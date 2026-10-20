@@ -11,3 +11,7 @@ cargo test --workspace     # 单元测试
 scripts/build-images.sh    # 构建 wharf-core / wharf-agent 镜像
 scripts/e2e.sh             # 在有 Docker 的机器上做端到端验证
 ```
+
+## 协议
+
+[Apache-2.0](LICENSE)
