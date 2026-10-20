@@ -45,6 +45,9 @@ pub fn server_view(
       .public_ip
       .clone()
       .or_else(|| report.as_ref().and_then(|r| r.public_ip.clone())),
+    private_addr: row.settings.private_addr.clone().or_else(|| {
+      report.as_ref().and_then(|r| r.private_addr.clone())
+    }),
     report,
     version: row.version,
   })
@@ -142,9 +145,9 @@ pub fn service_view(
     .iter()
     .map(|(port, host)| {
       let ip = net
-        .tailscale_ip
+        .private
         .get(&row.spec.server)
-        .cloned()
+        .map(|a| a.ip.clone())
         .unwrap_or_else(|| "127.0.0.1".into());
       (port.clone(), format!("{ip}:{host}"))
     })

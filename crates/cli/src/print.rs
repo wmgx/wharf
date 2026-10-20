@@ -160,13 +160,16 @@ pub fn status(s: &Status) {
       "离线"
     };
     let report = srv.report.as_ref();
+    let private = srv
+      .private_addr
+      .as_ref()
+      .map(|a| format!("{}（{}）", a.ip, a.network.as_str()))
+      .unwrap_or_else(|| "-".into());
     println!(
-      "  {:<10} {:<4}  tailscale {:<15}  公网 {:<15}  docker {}",
+      "  {:<10} {:<4}  内网 {:<24}  公网 {:<15}  docker {}",
       srv.name,
       state,
-      report
-        .and_then(|r| r.tailscale_ip.as_deref())
-        .unwrap_or("-"),
+      private,
       srv.public_ip.as_deref().unwrap_or("-"),
       report
         .and_then(|r| r.docker_version.as_deref())

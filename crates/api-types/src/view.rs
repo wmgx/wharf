@@ -8,7 +8,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
   agent::{AgentReport, ContainerInfo},
-  spec::{GatewaySpec, RouteSpec, ServerSettings, ServiceSpec},
+  spec::{
+    GatewaySpec, PrivateAddr, RouteSpec, ServerSettings, ServiceSpec,
+  },
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -26,6 +28,9 @@ pub struct ServerView {
   /// 实际使用的公网 IP：设置里的覆盖值，否则是 agent 探测值。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub public_ip: Option<String>,
+  /// 实际使用的内网地址：设置里的覆盖值，否则是 agent 检测到的组网地址。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub private_addr: Option<PrivateAddr>,
   pub version: u64,
 }
 
@@ -35,7 +40,7 @@ pub struct ServiceView {
   pub spec: ServiceSpec,
   /// 端口名到宿主机端口。
   pub host_ports: BTreeMap<String, u16>,
-  /// 服务之间互相访问用的地址，例如 `100.101.102.103:20001`。
+  /// 服务之间互相访问用的地址（内网地址:宿主机端口），例如 `100.101.102.103:20001`。
   pub addresses: BTreeMap<String, String>,
   pub version: u64,
   /// 实时状态，查不到时为空。

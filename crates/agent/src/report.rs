@@ -1,4 +1,4 @@
-//! 机器信息上报：Tailscale IP、公网 IP、docker 版本。
+//! 机器信息上报：内网地址、公网 IP、docker 版本。
 
 use std::{
   net::Ipv4Addr,
@@ -7,7 +7,10 @@ use std::{
 };
 
 use tokio::sync::Mutex;
-use wharf_api_types::agent::AgentReport;
+use wharf_api_types::{
+  agent::AgentReport,
+  spec::{PrivateAddr, PrivateNetwork},
+};
 
 use crate::docker::Docker;
 
@@ -22,22 +25,15 @@ type CachedIp = (Instant, Option<String>);
 #[derive(Clone)]
 pub struct Reporter {
   docker: Docker,
-  /// 环境变量 `WHARF_TAILSCALE_IP` 的覆盖值。
-  tailscale_ip: Option<String>,
   /// 环境变量 `WHARF_PUBLIC_IP` 的覆盖值。
   public_ip: Option<String>,
   cache: Arc<Mutex<Option<CachedIp>>>,
 }
 
 impl Reporter {
-  pub fn new(
-    docker: Docker,
-    tailscale_ip: Option<String>,
-    public_ip: Option<String>,
-  ) -> Self {
+  pub fn new(docker: Docker, public_ip: Option<String>) -> Self {
     Self {
       docker,
-      tailscale_ip,
       public_ip,
       cache: Default::default(),
     }
@@ -53,7 +49,8 @@ impl Reporter {
       arch: std::env::consts::ARCH.to_string(),
       docker_version,
       compose_version,
-      tailscale_ip: self.tailscale_ip.clone().or_else(tailscale_ip),
+      private_addr: detect_private(),
+      lan_ips: lan_ips(),
       public_ip: self.public_ip(refresh).await,
       data_dir: self.docker.data_dir.display().to_string(),
     }
@@ -92,19 +89,62 @@ fn hostname() -> String {
   String::from_utf8_lossy(&buf[..end]).into_owned()
 }
 
-/// Tailscale 的地址段是 100.64.0.0/10。不依赖 tailscale 命令，
-/// 所以 agent 在容器里（host 网络）也能拿到。
-fn tailscale_ip() -> Option<String> {
+/// 组网检测：按顺序尝试，第一个命中的就是内网地址。
+/// 以后支持别的组网工具时，在这里加一项。
+const DETECTORS: &[(PrivateNetwork, Detector)] =
+  &[(PrivateNetwork::Tailscale, is_tailscale)];
+
+type Detector = fn(&Iface) -> bool;
+
+struct Iface {
+  name: String,
+  ip: Ipv4Addr,
+}
+
+/// 只看网卡，不依赖组网工具的命令，所以 agent 在容器里（host 网络）也能拿到。
+fn ifaces() -> Vec<Iface> {
   if_addrs::get_if_addrs()
-    .ok()?
+    .unwrap_or_default()
     .into_iter()
     .filter_map(|iface| match iface.ip() {
-      std::net::IpAddr::V4(ip) if is_cgnat(ip) => {
-        Some(ip.to_string())
-      }
+      std::net::IpAddr::V4(ip) if !ip.is_loopback() => Some(Iface {
+        name: iface.name,
+        ip,
+      }),
       _ => None,
     })
-    .next()
+    .collect()
+}
+
+fn detect_private() -> Option<PrivateAddr> {
+  let ifaces = ifaces();
+  DETECTORS.iter().find_map(|(network, matches)| {
+    ifaces.iter().find(|i| matches(i)).map(|i| PrivateAddr {
+      ip: i.ip.to_string(),
+      network: *network,
+    })
+  })
+}
+
+/// 不属于任何组网、也不是 docker 网桥的地址。
+fn lan_ips() -> Vec<String> {
+  ifaces()
+    .into_iter()
+    .filter(|i| !DETECTORS.iter().any(|(_, m)| m(i)))
+    .filter(|i| !is_bridge(&i.name))
+    .map(|i| i.ip.to_string())
+    .collect()
+}
+
+fn is_bridge(name: &str) -> bool {
+  name == "docker0"
+    || name.starts_with("br-")
+    || name.starts_with("veth")
+}
+
+/// Tailscale 的地址段是 100.64.0.0/10。
+fn is_tailscale(iface: &Iface) -> bool {
+  is_cgnat(iface.ip)
 }
 
 fn is_cgnat(ip: Ipv4Addr) -> bool {

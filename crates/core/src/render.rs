@@ -6,7 +6,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use wharf_api_types::{
   ApiError,
-  spec::{GatewaySpec, GatewayTls, ServiceSpec, Source},
+  spec::{GatewaySpec, GatewayTls, PrivateAddr, ServiceSpec, Source},
 };
 
 use crate::world::{World, gateway_project};
@@ -22,7 +22,10 @@ pub fn hash(content: &str) -> String {
 /// 每台服务器的网络信息，来自 agent 上报和服务器设置。
 #[derive(Debug, Clone, Default)]
 pub struct Net {
-  pub tailscale_ip: BTreeMap<String, String>,
+  /// 实际使用的内网地址：服务器设置的覆盖值，否则是 agent 检测到的组网地址。
+  pub private: BTreeMap<String, PrivateAddr>,
+  /// agent 上报的其他网卡地址，用来在缺内网地址时给出建议命令。
+  pub lan_ips: BTreeMap<String, Vec<String>>,
   pub public_ip: BTreeMap<String, String>,
 }
 
@@ -116,12 +119,12 @@ pub fn substitute(
 }
 
 /// 服务的 compose 文件。image 来源自动生成；compose 来源原样使用。
-/// 端口只绑定 127.0.0.1 和 Tailscale IP，不绑定 0.0.0.0。
+/// 端口只绑定 127.0.0.1 和内网地址，不绑定 0.0.0.0。
 pub fn service_compose(
   name: &str,
   spec: &ServiceSpec,
   host_ports: &BTreeMap<String, u16>,
-  tailscale_ip: Option<&str>,
+  private_ip: Option<&str>,
   secrets: Option<&BTreeMap<String, String>>,
 ) -> Result<String, ApiError> {
   match &spec.source {
@@ -141,7 +144,7 @@ pub fn service_compose(
           continue;
         };
         ports.push(format!("127.0.0.1:{host}:{}", port.port));
-        if let Some(ip) = tailscale_ip {
+        if let Some(ip) = private_ip {
           ports.push(format!("{ip}:{host}:{}", port.port));
         }
       }
@@ -217,7 +220,7 @@ pub fn gateway_image(spec: &GatewaySpec) -> String {
     .unwrap_or_else(|| DEFAULT_CADDY_IMAGE.to_string())
 }
 
-/// caddy 网关的 compose：host 网络，这样上游用 127.0.0.1 和 Tailscale IP 都能访问。
+/// caddy 网关的 compose：host 网络，这样上游用 127.0.0.1 和内网地址都能访问。
 pub fn gateway_compose(name: &str, spec: &GatewaySpec) -> String {
   let project = gateway_project(name);
   let file = ComposeFile {
@@ -253,7 +256,7 @@ pub fn gateway_compose(name: &str, spec: &GatewaySpec) -> String {
   to_yaml(&file)
 }
 
-/// 路由的上游地址。网关和服务在同一台机器上用 127.0.0.1，否则用 Tailscale IP。
+/// 路由的上游地址。网关和服务在同一台机器上用 127.0.0.1，否则用服务所在机器的内网地址。
 pub fn upstream(
   world: &World,
   net: &Net,
@@ -272,14 +275,22 @@ pub fn upstream(
   if row.spec.server == gateway_server {
     return Ok(format!("127.0.0.1:{host_port}"));
   }
-  let ip = net.tailscale_ip.get(&row.spec.server).ok_or_else(|| {
-    ApiError::invalid(format!(
-      "服务器 {} 没有上报 Tailscale IP，网关 {gateway_server} 无法跨机器访问服务 {service}",
-      row.spec.server
+  let server = &row.spec.server;
+  let addr = net.private.get(server).ok_or_else(|| {
+    let err = ApiError::invalid(format!(
+      "服务器 {server} 没有内网地址，网关 {gateway_server} 无法跨机器访问服务 {service}"
     ))
-    .with_hint("确认这台机器上 Tailscale 已登录，或者用 WHARF_TAILSCALE_IP 告诉 agent")
+    .with_hint(
+      "装上组网工具（Tailscale / Headscale）后 agent 会自动检测；两台机器内网直通时，手动指定内网地址",
+    );
+    match net.lan_ips.get(server).and_then(|ips| ips.first()) {
+      Some(ip) => err.suggest(format!(
+        "wharf server set {server} --private-ip {ip} --apply"
+      )),
+      None => err,
+    }
   })?;
-  Ok(format!("{ip}:{host_port}"))
+  Ok(format!("{}:{host_port}", addr.ip))
 }
 
 /// 一条 Caddy 站点：hostname → 上游。
@@ -353,7 +364,7 @@ mod tests {
   }
 
   #[test]
-  fn image_compose_binds_loopback_and_tailscale_only() {
+  fn image_compose_binds_loopback_and_private_only() {
     let ports = BTreeMap::from([("http".to_string(), 20000)]);
     let secrets = BTreeMap::from([(
       "WHO_TOKEN".to_string(),

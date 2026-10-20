@@ -17,6 +17,7 @@ use wharf_api_types::{
   plan::{
     Action, Layer, Plan, PlanItem, PlanRequest, PlanStatus, Risk,
   },
+  spec::RouteSpec,
 };
 use wharf_providers::{DnsRecordSpec, DnsRecordType, RemoteRecord};
 
@@ -782,6 +783,12 @@ async fn dns_items(
   }
 
   for (host, route) in &desired.routes {
+    if let Some(warning) = plaintext_hop(desired, net, &route.spec) {
+      b.warnings.push(format!("路由 {host}：{warning}"));
+    }
+  }
+
+  for (host, route) in &desired.routes {
     let Some((account, _zone)) = snap.account_for(host) else {
       b.warnings.push(format!(
         "没有厂商账号管理 {host} 所在的域名，DNS 需要自己配置（或执行 wharf account add）"
@@ -917,4 +924,24 @@ pub async fn save(
       Ok(())
     })
     .await
+}
+
+/// 网关跨机器访问服务、而服务所在机器的内网地址不加密时，返回提醒。
+fn plaintext_hop(
+  world: &World,
+  net: &Net,
+  route: &RouteSpec,
+) -> Option<String> {
+  let gateway = world.gateways.get(world.route_gateway(route)?)?;
+  let server = &world.services.get(&route.service)?.spec.server;
+  if &gateway.spec.server == server {
+    return None;
+  }
+  let addr = net.private.get(server)?;
+  (!addr.network.encrypted()).then(|| {
+    format!(
+      "网关（{}）到服务（{server}）这一段走内网直连 {}，是明文",
+      gateway.spec.server, addr.ip
+    )
+  })
 }

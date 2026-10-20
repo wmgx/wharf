@@ -73,7 +73,7 @@ pub fn offline(server: &str) -> ApiError {
     ErrorCode::AgentOffline,
     format!("服务器 {server} 的 agent 不在线"),
   )
-  .with_hint("确认这台机器上 wharf-agent 在运行，并且能通过 Tailscale 访问控制面")
+  .with_hint("确认这台机器上 wharf-agent 在运行，并且能访问控制面")
   .suggest(format!("wharf server show {server}"))
 }
 

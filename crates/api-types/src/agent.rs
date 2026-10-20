@@ -1,6 +1,6 @@
 //! 控制面和 agent 之间的 websocket 协议。消息都是 JSON 文本帧。
 //!
-//! 握手（双向认证，传输加密依赖 Tailscale）：
+//! 握手（双向认证，传输加密依赖服务器之间的网络）：
 //! 1. agent 连上 `/agent/ws`，控制面发 [CoreMsg::Challenge]；
 //! 2. agent 回 [AgentMsg::Hello]：对 [auth_payload] 的签名，以及自己的 nonce；
 //! 3. 控制面验证 agent 公钥，回 [CoreMsg::Welcome]：对 agent nonce 的签名；
@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::ApiError;
+use crate::{ApiError, spec::PrivateAddr};
 
 /// 被签名的内容。`role` 是 `agent` 或 `core`，防止把一方的签名拿去冒充另一方。
 pub fn auth_payload(
@@ -81,8 +81,13 @@ pub struct AgentReport {
   pub docker_version: Option<String>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub compose_version: Option<String>,
+  /// 检测到的组网地址（目前只检测 Tailscale / Headscale）。
   #[serde(default, skip_serializing_if = "Option::is_none")]
-  pub tailscale_ip: Option<String>,
+  pub private_addr: Option<PrivateAddr>,
+  /// 其余网卡的 IPv4 地址（不含回环和 docker 网桥），
+  /// 没有组网工具时作为内网地址的候选。
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub lan_ips: Vec<String>,
   /// 探测到的公网出口 IP。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub public_ip: Option<String>,

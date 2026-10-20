@@ -140,6 +140,12 @@ pub enum ServerCmd {
     /// 有镜像源时不再尝试原地址。
     #[arg(long)]
     mirrors_only: Option<bool>,
+    /// 手动指定内网地址（没有组网工具、机器之间内网直通时用）；传空字符串恢复自动检测。
+    #[arg(long)]
+    private_ip: Option<String>,
+    /// 内网地址所在网络：lan（普通内网，明文）或 overlay（WireGuard 等加密组网）。
+    #[arg(long, default_value = "lan", value_parser = ["lan", "overlay"])]
+    network: String,
     #[command(flatten)]
     apply: ApplyFlags,
   },

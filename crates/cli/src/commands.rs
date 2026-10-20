@@ -10,8 +10,8 @@ use wharf_api_types::{
   },
   spec::{
     Change, Fleet, GatewayKind, GatewaySpec, GatewayTls, PortSpec,
-    Region, RouteSpec, ServerSettings, ServiceSpec, Source,
-    VolumeSpec,
+    PrivateAddr, PrivateNetwork, Region, RouteSpec, ServerSettings,
+    ServiceSpec, Source, VolumeSpec,
   },
   view::{
     AccountView, CreatedToken, DeploymentView, GatewayView, JoinInfo,
@@ -426,6 +426,8 @@ async fn server(
       mirror,
       clear_mirrors,
       mirrors_only,
+      private_ip,
+      network,
       apply,
     } => {
       let current: ServerView =
@@ -468,6 +470,26 @@ async fn server(
       }
       if let Some(only) = mirrors_only {
         settings.mirrors_only = only;
+      }
+      if let Some(ip) = private_ip {
+        let ip = ip.trim();
+        settings.private_addr = if ip.is_empty() {
+          None
+        } else {
+          ip.parse::<std::net::IpAddr>().map_err(|_| {
+            ApiError::invalid(format!(
+              "--private-ip {ip} 不是 IP 地址"
+            ))
+          })?;
+          Some(PrivateAddr {
+            ip: ip.to_string(),
+            network: if network == "overlay" {
+              PrivateNetwork::Overlay
+            } else {
+              PrivateNetwork::Lan
+            },
+          })
+        };
       }
       changes(
         c,

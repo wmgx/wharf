@@ -49,8 +49,16 @@ impl Snapshot {
     let mut net = Net::default();
     for (name, server) in &world.servers {
       let report = self.agent(name).and_then(|a| a.report.as_ref());
-      if let Some(ip) = report.and_then(|r| r.tailscale_ip.clone()) {
-        net.tailscale_ip.insert(name.clone(), ip);
+      if let Some(addr) = server
+        .settings
+        .private_addr
+        .clone()
+        .or_else(|| report.and_then(|r| r.private_addr.clone()))
+      {
+        net.private.insert(name.clone(), addr);
+      }
+      if let Some(r) = report {
+        net.lan_ips.insert(name.clone(), r.lan_ips.clone());
       }
       if let Some(ip) = server
         .settings
@@ -102,7 +110,7 @@ pub fn service_resolved(
     name,
     &row.spec,
     &row.host_ports,
-    net.tailscale_ip.get(&row.spec.server).map(String::as_str),
+    net.private.get(&row.spec.server).map(|a| a.ip.as_str()),
     Some(secrets),
   )?;
   let hash = render::hash(&resolved);
@@ -119,7 +127,7 @@ pub fn service_template(
     name,
     &row.spec,
     &row.host_ports,
-    net.tailscale_ip.get(&row.spec.server).map(String::as_str),
+    net.private.get(&row.spec.server).map(|a| a.ip.as_str()),
     None,
   )
 }

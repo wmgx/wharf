@@ -37,9 +37,6 @@ struct Cli {
     global = true
   )]
   docker: String,
-  /// 覆盖自动探测的 Tailscale IP。
-  #[arg(long, env = "WHARF_TAILSCALE_IP", global = true)]
-  tailscale_ip: Option<String>,
   /// 覆盖自动探测的公网 IP。
   #[arg(long, env = "WHARF_PUBLIC_IP", global = true)]
   public_ip: Option<String>,
@@ -114,11 +111,7 @@ async fn main() -> anyhow::Result<()> {
     bin: cli.docker,
     data_dir: cli.data_dir,
   };
-  let reporter = report::Reporter::new(
-    docker.clone(),
-    cli.tailscale_ip,
-    cli.public_ip,
-  );
+  let reporter = report::Reporter::new(docker.clone(), cli.public_ip);
   let ops = Arc::new(ops::Ops::new(docker, reporter));
   conn::run_forever(joined, key, ops).await
 }

@@ -42,6 +42,59 @@ pub struct ServerSettings {
   /// 是否跳过原地址（例如国内机器访问不了 Docker Hub，直连只会白等）。
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub mirrors_only: bool,
+  /// 覆盖 agent 探测到的内网地址。没有组网工具、直接走内网时用它。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub private_addr: Option<PrivateAddr>,
+}
+
+/// 服务器之间互相访问用的地址：网关跨机器访问服务时连它，
+/// 服务端口除了 127.0.0.1 也只绑定它。
+///
+/// Wharf 不负责打洞，组网交给专门的工具；这里只记地址在哪个网络、
+/// 网络本身是否加密。
+#[derive(
+  Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(deny_unknown_fields)]
+pub struct PrivateAddr {
+  pub ip: String,
+  pub network: PrivateNetwork,
+}
+
+/// 内网地址所在的网络。
+#[derive(
+  Debug,
+  Clone,
+  Copy,
+  PartialEq,
+  Eq,
+  Serialize,
+  Deserialize,
+  JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum PrivateNetwork {
+  /// Tailscale 或 Headscale（同一个客户端），agent 自动检测。加密。
+  Tailscale,
+  /// 其他加密组网：WireGuard、ZeroTier、Netbird 等，手动指定。
+  Overlay,
+  /// 普通内网直连（公司内网、云厂商 VPC、家里局域网）。明文。
+  Lan,
+}
+
+impl PrivateNetwork {
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::Tailscale => "tailscale",
+      Self::Overlay => "overlay",
+      Self::Lan => "lan",
+    }
+  }
+
+  /// 网络本身是否加密。不加密时，跨机器的流量是明文。
+  pub fn encrypted(self) -> bool {
+    self != Self::Lan
+  }
 }
 
 /// 服务来源，三选一。git 来源在 P4。
