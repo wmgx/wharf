@@ -25,6 +25,8 @@ use crate::{
 const SERVE_TIMEOUT: Duration = Duration::from_secs(8 * 3600);
 const PUSH_TIMEOUT: Duration = Duration::from_secs(4 * 3600);
 const READY_TIMEOUT: Duration = Duration::from_secs(15);
+const PUSH_ATTEMPTS: u32 = 6;
+const RETRY_DELAY: Duration = Duration::from_secs(3);
 const MODULE: &str = "wharf";
 const USER: &str = "wharf";
 
@@ -166,24 +168,47 @@ pub async fn push(
     IpAddr::V4(v4) => v4.to_string(),
   };
   ctx.say(format!("同步 {} → {host}", root.display()));
-  Cmd::new("rsync")
-    .args([
-      "-a",
-      "--numeric-ids",
-      "--delete",
-      "--stats",
-      "--human-readable",
-    ])
-    .arg(format!("{}/", root.display()))
-    .arg(format!("rsync://{USER}@{host}:{}/{MODULE}/", p.port))
-    // 口令走环境变量，不出现在命令行里。
-    .env("RSYNC_PASSWORD", &p.password.0)
-    .timeout(PUSH_TIMEOUT)
-    .stream(true)
-    .run(ctx)
-    .await?
-    .check("rsync")?;
-  Ok(serde_json::json!({ "synced": true }))
+  // 跨地域的内网连接偶尔建不上（SYN 被丢），rsync 是幂等的，失败就重试。
+  let mut attempt = 1;
+  loop {
+    let result = Cmd::new("rsync")
+      .args([
+        "-a",
+        "--numeric-ids",
+        "--delete",
+        "--stats",
+        "--human-readable",
+        "--contimeout=15",
+        "--timeout=300",
+      ])
+      .arg(format!("{}/", root.display()))
+      .arg(format!("rsync://{USER}@{host}:{}/{MODULE}/", p.port))
+      // 口令走环境变量，不出现在命令行里。
+      .env("RSYNC_PASSWORD", &p.password.0)
+      .timeout(PUSH_TIMEOUT)
+      .stream(true)
+      .run(ctx)
+      .await?
+      .check("rsync");
+    match result {
+      Ok(_) => return Ok(serde_json::json!({ "synced": true })),
+      Err(e) if attempt < PUSH_ATTEMPTS => {
+        ctx.say(format!(
+          "第 {attempt} 次同步失败，{}秒后重试：{}",
+          RETRY_DELAY.as_secs(),
+          e.message
+        ));
+        tokio::select! {
+          _ = tokio::time::sleep(RETRY_DELAY) => {}
+          _ = ctx.cancel.cancelled() => {
+            return Err(ApiError::new(ErrorCode::Cancelled, "已取消"));
+          }
+        }
+        attempt += 1;
+      }
+      Err(e) => return Err(e),
+    }
+  }
 }
 
 #[cfg(test)]

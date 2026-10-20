@@ -25,6 +25,8 @@ pub struct Snapshot {
   pub accounts: Vec<AccountRow>,
   pub owned: Vec<OwnedRecord>,
   pub secrets: BTreeMap<String, String>,
+  /// 每个服务最近一次成功部署在哪台服务器上。和配置里的服务器不同，说明迁移还没完成。
+  pub deployed: BTreeMap<String, String>,
 }
 
 pub async fn load(db: &Db) -> Result<Snapshot, ApiError> {
@@ -35,6 +37,7 @@ pub async fn load(db: &Db) -> Result<Snapshot, ApiError> {
       accounts: db::accounts(c)?,
       owned: db::owned_records(c)?,
       secrets: db::secrets(c)?,
+      deployed: db::deployed_servers(c)?,
     })
   })
   .await

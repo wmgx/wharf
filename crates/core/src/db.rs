@@ -471,6 +471,21 @@ pub fn token_count(conn: &Connection) -> Result<i64, ApiError> {
     .map_err(sql_err)
 }
 
+/// 每个服务最近一次部署所在的服务器。
+pub fn deployed_servers(
+  c: &Connection,
+) -> Result<std::collections::BTreeMap<String, String>, ApiError> {
+  let mut stmt = c
+    .prepare(
+      "SELECT service, server, MAX(id) FROM deployments GROUP BY service",
+    )
+    .map_err(sql_err)?;
+  let rows = stmt
+    .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+    .map_err(sql_err)?;
+  rows.collect::<Result<_, _>>().map_err(sql_err)
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;

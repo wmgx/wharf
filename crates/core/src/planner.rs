@@ -205,7 +205,11 @@ pub async fn make_plan(
   }
   // 换了服务器的服务在新机器上重新分配宿主机端口，不和那里已有的服务抢。
   for (name, svc) in desired.services.iter_mut() {
-    if moved_from(&current, name, &svc.spec.server).is_some() {
+    if current
+      .services
+      .get(name)
+      .is_some_and(|c| c.spec.server != svc.spec.server)
+    {
       svc.host_ports.clear();
     }
   }
@@ -271,17 +275,27 @@ fn redact_auth(caddyfile: &str, net: &Net) -> String {
   }
 }
 
-/// 服务换了服务器时，返回原来的服务器。
+/// 服务实际在哪台服务器上：最近一次成功部署的位置，没部署过就看配置。
+///
+/// 迁移失败时配置已经写成新服务器，但容器和数据还在旧服务器上；
+/// 按部署记录判断，重新 plan 时会再次迁移，而不是在新服务器上用不完整的数据启动。
+fn running_on<'a>(
+  snap: &'a Snapshot,
+  current: &'a World,
+  name: &str,
+) -> Option<&'a str> {
+  let configured = &current.services.get(name)?.spec.server;
+  Some(snap.deployed.get(name).unwrap_or(configured))
+}
+
+/// 服务要换服务器时，返回它现在所在的服务器。
 fn moved_from<'a>(
+  snap: &'a Snapshot,
   current: &'a World,
   name: &str,
   server: &str,
 ) -> Option<&'a str> {
-  current
-    .services
-    .get(name)
-    .map(|s| s.spec.server.as_str())
-    .filter(|old| *old != server)
+  running_on(snap, current, name).filter(|old| *old != server)
 }
 
 fn to_json<T: Serialize>(v: &T) -> Value {
@@ -455,7 +469,7 @@ fn service_items(
   for (name, svc) in &desired.services {
     let address = format!("{KIND_SERVICE}/{name}");
     let server = &svc.spec.server;
-    let moved = moved_from(current, name, server);
+    let moved = moved_from(snap, current, name, server);
     // 数据卷：新增的目录。迁移时新机器上要建全部目录。
     let old_dirs: BTreeSet<String> = current
       .services
@@ -581,10 +595,12 @@ fn service_items(
     }
   }
   for (name, svc) in &current.services {
+    let old =
+      running_on(snap, current, name).unwrap_or(&svc.spec.server);
     if desired
       .services
       .get(name)
-      .is_some_and(|d| d.spec.server == svc.spec.server)
+      .is_some_and(|d| d.spec.server == old)
     {
       continue;
     }
@@ -592,7 +608,7 @@ fn service_items(
     if let Some(to) =
       desired.services.get(name).map(|d| &d.spec.server)
     {
-      let server = &svc.spec.server;
+      let server = &old.to_string();
       let id = b.item(
         format!("{KIND_SERVICE}/{name}"),
         Layer::Container,
