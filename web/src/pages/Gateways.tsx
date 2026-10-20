@@ -112,7 +112,7 @@ function GatewayDetail({ g, onDone }: { g: GatewayView; onDone: () => void }) {
         <SheetDescription>网关</SheetDescription>
       </SheetHeader>
       <div className="flex-1 overflow-auto p-4">
-        <dl className="grid grid-cols-[88px_1fr] gap-x-4 gap-y-3 text-sm">
+        <dl className="grid grid-cols-[88px_minmax(0,1fr)] gap-x-4 gap-y-3 text-sm">
           <dt className="text-muted-foreground">服务器</dt>
           <dd>
             <ServerTag name={g.spec.server} />
