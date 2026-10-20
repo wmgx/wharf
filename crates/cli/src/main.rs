@@ -289,7 +289,7 @@ pub enum RouteCmd {
     /// 网关，不填用默认网关。
     #[arg(long)]
     gateway: Option<String>,
-    /// 登录保护（P3）。
+    /// 登录保护：访问时要输入账号密码。账号用 `wharf secret set BASIC_AUTH` 设置。
     #[arg(long)]
     auth: bool,
     #[command(flatten)]
@@ -324,6 +324,7 @@ pub enum AccountCmd {
 pub enum SecretCmd {
   List,
   /// 设置密钥，值从标准输入读取。
+  /// `BASIC_AUTH` 是登录保护的账号，值写成 `用户名:密码`，只保存哈希。
   Set {
     name: String,
   },

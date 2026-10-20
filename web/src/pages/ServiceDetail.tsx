@@ -1,9 +1,11 @@
-import { ArrowRightLeftIcon, ArrowLeftIcon, ArrowUpRightIcon, EllipsisIcon, HistoryIcon, PencilIcon, PlusIcon, RefreshCwIcon, Trash2Icon, XIcon } from "lucide-react";
+import { ArrowRightLeftIcon, ArrowLeftIcon, ArrowUpRightIcon, EllipsisIcon, HistoryIcon, LockIcon, LockOpenIcon, PencilIcon, PlusIcon, RefreshCwIcon, Trash2Icon, XIcon } from "lucide-react";
 import { useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { usePoll } from "@/api";
 import { useActions } from "@/components/actions";
-import { CodeBlock, Dot, Empty, ErrorNote, PageHeader, ServerTag, StatusBadge, ago, liveTone } from "@/components/common";
+import { useBasicAuthSetAt } from "@/components/basic-auth";
+import { Checkbox } from "@/components/ui/checkbox";
+import { CodeBlock, Dot, Empty, ErrorNote, Notice, PageHeader, ServerTag, StatusBadge, ago, liveTone } from "@/components/common";
 import { DomainChips, Field, Picker, PortsEditor, formatEnv, gatewayOptions, parseEnv } from "@/components/fields";
 import { LogStream } from "@/components/LogStream";
 import { Badge } from "@/components/ui/badge";
@@ -129,6 +131,26 @@ export function ServiceDetail() {
                       <span className="truncate">{r.url}</span>
                       <ArrowUpRightIcon className="size-3.5 shrink-0" />
                     </a>
+                    <span className="flex shrink-0 items-center">
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          variant="ghost"
+                          size="icon-xs"
+                          aria-label={r.spec.auth ? `关闭 ${r.spec.hostname} 的登录保护` : `给 ${r.spec.hostname} 开启登录保护`}
+                          className={r.spec.auth ? "text-primary" : "text-muted-foreground"}
+                          onClick={() =>
+                            actions.plan({
+                              title: `${r.spec.auth ? "关闭" : "开启"} ${r.spec.hostname} 的登录保护`,
+                              changes: [{ op: "upsert_route", spec: { ...r.spec, auth: !r.spec.auth } }],
+                            })
+                          }
+                        >
+                          {r.spec.auth ? <LockIcon /> : <LockOpenIcon />}
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent>{r.spec.auth ? "已开启登录保护，点击关闭" : "未开启登录保护，点击开启"}</TooltipContent>
+                    </Tooltip>
                     <Tooltip>
                       <TooltipTrigger asChild>
                         <Button
@@ -142,6 +164,7 @@ export function ServiceDetail() {
                       </TooltipTrigger>
                       <TooltipContent>移除这个域名</TooltipContent>
                     </Tooltip>
+                    </span>
                   </div>
                 ))}
                 <Button variant="outline" size="xs" className="w-fit" onClick={() => setAddingRoute(true)}>
@@ -328,12 +351,15 @@ function AddRoute({ service, open, onClose }: { service: string; open: boolean; 
   const [hostname, setHostname] = useState("");
   const gateways = status?.gateways ?? [];
   const [gateway, setGateway] = useState("");
+  const [auth, setAuth] = useState(false);
+  const authSetAt = useBasicAuthSetAt(open ? 1 : 0);
   const chosen = gateway || gateways.find((g) => g.spec.default)?.name || gateways[0]?.name || "";
   const suffixes = [...new Set(status?.routes.map((r) => r.spec.hostname.split(".").slice(1).join(".")).filter(Boolean))];
   const submit = () => {
     onClose();
     setHostname("");
-    actions.plan({ title: "加域名", changes: [{ op: "upsert_route", spec: { hostname: hostname.trim().toLowerCase(), service, gateway: chosen } }] });
+    setAuth(false);
+    actions.plan({ title: "加域名", changes: [{ op: "upsert_route", spec: { hostname: hostname.trim().toLowerCase(), service, gateway: chosen, auth: auth || undefined } }] });
   };
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
@@ -350,12 +376,25 @@ function AddRoute({ service, open, onClose }: { service: string; open: boolean; 
           <Field label="网关" htmlFor="gw">
             <Picker id="gw" value={chosen} options={gatewayOptions(gateways)} onChange={setGateway} placeholder="还没有网关" />
           </Field>
+          <label className="flex cursor-pointer items-center gap-2.5 text-sm">
+            <Checkbox checked={auth} onCheckedChange={(v) => setAuth(v === true)} />
+            登录保护
+            <span className="text-xs text-muted-foreground">访问时要输入账号密码</span>
+          </label>
+          {auth && authSetAt === null && (
+            <Notice kind="warn">
+              还没有设置登录保护账号。{" "}
+              <button type="button" className="font-medium underline underline-offset-2" onClick={actions.basicAuth}>
+                现在设置
+              </button>
+            </Notice>
+          )}
         </div>
         <DialogFooter>
           <Button variant="ghost" onClick={onClose}>
             取消
           </Button>
-          <Button disabled={!hostname.trim() || !chosen} onClick={submit}>
+          <Button disabled={!hostname.trim() || !chosen || (auth && authSetAt === null)} onClick={submit}>
             生成计划
           </Button>
         </DialogFooter>

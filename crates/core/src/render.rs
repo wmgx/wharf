@@ -27,6 +27,54 @@ pub struct Net {
   /// agent 上报的其他网卡地址，用来在缺内网地址时给出建议命令。
   pub lan_ips: BTreeMap<String, Vec<String>>,
   pub public_ip: BTreeMap<String, String>,
+  /// 登录保护的账号（密钥 BASIC_AUTH）。不是网络信息，但渲染网关时要用，放在这里不必到处传。
+  pub basic_auth: Option<BasicAuth>,
+}
+
+/// 密钥 BASIC_AUTH 的名字。写入时值是 `用户名:密码`，保存的是 `用户名 bcrypt哈希`。
+pub const BASIC_AUTH_SECRET: &str = "BASIC_AUTH";
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BasicAuth {
+  pub user: String,
+  pub hash: String,
+}
+
+impl BasicAuth {
+  /// 解析保存的值 `用户名 bcrypt哈希`。
+  pub fn parse(stored: &str) -> Option<Self> {
+    let (user, hash) = stored.split_once(' ')?;
+    (!user.is_empty() && hash.starts_with("$2")).then(|| Self {
+      user: user.into(),
+      hash: hash.into(),
+    })
+  }
+
+  /// 把写入的 `用户名:密码` 转成保存的值。盐是随机的，只在写入时算一次，
+  /// 这样网关配置是稳定的，不会每次 plan 都显示变化。
+  pub fn hash_input(input: &str) -> Result<String, ApiError> {
+    let (user, password) =
+      input.split_once(':').ok_or_else(|| {
+        ApiError::invalid("BASIC_AUTH 的值要写成 用户名:密码")
+      })?;
+    let user_ok = !user.is_empty()
+      && user
+        .bytes()
+        .all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c));
+    if !user_ok {
+      return Err(ApiError::invalid(
+        "BASIC_AUTH 的用户名只能用字母、数字、. _ -",
+      ));
+    }
+    if password.len() < 8 {
+      return Err(ApiError::invalid("BASIC_AUTH 的密码至少 8 位"));
+    }
+    let hash =
+      bcrypt::hash(password, bcrypt::DEFAULT_COST).map_err(|e| {
+        ApiError::internal(format!("计算密码哈希失败：{e}"))
+      })?;
+    Ok(format!("{user} {hash}"))
+  }
 }
 
 /// 服务数据目录：`/srv/<service>/<volume>`。
@@ -298,12 +346,14 @@ pub fn upstream(
 pub struct Site {
   pub hostname: String,
   pub upstream: String,
+  pub auth: bool,
 }
 
 pub fn caddyfile(
   name: &str,
   spec: &GatewaySpec,
   sites: &[Site],
+  auth: Option<&BasicAuth>,
 ) -> String {
   let mut out = format!(
     "# 由 Wharf 生成，不要手改。网关：{name}\n# 手写的站点放到 conf/extra.d/*.caddy\n{{\n\tadmin {CADDY_ADMIN}\n"
@@ -330,10 +380,14 @@ pub fn caddyfile(
   let mut sites = sites.to_vec();
   sites.sort_by(|a, b| a.hostname.cmp(&b.hostname));
   for site in sites {
-    out.push_str(&format!(
-      "\n{scheme}{} {{\n\treverse_proxy {}\n}}\n",
-      site.hostname, site.upstream
-    ));
+    out.push_str(&format!("\n{scheme}{} {{\n", site.hostname));
+    if let (true, Some(a)) = (site.auth, auth) {
+      out.push_str(&format!(
+        "\tbasic_auth {{\n\t\t{} {}\n\t}}\n",
+        a.user, a.hash
+      ));
+    }
+    out.push_str(&format!("\treverse_proxy {}\n}}\n", site.upstream));
   }
   out
 }
@@ -439,13 +493,20 @@ mod tests {
         Site {
           hostname: "z.example.com".into(),
           upstream: "127.0.0.1:1".into(),
+          auth: true,
         },
         Site {
           hostname: "a.example.com".into(),
           upstream: "100.1.1.1:2".into(),
+          auth: false,
         },
       ],
+      BasicAuth::parse("admin $2b$12$abc").as_ref(),
     );
+    // 只有开了 auth 的站点带 basic_auth。
+    let z = &out[out.find("z.example.com").unwrap()..];
+    assert!(z.contains("basic_auth {\n\t\tadmin $2b$12$abc\n\t}"));
+    assert_eq!(out.matches("basic_auth").count(), 1);
     assert!(out.contains("http_port 8080"));
     assert!(!out.contains("https_port"));
     assert!(!out.contains("auto_https"));
@@ -466,9 +527,19 @@ mod tests {
       &[Site {
         hostname: "a.example.com".into(),
         upstream: "127.0.0.1:1".into(),
+        auth: false,
       }],
+      None,
     );
     assert!(out.contains("auto_https off"));
     assert!(out.contains("\nhttp://a.example.com {"));
+  }
+
+  #[test]
+  fn basic_auth_input_is_checked() {
+    assert!(BasicAuth::hash_input("no-colon").is_err());
+    assert!(BasicAuth::hash_input("ad min:longenough").is_err());
+    assert!(BasicAuth::hash_input("admin:short").is_err());
+    assert!(BasicAuth::parse("admin plaintext").is_none());
   }
 }

@@ -817,6 +817,11 @@ async fn set_secret(
 ) -> ApiResult<SecretView> {
   auth.require(TokenScope::ApplyAll)?;
   check_secret_name(&name)?;
+  let value = if name == crate::render::BASIC_AUTH_SECRET {
+    crate::render::BasicAuth::hash_input(&req.value)?
+  } else {
+    req.value
+  };
   let now = now_ms();
   let n = name.clone();
   s.db
@@ -824,7 +829,7 @@ async fn set_secret(
       c.execute(
         "INSERT INTO secrets (name, value, updated_at) VALUES (?1, ?2, ?3)
          ON CONFLICT (name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-        params![n, req.value, now],
+        params![n, value, now],
       )
       .map_err(sql_err)?;
       Ok(())

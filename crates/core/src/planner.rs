@@ -263,6 +263,14 @@ pub async fn make_plan(
   })
 }
 
+/// 计划里展示网关配置时，不带出密码哈希。
+fn redact_auth(caddyfile: &str, net: &Net) -> String {
+  match &net.basic_auth {
+    Some(a) => caddyfile.replace(&a.hash, "<bcrypt>"),
+    None => caddyfile.to_string(),
+  }
+}
+
 /// 服务换了服务器时，返回原来的服务器。
 fn moved_from<'a>(
   current: &'a World,
@@ -707,7 +715,7 @@ fn gateway_items(
     let after = Some(json!({
       "server": server,
       "sites": r.sites.iter().map(|s| json!({ "hostname": s.hostname, "upstream": s.upstream })).collect::<Vec<_>>(),
-      "caddyfile": r.caddyfile,
+      "caddyfile": redact_auth(&r.caddyfile, net),
     }));
     let decision = match status.get(server).and_then(|s| s.as_ref()) {
       // 查不到现状时，只有配置变了才计划（服务器离线已经单独提醒过）。

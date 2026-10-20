@@ -414,15 +414,6 @@ impl World {
           route.spec.service
         )));
       }
-      if route.spec.auth {
-        return Err(
-          ApiError::new(
-            wharf_api_types::ErrorCode::NotImplemented,
-            format!("路由 {host}：登录保护在 P3 实现"),
-          )
-          .with_hint("P1 先去掉 --auth"),
-        );
-      }
     }
     Ok(())
   }

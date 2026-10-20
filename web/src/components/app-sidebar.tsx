@@ -1,4 +1,4 @@
-import { AnchorIcon, BoxesIcon, ChevronsUpDownIcon, LogOutIcon, MoonIcon, NetworkIcon, SunIcon, WaypointsIcon } from "lucide-react";
+import { AnchorIcon, BoxesIcon, ChevronsUpDownIcon, KeyRoundIcon, LogOutIcon, MoonIcon, NetworkIcon, SunIcon, WaypointsIcon } from "lucide-react";
 import { NavLink, useLocation } from "react-router-dom";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import {
@@ -18,6 +18,7 @@ import {
 } from "@/components/ui/sidebar";
 import { useStatus } from "@/status";
 import { useTheme } from "@/theme";
+import { useActions } from "./actions";
 import { Dot, serverText, serverTone } from "./common";
 
 export function Logo({ className = "size-8" }: { className?: string }) {
@@ -36,6 +37,7 @@ export function AppSidebar({ onLogout }: { onLogout: () => void }) {
   const { status } = useStatus();
   const { pathname } = useLocation();
   const { theme, toggle } = useTheme();
+  const actions = useActions();
 
   const groups = [
     {
@@ -137,6 +139,10 @@ export function AppSidebar({ onLogout }: { onLogout: () => void }) {
                 <DropdownMenuItem onSelect={toggle}>
                   {theme === "light" ? <MoonIcon /> : <SunIcon />}
                   {theme === "light" ? "切换到深色" : "切换到浅色"}
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={actions.basicAuth}>
+                  <KeyRoundIcon />
+                  登录保护账号
                 </DropdownMenuItem>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem onSelect={onLogout}>

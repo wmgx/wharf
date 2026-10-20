@@ -10,6 +10,7 @@ name = "wharf-core"
 path = "src/main.rs"
 
 [dependencies]
+bcrypt.workspace = true
 wharf-api-types.workspace = true
 wharf-providers.workspace = true
 

@@ -997,7 +997,12 @@ async fn secret(
       Ok(())
     }
     SecretCmd::Set { name } => {
-      let value = read_secret(&format!("{name} 的值："))?;
+      let prompt = if name == "BASIC_AUTH" {
+        "登录保护账号（用户名:密码）：".to_string()
+      } else {
+        format!("{name} 的值：")
+      };
+      let value = read_secret(&prompt)?;
       let v: SecretView = c
         .put(
           &format!("/api/secrets/{}", seg(&name)),

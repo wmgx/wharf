@@ -46,7 +46,13 @@ impl Snapshot {
   }
 
   pub fn net(&self, world: &World) -> Net {
-    let mut net = Net::default();
+    let mut net = Net {
+      basic_auth: self
+        .secrets
+        .get(render::BASIC_AUTH_SECRET)
+        .and_then(|v| render::BasicAuth::parse(v)),
+      ..Net::default()
+    };
     for (name, server) in &world.servers {
       let report = self.agent(name).and_then(|a| a.report.as_ref());
       if let Some(addr) = server
@@ -157,7 +163,22 @@ pub fn gateway_render(
     let port = world.route_port(&route.spec).ok_or_else(|| {
       ApiError::invalid(format!("路由 {host} 没有可用的端口"))
     })?;
+    if route.spec.auth && net.basic_auth.is_none() {
+      return Err(
+        ApiError::invalid(format!(
+          "路由 {host} 开启了登录保护，但还没有设置账号"
+        ))
+        .with_hint(
+          "值写成 用户名:密码，从标准输入读取，不会出现在命令行里",
+        )
+        .suggest(format!(
+          "wharf secret set {}",
+          render::BASIC_AUTH_SECRET
+        )),
+      );
+    }
     sites.push(render::Site {
+      auth: route.spec.auth,
       hostname: host.clone(),
       upstream: render::upstream(
         world,
@@ -169,7 +190,12 @@ pub fn gateway_render(
     });
   }
   let compose = render::gateway_compose(name, &gateway.spec);
-  let caddyfile = render::caddyfile(name, &gateway.spec, &sites);
+  let caddyfile = render::caddyfile(
+    name,
+    &gateway.spec,
+    &sites,
+    net.basic_auth.as_ref(),
+  );
   Ok(GatewayRender {
     compose_hash: render::hash(&compose),
     caddyfile_hash: render::hash(&caddyfile),

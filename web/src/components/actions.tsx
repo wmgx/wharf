@@ -19,6 +19,7 @@ import { Label } from "@/components/ui/label";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { useStatus } from "@/status";
 import type { Change, RollbackTarget, Run, ServiceView } from "@/types";
+import { BasicAuthDialog } from "./basic-auth";
 import { Picker, serverOptions } from "./fields";
 import { PlanFlow } from "./PlanFlow";
 
@@ -39,6 +40,8 @@ interface Actions {
   remove: (name: string) => void;
   /** 选目标服务器，再生成迁移计划。 */
   move: (svc: ServiceView) => void;
+  /** 设置登录保护账号。已有域名开了登录保护时，保存后生成更新网关的计划。 */
+  basicAuth: () => void;
 }
 
 const Ctx = createContext<Actions | null>(null);
@@ -57,6 +60,7 @@ export function ActionsProvider({ children }: { children: ReactNode }) {
   const [open, setOpen] = useState<Open | null>(null);
   const [removing, setRemoving] = useState<string | null>(null);
   const [moving, setMoving] = useState<ServiceView | null>(null);
+  const [settingAuth, setSettingAuth] = useState(false);
   const seq = useRef(0);
   // 正在执行的那次：关掉面板后继续在后台盯着，结束时弹提示。
   // 用 state 而不是 ref：apply 的返回可能晚于关面板，拿到 run_id 时也要能开始盯。
@@ -121,6 +125,14 @@ export function ActionsProvider({ children }: { children: ReactNode }) {
     },
     remove: (name) => setRemoving(name),
     move: (svc) => setMoving(svc),
+    basicAuth: () => setSettingAuth(true),
+  };
+
+  const authSaved = () => {
+    setSettingAuth(false);
+    if (status?.routes.some((r) => r.spec.auth)) {
+      actions.plan({ title: "更新登录保护账号", changes: [] });
+    }
   };
 
   const confirmMove = (svc: ServiceView, to: string) => {
@@ -166,6 +178,7 @@ export function ActionsProvider({ children }: { children: ReactNode }) {
       </Sheet>
       <RemoveDialog name={removing} onCancel={() => setRemoving(null)} onConfirm={confirmRemove} />
       <MoveDialog svc={moving} onCancel={() => setMoving(null)} onConfirm={confirmMove} />
+      <BasicAuthDialog open={settingAuth} onClose={() => setSettingAuth(false)} onSaved={authSaved} />
     </Ctx.Provider>
   );
 }
