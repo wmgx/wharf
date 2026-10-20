@@ -353,7 +353,8 @@ impl Docker {
           "image",
           "inspect",
           "--format",
-          "{{.Id}}|{{join .RepoDigests \",\"}}",
+          // `join` 在部分 docker 版本上对 RepoDigests 报类型错误，用 json。
+          "{{.Id}}|{{json .RepoDigests}}",
           image,
         ])
         .timeout(Duration::from_secs(15))
@@ -365,8 +366,10 @@ impl Docker {
         Some(o) => {
           let line = o.stdout.trim().to_string();
           let (id, digests) =
-            line.split_once('|').unwrap_or((&line, ""));
-          (id.to_string(), pick_digest(image, digests))
+            line.split_once('|').unwrap_or((&line, "[]"));
+          let digests: Vec<String> =
+            serde_json::from_str(digests).unwrap_or_default();
+          (id.to_string(), pick_digest(image, &digests.join(",")))
         }
         None => (String::new(), None),
       };
