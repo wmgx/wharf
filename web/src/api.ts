@@ -72,6 +72,7 @@ export const api = {
   get: <T,>(path: string) => request<T>("GET", path),
   post: <T,>(path: string, body: unknown) => request<T>("POST", path, body),
   put: <T,>(path: string, body: unknown) => request<T>("PUT", path, body),
+  del: <T,>(path: string) => request<T>("DELETE", path),
   plan: (changes: Change[]) => request<Plan>("POST", "/api/plan", { changes }),
   apply: (plan_id: string, confirm: string[]) =>
     request<{ run_id: string }>("POST", "/api/apply", { plan_id, confirm }),

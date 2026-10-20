@@ -759,6 +759,43 @@ async fn remove_account(
   Path(name): Path<String>,
 ) -> ApiResult<Value> {
   auth.require(TokenScope::ApplyAll)?;
+  // 还有网关、隧道或 DNS 记录靠这个账号管理时，删了就没法再改它们。
+  let snap = snapshot::load(&s.db).await?;
+  let mut users: Vec<String> = snap
+    .world
+    .gateways
+    .iter()
+    .filter(|(_, g)| g.spec.account.as_deref() == Some(name.as_str()))
+    .map(|(g, _)| format!("网关 {g}"))
+    .collect();
+  users.extend(
+    snap
+      .tunnels
+      .iter()
+      .filter(|(g, t)| {
+        t.account == name && !snap.world.gateways.contains_key(*g)
+      })
+      .map(|(g, _)| format!("网关 {g} 留下的隧道")),
+  );
+  users.extend(
+    snap
+      .owned
+      .iter()
+      .filter(|r| r.account == name)
+      .map(|r| format!("DNS 记录 {}", r.hostname)),
+  );
+  if !users.is_empty() {
+    users.sort();
+    users.dedup();
+    return Err(
+      ApiError::invalid(format!(
+        "账号 {name} 还在使用：{}",
+        users.join("、")
+      ))
+      .with_hint("先删除这些网关和域名（并执行计划），再删除账号")
+      .into(),
+    );
+  }
   let removed = s
     .db
     .call(move |c| {

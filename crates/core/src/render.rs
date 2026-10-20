@@ -643,7 +643,10 @@ mod tests {
       account: Some("cf".into()),
     };
     let out = tunnel_compose("cf", &spec);
-    assert!(out.contains("TUNNEL_TOKEN: '[[WHARF_TUNNEL_TOKEN]]'"), "{out}");
+    assert!(
+      out.contains("TUNNEL_TOKEN: '[[WHARF_TUNNEL_TOKEN]]'"),
+      "{out}"
+    );
     assert!(out.contains("network_mode: host"));
     assert!(out.contains(DEFAULT_CLOUDFLARED_IMAGE));
   }

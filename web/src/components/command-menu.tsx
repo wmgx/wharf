@@ -1,20 +1,4 @@
-import {
-  ArrowRightLeftIcon,
-  AnchorIcon,
-  BoxesIcon,
-  BoxIcon,
-  HistoryIcon,
-  LogOutIcon,
-  MoonIcon,
-  NetworkIcon,
-  PlusIcon,
-  RefreshCwIcon,
-  ScrollTextIcon,
-  SearchIcon,
-  SunIcon,
-  Trash2Icon,
-  WaypointsIcon,
-} from "lucide-react";
+import { AnchorIcon, ArrowRightLeftIcon, BoxIcon, BoxesIcon, CloudIcon, HistoryIcon, LogOutIcon, MoonIcon, NetworkIcon, PlusIcon, RefreshCwIcon, ScrollTextIcon, SearchIcon, SunIcon, Trash2Icon, WaypointsIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
@@ -91,6 +75,10 @@ export function CommandMenu({ onLogout }: { onLogout: () => void }) {
             <CommandItem onSelect={() => run(() => nav("/gateways"))}>
               <WaypointsIcon />
               网关
+            </CommandItem>
+            <CommandItem value="厂商账号 accounts cloudflare" onSelect={() => run(() => nav("/accounts"))}>
+              <CloudIcon />
+              厂商账号
             </CommandItem>
             <CommandItem onSelect={() => run(() => nav("/topology"))}>
               <NetworkIcon />

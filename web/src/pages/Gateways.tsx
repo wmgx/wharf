@@ -1,6 +1,6 @@
 import { PlusIcon, Trash2Icon, WaypointsIcon } from "lucide-react";
 import { useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { usePoll } from "@/api";
 import { useActions } from "@/components/actions";
 import { CardsSkeleton, CodeBlock, Empty, Notice, PageHeader, ServerTag, StatusBadge, liveTone } from "@/components/common";
@@ -266,7 +266,10 @@ function NewGateway({ onDone }: { onDone: () => void }) {
         {tunnel ? (
           accounts && accounts.length === 0 ? (
             <Notice kind="warn">
-              隧道要建在 Cloudflare 账号下，还没有账号。在终端里执行 <code className="font-mono">wharf account add cf</code>，token 从标准输入读取，不经过页面。
+              隧道要建在 Cloudflare 账号下，还没有账号。{" "}
+              <Link to="/accounts" className="font-medium underline underline-offset-2">
+                去添加厂商账号
+              </Link>
             </Notice>
           ) : (
             <Field label="厂商账号" htmlFor="account" help="Wharf 会在这个账号下创建隧道 wharf-<网关名>，账号里已有的隧道不会被改动。">

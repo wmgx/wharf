@@ -12,6 +12,7 @@ import { Skeleton } from "./components/ui/skeleton";
 import { Toaster } from "./components/ui/sonner";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { Gateways } from "./pages/Gateways";
+import { Accounts } from "./pages/Accounts";
 import { Home } from "./pages/Home";
 import { Login } from "./pages/Login";
 import { ServiceDetail } from "./pages/ServiceDetail";
@@ -83,6 +84,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
                   <Route path="/services" element={<Services />} />
                   <Route path="/services/:name" element={<ServiceDetail />} />
                   <Route path="/gateways" element={<Gateways />} />
+                  <Route path="/accounts" element={<Accounts />} />
                   <Route path="/topology" element={<Suspense fallback={<Skeleton className="h-[480px] rounded-xl" />}><Topology /></Suspense>} />
                   <Route path="*" element={<Navigate to="/" replace />} />
                 </Routes>

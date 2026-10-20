@@ -240,9 +240,11 @@ async fn discover_lists_zones() {
 }
 
 #[tokio::test]
-async fn tunnel_find_or_create_writes_whole_config_and_fetches_token() {
+async fn tunnel_find_or_create_writes_whole_config_and_fetches_token()
+{
   use crate::TunnelProvider;
-  let seen: Arc<Mutex<Vec<(String, String, Value)>>> = Default::default();
+  let seen: Arc<Mutex<Vec<(String, String, Value)>>> =
+    Default::default();
   let log = seen.clone();
   let fixture = Fixture::start(move |request| {
     let path = request.path.split('?').next().unwrap().to_string();
@@ -279,8 +281,10 @@ async fn tunnel_find_or_create_writes_whole_config_and_fetches_token() {
   assert_eq!(tunnels.find("wharf-edge").await.unwrap(), None);
   let t = tunnels.create("wharf-edge").await.unwrap();
   assert_eq!((t.scope.as_str(), t.id.as_str()), ("acc1", "tun1"));
-  let rules =
-    vec![("blog.example.com".to_string(), "http://127.0.0.1:20000".to_string())];
+  let rules = vec![(
+    "blog.example.com".to_string(),
+    "http://127.0.0.1:20000".to_string(),
+  )];
   tunnels.put_rules(&t, &rules).await.unwrap();
   assert_eq!(tunnels.token(&t).await.unwrap(), "connector-token");
   assert_eq!(tunnels.dns_target(&t).content, "tun1.cfargotunnel.com");

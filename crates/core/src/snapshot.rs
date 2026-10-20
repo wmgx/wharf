@@ -284,6 +284,9 @@ pub fn provider_error(e: ProviderError) -> ApiError {
     code::AUTH_FAILED => Some(
       "检查 Cloudflare token 权限：Zone → DNS → Edit，Zone → Zone → Read",
     ),
+    code::PROVIDER_REJECTED => Some(
+      "检查 token 是否完整复制、是否已过期或被删除；DNS 记录冲突时到 Cloudflare 面板确认",
+    ),
     code::ZONE_NOT_FOUND => {
       Some("执行 wharf account discover <account> 重新发现 zone")
     }

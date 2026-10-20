@@ -52,7 +52,7 @@ impl ProviderError {
   }
 
   pub fn internal(cause: impl fmt::Display) -> Self {
-    Self::new(code::INTERNAL, "Internal error, see core logs")
+    Self::new(code::INTERNAL, "内部错误，详见控制面日志")
       .with_detail(cause)
   }
 

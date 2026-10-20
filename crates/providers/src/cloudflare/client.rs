@@ -31,7 +31,7 @@ pub struct Zone {
 fn malformed(detail: &str) -> ProviderError {
   ProviderError::new(
     code::PROVIDER_RESPONSE,
-    "Provider returned an invalid response",
+    "Cloudflare 返回的内容无法解析",
   )
   .with_detail(detail)
 }
@@ -43,9 +43,7 @@ pub fn segment(value: &str) -> Result<&str> {
       .bytes()
       .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
   {
-    return Err(ProviderError::invalid(
-      "Invalid provider object identifier",
-    ));
+    return Err(ProviderError::invalid("Cloudflare 对象 id 不合法"));
   }
   Ok(value)
 }
@@ -55,7 +53,7 @@ impl CloudflareClient {
     if token.is_empty() {
       return Err(ProviderError::new(
         code::AUTH_FAILED,
-        "Account token is empty",
+        "账号 token 为空",
       ));
     }
     let client = Client::builder()
@@ -101,16 +99,13 @@ impl CloudflareClient {
         let detail =
           redact(&e.without_url().to_string(), &self.token);
         if timed_out {
-          ProviderError::new(
-            code::TIMEOUT,
-            "Provider request timed out",
-          )
-          .retryable()
-          .with_detail(detail)
+          ProviderError::new(code::TIMEOUT, "请求 Cloudflare 超时")
+            .retryable()
+            .with_detail(detail)
         } else {
           ProviderError::new(
             code::PROVIDER_UNAVAILABLE,
-            "Provider request failed",
+            "连不上 Cloudflare",
           )
           .retryable()
           .with_detail(detail)
@@ -140,25 +135,25 @@ impl CloudflareClient {
           match status.as_u16() {
             401 | 403 => ProviderError::new(
               code::AUTH_FAILED,
-              "Provider authorization failed",
+              "Cloudflare 拒绝了这个 token（无效或权限不够）",
             ),
             404 => ProviderError::new(
               code::PROVIDER_REJECTED,
-              "Provider object was not found",
+              "Cloudflare 上找不到这个对象",
             ),
             429 => ProviderError::new(
               code::RATE_LIMITED,
-              "Provider rate limit reached",
+              "Cloudflare 请求太频繁，被限流",
             )
             .retryable(),
             500..=599 => ProviderError::new(
               code::PROVIDER_UNAVAILABLE,
-              "Provider is unavailable",
+              "Cloudflare 暂时不可用",
             )
             .retryable(),
             _ => ProviderError::new(
               code::PROVIDER_REJECTED,
-              "Provider rejected the request",
+              "Cloudflare 拒绝了这个请求",
             ),
           }
           .with_detail(detail),
@@ -172,7 +167,7 @@ impl CloudflareClient {
         return Err(
           ProviderError::new(
             code::PROVIDER_REJECTED,
-            "Provider rejected the operation",
+            "Cloudflare 拒绝了这个操作",
           )
           .with_detail(format!("success=false on {method} {path}")),
         );
@@ -224,7 +219,7 @@ impl CloudflareClient {
     Err(
       ProviderError::new(
         code::PROVIDER_RESPONSE,
-        "Zone pagination limit exceeded",
+        "zone 太多，超过分页上限",
       )
       .with_detail("more than 200 pages of zones"),
     )
@@ -370,7 +365,7 @@ impl CloudflareClient {
     Err(
       ProviderError::new(
         code::PROVIDER_RESPONSE,
-        "Pagination limit exceeded",
+        "数量太多，超过分页上限",
       )
       .with_detail(format!("more than 200 pages of {what}")),
     )

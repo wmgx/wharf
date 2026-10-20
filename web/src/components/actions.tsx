@@ -28,6 +28,8 @@ interface FlowRequest {
   changes: Change[];
   /** 执行成功后跳转到这里。 */
   then?: string;
+  /** 执行前可以"返回修改"：关掉计划，回到这个地址（表单从草稿恢复）。 */
+  back?: string;
 }
 
 interface Actions {
@@ -54,7 +56,7 @@ export function useActions(): Actions {
   return a;
 }
 
-type Open = { key: number; title: string; changes?: Change[]; runId?: string; then?: string };
+type Open = { key: number; title: string; changes?: Change[]; runId?: string; then?: string; back?: string };
 
 export function ActionsProvider({ children }: { children: ReactNode }) {
   const { status, refresh } = useStatus();
@@ -177,6 +179,15 @@ export function ActionsProvider({ children }: { children: ReactNode }) {
                 runId={open.runId}
                 onStarted={(runId) => setRunning({ runId, title: open.title })}
                 onFinished={(run) => finished(run, open.title, open.then)}
+                onBack={
+                  open.back
+                    ? () => {
+                        const back = open.back!;
+                        setOpen(null);
+                        nav(back);
+                      }
+                    : undefined
+                }
               />
             )}
           </div>

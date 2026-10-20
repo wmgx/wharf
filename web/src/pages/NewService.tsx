@@ -1,9 +1,10 @@
 import { ArrowRightIcon } from "lucide-react";
 import { useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { usePoll } from "@/api";
 import { useActions } from "@/components/actions";
-import { Notice } from "@/components/common";
-import { DomainChips, Field, Picker, PortsEditor, Segmented, gatewayOptions, nameFromImage, parseEnv, serverOptions, toName } from "@/components/fields";
+import { EntryField, useEntry } from "@/components/entry";
+import { DomainChips, Field, Picker, PortsEditor, Segmented, nameFromImage, parseEnv, serverOptions, toName } from "@/components/fields";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
@@ -30,27 +31,51 @@ export function NewService({ open, onClose }: { open: boolean; onClose: () => vo
   );
 }
 
+interface Draft {
+  kind: "image" | "compose";
+  image: string;
+  compose: string;
+  name: string;
+  nameTouched: boolean;
+  server: string;
+  ports: PortSpec[];
+  envText: string;
+  hostname: string;
+  entry: string;
+}
+
+/** 上一次提交的表单。计划生成失败或想改时点"返回修改"，用它恢复。 */
+let lastDraft: Draft | null = null;
+
+/** 回到新建服务表单，恢复上一次填写的内容。 */
+export const NEW_SERVICE_DRAFT_URL = "/services?new=1&draft=1";
+
 function Form({ onClose }: { onClose: () => void }) {
   const { status } = useStatus();
   const actions = useActions();
   const { data: accounts } = usePoll<AccountView[]>("/api/accounts", 60000);
+  const [params] = useSearchParams();
+  const [draft] = useState(() => (params.get("draft") === "1" ? lastDraft : null));
 
-  const [kind, setKind] = useState<"image" | "compose">("image");
-  const [image, setImage] = useState("");
-  const [compose, setCompose] = useState("");
-  const [name, setName] = useState("");
-  const [nameTouched, setNameTouched] = useState(false);
+  const [kind, setKind] = useState<"image" | "compose">(draft?.kind ?? "image");
+  const [image, setImage] = useState(draft?.image ?? "");
+  const [compose, setCompose] = useState(draft?.compose ?? "");
+  const [name, setName] = useState(draft?.name ?? "");
+  const [nameTouched, setNameTouched] = useState(draft?.nameTouched ?? false);
   const servers = status?.servers ?? [];
-  const [server, setServer] = useState("");
-  const [ports, setPorts] = useState<PortSpec[]>([{ name: "http", port: 80 }]);
-  const [envText, setEnvText] = useState("");
-  const [hostname, setHostname] = useState("");
-  const gateways = status?.gateways ?? [];
-  const [gateway, setGateway] = useState("");
+  const [server, setServer] = useState(draft?.server ?? "");
+  const [ports, setPorts] = useState<PortSpec[]>(draft?.ports ?? [{ name: "http", port: 80 }]);
+  const [envText, setEnvText] = useState(draft?.envText ?? "");
+  const [hostname, setHostname] = useState(draft?.hostname ?? "");
 
   const svcName = nameTouched ? name : kind === "image" ? nameFromImage(image) : name;
   const chosenServer = server || serverOptions(servers)[0]?.value || "";
-  const chosenGateway = gateway || gateways.find((g) => g.spec.default)?.name || gateways[0]?.name || "";
+  const entry = useEntry(chosenServer);
+  const [entryRestored, setEntryRestored] = useState(false);
+  if (draft?.entry && !entryRestored && entry.options.some((o) => o.value === draft.entry)) {
+    setEntryRestored(true);
+    entry.setChoice(draft.entry);
+  }
 
   // 域名建议：已有路由的后缀 + 厂商账号里的 zone。
   const suggestions = useMemo(() => {
@@ -65,7 +90,7 @@ function Form({ onClose }: { onClose: () => void }) {
 
   const source = kind === "image" ? image.trim() : compose.trim();
   const portsOk = ports.every((p) => p.name && p.port > 0 && p.port < 65536);
-  const ready = !!svcName && !!source && !!chosenServer && portsOk && (!hostname || !!chosenGateway);
+  const ready = !!svcName && !!source && !!chosenServer && portsOk && (!hostname.trim() || entry.ready);
 
   const submit = () => {
     const spec: ServiceSpec = {
@@ -76,10 +101,12 @@ function Form({ onClose }: { onClose: () => void }) {
     };
     const changes: Change[] = [{ op: "upsert_service", name: svcName, spec }];
     if (hostname.trim()) {
-      changes.push({ op: "upsert_route", spec: { hostname: hostname.trim().toLowerCase(), service: svcName, gateway: chosenGateway || undefined } });
+      const { gateway, changes: gatewayChanges } = entry.resolve();
+      changes.push(...gatewayChanges, { op: "upsert_route", spec: { hostname: hostname.trim().toLowerCase(), service: svcName, gateway } });
     }
+    lastDraft = { kind, image, compose, name: svcName, nameTouched, server: chosenServer, ports, envText, hostname, entry: entry.chosen };
     onClose();
-    actions.plan({ title: `部署 ${svcName}`, changes, then: `/services/${svcName}` });
+    actions.plan({ title: `部署 ${svcName}`, changes, then: `/services/${svcName}`, back: NEW_SERVICE_DRAFT_URL });
   };
 
   return (
@@ -163,12 +190,7 @@ function Form({ onClose }: { onClose: () => void }) {
           <Input id="hostname" placeholder="例如 app.example.com，留空就只在内网访问" value={hostname} onChange={(e) => setHostname(e.target.value)} />
           {!hostname && <DomainChips suggestions={suggestions} onPick={setHostname} />}
         </Field>
-        {hostname && gateways.length > 1 && (
-          <Field label="经过哪个网关" htmlFor="gw">
-            <Picker id="gw" value={chosenGateway} options={gatewayOptions(gateways)} onChange={setGateway} />
-          </Field>
-        )}
-        {hostname && gateways.length === 0 && <Notice kind="warn">还没有网关，先在「网关」页新建一个。</Notice>}
+        {hostname.trim() && <EntryField entry={entry} />}
       </div>
       <SheetFooter className="flex-row justify-end border-t">
         <Button variant="ghost" onClick={onClose}>

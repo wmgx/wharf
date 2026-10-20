@@ -1,4 +1,4 @@
-import { CheckIcon, CircleIcon, LoaderIcon, MinusIcon, XIcon } from "lucide-react";
+import { ArrowLeftIcon, CheckIcon, CircleIcon, LoaderIcon, MinusIcon, XIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { api } from "@/api";
 import { Badge } from "@/components/ui/badge";
@@ -41,11 +41,14 @@ export function PlanFlow({
   runId,
   onStarted,
   onFinished,
+  onBack,
 }: {
   changes?: Change[];
   runId?: string;
   onStarted?: (runId: string) => void;
   onFinished?: (run: Run) => void;
+  /** 有值时，执行前显示"返回修改"。 */
+  onBack?: () => void;
 }) {
   const [stage, setStage] = useState<Stage>(runId ? "running" : "planning");
   const [plan, setPlan] = useState<Plan | null>(null);
@@ -117,11 +120,19 @@ export function PlanFlow({
       <ErrorNote error={error} />
 
       {plan && stage === "review" && <PlanReview plan={plan} confirmed={confirmed} setConfirmed={setConfirmed} />}
-      {plan && stage === "review" && plan.items.length > 0 && (
-        <div className="flex justify-end">
-          <Button disabled={!allConfirmed} onClick={apply}>
-            {needs.length ? "确认并执行" : "执行"}
-          </Button>
+      {(stage === "review" || (stage === "planning" && !!error)) && (
+        <div className="flex justify-end gap-2">
+          {onBack && (
+            <Button variant="outline" onClick={onBack}>
+              <ArrowLeftIcon />
+              返回修改
+            </Button>
+          )}
+          {plan && stage === "review" && plan.items.length > 0 && (
+            <Button disabled={!allConfirmed} onClick={apply}>
+              {needs.length ? "确认并执行" : "执行"}
+            </Button>
+          )}
         </div>
       )}
 

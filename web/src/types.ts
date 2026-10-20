@@ -127,7 +127,11 @@ export interface Status {
 export interface AccountView {
   name: string;
   kind: string;
+  /** 打码后的 token，例如 `abcd…wxyz`。 */
+  token: string;
   zones: string[];
+  warnings?: string[];
+  updated_at: string;
 }
 
 export type Change =

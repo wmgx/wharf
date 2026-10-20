@@ -6,7 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
-import type { GatewayView, PortSpec, ServerView } from "@/types";
+import type { PortSpec, ServerView } from "@/types";
 import { Dot, serverText, serverTone, type Tone } from "./common";
 
 /** `KEY=VALUE` 一行一个，和 .env 一样写法。 */
@@ -164,10 +164,6 @@ export function serverOptions(servers: ServerView[]): Option[] {
   return [...servers]
     .sort((a, b) => Number(b.online) - Number(a.online))
     .map((s) => ({ value: s.name, label: s.name, tone: serverTone(s), hint: serverText(s) }));
-}
-
-export function gatewayOptions(gateways: GatewayView[]): Option[] {
-  return gateways.map((g) => ({ value: g.name, label: g.name, hint: `${g.spec.server}${g.spec.default ? " · 默认" : ""}` }));
 }
 
 /** 域名建议：已有域名的后缀 + 厂商账号里的 zone。 */

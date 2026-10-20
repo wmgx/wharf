@@ -93,7 +93,7 @@ impl CloudflareDns {
     zones
       .into_iter()
       .find(|z| z.name == name)
-      .ok_or_else(|| ProviderError::internal("matched zone vanished"))
+      .ok_or_else(|| ProviderError::internal("匹配到的 zone 不见了"))
   }
 }
 
@@ -104,7 +104,7 @@ fn record_from(
   let bad = || {
     ProviderError::new(
       code::PROVIDER_RESPONSE,
-      "Provider returned an invalid DNS record",
+      "Cloudflare 返回的 DNS 记录无法解析",
     )
   };
   let record_type = value["type"].as_str().ok_or_else(bad)?;

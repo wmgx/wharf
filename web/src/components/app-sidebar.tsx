@@ -1,4 +1,4 @@
-import { AnchorIcon, BoxesIcon, ChevronsUpDownIcon, KeyRoundIcon, LogOutIcon, MoonIcon, NetworkIcon, SunIcon, WaypointsIcon } from "lucide-react";
+import { AnchorIcon, BoxesIcon, CloudIcon, ChevronsUpDownIcon, KeyRoundIcon, LogOutIcon, MoonIcon, NetworkIcon, SunIcon, WaypointsIcon } from "lucide-react";
 import { NavLink, useLocation } from "react-router-dom";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import {
@@ -53,6 +53,10 @@ export function AppSidebar({ onLogout }: { onLogout: () => void }) {
         { to: "/services", label: "服务", icon: BoxesIcon, count: status?.services.length },
         { to: "/gateways", label: "网关", icon: WaypointsIcon, count: status?.gateways.length },
       ],
+    },
+    {
+      label: "设置",
+      items: [{ to: "/accounts", label: "厂商账号", icon: CloudIcon }],
     },
   ];
   const active = (to: string) => (to === "/" ? pathname === "/" : pathname.startsWith(to));
