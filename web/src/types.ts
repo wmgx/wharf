@@ -61,7 +61,7 @@ export interface ContainerInfo {
 
 export interface LiveState {
   state: "running" | "stopped" | "partial" | "missing" | "unknown" | string;
-  containers: ContainerInfo[];
+  containers?: ContainerInfo[];
   in_sync?: boolean | null;
   error?: string;
 }
@@ -117,7 +117,7 @@ export interface Status {
   services: ServiceView[];
   gateways: GatewayView[];
   routes: RouteView[];
-  problems: string[];
+  problems?: string[];
 }
 
 export interface AccountView {
@@ -168,7 +168,8 @@ export interface ApiErrorBody {
 export interface RunStep {
   title: string;
   status: StepStatus;
-  log: string[];
+  /** 没有日志时后端省略这个字段。 */
+  log?: string[];
   error?: ApiErrorBody;
 }
 

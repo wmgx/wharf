@@ -10,6 +10,15 @@ const ACTION: Record<PlanItem["action"], string> = {
   adopt: "接管",
 };
 
+const LAYER: Record<string, string> = {
+  config: "配置",
+  volume: "数据卷",
+  container: "容器",
+  gateway: "网关",
+  dns: "DNS",
+  tunnel: "隧道",
+};
+
 const RISK: Record<string, string> = {
   disruptive: "会短暂中断",
   destructive: "破坏性",
@@ -133,18 +142,16 @@ function PlanReview({
           <div className="plan-item" key={it.id}>
             <span className={`act ${it.action}`}>{ACTION[it.action]}</span>
             <div>
-              <div className="mono">{it.address}</div>
+              <div className="mono">
+                {it.address}
+                <span className="layer">{LAYER[it.layer] ?? it.layer}</span>
+              </div>
               <div style={{ fontSize: 12, color: "var(--ink-3)" }}>{it.reason}</div>
             </div>
             {it.risk !== "safe" && <span className={`risk ${it.risk}`}>{RISK[it.risk]}</span>}
           </div>
         ))
       )}
-      {plan.warnings?.map((w) => (
-        <div className="note" key={w}>
-          {w}
-        </div>
-      ))}
       {needs.length > 0 && (
         <div className="confirm-box">
           <h4>这些操作需要你逐项确认</h4>
@@ -165,7 +172,35 @@ function PlanReview({
           ))}
         </div>
       )}
+      <Warnings plan={plan} />
     </div>
+  );
+}
+
+/** 和这次计划相关的提醒直接显示，其余的（plan 总是全量对比）折叠起来。 */
+function Warnings({ plan }: { plan: Plan }) {
+  const warnings = plan.warnings ?? [];
+  const names = plan.items.map((i) => i.address.split("/").slice(1).join("/")).filter(Boolean);
+  const related = warnings.filter((w) => names.some((n) => w.includes(n)));
+  const others = warnings.filter((w) => !related.includes(w));
+  return (
+    <>
+      {related.map((w) => (
+        <div className="note" key={w}>
+          {w}
+        </div>
+      ))}
+      {others.length > 0 && (
+        <details className="more">
+          <summary>其他提醒（{others.length}）</summary>
+          {others.map((w) => (
+            <div className="note" key={w}>
+              {w}
+            </div>
+          ))}
+        </details>
+      )}
+    </>
   );
 }
 
@@ -188,7 +223,7 @@ function RunView({ run }: { run: Run }) {
               {s.title}
             </span>
           </div>
-          {s.log.length > 0 && <div className="log">{s.log.slice(-40).join("\n")}</div>}
+          {!!s.log?.length && <div className="log">{s.log.slice(-40).join("\n")}</div>}
           {s.error && <ErrorNote error={{ message: s.error.message }} />}
         </div>
       ))}

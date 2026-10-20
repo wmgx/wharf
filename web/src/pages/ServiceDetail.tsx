@@ -112,10 +112,10 @@ export function ServiceDetail() {
         </div>
         <div className="panel">
           <dl className="kv">
-            {svc.live?.containers.map((c) => (
+            {svc.live?.containers?.map((c) => (
               <Container key={c.name} name={c.service} state={c.state} status={c.status} />
             ))}
-            {!svc.live?.containers.length && (
+            {!svc.live?.containers?.length && (
               <>
                 <dt>容器</dt>
                 <dd>{svc.live?.error ?? "没有容器"}</dd>

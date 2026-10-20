@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useState } from "react";
 import { NavLink, Navigate, Route, Routes } from "react-router-dom";
 import { getToken, setToken, setUnauthorizedHandler, usePoll } from "./api";
+import { Boundary } from "./components/Boundary";
 import { Light } from "./components/ui";
 import { Gateways } from "./pages/Gateways";
 import { Home } from "./pages/Home";
@@ -70,6 +71,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
         </nav>
         <main>
           <HarborBar status={status} />
+          <Boundary>
           <Routes>
             <Route path="/" element={<Home />} />
             <Route path="/services" element={<Services />} />
@@ -78,6 +80,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
             <Route path="/topology" element={<Topology />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
+          </Boundary>
         </main>
       </div>
     </Ctx.Provider>

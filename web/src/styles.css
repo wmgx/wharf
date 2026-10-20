@@ -648,7 +648,8 @@ textarea {
   flex: 1;
 }
 
-.row > .fixed {
+.row > .fixed,
+.row > .light {
   flex: none;
 }
 
@@ -830,6 +831,25 @@ textarea {
 .steps span.done {
   border-color: var(--go);
   color: var(--ink-2);
+}
+
+details.more {
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+details.more summary {
+  cursor: pointer;
+}
+
+.layer {
+  margin-left: 8px;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-3);
 }
 
 .plan-item {
@@ -1124,6 +1144,21 @@ pre.config {
   min-height: 480px;
   border: 1px solid var(--line);
   background: rgba(6, 13, 21, 0.6);
+}
+
+.topo .react-flow {
+  --xy-background-color: transparent;
+  --xy-edge-label-background-color: var(--sea-1);
+  --xy-controls-button-background-color: var(--sea-2);
+  --xy-controls-button-border-color: var(--line);
+  --xy-controls-button-color: var(--ink-2);
+}
+
+.topo .react-flow__node-group {
+  background: transparent;
+  border: none;
+  padding: 0;
+  box-shadow: none;
 }
 
 .topo .react-flow__attribution {
