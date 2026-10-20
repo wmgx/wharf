@@ -4,3 +4,5 @@ temp
 data
 doc
 CLAUDE.md
+web/node_modules
+web/dist

@@ -108,8 +108,14 @@ pub enum AgentOp {
   ProjectUp(ProjectUp),
   /// `down` 并删除 project 目录。数据目录保留。
   ProjectDown { project: String },
-  /// 最近的日志，结果是字符串。
-  Logs { project: String, tail: u32 },
+  /// 最近的日志，结果是字符串。`follow` 时持续把新日志作为进度推送，
+  /// 直到被取消或超时，结果是空字符串。
+  Logs {
+    project: String,
+    tail: u32,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    follow: bool,
+  },
   /// 校验并应用网关配置，失败自动回滚。结果是 [ProjectUpResult]。
   GatewayApply(GatewayApply),
 }

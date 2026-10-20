@@ -11,11 +11,14 @@ mod apply;
 mod auth;
 mod db;
 mod hub;
+mod logs_stream;
 mod planner;
 mod render;
+mod rollback;
 mod snapshot;
 mod state;
 mod views;
+mod web;
 mod world;
 
 #[derive(Parser)]

@@ -24,6 +24,7 @@ use wharf_api_types::{
     ApplyRequest, ApplyResponse, Plan, PlanStatus, Run, RunStatus,
     RunStep, StepStatus,
   },
+  spec::ServiceSpec,
   view::TokenScope,
 };
 use wharf_providers::{Owner, RemoteRecord};
@@ -529,7 +530,16 @@ async fn run_step(
         progress(format!("提醒：{warning}"));
       }
       record_deployment(
-        state, service, server, run_id, &hash, &template, &result,
+        state,
+        Deployed {
+          service,
+          server,
+          run_id,
+          hash: &hash,
+          template: &template,
+          spec: &world.services[service].spec,
+        },
+        &result,
       )
       .await?;
       ensure_running(
@@ -782,32 +792,39 @@ async fn remove_owned(
     .await
 }
 
+/// 一次成功部署的内容，写进部署历史。
+struct Deployed<'a> {
+  service: &'a str,
+  server: &'a str,
+  run_id: &'a str,
+  hash: &'a str,
+  template: &'a str,
+  spec: &'a ServiceSpec,
+}
+
 async fn record_deployment(
   state: &AppState,
-  service: &str,
-  server: &str,
-  run_id: &str,
-  hash: &str,
-  template: &str,
+  d: Deployed<'_>,
   result: &ProjectUpResult,
 ) -> Result<(), ApiError> {
   let images =
     serde_json::to_string(&result.images).map_err(json_err)?;
+  let spec = serde_json::to_string(d.spec).map_err(json_err)?;
   let values = (
-    service.to_string(),
-    server.to_string(),
-    run_id.to_string(),
-    hash.to_string(),
-    template.to_string(),
+    d.service.to_string(),
+    d.server.to_string(),
+    d.run_id.to_string(),
+    d.hash.to_string(),
+    d.template.to_string(),
   );
   state
     .db
     .call(move |c| {
       let (service, server, run_id, hash, compose) = values;
       c.execute(
-        "INSERT INTO deployments (service, server, run_id, hash, compose, images, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![service, server, run_id, hash, compose, images, now_ms()],
+        "INSERT INTO deployments (service, server, run_id, hash, compose, images, created_at, spec)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![service, server, run_id, hash, compose, images, now_ms(), spec],
       )
       .map_err(sql_err)?;
       Ok(())

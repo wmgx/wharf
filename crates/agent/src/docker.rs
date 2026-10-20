@@ -21,6 +21,9 @@ use crate::exec::{Cmd, Ctx};
 pub const HASH_FILE: &str = ".wharf-hash";
 pub const CONFIG_HASH_FILE: &str = ".wharf-config-hash";
 
+/// 跟随日志的最长时长，到点后页面会自动重连。
+const FOLLOW_MAX: Duration = Duration::from_secs(30 * 60);
+
 #[derive(Clone)]
 pub struct Docker {
   pub bin: String,
@@ -305,6 +308,35 @@ impl Docker {
       .check("docker compose logs")?;
     // compose 把日志写到 stdout，部分版本的提示写到 stderr。
     Ok(out.stdout)
+  }
+
+  /// 持续推送新日志，直到被取消（页面关闭）或到达上限时长。
+  /// 结束本身就是正常情况，所以不返回错误。
+  pub async fn follow_logs(
+    &self,
+    project: &str,
+    tail: u32,
+    ctx: &Ctx,
+  ) {
+    let result = self
+      .compose(project)
+      .args([
+        "logs".to_string(),
+        "--no-color".into(),
+        "--timestamps".into(),
+        "--follow".into(),
+        "--tail".into(),
+        tail.min(5000).to_string(),
+      ])
+      .timeout(FOLLOW_MAX)
+      .stream(true)
+      .run(ctx)
+      .await;
+    if let Err(e) = result
+      && !ctx.cancel.is_cancelled()
+    {
+      ctx.say(format!("日志流结束：{}", e.message));
+    }
   }
 
   /// 镜像 id 和 digest，写进部署历史用于回滚。

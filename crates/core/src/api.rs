@@ -52,7 +52,7 @@ impl IntoResponse for AppError {
   }
 }
 
-type ApiResult<T> = Result<Json<T>, AppError>;
+pub(crate) type ApiResult<T> = Result<Json<T>, AppError>;
 
 pub fn router(state: Arc<AppState>) -> Router {
   Router::new()
@@ -68,11 +68,23 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route("/api/services", get(list_services))
     .route("/api/services/{name}", get(show_service))
     .route("/api/services/{name}/logs", get(service_logs))
+    .route(
+      "/api/services/{name}/logs/stream",
+      get(crate::logs_stream::service),
+    )
+    .route(
+      "/api/services/{name}/rollback",
+      get(crate::rollback::target),
+    )
     .route("/api/services/{name}/deployments", get(deployments))
     .route("/api/gateways", get(list_gateways))
     .route("/api/gateways/{name}", get(show_gateway))
     .route("/api/gateways/{name}/config", get(gateway_config))
     .route("/api/gateways/{name}/logs", get(gateway_logs))
+    .route(
+      "/api/gateways/{name}/logs/stream",
+      get(crate::logs_stream::gateway),
+    )
     .route("/api/routes", get(list_routes))
     .route("/api/accounts", get(list_accounts).post(add_account))
     .route(
@@ -94,8 +106,13 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route("/api/export", get(export))
     .route("/api/tokens", get(list_tokens).post(create_token))
     .route("/api/tokens/{name}", axum::routing::delete(remove_token))
-    .fallback(|| async {
-      AppError(ApiError::not_found("没有这个接口"))
+    .fallback(|uri: axum::http::Uri| async move {
+      let path = uri.path();
+      if path.starts_with("/api/") || path.starts_with("/agent/") {
+        AppError(ApiError::not_found("没有这个接口")).into_response()
+      } else {
+        crate::web::serve(uri).await
+      }
     })
     .with_state(state)
 }
@@ -368,7 +385,7 @@ async fn list_services(
   ))
 }
 
-fn service_not_found(name: &str) -> ApiError {
+pub(crate) fn service_not_found(name: &str) -> ApiError {
   ApiError::not_found(format!("服务 {name} 不存在"))
     .suggest("wharf service list")
 }
@@ -408,7 +425,11 @@ async fn project_logs(
     .hub
     .call(
       server,
-      AgentOp::Logs { project, tail },
+      AgentOp::Logs {
+        project,
+        tail,
+        follow: false,
+      },
       Duration::from_secs(40),
       None,
       &tokio_util::sync::CancellationToken::new(),
@@ -444,7 +465,7 @@ async fn deployments(
     .call(move |c| {
       let mut stmt = c
         .prepare(
-          "SELECT id, service, server, run_id, compose, images, created_at FROM deployments
+          "SELECT id, service, server, run_id, compose, images, created_at, spec, hash FROM deployments
            WHERE service = ?1 ORDER BY id DESC LIMIT 50",
         )
         .map_err(sql_err)?;
@@ -458,6 +479,8 @@ async fn deployments(
             r.get::<_, String>(4)?,
             r.get::<_, String>(5)?,
             r.get::<_, i64>(6)?,
+            r.get::<_, Option<String>>(7)?,
+            r.get::<_, String>(8)?,
           ))
         })
         .map_err(sql_err)?;
@@ -465,7 +488,17 @@ async fn deployments(
     })
     .await?;
   let mut out = Vec::new();
-  for (id, service, server, run_id, compose, images, created) in rows
+  for (
+    id,
+    service,
+    server,
+    run_id,
+    compose,
+    images,
+    created,
+    spec,
+    hash,
+  ) in rows
   {
     out.push(DeploymentView {
       id,
@@ -474,6 +507,8 @@ async fn deployments(
       run_id,
       compose,
       images: serde_json::from_str(&images).map_err(json_err)?,
+      spec: spec.and_then(|s| serde_json::from_str(&s).ok()),
+      hash,
       created_at: to_time(created),
     });
   }
@@ -502,7 +537,7 @@ async fn list_gateways(
   ))
 }
 
-fn gateway_not_found(name: &str) -> ApiError {
+pub(crate) fn gateway_not_found(name: &str) -> ApiError {
   ApiError::not_found(format!("网关 {name} 不存在"))
     .suggest("wharf gateway list")
 }

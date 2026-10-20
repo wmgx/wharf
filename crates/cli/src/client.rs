@@ -140,6 +140,42 @@ impl Client {
     })
   }
 
+  /// 读取分块响应（日志流），收到一块就交给 `on_chunk`，直到服务端结束。
+  pub async fn follow(
+    &self,
+    path: &str,
+    mut on_chunk: impl FnMut(&[u8]),
+  ) -> CliResult<()> {
+    let req = self
+      .http
+      .get(format!("{}{path}", self.base))
+      .timeout(Duration::from_secs(2 * 3600));
+    let req = match &self.token {
+      Some(token) => req.bearer_auth(token),
+      None => req,
+    };
+    let mut resp = req.send().await.map_err(|e| {
+      ApiError::new(
+        ErrorCode::AgentOffline,
+        format!("无法连接控制面 {}：{}", self.base, e.without_url()),
+      )
+    })?;
+    if !resp.status().is_success() {
+      let bytes = resp.bytes().await.unwrap_or_default();
+      return Err(
+        serde_json::from_slice::<ApiError>(&bytes)
+          .unwrap_or_else(|_| ApiError::internal("日志流请求失败"))
+          .into(),
+      );
+    }
+    while let Some(chunk) = resp.chunk().await.map_err(|e| {
+      ApiError::internal(format!("日志流中断：{}", e.without_url()))
+    })? {
+      on_chunk(&chunk);
+    }
+    Ok(())
+  }
+
   pub async fn get<T: DeserializeOwned>(
     &self,
     path: &str,

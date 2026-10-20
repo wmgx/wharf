@@ -13,7 +13,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
 use wharf_api_types::ApiError;
 
-const MIGRATIONS: &[&str] = &[r#"
+const MIGRATIONS: &[&str] = &[
+  r#"
 CREATE TABLE resources (
   kind TEXT NOT NULL,
   name TEXT NOT NULL,
@@ -89,7 +90,12 @@ CREATE TABLE api_tokens (
   created_at INTEGER NOT NULL,
   last_used_at INTEGER
 );
-"#];
+"#,
+  // 部署历史记下当时的服务配置，用于回滚。
+  r#"
+ALTER TABLE deployments ADD COLUMN spec TEXT;
+"#,
+];
 
 #[derive(Clone)]
 pub struct Db {

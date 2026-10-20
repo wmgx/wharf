@@ -15,8 +15,8 @@ use wharf_api_types::{
   },
   view::{
     AccountView, CreatedToken, DeploymentView, GatewayView, JoinInfo,
-    RouteView, SecretView, ServerView, ServiceView, Status,
-    TokenView,
+    RollbackTarget, RouteView, SecretView, ServerView, ServiceView,
+    Status, TokenView,
   },
 };
 
@@ -567,7 +567,59 @@ async fn service(
       out(j, &v, pretty);
       Ok(())
     }
-    ServiceCmd::Logs { name, tail } => {
+    ServiceCmd::Logs {
+      name,
+      tail,
+      follow: true,
+    } => {
+      use std::io::Write;
+      let mut stdout = std::io::stdout();
+      c.follow(
+        &format!(
+          "/api/services/{}/logs/stream?tail={tail}",
+          seg(&name)
+        ),
+        |chunk| {
+          let _ = stdout.write_all(chunk);
+          let _ = stdout.flush();
+        },
+      )
+      .await
+    }
+    ServiceCmd::Rollback { name, to, apply } => {
+      let path = match to {
+        Some(id) => {
+          format!("/api/services/{}/rollback?to={id}", seg(&name))
+        }
+        None => format!("/api/services/{}/rollback", seg(&name)),
+      };
+      let target: RollbackTarget = c.get(&path).await?;
+      if !j {
+        println!(
+          "回滚 {name} 到部署 #{}（{}）",
+          target.deployment_id,
+          target
+            .deployed_at
+            .with_timezone(&chrono::Local)
+            .format("%m-%d %H:%M")
+        );
+      }
+      changes(
+        c,
+        vec![Change::UpsertService {
+          name,
+          spec: target.spec,
+        }],
+        apply,
+        j,
+      )
+      .await
+    }
+    ServiceCmd::Logs {
+      name,
+      tail,
+      follow: false,
+    } => {
       let v: Value = c
         .get(&format!(
           "/api/services/{}/logs?tail={tail}",

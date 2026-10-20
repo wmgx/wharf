@@ -165,10 +165,23 @@ pub enum ServiceCmd {
     name: String,
     #[arg(long, default_value_t = 200)]
     tail: u32,
+    /// 持续输出新日志，Ctrl-C 结束。
+    #[arg(short, long)]
+    follow: bool,
   },
   /// 部署历史。
   History {
     name: String,
+  },
+  /// 回滚到之前的一次部署（默认是上一个不同的版本）。
+  /// image 来源会固定到当时的镜像 digest。
+  Rollback {
+    name: String,
+    /// 部署记录 id，见 `wharf service history`。
+    #[arg(long)]
+    to: Option<i64>,
+    #[command(flatten)]
+    apply: ApplyFlags,
   },
   /// 新建或更新服务。已存在的服务只修改给出的参数。
   Deploy {

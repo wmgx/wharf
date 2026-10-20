@@ -76,9 +76,18 @@ impl Ops {
         self.docker.down(&project, ctx).await?;
         Ok(Value::Null)
       }
-      AgentOp::Logs { project, tail } => {
+      AgentOp::Logs {
+        project,
+        tail,
+        follow,
+      } => {
         check_project(&project)?;
-        to_value(self.docker.logs(&project, tail, ctx).await?)
+        if follow {
+          self.docker.follow_logs(&project, tail, ctx).await;
+          to_value(String::new())
+        } else {
+          to_value(self.docker.logs(&project, tail, ctx).await?)
+        }
       }
       AgentOp::GatewayApply(apply) => {
         check_project(&apply.up.project)?;

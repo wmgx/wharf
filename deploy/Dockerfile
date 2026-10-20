@@ -1,6 +1,17 @@
 # 构建：docker build -f deploy/Dockerfile --target agent -t wharf-agent .
 #       docker build -f deploy/Dockerfile --target core  -t wharf-core .
 # 国内构建加 --build-arg CARGO_MIRROR=sparse+https://rsproxy.cn/index/
+#            --build-arg NPM_REGISTRY=https://registry.npmmirror.com
+
+# 页面：打包进 wharf-core 二进制。
+FROM node:22-bookworm-slim AS web
+ARG NPM_REGISTRY=
+WORKDIR /web
+COPY web/package.json web/package-lock.json ./
+RUN if [ -n "$NPM_REGISTRY" ]; then npm config set registry "$NPM_REGISTRY"; fi \
+ && npm ci --no-audit --no-fund
+COPY web/ ./
+RUN npm run build
 
 FROM rust:1.95-bookworm AS build
 ARG CARGO_MIRROR=
@@ -9,6 +20,7 @@ RUN if [ -n "$CARGO_MIRROR" ]; then \
     fi
 WORKDIR /src
 COPY . .
+COPY --from=web /web/dist /src/web/dist
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     cargo build --release --locked \

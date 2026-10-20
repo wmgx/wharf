@@ -55,6 +55,8 @@ struct Conn {
   tx: mpsc::UnboundedSender<CoreMsg>,
   pending: Arc<Mutex<HashMap<u64, Pending>>>,
   closed: CancellationToken,
+  /// 最近一次 ping 的往返延迟，毫秒。
+  rtt_ms: Arc<AtomicU64>,
 }
 
 #[derive(Default)]
@@ -80,6 +82,13 @@ pub fn offline(server: &str) -> ApiError {
 impl Hub {
   pub fn is_online(&self, server: &str) -> bool {
     lock(&self.conns).contains_key(server)
+  }
+
+  /// 控制面到 agent 的往返延迟。还没测到时是 `None`。
+  pub fn rtt_ms(&self, server: &str) -> Option<u32> {
+    let conns = lock(&self.conns);
+    let ms = conns.get(server)?.rtt_ms.load(Ordering::Relaxed);
+    (ms != u64::MAX).then_some(ms as u32)
   }
 
   /// 发一个请求并等待结果。
@@ -267,6 +276,7 @@ async fn handle_socket(
     tx,
     pending: Default::default(),
     closed: CancellationToken::new(),
+    rtt_ms: Arc::new(AtomicU64::new(u64::MAX)),
   };
   state.hub.register(&server, conn.clone());
   tracing::info!("服务器 {server} 上线（agent {version}）");
@@ -275,6 +285,7 @@ async fn handle_socket(
   let (mut sink, mut stream) = socket.split();
   let mut ping = tokio::time::interval(PING_EVERY);
   let mut last_recv = tokio::time::Instant::now();
+  let mut ping_sent: Option<tokio::time::Instant> = None;
   let result: anyhow::Result<()> = loop {
     tokio::select! {
       _ = conn.closed.cancelled() => break Ok(()),
@@ -292,6 +303,7 @@ async fn handle_socket(
         if let Err(e) = sink.send(Message::Ping(Default::default())).await {
           break Err(e.into());
         }
+        ping_sent = Some(tokio::time::Instant::now());
       }
       incoming = stream.next() => {
         let msg = match incoming {
@@ -303,6 +315,12 @@ async fn handle_socket(
         let text = match msg {
           Message::Text(text) => text,
           Message::Close(_) => break Ok(()),
+          Message::Pong(_) => {
+            if let Some(sent) = ping_sent.take() {
+              conn.rtt_ms.store(sent.elapsed().as_millis() as u64, Ordering::Relaxed);
+            }
+            continue;
+          }
           _ => continue,
         };
         match serde_json::from_str::<AgentMsg>(&text) {

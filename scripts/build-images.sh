@@ -7,6 +7,7 @@ TAG=${TAG:-dev}
 export DOCKER_BUILDKIT=1
 args=(-f deploy/Dockerfile)
 [ -n "${CARGO_MIRROR:-}" ] && args+=(--build-arg "CARGO_MIRROR=$CARGO_MIRROR")
+[ -n "${NPM_REGISTRY:-}" ] && args+=(--build-arg "NPM_REGISTRY=$NPM_REGISTRY")
 for target in agent core; do
   echo "== 构建 wharf-$target:$TAG"
   docker build "${args[@]}" --target "$target" -t "wharf-$target:$TAG" .

@@ -31,6 +31,9 @@ pub struct ServerView {
   /// 实际使用的内网地址：设置里的覆盖值，否则是 agent 检测到的组网地址。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub private_addr: Option<PrivateAddr>,
+  /// 控制面到 agent 的往返延迟（websocket ping），毫秒。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub rtt_ms: Option<u32>,
   pub version: u64,
 }
 
@@ -114,7 +117,20 @@ pub struct DeploymentView {
   /// 渲染后的 compose（密钥未替换）。
   pub compose: String,
   pub images: Vec<crate::agent::ImageInfo>,
+  /// 部署时的服务配置。早于记录这一项的部署没有。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub spec: Option<ServiceSpec>,
+  pub hash: String,
   pub created_at: DateTime<Utc>,
+}
+
+/// 回滚到某次部署时要提交的服务配置。image 来源会固定到当时的镜像 digest。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RollbackTarget {
+  pub service: String,
+  pub deployment_id: i64,
+  pub deployed_at: DateTime<Utc>,
+  pub spec: ServiceSpec,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
