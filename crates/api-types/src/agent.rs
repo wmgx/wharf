@@ -118,7 +118,48 @@ pub enum AgentOp {
   },
   /// 校验并应用网关配置，失败自动回滚。结果是 [ProjectUpResult]。
   GatewayApply(GatewayApply),
+  /// `docker compose stop`：停止容器但不删除。project 不存在时什么也不做。
+  ProjectStop { project: String },
+  /// `docker compose start`：启动已停止的容器。
+  ProjectStart { project: String },
+  /// 迁移的接收端：在内网地址上临时起一个 rsync 服务，写入 `/srv/<service>/`。
+  /// 就绪后推送一条进度 `ready <port>`，之后一直运行，直到请求被取消。
+  SyncServe(SyncServe),
+  /// 迁移的发送端：把本机 `/srv/<service>/` 推送到另一台机器的 [AgentOp::SyncServe]。
+  SyncPush(SyncPush),
 }
+
+/// 一次性口令。Debug 输出时隐藏，防止被打进日志。
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct OneTimeSecret(pub String);
+
+impl std::fmt::Debug for OneTimeSecret {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.write_str("***")
+  }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncServe {
+  pub service: String,
+  /// 监听的内网地址。
+  pub bind: String,
+  /// 只接受这个地址（发送端的内网地址）的连接。
+  pub allow: String,
+  pub password: OneTimeSecret,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncPush {
+  pub service: String,
+  pub host: String,
+  pub port: u16,
+  pub password: OneTimeSecret,
+}
+
+/// [AgentOp::SyncServe] 就绪时的进度行前缀。
+pub const SYNC_READY: &str = "ready ";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PullPolicy {

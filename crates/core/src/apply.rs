@@ -495,6 +495,12 @@ async fn run_step(
         )
         .await?;
     }
+    Step::VolumeSync { service, from, to } => {
+      crate::migrate::volume_sync(
+        state, &net, service, from, to, progress, cancel,
+      )
+      .await?;
+    }
     Step::ServiceUp { service } => {
       let row = world.services.get(service).ok_or_else(|| {
         ApiError::new(

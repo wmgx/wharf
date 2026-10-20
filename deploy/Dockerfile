@@ -35,6 +35,10 @@ FROM debian:bookworm-slim AS base
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 
 FROM base AS agent
+# rsync：迁移服务时在两台 agent 之间同步数据。
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends rsync \
+ && rm -rf /var/lib/apt/lists/*
 COPY --from=dockercli /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=dockercli /usr/local/libexec/docker/cli-plugins/docker-compose /usr/local/libexec/docker/cli-plugins/docker-compose
 COPY --from=build /out/wharf-agent /usr/local/bin/wharf-agent

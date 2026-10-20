@@ -1,4 +1,4 @@
-import { EllipsisIcon, HistoryIcon, PlusIcon, RefreshCwIcon, ScrollTextIcon, Trash2Icon } from "lucide-react";
+import { ArrowRightLeftIcon, EllipsisIcon, HistoryIcon, PlusIcon, RefreshCwIcon, ScrollTextIcon, Trash2Icon } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useActions } from "@/components/actions";
 import { Empty, PageHeader, ServerTag, StatusBadge, imageOf, liveTone } from "@/components/common";
@@ -111,6 +111,10 @@ function RowMenu({ svc }: { svc: ServiceView }) {
         <DropdownMenuItem onSelect={() => actions.rollback(svc.name)}>
           <HistoryIcon />
           回滚到上一个版本
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => actions.move(svc)}>
+          <ArrowRightLeftIcon />
+          迁移到其他服务器
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuItem variant="destructive" onSelect={() => actions.remove(svc.name)}>

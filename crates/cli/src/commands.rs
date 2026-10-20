@@ -746,6 +746,21 @@ async fn service(
       changes(c, vec![Change::UpsertService { name, spec }], apply, j)
         .await
     }
+    ServiceCmd::Move { name, to, apply } => {
+      let mut spec = c
+        .get::<ServiceView>(&format!("/api/services/{}", seg(&name)))
+        .await?
+        .spec;
+      if spec.server == to {
+        return Err(
+          ApiError::invalid(format!("服务 {name} 已经在 {to} 上"))
+            .into(),
+        );
+      }
+      spec.server = to;
+      changes(c, vec![Change::UpsertService { name, spec }], apply, j)
+        .await
+    }
     ServiceCmd::Rm { name, apply } => {
       changes(c, vec![Change::RemoveService { name }], apply, j).await
     }

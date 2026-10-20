@@ -287,6 +287,33 @@ impl Docker {
     Ok(())
   }
 
+  /// `stop` 或 `start`。project 没部署过时什么也不做。
+  pub async fn stop_start(
+    &self,
+    project: &str,
+    start: bool,
+    ctx: &Ctx,
+  ) -> Result<bool, ApiError> {
+    if !self.project_dir(project).join("compose.yaml").exists() {
+      return Ok(false);
+    }
+    let action = if start { "start" } else { "stop" };
+    ctx.say(if start {
+      "启动容器"
+    } else {
+      "停止容器"
+    });
+    self
+      .compose(project)
+      .arg(action)
+      .timeout(Duration::from_secs(180))
+      .stream(true)
+      .run(ctx)
+      .await?
+      .check(&format!("docker compose {action}"))?;
+    Ok(true)
+  }
+
   pub async fn logs(
     &self,
     project: &str,

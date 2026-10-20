@@ -211,6 +211,15 @@ pub enum ServiceCmd {
     #[command(flatten)]
     apply: ApplyFlags,
   },
+  /// 迁移到另一台服务器：同步 /srv/<服务>/ 的数据，在新服务器上启动，
+  /// 网关改指新地址后删除旧容器，域名不变。旧服务器上的数据目录保留。
+  Move {
+    name: String,
+    #[arg(long)]
+    to: String,
+    #[command(flatten)]
+    apply: ApplyFlags,
+  },
   /// 删除服务（数据目录保留）。
   Rm {
     name: String,

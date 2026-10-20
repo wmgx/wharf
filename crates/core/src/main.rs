@@ -12,6 +12,7 @@ mod auth;
 mod db;
 mod hub;
 mod logs_stream;
+mod migrate;
 mod planner;
 mod render;
 mod rollback;

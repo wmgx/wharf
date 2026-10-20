@@ -79,6 +79,12 @@ pub enum Step {
     server: String,
     dirs: Vec<String>,
   },
+  /// 迁移数据：先在服务运行时同步一遍，停掉旧服务器上的容器，再增量同步。
+  VolumeSync {
+    service: String,
+    from: String,
+    to: String,
+  },
   ServiceUp {
     service: String,
   },
@@ -104,16 +110,19 @@ pub enum Step {
 }
 
 impl Step {
-  /// 删除 DNS → 建目录 → 起服务 → 网关 → 写 DNS → 下线网关 → 下线服务。
+  /// 删除 DNS → 建目录 → 迁移数据 → 起服务 → 网关 → 写 DNS → 下线网关 → 下线服务。
+  ///
+  /// 迁移时旧服务器上的容器在"下线服务"这一步才删除，网关切到新地址之前旧容器一直在。
   fn order(&self) -> u8 {
     match self {
       Self::DnsDelete { .. } => 0,
       Self::EnsureDirs { .. } => 1,
-      Self::ServiceUp { .. } => 2,
-      Self::GatewaySync { .. } => 3,
-      Self::DnsUpsert { .. } => 4,
-      Self::GatewayDown { .. } => 5,
-      Self::ServiceDown { .. } => 6,
+      Self::VolumeSync { .. } => 2,
+      Self::ServiceUp { .. } => 3,
+      Self::GatewaySync { .. } => 4,
+      Self::DnsUpsert { .. } => 5,
+      Self::GatewayDown { .. } => 6,
+      Self::ServiceDown { .. } => 7,
     }
   }
 }
@@ -194,24 +203,14 @@ pub async fn make_plan(
   } else {
     desired.apply_changes(&req.changes)?;
   }
-  desired.allocate_ports()?;
-  desired.validate()?;
-  for (name, svc) in &desired.services {
-    if let Some(old) = current.services.get(name)
-      && old.spec.server != svc.spec.server
-    {
-      return Err(
-        ApiError::new(
-          wharf_api_types::ErrorCode::NotImplemented,
-          format!(
-            "服务 {name} 从 {} 换到 {}：迁移数据要用 wharf service move（P3）",
-            old.spec.server, svc.spec.server
-          ),
-        )
-        .with_hint("现在可以先删除服务再在新服务器上创建，数据目录需要自己搬"),
-      );
+  // 换了服务器的服务在新机器上重新分配宿主机端口，不和那里已有的服务抢。
+  for (name, svc) in desired.services.iter_mut() {
+    if moved_from(&current, name, &svc.spec.server).is_some() {
+      svc.host_ports.clear();
     }
   }
+  desired.allocate_ports()?;
+  desired.validate()?;
 
   let writes = desired.writes_from(&current);
   let mut b = Builder::default();
@@ -262,6 +261,19 @@ pub async fn make_plan(
     steps: b.steps,
     writes,
   })
+}
+
+/// 服务换了服务器时，返回原来的服务器。
+fn moved_from<'a>(
+  current: &'a World,
+  name: &str,
+  server: &str,
+) -> Option<&'a str> {
+  current
+    .services
+    .get(name)
+    .map(|s| s.spec.server.as_str())
+    .filter(|old| *old != server)
 }
 
 fn to_json<T: Serialize>(v: &T) -> Value {
@@ -435,10 +447,12 @@ fn service_items(
   for (name, svc) in &desired.services {
     let address = format!("{KIND_SERVICE}/{name}");
     let server = &svc.spec.server;
-    // 数据卷：新增的目录。
+    let moved = moved_from(current, name, server);
+    // 数据卷：新增的目录。迁移时新机器上要建全部目录。
     let old_dirs: BTreeSet<String> = current
       .services
       .get(name)
+      .filter(|_| moved.is_none())
       .map(|s| {
         crate::render::service_dirs(name, &s.spec)
           .into_iter()
@@ -468,6 +482,10 @@ fn service_items(
           dirs: new_dirs,
         },
       );
+    }
+
+    if let Some(from) = moved {
+      move_items(b, current, name, from, server, net);
     }
 
     let (_, hash) =
@@ -555,7 +573,37 @@ fn service_items(
     }
   }
   for (name, svc) in &current.services {
-    if desired.services.contains_key(name) {
+    if desired
+      .services
+      .get(name)
+      .is_some_and(|d| d.spec.server == svc.spec.server)
+    {
+      continue;
+    }
+    // 迁移走的服务：旧服务器上的容器在网关切换之后删除，数据目录保留。
+    if let Some(to) =
+      desired.services.get(name).map(|d| &d.spec.server)
+    {
+      let server = &svc.spec.server;
+      let id = b.item(
+        format!("{KIND_SERVICE}/{name}"),
+        Layer::Container,
+        Action::Delete,
+        Some(json!({ "server": server })),
+        None,
+        Risk::Disruptive,
+        format!(
+          "迁移到 {to} 后删除 {server} 上的旧容器（数据目录保留）"
+        ),
+      );
+      b.step(
+        vec![id],
+        format!("删除 {server} 上的旧 {name}"),
+        Step::ServiceDown {
+          server: server.clone(),
+          service: name.clone(),
+        },
+      );
       continue;
     }
     let server = &svc.spec.server;
@@ -583,6 +631,65 @@ fn service_items(
     );
   }
   Ok(())
+}
+
+/// 迁移数据的计划项和步骤，以及相关提醒。
+fn move_items(
+  b: &mut Builder,
+  current: &World,
+  name: &str,
+  from: &str,
+  to: &str,
+  net: &Net,
+) {
+  let old = &current.services[name];
+  let is_compose = matches!(
+    old.spec.source,
+    wharf_api_types::spec::Source::Compose { .. }
+  );
+  // 镜像来源、没有数据卷：没有数据要搬，新容器起来、网关切过去即可，不停服。
+  if !is_compose && old.spec.volumes.is_empty() {
+    return;
+  }
+  let id = b.item(
+    format!("{KIND_SERVICE}/{name}"),
+    Layer::Volume,
+    Action::Update,
+    Some(json!({ "server": from, "dir": format!("/srv/{name}/") })),
+    Some(json!({ "server": to, "dir": format!("/srv/{name}/") })),
+    Risk::Disruptive,
+    format!("迁移 /srv/{name}/ 从 {from} 到 {to}：先同步一遍，再停掉旧容器做增量同步，这段时间服务不可用"),
+  );
+  b.step(
+    vec![id],
+    format!("迁移 {name} 的数据 {from} → {to}"),
+    Step::VolumeSync {
+      service: name.to_string(),
+      from: from.to_string(),
+      to: to.to_string(),
+    },
+  );
+  if is_compose {
+    b.warnings.push(format!(
+      "服务 {name} 是 compose 来源：只迁移 /srv/{name}/ 下的数据，compose 里其他位置的挂载和命名卷不会迁移"
+    ));
+  }
+  for (server, role) in [(from, "源"), (to, "目标")] {
+    match net.private.get(server) {
+      None => b.warnings.push(format!(
+        "迁移 {name} 需要{role}服务器 {server} 的内网地址，执行时会失败：先 wharf server set {server} --private-ip <ip>"
+      )),
+      Some(addr) if !addr.network.encrypted() && role == "目标" => {
+        b.warnings.push(format!(
+          "迁移 {name} 的数据走内网直连 {from} → {to}，是明文"
+        ))
+      }
+      _ => {}
+    }
+  }
+  b.warnings.push(format!(
+    "迁移后 {from} 上的 /srv/{name}/ 会保留，确认新服务正常后手动删除"
+  ));
 }
 
 fn gateway_items(

@@ -1,4 +1,4 @@
-import { ArrowLeftIcon, ArrowUpRightIcon, EllipsisIcon, HistoryIcon, PencilIcon, PlusIcon, RefreshCwIcon, Trash2Icon, XIcon } from "lucide-react";
+import { ArrowRightLeftIcon, ArrowLeftIcon, ArrowUpRightIcon, EllipsisIcon, HistoryIcon, PencilIcon, PlusIcon, RefreshCwIcon, Trash2Icon, XIcon } from "lucide-react";
 import { useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { usePoll } from "@/api";
@@ -98,6 +98,10 @@ export function ServiceDetail() {
                 <DropdownMenuItem onSelect={() => actions.rollback(name)}>
                   <HistoryIcon />
                   回滚到上一个版本
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={() => actions.move(svc)}>
+                  <ArrowRightLeftIcon />
+                  迁移到其他服务器
                 </DropdownMenuItem>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem variant="destructive" onSelect={() => actions.remove(name)}>

@@ -18,6 +18,7 @@ mod exec;
 mod identity;
 mod ops;
 mod report;
+mod sync;
 
 #[derive(Parser)]
 #[command(name = "wharf-agent", version, about = "Wharf agent")]

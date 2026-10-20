@@ -95,7 +95,27 @@ impl Ops {
         let _guard = lock.lock().await;
         to_value(self.gateway_apply(&apply, ctx).await?)
       }
+      AgentOp::ProjectStop { project } => {
+        self.stop_start(&project, false, ctx).await
+      }
+      AgentOp::ProjectStart { project } => {
+        self.stop_start(&project, true, ctx).await
+      }
+      AgentOp::SyncServe(s) => crate::sync::serve(&s, ctx).await,
+      AgentOp::SyncPush(p) => crate::sync::push(&p, ctx).await,
     }
+  }
+
+  async fn stop_start(
+    &self,
+    project: &str,
+    start: bool,
+    ctx: &Ctx,
+  ) -> Result<Value, ApiError> {
+    check_project(project)?;
+    let lock = self.lock_for(project);
+    let _guard = lock.lock().await;
+    to_value(self.docker.stop_start(project, start, ctx).await?)
   }
 
   async fn pull_all(

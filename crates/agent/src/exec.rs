@@ -77,6 +77,7 @@ pub struct Cmd {
   program: String,
   args: Vec<String>,
   cwd: Option<std::path::PathBuf>,
+  env: Vec<(String, String)>,
   timeout: Duration,
   /// 把 stdout 也转发为进度（默认只转发 stderr）。
   stream_stdout: bool,
@@ -89,6 +90,7 @@ impl Cmd {
       program: program.to_string(),
       args: Vec::new(),
       cwd: None,
+      env: Vec::new(),
       timeout: Duration::from_secs(60),
       stream_stdout: false,
       stream: false,
@@ -111,6 +113,12 @@ impl Cmd {
 
   pub fn cwd(mut self, dir: &Path) -> Self {
     self.cwd = Some(dir.to_path_buf());
+    self
+  }
+
+  /// 只设置给子进程，不会出现在命令行里（`ps` 看不到），适合放口令。
+  pub fn env(mut self, key: &str, value: &str) -> Self {
+    self.env.push((key.to_string(), value.to_string()));
     self
   }
 
@@ -148,6 +156,7 @@ impl Cmd {
     if let Some(cwd) = &self.cwd {
       command.current_dir(cwd);
     }
+    command.envs(self.env.iter().map(|(k, v)| (k, v)));
     let mut child = command.spawn().map_err(|e| {
       ApiError::new(
         ErrorCode::AgentFailed,

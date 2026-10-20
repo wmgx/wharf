@@ -1,4 +1,5 @@
 import {
+  ArrowRightLeftIcon,
   AnchorIcon,
   BoxesIcon,
   BoxIcon,
@@ -132,6 +133,10 @@ export function CommandMenu({ onLogout }: { onLogout: () => void }) {
                   <CommandItem key={`rollback-${s.name}`} value={`回滚 rollback ${s.name}`} onSelect={() => run(() => actions.rollback(s.name))}>
                     <HistoryIcon />
                     回滚 {s.name} 到上一个版本
+                  </CommandItem>,
+                  <CommandItem key={`move-${s.name}`} value={`迁移 move ${s.name}`} onSelect={() => run(() => actions.move(s))}>
+                    <ArrowRightLeftIcon />
+                    迁移 {s.name} 到其他服务器
                   </CommandItem>,
                   <CommandItem key={`rm-${s.name}`} value={`删除 remove ${s.name}`} onSelect={() => run(() => actions.remove(s.name))}>
                     <Trash2Icon />

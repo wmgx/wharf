@@ -12,10 +12,14 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { useStatus } from "@/status";
 import type { Change, RollbackTarget, Run, ServiceView } from "@/types";
+import { Picker, serverOptions } from "./fields";
 import { PlanFlow } from "./PlanFlow";
 
 interface FlowRequest {
@@ -33,6 +37,8 @@ interface Actions {
   rollback: (name: string, to?: number) => void;
   /** 先要求输入名称确认，再生成删除计划（连同它的域名）。 */
   remove: (name: string) => void;
+  /** 选目标服务器，再生成迁移计划。 */
+  move: (svc: ServiceView) => void;
 }
 
 const Ctx = createContext<Actions | null>(null);
@@ -50,6 +56,7 @@ export function ActionsProvider({ children }: { children: ReactNode }) {
   const nav = useNavigate();
   const [open, setOpen] = useState<Open | null>(null);
   const [removing, setRemoving] = useState<string | null>(null);
+  const [moving, setMoving] = useState<ServiceView | null>(null);
   const seq = useRef(0);
   // 正在执行的那次：关掉面板后继续在后台盯着，结束时弹提示。
   // 用 state 而不是 ref：apply 的返回可能晚于关面板，拿到 run_id 时也要能开始盯。
@@ -113,6 +120,16 @@ export function ActionsProvider({ children }: { children: ReactNode }) {
       }
     },
     remove: (name) => setRemoving(name),
+    move: (svc) => setMoving(svc),
+  };
+
+  const confirmMove = (svc: ServiceView, to: string) => {
+    setMoving(null);
+    actions.plan({
+      title: `迁移 ${svc.name} 到 ${to}`,
+      then: `/services/${svc.name}`,
+      changes: [{ op: "upsert_service", name: svc.name, spec: { ...svc.spec, server: to } }],
+    });
   };
 
   const confirmRemove = (name: string) => {
@@ -148,6 +165,7 @@ export function ActionsProvider({ children }: { children: ReactNode }) {
         </SheetContent>
       </Sheet>
       <RemoveDialog name={removing} onCancel={() => setRemoving(null)} onConfirm={confirmRemove} />
+      <MoveDialog svc={moving} onCancel={() => setMoving(null)} onConfirm={confirmMove} />
     </Ctx.Provider>
   );
 }
@@ -179,5 +197,41 @@ function RemoveDialog({ name, onCancel, onConfirm }: { name: string | null; onCa
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>
+  );
+}
+
+/** 迁移：选目标服务器。数据同步、切网关、删旧容器都在计划里列出来。 */
+function MoveDialog({ svc, onCancel, onConfirm }: { svc: ServiceView | null; onCancel: () => void; onConfirm: (svc: ServiceView, to: string) => void }) {
+  const { status } = useStatus();
+  const [to, setTo] = useState("");
+  useEffect(() => setTo(""), [svc]);
+  const options = serverOptions((status?.servers ?? []).filter((s) => s.joined && s.name !== svc?.spec.server));
+  return (
+    <Dialog open={!!svc} onOpenChange={(o) => !o && onCancel()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>迁移 {svc?.name}</DialogTitle>
+          <DialogDescription>
+            从 {svc?.spec.server} 搬到另一台服务器，域名不变。有数据卷时会先同步数据，再短暂停服做增量同步；旧服务器上的数据目录保留。
+          </DialogDescription>
+        </DialogHeader>
+        <div className="grid gap-2">
+          <Label htmlFor="move-to">目标服务器</Label>
+          {options.length ? (
+            <Picker id="move-to" value={to} options={options} onChange={setTo} placeholder="选择服务器…" />
+          ) : (
+            <p className="text-sm text-muted-foreground">没有其他已加入的服务器。</p>
+          )}
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={onCancel}>
+            取消
+          </Button>
+          <Button disabled={!to} onClick={() => svc && onConfirm(svc, to)}>
+            生成迁移计划
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
