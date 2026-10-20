@@ -42,6 +42,8 @@ interface Actions {
   move: (svc: ServiceView) => void;
   /** 设置登录保护账号。已有域名开了登录保护时，保存后生成更新网关的计划。 */
   basicAuth: () => void;
+  /** 打开一次已经开始的执行（备份、恢复），结束时提示。 */
+  watch: (runId: string, title: string) => void;
 }
 
 const Ctx = createContext<Actions | null>(null);
@@ -126,6 +128,10 @@ export function ActionsProvider({ children }: { children: ReactNode }) {
     remove: (name) => setRemoving(name),
     move: (svc) => setMoving(svc),
     basicAuth: () => setSettingAuth(true),
+    watch: (runId, title) => {
+      setOpen({ key: ++seq.current, title, runId });
+      setRunning({ runId, title });
+    },
   };
 
   const authSaved = () => {

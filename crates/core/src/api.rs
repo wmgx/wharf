@@ -577,9 +577,11 @@ async fn gateway_config(
   }
   let net = snap.net(&snap.world);
   let r = snapshot::gateway_render(&snap.world, &net, &name)?;
+  let kind = snap.world.gateways[&name].spec.kind;
   Ok(Json(json!({
     "gateway": name,
-    "caddyfile": r.caddyfile,
+    "kind": kind.as_str(),
+    "config": snapshot::redacted_config(&r.config, &net),
     "compose": r.compose,
   })))
 }

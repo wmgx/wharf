@@ -115,6 +115,17 @@ CREATE TABLE cleanups (
   PRIMARY KEY (service, server)
 );
 "#,
+  // cloudflare_tunnel 网关创建的隧道，和最近一次写入的入口规则哈希。
+  r#"
+CREATE TABLE tunnels (
+  gateway TEXT PRIMARY KEY,
+  account TEXT NOT NULL,
+  scope TEXT NOT NULL,
+  tunnel_id TEXT NOT NULL,
+  config_hash TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+"#,
 ];
 
 #[derive(Clone)]
@@ -489,6 +500,39 @@ pub fn token_count(conn: &Connection) -> Result<i64, ApiError> {
   conn
     .query_row("SELECT COUNT(*) FROM api_tokens", [], |r| r.get(0))
     .map_err(sql_err)
+}
+
+#[derive(Debug, Clone)]
+pub struct TunnelRow {
+  pub account: String,
+  pub scope: String,
+  pub tunnel_id: String,
+  /// 最近一次写到厂商那边的入口规则的哈希，空表示还没写过。
+  pub config_hash: String,
+}
+
+pub fn tunnels(
+  c: &Connection,
+) -> Result<std::collections::BTreeMap<String, TunnelRow>, ApiError> {
+  let mut stmt = c
+    .prepare(
+      "SELECT gateway, account, scope, tunnel_id, config_hash FROM tunnels",
+    )
+    .map_err(sql_err)?;
+  let rows = stmt
+    .query_map([], |r| {
+      Ok((
+        r.get(0)?,
+        TunnelRow {
+          account: r.get(1)?,
+          scope: r.get(2)?,
+          tunnel_id: r.get(3)?,
+          config_hash: r.get(4)?,
+        },
+      ))
+    })
+    .map_err(sql_err)?;
+  rows.collect::<Result<_, _>>().map_err(sql_err)
 }
 
 /// 每个服务最近一次部署所在的服务器。

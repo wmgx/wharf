@@ -339,6 +339,190 @@ impl CloudflareClient {
     self.request(Method::DELETE, &path, None).await?;
     Ok(())
   }
+
+  async fn list_pages(
+    &self,
+    path: &str,
+    what: &str,
+  ) -> Result<Vec<Value>> {
+    let sep = if path.contains('?') { '&' } else { '?' };
+    let mut all = Vec::new();
+    for page in 1..=200 {
+      let data = self
+        .request(
+          Method::GET,
+          &format!("{path}{sep}per_page=50&page={page}"),
+          None,
+        )
+        .await?;
+      let items = data["result"].as_array().ok_or_else(|| {
+        malformed(&format!("{what} result is not an array"))
+      })?;
+      all.extend(items.iter().cloned());
+      if items.len() < 50
+        || data["result_info"]["total_pages"]
+          .as_u64()
+          .is_some_and(|n| page >= n)
+      {
+        return Ok(all);
+      }
+    }
+    Err(
+      ProviderError::new(
+        code::PROVIDER_RESPONSE,
+        "Pagination limit exceeded",
+      )
+      .with_detail(format!("more than 200 pages of {what}")),
+    )
+  }
+
+  /// token 能访问的账户 `(id, name)`。token 没有账户读取权限时 `/accounts`
+  /// 返回空，所以再从可见 zone 的所属账户推出来。
+  pub async fn list_accounts(&self) -> Result<Vec<(String, String)>> {
+    let listed = self.list_pages("/accounts", "accounts").await;
+    let zones = self.list_pages("/zones", "zones").await;
+    let mut accounts: Vec<(String, String)> = Vec::new();
+    let mut add = |a: &Value| {
+      let Some(id) = a["id"].as_str() else { return };
+      if !accounts.iter().any(|(existing, _)| existing == id) {
+        accounts.push((
+          id.to_string(),
+          a["name"].as_str().unwrap_or_default().to_string(),
+        ));
+      }
+    };
+    if let Ok(listed) = &listed {
+      listed.iter().for_each(&mut add);
+    }
+    if let Ok(zones) = &zones {
+      zones.iter().for_each(|z| add(&z["account"]));
+    }
+    match (accounts.is_empty(), listed, zones) {
+      (false, _, _) => Ok(accounts),
+      (true, Err(e), _) | (true, _, Err(e)) => Err(e),
+      (true, Ok(_), Ok(_)) => Ok(accounts),
+    }
+  }
+
+  /// 账户里没删除的隧道（原始对象）。
+  pub async fn list_tunnels(
+    &self,
+    account: &str,
+  ) -> Result<Vec<Value>> {
+    self
+      .list_pages(
+        &format!(
+          "/accounts/{}/cfd_tunnel?is_deleted=false",
+          segment(account)?
+        ),
+        "tunnels",
+      )
+      .await
+  }
+
+  pub async fn put_tunnel_config(
+    &self,
+    account: &str,
+    tunnel: &str,
+    config: &Value,
+  ) -> Result<()> {
+    let path = format!(
+      "/accounts/{}/cfd_tunnel/{}/configurations",
+      segment(account)?,
+      segment(tunnel)?
+    );
+    self
+      .request(
+        Method::PUT,
+        &path,
+        Some(&serde_json::json!({ "config": config })),
+      )
+      .await?;
+    Ok(())
+  }
+
+  /// 创建由 Cloudflare 远程管理配置的隧道，返回 id。
+  pub async fn create_tunnel(
+    &self,
+    account: &str,
+    name: &str,
+  ) -> Result<String> {
+    let path = format!("/accounts/{}/cfd_tunnel", segment(account)?);
+    let data = self
+      .request(
+        Method::POST,
+        &path,
+        Some(&serde_json::json!({
+          "name": name,
+          "config_src": "cloudflare",
+        })),
+      )
+      .await?;
+    data["result"]["id"]
+      .as_str()
+      .map(str::to_string)
+      .ok_or_else(|| malformed("created tunnel has no id"))
+  }
+
+  /// 连接器的 token。不要打印返回值。
+  pub async fn tunnel_token(
+    &self,
+    account: &str,
+    tunnel: &str,
+  ) -> Result<String> {
+    let path = format!(
+      "/accounts/{}/cfd_tunnel/{}/token",
+      segment(account)?,
+      segment(tunnel)?
+    );
+    let data = self.request(Method::GET, &path, None).await?;
+    data["result"]
+      .as_str()
+      .filter(|t| !t.is_empty())
+      .map(str::to_string)
+      .ok_or_else(|| malformed("tunnel token is not a string"))
+  }
+
+  /// 隧道状态：healthy / degraded / down / inactive。
+  pub async fn tunnel_status(
+    &self,
+    account: &str,
+    tunnel: &str,
+  ) -> Result<String> {
+    let path = format!(
+      "/accounts/{}/cfd_tunnel/{}",
+      segment(account)?,
+      segment(tunnel)?
+    );
+    let data = self.request(Method::GET, &path, None).await?;
+    Ok(
+      data["result"]["status"]
+        .as_str()
+        .unwrap_or("inactive")
+        .to_string(),
+    )
+  }
+
+  /// 先清掉已经不在的连接器留下的连接，再删除隧道。隧道不存在也算成功。
+  pub async fn delete_tunnel(
+    &self,
+    account: &str,
+    tunnel: &str,
+  ) -> Result<()> {
+    let base = format!(
+      "/accounts/{}/cfd_tunnel/{}",
+      segment(account)?,
+      segment(tunnel)?
+    );
+    for path in [format!("{base}/connections"), base] {
+      match self.request(Method::DELETE, &path, None).await {
+        Ok(_) => {}
+        Err(e) if Self::is_not_found(&e) => {}
+        Err(e) => return Err(e),
+      }
+    }
+    Ok(())
+  }
 }
 
 #[cfg(test)]

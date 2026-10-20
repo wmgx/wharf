@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use wharf_api_types::{
   ApiError,
   spec::{
-    Change, Fleet, GatewayKind, GatewaySpec, RouteSpec,
+    Change, Fleet, GatewayKind, GatewaySpec, GatewayTls, RouteSpec,
     ServerSettings, ServiceSpec, Source,
   },
   validate_name,
@@ -338,13 +338,25 @@ impl World {
         return Err(server_not_found(&gateway.spec.server));
       }
       if gateway.spec.kind == GatewayKind::CloudflareTunnel {
-        return Err(
-          ApiError::new(
-            wharf_api_types::ErrorCode::NotImplemented,
-            format!("网关 {name}：cloudflare_tunnel 类型在 P3 实现"),
-          )
-          .with_hint("P1 先用 caddy 网关"),
-        );
+        let s = &gateway.spec;
+        if s.account.is_none() {
+          return Err(
+            ApiError::invalid(format!(
+              "网关 {name} 是 cloudflare_tunnel，要指定在哪个厂商账号下建隧道"
+            ))
+            .suggest("wharf account list"),
+          );
+        }
+        if s.http_port.is_some()
+          || s.https_port.is_some()
+          || s.email.is_some()
+          || s.tls != GatewayTls::Auto
+        {
+          return Err(ApiError::invalid(format!(
+            "网关 {name}：http_port、https_port、email、tls 只适用于 caddy 网关"
+          )));
+        }
+        continue;
       }
       let http = gateway.spec.http_port.unwrap_or(80);
       let https = gateway.spec.https_port.unwrap_or(443);
@@ -774,6 +786,7 @@ mod tests {
         tls: Default::default(),
         email: None,
         image: None,
+        account: None,
       },
     }])
     .unwrap();

@@ -185,7 +185,7 @@ pub struct BackupSpec {
 #[serde(rename_all = "snake_case")]
 pub enum GatewayKind {
   Caddy,
-  /// P3。
+  /// Wharf 在厂商账号下创建隧道，服务器上跑 cloudflared，不需要公网 IP 和开放端口。
   CloudflareTunnel,
 }
 
@@ -224,6 +224,9 @@ pub struct GatewaySpec {
   /// caddy：证书方式，默认 `auto`（公网签证书）。
   #[serde(default, skip_serializing_if = "GatewayTls::is_auto")]
   pub tls: GatewayTls,
+  /// cloudflare_tunnel：在哪个厂商账号下建隧道（`wharf account list`）。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub account: Option<String>,
 }
 
 /// 网关的证书方式。

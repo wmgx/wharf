@@ -1,6 +1,6 @@
 //! Provider abstraction. A provider kind (eg. `cloudflare`) is registered
-//! once in [REGISTRY]. P1 only has [DnsProvider]; ingress (tunnels) comes
-//! in P3.
+//! once in [REGISTRY]: [DnsProvider] for records, [TunnelProvider] for
+//! tunnel gateways.
 //!
 //! Adding a vendor = one new module + one line in [REGISTRY].
 
@@ -144,6 +144,53 @@ pub trait DnsProvider: Send + Sync {
   }
 }
 
+// TUNNEL
+
+/// A tunnel at the provider: container (eg. account id) and object id.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TunnelRef {
+  pub scope: String,
+  pub id: String,
+}
+
+/// Tunnels for `cloudflare_tunnel`-like gateways. Wharf creates the
+/// tunnel and owns it entirely: the whole ingress configuration is
+/// written by Wharf, so there is nothing to merge.
+pub trait TunnelProvider: Send + Sync {
+  /// A tunnel Wharf created earlier, by name (so a lost local record
+  /// never leads to a second tunnel).
+  fn find<'a>(
+    &'a self,
+    name: &'a str,
+  ) -> BoxFut<'a, Option<TunnelRef>>;
+
+  fn create<'a>(&'a self, name: &'a str) -> BoxFut<'a, TunnelRef>;
+
+  /// Replace the ingress with `rules` (hostname, origin url), followed
+  /// by a catch-all 404.
+  fn put_rules<'a>(
+    &'a self,
+    tunnel: &'a TunnelRef,
+    rules: &'a [(String, String)],
+  ) -> BoxFut<'a, ()>;
+
+  /// Connector credential. Never log it.
+  fn token<'a>(&'a self, tunnel: &'a TunnelRef)
+  -> BoxFut<'a, String>;
+
+  /// eg. `healthy`, `down`, `inactive`.
+  fn status<'a>(
+    &'a self,
+    tunnel: &'a TunnelRef,
+  ) -> BoxFut<'a, String>;
+
+  /// No-op if already gone.
+  fn delete<'a>(&'a self, tunnel: &'a TunnelRef) -> BoxFut<'a, ()>;
+
+  /// Where hostnames of this tunnel should point.
+  fn dns_target(&self, tunnel: &TunnelRef) -> DnsRecordSpec;
+}
+
 // REGISTRY
 
 /// Credentials of one account. No Debug output of the token.
@@ -174,6 +221,7 @@ pub struct Discovery {
 #[derive(Default)]
 pub struct ProviderSet {
   pub dns: Option<Box<dyn DnsProvider>>,
+  pub tunnel: Option<Box<dyn TunnelProvider>>,
 }
 
 pub struct ProviderFactory {

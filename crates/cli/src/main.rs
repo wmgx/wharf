@@ -251,8 +251,12 @@ pub enum GatewayCmd {
     name: String,
     #[arg(long)]
     server: String,
-    #[arg(long, default_value = "caddy", value_parser = ["caddy"])]
+    /// caddy：服务器要有公网 IP 和 80/443；cloudflare_tunnel：走 Cloudflare 隧道，不用开端口。
+    #[arg(long, default_value = "caddy", value_parser = ["caddy", "cloudflare_tunnel"])]
     kind: String,
+    /// cloudflare_tunnel：在哪个厂商账号下建隧道，只有一个账号时可以不填。
+    #[arg(long)]
+    account: Option<String>,
     /// 设为默认入口。
     #[arg(long)]
     default: bool,
@@ -262,7 +266,7 @@ pub enum GatewayCmd {
     https_port: Option<u16>,
     #[arg(long)]
     email: Option<String>,
-    /// caddy 镜像，默认 caddy:2。
+    /// 镜像：caddy 默认 caddy:2，cloudflare_tunnel 默认 cloudflare/cloudflared。
     #[arg(long)]
     image: Option<String>,
     /// 证书方式：auto（公网签证书）、internal（自签）、off（只走 HTTP，内网用）。

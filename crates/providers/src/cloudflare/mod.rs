@@ -1,4 +1,4 @@
-//! Cloudflare provider: DNS records. Tunnels come in P3.
+//! Cloudflare provider: DNS records and tunnels.
 
 use std::sync::Arc;
 
@@ -14,6 +14,7 @@ use crate::{
 use client::{CloudflareClient, Zone};
 
 mod client;
+mod tunnel;
 
 pub const FACTORY: ProviderFactory = ProviderFactory {
   kind: "cloudflare",
@@ -52,9 +53,10 @@ fn build(creds: Credentials) -> Result<ProviderSet, ProviderError> {
   let client = Arc::new(CloudflareClient::new(&creds.token)?);
   Ok(ProviderSet {
     dns: Some(Box::new(CloudflareDns {
-      client,
+      client: client.clone(),
       zones: creds.zones,
     })),
+    tunnel: Some(Box::new(tunnel::CloudflareTunnel { client })),
   })
 }
 

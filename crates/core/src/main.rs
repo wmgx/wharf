@@ -20,6 +20,7 @@ mod render;
 mod rollback;
 mod snapshot;
 mod state;
+mod tunnel;
 mod views;
 mod web;
 mod world;

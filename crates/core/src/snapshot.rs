@@ -5,6 +5,7 @@ use std::{collections::BTreeMap, time::Duration};
 use wharf_api_types::{
   ApiError, ErrorCode,
   agent::{ProjectState, PullPolicy},
+  spec::GatewayKind,
 };
 use wharf_providers::{
   Credentials, DnsProvider, ProviderError, error::code,
@@ -27,6 +28,8 @@ pub struct Snapshot {
   pub secrets: BTreeMap<String, String>,
   /// 每个服务最近一次成功部署在哪台服务器上。和配置里的服务器不同，说明迁移还没完成。
   pub deployed: BTreeMap<String, String>,
+  /// cloudflare_tunnel 网关已经创建的隧道。
+  pub tunnels: BTreeMap<String, db::TunnelRow>,
 }
 
 pub async fn load(db: &Db) -> Result<Snapshot, ApiError> {
@@ -38,6 +41,7 @@ pub async fn load(db: &Db) -> Result<Snapshot, ApiError> {
       owned: db::owned_records(c)?,
       secrets: db::secrets(c)?,
       deployed: db::deployed_servers(c)?,
+      tunnels: db::tunnels(c)?,
     })
   })
   .await
@@ -143,11 +147,32 @@ pub fn service_template(
 
 /// 网关的 compose、Caddyfile，以及它承载的站点。
 pub struct GatewayRender {
+  /// cloudflare_tunnel 的 compose 里 token 是占位，执行时才替换。
   pub compose: String,
   pub compose_hash: String,
-  pub caddyfile: String,
-  pub caddyfile_hash: String,
+  /// caddy：Caddyfile；cloudflare_tunnel：入口规则（JSON）。
+  pub config: String,
+  pub config_hash: String,
   pub sites: Vec<render::Site>,
+}
+
+impl GatewayRender {
+  /// 隧道的入口规则：`(hostname, http://上游)`。
+  pub fn tunnel_rules(&self) -> Vec<(String, String)> {
+    self
+      .sites
+      .iter()
+      .map(|s| (s.hostname.clone(), format!("http://{}", s.upstream)))
+      .collect()
+  }
+}
+
+/// 给人看的网关配置：不带出登录保护的密码哈希。
+pub fn redacted_config(config: &str, net: &Net) -> String {
+  match &net.basic_auth {
+    Some(a) => config.replace(&a.hash, "<bcrypt>"),
+    None => config.to_string(),
+  }
 }
 
 pub fn gateway_render(
@@ -166,6 +191,12 @@ pub fn gateway_render(
     let port = world.route_port(&route.spec).ok_or_else(|| {
       ApiError::invalid(format!("路由 {host} 没有可用的端口"))
     })?;
+    let tunnel = gateway.spec.kind == GatewayKind::CloudflareTunnel;
+    if route.spec.auth && tunnel {
+      return Err(ApiError::invalid(format!(
+        "路由 {host}：cloudflare_tunnel 网关还不支持登录保护，换 caddy 网关或去掉 --auth"
+      )));
+    }
     if route.spec.auth && net.basic_auth.is_none() {
       return Err(
         ApiError::invalid(format!(
@@ -192,18 +223,38 @@ pub fn gateway_render(
       )?,
     });
   }
-  let compose = render::gateway_compose(name, &gateway.spec);
-  let caddyfile = render::caddyfile(
-    name,
-    &gateway.spec,
-    &sites,
-    net.basic_auth.as_ref(),
-  );
+  sites.sort_by(|a, b| a.hostname.cmp(&b.hostname));
+  let (compose, config) = match gateway.spec.kind {
+    GatewayKind::Caddy => (
+      render::gateway_compose(name, &gateway.spec),
+      render::caddyfile(
+        name,
+        &gateway.spec,
+        &sites,
+        net.basic_auth.as_ref(),
+      ),
+    ),
+    GatewayKind::CloudflareTunnel => {
+      let rules: Vec<serde_json::Value> = sites
+        .iter()
+        .map(|s| {
+          serde_json::json!({
+            "hostname": s.hostname,
+            "service": format!("http://{}", s.upstream),
+          })
+        })
+        .collect();
+      (
+        render::tunnel_compose(name, &gateway.spec),
+        serde_json::to_string_pretty(&rules).unwrap_or_default(),
+      )
+    }
+  };
   Ok(GatewayRender {
     compose_hash: render::hash(&compose),
-    caddyfile_hash: render::hash(&caddyfile),
+    config_hash: render::hash(&config),
     compose,
-    caddyfile,
+    config,
     sites,
   })
 }
@@ -267,6 +318,25 @@ pub fn dns_provider(
   .dns
   .ok_or_else(|| {
     ApiError::internal(format!("账号 {} 不支持 DNS", account.name))
+  })
+}
+
+pub fn tunnel_provider(
+  account: &AccountRow,
+) -> Result<Box<dyn wharf_providers::TunnelProvider>, ApiError> {
+  let factory =
+    wharf_providers::factory(&account.kind).ok_or_else(|| {
+      ApiError::internal(format!("不支持的厂商类型 {}", account.kind))
+    })?;
+  (factory.build)(Credentials {
+    name: account.name.clone(),
+    token: account.token.clone(),
+    zones: account.zones.clone(),
+  })
+  .map_err(provider_error)?
+  .tunnel
+  .ok_or_else(|| {
+    ApiError::invalid(format!("账号 {} 不支持隧道", account.name))
   })
 }
 

@@ -4,7 +4,7 @@ use std::{collections::BTreeMap, time::Duration};
 
 use wharf_api_types::{
   agent::ProjectState,
-  spec::{Fleet, GatewayTls},
+  spec::{Fleet, GatewayKind, GatewayTls},
   view::{
     GatewayView, LiveState, RouteView, ServerView, ServiceView,
     Status,
@@ -196,9 +196,14 @@ pub fn gateway_view(
       live.get(&row.spec.server),
     ) {
       l.in_sync = states.get(&gateway_project(name)).map(|s| {
+        let applied = match row.spec.kind {
+          GatewayKind::Caddy => s.config_hash.as_deref(),
+          GatewayKind::CloudflareTunnel => {
+            snap.tunnels.get(name).map(|t| t.config_hash.as_str())
+          }
+        };
         s.hash.as_deref() == Some(r.compose_hash.as_str())
-          && s.config_hash.as_deref()
-            == Some(r.caddyfile_hash.as_str())
+          && applied == Some(r.config_hash.as_str())
           && s.all_running()
       });
     }

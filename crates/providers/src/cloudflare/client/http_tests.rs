@@ -238,3 +238,68 @@ async fn discover_lists_zones() {
   assert_eq!(found.zones, vec!["example.com"]);
   assert!(found.warnings.is_empty());
 }
+
+#[tokio::test]
+async fn tunnel_find_or_create_writes_whole_config_and_fetches_token() {
+  use crate::TunnelProvider;
+  let seen: Arc<Mutex<Vec<(String, String, Value)>>> = Default::default();
+  let log = seen.clone();
+  let fixture = Fixture::start(move |request| {
+    let path = request.path.split('?').next().unwrap().to_string();
+    log.lock().unwrap().push((
+      request.method.clone(),
+      path.clone(),
+      request.body.clone(),
+    ));
+    match (request.method.as_str(), path.as_str()) {
+      // token 没有账户读取权限：/accounts 为空，从 zone 推出账户。
+      ("GET", "/accounts") => Response::ok(json!([])),
+      ("GET", "/zones") => Response::ok(json!([
+        { "id": "z1", "name": "example.com", "account": { "id": "acc1", "name": "me" } }
+      ])),
+      ("GET", "/accounts/acc1/cfd_tunnel") => Response::ok(json!([
+        { "id": "other", "name": "someone-else" }
+      ])),
+      ("POST", "/accounts/acc1/cfd_tunnel") => {
+        Response::ok(json!({ "id": "tun1" }))
+      }
+      ("PUT", "/accounts/acc1/cfd_tunnel/tun1/configurations") => {
+        Response::ok(json!({}))
+      }
+      ("GET", "/accounts/acc1/cfd_tunnel/tun1/token") => {
+        Response::ok(json!("connector-token"))
+      }
+      other => panic!("unexpected request {other:?}"),
+    }
+  })
+  .await;
+  let tunnels = super::super::tunnel::CloudflareTunnel {
+    client: Arc::new(fixture.client(Duration::from_secs(2))),
+  };
+  assert_eq!(tunnels.find("wharf-edge").await.unwrap(), None);
+  let t = tunnels.create("wharf-edge").await.unwrap();
+  assert_eq!((t.scope.as_str(), t.id.as_str()), ("acc1", "tun1"));
+  let rules =
+    vec![("blog.example.com".to_string(), "http://127.0.0.1:20000".to_string())];
+  tunnels.put_rules(&t, &rules).await.unwrap();
+  assert_eq!(tunnels.token(&t).await.unwrap(), "connector-token");
+  assert_eq!(tunnels.dns_target(&t).content, "tun1.cfargotunnel.com");
+
+  let seen = seen.lock().unwrap();
+  let created = seen
+    .iter()
+    .find(|(m, p, _)| m == "POST" && p == "/accounts/acc1/cfd_tunnel")
+    .unwrap();
+  assert_eq!(
+    created.2,
+    json!({ "name": "wharf-edge", "config_src": "cloudflare" })
+  );
+  let put = seen.iter().find(|(m, _, _)| m == "PUT").unwrap();
+  assert_eq!(
+    put.2,
+    json!({ "config": { "ingress": [
+      { "hostname": "blog.example.com", "service": "http://127.0.0.1:20000" },
+      { "service": "http_status:404" }
+    ]}})
+  );
+}

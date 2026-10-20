@@ -24,7 +24,7 @@ use wharf_api_types::{
     ApplyRequest, ApplyResponse, Plan, PlanStatus, Run, RunStatus,
     RunStep, StepStatus,
   },
-  spec::ServiceSpec,
+  spec::{GatewayKind, ServiceSpec},
   view::TokenScope,
 };
 use wharf_providers::{Owner, RemoteRecord};
@@ -654,6 +654,12 @@ async fn run_step(
           format!("网关 {gateway} 已不存在"),
         )
       })?;
+      if gw.spec.kind == GatewayKind::CloudflareTunnel {
+        return crate::tunnel::sync(
+          state, &snap, gateway, progress, cancel,
+        )
+        .await;
+      }
       let server = &gw.spec.server;
       let r = snapshot::gateway_render(world, &net, gateway)?;
       let result: ProjectUpResult = state
@@ -667,8 +673,8 @@ async fn run_step(
               hash: r.compose_hash,
               pull: snapshot::pull_policy(&world.servers[server]),
             },
-            caddyfile: r.caddyfile,
-            caddyfile_hash: r.caddyfile_hash,
+            caddyfile: r.config,
+            caddyfile_hash: r.config_hash,
             image: render::gateway_image(&gw.spec),
           }),
           GATEWAY_TIMEOUT,
@@ -691,10 +697,15 @@ async fn run_step(
             project: gateway_project(gateway),
           },
           SHORT_TIMEOUT,
-          Some(progress),
+          Some(progress.clone()),
           cancel,
         )
         .await?;
+      // cloudflare_tunnel 网关：连接器停了之后删除它的隧道。
+      crate::tunnel::destroy(
+        state, &snap, gateway, &progress, cancel,
+      )
+      .await?;
     }
     Step::DnsUpsert {
       hostname,
@@ -713,6 +724,22 @@ async fn run_step(
       let provider = snapshot::dns_provider(account_row)?;
       let owner = Owner {
         id: route.id.clone(),
+      };
+      let spec = match &spec.tunnel {
+        Some(gateway) => {
+          let t = snap.tunnels.get(gateway).ok_or_else(|| {
+            ApiError::new(
+              ErrorCode::PlanStale,
+              format!("网关 {gateway} 的隧道还没有创建"),
+            )
+            .suggest("wharf plan")
+          })?;
+          crate::planner::DnsSpec {
+            content: crate::planner::tunnel_target(&t.tunnel_id),
+            ..spec.clone()
+          }
+        }
+        None => spec.clone(),
       };
       let want = spec.to_provider();
       let existing_record = existing.as_ref().map(|r| RemoteRecord {
@@ -820,7 +847,7 @@ fn ensure_running(
   Ok(())
 }
 
-async fn cancellable<T>(
+pub(crate) async fn cancellable<T>(
   cancel: &CancellationToken,
   fut: impl std::future::Future<Output = Result<T, ApiError>>,
 ) -> Result<T, ApiError> {

@@ -856,7 +856,8 @@ async fn gateway(
     GatewayCmd::Add {
       name,
       server,
-      kind: _,
+      kind,
+      account,
       default,
       http_port,
       https_port,
@@ -870,8 +871,39 @@ async fn gateway(
         "off" => GatewayTls::Off,
         _ => GatewayTls::Auto,
       };
+      let kind = match kind.as_str() {
+        "cloudflare_tunnel" => GatewayKind::CloudflareTunnel,
+        _ => GatewayKind::Caddy,
+      };
+      // 隧道网关只有一个厂商账号时自动选它。
+      let account = match (kind, account) {
+        (GatewayKind::CloudflareTunnel, None) => {
+          let accounts: Vec<AccountView> =
+            c.get("/api/accounts").await?;
+          match accounts.as_slice() {
+            [only] => Some(only.name.clone()),
+            [] => {
+              return Err(
+                ApiError::invalid("还没有厂商账号，隧道要建在账号下")
+                  .suggest("wharf account add cf --kind cloudflare")
+                  .into(),
+              );
+            }
+            _ => {
+              return Err(
+                ApiError::invalid(
+                  "有多个厂商账号，请用 --account 指定",
+                )
+                .suggest("wharf account list")
+                .into(),
+              );
+            }
+          }
+        }
+        (_, account) => account,
+      };
       let spec = GatewaySpec {
-        kind: GatewayKind::Caddy,
+        kind,
         server,
         default,
         http_port,
@@ -879,6 +911,7 @@ async fn gateway(
         email,
         image,
         tls,
+        account,
       };
       changes(c, vec![Change::UpsertGateway { name, spec }], apply, j)
         .await

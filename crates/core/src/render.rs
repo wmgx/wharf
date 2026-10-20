@@ -6,12 +6,19 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use wharf_api_types::{
   ApiError,
-  spec::{GatewaySpec, GatewayTls, PrivateAddr, ServiceSpec, Source},
+  spec::{
+    GatewayKind, GatewaySpec, GatewayTls, PrivateAddr, ServiceSpec,
+    Source,
+  },
 };
 
 use crate::world::{World, gateway_project};
 
 pub const DEFAULT_CADDY_IMAGE: &str = "caddy:2";
+pub const DEFAULT_CLOUDFLARED_IMAGE: &str =
+  "cloudflare/cloudflared:2026.9.3";
+/// 隧道连接器 compose 里 token 的占位，执行时才替换，不进计划、不算进哈希。
+pub const TUNNEL_TOKEN_SECRET: &str = "WHARF_TUNNEL_TOKEN";
 /// 和 agent 里的 `CADDY_ADMIN` 一致：管理接口走 unix socket，不占端口。
 const CADDY_ADMIN: &str = "unix//config/caddy-admin.sock";
 
@@ -262,10 +269,45 @@ pub fn check_compose(
 }
 
 pub fn gateway_image(spec: &GatewaySpec) -> String {
-  spec
-    .image
-    .clone()
-    .unwrap_or_else(|| DEFAULT_CADDY_IMAGE.to_string())
+  spec.image.clone().unwrap_or_else(|| {
+    match spec.kind {
+      GatewayKind::Caddy => DEFAULT_CADDY_IMAGE,
+      GatewayKind::CloudflareTunnel => DEFAULT_CLOUDFLARED_IMAGE,
+    }
+    .to_string()
+  })
+}
+
+/// cloudflare_tunnel 网关的连接器：host 网络，上游用 127.0.0.1 和内网地址都能访问。
+pub fn tunnel_compose(name: &str, spec: &GatewaySpec) -> String {
+  let project = gateway_project(name);
+  let file = ComposeFile {
+    name: project,
+    services: BTreeMap::from([(
+      "cloudflared".to_string(),
+      ComposeService {
+        image: gateway_image(spec),
+        restart: "unless-stopped",
+        network_mode: Some("host"),
+        command: Some(
+          ["tunnel", "--no-autoupdate", "run"]
+            .map(String::from)
+            .to_vec(),
+        ),
+        environment: BTreeMap::from([(
+          "TUNNEL_TOKEN".to_string(),
+          format!("[[{TUNNEL_TOKEN_SECRET}]]"),
+        )]),
+        ports: vec![],
+        volumes: vec![],
+        labels: BTreeMap::from([(
+          "wharf.gateway".to_string(),
+          name.to_string(),
+        )]),
+      },
+    )]),
+  };
+  to_yaml(&file)
 }
 
 /// caddy 网关的 compose：host 网络，这样上游用 127.0.0.1 和内网地址都能访问。
@@ -536,6 +578,7 @@ mod tests {
       email: None,
       image: None,
       tls: GatewayTls::Auto,
+      account: None,
     };
     let out = caddyfile(
       "edge",
@@ -584,6 +627,25 @@ mod tests {
     );
     assert!(out.contains("auto_https off"));
     assert!(out.contains("\nhttp://a.example.com {"));
+  }
+
+  #[test]
+  fn tunnel_compose_holds_only_a_token_placeholder() {
+    let spec = GatewaySpec {
+      kind: GatewayKind::CloudflareTunnel,
+      server: "edge1".into(),
+      default: false,
+      http_port: None,
+      https_port: None,
+      email: None,
+      image: None,
+      tls: GatewayTls::Auto,
+      account: Some("cf".into()),
+    };
+    let out = tunnel_compose("cf", &spec);
+    assert!(out.contains("TUNNEL_TOKEN: '[[WHARF_TUNNEL_TOKEN]]'"), "{out}");
+    assert!(out.contains("network_mode: host"));
+    assert!(out.contains(DEFAULT_CLOUDFLARED_IMAGE));
   }
 
   #[test]

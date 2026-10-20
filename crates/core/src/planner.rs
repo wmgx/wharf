@@ -17,7 +17,7 @@ use wharf_api_types::{
   plan::{
     Action, Layer, Plan, PlanItem, PlanRequest, PlanStatus, Risk,
   },
-  spec::RouteSpec,
+  spec::{GatewayKind, RouteSpec},
 };
 use wharf_providers::{DnsRecordSpec, DnsRecordType, RemoteRecord};
 
@@ -47,6 +47,17 @@ pub struct DnsSpec {
   pub record_type: String,
   pub content: String,
   pub proxied: bool,
+  /// 指向这个 cloudflare_tunnel 网关的隧道。隧道可能在同一次执行里才创建，
+  /// 所以执行时按网关重新取隧道 id。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub tunnel: Option<String>,
+}
+
+/// 隧道还没创建时计划里显示的 CNAME 目标。
+const TUNNEL_PENDING: &str = "（隧道创建后确定）.cfargotunnel.com";
+
+pub fn tunnel_target(id: &str) -> String {
+  format!("{id}.cfargotunnel.com")
 }
 
 impl DnsSpec {
@@ -224,6 +235,18 @@ pub async fn make_plan(
   }
   desired.allocate_ports()?;
   desired.validate()?;
+  for (name, gw) in &desired.gateways {
+    if let Some(account) = &gw.spec.account
+      && !snap.accounts.iter().any(|a| &a.name == account)
+    {
+      return Err(
+        ApiError::invalid(format!(
+          "网关 {name} 的厂商账号 {account} 不存在"
+        ))
+        .suggest("wharf account list"),
+      );
+    }
+  }
 
   let writes = desired.writes_from(&current);
   let mut b = Builder::default();
@@ -235,7 +258,7 @@ pub async fn make_plan(
   service_items(
     &mut b, &snap, &current, &desired, &net, &status, &writes,
   )?;
-  gateway_items(&mut b, &current, &desired, &net, &status)?;
+  gateway_items(&mut b, &snap, &current, &desired, &net, &status)?;
   dns_items(&mut b, &snap, &desired, &net).await?;
 
   b.steps.sort_by_key(|s| s.step.order());
@@ -274,14 +297,6 @@ pub async fn make_plan(
     steps: b.steps,
     writes,
   })
-}
-
-/// 计划里展示网关配置时，不带出密码哈希。
-fn redact_auth(caddyfile: &str, net: &Net) -> String {
-  match &net.basic_auth {
-    Some(a) => caddyfile.replace(&a.hash, "<bcrypt>"),
-    None => caddyfile.to_string(),
-  }
 }
 
 /// 服务实际在哪台服务器上：最近一次成功部署的位置，没部署过就看配置。
@@ -725,8 +740,24 @@ fn move_items(
   ));
 }
 
+/// 网关上次应用的配置哈希：caddy 由 agent 上报，隧道的规则在厂商那边，记在控制面里。
+fn applied_config<'a>(
+  snap: &'a Snapshot,
+  gateway: &str,
+  kind: GatewayKind,
+  state: &'a ProjectState,
+) -> Option<&'a str> {
+  match kind {
+    GatewayKind::Caddy => state.config_hash.as_deref(),
+    GatewayKind::CloudflareTunnel => {
+      snap.tunnels.get(gateway).map(|t| t.config_hash.as_str())
+    }
+  }
+}
+
 fn gateway_items(
   b: &mut Builder,
+  snap: &Snapshot,
   current: &World,
   desired: &World,
   net: &Net,
@@ -740,7 +771,7 @@ fn gateway_items(
     let after = Some(json!({
       "server": server,
       "sites": r.sites.iter().map(|s| json!({ "hostname": s.hostname, "upstream": s.upstream })).collect::<Vec<_>>(),
-      "caddyfile": redact_auth(&r.caddyfile, net),
+      "config": snapshot::redacted_config(&r.config, net),
     }));
     let decision = match status.get(server).and_then(|s| s.as_ref()) {
       // 查不到现状时，只有配置变了才计划（服务器离线已经单独提醒过）。
@@ -781,22 +812,44 @@ fn gateway_items(
           ),
         )),
         Some(s)
-          if s.config_hash.as_deref()
-            != Some(r.caddyfile_hash.as_str()) =>
+          if applied_config(snap, name, gw.spec.kind, s)
+            != Some(r.config_hash.as_str()) =>
         {
           Some((
             Action::Update,
             Risk::Safe,
-            "路由变化，热重载配置".to_string(),
+            match gw.spec.kind {
+              GatewayKind::Caddy => "路由变化，热重载配置",
+              GatewayKind::CloudflareTunnel => {
+                "路由变化，更新隧道入口规则"
+              }
+            }
+            .to_string(),
           ))
         }
         Some(_) => None,
       },
     };
     if let Some((action, risk, reason)) = decision {
+      let (layer, reason) = match gw.spec.kind {
+        GatewayKind::Caddy => (Layer::Gateway, reason),
+        GatewayKind::CloudflareTunnel
+          if !snap.tunnels.contains_key(name) =>
+        {
+          (
+            Layer::Tunnel,
+            format!(
+              "在账号 {} 下创建隧道 {}，部署 cloudflared",
+              gw.spec.account.as_deref().unwrap_or_default(),
+              crate::tunnel::tunnel_name(name)
+            ),
+          )
+        }
+        GatewayKind::CloudflareTunnel => (Layer::Tunnel, reason),
+      };
       let id = b.item(
         format!("{KIND_GATEWAY}/{name}"),
-        Layer::Gateway,
+        layer,
         action,
         None,
         after,
@@ -846,11 +899,12 @@ fn gateway_sites_same(
 ) -> bool {
   let a = snapshot::gateway_render(current, net, name).ok();
   let b = snapshot::gateway_render(desired, net, name).ok();
-  matches!((a, b), (Some(a), Some(b)) if a.caddyfile_hash == b.caddyfile_hash)
+  matches!((a, b), (Some(a), Some(b)) if a.config_hash == b.config_hash)
 }
 
 /// 路由期望的 DNS 记录。
 fn desired_record(
+  snap: &Snapshot,
   desired: &World,
   net: &Net,
   hostname: &str,
@@ -858,7 +912,20 @@ fn desired_record(
   let route = &desired.routes[hostname];
   let gateway =
     desired.route_gateway(&route.spec).unwrap_or_default();
-  let server = &desired.gateways[gateway].spec.server;
+  let gw = &desired.gateways[gateway].spec;
+  if gw.kind == GatewayKind::CloudflareTunnel {
+    return Ok(DnsSpec {
+      record_type: "CNAME".into(),
+      content: snap
+        .tunnels
+        .get(gateway)
+        .map(|t| tunnel_target(&t.tunnel_id))
+        .unwrap_or_else(|| TUNNEL_PENDING.into()),
+      proxied: true,
+      tunnel: Some(gateway.to_string()),
+    });
+  }
+  let server = &gw.server;
   let ip = net.public_ip.get(server).ok_or_else(|| {
     ApiError::invalid(format!(
       "网关 {gateway} 所在的服务器 {server} 没有公网 IP，{hostname} 的 DNS 无处可指"
@@ -875,6 +942,7 @@ fn desired_record(
     record_type: record_type.to_string(),
     content: ip.clone(),
     proxied: false,
+    tunnel: None,
   })
 }
 
@@ -935,12 +1003,14 @@ async fn dns_items(
       ));
       continue;
     };
-    let spec = desired_record(desired, net, host)?;
+    let spec = desired_record(snap, desired, net, host)?;
     let provider = snapshot::dns_provider(account)?;
     let want = spec.to_provider();
-    provider
-      .validate(host, &want)
-      .map_err(snapshot::provider_error)?;
+    if spec.content != TUNNEL_PENDING {
+      provider
+        .validate(host, &want)
+        .map_err(snapshot::provider_error)?;
+    }
     let records = snapshot::with_timeout(
       &format!("读取 {host} 的 DNS 记录"),
       provider.list(host),

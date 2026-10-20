@@ -88,6 +88,8 @@ export interface GatewaySpec {
   email?: string;
   image?: string;
   tls?: GatewayTls;
+  /** cloudflare_tunnel：在哪个厂商账号下建隧道。 */
+  account?: string;
 }
 
 export interface GatewayView {
@@ -202,4 +204,38 @@ export interface RollbackTarget {
   deployment_id: number;
   deployed_at: string;
   spec: ServiceSpec;
+}
+
+export interface BackupSummary {
+  snapshot_id: string;
+  files: number;
+  bytes: number;
+  added_bytes: number;
+}
+
+export interface BackupRecord {
+  id: number;
+  server: string;
+  target: string;
+  run_id: string;
+  ok: boolean;
+  summary?: BackupSummary;
+  error?: string;
+  created_at: string;
+}
+
+export interface Snapshot {
+  id: string;
+  short_id: string;
+  time: string;
+  hostname: string;
+  paths?: string[];
+}
+
+export interface BackupsView {
+  service: string;
+  target?: string;
+  records: BackupRecord[];
+  snapshots: Snapshot[];
+  snapshots_error?: string;
 }

@@ -8,6 +8,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { CodeBlock, Dot, Empty, ErrorNote, Notice, PageHeader, ServerTag, StatusBadge, ago, liveTone } from "@/components/common";
 import { DomainChips, Field, Picker, PortsEditor, formatEnv, gatewayOptions, parseEnv } from "@/components/fields";
 import { LogStream } from "@/components/LogStream";
+import { Backups } from "./service-backups";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -214,6 +215,7 @@ export function ServiceDetail() {
         <TabsList>
           <TabsTrigger value="logs">日志</TabsTrigger>
           <TabsTrigger value="history">部署历史</TabsTrigger>
+          <TabsTrigger value="backups">备份</TabsTrigger>
           <TabsTrigger value="config">配置</TabsTrigger>
         </TabsList>
         <TabsContent value="logs" className="mt-3">
@@ -221,6 +223,9 @@ export function ServiceDetail() {
         </TabsContent>
         <TabsContent value="history" className="mt-3">
           <History name={name} />
+        </TabsContent>
+        <TabsContent value="backups" className="mt-3">
+          <Backups svc={svc} />
         </TabsContent>
         <TabsContent value="config" className="mt-3">
           <CodeBlock>{JSON.stringify(svc.spec, null, 2)}</CodeBlock>
