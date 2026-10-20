@@ -103,6 +103,14 @@ pub enum Step {
     server: String,
     gateway: String,
   },
+  /// 备份和恢复不来自计划，是单独发起的执行。
+  Backup {
+    service: String,
+  },
+  Restore {
+    service: String,
+    snapshot: String,
+  },
   ServiceDown {
     server: String,
     service: String,
@@ -123,6 +131,7 @@ impl Step {
       Self::DnsUpsert { .. } => 5,
       Self::GatewayDown { .. } => 6,
       Self::ServiceDown { .. } => 7,
+      Self::Backup { .. } | Self::Restore { .. } => 8,
     }
   }
 }
@@ -712,7 +721,7 @@ fn move_items(
     }
   }
   b.warnings.push(format!(
-    "迁移后 {from} 上的 /srv/{name}/ 会保留，确认新服务正常后手动删除"
+    "迁移后 {from} 上的 /srv/{name}/ 保留 7 天，之后自动删除（期间迁回 {from} 就不删）"
   ));
 }
 

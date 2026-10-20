@@ -103,7 +103,38 @@ impl Ops {
       }
       AgentOp::SyncServe(s) => crate::sync::serve(&s, ctx).await,
       AgentOp::SyncPush(p) => crate::sync::push(&p, ctx).await,
+      AgentOp::RemoveData { service } => {
+        self.remove_data(&service, ctx)
+      }
+      AgentOp::Restic(job) => {
+        crate::restic::run(&self.docker, &job, ctx).await
+      }
     }
+  }
+
+  /// 只删迁移留下的旧数据：这台机器上还部署着这个服务就拒绝。
+  fn remove_data(
+    &self,
+    service: &str,
+    ctx: &Ctx,
+  ) -> Result<Value, ApiError> {
+    check_project(service)?;
+    if self
+      .docker
+      .project_dir(service)
+      .join("compose.yaml")
+      .exists()
+    {
+      return Err(ApiError::invalid(format!(
+        "服务 {service} 还部署在这台机器上，不删除它的数据"
+      )));
+    }
+    let dir = Path::new("/srv").join(service);
+    if dir.exists() {
+      ctx.say(format!("删除 {}", dir.display()));
+      std::fs::remove_dir_all(&dir).map_err(io_err(&dir))?;
+    }
+    Ok(Value::Null)
   }
 
   async fn stop_start(

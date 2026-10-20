@@ -397,6 +397,75 @@ pub async fn start(
   Ok(ApplyResponse { run_id })
 }
 
+/// 不来自计划的执行（备份、恢复）：同样占用 apply 锁、有执行记录、可以取消。
+pub async fn start_task(
+  state: Arc<AppState>,
+  title: String,
+  step: Step,
+) -> Result<ApplyResponse, ApiError> {
+  let guard =
+    state.apply_lock.clone().try_lock_owned().map_err(|_| {
+      ApiError::new(ErrorCode::Busy, "已有一个 apply 在执行")
+        .with_hint("等它结束再试")
+        .suggest("wharf run list")
+    })?;
+  let run_id = crate::world::new_id("r");
+  let run = Run {
+    run_id: run_id.clone(),
+    plan_id: String::new(),
+    status: RunStatus::Running,
+    started_at: Utc::now(),
+    finished_at: None,
+    steps: vec![RunStep {
+      items: vec![],
+      title: title.clone(),
+      status: StepStatus::Pending,
+      log: vec![],
+      error: None,
+      started_at: None,
+      finished_at: None,
+    }],
+  };
+  let body = serde_json::to_string(&run).map_err(json_err)?;
+  {
+    let run_id = run_id.clone();
+    state
+      .db
+      .call(move |c| {
+        c.execute(
+          "INSERT INTO runs (id, plan_id, status, body, started_at) VALUES (?1, '', 'running', ?2, ?3)",
+          params![run_id, body, now_ms()],
+        )
+        .map_err(sql_err)?;
+        Ok(())
+      })
+      .await?;
+  }
+  let cancel = CancellationToken::new();
+  let shared = Arc::new(Mutex::new(run));
+  lock(&state.runs.active).insert(
+    run_id.clone(),
+    ActiveRun {
+      run: shared.clone(),
+      cancel: cancel.clone(),
+    },
+  );
+  let steps = vec![StepPlan {
+    items: vec![],
+    title,
+    step,
+  }];
+  tokio::spawn(execute(
+    state.clone(),
+    shared,
+    steps,
+    0,
+    cancel,
+    guard,
+  ));
+  Ok(ApplyResponse { run_id })
+}
+
 async fn execute(
   state: Arc<AppState>,
   run: Arc<Mutex<Run>>,
@@ -498,6 +567,16 @@ async fn run_step(
     Step::VolumeSync { service, from, to } => {
       crate::migrate::volume_sync(
         state, &net, service, from, to, progress, cancel,
+      )
+      .await?;
+    }
+    Step::Backup { service } => {
+      crate::backup::backup(state, run_id, service, progress, cancel)
+        .await?;
+    }
+    Step::Restore { service, snapshot } => {
+      crate::backup::restore(
+        state, service, snapshot, progress, cancel,
       )
       .await?;
     }

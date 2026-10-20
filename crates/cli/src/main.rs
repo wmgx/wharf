@@ -64,6 +64,9 @@ pub enum Command {
   /// 密钥。服务的环境变量里用 `[[NAME]]` 引用。
   #[command(subcommand)]
   Secret(SecretCmd),
+  /// 备份：服务的 /srv/<服务>/ 每天用 restic 备份到另一台服务器。
+  #[command(subcommand)]
+  Backup(BackupCmd),
   /// 生成计划。不带参数时只检查漂移；`-f` 时以意图文件为完整期望状态。
   Plan {
     #[arg(short = 'f', long)]
@@ -330,6 +333,46 @@ pub enum SecretCmd {
   },
   Rm {
     name: String,
+  },
+}
+
+#[derive(Subcommand)]
+pub enum BackupCmd {
+  /// 开启每天自动备份（先停服务、备份、再启动，通常几秒）。
+  Enable {
+    service: String,
+    /// 备份存到哪台服务器，不能是服务所在的服务器。
+    #[arg(long)]
+    to: String,
+    #[command(flatten)]
+    apply: ApplyFlags,
+  },
+  /// 关闭自动备份。已有的快照保留在备份服务器上。
+  Disable {
+    service: String,
+    #[command(flatten)]
+    apply: ApplyFlags,
+  },
+  /// 立即备份一次并等待结束。
+  Run {
+    service: String,
+    /// 不等待执行结束，只返回 run_id。
+    #[arg(long)]
+    no_wait: bool,
+  },
+  /// 备份记录和快照。
+  List { service: String },
+  /// 恢复快照：停服务、恢复数据、启动。原来的数据改名保留在 /srv/.wharf-restore/ 下。
+  Restore {
+    service: String,
+    /// 快照 id（见 `wharf backup list`），默认最新的。
+    #[arg(long, default_value = "latest")]
+    snapshot: String,
+    /// 必须写 `service/<名称>`：恢复会覆盖现有数据。
+    #[arg(long)]
+    confirm: Option<String>,
+    #[arg(long)]
+    no_wait: bool,
   },
 }
 

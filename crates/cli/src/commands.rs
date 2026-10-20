@@ -9,20 +9,20 @@ use wharf_api_types::{
     ApplyRequest, ApplyResponse, Plan, PlanRequest, Run, RunStatus,
   },
   spec::{
-    Change, Fleet, GatewayKind, GatewaySpec, GatewayTls, PortSpec,
-    PrivateAddr, PrivateNetwork, Region, RouteSpec, ServerSettings,
-    ServiceSpec, Source, VolumeSpec,
+    BackupSpec, Change, Fleet, GatewayKind, GatewaySpec, GatewayTls,
+    PortSpec, PrivateAddr, PrivateNetwork, Region, RouteSpec,
+    ServerSettings, ServiceSpec, Source, VolumeSpec,
   },
   view::{
-    AccountView, CreatedToken, DeploymentView, GatewayView, JoinInfo,
-    RollbackTarget, RouteView, SecretView, ServerView, ServiceView,
-    Status, TokenView,
+    AccountView, BackupsView, CreatedToken, DeploymentView,
+    GatewayView, JoinInfo, RestoreRequest, RollbackTarget, RouteView,
+    SecretView, ServerView, ServiceView, Status, TokenView,
   },
 };
 
 use crate::{
-  AccountCmd, ApplyFlags, Cli, Command, GatewayCmd, RouteCmd, RunCmd,
-  SecretCmd, ServerCmd, ServiceCmd, TokenCmd,
+  AccountCmd, ApplyFlags, BackupCmd, Cli, Command, GatewayCmd,
+  RouteCmd, RunCmd, SecretCmd, ServerCmd, ServiceCmd, TokenCmd,
   client::{CliError, CliResult, Client, Config, read_secret, seg},
   fleet, print,
 };
@@ -74,6 +74,7 @@ async fn dispatch(
     Command::Route(cmd) => route(c, cmd, j).await,
     Command::Account(cmd) => account(c, cmd, j).await,
     Command::Secret(cmd) => secret(c, cmd, j).await,
+    Command::Backup(cmd) => backup(c, cmd, j).await,
     Command::Plan { file, apply } => {
       let req = match file {
         Some(path) => PlanRequest {
@@ -709,6 +710,7 @@ async fn service(
             ports: vec![],
             env: BTreeMap::new(),
             volumes: vec![],
+            backup: None,
           }
         }
       };
@@ -1018,6 +1020,88 @@ async fn secret(
       out(j, &v, |_| println!("已删除密钥 {name}"));
       Ok(())
     }
+  }
+}
+
+async fn backup(
+  c: &Client,
+  cmd: BackupCmd,
+  j: bool,
+) -> CliResult<()> {
+  let set_backup = |name: String, backup: Option<BackupSpec>| async move {
+    let mut spec = c
+      .get::<ServiceView>(&format!("/api/services/{}", seg(&name)))
+      .await?
+      .spec;
+    spec.backup = backup;
+    Ok::<_, CliError>(Change::UpsertService { name, spec })
+  };
+  match cmd {
+    BackupCmd::Enable { service, to, apply } => {
+      let change =
+        set_backup(service, Some(BackupSpec { to })).await?;
+      changes(c, vec![change], apply, j).await
+    }
+    BackupCmd::Disable { service, apply } => {
+      let change = set_backup(service, None).await?;
+      changes(c, vec![change], apply, j).await
+    }
+    BackupCmd::Run { service, no_wait } => {
+      let r: ApplyResponse = c
+        .post(
+          &format!("/api/services/{}/backups", seg(&service)),
+          &json!({}),
+        )
+        .await?;
+      finish_task(c, &r.run_id, !no_wait, j).await
+    }
+    BackupCmd::List { service } => {
+      let v: BackupsView = c
+        .get(&format!("/api/services/{}/backups", seg(&service)))
+        .await?;
+      out(j, &v, print::backups);
+      Ok(())
+    }
+    BackupCmd::Restore {
+      service,
+      snapshot,
+      confirm,
+      no_wait,
+    } => {
+      let r: ApplyResponse = c
+        .post(
+          &format!("/api/services/{}/restore", seg(&service)),
+          &RestoreRequest {
+            snapshot,
+            confirm: confirm.unwrap_or_default(),
+          },
+        )
+        .await?;
+      finish_task(c, &r.run_id, !no_wait, j).await
+    }
+  }
+}
+
+/// 单独发起的执行（备份、恢复）：等它结束，或者只给出 run_id。
+async fn finish_task(
+  c: &Client,
+  run_id: &str,
+  wait: bool,
+  j: bool,
+) -> CliResult<()> {
+  if !wait {
+    out(j, &json!({ "run_id": run_id }), |_| {
+      println!(
+        "已开始执行 {run_id}，查看进度：wharf run wait {run_id}"
+      )
+    });
+    return Ok(());
+  }
+  let run = wait_run(c, run_id, j).await?;
+  out(j, &run, print::run_summary);
+  match run.status {
+    RunStatus::Succeeded => Ok(()),
+    _ => Err(CliError::Exit(4)),
   }
 }
 

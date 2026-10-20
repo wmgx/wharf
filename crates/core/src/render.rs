@@ -103,7 +103,7 @@ struct ComposeService {
   #[serde(skip_serializing_if = "Option::is_none")]
   network_mode: Option<&'static str>,
   #[serde(skip_serializing_if = "Option::is_none")]
-  command: Option<Vec<&'static str>>,
+  command: Option<Vec<String>>,
   #[serde(skip_serializing_if = "BTreeMap::is_empty")]
   environment: BTreeMap<String, String>,
   #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -279,14 +279,18 @@ pub fn gateway_compose(name: &str, spec: &GatewaySpec) -> String {
         image: gateway_image(spec),
         restart: "unless-stopped",
         network_mode: Some("host"),
-        command: Some(vec![
-          "caddy",
-          "run",
-          "--config",
-          "/etc/caddy/Caddyfile",
-          "--adapter",
-          "caddyfile",
-        ]),
+        command: Some(
+          [
+            "caddy",
+            "run",
+            "--config",
+            "/etc/caddy/Caddyfile",
+            "--adapter",
+            "caddyfile",
+          ]
+          .map(String::from)
+          .to_vec(),
+        ),
         environment: BTreeMap::new(),
         ports: vec![],
         volumes: vec![
@@ -303,6 +307,52 @@ pub fn gateway_compose(name: &str, spec: &GatewaySpec) -> String {
   };
   to_yaml(&file)
 }
+
+/// 备份服务器上的 rest-server：只监听内网地址，要账号，只能追加
+/// （备份来源的机器被攻破也删不掉备份，清理旧快照在备份服务器本机做）。
+/// `htpasswd` 是 `用户名:bcrypt哈希`。
+pub fn backup_server_compose(
+  listen_ip: &str,
+  htpasswd: &str,
+) -> String {
+  use wharf_api_types::agent::{
+    BACKUP_ROOT, REST_SERVER_IMAGE, REST_SERVER_PORT,
+  };
+  let host = if listen_ip.contains(':') {
+    format!("[{listen_ip}]")
+  } else {
+    listen_ip.to_string()
+  };
+  let script = format!(
+    "printf '%s\\n' \"$$HTPASSWD\" > /tmp/htpasswd && exec rest-server --path /data --htpasswd-file /tmp/htpasswd --listen {host}:{REST_SERVER_PORT} --append-only"
+  );
+  let file = ComposeFile {
+    name: BACKUP_PROJECT.to_string(),
+    services: BTreeMap::from([(
+      "rest-server".to_string(),
+      ComposeService {
+        image: REST_SERVER_IMAGE.to_string(),
+        restart: "unless-stopped",
+        network_mode: Some("host"),
+        command: Some(vec!["sh".into(), "-c".into(), script]),
+        environment: BTreeMap::from([(
+          "HTPASSWD".to_string(),
+          htpasswd.replace('$', "$$"),
+        )]),
+        ports: vec![],
+        volumes: vec![format!("{BACKUP_ROOT}:/data")],
+        labels: BTreeMap::from([(
+          "wharf.backup".to_string(),
+          "rest-server".to_string(),
+        )]),
+      },
+    )]),
+  };
+  to_yaml(&file)
+}
+
+/// 备份服务器上 rest-server 的 project 名。
+pub const BACKUP_PROJECT: &str = "wharf-backup";
 
 /// 路由的上游地址。网关和服务在同一台机器上用 127.0.0.1，否则用服务所在机器的内网地址。
 pub fn upstream(
@@ -399,6 +449,7 @@ mod tests {
 
   fn spec() -> ServiceSpec {
     ServiceSpec {
+      backup: None,
       server: "node1".into(),
       source: Source::Image("traefik/whoami".into()),
       ports: vec![PortSpec {

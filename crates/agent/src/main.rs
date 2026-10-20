@@ -18,6 +18,7 @@ mod exec;
 mod identity;
 mod ops;
 mod report;
+mod restic;
 mod sync;
 
 #[derive(Parser)]

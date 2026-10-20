@@ -48,6 +48,8 @@ export interface ServiceSpec {
   ports?: PortSpec[];
   env?: Record<string, string>;
   volumes?: VolumeSpec[];
+  /** 每天自动备份到另一台服务器。 */
+  backup?: { to: string };
 }
 
 export interface ContainerInfo {

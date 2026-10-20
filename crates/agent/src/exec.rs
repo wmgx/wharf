@@ -41,6 +41,8 @@ impl Ctx {
 #[derive(Debug)]
 pub struct Output {
   pub success: bool,
+  /// 退出码，被信号杀掉时没有。
+  pub code: Option<i32>,
   pub stdout: String,
   pub stderr: String,
 }
@@ -207,6 +209,7 @@ impl Cmd {
     };
     Ok(Output {
       success: status.success(),
+      code: status.code(),
       stdout: stdout.await.unwrap_or_default(),
       stderr: stderr.await.unwrap_or_default(),
     })

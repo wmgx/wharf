@@ -2718,6 +2718,7 @@ name = "wharf-agent"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "ed25519-dalek",
  "futures-util",

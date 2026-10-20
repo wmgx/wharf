@@ -574,8 +574,31 @@ fn validate_service(
       "服务名不能以 {GATEWAY_PROJECT_PREFIX} 开头，它留给网关用"
     )));
   }
+  if name == crate::render::BACKUP_PROJECT {
+    return Err(ApiError::invalid(format!(
+      "服务名 {name} 留给备份服务用，换一个名字"
+    )));
+  }
   if !world.servers.contains_key(&spec.server) {
     return Err(server_not_found(&spec.server));
+  }
+  if let Some(backup) = &spec.backup {
+    if !world.servers.contains_key(&backup.to) {
+      return Err(server_not_found(&backup.to));
+    }
+    if backup.to == spec.server {
+      return Err(ApiError::invalid(format!(
+        "服务 {name} 的备份要存到另一台服务器，不能是它所在的 {}",
+        spec.server
+      )));
+    }
+    if spec.volumes.is_empty()
+      && matches!(spec.source, Source::Image(_))
+    {
+      return Err(ApiError::invalid(format!(
+        "服务 {name} 没有数据卷，不需要备份"
+      )));
+    }
   }
   match &spec.source {
     Source::Image(image) => {
@@ -681,6 +704,7 @@ mod tests {
 
   fn image_service(server: &str) -> ServiceSpec {
     ServiceSpec {
+      backup: None,
       server: server.into(),
       source: Source::Image("traefik/whoami".into()),
       ports: vec![PortSpec {

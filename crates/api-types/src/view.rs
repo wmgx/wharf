@@ -207,3 +207,45 @@ pub struct CreatedToken {
   /// 只返回这一次。
   pub token: String,
 }
+
+/// 一次备份的记录（成功或失败）。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct BackupRecord {
+  pub id: i64,
+  /// 数据所在的服务器。
+  pub server: String,
+  /// 备份存到的服务器。
+  pub target: String,
+  pub run_id: String,
+  pub ok: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub summary: Option<crate::agent::BackupSummary>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub error: Option<String>,
+  pub created_at: DateTime<Utc>,
+}
+
+/// `GET /api/services/{name}/backups`
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct BackupsView {
+  pub service: String,
+  /// 没开启备份时为空。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub target: Option<String>,
+  /// 最近的备份记录，新的在前。
+  pub records: Vec<BackupRecord>,
+  /// 备份服务器上的快照，新的在前。
+  pub snapshots: Vec<crate::agent::Snapshot>,
+  /// 读取快照失败的原因（例如备份服务器离线）。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub snapshots_error: Option<String>,
+}
+
+/// `POST /api/services/{name}/restore`
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RestoreRequest {
+  /// 快照 id，或 `latest`。
+  pub snapshot: String,
+  /// 必须是 `service/<名称>`：恢复会覆盖现有数据。
+  pub confirm: String,
+}

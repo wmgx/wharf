@@ -95,6 +95,26 @@ CREATE TABLE api_tokens (
   r#"
 ALTER TABLE deployments ADD COLUMN spec TEXT;
 "#,
+  // 备份记录（含失败，用于定时备份的退避）和迁移后待删除的旧数据。
+  r#"
+CREATE TABLE backups (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  service TEXT NOT NULL,
+  server TEXT NOT NULL,
+  target TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  ok INTEGER NOT NULL,
+  body TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX backups_service ON backups (service, id);
+CREATE TABLE cleanups (
+  service TEXT NOT NULL,
+  server TEXT NOT NULL,
+  due_at INTEGER NOT NULL,
+  PRIMARY KEY (service, server)
+);
+"#,
 ];
 
 #[derive(Clone)]

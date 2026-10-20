@@ -35,7 +35,7 @@ impl Docker {
     self.data_dir.join("projects").join(project)
   }
 
-  fn cmd(&self) -> Cmd {
+  pub fn cmd(&self) -> Cmd {
     Cmd::new(&self.bin)
   }
 
@@ -170,7 +170,7 @@ impl Docker {
     Ok(images)
   }
 
-  async fn image_exists(&self, image: &str, ctx: &Ctx) -> bool {
+  pub async fn image_exists(&self, image: &str, ctx: &Ctx) -> bool {
     self
       .cmd()
       .args(["image", "inspect", "--format", "{{.Id}}", image])

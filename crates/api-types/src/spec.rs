@@ -158,6 +158,18 @@ pub struct ServiceSpec {
   pub env: BTreeMap<String, String>,
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub volumes: Vec<VolumeSpec>,
+  /// 每天自动备份 `/srv/<服务>/` 到另一台服务器（restic）。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub backup: Option<BackupSpec>,
+}
+
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(deny_unknown_fields)]
+pub struct BackupSpec {
+  /// 备份存到哪台服务器，不能是服务所在的服务器。
+  pub to: String,
 }
 
 #[derive(

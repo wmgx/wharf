@@ -176,7 +176,14 @@ pub async fn volume_sync(
   match (result, served) {
     // 接收端没起来时，就绪等待只会说"没有启动"，用接收端自己的错误更清楚。
     (Err(_), Err(e)) if e.code != ErrorCode::Cancelled => Err(e),
-    (r, _) => r,
+    (Err(e), _) => Err(e),
+    (Ok(()), _) => {
+      crate::jobs::schedule_cleanup(state, service, from).await?;
+      progress(format!(
+        "{from} 上的 /srv/{service}/ 保留 7 天，之后自动删除"
+      ));
+      Ok(())
+    }
   }
 }
 

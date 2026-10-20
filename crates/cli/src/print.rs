@@ -3,7 +3,7 @@
 use wharf_api_types::{
   ApiError,
   plan::{Action, Plan, Risk, Run, RunStatus, RunStep, StepStatus},
-  view::{ServiceView, Status},
+  view::{BackupsView, ServiceView, Status},
 };
 
 pub fn json<T: serde::Serialize>(value: &T) {
@@ -118,6 +118,8 @@ pub fn run_summary(run: &Run) {
   let status = match run.status {
     RunStatus::Running => "执行中",
     RunStatus::Succeeded => "成功",
+    // 备份、恢复这类执行不来自计划，没有写入配置。
+    RunStatus::Failed if run.plan_id.is_empty() => "失败",
     RunStatus::Failed => {
       "失败（配置已写入，执行 wharf plan 查看剩下的差异）"
     }
@@ -224,6 +226,51 @@ pub fn status(s: &Status) {
     println!("需要注意");
     for p in &s.problems {
       println!("  - {p}");
+    }
+  }
+}
+
+pub fn backups(v: &BackupsView) {
+  let local = |t: &chrono::DateTime<chrono::Utc>| {
+    t.with_timezone(&chrono::Local)
+      .format("%m-%d %H:%M")
+      .to_string()
+  };
+  match &v.target {
+    Some(t) => println!("{}：每天备份到 {t}", v.service),
+    None => println!("{}：没有开启自动备份", v.service),
+  }
+  if let Some(e) = &v.snapshots_error {
+    println!("读取快照失败：{e}");
+  }
+  if !v.snapshots.is_empty() {
+    println!("快照：");
+    for s in &v.snapshots {
+      println!(
+        "  {}  {}  来自 {}",
+        s.short_id,
+        local(&s.time),
+        s.hostname
+      );
+    }
+  }
+  if !v.records.is_empty() {
+    println!("最近的备份：");
+    for r in v.records.iter().take(5) {
+      let detail = match (&r.summary, &r.error) {
+        (Some(s), _) => format!(
+          "成功  {} 个文件，新增 {} 字节",
+          s.files, s.added_bytes
+        ),
+        (None, Some(e)) => format!("失败  {e}"),
+        _ => if r.ok { "成功" } else { "失败" }.to_string(),
+      };
+      println!(
+        "  {}  {} → {}  {detail}",
+        local(&r.created_at),
+        r.server,
+        r.target
+      );
     }
   }
 }

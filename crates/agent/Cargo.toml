@@ -10,6 +10,7 @@ name = "wharf-agent"
 path = "src/main.rs"
 
 [dependencies]
+chrono.workspace = true
 wharf-api-types.workspace = true
 
 anyhow.workspace = true

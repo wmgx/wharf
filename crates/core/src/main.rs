@@ -9,8 +9,10 @@ use ed25519_dalek::SigningKey;
 mod api;
 mod apply;
 mod auth;
+mod backup;
 mod db;
 mod hub;
+mod jobs;
 mod logs_stream;
 mod migrate;
 mod planner;
@@ -94,6 +96,7 @@ async fn main() -> anyhow::Result<()> {
     agent_image: cli.agent_image,
   });
   apply::recover(&state).await?;
+  jobs::spawn(state.clone());
 
   let listener = tokio::net::TcpListener::bind(cli.listen)
     .await

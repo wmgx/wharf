@@ -77,6 +77,14 @@ pub fn router(state: Arc<AppState>) -> Router {
       get(crate::rollback::target),
     )
     .route("/api/services/{name}/deployments", get(deployments))
+    .route(
+      "/api/services/{name}/backups",
+      get(crate::backup::list).post(crate::backup::run_now),
+    )
+    .route(
+      "/api/services/{name}/restore",
+      post(crate::backup::restore_now),
+    )
     .route("/api/gateways", get(list_gateways))
     .route("/api/gateways/{name}", get(show_gateway))
     .route("/api/gateways/{name}/config", get(gateway_config))
