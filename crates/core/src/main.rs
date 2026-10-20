@@ -34,7 +34,7 @@ struct Cli {
   #[arg(
     long,
     env = "WHARF_AGENT_IMAGE",
-    default_value = "wharf-agent:latest"
+    default_value = "ghcr.io/wmgx/wharf-agent:latest"
   )]
   agent_image: String,
 }

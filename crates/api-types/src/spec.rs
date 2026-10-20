@@ -156,6 +156,38 @@ pub struct GatewaySpec {
   /// caddy：镜像，默认 `caddy:2`。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub image: Option<String>,
+  /// caddy：证书方式，默认 `auto`（公网签证书）。
+  #[serde(default, skip_serializing_if = "GatewayTls::is_auto")]
+  pub tls: GatewayTls,
+}
+
+/// 网关的证书方式。
+#[derive(
+  Debug,
+  Clone,
+  Copy,
+  Default,
+  PartialEq,
+  Eq,
+  Serialize,
+  Deserialize,
+  JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum GatewayTls {
+  /// 自动向 Let's Encrypt 等申请证书，需要公网可达的域名。
+  #[default]
+  Auto,
+  /// Caddy 自签证书，浏览器会提示不受信任。用于内网。
+  Internal,
+  /// 只走 HTTP，不用证书。用于内网演示。
+  Off,
+}
+
+impl GatewayTls {
+  pub fn is_auto(&self) -> bool {
+    *self == Self::Auto
+  }
 }
 
 #[derive(

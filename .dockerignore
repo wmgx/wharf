@@ -2,3 +2,5 @@ target
 .git
 temp
 data
+doc
+CLAUDE.md

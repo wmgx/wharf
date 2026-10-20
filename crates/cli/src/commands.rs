@@ -9,8 +9,9 @@ use wharf_api_types::{
     ApplyRequest, ApplyResponse, Plan, PlanRequest, Run, RunStatus,
   },
   spec::{
-    Change, Fleet, GatewayKind, GatewaySpec, PortSpec, Region,
-    RouteSpec, ServerSettings, ServiceSpec, Source, VolumeSpec,
+    Change, Fleet, GatewayKind, GatewaySpec, GatewayTls, PortSpec,
+    Region, RouteSpec, ServerSettings, ServiceSpec, Source,
+    VolumeSpec,
   },
   view::{
     AccountView, CreatedToken, DeploymentView, GatewayView, JoinInfo,
@@ -770,8 +771,14 @@ async fn gateway(
       https_port,
       email,
       image,
+      tls,
       apply,
     } => {
+      let tls = match tls.as_str() {
+        "internal" => GatewayTls::Internal,
+        "off" => GatewayTls::Off,
+        _ => GatewayTls::Auto,
+      };
       let spec = GatewaySpec {
         kind: GatewayKind::Caddy,
         server,
@@ -780,6 +787,7 @@ async fn gateway(
         https_port,
         email,
         image,
+        tls,
       };
       changes(c, vec![Change::UpsertGateway { name, spec }], apply, j)
         .await

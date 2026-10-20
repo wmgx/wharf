@@ -756,6 +756,7 @@ mod tests {
         default: true,
         http_port: None,
         https_port: None,
+        tls: Default::default(),
         email: None,
         image: None,
       },

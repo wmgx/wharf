@@ -6,7 +6,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use wharf_api_types::{
   ApiError,
-  spec::{GatewaySpec, ServiceSpec, Source},
+  spec::{GatewaySpec, GatewayTls, ServiceSpec, Source},
 };
 
 use crate::world::{World, gateway_project};
@@ -306,12 +306,21 @@ pub fn caddyfile(
   if let Some(email) = &spec.email {
     out.push_str(&format!("\temail {email}\n"));
   }
+  match spec.tls {
+    GatewayTls::Auto => {}
+    GatewayTls::Internal => out.push_str("\tlocal_certs\n"),
+    GatewayTls::Off => out.push_str("\tauto_https off\n"),
+  }
   out.push_str("}\n\nimport /etc/caddy/extra.d/*.caddy\n");
+  let scheme = match spec.tls {
+    GatewayTls::Off => "http://",
+    _ => "",
+  };
   let mut sites = sites.to_vec();
   sites.sort_by(|a, b| a.hostname.cmp(&b.hostname));
   for site in sites {
     out.push_str(&format!(
-      "\n{} {{\n\treverse_proxy {}\n}}\n",
+      "\n{scheme}{} {{\n\treverse_proxy {}\n}}\n",
       site.hostname, site.upstream
     ));
   }
@@ -410,6 +419,7 @@ mod tests {
       https_port: None,
       email: None,
       image: None,
+      tls: GatewayTls::Auto,
     };
     let out = caddyfile(
       "edge",
@@ -427,6 +437,7 @@ mod tests {
     );
     assert!(out.contains("http_port 8080"));
     assert!(!out.contains("https_port"));
+    assert!(!out.contains("auto_https"));
     assert!(
       out.find("a.example.com").unwrap()
         < out.find("z.example.com").unwrap()
@@ -434,5 +445,19 @@ mod tests {
     let compose = gateway_compose("edge", &gw);
     assert!(compose.contains("network_mode: host"));
     assert!(compose.contains("name: wharf-gw-edge"));
+    let off = GatewaySpec {
+      tls: GatewayTls::Off,
+      ..gw
+    };
+    let out = caddyfile(
+      "edge",
+      &off,
+      &[Site {
+        hostname: "a.example.com".into(),
+        upstream: "127.0.0.1:1".into(),
+      }],
+    );
+    assert!(out.contains("auto_https off"));
+    assert!(out.contains("\nhttp://a.example.com {"));
   }
 }

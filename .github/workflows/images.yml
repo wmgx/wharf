@@ -1,0 +1,53 @@
+# 推到 main 时构建 wharf-core / wharf-agent 镜像，推到 ghcr。
+# 标签：latest 和 sha-<短提交号>。国内机器可以从 ghcr.nju.edu.cn 拉。
+name: images
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: images
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: tag
+        run: echo "sha=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+      # 两个 target 共用 build 阶段，第二次直接命中缓存。
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          target: core
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/wharf-core:latest
+            ghcr.io/${{ github.repository_owner }}/wharf-core:${{ steps.tag.outputs.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          target: agent
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/wharf-agent:latest
+            ghcr.io/${{ github.repository_owner }}/wharf-agent:${{ steps.tag.outputs.sha }}
+          cache-from: type=gha

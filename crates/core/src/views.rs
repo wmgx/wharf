@@ -4,7 +4,7 @@ use std::{collections::BTreeMap, time::Duration};
 
 use wharf_api_types::{
   agent::ProjectState,
-  spec::Fleet,
+  spec::{Fleet, GatewayTls},
   view::{
     GatewayView, LiveState, RouteView, ServerView, ServiceView,
     Status,
@@ -229,18 +229,24 @@ pub fn route_view(
     )
     .ok()
   });
-  let https = gw_spec
-    .and_then(|g| g.spec.https_port)
-    .filter(|p| *p != 443);
+  let url = match gw_spec.map(|g| &g.spec) {
+    Some(g) if g.tls == GatewayTls::Off => {
+      match g.http_port.filter(|p| *p != 80) {
+        Some(port) => format!("http://{hostname}:{port}"),
+        None => format!("http://{hostname}"),
+      }
+    }
+    g => match g.and_then(|g| g.https_port).filter(|p| *p != 443) {
+      Some(port) => format!("https://{hostname}:{port}"),
+      None => format!("https://{hostname}"),
+    },
+  };
   Some(RouteView {
     id: row.id.clone(),
     spec: row.spec.clone(),
     gateway,
     upstream,
-    url: match https {
-      Some(port) => format!("https://{hostname}:{port}"),
-      None => format!("https://{hostname}"),
-    },
+    url,
     version: row.version,
   })
 }

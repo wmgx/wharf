@@ -234,6 +234,9 @@ pub enum GatewayCmd {
     /// caddy 镜像，默认 caddy:2。
     #[arg(long)]
     image: Option<String>,
+    /// 证书方式：auto（公网签证书）、internal（自签）、off（只走 HTTP，内网用）。
+    #[arg(long, default_value = "auto", value_parser = ["auto", "internal", "off"])]
+    tls: String,
     #[command(flatten)]
     apply: ApplyFlags,
   },
