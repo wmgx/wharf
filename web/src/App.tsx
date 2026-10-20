@@ -1,62 +1,30 @@
-import { createContext, useContext, useEffect, useState } from "react";
-import { NavLink, Navigate, Route, Routes } from "react-router-dom";
+import { Suspense, lazy, useEffect, useState } from "react";
+import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { getToken, setToken, setUnauthorizedHandler, usePoll } from "./api";
+import { ActionsProvider } from "./components/actions";
+import { AppSidebar } from "./components/app-sidebar";
 import { Boundary } from "./components/Boundary";
-import { Light } from "./components/ui";
+import { CommandMenu } from "./components/command-menu";
+import { Problems } from "./components/problems";
+import { Separator } from "./components/ui/separator";
+import { SidebarInset, SidebarProvider, SidebarTrigger } from "./components/ui/sidebar";
+import { Skeleton } from "./components/ui/skeleton";
+import { Toaster } from "./components/ui/sonner";
+import { TooltipProvider } from "./components/ui/tooltip";
 import { Gateways } from "./pages/Gateways";
 import { Home } from "./pages/Home";
 import { Login } from "./pages/Login";
 import { ServiceDetail } from "./pages/ServiceDetail";
 import { Services } from "./pages/Services";
-import { Topology } from "./pages/Topology";
+import { StatusContext } from "./status";
+import { ThemeProvider } from "./theme";
 import type { Status } from "./types";
 
-type Theme = "light" | "dark";
-
-interface StatusCtx {
-  status: Status | null;
-  refresh: () => void;
-  theme: Theme;
-}
-
-const Ctx = createContext<StatusCtx>({ status: null, refresh: () => {}, theme: "light" });
-
-/** 全局状态：每 5 秒拉一次 /api/status，各页面共用。 */
-export const useStatus = () => useContext(Ctx);
-
-const THEME_KEY = "wharf.theme";
-
-function initialTheme(): Theme {
-  try {
-    const saved = localStorage.getItem(THEME_KEY);
-    if (saved === "light" || saved === "dark") return saved;
-  } catch {
-    // 读不到就跟随系统。
-  }
-  return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-}
-
-function useTheme(): [Theme, () => void] {
-  const [theme, setTheme] = useState<Theme>(initialTheme);
-  useEffect(() => {
-    document.documentElement.dataset.theme = theme;
-  }, [theme]);
-  const toggle = () =>
-    setTheme((t) => {
-      const next = t === "light" ? "dark" : "light";
-      try {
-        localStorage.setItem(THEME_KEY, next);
-      } catch {
-        // 只在本次页面里生效。
-      }
-      return next;
-    });
-  return [theme, toggle];
-}
+// 拓扑图依赖的 @xyflow/react 比较大，只在打开拓扑页时加载。
+const Topology = lazy(() => import("./pages/Topology").then((m) => ({ default: m.Topology })));
 
 export function App() {
   const [authed, setAuthed] = useState(() => !!getToken());
-  const [theme, toggleTheme] = useTheme();
 
   useEffect(() => {
     setUnauthorizedHandler(() => {
@@ -65,103 +33,64 @@ export function App() {
     });
   }, []);
 
-  if (!authed) return <Login onDone={() => setAuthed(true)} />;
+  const logout = () => {
+    setToken(null);
+    setAuthed(false);
+  };
+
   return (
-    <Shell
-      theme={theme}
-      toggleTheme={toggleTheme}
-      onLogout={() => {
-        setToken(null);
-        setAuthed(false);
-      }}
-    />
+    <ThemeProvider>
+      <TooltipProvider delayDuration={300}>
+        {authed ? <Shell onLogout={logout} /> : <Login onDone={() => setAuthed(true)} />}
+        <Toaster position="bottom-right" />
+      </TooltipProvider>
+    </ThemeProvider>
   );
 }
 
-const NAV = [
-  { to: "/", label: "港口" },
-  { to: "/services", label: "服务" },
-  { to: "/gateways", label: "网关" },
-  { to: "/topology", label: "拓扑" },
+const TITLES: [string, string][] = [
+  ["/services/", "服务详情"],
+  ["/services", "服务"],
+  ["/gateways", "网关"],
+  ["/topology", "拓扑"],
+  ["/", "港口"],
 ];
 
-export function Logo() {
-  return (
-    <span className="logo">
-      <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
-        <path d="M2 10h12l-2 4H4z" />
-        <path d="M7 2h1.5v7H7z" />
-        <path d="M8.5 3l4.5 5H8.5z" opacity="0.7" />
-      </svg>
-    </span>
-  );
-}
-
-function Shell({ theme, toggleTheme, onLogout }: { theme: Theme; toggleTheme: () => void; onLogout: () => void }) {
+function Shell({ onLogout }: { onLogout: () => void }) {
   const { data: status, refresh } = usePoll<Status>("/api/status", 5000);
-  return (
-    <Ctx.Provider value={{ status, refresh, theme }}>
-      <header className="topbar">
-        <div className="container inner">
-          <NavLink to="/" className="brand">
-            <Logo />
-            Wharf
-          </NavLink>
-          <nav className="nav">
-            {NAV.map((n) => (
-              <NavLink key={n.to} to={n.to} end={n.to === "/"}>
-                {n.label}
-              </NavLink>
-            ))}
-          </nav>
-          <div className="right">
-            <Servers status={status} />
-            <button className="icon-btn" onClick={toggleTheme} title={theme === "light" ? "切换到深色" : "切换到浅色"}>
-              {theme === "light" ? "☾" : "☀"}
-            </button>
-            <button className="btn small ghost" onClick={onLogout}>
-              退出
-            </button>
-          </div>
-        </div>
-      </header>
-      <main className="container">
-        <Boundary>
-          <Routes>
-            <Route path="/" element={<Home />} />
-            <Route path="/services" element={<Services />} />
-            <Route path="/services/:name" element={<ServiceDetail />} />
-            <Route path="/gateways" element={<Gateways />} />
-            <Route path="/topology" element={<Topology />} />
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Routes>
-        </Boundary>
-      </main>
-    </Ctx.Provider>
-  );
-}
+  const { pathname } = useLocation();
+  const title = TITLES.find(([p]) => pathname.startsWith(p))?.[1] ?? "";
 
-/** 右上角：需要注意的问题，以及每台服务器的在线状态和延迟。 */
-function Servers({ status }: { status: Status | null }) {
-  const problems = status?.problems ?? [];
   return (
-    <>
-      {problems.length > 0 && (
-        <span className="problems-link" title={problems.join("\n")}>
-          {problems.length} 项需要注意
-        </span>
-      )}
-      {status?.servers.map((s) => (
-        <span
-          className="server-pill"
-          key={s.name}
-          title={s.private_addr ? `内网 ${s.private_addr.ip}（${s.private_addr.network}）` : "没有内网地址"}
-        >
-          <Light tone={!s.joined ? "fog" : s.online ? "go" : "stop"} />
-          <b>{s.name}</b>
-          {s.online ? (s.rtt_ms != null ? `${s.rtt_ms} ms` : "在线") : s.joined ? "离线" : "未加入"}
-        </span>
-      ))}
-    </>
+    <StatusContext.Provider value={{ status, refresh }}>
+      <ActionsProvider>
+        <SidebarProvider>
+          <AppSidebar onLogout={onLogout} />
+          <SidebarInset>
+            <header className="sticky top-0 z-10 flex h-14 shrink-0 items-center gap-2 border-b bg-background/80 px-4 backdrop-blur">
+              <SidebarTrigger className="-ml-1" />
+              <Separator orientation="vertical" className="mr-1 data-[orientation=vertical]:h-4" />
+              <span className="text-sm font-medium">{title}</span>
+              <div className="ml-auto flex flex-1 items-center justify-end gap-2">
+                <Problems />
+                <CommandMenu onLogout={onLogout} />
+              </div>
+            </header>
+            <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-8 md:px-8">
+              <Boundary>
+                <Routes>
+                  <Route path="/" element={<Home />} />
+                  <Route path="/services" element={<Services />} />
+                  <Route path="/services/:name" element={<ServiceDetail />} />
+                  <Route path="/gateways" element={<Gateways />} />
+                  <Route path="/topology" element={<Suspense fallback={<Skeleton className="h-[480px] rounded-xl" />}><Topology /></Suspense>} />
+                  <Route path="*" element={<Navigate to="/" replace />} />
+                </Routes>
+              </Boundary>
+            </main>
+          </SidebarInset>
+        </SidebarProvider>
+      </ActionsProvider>
+    </StatusContext.Provider>
   );
 }

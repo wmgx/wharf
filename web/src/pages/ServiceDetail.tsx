@@ -1,361 +1,361 @@
+import { ArrowLeftIcon, ArrowUpRightIcon, EllipsisIcon, HistoryIcon, PencilIcon, PlusIcon, RefreshCwIcon, Trash2Icon, XIcon } from "lucide-react";
 import { useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
-import { api, usePoll } from "../api";
-import { useStatus } from "../App";
-import { PortsEditor, formatEnv, parseEnv } from "../components/fields";
-import { LogStream } from "../components/LogStream";
-import { PlanFlow } from "../components/PlanFlow";
-import { Badge, Drawer, ErrorNote, Light, ago, liveTone } from "../components/ui";
-import type { Change, DeploymentView, PortSpec, RollbackTarget, ServiceView } from "../types";
-
-type Tab = "logs" | "history" | "config";
+import { Link, useParams, useSearchParams } from "react-router-dom";
+import { usePoll } from "@/api";
+import { useActions } from "@/components/actions";
+import { CodeBlock, Dot, Empty, ErrorNote, PageHeader, ServerTag, StatusBadge, ago, liveTone } from "@/components/common";
+import { DomainChips, Field, Picker, PortsEditor, formatEnv, gatewayOptions, parseEnv } from "@/components/fields";
+import { LogStream } from "@/components/LogStream";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
+import { Sheet, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Textarea } from "@/components/ui/textarea";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { useStatus } from "@/status";
+import type { DeploymentView, PortSpec, ServiceView } from "@/types";
 
 export function ServiceDetail() {
   const { name = "" } = useParams();
-  const nav = useNavigate();
-  const { status, refresh } = useStatus();
-  const { data: svc, error, refresh: reload } = usePoll<ServiceView>(`/api/services/${encodeURIComponent(name)}`, 8000);
-  const [tab, setTab] = useState<Tab>("logs");
-  const [flow, setFlow] = useState<{ title: string; changes: Change[]; leave?: boolean } | null>(null);
+  const [params, setParams] = useSearchParams();
+  const tab = params.get("tab") ?? "logs";
+  const { status } = useStatus();
+  const actions = useActions();
+  const { data: svc, error } = usePoll<ServiceView>(`/api/services/${encodeURIComponent(name)}`, 5000);
   const [editing, setEditing] = useState(false);
   const [addingRoute, setAddingRoute] = useState(false);
 
   const routes = status?.routes.filter((r) => r.spec.service === name) ?? [];
+  const back = (
+    <Link className="mb-3 inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground" to="/services">
+      <ArrowLeftIcon className="size-3.5" />
+      服务
+    </Link>
+  );
 
   if (error && !svc) {
     return (
       <>
-        <Link className="back" to="/services">
-          ← 服务
-        </Link>
+        {back}
         <ErrorNote error={error} />
       </>
     );
   }
-  if (!svc) return <p>载入中…</p>;
+  if (!svc) {
+    return (
+      <>
+        {back}
+        <Skeleton className="mb-6 h-12 w-64" />
+        <div className="grid gap-3 md:grid-cols-[1.4fr_1fr]">
+          <Skeleton className="h-44 rounded-xl" />
+          <Skeleton className="h-44 rounded-xl" />
+        </div>
+      </>
+    );
+  }
 
   const { tone, text } = liveTone(svc.live);
   const source = "image" in svc.spec.source ? svc.spec.source.image : "compose 文件";
 
-  const remove = () =>
-    setFlow({
-      title: `删除 ${name}`,
-      leave: true,
-      changes: [...routes.map((r) => ({ op: "remove_route", hostname: r.spec.hostname }) as Change), { op: "remove_service", name }],
-    });
-
   return (
     <>
-      <Link className="back" to="/services">
-        ← 服务
-      </Link>
-      <div className="page-head">
-        <div>
-          <h1>
+      {back}
+      <PageHeader
+        title={
+          <>
             {svc.name}
-            <Badge tone={tone}>{text}</Badge>
-          </h1>
-          <p>
-            <span className="mono">{source}</span> · 在 <span className="tag">{svc.spec.server}</span>
-          </p>
-        </div>
-        <div className="row" style={{ flex: "none", gap: 8 }}>
-          <button className="btn" onClick={() => setEditing(true)}>
-            修改配置
-          </button>
-          <button className="btn" onClick={() => setFlow({ title: `重新部署 ${name}`, changes: [{ op: "upsert_service", name, spec: svc.spec }] })}>
-            检查并修复
-          </button>
-          <button className="btn danger" onClick={remove}>
-            删除
-          </button>
-        </div>
-      </div>
+            <StatusBadge tone={tone}>{text}</StatusBadge>
+          </>
+        }
+        description={
+          <span className="flex items-center gap-1.5">
+            <span className="font-mono text-xs">{source}</span>· 在 <ServerTag name={svc.spec.server} />
+          </span>
+        }
+        actions={
+          <>
+            <Button variant="outline" onClick={() => setEditing(true)}>
+              <PencilIcon />
+              修改配置
+            </Button>
+            <Button variant="outline" onClick={() => actions.redeploy(svc)}>
+              <RefreshCwIcon />
+              检查并修复
+            </Button>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="outline" size="icon" aria-label="更多操作">
+                  <EllipsisIcon />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-44">
+                <DropdownMenuItem onSelect={() => actions.rollback(name)}>
+                  <HistoryIcon />
+                  回滚到上一个版本
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem variant="destructive" onSelect={() => actions.remove(name)}>
+                  <Trash2Icon />
+                  删除服务
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </>
+        }
+      />
 
-      <div className="grid-2">
-        <div className="panel">
-          <h3>访问</h3>
-          <dl className="kv">
-            <dt>域名</dt>
-            <dd>
-              {routes.map((r) => (
-                <div key={r.id} className="row" style={{ justifyContent: "space-between" }}>
-                  <a className="mono link" href={r.url} target="_blank" rel="noreferrer">
-                    {r.url} ↗
-                  </a>
-                  <button
-                    className="btn small ghost fixed"
-                    onClick={() => setFlow({ title: `移除 ${r.spec.hostname}`, changes: [{ op: "remove_route", hostname: r.spec.hostname }] })}
-                  >
-                    移除
-                  </button>
-                </div>
-              ))}
-              <button className="btn small" style={{ marginTop: routes.length ? 6 : 0 }} onClick={() => setAddingRoute(true)}>
-                ＋ 加域名
-              </button>
-            </dd>
-            <dt>内网地址</dt>
-            <dd className="mono">
-              {Object.entries(svc.addresses).map(([p, a]) => (
-                <div key={p}>
-                  {p} → {a}
-                </div>
-              ))}
-              {Object.keys(svc.addresses).length === 0 && "-"}
-            </dd>
-            <dt>环境变量</dt>
-            <dd className="mono">{Object.keys(svc.spec.env ?? {}).join(", ") || "-"}</dd>
-          </dl>
-        </div>
-        <div className="panel">
-          <h3>容器</h3>
-          <dl className="kv">
+      <div className="grid gap-3 md:grid-cols-[1.4fr_1fr]">
+        <Card className="gap-4 py-5 shadow-xs">
+          <CardHeader className="px-5">
+            <CardTitle className="text-sm font-medium text-muted-foreground">访问</CardTitle>
+          </CardHeader>
+          <CardContent className="px-5">
+            <dl className="grid grid-cols-[88px_1fr] gap-x-4 gap-y-3 text-sm">
+              <dt className="text-muted-foreground">域名</dt>
+              <dd className="grid min-w-0 gap-1">
+                {routes.map((r) => (
+                  <div key={r.id} className="flex items-center justify-between gap-2">
+                    <a className="inline-flex min-w-0 items-center gap-1 font-mono text-[13px] text-primary hover:underline" href={r.url} target="_blank" rel="noreferrer">
+                      <span className="truncate">{r.url}</span>
+                      <ArrowUpRightIcon className="size-3.5 shrink-0" />
+                    </a>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          variant="ghost"
+                          size="icon-xs"
+                          aria-label={`移除 ${r.spec.hostname}`}
+                          onClick={() => actions.plan({ title: `移除 ${r.spec.hostname}`, changes: [{ op: "remove_route", hostname: r.spec.hostname }] })}
+                        >
+                          <XIcon />
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent>移除这个域名</TooltipContent>
+                    </Tooltip>
+                  </div>
+                ))}
+                <Button variant="outline" size="xs" className="w-fit" onClick={() => setAddingRoute(true)}>
+                  <PlusIcon />
+                  加域名
+                </Button>
+              </dd>
+              <dt className="text-muted-foreground">内网地址</dt>
+              <dd className="font-mono text-[13px]">
+                {Object.entries(svc.addresses).map(([p, a]) => (
+                  <div key={p}>
+                    {p} → {a}
+                  </div>
+                ))}
+                {Object.keys(svc.addresses).length === 0 && "-"}
+              </dd>
+              <dt className="text-muted-foreground">环境变量</dt>
+              <dd className="flex flex-wrap gap-1">
+                {Object.keys(svc.spec.env ?? {}).map((k) => (
+                  <Badge key={k} variant="secondary" className="font-mono font-normal">
+                    {k}
+                  </Badge>
+                ))}
+                {!Object.keys(svc.spec.env ?? {}).length && "-"}
+              </dd>
+            </dl>
+          </CardContent>
+        </Card>
+        <Card className="gap-4 py-5 shadow-xs">
+          <CardHeader className="px-5">
+            <CardTitle className="text-sm font-medium text-muted-foreground">容器</CardTitle>
+          </CardHeader>
+          <CardContent className="grid gap-2.5 px-5 text-sm">
             {svc.live?.containers?.map((c) => (
-              <Container key={c.name} name={c.service} state={c.state} status={c.status} />
+              <div key={c.name} className="flex items-center gap-3">
+                <span className="w-24 truncate text-muted-foreground">{c.service}</span>
+                <Dot tone={c.state === "running" ? "ok" : "bad"} />
+                <span>{c.status || c.state}</span>
+              </div>
             ))}
-            {!svc.live?.containers?.length && (
-              <>
-                <dt>容器</dt>
-                <dd>{svc.live?.error ?? "没有容器"}</dd>
-              </>
-            )}
-          </dl>
-        </div>
+            {!svc.live?.containers?.length && <span className="text-muted-foreground">{svc.live?.error ?? "没有容器"}</span>}
+          </CardContent>
+        </Card>
       </div>
 
-      <div className="tabs">
-        {(
-          [
-            ["logs", "日志"],
-            ["history", "部署历史"],
-            ["config", "配置"],
-          ] as [Tab, string][]
-        ).map(([t, label]) => (
-          <button key={t} className={tab === t ? "on" : ""} onClick={() => setTab(t)}>
-            {label}
-          </button>
-        ))}
-      </div>
-      {tab === "logs" && <LogStream path={`/api/services/${encodeURIComponent(name)}/logs/stream`} />}
-      {tab === "history" && <History name={name} onRollback={(t) => setFlow({ title: `回滚到 #${t.deployment_id}`, changes: [{ op: "upsert_service", name, spec: t.spec }] })} />}
-      {tab === "config" && <pre className="config">{JSON.stringify(svc.spec, null, 2)}</pre>}
+      <Tabs value={tab} onValueChange={(t) => setParams({ tab: t }, { replace: true })} className="mt-8">
+        <TabsList>
+          <TabsTrigger value="logs">日志</TabsTrigger>
+          <TabsTrigger value="history">部署历史</TabsTrigger>
+          <TabsTrigger value="config">配置</TabsTrigger>
+        </TabsList>
+        <TabsContent value="logs" className="mt-3">
+          <LogStream path={`/api/services/${encodeURIComponent(name)}/logs/stream`} />
+        </TabsContent>
+        <TabsContent value="history" className="mt-3">
+          <History name={name} />
+        </TabsContent>
+        <TabsContent value="config" className="mt-3">
+          <CodeBlock>{JSON.stringify(svc.spec, null, 2)}</CodeBlock>
+        </TabsContent>
+      </Tabs>
 
-      {editing && (
-        <EditService
-          svc={svc}
-          onClose={() => setEditing(false)}
-          onSubmit={(spec) => {
-            setEditing(false);
-            setFlow({ title: `修改 ${name}`, changes: [{ op: "upsert_service", name, spec }] });
-          }}
-        />
-      )}
-      {addingRoute && (
-        <AddRoute
-          service={name}
-          onClose={() => setAddingRoute(false)}
-          onSubmit={(c) => {
-            setAddingRoute(false);
-            setFlow({ title: "加域名", changes: [c] });
-          }}
-        />
-      )}
-      {flow && (
-        <Drawer
-          title="Plan"
-          zh={flow.title}
-          onClose={() => {
-            setFlow(null);
-            refresh();
-            reload();
-          }}
-        >
-          <PlanFlow
-            changes={flow.changes}
-            onFinished={(ok) => {
-              refresh();
-              reload();
-              if (ok && flow.leave) setTimeout(() => nav("/services"), 900);
-            }}
-          />
-        </Drawer>
-      )}
+      <EditService svc={svc} open={editing} onClose={() => setEditing(false)} />
+      <AddRoute service={name} open={addingRoute} onClose={() => setAddingRoute(false)} />
     </>
   );
 }
 
-function Container({ name, state, status }: { name: string; state: string; status: string }) {
-  return (
-    <>
-      <dt>{name}</dt>
-      <dd className="row" style={{ gap: 8 }}>
-        <Light tone={state === "running" ? "go" : "stop"} />
-        <span style={{ flex: 1 }}>{status || state}</span>
-      </dd>
-    </>
-  );
-}
-
-function History({ name, onRollback }: { name: string; onRollback: (t: RollbackTarget) => void }) {
+function History({ name }: { name: string }) {
   const { data } = usePoll<DeploymentView[]>(`/api/services/${encodeURIComponent(name)}/deployments`, 15000);
-  const [error, setError] = useState<unknown>(null);
-  if (!data) return <p>载入中…</p>;
-  if (data.length === 0) return <div className="empty">还没有部署记录。</div>;
-  const rollback = async (id: number) => {
-    setError(null);
-    try {
-      onRollback(await api.get<RollbackTarget>(`/api/services/${encodeURIComponent(name)}/rollback?to=${id}`));
-    } catch (e) {
-      setError(e);
-    }
-  };
+  const actions = useActions();
+  if (!data) return <Skeleton className="h-40 rounded-xl" />;
+  if (data.length === 0) return <Empty>还没有部署记录。</Empty>;
   return (
-    <>
-      <ErrorNote error={error} />
-      <div className="table-wrap">
-      <table className="manifest">
-        <thead>
-          <tr>
-            <th>#</th>
-            <th>时间</th>
-            <th>服务器</th>
-            <th>镜像</th>
-            <th />
-          </tr>
-        </thead>
-        <tbody>
+    <div className="overflow-hidden rounded-xl border bg-card shadow-xs">
+      <Table>
+        <TableHeader className="bg-muted/50">
+          <TableRow>
+            <TableHead className="pl-4">#</TableHead>
+            <TableHead>时间</TableHead>
+            <TableHead>服务器</TableHead>
+            <TableHead>镜像</TableHead>
+            <TableHead />
+          </TableRow>
+        </TableHeader>
+        <TableBody>
           {data.map((d, i) => (
-            <tr key={d.id}>
-              <td className="mono">#{d.id}</td>
-              <td>{ago(d.created_at)}</td>
-              <td>
-                <span className="tag">{d.server}</span>
-              </td>
-              <td className="mono muted" style={{ wordBreak: "break-all" }}>
+            <TableRow key={d.id}>
+              <TableCell className="pl-4 font-mono text-xs">#{d.id}</TableCell>
+              <TableCell>
+                <span title={new Date(d.created_at).toLocaleString("zh-CN")}>{ago(d.created_at)}</span>
+              </TableCell>
+              <TableCell>
+                <ServerTag name={d.server} />
+              </TableCell>
+              <TableCell className="max-w-md truncate font-mono text-xs text-muted-foreground" title={d.images.map((im) => im.digest ?? im.image).join(" ")}>
                 {d.images.map((im) => im.digest ?? im.image).join(" ")}
-              </td>
-              <td style={{ textAlign: "right" }}>
-                {i === 0 || d.hash === data[0].hash ? (
-                  <span className="badge">当前版本</span>
+              </TableCell>
+              <TableCell className="pr-4 text-right">
+                {i === 0 ? (
+                  <Badge variant="secondary">当前版本</Badge>
+                ) : d.hash === data[0].hash ? (
+                  <span className="text-xs text-muted-foreground">和当前相同</span>
                 ) : (
-                  <button className="btn small" disabled={!d.spec} title={d.spec ? "" : "这条记录太早，没有保存当时的配置"} onClick={() => rollback(d.id)}>
+                  <Button variant="outline" size="xs" disabled={!d.spec} title={d.spec ? "" : "这条记录太早，没有保存当时的配置"} onClick={() => actions.rollback(name, d.id)}>
+                    <HistoryIcon />
                     回滚到这里
-                  </button>
+                  </Button>
                 )}
-              </td>
-            </tr>
+              </TableCell>
+            </TableRow>
           ))}
-        </tbody>
-      </table>
-      </div>
-    </>
+        </TableBody>
+      </Table>
+    </div>
   );
 }
 
-function EditService({ svc, onClose, onSubmit }: { svc: ServiceView; onClose: () => void; onSubmit: (spec: ServiceView["spec"]) => void }) {
+function EditService({ svc, open, onClose }: { svc: ServiceView; open: boolean; onClose: () => void }) {
+  return (
+    <Sheet open={open} onOpenChange={(o) => !o && onClose()}>
+      <SheetContent className="w-full gap-0 sm:max-w-xl">
+        <SheetHeader className="border-b">
+          <SheetTitle>修改 {svc.name}</SheetTitle>
+          <SheetDescription>改完生成计划，确认后重新部署。</SheetDescription>
+        </SheetHeader>
+        {open && <EditForm svc={svc} onClose={onClose} />}
+      </SheetContent>
+    </Sheet>
+  );
+}
+
+function EditForm({ svc, onClose }: { svc: ServiceView; onClose: () => void }) {
+  const actions = useActions();
   const isImage = "image" in svc.spec.source;
   const [image, setImage] = useState(isImage ? (svc.spec.source as { image: string }).image : "");
   const [compose, setCompose] = useState(!isImage ? ((svc.spec.source as { compose: { content?: string } }).compose.content ?? "") : "");
   const [ports, setPorts] = useState<PortSpec[]>(svc.spec.ports ?? []);
   const [envText, setEnvText] = useState(formatEnv(svc.spec.env));
-  const submit = () =>
-    onSubmit({
+  const submit = () => {
+    const spec = {
       ...svc.spec,
       source: isImage ? { image: image.trim() } : { compose: { content: compose } },
       ports,
       env: isImage ? parseEnv(envText) : svc.spec.env,
-    });
+    };
+    onClose();
+    actions.plan({ title: `修改 ${svc.name}`, changes: [{ op: "upsert_service", name: svc.name, spec }] });
+  };
   return (
-    <Drawer
-      title="Edit"
-      zh={`修改 ${svc.name}`}
-      onClose={onClose}
-      footer={
-        <>
-          <button className="btn ghost" onClick={onClose}>
-            取消
-          </button>
-          <button className="btn primary" onClick={submit}>
-            生成计划 →
-          </button>
-        </>
-      }
-    >
-      {isImage ? (
-        <div className="field">
-          <label>镜像</label>
-          <input type="text" value={image} onChange={(e) => setImage(e.target.value)} />
-        </div>
-      ) : (
-        <div className="field">
-          <label>compose.yaml</label>
-          <textarea value={compose} onChange={(e) => setCompose(e.target.value)} />
-        </div>
-      )}
-      <div className="field">
-        <label>端口</label>
-        <PortsEditor ports={ports} onChange={setPorts} />
+    <>
+      <div className="grid flex-1 content-start gap-5 overflow-auto p-4">
+        {isImage ? (
+          <Field label="镜像" htmlFor="image">
+            <Input id="image" value={image} onChange={(e) => setImage(e.target.value)} />
+          </Field>
+        ) : (
+          <Field label="compose.yaml" htmlFor="compose">
+            <Textarea id="compose" className="min-h-48 font-mono text-xs" value={compose} onChange={(e) => setCompose(e.target.value)} />
+          </Field>
+        )}
+        <Field label="端口">
+          <PortsEditor ports={ports} onChange={setPorts} />
+        </Field>
+        {isImage && (
+          <Field label="环境变量" htmlFor="env" help="一行一个 KEY=value。删掉一行就是删除这个变量。">
+            <Textarea id="env" className="min-h-32 font-mono text-xs" value={envText} onChange={(e) => setEnvText(e.target.value)} />
+          </Field>
+        )}
       </div>
-      {isImage && (
-        <div className="field">
-          <label>环境变量</label>
-          <textarea style={{ minHeight: 120 }} value={envText} onChange={(e) => setEnvText(e.target.value)} />
-        </div>
-      )}
-    </Drawer>
+      <SheetFooter className="flex-row justify-end border-t">
+        <Button variant="ghost" onClick={onClose}>
+          取消
+        </Button>
+        <Button onClick={submit}>生成计划</Button>
+      </SheetFooter>
+    </>
   );
 }
 
-function AddRoute({ service, onClose, onSubmit }: { service: string; onClose: () => void; onSubmit: (c: Change) => void }) {
+function AddRoute({ service, open, onClose }: { service: string; open: boolean; onClose: () => void }) {
   const { status } = useStatus();
+  const actions = useActions();
   const [hostname, setHostname] = useState("");
   const gateways = status?.gateways ?? [];
-  const [gateway, setGateway] = useState(gateways.find((g) => g.spec.default)?.name ?? gateways[0]?.name ?? "");
+  const [gateway, setGateway] = useState("");
+  const chosen = gateway || gateways.find((g) => g.spec.default)?.name || gateways[0]?.name || "";
   const suffixes = [...new Set(status?.routes.map((r) => r.spec.hostname.split(".").slice(1).join(".")).filter(Boolean))];
+  const submit = () => {
+    onClose();
+    setHostname("");
+    actions.plan({ title: "加域名", changes: [{ op: "upsert_route", spec: { hostname: hostname.trim().toLowerCase(), service, gateway: chosen } }] });
+  };
   return (
-    <Drawer
-      title="Domain"
-      zh="加域名"
-      onClose={onClose}
-      footer={
-        <>
-          <button className="btn ghost" onClick={onClose}>
+    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>给 {service} 加域名</DialogTitle>
+          <DialogDescription>域名经过网关转发到这个服务。</DialogDescription>
+        </DialogHeader>
+        <div className="grid gap-4">
+          <Field label="域名" htmlFor="hostname">
+            <Input id="hostname" autoFocus value={hostname} onChange={(e) => setHostname(e.target.value)} placeholder="app.example.com" />
+            {!hostname && <DomainChips suggestions={suffixes.map((s) => `${service}.${s}`)} onPick={setHostname} />}
+          </Field>
+          <Field label="网关" htmlFor="gw">
+            <Picker id="gw" value={chosen} options={gatewayOptions(gateways)} onChange={setGateway} placeholder="还没有网关" />
+          </Field>
+        </div>
+        <DialogFooter>
+          <Button variant="ghost" onClick={onClose}>
             取消
-          </button>
-          <button
-            className="btn primary"
-            disabled={!hostname.trim() || !gateway}
-            onClick={() => onSubmit({ op: "upsert_route", spec: { hostname: hostname.trim().toLowerCase(), service, gateway } })}
-          >
-            生成计划 →
-          </button>
-        </>
-      }
-    >
-      <div className="field">
-        <label>域名</label>
-        <input type="text" autoFocus value={hostname} onChange={(e) => setHostname(e.target.value)} placeholder="app.example.com" />
-        {!hostname && (
-          <div className="chips">
-            {suffixes.map((s) => (
-              <button className="chip" key={s} onClick={() => setHostname(`${service}.${s}`)}>
-                {service}.{s}
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
-      <div className="field">
-        <label>网关</label>
-        <select value={gateway} onChange={(e) => setGateway(e.target.value)}>
-          {gateways.map((g) => (
-            <option key={g.name} value={g.name}>
-              {g.name}（{g.spec.server}）
-            </option>
-          ))}
-        </select>
-      </div>
-    </Drawer>
+          </Button>
+          <Button disabled={!hostname.trim() || !chosen} onClick={submit}>
+            生成计划
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

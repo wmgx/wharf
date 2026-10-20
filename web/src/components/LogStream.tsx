@@ -1,5 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { followLogs } from "../api";
+import { EraserIcon, PauseIcon, PlayIcon } from "lucide-react";
+import { followLogs } from "@/api";
+import { Button } from "@/components/ui/button";
+import { Dot } from "./common";
 
 const MAX_LINES = 3000;
 
@@ -50,21 +53,27 @@ export function LogStream({ path }: { path: string }) {
   };
 
   return (
-    <div className="console-wrap">
-      <div className="console-bar">
-        <span className={`light ${live ? "go" : ""}`} />
+    <div className="overflow-hidden rounded-lg border bg-card">
+      <div className="flex h-10 items-center gap-2 border-b px-3 text-xs text-muted-foreground">
+        <Dot tone={live ? "ok" : "idle"} />
         <span>{live ? "实时" : "连接中…"}</span>
-        <span className="grow" />
+        <span className="flex-1" />
         <span>{lines.length} 行</span>
-        <button className="btn small ghost" onClick={() => setPaused((p) => !p)}>
+        <Button variant="ghost" size="xs" onClick={() => setPaused((p) => !p)}>
+          {paused ? <PlayIcon /> : <PauseIcon />}
           {paused ? "继续滚动" : "暂停滚动"}
-        </button>
-        <button className="btn small ghost" onClick={() => setLines([])}>
+        </Button>
+        <Button variant="ghost" size="xs" onClick={() => setLines([])}>
+          <EraserIcon />
           清屏
-        </button>
+        </Button>
       </div>
-      <div className="console" ref={box} onScroll={onScroll}>
-        {lines.length === 0 && <span className="ts">等待日志…</span>}
+      <div
+        className="h-[420px] overflow-auto bg-muted/30 px-3.5 py-3 font-mono text-xs leading-relaxed break-all whitespace-pre-wrap"
+        ref={box}
+        onScroll={onScroll}
+      >
+        {lines.length === 0 && <span className="text-muted-foreground">等待日志…</span>}
         {lines.map((l, i) => (
           <LogLine key={i} line={l} />
         ))}
@@ -75,15 +84,15 @@ export function LogStream({ path }: { path: string }) {
 
 /** compose 日志格式：`服务-1  | 2026-10-20T12:00:00.000Z 内容`。把时间戳调暗。 */
 function LogLine({ line }: { line: string }) {
-  if (line.startsWith("[wharf]")) return <div className="sys">{line}</div>;
+  if (line.startsWith("[wharf]")) return <div className="text-warning">{line}</div>;
   const m = line.match(/^(.*?\|\s*)?(\d{4}-\d\d-\d\dT[\d:.]+Z?)\s(.*)$/);
   if (!m) return <div>{line}</div>;
   const time = m[2].slice(11, 19);
   const isErr = /\b(error|fatal|panic|exception)\b/i.test(m[3]);
   return (
     <div>
-      <span className="ts">{time} </span>
-      <span className={isErr ? "err" : undefined}>{m[3]}</span>
+      <span className="text-muted-foreground">{time} </span>
+      <span className={isErr ? "text-destructive" : undefined}>{m[3]}</span>
     </div>
   );
 }

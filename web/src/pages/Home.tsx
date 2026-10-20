@@ -1,86 +1,88 @@
-import { useState } from "react";
+import { ArrowUpRightIcon, PlusIcon } from "lucide-react";
+import { useState, type CSSProperties } from "react";
 import { Link } from "react-router-dom";
-import { useStatus } from "../App";
-import { Badge, Mark, PageHead, liveTone } from "../components/ui";
+import { CardsSkeleton, Empty, Mark, PageHeader, SectionTitle, ServerTag, StatusBadge, liveTone } from "@/components/common";
+import { Button } from "@/components/ui/button";
+import { useStatus } from "@/status";
 import { NewService } from "./NewService";
+
+const card =
+  "group flex flex-col gap-3 rounded-xl border bg-card p-4 shadow-xs transition-all hover:-translate-y-px hover:border-foreground/15 hover:shadow-md animate-in fade-in slide-in-from-bottom-1 fill-mode-both";
 
 /** 首页导航：每条路由一张卡片，直接点开；没有域名的服务给内网地址。 */
 export function Home() {
   const { status, refresh } = useStatus();
   const [creating, setCreating] = useState(false);
-  if (!status) return <PageHead title="港口" sub="载入中…" />;
 
-  const byService = new Map(status.services.map((s) => [s.name, s]));
-  const routed = new Set(status.routes.map((r) => r.spec.service));
-  const internal = status.services.filter((s) => !routed.has(s.name));
+  const byService = new Map(status?.services.map((s) => [s.name, s]));
+  const routed = new Set(status?.routes.map((r) => r.spec.service));
+  const internal = status?.services.filter((s) => !routed.has(s.name)) ?? [];
 
   return (
     <>
-      <PageHead
+      <PageHeader
         title="港口"
-        sub={`${status.servers.length} 台服务器 · ${status.services.length} 个服务 · ${status.routes.length} 个域名`}
-        action={
-          <button className="btn primary" onClick={() => setCreating(true)}>
+        description={status ? `${status.servers.length} 台服务器 · ${status.services.length} 个服务 · ${status.routes.length} 个域名` : "载入中…"}
+        actions={
+          <Button onClick={() => setCreating(true)}>
+            <PlusIcon />
             新建服务
-          </button>
+          </Button>
         }
       />
 
-      <h2 className="section">
-        域名 <span className="count">{status.routes.length}</span>
-      </h2>
-      <div className="yard">
-        {status.routes.map((r, i) => {
-          const svc = byService.get(r.spec.service);
-          const { tone, text } = liveTone(svc?.live);
-          return (
-            <a className="crate" key={r.id} href={r.url} target="_blank" rel="noreferrer" style={{ ["--i" as string]: i }}>
-              <div className="head">
-                <Mark name={r.spec.service} url={r.url} />
-                <div style={{ minWidth: 0 }}>
-                  <div className="name">{r.spec.service}</div>
-                  <div className="addr">{r.url.replace(/^https?:\/\//, "")}</div>
+      <SectionTitle count={status?.routes.length}>域名</SectionTitle>
+      {!status ? (
+        <CardsSkeleton />
+      ) : status.routes.length === 0 ? (
+        <Empty>还没有域名。新建服务时可以顺手加一个。</Empty>
+      ) : (
+        <div className="grid grid-cols-[repeat(auto-fill,minmax(260px,1fr))] gap-3">
+          {status.routes.map((r, i) => {
+            const svc = byService.get(r.spec.service);
+            const { tone, text } = liveTone(svc?.live);
+            return (
+              <a className={card} style={{ animationDelay: `${i * 30}ms` } as CSSProperties} key={r.id} href={r.url} target="_blank" rel="noreferrer">
+                <div className="flex items-center gap-3">
+                  <Mark name={r.spec.service} url={r.url} />
+                  <div className="min-w-0">
+                    <div className="font-semibold">{r.spec.service}</div>
+                    <div className="truncate font-mono text-xs text-muted-foreground">{r.url.replace(/^https?:\/\//, "")}</div>
+                  </div>
                 </div>
-              </div>
-              <div className="foot">
-                <span className="row" style={{ gap: 6 }}>
-                  <Badge tone={tone}>{text}</Badge>
-                  <span className="tag">{svc?.spec.server ?? "-"}</span>
-                </span>
-                <span className="arrow">↗</span>
-              </div>
-            </a>
-          );
-        })}
-        {status.routes.length === 0 && <div className="empty">还没有域名。新建服务时可以顺手加一个。</div>}
-      </div>
+                <div className="flex items-center gap-1.5">
+                  <StatusBadge tone={tone}>{text}</StatusBadge>
+                  <ServerTag name={svc?.spec.server ?? "-"} />
+                  <ArrowUpRightIcon className="ml-auto size-4 text-muted-foreground transition-transform group-hover:translate-x-0.5 group-hover:-translate-y-0.5 group-hover:text-primary" />
+                </div>
+              </a>
+            );
+          })}
+        </div>
+      )}
 
       {internal.length > 0 && (
         <>
-          <h2 className="section">
-            只在内网 <span className="count">{internal.length}</span>
-          </h2>
-          <div className="yard">
+          <SectionTitle count={internal.length}>只在内网</SectionTitle>
+          <div className="grid grid-cols-[repeat(auto-fill,minmax(260px,1fr))] gap-3">
             {internal.map((s, i) => {
               const { tone, text } = liveTone(s.live);
               return (
-                <Link className="crate" key={s.name} to={`/services/${s.name}`} style={{ ["--i" as string]: i }}>
-                  <div className="head">
+                <Link className={card} style={{ animationDelay: `${i * 30}ms` }} key={s.name} to={`/services/${s.name}`}>
+                  <div className="flex items-center gap-3">
                     <Mark name={s.name} />
-                    <div style={{ minWidth: 0 }}>
-                      <div className="name">{s.name}</div>
+                    <div className="min-w-0">
+                      <div className="font-semibold">{s.name}</div>
                       {Object.entries(s.addresses).map(([port, addr]) => (
-                        <div className="addr" key={port}>
+                        <div className="truncate font-mono text-xs text-muted-foreground" key={port}>
                           {addr}
                         </div>
                       ))}
                     </div>
                   </div>
-                  <div className="foot">
-                    <span className="row" style={{ gap: 6 }}>
-                      <Badge tone={tone}>{text}</Badge>
-                      <span className="tag">{s.spec.server}</span>
-                    </span>
+                  <div className="flex items-center gap-1.5">
+                    <StatusBadge tone={tone}>{text}</StatusBadge>
+                    <ServerTag name={s.spec.server} />
                   </div>
                 </Link>
               );
@@ -89,14 +91,13 @@ export function Home() {
         </>
       )}
 
-      {creating && (
-        <NewService
-          onClose={() => {
-            setCreating(false);
-            refresh();
-          }}
-        />
-      )}
+      <NewService
+        open={creating}
+        onClose={() => {
+          setCreating(false);
+          refresh();
+        }}
+      />
     </>
   );
 }

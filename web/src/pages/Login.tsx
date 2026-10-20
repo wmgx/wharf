@@ -1,7 +1,11 @@
 import { useState } from "react";
-import { api, setToken } from "../api";
-import { Logo } from "../App";
-import { ErrorNote } from "../components/ui";
+import { api, setToken } from "@/api";
+import { Logo } from "@/components/app-sidebar";
+import { ErrorNote } from "@/components/common";
+import { Field } from "@/components/fields";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 
 export function Login({ onDone }: { onDone: () => void }) {
   const [token, setValue] = useState("");
@@ -25,27 +29,39 @@ export function Login({ onDone }: { onDone: () => void }) {
   };
 
   return (
-    <div className="gate">
-      <form className="card" onSubmit={submit}>
-        <div className="brand">
+    <div className="grid min-h-svh place-items-center bg-[radial-gradient(800px_400px_at_50%_0%,color-mix(in_oklch,var(--primary)_10%,transparent),transparent_70%)] p-4">
+      <div className="grid w-full max-w-sm gap-6">
+        <div className="flex items-center gap-2.5 self-center text-lg font-semibold">
           <Logo />
           Wharf
         </div>
-        <h1>登录</h1>
-        <p>粘贴 API token。token 只保存在这个浏览器里。</p>
-        <div className="field">
-          <label htmlFor="token">API token</label>
-          <input id="token" type="password" autoFocus autoComplete="off" value={token} onChange={(e) => setValue(e.target.value)} />
-          <span className="help">
-            管理员 token 在控制面数据目录的 <span className="mono">admin.token</span>；也可以用{" "}
-            <span className="mono">wharf token create</span> 新建一个。
-          </span>
-        </div>
-        <ErrorNote error={error} />
-        <button className="btn primary" disabled={!token.trim() || busy} style={{ width: "100%" }}>
-          {busy ? "验证中…" : "进入"}
-        </button>
-      </form>
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-lg">登录</CardTitle>
+            <CardDescription>粘贴 API token。token 只保存在这个浏览器里。</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <form className="grid gap-4" onSubmit={submit}>
+              <Field
+                label="API token"
+                htmlFor="token"
+                help={
+                  <>
+                    管理员 token 在控制面数据目录的 <code className="font-mono">admin.token</code>；也可以用{" "}
+                    <code className="font-mono">wharf token create</code> 新建一个。
+                  </>
+                }
+              >
+                <Input id="token" type="password" autoFocus autoComplete="off" value={token} onChange={(e) => setValue(e.target.value)} />
+              </Field>
+              <ErrorNote error={error} />
+              <Button type="submit" className="w-full" disabled={!token.trim() || busy}>
+                {busy ? "验证中…" : "进入"}
+              </Button>
+            </form>
+          </CardContent>
+        </Card>
+      </div>
     </div>
   );
 }

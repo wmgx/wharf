@@ -2,9 +2,11 @@ import { Background, Controls, Handle, Position, ReactFlow, type Edge, type Node
 import "@xyflow/react/dist/style.css";
 import { useMemo } from "react";
 import { useNavigate } from "react-router-dom";
-import { useStatus } from "../App";
-import { Light, PageHead, liveTone, type Tone } from "../components/ui";
-import type { Status } from "../types";
+import { Dot, PageHeader, liveTone, serverTone, type Tone } from "@/components/common";
+import { cn } from "@/lib/utils";
+import { useStatus } from "@/status";
+import { useTheme } from "@/theme";
+import type { Status } from "@/types";
 
 /** 控制面到 agent 超过这个延迟标红。 */
 const SLOW_MS = 150;
@@ -16,11 +18,16 @@ type GroupData = { name: string; tone: Tone; sub: string };
 
 function BoxNode({ data }: NodeProps<Node<BoxData>>) {
   return (
-    <div className={`topo-node ${data.cls ?? ""}`}>
+    <div
+      className={cn(
+        "min-w-36 cursor-pointer rounded-lg border bg-card px-3 py-2 shadow-xs transition-colors hover:border-foreground/20",
+        data.cls === "core" && "border-primary ring-3 ring-primary/10",
+      )}
+    >
       <Handle type="target" position={Position.Top} style={{ opacity: 0 }} />
-      <div className="k">{data.kind}</div>
-      <div className="n">
-        {data.tone && <Light tone={data.tone} />}
+      <div className="text-[10px] text-muted-foreground">{data.kind}</div>
+      <div className={cn("flex items-center gap-1.5 text-[13px] font-medium", data.cls === "route" && "font-mono text-xs font-normal")}>
+        {data.tone && <Dot tone={data.tone} />}
         {data.name}
       </div>
       <Handle type="source" position={Position.Bottom} style={{ opacity: 0 }} />
@@ -32,12 +39,12 @@ function BoxNode({ data }: NodeProps<Node<BoxData>>) {
 
 function GroupNode({ data }: NodeProps<Node<GroupData>>) {
   return (
-    <div className="topo-group">
+    <div className="size-full rounded-xl border bg-muted/40">
       <Handle type="target" position={Position.Top} style={{ opacity: 0 }} />
-      <div className="label">
-        <Light tone={data.tone} />
+      <div className="absolute top-2.5 left-3.5 flex items-center gap-2 text-[13px] font-semibold">
+        <Dot tone={data.tone} />
         {data.name}
-        <span className="sub">{data.sub}</span>
+        <span className="font-mono text-[11px] font-normal text-muted-foreground">{data.sub}</span>
       </div>
     </div>
   );
@@ -45,11 +52,11 @@ function GroupNode({ data }: NodeProps<Node<GroupData>>) {
 
 const nodeTypes = { box: BoxNode, group: GroupNode };
 
-const go = "var(--ok)";
-const signal = "var(--warn)";
-const stop = "var(--bad)";
-const fog = "var(--border-strong)";
-const labelStyle = { fill: "var(--text-2)", fontFamily: "Geist Mono, monospace", fontSize: 11 };
+const go = "var(--success)";
+const signal = "var(--warning)";
+const stop = "var(--destructive)";
+const fog = "var(--muted-foreground)";
+const labelStyle = { fill: "var(--muted-foreground)", fontFamily: "Geist Mono, monospace", fontSize: 11 };
 
 function build(status: Status): { nodes: Node[]; edges: Edge[] } {
   const nodes: Node[] = [];
@@ -62,7 +69,7 @@ function build(status: Status): { nodes: Node[]; edges: Edge[] } {
     const gws = status.gateways.filter((g) => g.spec.server === srv.name);
     const svcs = status.services.filter((s) => s.spec.server === srv.name);
     const width = Math.max(gws.length, svcs.length, 1) * COL + 40;
-    const tone: Tone = !srv.joined ? "fog" : srv.online ? "go" : "stop";
+    const tone: Tone = serverTone(srv);
     const addr = srv.private_addr ? `${srv.private_addr.ip} · ${srv.private_addr.network}` : "无内网地址";
     nodes.push({
       id: `srv:${srv.name}`,
@@ -148,28 +155,22 @@ function build(status: Status): { nodes: Node[]; edges: Edge[] } {
 }
 
 export function Topology() {
-  const { status, theme } = useStatus();
+  const { status } = useStatus();
+  const { theme } = useTheme();
   const nav = useNavigate();
   const graph = useMemo(() => (status ? build(status) : null), [status]);
 
   return (
     <>
-      <PageHead title="拓扑" sub="域名经过网关到达服务；虚线表示明文或断开。点节点进入详情。" />
-      <div className="legend">
-        <span>
-          <i />
-          加密 / 本机
-        </span>
-        <span>
-          <i className="dash" />
+      <PageHeader title="拓扑" description="域名经过网关到达服务。点节点进入详情。" />
+      <div className="mb-3 flex flex-wrap gap-5 text-xs text-muted-foreground">
+        <Legend color={go}>加密 / 本机</Legend>
+        <Legend color={signal} dashed>
           内网直连（明文）
-        </span>
-        <span>
-          <i className="slow" />
-          延迟超过 {SLOW_MS}ms 或断开
-        </span>
+        </Legend>
+        <Legend color={stop}>延迟超过 {SLOW_MS}ms 或断开</Legend>
       </div>
-      <div className="topo">
+      <div className="h-[calc(100svh-15rem)] min-h-[480px] overflow-hidden rounded-xl border bg-card shadow-xs">
         {graph && (
           <ReactFlow
             nodes={graph.nodes}
@@ -192,5 +193,14 @@ export function Topology() {
         )}
       </div>
     </>
+  );
+}
+
+function Legend({ color, dashed, children }: { color: string; dashed?: boolean; children: React.ReactNode }) {
+  return (
+    <span className="flex items-center gap-1.5">
+      <i className="inline-block w-5 border-t-2" style={{ borderColor: color, borderStyle: dashed ? "dashed" : "solid" }} />
+      {children}
+    </span>
   );
 }
