@@ -4,7 +4,7 @@ import { useStatus } from "../App";
 import { toName } from "../components/fields";
 import { LogStream } from "../components/LogStream";
 import { PlanFlow } from "../components/PlanFlow";
-import { Drawer, Light, PageHead, crateClass, liveTone } from "../components/ui";
+import { Badge, Drawer, PageHead, liveTone } from "../components/ui";
 import type { Change, GatewayTls, GatewayView } from "../types";
 
 const TLS_TEXT: Record<GatewayTls, string> = {
@@ -23,39 +23,35 @@ export function Gateways() {
 
   return (
     <>
-      <PageHead en="Gateways" zh="网关" sub="公网流量从网关进来，再转发到各台服务器上的服务。" />
+      <PageHead title="网关" sub="公网流量从网关进来，再转发到各台服务器上的服务。" />
       <div className="yard">
         {gateways.map((g, i) => {
           const { tone, text } = liveTone(g.live);
           const tls = g.spec.tls ?? "auto";
           return (
-            <button
-              className={`crate ${crateClass(tone)}`}
-              key={g.name}
-              style={{ ["--i" as string]: i, textAlign: "left", cursor: "pointer" }}
-              onClick={() => setOpen(g.name)}
-            >
-              <span className="tag">
-                {g.spec.kind}
-                {g.spec.default ? " · 默认" : ""}
-              </span>
-              <div className="name">{g.name}</div>
-              <div className="meta">
-                <Light tone={tone} />
-                {text} · 在 {g.spec.server}
-              </div>
-              <div className="addr">
-                {TLS_TEXT[tls]} · {tls === "off" ? `HTTP ${g.spec.http_port ?? 80}` : `HTTPS ${g.spec.https_port ?? 443}`}
+            <button className="crate" key={g.name} style={{ ["--i" as string]: i }} onClick={() => setOpen(g.name)}>
+              <div className="head">
+                <span className="mark">⇄</span>
+                <div>
+                  <div className="name">{g.name}</div>
+                  <div className="meta">
+                    {g.spec.kind} · {TLS_TEXT[tls]} · {tls === "off" ? `HTTP ${g.spec.http_port ?? 80}` : `HTTPS ${g.spec.https_port ?? 443}`}
+                  </div>
+                </div>
               </div>
               <div className="foot">
+                <span className="row" style={{ gap: 6 }}>
+                  <Badge tone={tone}>{text}</Badge>
+                  <span className="tag">{g.spec.server}</span>
+                  {g.spec.default && <span className="badge">默认</span>}
+                </span>
                 <span>{g.routes.length} 个域名</span>
-                <span>详情 →</span>
               </div>
             </button>
           );
         })}
         <button className="crate add" onClick={() => setCreating(true)}>
-          <span className="plus">＋</span>
+          <span className="plus">+</span>
           在某台服务器上新建网关
         </button>
       </div>
@@ -111,7 +107,9 @@ function GatewayDrawer({ g, onClose, onRemove }: { g: GatewayView; onClose: () =
     >
       <dl className="kv">
         <dt>服务器</dt>
-        <dd className="mono">{g.spec.server}</dd>
+        <dd>
+          <span className="tag">{g.spec.server}</span>
+        </dd>
         <dt>证书</dt>
         <dd>{TLS_TEXT[g.spec.tls ?? "auto"]}</dd>
         <dt>端口</dt>
@@ -133,7 +131,7 @@ function GatewayDrawer({ g, onClose, onRemove }: { g: GatewayView; onClose: () =
       {tab === "routes" &&
         (g.routes.length ? (
           g.routes.map((h) => (
-            <div className="mono" key={h} style={{ padding: "6px 0", borderBottom: "1px dashed var(--line)" }}>
+            <div className="mono" key={h} style={{ padding: "8px 0", borderBottom: "1px solid var(--border)" }}>
               {h}
             </div>
           ))

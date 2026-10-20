@@ -37,9 +37,7 @@ function GroupNode({ data }: NodeProps<Node<GroupData>>) {
       <div className="label">
         <Light tone={data.tone} />
         {data.name}
-        <span className="mono" style={{ fontSize: 11, fontWeight: 400, color: "var(--ink-3)" }}>
-          {data.sub}
-        </span>
+        <span className="sub">{data.sub}</span>
       </div>
     </div>
   );
@@ -47,10 +45,11 @@ function GroupNode({ data }: NodeProps<Node<GroupData>>) {
 
 const nodeTypes = { box: BoxNode, group: GroupNode };
 
-const go = "#3ddc97";
-const signal = "#f5a524";
-const stop = "#ff5d5d";
-const fog = "#5f7a94";
+const go = "var(--ok)";
+const signal = "var(--warn)";
+const stop = "var(--bad)";
+const fog = "var(--border-strong)";
+const labelStyle = { fill: "var(--text-2)", fontFamily: "Geist Mono, monospace", fontSize: 11 };
 
 function build(status: Status): { nodes: Node[]; edges: Edge[] } {
   const nodes: Node[] = [];
@@ -78,8 +77,8 @@ function build(status: Status): { nodes: Node[]; edges: Edge[] } {
         type: "box",
         parentId: `srv:${srv.name}`,
         extent: "parent",
-        position: { x: 20 + i * COL, y: 34 },
-        data: { kind: "gateway", name: g.name, tone: liveTone(g.live).tone, to: "/gateways" },
+        position: { x: 20 + i * COL, y: 44 },
+        data: { kind: "网关", name: g.name, tone: liveTone(g.live).tone, to: "/gateways" },
       });
     });
     svcs.forEach((s, i) => {
@@ -89,7 +88,7 @@ function build(status: Status): { nodes: Node[]; edges: Edge[] } {
         parentId: `srv:${srv.name}`,
         extent: "parent",
         position: { x: 20 + i * COL, y: 150 },
-        data: { kind: "service", name: s.name, tone: liveTone(s.live).tone, to: `/services/${s.name}` },
+        data: { kind: "服务", name: s.name, tone: liveTone(s.live).tone, to: `/services/${s.name}` },
       });
     });
     const slow = srv.rtt_ms != null && srv.rtt_ms > SLOW_MS;
@@ -99,8 +98,7 @@ function build(status: Status): { nodes: Node[]; edges: Edge[] } {
       target: `srv:${srv.name}`,
       label: srv.online ? (srv.rtt_ms != null ? `${srv.rtt_ms} ms` : "在线") : "断开",
       style: { stroke: !srv.online ? stop : slow ? stop : fog, strokeDasharray: srv.online ? undefined : "6 4" },
-      labelStyle: { fill: slow || !srv.online ? stop : "#9fb3c8", fontFamily: "IBM Plex Mono", fontSize: 11 },
-      labelBgStyle: { fill: "#0b1622" },
+      labelStyle: { ...labelStyle, fill: slow || !srv.online ? stop : labelStyle.fill },
     });
     x += width + 60;
   });
@@ -109,7 +107,7 @@ function build(status: Status): { nodes: Node[]; edges: Edge[] } {
     id: "core",
     type: "box",
     position: { x: Math.max(0, x - 60) / 2 - 80, y: -150 },
-    data: { kind: "control plane", name: "wharf-core", cls: "core" },
+    data: { kind: "控制面", name: "wharf-core", cls: "core" },
   });
 
   status.routes.forEach((r, i) => {
@@ -118,7 +116,7 @@ function build(status: Status): { nodes: Node[]; edges: Edge[] } {
       id,
       type: "box",
       position: { x: -300, y: i * 74 },
-      data: { kind: "route", name: r.spec.hostname, cls: "route", to: `/services/${r.spec.service}` },
+      data: { kind: "域名", name: r.spec.hostname, cls: "route", to: `/services/${r.spec.service}` },
     });
     if (!r.gateway) return;
     edges.push({
@@ -142,8 +140,7 @@ function build(status: Status): { nodes: Node[]; edges: Edge[] } {
       label: same ? undefined : plain ? "明文" : net,
       type: "smoothstep",
       style: { stroke: plain ? signal : go, strokeDasharray: plain ? "6 4" : undefined },
-      labelStyle: { fill: plain ? signal : "#9fb3c8", fontFamily: "IBM Plex Mono", fontSize: 11 },
-      labelBgStyle: { fill: "#0b1622" },
+      labelStyle: { ...labelStyle, fill: plain ? signal : labelStyle.fill },
     });
   });
 
@@ -151,13 +148,13 @@ function build(status: Status): { nodes: Node[]; edges: Edge[] } {
 }
 
 export function Topology() {
-  const { status } = useStatus();
+  const { status, theme } = useStatus();
   const nav = useNavigate();
   const graph = useMemo(() => (status ? build(status) : null), [status]);
 
   return (
     <>
-      <PageHead en="Topology" zh="拓扑" sub="域名经过网关到达服务；虚线表示明文或断开。点节点进入详情。" />
+      <PageHead title="拓扑" sub="域名经过网关到达服务；虚线表示明文或断开。点节点进入详情。" />
       <div className="legend">
         <span>
           <i />
@@ -182,14 +179,14 @@ export function Topology() {
             nodesDraggable={false}
             nodesConnectable={false}
             fitViewOptions={{ padding: 0.2 }}
-            colorMode="dark"
+            colorMode={theme}
             proOptions={{ hideAttribution: true }}
             onNodeClick={(_, n) => {
               const to = (n.data as BoxData).to;
               if (to) nav(to);
             }}
           >
-            <Background color="#1f3a55" gap={24} />
+            <Background gap={20} size={1} />
             <Controls showInteractive={false} />
           </ReactFlow>
         )}

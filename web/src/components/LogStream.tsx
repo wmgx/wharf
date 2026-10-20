@@ -50,10 +50,10 @@ export function LogStream({ path }: { path: string }) {
   };
 
   return (
-    <div>
+    <div className="console-wrap">
       <div className="console-bar">
         <span className={`light ${live ? "go" : ""}`} />
-        <span>{live ? "LIVE · 实时" : "连接中…"}</span>
+        <span>{live ? "实时" : "连接中…"}</span>
         <span className="grow" />
         <span>{lines.length} 行</span>
         <button className="btn small ghost" onClick={() => setPaused((p) => !p)}>

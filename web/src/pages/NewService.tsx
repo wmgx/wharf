@@ -169,7 +169,9 @@ export function NewService({ onClose }: { onClose: () => void }) {
         </div>
       )}
 
-      <h2 className="section">Domain · 域名（可选）</h2>
+      <div className="form-section">
+        域名 <span>可选</span>
+      </div>
       <div className="field">
         <input type="text" placeholder="例如 app.example.com，留空就只在内网访问" value={hostname} onChange={(e) => setHostname(e.target.value)} />
         {suggestions.length > 0 && !hostname && (

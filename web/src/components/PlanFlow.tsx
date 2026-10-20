@@ -87,12 +87,12 @@ export function PlanFlow({ changes, onFinished }: { changes: Change[]; onFinishe
   return (
     <div>
       <div className="steps">
-        <span className={stage === "planning" ? "on" : "done"}>01 计划</span>
-        <span className={stage === "review" ? "on" : stage === "planning" ? "" : "done"}>02 确认</span>
-        <span className={stage === "running" ? "on" : stage === "done" ? "done" : ""}>03 执行</span>
+        <span className={stage === "planning" ? "on" : "done"}>计划</span>
+        <span className={stage === "review" ? "on" : stage === "planning" ? "" : "done"}>确认</span>
+        <span className={stage === "running" ? "on" : stage === "done" ? "done" : ""}>执行</span>
       </div>
 
-      {stage === "planning" && !error && <p style={{ color: "var(--ink-3)" }}>正在对比配置和现实…</p>}
+      {stage === "planning" && !error && <p className="muted">正在对比配置和现实…</p>}
       <ErrorNote error={error} />
 
       {plan && stage === "review" && <PlanReview plan={plan} confirmed={confirmed} setConfirmed={setConfirmed} />}
@@ -138,7 +138,8 @@ function PlanReview({
       {plan.items.length === 0 ? (
         <div className="note good">没有变化，现实和配置一致。</div>
       ) : (
-        plan.items.map((it) => (
+        <div className="plan-list">
+        {plan.items.map((it) => (
           <div className="plan-item" key={it.id}>
             <span className={`act ${it.action}`}>{ACTION[it.action]}</span>
             <div>
@@ -146,21 +147,22 @@ function PlanReview({
                 {it.address}
                 <span className="layer">{LAYER[it.layer] ?? it.layer}</span>
               </div>
-              <div style={{ fontSize: 12, color: "var(--ink-3)" }}>{it.reason}</div>
+              <div className="muted" style={{ fontSize: 12.5 }}>{it.reason}</div>
             </div>
             {it.risk !== "safe" && <span className={`risk ${it.risk}`}>{RISK[it.risk]}</span>}
           </div>
-        ))
+        ))}
+        </div>
       )}
       {needs.length > 0 && (
         <div className="confirm-box">
-          <h4>这些操作需要你逐项确认</h4>
+          <h4>以下操作需要确认</h4>
           {needs.map((a) => (
             <label className="check" key={a}>
               <input type="checkbox" checked={confirmed.has(a)} onChange={() => toggle(a)} />
               <span>
                 <span className="mono">{a}</span>
-                <span style={{ color: "var(--ink-3)", fontSize: 12, marginLeft: 8 }}>
+                <span className="muted" style={{ fontSize: 12.5, marginLeft: 8 }}>
                   {plan.items
                     .filter((i) => i.address === a && i.risk !== "safe")
                     .map((i) => RISK[i.risk])
@@ -219,7 +221,7 @@ function RunView({ run }: { run: Run }) {
         <div className="run-step" key={i}>
           <div className="title">
             <Light tone={STEP_TONE[s.status]} />
-            <span style={{ color: s.status === "pending" || s.status === "skipped" ? "var(--ink-3)" : undefined }}>
+            <span className={s.status === "pending" || s.status === "skipped" ? "muted" : undefined}>
               {s.title}
             </span>
           </div>

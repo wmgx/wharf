@@ -5,7 +5,7 @@ import { useStatus } from "../App";
 import { PortsEditor, formatEnv, parseEnv } from "../components/fields";
 import { LogStream } from "../components/LogStream";
 import { PlanFlow } from "../components/PlanFlow";
-import { Drawer, ErrorNote, Light, ago, liveTone } from "../components/ui";
+import { Badge, Drawer, ErrorNote, Light, ago, liveTone } from "../components/ui";
 import type { Change, DeploymentView, PortSpec, RollbackTarget, ServiceView } from "../types";
 
 type Tab = "logs" | "history" | "config";
@@ -51,18 +51,15 @@ export function ServiceDetail() {
       </Link>
       <div className="page-head">
         <div>
-          <h1 style={{ display: "flex", alignItems: "center", gap: 16 }}>
+          <h1>
             {svc.name}
-            <span className="zh" style={{ display: "inline-flex", alignItems: "center", gap: 8, fontSize: 15 }}>
-              <Light tone={tone} />
-              {text}
-            </span>
+            <Badge tone={tone}>{text}</Badge>
           </h1>
-          <p className="mono">
-            {source} · 在 {svc.spec.server}
+          <p>
+            <span className="mono">{source}</span> · 在 <span className="tag">{svc.spec.server}</span>
           </p>
         </div>
-        <div className="row" style={{ flex: "none" }}>
+        <div className="row" style={{ flex: "none", gap: 8 }}>
           <button className="btn" onClick={() => setEditing(true)}>
             修改配置
           </button>
@@ -77,12 +74,13 @@ export function ServiceDetail() {
 
       <div className="grid-2">
         <div className="panel">
+          <h3>访问</h3>
           <dl className="kv">
             <dt>域名</dt>
             <dd>
               {routes.map((r) => (
                 <div key={r.id} className="row" style={{ justifyContent: "space-between" }}>
-                  <a className="mono" href={r.url} target="_blank" rel="noreferrer">
+                  <a className="mono link" href={r.url} target="_blank" rel="noreferrer">
                     {r.url} ↗
                   </a>
                   <button
@@ -111,6 +109,7 @@ export function ServiceDetail() {
           </dl>
         </div>
         <div className="panel">
+          <h3>容器</h3>
           <dl className="kv">
             {svc.live?.containers?.map((c) => (
               <Container key={c.name} name={c.service} state={c.state} status={c.status} />
@@ -214,6 +213,7 @@ function History({ name, onRollback }: { name: string; onRollback: (t: RollbackT
   return (
     <>
       <ErrorNote error={error} />
+      <div className="table-wrap">
       <table className="manifest">
         <thead>
           <tr>
@@ -229,13 +229,15 @@ function History({ name, onRollback }: { name: string; onRollback: (t: RollbackT
             <tr key={d.id}>
               <td className="mono">#{d.id}</td>
               <td>{ago(d.created_at)}</td>
-              <td className="mono">{d.server}</td>
-              <td className="mono" style={{ color: "var(--ink-2)", wordBreak: "break-all" }}>
+              <td>
+                <span className="tag">{d.server}</span>
+              </td>
+              <td className="mono muted" style={{ wordBreak: "break-all" }}>
                 {d.images.map((im) => im.digest ?? im.image).join(" ")}
               </td>
               <td style={{ textAlign: "right" }}>
                 {i === 0 || d.hash === data[0].hash ? (
-                  <span style={{ color: "var(--ink-3)", fontSize: 12 }}>当前版本</span>
+                  <span className="badge">当前版本</span>
                 ) : (
                   <button className="btn small" disabled={!d.spec} title={d.spec ? "" : "这条记录太早，没有保存当时的配置"} onClick={() => rollback(d.id)}>
                     回滚到这里
@@ -246,6 +248,7 @@ function History({ name, onRollback }: { name: string; onRollback: (t: RollbackT
           ))}
         </tbody>
       </table>
+      </div>
     </>
   );
 }

@@ -21,12 +21,18 @@ export function liveTone(live?: LiveState | null): { tone: Tone; text: string } 
   }
 }
 
-export function crateClass(tone: Tone) {
-  return tone === "go" ? "ok" : tone === "signal" ? "warn" : tone === "stop" ? "bad" : "";
-}
-
 export function Light({ tone, title }: { tone: Tone; title?: string }) {
   return <span className={`light ${tone === "fog" ? "" : tone}`} title={title} />;
+}
+
+/** 带圆点的状态标签。 */
+export function Badge({ tone, children }: { tone: Tone; children: ReactNode }) {
+  return (
+    <span className={`badge ${tone === "fog" ? "" : tone}`}>
+      <Light tone={tone} />
+      {children}
+    </span>
+  );
 }
 
 export function imageOf(s: ServiceView): string {
@@ -56,7 +62,7 @@ export function ErrorNote({ error }: { error: unknown }) {
   return (
     <div className="note bad">
       {body.message}
-      {body.hint && <div style={{ color: "var(--ink-2)", marginTop: 4 }}>{body.hint}</div>}
+      {body.hint && <div className="hint">{body.hint}</div>}
       {body.suggest?.map((s) => (
         <code className="cmd" key={s}>
           $ {s}
@@ -89,10 +95,7 @@ export function Drawer({
       <div className="scrim" onClick={onClose} />
       <aside className="drawer" role="dialog" aria-label={zh ?? title}>
         <header>
-          <h3>
-            {title}
-            {zh && <span className="zh">{zh}</span>}
-          </h3>
+          <h3>{zh ?? title}</h3>
           <button className="x" onClick={onClose} aria-label="关闭">
             ×
           </button>
@@ -104,14 +107,11 @@ export function Drawer({
   );
 }
 
-export function PageHead({ en, zh, sub, action }: { en: string; zh: string; sub?: ReactNode; action?: ReactNode }) {
+export function PageHead({ title, sub, action }: { title: ReactNode; sub?: ReactNode; action?: ReactNode }) {
   return (
     <div className="page-head">
       <div>
-        <h1>
-          {en}
-          <span className="zh">{zh}</span>
-        </h1>
+        <h1>{title}</h1>
         {sub && <p>{sub}</p>}
       </div>
       {action}

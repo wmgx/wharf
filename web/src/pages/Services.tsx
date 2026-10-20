@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useStatus } from "../App";
-import { Light, PageHead, imageOf, liveTone } from "../components/ui";
+import { Badge, PageHead, imageOf, liveTone } from "../components/ui";
 import { NewService } from "./NewService";
 
 export function Services() {
@@ -13,12 +13,11 @@ export function Services() {
   return (
     <>
       <PageHead
-        en="Services"
-        zh="服务"
+        title="服务"
         sub="每个服务是一组容器，跑在一台服务器上。"
         action={
           <button className="btn primary" onClick={() => setCreating(true)}>
-            ＋ 新建服务
+            新建服务
           </button>
         }
       />
@@ -27,6 +26,7 @@ export function Services() {
       ) : status.services.length === 0 ? (
         <div className="empty">还没有服务。点右上角新建一个。</div>
       ) : (
+        <div className="table-wrap">
         <table className="manifest">
           <thead>
             <tr>
@@ -43,24 +43,23 @@ export function Services() {
               const { tone, text } = liveTone(s.live);
               return (
                 <tr className="link" key={s.name} onClick={() => nav(`/services/${s.name}`)}>
-                  <td style={{ fontFamily: "var(--display)", fontSize: 18, fontWeight: 700 }}>{s.name}</td>
+                  <td className="strong">{s.name}</td>
                   <td>
-                    <span className="row" style={{ gap: 8 }}>
-                      <Light tone={tone} />
-                      <span style={{ flex: "none" }}>{text}</span>
-                    </span>
+                    <Badge tone={tone}>{text}</Badge>
                   </td>
-                  <td className="mono">{s.spec.server}</td>
-                  <td className="mono" style={{ color: "var(--ink-2)" }}>
+                  <td>
+                    <span className="tag">{s.spec.server}</span>
+                  </td>
+                  <td className="mono muted">
                     {imageOf(s)}
                   </td>
                   <td className="mono">
                     {routesOf(s.name).map((r) => (
                       <div key={r.id}>{r.spec.hostname}</div>
                     ))}
-                    {routesOf(s.name).length === 0 && <span style={{ color: "var(--ink-3)" }}>-</span>}
+                    {routesOf(s.name).length === 0 && <span className="muted">-</span>}
                   </td>
-                  <td className="mono" style={{ color: "var(--ink-2)" }}>
+                  <td className="mono muted">
                     {Object.values(s.addresses).join(" ")}
                   </td>
                 </tr>
@@ -68,6 +67,7 @@ export function Services() {
             })}
           </tbody>
         </table>
+        </div>
       )}
       {creating && (
         <NewService
