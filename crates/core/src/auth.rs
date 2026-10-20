@@ -135,7 +135,7 @@ impl FromRequestParts<Arc<AppState>> for Auth {
       AppError::from(
         ApiError::new(
           ErrorCode::Unauthorized,
-          "缺少或无效的 API token",
+          "没有登录，或 API token 无效",
         )
         .with_hint("设置环境变量 WHARF_TOKEN，或执行 wharf login")
         .suggest("wharf login --url <控制面地址>"),
@@ -147,8 +147,18 @@ impl FromRequestParts<Arc<AppState>> for Auth {
       .and_then(|v| v.to_str().ok())
       .and_then(|v| v.strip_prefix("Bearer "))
       .map(str::trim)
-      .filter(|t| !t.is_empty())
-      .ok_or_else(unauthorized)?;
+      .filter(|t| !t.is_empty());
+    let Some(token) = token else {
+      // 页面：账号密码登录后的会话 cookie，权限和管理员 token 一样。
+      let user = crate::login::session_user(state, &parts.headers)
+        .await
+        .map_err(AppError::from)?
+        .ok_or_else(unauthorized)?;
+      return Ok(Auth {
+        name: format!("页面:{user}"),
+        scope: TokenScope::ApplyAll,
+      });
+    };
     let hash = hash_token(token);
     let found = state
       .db

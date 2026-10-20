@@ -33,7 +33,7 @@ export function Logo({ className = "size-8" }: { className?: string }) {
   );
 }
 
-export function AppSidebar({ onLogout }: { onLogout: () => void }) {
+export function AppSidebar({ username, onLogout }: { username: string; onLogout: () => void }) {
   const { status } = useStatus();
   const { pathname } = useLocation();
   const { theme, toggle } = useTheme();
@@ -131,10 +131,10 @@ export function AppSidebar({ onLogout }: { onLogout: () => void }) {
             <DropdownMenu modal={false}>
               <DropdownMenuTrigger asChild>
                 <SidebarMenuButton size="lg" className="data-[state=open]:bg-sidebar-accent">
-                  <span className="grid size-8 shrink-0 place-items-center rounded-lg border bg-background text-xs font-medium">管</span>
-                  <div className="grid leading-tight">
-                    <span className="text-sm font-medium">管理员</span>
-                    <span className="text-xs text-muted-foreground">API token 登录</span>
+                  <span className="grid size-8 shrink-0 place-items-center rounded-lg border bg-background text-xs font-medium uppercase">{username.slice(0, 1)}</span>
+                  <div className="grid min-w-0 leading-tight">
+                    <span className="truncate text-sm font-medium">{username}</span>
+                    <span className="text-xs text-muted-foreground">管理员</span>
                   </div>
                   <ChevronsUpDownIcon className="ml-auto" />
                 </SidebarMenuButton>

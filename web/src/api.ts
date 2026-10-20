@@ -1,23 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ApiErrorBody, Change, Plan, Run } from "./types";
 
-const TOKEN_KEY = "wharf.token";
-
-export function getToken(): string | null {
-  try {
-    return localStorage.getItem(TOKEN_KEY);
-  } catch {
-    return null;
-  }
+// 以前页面用 API token 登录，存在 localStorage 里；现在改成账号密码 + HttpOnly cookie，清掉旧的。
+try {
+  localStorage.removeItem("wharf.token");
+} catch {
+  // 隐私模式下访问不了 localStorage，本来也没存。
 }
 
-export function setToken(token: string | null) {
-  try {
-    if (token) localStorage.setItem(TOKEN_KEY, token);
-    else localStorage.removeItem(TOKEN_KEY);
-  } catch {
-    // 隐私模式下存不了，只在本次页面里有效。
-  }
+/** `GET /api/session`：已登录时有 username；没有管理员账号时 setup_needed。 */
+export interface Session {
+  username?: string;
+  setup_needed: boolean;
+  setup_open: boolean;
 }
 
 export class ApiError extends Error {
@@ -37,8 +32,6 @@ export function setUnauthorizedHandler(fn: () => void) {
 
 function headers(json: boolean): HeadersInit {
   const h: Record<string, string> = {};
-  const token = getToken();
-  if (token) h.Authorization = `Bearer ${token}`;
   if (json) h["Content-Type"] = "application/json";
   return h;
 }

@@ -1,6 +1,6 @@
 import { Suspense, lazy, useEffect, useState } from "react";
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
-import { getToken, setToken, setUnauthorizedHandler, usePoll } from "./api";
+import { api, setUnauthorizedHandler, usePoll, type Session } from "./api";
 import { ActionsProvider } from "./components/actions";
 import { AppSidebar } from "./components/app-sidebar";
 import { Boundary } from "./components/Boundary";
@@ -25,24 +25,32 @@ import type { Status } from "./types";
 const Topology = lazy(() => import("./pages/Topology").then((m) => ({ default: m.Topology })));
 
 export function App() {
-  const [authed, setAuthed] = useState(() => !!getToken());
+  // null：还在问控制面是否已登录。
+  const [session, setSession] = useState<Session | null>(null);
+  const load = () =>
+    api
+      .get<Session>("/api/session")
+      .then(setSession)
+      .catch(() => setSession({ setup_needed: false, setup_open: false }));
 
   useEffect(() => {
-    setUnauthorizedHandler(() => {
-      setToken(null);
-      setAuthed(false);
-    });
+    load();
+    setUnauthorizedHandler(() => setSession((s) => (s?.username ? { ...s, username: undefined } : s)));
   }, []);
 
-  const logout = () => {
-    setToken(null);
-    setAuthed(false);
+  const logout = async () => {
+    await api.post("/api/logout", {}).catch(() => {});
+    load();
   };
 
   return (
     <ThemeProvider>
       <TooltipProvider delayDuration={300}>
-        {authed ? <Shell onLogout={logout} /> : <Login onDone={() => setAuthed(true)} />}
+        {!session ? null : session.username ? (
+          <Shell username={session.username} onLogout={logout} />
+        ) : (
+          <Login session={session} onDone={setSession} onRetry={load} />
+        )}
         <Toaster position="bottom-right" />
       </TooltipProvider>
     </ThemeProvider>
@@ -57,7 +65,7 @@ const TITLES: [string, string][] = [
   ["/", "港口"],
 ];
 
-function Shell({ onLogout }: { onLogout: () => void }) {
+function Shell({ username, onLogout }: { username: string; onLogout: () => void }) {
   const { data: status, refresh } = usePoll<Status>("/api/status", 5000);
   const { pathname } = useLocation();
   const title = TITLES.find(([p]) => pathname.startsWith(p))?.[1] ?? "";
@@ -66,7 +74,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
     <StatusContext.Provider value={{ status, refresh }}>
       <ActionsProvider>
         <SidebarProvider>
-          <AppSidebar onLogout={onLogout} />
+          <AppSidebar username={username} onLogout={onLogout} />
           <SidebarInset>
             <header className="sticky top-0 z-10 flex h-14 shrink-0 items-center gap-2 border-b bg-background/80 px-4 backdrop-blur">
               <SidebarTrigger className="-ml-1" />

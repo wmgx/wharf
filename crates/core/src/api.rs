@@ -59,6 +59,10 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route("/healthz", get(|| async { "ok" }))
     .route("/agent/ws", get(hub::agent_ws))
     .route("/agent/join", post(agent_join))
+    .route("/api/session", get(crate::login::show))
+    .route("/api/setup", post(crate::login::setup))
+    .route("/api/login", post(crate::login::login))
+    .route("/api/logout", post(crate::login::logout))
     .route("/agent/uploads/{sha256}", get(crate::uploads::download))
     .route(
       "/api/uploads/{sha256}",

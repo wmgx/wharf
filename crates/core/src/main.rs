@@ -14,6 +14,7 @@ mod build;
 mod db;
 mod hub;
 mod jobs;
+mod login;
 mod logs_stream;
 mod migrate;
 mod planner;
@@ -46,6 +47,18 @@ struct Cli {
     default_value = "ghcr.io/wmgx/wharf-agent:latest"
   )]
   agent_image: String,
+  #[command(subcommand)]
+  command: Option<Command>,
+}
+
+#[derive(clap::Subcommand)]
+enum Command {
+  /// 重置页面登录的管理员密码：`docker exec -it wharf-core wharf-core reset-password`。
+  ResetPassword {
+    /// 同时改账号名。不给时沿用现在的账号（没有账号时用 admin）。
+    #[arg(long)]
+    username: Option<String>,
+  },
 }
 
 fn load_or_create_key(
@@ -84,6 +97,10 @@ async fn main() -> anyhow::Result<()> {
   std::fs::create_dir_all(&cli.data_dir)
     .with_context(|| format!("创建 {}", cli.data_dir.display()))?;
   let db = db::Db::open(&cli.data_dir.join("wharf.db"))?;
+  if let Some(Command::ResetPassword { username }) = cli.command {
+    drop(db);
+    return login::reset_password(&cli.data_dir, username);
+  }
   let key = load_or_create_key(&cli.data_dir.join("core.key"))?;
   auth::bootstrap(&db, &cli.data_dir).await?;
 
@@ -99,6 +116,7 @@ async fn main() -> anyhow::Result<()> {
     agent_image: cli.agent_image,
     data_dir: cli.data_dir.clone(),
     downloads: Default::default(),
+    started: std::time::Instant::now(),
   });
   apply::recover(&state).await?;
   jobs::spawn(state.clone());

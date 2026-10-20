@@ -130,6 +130,20 @@ CREATE TABLE tunnels (
   r#"
 ALTER TABLE deployments ADD COLUMN commit_sha TEXT;
 "#,
+  // 页面登录：唯一的管理员账号和浏览器会话。
+  r#"
+CREATE TABLE admin (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  username TEXT NOT NULL,
+  password_hash TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE sessions (
+  hash TEXT PRIMARY KEY,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL
+);
+"#,
 ];
 
 #[derive(Clone)]
