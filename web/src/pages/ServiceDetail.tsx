@@ -91,7 +91,7 @@ export function ServiceDetail() {
               <RefreshCwIcon />
               检查并修复
             </Button>
-            <DropdownMenu>
+            <DropdownMenu modal={false}>
               <DropdownMenuTrigger asChild>
                 <Button variant="outline" size="icon" aria-label="更多操作">
                   <EllipsisIcon />
@@ -125,7 +125,7 @@ export function ServiceDetail() {
           <CardContent className="px-5">
             <dl className="grid grid-cols-[88px_minmax(0,1fr)] gap-x-4 gap-y-3 text-sm">
               <dt className="text-muted-foreground">域名</dt>
-              <dd className="grid min-w-0 gap-1">
+              <dd className="grid min-w-0 grid-cols-1 gap-1">
                 {routes.map((r) => (
                   <div key={r.id} className="flex items-center justify-between gap-2">
                     <a className="inline-flex min-w-0 items-center gap-1 font-mono text-[13px] text-primary hover:underline" href={r.url} target="_blank" rel="noreferrer">

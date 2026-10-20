@@ -124,7 +124,7 @@ export function AppSidebar({ onLogout }: { onLogout: () => void }) {
       <SidebarFooter>
         <SidebarMenu>
           <SidebarMenuItem>
-            <DropdownMenu>
+            <DropdownMenu modal={false}>
               <DropdownMenuTrigger asChild>
                 <SidebarMenuButton size="lg" className="data-[state=open]:bg-sidebar-accent">
                   <span className="grid size-8 shrink-0 place-items-center rounded-lg border bg-background text-xs font-medium">管</span>

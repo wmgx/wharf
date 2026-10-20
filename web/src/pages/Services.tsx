@@ -93,7 +93,7 @@ function RowMenu({ svc }: { svc: ServiceView }) {
   const actions = useActions();
   const nav = useNavigate();
   return (
-    <DropdownMenu>
+    <DropdownMenu modal={false}>
       <DropdownMenuTrigger asChild>
         <Button variant="ghost" size="icon-sm" aria-label={`${svc.name} 的操作`}>
           <EllipsisIcon />
