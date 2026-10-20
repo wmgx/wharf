@@ -54,7 +54,7 @@ struct Creds {
   http_hash: String,
 }
 
-fn random_hex() -> String {
+pub(crate) fn random_hex() -> String {
   let mut bytes = [0u8; 24];
   getrandom::fill(&mut bytes).expect("随机数不可用");
   hex::encode(bytes)

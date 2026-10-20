@@ -10,7 +10,10 @@ use std::{
 use serde_json::Value;
 use wharf_api_types::{
   ApiError, ErrorCode,
-  agent::{AgentOp, GatewayApply, ProjectUp, ProjectUpResult},
+  agent::{
+    AgentOp, BUILD_IMAGE_PREFIX, GatewayApply, ProjectUp,
+    ProjectUpResult,
+  },
   validate_name,
 };
 
@@ -23,6 +26,8 @@ use crate::{
 pub struct Ops {
   pub docker: Docker,
   pub reporter: Reporter,
+  /// 控制面地址：构建时从这里下载上传的代码包。
+  pub core_url: String,
   locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
@@ -30,10 +35,15 @@ pub struct Ops {
 pub const CADDY_ADMIN: &str = "unix//config/caddy-admin.sock";
 
 impl Ops {
-  pub fn new(docker: Docker, reporter: Reporter) -> Self {
+  pub fn new(
+    docker: Docker,
+    reporter: Reporter,
+    core_url: String,
+  ) -> Self {
     Self {
       docker,
       reporter,
+      core_url,
       locks: Default::default(),
     }
   }
@@ -109,6 +119,22 @@ impl Ops {
       AgentOp::Restic(job) => {
         crate::restic::run(&self.docker, &job, ctx).await
       }
+      AgentOp::Build(job) => {
+        check_project(&job.service)?;
+        if !job.image.starts_with(&format!(
+          "{BUILD_IMAGE_PREFIX}{}:",
+          job.service
+        )) {
+          return Err(ApiError::invalid(format!(
+            "构建镜像名必须是 {BUILD_IMAGE_PREFIX}{}:<指纹>",
+            job.service
+          )));
+        }
+        let lock = self.lock_for(&job.service);
+        let _guard = lock.lock().await;
+        crate::build::run(&self.docker, &self.core_url, &job, ctx)
+          .await
+      }
     }
   }
 
@@ -157,6 +183,16 @@ impl Ops {
   ) -> Result<Vec<String>, ApiError> {
     let images = self.docker.images(&up.project, ctx).await?;
     for image in &images {
+      // 本机构建的镜像不拉取，必须已经构建好。
+      if image.starts_with(BUILD_IMAGE_PREFIX) {
+        if !self.docker.image_exists(image, ctx).await {
+          return Err(ApiError::new(
+            ErrorCode::AgentFailed,
+            format!("镜像 {image} 还没有构建"),
+          ));
+        }
+        continue;
+      }
       self.docker.pull(image, &up.pull, ctx, warnings).await?;
     }
     Ok(images)

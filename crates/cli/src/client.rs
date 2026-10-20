@@ -205,6 +205,24 @@ impl Client {
       .await
   }
 
+  /// 上传二进制内容（代码包），大文件慢，单独给 30 分钟。
+  pub async fn put_bytes<T: DeserializeOwned>(
+    &self,
+    path: &str,
+    bytes: Vec<u8>,
+  ) -> CliResult<T> {
+    self
+      .send(
+        self
+          .http
+          .put(format!("{}{path}", self.base))
+          .header("content-type", "application/gzip")
+          .timeout(Duration::from_secs(30 * 60))
+          .body(bytes),
+      )
+      .await
+  }
+
   pub async fn delete<T: DeserializeOwned>(
     &self,
     path: &str,

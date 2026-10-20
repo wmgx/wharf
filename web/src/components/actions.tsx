@@ -36,6 +36,8 @@ interface Actions {
   /** 打开计划面板：计划 → 确认 → 执行。 */
   plan: (req: FlowRequest) => void;
   redeploy: (svc: ServiceView) => void;
+  /** 从代码构建的服务：拉最新代码重新构建并部署。 */
+  rebuild: (name: string) => void;
   /** 不给 `to` 就回到上一个不同的版本。 */
   rollback: (name: string, to?: number) => void;
   /** 先要求输入名称确认，再生成删除计划（连同它的域名）。 */
@@ -118,6 +120,14 @@ export function ActionsProvider({ children }: { children: ReactNode }) {
   const actions: Actions = {
     plan: (req) => setOpen({ key: ++seq.current, ...req }),
     redeploy: (svc) => actions.plan({ title: `重新部署 ${svc.name}`, changes: [{ op: "upsert_service", name: svc.name, spec: svc.spec }] }),
+    rebuild: async (name) => {
+      try {
+        const { run_id } = await api.post<{ run_id: string }>(`/api/services/${encodeURIComponent(name)}/rebuild`, {});
+        actions.watch(run_id, `重新构建 ${name}`);
+      } catch (e) {
+        toast.error(`不能重新构建 ${name}`, { description: (e as Error).message });
+      }
+    },
     rollback: async (name, to) => {
       try {
         const q = to != null ? `?to=${to}` : "";

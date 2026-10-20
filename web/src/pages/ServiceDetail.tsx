@@ -1,11 +1,11 @@
-import { ArrowRightLeftIcon, ArrowLeftIcon, ArrowUpRightIcon, EllipsisIcon, HistoryIcon, LockIcon, LockOpenIcon, PencilIcon, PlusIcon, RefreshCwIcon, Trash2Icon, XIcon } from "lucide-react";
+import { ArrowRightLeftIcon, ArrowLeftIcon, ArrowUpRightIcon, EllipsisIcon, HammerIcon, HistoryIcon, LockIcon, LockOpenIcon, PencilIcon, PlusIcon, RefreshCwIcon, Trash2Icon, XIcon } from "lucide-react";
 import { useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { usePoll } from "@/api";
 import { useActions } from "@/components/actions";
 import { useBasicAuthSetAt } from "@/components/basic-auth";
 import { Checkbox } from "@/components/ui/checkbox";
-import { CodeBlock, Dot, Empty, ErrorNote, Notice, PageHeader, ServerTag, StatusBadge, ago, liveTone } from "@/components/common";
+import { CodeBlock, Dot, Empty, ErrorNote, Notice, PageHeader, ServerTag, StatusBadge, ago, liveTone, sourceLabel } from "@/components/common";
 import { EntryField, useEntry } from "@/components/entry";
 import { DomainChips, Field, PortsEditor, formatEnv, parseEnv } from "@/components/fields";
 import { LogStream } from "@/components/LogStream";
@@ -65,7 +65,8 @@ export function ServiceDetail() {
   }
 
   const { tone, text } = liveTone(svc.live);
-  const source = "image" in svc.spec.source ? svc.spec.source.image : "compose 文件";
+  const source = sourceLabel(svc.spec.source);
+  const built = "build" in svc.spec.source;
 
   return (
     <>
@@ -88,6 +89,17 @@ export function ServiceDetail() {
               <PencilIcon />
               修改配置
             </Button>
+            {built && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button variant="outline" onClick={() => actions.rebuild(name)}>
+                    <HammerIcon />
+                    重新构建
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>{"build" in svc.spec.source && svc.spec.source.build.git ? "拉分支上的最新代码，构建后替换运行中的容器" : "用最近一次上传的代码重新构建"}</TooltipContent>
+              </Tooltip>
+            )}
             <Button variant="outline" onClick={() => actions.redeploy(svc)}>
               <RefreshCwIcon />
               检查并修复
@@ -305,17 +317,25 @@ function EditService({ svc, open, onClose }: { svc: ServiceView; open: boolean; 
 
 function EditForm({ svc, onClose }: { svc: ServiceView; onClose: () => void }) {
   const actions = useActions();
-  const isImage = "image" in svc.spec.source;
-  const [image, setImage] = useState(isImage ? (svc.spec.source as { image: string }).image : "");
-  const [compose, setCompose] = useState(!isImage ? ((svc.spec.source as { compose: { content?: string } }).compose.content ?? "") : "");
+  const src = svc.spec.source;
+  const isImage = "image" in src;
+  const build = "build" in src ? src.build : null;
+  const [image, setImage] = useState(isImage ? src.image : "");
+  const [compose, setCompose] = useState("compose" in src ? (src.compose.content ?? "") : "");
+  const [repo, setRepo] = useState(build?.git?.repo ?? "");
+  const [gitRef, setGitRef] = useState(build?.git?.ref ?? "");
   const [ports, setPorts] = useState<PortSpec[]>(svc.spec.ports ?? []);
   const [envText, setEnvText] = useState(formatEnv(svc.spec.env));
   const submit = () => {
     const spec = {
       ...svc.spec,
-      source: isImage ? { image: image.trim() } : { compose: { content: compose } },
+      source: isImage
+        ? { image: image.trim() }
+        : build
+          ? { build: build.git ? { ...build, git: { ...build.git, repo: repo.trim(), ref: gitRef.trim() } } : build }
+          : { compose: { content: compose } },
       ports,
-      env: isImage ? parseEnv(envText) : svc.spec.env,
+      env: isImage || build ? parseEnv(envText) : svc.spec.env,
     };
     onClose();
     actions.plan({ title: `修改 ${svc.name}`, changes: [{ op: "upsert_service", name: svc.name, spec }] });
@@ -323,7 +343,22 @@ function EditForm({ svc, onClose }: { svc: ServiceView; onClose: () => void }) {
   return (
     <>
       <div className="grid flex-1 content-start gap-5 overflow-auto p-4">
-        {isImage ? (
+        {build ? (
+          build.git ? (
+            <div className="grid grid-cols-[minmax(0,1fr)_8rem] gap-3">
+              <Field label="仓库" htmlFor="repo">
+                <Input id="repo" value={repo} onChange={(e) => setRepo(e.target.value)} />
+              </Field>
+              <Field label="分支 / 标签" htmlFor="ref">
+                <Input id="ref" value={gitRef} onChange={(e) => setGitRef(e.target.value)} />
+              </Field>
+            </div>
+          ) : (
+            <Notice kind="info">
+              代码来自本机目录。发布新版本在代码目录里执行 <code className="font-mono">wharf deploy</code>。
+            </Notice>
+          )
+        ) : isImage ? (
           <Field label="镜像" htmlFor="image">
             <Input id="image" value={image} onChange={(e) => setImage(e.target.value)} />
           </Field>
@@ -335,7 +370,7 @@ function EditForm({ svc, onClose }: { svc: ServiceView; onClose: () => void }) {
         <Field label="端口">
           <PortsEditor ports={ports} onChange={setPorts} />
         </Field>
-        {isImage && (
+        {(isImage || build) && (
           <Field label="环境变量" htmlFor="env" help="一行一个 KEY=value。删掉一行就是删除这个变量。">
             <Textarea id="env" className="min-h-32 font-mono text-xs" value={envText} onChange={(e) => setEnvText(e.target.value)} />
           </Field>

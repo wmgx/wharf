@@ -3,7 +3,7 @@ import { ApiError } from "@/api";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
-import type { LiveState, ServerView, ServiceView } from "@/types";
+import type { LiveState, ServerView, ServiceView, Source } from "@/types";
 
 export type Tone = "ok" | "warn" | "bad" | "idle";
 
@@ -71,7 +71,17 @@ export function ServerTag({ name }: { name: string }) {
 }
 
 export function imageOf(s: ServiceView): string {
-  return "image" in s.spec.source ? s.spec.source.image : "compose";
+  return sourceLabel(s.spec.source, "compose");
+}
+
+/** 来源的一行说明：镜像名、git 仓库@分支，或本机代码。 */
+export function sourceLabel(source: Source, compose = "compose 文件"): string {
+  if ("image" in source) return source.image;
+  if ("compose" in source) return compose;
+  const { git, upload, path } = source.build;
+  const sub = path ? ` /${path}` : "";
+  if (git) return `${git.repo.replace(/^https:\/\//, "")}@${git.ref}${sub}`;
+  return `本机代码 ${upload?.slice(0, 12) ?? ""}${sub}`;
 }
 
 /** 服务图标：先试站点的 favicon，失败就用首字母。 */

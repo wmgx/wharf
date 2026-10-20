@@ -17,7 +17,7 @@ use wharf_api_types::{
   plan::{
     Action, Layer, Plan, PlanItem, PlanRequest, PlanStatus, Risk,
   },
-  spec::{GatewayKind, RouteSpec},
+  spec::{BuildSource, GatewayKind, RouteSpec, Source},
 };
 use wharf_providers::{DnsRecordSpec, DnsRecordType, RemoteRecord};
 
@@ -122,6 +122,10 @@ pub enum Step {
     service: String,
     snapshot: String,
   },
+  /// 构建来源：拉最新代码重新构建并部署。单独发起，不来自计划。
+  Rebuild {
+    service: String,
+  },
   ServiceDown {
     server: String,
     service: String,
@@ -142,7 +146,9 @@ impl Step {
       Self::DnsUpsert { .. } => 5,
       Self::GatewayDown { .. } => 6,
       Self::ServiceDown { .. } => 7,
-      Self::Backup { .. } | Self::Restore { .. } => 8,
+      Self::Backup { .. }
+      | Self::Restore { .. }
+      | Self::Rebuild { .. } => 8,
     }
   }
 }
@@ -235,6 +241,20 @@ pub async fn make_plan(
   }
   desired.allocate_ports()?;
   desired.validate()?;
+  for (name, svc) in &desired.services {
+    if let Source::Build(BuildSource {
+      upload: Some(sha), ..
+    }) = &svc.spec.source
+      && !crate::uploads::exists(state, sha)
+    {
+      return Err(
+        ApiError::invalid(format!(
+          "服务 {name} 的代码包还没有上传到控制面"
+        ))
+        .with_hint("用 wharf deploy <目录> 部署，CLI 会先上传代码"),
+      );
+    }
+  }
   for (name, gw) in &desired.gateways {
     if let Some(account) = &gw.spec.account
       && !snap.accounts.iter().any(|a| &a.name == account)
@@ -600,6 +620,11 @@ fn service_items(
       },
     };
     if let Some((action, risk, reason, before)) = decision {
+      let reason = if matches!(svc.spec.source, Source::Build(_)) {
+        format!("{reason}（镜像不在 {server} 上时先构建）")
+      } else {
+        reason
+      };
       let id = b.item(
         address.clone(),
         Layer::Container,

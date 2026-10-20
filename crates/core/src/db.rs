@@ -126,6 +126,10 @@ CREATE TABLE tunnels (
   created_at INTEGER NOT NULL
 );
 "#,
+  // 构建来源的部署记下实际构建的 git commit，回滚和迁移时固定到它。
+  r#"
+ALTER TABLE deployments ADD COLUMN commit_sha TEXT;
+"#,
 ];
 
 #[derive(Clone)]

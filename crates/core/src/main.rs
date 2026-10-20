@@ -10,6 +10,7 @@ mod api;
 mod apply;
 mod auth;
 mod backup;
+mod build;
 mod db;
 mod hub;
 mod jobs;
@@ -21,6 +22,7 @@ mod rollback;
 mod snapshot;
 mod state;
 mod tunnel;
+mod uploads;
 mod views;
 mod web;
 mod world;
@@ -95,6 +97,8 @@ async fn main() -> anyhow::Result<()> {
       .public_url
       .map(|u| u.trim_end_matches('/').to_string()),
     agent_image: cli.agent_image,
+    data_dir: cli.data_dir.clone(),
+    downloads: Default::default(),
   });
   apply::recover(&state).await?;
   jobs::spawn(state.clone());

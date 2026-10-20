@@ -6,9 +6,10 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use wharf_api_types::{
   ApiError,
+  agent::BUILD_IMAGE_PREFIX,
   spec::{
-    GatewayKind, GatewaySpec, GatewayTls, PrivateAddr, ServiceSpec,
-    Source,
+    BuildSource, GatewayKind, GatewaySpec, GatewayTls, PortSpec,
+    PrivateAddr, ServiceSpec, Source,
   },
 };
 
@@ -173,6 +174,25 @@ pub fn substitute(
   Ok(out)
 }
 
+/// 构建来源的镜像名：`wharf-build/<服务>:<指纹>`。指纹来自构建配置和端口
+/// （端口决定模板里的 `$PORT`），配置不变就不用重新构建。
+pub fn build_image(
+  name: &str,
+  build: &BuildSource,
+  ports: &[PortSpec],
+) -> String {
+  // 模板只用到容器端口（`$PORT`），宿主机端口变了不用重新构建。
+  let input =
+    serde_json::json!({ "build": build, "port": build_port(ports) });
+  let key = hash(&input.to_string());
+  format!("{BUILD_IMAGE_PREFIX}{name}:{}", &key[..12])
+}
+
+/// 构建来源模板里的 `$PORT`：第一个端口，没有端口时 8080。
+pub fn build_port(ports: &[PortSpec]) -> u16 {
+  ports.first().map_or(8080, |p| p.port)
+}
+
 /// 服务的 compose 文件。image 来源自动生成；compose 来源原样使用。
 /// 端口只绑定 127.0.0.1 和内网地址，不绑定 0.0.0.0。
 pub fn service_compose(
@@ -186,7 +206,12 @@ pub fn service_compose(
     Source::Compose { content, .. } => {
       substitute(content.as_deref().unwrap_or_default(), secrets)
     }
-    Source::Image(image) => {
+    Source::Image(_) | Source::Build(_) => {
+      let image = match &spec.source {
+        Source::Build(b) => build_image(name, b, &spec.ports),
+        Source::Image(image) => image.clone(),
+        Source::Compose { .. } => unreachable!(),
+      };
       let mut environment = BTreeMap::new();
       for (key, value) in &spec.env {
         // compose 会对 `$` 做变量插值，原样传给容器要写成 `$$`。
@@ -215,7 +240,7 @@ pub fn service_compose(
         services: BTreeMap::from([(
           name.to_string(),
           ComposeService {
-            image: image.clone(),
+            image,
             restart: "unless-stopped",
             network_mode: None,
             command: None,

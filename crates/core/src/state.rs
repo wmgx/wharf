@@ -16,4 +16,7 @@ pub struct AppState {
   pub public_url: Option<String>,
   /// join 命令里 agent 容器的镜像。
   pub agent_image: String,
+  /// 数据目录，上传的代码包放在它下面的 `uploads/`。
+  pub data_dir: std::path::PathBuf,
+  pub downloads: crate::uploads::Downloads,
 }

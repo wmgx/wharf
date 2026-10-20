@@ -59,6 +59,15 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route("/healthz", get(|| async { "ok" }))
     .route("/agent/ws", get(hub::agent_ws))
     .route("/agent/join", post(agent_join))
+    .route("/agent/uploads/{sha256}", get(crate::uploads::download))
+    .route(
+      "/api/uploads/{sha256}",
+      get(crate::uploads::show).put(crate::uploads::put).layer(
+        axum::extract::DefaultBodyLimit::max(
+          crate::uploads::MAX_UPLOAD,
+        ),
+      ),
+    )
     .route("/api/status", get(status))
     .route("/api/servers", get(list_servers).post(add_server))
     .route(
@@ -84,6 +93,10 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route(
       "/api/services/{name}/restore",
       post(crate::backup::restore_now),
+    )
+    .route(
+      "/api/services/{name}/rebuild",
+      post(crate::build::rebuild_now),
     )
     .route("/api/gateways", get(list_gateways))
     .route("/api/gateways/{name}", get(show_gateway))

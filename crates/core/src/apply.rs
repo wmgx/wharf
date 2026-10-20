@@ -581,57 +581,16 @@ async fn run_step(
       .await?;
     }
     Step::ServiceUp { service } => {
-      let row = world.services.get(service).ok_or_else(|| {
-        ApiError::new(
-          ErrorCode::PlanStale,
-          format!("服务 {service} 已不存在"),
-        )
-      })?;
-      let server = &row.spec.server;
-      let (compose, hash) = snapshot::service_resolved(
-        world,
-        &net,
-        service,
-        &snap.secrets,
-      )?;
-      let template =
-        snapshot::service_template(world, &net, service)?;
-      let result: ProjectUpResult = state
-        .hub
-        .call(
-          server,
-          AgentOp::ProjectUp(ProjectUp {
-            project: service.clone(),
-            compose,
-            hash: hash.clone(),
-            pull: snapshot::pull_policy(&world.servers[server]),
-          }),
-          SERVICE_UP_TIMEOUT,
-          Some(progress.clone()),
-          cancel,
-        )
-        .await?;
-      for warning in &result.warnings {
-        progress(format!("提醒：{warning}"));
-      }
-      record_deployment(
-        state,
-        Deployed {
-          service,
-          server,
-          run_id,
-          hash: &hash,
-          template: &template,
-          spec: &world.services[service].spec,
-        },
-        &result,
+      service_up(
+        state, run_id, &snap, service, false, progress, cancel,
       )
       .await?;
-      ensure_running(
-        &result,
-        service,
-        &format!("wharf service logs {service}"),
-      )?;
+    }
+    Step::Rebuild { service } => {
+      service_up(
+        state, run_id, &snap, service, true, progress, cancel,
+      )
+      .await?;
     }
     Step::ServiceDown { server, service } => {
       state
@@ -905,6 +864,71 @@ async fn remove_owned(
 }
 
 /// 一次成功部署的内容，写进部署历史。
+/// 部署一个服务：构建来源先构建镜像（`force` 时拉最新代码重新构建），再 `up`。
+async fn service_up(
+  state: &AppState,
+  run_id: &str,
+  snap: &snapshot::Snapshot,
+  service: &str,
+  force: bool,
+  progress: ProgressFn,
+  cancel: &CancellationToken,
+) -> Result<(), ApiError> {
+  let world = &snap.world;
+  let net = snap.net(world);
+  let row = world.services.get(service).ok_or_else(|| {
+    ApiError::new(
+      ErrorCode::PlanStale,
+      format!("服务 {service} 已不存在"),
+    )
+  })?;
+  let server = &row.spec.server;
+  let commit = crate::build::ensure_image(
+    state, snap, service, force, &progress, cancel,
+  )
+  .await?;
+  let (compose, hash) =
+    snapshot::service_resolved(world, &net, service, &snap.secrets)?;
+  let template = snapshot::service_template(world, &net, service)?;
+  let result: ProjectUpResult = state
+    .hub
+    .call(
+      server,
+      AgentOp::ProjectUp(ProjectUp {
+        project: service.to_string(),
+        compose,
+        hash: hash.clone(),
+        pull: snapshot::pull_policy(&world.servers[server]),
+      }),
+      SERVICE_UP_TIMEOUT,
+      Some(progress.clone()),
+      cancel,
+    )
+    .await?;
+  for warning in &result.warnings {
+    progress(format!("提醒：{warning}"));
+  }
+  record_deployment(
+    state,
+    Deployed {
+      service,
+      server,
+      run_id,
+      hash: &hash,
+      template: &template,
+      spec: &row.spec,
+      commit: commit.as_deref(),
+    },
+    &result,
+  )
+  .await?;
+  ensure_running(
+    &result,
+    service,
+    &format!("wharf service logs {service}"),
+  )
+}
+
 struct Deployed<'a> {
   service: &'a str,
   server: &'a str,
@@ -912,6 +936,8 @@ struct Deployed<'a> {
   hash: &'a str,
   template: &'a str,
   spec: &'a ServiceSpec,
+  /// 构建来源：实际构建的 git commit。
+  commit: Option<&'a str>,
 }
 
 async fn record_deployment(
@@ -922,6 +948,7 @@ async fn record_deployment(
   let images =
     serde_json::to_string(&result.images).map_err(json_err)?;
   let spec = serde_json::to_string(d.spec).map_err(json_err)?;
+  let commit = d.commit.map(str::to_string);
   let values = (
     d.service.to_string(),
     d.server.to_string(),
@@ -934,9 +961,9 @@ async fn record_deployment(
     .call(move |c| {
       let (service, server, run_id, hash, compose) = values;
       c.execute(
-        "INSERT INTO deployments (service, server, run_id, hash, compose, images, created_at, spec)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        params![service, server, run_id, hash, compose, images, now_ms(), spec],
+        "INSERT INTO deployments (service, server, run_id, hash, compose, images, created_at, spec, commit_sha)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![service, server, run_id, hash, compose, images, now_ms(), spec, commit],
       )
       .map_err(sql_err)?;
       Ok(())

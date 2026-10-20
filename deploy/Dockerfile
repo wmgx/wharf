@@ -41,6 +41,8 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=dockercli /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=dockercli /usr/local/libexec/docker/cli-plugins/docker-compose /usr/local/libexec/docker/cli-plugins/docker-compose
+# buildx：构建来源的服务在 agent 上 docker build。
+COPY --from=dockercli /usr/local/libexec/docker/cli-plugins/docker-buildx /usr/local/libexec/docker/cli-plugins/docker-buildx
 COPY --from=build /out/wharf-agent /usr/local/bin/wharf-agent
 ENV WHARF_DATA_DIR=/var/lib/wharf
 ENTRYPOINT ["wharf-agent"]

@@ -7,6 +7,7 @@
 //! - [error]：统一错误格式 `{ code, message, hint, suggest }`。
 
 pub mod agent;
+pub mod build;
 pub mod error;
 pub mod plan;
 pub mod spec;

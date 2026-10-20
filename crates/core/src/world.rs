@@ -6,8 +6,8 @@ use serde_json::{Value, json};
 use wharf_api_types::{
   ApiError,
   spec::{
-    Change, Fleet, GatewayKind, GatewaySpec, GatewayTls, RouteSpec,
-    ServerSettings, ServiceSpec, Source,
+    BuildSource, Change, Fleet, GatewayKind, GatewaySpec, GatewayTls,
+    RouteSpec, ServerSettings, ServiceSpec, Source,
   },
   validate_name,
 };
@@ -447,7 +447,7 @@ impl World {
       for port in &service.spec.ports {
         let fixed = match service.spec.source {
           Source::Compose { .. } => Some(port.port),
-          Source::Image(_) => port.host_port,
+          Source::Image(_) | Source::Build(_) => port.host_port,
         };
         let chosen = fixed
           .or_else(|| service.host_ports.get(&port.name).copied());
@@ -562,6 +562,75 @@ fn diff_map<T>(
   }
 }
 
+/// 构建来源：代码来源二选一，路径只能是代码里的相对路径。
+fn check_build(name: &str, b: &BuildSource) -> Result<(), ApiError> {
+  let bad = |what: &str| {
+    Err(ApiError::invalid(format!("服务 {name} 的{what}")))
+  };
+  match (&b.upload, &b.git) {
+    (Some(sha), None) => {
+      if sha.len() != 64
+        || !sha.bytes().all(|c| c.is_ascii_hexdigit())
+      {
+        return bad("代码包 sha256 不合法");
+      }
+    }
+    (None, Some(git)) => {
+      let repo = git.repo.trim();
+      if !repo.starts_with("https://")
+        || repo.contains(char::is_whitespace)
+        || repo.contains('@')
+      {
+        return Err(
+          ApiError::invalid(format!(
+            "服务 {name} 的 git 仓库要写 https 地址，不要带账号密码"
+          ))
+          .with_hint(
+            "私有仓库把 token 存成密钥，用 token_secret 引用",
+          ),
+        );
+      }
+      if git.reference.trim().is_empty()
+        || git.reference.contains(char::is_whitespace)
+        || git.reference.starts_with('-')
+      {
+        return bad("git ref 不合法");
+      }
+      if let Some(secret) = &git.token_secret
+        && (secret.is_empty()
+          || !secret
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'_'))
+      {
+        return bad("token_secret 要写密钥名");
+      }
+    }
+    _ => {
+      return Err(ApiError::invalid(format!(
+        "服务 {name}：构建来源要给出 upload（本机目录）或 git 仓库，二选一"
+      )));
+    }
+  }
+  for p in [&b.path, &b.dockerfile].into_iter().flatten() {
+    let p = p.trim_start_matches("./");
+    if p.is_empty()
+      || p.starts_with('/')
+      || p.split('/').any(|seg| seg == "..")
+    {
+      return bad(&format!("路径 {p} 不合法：要写代码里的相对路径"));
+    }
+  }
+  if b.base.as_deref().is_some_and(|i| {
+    i.trim().is_empty() || i.contains(char::is_whitespace)
+  }) {
+    return bad("基础镜像名不合法");
+  }
+  if b.start.as_deref().is_some_and(|s| s.trim().is_empty()) {
+    return bad("启动命令为空");
+  }
+  Ok(())
+}
+
 pub fn server_not_found(name: &str) -> ApiError {
   ApiError::not_found(format!("服务器 {name} 不存在"))
     .with_hint("先用 wharf server add 加入服务器")
@@ -605,7 +674,7 @@ fn validate_service(
       )));
     }
     if spec.volumes.is_empty()
-      && matches!(spec.source, Source::Image(_))
+      && !matches!(spec.source, Source::Compose { .. })
     {
       return Err(ApiError::invalid(format!(
         "服务 {name} 没有数据卷，不需要备份"
@@ -622,6 +691,7 @@ fn validate_service(
         )));
       }
     }
+    Source::Build(b) => check_build(name, b)?,
     Source::Compose { content, file } => {
       let Some(content) = content else {
         return Err(

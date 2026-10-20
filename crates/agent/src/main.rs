@@ -12,6 +12,7 @@ use std::{path::PathBuf, sync::Arc};
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
 
+mod build;
 mod conn;
 mod docker;
 mod exec;
@@ -114,6 +115,10 @@ async fn main() -> anyhow::Result<()> {
     data_dir: cli.data_dir,
   };
   let reporter = report::Reporter::new(docker.clone(), cli.public_ip);
-  let ops = Arc::new(ops::Ops::new(docker, reporter));
+  let ops = Arc::new(ops::Ops::new(
+    docker,
+    reporter,
+    joined.core_url.clone(),
+  ));
   conn::run_forever(joined, key, ops).await
 }

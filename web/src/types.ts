@@ -27,9 +27,20 @@ export interface ServerView {
   rtt_ms?: number;
 }
 
+export interface BuildSource {
+  /** 本机目录上传的代码包 sha256。 */
+  upload?: string;
+  git?: { repo: string; ref: string; token_secret?: string };
+  path?: string;
+  dockerfile?: string;
+  base?: string;
+  start?: string;
+}
+
 export type Source =
   | { image: string }
-  | { compose: { content?: string; file?: string } };
+  | { compose: { content?: string; file?: string } }
+  | { build: BuildSource };
 
 export interface PortSpec {
   name: string;

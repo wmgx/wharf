@@ -21,8 +21,9 @@ use wharf_api_types::{
 };
 
 use crate::{
-  AccountCmd, ApplyFlags, BackupCmd, Cli, Command, GatewayCmd,
-  RouteCmd, RunCmd, SecretCmd, ServerCmd, ServiceCmd, TokenCmd,
+  AccountCmd, ApplyFlags, BackupCmd, BuildArgs, Cli, Command,
+  GatewayCmd, RouteCmd, RunCmd, SecretCmd, ServerCmd, ServiceCmd,
+  TokenCmd,
   client::{CliError, CliResult, Client, Config, read_secret, seg},
   fleet, print,
 };
@@ -67,6 +68,43 @@ async fn dispatch(
       let s: Status = c.get("/api/status").await?;
       out(j, &s, print::status);
       Ok(())
+    }
+    Command::Deploy {
+      dir,
+      name,
+      server,
+      port,
+      env,
+      path,
+      dockerfile,
+      base,
+      start,
+      apply,
+    } => {
+      let name = match name {
+        Some(n) => n,
+        None => dir_name(&dir)?,
+      };
+      let cmd = ServiceCmd::Deploy {
+        name,
+        image: None,
+        compose: None,
+        server,
+        port,
+        env,
+        unset_env: vec![],
+        volume: vec![],
+        build: BuildArgs {
+          dir: Some(dir),
+          path,
+          dockerfile,
+          base,
+          start,
+          ..Default::default()
+        },
+        apply,
+      };
+      service(c, cmd, j).await
     }
     Command::Server(cmd) => server(c, cmd, j).await,
     Command::Service(cmd) => service(c, cmd, j).await,
@@ -429,6 +467,8 @@ async fn server(
       mirrors_only,
       private_ip,
       network,
+      build_env,
+      clear_build_env,
       apply,
     } => {
       let current: ServerView =
@@ -471,6 +511,17 @@ async fn server(
       }
       if let Some(only) = mirrors_only {
         settings.mirrors_only = only;
+      }
+      if clear_build_env {
+        settings.build_env.clear();
+      }
+      for e in &build_env {
+        let (k, v) = parse_kv(e, "--build-env")?;
+        if v.is_empty() {
+          settings.build_env.remove(&k);
+        } else {
+          settings.build_env.insert(k, v);
+        }
       }
       if let Some(ip) = private_ip {
         let ip = ip.trim();
@@ -666,6 +717,7 @@ async fn service(
       env,
       unset_env,
       volume,
+      build,
       apply,
     } => {
       let existing = match c
@@ -678,9 +730,24 @@ async fn service(
         }
         Err(e) => return Err(e),
       };
-      let source = match (image, compose) {
-        (Some(image), _) => Some(Source::Image(image)),
-        (None, Some(path)) => Some(Source::Compose {
+      let first_port = port
+        .first()
+        .map(|p| parse_port(p))
+        .transpose()?
+        .map(|p| p.port);
+      let built = crate::deploy::source(
+        c,
+        &name,
+        &build,
+        existing.as_ref().map(|s| &s.source),
+        first_port,
+      )
+      .await?;
+      let default_port = built.as_ref().map(|b| b.default_port);
+      let source = match (image, compose, built) {
+        (_, _, Some(b)) => Some(b.source),
+        (Some(image), _, _) => Some(Source::Image(image)),
+        (None, Some(path), _) => Some(Source::Compose {
           content: Some(std::fs::read_to_string(&path).map_err(
             |e| {
               ApiError::invalid(format!(
@@ -691,13 +758,14 @@ async fn service(
           )?),
           file: None,
         }),
-        (None, None) => None,
+        (None, None, None) => None,
       };
+      let is_new = existing.is_none();
       let mut spec = match existing {
         Some(spec) => spec,
         None => {
           let source = source.clone().ok_or_else(|| {
-            ApiError::invalid(format!("服务 {name} 不存在，新建时需要 --image 或 --compose"))
+            ApiError::invalid(format!("服务 {name} 不存在，新建时需要 --image、--compose、--dir 或 --git"))
               .suggest(format!("wharf service deploy {name} --image traefik/whoami --port http=80"))
           })?;
           let server = match server.clone() {
@@ -725,6 +793,12 @@ async fn service(
           .iter()
           .map(|p| parse_port(p))
           .collect::<CliResult<_>>()?;
+      } else if let (true, Some(p)) = (is_new, default_port) {
+        spec.ports = vec![PortSpec {
+          name: "http".into(),
+          port: p,
+          host_port: None,
+        }];
       }
       for e in &env {
         let (k, v) = parse_kv(e, "--env")?;
@@ -766,7 +840,43 @@ async fn service(
     ServiceCmd::Rm { name, apply } => {
       changes(c, vec![Change::RemoveService { name }], apply, j).await
     }
+    ServiceCmd::Rebuild { name, no_wait } => {
+      let r: ApplyResponse = c
+        .post(
+          &format!("/api/services/{}/rebuild", seg(&name)),
+          &json!({}),
+        )
+        .await?;
+      finish_task(c, &r.run_id, !no_wait, j).await
+    }
   }
+}
+
+/// 目录名转成服务名：小写，非字母数字换成 `-`。
+fn dir_name(dir: &std::path::Path) -> CliResult<String> {
+  let abs = std::fs::canonicalize(dir).map_err(|e| {
+    ApiError::invalid(format!("{}：{e}", dir.display()))
+  })?;
+  let raw = abs
+    .file_name()
+    .map(|n| n.to_string_lossy().to_lowercase())
+    .unwrap_or_default();
+  let mut name: String = raw
+    .chars()
+    .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+    .collect();
+  name = name.trim_matches('-').to_string();
+  while name.contains("--") {
+    name = name.replace("--", "-");
+  }
+  name.truncate(48);
+  if name.is_empty() {
+    return Err(
+      ApiError::invalid("从目录名取不出服务名，请用 --name 指定")
+        .into(),
+    );
+  }
+  Ok(name)
 }
 
 /// 只有一台已加入的服务器时自动选它。

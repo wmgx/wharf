@@ -45,6 +45,9 @@ pub struct ServerSettings {
   /// 覆盖 agent 探测到的内网地址。没有组网工具、直接走内网时用它。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub private_addr: Option<PrivateAddr>,
+  /// 构建时传给内置模板的参数，例如 `PIP_INDEX_URL`、`GOPROXY`（国内机器配镜像源）。
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub build_env: BTreeMap<String, String>,
 }
 
 /// 服务器之间互相访问用的地址：网关跨机器访问服务时连它，
@@ -116,6 +119,48 @@ pub enum Source {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     file: Option<String>,
   },
+  /// 从代码构建镜像（在服务所在的服务器上 `docker build`），其余和 image 来源一样。
+  Build(BuildSource),
+}
+
+/// 代码来源：本机目录（CLI 打包上传）或 git 仓库，二选一。
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(deny_unknown_fields)]
+pub struct BuildSource {
+  /// CLI 上传到控制面的代码包（tar.gz）的 sha256。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub upload: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub git: Option<GitSource>,
+  /// 代码里的子目录，作为构建目录。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub path: Option<String>,
+  /// Dockerfile 路径（相对构建目录）。不填时有 `Dockerfile` 就用，没有就按语言用内置模板。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub dockerfile: Option<String>,
+  /// 内置模板的基础镜像，例如 `python:3.12-slim`。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub base: Option<String>,
+  /// 内置模板的启动命令，例如 `uvicorn main:app --host 0.0.0.0 --port $PORT`。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub start: Option<String>,
+}
+
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(deny_unknown_fields)]
+pub struct GitSource {
+  /// https 地址，例如 `https://github.com/owner/repo`。
+  pub repo: String,
+  /// 分支、标签或 commit。
+  #[serde(rename = "ref")]
+  pub reference: String,
+  /// 私有仓库：保存访问 token 的密钥名（`wharf secret set`）。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub token_secret: Option<String>,
 }
 
 #[derive(

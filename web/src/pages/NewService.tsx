@@ -31,10 +31,21 @@ export function NewService({ open, onClose }: { open: boolean; onClose: () => vo
   );
 }
 
+type Kind = "image" | "compose" | "git";
+
+/** 从仓库地址取服务名：https://github.com/owner/my-app.git → my-app。 */
+function nameFromRepo(repo: string): string {
+  const last = repo.trim().replace(/\/+$/, "").split("/").pop() ?? "";
+  return toName(last.replace(/\.git$/, ""));
+}
+
 interface Draft {
-  kind: "image" | "compose";
+  kind: Kind;
   image: string;
   compose: string;
+  repo: string;
+  gitRef: string;
+  path: string;
   name: string;
   nameTouched: boolean;
   server: string;
@@ -57,9 +68,12 @@ function Form({ onClose }: { onClose: () => void }) {
   const [params] = useSearchParams();
   const [draft] = useState(() => (params.get("draft") === "1" ? lastDraft : null));
 
-  const [kind, setKind] = useState<"image" | "compose">(draft?.kind ?? "image");
+  const [kind, setKind] = useState<Kind>(draft?.kind ?? "image");
   const [image, setImage] = useState(draft?.image ?? "");
   const [compose, setCompose] = useState(draft?.compose ?? "");
+  const [repo, setRepo] = useState(draft?.repo ?? "");
+  const [gitRef, setGitRef] = useState(draft?.gitRef ?? "main");
+  const [path, setPath] = useState(draft?.path ?? "");
   const [name, setName] = useState(draft?.name ?? "");
   const [nameTouched, setNameTouched] = useState(draft?.nameTouched ?? false);
   const servers = status?.servers ?? [];
@@ -68,7 +82,7 @@ function Form({ onClose }: { onClose: () => void }) {
   const [envText, setEnvText] = useState(draft?.envText ?? "");
   const [hostname, setHostname] = useState(draft?.hostname ?? "");
 
-  const svcName = nameTouched ? name : kind === "image" ? nameFromImage(image) : name;
+  const svcName = nameTouched ? name : kind === "image" ? nameFromImage(image) : kind === "git" ? nameFromRepo(repo) : name;
   const chosenServer = server || serverOptions(servers)[0]?.value || "";
   const entry = useEntry(chosenServer);
   const [entryRestored, setEntryRestored] = useState(false);
@@ -88,23 +102,30 @@ function Form({ onClose }: { onClose: () => void }) {
     return svcName ? [...suffixes].map((s) => `${svcName}.${s}`) : [];
   }, [status, accounts, svcName]);
 
-  const source = kind === "image" ? image.trim() : compose.trim();
+  const source = kind === "image" ? image.trim() : kind === "git" ? repo.trim() : compose.trim();
+  const repoOk = kind !== "git" || (/^https:\/\/[^\s@]+$/.test(repo.trim()) && !!gitRef.trim());
   const portsOk = ports.every((p) => p.name && p.port > 0 && p.port < 65536);
-  const ready = !!svcName && !!source && !!chosenServer && portsOk && (!hostname.trim() || entry.ready);
+  const ready = !!svcName && !!source && repoOk && !!chosenServer && portsOk && (!hostname.trim() || entry.ready);
+  const withEnv = kind !== "compose";
 
   const submit = () => {
     const spec: ServiceSpec = {
       server: chosenServer,
-      source: kind === "image" ? { image: source } : { compose: { content: source } },
+      source:
+        kind === "image"
+          ? { image: source }
+          : kind === "git"
+            ? { build: { git: { repo: source.replace(/\/+$/, ""), ref: gitRef.trim() }, path: path.trim() || undefined } }
+            : { compose: { content: source } },
       ports: ports.length ? ports : undefined,
-      env: kind === "image" && envText.trim() ? parseEnv(envText) : undefined,
+      env: withEnv && envText.trim() ? parseEnv(envText) : undefined,
     };
     const changes: Change[] = [{ op: "upsert_service", name: svcName, spec }];
     if (hostname.trim()) {
       const { gateway, changes: gatewayChanges } = entry.resolve();
       changes.push(...gatewayChanges, { op: "upsert_route", spec: { hostname: hostname.trim().toLowerCase(), service: svcName, gateway } });
     }
-    lastDraft = { kind, image, compose, name: svcName, nameTouched, server: chosenServer, ports, envText, hostname, entry: entry.chosen };
+    lastDraft = { kind, image, compose, repo, gitRef, path, name: svcName, nameTouched, server: chosenServer, ports, envText, hostname, entry: entry.chosen };
     onClose();
     actions.plan({ title: `部署 ${svcName}`, changes, then: `/services/${svcName}`, back: NEW_SERVICE_DRAFT_URL });
   };
@@ -115,15 +136,44 @@ function Form({ onClose }: { onClose: () => void }) {
         <Field label="来源">
           <Segmented
             value={kind}
-            onChange={setKind}
+            onChange={(k) => {
+              setKind(k);
+              // 端口还是默认值时，换成这种来源常用的端口。
+              const untouched = ports.length === 1 && ports[0].name === "http" && [80, 8080].includes(ports[0].port);
+              if (untouched) setPorts([{ name: "http", port: k === "git" ? 8080 : 80 }]);
+            }}
             options={[
               ["image", "镜像"],
+              ["git", "代码（git）"],
               ["compose", "Compose 文件"],
             ]}
           />
         </Field>
 
-        {kind === "image" ? (
+        {kind === "git" ? (
+          <>
+            <Field
+              label="仓库"
+              htmlFor="repo"
+              help={
+                <>
+                  在服务器上拉代码构建：有 Dockerfile 就用，没有时自动识别 Python、Go。私有仓库和本机目录用 CLI：
+                  <code className="font-mono">wharf deploy ./目录</code>。
+                </>
+              }
+            >
+              <Input id="repo" autoFocus placeholder="https://github.com/owner/app" value={repo} onChange={(e) => setRepo(e.target.value)} />
+            </Field>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="分支 / 标签" htmlFor="ref">
+                <Input id="ref" value={gitRef} onChange={(e) => setGitRef(e.target.value)} />
+              </Field>
+              <Field label="子目录" htmlFor="path">
+                <Input id="path" placeholder="仓库根目录" value={path} onChange={(e) => setPath(e.target.value)} />
+              </Field>
+            </div>
+          </>
+        ) : kind === "image" ? (
           <Field label="镜像" htmlFor="image">
             <Input id="image" autoFocus placeholder="例如 nginxdemos/hello 或 ghcr.io/owner/app:1.0" value={image} onChange={(e) => setImage(e.target.value)} />
           </Field>
@@ -144,7 +194,7 @@ function Form({ onClose }: { onClose: () => void }) {
             <Input
               id="name"
               value={svcName}
-              placeholder="自动取镜像名"
+              placeholder={kind === "git" ? "自动取仓库名" : "自动取镜像名"}
               onChange={(e) => {
                 setNameTouched(true);
                 setName(toName(e.target.value));
@@ -158,12 +208,18 @@ function Form({ onClose }: { onClose: () => void }) {
 
         <Field
           label="端口"
-          help={kind === "image" ? "容器里监听的端口。宿主机端口自动分配，只绑定 127.0.0.1 和内网地址。" : "compose 里已经发布的宿主机端口。"}
+          help={
+            kind === "compose"
+              ? "compose 里已经发布的宿主机端口。"
+              : kind === "git"
+                ? "程序监听的端口，会通过 PORT 环境变量传给内置模板（Python 常用 8000，Go 常用 8080）。宿主机端口自动分配。"
+                : "容器里监听的端口。宿主机端口自动分配，只绑定 127.0.0.1 和内网地址。"
+          }
         >
           <PortsEditor ports={ports} onChange={setPorts} />
         </Field>
 
-        {kind === "image" && (
+        {withEnv && (
           <Field
             label="环境变量"
             htmlFor="env"

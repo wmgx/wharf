@@ -9,7 +9,9 @@ use clap::{Args, Parser, Subcommand};
 
 mod client;
 mod commands;
+mod deploy;
 mod fleet;
+mod pack;
 mod print;
 
 #[derive(Parser)]
@@ -46,6 +48,33 @@ pub enum Command {
   },
   /// 总览：服务器、服务、网关、路由的状态。
   Status,
+  /// 部署本机代码目录：打包上传，在服务器上构建并运行。
+  /// Python、Go 自动识别，有 Dockerfile 就用。再次执行就是发布新版本。
+  Deploy {
+    /// 代码目录，默认当前目录。
+    #[arg(default_value = ".")]
+    dir: std::path::PathBuf,
+    /// 服务名，默认取目录名。
+    #[arg(long)]
+    name: Option<String>,
+    #[arg(long)]
+    server: Option<String>,
+    /// 端口 `名字=容器端口`，不给时 Python 用 8000、Go 用 8080。
+    #[arg(long)]
+    port: Vec<String>,
+    #[arg(long)]
+    env: Vec<String>,
+    #[arg(long)]
+    path: Option<String>,
+    #[arg(long)]
+    dockerfile: Option<String>,
+    #[arg(long)]
+    base: Option<String>,
+    #[arg(long)]
+    start: Option<String>,
+    #[command(flatten)]
+    apply: ApplyFlags,
+  },
   /// 服务器。
   #[command(subcommand)]
   Server(ServerCmd),
@@ -102,6 +131,35 @@ pub enum Command {
   Token(TokenCmd),
 }
 
+/// 从代码构建：本机目录或 git 仓库，加上构建选项。
+#[derive(Args, Clone, Default)]
+pub struct BuildArgs {
+  /// 本机代码目录：打包上传，在服务器上构建（Python、Go 自动识别，有 Dockerfile 就用）。
+  #[arg(long)]
+  pub dir: Option<std::path::PathBuf>,
+  /// git 仓库（https 地址），在服务器上拉代码构建。
+  #[arg(long)]
+  pub git: Option<String>,
+  /// git 的分支、标签或 commit，默认 main。
+  #[arg(long = "ref")]
+  pub git_ref: Option<String>,
+  /// 私有仓库：保存访问 token 的密钥名（先 `wharf secret set`）。
+  #[arg(long)]
+  pub git_token_secret: Option<String>,
+  /// 代码里的子目录，作为构建目录。
+  #[arg(long)]
+  pub path: Option<String>,
+  /// Dockerfile 路径（相对构建目录）。不给时有 Dockerfile 就用，没有就按语言生成。
+  #[arg(long)]
+  pub dockerfile: Option<String>,
+  /// 内置模板的基础镜像，例如 `python:3.12-slim`。
+  #[arg(long)]
+  pub base: Option<String>,
+  /// 内置模板的启动命令，监听端口用 `$PORT`，例如 `python run.py`。
+  #[arg(long)]
+  pub start: Option<String>,
+}
+
 /// 修改类命令共用：生成计划后是否直接执行。
 #[derive(Args, Clone, Default)]
 pub struct ApplyFlags {
@@ -149,6 +207,12 @@ pub enum ServerCmd {
     /// 内网地址所在网络：lan（普通内网，明文）或 overlay（WireGuard 等加密组网）。
     #[arg(long, default_value = "lan", value_parser = ["lan", "overlay"])]
     network: String,
+    /// 构建时传给内置模板的参数 `KEY=VALUE`（国内机器配 PIP_INDEX_URL、GOPROXY），可以多次使用。
+    #[arg(long)]
+    build_env: Vec<String>,
+    /// 清空构建参数。
+    #[arg(long)]
+    clear_build_env: bool,
     #[command(flatten)]
     apply: ApplyFlags,
   },
@@ -159,6 +223,8 @@ pub enum ServerCmd {
 }
 
 #[derive(Subcommand)]
+// 只在启动时解析一次，变体大小无所谓。
+#[allow(clippy::large_enum_variant)]
 pub enum ServiceCmd {
   List,
   Show {
@@ -212,7 +278,16 @@ pub enum ServiceCmd {
     #[arg(long)]
     volume: Vec<String>,
     #[command(flatten)]
+    build: BuildArgs,
+    #[command(flatten)]
     apply: ApplyFlags,
+  },
+  /// 从代码构建的服务：拉最新代码（本机目录用上次上传的）重新构建并部署。
+  Rebuild {
+    name: String,
+    /// 只发起，不等结束。
+    #[arg(long)]
+    no_wait: bool,
   },
   /// 迁移到另一台服务器：同步 /srv/<服务>/ 的数据，在新服务器上启动，
   /// 网关改指新地址后删除旧容器，域名不变。旧服务器上的数据目录保留。

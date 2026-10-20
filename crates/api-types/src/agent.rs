@@ -142,6 +142,8 @@ pub enum AgentOp {
     service: String,
   },
   Restic(ResticJob),
+  /// 取代码、`docker build`，结果是 [BuildResult]。镜像已存在且不是 `force` 时跳过。
+  Build(Box<BuildJob>),
 }
 
 /// 一次性口令。Debug 输出时隐藏，防止被打进日志。
@@ -187,6 +189,10 @@ pub struct ResticJob {
 
 /// restic 和 rest-server 的镜像，控制面和 agent 共用。
 pub const RESTIC_IMAGE: &str = "restic/restic:0.18.1";
+/// git 克隆在这个镜像的容器里做，服务器不用装 git。
+pub const GIT_IMAGE: &str = "alpine/git:v2.49.1";
+/// 构建出的镜像都在这个名字下，只在本机，不拉取。
+pub const BUILD_IMAGE_PREFIX: &str = "wharf-build/";
 pub const REST_SERVER_IMAGE: &str = "restic/rest-server:0.14.0";
 /// rest-server 在备份服务器内网地址上监听的端口。
 pub const REST_SERVER_PORT: u16 = 7710;
@@ -328,4 +334,57 @@ pub struct ProjectUpResult {
   pub images: Vec<ImageInfo>,
   #[serde(default)]
   pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildJob {
+  pub service: String,
+  /// 构建出的镜像，`wharf-build/<服务>:<指纹>`。
+  pub image: String,
+  pub fetch: BuildFetch,
+  /// 代码里的子目录，作为构建目录。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub path: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub dockerfile: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub base: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub start: Option<String>,
+  /// 内置模板里的 `$PORT`。
+  pub port: u16,
+  /// 作为 `--build-arg` 传入（镜像源等）。
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub build_env: BTreeMap<String, String>,
+  /// 镜像已存在也重新构建（拉最新代码）。
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub force: bool,
+  pub pull: PullPolicy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuildFetch {
+  /// 从控制面下载 CLI 上传的代码包：`GET <控制面>/agent/uploads/<sha256>`，
+  /// 带一次性口令。
+  Upload {
+    sha256: String,
+    token: OneTimeSecret,
+  },
+  Git {
+    repo: String,
+    reference: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    token: Option<OneTimeSecret>,
+  },
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BuildResult {
+  /// 镜像已存在，没有重新构建。
+  #[serde(default)]
+  pub skipped: bool,
+  /// git 来源实际构建的 commit。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub commit: Option<String>,
 }

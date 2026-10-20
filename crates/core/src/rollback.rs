@@ -33,8 +33,8 @@ pub struct RollbackQuery {
   to: Option<i64>,
 }
 
-/// (id, hash, spec, images, created_at)
-type Row = (i64, String, Option<String>, String, i64);
+/// (id, hash, spec, images, created_at, commit_sha)
+type Row = (i64, String, Option<String>, String, i64, Option<String>);
 
 pub async fn target(
   State(s): State<Arc<AppState>>,
@@ -55,13 +55,20 @@ pub async fn target(
     .call(move |c| {
       let mut stmt = c
         .prepare(
-          "SELECT id, hash, spec, images, created_at FROM deployments
+          "SELECT id, hash, spec, images, created_at, commit_sha FROM deployments
            WHERE service = ?1 ORDER BY id DESC LIMIT 200",
         )
         .map_err(sql_err)?;
       let rows = stmt
         .query_map(params![service], |r| {
-          Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+          Ok((
+            r.get(0)?,
+            r.get(1)?,
+            r.get(2)?,
+            r.get(3)?,
+            r.get(4)?,
+            r.get(5)?,
+          ))
         })
         .map_err(sql_err)?;
       rows.collect::<Result<Vec<_>, _>>().map_err(sql_err)
@@ -76,7 +83,7 @@ pub async fn target(
       ApiError::invalid(format!("服务 {name} 没有可以回滚的旧版本"))
     }
   })?;
-  let (id, _, spec, images, created) = row;
+  let (id, _, spec, images, created, commit) = row;
   let spec: ServiceSpec = match spec {
     Some(spec) => serde_json::from_str(spec).map_err(json_err)?,
     None => {
@@ -94,7 +101,7 @@ pub async fn target(
   let spec = ServiceSpec {
     server: current.spec.server.clone(),
     backup: current.spec.backup.clone(),
-    ..pin_image(spec, &images)
+    ..pin_commit(pin_image(spec, &images), commit.as_deref())
   };
   Ok(Json(RollbackTarget {
     service: name,
@@ -109,9 +116,29 @@ fn pick(rows: &[Row], to: Option<i64>) -> Option<&Row> {
   match to {
     Some(id) => rows.iter().find(|r| r.0 == id),
     None => {
-      let latest = &rows.first()?.1;
-      rows.iter().find(|r| &r.1 != latest)
+      let latest = rows.first()?;
+      rows.iter().find(|r| (&r.1, &r.5) != (&latest.1, &latest.5))
     }
+  }
+}
+
+/// git 来源固定到那次部署实际构建的 commit。
+fn pin_commit(
+  spec: ServiceSpec,
+  commit: Option<&str>,
+) -> ServiceSpec {
+  match (&spec.source, commit) {
+    (Source::Build(b), Some(commit)) if b.git.is_some() => {
+      let mut b = b.clone();
+      if let Some(git) = &mut b.git {
+        git.reference = commit.to_string();
+      }
+      ServiceSpec {
+        source: Source::Build(b),
+        ..spec
+      }
+    }
+    _ => spec,
   }
 }
 
@@ -137,7 +164,7 @@ mod tests {
   use super::*;
 
   fn row(id: i64, hash: &str) -> Row {
-    (id, hash.into(), None, "[]".into(), 0)
+    (id, hash.into(), None, "[]".into(), 0, None)
   }
 
   #[test]
