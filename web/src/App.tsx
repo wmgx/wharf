@@ -76,7 +76,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
                 <CommandMenu onLogout={onLogout} />
               </div>
             </header>
-            <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-8 md:px-8">
+            <div className="mx-auto w-full max-w-6xl flex-1 px-4 py-8 md:px-8">
               <Boundary>
                 <Routes>
                   <Route path="/" element={<Home />} />
@@ -87,7 +87,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
                   <Route path="*" element={<Navigate to="/" replace />} />
                 </Routes>
               </Boundary>
-            </main>
+            </div>
           </SidebarInset>
         </SidebarProvider>
       </ActionsProvider>
