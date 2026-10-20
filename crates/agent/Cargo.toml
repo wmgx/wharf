@@ -1,0 +1,34 @@
+[package]
+name = "wharf-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "每台服务器上跑一个，主动连接控制面并执行 compose 和网关操作"
+
+[[bin]]
+name = "wharf-agent"
+path = "src/main.rs"
+
+[dependencies]
+wharf-api-types.workspace = true
+
+anyhow.workspace = true
+clap.workspace = true
+ed25519-dalek.workspace = true
+futures-util.workspace = true
+getrandom.workspace = true
+hex.workspace = true
+if-addrs.workspace = true
+libc = "0.2"
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,0 +1,301 @@
+//! 请求分发。修改同一个 project 的请求串行执行。
+
+use std::{
+  collections::HashMap,
+  path::Path,
+  sync::{Arc, Mutex},
+  time::Duration,
+};
+
+use serde_json::Value;
+use wharf_api_types::{
+  ApiError, ErrorCode,
+  agent::{AgentOp, GatewayApply, ProjectUp, ProjectUpResult},
+  validate_name,
+};
+
+use crate::{
+  docker::{CONFIG_HASH_FILE, Docker, io_err, write_private},
+  exec::{Cmd, Ctx},
+  report::Reporter,
+};
+
+pub struct Ops {
+  pub docker: Docker,
+  pub reporter: Reporter,
+  locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+/// caddy 的管理接口用 unix socket，不占端口，也就不会和机器上已有的 Caddy 冲突。
+pub const CADDY_ADMIN: &str = "unix//config/caddy-admin.sock";
+
+impl Ops {
+  pub fn new(docker: Docker, reporter: Reporter) -> Self {
+    Self {
+      docker,
+      reporter,
+      locks: Default::default(),
+    }
+  }
+
+  fn lock_for(&self, project: &str) -> Arc<tokio::sync::Mutex<()>> {
+    let mut locks =
+      self.locks.lock().unwrap_or_else(|p| p.into_inner());
+    locks.entry(project.to_string()).or_default().clone()
+  }
+
+  pub async fn handle(
+    &self,
+    op: AgentOp,
+    ctx: &Ctx,
+  ) -> Result<Value, ApiError> {
+    match op {
+      AgentOp::Report => to_value(self.reporter.report(true).await),
+      AgentOp::ProjectStatus { projects } => {
+        for p in &projects {
+          check_project(p)?;
+        }
+        to_value(self.docker.status(&projects, ctx).await?)
+      }
+      AgentOp::EnsureDirs { dirs } => {
+        for dir in &dirs {
+          ensure_dir(dir)?;
+        }
+        Ok(Value::Null)
+      }
+      AgentOp::ProjectUp(up) => {
+        check_project(&up.project)?;
+        let lock = self.lock_for(&up.project);
+        let _guard = lock.lock().await;
+        to_value(self.project_up(&up, ctx).await?)
+      }
+      AgentOp::ProjectDown { project } => {
+        check_project(&project)?;
+        let lock = self.lock_for(&project);
+        let _guard = lock.lock().await;
+        self.docker.down(&project, ctx).await?;
+        Ok(Value::Null)
+      }
+      AgentOp::Logs { project, tail } => {
+        check_project(&project)?;
+        to_value(self.docker.logs(&project, tail, ctx).await?)
+      }
+      AgentOp::GatewayApply(apply) => {
+        check_project(&apply.up.project)?;
+        let lock = self.lock_for(&apply.up.project);
+        let _guard = lock.lock().await;
+        to_value(self.gateway_apply(&apply, ctx).await?)
+      }
+    }
+  }
+
+  async fn pull_all(
+    &self,
+    up: &ProjectUp,
+    ctx: &Ctx,
+    warnings: &mut Vec<String>,
+  ) -> Result<Vec<String>, ApiError> {
+    let images = self.docker.images(&up.project, ctx).await?;
+    for image in &images {
+      self.docker.pull(image, &up.pull, ctx, warnings).await?;
+    }
+    Ok(images)
+  }
+
+  async fn finish_up(
+    &self,
+    up: &ProjectUp,
+    images: &[String],
+    warnings: Vec<String>,
+    ctx: &Ctx,
+  ) -> Result<ProjectUpResult, ApiError> {
+    self.docker.up(&up.project, ctx).await?;
+    self.docker.write_hash(&up.project, &up.hash)?;
+    let state = self.docker.one_status(&up.project, ctx).await?;
+    Ok(ProjectUpResult {
+      containers: state.containers,
+      images: self.docker.image_info(images, ctx).await,
+      warnings,
+    })
+  }
+
+  async fn project_up(
+    &self,
+    up: &ProjectUp,
+    ctx: &Ctx,
+  ) -> Result<ProjectUpResult, ApiError> {
+    self.docker.write_compose(&up.project, &up.compose)?;
+    let mut warnings = Vec::new();
+    let images = self.pull_all(up, ctx, &mut warnings).await?;
+    self.finish_up(up, &images, warnings, ctx).await
+  }
+
+  /// 先校验新配置，通过后再替换；容器在运行时热重载，失败就恢复旧配置。
+  async fn gateway_apply(
+    &self,
+    apply: &GatewayApply,
+    ctx: &Ctx,
+  ) -> Result<ProjectUpResult, ApiError> {
+    let up = &apply.up;
+    let dir = self.docker.project_dir(&up.project);
+    let conf = dir.join("conf");
+    std::fs::create_dir_all(&conf).map_err(io_err(&conf))?;
+    let current = conf.join("Caddyfile");
+    let next = conf.join("Caddyfile.next");
+    let prev = conf.join("Caddyfile.prev");
+
+    let before = self.docker.one_status(&up.project, ctx).await?;
+    let compose_changed =
+      before.hash.as_deref() != Some(up.hash.as_str());
+    let running = before.all_running();
+
+    // 网关 compose 只有 caddy 一个镜像。校验通过之前不动现有 compose 文件。
+    let mut warnings = Vec::new();
+    let images = vec![apply.image.clone()];
+    // 只改路由时容器在跑、镜像就在本地，不必再拉。
+    if !running || compose_changed {
+      self
+        .docker
+        .pull(&apply.image, &up.pull, ctx, &mut warnings)
+        .await?;
+    }
+
+    write_private(&next, &apply.caddyfile)?;
+    ctx.say("校验 Caddy 配置");
+    let validated = Cmd::new(&self.docker.bin)
+      .args(["run", "--rm", "--network", "none", "-v"])
+      .arg(format!("{}:/etc/caddy:ro", conf.display()))
+      .args([
+        apply.image.as_str(),
+        "caddy",
+        "validate",
+        "--config",
+        "/etc/caddy/Caddyfile.next",
+        "--adapter",
+        "caddyfile",
+      ])
+      .timeout(Duration::from_secs(60))
+      .run(ctx)
+      .await?
+      .check("caddy validate");
+    if let Err(e) = validated {
+      let _ = std::fs::remove_file(&next);
+      return Err(e);
+    }
+
+    let had_config = current.exists();
+    if had_config {
+      std::fs::copy(&current, &prev).map_err(io_err(&prev))?;
+    }
+    std::fs::rename(&next, &current).map_err(io_err(&current))?;
+    self.docker.write_compose(&up.project, &up.compose)?;
+
+    let result = if running && !compose_changed {
+      ctx.say("热重载 Caddy");
+      match self.caddy_reload(&up.project, ctx).await {
+        Ok(()) => {
+          let state =
+            self.docker.one_status(&up.project, ctx).await?;
+          Ok(ProjectUpResult {
+            containers: state.containers,
+            images: self.docker.image_info(&images, ctx).await,
+            warnings,
+          })
+        }
+        Err(e) => Err(e),
+      }
+    } else {
+      self.finish_up(up, &images, warnings, ctx).await
+    };
+
+    match result {
+      Ok(result) => {
+        let hash = conf.join(CONFIG_HASH_FILE);
+        std::fs::write(&hash, &apply.caddyfile_hash)
+          .map_err(io_err(&hash))?;
+        Ok(result)
+      }
+      Err(e) => {
+        if had_config {
+          ctx.say("失败，恢复旧配置");
+          let _ = std::fs::rename(&prev, &current);
+          if running {
+            let _ = self.caddy_reload(&up.project, ctx).await;
+          }
+        }
+        Err(e)
+      }
+    }
+  }
+
+  async fn caddy_reload(
+    &self,
+    project: &str,
+    ctx: &Ctx,
+  ) -> Result<(), ApiError> {
+    self
+      .docker
+      .compose(project)
+      .args([
+        "exec",
+        "-T",
+        "caddy",
+        "caddy",
+        "reload",
+        "--config",
+        "/etc/caddy/Caddyfile",
+        "--adapter",
+        "caddyfile",
+        "--address",
+        CADDY_ADMIN,
+      ])
+      .timeout(Duration::from_secs(60))
+      .run(ctx)
+      .await?
+      .check("caddy reload")?;
+    Ok(())
+  }
+}
+
+fn to_value<T: serde::Serialize>(v: T) -> Result<Value, ApiError> {
+  serde_json::to_value(v)
+    .map_err(|e| ApiError::internal(e.to_string()))
+}
+
+/// project 名会拼进路径，必须先校验。网关 project 是 `wharf-gw-<name>`。
+fn check_project(project: &str) -> Result<(), ApiError> {
+  validate_name("project", project)
+}
+
+/// 只允许在 `/srv/` 下建目录，防止控制面被冒充时随便写。
+fn ensure_dir(dir: &str) -> Result<(), ApiError> {
+  let path = Path::new(dir);
+  let ok = path.is_absolute()
+    && path.starts_with("/srv/")
+    && path.components().all(|c| {
+      matches!(
+        c,
+        std::path::Component::RootDir
+          | std::path::Component::Normal(_)
+      )
+    });
+  if !ok {
+    return Err(ApiError::new(
+      ErrorCode::InvalidInput,
+      format!("数据目录必须在 /srv/ 下：{dir}"),
+    ));
+  }
+  std::fs::create_dir_all(path).map_err(io_err(path))
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn dirs_stay_under_srv() {
+    assert!(ensure_dir("/etc/x").is_err());
+    assert!(ensure_dir("/srv/../etc").is_err());
+    assert!(ensure_dir("srv/a").is_err());
+  }
+}

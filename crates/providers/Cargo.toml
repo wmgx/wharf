@@ -1,0 +1,16 @@
+[package]
+name = "wharf-providers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "厂商实现：DNS、入口。从 Komodo fork 的 domain/provider 搬来"
+
+[dependencies]
+hex.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+urlencoding.workspace = true

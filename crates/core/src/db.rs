@@ -1,0 +1,492 @@
+//! SQLite：唯一事实来源。
+//!
+//! 服务器设置、服务、网关、路由统一存在 `resources` 表，每行有自己的
+//! `version`，plan/apply 用它做乐观锁。其他表是运行数据。
+
+use std::{
+  path::Path,
+  sync::{Arc, Mutex},
+};
+
+use chrono::{DateTime, TimeZone, Utc};
+use rusqlite::{Connection, OptionalExtension, params};
+use serde_json::Value;
+use wharf_api_types::ApiError;
+
+const MIGRATIONS: &[&str] = &[r#"
+CREATE TABLE resources (
+  kind TEXT NOT NULL,
+  name TEXT NOT NULL,
+  spec TEXT NOT NULL,
+  meta TEXT NOT NULL DEFAULT '{}',
+  version INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (kind, name)
+);
+CREATE TABLE agents (
+  server TEXT PRIMARY KEY,
+  public_key TEXT,
+  join_token_hash TEXT UNIQUE,
+  join_expires_at INTEGER,
+  report TEXT,
+  last_seen INTEGER
+);
+CREATE TABLE accounts (
+  name TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  token TEXT NOT NULL,
+  zones TEXT NOT NULL,
+  warnings TEXT NOT NULL DEFAULT '[]',
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE secrets (
+  name TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE owned_records (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  route_id TEXT NOT NULL,
+  hostname TEXT NOT NULL,
+  account TEXT NOT NULL,
+  scope TEXT NOT NULL,
+  remote_id TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  UNIQUE (account, scope, remote_id)
+);
+CREATE TABLE plans (
+  id TEXT PRIMARY KEY,
+  status TEXT NOT NULL,
+  body TEXT NOT NULL,
+  steps TEXT NOT NULL,
+  writes TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL
+);
+CREATE TABLE runs (
+  id TEXT PRIMARY KEY,
+  plan_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  body TEXT NOT NULL,
+  started_at INTEGER NOT NULL
+);
+CREATE TABLE deployments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  service TEXT NOT NULL,
+  server TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  hash TEXT NOT NULL,
+  compose TEXT NOT NULL,
+  images TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX deployments_service ON deployments (service, id);
+CREATE TABLE api_tokens (
+  name TEXT PRIMARY KEY,
+  hash TEXT NOT NULL UNIQUE,
+  scope TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  last_used_at INTEGER
+);
+"#];
+
+#[derive(Clone)]
+pub struct Db {
+  conn: Arc<Mutex<Connection>>,
+}
+
+impl Db {
+  pub fn open(path: &Path) -> anyhow::Result<Self> {
+    let conn = Connection::open(path)?;
+    Self::init(conn)
+  }
+
+  #[cfg(test)]
+  pub fn memory() -> Self {
+    Self::init(Connection::open_in_memory().unwrap()).unwrap()
+  }
+
+  fn init(mut conn: Connection) -> anyhow::Result<Self> {
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    let current: usize =
+      conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    for (i, sql) in MIGRATIONS.iter().enumerate().skip(current) {
+      let tx = conn.transaction()?;
+      tx.execute_batch(sql)?;
+      tx.pragma_update(None, "user_version", i + 1)?;
+      tx.commit()?;
+    }
+    Ok(Self {
+      conn: Arc::new(Mutex::new(conn)),
+    })
+  }
+
+  /// 在阻塞线程里执行一段数据库操作。
+  pub async fn call<R, F>(&self, f: F) -> Result<R, ApiError>
+  where
+    R: Send + 'static,
+    F:
+      FnOnce(&mut Connection) -> Result<R, ApiError> + Send + 'static,
+  {
+    let conn = self.conn.clone();
+    tokio::task::spawn_blocking(move || {
+      let mut conn = conn.lock().unwrap_or_else(|p| p.into_inner());
+      f(&mut conn)
+    })
+    .await
+    .map_err(|e| ApiError::internal(format!("数据库任务失败：{e}")))?
+  }
+}
+
+pub fn sql_err(e: rusqlite::Error) -> ApiError {
+  tracing::error!("sqlite: {e}");
+  ApiError::internal("数据库错误，详见控制面日志")
+}
+
+pub fn json_err(e: serde_json::Error) -> ApiError {
+  ApiError::internal(format!("数据格式错误：{e}"))
+}
+
+pub fn now_ms() -> i64 {
+  Utc::now().timestamp_millis()
+}
+
+pub fn to_time(ms: i64) -> DateTime<Utc> {
+  Utc.timestamp_millis_opt(ms).single().unwrap_or_default()
+}
+
+// RESOURCES
+
+#[derive(Debug, Clone)]
+pub struct ResourceRow {
+  pub kind: String,
+  pub name: String,
+  pub spec: Value,
+  pub meta: Value,
+  pub version: u64,
+}
+
+pub fn all_resources(
+  conn: &Connection,
+) -> Result<Vec<ResourceRow>, ApiError> {
+  let mut stmt = conn
+    .prepare(
+      "SELECT kind, name, spec, meta, version FROM resources ORDER BY kind, name",
+    )
+    .map_err(sql_err)?;
+  let rows = stmt
+    .query_map([], |r| {
+      Ok((
+        r.get::<_, String>(0)?,
+        r.get::<_, String>(1)?,
+        r.get::<_, String>(2)?,
+        r.get::<_, String>(3)?,
+        r.get::<_, i64>(4)?,
+      ))
+    })
+    .map_err(sql_err)?;
+  let mut out = Vec::new();
+  for row in rows {
+    let (kind, name, spec, meta, version) = row.map_err(sql_err)?;
+    out.push(ResourceRow {
+      kind,
+      name,
+      spec: serde_json::from_str(&spec).map_err(json_err)?,
+      meta: serde_json::from_str(&meta).map_err(json_err)?,
+      version: version as u64,
+    });
+  }
+  Ok(out)
+}
+
+/// 配置写入，在 apply 的事务里执行。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum Write {
+  Upsert {
+    kind: String,
+    name: String,
+    spec: Value,
+    meta: Value,
+  },
+  Delete {
+    kind: String,
+    name: String,
+  },
+}
+
+pub fn apply_write(
+  conn: &Connection,
+  write: &Write,
+) -> Result<(), ApiError> {
+  let now = now_ms();
+  match write {
+    Write::Upsert {
+      kind,
+      name,
+      spec,
+      meta,
+    } => conn
+      .execute(
+        "INSERT INTO resources (kind, name, spec, meta, version, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, 1, ?5, ?5)
+         ON CONFLICT (kind, name) DO UPDATE SET
+           spec = excluded.spec, meta = excluded.meta,
+           version = resources.version + 1, updated_at = excluded.updated_at",
+        params![kind, name, spec.to_string(), meta.to_string(), now],
+      )
+      .map(|_| ())
+      .map_err(sql_err),
+    Write::Delete { kind, name } => conn
+      .execute(
+        "DELETE FROM resources WHERE kind = ?1 AND name = ?2",
+        params![kind, name],
+      )
+      .map(|_| ())
+      .map_err(sql_err),
+  }
+}
+
+pub fn versions(
+  conn: &Connection,
+) -> Result<std::collections::BTreeMap<String, u64>, ApiError> {
+  Ok(
+    all_resources(conn)?
+      .into_iter()
+      .map(|r| (format!("{}/{}", r.kind, r.name), r.version))
+      .collect(),
+  )
+}
+
+// AGENTS
+
+#[derive(Debug, Clone)]
+pub struct AgentRow {
+  pub server: String,
+  pub public_key: Option<String>,
+  pub report: Option<wharf_api_types::agent::AgentReport>,
+  pub last_seen: Option<i64>,
+}
+
+pub fn agents(conn: &Connection) -> Result<Vec<AgentRow>, ApiError> {
+  let mut stmt = conn
+    .prepare(
+      "SELECT server, public_key, report, last_seen FROM agents",
+    )
+    .map_err(sql_err)?;
+  let rows = stmt
+    .query_map([], |r| {
+      Ok((
+        r.get::<_, String>(0)?,
+        r.get::<_, Option<String>>(1)?,
+        r.get::<_, Option<String>>(2)?,
+        r.get::<_, Option<i64>>(3)?,
+      ))
+    })
+    .map_err(sql_err)?;
+  let mut out = Vec::new();
+  for row in rows {
+    let (server, public_key, report, last_seen) =
+      row.map_err(sql_err)?;
+    out.push(AgentRow {
+      server,
+      public_key,
+      report: report.and_then(|r| serde_json::from_str(&r).ok()),
+      last_seen,
+    });
+  }
+  Ok(out)
+}
+
+pub fn agent(
+  conn: &Connection,
+  server: &str,
+) -> Result<Option<AgentRow>, ApiError> {
+  Ok(agents(conn)?.into_iter().find(|a| a.server == server))
+}
+
+// SECRETS
+
+pub fn secrets(
+  conn: &Connection,
+) -> Result<std::collections::BTreeMap<String, String>, ApiError> {
+  let mut stmt = conn
+    .prepare("SELECT name, value FROM secrets")
+    .map_err(sql_err)?;
+  let rows = stmt
+    .query_map([], |r| {
+      Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    })
+    .map_err(sql_err)?;
+  rows.collect::<Result<_, _>>().map_err(sql_err)
+}
+
+// ACCOUNTS
+
+#[derive(Clone)]
+pub struct AccountRow {
+  pub name: String,
+  pub kind: String,
+  pub token: String,
+  pub zones: Vec<String>,
+  pub warnings: Vec<String>,
+  pub updated_at: i64,
+}
+
+pub fn accounts(
+  conn: &Connection,
+) -> Result<Vec<AccountRow>, ApiError> {
+  let mut stmt = conn
+    .prepare(
+      "SELECT name, kind, token, zones, warnings, updated_at FROM accounts ORDER BY name",
+    )
+    .map_err(sql_err)?;
+  let rows = stmt
+    .query_map([], |r| {
+      Ok((
+        r.get::<_, String>(0)?,
+        r.get::<_, String>(1)?,
+        r.get::<_, String>(2)?,
+        r.get::<_, String>(3)?,
+        r.get::<_, String>(4)?,
+        r.get::<_, i64>(5)?,
+      ))
+    })
+    .map_err(sql_err)?;
+  let mut out = Vec::new();
+  for row in rows {
+    let (name, kind, token, zones, warnings, updated_at) =
+      row.map_err(sql_err)?;
+    out.push(AccountRow {
+      name,
+      kind,
+      token,
+      zones: serde_json::from_str(&zones).map_err(json_err)?,
+      warnings: serde_json::from_str(&warnings).map_err(json_err)?,
+      updated_at,
+    });
+  }
+  Ok(out)
+}
+
+// OWNED DNS RECORDS
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct OwnedRecord {
+  pub route_id: String,
+  pub hostname: String,
+  pub account: String,
+  pub scope: String,
+  pub remote_id: String,
+}
+
+pub fn owned_records(
+  conn: &Connection,
+) -> Result<Vec<OwnedRecord>, ApiError> {
+  let mut stmt = conn
+    .prepare(
+      "SELECT route_id, hostname, account, scope, remote_id FROM owned_records ORDER BY id",
+    )
+    .map_err(sql_err)?;
+  let rows = stmt
+    .query_map([], |r| {
+      Ok(OwnedRecord {
+        route_id: r.get(0)?,
+        hostname: r.get(1)?,
+        account: r.get(2)?,
+        scope: r.get(3)?,
+        remote_id: r.get(4)?,
+      })
+    })
+    .map_err(sql_err)?;
+  rows.collect::<Result<_, _>>().map_err(sql_err)
+}
+
+pub fn add_owned(
+  conn: &Connection,
+  r: &OwnedRecord,
+) -> Result<(), ApiError> {
+  conn
+    .execute(
+      "INSERT OR REPLACE INTO owned_records (route_id, hostname, account, scope, remote_id, created_at)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+      params![r.route_id, r.hostname, r.account, r.scope, r.remote_id, now_ms()],
+    )
+    .map(|_| ())
+    .map_err(sql_err)
+}
+
+pub fn remove_owned(
+  conn: &Connection,
+  account: &str,
+  scope: &str,
+  remote_id: &str,
+) -> Result<(), ApiError> {
+  conn
+    .execute(
+      "DELETE FROM owned_records WHERE account = ?1 AND scope = ?2 AND remote_id = ?3",
+      params![account, scope, remote_id],
+    )
+    .map(|_| ())
+    .map_err(sql_err)
+}
+
+// TOKENS
+
+pub fn token_scope(
+  conn: &Connection,
+  hash: &str,
+) -> Result<Option<(String, String)>, ApiError> {
+  let found: Option<(String, String)> = conn
+    .query_row(
+      "SELECT name, scope FROM api_tokens WHERE hash = ?1",
+      params![hash],
+      |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .optional()
+    .map_err(sql_err)?;
+  if let Some((name, _)) = &found {
+    conn
+      .execute(
+        "UPDATE api_tokens SET last_used_at = ?1 WHERE name = ?2",
+        params![now_ms(), name],
+      )
+      .map_err(sql_err)?;
+  }
+  Ok(found)
+}
+
+pub fn token_count(conn: &Connection) -> Result<i64, ApiError> {
+  conn
+    .query_row("SELECT COUNT(*) FROM api_tokens", [], |r| r.get(0))
+    .map_err(sql_err)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use serde_json::json;
+
+  #[tokio::test]
+  async fn upsert_bumps_version() {
+    let db = Db::memory();
+    let w = Write::Upsert {
+      kind: "service".into(),
+      name: "a".into(),
+      spec: json!({"x": 1}),
+      meta: json!({}),
+    };
+    let w2 = w.clone();
+    db.call(move |c| {
+      apply_write(c, &w)?;
+      apply_write(c, &w2)
+    })
+    .await
+    .unwrap();
+    let v = db.call(|c| versions(c)).await.unwrap();
+    assert_eq!(v["service/a"], 2);
+  }
+}

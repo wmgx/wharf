@@ -1,0 +1,226 @@
+//! 给人看的输出。AI 用 `--json`，结构由 api-types 决定。
+
+use wharf_api_types::{
+  ApiError,
+  plan::{Action, Plan, Risk, Run, RunStatus, RunStep, StepStatus},
+  view::{ServiceView, Status},
+};
+
+pub fn json<T: serde::Serialize>(value: &T) {
+  println!(
+    "{}",
+    serde_json::to_string_pretty(value)
+      .unwrap_or_else(|_| "null".into())
+  );
+}
+
+pub fn error(e: &ApiError, as_json: bool) {
+  if as_json {
+    json(e);
+    return;
+  }
+  eprintln!("错误 [{}]：{}", e.code.as_str(), e.message);
+  if let Some(hint) = &e.hint {
+    eprintln!("提示：{hint}");
+  }
+  for s in &e.suggest {
+    eprintln!("可以试试：{s}");
+  }
+}
+
+fn symbol(action: Action) -> &'static str {
+  match action {
+    Action::Create => "+",
+    Action::Update => "~",
+    Action::Delete => "-",
+    Action::Adopt => "!",
+  }
+}
+
+fn layer(l: wharf_api_types::plan::Layer) -> String {
+  serde_json::to_value(l)
+    .ok()
+    .and_then(|v| v.as_str().map(str::to_string))
+    .unwrap_or_default()
+}
+
+/// `next_step`：是否打印"下一步"（加了 --apply 时不打印）。
+pub fn plan_with(p: &Plan, next_step: bool) {
+  if p.items.is_empty() {
+    println!("没有变化，现实和配置一致。");
+  } else {
+    println!(
+      "计划 {}（{} 项，{} 前有效）",
+      p.plan_id,
+      p.items.len(),
+      p.expires_at.with_timezone(&chrono::Local).format("%H:%M")
+    );
+    let width = p
+      .items
+      .iter()
+      .map(|i| i.address.chars().count())
+      .max()
+      .unwrap_or(0);
+    for item in &p.items {
+      let risk = match item.risk {
+        Risk::Safe => String::new(),
+        Risk::Disruptive => "  [会中断]".into(),
+        Risk::Destructive => "  [破坏性，需确认]".into(),
+        Risk::ExposesPublic => "  [公网暴露，需确认]".into(),
+      };
+      println!(
+        "  {} {:<width$}  {:<9}  {}{risk}",
+        symbol(item.action),
+        item.address,
+        layer(item.layer),
+        item.reason,
+      );
+    }
+  }
+  for w in &p.warnings {
+    println!("提醒：{w}");
+  }
+  if next_step {
+    for s in &p.suggest {
+      println!("下一步：{s}");
+    }
+  }
+}
+
+pub fn plan(p: &Plan) {
+  plan_with(p, true);
+}
+
+fn step_mark(s: StepStatus) -> &'static str {
+  match s {
+    StepStatus::Pending => "…",
+    StepStatus::Running => "▶",
+    StepStatus::Done => "✓",
+    StepStatus::Failed => "✗",
+    StepStatus::Skipped => "·",
+  }
+}
+
+pub fn step_line(step: &RunStep) {
+  println!("{} {}", step_mark(step.status), step.title);
+  if let Some(e) = &step.error {
+    println!("    错误：{}", e.message);
+    if let Some(h) = &e.hint {
+      println!("    提示：{h}");
+    }
+    for s in &e.suggest {
+      println!("    可以试试：{s}");
+    }
+  }
+}
+
+pub fn run_summary(run: &Run) {
+  let status = match run.status {
+    RunStatus::Running => "执行中",
+    RunStatus::Succeeded => "成功",
+    RunStatus::Failed => {
+      "失败（配置已写入，执行 wharf plan 查看剩下的差异）"
+    }
+    RunStatus::Cancelled => "已取消",
+  };
+  println!("执行 {}：{status}", run.run_id);
+}
+
+pub fn run(run: &Run) {
+  run_summary(run);
+  for step in &run.steps {
+    step_line(step);
+    for line in &step.log {
+      println!("    {line}");
+    }
+  }
+}
+
+fn live(s: &ServiceView) -> String {
+  match &s.live {
+    None => "-".into(),
+    Some(l) => {
+      let sync = match l.in_sync {
+        Some(false) => "（和配置不一致）",
+        _ => "",
+      };
+      format!("{}{sync}", l.state)
+    }
+  }
+}
+
+pub fn status(s: &Status) {
+  println!("服务器");
+  for srv in &s.servers {
+    let state = if !srv.joined {
+      "未加入"
+    } else if srv.online {
+      "在线"
+    } else {
+      "离线"
+    };
+    let report = srv.report.as_ref();
+    println!(
+      "  {:<10} {:<4}  tailscale {:<15}  公网 {:<15}  docker {}",
+      srv.name,
+      state,
+      report
+        .and_then(|r| r.tailscale_ip.as_deref())
+        .unwrap_or("-"),
+      srv.public_ip.as_deref().unwrap_or("-"),
+      report
+        .and_then(|r| r.docker_version.as_deref())
+        .unwrap_or("-"),
+    );
+  }
+  if !s.services.is_empty() {
+    println!("服务");
+    for svc in &s.services {
+      let addrs: Vec<String> = svc
+        .addresses
+        .iter()
+        .map(|(p, a)| format!("{p}→{a}"))
+        .collect();
+      println!(
+        "  {:<14} {:<8} {:<10} {}",
+        svc.name,
+        svc.spec.server,
+        live(svc),
+        addrs.join(" ")
+      );
+    }
+  }
+  if !s.gateways.is_empty() {
+    println!("网关");
+    for gw in &s.gateways {
+      println!(
+        "  {:<14} {:<8} {}{}  {}  路由 {}",
+        gw.name,
+        gw.spec.server,
+        gw.spec.kind.as_str(),
+        if gw.spec.default { "（默认）" } else { "" },
+        gw.live.as_ref().map(|l| l.state.as_str()).unwrap_or("-"),
+        gw.routes.len()
+      );
+    }
+  }
+  if !s.routes.is_empty() {
+    println!("路由");
+    for r in &s.routes {
+      println!(
+        "  {}  →  {}:{}  经 {}（上游 {}）",
+        r.url,
+        r.spec.service,
+        r.spec.port.as_deref().unwrap_or("默认端口"),
+        r.gateway.as_deref().unwrap_or("-"),
+        r.upstream.as_deref().unwrap_or("-")
+      );
+    }
+  }
+  if !s.problems.is_empty() {
+    println!("需要注意");
+    for p in &s.problems {
+      println!("  - {p}");
+    }
+  }
+}
