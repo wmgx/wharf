@@ -63,8 +63,8 @@ export function Segmented<T extends string>({ value, options, onChange }: { valu
           type="button"
           onClick={() => onChange(v)}
           className={cn(
-            "h-7 rounded-md px-3 text-sm text-muted-foreground transition-colors",
-            value === v && "bg-background font-medium text-foreground shadow-xs",
+            "h-7 rounded-md border border-transparent px-3 text-sm text-muted-foreground transition-colors hover:text-foreground",
+            value === v && "border-border bg-card font-medium text-foreground shadow-sm dark:border-input dark:bg-input/60",
           )}
         >
           {label}
