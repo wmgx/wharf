@@ -330,6 +330,46 @@ fn pages_project(p: &Value) -> EdgeProject {
   }
 }
 
+/// `content/v2` 对 module Worker 返回 multipart（每个模块一段），
+/// 旧格式的直接是脚本。只支持一个模块，返回（文件名，内容）。
+fn split_script(body: &str) -> Result<(String, String)> {
+  let Some(boundary) = body
+    .strip_prefix("--")
+    .and_then(|rest| rest.lines().next())
+    .map(|b| format!("--{}", b.trim_end()))
+  else {
+    return Ok(("worker.js".into(), body.to_string()));
+  };
+  let parts: Vec<&str> = body
+    .split(boundary.as_str())
+    .map(|p| p.trim_start_matches("\r\n").trim_start_matches('\n'))
+    .filter(|p| !p.is_empty() && !p.starts_with("--"))
+    .collect();
+  let [part] = parts.as_slice() else {
+    return Err(ProviderError::invalid(format!(
+      "这个 Worker 有 {} 个模块，目前只支持拉取单文件 Worker",
+      parts.len()
+    )));
+  };
+  let (head, content) = part
+    .split_once("\r\n\r\n")
+    .or_else(|| part.split_once("\n\n"))
+    .ok_or_else(|| {
+      ProviderError::internal("读不懂 Cloudflare 返回的脚本")
+    })?;
+  let filename = head
+    .split(';')
+    .find_map(|kv| kv.trim().strip_prefix("filename=\""))
+    .and_then(|v| v.split('"').next())
+    .filter(|f| !f.is_empty() && !f.contains('/'))
+    .unwrap_or("worker.js");
+  let content = content
+    .strip_suffix("\r\n")
+    .or_else(|| content.strip_suffix('\n'))
+    .unwrap_or(content);
+  Ok((filename.to_string(), content.to_string()))
+}
+
 /// 主机名放进 URL 路径前校验一下。
 fn host_segment(hostname: &str) -> Result<&str> {
   if hostname.is_empty()
@@ -451,8 +491,9 @@ impl EdgeProvider for CloudflareEdge {
           segment(name)?
         ))
         .await?;
+      let (filename, content) = split_script(&content)?;
       Ok(WorkerScript {
-        filename: "worker.js".into(),
+        filename,
         content,
         modules,
       })
@@ -753,6 +794,21 @@ impl EdgeProvider for CloudflareEdge {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn splits_module_script_out_of_multipart() {
+    let body = "--b1\r\nContent-Disposition: form-data; name=\"index.js\"; filename=\"index.js\"\r\nContent-Type: application/javascript+module\r\n\r\nexport default {}\n\r\n--b1--\r\n";
+    assert_eq!(
+      split_script(body).unwrap(),
+      ("index.js".to_string(), "export default {}\n".to_string())
+    );
+    assert_eq!(
+      split_script("addEventListener()").unwrap().1,
+      "addEventListener()"
+    );
+    let two = "--b\r\nA: x\r\n\r\na\r\n--b\r\nA: y\r\n\r\nb\r\n--b--";
+    assert!(split_script(two).is_err());
+  }
 
   #[test]
   fn upload_keeps_existing_settings_and_bindings() {

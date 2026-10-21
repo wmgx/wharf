@@ -421,9 +421,15 @@ fn config_items(
         (Risk::Disruptive, "删除路由，域名将无法访问".to_string())
       }
       (KIND_ROUTE, Action::Create) => {
-        let auth =
-          desired.routes.get(name).is_some_and(|r| r.spec.auth);
-        if auth {
+        let route = desired.routes.get(name);
+        let auth = route.is_some_and(|r| r.spec.auth);
+        let edge = route.is_some_and(|r| {
+          desired.edge_apps.contains_key(&r.spec.service)
+        });
+        if edge {
+          // 边缘应用本来就有公网地址（workers.dev / pages.dev）。
+          (Risk::Safe, "新增路由（边缘应用）".to_string())
+        } else if auth {
           (Risk::Safe, "新增路由".to_string())
         } else {
           (
