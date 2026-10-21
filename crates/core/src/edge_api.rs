@@ -33,8 +33,16 @@ use crate::{
 #[derive(Deserialize, Default)]
 pub struct SyncQuery {
   /// 先同步再返回（CLI 和页面上的"同步"按钮用）；不给时读控制面里存的。
-  #[serde(default)]
+  #[serde(default, deserialize_with = "flag")]
   sync: bool,
+}
+
+/// `?sync=1`、`?sync=true` 都算。
+fn flag<'de, D: serde::Deserializer<'de>>(
+  d: D,
+) -> Result<bool, D::Error> {
+  let v = String::deserialize(d)?;
+  Ok(matches!(v.as_str(), "1" | "true" | "yes"))
 }
 
 /// `GET /api/edge`
