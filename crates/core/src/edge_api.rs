@@ -36,6 +36,12 @@ pub async fn list(
 ) -> ApiResult<Vec<EdgeAppView>> {
   auth.require(TokenScope::Read)?;
   let snap = snapshot::load(&s.db).await?;
+  // 刚导入、还没被定时任务读过的当场读一次。
+  for name in snap.world.edge_apps.keys() {
+    if s.edge_live.get(name).is_none() {
+      edge::refresh(&s, &snap, name).await;
+    }
+  }
   Ok(Json(
     snap
       .world

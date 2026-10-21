@@ -139,10 +139,16 @@ impl CloudflareClient {
           self.http_error(status, &method, path, response).await,
         );
       }
-      let data: Value = response
-        .json()
+      let text = response
+        .text()
         .await
         .map_err(|e| malformed(&e.without_url().to_string()))?;
+      // 有的删除接口（例如 Workers 自定义域名）成功时返回空内容。
+      if text.trim().is_empty() && method == Method::DELETE {
+        return Ok(Value::Null);
+      }
+      let data: Value = serde_json::from_str(&text)
+        .map_err(|e| malformed(&e.to_string()))?;
       if data["success"] != true {
         return Err(
           ProviderError::new(
