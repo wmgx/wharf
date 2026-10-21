@@ -9,7 +9,7 @@ import { DomainChips, Field } from "@/components/fields";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -107,18 +107,13 @@ export function EdgeDetail() {
                   同步
                 </Button>
               </TooltipTrigger>
-              <TooltipContent>{app.live ? `上次同步：${ago(app.live.checked_at)}` : "还没同步过"}，点击从 Cloudflare 重新读取</TooltipContent>
+              <TooltipContent>{app.live ? `上次同步 ${ago(app.live.checked_at)}` : "未同步"}</TooltipContent>
             </Tooltip>
             {app.spec.source && (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button variant="outline" onClick={redeploy}>
-                    <RefreshCwIcon />
-                    重新发布
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>{app.spec.source.git ? "拉分支上的最新代码再发布" : "用最近一次上传的代码再发布"}</TooltipContent>
-              </Tooltip>
+              <Button variant="outline" onClick={redeploy}>
+                <RefreshCwIcon />
+                重新发布
+              </Button>
             )}
             <Button variant="outline" className="text-destructive" onClick={remove}>
               <Trash2Icon />
@@ -130,7 +125,7 @@ export function EdgeDetail() {
 
       {app.drift && (
         <Notice kind="warn" className="mb-3">
-          {app.drift}。
+          {app.drift}
           {app.live?.exists && (
             <button type="button" className="ml-1 font-medium underline underline-offset-2" onClick={accept}>
               以线上为准
@@ -141,12 +136,6 @@ export function EdgeDetail() {
       {app.live?.error && (
         <Notice kind="warn" className="mb-3">
           同步失败：{app.live.error}
-        </Notice>
-      )}
-      {!app.spec.source && (
-        <Notice className="mb-3">
-          只纳管，代码还在 Cloudflare 面板里。改成本地文件发布：<code className="font-mono">wharf edge pull {name}</code>，改完{" "}
-          <code className="font-mono">wharf edge deploy {name} --apply</code>。
         </Notice>
       )}
 
@@ -179,7 +168,7 @@ export function EdgeDetail() {
               {app.spec.account} / {projectOf(app)}
             </dd>
             <dt className="text-muted-foreground">同步于</dt>
-            <dd className="text-muted-foreground">{app.live ? ago(app.live.checked_at) : "还没同步，稍等片刻"}</dd>
+            <dd className="text-muted-foreground">{app.live ? ago(app.live.checked_at) : "-"}</dd>
             <dt className="text-muted-foreground">最近发布</dt>
             <dd>
               {app.live?.deployed_at ? `${ago(app.live.deployed_at)}${app.live.deployed_by ? `（${app.live.deployed_by}）` : ""}` : "-"}
@@ -295,10 +284,9 @@ function AddEdgeRoute({ app, open, onClose }: { app: string; open: boolean; onCl
   };
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent>
+      <DialogContent aria-describedby={undefined}>
         <DialogHeader>
           <DialogTitle>给 {app} 加域名</DialogTitle>
-          <DialogDescription>域名直接绑定到 Cloudflare 上的项目，不经过网关。域名要在这个 Cloudflare 账号里。</DialogDescription>
         </DialogHeader>
         <Field label="域名" htmlFor="edge-hostname">
           <Input id="edge-hostname" autoFocus value={hostname} onChange={(e) => setHostname(e.target.value)} placeholder="app.example.com" />

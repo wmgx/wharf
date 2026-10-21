@@ -5,12 +5,12 @@ import { ErrorNote, Notice, ago } from "@/components/common";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import type { EdgeProjectView } from "@/types";
 import { KIND_NAME } from "./edge";
 
-/** 列出账号里的 Workers / Pages，一键导入。导入只纳管，不改 Cloudflare 那边的东西。 */
+/** 勾选导入账号里的 Workers / Pages。 */
 export function EdgeImport({ account, onClose }: { account: string; onClose: () => void }) {
   const { data, error } = usePoll<EdgeProjectView[]>(`/api/accounts/${encodeURIComponent(account)}/edge`, 60000);
   const actions = useActions();
@@ -29,16 +29,15 @@ export function EdgeImport({ account, onClose }: { account: string; onClose: () 
   };
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="sm:max-w-lg">
+      <DialogContent className="sm:max-w-lg" aria-describedby={undefined}>
         <DialogHeader>
           <DialogTitle>{account} 的 Workers / Pages</DialogTitle>
-          <DialogDescription>导入后在服务页统一查看、加域名、切换版本。导入不会改动 Cloudflare 上的项目。</DialogDescription>
         </DialogHeader>
         <ErrorNote error={error} />
         {!data ? (
           !error && <Skeleton className="h-32 rounded-lg" />
         ) : data.length === 0 ? (
-          <Notice>这个账号里还没有 Workers 或 Pages 项目。</Notice>
+          <Notice>没有 Workers / Pages 项目</Notice>
         ) : (
           <div className="grid max-h-80 gap-1 overflow-auto">
             {data.map((p) => (
@@ -51,7 +50,6 @@ export function EdgeImport({ account, onClose }: { account: string; onClose: () 
             ))}
           </div>
         )}
-        <Notice>Worker 导入后，用 <code className="font-mono">wharf edge pull &lt;名字&gt;</code> 把脚本拉到本地，改完再发布。</Notice>
         <div className="flex justify-end gap-2">
           <Button variant="ghost" onClick={onClose}>
             取消

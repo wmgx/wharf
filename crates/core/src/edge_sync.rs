@@ -78,13 +78,13 @@ pub fn drift(
     return None;
   }
   if !cache.live.exists {
-    return Some("Cloudflare 上已经没有这个项目".into());
+    return Some("Cloudflare 上没有这个项目".into());
   }
   let expected = expected.filter(|e| e.target == target)?;
   let active = cache.active();
   (!active.is_empty() && active != expected.versions).then(|| {
     format!(
-      "线上版本 {} 不是 Wharf 记录的 {}（在 Cloudflare 面板或别处发布过）",
+      "线上版本 {}，Wharf 记录的是 {}",
       short(&active),
       short(&expected.versions)
     )

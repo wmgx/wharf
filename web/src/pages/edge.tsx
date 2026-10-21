@@ -21,7 +21,7 @@ export function edgeTone(live?: EdgeLive, drift?: string): { tone: Tone; text: s
 }
 
 export function edgeSourceLabel(source?: EdgeSource): string {
-  if (!source) return "只纳管（在 Cloudflare 面板里改）";
+  if (!source) return "Cloudflare 面板";
   const where = source.git ? `${source.git.repo.replace(/^https:\/\//, "")} @ ${source.git.ref}` : "本机上传";
   if (source.script) return `${where} · ${source.script}`;
   if (source.build) return `${where} · ${source.build}`;
