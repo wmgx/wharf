@@ -73,8 +73,7 @@ export function BasicAuthDialog({ open, onClose, onSaved }: { open: boolean; onC
         <DialogHeader>
           <DialogTitle>登录保护账号</DialogTitle>
           <DialogDescription>
-            开了登录保护的域名，访问时浏览器会要求输入这个账号。所有域名共用一个账号。
-            {setAt && <> 上次设置于 {ago(setAt)}。</>}
+            {setAt ? `上次设置于 ${ago(setAt)}` : "未设置"}
           </DialogDescription>
         </DialogHeader>
         <form
@@ -87,7 +86,7 @@ export function BasicAuthDialog({ open, onClose, onSaved }: { open: boolean; onC
           <Field label="用户名" htmlFor="ba-user">
             <Input id="ba-user" value={user} onChange={(e) => setUser(e.target.value)} autoComplete="username" />
           </Field>
-          <Field label="密码" htmlFor="ba-pass" help="至少 8 位。控制面只保存哈希，之后看不到原文。">
+          <Field label="密码" htmlFor="ba-pass" help="至少 8 位">
             <Input id="ba-pass" type="password" autoFocus value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="new-password" />
           </Field>
           <ErrorNote error={error} />

@@ -13,10 +13,10 @@ import { Backups } from "./service-backups";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
-import { Sheet, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { Sheet, SheetContent, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -90,15 +90,10 @@ export function ServiceDetail() {
               修改配置
             </Button>
             {built && (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button variant="outline" onClick={() => actions.rebuild(name)}>
+              <Button variant="outline" onClick={() => actions.rebuild(name)}>
                     <HammerIcon />
                     重新构建
                   </Button>
-                </TooltipTrigger>
-                <TooltipContent>{"build" in svc.spec.source && svc.spec.source.build.git ? "拉分支上的最新代码，构建后替换运行中的容器" : "用最近一次上传的代码重新构建"}</TooltipContent>
-              </Tooltip>
             )}
             <Button variant="outline" onClick={() => actions.redeploy(svc)}>
               <RefreshCwIcon />
@@ -163,7 +158,7 @@ export function ServiceDetail() {
                           {r.spec.auth ? <LockIcon /> : <LockOpenIcon />}
                         </Button>
                       </TooltipTrigger>
-                      <TooltipContent>{r.spec.auth ? "已开启登录保护，点击关闭" : "未开启登录保护，点击开启"}</TooltipContent>
+                      <TooltipContent>{r.spec.auth ? "关闭登录保护" : "开启登录保护"}</TooltipContent>
                     </Tooltip>
                     <Tooltip>
                       <TooltipTrigger asChild>
@@ -176,7 +171,7 @@ export function ServiceDetail() {
                           <XIcon />
                         </Button>
                       </TooltipTrigger>
-                      <TooltipContent>移除这个域名</TooltipContent>
+                      <TooltipContent>移除</TooltipContent>
                     </Tooltip>
                     </span>
                   </div>
@@ -255,7 +250,7 @@ function History({ name }: { name: string }) {
   const { data } = usePoll<DeploymentView[]>(`/api/services/${encodeURIComponent(name)}/deployments`, 15000);
   const actions = useActions();
   if (!data) return <Skeleton className="h-40 rounded-xl" />;
-  if (data.length === 0) return <Empty>还没有部署记录。</Empty>;
+  if (data.length === 0) return <Empty>没有部署记录</Empty>;
   return (
     <div className="overflow-hidden rounded-xl border bg-card shadow-xs">
       <Table>
@@ -304,10 +299,9 @@ function History({ name }: { name: string }) {
 function EditService({ svc, open, onClose }: { svc: ServiceView; open: boolean; onClose: () => void }) {
   return (
     <Sheet open={open} onOpenChange={(o) => !o && onClose()}>
-      <SheetContent className="w-full gap-0 sm:max-w-xl">
+      <SheetContent className="w-full gap-0 sm:max-w-xl" aria-describedby={undefined}>
         <SheetHeader className="border-b">
           <SheetTitle>修改 {svc.name}</SheetTitle>
-          <SheetDescription>改完生成计划，确认后重新部署。</SheetDescription>
         </SheetHeader>
         {open && <EditForm svc={svc} onClose={onClose} />}
       </SheetContent>
@@ -371,7 +365,7 @@ function EditForm({ svc, onClose }: { svc: ServiceView; onClose: () => void }) {
           <PortsEditor ports={ports} onChange={setPorts} />
         </Field>
         {(isImage || build) && (
-          <Field label="环境变量" htmlFor="env" help="一行一个 KEY=value。删掉一行就是删除这个变量。">
+          <Field label="环境变量" htmlFor="env">
             <Textarea id="env" className="min-h-32 font-mono text-xs" value={envText} onChange={(e) => setEnvText(e.target.value)} />
           </Field>
         )}
@@ -408,10 +402,9 @@ function AddRoute({ service, open, onClose }: { service: string; open: boolean; 
   };
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent>
+      <DialogContent aria-describedby={undefined}>
         <DialogHeader>
           <DialogTitle>给 {service} 加域名</DialogTitle>
-          <DialogDescription>域名经过网关或 Cloudflare 隧道转发到这个服务。</DialogDescription>
         </DialogHeader>
         <div className="grid gap-4">
           <Field label="域名" htmlFor="hostname">

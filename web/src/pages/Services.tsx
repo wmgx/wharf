@@ -22,7 +22,6 @@ export function Services() {
     <>
       <PageHeader
         title="服务"
-        description="每个服务是一组容器，跑在一台服务器上。"
         actions={
           <Button onClick={() => setParams({ new: "1" })}>
             <PlusIcon />
@@ -33,7 +32,7 @@ export function Services() {
       {!status ? (
         <Skeleton className="h-48 rounded-xl" />
       ) : status.services.length === 0 ? (
-        !status.edge_apps?.length && <Empty>还没有服务。点右上角新建一个。</Empty>
+        !status.edge_apps?.length && <Empty>还没有服务</Empty>
       ) : (
         <div className="overflow-hidden rounded-xl border bg-card shadow-xs">
           <Table>

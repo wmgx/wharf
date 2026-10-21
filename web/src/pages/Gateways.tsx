@@ -35,7 +35,6 @@ export function Gateways() {
     <>
       <PageHeader
         title="网关"
-        description="公网流量从网关进来，再转发到各台服务器上的服务。"
         actions={
           <Button variant="outline" onClick={() => setParams({ new: "1" })}>
             <PlusIcon />
@@ -46,7 +45,7 @@ export function Gateways() {
       {!status ? (
         <CardsSkeleton count={2} />
       ) : gateways.length === 0 ? (
-        <Empty>还没有网关。在一台有公网地址的服务器上新建一个，域名就能从公网访问了。</Empty>
+        <Empty>还没有网关</Empty>
       ) : (
         <div className="grid grid-cols-[repeat(auto-fill,minmax(280px,1fr))] gap-3">
           {gateways.map((g, i) => {
@@ -90,10 +89,9 @@ export function Gateways() {
         </SheetContent>
       </Sheet>
       <Sheet open={creating} onOpenChange={(o) => !o && setParams({})}>
-        <SheetContent className="w-full gap-0 sm:max-w-xl">
+        <SheetContent className="w-full gap-0 sm:max-w-xl" aria-describedby={undefined}>
           <SheetHeader className="border-b">
             <SheetTitle>新建网关</SheetTitle>
-            <SheetDescription>域名从这里进来：服务器上的 Caddy，或者 Cloudflare 隧道。</SheetDescription>
           </SheetHeader>
           {creating && <NewGateway onDone={() => setParams({})} />}
         </SheetContent>
@@ -151,7 +149,7 @@ function GatewayDetail({ g, onDone }: { g: GatewayView; onDone: () => void }) {
                 ))}
               </div>
             ) : (
-              <Empty>还没有域名经过这个网关。</Empty>
+              <Empty>没有域名</Empty>
             )}
           </TabsContent>
           <TabsContent value="config" className="mt-3">
@@ -248,11 +246,6 @@ function NewGateway({ onDone }: { onDone: () => void }) {
         </div>
         <Field
           label="类型"
-          help={
-            tunnel
-              ? "服务器上跑 cloudflared 连到 Cloudflare，不需要公网 IP 和开放端口；国内访问较慢。"
-              : "服务器上跑 Caddy，需要公网 IP，域名解析到这台服务器。"
-          }
         >
           <Segmented
             value={kind}
@@ -272,7 +265,7 @@ function NewGateway({ onDone }: { onDone: () => void }) {
               </Link>
             </Notice>
           ) : (
-            <Field label="厂商账号" htmlFor="account" help="Wharf 会在这个账号下创建隧道 wharf-<网关名>，账号里已有的隧道不会被改动。">
+            <Field label="厂商账号" htmlFor="account">
               <Picker
                 id="account"
                 value={chosenAccount}
@@ -290,13 +283,6 @@ function NewGateway({ onDone }: { onDone: () => void }) {
           <>
             <Field
               label="证书"
-              help={
-                tls === "auto"
-                  ? "域名要能从公网解析到这台服务器，并且 80 端口可达。"
-                  : tls === "internal"
-                    ? "Caddy 自签证书，浏览器会提示不受信任。"
-                    : "不加密，只适合内网。"
-              }
             >
               <Segmented value={tls} onChange={setTls} options={(["auto", "internal", "off"] as GatewayTls[]).map((t) => [t, TLS_TEXT[t]])} />
             </Field>

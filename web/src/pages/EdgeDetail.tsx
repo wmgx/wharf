@@ -221,7 +221,7 @@ function Versions({ name, onChanged }: { name: string; onChanged: () => void }) 
       {!data ? (
         !error && <Skeleton className="h-32 rounded-xl" />
       ) : data.length === 0 ? (
-        <Empty>Cloudflare 那边还没有版本。</Empty>
+        <Empty>没有版本</Empty>
       ) : (
         <div className="overflow-hidden rounded-xl border bg-card shadow-xs">
           <Table>

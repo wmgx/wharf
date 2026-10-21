@@ -60,7 +60,6 @@ export function EntryField({ entry }: { entry: ReturnType<typeof useEntry> }) {
       <Field
         label="公网入口"
         htmlFor="entry"
-        help={entry.tunnel ? "经 Cloudflare 隧道访问，服务器不用开端口；一台服务器一条隧道，可以承载多个域名。" : "经网关所在服务器的 Caddy 转发到服务。"}
       >
         <Picker id="entry" value={entry.chosen} options={entry.options} onChange={entry.setChoice} placeholder="还没有网关" />
       </Field>

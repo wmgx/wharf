@@ -8,7 +8,7 @@ import { DomainChips, Field, Picker, PortsEditor, Segmented, nameFromImage, pars
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
-import { Sheet, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { Sheet, SheetContent, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Textarea } from "@/components/ui/textarea";
 import { useStatus } from "@/status";
 import type { AccountView, Change, PortSpec, ServiceSpec } from "@/types";
@@ -20,10 +20,9 @@ import type { AccountView, Change, PortSpec, ServiceSpec } from "@/types";
 export function NewService({ open, onClose }: { open: boolean; onClose: () => void }) {
   return (
     <Sheet open={open} onOpenChange={(o) => !o && onClose()}>
-      <SheetContent className="w-full gap-0 sm:max-w-xl">
+      <SheetContent className="w-full gap-0 sm:max-w-xl" aria-describedby={undefined}>
         <SheetHeader className="border-b">
           <SheetTitle>新建服务</SheetTitle>
-          <SheetDescription>填好后生成计划，确认后一次部署完成。</SheetDescription>
         </SheetHeader>
         {open && <Form onClose={onClose} />}
       </SheetContent>
@@ -155,12 +154,6 @@ function Form({ onClose }: { onClose: () => void }) {
             <Field
               label="仓库"
               htmlFor="repo"
-              help={
-                <>
-                  在服务器上拉代码构建：有 Dockerfile 就用，没有时自动识别 Python、Go。私有仓库和本机目录用 CLI：
-                  <code className="font-mono">wharf deploy ./目录</code>。
-                </>
-              }
             >
               <Input id="repo" autoFocus placeholder="https://github.com/owner/app" value={repo} onChange={(e) => setRepo(e.target.value)} />
             </Field>
@@ -178,7 +171,7 @@ function Form({ onClose }: { onClose: () => void }) {
             <Input id="image" autoFocus placeholder="例如 nginxdemos/hello 或 ghcr.io/owner/app:1.0" value={image} onChange={(e) => setImage(e.target.value)} />
           </Field>
         ) : (
-          <Field label="compose.yaml" htmlFor="compose" help="compose 来源原样使用，端口按文件里发布的宿主机端口填写。">
+          <Field label="compose.yaml" htmlFor="compose">
             <Textarea
               id="compose"
               className="min-h-40 font-mono text-xs"
@@ -208,13 +201,6 @@ function Form({ onClose }: { onClose: () => void }) {
 
         <Field
           label="端口"
-          help={
-            kind === "compose"
-              ? "compose 里已经发布的宿主机端口。"
-              : kind === "git"
-                ? "程序监听的端口，会通过 PORT 环境变量传给内置模板（Python 常用 8000，Go 常用 8080）。宿主机端口自动分配。"
-                : "容器里监听的端口。宿主机端口自动分配，只绑定 127.0.0.1 和内网地址。"
-          }
         >
           <PortsEditor ports={ports} onChange={setPorts} />
         </Field>
@@ -223,11 +209,6 @@ function Form({ onClose }: { onClose: () => void }) {
           <Field
             label="环境变量"
             htmlFor="env"
-            help={
-              <>
-                一行一个。密钥用 <code className="font-mono">[[名称]]</code> 引用，值不会出现在配置里。
-              </>
-            }
           >
             <Textarea id="env" className="min-h-24 font-mono text-xs" placeholder={"KEY=value\nTOKEN=[[MY_SECRET]]"} value={envText} onChange={(e) => setEnvText(e.target.value)} />
           </Field>

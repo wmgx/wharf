@@ -184,7 +184,7 @@ function PlanReview({ plan, confirmed, setConfirmed }: { plan: Plan; confirmed: 
   return (
     <div className="grid gap-3">
       {plan.items.length === 0 ? (
-        <Notice kind="ok">没有变化，现实和配置一致。</Notice>
+        <Notice kind="ok">没有变化</Notice>
       ) : (
         <div className="divide-y rounded-lg border">
           {plan.items.map((it) => (
@@ -297,7 +297,7 @@ function RunView({ run }: { run: Run }) {
         ))}
       </div>
       {run.status === "succeeded" && <Notice kind="ok">执行成功。</Notice>}
-      {run.status === "failed" && <Notice kind="bad">执行失败，已停止。配置已写入，修好问题后重新计划即可继续。</Notice>}
+      {run.status === "failed" && <Notice kind="bad">执行失败</Notice>}
       {run.status === "cancelled" && <Notice>已取消。</Notice>}
     </div>
   );

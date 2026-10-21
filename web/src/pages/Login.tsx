@@ -62,16 +62,13 @@ function CredentialsForm({ mode, onDone }: { mode: "login" | "setup"; onDone: (s
     <Card>
       <CardHeader>
         <CardTitle className="text-lg">{setup ? "设置管理员账号" : "登录"}</CardTitle>
-        <CardDescription>
-          {setup ? "第一次使用，先设置页面登录用的账号密码。控制面启动后 30 分钟内可以设置。" : "用管理员账号登录。CLI 和 AI 继续用 API token。"}
-        </CardDescription>
       </CardHeader>
       <CardContent>
         <form className="grid gap-4" onSubmit={submit}>
           <Field label="账号" htmlFor="username">
             <Input id="username" autoFocus={!setup} autoComplete="username" value={username} onChange={(e) => setUsername(e.target.value)} />
           </Field>
-          <Field label="密码" htmlFor="password" help={setup ? "至少 8 个字符。" : undefined}>
+          <Field label="密码" htmlFor="password" help={setup ? "至少 8 位" : undefined}>
             <Input
               id="password"
               type="password"
@@ -91,11 +88,6 @@ function CredentialsForm({ mode, onDone }: { mode: "login" | "setup"; onDone: (s
           <Button type="submit" className="w-full" disabled={!ready || busy}>
             {busy ? "请稍候…" : setup ? "设置并进入" : "登录"}
           </Button>
-          {!setup && (
-            <p className="text-xs text-muted-foreground">
-              忘记密码：在服务器上执行 <code className="font-mono">docker exec -it wharf-core wharf-core reset-password</code>
-            </p>
-          )}
         </form>
       </CardContent>
     </Card>
@@ -107,7 +99,7 @@ function SetupClosed({ onRetry }: { onRetry: () => void }) {
     <Card>
       <CardHeader>
         <CardTitle className="text-lg">还没有管理员账号</CardTitle>
-        <CardDescription>为了防止别人抢先设置，只有控制面启动后 30 分钟内可以在页面上设置，现在已经过了。</CardDescription>
+        <CardDescription>控制面启动已超过 30 分钟</CardDescription>
       </CardHeader>
       <CardContent className="grid gap-4">
         <Notice>

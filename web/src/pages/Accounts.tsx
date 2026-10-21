@@ -47,7 +47,6 @@ export function Accounts() {
     <>
       <PageHeader
         title="厂商账号"
-        description="管理域名解析、Cloudflare 隧道和 Workers / Pages 用的账号。token 只保存在控制面，页面上看不到原文。"
         actions={
           <Button variant="outline" onClick={() => setAdding(true)}>
             <PlusIcon />
@@ -59,7 +58,7 @@ export function Accounts() {
       {!data ? (
         <CardsSkeleton count={1} />
       ) : data.length === 0 ? (
-        <Empty>还没有厂商账号。添加 Cloudflare 账号后，加域名时会自动写 DNS，也可以用 Cloudflare 隧道做公网入口。</Empty>
+        <Empty>还没有厂商账号</Empty>
       ) : (
         <div className="grid grid-cols-[repeat(auto-fill,minmax(300px,1fr))] gap-3">
           {data.map((a) => (
@@ -127,7 +126,7 @@ export function Accounts() {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>删除账号 {removing}？</DialogTitle>
-            <DialogDescription>只删除控制面里保存的 token，Cloudflare 那边的东西不受影响。还有网关或域名在用这个账号时不能删除。</DialogDescription>
+            <DialogDescription>只删除 Wharf 保存的 token</DialogDescription>
           </DialogHeader>
           <DialogFooter>
             <Button variant="ghost" onClick={() => setRemoving(null)}>
@@ -167,10 +166,9 @@ function AddAccount({ taken, onClose, onAdded }: { taken: string[]; onClose: () 
 
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent>
+      <DialogContent aria-describedby={undefined}>
         <DialogHeader>
           <DialogTitle>添加 Cloudflare 账号</DialogTitle>
-          <DialogDescription>保存后自动发现这个 token 能管理的域名。</DialogDescription>
         </DialogHeader>
         <div className="grid gap-4">
           <Field label="名称" htmlFor="acc-name">
@@ -180,12 +178,12 @@ function AddAccount({ taken, onClose, onAdded }: { taken: string[]; onClose: () 
             label="API token"
             htmlFor="acc-token"
             help={
-              <>在 Cloudflare「我的个人资料 → API 令牌」创建，权限：Zone → DNS → Edit、Zone → Zone → Read；要用隧道再加 Account → Cloudflare Tunnel → Edit。</>
+              <>权限：Zone.DNS 编辑、Zone 读取；可选 Cloudflare Tunnel、Workers Scripts、Cloudflare Pages、Workers Routes 编辑</>
             }
           >
             <Input id="acc-token" type="password" autoComplete="off" value={token} onChange={(e) => setToken(e.target.value)} className="font-mono" />
           </Field>
-          {name && taken.includes(name) && <Notice kind="warn">已有同名账号，保存会替换它的 token。</Notice>}
+          {name && taken.includes(name) && <Notice kind="warn">会替换同名账号的 token</Notice>}
           <ErrorNote error={error} />
         </div>
         <DialogFooter>

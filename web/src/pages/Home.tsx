@@ -35,7 +35,7 @@ export function Home() {
       {!status ? (
         <CardsSkeleton />
       ) : status.routes.length === 0 ? (
-        <Empty>还没有域名。新建服务时可以顺手加一个。</Empty>
+        <Empty>还没有域名</Empty>
       ) : (
         <div className="grid grid-cols-[repeat(auto-fill,minmax(260px,1fr))] gap-3">
           {status.routes.map((r, i) => {

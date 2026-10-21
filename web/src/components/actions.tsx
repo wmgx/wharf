@@ -16,7 +16,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { useStatus } from "@/status";
 import type { Change, RollbackTarget, Run, ServiceView } from "@/types";
 import { BasicAuthDialog } from "./basic-auth";
@@ -176,10 +176,9 @@ export function ActionsProvider({ children }: { children: ReactNode }) {
     <Ctx.Provider value={actions}>
       {children}
       <Sheet open={!!open} onOpenChange={(o) => !o && close()}>
-        <SheetContent className="w-full gap-0 sm:max-w-xl">
+        <SheetContent className="w-full gap-0 sm:max-w-xl" aria-describedby={undefined}>
           <SheetHeader className="border-b">
             <SheetTitle>{open?.title}</SheetTitle>
-            <SheetDescription>和 CLI 是同一套计划：先看会做什么，确认后再执行。</SheetDescription>
           </SheetHeader>
           <div className="flex-1 overflow-auto p-4">
             {open && (
@@ -252,7 +251,7 @@ function MoveDialog({ svc, onCancel, onConfirm }: { svc: ServiceView | null; onC
         <DialogHeader>
           <DialogTitle>迁移 {svc?.name}</DialogTitle>
           <DialogDescription>
-            从 {svc?.spec.server} 搬到另一台服务器，域名不变。有数据卷时会先同步数据，再短暂停服做增量同步；旧服务器上的数据目录保留。
+            从 {svc?.spec.server} 迁出，域名不变；有数据卷时会短暂停服，旧数据保留。
           </DialogDescription>
         </DialogHeader>
         <div className="grid gap-2">

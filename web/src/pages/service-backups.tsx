@@ -58,7 +58,7 @@ export function Backups({ svc }: { svc: ServiceView }) {
     }
   };
 
-  if (!hasData) return <Empty>这个服务没有数据卷，不需要备份。</Empty>;
+  if (!hasData) return <Empty>没有数据卷</Empty>;
 
   const last = data?.records[0];
   return (
@@ -112,7 +112,7 @@ export function Backups({ svc }: { svc: ServiceView }) {
       {!data ? (
         <Skeleton className="h-32 rounded-xl" />
       ) : data.snapshots.length === 0 ? (
-        target && <Empty>还没有快照。第一次自动备份会在开启后 10 分钟内开始，也可以点"立即备份"。</Empty>
+        target && <Empty>还没有快照</Empty>
       ) : (
         <div className="overflow-hidden rounded-xl border bg-card shadow-xs">
           <Table>
@@ -164,7 +164,7 @@ function EnableBackup({ svc }: { svc: ServiceView }) {
   if (!options.length) return <p className="text-muted-foreground">需要另一台服务器存放备份，现在只有 {svc.spec.server}。</p>;
   return (
     <div className="grid gap-3 sm:grid-cols-[1fr_auto] sm:items-end">
-      <Field label="备份到" htmlFor="backup-to" help="restic 加密备份，存在这台服务器的 /srv/wharf-backup/ 下。">
+      <Field label="备份到" htmlFor="backup-to">
         <Picker id="backup-to" value={to} options={options} onChange={setTo} placeholder="选择服务器…" />
       </Field>
       <Button
@@ -189,7 +189,7 @@ function RestoreDialog({ name, snapshot, onCancel, onConfirm }: { name: string; 
         <DialogHeader>
           <DialogTitle>恢复 {name} 到快照 {snapshot?.short_id}？</DialogTitle>
           <DialogDescription>
-            会先停止服务，用 {snapshot && new Date(snapshot.time).toLocaleString("zh-CN")} 的数据替换 /srv/{name}/，再启动。现在的数据改名保留在 /srv/.wharf-restore/ 下。输入{" "}
+            停服后用 {snapshot && new Date(snapshot.time).toLocaleString("zh-CN")} 的快照替换 /srv/{name}/，原数据移到 /srv/.wharf-restore/。输入{" "}
             <code className="font-mono text-foreground">{expect}</code> 确认。
           </DialogDescription>
         </DialogHeader>

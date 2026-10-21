@@ -162,7 +162,7 @@ export function Topology() {
 
   return (
     <>
-      <PageHeader title="拓扑" description="域名经过网关到达服务。点节点进入详情。" />
+      <PageHeader title="拓扑" />
       <div className="mb-3 flex flex-wrap gap-5 text-xs text-muted-foreground">
         <Legend color={go}>加密 / 本机</Legend>
         <Legend color={signal} dashed>
