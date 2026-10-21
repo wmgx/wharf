@@ -241,7 +241,7 @@ fn preview(
       "识别为"
     },
     g.language,
-    g.start
+    g.start.replace('\n', "; ")
   );
   done(&g.dockerfile)?;
   Ok(default)

@@ -247,7 +247,8 @@ fn dockerfile(
   )?;
   ctx.say(format!(
     "按 {} 模板生成 Dockerfile（启动：{}）：",
-    generated.language, generated.start
+    generated.language,
+    generated.start.replace('\n', "; ")
   ));
   for line in generated.dockerfile.lines() {
     ctx.say(format!("  {line}"));
