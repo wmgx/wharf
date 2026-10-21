@@ -31,8 +31,8 @@ pub fn spawn(state: Arc<AppState>) {
   tokio::spawn(async move {
     tokio::time::sleep(Duration::from_secs(10)).await;
     loop {
-      if let Err(e) = crate::edge::refresh_all(&edge_state).await {
-        tracing::warn!("刷新边缘应用状态失败：{e}");
+      if let Err(e) = crate::edge_sync::sync_all(&edge_state).await {
+        tracing::warn!("同步边缘应用失败：{e}");
       }
       tokio::time::sleep(EDGE_REFRESH).await;
     }

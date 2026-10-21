@@ -136,6 +136,7 @@ pub fn router(state: Arc<AppState>) -> Router {
       "/api/edge/{name}/redeploy",
       post(crate::edge_api::redeploy),
     )
+    .route("/api/edge/{name}/accept", post(crate::edge_api::accept))
     .route("/api/secrets", get(list_secrets))
     .route(
       "/api/secrets/{name}",
@@ -168,7 +169,14 @@ async fn status(
   auth: Auth,
 ) -> ApiResult<Status> {
   auth.require(TokenScope::Read)?;
-  Ok(Json(views::status(&s).await?))
+  let status = views::status(&s).await?;
+  // 刚导入、还没同步过的在后台同步，下一次轮询就有了。
+  if let Ok(snap) = snapshot::load(&s.db).await {
+    for a in status.edge_apps.iter().filter(|a| a.live.is_none()) {
+      crate::edge_sync::sync_if_stale(&s, &snap, &a.name);
+    }
+  }
+  Ok(Json(status))
 }
 
 // SERVERS

@@ -6,8 +6,8 @@ use wharf_api_types::{
   agent::ProjectState,
   spec::{Fleet, GatewayKind, GatewayTls},
   view::{
-    EdgeAppView, EdgeLive, GatewayView, LiveState, RouteView,
-    ServerView, ServiceView, Status,
+    EdgeAppView, EdgeLive, EdgeProjectView, GatewayView, LiveState,
+    RouteView, ServerView, ServiceView, Status,
   },
 };
 
@@ -311,21 +311,19 @@ pub async fn status(
     .world
     .edge_apps
     .keys()
-    .filter_map(|n| edge_view(state, &snap, n))
+    .filter_map(|n| edge_view(&snap, n))
     .collect();
   for app in &edge_apps {
-    match &app.live {
-      Some(EdgeLive { error: Some(e), .. }) => problems
-        .push(format!("边缘应用 {} 读取状态失败：{e}", app.name)),
-      Some(EdgeLive { exists: false, .. })
-        if app.spec.source.is_none() =>
-      {
-        problems
-          .push(format!("边缘应用 {} 在厂商那边不存在", app.name))
-      }
-      _ => {}
+    if let Some(d) = &app.drift {
+      problems.push(format!("边缘应用 {}：{d}", app.name));
+    } else if let Some(EdgeLive { error: Some(e), .. }) = &app.live {
+      problems.push(format!("边缘应用 {} 同步失败：{e}", app.name));
     }
   }
+  let mut edge_unmanaged: Vec<EdgeProjectView> =
+    snap.edge_accounts.values().flatten().cloned().collect();
+  crate::edge_sync::mark_managed(&snap, &mut edge_unmanaged);
+  edge_unmanaged.retain(|p| p.managed_as.is_none());
   let routes = snap
     .world
     .routes
@@ -336,23 +334,28 @@ pub async fn status(
     servers,
     services,
     edge_apps,
+    edge_unmanaged,
     gateways,
     routes,
     problems,
   })
 }
 
-pub fn edge_view(
-  state: &AppState,
-  snap: &Snapshot,
-  name: &str,
-) -> Option<EdgeAppView> {
+pub fn edge_view(snap: &Snapshot, name: &str) -> Option<EdgeAppView> {
   let row = snap.world.edge_apps.get(name)?;
+  let target = crate::edge_sync::target(name, &row.spec);
+  let cache =
+    snap.edge_cache.get(name).filter(|c| c.target == target);
   Some(EdgeAppView {
     name: name.to_string(),
     spec: row.spec.clone(),
     version: row.version,
-    live: state.edge_live.get(name),
+    live: cache.map(|c| c.live.clone()),
+    drift: crate::edge_sync::drift(
+      &target,
+      cache,
+      snap.edge_expected.get(name),
+    ),
   })
 }
 

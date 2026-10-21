@@ -32,20 +32,58 @@ pub struct Snapshot {
   pub tunnels: BTreeMap<String, db::TunnelRow>,
   /// 已绑定到边缘应用的自定义域名。
   pub edge_domains: Vec<db::EdgeDomainRow>,
+  /// 边缘应用的同步结果。
+  pub edge_cache: BTreeMap<String, crate::edge_sync::AppCache>,
+  /// 厂商账号里的 Workers / Pages（最近一次同步）。
+  pub edge_accounts:
+    BTreeMap<String, Vec<wharf_api_types::view::EdgeProjectView>>,
+  /// 同步时间（毫秒），key 是 `app:<名字>` / `account:<账号>`。
+  pub edge_checked: BTreeMap<String, i64>,
+  /// Wharf 记录的线上版本。
+  pub edge_expected: BTreeMap<String, db::EdgeExpected>,
+}
+
+impl Snapshot {
+  /// 解析同步结果。解析不了的旧数据当作没同步过。
+  fn with_edge_cache(
+    mut self,
+    rows: BTreeMap<String, (String, i64)>,
+  ) -> Self {
+    for (key, (data, checked)) in rows {
+      if let Some(app) = key.strip_prefix("app:") {
+        if let Ok(c) = serde_json::from_str(&data) {
+          self.edge_cache.insert(app.to_string(), c);
+        }
+      } else if let Some(account) = key.strip_prefix("account:")
+        && let Ok(list) = serde_json::from_str(&data)
+      {
+        self.edge_accounts.insert(account.to_string(), list);
+      }
+      self.edge_checked.insert(key, checked);
+    }
+    self
+  }
 }
 
 pub async fn load(db: &Db) -> Result<Snapshot, ApiError> {
   db.call(|c| {
-    Ok(Snapshot {
-      world: World::from_rows(db::all_resources(c)?)?,
-      agents: db::agents(c)?,
-      accounts: db::accounts(c)?,
-      owned: db::owned_records(c)?,
-      secrets: db::secrets(c)?,
-      deployed: db::deployed_servers(c)?,
-      tunnels: db::tunnels(c)?,
-      edge_domains: db::edge_domains(c)?,
-    })
+    Ok(
+      Snapshot {
+        world: World::from_rows(db::all_resources(c)?)?,
+        agents: db::agents(c)?,
+        accounts: db::accounts(c)?,
+        owned: db::owned_records(c)?,
+        secrets: db::secrets(c)?,
+        deployed: db::deployed_servers(c)?,
+        tunnels: db::tunnels(c)?,
+        edge_domains: db::edge_domains(c)?,
+        edge_cache: BTreeMap::new(),
+        edge_accounts: BTreeMap::new(),
+        edge_checked: BTreeMap::new(),
+        edge_expected: db::edge_expected(c)?,
+      }
+      .with_edge_cache(db::edge_cache(c)?),
+    )
   })
   .await
 }

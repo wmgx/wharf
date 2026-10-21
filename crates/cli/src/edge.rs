@@ -127,6 +127,8 @@ pub enum EdgeCmd {
   },
   /// 厂商那边的版本，新的在前。
   Versions { name: String },
+  /// 以线上为准：线上版本被别处改过时，把现在的线上版本记为 Wharf 期望的版本。
+  Accept { name: String },
   /// 回滚到上一个版本，或 `--to` 指定的版本。
   Rollback {
     name: String,
@@ -165,7 +167,7 @@ pub async fn edge(
     }
     EdgeCmd::Show { name } => {
       let v: EdgeAppView =
-        c.get(&format!("/api/edge/{}", seg(&name))).await?;
+        c.get(&format!("/api/edge/{}?sync=1", seg(&name))).await?;
       out(j, &v, pretty);
       Ok(())
     }
@@ -365,8 +367,9 @@ pub async fn edge(
       finish_task(c, &r.run_id, !no_wait, j).await
     }
     EdgeCmd::Versions { name } => {
-      let v: Vec<EdgeVersionView> =
-        c.get(&format!("/api/edge/{}/versions", seg(&name))).await?;
+      let v: Vec<EdgeVersionView> = c
+        .get(&format!("/api/edge/{}/versions?sync=1", seg(&name)))
+        .await?;
       out(j, &v, |v| {
         for x in v {
           println!(
@@ -389,6 +392,13 @@ pub async fn edge(
         )
         .await?;
       finish_task(c, &r.run_id, !no_wait, j).await
+    }
+    EdgeCmd::Accept { name } => {
+      let v: EdgeAppView = c
+        .post(&format!("/api/edge/{}/accept", seg(&name)), &json!({}))
+        .await?;
+      out(j, &v, |v| println!("{}", line(v)));
+      Ok(())
     }
     EdgeCmd::Rm { name, apply } => {
       // 指向它的域名一起移除。
@@ -415,7 +425,10 @@ fn kind_name(kind: EdgeKind) -> &'static str {
 
 fn line(a: &EdgeAppView) -> String {
   let state = match &a.live {
-    None => "未读取".to_string(),
+    _ if a.drift.is_some() => {
+      format!("有差异：{}", a.drift.as_deref().unwrap_or_default())
+    }
+    None => "还没同步".to_string(),
     Some(l) => match (&l.error, l.exists) {
       (Some(e), _) => format!("读取失败：{e}"),
       (None, false) => "厂商那边不存在".to_string(),
@@ -448,7 +461,8 @@ async fn discover(
   c: &Client,
   account: &str,
 ) -> CliResult<Vec<EdgeProjectView>> {
-  c.get(&format!("/api/accounts/{}/edge", seg(account))).await
+  c.get(&format!("/api/accounts/{}/edge?sync=1", seg(account)))
+    .await
 }
 
 /// 没写 `--account` 时用唯一的 Cloudflare 账号。

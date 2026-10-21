@@ -5,18 +5,17 @@
 //! - 回滚用厂商自己的版本，不在 Wharf 里另存；
 //! - 不再纳管时不删除厂商那边的项目，只解绑 Wharf 绑定的域名。
 
-use std::{collections::HashMap, sync::Mutex, time::Duration};
+use std::time::Duration;
 
-use chrono::Utc;
 use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
   ApiError,
   agent::{AgentOp, EdgeBuildJob, EdgeBuildResult, OneTimeSecret},
   spec::{EdgeAppSpec, EdgeKind, Region, RouteSpec},
   validate_name,
-  view::{EdgeLive, EdgeVersionView},
+  view::EdgeVersionView,
 };
-use wharf_providers::{EdgeProvider, WorkerScript};
+use wharf_providers::WorkerScript;
 
 use crate::{
   db::{self, AccountRow, EdgeDomainRow},
@@ -298,7 +297,7 @@ pub async fn deploy(
       ));
     }
   }
-  refresh(state, snap, name).await;
+  crate::edge_sync::after_change(state, name).await;
   Ok(())
 }
 
@@ -436,100 +435,7 @@ pub async fn rollback(
     ),
   )
   .await?;
-  refresh(state, snap, name).await;
-  Ok(())
-}
-
-// LIVE
-
-/// 厂商那边的现状缓存：定时任务刷新，状态页直接读。
-#[derive(Default)]
-pub struct LiveCache(Mutex<HashMap<String, EdgeLive>>);
-
-impl LiveCache {
-  pub fn get(&self, name: &str) -> Option<EdgeLive> {
-    self
-      .0
-      .lock()
-      .unwrap_or_else(|p| p.into_inner())
-      .get(name)
-      .cloned()
-  }
-
-  fn put(&self, name: &str, live: EdgeLive) {
-    self
-      .0
-      .lock()
-      .unwrap_or_else(|p| p.into_inner())
-      .insert(name.to_string(), live);
-  }
-}
-
-async fn read_live(
-  provider: &dyn EdgeProvider,
-  spec: &EdgeAppSpec,
-  name: &str,
-) -> EdgeLive {
-  let result = with_timeout(
-    &format!("读取 {name} 的状态"),
-    provider.get(provider_kind(spec.kind), spec.project_name(name)),
-  )
-  .await;
-  let now = Utc::now();
-  match result {
-    Ok(Some(p)) => EdgeLive {
-      exists: true,
-      url: p.url,
-      deployed_at: p.deployed_at,
-      deployed_by: p.deployed_by,
-      error: None,
-      checked_at: now,
-    },
-    Ok(None) => EdgeLive {
-      exists: false,
-      url: None,
-      deployed_at: None,
-      deployed_by: None,
-      error: None,
-      checked_at: now,
-    },
-    Err(e) => EdgeLive {
-      exists: false,
-      url: None,
-      deployed_at: None,
-      deployed_by: None,
-      error: Some(e.message),
-      checked_at: now,
-    },
-  }
-}
-
-/// 重新读取一个边缘应用的现状。读取失败也写进缓存（带原因）。
-pub async fn refresh(state: &AppState, snap: &Snapshot, name: &str) {
-  let Ok(spec) = app(snap, name) else { return };
-  let live = match account(snap, &spec.account)
-    .and_then(snapshot::edge_provider)
-  {
-    Ok(provider) => read_live(provider.as_ref(), spec, name).await,
-    Err(e) => EdgeLive {
-      exists: false,
-      url: None,
-      deployed_at: None,
-      deployed_by: None,
-      error: Some(e.message),
-      checked_at: Utc::now(),
-    },
-  };
-  state.edge_live.put(name, live);
-}
-
-pub async fn refresh_all(state: &AppState) -> Result<(), ApiError> {
-  let snap = snapshot::load(&state.db).await?;
-  let names: Vec<String> =
-    snap.world.edge_apps.keys().cloned().collect();
-  for name in names {
-    refresh(state, &snap, &name).await;
-  }
+  crate::edge_sync::after_change(state, name).await;
   Ok(())
 }
 

@@ -95,9 +95,12 @@ pub struct EdgeAppView {
   pub name: String,
   pub spec: EdgeAppSpec,
   pub version: u64,
-  /// 厂商那边的现状（定时刷新，详情页实时读取），查不到时为空。
+  /// 厂商那边的现状（后台同步后存在控制面），还没同步过时为空。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub live: Option<EdgeLive>,
+  /// 和 Wharf 记录的不一致时的说明，例如线上版本被别处改过、项目被删了。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub drift: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -122,6 +125,9 @@ pub struct EdgeLive {
 /// 厂商账号下自动发现的 Worker / Pages 项目。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct EdgeProjectView {
+  /// 所在的厂商账号。
+  #[serde(default)]
+  pub account: String,
   pub kind: EdgeKind,
   pub project: String,
   #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -209,6 +215,9 @@ pub struct Status {
   pub services: Vec<ServiceView>,
   #[serde(default)]
   pub edge_apps: Vec<EdgeAppView>,
+  /// 厂商账号里还没纳管的 Workers / Pages（来自最近一次同步）。
+  #[serde(default)]
+  pub edge_unmanaged: Vec<EdgeProjectView>,
   pub gateways: Vec<GatewayView>,
   pub routes: Vec<RouteView>,
   /// 需要注意的问题，例如服务器离线、服务没在运行。

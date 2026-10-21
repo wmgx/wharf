@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use axum::{
   Json,
-  extract::{Path, State},
+  extract::{Path, Query, State},
 };
 use serde::Deserialize;
 use wharf_api_types::{
@@ -23,11 +23,19 @@ use crate::{
   apply::start_task,
   auth::Auth,
   edge::{self, edge_not_found},
+  edge_sync,
   planner::Step,
-  snapshot::{self, with_timeout},
+  snapshot::{self, Snapshot, with_timeout},
   state::AppState,
   views,
 };
+
+#[derive(Deserialize, Default)]
+pub struct SyncQuery {
+  /// 先同步再返回（CLI 和页面上的"同步"按钮用）；不给时读控制面里存的。
+  #[serde(default)]
+  sync: bool,
+}
 
 /// `GET /api/edge`
 pub async fn list(
@@ -36,36 +44,48 @@ pub async fn list(
 ) -> ApiResult<Vec<EdgeAppView>> {
   auth.require(TokenScope::Read)?;
   let snap = snapshot::load(&s.db).await?;
-  // 刚导入、还没被定时任务读过的当场读一次。
   for name in snap.world.edge_apps.keys() {
-    if s.edge_live.get(name).is_none() {
-      edge::refresh(&s, &snap, name).await;
-    }
+    edge_sync::sync_if_stale(&s, &snap, name);
   }
   Ok(Json(
     snap
       .world
       .edge_apps
       .keys()
-      .filter_map(|n| views::edge_view(&s, &snap, n))
+      .filter_map(|n| views::edge_view(&snap, n))
       .collect(),
   ))
 }
 
-/// `GET /api/edge/{name}`：先实时读一次厂商那边的现状。
+/// 同步（`sync` 或从没同步过时）后重新读快照，否则读到的旧了就后台同步。
+async fn synced(
+  s: &Arc<AppState>,
+  name: &str,
+  sync: bool,
+) -> Result<Snapshot, ApiError> {
+  let snap = snapshot::load(&s.db).await?;
+  if !snap.world.edge_apps.contains_key(name) {
+    return Err(edge_not_found(name));
+  }
+  if sync || !snap.edge_cache.contains_key(name) {
+    edge_sync::sync_app(s, &snap, name, false).await?;
+    return snapshot::load(&s.db).await;
+  }
+  edge_sync::sync_if_stale(s, &snap, name);
+  Ok(snap)
+}
+
+/// `GET /api/edge/{name}`
 pub async fn show(
   State(s): State<Arc<AppState>>,
   auth: Auth,
   Path(name): Path<String>,
+  Query(q): Query<SyncQuery>,
 ) -> ApiResult<EdgeAppView> {
   auth.require(TokenScope::Read)?;
-  let snap = snapshot::load(&s.db).await?;
-  if !snap.world.edge_apps.contains_key(&name) {
-    return Err(edge_not_found(&name).into());
-  }
-  edge::refresh(&s, &snap, &name).await;
+  let snap = synced(&s, &name, q.sync).await?;
   Ok(Json(
-    views::edge_view(&s, &snap, &name)
+    views::edge_view(&snap, &name)
       .ok_or_else(|| edge_not_found(&name))?,
   ))
 }
@@ -75,41 +95,35 @@ pub async fn discover(
   State(s): State<Arc<AppState>>,
   auth: Auth,
   Path(account): Path<String>,
+  Query(q): Query<SyncQuery>,
 ) -> ApiResult<Vec<EdgeProjectView>> {
   auth.require(TokenScope::Read)?;
   let snap = snapshot::load(&s.db).await?;
-  let provider =
-    snapshot::edge_provider(edge::account(&snap, &account)?)?;
-  let list =
-    with_timeout("读取 Workers / Pages 项目", provider.list())
-      .await?;
+  edge::account(&snap, &account)?;
+  let mut list = match snap.edge_accounts.get(&account) {
+    Some(list) if !q.sync => list.clone(),
+    _ => edge_sync::sync_account(&s, &snap, &account).await?,
+  };
+  edge_sync::mark_managed(&snap, &mut list);
+  Ok(Json(list))
+}
+
+/// `POST /api/edge/{name}/accept`：以线上为准，把现在的线上版本记为 Wharf 期望的版本。
+pub async fn accept(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Path(name): Path<String>,
+) -> ApiResult<EdgeAppView> {
+  auth.require(TokenScope::ApplySafe)?;
+  let snap = snapshot::load(&s.db).await?;
+  if !snap.world.edge_apps.contains_key(&name) {
+    return Err(edge_not_found(&name).into());
+  }
+  edge_sync::sync_app(&s, &snap, &name, true).await?;
+  let snap = snapshot::load(&s.db).await?;
   Ok(Json(
-    list
-      .into_iter()
-      .map(|(kind, p)| {
-        let kind = match kind {
-          wharf_providers::EdgeKind::Worker => EdgeKind::Worker,
-          wharf_providers::EdgeKind::Pages => EdgeKind::Pages,
-        };
-        let managed_as = snap
-          .world
-          .edge_apps
-          .iter()
-          .find(|(n, r)| {
-            r.spec.account == account
-              && r.spec.kind == kind
-              && r.spec.project_name(n) == p.name
-          })
-          .map(|(n, _)| n.clone());
-        EdgeProjectView {
-          kind,
-          project: p.name,
-          url: p.url,
-          modified_at: p.modified_at,
-          managed_as,
-        }
-      })
-      .collect(),
+    views::edge_view(&snap, &name)
+      .ok_or_else(|| edge_not_found(&name))?,
   ))
 }
 
@@ -154,10 +168,17 @@ pub async fn versions(
   State(s): State<Arc<AppState>>,
   auth: Auth,
   Path(name): Path<String>,
+  Query(q): Query<SyncQuery>,
 ) -> ApiResult<Vec<EdgeVersionView>> {
   auth.require(TokenScope::Read)?;
-  let snap = snapshot::load(&s.db).await?;
-  Ok(Json(edge::versions(&snap, &name).await?))
+  let snap = synced(&s, &name, q.sync).await?;
+  Ok(Json(
+    snap
+      .edge_cache
+      .get(&name)
+      .map(|c| c.versions.clone())
+      .unwrap_or_default(),
+  ))
 }
 
 #[derive(Deserialize, Default)]

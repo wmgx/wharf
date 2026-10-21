@@ -163,9 +163,12 @@ export interface EdgeAppView {
   spec: EdgeAppSpec;
   version: number;
   live?: EdgeLive;
+  /** 和 Wharf 记录的不一致时的说明。 */
+  drift?: string;
 }
 
 export interface EdgeProjectView {
+  account: string;
   kind: EdgeKind;
   project: string;
   url?: string;
@@ -186,6 +189,8 @@ export interface Status {
   servers: ServerView[];
   services: ServiceView[];
   edge_apps?: EdgeAppView[];
+  /** 厂商账号里还没纳管的 Workers / Pages。 */
+  edge_unmanaged?: EdgeProjectView[];
   gateways: GatewayView[];
   routes: RouteView[];
   problems?: string[];

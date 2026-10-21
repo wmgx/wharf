@@ -1,7 +1,8 @@
-import { ArrowLeftIcon, ArrowUpRightIcon, PlusIcon, RefreshCwIcon, Trash2Icon, Undo2Icon, XIcon } from "lucide-react";
+import { ArrowLeftIcon, ArrowUpRightIcon, PlusIcon, RefreshCwIcon, RotateCwIcon, Trash2Icon, Undo2Icon, XIcon } from "lucide-react";
 import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { usePoll } from "@/api";
+import { toast } from "sonner";
+import { api, usePoll } from "@/api";
 import { useActions } from "@/components/actions";
 import { CodeBlock, Empty, ErrorNote, Notice, PageHeader, SectionTitle, StatusBadge, ago } from "@/components/common";
 import { DomainChips, Field } from "@/components/fields";
@@ -23,9 +24,12 @@ export function EdgeDetail() {
   const { status } = useStatus();
   const actions = useActions();
   const path = `/api/edge/${encodeURIComponent(name)}`;
-  // 详情接口每次都实时读 Cloudflare，轮询放慢。
-  const { data: app, error, refresh } = usePoll<EdgeAppView>(path, 30000);
+  // 读控制面里存的同步结果；旧了控制面会在后台再同步。
+  const { data: app, error, refresh } = usePoll<EdgeAppView>(path, 10000);
   const [addingRoute, setAddingRoute] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  // 同步、以线上为准之后让版本列表重新读。
+  const [tick, setTick] = useState(0);
   const routes = status?.routes.filter((r) => r.spec.service === name) ?? [];
 
   const back = (
@@ -44,10 +48,32 @@ export function EdgeDetail() {
     );
   }
 
-  const { tone, text } = edgeTone(app.live);
+  const { tone, text } = edgeTone(app.live, app.drift);
   const redeploy = async () => {
     const run = await edgeTask(`${path}/redeploy`, {}, `重新发布 ${name}`);
     if (run) actions.watch(run, `重新发布 ${name}`);
+  };
+  const sync = async () => {
+    setSyncing(true);
+    try {
+      await api.get(`${path}?sync=1`);
+      refresh();
+      setTick((t) => t + 1);
+    } catch (e) {
+      toast.error(`同步 ${name} 失败`, { description: (e as Error).message });
+    } finally {
+      setSyncing(false);
+    }
+  };
+  const accept = async () => {
+    try {
+      await api.post(`${path}/accept`, {});
+      toast.success("已以线上版本为准");
+      refresh();
+      setTick((t) => t + 1);
+    } catch (e) {
+      toast.error("操作失败", { description: (e as Error).message });
+    }
   };
   const remove = () =>
     actions.plan({
@@ -74,6 +100,15 @@ export function EdgeDetail() {
         }
         actions={
           <>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button variant="outline" disabled={syncing} onClick={sync}>
+                  <RotateCwIcon className={syncing ? "animate-spin" : undefined} />
+                  同步
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>{app.live ? `上次同步：${ago(app.live.checked_at)}` : "还没同步过"}，点击从 Cloudflare 重新读取</TooltipContent>
+            </Tooltip>
             {app.spec.source && (
               <Tooltip>
                 <TooltipTrigger asChild>
@@ -93,7 +128,21 @@ export function EdgeDetail() {
         }
       />
 
-      {app.live?.error && <Notice kind="warn">读取 Cloudflare 失败：{app.live.error}</Notice>}
+      {app.drift && (
+        <Notice kind="warn" className="mb-3">
+          {app.drift}。
+          {app.live?.exists && (
+            <button type="button" className="ml-1 font-medium underline underline-offset-2" onClick={accept}>
+              以线上为准
+            </button>
+          )}
+        </Notice>
+      )}
+      {app.live?.error && (
+        <Notice kind="warn" className="mb-3">
+          同步失败：{app.live.error}
+        </Notice>
+      )}
       {!app.spec.source && (
         <Notice className="mb-3">
           只纳管，代码还在 Cloudflare 面板里。改成本地文件发布：<code className="font-mono">wharf edge pull {name}</code>，改完{" "}
@@ -129,6 +178,8 @@ export function EdgeDetail() {
             <dd className="font-mono text-[13px]">
               {app.spec.account} / {projectOf(app)}
             </dd>
+            <dt className="text-muted-foreground">同步于</dt>
+            <dd className="text-muted-foreground">{app.live ? ago(app.live.checked_at) : "还没同步，稍等片刻"}</dd>
             <dt className="text-muted-foreground">最近发布</dt>
             <dd>
               {app.live?.deployed_at ? `${ago(app.live.deployed_at)}${app.live.deployed_by ? `（${app.live.deployed_by}）` : ""}` : "-"}
@@ -143,7 +194,7 @@ export function EdgeDetail() {
         </CardContent>
       </Card>
 
-      <Versions name={name} onChanged={refresh} />
+      <Versions key={tick} name={name} onChanged={refresh} />
 
       <SectionTitle>配置</SectionTitle>
       <CodeBlock>{JSON.stringify(app.spec, null, 2)}</CodeBlock>
@@ -164,7 +215,7 @@ function ExternalLink({ url }: { url: string }) {
 
 function Versions({ name, onChanged }: { name: string; onChanged: () => void }) {
   const path = `/api/edge/${encodeURIComponent(name)}`;
-  const { data, error } = usePoll<EdgeVersionView[]>(`${path}/versions`, 60000);
+  const { data, error } = usePoll<EdgeVersionView[]>(`${path}/versions`, 10000);
   const actions = useActions();
   const rollback = async (v: EdgeVersionView) => {
     const title = `${name} 切换到 ${v.id.slice(0, 8)}`;

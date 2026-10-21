@@ -15,6 +15,7 @@ mod db;
 mod edge;
 mod edge_api;
 mod edge_plan;
+mod edge_sync;
 mod hub;
 mod jobs;
 mod login;
@@ -120,7 +121,7 @@ async fn main() -> anyhow::Result<()> {
     data_dir: cli.data_dir.clone(),
     downloads: Default::default(),
     started: std::time::Instant::now(),
-    edge_live: Default::default(),
+    edge_syncing: Default::default(),
   });
   apply::recover(&state).await?;
   jobs::spawn(state.clone());

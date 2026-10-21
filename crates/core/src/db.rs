@@ -155,6 +155,21 @@ CREATE TABLE edge_domains (
   created_at INTEGER NOT NULL
 );
 "#,
+  // 边缘应用的同步结果（key 是 `app:<名字>` / `account:<账号>`），页面直接读它；
+  // 以及 Wharf 记录的线上版本，用来发现别处改过。
+  r#"
+CREATE TABLE edge_cache (
+  key TEXT PRIMARY KEY,
+  data TEXT NOT NULL,
+  checked_at INTEGER NOT NULL
+);
+CREATE TABLE edge_expected (
+  app TEXT PRIMARY KEY,
+  target TEXT NOT NULL,
+  versions TEXT NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+"#,
 ];
 
 #[derive(Clone)]
@@ -306,14 +321,97 @@ pub fn apply_write(
       )
       .map(|_| ())
       .map_err(sql_err),
-    Write::Delete { kind, name } => conn
-      .execute(
-        "DELETE FROM resources WHERE kind = ?1 AND name = ?2",
-        params![kind, name],
-      )
-      .map(|_| ())
-      .map_err(sql_err),
+    Write::Delete { kind, name } => {
+      conn
+        .execute(
+          "DELETE FROM resources WHERE kind = ?1 AND name = ?2",
+          params![kind, name],
+        )
+        .map_err(sql_err)?;
+      if kind == crate::world::KIND_EDGE {
+        conn
+          .execute(
+            "DELETE FROM edge_cache WHERE key = ?1",
+            params![format!("app:{name}")],
+          )
+          .map_err(sql_err)?;
+        conn
+          .execute("DELETE FROM edge_expected WHERE app = ?1", params![name])
+          .map_err(sql_err)?;
+      }
+      Ok(())
+    }
   }
+}
+
+/// 边缘应用同步结果：key → （JSON，同步时间毫秒）。
+pub fn edge_cache(
+  c: &Connection,
+) -> Result<std::collections::BTreeMap<String, (String, i64)>, ApiError>
+{
+  let mut stmt = c
+    .prepare("SELECT key, data, checked_at FROM edge_cache")
+    .map_err(sql_err)?;
+  let rows = stmt
+    .query_map([], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?))))
+    .map_err(sql_err)?;
+  rows.collect::<Result<_, _>>().map_err(sql_err)
+}
+
+pub fn put_edge_cache(
+  c: &Connection,
+  key: &str,
+  data: &str,
+) -> Result<(), ApiError> {
+  c.execute(
+    "INSERT INTO edge_cache (key, data, checked_at) VALUES (?1, ?2, ?3)
+     ON CONFLICT (key) DO UPDATE SET data = ?2, checked_at = ?3",
+    params![key, data, now_ms()],
+  )
+  .map_err(sql_err)?;
+  Ok(())
+}
+
+/// Wharf 记录的线上版本：应用 → （厂商项目，版本 id 用逗号连起来）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct EdgeExpected {
+  pub target: String,
+  pub versions: String,
+}
+
+pub fn edge_expected(
+  c: &Connection,
+) -> Result<std::collections::BTreeMap<String, EdgeExpected>, ApiError>
+{
+  let mut stmt = c
+    .prepare("SELECT app, target, versions FROM edge_expected")
+    .map_err(sql_err)?;
+  let rows = stmt
+    .query_map([], |r| {
+      Ok((
+        r.get(0)?,
+        EdgeExpected {
+          target: r.get(1)?,
+          versions: r.get(2)?,
+        },
+      ))
+    })
+    .map_err(sql_err)?;
+  rows.collect::<Result<_, _>>().map_err(sql_err)
+}
+
+pub fn put_edge_expected(
+  c: &Connection,
+  app: &str,
+  e: &EdgeExpected,
+) -> Result<(), ApiError> {
+  c.execute(
+    "INSERT INTO edge_expected (app, target, versions, updated_at) VALUES (?1, ?2, ?3, ?4)
+     ON CONFLICT (app) DO UPDATE SET target = ?2, versions = ?3, updated_at = ?4",
+    params![app, e.target, e.versions, now_ms()],
+  )
+  .map_err(sql_err)?;
+  Ok(())
 }
 
 pub fn versions(
