@@ -409,6 +409,10 @@ pub fn upload_metadata(
     .unwrap_or_default();
   keep.sort();
   keep.dedup();
+  // 带静态资源（Workers Assets）的 Worker：只换脚本，资源沿用上一个版本的。
+  if keep.iter().any(|t| t == "assets") {
+    meta["keep_assets"] = json!(true);
+  }
   if !keep.is_empty() {
     meta["keep_bindings"] = json!(keep);
   }
@@ -835,6 +839,13 @@ mod tests {
         "keep_bindings": ["kv_namespace", "secret_text"],
       })
     );
+    let with_assets = json!({
+      "compatibility_date": "2025-01-01",
+      "bindings": [{ "type": "assets", "name": "ASSETS" }, { "type": "d1", "name": "DB" }],
+    });
+    let meta = upload_metadata(&script, Some(&with_assets));
+    assert_eq!(meta["keep_assets"], json!(true));
+    assert_eq!(meta["keep_bindings"], json!(["assets", "d1"]));
     let old = WorkerScript {
       modules: false,
       ..script
