@@ -185,7 +185,11 @@ pub async fn edge(
               .unwrap_or_default()
           );
         }
-        if !v.is_empty() {
+        if v.is_empty() {
+          println!(
+            "账号 {account} 里没有 Workers / Pages 项目（token 没有 Workers / Pages 读权限时也是空的）"
+          );
+        } else {
           println!("\n导入：wharf edge import <项目> --apply");
         }
       });
