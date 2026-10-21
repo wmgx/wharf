@@ -135,6 +135,12 @@ impl Ops {
         crate::build::run(&self.docker, &self.core_url, &job, ctx)
           .await
       }
+      AgentOp::EdgeBuild(job) => {
+        let lock = self.lock_for(&format!("edge/{}", job.app));
+        let _guard = lock.lock().await;
+        crate::edge::run(&self.docker, &self.core_url, &job, ctx)
+          .await
+      }
     }
   }
 

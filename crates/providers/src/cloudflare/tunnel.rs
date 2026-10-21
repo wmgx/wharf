@@ -16,23 +16,11 @@ pub(super) struct CloudflareTunnel {
 }
 
 impl CloudflareTunnel {
-  /// 隧道建在哪个 Cloudflare 账户下：token 只能看到一个账户时用它。
   async fn account_id(&self) -> Result<String, ProviderError> {
-    let mut accounts = self.client.list_accounts().await?;
-    match accounts.len() {
-      1 => Ok(accounts.remove(0).0),
-      0 => Err(ProviderError::invalid(
-        "这个 token 看不到任何 Cloudflare 账户。需要的权限：Account → Cloudflare Tunnel → Edit",
-      )),
-      _ => Err(ProviderError::invalid(format!(
-        "这个 token 能看到多个 Cloudflare 账户（{}），请换一个只属于一个账户的 token",
-        accounts
-          .iter()
-          .map(|(_, n)| n.as_str())
-          .collect::<Vec<_>>()
-          .join("、")
-      ))),
-    }
+    self
+      .client
+      .single_account("Account → Cloudflare Tunnel → Edit")
+      .await
   }
 }
 

@@ -6,8 +6,9 @@ use serde_json::{Value, json};
 use wharf_api_types::{
   ApiError,
   spec::{
-    BuildSource, Change, Fleet, GatewayKind, GatewaySpec, GatewayTls,
-    RouteSpec, ServerSettings, ServiceSpec, Source,
+    BuildSource, Change, EdgeAppSpec, Fleet, GatewayKind,
+    GatewaySpec, GatewayTls, RouteSpec, ServerSettings, ServiceSpec,
+    Source,
   },
   validate_name,
 };
@@ -18,6 +19,7 @@ pub const KIND_SERVER: &str = "server";
 pub const KIND_SERVICE: &str = "service";
 pub const KIND_GATEWAY: &str = "gateway";
 pub const KIND_ROUTE: &str = "route";
+pub const KIND_EDGE: &str = "edge";
 
 /// 网关的 compose project 名前缀，服务名不能用。
 pub const GATEWAY_PROJECT_PREFIX: &str = "wharf-gw-";
@@ -45,6 +47,12 @@ pub struct GatewayRow {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct EdgeRow {
+  pub spec: EdgeAppSpec,
+  pub version: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct RouteRow {
   pub id: String,
   pub spec: RouteSpec,
@@ -56,6 +64,7 @@ pub struct World {
   pub servers: BTreeMap<String, ServerRow>,
   pub services: BTreeMap<String, ServiceRow>,
   pub gateways: BTreeMap<String, GatewayRow>,
+  pub edge_apps: BTreeMap<String, EdgeRow>,
   /// key 是 hostname。
   pub routes: BTreeMap<String, RouteRow>,
 }
@@ -124,6 +133,16 @@ impl World {
             },
           );
         }
+        KIND_EDGE => {
+          world.edge_apps.insert(
+            row.name,
+            EdgeRow {
+              spec: serde_json::from_value(row.spec)
+                .map_err(json_err)?,
+              version,
+            },
+          );
+        }
         other => tracing::warn!("未知资源类型 {other}，忽略"),
       }
     }
@@ -144,6 +163,9 @@ impl World {
     }
     for (name, r) in &self.routes {
       out.insert(format!("{KIND_ROUTE}/{name}"), r.version);
+    }
+    for (name, r) in &self.edge_apps {
+      out.insert(format!("{KIND_EDGE}/{name}"), r.version);
     }
     out
   }
@@ -221,6 +243,26 @@ impl World {
             RouteRow { id, spec, version },
           );
         }
+        Change::UpsertEdgeApp { name, spec } => {
+          validate_name("边缘应用", name)?;
+          let version =
+            self.edge_apps.get(name).map(|r| r.version).unwrap_or(0);
+          self.edge_apps.insert(
+            name.clone(),
+            EdgeRow {
+              spec: spec.clone(),
+              version,
+            },
+          );
+        }
+        Change::RemoveEdgeApp { name } => {
+          if self.edge_apps.remove(name).is_none() {
+            return Err(
+              ApiError::not_found(format!("边缘应用 {name} 不存在"))
+                .suggest("wharf edge list"),
+            );
+          }
+        }
         Change::RemoveRoute { hostname } => {
           let hostname = normalize_hostname(hostname)?;
           if self.routes.remove(&hostname).is_none() {
@@ -261,6 +303,9 @@ impl World {
       }
     }
     self.services.retain(|name, _| keep_services.contains(name));
+    self
+      .edge_apps
+      .retain(|name, _| fleet.edge_apps.contains_key(name));
     self.gateways.retain(|name, _| keep_gateways.contains(name));
     self.routes.retain(|host, _| keep_routes.contains(host));
     for (name, spec) in &fleet.services {
@@ -271,6 +316,12 @@ impl World {
     }
     for (name, spec) in &fleet.gateways {
       changes.push(Change::UpsertGateway {
+        name: name.clone(),
+        spec: spec.clone(),
+      });
+    }
+    for (name, spec) in &fleet.edge_apps {
+      changes.push(Change::UpsertEdgeApp {
         name: name.clone(),
         spec: spec.clone(),
       });
@@ -289,11 +340,14 @@ impl World {
       .map(|(name, _)| name.as_str())
   }
 
-  /// 路由实际使用的网关。
+  /// 路由实际使用的网关。指向边缘应用的路由不经过网关。
   pub fn route_gateway<'a>(
     &'a self,
     route: &'a RouteSpec,
   ) -> Option<&'a str> {
+    if self.edge_apps.contains_key(&route.service) {
+      return None;
+    }
     route.gateway.as_deref().or_else(|| self.default_gateway())
   }
 
@@ -316,6 +370,9 @@ impl World {
   pub fn validate(&self) -> Result<(), ApiError> {
     for (name, service) in &self.services {
       validate_service(self, name, &service.spec)?;
+    }
+    for (name, app) in &self.edge_apps {
+      crate::edge::validate_app(self, name, &app.spec)?;
     }
     let defaults: Vec<&String> = self
       .gateways
@@ -367,6 +424,10 @@ impl World {
       }
     }
     for (host, route) in &self.routes {
+      if self.edge_apps.contains_key(&route.spec.service) {
+        crate::edge::validate_route(host, &route.spec)?;
+        continue;
+      }
       let Some(service) = self.services.get(&route.spec.service)
       else {
         return Err(
@@ -522,6 +583,13 @@ impl World {
       |r| (to_json(&r.spec), json!({ "id": r.id })),
       &mut out,
     );
+    diff_map(
+      &current.edge_apps,
+      &self.edge_apps,
+      KIND_EDGE,
+      |r| (to_json(&r.spec), json!({})),
+      &mut out,
+    );
     out
   }
 }
@@ -562,12 +630,16 @@ fn diff_map<T>(
   }
 }
 
-/// 构建来源：代码来源二选一，路径只能是代码里的相对路径。
-fn check_build(name: &str, b: &BuildSource) -> Result<(), ApiError> {
-  let bad = |what: &str| {
-    Err(ApiError::invalid(format!("服务 {name} 的{what}")))
-  };
-  match (&b.upload, &b.git) {
+/// 代码来源（本机上传或 git）和相对路径的校验，服务和边缘应用共用。
+/// `what` 例如"服务 api"。
+pub fn check_code_source(
+  what: &str,
+  upload: Option<&String>,
+  git: Option<&wharf_api_types::spec::GitSource>,
+  paths: &[&Option<String>],
+) -> Result<(), ApiError> {
+  let bad = |m: &str| Err(ApiError::invalid(format!("{what} 的{m}")));
+  match (upload, git) {
     (Some(sha), None) => {
       if sha.len() != 64
         || !sha.bytes().all(|c| c.is_ascii_hexdigit())
@@ -583,7 +655,7 @@ fn check_build(name: &str, b: &BuildSource) -> Result<(), ApiError> {
       {
         return Err(
           ApiError::invalid(format!(
-            "服务 {name} 的 git 仓库要写 https 地址，不要带账号密码"
+            "{what} 的 git 仓库要写 https 地址，不要带账号密码"
           ))
           .with_hint(
             "私有仓库把 token 存成密钥，用 token_secret 引用",
@@ -607,11 +679,11 @@ fn check_build(name: &str, b: &BuildSource) -> Result<(), ApiError> {
     }
     _ => {
       return Err(ApiError::invalid(format!(
-        "服务 {name}：构建来源要给出 upload（本机目录）或 git 仓库，二选一"
+        "{what}：代码来源要给出 upload（本机目录）或 git 仓库，二选一"
       )));
     }
   }
-  for p in [&b.path, &b.dockerfile].into_iter().flatten() {
+  for p in paths.iter().copied().flatten() {
     let p = p.trim_start_matches("./");
     if p.is_empty()
       || p.starts_with('/')
@@ -620,6 +692,20 @@ fn check_build(name: &str, b: &BuildSource) -> Result<(), ApiError> {
       return bad(&format!("路径 {p} 不合法：要写代码里的相对路径"));
     }
   }
+  Ok(())
+}
+
+/// 构建来源：代码来源二选一，路径只能是代码里的相对路径。
+fn check_build(name: &str, b: &BuildSource) -> Result<(), ApiError> {
+  let bad = |what: &str| {
+    Err(ApiError::invalid(format!("服务 {name} 的{what}")))
+  };
+  check_code_source(
+    &format!("服务 {name}"),
+    b.upload.as_ref(),
+    b.git.as_ref(),
+    &[&b.path, &b.dockerfile],
+  )?;
   if b.base.as_deref().is_some_and(|i| {
     i.trim().is_empty() || i.contains(char::is_whitespace)
   }) {

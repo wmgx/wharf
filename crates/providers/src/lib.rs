@@ -1,6 +1,6 @@
 //! Provider abstraction. A provider kind (eg. `cloudflare`) is registered
 //! once in [REGISTRY]: [DnsProvider] for records, [TunnelProvider] for
-//! tunnel gateways.
+//! tunnel gateways, [EdgeProvider] for edge apps (Workers / Pages).
 //!
 //! Adding a vendor = one new module + one line in [REGISTRY].
 
@@ -191,6 +191,134 @@ pub trait TunnelProvider: Send + Sync {
   fn dns_target(&self, tunnel: &TunnelRef) -> DnsRecordSpec;
 }
 
+// EDGE
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeKind {
+  Worker,
+  Pages,
+}
+
+/// A Worker script or a Pages project at the provider.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct EdgeProject {
+  pub name: String,
+  /// Default public url, if enabled.
+  pub url: Option<String>,
+  pub modified_at: Option<String>,
+  /// Worker: ES module format.
+  pub modules: bool,
+  /// Pages: deployments to this branch are production.
+  pub production_branch: Option<String>,
+  /// Pages: `<x>.pages.dev`, where custom hostnames must point.
+  pub subdomain: Option<String>,
+  /// Latest production deployment: time and trigger (`wrangler`, `dashboard`...).
+  pub deployed_at: Option<String>,
+  pub deployed_by: Option<String>,
+}
+
+/// One version (Worker) or production deployment (Pages).
+#[derive(Debug, Clone, PartialEq)]
+pub struct EdgeVersion {
+  pub id: String,
+  pub created_at: String,
+  pub source: Option<String>,
+  pub message: Option<String>,
+  pub active: bool,
+  pub url: Option<String>,
+}
+
+/// The main module of a Worker.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkerScript {
+  pub filename: String,
+  pub content: String,
+  pub modules: bool,
+}
+
+/// Workers / Pages. Wharf never deletes provider projects: removing an
+/// edge app only stops managing it.
+pub trait EdgeProvider: Send + Sync {
+  /// The provider account (eg. Cloudflare account id) wrangler deploys to.
+  fn account_id(&self) -> BoxFut<'_, String>;
+
+  /// Every Worker and Pages project the token can see.
+  fn list(&self) -> BoxFut<'_, Vec<(EdgeKind, EdgeProject)>>;
+
+  /// `None` if it does not exist.
+  fn get<'a>(
+    &'a self,
+    kind: EdgeKind,
+    name: &'a str,
+  ) -> BoxFut<'a, Option<EdgeProject>>;
+
+  fn download_worker<'a>(
+    &'a self,
+    name: &'a str,
+  ) -> BoxFut<'a, WorkerScript>;
+
+  /// Upload a single file Worker as a new deployed version. Variables,
+  /// secrets and bindings configured in the dashboard are kept.
+  fn upload_worker<'a>(
+    &'a self,
+    name: &'a str,
+    script: &'a WorkerScript,
+  ) -> BoxFut<'a, ()>;
+
+  /// Create the Pages project if missing.
+  fn ensure_pages<'a>(
+    &'a self,
+    name: &'a str,
+  ) -> BoxFut<'a, EdgeProject>;
+
+  /// Newest first.
+  fn versions<'a>(
+    &'a self,
+    kind: EdgeKind,
+    name: &'a str,
+  ) -> BoxFut<'a, Vec<EdgeVersion>>;
+
+  fn rollback<'a>(
+    &'a self,
+    kind: EdgeKind,
+    name: &'a str,
+    version: &'a str,
+  ) -> BoxFut<'a, ()>;
+
+  /// Custom hostnames bound to the project.
+  fn domains<'a>(
+    &'a self,
+    kind: EdgeKind,
+    name: &'a str,
+  ) -> BoxFut<'a, Vec<String>>;
+
+  /// Bind a custom hostname. `takeover`: replace an existing DNS record
+  /// (Workers manage the record themselves).
+  fn attach_domain<'a>(
+    &'a self,
+    kind: EdgeKind,
+    name: &'a str,
+    hostname: &'a str,
+    takeover: bool,
+  ) -> BoxFut<'a, ()>;
+
+  /// No-op if not bound.
+  fn detach_domain<'a>(
+    &'a self,
+    kind: EdgeKind,
+    name: &'a str,
+    hostname: &'a str,
+  ) -> BoxFut<'a, ()>;
+
+  /// The DNS record a custom hostname needs, when the provider does not
+  /// create it with the binding (Pages). `None`: the provider manages it.
+  fn domain_dns(
+    &self,
+    kind: EdgeKind,
+    project: &EdgeProject,
+  ) -> Option<DnsRecordSpec>;
+}
+
 // REGISTRY
 
 /// Credentials of one account. No Debug output of the token.
@@ -222,6 +350,7 @@ pub struct Discovery {
 pub struct ProviderSet {
   pub dns: Option<Box<dyn DnsProvider>>,
   pub tunnel: Option<Box<dyn TunnelProvider>>,
+  pub edge: Option<Box<dyn EdgeProvider>>,
 }
 
 pub struct ProviderFactory {

@@ -72,47 +72,9 @@ async fn build_in(
   ctx: &Ctx,
 ) -> Result<BuildResult, ApiError> {
   let src = work.join("src");
-  std::fs::create_dir_all(&src).map_err(io_err(&src))?;
-  let commit = match &job.fetch {
-    BuildFetch::Upload { sha256, token } => {
-      let archive = work.join("source.tar.gz");
-      download(core_url, sha256, &token.0, &archive, ctx).await?;
-      ctx.say("解压代码");
-      // 包里的修改时间都是 0（为了内容相同时 sha256 相同），解压时用当前时间：
-      // BuildKit 按大小和修改时间判断构建上下文里的文件变没变，
-      // 改了内容但大小没变的文件会被当成没变。
-      Cmd::new("tar")
-        .args([
-          "-xzf",
-          &archive.to_string_lossy(),
-          "--no-same-owner",
-          "-m",
-        ])
-        .arg("-C")
-        .arg(src.to_string_lossy().to_string())
-        .timeout(Duration::from_secs(300))
-        .run(ctx)
-        .await?
-        .check("解压代码包")?;
-      None
-    }
-    BuildFetch::Git {
-      repo,
-      reference,
-      token,
-    } => Some(
-      clone(
-        docker,
-        &job.service,
-        repo,
-        reference,
-        token.as_ref().map(|t| t.0.as_str()),
-        &src,
-        ctx,
-      )
-      .await?,
-    ),
-  };
+  let commit =
+    fetch_code(docker, core_url, &job.service, &job.fetch, work, ctx)
+      .await?;
 
   let context = match &job.path {
     Some(p) => src.join(relative(p)?),
@@ -163,6 +125,61 @@ async fn build_in(
     skipped: false,
     commit,
   })
+}
+
+/// 把代码取到 `<work>/src`：下载控制面上的代码包，或在容器里 git clone。
+/// 返回 git 来源的 commit。
+pub async fn fetch_code(
+  docker: &Docker,
+  core_url: &str,
+  name: &str,
+  fetch: &BuildFetch,
+  work: &Path,
+  ctx: &Ctx,
+) -> Result<Option<String>, ApiError> {
+  let src = work.join("src");
+  std::fs::create_dir_all(&src).map_err(io_err(&src))?;
+  let commit = match fetch {
+    BuildFetch::Upload { sha256, token } => {
+      let archive = work.join("source.tar.gz");
+      download(core_url, sha256, &token.0, &archive, ctx).await?;
+      ctx.say("解压代码");
+      // 包里的修改时间都是 0（为了内容相同时 sha256 相同），解压时用当前时间：
+      // BuildKit 按大小和修改时间判断构建上下文里的文件变没变，
+      // 改了内容但大小没变的文件会被当成没变。
+      Cmd::new("tar")
+        .args([
+          "-xzf",
+          &archive.to_string_lossy(),
+          "--no-same-owner",
+          "-m",
+        ])
+        .arg("-C")
+        .arg(src.to_string_lossy().to_string())
+        .timeout(Duration::from_secs(300))
+        .run(ctx)
+        .await?
+        .check("解压代码包")?;
+      None
+    }
+    BuildFetch::Git {
+      repo,
+      reference,
+      token,
+    } => Some(
+      clone(
+        docker,
+        name,
+        repo,
+        reference,
+        token.as_ref().map(|t| t.0.as_str()),
+        &src,
+        ctx,
+      )
+      .await?,
+    ),
+  };
+  Ok(commit)
 }
 
 /// 构建日志已经实时打出来了，错误里只留 BuildKit 报的 ERROR 行。
@@ -232,7 +249,7 @@ fn dockerfile(
 }
 
 /// 只接受代码里的相对路径，不能跳出去。
-fn relative(p: &str) -> Result<PathBuf, ApiError> {
+pub(crate) fn relative(p: &str) -> Result<PathBuf, ApiError> {
   let path = PathBuf::from(p.trim_start_matches("./"));
   let ok = !p.is_empty()
     && path
@@ -404,7 +421,7 @@ rm -rf .git"#;
   Ok(commit)
 }
 
-async fn remove_container(docker: &Docker, name: &str) {
+pub(crate) async fn remove_container(docker: &Docker, name: &str) {
   let _ = docker
     .cmd()
     .args(["rm", "-f", name])
@@ -454,13 +471,15 @@ async fn prune_old_images(
   }
 }
 
-fn random_suffix() -> String {
+pub(crate) fn random_suffix() -> String {
   let mut bytes = [0u8; 4];
   getrandom::fill(&mut bytes).expect("随机数不可用");
   hex::encode(bytes)
 }
 
-fn to_value<T: serde::Serialize>(v: T) -> Result<Value, ApiError> {
+pub(crate) fn to_value<T: serde::Serialize>(
+  v: T,
+) -> Result<Value, ApiError> {
   serde_json::to_value(v)
     .map_err(|e| ApiError::internal(e.to_string()))
 }

@@ -144,6 +144,17 @@ CREATE TABLE sessions (
   expires_at INTEGER NOT NULL
 );
 "#,
+  // 绑定到边缘应用（Workers / Pages）的自定义域名，记下绑在厂商哪个项目上，解绑时用。
+  r#"
+CREATE TABLE edge_domains (
+  hostname TEXT PRIMARY KEY,
+  app TEXT NOT NULL,
+  account TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  project TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+"#,
 ];
 
 #[derive(Clone)]
@@ -551,6 +562,67 @@ pub fn tunnels(
     })
     .map_err(sql_err)?;
   rows.collect::<Result<_, _>>().map_err(sql_err)
+}
+
+/// 已绑定到边缘应用的自定义域名。
+#[derive(
+  Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize,
+)]
+pub struct EdgeDomainRow {
+  pub hostname: String,
+  pub app: String,
+  pub account: String,
+  /// `worker` / `pages`
+  pub kind: String,
+  pub project: String,
+}
+
+pub fn edge_domains(
+  c: &Connection,
+) -> Result<Vec<EdgeDomainRow>, ApiError> {
+  let mut stmt = c
+    .prepare(
+      "SELECT hostname, app, account, kind, project FROM edge_domains ORDER BY hostname",
+    )
+    .map_err(sql_err)?;
+  let rows = stmt
+    .query_map([], |r| {
+      Ok(EdgeDomainRow {
+        hostname: r.get(0)?,
+        app: r.get(1)?,
+        account: r.get(2)?,
+        kind: r.get(3)?,
+        project: r.get(4)?,
+      })
+    })
+    .map_err(sql_err)?;
+  rows.collect::<Result<_, _>>().map_err(sql_err)
+}
+
+pub fn put_edge_domain(
+  c: &Connection,
+  row: &EdgeDomainRow,
+) -> Result<(), ApiError> {
+  c.execute(
+    "INSERT INTO edge_domains (hostname, app, account, kind, project, created_at)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+     ON CONFLICT (hostname) DO UPDATE SET app = ?2, account = ?3, kind = ?4, project = ?5",
+    params![row.hostname, row.app, row.account, row.kind, row.project, now_ms()],
+  )
+  .map_err(sql_err)?;
+  Ok(())
+}
+
+pub fn delete_edge_domain(
+  c: &Connection,
+  hostname: &str,
+) -> Result<(), ApiError> {
+  c.execute(
+    "DELETE FROM edge_domains WHERE hostname = ?1",
+    params![hostname],
+  )
+  .map_err(sql_err)?;
+  Ok(())
 }
 
 /// 每个服务最近一次部署所在的服务器。

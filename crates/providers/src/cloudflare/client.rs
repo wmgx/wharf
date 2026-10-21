@@ -28,6 +28,27 @@ pub struct Zone {
   pub name: String,
 }
 
+/// `errors[].message` of a Cloudflare error body, shortened.
+fn cf_errors(body: &str) -> Option<String> {
+  let data: Value = serde_json::from_str(body).ok()?;
+  let messages: Vec<String> = data["errors"]
+    .as_array()?
+    .iter()
+    .filter_map(|e| {
+      let msg = e["message"].as_str()?;
+      Some(match e["code"].as_i64() {
+        Some(c) => format!("{msg} [{c}]"),
+        None => msg.to_string(),
+      })
+    })
+    .collect();
+  if messages.is_empty() {
+    return None;
+  }
+  let joined = messages.join("；");
+  Some(joined.chars().take(400).collect())
+}
+
 fn malformed(detail: &str) -> ProviderError {
   ProviderError::new(
     code::PROVIDER_RESPONSE,
@@ -94,23 +115,8 @@ impl CloudflareClient {
       if let Some(body) = body {
         req = req.json(body);
       }
-      let response = req.send().await.map_err(|e| {
-        let timed_out = e.is_timeout();
-        let detail =
-          redact(&e.without_url().to_string(), &self.token);
-        if timed_out {
-          ProviderError::new(code::TIMEOUT, "请求 Cloudflare 超时")
-            .retryable()
-            .with_detail(detail)
-        } else {
-          ProviderError::new(
-            code::PROVIDER_UNAVAILABLE,
-            "连不上 Cloudflare",
-          )
-          .retryable()
-          .with_detail(detail)
-        }
-      })?;
+      let response =
+        req.send().await.map_err(|e| self.send_error(e))?;
       let status = response.status();
       if method == Method::GET
         && attempt < 2
@@ -129,34 +135,8 @@ impl CloudflareClient {
         continue;
       }
       if !status.is_success() {
-        let detail =
-          format!("HTTP {} on {method} {path}", status.as_u16());
         return Err(
-          match status.as_u16() {
-            401 | 403 => ProviderError::new(
-              code::AUTH_FAILED,
-              "Cloudflare 拒绝了这个 token（无效或权限不够）",
-            ),
-            404 => ProviderError::new(
-              code::PROVIDER_REJECTED,
-              "Cloudflare 上找不到这个对象",
-            ),
-            429 => ProviderError::new(
-              code::RATE_LIMITED,
-              "Cloudflare 请求太频繁，被限流",
-            )
-            .retryable(),
-            500..=599 => ProviderError::new(
-              code::PROVIDER_UNAVAILABLE,
-              "Cloudflare 暂时不可用",
-            )
-            .retryable(),
-            _ => ProviderError::new(
-              code::PROVIDER_REJECTED,
-              "Cloudflare 拒绝了这个请求",
-            ),
-          }
-          .with_detail(detail),
+          self.http_error(status, &method, path, response).await,
         );
       }
       let data: Value = response
@@ -174,6 +154,159 @@ impl CloudflareClient {
       }
       return Ok(data);
     }
+  }
+
+  /// Map a non-2xx response. Cloudflare's own error messages (eg. a
+  /// script syntax error) are appended: they never contain the token.
+  async fn http_error(
+    &self,
+    status: StatusCode,
+    method: &Method,
+    path: &str,
+    response: reqwest::Response,
+  ) -> ProviderError {
+    let detail =
+      format!("HTTP {} on {method} {path}", status.as_u16());
+    let body = response.text().await.unwrap_or_default();
+    let reason = cf_errors(&body)
+      .map(|r| format!("（Cloudflare：{}）", redact(&r, &self.token)))
+      .unwrap_or_default();
+    match status.as_u16() {
+      401 | 403 => ProviderError::new(
+        code::AUTH_FAILED,
+        format!(
+          "Cloudflare 拒绝了这个 token（无效或权限不够）{reason}"
+        ),
+      ),
+      404 => ProviderError::new(
+        code::PROVIDER_REJECTED,
+        format!("Cloudflare 上找不到这个对象{reason}"),
+      ),
+      429 => ProviderError::new(
+        code::RATE_LIMITED,
+        "Cloudflare 请求太频繁，被限流",
+      )
+      .retryable(),
+      500..=599 => ProviderError::new(
+        code::PROVIDER_UNAVAILABLE,
+        format!("Cloudflare 暂时不可用{reason}"),
+      )
+      .retryable(),
+      _ => ProviderError::new(
+        code::PROVIDER_REJECTED,
+        format!("Cloudflare 拒绝了这个请求{reason}"),
+      ),
+    }
+    .with_detail(detail)
+  }
+
+  fn send_error(&self, e: reqwest::Error) -> ProviderError {
+    let timed_out = e.is_timeout();
+    let detail = redact(&e.without_url().to_string(), &self.token);
+    if timed_out {
+      ProviderError::new(code::TIMEOUT, "请求 Cloudflare 超时")
+        .retryable()
+        .with_detail(detail)
+    } else {
+      ProviderError::new(
+        code::PROVIDER_UNAVAILABLE,
+        "连不上 Cloudflare",
+      )
+      .retryable()
+      .with_detail(detail)
+    }
+  }
+
+  /// GET a non-JSON body (eg. a Worker script).
+  pub async fn get_text(&self, path: &str) -> Result<String> {
+    let response = self
+      .client
+      .get(self.endpoint(path))
+      .bearer_auth(&self.token)
+      .send()
+      .await
+      .map_err(|e| self.send_error(e))?;
+    let status = response.status();
+    if !status.is_success() {
+      return Err(
+        self.http_error(status, &Method::GET, path, response).await,
+      );
+    }
+    response
+      .text()
+      .await
+      .map_err(|e| malformed(&e.without_url().to_string()))
+  }
+
+  /// `multipart/form-data` upload. Parts: (name, filename, content type, body).
+  pub async fn send_multipart(
+    &self,
+    method: Method,
+    path: &str,
+    parts: &[(&str, &str, &str, &[u8])],
+  ) -> Result<Value> {
+    // 边界取内容的哈希，不会和内容本身冲突。
+    let boundary = {
+      use sha2::Digest;
+      let mut h = sha2::Sha256::new();
+      parts.iter().for_each(|p| h.update(p.3));
+      format!("wharf-{}", &hex::encode(h.finalize())[..32])
+    };
+    let mut body = Vec::new();
+    for (name, filename, content_type, data) in parts {
+      body.extend_from_slice(
+        format!(
+          "--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"; filename=\"{filename}\"\r\nContent-Type: {content_type}\r\n\r\n"
+        )
+        .as_bytes(),
+      );
+      body.extend_from_slice(data);
+      body.extend_from_slice(b"\r\n");
+    }
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    let response = self
+      .client
+      .request(method.clone(), self.endpoint(path))
+      .bearer_auth(&self.token)
+      .header(
+        "content-type",
+        format!("multipart/form-data; boundary={boundary}"),
+      )
+      .timeout(Duration::from_secs(120))
+      .body(body)
+      .send()
+      .await
+      .map_err(|e| self.send_error(e))?;
+    let status = response.status();
+    if !status.is_success() {
+      return Err(
+        self.http_error(status, &method, path, response).await,
+      );
+    }
+    let data: Value = response
+      .json()
+      .await
+      .map_err(|e| malformed(&e.without_url().to_string()))?;
+    if data["success"] != true {
+      return Err(
+        ProviderError::new(
+          code::PROVIDER_REJECTED,
+          "Cloudflare 拒绝了这个操作",
+        )
+        .with_detail(format!("success=false on {method} {path}")),
+      );
+    }
+    Ok(data)
+  }
+
+  /// JSON request for the edge module (same rules as the others).
+  pub async fn call(
+    &self,
+    method: Method,
+    path: &str,
+    body: Option<&Value>,
+  ) -> Result<Value> {
+    self.request(method, path, body).await
   }
 
   /// True if the error is a provider 404 (`GET` of a missing object).
@@ -396,6 +529,29 @@ impl CloudflareClient {
       (false, _, _) => Ok(accounts),
       (true, Err(e), _) | (true, _, Err(e)) => Err(e),
       (true, Ok(_), Ok(_)) => Ok(accounts),
+    }
+  }
+
+  /// token 只能看到一个账户时用它（隧道、Workers 都建在账户下）。
+  /// `permission`：看不到账户时提示需要的权限。
+  pub async fn single_account(
+    &self,
+    permission: &str,
+  ) -> Result<String> {
+    let mut accounts = self.list_accounts().await?;
+    match accounts.len() {
+      1 => Ok(accounts.remove(0).0),
+      0 => Err(ProviderError::invalid(format!(
+        "这个 token 看不到任何 Cloudflare 账户。需要的权限：{permission}"
+      ))),
+      _ => Err(ProviderError::invalid(format!(
+        "这个 token 能看到多个 Cloudflare 账户（{}），请换一个只属于一个账户的 token",
+        accounts
+          .iter()
+          .map(|(_, n)| n.as_str())
+          .collect::<Vec<_>>()
+          .join("、")
+      ))),
     }
   }
 

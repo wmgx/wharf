@@ -1,4 +1,4 @@
-import { KeyRoundIcon, PlusIcon, RefreshCwIcon, Trash2Icon } from "lucide-react";
+import { CloudIcon, KeyRoundIcon, PlusIcon, RefreshCwIcon, Trash2Icon } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { api, usePoll } from "@/api";
@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import type { AccountView } from "@/types";
+import { EdgeImport } from "./edge-import";
 
 /** 厂商账号：DNS 记录和 Cloudflare 隧道都用它。token 只存在控制面，页面上只显示打码后的值。 */
 export function Accounts() {
@@ -16,6 +17,7 @@ export function Accounts() {
   const [adding, setAdding] = useState(false);
   const [removing, setRemoving] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [importing, setImporting] = useState<string | null>(null);
 
   const rediscover = async (name: string) => {
     setBusy(name);
@@ -45,7 +47,7 @@ export function Accounts() {
     <>
       <PageHeader
         title="厂商账号"
-        description="管理域名解析和 Cloudflare 隧道用的账号。token 只保存在控制面，页面上看不到原文。"
+        description="管理域名解析、Cloudflare 隧道和 Workers / Pages 用的账号。token 只保存在控制面，页面上看不到原文。"
         actions={
           <Button variant="outline" onClick={() => setAdding(true)}>
             <PlusIcon />
@@ -91,7 +93,13 @@ export function Accounts() {
               ))}
               <div className="mt-auto flex items-center gap-1 text-xs text-muted-foreground">
                 <span>更新于 {ago(a.updated_at)}</span>
-                <Button variant="ghost" size="xs" className="ml-auto" disabled={busy === a.name} onClick={() => rediscover(a.name)}>
+                {a.kind === "cloudflare" && (
+                  <Button variant="ghost" size="xs" className="ml-auto" onClick={() => setImporting(a.name)}>
+                    <CloudIcon />
+                    Workers / Pages
+                  </Button>
+                )}
+                <Button variant="ghost" size="xs" className={a.kind === "cloudflare" ? undefined : "ml-auto"} disabled={busy === a.name} onClick={() => rediscover(a.name)}>
                   <RefreshCwIcon className={busy === a.name ? "animate-spin" : undefined} />
                   重新发现
                 </Button>
@@ -104,6 +112,7 @@ export function Accounts() {
           ))}
         </div>
       )}
+      {importing && <EdgeImport account={importing} onClose={() => setImporting(null)} />}
       {adding && (
         <AddAccount
           taken={(data ?? []).map((a) => a.name)}

@@ -46,6 +46,8 @@ pub enum Layer {
   Gateway,
   Dns,
   Tunnel,
+  /// 边缘应用（Workers / Pages）：发布、绑定自定义域名。
+  Edge,
 }
 
 #[derive(

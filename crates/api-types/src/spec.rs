@@ -310,17 +310,98 @@ impl GatewayTls {
 pub struct RouteSpec {
   /// 例如 `blog.example.com`。
   pub hostname: String,
-  /// 目标服务。
+  /// 目标服务或边缘应用。
   pub service: String,
-  /// 目标端口名。服务只有一个端口时可以不填。
+  /// 目标端口名。服务只有一个端口时可以不填；边缘应用不填。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub port: Option<String>,
-  /// 入口网关。不填则用默认网关。
+  /// 入口网关。不填则用默认网关；边缘应用的域名不经过网关，不填。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub gateway: Option<String>,
   /// 登录保护（P3）。
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub auth: bool,
+}
+
+/// 边缘应用的种类。
+#[derive(
+  Debug,
+  Clone,
+  Copy,
+  PartialEq,
+  Eq,
+  Serialize,
+  Deserialize,
+  JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum EdgeKind {
+  /// Cloudflare Workers。
+  Worker,
+  /// Cloudflare Pages。
+  Pages,
+}
+
+impl EdgeKind {
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::Worker => "worker",
+      Self::Pages => "pages",
+    }
+  }
+}
+
+/// 边缘应用的代码来源。和服务的构建来源一样，代码来自本机目录上传或 git。
+#[derive(
+  Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(deny_unknown_fields)]
+pub struct EdgeSource {
+  /// 本机目录上传到控制面的代码包 sha256（`wharf edge deploy` 自动填）。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub upload: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub git: Option<GitSource>,
+  /// 代码里的子目录。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub path: Option<String>,
+  /// worker：单文件脚本（相对代码目录）。直接调用厂商接口上传，
+  /// 保留面板里配置的变量和绑定。不填时按 wrangler 项目发布。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub script: Option<String>,
+  /// pages：构建命令，例如 `npm run build`。不填就是静态目录。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub build: Option<String>,
+  /// pages：要发布的目录（相对代码目录）。不填时有构建命令用 `dist`，否则用代码目录本身。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub output: Option<String>,
+}
+
+/// 边缘应用：Cloudflare Workers / Pages。没有端口、数据卷、迁移、备份。
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(deny_unknown_fields)]
+pub struct EdgeAppSpec {
+  /// 厂商账号。
+  pub account: String,
+  pub kind: EdgeKind,
+  /// 厂商那边的脚本名 / 项目名。不填时等于边缘应用的名字。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub project: Option<String>,
+  /// 不填表示只纳管：Wharf 显示状态、管域名、回滚，不发布代码。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub source: Option<EdgeSource>,
+  /// 在哪台服务器上执行 wrangler（构建 Pages、发布 wrangler 项目）。不填时自动选，优先海外。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub builder: Option<String>,
+}
+
+impl EdgeAppSpec {
+  /// 厂商那边的名字。
+  pub fn project_name<'a>(&'a self, name: &'a str) -> &'a str {
+    self.project.as_deref().unwrap_or(name)
+  }
 }
 
 /// 意图文件 fleet.toml 的全部内容。plan 时作为完整期望状态：
@@ -337,6 +418,8 @@ pub struct Fleet {
   pub services: BTreeMap<String, ServiceSpec>,
   #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
   pub gateways: BTreeMap<String, GatewaySpec>,
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub edge_apps: BTreeMap<String, EdgeAppSpec>,
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub routes: Vec<RouteSpec>,
 }
@@ -371,5 +454,13 @@ pub enum Change {
   },
   RemoveRoute {
     hostname: String,
+  },
+  UpsertEdgeApp {
+    name: String,
+    spec: EdgeAppSpec,
+  },
+  /// 只是不再纳管，不删除厂商那边的 Worker / Pages 项目。
+  RemoveEdgeApp {
+    name: String,
   },
 }

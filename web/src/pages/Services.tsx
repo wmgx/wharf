@@ -8,6 +8,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useStatus } from "@/status";
 import type { ServiceView } from "@/types";
+import { EdgeList } from "./edge";
 import { NewService } from "./NewService";
 
 export function Services() {
@@ -32,7 +33,7 @@ export function Services() {
       {!status ? (
         <Skeleton className="h-48 rounded-xl" />
       ) : status.services.length === 0 ? (
-        <Empty>还没有服务。点右上角新建一个。</Empty>
+        !status.edge_apps?.length && <Empty>还没有服务。点右上角新建一个。</Empty>
       ) : (
         <div className="overflow-hidden rounded-xl border bg-card shadow-xs">
           <Table>
@@ -78,6 +79,7 @@ export function Services() {
           </Table>
         </div>
       )}
+      <EdgeList />
       <NewService
         open={creating}
         onClose={() => {

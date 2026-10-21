@@ -117,6 +117,25 @@ pub fn router(state: Arc<AppState>) -> Router {
       axum::routing::delete(remove_account),
     )
     .route("/api/accounts/{name}/discover", post(rediscover_account))
+    .route(
+      "/api/accounts/{name}/edge",
+      get(crate::edge_api::discover),
+    )
+    .route("/api/edge", get(crate::edge_api::list))
+    .route("/api/edge/{name}", get(crate::edge_api::show))
+    .route("/api/edge/{name}/script", get(crate::edge_api::script))
+    .route(
+      "/api/edge/{name}/versions",
+      get(crate::edge_api::versions),
+    )
+    .route(
+      "/api/edge/{name}/rollback",
+      post(crate::edge_api::rollback),
+    )
+    .route(
+      "/api/edge/{name}/redeploy",
+      post(crate::edge_api::redeploy),
+    )
     .route("/api/secrets", get(list_secrets))
     .route(
       "/api/secrets/{name}",

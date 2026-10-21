@@ -165,7 +165,10 @@ fn preview(
 }
 
 /// 打包上传，返回 sha256。控制面已有同样的包就不再上传。
-async fn upload(c: &Client, dir: &Path) -> CliResult<String> {
+pub(crate) async fn upload(
+  c: &Client,
+  dir: &Path,
+) -> CliResult<String> {
   let packed = pack::pack(dir)?;
   eprintln!(
     "打包 {} 个文件，{} KiB（{}）",

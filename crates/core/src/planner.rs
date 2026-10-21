@@ -17,7 +17,7 @@ use wharf_api_types::{
   plan::{
     Action, Layer, Plan, PlanItem, PlanRequest, PlanStatus, Risk,
   },
-  spec::{BuildSource, GatewayKind, RouteSpec, Source},
+  spec::{BuildSource, EdgeKind, GatewayKind, RouteSpec, Source},
 };
 use wharf_providers::{DnsRecordSpec, DnsRecordType, RemoteRecord};
 
@@ -27,8 +27,8 @@ use crate::{
   snapshot::{self, Snapshot},
   state::AppState,
   world::{
-    KIND_GATEWAY, KIND_ROUTE, KIND_SERVER, KIND_SERVICE, World,
-    gateway_project, new_id,
+    KIND_EDGE, KIND_GATEWAY, KIND_ROUTE, KIND_SERVER, KIND_SERVICE,
+    World, gateway_project, new_id,
   },
 };
 
@@ -130,6 +130,25 @@ pub enum Step {
     server: String,
     service: String,
   },
+  /// 发布边缘应用的代码。
+  EdgeDeploy {
+    app: String,
+  },
+  /// 把自定义域名绑定到边缘应用。`takeover`：覆盖已有的 DNS 记录（Workers）。
+  EdgeAttach {
+    hostname: String,
+    app: String,
+    takeover: bool,
+  },
+  /// 按记录解绑自定义域名。
+  EdgeDetach {
+    domain: db::EdgeDomainRow,
+  },
+  /// 边缘应用回滚到厂商那边的旧版本。单独发起，不来自计划。
+  EdgeRollback {
+    app: String,
+    version: String,
+  },
 }
 
 impl Step {
@@ -138,17 +157,18 @@ impl Step {
   /// 迁移时旧服务器上的容器在"下线服务"这一步才删除，网关切到新地址之前旧容器一直在。
   fn order(&self) -> u8 {
     match self {
-      Self::DnsDelete { .. } => 0,
+      Self::DnsDelete { .. } | Self::EdgeDetach { .. } => 0,
       Self::EnsureDirs { .. } => 1,
       Self::VolumeSync { .. } => 2,
-      Self::ServiceUp { .. } => 3,
+      Self::ServiceUp { .. } | Self::EdgeDeploy { .. } => 3,
       Self::GatewaySync { .. } => 4,
-      Self::DnsUpsert { .. } => 5,
+      Self::DnsUpsert { .. } | Self::EdgeAttach { .. } => 5,
       Self::GatewayDown { .. } => 6,
       Self::ServiceDown { .. } => 7,
       Self::Backup { .. }
       | Self::Restore { .. }
-      | Self::Rebuild { .. } => 8,
+      | Self::Rebuild { .. }
+      | Self::EdgeRollback { .. } => 8,
     }
   }
 }
@@ -168,15 +188,15 @@ pub struct Planned {
 }
 
 #[derive(Default)]
-struct Builder {
+pub(crate) struct Builder {
   items: Vec<PlanItem>,
   steps: Vec<StepPlan>,
-  warnings: Vec<String>,
+  pub(crate) warnings: Vec<String>,
 }
 
 impl Builder {
   #[allow(clippy::too_many_arguments)]
-  fn item(
+  pub(crate) fn item(
     &mut self,
     address: String,
     layer: Layer,
@@ -200,7 +220,7 @@ impl Builder {
     id
   }
 
-  fn step(
+  pub(crate) fn step(
     &mut self,
     items: Vec<u32>,
     title: impl Into<String>,
@@ -280,6 +300,8 @@ pub async fn make_plan(
   )?;
   gateway_items(&mut b, &snap, &current, &desired, &net, &status)?;
   dns_items(&mut b, &snap, &desired, &net).await?;
+  crate::edge_plan::edge_items(&mut b, &snap, &current, &desired)
+    .await?;
 
   b.steps.sort_by_key(|s| s.step.order());
   let plan_id = new_id("p");
@@ -360,6 +382,7 @@ fn spec_json(world: &World, kind: &str, name: &str) -> Option<Value> {
       world.gateways.get(name).map(|r| to_json(&r.spec))
     }
     KIND_ROUTE => world.routes.get(name).map(|r| to_json(&r.spec)),
+    KIND_EDGE => world.edge_apps.get(name).map(|r| to_json(&r.spec)),
     _ => None,
   }
 }
@@ -390,6 +413,9 @@ fn config_items(
       }
       (KIND_GATEWAY, Action::Delete) => {
         (Risk::Disruptive, "删除网关".to_string())
+      }
+      (KIND_EDGE, Action::Delete) => {
+        (Risk::Safe, "不再纳管（厂商那边的项目保留）".to_string())
       }
       (KIND_ROUTE, Action::Delete) => {
         (Risk::Disruptive, "删除路由，域名将无法访问".to_string())
@@ -1022,13 +1048,28 @@ async fn dns_items(
   }
 
   for (host, route) in &desired.routes {
+    // Workers 的自定义域名由厂商连同 DNS 一起管，见 edge_plan。
+    let edge = desired.edge_apps.get(&route.spec.service);
+    if edge.is_some_and(|a| a.spec.kind == EdgeKind::Worker) {
+      continue;
+    }
     let Some((account, _zone)) = snap.account_for(host) else {
       b.warnings.push(format!(
         "没有厂商账号管理 {host} 所在的域名，DNS 需要自己配置（或执行 wharf account add）"
       ));
       continue;
     };
-    let spec = desired_record(snap, desired, net, host)?;
+    let spec = match edge {
+      Some(app) => {
+        crate::edge_plan::pages_record(
+          snap,
+          &route.spec.service,
+          &app.spec,
+        )
+        .await?
+      }
+      None => desired_record(snap, desired, net, host)?,
+    };
     let provider = snapshot::dns_provider(account)?;
     let want = spec.to_provider();
     if spec.content != TUNNEL_PENDING {

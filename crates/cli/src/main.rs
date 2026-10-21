@@ -10,6 +10,7 @@ use clap::{Args, Parser, Subcommand};
 mod client;
 mod commands;
 mod deploy;
+mod edge;
 mod fleet;
 mod pack;
 mod print;
@@ -90,6 +91,9 @@ pub enum Command {
   /// 厂商账号（Cloudflare）。
   #[command(subcommand)]
   Account(AccountCmd),
+  /// 边缘应用（Cloudflare Workers / Pages）：导入、发布、版本和回滚。
+  #[command(subcommand)]
+  Edge(edge::EdgeCmd),
   /// 密钥。服务的环境变量里用 `[[NAME]]` 引用。
   #[command(subcommand)]
   Secret(SecretCmd),
@@ -363,6 +367,7 @@ pub enum RouteCmd {
   /// 新增或修改路由。
   Add {
     hostname: String,
+    /// 服务或边缘应用（Workers / Pages）的名字。
     #[arg(long)]
     service: String,
     /// 端口名，服务只有一个端口时可以不填。

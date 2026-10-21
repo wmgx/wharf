@@ -592,6 +592,27 @@ async fn run_step(
       )
       .await?;
     }
+    Step::EdgeDeploy { app } => {
+      crate::edge::deploy(state, &snap, app, &progress, cancel)
+        .await?;
+    }
+    Step::EdgeAttach {
+      hostname,
+      app,
+      takeover,
+    } => {
+      crate::edge::attach_domain(
+        state, &snap, hostname, app, *takeover,
+      )
+      .await?;
+    }
+    Step::EdgeDetach { domain } => {
+      crate::edge::detach_domain(state, &snap, domain).await?;
+    }
+    Step::EdgeRollback { app, version } => {
+      crate::edge::rollback(state, &snap, app, version, &progress)
+        .await?;
+    }
     Step::ServiceDown { server, service } => {
       state
         .hub

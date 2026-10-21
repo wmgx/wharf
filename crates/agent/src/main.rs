@@ -15,6 +15,7 @@ use clap::{Parser, Subcommand};
 mod build;
 mod conn;
 mod docker;
+mod edge;
 mod exec;
 mod identity;
 mod ops;

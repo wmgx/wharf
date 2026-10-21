@@ -6,8 +6,8 @@ use wharf_api_types::{
   agent::ProjectState,
   spec::{Fleet, GatewayKind, GatewayTls},
   view::{
-    GatewayView, LiveState, RouteView, ServerView, ServiceView,
-    Status,
+    EdgeAppView, EdgeLive, GatewayView, LiveState, RouteView,
+    ServerView, ServiceView, Status,
   },
 };
 
@@ -307,6 +307,25 @@ pub async fn status(
       ));
     }
   }
+  let edge_apps: Vec<EdgeAppView> = snap
+    .world
+    .edge_apps
+    .keys()
+    .filter_map(|n| edge_view(state, &snap, n))
+    .collect();
+  for app in &edge_apps {
+    match &app.live {
+      Some(EdgeLive { error: Some(e), .. }) => problems
+        .push(format!("边缘应用 {} 读取状态失败：{e}", app.name)),
+      Some(EdgeLive { exists: false, .. })
+        if app.spec.source.is_none() =>
+      {
+        problems
+          .push(format!("边缘应用 {} 在厂商那边不存在", app.name))
+      }
+      _ => {}
+    }
+  }
   let routes = snap
     .world
     .routes
@@ -316,9 +335,24 @@ pub async fn status(
   Ok(Status {
     servers,
     services,
+    edge_apps,
     gateways,
     routes,
     problems,
+  })
+}
+
+pub fn edge_view(
+  state: &AppState,
+  snap: &Snapshot,
+  name: &str,
+) -> Option<EdgeAppView> {
+  let row = snap.world.edge_apps.get(name)?;
+  Some(EdgeAppView {
+    name: name.to_string(),
+    spec: row.spec.clone(),
+    version: row.version,
+    live: state.edge_live.get(name),
   })
 }
 
@@ -336,6 +370,11 @@ pub fn export(world: &World) -> Fleet {
       .collect(),
     gateways: world
       .gateways
+      .iter()
+      .map(|(n, r)| (n.clone(), r.spec.clone()))
+      .collect(),
+    edge_apps: world
+      .edge_apps
       .iter()
       .map(|(n, r)| (n.clone(), r.spec.clone()))
       .collect(),

@@ -21,4 +21,6 @@ pub struct AppState {
   pub downloads: crate::uploads::Downloads,
   /// 启动时间：没有管理员账号时，启动后 30 分钟内可以在页面上设置。
   pub started: std::time::Instant,
+  /// 边缘应用在厂商那边的现状。
+  pub edge_live: crate::edge::LiveCache,
 }

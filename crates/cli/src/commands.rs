@@ -41,7 +41,7 @@ pub async fn run(cli: Cli) -> CliResult<()> {
 }
 
 /// 输出：JSON 模式原样输出，否则用 `human`。
-fn out<T: serde::Serialize>(
+pub(crate) fn out<T: serde::Serialize>(
   j: bool,
   value: &T,
   human: impl FnOnce(&T),
@@ -53,7 +53,7 @@ fn out<T: serde::Serialize>(
   }
 }
 
-fn pretty<T: serde::Serialize>(value: &T) {
+pub(crate) fn pretty<T: serde::Serialize>(value: &T) {
   print::json(value);
 }
 
@@ -113,6 +113,7 @@ async fn dispatch(
     Command::Account(cmd) => account(c, cmd, j).await,
     Command::Secret(cmd) => secret(c, cmd, j).await,
     Command::Backup(cmd) => backup(c, cmd, j).await,
+    Command::Edge(cmd) => crate::edge::edge(c, cmd, j).await,
     Command::Plan { file, apply } => {
       let req = match file {
         Some(path) => PlanRequest {
@@ -385,7 +386,7 @@ async fn run_cmd(c: &Client, cmd: RunCmd, j: bool) -> CliResult<()> {
   }
 }
 
-async fn changes(
+pub(crate) async fn changes(
   c: &Client,
   changes: Vec<Change>,
   flags: ApplyFlags,
@@ -1226,7 +1227,7 @@ async fn backup(
 }
 
 /// 单独发起的执行（备份、恢复）：等它结束，或者只给出 run_id。
-async fn finish_task(
+pub(crate) async fn finish_task(
   c: &Client,
   run_id: &str,
   wait: bool,

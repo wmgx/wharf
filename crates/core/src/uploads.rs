@@ -87,6 +87,48 @@ pub fn exists(state: &AppState, sha256: &str) -> bool {
   file(state, sha256).is_file()
 }
 
+/// 从代码包里读一个文本文件（单文件 Worker），最大 10 MiB。
+pub fn read_file(
+  state: &AppState,
+  sha256: &str,
+  path: &str,
+) -> Result<String, ApiError> {
+  use std::io::Read;
+  const MAX: u64 = 10 * 1024 * 1024;
+  let archive = file(state, sha256);
+  let f = std::fs::File::open(&archive).map_err(|_| {
+    ApiError::invalid(format!(
+      "代码包 {} 不在控制面上",
+      &sha256[..12]
+    ))
+    .with_hint("重新执行 wharf edge deploy 上传")
+  })?;
+  let want = path.trim_start_matches("./");
+  let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(f));
+  let entries = tar.entries().map_err(|e| io_error(&archive, e))?;
+  for entry in entries {
+    let entry = entry.map_err(|e| io_error(&archive, e))?;
+    let name = entry
+      .path()
+      .map_err(|e| io_error(&archive, e))?
+      .to_string_lossy()
+      .trim_start_matches("./")
+      .to_string();
+    if name != want {
+      continue;
+    }
+    if entry.size() > MAX {
+      return Err(ApiError::invalid(format!("{want} 超过 10 MiB")));
+    }
+    let mut text = String::new();
+    entry.take(MAX).read_to_string(&mut text).map_err(|_| {
+      ApiError::invalid(format!("{want} 不是 UTF-8 文本"))
+    })?;
+    return Ok(text);
+  }
+  Err(ApiError::invalid(format!("代码包里没有 {want}")))
+}
+
 /// `GET /api/uploads/{sha256}`：CLI 上传前先问，已有就不用再传。
 pub async fn show(
   State(s): State<Arc<AppState>>,

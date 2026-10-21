@@ -144,6 +144,8 @@ pub enum AgentOp {
   Restic(ResticJob),
   /// 取代码、`docker build`，结果是 [BuildResult]。镜像已存在且不是 `force` 时跳过。
   Build(Box<BuildJob>),
+  /// 取代码，在 node 容器里执行 wrangler 发布 Worker / Pages，结果是 [EdgeBuildResult]。
+  EdgeBuild(Box<EdgeBuildJob>),
 }
 
 /// 一次性口令。Debug 输出时隐藏，防止被打进日志。
@@ -193,6 +195,10 @@ pub const RESTIC_IMAGE: &str = "restic/restic:0.18.1";
 pub const GIT_IMAGE: &str = "alpine/git:v2.49.1";
 /// 构建出的镜像都在这个名字下，只在本机，不拉取。
 pub const BUILD_IMAGE_PREFIX: &str = "wharf-build/";
+/// 执行 wrangler 的镜像。
+pub const NODE_IMAGE: &str = "node:22-bookworm-slim";
+/// 项目里没装 wrangler 时用这个版本。
+pub const WRANGLER_VERSION: &str = "4.148.0";
 pub const REST_SERVER_IMAGE: &str = "restic/rest-server:0.14.0";
 /// rest-server 在备份服务器内网地址上监听的端口。
 pub const REST_SERVER_PORT: u16 = 7710;
@@ -360,6 +366,41 @@ pub struct BuildJob {
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub force: bool,
   pub pull: PullPolicy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EdgeBuildJob {
+  /// 边缘应用名，用于容器名和日志。
+  pub app: String,
+  pub kind: crate::spec::EdgeKind,
+  /// 厂商那边的脚本名 / 项目名。
+  pub project: String,
+  pub fetch: BuildFetch,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub path: Option<String>,
+  /// pages：构建命令。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub build: Option<String>,
+  /// pages：发布目录。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub output: Option<String>,
+  /// pages：生产分支，发布到它才算正式版本。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub branch: Option<String>,
+  pub account_id: String,
+  /// 厂商 API token，以环境变量传给 wrangler。
+  pub api_token: OneTimeSecret,
+  /// 作为环境变量传入（NPM_CONFIG_REGISTRY 等）。
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub build_env: BTreeMap<String, String>,
+  pub pull: PullPolicy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EdgeBuildResult {
+  /// git 来源实际发布的 commit。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub commit: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

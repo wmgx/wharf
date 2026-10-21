@@ -13,7 +13,7 @@ use wharf_api_types::{
   agent::{
     AgentOp, BuildFetch, BuildJob, BuildResult, OneTimeSecret,
   },
-  spec::{BuildSource, ServiceSpec, Source},
+  spec::{BuildSource, GitSource, ServiceSpec, Source},
 };
 
 use crate::{
@@ -56,6 +56,56 @@ async fn last_commit(
   }))
 }
 
+/// 告诉 agent 怎么取代码：本机上传的包（签发一次性下载口令）或 git 仓库。
+/// `reference`：覆盖 git 的 ref（固定到某个 commit）。
+pub fn code_fetch(
+  state: &AppState,
+  snap: &Snapshot,
+  what: &str,
+  upload: Option<&String>,
+  git: Option<&GitSource>,
+  reference: Option<String>,
+) -> Result<BuildFetch, ApiError> {
+  match (upload, git) {
+    (Some(sha), _) => {
+      if !crate::uploads::exists(state, sha) {
+        return Err(
+          ApiError::invalid(format!(
+            "{what} 的代码包 {} 不在控制面上（可能已被清理）",
+            &sha[..12]
+          ))
+          .with_hint(
+            "重新执行 wharf deploy / wharf edge deploy 上传代码",
+          ),
+        );
+      }
+      Ok(BuildFetch::Upload {
+        sha256: sha.clone(),
+        token: OneTimeSecret(state.downloads.issue(sha)),
+      })
+    }
+    (None, Some(git)) => {
+      let token = match &git.token_secret {
+        Some(name) => Some(OneTimeSecret(
+          snap.secrets.get(name).cloned().ok_or_else(|| {
+            ApiError::invalid(format!("密钥 {name} 不存在"))
+              .suggest(format!("wharf secret set {name}"))
+          })?,
+        )),
+        None => None,
+      };
+      Ok(BuildFetch::Git {
+        repo: git.repo.clone(),
+        reference: reference.unwrap_or_else(|| git.reference.clone()),
+        token,
+      })
+    }
+    (None, None) => {
+      Err(ApiError::invalid(format!("{what} 没有代码来源")))
+    }
+  }
+}
+
 /// 构建来源的服务确保镜像在服务器上，返回 git 来源实际构建的 commit。
 /// 其他来源什么也不做。
 pub async fn ensure_image(
@@ -76,52 +126,17 @@ pub async fn ensure_image(
   } else {
     last_commit(state, service, build).await?
   };
-  let fetch = match (&build.upload, &build.git) {
-    (Some(sha), _) => {
-      if !crate::uploads::exists(state, sha) {
-        return Err(
-          ApiError::invalid(format!(
-            "服务 {service} 的代码包 {} 不在控制面上（可能已被清理）",
-            &sha[..12]
-          ))
-          .suggest(format!("wharf deploy <目录> --name {service}")),
-        );
-      }
-      BuildFetch::Upload {
-        sha256: sha.clone(),
-        token: OneTimeSecret(state.downloads.issue(sha)),
-      }
-    }
-    (None, Some(git)) => {
-      let token = match &git.token_secret {
-        Some(name) => Some(OneTimeSecret(
-          snap.secrets.get(name).cloned().ok_or_else(|| {
-            ApiError::invalid(format!("密钥 {name} 不存在"))
-              .suggest(format!("wharf secret set {name}"))
-          })?,
-        )),
-        None => None,
-      };
-      if let Some(commit) = &pinned {
-        progress(format!(
-          "固定到上次部署的 commit {}",
-          &commit[..12]
-        ));
-      }
-      BuildFetch::Git {
-        repo: git.repo.clone(),
-        reference: pinned
-          .clone()
-          .unwrap_or_else(|| git.reference.clone()),
-        token,
-      }
-    }
-    (None, None) => {
-      return Err(ApiError::invalid(format!(
-        "服务 {service} 没有代码来源"
-      )));
-    }
-  };
+  if let (Some(commit), Some(_)) = (&pinned, &build.git) {
+    progress(format!("固定到上次部署的 commit {}", &commit[..12]));
+  }
+  let fetch = code_fetch(
+    state,
+    snap,
+    &format!("服务 {service}"),
+    build.upload.as_ref(),
+    build.git.as_ref(),
+    pinned.clone(),
+  )?;
   let server_row = &snap.world.servers[server];
   let result: BuildResult = state
     .hub

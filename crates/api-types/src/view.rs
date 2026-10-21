@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
   agent::{AgentReport, ContainerInfo},
   spec::{
-    GatewaySpec, PrivateAddr, RouteSpec, ServerSettings, ServiceSpec,
+    EdgeAppSpec, EdgeKind, GatewaySpec, PrivateAddr, RouteSpec,
+    ServerSettings, ServiceSpec,
   },
 };
 
@@ -90,6 +91,75 @@ pub struct RouteView {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct EdgeAppView {
+  pub name: String,
+  pub spec: EdgeAppSpec,
+  pub version: u64,
+  /// 厂商那边的现状（定时刷新，详情页实时读取），查不到时为空。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub live: Option<EdgeLive>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct EdgeLive {
+  /// 厂商那边是否存在这个 Worker / Pages 项目。
+  pub exists: bool,
+  /// 默认访问地址，例如 `https://x.y.workers.dev`、`https://x.pages.dev`。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub url: Option<String>,
+  /// 最近一次发布。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub deployed_at: Option<String>,
+  /// 最近一次发布的来源，例如 `wrangler`、`dashboard`、`api`。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub deployed_by: Option<String>,
+  /// 读取失败时的原因。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub error: Option<String>,
+  pub checked_at: DateTime<Utc>,
+}
+
+/// 厂商账号下自动发现的 Worker / Pages 项目。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct EdgeProjectView {
+  pub kind: EdgeKind,
+  pub project: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub url: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub modified_at: Option<String>,
+  /// 已经导入时是边缘应用的名字。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub managed_as: Option<String>,
+}
+
+/// 边缘应用的一个版本（Workers 的 version / Pages 的 deployment）。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct EdgeVersionView {
+  pub id: String,
+  pub created_at: String,
+  /// `wrangler`、`dashboard`、`api` 等。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub source: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub message: Option<String>,
+  /// 正在线上的版本。
+  pub active: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub url: Option<String>,
+}
+
+/// `wharf edge pull`：Worker 当前线上的脚本。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct EdgeScript {
+  /// 文件名，例如 `worker.js`。
+  pub filename: String,
+  pub content: String,
+  /// ES Module 格式（`export default`）还是旧的 Service Worker 格式。
+  pub modules: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AccountView {
   pub name: String,
   pub kind: String,
@@ -137,6 +207,8 @@ pub struct RollbackTarget {
 pub struct Status {
   pub servers: Vec<ServerView>,
   pub services: Vec<ServiceView>,
+  #[serde(default)]
+  pub edge_apps: Vec<EdgeAppView>,
   pub gateways: Vec<GatewayView>,
   pub routes: Vec<RouteView>,
   /// 需要注意的问题，例如服务器离线、服务没在运行。

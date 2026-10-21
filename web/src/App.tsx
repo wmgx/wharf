@@ -16,6 +16,7 @@ import { Accounts } from "./pages/Accounts";
 import { Home } from "./pages/Home";
 import { Login } from "./pages/Login";
 import { ServiceDetail } from "./pages/ServiceDetail";
+import { EdgeDetail } from "./pages/EdgeDetail";
 import { Services } from "./pages/Services";
 import { StatusContext } from "./status";
 import { ThemeProvider } from "./theme";
@@ -91,6 +92,7 @@ function Shell({ username, onLogout }: { username: string; onLogout: () => void 
                   <Route path="/" element={<Home />} />
                   <Route path="/services" element={<Services />} />
                   <Route path="/services/:name" element={<ServiceDetail />} />
+                  <Route path="/edge/:name" element={<EdgeDetail />} />
                   <Route path="/gateways" element={<Gateways />} />
                   <Route path="/accounts" element={<Accounts />} />
                   <Route path="/topology" element={<Suspense fallback={<Skeleton className="h-[480px] rounded-xl" />}><Topology /></Suspense>} />

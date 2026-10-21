@@ -22,6 +22,7 @@ const LAYER: Record<string, string> = {
   gateway: "网关",
   dns: "DNS",
   tunnel: "隧道",
+  edge: "边缘",
 };
 
 const RISK: Record<string, { text: string; cls: string }> = {

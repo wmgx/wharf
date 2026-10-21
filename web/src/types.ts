@@ -127,9 +127,65 @@ export interface RouteView {
   url: string;
 }
 
+export type EdgeKind = "worker" | "pages";
+
+export interface EdgeSource {
+  upload?: string;
+  git?: { repo: string; ref: string; token_secret?: string };
+  path?: string;
+  /** 单文件 Worker 的脚本文件名。 */
+  script?: string;
+  /** Pages 的构建命令。 */
+  build?: string;
+  output?: string;
+}
+
+export interface EdgeAppSpec {
+  account: string;
+  kind: EdgeKind;
+  /** 厂商那边的项目名，和名字相同时不写。 */
+  project?: string;
+  source?: EdgeSource;
+  builder?: string;
+}
+
+export interface EdgeLive {
+  exists: boolean;
+  url?: string;
+  deployed_at?: string;
+  deployed_by?: string;
+  error?: string;
+  checked_at: string;
+}
+
+export interface EdgeAppView {
+  name: string;
+  spec: EdgeAppSpec;
+  version: number;
+  live?: EdgeLive;
+}
+
+export interface EdgeProjectView {
+  kind: EdgeKind;
+  project: string;
+  url?: string;
+  modified_at?: string;
+  managed_as?: string;
+}
+
+export interface EdgeVersionView {
+  id: string;
+  created_at: string;
+  source?: string;
+  message?: string;
+  active: boolean;
+  url?: string;
+}
+
 export interface Status {
   servers: ServerView[];
   services: ServiceView[];
+  edge_apps?: EdgeAppView[];
   gateways: GatewayView[];
   routes: RouteView[];
   problems?: string[];
@@ -151,7 +207,9 @@ export type Change =
   | { op: "upsert_gateway"; name: string; spec: GatewaySpec }
   | { op: "remove_gateway"; name: string }
   | { op: "upsert_route"; spec: RouteSpec }
-  | { op: "remove_route"; hostname: string };
+  | { op: "remove_route"; hostname: string }
+  | { op: "upsert_edge_app"; name: string; spec: EdgeAppSpec }
+  | { op: "remove_edge_app"; name: string };
 
 export type Risk = "safe" | "disruptive" | "destructive" | "exposes_public";
 

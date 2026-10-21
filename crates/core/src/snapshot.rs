@@ -30,6 +30,8 @@ pub struct Snapshot {
   pub deployed: BTreeMap<String, String>,
   /// cloudflare_tunnel 网关已经创建的隧道。
   pub tunnels: BTreeMap<String, db::TunnelRow>,
+  /// 已绑定到边缘应用的自定义域名。
+  pub edge_domains: Vec<db::EdgeDomainRow>,
 }
 
 pub async fn load(db: &Db) -> Result<Snapshot, ApiError> {
@@ -42,6 +44,7 @@ pub async fn load(db: &Db) -> Result<Snapshot, ApiError> {
       secrets: db::secrets(c)?,
       deployed: db::deployed_servers(c)?,
       tunnels: db::tunnels(c)?,
+      edge_domains: db::edge_domains(c)?,
     })
   })
   .await
@@ -282,7 +285,7 @@ pub fn provider_error(e: ProviderError) -> ApiError {
   e.log("dns");
   let hint = match e.code {
     code::AUTH_FAILED => Some(
-      "检查 Cloudflare token 权限：Zone → DNS → Edit，Zone → Zone → Read",
+      "检查 Cloudflare token 权限：Zone → DNS → Edit，Zone → Zone → Read；Workers / Pages 还要 Account → Workers Scripts → Edit、Account → Cloudflare Pages → Edit、Zone → Workers Routes → Edit",
     ),
     code::PROVIDER_REJECTED => Some(
       "检查 token 是否完整复制、是否已过期或被删除；DNS 记录冲突时到 Cloudflare 面板确认",
@@ -340,6 +343,28 @@ pub fn tunnel_provider(
   .tunnel
   .ok_or_else(|| {
     ApiError::invalid(format!("账号 {} 不支持隧道", account.name))
+  })
+}
+
+pub fn edge_provider(
+  account: &AccountRow,
+) -> Result<Box<dyn wharf_providers::EdgeProvider>, ApiError> {
+  let factory =
+    wharf_providers::factory(&account.kind).ok_or_else(|| {
+      ApiError::internal(format!("不支持的厂商类型 {}", account.kind))
+    })?;
+  (factory.build)(Credentials {
+    name: account.name.clone(),
+    token: account.token.clone(),
+    zones: account.zones.clone(),
+  })
+  .map_err(provider_error)?
+  .edge
+  .ok_or_else(|| {
+    ApiError::invalid(format!(
+      "账号 {} 不支持 Workers / Pages",
+      account.name
+    ))
   })
 }
 
