@@ -3,6 +3,7 @@ import { useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { usePoll } from "@/api";
 import { useActions } from "@/components/actions";
+import { BuildEditor, type BuildHow, cleanHow, howReady } from "@/components/build-editor";
 import { EntryField, useEntry } from "@/components/entry";
 import { DomainChips, Field, Picker, PortsEditor, Segmented, nameFromImage, parseEnv, serverOptions, toName } from "@/components/fields";
 import { Button } from "@/components/ui/button";
@@ -45,6 +46,7 @@ interface Draft {
   repo: string;
   gitRef: string;
   path: string;
+  how: BuildHow;
   name: string;
   nameTouched: boolean;
   server: string;
@@ -73,6 +75,7 @@ function Form({ onClose }: { onClose: () => void }) {
   const [repo, setRepo] = useState(draft?.repo ?? "");
   const [gitRef, setGitRef] = useState(draft?.gitRef ?? "main");
   const [path, setPath] = useState(draft?.path ?? "");
+  const [how, setHow] = useState<BuildHow>(draft?.how ?? {});
   const [name, setName] = useState(draft?.name ?? "");
   const [nameTouched, setNameTouched] = useState(draft?.nameTouched ?? false);
   const servers = status?.servers ?? [];
@@ -102,7 +105,7 @@ function Form({ onClose }: { onClose: () => void }) {
   }, [status, accounts, svcName]);
 
   const source = kind === "image" ? image.trim() : kind === "git" ? repo.trim() : compose.trim();
-  const repoOk = kind !== "git" || (/^https:\/\/[^\s@]+$/.test(repo.trim()) && !!gitRef.trim());
+  const repoOk = kind !== "git" || (/^https:\/\/[^\s@]+$/.test(repo.trim()) && !!gitRef.trim() && howReady(how));
   const portsOk = ports.every((p) => p.name && p.port > 0 && p.port < 65536);
   const ready = !!svcName && !!source && repoOk && !!chosenServer && portsOk && (!hostname.trim() || entry.ready);
   const withEnv = kind !== "compose";
@@ -114,7 +117,7 @@ function Form({ onClose }: { onClose: () => void }) {
         kind === "image"
           ? { image: source }
           : kind === "git"
-            ? { build: { git: { repo: source.replace(/\/+$/, ""), ref: gitRef.trim() }, path: path.trim() || undefined } }
+            ? { build: { git: { repo: source.replace(/\/+$/, ""), ref: gitRef.trim() }, path: path.trim() || undefined, ...cleanHow(how) } }
             : { compose: { content: source } },
       ports: ports.length ? ports : undefined,
       env: withEnv && envText.trim() ? parseEnv(envText) : undefined,
@@ -124,7 +127,7 @@ function Form({ onClose }: { onClose: () => void }) {
       const { gateway, changes: gatewayChanges } = entry.resolve();
       changes.push(...gatewayChanges, { op: "upsert_route", spec: { hostname: hostname.trim().toLowerCase(), service: svcName, gateway } });
     }
-    lastDraft = { kind, image, compose, repo, gitRef, path, name: svcName, nameTouched, server: chosenServer, ports, envText, hostname, entry: entry.chosen };
+    lastDraft = { kind, image, compose, repo, gitRef, path, how, name: svcName, nameTouched, server: chosenServer, ports, envText, hostname, entry: entry.chosen };
     onClose();
     actions.plan({ title: `部署 ${svcName}`, changes, then: `/services/${svcName}`, back: NEW_SERVICE_DRAFT_URL });
   };
@@ -165,6 +168,7 @@ function Form({ onClose }: { onClose: () => void }) {
                 <Input id="path" placeholder="仓库根目录" value={path} onChange={(e) => setPath(e.target.value)} />
               </Field>
             </div>
+            <BuildEditor value={how} onChange={setHow} />
           </>
         ) : kind === "image" ? (
           <Field label="镜像" htmlFor="image">

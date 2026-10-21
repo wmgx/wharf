@@ -35,6 +35,9 @@ export interface BuildSource {
   dockerfile?: string;
   base?: string;
   start?: string;
+  template?: string;
+  install?: string;
+  dockerfile_content?: string;
 }
 
 export type Source =

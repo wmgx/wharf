@@ -714,6 +714,33 @@ fn check_build(name: &str, b: &BuildSource) -> Result<(), ApiError> {
   if b.start.as_deref().is_some_and(|s| s.trim().is_empty()) {
     return bad("启动命令为空");
   }
+  if b.install.as_deref().is_some_and(|s| s.trim().is_empty()) {
+    return bad("安装命令为空");
+  }
+  if let Some(t) = &b.template
+    && !wharf_api_types::build::TEMPLATES
+      .iter()
+      .any(|(id, ..)| id == t)
+  {
+    return bad(&format!(
+      "模板 {t} 不存在，可选：python、node、go、static"
+    ));
+  }
+  if let Some(content) = &b.dockerfile_content {
+    if content.trim().is_empty() {
+      return bad("Dockerfile 内容为空");
+    }
+    if b.dockerfile.is_some()
+      || b.template.is_some()
+      || b.base.is_some()
+      || b.start.is_some()
+      || b.install.is_some()
+    {
+      return bad(
+        "写了 Dockerfile 内容时，不再用 dockerfile、template、base、start、install",
+      );
+    }
+  }
   Ok(())
 }
 

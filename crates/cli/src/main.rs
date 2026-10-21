@@ -65,14 +65,8 @@ pub enum Command {
     port: Vec<String>,
     #[arg(long)]
     env: Vec<String>,
-    #[arg(long)]
-    path: Option<String>,
-    #[arg(long)]
-    dockerfile: Option<String>,
-    #[arg(long)]
-    base: Option<String>,
-    #[arg(long)]
-    start: Option<String>,
+    #[command(flatten)]
+    build: BuildOpts,
     #[command(flatten)]
     apply: ApplyFlags,
   },
@@ -150,18 +144,40 @@ pub struct BuildArgs {
   /// 私有仓库：保存访问 token 的密钥名（先 `wharf secret set`）。
   #[arg(long)]
   pub git_token_secret: Option<String>,
+  #[command(flatten)]
+  pub opts: BuildOpts,
+}
+
+/// 怎么构建：代码里的 Dockerfile、Wharf 里保存的 Dockerfile，或内置模板。
+#[derive(Args, Clone, Default)]
+pub struct BuildOpts {
   /// 代码里的子目录，作为构建目录。
   #[arg(long)]
   pub path: Option<String>,
-  /// Dockerfile 路径（相对构建目录）。不给时有 Dockerfile 就用，没有就按语言生成。
+  /// 代码里的 Dockerfile 路径（相对构建目录）。不给时有 Dockerfile 就用，没有就用模板。
   #[arg(long)]
   pub dockerfile: Option<String>,
+  /// 本机的 Dockerfile 文件，内容存进 Wharf（代码里不用放 Dockerfile）。
+  #[arg(long, conflicts_with_all = ["dockerfile", "template", "base", "start", "start_file", "install"])]
+  pub dockerfile_file: Option<std::path::PathBuf>,
+  /// 内置模板，`auto` 表示按文件识别。
+  #[arg(long, value_parser = ["auto", "python", "node", "go", "static"])]
+  pub template: Option<String>,
   /// 内置模板的基础镜像，例如 `python:3.12-slim`。
   #[arg(long)]
   pub base: Option<String>,
-  /// 内置模板的启动命令，监听端口用 `$PORT`，例如 `python run.py`。
+  /// 覆盖内置模板安装依赖的命令（Python、Node），例如 `npm ci && npm run build`。
   #[arg(long)]
+  pub install: Option<String>,
+  /// 内置模板的启动命令，监听端口用 `$PORT`，例如 `python run.py`。
+  #[arg(long, conflicts_with = "start_file")]
   pub start: Option<String>,
+  /// 启动脚本文件（多行 shell），内容存进 Wharf。
+  #[arg(long)]
+  pub start_file: Option<std::path::PathBuf>,
+  /// 只打印会用的 Dockerfile，不部署（只支持本机目录）。
+  #[arg(long)]
+  pub print_dockerfile: bool,
 }
 
 /// 修改类命令共用：生成计划后是否直接执行。

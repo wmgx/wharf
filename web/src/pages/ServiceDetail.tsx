@@ -4,6 +4,7 @@ import { Link, useParams, useSearchParams } from "react-router-dom";
 import { usePoll } from "@/api";
 import { useActions } from "@/components/actions";
 import { useBasicAuthSetAt } from "@/components/basic-auth";
+import { BuildEditor, type BuildHow, cleanHow, howOf, howReady } from "@/components/build-editor";
 import { Checkbox } from "@/components/ui/checkbox";
 import { CodeBlock, Dot, Empty, ErrorNote, Notice, PageHeader, ServerTag, StatusBadge, ago, liveTone, sourceLabel } from "@/components/common";
 import { EntryField, useEntry } from "@/components/entry";
@@ -318,6 +319,7 @@ function EditForm({ svc, onClose }: { svc: ServiceView; onClose: () => void }) {
   const [compose, setCompose] = useState("compose" in src ? (src.compose.content ?? "") : "");
   const [repo, setRepo] = useState(build?.git?.repo ?? "");
   const [gitRef, setGitRef] = useState(build?.git?.ref ?? "");
+  const [how, setHow] = useState<BuildHow>(howOf(build));
   const [ports, setPorts] = useState<PortSpec[]>(svc.spec.ports ?? []);
   const [envText, setEnvText] = useState(formatEnv(svc.spec.env));
   const submit = () => {
@@ -326,7 +328,14 @@ function EditForm({ svc, onClose }: { svc: ServiceView; onClose: () => void }) {
       source: isImage
         ? { image: image.trim() }
         : build
-          ? { build: build.git ? { ...build, git: { ...build.git, repo: repo.trim(), ref: gitRef.trim() } } : build }
+          ? {
+              build: {
+                upload: build.upload,
+                git: build.git ? { ...build.git, repo: repo.trim(), ref: gitRef.trim() } : undefined,
+                path: build.path,
+                ...cleanHow(how),
+              },
+            }
           : { compose: { content: compose } },
       ports,
       env: isImage || build ? parseEnv(envText) : svc.spec.env,
@@ -348,9 +357,7 @@ function EditForm({ svc, onClose }: { svc: ServiceView; onClose: () => void }) {
               </Field>
             </div>
           ) : (
-            <Notice kind="info">
-              代码来自本机目录。发布新版本在代码目录里执行 <code className="font-mono">wharf deploy</code>。
-            </Notice>
+            <Notice kind="info">代码来自本机目录</Notice>
           )
         ) : isImage ? (
           <Field label="镜像" htmlFor="image">
@@ -361,6 +368,7 @@ function EditForm({ svc, onClose }: { svc: ServiceView; onClose: () => void }) {
             <Textarea id="compose" className="min-h-48 font-mono text-xs" value={compose} onChange={(e) => setCompose(e.target.value)} />
           </Field>
         )}
+        {build && <BuildEditor value={how} onChange={setHow} />}
         <Field label="端口">
           <PortsEditor ports={ports} onChange={setPorts} />
         </Field>
@@ -374,7 +382,9 @@ function EditForm({ svc, onClose }: { svc: ServiceView; onClose: () => void }) {
         <Button variant="ghost" onClick={onClose}>
           取消
         </Button>
-        <Button onClick={submit}>生成计划</Button>
+        <Button disabled={!howReady(how)} onClick={submit}>
+          生成计划
+        </Button>
       </SheetFooter>
     </>
   );

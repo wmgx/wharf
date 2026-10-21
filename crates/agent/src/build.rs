@@ -207,6 +207,12 @@ fn dockerfile(
   work: &Path,
   ctx: &Ctx,
 ) -> Result<(PathBuf, Vec<String>), ApiError> {
+  if let Some(content) = &job.dockerfile_content {
+    ctx.say("使用 Wharf 里保存的 Dockerfile");
+    let path = work.join("Dockerfile.wharf");
+    std::fs::write(&path, content).map_err(io_err(&path))?;
+    return Ok((path, build::from_images(content)));
+  }
   let own = match &job.dockerfile {
     Some(p) => {
       let path = context.join(relative(p)?);
@@ -215,6 +221,8 @@ fn dockerfile(
       }
       Some(path)
     }
+    // 指定了模板时不用代码里的 Dockerfile。
+    None if job.template.is_some() => None,
     None => Some(context.join("Dockerfile")).filter(|p| p.is_file()),
   };
   if let Some(path) = own {
@@ -233,10 +241,12 @@ fn dockerfile(
       port: job.port,
       base: job.base.as_deref(),
       start: job.start.as_deref(),
+      template: job.template.as_deref(),
+      install: job.install.as_deref(),
     },
   )?;
   ctx.say(format!(
-    "没有 Dockerfile，按 {} 模板生成（启动：{}）：",
+    "按 {} 模板生成 Dockerfile（启动：{}）：",
     generated.language, generated.start
   ));
   for line in generated.dockerfile.lines() {

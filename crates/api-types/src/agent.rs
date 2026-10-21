@@ -357,6 +357,12 @@ pub struct BuildJob {
   pub base: Option<String>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub start: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub template: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub install: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub dockerfile_content: Option<String>,
   /// 内置模板里的 `$PORT`。
   pub port: u16,
   /// 作为 `--build-arg` 传入（镜像源等）。

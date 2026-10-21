@@ -75,10 +75,7 @@ async fn dispatch(
       server,
       port,
       env,
-      path,
-      dockerfile,
-      base,
-      start,
+      build,
       apply,
     } => {
       let name = match name {
@@ -96,10 +93,7 @@ async fn dispatch(
         volume: vec![],
         build: BuildArgs {
           dir: Some(dir),
-          path,
-          dockerfile,
-          base,
-          start,
+          opts: build,
           ..Default::default()
         },
         apply,

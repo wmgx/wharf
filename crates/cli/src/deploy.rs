@@ -13,8 +13,8 @@ use wharf_api_types::{
 };
 
 use crate::{
-  BuildArgs,
-  client::{CliResult, Client},
+  BuildArgs, BuildOpts,
+  client::{CliError, CliResult, Client},
   pack::{self, LocalTree},
 };
 
@@ -32,11 +32,21 @@ pub async fn source(
   existing: Option<&Source>,
   port: Option<u16>,
 ) -> CliResult<Option<Built>> {
-  let tweaks = args.path.is_some()
-    || args.dockerfile.is_some()
-    || args.base.is_some()
-    || args.start.is_some();
-  let mut b = match (&args.dir, &args.git, existing) {
+  let o = &args.opts;
+  let tweaks = o.path.is_some()
+    || o.dockerfile.is_some()
+    || o.dockerfile_file.is_some()
+    || o.template.is_some()
+    || o.base.is_some()
+    || o.install.is_some()
+    || o.start.is_some()
+    || o.start_file.is_some();
+  let old = match existing {
+    Some(Source::Build(old)) => Some(old),
+    _ => None,
+  };
+  // 重新给出 --dir / --git 时，没给的选项沿用现有配置。
+  let mut b = match (&args.dir, &args.git, old) {
     (Some(_), Some(_), _) => {
       return Err(
         ApiError::invalid("--dir 和 --git 只能给一个").into(),
@@ -52,51 +62,25 @@ pub async fn source(
           .unwrap_or_else(|| "main".into()),
         token_secret: args.git_token_secret.clone(),
       }),
-      path: None,
-      dockerfile: None,
-      base: None,
-      start: None,
+      ..old.cloned().unwrap_or_default()
     },
     (Some(_), None, _) => BuildSource {
       upload: None,
       git: None,
-      path: None,
-      dockerfile: None,
-      base: None,
-      start: None,
+      ..old.cloned().unwrap_or_default()
     },
-    (None, None, Some(Source::Build(b))) if tweaks => b.clone(),
+    (None, None, Some(b)) if tweaks => b.clone(),
     (None, None, _) if tweaks => {
       return Err(
         ApiError::invalid(format!(
-          "--path、--dockerfile、--base、--start 只用于从代码构建的服务，{name} 不是"
+          "构建选项只用于从代码构建的服务，{name} 不是"
         ))
         .into(),
       );
     }
     (None, None, _) => return Ok(None),
   };
-  // 重新给出 --dir / --git 时，没给的选项沿用现有配置。
-  let old = match existing {
-    Some(Source::Build(old)) => Some(old),
-    _ => None,
-  };
-  b.path = args
-    .path
-    .clone()
-    .or_else(|| old.and_then(|o| o.path.clone()));
-  b.dockerfile = args
-    .dockerfile
-    .clone()
-    .or_else(|| old.and_then(|o| o.dockerfile.clone()));
-  b.base = args
-    .base
-    .clone()
-    .or_else(|| old.and_then(|o| o.base.clone()));
-  b.start = args
-    .start
-    .clone()
-    .or_else(|| old.and_then(|o| o.start.clone()));
+  apply_opts(&mut b, o)?;
 
   let mut default_port = 8080;
   if let Some(dir) = &args.dir {
@@ -104,8 +88,13 @@ pub async fn source(
       Some(p) => dir.join(p),
       None => dir.clone(),
     };
-    default_port = preview(name, &context, &b, port)?;
+    default_port =
+      preview(name, &context, &b, port, o.print_dockerfile)?;
     b.upload = Some(upload(c, dir).await?);
+  } else if o.print_dockerfile {
+    return Err(
+      ApiError::invalid("--print-dockerfile 只支持本机目录").into(),
+    );
   }
   Ok(Some(Built {
     source: Source::Build(b),
@@ -113,29 +102,111 @@ pub async fn source(
   }))
 }
 
+fn read_file(path: &Path) -> CliResult<String> {
+  std::fs::read_to_string(path).map_err(|e| {
+    ApiError::invalid(format!("读取 {}：{e}", path.display())).into()
+  })
+}
+
+/// 把命令行选项合进构建来源。写 Dockerfile 和用模板互斥，换一种时清掉另一种的设置。
+fn apply_opts(b: &mut BuildSource, o: &BuildOpts) -> CliResult<()> {
+  if let Some(p) = &o.path {
+    b.path = Some(p.clone());
+  }
+  if let Some(file) = &o.dockerfile_file {
+    *b = BuildSource {
+      dockerfile_content: Some(read_file(file)?),
+      upload: b.upload.take(),
+      git: b.git.take(),
+      path: b.path.take(),
+      ..BuildSource::default()
+    };
+    return Ok(());
+  }
+  if let Some(p) = &o.dockerfile {
+    b.dockerfile = Some(p.clone());
+    b.dockerfile_content = None;
+  }
+  let template_opts = o.template.is_some()
+    || o.base.is_some()
+    || o.install.is_some()
+    || o.start.is_some()
+    || o.start_file.is_some();
+  if template_opts {
+    b.dockerfile_content = None;
+  }
+  match o.template.as_deref() {
+    Some("auto") => b.template = None,
+    Some(t) => b.template = Some(t.to_string()),
+    None => {}
+  }
+  if let Some(v) = &o.base {
+    b.base = Some(v.clone());
+  }
+  if let Some(v) = &o.install {
+    b.install = Some(v.clone());
+  }
+  if let Some(v) = &o.start {
+    b.start = Some(v.clone());
+  }
+  if let Some(file) = &o.start_file {
+    b.start = Some(read_file(file)?.trim_end().to_string());
+  }
+  Ok(())
+}
+
+/// 各模板的默认端口。
+fn default_port(template: &str) -> u16 {
+  match template {
+    "python" => 8000,
+    "node" => 3000,
+    _ => 8080,
+  }
+}
+
+fn exposed_port(dockerfile: &str) -> Option<u16> {
+  dockerfile.lines().find_map(|l| {
+    let rest = l.trim().strip_prefix("EXPOSE ")?;
+    rest
+      .split_whitespace()
+      .next()?
+      .split('/')
+      .next()?
+      .parse()
+      .ok()
+  })
+}
+
 /// 在本机判断会怎么构建，返回默认端口。认不出来时直接报错，不用等到服务器上。
+/// `print`：打印 Dockerfile 后结束。
 fn preview(
   name: &str,
   context: &Path,
   b: &BuildSource,
   port: Option<u16>,
+  print: bool,
 ) -> CliResult<u16> {
+  let done = |text: &str| -> CliResult<()> {
+    if print {
+      print!("{text}");
+      return Err(CliError::Exit(0));
+    }
+    Ok(())
+  };
+  if let Some(content) = &b.dockerfile_content {
+    eprintln!("使用 Wharf 里保存的 Dockerfile");
+    done(content)?;
+    return Ok(exposed_port(content).unwrap_or(8080));
+  }
   let tree = LocalTree(context.to_path_buf());
   let dockerfile =
     b.dockerfile.clone().unwrap_or_else(|| "Dockerfile".into());
-  if let Some(content) = tree.read(&dockerfile) {
+  if b.template.is_none()
+    && let Some(content) = tree.read(&dockerfile)
+  {
     eprintln!("使用 {dockerfile}");
-    let exposed = content.lines().find_map(|l| {
-      let rest = l.trim().strip_prefix("EXPOSE ")?;
-      rest
-        .split_whitespace()
-        .next()?
-        .split('/')
-        .next()?
-        .parse()
-        .ok()
-    });
-    return Ok(exposed.unwrap_or(8080));
+    done(&content)?;
+    return Ok(exposed_port(&content).unwrap_or(8080));
   }
   if b.dockerfile.is_some() {
     return Err(
@@ -146,21 +217,33 @@ fn preview(
       .into(),
     );
   }
-  let probe = |p: u16| {
-    build::generate(
-      &tree,
-      &build::Options {
-        service: name,
-        port: p,
-        base: b.base.as_deref(),
-        start: b.start.as_deref(),
-      },
-    )
+  let template = match &b.template {
+    Some(t) => t.clone(),
+    None => build::detect(&tree)?.to_string(),
   };
-  let lang = probe(port.unwrap_or(8080))?.language;
-  let default = if lang == "python" { 8000 } else { 8080 };
-  let g = probe(port.unwrap_or(default))?;
-  eprintln!("识别为 {}，启动：{}", g.language, g.start);
+  let default = default_port(&template);
+  let g = build::generate(
+    &tree,
+    &build::Options {
+      service: name,
+      port: port.unwrap_or(default),
+      base: b.base.as_deref(),
+      start: b.start.as_deref(),
+      template: Some(&template),
+      install: b.install.as_deref(),
+    },
+  )?;
+  eprintln!(
+    "{} {} 模板，启动：{}",
+    if b.template.is_some() {
+      "使用"
+    } else {
+      "识别为"
+    },
+    g.language,
+    g.start
+  );
+  done(&g.dockerfile)?;
   Ok(default)
 }
 

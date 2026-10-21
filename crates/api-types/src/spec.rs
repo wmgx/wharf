@@ -104,6 +104,7 @@ impl PrivateNetwork {
 ///
 /// 意图文件里写作 `source = { image = "traefik/whoami" }` 或
 /// `source = { compose = { file = "blog.yaml" } }`。
+#[allow(clippy::large_enum_variant)]
 #[derive(
   Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
 )]
@@ -125,7 +126,7 @@ pub enum Source {
 
 /// 代码来源：本机目录（CLI 打包上传）或 git 仓库，二选一。
 #[derive(
-  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+  Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema,
 )]
 #[serde(deny_unknown_fields)]
 pub struct BuildSource {
@@ -144,8 +145,18 @@ pub struct BuildSource {
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub base: Option<String>,
   /// 内置模板的启动命令，例如 `uvicorn main:app --host 0.0.0.0 --port $PORT`。
+  /// 可以多行（启动脚本），用 `sh -c` 执行。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub start: Option<String>,
+  /// 内置模板：`python` / `node` / `go` / `static`，不填时按文件识别。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub template: Option<String>,
+  /// 覆盖内置模板安装依赖的命令（Python、Node），例如 `npm ci && npm run build`。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub install: Option<String>,
+  /// 存在 Wharf 里的 Dockerfile 内容，优先于代码里的 Dockerfile 和模板。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub dockerfile_content: Option<String>,
 }
 
 #[derive(

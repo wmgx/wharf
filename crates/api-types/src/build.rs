@@ -1,9 +1,13 @@
-//! 没有 Dockerfile 时按语言生成。agent 构建时用，CLI 部署前预览也用同一份逻辑。
+//! 没有 Dockerfile 时按模板生成。agent 构建时用，CLI 部署前预览也用同一份逻辑。
 //!
+//! 模板可以指定（`template`），不指定时按文件识别：
 //! - Go：`go.mod`。编译成静态二进制放进 alpine，不在最终镜像里装包（国内 apk 慢）；
+//! - Node：`package.json`。有 lock 用 `npm ci`，有 build 脚本就执行；
 //! - Python：`requirements.txt` / `pyproject.toml` / `*.py`。启动命令按 Procfile、
-//!   FastAPI / Flask / Django 猜，猜不出来要求 `--start`。
+//!   FastAPI / Flask / Django 猜，猜不出来要求 `--start`；
+//! - 静态站：`index.html`，用 Caddy 提供文件。
 //!
+//! 启动命令可以是多行（相当于启动脚本），用 `sh -c` 执行。
 //! 生成的 Dockerfile 用 `$PORT`，容器里设成服务的端口。
 
 use crate::ApiError;
@@ -11,6 +15,16 @@ use crate::ApiError;
 pub const GO_BASE: &str = "golang:1.25-alpine";
 pub const GO_RUNTIME: &str = "alpine:3.22";
 pub const PYTHON_BASE: &str = "python:3.13-slim";
+pub const NODE_BASE: &str = "node:22-bookworm-slim";
+pub const STATIC_BASE: &str = "caddy:2-alpine";
+
+/// 可选的模板：（id，名字，默认基础镜像）。
+pub const TEMPLATES: [(&str, &str, &str); 4] = [
+  ("python", "Python", PYTHON_BASE),
+  ("node", "Node", NODE_BASE),
+  ("go", "Go", GO_BASE),
+  ("static", "静态站", STATIC_BASE),
+];
 
 /// 读取代码目录。路径用 `/` 分隔、相对构建目录。
 pub trait SourceTree {
@@ -27,11 +41,15 @@ pub struct Options<'a> {
   pub port: u16,
   pub base: Option<&'a str>,
   pub start: Option<&'a str>,
+  /// `python` / `node` / `go` / `static`，不填时按文件识别。
+  pub template: Option<&'a str>,
+  /// 覆盖安装依赖的命令（Python、Node）。
+  pub install: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Generated {
-  /// `go` / `python`。
+  /// 用的模板：`go` / `node` / `python` / `static`。
   pub language: &'static str,
   pub dockerfile: String,
   /// 给人看的启动方式。
@@ -44,20 +62,50 @@ pub fn generate(
   tree: &dyn SourceTree,
   opts: &Options,
 ) -> Result<Generated, ApiError> {
+  let template = match opts.template {
+    Some(t) => t,
+    None => detect(tree)?,
+  };
+  if opts.install.is_some() && matches!(template, "go" | "static") {
+    return Err(ApiError::invalid(format!(
+      "{template} 模板不支持自定义安装命令"
+    )));
+  }
+  match template {
+    "go" => go(tree, opts),
+    "node" => node(tree, opts),
+    "python" => python(tree, opts),
+    "static" => Ok(static_site(opts)),
+    other => Err(ApiError::invalid(format!(
+      "没有模板 {other}，可选：python、node、go、static"
+    ))),
+  }
+}
+
+/// 按文件识别模板。
+pub fn detect(
+  tree: &dyn SourceTree,
+) -> Result<&'static str, ApiError> {
   if tree.exists("go.mod") {
-    return go(tree, opts);
+    return Ok("go");
+  }
+  if tree.exists("package.json") {
+    return Ok("node");
   }
   let has_py = tree.exists("requirements.txt")
     || tree.exists("pyproject.toml")
     || tree.list("").iter().any(|f| f.ends_with(".py"));
   if has_py {
-    return python(tree, opts);
+    return Ok("python");
+  }
+  if tree.exists("index.html") {
+    return Ok("static");
   }
   Err(
     ApiError::invalid(
-      "认不出语言：代码里没有 Dockerfile、go.mod、requirements.txt、pyproject.toml 或 .py 文件",
+      "认不出语言：代码里没有 Dockerfile、go.mod、package.json、requirements.txt、pyproject.toml、.py 或 index.html",
     )
-    .with_hint("在代码根目录加一个 Dockerfile，或用 --path 指到项目所在的子目录"),
+    .with_hint("用 --template 指定模板，或加一个 Dockerfile，或用 --path 指到项目所在的子目录"),
   )
 }
 
@@ -262,12 +310,18 @@ fn python(
   };
   let base = opts.base.unwrap_or(PYTHON_BASE);
   let mut steps = Vec::new();
-  if requirements.is_some() {
+  if let Some(install) = opts.install {
+    steps.push("COPY . .".to_string());
+    steps.push(run_line(install));
+  } else if requirements.is_some() {
     steps.push("COPY requirements.txt ./".to_string());
     steps.push("RUN pip install -r requirements.txt".to_string());
   }
-  steps.push("COPY . .".to_string());
-  if requirements.is_none()
+  if opts.install.is_none() {
+    steps.push("COPY . .".to_string());
+  }
+  if opts.install.is_none()
+    && requirements.is_none()
     && pyproject
       .as_deref()
       .is_some_and(|p| p.contains("[project]"))
@@ -298,6 +352,129 @@ EXPOSE {port}
     start: start.cmd,
     images: vec![base.to_string()],
   })
+}
+
+/// `RUN` 一段 shell（可以多行）。
+fn run_line(script: &str) -> String {
+  let json = serde_json::to_string(&["sh", "-c", script])
+    .unwrap_or_else(|_| "[]".into());
+  format!("RUN {json}")
+}
+
+fn node_start(
+  tree: &dyn SourceTree,
+  pkg: &serde_json::Value,
+) -> Result<String, ApiError> {
+  if pkg["scripts"]["start"].is_string() {
+    return Ok("npm start".into());
+  }
+  if let Some(main) = pkg["main"].as_str()
+    && tree.exists(main)
+  {
+    return Ok(format!("node {main}"));
+  }
+  for file in ["server.js", "index.js", "app.js", "main.js"] {
+    if tree.exists(file) {
+      return Ok(format!("node {file}"));
+    }
+  }
+  Err(
+    ApiError::invalid("猜不出 Node 服务的启动命令")
+      .with_hint("在 package.json 里加 start 脚本，或用 --start 指定，监听端口用环境变量 $PORT"),
+  )
+}
+
+fn node(
+  tree: &dyn SourceTree,
+  opts: &Options,
+) -> Result<Generated, ApiError> {
+  let pkg: serde_json::Value = tree
+    .read("package.json")
+    .and_then(|s| serde_json::from_str(&s).ok())
+    .unwrap_or_default();
+  let start = match opts.start {
+    Some(cmd) => cmd.to_string(),
+    None => node_start(tree, &pkg)?,
+  };
+  let base = opts.base.unwrap_or(NODE_BASE);
+  let mut steps = Vec::new();
+  match opts.install {
+    Some(install) => {
+      steps.push("COPY . .".to_string());
+      steps.push(run_line(install));
+    }
+    None => {
+      let lock = tree.exists("package-lock.json");
+      if tree.exists("package.json") {
+        steps.push(
+          if lock {
+            "COPY package.json package-lock.json ./"
+          } else {
+            "COPY package.json ./"
+          }
+          .to_string(),
+        );
+        steps.push(
+          if lock {
+            "RUN npm ci"
+          } else {
+            "RUN npm install"
+          }
+          .to_string(),
+        );
+      }
+      steps.push("COPY . .".to_string());
+      if pkg["scripts"]["build"].is_string() {
+        steps.push("RUN npm run build".to_string());
+      }
+    }
+  }
+  let dockerfile = format!(
+    r#"# Wharf 按 Node 模板生成
+FROM {base}
+ARG NPM_CONFIG_REGISTRY
+ENV PORT={port}
+WORKDIR /app
+{steps}
+EXPOSE {port}
+{run}
+"#,
+    port = opts.port,
+    steps = steps.join("\n"),
+    run = cmd_line(&start),
+  );
+  Ok(Generated {
+    language: "node",
+    dockerfile,
+    start,
+    images: vec![base.to_string()],
+  })
+}
+
+fn static_site(opts: &Options) -> Generated {
+  let base = opts.base.unwrap_or(STATIC_BASE);
+  let start = opts
+    .start
+    .unwrap_or("caddy file-server --root /srv --listen :$PORT")
+    .to_string();
+  let dockerfile = format!(
+    r#"# Wharf 按静态站模板生成
+FROM {base}
+WORKDIR /srv
+COPY . /srv
+ENV PORT={port}
+EXPOSE {port}
+{run}
+"#,
+    port = opts.port,
+    run = cmd_line(&start),
+  );
+  Generated {
+    language: "static",
+    dockerfile,
+    start,
+    images: vec![base.to_string()],
+  }
 }
 
 /// Dockerfile 里 `FROM` 用到的镜像（跳过前面阶段的别名和 `scratch`），构建前先按镜像源拉好。
@@ -366,7 +543,55 @@ mod tests {
       port: 8000,
       base: None,
       start,
+      template: None,
+      install: None,
     }
+  }
+
+  #[test]
+  fn node_uses_lock_build_and_start_script() {
+    let tree = Mem(BTreeMap::from([
+      (
+        "package.json",
+        r#"{"scripts":{"build":"vite build","start":"node dist/server.js"}}"#,
+      ),
+      ("package-lock.json", "{}"),
+    ]));
+    let g = generate(&tree, &opts(None)).unwrap();
+    assert_eq!(g.language, "node");
+    assert_eq!(g.start, "npm start");
+    assert!(
+      g.dockerfile
+        .contains("RUN npm ci\nCOPY . .\nRUN npm run build")
+    );
+  }
+
+  #[test]
+  fn explicit_template_install_and_script() {
+    let tree = Mem(BTreeMap::from([("index.html", "")]));
+    assert_eq!(
+      generate(&tree, &opts(None)).unwrap().language,
+      "static"
+    );
+    let o = Options {
+      template: Some("python"),
+      install: Some("pip install uv && uv sync"),
+      ..opts(Some("alembic upgrade head\nexec python main.py"))
+    };
+    let g = generate(&tree, &o).unwrap();
+    assert!(
+      g.dockerfile
+        .contains(r#"RUN ["sh","-c","pip install uv && uv sync"]"#)
+    );
+    assert!(g.dockerfile.contains(
+      r#"CMD ["sh","-c","alembic upgrade head\nexec python main.py"]"#
+    ));
+    let go = Options {
+      template: Some("go"),
+      install: Some("x"),
+      ..opts(None)
+    };
+    assert!(generate(&tree, &go).is_err());
   }
 
   #[test]
