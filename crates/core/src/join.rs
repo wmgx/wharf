@@ -279,8 +279,36 @@ DATA=/var/lib/wharf
 step() { printf '\n==> %s\n' "$1"; }
 fail() { printf '\n失败：%s\n' "$1" >&2; exit 1; }
 
+T=""
+if command -v timeout >/dev/null 2>&1; then T="timeout"; fi
+run() { limit=$1; shift; if [ -n "$T" ]; then $T "$limit" "$@"; else "$@"; fi; }
+
+# 只支持 apt 系，用本机已配置的软件源（国内连不上 get.docker.com）。
+install_docker() {
+  command -v apt-get >/dev/null 2>&1 || fail "没有 Docker，先安装：https://docs.docker.com/engine/install/"
+  SUDO=""
+  if [ "$(id -u)" != 0 ]; then
+    command -v sudo >/dev/null 2>&1 || fail "安装 Docker 需要 root"
+    SUDO=sudo
+  fi
+  printf '没有 Docker。将执行：apt-get install docker.io（用本机已配置的软件源）\n'
+  printf '  - 约占 100～200M 内存\n'
+  printf '  - 会添加 iptables 规则，FORWARD 默认策略改为 DROP（不影响本机端口和 Tailscale）\n'
+  printf '  - 现有服务不用重启\n'
+  if [ "${WHARF_INSTALL_DOCKER:-}" != 1 ]; then
+    # 脚本从管道读入，回答从终端读。
+    (exec </dev/tty) 2>/dev/null || fail "没有终端可以确认。确认安装时加上 WHARF_INSTALL_DOCKER=1 重新执行"
+    printf '现在安装？[y/N] '
+    read -r ans </dev/tty || ans=""
+    case "$ans" in y | Y | yes) ;; *) fail "没有安装 Docker" ;; esac
+  fi
+  run 600 $SUDO apt-get update -q || fail "apt-get update 失败"
+  run 900 $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -q docker.io || fail "安装 docker.io 失败"
+  $SUDO systemctl enable --now docker >/dev/null 2>&1 || true
+}
+
 step "检查 Docker"
-command -v docker >/dev/null 2>&1 || fail "没有 Docker，先安装：https://docs.docker.com/engine/install/"
+command -v docker >/dev/null 2>&1 || install_docker
 DOCKER=docker
 if ! docker info >/dev/null 2>&1; then
   if [ "$(id -u)" != 0 ] && command -v sudo >/dev/null 2>&1 && sudo docker info >/dev/null 2>&1; then
@@ -289,10 +317,6 @@ if ! docker info >/dev/null 2>&1; then
     fail "Docker 没有运行，或当前用户没有权限"
   fi
 fi
-T=""
-if command -v timeout >/dev/null 2>&1; then T="timeout"; fi
-run() { limit=$1; shift; if [ -n "$T" ]; then $T "$limit" "$@"; else "$@"; fi; }
-
 step "拉取 $IMAGE"
 run 900 $DOCKER pull "$IMAGE" || fail "拉取镜像失败。国内机器可以设置 WHARF_AGENT_IMAGE 换成镜像站地址"
 
