@@ -135,6 +135,9 @@ impl Ops {
         crate::build::run(&self.docker, &self.core_url, &job, ctx)
           .await
       }
+      AgentOp::Probe { targets } => {
+        to_value(crate::probe::check(targets).await)
+      }
       AgentOp::Discover => {
         to_value(crate::adopt::discover(&self.docker, ctx).await?)
       }

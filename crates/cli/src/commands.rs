@@ -1141,9 +1141,15 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
       gateway,
       auth,
       paths,
+      tunnel,
       apply,
     } => {
       let spec = RouteSpec {
+        link: if tunnel {
+          wharf_api_types::spec::LinkMode::Tunnel
+        } else {
+          wharf_api_types::spec::LinkMode::Auto
+        },
         hostname,
         service: service.unwrap_or_default(),
         upstream,

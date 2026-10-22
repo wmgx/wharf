@@ -20,6 +20,7 @@ mod edge;
 mod exec;
 mod identity;
 mod ops;
+mod probe;
 mod report;
 mod restic;
 mod sync;
@@ -45,6 +46,14 @@ struct Cli {
   /// 覆盖自动探测的公网 IP。
   #[arg(long, env = "WHARF_PUBLIC_IP", global = true)]
   public_ip: Option<String>,
+  /// 连通性探测端口，控制面用它判断网关能不能直连这台机器。
+  #[arg(
+    long,
+    env = "WHARF_PROBE_PORT",
+    default_value_t = wharf_api_types::agent::PROBE_PORT,
+    global = true
+  )]
+  probe_port: u16,
   #[command(subcommand)]
   command: Option<Command>,
 }
@@ -112,6 +121,7 @@ async fn main() -> anyhow::Result<()> {
   };
 
   let key = identity::load_or_create_key(&cli.data_dir)?;
+  tokio::spawn(probe::serve(joined.server.clone(), cli.probe_port));
   let docker = docker::Docker {
     bin: cli.docker,
     data_dir: cli.data_dir,

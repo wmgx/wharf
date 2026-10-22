@@ -170,6 +170,16 @@ CREATE TABLE edge_expected (
   updated_at INTEGER NOT NULL
 );
 "#,
+  // 连通性探测结果：from 机器能不能直连 to 机器的内网地址。
+  r#"
+CREATE TABLE reach (
+  from_server TEXT NOT NULL,
+  to_server TEXT NOT NULL,
+  ok INTEGER NOT NULL,
+  checked_at INTEGER NOT NULL,
+  PRIMARY KEY (from_server, to_server)
+);
+"#,
 ];
 
 #[derive(Clone)]
@@ -486,6 +496,71 @@ pub fn secrets(
     })
     .map_err(sql_err)?;
   rows.collect::<Result<_, _>>().map_err(sql_err)
+}
+
+// REACH
+
+pub type Reach = std::collections::BTreeMap<(String, String), bool>;
+
+pub fn reach(conn: &Connection) -> Result<Reach, ApiError> {
+  let mut stmt = conn
+    .prepare("SELECT from_server, to_server, ok FROM reach")
+    .map_err(sql_err)?;
+  let rows = stmt
+    .query_map([], |r| {
+      Ok((
+        (r.get::<_, String>(0)?, r.get::<_, String>(1)?),
+        r.get(2)?,
+      ))
+    })
+    .map_err(sql_err)?;
+  rows.collect::<Result<_, _>>().map_err(sql_err)
+}
+
+pub fn set_reach(
+  conn: &Connection,
+  results: &[(String, String, bool)],
+  now: i64,
+) -> Result<(), ApiError> {
+  for (from, to, ok) in results {
+    conn
+      .execute(
+        "INSERT INTO reach (from_server, to_server, ok, checked_at) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT (from_server, to_server) DO UPDATE SET ok = excluded.ok, checked_at = excluded.checked_at",
+        params![from, to, ok, now],
+      )
+      .map_err(sql_err)?;
+  }
+  Ok(())
+}
+
+/// 没有就生成一个随机值存进去，返回它。
+pub fn ensure_secret(
+  conn: &Connection,
+  name: &str,
+  now: i64,
+) -> Result<String, ApiError> {
+  let existing: Option<String> = conn
+    .query_row(
+      "SELECT value FROM secrets WHERE name = ?1",
+      params![name],
+      |r| r.get(0),
+    )
+    .optional()
+    .map_err(sql_err)?;
+  if let Some(v) = existing {
+    return Ok(v);
+  }
+  let mut bytes = [0u8; 24];
+  getrandom::fill(&mut bytes).expect("随机数不可用");
+  let value = hex::encode(bytes);
+  conn
+    .execute(
+      "INSERT INTO secrets (name, value, updated_at) VALUES (?1, ?2, ?3)",
+      params![name, value, now],
+    )
+    .map_err(sql_err)?;
+  Ok(value)
 }
 
 // ACCOUNTS

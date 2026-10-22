@@ -356,6 +356,35 @@ pub struct RouteSpec {
   /// 按路径转发到别的上游，其余路径仍到 `service`。只支持 caddy 网关。
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub paths: Vec<PathRoute>,
+  /// 网关到服务的走法。不填为自动：同机、能直连内网地址就直连，否则走反向隧道。
+  #[serde(default, skip_serializing_if = "LinkMode::is_auto")]
+  pub link: LinkMode,
+}
+
+/// 网关到服务的走法偏好。
+#[derive(
+  Debug,
+  Clone,
+  Copy,
+  Default,
+  PartialEq,
+  Eq,
+  Serialize,
+  Deserialize,
+  JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkMode {
+  #[default]
+  Auto,
+  /// 总是走反向隧道，不经过组网。
+  Tunnel,
+}
+
+impl LinkMode {
+  pub fn is_auto(&self) -> bool {
+    *self == Self::Auto
+  }
 }
 
 /// 路由里的一条路径转发。`service` 和 `upstream` 二选一。

@@ -155,7 +155,24 @@ pub enum AgentOp {
   Unretire {
     items: Vec<Retired>,
   },
+  /// 从本机去连别的服务器的探测端口，结果是 `Vec<bool>`（和 `targets` 一一对应）。
+  Probe {
+    targets: Vec<ProbeTarget>,
+  },
 }
+
+/// 探测目标：连上 `addr` 后对方要回 `wharf <server>`。
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct ProbeTarget {
+  pub server: String,
+  /// `ip:端口`。
+  pub addr: String,
+}
+
+/// agent 的探测端口：连上后回一行 `wharf <服务器名>`。
+pub const PROBE_PORT: u16 = 7701;
 
 /// 服务器上的一个容器。
 #[derive(

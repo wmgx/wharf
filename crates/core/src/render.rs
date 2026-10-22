@@ -35,6 +35,8 @@ pub struct Net {
   /// agent 上报的其他网卡地址，用来在缺内网地址时给出建议命令。
   pub lan_ips: BTreeMap<String, Vec<String>>,
   pub public_ip: BTreeMap<String, String>,
+  /// 连通性探测结果：(网关所在机器, 服务所在机器) → 能否直连内网地址。没探测过的不在里面。
+  pub reach: crate::db::Reach,
   /// 登录保护的账号（密钥 BASIC_AUTH）。不是网络信息，但渲染网关时要用，放在这里不必到处传。
   pub basic_auth: Option<BasicAuth>,
 }
@@ -110,6 +112,8 @@ struct ComposeService {
   restart: &'static str,
   #[serde(skip_serializing_if = "Option::is_none")]
   network_mode: Option<&'static str>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  entrypoint: Option<Vec<String>>,
   #[serde(skip_serializing_if = "Option::is_none")]
   command: Option<Vec<String>>,
   #[serde(skip_serializing_if = "BTreeMap::is_empty")]
@@ -243,6 +247,7 @@ pub fn service_compose(
             image,
             restart: "unless-stopped",
             network_mode: None,
+            entrypoint: None,
             command: None,
             environment,
             ports,
@@ -314,6 +319,7 @@ pub fn tunnel_compose(name: &str, spec: &GatewaySpec) -> String {
         image: gateway_image(spec),
         restart: "unless-stopped",
         network_mode: Some("host"),
+        entrypoint: None,
         command: Some(
           ["tunnel", "--no-autoupdate", "run"]
             .map(String::from)
@@ -346,6 +352,7 @@ pub fn gateway_compose(name: &str, spec: &GatewaySpec) -> String {
         image: gateway_image(spec),
         restart: "unless-stopped",
         network_mode: Some("host"),
+        entrypoint: None,
         command: Some(
           [
             "caddy",
@@ -401,6 +408,7 @@ pub fn backup_server_compose(
         image: REST_SERVER_IMAGE.to_string(),
         restart: "unless-stopped",
         network_mode: Some("host"),
+        entrypoint: None,
         command: Some(vec!["sh".into(), "-c".into(), script]),
         environment: BTreeMap::from([(
           "HTPASSWD".to_string(),
@@ -428,6 +436,7 @@ pub fn upstream(
   gateway_server: &str,
   service: &str,
   port: &str,
+  mode: wharf_api_types::spec::LinkMode,
 ) -> Result<String, ApiError> {
   let row = world.services.get(service).ok_or_else(|| {
     ApiError::invalid(format!("服务 {service} 不存在"))
@@ -437,25 +446,86 @@ pub fn upstream(
       "服务 {service} 的端口 {port} 没有分配"
     ))
   })?;
-  if row.spec.server == gateway_server {
-    return Ok(format!("127.0.0.1:{host_port}"));
-  }
-  let server = &row.spec.server;
-  let addr = net.private.get(server).ok_or_else(|| {
-    let err = ApiError::invalid(format!(
-      "服务器 {server} 没有内网地址，网关 {gateway_server} 无法跨机器访问服务 {service}"
-    ))
-    .with_hint(
-      "装上组网工具（Tailscale / Headscale）后 agent 会自动检测；两台机器内网直通时，手动指定内网地址",
-    );
-    match net.lan_ips.get(server).and_then(|ips| ips.first()) {
-      Some(ip) => err.suggest(format!(
-        "wharf server set {server} --private-ip {ip} --apply"
-      )),
-      None => err,
+  use crate::link::{Choice, choose, tunnel_upstream};
+  Ok(match choose(world, net, gateway_server, service, mode)? {
+    Choice::Local => format!("127.0.0.1:{host_port}"),
+    Choice::Direct(ip) => format!("{ip}:{host_port}"),
+    Choice::Tunnel => {
+      tunnel_upstream(world, net, gateway_server, service, port)?
     }
-  })?;
-  Ok(format!("{}:{host_port}", addr.ip))
+  })
+}
+
+pub const FRPS_IMAGE: &str = "snowdreamtech/frps:0.61.1";
+pub const FRPC_IMAGE: &str = "snowdreamtech/frpc:0.61.1";
+
+/// frp 容器：配置放在环境变量里，启动时写成文件；密钥是占位，部署时替换。
+fn frp_service(
+  image: &str,
+  bin: &str,
+  config: String,
+) -> ComposeService {
+  ComposeService {
+    image: image.to_string(),
+    restart: "unless-stopped",
+    network_mode: Some("host"),
+    entrypoint: Some(vec!["sh".into(), "-c".into()]),
+    command: Some(vec![format!(
+      "printf '%s\\n' \"$$FRP_CONFIG\" > /tmp/frp.toml && exec {bin} -c /tmp/frp.toml"
+    )]),
+    environment: BTreeMap::from([
+      ("FRP_CONFIG".to_string(), config),
+      (
+        "FRP_TOKEN".to_string(),
+        format!("[[{}]]", crate::link::TOKEN_SECRET),
+      ),
+    ]),
+    ports: vec![],
+    volumes: vec![],
+    labels: BTreeMap::from([(
+      "wharf.link".to_string(),
+      bin.to_string(),
+    )]),
+  }
+}
+
+/// 网关所在机器上的 frps：隧道端口只绑 127.0.0.1，只允许 Wharf 的隧道端口范围。
+pub fn frps_compose(project: &str) -> String {
+  let config = format!(
+    "bindPort = {}\nproxyBindAddr = \"127.0.0.1\"\nallowPorts = [{{ start = 30000, end = 39999 }}]\nauth.token = \"{{{{ .Envs.FRP_TOKEN }}}}\"\ntransport.tls.force = true\n",
+    crate::link::FRPS_PORT
+  );
+  to_yaml(&ComposeFile {
+    name: project.to_string(),
+    services: BTreeMap::from([(
+      "frps".to_string(),
+      frp_service(FRPS_IMAGE, "frps", config),
+    )]),
+  })
+}
+
+/// 服务所在机器上的 frpc：`proxies` 是 (名字, 本机端口, 隧道端口)。
+pub fn frpc_compose(
+  project: &str,
+  server_addr: &str,
+  server_port: u16,
+  proxies: &[(String, u16, u16)],
+) -> String {
+  let mut config = format!(
+    "serverAddr = \"{server_addr}\"\nserverPort = {server_port}\nloginFailExit = false\nauth.token = \"{{{{ .Envs.FRP_TOKEN }}}}\"\ntransport.tls.enable = true\n"
+  );
+  for (name, local, remote) in proxies {
+    config.push_str(&format!(
+      "\n[[proxies]]\nname = \"{name}\"\ntype = \"tcp\"\nlocalIP = \"127.0.0.1\"\nlocalPort = {local}\nremotePort = {remote}\n"
+    ));
+  }
+  to_yaml(&ComposeFile {
+    name: project.to_string(),
+    services: BTreeMap::from([(
+      "frpc".to_string(),
+      frp_service(FRPC_IMAGE, "frpc", config),
+    )]),
+  })
 }
 
 /// 一条 Caddy 站点：hostname → 上游。

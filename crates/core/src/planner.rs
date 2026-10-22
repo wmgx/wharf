@@ -114,6 +114,15 @@ pub enum Step {
     server: String,
     gateway: String,
   },
+  /// 部署反向隧道的 frps 或 frpc（design 2.7.2）。
+  LinkUp {
+    server: String,
+    project: String,
+  },
+  LinkDown {
+    server: String,
+    project: String,
+  },
   /// 备份和恢复不来自计划，是单独发起的执行。
   Backup {
     service: String,
@@ -160,10 +169,12 @@ impl Step {
       Self::DnsDelete { .. } | Self::EdgeDetach { .. } => 0,
       Self::EnsureDirs { .. } => 1,
       Self::VolumeSync { .. } => 2,
-      Self::ServiceUp { .. } | Self::EdgeDeploy { .. } => 3,
+      Self::ServiceUp { .. }
+      | Self::EdgeDeploy { .. }
+      | Self::LinkUp { .. } => 3,
       Self::GatewaySync { .. } => 4,
       Self::DnsUpsert { .. } | Self::EdgeAttach { .. } => 5,
-      Self::GatewayDown { .. } => 6,
+      Self::GatewayDown { .. } | Self::LinkDown { .. } => 6,
       Self::ServiceDown { .. } => 7,
       Self::Backup { .. }
       | Self::Restore { .. }
@@ -292,12 +303,15 @@ pub async fn make_plan(
   let mut b = Builder::default();
   config_items(&mut b, &current, &desired, &writes);
 
-  let net = snap.net(&desired);
+  let mut net = snap.net(&desired);
+  net.reach = crate::link::probe(state, &net, &desired).await;
   let status =
-    gather_status(state, &snap, &current, &desired, &mut b).await;
+    gather_status(state, &snap, &current, &desired, &net, &mut b)
+      .await;
   service_items(
     &mut b, &snap, &current, &desired, &net, &status, &writes,
   )?;
+  link_items(&mut b, &current, &desired, &net, &status)?;
   gateway_items(&mut b, &snap, &current, &desired, &net, &status)?;
   dns_items(&mut b, &snap, &desired, &net).await?;
   crate::edge_plan::edge_items(&mut b, &snap, &current, &desired)
@@ -495,6 +509,7 @@ async fn gather_status(
   snap: &Snapshot,
   current: &World,
   desired: &World,
+  net: &Net,
   b: &mut Builder,
 ) -> StatusMap {
   let mut projects: BTreeMap<String, BTreeSet<String>> =
@@ -511,6 +526,9 @@ async fn gather_status(
         .entry(g.spec.server.clone())
         .or_default()
         .insert(gateway_project(name));
+    }
+    for p in crate::link::projects(world, net).unwrap_or_default() {
+      projects.entry(p.server).or_default().insert(p.project);
     }
   }
   let futures =
@@ -846,6 +864,112 @@ fn applied_config<'a>(
       snap.tunnels.get(gateway).map(|t| t.config_hash.as_str())
     }
   }
+}
+
+/// 反向隧道的 frps / frpc：按路由算出该有哪些，和现状比对。
+fn link_items(
+  b: &mut Builder,
+  current: &World,
+  desired: &World,
+  net: &Net,
+  status: &StatusMap,
+) -> Result<(), ApiError> {
+  let want = crate::link::projects(desired, net)?;
+  for p in &want {
+    // 查不到现状的服务器已经单独提醒过。
+    let Some(Some(projects)) = status.get(&p.server) else {
+      continue;
+    };
+    let decision = match projects.get(&p.project) {
+      Some(s) if !(s.hash.is_none() && s.containers.is_empty()) => {
+        if s.hash.as_deref() != Some(p.hash.as_str()) {
+          Some((
+            Action::Update,
+            Risk::Disruptive,
+            format!(
+              "{}（配置变化，重建，经这条隧道的路由会断几秒）",
+              p.summary
+            ),
+          ))
+        } else if !s.all_running() {
+          Some((
+            Action::Update,
+            Risk::Disruptive,
+            format!(
+              "漂移：隧道容器没在运行（{}）",
+              describe_containers(s)
+            ),
+          ))
+        } else {
+          None
+        }
+      }
+      _ => Some((Action::Create, Risk::Safe, p.summary.clone())),
+    };
+    let Some((action, risk, reason)) = decision else {
+      continue;
+    };
+    if action == Action::Create
+      && p.project == crate::link::SERVER_PROJECT
+    {
+      b.warnings.push(format!(
+        "反向隧道：需要在 {} 的安全组 / 防火墙放行 TCP {}，别的机器的 frpc 要连进来",
+        p.server,
+        crate::link::FRPS_PORT
+      ));
+    }
+    let id = b.item(
+      format!("link/{}/{}", p.server, p.project),
+      Layer::Gateway,
+      action,
+      None,
+      Some(json!({ "server": p.server, "summary": p.summary })),
+      risk,
+      reason,
+    );
+    b.step(
+      vec![id],
+      format!("在 {} 上部署 {}", p.server, p.project),
+      Step::LinkUp {
+        server: p.server.clone(),
+        project: p.project.clone(),
+      },
+    );
+  }
+  for p in crate::link::projects(current, net).unwrap_or_default() {
+    if want
+      .iter()
+      .any(|w| w.server == p.server && w.project == p.project)
+    {
+      continue;
+    }
+    let exists = status
+      .get(&p.server)
+      .and_then(|s| s.as_ref())
+      .and_then(|s| s.get(&p.project))
+      .is_some_and(|s| !s.containers.is_empty());
+    if !exists {
+      continue;
+    }
+    let id = b.item(
+      format!("link/{}/{}", p.server, p.project),
+      Layer::Gateway,
+      Action::Delete,
+      Some(json!({ "server": p.server, "summary": p.summary })),
+      None,
+      Risk::Disruptive,
+      "没有路由再用这条隧道，停止并删除",
+    );
+    b.step(
+      vec![id],
+      format!("在 {} 上删除 {}", p.server, p.project),
+      Step::LinkDown {
+        server: p.server.clone(),
+        project: p.project,
+      },
+    );
+  }
+  Ok(())
 }
 
 fn gateway_items(

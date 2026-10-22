@@ -438,6 +438,9 @@ pub enum RouteCmd {
     /// `/api/*` 匹配前缀。只支持 caddy 网关。
     #[arg(long = "path", value_name = "PATH=TARGET")]
     paths: Vec<String>,
+    /// 总是走反向隧道。不给时自动选：同机、能直连内网地址就直连，否则走隧道。
+    #[arg(long)]
+    tunnel: bool,
     #[command(flatten)]
     apply: ApplyFlags,
   },

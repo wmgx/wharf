@@ -673,6 +673,72 @@ async fn run_step(
         &format!("wharf gateway logs {gateway}"),
       )?;
     }
+    Step::LinkUp { server, project } => {
+      let p = crate::link::projects(world, &net)?
+        .into_iter()
+        .find(|p| &p.server == server && &p.project == project)
+        .ok_or_else(|| {
+          ApiError::new(
+            ErrorCode::PlanStale,
+            format!("{server} 上已经不需要 {project}"),
+          )
+          .suggest("wharf plan")
+        })?;
+      let now = Utc::now().timestamp_millis();
+      let token = state
+        .db
+        .call(move |c| {
+          db::ensure_secret(c, crate::link::TOKEN_SECRET, now)
+        })
+        .await?;
+      let compose = p.compose.replace(
+        &format!("[[{}]]", crate::link::TOKEN_SECRET),
+        &token,
+      );
+      let result: ProjectUpResult = state
+        .hub
+        .call(
+          server,
+          AgentOp::ProjectUp(ProjectUp {
+            project: project.clone(),
+            compose,
+            hash: p.hash,
+            pull: snapshot::pull_policy(&world.servers[server]),
+            pull_missing_only: false,
+            retire: None,
+          }),
+          GATEWAY_TIMEOUT,
+          Some(progress),
+          cancel,
+        )
+        .await?;
+      ensure_running(
+        &result,
+        &format!("反向隧道 {project}"),
+        &format!(
+          "在 {server} 上 docker logs {project}-{}-1",
+          if project == crate::link::SERVER_PROJECT {
+            "frps"
+          } else {
+            "frpc"
+          }
+        ),
+      )?;
+    }
+    Step::LinkDown { server, project } => {
+      state
+        .hub
+        .call::<serde_json::Value>(
+          server,
+          AgentOp::ProjectDown {
+            project: project.clone(),
+          },
+          SHORT_TIMEOUT,
+          Some(progress),
+          cancel,
+        )
+        .await?;
+    }
     Step::GatewayDown { server, gateway } => {
       state
         .hub

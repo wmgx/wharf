@@ -371,6 +371,7 @@ impl World {
       gateway_server,
       &route.service,
       port,
+      route.link,
     )
   }
 
@@ -1092,6 +1093,7 @@ mod tests {
           auth: false,
           paths: vec![],
           upstream: None,
+          link: Default::default(),
         },
       },
     ])

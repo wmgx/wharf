@@ -28,6 +28,7 @@ fn managed(world: &World, project: &str) -> bool {
   world.services.contains_key(project)
     || world.gateways.keys().any(|g| gateway_project(g) == project)
     || project == render::BACKUP_PROJECT
+    || crate::link::is_link_project(project)
 }
 
 pub async fn unmanaged(

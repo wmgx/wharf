@@ -397,6 +397,7 @@ function AddRoute({ service, open, onClose }: { service: string; open: boolean; 
   const server = status?.services.find((s) => s.name === service)?.spec.server ?? "";
   const entry = useEntry(server);
   const [authWanted, setAuth] = useState(false);
+  const [tunnel, setTunnel] = useState(false);
   const auth = authWanted && !entry.tunnel;
   const authSetAt = useBasicAuthSetAt(open ? 1 : 0);
   const suffixes = [...new Set(status?.routes.map((r) => r.spec.hostname.split(".").slice(1).join(".")).filter(Boolean))];
@@ -404,10 +405,11 @@ function AddRoute({ service, open, onClose }: { service: string; open: boolean; 
     onClose();
     setHostname("");
     setAuth(false);
+    setTunnel(false);
     const { gateway, changes } = entry.resolve();
     actions.plan({
       title: "加域名",
-      changes: [...changes, { op: "upsert_route", spec: { hostname: hostname.trim().toLowerCase(), service, gateway, auth: auth || undefined } }],
+      changes: [...changes, { op: "upsert_route", spec: { hostname: hostname.trim().toLowerCase(), service, gateway, auth: auth || undefined, link: tunnel ? "tunnel" : undefined } }],
     });
   };
   return (
@@ -426,6 +428,11 @@ function AddRoute({ service, open, onClose }: { service: string; open: boolean; 
             <Checkbox checked={auth} disabled={entry.tunnel} onCheckedChange={(v) => setAuth(v === true)} />
             登录保护
             <span className="text-xs text-muted-foreground">{entry.tunnel ? "隧道入口暂不支持" : "访问时要输入账号密码"}</span>
+          </label>
+          <label className="flex cursor-pointer items-center gap-2.5 text-sm">
+            <Checkbox checked={tunnel} onCheckedChange={(v) => setTunnel(v === true)} />
+            总是走反向隧道
+            <span className="text-xs text-muted-foreground">默认自动：能直连就直连</span>
           </label>
           {auth && authSetAt === null && (
             <Notice kind="warn">

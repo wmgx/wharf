@@ -41,6 +41,8 @@ pub struct Snapshot {
   pub edge_checked: BTreeMap<String, i64>,
   /// Wharf 记录的线上版本。
   pub edge_expected: BTreeMap<String, db::EdgeExpected>,
+  /// 连通性探测结果。
+  pub reach: db::Reach,
 }
 
 impl Snapshot {
@@ -81,6 +83,7 @@ pub async fn load(db: &Db) -> Result<Snapshot, ApiError> {
         edge_accounts: BTreeMap::new(),
         edge_checked: BTreeMap::new(),
         edge_expected: db::edge_expected(c)?,
+        reach: db::reach(c)?,
       }
       .with_edge_cache(db::edge_cache(c)?),
     )
@@ -99,6 +102,7 @@ impl Snapshot {
         .secrets
         .get(render::BASIC_AUTH_SECRET)
         .and_then(|v| render::BasicAuth::parse(v)),
+      reach: self.reach.clone(),
       ..Net::default()
     };
     for (name, server) in &world.servers {
@@ -273,6 +277,7 @@ pub fn gateway_render(
             &gateway.spec.server,
             svc,
             port,
+            route.spec.link,
           )?
         }
         (None, None) => continue,
