@@ -302,8 +302,13 @@ install_docker() {
     read -r ans </dev/tty || ans=""
     case "$ans" in y | Y | yes) ;; *) fail "没有安装 Docker" ;; esac
   fi
-  run 600 $SUDO apt-get update -q || fail "apt-get update 失败"
-  run 900 $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -q docker.io || fail "安装 docker.io 失败"
+  apt_hint="软件源连不上时检查 apt 源：云厂商内网源的地址在 100.64.0.0/10 时会和 Tailscale 冲突，可换成公网源"
+  run 600 $SUDO apt-get update -q || fail "apt-get update 失败。$apt_hint"
+  # 新版 Debian 把命令行拆成了 docker-cli；不装推荐包，避免带上 needrestart 之类会重启服务的东西。
+  pkgs=docker.io
+  if apt-cache show docker-cli >/dev/null 2>&1; then pkgs="docker.io docker-cli"; fi
+  run 900 $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends $pkgs \
+    || fail "安装 $pkgs 失败。$apt_hint"
   $SUDO systemctl enable --now docker >/dev/null 2>&1 || true
 }
 
