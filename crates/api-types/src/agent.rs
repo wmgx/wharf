@@ -26,6 +26,7 @@ pub fn auth_payload(
   format!("wharf-auth-v1|{role}|{server}|{nonce}").into_bytes()
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CoreMsg {
