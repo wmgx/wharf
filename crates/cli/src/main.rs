@@ -395,6 +395,10 @@ pub enum RouteCmd {
     /// 登录保护：访问时要输入账号密码。账号用 `wharf secret set BASIC_AUTH` 设置。
     #[arg(long)]
     auth: bool,
+    /// 按路径转发，可以多次给：`/ws=服务[:端口名]` 或 `/ws=127.0.0.1:17891`（不归 Wharf 管的上游）。
+    /// `/api/*` 匹配前缀。只支持 caddy 网关。
+    #[arg(long = "path", value_name = "PATH=TARGET")]
+    paths: Vec<String>,
     #[command(flatten)]
     apply: ApplyFlags,
   },

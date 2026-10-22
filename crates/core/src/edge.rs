@@ -116,9 +116,12 @@ pub fn validate_route(
   host: &str,
   spec: &RouteSpec,
 ) -> Result<(), ApiError> {
-  if spec.port.is_some() || spec.gateway.is_some() {
+  if spec.port.is_some()
+    || spec.gateway.is_some()
+    || !spec.paths.is_empty()
+  {
     return Err(ApiError::invalid(format!(
-      "路由 {host} 指向边缘应用，不经过网关，不能指定端口或网关"
+      "路由 {host} 指向边缘应用，不经过网关，不能指定端口、网关或路径转发"
     )));
   }
   if spec.auth {

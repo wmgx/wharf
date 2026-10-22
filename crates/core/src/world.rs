@@ -356,14 +356,108 @@ impl World {
     &'a self,
     route: &'a RouteSpec,
   ) -> Option<&'a str> {
-    let service = self.services.get(&route.service)?;
-    match &route.port {
-      Some(port) => Some(port.as_str()),
+    self.service_port(&route.service, route.port.as_deref())
+  }
+
+  /// 服务的端口名：指定了就用，只有一个端口时取它。
+  pub fn service_port<'a>(
+    &'a self,
+    service: &str,
+    port: Option<&'a str>,
+  ) -> Option<&'a str> {
+    let service = self.services.get(service)?;
+    match port {
+      Some(port) => Some(port),
       None if service.spec.ports.len() == 1 => {
         Some(service.spec.ports[0].name.as_str())
       }
       None => None,
     }
+  }
+
+  fn validate_paths(
+    &self,
+    host: &str,
+    route: &RouteSpec,
+  ) -> Result<(), ApiError> {
+    if route.paths.is_empty() {
+      return Ok(());
+    }
+    let bad =
+      |m: String| Err(ApiError::invalid(format!("路由 {host}：{m}")));
+    if let Some(gw) = self.route_gateway(route)
+      && self
+        .gateways
+        .get(gw)
+        .is_some_and(|g| g.spec.kind != GatewayKind::Caddy)
+    {
+      return bad("按路径转发只支持 caddy 网关".into());
+    }
+    let mut seen = BTreeSet::new();
+    for p in &route.paths {
+      let ok = p.path.starts_with('/')
+        && !p.path.chars().any(|c| {
+          c.is_whitespace() || matches!(c, '{' | '}' | '"' | '#')
+        });
+      if !ok {
+        return bad(format!(
+          "路径 {} 要以 / 开头，不能有空格和 {{}}\"#",
+          p.path
+        ));
+      }
+      if !seen.insert(p.path.as_str()) {
+        return bad(format!("路径 {} 重复", p.path));
+      }
+      match (&p.service, &p.upstream) {
+        (Some(service), None) => {
+          if !self.services.contains_key(service) {
+            return bad(format!(
+              "路径 {} 指向的服务 {service} 不存在",
+              p.path
+            ));
+          }
+          let Some(port) =
+            self.service_port(service, p.port.as_deref())
+          else {
+            return bad(format!(
+              "路径 {} 要指定服务 {service} 的端口",
+              p.path
+            ));
+          };
+          if !self.services[service]
+            .spec
+            .ports
+            .iter()
+            .any(|x| x.name == port)
+          {
+            return bad(format!(
+              "服务 {service} 没有名为 {port} 的端口"
+            ));
+          }
+        }
+        (None, Some(up)) => {
+          let valid = p.port.is_none()
+            && up.rsplit_once(':').is_some_and(|(h, port)| {
+              !h.is_empty()
+                && port.parse::<u16>().is_ok()
+                && !h.chars().any(|c| c.is_whitespace() || c == '/')
+            });
+          if !valid {
+            return bad(format!(
+              "路径 {} 的上游 {up} 要写成 主机:端口，例如 127.0.0.1:8080",
+              p.path
+            ));
+          }
+        }
+        _ => {
+          return bad(format!(
+            "路径 {} 要指定服务或上游（二选一）",
+            p.path
+          ));
+        }
+      }
+    }
+    Ok(())
   }
 
   /// 整体校验。`joined` 是已经完成 join 的服务器。
@@ -487,6 +581,7 @@ impl World {
           route.spec.service
         )));
       }
+      self.validate_paths(host, &route.spec)?;
     }
     Ok(())
   }
@@ -951,6 +1046,7 @@ mod tests {
           port: None,
           gateway: None,
           auth: false,
+          paths: vec![],
         },
       },
     ])

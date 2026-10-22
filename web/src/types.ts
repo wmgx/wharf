@@ -120,6 +120,8 @@ export interface RouteSpec {
   port?: string;
   gateway?: string;
   auth?: boolean;
+  /** 按路径转发，service 和 upstream 二选一。 */
+  paths?: { path: string; service?: string; port?: string; upstream?: string }[];
 }
 
 export interface RouteView {

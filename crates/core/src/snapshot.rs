@@ -252,7 +252,38 @@ pub fn gateway_render(
         )),
       );
     }
+    if tunnel && !route.spec.paths.is_empty() {
+      return Err(ApiError::invalid(format!(
+        "路由 {host}：按路径转发只支持 caddy 网关"
+      )));
+    }
+    let mut paths = Vec::new();
+    for p in &route.spec.paths {
+      let upstream = match (&p.service, &p.upstream) {
+        (_, Some(up)) => up.clone(),
+        (Some(svc), None) => {
+          let port = world
+            .service_port(svc, p.port.as_deref())
+            .ok_or_else(|| {
+              ApiError::invalid(format!(
+                "路由 {host} 的路径 {} 没有可用的端口",
+                p.path
+              ))
+            })?;
+          render::upstream(
+            world,
+            net,
+            &gateway.spec.server,
+            svc,
+            port,
+          )?
+        }
+        (None, None) => continue,
+      };
+      paths.push((p.path.clone(), upstream));
+    }
     sites.push(render::Site {
+      paths,
       auth: route.spec.auth,
       hostname: host.clone(),
       upstream: render::upstream(

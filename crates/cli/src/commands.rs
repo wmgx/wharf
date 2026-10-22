@@ -10,8 +10,8 @@ use wharf_api_types::{
   },
   spec::{
     BackupSpec, Change, Fleet, GatewayKind, GatewaySpec, GatewayTls,
-    PortSpec, PrivateAddr, PrivateNetwork, Region, RouteSpec,
-    ServerSettings, ServiceSpec, Source, VolumeSpec,
+    PathRoute, PortSpec, PrivateAddr, PrivateNetwork, Region,
+    RouteSpec, ServerSettings, ServiceSpec, Source, VolumeSpec,
   },
   view::{
     AccountView, BackupsView, CreatedToken, DeploymentView,
@@ -1039,6 +1039,16 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
             r.spec.service,
             r.gateway.as_deref().unwrap_or("-")
           );
+          for p in &r.spec.paths {
+            println!(
+              "    {}  →  {}",
+              p.path,
+              p.upstream
+                .as_deref()
+                .or(p.service.as_deref())
+                .unwrap_or("-")
+            );
+          }
         }
       });
       Ok(())
@@ -1049,6 +1059,7 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
       port,
       gateway,
       auth,
+      paths,
       apply,
     } => {
       let spec = RouteSpec {
@@ -1057,6 +1068,10 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
         port,
         gateway,
         auth,
+        paths: paths
+          .iter()
+          .map(|p| parse_path_route(p))
+          .collect::<Result<_, _>>()?,
       };
       changes(c, vec![Change::UpsertRoute { spec }], apply, j).await
     }
@@ -1065,6 +1080,32 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
         .await
     }
   }
+}
+
+/// `/ws=svc`、`/ws=svc:port`、`/ws=127.0.0.1:17891`。目标的主机部分带 `.`、`:` 或是
+/// `localhost` 时当作上游地址（服务名里不会有这些）。
+fn parse_path_route(arg: &str) -> CliResult<PathRoute> {
+  let (path, target) = arg.split_once('=').ok_or_else(|| {
+    ApiError::invalid(format!(
+      "--path {arg} 要写成 路径=目标，例如 /ws=relay"
+    ))
+  })?;
+  let (host, port) = match target.rsplit_once(':') {
+    Some((h, p)) => (h, Some(p)),
+    None => (target, None),
+  };
+  let address =
+    host.contains('.') || host.contains(':') || host == "localhost";
+  Ok(PathRoute {
+    path: path.to_string(),
+    service: (!address).then(|| host.to_string()),
+    port: if address {
+      None
+    } else {
+      port.map(str::to_string)
+    },
+    upstream: address.then(|| target.to_string()),
+  })
 }
 
 // ACCOUNTS / SECRETS / TOKENS

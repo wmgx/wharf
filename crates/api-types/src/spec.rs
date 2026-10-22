@@ -332,6 +332,28 @@ pub struct RouteSpec {
   /// 登录保护（P3）。
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub auth: bool,
+  /// 按路径转发到别的上游，其余路径仍到 `service`。只支持 caddy 网关。
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub paths: Vec<PathRoute>,
+}
+
+/// 路由里的一条路径转发。`service` 和 `upstream` 二选一。
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(deny_unknown_fields)]
+pub struct PathRoute {
+  /// Caddy 的路径匹配：`/ws` 只匹配这个路径，`/api/*` 匹配前缀。
+  pub path: String,
+  /// 目标服务。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub service: Option<String>,
+  /// 目标端口名，服务只有一个端口时可以不填。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub port: Option<String>,
+  /// 不归 Wharf 管的上游，例如网关所在机器上的 `127.0.0.1:17891`。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub upstream: Option<String>,
 }
 
 /// 边缘应用的种类。

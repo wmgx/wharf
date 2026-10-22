@@ -464,6 +464,8 @@ pub struct Site {
   pub hostname: String,
   pub upstream: String,
   pub auth: bool,
+  /// 按路径转发：（路径，上游）。
+  pub paths: Vec<(String, String)>,
 }
 
 pub fn caddyfile(
@@ -503,6 +505,10 @@ pub fn caddyfile(
         "\tbasic_auth {{\n\t\t{} {}\n\t}}\n",
         a.user, a.hash
       ));
+    }
+    // 带路径的 reverse_proxy 由 Caddy 排在不带路径的前面。
+    for (path, upstream) in &site.paths {
+      out.push_str(&format!("\treverse_proxy {path} {upstream}\n"));
     }
     out.push_str(&format!("\treverse_proxy {}\n}}\n", site.upstream));
   }
@@ -613,11 +619,13 @@ mod tests {
           hostname: "z.example.com".into(),
           upstream: "127.0.0.1:1".into(),
           auth: true,
+          paths: vec![],
         },
         Site {
           hostname: "a.example.com".into(),
           upstream: "100.1.1.1:2".into(),
           auth: false,
+          paths: vec![("/ws".into(), "127.0.0.1:17891".into())],
         },
       ],
       BasicAuth::parse("admin $2b$12$abc").as_ref(),
@@ -626,6 +634,9 @@ mod tests {
     let z = &out[out.find("z.example.com").unwrap()..];
     assert!(z.contains("basic_auth {\n\t\tadmin $2b$12$abc\n\t}"));
     assert_eq!(out.matches("basic_auth").count(), 1);
+    assert!(out.contains(
+      "a.example.com {\n\treverse_proxy /ws 127.0.0.1:17891\n\treverse_proxy 100.1.1.1:2\n}"
+    ));
     assert!(out.contains("http_port 8080"));
     assert!(!out.contains("https_port"));
     assert!(!out.contains("auto_https"));
@@ -647,6 +658,7 @@ mod tests {
         hostname: "a.example.com".into(),
         upstream: "127.0.0.1:1".into(),
         auth: false,
+        paths: vec![],
       }],
       None,
     );
