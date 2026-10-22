@@ -76,6 +76,7 @@ pub async fn addresses(
   Ok(Json(CoreAddresses {
     server,
     port,
+    agent_image: s.agent_image.clone(),
     addresses: out,
   }))
 }
@@ -229,9 +230,32 @@ pub fn check_core_url(url: &str) -> Result<String, ApiError> {
   Ok(url.to_string())
 }
 
-pub fn script_command(core_url: &str, token: &str) -> String {
+/// 镜像名只允许常见字符，因为它会拼进给人复制的 shell 命令。
+pub fn check_image(image: &str) -> Result<String, ApiError> {
+  let image = image.trim();
+  let ok = !image.is_empty()
+    && image.len() <= 200
+    && image
+      .chars()
+      .all(|c| c.is_ascii_alphanumeric() || ".:-_/@".contains(c));
+  if ok {
+    Ok(image.to_string())
+  } else {
+    Err(ApiError::invalid(format!("agent 镜像 {image} 格式不对")))
+  }
+}
+
+/// `image` 和控制面默认镜像不同时，通过环境变量交给脚本。
+pub fn script_command(
+  core_url: &str,
+  token: &str,
+  image: Option<&str>,
+) -> String {
+  let env = image
+    .map(|i| format!("WHARF_AGENT_IMAGE={i} "))
+    .unwrap_or_default();
   format!(
-    "curl -fsSL {core_url}/join.sh | sh -s -- {core_url} {token}"
+    "curl -fsSL {core_url}/join.sh | {env}sh -s -- {core_url} {token}"
   )
 }
 
@@ -297,6 +321,8 @@ mod tests {
     );
     assert!(check_core_url("http://a;rm -rf /").is_err());
     assert!(check_core_url("ftp://a").is_err());
+    assert!(check_image("mirror.example.com/a/b:latest").is_ok());
+    assert!(check_image("a;b").is_err());
     assert!(check_core_url("http://192.168.1.2:7700").is_ok());
     assert!(check_core_url("http://100.100.1.1:7700").is_ok());
     assert!(check_core_url("http://8.8.8.8:7700").is_err());

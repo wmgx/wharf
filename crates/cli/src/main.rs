@@ -206,6 +206,9 @@ pub enum ServerCmd {
     /// agent 连接控制面用的地址，例如 https://wharf.example.com。不给时用控制面的启动配置。
     #[arg(long)]
     core_url: Option<String>,
+    /// agent 镜像，国内机器可以换成镜像站地址。
+    #[arg(long)]
+    agent_image: Option<String>,
   },
   /// 修改服务器设置。
   Set {

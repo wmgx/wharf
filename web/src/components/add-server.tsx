@@ -31,6 +31,24 @@ function candidates(list: CoreAddress[]): CoreAddress[] {
   return [...page, ...list];
 }
 
+// 上次填的镜像只记在这个浏览器里，方便下次加国内机器。
+const IMAGE_KEY = "wharf.add-server.image";
+function loadImage(): string {
+  try {
+    return localStorage.getItem(IMAGE_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+function saveImage(v: string) {
+  try {
+    if (v) localStorage.setItem(IMAGE_KEY, v);
+    else localStorage.removeItem(IMAGE_KEY);
+  } catch {
+    // 存不了就算了
+  }
+}
+
 function addressOption(a: CoreAddress) {
   const hint = blocked(a) ? "需要 https" : [KIND_HINT[a.kind] ?? a.kind, a.plaintext ? "明文" : ""].filter(Boolean).join(" · ");
   return { value: a.url, label: a.url, hint, disabled: blocked(a) };
@@ -45,6 +63,7 @@ export function AddServer({ open, onClose }: { open: boolean; onClose: () => voi
   const [opening, setOpening] = useState(false);
   const [url, setUrl] = useState("");
   const [custom, setCustom] = useState("");
+  const [image, setImage] = useState(loadImage);
   const [info, setInfo] = useState<JoinInfo | null>(null);
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -77,7 +96,8 @@ export function AddServer({ open, onClose }: { open: boolean; onClose: () => voi
   const submit = async () => {
     setBusy(true);
     try {
-      setInfo(await api.post<JoinInfo>("/api/servers", { name, core_url: coreUrl, rejoin: !!existing?.joined }));
+      setInfo(await api.post<JoinInfo>("/api/servers", { name, core_url: coreUrl, agent_image: image.trim() || undefined, rejoin: !!existing?.joined }));
+      saveImage(image.trim());
     } catch (e) {
       toast.error("生成失败", { description: (e as Error).message });
     } finally {
@@ -119,6 +139,9 @@ export function AddServer({ open, onClose }: { open: boolean; onClose: () => voi
               )}
             </Field>
             {opening && core && <OpenPublic core={core} onDone={close} />}
+            <Field label="agent 镜像" htmlFor="agent-image">
+              <Input id="agent-image" className="font-mono text-xs" placeholder={core?.agent_image ?? "默认"} value={image} onChange={(e) => setImage(e.target.value)} />
+            </Field>
             {existing?.joined && <Notice kind="warn">{name} 已加入，原来的 agent 会失效</Notice>}
             <DialogFooter>
               <Button variant="ghost" onClick={close}>

@@ -436,11 +436,17 @@ async fn server(
       name,
       rejoin,
       core_url,
+      agent_image,
     } => {
       let v: JoinInfo = c
         .post(
           "/api/servers",
-          &json!({ "name": name, "rejoin": rejoin, "core_url": core_url }),
+          &json!({
+            "name": name,
+            "rejoin": rejoin,
+            "core_url": core_url,
+            "agent_image": agent_image,
+          }),
         )
         .await?;
       out(j, &v, |v| {

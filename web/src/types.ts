@@ -13,6 +13,8 @@ export interface CoreAddresses {
   server?: string;
   port: number;
   addresses: CoreAddress[];
+  /** 控制面默认的 agent 镜像。 */
+  agent_image: string;
 }
 
 export interface JoinInfo {

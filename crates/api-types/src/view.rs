@@ -247,6 +247,9 @@ pub struct CoreAddresses {
   pub server: Option<String>,
   pub port: u16,
   pub addresses: Vec<CoreAddress>,
+  /// 控制面默认的 agent 镜像。
+  #[serde(default)]
+  pub agent_image: String,
 }
 
 /// 控制面的一个候选地址，加服务器时选一个给 agent 连。

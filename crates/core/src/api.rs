@@ -220,6 +220,9 @@ struct AddServer {
   /// agent 连接控制面用的地址，不给时用启动配置或请求的 Host。
   #[serde(default)]
   core_url: Option<String>,
+  /// agent 镜像，不给时用控制面的默认镜像。国内机器可以换成镜像站地址。
+  #[serde(default)]
+  agent_image: Option<String>,
 }
 
 const JOIN_TTL_HOURS: i64 = 24;
@@ -232,6 +235,12 @@ async fn add_server(
 ) -> ApiResult<JoinInfo> {
   auth.require(TokenScope::ApplyAll)?;
   validate_name("服务器", &req.name)?;
+  let image = match req.agent_image.as_deref().map(str::trim) {
+    Some(i) if !i.is_empty() && i != s.agent_image => {
+      Some(crate::join::check_image(i)?)
+    }
+    _ => None,
+  };
   let core_url =
     match req.core_url.as_deref().filter(|u| !u.trim().is_empty()) {
       Some(u) => Some(crate::join::check_core_url(u)?),
@@ -304,7 +313,11 @@ async fn add_server(
   let commands = BTreeMap::from([
     (
       "script".to_string(),
-      crate::join::script_command(&core_url, &token),
+      crate::join::script_command(
+        &core_url,
+        &token,
+        image.as_deref(),
+      ),
     ),
     (
       "docker".to_string(),
@@ -312,7 +325,7 @@ async fn add_server(
         "docker run -d --name wharf-agent --restart unless-stopped --network host \
          -v /var/run/docker.sock:/var/run/docker.sock -v /var/lib/wharf:/var/lib/wharf -v /srv:/srv \
          -e WHARF_CORE_URL={core_url} -e WHARF_JOIN_TOKEN={token} {}",
-        s.agent_image
+        image.as_deref().unwrap_or(&s.agent_image)
       ),
     ),
     (
