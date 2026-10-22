@@ -1,15 +1,14 @@
-import { BoxIcon, DownloadIcon, LayersIcon } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { BoxIcon, DownloadIcon, LayersIcon, ServerIcon } from "lucide-react";
+import { type ReactNode, useCallback, useEffect, useState } from "react";
 import { api } from "@/api";
 import { useActions } from "@/components/actions";
-import { CodeBlock, Notice, SectionTitle, ServerTag, StatusBadge } from "@/components/common";
+import { CodeBlock, Notice, StatusBadge } from "@/components/common";
 import { Field } from "@/components/fields";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useStatus } from "@/status";
 import type { ImportPreview, Unmanaged } from "@/types";
 
@@ -34,61 +33,81 @@ function useUnmanaged(): Unmanaged[] {
 
 const target = (u: Unmanaged) => u.project ?? u.container ?? "";
 
+/** 一行"还有多少没纳管"的提示，点开逐个导入。 */
+export function HintRow({ icon, label, text, onClick }: { icon: ReactNode; label: string; text: string; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="flex items-center gap-2 rounded-lg border border-dashed px-4 py-2.5 text-left text-sm text-muted-foreground transition-colors hover:border-primary hover:text-foreground"
+    >
+      {icon}
+      <span className="font-medium text-foreground">{label}</span>
+      <span>· {text}</span>
+      <span className="ml-auto inline-flex items-center gap-1 text-primary">
+        <DownloadIcon className="size-3.5" />
+        导入
+      </span>
+    </button>
+  );
+}
+
+/** 每台服务器一行提示：有多少容器没纳管，点开逐个导入。 */
 export function UnmanagedList() {
   const items = useUnmanaged();
+  const [server, setServer] = useState<string | null>(null);
   const [importing, setImporting] = useState<Unmanaged | null>(null);
-  if (items.length === 0) return null;
+  const byServer = new Map<string, Unmanaged[]>();
+  for (const u of items) byServer.set(u.server, [...(byServer.get(u.server) ?? []), u]);
+  if (byServer.size === 0) return null;
+  const list = server ? (byServer.get(server) ?? []) : [];
   return (
-    <section>
-      <SectionTitle count={items.length}>服务器上没纳管的容器</SectionTitle>
-      <div className="overflow-hidden rounded-xl border bg-card shadow-xs">
-        <Table>
-          <TableHeader className="bg-muted/50">
-            <TableRow>
-              <TableHead className="pl-4">名字</TableHead>
-              <TableHead>状态</TableHead>
-              <TableHead>服务器</TableHead>
-              <TableHead>镜像</TableHead>
-              <TableHead>端口</TableHead>
-              <TableHead className="w-24" />
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {items.map((u) => {
-              const running = u.containers.filter((c) => c.state === "running").length;
-              return (
-                <TableRow key={`${u.server}/${target(u)}`} className="text-muted-foreground">
-                  <TableCell className="pl-4">
-                    <span className="inline-flex items-center gap-1.5">
-                      {u.project ? <LayersIcon className="size-3.5" /> : <BoxIcon className="size-3.5" />}
-                      {target(u)}
-                      {u.project && <Badge variant="outline">compose · {u.containers.length}</Badge>}
-                    </span>
-                  </TableCell>
-                  <TableCell>
-                    <StatusBadge tone={running === u.containers.length ? "ok" : running ? "warn" : "idle"}>
-                      {running === u.containers.length ? "运行中" : running ? `${running}/${u.containers.length} 运行` : "已停止"}
-                    </StatusBadge>
-                  </TableCell>
-                  <TableCell>
-                    <ServerTag name={u.server} />
-                  </TableCell>
-                  <TableCell className="max-w-64 truncate font-mono text-xs">{[...new Set(u.containers.map((c) => c.image))].join(" ")}</TableCell>
-                  <TableCell className="max-w-48 truncate font-mono text-xs">{u.containers.flatMap((c) => c.ports ?? []).join(" ") || "-"}</TableCell>
-                  <TableCell className="pr-4 text-right">
-                    <Button variant="ghost" size="xs" onClick={() => setImporting(u)}>
-                      <DownloadIcon />
-                      导入
-                    </Button>
-                  </TableCell>
-                </TableRow>
-              );
-            })}
-          </TableBody>
-        </Table>
-      </div>
+    <div className="mt-3 grid gap-2">
+      {[...byServer].map(([name, group]) => (
+        <HintRow key={name} icon={<ServerIcon className="size-4" />} label={name} text={`${group.length} 个容器未纳管`} onClick={() => setServer(name)} />
+      ))}
+      <Dialog open={!!server && !importing} onOpenChange={(o) => !o && setServer(null)}>
+        <DialogContent aria-describedby={undefined} className="sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>{server} 上未纳管的容器</DialogTitle>
+          </DialogHeader>
+          <div className="grid max-h-[60vh] gap-1.5 overflow-y-auto">
+            {list.map((u) => (
+              <UnmanagedRow key={target(u)} item={u} onImport={() => setImporting(u)} />
+            ))}
+          </div>
+        </DialogContent>
+      </Dialog>
       {importing && <ImportDialog item={importing} onClose={() => setImporting(null)} />}
-    </section>
+    </div>
+  );
+}
+
+function UnmanagedRow({ item, onImport }: { item: Unmanaged; onImport: () => void }) {
+  const total = item.containers.length;
+  const running = item.containers.filter((c) => c.state === "running").length;
+  const ports = item.containers.flatMap((c) => c.ports ?? []);
+  return (
+    <div className="flex items-center gap-3 rounded-lg border px-3 py-2">
+      {item.project ? <LayersIcon className="size-4 shrink-0 text-muted-foreground" /> : <BoxIcon className="size-4 shrink-0 text-muted-foreground" />}
+      <div className="grid min-w-0 flex-1 gap-0.5">
+        <div className="flex items-center gap-2 text-sm font-medium">
+          {target(item)}
+          {item.project && <Badge variant="outline">compose · {total}</Badge>}
+          <StatusBadge tone={running === total ? "ok" : running ? "warn" : "idle"}>
+            {running === total ? "运行中" : running ? `${running}/${total} 运行` : "已停止"}
+          </StatusBadge>
+        </div>
+        <div className="truncate font-mono text-xs text-muted-foreground">
+          {[...new Set(item.containers.map((c) => c.image))].join(" ")}
+          {ports.length > 0 && ` · ${ports.join(" ")}`}
+        </div>
+      </div>
+      <Button variant="outline" size="xs" onClick={onImport}>
+        <DownloadIcon />
+        导入
+      </Button>
+    </div>
   );
 }
 
