@@ -229,9 +229,6 @@ pub fn gateway_render(
     if world.route_gateway(&route.spec) != Some(name) {
       continue;
     }
-    let port = world.route_port(&route.spec).ok_or_else(|| {
-      ApiError::invalid(format!("路由 {host} 没有可用的端口"))
-    })?;
     let tunnel = gateway.spec.kind == GatewayKind::CloudflareTunnel;
     if route.spec.auth && tunnel {
       return Err(ApiError::invalid(format!(
@@ -286,12 +283,11 @@ pub fn gateway_render(
       paths,
       auth: route.spec.auth,
       hostname: host.clone(),
-      upstream: render::upstream(
-        world,
+      upstream: world.route_upstream(
         net,
         &gateway.spec.server,
-        &route.spec.service,
-        port,
+        host,
+        &route.spec,
       )?,
     });
   }

@@ -239,12 +239,25 @@ pub struct JoinInfo {
   pub core_url: String,
 }
 
-/// 控制面的候选地址，加服务器时选一个给 agent 连。
+/// 控制面能被 agent 访问到的地址。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CoreAddresses {
+  /// 控制面所在的服务器（网卡地址和 agent 上报的地址比对得到），找不到时为空。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub server: Option<String>,
+  pub port: u16,
+  pub addresses: Vec<CoreAddress>,
+}
+
+/// 控制面的一个候选地址，加服务器时选一个给 agent 连。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct CoreAddress {
   pub url: String,
-  /// configured（启动时配置的对外地址）、public、tailscale、lan。
+  /// route（经网关开放的域名）、configured（启动时配置的地址）、public、tailscale、lan。
   pub kind: String,
+  /// 走这个地址时 agent 和控制面之间是明文。
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub plaintext: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

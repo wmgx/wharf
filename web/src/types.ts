@@ -4,7 +4,15 @@ export type PrivateNetwork = "tailscale" | "overlay" | "lan";
 
 export interface CoreAddress {
   url: string;
-  kind: "configured" | "public" | "tailscale" | "lan" | string;
+  kind: "route" | "configured" | "public" | "tailscale" | "lan" | string;
+  plaintext?: boolean;
+}
+
+export interface CoreAddresses {
+  /** 控制面所在的服务器。 */
+  server?: string;
+  port: number;
+  addresses: CoreAddress[];
 }
 
 export interface JoinInfo {
@@ -129,7 +137,10 @@ export interface GatewayView {
 
 export interface RouteSpec {
   hostname: string;
-  service: string;
+  /** 和 upstream 二选一，指向地址时为空。 */
+  service?: string;
+  /** 不归 Wharf 管的上游，例如 127.0.0.1:7700。 */
+  upstream?: string;
   port?: string;
   gateway?: string;
   auth?: boolean;

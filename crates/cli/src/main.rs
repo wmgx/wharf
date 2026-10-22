@@ -387,8 +387,15 @@ pub enum RouteCmd {
   Add {
     hostname: String,
     /// 服务或边缘应用（Workers / Pages）的名字。
+    #[arg(
+      long,
+      required_unless_present = "upstream",
+      conflicts_with = "upstream"
+    )]
+    service: Option<String>,
+    /// 不归 Wharf 管的上游，写网关所在机器能访问到的 主机:端口，例如 127.0.0.1:7700。
     #[arg(long)]
-    service: String,
+    upstream: Option<String>,
     /// 端口名，服务只有一个端口时可以不填。
     #[arg(long)]
     port: Option<String>,

@@ -1,16 +1,18 @@
-import { CheckIcon, CopyIcon, LoaderIcon } from "lucide-react";
+import { CheckIcon, CopyIcon, GlobeIcon, LoaderIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { api } from "@/api";
+import { useActions } from "@/components/actions";
 import { Dot, Notice } from "@/components/common";
-import { Field, Picker } from "@/components/fields";
+import { DomainChips, Field, Picker } from "@/components/fields";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { useStatus } from "@/status";
-import type { CoreAddress, JoinInfo } from "@/types";
+import type { CoreAddress, CoreAddresses, JoinInfo } from "@/types";
 
 const KIND_HINT: Record<string, string> = {
+  route: "公网",
   configured: "启动配置",
   page: "当前页面",
   public: "公网",
@@ -19,18 +21,28 @@ const KIND_HINT: Record<string, string> = {
 };
 const CUSTOM = "custom";
 
-/** 候选地址：控制面列出的，加上浏览器当前访问的地址。https 的排在前面。 */
+/** 公网地址必须 https，和控制面的校验一致。 */
+const blocked = (a: CoreAddress) => a.kind === "public" && a.url.startsWith("http://");
+
+/** 候选地址：控制面列出的，加上浏览器当前访问的 https 地址。 */
 function candidates(list: CoreAddress[]): CoreAddress[] {
-  const page = { url: window.location.origin, kind: "page" };
-  const all = list.some((a) => a.url === page.url) ? list : [page, ...list];
-  return [...all].sort((a, b) => Number(b.url.startsWith("https://")) - Number(a.url.startsWith("https://")));
+  const origin = window.location.origin;
+  const page = origin.startsWith("https://") && !list.some((a) => a.url === origin) ? [{ url: origin, kind: "page" }] : [];
+  return [...page, ...list];
+}
+
+function addressOption(a: CoreAddress) {
+  const hint = blocked(a) ? "需要 https" : [KIND_HINT[a.kind] ?? a.kind, a.plaintext ? "明文" : ""].filter(Boolean).join(" · ");
+  return { value: a.url, label: a.url, hint, disabled: blocked(a) };
 }
 
 /** 加服务器：选控制面地址，生成一条命令到目标机器上执行，等 agent 连上。 */
 export function AddServer({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { status } = useStatus();
   const [name, setName] = useState("");
+  const [core, setCore] = useState<CoreAddresses | null>(null);
   const [addrs, setAddrs] = useState<CoreAddress[]>([]);
+  const [opening, setOpening] = useState(false);
   const [url, setUrl] = useState("");
   const [custom, setCustom] = useState("");
   const [info, setInfo] = useState<JoinInfo | null>(null);
@@ -40,12 +52,13 @@ export function AddServer({ open, onClose }: { open: boolean; onClose: () => voi
   useEffect(() => {
     if (!open) return;
     api
-      .get<CoreAddress[]>("/api/core/addresses")
-      .catch(() => [])
-      .then((list) => {
-        const c = candidates(list);
+      .get<CoreAddresses>("/api/core/addresses")
+      .catch(() => null)
+      .then((res) => {
+        const c = candidates(res?.addresses ?? []);
+        setCore(res);
         setAddrs(c);
-        setUrl((u) => u || c[0]?.url || CUSTOM);
+        setUrl((u) => u || c.find((a) => !blocked(a))?.url || CUSTOM);
       });
   }, [open]);
 
@@ -54,6 +67,7 @@ export function AddServer({ open, onClose }: { open: boolean; onClose: () => voi
     setName("");
     setInfo(null);
     setCopied(false);
+    setOpening(false);
   };
   const existing = status?.servers.find((s) => s.name === name);
   const server = info ? status?.servers.find((s) => s.name === info.server) : undefined;
@@ -91,13 +105,20 @@ export function AddServer({ open, onClose }: { open: boolean; onClose: () => voi
               <Picker
                 id="core-url"
                 value={url}
-                options={[...addrs.map((a) => ({ value: a.url, label: a.url, hint: KIND_HINT[a.kind] ?? a.kind })), { value: CUSTOM, label: "其他地址" }]}
+                options={[...addrs.map(addressOption), { value: CUSTOM, label: "其他地址" }]}
                 onChange={setUrl}
               />
               {url === CUSTOM && (
                 <Input className="mt-2 font-mono text-xs" placeholder="https://wharf.example.com" value={custom} onChange={(e) => setCustom(e.target.value)} />
               )}
+              {!opening && !addrs.some((a) => a.kind === "route") && (
+                <Button variant="outline" size="xs" className="mt-2 w-fit" onClick={() => setOpening(true)}>
+                  <GlobeIcon />
+                  开放到公网
+                </Button>
+              )}
             </Field>
+            {opening && core && <OpenPublic core={core} onDone={close} />}
             {existing?.joined && <Notice kind="warn">{name} 已加入，原来的 agent 会失效</Notice>}
             <DialogFooter>
               <Button variant="ghost" onClick={close}>
@@ -146,5 +167,42 @@ export function AddServer({ open, onClose }: { open: boolean; onClose: () => voi
         )}
       </DialogContent>
     </Dialog>
+  );
+}
+
+/** 经网关给控制面开放一个 https 域名：新建一条指向控制面地址的路由。 */
+function OpenPublic({ core, onDone }: { core: CoreAddresses; onDone: () => void }) {
+  const { status } = useStatus();
+  const actions = useActions();
+  const gateways = status?.gateways ?? [];
+  const [gateway, setGateway] = useState(gateways.find((g) => g.spec.default)?.name ?? gateways[0]?.name ?? "");
+  const [hostname, setHostname] = useState("");
+  const gw = gateways.find((g) => g.name === gateway);
+  // 网关和控制面在同一台机器用 127.0.0.1，否则用控制面那台的内网地址。
+  const coreIp = status?.servers.find((s) => s.name === core.server)?.private_addr?.ip;
+  const upstream = !gw || !core.server ? undefined : gw.spec.server === core.server ? `127.0.0.1:${core.port}` : coreIp && `${coreIp}:${core.port}`;
+  const suffixes = [...new Set(status?.routes.map((r) => r.spec.hostname.split(".").slice(1).join(".")).filter(Boolean))];
+  const submit = () => {
+    if (!upstream) return;
+    onDone();
+    actions.plan({ title: "控制面开放到公网", changes: [{ op: "upsert_route", spec: { hostname: hostname.trim().toLowerCase(), upstream, gateway } }] });
+  };
+  return (
+    <div className="grid gap-3 rounded-lg border p-3">
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="网关" htmlFor="core-gateway">
+          <Picker id="core-gateway" value={gateway} options={gateways.map((g) => ({ value: g.name, label: g.name, hint: g.spec.server }))} onChange={setGateway} />
+        </Field>
+        <Field label="域名" htmlFor="core-hostname">
+          <Input id="core-hostname" placeholder="wharf.example.com" value={hostname} onChange={(e) => setHostname(e.target.value)} />
+        </Field>
+      </div>
+      {!hostname && <DomainChips suggestions={suffixes.map((s) => `wharf.${s}`)} onPick={setHostname} />}
+      {gw && !upstream && <Notice kind="warn">{core.server ? `${core.server} 没有内网地址` : "找不到控制面所在的服务器"}</Notice>}
+      {upstream && <div className="font-mono text-xs text-muted-foreground">→ {upstream}</div>}
+      <Button className="w-fit" disabled={!hostname.trim() || !upstream} onClick={submit}>
+        生成计划
+      </Button>
+    </div>
   );
 }

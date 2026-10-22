@@ -351,6 +351,29 @@ impl World {
     route.gateway.as_deref().or_else(|| self.default_gateway())
   }
 
+  /// 路由的上游地址：直接写的地址，或按服务算出来的。
+  pub fn route_upstream(
+    &self,
+    net: &crate::render::Net,
+    gateway_server: &str,
+    host: &str,
+    route: &RouteSpec,
+  ) -> Result<String, ApiError> {
+    if let Some(up) = &route.upstream {
+      return Ok(up.clone());
+    }
+    let port = self.route_port(route).ok_or_else(|| {
+      ApiError::invalid(format!("路由 {host} 没有可用的端口"))
+    })?;
+    crate::render::upstream(
+      self,
+      net,
+      gateway_server,
+      &route.service,
+      port,
+    )
+  }
+
   /// 路由指向的端口名。
   pub fn route_port<'a>(
     &'a self,
@@ -436,13 +459,7 @@ impl World {
           }
         }
         (None, Some(up)) => {
-          let valid = p.port.is_none()
-            && up.rsplit_once(':').is_some_and(|(h, port)| {
-              !h.is_empty()
-                && port.parse::<u16>().is_ok()
-                && !h.chars().any(|c| c.is_whitespace() || c == '/')
-            });
-          if !valid {
+          if p.port.is_some() || !valid_upstream(up) {
             return bad(format!(
               "路径 {} 的上游 {up} 要写成 主机:端口，例如 127.0.0.1:8080",
               p.path
@@ -458,6 +475,29 @@ impl World {
       }
     }
     Ok(())
+  }
+
+  fn check_route_gateway(
+    &self,
+    host: &str,
+    route: &RouteSpec,
+  ) -> Result<(), ApiError> {
+    match self.route_gateway(route) {
+      None => Err(
+        ApiError::invalid(format!(
+          "路由 {host} 没有指定网关，也没有默认网关"
+        ))
+        .with_hint("先创建一个默认网关")
+        .suggest(
+          "wharf gateway add <name> --server <server> --default",
+        ),
+      ),
+      Some(gw) if !self.gateways.contains_key(gw) => Err(
+        ApiError::invalid(format!("路由 {host} 的网关 {gw} 不存在"))
+          .suggest("wharf gateway list"),
+      ),
+      Some(_) => Ok(()),
+    }
   }
 
   /// 整体校验。`joined` 是已经完成 join 的服务器。
@@ -522,6 +562,22 @@ impl World {
         crate::edge::validate_route(host, &route.spec)?;
         continue;
       }
+      self.check_route_gateway(host, &route.spec)?;
+      if let Some(up) = &route.spec.upstream {
+        if !route.spec.service.is_empty() || route.spec.port.is_some()
+        {
+          return Err(ApiError::invalid(format!(
+            "路由 {host}：服务和上游地址二选一"
+          )));
+        }
+        if !valid_upstream(up) {
+          return Err(ApiError::invalid(format!(
+            "路由 {host} 的上游 {up} 要写成 主机:端口，例如 127.0.0.1:8080"
+          )));
+        }
+        self.validate_paths(host, &route.spec)?;
+        continue;
+      }
       let Some(service) = self.services.get(&route.spec.service)
       else {
         return Err(
@@ -532,28 +588,6 @@ impl World {
           .suggest("wharf service list"),
         );
       };
-      match self.route_gateway(&route.spec) {
-        None => {
-          return Err(
-            ApiError::invalid(format!(
-              "路由 {host} 没有指定网关，也没有默认网关"
-            ))
-            .with_hint("先创建一个默认网关")
-            .suggest(
-              "wharf gateway add <name> --server <server> --default",
-            ),
-          );
-        }
-        Some(gw) if !self.gateways.contains_key(gw) => {
-          return Err(
-            ApiError::invalid(format!(
-              "路由 {host} 的网关 {gw} 不存在"
-            ))
-            .suggest("wharf gateway list"),
-          );
-        }
-        Some(_) => {}
-      }
       let Some(port) = self.route_port(&route.spec) else {
         let names: Vec<&str> = service
           .spec
@@ -975,6 +1009,15 @@ fn validate_service(
   Ok(())
 }
 
+/// `主机:端口`，主机里不能有空白和 `/`。
+fn valid_upstream(up: &str) -> bool {
+  up.rsplit_once(':').is_some_and(|(h, port)| {
+    !h.is_empty()
+      && port.parse::<u16>().is_ok()
+      && !h.chars().any(|c| c.is_whitespace() || c == '/')
+  })
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -1047,6 +1090,7 @@ mod tests {
           gateway: None,
           auth: false,
           paths: vec![],
+          upstream: None,
         },
       },
     ])
@@ -1070,6 +1114,19 @@ mod tests {
     }])
     .unwrap();
     w.validate().unwrap();
+    // 直接指向地址：不需要服务，和服务二选一。
+    let mut up = w.routes["who.example.com"].spec.clone();
+    up.hostname = "core.example.com".into();
+    up.service = String::new();
+    up.upstream = Some("127.0.0.1:7700".into());
+    w.apply_changes(&[Change::UpsertRoute { spec: up.clone() }])
+      .unwrap();
+    w.validate().unwrap();
+    up.service = "who".into();
+    w.apply_changes(&[Change::UpsertRoute { spec: up }])
+      .unwrap();
+    let err = w.validate().unwrap_err();
+    assert!(err.message.contains("二选一"), "{}", err.message);
   }
 
   #[test]

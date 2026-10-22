@@ -321,8 +321,12 @@ impl GatewayTls {
 pub struct RouteSpec {
   /// 例如 `blog.example.com`。
   pub hostname: String,
-  /// 目标服务或边缘应用。
+  /// 目标服务或边缘应用。和 `upstream` 二选一。
+  #[serde(default, skip_serializing_if = "String::is_empty")]
   pub service: String,
+  /// 不归 Wharf 管的上游，写网关所在机器能访问到的 `主机:端口`，例如 `127.0.0.1:7700`。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub upstream: Option<String>,
   /// 目标端口名。服务只有一个端口时可以不填；边缘应用不填。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub port: Option<String>,

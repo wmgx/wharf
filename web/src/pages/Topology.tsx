@@ -123,7 +123,7 @@ function build(status: Status): { nodes: Node[]; edges: Edge[] } {
       id,
       type: "box",
       position: { x: -300, y: i * 74 },
-      data: { kind: "域名", name: r.spec.hostname, cls: "route", to: `/services/${r.spec.service}` },
+      data: { kind: "域名", name: r.spec.hostname, cls: "route", to: r.spec.service ? `/services/${r.spec.service}` : undefined },
     });
     if (!r.gateway) return;
     edges.push({
@@ -135,6 +135,7 @@ function build(status: Status): { nodes: Node[]; edges: Edge[] } {
       animated: true,
       style: { stroke: go },
     });
+    if (!r.spec.service) return;
     const gwServer = status.gateways.find((g) => g.name === r.gateway)?.spec.server;
     const svcServer = serverOf.get(r.spec.service);
     const same = gwServer === svcServer;

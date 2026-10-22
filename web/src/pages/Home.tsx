@@ -39,19 +39,20 @@ export function Home() {
       ) : (
         <div className="grid grid-cols-[repeat(auto-fill,minmax(260px,1fr))] gap-3">
           {status.routes.map((r, i) => {
-            const svc = byService.get(r.spec.service);
+            const svc = r.spec.service ? byService.get(r.spec.service) : undefined;
+            const label = r.spec.service || r.spec.upstream || "-";
             const { tone, text } = liveTone(svc?.live);
             return (
               <a className={card} style={{ animationDelay: `${i * 30}ms` } as CSSProperties} key={r.id} href={r.url} target="_blank" rel="noreferrer">
                 <div className="flex items-center gap-3">
-                  <Mark name={r.spec.service} url={r.url} />
+                  <Mark name={label} url={r.url} />
                   <div className="min-w-0">
-                    <div className="font-semibold">{r.spec.service}</div>
+                    <div className={r.spec.service ? "font-semibold" : "font-mono text-sm font-semibold"}>{label}</div>
                     <div className="truncate font-mono text-xs text-muted-foreground">{r.url.replace(/^https?:\/\//, "")}</div>
                   </div>
                 </div>
                 <div className="flex items-center gap-1.5">
-                  <StatusBadge tone={tone}>{text}</StatusBadge>
+                  {svc && <StatusBadge tone={tone}>{text}</StatusBadge>}
                   <ServerTag name={svc?.spec.server ?? "-"} />
                   <ArrowUpRightIcon className="ml-auto size-4 text-muted-foreground transition-transform group-hover:translate-x-0.5 group-hover:-translate-y-0.5 group-hover:text-primary" />
                 </div>

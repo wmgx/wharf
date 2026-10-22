@@ -13,7 +13,7 @@ use wharf_api_types::{
 
 use crate::{
   db::to_time,
-  render::{self, Net},
+  render::Net,
   snapshot::{self, Snapshot},
   state::AppState,
   world::{World, gateway_project},
@@ -228,15 +228,9 @@ pub fn route_view(
   let gateway = world.route_gateway(&row.spec).map(str::to_string);
   let gw_spec = gateway.as_ref().and_then(|g| world.gateways.get(g));
   let upstream = gw_spec.and_then(|g| {
-    let port = world.route_port(&row.spec)?;
-    render::upstream(
-      world,
-      net,
-      &g.spec.server,
-      &row.spec.service,
-      port,
-    )
-    .ok()
+    world
+      .route_upstream(net, &g.spec.server, hostname, &row.spec)
+      .ok()
   });
   let url = match gw_spec.map(|g| &g.spec) {
     Some(g) if g.tls == GatewayTls::Off => {

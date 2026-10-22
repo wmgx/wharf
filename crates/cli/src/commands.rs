@@ -1040,7 +1040,7 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
           println!(
             "{}  →  {}  经 {}",
             r.url,
-            r.spec.service,
+            r.spec.upstream.as_deref().unwrap_or(&r.spec.service),
             r.gateway.as_deref().unwrap_or("-")
           );
           for p in &r.spec.paths {
@@ -1060,6 +1060,7 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
     RouteCmd::Add {
       hostname,
       service,
+      upstream,
       port,
       gateway,
       auth,
@@ -1068,7 +1069,8 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
     } => {
       let spec = RouteSpec {
         hostname,
-        service,
+        service: service.unwrap_or_default(),
+        upstream,
         port,
         gateway,
         auth,
