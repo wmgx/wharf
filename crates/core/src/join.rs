@@ -323,7 +323,11 @@ if ! docker info >/dev/null 2>&1; then
   fi
 fi
 step "拉取 $IMAGE"
-run 900 $DOCKER pull "$IMAGE" || fail "拉取镜像失败。国内机器可以设置 WHARF_AGENT_IMAGE 换成镜像站地址"
+if ! run 900 $DOCKER pull "$IMAGE"; then
+  $DOCKER image inspect "$IMAGE" >/dev/null 2>&1 \
+    || fail "拉取镜像失败。国内机器可以设置 WHARF_AGENT_IMAGE 换成镜像站地址"
+  printf '拉取失败，用本机已有的镜像\n'
+fi
 
 step "加入 $CORE_URL"
 run 60 $DOCKER run --rm --network host -v "$DATA:$DATA" "$IMAGE" join "$CORE_URL" "$TOKEN" \
