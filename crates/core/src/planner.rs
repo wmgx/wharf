@@ -653,14 +653,17 @@ fn service_items(
           if state.hash.as_deref() != Some(hash.as_str()) =>
         {
           let before = json!({ "hash": state.hash, "containers": state.containers });
-          let reason = if state.hash.is_none() {
+          let adopting = svc.spec.adopt.is_some();
+          let reason = if state.hash.is_none() && adopting {
+            "接管服务器上的同名 compose 项目，配置一致时不重建容器"
+          } else if state.hash.is_none() {
             "服务器上已有同名 project，但不是 Wharf 部署的，将被接管重建"
           } else if changed(writes, KIND_SERVICE, name) {
             "配置变化，重建容器"
           } else {
             "漂移：服务器上的部署和配置不一致，重新部署"
           };
-          let risk = if state.hash.is_none() {
+          let risk = if state.hash.is_none() && !adopting {
             Risk::Destructive
           } else {
             Risk::Disruptive

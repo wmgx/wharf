@@ -141,12 +141,6 @@ impl Ops {
       AgentOp::ImportRead(target) => to_value(
         crate::adopt::read(&self.docker, &target, ctx).await?,
       ),
-      AgentOp::Retire(r) => {
-        check_project(&r.service)?;
-        let lock = self.lock_for(&r.service);
-        let _guard = lock.lock().await;
-        to_value(crate::adopt::retire(&self.docker, &r, ctx).await?)
-      }
       AgentOp::Unretire { items } => {
         crate::adopt::unretire(&self.docker, &items, ctx).await?;
         Ok(Value::Null)
@@ -239,6 +233,7 @@ impl Ops {
       containers: state.containers,
       images: self.docker.image_info(images, ctx).await,
       warnings,
+      retired: vec![],
     })
   }
 
@@ -250,7 +245,28 @@ impl Ops {
     self.docker.write_compose(&up.project, &up.compose)?;
     let mut warnings = Vec::new();
     let images = self.pull_all(up, ctx, &mut warnings).await?;
-    self.finish_up(up, &images, warnings, ctx).await
+    // 镜像拉好之后再停原来的容器，中断只有切换的那几秒。
+    let retired = match &up.retire {
+      Some(r) if r.service == up.project => {
+        crate::adopt::retire(&self.docker, r, ctx).await?
+      }
+      _ => vec![],
+    };
+    match self.finish_up(up, &images, warnings, ctx).await {
+      Ok(result) => Ok(ProjectUpResult { retired, ..result }),
+      Err(e) if !retired.is_empty() => {
+        ctx.say("启动失败，恢复原来的容器");
+        let _ = self.docker.down(&up.project, ctx).await;
+        if let Err(back) =
+          crate::adopt::unretire(&self.docker, &retired, ctx).await
+        {
+          ctx
+            .say(format!("恢复失败，需要手动处理：{}", back.message));
+        }
+        Err(e)
+      }
+      Err(e) => Err(e),
+    }
   }
 
   /// 先校验新配置，通过后再替换；容器在运行时热重载，失败就恢复旧配置。
@@ -323,6 +339,7 @@ impl Ops {
             containers: state.containers,
             images: self.docker.image_info(&images, ctx).await,
             warnings,
+            retired: vec![],
           })
         }
         Err(e) => Err(e),

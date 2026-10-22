@@ -150,9 +150,7 @@ pub enum AgentOp {
   Discover,
   /// 读取要导入的 compose 项目或容器的配置，结果是 [ImportRaw]。
   ImportRead(ImportTarget),
-  /// 接管前停掉原来的容器，结果是 `Vec<Retired>`。
-  Retire(Retire),
-  /// 部署失败时恢复 [AgentOp::Retire] 停掉的容器。
+  /// 恢复 [ProjectUp::retire] 停掉的容器。
   Unretire {
     items: Vec<Retired>,
   },
@@ -351,6 +349,9 @@ pub struct ProjectUp {
   /// 本机已有的镜像不再拉取（刚导入的服务，避免拉到新版本而重建容器）。
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub pull_missing_only: bool,
+  /// 导入时接管的原容器：镜像拉好之后、启动之前停掉，启动失败时恢复。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub retire: Option<Retire>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -420,6 +421,9 @@ pub struct ProjectUpResult {
   pub images: Vec<ImageInfo>,
   #[serde(default)]
   pub warnings: Vec<String>,
+  /// 这次停掉的原容器，容器起来后又退出时控制面用它恢复。
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub retired: Vec<Retired>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

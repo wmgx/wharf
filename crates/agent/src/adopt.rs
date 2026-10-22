@@ -54,7 +54,11 @@ pub async fn discover(
       .stdout
       .lines()
       .filter_map(|l| serde_json::from_str::<PsLine>(l).ok())
-      .filter(|ps| !ps.image.contains("wharf-agent"))
+      // Wharf 自己的 agent 和控制面不算。
+      .filter(|ps| {
+        !ps.image.contains("wharf-agent")
+          && !ps.image.contains("wharf-core")
+      })
       .map(|ps| {
         let project = labels(&ps.labels)
           .get(PROJECT_LABEL)

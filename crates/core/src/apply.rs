@@ -656,6 +656,7 @@ async fn run_step(
               hash: r.compose_hash,
               pull: snapshot::pull_policy(&world.servers[server]),
               pull_missing_only: false,
+              retire: None,
             },
             caddyfile: r.config,
             caddyfile_hash: r.config_hash,
@@ -915,30 +916,21 @@ async fn service_up(
   let (compose, hash) =
     snapshot::service_resolved(world, &net, service, &snap.secrets)?;
   let template = snapshot::service_template(world, &net, service)?;
-  // 导入的服务：先停掉原来的容器，部署失败再恢复。
-  let retired: Vec<Retired> = match &row.spec.adopt {
-    Some(a) if a.project.is_some() || !a.containers.is_empty() => {
-      state
-        .hub
-        .call(
-          server,
-          AgentOp::Retire(Retire {
-            service: service.to_string(),
-            project: a.project.clone(),
-            containers: a.containers.clone(),
-          }),
-          SHORT_TIMEOUT,
-          Some(progress.clone()),
-          cancel,
-        )
-        .await?
-    }
-    _ => vec![],
-  };
+  // 导入的服务：agent 拉好镜像后停掉原来的容器，启动失败时由 agent 恢复。
+  let retire = row
+    .spec
+    .adopt
+    .as_ref()
+    .filter(|a| a.project.is_some() || !a.containers.is_empty())
+    .map(|a| Retire {
+      service: service.to_string(),
+      project: a.project.clone(),
+      containers: a.containers.clone(),
+    });
   // 刚导入时本机已有的镜像不拉取，避免拉到新版本而重建容器。
   let pull_missing_only = row.spec.adopt.is_some()
     && !has_deployment(state, service).await?;
-  let up: Result<ProjectUpResult, ApiError> = state
+  let result: ProjectUpResult = state
     .hub
     .call(
       server,
@@ -948,21 +940,14 @@ async fn service_up(
         hash: hash.clone(),
         pull: snapshot::pull_policy(&world.servers[server]),
         pull_missing_only,
+        retire,
       }),
       SERVICE_UP_TIMEOUT,
       Some(progress.clone()),
       cancel,
     )
-    .await;
-  let result = match up {
-    Ok(result) => result,
-    Err(e) => {
-      if !retired.is_empty() {
-        restore(state, server, service, retired, &progress).await;
-      }
-      return Err(e);
-    }
-  };
+    .await?;
+  let retired = result.retired.clone();
   for warning in &result.warnings {
     progress(format!("提醒：{warning}"));
   }
