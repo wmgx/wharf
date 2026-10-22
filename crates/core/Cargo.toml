@@ -26,6 +26,7 @@ argon2 = { version = "=0.6.0", default-features = false, features = ["alloc", "p
 flate2 = "=1.1.10"
 getrandom.workspace = true
 hex.workspace = true
+if-addrs.workspace = true
 rpassword = "=7.5.4"
 rusqlite.workspace = true
 serde.workspace = true

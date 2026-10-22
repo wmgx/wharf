@@ -1,4 +1,5 @@
-import { AnchorIcon, BoxesIcon, CloudIcon, ChevronsUpDownIcon, KeyRoundIcon, LogOutIcon, MoonIcon, NetworkIcon, SunIcon, WaypointsIcon } from "lucide-react";
+import { AnchorIcon, PlusIcon, BoxesIcon, CloudIcon, ChevronsUpDownIcon, KeyRoundIcon, LogOutIcon, MoonIcon, NetworkIcon, SunIcon, WaypointsIcon } from "lucide-react";
+import { useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import {
@@ -6,6 +7,7 @@ import {
   SidebarContent,
   SidebarFooter,
   SidebarGroup,
+  SidebarGroupAction,
   SidebarGroupContent,
   SidebarGroupLabel,
   SidebarHeader,
@@ -19,6 +21,7 @@ import {
 import { useStatus } from "@/status";
 import { useTheme } from "@/theme";
 import { useActions } from "./actions";
+import { AddServer } from "./add-server";
 import { Dot, serverText, serverTone } from "./common";
 
 export function Logo({ className = "size-8" }: { className?: string }) {
@@ -38,6 +41,7 @@ export function AppSidebar({ username, onLogout }: { username: string; onLogout:
   const { pathname } = useLocation();
   const { theme, toggle } = useTheme();
   const actions = useActions();
+  const [adding, setAdding] = useState(false);
 
   const groups = [
     {
@@ -103,6 +107,9 @@ export function AppSidebar({ username, onLogout }: { username: string; onLogout:
 
         <SidebarGroup className="mt-auto">
           <SidebarGroupLabel>服务器</SidebarGroupLabel>
+          <SidebarGroupAction title="加服务器" onClick={() => setAdding(true)}>
+            <PlusIcon />
+          </SidebarGroupAction>
           <SidebarGroupContent>
             <SidebarMenu>
               {!status && <SidebarMenuSkeleton showIcon />}
@@ -123,6 +130,7 @@ export function AppSidebar({ username, onLogout }: { username: string; onLogout:
             </SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>
+        <AddServer open={adding} onClose={() => setAdding(false)} />
       </SidebarContent>
 
       <SidebarFooter>

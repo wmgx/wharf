@@ -18,6 +18,7 @@ mod edge_plan;
 mod edge_sync;
 mod hub;
 mod jobs;
+mod join;
 mod login;
 mod logs_stream;
 mod migrate;
@@ -118,6 +119,7 @@ async fn main() -> anyhow::Result<()> {
       .public_url
       .map(|u| u.trim_end_matches('/').to_string()),
     agent_image: cli.agent_image,
+    listen_port: cli.listen.port(),
     data_dir: cli.data_dir.clone(),
     downloads: Default::default(),
     started: std::time::Instant::now(),

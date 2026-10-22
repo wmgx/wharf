@@ -203,6 +203,9 @@ pub enum ServerCmd {
     /// 已加入的服务器重新生成加入命令（换机器、重装 agent 时）。
     #[arg(long)]
     rejoin: bool,
+    /// agent 连接控制面用的地址，例如 https://wharf.example.com。不给时用控制面的启动配置。
+    #[arg(long)]
+    core_url: Option<String>,
   },
   /// 修改服务器设置。
   Set {

@@ -432,11 +432,15 @@ async fn server(
       out(j, &v, pretty);
       Ok(())
     }
-    ServerCmd::Add { name, rejoin } => {
+    ServerCmd::Add {
+      name,
+      rejoin,
+      core_url,
+    } => {
       let v: JoinInfo = c
         .post(
           "/api/servers",
-          &json!({ "name": name, "rejoin": rejoin }),
+          &json!({ "name": name, "rejoin": rejoin, "core_url": core_url }),
         )
         .await?;
       out(j, &v, |v| {

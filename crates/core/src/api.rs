@@ -59,6 +59,8 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route("/healthz", get(|| async { "ok" }))
     .route("/agent/ws", get(hub::agent_ws))
     .route("/agent/join", post(agent_join))
+    .route("/join.sh", get(crate::join::script))
+    .route("/api/core/addresses", get(crate::join::addresses))
     .route("/api/session", get(crate::login::show))
     .route("/api/setup", post(crate::login::setup))
     .route("/api/login", post(crate::login::login))
@@ -215,6 +217,9 @@ struct AddServer {
   name: String,
   #[serde(default)]
   rejoin: bool,
+  /// agent 连接控制面用的地址，不给时用启动配置或请求的 Host。
+  #[serde(default)]
+  core_url: Option<String>,
 }
 
 const JOIN_TTL_HOURS: i64 = 24;
@@ -227,6 +232,11 @@ async fn add_server(
 ) -> ApiResult<JoinInfo> {
   auth.require(TokenScope::ApplyAll)?;
   validate_name("服务器", &req.name)?;
+  let core_url =
+    match req.core_url.as_deref().filter(|u| !u.trim().is_empty()) {
+      Some(u) => Some(crate::join::check_core_url(u)?),
+      None => None,
+    };
   let token = auth::new_token().replacen("wh_", "wj_", 1);
   let hash = auth::hash_token(&token);
   let expires = Utc::now() + chrono::Duration::hours(JOIN_TTL_HOURS);
@@ -282,14 +292,20 @@ async fn add_server(
     })
     .await?;
 
-  let core_url = s.public_url.clone().unwrap_or_else(|| {
-    let host = headers
-      .get(axum::http::header::HOST)
-      .and_then(|h| h.to_str().ok())
-      .unwrap_or("127.0.0.1:7700");
-    format!("http://{host}")
-  });
+  let core_url = core_url
+    .or_else(|| s.public_url.clone())
+    .unwrap_or_else(|| {
+      let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("127.0.0.1:7700");
+      format!("http://{host}")
+    });
   let commands = BTreeMap::from([
+    (
+      "script".to_string(),
+      crate::join::script_command(&core_url, &token),
+    ),
     (
       "docker".to_string(),
       format!(
@@ -311,6 +327,7 @@ async fn add_server(
     join_token: token,
     expires_at: expires,
     commands,
+    core_url,
   }))
 }
 

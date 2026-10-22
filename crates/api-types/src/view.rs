@@ -232,8 +232,19 @@ pub struct JoinInfo {
   /// 一次性加入凭据，24 小时内有效，用过即失效。
   pub join_token: String,
   pub expires_at: DateTime<Utc>,
-  /// 例如 `{ "docker": "docker run ...", "binary": "wharf-agent join ..." }`。
+  /// 例如 `{ "script": "curl ... | sh ...", "docker": "docker run ...", "binary": "wharf-agent join ..." }`。
   pub commands: BTreeMap<String, String>,
+  /// 命令里 agent 连接控制面用的地址。
+  #[serde(default)]
+  pub core_url: String,
+}
+
+/// 控制面的候选地址，加服务器时选一个给 agent 连。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CoreAddress {
+  pub url: String,
+  /// configured（启动时配置的对外地址）、public、tailscale、lan。
+  pub kind: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

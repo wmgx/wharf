@@ -2,6 +2,19 @@
 
 export type PrivateNetwork = "tailscale" | "overlay" | "lan";
 
+export interface CoreAddress {
+  url: string;
+  kind: "configured" | "public" | "tailscale" | "lan" | string;
+}
+
+export interface JoinInfo {
+  server: string;
+  join_token: string;
+  expires_at: string;
+  commands: Record<string, string>;
+  core_url: string;
+}
+
 export interface PrivateAddr {
   ip: string;
   network: PrivateNetwork;
