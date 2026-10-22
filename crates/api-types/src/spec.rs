@@ -217,6 +217,23 @@ pub struct ServiceSpec {
   /// 每天自动备份 `/srv/<服务>/` 到另一台服务器（restic）。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub backup: Option<BackupSpec>,
+  /// 导入时接管的现有容器。部署前停掉它们，失败时恢复；之后再部署时已经没有可接管的，不起作用。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub adopt: Option<AdoptSpec>,
+}
+
+/// 导入前容器是怎么跑的。和服务同名的 compose 项目不需要接管，Wharf 直接沿用。
+#[derive(
+  Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(deny_unknown_fields)]
+pub struct AdoptSpec {
+  /// 原来的 compose 项目名（和服务名不同时）：停掉它的容器。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub project: Option<String>,
+  /// 原来 `docker run` 起的容器：改名为 `<名字>-wharf-old` 并停掉，留着回退用。
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub containers: Vec<String>,
 }
 
 #[derive(

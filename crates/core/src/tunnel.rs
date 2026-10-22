@@ -183,6 +183,7 @@ pub async fn sync(
         compose,
         hash: r.compose_hash.clone(),
         pull: snapshot::pull_policy(&world.servers[server]),
+        pull_missing_only: false,
       }),
       CONNECTOR_TIMEOUT,
       Some(progress.clone()),

@@ -1038,6 +1038,7 @@ mod tests {
   fn image_service(server: &str) -> ServiceSpec {
     ServiceSpec {
       backup: None,
+      adopt: None,
       server: server.into(),
       source: Source::Image("traefik/whoami".into()),
       ports: vec![PortSpec {

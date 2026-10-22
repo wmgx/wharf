@@ -146,6 +146,83 @@ pub enum AgentOp {
   Build(Box<BuildJob>),
   /// 取代码，在 node 容器里执行 wrangler 发布 Worker / Pages，结果是 [EdgeBuildResult]。
   EdgeBuild(Box<EdgeBuildJob>),
+  /// 列出本机的全部容器（不含 agent 自己），结果是 `Vec<FoundContainer>`。
+  Discover,
+  /// 读取要导入的 compose 项目或容器的配置，结果是 [ImportRaw]。
+  ImportRead(ImportTarget),
+  /// 接管前停掉原来的容器，结果是 `Vec<Retired>`。
+  Retire(Retire),
+  /// 部署失败时恢复 [AgentOp::Retire] 停掉的容器。
+  Unretire {
+    items: Vec<Retired>,
+  },
+}
+
+/// 服务器上的一个容器。
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct FoundContainer {
+  pub name: String,
+  pub image: String,
+  pub state: String,
+  #[serde(default)]
+  pub status: String,
+  /// 例如 `0.0.0.0:8080->80/tcp`。
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub ports: Vec<String>,
+  /// 所属的 compose 项目，`docker run` 起的为空。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub project: Option<String>,
+}
+
+/// 导入哪个：compose 项目或单个容器，二选一。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportTarget {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub project: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub container: Option<String>,
+}
+
+/// 原样读出的配置，由控制面转换成服务。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ImportRaw {
+  /// compose 项目：`docker compose config` 的输出（相对路径、`.env` 已解析）。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub compose: Option<String>,
+  /// 单个容器：`docker inspect` 的结果。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub inspect: Option<serde_json::Value>,
+  /// 单个容器的镜像：`docker image inspect` 的结果，用来去掉镜像自带的默认值。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub image_inspect: Option<serde_json::Value>,
+  /// 读取时的提醒，例如 compose 里引用了没有设置的变量。
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Retire {
+  /// 接管后的服务名（也是新的 compose 项目名），属于它的容器不动。
+  pub service: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub project: Option<String>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub containers: Vec<String>,
+}
+
+/// 被停掉的一个容器，恢复时用。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Retired {
+  pub id: String,
+  pub name: String,
+  /// 改名后的名字（单个容器）。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub renamed: Option<String>,
+  /// 原来的重启策略。
+  pub restart: String,
+  pub was_running: bool,
 }
 
 /// 一次性口令。Debug 输出时隐藏，防止被打进日志。
@@ -271,6 +348,9 @@ pub struct ProjectUp {
   /// 控制面算出的指纹，agent 原样保存，用于漂移判断。
   pub hash: String,
   pub pull: PullPolicy,
+  /// 本机已有的镜像不再拉取（刚导入的服务，避免拉到新版本而重建容器）。
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub pull_missing_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

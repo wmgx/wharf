@@ -337,7 +337,7 @@ step "启动 agent"
 $DOCKER rm -f wharf-agent >/dev/null 2>&1 || true
 $DOCKER run -d --name wharf-agent --restart unless-stopped --network host \
   -v /var/run/docker.sock:/var/run/docker.sock -v "$DATA:$DATA" -v /srv:/srv \
-  "$IMAGE" >/dev/null
+  -e WHARF_SELF_IMAGE="$IMAGE" "$IMAGE" >/dev/null
 
 printf '\n完成，回到页面查看连接状态。\n'
 "#;

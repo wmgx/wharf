@@ -523,6 +523,7 @@ mod tests {
   fn spec() -> ServiceSpec {
     ServiceSpec {
       backup: None,
+      adopt: None,
       server: "node1".into(),
       source: Source::Image("traefik/whoami".into()),
       ports: vec![PortSpec {

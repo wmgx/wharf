@@ -357,3 +357,39 @@ pub struct RestoreRequest {
   /// 必须是 `service/<名称>`：恢复会覆盖现有数据。
   pub confirm: String,
 }
+
+/// `GET /api/servers/{name}/unmanaged`：服务器上还没纳管的一组容器，
+/// 是一个 compose 项目或一个 `docker run` 起的容器。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct Unmanaged {
+  pub server: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub project: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub container: Option<String>,
+  pub containers: Vec<crate::agent::FoundContainer>,
+  /// 导入时默认的服务名。
+  pub name: String,
+}
+
+/// `POST /api/import`：compose 项目和容器二选一。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ImportRequest {
+  pub server: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub project: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub container: Option<String>,
+  /// 服务名，不填时由项目名或容器名得出。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub name: Option<String>,
+}
+
+/// 导入预览：用 `upsert_service` 提交即可。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ImportPreview {
+  pub name: String,
+  pub spec: ServiceSpec,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub warnings: Vec<String>,
+}

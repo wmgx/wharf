@@ -8,6 +8,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useStatus } from "@/status";
 import type { ServiceView } from "@/types";
+import { UnmanagedList } from "./containers";
 import { EdgeList } from "./edge";
 import { NewService } from "./NewService";
 
@@ -78,6 +79,7 @@ export function Services() {
           </Table>
         </div>
       )}
+      <UnmanagedList />
       <EdgeList />
       <NewService
         open={creating}

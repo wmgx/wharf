@@ -17,6 +17,8 @@ mod edge_api;
 mod edge_plan;
 mod edge_sync;
 mod hub;
+mod import;
+mod import_api;
 mod jobs;
 mod join;
 mod login;

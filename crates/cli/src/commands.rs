@@ -15,8 +15,9 @@ use wharf_api_types::{
   },
   view::{
     AccountView, BackupsView, CreatedToken, DeploymentView,
-    GatewayView, JoinInfo, RestoreRequest, RollbackTarget, RouteView,
-    SecretView, ServerView, ServiceView, Status, TokenView,
+    GatewayView, ImportPreview, ImportRequest, JoinInfo,
+    RestoreRequest, RollbackTarget, RouteView, SecretView,
+    ServerView, ServiceView, Status, TokenView, Unmanaged,
   },
 };
 
@@ -643,6 +644,74 @@ async fn service(
       )
       .await
     }
+    ServiceCmd::Discover { server } => {
+      let v: Vec<Unmanaged> = c
+        .get(&format!("/api/servers/{}/unmanaged", seg(&server)))
+        .await?;
+      out(j, &v, |v| {
+        if v.is_empty() {
+          println!("{server} 上没有未纳管的容器");
+        }
+        for u in v {
+          let (kind, what) = match (&u.project, &u.container) {
+            (Some(p), _) => ("--project", p.as_str()),
+            (_, Some(c)) => ("--container", c.as_str()),
+            _ => continue,
+          };
+          println!("{kind} {what}");
+          for c in &u.containers {
+            println!(
+              "    {:<24} {:<10} {}",
+              c.name, c.state, c.image
+            );
+          }
+        }
+      });
+      Ok(())
+    }
+    ServiceCmd::Import {
+      server,
+      project,
+      container,
+      name,
+      print,
+      apply,
+    } => {
+      let v: ImportPreview = c
+        .post(
+          "/api/import",
+          &ImportRequest {
+            server,
+            project,
+            container,
+            name,
+          },
+        )
+        .await?;
+      if !j {
+        println!("导入为服务 {}", v.name);
+        for w in &v.warnings {
+          println!("  提醒：{w}");
+        }
+        if print
+          && let Source::Compose {
+            content: Some(c), ..
+          } = &v.spec.source
+        {
+          println!("{c}");
+        }
+      }
+      changes(
+        c,
+        vec![Change::UpsertService {
+          name: v.name,
+          spec: v.spec,
+        }],
+        apply,
+        j,
+      )
+      .await
+    }
     ServiceCmd::Rollback { name, to, apply } => {
       let path = match to {
         Some(id) => {
@@ -784,6 +853,7 @@ async fn service(
             env: BTreeMap::new(),
             volumes: vec![],
             backup: None,
+            adopt: None,
           }
         }
       };

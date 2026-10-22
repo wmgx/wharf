@@ -19,7 +19,10 @@ use tokio::sync::OwnedMutexGuard;
 use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
   ApiError, ErrorCode,
-  agent::{AgentOp, GatewayApply, ProjectUp, ProjectUpResult},
+  agent::{
+    AgentOp, GatewayApply, ProjectUp, ProjectUpResult, Retire,
+    Retired,
+  },
   plan::{
     ApplyRequest, ApplyResponse, Plan, PlanStatus, Run, RunStatus,
     RunStep, StepStatus,
@@ -652,6 +655,7 @@ async fn run_step(
               compose: r.compose,
               hash: r.compose_hash,
               pull: snapshot::pull_policy(&world.servers[server]),
+              pull_missing_only: false,
             },
             caddyfile: r.config,
             caddyfile_hash: r.config_hash,
@@ -911,7 +915,30 @@ async fn service_up(
   let (compose, hash) =
     snapshot::service_resolved(world, &net, service, &snap.secrets)?;
   let template = snapshot::service_template(world, &net, service)?;
-  let result: ProjectUpResult = state
+  // 导入的服务：先停掉原来的容器，部署失败再恢复。
+  let retired: Vec<Retired> = match &row.spec.adopt {
+    Some(a) if a.project.is_some() || !a.containers.is_empty() => {
+      state
+        .hub
+        .call(
+          server,
+          AgentOp::Retire(Retire {
+            service: service.to_string(),
+            project: a.project.clone(),
+            containers: a.containers.clone(),
+          }),
+          SHORT_TIMEOUT,
+          Some(progress.clone()),
+          cancel,
+        )
+        .await?
+    }
+    _ => vec![],
+  };
+  // 刚导入时本机已有的镜像不拉取，避免拉到新版本而重建容器。
+  let pull_missing_only = row.spec.adopt.is_some()
+    && !has_deployment(state, service).await?;
+  let up: Result<ProjectUpResult, ApiError> = state
     .hub
     .call(
       server,
@@ -920,12 +947,22 @@ async fn service_up(
         compose,
         hash: hash.clone(),
         pull: snapshot::pull_policy(&world.servers[server]),
+        pull_missing_only,
       }),
       SERVICE_UP_TIMEOUT,
       Some(progress.clone()),
       cancel,
     )
-    .await?;
+    .await;
+  let result = match up {
+    Ok(result) => result,
+    Err(e) => {
+      if !retired.is_empty() {
+        restore(state, server, service, retired, &progress).await;
+      }
+      return Err(e);
+    }
+  };
   for warning in &result.warnings {
     progress(format!("提醒：{warning}"));
   }
@@ -943,11 +980,79 @@ async fn service_up(
     &result,
   )
   .await?;
-  ensure_running(
+  let running = ensure_running(
     &result,
     service,
     &format!("wharf service logs {service}"),
-  )
+  );
+  if running.is_err() && !retired.is_empty() {
+    restore(state, server, service, retired, &progress).await;
+  }
+  running
+}
+
+/// 接管失败：删掉新起的 project，恢复原来的容器。不受取消影响。
+async fn restore(
+  state: &AppState,
+  server: &str,
+  service: &str,
+  retired: Vec<Retired>,
+  progress: &ProgressFn,
+) {
+  progress("部署失败，恢复原来的容器".into());
+  let cancel = CancellationToken::new();
+  let down: Result<serde_json::Value, ApiError> = state
+    .hub
+    .call(
+      server,
+      AgentOp::ProjectDown {
+        project: service.to_string(),
+      },
+      SHORT_TIMEOUT,
+      Some(progress.clone()),
+      &cancel,
+    )
+    .await;
+  if let Err(e) = down {
+    progress(format!("删除新容器失败：{}", e.message));
+  }
+  let back: Result<serde_json::Value, ApiError> = state
+    .hub
+    .call(
+      server,
+      AgentOp::Unretire { items: retired },
+      SHORT_TIMEOUT,
+      Some(progress.clone()),
+      &cancel,
+    )
+    .await;
+  match back {
+    Ok(_) => progress("已恢复原来的容器".into()),
+    Err(e) => progress(format!(
+      "恢复原来的容器失败，需要手动处理：{}",
+      e.message
+    )),
+  }
+}
+
+async fn has_deployment(
+  state: &AppState,
+  service: &str,
+) -> Result<bool, ApiError> {
+  let service = service.to_string();
+  state
+    .db
+    .call(move |c| {
+      c.query_row(
+        "SELECT 1 FROM deployments WHERE service = ?1 LIMIT 1",
+        params![service],
+        |_| Ok(()),
+      )
+      .optional()
+      .map(|r| r.is_some())
+      .map_err(sql_err)
+    })
+    .await
 }
 
 struct Deployed<'a> {

@@ -135,6 +135,22 @@ impl Ops {
         crate::build::run(&self.docker, &self.core_url, &job, ctx)
           .await
       }
+      AgentOp::Discover => {
+        to_value(crate::adopt::discover(&self.docker, ctx).await?)
+      }
+      AgentOp::ImportRead(target) => to_value(
+        crate::adopt::read(&self.docker, &target, ctx).await?,
+      ),
+      AgentOp::Retire(r) => {
+        check_project(&r.service)?;
+        let lock = self.lock_for(&r.service);
+        let _guard = lock.lock().await;
+        to_value(crate::adopt::retire(&self.docker, &r, ctx).await?)
+      }
+      AgentOp::Unretire { items } => {
+        crate::adopt::unretire(&self.docker, &items, ctx).await?;
+        Ok(Value::Null)
+      }
       AgentOp::EdgeBuild(job) => {
         let lock = self.lock_for(&format!("edge/{}", job.app));
         let _guard = lock.lock().await;
@@ -189,6 +205,11 @@ impl Ops {
   ) -> Result<Vec<String>, ApiError> {
     let images = self.docker.images(&up.project, ctx).await?;
     for image in &images {
+      if up.pull_missing_only
+        && self.docker.image_exists(image, ctx).await
+      {
+        continue;
+      }
       // 本机构建的镜像不拉取，必须已经构建好。
       if image.starts_with(BUILD_IMAGE_PREFIX) {
         if !self.docker.image_exists(image, ctx).await {

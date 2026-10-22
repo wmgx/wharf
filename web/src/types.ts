@@ -87,6 +87,32 @@ export interface ServiceSpec {
   volumes?: VolumeSpec[];
   /** 每天自动备份到另一台服务器。 */
   backup?: { to: string };
+  /** 导入时接管的现有容器。 */
+  adopt?: { project?: string; containers?: string[] };
+}
+
+export interface FoundContainer {
+  name: string;
+  image: string;
+  state: string;
+  status: string;
+  ports?: string[];
+  project?: string;
+}
+
+/** 服务器上没纳管的一个 compose 项目或单个容器。 */
+export interface Unmanaged {
+  server: string;
+  project?: string;
+  container?: string;
+  containers: FoundContainer[];
+  name: string;
+}
+
+export interface ImportPreview {
+  name: string;
+  spec: ServiceSpec;
+  warnings?: string[];
 }
 
 export interface ContainerInfo {

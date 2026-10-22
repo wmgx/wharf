@@ -214,6 +214,7 @@ async fn ensure_server(
         compose,
         hash,
         pull: snapshot::pull_policy(&snap.world.servers[&w.target]),
+        pull_missing_only: false,
       }),
       SERVER_TIMEOUT,
       Some(progress.clone()),

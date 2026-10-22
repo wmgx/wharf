@@ -278,6 +278,32 @@ pub enum ServiceCmd {
     #[command(flatten)]
     apply: ApplyFlags,
   },
+  /// 列出服务器上还没纳管的容器（compose 项目或 `docker run` 起的容器）。
+  Discover {
+    server: String,
+  },
+  /// 把服务器上已有的 compose 项目或容器导入成服务。
+  Import {
+    server: String,
+    /// compose 项目名。
+    #[arg(
+      long,
+      conflicts_with = "container",
+      required_unless_present = "container"
+    )]
+    project: Option<String>,
+    /// `docker run` 起的容器名。
+    #[arg(long)]
+    container: Option<String>,
+    /// 服务名，不填时由项目名或容器名得出。和原 compose 项目同名时不重建容器。
+    #[arg(long)]
+    name: Option<String>,
+    /// 打印转换出的 compose（可能含明文的环境变量）。
+    #[arg(long)]
+    print: bool,
+    #[command(flatten)]
+    apply: ApplyFlags,
+  },
   /// 新建或更新服务。已存在的服务只修改给出的参数。
   Deploy {
     name: String,

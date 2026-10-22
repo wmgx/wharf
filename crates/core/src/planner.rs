@@ -411,6 +411,39 @@ fn config_items(
       (KIND_SERVICE, Action::Delete) => {
         (Risk::Destructive, "删除服务（数据目录保留）".to_string())
       }
+      (KIND_SERVICE, Action::Create)
+        if desired
+          .services
+          .get(name)
+          .and_then(|r| r.spec.adopt.as_ref())
+          .is_some() =>
+      {
+        let adopt = desired.services[name].spec.adopt.as_ref();
+        match adopt.and_then(|a| a.project.as_deref()) {
+          Some(project) => (
+            Risk::Disruptive,
+            format!(
+              "导入：停掉原来的 compose 项目 {project}，用新名字重新创建容器"
+            ),
+          ),
+          None if adopt.is_some_and(|a| !a.containers.is_empty()) => {
+            (
+              Risk::Disruptive,
+              format!(
+                "导入：原来的容器 {} 改名停掉（失败时恢复），重新创建",
+                adopt
+                  .map(|a| a.containers.join("、"))
+                  .unwrap_or_default()
+              ),
+            )
+          }
+          None => (
+            Risk::Safe,
+            "导入：沿用同名 compose 项目，配置一致时不重建容器"
+              .to_string(),
+          ),
+        }
+      }
       (KIND_GATEWAY, Action::Delete) => {
         (Risk::Disruptive, "删除网关".to_string())
       }
