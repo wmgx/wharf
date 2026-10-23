@@ -429,11 +429,11 @@ pub fn backup_server_compose(
 /// 备份服务器上 rest-server 的 project 名。
 pub const BACKUP_PROJECT: &str = "wharf-backup";
 
-/// 路由的上游地址。网关和服务在同一台机器上用 127.0.0.1，否则用服务所在机器的内网地址。
+/// 路由的上游地址：同机用 127.0.0.1，能直连用服务所在机器的内网地址，否则走反向隧道。
 pub fn upstream(
   world: &World,
   net: &Net,
-  gateway_server: &str,
+  gateway: &GatewaySpec,
   service: &str,
   port: &str,
   mode: wharf_api_types::spec::LinkMode,
@@ -447,11 +447,11 @@ pub fn upstream(
     ))
   })?;
   use crate::link::{Choice, choose, tunnel_upstream};
-  Ok(match choose(world, net, gateway_server, service, mode)? {
+  Ok(match choose(world, net, gateway, service, mode)? {
     Choice::Local => format!("127.0.0.1:{host_port}"),
     Choice::Direct(ip) => format!("{ip}:{host_port}"),
     Choice::Tunnel => {
-      tunnel_upstream(world, net, gateway_server, service, port)?
+      tunnel_upstream(world, net, &gateway.server, service, port)?
     }
   })
 }
@@ -489,10 +489,11 @@ fn frp_service(
   }
 }
 
-/// 网关所在机器上的 frps：隧道端口只绑 127.0.0.1，只允许 Wharf 的隧道端口范围。
+/// 网关所在机器上的 frps：只监听 127.0.0.1，由 Caddy 转发 websocket 进来；
+/// 隧道端口也只绑 127.0.0.1，只允许 Wharf 的隧道端口范围。
 pub fn frps_compose(project: &str) -> String {
   let config = format!(
-    "bindPort = {}\nproxyBindAddr = \"127.0.0.1\"\nallowPorts = [{{ start = 30000, end = 39999 }}]\nauth.token = \"{{{{ .Envs.FRP_TOKEN }}}}\"\ntransport.tls.force = true\n",
+    "bindAddr = \"127.0.0.1\"\nbindPort = {}\nproxyBindAddr = \"127.0.0.1\"\nallowPorts = [{{ start = 30000, end = 39999 }}]\nauth.token = \"{{{{ .Envs.FRP_TOKEN }}}}\"\n",
     crate::link::FRPS_PORT
   );
   to_yaml(&ComposeFile {
@@ -504,7 +505,7 @@ pub fn frps_compose(project: &str) -> String {
   })
 }
 
-/// 服务所在机器上的 frpc：`proxies` 是 (名字, 本机端口, 隧道端口)。
+/// 服务所在机器上的 frpc：经网关的 Caddy 用 wss 连 frps。`proxies` 是 (名字, 本机端口, 隧道端口)。
 pub fn frpc_compose(
   project: &str,
   server_addr: &str,
@@ -512,7 +513,7 @@ pub fn frpc_compose(
   proxies: &[(String, u16, u16)],
 ) -> String {
   let mut config = format!(
-    "serverAddr = \"{server_addr}\"\nserverPort = {server_port}\nloginFailExit = false\nauth.token = \"{{{{ .Envs.FRP_TOKEN }}}}\"\ntransport.tls.enable = true\n"
+    "serverAddr = \"{server_addr}\"\nserverPort = {server_port}\nloginFailExit = false\nauth.token = \"{{{{ .Envs.FRP_TOKEN }}}}\"\ntransport.protocol = \"wss\"\n"
   );
   for (name, local, remote) in proxies {
     config.push_str(&format!(
@@ -543,6 +544,7 @@ pub fn caddyfile(
   spec: &GatewaySpec,
   sites: &[Site],
   auth: Option<&BasicAuth>,
+  link: Option<&str>,
 ) -> String {
   let mut out = format!(
     "# 由 Wharf 生成，不要手改。网关：{name}\n# 手写的站点放到 conf/extra.d/*.caddy\n{{\n\tadmin {CADDY_ADMIN}\n"
@@ -581,6 +583,18 @@ pub fn caddyfile(
       out.push_str(&format!("\treverse_proxy {path} {upstream}\n"));
     }
     out.push_str(&format!("\treverse_proxy {}\n}}\n", site.upstream));
+  }
+  // 反向隧道：frpc 按 IP 连进来，用 Caddy 自己签的证书。
+  if let Some(addr) = link {
+    let tls = match spec.tls {
+      GatewayTls::Auto => "\ttls internal\n",
+      _ => "",
+    };
+    out.push_str(&format!(
+      "\n{scheme}{addr} {{\n{tls}\treverse_proxy {} 127.0.0.1:{}\n}}\n",
+      crate::link::FRP_PATH,
+      crate::link::FRPS_PORT
+    ));
   }
   out
 }
@@ -700,7 +714,11 @@ mod tests {
         },
       ],
       BasicAuth::parse("admin $2b$12$abc").as_ref(),
+      Some("203.0.113.5"),
     );
+    assert!(out.contains(
+      "203.0.113.5 {\n\ttls internal\n\treverse_proxy /~!frp 127.0.0.1:7000\n}"
+    ));
     // 只有开了 auth 的站点带 basic_auth。
     let z = &out[out.find("z.example.com").unwrap()..];
     assert!(z.contains("basic_auth {\n\t\tadmin $2b$12$abc\n\t}"));
@@ -731,6 +749,7 @@ mod tests {
         auth: false,
         paths: vec![],
       }],
+      None,
       None,
     );
     assert!(out.contains("auto_https off"));

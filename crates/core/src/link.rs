@@ -1,7 +1,9 @@
 //! 链路：网关怎么连到服务（design 2.7.2）。
 //!
 //! 同机走 127.0.0.1；网关所在机器能连到服务所在机器的内网地址就直连；
-//! 否则走反向隧道：网关那台跑 frps（它一定能被连到），服务那台跑 frpc 主动连过去。
+//! 否则走反向隧道：网关那台跑 frps，只监听本机，由 Caddy 网关在 443 上转发；
+//! 服务那台跑 frpc，用 wss 主动连过去，不用另开端口。
+//! cloudflare_tunnel 网关的连接器本身就是主动往外连，不需要隧道：连不到就在服务那台建一个。
 
 use std::{
   collections::{BTreeMap, BTreeSet},
@@ -12,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
   ApiError,
   agent::{AgentOp, PROBE_PORT, ProbeTarget},
-  spec::{LinkMode, RouteSpec},
+  spec::{GatewayKind, GatewaySpec, LinkMode, RouteSpec},
 };
 
 use crate::{
@@ -26,7 +28,10 @@ use crate::{
 pub const SERVER_PROJECT: &str = "wharf-link";
 /// frps 和 frpc 之间的认证密钥，第一次部署隧道时自动生成。
 pub const TOKEN_SECRET: &str = "WHARF_LINK_TOKEN";
+/// frps 只监听 127.0.0.1，Caddy 把 `FRP_PATH` 转发过来。
 pub const FRPS_PORT: u16 = 7000;
+/// frp 的 websocket 路径，frps 认这个路径。
+pub const FRP_PATH: &str = "/~!frp";
 /// frps 只把隧道端口绑在 127.0.0.1，从这个范围里取。
 const TUNNEL_PORTS: std::ops::RangeInclusive<u16> = 30000..=39999;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -51,7 +56,7 @@ pub enum Choice {
 pub fn choose(
   world: &World,
   net: &Net,
-  gateway_server: &str,
+  gateway: &GatewaySpec,
   service: &str,
   mode: LinkMode,
 ) -> Result<Choice, ApiError> {
@@ -59,22 +64,33 @@ pub fn choose(
     ApiError::invalid(format!("服务 {service} 不存在"))
   })?;
   let server = &row.spec.server;
+  let gateway_server = &gateway.server;
   if server == gateway_server {
     return Ok(Choice::Local);
   }
-  if mode == LinkMode::Tunnel {
-    return Ok(Choice::Tunnel);
-  }
   let reach = net
     .reach
-    .get(&(gateway_server.to_string(), server.clone()))
+    .get(&(gateway_server.clone(), server.clone()))
     .copied();
-  Ok(match net.private.get(server) {
-    Some(addr) if reach != Some(false) => {
+  let choice = match net.private.get(server) {
+    Some(addr)
+      if mode != LinkMode::Tunnel && reach != Some(false) =>
+    {
       Choice::Direct(addr.ip.clone())
     }
     _ => Choice::Tunnel,
-  })
+  };
+  if choice == Choice::Tunnel
+    && gateway.kind == GatewayKind::CloudflareTunnel
+  {
+    return Err(ApiError::invalid(format!(
+      "服务 {service} 在 {server} 上，cloudflare_tunnel 网关所在的 {gateway_server} 连不到它"
+    ))
+    .with_hint(format!(
+      "在 {server} 上建一个 cloudflare_tunnel 网关，路由改用它，不需要开端口"
+    )));
+  }
+  Ok(choice)
 }
 
 /// 路由指向的 Wharf 服务：`(服务, 端口名)`，包括按路径转发的。
@@ -100,14 +116,15 @@ fn route_targets(
   out
 }
 
-/// 路由所在网关的服务器，以及它指向的服务。
+/// 路由所在的网关，以及它指向的服务。
 fn routes_by_gateway(
   world: &World,
-) -> impl Iterator<Item = (&str, &RouteSpec, Vec<(String, String)>)> {
+) -> impl Iterator<Item = (&GatewaySpec, &RouteSpec, Vec<(String, String)>)>
+{
   world.routes.values().filter_map(move |r| {
     let gw = world.route_gateway(&r.spec)?;
-    let server = world.gateways.get(gw)?.spec.server.as_str();
-    Some((server, &r.spec, route_targets(world, &r.spec)))
+    let spec = &world.gateways.get(gw)?.spec;
+    Some((spec, &r.spec, route_targets(world, &r.spec)))
   })
 }
 
@@ -127,12 +144,12 @@ pub fn tunnels(
   net: &Net,
 ) -> Result<Vec<Tunnel>, ApiError> {
   let mut wanted = BTreeSet::new();
-  for (gateway_server, route, targets) in routes_by_gateway(world) {
+  for (gateway, route, targets) in routes_by_gateway(world) {
     for (service, port) in targets {
-      if choose(world, net, gateway_server, &service, route.link)?
+      if choose(world, net, gateway, &service, route.link)?
         == Choice::Tunnel
       {
-        wanted.insert((gateway_server.to_string(), service, port));
+        wanted.insert((gateway.server.clone(), service, port));
       }
     }
   }
@@ -237,11 +254,15 @@ pub fn projects(
       project: SERVER_PROJECT.to_string(),
       hash: render::hash(&compose),
       compose,
-      summary: format!("隧道服务端 frps，监听 TCP {FRPS_PORT}"),
+      summary: "隧道服务端 frps，经 Caddy 网关的 443 接入"
+        .to_string(),
     });
   }
   for ((service_server, gateway_server), list) in clients {
     let addr = frps_addr(net, &gateway_server)?;
+    let port = link_gateway(world, &gateway_server)
+      .and_then(|(_, g)| g.https_port)
+      .unwrap_or(443);
     let project = client_project(&gateway_server);
     let proxies: Vec<(String, u16, u16)> = list
       .iter()
@@ -254,7 +275,7 @@ pub fn projects(
       })
       .collect();
     let compose =
-      render::frpc_compose(&project, &addr, FRPS_PORT, &proxies);
+      render::frpc_compose(&project, &addr, port, &proxies);
     let names: Vec<String> = list
       .iter()
       .map(|t| format!("{}:{}", t.service, t.port))
@@ -271,6 +292,38 @@ pub fn projects(
     });
   }
   Ok(out)
+}
+
+/// 一台机器上给 frps 做转发的 Caddy 网关：按名字排第一个。
+fn link_gateway<'a>(
+  world: &'a World,
+  server: &str,
+) -> Option<(&'a str, &'a GatewaySpec)> {
+  world
+    .gateways
+    .iter()
+    .find(|(_, g)| {
+      g.spec.server == server && g.spec.kind == GatewayKind::Caddy
+    })
+    .map(|(n, g)| (n.as_str(), &g.spec))
+}
+
+/// Caddy 网关 `name` 要不要给 frps 做转发：要的话返回 frpc 连过来用的地址。
+pub fn caddy_site(
+  world: &World,
+  net: &Net,
+  name: &str,
+  gateway: &GatewaySpec,
+) -> Result<Option<String>, ApiError> {
+  if link_gateway(world, &gateway.server).map(|(n, _)| n)
+    != Some(name)
+    || !tunnels(world, net)?
+      .iter()
+      .any(|t| t.gateway_server == gateway.server)
+  {
+    return Ok(None);
+  }
+  frps_addr(net, &gateway.server).map(Some)
 }
 
 /// frpc 连 frps 用的地址：网关所在机器的公网 IP，没有就用内网地址。
@@ -299,7 +352,8 @@ pub async fn probe(
   world: &World,
 ) -> db::Reach {
   let mut pairs: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-  for (gateway_server, route, targets) in routes_by_gateway(world) {
+  for (gateway, route, targets) in routes_by_gateway(world) {
+    let gateway_server = gateway.server.as_str();
     if route.link == LinkMode::Tunnel {
       continue;
     }
@@ -421,7 +475,12 @@ mod tests {
     let w = world();
     let route = &w.routes["app.example.com"].spec;
     let up = |n: &Net| {
-      w.route_upstream(n, "edge1", "app.example.com", route)
+      w.route_upstream(
+        n,
+        &w.gateways["edge"].spec,
+        "app.example.com",
+        route,
+      )
     };
     // 没探测过按原来的做法直连；探测到连不上就走隧道。
     assert_eq!(up(&net(None)).unwrap(), "100.64.0.2:20000");
@@ -453,6 +512,28 @@ mod tests {
     assert!(frpc.contains("localPort = 20000"));
     assert!(frpc.contains("[[WHARF_LINK_TOKEN]]"));
     assert!(frpc.contains("network_mode: host"));
-    assert!(ps[0].compose.contains(r#"proxyBindAddr = "127.0.0.1""#));
+    assert!(frpc.contains("serverPort = 443"));
+    assert!(frpc.contains(r#"transport.protocol = "wss""#));
+    assert!(ps[0].compose.contains(r#"bindAddr = "127.0.0.1""#));
+    let gw = &w.gateways["edge"].spec;
+    assert_eq!(
+      caddy_site(&w, &net(Some(false)), "edge", gw)
+        .unwrap()
+        .as_deref(),
+      Some("203.0.113.5")
+    );
+    assert_eq!(
+      caddy_site(&w, &net(Some(true)), "edge", gw).unwrap(),
+      None
+    );
+  }
+
+  #[test]
+  fn tunnel_gateway_never_uses_frp() {
+    let mut w = world();
+    w.gateways.get_mut("edge").unwrap().spec.kind =
+      GatewayKind::CloudflareTunnel;
+    assert!(tunnels(&w, &net(Some(false))).is_err());
+    assert!(tunnels(&w, &net(Some(true))).unwrap().is_empty());
   }
 }

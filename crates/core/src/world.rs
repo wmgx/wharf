@@ -355,7 +355,7 @@ impl World {
   pub fn route_upstream(
     &self,
     net: &crate::render::Net,
-    gateway_server: &str,
+    gateway: &wharf_api_types::spec::GatewaySpec,
     host: &str,
     route: &RouteSpec,
   ) -> Result<String, ApiError> {
@@ -368,7 +368,7 @@ impl World {
     crate::render::upstream(
       self,
       net,
-      gateway_server,
+      gateway,
       &route.service,
       port,
       route.link,

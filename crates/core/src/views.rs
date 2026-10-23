@@ -228,9 +228,7 @@ pub fn route_view(
   let gateway = world.route_gateway(&row.spec).map(str::to_string);
   let gw_spec = gateway.as_ref().and_then(|g| world.gateways.get(g));
   let upstream = gw_spec.and_then(|g| {
-    world
-      .route_upstream(net, &g.spec.server, hostname, &row.spec)
-      .ok()
+    world.route_upstream(net, &g.spec, hostname, &row.spec).ok()
   });
   let url = match gw_spec.map(|g| &g.spec) {
     Some(g) if g.tls == GatewayTls::Off => {

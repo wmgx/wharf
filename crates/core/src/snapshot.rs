@@ -274,7 +274,7 @@ pub fn gateway_render(
           render::upstream(
             world,
             net,
-            &gateway.spec.server,
+            &gateway.spec,
             svc,
             port,
             route.spec.link,
@@ -290,7 +290,7 @@ pub fn gateway_render(
       hostname: host.clone(),
       upstream: world.route_upstream(
         net,
-        &gateway.spec.server,
+        &gateway.spec,
         host,
         &route.spec,
       )?,
@@ -305,6 +305,8 @@ pub fn gateway_render(
         &gateway.spec,
         &sites,
         net.basic_auth.as_ref(),
+        crate::link::caddy_site(world, net, name, &gateway.spec)?
+          .as_deref(),
       ),
     ),
     GatewayKind::CloudflareTunnel => {

@@ -909,15 +909,6 @@ fn link_items(
     let Some((action, risk, reason)) = decision else {
       continue;
     };
-    if action == Action::Create
-      && p.project == crate::link::SERVER_PROJECT
-    {
-      b.warnings.push(format!(
-        "反向隧道：需要在 {} 的安全组 / 防火墙放行 TCP {}，别的机器的 frpc 要连进来",
-        p.server,
-        crate::link::FRPS_PORT
-      ));
-    }
     let id = b.item(
       format!("link/{}/{}", p.server, p.project),
       Layer::Gateway,
