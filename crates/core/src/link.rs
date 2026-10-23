@@ -32,6 +32,8 @@ pub const TOKEN_SECRET: &str = "WHARF_LINK_TOKEN";
 pub const FRPS_PORT: u16 = 7000;
 /// frp 的 websocket 路径，frps 认这个路径。
 pub const FRP_PATH: &str = "/~!frp";
+/// frpc 握手时带的名字（SNI 和 Host）。按 IP 连时不带 SNI，Caddy 选不出证书。
+pub const LINK_HOST: &str = "link.wharf.internal";
 /// frps 只把隧道端口绑在 127.0.0.1，从这个范围里取。
 const TUNNEL_PORTS: std::ops::RangeInclusive<u16> = 30000..=39999;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -308,22 +310,20 @@ fn link_gateway<'a>(
     .map(|(n, g)| (n.as_str(), &g.spec))
 }
 
-/// Caddy 网关 `name` 要不要给 frps 做转发：要的话返回 frpc 连过来用的地址。
+/// Caddy 网关 `name` 要不要给 frps 做转发。
 pub fn caddy_site(
   world: &World,
   net: &Net,
   name: &str,
   gateway: &GatewaySpec,
-) -> Result<Option<String>, ApiError> {
-  if link_gateway(world, &gateway.server).map(|(n, _)| n)
-    != Some(name)
-    || !tunnels(world, net)?
-      .iter()
-      .any(|t| t.gateway_server == gateway.server)
-  {
-    return Ok(None);
-  }
-  frps_addr(net, &gateway.server).map(Some)
+) -> Result<bool, ApiError> {
+  Ok(
+    link_gateway(world, &gateway.server).map(|(n, _)| n)
+      == Some(name)
+      && tunnels(world, net)?
+        .iter()
+        .any(|t| t.gateway_server == gateway.server),
+  )
 }
 
 /// frpc 连 frps 用的地址：网关所在机器的公网 IP，没有就用内网地址。
@@ -516,16 +516,8 @@ mod tests {
     assert!(frpc.contains(r#"transport.protocol = "wss""#));
     assert!(ps[0].compose.contains(r#"bindAddr = "127.0.0.1""#));
     let gw = &w.gateways["edge"].spec;
-    assert_eq!(
-      caddy_site(&w, &net(Some(false)), "edge", gw)
-        .unwrap()
-        .as_deref(),
-      Some("203.0.113.5")
-    );
-    assert_eq!(
-      caddy_site(&w, &net(Some(true)), "edge", gw).unwrap(),
-      None
-    );
+    assert!(caddy_site(&w, &net(Some(false)), "edge", gw).unwrap());
+    assert!(!caddy_site(&w, &net(Some(true)), "edge", gw).unwrap());
   }
 
   #[test]

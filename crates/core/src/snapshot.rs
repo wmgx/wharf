@@ -305,8 +305,7 @@ pub fn gateway_render(
         &gateway.spec,
         &sites,
         net.basic_auth.as_ref(),
-        crate::link::caddy_site(world, net, name, &gateway.spec)?
-          .as_deref(),
+        crate::link::caddy_site(world, net, name, &gateway.spec)?,
       ),
     ),
     GatewayKind::CloudflareTunnel => {

@@ -513,7 +513,8 @@ pub fn frpc_compose(
   proxies: &[(String, u16, u16)],
 ) -> String {
   let mut config = format!(
-    "serverAddr = \"{server_addr}\"\nserverPort = {server_port}\nloginFailExit = false\nauth.token = \"{{{{ .Envs.FRP_TOKEN }}}}\"\ntransport.protocol = \"wss\"\n"
+    "serverAddr = \"{server_addr}\"\nserverPort = {server_port}\nloginFailExit = false\nauth.token = \"{{{{ .Envs.FRP_TOKEN }}}}\"\ntransport.protocol = \"wss\"\ntransport.tls.serverName = \"{}\"\n",
+    crate::link::LINK_HOST
   );
   for (name, local, remote) in proxies {
     config.push_str(&format!(
@@ -544,7 +545,7 @@ pub fn caddyfile(
   spec: &GatewaySpec,
   sites: &[Site],
   auth: Option<&BasicAuth>,
-  link: Option<&str>,
+  link: bool,
 ) -> String {
   let mut out = format!(
     "# 由 Wharf 生成，不要手改。网关：{name}\n# 手写的站点放到 conf/extra.d/*.caddy\n{{\n\tadmin {CADDY_ADMIN}\n"
@@ -584,14 +585,15 @@ pub fn caddyfile(
     }
     out.push_str(&format!("\treverse_proxy {}\n}}\n", site.upstream));
   }
-  // 反向隧道：frpc 按 IP 连进来，用 Caddy 自己签的证书。
-  if let Some(addr) = link {
+  // 反向隧道：frpc 按 IP 连进来，握手带固定名字，用 Caddy 自己签的证书。
+  if link {
     let tls = match spec.tls {
       GatewayTls::Auto => "\ttls internal\n",
       _ => "",
     };
     out.push_str(&format!(
-      "\n{scheme}{addr} {{\n{tls}\treverse_proxy {} 127.0.0.1:{}\n}}\n",
+      "\n{scheme}{} {{\n{tls}\treverse_proxy {} 127.0.0.1:{}\n}}\n",
+      crate::link::LINK_HOST,
       crate::link::FRP_PATH,
       crate::link::FRPS_PORT
     ));
@@ -714,10 +716,10 @@ mod tests {
         },
       ],
       BasicAuth::parse("admin $2b$12$abc").as_ref(),
-      Some("203.0.113.5"),
+      true,
     );
     assert!(out.contains(
-      "203.0.113.5 {\n\ttls internal\n\treverse_proxy /~!frp 127.0.0.1:7000\n}"
+      "link.wharf.internal {\n\ttls internal\n\treverse_proxy /~!frp 127.0.0.1:7000\n}"
     ));
     // 只有开了 auth 的站点带 basic_auth。
     let z = &out[out.find("z.example.com").unwrap()..];
@@ -750,7 +752,7 @@ mod tests {
         paths: vec![],
       }],
       None,
-      None,
+      false,
     );
     assert!(out.contains("auto_https off"));
     assert!(out.contains("\nhttp://a.example.com {"));
