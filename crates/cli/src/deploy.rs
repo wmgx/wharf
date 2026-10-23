@@ -45,6 +45,11 @@ pub async fn source(
     Some(Source::Build(old)) => Some(old),
     _ => None,
   };
+  // GitHub 私有仓库没指定 token 密钥时，借本机 gh 的登录。
+  let token_secret = match (&args.git, &args.git_token_secret) {
+    (Some(repo), None) => crate::gh::private_token(c, repo).await?,
+    (_, t) => t.clone(),
+  };
   // 重新给出 --dir / --git 时，没给的选项沿用现有配置。
   let mut b = match (&args.dir, &args.git, old) {
     (Some(_), Some(_), _) => {
@@ -60,7 +65,7 @@ pub async fn source(
           .git_ref
           .clone()
           .unwrap_or_else(|| "main".into()),
-        token_secret: args.git_token_secret.clone(),
+        token_secret,
       }),
       ..old.cloned().unwrap_or_default()
     },

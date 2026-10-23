@@ -12,6 +12,7 @@ mod commands;
 mod deploy;
 mod edge;
 mod fleet;
+mod gh;
 mod pack;
 mod print;
 
@@ -142,6 +143,7 @@ pub struct BuildArgs {
   #[arg(long = "ref")]
   pub git_ref: Option<String>,
   /// 私有仓库：保存访问 token 的密钥名（先 `wharf secret set`）。
+  /// GitHub 私有仓库不给时，用本机 gh 的登录存进密钥 GITHUB_TOKEN。
   #[arg(long)]
   pub git_token_secret: Option<String>,
   #[command(flatten)]
