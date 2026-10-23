@@ -109,7 +109,16 @@ impl Docker {
             ),
             containers: by_project
               .remove(project)
-              .unwrap_or_default(),
+              .unwrap_or_default()
+              .into_iter()
+              .map(|c| ContainerInfo {
+                foreign: c
+                  .working_dir
+                  .as_deref()
+                  .is_some_and(|w| Path::new(w) != dir),
+                ..c
+              })
+              .collect(),
           }
         })
         .collect(),
@@ -496,6 +505,10 @@ pub fn parse_ps(
         status: ps.status,
         health,
         image: ps.image,
+        foreign: false,
+        working_dir: labels
+          .get("com.docker.compose.project.working_dir")
+          .map(|w| w.to_string()),
       });
   }
   for containers in out.values_mut() {
@@ -646,7 +659,7 @@ mod tests {
 
   #[test]
   fn ps_groups_by_project() {
-    let out = r#"{"Names":"whoami-whoami-1","State":"running","Status":"Up 2 minutes (healthy)","Image":"traefik/whoami","Labels":"com.docker.compose.project=whoami,com.docker.compose.service=whoami"}
+    let out = r#"{"Names":"whoami-whoami-1","State":"running","Status":"Up 2 minutes (healthy)","Image":"traefik/whoami","Labels":"com.docker.compose.project=whoami,com.docker.compose.project.working_dir=/opt/whoami,com.docker.compose.service=whoami"}
 {"Names":"x","State":"exited","Status":"Exited (1)","Image":"a","Labels":"com.docker.compose.project=other,com.docker.compose.service=web"}
 not json"#;
     let grouped = parse_ps(out);
@@ -654,6 +667,7 @@ not json"#;
     let who = &grouped["whoami"][0];
     assert_eq!(who.service, "whoami");
     assert_eq!(who.health.as_deref(), Some("healthy"));
+    assert_eq!(who.working_dir.as_deref(), Some("/opt/whoami"));
     assert_eq!(grouped["other"][0].state, "exited");
   }
 }

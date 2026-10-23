@@ -397,6 +397,12 @@ pub struct ContainerInfo {
   pub health: Option<String>,
   #[serde(default)]
   pub image: String,
+  /// 同名 compose 项目里不是 Wharf 部署的容器（compose 工作目录不是 Wharf 的项目目录）。
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub foreign: bool,
+  /// compose 的工作目录，只在 agent 内部用来判断 `foreign`。
+  #[serde(skip)]
+  pub working_dir: Option<String>,
 }
 
 #[derive(

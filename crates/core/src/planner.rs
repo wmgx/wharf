@@ -705,6 +705,35 @@ fn service_items(
         Some(_) => None,
       },
     };
+    // 同名 compose 项目里混着别处起的容器：compose up 会把它们当成自己的删掉。导入时本来就要接管。
+    let foreign: Vec<&str> = status
+      .get(server)
+      .and_then(|s| s.as_ref())
+      .and_then(|p| p.get(name))
+      .map(|s| {
+        s.containers
+          .iter()
+          .filter(|c| c.foreign)
+          .map(|c| c.name.as_str())
+          .collect()
+      })
+      .unwrap_or_default();
+    let decision = match decision {
+      Some((action, _, _, before))
+        if !foreign.is_empty() && svc.spec.adopt.is_none() =>
+      {
+        Some((
+          action,
+          Risk::Destructive,
+          format!(
+            "{server} 上同名 compose 项目里有不是 Wharf 部署的容器（{}），部署会删除它们；要保留请先导入，或换个服务名",
+            foreign.join("、")
+          ),
+          before,
+        ))
+      }
+      d => d,
+    };
     if let Some((action, risk, reason, before)) = decision {
       let reason = if matches!(svc.spec.source, Source::Build(_)) {
         format!("{reason}（镜像不在 {server} 上时先构建）")
