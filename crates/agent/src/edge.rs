@@ -72,9 +72,10 @@ async fn deploy_in(
   work: &std::path::Path,
   ctx: &Ctx,
 ) -> Result<EdgeBuildResult, ApiError> {
-  let commit =
-    fetch_code(docker, core_url, &job.app, &job.fetch, work, ctx)
-      .await?;
+  let commit = fetch_code(
+    docker, core_url, &job.app, &job.fetch, &job.pull, work, ctx,
+  )
+  .await?;
   let src = work.join("src");
   let context = match &job.path {
     Some(p) => src.join(relative(p)?),

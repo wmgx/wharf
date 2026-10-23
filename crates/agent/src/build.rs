@@ -17,7 +17,7 @@ use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use wharf_api_types::{
   ApiError, ErrorCode,
-  agent::{BuildFetch, BuildJob, BuildResult, GIT_IMAGE},
+  agent::{BuildFetch, BuildJob, BuildResult, GIT_IMAGE, PullPolicy},
   build::{self, SourceTree},
   validate_name,
 };
@@ -72,9 +72,16 @@ async fn build_in(
   ctx: &Ctx,
 ) -> Result<BuildResult, ApiError> {
   let src = work.join("src");
-  let commit =
-    fetch_code(docker, core_url, &job.service, &job.fetch, work, ctx)
-      .await?;
+  let commit = fetch_code(
+    docker,
+    core_url,
+    &job.service,
+    &job.fetch,
+    &job.pull,
+    work,
+    ctx,
+  )
+  .await?;
 
   let context = match &job.path {
     Some(p) => src.join(relative(p)?),
@@ -134,6 +141,7 @@ pub async fn fetch_code(
   core_url: &str,
   name: &str,
   fetch: &BuildFetch,
+  pull: &PullPolicy,
   work: &Path,
   ctx: &Ctx,
 ) -> Result<Option<String>, ApiError> {
@@ -166,7 +174,11 @@ pub async fn fetch_code(
       repo,
       reference,
       token,
-    } => Some(
+    } => Some({
+      // 先按服务器的镜像源拉 git 镜像，`docker run` 自己拉只认官方地址。
+      if !docker.image_exists(GIT_IMAGE, ctx).await {
+        docker.pull(GIT_IMAGE, pull, ctx, &mut Vec::new()).await?;
+      }
       clone(
         docker,
         name,
@@ -176,8 +188,8 @@ pub async fn fetch_code(
         &src,
         ctx,
       )
-      .await?,
-    ),
+      .await?
+    }),
   };
   Ok(commit)
 }
