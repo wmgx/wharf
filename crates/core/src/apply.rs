@@ -595,6 +595,10 @@ async fn run_step(
       )
       .await?;
     }
+    Step::AgentUpgrade { server } => {
+      crate::agent_upgrade::upgrade(state, server, progress, cancel)
+        .await?;
+    }
     Step::EdgeDeploy { app } => {
       crate::edge::deploy(state, &snap, app, &progress, cancel)
         .await?;

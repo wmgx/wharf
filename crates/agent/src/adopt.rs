@@ -264,7 +264,7 @@ async fn self_image(
 }
 
 /// mountinfo 里 `/etc/hostname` 之类的挂载来自 `.../containers/<id>/`。
-fn container_id(mountinfo: &str) -> Option<String> {
+pub(crate) fn container_id(mountinfo: &str) -> Option<String> {
   mountinfo.lines().find_map(|line| {
     let rest =
       &line[line.find("/containers/")? + "/containers/".len()..];

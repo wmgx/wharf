@@ -1,4 +1,4 @@
-import { AnchorIcon, PlusIcon, BoxesIcon, CloudIcon, ChevronsUpDownIcon, KeyRoundIcon, LogOutIcon, MoonIcon, NetworkIcon, SunIcon, WaypointsIcon } from "lucide-react";
+import { AnchorIcon, PlusIcon, BoxesIcon, CloudIcon, ChevronsUpDownIcon, KeyRoundIcon, LogOutIcon, MoonIcon, NetworkIcon, SunIcon, ArrowUpCircleIcon, WaypointsIcon } from "lucide-react";
 import { useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
@@ -12,6 +12,7 @@ import {
   SidebarGroupLabel,
   SidebarHeader,
   SidebarMenu,
+  SidebarMenuAction,
   SidebarMenuBadge,
   SidebarMenuButton,
   SidebarMenuItem,
@@ -116,7 +117,7 @@ export function AppSidebar({ username, onLogout }: { username: string; onLogout:
               {status?.servers.map((s) => (
                 <SidebarMenuItem key={s.name}>
                   <SidebarMenuButton
-                    className="cursor-default"
+                    className={s.agent_outdated ? "cursor-default pr-8" : "cursor-default"}
                     tooltip={`${s.name} · ${serverText(s)}${s.private_addr ? ` · 内网 ${s.private_addr.ip}` : ""}`}
                   >
                     <span className="grid size-4 place-items-center">
@@ -125,6 +126,11 @@ export function AppSidebar({ username, onLogout }: { username: string; onLogout:
                     <span className="group-data-[collapsible=icon]:hidden">{s.name}</span>
                     <span className="ml-auto font-mono text-xs text-muted-foreground group-data-[collapsible=icon]:hidden">{serverText(s)}</span>
                   </SidebarMenuButton>
+                  {s.agent_outdated && (
+                    <SidebarMenuAction title="升级 agent" onClick={() => actions.upgradeAgent(s.name)}>
+                      <ArrowUpCircleIcon className="text-warning" />
+                    </SidebarMenuAction>
+                  )}
                 </SidebarMenuItem>
               ))}
             </SidebarMenu>

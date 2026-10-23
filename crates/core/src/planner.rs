@@ -153,6 +153,10 @@ pub enum Step {
   EdgeDetach {
     domain: db::EdgeDomainRow,
   },
+  /// 升级服务器上的 agent。单独发起，不来自计划。
+  AgentUpgrade {
+    server: String,
+  },
   /// 边缘应用回滚到厂商那边的旧版本。单独发起，不来自计划。
   EdgeRollback {
     app: String,
@@ -179,6 +183,7 @@ impl Step {
       Self::Backup { .. }
       | Self::Restore { .. }
       | Self::Rebuild { .. }
+      | Self::AgentUpgrade { .. }
       | Self::EdgeRollback { .. } => 8,
     }
   }

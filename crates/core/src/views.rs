@@ -49,6 +49,10 @@ pub fn server_view(
     private_addr: row.settings.private_addr.clone().or_else(|| {
       report.as_ref().and_then(|r| r.private_addr.clone())
     }),
+    agent_outdated: state.hub.is_online(name)
+      && crate::agent_upgrade::outdated(
+        report.as_ref().map(|r| r.build.as_str()),
+      ),
     report,
     version: row.version,
   })

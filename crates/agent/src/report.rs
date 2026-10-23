@@ -53,6 +53,7 @@ impl Reporter {
       lan_ips: lan_ips(),
       public_ip: self.public_ip(refresh).await,
       data_dir: self.docker.data_dir.display().to_string(),
+      build: wharf_api_types::BUILD.to_string(),
     }
   }
 

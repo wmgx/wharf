@@ -154,6 +154,9 @@ impl Ops {
         crate::edge::run(&self.docker, &self.core_url, &job, ctx)
           .await
       }
+      AgentOp::Upgrade(job) => to_value(
+        crate::upgrade::start(&self.docker, &job, ctx).await?,
+      ),
     }
   }
 

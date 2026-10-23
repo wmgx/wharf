@@ -94,6 +94,9 @@ pub struct AgentReport {
   pub public_ip: Option<String>,
   /// agent 存放 compose 文件的目录。
   pub data_dir: String,
+  /// 构建号，见 [crate::BUILD]。旧版本 agent 没有。
+  #[serde(default, skip_serializing_if = "String::is_empty")]
+  pub build: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -159,6 +162,25 @@ pub enum AgentOp {
   Probe {
     targets: Vec<ProbeTarget>,
   },
+  /// 升级 agent 自己：拉新镜像，起一个接班容器换掉当前容器，结果是 [UpgradeResult]。
+  /// 回复之后连接会断开，新 agent 重新连上才算完成。
+  Upgrade(UpgradeJob),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpgradeJob {
+  /// 镜像标签，例如 `sha-0b45a47`。不填时重新拉当前镜像。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub tag: Option<String>,
+  pub pull: PullPolicy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpgradeResult {
+  /// 新镜像。
+  pub image: String,
+  /// `false`：已经是这个镜像，没有换容器。
+  pub started: bool,
 }
 
 /// 探测目标：连上 `addr` 后对方要回 `wharf <server>`。

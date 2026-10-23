@@ -18,6 +18,13 @@ pub use error::{ApiError, ErrorCode};
 /// CLI 和控制面在请求头里互相报告的版本。
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// 构建号：CI 构建镜像时传入的短提交号，本地构建是 `dev`。
+/// 控制面拿它判断 agent 要不要升级，升级时拉 `sha-<构建号>` 标签的镜像。
+pub const BUILD: &str = match option_env!("WHARF_BUILD") {
+  Some(b) => b,
+  None => "dev",
+};
+
 /// 名称规则：小写字母、数字、`-`，以字母或数字开头，最长 48 个字符。
 /// 服务名同时是 compose project 名，所以规则比 compose 更严。
 pub fn validate_name(kind: &str, name: &str) -> Result<(), ApiError> {

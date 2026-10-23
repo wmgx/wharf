@@ -24,6 +24,7 @@ mod probe;
 mod report;
 mod restic;
 mod sync;
+mod upgrade;
 
 #[derive(Parser)]
 #[command(name = "wharf-agent", version, about = "Wharf agent")]
@@ -73,6 +74,13 @@ enum Command {
     #[arg(long, env = "WHARF_JOIN_TOKEN", hide_env_values = true)]
     join_token: Option<String>,
   },
+  /// 升级用：在接班容器里换掉旧 agent 容器（由 agent 自己启动）。
+  #[command(hide = true)]
+  Replace {
+    container: String,
+    image: String,
+    old_image: String,
+  },
 }
 
 #[tokio::main]
@@ -92,6 +100,13 @@ async fn main() -> anyhow::Result<()> {
     join_token: std::env::var("WHARF_JOIN_TOKEN").ok(),
   });
   let joined = match command {
+    Command::Replace {
+      container,
+      image,
+      old_image,
+    } => {
+      return upgrade::replace(&container, &image, &old_image).await;
+    }
     Command::Join {
       core_url,
       join_token,

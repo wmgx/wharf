@@ -35,6 +35,9 @@ pub struct ServerView {
   /// 控制面到 agent 的往返延迟（websocket ping），毫秒。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub rtt_ms: Option<u32>,
+  /// agent 的构建号和控制面不一致，可以 `wharf server upgrade`。
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub agent_outdated: bool,
   pub version: u64,
 }
 

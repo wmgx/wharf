@@ -15,6 +15,8 @@ RUN npm run build
 
 FROM rust:1.95-bookworm AS build
 ARG CARGO_MIRROR=
+# 构建号（短提交号），控制面用它判断 agent 是否要升级。
+ARG WHARF_BUILD=
 RUN if [ -n "$CARGO_MIRROR" ]; then \
       printf '[source.crates-io]\nreplace-with = "mirror"\n[source.mirror]\nregistry = "%s"\n' "$CARGO_MIRROR" > "$CARGO_HOME/config.toml"; \
     fi
@@ -23,7 +25,8 @@ COPY . .
 COPY --from=web /web/dist /src/web/dist
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release --locked \
+    if [ -n "$WHARF_BUILD" ]; then export WHARF_BUILD; else unset WHARF_BUILD; fi \
+ && cargo build --release --locked \
  && mkdir -p /out \
  && cp target/release/wharf-core target/release/wharf-agent target/release/wharf /out/
 

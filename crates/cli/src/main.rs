@@ -248,6 +248,14 @@ pub enum ServerCmd {
   Rm {
     name: String,
   },
+  /// 升级 agent 到和控制面相同的版本：拉新镜像，换掉 agent 容器，新 agent 连不上就恢复旧的。
+  Upgrade {
+    /// 服务器名；不给时用 `--all`。
+    name: Option<String>,
+    /// 升级全部版本落后的在线服务器，一台接一台。
+    #[arg(long, conflicts_with = "name")]
+    all: bool,
+  },
 }
 
 #[derive(Subcommand)]

@@ -84,6 +84,11 @@ impl Hub {
     lock(&self.conns).contains_key(server)
   }
 
+  /// 当前连接的编号，每次重连都会变。不在线时是 `None`。
+  pub fn conn_id(&self, server: &str) -> Option<u64> {
+    lock(&self.conns).get(server).map(|c| c.conn_id)
+  }
+
   /// 控制面到 agent 的往返延迟。还没测到时是 `None`。
   pub fn rtt_ms(&self, server: &str) -> Option<u32> {
     let conns = lock(&self.conns);

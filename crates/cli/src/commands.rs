@@ -412,7 +412,7 @@ async fn server(
       out(j, &v, |v| {
         for s in v {
           println!(
-            "{:<10} {}  公网 {}",
+            "{:<10} {}  公网 {}{}",
             s.name,
             if !s.joined {
               "未加入"
@@ -421,7 +421,12 @@ async fn server(
             } else {
               "离线"
             },
-            s.public_ip.as_deref().unwrap_or("-")
+            s.public_ip.as_deref().unwrap_or("-"),
+            if s.agent_outdated {
+              "  agent 可升级"
+            } else {
+              ""
+            }
           );
         }
       });
@@ -561,6 +566,38 @@ async fn server(
       let v: Value =
         c.delete(&format!("/api/servers/{}", seg(&name))).await?;
       out(j, &v, |_| println!("已删除服务器 {name}"));
+      Ok(())
+    }
+    ServerCmd::Upgrade { name, all } => {
+      let names = match (name, all) {
+        (Some(name), _) => vec![name],
+        (None, true) => {
+          let v: Vec<ServerView> = c.get("/api/servers").await?;
+          v.into_iter()
+            .filter(|s| s.agent_outdated)
+            .map(|s| s.name)
+            .collect()
+        }
+        (None, false) => {
+          return Err(
+            ApiError::invalid("给出服务器名，或者用 --all")
+              .suggest("wharf server upgrade --all")
+              .into(),
+          );
+        }
+      };
+      if names.is_empty() {
+        out(j, &json!([]), |_| println!("全部 agent 都是最新版本"));
+      }
+      for name in names {
+        let r: ApplyResponse = c
+          .post(
+            &format!("/api/servers/{}/upgrade", seg(&name)),
+            &json!({}),
+          )
+          .await?;
+        finish_task(c, &r.run_id, true, j).await?;
+      }
       Ok(())
     }
   }

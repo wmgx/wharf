@@ -48,6 +48,7 @@ export interface ServerView {
   public_ip?: string;
   private_addr?: PrivateAddr;
   rtt_ms?: number;
+  agent_outdated?: boolean;
 }
 
 export interface BuildSource {
