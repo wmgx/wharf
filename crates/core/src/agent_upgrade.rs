@@ -112,6 +112,16 @@ pub async fn upgrade(
         ));
         return Ok(());
       }
+      // 换了连接但构建号还是旧的：接班容器已经把旧 agent 恢复回来了。
+      if build.is_some() {
+        return Err(
+          ApiError::new(
+            ErrorCode::AgentFailed,
+            format!("{server} 的新 agent 没有起来，已恢复旧 agent"),
+          )
+          .with_hint("在服务器上 docker logs wharf-agent-upgrade 查看原因"),
+        );
+      }
     }
     if tokio::time::Instant::now() > deadline {
       return Err(
