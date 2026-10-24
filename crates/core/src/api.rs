@@ -314,15 +314,17 @@ async fn add_server(
     })
     .await?;
 
-  let core_url = core_url
-    .or_else(|| s.public_url.clone())
-    .unwrap_or_else(|| {
-      let host = headers
-        .get(axum::http::header::HOST)
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or("127.0.0.1:7700");
-      format!("http://{host}")
-    });
+  let core_url = match core_url {
+    Some(u) => Some(u),
+    None => crate::join::default_url(&s).await,
+  };
+  let core_url = core_url.unwrap_or_else(|| {
+    let host = headers
+      .get(axum::http::header::HOST)
+      .and_then(|h| h.to_str().ok())
+      .unwrap_or("127.0.0.1:7700");
+    format!("http://{host}")
+  });
   let commands = BTreeMap::from([
     (
       "script".to_string(),

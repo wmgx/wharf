@@ -32,6 +32,22 @@ pub async fn addresses(
   auth: Auth,
 ) -> ApiResult<CoreAddresses> {
   auth.require(TokenScope::ApplyAll)?;
+  Ok(Json(candidates(&s).await?))
+}
+
+/// 加入命令默认用的地址：经网关开放的域名优先（新机器不用先装组网），
+/// 其次是启动配置的地址。
+pub async fn default_url(s: &AppState) -> Option<String> {
+  let found = candidates(s).await.ok()?;
+  found
+    .addresses
+    .iter()
+    .find(|a| a.kind == "route")
+    .map(|a| a.url.clone())
+    .or_else(|| s.public_url.clone())
+}
+
+async fn candidates(s: &AppState) -> Result<CoreAddresses, ApiError> {
   let snap = snapshot::load(&s.db).await?;
   let net = snap.net(&snap.world);
   let port = s.listen_port;
@@ -73,12 +89,12 @@ pub async fn addresses(
   for ip in ips {
     push(format!("http://{ip}:{port}"), kind(ip));
   }
-  Ok(Json(CoreAddresses {
+  Ok(CoreAddresses {
     server,
     port,
     agent_image: s.agent_image.clone(),
     addresses: out,
-  }))
+  })
 }
 
 /// 控制面所在的服务器：哪台的 agent 上报了控制面网卡上的地址。
