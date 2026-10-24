@@ -627,6 +627,16 @@ const CORE_RESTART_WAIT: Duration = Duration::from_secs(150);
 const AGENT_RECONNECT_WAIT: Duration = Duration::from_secs(60);
 
 async fn upgrade(c: &Client, j: bool) -> CliResult<()> {
+  // 替换控制面要靠同机的 agent，落后的 agent 先升到和控制面一致。
+  let servers: Vec<ServerView> = c.get("/api/servers").await?;
+  let behind: Vec<String> = servers
+    .into_iter()
+    .filter(|s| s.online && s.agent_outdated)
+    .map(|s| s.name)
+    .collect();
+  if !behind.is_empty() {
+    upgrade_agents(c, behind, j).await?;
+  }
   let before: Value = c.get("/api/version").await?;
   let r: UpgradeResult = c.post("/api/upgrade", &json!({})).await?;
   if !r.started {
