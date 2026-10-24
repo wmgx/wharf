@@ -3,9 +3,14 @@
 //! - 还没有管理员账号时，控制面启动后 30 分钟内可以在页面上设置，过期要重启控制面
 //!   （防止内网里别人抢先打开页面占走账号）；
 //! - 忘记密码：`docker exec -it wharf-core wharf-core reset-password`；
-//! - 密码用 argon2 存，会话只存 SHA-256，30 天过期。
+//! - 密码用 argon2 存，会话只存 SHA-256，30 天过期；
+//! - 同一来源连续输错 5 次锁 15 分钟（控制面可以经网关挂在公网上）。
 
-use std::{sync::Arc, time::Duration};
+use std::{
+  collections::HashMap,
+  sync::{Arc, LazyLock, Mutex},
+  time::{Duration, Instant},
+};
 
 use argon2::{
   Argon2,
@@ -30,6 +35,40 @@ use crate::{
 pub const COOKIE: &str = "wharf_session";
 const SETUP_WINDOW: Duration = Duration::from_secs(30 * 60);
 const SESSION_TTL: Duration = Duration::from_secs(30 * 24 * 3600);
+const MAX_FAILURES: u32 = 5;
+const LOCKOUT: Duration = Duration::from_secs(15 * 60);
+
+/// 来源 → (连续失败次数, 最后一次失败的时间)。
+static FAILURES: LazyLock<Mutex<HashMap<String, (u32, Instant)>>> =
+  LazyLock::new(Default::default);
+
+/// 登录请求的来源：经网关时是 Caddy 追加在 `X-Forwarded-For` 最后的客户端地址，
+/// 直连时所有请求算同一个来源。
+fn client_key(headers: &HeaderMap) -> String {
+  headers
+    .get("x-forwarded-for")
+    .and_then(|v| v.to_str().ok())
+    .and_then(|v| v.rsplit(',').next())
+    .map(|v| v.trim().to_string())
+    .filter(|v| !v.is_empty())
+    .unwrap_or_else(|| "direct".into())
+}
+
+/// 还在锁定期时返回剩余分钟数。
+fn locked(key: &str) -> Option<u64> {
+  let map = FAILURES.lock().unwrap_or_else(|e| e.into_inner());
+  let (count, at) = map.get(key)?;
+  let left = LOCKOUT.checked_sub(at.elapsed())?;
+  (*count >= MAX_FAILURES).then(|| left.as_secs().div_ceil(60))
+}
+
+fn record_failure(key: &str) {
+  let mut map = FAILURES.lock().unwrap_or_else(|e| e.into_inner());
+  map.retain(|_, (_, at)| at.elapsed() < LOCKOUT);
+  let entry =
+    map.entry(key.to_string()).or_insert((0, Instant::now()));
+  *entry = (entry.0 + 1, Instant::now());
+}
 
 #[derive(Serialize)]
 pub struct SessionView {
@@ -252,8 +291,19 @@ pub async fn setup(
 /// `POST /api/login`。
 pub async fn login(
   axum::extract::State(s): axum::extract::State<Arc<AppState>>,
+  headers: HeaderMap,
   Json(req): Json<Credentials>,
 ) -> Result<Response, AppError> {
+  let key = client_key(&headers);
+  if let Some(minutes) = locked(&key) {
+    return Err(
+      ApiError::new(
+        ErrorCode::Unauthorized,
+        format!("输错次数太多，{minutes} 分钟后再试"),
+      )
+      .into(),
+    );
+  }
   let username = req.username.trim().to_lowercase();
   let ok = match admin(&s.db).await? {
     Some((name, hash)) => {
@@ -262,12 +312,17 @@ pub async fn login(
     None => false,
   };
   if !ok {
+    record_failure(&key);
     // 拖慢猜密码。
     tokio::time::sleep(Duration::from_secs(1)).await;
     return Err(
       ApiError::new(ErrorCode::Unauthorized, "账号或密码不对").into(),
     );
   }
+  FAILURES
+    .lock()
+    .unwrap_or_else(|e| e.into_inner())
+    .remove(&key);
   start_session(&s, username).await
 }
 
@@ -349,5 +404,23 @@ mod tests {
       "theme=dark; wharf_session=abc".parse().unwrap(),
     );
     assert_eq!(cookie_value(&h), Some("abc"));
+  }
+
+  #[test]
+  fn locks_after_repeated_failures_per_client() {
+    let mut h = HeaderMap::new();
+    h.insert(
+      "x-forwarded-for",
+      "1.2.3.4, 203.0.113.9".parse().unwrap(),
+    );
+    let key = client_key(&h);
+    assert_eq!(key, "203.0.113.9");
+    for _ in 0..MAX_FAILURES - 1 {
+      record_failure(&key);
+    }
+    assert_eq!(locked(&key), None);
+    record_failure(&key);
+    assert_eq!(locked(&key), Some(15));
+    assert_eq!(locked("direct"), None);
   }
 }
