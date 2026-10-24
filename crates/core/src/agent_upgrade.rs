@@ -24,6 +24,8 @@ use crate::{
 const PULL_TIMEOUT: Duration = Duration::from_secs(600);
 /// 接班容器最多等 60 秒新 agent 连上，失败再恢复旧的，这里多留一些。
 const RECONNECT_WAIT: Duration = Duration::from_secs(150);
+/// agent 连上后立刻上报，留够这么长时间再看构建号。
+const FIRST_REPORT_WAIT: Duration = Duration::from_secs(15);
 
 /// 本地构建的控制面没有构建号，不判断落后。
 pub fn outdated(agent_build: Option<&str>) -> bool {
@@ -97,6 +99,7 @@ pub async fn upgrade(
   }
   progress("等新 agent 连回控制面".into());
   let deadline = tokio::time::Instant::now() + RECONNECT_WAIT;
+  let mut new_conn_at = None;
   loop {
     tokio::select! {
       _ = cancel.cancelled() => return Err(ApiError::new(ErrorCode::Cancelled, "已取消")),
@@ -112,8 +115,10 @@ pub async fn upgrade(
         ));
         return Ok(());
       }
-      // 换了连接但构建号还是旧的：接班容器已经把旧 agent 恢复回来了。
-      if build.is_some() {
+      // 新连接要等第一次上报才有构建号；过了这段时间还是旧的，
+      // 就是接班容器已经把旧 agent 恢复回来了。
+      let seen = *new_conn_at.get_or_insert_with(tokio::time::Instant::now);
+      if build.is_some() && seen.elapsed() > FIRST_REPORT_WAIT {
         return Err(
           ApiError::new(
             ErrorCode::AgentFailed,
