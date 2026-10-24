@@ -153,12 +153,22 @@ pub async fn start(
     .timeout(QUICK)
     .run(ctx)
     .await;
+  // 接班程序在 agent 镜像里：换自己时用新镜像，换别的容器（控制面）时用当前 agent 的镜像。
+  // docker socket 的挂载也照 agent 自己的。
+  let (helper_image, sock) = match &job.container {
+    None => (new_id.clone(), sock_bind(&me)),
+    Some(_) => {
+      let own = inspect(docker, &self_container()?, ctx).await?;
+      let image = str_at(&own, &["Image"]).unwrap_or_default();
+      (image.to_string(), sock_bind(&own))
+    }
+  };
   ctx.say(format!("启动接班容器，换成 {pulled}"));
   docker
     .cmd()
     .args(["run", "-d", "--rm", "--name", HELPER])
-    .args(["-v", &sock_bind(&me)])
-    .args(["--entrypoint", "wharf-agent", &new_id])
+    .args(["-v", &sock])
+    .args(["--entrypoint", "wharf-agent", &helper_image])
     .args(["replace", &id, &current, &old_id])
     .args(["--ready", job.ready.as_deref().unwrap_or(CONNECTED)])
     .timeout(QUICK)
