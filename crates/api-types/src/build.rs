@@ -429,6 +429,9 @@ fn node(
       }
     }
   }
+  if pkg["scripts"]["build"].is_string() && runs_python(&start) {
+    return Ok(node_then_python(tree, opts, base, steps, start));
+  }
   let dockerfile = format!(
     r#"# Wharf 按 Node 模板生成
 FROM {base}
@@ -449,6 +452,54 @@ EXPOSE {port}
     start,
     images: vec![base.to_string()],
   })
+}
+
+fn runs_python(start: &str) -> bool {
+  matches!(
+    start.split_whitespace().next(),
+    Some("python" | "python3")
+  )
+}
+
+/// 前端用 Node 构建、后端用 Python 跑：Node 只留在构建阶段，
+/// 最终镜像是 Python 加上构建好的代码目录。
+fn node_then_python(
+  tree: &dyn SourceTree,
+  opts: &Options,
+  base: &str,
+  steps: Vec<String>,
+  start: String,
+) -> Generated {
+  let pip = if tree.exists("requirements.txt") {
+    "\nARG PIP_INDEX_URL\nARG PIP_TRUSTED_HOST\nRUN pip install --no-cache-dir -r requirements.txt"
+  } else {
+    ""
+  };
+  let dockerfile = format!(
+    r#"# Wharf 按 Node 模板生成：Node 构建，Python 运行
+FROM {base} AS build
+ARG NPM_CONFIG_REGISTRY
+WORKDIR /app
+{steps}
+RUN rm -rf node_modules
+
+FROM {PYTHON_BASE}
+ENV PYTHONUNBUFFERED=1 PORT={port}
+WORKDIR /app
+COPY --from=build /app /app{pip}
+EXPOSE {port}
+{run}
+"#,
+    port = opts.port,
+    steps = steps.join("\n"),
+    run = cmd_line(&start),
+  );
+  Generated {
+    language: "node",
+    dockerfile,
+    start,
+    images: vec![base.to_string(), PYTHON_BASE.to_string()],
+  }
 }
 
 fn static_site(opts: &Options) -> Generated {
@@ -564,6 +615,23 @@ mod tests {
       g.dockerfile
         .contains("RUN npm ci\nCOPY . .\nRUN npm run build")
     );
+  }
+
+  #[test]
+  fn node_build_with_python_start_runs_on_python() {
+    let tree = Mem(BTreeMap::from([
+      ("package.json", r#"{"scripts":{"build":"vite build"}}"#),
+      ("package-lock.json", "{}"),
+    ]));
+    let g =
+      generate(&tree, &opts(Some("python3 server/app.py"))).unwrap();
+    assert!(
+      g.dockerfile
+        .contains("RUN npm run build\nRUN rm -rf node_modules")
+    );
+    assert!(g.dockerfile.contains(&format!("FROM {PYTHON_BASE}\n")));
+    assert!(g.dockerfile.contains("COPY --from=build /app /app"));
+    assert_eq!(g.images, vec![NODE_BASE, PYTHON_BASE]);
   }
 
   #[test]
