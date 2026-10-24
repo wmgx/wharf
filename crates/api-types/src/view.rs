@@ -9,10 +9,67 @@ use serde::{Deserialize, Serialize};
 use crate::{
   agent::{AgentReport, ContainerInfo},
   spec::{
-    EdgeAppSpec, EdgeKind, GatewaySpec, PrivateAddr, RouteSpec,
-    ServerSettings, ServiceSpec,
+    EdgeAppSpec, EdgeKind, GatewaySpec, PrivateAddr, PrivateNetwork,
+    RouteSpec, ServerSettings, ServiceSpec,
   },
 };
+
+/// 机器的接入方式（design 2.10）：有 Tailscale 地址是 `tailscale`，
+/// 有别的内网地址是 `lan`，都没有是 `public`（只能经公网和反向隧道）。
+#[derive(
+  Debug,
+  Clone,
+  Copy,
+  PartialEq,
+  Eq,
+  Serialize,
+  Deserialize,
+  JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkMode {
+  Tailscale,
+  Lan,
+  Public,
+}
+
+impl NetworkMode {
+  pub fn of(addr: Option<&PrivateAddr>) -> Self {
+    match addr.map(|a| a.network) {
+      Some(PrivateNetwork::Tailscale) => Self::Tailscale,
+      Some(_) => Self::Lan,
+      None => Self::Public,
+    }
+  }
+}
+
+/// `GET /api/network`：各机器怎么接入、谁能连谁。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct NetworkView {
+  pub servers: Vec<NetworkServer>,
+  /// 探测过的方向，没探测过的不在里面。
+  pub reach: Vec<ReachView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct NetworkServer {
+  pub name: String,
+  pub mode: NetworkMode,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub private_ip: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub public_ip: Option<String>,
+  pub online: bool,
+}
+
+/// `from` 所在机器能不能连到 `to` 的内网地址。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ReachView {
+  pub from: String,
+  pub to: String,
+  pub ok: bool,
+  pub checked_at: DateTime<Utc>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ServerView {

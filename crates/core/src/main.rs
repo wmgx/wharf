@@ -26,6 +26,7 @@ mod link;
 mod login;
 mod logs_stream;
 mod migrate;
+mod network;
 mod planner;
 mod render;
 mod rollback;

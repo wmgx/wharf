@@ -377,3 +377,10 @@ export interface BackupsView {
   snapshots: Snapshot[];
   snapshots_error?: string;
 }
+
+export type NetworkMode = "tailscale" | "lan" | "public";
+
+export interface NetworkView {
+  servers: { name: string; mode: NetworkMode; private_ip?: string; public_ip?: string; online: boolean }[];
+  reach: { from: string; to: string; ok: boolean; checked_at: string }[];
+}

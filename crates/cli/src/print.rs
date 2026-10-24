@@ -3,7 +3,9 @@
 use wharf_api_types::{
   ApiError,
   plan::{Action, Plan, Risk, Run, RunStatus, RunStep, StepStatus},
-  view::{BackupsView, ServiceView, Status},
+  view::{
+    BackupsView, NetworkMode, NetworkView, ServiceView, Status,
+  },
 };
 
 pub fn json<T: serde::Serialize>(value: &T) {
@@ -272,5 +274,39 @@ pub fn backups(v: &BackupsView) {
         r.target
       );
     }
+  }
+}
+
+pub fn network(v: &NetworkView) {
+  for s in &v.servers {
+    let mode = match s.mode {
+      NetworkMode::Tailscale => "tailscale",
+      NetworkMode::Lan => "lan",
+      NetworkMode::Public => "public",
+    };
+    println!(
+      "{:<10} {:<9}  内网 {:<16} 公网 {:<16} {}",
+      s.name,
+      mode,
+      s.private_ip.as_deref().unwrap_or("-"),
+      s.public_ip.as_deref().unwrap_or("-"),
+      if s.online { "在线" } else { "离线" }
+    );
+  }
+  if v.reach.is_empty() {
+    println!("\n还没有探测过，wharf network --probe");
+    return;
+  }
+  println!("\n谁能连谁的内网地址：");
+  for r in &v.reach {
+    println!(
+      "  {} → {}  {}  ({})",
+      r.from,
+      r.to,
+      if r.ok { "通" } else { "不通" },
+      r.checked_at
+        .with_timezone(&chrono::Local)
+        .format("%m-%d %H:%M")
+    );
   }
 }

@@ -76,6 +76,8 @@ pub fn router(state: Arc<AppState>) -> Router {
     )
     .route("/api/status", get(status))
     .route("/api/version", get(crate::agent_upgrade::version))
+    .route("/api/network", get(crate::network::show))
+    .route("/api/network/probe", post(crate::network::probe))
     .route("/api/upgrade", post(crate::agent_upgrade::upgrade_core))
     .route("/api/servers", get(list_servers).post(add_server))
     .route(

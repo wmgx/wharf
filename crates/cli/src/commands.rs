@@ -16,7 +16,7 @@ use wharf_api_types::{
   },
   view::{
     AccountView, BackupsView, CreatedToken, DeploymentView,
-    GatewayView, ImportPreview, ImportRequest, JoinInfo,
+    GatewayView, ImportPreview, ImportRequest, JoinInfo, NetworkView,
     RestoreRequest, RollbackTarget, RouteView, SecretView,
     ServerView, ServiceView, Status, TokenView, Unmanaged,
   },
@@ -103,6 +103,15 @@ async fn dispatch(
       service(c, cmd, j).await
     }
     Command::Upgrade => upgrade(c, j).await,
+    Command::Network { probe } => {
+      let v: NetworkView = if probe {
+        c.post("/api/network/probe", &json!({})).await?
+      } else {
+        c.get("/api/network").await?
+      };
+      out(j, &v, print::network);
+      Ok(())
+    }
     Command::Server(cmd) => server(c, cmd, j).await,
     Command::Service(cmd) => service(c, cmd, j).await,
     Command::Gateway(cmd) => gateway(c, cmd, j).await,

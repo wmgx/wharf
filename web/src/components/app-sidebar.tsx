@@ -1,4 +1,4 @@
-import { AnchorIcon, PlusIcon, BoxesIcon, CloudIcon, ChevronsUpDownIcon, KeyRoundIcon, LogOutIcon, MoonIcon, NetworkIcon, SunIcon, ArrowUpCircleIcon, WaypointsIcon } from "lucide-react";
+import { AnchorIcon, CableIcon, PlusIcon, BoxesIcon, CloudIcon, ChevronsUpDownIcon, KeyRoundIcon, LogOutIcon, MoonIcon, NetworkIcon, SunIcon, ArrowUpCircleIcon, WaypointsIcon } from "lucide-react";
 import { useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
@@ -57,6 +57,7 @@ export function AppSidebar({ username, onLogout }: { username: string; onLogout:
       items: [
         { to: "/services", label: "服务", icon: BoxesIcon, count: status?.services.length },
         { to: "/gateways", label: "网关", icon: WaypointsIcon, count: status?.gateways.length },
+        { to: "/network", label: "组网", icon: CableIcon },
       ],
     },
     {

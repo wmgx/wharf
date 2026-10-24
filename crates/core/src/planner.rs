@@ -310,6 +310,14 @@ pub async fn make_plan(
 
   let mut net = snap.net(&desired);
   net.reach = crate::link::probe(state, &net, &desired).await;
+  // 迁移要源机器把数据推到目标机器（design 2.10）。
+  for (name, svc) in &desired.services {
+    let to = &svc.spec.server;
+    if let Some(from) = moved_from(&snap, &current, name, to) {
+      crate::link::require_reach(state, &net, from, to, "迁移数据")
+        .await?;
+    }
+  }
   let status =
     gather_status(state, &snap, &current, &desired, &net, &mut b)
       .await;

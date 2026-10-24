@@ -517,6 +517,23 @@ pub fn reach(conn: &Connection) -> Result<Reach, ApiError> {
   rows.collect::<Result<_, _>>().map_err(sql_err)
 }
 
+/// 连通性探测结果和探测时间（毫秒）。
+pub fn reach_rows(
+  conn: &Connection,
+) -> Result<Vec<(String, String, bool, i64)>, ApiError> {
+  let mut stmt = conn
+    .prepare(
+      "SELECT from_server, to_server, ok, checked_at FROM reach ORDER BY from_server, to_server",
+    )
+    .map_err(sql_err)?;
+  let rows = stmt
+    .query_map([], |r| {
+      Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+    })
+    .map_err(sql_err)?;
+  rows.collect::<Result<_, _>>().map_err(sql_err)
+}
+
 pub fn set_reach(
   conn: &Connection,
   results: &[(String, String, bool)],

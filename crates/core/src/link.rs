@@ -344,6 +344,9 @@ fn frps_addr(
     })
 }
 
+/// 一台机器要探测哪些机器：from → {to}。
+pub type Pairs = BTreeMap<String, BTreeSet<String>>;
+
 /// 做计划前探测：网关所在机器能不能连到服务所在机器的内网地址。结果写进数据库并返回合并后的结果。
 /// agent 离线或版本太旧时跳过，保留原来的结果。
 pub async fn probe(
@@ -351,7 +354,7 @@ pub async fn probe(
   net: &Net,
   world: &World,
 ) -> db::Reach {
-  let mut pairs: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+  let mut pairs = Pairs::new();
   for (gateway, route, targets) in routes_by_gateway(world) {
     let gateway_server = gateway.server.as_str();
     if route.link == LinkMode::Tunnel {
@@ -367,8 +370,49 @@ pub async fn probe(
       }
     }
   }
+  probe_pairs(state, net, pairs).await
+}
+
+/// 两台机器之间要直接传数据（迁移、备份）时先探测，连不上就报错（design 2.10）。
+pub async fn require_reach(
+  state: &AppState,
+  net: &Net,
+  from: &str,
+  to: &str,
+  what: &str,
+) -> Result<(), ApiError> {
+  let pairs = Pairs::from([(
+    from.to_string(),
+    BTreeSet::from([to.to_string()]),
+  )]);
+  let reach = probe_pairs(state, net, pairs).await;
+  if reach.get(&(from.to_string(), to.to_string())) == Some(&false) {
+    return Err(
+      ApiError::invalid(format!(
+        "{from} 连不上 {to} 的内网地址，不能{what}"
+      ))
+      .with_hint(
+        "两台机器要在同一个组网（Tailscale）或同一个内网里；wharf network 查看谁能连谁",
+      ),
+    );
+  }
+  Ok(())
+}
+
+/// 探测 `pairs` 里每个方向，`to` 没有内网地址的跳过。结果写进数据库并返回合并后的结果。
+pub async fn probe_pairs(
+  state: &AppState,
+  net: &Net,
+  pairs: Pairs,
+) -> db::Reach {
   let calls = pairs.into_iter().map(|(from, to)| async move {
-    let to: Vec<String> = to.into_iter().collect();
+    let to: Vec<String> = to
+      .into_iter()
+      .filter(|t| net.private.contains_key(t))
+      .collect();
+    if to.is_empty() {
+      return vec![];
+    }
     let targets = to
       .iter()
       .map(|t| {

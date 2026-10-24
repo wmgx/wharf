@@ -73,6 +73,12 @@ pub enum Command {
   },
   /// 升级 Wharf：控制面换成最新镜像，再把各服务器的 agent 升到同一版本。
   Upgrade,
+  /// 组网：各服务器怎么接入（tailscale / lan / public）、谁能连谁的内网地址。
+  Network {
+    /// 先让每台在线服务器探测其余服务器，再显示结果。
+    #[arg(long)]
+    probe: bool,
+  },
   /// 服务器。
   #[command(subcommand)]
   Server(ServerCmd),

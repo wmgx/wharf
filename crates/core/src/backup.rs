@@ -293,6 +293,14 @@ pub async fn backup(
 ) -> Result<(), ApiError> {
   let snap = snapshot::load(&state.db).await?;
   let w = locate(&snap, service)?;
+  crate::link::require_reach(
+    state,
+    &snap.net(&snap.world),
+    &w.server,
+    &w.target,
+    "备份到这台机器",
+  )
+  .await?;
   let creds = credentials(state).await?;
   let result = async {
     ensure_server(state, &snap, &w, &creds, &progress, cancel)
@@ -363,6 +371,14 @@ pub async fn restore(
 ) -> Result<(), ApiError> {
   let snap = snapshot::load(&state.db).await?;
   let w = locate(&snap, service)?;
+  crate::link::require_reach(
+    state,
+    &snap.net(&snap.world),
+    &w.server,
+    &w.target,
+    "备份到这台机器",
+  )
+  .await?;
   let creds = credentials(state).await?;
   ensure_server(state, &snap, &w, &creds, &progress, cancel).await?;
   let stopped = stop(state, &w, service, &progress, cancel).await?;
