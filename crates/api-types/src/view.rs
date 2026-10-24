@@ -9,39 +9,10 @@ use serde::{Deserialize, Serialize};
 use crate::{
   agent::{AgentReport, ContainerInfo},
   spec::{
-    EdgeAppSpec, EdgeKind, GatewaySpec, PrivateAddr, PrivateNetwork,
+    EdgeAppSpec, EdgeKind, GatewaySpec, NetworkMode, PrivateAddr,
     RouteSpec, ServerSettings, ServiceSpec,
   },
 };
-
-/// 机器的接入方式（design 2.10）：有 Tailscale 地址是 `tailscale`，
-/// 有别的内网地址是 `lan`，都没有是 `public`（只能经公网和反向隧道）。
-#[derive(
-  Debug,
-  Clone,
-  Copy,
-  PartialEq,
-  Eq,
-  Serialize,
-  Deserialize,
-  JsonSchema,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum NetworkMode {
-  Tailscale,
-  Lan,
-  Public,
-}
-
-impl NetworkMode {
-  pub fn of(addr: Option<&PrivateAddr>) -> Self {
-    match addr.map(|a| a.network) {
-      Some(PrivateNetwork::Tailscale) => Self::Tailscale,
-      Some(_) => Self::Lan,
-      None => Self::Public,
-    }
-  }
-}
 
 /// `GET /api/network`：各机器怎么接入、谁能连谁。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -55,6 +26,9 @@ pub struct NetworkView {
 pub struct NetworkServer {
   pub name: String,
   pub mode: NetworkMode,
+  /// 接入方式是在设置里指定的（否则是按检测到的地址推断）。
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub configured: bool,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub private_ip: Option<String>,
   #[serde(default, skip_serializing_if = "Option::is_none")]

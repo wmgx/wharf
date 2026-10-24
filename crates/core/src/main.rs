@@ -32,6 +32,7 @@ mod render;
 mod rollback;
 mod snapshot;
 mod state;
+mod tailscale;
 mod tunnel;
 mod uploads;
 mod views;

@@ -3,9 +3,8 @@
 use wharf_api_types::{
   ApiError,
   plan::{Action, Plan, Risk, Run, RunStatus, RunStep, StepStatus},
-  view::{
-    BackupsView, NetworkMode, NetworkView, ServiceView, Status,
-  },
+  spec::NetworkMode,
+  view::{BackupsView, NetworkView, ServiceView, Status},
 };
 
 pub fn json<T: serde::Serialize>(value: &T) {
@@ -285,9 +284,10 @@ pub fn network(v: &NetworkView) {
       NetworkMode::Public => "public",
     };
     println!(
-      "{:<10} {:<9}  内网 {:<16} 公网 {:<16} {}",
+      "{:<10} {:<9}{} 内网 {:<16} 公网 {:<16} {}",
       s.name,
       mode,
+      if s.configured { "*" } else { " " },
       s.private_ip.as_deref().unwrap_or("-"),
       s.public_ip.as_deref().unwrap_or("-"),
       if s.online { "在线" } else { "离线" }

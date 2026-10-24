@@ -4,8 +4,9 @@ use std::sync::Arc;
 
 use axum::{Json, extract::State};
 use chrono::TimeZone;
-use wharf_api_types::view::{
-  NetworkMode, NetworkServer, NetworkView, ReachView, TokenScope,
+use wharf_api_types::{
+  spec::NetworkMode,
+  view::{NetworkServer, NetworkView, ReachView, TokenScope},
 };
 
 use crate::{
@@ -62,7 +63,11 @@ async fn view(
     .keys()
     .filter_map(|n| crate::views::server_view(state, snap, n))
     .map(|v| NetworkServer {
-      mode: NetworkMode::of(v.private_addr.as_ref()),
+      mode: v
+        .settings
+        .network_mode
+        .unwrap_or_else(|| NetworkMode::of(v.private_addr.as_ref())),
+      configured: v.settings.network_mode.is_some(),
       private_ip: v.private_addr.map(|a| a.ip),
       public_ip: v.public_ip,
       online: v.online,

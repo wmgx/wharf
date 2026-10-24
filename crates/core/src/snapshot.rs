@@ -107,11 +107,15 @@ impl Snapshot {
     };
     for (name, server) in &world.servers {
       let report = self.agent(name).and_then(|a| a.report.as_ref());
+      // 接入方式是 public 时不用内网地址：端口只绑 127.0.0.1，网关一律走反向隧道。
+      let public = server.settings.network_mode
+        == Some(wharf_api_types::spec::NetworkMode::Public);
       if let Some(addr) = server
         .settings
         .private_addr
         .clone()
         .or_else(|| report.and_then(|r| r.private_addr.clone()))
+        .filter(|_| !public)
       {
         net.private.insert(name.clone(), addr);
       }

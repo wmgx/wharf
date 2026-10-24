@@ -17,7 +17,10 @@ use wharf_api_types::{
   plan::{
     Action, Layer, Plan, PlanItem, PlanRequest, PlanStatus, Risk,
   },
-  spec::{BuildSource, EdgeKind, GatewayKind, RouteSpec, Source},
+  spec::{
+    BuildSource, EdgeKind, GatewayKind, NetworkMode, RouteSpec,
+    Source,
+  },
 };
 use wharf_providers::{DnsRecordSpec, DnsRecordType, RemoteRecord};
 
@@ -123,6 +126,10 @@ pub enum Step {
     server: String,
     project: String,
   },
+  /// 起 Wharf 管理的 Tailscale 容器并加入网络（design 2.10）。删除用 LinkDown。
+  TailscaleUp {
+    server: String,
+  },
   /// 备份和恢复不来自计划，是单独发起的执行。
   Backup {
     service: String,
@@ -175,7 +182,8 @@ impl Step {
       Self::VolumeSync { .. } => 2,
       Self::ServiceUp { .. }
       | Self::EdgeDeploy { .. }
-      | Self::LinkUp { .. } => 3,
+      | Self::LinkUp { .. }
+      | Self::TailscaleUp { .. } => 3,
       Self::GatewaySync { .. } => 4,
       Self::DnsUpsert { .. } | Self::EdgeAttach { .. } => 5,
       Self::GatewayDown { .. } | Self::LinkDown { .. } => 6,
@@ -291,6 +299,20 @@ pub async fn make_plan(
       );
     }
   }
+  for (name, row) in &desired.servers {
+    if row.settings.network_mode == Some(NetworkMode::Lan)
+      && row.settings.private_addr.is_none()
+    {
+      return Err(
+        ApiError::invalid(format!(
+          "服务器 {name} 的接入方式是 lan，要指定内网地址"
+        ))
+        .suggest(format!(
+          "wharf server set {name} --private-ip <ip>"
+        )),
+      );
+    }
+  }
   for (name, gw) in &desired.gateways {
     if let Some(account) = &gw.spec.account
       && !snap.accounts.iter().any(|a| &a.name == account)
@@ -325,6 +347,7 @@ pub async fn make_plan(
     &mut b, &snap, &current, &desired, &net, &status, &writes,
   )?;
   link_items(&mut b, &current, &desired, &net, &status)?;
+  tailscale_items(&mut b, &snap, &desired, &status);
   gateway_items(&mut b, &snap, &current, &desired, &net, &status)?;
   dns_items(&mut b, &snap, &desired, &net).await?;
   crate::edge_plan::edge_items(&mut b, &snap, &current, &desired)
@@ -1003,6 +1026,89 @@ fn link_items(
     );
   }
   Ok(())
+}
+
+/// Wharf 管理的 Tailscale 容器：要的时候起，接入方式改掉之后删。
+fn tailscale_items(
+  b: &mut Builder,
+  snap: &Snapshot,
+  desired: &World,
+  status: &StatusMap,
+) {
+  use crate::tailscale::{self as ts, PROJECT};
+  for server in desired.servers.keys() {
+    // 查不到现状的服务器已经单独提醒过。
+    let Some(Some(projects)) = status.get(server) else {
+      continue;
+    };
+    let existing = projects
+      .get(PROJECT)
+      .filter(|s| !(s.hash.is_none() && s.containers.is_empty()));
+    let address = format!("network/{server}/tailscale");
+    if !ts::wanted(snap, desired, server, existing.is_some()) {
+      if existing.is_some() {
+        let id = b.item(
+          address,
+          Layer::Tunnel,
+          Action::Delete,
+          Some(json!({ "server": server })),
+          None,
+          Risk::Disruptive,
+          "接入方式不再是 tailscale，删除 Wharf 装的 Tailscale（机器会留在 Tailscale 后台，显示离线）",
+        );
+        b.step(
+          vec![id],
+          format!("在 {server} 上删除 Tailscale"),
+          Step::LinkDown {
+            server: server.clone(),
+            project: PROJECT.to_string(),
+          },
+        );
+      }
+      continue;
+    }
+    let hash = ts::hash(server);
+    let decision = match existing {
+      None => Some((
+        Action::Create,
+        Risk::Safe,
+        format!("没检测到 Tailscale，起容器并以 {} 加入", ts::TAG),
+      )),
+      Some(s) if s.hash.as_deref() != Some(hash.as_str()) => Some((
+        Action::Update,
+        Risk::Disruptive,
+        "Tailscale 容器配置变化，重建（不会重新加入）".to_string(),
+      )),
+      Some(s) if !s.all_running() => Some((
+        Action::Update,
+        Risk::Disruptive,
+        format!(
+          "漂移：Tailscale 容器没在运行（{}）",
+          describe_containers(s)
+        ),
+      )),
+      Some(_) => None,
+    };
+    let Some((action, risk, reason)) = decision else {
+      continue;
+    };
+    let id = b.item(
+      address,
+      Layer::Tunnel,
+      action,
+      None,
+      Some(json!({ "server": server, "image": ts::IMAGE })),
+      risk,
+      reason,
+    );
+    b.step(
+      vec![id],
+      format!("在 {server} 上部署 Tailscale"),
+      Step::TailscaleUp {
+        server: server.clone(),
+      },
+    );
+  }
 }
 
 fn gateway_items(

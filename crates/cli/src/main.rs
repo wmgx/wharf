@@ -243,6 +243,10 @@ pub enum ServerCmd {
     /// 内网地址所在网络：lan（普通内网，明文）或 overlay（WireGuard 等加密组网）。
     #[arg(long, default_value = "lan", value_parser = ["lan", "overlay"])]
     network: String,
+    /// 接入方式：tailscale（没装时由 Wharf 装 Tailscale 容器并加入）、lan（要 --private-ip）、
+    /// public（不用内网地址，网关一律走反向隧道）、auto（按检测到的地址推断）。
+    #[arg(long, value_parser = ["tailscale", "lan", "public", "auto"])]
+    mode: Option<String>,
     /// 构建时传给内置模板的参数 `KEY=VALUE`（国内机器配 PIP_INDEX_URL、GOPROXY），可以多次使用。
     #[arg(long)]
     build_env: Vec<String>,

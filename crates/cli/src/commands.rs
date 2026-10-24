@@ -11,8 +11,9 @@ use wharf_api_types::{
   },
   spec::{
     BackupSpec, Change, Fleet, GatewayKind, GatewaySpec, GatewayTls,
-    PathRoute, PortSpec, PrivateAddr, PrivateNetwork, Region,
-    RouteSpec, ServerSettings, ServiceSpec, Source, VolumeSpec,
+    NetworkMode, PathRoute, PortSpec, PrivateAddr, PrivateNetwork,
+    Region, RouteSpec, ServerSettings, ServiceSpec, Source,
+    VolumeSpec,
   },
   view::{
     AccountView, BackupsView, CreatedToken, DeploymentView,
@@ -489,6 +490,7 @@ async fn server(
       mirrors_only,
       private_ip,
       network,
+      mode,
       build_env,
       clear_build_env,
       apply,
@@ -563,6 +565,14 @@ async fn server(
               PrivateNetwork::Lan
             },
           })
+        };
+      }
+      if let Some(mode) = mode {
+        settings.network_mode = match mode.as_str() {
+          "tailscale" => Some(NetworkMode::Tailscale),
+          "lan" => Some(NetworkMode::Lan),
+          "public" => Some(NetworkMode::Public),
+          _ => None,
         };
       }
       changes(

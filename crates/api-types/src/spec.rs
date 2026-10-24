@@ -48,6 +48,39 @@ pub struct ServerSettings {
   /// 构建时传给内置模板的参数，例如 `PIP_INDEX_URL`、`GOPROXY`（国内机器配镜像源）。
   #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
   pub build_env: BTreeMap<String, String>,
+  /// 接入方式（design 2.10）。不填按检测到的地址推断。`tailscale` 且没检测到 Tailscale 时
+  /// 由 Wharf 装 Tailscale 容器并加入；`public` 不用内网地址，网关到这台一律走反向隧道。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub network_mode: Option<NetworkMode>,
+}
+
+/// 机器的接入方式（design 2.10）。不指定时按检测到的地址推断：有 Tailscale 地址是 `tailscale`，
+/// 有别的内网地址是 `lan`，都没有是 `public`（只能经公网和反向隧道）。
+#[derive(
+  Debug,
+  Clone,
+  Copy,
+  PartialEq,
+  Eq,
+  Serialize,
+  Deserialize,
+  JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkMode {
+  Tailscale,
+  Lan,
+  Public,
+}
+
+impl NetworkMode {
+  pub fn of(addr: Option<&PrivateAddr>) -> Self {
+    match addr.map(|a| a.network) {
+      Some(PrivateNetwork::Tailscale) => Self::Tailscale,
+      Some(_) => Self::Lan,
+      None => Self::Public,
+    }
+  }
 }
 
 /// 服务器之间互相访问用的地址：网关跨机器访问服务时连它，

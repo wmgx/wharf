@@ -729,6 +729,35 @@ async fn run_step(
         ),
       )?;
     }
+    Step::TailscaleUp { server } => {
+      let compose =
+        crate::tailscale::deploy_compose(state, server).await?;
+      let result: ProjectUpResult = state
+        .hub
+        .call(
+          server,
+          AgentOp::ProjectUp(ProjectUp {
+            project: crate::tailscale::PROJECT.to_string(),
+            compose,
+            hash: crate::tailscale::hash(server),
+            pull: snapshot::pull_policy(&world.servers[server]),
+            pull_missing_only: false,
+            retire: None,
+          }),
+          GATEWAY_TIMEOUT,
+          Some(progress),
+          cancel,
+        )
+        .await?;
+      ensure_running(
+        &result,
+        "Tailscale",
+        &format!(
+          "在 {server} 上 docker logs {}-tailscale-1",
+          crate::tailscale::PROJECT
+        ),
+      )?;
+    }
     Step::LinkDown { server, project } => {
       state
         .hub

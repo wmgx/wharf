@@ -267,6 +267,7 @@ export interface AccountView {
 }
 
 export type Change =
+  | { op: "update_server"; name: string; settings: Record<string, unknown> }
   | { op: "upsert_service"; name: string; spec: ServiceSpec }
   | { op: "remove_service"; name: string }
   | { op: "upsert_gateway"; name: string; spec: GatewaySpec }
@@ -381,6 +382,6 @@ export interface BackupsView {
 export type NetworkMode = "tailscale" | "lan" | "public";
 
 export interface NetworkView {
-  servers: { name: string; mode: NetworkMode; private_ip?: string; public_ip?: string; online: boolean }[];
+  servers: { name: string; mode: NetworkMode; configured?: boolean; private_ip?: string; public_ip?: string; online: boolean }[];
   reach: { from: string; to: string; ok: boolean; checked_at: string }[];
 }
