@@ -566,6 +566,14 @@ async fn gather_status(
     for p in crate::link::projects(world, net).unwrap_or_default() {
       projects.entry(p.server).or_default().insert(p.project);
     }
+    for (name, row) in &world.servers {
+      if row.settings.network_mode == Some(NetworkMode::Tailscale) {
+        projects
+          .entry(name.clone())
+          .or_default()
+          .insert(crate::tailscale::PROJECT.to_string());
+      }
+    }
   }
   let futures =
     projects.into_iter().map(|(server, projects)| async move {
