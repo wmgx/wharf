@@ -249,7 +249,7 @@ async fn self_image(
   }
   let id = std::fs::read_to_string("/proc/self/mountinfo")
     .ok()
-    .and_then(|m| container_id(&m))
+    .and_then(|m| wharf_api_types::agent::container_id(&m))
     .ok_or_else(|| {
       ApiError::new(ErrorCode::AgentFailed, "找不到 agent 自己的容器")
     })?;
@@ -261,17 +261,6 @@ async fn self_image(
     .await?
     .check("docker inspect")?;
   Ok(out.stdout.trim().to_string())
-}
-
-/// mountinfo 里 `/etc/hostname` 之类的挂载来自 `.../containers/<id>/`。
-pub(crate) fn container_id(mountinfo: &str) -> Option<String> {
-  mountinfo.lines().find_map(|line| {
-    let rest =
-      &line[line.find("/containers/")? + "/containers/".len()..];
-    let id: String =
-      rest.chars().take_while(|c| c.is_ascii_hexdigit()).collect();
-    (id.len() == 64).then_some(id)
-  })
 }
 
 /// 容器名只允许 docker 本身允许的字符，也防止被当成命令行参数。
@@ -444,6 +433,7 @@ mod tests {
 
   #[test]
   fn finds_container_id_in_mountinfo() {
+    use wharf_api_types::agent::container_id;
     let id = "a".repeat(64);
     let m = format!(
       "1 2 0:1 / / rw - overlay overlay rw\n3 1 8:1 /var/lib/docker/containers/{id}/hostname /etc/hostname rw - ext4 /dev/sda1 rw\n"

@@ -1,4 +1,4 @@
-//! agent 自升级。
+//! agent 自升级，也用来升级同机的控制面。
 //!
 //! agent 不能停掉自己再启动，所以分两段：
 //! 1. 当前 agent 拉新镜像，用新镜像起一个接班容器（`wharf-agent replace`），然后回复控制面；
@@ -24,14 +24,14 @@ const HELPER: &str = "wharf-agent-upgrade";
 /// 新 agent 要在这么长时间里连上控制面。
 const CONNECT_WAIT: Duration = Duration::from_secs(60);
 /// agent 连上控制面时打的日志，见 conn.rs。
-const CONNECTED: &str = "已连接控制面";
+pub const CONNECTED: &str = "已连接控制面";
 const SOCK: &str = "/var/run/docker.sock";
 
 /// 当前 agent 所在的容器 id。
 fn self_container() -> Result<String, ApiError> {
   std::fs::read_to_string("/proc/self/mountinfo")
     .ok()
-    .and_then(|m| crate::adopt::container_id(&m))
+    .and_then(|m| wharf_api_types::agent::container_id(&m))
     .ok_or_else(|| {
       ApiError::new(
         ErrorCode::AgentFailed,
@@ -102,8 +102,19 @@ pub async fn start(
   job: &UpgradeJob,
   ctx: &Ctx,
 ) -> Result<UpgradeResult, ApiError> {
-  let id = self_container()?;
-  let me = inspect(docker, &id, ctx).await?;
+  let (id, me) = match &job.container {
+    None => {
+      let id = self_container()?;
+      let me = inspect(docker, &id, ctx).await?;
+      (id, me)
+    }
+    Some(id) => {
+      let me = inspect(docker, id, ctx).await.map_err(|_| {
+        ApiError::not_found(format!("这台机器上没有容器 {id}"))
+      })?;
+      (id.clone(), me)
+    }
+  };
   let current = str_at(&me, &["Config", "Image"])
     .ok_or_else(|| ApiError::internal("读不到 agent 的镜像名"))?
     .to_string();
@@ -149,6 +160,7 @@ pub async fn start(
     .args(["-v", &sock_bind(&me)])
     .args(["--entrypoint", "wharf-agent", &new_id])
     .args(["replace", &id, &current, &old_id])
+    .args(["--ready", job.ready.as_deref().unwrap_or(CONNECTED)])
     .timeout(QUICK)
     .run(ctx)
     .await?
@@ -246,8 +258,8 @@ async fn docker_ok(ctx: &Ctx, args: &[&str]) -> bool {
     .is_ok_and(|o| o.success)
 }
 
-/// 等新 agent 连上控制面。
-async fn connected(ctx: &Ctx, name: &str) -> bool {
+/// 等新容器的日志里出现 `ready`。
+async fn ready_in_time(ctx: &Ctx, name: &str, ready: &str) -> bool {
   let deadline = tokio::time::Instant::now() + CONNECT_WAIT;
   while tokio::time::Instant::now() < deadline {
     tokio::time::sleep(Duration::from_secs(3)).await;
@@ -259,9 +271,7 @@ async fn connected(ctx: &Ctx, name: &str) -> bool {
     else {
       continue;
     };
-    if out.stdout.contains(CONNECTED)
-      || out.stderr.contains(CONNECTED)
-    {
+    if out.stdout.contains(ready) || out.stderr.contains(ready) {
       return true;
     }
   }
@@ -273,9 +283,10 @@ pub async fn replace(
   container: &str,
   image: &str,
   old_image: &str,
+  ready: &str,
 ) -> anyhow::Result<()> {
   let ctx = Ctx::detached();
-  // 让旧 agent 先把回复发出去。
+  // 让旧容器先把回复发出去。
   tokio::time::sleep(Duration::from_secs(3)).await;
   let docker = Docker {
     bin: "docker".into(),
@@ -303,26 +314,26 @@ pub async fn replace(
   run.push(image);
   run.extend(cmd.iter().map(String::as_str));
   let started = docker_ok(&ctx, &run).await;
-  if started && connected(&ctx, &name).await {
+  if started && ready_in_time(&ctx, &name, ready).await {
     docker_ok(&ctx, &["rm", "-f", &backup]).await;
     // 旧镜像没有别的容器在用时删掉；在用就删不掉，不影响。
     docker_ok(&ctx, &["rmi", old_image]).await;
     tracing::info!("升级完成：{name} 已换成 {image}");
     return Ok(());
   }
-  tracing::warn!("新 agent 没有连上控制面，恢复旧容器");
+  tracing::warn!("新容器没有起来，恢复旧容器");
   if let Ok(out) = Cmd::new("docker")
     .args(["logs", "--tail", "20", &name])
     .timeout(QUICK)
     .run(&ctx)
     .await
   {
-    tracing::warn!("新 agent 的日志：\n{}{}", out.stdout, out.stderr);
+    tracing::warn!("新容器的日志：\n{}{}", out.stdout, out.stderr);
   }
   docker_ok(&ctx, &["rm", "-f", &name]).await;
   docker_ok(&ctx, &["rename", &backup, &name]).await;
   docker_ok(&ctx, &["start", &name]).await;
-  anyhow::bail!("升级失败，已恢复旧 agent")
+  anyhow::bail!("升级失败，已恢复旧容器")
 }
 
 #[cfg(test)]

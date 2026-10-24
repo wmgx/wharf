@@ -80,6 +80,9 @@ enum Command {
     container: String,
     image: String,
     old_image: String,
+    /// 新容器日志里出现这段文字才算起来了。
+    #[arg(long, default_value = upgrade::CONNECTED)]
+    ready: String,
   },
 }
 
@@ -104,8 +107,12 @@ async fn main() -> anyhow::Result<()> {
       container,
       image,
       old_image,
+      ready,
     } => {
-      return upgrade::replace(&container, &image, &old_image).await;
+      return upgrade::replace(
+        &container, &image, &old_image, &ready,
+      )
+      .await;
     }
     Command::Join {
       core_url,

@@ -162,7 +162,8 @@ pub enum AgentOp {
   Probe {
     targets: Vec<ProbeTarget>,
   },
-  /// 升级 agent 自己：拉新镜像，起一个接班容器换掉当前容器，结果是 [UpgradeResult]。
+  /// 升级 agent 自己（或 `container` 指定的同机容器，例如控制面）：
+  /// 拉新镜像，起一个接班容器换掉当前容器，结果是 [UpgradeResult]。
   /// 回复之后连接会断开，新 agent 重新连上才算完成。
   Upgrade(UpgradeJob),
 }
@@ -173,6 +174,24 @@ pub struct UpgradeJob {
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub tag: Option<String>,
   pub pull: PullPolicy,
+  /// 要换掉的容器 id，不填是 agent 自己。不在这台机器上时回复 NotFound。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub container: Option<String>,
+  /// 新容器日志里出现这段文字才算起来了，不填是 agent 连上控制面的日志。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub ready: Option<String>,
+}
+
+/// 从 `/proc/self/mountinfo` 认出当前所在的容器 id：
+/// `/etc/hostname` 之类的挂载来自 `.../containers/<id>/`。
+pub fn container_id(mountinfo: &str) -> Option<String> {
+  mountinfo.lines().find_map(|line| {
+    let rest =
+      &line[line.find("/containers/")? + "/containers/".len()..];
+    let id: String =
+      rest.chars().take_while(|c| c.is_ascii_hexdigit()).collect();
+    (id.len() == 64).then_some(id)
+  })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

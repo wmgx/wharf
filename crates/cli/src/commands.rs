@@ -5,6 +5,7 @@ use std::{collections::BTreeMap, time::Duration};
 use serde_json::{Value, json};
 use wharf_api_types::{
   ApiError, ErrorCode,
+  agent::UpgradeResult,
   plan::{
     ApplyRequest, ApplyResponse, Plan, PlanRequest, Run, RunStatus,
   },
@@ -101,6 +102,7 @@ async fn dispatch(
       };
       service(c, cmd, j).await
     }
+    Command::Upgrade => upgrade(c, j).await,
     Command::Server(cmd) => server(c, cmd, j).await,
     Command::Service(cmd) => service(c, cmd, j).await,
     Command::Gateway(cmd) => gateway(c, cmd, j).await,
@@ -586,21 +588,91 @@ async fn server(
           );
         }
       };
-      if names.is_empty() {
-        out(j, &json!([]), |_| println!("全部 agent 都是最新版本"));
-      }
-      for name in names {
-        let r: ApplyResponse = c
-          .post(
-            &format!("/api/servers/{}/upgrade", seg(&name)),
-            &json!({}),
-          )
-          .await?;
-        finish_task(c, &r.run_id, true, j).await?;
-      }
-      Ok(())
+      upgrade_agents(c, names, j).await
     }
   }
+}
+
+async fn upgrade_agents(
+  c: &Client,
+  names: Vec<String>,
+  j: bool,
+) -> CliResult<()> {
+  if names.is_empty() {
+    out(j, &json!([]), |_| println!("全部 agent 都是最新版本"));
+  }
+  for name in names {
+    let r: ApplyResponse = c
+      .post(
+        &format!("/api/servers/{}/upgrade", seg(&name)),
+        &json!({}),
+      )
+      .await?;
+    finish_task(c, &r.run_id, true, j).await?;
+  }
+  Ok(())
+}
+
+/// 控制面重启后，等它带着新构建号回来、agent 重新连上。
+const CORE_RESTART_WAIT: Duration = Duration::from_secs(150);
+const AGENT_RECONNECT_WAIT: Duration = Duration::from_secs(60);
+
+async fn upgrade(c: &Client, j: bool) -> CliResult<()> {
+  let before: Value = c.get("/api/version").await?;
+  let r: UpgradeResult = c.post("/api/upgrade", &json!({})).await?;
+  if !r.started {
+    if !j {
+      println!("控制面已经是最新版本");
+    }
+  } else {
+    if !j {
+      println!("控制面正在换成 {}", r.image);
+    }
+    let deadline = tokio::time::Instant::now() + CORE_RESTART_WAIT;
+    loop {
+      tokio::time::sleep(Duration::from_secs(3)).await;
+      // 重启期间连不上是正常的。
+      if let Ok(v) = c.get::<Value>("/api/version").await
+        && v["build"] != before["build"]
+      {
+        if !j {
+          println!(
+            "控制面已换成构建 {}",
+            v["build"].as_str().unwrap_or_default()
+          );
+        }
+        break;
+      }
+      if tokio::time::Instant::now() > deadline {
+        return Err(
+          ApiError::new(ErrorCode::AgentFailed, "控制面没有换成新版本")
+            .with_hint("接班容器会恢复旧的控制面；在控制面所在的机器上 docker logs wharf-agent-upgrade 查看原因")
+            .into(),
+        );
+      }
+    }
+  }
+  // agent 断线重连要几秒，最多等一分钟；还没连上的这次跳过。
+  let deadline = tokio::time::Instant::now() + AGENT_RECONNECT_WAIT;
+  let servers = loop {
+    let v: Vec<ServerView> = c.get("/api/servers").await?;
+    if !r.started
+      || v.iter().all(|s| s.online)
+      || tokio::time::Instant::now() > deadline
+    {
+      break v;
+    }
+    tokio::time::sleep(Duration::from_secs(3)).await;
+  };
+  for s in servers.iter().filter(|s| !s.online) {
+    eprintln!("{} 不在线，跳过", s.name);
+  }
+  let names = servers
+    .into_iter()
+    .filter(|s| s.online && s.agent_outdated)
+    .map(|s| s.name)
+    .collect();
+  upgrade_agents(c, names, j).await
 }
 
 // SERVICES

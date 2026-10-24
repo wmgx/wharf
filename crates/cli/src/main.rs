@@ -71,6 +71,8 @@ pub enum Command {
     #[command(flatten)]
     apply: ApplyFlags,
   },
+  /// 升级 Wharf：控制面换成最新镜像，再把各服务器的 agent 升到同一版本。
+  Upgrade,
   /// 服务器。
   #[command(subcommand)]
   Server(ServerCmd),
