@@ -3,14 +3,12 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { api, usePoll } from "@/api";
 import { useActions } from "@/components/actions";
-import { ago, CardsSkeleton, ErrorNote, PageHeader } from "@/components/common";
+import { ago, CardsSkeleton, ErrorNote, MODES, PageHeader } from "@/components/common";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import type { NetworkMode, NetworkView } from "@/types";
-
-const MODES: Record<NetworkMode, string> = { tailscale: "Tailscale", lan: "局域网", public: "公网" };
 
 /** 接入方式：选"自动"时按检测到的地址推断。 */
 function ModeMenu({ server }: { server: NetworkView["servers"][number] }) {

@@ -3,7 +3,7 @@ import { ApiError } from "@/api";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
-import type { LiveState, ServerView, ServiceView, Source } from "@/types";
+import type { LiveState, NetworkMode, ServerView, ServiceView, Source } from "@/types";
 
 export type Tone = "ok" | "warn" | "bad" | "idle";
 
@@ -33,6 +33,9 @@ export function serverText(s: ServerView): string {
   if (!s.online) return "离线";
   return s.rtt_ms != null ? `${s.rtt_ms} ms` : "在线";
 }
+
+/** 接入方式的显示名。 */
+export const MODES: Record<NetworkMode, string> = { tailscale: "Tailscale", lan: "局域网", public: "公网" };
 
 const GB = 1024 ** 3;
 
