@@ -180,7 +180,38 @@ CREATE TABLE reach (
   PRIMARY KEY (from_server, to_server)
 );
 "#,
+  // 零散的单值设置，例如控制面自身备份到哪台服务器。
+  r#"
+CREATE TABLE settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+"#,
 ];
+
+pub fn setting(c: &Connection, key: &str) -> Result<Option<String>, ApiError> {
+  c.query_row("SELECT value FROM settings WHERE key = ?1", params![key], |r| r.get(0))
+    .optional()
+    .map_err(sql_err)
+}
+
+/// `None` 删除。
+pub fn set_setting(
+  c: &Connection,
+  key: &str,
+  value: Option<&str>,
+) -> Result<(), ApiError> {
+  match value {
+    Some(v) => c.execute(
+      "INSERT INTO settings (key, value) VALUES (?1, ?2)
+       ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+      params![key, v],
+    ),
+    None => c.execute("DELETE FROM settings WHERE key = ?1", params![key]),
+  }
+  .map_err(sql_err)?;
+  Ok(())
+}
 
 #[derive(Clone)]
 pub struct Db {

@@ -79,6 +79,11 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route("/api/network", get(crate::network::show))
     .route("/api/network/probe", post(crate::network::probe))
     .route("/api/upgrade", post(crate::agent_upgrade::upgrade_core))
+    .route(
+      "/api/core-backup",
+      get(crate::core_backup::show).post(crate::core_backup::enable),
+    )
+    .route("/api/core-backup/run", post(crate::core_backup::run_now))
     .route("/api/servers", get(list_servers).post(add_server))
     .route(
       "/api/servers/{name}",

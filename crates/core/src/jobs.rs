@@ -58,6 +58,38 @@ pub fn spawn(state: Arc<AppState>) {
 async fn backups(state: &Arc<AppState>) -> Result<(), ApiError> {
   let snap = snapshot::load(&state.db).await?;
   let now = now_ms();
+  // 控制面自己先备份：它丢了，服务备份的口令也跟着丢了。
+  let (core_on, core_ok, core_any): (bool, Option<i64>, Option<i64>) = state
+    .db
+    .call(|c| {
+      let any = c
+        .query_row(
+          "SELECT MAX(created_at) FROM backups WHERE service = ?1",
+          params![crate::core_backup::REPO],
+          |r| r.get(0),
+        )
+        .map_err(sql_err)?;
+      Ok((
+        crate::core_backup::enabled(c)?,
+        crate::core_backup::last_ok(c)?,
+        any,
+      ))
+    })
+    .await?;
+  let backoff = core_any
+    .is_some_and(|t| core_any != core_ok && now - t < RETRY_AFTER_MS);
+  if core_on
+    && core_ok.is_none_or(|t| now - t >= BACKUP_EVERY_MS)
+    && !backoff
+  {
+    apply::start_task(
+      state.clone(),
+      "备份控制面".into(),
+      Step::CoreBackup { user_key: None },
+    )
+    .await?;
+    return Ok(());
+  }
   for (name, row) in &snap.world.services {
     if row.spec.backup.is_none() {
       continue;

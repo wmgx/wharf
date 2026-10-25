@@ -172,6 +172,10 @@ pub enum Step {
   ServiceRestart {
     service: String,
   },
+  /// 控制面自身备份。`user_key`：开启时输入的登录密码，加成仓库的恢复口令。
+  CoreBackup {
+    user_key: Option<wharf_api_types::agent::OneTimeSecret>,
+  },
   /// 清理服务器上没在用的镜像。单独发起，不来自计划。
   Prune {
     server: String,
@@ -206,6 +210,7 @@ impl Step {
       | Self::Rebuild { .. }
       | Self::AgentUpgrade { .. }
       | Self::Prune { .. }
+      | Self::CoreBackup { .. }
       | Self::ServiceRestart { .. }
       | Self::EdgeRollback { .. } => 8,
     }

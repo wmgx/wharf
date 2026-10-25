@@ -44,14 +44,16 @@ const HTTP_HASH_SECRET: &str = "WHARF_BACKUP_HTTP_HASH";
 const HTTP_USER: &str = "wharf";
 
 const STOP_TIMEOUT: Duration = Duration::from_secs(5 * 60);
-const RESTIC_TIMEOUT: Duration = Duration::from_secs(6 * 3600);
+pub(crate) const RESTIC_TIMEOUT: Duration = Duration::from_secs(6 * 3600);
 const SERVER_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const LIST_TIMEOUT: Duration = Duration::from_secs(3 * 60);
 
-struct Creds {
-  key: String,
+pub(crate) struct Creds {
+  pub(crate) key: String,
   http: String,
   http_hash: String,
+  /// 控制面自身备份开启后，管理员也能用登录密码访问备份服务器（`用户名:bcrypt`）。
+  owner: Option<String>,
 }
 
 pub(crate) fn random_hex() -> String {
@@ -61,7 +63,7 @@ pub(crate) fn random_hex() -> String {
 }
 
 /// 取备份口令，没有就生成。已有的不覆盖（INSERT OR IGNORE），并发时也只有一份。
-async fn credentials(state: &AppState) -> Result<Creds, ApiError> {
+pub(crate) async fn credentials(state: &AppState) -> Result<Creds, ApiError> {
   let key = random_hex();
   let http = random_hex();
   let http_hash = bcrypt::hash(&http, bcrypt::DEFAULT_COST)
@@ -87,18 +89,19 @@ async fn credentials(state: &AppState) -> Result<Creds, ApiError> {
         key: get(KEY_SECRET),
         http: get(HTTP_SECRET),
         http_hash: get(HTTP_HASH_SECRET),
+        owner: secrets.get(crate::core_backup::OWNER_SECRET).cloned(),
       })
     })
     .await
 }
 
 /// 一次备份或恢复要用到的位置信息。
-struct Where {
+pub(crate) struct Where {
   /// 数据所在的服务器（最近一次部署的位置）。
-  server: String,
+  pub(crate) server: String,
   /// 备份服务器。
-  target: String,
-  target_ip: String,
+  pub(crate) target: String,
+  pub(crate) target_ip: String,
 }
 
 fn locate(snap: &Snap, service: &str) -> Result<Where, ApiError> {
@@ -143,7 +146,7 @@ fn locate(snap: &Snap, service: &str) -> Result<Where, ApiError> {
   })
 }
 
-fn job(
+pub(crate) fn job(
   snap: &Snap,
   server: &str,
   service: &str,
@@ -166,10 +169,11 @@ fn job(
         mirrors_only: false,
         attempt_timeout_secs: snapshot::PULL_ATTEMPT_SECS,
       }),
+    core_marker: None,
   })
 }
 
-fn rest_repo(w: &Where, creds: &Creds) -> ResticRepo {
+pub(crate) fn rest_repo(w: &Where, creds: &Creds) -> ResticRepo {
   ResticRepo::Rest {
     host: w.target_ip.clone(),
     port: REST_SERVER_PORT,
@@ -179,7 +183,7 @@ fn rest_repo(w: &Where, creds: &Creds) -> ResticRepo {
 }
 
 /// 备份服务器上的 rest-server 配置没变且在运行时什么也不做。
-async fn ensure_server(
+pub(crate) async fn ensure_server(
   state: &AppState,
   snap: &Snap,
   w: &Where,
@@ -187,10 +191,12 @@ async fn ensure_server(
   progress: &ProgressFn,
   cancel: &CancellationToken,
 ) -> Result<(), ApiError> {
-  let compose = render::backup_server_compose(
-    &w.target_ip,
-    &format!("{HTTP_USER}:{}", creds.http_hash),
-  );
+  let mut htpasswd = format!("{HTTP_USER}:{}", creds.http_hash);
+  if let Some(owner) = &creds.owner {
+    htpasswd = format!("{htpasswd}\n{owner}");
+  }
+  let compose =
+    render::backup_server_compose(&w.target_ip, &htpasswd);
   let hash = render::hash(&compose);
   let states = snapshot::project_status(
     &state.hub,
@@ -411,7 +417,7 @@ pub async fn restore(
   started
 }
 
-async fn record(
+pub(crate) async fn record(
   state: &AppState,
   run_id: &str,
   service: &str,

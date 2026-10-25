@@ -14,8 +14,8 @@ use serde_json::Value;
 use wharf_api_types::{
   ApiError, ErrorCode,
   agent::{
-    BACKUP_ROOT, BackupSummary, RESTIC_IMAGE, ResticAction,
-    ResticJob, ResticRepo, Snapshot,
+    BACKUP_ROOT, BackupSummary, CORE_BACKUP_DIR, RESTIC_IMAGE,
+    ResticAction, ResticJob, ResticRepo, Snapshot,
   },
   validate_name,
 };
@@ -119,7 +119,10 @@ pub async fn run(
   job: &ResticJob,
   ctx: &Ctx,
 ) -> Result<Value, ApiError> {
-  let root = data_root(&job.service)?;
+  let root = match &job.core_marker {
+    Some(marker) => core_root(marker)?,
+    None => data_root(&job.service)?,
+  };
   let (repo, mut mounts) = match &job.repo {
     ResticRepo::Rest {
       host,
@@ -220,6 +223,33 @@ pub async fn run(
     ResticAction::Restore { snapshot } => {
       restore(docker, job, repo, mounts, &root, snapshot, ctx).await
     }
+    ResticAction::AddKey { new_password } => {
+      let j = Job {
+        docker,
+        service: &job.service,
+        repo,
+        password: &job.password.0,
+        mounts,
+      };
+      add_key(docker, j, &new_password.0, ctx).await
+    }
+    ResticAction::RemoveKey { id } => {
+      if !id.bytes().all(|c| c.is_ascii_hexdigit()) || id.is_empty() {
+        return Err(ApiError::invalid(format!("钥匙 id 不合法：{id}")));
+      }
+      let j = Job {
+        docker,
+        service: &job.service,
+        repo,
+        password: &job.password.0,
+        mounts,
+      };
+      ctx.say("删除旧口令");
+      j.restic(&["key", "remove", id], SHORT_TIMEOUT, true, ctx)
+        .await?
+        .check("restic key remove")?;
+      Ok(Value::Null)
+    }
     ResticAction::Prune => {
       let j = Job {
         docker,
@@ -249,6 +279,68 @@ pub async fn run(
       Ok(Value::Null)
     }
   }
+}
+
+/// 控制面自身备份的目录。用标记确认这台就是控制面所在的机器。
+fn core_root(marker: &str) -> Result<PathBuf, ApiError> {
+  let root = PathBuf::from(CORE_BACKUP_DIR);
+  let found = std::fs::read_to_string(root.join(".marker")).ok();
+  if found.as_deref().map(str::trim) != Some(marker) {
+    return Err(ApiError::new(
+      ErrorCode::NotFound,
+      "控制面不在这台机器上",
+    ));
+  }
+  Ok(root)
+}
+
+/// 新口令写进 agent 数据目录下的临时文件（宿主机路径相同）挂给 restic，用完删掉。
+async fn add_key(
+  docker: &Docker,
+  mut j: Job<'_>,
+  new_password: &str,
+  ctx: &Ctx,
+) -> Result<Value, ApiError> {
+  let before = key_ids(&j, ctx).await?;
+  let file = docker
+    .data_dir
+    .join(format!(".restic-newkey-{}", std::process::id()));
+  crate::docker::write_private(&file, new_password)?;
+  j.mounts.push(format!("{}:/newkey:ro", file.display()));
+  ctx.say("给备份仓库加一把口令");
+  let added = j
+    .restic(
+      &["key", "add", "--new-password-file", "/newkey"],
+      SHORT_TIMEOUT,
+      false,
+      ctx,
+    )
+    .await
+    .and_then(|o| o.check("restic key add"));
+  let _ = std::fs::remove_file(&file);
+  added?;
+  j.mounts.pop();
+  let after = key_ids(&j, ctx).await?;
+  let new = after
+    .into_iter()
+    .find(|id| !before.contains(id))
+    .ok_or_else(|| ApiError::internal("加了口令但没找到新钥匙"))?;
+  to_value(new)
+}
+
+async fn key_ids(j: &Job<'_>, ctx: &Ctx) -> Result<Vec<String>, ApiError> {
+  #[derive(serde::Deserialize)]
+  struct Key {
+    id: String,
+  }
+  let out = j
+    .restic(&["key", "list", "--json"], SHORT_TIMEOUT, false, ctx)
+    .await?
+    .check("restic key list")?;
+  let keys: Vec<Key> = serde_json::from_str(&out.stdout).map_err(|e| {
+    ApiError::internal(format!("解析 restic 钥匙列表失败：{e}"))
+  })?;
+  Ok(keys.into_iter().map(|k| k.id).collect())
 }
 
 async fn ensure_repo(j: &Job<'_>, ctx: &Ctx) -> Result<(), ApiError> {

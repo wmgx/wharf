@@ -96,7 +96,7 @@ pub fn hash_password(password: &str) -> Result<String, ApiError> {
     .map_err(|e| ApiError::internal(format!("密码哈希失败：{e}")))
 }
 
-fn verify_password(password: &str, hash: &str) -> bool {
+pub(crate) fn verify_password(password: &str, hash: &str) -> bool {
   Argon2::default()
     .verify_password(password.as_bytes(), hash)
     .is_ok()

@@ -613,6 +613,16 @@ async fn run_step(
       project_stop_start(state, &server, service, true, &progress, cancel)
         .await?;
     }
+    Step::CoreBackup { user_key } => {
+      crate::core_backup::backup(
+        state,
+        run_id,
+        user_key.as_ref(),
+        progress,
+        cancel,
+      )
+      .await?;
+    }
     Step::Prune { server } => {
       crate::prune::prune(state, server, progress, cancel).await?;
     }

@@ -12,6 +12,7 @@ mod apply;
 mod auth;
 mod backup;
 mod build;
+mod core_backup;
 mod db;
 mod edge;
 mod edge_api;

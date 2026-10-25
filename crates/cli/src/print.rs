@@ -284,6 +284,30 @@ pub fn backups(v: &BackupsView) {
   }
 }
 
+pub fn core_backup(v: &serde_json::Value) {
+  let Some(to) = v["to"].as_str() else {
+    println!("控制面备份没有开启：wharf backup core --to <server>");
+    return;
+  };
+  println!("控制面每天备份到 {to}");
+  if !v["user_key_current"].as_bool().unwrap_or(false) {
+    println!("登录密码改过了，恢复口令还是旧密码：wharf backup core --to {to} 重新输入一次");
+  }
+  for r in v["records"].as_array().into_iter().flatten().take(5) {
+    let at = r["created_at"].as_str().unwrap_or("-");
+    let detail = if r["ok"].as_bool().unwrap_or(false) {
+      "成功".to_string()
+    } else {
+      format!("失败  {}", r["error"].as_str().unwrap_or(""))
+    };
+    println!("  {at}  {detail}");
+  }
+  if let Some(cmd) = v["restore_command"].as_str() {
+    println!("\n控制面整个丢了时：新机器先加入同一个内网，执行下面的命令并输入登录密码，文件会恢复到 /var/lib/wharf-core，再启动控制面：");
+    println!("{cmd}");
+  }
+}
+
 pub fn network(v: &NetworkView) {
   for s in &v.servers {
     let mode = match s.mode {

@@ -329,7 +329,7 @@ pub struct Retired {
 }
 
 /// 一次性口令。Debug 输出时隐藏，防止被打进日志。
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct OneTimeSecret(pub String);
 
@@ -367,7 +367,14 @@ pub struct ResticJob {
   pub action: ResticAction,
   /// 本机没有 restic 镜像时怎么拉。
   pub pull: PullPolicy,
+  /// 控制面自身备份：备份 [CORE_BACKUP_DIR] 而不是 `/srv/<service>/`。
+  /// 目录里的 `.marker` 要和这个值一样，不一样（不是控制面所在的机器）回复 NotFound。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub core_marker: Option<String>,
 }
+
+/// 控制面把要备份的数据库快照和密钥放在这里，宿主机和容器里路径相同。
+pub const CORE_BACKUP_DIR: &str = "/var/lib/wharf-core/backup";
 
 /// restic 和 rest-server 的镜像，控制面和 agent 共用。
 pub const RESTIC_IMAGE: &str = "restic/restic:0.18.1";
@@ -410,6 +417,10 @@ pub enum ResticAction {
   Restore { snapshot: String },
   /// 按保留策略删除旧快照并回收空间。
   Prune,
+  /// 给仓库加一把口令，结果是新钥匙的 id。
+  AddKey { new_password: OneTimeSecret },
+  /// 删掉一把口令。rest-server 只能追加，要在备份服务器本机（`Local`）做。
+  RemoveKey { id: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

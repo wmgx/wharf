@@ -1494,6 +1494,22 @@ async fn backup(
         .await?;
       finish_task(c, &r.run_id, !no_wait, j).await
     }
+    BackupCmd::Core { to: Some(to), .. } => {
+      let password = read_secret("登录密码（会成为恢复口令）：")?;
+      let r: ApplyResponse = c
+        .post("/api/core-backup", &json!({ "to": to, "password": password }))
+        .await?;
+      finish_task(c, &r.run_id, true, j).await
+    }
+    BackupCmd::Core { run: true, .. } => {
+      let r: ApplyResponse = c.post("/api/core-backup/run", &json!({})).await?;
+      finish_task(c, &r.run_id, true, j).await
+    }
+    BackupCmd::Core { .. } => {
+      let v: Value = c.get("/api/core-backup").await?;
+      out(j, &v, print::core_backup);
+      Ok(())
+    }
     BackupCmd::List { service } => {
       let v: BackupsView = c
         .get(&format!("/api/services/{}/backups", seg(&service)))
