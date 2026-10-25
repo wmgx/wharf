@@ -158,6 +158,10 @@ impl Ops {
         crate::upgrade::start(&self.docker, &job, ctx).await?,
       ),
       AgentOp::Prune => to_value(self.docker.prune(ctx).await?),
+      // 要接收输入，由连接那边直接处理。
+      AgentOp::Terminal(_) => {
+        Err(ApiError::internal("终端请求没有输入通道"))
+      }
     }
   }
 

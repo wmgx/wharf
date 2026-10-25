@@ -28,7 +28,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
   ApiError, ErrorCode,
-  agent::{AgentMsg, AgentOp, CoreMsg, auth_payload},
+  agent::{AgentMsg, AgentOp, CoreMsg, TerminalInput, auth_payload},
 };
 
 use crate::{
@@ -105,11 +105,36 @@ impl Hub {
     progress: Option<ProgressFn>,
     cancel: &CancellationToken,
   ) -> Result<T, ApiError> {
+    self
+      .call_as(self.new_id(), server, op, timeout, progress, cancel)
+      .await
+  }
+
+  /// 请求编号。要在请求进行中给它发输入（终端）时，先拿编号再 [Self::call_as]。
+  pub fn new_id(&self) -> u64 {
+    self.next_id.fetch_add(1, Ordering::Relaxed) + 1
+  }
+
+  /// 给进行中的请求发输入。连接已断开时什么也不做。
+  pub fn input(&self, server: &str, id: u64, input: TerminalInput) {
+    if let Some(conn) = lock(&self.conns).get(server) {
+      let _ = conn.tx.send(CoreMsg::Input { id, input });
+    }
+  }
+
+  pub async fn call_as<T: DeserializeOwned>(
+    &self,
+    id: u64,
+    server: &str,
+    op: AgentOp,
+    timeout: Duration,
+    progress: Option<ProgressFn>,
+    cancel: &CancellationToken,
+  ) -> Result<T, ApiError> {
     let conn = lock(&self.conns)
       .get(server)
       .cloned()
       .ok_or_else(|| offline(server))?;
-    let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
     let (done, rx) = oneshot::channel();
     lock(&conn.pending).insert(id, Pending { done, progress });
     let sent = conn.tx.send(CoreMsg::Request {

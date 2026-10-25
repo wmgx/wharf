@@ -24,6 +24,7 @@ mod probe;
 mod report;
 mod restic;
 mod sync;
+mod terminal;
 mod upgrade;
 
 #[derive(Parser)]

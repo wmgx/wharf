@@ -45,6 +45,27 @@ pub enum CoreMsg {
   Cancel {
     id: u64,
   },
+  /// 发给进行中的 [AgentOp::Terminal]：键盘输入或窗口大小变化。
+  Input {
+    id: u64,
+    #[serde(flatten)]
+    input: TerminalInput,
+  },
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TerminalInput {
+  /// 输入的字节，base64。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub data: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub size: Option<TerminalSize>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct TerminalSize {
+  pub cols: u16,
+  pub rows: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -179,6 +200,18 @@ pub enum AgentOp {
   Upgrade(UpgradeJob),
   /// 删除没有容器在用的镜像和构建缓存，结果是字符串（释放了多少）。
   Prune,
+  /// 在 project 的容器里开一个 shell。输出作为进度推送（base64），
+  /// 输入经 [CoreMsg::Input] 送进来；shell 退出时结束，结果是退出码。
+  Terminal(TerminalJob),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TerminalJob {
+  pub project: String,
+  /// compose 里的服务名，不填时用第一个在运行的容器。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub service: Option<String>,
+  pub size: TerminalSize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

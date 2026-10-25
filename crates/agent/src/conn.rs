@@ -10,7 +10,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
   ApiError, ErrorCode,
-  agent::{AgentMsg, CoreMsg, auth_payload},
+  agent::{AgentMsg, AgentOp, CoreMsg, TerminalInput, auth_payload},
 };
 
 use crate::{
@@ -138,6 +138,10 @@ async fn session(
 
   let running: Arc<Mutex<HashMap<u64, CancellationToken>>> =
     Default::default();
+  // 进行中的终端：控制面转来的输入送到这里。
+  let inputs: Arc<
+    Mutex<HashMap<u64, mpsc::UnboundedSender<TerminalInput>>>,
+  > = Default::default();
   let result = loop {
     let msg = tokio::select! {
       msg = tokio::time::timeout(IDLE_TIMEOUT, stream.next()) => msg,
@@ -170,9 +174,17 @@ async fn session(
       CoreMsg::Request { id, timeout_ms, op } => {
         let cancel = session_cancel.child_token();
         running.lock().await.insert(id, cancel.clone());
+        let input = if matches!(op, AgentOp::Terminal(_)) {
+          let (itx, irx) = mpsc::unbounded_channel();
+          inputs.lock().await.insert(id, itx);
+          Some(irx)
+        } else {
+          None
+        };
         let tx = tx.clone();
         let ops = ops.clone();
         let running = running.clone();
+        let inputs = inputs.clone();
         tokio::spawn(async move {
           let progress_tx = tx.clone();
           let ctx = Ctx {
@@ -191,7 +203,13 @@ async fn session(
               true
             })
           };
-          let result = ops.handle(op, &ctx).await;
+          let result = match (op, input) {
+            (AgentOp::Terminal(job), Some(input)) => {
+              crate::terminal::run(&ops.docker, &job, &ctx, input).await
+            }
+            (op, _) => ops.handle(op, &ctx).await,
+          };
+          inputs.lock().await.remove(&id);
           let timed_out = deadline.is_finished();
           deadline.abort();
           let result = match result {
@@ -213,6 +231,11 @@ async fn session(
       CoreMsg::Cancel { id } => {
         if let Some(cancel) = running.lock().await.get(&id) {
           cancel.cancel();
+        }
+      }
+      CoreMsg::Input { id, input } => {
+        if let Some(itx) = inputs.lock().await.get(&id) {
+          let _ = itx.send(input);
         }
       }
       CoreMsg::Challenge { .. } | CoreMsg::Welcome { .. } => {}

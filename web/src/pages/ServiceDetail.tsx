@@ -1,5 +1,5 @@
 import { ArrowRightLeftIcon, ArrowLeftIcon, ArrowUpRightIcon, EllipsisIcon, HammerIcon, HistoryIcon, LockIcon, LockOpenIcon, PencilIcon, PlayIcon, PlusIcon, RefreshCwIcon, RotateCwIcon, SquareIcon, Trash2Icon, XIcon } from "lucide-react";
-import { useState } from "react";
+import { Suspense, lazy, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { usePoll } from "@/api";
 import { useActions } from "@/components/actions";
@@ -25,6 +25,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useStatus } from "@/status";
 import type { DeploymentView, PortSpec, ServiceView } from "@/types";
+
+const Terminal = lazy(() => import("@/components/Terminal"));
 
 export function ServiceDetail() {
   const { name = "" } = useParams();
@@ -240,12 +242,16 @@ export function ServiceDetail() {
       <Tabs value={tab} onValueChange={(t) => setParams({ tab: t }, { replace: true })} className="mt-8">
         <TabsList>
           <TabsTrigger value="logs">日志</TabsTrigger>
+          <TabsTrigger value="terminal">终端</TabsTrigger>
           <TabsTrigger value="history">部署历史</TabsTrigger>
           <TabsTrigger value="backups">备份</TabsTrigger>
           <TabsTrigger value="config">配置</TabsTrigger>
         </TabsList>
         <TabsContent value="logs" className="mt-3">
           <LogStream path={`/api/services/${encodeURIComponent(name)}/logs/stream`} />
+        </TabsContent>
+        <TabsContent value="terminal" className="mt-3">
+          <TerminalTab svc={svc} />
         </TabsContent>
         <TabsContent value="history" className="mt-3">
           <History name={name} />
@@ -470,5 +476,29 @@ function AddRoute({ service, open, onClose }: { service: string; open: boolean; 
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+/** 只有打开这个标签时才连接；多个容器时可以选。 */
+function TerminalTab({ svc }: { svc: ServiceView }) {
+  const running = [...new Set((svc.live?.containers ?? []).filter((c) => c.state === "running").map((c) => c.service))];
+  const [service, setService] = useState<string | undefined>(undefined);
+  if (running.length === 0) return <Empty>没有在运行的容器</Empty>;
+  const current = service && running.includes(service) ? service : running[0];
+  return (
+    <div className="grid gap-2">
+      {running.length > 1 && (
+        <div className="flex flex-wrap gap-1.5">
+          {running.map((s) => (
+            <Button key={s} size="xs" variant={s === current ? "secondary" : "ghost"} onClick={() => setService(s)}>
+              {s}
+            </Button>
+          ))}
+        </div>
+      )}
+      <Suspense fallback={<Skeleton className="h-80 rounded-xl" />}>
+        <Terminal name={svc.name} service={current} />
+      </Suspense>
+    </div>
   );
 }
