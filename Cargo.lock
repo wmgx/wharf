@@ -2901,6 +2901,7 @@ name = "wharf-agent"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "chrono",
  "clap",
  "ed25519-dalek",
@@ -2962,6 +2963,7 @@ dependencies = [
  "anyhow",
  "argon2",
  "axum",
+ "base64 0.22.1",
  "bcrypt",
  "chrono",
  "clap",
