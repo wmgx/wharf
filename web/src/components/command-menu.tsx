@@ -16,7 +16,7 @@ import { Kbd } from "@/components/ui/kbd";
 import { useStatus } from "@/status";
 import { useTheme } from "@/theme";
 import { useActions } from "./actions";
-import { Dot, liveTone } from "./common";
+import { Dot, serviceTone } from "./common";
 
 const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
 
@@ -93,7 +93,7 @@ export function CommandMenu({ onLogout }: { onLogout: () => void }) {
                 {s.name}
                 <span className="text-xs text-muted-foreground">{s.spec.server}</span>
                 <CommandShortcut>
-                  <Dot tone={liveTone(s.live).tone} />
+                  <Dot tone={serviceTone(s).tone} />
                 </CommandShortcut>
               </CommandItem>
             ))}

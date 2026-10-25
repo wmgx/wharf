@@ -97,10 +97,11 @@ pub async fn target(
   };
   let images: Vec<ImageInfo> =
     serde_json::from_str(images).map_err(json_err)?;
-  // 服务器和备份设置以现在为准：换服务器是迁移，不是回滚。
+  // 服务器、备份、停止与否以现在为准：换服务器是迁移，不是回滚。
   let spec = ServiceSpec {
     server: current.spec.server.clone(),
     backup: current.spec.backup.clone(),
+    stopped: current.spec.stopped,
     ..pin_commit(pin_image(spec, &images), commit.as_deref())
   };
   Ok(Json(RollbackTarget {

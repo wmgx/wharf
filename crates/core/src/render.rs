@@ -610,6 +610,7 @@ mod tests {
     ServiceSpec {
       backup: None,
       adopt: None,
+      stopped: false,
       server: "node1".into(),
       source: Source::Image("traefik/whoami".into()),
       ports: vec![PortSpec {

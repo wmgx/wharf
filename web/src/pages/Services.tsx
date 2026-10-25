@@ -1,7 +1,7 @@
-import { ArrowRightLeftIcon, EllipsisIcon, HistoryIcon, PlusIcon, RefreshCwIcon, ScrollTextIcon, Trash2Icon } from "lucide-react";
+import { ArrowRightLeftIcon, EllipsisIcon, HistoryIcon, PlayIcon, PlusIcon, RefreshCwIcon, RotateCwIcon, ScrollTextIcon, SquareIcon, Trash2Icon } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useActions } from "@/components/actions";
-import { Empty, PageHeader, ServerTag, StatusBadge, imageOf, liveTone } from "@/components/common";
+import { Empty, PageHeader, ServerTag, StatusBadge, imageOf, serviceTone } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -50,7 +50,7 @@ export function Services() {
             </TableHeader>
             <TableBody>
               {status.services.map((s) => {
-                const { tone, text } = liveTone(s.live);
+                const { tone, text } = serviceTone(s);
                 const routes = routesOf(s.name);
                 return (
                   <TableRow key={s.name} className="cursor-pointer" onClick={() => nav(`/services/${s.name}`)}>
@@ -107,6 +107,23 @@ function RowMenu({ svc }: { svc: ServiceView }) {
           <ScrollTextIcon />
           看日志
         </DropdownMenuItem>
+        {svc.spec.stopped ? (
+          <DropdownMenuItem onSelect={() => actions.setStopped(svc, false)}>
+            <PlayIcon />
+            启动
+          </DropdownMenuItem>
+        ) : (
+          <>
+            <DropdownMenuItem onSelect={() => actions.restart(svc.name)}>
+              <RotateCwIcon />
+              重启
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => actions.setStopped(svc, true)}>
+              <SquareIcon />
+              停止
+            </DropdownMenuItem>
+          </>
+        )}
         <DropdownMenuItem onSelect={() => actions.redeploy(svc)}>
           <RefreshCwIcon />
           重新部署

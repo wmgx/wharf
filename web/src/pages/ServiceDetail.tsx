@@ -1,4 +1,4 @@
-import { ArrowRightLeftIcon, ArrowLeftIcon, ArrowUpRightIcon, EllipsisIcon, HammerIcon, HistoryIcon, LockIcon, LockOpenIcon, PencilIcon, PlusIcon, RefreshCwIcon, Trash2Icon, XIcon } from "lucide-react";
+import { ArrowRightLeftIcon, ArrowLeftIcon, ArrowUpRightIcon, EllipsisIcon, HammerIcon, HistoryIcon, LockIcon, LockOpenIcon, PencilIcon, PlayIcon, PlusIcon, RefreshCwIcon, RotateCwIcon, SquareIcon, Trash2Icon, XIcon } from "lucide-react";
 import { useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { usePoll } from "@/api";
@@ -6,7 +6,7 @@ import { useActions } from "@/components/actions";
 import { useBasicAuthSetAt } from "@/components/basic-auth";
 import { BuildEditor, type BuildHow, cleanHow, howOf, howReady } from "@/components/build-editor";
 import { Checkbox } from "@/components/ui/checkbox";
-import { CodeBlock, Dot, Empty, ErrorNote, Notice, PageHeader, ServerTag, StatusBadge, ago, liveTone, sourceLabel } from "@/components/common";
+import { CodeBlock, Dot, Empty, ErrorNote, Notice, PageHeader, ServerTag, StatusBadge, ago, serviceTone, sourceLabel } from "@/components/common";
 import { EntryField, useEntry } from "@/components/entry";
 import { DomainChips, Field, PortsEditor, formatEnv, parseEnv } from "@/components/fields";
 import { LogStream } from "@/components/LogStream";
@@ -65,7 +65,7 @@ export function ServiceDetail() {
     );
   }
 
-  const { tone, text } = liveTone(svc.live);
+  const { tone, text } = serviceTone(svc);
   const source = sourceLabel(svc.spec.source);
   const built = "build" in svc.spec.source;
 
@@ -96,6 +96,17 @@ export function ServiceDetail() {
                     重新构建
                   </Button>
             )}
+            {svc.spec.stopped ? (
+              <Button variant="outline" onClick={() => actions.setStopped(svc, false)}>
+                <PlayIcon />
+                启动
+              </Button>
+            ) : (
+              <Button variant="outline" onClick={() => actions.restart(name)}>
+                <RotateCwIcon />
+                重启
+              </Button>
+            )}
             <Button variant="outline" onClick={() => actions.redeploy(svc)}>
               <RefreshCwIcon />
               检查并修复
@@ -107,6 +118,12 @@ export function ServiceDetail() {
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="w-44">
+                {!svc.spec.stopped && (
+                  <DropdownMenuItem onSelect={() => actions.setStopped(svc, true)}>
+                    <SquareIcon />
+                    停止
+                  </DropdownMenuItem>
+                )}
                 <DropdownMenuItem onSelect={() => actions.rollback(name)}>
                   <HistoryIcon />
                   回滚到上一个版本

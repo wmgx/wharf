@@ -118,6 +118,10 @@ pub fn router(state: Arc<AppState>) -> Router {
       "/api/services/{name}/rebuild",
       post(crate::build::rebuild_now),
     )
+    .route(
+      "/api/services/{name}/restart",
+      post(crate::build::restart_now),
+    )
     .route("/api/gateways", get(list_gateways))
     .route("/api/gateways/{name}", get(show_gateway))
     .route("/api/gateways/{name}/config", get(gateway_config))

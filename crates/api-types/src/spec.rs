@@ -253,6 +253,9 @@ pub struct ServiceSpec {
   /// 导入时接管的现有容器。部署前停掉它们，失败时恢复；之后再部署时已经没有可接管的，不起作用。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub adopt: Option<AdoptSpec>,
+  /// 停止：容器保留但不运行，部署后也保持停止。不影响 compose，也就不会重建容器。
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub stopped: bool,
 }
 
 /// 导入前容器是怎么跑的。和服务同名的 compose 项目不需要接管，Wharf 直接沿用。

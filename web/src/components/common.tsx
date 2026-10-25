@@ -8,6 +8,14 @@ import type { LiveState, NetworkMode, ServerView, ServiceView, Source } from "@/
 export type Tone = "ok" | "warn" | "bad" | "idle";
 
 /** 现状 → 颜色和文字。 */
+/** 服务状态：按配置停下的服务停着是正常的，不标红。 */
+export function serviceTone(svc?: Pick<ServiceView, "spec" | "live">): { tone: Tone; text: string } {
+  if (svc?.spec.stopped) {
+    return svc.live?.state === "stopped" ? { tone: "idle", text: "已停止" } : { tone: "warn", text: "应停止 · 还在运行" };
+  }
+  return liveTone(svc?.live);
+}
+
 export function liveTone(live?: LiveState | null): { tone: Tone; text: string } {
   if (!live) return { tone: "idle", text: "未知" };
   switch (live.state) {

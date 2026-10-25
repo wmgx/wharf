@@ -298,12 +298,18 @@ pub async fn status(
     .keys()
     .filter_map(|n| gateway_view(&snap, &net, n, Some(&live)))
     .collect();
-  for (kind, name, live) in services
+  for (kind, name, live, stopped) in services
     .iter()
-    .map(|s| ("服务", &s.name, &s.live))
-    .chain(gateways.iter().map(|g| ("网关", &g.name, &g.live)))
+    .map(|s| ("服务", &s.name, &s.live, s.spec.stopped))
+    .chain(
+      gateways.iter().map(|g| ("网关", &g.name, &g.live, false)),
+    )
   {
     let Some(live) = live else { continue };
+    // 按配置停下的服务，停着是正常的。
+    if stopped && live.state == "stopped" {
+      continue;
+    }
     if live.state != "running" && live.state != "unknown" {
       problems.push(format!("{kind} {name} 状态是 {}", live.state));
     } else if live.in_sync == Some(false) {

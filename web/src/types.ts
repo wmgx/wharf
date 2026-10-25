@@ -91,6 +91,8 @@ export interface ServiceSpec {
   backup?: { to: string };
   /** 导入时接管的现有容器。 */
   adopt?: { project?: string; containers?: string[] };
+  /** 停止：容器保留但不运行。 */
+  stopped?: boolean;
 }
 
 export interface FoundContainer {

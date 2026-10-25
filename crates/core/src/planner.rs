@@ -164,6 +164,14 @@ pub enum Step {
   AgentUpgrade {
     server: String,
   },
+  /// 停止服务的容器（配置没变，不重建）。
+  ServiceStop {
+    service: String,
+  },
+  /// 重启服务的容器。单独发起，不来自计划。
+  ServiceRestart {
+    service: String,
+  },
   /// 清理服务器上没在用的镜像。单独发起，不来自计划。
   Prune {
     server: String,
@@ -187,7 +195,8 @@ impl Step {
       Self::ServiceUp { .. }
       | Self::EdgeDeploy { .. }
       | Self::LinkUp { .. }
-      | Self::TailscaleUp { .. } => 3,
+      | Self::TailscaleUp { .. }
+      | Self::ServiceStop { .. } => 3,
       Self::GatewaySync { .. } => 4,
       Self::DnsUpsert { .. } | Self::EdgeAttach { .. } => 5,
       Self::GatewayDown { .. } | Self::LinkDown { .. } => 6,
@@ -197,6 +206,7 @@ impl Step {
       | Self::Rebuild { .. }
       | Self::AgentUpgrade { .. }
       | Self::Prune { .. }
+      | Self::ServiceRestart { .. }
       | Self::EdgeRollback { .. } => 8,
     }
   }
@@ -691,6 +701,35 @@ fn service_items(
     let template = snapshot::service_template(desired, net, name)?;
     let after =
       Some(json!({ "server": server, "compose": template }));
+    let live = status
+      .get(server)
+      .and_then(|s| s.as_ref())
+      .and_then(|p| p.get(name));
+    // 配置没变、只是要停下来：不重建，直接停。
+    if svc.spec.stopped
+      && let Some(state) = live
+      && state.hash.as_deref() == Some(hash.as_str())
+    {
+      if state.containers.iter().any(|c| c.state == "running") {
+        let id = b.item(
+          address.clone(),
+          Layer::Container,
+          Action::Update,
+          Some(json!({ "containers": state.containers })),
+          after,
+          Risk::Disruptive,
+          "停止服务",
+        );
+        b.step(
+          vec![id],
+          format!("停止 {server} 上的 {name}"),
+          Step::ServiceStop {
+            service: name.clone(),
+          },
+        );
+      }
+      continue;
+    }
     let decision = match status.get(server).and_then(|s| s.as_ref()) {
       None if changed(writes, KIND_SERVICE, name) => Some((
         Action::Update,
@@ -745,10 +784,14 @@ fn service_items(
         Some(state) if !state.all_running() => Some((
           Action::Update,
           Risk::Disruptive,
-          format!(
-            "漂移：容器没在运行（{}）",
-            describe_containers(state)
-          ),
+          if changed(writes, KIND_SERVICE, name) {
+            "启动服务".to_string()
+          } else {
+            format!(
+              "漂移：容器没在运行（{}）",
+              describe_containers(state)
+            )
+          },
           Some(json!({ "containers": state.containers })),
         )),
         Some(_) => None,
@@ -786,6 +829,11 @@ fn service_items(
     if let Some((action, risk, reason, before)) = decision {
       let reason = if matches!(svc.spec.source, Source::Build(_)) {
         format!("{reason}（镜像不在 {server} 上时先构建）")
+      } else {
+        reason
+      };
+      let reason = if svc.spec.stopped {
+        format!("{reason}，部署后保持停止")
       } else {
         reason
       };

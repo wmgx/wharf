@@ -1,11 +1,11 @@
 import { Background, Controls, Handle, Position, ReactFlow, type Edge, type Node, type NodeProps } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { ArrowUpCircleIcon, ExternalLinkIcon, Trash2Icon, XIcon } from "lucide-react";
+import { ArrowUpCircleIcon, ExternalLinkIcon, PlayIcon, RotateCwIcon, SquareIcon, Trash2Icon, XIcon } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { usePoll } from "@/api";
 import { useActions } from "@/components/actions";
-import { diskText, Dot, MODES, PageHeader, liveTone, serverText, serverTone, type Tone } from "@/components/common";
+import { diskText, Dot, MODES, PageHeader, liveTone, serverText, serviceTone, serverTone, type Tone } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { useStatus } from "@/status";
@@ -110,7 +110,7 @@ function build(status: Status, net: NetworkView | null): { nodes: Node[]; edges:
         parentId: `srv:${srv.name}`,
         extent: "parent",
         position: { x: 20 + i * COL, y: 150 },
-        data: { kind: "服务", name: s.name, tone: liveTone(s.live).tone, to: `/services/${s.name}` },
+        data: { kind: "服务", name: s.name, tone: serviceTone(s).tone, to: `/services/${s.name}` },
       });
     });
     const slow = srv.rtt_ms != null && srv.rtt_ms > SLOW_MS;
@@ -315,12 +315,31 @@ function Panel({ status, sel, onClose }: { status: Status; sel: string; onClose:
     if (!s) return null;
     rows = [
       ["服务器", s.spec.server],
-      ["状态", liveTone(s.live).text],
+      ["状态", serviceTone(s).text],
     ];
     buttons = (
-      <Button size="sm" variant="outline" onClick={() => nav(`/services/${s.name}`)}>
-        打开
-      </Button>
+      <>
+        {s.spec.stopped ? (
+          <Button size="sm" variant="outline" onClick={() => actions.setStopped(s, false)}>
+            <PlayIcon />
+            启动
+          </Button>
+        ) : (
+          <>
+            <Button size="sm" variant="outline" onClick={() => actions.restart(s.name)}>
+              <RotateCwIcon />
+              重启
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => actions.setStopped(s, true)}>
+              <SquareIcon />
+              停止
+            </Button>
+          </>
+        )}
+        <Button size="sm" variant="outline" onClick={() => nav(`/services/${s.name}`)}>
+          打开
+        </Button>
+      </>
     );
   } else if (kind === "gw") {
     const g = status.gateways.find((x) => x.name === name);

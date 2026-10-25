@@ -292,6 +292,22 @@ pub enum ServiceCmd {
   History {
     name: String,
   },
+  /// 停止：容器保留但不运行，之后部署也保持停止。生成计划。
+  Stop {
+    name: String,
+    #[command(flatten)]
+    apply: ApplyFlags,
+  },
+  /// 启动之前停止的服务。生成计划。
+  Start {
+    name: String,
+    #[command(flatten)]
+    apply: ApplyFlags,
+  },
+  /// 重启容器，不改配置、不重建。
+  Restart {
+    name: String,
+  },
   /// 回滚到之前的一次部署（默认是上一个不同的版本）。
   /// image 来源会固定到当时的镜像 digest。
   Rollback {

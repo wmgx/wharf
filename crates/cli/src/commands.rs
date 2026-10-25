@@ -901,6 +901,24 @@ async fn service(
       });
       Ok(())
     }
+    ServiceCmd::Stop { .. } | ServiceCmd::Start { .. } => {
+      let (name, apply, stopped) = match cmd {
+        ServiceCmd::Stop { name, apply } => (name, apply, true),
+        ServiceCmd::Start { name, apply } => (name, apply, false),
+        _ => unreachable!(),
+      };
+      let v: ServiceView =
+        c.get(&format!("/api/services/{}", seg(&name))).await?;
+      let spec = ServiceSpec { stopped, ..v.spec };
+      changes(c, vec![Change::UpsertService { name, spec }], apply, j)
+        .await
+    }
+    ServiceCmd::Restart { name } => {
+      let r: ApplyResponse = c
+        .post(&format!("/api/services/{}/restart", seg(&name)), &json!({}))
+        .await?;
+      finish_task(c, &r.run_id, true, j).await
+    }
     ServiceCmd::History { name } => {
       let v: Vec<DeploymentView> = c
         .get(&format!("/api/services/{}/deployments", seg(&name)))
@@ -998,6 +1016,7 @@ async fn service(
             volumes: vec![],
             backup: None,
             adopt: None,
+            stopped: false,
           }
         }
       };

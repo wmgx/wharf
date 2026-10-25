@@ -1,7 +1,7 @@
 import { ArrowUpRightIcon, PlusIcon } from "lucide-react";
 import { useState, type CSSProperties } from "react";
 import { Link } from "react-router-dom";
-import { CardsSkeleton, Empty, Mark, PageHeader, SectionTitle, ServerTag, StatusBadge, liveTone } from "@/components/common";
+import { CardsSkeleton, Empty, Mark, PageHeader, SectionTitle, ServerTag, StatusBadge, serviceTone } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { useStatus } from "@/status";
 import { NewService } from "./NewService";
@@ -41,7 +41,7 @@ export function Home() {
           {status.routes.map((r, i) => {
             const svc = r.spec.service ? byService.get(r.spec.service) : undefined;
             const label = r.spec.service || r.spec.upstream || "-";
-            const { tone, text } = liveTone(svc?.live);
+            const { tone, text } = serviceTone(svc);
             return (
               <a className={card} style={{ animationDelay: `${i * 30}ms` } as CSSProperties} key={r.id} href={r.url} target="_blank" rel="noreferrer">
                 <div className="flex items-center gap-3">
@@ -67,7 +67,7 @@ export function Home() {
           <SectionTitle count={internal.length}>只在内网</SectionTitle>
           <div className="grid grid-cols-[repeat(auto-fill,minmax(260px,1fr))] gap-3">
             {internal.map((s, i) => {
-              const { tone, text } = liveTone(s.live);
+              const { tone, text } = serviceTone(s);
               return (
                 <Link className={card} style={{ animationDelay: `${i * 30}ms` }} key={s.name} to={`/services/${s.name}`}>
                   <div className="flex items-center gap-3">

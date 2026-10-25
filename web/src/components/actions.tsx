@@ -40,6 +40,10 @@ interface Actions {
   rebuild: (name: string) => void;
   /** 升级服务器上的 agent 到控制面的版本。 */
   upgradeAgent: (server: string) => void;
+  /** 停止（容器保留）或启动服务，走计划。 */
+  setStopped: (svc: ServiceView, stopped: boolean) => void;
+  /** 重启容器，不改配置。 */
+  restart: (name: string) => void;
   /** 删除服务器上没在用的镜像和构建缓存。 */
   prune: (server: string) => void;
   /** 不给 `to` 就回到上一个不同的版本。 */
@@ -138,6 +142,19 @@ export function ActionsProvider({ children }: { children: ReactNode }) {
         actions.watch(run_id, `升级 ${server} 的 agent`);
       } catch (e) {
         toast.error(`不能升级 ${server} 的 agent`, { description: (e as Error).message });
+      }
+    },
+    setStopped: (svc, stopped) =>
+      actions.plan({
+        title: `${stopped ? "停止" : "启动"} ${svc.name}`,
+        changes: [{ op: "upsert_service", name: svc.name, spec: { ...svc.spec, stopped: stopped || undefined } }],
+      }),
+    restart: async (name) => {
+      try {
+        const { run_id } = await api.post<{ run_id: string }>(`/api/services/${encodeURIComponent(name)}/restart`, {});
+        actions.watch(run_id, `重启 ${name}`);
+      } catch (e) {
+        toast.error(`不能重启 ${name}`, { description: (e as Error).message });
       }
     },
     prune: async (server) => {

@@ -41,6 +41,8 @@ use crate::{
   world::gateway_project,
 };
 
+/// agent 那边 stop/start 本身限时 180 秒，这里多留一些。
+const STOP_START_TIMEOUT: Duration = Duration::from_secs(200);
 const SERVICE_UP_TIMEOUT: Duration = Duration::from_secs(45 * 60);
 const GATEWAY_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const SHORT_TIMEOUT: Duration = Duration::from_secs(3 * 60);
@@ -599,6 +601,18 @@ async fn run_step(
       crate::agent_upgrade::upgrade(state, server, progress, cancel)
         .await?;
     }
+    Step::ServiceStop { service } => {
+      let server = service_server(&snap, service)?;
+      project_stop_start(state, &server, service, false, &progress, cancel)
+        .await?;
+    }
+    Step::ServiceRestart { service } => {
+      let server = service_server(&snap, service)?;
+      project_stop_start(state, &server, service, false, &progress, cancel)
+        .await?;
+      project_stop_start(state, &server, service, true, &progress, cancel)
+        .await?;
+    }
     Step::Prune { server } => {
       crate::prune::prune(state, server, progress, cancel).await?;
     }
@@ -1075,7 +1089,60 @@ async fn service_up(
   if running.is_err() && !retired.is_empty() {
     restore(state, server, service, retired, &progress).await;
   }
-  running
+  running?;
+  if row.spec.stopped {
+    project_stop_start(state, server, service, false, &progress, cancel)
+      .await?;
+  }
+  Ok(())
+}
+
+fn service_server(
+  snap: &snapshot::Snapshot,
+  service: &str,
+) -> Result<String, ApiError> {
+  snap
+    .world
+    .services
+    .get(service)
+    .map(|s| s.spec.server.clone())
+    .ok_or_else(|| {
+      ApiError::new(
+        ErrorCode::PlanStale,
+        format!("服务 {service} 已不存在"),
+      )
+    })
+}
+
+/// `docker compose stop` / `start`，容器不删除、不重建。
+async fn project_stop_start(
+  state: &AppState,
+  server: &str,
+  service: &str,
+  start: bool,
+  progress: &ProgressFn,
+  cancel: &CancellationToken,
+) -> Result<(), ApiError> {
+  let op = if start {
+    AgentOp::ProjectStart {
+      project: service.to_string(),
+    }
+  } else {
+    AgentOp::ProjectStop {
+      project: service.to_string(),
+    }
+  };
+  let done: bool = state
+    .hub
+    .call(server, op, STOP_START_TIMEOUT, Some(progress.clone()), cancel)
+    .await?;
+  if !done {
+    return Err(ApiError::new(
+      ErrorCode::NotFound,
+      format!("{server} 上还没有部署 {service}"),
+    ));
+  }
+  Ok(())
 }
 
 /// 接管失败：删掉新起的 project，恢复原来的容器。不受取消影响。

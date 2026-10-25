@@ -205,3 +205,35 @@ pub async fn rebuild_now(
     .await?,
   ))
 }
+
+/// `POST /api/services/{name}/restart`：重启容器，不改配置、不重建。
+pub async fn restart_now(
+  axum::extract::State(s): axum::extract::State<
+    std::sync::Arc<AppState>,
+  >,
+  auth: crate::auth::Auth,
+  axum::extract::Path(name): axum::extract::Path<String>,
+) -> crate::api::ApiResult<wharf_api_types::plan::ApplyResponse> {
+  auth.require(wharf_api_types::view::TokenScope::ApplySafe)?;
+  let snap = snapshot::load(&s.db).await?;
+  let row = snap
+    .world
+    .services
+    .get(&name)
+    .ok_or_else(|| crate::api::service_not_found(&name))?;
+  if row.spec.stopped {
+    return Err(
+      ApiError::invalid(format!("服务 {name} 已停止"))
+        .with_hint(format!("先启动：wharf service start {name}"))
+        .into(),
+    );
+  }
+  Ok(axum::Json(
+    crate::apply::start_task(
+      s.clone(),
+      format!("重启 {name}"),
+      crate::planner::Step::ServiceRestart { service: name },
+    )
+    .await?,
+  ))
+}
