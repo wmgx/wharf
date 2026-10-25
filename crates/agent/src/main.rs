@@ -23,6 +23,7 @@ mod ops;
 mod probe;
 mod report;
 mod restic;
+mod settle;
 mod sync;
 mod terminal;
 mod upgrade;

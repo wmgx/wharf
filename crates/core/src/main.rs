@@ -17,6 +17,7 @@ mod edge;
 mod edge_api;
 mod edge_plan;
 mod edge_sync;
+mod heal;
 mod hub;
 mod import;
 mod import_api;
@@ -135,6 +136,7 @@ async fn main() -> anyhow::Result<()> {
   });
   apply::recover(&state).await?;
   jobs::spawn(state.clone());
+  heal::spawn(state.clone());
 
   let listener = tokio::net::TcpListener::bind(cli.listen)
     .await

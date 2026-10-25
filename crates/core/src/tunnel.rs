@@ -185,6 +185,7 @@ pub async fn sync(
         pull: snapshot::pull_policy(&world.servers[server]),
         pull_missing_only: false,
         retire: None,
+        rollback: false,
       }),
       CONNECTOR_TIMEOUT,
       Some(progress.clone()),

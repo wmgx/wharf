@@ -27,7 +27,7 @@ use wharf_api_types::{
     ApplyRequest, ApplyResponse, Plan, PlanStatus, Run, RunStatus,
     RunStep, StepStatus,
   },
-  spec::{GatewayKind, ServiceSpec},
+  spec::{GatewayKind, ServiceSpec, Source},
   view::TokenScope,
 };
 use wharf_providers::{Owner, RemoteRecord};
@@ -678,6 +678,7 @@ async fn run_step(
               pull: snapshot::pull_policy(&world.servers[server]),
               pull_missing_only: false,
               retire: None,
+              rollback: false,
             },
             caddyfile: r.config,
             caddyfile_hash: r.config_hash,
@@ -727,6 +728,7 @@ async fn run_step(
             pull: snapshot::pull_policy(&world.servers[server]),
             pull_missing_only: false,
             retire: None,
+            rollback: false,
           }),
           GATEWAY_TIMEOUT,
           Some(progress),
@@ -760,6 +762,7 @@ async fn run_step(
             pull: snapshot::pull_policy(&world.servers[server]),
             pull_missing_only: false,
             retire: None,
+            rollback: false,
           }),
           GATEWAY_TIMEOUT,
           Some(progress),
@@ -1046,6 +1049,11 @@ async fn service_up(
   // 刚导入时本机已有的镜像不拉取，避免拉到新版本而重建容器。
   let pull_missing_only = row.spec.adopt.is_some()
     && !has_deployment(state, service).await?;
+  // 起不来时自动换回上一版：只对没有数据的服务做，新版本可能已经改了数据，
+  // 旧版本不一定认。compose 来源看不出有没有数据，不做。
+  let rollback = row.spec.volumes.is_empty()
+    && retire.is_none()
+    && !matches!(row.spec.source, Source::Compose { .. });
   let result: ProjectUpResult = state
     .hub
     .call(
@@ -1057,6 +1065,7 @@ async fn service_up(
         pull: snapshot::pull_policy(&world.servers[server]),
         pull_missing_only,
         retire,
+        rollback,
       }),
       SERVICE_UP_TIMEOUT,
       Some(progress.clone()),

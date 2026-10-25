@@ -24,6 +24,11 @@ pub const CONFIG_HASH_FILE: &str = ".wharf-config-hash";
 /// 跟随日志的最长时长，到点后页面会自动重连。
 const FOLLOW_MAX: Duration = Duration::from_secs(30 * 60);
 
+pub struct Previous {
+  pub compose: String,
+  pub hash: String,
+}
+
 #[derive(Clone)]
 pub struct Docker {
   pub bin: String,
@@ -294,6 +299,15 @@ impl Docker {
       std::fs::remove_dir_all(&dir).map_err(io_err(&dir))?;
     }
     Ok(())
+  }
+
+  /// 当前部署的 compose 和指纹，部署新版本前留着，起不来时换回去。
+  pub fn previous(&self, project: &str) -> Option<Previous> {
+    let dir = self.project_dir(project);
+    Some(Previous {
+      compose: std::fs::read_to_string(dir.join("compose.yaml")).ok()?,
+      hash: std::fs::read_to_string(dir.join(HASH_FILE)).ok()?.trim().to_string(),
+    })
   }
 
   /// 删除没有容器在用的镜像（停止的容器也算在用）和构建缓存。

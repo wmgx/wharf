@@ -457,6 +457,9 @@ pub struct ProjectUp {
   /// 导入时接管的原容器：镜像拉好之后、启动之前停掉，启动失败时恢复。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub retire: Option<Retire>,
+  /// 启动后没稳定运行时，换回上一版 compose（没有数据卷的服务才这样做）。
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub rollback: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
