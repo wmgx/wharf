@@ -39,6 +39,14 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 urlencoding = "2.1.3"
 
+# 开发编译不要完整调试信息：target 小一半多，链接也快。
+# 自己的代码保留行号（panic 栈能看到位置），依赖不要。
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
 [profile.release]
 strip = true
 lto = "thin"
