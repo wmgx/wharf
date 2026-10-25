@@ -40,6 +40,8 @@ interface Actions {
   rebuild: (name: string) => void;
   /** 升级服务器上的 agent 到控制面的版本。 */
   upgradeAgent: (server: string) => void;
+  /** 删除服务器上没在用的镜像和构建缓存。 */
+  prune: (server: string) => void;
   /** 不给 `to` 就回到上一个不同的版本。 */
   rollback: (name: string, to?: number) => void;
   /** 先要求输入名称确认，再生成删除计划（连同它的域名）。 */
@@ -136,6 +138,14 @@ export function ActionsProvider({ children }: { children: ReactNode }) {
         actions.watch(run_id, `升级 ${server} 的 agent`);
       } catch (e) {
         toast.error(`不能升级 ${server} 的 agent`, { description: (e as Error).message });
+      }
+    },
+    prune: async (server) => {
+      try {
+        const { run_id } = await api.post<{ run_id: string }>(`/api/servers/${encodeURIComponent(server)}/prune`, {});
+        actions.watch(run_id, `清理 ${server} 上没在用的镜像`);
+      } catch (e) {
+        toast.error(`不能清理 ${server}`, { description: (e as Error).message });
       }
     },
     rollback: async (name, to) => {

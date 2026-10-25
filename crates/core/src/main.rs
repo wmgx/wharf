@@ -28,6 +28,7 @@ mod logs_stream;
 mod migrate;
 mod network;
 mod planner;
+mod prune;
 mod render;
 mod rollback;
 mod snapshot;

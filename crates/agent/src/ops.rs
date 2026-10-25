@@ -157,6 +157,7 @@ impl Ops {
       AgentOp::Upgrade(job) => to_value(
         crate::upgrade::start(&self.docker, &job, ctx).await?,
       ),
+      AgentOp::Prune => to_value(self.docker.prune(ctx).await?),
     }
   }
 

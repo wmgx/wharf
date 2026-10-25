@@ -164,6 +164,10 @@ pub enum Step {
   AgentUpgrade {
     server: String,
   },
+  /// 清理服务器上没在用的镜像。单独发起，不来自计划。
+  Prune {
+    server: String,
+  },
   /// 边缘应用回滚到厂商那边的旧版本。单独发起，不来自计划。
   EdgeRollback {
     app: String,
@@ -192,6 +196,7 @@ impl Step {
       | Self::Restore { .. }
       | Self::Rebuild { .. }
       | Self::AgentUpgrade { .. }
+      | Self::Prune { .. }
       | Self::EdgeRollback { .. } => 8,
     }
   }

@@ -268,6 +268,8 @@ pub enum ServerCmd {
     #[arg(long, conflicts_with = "name")]
     all: bool,
   },
+  /// 删除没有容器在用的镜像和构建缓存，腾出磁盘。
+  Prune { name: String },
 }
 
 #[derive(Subcommand)]

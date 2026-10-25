@@ -97,6 +97,17 @@ pub struct AgentReport {
   /// 构建号，见 [crate::BUILD]。旧版本 agent 没有。
   #[serde(default, skip_serializing_if = "String::is_empty")]
   pub build: String,
+  /// `data_dir` 所在磁盘的容量。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub disk: Option<Disk>,
+}
+
+#[derive(
+  Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct Disk {
+  pub total: u64,
+  pub free: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -166,6 +177,8 @@ pub enum AgentOp {
   /// 拉新镜像，起一个接班容器换掉当前容器，结果是 [UpgradeResult]。
   /// 回复之后连接会断开，新 agent 重新连上才算完成。
   Upgrade(UpgradeJob),
+  /// 删除没有容器在用的镜像和构建缓存，结果是字符串（释放了多少）。
+  Prune,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

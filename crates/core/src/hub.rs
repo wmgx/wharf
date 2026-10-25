@@ -353,7 +353,7 @@ async fn handle_socket(
 }
 
 /// 记录最后在线时间和上报内容。
-async fn touch(
+pub(crate) async fn touch(
   state: &AppState,
   server: &str,
   report: Option<wharf_api_types::agent::AgentReport>,

@@ -1,4 +1,4 @@
-import { AnchorIcon, CableIcon, PlusIcon, BoxesIcon, CloudIcon, ChevronsUpDownIcon, KeyRoundIcon, LogOutIcon, MoonIcon, NetworkIcon, SunIcon, ArrowUpCircleIcon, WaypointsIcon } from "lucide-react";
+import { AnchorIcon, CableIcon, PlusIcon, BoxesIcon, CloudIcon, ChevronsUpDownIcon, KeyRoundIcon, LogOutIcon, MoonIcon, NetworkIcon, SunIcon, ArrowUpCircleIcon, WaypointsIcon, HardDriveIcon, Trash2Icon } from "lucide-react";
 import { useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
@@ -23,7 +23,7 @@ import { useStatus } from "@/status";
 import { useTheme } from "@/theme";
 import { useActions } from "./actions";
 import { AddServer } from "./add-server";
-import { Dot, serverText, serverTone } from "./common";
+import { diskText, Dot, serverText, serverTone } from "./common";
 
 export function Logo({ className = "size-8" }: { className?: string }) {
   return (
@@ -115,25 +115,48 @@ export function AppSidebar({ username, onLogout }: { username: string; onLogout:
           <SidebarGroupContent>
             <SidebarMenu>
               {!status && <SidebarMenuSkeleton showIcon />}
-              {status?.servers.map((s) => (
-                <SidebarMenuItem key={s.name}>
-                  <SidebarMenuButton
-                    className={s.agent_outdated ? "cursor-default pr-8" : "cursor-default"}
-                    tooltip={`${s.name} · ${serverText(s)}${s.private_addr ? ` · 内网 ${s.private_addr.ip}` : ""}`}
-                  >
-                    <span className="grid size-4 place-items-center">
-                      <Dot tone={serverTone(s)} />
-                    </span>
-                    <span className="group-data-[collapsible=icon]:hidden">{s.name}</span>
-                    <span className="ml-auto font-mono text-xs text-muted-foreground group-data-[collapsible=icon]:hidden">{serverText(s)}</span>
-                  </SidebarMenuButton>
-                  {s.agent_outdated && (
-                    <SidebarMenuAction title="升级 agent" onClick={() => actions.upgradeAgent(s.name)}>
-                      <ArrowUpCircleIcon className="text-warning" />
-                    </SidebarMenuAction>
-                  )}
-                </SidebarMenuItem>
-              ))}
+              {status?.servers.map((s) => {
+                const disk = diskText(s);
+                return (
+                  <SidebarMenuItem key={s.name}>
+                    <DropdownMenu modal={false}>
+                      <DropdownMenuTrigger asChild>
+                        <SidebarMenuButton
+                          className={s.agent_outdated ? "pr-8" : undefined}
+                          tooltip={`${s.name} · ${serverText(s)}${s.private_addr ? ` · 内网 ${s.private_addr.ip}` : ""}${disk ? ` · 磁盘剩 ${disk.text}` : ""}`}
+                        >
+                          <span className="grid size-4 place-items-center">
+                            <Dot tone={serverTone(s)} />
+                          </span>
+                          <span className="group-data-[collapsible=icon]:hidden">{s.name}</span>
+                          {disk?.low && <HardDriveIcon className="text-warning group-data-[collapsible=icon]:hidden" />}
+                          <span className="ml-auto font-mono text-xs text-muted-foreground group-data-[collapsible=icon]:hidden">{serverText(s)}</span>
+                        </SidebarMenuButton>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent side="right" align="start" className="min-w-52">
+                        {disk && (
+                          <div className={`px-2 py-1.5 text-xs ${disk.low ? "text-warning" : "text-muted-foreground"}`}>磁盘剩 {disk.text}</div>
+                        )}
+                        <DropdownMenuItem disabled={!s.online} onSelect={() => actions.prune(s.name)}>
+                          <Trash2Icon />
+                          清理没在用的镜像
+                        </DropdownMenuItem>
+                        {s.agent_outdated && (
+                          <DropdownMenuItem onSelect={() => actions.upgradeAgent(s.name)}>
+                            <ArrowUpCircleIcon />
+                            升级 agent
+                          </DropdownMenuItem>
+                        )}
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                    {s.agent_outdated && (
+                      <SidebarMenuAction title="升级 agent" onClick={() => actions.upgradeAgent(s.name)}>
+                        <ArrowUpCircleIcon className="text-warning" />
+                      </SidebarMenuAction>
+                    )}
+                  </SidebarMenuItem>
+                );
+              })}
             </SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>

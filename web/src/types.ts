@@ -37,6 +37,7 @@ export interface AgentReport {
   arch: string;
   docker_version?: string;
   lan_ips?: string[];
+  disk?: { total: number; free: number };
 }
 
 export interface ServerView {

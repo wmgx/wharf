@@ -609,6 +609,12 @@ async fn server(
       };
       upgrade_agents(c, names, j).await
     }
+    ServerCmd::Prune { name } => {
+      let r: ApplyResponse = c
+        .post(&format!("/api/servers/{}/prune", seg(&name)), &json!({}))
+        .await?;
+      finish_task(c, &r.run_id, true, j).await
+    }
   }
 }
 

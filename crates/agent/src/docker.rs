@@ -296,6 +296,33 @@ impl Docker {
     Ok(())
   }
 
+  /// 删除没有容器在用的镜像（停止的容器也算在用）和构建缓存。
+  pub async fn prune(&self, ctx: &Ctx) -> Result<String, ApiError> {
+    let mut freed = Vec::new();
+    for (what, args) in [
+      ("镜像", ["image", "prune", "--all", "--force"]),
+      ("构建缓存", ["builder", "prune", "--all", "--force"]),
+    ] {
+      ctx.say(format!("清理没在用的{what}"));
+      let out = self
+        .cmd()
+        .args(args)
+        .timeout(Duration::from_secs(600))
+        .run(ctx)
+        .await?
+        .check(&format!("docker {}", args[..2].join(" ")))?;
+      let total = out
+        .stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("Total reclaimed space:"))
+        .map(str::trim)
+        .unwrap_or("0B");
+      ctx.say(format!("{what}释放 {total}"));
+      freed.push(format!("{what} {total}"));
+    }
+    Ok(format!("释放了{}", freed.join("，")))
+  }
+
   /// `stop` 或 `start`。project 没部署过时什么也不做。
   pub async fn stop_start(
     &self,

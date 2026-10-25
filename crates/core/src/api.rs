@@ -88,6 +88,7 @@ pub fn router(state: Arc<AppState>) -> Router {
       "/api/servers/{name}/upgrade",
       post(crate::agent_upgrade::upgrade_now),
     )
+    .route("/api/servers/{name}/prune", post(crate::prune::prune_now))
     .route(
       "/api/servers/{name}/unmanaged",
       get(crate::import_api::unmanaged),

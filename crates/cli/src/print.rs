@@ -168,8 +168,12 @@ pub fn status(s: &Status) {
       .as_ref()
       .map(|a| format!("{}（{}）", a.ip, a.network.as_str()))
       .unwrap_or_else(|| "-".into());
+    let disk = report
+      .and_then(|r| r.disk)
+      .map(|d| format!("{} / {}", gb(d.free), gb(d.total)))
+      .unwrap_or_else(|| "-".into());
     println!(
-      "  {:<10} {:<4}  内网 {:<24}  公网 {:<15}  docker {}",
+      "  {:<10} {:<4}  内网 {:<24}  公网 {:<15}  docker {:<8}  磁盘剩 {disk}",
       srv.name,
       state,
       private,
@@ -229,6 +233,10 @@ pub fn status(s: &Status) {
       println!("  - {p}");
     }
   }
+}
+
+fn gb(bytes: u64) -> String {
+  format!("{:.1}G", bytes as f64 / (1u64 << 30) as f64)
 }
 
 pub fn backups(v: &BackupsView) {

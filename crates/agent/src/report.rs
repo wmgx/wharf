@@ -8,7 +8,7 @@ use std::{
 
 use tokio::sync::Mutex;
 use wharf_api_types::{
-  agent::AgentReport,
+  agent::{AgentReport, Disk},
   spec::{PrivateAddr, PrivateNetwork},
 };
 
@@ -54,6 +54,7 @@ impl Reporter {
       public_ip: self.public_ip(refresh).await,
       data_dir: self.docker.data_dir.display().to_string(),
       build: wharf_api_types::BUILD.to_string(),
+      disk: disk(&self.docker.data_dir),
     }
   }
 
@@ -183,4 +184,19 @@ mod tests {
     assert!(!is_cgnat("100.128.0.1".parse().unwrap()));
     assert!(!is_cgnat("192.168.1.10".parse().unwrap()));
   }
+}
+
+/// 挂载进来的数据目录在宿主机的磁盘上，statvfs 看到的就是宿主机的容量。
+fn disk(path: &std::path::Path) -> Option<Disk> {
+  use std::os::unix::ffi::OsStrExt;
+  let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+  let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+  if unsafe { libc::statvfs(c.as_ptr(), &mut st) } != 0 {
+    return None;
+  }
+  let block = st.f_frsize as u64;
+  Some(Disk {
+    total: st.f_blocks as u64 * block,
+    free: st.f_bavail as u64 * block,
+  })
 }

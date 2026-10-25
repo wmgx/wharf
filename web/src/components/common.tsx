@@ -34,6 +34,16 @@ export function serverText(s: ServerView): string {
   return s.rtt_ms != null ? `${s.rtt_ms} ms` : "在线";
 }
 
+const GB = 1024 ** 3;
+
+/** 磁盘余量，例如 `12.3G / 40G`；剩余不到 10% 或 5G 时 `low`。 */
+export function diskText(s: ServerView): { text: string; low: boolean } | null {
+  const d = s.report?.disk;
+  if (!d) return null;
+  const g = (n: number) => `${(n / GB).toFixed(n < 10 * GB ? 1 : 0)}G`;
+  return { text: `${g(d.free)} / ${g(d.total)}`, low: d.free < d.total / 10 || d.free < 5 * GB };
+}
+
 const DOT: Record<Tone, string> = {
   ok: "bg-success",
   warn: "bg-warning",

@@ -276,6 +276,15 @@ pub async fn status(
     } else if !s.online {
       problems.push(format!("服务器 {} 离线", s.name));
     }
+    if let Some(d) = s.report.as_ref().and_then(|r| r.disk)
+      && low_disk(d)
+    {
+      problems.push(format!(
+        "服务器 {} 磁盘只剩 {:.1} GB",
+        s.name,
+        d.free as f64 / GB
+      ));
+    }
   }
   let services: Vec<ServiceView> = snap
     .world
@@ -379,4 +388,11 @@ pub fn export(world: &World) -> Fleet {
       .collect(),
     routes: world.routes.values().map(|r| r.spec.clone()).collect(),
   }
+}
+
+const GB: f64 = (1u64 << 30) as f64;
+
+/// 剩余不到 10% 或不到 5 GB。
+fn low_disk(d: wharf_api_types::agent::Disk) -> bool {
+  d.free < d.total / 10 || (d.free as f64) < 5.0 * GB
 }
