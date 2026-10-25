@@ -91,11 +91,13 @@ pub async fn live_states(state: &AppState, world: &World) -> LiveMap {
     .collect()
 }
 
+/// `stopped`：配置要求停止，这时容器停着才算和配置一致。
 fn live_of(
   live: &LiveMap,
   server: &str,
   project: &str,
   expected_hash: Option<&str>,
+  stopped: bool,
 ) -> LiveState {
   match live.get(server) {
     None => LiveState {
@@ -129,7 +131,7 @@ fn live_of(
         state: state.into(),
         in_sync: expected_hash.map(|h| {
           s.and_then(|s| s.hash.as_deref()) == Some(h)
-            && state == "running"
+            && state == if stopped { "stopped" } else { "running" }
         }),
         containers,
         error: None,
@@ -166,7 +168,13 @@ pub fn service_view(
     )
     .ok()
     .map(|(_, h)| h);
-    live_of(live, &row.spec.server, name, hash.as_deref())
+    live_of(
+      live,
+      &row.spec.server,
+      name,
+      hash.as_deref(),
+      row.spec.stopped,
+    )
   });
   Some(ServiceView {
     name: name.to_string(),
@@ -194,7 +202,13 @@ pub fn gateway_view(
     .collect();
   let live = live.map(|live| {
     let mut l =
-      live_of(live, &row.spec.server, &gateway_project(name), None);
+      live_of(
+        live,
+        &row.spec.server,
+        &gateway_project(name),
+        None,
+        false,
+      );
     if let (Ok(r), Some(Ok(states))) = (
       snapshot::gateway_render(world, net, name),
       live.get(&row.spec.server),
