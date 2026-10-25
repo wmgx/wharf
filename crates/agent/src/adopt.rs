@@ -238,7 +238,7 @@ async fn read_project(
 }
 
 /// agent 自己的镜像（里面有 docker 命令和 compose 插件）。
-async fn self_image(
+pub(crate) async fn self_image(
   docker: &Docker,
   ctx: &Ctx,
 ) -> Result<String, ApiError> {

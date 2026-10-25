@@ -120,7 +120,7 @@ pub async fn run(
   ctx: &Ctx,
 ) -> Result<Value, ApiError> {
   let root = match &job.core_marker {
-    Some(marker) => core_root(marker)?,
+    Some(marker) => core_root(docker, marker, ctx).await?,
     None => data_root(&job.service)?,
   };
   let (repo, mut mounts) = match &job.repo {
@@ -155,7 +155,8 @@ pub async fn run(
   }
   match &job.action {
     ResticAction::Backup { host } => {
-      if !root.exists() {
+      // 控制面的目录不在 agent 容器里，上面已经在宿主机上确认过了。
+      if job.core_marker.is_none() && !root.exists() {
         return Err(ApiError::invalid(format!(
           "{} 不存在，没有数据可以备份",
           root.display()
@@ -282,9 +283,26 @@ pub async fn run(
 }
 
 /// 控制面自身备份的目录。用标记确认这台就是控制面所在的机器。
-fn core_root(marker: &str) -> Result<PathBuf, ApiError> {
+/// 目录在宿主机上、不在 agent 容器里，借 agent 自己的镜像（每台都有）去读；
+/// `--mount` 遇到不存在的目录会报错，不会像 `-v` 那样在别的机器上建出空目录。
+async fn core_root(
+  docker: &Docker,
+  marker: &str,
+  ctx: &Ctx,
+) -> Result<PathBuf, ApiError> {
+  let image = crate::adopt::self_image(docker, ctx).await?;
+  let found = docker
+    .cmd()
+    .args(["run", "--rm", "--network", "none", "--entrypoint", "cat", "--mount"])
+    .arg(format!("type=bind,src={CORE_BACKUP_DIR},dst=/c,readonly"))
+    .args([image.as_str(), "/c/.marker"])
+    .timeout(SHORT_TIMEOUT)
+    .run(ctx)
+    .await
+    .ok()
+    .filter(|o| o.success)
+    .map(|o| o.stdout);
   let root = PathBuf::from(CORE_BACKUP_DIR);
-  let found = std::fs::read_to_string(root.join(".marker")).ok();
   if found.as_deref().map(str::trim) != Some(marker) {
     return Err(ApiError::new(
       ErrorCode::NotFound,
