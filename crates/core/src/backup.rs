@@ -41,7 +41,9 @@ use crate::{
 const KEY_SECRET: &str = "WHARF_BACKUP_KEY";
 const HTTP_SECRET: &str = "WHARF_BACKUP_HTTP";
 const HTTP_HASH_SECRET: &str = "WHARF_BACKUP_HTTP_HASH";
-const HTTP_USER: &str = "wharf";
+pub const MANAGED_SECRETS: [&str; 3] =
+  [KEY_SECRET, HTTP_SECRET, HTTP_HASH_SECRET];
+pub(crate) const HTTP_USER: &str = "wharf";
 
 const STOP_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 pub(crate) const RESTIC_TIMEOUT: Duration = Duration::from_secs(6 * 3600);
@@ -50,7 +52,7 @@ const LIST_TIMEOUT: Duration = Duration::from_secs(3 * 60);
 
 pub(crate) struct Creds {
   pub(crate) key: String,
-  http: String,
+  pub(crate) http: String,
   http_hash: String,
   /// 控制面自身备份开启后，管理员也能用登录密码访问备份服务器（`用户名:bcrypt`）。
   owner: Option<String>,

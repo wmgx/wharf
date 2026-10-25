@@ -62,7 +62,7 @@ export function AppSidebar({ username, onLogout }: { username: string; onLogout:
     },
     {
       label: "设置",
-      items: [{ to: "/accounts", label: "厂商账号", icon: CloudIcon }],
+      items: [{ to: "/accounts", label: "账号与密钥", icon: CloudIcon }],
     },
   ];
   const active = (to: string) => (to === "/" ? pathname === "/" : pathname.startsWith(to));

@@ -60,6 +60,17 @@ pub struct CoreBackupView {
 }
 
 #[derive(Deserialize)]
+pub struct PasswordRequest {
+  pub password: String,
+}
+
+#[derive(Serialize)]
+pub struct RecoveryKey {
+  pub filename: String,
+  pub text: String,
+}
+
+#[derive(Deserialize)]
 pub struct EnableRequest {
   pub to: String,
   pub password: String,
@@ -167,6 +178,62 @@ pub async fn enable(
     )
     .await?,
   ))
+}
+
+/// `POST /api/core-backup/recovery-key`：后备的恢复密钥（备份口令和备份服务器账号）。
+/// 登录密码忘了也能恢复；服务备份也用同一个口令。要重新输入登录密码。
+pub async fn recovery_key(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Json(req): Json<PasswordRequest>,
+) -> ApiResult<RecoveryKey> {
+  auth.require(TokenScope::ApplyAll)?;
+  let hash: String = s
+    .db
+    .call(|c| {
+      c.query_row("SELECT password_hash FROM admin WHERE id = 1", [], |r| {
+        r.get(0)
+      })
+      .map_err(sql_err)
+    })
+    .await?;
+  if !crate::login::verify_password(&req.password, &hash) {
+    return Err(
+      ApiError::new(ErrorCode::Unauthorized, "登录密码不对").into(),
+    );
+  }
+  let snap = snapshot::load(&s.db).await?;
+  let to = s.db.call(|c| db::setting(c, TO)).await?;
+  let net = snap.net(&snap.world);
+  let target = to
+    .as_ref()
+    .and_then(|t| net.private.get(t))
+    .map(|a| format!("{}:{REST_SERVER_PORT}", a.ip));
+  let creds = backup::credentials(&s).await?;
+  tracing::info!("已下载恢复密钥");
+  let image = wharf_api_types::agent::RESTIC_IMAGE;
+  let user = backup::HTTP_USER;
+  let mut text = format!(
+    "# Wharf 恢复密钥：能打开所有备份，收好，别放在被备份的机器上。\n\
+RESTIC_PASSWORD={key}\n\
+RESTIC_REST_USERNAME={user}\n\
+RESTIC_REST_PASSWORD={http}\n",
+    key = creds.key,
+    http = creds.http,
+  );
+  if let Some(target) = target {
+    text.push_str(&format!(
+      "\n# 控制面备份在 {to}（{target}）的仓库 {REPO}；服务备份的仓库名是服务名。\n\
+# 恢复控制面（新机器先加入同一个内网，把本文件存成 wharf-recovery.env）：\n\
+docker run --rm --network host --env-file wharf-recovery.env -v /var/lib/wharf-core:/restore \\\n  \
+{image} -r rest:http://{target}/{REPO} restore latest:{CORE_BACKUP_DIR} --target /restore\n",
+      to = to.unwrap_or_default(),
+    ));
+  }
+  Ok(Json(RecoveryKey {
+    filename: "wharf-recovery.env".into(),
+    text,
+  }))
 }
 
 /// `POST /api/core-backup/run`

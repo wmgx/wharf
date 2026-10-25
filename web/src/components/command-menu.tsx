@@ -76,9 +76,9 @@ export function CommandMenu({ onLogout }: { onLogout: () => void }) {
               <WaypointsIcon />
               网关
             </CommandItem>
-            <CommandItem value="厂商账号 accounts cloudflare" onSelect={() => run(() => nav("/accounts"))}>
+            <CommandItem value="账号与密钥 accounts cloudflare secret token 备份" onSelect={() => run(() => nav("/accounts"))}>
               <CloudIcon />
-              厂商账号
+              账号与密钥
             </CommandItem>
             <CommandItem onSelect={() => run(() => nav("/topology"))}>
               <NetworkIcon />

@@ -388,3 +388,32 @@ export interface NetworkView {
   servers: { name: string; mode: NetworkMode; configured?: boolean; private_ip?: string; public_ip?: string; online: boolean }[];
   reach: { from: string; to: string; ok: boolean; checked_at: string }[];
 }
+
+export interface SecretView {
+  name: string;
+  updated_at: string;
+  used_by?: string[];
+  managed?: boolean;
+}
+
+export type TokenScope = "read" | "plan" | "apply_safe" | "apply_all";
+
+export interface TokenView {
+  name: string;
+  scope: TokenScope;
+  created_at: string;
+  last_used_at?: string;
+}
+
+export interface CreatedToken {
+  name: string;
+  scope: TokenScope;
+  token: string;
+}
+
+export interface CoreBackupView {
+  to?: string;
+  user_key_current: boolean;
+  records: BackupRecord[];
+  restore_command?: string;
+}

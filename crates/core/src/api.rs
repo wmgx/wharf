@@ -84,6 +84,10 @@ pub fn router(state: Arc<AppState>) -> Router {
       get(crate::core_backup::show).post(crate::core_backup::enable),
     )
     .route("/api/core-backup/run", post(crate::core_backup::run_now))
+    .route(
+      "/api/core-backup/recovery-key",
+      post(crate::core_backup::recovery_key),
+    )
     .route("/api/servers", get(list_servers).post(add_server))
     .route(
       "/api/servers/{name}",
@@ -916,6 +920,7 @@ async fn list_secrets(
   auth: Auth,
 ) -> ApiResult<Vec<SecretView>> {
   auth.require(TokenScope::Read)?;
+  let snap = snapshot::load(&s.db).await?;
   let rows: Vec<(String, i64)> = s
     .db
     .call(|c| {
@@ -932,11 +937,53 @@ async fn list_secrets(
     rows
       .into_iter()
       .map(|(name, at)| SecretView {
+        used_by: secret_users(&snap.world, &name),
+        managed: managed_secret(&name),
         name,
         updated_at: to_time(at),
       })
       .collect(),
   ))
+}
+
+/// Wharf 自己生成、自己用的密钥。改了或删了，旧备份就打不开了。
+fn managed_secret(name: &str) -> bool {
+  crate::backup::MANAGED_SECRETS.contains(&name)
+    || name == crate::core_backup::OWNER_SECRET
+    || name == crate::link::TOKEN_SECRET
+}
+
+fn secret_users(world: &crate::world::World, name: &str) -> Vec<String> {
+  let system = match name {
+    n if crate::backup::MANAGED_SECRETS.contains(&n) => Some("备份"),
+    n if n == crate::core_backup::OWNER_SECRET => Some("控制面备份"),
+    n if n == crate::link::TOKEN_SECRET => Some("机器互联"),
+    n if n == crate::tailscale::OAUTH_SECRET => Some("Tailscale 组网"),
+    n if n == crate::render::BASIC_AUTH_SECRET => Some("网关登录"),
+    n if n == crate::render::TUNNEL_TOKEN_SECRET => Some("隧道"),
+    _ => None,
+  };
+  let reference = format!("[[{name}]]");
+  let token = format!("\"token_secret\":\"{name}\"");
+  system
+    .map(str::to_string)
+    .into_iter()
+    .chain(world.services.iter().filter_map(|(service, row)| {
+      let spec = serde_json::to_string(&row.spec).ok()?;
+      (spec.contains(&reference) || spec.contains(&token))
+        .then(|| service.clone())
+    }))
+    .collect()
+}
+
+fn refuse_managed(name: &str) -> Result<(), ApiError> {
+  if managed_secret(name) {
+    return Err(ApiError::new(
+      ErrorCode::Forbidden,
+      format!("{name} 是 Wharf 自己生成的，改了或删了旧备份就打不开了"),
+    ));
+  }
+  Ok(())
 }
 
 #[derive(Deserialize)]
@@ -967,6 +1014,7 @@ async fn set_secret(
 ) -> ApiResult<SecretView> {
   auth.require(TokenScope::ApplyAll)?;
   check_secret_name(&name)?;
+  refuse_managed(&name)?;
   let value = if name == crate::render::BASIC_AUTH_SECRET {
     crate::render::BasicAuth::hash_input(&req.value)?
   } else {
@@ -986,6 +1034,8 @@ async fn set_secret(
     })
     .await?;
   Ok(Json(SecretView {
+    used_by: vec![],
+    managed: false,
     name,
     updated_at: to_time(now),
   }))
@@ -997,6 +1047,7 @@ async fn remove_secret(
   Path(name): Path<String>,
 ) -> ApiResult<Value> {
   auth.require(TokenScope::ApplyAll)?;
+  refuse_managed(&name)?;
   let removed = s
     .db
     .call(move |c| {

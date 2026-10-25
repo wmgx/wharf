@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import { api, usePoll } from "@/api";
 import { useActions } from "@/components/actions";
 import { ago, CardsSkeleton, ErrorNote, MODES, PageHeader } from "@/components/common";
+import { TailscaleSetup } from "@/components/tailscale-setup";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
@@ -75,10 +76,13 @@ export function Network() {
       <PageHeader
         title="组网"
         actions={
-          <Button variant="outline" onClick={probe} disabled={probing}>
-            <RadarIcon />
-            {probing ? "探测中" : "探测"}
-          </Button>
+          <>
+            <TailscaleSetup />
+            <Button variant="outline" onClick={probe} disabled={probing}>
+              <RadarIcon />
+              {probing ? "探测中" : "探测"}
+            </Button>
+          </>
         }
       />
       <ErrorNote error={error} />

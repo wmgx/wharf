@@ -2,16 +2,19 @@ import { CloudIcon, KeyRoundIcon, PlusIcon, RefreshCwIcon, Trash2Icon } from "lu
 import { useState } from "react";
 import { toast } from "sonner";
 import { api, usePoll } from "@/api";
-import { ago, CardsSkeleton, Empty, ErrorNote, Notice, PageHeader } from "@/components/common";
+import { ago, CardsSkeleton, Empty, ErrorNote, Notice, PageHeader, SectionTitle } from "@/components/common";
 import { Field, toName } from "@/components/fields";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import type { AccountView } from "@/types";
+import { CoreBackup } from "./core-backup";
 import { EdgeImport } from "./edge-import";
+import { Secrets } from "./secrets";
+import { Tokens } from "./tokens";
 
-/** 厂商账号：DNS 记录和 Cloudflare 隧道都用它。token 只存在控制面，页面上只显示打码后的值。 */
+/** 账号与密钥：厂商账号、密钥、API token、控制面备份。都只写不读。 */
 export function Accounts() {
   const { data, error, refresh } = usePoll<AccountView[]>("/api/accounts", 30000);
   const [adding, setAdding] = useState(false);
@@ -45,15 +48,14 @@ export function Accounts() {
 
   return (
     <>
-      <PageHeader
-        title="厂商账号"
-        actions={
-          <Button variant="outline" onClick={() => setAdding(true)}>
-            <PlusIcon />
-            添加账号
-          </Button>
-        }
-      />
+      <PageHeader title="账号与密钥" />
+      <div className="flex items-center justify-between">
+        <SectionTitle count={data?.length}>厂商账号</SectionTitle>
+        <Button variant="ghost" size="sm" onClick={() => setAdding(true)}>
+          <PlusIcon />
+          添加
+        </Button>
+      </div>
       <ErrorNote error={error} />
       {!data ? (
         <CardsSkeleton count={1} />
@@ -111,6 +113,17 @@ export function Accounts() {
           ))}
         </div>
       )}
+      <div className="mt-8 grid gap-8">
+        <div>
+          <Secrets />
+        </div>
+        <div>
+          <Tokens />
+        </div>
+        <div>
+          <CoreBackup />
+        </div>
+      </div>
       {importing && <EdgeImport account={importing} onClose={() => setImporting(null)} />}
       {adding && (
         <AddAccount

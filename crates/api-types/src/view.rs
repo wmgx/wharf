@@ -216,6 +216,12 @@ pub struct AccountView {
 pub struct SecretView {
   pub name: String,
   pub updated_at: DateTime<Utc>,
+  /// 用到它的服务和系统功能。
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub used_by: Vec<String>,
+  /// Wharf 自己生成的，不能改也不能删。
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub managed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
