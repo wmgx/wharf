@@ -20,7 +20,7 @@ const GROUP_H = 250;
 type BoxData = { kind: string; name: string; tone?: Tone; cls?: string; to?: string };
 type GroupData = { name: string; tone: Tone; sub: string; disk?: { text: string; low: boolean } | null };
 /** 域名链路上的线都记着属于哪个域名，点一个节点时顺着域名找上下游。 */
-type LinkData = { route?: string };
+type LinkData = { route?: string; reachOk?: boolean };
 
 function BoxNode({ data }: NodeProps<Node<BoxData>>) {
   return (
@@ -176,19 +176,29 @@ function build(status: Status, net: NetworkView | null): { nodes: Node[]; edges:
     const p = pairs.get(`${a}|${b}`) ?? { a, b, ok: true };
     pairs.set(`${a}|${b}`, { ...p, ok: p.ok && r.ok });
   }
-  for (const p of pairs.values()) {
-    if (!status.servers.some((s) => s.name === p.a) || !status.servers.some((s) => s.name === p.b)) continue;
-    edges.push({
-      id: `reach:${p.a}|${p.b}`,
-      source: `srv:${p.a}`,
-      sourceHandle: "bs",
-      target: `srv:${p.b}`,
-      targetHandle: "bt",
-      label: p.ok ? undefined : "不通",
-      style: { stroke: p.ok ? go : stop, strokeDasharray: p.ok ? undefined : "6 4", opacity: p.ok ? 0.5 : 1 },
-      labelStyle: { ...labelStyle, fill: stop },
+  const known = new Set(status.servers.map((s) => s.name));
+  [...pairs.values()]
+    .filter((p) => known.has(p.a) && known.has(p.b))
+    .forEach((p, i) => {
+      // pathOptions 是 smoothstep 线才有的字段，Edge 类型里没有。
+      const edge = {
+        id: `reach:${p.a}|${p.b}`,
+        source: `srv:${p.a}`,
+        sourceHandle: "bs",
+        target: `srv:${p.b}`,
+        targetHandle: "bt",
+        // 都从机器底部出发，往下错开，免得叠在一起。
+        type: "smoothstep",
+        pathOptions: { offset: 24 + i * 16 },
+        // 通的线只在选中机器时出现。
+        hidden: p.ok,
+        data: { reachOk: p.ok },
+        label: p.ok ? "通" : "不通",
+        style: { stroke: p.ok ? go : stop, strokeDasharray: p.ok ? undefined : "6 4" },
+        labelStyle: { ...labelStyle, fill: p.ok ? go : stop },
+      } as Edge<LinkData>;
+      edges.push(edge);
     });
-  }
 
   return { nodes, edges };
 }
@@ -224,7 +234,7 @@ export function Topology() {
       nodes: graph.nodes.map((n) => ({ ...n, selected: n.id === sel, style: { ...n.style, opacity: r.nodes.has(n.id) ? 1 : 0.3 } })),
       edges: graph.edges.map((e) =>
         r.edges.has(e.id)
-          ? { ...e, animated: true, style: { ...e.style, strokeWidth: 2, opacity: 1 } }
+          ? { ...e, hidden: false, animated: !e.data?.reachOk, style: { ...e.style, strokeWidth: 2, opacity: 1 } }
           : { ...e, animated: false, style: { ...e.style, opacity: 0.12 }, label: undefined },
       ),
     };
