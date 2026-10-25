@@ -16,10 +16,11 @@ use wharf_api_types::{
     VolumeSpec,
   },
   view::{
-    AccountView, BackupsView, CreatedToken, DeploymentView,
-    GatewayView, ImportPreview, ImportRequest, JoinInfo, NetworkView,
-    RestoreRequest, RollbackTarget, RouteView, SecretView,
-    ServerView, ServiceView, Status, TokenView, Unmanaged,
+    AccountView, BackupsView, CheckStatus, CreatedToken,
+    DeploymentView, DoctorReport, GatewayView, ImportPreview,
+    ImportRequest, JoinInfo, NetworkView, RestoreRequest,
+    RollbackTarget, RouteView, SecretView, ServerView, ServiceView,
+    Status, TokenView, Unmanaged,
   },
 };
 
@@ -104,6 +105,24 @@ async fn dispatch(
       service(c, cmd, j).await
     }
     Command::Upgrade => upgrade(c, j).await,
+    Command::Doctor { hostname } => {
+      let path = match &hostname {
+        Some(h) => format!("/api/doctor?host={}", seg(h)),
+        None => "/api/doctor".to_string(),
+      };
+      let v: DoctorReport = c.get(&path).await?;
+      out(j, &v, print::doctor);
+      let bad = v
+        .servers
+        .iter()
+        .chain(v.routes.iter().flat_map(|r| &r.checks))
+        .filter(|c| c.status == CheckStatus::Bad)
+        .count();
+      if bad > 0 {
+        return Err(anyhow::anyhow!("{bad} 项不通").into());
+      }
+      Ok(())
+    }
     Command::Network { probe } => {
       let v: NetworkView = if probe {
         c.post("/api/network/probe", &json!({})).await?
@@ -611,7 +630,10 @@ async fn server(
     }
     ServerCmd::Prune { name } => {
       let r: ApplyResponse = c
-        .post(&format!("/api/servers/{}/prune", seg(&name)), &json!({}))
+        .post(
+          &format!("/api/servers/{}/prune", seg(&name)),
+          &json!({}),
+        )
         .await?;
       finish_task(c, &r.run_id, true, j).await
     }
@@ -915,7 +937,10 @@ async fn service(
     }
     ServiceCmd::Restart { name } => {
       let r: ApplyResponse = c
-        .post(&format!("/api/services/{}/restart", seg(&name)), &json!({}))
+        .post(
+          &format!("/api/services/{}/restart", seg(&name)),
+          &json!({}),
+        )
         .await?;
       finish_task(c, &r.run_id, true, j).await
     }
@@ -1497,12 +1522,16 @@ async fn backup(
     BackupCmd::Core { to: Some(to), .. } => {
       let password = read_secret("登录密码（会成为恢复口令）：")?;
       let r: ApplyResponse = c
-        .post("/api/core-backup", &json!({ "to": to, "password": password }))
+        .post(
+          "/api/core-backup",
+          &json!({ "to": to, "password": password }),
+        )
         .await?;
       finish_task(c, &r.run_id, true, j).await
     }
     BackupCmd::Core { run: true, .. } => {
-      let r: ApplyResponse = c.post("/api/core-backup/run", &json!({})).await?;
+      let r: ApplyResponse =
+        c.post("/api/core-backup/run", &json!({})).await?;
       finish_task(c, &r.run_id, true, j).await
     }
     BackupCmd::Core { .. } => {

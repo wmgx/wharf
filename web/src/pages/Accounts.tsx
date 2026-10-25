@@ -49,7 +49,7 @@ export function Accounts() {
   return (
     <>
       <PageHeader title="账号与密钥" />
-      <div className="flex items-center justify-between">
+      <div className="mb-3 flex items-center justify-between [&>h2]:mb-0">
         <SectionTitle count={data?.length}>厂商账号</SectionTitle>
         <Button variant="ghost" size="sm" onClick={() => setAdding(true)}>
           <PlusIcon />
@@ -92,8 +92,8 @@ export function Accounts() {
                   {w}
                 </Notice>
               ))}
-              <div className="mt-auto flex items-center gap-1 text-xs text-muted-foreground">
-                <span>更新于 {ago(a.updated_at)}</span>
+              <div className="mt-auto flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
+                <span className="whitespace-nowrap">更新于 {ago(a.updated_at)}</span>
                 {a.kind === "cloudflare" && (
                   <Button variant="ghost" size="xs" className="ml-auto" onClick={() => setImporting(a.name)}>
                     <CloudIcon />

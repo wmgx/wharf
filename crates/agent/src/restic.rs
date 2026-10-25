@@ -236,7 +236,9 @@ pub async fn run(
     }
     ResticAction::RemoveKey { id } => {
       if !id.bytes().all(|c| c.is_ascii_hexdigit()) || id.is_empty() {
-        return Err(ApiError::invalid(format!("钥匙 id 不合法：{id}")));
+        return Err(ApiError::invalid(format!(
+          "钥匙 id 不合法：{id}"
+        )));
       }
       let j = Job {
         docker,
@@ -293,7 +295,15 @@ async fn core_root(
   let image = crate::adopt::self_image(docker, ctx).await?;
   let found = docker
     .cmd()
-    .args(["run", "--rm", "--network", "none", "--entrypoint", "cat", "--mount"])
+    .args([
+      "run",
+      "--rm",
+      "--network",
+      "none",
+      "--entrypoint",
+      "cat",
+      "--mount",
+    ])
     .arg(format!("type=bind,src={CORE_BACKUP_DIR},dst=/c,readonly"))
     .args([image.as_str(), "/c/.marker"])
     .timeout(SHORT_TIMEOUT)
@@ -346,7 +356,10 @@ async fn add_key(
   to_value(new)
 }
 
-async fn key_ids(j: &Job<'_>, ctx: &Ctx) -> Result<Vec<String>, ApiError> {
+async fn key_ids(
+  j: &Job<'_>,
+  ctx: &Ctx,
+) -> Result<Vec<String>, ApiError> {
   #[derive(serde::Deserialize)]
   struct Key {
     id: String,
@@ -355,9 +368,10 @@ async fn key_ids(j: &Job<'_>, ctx: &Ctx) -> Result<Vec<String>, ApiError> {
     .restic(&["key", "list", "--json"], SHORT_TIMEOUT, false, ctx)
     .await?
     .check("restic key list")?;
-  let keys: Vec<Key> = serde_json::from_str(&out.stdout).map_err(|e| {
-    ApiError::internal(format!("解析 restic 钥匙列表失败：{e}"))
-  })?;
+  let keys: Vec<Key> =
+    serde_json::from_str(&out.stdout).map_err(|e| {
+      ApiError::internal(format!("解析 restic 钥匙列表失败：{e}"))
+    })?;
   Ok(keys.into_iter().map(|k| k.id).collect())
 }
 

@@ -189,10 +189,17 @@ CREATE TABLE settings (
 "#,
 ];
 
-pub fn setting(c: &Connection, key: &str) -> Result<Option<String>, ApiError> {
-  c.query_row("SELECT value FROM settings WHERE key = ?1", params![key], |r| r.get(0))
-    .optional()
-    .map_err(sql_err)
+pub fn setting(
+  c: &Connection,
+  key: &str,
+) -> Result<Option<String>, ApiError> {
+  c.query_row(
+    "SELECT value FROM settings WHERE key = ?1",
+    params![key],
+    |r| r.get(0),
+  )
+  .optional()
+  .map_err(sql_err)
 }
 
 /// `None` 删除。
@@ -207,7 +214,9 @@ pub fn set_setting(
        ON CONFLICT (key) DO UPDATE SET value = excluded.value",
       params![key, v],
     ),
-    None => c.execute("DELETE FROM settings WHERE key = ?1", params![key]),
+    None => {
+      c.execute("DELETE FROM settings WHERE key = ?1", params![key])
+    }
   }
   .map_err(sql_err)?;
   Ok(())

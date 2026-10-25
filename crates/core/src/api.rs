@@ -84,6 +84,7 @@ pub fn router(state: Arc<AppState>) -> Router {
       get(crate::core_backup::show).post(crate::core_backup::enable),
     )
     .route("/api/core-backup/run", post(crate::core_backup::run_now))
+    .route("/api/doctor", get(crate::doctor::doctor))
     .route(
       "/api/core-backup/recovery-key",
       post(crate::core_backup::recovery_key),
@@ -953,12 +954,17 @@ fn managed_secret(name: &str) -> bool {
     || name == crate::link::TOKEN_SECRET
 }
 
-fn secret_users(world: &crate::world::World, name: &str) -> Vec<String> {
+fn secret_users(
+  world: &crate::world::World,
+  name: &str,
+) -> Vec<String> {
   let system = match name {
     n if crate::backup::MANAGED_SECRETS.contains(&n) => Some("备份"),
     n if n == crate::core_backup::OWNER_SECRET => Some("控制面备份"),
     n if n == crate::link::TOKEN_SECRET => Some("机器互联"),
-    n if n == crate::tailscale::OAUTH_SECRET => Some("Tailscale 组网"),
+    n if n == crate::tailscale::OAUTH_SECRET => {
+      Some("Tailscale 组网")
+    }
     n if n == crate::render::BASIC_AUTH_SECRET => Some("网关登录"),
     n if n == crate::render::TUNNEL_TOKEN_SECRET => Some("隧道"),
     _ => None,
@@ -980,7 +986,9 @@ fn refuse_managed(name: &str) -> Result<(), ApiError> {
   if managed_secret(name) {
     return Err(ApiError::new(
       ErrorCode::Forbidden,
-      format!("{name} 是 Wharf 自己生成的，改了或删了旧备份就打不开了"),
+      format!(
+        "{name} 是 Wharf 自己生成的，改了或删了旧备份就打不开了"
+      ),
     ));
   }
   Ok(())

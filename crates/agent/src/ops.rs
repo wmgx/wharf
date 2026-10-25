@@ -18,7 +18,9 @@ use wharf_api_types::{
 };
 
 use crate::{
-  docker::{CONFIG_HASH_FILE, Docker, Previous, io_err, write_private},
+  docker::{
+    CONFIG_HASH_FILE, Docker, Previous, io_err, write_private,
+  },
   exec::{Cmd, Ctx},
   report::Reporter,
 };
@@ -240,7 +242,13 @@ impl Ops {
   ) -> Result<ProjectUpResult, ApiError> {
     self.docker.up(&up.project, ctx).await?;
     self.docker.write_hash(&up.project, &up.hash)?;
-    let state = match crate::settle::watch(&self.docker, &up.project, ctx).await {
+    let state = match crate::settle::watch(
+      &self.docker,
+      &up.project,
+      ctx,
+    )
+    .await
+    {
       Ok(state) => state,
       Err(e) => {
         let Some(prev) = previous else { return Err(e) };
@@ -248,11 +256,13 @@ impl Ops {
         self.docker.write_compose(&up.project, &prev.compose)?;
         self.docker.write_hash(&up.project, &prev.hash)?;
         self.docker.up(&up.project, ctx).await?;
-        return Err(ApiError::new(
-          ErrorCode::AgentFailed,
-          format!("{}，已换回上一版", e.message),
-        )
-        .with_hint("配置还是新版本，修好后重新部署；先看日志"));
+        return Err(
+          ApiError::new(
+            ErrorCode::AgentFailed,
+            format!("{}，已换回上一版", e.message),
+          )
+          .with_hint("配置还是新版本，修好后重新部署；先看日志"),
+        );
       }
     };
     Ok(ProjectUpResult {
@@ -270,7 +280,10 @@ impl Ops {
   ) -> Result<ProjectUpResult, ApiError> {
     // 换回上一版要用的旧 compose；同一版重新部署时没有"上一版"。
     let previous = if up.rollback {
-      self.docker.previous(&up.project).filter(|p| p.hash != up.hash)
+      self
+        .docker
+        .previous(&up.project)
+        .filter(|p| p.hash != up.hash)
     } else {
       None
     };

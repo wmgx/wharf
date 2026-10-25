@@ -46,7 +46,8 @@ pub const MANAGED_SECRETS: [&str; 3] =
 pub(crate) const HTTP_USER: &str = "wharf";
 
 const STOP_TIMEOUT: Duration = Duration::from_secs(5 * 60);
-pub(crate) const RESTIC_TIMEOUT: Duration = Duration::from_secs(6 * 3600);
+pub(crate) const RESTIC_TIMEOUT: Duration =
+  Duration::from_secs(6 * 3600);
 const SERVER_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const LIST_TIMEOUT: Duration = Duration::from_secs(3 * 60);
 
@@ -65,7 +66,9 @@ pub(crate) fn random_hex() -> String {
 }
 
 /// 取备份口令，没有就生成。已有的不覆盖（INSERT OR IGNORE），并发时也只有一份。
-pub(crate) async fn credentials(state: &AppState) -> Result<Creds, ApiError> {
+pub(crate) async fn credentials(
+  state: &AppState,
+) -> Result<Creds, ApiError> {
   let key = random_hex();
   let http = random_hex();
   let http_hash = bcrypt::hash(&http, bcrypt::DEFAULT_COST)

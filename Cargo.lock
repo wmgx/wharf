@@ -2973,6 +2973,7 @@ dependencies = [
  "getrandom 0.3.4",
  "hex",
  "if-addrs",
+ "reqwest",
  "rpassword",
  "rusqlite",
  "rust-embed",

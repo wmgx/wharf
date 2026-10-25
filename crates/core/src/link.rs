@@ -425,6 +425,7 @@ pub async fn probe_pairs(
         ProbeTarget {
           server: t.clone(),
           addr: format!("{host}:{PROBE_PORT}"),
+          plain: false,
         }
       })
       .collect();

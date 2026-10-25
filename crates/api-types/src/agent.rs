@@ -124,7 +124,14 @@ pub struct AgentReport {
 }
 
 #[derive(
-  Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema,
+  Debug,
+  Clone,
+  Copy,
+  PartialEq,
+  Eq,
+  Serialize,
+  Deserialize,
+  JsonSchema,
 )]
 pub struct Disk {
   pub total: u64,
@@ -256,6 +263,9 @@ pub struct ProbeTarget {
   pub server: String,
   /// `ip:端口`。
   pub addr: String,
+  /// 只看 TCP 能不能连上，不要求对方是 agent 的探测端口（诊断网关到上游用）。
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub plain: bool,
 }
 
 /// agent 的探测端口：连上后回一行 `wharf <服务器名>`。

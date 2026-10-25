@@ -201,14 +201,13 @@ pub fn gateway_view(
     .map(|(h, _)| h.clone())
     .collect();
   let live = live.map(|live| {
-    let mut l =
-      live_of(
-        live,
-        &row.spec.server,
-        &gateway_project(name),
-        None,
-        false,
-      );
+    let mut l = live_of(
+      live,
+      &row.spec.server,
+      &gateway_project(name),
+      None,
+      false,
+    );
     if let (Ok(r), Some(Ok(states))) = (
       snapshot::gateway_render(world, net, name),
       live.get(&row.spec.server),
@@ -315,9 +314,7 @@ pub async fn status(
   for (kind, name, live, stopped) in services
     .iter()
     .map(|s| ("服务", &s.name, &s.live, s.spec.stopped))
-    .chain(
-      gateways.iter().map(|g| ("网关", &g.name, &g.live, false)),
-    )
+    .chain(gateways.iter().map(|g| ("网关", &g.name, &g.live, false)))
   {
     let Some(live) = live else { continue };
     // 按配置停下的服务，停着是正常的。

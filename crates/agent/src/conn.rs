@@ -205,7 +205,8 @@ async fn session(
           };
           let result = match (op, input) {
             (AgentOp::Terminal(job), Some(input)) => {
-              crate::terminal::run(&ops.docker, &job, &ctx, input).await
+              crate::terminal::run(&ops.docker, &job, &ctx, input)
+                .await
             }
             (op, _) => ops.handle(op, &ctx).await,
           };

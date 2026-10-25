@@ -305,8 +305,12 @@ impl Docker {
   pub fn previous(&self, project: &str) -> Option<Previous> {
     let dir = self.project_dir(project);
     Some(Previous {
-      compose: std::fs::read_to_string(dir.join("compose.yaml")).ok()?,
-      hash: std::fs::read_to_string(dir.join(HASH_FILE)).ok()?.trim().to_string(),
+      compose: std::fs::read_to_string(dir.join("compose.yaml"))
+        .ok()?,
+      hash: std::fs::read_to_string(dir.join(HASH_FILE))
+        .ok()?
+        .trim()
+        .to_string(),
     })
   }
 

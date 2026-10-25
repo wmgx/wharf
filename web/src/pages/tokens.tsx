@@ -38,7 +38,7 @@ export function Tokens() {
 
   return (
     <>
-      <div className="flex items-center justify-between">
+      <div className="mb-3 flex items-center justify-between [&>h2]:mb-0">
         <SectionTitle count={data?.length}>API token</SectionTitle>
         <Button variant="ghost" size="sm" onClick={() => setCreating(true)}>
           <PlusIcon />

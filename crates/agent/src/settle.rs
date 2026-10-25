@@ -86,8 +86,11 @@ fn problem(state: &ProjectState) -> Option<String> {
 }
 
 fn failed(project: &str, why: String) -> ApiError {
-  ApiError::new(ErrorCode::AgentFailed, format!("{project} 没起来：{why}"))
-    .suggest(format!("wharf service logs {project}"))
+  ApiError::new(
+    ErrorCode::AgentFailed,
+    format!("{project} 没起来：{why}"),
+  )
+  .suggest(format!("wharf service logs {project}"))
 }
 
 /// 容器名 → 重启次数。查不到时返回空，不影响判断其他条件。
@@ -112,7 +115,10 @@ async fn restart_counts(
     .lines()
     .filter_map(|l| {
       let (name, n) = l.trim().rsplit_once(' ')?;
-      Some((name.trim_start_matches('/').to_string(), n.parse().ok()?))
+      Some((
+        name.trim_start_matches('/').to_string(),
+        n.parse().ok()?,
+      ))
     })
     .collect()
 }
@@ -150,7 +156,8 @@ mod tests {
     );
     assert!(problem(&state(container("exited", None))).is_some());
     assert!(
-      problem(&state(container("running", Some("unhealthy")))).is_some()
+      problem(&state(container("running", Some("unhealthy"))))
+        .is_some()
     );
   }
 }

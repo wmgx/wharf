@@ -433,3 +433,49 @@ pub struct ImportPreview {
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub warnings: Vec<String>,
 }
+
+/// `wharf doctor` 的结果：沿每个域名的访问链路逐层检查。只读。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DoctorReport {
+  pub checked_at: DateTime<Utc>,
+  pub servers: Vec<DoctorCheck>,
+  pub routes: Vec<RouteDiagnosis>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RouteDiagnosis {
+  pub hostname: String,
+  pub url: String,
+  /// 按访问顺序：域名解析 → HTTPS → 网关 → 网关到上游 → 容器。
+  pub checks: Vec<DoctorCheck>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DoctorCheck {
+  /// 哪一层，例如 `dns`、`https`、`gateway`、`link`、`container`、`agent`。
+  pub layer: String,
+  /// 检查对象，例如 `server1 上的网关 edge`。
+  pub subject: String,
+  pub status: CheckStatus,
+  pub detail: String,
+  pub at: DateTime<Utc>,
+}
+
+#[derive(
+  Debug,
+  Clone,
+  Copy,
+  PartialEq,
+  Eq,
+  Serialize,
+  Deserialize,
+  JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckStatus {
+  Ok,
+  Warn,
+  Bad,
+  /// 前面一层已经不通，或这一层不适用。
+  Skip,
+}

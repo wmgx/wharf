@@ -50,6 +50,9 @@ pub async fn check(targets: Vec<ProbeTarget>) -> Vec<bool> {
 async fn one(target: &ProbeTarget) -> bool {
   let attempt = async {
     let stream = TcpStream::connect(&target.addr).await.ok()?;
+    if target.plain {
+      return Some(true);
+    }
     let mut line = String::new();
     BufReader::new(stream).read_line(&mut line).await.ok()?;
     Some(line == banner(&target.server))
@@ -78,10 +81,12 @@ mod tests {
     let target = |server: &str| ProbeTarget {
       server: server.into(),
       addr: addr.clone(),
+      plain: false,
     };
     let unused = ProbeTarget {
       server: "home1".into(),
       addr: "127.0.0.1:1".into(),
+      plain: false,
     };
     assert_eq!(
       check(vec![target("home1"), target("edge1"), unused]).await,

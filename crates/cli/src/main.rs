@@ -73,6 +73,12 @@ pub enum Command {
   },
   /// 升级 Wharf：控制面换成最新镜像，再把各服务器的 agent 升到同一版本。
   Upgrade,
+  /// 只读诊断：沿每个域名逐层检查（解析 → HTTPS → 网关 → 网关连上游 → 容器）。
+  /// 有不通的项时退出码为 1。
+  Doctor {
+    /// 只查这个域名。
+    hostname: Option<String>,
+  },
   /// 组网：各服务器怎么接入（tailscale / lan / public）、谁能连谁的内网地址。
   Network {
     /// 先让每台在线服务器探测其余服务器，再显示结果。
@@ -269,7 +275,9 @@ pub enum ServerCmd {
     all: bool,
   },
   /// 删除没有容器在用的镜像和构建缓存，腾出磁盘。
-  Prune { name: String },
+  Prune {
+    name: String,
+  },
 }
 
 #[derive(Subcommand)]

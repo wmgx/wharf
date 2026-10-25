@@ -126,10 +126,12 @@ pub async fn run(
 
 /// 在输出开头找 `ESC ]777;wharf-pid;<pid> BEL`，返回进程号和去掉标记后的输出。
 fn take_pid(out: &[u8]) -> Option<(u32, Vec<u8>)> {
-  let start = out.windows(PID_MARK.len()).position(|w| w == PID_MARK)?;
+  let start =
+    out.windows(PID_MARK.len()).position(|w| w == PID_MARK)?;
   let digits = start + PID_MARK.len();
   let end = digits + out[digits..].iter().position(|&b| b == 0x07)?;
-  let pid = std::str::from_utf8(&out[digits..end]).ok()?.parse().ok()?;
+  let pid =
+    std::str::from_utf8(&out[digits..end]).ok()?.parse().ok()?;
   let mut rest = out[..start].to_vec();
   rest.extend_from_slice(&out[end + 1..]);
   Some((pid, rest))
@@ -146,7 +148,9 @@ async fn hang_up(docker: &Docker, container: &str, pid: u32) {
     .await;
 }
 
-fn open_pty(size: TerminalSize) -> Result<(OwnedFd, OwnedFd), ApiError> {
+fn open_pty(
+  size: TerminalSize,
+) -> Result<(OwnedFd, OwnedFd), ApiError> {
   let mut master = 0;
   let mut slave = 0;
   let ws = winsize(size);
@@ -162,7 +166,9 @@ fn open_pty(size: TerminalSize) -> Result<(OwnedFd, OwnedFd), ApiError> {
   if rc != 0 {
     return Err(io(std::io::Error::last_os_error()));
   }
-  unsafe { Ok((OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave))) }
+  unsafe {
+    Ok((OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)))
+  }
 }
 
 fn resize(master: &OwnedFd, size: TerminalSize) {

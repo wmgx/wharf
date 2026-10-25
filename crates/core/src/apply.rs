@@ -603,15 +603,21 @@ async fn run_step(
     }
     Step::ServiceStop { service } => {
       let server = service_server(&snap, service)?;
-      project_stop_start(state, &server, service, false, &progress, cancel)
-        .await?;
+      project_stop_start(
+        state, &server, service, false, &progress, cancel,
+      )
+      .await?;
     }
     Step::ServiceRestart { service } => {
       let server = service_server(&snap, service)?;
-      project_stop_start(state, &server, service, false, &progress, cancel)
-        .await?;
-      project_stop_start(state, &server, service, true, &progress, cancel)
-        .await?;
+      project_stop_start(
+        state, &server, service, false, &progress, cancel,
+      )
+      .await?;
+      project_stop_start(
+        state, &server, service, true, &progress, cancel,
+      )
+      .await?;
     }
     Step::CoreBackup { user_key } => {
       crate::core_backup::backup(
@@ -1110,8 +1116,10 @@ async fn service_up(
   }
   running?;
   if row.spec.stopped {
-    project_stop_start(state, server, service, false, &progress, cancel)
-      .await?;
+    project_stop_start(
+      state, server, service, false, &progress, cancel,
+    )
+    .await?;
   }
   Ok(())
 }
@@ -1153,7 +1161,13 @@ async fn project_stop_start(
   };
   let done: bool = state
     .hub
-    .call(server, op, STOP_START_TIMEOUT, Some(progress.clone()), cancel)
+    .call(
+      server,
+      op,
+      STOP_START_TIMEOUT,
+      Some(progress.clone()),
+      cancel,
+    )
     .await?;
   if !done {
     return Err(ApiError::new(

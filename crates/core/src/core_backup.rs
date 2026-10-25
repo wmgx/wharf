@@ -125,8 +125,11 @@ pub async fn enable(
   }
   if !snap.net(&snap.world).private.contains_key(&req.to) {
     return Err(
-      ApiError::invalid(format!("{} 没有内网地址，不能做备份服务器", req.to))
-        .into(),
+      ApiError::invalid(format!(
+        "{} 没有内网地址，不能做备份服务器",
+        req.to
+      ))
+      .into(),
     );
   }
   let (username, hash): (String, String) = s
@@ -143,8 +146,10 @@ pub async fn enable(
   // 备份服务器上 wharf 这个账号已经给控制面用了。
   if username == "wharf" {
     return Err(
-      ApiError::invalid("管理员账号叫 wharf，和备份服务器的内部账号重名，先改个名")
-        .into(),
+      ApiError::invalid(
+        "管理员账号叫 wharf，和备份服务器的内部账号重名，先改个名",
+      )
+      .into(),
     );
   }
   if !crate::login::verify_password(&req.password, &hash) {
@@ -191,9 +196,11 @@ pub async fn recovery_key(
   let hash: String = s
     .db
     .call(|c| {
-      c.query_row("SELECT password_hash FROM admin WHERE id = 1", [], |r| {
-        r.get(0)
-      })
+      c.query_row(
+        "SELECT password_hash FROM admin WHERE id = 1",
+        [],
+        |r| r.get(0),
+      )
       .map_err(sql_err)
     })
     .await?;
@@ -259,7 +266,9 @@ fn check_data_dir(s: &AppState) -> Result<(), ApiError> {
     return Err(ApiError::invalid(format!(
       "控制面数据目录是 {}，不是 {}，不能自动备份",
       s.data_dir.display(),
-      expected.map(|p| p.display().to_string()).unwrap_or_default()
+      expected
+        .map(|p| p.display().to_string())
+        .unwrap_or_default()
     )));
   }
   Ok(())
@@ -277,14 +286,12 @@ pub async fn backup(
   cancel: &CancellationToken,
 ) -> Result<(), ApiError> {
   check_data_dir(state)?;
-  let to = state
-    .db
-    .call(|c| db::setting(c, TO))
-    .await?
-    .ok_or_else(|| {
+  let to = state.db.call(|c| db::setting(c, TO)).await?.ok_or_else(
+    || {
       ApiError::invalid("还没有开启控制面备份")
         .suggest("wharf backup core --to <server>")
-    })?;
+    },
+  )?;
   let snap = snapshot::load(&state.db).await?;
   let target_ip = snap
     .net(&snap.world)
@@ -306,20 +313,37 @@ pub async fn backup(
   progress("已生成数据库快照".into());
 
   // 不知道控制面在哪台机器上：问每台在线的 agent，目录里的标记对得上的就是。
-  let mut result: Result<BackupSummary, ApiError> = Err(ApiError::new(
-    ErrorCode::NotFound,
-    format!("找不到控制面所在的机器（控制面不能和备份服务器 {to} 是同一台）"),
-  ));
+  let mut result: Result<BackupSummary, ApiError> = Err(
+    ApiError::new(
+      ErrorCode::NotFound,
+      format!(
+        "找不到控制面所在的机器（控制面不能和备份服务器 {to} 是同一台）"
+      ),
+    ),
+  );
   for server in snap.world.servers.keys() {
     if *server == to || !state.hub.is_online(server) {
       continue;
     }
-    let job = core_job(&snap, server, &w, &creds, &marker, ResticAction::Backup {
-      host: server.clone(),
-    });
+    let job = core_job(
+      &snap,
+      server,
+      &w,
+      &creds,
+      &marker,
+      ResticAction::Backup {
+        host: server.clone(),
+      },
+    );
     match state
       .hub
-      .call(server, job, backup::RESTIC_TIMEOUT, Some(progress.clone()), cancel)
+      .call(
+        server,
+        job,
+        backup::RESTIC_TIMEOUT,
+        Some(progress.clone()),
+        cancel,
+      )
       .await
     {
       Err(e) if e.code == ErrorCode::NotFound => continue,
@@ -335,8 +359,10 @@ pub async fn backup(
   result?;
 
   if let Some(password) = user_key {
-    add_user_key(state, &snap, &w, &creds, password, &progress, cancel)
-      .await?;
+    add_user_key(
+      state, &snap, &w, &creds, password, &progress, cancel,
+    )
+    .await?;
   }
   // 清理旧快照失败不影响这次备份的结果。
   let pruned = state
@@ -377,7 +403,13 @@ async fn add_user_key(
   );
   let id: String = state
     .hub
-    .call(&w.server, job, backup::RESTIC_TIMEOUT, Some(progress.clone()), cancel)
+    .call(
+      &w.server,
+      job,
+      backup::RESTIC_TIMEOUT,
+      Some(progress.clone()),
+      cancel,
+    )
     .await?;
   let old = state.db.call(|c| db::setting(c, USER_KEY)).await?;
   if let Some(old) = old.filter(|o| *o != id) {
@@ -385,7 +417,12 @@ async fn add_user_key(
       .hub
       .call::<serde_json::Value>(
         &w.target,
-        local_job(snap, &w.target, creds, ResticAction::RemoveKey { id: old }),
+        local_job(
+          snap,
+          &w.target,
+          creds,
+          ResticAction::RemoveKey { id: old },
+        ),
         backup::RESTIC_TIMEOUT,
         Some(progress.clone()),
         cancel,
@@ -399,9 +436,11 @@ async fn add_user_key(
     .db
     .call(move |c| {
       let hash: String = c
-        .query_row("SELECT password_hash FROM admin WHERE id = 1", [], |r| {
-          r.get(0)
-        })
+        .query_row(
+          "SELECT password_hash FROM admin WHERE id = 1",
+          [],
+          |r| r.get(0),
+        )
         .map_err(sql_err)?;
       db::set_setting(c, USER_KEY, Some(&id))?;
       db::set_setting(c, KEY_FOR, Some(&hash))
@@ -419,8 +458,14 @@ fn core_job(
   marker: &str,
   action: ResticAction,
 ) -> AgentOp {
-  let mut job =
-    backup::job(snap, server, REPO, backup::rest_repo(w, creds), creds, action);
+  let mut job = backup::job(
+    snap,
+    server,
+    REPO,
+    backup::rest_repo(w, creds),
+    creds,
+    action,
+  );
   if let AgentOp::Restic(j) = &mut job {
     j.core_marker = Some(marker.to_string());
   }
@@ -446,13 +491,17 @@ async fn stage(state: &AppState) -> Result<String, ApiError> {
   #[cfg(unix)]
   {
     use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    let _ = std::fs::set_permissions(
+      dir,
+      std::fs::Permissions::from_mode(0o700),
+    );
   }
   let db_copy = dir.join("wharf.db").display().to_string();
   state
     .db
     .call(move |c| {
-      c.execute("VACUUM INTO ?1", params![db_copy]).map_err(sql_err)?;
+      c.execute("VACUUM INTO ?1", params![db_copy])
+        .map_err(sql_err)?;
       Ok(())
     })
     .await?;
@@ -481,7 +530,9 @@ fn restore_command(ip: &str, user: &str) -> String {
 }
 
 /// 定时备份用：上次成功是什么时候。
-pub fn last_ok(c: &rusqlite::Connection) -> Result<Option<i64>, ApiError> {
+pub fn last_ok(
+  c: &rusqlite::Connection,
+) -> Result<Option<i64>, ApiError> {
   c.query_row(
     "SELECT MAX(created_at) FROM backups WHERE service = ?1 AND ok",
     params![REPO],

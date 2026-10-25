@@ -58,10 +58,14 @@ async fn tick(
       .get(&row.spec.server)
       .and_then(|r| r.as_ref().ok())
       .and_then(|projects| projects.get(name));
-    let expected =
-      snapshot::service_resolved(&snap.world, &net, name, &snap.secrets)
-        .ok()
-        .map(|(_, h)| h);
+    let expected = snapshot::service_resolved(
+      &snap.world,
+      &net,
+      name,
+      &snap.secrets,
+    )
+    .ok()
+    .map(|(_, h)| h);
     let why = observed.and_then(|p| {
       if row.spec.stopped || p.hash.is_none() || p.hash != expected {
         // 要求停止、不是 Wharf 部署的、和配置不一致（交给计划处理）都不管。

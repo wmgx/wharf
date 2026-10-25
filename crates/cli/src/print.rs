@@ -284,6 +284,36 @@ pub fn backups(v: &BackupsView) {
   }
 }
 
+pub fn doctor(v: &wharf_api_types::view::DoctorReport) {
+  use wharf_api_types::view::{CheckStatus, DoctorCheck};
+  let line = |c: &DoctorCheck| {
+    let mark = match c.status {
+      CheckStatus::Ok => "✓",
+      CheckStatus::Warn => "!",
+      CheckStatus::Bad => "✗",
+      CheckStatus::Skip => "-",
+    };
+    println!("  {mark} {:<9} {}  {}", c.layer, c.subject, c.detail);
+  };
+  println!("服务器");
+  v.servers.iter().for_each(line);
+  for r in &v.routes {
+    let first_bad =
+      r.checks.iter().find(|c| c.status == CheckStatus::Bad);
+    match first_bad {
+      Some(c) => println!("\n{}  ✗ 先看 {}", r.hostname, c.layer),
+      None => println!("\n{}", r.hostname),
+    }
+    r.checks.iter().for_each(line);
+  }
+  println!(
+    "\n检查于 {}",
+    v.checked_at
+      .with_timezone(&chrono::Local)
+      .format("%m-%d %H:%M:%S")
+  );
+}
+
 pub fn core_backup(v: &serde_json::Value) {
   let Some(to) = v["to"].as_str() else {
     println!("控制面备份没有开启：wharf backup core --to <server>");
@@ -291,7 +321,9 @@ pub fn core_backup(v: &serde_json::Value) {
   };
   println!("控制面每天备份到 {to}");
   if !v["user_key_current"].as_bool().unwrap_or(false) {
-    println!("登录密码改过了，恢复口令还是旧密码：wharf backup core --to {to} 重新输入一次");
+    println!(
+      "登录密码改过了，恢复口令还是旧密码：wharf backup core --to {to} 重新输入一次"
+    );
   }
   for r in v["records"].as_array().into_iter().flatten().take(5) {
     let at = r["created_at"].as_str().unwrap_or("-");
@@ -303,7 +335,9 @@ pub fn core_backup(v: &serde_json::Value) {
     println!("  {at}  {detail}");
   }
   if let Some(cmd) = v["restore_command"].as_str() {
-    println!("\n控制面整个丢了时：新机器先加入同一个内网，执行下面的命令并输入登录密码，文件会恢复到 /var/lib/wharf-core，再启动控制面：");
+    println!(
+      "\n控制面整个丢了时：新机器先加入同一个内网，执行下面的命令并输入登录密码，文件会恢复到 /var/lib/wharf-core，再启动控制面："
+    );
     println!("{cmd}");
   }
 }

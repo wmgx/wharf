@@ -14,6 +14,7 @@ mod backup;
 mod build;
 mod core_backup;
 mod db;
+mod doctor;
 mod edge;
 mod edge_api;
 mod edge_plan;
