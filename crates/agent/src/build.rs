@@ -32,8 +32,8 @@ use crate::{
 
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const CLONE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
-/// 只查 commit，比拉代码短得多。
-const LS_REMOTE_TIMEOUT: Duration = Duration::from_secs(60);
+/// 只查 commit，比拉代码短得多；国内机器连 GitHub 失败要一分多钟才报错，留够时间带回真实原因。
+const LS_REMOTE_TIMEOUT: Duration = Duration::from_secs(150);
 const BUILD_TIMEOUT: Duration = Duration::from_secs(40 * 60);
 /// 代码包大小上限，和控制面接收上传的上限一致。
 const MAX_ARCHIVE: u64 = 512 * 1024 * 1024;

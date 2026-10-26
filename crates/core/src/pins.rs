@@ -18,6 +18,9 @@ use crate::{
 
 const RESOLVE_TIMEOUT: std::time::Duration =
   std::time::Duration::from_secs(60);
+/// 比 agent 里 `git ls-remote` 的上限长，失败时带回 git 的报错而不是超时。
+const COMMIT_TIMEOUT: std::time::Duration =
+  std::time::Duration::from_secs(180);
 
 pub struct Resolved {
   /// 这次查到的镜像 ID：服务 → `sha256:…`，用来判断正在跑的是不是这个版本。
@@ -175,7 +178,7 @@ pub async fn resolve_commits(
           fetch,
           pull: snapshot::pull_policy(&desired.servers[&server]),
         }),
-        RESOLVE_TIMEOUT,
+        COMMIT_TIMEOUT,
         None,
         &Default::default(),
       )
