@@ -191,6 +191,10 @@ export function AppSidebar({ username, onLogout }: { username: string; onLogout:
                   <KeyRoundIcon />
                   登录保护账号
                 </DropdownMenuItem>
+                <DropdownMenuItem onSelect={actions.upgrade}>
+                  <ArrowUpCircleIcon />
+                  升级 Wharf
+                </DropdownMenuItem>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem onSelect={onLogout}>
                   <LogOutIcon />

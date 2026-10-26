@@ -624,26 +624,23 @@ async fn server(
       out(j, &v, |_| println!("已删除服务器 {name}"));
       Ok(())
     }
-    ServerCmd::Upgrade { name, all } => {
-      let names = match (name, all) {
-        (Some(name), _) => vec![name],
-        (None, true) => {
-          let v: Vec<ServerView> = c.get("/api/servers").await?;
-          v.into_iter()
-            .filter(|s| s.agent_outdated)
-            .map(|s| s.name)
-            .collect()
-        }
-        (None, false) => {
-          return Err(
-            ApiError::invalid("给出服务器名，或者用 --all")
-              .suggest("wharf server upgrade --all")
-              .into(),
-          );
-        }
-      };
-      upgrade_agents(c, names, j).await
-    }
+    ServerCmd::Upgrade { name, all } => match (name, all) {
+      (Some(name), _) => {
+        let r: ApplyResponse = c
+          .post(
+            &format!("/api/servers/{}/upgrade", seg(&name)),
+            &json!({}),
+          )
+          .await?;
+        finish_task(c, &r.run_id, true, j).await
+      }
+      (None, true) => upgrade_outdated(c, j).await,
+      (None, false) => Err(
+        ApiError::invalid("给出服务器名，或者用 --all")
+          .suggest("wharf server upgrade --all")
+          .into(),
+      ),
+    },
     ServerCmd::Prune { name } => {
       let r: ApplyResponse = c
         .post(
@@ -662,24 +659,16 @@ async fn server(
   }
 }
 
-async fn upgrade_agents(
-  c: &Client,
-  names: Vec<String>,
-  j: bool,
-) -> CliResult<()> {
-  if names.is_empty() {
-    out(j, &json!([]), |_| println!("全部 agent 都是最新版本"));
+/// 升级全部在线、版本落后的 agent，逐台进行，一台失败不影响其余的。
+async fn upgrade_outdated(c: &Client, j: bool) -> CliResult<()> {
+  let r: Value = c.post("/api/servers/upgrade", &json!({})).await?;
+  match r["run_id"].as_str() {
+    Some(id) => finish_task(c, id, true, j).await,
+    None => {
+      out(j, &r, |_| println!("全部 agent 都是最新版本"));
+      Ok(())
+    }
   }
-  for name in names {
-    let r: ApplyResponse = c
-      .post(
-        &format!("/api/servers/{}/upgrade", seg(&name)),
-        &json!({}),
-      )
-      .await?;
-    finish_task(c, &r.run_id, true, j).await?;
-  }
-  Ok(())
 }
 
 /// 控制面重启后，等它带着新构建号回来、agent 重新连上。
@@ -688,14 +677,10 @@ const AGENT_RECONNECT_WAIT: Duration = Duration::from_secs(60);
 
 async fn upgrade(c: &Client, j: bool) -> CliResult<()> {
   // 替换控制面要靠同机的 agent，落后的 agent 先升到和控制面一致。
-  let servers: Vec<ServerView> = c.get("/api/servers").await?;
-  let behind: Vec<String> = servers
-    .into_iter()
-    .filter(|s| s.online && s.agent_outdated)
-    .map(|s| s.name)
-    .collect();
-  if !behind.is_empty() {
-    upgrade_agents(c, behind, j).await?;
+  // 只有控制面所在机器的那台必须成功，其余的失败了也接着换控制面。
+  // 失败原因 finish_task 已经打印过了。
+  if upgrade_outdated(c, j).await.is_err() {
+    eprintln!("有 agent 没升级成功，继续升级控制面");
   }
   let before: Value = c.get("/api/version").await?;
   let r: UpgradeResult = c.post("/api/upgrade", &json!({})).await?;
@@ -746,12 +731,7 @@ async fn upgrade(c: &Client, j: bool) -> CliResult<()> {
   for s in servers.iter().filter(|s| !s.online) {
     eprintln!("{} 不在线，跳过", s.name);
   }
-  let names = servers
-    .into_iter()
-    .filter(|s| s.online && s.agent_outdated)
-    .map(|s| s.name)
-    .collect();
-  upgrade_agents(c, names, j).await
+  upgrade_outdated(c, j).await
 }
 
 // SERVICES

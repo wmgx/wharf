@@ -63,6 +63,113 @@ pub async fn upgrade_now(
   ))
 }
 
+/// `POST /api/servers/upgrade`：升级全部在线、版本落后的 agent。
+/// 都是最新时 `run_id` 为空。
+pub async fn upgrade_outdated(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+) -> ApiResult<Value> {
+  auth.require(TokenScope::ApplyAll)?;
+  Ok(Json(match start_outdated(&s).await? {
+    Some(r) => json!({ "run_id": r.run_id }),
+    None => json!({ "run_id": null }),
+  }))
+}
+
+async fn start_outdated(
+  s: &Arc<AppState>,
+) -> Result<Option<ApplyResponse>, ApiError> {
+  let snap = snapshot::load(&s.db).await?;
+  let mut servers = Vec::new();
+  for name in snap.world.servers.keys() {
+    if s.hub.is_online(name)
+      && outdated(reported_build(s, name).await?.as_deref())
+    {
+      servers.push(name.clone());
+    }
+  }
+  if servers.is_empty() {
+    return Ok(None);
+  }
+  let title = format!("升级 {} 的 agent", servers.join("、"));
+  crate::apply::start_task(
+    s.clone(),
+    title,
+    Step::AgentUpgrades { servers },
+  )
+  .await
+  .map(Some)
+}
+
+/// 一台失败不影响其余的。
+pub async fn upgrade_each(
+  state: &AppState,
+  servers: &[String],
+  progress: ProgressFn,
+  cancel: &CancellationToken,
+) -> Result<(), ApiError> {
+  let mut failed = Vec::new();
+  for server in servers {
+    if cancel.is_cancelled() {
+      return Err(ApiError::new(ErrorCode::Cancelled, "已取消"));
+    }
+    progress(format!("升级 {server}"));
+    match upgrade(state, server, progress.clone(), cancel).await {
+      Ok(()) => progress(format!("✓ {server}")),
+      Err(e) => {
+        progress(format!("✗ {server}：{}", e.message));
+        failed.push(server.as_str());
+      }
+    }
+  }
+  if failed.is_empty() {
+    Ok(())
+  } else {
+    Err(ApiError::new(
+      ErrorCode::AgentFailed,
+      format!("{} 没有升级成功", failed.join("、")),
+    ))
+  }
+}
+
+/// 升级控制面时带上 `then_agents`：新控制面起来、agent 都连上后自己接着升级 agent。
+const AGENTS_AFTER_KEY: &str = "upgrade.agents_after";
+/// 新控制面启动后等 agent 重新连上的时间。
+const AGENTS_AFTER_DELAY: Duration = Duration::from_secs(60);
+
+/// 控制面启动时调用。
+pub fn spawn_agents_after(state: Arc<AppState>) {
+  tokio::spawn(async move {
+    tokio::time::sleep(AGENTS_AFTER_DELAY).await;
+    let flagged = state
+      .db
+      .call(|c| {
+        let v = crate::db::setting(c, AGENTS_AFTER_KEY)?;
+        if v.is_some() {
+          crate::db::set_setting(c, AGENTS_AFTER_KEY, None)?;
+        }
+        Ok(v)
+      })
+      .await;
+    match flagged {
+      // 升级失败时接班容器恢复的是旧控制面，构建号对不上就不升 agent。
+      Ok(Some(from)) if from != BUILD => {
+        if let Err(e) = start_outdated(&state).await {
+          tracing::warn!("升级控制面后接着升级 agent 失败：{e}");
+        }
+      }
+      Ok(_) => {}
+      Err(e) => tracing::warn!("读取升级标记失败：{e}"),
+    }
+  });
+}
+
+#[derive(serde::Deserialize, Default)]
+pub struct UpgradeCore {
+  #[serde(default)]
+  pub then_agents: bool,
+}
+
 /// `GET /api/version`
 pub async fn version(auth: Auth) -> ApiResult<Value> {
   auth.require(TokenScope::Read)?;
@@ -74,8 +181,10 @@ pub async fn version(auth: Auth) -> ApiResult<Value> {
 pub async fn upgrade_core(
   State(s): State<Arc<AppState>>,
   auth: Auth,
+  body: Option<Json<UpgradeCore>>,
 ) -> ApiResult<UpgradeResult> {
   auth.require(TokenScope::ApplyAll)?;
+  let then_agents = body.is_some_and(|b| b.then_agents);
   let id = std::fs::read_to_string("/proc/self/mountinfo")
     .ok()
     .and_then(|m| container_id(&m))
@@ -99,7 +208,7 @@ pub async fn upgrade_core(
     };
     match s
       .hub
-      .call(
+      .call::<UpgradeResult>(
         name,
         AgentOp::Upgrade(job),
         CORE_PULL_TIMEOUT,
@@ -108,7 +217,18 @@ pub async fn upgrade_core(
       )
       .await
     {
-      Ok(r) => return Ok(Json(r)),
+      Ok(r) => {
+        // 记下旧构建号：新控制面起来后据此判断是不是真的换了。
+        if then_agents && r.started {
+          let from = BUILD.to_string();
+          s.db
+            .call(move |c| {
+              crate::db::set_setting(c, AGENTS_AFTER_KEY, Some(&from))
+            })
+            .await?;
+        }
+        return Ok(Json(r));
+      }
       Err(e) if e.code == ErrorCode::NotFound => continue,
       Err(e) => return Err(e.into()),
     }
@@ -118,7 +238,7 @@ pub async fn upgrade_core(
       ErrorCode::AgentFailed,
       "找不到和控制面在同一台机器上、在线且是最新版本的 agent",
     )
-    .with_hint("先执行 wharf server upgrade --all")
+    .with_hint("先升级 agent：wharf server upgrade --all")
     .into(),
   )
 }

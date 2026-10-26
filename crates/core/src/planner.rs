@@ -164,6 +164,10 @@ pub enum Step {
   AgentUpgrade {
     server: String,
   },
+  /// 逐台升级 agent：一台失败不影响其余的，最后汇总报错。单独发起，不来自计划。
+  AgentUpgrades {
+    servers: Vec<String>,
+  },
   /// 停止服务的容器（配置没变，不重建）。
   ServiceStop {
     service: String,
@@ -209,6 +213,7 @@ impl Step {
       | Self::Restore { .. }
       | Self::Rebuild { .. }
       | Self::AgentUpgrade { .. }
+      | Self::AgentUpgrades { .. }
       | Self::Prune { .. }
       | Self::CoreBackup { .. }
       | Self::ServiceRestart { .. }

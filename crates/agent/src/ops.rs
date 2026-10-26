@@ -160,6 +160,12 @@ impl Ops {
         crate::upgrade::start(&self.docker, &job, ctx).await?,
       ),
       AgentOp::Prune => to_value(self.docker.prune(ctx).await?),
+      // 文件 IO 不长，但还是放到阻塞线程，不卡住连接。
+      AgentOp::Files(op) => {
+        tokio::task::spawn_blocking(move || crate::files::handle(op))
+          .await
+          .map_err(|e| ApiError::internal(e.to_string()))?
+      }
       AgentOp::HostInfo => {
         to_value(crate::host::info(&self.docker, ctx).await?)
       }

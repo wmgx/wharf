@@ -12,6 +12,7 @@ import { DomainChips, Field, PortsEditor, formatEnv, parseEnv } from "@/componen
 import { LogStream } from "@/components/LogStream";
 import { MetricsPanel } from "@/components/metrics";
 import { Backups } from "./service-backups";
+import { Files } from "./service-files";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -246,6 +247,7 @@ export function ServiceDetail() {
           <TabsTrigger value="metrics">资源</TabsTrigger>
           <TabsTrigger value="terminal">终端</TabsTrigger>
           <TabsTrigger value="history">部署历史</TabsTrigger>
+          <TabsTrigger value="files">文件</TabsTrigger>
           <TabsTrigger value="backups">备份</TabsTrigger>
           <TabsTrigger value="config">配置</TabsTrigger>
         </TabsList>
@@ -260,6 +262,9 @@ export function ServiceDetail() {
         </TabsContent>
         <TabsContent value="history" className="mt-3">
           <History name={name} />
+        </TabsContent>
+        <TabsContent value="files" className="mt-3">
+          <Files name={name} />
         </TabsContent>
         <TabsContent value="backups" className="mt-3">
           <Backups svc={svc} />

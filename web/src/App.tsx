@@ -10,6 +10,7 @@ import { Separator } from "./components/ui/separator";
 import { SidebarInset, SidebarProvider, SidebarTrigger } from "./components/ui/sidebar";
 import { Skeleton } from "./components/ui/skeleton";
 import { Toaster } from "./components/ui/sonner";
+import { announceUpgrade } from "./components/upgrade";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { Gateways } from "./pages/Gateways";
 import { Network } from "./pages/Network";
@@ -72,6 +73,7 @@ const TITLES: [string, string][] = [
 
 function Shell({ username, onLogout }: { username: string; onLogout: () => void }) {
   const { data: status, refresh } = usePoll<Status>("/api/status", 5000);
+  useEffect(announceUpgrade, []);
   const { pathname } = useLocation();
   const title = TITLES.find(([p]) => pathname.startsWith(p))?.[1] ?? "";
 

@@ -41,8 +41,8 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   try {
     resp = await fetch(path, {
       method,
-      headers: headers(body !== undefined),
-      body: body === undefined ? undefined : JSON.stringify(body),
+      headers: headers(body !== undefined && !(body instanceof Blob)),
+      body: body === undefined ? undefined : body instanceof Blob ? body : JSON.stringify(body),
     });
   } catch {
     throw new ApiError({ code: "Network", message: "连不上控制面，检查网络或控制面是否在运行" }, 0);
@@ -65,6 +65,8 @@ export const api = {
   get: <T,>(path: string) => request<T>("GET", path),
   post: <T,>(path: string, body: unknown) => request<T>("POST", path, body),
   put: <T,>(path: string, body: unknown) => request<T>("PUT", path, body),
+  /** 请求体是文件原样内容。 */
+  upload: <T,>(path: string, file: Blob) => request<T>("PUT", path, file),
   del: <T,>(path: string) => request<T>("DELETE", path),
   plan: (changes: Change[]) => request<Plan>("POST", "/api/plan", { changes }),
   apply: (plan_id: string, confirm: string[]) =>

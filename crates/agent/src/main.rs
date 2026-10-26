@@ -18,6 +18,7 @@ mod conn;
 mod docker;
 mod edge;
 mod exec;
+mod files;
 mod host;
 mod identity;
 mod metrics;

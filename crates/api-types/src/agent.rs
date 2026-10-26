@@ -245,6 +245,56 @@ pub enum AgentOp {
   Terminal(TerminalJob),
   /// 读宿主机的系统版本、待装更新、docker 和日志占用，结果是 [HostInfo]。只读。
   HostInfo,
+  /// 服务数据目录 `/srv/<service>/` 里的文件：列目录、分块读、分块写。
+  Files(FilesOp),
+}
+
+/// 路径都相对于 `/srv/<service>/`，不能跳出去（含符号链接）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum FilesOp {
+  /// 结果是 `Vec<FileEntry>`。
+  List { service: String, path: String },
+  /// 结果是 [FileChunk]。
+  Read {
+    service: String,
+    path: String,
+    offset: u64,
+    len: u32,
+  },
+  /// 写进临时文件，`last` 时换成正式文件（保留原文件或所在目录的属主）。
+  /// `offset` 为 0 时从头写。结果为空。
+  Write {
+    service: String,
+    path: String,
+    offset: u64,
+    /// base64。
+    data: String,
+    last: bool,
+  },
+}
+
+/// 分块传输的块大小：base64 后远小于 websocket 单帧上限。
+pub const FILE_CHUNK: u32 = 4 << 20;
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct FileEntry {
+  pub name: String,
+  pub dir: bool,
+  /// 符号链接（不跟进）。
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub link: bool,
+  pub size: u64,
+  /// 修改时间，毫秒。
+  pub modified: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileChunk {
+  /// base64。
+  pub data: String,
+  /// 文件总大小。
+  pub size: u64,
 }
 
 /// 服务器详情页的宿主机信息，打开页面时现查。

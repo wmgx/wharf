@@ -22,6 +22,7 @@ import type { Change, RollbackTarget, Run, ServiceView } from "@/types";
 import { BasicAuthDialog } from "./basic-auth";
 import { Picker, serverOptions } from "./fields";
 import { PlanFlow } from "./PlanFlow";
+import { upgradeWharf } from "./upgrade";
 
 interface FlowRequest {
   title: string;
@@ -54,6 +55,8 @@ interface Actions {
   move: (svc: ServiceView) => void;
   /** 设置登录保护账号。已有域名开了登录保护时，保存后生成更新网关的计划。 */
   basicAuth: () => void;
+  /** 确认后升级控制面和全部 agent。 */
+  upgrade: () => void;
   /** 打开一次已经开始的执行（备份、恢复），结束时提示。 */
   watch: (runId: string, title: string) => void;
 }
@@ -75,6 +78,7 @@ export function ActionsProvider({ children }: { children: ReactNode }) {
   const [removing, setRemoving] = useState<string | null>(null);
   const [moving, setMoving] = useState<ServiceView | null>(null);
   const [settingAuth, setSettingAuth] = useState(false);
+  const [upgrading, setUpgrading] = useState(false);
   const seq = useRef(0);
   // 正在执行的那次：关掉面板后继续在后台盯着，结束时弹提示。
   // 用 state 而不是 ref：apply 的返回可能晚于关面板，拿到 run_id 时也要能开始盯。
@@ -177,6 +181,7 @@ export function ActionsProvider({ children }: { children: ReactNode }) {
     remove: (name) => setRemoving(name),
     move: (svc) => setMoving(svc),
     basicAuth: () => setSettingAuth(true),
+    upgrade: () => setUpgrading(true),
     watch: (runId, title) => {
       setOpen({ key: ++seq.current, title, runId });
       setRunning({ runId, title });
@@ -242,6 +247,27 @@ export function ActionsProvider({ children }: { children: ReactNode }) {
       <RemoveDialog name={removing} onCancel={() => setRemoving(null)} onConfirm={confirmRemove} />
       <MoveDialog svc={moving} onCancel={() => setMoving(null)} onConfirm={confirmMove} />
       <BasicAuthDialog open={settingAuth} onClose={() => setSettingAuth(false)} onSaved={authSaved} />
+      <Dialog open={upgrading} onOpenChange={setUpgrading}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>升级 Wharf？</DialogTitle>
+            <DialogDescription>控制面会重启，页面断开一会儿</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setUpgrading(false)}>
+              取消
+            </Button>
+            <Button
+              onClick={() => {
+                setUpgrading(false);
+                upgradeWharf();
+              }}
+            >
+              升级
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Ctx.Provider>
   );
 }

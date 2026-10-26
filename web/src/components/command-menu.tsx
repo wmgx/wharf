@@ -1,4 +1,4 @@
-import { AnchorIcon, ArrowRightLeftIcon, BoxIcon, BoxesIcon, CloudIcon, HistoryIcon, LogOutIcon, MoonIcon, NetworkIcon, PlusIcon, RefreshCwIcon, ScrollTextIcon, SearchIcon, ServerIcon, SunIcon, Trash2Icon, WaypointsIcon } from "lucide-react";
+import { AnchorIcon, ArrowRightLeftIcon, ArrowUpCircleIcon, BoxIcon, BoxesIcon, CloudIcon, HistoryIcon, LogOutIcon, MoonIcon, NetworkIcon, PlusIcon, RefreshCwIcon, ScrollTextIcon, SearchIcon, ServerIcon, SunIcon, Trash2Icon, WaypointsIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
@@ -150,6 +150,10 @@ export function CommandMenu({ onLogout }: { onLogout: () => void }) {
             <CommandItem value="新建网关 new gateway" onSelect={() => run(() => nav("/gateways?new=1"))}>
               <PlusIcon />
               新建网关
+            </CommandItem>
+            <CommandItem value="升级 Wharf upgrade 控制面 agent" onSelect={() => run(actions.upgrade)}>
+              <ArrowUpCircleIcon />
+              升级 Wharf
             </CommandItem>
             <CommandItem value="切换主题 深色 浅色 theme" onSelect={() => run(toggle)}>
               {theme === "light" ? <MoonIcon /> : <SunIcon />}

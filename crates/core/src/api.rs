@@ -92,6 +92,10 @@ pub fn router(state: Arc<AppState>) -> Router {
     )
     .route("/api/servers", get(list_servers).post(add_server))
     .route(
+      "/api/servers/upgrade",
+      post(crate::agent_upgrade::upgrade_outdated),
+    )
+    .route(
       "/api/servers/{name}",
       get(show_server).delete(remove_server),
     )
@@ -118,6 +122,18 @@ pub fn router(state: Arc<AppState>) -> Router {
       get(crate::rollback::target),
     )
     .route("/api/services/{name}/deployments", get(deployments))
+    .route(
+      "/api/services/{name}/files",
+      get(crate::files_api::list)
+        .put(crate::files_api::upload)
+        .layer(axum::extract::DefaultBodyLimit::max(
+          crate::files_api::MAX_UPLOAD,
+        )),
+    )
+    .route(
+      "/api/services/{name}/files/download",
+      get(crate::files_api::download),
+    )
     .route(
       "/api/services/{name}/backups",
       get(crate::backup::list).post(crate::backup::run_now),

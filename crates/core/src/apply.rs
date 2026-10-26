@@ -609,6 +609,12 @@ async fn run_step(
       crate::agent_upgrade::upgrade(state, server, progress, cancel)
         .await?;
     }
+    Step::AgentUpgrades { servers } => {
+      crate::agent_upgrade::upgrade_each(
+        state, servers, progress, cancel,
+      )
+      .await?;
+    }
     Step::ServiceStop { service } => {
       let server = service_server(&snap, service)?;
       project_stop_start(

@@ -452,3 +452,12 @@ export interface HostInfo {
   journal?: number;
   var_log?: number;
 }
+
+export interface FileEntry {
+  name: string;
+  dir: boolean;
+  link?: boolean;
+  size: number;
+  /** 毫秒。 */
+  modified: number;
+}
