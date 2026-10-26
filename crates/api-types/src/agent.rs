@@ -606,6 +606,9 @@ pub struct PullPolicy {
   pub mirrors_only: bool,
   /// 每次 `docker pull` 的超时。
   pub attempt_timeout_secs: u64,
+  /// 拉代码、查 commit 时用的 HTTP 代理（服务器设置 `git_proxy`）。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub git_proxy: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

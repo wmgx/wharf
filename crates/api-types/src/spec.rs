@@ -48,6 +48,10 @@ pub struct ServerSettings {
   /// 构建时传给内置模板的参数，例如 `PIP_INDEX_URL`、`GOPROXY`（国内机器配镜像源）。
   #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
   pub build_env: BTreeMap<String, String>,
+  /// 拉代码、查 commit 时用的 HTTP 代理，例如 `http://<海外机器内网地址>:<端口>`。
+  /// 国内机器连不上 GitHub 时经海外机器转发；只用于 git，不影响构建和拉镜像。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub git_proxy: Option<String>,
   /// 接入方式（design 2.10）。不填按检测到的地址推断。`tailscale` 且没检测到 Tailscale 时
   /// 由 Wharf 装 Tailscale 容器并加入；`public` 不用内网地址，网关到这台一律走反向隧道。
   #[serde(default, skip_serializing_if = "Option::is_none")]

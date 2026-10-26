@@ -528,6 +528,7 @@ async fn server(
       mode,
       build_env,
       clear_build_env,
+      git_proxy,
       apply,
     } => {
       let current: ServerView =
@@ -573,6 +574,18 @@ async fn server(
       }
       if clear_build_env {
         settings.build_env.clear();
+      }
+      if let Some(p) = git_proxy {
+        let p = p.trim();
+        if !p.is_empty() && !p.starts_with("http://") {
+          return Err(
+            ApiError::invalid(format!(
+              "--git-proxy {p} 要以 http:// 开头"
+            ))
+            .into(),
+          );
+        }
+        settings.git_proxy = (!p.is_empty()).then(|| p.to_string());
       }
       for e in &build_env {
         let (k, v) = parse_kv(e, "--build-env")?;

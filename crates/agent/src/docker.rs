@@ -740,6 +740,7 @@ mod tests {
       ]),
       mirrors_only: only,
       attempt_timeout_secs: 60,
+      git_proxy: None,
     }
   }
 

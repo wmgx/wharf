@@ -164,6 +164,7 @@ pub fn pull_policy(server: &ServerRow) -> PullPolicy {
     mirrors: server.settings.registry_mirrors.clone(),
     mirrors_only: server.settings.mirrors_only,
     attempt_timeout_secs: PULL_ATTEMPT_SECS,
+    git_proxy: server.settings.git_proxy.clone(),
   }
 }
 

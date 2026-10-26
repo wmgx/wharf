@@ -269,6 +269,9 @@ pub enum ServerCmd {
     /// 清空构建参数。
     #[arg(long)]
     clear_build_env: bool,
+    /// 拉代码时用的 HTTP 代理，例如 `http://100.x.x.x:8118`（国内机器经海外机器连 GitHub）；传空字符串清除。
+    #[arg(long)]
+    git_proxy: Option<String>,
     #[command(flatten)]
     apply: ApplyFlags,
   },

@@ -190,6 +190,7 @@ pub async fn fetch_code(
         repo,
         reference,
         token.as_ref().map(|t| t.0.as_str()),
+        pull.git_proxy.as_deref(),
         &src,
         ctx,
       )
@@ -392,16 +393,23 @@ fn download_err(detail: &str) -> ApiError {
 }
 
 /// 在临时容器里浅克隆到 `src`，返回 commit。
+#[allow(clippy::too_many_arguments)]
 async fn clone(
   docker: &Docker,
   service: &str,
   repo: &str,
   reference: &str,
   token: Option<&str>,
+  proxy: Option<&str>,
   src: &Path,
   ctx: &Ctx,
 ) -> Result<String, ApiError> {
-  ctx.say(format!("拉取代码 {repo} @ {reference}"));
+  match proxy {
+    Some(p) => {
+      ctx.say(format!("拉取代码 {repo} @ {reference}（经代理 {p}）"))
+    }
+    None => ctx.say(format!("拉取代码 {repo} @ {reference}")),
+  }
   let name = format!("wharf-git-{service}");
   remove_container(docker, &name).await;
   // GitHub 等用 `x-access-token:<token>` 的 basic 认证。
@@ -422,11 +430,20 @@ rm -rf .git"#;
     .args(["run", "--rm", "--name", &name, "--network", "host"])
     .args(["-v", &format!("{}:/git", src.display()), "-w", "/git"])
     .args(["-e", "REPO", "-e", "REF", "-e", "GIT_TOKEN"])
-    .args(["-e", "GIT_TERMINAL_PROMPT=0"])
+    .args([
+      "-e",
+      "GIT_TERMINAL_PROMPT=0",
+      "-e",
+      "HTTPS_PROXY",
+      "-e",
+      "HTTP_PROXY",
+    ])
     .args(["--entrypoint", "sh", GIT_IMAGE, "-c", script])
     .env("REPO", repo)
     .env("REF", reference)
     .env("GIT_TOKEN", token.unwrap_or_default())
+    .env("HTTPS_PROXY", proxy.unwrap_or_default())
+    .env("HTTP_PROXY", proxy.unwrap_or_default())
     .timeout(CLONE_TIMEOUT)
     .run(ctx)
     .await;
@@ -487,13 +504,28 @@ fi"#;
     .cmd()
     .args(["run", "--rm", "--name", &name, "--network", "host"])
     .args(["-e", "REPO", "-e", "REF", "-e", "GIT_TOKEN"])
-    .args(["-e", "GIT_TERMINAL_PROMPT=0"])
+    .args([
+      "-e",
+      "GIT_TERMINAL_PROMPT=0",
+      "-e",
+      "HTTPS_PROXY",
+      "-e",
+      "HTTP_PROXY",
+    ])
     .args(["--entrypoint", "sh", GIT_IMAGE, "-c", script])
     .env("REPO", repo)
     .env("REF", reference)
     .env(
       "GIT_TOKEN",
       token.as_ref().map(|t| t.0.as_str()).unwrap_or_default(),
+    )
+    .env(
+      "HTTPS_PROXY",
+      job.pull.git_proxy.as_deref().unwrap_or_default(),
+    )
+    .env(
+      "HTTP_PROXY",
+      job.pull.git_proxy.as_deref().unwrap_or_default(),
     )
     .timeout(LS_REMOTE_TIMEOUT)
     .run(ctx)
