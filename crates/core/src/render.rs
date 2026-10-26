@@ -194,7 +194,7 @@ pub fn build_image(
 
 /// 构建来源模板里的 `$PORT`：第一个端口，没有端口时 8080。
 pub fn build_port(ports: &[PortSpec]) -> u16 {
-  ports.first().map_or(8080, |p| p.port)
+  ports.first().and_then(|p| p.container).unwrap_or(8080)
 }
 
 /// 服务的 compose 文件。image 来源自动生成；compose 来源原样使用。
@@ -224,12 +224,14 @@ pub fn service_compose(
       }
       let mut ports = Vec::new();
       for port in &spec.ports {
-        let Some(host) = host_ports.get(&port.name) else {
+        let (Some(host), Some(container)) =
+          (host_ports.get(&port.name), port.container)
+        else {
           continue;
         };
-        ports.push(format!("127.0.0.1:{host}:{}", port.port));
+        ports.push(format!("127.0.0.1:{host}:{container}"));
         if let Some(ip) = private_ip {
-          ports.push(format!("{ip}:{host}:{}", port.port));
+          ports.push(format!("{ip}:{host}:{container}"));
         }
       }
       let volumes = spec
@@ -615,8 +617,8 @@ mod tests {
       source: Source::Image("traefik/whoami".into()),
       ports: vec![PortSpec {
         name: "http".into(),
-        port: 80,
-        host_port: None,
+        container: Some(80),
+        host: None,
       }],
       env: BTreeMap::from([
         ("A".to_string(), "x$y".to_string()),

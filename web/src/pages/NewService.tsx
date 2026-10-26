@@ -5,7 +5,7 @@ import { usePoll } from "@/api";
 import { useActions } from "@/components/actions";
 import { BuildEditor, type BuildHow, cleanHow, howReady } from "@/components/build-editor";
 import { EntryField, useEntry } from "@/components/entry";
-import { DomainChips, Field, Picker, PortsEditor, Segmented, nameFromImage, parseEnv, serverOptions, toName } from "@/components/fields";
+import { DomainChips, Field, Picker, PortsEditor, Segmented, portsFor, portsValid, nameFromImage, parseEnv, serverOptions, toName } from "@/components/fields";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
@@ -80,7 +80,7 @@ function Form({ onClose }: { onClose: () => void }) {
   const [nameTouched, setNameTouched] = useState(draft?.nameTouched ?? false);
   const servers = status?.servers ?? [];
   const [server, setServer] = useState(draft?.server ?? "");
-  const [ports, setPorts] = useState<PortSpec[]>(draft?.ports ?? [{ name: "http", port: 80 }]);
+  const [ports, setPorts] = useState<PortSpec[]>(draft?.ports ?? [{ name: "http", container: 80 }]);
   const [envText, setEnvText] = useState(draft?.envText ?? "");
   const [hostname, setHostname] = useState(draft?.hostname ?? "");
 
@@ -106,7 +106,7 @@ function Form({ onClose }: { onClose: () => void }) {
 
   const source = kind === "image" ? image.trim() : kind === "git" ? repo.trim() : compose.trim();
   const repoOk = kind !== "git" || (/^https:\/\/[^\s@]+$/.test(repo.trim()) && !!gitRef.trim() && howReady(how));
-  const portsOk = ports.every((p) => p.name && p.port > 0 && p.port < 65536);
+  const portsOk = portsValid(ports, kind === "compose");
   const ready = !!svcName && !!source && repoOk && !!chosenServer && portsOk && (!hostname.trim() || entry.ready);
   const withEnv = kind !== "compose";
 
@@ -119,7 +119,7 @@ function Form({ onClose }: { onClose: () => void }) {
           : kind === "git"
             ? { build: { git: { repo: source.replace(/\/+$/, ""), ref: gitRef.trim() }, path: path.trim() || undefined, ...cleanHow(how) } }
             : { compose: { content: source } },
-      ports: ports.length ? ports : undefined,
+      ports: ports.length ? portsFor(ports, kind === "compose") : undefined,
       env: withEnv && envText.trim() ? parseEnv(envText) : undefined,
     };
     const changes: Change[] = [{ op: "upsert_service", name: svcName, spec }];
@@ -141,8 +141,9 @@ function Form({ onClose }: { onClose: () => void }) {
             onChange={(k) => {
               setKind(k);
               // 端口还是默认值时，换成这种来源常用的端口。
-              const untouched = ports.length === 1 && ports[0].name === "http" && [80, 8080].includes(ports[0].port);
-              if (untouched) setPorts([{ name: "http", port: k === "git" ? 8080 : 80 }]);
+              const untouched = ports.length === 1 && ports[0].name === "http" && !ports[0].host && [80, 8080].includes(ports[0].container ?? 0);
+              if (untouched && k !== "compose") setPorts([{ name: "http", container: k === "git" ? 8080 : 80 }]);
+              if (untouched && k === "compose") setPorts([]);
             }}
             options={[
               ["image", "镜像"],
@@ -206,7 +207,7 @@ function Form({ onClose }: { onClose: () => void }) {
         <Field
           label="端口"
         >
-          <PortsEditor ports={ports} onChange={setPorts} />
+          <PortsEditor ports={ports} onChange={setPorts} compose={kind === "compose"} />
         </Field>
 
         {withEnv && (

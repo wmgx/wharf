@@ -74,8 +74,10 @@ export type Source =
 
 export interface PortSpec {
   name: string;
-  port: number;
-  host_port?: number;
+  /** 容器内端口。image / build 来源必填，compose 来源不填。 */
+  container?: number;
+  /** 宿主机端口。compose 来源必填；其余来源不填时自动分配。 */
+  host?: number;
 }
 
 export interface VolumeSpec {

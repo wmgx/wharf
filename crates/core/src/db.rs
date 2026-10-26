@@ -198,7 +198,47 @@ CREATE TABLE points (
 ) WITHOUT ROWID;
 CREATE INDEX points_at ON points (at);
 "#,
+  PORTS_MIGRATION,
 ];
+
+/// 端口字段 `{port, host_port}` 改成 `{container, host}`：旧的 `port` 在 compose 来源里
+/// 是宿主机端口，其余来源是容器端口。服务配置和部署历史（回滚用）都转换；
+/// 没执行的计划里是旧格式，直接删掉，用户重新 plan。
+const PORTS_MIGRATION: &str = r#"
+UPDATE resources SET spec = json_set(spec, '$.ports', (
+  SELECT json_group_array(json(x)) FROM (
+    SELECT CASE
+      WHEN json_type(resources.spec, '$.source.compose') IS NOT NULL
+        THEN json_object('name', json_extract(p.value, '$.name'),
+                         'host', json_extract(p.value, '$.port'))
+      WHEN json_extract(p.value, '$.host_port') IS NOT NULL
+        THEN json_object('name', json_extract(p.value, '$.name'),
+                         'container', json_extract(p.value, '$.port'),
+                         'host', json_extract(p.value, '$.host_port'))
+      ELSE json_object('name', json_extract(p.value, '$.name'),
+                       'container', json_extract(p.value, '$.port'))
+    END AS x
+    FROM json_each(resources.spec, '$.ports') p ORDER BY p.key)))
+WHERE kind = 'service' AND json_array_length(spec, '$.ports') > 0;
+
+UPDATE deployments SET spec = json_set(spec, '$.ports', (
+  SELECT json_group_array(json(x)) FROM (
+    SELECT CASE
+      WHEN json_type(deployments.spec, '$.source.compose') IS NOT NULL
+        THEN json_object('name', json_extract(p.value, '$.name'),
+                         'host', json_extract(p.value, '$.port'))
+      WHEN json_extract(p.value, '$.host_port') IS NOT NULL
+        THEN json_object('name', json_extract(p.value, '$.name'),
+                         'container', json_extract(p.value, '$.port'),
+                         'host', json_extract(p.value, '$.host_port'))
+      ELSE json_object('name', json_extract(p.value, '$.name'),
+                       'container', json_extract(p.value, '$.port'))
+    END AS x
+    FROM json_each(deployments.spec, '$.ports') p ORDER BY p.key)))
+WHERE spec IS NOT NULL AND json_array_length(spec, '$.ports') > 0;
+
+DELETE FROM plans WHERE status = 'pending';
+"#;
 
 pub fn setting(
   c: &Connection,
@@ -883,6 +923,72 @@ pub fn deployed_servers(
 
 #[cfg(test)]
 mod tests {
+  #[test]
+  fn ports_migration() {
+    let c = Connection::open_in_memory().unwrap();
+    c.execute_batch(
+      "CREATE TABLE resources (kind TEXT, name TEXT, spec TEXT);
+       CREATE TABLE deployments (spec TEXT);
+       CREATE TABLE plans (status TEXT);
+       INSERT INTO plans VALUES ('pending'), ('applied');",
+    )
+    .unwrap();
+    let old = [
+      r#"{"server":"a","source":{"compose":{"content":"x"}},"ports":[{"name":"http","port":41773}]}"#,
+      r#"{"server":"a","source":{"image":"nginx"},"ports":[{"name":"http","port":80,"host_port":20080},{"name":"admin","port":81}]}"#,
+      r#"{"server":"a","source":{"image":"nginx"}}"#,
+    ];
+    for spec in old {
+      c.execute(
+        "INSERT INTO resources VALUES ('service', 'x', ?1)",
+        [spec],
+      )
+      .unwrap();
+      c.execute("INSERT INTO deployments VALUES (?1)", [spec])
+        .unwrap();
+    }
+    c.execute("INSERT INTO deployments VALUES (NULL)", [])
+      .unwrap();
+    c.execute_batch(PORTS_MIGRATION).unwrap();
+    for table in ["resources", "deployments"] {
+      let specs: Vec<Option<String>> = c
+        .prepare(&format!("SELECT spec FROM {table} ORDER BY rowid"))
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+      let ports = |i: usize| {
+        let v: serde_json::Value =
+          serde_json::from_str(specs[i].as_deref().unwrap()).unwrap();
+        v["ports"].clone()
+      };
+      assert_eq!(
+        ports(0),
+        serde_json::json!([{"name": "http", "host": 41773}])
+      );
+      assert_eq!(
+        ports(1),
+        serde_json::json!([
+          {"name": "http", "container": 80, "host": 20080},
+          {"name": "admin", "container": 81}
+        ])
+      );
+      assert!(ports(2).is_null());
+      // 转换后能按新格式读出来。
+      for spec in specs.iter().flatten() {
+        serde_json::from_str::<wharf_api_types::spec::ServiceSpec>(
+          spec,
+        )
+        .unwrap();
+      }
+    }
+    let plans: i64 = c
+      .query_row("SELECT COUNT(*) FROM plans", [], |r| r.get(0))
+      .unwrap();
+    assert_eq!(plans, 1);
+  }
+
   use super::*;
   use serde_json::json;
 

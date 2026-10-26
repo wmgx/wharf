@@ -8,7 +8,7 @@ import { BuildEditor, type BuildHow, cleanHow, howOf, howReady } from "@/compone
 import { Checkbox } from "@/components/ui/checkbox";
 import { CodeBlock, Dot, Empty, ErrorNote, Notice, PageHeader, ServerTag, StatusBadge, ago, serviceTone, sourceLabel } from "@/components/common";
 import { EntryField, useEntry } from "@/components/entry";
-import { DomainChips, Field, PortsEditor, formatEnv, parseEnv } from "@/components/fields";
+import { DomainChips, Field, PortsEditor, formatEnv, parseEnv, portsFor } from "@/components/fields";
 import { LogStream } from "@/components/LogStream";
 import { MetricsPanel } from "@/components/metrics";
 import { Backups } from "./service-backups";
@@ -347,6 +347,7 @@ function EditForm({ svc, onClose }: { svc: ServiceView; onClose: () => void }) {
   const actions = useActions();
   const src = svc.spec.source;
   const isImage = "image" in src;
+  const isCompose = "compose" in src;
   const build = "build" in src ? src.build : null;
   const [image, setImage] = useState(isImage ? src.image : "");
   const [compose, setCompose] = useState("compose" in src ? (src.compose.content ?? "") : "");
@@ -370,7 +371,7 @@ function EditForm({ svc, onClose }: { svc: ServiceView; onClose: () => void }) {
               },
             }
           : { compose: { content: compose } },
-      ports,
+      ports: portsFor(ports, isCompose),
       env: isImage || build ? parseEnv(envText) : svc.spec.env,
     };
     onClose();
@@ -403,7 +404,7 @@ function EditForm({ svc, onClose }: { svc: ServiceView; onClose: () => void }) {
         )}
         {build && <BuildEditor value={how} onChange={setHow} />}
         <Field label="端口">
-          <PortsEditor ports={ports} onChange={setPorts} />
+          <PortsEditor ports={ports} onChange={setPorts} compose={isCompose} />
         </Field>
         {(isImage || build) && (
           <Field label="环境变量" htmlFor="env">

@@ -74,26 +74,41 @@ export function Segmented<T extends string>({ value, options, onChange }: { valu
   );
 }
 
-export function PortsEditor({ ports, onChange }: { ports: PortSpec[]; onChange: (p: PortSpec[]) => void }) {
+const portOk = (n?: number) => n != null && n > 0 && n < 65536;
+
+/** compose 来源只有宿主机端口；其余来源容器端口必填、宿主机端口选填。 */
+export function portsValid(ports: PortSpec[], compose: boolean): boolean {
+  return ports.every((p) => p.name && (compose ? portOk(p.host) : portOk(p.container) && (p.host == null || portOk(p.host))));
+}
+
+/** 提交前按来源去掉另一侧：切换来源时填过的值不带过去。 */
+export function portsFor(ports: PortSpec[], compose: boolean): PortSpec[] {
+  return ports.map((p) => (compose ? { name: p.name, host: p.host ?? p.container } : { name: p.name, container: p.container, host: p.host }));
+}
+
+const num = (v: string) => (v === "" ? undefined : Number(v));
+
+export function PortsEditor({ ports, onChange, compose = false }: { ports: PortSpec[]; onChange: (p: PortSpec[]) => void; compose?: boolean }) {
   const set = (i: number, patch: Partial<PortSpec>) => onChange(ports.map((p, j) => (j === i ? { ...p, ...patch } : p)));
   return (
     <div className="grid gap-2">
       {ports.map((p, i) => (
         <div className="flex gap-2" key={i}>
           <Input placeholder="名称，例如 http" value={p.name} onChange={(e) => set(i, { name: toName(e.target.value) })} />
-          <Input type="number" placeholder="容器端口" value={p.port || ""} onChange={(e) => set(i, { port: Number(e.target.value) })} />
+          {compose ? (
+            <Input type="number" placeholder="宿主机端口" value={p.host ?? p.container ?? ""} onChange={(e) => set(i, { host: num(e.target.value), container: undefined })} />
+          ) : (
+            <>
+              <Input type="number" placeholder="容器端口" value={p.container ?? ""} onChange={(e) => set(i, { container: num(e.target.value) })} />
+              <Input type="number" placeholder="宿主机端口（自动）" value={p.host ?? ""} onChange={(e) => set(i, { host: num(e.target.value) })} />
+            </>
+          )}
           <Button type="button" variant="ghost" size="icon" aria-label="移除端口" onClick={() => onChange(ports.filter((_, j) => j !== i))}>
             <XIcon />
           </Button>
         </div>
       ))}
-      <Button
-        type="button"
-        variant="outline"
-        size="sm"
-        className="w-fit"
-        onClick={() => onChange([...ports, { name: ports.length ? `p${ports.length + 1}` : "http", port: 0 }])}
-      >
+      <Button type="button" variant="outline" size="sm" className="w-fit" onClick={() => onChange([...ports, { name: ports.length ? `p${ports.length + 1}` : "http" }])}>
         <PlusIcon />
         端口
       </Button>

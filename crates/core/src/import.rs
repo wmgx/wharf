@@ -183,8 +183,8 @@ fn port_specs(mut ports: Vec<u16>) -> Vec<PortSpec> {
       } else {
         format!("p{port}")
       },
-      port,
-      host_port: None,
+      container: None,
+      host: Some(port),
     })
     .collect()
 }
@@ -531,7 +531,7 @@ volumes:
   fn compose_same_name_keeps_project() {
     let c = from_compose(CONFIG, "blog", "blog").unwrap();
     assert_eq!(c.adopt, Some(AdoptSpec::default()));
-    assert_eq!(c.ports[0].port, 8080);
+    assert_eq!(c.ports[0].host, Some(8080));
     assert!(c.compose.contains("image: blog-web"));
     assert!(!c.compose.contains("build"));
     crate::render::check_compose("blog", &c.compose).unwrap();
@@ -580,7 +580,7 @@ volumes:
     assert_eq!(svc["ports"][0], key("41773:3000"));
     assert_eq!(svc["volumes"][0], key("/srv/p:/config"));
     assert_eq!(svc["restart"], key("unless-stopped"));
-    assert_eq!(c.ports[0].port, 41773);
+    assert_eq!(c.ports[0].host, Some(41773));
     assert_eq!(
       c.adopt.unwrap().containers,
       vec!["pairdrop".to_string()]

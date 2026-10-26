@@ -628,7 +628,7 @@ impl World {
     let mut take = |server: &str, port: u16| {
       used.entry(server.to_string()).or_default().insert(port)
     };
-    // 第一轮：固定端口（compose 来源、显式 host_port）和已有分配。
+    // 第一轮：固定端口（填了 host 的）和已有分配。
     let names: Vec<String> = self.services.keys().cloned().collect();
     let mut pending: Vec<(String, String)> = Vec::new();
     for name in &names {
@@ -636,10 +636,7 @@ impl World {
       let server = service.spec.server.clone();
       let mut assigned = BTreeMap::new();
       for port in &service.spec.ports {
-        let fixed = match service.spec.source {
-          Source::Compose { .. } => Some(port.port),
-          Source::Image(_) | Source::Build(_) => port.host_port,
-        };
+        let fixed = port.host;
         let chosen = fixed
           .or_else(|| service.host_ports.get(&port.name).copied());
         match chosen {
@@ -967,17 +964,32 @@ fn validate_service(
         port.name
       )));
     }
-    if port.port == 0 {
+    let p = &port.name;
+    if port.container == Some(0) || port.host == Some(0) {
       return Err(ApiError::invalid(format!(
-        "服务 {name} 的端口不能是 0"
+        "服务 {name} 的端口 {p} 不能是 0"
       )));
     }
-    if port.host_port.is_some()
-      && matches!(spec.source, Source::Compose { .. })
-    {
-      return Err(ApiError::invalid(format!(
-        "服务 {name}：compose 来源的 port 就是宿主机端口，不需要 host_port"
-      )));
+    match spec.source {
+      Source::Compose { .. } => {
+        if port.container.is_some() {
+          return Err(ApiError::invalid(format!(
+            "服务 {name} 的端口 {p}：compose 来源只填宿主机端口 host，容器端口写在 compose 里"
+          )));
+        }
+        if port.host.is_none() {
+          return Err(ApiError::invalid(format!(
+            "服务 {name} 的端口 {p}：compose 来源要填 compose 里发布的宿主机端口 host"
+          )));
+        }
+      }
+      Source::Image(_) | Source::Build(_) => {
+        if port.container.is_none() {
+          return Err(ApiError::invalid(format!(
+            "服务 {name} 的端口 {p}：要填容器内端口 container"
+          )));
+        }
+      }
     }
   }
   let mut volume_names = BTreeSet::new();
@@ -1045,8 +1057,8 @@ mod tests {
       source: Source::Image("traefik/whoami".into()),
       ports: vec![PortSpec {
         name: "http".into(),
-        port: 80,
-        host_port: None,
+        container: Some(80),
+        host: None,
       }],
       env: Default::default(),
       volumes: vec![],

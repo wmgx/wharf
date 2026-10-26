@@ -61,7 +61,7 @@ registry_mirrors = { "docker.io" = ["docker.1ms.run"] }
 [services.whoami]
 server = "node1"
 source = { image = "traefik/whoami" }
-ports = [{ name = "http", port = 80 }]
+ports = [{ name = "http", container = 80 }]
 
 [services.blog]
 server = "node1"

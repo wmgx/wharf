@@ -379,7 +379,7 @@ pub enum ServiceCmd {
     #[arg(long)]
     server: Option<String>,
     /// 端口：`名字=容器端口` 或 `名字=容器端口:宿主机端口`，可以多次使用。
-    /// compose 来源写 `名字=宿主机端口`。给出后替换全部端口。
+    /// compose 来源只有宿主机端口，写 `名字=:宿主机端口`。给出后替换全部端口。
     #[arg(long)]
     port: Vec<String>,
     /// 环境变量 `KEY=VALUE`，值里可以用 `[[SECRET]]`。可以多次使用。

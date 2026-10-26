@@ -491,7 +491,7 @@ mod tests {
       |v: serde_json::Value| serde_json::from_value(v).unwrap();
     w.apply_changes(&[
       from(json!({"op": "upsert_gateway", "name": "edge", "spec": {"kind": "caddy", "server": "edge1", "default": true}})),
-      from(json!({"op": "upsert_service", "name": "app", "spec": {"server": "home1", "source": {"image": "traefik/whoami"}, "ports": [{"name": "http", "port": 80}]}})),
+      from(json!({"op": "upsert_service", "name": "app", "spec": {"server": "home1", "source": {"image": "traefik/whoami"}, "ports": [{"name": "http", "container": 80}]}})),
       from(json!({"op": "upsert_route", "spec": {"hostname": "app.example.com", "service": "app"}})),
     ] as &[Change])
     .unwrap();

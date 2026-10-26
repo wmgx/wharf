@@ -214,11 +214,13 @@ pub struct GitSource {
 pub struct PortSpec {
   /// 端口名，路由用它指定目标端口，例如 `http`。
   pub name: String,
-  /// image 来源：容器内端口；compose 来源：compose 里已经发布的宿主机端口。
-  pub port: u16,
-  /// 仅 image 来源：指定宿主机端口。不填则由系统从 20000 起自动分配。
+  /// 容器内端口。image / build 来源必填；compose 来源不填（映射写在 compose 里）。
   #[serde(default, skip_serializing_if = "Option::is_none")]
-  pub host_port: Option<u16>,
+  pub container: Option<u16>,
+  /// 宿主机端口。compose 来源必填（compose 里已经发布的端口）；
+  /// image / build 来源选填，不填由系统从 20000 起自动分配。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub host: Option<u16>,
 }
 
 /// 目录挂载：宿主机 `/srv/<service>/<name>/` 挂到容器内 `target`。

@@ -750,17 +750,22 @@ fn parse_port(s: &str) -> CliResult<PortSpec> {
   let (name, value) = parse_kv(s, "--port")?;
   let bad = || {
     ApiError::invalid(format!(
-      "--port {s} 格式不对，应为 http=80 或 http=80:20080"
+      "--port {s} 格式不对，应为 http=80、http=80:20080，compose 来源写 http=:41773"
     ))
   };
   let (port, host) = match value.split_once(':') {
     Some((p, h)) => (p, Some(h)),
     None => (value.as_str(), None),
   };
+  // compose 来源只有宿主机端口，写成 `http=:41773`。
+  let container = match port.trim() {
+    "" => None,
+    p => Some(p.parse().map_err(|_| bad())?),
+  };
   Ok(PortSpec {
     name,
-    port: port.trim().parse().map_err(|_| bad())?,
-    host_port: host
+    container,
+    host: host
       .map(|h| h.trim().parse())
       .transpose()
       .map_err(|_| bad())?,
@@ -997,7 +1002,7 @@ async fn service(
         .first()
         .map(|p| parse_port(p))
         .transpose()?
-        .map(|p| p.port);
+        .and_then(|p| p.container);
       let built = crate::deploy::source(
         c,
         &name,
@@ -1061,8 +1066,8 @@ async fn service(
       } else if let (true, Some(p)) = (is_new, default_port) {
         spec.ports = vec![PortSpec {
           name: "http".into(),
-          port: p,
-          host_port: None,
+          container: Some(p),
+          host: None,
         }];
       }
       for e in &env {
@@ -1631,11 +1636,13 @@ mod tests {
   fn ports() {
     let p = parse_port("http=80").unwrap();
     assert_eq!(
-      (p.name.as_str(), p.port, p.host_port),
-      ("http", 80, None)
+      (p.name.as_str(), p.container, p.host),
+      ("http", Some(80), None)
     );
     let p = parse_port("http=80:20080").unwrap();
-    assert_eq!(p.host_port, Some(20080));
+    assert_eq!((p.container, p.host), (Some(80), Some(20080)));
+    let p = parse_port("http=:41773").unwrap();
+    assert_eq!((p.container, p.host), (None, Some(41773)));
     assert!(parse_port("http").is_err());
     assert!(parse_port("http=x").is_err());
   }
