@@ -909,17 +909,15 @@ async fn run_step(
       existing,
       extra,
     } => {
-      let route = world.routes.get(hostname).ok_or_else(|| {
+      let owner_id = world.dns_owner(hostname).ok_or_else(|| {
         ApiError::new(
           ErrorCode::PlanStale,
-          format!("路由 {hostname} 已不存在"),
+          format!("域名 {hostname} 已经没有路由或边缘应用使用"),
         )
       })?;
       let account_row = find_account(&snap, account)?;
       let provider = snapshot::dns_provider(account_row)?;
-      let owner = Owner {
-        id: route.id.clone(),
-      };
+      let owner = Owner { id: owner_id };
       let spec = match &spec.tunnel {
         Some(gateway) => {
           let t = snap.tunnels.get(gateway).ok_or_else(|| {
@@ -962,7 +960,7 @@ async fn run_step(
       .await?;
       add_owned(
         state,
-        &route.id,
+        &owner.id,
         hostname,
         account,
         &record.scope,

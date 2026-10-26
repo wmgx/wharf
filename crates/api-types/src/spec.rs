@@ -373,7 +373,7 @@ impl GatewayTls {
 pub struct RouteSpec {
   /// 例如 `blog.example.com`。
   pub hostname: String,
-  /// 目标服务或边缘应用。和 `upstream` 二选一。
+  /// 目标服务。和 `upstream` 二选一。边缘应用的域名写在边缘应用的 `domains` 里。
   #[serde(default, skip_serializing_if = "String::is_empty")]
   pub service: String,
   /// 不归 Wharf 管的上游，写网关所在机器能访问到的 `主机:端口`，例如 `127.0.0.1:7700`。
@@ -513,6 +513,9 @@ pub struct EdgeAppSpec {
   /// 在哪台服务器上执行 wrangler（构建 Pages、发布 wrangler 项目）。不填时自动选，优先海外。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub builder: Option<String>,
+  /// 绑定的自定义域名，不经过网关。Worker 的 DNS 由 Cloudflare 管；Pages 由 Wharf 写 CNAME。
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub domains: Vec<String>,
 }
 
 impl EdgeAppSpec {

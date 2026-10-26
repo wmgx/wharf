@@ -15,7 +15,7 @@ use wharf_api_types::{
   spec::{Change, EdgeAppSpec, EdgeKind, EdgeSource, GitSource},
   view::{
     AccountView, EdgeAppView, EdgeProjectView, EdgeScript,
-    EdgeVersionView, RouteView,
+    EdgeVersionView,
   },
 };
 
@@ -143,6 +143,27 @@ pub enum EdgeCmd {
     #[command(flatten)]
     apply: ApplyFlags,
   },
+  /// 自定义域名：不经过网关，直接绑定到 Worker / Pages。
+  #[command(subcommand)]
+  Domain(DomainCmd),
+}
+
+#[derive(Subcommand)]
+pub enum DomainCmd {
+  /// 绑定域名。
+  Add {
+    name: String,
+    hostname: String,
+    #[command(flatten)]
+    apply: ApplyFlags,
+  },
+  /// 解绑域名。
+  Remove {
+    name: String,
+    hostname: String,
+    #[command(flatten)]
+    apply: ApplyFlags,
+  },
 }
 
 pub async fn edge(
@@ -232,6 +253,7 @@ pub async fn edge(
         project: (name != project).then_some(project),
         source: None,
         builder: None,
+        domains: Vec::new(),
       };
       let applied = apply.apply;
       changes(
@@ -353,6 +375,7 @@ pub async fn edge(
         source: Some(source),
         builder: server
           .or_else(|| base.as_ref().and_then(|b| b.builder.clone())),
+        domains: base.map(|b| b.domains).unwrap_or_default(),
       };
       changes(c, vec![Change::UpsertEdgeApp { name, spec }], apply, j)
         .await
@@ -401,17 +424,36 @@ pub async fn edge(
       Ok(())
     }
     EdgeCmd::Rm { name, apply } => {
-      // 指向它的域名一起移除。
-      let routes: Vec<RouteView> = c.get("/api/routes").await?;
-      let mut list: Vec<Change> = routes
-        .into_iter()
-        .filter(|r| r.spec.service == name)
-        .map(|r| Change::RemoveRoute {
-          hostname: r.spec.hostname,
-        })
-        .collect();
-      list.push(Change::RemoveEdgeApp { name });
-      changes(c, list, apply, j).await
+      changes(c, vec![Change::RemoveEdgeApp { name }], apply, j).await
+    }
+    EdgeCmd::Domain(cmd) => {
+      let (name, hostname, add, apply) = match cmd {
+        DomainCmd::Add {
+          name,
+          hostname,
+          apply,
+        } => (name, hostname, true, apply),
+        DomainCmd::Remove {
+          name,
+          hostname,
+          apply,
+        } => (name, hostname, false, apply),
+      };
+      let v: EdgeAppView =
+        c.get(&format!("/api/edge/{}", seg(&name))).await?;
+      let hostname = hostname.trim().to_lowercase();
+      let mut spec = v.spec;
+      let has = spec.domains.contains(&hostname);
+      if add && !has {
+        spec.domains.push(hostname);
+      } else if !add && has {
+        spec.domains.retain(|d| *d != hostname);
+      } else if !j {
+        println!("没有变化");
+        return Ok(());
+      }
+      changes(c, vec![Change::UpsertEdgeApp { name, spec }], apply, j)
+        .await
     }
   }
 }

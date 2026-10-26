@@ -256,14 +256,14 @@ export function ServiceDetail() {
             <CardTitle className="text-sm font-medium text-muted-foreground">容器</CardTitle>
           </CardHeader>
           <CardContent className="grid gap-2.5 px-5 text-sm">
-            {svc.live?.containers?.map((c) => (
+            {svc.containers?.map((c) => (
               <div key={c.name} className="flex items-center gap-3">
                 <span className="w-24 truncate text-muted-foreground">{c.service}</span>
                 <Dot tone={c.state === "running" ? "ok" : "bad"} />
                 <span>{c.status || c.state}</span>
               </div>
             ))}
-            {!svc.live?.containers?.length && <span className="text-muted-foreground">{svc.live?.error ?? "没有容器"}</span>}
+            {!svc.containers?.length && <span className="text-muted-foreground">{svc.status?.error ?? "没有容器"}</span>}
           </CardContent>
         </Card>
       </div>
@@ -545,7 +545,7 @@ function AddRoute({ service, open, onClose }: { service: string; open: boolean; 
 
 /** 只有打开这个标签时才连接；多个容器时可以选。 */
 function TerminalTab({ svc }: { svc: ServiceView }) {
-  const running = [...new Set((svc.live?.containers ?? []).filter((c) => c.state === "running").map((c) => c.service))];
+  const running = [...new Set((svc.containers ?? []).filter((c) => c.state === "running").map((c) => c.service))];
   const [service, setService] = useState<string | undefined>(undefined);
   if (running.length === 0) return <Empty>没有在运行的容器</Empty>;
   const current = service && running.includes(service) ? service : running[0];

@@ -18,8 +18,8 @@ use wharf_api_types::{
     Action, Layer, Plan, PlanItem, PlanRequest, PlanStatus, Risk,
   },
   spec::{
-    BuildSource, EdgeKind, GatewayKind, NetworkMode, RouteSpec,
-    Source,
+    BuildSource, EdgeAppSpec, EdgeKind, GatewayKind, NetworkMode,
+    RouteSpec, Source,
   },
   view::DataKind,
 };
@@ -532,13 +532,7 @@ fn config_items(
       (KIND_ROUTE, Action::Create) => {
         let route = desired.routes.get(name);
         let auth = route.is_some_and(|r| r.spec.auth);
-        let edge = route.is_some_and(|r| {
-          desired.edge_apps.contains_key(&r.spec.service)
-        });
-        if edge {
-          // 边缘应用本来就有公网地址（workers.dev / pages.dev）。
-          (Risk::Safe, "新增路由（边缘应用）".to_string())
-        } else if auth {
+        if auth {
           (Risk::Safe, "新增路由".to_string())
         } else {
           (
@@ -1394,14 +1388,29 @@ fn remote_ref(r: &RemoteRecord) -> RemoteRef {
   }
 }
 
+/// 要写 DNS 的域名、记录所有者，Pages 域名还带上边缘应用。
+type DnsTarget<'a> =
+  (String, String, Option<(&'a str, &'a EdgeAppSpec)>);
+
 async fn dns_items(
   b: &mut Builder,
   snap: &Snapshot,
   desired: &World,
   net: &Net,
 ) -> Result<(), ApiError> {
-  let live_ids: BTreeSet<&str> =
-    desired.routes.values().map(|r| r.id.as_str()).collect();
+  let edge_ids: Vec<String> = desired
+    .edge_apps
+    .values()
+    .flat_map(|a| {
+      a.spec.domains.iter().map(|d| crate::world::edge_owner(d))
+    })
+    .collect();
+  let live_ids: BTreeSet<&str> = desired
+    .routes
+    .values()
+    .map(|r| r.id.as_str())
+    .chain(edge_ids.iter().map(String::as_str))
+    .collect();
   // 已删除路由留下的记录。
   for owned in &snap.owned {
     if live_ids.contains(owned.route_id.as_str()) {
@@ -1437,12 +1446,26 @@ async fn dns_items(
     }
   }
 
-  for (host, route) in &desired.routes {
-    // Workers 的自定义域名由厂商连同 DNS 一起管，见 edge_plan。
-    let edge = desired.edge_apps.get(&route.spec.service);
-    if edge.is_some_and(|a| a.spec.kind == EdgeKind::Worker) {
+  // 代理路由，加上 Pages 的自定义域名；Workers 的由厂商连同 DNS 一起管，见 edge_plan。
+  let mut targets: Vec<DnsTarget> = desired
+    .routes
+    .iter()
+    .map(|(host, r)| (host.clone(), r.id.clone(), None))
+    .collect();
+  for (name, app) in &desired.edge_apps {
+    if app.spec.kind != EdgeKind::Pages {
       continue;
     }
+    for d in &app.spec.domains {
+      targets.push((
+        d.clone(),
+        crate::world::edge_owner(d),
+        Some((name.as_str(), &app.spec)),
+      ));
+    }
+  }
+  for (host, owner_id, edge) in targets {
+    let host = &host;
     let Some((account, _zone)) = snap.account_for(host) else {
       b.warnings.push(format!(
         "没有厂商账号管理 {host} 所在的域名，DNS 需要自己配置（或执行 wharf account add）"
@@ -1450,13 +1473,8 @@ async fn dns_items(
       continue;
     };
     let spec = match edge {
-      Some(app) => {
-        crate::edge_plan::pages_record(
-          snap,
-          &route.spec.service,
-          &app.spec,
-        )
-        .await?
+      Some((name, app)) => {
+        crate::edge_plan::pages_record(snap, name, app).await?
       }
       None => desired_record(snap, desired, net, host)?,
     };
@@ -1473,7 +1491,7 @@ async fn dns_items(
     )
     .await?;
     let owner = wharf_providers::Owner {
-      id: route.id.clone(),
+      id: owner_id.clone(),
     };
     let (ours, foreign): (Vec<&RemoteRecord>, Vec<&RemoteRecord>) =
       records.iter().partition(|r| provider.is_owned(r, &owner));

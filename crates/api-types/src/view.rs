@@ -81,9 +81,9 @@ pub struct ServiceView {
   /// 服务之间互相访问用的地址（内网地址:宿主机端口），例如 `100.101.102.103:20001`。
   pub addresses: BTreeMap<String, String>,
   pub version: u64,
-  /// 实时状态，查不到时为空。
-  #[serde(default, skip_serializing_if = "Option::is_none")]
-  pub live: Option<LiveState>,
+  /// 容器现状，查不到时为空；状态看 `status`。
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub containers: Vec<crate::agent::ContainerInfo>,
   /// 服务挂载的数据和归属，从配置里算出来。
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub data: Vec<DataMount>,
@@ -120,6 +120,9 @@ pub struct ServiceStatus {
   pub tone: Tone,
   /// 一句话，例如"运行中"、"部署失败"、"服务器离线"。
   pub summary: String,
+  /// 查不到现状时的原因。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub error: Option<String>,
 }
 
 #[derive(

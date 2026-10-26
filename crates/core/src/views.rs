@@ -9,7 +9,7 @@ use wharf_api_types::{
   view::{
     EdgeAppView, EdgeLive, EdgeProjectView, GatewayView,
     ImportRecord, LiveState, RouteView, ServerView, ServiceView,
-    Status,
+    Status, Tone,
   },
 };
 
@@ -207,22 +207,19 @@ pub fn service_view(
       last_op: snap.ops.get(name),
     })
   });
-  let live = live.map(|live| {
-    live_of(
-      live,
-      &row.spec.server,
-      name,
-      hash.as_deref(),
-      row.spec.stopped,
-    )
-  });
+  let containers = live
+    .and_then(|l| l.get(&row.spec.server))
+    .and_then(|r| r.as_ref().ok())
+    .and_then(|states| states.get(name))
+    .map(|p| p.containers.clone())
+    .unwrap_or_default();
   Some(ServiceView {
     name: name.to_string(),
     spec: row.spec.clone(),
     host_ports: row.host_ports.clone(),
     addresses,
     version: row.version,
-    live,
+    containers,
     data: crate::data::mounts(name, &row.spec),
     import: import_record(snap, name),
     status,
@@ -354,16 +351,17 @@ pub async fn status(
     .keys()
     .filter_map(|n| gateway_view(&snap, &net, n, Some(&live)))
     .collect();
-  for (kind, name, live, stopped) in services
-    .iter()
-    .map(|s| ("服务", &s.name, &s.live, s.spec.stopped))
-    .chain(gateways.iter().map(|g| ("网关", &g.name, &g.live, false)))
+  for s in &services {
+    if let Some(st) = &s.status
+      && matches!(st.tone, Tone::Warn | Tone::Bad)
+    {
+      problems.push(format!("服务 {}：{}", s.name, st.summary));
+    }
+  }
+  for (kind, name, live) in
+    gateways.iter().map(|g| ("网关", &g.name, &g.live))
   {
     let Some(live) = live else { continue };
-    // 按配置停下的服务，停着是正常的。
-    if stopped && live.state == "stopped" {
-      continue;
-    }
     if live.state != "running" && live.state != "unknown" {
       problems.push(format!("{kind} {name} 状态是 {}", live.state));
     } else if live.in_sync == Some(false) {

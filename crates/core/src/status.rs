@@ -28,6 +28,10 @@ pub fn service_status(i: Inputs<'_>) -> ServiceStatus {
       (actual_of(&p.containers), p.hash.clone(), &p.containers[..])
     }
   };
+  let error = match i.live {
+    Some(Err(e)) => Some(e.message.clone()),
+    _ => None,
+  };
   let health = health_of(containers);
   let (tone, summary) =
     summarize(&i, actual, actual_hash.as_deref(), health);
@@ -41,6 +45,7 @@ pub fn service_status(i: Inputs<'_>) -> ServiceStatus {
     last_op: i.last_op.cloned(),
     tone,
     summary,
+    error,
   }
 }
 

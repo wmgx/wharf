@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
   ApiError,
   agent::{AgentOp, EdgeBuildJob, EdgeBuildResult, OneTimeSecret},
-  spec::{EdgeAppSpec, EdgeKind, Region, RouteSpec},
+  spec::{EdgeAppSpec, EdgeKind, Region},
   validate_name,
   view::EdgeVersionView,
 };
@@ -67,6 +67,20 @@ pub fn validate_app(
       "边缘应用 {name} 的项目名 {project} 不合法：只能用小写字母、数字和 -"
     )));
   }
+  for d in &spec.domains {
+    if world.routes.contains_key(d) {
+      return Err(ApiError::invalid(format!(
+        "域名 {d} 已经是路由，不能再绑定到边缘应用 {name}"
+      )));
+    }
+    if let Some((other, _)) =
+      world.edge_domain(d).filter(|(o, _)| *o != name)
+    {
+      return Err(ApiError::invalid(format!(
+        "域名 {d} 已经绑定到边缘应用 {other}"
+      )));
+    }
+  }
   if let Some(builder) = &spec.builder
     && !world.servers.contains_key(builder)
   {
@@ -108,26 +122,6 @@ pub fn validate_app(
   }
   if src.build.as_deref().is_some_and(|b| b.trim().is_empty()) {
     return Err(ApiError::invalid(format!("{what} 的构建命令为空")));
-  }
-  Ok(())
-}
-
-pub fn validate_route(
-  host: &str,
-  spec: &RouteSpec,
-) -> Result<(), ApiError> {
-  if spec.port.is_some()
-    || spec.gateway.is_some()
-    || !spec.paths.is_empty()
-  {
-    return Err(ApiError::invalid(format!(
-      "路由 {host} 指向边缘应用，不经过网关，不能指定端口、网关或路径转发"
-    )));
-  }
-  if spec.auth {
-    return Err(ApiError::invalid(format!(
-      "路由 {host}：边缘应用的域名暂不支持登录保护"
-    )));
   }
   Ok(())
 }

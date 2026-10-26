@@ -71,6 +71,10 @@ pub struct World {
   pub routes: BTreeMap<String, RouteRow>,
 }
 
+pub fn edge_owner(host: &str) -> String {
+  format!("edge:{host}")
+}
+
 pub fn gateway_project(name: &str) -> String {
   format!("{GATEWAY_PROJECT_PREFIX}{name}")
 }
@@ -255,13 +259,17 @@ impl World {
           validate_name("边缘应用", name)?;
           let version =
             self.edge_apps.get(name).map(|r| r.version).unwrap_or(0);
-          self.edge_apps.insert(
-            name.clone(),
-            EdgeRow {
-              spec: spec.clone(),
-              version,
-            },
-          );
+          let mut spec = spec.clone();
+          spec.domains = spec
+            .domains
+            .iter()
+            .map(|d| normalize_hostname(d))
+            .collect::<Result<_, _>>()?;
+          spec.domains.sort();
+          spec.domains.dedup();
+          self
+            .edge_apps
+            .insert(name.clone(), EdgeRow { spec, version });
         }
         Change::RemoveEdgeApp { name } => {
           if self.edge_apps.remove(name).is_none() {
@@ -349,15 +357,29 @@ impl World {
       .map(|(name, _)| name.as_str())
   }
 
-  /// 路由实际使用的网关。指向边缘应用的路由不经过网关。
+  /// 路由实际使用的网关。
   pub fn route_gateway<'a>(
     &'a self,
     route: &'a RouteSpec,
   ) -> Option<&'a str> {
-    if self.edge_apps.contains_key(&route.service) {
-      return None;
-    }
     route.gateway.as_deref().or_else(|| self.default_gateway())
+  }
+
+  /// 绑定了这个域名的边缘应用。
+  pub fn edge_domain(&self, host: &str) -> Option<(&str, &EdgeRow)> {
+    self
+      .edge_apps
+      .iter()
+      .find(|(_, a)| a.spec.domains.iter().any(|d| d == host))
+      .map(|(n, a)| (n.as_str(), a))
+  }
+
+  /// Wharf 写的 DNS 记录归谁：路由用路由 id，边缘域名用 `edge:<域名>`。
+  pub fn dns_owner(&self, host: &str) -> Option<String> {
+    match self.routes.get(host) {
+      Some(r) => Some(r.id.clone()),
+      None => self.edge_domain(host).map(|_| edge_owner(host)),
+    }
   }
 
   /// 路由的上游地址：直接写的地址，或按服务算出来的。
@@ -569,8 +591,16 @@ impl World {
     }
     for (host, route) in &self.routes {
       if self.edge_apps.contains_key(&route.spec.service) {
-        crate::edge::validate_route(host, &route.spec)?;
-        continue;
+        return Err(
+          ApiError::invalid(format!(
+            "路由 {host} 指向边缘应用 {}：边缘应用的域名写在应用自己的 domains 里",
+            route.spec.service
+          ))
+          .suggest(format!(
+            "wharf edge domain add {} {host}",
+            route.spec.service
+          )),
+        );
       }
       self.check_route_gateway(host, &route.spec)?;
       if let Some(up) = &route.spec.upstream {

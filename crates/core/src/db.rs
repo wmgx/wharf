@@ -215,7 +215,30 @@ CREATE TABLE service_ops (
 );
 "#,
   ADOPT_MIGRATION,
+  EDGE_DOMAINS_MIGRATION,
 ];
+
+/// 指向边缘应用的路由挪进边缘应用的 `domains`。Pages 域名的 DNS 记录所有者从路由 id 改成 `edge:<域名>`。
+const EDGE_DOMAINS_MIGRATION: &str = r#"
+UPDATE resources
+SET spec = json_set(spec, '$.domains', (
+  SELECT json_group_array(name) FROM (
+    SELECT r.name FROM resources r
+    WHERE r.kind = 'route' AND json_extract(r.spec, '$.service') = resources.name
+    ORDER BY r.name)))
+WHERE kind = 'edge' AND EXISTS (
+  SELECT 1 FROM resources r
+  WHERE r.kind = 'route' AND json_extract(r.spec, '$.service') = resources.name);
+UPDATE owned_records SET route_id = 'edge:' || hostname
+WHERE route_id IN (
+  SELECT json_extract(r.meta, '$.id') FROM resources r
+  WHERE r.kind = 'route'
+    AND json_extract(r.spec, '$.service') IN (SELECT name FROM resources WHERE kind = 'edge'));
+DELETE FROM resources
+WHERE kind = 'route'
+  AND json_extract(spec, '$.service') IN (SELECT name FROM resources WHERE kind = 'edge');
+DELETE FROM plans WHERE status = 'pending';
+"#;
 
 /// adopt 从服务配置移到导入记录：部署过的记为已完成，还没部署的挪到 meta 里等第一次部署；
 /// 部署历史里的也去掉，免得回滚时又带回配置。未执行的计划里还是旧格式，删掉。
@@ -1109,6 +1132,51 @@ pub fn interrupt_service_ops(c: &Connection) -> Result<(), ApiError> {
 
 #[cfg(test)]
 mod tests {
+  #[test]
+  fn edge_domains_migration() {
+    let c = Connection::open_in_memory().unwrap();
+    c.execute_batch(
+      r#"CREATE TABLE resources (kind TEXT, name TEXT, spec TEXT, meta TEXT NOT NULL DEFAULT '{}');
+       CREATE TABLE owned_records (route_id TEXT, hostname TEXT);
+       CREATE TABLE plans (status TEXT);
+       INSERT INTO resources VALUES
+         ('edge', 'site', '{"account":"cf","kind":"pages"}', '{}'),
+         ('edge', 'idle', '{"account":"cf","kind":"worker"}', '{}'),
+         ('service', 'web', '{"server":"a"}', '{}'),
+         ('route', 'b.example.com', '{"hostname":"b.example.com","service":"site"}', '{"id":"rt_b"}'),
+         ('route', 'a.example.com', '{"hostname":"a.example.com","service":"site"}', '{"id":"rt_a"}'),
+         ('route', 'w.example.com', '{"hostname":"w.example.com","service":"web"}', '{"id":"rt_w"}');
+       INSERT INTO owned_records VALUES ('rt_a', 'a.example.com'), ('rt_w', 'w.example.com');"#,
+    )
+    .unwrap();
+    c.execute_batch(EDGE_DOMAINS_MIGRATION).unwrap();
+    let get = |sql: &str| -> Vec<String> {
+      c.prepare(sql)
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+    };
+    assert_eq!(
+      get(
+        "SELECT spec FROM resources WHERE kind = 'edge' ORDER BY name"
+      ),
+      [
+        r#"{"account":"cf","kind":"worker"}"#,
+        r#"{"account":"cf","kind":"pages","domains":["a.example.com","b.example.com"]}"#,
+      ]
+    );
+    assert_eq!(
+      get("SELECT name FROM resources WHERE kind = 'route'"),
+      ["w.example.com"]
+    );
+    assert_eq!(
+      get("SELECT route_id FROM owned_records ORDER BY hostname"),
+      ["edge:a.example.com", "rt_w"]
+    );
+  }
+
   #[test]
   fn adopt_migration() {
     let c = Connection::open_in_memory().unwrap();

@@ -160,7 +160,7 @@ export interface ServiceView {
   host_ports: Record<string, number>;
   addresses: Record<string, string>;
   version: number;
-  live?: LiveState;
+  containers?: ContainerInfo[];
   data?: DataMount[];
   status?: ServiceStatus;
   import?: ImportRecord;
@@ -232,6 +232,8 @@ export interface EdgeAppSpec {
   project?: string;
   source?: EdgeSource;
   builder?: string;
+  /** 绑定的自定义域名，不经过网关。 */
+  domains?: string[];
 }
 
 export interface EdgeLive {
@@ -504,4 +506,5 @@ export interface ServiceStatus {
   last_op?: { action: string; run_id: string; status: "running" | "succeeded" | "failed"; at: string; error?: string };
   tone: "ok" | "warn" | "bad" | "idle";
   summary: string;
+  error?: string;
 }

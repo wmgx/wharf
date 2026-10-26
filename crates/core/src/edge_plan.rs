@@ -66,22 +66,18 @@ fn deploy_items(b: &mut Builder, current: &World, desired: &World) {
   }
 }
 
-/// 路由想要的绑定：主机名 → 边缘应用的厂商项目。
+/// 想要的绑定：域名 → 边缘应用的厂商项目。
 fn wanted(desired: &World) -> Vec<EdgeDomainRow> {
   desired
-    .routes
+    .edge_apps
     .iter()
-    .filter_map(|(host, route)| {
-      let app = desired.edge_apps.get(&route.spec.service)?;
-      Some(EdgeDomainRow {
+    .flat_map(|(name, app)| {
+      app.spec.domains.iter().map(move |host| EdgeDomainRow {
         hostname: host.clone(),
-        app: route.spec.service.clone(),
+        app: name.clone(),
         account: app.spec.account.clone(),
         kind: app.spec.kind.as_str().to_string(),
-        project: app
-          .spec
-          .project_name(&route.spec.service)
-          .to_string(),
+        project: app.spec.project_name(name).to_string(),
       })
     })
     .collect()
@@ -126,7 +122,7 @@ async fn domain_items(
       continue;
     }
     let takeover = if want.kind == EdgeKind::Worker.as_str() {
-      worker_dns(b, snap, desired, &want.hostname).await?
+      worker_dns(b, snap, &want.hostname).await?
     } else {
       false
     };
@@ -168,10 +164,9 @@ async fn domain_items(
 async fn worker_dns(
   b: &mut Builder,
   snap: &Snapshot,
-  desired: &World,
   host: &str,
 ) -> Result<bool, ApiError> {
-  let route_id = &desired.routes[host].id;
+  let route_id = &crate::world::edge_owner(host);
   // 已删除路由留下的记录由常规 DNS 计划删除，这里只管这条路由自己的。
   for owned in snap
     .owned

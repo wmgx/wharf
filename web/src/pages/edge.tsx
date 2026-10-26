@@ -55,7 +55,6 @@ export function EdgeList() {
   if (apps.length === 0 && unmanaged.length === 0) return null;
   const importOne = (p: EdgeProjectView) =>
     actions.plan({ title: `导入 ${p.project}`, changes: [{ op: "upsert_edge_app", name: p.project, spec: { account: p.account, kind: p.kind } }] });
-  const routesOf = (name: string) => status?.routes.filter((r) => r.spec.service === name) ?? [];
   const byAccount = new Map<string, EdgeProjectView[]>();
   for (const p of unmanaged) byAccount.set(p.account, [...(byAccount.get(p.account) ?? []), p]);
   const list = account ? (byAccount.get(account) ?? []) : [];
@@ -78,7 +77,6 @@ export function EdgeList() {
             <TableBody>
               {apps.map((a) => {
                 const { tone, text } = edgeTone(a.live, a.drift);
-                const routes = routesOf(a.name);
                 return (
                   <TableRow key={a.name} className="cursor-pointer" onClick={() => nav(`/edge/${a.name}`)}>
                     <TableCell className="pl-4 font-medium">
@@ -95,10 +93,10 @@ export function EdgeList() {
                     </TableCell>
                     <TableCell className="font-mono text-xs text-muted-foreground">{edgeSourceLabel(a.spec.source)}</TableCell>
                     <TableCell className="font-mono text-xs">
-                      {routes.map((r) => (
-                        <div key={r.id}>{r.spec.hostname}</div>
+                      {a.spec.domains?.map((d) => (
+                        <div key={d}>{d}</div>
                       ))}
-                      {routes.length === 0 && <span className="text-muted-foreground">{a.live?.url?.replace(/^https:\/\//, "") ?? "-"}</span>}
+                      {!a.spec.domains?.length && <span className="text-muted-foreground">{a.live?.url?.replace(/^https:\/\//, "") ?? "-"}</span>}
                     </TableCell>
                     <TableCell />
                   </TableRow>

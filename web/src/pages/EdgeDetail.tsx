@@ -15,13 +15,12 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useStatus } from "@/status";
-import type { Change, EdgeAppView, EdgeVersionView } from "@/types";
+import type { EdgeAppView, EdgeVersionView } from "@/types";
 import { KIND_NAME, edgeSourceLabel, edgeTask, edgeTone, projectOf } from "./edge";
 
 /** 边缘应用详情：访问地址、域名、Cloudflare 那边的版本（可以切换回旧版本）。 */
 export function EdgeDetail() {
   const { name = "" } = useParams();
-  const { status } = useStatus();
   const actions = useActions();
   const path = `/api/edge/${encodeURIComponent(name)}`;
   // 读控制面里存的同步结果；旧了控制面会在后台再同步。
@@ -30,7 +29,9 @@ export function EdgeDetail() {
   const [syncing, setSyncing] = useState(false);
   // 同步、以线上为准之后让版本列表重新读。
   const [tick, setTick] = useState(0);
-  const routes = status?.routes.filter((r) => r.spec.service === name) ?? [];
+  const domains = app?.spec.domains ?? [];
+  const setDomains = (title: string, list: string[]) =>
+    app && actions.plan({ title, changes: [{ op: "upsert_edge_app", name, spec: { ...app.spec, domains: list } }] });
 
   const back = (
     <Link className="mb-3 inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground" to="/services">
@@ -79,7 +80,7 @@ export function EdgeDetail() {
     actions.plan({
       title: `不再纳管 ${name}`,
       then: "/services",
-      changes: [...routes.map((r) => ({ op: "remove_route", hostname: r.spec.hostname }) as Change), { op: "remove_edge_app", name }],
+      changes: [{ op: "remove_edge_app", name }],
     });
 
   return (
@@ -145,14 +146,14 @@ export function EdgeDetail() {
             <dt className="text-muted-foreground">地址</dt>
             <dd className="grid min-w-0 gap-1">
               {app.live?.url && <ExternalLink url={app.live.url} />}
-              {routes.map((r) => (
-                <div key={r.id} className="flex items-center justify-between gap-2">
-                  <ExternalLink url={r.url} />
+              {domains.map((d) => (
+                <div key={d} className="flex items-center justify-between gap-2">
+                  <ExternalLink url={`https://${d}`} />
                   <Button
                     variant="ghost"
                     size="icon-xs"
-                    aria-label={`移除 ${r.spec.hostname}`}
-                    onClick={() => actions.plan({ title: `移除 ${r.spec.hostname}`, changes: [{ op: "remove_route", hostname: r.spec.hostname }] })}
+                    aria-label={`移除 ${d}`}
+                    onClick={() => setDomains(`移除 ${d}`, domains.filter((x) => x !== d))}
                   >
                     <XIcon />
                   </Button>
@@ -188,7 +189,7 @@ export function EdgeDetail() {
       <SectionTitle>配置</SectionTitle>
       <CodeBlock>{JSON.stringify(app.spec, null, 2)}</CodeBlock>
 
-      <AddEdgeRoute app={name} open={addingRoute} onClose={() => setAddingRoute(false)} />
+      <AddEdgeRoute app={name} open={addingRoute} onClose={() => setAddingRoute(false)} onAdd={(h) => setDomains("加域名", [...domains, h])} />
     </>
   );
 }
@@ -272,15 +273,14 @@ function Versions({ name, onChanged }: { name: string; onChanged: () => void }) 
   );
 }
 
-function AddEdgeRoute({ app, open, onClose }: { app: string; open: boolean; onClose: () => void }) {
+function AddEdgeRoute({ app, open, onClose, onAdd }: { app: string; open: boolean; onClose: () => void; onAdd: (hostname: string) => void }) {
   const { status } = useStatus();
-  const actions = useActions();
   const [hostname, setHostname] = useState("");
   const suffixes = [...new Set(status?.routes.map((r) => r.spec.hostname.split(".").slice(1).join(".")).filter(Boolean))];
   const submit = () => {
     onClose();
     setHostname("");
-    actions.plan({ title: "加域名", changes: [{ op: "upsert_route", spec: { hostname: hostname.trim().toLowerCase(), service: app } }] });
+    onAdd(hostname.trim().toLowerCase());
   };
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
