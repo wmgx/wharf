@@ -1,4 +1,4 @@
-import { AnchorIcon, ArrowRightLeftIcon, BoxIcon, BoxesIcon, CloudIcon, HistoryIcon, LogOutIcon, MoonIcon, NetworkIcon, PlusIcon, RefreshCwIcon, ScrollTextIcon, SearchIcon, SunIcon, Trash2Icon, WaypointsIcon } from "lucide-react";
+import { AnchorIcon, ArrowRightLeftIcon, BoxIcon, BoxesIcon, CloudIcon, HistoryIcon, LogOutIcon, MoonIcon, NetworkIcon, PlusIcon, RefreshCwIcon, ScrollTextIcon, SearchIcon, ServerIcon, SunIcon, Trash2Icon, WaypointsIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
@@ -95,6 +95,13 @@ export function CommandMenu({ onLogout }: { onLogout: () => void }) {
                 <CommandShortcut>
                   <Dot tone={serviceTone(s).tone} />
                 </CommandShortcut>
+              </CommandItem>
+            ))}
+            {status?.servers.map((s) => (
+              <CommandItem key={`server-${s.name}`} value={`服务器 ${s.name}`} onSelect={() => run(() => nav(`/servers/${s.name}`))}>
+                <ServerIcon />
+                {s.name}
+                <span className="text-xs text-muted-foreground">服务器</span>
               </CommandItem>
             ))}
             {status?.gateways.map((g) => (

@@ -99,6 +99,7 @@ pub fn router(state: Arc<AppState>) -> Router {
       post(crate::agent_upgrade::upgrade_now),
     )
     .route("/api/servers/{name}/prune", post(crate::prune::prune_now))
+    .route("/api/servers/{name}/host", get(host_info))
     .route(
       "/api/servers/{name}/unmanaged",
       get(crate::import_api::unmanaged),
@@ -241,6 +242,33 @@ async fn show_server(
   Ok(Json(
     views::server_view(&s, &snap, &name)
       .ok_or_else(|| server_not_found(&name))?,
+  ))
+}
+
+/// 宿主机的系统版本、待装更新、docker 和日志占用，现查。
+async fn host_info(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Path(name): Path<String>,
+) -> ApiResult<wharf_api_types::agent::HostInfo> {
+  auth.require(TokenScope::Read)?;
+  let snap = snapshot::load(&s.db).await?;
+  if !snap.world.servers.contains_key(&name) {
+    return Err(server_not_found(&name).into());
+  }
+  if !s.hub.is_online(&name) {
+    return Err(crate::hub::offline(&name).into());
+  }
+  Ok(Json(
+    s.hub
+      .call(
+        &name,
+        AgentOp::HostInfo,
+        Duration::from_secs(120),
+        None,
+        &tokio_util::sync::CancellationToken::new(),
+      )
+      .await?,
   ))
 }
 

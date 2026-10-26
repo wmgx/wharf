@@ -314,6 +314,57 @@ pub fn doctor(v: &wharf_api_types::view::DoctorReport) {
   );
 }
 
+pub fn host(v: &wharf_api_types::agent::HostInfo) {
+  let mb = |b: u64| format!("{:.0}M", b as f64 / (1u64 << 20) as f64);
+  println!("系统  {}", v.os.as_deref().unwrap_or("未知"));
+  println!("内核  {}", v.kernel);
+  println!(
+    "运行  {} 天，负载 {:.2} {:.2} {:.2}（{} 核）",
+    v.uptime_secs / 86400,
+    v.load[0],
+    v.load[1],
+    v.load[2],
+    v.cpus
+  );
+  println!(
+    "内存  可用 {} / {}",
+    gb(v.mem_available),
+    gb(v.mem_total)
+  );
+  if v.reboot_required {
+    println!("需要重启");
+  }
+  match &v.updates {
+    None => println!("待装更新  不是 apt 系统，没查"),
+    Some(u) if u.is_empty() => println!("待装更新  没有"),
+    Some(u) => {
+      let security = u.iter().filter(|p| p.security).count();
+      println!(
+        "待装更新  {} 个，其中安全更新 {security} 个",
+        u.len()
+      );
+      for p in u {
+        let mark = if p.security { "!" } else { " " };
+        println!("  {mark} {}  {} → {}", p.name, p.from, p.to);
+      }
+    }
+  }
+  println!("docker");
+  for d in &v.docker {
+    println!(
+      "  {:<14} {:>3} 个，{} 在用，占 {}，可回收 {}",
+      d.kind, d.total, d.active, d.size, d.reclaimable
+    );
+  }
+  let opt = |b: Option<u64>| b.map_or("-".into(), mb);
+  println!(
+    "日志  容器 {}，journal {}，/var/log {}",
+    opt(v.container_logs),
+    opt(v.journal),
+    opt(v.var_log)
+  );
+}
+
 pub fn core_backup(v: &serde_json::Value) {
   let Some(to) = v["to"].as_str() else {
     println!("控制面备份没有开启：wharf backup core --to <server>");

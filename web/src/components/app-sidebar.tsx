@@ -1,6 +1,6 @@
-import { AnchorIcon, CableIcon, PlusIcon, BoxesIcon, ChevronsUpDownIcon, KeyRoundIcon, LogOutIcon, MoonIcon, NetworkIcon, SunIcon, ArrowUpCircleIcon, WaypointsIcon, HardDriveIcon, Trash2Icon } from "lucide-react";
+import { AnchorIcon, CableIcon, PlusIcon, BoxesIcon, ChevronsUpDownIcon, KeyRoundIcon, LogOutIcon, MoonIcon, NetworkIcon, SunIcon, ArrowUpCircleIcon, WaypointsIcon, HardDriveIcon, ServerIcon, Trash2Icon } from "lucide-react";
 import { useState } from "react";
-import { NavLink, useLocation } from "react-router-dom";
+import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import {
   Sidebar,
@@ -40,6 +40,7 @@ export function Logo({ className = "size-8" }: { className?: string }) {
 export function AppSidebar({ username, onLogout }: { username: string; onLogout: () => void }) {
   const { status } = useStatus();
   const { pathname } = useLocation();
+  const navigate = useNavigate();
   const { theme, toggle } = useTheme();
   const actions = useActions();
   const [adding, setAdding] = useState(false);
@@ -137,6 +138,10 @@ export function AppSidebar({ username, onLogout }: { username: string; onLogout:
                         {disk && (
                           <div className={`px-2 py-1.5 text-xs ${disk.low ? "text-warning" : "text-muted-foreground"}`}>磁盘剩 {disk.text}</div>
                         )}
+                        <DropdownMenuItem onSelect={() => navigate(`/servers/${encodeURIComponent(s.name)}`)}>
+                          <ServerIcon />
+                          详情
+                        </DropdownMenuItem>
                         <DropdownMenuItem disabled={!s.online} onSelect={() => actions.prune(s.name)}>
                           <Trash2Icon />
                           清理没在用的镜像

@@ -637,6 +637,12 @@ async fn server(
         .await?;
       finish_task(c, &r.run_id, true, j).await
     }
+    ServerCmd::Host { name } => {
+      let v: wharf_api_types::agent::HostInfo =
+        c.get(&format!("/api/servers/{}/host", seg(&name))).await?;
+      out(j, &v, print::host);
+      Ok(())
+    }
   }
 }
 

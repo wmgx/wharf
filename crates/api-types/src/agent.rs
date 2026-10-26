@@ -210,6 +210,63 @@ pub enum AgentOp {
   /// 在 project 的容器里开一个 shell。输出作为进度推送（base64），
   /// 输入经 [CoreMsg::Input] 送进来；shell 退出时结束，结果是退出码。
   Terminal(TerminalJob),
+  /// 读宿主机的系统版本、待装更新、docker 和日志占用，结果是 [HostInfo]。只读。
+  HostInfo,
+}
+
+/// 服务器详情页的宿主机信息，打开页面时现查。
+#[derive(
+  Debug, Clone, Default, Serialize, Deserialize, JsonSchema,
+)]
+pub struct HostInfo {
+  /// `/etc/os-release` 的 PRETTY_NAME。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub os: Option<String>,
+  pub kernel: String,
+  pub uptime_secs: u64,
+  pub mem_total: u64,
+  pub mem_available: u64,
+  /// 1、5、15 分钟负载。
+  pub load: [f64; 3],
+  pub cpus: u32,
+  /// 按上次 `apt update` 的结果算的待装更新；不是 apt 系统时为空。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub updates: Option<Vec<PackageUpdate>>,
+  pub reboot_required: bool,
+  /// `docker system df` 的每一行。
+  pub docker: Vec<DockerUsage>,
+  /// 容器日志（json-file）合计字节数。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub container_logs: Option<u64>,
+  /// systemd journal 字节数。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub journal: Option<u64>,
+  /// `/var/log` 合计字节数（含 journal）。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub var_log: Option<u64>,
+}
+
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct PackageUpdate {
+  pub name: String,
+  pub from: String,
+  pub to: String,
+  /// 来自安全更新源。
+  pub security: bool,
+}
+
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct DockerUsage {
+  /// Images / Containers / Local Volumes / Build Cache。
+  pub kind: String,
+  pub total: String,
+  pub active: String,
+  pub size: String,
+  pub reclaimable: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

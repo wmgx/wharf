@@ -278,6 +278,10 @@ pub enum ServerCmd {
   Prune {
     name: String,
   },
+  /// 宿主机信息：系统版本、待装更新、docker 和日志占用。
+  Host {
+    name: String,
+  },
 }
 
 #[derive(Subcommand)]

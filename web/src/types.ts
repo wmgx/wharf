@@ -36,6 +36,8 @@ export interface AgentReport {
   os: string;
   arch: string;
   docker_version?: string;
+  compose_version?: string;
+  build?: string;
   lan_ips?: string[];
   disk?: { total: number; free: number };
 }
@@ -416,4 +418,37 @@ export interface CoreBackupView {
   user_key_current: boolean;
   records: BackupRecord[];
   restore_command?: string;
+}
+
+export interface PackageUpdate {
+  name: string;
+  from: string;
+  to: string;
+  security: boolean;
+}
+
+export interface DockerUsage {
+  kind: string;
+  total: string;
+  active: string;
+  size: string;
+  reclaimable: string;
+}
+
+/** 服务器详情页的宿主机信息，现查。 */
+export interface HostInfo {
+  os?: string;
+  kernel: string;
+  uptime_secs: number;
+  mem_total: number;
+  mem_available: number;
+  load: [number, number, number];
+  cpus: number;
+  /** 不是 apt 系统时没有。 */
+  updates?: PackageUpdate[];
+  reboot_required: boolean;
+  docker: DockerUsage[];
+  container_logs?: number;
+  journal?: number;
+  var_log?: number;
 }

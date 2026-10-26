@@ -16,6 +16,7 @@ import { Network } from "./pages/Network";
 import { Accounts } from "./pages/Accounts";
 import { Home } from "./pages/Home";
 import { Login } from "./pages/Login";
+import { ServerDetail } from "./pages/ServerDetail";
 import { ServiceDetail } from "./pages/ServiceDetail";
 import { EdgeDetail } from "./pages/EdgeDetail";
 import { Services } from "./pages/Services";
@@ -62,6 +63,7 @@ export function App() {
 const TITLES: [string, string][] = [
   ["/services/", "服务详情"],
   ["/services", "服务"],
+  ["/servers/", "服务器"],
   ["/gateways", "网关"],
   ["/network", "组网"],
   ["/topology", "拓扑"],
@@ -95,6 +97,7 @@ function Shell({ username, onLogout }: { username: string; onLogout: () => void 
                   <Route path="/services" element={<Services />} />
                   <Route path="/services/:name" element={<ServiceDetail />} />
                   <Route path="/edge/:name" element={<EdgeDetail />} />
+                  <Route path="/servers/:name" element={<ServerDetail />} />
                   <Route path="/gateways" element={<Gateways />} />
                   <Route path="/network" element={<Network />} />
                   <Route path="/accounts" element={<Accounts />} />

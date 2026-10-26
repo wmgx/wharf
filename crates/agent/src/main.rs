@@ -18,6 +18,7 @@ mod conn;
 mod docker;
 mod edge;
 mod exec;
+mod host;
 mod identity;
 mod ops;
 mod probe;
