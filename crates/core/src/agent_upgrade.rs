@@ -122,6 +122,11 @@ pub async fn upgrade_each(
       }
     }
   }
+  // 升级过程中的定时探测会碰上 agent 换容器、探测端口没人应答，记成不通；升级完重新探测一遍。
+  progress("重新探测机器之间的连通性".into());
+  if let Err(e) = crate::network::probe_all(state).await {
+    progress(format!("探测失败：{}", e.message));
+  }
   if failed.is_empty() {
     Ok(())
   } else {
