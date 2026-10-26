@@ -28,7 +28,7 @@ use wharf_api_types::{
     RunStep, StepStatus,
   },
   spec::{GatewayKind, ServiceSpec, Source},
-  view::TokenScope,
+  view::{LastOp, OpStatus, TokenScope},
 };
 use wharf_providers::{Owner, RemoteRecord};
 
@@ -82,6 +82,7 @@ impl Runs {
 
 /// 控制面重启时，把上次没执行完的记录标为失败，不留下"一直在执行"。
 pub async fn recover(state: &AppState) -> Result<(), ApiError> {
+  state.db.call(|c| db::interrupt_service_ops(c)).await?;
   let rows: Vec<(String, String)> = state
     .db
     .call(|c| {
@@ -509,8 +510,28 @@ async fn execute(
     };
     tracing::info!("[{run_id}] {}", step.title);
     let started = std::time::Instant::now();
+    let op = service_op(&step.step);
+    if let Some((service, action)) = op {
+      record_op(
+        &state,
+        service,
+        action,
+        &run_id,
+        OpStatus::Running,
+        None,
+      )
+      .await;
+    }
     let result =
       run_step(&state, &run_id, &step.step, progress, &cancel).await;
+    if let Some((service, action)) = op {
+      let (status, error) = match &result {
+        Ok(()) => (OpStatus::Succeeded, None),
+        Err(e) => (OpStatus::Failed, Some(e.message.clone())),
+      };
+      record_op(&state, service, action, &run_id, status, error)
+        .await;
+    }
     crate::metrics::step_done(
       &state,
       &step.step,
@@ -552,6 +573,46 @@ async fn execute(
   }
   lock(&state.runs.active).remove(&run_id);
   tracing::info!("[{run_id}] 结束：{:?}", final_run.status);
+}
+
+/// 会改变服务现状的步骤，记进服务状态的"执行"一层。
+fn service_op(step: &Step) -> Option<(&str, &'static str)> {
+  match step {
+    Step::ServiceUp { service, .. } => Some((service, "部署")),
+    Step::Rebuild { service, .. } => Some((service, "重新构建")),
+    Step::ServiceStop { service, .. } => Some((service, "停止")),
+    Step::ServiceRestart { service, .. } => Some((service, "重启")),
+    Step::VolumeSync { service, .. } => Some((service, "迁移数据")),
+    Step::Restore { service, .. } => Some((service, "恢复")),
+    Step::ServiceDown { service, .. } => Some((service, "删除")),
+    _ => None,
+  }
+}
+
+/// 失败只记日志：状态显示不全不影响执行本身。
+async fn record_op(
+  state: &AppState,
+  service: &str,
+  action: &str,
+  run_id: &str,
+  status: OpStatus,
+  error: Option<String>,
+) {
+  let service = service.to_string();
+  let op = LastOp {
+    action: action.to_string(),
+    run_id: run_id.to_string(),
+    status,
+    at: Utc::now(),
+    error,
+  };
+  let result = state
+    .db
+    .call(move |c| db::set_service_op(c, &service, &op))
+    .await;
+  if let Err(e) = result {
+    tracing::warn!("记录服务操作失败：{e}");
+  }
 }
 
 async fn run_step(

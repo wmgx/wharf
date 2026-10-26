@@ -39,6 +39,10 @@ pub struct Snapshot {
     BTreeMap<String, Vec<wharf_api_types::view::EdgeProjectView>>,
   /// 同步时间（毫秒），key 是 `app:<名字>` / `account:<账号>`。
   pub edge_checked: BTreeMap<String, i64>,
+  /// 每个服务上次成功部署。
+  pub applied: BTreeMap<String, wharf_api_types::view::Applied>,
+  /// 每个服务最近一次操作。
+  pub ops: BTreeMap<String, wharf_api_types::view::LastOp>,
   /// Wharf 记录的线上版本。
   pub edge_expected: BTreeMap<String, db::EdgeExpected>,
   /// 连通性探测结果。
@@ -77,6 +81,8 @@ pub async fn load(db: &Db) -> Result<Snapshot, ApiError> {
         owned: db::owned_records(c)?,
         secrets: db::secrets(c)?,
         deployed: db::deployed_servers(c)?,
+        applied: db::applied(c)?,
+        ops: db::service_ops(c)?,
         tunnels: db::tunnels(c)?,
         edge_domains: db::edge_domains(c)?,
         edge_cache: BTreeMap::new(),

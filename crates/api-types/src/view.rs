@@ -87,6 +87,136 @@ pub struct ServiceView {
   /// 服务挂载的数据和归属，从配置里算出来。
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub data: Vec<DataMount>,
+  /// 分层状态；只读配置、不查现状时为空。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub status: Option<ServiceStatus>,
+}
+
+/// 服务的分层状态：期望、已应用、实际、健康、执行，加上按优先级挑出的一句话。
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct ServiceStatus {
+  /// 期望：按配置应该在运行（`stopped` 时为 false）。
+  pub want_running: bool,
+  /// 期望：当前配置生成的 compose 哈希；缺密钥等算不出时为空。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub desired_hash: Option<String>,
+  /// 已应用：上次成功部署。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub applied: Option<Applied>,
+  /// 实际：容器现状。
+  pub actual: Actual,
+  /// 实际：容器上标记的哈希。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub actual_hash: Option<String>,
+  pub health: Health,
+  /// 执行：最近一次和这个服务有关的部署、启停、重启、迁移、恢复。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub last_op: Option<LastOp>,
+  pub tone: Tone,
+  /// 一句话，例如"运行中"、"部署失败"、"服务器离线"。
+  pub summary: String,
+}
+
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct Applied {
+  pub hash: String,
+  pub at: DateTime<Utc>,
+}
+
+#[derive(
+  Debug,
+  Clone,
+  Copy,
+  PartialEq,
+  Eq,
+  Serialize,
+  Deserialize,
+  JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum Actual {
+  Running,
+  /// 有的容器在运行，有的没有。
+  Partial,
+  Stopped,
+  /// 服务器上没有这个服务的容器。
+  Missing,
+  /// 服务器的 agent 不在线。
+  Offline,
+  /// agent 在线但查询失败。
+  Unknown,
+}
+
+#[derive(
+  Debug,
+  Clone,
+  Copy,
+  PartialEq,
+  Eq,
+  Serialize,
+  Deserialize,
+  JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum Health {
+  Healthy,
+  Unhealthy,
+  Starting,
+  /// 没配健康检查。
+  None,
+}
+
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct LastOp {
+  /// 部署、重启、停止、迁移数据、恢复。
+  pub action: String,
+  pub run_id: String,
+  pub status: OpStatus,
+  pub at: DateTime<Utc>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub error: Option<String>,
+}
+
+#[derive(
+  Debug,
+  Clone,
+  Copy,
+  PartialEq,
+  Eq,
+  Serialize,
+  Deserialize,
+  JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum OpStatus {
+  Running,
+  Succeeded,
+  Failed,
+}
+
+/// 页面上的颜色。
+#[derive(
+  Debug,
+  Clone,
+  Copy,
+  PartialEq,
+  Eq,
+  Serialize,
+  Deserialize,
+  JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum Tone {
+  Ok,
+  Warn,
+  Bad,
+  Idle,
 }
 
 /// 数据归属：决定迁移、备份、删除时动不动它。

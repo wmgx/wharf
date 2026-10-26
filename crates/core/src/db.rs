@@ -11,7 +11,10 @@ use std::{
 use chrono::{DateTime, TimeZone, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
-use wharf_api_types::ApiError;
+use wharf_api_types::{
+  ApiError,
+  view::{Applied, LastOp, OpStatus},
+};
 
 const MIGRATIONS: &[&str] = &[
   r#"
@@ -199,6 +202,17 @@ CREATE TABLE points (
 CREATE INDEX points_at ON points (at);
 "#,
   PORTS_MIGRATION,
+  // 每个服务最近一次部署、启停、重启、迁移、恢复，服务状态的"执行"一层。
+  r#"
+CREATE TABLE service_ops (
+  service TEXT PRIMARY KEY,
+  action TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  at INTEGER NOT NULL,
+  error TEXT
+);
+"#,
 ];
 
 /// 端口字段 `{port, host_port}` 改成 `{container, host}`：旧的 `port` 在 compose 来源里
@@ -919,6 +933,87 @@ pub fn deployed_servers(
     .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
     .map_err(sql_err)?;
   rows.collect::<Result<_, _>>().map_err(sql_err)
+}
+
+/// 每个服务最近一次成功部署的哈希和时间。
+pub fn applied(
+  c: &Connection,
+) -> Result<std::collections::BTreeMap<String, Applied>, ApiError> {
+  let mut stmt = c
+    .prepare(
+      "SELECT service, hash, created_at FROM deployments
+       WHERE id IN (SELECT MAX(id) FROM deployments GROUP BY service)",
+    )
+    .map_err(sql_err)?;
+  let rows = stmt
+    .query_map([], |r| {
+      Ok((
+        r.get::<_, String>(0)?,
+        Applied {
+          hash: r.get(1)?,
+          at: to_time(r.get(2)?),
+        },
+      ))
+    })
+    .map_err(sql_err)?;
+  rows.collect::<Result<_, _>>().map_err(sql_err)
+}
+
+pub fn service_ops(
+  c: &Connection,
+) -> Result<std::collections::BTreeMap<String, LastOp>, ApiError> {
+  let mut stmt = c
+    .prepare("SELECT service, action, run_id, status, at, error FROM service_ops")
+    .map_err(sql_err)?;
+  let rows = stmt
+    .query_map([], |r| {
+      let status = match r.get::<_, String>(3)?.as_str() {
+        "running" => OpStatus::Running,
+        "succeeded" => OpStatus::Succeeded,
+        _ => OpStatus::Failed,
+      };
+      Ok((
+        r.get::<_, String>(0)?,
+        LastOp {
+          action: r.get(1)?,
+          run_id: r.get(2)?,
+          status,
+          at: to_time(r.get(4)?),
+          error: r.get(5)?,
+        },
+      ))
+    })
+    .map_err(sql_err)?;
+  rows.collect::<Result<_, _>>().map_err(sql_err)
+}
+
+pub fn set_service_op(
+  c: &Connection,
+  service: &str,
+  op: &LastOp,
+) -> Result<(), ApiError> {
+  let status = match op.status {
+    OpStatus::Running => "running",
+    OpStatus::Succeeded => "succeeded",
+    OpStatus::Failed => "failed",
+  };
+  c.execute(
+    "INSERT OR REPLACE INTO service_ops (service, action, run_id, status, at, error)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+    params![service, op.action, op.run_id, status, op.at.timestamp_millis(), op.error],
+  )
+  .map_err(sql_err)?;
+  Ok(())
+}
+
+/// 控制面重启时执行中的操作都断了。
+pub fn interrupt_service_ops(c: &Connection) -> Result<(), ApiError> {
+  c.execute(
+    "UPDATE service_ops SET status = 'failed', error = '控制面重启，执行中断' WHERE status = 'running'",
+    [],
+  )
+  .map_err(sql_err)?;
+  Ok(())
 }
 
 #[cfg(test)]

@@ -39,6 +39,7 @@ mod render;
 mod rollback;
 mod snapshot;
 mod state;
+mod status;
 mod tailscale;
 mod terminal;
 mod tunnel;

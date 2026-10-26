@@ -280,7 +280,7 @@ fn gateway_check(
   match live.get(server) {
     None => check("gateway", subject, CheckStatus::Bad, "查不到状态"),
     Some(Err(e)) => {
-      check("gateway", subject, CheckStatus::Bad, e.clone())
+      check("gateway", subject, CheckStatus::Bad, e.message.clone())
     }
     Some(Ok(states)) => match states.get(&gateway_project(name)) {
       Some(p) if p.all_running() => {
@@ -383,7 +383,7 @@ fn container(
         "container",
         subject,
         CheckStatus::Bad,
-        e.clone(),
+        e.message.clone(),
       );
     }
     Some(Ok(states)) => states,

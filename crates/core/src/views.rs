@@ -3,6 +3,7 @@
 use std::{collections::BTreeMap, time::Duration};
 
 use wharf_api_types::{
+  ApiError,
   agent::ProjectState,
   spec::{Fleet, GatewayKind, GatewayTls},
   view::{
@@ -21,7 +22,7 @@ use crate::{
 
 /// 服务器 → project → 现状；查不到时是错误信息。
 pub type LiveMap =
-  BTreeMap<String, Result<BTreeMap<String, ProjectState>, String>>;
+  BTreeMap<String, Result<BTreeMap<String, ProjectState>, ApiError>>;
 
 /// 查实时状态的超时，status 要快。
 const LIVE_TIMEOUT: Duration = Duration::from_secs(6);
@@ -81,8 +82,7 @@ pub async fn live_states(state: &AppState, world: &World) -> LiveMap {
         projects,
         LIVE_TIMEOUT,
       )
-      .await
-      .map_err(|e| e.message);
+      .await;
       (server, result)
     });
   futures_util::future::join_all(futures)
@@ -110,7 +110,7 @@ fn live_of(
       state: "unknown".into(),
       containers: vec![],
       in_sync: None,
-      error: Some(e.clone()),
+      error: Some(e.message.clone()),
     },
     Some(Ok(states)) => {
       let s = states.get(project);
@@ -140,6 +140,16 @@ fn live_of(
   }
 }
 
+/// 服务器上没有这个服务的容器。
+fn empty_project(name: &str) -> ProjectState {
+  ProjectState {
+    project: name.to_string(),
+    hash: None,
+    config_hash: None,
+    containers: Vec::new(),
+  }
+}
+
 pub fn service_view(
   snap: &Snapshot,
   net: &Net,
@@ -159,15 +169,26 @@ pub fn service_view(
       (port.clone(), format!("{ip}:{host}"))
     })
     .collect();
+  let hash = live.and_then(|_| {
+    snapshot::service_resolved(&snap.world, net, name, &snap.secrets)
+      .ok()
+      .map(|(_, h)| h)
+  });
+  let status = live.map(|live| {
+    let project = live
+      .get(&row.spec.server)
+      .map(|r| r.as_ref().map(|states| states.get(name)));
+    let missing = empty_project(name);
+    let project = project.map(|r| r.map(|p| p.unwrap_or(&missing)));
+    crate::status::service_status(crate::status::Inputs {
+      want_running: !row.spec.stopped,
+      desired_hash: hash.clone(),
+      applied: snap.applied.get(name),
+      live: project.as_ref(),
+      last_op: snap.ops.get(name),
+    })
+  });
   let live = live.map(|live| {
-    let hash = snapshot::service_resolved(
-      &snap.world,
-      net,
-      name,
-      &snap.secrets,
-    )
-    .ok()
-    .map(|(_, h)| h);
     live_of(
       live,
       &row.spec.server,
@@ -184,6 +205,7 @@ pub fn service_view(
     version: row.version,
     live,
     data: crate::data::mounts(name, &row.spec),
+    status,
   })
 }
 

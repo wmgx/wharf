@@ -4,7 +4,7 @@ use wharf_api_types::{
   ApiError,
   plan::{Action, Plan, Risk, Run, RunStatus, RunStep, StepStatus},
   spec::NetworkMode,
-  view::{BackupsView, NetworkView, ServiceView, Status},
+  view::{BackupsView, NetworkView, OpStatus, ServiceView, Status},
 };
 
 pub fn json<T: serde::Serialize>(value: &T) {
@@ -139,16 +139,18 @@ pub fn run(run: &Run) {
   }
 }
 
-fn live(s: &ServiceView) -> String {
-  match &s.live {
-    None => "-".into(),
-    Some(l) => {
-      let sync = match l.in_sync {
-        Some(false) => "（和配置不一致）",
-        _ => "",
-      };
-      format!("{}{sync}", l.state)
-    }
+/// 控制面挑出的一句话；最近一次操作失败时带上原因。
+pub fn service_state(s: &ServiceView) -> String {
+  let Some(st) = &s.status else {
+    return "-".into();
+  };
+  match &st.last_op {
+    Some(op) if op.status == OpStatus::Failed => format!(
+      "{}（{}）",
+      st.summary,
+      op.error.as_deref().unwrap_or(&op.run_id)
+    ),
+    _ => st.summary.clone(),
   }
 }
 
@@ -195,7 +197,7 @@ pub fn status(s: &Status) {
         "  {:<14} {:<8} {:<10} {}",
         svc.name,
         svc.spec.server,
-        live(svc),
+        service_state(svc),
         addrs.join(" ")
       );
     }

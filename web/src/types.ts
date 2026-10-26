@@ -147,6 +147,7 @@ export interface ServiceView {
   version: number;
   live?: LiveState;
   data?: DataMount[];
+  status?: ServiceStatus;
 }
 
 export type GatewayTls = "auto" | "internal" | "off";
@@ -474,4 +475,17 @@ export interface DataMount {
   source: string;
   target: string;
   container?: string;
+}
+
+/** 分层状态：期望、已应用、实际、健康、执行，summary 是按优先级挑出的一句话。 */
+export interface ServiceStatus {
+  want_running: boolean;
+  desired_hash?: string;
+  applied?: { hash: string; at: string };
+  actual: "running" | "partial" | "stopped" | "missing" | "offline" | "unknown";
+  actual_hash?: string;
+  health: "healthy" | "unhealthy" | "starting" | "none";
+  last_op?: { action: string; run_id: string; status: "running" | "succeeded" | "failed"; at: string; error?: string };
+  tone: "ok" | "warn" | "bad" | "idle";
+  summary: string;
 }

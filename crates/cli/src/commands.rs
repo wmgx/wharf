@@ -786,7 +786,7 @@ async fn service(
             "{:<14} {:<8} {}",
             s.name,
             s.spec.server,
-            s.live.as_ref().map(|l| l.state.as_str()).unwrap_or("-")
+            crate::print::service_state(s)
           );
         }
       });

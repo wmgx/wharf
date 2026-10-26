@@ -24,9 +24,9 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useStatus } from "@/status";
-import type { DataKind, DeploymentView, PortSpec, ServiceView } from "@/types";
+import type { DataKind, DeploymentView, PortSpec, ServiceStatus, ServiceView } from "@/types";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 
 const Terminal = lazy(() => import("@/components/Terminal"));
 
@@ -80,7 +80,12 @@ export function ServiceDetail() {
         title={
           <>
             {svc.name}
-            <StatusBadge tone={tone}>{text}</StatusBadge>
+            <Tooltip>
+              <TooltipTrigger>
+                <StatusBadge tone={tone}>{text}</StatusBadge>
+              </TooltipTrigger>
+              {svc.status && <TooltipContent className="grid gap-0.5">{statusLayers(svc.status).map((l) => <div key={l}>{l}</div>)}</TooltipContent>}
+            </Tooltip>
           </>
         }
         description={
@@ -357,6 +362,23 @@ function EditService({ svc, open, onClose }: { svc: ServiceView; open: boolean; 
       </SheetContent>
     </Sheet>
   );
+}
+
+const ACTUAL: Record<ServiceStatus["actual"], string> = { running: "运行中", partial: "部分运行", stopped: "已停止", missing: "没有容器", offline: "服务器离线", unknown: "查不到" };
+const HEALTH: Record<ServiceStatus["health"], string> = { healthy: "健康", unhealthy: "不健康", starting: "启动中", none: "没配健康检查" };
+const OP: Record<NonNullable<ServiceStatus["last_op"]>["status"], string> = { running: "进行中", succeeded: "成功", failed: "失败" };
+
+/** 悬停时显示每一层。 */
+function statusLayers(s: ServiceStatus): string[] {
+  const short = (h?: string) => h?.slice(0, 8) ?? "-";
+  const op = s.last_op;
+  return [
+    `期望：${s.want_running ? "运行" : "停止"} · ${short(s.desired_hash)}`,
+    `已应用：${s.applied ? `${short(s.applied.hash)} · ${ago(s.applied.at)}` : "没有部署记录"}`,
+    `实际：${ACTUAL[s.actual]}${s.actual_hash ? ` · ${short(s.actual_hash)}` : ""}`,
+    `健康：${HEALTH[s.health]}`,
+    `执行：${op ? `${op.action}${OP[op.status]} · ${ago(op.at)}${op.error ? ` · ${op.error}` : ""}` : "-"}`,
+  ];
 }
 
 const DATA_KIND: Record<DataKind, string> = { managed: "Wharf 管理", external_dir: "外部目录", named_volume: "docker 卷" };
