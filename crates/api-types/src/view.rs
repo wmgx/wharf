@@ -134,6 +134,14 @@ pub struct ServiceStatus {
 pub struct Applied {
   pub hash: String,
   pub at: DateTime<Utc>,
+  /// image 来源实际部署的镜像 digest（`sha256:…`）。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub digest: Option<String>,
+  /// 部署时的镜像（compose 里写的名字）和镜像 ID。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub image: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub image_id: Option<String>,
 }
 
 #[derive(

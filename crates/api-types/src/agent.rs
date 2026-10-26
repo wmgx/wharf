@@ -176,6 +176,8 @@ pub struct Disk {
 pub enum AgentOp {
   /// 立刻回一份最新的 [AgentReport]。
   Report,
+  /// 结果是 `Vec<ResolvedImage>`。
+  ResolveImages(ResolveImages),
   /// 读取若干 compose project 的现状，结果是 `Vec<ProjectState>`。
   ProjectStatus {
     projects: Vec<String>,
@@ -621,6 +623,30 @@ pub struct ProjectUp {
   /// 启动后没稳定运行时，换回上一版 compose（没有数据卷的服务才这样做）。
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub rollback: bool,
+  /// 计划时固定的版本：镜像（compose 里写的名字）→ `sha256:…`。按 digest 拉取后打回原来的标签，
+  /// compose 不用改；本地已经是这个 digest 就不拉。
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub pins: BTreeMap<String, String>,
+}
+
+/// 查镜像标签当前对应的 digest：只读 registry 的清单，不拉镜像。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResolveImages {
+  pub images: Vec<String>,
+  pub pull: PullPolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResolvedImage {
+  pub image: String,
+  /// `sha256:…`。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub digest: Option<String>,
+  /// 这台机器平台对应的镜像 ID（`sha256:…`），和 `docker image inspect` 的 Id 相同。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub config: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

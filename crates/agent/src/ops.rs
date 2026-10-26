@@ -63,6 +63,9 @@ impl Ops {
   ) -> Result<Value, ApiError> {
     match op {
       AgentOp::Report => to_value(self.reporter.report(true).await),
+      AgentOp::ResolveImages(job) => {
+        to_value(crate::registry::resolve(&job, ctx).await?)
+      }
       AgentOp::ProjectStatus { projects } => {
         for p in &projects {
           check_project(p)?;
@@ -233,6 +236,15 @@ impl Ops {
             ErrorCode::AgentFailed,
             format!("镜像 {image} 还没有构建"),
           ));
+        }
+        continue;
+      }
+      if let Some(digest) = up.pins.get(image) {
+        if !self.docker.has_digest(image, digest, ctx).await {
+          self
+            .docker
+            .pull_pinned(image, digest, &up.pull, ctx)
+            .await?;
         }
         continue;
       }

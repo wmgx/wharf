@@ -566,6 +566,10 @@ pub enum Change {
   RemoveService {
     name: String,
   },
+  /// 检查更新：重新查 image 来源服务的镜像标签现在对应哪个版本，有新版本时计划里会更新。
+  RefreshImages {
+    name: String,
+  },
   UpsertGateway {
     name: String,
     spec: GatewaySpec,

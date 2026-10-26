@@ -39,6 +39,8 @@ pub struct ServiceRow {
   pub host_ports: BTreeMap<String, u16>,
   /// 还没完成的导入：第一次部署成功后清掉，记进导入记录。存在 meta 里，不是用户配置。
   pub import: Option<AdoptSpec>,
+  /// 计划时固定的镜像版本：镜像 → `sha256:…`（image 来源）。存在 meta 里，只有检查更新才换。
+  pub pins: BTreeMap<String, String>,
   pub version: u64,
 }
 
@@ -115,6 +117,8 @@ impl World {
                 row.meta["import"].clone(),
               )
               .unwrap_or_default(),
+              pins: serde_json::from_value(row.meta["pins"].clone())
+                .unwrap_or_default(),
               version,
             },
           );
@@ -204,15 +208,30 @@ impl World {
           let import = adopt
             .clone()
             .or_else(|| old.and_then(|s| s.import.clone()));
+          // 改配置不换镜像版本；换了镜像的，旧的固定版本对不上，计划时重新查。
+          let pins = old
+            .map(|s| s.pins.clone())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(image, _)| matches!(&spec.source, Source::Image(i) if i == image))
+            .collect();
           self.services.insert(
             name.clone(),
             ServiceRow {
               spec: spec.clone(),
               host_ports,
               import,
+              pins,
               version,
             },
           );
+        }
+        Change::RefreshImages { name } => {
+          let row = self.services.get_mut(name).ok_or_else(|| {
+            ApiError::not_found(format!("服务 {name} 不存在"))
+              .suggest("wharf service list")
+          })?;
+          row.pins.clear();
         }
         Change::RemoveService { name } => {
           if self.services.remove(name).is_none() {
@@ -736,6 +755,9 @@ impl World {
         let mut meta = json!({ "host_ports": r.host_ports });
         if let Some(import) = &r.import {
           meta["import"] = to_json(import);
+        }
+        if !r.pins.is_empty() {
+          meta["pins"] = to_json(&r.pins);
         }
         (to_json(&r.spec), meta)
       },

@@ -24,6 +24,7 @@ mod identity;
 mod metrics;
 mod ops;
 mod probe;
+mod registry;
 mod report;
 mod restic;
 mod settle;

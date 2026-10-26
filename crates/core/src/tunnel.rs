@@ -186,6 +186,7 @@ pub async fn sync(
         pull_missing_only: false,
         retire: None,
         rollback: false,
+        pins: Default::default(),
       }),
       CONNECTOR_TIMEOUT,
       Some(progress.clone()),

@@ -194,6 +194,95 @@ impl Docker {
       .is_ok_and(|o| o.success)
   }
 
+  /// 本地的 `image` 是不是这个 digest（`sha256:…`）。
+  pub async fn has_digest(
+    &self,
+    image: &str,
+    digest: &str,
+    ctx: &Ctx,
+  ) -> bool {
+    self
+      .cmd()
+      .args([
+        "image",
+        "inspect",
+        "--format",
+        "{{join .RepoDigests \",\"}}",
+        image,
+      ])
+      .timeout(Duration::from_secs(15))
+      .run(ctx)
+      .await
+      .is_ok_and(|o| {
+        o.success
+          && o
+            .stdout
+            .trim()
+            .split(',')
+            .any(|d| d.ends_with(&format!("@{digest}")))
+      })
+  }
+
+  /// 按计划固定的 digest 拉取（按镜像源顺序），再打回 `image` 这个标签，compose 不用改。
+  pub async fn pull_pinned(
+    &self,
+    image: &str,
+    digest: &str,
+    policy: &PullPolicy,
+    ctx: &Ctx,
+  ) -> Result<(), ApiError> {
+    let timeout =
+      Duration::from_secs(policy.attempt_timeout_secs.max(10));
+    let (registry, path, suffix) = split_image(image);
+    let name = image.strip_suffix(suffix.as_str()).unwrap_or(image);
+    let mut candidates: Vec<String> = policy
+      .mirrors
+      .get(&registry)
+      .into_iter()
+      .flatten()
+      .map(|m| format!("{}/{path}@{digest}", m.trim_end_matches('/')))
+      .collect();
+    if candidates.is_empty() || !policy.mirrors_only {
+      candidates.push(format!("{name}@{digest}"));
+    }
+    let mut errors = Vec::new();
+    for candidate in candidates {
+      ctx.say(format!("拉取 {candidate}"));
+      let result = self
+        .cmd()
+        .args(["pull", "--quiet", &candidate])
+        .timeout(timeout)
+        .stream(false)
+        .run(ctx)
+        .await
+        .and_then(|o| o.check(&format!("docker pull {candidate}")));
+      match result {
+        Ok(_) => {
+          self
+            .cmd()
+            .args(["tag", &candidate, image])
+            .timeout(Duration::from_secs(15))
+            .run(ctx)
+            .await?
+            .check("docker tag")?;
+          ctx.say(format!("已拉取 {image}（{digest}）"));
+          return Ok(());
+        }
+        Err(e) if e.code == ErrorCode::Cancelled => return Err(e),
+        Err(e) => errors.push(e.message),
+      }
+    }
+    Err(
+      ApiError::new(
+        ErrorCode::AgentFailed,
+        format!("拉取 {image}@{digest} 失败：{}", errors.join("；")),
+      )
+      .with_hint(
+        "计划里固定的版本可能已经从仓库删除，重新 plan 会查最新版本",
+      ),
+    )
+  }
+
   /// 按镜像源顺序拉取，每次尝试都有超时。全部失败但本地已有镜像时只警告。
   pub async fn pull(
     &self,
@@ -563,7 +652,7 @@ pub fn parse_ps(
 }
 
 /// 镜像引用拆成 (registry, 路径, 标签或 digest 后缀)。
-fn split_image(image: &str) -> (String, String, String) {
+pub(crate) fn split_image(image: &str) -> (String, String, String) {
   let (name, suffix) = match image.find('@') {
     Some(i) => (&image[..i], image[i..].to_string()),
     None => {

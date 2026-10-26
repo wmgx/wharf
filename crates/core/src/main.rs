@@ -33,6 +33,7 @@ mod logs_stream;
 mod metrics;
 mod migrate;
 mod network;
+mod pins;
 mod planner;
 mod prune;
 mod render;

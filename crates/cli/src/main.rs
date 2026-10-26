@@ -330,6 +330,13 @@ pub enum ServiceCmd {
   Restart {
     name: String,
   },
+  /// 检查更新：image 来源重新查镜像标签现在的版本，有新版本时计划里会更新。
+  /// 平时改配置不会换镜像版本。
+  Update {
+    name: String,
+    #[command(flatten)]
+    apply: ApplyFlags,
+  },
   /// 回滚到之前的一次部署（默认是上一个不同的版本）。
   /// image 来源会固定到当时的镜像 digest。
   Rollback {

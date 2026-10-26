@@ -228,6 +228,7 @@ pub(crate) async fn ensure_server(
         pull_missing_only: false,
         retire: None,
         rollback: false,
+        pins: Default::default(),
       }),
       SERVER_TIMEOUT,
       Some(progress.clone()),

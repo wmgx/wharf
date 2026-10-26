@@ -150,6 +150,9 @@ mod tests {
     let applied = Applied {
       hash: "a".into(),
       at: Default::default(),
+      digest: None,
+      image: None,
+      image_id: None,
     };
     let failed = LastOp {
       action: "部署".into(),

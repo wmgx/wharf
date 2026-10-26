@@ -886,6 +886,9 @@ async fn service(
       )
       .await
     }
+    ServiceCmd::Update { name, apply } => {
+      changes(c, vec![Change::RefreshImages { name }], apply, j).await
+    }
     ServiceCmd::Rollback { name, to, apply } => {
       let path = match to {
         Some(id) => {

@@ -216,7 +216,23 @@ CREATE TABLE service_ops (
 "#,
   ADOPT_MIGRATION,
   EDGE_DOMAINS_MIGRATION,
+  PINS_MIGRATION,
 ];
+
+/// image 来源固定到上次部署实际用的 digest，升级后不会因为补查版本而重新部署。
+/// 部署记录里没有 digest 的（经镜像源拉取的旧部署）留给第一次 plan 去查。
+const PINS_MIGRATION: &str = r#"
+UPDATE resources
+SET meta = json_set(meta, '$.pins', json_object(
+  json_extract(spec, '$.source.image'),
+  (SELECT substr(dg, instr(dg, '@') + 1) FROM (
+    SELECT json_extract(d.images, '$[0].digest') AS dg FROM deployments d
+    WHERE d.service = resources.name ORDER BY d.id DESC LIMIT 1))))
+WHERE kind = 'service' AND json_type(spec, '$.source.image') = 'text'
+  AND (SELECT json_extract(d.images, '$[0].digest') FROM deployments d
+       WHERE d.service = resources.name ORDER BY d.id DESC LIMIT 1) LIKE '%@sha256:%';
+DELETE FROM plans WHERE status = 'pending';
+"#;
 
 /// 指向边缘应用的路由挪进边缘应用的 `domains`。Pages 域名的 DNS 记录所有者从路由 id 改成 `edge:<域名>`。
 const EDGE_DOMAINS_MIGRATION: &str = r#"
@@ -1058,17 +1074,29 @@ pub fn applied(
 ) -> Result<std::collections::BTreeMap<String, Applied>, ApiError> {
   let mut stmt = c
     .prepare(
-      "SELECT service, hash, created_at FROM deployments
+      "SELECT service, hash, created_at, images FROM deployments
        WHERE id IN (SELECT MAX(id) FROM deployments GROUP BY service)",
     )
     .map_err(sql_err)?;
   let rows = stmt
     .query_map([], |r| {
+      let images: Vec<wharf_api_types::agent::ImageInfo> =
+        serde_json::from_str(&r.get::<_, String>(3)?)
+          .unwrap_or_default();
       Ok((
         r.get::<_, String>(0)?,
         Applied {
           hash: r.get(1)?,
           at: to_time(r.get(2)?),
+          digest: images
+            .iter()
+            .find_map(|i| i.digest.as_deref()?.split_once('@'))
+            .map(|(_, d)| d.to_string()),
+          image: images.first().map(|i| i.image.clone()),
+          image_id: images
+            .first()
+            .map(|i| i.id.clone())
+            .filter(|i| !i.is_empty()),
         },
       ))
     })
@@ -1135,6 +1163,42 @@ pub fn interrupt_service_ops(c: &Connection) -> Result<(), ApiError> {
 
 #[cfg(test)]
 mod tests {
+  #[test]
+  fn pins_migration() {
+    let c = Connection::open_in_memory().unwrap();
+    c.execute_batch(
+      r#"CREATE TABLE resources (kind TEXT, name TEXT, spec TEXT, meta TEXT NOT NULL DEFAULT '{}');
+       CREATE TABLE deployments (id INTEGER, service TEXT, images TEXT);
+       CREATE TABLE plans (status TEXT);
+       INSERT INTO resources VALUES
+         ('service', 'web', '{"source":{"image":"nginx:1"}}', '{"host_ports":{"http":20000}}'),
+         ('service', 'old', '{"source":{"image":"x:latest"}}', '{}'),
+         ('service', 'blog', '{"source":{"compose":{"content":"x"}}}', '{}');
+       INSERT INTO deployments VALUES
+         (1, 'web', '[{"image":"nginx:1","id":"sha256:i1","digest":"nginx@sha256:aa"}]'),
+         (2, 'web', '[{"image":"nginx:1","id":"sha256:i2","digest":"docker.io/library/nginx@sha256:bb"}]'),
+         (3, 'old', '[{"image":"x:latest","id":"sha256:i3"}]'),
+         (4, 'blog', '[{"image":"y","id":"sha256:i4","digest":"y@sha256:cc"}]');"#,
+    )
+    .unwrap();
+    c.execute_batch(PINS_MIGRATION).unwrap();
+    let meta: Vec<String> = c
+      .prepare("SELECT meta FROM resources ORDER BY name")
+      .unwrap()
+      .query_map([], |r| r.get(0))
+      .unwrap()
+      .map(Result::unwrap)
+      .collect();
+    assert_eq!(
+      meta,
+      [
+        "{}",
+        "{}",
+        r#"{"host_ports":{"http":20000},"pins":{"nginx:1":"sha256:bb"}}"#
+      ]
+    );
+  }
+
   #[test]
   fn edge_domains_migration() {
     let c = Connection::open_in_memory().unwrap();

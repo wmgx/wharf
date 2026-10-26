@@ -242,6 +242,8 @@ pub(crate) struct Builder {
   items: Vec<PlanItem>,
   steps: Vec<StepPlan>,
   pub(crate) warnings: Vec<String>,
+  /// 这次计划查到的镜像 ID：服务 → `sha256:…`。
+  image_ids: BTreeMap<String, String>,
 }
 
 impl Builder {
@@ -311,6 +313,23 @@ pub async fn make_plan(
   }
   desired.allocate_ports()?;
   desired.validate()?;
+  let refresh: BTreeSet<String> = req
+    .changes
+    .iter()
+    .filter_map(|c| match c {
+      wharf_api_types::spec::Change::RefreshImages { name } => {
+        Some(name.clone())
+      }
+      _ => None,
+    })
+    .collect();
+  let resolved = crate::pins::resolve(
+    state,
+    &snap.applied,
+    &mut desired,
+    &refresh,
+  )
+  .await?;
   for (name, svc) in &desired.services {
     if let Source::Build(BuildSource {
       upload: Some(sha), ..
@@ -353,7 +372,11 @@ pub async fn make_plan(
   }
 
   let writes = desired.writes_from(&current);
-  let mut b = Builder::default();
+  let mut b = Builder {
+    image_ids: resolved.image_ids,
+    warnings: resolved.warnings,
+    ..Builder::default()
+  };
   config_items(&mut b, &current, &desired, &writes);
 
   let mut net = snap.net(&desired);
@@ -735,6 +758,11 @@ fn service_items(
       }
       continue;
     }
+    let upgrade = crate::pins::change(
+      snap.applied.get(name),
+      &svc.pins,
+      b.image_ids.get(name).map(String::as_str),
+    );
     let decision = match status.get(server).and_then(|s| s.as_ref()) {
       None if changed(writes, KIND_SERVICE, name) => Some((
         Action::Update,
@@ -799,7 +827,17 @@ fn service_items(
           },
           Some(json!({ "containers": state.containers })),
         )),
-        Some(_) => None,
+        Some(_) => upgrade.map(|(old, new)| {
+          (
+            Action::Update,
+            Risk::Disruptive,
+            format!(
+              "更新镜像版本 {old} → {}",
+              crate::pins::short(&new)
+            ),
+            Some(json!({ "digest": old })),
+          )
+        }),
       },
     };
     // 同名 compose 项目里混着别处起的容器：compose up 会把它们当成自己的删掉。导入时本来就要接管。
