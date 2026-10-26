@@ -330,6 +330,8 @@ pub async fn start(
   };
   {
     let base = plan.base_versions.clone();
+    let inputs = plan.inputs.clone();
+    let replan_inputs = replan.clone();
     let writes = stored.writes.clone();
     let plan_id = plan.plan_id.clone();
     let run_body = serde_json::to_string(&run).map_err(json_err)?;
@@ -343,6 +345,17 @@ pub async fn start(
       .db
       .call(move |c| {
         let tx = c.transaction().map_err(sql_err)?;
+        if let Some(i) = inputs
+          && i != db::inputs(&tx)?
+        {
+          return Err(
+            ApiError::new(
+              ErrorCode::PlanStale,
+              "plan 之后机器之间的连通性或密钥变了，直连还是走隧道、渲染出的配置可能和计划不一样",
+            )
+            .suggest(replan_inputs),
+          );
+        }
         let now_versions = db::versions(&tx)?;
         let stale: Vec<String> = base
           .keys()
@@ -708,7 +721,25 @@ async fn run_step(
       crate::prune::prune(state, server, progress, cancel).await?;
     }
     Step::EdgeDeploy { app } => {
+      let key = crate::edge_plan::deployed_key(app);
+      let fingerprint = world
+        .edge_apps
+        .get(app)
+        .map(|a| crate::edge_plan::fingerprint(app, &a.spec));
+      let k = key.clone();
+      state
+        .db
+        .call(move |c| {
+          db::set_setting(c, &k, Some(crate::edge_plan::DEPLOYING))
+        })
+        .await?;
       crate::edge::deploy(state, &snap, app, &progress, cancel)
+        .await?;
+      state
+        .db
+        .call(move |c| {
+          db::set_setting(c, &key, fingerprint.as_deref())
+        })
         .await?;
     }
     Step::EdgeAttach {

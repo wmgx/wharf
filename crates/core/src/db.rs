@@ -355,6 +355,25 @@ pub fn setting(
 }
 
 /// `None` 删除。
+/// 键以 `prefix` 开头的设置，返回时去掉前缀。
+pub fn settings_with_prefix(
+  c: &Connection,
+  prefix: &str,
+) -> Result<std::collections::BTreeMap<String, String>, ApiError> {
+  let mut stmt = c
+    .prepare(
+      "SELECT key, value FROM settings WHERE substr(key, 1, length(?1)) = ?1",
+    )
+    .map_err(sql_err)?;
+  let rows = stmt
+    .query_map(params![prefix], |r| {
+      let key: String = r.get(0)?;
+      Ok((key[prefix.len()..].to_string(), r.get(1)?))
+    })
+    .map_err(sql_err)?;
+  rows.collect::<Result<_, _>>().map_err(sql_err)
+}
+
 pub fn set_setting(
   c: &Connection,
   key: &str,
@@ -688,6 +707,22 @@ pub fn secrets(
     })
     .map_err(sql_err)?;
   rows.collect::<Result<_, _>>().map_err(sql_err)
+}
+
+/// 计划依赖、又不在资源版本里的输入的指纹：连通性结果和密钥。
+pub fn inputs_fingerprint(
+  reach: &Reach,
+  secrets: &std::collections::BTreeMap<String, String>,
+) -> String {
+  let reach: Vec<_> = reach.iter().collect();
+  crate::render::hash(
+    &serde_json::json!({ "reach": reach, "secrets": secrets })
+      .to_string(),
+  )
+}
+
+pub fn inputs(conn: &Connection) -> Result<String, ApiError> {
+  Ok(inputs_fingerprint(&reach(conn)?, &secrets(conn)?))
 }
 
 // REACH

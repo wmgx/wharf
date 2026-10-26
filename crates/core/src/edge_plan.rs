@@ -1,9 +1,12 @@
 //! 边缘应用的计划项：发布代码、绑定 / 解绑自定义域名。
 //!
-//! - 代码来源变了（或新建）才发布；只纳管、没有代码来源的不发布；
+//! - 和上次发布成功的不一样（代码来源、账户、项目）才发布；上次发布没做完的重新发布；
+//!   只纳管、没有代码来源的不发布；
 //! - Workers 的域名由厂商连同 DNS 一起管：Wharf 自己写过的记录先删掉，
 //!   别人的记录要确认接管；
 //! - Pages 的域名走常规 DNS（CNAME 到 `<项目>.pages.dev`），再在项目上绑定。
+
+use std::collections::BTreeMap;
 
 use serde_json::json;
 use wharf_api_types::{
@@ -27,18 +30,51 @@ pub async fn edge_items(
   current: &World,
   desired: &World,
 ) -> Result<(), ApiError> {
-  deploy_items(b, current, desired);
+  deploy_items(b, &snap.edge_deployed, current, desired);
   domain_items(b, snap, desired).await
 }
 
-fn deploy_items(b: &mut Builder, current: &World, desired: &World) {
+/// 发布开始时写入，成功后换成配置指纹；停在这个值说明上次发布没做完。
+pub const DEPLOYING: &str = "deploying";
+
+/// settings 表里记上次发布成功的配置指纹的键。
+pub fn deployed_key(app: &str) -> String {
+  format!("edge.deployed.{app}")
+}
+
+/// 决定发布结果的配置：账户、类型、厂商项目、代码来源（不含在哪台机器上构建）。
+pub fn fingerprint(name: &str, spec: &EdgeAppSpec) -> String {
+  crate::render::hash(
+    &json!({
+      "account": spec.account,
+      "kind": spec.kind,
+      "project": spec.project_name(name),
+      "source": spec.source,
+    })
+    .to_string(),
+  )
+}
+
+fn deploy_items(
+  b: &mut Builder,
+  deployed: &BTreeMap<String, String>,
+  current: &World,
+  desired: &World,
+) {
   for (name, app) in &desired.edge_apps {
     let Some(source) = &app.spec.source else {
       continue;
     };
     let before = current.edge_apps.get(name);
-    if before.is_some_and(|r| r.spec.source.as_ref() == Some(source))
-    {
+    let last = deployed.get(name).map(String::as_str);
+    let up_to_date = match last {
+      Some(fp) => fp == fingerprint(name, &app.spec),
+      // 记录指纹之前发布的：沿用原来的判断，只看代码来源变没变。
+      None => {
+        before.is_some_and(|r| r.spec.source.as_ref() == Some(source))
+      }
+    };
+    if up_to_date {
       continue;
     }
     let what = match app.spec.kind {
@@ -56,7 +92,11 @@ fn deploy_items(b: &mut Builder, current: &World, desired: &World) {
       None,
       Some(json!({ "project": app.spec.project_name(name) })),
       vec![],
-      format!("发布到 Cloudflare {what}"),
+      if last == Some(DEPLOYING) {
+        format!("上次发布没有完成，重新发布到 Cloudflare {what}")
+      } else {
+        format!("发布到 Cloudflare {what}")
+      },
     );
     b.step(
       vec![id],
@@ -244,4 +284,41 @@ pub async fn pages_record(
     proxied: record.proxied,
     tunnel: None,
   })
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn redeploys_after_unfinished_deploy() {
+    let spec: EdgeAppSpec = serde_json::from_value(json!({
+      "account": "cf",
+      "kind": "worker",
+      "source": { "upload": "abc", "script": "index.js" },
+    }))
+    .unwrap();
+    let mut world = World::default();
+    world.edge_apps.insert(
+      "w".into(),
+      crate::world::EdgeRow {
+        spec: spec.clone(),
+        version: 1,
+      },
+    );
+    let plan = |deployed: &[(&str, &str)]| {
+      let deployed = deployed
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+      let mut b = Builder::default();
+      deploy_items(&mut b, &deployed, &world, &world);
+      b.items.len()
+    };
+    // 没有记录：沿用旧判断，配置没变就不发布。
+    assert_eq!(plan(&[]), 0);
+    assert_eq!(plan(&[("w", &fingerprint("w", &spec))]), 0);
+    // 上次发布中途失败。
+    assert_eq!(plan(&[("w", DEPLOYING)]), 1);
+  }
 }

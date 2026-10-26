@@ -47,6 +47,8 @@ pub struct Snapshot {
   pub ops: BTreeMap<String, wharf_api_types::view::LastOp>,
   /// Wharf 记录的线上版本。
   pub edge_expected: BTreeMap<String, db::EdgeExpected>,
+  /// 边缘应用上次发布成功的配置指纹（或"发布中"）。
+  pub edge_deployed: BTreeMap<String, String>,
   /// 连通性探测结果。
   pub reach: db::Reach,
 }
@@ -92,6 +94,7 @@ pub async fn load(db: &Db) -> Result<Snapshot, ApiError> {
         edge_accounts: BTreeMap::new(),
         edge_checked: BTreeMap::new(),
         edge_expected: db::edge_expected(c)?,
+        edge_deployed: db::settings_with_prefix(c, "edge.deployed.")?,
         reach: db::reach(c)?,
       }
       .with_edge_cache(db::edge_cache(c)?),

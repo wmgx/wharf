@@ -239,7 +239,7 @@ pub struct Planned {
 
 #[derive(Default)]
 pub(crate) struct Builder {
-  items: Vec<PlanItem>,
+  pub(crate) items: Vec<PlanItem>,
   steps: Vec<StepPlan>,
   pub(crate) warnings: Vec<String>,
   /// 这次计划查到的镜像 ID：服务 → `sha256:…`。
@@ -404,6 +404,7 @@ pub async fn make_plan(
   service_items(
     &mut b, &snap, &current, &desired, &net, &status, &writes,
   )?;
+  leftover_items(&mut b, &snap.deployed, &current, &desired, &status);
   link_items(&mut b, &current, &desired, &net, &status)?;
   tailscale_items(&mut b, &snap, &desired, &status);
   gateway_items(&mut b, &snap, &current, &desired, &net, &status)?;
@@ -437,6 +438,10 @@ pub async fn make_plan(
     created_at: now,
     expires_at: now + chrono::Duration::minutes(PLAN_TTL_MINUTES),
     base_versions: current.versions(),
+    inputs: Some(crate::db::inputs_fingerprint(
+      &snap.reach,
+      &snap.secrets,
+    )),
     items: b.items,
     warnings: b.warnings,
     needs_confirm,
@@ -631,6 +636,13 @@ async fn gather_status(
     }
     for p in crate::link::projects(world, net).unwrap_or_default() {
       projects.entry(p.server).or_default().insert(p.project);
+    }
+    for (name, server) in leftovers(&snap.deployed, current, desired)
+    {
+      projects
+        .entry(server.to_string())
+        .or_default()
+        .insert(name.to_string());
     }
     for (name, row) in &world.servers {
       if row.settings.network_mode == Some(NetworkMode::Tailscale) {
@@ -979,6 +991,60 @@ fn service_items(
     );
   }
   Ok(())
+}
+
+/// 部署过、但配置里已经没有的服务：(服务, 最后部署在的服务器)。
+/// 删除服务时配置先提交，删容器那步失败了，靠它在下次 plan 时接着清理。
+fn leftovers<'a>(
+  deployed: &'a BTreeMap<String, String>,
+  current: &'a World,
+  desired: &'a World,
+) -> impl Iterator<Item = (&'a str, &'a str)> {
+  deployed
+    .iter()
+    .filter(|(name, _)| {
+      !current.services.contains_key(*name)
+        && !desired.services.contains_key(*name)
+    })
+    .map(|(n, s)| (n.as_str(), s.as_str()))
+}
+
+/// 上次删除没做完：项目目录（Wharf 的部署指纹）还在。别人同名的项目没有指纹，不碰。
+fn leftover_items(
+  b: &mut Builder,
+  deployed: &BTreeMap<String, String>,
+  current: &World,
+  desired: &World,
+  status: &StatusMap,
+) {
+  for (name, server) in leftovers(deployed, current, desired) {
+    let Some(Some(projects)) = status.get(server) else {
+      continue;
+    };
+    let Some(state) = projects.get(name).filter(|s| s.hash.is_some())
+    else {
+      continue;
+    };
+    let id = b.item(
+      format!("{KIND_SERVICE}/{name}"),
+      Layer::Container,
+      Action::Delete,
+      Some(
+        json!({ "server": server, "containers": state.containers }),
+      ),
+      None,
+      vec![Impact::Remove],
+      "上次删除没有完成，停止并删除留下的容器（数据目录保留）",
+    );
+    b.step(
+      vec![id],
+      format!("在 {server} 上删除 {name}"),
+      Step::ServiceDown {
+        server: server.to_string(),
+        service: name.to_string(),
+      },
+    );
+  }
 }
 
 /// 迁移数据的计划项和步骤，以及相关提醒。
@@ -1685,4 +1751,38 @@ fn plaintext_hop(
       gateway.spec.server, addr.ip
     )
   })
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn cleans_up_unfinished_deletes() {
+    let deployed = BTreeMap::from([
+      ("half".to_string(), "s1".to_string()),
+      ("done".to_string(), "s1".to_string()),
+    ]);
+    let state = |hash: Option<&str>| ProjectState {
+      project: String::new(),
+      hash: hash.map(str::to_string),
+      config_hash: None,
+      containers: vec![],
+    };
+    let status = StatusMap::from([(
+      "s1".to_string(),
+      Some(BTreeMap::from([
+        ("half".to_string(), state(Some("h"))),
+        // 删干净了，或者是别人同名的项目：没有 Wharf 的指纹。
+        ("done".to_string(), state(None)),
+      ])),
+    )]);
+    let world = World::default();
+    let mut b = Builder::default();
+    leftover_items(&mut b, &deployed, &world, &world, &status);
+    let found: Vec<&str> =
+      b.items.iter().map(|i| i.address.as_str()).collect();
+    assert_eq!(found, ["service/half"]);
+    assert!(b.items[0].needs_confirm());
+  }
 }

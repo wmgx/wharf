@@ -164,6 +164,10 @@ pub struct Plan {
   pub expires_at: DateTime<Utc>,
   /// plan 时读到的资源版本。apply 时任何一个变了都拒绝执行。
   pub base_versions: BTreeMap<String, u64>,
+  /// plan 时连通性结果和密钥的指纹：直连还是走隧道、渲染出的配置都取决于它们，
+  /// apply 时变了就拒绝执行。旧计划没有这个字段，不检查。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub inputs: Option<String>,
   pub items: Vec<PlanItem>,
   /// 不阻止 apply 的提醒，例如某台服务器离线，查不到现状。
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
