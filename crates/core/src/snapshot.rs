@@ -41,6 +41,8 @@ pub struct Snapshot {
   pub edge_checked: BTreeMap<String, i64>,
   /// 每个服务上次成功部署。
   pub applied: BTreeMap<String, wharf_api_types::view::Applied>,
+  /// 导入记录（已完成的）。
+  pub imports: BTreeMap<String, wharf_api_types::view::ImportRecord>,
   /// 每个服务最近一次操作。
   pub ops: BTreeMap<String, wharf_api_types::view::LastOp>,
   /// Wharf 记录的线上版本。
@@ -83,6 +85,7 @@ pub async fn load(db: &Db) -> Result<Snapshot, ApiError> {
         deployed: db::deployed_servers(c)?,
         applied: db::applied(c)?,
         ops: db::service_ops(c)?,
+        imports: db::imports(c)?,
         tunnels: db::tunnels(c)?,
         edge_domains: db::edge_domains(c)?,
         edge_cache: BTreeMap::new(),

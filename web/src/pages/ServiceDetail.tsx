@@ -25,7 +25,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { useStatus } from "@/status";
-import type { DataKind, DeploymentView, PortSpec, ServiceStatus, ServiceView } from "@/types";
+import type { DataKind, DeploymentView, ImportRecord, PortSpec, ServiceStatus, ServiceView } from "@/types";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 
 const Terminal = lazy(() => import("@/components/Terminal"));
@@ -226,6 +226,12 @@ export function ServiceDetail() {
                 ))}
                 {!Object.keys(svc.spec.env ?? {}).length && "-"}
               </dd>
+              {svc.import && (
+                <>
+                  <dt className="text-muted-foreground">导入</dt>
+                  <dd className="text-xs">{importText(svc.import)}</dd>
+                </>
+              )}
               {!!svc.data?.length && (
                 <>
                   <dt className="text-muted-foreground">数据</dt>
@@ -379,6 +385,13 @@ function statusLayers(s: ServiceStatus): string[] {
     `健康：${HEALTH[s.health]}`,
     `执行：${op ? `${op.action}${OP[op.status]} · ${ago(op.at)}${op.error ? ` · ${op.error}` : ""}` : "-"}`,
   ];
+}
+
+function importText(r: ImportRecord): string {
+  const from = [r.project && `compose 项目 ${r.project}`, ...(r.containers ?? []).map((c) => `容器 ${c}`)].filter(Boolean).join("、") || "同名 compose 项目";
+  if (!r.done_at) return `${from} · 第一次部署时接管`;
+  const retired = r.retired?.length ? ` · 旧容器 ${r.retired.join("、")} 已停止` : "";
+  return `${from} · ${ago(r.done_at)}${retired}`;
 }
 
 const DATA_KIND: Record<DataKind, string> = { managed: "Wharf 管理", external_dir: "外部目录", named_volume: "docker 卷" };

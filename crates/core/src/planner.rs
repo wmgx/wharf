@@ -491,10 +491,10 @@ fn config_items(
         if desired
           .services
           .get(name)
-          .and_then(|r| r.spec.adopt.as_ref())
+          .and_then(|r| r.import.as_ref())
           .is_some() =>
       {
-        let adopt = desired.services[name].spec.adopt.as_ref();
+        let adopt = desired.services[name].import.as_ref();
         match adopt.and_then(|a| a.project.as_deref()) {
           Some(project) => (
             Risk::Disruptive,
@@ -770,7 +770,7 @@ fn service_items(
           if state.hash.as_deref() != Some(hash.as_str()) =>
         {
           let before = json!({ "hash": state.hash, "containers": state.containers });
-          let adopting = svc.spec.adopt.is_some();
+          let adopting = svc.import.is_some();
           let reason = if state.hash.is_none() && adopting {
             "接管服务器上的同名 compose 项目，配置一致时不重建容器"
           } else if state.hash.is_none() {
@@ -823,7 +823,7 @@ fn service_items(
       .unwrap_or_default();
     let decision = match decision {
       Some((action, _, _, before))
-        if !foreign.is_empty() && svc.spec.adopt.is_none() =>
+        if !foreign.is_empty() && svc.import.is_none() =>
       {
         Some((
           action,

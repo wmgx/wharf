@@ -879,6 +879,7 @@ async fn service(
         vec![Change::UpsertService {
           name: v.name,
           spec: v.spec,
+          adopt: v.adopt,
         }],
         apply,
         j,
@@ -908,6 +909,7 @@ async fn service(
         vec![Change::UpsertService {
           name,
           spec: target.spec,
+          adopt: None,
         }],
         apply,
         j,
@@ -939,8 +941,17 @@ async fn service(
       let v: ServiceView =
         c.get(&format!("/api/services/{}", seg(&name))).await?;
       let spec = ServiceSpec { stopped, ..v.spec };
-      changes(c, vec![Change::UpsertService { name, spec }], apply, j)
-        .await
+      changes(
+        c,
+        vec![Change::UpsertService {
+          name,
+          spec,
+          adopt: None,
+        }],
+        apply,
+        j,
+      )
+      .await
     }
     ServiceCmd::Restart { name } => {
       let r: ApplyResponse = c
@@ -1047,7 +1058,6 @@ async fn service(
             env: BTreeMap::new(),
             volumes: vec![],
             backup: None,
-            adopt: None,
             stopped: false,
           }
         }
@@ -1089,8 +1099,17 @@ async fn service(
           target: target.to_string(),
         });
       }
-      changes(c, vec![Change::UpsertService { name, spec }], apply, j)
-        .await
+      changes(
+        c,
+        vec![Change::UpsertService {
+          name,
+          spec,
+          adopt: None,
+        }],
+        apply,
+        j,
+      )
+      .await
     }
     ServiceCmd::Move { name, to, apply } => {
       let mut spec = c
@@ -1104,8 +1123,17 @@ async fn service(
         );
       }
       spec.server = to;
-      changes(c, vec![Change::UpsertService { name, spec }], apply, j)
-        .await
+      changes(
+        c,
+        vec![Change::UpsertService {
+          name,
+          spec,
+          adopt: None,
+        }],
+        apply,
+        j,
+      )
+      .await
     }
     ServiceCmd::Rm { name, apply } => {
       changes(c, vec![Change::RemoveService { name }], apply, j).await
@@ -1505,7 +1533,11 @@ async fn backup(
       .await?
       .spec;
     spec.backup = backup;
-    Ok::<_, CliError>(Change::UpsertService { name, spec })
+    Ok::<_, CliError>(Change::UpsertService {
+      name,
+      spec,
+      adopt: None,
+    })
   };
   match cmd {
     BackupCmd::Enable { service, to, apply } => {

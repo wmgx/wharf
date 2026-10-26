@@ -252,9 +252,6 @@ pub struct ServiceSpec {
   /// 每天自动备份 `/srv/<服务>/` 到另一台服务器（restic）。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub backup: Option<BackupSpec>,
-  /// 导入时接管的现有容器。部署前停掉它们，失败时恢复；之后再部署时已经没有可接管的，不起作用。
-  #[serde(default, skip_serializing_if = "Option::is_none")]
-  pub adopt: Option<AdoptSpec>,
   /// 停止：容器保留但不运行，部署后也保持停止。不影响 compose，也就不会重建容器。
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub stopped: bool,
@@ -559,6 +556,9 @@ pub enum Change {
   UpsertService {
     name: String,
     spec: ServiceSpec,
+    /// 导入时接管的现有容器：第一次部署前停掉它们，失败时恢复。部署成功后记进导入记录，不再起作用。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    adopt: Option<AdoptSpec>,
   },
   RemoveService {
     name: String,

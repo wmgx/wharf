@@ -87,6 +87,9 @@ pub struct ServiceView {
   /// 服务挂载的数据和归属，从配置里算出来。
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub data: Vec<DataMount>,
+  /// 从服务器上已有的容器导入时的记录。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub import: Option<ImportRecord>,
   /// 分层状态；只读配置、不查现状时为空。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub status: Option<ServiceStatus>,
@@ -217,6 +220,25 @@ pub enum Tone {
   Warn,
   Bad,
   Idle,
+}
+
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct ImportRecord {
+  pub server: String,
+  /// 原来的 compose 项目。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub project: Option<String>,
+  /// 原来 `docker run` 起的容器。
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub containers: Vec<String>,
+  /// 被停掉留着回退用的旧容器（改名后的名字）。
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub retired: Vec<String>,
+  /// 第一次部署成功的时间；还没部署时为空。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub done_at: Option<DateTime<Utc>>,
 }
 
 /// 数据归属：决定迁移、备份、删除时动不动它。
@@ -598,6 +620,9 @@ pub struct ImportRequest {
 pub struct ImportPreview {
   pub name: String,
   pub spec: ServiceSpec,
+  /// 提交 `UpsertService` 时原样带上。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub adopt: Option<crate::spec::AdoptSpec>,
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub warnings: Vec<String>,
 }

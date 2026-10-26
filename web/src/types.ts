@@ -93,8 +93,6 @@ export interface ServiceSpec {
   volumes?: VolumeSpec[];
   /** 每天自动备份到另一台服务器。 */
   backup?: { to: string };
-  /** 导入时接管的现有容器。 */
-  adopt?: { project?: string; containers?: string[] };
   /** 停止：容器保留但不运行。 */
   stopped?: boolean;
 }
@@ -117,9 +115,26 @@ export interface Unmanaged {
   name: string;
 }
 
+/** 导入时接管的现有容器：提交 upsert_service 时原样带上。 */
+export interface AdoptSpec {
+  project?: string;
+  containers?: string[];
+}
+
+export interface ImportRecord {
+  server: string;
+  project?: string;
+  containers?: string[];
+  /** 被停掉留着回退用的旧容器。 */
+  retired?: string[];
+  /** 第一次部署成功的时间；还没部署时为空。 */
+  done_at?: string;
+}
+
 export interface ImportPreview {
   name: string;
   spec: ServiceSpec;
+  adopt?: AdoptSpec;
   warnings?: string[];
 }
 
@@ -148,6 +163,7 @@ export interface ServiceView {
   live?: LiveState;
   data?: DataMount[];
   status?: ServiceStatus;
+  import?: ImportRecord;
 }
 
 export type GatewayTls = "auto" | "internal" | "off";
@@ -277,7 +293,7 @@ export interface AccountView {
 
 export type Change =
   | { op: "update_server"; name: string; settings: Record<string, unknown> }
-  | { op: "upsert_service"; name: string; spec: ServiceSpec }
+  | { op: "upsert_service"; name: string; spec: ServiceSpec; adopt?: AdoptSpec }
   | { op: "remove_service"; name: string }
   | { op: "upsert_gateway"; name: string; spec: GatewaySpec }
   | { op: "remove_gateway"; name: string }

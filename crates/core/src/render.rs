@@ -611,7 +611,6 @@ mod tests {
   fn spec() -> ServiceSpec {
     ServiceSpec {
       backup: None,
-      adopt: None,
       stopped: false,
       server: "node1".into(),
       source: Source::Image("traefik/whoami".into()),

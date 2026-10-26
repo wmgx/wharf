@@ -7,8 +7,9 @@ use wharf_api_types::{
   agent::ProjectState,
   spec::{Fleet, GatewayKind, GatewayTls},
   view::{
-    EdgeAppView, EdgeLive, EdgeProjectView, GatewayView, LiveState,
-    RouteView, ServerView, ServiceView, Status,
+    EdgeAppView, EdgeLive, EdgeProjectView, GatewayView,
+    ImportRecord, LiveState, RouteView, ServerView, ServiceView,
+    Status,
   },
 };
 
@@ -140,6 +141,24 @@ fn live_of(
   }
 }
 
+/// 还没部署的导入在服务的 meta 里，部署过的在导入记录表里。
+fn import_record(
+  snap: &Snapshot,
+  name: &str,
+) -> Option<ImportRecord> {
+  let row = &snap.world.services[name];
+  match &row.import {
+    Some(a) => Some(ImportRecord {
+      server: row.spec.server.clone(),
+      project: a.project.clone(),
+      containers: a.containers.clone(),
+      retired: Vec::new(),
+      done_at: None,
+    }),
+    None => snap.imports.get(name).cloned(),
+  }
+}
+
 /// 服务器上没有这个服务的容器。
 fn empty_project(name: &str) -> ProjectState {
   ProjectState {
@@ -205,6 +224,7 @@ pub fn service_view(
     version: row.version,
     live,
     data: crate::data::mounts(name, &row.spec),
+    import: import_record(snap, name),
     status,
   })
 }

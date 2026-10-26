@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use wharf_api_types::{
   ApiError,
   spec::{
-    BuildSource, Change, EdgeAppSpec, Fleet, GatewayKind,
+    AdoptSpec, BuildSource, Change, EdgeAppSpec, Fleet, GatewayKind,
     GatewaySpec, GatewayTls, RouteSpec, ServerSettings, ServiceSpec,
     Source,
   },
@@ -37,6 +37,8 @@ pub struct ServiceRow {
   pub spec: ServiceSpec,
   /// 端口名 → 宿主机端口。
   pub host_ports: BTreeMap<String, u16>,
+  /// 还没完成的导入：第一次部署成功后清掉，记进导入记录。存在 meta 里，不是用户配置。
+  pub import: Option<AdoptSpec>,
   pub version: u64,
 }
 
@@ -103,6 +105,10 @@ impl World {
                 .map_err(json_err)?,
               host_ports: serde_json::from_value(
                 row.meta["host_ports"].clone(),
+              )
+              .unwrap_or_default(),
+              import: serde_json::from_value(
+                row.meta["import"].clone(),
               )
               .unwrap_or_default(),
               version,
@@ -184,20 +190,22 @@ impl World {
             .ok_or_else(|| server_not_found(name))?;
           server.settings = settings.clone();
         }
-        Change::UpsertService { name, spec } => {
+        Change::UpsertService { name, spec, adopt } => {
           validate_name("服务", name)?;
-          let host_ports = self
-            .services
-            .get(name)
-            .map(|s| s.host_ports.clone())
-            .unwrap_or_default();
-          let version =
-            self.services.get(name).map(|s| s.version).unwrap_or(0);
+          let old = self.services.get(name);
+          let host_ports =
+            old.map(|s| s.host_ports.clone()).unwrap_or_default();
+          let version = old.map(|s| s.version).unwrap_or(0);
+          // 导入后、第一次部署前再改配置：导入还没做完，保留。
+          let import = adopt
+            .clone()
+            .or_else(|| old.and_then(|s| s.import.clone()));
           self.services.insert(
             name.clone(),
             ServiceRow {
               spec: spec.clone(),
               host_ports,
+              import,
               version,
             },
           );
@@ -312,6 +320,7 @@ impl World {
       changes.push(Change::UpsertService {
         name: name.clone(),
         spec: spec.clone(),
+        adopt: None,
       });
     }
     for (name, spec) in &fleet.gateways {
@@ -693,7 +702,13 @@ impl World {
       &current.services,
       &self.services,
       KIND_SERVICE,
-      |r| (to_json(&r.spec), json!({ "host_ports": r.host_ports })),
+      |r| {
+        let mut meta = json!({ "host_ports": r.host_ports });
+        if let Some(import) = &r.import {
+          meta["import"] = to_json(import);
+        }
+        (to_json(&r.spec), meta)
+      },
       &mut out,
     );
     diff_map(
@@ -1051,7 +1066,6 @@ mod tests {
   fn image_service(server: &str) -> ServiceSpec {
     ServiceSpec {
       backup: None,
-      adopt: None,
       stopped: false,
       server: server.into(),
       source: Source::Image("traefik/whoami".into()),
@@ -1072,10 +1086,12 @@ mod tests {
       Change::UpsertService {
         name: "a".into(),
         spec: image_service("node1"),
+        adopt: None,
       },
       Change::UpsertService {
         name: "b".into(),
         spec: image_service("node1"),
+        adopt: None,
       },
     ])
     .unwrap();
@@ -1096,6 +1112,7 @@ mod tests {
       Change::UpsertService {
         name: "who".into(),
         spec: image_service("node1"),
+        adopt: None,
       },
       Change::UpsertRoute {
         spec: RouteSpec {
@@ -1151,6 +1168,7 @@ mod tests {
     w.apply_changes(&[Change::UpsertService {
       name: "x".into(),
       spec: image_service("nowhere"),
+      adopt: None,
     }])
     .unwrap();
     let err = w.validate().unwrap_err();
@@ -1166,6 +1184,7 @@ mod tests {
       .apply_changes(&[Change::UpsertService {
         name: "x".into(),
         spec: image_service("node1"),
+        adopt: None,
       }])
       .unwrap();
     desired.allocate_ports().unwrap();

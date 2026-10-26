@@ -156,9 +156,9 @@ pub async fn preview(
       env: Default::default(),
       volumes: vec![],
       backup: None,
-      adopt: converted.adopt,
       stopped: false,
     },
+    adopt: converted.adopt,
     name,
     warnings,
   }))

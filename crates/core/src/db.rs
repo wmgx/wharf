@@ -13,7 +13,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
 use wharf_api_types::{
   ApiError,
-  view::{Applied, LastOp, OpStatus},
+  spec::AdoptSpec,
+  view::{Applied, ImportRecord, LastOp, OpStatus},
 };
 
 const MIGRATIONS: &[&str] = &[
@@ -213,7 +214,38 @@ CREATE TABLE service_ops (
   error TEXT
 );
 "#,
+  ADOPT_MIGRATION,
 ];
+
+/// adopt 从服务配置移到导入记录：部署过的记为已完成，还没部署的挪到 meta 里等第一次部署；
+/// 部署历史里的也去掉，免得回滚时又带回配置。未执行的计划里还是旧格式，删掉。
+const ADOPT_MIGRATION: &str = r#"
+CREATE TABLE imports (
+  service TEXT PRIMARY KEY,
+  server TEXT NOT NULL,
+  project TEXT,
+  containers TEXT,
+  retired TEXT,
+  done_at INTEGER
+);
+INSERT INTO imports (service, server, project, containers, done_at)
+SELECT r.name, json_extract(r.spec, '$.server'),
+       json_extract(r.spec, '$.adopt.project'),
+       json_extract(r.spec, '$.adopt.containers'),
+       (SELECT MIN(created_at) FROM deployments d WHERE d.service = r.name)
+FROM resources r
+WHERE r.kind = 'service' AND json_type(r.spec, '$.adopt') IS NOT NULL
+  AND EXISTS (SELECT 1 FROM deployments d WHERE d.service = r.name);
+UPDATE resources
+SET meta = json_set(COALESCE(meta, '{}'), '$.import', json(json_extract(spec, '$.adopt')))
+WHERE kind = 'service' AND json_type(spec, '$.adopt') IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM deployments d WHERE d.service = resources.name);
+UPDATE resources SET spec = json_remove(spec, '$.adopt')
+WHERE kind = 'service' AND json_type(spec, '$.adopt') IS NOT NULL;
+UPDATE deployments SET spec = json_remove(spec, '$.adopt')
+WHERE spec IS NOT NULL AND json_type(spec, '$.adopt') IS NOT NULL;
+DELETE FROM plans WHERE status = 'pending';
+"#;
 
 /// 端口字段 `{port, host_port}` 改成 `{container, host}`：旧的 `port` 在 compose 来源里
 /// 是宿主机端口，其余来源是容器端口。服务配置和部署历史（回滚用）都转换；
@@ -935,6 +967,65 @@ pub fn deployed_servers(
   rows.collect::<Result<_, _>>().map_err(sql_err)
 }
 
+/// 导入后第一次部署成功：记进导入记录，清掉服务上的待办导入，之后部署不再接管。
+pub fn finish_import(
+  c: &Connection,
+  service: &str,
+  server: &str,
+  adopt: &AdoptSpec,
+  retired: &[String],
+) -> Result<(), ApiError> {
+  let tx = c.unchecked_transaction().map_err(sql_err)?;
+  tx.execute(
+    "INSERT OR REPLACE INTO imports (service, server, project, containers, retired, done_at)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+    params![
+      service,
+      server,
+      adopt.project,
+      serde_json::to_string(&adopt.containers).map_err(json_err)?,
+      serde_json::to_string(retired).map_err(json_err)?,
+      now_ms()
+    ],
+  )
+  .map_err(sql_err)?;
+  tx.execute(
+    "UPDATE resources SET meta = json_remove(meta, '$.import'), version = version + 1
+     WHERE kind = 'service' AND name = ?1",
+    params![service],
+  )
+  .map_err(sql_err)?;
+  tx.commit().map_err(sql_err)
+}
+
+pub fn imports(
+  c: &Connection,
+) -> Result<std::collections::BTreeMap<String, ImportRecord>, ApiError>
+{
+  let mut stmt = c
+    .prepare("SELECT service, server, project, containers, retired, done_at FROM imports")
+    .map_err(sql_err)?;
+  let rows = stmt
+    .query_map([], |r| {
+      let list = |s: Option<String>| -> Vec<String> {
+        s.and_then(|s| serde_json::from_str(&s).ok())
+          .unwrap_or_default()
+      };
+      Ok((
+        r.get::<_, String>(0)?,
+        ImportRecord {
+          server: r.get(1)?,
+          project: r.get(2)?,
+          containers: list(r.get(3)?),
+          retired: list(r.get(4)?),
+          done_at: r.get::<_, Option<i64>>(5)?.map(to_time),
+        },
+      ))
+    })
+    .map_err(sql_err)?;
+  rows.collect::<Result<_, _>>().map_err(sql_err)
+}
+
 /// 每个服务最近一次成功部署的哈希和时间。
 pub fn applied(
   c: &Connection,
@@ -1018,6 +1109,43 @@ pub fn interrupt_service_ops(c: &Connection) -> Result<(), ApiError> {
 
 #[cfg(test)]
 mod tests {
+  #[test]
+  fn adopt_migration() {
+    let c = Connection::open_in_memory().unwrap();
+    c.execute_batch(
+      r#"CREATE TABLE resources (kind TEXT, name TEXT, spec TEXT, meta TEXT NOT NULL DEFAULT '{}');
+       CREATE TABLE deployments (service TEXT, spec TEXT, created_at INTEGER);
+       CREATE TABLE plans (status TEXT);
+       INSERT INTO resources (kind, name, spec) VALUES
+         ('service', 'done', '{"server":"a","adopt":{"containers":["done"]}}'),
+         ('service', 'todo', '{"server":"a","adopt":{"project":"blog"}}'),
+         ('service', 'plain', '{"server":"a"}');
+       INSERT INTO deployments VALUES ('done', '{"server":"a","adopt":{"containers":["done"]}}', 5);"#,
+    )
+    .unwrap();
+    c.execute_batch(ADOPT_MIGRATION).unwrap();
+    let rows: Vec<(String, String, String)> = c
+      .prepare("SELECT name, spec, meta FROM resources ORDER BY name")
+      .unwrap()
+      .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+      .unwrap()
+      .map(Result::unwrap)
+      .collect();
+    let meta =
+      |n: &str| rows.iter().find(|r| r.0 == n).unwrap().2.clone();
+    assert!(rows.iter().all(|r| !r.1.contains("adopt")));
+    assert_eq!(meta("done"), "{}");
+    assert_eq!(meta("todo"), r#"{"import":{"project":"blog"}}"#);
+    let imports = imports(&c).unwrap();
+    assert_eq!(imports.keys().collect::<Vec<_>>(), ["done"]);
+    assert_eq!(imports["done"].containers, ["done"]);
+    assert!(imports["done"].done_at.is_some());
+    let spec: String = c
+      .query_row("SELECT spec FROM deployments", [], |r| r.get(0))
+      .unwrap();
+    assert!(!spec.contains("adopt"));
+  }
+
   #[test]
   fn ports_migration() {
     let c = Connection::open_in_memory().unwrap();

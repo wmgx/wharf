@@ -142,7 +142,7 @@ function ImportDialog({ item, onClose }: { item: Unmanaged; onClose: () => void 
   const submit = () => {
     if (!preview) return;
     onClose();
-    actions.plan({ title: `导入 ${preview.name}`, changes: [{ op: "upsert_service", name: preview.name, spec: preview.spec }] });
+    actions.plan({ title: `导入 ${preview.name}`, changes: [{ op: "upsert_service", name: preview.name, spec: preview.spec, adopt: preview.adopt }] });
   };
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>

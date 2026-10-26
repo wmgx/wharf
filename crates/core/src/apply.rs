@@ -1128,8 +1128,7 @@ async fn service_up(
   let template = snapshot::service_template(world, &net, service)?;
   // 导入的服务：agent 拉好镜像后停掉原来的容器，启动失败时由 agent 恢复。
   let retire = row
-    .spec
-    .adopt
+    .import
     .as_ref()
     .filter(|a| a.project.is_some() || !a.containers.is_empty())
     .map(|a| Retire {
@@ -1138,8 +1137,8 @@ async fn service_up(
       containers: a.containers.clone(),
     });
   // 刚导入时本机已有的镜像不拉取，避免拉到新版本而重建容器。
-  let pull_missing_only = row.spec.adopt.is_some()
-    && !has_deployment(state, service).await?;
+  let pull_missing_only =
+    row.import.is_some() && !has_deployment(state, service).await?;
   // 起不来时自动换回上一版：只对没有数据的服务做，新版本可能已经改了数据，
   // 旧版本不一定认。compose 来源看不出有没有数据，不做。
   let rollback = row.spec.volumes.is_empty()
@@ -1190,6 +1189,20 @@ async fn service_up(
     restore(state, server, service, retired, &progress).await;
   }
   running?;
+  if let Some(import) = row.import.clone() {
+    let retired: Vec<String> = result
+      .retired
+      .iter()
+      .map(|r| r.renamed.clone().unwrap_or_else(|| r.name.clone()))
+      .collect();
+    let (service, server) = (service.to_string(), server.to_string());
+    state
+      .db
+      .call(move |c| {
+        db::finish_import(c, &service, &server, &import, &retired)
+      })
+      .await?;
+  }
   if row.spec.stopped {
     project_stop_start(
       state, server, service, false, &progress, cancel,
