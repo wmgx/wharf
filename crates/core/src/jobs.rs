@@ -16,6 +16,8 @@ use crate::{
   state::AppState,
 };
 
+/// 连通性重新探测的间隔，远小于结果的有效期（一天）。
+const REACH_REFRESH: Duration = Duration::from_secs(6 * 3600);
 const TICK: Duration = Duration::from_secs(10 * 60);
 const FIRST_TICK: Duration = Duration::from_secs(2 * 60);
 const BACKUP_EVERY_MS: i64 = 24 * 3600 * 1000;
@@ -28,6 +30,16 @@ const EDGE_REFRESH: Duration = Duration::from_secs(5 * 60);
 
 pub fn spawn(state: Arc<AppState>) {
   let edge_state = state.clone();
+  let reach_state = state.clone();
+  tokio::spawn(async move {
+    tokio::time::sleep(FIRST_TICK).await;
+    loop {
+      if let Err(e) = crate::network::probe_all(&reach_state).await {
+        tracing::warn!("探测机器之间的连通性失败：{e}");
+      }
+      tokio::time::sleep(REACH_REFRESH).await;
+    }
+  });
   tokio::spawn(async move {
     tokio::time::sleep(Duration::from_secs(10)).await;
     loop {

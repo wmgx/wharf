@@ -171,7 +171,7 @@ function build(status: Status, net: NetworkView | null): { nodes: Node[]; edges:
 
   // 机器之间能不能连上对方的内网地址，两个方向合成一条线。
   const pairs = new Map<string, { a: string; b: string; ok: boolean }>();
-  for (const r of net?.reach ?? []) {
+  for (const r of net?.reach.filter((r) => !r.stale) ?? []) {
     const [a, b] = [r.from, r.to].sort();
     const p = pairs.get(`${a}|${b}`) ?? { a, b, ok: true };
     pairs.set(`${a}|${b}`, { ...p, ok: p.ok && r.ok });

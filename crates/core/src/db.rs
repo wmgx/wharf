@@ -662,12 +662,15 @@ pub fn secrets(
 
 pub type Reach = std::collections::BTreeMap<(String, String), bool>;
 
+/// 探测结果超过这个时间就当作不知道：网络会变，旧结果不能拿来下结论。
+pub const REACH_TTL_MS: i64 = 24 * 3600 * 1000;
+
 pub fn reach(conn: &Connection) -> Result<Reach, ApiError> {
   let mut stmt = conn
-    .prepare("SELECT from_server, to_server, ok FROM reach")
+    .prepare("SELECT from_server, to_server, ok FROM reach WHERE checked_at >= ?1")
     .map_err(sql_err)?;
   let rows = stmt
-    .query_map([], |r| {
+    .query_map([now_ms() - REACH_TTL_MS], |r| {
       Ok((
         (r.get::<_, String>(0)?, r.get::<_, String>(1)?),
         r.get(2)?,

@@ -34,6 +34,14 @@ pub async fn probe(
   auth: Auth,
 ) -> ApiResult<NetworkView> {
   auth.require(TokenScope::Read)?;
+  let snap = probe_all(&s).await?;
+  Ok(Json(view(&s, &snap).await?))
+}
+
+/// 每台在线机器探测其余每台机器的内网地址。后台定时跑，也可以在组网页手动触发。
+pub async fn probe_all(
+  s: &AppState,
+) -> Result<Snapshot, wharf_api_types::ApiError> {
   let snap = snapshot::load(&s.db).await?;
   let net = snap.net(&snap.world);
   let names: Vec<&String> = snap.world.servers.keys().collect();
@@ -49,8 +57,8 @@ pub async fn probe(
       (from.to_string(), to)
     })
     .collect();
-  link::probe_pairs(&s, &net, pairs).await;
-  Ok(Json(view(&s, &snap).await?))
+  link::probe_pairs(s, &net, pairs).await;
+  Ok(snap)
 }
 
 async fn view(
@@ -87,6 +95,7 @@ async fn view(
       from,
       to,
       ok,
+      stale: at < db::now_ms() - db::REACH_TTL_MS,
       checked_at: chrono::Utc
         .timestamp_millis_opt(at)
         .single()

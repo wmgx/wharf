@@ -410,7 +410,7 @@ export type NetworkMode = "tailscale" | "lan" | "public";
 
 export interface NetworkView {
   servers: { name: string; mode: NetworkMode; configured?: boolean; private_ip?: string; public_ip?: string; online: boolean }[];
-  reach: { from: string; to: string; ok: boolean; checked_at: string }[];
+  reach: { from: string; to: string; ok: boolean; checked_at: string; stale?: boolean }[];
 }
 
 export interface SecretView {

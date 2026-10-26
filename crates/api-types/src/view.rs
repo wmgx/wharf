@@ -43,6 +43,9 @@ pub struct ReachView {
   pub to: String,
   pub ok: bool,
   pub checked_at: DateTime<Utc>,
+  /// 超过一天没重新探测，结果不作数。
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub stale: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

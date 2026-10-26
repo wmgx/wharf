@@ -160,6 +160,12 @@ function Cell({ self, r, from, to }: { self: boolean; r?: NetworkView["reach"][n
         <MinusIcon className="size-4" />
       </span>
     );
+  if (r.stale)
+    return (
+      <span title={`${r.ok ? "通" : "不通"} · ${ago(r.checked_at)}，已过期`} className="inline-flex text-muted-foreground">
+        {r.ok ? <CheckIcon className="size-4" /> : <XIcon className="size-4" />}
+      </span>
+    );
   return r.ok ? (
     <span title={`通 · ${ago(r.checked_at)}`} className="inline-flex text-success">
       <CheckIcon className="size-4" />
