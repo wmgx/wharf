@@ -8,7 +8,7 @@
 use serde_json::json;
 use wharf_api_types::{
   ApiError,
-  plan::{Action, Layer, Risk},
+  plan::{Action, Impact, Layer},
   spec::{EdgeAppSpec, EdgeKind},
 };
 use wharf_providers::{Owner, RemoteRecord};
@@ -55,7 +55,7 @@ fn deploy_items(b: &mut Builder, current: &World, desired: &World) {
       },
       None,
       Some(json!({ "project": app.spec.project_name(name) })),
-      Risk::Safe,
+      vec![],
       format!("发布到 Cloudflare {what}"),
     );
     b.step(
@@ -105,7 +105,7 @@ async fn domain_items(
       Action::Delete,
       Some(json!({ "project": row.project, "kind": row.kind })),
       None,
-      Risk::Disruptive,
+      vec![Impact::Downtime],
       format!("从 {} 解绑域名", row.project),
     );
     b.step(
@@ -133,9 +133,9 @@ async fn domain_items(
       None,
       Some(json!({ "project": want.project, "kind": want.kind })),
       if takeover {
-        Risk::Destructive
+        vec![Impact::Overwrite]
       } else {
-        Risk::Safe
+        vec![]
       },
       if takeover {
         format!(
@@ -179,7 +179,7 @@ async fn worker_dns(
       Action::Delete,
       Some(json!({ "account": owned.account, "remote_id": owned.remote_id })),
       None,
-      Risk::Disruptive,
+      vec![Impact::Remove],
       "改由 Worker 管理这个域名的 DNS",
     );
     b.step(

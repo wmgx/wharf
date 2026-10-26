@@ -25,10 +25,13 @@ const LAYER: Record<string, string> = {
   edge: "边缘",
 };
 
-const RISK: Record<string, { text: string; cls: string }> = {
-  disruptive: { text: "会短暂中断", cls: "bg-warning/10 text-warning" },
-  destructive: { text: "破坏性", cls: "bg-destructive/10 text-destructive" },
-  exposes_public: { text: "公网暴露", cls: "bg-primary/10 text-primary" },
+const IMPACT: Record<string, { text: string; cls: string }> = {
+  restart: { text: "重启", cls: "bg-warning/10 text-warning" },
+  downtime: { text: "停服", cls: "bg-warning/10 text-warning" },
+  remove: { text: "删除", cls: "bg-destructive/10 text-destructive" },
+  data_loss: { text: "丢数据", cls: "bg-destructive/10 text-destructive" },
+  overwrite: { text: "覆盖", cls: "bg-destructive/10 text-destructive" },
+  public: { text: "公开", cls: "bg-primary/10 text-primary" },
 };
 
 type Stage = "planning" | "review" | "running" | "done";
@@ -197,11 +200,15 @@ function PlanReview({ plan, confirmed, setConfirmed }: { plan: Plan; confirmed: 
                 </div>
                 <div className="text-xs text-muted-foreground">{it.reason}</div>
               </div>
-              {it.risk !== "safe" && RISK[it.risk] && (
-                <Badge variant="outline" className={cn("border-transparent", RISK[it.risk].cls)}>
-                  {RISK[it.risk].text}
-                </Badge>
-              )}
+              <div className="flex shrink-0 gap-1">
+                {(it.impacts ?? []).map((k) =>
+                  IMPACT[k] ? (
+                    <Badge key={k} variant="outline" className={cn("border-transparent", IMPACT[k].cls)}>
+                      {IMPACT[k].text}
+                    </Badge>
+                  ) : null,
+                )}
+              </div>
             </div>
           ))}
         </div>
@@ -215,7 +222,7 @@ function PlanReview({ plan, confirmed, setConfirmed }: { plan: Plan; confirmed: 
                 <Checkbox checked={confirmed.has(a)} onCheckedChange={() => toggle(a)} />
                 <span className="font-mono text-[13px]">{a}</span>
                 <span className="text-xs text-muted-foreground">
-                  {[...new Set(plan.items.filter((i) => i.address === a && i.risk !== "safe").map((i) => RISK[i.risk]?.text))]
+                  {[...new Set(plan.items.filter((i) => i.address === a).flatMap((i) => (i.impacts ?? []).map((k) => IMPACT[k]?.text)))]
                     .filter(Boolean)
                     .join("、")}
                 </span>

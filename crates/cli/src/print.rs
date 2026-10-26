@@ -2,7 +2,7 @@
 
 use wharf_api_types::{
   ApiError,
-  plan::{Action, Plan, Risk, Run, RunStatus, RunStep, StepStatus},
+  plan::{Action, Plan, Run, RunStatus, RunStep, StepStatus},
   spec::NetworkMode,
   view::{BackupsView, NetworkView, OpStatus, ServiceView, Status},
 };
@@ -63,12 +63,17 @@ pub fn plan_with(p: &Plan, next_step: bool) {
       .max()
       .unwrap_or(0);
     for item in &p.items {
-      let risk = match item.risk {
-        Risk::Safe => String::new(),
-        Risk::Disruptive => "  [会中断]".into(),
-        Risk::Destructive => "  [破坏性，需确认]".into(),
-        Risk::ExposesPublic => "  [公网暴露，需确认]".into(),
-      };
+      let mut risk: String = item
+        .impacts
+        .iter()
+        .map(|i| format!("[{}]", i.label()))
+        .collect();
+      if item.needs_confirm() {
+        risk.push_str("[需确认]");
+      }
+      if !risk.is_empty() {
+        risk.insert_str(0, "  ");
+      }
       println!(
         "  {} {:<width$}  {:<9}  {}{risk}",
         symbol(item.action),

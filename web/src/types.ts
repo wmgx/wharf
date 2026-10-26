@@ -305,7 +305,7 @@ export type Change =
   | { op: "upsert_edge_app"; name: string; spec: EdgeAppSpec }
   | { op: "remove_edge_app"; name: string };
 
-export type Risk = "safe" | "disruptive" | "destructive" | "exposes_public";
+export type Impact = "restart" | "downtime" | "remove" | "data_loss" | "overwrite" | "public";
 
 export interface PlanItem {
   id: number;
@@ -314,7 +314,7 @@ export interface PlanItem {
   action: "create" | "update" | "delete" | "adopt";
   before?: unknown;
   after?: unknown;
-  risk: Risk;
+  impacts?: Impact[];
   reason: string;
 }
 

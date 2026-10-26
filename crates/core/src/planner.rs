@@ -15,7 +15,7 @@ use wharf_api_types::{
   ApiError,
   agent::ProjectState,
   plan::{
-    Action, Layer, Plan, PlanItem, PlanRequest, PlanStatus, Risk,
+    Action, Impact, Layer, Plan, PlanItem, PlanRequest, PlanStatus,
   },
   spec::{
     BuildSource, EdgeAppSpec, EdgeKind, GatewayKind, NetworkMode,
@@ -255,7 +255,7 @@ impl Builder {
     action: Action,
     before: Option<Value>,
     after: Option<Value>,
-    risk: Risk,
+    impacts: Vec<Impact>,
     reason: impl Into<String>,
   ) -> u32 {
     let id = self.items.len() as u32 + 1;
@@ -266,7 +266,7 @@ impl Builder {
       action,
       before,
       after,
-      risk,
+      impacts,
       reason: reason.into(),
     });
     id
@@ -416,7 +416,7 @@ pub async fn make_plan(
   let mut needs_confirm: Vec<String> = b
     .items
     .iter()
-    .filter(|i| i.risk.needs_confirm())
+    .filter(|i| i.needs_confirm())
     .map(|i| i.address.clone())
     .collect();
   needs_confirm.sort();
@@ -517,7 +517,7 @@ fn config_items(
     };
     let (risk, reason) = match (kind, action) {
       (KIND_SERVICE, Action::Delete) => {
-        (Risk::Destructive, "删除服务（数据目录保留）".to_string())
+        (vec![Impact::Remove], "删除服务（数据目录保留）".to_string())
       }
       (KIND_SERVICE, Action::Create)
         if desired
@@ -529,14 +529,14 @@ fn config_items(
         let adopt = desired.services[name].import.as_ref();
         match adopt.and_then(|a| a.project.as_deref()) {
           Some(project) => (
-            Risk::Disruptive,
+            vec![Impact::Restart],
             format!(
               "导入：停掉原来的 compose 项目 {project}，用新名字重新创建容器"
             ),
           ),
           None if adopt.is_some_and(|a| !a.containers.is_empty()) => {
             (
-              Risk::Disruptive,
+              vec![Impact::Restart],
               format!(
                 "导入：原来的容器 {} 改名停掉（失败时恢复），重新创建",
                 adopt
@@ -546,34 +546,36 @@ fn config_items(
             )
           }
           None => (
-            Risk::Safe,
+            vec![],
             "导入：沿用同名 compose 项目，配置一致时不重建容器"
               .to_string(),
           ),
         }
       }
-      (KIND_GATEWAY, Action::Delete) => {
-        (Risk::Disruptive, "删除网关".to_string())
-      }
+      (KIND_GATEWAY, Action::Delete) => (
+        vec![Impact::Remove, Impact::Downtime],
+        "删除网关".to_string(),
+      ),
       (KIND_EDGE, Action::Delete) => {
-        (Risk::Safe, "不再纳管（厂商那边的项目保留）".to_string())
+        (vec![], "不再纳管（厂商那边的项目保留）".to_string())
       }
-      (KIND_ROUTE, Action::Delete) => {
-        (Risk::Disruptive, "删除路由，域名将无法访问".to_string())
-      }
+      (KIND_ROUTE, Action::Delete) => (
+        vec![Impact::Downtime],
+        "删除路由，域名将无法访问".to_string(),
+      ),
       (KIND_ROUTE, Action::Create) => {
         let route = desired.routes.get(name);
         let auth = route.is_some_and(|r| r.spec.auth);
         if auth {
-          (Risk::Safe, "新增路由".to_string())
+          (vec![], "新增路由".to_string())
         } else {
           (
-            Risk::ExposesPublic,
+            vec![Impact::Public],
             "新增公网路由，未开启 auth".to_string(),
           )
         }
       }
-      (_, Action::Create) => (Risk::Safe, "新增".to_string()),
+      (_, Action::Create) => (vec![], "新增".to_string()),
       // 配置没变，只是记下固定的镜像版本（存在 meta 里）。
       (KIND_SERVICE, Action::Update) if before == after => {
         let pinned = desired
@@ -582,13 +584,11 @@ fn config_items(
           .and_then(|r| r.pins.values().next())
           .map(|d| crate::pins::short(d).to_string());
         match pinned {
-          Some(d) => {
-            (Risk::Safe, format!("固定镜像版本 {d}，不重建"))
-          }
-          None => (Risk::Safe, "更新内部记录，不重建".to_string()),
+          Some(d) => (vec![], format!("固定镜像版本 {d}，不重建")),
+          None => (vec![], "更新内部记录，不重建".to_string()),
         }
       }
-      _ => (Risk::Safe, "修改配置".to_string()),
+      _ => (vec![], "修改配置".to_string()),
     };
     b.item(
       format!("{kind}/{name}"),
@@ -730,7 +730,7 @@ fn service_items(
         Action::Create,
         None,
         Some(json!({ "dirs": new_dirs })),
-        Risk::Safe,
+        vec![],
         "创建数据目录",
       );
       b.step(
@@ -768,7 +768,7 @@ fn service_items(
           Action::Update,
           Some(json!({ "containers": state.containers })),
           after,
-          Risk::Disruptive,
+          vec![Impact::Downtime],
           "停止服务",
         );
         b.step(
@@ -801,27 +801,19 @@ fn service_items(
     let decision = match status.get(server).and_then(|s| s.as_ref()) {
       None if changed(writes, KIND_SERVICE, name) => Some((
         Action::Update,
-        Risk::Disruptive,
+        vec![Impact::Restart],
         "无法读取现状，按新配置部署".to_string(),
         None,
       )),
       None => None,
       Some(projects) => match projects.get(name) {
-        None => Some((
-          Action::Create,
-          Risk::Safe,
-          "部署新服务".into(),
-          None,
-        )),
+        None => {
+          Some((Action::Create, vec![], "部署新服务".into(), None))
+        }
         Some(state)
           if state.hash.is_none() && state.containers.is_empty() =>
         {
-          Some((
-            Action::Create,
-            Risk::Safe,
-            "部署新服务".into(),
-            None,
-          ))
+          Some((Action::Create, vec![], "部署新服务".into(), None))
         }
         Some(state)
           if state.hash.as_deref() != Some(hash.as_str()) =>
@@ -838,9 +830,9 @@ fn service_items(
             "漂移：服务器上的部署和配置不一致，重新部署"
           };
           let risk = if state.hash.is_none() && !adopting {
-            Risk::Destructive
+            vec![Impact::Restart, Impact::Overwrite]
           } else {
-            Risk::Disruptive
+            vec![Impact::Restart]
           };
           Some((
             Action::Update,
@@ -851,7 +843,7 @@ fn service_items(
         }
         Some(state) if !state.all_running() => Some((
           Action::Update,
-          Risk::Disruptive,
+          vec![Impact::Restart],
           if changed(writes, KIND_SERVICE, name) {
             "启动服务".to_string()
           } else {
@@ -863,7 +855,7 @@ fn service_items(
           Some(json!({ "containers": state.containers })),
         )),
         Some(_) => upgrade.map(|reason| {
-          (Action::Update, Risk::Disruptive, reason, None)
+          (Action::Update, vec![Impact::Restart], reason, None)
         }),
       },
     };
@@ -886,7 +878,7 @@ fn service_items(
       {
         Some((
           action,
-          Risk::Destructive,
+          vec![Impact::Restart, Impact::Overwrite],
           format!(
             "{server} 上同名 compose 项目里有不是 Wharf 部署的容器（{}），部署会删除它们；要保留请先导入，或换个服务名",
             foreign.join("、")
@@ -946,7 +938,7 @@ fn service_items(
         Action::Delete,
         Some(json!({ "server": server })),
         None,
-        Risk::Disruptive,
+        vec![],
         format!(
           "迁移到 {to} 后删除 {server} 上的旧容器（数据目录保留）"
         ),
@@ -968,7 +960,7 @@ fn service_items(
       Action::Delete,
       Some(json!({ "server": server })),
       None,
-      Risk::Destructive,
+      vec![Impact::Remove],
       "停止并删除容器",
     );
     for m in crate::data::mounts(name, &svc.spec) {
@@ -1013,7 +1005,7 @@ fn move_items(
       Action::Update,
       None,
       None,
-      Risk::Destructive,
+      vec![Impact::DataLoss],
       format!(
         "{} 不归 Wharf 管，不会迁移到 {to}：迁移后服务看不到这些数据",
         left.join("、")
@@ -1030,7 +1022,7 @@ fn move_items(
     Action::Update,
     Some(json!({ "server": from, "dir": format!("/srv/{name}/") })),
     Some(json!({ "server": to, "dir": format!("/srv/{name}/") })),
-    Risk::Disruptive,
+    vec![Impact::Downtime],
     format!("迁移 /srv/{name}/ 从 {from} 到 {to}：先同步一遍，再停掉旧容器做增量同步，这段时间服务不可用"),
   );
   b.step(
@@ -1094,7 +1086,7 @@ fn link_items(
         if s.hash.as_deref() != Some(p.hash.as_str()) {
           Some((
             Action::Update,
-            Risk::Disruptive,
+            vec![Impact::Restart],
             format!(
               "{}（配置变化，重建，经这条隧道的路由会断几秒）",
               p.summary
@@ -1103,7 +1095,7 @@ fn link_items(
         } else if !s.all_running() {
           Some((
             Action::Update,
-            Risk::Disruptive,
+            vec![Impact::Restart],
             format!(
               "漂移：隧道容器没在运行（{}）",
               describe_containers(s)
@@ -1113,7 +1105,7 @@ fn link_items(
           None
         }
       }
-      _ => Some((Action::Create, Risk::Safe, p.summary.clone())),
+      _ => Some((Action::Create, vec![], p.summary.clone())),
     };
     let Some((action, risk, reason)) = decision else {
       continue;
@@ -1157,7 +1149,7 @@ fn link_items(
       Action::Delete,
       Some(json!({ "server": p.server, "summary": p.summary })),
       None,
-      Risk::Disruptive,
+      vec![Impact::Remove],
       "没有路由再用这条隧道，停止并删除",
     );
     b.step(
@@ -1197,7 +1189,7 @@ fn tailscale_items(
           Action::Delete,
           Some(json!({ "server": server })),
           None,
-          Risk::Disruptive,
+          vec![Impact::Remove],
           "接入方式不再是 tailscale，删除 Wharf 装的 Tailscale（机器会留在 Tailscale 后台，显示离线）",
         );
         b.step(
@@ -1215,17 +1207,17 @@ fn tailscale_items(
     let decision = match existing {
       None => Some((
         Action::Create,
-        Risk::Safe,
+        vec![],
         format!("没检测到 Tailscale，起容器并以 {} 加入", ts::TAG),
       )),
       Some(s) if s.hash.as_deref() != Some(hash.as_str()) => Some((
         Action::Update,
-        Risk::Disruptive,
+        vec![Impact::Restart],
         "Tailscale 容器配置变化，重建（不会重新加入）".to_string(),
       )),
       Some(s) if !s.all_running() => Some((
         Action::Update,
-        Risk::Disruptive,
+        vec![Impact::Restart],
         format!(
           "漂移：Tailscale 容器没在运行（{}）",
           describe_containers(s)
@@ -1282,30 +1274,30 @@ fn gateway_items(
         (!same).then(|| {
           (
             Action::Update,
-            Risk::Disruptive,
+            vec![Impact::Restart],
             "无法读取现状，按新配置应用".to_string(),
           )
         })
       }
       Some(projects) => match projects.get(&project) {
         Some(s) if s.hash.is_none() && s.containers.is_empty() => {
-          Some((Action::Create, Risk::Safe, "部署网关".to_string()))
+          Some((Action::Create, vec![], "部署网关".to_string()))
         }
         None => {
-          Some((Action::Create, Risk::Safe, "部署网关".to_string()))
+          Some((Action::Create, vec![], "部署网关".to_string()))
         }
         Some(s)
           if s.hash.as_deref() != Some(r.compose_hash.as_str()) =>
         {
           Some((
             Action::Update,
-            Risk::Disruptive,
+            vec![Impact::Restart],
             "网关容器配置变化，重建".to_string(),
           ))
         }
         Some(s) if !s.all_running() => Some((
           Action::Update,
-          Risk::Disruptive,
+          vec![Impact::Restart],
           format!(
             "漂移：网关容器没在运行（{}）",
             describe_containers(s)
@@ -1317,7 +1309,7 @@ fn gateway_items(
         {
           Some((
             Action::Update,
-            Risk::Safe,
+            vec![],
             match gw.spec.kind {
               GatewayKind::Caddy => "路由变化，热重载配置",
               GatewayKind::CloudflareTunnel => {
@@ -1376,7 +1368,7 @@ fn gateway_items(
       Action::Delete,
       Some(json!({ "server": server })),
       None,
-      Risk::Disruptive,
+      vec![Impact::Remove, Impact::Downtime],
       "停止并删除网关容器",
     );
     b.step(
@@ -1487,7 +1479,7 @@ async fn dns_items(
       Action::Delete,
       Some(json!({ "account": owned.account, "remote_id": owned.remote_id })),
       None,
-      Risk::Disruptive,
+      vec![Impact::Remove],
       "删除路由留下的 DNS 记录",
     );
     b.step(
@@ -1591,7 +1583,7 @@ async fn dns_items(
             .collect::<Vec<_>>()
         )),
         after,
-        Risk::Destructive,
+        vec![Impact::Overwrite],
         format!(
           "{host} 已有 {} 条不是 Wharf 创建的记录，接管会覆盖{}",
           foreign.len(),
@@ -1613,7 +1605,7 @@ async fn dns_items(
           Action::Create,
           None,
           after,
-          Risk::Safe,
+          vec![],
           format!("新建 {} 记录", spec.record_type),
         );
         b.step(vec![id], title, upsert(None, vec![]));
@@ -1626,7 +1618,7 @@ async fn dns_items(
           Action::Update,
           Some(first.canonical.clone()),
           after,
-          Risk::Disruptive,
+          vec![Impact::Restart],
           if first.canonical == canonical {
             "删除重复的记录".to_string()
           } else {
