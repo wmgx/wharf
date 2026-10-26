@@ -183,6 +183,7 @@ pub fn service_view(
     addresses,
     version: row.version,
     live,
+    data: crate::data::mounts(name, &row.spec),
   })
 }
 

@@ -146,6 +146,7 @@ export interface ServiceView {
   addresses: Record<string, string>;
   version: number;
   live?: LiveState;
+  data?: DataMount[];
 }
 
 export type GatewayTls = "auto" | "internal" | "off";
@@ -462,4 +463,15 @@ export interface FileEntry {
   size: number;
   /** 毫秒。 */
   modified: number;
+}
+
+/** 数据归属：只有 managed 会被迁移、备份。 */
+export type DataKind = "managed" | "external_dir" | "named_volume";
+
+export interface DataMount {
+  kind: DataKind;
+  /** 宿主机路径或卷名；匿名卷为空。 */
+  source: string;
+  target: string;
+  container?: string;
 }

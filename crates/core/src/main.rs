@@ -13,6 +13,7 @@ mod auth;
 mod backup;
 mod build;
 mod core_backup;
+mod data;
 mod db;
 mod doctor;
 mod edge;

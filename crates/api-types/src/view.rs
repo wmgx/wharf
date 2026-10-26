@@ -84,6 +84,44 @@ pub struct ServiceView {
   /// 实时状态，查不到时为空。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub live: Option<LiveState>,
+  /// 服务挂载的数据和归属，从配置里算出来。
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub data: Vec<DataMount>,
+}
+
+/// 数据归属：决定迁移、备份、删除时动不动它。
+#[derive(
+  Debug,
+  Clone,
+  Copy,
+  PartialEq,
+  Eq,
+  Serialize,
+  Deserialize,
+  JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum DataKind {
+  /// `/srv/<服务>/` 下：迁移时同步、每天备份、迁走后旧机器上的 7 天后删除。
+  Managed,
+  /// 其他宿主机目录：Wharf 不迁移、不备份、不删除。
+  ExternalDir,
+  /// docker 命名卷或匿名卷：Wharf 不迁移、不备份、不删除。
+  NamedVolume,
+}
+
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct DataMount {
+  pub kind: DataKind,
+  /// 宿主机路径或卷名；匿名卷为空。
+  pub source: String,
+  /// 容器内路径。
+  pub target: String,
+  /// compose 里的服务名；image / build 来源为空。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub container: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

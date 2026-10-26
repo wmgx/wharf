@@ -21,6 +21,7 @@ use wharf_api_types::{
     BuildSource, EdgeKind, GatewayKind, NetworkMode, RouteSpec,
     Source,
   },
+  view::DataKind,
 };
 use wharf_providers::{DnsRecordSpec, DnsRecordType, RemoteRecord};
 
@@ -911,9 +912,10 @@ fn service_items(
       Risk::Destructive,
       "停止并删除容器",
     );
-    if !svc.spec.volumes.is_empty() {
+    for m in crate::data::mounts(name, &svc.spec) {
       b.warnings.push(format!(
-        "服务 {name} 的数据目录 /srv/{name}/ 会保留在 {server} 上，需要时手动删除"
+        "服务 {name} 的{} 会保留在 {server} 上，需要时手动删除",
+        crate::data::describe(&m)
       ));
     }
     b.step(
@@ -938,12 +940,29 @@ fn move_items(
   net: &Net,
 ) {
   let old = &current.services[name];
-  let is_compose = matches!(
-    old.spec.source,
-    wharf_api_types::spec::Source::Compose { .. }
-  );
-  // 镜像来源、没有数据卷：没有数据要搬，新容器起来、网关切过去即可，不停服。
-  if !is_compose && old.spec.volumes.is_empty() {
+  let mounts = crate::data::mounts(name, &old.spec);
+  let left: Vec<String> = mounts
+    .iter()
+    .filter(|m| m.kind != DataKind::Managed)
+    .map(crate::data::describe)
+    .collect();
+  // 不归 Wharf 管的数据不会跟着走，新服务器上的服务看不到它们，要用户确认。
+  if !left.is_empty() {
+    b.item(
+      format!("{KIND_SERVICE}/{name}"),
+      Layer::Volume,
+      Action::Update,
+      None,
+      None,
+      Risk::Destructive,
+      format!(
+        "{} 不归 Wharf 管，不会迁移到 {to}：迁移后服务看不到这些数据",
+        left.join("、")
+      ),
+    );
+  }
+  // 没有 Wharf 管理的数据：没有要搬的，新容器起来、网关切过去即可，不停服。
+  if !mounts.iter().any(|m| m.kind == DataKind::Managed) {
     return;
   }
   let id = b.item(
@@ -964,11 +983,6 @@ fn move_items(
       to: to.to_string(),
     },
   );
-  if is_compose {
-    b.warnings.push(format!(
-      "服务 {name} 是 compose 来源：只迁移 /srv/{name}/ 下的数据，compose 里其他位置的挂载和命名卷不会迁移"
-    ));
-  }
   for (server, role) in [(from, "源"), (to, "目标")] {
     match net.private.get(server) {
       None => b.warnings.push(format!(

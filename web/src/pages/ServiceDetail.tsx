@@ -26,7 +26,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useStatus } from "@/status";
-import type { DeploymentView, PortSpec, ServiceView } from "@/types";
+import type { DataKind, DeploymentView, PortSpec, ServiceView } from "@/types";
 
 const Terminal = lazy(() => import("@/components/Terminal"));
 
@@ -221,6 +221,22 @@ export function ServiceDetail() {
                 ))}
                 {!Object.keys(svc.spec.env ?? {}).length && "-"}
               </dd>
+              {!!svc.data?.length && (
+                <>
+                  <dt className="text-muted-foreground">数据</dt>
+                  <dd className="grid gap-1">
+                    {svc.data.map((m, i) => (
+                      <div key={i} className="flex flex-wrap items-center gap-2 font-mono text-xs">
+                        <span>{m.source || "匿名卷"}</span>
+                        <span className="text-muted-foreground">→ {m.target}</span>
+                        <Badge variant={m.kind === "managed" ? "secondary" : "outline"} className={m.kind === "managed" ? "font-normal" : "border-warning/50 font-normal text-warning"}>
+                          {DATA_KIND[m.kind]}
+                        </Badge>
+                      </div>
+                    ))}
+                  </dd>
+                </>
+              )}
             </dl>
           </CardContent>
         </Card>
@@ -342,6 +358,8 @@ function EditService({ svc, open, onClose }: { svc: ServiceView; open: boolean; 
     </Sheet>
   );
 }
+
+const DATA_KIND: Record<DataKind, string> = { managed: "Wharf 管理", external_dir: "外部目录", named_volume: "docker 卷" };
 
 function EditForm({ svc, onClose }: { svc: ServiceView; onClose: () => void }) {
   const actions = useActions();
