@@ -565,6 +565,18 @@ fn config_items(
         }
       }
       (_, Action::Create) => (Risk::Safe, "新增".to_string()),
+      // 配置没变，只是记下固定的镜像版本（存在 meta 里）。
+      (KIND_SERVICE, Action::Update) if before == after => {
+        let pinned = desired
+          .services
+          .get(name)
+          .and_then(|r| r.pins.values().next())
+          .map(|d| crate::pins::short(d).to_string());
+        match pinned {
+          Some(d) => (Risk::Safe, format!("固定镜像版本 {d}，不重建")),
+          None => (Risk::Safe, "更新内部记录，不重建".to_string()),
+        }
+      }
       _ => (Risk::Safe, "修改配置".to_string()),
     };
     b.item(
