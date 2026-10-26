@@ -46,6 +46,9 @@ pub fn spawn(state: Arc<AppState>) {
       if let Err(e) = backups(&state).await {
         tracing::warn!("定时备份失败：{e}");
       }
+      if let Err(e) = crate::metrics::compact(&state).await {
+        tracing::warn!("整理打点失败：{e}");
+      }
       if let Err(e) = crate::uploads::cleanup(&state).await {
         tracing::warn!("清理代码包失败：{e}");
       }

@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "@/api";
 import { useActions } from "@/components/actions";
+import { MetricsPanel } from "@/components/metrics";
 import { Dot, Empty, ErrorNote, Notice, PageHeader, SectionTitle, StatusBadge, ago, serverText, serverTone, serviceTone } from "@/components/common";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -150,6 +151,8 @@ export function ServerDetail() {
         <Row k="docker" v={r?.docker_version && `${r.docker_version}${r.compose_version ? ` · compose ${r.compose_version}` : ""}`} />
         <Row k="agent" v={r && `${r.version}${r.build ? ` · ${r.build}` : ""}`} />
       </dl>
+
+      <MetricsPanel subject={name} kind="host" />
 
       <ErrorNote error={host.error} />
 

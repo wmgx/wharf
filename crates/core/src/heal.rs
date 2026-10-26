@@ -103,6 +103,7 @@ async fn tick(
     .await;
     if started.is_ok() {
       tracing::info!("自动重启 {name}：{why}");
+      crate::metrics::event(state, "heal.restart", name, 1.0).await;
       rec.strikes = 0;
       rec.gave_up = false;
       rec.restarts.push(Instant::now());

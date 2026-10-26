@@ -28,6 +28,7 @@ mod join;
 mod link;
 mod login;
 mod logs_stream;
+mod metrics;
 mod migrate;
 mod network;
 mod planner;

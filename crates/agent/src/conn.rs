@@ -122,9 +122,15 @@ async fn session(
     let cancel = session_cancel.clone();
     tokio::spawn(async move {
       let mut refresh = true;
+      // 每两次上报（一分钟）带一次资源采样。
+      let mut sample = true;
       loop {
-        let report = ops.reporter.report(refresh).await;
+        let mut report = ops.reporter.report(refresh).await;
         refresh = false;
+        if sample {
+          report.metrics = ops.reporter.metrics().await.map(Box::new);
+        }
+        sample = !sample;
         if tx.send(AgentMsg::Report(report)).is_err() {
           break;
         }

@@ -365,6 +365,55 @@ pub fn host(v: &wharf_api_types::agent::HostInfo) {
   );
 }
 
+/// 每条序列一行：最新、平均、最大。
+pub fn metrics(v: &serde_json::Value) {
+  let Some(series) =
+    v["series"].as_object().filter(|s| !s.is_empty())
+  else {
+    println!(
+      "{} 这段时间没有数据",
+      v["subject"].as_str().unwrap_or("")
+    );
+    return;
+  };
+  for (name, points) in series {
+    let values: Vec<f64> = points
+      .as_array()
+      .into_iter()
+      .flatten()
+      .filter_map(|p| p[1].as_f64())
+      .collect();
+    let Some(last) = values.last() else { continue };
+    let avg = values.iter().sum::<f64>() / values.len() as f64;
+    let max = values.iter().cloned().fold(f64::MIN, f64::max);
+    let fmt = |x: f64| metric_value(name, x);
+    println!(
+      "{name:<16} 最新 {:<10} 平均 {:<10} 最大 {:<10} {} 个点",
+      fmt(*last),
+      fmt(avg),
+      fmt(max),
+      values.len()
+    );
+  }
+}
+
+fn metric_value(name: &str, x: f64) -> String {
+  if name.ends_with(".cpu") {
+    format!("{x:.1}%")
+  } else if name.ends_with(".secs") {
+    format!("{x:.0}s")
+  } else if name.contains(".net_") {
+    format!("{:.1}K/s", x / 1024.0)
+  } else if name.contains("mem")
+    || name.contains("disk")
+    || name.ends_with(".added")
+  {
+    format!("{:.0}M", x / (1u64 << 20) as f64)
+  } else {
+    format!("{x}")
+  }
+}
+
 pub fn core_backup(v: &serde_json::Value) {
   let Some(to) = v["to"].as_str() else {
     println!("控制面备份没有开启：wharf backup core --to <server>");

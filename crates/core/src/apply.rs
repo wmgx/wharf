@@ -508,8 +508,16 @@ async fn execute(
       })
     };
     tracing::info!("[{run_id}] {}", step.title);
+    let started = std::time::Instant::now();
     let result =
       run_step(&state, &run_id, &step.step, progress, &cancel).await;
+    crate::metrics::step_done(
+      &state,
+      &step.step,
+      started.elapsed(),
+      result.is_ok(),
+    )
+    .await;
     {
       let mut r = lock(&run);
       let s = &mut r.steps[index];

@@ -28,6 +28,7 @@ pub struct Reporter {
   /// 环境变量 `WHARF_PUBLIC_IP` 的覆盖值。
   public_ip: Option<String>,
   cache: Arc<Mutex<Option<CachedIp>>>,
+  sampler: Arc<Mutex<crate::metrics::Sampler>>,
 }
 
 impl Reporter {
@@ -36,7 +37,16 @@ impl Reporter {
       docker,
       public_ip,
       cache: Default::default(),
+      sampler: Default::default(),
     }
+  }
+
+  /// 资源采样，只由定时上报调用（速率按两次调用的间隔算）。
+  pub async fn metrics(
+    &self,
+  ) -> Option<wharf_api_types::agent::Metrics> {
+    let disk = disk(&self.docker.data_dir);
+    self.sampler.lock().await.sample(&self.docker, disk).await
   }
 
   pub async fn report(&self, refresh: bool) -> AgentReport {
@@ -55,6 +65,7 @@ impl Reporter {
       data_dir: self.docker.data_dir.display().to_string(),
       build: wharf_api_types::BUILD.to_string(),
       disk: disk(&self.docker.data_dir),
+      metrics: None,
     }
   }
 

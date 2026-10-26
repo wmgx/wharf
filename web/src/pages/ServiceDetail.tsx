@@ -10,6 +10,7 @@ import { CodeBlock, Dot, Empty, ErrorNote, Notice, PageHeader, ServerTag, Status
 import { EntryField, useEntry } from "@/components/entry";
 import { DomainChips, Field, PortsEditor, formatEnv, parseEnv } from "@/components/fields";
 import { LogStream } from "@/components/LogStream";
+import { MetricsPanel } from "@/components/metrics";
 import { Backups } from "./service-backups";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -242,6 +243,7 @@ export function ServiceDetail() {
       <Tabs value={tab} onValueChange={(t) => setParams({ tab: t }, { replace: true })} className="mt-8">
         <TabsList>
           <TabsTrigger value="logs">日志</TabsTrigger>
+          <TabsTrigger value="metrics">资源</TabsTrigger>
           <TabsTrigger value="terminal">终端</TabsTrigger>
           <TabsTrigger value="history">部署历史</TabsTrigger>
           <TabsTrigger value="backups">备份</TabsTrigger>
@@ -249,6 +251,9 @@ export function ServiceDetail() {
         </TabsList>
         <TabsContent value="logs" className="mt-3">
           <LogStream path={`/api/services/${encodeURIComponent(name)}/logs/stream`} />
+        </TabsContent>
+        <TabsContent value="metrics" className="mt-3">
+          <MetricsPanel subject={name} kind="svc" title="" />
         </TabsContent>
         <TabsContent value="terminal" className="mt-3">
           <TerminalTab svc={svc} />

@@ -187,6 +187,17 @@ CREATE TABLE settings (
   value TEXT NOT NULL
 );
 "#,
+  // 打点：资源曲线和部署、备份等事件，见 metrics.rs。
+  r#"
+CREATE TABLE points (
+  name TEXT NOT NULL,
+  subject TEXT NOT NULL,
+  at INTEGER NOT NULL,
+  value REAL NOT NULL,
+  PRIMARY KEY (subject, name, at)
+) WITHOUT ROWID;
+CREATE INDEX points_at ON points (at);
+"#,
 ];
 
 pub fn setting(

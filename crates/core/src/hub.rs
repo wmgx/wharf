@@ -354,7 +354,12 @@ async fn handle_socket(
           _ => continue,
         };
         match serde_json::from_str::<AgentMsg>(&text) {
-          Ok(AgentMsg::Report(report)) => touch(&state, &server, Some(report)).await,
+          Ok(AgentMsg::Report(mut report)) => {
+            if let Some(m) = report.metrics.take() {
+              crate::metrics::record_report(&state, &server, *m).await;
+            }
+            touch(&state, &server, Some(report)).await
+          }
           Ok(AgentMsg::Progress { id, line }) => {
             let progress = lock(&conn.pending).get(&id).and_then(|p| p.progress.clone());
             if let Some(progress) = progress {

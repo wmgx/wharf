@@ -105,6 +105,22 @@ async fn dispatch(
       service(c, cmd, j).await
     }
     Command::Upgrade => upgrade(c, j).await,
+    Command::Metrics {
+      subject,
+      names,
+      range,
+    } => {
+      let mut path = format!(
+        "/api/metrics?subject={}&range={range}",
+        seg(&subject)
+      );
+      if let Some(n) = &names {
+        path.push_str(&format!("&names={}", seg(n)));
+      }
+      let v: serde_json::Value = c.get(&path).await?;
+      out(j, &v, print::metrics);
+      Ok(())
+    }
     Command::Doctor { hostname } => {
       let path = match &hostname {
         Some(h) => format!("/api/doctor?host={}", seg(h)),

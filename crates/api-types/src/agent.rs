@@ -121,6 +121,39 @@ pub struct AgentReport {
   /// `data_dir` 所在磁盘的容量。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub disk: Option<Disk>,
+  /// 资源采样，每分钟一次（其余上报没有）。控制面存进曲线后不再保留。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub metrics: Option<Box<Metrics>>,
+}
+
+/// 一次资源采样。速率是和上一次采样相比的平均值。
+#[derive(
+  Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct Metrics {
+  /// 整机 CPU 使用率，0 到 100。
+  pub cpu: f32,
+  pub mem_used: u64,
+  pub mem_total: u64,
+  /// 字节每秒，不含回环、docker 网桥和组网网卡。
+  pub net_rx: u64,
+  pub net_tx: u64,
+  pub disk_used: u64,
+  pub disk_total: u64,
+  /// compose project 名到它的容器合计。
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub projects: BTreeMap<String, ProjectMetrics>,
+}
+
+#[derive(
+  Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct ProjectMetrics {
+  /// 占整机 CPU 的百分比，0 到 100。
+  pub cpu: f32,
+  pub mem: u64,
+  pub net_rx: u64,
+  pub net_tx: u64,
 }
 
 #[derive(

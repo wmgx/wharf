@@ -79,6 +79,16 @@ pub enum Command {
     /// 只查这个域名。
     hostname: Option<String>,
   },
+  /// 打点：服务器或服务的资源曲线（host.* / svc.*），以及部署、备份耗时等事件。
+  Metrics {
+    /// 服务器名或服务名。
+    subject: String,
+    /// 只看这些，逗号分隔，例如 host.cpu,host.mem。
+    #[arg(long)]
+    names: Option<String>,
+    #[arg(long, default_value = "24h", value_parser = ["1h", "24h", "7d", "30d"])]
+    range: String,
+  },
   /// 组网：各服务器怎么接入（tailscale / lan / public）、谁能连谁的内网地址。
   Network {
     /// 先让每台在线服务器探测其余服务器，再显示结果。

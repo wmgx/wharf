@@ -20,6 +20,7 @@ mod edge;
 mod exec;
 mod host;
 mod identity;
+mod metrics;
 mod ops;
 mod probe;
 mod report;

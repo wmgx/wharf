@@ -429,6 +429,15 @@ pub(crate) async fn record(
   w: &Where,
   result: &Result<BackupSummary, ApiError>,
 ) -> Result<(), ApiError> {
+  if let Ok(s) = result {
+    crate::metrics::event(
+      state,
+      "backup.added",
+      service,
+      s.added_bytes as f64,
+    )
+    .await;
+  }
   let (ok, body) = match result {
     Ok(s) => (true, serde_json::to_string(s).map_err(json_err)?),
     Err(e) => {
