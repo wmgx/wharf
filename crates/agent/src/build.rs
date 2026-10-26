@@ -17,7 +17,10 @@ use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use wharf_api_types::{
   ApiError, ErrorCode,
-  agent::{BuildFetch, BuildJob, BuildResult, GIT_IMAGE, PullPolicy},
+  agent::{
+    BuildFetch, BuildJob, BuildResult, GIT_IMAGE, PullPolicy,
+    ResolveCommit,
+  },
   build::{self, SourceTree},
   validate_name,
 };
@@ -29,6 +32,8 @@ use crate::{
 
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const CLONE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// 只查 commit，比拉代码短得多。
+const LS_REMOTE_TIMEOUT: Duration = Duration::from_secs(60);
 const BUILD_TIMEOUT: Duration = Duration::from_secs(40 * 60);
 /// 代码包大小上限，和控制面接收上传的上限一致。
 const MAX_ARCHIVE: u64 = 512 * 1024 * 1024;
@@ -444,6 +449,87 @@ rm -rf .git"#;
   Ok(commit)
 }
 
+/// 分支或标签现在指向的 commit。已经是 commit 的原样返回。
+pub async fn resolve_commit(
+  docker: &Docker,
+  job: &ResolveCommit,
+  ctx: &Ctx,
+) -> Result<String, ApiError> {
+  validate_name("service", &job.service)?;
+  let BuildFetch::Git {
+    repo,
+    reference,
+    token,
+  } = &job.fetch
+  else {
+    return Err(ApiError::invalid("只有 git 来源能查 commit"));
+  };
+  if is_commit(reference) {
+    return Ok(reference.to_lowercase());
+  }
+  if !docker.image_exists(GIT_IMAGE, ctx).await {
+    docker
+      .pull(GIT_IMAGE, &job.pull, ctx, &mut Vec::new())
+      .await?;
+  }
+  let name = format!("wharf-git-ls-{}", job.service);
+  remove_container(docker, &name).await;
+  // 带上 `^{}`：附注标签要取它指向的 commit，不是标签对象本身。
+  let script = r#"set -e
+if [ -n "$GIT_TOKEN" ]; then
+  auth="Authorization: Basic $(printf 'x-access-token:%s' "$GIT_TOKEN" | base64 | tr -d '
+')"
+  git -c http.extraHeader="$auth" ls-remote "$REPO" "$REF" "$REF^{}"
+else
+  git ls-remote "$REPO" "$REF" "$REF^{}"
+fi"#;
+  let result = docker
+    .cmd()
+    .args(["run", "--rm", "--name", &name, "--network", "host"])
+    .args(["-e", "REPO", "-e", "REF", "-e", "GIT_TOKEN"])
+    .args(["-e", "GIT_TERMINAL_PROMPT=0"])
+    .args(["--entrypoint", "sh", GIT_IMAGE, "-c", script])
+    .env("REPO", repo)
+    .env("REF", reference)
+    .env(
+      "GIT_TOKEN",
+      token.as_ref().map(|t| t.0.as_str()).unwrap_or_default(),
+    )
+    .timeout(LS_REMOTE_TIMEOUT)
+    .run(ctx)
+    .await;
+  if result.is_err() {
+    remove_container(docker, &name).await;
+  }
+  let out = result?.check("查询代码版本")?;
+  pick_commit(&out.stdout, reference).ok_or_else(|| {
+    ApiError::invalid(format!("仓库里没有分支或标签 {reference}"))
+  })
+}
+
+fn is_commit(s: &str) -> bool {
+  s.len() == 40 && s.bytes().all(|c| c.is_ascii_hexdigit())
+}
+
+/// `ls-remote` 的输出里挑：附注标签取 `^{}` 那行，否则优先分支，再是标签。
+fn pick_commit(out: &str, reference: &str) -> Option<String> {
+  let lines: Vec<(&str, &str)> = out
+    .lines()
+    .filter_map(|l| l.split_once('\t'))
+    .filter(|(sha, _)| is_commit(sha))
+    .collect();
+  let find = |want: &str| {
+    lines
+      .iter()
+      .find(|(_, r)| *r == want)
+      .map(|(s, _)| s.to_string())
+  };
+  find(&format!("refs/tags/{reference}^{{}}"))
+    .or_else(|| find(&format!("refs/heads/{reference}")))
+    .or_else(|| find(&format!("refs/tags/{reference}")))
+    .or_else(|| find(reference))
+}
+
 pub(crate) async fn remove_container(docker: &Docker, name: &str) {
   let _ = docker
     .cmd()
@@ -510,6 +596,20 @@ pub(crate) fn to_value<T: serde::Serialize>(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn picks_commit_from_ls_remote() {
+    let a = "a".repeat(40);
+    let b = "b".repeat(40);
+    let c = "c".repeat(40);
+    let out = format!(
+      "{a}\trefs/heads/main\n{b}\trefs/tags/v1\n{c}\trefs/tags/v1^{{}}\n"
+    );
+    assert_eq!(pick_commit(&out, "main"), Some(a));
+    // 附注标签取它指向的 commit。
+    assert_eq!(pick_commit(&out, "v1"), Some(c));
+    assert_eq!(pick_commit(&out, "dev"), None);
+  }
 
   #[test]
   fn build_error_keeps_only_error_lines() {

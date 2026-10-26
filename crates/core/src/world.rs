@@ -41,6 +41,8 @@ pub struct ServiceRow {
   pub import: Option<AdoptSpec>,
   /// 计划时固定的镜像版本：镜像 → `sha256:…`（image 来源）。存在 meta 里，只有检查更新才换。
   pub pins: BTreeMap<String, String>,
+  /// 计划时固定的 commit（git 构建来源）。存在 meta 里，只有检查更新才换。
+  pub commit: Option<String>,
   pub version: u64,
 }
 
@@ -71,6 +73,16 @@ pub struct World {
   pub edge_apps: BTreeMap<String, EdgeRow>,
   /// key 是 hostname。
   pub routes: BTreeMap<String, RouteRow>,
+}
+
+/// git 构建来源的 `仓库#分支`，和部署记录里的写法一致。
+pub fn git_ref(spec: &ServiceSpec) -> Option<String> {
+  match &spec.source {
+    Source::Build(BuildSource { git: Some(g), .. }) => {
+      Some(format!("{}#{}", g.repo, g.reference))
+    }
+    _ => None,
+  }
 }
 
 pub fn edge_owner(host: &str) -> String {
@@ -119,6 +131,7 @@ impl World {
               .unwrap_or_default(),
               pins: serde_json::from_value(row.meta["pins"].clone())
                 .unwrap_or_default(),
+              commit: row.meta["commit"].as_str().map(str::to_string),
               version,
             },
           );
@@ -215,6 +228,10 @@ impl World {
             .into_iter()
             .filter(|(image, _)| matches!(&spec.source, Source::Image(i) if i == image))
             .collect();
+          // 改构建配置不换代码；换了仓库或分支的，计划时重新查。
+          let commit = old
+            .filter(|o| git_ref(&o.spec) == git_ref(spec))
+            .and_then(|o| o.commit.clone());
           self.services.insert(
             name.clone(),
             ServiceRow {
@@ -222,6 +239,7 @@ impl World {
               host_ports,
               import,
               pins,
+              commit,
               version,
             },
           );
@@ -232,6 +250,7 @@ impl World {
               .suggest("wharf service list")
           })?;
           row.pins.clear();
+          row.commit = None;
         }
         Change::RemoveService { name } => {
           if self.services.remove(name).is_none() {
@@ -758,6 +777,9 @@ impl World {
         }
         if !r.pins.is_empty() {
           meta["pins"] = to_json(&r.pins);
+        }
+        if let Some(commit) = &r.commit {
+          meta["commit"] = json!(commit);
         }
         (to_json(&r.spec), meta)
       },

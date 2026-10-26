@@ -217,7 +217,23 @@ CREATE TABLE service_ops (
   ADOPT_MIGRATION,
   EDGE_DOMAINS_MIGRATION,
   PINS_MIGRATION,
+  COMMIT_MIGRATION,
 ];
+
+/// git 构建来源固定到上次部署构建的 commit（仓库和分支没换过的）。当时没记下 commit 的留给 plan 提醒。
+const COMMIT_MIGRATION: &str = r#"
+UPDATE resources
+SET meta = json_set(meta, '$.commit', (
+  SELECT d.commit_sha FROM deployments d
+  WHERE d.service = resources.name ORDER BY d.id DESC LIMIT 1))
+WHERE kind = 'service' AND json_type(spec, '$.source.build.git') = 'object'
+  AND (SELECT d.commit_sha FROM deployments d
+       WHERE d.service = resources.name ORDER BY d.id DESC LIMIT 1) IS NOT NULL
+  AND (SELECT json_extract(d.spec, '$.source.build.git.repo') || '#' || json_extract(d.spec, '$.source.build.git.ref')
+       FROM deployments d WHERE d.service = resources.name ORDER BY d.id DESC LIMIT 1)
+    = json_extract(spec, '$.source.build.git.repo') || '#' || json_extract(spec, '$.source.build.git.ref');
+DELETE FROM plans WHERE status = 'pending';
+"#;
 
 /// image 来源固定到上次部署实际用的 digest，升级后不会因为补查版本而重新部署。
 /// 部署记录里没有 digest 的（经镜像源拉取的旧部署）留给第一次 plan 去查。
@@ -1074,7 +1090,7 @@ pub fn applied(
 ) -> Result<std::collections::BTreeMap<String, Applied>, ApiError> {
   let mut stmt = c
     .prepare(
-      "SELECT service, hash, created_at, images FROM deployments
+      "SELECT service, hash, created_at, images, commit_sha, json_extract(spec, '$.source.build.git.repo') || '#' || json_extract(spec, '$.source.build.git.ref') FROM deployments
        WHERE id IN (SELECT MAX(id) FROM deployments GROUP BY service)",
     )
     .map_err(sql_err)?;
@@ -1097,6 +1113,8 @@ pub fn applied(
             .first()
             .map(|i| i.id.clone())
             .filter(|i| !i.is_empty()),
+          commit: r.get(4)?,
+          git: r.get(5)?,
         },
       ))
     })
@@ -1163,6 +1181,43 @@ pub fn interrupt_service_ops(c: &Connection) -> Result<(), ApiError> {
 
 #[cfg(test)]
 mod tests {
+  #[test]
+  fn commit_migration() {
+    let c = Connection::open_in_memory().unwrap();
+    let git = |r: &str| {
+      format!(
+        r#"{{"source":{{"build":{{"git":{{"repo":"https://g/x","ref":"{r}"}}}}}}}}"#
+      )
+    };
+    c.execute_batch(
+      "CREATE TABLE resources (kind TEXT, name TEXT, spec TEXT, meta TEXT NOT NULL DEFAULT '{}');
+       CREATE TABLE deployments (id INTEGER, service TEXT, spec TEXT, commit_sha TEXT);
+       CREATE TABLE plans (status TEXT);",
+    )
+    .unwrap();
+    for (name, now, deployed, commit) in [
+      ("same", "main", "main", Some("c1")),
+      ("moved", "dev", "main", Some("c2")),
+      ("unknown", "main", "main", None),
+    ] {
+      c.execute("INSERT INTO resources (kind, name, spec) VALUES ('service', ?1, ?2)", params![name, git(now)]).unwrap();
+      c.execute(
+        "INSERT INTO deployments VALUES (1, ?1, ?2, ?3)",
+        params![name, git(deployed), commit],
+      )
+      .unwrap();
+    }
+    c.execute_batch(COMMIT_MIGRATION).unwrap();
+    let meta: Vec<String> = c
+      .prepare("SELECT meta FROM resources ORDER BY name")
+      .unwrap()
+      .query_map([], |r| r.get(0))
+      .unwrap()
+      .map(Result::unwrap)
+      .collect();
+    assert_eq!(meta, ["{}", r#"{"commit":"c1"}"#, "{}"]);
+  }
+
   #[test]
   fn pins_migration() {
     let c = Connection::open_in_memory().unwrap();

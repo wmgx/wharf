@@ -5,12 +5,16 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use wharf_api_types::{
   ApiError,
-  agent::{AgentOp, ResolveImages, ResolvedImage},
+  agent::{AgentOp, ResolveCommit, ResolveImages, ResolvedImage},
   spec::Source,
   view::Applied,
 };
 
-use crate::{snapshot, state::AppState, world::World};
+use crate::{
+  snapshot::{self, Snapshot},
+  state::AppState,
+  world::World,
+};
 
 const RESOLVE_TIMEOUT: std::time::Duration =
   std::time::Duration::from_secs(60);
@@ -114,6 +118,100 @@ pub async fn resolve(
   Ok(out)
 }
 
+/// git 构建来源固定 commit，规则和镜像一样：部署过、仓库分支没换的，固定到当时构建的 commit；
+/// 当时没记下 commit 的不固定，提醒检查更新；其余由构建机的 agent 查分支现在的 commit。
+pub async fn resolve_commits(
+  state: &AppState,
+  snap: &Snapshot,
+  desired: &mut World,
+  refresh: &BTreeSet<String>,
+  warnings: &mut Vec<String>,
+) -> Result<(), ApiError> {
+  let mut todo = Vec::new();
+  for (name, row) in desired.services.iter_mut() {
+    let Some(git) = crate::world::git_ref(&row.spec) else {
+      continue;
+    };
+    if row.commit.is_some() {
+      continue;
+    }
+    let same = snap
+      .applied
+      .get(name)
+      .filter(|a| a.git.as_deref() == Some(git.as_str()));
+    if !refresh.contains(name)
+      && let Some(a) = same
+    {
+      match &a.commit {
+        Some(c) => row.commit = Some(c.clone()),
+        None => warnings.push(format!(
+          "服务 {name} 部署时没有记下 commit，这次不固定代码版本；要按最新代码构建执行 wharf service update {name}"
+        )),
+      }
+      continue;
+    }
+    todo.push(name.clone());
+  }
+  for name in todo {
+    let row = &desired.services[&name];
+    let Source::Build(build) = &row.spec.source else {
+      continue;
+    };
+    let server = row.spec.server.clone();
+    let fetch = crate::build::code_fetch(
+      state,
+      snap,
+      &format!("服务 {name}"),
+      None,
+      build.git.as_ref(),
+      None,
+    )?;
+    let commit: String = state
+      .hub
+      .call(
+        &server,
+        AgentOp::ResolveCommit(ResolveCommit {
+          service: name.clone(),
+          fetch,
+          pull: snapshot::pull_policy(&desired.servers[&server]),
+        }),
+        RESOLVE_TIMEOUT,
+        None,
+        &Default::default(),
+      )
+      .await
+      .map_err(|e| {
+        ApiError::new(
+          e.code,
+          format!("查不到服务 {name} 的代码版本：{}", e.message),
+        )
+        .with_hint(
+          "确认仓库地址、分支和 token；仓库暂时连不上时稍后重新 plan",
+        )
+      })?;
+    if let Some(row) = desired.services.get_mut(&name) {
+      row.commit = Some(commit);
+    }
+  }
+  Ok(())
+}
+
+/// git 构建来源要换代码：(上次部署的，看得懂的写法, 这次固定的)。
+pub fn commit_change(
+  applied: Option<&Applied>,
+  commit: Option<&str>,
+) -> Option<(String, String)> {
+  let new = commit?;
+  let applied = applied?;
+  match &applied.commit {
+    Some(old) if old != new => {
+      Some((old[..old.len().min(12)].to_string(), new.to_string()))
+    }
+    None => Some(("当前版本未知".into(), new.to_string())),
+    _ => None,
+  }
+}
+
 /// image 来源的服务要换镜像版本：(上次部署的，看得懂的写法, 这次固定的)。
 /// 部署记录里没有 digest 时（经镜像源拉取的旧部署），用这次查到的镜像 ID 和部署时的比。
 pub fn change(
@@ -156,6 +254,8 @@ mod tests {
       digest: digest.map(str::to_string),
       image: Some("x:latest".into()),
       image_id: Some("sha256:id1".into()),
+      commit: None,
+      git: None,
     };
     assert_eq!(
       change(Some(&applied(Some("sha256:new"))), &pins, None),

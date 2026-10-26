@@ -63,6 +63,9 @@ impl Ops {
   ) -> Result<Value, ApiError> {
     match op {
       AgentOp::Report => to_value(self.reporter.report(true).await),
+      AgentOp::ResolveCommit(job) => to_value(
+        crate::build::resolve_commit(&self.docker, &job, ctx).await?,
+      ),
       AgentOp::ResolveImages(job) => {
         to_value(crate::registry::resolve(&job, ctx).await?)
       }

@@ -121,13 +121,19 @@ pub async fn ensure_image(
     return Ok(None);
   };
   let server = &row.spec.server;
-  let pinned = if force {
-    None
-  } else {
-    last_commit(state, service, build).await?
-  };
+  let last = last_commit(state, service, build).await?;
+  // 计划时固定的 commit 优先；没固定的（旧数据）沿用上次部署的，重新构建时拉最新。
+  let pinned = row
+    .commit
+    .clone()
+    .or_else(|| if force { None } else { last.clone() });
+  // 镜像名只看构建配置，换了 commit 名字不变，要强制重新构建。
+  let force = force || (row.commit.is_some() && row.commit != last);
   if let (Some(commit), Some(_)) = (&pinned, &build.git) {
-    progress(format!("固定到上次部署的 commit {}", &commit[..12]));
+    progress(format!(
+      "构建 commit {}",
+      &commit[..commit.len().min(12)]
+    ));
   }
   let fetch = code_fetch(
     state,
@@ -174,7 +180,7 @@ pub async fn ensure_image(
   Ok(result.commit.or(pinned))
 }
 
-/// `POST /api/services/{name}/rebuild`：拉最新代码重新构建并部署。
+/// `POST /api/services/{name}/rebuild`：按固定的 commit 重新构建并部署（没固定过的拉最新代码）。
 pub async fn rebuild_now(
   axum::extract::State(s): axum::extract::State<
     std::sync::Arc<AppState>,

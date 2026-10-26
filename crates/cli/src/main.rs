@@ -330,8 +330,8 @@ pub enum ServiceCmd {
   Restart {
     name: String,
   },
-  /// 检查更新：image 来源重新查镜像标签现在的版本，有新版本时计划里会更新。
-  /// 平时改配置不会换镜像版本。
+  /// 检查更新：image 来源重新查镜像标签现在的版本，git 构建来源重新查分支现在的 commit，
+  /// 有新版本时计划里会更新。平时改配置不会换版本。
   Update {
     name: String,
     #[command(flatten)]
@@ -403,7 +403,8 @@ pub enum ServiceCmd {
     #[command(flatten)]
     apply: ApplyFlags,
   },
-  /// 从代码构建的服务：拉最新代码（本机目录用上次上传的）重新构建并部署。
+  /// 从代码构建的服务：按固定的 commit 重新构建并部署（本机目录用上次上传的）。
+  /// 要换成最新代码用 `wharf service update`。
   Rebuild {
     name: String,
     /// 只发起，不等结束。

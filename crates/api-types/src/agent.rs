@@ -178,6 +178,8 @@ pub enum AgentOp {
   Report,
   /// 结果是 `Vec<ResolvedImage>`。
   ResolveImages(ResolveImages),
+  /// 查 git 分支或标签现在指向的 commit（`git ls-remote`，不下载代码），结果是 40 位 commit。
+  ResolveCommit(ResolveCommit),
   /// 读取若干 compose project 的现状，结果是 `Vec<ProjectState>`。
   ProjectStatus {
     projects: Vec<String>,
@@ -629,6 +631,14 @@ pub struct ProjectUp {
   pub pins: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResolveCommit {
+  pub service: String,
+  /// 只能是 `BuildFetch::Git`。
+  pub fetch: BuildFetch,
+  pub pull: PullPolicy,
+}
+
 /// 查镜像标签当前对应的 digest：只读 registry 的清单，不拉镜像。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolveImages {
@@ -753,7 +763,7 @@ pub struct BuildJob {
   /// 作为 `--build-arg` 传入（镜像源等）。
   #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
   pub build_env: BTreeMap<String, String>,
-  /// 镜像已存在也重新构建（拉最新代码）。
+  /// 镜像已存在也重新构建。
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub force: bool,
   pub pull: PullPolicy,

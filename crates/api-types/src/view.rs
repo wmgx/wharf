@@ -142,6 +142,11 @@ pub struct Applied {
   pub image: Option<String>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub image_id: Option<String>,
+  /// git 构建来源实际构建的 commit，和当时的 `仓库#分支`。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub commit: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub git: Option<String>,
 }
 
 #[derive(

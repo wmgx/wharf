@@ -153,6 +153,8 @@ mod tests {
       digest: None,
       image: None,
       image_id: None,
+      commit: None,
+      git: None,
     };
     let failed = LastOp {
       action: "部署".into(),

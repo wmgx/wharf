@@ -1101,7 +1101,7 @@ async fn remove_owned(
 }
 
 /// 一次成功部署的内容，写进部署历史。
-/// 部署一个服务：构建来源先构建镜像（`force` 时拉最新代码重新构建），再 `up`。
+/// 部署一个服务：构建来源先构建镜像（`force` 时重新构建），再 `up`。
 async fn service_up(
   state: &AppState,
   run_id: &str,

@@ -99,7 +99,7 @@ export function ServiceDetail() {
               <PencilIcon />
               修改配置
             </Button>
-            {"image" in svc.spec.source && (
+            {("image" in svc.spec.source || ("build" in svc.spec.source && !!svc.spec.source.build.git)) && (
               <Button variant="outline" onClick={() => actions.plan({ title: `检查 ${name} 的更新`, changes: [{ op: "refresh_images", name }] })}>
                 <RefreshCwIcon />
                 检查更新

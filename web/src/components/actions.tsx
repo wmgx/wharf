@@ -37,7 +37,7 @@ interface Actions {
   /** 打开计划面板：计划 → 确认 → 执行。 */
   plan: (req: FlowRequest) => void;
   redeploy: (svc: ServiceView) => void;
-  /** 从代码构建的服务：拉最新代码重新构建并部署。 */
+  /** 从代码构建的服务：按固定的 commit 重新构建并部署。 */
   rebuild: (name: string) => void;
   /** 升级服务器上的 agent 到控制面的版本。 */
   upgradeAgent: (server: string) => void;

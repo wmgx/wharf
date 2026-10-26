@@ -139,7 +139,7 @@ pub enum Step {
     service: String,
     snapshot: String,
   },
-  /// 构建来源：拉最新代码重新构建并部署。单独发起，不来自计划。
+  /// 构建来源：按固定的 commit 重新构建并部署（没固定过的拉最新代码）。单独发起，不来自计划。
   Rebuild {
     service: String,
   },
@@ -330,6 +330,15 @@ pub async fn make_plan(
     &refresh,
   )
   .await?;
+  let mut warnings = resolved.warnings;
+  crate::pins::resolve_commits(
+    state,
+    &snap,
+    &mut desired,
+    &refresh,
+    &mut warnings,
+  )
+  .await?;
   for (name, svc) in &desired.services {
     if let Source::Build(BuildSource {
       upload: Some(sha), ..
@@ -374,7 +383,7 @@ pub async fn make_plan(
   let writes = desired.writes_from(&current);
   let mut b = Builder {
     image_ids: resolved.image_ids,
-    warnings: resolved.warnings,
+    warnings,
     ..Builder::default()
   };
   config_items(&mut b, &current, &desired, &writes);
@@ -573,7 +582,9 @@ fn config_items(
           .and_then(|r| r.pins.values().next())
           .map(|d| crate::pins::short(d).to_string());
         match pinned {
-          Some(d) => (Risk::Safe, format!("固定镜像版本 {d}，不重建")),
+          Some(d) => {
+            (Risk::Safe, format!("固定镜像版本 {d}，不重建"))
+          }
           None => (Risk::Safe, "更新内部记录，不重建".to_string()),
         }
       }
@@ -774,7 +785,19 @@ fn service_items(
       snap.applied.get(name),
       &svc.pins,
       b.image_ids.get(name).map(String::as_str),
-    );
+    )
+    .map(|(old, new)| {
+      format!("更新镜像版本 {old} → {}", crate::pins::short(&new))
+    })
+    .or_else(|| {
+      crate::pins::commit_change(
+        snap.applied.get(name),
+        svc.commit.as_deref(),
+      )
+      .map(|(old, new)| {
+        format!("更新代码 {old} → {}，重新构建", &new[..12])
+      })
+    });
     let decision = match status.get(server).and_then(|s| s.as_ref()) {
       None if changed(writes, KIND_SERVICE, name) => Some((
         Action::Update,
@@ -839,16 +862,8 @@ fn service_items(
           },
           Some(json!({ "containers": state.containers })),
         )),
-        Some(_) => upgrade.map(|(old, new)| {
-          (
-            Action::Update,
-            Risk::Disruptive,
-            format!(
-              "更新镜像版本 {old} → {}",
-              crate::pins::short(&new)
-            ),
-            Some(json!({ "digest": old })),
-          )
+        Some(_) => upgrade.map(|reason| {
+          (Action::Update, Risk::Disruptive, reason, None)
         }),
       },
     };
