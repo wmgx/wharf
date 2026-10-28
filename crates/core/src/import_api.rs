@@ -106,7 +106,7 @@ pub async fn preview(
     .unwrap_or_else(|| import::service_name(raw_name));
   validate_name("服务", &name)?;
   if snap.world.services.contains_key(&name) {
-    return Err(
+    Err(
       ApiError::new(
         ErrorCode::AlreadyExists,
         format!("服务 {name} 已存在"),
