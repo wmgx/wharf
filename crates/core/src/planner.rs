@@ -419,6 +419,21 @@ pub async fn make_plan(
     .await?;
 
   b.steps.sort_by_key(|s| s.step.order());
+  // 同一次执行里要起 Tailscale：起来后机器地址会变，后面的服务和网关按新地址渲染，
+  // 和计划时的指纹对不上是正常的，不校验。
+  if b
+    .steps
+    .iter()
+    .any(|s| matches!(s.step, Step::TailscaleUp { .. }))
+  {
+    for s in &mut b.steps {
+      if let Step::ServiceUp { expect, .. }
+      | Step::GatewaySync { expect, .. } = &mut s.step
+      {
+        *expect = None;
+      }
+    }
+  }
   let plan_id = new_id("p");
   let mut needs_confirm: Vec<String> = b
     .items
