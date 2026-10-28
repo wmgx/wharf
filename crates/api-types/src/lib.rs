@@ -18,6 +18,9 @@ pub use error::{ApiError, ErrorCode};
 /// CLI 和控制面在请求头里互相报告的版本。
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// agent 和控制面之间的协议版本。控制面拒绝不兼容的 agent；旧 agent 不发这个字段，当作 0。
+pub const PROTOCOL: u32 = 1;
+
 /// 构建号：CI 构建镜像时传入的短提交号，本地构建是 `dev`。
 /// 控制面拿它判断 agent 要不要升级，升级时拉 `sha-<构建号>` 标签的镜像。
 pub const BUILD: &str = match option_env!("WHARF_BUILD") {

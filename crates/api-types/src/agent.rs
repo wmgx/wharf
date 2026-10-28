@@ -78,6 +78,9 @@ pub enum AgentMsg {
     signature: String,
     nonce: String,
     version: String,
+    /// 协议版本，见 [crate::PROTOCOL]。旧 agent 不发这个字段，反序列化成 0。
+    #[serde(default)]
+    protocol: u32,
   },
   Report(AgentReport),
   Progress {

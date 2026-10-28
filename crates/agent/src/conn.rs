@@ -81,6 +81,7 @@ async fn session(
     ),
     nonce: my_nonce.clone(),
     version: wharf_api_types::VERSION.to_string(),
+    protocol: wharf_api_types::PROTOCOL,
   };
   sink
     .send(Message::text(serde_json::to_string(&hello)?))

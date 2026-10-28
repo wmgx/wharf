@@ -27,7 +27,7 @@ use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
-  ApiError, ErrorCode,
+  ApiError, ErrorCode, PROTOCOL,
   agent::{AgentMsg, AgentOp, CoreMsg, TerminalInput, auth_payload},
 };
 
@@ -240,6 +240,11 @@ async fn send_msg(
   Ok(())
 }
 
+/// 协议版本是否兼容：0 是旧 agent（不发这个字段），必须放行；其余版本必须相等。
+fn protocol_ok(agent: u32) -> bool {
+  agent == 0 || agent == PROTOCOL
+}
+
 async fn handle_socket(
   state: Arc<AppState>,
   mut socket: WebSocket,
@@ -260,10 +265,24 @@ async fn handle_socket(
     signature,
     nonce: agent_nonce,
     version,
+    protocol,
   } = hello
   else {
     anyhow::bail!("agent 没有先发 hello");
   };
+  if !protocol_ok(protocol) {
+    let reason = format!(
+      "agent 协议版本 {protocol}，控制面要求 {PROTOCOL}，请运行 wharf upgrade"
+    );
+    tracing::warn!("服务器 {server} 拒绝连接：{reason}");
+    let _ = socket
+      .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+        code: 4002,
+        reason: reason.clone().into(),
+      })))
+      .await;
+    anyhow::bail!("{reason}");
+  }
   let registered = {
     let server = server.clone();
     state
@@ -289,6 +308,12 @@ async fn handle_socket(
       })))
       .await;
     anyhow::bail!("服务器 {server} 认证失败");
+  }
+  if protocol == 0 {
+    // 线上旧 agent 不发这个字段。不能拒绝，否则控制面一升级所有 agent 都连不上。
+    tracing::warn!(
+      "服务器 {server} 的 agent 没有上报协议版本（旧版本），按兼容处理，建议运行 wharf upgrade"
+    );
   }
   let welcome =
     state.key.sign(&auth_payload("core", &server, &agent_nonce));
@@ -402,5 +427,19 @@ pub(crate) async fn touch(
     .await;
   if let Err(e) = result {
     tracing::warn!("记录 agent 状态失败：{e}");
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn protocol_gate() {
+    // 旧 agent 不发 protocol 字段，控制面升级后必须还能连上
+    assert!(protocol_ok(0));
+    assert!(protocol_ok(PROTOCOL));
+    assert!(!protocol_ok(PROTOCOL + 1));
+    assert!(!protocol_ok(u32::MAX));
   }
 }
