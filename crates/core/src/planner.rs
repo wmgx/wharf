@@ -441,6 +441,7 @@ pub async fn make_plan(
     inputs: Some(crate::db::inputs_fingerprint(
       &snap.reach,
       &snap.secrets,
+      &snap.net(&snap.world).addresses(),
     )),
     items: b.items,
     warnings: b.warnings,

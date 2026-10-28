@@ -351,7 +351,7 @@ pub async fn start(
           return Err(
             ApiError::new(
               ErrorCode::PlanStale,
-              "plan 之后机器之间的连通性或密钥变了，直连还是走隧道、渲染出的配置可能和计划不一样",
+              "plan 之后机器之间的连通性、密钥或机器地址变了，直连还是走隧道、渲染出的配置可能和计划不一样",
             )
             .suggest(replan_inputs),
           );

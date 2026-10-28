@@ -109,41 +109,14 @@ impl Snapshot {
   }
 
   pub fn net(&self, world: &World) -> Net {
-    let mut net = Net {
+    Net {
       basic_auth: self
         .secrets
         .get(render::BASIC_AUTH_SECRET)
         .and_then(|v| render::BasicAuth::parse(v)),
       reach: self.reach.clone(),
-      ..Net::default()
-    };
-    for (name, server) in &world.servers {
-      let report = self.agent(name).and_then(|a| a.report.as_ref());
-      // 接入方式是 public 时不用内网地址：端口只绑 127.0.0.1，网关一律走反向隧道。
-      let public = server.settings.network_mode
-        == Some(wharf_api_types::spec::NetworkMode::Public);
-      if let Some(addr) = server
-        .settings
-        .private_addr
-        .clone()
-        .or_else(|| report.and_then(|r| r.private_addr.clone()))
-        .filter(|_| !public)
-      {
-        net.private.insert(name.clone(), addr);
-      }
-      if let Some(r) = report {
-        net.lan_ips.insert(name.clone(), r.lan_ips.clone());
-      }
-      if let Some(ip) = server
-        .settings
-        .public_ip
-        .clone()
-        .or_else(|| report.and_then(|r| r.public_ip.clone()))
-      {
-        net.public_ip.insert(name.clone(), ip);
-      }
+      ..Net::derive(&world.servers, &self.agents)
     }
-    net
   }
 
   /// hostname 所属的厂商账号和 zone，取最长匹配。

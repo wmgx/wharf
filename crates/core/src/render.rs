@@ -13,7 +13,7 @@ use wharf_api_types::{
   },
 };
 
-use crate::world::{World, gateway_project};
+use crate::world::{ServerRow, World, gateway_project};
 
 pub const DEFAULT_CADDY_IMAGE: &str = "caddy:2";
 pub const DEFAULT_CLOUDFLARED_IMAGE: &str =
@@ -39,6 +39,62 @@ pub struct Net {
   pub reach: crate::db::Reach,
   /// 登录保护的账号（密钥 BASIC_AUTH）。不是网络信息，但渲染网关时要用，放在这里不必到处传。
   pub basic_auth: Option<BasicAuth>,
+}
+
+impl Net {
+  /// 由服务器设置和 agent 上报推导出网络信息。设置里的地址优先，其次是 agent 检测到的。
+  pub fn derive(
+    servers: &BTreeMap<String, ServerRow>,
+    agents: &[crate::db::AgentRow],
+  ) -> Self {
+    let mut net = Net::default();
+    for (name, server) in servers {
+      let report = agents
+        .iter()
+        .find(|a| &a.server == name)
+        .and_then(|a| a.report.as_ref());
+      // 接入方式是 public 时不用内网地址：端口只绑 127.0.0.1，网关一律走反向隧道。
+      let public = server.settings.network_mode
+        == Some(wharf_api_types::spec::NetworkMode::Public);
+      if let Some(addr) = server
+        .settings
+        .private_addr
+        .clone()
+        .or_else(|| report.and_then(|r| r.private_addr.clone()))
+        .filter(|_| !public)
+      {
+        net.private.insert(name.clone(), addr);
+      }
+      if let Some(r) = report {
+        net.lan_ips.insert(name.clone(), r.lan_ips.clone());
+      }
+      if let Some(ip) = server
+        .settings
+        .public_ip
+        .clone()
+        .or_else(|| report.and_then(|r| r.public_ip.clone()))
+      {
+        net.public_ip.insert(name.clone(), ip);
+      }
+    }
+    net
+  }
+
+  /// 只取影响渲染的地址，给 plan 的 inputs 指纹用。
+  pub fn addresses(&self) -> Addresses {
+    Addresses {
+      private: self.private.clone(),
+      public_ip: self.public_ip.clone(),
+    }
+  }
+}
+
+/// 渲染网关依赖的机器地址。地址变了渲染结果可能变，所以进 plan 的 inputs 指纹；
+/// 磁盘、负载这些上报值变化很勤，不能算进去，否则计划频繁失效。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct Addresses {
+  pub private: BTreeMap<String, PrivateAddr>,
+  pub public_ip: BTreeMap<String, String>,
 }
 
 /// 密钥 BASIC_AUTH 的名字。写入时值是 `用户名:密码`，保存的是 `用户名 bcrypt哈希`。
@@ -788,5 +844,76 @@ mod tests {
     assert!(BasicAuth::hash_input("ad min:longenough").is_err());
     assert!(BasicAuth::hash_input("admin:short").is_err());
     assert!(BasicAuth::parse("admin plaintext").is_none());
+  }
+
+  #[test]
+  fn inputs_include_addresses_not_usage() {
+    use wharf_api_types::agent::{AgentReport, Disk};
+    use wharf_api_types::spec::{PrivateNetwork, ServerSettings};
+
+    let addr = |ip: &str| PrivateAddr {
+      ip: ip.into(),
+      network: PrivateNetwork::Tailscale,
+    };
+    let fingerprint = |settings: ServerSettings,
+                       report: AgentReport| {
+      let servers = BTreeMap::from([(
+        "home".to_string(),
+        ServerRow {
+          settings,
+          version: 1,
+        },
+      )]);
+      let agents = vec![crate::db::AgentRow {
+        server: "home".into(),
+        public_key: None,
+        report: Some(report),
+        last_seen: None,
+      }];
+      crate::db::inputs_fingerprint(
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        &Net::derive(&servers, &agents).addresses(),
+      )
+    };
+
+    let base = fingerprint(
+      ServerSettings::default(),
+      AgentReport {
+        private_addr: Some(addr("100.64.0.1")),
+        ..Default::default()
+      },
+    );
+    // 磁盘用量这类高频上报值变了，指纹不变
+    let usage = fingerprint(
+      ServerSettings::default(),
+      AgentReport {
+        private_addr: Some(addr("100.64.0.1")),
+        disk: Some(Disk {
+          total: 100,
+          free: 1,
+        }),
+        ..Default::default()
+      },
+    );
+    assert_eq!(base, usage);
+    // agent 上报的地址变了，指纹要变
+    let moved = fingerprint(
+      ServerSettings::default(),
+      AgentReport {
+        private_addr: Some(addr("100.64.0.2")),
+        ..Default::default()
+      },
+    );
+    assert_ne!(base, moved);
+    // 服务器设置里的地址覆盖变了，指纹也要变
+    let overridden = fingerprint(
+      ServerSettings {
+        private_addr: Some(addr("100.64.0.3")),
+        ..Default::default()
+      },
+      AgentReport::default(),
+    );
+    assert_ne!(base, overridden);
   }
 }

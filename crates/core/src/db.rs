@@ -709,20 +709,32 @@ pub fn secrets(
   rows.collect::<Result<_, _>>().map_err(sql_err)
 }
 
-/// 计划依赖、又不在资源版本里的输入的指纹：连通性结果和密钥。
+/// 计划依赖、又不在资源版本里的输入的指纹：连通性结果、密钥、渲染要用的机器地址。
 pub fn inputs_fingerprint(
   reach: &Reach,
   secrets: &std::collections::BTreeMap<String, String>,
+  addresses: &crate::render::Addresses,
 ) -> String {
   let reach: Vec<_> = reach.iter().collect();
   crate::render::hash(
-    &serde_json::json!({ "reach": reach, "secrets": secrets })
-      .to_string(),
+    &serde_json::json!({
+      "reach": reach,
+      "secrets": secrets,
+      "addresses": addresses,
+    })
+    .to_string(),
   )
 }
 
 pub fn inputs(conn: &Connection) -> Result<String, ApiError> {
-  Ok(inputs_fingerprint(&reach(conn)?, &secrets(conn)?))
+  let world = crate::world::World::from_rows(all_resources(conn)?)?;
+  let net =
+    crate::render::Net::derive(&world.servers, &agents(conn)?);
+  Ok(inputs_fingerprint(
+    &reach(conn)?,
+    &secrets(conn)?,
+    &net.addresses(),
+  ))
 }
 
 // REACH
