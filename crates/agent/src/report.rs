@@ -184,19 +184,6 @@ async fn detect_public_ip() -> Option<String> {
   None
 }
 
-#[cfg(test)]
-mod tests {
-  use super::*;
-
-  #[test]
-  fn cgnat_range() {
-    assert!(is_cgnat("100.64.0.1".parse().unwrap()));
-    assert!(is_cgnat("100.101.102.103".parse().unwrap()));
-    assert!(!is_cgnat("100.128.0.1".parse().unwrap()));
-    assert!(!is_cgnat("192.168.1.10".parse().unwrap()));
-  }
-}
-
 /// 挂载进来的数据目录在宿主机的磁盘上，statvfs 看到的就是宿主机的容量。
 fn disk(path: &std::path::Path) -> Option<Disk> {
   use std::os::unix::ffi::OsStrExt;
@@ -210,4 +197,17 @@ fn disk(path: &std::path::Path) -> Option<Disk> {
     total: st.f_blocks as u64 * block,
     free: st.f_bavail as u64 * block,
   })
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn cgnat_range() {
+    assert!(is_cgnat("100.64.0.1".parse().unwrap()));
+    assert!(is_cgnat("100.101.102.103".parse().unwrap()));
+    assert!(!is_cgnat("100.128.0.1".parse().unwrap()));
+    assert!(!is_cgnat("192.168.1.10".parse().unwrap()));
+  }
 }

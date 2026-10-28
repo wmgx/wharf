@@ -429,8 +429,6 @@ pub async fn unretire(
 
 #[cfg(test)]
 mod tests {
-  use super::*;
-
   #[test]
   fn finds_container_id_in_mountinfo() {
     use wharf_api_types::agent::container_id;
