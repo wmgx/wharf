@@ -496,6 +496,26 @@ export interface DataMount {
   container?: string;
 }
 
+/** 一个服务的备份状态。stale：开了备份但 48 小时没成功过。 */
+export type DataStatus = "ok" | "stale" | "off" | "uncovered" | "none";
+
+export interface ServiceData {
+  name: string;
+  /** 数据所在的服务器。 */
+  server: string;
+  /** 没开备份时为空。 */
+  target?: string;
+  last_ok?: string;
+  /** 只在这个时间比最近成功晚时才有。 */
+  last_failed?: string;
+  mounts: DataMount[];
+  status: DataStatus;
+}
+
+export interface DataView {
+  services: ServiceData[];
+}
+
 /** 分层状态：期望、已应用、实际、健康、执行，summary 是按优先级挑出的一句话。 */
 export interface ServiceStatus {
   want_running: boolean;

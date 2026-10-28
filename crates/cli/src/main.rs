@@ -89,6 +89,8 @@ pub enum Command {
     #[arg(long, default_value = "24h", value_parser = ["1h", "24h", "7d", "30d"])]
     range: String,
   },
+  /// 数据：每个服务的挂载和备份情况。
+  Data,
   /// 组网：各服务器怎么接入（tailscale / lan / public）、谁能连谁的内网地址。
   Network {
     /// 先让每台在线服务器探测其余服务器，再显示结果。

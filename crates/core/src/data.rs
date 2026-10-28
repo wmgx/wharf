@@ -4,11 +4,17 @@
 
 use std::path::{Component, Path};
 
+use chrono::{DateTime, Duration, Utc};
 use serde_yaml_ng::Value;
 use wharf_api_types::{
   spec::{ServiceSpec, Source},
-  view::{DataKind, DataMount},
+  view::{DataKind, DataMount, DataStatus, DataView, ServiceData},
 };
+
+use crate::{db::sql_err, snapshot, state::AppState};
+
+/// 超过这个时间没有成功的备份就算过期。
+pub const STALE_AFTER_HOURS: i64 = 48;
 
 pub fn mounts(name: &str, spec: &ServiceSpec) -> Vec<DataMount> {
   match &spec.source {
@@ -26,6 +32,98 @@ pub fn mounts(name: &str, spec: &ServiceSpec) -> Vec<DataMount> {
       compose_mounts(name, content.as_deref().unwrap_or_default())
     }
   }
+}
+
+/// 一个服务的数据现状：有没有开备份、有没有全部覆盖、最近成功过没有。
+pub fn status(
+  backup: bool,
+  mounts: &[DataMount],
+  last_ok: Option<DateTime<Utc>>,
+  last_failed: Option<DateTime<Utc>>,
+  now: DateTime<Utc>,
+) -> DataStatus {
+  if mounts.is_empty() {
+    return DataStatus::None;
+  }
+  if !backup {
+    return DataStatus::Off;
+  }
+  // 最近一次尝试失败，或者成功已经太久：备份没在正常跑。
+  let failed_lately = match (last_ok, last_failed) {
+    (Some(ok), Some(failed)) => failed > ok,
+    (None, Some(_)) => true,
+    _ => false,
+  };
+  let fresh = last_ok.is_some_and(|t| {
+    now.signed_duration_since(t) <= Duration::hours(STALE_AFTER_HOURS)
+  });
+  if !fresh || failed_lately {
+    return DataStatus::Stale;
+  }
+  if mounts.iter().any(|m| m.kind != DataKind::Managed) {
+    return DataStatus::Uncovered;
+  }
+  DataStatus::Ok
+}
+
+/// 最近一次成功和最近一次失败的时间。
+type BackupTimes = (Option<DateTime<Utc>>, Option<DateTime<Utc>>);
+
+/// 每个服务的数据在哪、备份有没有在跑，现查。
+pub async fn overview(
+  state: &AppState,
+) -> Result<DataView, wharf_api_types::ApiError> {
+  let snap = snapshot::load(&state.db).await?;
+  let rows: Vec<(String, Option<i64>, Option<i64>)> = state
+    .db
+    .call(|c| {
+      let mut stmt = c
+        .prepare(
+          "SELECT service,
+                  MAX(CASE WHEN ok THEN created_at END),
+                  MAX(CASE WHEN ok = 0 THEN created_at END)
+           FROM backups GROUP BY service",
+        )
+        .map_err(sql_err)?;
+      let rows = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .map_err(sql_err)?;
+      rows.collect::<Result<_, _>>().map_err(sql_err)
+    })
+    .await?;
+  let times: std::collections::BTreeMap<String, BackupTimes> = rows
+    .into_iter()
+    .map(|(name, ok, failed)| (name, (from_ms(ok), from_ms(failed))))
+    .collect();
+  let now = Utc::now();
+  let mut services = Vec::new();
+  for (name, row) in &snap.world.services {
+    let mounts = mounts(name, &row.spec);
+    let (last_ok, last_failed) =
+      times.get(name).copied().unwrap_or_default();
+    let target = row.spec.backup.as_ref().map(|b| b.to.clone());
+    services.push(ServiceData {
+      name: name.clone(),
+      server: row.spec.server.clone(),
+      last_ok,
+      last_failed: last_failed
+        .filter(|f| last_ok.is_none_or(|ok| *f > ok)),
+      status: status(
+        target.is_some(),
+        &mounts,
+        last_ok,
+        last_failed,
+        now,
+      ),
+      target,
+      mounts,
+    });
+  }
+  Ok(DataView { services })
+}
+
+fn from_ms(ms: Option<i64>) -> Option<DateTime<Utc>> {
+  ms.and_then(DateTime::from_timestamp_millis)
 }
 
 pub fn describe(m: &DataMount) -> String {
@@ -144,6 +242,46 @@ fn volume_name(top: Option<&Value>, key: String) -> String {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn covers_five_states() {
+    let now = Utc::now();
+    let mount = |kind: DataKind, source: &str| DataMount {
+      kind,
+      source: source.into(),
+      target: "/data".into(),
+      container: None,
+    };
+    let managed = [mount(DataKind::Managed, "/srv/app/data")];
+    let mixed = [
+      mount(DataKind::Managed, "/srv/app/data"),
+      mount(DataKind::ExternalDir, "/home/me"),
+    ];
+    let old = Some(now - Duration::hours(STALE_AFTER_HOURS + 1));
+    use DataStatus as S;
+    // 开了备份，最近成功过，挂载都归 Wharf 管。
+    assert_eq!(status(true, &managed, Some(now), None, now), S::Ok);
+    // 从没成功过。
+    assert_eq!(
+      status(true, &managed, None, Some(now), now),
+      S::Stale
+    );
+    // 上次成功太久了。
+    assert_eq!(status(true, &managed, old, None, now), S::Stale);
+    // 最近一次尝试失败。
+    assert_eq!(status(true, &managed, old, Some(now), now), S::Stale);
+    // 有目录，但没开备份。
+    assert_eq!(status(false, &managed, Some(now), None, now), S::Off);
+    // 开了备份，但还有不归 Wharf 管的数据。
+    assert_eq!(
+      status(true, &mixed, Some(now), None, now),
+      S::Uncovered
+    );
+    // 同时过期和没覆盖时按过期算。
+    assert_eq!(status(true, &mixed, old, None, now), S::Stale);
+    // 没有任何挂载。
+    assert_eq!(status(true, &[], Some(now), None, now), S::None);
+  }
 
   #[test]
   fn classifies_compose_mounts() {

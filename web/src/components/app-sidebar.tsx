@@ -59,6 +59,7 @@ export function AppSidebar({ username, onLogout }: { username: string; onLogout:
         { to: "/services", label: "服务", icon: BoxesIcon, count: status?.services.length },
         { to: "/gateways", label: "网关", icon: WaypointsIcon, count: status?.gateways.length },
         { to: "/network", label: "组网", icon: CableIcon },
+        { to: "/data", label: "数据", icon: HardDriveIcon },
       ],
     },
     {

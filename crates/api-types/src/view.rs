@@ -295,6 +295,54 @@ pub struct DataMount {
   pub container: Option<String>,
 }
 
+/// 一个服务的数据备份状态。
+#[derive(
+  Debug,
+  Clone,
+  Copy,
+  PartialEq,
+  Eq,
+  Serialize,
+  Deserialize,
+  JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum DataStatus {
+  /// 开了备份，最近 48 小时内成功过。
+  Ok,
+  /// 开了备份，最近 48 小时内没有成功（包括从没成功、最近一次失败）。
+  Stale,
+  /// 有 Wharf 管的目录，但没开备份。
+  Off,
+  /// 开了备份，但还有不归 Wharf 管的数据，备份盖不到。
+  Uncovered,
+  /// 没有任何挂载。
+  None,
+}
+
+/// `GET /api/data`：每个服务的数据在哪、备份有没有在跑。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DataView {
+  pub services: Vec<ServiceData>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ServiceData {
+  pub name: String,
+  /// 数据所在的服务器。
+  pub server: String,
+  /// 备份存到哪台服务器，没开备份时为空。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub target: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub last_ok: Option<DateTime<Utc>>,
+  /// 只在这个时间比最近成功晚时才有，也就是最近一次尝试失败了。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub last_failed: Option<DateTime<Utc>>,
+  pub mounts: Vec<DataMount>,
+  pub status: DataStatus,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct LiveState {
   /// `running`、`partial`、`stopped`、`missing`、`unknown`。

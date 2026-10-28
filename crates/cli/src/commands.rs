@@ -16,7 +16,7 @@ use wharf_api_types::{
     VolumeSpec,
   },
   view::{
-    AccountView, BackupsView, CheckStatus, CreatedToken,
+    AccountView, BackupsView, CheckStatus, CreatedToken, DataView,
     DeploymentView, DoctorReport, GatewayView, ImportPreview,
     ImportRequest, JoinInfo, NetworkView, RestoreRequest,
     RollbackTarget, RouteView, SecretView, ServerView, ServiceView,
@@ -103,6 +103,11 @@ async fn dispatch(
         apply,
       };
       service(c, cmd, j).await
+    }
+    Command::Data => {
+      let v: DataView = c.get("/api/data").await?;
+      out(j, &v, print::data);
+      Ok(())
     }
     Command::Upgrade => upgrade(c, j).await,
     Command::Metrics {

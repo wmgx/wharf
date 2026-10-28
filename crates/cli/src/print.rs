@@ -4,7 +4,10 @@ use wharf_api_types::{
   ApiError,
   plan::{Action, Plan, Run, RunStatus, RunStep, StepStatus},
   spec::NetworkMode,
-  view::{BackupsView, NetworkView, OpStatus, ServiceView, Status},
+  view::{
+    BackupsView, DataKind, DataMount, DataStatus, DataView,
+    NetworkView, OpStatus, ServiceView, Status,
+  },
 };
 
 pub fn json<T: serde::Serialize>(value: &T) {
@@ -446,6 +449,67 @@ pub fn core_backup(v: &serde_json::Value) {
       "\n控制面整个丢了时：新机器先加入同一个内网，执行下面的命令并输入登录密码，文件会恢复到 /var/lib/wharf-core，再启动控制面："
     );
     println!("{cmd}");
+  }
+}
+
+fn data_status(s: DataStatus) -> &'static str {
+  match s {
+    DataStatus::Ok => "正常",
+    DataStatus::Stale => "过期",
+    DataStatus::Off => "未备份",
+    DataStatus::Uncovered => "未覆盖",
+    DataStatus::None => "没有数据",
+  }
+}
+
+fn mount_label(m: &DataMount) -> String {
+  let kind = match m.kind {
+    DataKind::Managed => "目录",
+    DataKind::ExternalDir => "外部目录",
+    DataKind::NamedVolume if m.source.is_empty() => "匿名卷",
+    DataKind::NamedVolume => "卷",
+  };
+  if m.source.is_empty() {
+    format!("{kind} → {}", m.target)
+  } else {
+    format!("{kind} {} → {}", m.source, m.target)
+  }
+}
+
+pub fn data(v: &DataView) {
+  if v.services.is_empty() {
+    println!("还没有服务。");
+    return;
+  }
+  let local = |t: &chrono::DateTime<chrono::Utc>| {
+    t.with_timezone(&chrono::Local)
+      .format("%m-%d %H:%M")
+      .to_string()
+  };
+  let width = v
+    .services
+    .iter()
+    .map(|s| s.name.chars().count())
+    .max()
+    .unwrap_or(0);
+  for s in &v.services {
+    let backup = match &s.target {
+      Some(t) => format!("备份到 {t}"),
+      None => "没有备份".to_string(),
+    };
+    let last = s
+      .last_ok
+      .map(|t| format!("  最近成功 {}", local(&t)))
+      .unwrap_or_default();
+    println!(
+      "{:<width$}  {:<8}  {:<4}  {backup}{last}",
+      s.name,
+      s.server,
+      data_status(s.status),
+    );
+    for m in &s.mounts {
+      println!("  {}", mount_label(m));
+    }
   }
 }
 

@@ -20,9 +20,9 @@ use wharf_api_types::{
   spec::Fleet,
   validate_name,
   view::{
-    AccountView, CreatedToken, DeploymentView, GatewayView, JoinInfo,
-    JoinRequest, JoinResponse, RouteView, SecretView, ServerView,
-    ServiceView, Status, TokenScope, TokenView,
+    AccountView, CreatedToken, DataView, DeploymentView, GatewayView,
+    JoinInfo, JoinRequest, JoinResponse, RouteView, SecretView,
+    ServerView, ServiceView, Status, TokenScope, TokenView,
   },
 };
 
@@ -77,6 +77,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route("/api/status", get(status))
     .route("/api/version", get(crate::agent_upgrade::version))
     .route("/api/network", get(crate::network::show))
+    .route("/api/data", get(data_overview))
     .route("/api/network/probe", post(crate::network::probe))
     .route("/api/upgrade", post(crate::agent_upgrade::upgrade_core))
     .route(
@@ -229,6 +230,15 @@ async fn status(
     }
   }
   Ok(Json(status))
+}
+
+/// 每个服务的数据在哪、备份有没有在跑。
+async fn data_overview(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+) -> ApiResult<DataView> {
+  auth.require(TokenScope::Read)?;
+  Ok(Json(crate::data::overview(&s).await?))
 }
 
 // SERVERS

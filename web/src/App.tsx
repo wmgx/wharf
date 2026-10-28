@@ -12,6 +12,7 @@ import { Skeleton } from "./components/ui/skeleton";
 import { Toaster } from "./components/ui/sonner";
 import { announceUpgrade } from "./components/upgrade";
 import { TooltipProvider } from "./components/ui/tooltip";
+import { Data } from "./pages/Data";
 import { Gateways } from "./pages/Gateways";
 import { Network } from "./pages/Network";
 import { Accounts } from "./pages/Accounts";
@@ -68,6 +69,7 @@ const TITLES: [string, string][] = [
   ["/gateways", "网关"],
   ["/network", "组网"],
   ["/topology", "拓扑"],
+  ["/data", "数据"],
   ["/", "港口"],
 ];
 
@@ -102,6 +104,7 @@ function Shell({ username, onLogout }: { username: string; onLogout: () => void 
                   <Route path="/servers/:name" element={<ServerDetail />} />
                   <Route path="/gateways" element={<Gateways />} />
                   <Route path="/network" element={<Network />} />
+                  <Route path="/data" element={<Data />} />
                   <Route path="/accounts" element={<Accounts />} />
                   <Route path="/topology" element={<Suspense fallback={<Skeleton className="h-[480px] rounded-xl" />}><Topology /></Suspense>} />
                   <Route path="*" element={<Navigate to="/" replace />} />
