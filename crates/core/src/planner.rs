@@ -102,9 +102,15 @@ pub enum Step {
   },
   ServiceUp {
     service: String,
+    /// 计划时渲染出的 compose 指纹，执行前重算比对；没有这个字段的旧计划不校验。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    expect: Option<String>,
   },
   GatewaySync {
     gateway: String,
+    /// 计划时渲染出的 compose 和配置的指纹，执行前重算比对。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    expect: Option<String>,
   },
   DnsUpsert {
     hostname: String,
@@ -926,6 +932,7 @@ fn service_items(
         format!("在 {server} 上部署 {name}"),
         Step::ServiceUp {
           service: name.clone(),
+          expect: Some(hash.clone()),
         },
       );
     }
@@ -1420,6 +1427,8 @@ fn gateway_items(
         format!("在 {server} 上应用网关 {name}"),
         Step::GatewaySync {
           gateway: name.clone(),
+          expect: (gw.spec.kind == GatewayKind::Caddy)
+            .then(|| r.fingerprint()),
         },
       );
     }

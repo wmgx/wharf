@@ -192,6 +192,14 @@ pub struct GatewayRender {
 }
 
 impl GatewayRender {
+  /// 下发内容的指纹：compose 和配置各自的 hash 一起再算一次。
+  pub fn fingerprint(&self) -> String {
+    render::hash(&format!(
+      "{} {}",
+      self.compose_hash, self.config_hash
+    ))
+  }
+
   /// 隧道的入口规则：`(hostname, http://上游)`。
   pub fn tunnel_rules(&self) -> Vec<(String, String)> {
     self
@@ -440,5 +448,76 @@ pub async fn with_timeout<T>(
       ErrorCode::Timeout,
       format!("{what} 超过 90 秒没有完成"),
     )),
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use std::collections::BTreeMap;
+
+  use super::*;
+  use crate::{
+    render::Net,
+    world::{ServerRow, ServiceRow, World},
+  };
+
+  fn world(host_port: u16) -> World {
+    let spec = serde_json::from_value(serde_json::json!({
+      "server": "s1",
+      "source": {"image": "nginx:1"},
+      "ports": [{"name": "http", "container": 80}],
+    }))
+    .unwrap();
+    let mut world = World::default();
+    world.servers.insert(
+      "s1".to_string(),
+      ServerRow {
+        settings: Default::default(),
+        version: 1,
+      },
+    );
+    world.services.insert(
+      "app".to_string(),
+      ServiceRow {
+        spec,
+        host_ports: BTreeMap::from([("http".to_string(), host_port)]),
+        import: None,
+        pins: BTreeMap::new(),
+        commit: None,
+        version: 1,
+      },
+    );
+    world
+  }
+
+  fn fingerprint(compose: &str, config: &str) -> String {
+    GatewayRender {
+      compose: compose.to_string(),
+      compose_hash: render::hash(compose),
+      config: config.to_string(),
+      config_hash: render::hash(config),
+      sites: Vec::new(),
+    }
+    .fingerprint()
+  }
+
+  #[test]
+  fn service_hash_follows_the_rendered_compose() {
+    let net = Net::default();
+    let secrets = BTreeMap::new();
+    let same = world(21000);
+    let moved = world(21001);
+    let hash = |w: &World| {
+      service_resolved(w, &net, "app", &secrets).unwrap().1
+    };
+    assert_eq!(hash(&same), hash(&same));
+    assert_ne!(hash(&same), hash(&moved));
+  }
+
+  #[test]
+  fn gateway_fingerprint_covers_both_payloads() {
+    assert_eq!(fingerprint("a", "b"), fingerprint("a", "b"));
+    assert_ne!(fingerprint("a", "b"), fingerprint("a2", "b"));
+    assert_ne!(fingerprint("a", "b"), fingerprint("a", "b2"));
   }
 }

@@ -121,7 +121,7 @@ pub async fn step_done(
   ok: bool,
 ) {
   let (kind, subject) = match step {
-    Step::ServiceUp { service } | Step::Rebuild { service } => {
+    Step::ServiceUp { service, .. } | Step::Rebuild { service } => {
       ("deploy", service.as_str())
     }
     Step::Backup { service } => ("backup", service.as_str()),

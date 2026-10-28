@@ -602,6 +602,32 @@ fn service_op(step: &Step) -> Option<(&str, &'static str)> {
   }
 }
 
+/// 计划时的产物指纹和现在渲染的不一致：说明计划之后有东西变了，
+/// 现在下发的和用户看过的不一样，重新 plan 再确认。
+fn check_expect(
+  expect: Option<&str>,
+  current: &str,
+  what: &str,
+) -> Result<(), ApiError> {
+  let Some(expect) = expect else {
+    // 旧计划没有指纹，照常执行。
+    return Ok(());
+  };
+  if expect == current {
+    return Ok(());
+  }
+  Err(
+    ApiError::new(
+      ErrorCode::PlanStale,
+      format!(
+        "{what} 的配置在 plan 之后变了，现在下发的会和计划里看过的不一样"
+      ),
+    )
+    .with_hint("重新 plan，确认新的差异后再 apply")
+    .suggest("wharf plan"),
+  )
+}
+
 /// 失败只记日志：状态显示不全不影响执行本身。
 async fn record_op(
   state: &AppState,
@@ -667,15 +693,22 @@ async fn run_step(
       )
       .await?;
     }
-    Step::ServiceUp { service } => {
+    Step::ServiceUp { service, expect } => {
       service_up(
-        state, run_id, &snap, service, false, progress, cancel,
+        state,
+        run_id,
+        &snap,
+        service,
+        false,
+        expect.as_deref(),
+        progress,
+        cancel,
       )
       .await?;
     }
     Step::Rebuild { service } => {
       service_up(
-        state, run_id, &snap, service, true, progress, cancel,
+        state, run_id, &snap, service, true, None, progress, cancel,
       )
       .await?;
     }
@@ -773,7 +806,7 @@ async fn run_step(
         )
         .await?;
     }
-    Step::GatewaySync { gateway } => {
+    Step::GatewaySync { gateway, expect } => {
       let gw = world.gateways.get(gateway).ok_or_else(|| {
         ApiError::new(
           ErrorCode::PlanStale,
@@ -788,6 +821,11 @@ async fn run_step(
       }
       let server = &gw.spec.server;
       let r = snapshot::gateway_render(world, &net, gateway)?;
+      check_expect(
+        expect.as_deref(),
+        &r.fingerprint(),
+        &format!("网关 {gateway}"),
+      )?;
       let result: ProjectUpResult = state
         .hub
         .call(
@@ -1133,12 +1171,14 @@ async fn remove_owned(
 
 /// 一次成功部署的内容，写进部署历史。
 /// 部署一个服务：构建来源先构建镜像（`force` 时重新构建），再 `up`。
+#[allow(clippy::too_many_arguments)]
 async fn service_up(
   state: &AppState,
   run_id: &str,
   snap: &snapshot::Snapshot,
   service: &str,
   force: bool,
+  expect: Option<&str>,
   progress: ProgressFn,
   cancel: &CancellationToken,
 ) -> Result<(), ApiError> {
@@ -1151,12 +1191,14 @@ async fn service_up(
     )
   })?;
   let server = &row.spec.server;
+  let (compose, hash) =
+    snapshot::service_resolved(world, &net, service, &snap.secrets)?;
+  // 先比对指纹再构建：计划过期时不用白构建一次。
+  check_expect(expect, &hash, &format!("服务 {service}"))?;
   let commit = crate::build::ensure_image(
     state, snap, service, force, &progress, cancel,
   )
   .await?;
-  let (compose, hash) =
-    snapshot::service_resolved(world, &net, service, &snap.secrets)?;
   let template = snapshot::service_template(world, &net, service)?;
   // 导入的服务：agent 拉好镜像后停掉原来的容器，启动失败时由 agent 恢复。
   let retire = row
@@ -1437,4 +1479,50 @@ pub async fn list_runs(
     runs.push(run);
   }
   Ok(runs)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn old_plan_without_fingerprint_still_runs() {
+    let step: Step = serde_json::from_str(
+      r#"{"kind":"service_up","service":"web"}"#,
+    )
+    .unwrap();
+    assert_eq!(
+      step,
+      Step::ServiceUp {
+        service: "web".into(),
+        expect: None,
+      }
+    );
+    let with = serde_json::to_string(&Step::ServiceUp {
+      service: "web".into(),
+      expect: Some("h".into()),
+    })
+    .unwrap();
+    assert!(with.contains(r#""expect":"h""#));
+    let gateway: Step = serde_json::from_str(
+      r#"{"kind":"gateway_sync","gateway":"gw"}"#,
+    )
+    .unwrap();
+    assert_eq!(
+      gateway,
+      Step::GatewaySync {
+        gateway: "gw".into(),
+        expect: None,
+      }
+    );
+  }
+
+  #[test]
+  fn fingerprint_mismatch_asks_for_a_new_plan() {
+    assert!(check_expect(None, "x", "服务 web").is_ok());
+    assert!(check_expect(Some("x"), "x", "服务 web").is_ok());
+    let e = check_expect(Some("x"), "y", "服务 web").unwrap_err();
+    assert_eq!(e.code, ErrorCode::PlanStale);
+    assert_eq!(e.suggest, ["wharf plan"]);
+  }
 }
