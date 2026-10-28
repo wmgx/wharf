@@ -117,10 +117,22 @@ fn pick(rows: &[Row], to: Option<i64>) -> Option<&Row> {
   match to {
     Some(id) => rows.iter().find(|r| r.0 == id),
     None => {
-      let latest = rows.first()?;
-      rows.iter().find(|r| (&r.1, &r.5) != (&latest.1, &latest.5))
+      let latest = version(rows.first()?);
+      rows.iter().find(|r| version(r) != latest)
     }
   }
+}
+
+/// 一次部署的版本：配置、commit、实际用的镜像。同一个标签换了镜像也算不同版本。
+fn version(r: &Row) -> (&str, Option<&str>, Vec<String>) {
+  let mut images: Vec<String> =
+    serde_json::from_str::<Vec<ImageInfo>>(&r.3)
+      .unwrap_or_default()
+      .into_iter()
+      .map(|i| i.digest.unwrap_or(i.id))
+      .collect();
+  images.sort();
+  (&r.1, r.5.as_deref(), images)
 }
 
 /// git 来源固定到那次部署实际构建的 commit。
@@ -175,5 +187,17 @@ mod tests {
     assert_eq!(pick(&rows, None).map(|r| r.0), Some(3));
     assert_eq!(pick(&rows, Some(2)).map(|r| r.0), Some(2));
     assert!(pick(&[row(1, "a")], None).is_none());
+  }
+
+  #[test]
+  fn pick_treats_new_digest_as_new_version() {
+    let with = |id, digest: &str| {
+      let mut r = row(id, "a");
+      r.3 =
+        format!(r#"[{{"image":"app:latest","digest":"{digest}"}}]"#);
+      r
+    };
+    let rows = vec![with(3, "app@sha256:b"), with(2, "app@sha256:a")];
+    assert_eq!(pick(&rows, None).map(|r| r.0), Some(2));
   }
 }
