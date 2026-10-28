@@ -28,12 +28,12 @@ pub async fn show(
   Ok(Json(view(&s, &snap).await?))
 }
 
-/// `POST /api/network/probe`：每台在线机器探测其余每台机器的内网地址。
+/// `POST /api/network/probe`：每台在线机器探测其余每台机器的内网地址。会让 agent 去连别的机器，需要 plan 权限。
 pub async fn probe(
   State(s): State<Arc<AppState>>,
   auth: Auth,
 ) -> ApiResult<NetworkView> {
-  auth.require(TokenScope::Read)?;
+  auth.require(TokenScope::Plan)?;
   let snap = probe_all(&s).await?;
   Ok(Json(view(&s, &snap).await?))
 }

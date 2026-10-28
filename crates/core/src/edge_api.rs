@@ -141,7 +141,7 @@ pub async fn script(
   auth: Auth,
   Path(name): Path<String>,
 ) -> ApiResult<EdgeScript> {
-  auth.require(TokenScope::Plan)?;
+  auth.require(TokenScope::Read)?;
   let snap = snapshot::load(&s.db).await?;
   let spec = &snap
     .world
