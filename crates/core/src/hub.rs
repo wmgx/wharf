@@ -37,6 +37,7 @@ use crate::{
 };
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+const SOCKET_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const PING_EVERY: Duration = Duration::from_secs(30);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 /// 控制面在 agent 超时之后再多等一会儿，让 agent 有机会报告超时原因。
@@ -272,9 +273,12 @@ async fn send_msg(
   socket: &mut WebSocket,
   msg: &CoreMsg,
 ) -> anyhow::Result<()> {
-  socket
-    .send(Message::text(serde_json::to_string(msg)?))
-    .await?;
+  tokio::time::timeout(
+    SOCKET_WRITE_TIMEOUT,
+    socket.send(Message::text(serde_json::to_string(msg)?)),
+  )
+  .await
+  .map_err(|_| anyhow::anyhow!("发送 WebSocket 消息超时"))??;
   Ok(())
 }
 
@@ -314,12 +318,16 @@ async fn handle_socket(
       "agent 协议版本 {protocol}，控制面要求 {PROTOCOL}，请运行 wharf upgrade"
     );
     tracing::warn!("服务器 {server} 拒绝连接：{reason}");
-    let _ = socket
-      .send(Message::Close(Some(axum::extract::ws::CloseFrame {
-        code: 4002,
-        reason: reason.clone().into(),
-      })))
-      .await;
+    let _ = tokio::time::timeout(
+      SOCKET_WRITE_TIMEOUT,
+      socket.send(Message::Close(Some(
+        axum::extract::ws::CloseFrame {
+          code: 4002,
+          reason: reason.clone().into(),
+        },
+      ))),
+    )
+    .await;
     anyhow::bail!("{reason}");
   }
   let registered = {
@@ -340,12 +348,14 @@ async fn handle_socket(
           .is_ok()
       });
   if !verified {
-    let _ = socket
-      .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+    let _ = tokio::time::timeout(
+      SOCKET_WRITE_TIMEOUT,
+      socket.send(Message::Close(Some(axum::extract::ws::CloseFrame {
         code: 4001,
         reason: "认证失败：服务器未加入或密钥不匹配，请重新 wharf server add".into(),
-      })))
-      .await;
+      }))),
+    )
+    .await;
     anyhow::bail!("服务器 {server} 认证失败");
   }
   if protocol == 0 {
@@ -386,8 +396,10 @@ async fn handle_socket(
       _ = conn.closed.cancelled() => break Ok(()),
       out = rx.recv() => {
         let Some(out) = out else { break Ok(()) };
-        if let Err(e) = sink.send(Message::text(serde_json::to_string(&out)?)).await {
-          break Err(e.into());
+        match tokio::time::timeout(SOCKET_WRITE_TIMEOUT, sink.send(Message::text(serde_json::to_string(&out)?))).await {
+          Ok(Ok(())) => {}
+          Ok(Err(e)) => break Err(e.into()),
+          Err(_) => break Err(anyhow::anyhow!("发送 WebSocket 消息超时")),
         }
       }
       _ = ping.tick() => {
@@ -395,8 +407,10 @@ async fn handle_socket(
         if last_recv.elapsed() > IDLE_TIMEOUT {
           break Err(anyhow::anyhow!("{} 秒没有收到消息", IDLE_TIMEOUT.as_secs()));
         }
-        if let Err(e) = sink.send(Message::Ping(Default::default())).await {
-          break Err(e.into());
+        match tokio::time::timeout(SOCKET_WRITE_TIMEOUT, sink.send(Message::Ping(Default::default()))).await {
+          Ok(Ok(())) => {}
+          Ok(Err(e)) => break Err(e.into()),
+          Err(_) => break Err(anyhow::anyhow!("发送 WebSocket ping 超时")),
         }
         ping_sent = Some(tokio::time::Instant::now());
       }
@@ -499,5 +513,36 @@ mod tests {
       panic!("不是 hello");
     };
     assert!(!host_shell);
+  }
+
+  #[test]
+  fn old_core_ignores_new_hello_capability() {
+    #[allow(dead_code)]
+    #[derive(serde::Deserialize)]
+    #[serde(tag = "type", rename_all = "snake_case")]
+    enum OldAgentMsg {
+      Hello {
+        server: String,
+        public_key: String,
+        signature: String,
+        nonce: String,
+        version: String,
+        #[serde(default)]
+        protocol: u32,
+      },
+    }
+
+    let hello = AgentMsg::Hello {
+      server: "s1".into(),
+      public_key: "k".into(),
+      signature: "s".into(),
+      nonce: "n".into(),
+      version: "0.1.0".into(),
+      protocol: PROTOCOL,
+      host_shell: true,
+    };
+    let json = serde_json::to_string(&hello).unwrap();
+    let old = serde_json::from_str::<OldAgentMsg>(&json);
+    assert!(old.is_ok());
   }
 }

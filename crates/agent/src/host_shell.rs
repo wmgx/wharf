@@ -30,6 +30,7 @@ const FEATURE_LABEL: &str = "com.wharf.host-shell=1";
 const SERVER_LABEL: &str = "com.wharf.host-shell.server";
 const GENERATION_LABEL: &str = "com.wharf.host-shell.generation";
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(10);
+const CLEANUP_STEP_TIMEOUT: Duration = Duration::from_secs(3);
 const OUTPUT_LIMIT: usize = 64 * 1024;
 const COMMAND_LIMIT: usize = 64 * 1024;
 const TAIL_LIMIT: usize = 512;
@@ -192,6 +193,7 @@ impl HostShell {
     let _ =
       tokio::time::timeout(Duration::from_secs(2), child.wait())
         .await;
+    tokio::time::sleep(Duration::from_millis(250)).await;
     let second_cleanup = self.remove(&name).await;
     drop(writer);
     drop(master);
@@ -272,6 +274,7 @@ impl HostShell {
     let _ =
       tokio::time::timeout(Duration::from_secs(2), child.wait())
         .await;
+    tokio::time::sleep(Duration::from_millis(250)).await;
     let second_cleanup = self.remove(&name).await;
     let out = finish_capture(&mut stdout).await;
     let err = finish_capture(&mut stderr).await;
@@ -300,13 +303,19 @@ impl HostShell {
 
   async fn remove(&self, name: &str) -> Result<(), ApiError> {
     let ctx = Ctx::detached();
-    let out = self
-      .docker
-      .cmd()
-      .args(["rm", "-f", name])
-      .timeout(CLEANUP_TIMEOUT)
-      .run(&ctx)
-      .await?;
+    let out = tokio::time::timeout(
+      CLEANUP_STEP_TIMEOUT,
+      self
+        .docker
+        .cmd()
+        .args(["rm", "-f", name])
+        .timeout(CLEANUP_STEP_TIMEOUT)
+        .run(&ctx),
+    )
+    .await
+    .map_err(|_| {
+      ApiError::new(ErrorCode::Timeout, "清理宿主机命令容器超时")
+    })??;
     if out.success || missing_container(&out.stderr) {
       Ok(())
     } else {
@@ -478,13 +487,9 @@ fn finish_stderr(
     .ok_or_else(|| ApiError::internal("宿主机命令退出状态不合法"))?;
   let marker_len = marker.len() + end - digits + 1;
   captured.total = captured.total.saturating_sub(marker_len as u64);
-  if let Some(start) = captured
+  captured
     .kept
-    .windows(marker.len())
-    .rposition(|w| w == marker)
-  {
-    captured.kept.truncate(start);
-  }
+    .truncate(captured.kept.len().min(captured.total as usize));
   Ok((captured, code))
 }
 
@@ -544,6 +549,16 @@ mod tests {
     let (text, truncated) = output_text(captured);
     assert_eq!(code, 137);
     assert_eq!(text, "warning\u{fffd}");
+    assert!(!truncated);
+
+    let mut captured = Captured::default();
+    captured.push(&vec![b'x'; OUTPUT_LIMIT - marker.len() / 2]);
+    captured.push(marker);
+    captured.push(b"0\n");
+    let (captured, code) = finish_stderr(captured, marker).unwrap();
+    let (text, truncated) = output_text(captured);
+    assert_eq!(code, 0);
+    assert!(text.bytes().all(|byte| byte == b'x'));
     assert!(!truncated);
   }
 

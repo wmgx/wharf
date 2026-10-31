@@ -197,16 +197,20 @@ export default function Terminal({
     }
   };
 
-  const toggleCtrl = () =>
+  const toggleCtrl = () => {
     setCtrl((value) => {
       ctrlRef.current = !value;
       return !value;
     });
-  const toggleAlt = () =>
+    termRef.current?.focus();
+  };
+  const toggleAlt = () => {
     setAlt((value) => {
       altRef.current = !value;
       return !value;
     });
+    termRef.current?.focus();
+  };
   const sendKey = (data: string, modifiers = false) => forwardRef.current(data, modifiers);
   const sendArrow = (key: "A" | "B" | "C" | "D") => sendKey(`\x1b${termRef.current?.modes.applicationCursorKeysMode ? "O" : "["}${key}`);
   const paste = async () => {

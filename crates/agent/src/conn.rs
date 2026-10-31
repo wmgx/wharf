@@ -20,6 +20,7 @@ use crate::{
 };
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+const SOCKET_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const REPORT_EVERY: Duration = Duration::from_secs(30);
 /// 这么久没收到控制面任何消息（包括 ping）就认为连接已死。
 const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
@@ -84,9 +85,12 @@ async fn session(
     protocol: wharf_api_types::PROTOCOL,
     host_shell: true,
   };
-  sink
-    .send(Message::text(serde_json::to_string(&hello)?))
-    .await?;
+  tokio::time::timeout(
+    SOCKET_WRITE_TIMEOUT,
+    sink.send(Message::text(serde_json::to_string(&hello)?)),
+  )
+  .await
+  .context("发送 hello 超时")??;
   let CoreMsg::Welcome { signature } =
     next_core_msg(&mut stream).await?
   else {
@@ -111,7 +115,14 @@ async fn session(
         let Ok(text) = serde_json::to_string(&msg) else {
           continue;
         };
-        if sink.send(Message::text(text)).await.is_err() {
+        if !matches!(
+          tokio::time::timeout(
+            SOCKET_WRITE_TIMEOUT,
+            sink.send(Message::text(text)),
+          )
+          .await,
+          Ok(Ok(()))
+        ) {
           break;
         }
       }
