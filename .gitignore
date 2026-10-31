@@ -8,4 +8,5 @@ temp/
 data/
 doc/
 CLAUDE.md
+AGENTS.md
 web/tsconfig.tsbuildinfo
