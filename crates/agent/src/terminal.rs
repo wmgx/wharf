@@ -30,7 +30,7 @@ pub async fn run(
   docker: &Docker,
   job: &TerminalJob,
   ctx: &Ctx,
-  mut input: mpsc::UnboundedReceiver<TerminalInput>,
+  mut input: mpsc::Receiver<TerminalInput>,
 ) -> Result<Value, ApiError> {
   let state = docker.one_status(&job.project, ctx).await?;
   let container = state

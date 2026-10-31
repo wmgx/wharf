@@ -218,6 +218,23 @@ CREATE TABLE service_ops (
   EDGE_DOMAINS_MIGRATION,
   PINS_MIGRATION,
   COMMIT_MIGRATION,
+  // 宿主机终端和命令执行审计；只记命令与统计，不保存终端输入和输出。
+  r#"
+CREATE TABLE shell_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  at INTEGER NOT NULL,
+  actor TEXT NOT NULL,
+  server TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('terminal', 'exec')),
+  command TEXT,
+  exit_code INTEGER,
+  duration_ms INTEGER,
+  output_bytes INTEGER,
+  error TEXT
+);
+CREATE INDEX shell_log_at_id ON shell_log(at DESC, id DESC);
+CREATE INDEX shell_log_server_at_id ON shell_log(server, at DESC, id DESC);
+"#,
 ];
 
 /// git 构建来源固定到上次部署构建的 commit（仓库和分支没换过的）。当时没记下 commit 的留给 plan 提醒。

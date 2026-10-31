@@ -56,6 +56,12 @@ pub struct ServerSettings {
   /// 由 Wharf 装 Tailscale 容器并加入；`public` 不用内网地址，网关到这台一律走反向隧道。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub network_mode: Option<NetworkMode>,
+  /// 允许从页面打开宿主机 root 终端。
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub host_terminal: bool,
+  /// 允许通过 API 在宿主机执行命令。
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub host_exec: bool,
 }
 
 /// 机器的接入方式（design 2.10）。不指定时按检测到的地址推断：有 Tailscale 地址是 `tailscale`，

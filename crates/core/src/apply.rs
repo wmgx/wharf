@@ -250,6 +250,15 @@ pub async fn start(
       .suggest(replan),
     );
   }
+  if scope < TokenScope::ApplyAll && changes_host_access(plan) {
+    return Err(
+      ApiError::new(
+        ErrorCode::Forbidden,
+        "宿主机终端和命令执行开关只能用 apply_all 权限修改",
+      )
+      .with_hint("请用户用 apply_all 权限的 token 执行"),
+    );
+  }
   let missing: Vec<&String> = plan
     .needs_confirm
     .iter()
@@ -414,6 +423,22 @@ pub async fn start(
     ));
   }
   Ok(ApplyResponse { run_id })
+}
+
+fn changes_host_access(plan: &Plan) -> bool {
+  fn flags(value: Option<&serde_json::Value>) -> (bool, bool) {
+    let get = |name| {
+      value
+        .and_then(|v| v.get(name))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    };
+    (get("host_terminal"), get("host_exec"))
+  }
+  plan.items.iter().any(|item| {
+    item.address.starts_with("server/")
+      && flags(item.before.as_ref()) != flags(item.after.as_ref())
+  })
 }
 
 /// 不来自计划的执行（备份、恢复）：同样占用 apply 锁、有执行记录、可以取消。
@@ -1524,5 +1549,32 @@ mod tests {
     let e = check_expect(Some("x"), "y", "服务 web").unwrap_err();
     assert_eq!(e.code, ErrorCode::PlanStale);
     assert_eq!(e.suggest, ["wharf plan"]);
+  }
+
+  #[test]
+  fn host_access_switch_requires_apply_all() {
+    let now = Utc::now();
+    let plan = Plan {
+      plan_id: "p1".into(),
+      status: PlanStatus::Pending,
+      created_at: now,
+      expires_at: now,
+      base_versions: Default::default(),
+      inputs: None,
+      items: vec![wharf_api_types::plan::PlanItem {
+        id: 1,
+        address: "server/s1".into(),
+        layer: wharf_api_types::plan::Layer::Config,
+        action: wharf_api_types::plan::Action::Update,
+        before: Some(serde_json::json!({})),
+        after: Some(serde_json::json!({"host_exec": true})),
+        impacts: vec![],
+        reason: "修改配置".into(),
+      }],
+      warnings: vec![],
+      needs_confirm: vec![],
+      suggest: vec![],
+    };
+    assert!(changes_host_access(&plan));
   }
 }

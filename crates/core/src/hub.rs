@@ -52,11 +52,12 @@ struct Pending {
 #[derive(Clone)]
 struct Conn {
   conn_id: u64,
-  tx: mpsc::UnboundedSender<CoreMsg>,
+  tx: mpsc::Sender<CoreMsg>,
   pending: Arc<Mutex<HashMap<u64, Pending>>>,
   closed: CancellationToken,
   /// 最近一次 ping 的往返延迟，毫秒。
   rtt_ms: Arc<AtomicU64>,
+  host_shell: bool,
 }
 
 #[derive(Default)]
@@ -82,6 +83,12 @@ pub fn offline(server: &str) -> ApiError {
 impl Hub {
   pub fn is_online(&self, server: &str) -> bool {
     lock(&self.conns).contains_key(server)
+  }
+
+  pub fn supports_host_shell(&self, server: &str) -> bool {
+    lock(&self.conns)
+      .get(server)
+      .is_some_and(|conn| conn.host_shell)
   }
 
   /// 当前连接的编号，每次重连都会变。不在线时是 `None`。
@@ -116,10 +123,22 @@ impl Hub {
   }
 
   /// 给进行中的请求发输入。连接已断开时什么也不做。
-  pub fn input(&self, server: &str, id: u64, input: TerminalInput) {
-    if let Some(conn) = lock(&self.conns).get(server) {
-      let _ = conn.tx.send(CoreMsg::Input { id, input });
-    }
+  pub async fn input(
+    &self,
+    server: &str,
+    id: u64,
+    input: TerminalInput,
+  ) -> bool {
+    let conn = lock(&self.conns).get(server).cloned();
+    let Some(conn) = conn else {
+      return false;
+    };
+    tokio::time::timeout(
+      Duration::from_secs(1),
+      conn.tx.send(CoreMsg::Input { id, input }),
+    )
+    .await
+    .is_ok_and(|result| result.is_ok())
   }
 
   pub async fn call_as<T: DeserializeOwned>(
@@ -135,20 +154,39 @@ impl Hub {
       .get(server)
       .cloned()
       .ok_or_else(|| offline(server))?;
+    if matches!(
+      &op,
+      AgentOp::HostTerminal { .. } | AgentOp::HostExec(_)
+    ) && !conn.host_shell
+    {
+      return Err(
+        ApiError::new(
+          ErrorCode::Conflict,
+          format!("服务器 {server} 的 agent 还不支持宿主机终端"),
+        )
+        .with_hint("请先运行 wharf upgrade"),
+      );
+    }
     let (done, rx) = oneshot::channel();
     lock(&conn.pending).insert(id, Pending { done, progress });
-    let sent = conn.tx.send(CoreMsg::Request {
-      id,
-      timeout_ms: timeout.as_millis() as u64,
-      op,
-    });
-    if sent.is_err() {
+    let sent = tokio::time::timeout(
+      Duration::from_secs(5),
+      conn.tx.send(CoreMsg::Request {
+        id,
+        timeout_ms: timeout.as_millis() as u64,
+        op,
+      }),
+    )
+    .await;
+    if !matches!(sent, Ok(Ok(()))) {
       lock(&conn.pending).remove(&id);
       return Err(offline(server));
     }
     let abort = |code: ErrorCode, message: String| {
       lock(&conn.pending).remove(&id);
-      let _ = conn.tx.send(CoreMsg::Cancel { id });
+      if conn.tx.try_send(CoreMsg::Cancel { id }).is_err() {
+        conn.closed.cancel();
+      }
       ApiError::new(code, message)
     };
     let result = tokio::select! {
@@ -266,7 +304,7 @@ async fn handle_socket(
     nonce: agent_nonce,
     version,
     protocol,
-    host_shell: _,
+    host_shell,
   } = hello
   else {
     anyhow::bail!("agent 没有先发 hello");
@@ -326,13 +364,14 @@ async fn handle_socket(
   )
   .await?;
 
-  let (tx, mut rx) = mpsc::unbounded_channel();
+  let (tx, mut rx) = mpsc::channel(4096);
   let conn = Conn {
     conn_id: state.hub.next_conn.fetch_add(1, Ordering::Relaxed),
     tx,
     pending: Default::default(),
     closed: CancellationToken::new(),
     rtt_ms: Arc::new(AtomicU64::new(u64::MAX)),
+    host_shell,
   };
   state.hub.register(&server, conn.clone());
   tracing::info!("服务器 {server} 上线（agent {version}）");
@@ -442,5 +481,23 @@ mod tests {
     assert!(protocol_ok(PROTOCOL));
     assert!(!protocol_ok(PROTOCOL + 1));
     assert!(!protocol_ok(u32::MAX));
+  }
+
+  #[test]
+  fn old_hello_has_no_host_shell_capability() {
+    let hello: AgentMsg = serde_json::from_value(serde_json::json!({
+      "type": "hello",
+      "server": "s1",
+      "public_key": "k",
+      "signature": "s",
+      "nonce": "n",
+      "version": "0.1.0",
+      "protocol": 1
+    }))
+    .unwrap();
+    let AgentMsg::Hello { host_shell, .. } = hello else {
+      panic!("不是 hello");
+    };
+    assert!(!host_shell);
   }
 }

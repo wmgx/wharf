@@ -134,7 +134,7 @@ impl HostShell {
     &self,
     size: TerminalSize,
     ctx: &Ctx,
-    mut input: mpsc::UnboundedReceiver<TerminalInput>,
+    mut input: mpsc::Receiver<TerminalInput>,
   ) -> Result<Value, ApiError> {
     let image = self.image()?;
     let name = self.name();

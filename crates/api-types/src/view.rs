@@ -55,6 +55,9 @@ pub struct ServerView {
   /// agent 是否已经加入（完成过 join）。
   pub joined: bool,
   pub online: bool,
+  /// 当前连接的 agent 支持宿主机终端和命令执行。
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub host_shell: bool,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub last_seen: Option<DateTime<Utc>>,
   /// agent 最近一次上报。
@@ -73,6 +76,34 @@ pub struct ServerView {
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub agent_outdated: bool,
   pub version: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct HostExecResponse {
+  pub exit_code: i32,
+  pub stdout: String,
+  pub stderr: String,
+  pub truncated: bool,
+  pub duration_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ShellLog {
+  pub id: i64,
+  pub at: DateTime<Utc>,
+  pub actor: String,
+  pub server: String,
+  pub kind: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub command: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub exit_code: Option<i32>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub duration_ms: Option<u64>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub output_bytes: Option<u64>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

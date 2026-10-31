@@ -106,6 +106,12 @@ pub fn router(state: Arc<AppState>) -> Router {
     )
     .route("/api/servers/{name}/prune", post(crate::prune::prune_now))
     .route("/api/servers/{name}/host", get(host_info))
+    .route("/api/servers/{name}/exec", post(crate::shell::exec))
+    .route(
+      "/api/servers/{name}/terminal",
+      get(crate::terminal::open_host),
+    )
+    .route("/api/shell-log", get(crate::shell::list))
     .route(
       "/api/servers/{name}/unmanaged",
       get(crate::import_api::unmanaged),
