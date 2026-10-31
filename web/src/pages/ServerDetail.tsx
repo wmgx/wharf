@@ -1,4 +1,4 @@
-import { ArrowLeftIcon, ArrowUpCircleIcon, RefreshCwIcon, Trash2Icon } from "lucide-react";
+import { ArrowLeftIcon, ArrowUpCircleIcon, RefreshCwIcon, SettingsIcon, TerminalIcon, Trash2Icon } from "lucide-react";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "@/api";
@@ -8,10 +8,13 @@ import { Dot, Empty, ErrorNote, Notice, PageHeader, SectionTitle, StatusBadge, a
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useStatus } from "@/status";
-import type { HostInfo } from "@/types";
+import type { HostInfo, ServerView } from "@/types";
 
 const DOCKER_KIND: Record<string, string> = {
   Images: "镜像",
@@ -67,6 +70,7 @@ export function ServerDetail() {
   const { name = "" } = useParams();
   const { status } = useStatus();
   const actions = useActions();
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const server = status?.servers.find((s) => s.name === name);
   const host = useHostInfo(name, !!server?.online);
 
@@ -90,6 +94,7 @@ export function ServerDetail() {
   const info = host.data;
   const services = status?.services.filter((s) => s.spec.server === name) ?? [];
   const gateways = status?.gateways.filter((g) => g.spec.server === name) ?? [];
+  const terminalStatus = !server.settings.host_terminal ? "未开启" : !server.online ? "离线" : !server.host_shell ? "待升级" : undefined;
 
   return (
     <>
@@ -104,6 +109,23 @@ export function ServerDetail() {
         description={!server.online && server.last_seen ? `最后在线 ${ago(server.last_seen)}` : undefined}
         actions={
           <>
+            {terminalStatus ? (
+              <Button variant="outline" size="sm" disabled>
+                <TerminalIcon />
+                {terminalStatus}
+              </Button>
+            ) : (
+              <Button asChild variant="outline" size="sm">
+                <Link to={`/servers/${encodeURIComponent(name)}/terminal`}>
+                  <TerminalIcon />
+                  终端
+                </Link>
+              </Button>
+            )}
+            <Button variant="outline" size="sm" onClick={() => setSettingsOpen(true)}>
+              <SettingsIcon />
+              设置
+            </Button>
             {server.agent_outdated && (
               <Button variant="outline" size="sm" onClick={() => actions.upgradeAgent(name)}>
                 <ArrowUpCircleIcon />
@@ -121,6 +143,8 @@ export function ServerDetail() {
           </>
         }
       />
+
+      <ServerSettingsDialog server={server} open={settingsOpen} onOpenChange={setSettingsOpen} />
 
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <Stat label="系统" value={info?.os ?? r?.os} sub={info ? `内核 ${info.kernel}` : r?.arch} loading={!info && host.loading} />
@@ -248,6 +272,55 @@ export function ServerDetail() {
         </div>
       )}
     </>
+  );
+}
+
+function ServerSettingsDialog({ server, open, onOpenChange }: { server: ServerView; open: boolean; onOpenChange: (open: boolean) => void }) {
+  const actions = useActions();
+  const [hostTerminal, setHostTerminal] = useState(server.settings.host_terminal);
+  const [hostExec, setHostExec] = useState(server.settings.host_exec);
+  useEffect(() => {
+    if (!open) return;
+    setHostTerminal(server.settings.host_terminal);
+    setHostExec(server.settings.host_exec);
+  }, [open, server.settings.host_exec, server.settings.host_terminal]);
+  const changed = hostTerminal !== server.settings.host_terminal || hostExec !== server.settings.host_exec;
+  const save = () => {
+    onOpenChange(false);
+    actions.plan({
+      title: `设置 ${server.name}`,
+      changes: [{ op: "update_server", name: server.name, settings: { ...server.settings, host_terminal: hostTerminal, host_exec: hostExec } }],
+    });
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent aria-describedby={undefined}>
+        <DialogHeader>
+          <DialogTitle>设置</DialogTitle>
+        </DialogHeader>
+        <div className="grid gap-3">
+          <div className="flex items-center gap-3 rounded-lg border p-3">
+            <Checkbox id="host-terminal" checked={hostTerminal} onCheckedChange={(value) => setHostTerminal(value === true)} />
+            <Label htmlFor="host-terminal" className="cursor-pointer">宿主机终端</Label>
+            <span className="ml-auto text-sm text-muted-foreground">{hostTerminal ? "已开启" : "未开启"}</span>
+          </div>
+          <div className="flex items-center gap-3 rounded-lg border p-3">
+            <Checkbox id="host-exec" checked={hostExec} onCheckedChange={(value) => setHostExec(value === true)} />
+            <Label htmlFor="host-exec" className="cursor-pointer">命令执行</Label>
+            <span className="ml-auto text-sm text-muted-foreground">{hostExec ? "已开启" : "未开启"}</span>
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="ghost" onClick={() => onOpenChange(false)}>
+            取消
+          </Button>
+          <Button disabled={!changed} onClick={save}>
+            生成计划
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 

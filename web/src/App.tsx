@@ -19,6 +19,7 @@ import { Accounts } from "./pages/Accounts";
 import { Home } from "./pages/Home";
 import { Login } from "./pages/Login";
 import { ServerDetail } from "./pages/ServerDetail";
+import { HostTerminal } from "./pages/HostTerminal";
 import { ServiceDetail } from "./pages/ServiceDetail";
 import { EdgeDetail } from "./pages/EdgeDetail";
 import { Services } from "./pages/Services";
@@ -102,6 +103,7 @@ function Shell({ username, onLogout }: { username: string; onLogout: () => void 
                   <Route path="/services/:name" element={<ServiceDetail />} />
                   <Route path="/edge/:name" element={<EdgeDetail />} />
                   <Route path="/servers/:name" element={<ServerDetail />} />
+                  <Route path="/servers/:name/terminal" element={<HostTerminal />} />
                   <Route path="/gateways" element={<Gateways />} />
                   <Route path="/network" element={<Network />} />
                   <Route path="/data" element={<Data />} />
