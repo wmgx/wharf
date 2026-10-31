@@ -94,6 +94,7 @@ impl Client {
     })?;
     Ok(Self {
       http: reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(15))
         .timeout(Duration::from_secs(180))
         .build()
         .map_err(|e| ApiError::internal(e.to_string()))?,
@@ -192,6 +193,23 @@ impl Client {
   ) -> CliResult<T> {
     self
       .send(self.http.post(format!("{}{path}", self.base)).json(body))
+      .await
+  }
+
+  pub async fn post_timeout<B: Serialize, T: DeserializeOwned>(
+    &self,
+    path: &str,
+    body: &B,
+    timeout: Duration,
+  ) -> CliResult<T> {
+    self
+      .send(
+        self
+          .http
+          .post(format!("{}{path}", self.base))
+          .timeout(timeout)
+          .json(body),
+      )
       .await
   }
 

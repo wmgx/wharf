@@ -91,6 +91,24 @@ pub enum Command {
   },
   /// 数据：每个服务的挂载和备份情况。
   Data,
+  /// 在宿主机执行一次非交互 shell 命令。
+  Exec {
+    server: String,
+    #[arg(long)]
+    timeout: Option<u64>,
+    #[arg(long)]
+    cwd: Option<String>,
+    /// 完整 shell 命令；写在 `--` 后并用本地 shell 引号保护。
+    #[arg(last = true, required = true)]
+    command: String,
+  },
+  /// 宿主机终端和命令执行审计。
+  ShellLog {
+    #[arg(long)]
+    server: Option<String>,
+    #[arg(long, default_value_t = 50)]
+    limit: u32,
+  },
   /// 组网：各服务器怎么接入（tailscale / lan / public）、谁能连谁的内网地址。
   Network {
     /// 先让每台在线服务器探测其余服务器，再显示结果。
@@ -274,6 +292,12 @@ pub enum ServerCmd {
     /// 拉代码时用的 HTTP 代理，例如 `http://100.x.x.x:8118`（国内机器经海外机器连 GitHub）；传空字符串清除。
     #[arg(long)]
     git_proxy: Option<String>,
+    /// 是否允许从页面打开宿主机终端。
+    #[arg(long)]
+    host_terminal: Option<bool>,
+    /// 是否允许通过 API 在宿主机执行命令。
+    #[arg(long)]
+    host_exec: Option<bool>,
     #[command(flatten)]
     apply: ApplyFlags,
   },
