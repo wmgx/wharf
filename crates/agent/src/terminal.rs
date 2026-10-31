@@ -30,7 +30,7 @@ pub async fn run(
   docker: &Docker,
   job: &TerminalJob,
   ctx: &Ctx,
-  mut input: mpsc::UnboundedReceiver<TerminalInput>,
+  mut input: mpsc::Receiver<TerminalInput>,
 ) -> Result<Value, ApiError> {
   let state = docker.one_status(&job.project, ctx).await?;
   let container = state
@@ -148,7 +148,7 @@ async fn hang_up(docker: &Docker, container: &str, pid: u32) {
     .await;
 }
 
-fn open_pty(
+pub(crate) fn open_pty(
   size: TerminalSize,
 ) -> Result<(OwnedFd, OwnedFd), ApiError> {
   let mut master = 0;
@@ -171,7 +171,7 @@ fn open_pty(
   }
 }
 
-fn resize(master: &OwnedFd, size: TerminalSize) {
+pub(crate) fn resize(master: &OwnedFd, size: TerminalSize) {
   let ws = winsize(size);
   unsafe {
     libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ as _, &ws);
@@ -187,7 +187,7 @@ fn winsize(size: TerminalSize) -> libc::winsize {
   }
 }
 
-fn io(e: std::io::Error) -> ApiError {
+pub(crate) fn io(e: std::io::Error) -> ApiError {
   ApiError::new(ErrorCode::AgentFailed, format!("终端：{e}"))
 }
 

@@ -37,6 +37,7 @@ use crate::{
 };
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+const SOCKET_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const PING_EVERY: Duration = Duration::from_secs(30);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 /// 控制面在 agent 超时之后再多等一会儿，让 agent 有机会报告超时原因。
@@ -52,11 +53,12 @@ struct Pending {
 #[derive(Clone)]
 struct Conn {
   conn_id: u64,
-  tx: mpsc::UnboundedSender<CoreMsg>,
+  tx: mpsc::Sender<CoreMsg>,
   pending: Arc<Mutex<HashMap<u64, Pending>>>,
   closed: CancellationToken,
   /// 最近一次 ping 的往返延迟，毫秒。
   rtt_ms: Arc<AtomicU64>,
+  host_shell: bool,
 }
 
 #[derive(Default)]
@@ -82,6 +84,12 @@ pub fn offline(server: &str) -> ApiError {
 impl Hub {
   pub fn is_online(&self, server: &str) -> bool {
     lock(&self.conns).contains_key(server)
+  }
+
+  pub fn supports_host_shell(&self, server: &str) -> bool {
+    lock(&self.conns)
+      .get(server)
+      .is_some_and(|conn| conn.host_shell)
   }
 
   /// 当前连接的编号，每次重连都会变。不在线时是 `None`。
@@ -116,10 +124,22 @@ impl Hub {
   }
 
   /// 给进行中的请求发输入。连接已断开时什么也不做。
-  pub fn input(&self, server: &str, id: u64, input: TerminalInput) {
-    if let Some(conn) = lock(&self.conns).get(server) {
-      let _ = conn.tx.send(CoreMsg::Input { id, input });
-    }
+  pub async fn input(
+    &self,
+    server: &str,
+    id: u64,
+    input: TerminalInput,
+  ) -> bool {
+    let conn = lock(&self.conns).get(server).cloned();
+    let Some(conn) = conn else {
+      return false;
+    };
+    tokio::time::timeout(
+      Duration::from_secs(1),
+      conn.tx.send(CoreMsg::Input { id, input }),
+    )
+    .await
+    .is_ok_and(|result| result.is_ok())
   }
 
   pub async fn call_as<T: DeserializeOwned>(
@@ -135,20 +155,39 @@ impl Hub {
       .get(server)
       .cloned()
       .ok_or_else(|| offline(server))?;
+    if matches!(
+      &op,
+      AgentOp::HostTerminal { .. } | AgentOp::HostExec(_)
+    ) && !conn.host_shell
+    {
+      return Err(
+        ApiError::new(
+          ErrorCode::Conflict,
+          format!("服务器 {server} 的 agent 还不支持宿主机终端"),
+        )
+        .with_hint("请先运行 wharf upgrade"),
+      );
+    }
     let (done, rx) = oneshot::channel();
     lock(&conn.pending).insert(id, Pending { done, progress });
-    let sent = conn.tx.send(CoreMsg::Request {
-      id,
-      timeout_ms: timeout.as_millis() as u64,
-      op,
-    });
-    if sent.is_err() {
+    let sent = tokio::time::timeout(
+      Duration::from_secs(5),
+      conn.tx.send(CoreMsg::Request {
+        id,
+        timeout_ms: timeout.as_millis() as u64,
+        op,
+      }),
+    )
+    .await;
+    if !matches!(sent, Ok(Ok(()))) {
       lock(&conn.pending).remove(&id);
       return Err(offline(server));
     }
     let abort = |code: ErrorCode, message: String| {
       lock(&conn.pending).remove(&id);
-      let _ = conn.tx.send(CoreMsg::Cancel { id });
+      if conn.tx.try_send(CoreMsg::Cancel { id }).is_err() {
+        conn.closed.cancel();
+      }
       ApiError::new(code, message)
     };
     let result = tokio::select! {
@@ -234,9 +273,12 @@ async fn send_msg(
   socket: &mut WebSocket,
   msg: &CoreMsg,
 ) -> anyhow::Result<()> {
-  socket
-    .send(Message::text(serde_json::to_string(msg)?))
-    .await?;
+  tokio::time::timeout(
+    SOCKET_WRITE_TIMEOUT,
+    socket.send(Message::text(serde_json::to_string(msg)?)),
+  )
+  .await
+  .map_err(|_| anyhow::anyhow!("发送 WebSocket 消息超时"))??;
   Ok(())
 }
 
@@ -266,6 +308,7 @@ async fn handle_socket(
     nonce: agent_nonce,
     version,
     protocol,
+    host_shell,
   } = hello
   else {
     anyhow::bail!("agent 没有先发 hello");
@@ -275,12 +318,16 @@ async fn handle_socket(
       "agent 协议版本 {protocol}，控制面要求 {PROTOCOL}，请运行 wharf upgrade"
     );
     tracing::warn!("服务器 {server} 拒绝连接：{reason}");
-    let _ = socket
-      .send(Message::Close(Some(axum::extract::ws::CloseFrame {
-        code: 4002,
-        reason: reason.clone().into(),
-      })))
-      .await;
+    let _ = tokio::time::timeout(
+      SOCKET_WRITE_TIMEOUT,
+      socket.send(Message::Close(Some(
+        axum::extract::ws::CloseFrame {
+          code: 4002,
+          reason: reason.clone().into(),
+        },
+      ))),
+    )
+    .await;
     anyhow::bail!("{reason}");
   }
   let registered = {
@@ -301,12 +348,14 @@ async fn handle_socket(
           .is_ok()
       });
   if !verified {
-    let _ = socket
-      .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+    let _ = tokio::time::timeout(
+      SOCKET_WRITE_TIMEOUT,
+      socket.send(Message::Close(Some(axum::extract::ws::CloseFrame {
         code: 4001,
         reason: "认证失败：服务器未加入或密钥不匹配，请重新 wharf server add".into(),
-      })))
-      .await;
+      }))),
+    )
+    .await;
     anyhow::bail!("服务器 {server} 认证失败");
   }
   if protocol == 0 {
@@ -325,13 +374,14 @@ async fn handle_socket(
   )
   .await?;
 
-  let (tx, mut rx) = mpsc::unbounded_channel();
+  let (tx, mut rx) = mpsc::channel(4096);
   let conn = Conn {
     conn_id: state.hub.next_conn.fetch_add(1, Ordering::Relaxed),
     tx,
     pending: Default::default(),
     closed: CancellationToken::new(),
     rtt_ms: Arc::new(AtomicU64::new(u64::MAX)),
+    host_shell,
   };
   state.hub.register(&server, conn.clone());
   tracing::info!("服务器 {server} 上线（agent {version}）");
@@ -346,8 +396,10 @@ async fn handle_socket(
       _ = conn.closed.cancelled() => break Ok(()),
       out = rx.recv() => {
         let Some(out) = out else { break Ok(()) };
-        if let Err(e) = sink.send(Message::text(serde_json::to_string(&out)?)).await {
-          break Err(e.into());
+        match tokio::time::timeout(SOCKET_WRITE_TIMEOUT, sink.send(Message::text(serde_json::to_string(&out)?))).await {
+          Ok(Ok(())) => {}
+          Ok(Err(e)) => break Err(e.into()),
+          Err(_) => break Err(anyhow::anyhow!("发送 WebSocket 消息超时")),
         }
       }
       _ = ping.tick() => {
@@ -355,8 +407,10 @@ async fn handle_socket(
         if last_recv.elapsed() > IDLE_TIMEOUT {
           break Err(anyhow::anyhow!("{} 秒没有收到消息", IDLE_TIMEOUT.as_secs()));
         }
-        if let Err(e) = sink.send(Message::Ping(Default::default())).await {
-          break Err(e.into());
+        match tokio::time::timeout(SOCKET_WRITE_TIMEOUT, sink.send(Message::Ping(Default::default()))).await {
+          Ok(Ok(())) => {}
+          Ok(Err(e)) => break Err(e.into()),
+          Err(_) => break Err(anyhow::anyhow!("发送 WebSocket ping 超时")),
         }
         ping_sent = Some(tokio::time::Instant::now());
       }
@@ -441,5 +495,54 @@ mod tests {
     assert!(protocol_ok(PROTOCOL));
     assert!(!protocol_ok(PROTOCOL + 1));
     assert!(!protocol_ok(u32::MAX));
+  }
+
+  #[test]
+  fn old_hello_has_no_host_shell_capability() {
+    let hello: AgentMsg = serde_json::from_value(serde_json::json!({
+      "type": "hello",
+      "server": "s1",
+      "public_key": "k",
+      "signature": "s",
+      "nonce": "n",
+      "version": "0.1.0",
+      "protocol": 1
+    }))
+    .unwrap();
+    let AgentMsg::Hello { host_shell, .. } = hello else {
+      panic!("不是 hello");
+    };
+    assert!(!host_shell);
+  }
+
+  #[test]
+  fn old_core_ignores_new_hello_capability() {
+    #[allow(dead_code)]
+    #[derive(serde::Deserialize)]
+    #[serde(tag = "type", rename_all = "snake_case")]
+    enum OldAgentMsg {
+      Hello {
+        server: String,
+        public_key: String,
+        signature: String,
+        nonce: String,
+        version: String,
+        #[serde(default)]
+        protocol: u32,
+      },
+    }
+
+    let hello = AgentMsg::Hello {
+      server: "s1".into(),
+      public_key: "k".into(),
+      signature: "s".into(),
+      nonce: "n".into(),
+      version: "0.1.0".into(),
+      protocol: PROTOCOL,
+      host_shell: true,
+    };
+    let json = serde_json::to_string(&hello).unwrap();
+    let old = serde_json::from_str::<OldAgentMsg>(&json);
+    assert!(old.is_ok());
   }
 }

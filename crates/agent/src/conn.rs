@@ -20,6 +20,7 @@ use crate::{
 };
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+const SOCKET_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const REPORT_EVERY: Duration = Duration::from_secs(30);
 /// 这么久没收到控制面任何消息（包括 ping）就认为连接已死。
 const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
@@ -82,10 +83,14 @@ async fn session(
     nonce: my_nonce.clone(),
     version: wharf_api_types::VERSION.to_string(),
     protocol: wharf_api_types::PROTOCOL,
+    host_shell: true,
   };
-  sink
-    .send(Message::text(serde_json::to_string(&hello)?))
-    .await?;
+  tokio::time::timeout(
+    SOCKET_WRITE_TIMEOUT,
+    sink.send(Message::text(serde_json::to_string(&hello)?)),
+  )
+  .await
+  .context("发送 hello 超时")??;
   let CoreMsg::Welcome { signature } =
     next_core_msg(&mut stream).await?
   else {
@@ -101,7 +106,7 @@ async fn session(
   tracing::info!("已连接控制面 {url}，服务器名 {}", joined.server);
 
   // 所有出站消息走一个通道，由写任务统一发送。
-  let (tx, mut rx) = mpsc::unbounded_channel::<AgentMsg>();
+  let (tx, mut rx) = mpsc::channel::<AgentMsg>(4096);
   let session_cancel = CancellationToken::new();
   let writer = {
     let cancel = session_cancel.clone();
@@ -110,7 +115,14 @@ async fn session(
         let Ok(text) = serde_json::to_string(&msg) else {
           continue;
         };
-        if sink.send(Message::text(text)).await.is_err() {
+        if !matches!(
+          tokio::time::timeout(
+            SOCKET_WRITE_TIMEOUT,
+            sink.send(Message::text(text)),
+          )
+          .await,
+          Ok(Ok(()))
+        ) {
           break;
         }
       }
@@ -132,7 +144,7 @@ async fn session(
           report.metrics = ops.reporter.metrics().await.map(Box::new);
         }
         sample = !sample;
-        if tx.send(AgentMsg::Report(report)).is_err() {
+        if tx.send(AgentMsg::Report(report)).await.is_err() {
           break;
         }
         tokio::select! {
@@ -146,9 +158,8 @@ async fn session(
   let running: Arc<Mutex<HashMap<u64, CancellationToken>>> =
     Default::default();
   // 进行中的终端：控制面转来的输入送到这里。
-  let inputs: Arc<
-    Mutex<HashMap<u64, mpsc::UnboundedSender<TerminalInput>>>,
-  > = Default::default();
+  let inputs: Arc<Mutex<HashMap<u64, mpsc::Sender<TerminalInput>>>> =
+    Default::default();
   let result = loop {
     let msg = tokio::select! {
       msg = tokio::time::timeout(IDLE_TIMEOUT, stream.next()) => msg,
@@ -181,8 +192,11 @@ async fn session(
       CoreMsg::Request { id, timeout_ms, op } => {
         let cancel = session_cancel.child_token();
         running.lock().await.insert(id, cancel.clone());
-        let input = if matches!(op, AgentOp::Terminal(_)) {
-          let (itx, irx) = mpsc::unbounded_channel();
+        let input = if matches!(
+          op,
+          AgentOp::Terminal(_) | AgentOp::HostTerminal { .. }
+        ) {
+          let (itx, irx) = mpsc::channel(256);
           inputs.lock().await.insert(id, itx);
           Some(irx)
         } else {
@@ -194,11 +208,16 @@ async fn session(
         let inputs = inputs.clone();
         tokio::spawn(async move {
           let progress_tx = tx.clone();
+          let progress_cancel = cancel.clone();
           let ctx = Ctx {
             cancel: cancel.clone(),
             progress: Some(Arc::new(move |line| {
-              let _ =
-                progress_tx.send(AgentMsg::Progress { id, line });
+              if progress_tx
+                .try_send(AgentMsg::Progress { id, line })
+                .is_err()
+              {
+                progress_cancel.cancel();
+              }
             })),
           };
           let timeout = Duration::from_millis(timeout_ms.max(1000));
@@ -214,6 +233,9 @@ async fn session(
             (AgentOp::Terminal(job), Some(input)) => {
               crate::terminal::run(&ops.docker, &job, &ctx, input)
                 .await
+            }
+            (AgentOp::HostTerminal { size }, Some(input)) => {
+              ops.host_shell.terminal(size, &ctx, input).await
             }
             (op, _) => ops.handle(op, &ctx).await,
           };
@@ -233,7 +255,7 @@ async fn session(
             other => other,
           };
           running.lock().await.remove(&id);
-          let _ = tx.send(AgentMsg::Response { id, result });
+          let _ = tx.send(AgentMsg::Response { id, result }).await;
         });
       }
       CoreMsg::Cancel { id } => {
@@ -242,8 +264,15 @@ async fn session(
         }
       }
       CoreMsg::Input { id, input } => {
-        if let Some(itx) = inputs.lock().await.get(&id) {
-          let _ = itx.send(input);
+        let rejected = inputs
+          .lock()
+          .await
+          .get(&id)
+          .is_some_and(|itx| itx.try_send(input).is_err());
+        if rejected
+          && let Some(cancel) = running.lock().await.get(&id)
+        {
+          cancel.cancel();
         }
       }
       CoreMsg::Challenge { .. } | CoreMsg::Welcome { .. } => {}

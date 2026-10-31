@@ -10,3 +10,4 @@ doc/
 CLAUDE.md
 AGENTS.md
 web/tsconfig.tsbuildinfo
+.DS_Store

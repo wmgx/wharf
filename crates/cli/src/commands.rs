@@ -1,6 +1,6 @@
 //! 各子命令的实现。
 
-use std::{collections::BTreeMap, time::Duration};
+use std::{collections::BTreeMap, io::Write, time::Duration};
 
 use serde_json::{Value, json};
 use wharf_api_types::{
@@ -17,10 +17,10 @@ use wharf_api_types::{
   },
   view::{
     AccountView, BackupsView, CheckStatus, CreatedToken, DataView,
-    DeploymentView, DoctorReport, GatewayView, ImportPreview,
-    ImportRequest, JoinInfo, NetworkView, RestoreRequest,
-    RollbackTarget, RouteView, SecretView, ServerView, ServiceView,
-    Status, TokenView, Unmanaged,
+    DeploymentView, DoctorReport, GatewayView, HostExecResponse,
+    ImportPreview, ImportRequest, JoinInfo, NetworkView,
+    RestoreRequest, RollbackTarget, RouteView, SecretView,
+    ServerView, ServiceView, ShellLog, Status, TokenView, Unmanaged,
   },
 };
 
@@ -108,6 +108,15 @@ async fn dispatch(
       let v: DataView = c.get("/api/data").await?;
       out(j, &v, print::data);
       Ok(())
+    }
+    Command::Exec {
+      server,
+      timeout,
+      cwd,
+      command,
+    } => host_exec(c, server, timeout, cwd, command, j).await,
+    Command::ShellLog { server, limit } => {
+      shell_log(c, server, limit, j).await
     }
     Command::Upgrade => upgrade(c, j).await,
     Command::Metrics {
@@ -451,6 +460,128 @@ pub(crate) async fn changes(
   .await
 }
 
+async fn host_exec(
+  c: &Client,
+  server: String,
+  timeout: Option<u64>,
+  cwd: Option<String>,
+  command: String,
+  j: bool,
+) -> CliResult<()> {
+  let timeout = timeout.unwrap_or(30);
+  let body = json!({
+    "command": command,
+    "timeout_secs": timeout,
+    "cwd": cwd,
+  });
+  enum Wait {
+    Done(CliResult<HostExecResponse>),
+    Interrupted,
+  }
+  let path = format!("/api/servers/{}/exec", seg(&server));
+  let wait = {
+    let request = c.post_timeout(
+      &path,
+      &body,
+      Duration::from_secs(timeout.saturating_add(45)),
+    );
+    tokio::pin!(request);
+    tokio::select! {
+      result = &mut request => Wait::Done(result),
+      _ = tokio::signal::ctrl_c() => Wait::Interrupted,
+    }
+  };
+  let result = match wait {
+    Wait::Done(result) => result?,
+    Wait::Interrupted => {
+      if !j {
+        eprintln!("\n正在取消，等待远端清理…");
+      }
+      // 关闭 HTTP 请求会触发控制面取消；agent 的独立清理预算是 10 秒。
+      tokio::time::sleep(Duration::from_secs(20)).await;
+      return Err(CliError::Exit(130));
+    }
+  };
+  if j {
+    print::json(&result);
+  } else {
+    std::io::stdout()
+      .write_all(result.stdout.as_bytes())
+      .map_err(anyhow::Error::from)?;
+    std::io::stderr()
+      .write_all(result.stderr.as_bytes())
+      .map_err(anyhow::Error::from)?;
+    if result.truncated {
+      eprintln!("\n[输出已截断]");
+    }
+  }
+  if result.exit_code == 0 {
+    Ok(())
+  } else {
+    Err(CliError::Exit(result.exit_code))
+  }
+}
+
+async fn shell_log(
+  c: &Client,
+  server: Option<String>,
+  limit: u32,
+  j: bool,
+) -> CliResult<()> {
+  let mut path = format!("/api/shell-log?limit={limit}");
+  if let Some(server) = server {
+    path.push_str("&server=");
+    path.push_str(&seg(&server));
+  }
+  let rows: Vec<ShellLog> = c.get(&path).await?;
+  out(j, &rows, |rows| {
+    for row in rows {
+      let at = row
+        .at
+        .with_timezone(&chrono::Local)
+        .format("%m-%d %H:%M:%S");
+      let kind = if row.kind == "terminal" {
+        "终端"
+      } else {
+        "命令"
+      };
+      let result = match (&row.error, row.exit_code) {
+        (Some(error), _) => error.clone(),
+        (None, Some(code)) => format!("退出 {code}"),
+        _ => "进行中".into(),
+      };
+      let duration = row
+        .duration_ms
+        .map(|ms| format!("{ms}ms"))
+        .unwrap_or_default();
+      let command = row
+        .command
+        .as_deref()
+        .map(command_summary)
+        .unwrap_or_default();
+      println!(
+        "{at}  {:<12} {:<10} {:<4} {:<12} {:>8}{}{}",
+        row.actor,
+        row.server,
+        kind,
+        result,
+        duration,
+        if command.is_empty() { "" } else { "  " },
+        command,
+      );
+    }
+  });
+  Ok(())
+}
+
+fn command_summary(command: &str) -> String {
+  command
+    .chars()
+    .flat_map(char::escape_default)
+    .take(100)
+    .collect()
+}
+
 // SERVERS
 
 async fn server(
@@ -534,6 +665,8 @@ async fn server(
       build_env,
       clear_build_env,
       git_proxy,
+      host_terminal,
+      host_exec,
       apply,
     } => {
       let current: ServerView =
@@ -627,6 +760,12 @@ async fn server(
           "public" => Some(NetworkMode::Public),
           _ => None,
         };
+      }
+      if let Some(enabled) = host_terminal {
+        settings.host_terminal = enabled;
+      }
+      if let Some(enabled) = host_exec {
+        settings.host_exec = enabled;
       }
       changes(
         c,
@@ -1684,6 +1823,7 @@ async fn token(c: &Client, cmd: TokenCmd, j: bool) -> CliResult<()> {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use clap::Parser;
 
   #[test]
   fn ports() {
@@ -1698,5 +1838,26 @@ mod tests {
     assert_eq!((p.container, p.host), (None, Some(41773)));
     assert!(parse_port("http").is_err());
     assert!(parse_port("http=x").is_err());
+  }
+
+  #[test]
+  fn exec_keeps_one_command_string() {
+    let cli = Cli::try_parse_from([
+      "wharf",
+      "exec",
+      "s1",
+      "--",
+      "printf '%s' hello",
+    ])
+    .unwrap();
+    let Command::Exec { command, .. } = cli.command else {
+      panic!("不是 exec");
+    };
+    assert_eq!(command, "printf '%s' hello");
+    assert_eq!(command_summary("a\x1b[31m"), r"a\u{1b}[31m");
+    assert!(
+      Cli::try_parse_from(["wharf", "exec", "s1", "--", "a", "b"])
+        .is_err()
+    );
   }
 }

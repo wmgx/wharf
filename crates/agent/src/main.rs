@@ -20,6 +20,7 @@ mod edge;
 mod exec;
 mod files;
 mod host;
+mod host_shell;
 mod identity;
 mod metrics;
 mod ops;
@@ -155,10 +156,16 @@ async fn main() -> anyhow::Result<()> {
     data_dir: cli.data_dir,
   };
   let reporter = report::Reporter::new(docker.clone(), cli.public_ip);
+  let host_shell = host_shell::HostShell::prepare(
+    docker.clone(),
+    joined.server.clone(),
+  )
+  .await;
   let ops = Arc::new(ops::Ops::new(
     docker,
     reporter,
     joined.core_url.clone(),
+    host_shell,
   ));
   conn::run_forever(joined, key, ops).await
 }

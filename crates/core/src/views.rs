@@ -41,6 +41,7 @@ pub fn server_view(
     settings: row.settings.clone(),
     joined: agent.is_some_and(|a| a.public_key.is_some()),
     online: state.hub.is_online(name),
+    host_shell: state.hub.supports_host_shell(name),
     rtt_ms: state.hub.rtt_ms(name),
     last_seen: agent.and_then(|a| a.last_seen).map(to_time),
     public_ip: row

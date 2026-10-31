@@ -38,6 +38,7 @@ mod planner;
 mod prune;
 mod render;
 mod rollback;
+mod shell;
 mod snapshot;
 mod state;
 mod status;
@@ -142,6 +143,7 @@ async fn main() -> anyhow::Result<()> {
     edge_syncing: Default::default(),
   });
   apply::recover(&state).await?;
+  shell::recover(&state).await?;
   jobs::spawn(state.clone());
   agent_upgrade::spawn_agents_after(state.clone());
   heal::spawn(state.clone());

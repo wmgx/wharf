@@ -44,8 +44,13 @@ export interface AgentReport {
 
 export interface ServerView {
   name: string;
+  settings: Record<string, unknown> & {
+    host_terminal: boolean;
+    host_exec: boolean;
+  };
   joined: boolean;
   online: boolean;
+  host_shell: boolean;
   last_seen?: string;
   report?: AgentReport;
   public_ip?: string;

@@ -22,6 +22,7 @@ use crate::{
     CONFIG_HASH_FILE, Docker, Previous, io_err, write_private,
   },
   exec::{Cmd, Ctx},
+  host_shell::HostShell,
   report::Reporter,
 };
 
@@ -30,6 +31,7 @@ pub struct Ops {
   pub reporter: Reporter,
   /// 控制面地址：构建时从这里下载上传的代码包。
   pub core_url: String,
+  pub host_shell: HostShell,
   locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
@@ -41,11 +43,13 @@ impl Ops {
     docker: Docker,
     reporter: Reporter,
     core_url: String,
+    host_shell: HostShell,
   ) -> Self {
     Self {
       docker,
       reporter,
       core_url,
+      host_shell,
       locks: Default::default(),
     }
   }
@@ -175,8 +179,11 @@ impl Ops {
       AgentOp::HostInfo => {
         to_value(crate::host::info(&self.docker, ctx).await?)
       }
+      AgentOp::HostExec(job) => {
+        to_value(self.host_shell.exec(job, ctx).await)
+      }
       // 要接收输入，由连接那边直接处理。
-      AgentOp::Terminal(_) => {
+      AgentOp::Terminal(_) | AgentOp::HostTerminal { .. } => {
         Err(ApiError::internal("终端请求没有输入通道"))
       }
     }

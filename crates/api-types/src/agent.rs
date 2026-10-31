@@ -45,7 +45,7 @@ pub enum CoreMsg {
   Cancel {
     id: u64,
   },
-  /// 发给进行中的 [AgentOp::Terminal]：键盘输入或窗口大小变化。
+  /// 发给进行中的 [AgentOp::Terminal] 或 [AgentOp::HostTerminal]：键盘输入或窗口大小变化。
   Input {
     id: u64,
     #[serde(flatten)]
@@ -81,6 +81,9 @@ pub enum AgentMsg {
     /// 协议版本，见 [crate::PROTOCOL]。旧 agent 不发这个字段，反序列化成 0。
     #[serde(default)]
     protocol: u32,
+    /// 是否支持宿主机终端和命令执行。旧 agent 缺省为不支持。
+    #[serde(default)]
+    host_shell: bool,
   },
   Report(AgentReport),
   Progress {
@@ -250,6 +253,12 @@ pub enum AgentOp {
   /// 在 project 的容器里开一个 shell。输出作为进度推送（base64），
   /// 输入经 [CoreMsg::Input] 送进来；shell 退出时结束，结果是退出码。
   Terminal(TerminalJob),
+  /// 在宿主机命名空间里开一个 root shell。输入输出与 [AgentOp::Terminal] 相同。
+  HostTerminal {
+    size: TerminalSize,
+  },
+  /// 在宿主机命名空间里执行一次命令。结果是 [HostExecOutcome]。
+  HostExec(HostExecJob),
   /// 读宿主机的系统版本、待装更新、docker 和日志占用，结果是 [HostInfo]。只读。
   HostInfo,
   /// 服务数据目录 `/srv/<service>/` 里的文件：列目录、分块读、分块写。
@@ -366,6 +375,38 @@ pub struct TerminalJob {
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub service: Option<String>,
   pub size: TerminalSize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostExecJob {
+  pub command: String,
+  pub timeout_secs: u64,
+  pub cwd: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum HostExecOutcome {
+  Finished(HostExecResult),
+  Failed(HostExecFailure),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostExecResult {
+  pub exit_code: i32,
+  pub stdout: String,
+  pub stderr: String,
+  pub truncated: bool,
+  pub duration_ms: u64,
+  /// stdout 和 stderr 实际读到的原始字节数，包含截掉的部分。
+  pub output_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostExecFailure {
+  pub error: ApiError,
+  pub duration_ms: u64,
+  pub output_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
