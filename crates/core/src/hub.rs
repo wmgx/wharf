@@ -266,6 +266,7 @@ async fn handle_socket(
     nonce: agent_nonce,
     version,
     protocol,
+    host_shell: _,
   } = hello
   else {
     anyhow::bail!("agent 没有先发 hello");

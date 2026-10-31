@@ -82,6 +82,7 @@ async fn session(
     nonce: my_nonce.clone(),
     version: wharf_api_types::VERSION.to_string(),
     protocol: wharf_api_types::PROTOCOL,
+    host_shell: true,
   };
   sink
     .send(Message::text(serde_json::to_string(&hello)?))
@@ -181,7 +182,10 @@ async fn session(
       CoreMsg::Request { id, timeout_ms, op } => {
         let cancel = session_cancel.child_token();
         running.lock().await.insert(id, cancel.clone());
-        let input = if matches!(op, AgentOp::Terminal(_)) {
+        let input = if matches!(
+          op,
+          AgentOp::Terminal(_) | AgentOp::HostTerminal { .. }
+        ) {
           let (itx, irx) = mpsc::unbounded_channel();
           inputs.lock().await.insert(id, itx);
           Some(irx)
@@ -214,6 +218,9 @@ async fn session(
             (AgentOp::Terminal(job), Some(input)) => {
               crate::terminal::run(&ops.docker, &job, &ctx, input)
                 .await
+            }
+            (AgentOp::HostTerminal { size }, Some(input)) => {
+              ops.host_shell.terminal(size, &ctx, input).await
             }
             (op, _) => ops.handle(op, &ctx).await,
           };
