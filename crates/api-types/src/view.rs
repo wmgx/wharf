@@ -551,6 +551,9 @@ pub struct Status {
   /// 需要注意的问题，例如服务器离线、服务没在运行。
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub problems: Vec<String>,
+  /// 最近一次域名检查（后台每 5 分钟），控制面刚启动时为空。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub health: Option<DoctorReport>,
 }
 
 /// `wharf server add` 的返回：在目标机器上执行 `join` 里的任一命令即可加入。

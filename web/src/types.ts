@@ -286,6 +286,30 @@ export interface Status {
   gateways: GatewayView[];
   routes: RouteView[];
   problems?: string[];
+  /** 最近一次域名检查，控制面刚启动时没有。 */
+  health?: DoctorReport;
+}
+
+export type CheckStatus = "ok" | "warn" | "bad" | "skip";
+
+export interface DoctorCheck {
+  layer: string;
+  subject: string;
+  status: CheckStatus;
+  detail: string;
+  at: string;
+}
+
+export interface RouteDiagnosis {
+  hostname: string;
+  url: string;
+  checks: DoctorCheck[];
+}
+
+export interface DoctorReport {
+  checked_at: string;
+  servers: DoctorCheck[];
+  routes: RouteDiagnosis[];
 }
 
 export interface AccountView {

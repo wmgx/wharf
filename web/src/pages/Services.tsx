@@ -1,7 +1,7 @@
 import { ArrowRightLeftIcon, CloudIcon, EllipsisIcon, HardDriveIcon, NetworkIcon, HistoryIcon, PlayIcon, PlusIcon, RefreshCwIcon, RotateCwIcon, ScrollTextIcon, SquareIcon, Trash2Icon } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useActions } from "@/components/actions";
-import { Empty, PageHeader, ServerTag, StatusBadge, imageOf, serviceTone, type Tone } from "@/components/common";
+import { Empty, PageHeader, ServerTag, StatusBadge, imageOf, type Tone } from "@/components/common";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
@@ -10,6 +10,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { useStatus } from "@/status";
 import type { ServiceView, Status } from "@/types";
 import { UnmanagedList } from "./containers";
+import { serviceTruth } from "@/components/health";
 import { EdgeList, KIND_NAME, edgeSourceLabel, edgeTone } from "./edge";
 import { NewService } from "./NewService";
 
@@ -29,7 +30,7 @@ interface Row {
 function rowsOf(status: Status): Row[] {
   const routes = (name: string) => status.routes.filter((r) => r.spec.service === name).map((r) => r.spec.hostname);
   const services: Row[] = status.services.map((s) => {
-    const { tone, text } = serviceTone(s);
+    const { tone, text } = serviceTruth(s, status);
     return { name: s.name, to: `/services/${s.name}`, kind: "服务器", where: s.spec.server, source: imageOf(s), domains: routes(s.name), tone, text, svc: s };
   });
   const edge: Row[] = (status.edge_apps ?? []).map((a) => {

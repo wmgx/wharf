@@ -402,6 +402,7 @@ pub async fn status(
     gateways,
     routes,
     problems,
+    health: crate::doctor::last(),
   })
 }
 

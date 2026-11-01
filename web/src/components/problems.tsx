@@ -3,11 +3,16 @@ import { Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { useStatus } from "@/status";
+import { routeTone } from "./health";
 
 /** 顶栏的"需要注意"：点开看完整列表，提到的服务可以直接跳过去。 */
 export function Problems() {
   const { status } = useStatus();
-  const problems = status?.problems ?? [];
+  const broken = (status?.health?.routes ?? []).flatMap((r) => {
+    const t = routeTone(r);
+    return t.tone === "bad" ? [`${r.hostname} 打不开：${t.detail ?? t.text}`] : [];
+  });
+  const problems = [...broken, ...(status?.problems ?? [])];
   if (!problems.length) return null;
   const services = status?.services.map((s) => s.name) ?? [];
   // 优先匹配更长的名字，避免 "hello" 抢走 "hello-api"。

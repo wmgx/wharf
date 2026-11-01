@@ -40,27 +40,69 @@ pub struct DoctorQuery {
   pub host: Option<String>,
 }
 
-/// `GET /api/doctor[?host=]`
+/// `GET /api/doctor[?host=]`：现查。查全部域名时顺便更新后台检查的结果。
 pub async fn doctor(
   State(s): State<Arc<AppState>>,
   auth: Auth,
   Query(q): Query<DoctorQuery>,
 ) -> ApiResult<DoctorReport> {
   auth.require(TokenScope::Read)?;
+  let report = run(&s, q.host.as_deref()).await?;
+  if q.host.is_none() {
+    remember(report.clone());
+  }
+  Ok(Json(report))
+}
+
+/// 最近一次检查全部域名的结果（后台每 5 分钟一次，或手动 `doctor`）。
+static LAST: std::sync::RwLock<Option<DoctorReport>> =
+  std::sync::RwLock::new(None);
+
+fn remember(report: DoctorReport) {
+  if let Ok(mut last) = LAST.write() {
+    *last = Some(report);
+  }
+}
+
+pub fn last() -> Option<DoctorReport> {
+  LAST.read().ok().and_then(|l| l.clone())
+}
+
+const FIRST_TICK: Duration = Duration::from_secs(90);
+const TICK: Duration = Duration::from_secs(300);
+
+/// 后台定时检查全部域名：页面上"服务好不好"以网址能不能打开为准。
+pub fn spawn(state: Arc<AppState>) {
+  tokio::spawn(async move {
+    tokio::time::sleep(FIRST_TICK).await;
+    loop {
+      match run(&state, None).await {
+        Ok(report) => remember(report),
+        Err(e) => tracing::warn!("域名检查失败：{e}"),
+      }
+      tokio::time::sleep(TICK).await;
+    }
+  });
+}
+
+/// 逐层检查域名；`host` 为空时检查全部。
+pub async fn run(
+  s: &AppState,
+  host: Option<&str>,
+) -> Result<DoctorReport, wharf_api_types::ApiError> {
   let snap = snapshot::load(&s.db).await?;
-  if let Some(host) = &q.host
+  if let Some(host) = host
     && !snap.world.routes.contains_key(host)
   {
     return Err(
       wharf_api_types::ApiError::not_found(format!(
         "没有域名 {host}"
       ))
-      .suggest("wharf route ls")
-      .into(),
+      .suggest("wharf route ls"),
     );
   }
   let net = snap.net(&snap.world);
-  let live = live_states(&s, &snap.world).await;
+  let live = live_states(s, &snap.world).await;
   let client = reqwest::Client::builder()
     .redirect(reqwest::redirect::Policy::none())
     .timeout(HTTP_TIMEOUT)
@@ -72,22 +114,22 @@ pub async fn doctor(
     .world
     .routes
     .keys()
-    .filter(|h| q.host.as_ref().is_none_or(|q| q == *h))
+    .filter(|h| host.is_none_or(|q| q == h.as_str()))
     .collect();
   let routes = futures_util::future::join_all(
     hosts
       .into_iter()
-      .map(|h| route(&s, &snap, &net, &live, &client, h)),
+      .map(|h| route(s, &snap, &net, &live, &client, h)),
   )
   .await
   .into_iter()
   .flatten()
   .collect();
-  Ok(Json(DoctorReport {
+  Ok(DoctorReport {
     checked_at: Utc::now(),
-    servers: servers(&s, &snap),
+    servers: servers(s, &snap),
     routes,
-  }))
+  })
 }
 
 fn check(

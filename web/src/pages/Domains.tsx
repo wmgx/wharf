@@ -1,14 +1,17 @@
-import { ArrowUpRightIcon, CloudIcon, LockIcon, PlusIcon } from "lucide-react";
+import { ArrowUpRightIcon, CloudIcon, LockIcon, PlusIcon, RadarIcon } from "lucide-react";
+import { toast } from "sonner";
+import { api } from "@/api";
+import { Lamps, diagnosisOf, routeTone } from "@/components/health";
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { AddRoute } from "@/components/add-route";
-import { CardsSkeleton, Empty, PageHeader, StatusBadge, serviceTone, type Tone } from "@/components/common";
+import { CardsSkeleton, Empty, PageHeader, StatusBadge, ago, type Tone } from "@/components/common";
 import { useTab } from "@/components/page-tabs";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useStatus } from "@/status";
-import type { Status } from "@/types";
+import type { RouteDiagnosis, Status } from "@/types";
 import { edgeTone } from "./edge";
 import { GatewaysPanel } from "./Gateways";
 
@@ -24,15 +27,17 @@ interface Row {
   auth: boolean;
   tone: Tone;
   text: string;
+  detail?: string;
+  diag?: RouteDiagnosis;
+  edge?: boolean;
 }
 
 function rowsOf(status: Status): Row[] {
   const gateways = new Map(status.gateways.map((g) => [g.name, g]));
-  const services = new Map(status.services.map((s) => [s.name, s]));
   const routes: Row[] = status.routes.map((r) => {
     const g = r.gateway ? gateways.get(r.gateway) : undefined;
-    const svc = r.spec.service ? services.get(r.spec.service) : undefined;
-    const { tone, text } = svc ? serviceTone(svc) : { tone: "idle" as Tone, text: "外部地址" };
+    const diag = diagnosisOf(status, r.spec.hostname);
+    const { tone, text, detail } = routeTone(diag);
     return {
       hostname: r.spec.hostname,
       url: r.url,
@@ -42,12 +47,14 @@ function rowsOf(status: Status): Row[] {
       auth: !!r.spec.auth,
       tone,
       text,
+      detail,
+      diag,
     };
   });
   const edge: Row[] = (status.edge_apps ?? []).flatMap((a) =>
     (a.spec.domains ?? []).map((d) => {
       const { tone, text } = edgeTone(a.live, a.drift);
-      return { hostname: d, url: `https://${d}`, target: a.name, to: `/edge/${a.name}`, entry: "Cloudflare", auth: false, tone, text };
+      return { hostname: d, url: `https://${d}`, target: a.name, to: `/edge/${a.name}`, entry: "Cloudflare", auth: false, tone, text, edge: true };
     }),
   );
   return [...routes, ...edge].sort((x, y) => x.hostname.localeCompare(y.hostname));
@@ -55,8 +62,20 @@ function rowsOf(status: Status): Row[] {
 
 /** 域名：所有网址；"入口"标签管理网关。 */
 export function Domains() {
-  const { status } = useStatus();
+  const { status, refresh } = useStatus();
   const [tab, setTab] = useTab(TABS, "list");
+  const [checking, setChecking] = useState(false);
+  const checkNow = async () => {
+    setChecking(true);
+    try {
+      await api.get("/api/doctor");
+      refresh();
+    } catch (e) {
+      toast.error("检查失败", { description: (e as Error).message });
+    } finally {
+      setChecking(false);
+    }
+  };
   const [adding, setAdding] = useState(false);
   const rows = status ? rowsOf(status) : [];
 
@@ -64,12 +83,20 @@ export function Domains() {
     <>
       <PageHeader
         title="域名"
-        description={status ? `${rows.length} 个域名 · ${status.gateways.length} 个入口` : "载入中…"}
+        description={
+          status ? `${rows.length} 个域名 · ${status.gateways.length} 个入口 · ${status.health ? `${ago(status.health.checked_at)}检查过` : "还没检查"}` : "载入中…"
+        }
         actions={
+          <>
+          <Button variant="outline" onClick={checkNow} disabled={checking || !status?.routes.length}>
+            <RadarIcon className={checking ? "animate-pulse" : undefined} />
+            {checking ? "检查中…" : "立即检查"}
+          </Button>
           <Button onClick={() => setAdding(true)} disabled={!status?.services.length}>
             <PlusIcon />
             加域名
           </Button>
+          </>
         }
       />
       <Tabs value={tab} onValueChange={(v) => setTab(v as (typeof TABS)[number])}>
@@ -105,7 +132,7 @@ export function Domains() {
                         </TableCell>
                         <TableCell className="text-sm text-muted-foreground">{r.entry}</TableCell>
                         <TableCell>
-                          <StatusBadge tone={r.tone}>{r.text}</StatusBadge>
+                          <Health r={r} />
                         </TableCell>
                       </TableRow>
                     ))}
@@ -117,7 +144,7 @@ export function Domains() {
                   <div key={r.hostname} className="grid gap-2 rounded-xl border bg-card p-3 shadow-xs">
                     <HostLink r={r} />
                     <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                      <StatusBadge tone={r.tone}>{r.text}</StatusBadge>
+                      <Health r={r} />
                       <Target r={r} />
                       <span>· {r.entry}</span>
                     </div>
@@ -152,5 +179,17 @@ function Target({ r }: { r: Row }) {
       {icon}
       {r.target}
     </Link>
+  );
+}
+
+function Health({ r }: { r: Row }) {
+  return (
+    <div className="grid gap-1">
+      <div className="flex items-center gap-2">
+        <StatusBadge tone={r.tone}>{r.text}</StatusBadge>
+        {!r.edge && <Lamps d={r.diag} />}
+      </div>
+      {r.detail && r.tone !== "ok" && <span className="max-w-72 truncate text-xs text-muted-foreground" title={r.detail}>{r.detail}</span>}
+    </div>
   );
 }

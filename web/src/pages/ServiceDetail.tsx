@@ -1,10 +1,10 @@
-import { WrenchIcon, ArrowRightLeftIcon, ArrowLeftIcon, ArrowUpRightIcon, EllipsisIcon, HammerIcon, HistoryIcon, LockIcon, LockOpenIcon, PencilIcon, PlayIcon, PlusIcon, RefreshCwIcon, RotateCwIcon, SquareIcon, Trash2Icon, XIcon } from "lucide-react";
+import { WrenchIcon, ArrowRightIcon, ArrowRightLeftIcon, ArrowLeftIcon, ArrowUpRightIcon, EllipsisIcon, HammerIcon, HistoryIcon, LockIcon, LockOpenIcon, PencilIcon, PlayIcon, PlusIcon, RefreshCwIcon, RotateCwIcon, SquareIcon, Trash2Icon, XIcon } from "lucide-react";
 import { Suspense, lazy, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { usePoll } from "@/api";
 import { useActions } from "@/components/actions";
 import { BuildEditor, type BuildHow, cleanHow, howOf, howReady } from "@/components/build-editor";
-import { CodeBlock, Dot, Empty, ErrorNote, Notice, PageHeader, ServerTag, StatusBadge, ago, serviceTone, sourceLabel } from "@/components/common";
+import { CodeBlock, Dot, Empty, ErrorNote, Notice, PageHeader, ServerTag, StatusBadge, ago, sourceLabel } from "@/components/common";
 import { Field, PortsEditor, formatEnv, parseEnv, portsFor } from "@/components/fields";
 import { LogStream } from "@/components/LogStream";
 import { MetricsPanel } from "@/components/metrics";
@@ -22,6 +22,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { useStatus } from "@/status";
 import { AddRoute } from "@/components/add-route";
+import { serviceTruth } from "@/components/health";
 import type { DataKind, DeploymentView, RouteView, ImportRecord, PortSpec, ServiceStatus, ServiceView } from "@/types";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 
@@ -66,7 +67,7 @@ export function ServiceDetail() {
     );
   }
 
-  const { tone, text } = serviceTone(svc);
+  const { tone, text, detail } = serviceTruth(svc, status);
   const source = sourceLabel(svc.spec.source);
   const built = "build" in svc.spec.source;
 
@@ -81,7 +82,14 @@ export function ServiceDetail() {
               <TooltipTrigger>
                 <StatusBadge tone={tone}>{text}</StatusBadge>
               </TooltipTrigger>
-              {svc.status && <TooltipContent className="grid gap-0.5">{statusLayers(svc.status).map((l) => <div key={l}>{l}</div>)}</TooltipContent>}
+              {svc.status && (
+                <TooltipContent className="grid gap-0.5">
+                  {detail && <div className="font-medium">{detail}</div>}
+                  {statusLayers(svc.status).map((l) => (
+                    <div key={l}>{l}</div>
+                  ))}
+                </TooltipContent>
+              )}
             </Tooltip>
           </>
         }
@@ -206,7 +214,20 @@ export function ServiceDetail() {
 
 /** 概览：能不能打开、跑在哪、容器怎么样。细节去各标签。 */
 function Overview({ svc, routes, onTab }: { svc: ServiceView; routes: RouteView[]; onTab: (t: string) => void }) {
+  const hints: { text: string; action: string; tab: string }[] = [];
+  if (routes.length === 0) hints.push({ text: "还没有域名，现在只能从内网访问。", action: "加域名", tab: "domains" });
+  if (svc.data?.some((m) => m.kind === "managed") && !svc.spec.backup) hints.push({ text: "有数据，但还没开备份。", action: "开备份", tab: "data" });
   return (
+    <div className="grid gap-3">
+    {hints.map((h) => (
+      <div key={h.tab} className="flex items-center gap-3 rounded-xl border border-dashed px-4 py-2.5 text-sm">
+        <span className="flex-1 text-muted-foreground">{h.text}</span>
+        <Button size="xs" variant="outline" onClick={() => onTab(h.tab)}>
+          {h.action}
+          <ArrowRightIcon />
+        </Button>
+      </div>
+    ))}
     <div className="grid gap-3 md:grid-cols-[1.4fr_1fr]">
       <Card className="gap-4 py-5 shadow-xs">
         <CardHeader className="px-5">
@@ -262,6 +283,7 @@ function Overview({ svc, routes, onTab }: { svc: ServiceView; routes: RouteView[
           {!svc.containers?.length && <span className="text-muted-foreground">{svc.status?.error ?? "没有容器"}</span>}
         </CardContent>
       </Card>
+    </div>
     </div>
   );
 }
