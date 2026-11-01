@@ -20,6 +20,7 @@ mod edge;
 mod exec;
 mod files;
 mod host;
+mod host_dir;
 mod host_shell;
 mod identity;
 mod metrics;
@@ -81,6 +82,13 @@ enum Command {
     #[arg(long, env = "WHARF_JOIN_TOKEN", hide_env_values = true)]
     join_token: Option<String>,
   },
+  /// 打包目录（在只读挂载宿主机根目录的临时容器里执行，见 host_dir）。
+  #[command(hide = true)]
+  Pack {
+    dir: PathBuf,
+    #[arg(long)]
+    out: PathBuf,
+  },
   /// 升级用：在接班容器里换掉旧 agent 容器（由 agent 自己启动）。
   #[command(hide = true)]
   Replace {
@@ -102,6 +110,9 @@ async fn main() -> anyhow::Result<()> {
     )
     .init();
   let cli = Cli::parse();
+  if let Some(Command::Pack { dir, out }) = &cli.command {
+    return host_dir::pack_cli(dir, out);
+  }
   std::fs::create_dir_all(&cli.data_dir)
     .with_context(|| format!("创建 {}", cli.data_dir.display()))?;
 
@@ -110,6 +121,7 @@ async fn main() -> anyhow::Result<()> {
     join_token: std::env::var("WHARF_JOIN_TOKEN").ok(),
   });
   let joined = match command {
+    Command::Pack { .. } => unreachable!("前面已经处理"),
     Command::Replace {
       container,
       image,
@@ -153,7 +165,7 @@ async fn main() -> anyhow::Result<()> {
   tokio::spawn(probe::serve(joined.server.clone(), cli.probe_port));
   let docker = docker::Docker {
     bin: cli.docker,
-    data_dir: cli.data_dir,
+    data_dir: cli.data_dir.clone(),
   };
   let reporter = report::Reporter::new(docker.clone(), cli.public_ip);
   let host_shell = host_shell::HostShell::prepare(
@@ -166,6 +178,7 @@ async fn main() -> anyhow::Result<()> {
     reporter,
     joined.core_url.clone(),
     host_shell,
+    cli.data_dir.clone(),
   ));
   conn::run_forever(joined, key, ops).await
 }

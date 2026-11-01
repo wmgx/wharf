@@ -1,7 +1,7 @@
-import { WrenchIcon, ArrowRightIcon, ArrowRightLeftIcon, ArrowLeftIcon, ArrowUpRightIcon, EllipsisIcon, HammerIcon, HistoryIcon, LockIcon, LockOpenIcon, PencilIcon, PlayIcon, PlusIcon, RefreshCwIcon, RotateCwIcon, SquareIcon, Trash2Icon, XIcon } from "lucide-react";
-import { Suspense, lazy, useState } from "react";
+import { PackageIcon, WrenchIcon, ArrowRightIcon, ArrowRightLeftIcon, ArrowLeftIcon, ArrowUpRightIcon, EllipsisIcon, HammerIcon, HistoryIcon, LockIcon, LockOpenIcon, PencilIcon, PlayIcon, PlusIcon, RefreshCwIcon, RotateCwIcon, SquareIcon, Trash2Icon, XIcon } from "lucide-react";
+import { Suspense, lazy, useEffect, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
-import { usePoll } from "@/api";
+import { api, usePoll } from "@/api";
 import { useActions } from "@/components/actions";
 import { BuildEditor, type BuildHow, cleanHow, howOf, howReady } from "@/components/build-editor";
 import { CodeBlock, Dot, Empty, ErrorNote, Notice, PageHeader, ServerTag, StatusBadge, ago, sourceLabel } from "@/components/common";
@@ -22,6 +22,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { useStatus } from "@/status";
 import { AddRoute } from "@/components/add-route";
+import { CodePackageField, type CodePackage } from "@/components/code-package";
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { serviceTruth } from "@/components/health";
 import type { DataKind, DeploymentView, RouteView, ImportRecord, PortSpec, ServiceStatus, ServiceView } from "@/types";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -37,6 +39,7 @@ export function ServiceDetail() {
   const { data: svc, error } = usePoll<ServiceView>(`/api/services/${encodeURIComponent(name)}`, 5000);
   const [editing, setEditing] = useState(false);
   const [addingRoute, setAddingRoute] = useState(false);
+  const [repacking, setRepacking] = useState(false);
 
   const routes = status?.routes.filter((r) => r.spec.service === name) ?? [];
   const back = (
@@ -128,6 +131,12 @@ export function ServiceDetail() {
                     检查更新
                   </DropdownMenuItem>
                 )}
+                {"build" in svc.spec.source && !svc.spec.source.build.git && (
+                  <DropdownMenuItem onSelect={() => setRepacking(true)}>
+                    <PackageIcon />
+                    更新代码包
+                  </DropdownMenuItem>
+                )}
                 {built && (
                   <DropdownMenuItem onSelect={() => actions.rebuild(name)}>
                     <HammerIcon />
@@ -207,6 +216,7 @@ export function ServiceDetail() {
       </Tabs>
 
       <EditService svc={svc} open={editing} onClose={() => setEditing(false)} />
+      {repacking && <Repack svc={svc} onClose={() => setRepacking(false)} />}
       <AddRoute service={name} open={addingRoute} onClose={() => setAddingRoute(false)} />
     </>
   );
@@ -422,6 +432,48 @@ function DataTab({ svc }: { svc: ServiceView }) {
         <Backups svc={svc} />
       </div>
     </div>
+  );
+}
+
+/** 代码包来源的服务：重新打包服务器目录（记得上次的目录），或上传新的 zip，然后预览改动。 */
+function Repack({ svc, onClose }: { svc: ServiceView; onClose: () => void }) {
+  const actions = useActions();
+  // undefined：还在读；null：没有记录（之前是上传的 zip 或 CLI 部署的）。
+  const [origin, setOrigin] = useState<{ server: string; path: string } | null | undefined>(undefined);
+  useEffect(() => {
+    api
+      .get<{ server: string; path: string } | null>(`/api/services/${encodeURIComponent(svc.name)}/origin`)
+      .then(setOrigin)
+      .catch(() => setOrigin(null));
+  }, [svc.name]);
+  const [pkg, setPkg] = useState<CodePackage | null>(null);
+  const loaded = origin !== undefined;
+  const submit = () => {
+    if (!pkg || !("build" in svc.spec.source)) return;
+    onClose();
+    actions.plan({
+      title: `更新 ${svc.name} 的代码`,
+      changes: [{ op: "upsert_service", name: svc.name, spec: { ...svc.spec, source: { build: { ...svc.spec.source.build, upload: pkg.sha256 } } } }],
+    });
+  };
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent aria-describedby={undefined} className="sm:max-w-xl">
+        <DialogHeader>
+          <DialogTitle>更新 {svc.name} 的代码包</DialogTitle>
+        </DialogHeader>
+        {loaded ? <CodePackageField value={pkg} onChange={setPkg} service={svc.name} initial={origin} /> : <Skeleton className="h-32 rounded-lg" />}
+        {pkg && "build" in svc.spec.source && pkg.sha256 === svc.spec.source.build.upload && <Notice>代码没有变化。</Notice>}
+        <DialogFooter>
+          <Button variant="ghost" onClick={onClose}>
+            取消
+          </Button>
+          <Button disabled={!pkg || ("build" in svc.spec.source && pkg.sha256 === svc.spec.source.build.upload)} onClick={submit}>
+            预览改动
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 

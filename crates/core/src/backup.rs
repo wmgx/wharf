@@ -23,7 +23,7 @@ use wharf_api_types::{
     ResticRepo, Snapshot,
   },
   plan::ApplyResponse,
-  view::{BackupRecord, BackupsView, RestoreRequest, TokenScope},
+  view::{BackupRecord, BackupsView, Perm, RestoreRequest},
 };
 
 use crate::{
@@ -527,7 +527,7 @@ pub async fn list(
   auth: Auth,
   Path(name): Path<String>,
 ) -> ApiResult<BackupsView> {
-  auth.require(TokenScope::Read)?;
+  auth.require(Perm::Read)?;
   let snap = snapshot::load(&s.db).await?;
   let row = snap
     .world
@@ -579,7 +579,7 @@ pub async fn run_now(
   auth: Auth,
   Path(name): Path<String>,
 ) -> ApiResult<ApplyResponse> {
-  auth.require(TokenScope::ApplySafe)?;
+  auth.require(Perm::Apply)?;
   let snap = snapshot::load(&s.db).await?;
   locate(&snap, &name)?;
   Ok(Json(
@@ -598,7 +598,7 @@ pub async fn restore_now(
   Path(name): Path<String>,
   Json(req): Json<RestoreRequest>,
 ) -> ApiResult<ApplyResponse> {
-  auth.require(TokenScope::ApplyAll)?;
+  auth.require(Perm::Confirm)?;
   let address = format!("service/{name}");
   if req.confirm != address {
     return Err(

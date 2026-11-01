@@ -1794,19 +1794,30 @@ async fn token(c: &Client, cmd: TokenCmd, j: bool) -> CliResult<()> {
       let v: Vec<TokenView> = c.get("/api/tokens").await?;
       out(j, &v, |v| {
         for t in v {
-          println!("{:<14} {:?}", t.name, t.scope);
+          let perms: Vec<&str> =
+            t.perms.iter().map(|p| p.as_str()).collect();
+          println!("{:<14} {}", t.name, perms.join(","));
         }
       });
       Ok(())
     }
-    TokenCmd::Create { name, scope } => {
-      let v: CreatedToken = c
-        .post("/api/tokens", &json!({ "name": name, "scope": scope }))
-        .await?;
+    TokenCmd::Create { name, perms, scope } => {
+      let body = match (perms, scope) {
+        (Some(p), _) => json!({
+          "name": name,
+          "perms": p.split(',').map(str::trim).filter(|x| !x.is_empty()).collect::<Vec<_>>(),
+        }),
+        (None, scope) => json!({ "name": name, "scope": scope }),
+      };
+      let v: CreatedToken = c.post("/api/tokens", &body).await?;
       out(j, &v, |v| {
+        let perms: Vec<&str> =
+          v.perms.iter().map(|p| p.as_str()).collect();
         println!(
-          "已创建 token {}（{:?}），只显示这一次：\n{}",
-          v.name, v.scope, v.token
+          "已创建 token {}（{}），只显示这一次：\n{}",
+          v.name,
+          perms.join(","),
+          v.token
         )
       });
       Ok(())

@@ -1,3 +1,4 @@
+import { CodePackageField, type CodePackage } from "@/components/code-package";
 import { ArrowRightIcon } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
@@ -31,7 +32,7 @@ export function NewService({ open, onClose }: { open: boolean; onClose: () => vo
   );
 }
 
-type Kind = "image" | "compose" | "git";
+type Kind = "image" | "compose" | "git" | "package";
 
 /** 从仓库地址取服务名：https://github.com/owner/my-app.git → my-app。 */
 function nameFromRepo(repo: string): string {
@@ -54,6 +55,7 @@ interface Draft {
   envText: string;
   hostname: string;
   entry: string;
+  pkg: CodePackage | null;
 }
 
 /** 上一次提交的表单。计划生成失败或想改时点"返回修改"，用它恢复。 */
@@ -83,8 +85,17 @@ function Form({ onClose }: { onClose: () => void }) {
   const [ports, setPorts] = useState<PortSpec[]>(draft?.ports ?? [{ name: "http", container: 80 }]);
   const [envText, setEnvText] = useState(draft?.envText ?? "");
   const [hostname, setHostname] = useState(draft?.hostname ?? "");
+  const [pkg, setPkg] = useState<CodePackage | null>(draft?.pkg ?? null);
 
-  const svcName = nameTouched ? name : kind === "image" ? nameFromImage(image) : kind === "git" ? nameFromRepo(repo) : name;
+  const svcName = nameTouched
+    ? name
+    : kind === "image"
+      ? nameFromImage(image)
+      : kind === "git"
+        ? nameFromRepo(repo)
+        : kind === "package"
+          ? toName(pkg?.stem ?? "")
+          : name;
   const chosenServer = server || serverOptions(servers)[0]?.value || "";
   const entry = useEntry(chosenServer);
   const [entryRestored, setEntryRestored] = useState(false);
@@ -104,8 +115,9 @@ function Form({ onClose }: { onClose: () => void }) {
     return svcName ? [...suffixes].map((s) => `${svcName}.${s}`) : [];
   }, [status, accounts, svcName]);
 
-  const source = kind === "image" ? image.trim() : kind === "git" ? repo.trim() : compose.trim();
-  const repoOk = kind !== "git" || (/^https:\/\/[^\s@]+$/.test(repo.trim()) && !!gitRef.trim() && howReady(how));
+  const source = kind === "image" ? image.trim() : kind === "git" ? repo.trim() : kind === "package" ? (pkg?.sha256 ?? "") : compose.trim();
+  const repoOk =
+    kind === "git" ? /^https:\/\/[^\s@]+$/.test(repo.trim()) && !!gitRef.trim() && howReady(how) : kind === "package" ? howReady(how) : true;
   const portsOk = portsValid(ports, kind === "compose");
   const ready = !!svcName && !!source && repoOk && !!chosenServer && portsOk && (!hostname.trim() || entry.ready);
   const withEnv = kind !== "compose";
@@ -118,7 +130,9 @@ function Form({ onClose }: { onClose: () => void }) {
           ? { image: source }
           : kind === "git"
             ? { build: { git: { repo: source.replace(/\/+$/, ""), ref: gitRef.trim() }, path: path.trim() || undefined, ...cleanHow(how) } }
-            : { compose: { content: source } },
+            : kind === "package"
+              ? { build: { upload: source, ...cleanHow(how) } }
+              : { compose: { content: source } },
       ports: ports.length ? portsFor(ports, kind === "compose") : undefined,
       env: withEnv && envText.trim() ? parseEnv(envText) : undefined,
     };
@@ -127,7 +141,7 @@ function Form({ onClose }: { onClose: () => void }) {
       const { gateway, changes: gatewayChanges } = entry.resolve();
       changes.push(...gatewayChanges, { op: "upsert_route", spec: { hostname: hostname.trim().toLowerCase(), service: svcName, gateway } });
     }
-    lastDraft = { kind, image, compose, repo, gitRef, path, how, name: svcName, nameTouched, server: chosenServer, ports, envText, hostname, entry: entry.chosen };
+    lastDraft = { kind, image, compose, repo, gitRef, path, how, name: svcName, nameTouched, server: chosenServer, ports, envText, hostname, entry: entry.chosen, pkg };
     onClose();
     actions.plan({ title: `部署 ${svcName}`, changes, then: `/services/${svcName}`, back: NEW_SERVICE_DRAFT_URL });
   };
@@ -142,18 +156,26 @@ function Form({ onClose }: { onClose: () => void }) {
               setKind(k);
               // 端口还是默认值时，换成这种来源常用的端口。
               const untouched = ports.length === 1 && ports[0].name === "http" && !ports[0].host && [80, 8080].includes(ports[0].container ?? 0);
-              if (untouched && k !== "compose") setPorts([{ name: "http", container: k === "git" ? 8080 : 80 }]);
+              if (untouched && k !== "compose") setPorts([{ name: "http", container: k === "image" ? 80 : 8080 }]);
               if (untouched && k === "compose") setPorts([]);
             }}
             options={[
               ["image", "镜像"],
               ["git", "代码（git）"],
+              ["package", "代码包"],
               ["compose", "Compose 文件"],
             ]}
           />
         </Field>
 
-        {kind === "git" ? (
+        {kind === "package" ? (
+          <>
+            <Field label="代码">
+              <CodePackageField value={pkg} onChange={setPkg} />
+            </Field>
+            <BuildEditor value={how} onChange={setHow} />
+          </>
+        ) : kind === "git" ? (
           <>
             <Field
               label="仓库"
@@ -192,7 +214,7 @@ function Form({ onClose }: { onClose: () => void }) {
             <Input
               id="name"
               value={svcName}
-              placeholder={kind === "git" ? "自动取仓库名" : "自动取镜像名"}
+              placeholder={kind === "git" ? "自动取仓库名" : kind === "package" ? "自动取目录名或文件名" : "自动取镜像名"}
               onChange={(e) => {
                 setNameTouched(true);
                 setName(toName(e.target.value));

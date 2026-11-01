@@ -10,6 +10,7 @@ license = "Apache-2.0"
 [workspace.dependencies]
 bcrypt = { version = "=0.19.3", default-features = false, features = ["std", "zeroize"] }
 wharf-api-types = { path = "crates/api-types" }
+wharf-pack = { path = "crates/pack" }
 wharf-providers = { path = "crates/providers" }
 
 anyhow = "1.0.102"

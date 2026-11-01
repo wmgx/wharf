@@ -651,11 +651,19 @@ pub enum RunCmd {
 #[derive(Subcommand)]
 pub enum TokenCmd {
   List,
-  /// 新建 token（只显示这一次）。AI 默认用 apply_safe。
+  /// 新建 token（只显示这一次）。给 AI 常用 `--perms plan,apply,exec`。
   Create {
     name: String,
+    /// 权限点，逗号分隔：read、plan、apply、confirm、exec、admin（read 总是带上）。
+    #[arg(
+      long,
+      conflicts_with = "scope",
+      required_unless_present = "scope"
+    )]
+    perms: Option<String>,
+    /// 旧档位预设：read、plan、apply_safe、apply_all。
     #[arg(long, value_parser = ["read", "plan", "apply_safe", "apply_all"])]
-    scope: String,
+    scope: Option<String>,
   },
   Rm {
     name: String,

@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 chrono.workspace = true
 wharf-api-types.workspace = true
+wharf-pack.workspace = true
 
 anyhow.workspace = true
 base64.workspace = true

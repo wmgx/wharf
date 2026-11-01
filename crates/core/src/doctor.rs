@@ -15,8 +15,7 @@ use wharf_api_types::{
   agent::{AgentOp, ProbeTarget},
   spec::GatewayKind,
   view::{
-    CheckStatus, DoctorCheck, DoctorReport, RouteDiagnosis,
-    TokenScope,
+    CheckStatus, DoctorCheck, DoctorReport, Perm, RouteDiagnosis,
   },
 };
 
@@ -46,7 +45,7 @@ pub async fn doctor(
   auth: Auth,
   Query(q): Query<DoctorQuery>,
 ) -> ApiResult<DoctorReport> {
-  auth.require(TokenScope::Read)?;
+  auth.require(Perm::Read)?;
   let report = run(&s, q.host.as_deref()).await?;
   if q.host.is_none() {
     remember(report.clone());

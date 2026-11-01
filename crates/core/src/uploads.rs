@@ -24,7 +24,7 @@ use rusqlite::params;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
-use wharf_api_types::{ApiError, spec::Source, view::TokenScope};
+use wharf_api_types::{ApiError, spec::Source, view::Perm};
 
 use crate::{
   api::{ApiResult, AppError},
@@ -33,6 +33,9 @@ use crate::{
   snapshot,
   state::AppState,
 };
+
+/// 上传口令在表里记的"sha256"。
+const UPLOAD: &str = "upload";
 
 /// 代码包大小上限，和 agent 下载的上限一致。
 pub const MAX_UPLOAD: usize = 512 * 1024 * 1024;
@@ -52,6 +55,11 @@ impl Downloads {
     map.retain(|_, (_, exp)| *exp > now);
     map.insert(token.clone(), (sha256.to_string(), now + TOKEN_TTL));
     token
+  }
+
+  /// agent 打包服务器目录后上传用的口令：签发时还不知道 sha256。
+  pub fn issue_upload(&self) -> String {
+    self.issue(UPLOAD)
   }
 
   fn take(&self, token: &str, sha256: &str) -> bool {
@@ -135,7 +143,7 @@ pub async fn show(
   auth: Auth,
   Path(sha256): Path<String>,
 ) -> ApiResult<Value> {
-  auth.require(TokenScope::Read)?;
+  auth.require(Perm::Read)?;
   check_sha(&sha256)?;
   let size =
     std::fs::metadata(file(&s, &sha256)).ok().map(|m| m.len());
@@ -149,28 +157,34 @@ pub async fn put(
   Path(sha256): Path<String>,
   body: Body,
 ) -> ApiResult<Value> {
-  auth.require(TokenScope::ApplyAll)?;
+  auth.require(Perm::Apply)?;
   check_sha(&sha256)?;
-  let target = file(&s, &sha256);
+  Ok(Json(store(&s, &sha256, body).await?))
+}
+
+async fn store(
+  s: &AppState,
+  sha256: &str,
+  body: Body,
+) -> Result<Value, ApiError> {
+  let target = file(s, sha256);
   if target.is_file() {
-    return Ok(Json(json!({ "sha256": sha256, "existed": true })));
+    return Ok(json!({ "sha256": sha256, "existed": true }));
   }
-  let dir = dir(&s);
+  let dir = dir(s);
   std::fs::create_dir_all(&dir).map_err(|e| io_error(&dir, e))?;
   let part = dir
     .join(format!(".{sha256}.{}.part", crate::backup::random_hex()));
-  let result = receive(body, &part, &sha256).await;
+  let result = receive(body, &part, sha256).await;
   match result {
     Ok(size) => {
       std::fs::rename(&part, &target)
         .map_err(|e| io_error(&target, e))?;
-      Ok(Json(
-        json!({ "sha256": sha256, "size": size, "existed": false }),
-      ))
+      Ok(json!({ "sha256": sha256, "size": size, "existed": false }))
     }
     Err(e) => {
       let _ = std::fs::remove_file(&part);
-      Err(e.into())
+      Err(e)
     }
   }
 }
@@ -244,6 +258,28 @@ pub async fn download(
       "代码包不存在，重新执行 wharf deploy 上传",
     ))
     .into_response(),
+  }
+}
+
+/// `PUT /agent/uploads/{sha256}`：agent 打包服务器目录后上传，`Authorization: Bearer <一次性上传口令>`。
+pub async fn agent_put(
+  State(s): State<Arc<AppState>>,
+  headers: HeaderMap,
+  Path(sha256): Path<String>,
+  body: Body,
+) -> Response {
+  let token = headers
+    .get(header::AUTHORIZATION)
+    .and_then(|v| v.to_str().ok())
+    .and_then(|v| v.strip_prefix("Bearer "))
+    .unwrap_or_default();
+  if check_sha(&sha256).is_err() || !s.downloads.take(token, UPLOAD) {
+    return (StatusCode::UNAUTHORIZED, "上传口令无效或已过期")
+      .into_response();
+  }
+  match store(&s, &sha256, body).await {
+    Ok(v) => Json(v).into_response(),
+    Err(e) => AppError(e).into_response(),
   }
 }
 

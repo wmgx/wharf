@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
   ApiError, ErrorCode,
   agent::{AgentOp, HostExecJob, HostExecOutcome},
-  view::{HostExecResponse, ShellLog, TokenScope},
+  view::{HostExecResponse, Perm, ShellLog},
 };
 
 use crate::{
@@ -81,7 +81,7 @@ pub async fn exec(
   AxumPath(name): AxumPath<String>,
   Json(req): Json<ExecRequest>,
 ) -> ApiResult<HostExecResponse> {
-  auth.require(TokenScope::ApplyAll)?;
+  auth.require(Perm::Exec)?;
   let job = req.job()?;
   let snap = snapshot::load(&state.db).await?;
   let server = snap
@@ -179,7 +179,7 @@ pub async fn list(
   auth: Auth,
   Query(query): Query<LogQuery>,
 ) -> ApiResult<Vec<ShellLog>> {
-  auth.require(TokenScope::Read)?;
+  auth.require(Perm::Read)?;
   if !(1..=200).contains(&query.limit) {
     return Err(
       ApiError::invalid("limit 必须在 1 到 200 之间").into(),

@@ -6,7 +6,7 @@ use axum::{Json, extract::State};
 use chrono::TimeZone;
 use wharf_api_types::{
   spec::NetworkMode,
-  view::{NetworkServer, NetworkView, ReachView, TokenScope},
+  view::{NetworkServer, NetworkView, Perm, ReachView},
 };
 
 use crate::{
@@ -23,7 +23,7 @@ pub async fn show(
   State(s): State<Arc<AppState>>,
   auth: Auth,
 ) -> ApiResult<NetworkView> {
-  auth.require(TokenScope::Read)?;
+  auth.require(Perm::Read)?;
   let snap = snapshot::load(&s.db).await?;
   Ok(Json(view(&s, &snap).await?))
 }
@@ -33,7 +33,7 @@ pub async fn probe(
   State(s): State<Arc<AppState>>,
   auth: Auth,
 ) -> ApiResult<NetworkView> {
-  auth.require(TokenScope::Plan)?;
+  auth.require(Perm::Plan)?;
   let snap = probe_all(&s).await?;
   Ok(Json(view(&s, &snap).await?))
 }

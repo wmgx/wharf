@@ -26,7 +26,7 @@ use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
   ApiError, ErrorCode,
   agent::{AgentOp, TerminalInput, TerminalJob, TerminalSize},
-  view::TokenScope,
+  view::Perm,
 };
 
 use crate::{
@@ -79,7 +79,7 @@ pub async fn open(
   ws: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
   // 能在容器里执行任意命令，和执行全部操作同一权限。
-  auth.require(TokenScope::ApplyAll)?;
+  auth.require(Perm::Exec)?;
   let snap = snapshot::load(&s.db).await?;
   let row = snap
     .world
@@ -111,7 +111,7 @@ pub async fn open_host(
   Query(q): Query<OpenQuery>,
   ws: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
-  auth.require(TokenScope::ApplyAll)?;
+  auth.require(Perm::Exec)?;
   let snap = snapshot::load(&s.db).await?;
   let row = snap
     .world

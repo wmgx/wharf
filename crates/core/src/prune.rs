@@ -8,7 +8,7 @@ use axum::{
 };
 use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
-  ApiError, agent::AgentOp, plan::ApplyResponse, view::TokenScope,
+  ApiError, agent::AgentOp, plan::ApplyResponse, view::Perm,
 };
 
 use crate::{
@@ -24,7 +24,7 @@ pub async fn prune_now(
   auth: Auth,
   Path(name): Path<String>,
 ) -> ApiResult<ApplyResponse> {
-  auth.require(TokenScope::ApplyAll)?;
+  auth.require(Perm::Admin)?;
   let snap = snapshot::load(&s.db).await?;
   if !snap.world.servers.contains_key(&name) {
     return Err(crate::world::server_not_found(&name).into());

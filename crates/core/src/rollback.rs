@@ -16,7 +16,7 @@ use wharf_api_types::{
   ApiError,
   agent::ImageInfo,
   spec::{ServiceSpec, Source},
-  view::{RollbackTarget, TokenScope},
+  view::{Perm, RollbackTarget},
 };
 
 use crate::{
@@ -42,7 +42,7 @@ pub async fn target(
   Path(name): Path<String>,
   Query(q): Query<RollbackQuery>,
 ) -> ApiResult<RollbackTarget> {
-  auth.require(TokenScope::Read)?;
+  auth.require(Perm::Read)?;
   let snap = snapshot::load(&s.db).await?;
   let current = snap
     .world

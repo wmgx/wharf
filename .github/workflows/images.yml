@@ -1,5 +1,6 @@
 # 推到 main 时构建 wharf-core / wharf-agent 镜像，推到 ghcr。
 # 标签：latest 和 sha-<短提交号>。国内机器可以从 ghcr.nju.edu.cn 拉。
+# 同时构建各平台的 wharf CLI，发布到 Release build-<短提交号>；控制面的 /cli.sh 按自己的构建号下载。
 name: images
 
 on:
@@ -8,7 +9,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   packages: write
 
 concurrency:
@@ -55,3 +56,48 @@ jobs:
             ghcr.io/${{ github.repository_owner }}/wharf-agent:${{ steps.tag.outputs.sha }}
           build-args: WHARF_BUILD=${{ steps.tag.outputs.build }}
           cache-from: type=gha
+
+  cli:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, name: wharf-linux-amd64 }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, name: wharf-linux-arm64 }
+          - { os: macos-14, target: aarch64-apple-darwin, name: wharf-macos-arm64 }
+          - { os: macos-14, target: x86_64-apple-darwin, name: wharf-macos-amd64 }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cli-${{ matrix.target }}
+      - name: build
+        run: |
+          export WHARF_BUILD="${GITHUB_SHA::7}"
+          cargo build --release --locked -p wharf-cli --target ${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/wharf ${{ matrix.name }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ matrix.name }}
+
+  release-cli:
+    needs: cli
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="build-${GITHUB_SHA::7}"
+          gh release create "$tag" dist/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "$tag" --notes "wharf CLI，构建 ${GITHUB_SHA::7}。用控制面的 /cli.sh 安装。" --prerelease

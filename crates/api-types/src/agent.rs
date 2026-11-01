@@ -263,6 +263,32 @@ pub enum AgentOp {
   HostInfo,
   /// 服务数据目录 `/srv/<service>/` 里的文件：列目录、分块读、分块写。
   Files(FilesOp),
+  /// 列宿主机上的一个目录（只读挂载宿主机根目录），结果是 `Vec<String>`，目录名以 `/` 结尾。
+  HostListDir {
+    path: String,
+  },
+  /// 把宿主机上的目录按 `.gitignore` 打成代码包，用一次性口令上传到控制面，
+  /// 结果是 [PackedUpload]。
+  HostPack(HostPackJob),
+}
+
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct HostPackJob {
+  /// 宿主机上的绝对路径。
+  pub path: String,
+  /// 上传口令，只能用一次。
+  pub token: String,
+}
+
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct PackedUpload {
+  pub sha256: String,
+  pub size: u64,
+  pub files: usize,
 }
 
 /// 路径都相对于 `/srv/<service>/`，不能跳出去（含符号链接）。

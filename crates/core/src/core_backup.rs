@@ -21,7 +21,7 @@ use wharf_api_types::{
     REST_SERVER_PORT, ResticAction, ResticRepo,
   },
   plan::ApplyResponse,
-  view::{BackupRecord, TokenScope},
+  view::{BackupRecord, Perm},
 };
 
 use crate::{
@@ -81,7 +81,7 @@ pub async fn show(
   State(s): State<Arc<AppState>>,
   auth: Auth,
 ) -> ApiResult<CoreBackupView> {
-  auth.require(TokenScope::Read)?;
+  auth.require(Perm::Read)?;
   let snap = snapshot::load(&s.db).await?;
   let records = crate::backup::records(&s, REPO, 10).await?;
   let (to, key_for, admin) = s
@@ -117,7 +117,7 @@ pub async fn enable(
   auth: Auth,
   Json(req): Json<EnableRequest>,
 ) -> ApiResult<ApplyResponse> {
-  auth.require(TokenScope::ApplyAll)?;
+  auth.require(Perm::Admin)?;
   check_data_dir(&s)?;
   let snap = snapshot::load(&s.db).await?;
   if !snap.world.servers.contains_key(&req.to) {
@@ -192,7 +192,7 @@ pub async fn recovery_key(
   auth: Auth,
   Json(req): Json<PasswordRequest>,
 ) -> ApiResult<RecoveryKey> {
-  auth.require(TokenScope::ApplyAll)?;
+  auth.require(Perm::Admin)?;
   let hash: String = s
     .db
     .call(|c| {
@@ -248,7 +248,7 @@ pub async fn run_now(
   State(s): State<Arc<AppState>>,
   auth: Auth,
 ) -> ApiResult<ApplyResponse> {
-  auth.require(TokenScope::ApplySafe)?;
+  auth.require(Perm::Apply)?;
   Ok(Json(
     apply::start_task(
       s.clone(),

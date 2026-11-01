@@ -28,7 +28,7 @@ use wharf_api_types::{
     RunStep, StepStatus,
   },
   spec::{GatewayKind, ServiceSpec, Source},
-  view::{LastOp, OpStatus, TokenScope},
+  view::{LastOp, OpStatus, Perm},
 };
 use wharf_providers::{Owner, RemoteRecord};
 
@@ -224,7 +224,7 @@ async fn stored_plan(
 pub async fn start(
   state: Arc<AppState>,
   req: ApplyRequest,
-  scope: TokenScope,
+  perms: std::collections::BTreeSet<Perm>,
 ) -> Result<ApplyResponse, ApiError> {
   let guard =
     state.apply_lock.clone().try_lock_owned().map_err(|_| {
@@ -250,13 +250,13 @@ pub async fn start(
       .suggest(replan),
     );
   }
-  if scope < TokenScope::ApplyAll && changes_host_access(plan) {
+  if !perms.contains(&Perm::Admin) && changes_host_access(plan) {
     return Err(
       ApiError::new(
         ErrorCode::Forbidden,
-        "宿主机终端和命令执行开关只能用 apply_all 权限修改",
+        "宿主机终端和命令执行开关要 admin 权限才能修改",
       )
-      .with_hint("请用户用 apply_all 权限的 token 执行"),
+      .with_hint("请用户在页面上执行，或用有 admin 权限的 token"),
     );
   }
   let missing: Vec<&String> = plan
@@ -281,14 +281,15 @@ pub async fn start(
       .suggest(format!("wharf apply {}{flags}", plan.plan_id)),
     );
   }
-  if !plan.needs_confirm.is_empty() && scope < TokenScope::ApplyAll {
+  if !plan.needs_confirm.is_empty() && !perms.contains(&Perm::Confirm)
+  {
     return Err(
       ApiError::new(
         ErrorCode::Forbidden,
         "计划里有高风险项，当前 token 只能执行安全的计划",
       )
       .with_hint(
-        "请用户用 apply_all 权限的 token 执行，或者去掉高风险的修改",
+        "请用户在页面上确认执行，或用有 confirm 权限的 token",
       ),
     );
   }

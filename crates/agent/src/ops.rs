@@ -32,6 +32,8 @@ pub struct Ops {
   /// 控制面地址：构建时从这里下载上传的代码包。
   pub core_url: String,
   pub host_shell: HostShell,
+  /// 数据目录：打包宿主机目录时的临时文件放在它下面的 `tmp/`。
+  pub data_dir: std::path::PathBuf,
   locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
@@ -44,12 +46,14 @@ impl Ops {
     reporter: Reporter,
     core_url: String,
     host_shell: HostShell,
+    data_dir: std::path::PathBuf,
   ) -> Self {
     Self {
       docker,
       reporter,
       core_url,
       host_shell,
+      data_dir,
       locks: Default::default(),
     }
   }
@@ -179,6 +183,19 @@ impl Ops {
       AgentOp::HostInfo => {
         to_value(crate::host::info(&self.docker, ctx).await?)
       }
+      AgentOp::HostListDir { path } => to_value(
+        crate::host_dir::list(&self.docker, &path, ctx).await?,
+      ),
+      AgentOp::HostPack(job) => to_value(
+        crate::host_dir::pack(
+          &self.docker,
+          &self.data_dir,
+          &self.core_url,
+          &job,
+          ctx,
+        )
+        .await?,
+      ),
       AgentOp::HostExec(job) => {
         to_value(self.host_shell.exec(job, ctx).await)
       }

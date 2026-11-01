@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
   ApiError,
   agent::{AgentOp, FILE_CHUNK, FileChunk, FileEntry, FilesOp},
-  view::TokenScope,
+  view::Perm,
 };
 
 use crate::{
@@ -73,7 +73,7 @@ pub async fn list(
   Path(name): Path<String>,
   Query(q): Query<FileQuery>,
 ) -> ApiResult<Vec<FileEntry>> {
-  auth.require(TokenScope::Read)?;
+  auth.require(Perm::Read)?;
   let server = server_of(&s, &name).await?;
   Ok(Json(
     call(
@@ -96,7 +96,7 @@ pub async fn download(
   Path(name): Path<String>,
   Query(q): Query<FileQuery>,
 ) -> Result<Response, crate::api::AppError> {
-  auth.require(TokenScope::Read)?;
+  auth.require(Perm::Read)?;
   let server = server_of(&s, &name).await?;
   let (svc, path) = (name.clone(), q.path.clone());
   let read = move |offset: u64| FilesOp::Read {
@@ -184,7 +184,7 @@ pub async fn upload(
   Query(q): Query<FileQuery>,
   body: Bytes,
 ) -> ApiResult<serde_json::Value> {
-  auth.require(TokenScope::ApplyAll)?;
+  auth.require(Perm::Exec)?;
   let server = server_of(&s, &name).await?;
   let chunks: Vec<&[u8]> = if body.is_empty() {
     vec![&[]]

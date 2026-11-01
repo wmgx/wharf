@@ -13,7 +13,7 @@ use axum::{
 };
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
-use wharf_api_types::{ApiError, agent::Metrics, view::TokenScope};
+use wharf_api_types::{ApiError, agent::Metrics, view::Perm};
 
 use crate::{
   api::ApiResult,
@@ -223,7 +223,7 @@ pub async fn query(
   auth: Auth,
   Query(q): Query<MetricsQuery>,
 ) -> ApiResult<MetricsView> {
-  auth.require(TokenScope::Read)?;
+  auth.require(Perm::Read)?;
   let (span, step) = range_ms(q.range.as_deref().unwrap_or("24h"))?;
   let names: Vec<String> = q
     .names

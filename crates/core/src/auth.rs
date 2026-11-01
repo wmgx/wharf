@@ -1,11 +1,14 @@
 //! API token：`Authorization: Bearer <token>`。数据库里只存 SHA-256。
 
-use std::{path::Path, sync::Arc};
+use std::{collections::BTreeSet, path::Path, sync::Arc};
 
 use axum::{extract::FromRequestParts, http::request::Parts};
 use rusqlite::params;
 use sha2::{Digest, Sha256};
-use wharf_api_types::{ApiError, ErrorCode, view::TokenScope};
+use wharf_api_types::{
+  ApiError, ErrorCode,
+  view::{Perm, TokenScope},
+};
 
 use crate::{
   api::AppError,
@@ -23,35 +26,37 @@ pub fn new_token() -> String {
   format!("wh_{}", hex::encode(bytes))
 }
 
-pub fn scope_str(scope: TokenScope) -> &'static str {
-  match scope {
-    TokenScope::Read => "read",
-    TokenScope::Plan => "plan",
-    TokenScope::ApplySafe => "apply_safe",
-    TokenScope::ApplyAll => "apply_all",
-  }
+/// 数据库里的权限：旧档位名（`apply_safe` 等）或逗号分隔的权限点。
+pub fn encode_perms(perms: &[Perm]) -> String {
+  let set: BTreeSet<Perm> =
+    perms.iter().copied().chain([Perm::Read]).collect();
+  set.iter().map(|p| p.as_str()).collect::<Vec<_>>().join(",")
 }
 
-pub fn parse_scope(s: &str) -> Option<TokenScope> {
-  match s {
+pub fn decode_perms(s: &str) -> Option<BTreeSet<Perm>> {
+  let legacy = match s {
     "read" => Some(TokenScope::Read),
     "plan" => Some(TokenScope::Plan),
     "apply_safe" => Some(TokenScope::ApplySafe),
     "apply_all" => Some(TokenScope::ApplyAll),
     _ => None,
+  };
+  if let Some(scope) = legacy {
+    return Some(Perm::of_scope(scope).into_iter().collect());
   }
+  s.split(',').map(|p| Perm::parse(p.trim())).collect()
 }
 
 pub fn insert_token(
   conn: &rusqlite::Connection,
   name: &str,
-  scope: TokenScope,
+  perms: &[Perm],
   token: &str,
 ) -> Result<(), ApiError> {
   conn
     .execute(
       "INSERT INTO api_tokens (name, hash, scope, created_at) VALUES (?1, ?2, ?3, ?4)",
-      params![name, hash_token(token), scope_str(scope), now_ms()],
+      params![name, hash_token(token), encode_perms(perms), now_ms()],
     )
     .map_err(|e| match e {
       rusqlite::Error::SqliteFailure(f, _)
@@ -86,12 +91,10 @@ pub async fn bootstrap(
       .open(&path)?;
     writeln!(file, "{token}")?;
   }
-  db.call(move |c| {
-    insert_token(c, "admin", TokenScope::ApplyAll, &token)
-  })
-  .await?;
+  db.call(move |c| insert_token(c, "admin", &Perm::ALL, &token))
+    .await?;
   tracing::info!(
-    "已生成管理员 token（apply_all），保存在 {}。用它执行 wharf login",
+    "已生成管理员 token（全部权限），保存在 {}。用它执行 wharf login",
     path.display()
   );
   Ok(())
@@ -101,26 +104,32 @@ pub async fn bootstrap(
 pub struct Auth {
   #[allow(dead_code)]
   pub name: String,
-  pub scope: TokenScope,
+  pub perms: BTreeSet<Perm>,
 }
 
 impl Auth {
-  pub fn require(&self, scope: TokenScope) -> Result<(), AppError> {
-    if self.scope >= scope {
-      Ok(())
-    } else {
-      Err(
-        ApiError::new(
-          ErrorCode::Forbidden,
-          format!(
-            "当前 token 的权限是 {}，这个操作需要 {}",
-            scope_str(self.scope),
-            scope_str(scope)
-          ),
-        )
-        .into(),
-      )
+  pub fn has(&self, perm: Perm) -> bool {
+    self.perms.contains(&perm)
+  }
+
+  pub fn require(&self, perm: Perm) -> Result<(), AppError> {
+    if self.has(perm) {
+      return Ok(());
     }
+    let have: Vec<&str> =
+      self.perms.iter().map(|p| p.as_str()).collect();
+    Err(
+      ApiError::new(
+        ErrorCode::Forbidden,
+        format!(
+          "当前 token 没有 {} 权限（有：{}）",
+          perm.as_str(),
+          have.join(",")
+        ),
+      )
+      .with_hint("请用户在页面\u{201c}设置 → CLI 与 AI 接入\u{201d}换一个有这个权限的 token")
+      .into(),
+    )
   }
 }
 
@@ -156,7 +165,7 @@ impl FromRequestParts<Arc<AppState>> for Auth {
         .ok_or_else(unauthorized)?;
       return Ok(Auth {
         name: format!("页面:{user}"),
-        scope: TokenScope::ApplyAll,
+        perms: Perm::ALL.into_iter().collect(),
       });
     };
     let hash = hash_token(token);
@@ -165,10 +174,30 @@ impl FromRequestParts<Arc<AppState>> for Auth {
       .call(move |c| db::token_scope(c, &hash))
       .await
       .map_err(AppError::from)?;
-    let (name, scope) = found.ok_or_else(unauthorized)?;
+    let (name, perms) = found.ok_or_else(unauthorized)?;
     Ok(Auth {
       name,
-      scope: parse_scope(&scope).ok_or_else(unauthorized)?,
+      perms: decode_perms(&perms).ok_or_else(unauthorized)?,
     })
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn legacy_scopes_and_perm_lists() {
+    let apply_safe = decode_perms("apply_safe").unwrap();
+    assert!(apply_safe.contains(&Perm::Apply));
+    assert!(!apply_safe.contains(&Perm::Confirm));
+    assert_eq!(decode_perms("apply_all").unwrap().len(), 6);
+    let ai = encode_perms(&[Perm::Plan, Perm::Exec]);
+    assert_eq!(ai, "read,plan,exec");
+    let back = decode_perms(&ai).unwrap();
+    assert!(
+      back.contains(&Perm::Exec) && !back.contains(&Perm::Admin)
+    );
+    assert!(decode_perms("read,nope").is_none());
   }
 }

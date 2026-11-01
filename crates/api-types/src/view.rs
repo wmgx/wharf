@@ -621,6 +621,7 @@ pub struct JoinResponse {
   JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
+/// 旧的权限档位，现在只作为新建 token 时的预设，见 [`Perm::of_scope`]。
 pub enum TokenScope {
   Read,
   Plan,
@@ -630,10 +631,77 @@ pub enum TokenScope {
   ApplyAll,
 }
 
+/// 权限点。token 持有一组；页面登录的会话有全部权限。
+#[derive(
+  Debug,
+  Clone,
+  Copy,
+  PartialEq,
+  Eq,
+  PartialOrd,
+  Ord,
+  Hash,
+  Serialize,
+  Deserialize,
+  JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum Perm {
+  /// 查看一切（不含密钥明文）。
+  Read,
+  /// 生成计划、探测网络、预览导入。
+  Plan,
+  /// 执行不含高风险项的计划、上传代码包、触发备份、重新发布边缘应用。
+  Apply,
+  /// 确认高风险项（删数据、覆盖、公开）、从备份恢复。
+  Confirm,
+  /// 宿主机命令执行、宿主机和容器终端、改服务文件。
+  Exec,
+  /// 管理服务器、账号、密钥、token，升级 Wharf，改宿主机访问开关。
+  Admin,
+}
+
+impl Perm {
+  pub const ALL: [Perm; 6] = [
+    Perm::Read,
+    Perm::Plan,
+    Perm::Apply,
+    Perm::Confirm,
+    Perm::Exec,
+    Perm::Admin,
+  ];
+
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Perm::Read => "read",
+      Perm::Plan => "plan",
+      Perm::Apply => "apply",
+      Perm::Confirm => "confirm",
+      Perm::Exec => "exec",
+      Perm::Admin => "admin",
+    }
+  }
+
+  pub fn parse(s: &str) -> Option<Perm> {
+    Perm::ALL.into_iter().find(|p| p.as_str() == s)
+  }
+
+  /// 旧档位对应的一组权限点。
+  pub fn of_scope(scope: TokenScope) -> Vec<Perm> {
+    let n = match scope {
+      TokenScope::Read => 1,
+      TokenScope::Plan => 2,
+      TokenScope::ApplySafe => 3,
+      TokenScope::ApplyAll => 6,
+    };
+    Perm::ALL[..n].to_vec()
+  }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct TokenView {
   pub name: String,
-  pub scope: TokenScope,
+  pub perms: Vec<Perm>,
   pub created_at: DateTime<Utc>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub last_used_at: Option<DateTime<Utc>>,
@@ -642,7 +710,7 @@ pub struct TokenView {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct CreatedToken {
   pub name: String,
-  pub scope: TokenScope,
+  pub perms: Vec<Perm>,
   /// 只返回这一次。
   pub token: String,
 }

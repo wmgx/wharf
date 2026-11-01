@@ -467,18 +467,19 @@ export interface SecretView {
   managed?: boolean;
 }
 
-export type TokenScope = "read" | "plan" | "apply_safe" | "apply_all";
+
+export type Perm = "read" | "plan" | "apply" | "confirm" | "exec" | "admin";
 
 export interface TokenView {
   name: string;
-  scope: TokenScope;
+  perms: Perm[];
   created_at: string;
   last_used_at?: string;
 }
 
 export interface CreatedToken {
   name: string;
-  scope: TokenScope;
+  perms: Perm[];
   token: string;
 }
 

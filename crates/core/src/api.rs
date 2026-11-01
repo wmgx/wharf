@@ -21,7 +21,7 @@ use wharf_api_types::{
   validate_name,
   view::{
     AccountView, CreatedToken, DataView, DeploymentView, GatewayView,
-    JoinInfo, JoinRequest, JoinResponse, RouteView, SecretView,
+    JoinInfo, JoinRequest, JoinResponse, Perm, RouteView, SecretView,
     ServerView, ServiceView, Status, TokenScope, TokenView,
   },
 };
@@ -60,12 +60,20 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route("/agent/ws", get(hub::agent_ws))
     .route("/agent/join", post(agent_join))
     .route("/join.sh", get(crate::join::script))
+    .route("/cli.sh", get(crate::cli_dist::script))
     .route("/api/core/addresses", get(crate::join::addresses))
     .route("/api/session", get(crate::login::show))
     .route("/api/setup", post(crate::login::setup))
     .route("/api/login", post(crate::login::login))
     .route("/api/logout", post(crate::login::logout))
-    .route("/agent/uploads/{sha256}", get(crate::uploads::download))
+    .route(
+      "/agent/uploads/{sha256}",
+      get(crate::uploads::download)
+        .put(crate::uploads::agent_put)
+        .layer(axum::extract::DefaultBodyLimit::max(
+          crate::uploads::MAX_UPLOAD,
+        )),
+    )
     .route(
       "/api/uploads/{sha256}",
       get(crate::uploads::show).put(crate::uploads::put).layer(
@@ -106,6 +114,8 @@ pub fn router(state: Arc<AppState>) -> Router {
     )
     .route("/api/servers/{name}/prune", post(crate::prune::prune_now))
     .route("/api/servers/{name}/host", get(host_info))
+    .route("/api/servers/{name}/dirs", get(crate::host_dir::list))
+    .route("/api/servers/{name}/pack", post(crate::host_dir::pack))
     .route("/api/servers/{name}/exec", post(crate::shell::exec))
     .route(
       "/api/servers/{name}/terminal",
@@ -129,6 +139,10 @@ pub fn router(state: Arc<AppState>) -> Router {
       get(crate::rollback::target),
     )
     .route("/api/services/{name}/deployments", get(deployments))
+    .route(
+      "/api/services/{name}/origin",
+      get(crate::host_dir::origin),
+    )
     .route(
       "/api/services/{name}/files",
       get(crate::files_api::list)
@@ -227,7 +241,7 @@ async fn status(
   State(s): State<Arc<AppState>>,
   auth: Auth,
 ) -> ApiResult<Status> {
-  auth.require(TokenScope::Read)?;
+  auth.require(Perm::Read)?;
   let status = views::status(&s).await?;
   // 刚导入、还没同步过的在后台同步，下一次轮询就有了。
   if let Ok(snap) = snapshot::load(&s.db).await {
@@ -243,7 +257,7 @@ async fn data_overview(
   State(s): State<Arc<AppState>>,
   auth: Auth,
 ) -> ApiResult<DataView> {
-  auth.require(TokenScope::Read)?;
+  auth.require(Perm::Read)?;
   Ok(Json(crate::data::overview(&s).await?))
 }
 
@@ -253,7 +267,7 @@ async fn list_servers(
   State(s): State<Arc<AppState>>,
   auth: Auth,
 ) -> ApiResult<Vec<ServerView>> {
-  auth.require(TokenScope::Read)?;
+  auth.require(Perm::Read)?;
   let snap = snapshot::load(&s.db).await?;
   Ok(Json(
     snap
@@ -270,7 +284,7 @@ async fn show_server(
   auth: Auth,
   Path(name): Path<String>,
 ) -> ApiResult<ServerView> {
-  auth.require(TokenScope::Read)?;
+  auth.require(Perm::Read)?;
   let snap = snapshot::load(&s.db).await?;
   Ok(Json(
     views::server_view(&s, &snap, &name)
@@ -284,7 +298,7 @@ async fn host_info(
   auth: Auth,
   Path(name): Path<String>,
 ) -> ApiResult<wharf_api_types::agent::HostInfo> {
-  auth.require(TokenScope::Read)?;
+  auth.require(Perm::Read)?;
   let snap = snapshot::load(&s.db).await?;
   if !snap.world.servers.contains_key(&name) {
     return Err(server_not_found(&name).into());
@@ -326,7 +340,7 @@ async fn add_server(
   headers: HeaderMap,
   Json(req): Json<AddServer>,
 ) -> ApiResult<JoinInfo> {
-  auth.require(TokenScope::ApplyAll)?;
+  auth.require(Perm::Admin)?;
   validate_name("服务器", &req.name)?;
   let image = match req.agent_image.as_deref().map(str::trim) {
     Some(i) if !i.is_empty() && i != s.agent_image => {
@@ -492,7 +506,7 @@ async fn remove_server(
   auth: Auth,
   Path(name): Path<String>,
 ) -> ApiResult<Value> {
-  auth.require(TokenScope::ApplyAll)?;
+  auth.require(Perm::Admin)?;
   let snap = snapshot::load(&s.db).await?;
   if !snap.world.servers.contains_key(&name) {
     return Err(server_not_found(&name).into());
@@ -546,7 +560,7 @@ async fn list_services(
   State(s): State<Arc<AppState>>,
   auth: Auth,
 ) -> ApiResult<Vec<ServiceView>> {
-  auth.require(TokenScope::Read)?;
+  auth.require(Perm::Read)?;
   let snap = snapshot::load(&s.db).await?;
   let net = snap.net(&snap.world);
   let live = views::live_states(&s, &snap.world).await;
@@ -572,7 +586,7 @@ async fn show_service(
   auth: Auth,
   Path(name): Path<String>,
 ) -> ApiResult<ServiceView> {
-  auth.require(TokenScope::Read)?;
+  auth.require(Perm::Read)?;
   let snap = snapshot::load(&s.db).await?;
   let net = snap.net(&snap.world);
   let live = views::live_states(&s, &snap.world).await;
@@ -621,7 +635,7 @@ async fn service_logs(
   Path(name): Path<String>,
   Query(q): Query<LogsQuery>,
 ) -> ApiResult<Value> {
-  auth.require(TokenScope::Read)?;
+  auth.require(Perm::Read)?;
   let snap = snapshot::load(&s.db).await?;
   let row = snap
     .world
@@ -636,7 +650,7 @@ async fn deployments(
   auth: Auth,
   Path(name): Path<String>,
 ) -> ApiResult<Vec<DeploymentView>> {
-  auth.require(TokenScope::Read)?;
+  auth.require(Perm::Read)?;
   let rows = s
     .db
     .call(move |c| {
@@ -698,7 +712,7 @@ async fn list_gateways(
   State(s): State<Arc<AppState>>,
   auth: Auth,
 ) -> ApiResult<Vec<GatewayView>> {
-  auth.require(TokenScope::Read)?;
+  auth.require(Perm::Read)?;
   let snap = snapshot::load(&s.db).await?;
   let net = snap.net(&snap.world);
   let live = views::live_states(&s, &snap.world).await;
@@ -724,7 +738,7 @@ async fn show_gateway(
   auth: Auth,
   Path(name): Path<String>,
 ) -> ApiResult<GatewayView> {
-  auth.require(TokenScope::Read)?;
+  auth.require(Perm::Read)?;
   let snap = snapshot::load(&s.db).await?;
   let net = snap.net(&snap.world);
   let live = views::live_states(&s, &snap.world).await;
@@ -739,7 +753,7 @@ async fn gateway_config(
   auth: Auth,
   Path(name): Path<String>,
 ) -> ApiResult<Value> {
-  auth.require(TokenScope::Read)?;
+  auth.require(Perm::Read)?;
   let snap = snapshot::load(&s.db).await?;
   if !snap.world.gateways.contains_key(&name) {
     return Err(gateway_not_found(&name).into());
@@ -761,7 +775,7 @@ async fn gateway_logs(
   Path(name): Path<String>,
   Query(q): Query<LogsQuery>,
 ) -> ApiResult<Value> {
-  auth.require(TokenScope::Read)?;
+  auth.require(Perm::Read)?;
   let snap = snapshot::load(&s.db).await?;
   let row = snap
     .world
@@ -778,7 +792,7 @@ async fn list_routes(
   State(s): State<Arc<AppState>>,
   auth: Auth,
 ) -> ApiResult<Vec<RouteView>> {
-  auth.require(TokenScope::Read)?;
+  auth.require(Perm::Read)?;
   let snap = snapshot::load(&s.db).await?;
   let net = snap.net(&snap.world);
   Ok(Json(
@@ -820,7 +834,7 @@ async fn list_accounts(
   State(s): State<Arc<AppState>>,
   auth: Auth,
 ) -> ApiResult<Vec<AccountView>> {
-  auth.require(TokenScope::Read)?;
+  auth.require(Perm::Read)?;
   let accounts = s.db.call(|c| db::accounts(c)).await?;
   Ok(Json(accounts.iter().map(account_view).collect()))
 }
@@ -896,7 +910,7 @@ async fn add_account(
   auth: Auth,
   Json(req): Json<AddAccount>,
 ) -> ApiResult<AccountView> {
-  auth.require(TokenScope::ApplyAll)?;
+  auth.require(Perm::Admin)?;
   validate_name("账号", &req.name)?;
   let token = req.token.trim().to_string();
   if token.is_empty() {
@@ -910,7 +924,7 @@ async fn rediscover_account(
   auth: Auth,
   Path(name): Path<String>,
 ) -> ApiResult<AccountView> {
-  auth.require(TokenScope::ApplyAll)?;
+  auth.require(Perm::Admin)?;
   let accounts = s.db.call(|c| db::accounts(c)).await?;
   let account =
     accounts.into_iter().find(|a| a.name == name).ok_or_else(
@@ -927,7 +941,7 @@ async fn remove_account(
   auth: Auth,
   Path(name): Path<String>,
 ) -> ApiResult<Value> {
-  auth.require(TokenScope::ApplyAll)?;
+  auth.require(Perm::Admin)?;
   // 还有网关、隧道或 DNS 记录靠这个账号管理时，删了就没法再改它们。
   let snap = snapshot::load(&s.db).await?;
   let mut users: Vec<String> = snap
@@ -981,7 +995,7 @@ async fn list_secrets(
   State(s): State<Arc<AppState>>,
   auth: Auth,
 ) -> ApiResult<Vec<SecretView>> {
-  auth.require(TokenScope::Read)?;
+  auth.require(Perm::Read)?;
   let snap = snapshot::load(&s.db).await?;
   let rows: Vec<(String, i64)> = s
     .db
@@ -1081,7 +1095,7 @@ async fn set_secret(
   Path(name): Path<String>,
   Json(req): Json<SetSecret>,
 ) -> ApiResult<SecretView> {
-  auth.require(TokenScope::ApplyAll)?;
+  auth.require(Perm::Admin)?;
   check_secret_name(&name)?;
   refuse_managed(&name)?;
   let value = if name == crate::render::BASIC_AUTH_SECRET {
@@ -1115,7 +1129,7 @@ async fn remove_secret(
   auth: Auth,
   Path(name): Path<String>,
 ) -> ApiResult<Value> {
-  auth.require(TokenScope::ApplyAll)?;
+  auth.require(Perm::Admin)?;
   refuse_managed(&name)?;
   let removed = s
     .db
@@ -1134,7 +1148,7 @@ async fn make_plan(
   auth: Auth,
   Json(req): Json<PlanRequest>,
 ) -> ApiResult<Plan> {
-  auth.require(TokenScope::Plan)?;
+  auth.require(Perm::Plan)?;
   let planned = planner::make_plan(&s, req).await?;
   planner::save(&s, &planned).await?;
   Ok(Json(planned.plan))
@@ -1145,7 +1159,7 @@ async fn show_plan(
   auth: Auth,
   Path(id): Path<String>,
 ) -> ApiResult<Plan> {
-  auth.require(TokenScope::Read)?;
+  auth.require(Perm::Read)?;
   Ok(Json(apply::load_plan(&s, &id).await?))
 }
 
@@ -1154,8 +1168,8 @@ async fn apply_plan(
   auth: Auth,
   Json(req): Json<ApplyRequest>,
 ) -> ApiResult<ApplyResponse> {
-  auth.require(TokenScope::ApplySafe)?;
-  Ok(Json(apply::start(s.clone(), req, auth.scope).await?))
+  auth.require(Perm::Apply)?;
+  Ok(Json(apply::start(s.clone(), req, auth.perms).await?))
 }
 
 #[derive(Deserialize)]
@@ -1173,7 +1187,7 @@ async fn list_runs(
   auth: Auth,
   Query(q): Query<RunsQuery>,
 ) -> ApiResult<Vec<Run>> {
-  auth.require(TokenScope::Read)?;
+  auth.require(Perm::Read)?;
   Ok(Json(apply::list_runs(&s, q.limit.min(200)).await?))
 }
 
@@ -1182,7 +1196,7 @@ async fn show_run(
   auth: Auth,
   Path(id): Path<String>,
 ) -> ApiResult<Run> {
-  auth.require(TokenScope::Read)?;
+  auth.require(Perm::Read)?;
   Ok(Json(apply::load_run(&s, &id).await?))
 }
 
@@ -1191,7 +1205,7 @@ async fn cancel_run(
   auth: Auth,
   Path(id): Path<String>,
 ) -> ApiResult<Value> {
-  auth.require(TokenScope::ApplySafe)?;
+  auth.require(Perm::Apply)?;
   if s.runs.cancel(&id) {
     Ok(Json(json!({ "cancelling": true })))
   } else {
@@ -1210,7 +1224,7 @@ async fn export(
   State(s): State<Arc<AppState>>,
   auth: Auth,
 ) -> ApiResult<Fleet> {
-  auth.require(TokenScope::Read)?;
+  auth.require(Perm::Read)?;
   let snap = snapshot::load(&s.db).await?;
   Ok(Json(views::export(&snap.world)))
 }
@@ -1221,7 +1235,7 @@ async fn list_tokens(
   State(s): State<Arc<AppState>>,
   auth: Auth,
 ) -> ApiResult<Vec<TokenView>> {
-  auth.require(TokenScope::ApplyAll)?;
+  auth.require(Perm::Admin)?;
   let rows: Vec<(String, String, i64, Option<i64>)> = s
     .db
     .call(|c| {
@@ -1240,7 +1254,7 @@ async fn list_tokens(
       .filter_map(|(name, scope, created, used)| {
         Some(TokenView {
           name,
-          scope: auth::parse_scope(&scope)?,
+          perms: auth::decode_perms(&scope)?.into_iter().collect(),
           created_at: to_time(created),
           last_used_at: used.map(to_time),
         })
@@ -1249,10 +1263,14 @@ async fn list_tokens(
   ))
 }
 
+/// 新建 token：给 `perms`（权限点），或给旧档位 `scope` 作为预设。
 #[derive(Deserialize)]
 struct CreateToken {
   name: String,
-  scope: TokenScope,
+  #[serde(default)]
+  scope: Option<TokenScope>,
+  #[serde(default)]
+  perms: Option<Vec<Perm>>,
 }
 
 async fn create_token(
@@ -1260,16 +1278,31 @@ async fn create_token(
   auth: Auth,
   Json(req): Json<CreateToken>,
 ) -> ApiResult<CreatedToken> {
-  auth.require(TokenScope::ApplyAll)?;
+  auth.require(Perm::Admin)?;
   validate_name("token", &req.name)?;
   let token = auth::new_token();
-  let (name, scope, t) = (req.name.clone(), req.scope, token.clone());
+  let perms = match (req.perms, req.scope) {
+    (Some(p), None) => p,
+    (None, Some(scope)) => Perm::of_scope(scope),
+    _ => {
+      return Err(
+        wharf_api_types::ApiError::invalid("perms 和 scope 要给且只给一个")
+          .with_hint("perms 是权限点列表：read、plan、apply、confirm、exec、admin")
+          .into(),
+      );
+    }
+  };
+  let stored = auth::encode_perms(&perms);
+  let (name, t, p) = (req.name.clone(), token.clone(), perms.clone());
   s.db
-    .call(move |c| auth::insert_token(c, &name, scope, &t))
+    .call(move |c| auth::insert_token(c, &name, &p, &t))
     .await?;
   Ok(Json(CreatedToken {
     name: req.name,
-    scope: req.scope,
+    perms: auth::decode_perms(&stored)
+      .unwrap_or_default()
+      .into_iter()
+      .collect(),
     token,
   }))
 }
@@ -1279,7 +1312,7 @@ async fn remove_token(
   auth: Auth,
   Path(name): Path<String>,
 ) -> ApiResult<Value> {
-  auth.require(TokenScope::ApplyAll)?;
+  auth.require(Perm::Admin)?;
   let removed = s
     .db
     .call(move |c| {

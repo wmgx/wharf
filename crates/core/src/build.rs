@@ -188,7 +188,7 @@ pub async fn rebuild_now(
   auth: crate::auth::Auth,
   axum::extract::Path(name): axum::extract::Path<String>,
 ) -> crate::api::ApiResult<wharf_api_types::plan::ApplyResponse> {
-  auth.require(wharf_api_types::view::TokenScope::ApplySafe)?;
+  auth.require(wharf_api_types::view::Perm::Apply)?;
   let snap = snapshot::load(&s.db).await?;
   let row = snap
     .world
@@ -220,7 +220,7 @@ pub async fn restart_now(
   auth: crate::auth::Auth,
   axum::extract::Path(name): axum::extract::Path<String>,
 ) -> crate::api::ApiResult<wharf_api_types::plan::ApplyResponse> {
-  auth.require(wharf_api_types::view::TokenScope::ApplySafe)?;
+  auth.require(wharf_api_types::view::Perm::Apply)?;
   let snap = snapshot::load(&s.db).await?;
   let row = snap
     .world

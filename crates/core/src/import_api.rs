@@ -12,7 +12,7 @@ use wharf_api_types::{
   agent::{AgentOp, FoundContainer, ImportRaw, ImportTarget},
   spec::{ServiceSpec, Source},
   validate_name,
-  view::{ImportPreview, ImportRequest, TokenScope, Unmanaged},
+  view::{ImportPreview, ImportRequest, Perm, Unmanaged},
 };
 
 use crate::{
@@ -36,7 +36,7 @@ pub async fn unmanaged(
   auth: Auth,
   Path(server): Path<String>,
 ) -> ApiResult<Vec<Unmanaged>> {
-  auth.require(TokenScope::Read)?;
+  auth.require(Perm::Read)?;
   let snap = snapshot::load(&s.db).await?;
   if !snap.world.servers.contains_key(&server) {
     return Err(server_not_found(&server).into());
@@ -85,7 +85,7 @@ pub async fn preview(
   auth: Auth,
   Json(req): Json<ImportRequest>,
 ) -> ApiResult<ImportPreview> {
-  auth.require(TokenScope::Plan)?;
+  auth.require(Perm::Plan)?;
   let snap = snapshot::load(&s.db).await?;
   if !snap.world.servers.contains_key(&req.server) {
     return Err(server_not_found(&req.server).into());

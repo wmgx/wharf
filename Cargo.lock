@@ -2921,6 +2921,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "wharf-api-types",
+ "wharf-pack",
 ]
 
 [[package]]
@@ -2940,20 +2941,18 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
- "flate2",
  "hex",
- "ignore",
  "reqwest",
  "rpassword",
  "schemars",
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "tar",
  "tempfile",
  "tokio",
  "toml",
  "wharf-api-types",
+ "wharf-pack",
 ]
 
 [[package]]
@@ -2989,6 +2988,19 @@ dependencies = [
  "tracing-subscriber",
  "wharf-api-types",
  "wharf-providers",
+]
+
+[[package]]
+name = "wharf-pack"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "hex",
+ "ignore",
+ "sha2 0.10.9",
+ "tar",
+ "tempfile",
+ "wharf-api-types",
 ]
 
 [[package]]

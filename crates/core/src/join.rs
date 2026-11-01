@@ -18,7 +18,7 @@ use axum::{
 };
 use wharf_api_types::{
   ApiError,
-  view::{CoreAddress, CoreAddresses, TokenScope},
+  view::{CoreAddress, CoreAddresses, Perm},
 };
 
 use crate::{
@@ -31,7 +31,7 @@ pub async fn addresses(
   State(s): State<Arc<AppState>>,
   auth: Auth,
 ) -> ApiResult<CoreAddresses> {
-  auth.require(TokenScope::ApplyAll)?;
+  auth.require(Perm::Admin)?;
   Ok(Json(candidates(&s).await?))
 }
 

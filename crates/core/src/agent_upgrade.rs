@@ -14,7 +14,7 @@ use wharf_api_types::{
   ApiError, BUILD, ErrorCode, VERSION,
   agent::{AgentOp, UpgradeJob, UpgradeResult, container_id},
   plan::ApplyResponse,
-  view::TokenScope,
+  view::Perm,
 };
 
 use crate::{
@@ -45,7 +45,7 @@ pub async fn upgrade_now(
   auth: Auth,
   Path(name): Path<String>,
 ) -> ApiResult<ApplyResponse> {
-  auth.require(TokenScope::ApplyAll)?;
+  auth.require(Perm::Admin)?;
   let snap = snapshot::load(&s.db).await?;
   if !snap.world.servers.contains_key(&name) {
     return Err(crate::world::server_not_found(&name).into());
@@ -69,7 +69,7 @@ pub async fn upgrade_outdated(
   State(s): State<Arc<AppState>>,
   auth: Auth,
 ) -> ApiResult<Value> {
-  auth.require(TokenScope::ApplyAll)?;
+  auth.require(Perm::Admin)?;
   Ok(Json(match start_outdated(&s).await? {
     Some(r) => json!({ "run_id": r.run_id }),
     None => json!({ "run_id": null }),
@@ -177,7 +177,7 @@ pub struct UpgradeCore {
 
 /// `GET /api/version`
 pub async fn version(auth: Auth) -> ApiResult<Value> {
-  auth.require(TokenScope::Read)?;
+  auth.require(Perm::Read)?;
   Ok(Json(json!({ "version": VERSION, "build": BUILD })))
 }
 
@@ -188,7 +188,7 @@ pub async fn upgrade_core(
   auth: Auth,
   body: Option<Json<UpgradeCore>>,
 ) -> ApiResult<UpgradeResult> {
-  auth.require(TokenScope::ApplyAll)?;
+  auth.require(Perm::Admin)?;
   let then_agents = body.is_some_and(|b| b.then_agents);
   let id = std::fs::read_to_string("/proc/self/mountinfo")
     .ok()

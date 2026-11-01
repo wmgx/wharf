@@ -15,7 +15,7 @@ use futures_util::stream;
 use serde::Deserialize;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use wharf_api_types::{agent::AgentOp, view::TokenScope};
+use wharf_api_types::{agent::AgentOp, view::Perm};
 
 use crate::{
   api::{AppError, gateway_not_found, service_not_found},
@@ -47,7 +47,7 @@ pub async fn service(
   Path(name): Path<String>,
   Query(q): Query<FollowQuery>,
 ) -> Result<Response, AppError> {
-  auth.require(TokenScope::Read)?;
+  auth.require(Perm::Read)?;
   let snap = snapshot::load(&s.db).await?;
   let row = snap
     .world
@@ -63,7 +63,7 @@ pub async fn gateway(
   Path(name): Path<String>,
   Query(q): Query<FollowQuery>,
 ) -> Result<Response, AppError> {
-  auth.require(TokenScope::Read)?;
+  auth.require(Perm::Read)?;
   let snap = snapshot::load(&s.db).await?;
   let row = snap
     .world

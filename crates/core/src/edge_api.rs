@@ -13,8 +13,7 @@ use wharf_api_types::{
   plan::ApplyResponse,
   spec::EdgeKind,
   view::{
-    EdgeAppView, EdgeProjectView, EdgeScript, EdgeVersionView,
-    TokenScope,
+    EdgeAppView, EdgeProjectView, EdgeScript, EdgeVersionView, Perm,
   },
 };
 
@@ -50,7 +49,7 @@ pub async fn list(
   State(s): State<Arc<AppState>>,
   auth: Auth,
 ) -> ApiResult<Vec<EdgeAppView>> {
-  auth.require(TokenScope::Read)?;
+  auth.require(Perm::Read)?;
   let snap = snapshot::load(&s.db).await?;
   for name in snap.world.edge_apps.keys() {
     edge_sync::sync_if_stale(&s, &snap, name);
@@ -90,7 +89,7 @@ pub async fn show(
   Path(name): Path<String>,
   Query(q): Query<SyncQuery>,
 ) -> ApiResult<EdgeAppView> {
-  auth.require(TokenScope::Read)?;
+  auth.require(Perm::Read)?;
   let snap = synced(&s, &name, q.sync).await?;
   Ok(Json(
     views::edge_view(&snap, &name)
@@ -105,7 +104,7 @@ pub async fn discover(
   Path(account): Path<String>,
   Query(q): Query<SyncQuery>,
 ) -> ApiResult<Vec<EdgeProjectView>> {
-  auth.require(TokenScope::Read)?;
+  auth.require(Perm::Read)?;
   let snap = snapshot::load(&s.db).await?;
   edge::account(&snap, &account)?;
   let mut list = match snap.edge_accounts.get(&account) {
@@ -122,7 +121,7 @@ pub async fn accept(
   auth: Auth,
   Path(name): Path<String>,
 ) -> ApiResult<EdgeAppView> {
-  auth.require(TokenScope::ApplySafe)?;
+  auth.require(Perm::Apply)?;
   let snap = snapshot::load(&s.db).await?;
   if !snap.world.edge_apps.contains_key(&name) {
     return Err(edge_not_found(&name).into());
@@ -141,7 +140,7 @@ pub async fn script(
   auth: Auth,
   Path(name): Path<String>,
 ) -> ApiResult<EdgeScript> {
-  auth.require(TokenScope::Read)?;
+  auth.require(Perm::Read)?;
   let snap = snapshot::load(&s.db).await?;
   let spec = &snap
     .world
@@ -178,7 +177,7 @@ pub async fn versions(
   Path(name): Path<String>,
   Query(q): Query<SyncQuery>,
 ) -> ApiResult<Vec<EdgeVersionView>> {
-  auth.require(TokenScope::Read)?;
+  auth.require(Perm::Read)?;
   let snap = synced(&s, &name, q.sync).await?;
   Ok(Json(
     snap
@@ -203,7 +202,7 @@ pub async fn rollback(
   Path(name): Path<String>,
   Json(req): Json<RollbackRequest>,
 ) -> ApiResult<ApplyResponse> {
-  auth.require(TokenScope::ApplySafe)?;
+  auth.require(Perm::Apply)?;
   let snap = snapshot::load(&s.db).await?;
   let list = edge::versions(&snap, &name).await?;
   let version = edge::rollback_target(&list, req.version.as_deref())?;
@@ -223,7 +222,7 @@ pub async fn redeploy(
   auth: Auth,
   Path(name): Path<String>,
 ) -> ApiResult<ApplyResponse> {
-  auth.require(TokenScope::ApplySafe)?;
+  auth.require(Perm::Apply)?;
   let snap = snapshot::load(&s.db).await?;
   let app = snap
     .world

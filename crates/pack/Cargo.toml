@@ -1,0 +1,18 @@
+[package]
+name = "wharf-pack"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "把目录打成可复现的代码包：CLI 部署本机目录、agent 打包服务器目录共用"
+
+[dependencies]
+wharf-api-types.workspace = true
+
+flate2 = "=1.1.10"
+hex.workspace = true
+ignore = "=0.4.33"
+sha2.workspace = true
+tar = "=0.4.46"
+
+[dev-dependencies]
+tempfile = "3"
