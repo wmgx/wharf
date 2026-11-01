@@ -98,7 +98,8 @@ pub async fn live_states(state: &AppState, world: &World) -> LiveMap {
 }
 
 /// 后台每隔 [LIVE_EVERY] 查一次各服务器现状，`status` 读这份缓存，不用等最慢的那台。
-static LIVE_CACHE: Mutex<Option<(Instant, LiveMap)>> = Mutex::new(None);
+static LIVE_CACHE: Mutex<Option<(Instant, LiveMap)>> =
+  Mutex::new(None);
 const LIVE_EVERY: Duration = Duration::from_secs(5);
 /// 缓存比这更旧（后台卡住）时 `status` 自己现查。
 const LIVE_STALE: Duration = Duration::from_secs(30);
