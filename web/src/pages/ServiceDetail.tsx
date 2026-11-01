@@ -1,4 +1,4 @@
-import { ArrowRightLeftIcon, ArrowLeftIcon, ArrowUpRightIcon, EllipsisIcon, HammerIcon, HistoryIcon, LockIcon, LockOpenIcon, PencilIcon, PlayIcon, PlusIcon, RefreshCwIcon, RotateCwIcon, SquareIcon, Trash2Icon, XIcon } from "lucide-react";
+import { WrenchIcon, ArrowRightLeftIcon, ArrowLeftIcon, ArrowUpRightIcon, EllipsisIcon, HammerIcon, HistoryIcon, LockIcon, LockOpenIcon, PencilIcon, PlayIcon, PlusIcon, RefreshCwIcon, RotateCwIcon, SquareIcon, Trash2Icon, XIcon } from "lucide-react";
 import { Suspense, lazy, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { usePoll } from "@/api";
@@ -22,7 +22,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { useStatus } from "@/status";
 import { AddRoute } from "@/components/add-route";
-import type { DataKind, DeploymentView, ImportRecord, PortSpec, ServiceStatus, ServiceView } from "@/types";
+import type { DataKind, DeploymentView, RouteView, ImportRecord, PortSpec, ServiceStatus, ServiceView } from "@/types";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 
 const Terminal = lazy(() => import("@/components/Terminal"));
@@ -30,7 +30,7 @@ const Terminal = lazy(() => import("@/components/Terminal"));
 export function ServiceDetail() {
   const { name = "" } = useParams();
   const [params, setParams] = useSearchParams();
-  const tab = params.get("tab") ?? "logs";
+  const tab = params.get("tab") ?? "overview";
   const { status } = useStatus();
   const actions = useActions();
   const { data: svc, error } = usePoll<ServiceView>(`/api/services/${encodeURIComponent(name)}`, 5000);
@@ -96,18 +96,6 @@ export function ServiceDetail() {
               <PencilIcon />
               修改配置
             </Button>
-            {("image" in svc.spec.source || ("build" in svc.spec.source && !!svc.spec.source.build.git)) && (
-              <Button variant="outline" onClick={() => actions.plan({ title: `检查 ${name} 的更新`, changes: [{ op: "refresh_images", name }] })}>
-                <RefreshCwIcon />
-                检查更新
-              </Button>
-            )}
-            {built && (
-              <Button variant="outline" onClick={() => actions.rebuild(name)}>
-                    <HammerIcon />
-                    重新构建
-                  </Button>
-            )}
             {svc.spec.stopped ? (
               <Button variant="outline" onClick={() => actions.setStopped(svc, false)}>
                 <PlayIcon />
@@ -119,17 +107,29 @@ export function ServiceDetail() {
                 重启
               </Button>
             )}
-            <Button variant="outline" onClick={() => actions.redeploy(svc)}>
-              <RefreshCwIcon />
-              检查并修复
-            </Button>
             <DropdownMenu modal={false}>
               <DropdownMenuTrigger asChild>
                 <Button variant="outline" size="icon" aria-label="更多操作">
                   <EllipsisIcon />
                 </Button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-44">
+              <DropdownMenuContent align="end" className="w-48">
+                {("image" in svc.spec.source || ("build" in svc.spec.source && !!svc.spec.source.build.git)) && (
+                  <DropdownMenuItem onSelect={() => actions.plan({ title: `检查 ${name} 的更新`, changes: [{ op: "refresh_images", name }] })}>
+                    <RefreshCwIcon />
+                    检查更新
+                  </DropdownMenuItem>
+                )}
+                {built && (
+                  <DropdownMenuItem onSelect={() => actions.rebuild(name)}>
+                    <HammerIcon />
+                    重新构建
+                  </DropdownMenuItem>
+                )}
+                <DropdownMenuItem onSelect={() => actions.redeploy(svc)}>
+                  <WrenchIcon />
+                  检查并修复
+                </DropdownMenuItem>
                 {!svc.spec.stopped && (
                   <DropdownMenuItem onSelect={() => actions.setStopped(svc, true)}>
                     <SquareIcon />
@@ -138,7 +138,7 @@ export function ServiceDetail() {
                 )}
                 <DropdownMenuItem onSelect={() => actions.rollback(name)}>
                   <HistoryIcon />
-                  回滚到上一个版本
+                  回到上一个版本
                 </DropdownMenuItem>
                 <DropdownMenuItem onSelect={() => actions.move(svc)}>
                   <ArrowRightLeftIcon />
@@ -155,158 +155,251 @@ export function ServiceDetail() {
         }
       />
 
-      <div className="grid gap-3 md:grid-cols-[1.4fr_1fr]">
-        <Card className="gap-4 py-5 shadow-xs">
-          <CardHeader className="px-5">
-            <CardTitle className="text-sm font-medium text-muted-foreground">访问</CardTitle>
-          </CardHeader>
-          <CardContent className="px-5">
-            <dl className="grid grid-cols-[88px_minmax(0,1fr)] gap-x-4 gap-y-3 text-sm">
-              <dt className="text-muted-foreground">域名</dt>
-              <dd className="grid min-w-0 grid-cols-1 gap-1">
-                {routes.map((r) => (
-                  <div key={r.id} className="flex items-center justify-between gap-2">
-                    <a className="inline-flex min-w-0 items-center gap-1 font-mono text-[13px] text-primary hover:underline" href={r.url} target="_blank" rel="noreferrer">
-                      <span className="truncate">{r.url}</span>
-                      <ArrowUpRightIcon className="size-3.5 shrink-0" />
-                    </a>
-                    <span className="flex shrink-0 items-center">
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <Button
-                          variant="ghost"
-                          size="icon-xs"
-                          aria-label={r.spec.auth ? `关闭 ${r.spec.hostname} 的登录保护` : `给 ${r.spec.hostname} 开启登录保护`}
-                          className={r.spec.auth ? "text-primary" : "text-muted-foreground"}
-                          onClick={() =>
-                            actions.plan({
-                              title: `${r.spec.auth ? "关闭" : "开启"} ${r.spec.hostname} 的登录保护`,
-                              changes: [{ op: "upsert_route", spec: { ...r.spec, auth: !r.spec.auth } }],
-                            })
-                          }
-                        >
-                          {r.spec.auth ? <LockIcon /> : <LockOpenIcon />}
-                        </Button>
-                      </TooltipTrigger>
-                      <TooltipContent>{r.spec.auth ? "关闭登录保护" : "开启登录保护"}</TooltipContent>
-                    </Tooltip>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <Button
-                          variant="ghost"
-                          size="icon-xs"
-                          aria-label={`移除 ${r.spec.hostname}`}
-                          onClick={() => actions.plan({ title: `移除 ${r.spec.hostname}`, changes: [{ op: "remove_route", hostname: r.spec.hostname }] })}
-                        >
-                          <XIcon />
-                        </Button>
-                      </TooltipTrigger>
-                      <TooltipContent>移除</TooltipContent>
-                    </Tooltip>
-                    </span>
-                  </div>
-                ))}
-                <Button variant="outline" size="xs" className="w-fit" onClick={() => setAddingRoute(true)}>
-                  <PlusIcon />
-                  加域名
-                </Button>
-              </dd>
-              <dt className="text-muted-foreground">内网地址</dt>
-              <dd className="font-mono text-[13px]">
-                {Object.entries(svc.addresses).map(([p, a]) => (
-                  <div key={p}>
-                    {p} → {a}
-                  </div>
-                ))}
-                {Object.keys(svc.addresses).length === 0 && "-"}
-              </dd>
-              <dt className="text-muted-foreground">环境变量</dt>
-              <dd className="flex flex-wrap gap-1">
-                {Object.keys(svc.spec.env ?? {}).map((k) => (
-                  <Badge key={k} variant="secondary" className="font-mono font-normal">
-                    {k}
-                  </Badge>
-                ))}
-                {!Object.keys(svc.spec.env ?? {}).length && "-"}
-              </dd>
-              {svc.import && (
-                <>
-                  <dt className="text-muted-foreground">导入</dt>
-                  <dd className="text-xs">{importText(svc.import)}</dd>
-                </>
-              )}
-              {!!svc.data?.length && (
-                <>
-                  <dt className="text-muted-foreground">数据</dt>
-                  <dd className="grid gap-1">
-                    {svc.data.map((m, i) => (
-                      <div key={i} className="flex flex-wrap items-center gap-2 font-mono text-xs">
-                        <span>{m.source || "匿名卷"}</span>
-                        <span className="text-muted-foreground">→ {m.target}</span>
-                        <Badge variant={m.kind === "managed" ? "secondary" : "outline"} className={m.kind === "managed" ? "font-normal" : "border-warning/50 font-normal text-warning"}>
-                          {DATA_KIND[m.kind]}
-                        </Badge>
-                      </div>
-                    ))}
-                  </dd>
-                </>
-              )}
-            </dl>
-          </CardContent>
-        </Card>
-        <Card className="gap-4 py-5 shadow-xs">
-          <CardHeader className="px-5">
-            <CardTitle className="text-sm font-medium text-muted-foreground">容器</CardTitle>
-          </CardHeader>
-          <CardContent className="grid gap-2.5 px-5 text-sm">
-            {svc.containers?.map((c) => (
-              <div key={c.name} className="flex items-center gap-3">
-                <span className="w-24 truncate text-muted-foreground">{c.service}</span>
-                <Dot tone={c.state === "running" ? "ok" : "bad"} />
-                <span>{c.status || c.state}</span>
-              </div>
-            ))}
-            {!svc.containers?.length && <span className="text-muted-foreground">{svc.status?.error ?? "没有容器"}</span>}
-          </CardContent>
-        </Card>
-      </div>
-
-      <Tabs value={tab} onValueChange={(t) => setParams({ tab: t }, { replace: true })} className="mt-8">
-        <TabsList>
-          <TabsTrigger value="logs">日志</TabsTrigger>
-          <TabsTrigger value="metrics">资源</TabsTrigger>
-          <TabsTrigger value="terminal">终端</TabsTrigger>
-          <TabsTrigger value="history">部署历史</TabsTrigger>
-          <TabsTrigger value="files">文件</TabsTrigger>
-          <TabsTrigger value="backups">备份</TabsTrigger>
-          <TabsTrigger value="config">配置</TabsTrigger>
-        </TabsList>
-        <TabsContent value="logs" className="mt-3">
+      <Tabs value={tab} onValueChange={(t) => setParams(t === "overview" ? {} : { tab: t }, { replace: true })}>
+        <div className="-mx-1 overflow-x-auto px-1">
+          <TabsList>
+            <TabsTrigger value="overview">概览</TabsTrigger>
+            <TabsTrigger value="domains">域名{routes.length > 0 && <span className="ml-1 text-muted-foreground">{routes.length}</span>}</TabsTrigger>
+            <TabsTrigger value="config">配置</TabsTrigger>
+            <TabsTrigger value="logs">日志</TabsTrigger>
+            <TabsTrigger value="metrics">资源</TabsTrigger>
+            <TabsTrigger value="history">版本</TabsTrigger>
+            <TabsTrigger value="data">数据与备份</TabsTrigger>
+            <TabsTrigger value="files">文件</TabsTrigger>
+            <TabsTrigger value="terminal">终端</TabsTrigger>
+          </TabsList>
+        </div>
+        <TabsContent value="overview" className="mt-4">
+          <Overview svc={svc} routes={routes} onTab={(t) => setParams({ tab: t }, { replace: true })} />
+        </TabsContent>
+        <TabsContent value="domains" className="mt-4">
+          <DomainsTab routes={routes} onAdd={() => setAddingRoute(true)} />
+        </TabsContent>
+        <TabsContent value="config" className="mt-4">
+          <ConfigTab svc={svc} onEdit={() => setEditing(true)} />
+        </TabsContent>
+        <TabsContent value="logs" className="mt-4">
           <LogStream path={`/api/services/${encodeURIComponent(name)}/logs/stream`} />
         </TabsContent>
-        <TabsContent value="metrics" className="mt-3">
+        <TabsContent value="metrics" className="mt-4">
           <MetricsPanel subject={name} kind="svc" title="" />
         </TabsContent>
-        <TabsContent value="terminal" className="mt-3">
-          <TerminalTab svc={svc} />
-        </TabsContent>
-        <TabsContent value="history" className="mt-3">
+        <TabsContent value="history" className="mt-4">
           <History name={name} />
         </TabsContent>
-        <TabsContent value="files" className="mt-3">
+        <TabsContent value="data" className="mt-4">
+          <DataTab svc={svc} />
+        </TabsContent>
+        <TabsContent value="files" className="mt-4">
           <Files name={name} />
         </TabsContent>
-        <TabsContent value="backups" className="mt-3">
-          <Backups svc={svc} />
-        </TabsContent>
-        <TabsContent value="config" className="mt-3">
-          <CodeBlock>{JSON.stringify(svc.spec, null, 2)}</CodeBlock>
+        <TabsContent value="terminal" className="mt-4">
+          <TerminalTab svc={svc} />
         </TabsContent>
       </Tabs>
 
       <EditService svc={svc} open={editing} onClose={() => setEditing(false)} />
       <AddRoute service={name} open={addingRoute} onClose={() => setAddingRoute(false)} />
     </>
+  );
+}
+
+/** 概览：能不能打开、跑在哪、容器怎么样。细节去各标签。 */
+function Overview({ svc, routes, onTab }: { svc: ServiceView; routes: RouteView[]; onTab: (t: string) => void }) {
+  return (
+    <div className="grid gap-3 md:grid-cols-[1.4fr_1fr]">
+      <Card className="gap-4 py-5 shadow-xs">
+        <CardHeader className="px-5">
+          <CardTitle className="text-sm font-medium text-muted-foreground">访问</CardTitle>
+        </CardHeader>
+        <CardContent className="px-5">
+          <dl className="grid grid-cols-[88px_minmax(0,1fr)] gap-x-4 gap-y-3 text-sm">
+            <dt className="text-muted-foreground">域名</dt>
+            <dd className="grid min-w-0 gap-1">
+              {routes.map((r) => (
+                <a key={r.id} className="inline-flex min-w-0 items-center gap-1 font-mono text-[13px] text-primary hover:underline" href={r.url} target="_blank" rel="noreferrer">
+                  {r.spec.auth && <LockIcon className="size-3.5 shrink-0 text-muted-foreground" />}
+                  <span className="truncate">{r.url}</span>
+                  <ArrowUpRightIcon className="size-3.5 shrink-0" />
+                </a>
+              ))}
+              {routes.length === 0 && (
+                <button type="button" className="w-fit text-left text-muted-foreground hover:text-foreground" onClick={() => onTab("domains")}>
+                  只在内网访问 · <span className="text-primary">加域名</span>
+                </button>
+              )}
+            </dd>
+            <dt className="text-muted-foreground">内网地址</dt>
+            <dd className="font-mono text-[13px]">
+              {Object.entries(svc.addresses).map(([p, a]) => (
+                <div key={p}>
+                  {p} → {a}
+                </div>
+              ))}
+              {Object.keys(svc.addresses).length === 0 && "-"}
+            </dd>
+            <dt className="text-muted-foreground">数据</dt>
+            <dd>
+              <button type="button" className="text-left hover:underline" onClick={() => onTab("data")}>
+                {dataSummary(svc)}
+              </button>
+            </dd>
+          </dl>
+        </CardContent>
+      </Card>
+      <Card className="gap-4 py-5 shadow-xs">
+        <CardHeader className="px-5">
+          <CardTitle className="text-sm font-medium text-muted-foreground">容器</CardTitle>
+        </CardHeader>
+        <CardContent className="grid gap-2.5 px-5 text-sm">
+          {svc.containers?.map((c) => (
+            <div key={c.name} className="flex items-center gap-3">
+              <span className="w-24 truncate text-muted-foreground">{c.service}</span>
+              <Dot tone={c.state === "running" ? "ok" : "bad"} />
+              <span>{c.status || c.state}</span>
+            </div>
+          ))}
+          {!svc.containers?.length && <span className="text-muted-foreground">{svc.status?.error ?? "没有容器"}</span>}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+function dataSummary(svc: ServiceView): string {
+  const data = svc.data ?? [];
+  if (data.length === 0) return "没有数据卷";
+  const outside = data.filter((m) => m.kind !== "managed").length;
+  return outside ? `${data.length} 处挂载，${outside} 处不在备份范围` : `${data.length} 处挂载`;
+}
+
+function DomainsTab({ routes, onAdd }: { routes: RouteView[]; onAdd: () => void }) {
+  const actions = useActions();
+  return (
+    <div className="grid gap-3">
+      {routes.length === 0 ? (
+        <Empty>还没有域名，现在只能从内网访问。</Empty>
+      ) : (
+        <div className="divide-y overflow-hidden rounded-xl border bg-card shadow-xs">
+          {routes.map((r) => (
+            <div key={r.id} className="flex flex-wrap items-center gap-3 px-4 py-3">
+              <a className="inline-flex min-w-0 flex-1 items-center gap-1 font-mono text-sm text-primary hover:underline" href={r.url} target="_blank" rel="noreferrer">
+                <span className="truncate">{r.url}</span>
+                <ArrowUpRightIcon className="size-3.5 shrink-0" />
+              </a>
+              <span className="text-xs text-muted-foreground">{r.gateway ? `经 ${r.gateway}` : ""}{r.spec.link === "tunnel" ? " · 反向隧道" : ""}</span>
+              <Button
+                variant="ghost"
+                size="xs"
+                onClick={() =>
+                  actions.plan({
+                    title: `${r.spec.auth ? "关闭" : "开启"} ${r.spec.hostname} 的登录保护`,
+                    changes: [{ op: "upsert_route", spec: { ...r.spec, auth: !r.spec.auth } }],
+                  })
+                }
+              >
+                {r.spec.auth ? <LockIcon /> : <LockOpenIcon />}
+                {r.spec.auth ? "已开登录保护" : "开启登录保护"}
+              </Button>
+              <Button
+                variant="ghost"
+                size="xs"
+                onClick={() => actions.plan({ title: `移除 ${r.spec.hostname}`, changes: [{ op: "remove_route", hostname: r.spec.hostname }] })}
+              >
+                <XIcon />
+                移除
+              </Button>
+            </div>
+          ))}
+        </div>
+      )}
+      <Button variant="outline" className="w-fit" onClick={onAdd}>
+        <PlusIcon />
+        加域名
+      </Button>
+    </div>
+  );
+}
+
+/** 配置：人看得懂的样子；原始 JSON 折叠在下面。 */
+function ConfigTab({ svc, onEdit }: { svc: ServiceView; onEdit: () => void }) {
+  const env = Object.entries(svc.spec.env ?? {});
+  return (
+    <div className="grid gap-4">
+      <Card className="gap-4 py-5 shadow-xs">
+        <CardContent className="px-5">
+          <dl className="grid grid-cols-[88px_minmax(0,1fr)] gap-x-4 gap-y-3 text-sm">
+            <dt className="text-muted-foreground">来源</dt>
+            <dd className="font-mono text-[13px] break-all">{sourceLabel(svc.spec.source)}</dd>
+            <dt className="text-muted-foreground">服务器</dt>
+            <dd>
+              <ServerTag name={svc.spec.server} />
+            </dd>
+            <dt className="text-muted-foreground">端口</dt>
+            <dd className="font-mono text-[13px]">
+              {(svc.spec.ports ?? []).map((p) => (
+                <div key={p.name}>
+                  {p.name}：{p.container != null ? `容器 ${p.container} → ` : ""}宿主机 {svc.host_ports[p.name] ?? p.host ?? "自动"}
+                </div>
+              ))}
+              {!svc.spec.ports?.length && "-"}
+            </dd>
+            <dt className="text-muted-foreground">环境变量</dt>
+            <dd className="grid gap-0.5 font-mono text-[13px]">
+              {env.map(([k, v]) => (
+                <div key={k} className="truncate">
+                  {k}={/\[\[.+\]\]/.test(v) ? v : "••••"}
+                </div>
+              ))}
+              {env.length === 0 && "-"}
+            </dd>
+            {svc.import && (
+              <>
+                <dt className="text-muted-foreground">导入</dt>
+                <dd className="text-xs">{importText(svc.import)}</dd>
+              </>
+            )}
+          </dl>
+        </CardContent>
+      </Card>
+      <Button variant="outline" className="w-fit" onClick={onEdit}>
+        <PencilIcon />
+        修改配置
+      </Button>
+      <details className="text-sm">
+        <summary className="cursor-pointer text-muted-foreground">原始配置（JSON）</summary>
+        <CodeBlock className="mt-2">{JSON.stringify(svc.spec, null, 2)}</CodeBlock>
+      </details>
+    </div>
+  );
+}
+
+function DataTab({ svc }: { svc: ServiceView }) {
+  return (
+    <div className="grid gap-6">
+      <div>
+        <h3 className="mb-2 text-sm font-medium text-muted-foreground">挂载</h3>
+        {!svc.data?.length ? (
+          <Empty>这个服务没有数据卷</Empty>
+        ) : (
+          <div className="divide-y overflow-hidden rounded-xl border bg-card shadow-xs">
+            {svc.data.map((m, i) => (
+              <div key={i} className="flex flex-wrap items-center gap-2 px-4 py-2.5 font-mono text-xs">
+                <span>{m.source || "匿名卷"}</span>
+                <span className="text-muted-foreground">→ {m.target}</span>
+                <Badge variant={m.kind === "managed" ? "secondary" : "outline"} className={m.kind === "managed" ? "ml-auto font-normal" : "ml-auto border-warning/50 font-normal text-warning"}>
+                  {DATA_KIND[m.kind]}
+                </Badge>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+      <div>
+        <h3 className="mb-2 text-sm font-medium text-muted-foreground">备份</h3>
+        <Backups svc={svc} />
+      </div>
+    </div>
   );
 }
 

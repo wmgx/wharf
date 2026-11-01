@@ -1,5 +1,5 @@
-import { AnchorIcon, ArrowRightLeftIcon, ArrowUpCircleIcon, BoxIcon, BoxesIcon, CableIcon, GlobeIcon, HardDriveIcon, HistoryIcon, LogOutIcon, MoonIcon, NetworkIcon, PlusIcon, RefreshCwIcon, ScrollTextIcon, SearchIcon, ServerIcon, SettingsIcon, SunIcon, Trash2Icon, WaypointsIcon } from "lucide-react";
-import { useEffect, useState } from "react";
+import { AnchorIcon, ArrowRightLeftIcon, ArrowUpCircleIcon, BoxIcon, BoxesIcon, CableIcon, CloudIcon, DownloadIcon, GlobeIcon, HammerIcon, HardDriveIcon, HistoryIcon, KeyRoundIcon, LockIcon, LogOutIcon, MoonIcon, NetworkIcon, PencilIcon, PlayIcon, PlusIcon, RefreshCwIcon, RotateCwIcon, ScrollTextIcon, SearchIcon, ServerIcon, SettingsIcon, SquareIcon, SunIcon, TerminalIcon, Trash2Icon, WaypointsIcon, WrenchIcon } from "lucide-react";
+import { useEffect, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import {
@@ -49,6 +49,12 @@ export function CommandMenu({ onLogout }: { onLogout: () => void }) {
     fn();
   };
   const services = status?.services ?? [];
+  const op = (key: string, value: string, icon: ReactNode, label: string, fn: () => void) => (
+    <CommandItem key={key} value={value} onSelect={() => run(fn)}>
+      {icon}
+      {label}
+    </CommandItem>
+  );
   // 针对每个服务的操作比较多，输入了内容再列出来，默认界面保持简洁。
   const showOps = search.trim().length > 0;
 
@@ -135,54 +141,58 @@ export function CommandMenu({ onLogout }: { onLogout: () => void }) {
           {showOps && (
             <>
               <CommandSeparator />
-              <CommandGroup heading="操作">
-                {services.flatMap((s) => [
-                  <CommandItem key={`logs-${s.name}`} value={`日志 看 logs ${s.name}`} onSelect={() => run(() => nav(`/services/${s.name}?tab=logs`))}>
-                    <ScrollTextIcon />
-                    看 {s.name} 的日志
-                  </CommandItem>,
-                  <CommandItem key={`redeploy-${s.name}`} value={`重新部署 修复 deploy ${s.name}`} onSelect={() => run(() => actions.redeploy(s))}>
-                    <RefreshCwIcon />
-                    重新部署 {s.name}
-                  </CommandItem>,
-                  <CommandItem key={`rollback-${s.name}`} value={`回滚 rollback ${s.name}`} onSelect={() => run(() => actions.rollback(s.name))}>
-                    <HistoryIcon />
-                    回滚 {s.name} 到上一个版本
-                  </CommandItem>,
-                  <CommandItem key={`move-${s.name}`} value={`迁移 move ${s.name}`} onSelect={() => run(() => actions.move(s))}>
-                    <ArrowRightLeftIcon />
-                    迁移 {s.name} 到其他服务器
-                  </CommandItem>,
-                  <CommandItem key={`rm-${s.name}`} value={`删除 remove ${s.name}`} onSelect={() => run(() => actions.remove(s.name))}>
-                    <Trash2Icon />
-                    删除 {s.name}
-                  </CommandItem>,
-                ])}
+              <CommandGroup heading="服务操作">
+                {services.flatMap((s) => {
+                  const go = (tab: string) => run(() => nav(`/services/${s.name}?tab=${tab}`));
+                  const built = "build" in s.spec.source;
+                  const updatable = "image" in s.spec.source || ("build" in s.spec.source && !!s.spec.source.build.git);
+                  return [
+                    op(`logs-${s.name}`, `日志 看 logs ${s.name}`, <ScrollTextIcon />, `看 ${s.name} 的日志`, () => go("logs")),
+                    op(`cfg-${s.name}`, `修改配置 环境变量 端口 config edit ${s.name}`, <PencilIcon />, `修改 ${s.name} 的配置`, () => go("config")),
+                    op(`dom-${s.name}`, `加域名 域名 domain route ${s.name}`, <GlobeIcon />, `${s.name} 的域名`, () => go("domains")),
+                    op(`data-${s.name}`, `数据 备份 恢复 backup ${s.name}`, <HardDriveIcon />, `${s.name} 的数据与备份`, () => go("data")),
+                    op(`term-${s.name}`, `终端 容器 shell terminal ${s.name}`, <TerminalIcon />, `进入 ${s.name} 的容器终端`, () => go("terminal")),
+                    s.spec.stopped
+                      ? op(`start-${s.name}`, `启动 start ${s.name}`, <PlayIcon />, `启动 ${s.name}`, () => actions.setStopped(s, false))
+                      : op(`restart-${s.name}`, `重启 restart ${s.name}`, <RotateCwIcon />, `重启 ${s.name}`, () => actions.restart(s.name)),
+                    !s.spec.stopped && op(`stop-${s.name}`, `停止 stop ${s.name}`, <SquareIcon />, `停止 ${s.name}`, () => actions.setStopped(s, true)),
+                    updatable && op(`upd-${s.name}`, `检查更新 新版本 update ${s.name}`, <RefreshCwIcon />, `检查 ${s.name} 的更新`, () => actions.plan({ title: `检查 ${s.name} 的更新`, changes: [{ op: "refresh_images", name: s.name }] })),
+                    built && op(`rebuild-${s.name}`, `重新构建 rebuild ${s.name}`, <HammerIcon />, `重新构建 ${s.name}`, () => actions.rebuild(s.name)),
+                    op(`fix-${s.name}`, `检查并修复 重新部署 redeploy ${s.name}`, <WrenchIcon />, `检查并修复 ${s.name}`, () => actions.redeploy(s)),
+                    op(`rollback-${s.name}`, `回滚 版本 rollback ${s.name}`, <HistoryIcon />, `${s.name} 回到上一个版本`, () => actions.rollback(s.name)),
+                    op(`move-${s.name}`, `迁移 move ${s.name}`, <ArrowRightLeftIcon />, `迁移 ${s.name} 到其他服务器`, () => actions.move(s)),
+                    op(`rm-${s.name}`, `删除 remove ${s.name}`, <Trash2Icon />, `删除 ${s.name}`, () => actions.remove(s.name)),
+                  ].filter(Boolean);
+                })}
+              </CommandGroup>
+              <CommandGroup heading="服务器操作">
+                {(status?.servers ?? []).flatMap((v) => {
+                  const go = (tab: string) => run(() => nav(`/servers/${encodeURIComponent(v.name)}?tab=${tab}`));
+                  return [
+                    op(`hterm-${v.name}`, `宿主机终端 terminal ${v.name}`, <TerminalIcon />, `打开 ${v.name} 的宿主机终端`, () => run(() => nav(`/servers/${encodeURIComponent(v.name)}/terminal`))),
+                    op(`sys-${v.name}`, `系统 更新 apt 磁盘 system ${v.name}`, <HardDriveIcon />, `${v.name} 的系统和磁盘`, () => go("system")),
+                    op(`set-${v.name}`, `服务器设置 镜像源 代理 settings ${v.name}`, <SettingsIcon />, `${v.name} 的设置`, () => go("settings")),
+                    v.online && op(`prune-${v.name}`, `清理镜像 磁盘 prune ${v.name}`, <Trash2Icon />, `清理 ${v.name} 上没在用的镜像`, () => actions.prune(v.name)),
+                    v.agent_outdated && op(`agent-${v.name}`, `升级 agent upgrade ${v.name}`, <ArrowUpCircleIcon />, `升级 ${v.name} 的 agent`, () => actions.upgradeAgent(v.name)),
+                  ].filter(Boolean);
+                })}
               </CommandGroup>
             </>
           )}
           <CommandSeparator />
+          <CommandGroup heading="新建">
+            {op("n-svc", "部署服务 新建服务 new deploy", <PlusIcon />, "部署服务", () => nav("/services?new=1"))}
+            {op("n-imp", "导入已有容器 import", <DownloadIcon />, "导入服务器上已有的容器", () => nav("/services?import=1"))}
+            {op("n-edge", "导入 Workers Pages cloudflare edge", <CloudIcon />, "导入 Cloudflare Workers / Pages", () => nav("/services?edge=1"))}
+            {op("n-gw", "新建入口 网关 new gateway", <WaypointsIcon />, "新建入口", () => nav("/domains?tab=entries&new=1"))}
+            {op("n-acc", "加 Cloudflare 账号 account", <KeyRoundIcon />, "加 Cloudflare 账号", () => nav("/settings?add=account"))}
+          </CommandGroup>
+          <CommandSeparator />
           <CommandGroup heading="其他">
-            <CommandItem value="新建服务 部署 new" onSelect={() => run(() => nav("/services?new=1"))}>
-              <PlusIcon />
-              新建服务
-            </CommandItem>
-            <CommandItem value="新建入口 网关 new gateway" onSelect={() => run(() => nav("/domains?tab=entries&new=1"))}>
-              <PlusIcon />
-              新建网关
-            </CommandItem>
-            <CommandItem value="升级 Wharf upgrade 控制面 agent" onSelect={() => run(actions.upgrade)}>
-              <ArrowUpCircleIcon />
-              升级 Wharf
-            </CommandItem>
-            <CommandItem value="切换主题 深色 浅色 theme" onSelect={() => run(toggle)}>
-              {theme === "light" ? <MoonIcon /> : <SunIcon />}
-              {theme === "light" ? "切换到深色" : "切换到浅色"}
-            </CommandItem>
-            <CommandItem value="退出登录 logout" onSelect={() => run(onLogout)}>
-              <LogOutIcon />
-              退出登录
-            </CommandItem>
+            {op("o-auth", "登录保护账号 basic auth 密码", <LockIcon />, "登录保护账号", actions.basicAuth)}
+            {op("o-up", "升级 Wharf upgrade 控制面 agent", <ArrowUpCircleIcon />, "升级 Wharf", actions.upgrade)}
+            {op("o-theme", "切换主题 深色 浅色 theme", theme === "light" ? <MoonIcon /> : <SunIcon />, theme === "light" ? "切换到深色" : "切换到浅色", toggle)}
+            {op("o-out", "退出登录 logout", <LogOutIcon />, "退出登录", onLogout)}
           </CommandGroup>
         </CommandList>
       </CommandDialog>

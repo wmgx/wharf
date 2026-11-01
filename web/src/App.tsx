@@ -8,6 +8,7 @@ import { ActionsProvider } from "./components/actions";
 import { AppSidebar } from "./components/app-sidebar";
 import { Boundary } from "./components/Boundary";
 import { CommandMenu } from "./components/command-menu";
+import { NewMenu } from "./components/new-menu";
 import { Problems } from "./components/problems";
 import { Separator } from "./components/ui/separator";
 import { SidebarInset, SidebarProvider, SidebarTrigger } from "./components/ui/sidebar";
@@ -96,6 +97,7 @@ function Shell({ username, onLogout }: { username: string; onLogout: () => void 
               <div className="ml-auto flex min-w-0 flex-1 items-center justify-end gap-2">
                 <Problems />
                 <CommandMenu onLogout={onLogout} />
+                <NewMenu />
               </div>
             </header>
             <div className="mx-auto w-full max-w-6xl flex-1 px-4 py-8 md:px-8">

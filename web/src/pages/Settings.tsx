@@ -1,3 +1,4 @@
+import { useSearchParams } from "react-router-dom";
 import { useActions } from "@/components/actions";
 import { ArrowUpCircleIcon, LockIcon } from "lucide-react";
 import { CloudIcon, KeyRoundIcon, PlusIcon, RefreshCwIcon, Trash2Icon } from "lucide-react";
@@ -20,7 +21,9 @@ import { Tokens } from "./tokens";
 export function Settings() {
   const actions = useActions();
   const { data, error, refresh } = usePoll<AccountView[]>("/api/accounts", 30000);
-  const [adding, setAdding] = useState(false);
+  const [params, setParams] = useSearchParams();
+  const [addingNow, setAdding] = useState(false);
+  const adding = addingNow || params.get("add") === "account";
   const [removing, setRemoving] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [importing, setImporting] = useState<string | null>(null);
@@ -145,9 +148,13 @@ export function Settings() {
       {adding && (
         <AddAccount
           taken={(data ?? []).map((a) => a.name)}
-          onClose={() => setAdding(false)}
+          onClose={() => {
+            setAdding(false);
+            setParams({});
+          }}
           onAdded={() => {
             setAdding(false);
+            setParams({});
             refresh();
           }}
         />

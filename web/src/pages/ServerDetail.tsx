@@ -1,6 +1,11 @@
-import { ArrowLeftIcon, ArrowUpCircleIcon, RefreshCwIcon, SettingsIcon, TerminalIcon, Trash2Icon } from "lucide-react";
+import { ArrowLeftIcon, ArrowUpCircleIcon, RefreshCwIcon, TerminalIcon, Trash2Icon } from "lucide-react";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { toast } from "sonner";
+import { Field, formatEnv, parseEnv } from "@/components/fields";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/api";
 import { useActions } from "@/components/actions";
 import { MetricsPanel } from "@/components/metrics";
@@ -10,7 +15,6 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useStatus } from "@/status";
@@ -70,7 +74,8 @@ export function ServerDetail() {
   const { name = "" } = useParams();
   const { status } = useStatus();
   const actions = useActions();
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [params, setParams] = useSearchParams();
+  const tab = params.get("tab") ?? "overview";
   const server = status?.servers.find((s) => s.name === name);
   const host = useHostInfo(name, !!server?.online);
 
@@ -106,221 +111,311 @@ export function ServerDetail() {
             <StatusBadge tone={serverTone(server)}>{serverText(server)}</StatusBadge>
           </>
         }
-        description={!server.online && server.last_seen ? `最后在线 ${ago(server.last_seen)}` : undefined}
+        description={!server.online && server.last_seen ? `最后在线 ${ago(server.last_seen)}` : r ? `${r.os} · ${r.arch}` : undefined}
         actions={
-          <>
-            {terminalStatus ? (
-              <Button variant="outline" size="sm" disabled>
-                <TerminalIcon />
-                {terminalStatus}
-              </Button>
-            ) : (
-              <Button asChild variant="outline" size="sm">
-                <Link to={`/servers/${encodeURIComponent(name)}/terminal`}>
-                  <TerminalIcon />
-                  终端
-                </Link>
-              </Button>
-            )}
-            <Button variant="outline" size="sm" onClick={() => setSettingsOpen(true)}>
-              <SettingsIcon />
-              设置
+          server.agent_outdated && (
+            <Button variant="outline" size="sm" onClick={() => actions.upgradeAgent(name)}>
+              <ArrowUpCircleIcon />
+              升级 agent
             </Button>
-            {server.agent_outdated && (
-              <Button variant="outline" size="sm" onClick={() => actions.upgradeAgent(name)}>
-                <ArrowUpCircleIcon />
-                升级 agent
-              </Button>
-            )}
-            <Button variant="outline" size="sm" disabled={!server.online} onClick={() => actions.prune(name)}>
-              <Trash2Icon />
-              清理镜像
-            </Button>
-            <Button variant="ghost" size="sm" disabled={!server.online || host.loading} onClick={host.load}>
-              <RefreshCwIcon className={host.loading ? "animate-spin" : undefined} />
-              刷新
-            </Button>
-          </>
+          )
         }
       />
 
-      <ServerSettingsDialog server={server} open={settingsOpen} onOpenChange={setSettingsOpen} />
+      <Tabs value={tab} onValueChange={(t) => setParams(t === "overview" ? {} : { tab: t }, { replace: true })}>
+        <TabsList>
+          <TabsTrigger value="overview">概览</TabsTrigger>
+          <TabsTrigger value="metrics">资源</TabsTrigger>
+          <TabsTrigger value="system">系统</TabsTrigger>
+          <TabsTrigger value="terminal">终端</TabsTrigger>
+          <TabsTrigger value="settings">设置</TabsTrigger>
+        </TabsList>
 
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <Stat label="系统" value={info?.os ?? r?.os} sub={info ? `内核 ${info.kernel}` : r?.arch} loading={!info && host.loading} />
-        <Stat
-          label="负载"
-          value={info ? info.load.map((l) => l.toFixed(2)).join(" ") : undefined}
-          sub={info ? `${info.cpus} 核 · 已运行 ${uptime(info.uptime_secs)}` : undefined}
-          loading={!info && host.loading}
-        />
-        <Stat
-          label="内存"
-          value={info ? `可用 ${size(info.mem_available)}` : undefined}
-          sub={info ? `共 ${size(info.mem_total)}` : undefined}
-          used={info ? 1 - info.mem_available / info.mem_total : undefined}
-          loading={!info && host.loading}
-        />
-        <Stat
-          label="磁盘"
-          value={disk ? `剩 ${size(disk.free)}` : undefined}
-          sub={disk ? `共 ${size(disk.total)}` : undefined}
-          used={disk ? 1 - disk.free / disk.total : undefined}
-        />
-      </div>
-
-      <dl className="mt-4 grid gap-x-6 gap-y-1 text-sm sm:grid-cols-[auto_1fr]">
-        <Row k="公网 IP" v={server.public_ip} />
-        <Row k="内网地址" v={server.private_addr?.ip} />
-        <Row k="docker" v={r?.docker_version && `${r.docker_version}${r.compose_version ? ` · compose ${r.compose_version}` : ""}`} />
-        <Row k="agent" v={r && `${r.version}${r.build ? ` · ${r.build}` : ""}`} />
-      </dl>
-
-      <MetricsPanel subject={name} kind="host" />
-
-      <ErrorNote error={host.error} />
-
-      {info && (
-        <>
-          <SectionTitle count={info.updates?.length}>待装更新</SectionTitle>
-          {info.reboot_required && <Notice kind="warn" className="mb-3">需要重启</Notice>}
-          {!info.updates ? (
-            <Empty>不是 apt 系统</Empty>
-          ) : info.updates.length === 0 ? (
-            <Empty>没有</Empty>
+        <TabsContent value="overview" className="mt-4">
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <Stat label="系统" value={info?.os ?? r?.os} sub={info ? `内核 ${info.kernel}` : r?.arch} loading={!info && host.loading} />
+            <Stat
+              label="负载"
+              value={info ? info.load.map((l) => l.toFixed(2)).join(" ") : undefined}
+              sub={info ? `${info.cpus} 核 · 已运行 ${uptime(info.uptime_secs)}` : undefined}
+              loading={!info && host.loading}
+            />
+            <Stat
+              label="内存"
+              value={info ? `可用 ${size(info.mem_available)}` : undefined}
+              sub={info ? `共 ${size(info.mem_total)}` : undefined}
+              used={info ? 1 - info.mem_available / info.mem_total : undefined}
+              loading={!info && host.loading}
+            />
+            <Stat label="磁盘" value={disk ? `剩 ${size(disk.free)}` : undefined} sub={disk ? `共 ${size(disk.total)}` : undefined} used={disk ? 1 - disk.free / disk.total : undefined} />
+          </div>
+          <dl className="mt-4 grid gap-x-6 gap-y-1 text-sm sm:grid-cols-[auto_1fr]">
+            <Row k="公网 IP" v={server.public_ip} />
+            <Row k="内网地址" v={server.private_addr?.ip} />
+            <Row k="docker" v={r?.docker_version && `${r.docker_version}${r.compose_version ? ` · compose ${r.compose_version}` : ""}`} />
+            <Row k="agent" v={r && `${r.version}${r.build ? ` · ${r.build}` : ""}`} />
+          </dl>
+          <SectionTitle count={services.length + gateways.length}>在这台机器上</SectionTitle>
+          {services.length + gateways.length === 0 ? (
+            <Empty>还没有服务</Empty>
           ) : (
-            <div className="rounded-xl border bg-card">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>包</TableHead>
-                    <TableHead>当前</TableHead>
-                    <TableHead>新版本</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {[...info.updates]
-                    .sort((a, b) => Number(b.security) - Number(a.security))
-                    .map((u) => (
-                      <TableRow key={u.name}>
-                        <TableCell className="font-mono text-xs">
-                          {u.name}
-                          {u.security && (
-                            <Badge variant="destructive" className="ml-2">
-                              安全
-                            </Badge>
-                          )}
-                        </TableCell>
-                        <TableCell className="font-mono text-xs text-muted-foreground">{u.from || "新装"}</TableCell>
-                        <TableCell className="font-mono text-xs">{u.to}</TableCell>
-                      </TableRow>
-                    ))}
-                </TableBody>
-              </Table>
+            <div className="flex flex-wrap gap-2">
+              {services.map((s) => (
+                <Link key={s.name} to={`/services/${s.name}`} className="flex items-center gap-2 rounded-lg border bg-card px-3 py-1.5 text-sm hover:bg-accent">
+                  <Dot tone={serviceTone(s).tone} />
+                  {s.name}
+                </Link>
+              ))}
+              {gateways.map((g) => (
+                <Link key={g.name} to={`/domains?tab=entries&open=${g.name}`} className="rounded-lg border border-dashed bg-card px-3 py-1.5 text-sm hover:bg-accent">
+                  入口 {g.name}
+                </Link>
+              ))}
             </div>
           )}
+        </TabsContent>
 
-          <SectionTitle>磁盘占用</SectionTitle>
-          <div className="rounded-xl border bg-card">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>类型</TableHead>
-                  <TableHead className="text-right">数量</TableHead>
-                  <TableHead className="text-right">占用</TableHead>
-                  <TableHead className="text-right">可回收</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {info.docker.map((d) => (
-                  <TableRow key={d.kind}>
-                    <TableCell>{DOCKER_KIND[d.kind] ?? d.kind}</TableCell>
-                    <TableCell className="text-right font-mono text-xs">
-                      {d.total}
-                      <span className="text-muted-foreground"> / {d.active} 在用</span>
-                    </TableCell>
-                    <TableCell className="text-right font-mono text-xs">{d.size}</TableCell>
-                    <TableCell className="text-right font-mono text-xs text-muted-foreground">{d.reclaimable}</TableCell>
-                  </TableRow>
-                ))}
-                <LogRow label="容器日志" bytes={info.container_logs} />
-                <LogRow label="journal" bytes={info.journal} />
-                <LogRow label="/var/log" bytes={info.var_log} />
-              </TableBody>
-            </Table>
+        <TabsContent value="metrics" className="mt-4">
+          <MetricsPanel subject={name} kind="host" title="" />
+        </TabsContent>
+
+        <TabsContent value="system" className="mt-4">
+          <div className="mb-4 flex flex-wrap gap-2">
+            <Button variant="outline" size="sm" disabled={!server.online} onClick={() => actions.prune(name)}>
+              <Trash2Icon />
+              清理没在用的镜像
+            </Button>
+            <Button variant="ghost" size="sm" disabled={!server.online || host.loading} onClick={host.load}>
+              <RefreshCwIcon className={host.loading ? "animate-spin" : undefined} />
+              重新读取
+            </Button>
           </div>
-        </>
-      )}
+          <ErrorNote error={host.error} />
+          {!info ? (
+            host.loading ? <Skeleton className="h-40 rounded-xl" /> : <Empty>{server.online ? "读取中…" : "服务器离线，读不到系统信息"}</Empty>
+          ) : (
+            <SystemInfo info={info} />
+          )}
+        </TabsContent>
 
-      <SectionTitle count={services.length + gateways.length}>在这台机器上</SectionTitle>
-      {services.length + gateways.length === 0 ? (
-        <Empty>没有服务</Empty>
-      ) : (
-        <div className="flex flex-wrap gap-2">
-          {gateways.map((g) => (
-            <Link key={g.name} to={`/domains?tab=entries&open=${g.name}`} className="rounded-lg border bg-card px-3 py-1.5 text-sm hover:bg-accent">
-              {g.name}
-              <span className="ml-2 text-xs text-muted-foreground">网关</span>
-            </Link>
-          ))}
-          {services.map((s) => (
-            <Link key={s.name} to={`/services/${s.name}`} className="flex items-center gap-2 rounded-lg border bg-card px-3 py-1.5 text-sm hover:bg-accent">
-              <Dot tone={serviceTone(s).tone} />
-              {s.name}
-            </Link>
-          ))}
-        </div>
-      )}
+        <TabsContent value="terminal" className="mt-4">
+          {terminalStatus ? (
+            <Empty>
+              {terminalStatus === "未开启" ? "宿主机终端没有开启，在“设置”标签里打开。" : terminalStatus === "离线" ? "服务器离线。" : "agent 版本太旧，先升级 agent。"}
+            </Empty>
+          ) : (
+            <Button asChild>
+              <Link to={`/servers/${encodeURIComponent(name)}/terminal`}>
+                <TerminalIcon />
+                打开宿主机终端
+              </Link>
+            </Button>
+          )}
+        </TabsContent>
+
+        <TabsContent value="settings" className="mt-4">
+          <SettingsForm server={server} canRemove={services.length + gateways.length === 0} />
+        </TabsContent>
+      </Tabs>
     </>
   );
 }
 
-function ServerSettingsDialog({ server, open, onOpenChange }: { server: ServerView; open: boolean; onOpenChange: (open: boolean) => void }) {
+function SystemInfo({ info }: { info: HostInfo }) {
+  return (
+    <>
+      <SectionTitle count={info.updates?.length}>待装更新</SectionTitle>
+      {info.reboot_required && <Notice kind="warn" className="mb-3">需要重启</Notice>}
+      {!info.updates ? (
+        <Empty>不是 apt 系统</Empty>
+      ) : info.updates.length === 0 ? (
+        <Empty>没有</Empty>
+      ) : (
+        <div className="rounded-xl border bg-card">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>包</TableHead>
+                <TableHead>当前</TableHead>
+                <TableHead>新版本</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {[...info.updates]
+                .sort((a, b) => Number(b.security) - Number(a.security))
+                .map((u) => (
+                  <TableRow key={u.name}>
+                    <TableCell className="font-mono text-xs">
+                      {u.name}
+                      {u.security && (
+                        <Badge variant="destructive" className="ml-2">
+                          安全
+                        </Badge>
+                      )}
+                    </TableCell>
+                    <TableCell className="font-mono text-xs text-muted-foreground">{u.from || "新装"}</TableCell>
+                    <TableCell className="font-mono text-xs">{u.to}</TableCell>
+                  </TableRow>
+                ))}
+            </TableBody>
+          </Table>
+        </div>
+      )}
+      <SectionTitle>磁盘占用</SectionTitle>
+      <div className="rounded-xl border bg-card">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>类型</TableHead>
+              <TableHead className="text-right">数量</TableHead>
+              <TableHead className="text-right">占用</TableHead>
+              <TableHead className="text-right">可回收</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {info.docker.map((d) => (
+              <TableRow key={d.kind}>
+                <TableCell>{DOCKER_KIND[d.kind] ?? d.kind}</TableCell>
+                <TableCell className="text-right font-mono text-xs">
+                  {d.total}
+                  <span className="text-muted-foreground"> / {d.active} 在用</span>
+                </TableCell>
+                <TableCell className="text-right font-mono text-xs">{d.size}</TableCell>
+                <TableCell className="text-right font-mono text-xs text-muted-foreground">{d.reclaimable}</TableCell>
+              </TableRow>
+            ))}
+            <LogRow label="容器日志" bytes={info.container_logs} />
+            <LogRow label="journal" bytes={info.journal} />
+            <LogRow label="/var/log" bytes={info.var_log} />
+          </TableBody>
+        </Table>
+      </div>
+    </>
+  );
+}
+
+type Settings = ServerView["settings"] & {
+  public_ip?: string;
+  registry_mirrors?: Record<string, string[]>;
+  mirrors_only?: boolean;
+  build_env?: Record<string, string>;
+  git_proxy?: string;
+};
+
+const mirrorsText = (m?: Record<string, string[]>) =>
+  Object.entries(m ?? {})
+    .map(([k, v]) => `${k}=${v.join(",")}`)
+    .join("\n");
+
+function parseMirrors(text: string): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  for (const line of text.split("\n")) {
+    const i = line.indexOf("=");
+    if (i <= 0) continue;
+    const list = line.slice(i + 1).split(",").map((x) => x.trim()).filter(Boolean);
+    if (list.length) out[line.slice(0, i).trim()] = list;
+  }
+  return out;
+}
+
+/** 服务器设置：和 `wharf server set` 同一组字段；接入方式和内网地址在"服务器 → 组网"里改。 */
+function SettingsForm({ server, canRemove }: { server: ServerView; canRemove: boolean }) {
   const actions = useActions();
-  const [hostTerminal, setHostTerminal] = useState(server.settings.host_terminal);
-  const [hostExec, setHostExec] = useState(server.settings.host_exec);
-  useEffect(() => {
-    if (!open) return;
-    setHostTerminal(server.settings.host_terminal);
-    setHostExec(server.settings.host_exec);
-  }, [open, server.settings.host_exec, server.settings.host_terminal]);
-  const changed = hostTerminal !== server.settings.host_terminal || hostExec !== server.settings.host_exec;
-  const save = () => {
-    onOpenChange(false);
-    actions.plan({
-      title: `设置 ${server.name}`,
-      changes: [{ op: "update_server", name: server.name, settings: { ...server.settings, host_terminal: hostTerminal, host_exec: hostExec } }],
-    });
+  const nav = useNavigate();
+  const cur = server.settings as Settings;
+  const [publicIp, setPublicIp] = useState(cur.public_ip ?? "");
+  const [mirrors, setMirrors] = useState(mirrorsText(cur.registry_mirrors));
+  const [mirrorsOnly, setMirrorsOnly] = useState(!!cur.mirrors_only);
+  const [buildEnv, setBuildEnv] = useState(formatEnv(cur.build_env));
+  const [gitProxy, setGitProxy] = useState(cur.git_proxy ?? "");
+  const [hostTerminal, setHostTerminal] = useState(cur.host_terminal);
+  const [hostExec, setHostExec] = useState(cur.host_exec);
+  const [removing, setRemoving] = useState(false);
+
+  const next: Settings = {
+    ...cur,
+    public_ip: publicIp.trim() || undefined,
+    registry_mirrors: parseMirrors(mirrors),
+    mirrors_only: mirrorsOnly,
+    build_env: parseEnv(buildEnv),
+    git_proxy: gitProxy.trim() || undefined,
+    host_terminal: hostTerminal,
+    host_exec: hostExec,
+  };
+  const norm = (x: Settings) =>
+    JSON.stringify({ ...x, public_ip: x.public_ip || undefined, git_proxy: x.git_proxy || undefined, registry_mirrors: x.registry_mirrors ?? {}, build_env: x.build_env ?? {}, mirrors_only: !!x.mirrors_only });
+  const changed = norm(next) !== norm(cur);
+
+  const remove = async () => {
+    setRemoving(false);
+    try {
+      await api.del(`/api/servers/${encodeURIComponent(server.name)}`);
+      toast.success(`已删除服务器 ${server.name}`);
+      nav("/servers");
+    } catch (e) {
+      toast.error(`不能删除 ${server.name}`, { description: (e as Error).message });
+    }
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent aria-describedby={undefined}>
-        <DialogHeader>
-          <DialogTitle>设置</DialogTitle>
-        </DialogHeader>
-        <div className="grid gap-3">
-          <div className="flex items-center gap-3 rounded-lg border p-3">
-            <Checkbox id="host-terminal" checked={hostTerminal} onCheckedChange={(value) => setHostTerminal(value === true)} />
-            <Label htmlFor="host-terminal" className="cursor-pointer">宿主机终端</Label>
-            <span className="ml-auto text-sm text-muted-foreground">{hostTerminal ? "已开启" : "未开启"}</span>
-          </div>
-          <div className="flex items-center gap-3 rounded-lg border p-3">
-            <Checkbox id="host-exec" checked={hostExec} onCheckedChange={(value) => setHostExec(value === true)} />
-            <Label htmlFor="host-exec" className="cursor-pointer">命令执行</Label>
-            <span className="ml-auto text-sm text-muted-foreground">{hostExec ? "已开启" : "未开启"}</span>
-          </div>
+    <div className="grid max-w-2xl gap-5">
+      <Field label="公网 IP" htmlFor="public-ip" help={`不填用 agent 探测的${server.public_ip ? `（现在是 ${server.public_ip}）` : ""}。直连入口的 DNS 指向它。`}>
+        <Input id="public-ip" value={publicIp} placeholder="自动探测" onChange={(e) => setPublicIp(e.target.value)} />
+      </Field>
+      <Field label="镜像源" htmlFor="mirrors" help="每行一个仓库，例如 docker.io=docker.1ms.run,docker.m.daocloud.io，按顺序尝试。">
+        <Textarea id="mirrors" rows={3} className="font-mono text-xs" value={mirrors} onChange={(e) => setMirrors(e.target.value)} />
+      </Field>
+      <label className="-mt-3 flex cursor-pointer items-center gap-2 text-sm">
+        <Checkbox checked={mirrorsOnly} onCheckedChange={(v) => setMirrorsOnly(v === true)} />
+        有镜像源时不再尝试原地址
+      </label>
+      <Field label="构建参数" htmlFor="build-env" help="每行 KEY=VALUE，传给内置模板。国内机器常配 PIP_INDEX_URL、GOPROXY。">
+        <Textarea id="build-env" rows={3} className="font-mono text-xs" value={buildEnv} onChange={(e) => setBuildEnv(e.target.value)} />
+      </Field>
+      <Field label="拉代码代理" htmlFor="git-proxy" help="只用于 git。国内机器连不上 GitHub 时经海外机器转发。">
+        <Input id="git-proxy" value={gitProxy} placeholder="http://100.x.x.x:8118" onChange={(e) => setGitProxy(e.target.value)} />
+      </Field>
+      <div className="grid gap-2">
+        <label className="flex cursor-pointer items-center gap-2.5 text-sm">
+          <Checkbox checked={hostTerminal} onCheckedChange={(v) => setHostTerminal(v === true)} />
+          允许从页面打开宿主机终端
+        </label>
+        <label className="flex cursor-pointer items-center gap-2.5 text-sm">
+          <Checkbox checked={hostExec} onCheckedChange={(v) => setHostExec(v === true)} />
+          允许通过 API 在宿主机执行命令（CLI、AI 用）
+        </label>
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <Button disabled={!changed} onClick={() => actions.plan({ title: `设置 ${server.name}`, changes: [{ op: "update_server", name: server.name, settings: next }] })}>
+          预览改动
+        </Button>
+        <span className="text-xs text-muted-foreground">接入方式和内网地址在<Link to="/servers?tab=network" className="mx-0.5 underline underline-offset-2">组网</Link>里改</span>
+      </div>
+      <div className="mt-6 flex flex-wrap items-center gap-3 rounded-xl border border-destructive/30 p-4">
+        <div className="grid flex-1 gap-0.5 text-sm">
+          <span className="font-medium">删除服务器</span>
+          <span className="text-xs text-muted-foreground">{canRemove ? "只删除 Wharf 里的记录，机器上的 agent 需要自己停掉。" : "上面还有服务或入口，先迁走或删掉。"}</span>
         </div>
-        <DialogFooter>
-          <Button variant="ghost" onClick={() => onOpenChange(false)}>
-            取消
-          </Button>
-          <Button disabled={!changed} onClick={save}>
-            生成计划
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+        <Button variant="destructive" size="sm" disabled={!canRemove} onClick={() => setRemoving(true)}>
+          删除
+        </Button>
+      </div>
+      <Dialog open={removing} onOpenChange={setRemoving}>
+        <DialogContent aria-describedby={undefined}>
+          <DialogHeader>
+            <DialogTitle>删除服务器 {server.name}？</DialogTitle>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setRemoving(false)}>
+              取消
+            </Button>
+            <Button variant="destructive" onClick={remove}>
+              删除
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
   );
 }
 

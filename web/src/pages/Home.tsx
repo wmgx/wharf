@@ -21,7 +21,7 @@ export function Home() {
   return (
     <>
       <PageHeader
-        title="港口"
+        title="首页"
         description={status ? `${status.servers.length} 台服务器 · ${status.services.length} 个服务 · ${status.routes.length} 个域名` : "载入中…"}
         actions={
           <Button onClick={() => setCreating(true)}>

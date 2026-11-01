@@ -1,5 +1,6 @@
 import { CloudIcon, DownloadIcon } from "lucide-react";
 import { useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import { api } from "@/api";
 import { useActions } from "@/components/actions";
@@ -47,7 +48,10 @@ export function EdgeList() {
   const { status } = useStatus();
   const actions = useActions();
   const unmanaged = status?.edge_unmanaged ?? [];
-  const [account, setAccount] = useState<string | null>(null);
+  const [params, setParams] = useSearchParams();
+  const [picked, setAccount] = useState<string | null>(null);
+  // 从"新建 → 导入 Workers / Pages"进来（?edge=1）：打开第一个有未纳管项目的账号。
+  const account = params.get("edge") === "1" ? (unmanaged[0]?.account ?? null) : picked;
   if (unmanaged.length === 0) return null;
   const importOne = (p: EdgeProjectView) =>
     actions.plan({ title: `导入 ${p.project}`, changes: [{ op: "upsert_edge_app", name: p.project, spec: { account: p.account, kind: p.kind } }] });
@@ -64,7 +68,7 @@ export function EdgeList() {
           ))}
         </div>
       )}
-      <Dialog open={!!account} onOpenChange={(o) => !o && setAccount(null)}>
+      <Dialog open={!!account} onOpenChange={(o) => !o && (setAccount(null), setParams({}))}>
         <DialogContent aria-describedby={undefined} className="sm:max-w-2xl">
           <DialogHeader>
             <DialogTitle>{account} 里未纳管的 Workers / Pages</DialogTitle>
@@ -87,6 +91,7 @@ export function EdgeList() {
                   size="xs"
                   onClick={() => {
                     setAccount(null);
+                    setParams({});
                     importOne(p);
                   }}
                 >

@@ -1,5 +1,6 @@
 import { BoxIcon, DownloadIcon, LayersIcon, ServerIcon } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { api } from "@/api";
 import { useActions } from "@/components/actions";
 import { CodeBlock, Notice, StatusBadge } from "@/components/common";
@@ -55,21 +56,26 @@ export function HintRow({ icon, label, text, onClick }: { icon: ReactNode; label
 /** 每台服务器一行提示：有多少容器没纳管，点开逐个导入。 */
 export function UnmanagedList() {
   const items = useUnmanaged();
-  const [server, setServer] = useState<string | null>(null);
+  const [params, setParams] = useSearchParams();
+  const [picked, setServer] = useState<string | null>(null);
   const [importing, setImporting] = useState<Unmanaged | null>(null);
   const byServer = new Map<string, Unmanaged[]>();
   for (const u of items) byServer.set(u.server, [...(byServer.get(u.server) ?? []), u]);
+  // 从"新建 → 导入已有容器"进来（?import=1）：列出所有服务器上的。
+  const all = params.get("import") === "1";
+  const server = all ? "*" : picked;
+  const close = () => (all ? setParams({}) : setServer(null));
   if (byServer.size === 0) return null;
-  const list = server ? (byServer.get(server) ?? []) : [];
+  const list = server === "*" ? items : server ? (byServer.get(server) ?? []) : [];
   return (
     <div className="mt-3 grid gap-2">
       {[...byServer].map(([name, group]) => (
         <HintRow key={name} icon={<ServerIcon className="size-4" />} label={name} text={`${group.length} 个容器未纳管`} onClick={() => setServer(name)} />
       ))}
-      <Dialog open={!!server && !importing} onOpenChange={(o) => !o && setServer(null)}>
+      <Dialog open={!!server && !importing} onOpenChange={(o) => !o && close()}>
         <DialogContent aria-describedby={undefined} className="sm:max-w-2xl">
           <DialogHeader>
-            <DialogTitle>{server} 上未纳管的容器</DialogTitle>
+            <DialogTitle>{server === "*" ? "服务器上还没纳管的容器" : `${server} 上未纳管的容器`}</DialogTitle>
           </DialogHeader>
           <div className="grid max-h-[60vh] gap-1.5 overflow-y-auto">
             {list.map((u) => (
