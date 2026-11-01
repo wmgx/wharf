@@ -100,7 +100,7 @@ function build(status: Status, net: NetworkView | null): { nodes: Node[]; edges:
         parentId: `srv:${srv.name}`,
         extent: "parent",
         position: { x: 20 + i * COL, y: 44 },
-        data: { kind: "网关", name: g.name, tone: liveTone(g.live).tone, to: "/gateways" },
+        data: { kind: "网关", name: g.name, tone: liveTone(g.live).tone, to: "/domains?tab=entries" },
       });
     });
     svcs.forEach((s, i) => {
@@ -350,7 +350,7 @@ function Panel({ status, sel, onClose }: { status: Status; sel: string; onClose:
       ["路由", String(status.routes.filter((r) => r.gateway === g.name).length)],
     ];
     buttons = (
-      <Button size="sm" variant="outline" onClick={() => nav("/gateways")}>
+      <Button size="sm" variant="outline" onClick={() => nav("/domains?tab=entries")}>
         打开
       </Button>
     );

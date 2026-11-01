@@ -59,6 +59,8 @@ interface Actions {
   upgrade: () => void;
   /** 打开一次已经开始的执行（备份、恢复），结束时提示。 */
   watch: (runId: string, title: string) => void;
+  /** 只查看一次执行（活动页回看），不在后台盯。 */
+  view: (runId: string, title: string) => void;
 }
 
 const Ctx = createContext<Actions | null>(null);
@@ -186,6 +188,7 @@ export function ActionsProvider({ children }: { children: ReactNode }) {
       setOpen({ key: ++seq.current, title, runId });
       setRunning({ runId, title });
     },
+    view: (runId, title) => setOpen({ key: ++seq.current, title, runId }),
   };
 
   const authSaved = () => {

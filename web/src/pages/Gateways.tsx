@@ -3,7 +3,7 @@ import { useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { usePoll } from "@/api";
 import { useActions } from "@/components/actions";
-import { CardsSkeleton, CodeBlock, Empty, Notice, PageHeader, ServerTag, StatusBadge, liveTone } from "@/components/common";
+import { CardsSkeleton, CodeBlock, Empty, Notice, ServerTag, StatusBadge, liveTone } from "@/components/common";
 import { Field, Picker, Segmented, serverOptions, toName } from "@/components/fields";
 import { LogStream } from "@/components/LogStream";
 import { Badge } from "@/components/ui/badge";
@@ -23,7 +23,8 @@ const TLS_TEXT: Record<GatewayTls, string> = {
   off: "只走 HTTP",
 };
 
-export function Gateways() {
+/** 域名页的"入口"标签：网关列表、详情和新建。人加域名时选的是入口，这里只在需要管理时用。 */
+export function GatewaysPanel() {
   const { status } = useStatus();
   const [params, setParams] = useSearchParams();
   const open = params.get("open");
@@ -33,19 +34,17 @@ export function Gateways() {
 
   return (
     <>
-      <PageHeader
-        title="网关"
-        actions={
-          <Button variant="outline" onClick={() => setParams({ new: "1" })}>
-            <PlusIcon />
-            新建网关
-          </Button>
-        }
-      />
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <p className="text-sm text-muted-foreground">入口决定域名从哪进来：服务器上的 Caddy（有公网 IP，国内可备案）或 Cloudflare 隧道（全球可达）。</p>
+        <Button variant="outline" size="sm" onClick={() => setParams({ tab: "entries", new: "1" })}>
+          <PlusIcon />
+          新建入口
+        </Button>
+      </div>
       {!status ? (
         <CardsSkeleton count={2} />
       ) : gateways.length === 0 ? (
-        <Empty>还没有网关</Empty>
+        <Empty>还没有入口。加域名时会提示新建，也可以在这里先建好。</Empty>
       ) : (
         <div className="grid grid-cols-[repeat(auto-fill,minmax(280px,1fr))] gap-3">
           {gateways.map((g, i) => {
@@ -55,7 +54,7 @@ export function Gateways() {
               <button
                 key={g.name}
                 style={{ animationDelay: `${i * 30}ms` }}
-                onClick={() => setParams({ open: g.name })}
+                onClick={() => setParams({ tab: "entries", open: g.name })}
                 className="flex flex-col gap-3 rounded-xl border bg-card p-4 text-left shadow-xs transition-all animate-in fade-in slide-in-from-bottom-1 fill-mode-both hover:-translate-y-px hover:border-foreground/15 hover:shadow-md"
               >
                 <div className="flex items-center gap-3">
@@ -83,17 +82,17 @@ export function Gateways() {
         </div>
       )}
 
-      <Sheet open={!!selected} onOpenChange={(o) => !o && setParams({})}>
+      <Sheet open={!!selected} onOpenChange={(o) => !o && setParams({ tab: "entries" })}>
         <SheetContent className="w-full gap-0 sm:max-w-xl" onOpenAutoFocus={(e) => e.preventDefault()}>
-          {selected && <GatewayDetail g={selected} onDone={() => setParams({})} />}
+          {selected && <GatewayDetail g={selected} onDone={() => setParams({ tab: "entries" })} />}
         </SheetContent>
       </Sheet>
-      <Sheet open={creating} onOpenChange={(o) => !o && setParams({})}>
+      <Sheet open={creating} onOpenChange={(o) => !o && setParams({ tab: "entries" })}>
         <SheetContent className="w-full gap-0 sm:max-w-xl" aria-describedby={undefined}>
           <SheetHeader className="border-b">
-            <SheetTitle>新建网关</SheetTitle>
+            <SheetTitle>新建入口</SheetTitle>
           </SheetHeader>
-          {creating && <NewGateway onDone={() => setParams({})} />}
+          {creating && <NewGateway onDone={() => setParams({ tab: "entries" })} />}
         </SheetContent>
       </Sheet>
     </>
@@ -107,7 +106,7 @@ function GatewayDetail({ g, onDone }: { g: GatewayView; onDone: () => void }) {
     <>
       <SheetHeader className="border-b">
         <SheetTitle>{g.name}</SheetTitle>
-        <SheetDescription>网关</SheetDescription>
+        <SheetDescription>入口（网关）</SheetDescription>
       </SheetHeader>
       <div className="flex-1 overflow-auto p-4">
         <dl className="grid grid-cols-[88px_minmax(0,1fr)] gap-x-4 gap-y-3 text-sm">
@@ -260,7 +259,7 @@ function NewGateway({ onDone }: { onDone: () => void }) {
           accounts && accounts.length === 0 ? (
             <Notice kind="warn">
               隧道要建在 Cloudflare 账号下，还没有账号。{" "}
-              <Link to="/accounts" className="font-medium underline underline-offset-2">
+              <Link to="/settings" className="font-medium underline underline-offset-2">
                 去添加厂商账号
               </Link>
             </Notice>

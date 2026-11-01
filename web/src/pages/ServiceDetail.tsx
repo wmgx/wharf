@@ -3,12 +3,9 @@ import { Suspense, lazy, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { usePoll } from "@/api";
 import { useActions } from "@/components/actions";
-import { useBasicAuthSetAt } from "@/components/basic-auth";
 import { BuildEditor, type BuildHow, cleanHow, howOf, howReady } from "@/components/build-editor";
-import { Checkbox } from "@/components/ui/checkbox";
 import { CodeBlock, Dot, Empty, ErrorNote, Notice, PageHeader, ServerTag, StatusBadge, ago, serviceTone, sourceLabel } from "@/components/common";
-import { EntryField, useEntry } from "@/components/entry";
-import { DomainChips, Field, PortsEditor, formatEnv, parseEnv, portsFor } from "@/components/fields";
+import { Field, PortsEditor, formatEnv, parseEnv, portsFor } from "@/components/fields";
 import { LogStream } from "@/components/LogStream";
 import { MetricsPanel } from "@/components/metrics";
 import { Backups } from "./service-backups";
@@ -16,7 +13,6 @@ import { Files } from "./service-files";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Sheet, SheetContent, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
@@ -25,6 +21,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { useStatus } from "@/status";
+import { AddRoute } from "@/components/add-route";
 import type { DataKind, DeploymentView, ImportRecord, PortSpec, ServiceStatus, ServiceView } from "@/types";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 
@@ -480,72 +477,6 @@ function EditForm({ svc, onClose }: { svc: ServiceView; onClose: () => void }) {
         </Button>
       </SheetFooter>
     </>
-  );
-}
-
-function AddRoute({ service, open, onClose }: { service: string; open: boolean; onClose: () => void }) {
-  const { status } = useStatus();
-  const actions = useActions();
-  const [hostname, setHostname] = useState("");
-  const server = status?.services.find((s) => s.name === service)?.spec.server ?? "";
-  const entry = useEntry(server);
-  const [authWanted, setAuth] = useState(false);
-  const [tunnel, setTunnel] = useState(false);
-  const auth = authWanted && !entry.tunnel;
-  const authSetAt = useBasicAuthSetAt(open ? 1 : 0);
-  const suffixes = [...new Set(status?.routes.map((r) => r.spec.hostname.split(".").slice(1).join(".")).filter(Boolean))];
-  const submit = () => {
-    onClose();
-    setHostname("");
-    setAuth(false);
-    setTunnel(false);
-    const { gateway, changes } = entry.resolve();
-    actions.plan({
-      title: "加域名",
-      changes: [...changes, { op: "upsert_route", spec: { hostname: hostname.trim().toLowerCase(), service, gateway, auth: auth || undefined, link: tunnel ? "tunnel" : undefined } }],
-    });
-  };
-  return (
-    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent aria-describedby={undefined}>
-        <DialogHeader>
-          <DialogTitle>给 {service} 加域名</DialogTitle>
-        </DialogHeader>
-        <div className="grid gap-4">
-          <Field label="域名" htmlFor="hostname">
-            <Input id="hostname" autoFocus value={hostname} onChange={(e) => setHostname(e.target.value)} placeholder="app.example.com" />
-            {!hostname && <DomainChips suggestions={suffixes.map((s) => `${service}.${s}`)} onPick={setHostname} />}
-          </Field>
-          <EntryField entry={entry} />
-          <label className={`flex items-center gap-2.5 text-sm ${entry.tunnel ? "text-muted-foreground" : "cursor-pointer"}`}>
-            <Checkbox checked={auth} disabled={entry.tunnel} onCheckedChange={(v) => setAuth(v === true)} />
-            登录保护
-            <span className="text-xs text-muted-foreground">{entry.tunnel ? "隧道入口暂不支持" : "访问时要输入账号密码"}</span>
-          </label>
-          <label className="flex cursor-pointer items-center gap-2.5 text-sm">
-            <Checkbox checked={tunnel} onCheckedChange={(v) => setTunnel(v === true)} />
-            总是走反向隧道
-            <span className="text-xs text-muted-foreground">默认自动：能直连就直连</span>
-          </label>
-          {auth && authSetAt === null && (
-            <Notice kind="warn">
-              还没有设置登录保护账号。{" "}
-              <button type="button" className="font-medium underline underline-offset-2" onClick={actions.basicAuth}>
-                现在设置
-              </button>
-            </Notice>
-          )}
-        </div>
-        <DialogFooter>
-          <Button variant="ghost" onClick={onClose}>
-            取消
-          </Button>
-          <Button disabled={!hostname.trim() || !entry.ready || (auth && authSetAt === null)} onClick={submit}>
-            生成计划
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
   );
 }
 

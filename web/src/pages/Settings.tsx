@@ -1,3 +1,5 @@
+import { useActions } from "@/components/actions";
+import { ArrowUpCircleIcon, LockIcon } from "lucide-react";
 import { CloudIcon, KeyRoundIcon, PlusIcon, RefreshCwIcon, Trash2Icon } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
@@ -14,8 +16,9 @@ import { EdgeImport } from "./edge-import";
 import { Secrets } from "./secrets";
 import { Tokens } from "./tokens";
 
-/** 账号与密钥：厂商账号、密钥、API token、控制面备份。都只写不读。 */
-export function Accounts() {
+/** 设置：厂商账号、密钥、CLI 与 AI 接入、控制面备份、登录保护账号、升级。 */
+export function Settings() {
+  const actions = useActions();
   const { data, error, refresh } = usePoll<AccountView[]>("/api/accounts", 30000);
   const [adding, setAdding] = useState(false);
   const [removing, setRemoving] = useState<string | null>(null);
@@ -48,7 +51,21 @@ export function Accounts() {
 
   return (
     <>
-      <PageHeader title="账号与密钥" />
+      <PageHeader
+        title="设置"
+        actions={
+          <>
+            <Button variant="outline" onClick={actions.basicAuth}>
+              <LockIcon />
+              登录保护账号
+            </Button>
+            <Button variant="outline" onClick={actions.upgrade}>
+              <ArrowUpCircleIcon />
+              升级 Wharf
+            </Button>
+          </>
+        }
+      />
       <div className="mb-3 flex items-center justify-between [&>h2]:mb-0">
         <SectionTitle count={data?.length}>厂商账号</SectionTitle>
         <Button variant="ghost" size="sm" onClick={() => setAdding(true)}>

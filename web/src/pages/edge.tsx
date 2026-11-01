@@ -1,14 +1,12 @@
 import { CloudIcon, DownloadIcon } from "lucide-react";
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { api } from "@/api";
 import { useActions } from "@/components/actions";
-import { SectionTitle, StatusBadge, ago, type Tone } from "@/components/common";
+import { SectionTitle, ago, type Tone } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useStatus } from "@/status";
 import { HintRow } from "./containers";
 import type { EdgeAppView, EdgeKind, EdgeLive, EdgeProjectView, EdgeSource } from "@/types";
@@ -44,15 +42,13 @@ export async function edgeTask(path: string, body: object, what: string): Promis
   }
 }
 
-/** 服务页下方的边缘应用列表；账号里还没纳管的项目每个账号一行提示。 */
+/** 服务页下方：厂商账号里还没纳管的 Workers / Pages，每个账号一行提示。 */
 export function EdgeList() {
   const { status } = useStatus();
-  const nav = useNavigate();
   const actions = useActions();
-  const apps = status?.edge_apps ?? [];
   const unmanaged = status?.edge_unmanaged ?? [];
   const [account, setAccount] = useState<string | null>(null);
-  if (apps.length === 0 && unmanaged.length === 0) return null;
+  if (unmanaged.length === 0) return null;
   const importOne = (p: EdgeProjectView) =>
     actions.plan({ title: `导入 ${p.project}`, changes: [{ op: "upsert_edge_app", name: p.project, spec: { account: p.account, kind: p.kind } }] });
   const byAccount = new Map<string, EdgeProjectView[]>();
@@ -60,52 +56,7 @@ export function EdgeList() {
   const list = account ? (byAccount.get(account) ?? []) : [];
   return (
     <section className="mt-8">
-      <SectionTitle count={apps.length}>边缘应用（Cloudflare Workers / Pages）</SectionTitle>
-      {apps.length > 0 && (
-        <div className="overflow-hidden rounded-xl border bg-card shadow-xs">
-          <Table>
-            <TableHeader className="bg-muted/50">
-              <TableRow>
-                <TableHead className="pl-4">名字</TableHead>
-                <TableHead>状态</TableHead>
-                <TableHead>类型</TableHead>
-                <TableHead>来源</TableHead>
-                <TableHead>域名</TableHead>
-                <TableHead className="w-24" />
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {apps.map((a) => {
-                const { tone, text } = edgeTone(a.live, a.drift);
-                return (
-                  <TableRow key={a.name} className="cursor-pointer" onClick={() => nav(`/edge/${a.name}`)}>
-                    <TableCell className="pl-4 font-medium">
-                      <span className="inline-flex items-center gap-1.5">
-                        <CloudIcon className="size-3.5 text-muted-foreground" />
-                        {a.name}
-                      </span>
-                    </TableCell>
-                    <TableCell>
-                      <StatusBadge tone={tone}>{text}</StatusBadge>
-                    </TableCell>
-                    <TableCell>
-                      <Badge variant="secondary">{KIND_NAME[a.spec.kind]}</Badge>
-                    </TableCell>
-                    <TableCell className="font-mono text-xs text-muted-foreground">{edgeSourceLabel(a.spec.source)}</TableCell>
-                    <TableCell className="font-mono text-xs">
-                      {a.spec.domains?.map((d) => (
-                        <div key={d}>{d}</div>
-                      ))}
-                      {!a.spec.domains?.length && <span className="text-muted-foreground">{a.live?.url?.replace(/^https:\/\//, "") ?? "-"}</span>}
-                    </TableCell>
-                    <TableCell />
-                  </TableRow>
-                );
-              })}
-            </TableBody>
-          </Table>
-        </div>
-      )}
+      <SectionTitle>Cloudflare 上还没纳管的</SectionTitle>
       {byAccount.size > 0 && (
         <div className="mt-3 grid gap-2">
           {[...byAccount].map(([acc, group]) => (

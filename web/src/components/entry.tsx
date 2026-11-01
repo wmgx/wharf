@@ -66,7 +66,7 @@ export function EntryField({ entry }: { entry: ReturnType<typeof useEntry> }) {
       {entry.needsAccount && (
         <Notice kind="warn">
           新建隧道需要 Cloudflare 账号。{" "}
-          <Link to="/accounts" className="font-medium underline underline-offset-2">
+          <Link to="/settings" className="font-medium underline underline-offset-2">
             去添加厂商账号
           </Link>
         </Notice>

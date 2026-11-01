@@ -1,29 +1,21 @@
-import { AnchorIcon, CableIcon, PlusIcon, BoxesIcon, ChevronsUpDownIcon, KeyRoundIcon, LogOutIcon, MoonIcon, NetworkIcon, SunIcon, ArrowUpCircleIcon, WaypointsIcon, HardDriveIcon, ServerIcon, Trash2Icon } from "lucide-react";
-import { useState } from "react";
-import { NavLink, useLocation, useNavigate } from "react-router-dom";
+import { AnchorIcon, BoxesIcon, ChevronsUpDownIcon, GlobeIcon, HistoryIcon, LogOutIcon, MoonIcon, ServerIcon, SettingsIcon, SunIcon } from "lucide-react";
+import { NavLink, useLocation } from "react-router-dom";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import {
   Sidebar,
   SidebarContent,
   SidebarFooter,
   SidebarGroup,
-  SidebarGroupAction,
   SidebarGroupContent,
-  SidebarGroupLabel,
   SidebarHeader,
   SidebarMenu,
-  SidebarMenuAction,
   SidebarMenuBadge,
   SidebarMenuButton,
   SidebarMenuItem,
-  SidebarMenuSkeleton,
   SidebarRail,
 } from "@/components/ui/sidebar";
 import { useStatus } from "@/status";
 import { useTheme } from "@/theme";
-import { useActions } from "./actions";
-import { AddServer } from "./add-server";
-import { diskText, Dot, serverText, serverTone } from "./common";
 
 export function Logo({ className = "size-8" }: { className?: string }) {
   return (
@@ -40,31 +32,22 @@ export function Logo({ className = "size-8" }: { className?: string }) {
 export function AppSidebar({ username, onLogout }: { username: string; onLogout: () => void }) {
   const { status } = useStatus();
   const { pathname } = useLocation();
-  const navigate = useNavigate();
   const { theme, toggle } = useTheme();
-  const actions = useActions();
-  const [adding, setAdding] = useState(false);
 
   const groups = [
     {
-      label: "概览",
+      label: "",
       items: [
-        { to: "/", label: "港口", icon: AnchorIcon },
-        { to: "/topology", label: "拓扑", icon: NetworkIcon },
+        { to: "/", label: "首页", icon: AnchorIcon },
+        { to: "/services", label: "服务", icon: BoxesIcon, count: status ? status.services.length + (status.edge_apps?.length ?? 0) : undefined },
+        { to: "/domains", label: "域名", icon: GlobeIcon, count: status ? status.routes.length : undefined },
+        { to: "/servers", label: "服务器", icon: ServerIcon, count: status?.servers.length },
+        { to: "/activity", label: "活动", icon: HistoryIcon },
       ],
     },
     {
-      label: "资源",
-      items: [
-        { to: "/services", label: "服务", icon: BoxesIcon, count: status?.services.length },
-        { to: "/gateways", label: "网关", icon: WaypointsIcon, count: status?.gateways.length },
-        { to: "/network", label: "组网", icon: CableIcon },
-        { to: "/data", label: "数据", icon: HardDriveIcon },
-      ],
-    },
-    {
-      label: "设置",
-      items: [{ to: "/accounts", label: "账号与密钥", icon: KeyRoundIcon }],
+      label: "",
+      items: [{ to: "/settings", label: "设置", icon: SettingsIcon }],
     },
   ];
   const active = (to: string) => (to === "/" ? pathname === "/" : pathname.startsWith(to));
@@ -88,9 +71,8 @@ export function AppSidebar({ username, onLogout }: { username: string; onLogout:
       </SidebarHeader>
 
       <SidebarContent>
-        {groups.map((g) => (
-          <SidebarGroup key={g.label}>
-            <SidebarGroupLabel>{g.label}</SidebarGroupLabel>
+        {groups.map((g, gi) => (
+          <SidebarGroup key={gi} className={gi === groups.length - 1 ? "mt-auto" : undefined}>
             <SidebarGroupContent>
               <SidebarMenu>
                 {g.items.map((it) => (
@@ -109,64 +91,6 @@ export function AppSidebar({ username, onLogout }: { username: string; onLogout:
           </SidebarGroup>
         ))}
 
-        <SidebarGroup className="mt-auto">
-          <SidebarGroupLabel>服务器</SidebarGroupLabel>
-          <SidebarGroupAction title="加服务器" onClick={() => setAdding(true)}>
-            <PlusIcon />
-          </SidebarGroupAction>
-          <SidebarGroupContent>
-            <SidebarMenu>
-              {!status && <SidebarMenuSkeleton showIcon />}
-              {status?.servers.map((s) => {
-                const disk = diskText(s);
-                return (
-                  <SidebarMenuItem key={s.name}>
-                    <DropdownMenu modal={false}>
-                      <DropdownMenuTrigger asChild>
-                        <SidebarMenuButton
-                          className={s.agent_outdated ? "pr-8" : undefined}
-                          tooltip={`${s.name} · ${serverText(s)}${s.private_addr ? ` · 内网 ${s.private_addr.ip}` : ""}${disk ? ` · 磁盘剩 ${disk.text}` : ""}`}
-                        >
-                          <span className="grid size-4 place-items-center">
-                            <Dot tone={serverTone(s)} />
-                          </span>
-                          <span className="group-data-[collapsible=icon]:hidden">{s.name}</span>
-                          {disk?.low && <HardDriveIcon className="text-warning group-data-[collapsible=icon]:hidden" />}
-                          <span className="ml-auto font-mono text-xs text-muted-foreground group-data-[collapsible=icon]:hidden">{serverText(s)}</span>
-                        </SidebarMenuButton>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent side="right" align="start" className="min-w-52">
-                        {disk && (
-                          <div className={`px-2 py-1.5 text-xs ${disk.low ? "text-warning" : "text-muted-foreground"}`}>磁盘剩 {disk.text}</div>
-                        )}
-                        <DropdownMenuItem onSelect={() => navigate(`/servers/${encodeURIComponent(s.name)}`)}>
-                          <ServerIcon />
-                          详情
-                        </DropdownMenuItem>
-                        <DropdownMenuItem disabled={!s.online} onSelect={() => actions.prune(s.name)}>
-                          <Trash2Icon />
-                          清理没在用的镜像
-                        </DropdownMenuItem>
-                        {s.agent_outdated && (
-                          <DropdownMenuItem onSelect={() => actions.upgradeAgent(s.name)}>
-                            <ArrowUpCircleIcon />
-                            升级 agent
-                          </DropdownMenuItem>
-                        )}
-                      </DropdownMenuContent>
-                    </DropdownMenu>
-                    {s.agent_outdated && (
-                      <SidebarMenuAction title="升级 agent" onClick={() => actions.upgradeAgent(s.name)}>
-                        <ArrowUpCircleIcon className="text-warning" />
-                      </SidebarMenuAction>
-                    )}
-                  </SidebarMenuItem>
-                );
-              })}
-            </SidebarMenu>
-          </SidebarGroupContent>
-        </SidebarGroup>
-        <AddServer open={adding} onClose={() => setAdding(false)} />
       </SidebarContent>
 
       <SidebarFooter>
@@ -187,14 +111,6 @@ export function AppSidebar({ username, onLogout }: { username: string; onLogout:
                 <DropdownMenuItem onSelect={toggle}>
                   {theme === "light" ? <MoonIcon /> : <SunIcon />}
                   {theme === "light" ? "切换到深色" : "切换到浅色"}
-                </DropdownMenuItem>
-                <DropdownMenuItem onSelect={actions.basicAuth}>
-                  <KeyRoundIcon />
-                  登录保护账号
-                </DropdownMenuItem>
-                <DropdownMenuItem onSelect={actions.upgrade}>
-                  <ArrowUpCircleIcon />
-                  升级 Wharf
                 </DropdownMenuItem>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem onSelect={onLogout}>

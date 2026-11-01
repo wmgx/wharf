@@ -351,8 +351,25 @@ export interface RunStep {
 
 export interface Run {
   run_id: string;
+  plan_id?: string;
   status: "running" | "succeeded" | "failed" | "cancelled";
+  started_at?: string;
+  finished_at?: string;
   steps: RunStep[];
+}
+
+/** 宿主机终端和命令执行的审计记录。 */
+export interface ShellLog {
+  id: number;
+  at: string;
+  actor: string;
+  server: string;
+  kind: string;
+  command?: string;
+  exit_code?: number;
+  duration_ms?: number;
+  output_bytes?: number;
+  error?: string;
 }
 
 export interface ImageInfo {

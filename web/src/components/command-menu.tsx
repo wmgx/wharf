@@ -1,4 +1,4 @@
-import { AnchorIcon, ArrowRightLeftIcon, ArrowUpCircleIcon, BoxIcon, BoxesIcon, CloudIcon, HistoryIcon, LogOutIcon, MoonIcon, NetworkIcon, PlusIcon, RefreshCwIcon, ScrollTextIcon, SearchIcon, ServerIcon, SunIcon, Trash2Icon, WaypointsIcon } from "lucide-react";
+import { AnchorIcon, ArrowRightLeftIcon, ArrowUpCircleIcon, BoxIcon, BoxesIcon, CableIcon, GlobeIcon, HardDriveIcon, HistoryIcon, LogOutIcon, MoonIcon, NetworkIcon, PlusIcon, RefreshCwIcon, ScrollTextIcon, SearchIcon, ServerIcon, SettingsIcon, SunIcon, Trash2Icon, WaypointsIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
@@ -54,9 +54,9 @@ export function CommandMenu({ onLogout }: { onLogout: () => void }) {
 
   return (
     <>
-      <Button variant="outline" className="h-8 w-full max-w-64 justify-start gap-2 px-2.5 font-normal text-muted-foreground" onClick={() => setOpen(true)}>
+      <Button variant="outline" className="h-8 w-full min-w-0 max-w-64 justify-start gap-2 px-2.5 font-normal text-muted-foreground" onClick={() => setOpen(true)}>
         <SearchIcon />
-        <span className="flex-1 text-left">搜索或执行操作…</span>
+        <span className="flex-1 truncate text-left">搜索或执行操作…</span>
         <Kbd>{isMac ? "⌘" : "Ctrl"} K</Kbd>
       </Button>
       <CommandDialog open={open} onOpenChange={setOpen} title="命令面板" description="搜索服务、网关，或直接执行操作">
@@ -64,25 +64,45 @@ export function CommandMenu({ onLogout }: { onLogout: () => void }) {
         <CommandList>
           <CommandEmpty>没有匹配的结果</CommandEmpty>
           <CommandGroup heading="页面">
-            <CommandItem onSelect={() => run(() => nav("/"))}>
+            <CommandItem value="首页 港口 home" onSelect={() => run(() => nav("/"))}>
               <AnchorIcon />
-              港口
+              首页
             </CommandItem>
-            <CommandItem onSelect={() => run(() => nav("/services"))}>
+            <CommandItem value="服务 services" onSelect={() => run(() => nav("/services"))}>
               <BoxesIcon />
               服务
             </CommandItem>
-            <CommandItem onSelect={() => run(() => nav("/gateways"))}>
+            <CommandItem value="域名 domains route" onSelect={() => run(() => nav("/domains"))}>
+              <GlobeIcon />
+              域名
+            </CommandItem>
+            <CommandItem value="入口 网关 gateway" onSelect={() => run(() => nav("/domains?tab=entries"))}>
               <WaypointsIcon />
-              网关
+              入口
             </CommandItem>
-            <CommandItem value="账号与密钥 accounts cloudflare secret token 备份" onSelect={() => run(() => nav("/accounts"))}>
-              <CloudIcon />
-              账号与密钥
+            <CommandItem value="服务器 servers" onSelect={() => run(() => nav("/servers"))}>
+              <ServerIcon />
+              服务器
             </CommandItem>
-            <CommandItem onSelect={() => run(() => nav("/topology"))}>
+            <CommandItem value="组网 network tailscale" onSelect={() => run(() => nav("/servers?tab=network"))}>
+              <CableIcon />
+              组网
+            </CommandItem>
+            <CommandItem value="活动 执行记录 审计 runs" onSelect={() => run(() => nav("/activity"))}>
+              <HistoryIcon />
+              活动
+            </CommandItem>
+            <CommandItem value="设置 账号 密钥 token cli 备份 settings" onSelect={() => run(() => nav("/settings"))}>
+              <SettingsIcon />
+              设置
+            </CommandItem>
+            <CommandItem value="拓扑 topology" onSelect={() => run(() => nav("/topology"))}>
               <NetworkIcon />
               拓扑
+            </CommandItem>
+            <CommandItem value="数据 备份 data" onSelect={() => run(() => nav("/data"))}>
+              <HardDriveIcon />
+              数据
             </CommandItem>
           </CommandGroup>
           <CommandSeparator />
@@ -105,7 +125,7 @@ export function CommandMenu({ onLogout }: { onLogout: () => void }) {
               </CommandItem>
             ))}
             {status?.gateways.map((g) => (
-              <CommandItem key={g.name} value={`网关 ${g.name} ${g.spec.server}`} onSelect={() => run(() => nav(`/gateways?open=${g.name}`))}>
+              <CommandItem key={g.name} value={`网关 ${g.name} ${g.spec.server}`} onSelect={() => run(() => nav(`/domains?tab=entries&open=${g.name}`))}>
                 <WaypointsIcon />
                 {g.name}
                 <span className="text-xs text-muted-foreground">网关 · {g.spec.server}</span>
@@ -147,7 +167,7 @@ export function CommandMenu({ onLogout }: { onLogout: () => void }) {
               <PlusIcon />
               新建服务
             </CommandItem>
-            <CommandItem value="新建网关 new gateway" onSelect={() => run(() => nav("/gateways?new=1"))}>
+            <CommandItem value="新建入口 网关 new gateway" onSelect={() => run(() => nav("/domains?tab=entries&new=1"))}>
               <PlusIcon />
               新建网关
             </CommandItem>

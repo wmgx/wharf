@@ -18,10 +18,10 @@ export function Problems() {
       <PopoverTrigger asChild>
         <Button variant="ghost" size="sm" className="h-8 gap-1.5 bg-warning/10 text-warning hover:bg-warning/15 hover:text-warning">
           <TriangleAlertIcon />
-          {problems.length} 项需要注意
+          <span>{problems.length}<span className="hidden sm:inline"> 项需要注意</span></span>
         </Button>
       </PopoverTrigger>
-      <PopoverContent align="end" className="w-96 p-0">
+      <PopoverContent align="end" className="w-[min(24rem,calc(100vw-2rem))] p-0">
         <div className="border-b px-4 py-3 text-sm font-medium">需要注意</div>
         <ul className="max-h-80 divide-y overflow-auto">
           {problems.map((p) => {

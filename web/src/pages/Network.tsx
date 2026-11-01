@@ -3,7 +3,7 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { api, usePoll } from "@/api";
 import { useActions } from "@/components/actions";
-import { ago, CardsSkeleton, ErrorNote, MODES, PageHeader } from "@/components/common";
+import { ago, CardsSkeleton, ErrorNote, MODES } from "@/components/common";
 import { TailscaleSetup } from "@/components/tailscale-setup";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -51,8 +51,8 @@ function ModeMenu({ server }: { server: NetworkView["servers"][number] }) {
   );
 }
 
-/** 组网：各机器怎么接入、谁能连谁的内网地址（design 2.10）。 */
-export function Network() {
+/** 服务器页的"组网"标签：各机器怎么接入、谁能连谁的内网地址（design 2.10）。 */
+export function NetworkPanel() {
   const { data, error, refresh } = usePoll<NetworkView>("/api/network", 30000);
   const [probing, setProbing] = useState(false);
 
@@ -73,18 +73,16 @@ export function Network() {
 
   return (
     <>
-      <PageHeader
-        title="组网"
-        actions={
-          <>
-            <TailscaleSetup />
-            <Button variant="outline" onClick={probe} disabled={probing}>
-              <RadarIcon />
-              {probing ? "探测中" : "探测"}
-            </Button>
-          </>
-        }
-      />
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <p className="text-sm text-muted-foreground">服务器之间靠内网地址互相访问；迁移、备份、网关转发都要能连通。</p>
+        <div className="flex items-center gap-2">
+          <TailscaleSetup />
+          <Button variant="outline" size="sm" onClick={probe} disabled={probing}>
+            <RadarIcon />
+            {probing ? "探测中" : "探测"}
+          </Button>
+        </div>
+      </div>
       <ErrorNote error={error} />
       {!data ? (
         <CardsSkeleton count={1} />

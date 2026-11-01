@@ -75,9 +75,9 @@ export function ServerDetail() {
   const host = useHostInfo(name, !!server?.online);
 
   const back = (
-    <Link className="mb-3 inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground" to="/">
+    <Link className="mb-3 inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground" to="/servers">
       <ArrowLeftIcon className="size-3.5" />
-      港口
+      服务器
     </Link>
   );
   if (!server) {
@@ -258,7 +258,7 @@ export function ServerDetail() {
       ) : (
         <div className="flex flex-wrap gap-2">
           {gateways.map((g) => (
-            <Link key={g.name} to={`/gateways?open=${g.name}`} className="rounded-lg border bg-card px-3 py-1.5 text-sm hover:bg-accent">
+            <Link key={g.name} to={`/domains?tab=entries&open=${g.name}`} className="rounded-lg border bg-card px-3 py-1.5 text-sm hover:bg-accent">
               {g.name}
               <span className="ml-2 text-xs text-muted-foreground">网关</span>
             </Link>
