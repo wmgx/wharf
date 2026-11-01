@@ -85,7 +85,7 @@ pub enum AgentMsg {
     #[serde(default)]
     host_shell: bool,
   },
-  Report(AgentReport),
+  Report(Box<AgentReport>),
   Progress {
     id: u64,
     line: String,
@@ -127,6 +127,9 @@ pub struct AgentReport {
   /// `data_dir` 所在磁盘的容量。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub disk: Option<Disk>,
+  /// Docker 镜像和容器所在磁盘的容量，和 `disk` 不是同一块盘时才有。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub docker_disk: Option<Disk>,
   /// 资源采样，每分钟一次（其余上报没有）。控制面存进曲线后不再保留。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub metrics: Option<Box<Metrics>>,

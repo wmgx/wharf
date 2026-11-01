@@ -1,4 +1,4 @@
-import { ArrowRightLeftIcon, CloudIcon, EllipsisIcon, HardDriveIcon, NetworkIcon, HistoryIcon, PlayIcon, PlusIcon, RefreshCwIcon, RotateCwIcon, ScrollTextIcon, SquareIcon, Trash2Icon } from "lucide-react";
+import { ArrowRightLeftIcon, CloudIcon, EllipsisIcon, HistoryIcon, PlayIcon, PlusIcon, RefreshCwIcon, RotateCwIcon, ScrollTextIcon, SquareIcon, Trash2Icon } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useActions } from "@/components/actions";
 import { Empty, PageHeader, ServerTag, StatusBadge, imageOf, type Tone } from "@/components/common";
@@ -10,6 +10,9 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { useStatus } from "@/status";
 import type { ServiceView, Status } from "@/types";
 import { UnmanagedList } from "./containers";
+import { Data } from "./Data";
+import { useTab } from "@/components/page-tabs";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { serviceTruth } from "@/components/health";
 import { EdgeList, KIND_NAME, edgeSourceLabel, edgeTone } from "./edge";
 import { NewService } from "./NewService";
@@ -41,11 +44,14 @@ function rowsOf(status: Status): Row[] {
   return [...services, ...edge].sort((x, y) => x.name.localeCompare(y.name));
 }
 
+const TABS = ["list", "data"] as const;
+
 export function Services() {
   const { status, refresh } = useStatus();
   const nav = useNavigate();
   const [params, setParams] = useSearchParams();
   const creating = params.get("new") === "1";
+  const [tab, setTab] = useTab(TABS, "list");
   const rows = status ? rowsOf(status) : [];
 
   return (
@@ -54,14 +60,6 @@ export function Services() {
         title="服务"
         actions={
           <>
-            <Button variant="ghost" size="sm" onClick={() => nav("/topology")}>
-              <NetworkIcon />
-              拓扑
-            </Button>
-            <Button variant="ghost" size="sm" onClick={() => nav("/data")}>
-              <HardDriveIcon />
-              数据
-            </Button>
             <Button onClick={() => setParams({ new: "1" })}>
               <PlusIcon />
               新建服务
@@ -69,72 +67,81 @@ export function Services() {
           </>
         }
       />
-      {!status ? (
-        <Skeleton className="h-40 rounded-xl" />
-      ) : rows.length === 0 ? (
-        <Empty>还没有服务。点右上角"新建服务"，从镜像、git 仓库或 compose 部署第一个。</Empty>
-      ) : (
-        <>
-          <div className="hidden overflow-hidden rounded-xl border bg-card shadow-xs md:block">
-            <Table>
-              <TableHeader className="bg-muted/50">
-                <TableRow>
-                  <TableHead className="pl-4">服务</TableHead>
-                  <TableHead>状态</TableHead>
-                  <TableHead>运行在</TableHead>
-                  <TableHead>来源</TableHead>
-                  <TableHead>域名</TableHead>
-                  <TableHead className="w-12" />
-                </TableRow>
-              </TableHeader>
-              <TableBody>
+      <Tabs value={tab} onValueChange={(v) => setTab(v as (typeof TABS)[number])}>
+        <TabsList className="mb-4">
+          <TabsTrigger value="list">服务</TabsTrigger>
+          <TabsTrigger value="data">数据与备份</TabsTrigger>
+        </TabsList>
+        <TabsContent value="list">
+          {!status ? (
+            <Skeleton className="h-40 rounded-xl" />
+          ) : rows.length === 0 ? (
+            <Empty>还没有服务。点右上角"新建服务"，从镜像、git 仓库或 compose 部署第一个。</Empty>
+          ) : (
+            <>
+              <div className="hidden overflow-hidden rounded-xl border bg-card shadow-xs md:block">
+                <Table>
+                  <TableHeader className="bg-muted/50">
+                    <TableRow>
+                      <TableHead className="pl-4">服务</TableHead>
+                      <TableHead>状态</TableHead>
+                      <TableHead>运行在</TableHead>
+                      <TableHead>来源</TableHead>
+                      <TableHead>域名</TableHead>
+                      <TableHead className="w-12" />
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {rows.map((r) => (
+                      <TableRow key={r.to} className="cursor-pointer" onClick={() => nav(r.to)}>
+                        <TableCell className="pl-4 font-medium">
+                          <span className="inline-flex items-center gap-1.5">
+                            {!r.svc && <CloudIcon className="size-3.5 text-muted-foreground" />}
+                            {r.name}
+                          </span>
+                        </TableCell>
+                        <TableCell>
+                          <StatusBadge tone={r.tone}>{r.text}</StatusBadge>
+                        </TableCell>
+                        <TableCell>{r.svc ? <ServerTag name={r.where} /> : <Badge variant="secondary">{`Cloudflare ${r.where}`}</Badge>}</TableCell>
+                        <TableCell className="max-w-64 truncate font-mono text-xs text-muted-foreground">{r.source}</TableCell>
+                        <TableCell className="font-mono text-xs">
+                          {r.domains.map((d) => (
+                            <div key={d}>{d}</div>
+                          ))}
+                          {r.domains.length === 0 && <span className="text-muted-foreground">-</span>}
+                        </TableCell>
+                        <TableCell onClick={(e) => e.stopPropagation()}>{r.svc && <RowMenu svc={r.svc} />}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+              <div className="grid gap-2 md:hidden">
                 {rows.map((r) => (
-                  <TableRow key={r.to} className="cursor-pointer" onClick={() => nav(r.to)}>
-                    <TableCell className="pl-4 font-medium">
-                      <span className="inline-flex items-center gap-1.5">
+                  <div key={r.to} className="flex items-start gap-2 rounded-xl border bg-card p-3 shadow-xs" onClick={() => nav(r.to)}>
+                    <div className="grid min-w-0 flex-1 gap-1.5">
+                      <div className="flex items-center gap-1.5 font-medium">
                         {!r.svc && <CloudIcon className="size-3.5 text-muted-foreground" />}
                         {r.name}
-                      </span>
-                    </TableCell>
-                    <TableCell>
-                      <StatusBadge tone={r.tone}>{r.text}</StatusBadge>
-                    </TableCell>
-                    <TableCell>{r.svc ? <ServerTag name={r.where} /> : <Badge variant="secondary">{`Cloudflare ${r.where}`}</Badge>}</TableCell>
-                    <TableCell className="max-w-64 truncate font-mono text-xs text-muted-foreground">{r.source}</TableCell>
-                    <TableCell className="font-mono text-xs">
-                      {r.domains.map((d) => (
-                        <div key={d}>{d}</div>
-                      ))}
-                      {r.domains.length === 0 && <span className="text-muted-foreground">-</span>}
-                    </TableCell>
-                    <TableCell onClick={(e) => e.stopPropagation()}>{r.svc && <RowMenu svc={r.svc} />}</TableCell>
-                  </TableRow>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+                        <StatusBadge tone={r.tone}>{r.text}</StatusBadge>
+                        {r.svc ? <ServerTag name={r.where} /> : <span>{`Cloudflare ${r.where}`}</span>}
+                      </div>
+                      {r.domains.length > 0 && <div className="truncate font-mono text-xs text-muted-foreground">{r.domains.join(" · ")}</div>}
+                    </div>
+                    <div onClick={(e) => e.stopPropagation()}>{r.svc && <RowMenu svc={r.svc} />}</div>
+                  </div>
                 ))}
-              </TableBody>
-            </Table>
-          </div>
-          <div className="grid gap-2 md:hidden">
-            {rows.map((r) => (
-              <div key={r.to} className="flex items-start gap-2 rounded-xl border bg-card p-3 shadow-xs" onClick={() => nav(r.to)}>
-                <div className="grid min-w-0 flex-1 gap-1.5">
-                  <div className="flex items-center gap-1.5 font-medium">
-                    {!r.svc && <CloudIcon className="size-3.5 text-muted-foreground" />}
-                    {r.name}
-                  </div>
-                  <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
-                    <StatusBadge tone={r.tone}>{r.text}</StatusBadge>
-                    {r.svc ? <ServerTag name={r.where} /> : <span>{`Cloudflare ${r.where}`}</span>}
-                  </div>
-                  {r.domains.length > 0 && <div className="truncate font-mono text-xs text-muted-foreground">{r.domains.join(" · ")}</div>}
-                </div>
-                <div onClick={(e) => e.stopPropagation()}>{r.svc && <RowMenu svc={r.svc} />}</div>
               </div>
-            ))}
-          </div>
-        </>
-      )}
-      <UnmanagedList />
-      <EdgeList />
+            </>
+          )}
+          <UnmanagedList />
+          <EdgeList />
+        </TabsContent>
+        <TabsContent value="data">{tab === "data" && <Data />}</TabsContent>
+      </Tabs>
       <NewService
         open={creating}
         onClose={() => {

@@ -150,6 +150,7 @@ async fn main() -> anyhow::Result<()> {
   agent_upgrade::spawn_agents_after(state.clone());
   heal::spawn(state.clone());
   doctor::spawn(state.clone());
+  views::spawn_live(state.clone());
 
   let listener = tokio::net::TcpListener::bind(cli.listen)
     .await

@@ -1,6 +1,6 @@
 import { useNavigate } from "react-router-dom";
 import { usePoll } from "@/api";
-import { ago, Empty, ErrorNote, PageHeader, ServerTag, StatusBadge, type Tone } from "@/components/common";
+import { ago, Empty, ErrorNote, ServerTag, StatusBadge, type Tone } from "@/components/common";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import type { DataKind, DataStatus, DataView } from "@/types";
@@ -37,7 +37,6 @@ export function Data() {
 
   return (
     <>
-      <PageHeader title="数据" />
       {error && <ErrorNote error={error} />}
       {!data ? (
         <Skeleton className="h-48 rounded-xl" />

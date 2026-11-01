@@ -1,6 +1,10 @@
 //! 组装 API 视图，必要时向 agent 查实时状态。
 
-use std::{collections::BTreeMap, time::Duration};
+use std::{
+  collections::BTreeMap,
+  sync::{Arc, Mutex},
+  time::{Duration, Instant},
+};
 
 use wharf_api_types::{
   ApiError,
@@ -91,6 +95,52 @@ pub async fn live_states(state: &AppState, world: &World) -> LiveMap {
     .await
     .into_iter()
     .collect()
+}
+
+/// 后台每隔 [LIVE_EVERY] 查一次各服务器现状，`status` 读这份缓存，不用等最慢的那台。
+static LIVE_CACHE: Mutex<Option<(Instant, LiveMap)>> = Mutex::new(None);
+const LIVE_EVERY: Duration = Duration::from_secs(5);
+/// 缓存比这更旧（后台卡住）时 `status` 自己现查。
+const LIVE_STALE: Duration = Duration::from_secs(30);
+
+async fn refresh_live(state: &AppState) -> Result<LiveMap, ApiError> {
+  let snap = snapshot::load(&state.db).await?;
+  let live = live_states(state, &snap.world).await;
+  if let Ok(mut c) = LIVE_CACHE.lock() {
+    *c = Some((Instant::now(), live.clone()));
+  }
+  Ok(live)
+}
+
+/// 有改动执行完一步时调用：马上刷新一次，页面不用等下一轮。
+pub fn refresh_live_soon(state: Arc<AppState>) {
+  tokio::spawn(async move {
+    let _ = refresh_live(&state).await;
+  });
+}
+
+pub fn spawn_live(state: Arc<AppState>) {
+  tokio::spawn(async move {
+    loop {
+      if let Err(e) = refresh_live(&state).await {
+        tracing::warn!("刷新服务器现状失败：{e}");
+      }
+      tokio::time::sleep(LIVE_EVERY).await;
+    }
+  });
+}
+
+/// 缓存里的现状；没有或太旧时现查。
+async fn cached_live(state: &AppState, world: &World) -> LiveMap {
+  let cached = LIVE_CACHE
+    .lock()
+    .ok()
+    .and_then(|c| c.clone())
+    .filter(|(at, _)| at.elapsed() < LIVE_STALE);
+  match cached {
+    Some((_, live)) => live,
+    None => live_states(state, world).await,
+  }
 }
 
 /// `stopped`：配置要求停止，这时容器停着才算和配置一致。
@@ -315,7 +365,7 @@ pub async fn status(
 ) -> Result<Status, wharf_api_types::ApiError> {
   let snap = snapshot::load(&state.db).await?;
   let net = snap.net(&snap.world);
-  let live = live_states(state, &snap.world).await;
+  let live = cached_live(state, &snap.world).await;
   let mut problems = Vec::new();
   let servers: Vec<ServerView> = snap
     .world
@@ -330,14 +380,21 @@ pub async fn status(
     } else if !s.online {
       problems.push(format!("服务器 {} 离线", s.name));
     }
-    if let Some(d) = s.report.as_ref().and_then(|r| r.disk)
-      && low_disk(d)
-    {
-      problems.push(format!(
-        "服务器 {} 磁盘只剩 {:.1} GB",
-        s.name,
-        d.free as f64 / GB
-      ));
+    let disks = s
+      .report
+      .as_ref()
+      .map(|r| [("磁盘", r.disk), ("Docker 所在磁盘", r.docker_disk)])
+      .unwrap_or_default();
+    for (label, d) in disks {
+      if let Some(d) = d
+        && low_disk(d)
+      {
+        problems.push(format!(
+          "服务器 {} {label}只剩 {:.1} GB",
+          s.name,
+          d.free as f64 / GB
+        ));
+      }
     }
   }
   let services: Vec<ServiceView> = snap

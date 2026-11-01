@@ -144,7 +144,7 @@ async fn session(
           report.metrics = ops.reporter.metrics().await.map(Box::new);
         }
         sample = !sample;
-        if tx.send(AgentMsg::Report(report)).await.is_err() {
+        if tx.send(AgentMsg::Report(Box::new(report))).await.is_err() {
           break;
         }
         tokio::select! {

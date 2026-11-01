@@ -65,6 +65,7 @@ impl Reporter {
       data_dir: self.docker.data_dir.display().to_string(),
       build: wharf_api_types::BUILD.to_string(),
       disk: disk(&self.docker.data_dir),
+      docker_disk: docker_disk(&self.docker.data_dir),
       metrics: None,
     }
   }
@@ -182,6 +183,13 @@ async fn detect_public_ip() -> Option<String> {
     }
   }
   None
+}
+
+/// agent 容器的根目录是 overlay，statvfs 看到的是 Docker 存储目录所在的磁盘。
+/// 和数据目录是同一块盘（容量相同）时不重复报。
+fn docker_disk(data_dir: &std::path::Path) -> Option<Disk> {
+  let d = disk(std::path::Path::new("/"))?;
+  (disk(data_dir).map(|x| x.total) != Some(d.total)).then_some(d)
 }
 
 /// 挂载进来的数据目录在宿主机的磁盘上，statvfs 看到的就是宿主机的容量。

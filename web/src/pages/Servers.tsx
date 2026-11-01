@@ -1,17 +1,21 @@
 import { ArrowUpCircleIcon, PlusIcon, ServerIcon } from "lucide-react";
-import { useState } from "react";
+import { lazy, Suspense, useState } from "react";
 import { Link } from "react-router-dom";
 import { AddServer } from "@/components/add-server";
 import { CardsSkeleton, Dot, Empty, PageHeader, StatusBadge, ago, diskText, serverText, serverTone } from "@/components/common";
 import { useTab } from "@/components/page-tabs";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useStatus } from "@/status";
 import type { ServerView, Status } from "@/types";
 import { NetworkPanel } from "./Network";
 
-const TABS = ["list", "network"] as const;
+const TABS = ["list", "topology", "network"] as const;
+
+// 拓扑图依赖的 @xyflow/react 比较大，只在打开拓扑标签时加载。
+const Topology = lazy(() => import("./Topology").then((m) => ({ default: m.Topology })));
 
 /** 服务器：每台一张卡片；组网是一个标签。 */
 export function Servers() {
@@ -34,6 +38,7 @@ export function Servers() {
       <Tabs value={tab} onValueChange={(v) => setTab(v as (typeof TABS)[number])}>
         <TabsList className="mb-4">
           <TabsTrigger value="list">服务器</TabsTrigger>
+          <TabsTrigger value="topology">拓扑</TabsTrigger>
           <TabsTrigger value="network">组网</TabsTrigger>
         </TabsList>
         <TabsContent value="list">
@@ -49,6 +54,13 @@ export function Servers() {
                 <ServerCard key={s.name} s={s} status={status} />
               ))}
             </div>
+          )}
+        </TabsContent>
+        <TabsContent value="topology">
+          {tab === "topology" && (
+            <Suspense fallback={<Skeleton className="h-[480px] rounded-xl" />}>
+              <Topology />
+            </Suspense>
           )}
         </TabsContent>
         <TabsContent value="network">{tab === "network" && <NetworkPanel />}</TabsContent>

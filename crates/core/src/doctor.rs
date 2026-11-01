@@ -53,7 +53,7 @@ pub async fn doctor(
   Ok(Json(report))
 }
 
-/// 最近一次检查全部域名的结果（后台每 5 分钟一次，或手动 `doctor`）。
+/// 最近一次检查全部域名的结果（后台每 2 分钟一次，或手动 `doctor`）。
 static LAST: std::sync::RwLock<Option<DoctorReport>> =
   std::sync::RwLock::new(None);
 
@@ -67,8 +67,9 @@ pub fn last() -> Option<DoctorReport> {
   LAST.read().ok().and_then(|l| l.clone())
 }
 
-const FIRST_TICK: Duration = Duration::from_secs(90);
-const TICK: Duration = Duration::from_secs(300);
+/// 启动后先等 agent 连上再查，否则第一次全是"容器查不到"。
+const FIRST_TICK: Duration = Duration::from_secs(20);
+const TICK: Duration = Duration::from_secs(120);
 
 /// 后台定时检查全部域名：页面上"服务好不好"以网址能不能打开为准。
 pub fn spawn(state: Arc<AppState>) {

@@ -102,11 +102,11 @@ export function CommandMenu({ onLogout }: { onLogout: () => void }) {
               <SettingsIcon />
               设置
             </CommandItem>
-            <CommandItem value="拓扑 topology" onSelect={() => run(() => nav("/topology"))}>
+            <CommandItem value="拓扑 topology" onSelect={() => run(() => nav("/servers?tab=topology"))}>
               <NetworkIcon />
               拓扑
             </CommandItem>
-            <CommandItem value="数据 备份 data" onSelect={() => run(() => nav("/data"))}>
+            <CommandItem value="数据 备份 data" onSelect={() => run(() => nav("/services?tab=data"))}>
               <HardDriveIcon />
               数据
             </CommandItem>

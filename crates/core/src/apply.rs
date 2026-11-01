@@ -594,6 +594,7 @@ async fn execute(
     }
     let snapshot_run = lock(&run).clone();
     let _ = persist(&state, &snapshot_run).await;
+    crate::views::refresh_live_soon(state.clone());
   }
   let final_run = {
     let mut r = lock(&run);

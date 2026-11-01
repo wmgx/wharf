@@ -1,4 +1,4 @@
-import { Suspense, lazy, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { Activity } from "./pages/Activity";
 import { Domains } from "./pages/Domains";
@@ -12,11 +12,9 @@ import { NewMenu } from "./components/new-menu";
 import { Problems } from "./components/problems";
 import { Separator } from "./components/ui/separator";
 import { SidebarInset, SidebarProvider, SidebarTrigger } from "./components/ui/sidebar";
-import { Skeleton } from "./components/ui/skeleton";
 import { Toaster } from "./components/ui/sonner";
 import { announceUpgrade } from "./components/upgrade";
 import { TooltipProvider } from "./components/ui/tooltip";
-import { Data } from "./pages/Data";
 import { Settings } from "./pages/Settings";
 import { Home } from "./pages/Home";
 import { Login } from "./pages/Login";
@@ -29,8 +27,6 @@ import { StatusContext } from "./status";
 import { ThemeProvider } from "./theme";
 import type { Status } from "./types";
 
-// 拓扑图依赖的 @xyflow/react 比较大，只在打开拓扑页时加载。
-const Topology = lazy(() => import("./pages/Topology").then((m) => ({ default: m.Topology })));
 
 export function App() {
   // null：还在问控制面是否已登录。
@@ -73,8 +69,6 @@ const TITLES: [string, string][] = [
   ["/servers", "服务器"],
   ["/activity", "活动"],
   ["/settings", "设置"],
-  ["/topology", "拓扑"],
-  ["/data", "数据"],
   ["/", "首页"],
 ];
 
@@ -113,11 +107,11 @@ function Shell({ username, onLogout }: { username: string; onLogout: () => void 
                   <Route path="/domains" element={<Domains />} />
                   <Route path="/activity" element={<Activity />} />
                   <Route path="/settings" element={<Settings />} />
-                  <Route path="/data" element={<Data />} />
+                  <Route path="/data" element={<Moved to="/services" tab="data" />} />
                   <Route path="/gateways" element={<Moved to="/domains" tab="entries" />} />
                   <Route path="/network" element={<Moved to="/servers" tab="network" />} />
                   <Route path="/accounts" element={<Moved to="/settings" />} />
-                  <Route path="/topology" element={<Suspense fallback={<Skeleton className="h-[480px] rounded-xl" />}><Topology /></Suspense>} />
+                  <Route path="/topology" element={<Moved to="/servers" tab="topology" />} />
                   <Route path="*" element={<Navigate to="/" replace />} />
                 </Routes>
               </Boundary>

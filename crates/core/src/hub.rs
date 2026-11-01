@@ -437,7 +437,7 @@ async fn handle_socket(
             if let Some(m) = report.metrics.take() {
               crate::metrics::record_report(&state, &server, *m).await;
             }
-            touch(&state, &server, Some(report)).await
+            touch(&state, &server, Some(*report)).await
           }
           Ok(AgentMsg::Progress { id, line }) => {
             let progress = lock(&conn.pending).get(&id).and_then(|p| p.progress.clone());

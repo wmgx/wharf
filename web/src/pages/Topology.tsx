@@ -5,7 +5,7 @@ import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { usePoll } from "@/api";
 import { useActions } from "@/components/actions";
-import { diskText, Dot, MODES, PageHeader, liveTone, serverText, serviceTone, serverTone, type Tone } from "@/components/common";
+import { diskText, Dot, MODES, liveTone, serverText, serviceTone, serverTone, type Tone } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { useStatus } from "@/status";
@@ -242,7 +242,6 @@ export function Topology() {
 
   return (
     <>
-      <PageHeader title="拓扑" />
       <div className="mb-3 flex flex-wrap gap-5 text-xs text-muted-foreground">
         <Legend color={go}>加密 / 本机 / 互通</Legend>
         <Legend color={signal} dashed>

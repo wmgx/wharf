@@ -40,6 +40,7 @@ export interface AgentReport {
   build?: string;
   lan_ips?: string[];
   disk?: { total: number; free: number };
+  docker_disk?: { total: number; free: number };
 }
 
 export interface ServerView {
