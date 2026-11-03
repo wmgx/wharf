@@ -1,5 +1,5 @@
 import { CodePackageField, type CodePackage } from "@/components/code-package";
-import { ComposeEditor, MirrorHint, parseCompose, type ComposeInfo } from "@/components/compose";
+import { ComposeField, MirrorHint, composePorts, parseCompose } from "@/components/compose";
 import { ArrowRightIcon } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
@@ -57,13 +57,6 @@ interface Draft {
   hostname: string;
   entry: string;
   pkg: CodePackage | null;
-}
-
-/** compose 里写的端口转成表单端口：名称取服务名，同一服务多个端口时加容器端口区分。 */
-function composePorts(info: ComposeInfo): PortSpec[] {
-  const count = new Map<string, number>();
-  info.ports.forEach((p) => count.set(p.service, (count.get(p.service) ?? 0) + 1));
-  return info.ports.map((p) => ({ name: toName(count.get(p.service)! > 1 ? `${p.service}-${p.container}` : p.service), host: p.host }));
 }
 
 /** 上一次提交的表单。计划生成失败或想改时点"返回修改"，用它恢复。 */
@@ -214,22 +207,13 @@ function Form({ onClose }: { onClose: () => void }) {
           </Field>
         ) : (
           <Field label="compose.yaml" htmlFor="compose">
-            <ComposeEditor
+            <ComposeField
               id="compose"
               placeholder={"services:\n  app:\n    image: nginx\n    ports:\n      - 127.0.0.1:8080:80\n    volumes:\n      - ./data:/data"}
               value={compose}
               onChange={onCompose}
+              info={composeInfo}
             />
-            {composeInfo.volumes.length > 0 && (
-              <div className="grid gap-0.5 text-xs text-muted-foreground">
-                <div>识别到的挂载：</div>
-                {composeInfo.volumes.map((v, i) => (
-                  <div key={i} className="font-mono">
-                    {v.service}：{v.source} → {v.target}
-                  </div>
-                ))}
-              </div>
-            )}
           </Field>
         )}
 

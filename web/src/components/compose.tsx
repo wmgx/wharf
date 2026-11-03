@@ -1,6 +1,7 @@
 import { Link } from "react-router-dom";
 import { useRef } from "react";
-import type { ServerView } from "@/types";
+import type { PortSpec, ServerView } from "@/types";
+import { toName } from "@/components/fields";
 import { cn } from "@/lib/utils";
 
 export interface ComposePort {
@@ -185,5 +186,31 @@ export function ComposeEditor({ id, value, onChange, placeholder }: { id?: strin
         className={cn(shared, "resize-y border-input bg-transparent text-transparent caret-foreground outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/50")}
       />
     </div>
+  );
+}
+
+/** compose 里写的端口转成表单端口：名称取服务名，同一服务多个端口时加容器端口区分。 */
+export function composePorts(info: ComposeInfo): PortSpec[] {
+  const count = new Map<string, number>();
+  info.ports.forEach((p) => count.set(p.service, (count.get(p.service) ?? 0) + 1));
+  return info.ports.map((p) => ({ name: toName(count.get(p.service)! > 1 ? `${p.service}-${p.container}` : p.service), host: p.host }));
+}
+
+/** 新建和编辑共用：高亮编辑框 + 识别到的挂载。 */
+export function ComposeField({ info, ...editor }: { id?: string; value: string; onChange: (v: string) => void; placeholder?: string; info: ComposeInfo }) {
+  return (
+    <>
+      <ComposeEditor {...editor} />
+      {info.volumes.length > 0 && (
+        <div className="grid gap-0.5 text-xs text-muted-foreground">
+          <div>识别到的挂载：</div>
+          {info.volumes.map((v, i) => (
+            <div key={i} className="font-mono">
+              {v.service}：{v.source} → {v.target}
+            </div>
+          ))}
+        </div>
+      )}
+    </>
   );
 }

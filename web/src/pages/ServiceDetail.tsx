@@ -1,5 +1,6 @@
 import { PackageIcon, WrenchIcon, ArrowRightIcon, ArrowRightLeftIcon, ArrowLeftIcon, ArrowUpRightIcon, EllipsisIcon, HammerIcon, HistoryIcon, LockIcon, LockOpenIcon, PencilIcon, PlayIcon, PlusIcon, RefreshCwIcon, RotateCwIcon, SquareIcon, Trash2Icon, XIcon } from "lucide-react";
-import { Suspense, lazy, useEffect, useState } from "react";
+import { Suspense, lazy, useEffect, useMemo, useState } from "react";
+import { ComposeField, MirrorHint, composePorts, parseCompose } from "@/components/compose";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { api, usePoll } from "@/api";
 import { useActions } from "@/components/actions";
@@ -577,7 +578,15 @@ function EditForm({ svc, onClose }: { svc: ServiceView; onClose: () => void }) {
   const [repo, setRepo] = useState(build?.git?.repo ?? "");
   const [gitRef, setGitRef] = useState(build?.git?.ref ?? "");
   const [how, setHow] = useState<BuildHow>(howOf(build));
-  const [ports, setPorts] = useState<PortSpec[]>(svc.spec.ports ?? []);
+  const composeInfo = useMemo(() => parseCompose(compose), [compose]);
+  // 原来没填端口的 compose 服务，按 compose 内容自动填；手动改过端口后不再覆盖。
+  const [portsTouched, setPortsTouched] = useState(!!svc.spec.ports?.length);
+  const [ports, setPorts] = useState<PortSpec[]>(() => (isCompose && !svc.spec.ports?.length ? composePorts(parseCompose(compose)) : (svc.spec.ports ?? [])));
+  const { status } = useStatus();
+  const onCompose = (text: string) => {
+    setCompose(text);
+    if (!portsTouched) setPorts(composePorts(parseCompose(text)));
+  };
   const [envText, setEnvText] = useState(formatEnv(svc.spec.env));
   const submit = () => {
     const spec = {
@@ -622,12 +631,22 @@ function EditForm({ svc, onClose }: { svc: ServiceView; onClose: () => void }) {
           </Field>
         ) : (
           <Field label="compose.yaml" htmlFor="compose">
-            <Textarea id="compose" className="min-h-48 font-mono text-xs" value={compose} onChange={(e) => setCompose(e.target.value)} />
+            <ComposeField id="compose" value={compose} onChange={onCompose} info={composeInfo} />
           </Field>
+        )}
+        {(isImage || isCompose) && (
+          <MirrorHint server={status?.servers.find((s) => s.name === svc.spec.server)} images={isImage ? [image] : composeInfo.images} />
         )}
         {build && <BuildEditor value={how} onChange={setHow} />}
         <Field label="端口">
-          <PortsEditor ports={ports} onChange={setPorts} compose={isCompose} />
+          <PortsEditor
+            ports={ports}
+            onChange={(p) => {
+              setPortsTouched(true);
+              setPorts(p);
+            }}
+            compose={isCompose}
+          />
         </Field>
         {(isImage || build) && (
           <Field label="环境变量" htmlFor="env">
