@@ -2,7 +2,7 @@ import { ArrowRightIcon, ArrowUpRightIcon, CheckIcon, CloudIcon, PlusIcon } from
 import type { CSSProperties } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { usePoll } from "@/api";
-import { CardsSkeleton, Mark, PageHeader, SectionTitle, ServerTag, StatusBadge, type Tone } from "@/components/common";
+import { CardsSkeleton, CopyButton, Mark, PageHeader, SectionTitle, ServerTag, StatusBadge, type Tone } from "@/components/common";
 import { serviceTruth } from "@/components/health";
 import { Button } from "@/components/ui/button";
 import { useStatus } from "@/status";
@@ -73,13 +73,19 @@ function Cards({ items }: { items: Item[] }) {
     <div className="grid grid-cols-[repeat(auto-fill,minmax(min(100%,260px),1fr))] gap-3">
       {items.map((it, i) => {
         const style = { animationDelay: `${i * 30}ms` } as CSSProperties;
+        // 只在内网的服务点卡片直接打开内网地址。
+        const href = it.url ?? (it.address ? `http://${it.address}` : undefined);
+        const shown = it.url ? it.url.replace(/^https?:\/\//, "") : it.address;
         const body = (
           <>
             <div className="flex items-center gap-3">
               <Mark name={it.name} url={it.url} />
               <div className="min-w-0">
                 <div className="font-semibold">{it.name}</div>
-                <div className="truncate font-mono text-xs text-muted-foreground">{it.url ? it.url.replace(/^https?:\/\//, "") : (it.address ?? "-")}</div>
+                <div className="flex min-w-0 items-center gap-0.5 font-mono text-xs text-muted-foreground">
+                  <span className="truncate">{shown ?? "-"}</span>
+                  {shown && <CopyButton text={shown} className="size-5 opacity-0 transition-opacity group-hover:opacity-100" />}
+                </div>
               </div>
             </div>
             <div className="flex items-center gap-1.5">
@@ -104,12 +110,12 @@ function Cards({ items }: { items: Item[] }) {
               >
                 详情
               </span>
-              {it.url && <ArrowUpRightIcon className="size-4 text-muted-foreground transition-transform group-hover:translate-x-0.5 group-hover:-translate-y-0.5 group-hover:text-primary" />}
+              {href && <ArrowUpRightIcon className="size-4 text-muted-foreground transition-transform group-hover:translate-x-0.5 group-hover:-translate-y-0.5 group-hover:text-primary" />}
             </div>
           </>
         );
-        return it.url ? (
-          <a key={it.detail} className={card} style={style} href={it.url} target="_blank" rel="noreferrer">
+        return href ? (
+          <a key={it.detail} className={card} style={style} href={href} target="_blank" rel="noreferrer">
             {body}
           </a>
         ) : (

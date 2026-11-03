@@ -5,7 +5,7 @@ import { Link, useParams, useSearchParams } from "react-router-dom";
 import { api, usePoll } from "@/api";
 import { useActions } from "@/components/actions";
 import { BuildEditor, type BuildHow, cleanHow, howOf, howReady } from "@/components/build-editor";
-import { CodeBlock, Dot, Empty, ErrorNote, Notice, PageHeader, ServerTag, StatusBadge, ago, sourceLabel } from "@/components/common";
+import { CodeBlock, CopyButton, Dot, Empty, ErrorNote, Notice, OpenLink, PageHeader, ServerTag, StatusBadge, ago, sourceLabel } from "@/components/common";
 import { Field, PortsEditor, formatEnv, parseEnv, portsFor } from "@/components/fields";
 import { LogStream } from "@/components/LogStream";
 import { MetricsPanel } from "@/components/metrics";
@@ -249,11 +249,14 @@ function Overview({ svc, routes, onTab }: { svc: ServiceView; routes: RouteView[
             <dt className="text-muted-foreground">域名</dt>
             <dd className="grid min-w-0 gap-1">
               {routes.map((r) => (
-                <a key={r.id} className="inline-flex min-w-0 items-center gap-1 font-mono text-[13px] text-primary hover:underline" href={r.url} target="_blank" rel="noreferrer">
-                  {r.spec.auth && <LockIcon className="size-3.5 shrink-0 text-muted-foreground" />}
-                  <span className="truncate">{r.url}</span>
-                  <ArrowUpRightIcon className="size-3.5 shrink-0" />
-                </a>
+                <div key={r.id} className="flex min-w-0 items-center gap-0.5">
+                  <a className="inline-flex min-w-0 items-center gap-1 font-mono text-[13px] text-primary hover:underline" href={r.url} target="_blank" rel="noreferrer">
+                    {r.spec.auth && <LockIcon className="size-3.5 shrink-0 text-muted-foreground" />}
+                    <span className="truncate">{r.url}</span>
+                    <ArrowUpRightIcon className="size-3.5 shrink-0" />
+                  </a>
+                  <CopyButton text={r.url} />
+                </div>
               ))}
               {routes.length === 0 && (
                 <button type="button" className="w-fit text-left text-muted-foreground hover:text-foreground" onClick={() => onTab("domains")}>
@@ -264,8 +267,9 @@ function Overview({ svc, routes, onTab }: { svc: ServiceView; routes: RouteView[
             <dt className="text-muted-foreground">内网地址</dt>
             <dd className="font-mono text-[13px]">
               {Object.entries(svc.addresses).map(([p, a]) => (
-                <div key={p}>
-                  {p} → {a}
+                <div key={p} className="flex items-center gap-1.5">
+                  <span className="text-muted-foreground">{p}</span>
+                  <OpenLink value={a} />
                 </div>
               ))}
               {Object.keys(svc.addresses).length === 0 && "-"}

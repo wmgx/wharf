@@ -1,4 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
+import { ArrowUpRightIcon, CheckIcon, CopyIcon } from "lucide-react";
+import { toast } from "sonner";
 import { ApiError } from "@/api";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -212,4 +214,50 @@ export function ago(iso?: string): string {
   if (s < 3600) return `${Math.floor(s / 60)} 分钟前`;
   if (s < 86400) return `${Math.floor(s / 3600)} 小时前`;
   return new Date(iso).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
+
+/** 复制按钮：点了图标变成对勾，1.5 秒后恢复。不触发外层卡片或行的点击。 */
+export function CopyButton({ text, className }: { text: string; className?: string }) {
+  const [done, setDone] = useState(false);
+  return (
+    <button
+      type="button"
+      aria-label={`复制 ${text}`}
+      title="复制"
+      className={cn("inline-flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground", className)}
+      onClick={async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        try {
+          await navigator.clipboard.writeText(text);
+          setDone(true);
+          setTimeout(() => setDone(false), 1500);
+        } catch {
+          toast.error("复制失败，手动选中复制");
+        }
+      }}
+    >
+      {done ? <CheckIcon className="size-3.5 text-emerald-600" /> : <CopyIcon className="size-3.5" />}
+    </button>
+  );
+}
+
+/** 地址或域名：点击新标签页打开，旁边带复制。`host:port` 按 http 打开，域名按 https。 */
+export function OpenLink({ value, label, className }: { value: string; label?: ReactNode; className?: string }) {
+  const href = /^https?:\/\//.test(value) ? value : /^[\d.]+:\d+$|^\[.*\]:\d+$|^localhost:/.test(value) ? `http://${value}` : `https://${value}`;
+  return (
+    <span className={cn("group/open inline-flex min-w-0 items-center gap-0.5", className)}>
+      <a
+        href={href}
+        target="_blank"
+        rel="noreferrer"
+        onClick={(e) => e.stopPropagation()}
+        className="inline-flex min-w-0 items-center gap-1 truncate hover:text-primary hover:underline underline-offset-2"
+      >
+        <span className="truncate">{label ?? value}</span>
+        <ArrowUpRightIcon className="size-3.5 shrink-0 opacity-60" />
+      </a>
+      <CopyButton text={value.replace(/^https?:\/\//, "")} className="opacity-60 group-hover/open:opacity-100" />
+    </span>
+  );
 }

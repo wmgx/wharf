@@ -1,7 +1,7 @@
 import { ArrowRightLeftIcon, CloudIcon, EllipsisIcon, HistoryIcon, PlayIcon, PlusIcon, RefreshCwIcon, RotateCwIcon, ScrollTextIcon, SquareIcon, Trash2Icon } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useActions } from "@/components/actions";
-import { Empty, PageHeader, ServerTag, StatusBadge, imageOf, type Tone } from "@/components/common";
+import { Empty, OpenLink, PageHeader, ServerTag, StatusBadge, imageOf, type Tone } from "@/components/common";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
@@ -25,6 +25,8 @@ interface Row {
   where: string;
   source: string;
   domains: string[];
+  /** 没有域名时显示的内网地址。 */
+  address?: string;
   tone: Tone;
   text: string;
   svc?: ServiceView;
@@ -34,7 +36,7 @@ function rowsOf(status: Status): Row[] {
   const routes = (name: string) => status.routes.filter((r) => r.spec.service === name).map((r) => r.spec.hostname);
   const services: Row[] = status.services.map((s) => {
     const { tone, text } = serviceTruth(s, status);
-    return { name: s.name, to: `/services/${s.name}`, kind: "服务器", where: s.spec.server, source: imageOf(s), domains: routes(s.name), tone, text, svc: s };
+    return { name: s.name, to: `/services/${s.name}`, kind: "服务器", where: s.spec.server, source: imageOf(s), domains: routes(s.name), address: Object.values(s.addresses)[0], tone, text, svc: s };
   });
   const edge: Row[] = (status.edge_apps ?? []).map((a) => {
     const { tone, text } = edgeTone(a.live, a.drift);
@@ -107,9 +109,11 @@ export function Services() {
                         <TableCell className="max-w-64 truncate font-mono text-xs text-muted-foreground">{r.source}</TableCell>
                         <TableCell className="font-mono text-xs">
                           {r.domains.map((d) => (
-                            <div key={d}>{d}</div>
+                            <div key={d}>
+                              <OpenLink value={d} />
+                            </div>
                           ))}
-                          {r.domains.length === 0 && <span className="text-muted-foreground">-</span>}
+                          {r.domains.length === 0 && (r.address ? <OpenLink value={r.address} className="text-muted-foreground" /> : <span className="text-muted-foreground">-</span>)}
                         </TableCell>
                         <TableCell onClick={(e) => e.stopPropagation()}>{r.svc && <RowMenu svc={r.svc} />}</TableCell>
                       </TableRow>
@@ -129,7 +133,13 @@ export function Services() {
                         <StatusBadge tone={r.tone}>{r.text}</StatusBadge>
                         {r.svc ? <ServerTag name={r.where} /> : <span>{`Cloudflare ${r.where}`}</span>}
                       </div>
-                      {r.domains.length > 0 && <div className="truncate font-mono text-xs text-muted-foreground">{r.domains.join(" · ")}</div>}
+                      {(r.domains.length > 0 || r.address) && (
+                        <div className="flex min-w-0 flex-wrap gap-x-2 font-mono text-xs text-muted-foreground">
+                          {(r.domains.length ? r.domains : [r.address!]).map((d) => (
+                            <OpenLink key={d} value={d} />
+                          ))}
+                        </div>
+                      )}
                     </div>
                     <div onClick={(e) => e.stopPropagation()}>{r.svc && <RowMenu svc={r.svc} />}</div>
                   </div>
