@@ -329,6 +329,13 @@ pub async fn make_plan(
       _ => None,
     })
     .collect();
+  let started = std::time::Instant::now();
+  let mut lap = started;
+  let mut timing = Vec::new();
+  let mut mark = |stage: &str| {
+    timing.push(format!("{stage} {}ms", lap.elapsed().as_millis()));
+    lap = std::time::Instant::now();
+  };
   let resolved = crate::pins::resolve(
     state,
     &snap.applied,
@@ -345,6 +352,7 @@ pub async fn make_plan(
     &mut warnings,
   )
   .await?;
+  mark("定版本");
   for (name, svc) in &desired.services {
     if let Source::Build(BuildSource {
       upload: Some(sha), ..
@@ -396,6 +404,7 @@ pub async fn make_plan(
 
   let mut net = snap.net(&desired);
   net.reach = crate::link::probe(state, &net, &desired).await;
+  mark("探测互通");
   // 迁移要源机器把数据推到目标机器（design 2.10）。
   for (name, svc) in &desired.services {
     let to = &svc.spec.server;
@@ -407,6 +416,7 @@ pub async fn make_plan(
   let status =
     gather_status(state, &snap, &current, &desired, &net, &mut b)
       .await;
+  mark("容器状态");
   service_items(
     &mut b, &snap, &current, &desired, &net, &status, &writes,
   )?;
@@ -415,8 +425,15 @@ pub async fn make_plan(
   tailscale_items(&mut b, &snap, &desired, &status);
   gateway_items(&mut b, &snap, &current, &desired, &net, &status)?;
   dns_items(&mut b, &snap, &desired, &net).await?;
+  mark("DNS");
   crate::edge_plan::edge_items(&mut b, &snap, &current, &desired)
     .await?;
+  mark("边缘应用");
+  tracing::info!(
+    "生成计划用时 {}ms：{}",
+    started.elapsed().as_millis(),
+    timing.join("，")
+  );
 
   b.steps.sort_by_key(|s| s.step.order());
   // 同一次执行里要起 Tailscale：起来后机器地址会变，后面的服务和网关按新地址渲染，
@@ -1612,6 +1629,27 @@ async fn dns_items(
       ));
     }
   }
+  // 各域名的 DNS 记录并发读取：从国内逐个请求厂商 API 很慢。
+  let mut fetched: BTreeMap<
+    String,
+    Result<Vec<RemoteRecord>, ApiError>,
+  > = futures_util::future::join_all(targets.iter().filter_map(
+    |(host, _, _)| {
+      let (account, _) = snap.account_for(host)?;
+      let provider = snapshot::dns_provider(account).ok()?;
+      Some(async move {
+        let records = snapshot::with_timeout(
+          &format!("读取 {host} 的 DNS 记录"),
+          provider.list(host),
+        )
+        .await;
+        (host.clone(), records)
+      })
+    },
+  ))
+  .await
+  .into_iter()
+  .collect();
   for (host, owner_id, edge) in targets {
     let host = &host;
     let Some((account, _zone)) = snap.account_for(host) else {
@@ -1633,11 +1671,16 @@ async fn dns_items(
         .validate(host, &want)
         .map_err(snapshot::provider_error)?;
     }
-    let records = snapshot::with_timeout(
-      &format!("读取 {host} 的 DNS 记录"),
-      provider.list(host),
-    )
-    .await?;
+    let records = match fetched.remove(host) {
+      Some(records) => records?,
+      None => {
+        snapshot::with_timeout(
+          &format!("读取 {host} 的 DNS 记录"),
+          provider.list(host),
+        )
+        .await?
+      }
+    };
     let owner = wharf_providers::Owner {
       id: owner_id.clone(),
     };
