@@ -1,8 +1,7 @@
 import { ArrowUpCircleIcon, PlusIcon, ServerIcon } from "lucide-react";
 import { lazy, Suspense, useState } from "react";
-import { Link } from "react-router-dom";
 import { AddServer } from "@/components/add-server";
-import { CardsSkeleton, Dot, Empty, PageHeader, StatusBadge, ago, diskText, serverText, serverTone } from "@/components/common";
+import { CardsSkeleton, CopyButton, Dot, useClickable, Empty, PageHeader, StatusBadge, ago, diskText, serverText, serverTone } from "@/components/common";
 import { useTab } from "@/components/page-tabs";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -76,11 +75,12 @@ function ServerCard({ s, status }: { s: ServerView; status: Status }) {
   const disk = diskText(s);
   const tone = serverTone(s);
   const r = s.report;
+  const clickable = useClickable();
 
   return (
-    <Link
-      to={`/servers/${encodeURIComponent(s.name)}`}
-      className="flex flex-col gap-3 rounded-xl border bg-card p-4 shadow-xs transition-all hover:-translate-y-px hover:border-foreground/15 hover:shadow-md"
+    <div
+      {...clickable({ to: `/servers/${encodeURIComponent(s.name)}` })}
+      className="flex cursor-pointer flex-col gap-3 rounded-xl border bg-card p-4 shadow-xs transition-all hover:-translate-y-px hover:border-foreground/15 hover:shadow-md"
     >
       <div className="flex items-center gap-3">
         <span className="grid size-9 shrink-0 place-items-center rounded-lg border bg-muted text-muted-foreground">
@@ -102,9 +102,15 @@ function ServerCard({ s, status }: { s: ServerView; status: Status }) {
       </div>
       <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
         <dt className="text-muted-foreground">公网</dt>
-        <dd className="truncate font-mono">{s.public_ip ?? "-"}</dd>
+        <dd className="flex min-w-0 items-center gap-0.5 font-mono">
+          <span className="truncate">{s.public_ip ?? "-"}</span>
+          {s.public_ip && <CopyButton text={s.public_ip} className="size-5" />}
+        </dd>
         <dt className="text-muted-foreground">内网</dt>
-        <dd className="truncate font-mono">{s.private_addr?.ip ?? "-"}</dd>
+        <dd className="flex min-w-0 items-center gap-0.5 font-mono">
+          <span className="truncate">{s.private_addr?.ip ?? "-"}</span>
+          {s.private_addr?.ip && <CopyButton text={s.private_addr.ip} className="size-5" />}
+        </dd>
         <dt className="text-muted-foreground">磁盘剩余</dt>
         <dd className={disk?.low ? "text-warning" : undefined}>{disk?.text ?? "-"}</dd>
         {!s.online && s.last_seen && (
@@ -128,6 +134,6 @@ function ServerCard({ s, status }: { s: ServerView; status: Status }) {
           </span>
         ))}
       </div>
-    </Link>
+    </div>
   );
 }

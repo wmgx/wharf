@@ -1,6 +1,5 @@
-import { useNavigate } from "react-router-dom";
 import { usePoll } from "@/api";
-import { ago, Empty, ErrorNote, ServerTag, StatusBadge, type Tone } from "@/components/common";
+import { ago, Empty, useClickable, ErrorNote, ServerTag, StatusBadge, type Tone } from "@/components/common";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import type { DataKind, DataStatus, DataView } from "@/types";
@@ -32,7 +31,7 @@ const KIND: Record<DataKind, string> = {
 
 export function Data() {
   const { data, error } = usePoll<DataView>("/api/data", 15000);
-  const nav = useNavigate();
+  const clickable = useClickable();
   const services = [...(data?.services ?? [])].sort((a, b) => ORDER.indexOf(a.status) - ORDER.indexOf(b.status));
 
   return (
@@ -57,7 +56,7 @@ export function Data() {
             </TableHeader>
             <TableBody>
               {services.map((s) => (
-                <TableRow key={s.name} className="cursor-pointer" onClick={() => nav(`/services/${s.name}`)}>
+                <TableRow key={s.name} className="cursor-pointer" {...clickable({ to: `/services/${s.name}` })}>
                   <TableCell className="pl-4 font-medium">{s.name}</TableCell>
                   <TableCell>
                     <ServerTag name={s.server} />

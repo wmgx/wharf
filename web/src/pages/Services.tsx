@@ -1,7 +1,7 @@
 import { ArrowRightLeftIcon, CloudIcon, EllipsisIcon, HistoryIcon, PlayIcon, PlusIcon, RefreshCwIcon, RotateCwIcon, ScrollTextIcon, SquareIcon, Trash2Icon } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useActions } from "@/components/actions";
-import { Empty, OpenLink, PageHeader, ServerTag, StatusBadge, imageOf, type Tone } from "@/components/common";
+import { Empty, OpenLink, useClickable, PageHeader, ServerTag, StatusBadge, imageOf, type Tone } from "@/components/common";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
@@ -49,8 +49,8 @@ function rowsOf(status: Status): Row[] {
 const TABS = ["list", "data"] as const;
 
 export function Services() {
+  const clickable = useClickable();
   const { status, refresh } = useStatus();
-  const nav = useNavigate();
   const [params, setParams] = useSearchParams();
   const creating = params.get("new") === "1";
   const [tab, setTab] = useTab(TABS, "list");
@@ -95,7 +95,7 @@ export function Services() {
                   </TableHeader>
                   <TableBody>
                     {rows.map((r) => (
-                      <TableRow key={r.to} className="cursor-pointer" onClick={() => nav(r.to)}>
+                      <TableRow key={r.to} className="cursor-pointer" {...clickable({ to: r.to })}>
                         <TableCell className="pl-4 font-medium">
                           <span className="inline-flex items-center gap-1.5">
                             {!r.svc && <CloudIcon className="size-3.5 text-muted-foreground" />}
@@ -123,7 +123,7 @@ export function Services() {
               </div>
               <div className="grid gap-2 md:hidden">
                 {rows.map((r) => (
-                  <div key={r.to} className="flex items-start gap-2 rounded-xl border bg-card p-3 shadow-xs" onClick={() => nav(r.to)}>
+                  <div key={r.to} className="flex cursor-pointer items-start gap-2 rounded-xl border bg-card p-3 shadow-xs" {...clickable({ to: r.to })}>
                     <div className="grid min-w-0 flex-1 gap-1.5">
                       <div className="flex items-center gap-1.5 font-medium">
                         {!r.svc && <CloudIcon className="size-3.5 text-muted-foreground" />}

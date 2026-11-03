@@ -1,8 +1,8 @@
 import { ArrowRightIcon, ArrowUpRightIcon, CheckIcon, CloudIcon, PlusIcon } from "lucide-react";
 import type { CSSProperties } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { usePoll } from "@/api";
-import { CardsSkeleton, CopyButton, Mark, PageHeader, SectionTitle, ServerTag, StatusBadge, type Tone } from "@/components/common";
+import { CardsSkeleton, CopyButton, useClickable, Mark, PageHeader, SectionTitle, ServerTag, StatusBadge, type Tone } from "@/components/common";
 import { serviceTruth } from "@/components/health";
 import { Button } from "@/components/ui/button";
 import { useStatus } from "@/status";
@@ -68,6 +68,7 @@ export function Home() {
 
 function Cards({ items }: { items: Item[] }) {
   const nav = useNavigate();
+  const clickable = useClickable();
   if (items.length === 0) return null;
   return (
     <div className="grid grid-cols-[repeat(auto-fill,minmax(min(100%,260px),1fr))] gap-3">
@@ -114,14 +115,10 @@ function Cards({ items }: { items: Item[] }) {
             </div>
           </>
         );
-        return href ? (
-          <a key={it.detail} className={card} style={style} href={href} target="_blank" rel="noreferrer">
+        return (
+          <div key={it.detail} className={`${card} cursor-pointer`} style={style} {...clickable(href ? { href } : { to: it.detail })}>
             {body}
-          </a>
-        ) : (
-          <Link key={it.detail} className={card} style={style} to={it.detail}>
-            {body}
-          </Link>
+          </div>
         );
       })}
     </div>

@@ -1,5 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { ArrowUpRightIcon, CheckIcon, CopyIcon } from "lucide-react";
+import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { ApiError } from "@/api";
 import { Badge } from "@/components/ui/badge";
@@ -260,4 +261,36 @@ export function OpenLink({ value, label, className }: { value: string; label?: R
       <CopyButton text={value.replace(/^https?:\/\//, "")} className="opacity-60 group-hover/open:opacity-100" />
     </span>
   );
+}
+
+/**
+ * 整块可点的卡片或表格行：不用 `<a>` 包住，这样里面的文字能拖选复制。
+ * 选中了文字时不跳转；点到里面的链接、按钮交给它们自己；Ctrl/⌘ 点击在新标签页打开。
+ * `to` 是站内路径，`href` 是外部地址（总在新标签页打开）。
+ */
+export function useClickable(): (target: { to?: string; href?: string }) => {
+  role: "link";
+  tabIndex: number;
+  onClick: (e: React.MouseEvent) => void;
+  onKeyDown: (e: React.KeyboardEvent) => void;
+} {
+  const nav = useNavigate();
+  return ({ to, href }) => {
+    const go = (newTab: boolean) => {
+      if (href) window.open(href, "_blank", "noreferrer");
+      else if (to) newTab ? window.open(to, "_blank") : nav(to);
+    };
+    return {
+      role: "link",
+      tabIndex: 0,
+      onClick: (e) => {
+        if (window.getSelection()?.toString()) return;
+        if ((e.target as HTMLElement).closest("a,button,input,label,[role=menuitem]")) return;
+        go(e.metaKey || e.ctrlKey);
+      },
+      onKeyDown: (e) => {
+        if (e.key === "Enter" && e.target === e.currentTarget) go(e.metaKey || e.ctrlKey);
+      },
+    };
+  };
 }
