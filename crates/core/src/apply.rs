@@ -43,7 +43,7 @@ use crate::{
 
 /// agent 那边 stop/start 本身限时 180 秒，这里多留一些。
 const STOP_START_TIMEOUT: Duration = Duration::from_secs(200);
-const SERVICE_UP_TIMEOUT: Duration = Duration::from_secs(45 * 60);
+const SERVICE_UP_TIMEOUT: Duration = Duration::from_secs(70 * 60);
 const GATEWAY_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const SHORT_TIMEOUT: Duration = Duration::from_secs(3 * 60);
 /// 每个步骤最多保留的日志行数。

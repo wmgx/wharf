@@ -18,7 +18,7 @@ use crate::{
 };
 
 /// 每次 `docker pull` 的超时。国内拉海外镜像慢，给足时间，但不会无限等。
-pub const PULL_ATTEMPT_SECS: u64 = 600;
+pub const PULL_ATTEMPT_SECS: u64 = 30 * 60;
 
 pub struct Snapshot {
   pub world: World,

@@ -5,8 +5,9 @@
 //! 这样 compose 里的相对路径、目录挂载在宿主机上解析结果一致。
 
 use std::{
-  collections::BTreeMap,
+  collections::{BTreeMap, BTreeSet},
   path::{Path, PathBuf},
+  sync::{Arc, Mutex},
   time::Duration,
 };
 
@@ -15,6 +16,8 @@ use wharf_api_types::{
   ApiError, ErrorCode,
   agent::{ContainerInfo, ImageInfo, ProjectState, PullPolicy},
 };
+
+use tokio_util::sync::CancellationToken;
 
 use crate::exec::{Cmd, Ctx};
 
@@ -223,6 +226,45 @@ impl Docker {
       })
   }
 
+  /// 拉一次镜像。docker 的逐层输出汇总成"已下载 a/n 层"写进日志，
+  /// 再每分钟报一次已用时间，大镜像拉很久时也能看出还在进行。
+  async fn pull_once(
+    &self,
+    candidate: &str,
+    timeout: Duration,
+    ctx: &Ctx,
+  ) -> Result<crate::exec::Output, ApiError> {
+    let pull_ctx = layer_progress(ctx);
+    let ticker = {
+      let ctx = ctx.clone();
+      let done = CancellationToken::new();
+      let stop = done.clone();
+      let task = tokio::spawn(async move {
+        let mut minutes = 0;
+        loop {
+          tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(60)) => {}
+            _ = stop.cancelled() => break,
+          }
+          minutes += 1;
+          ctx.say(format!("仍在拉取，已用 {minutes} 分钟"));
+        }
+      });
+      (done, task)
+    };
+    let result = self
+      .cmd()
+      .args(["pull", candidate])
+      .timeout(timeout)
+      .stream(true)
+      .run(&pull_ctx)
+      .await
+      .and_then(|o| o.check(&format!("docker pull {candidate}")));
+    ticker.0.cancel();
+    let _ = ticker.1.await;
+    result
+  }
+
   /// 按计划固定的 digest 拉取（按镜像源顺序），再打回 `image` 这个标签，compose 不用改。
   pub async fn pull_pinned(
     &self,
@@ -248,14 +290,7 @@ impl Docker {
     let mut errors = Vec::new();
     for candidate in candidates {
       ctx.say(format!("拉取 {candidate}"));
-      let result = self
-        .cmd()
-        .args(["pull", "--quiet", &candidate])
-        .timeout(timeout)
-        .stream(false)
-        .run(ctx)
-        .await
-        .and_then(|o| o.check(&format!("docker pull {candidate}")));
+      let result = self.pull_once(&candidate, timeout, ctx).await;
       match result {
         Ok(_) => {
           self
@@ -296,14 +331,7 @@ impl Docker {
     let mut errors = Vec::new();
     for candidate in pull_candidates(image, policy) {
       ctx.say(format!("拉取 {candidate}"));
-      let result = self
-        .cmd()
-        .args(["pull", "--quiet", &candidate])
-        .timeout(timeout)
-        .stream(false)
-        .run(ctx)
-        .await
-        .and_then(|o| o.check(&format!("docker pull {candidate}")));
+      let result = self.pull_once(&candidate, timeout, ctx).await;
       match result {
         Ok(_) => {
           if candidate != image {
@@ -722,8 +750,87 @@ fn pick_digest(image: &str, digests: &str) -> Option<String> {
     .map(|d| d.to_string())
 }
 
+/// `docker pull` 非终端输出是逐层状态行，如 `0a1b2c3d4e5f: Download complete`。
+/// 汇总成已下载、已解压的层数，只在数字变化时报一次。
+#[derive(Default)]
+struct Layers {
+  seen: BTreeSet<String>,
+  downloaded: BTreeSet<String>,
+  extracted: BTreeSet<String>,
+  last: (usize, usize, usize),
+}
+
+impl Layers {
+  fn feed(&mut self, line: &str) -> Option<String> {
+    let (id, status) = line.split_once(": ")?;
+    let id = id.trim();
+    if !(id.len() == 12 && id.chars().all(|c| c.is_ascii_hexdigit()))
+    {
+      return id.eq("Status").then(|| status.trim().to_string());
+    }
+    self.seen.insert(id.to_string());
+    let status = status.trim();
+    if matches!(
+      status,
+      "Download complete" | "Already exists" | "Pull complete"
+    ) {
+      self.downloaded.insert(id.to_string());
+    }
+    if matches!(status, "Already exists" | "Pull complete") {
+      self.extracted.insert(id.to_string());
+    }
+    let now =
+      (self.seen.len(), self.downloaded.len(), self.extracted.len());
+    let changed = (now.1, now.2) != (self.last.1, self.last.2);
+    self.last = now;
+    if !changed {
+      return None;
+    }
+    Some(format!(
+      "镜像层：已下载 {}/{}，已解压 {}/{}",
+      now.1, now.0, now.2, now.0
+    ))
+  }
+}
+
+fn layer_progress(ctx: &Ctx) -> Ctx {
+  let Some(outer) = ctx.progress.clone() else {
+    return ctx.clone();
+  };
+  let layers = Arc::new(Mutex::new(Layers::default()));
+  Ctx {
+    cancel: ctx.cancel.clone(),
+    progress: Some(Arc::new(move |line: String| {
+      let msg = layers.lock().ok().and_then(|mut l| l.feed(&line));
+      if let Some(msg) = msg {
+        outer(msg);
+      }
+    })),
+  }
+}
+
 #[cfg(test)]
 mod tests {
+  #[test]
+  fn layer_progress_reports_counts() {
+    let mut l = super::Layers::default();
+    assert_eq!(l.feed("latest: Pulling from remsky/kokoro"), None);
+    assert_eq!(l.feed("0a1b2c3d4e5f: Pulling fs layer"), None);
+    assert_eq!(
+      l.feed("1a1b2c3d4e5f: Already exists").as_deref(),
+      Some("镜像层：已下载 1/2，已解压 1/2")
+    );
+    assert_eq!(
+      l.feed("0a1b2c3d4e5f: Download complete").as_deref(),
+      Some("镜像层：已下载 2/2，已解压 1/2")
+    );
+    assert_eq!(l.feed("0a1b2c3d4e5f: Verifying Checksum"), None);
+    assert_eq!(
+      l.feed("Status: Downloaded newer image").as_deref(),
+      Some("Downloaded newer image")
+    );
+  }
+
   use super::*;
 
   fn policy(only: bool) -> PullPolicy {

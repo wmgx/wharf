@@ -1,4 +1,5 @@
 import { CodePackageField, type CodePackage } from "@/components/code-package";
+import { ComposeEditor, MirrorHint, parseCompose, type ComposeInfo } from "@/components/compose";
 import { ArrowRightIcon } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
@@ -58,6 +59,13 @@ interface Draft {
   pkg: CodePackage | null;
 }
 
+/** compose 里写的端口转成表单端口：名称取服务名，同一服务多个端口时加容器端口区分。 */
+function composePorts(info: ComposeInfo): PortSpec[] {
+  const count = new Map<string, number>();
+  info.ports.forEach((p) => count.set(p.service, (count.get(p.service) ?? 0) + 1));
+  return info.ports.map((p) => ({ name: toName(count.get(p.service)! > 1 ? `${p.service}-${p.container}` : p.service), host: p.host }));
+}
+
 /** 上一次提交的表单。计划生成失败或想改时点"返回修改"，用它恢复。 */
 let lastDraft: Draft | null = null;
 
@@ -86,6 +94,13 @@ function Form({ onClose }: { onClose: () => void }) {
   const [envText, setEnvText] = useState(draft?.envText ?? "");
   const [hostname, setHostname] = useState(draft?.hostname ?? "");
   const [pkg, setPkg] = useState<CodePackage | null>(draft?.pkg ?? null);
+  // 用户手动改过端口后，不再按 compose 内容自动填。
+  const [portsTouched, setPortsTouched] = useState(!!draft);
+  const composeInfo = useMemo(() => parseCompose(compose), [compose]);
+  const onCompose = (text: string) => {
+    setCompose(text);
+    if (!portsTouched) setPorts(composePorts(parseCompose(text)));
+  };
 
   const svcName = nameTouched
     ? name
@@ -199,13 +214,22 @@ function Form({ onClose }: { onClose: () => void }) {
           </Field>
         ) : (
           <Field label="compose.yaml" htmlFor="compose">
-            <Textarea
+            <ComposeEditor
               id="compose"
-              className="min-h-40 font-mono text-xs"
-              placeholder={"services:\n  app:\n    image: nginx\n    ports:\n      - 127.0.0.1:8080:80"}
+              placeholder={"services:\n  app:\n    image: nginx\n    ports:\n      - 127.0.0.1:8080:80\n    volumes:\n      - ./data:/data"}
               value={compose}
-              onChange={(e) => setCompose(e.target.value)}
+              onChange={onCompose}
             />
+            {composeInfo.volumes.length > 0 && (
+              <div className="grid gap-0.5 text-xs text-muted-foreground">
+                <div>识别到的挂载：</div>
+                {composeInfo.volumes.map((v, i) => (
+                  <div key={i} className="font-mono">
+                    {v.service}：{v.source} → {v.target}
+                  </div>
+                ))}
+              </div>
+            )}
           </Field>
         )}
 
@@ -226,10 +250,26 @@ function Form({ onClose }: { onClose: () => void }) {
           </Field>
         </div>
 
+        {(kind === "image" || kind === "compose") && (
+          <MirrorHint server={servers.find((s) => s.name === chosenServer)} images={kind === "image" ? [image] : composeInfo.images} />
+        )}
+
         <Field
-          label="端口"
+          label={
+            <>
+              端口
+              {kind === "compose" && !portsTouched && composeInfo.ports.length > 0 && <span className="font-normal text-muted-foreground"> 已从 compose 识别</span>}
+            </>
+          }
         >
-          <PortsEditor ports={ports} onChange={setPorts} compose={kind === "compose"} />
+          <PortsEditor
+            ports={ports}
+            onChange={(p) => {
+              setPortsTouched(true);
+              setPorts(p);
+            }}
+            compose={kind === "compose"}
+          />
         </Field>
 
         {withEnv && (
