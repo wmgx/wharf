@@ -11,7 +11,10 @@ use std::{
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::Value;
-use tokio::{io::AsyncReadExt, sync::mpsc};
+use tokio::{
+  io::AsyncReadExt,
+  sync::{Mutex, mpsc},
+};
 use wharf_api_types::{
   ApiError, ErrorCode,
   agent::{
@@ -45,7 +48,8 @@ pub struct HostShell {
   docker: Docker,
   server: String,
   generation: String,
-  prepared: Result<Prepared, ApiError>,
+  /// 启动时检查一次；失败（例如开机时 docker 还很忙）就在下次使用时重查，不用重启 agent。
+  prepared: Mutex<Result<Prepared, ApiError>>,
   next: AtomicU64,
 }
 
@@ -60,16 +64,19 @@ impl HostShell {
       docker,
       server,
       generation,
-      prepared,
+      prepared: Mutex::new(prepared),
       next: AtomicU64::new(0),
     }
   }
 
-  fn image(&self) -> Result<&str, ApiError> {
-    self
-      .prepared
+  async fn image(&self) -> Result<String, ApiError> {
+    let mut prepared = self.prepared.lock().await;
+    if prepared.is_err() {
+      *prepared = prepare(&self.docker, &self.server).await;
+    }
+    prepared
       .as_ref()
-      .map(|p| p.image.as_str())
+      .map(|p| p.image.clone())
       .map_err(Clone::clone)
   }
 
@@ -137,12 +144,12 @@ impl HostShell {
     ctx: &Ctx,
     mut input: mpsc::Receiver<TerminalInput>,
   ) -> Result<Value, ApiError> {
-    let image = self.image()?;
+    let image = self.image().await?;
     let name = self.name();
     let (master, slave) = open_pty(size)?;
     let mut writer = File::from(master.try_clone().map_err(io)?);
     let mut reader = File::from(master.try_clone().map_err(io)?);
-    let mut args = self.run_args(&name, "/", true, image);
+    let mut args = self.run_args(&name, "/", true, &image);
     args.extend(["/bin/sh".into(), "-c".into(), HOST_SHELL.into()]);
     let mut cmd = tokio::process::Command::new(&self.docker.bin);
     cmd
@@ -228,12 +235,12 @@ impl HostShell {
     job: &HostExecJob,
     ctx: &Ctx,
   ) -> Result<HostExecResult, (ApiError, u64)> {
-    let image = self.image().map_err(|e| (e, 0))?;
+    let image = self.image().await.map_err(|e| (e, 0))?;
     validate_exec(job).map_err(|e| (e, 0))?;
     let name = self.name();
     let marker = format!("__WHARF_EXIT_{}__=", random_id());
     let marker_prefix = format!("\n{marker}");
-    let mut args = self.run_args(&name, &job.cwd, false, image);
+    let mut args = self.run_args(&name, &job.cwd, false, &image);
     args.extend([
       "/bin/sh".into(),
       "-c".into(),
@@ -339,7 +346,7 @@ async fn prepare(
     .arg(
       "command -v nsenter >/dev/null && nsenter --version >/dev/null",
     )
-    .timeout(Duration::from_secs(30))
+    .timeout(Duration::from_secs(60))
     .run(&ctx)
     .await?
     .check("检查 nsenter")?;
