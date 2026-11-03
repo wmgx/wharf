@@ -171,6 +171,56 @@ fn env_warning() -> String {
     .into()
 }
 
+/// compose 内容里映射到宿主机的 TCP 端口，短写法（`18880:8880`、`127.0.0.1:80:80`）
+/// 和长写法（`published`）都认。只写容器端口、端口范围、UDP 的跳过。
+/// compose 来源没填 ports 时用它补上，这样服务有内网地址、路由也能指过来。
+pub fn compose_ports(content: &str) -> Vec<PortSpec> {
+  let Ok(doc) = serde_yaml_ng::from_str::<Value>(content) else {
+    return Vec::new();
+  };
+  let mut published = Vec::new();
+  let services = doc.get("services").and_then(Value::as_mapping);
+  for body in services.into_iter().flat_map(|m| m.values()) {
+    let ports = body.get("ports").and_then(Value::as_sequence);
+    for p in ports.into_iter().flatten() {
+      let port = match p {
+        Value::String(s) => short_port(s),
+        Value::Mapping(_) => {
+          let tcp = p
+            .get("protocol")
+            .and_then(Value::as_str)
+            .unwrap_or("tcp")
+            == "tcp";
+          match p.get("published") {
+            Some(Value::String(s)) if tcp => s.parse().ok(),
+            Some(Value::Number(n)) if tcp => {
+              n.as_u64().and_then(|n| u16::try_from(n).ok())
+            }
+            _ => None,
+          }
+        }
+        _ => None,
+      };
+      published.extend(port);
+    }
+  }
+  port_specs(published)
+}
+
+fn short_port(s: &str) -> Option<u16> {
+  let s = s.trim();
+  let s = match s.split_once('/') {
+    Some((p, "tcp")) => p,
+    Some(_) => return None,
+    None => s,
+  };
+  let parts: Vec<&str> = s.split(':').collect();
+  if parts.len() < 2 {
+    return None;
+  }
+  parts[parts.len() - 2].parse().ok()
+}
+
 fn port_specs(mut ports: Vec<u16>) -> Vec<PortSpec> {
   ports.sort_unstable();
   ports.dedup();
@@ -501,6 +551,23 @@ pub fn from_container(
 
 #[cfg(test)]
 mod tests {
+  #[test]
+  fn compose_ports_reads_short_and_long_syntax() {
+    let c = "services:\n  a:\n    ports:\n      - \"18880:8880\"\n      - 127.0.0.1:9000:90\n      - 5000\n      - 53:53/udp\n  b:\n    ports:\n      - target: 80\n        published: 8081\n";
+    let ports: Vec<_> = super::compose_ports(c)
+      .into_iter()
+      .map(|p| (p.name, p.host))
+      .collect();
+    assert_eq!(
+      ports,
+      vec![
+        ("p8081".to_string(), Some(8081)),
+        ("p9000".to_string(), Some(9000)),
+        ("p18880".to_string(), Some(18880)),
+      ]
+    );
+  }
+
   use super::*;
 
   const CONFIG: &str = r#"name: blog

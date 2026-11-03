@@ -232,10 +232,20 @@ impl World {
           let commit = old
             .filter(|o| git_ref(&o.spec) == git_ref(spec))
             .and_then(|o| o.commit.clone());
+          // compose 来源没填端口时按 compose 里映射的端口补上，否则服务没有内网地址。
+          let mut spec = spec.clone();
+          if spec.ports.is_empty()
+            && let Source::Compose {
+              content: Some(content),
+              ..
+            } = &spec.source
+          {
+            spec.ports = crate::import::compose_ports(content);
+          }
           self.services.insert(
             name.clone(),
             ServiceRow {
-              spec: spec.clone(),
+              spec,
               host_ports,
               import,
               pins,
