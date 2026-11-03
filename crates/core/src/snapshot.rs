@@ -45,6 +45,8 @@ pub struct Snapshot {
   pub imports: BTreeMap<String, wharf_api_types::view::ImportRecord>,
   /// 每个服务最近一次操作。
   pub ops: BTreeMap<String, wharf_api_types::view::LastOp>,
+  /// 服务备注。
+  pub notes: BTreeMap<String, String>,
   /// Wharf 记录的线上版本。
   pub edge_expected: BTreeMap<String, db::EdgeExpected>,
   /// 边缘应用上次发布成功的配置指纹（或"发布中"）。
@@ -87,6 +89,7 @@ pub async fn load(db: &Db) -> Result<Snapshot, ApiError> {
         deployed: db::deployed_servers(c)?,
         applied: db::applied(c)?,
         ops: db::service_ops(c)?,
+        notes: db::service_notes(c)?,
         imports: db::imports(c)?,
         tunnels: db::tunnels(c)?,
         edge_domains: db::edge_domains(c)?,

@@ -117,6 +117,9 @@ pub struct ServiceView {
   /// 局域网地址：端口名 → 各个局域网地址:宿主机端口（服务器设置了 lan_addrs 时才有）。
   #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
   pub lan_addresses: BTreeMap<String, Vec<String>>,
+  /// 备注：给人看的说明，不影响部署。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub note: Option<String>,
   pub version: u64,
   /// 容器现状，查不到时为空；状态看 `status`。
   #[serde(default, skip_serializing_if = "Vec::is_empty")]

@@ -139,6 +139,7 @@ pub fn router(state: Arc<AppState>) -> Router {
       get(crate::rollback::target),
     )
     .route("/api/services/{name}/deployments", get(deployments))
+    .route("/api/services/{name}/note", put(set_note))
     .route(
       "/api/services/{name}/origin",
       get(crate::host_dir::origin),
@@ -579,6 +580,37 @@ async fn list_services(
 pub(crate) fn service_not_found(name: &str) -> ApiError {
   ApiError::not_found(format!("服务 {name} 不存在"))
     .suggest("wharf service list")
+}
+
+#[derive(Deserialize)]
+struct NoteRequest {
+  note: String,
+}
+
+const NOTE_LIMIT: usize = 4000;
+
+/// 改服务备注：不影响部署，直接保存，不走计划。传空字符串清除。
+async fn set_note(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Path(name): Path<String>,
+  Json(req): Json<NoteRequest>,
+) -> ApiResult<Value> {
+  auth.require(Perm::Apply)?;
+  let note = req.note.trim().to_string();
+  if note.chars().count() > NOTE_LIMIT {
+    return Err(
+      ApiError::invalid(format!("备注最多 {NOTE_LIMIT} 个字")).into(),
+    );
+  }
+  let snap = snapshot::load(&s.db).await?;
+  if !snap.world.services.contains_key(&name) {
+    return Err(service_not_found(&name).into());
+  }
+  s.db
+    .call(move |c| crate::db::set_service_note(c, &name, &note))
+    .await?;
+  Ok(Json(json!({ "ok": true })))
 }
 
 async fn show_service(

@@ -235,6 +235,14 @@ CREATE TABLE shell_log (
 CREATE INDEX shell_log_at_id ON shell_log(at DESC, id DESC);
 CREATE INDEX shell_log_server_at_id ON shell_log(server, at DESC, id DESC);
 "#,
+  // 服务备注：给人看的说明，不影响部署，直接改不走计划。
+  r#"
+CREATE TABLE service_notes (
+  service TEXT PRIMARY KEY,
+  note TEXT NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+"#,
 ];
 
 /// git 构建来源固定到上次部署构建的 commit（仓库和分支没换过的）。当时没记下 commit 的留给 plan 提醒。
@@ -1184,6 +1192,37 @@ pub fn applied(
     })
     .map_err(sql_err)?;
   rows.collect::<Result<_, _>>().map_err(sql_err)
+}
+
+pub fn service_notes(
+  c: &Connection,
+) -> Result<std::collections::BTreeMap<String, String>, ApiError> {
+  let mut stmt = c
+    .prepare("SELECT service, note FROM service_notes")
+    .map_err(sql_err)?;
+  let rows = stmt
+    .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+    .map_err(sql_err)?;
+  rows.collect::<Result<_, _>>().map_err(sql_err)
+}
+
+/// 写入或清空（空字符串）服务备注。
+pub fn set_service_note(
+  c: &Connection,
+  service: &str,
+  note: &str,
+) -> Result<(), ApiError> {
+  if note.is_empty() {
+    c.execute("DELETE FROM service_notes WHERE service = ?1", params![service])
+  } else {
+    c.execute(
+      "INSERT INTO service_notes (service, note, updated_at) VALUES (?1, ?2, ?3)
+       ON CONFLICT (service) DO UPDATE SET note = excluded.note, updated_at = excluded.updated_at",
+      params![service, note, Utc::now().timestamp_millis()],
+    )
+  }
+  .map_err(sql_err)?;
+  Ok(())
 }
 
 pub fn service_ops(

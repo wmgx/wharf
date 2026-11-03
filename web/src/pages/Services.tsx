@@ -101,6 +101,7 @@ export function Services() {
                             {!r.svc && <CloudIcon className="size-3.5 text-muted-foreground" />}
                             {r.name}
                           </span>
+                          {r.svc?.note && <div className="max-w-56 truncate text-xs font-normal text-muted-foreground" title={r.svc.note}>{r.svc.note.split("\n")[0]}</div>}
                         </TableCell>
                         <TableCell>
                           <StatusBadge tone={r.tone}>{r.text}</StatusBadge>

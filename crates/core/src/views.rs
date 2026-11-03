@@ -287,6 +287,7 @@ pub fn service_view(
     host_ports: row.host_ports.clone(),
     addresses,
     lan_addresses,
+    note: snap.notes.get(name).cloned(),
     version: row.version,
     containers,
     data: crate::data::mounts(name, &row.spec),

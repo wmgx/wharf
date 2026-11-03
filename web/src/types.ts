@@ -167,6 +167,8 @@ export interface ServiceView {
   addresses: Record<string, string>;
   /** 局域网地址：端口名 → 各局域网地址:宿主机端口。 */
   lan_addresses?: Record<string, string[]>;
+  /** 备注，不影响部署。 */
+  note?: string;
   version: number;
   containers?: ContainerInfo[];
   data?: DataMount[];

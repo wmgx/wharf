@@ -351,6 +351,11 @@ pub enum ServiceCmd {
   History {
     name: String,
   },
+  /// 设置备注（给人看的说明，不影响部署，直接保存）。传空字符串清除。
+  Note {
+    name: String,
+    note: String,
+  },
   /// 停止：容器保留但不运行，之后部署也保持停止。生成计划。
   Stop {
     name: String,

@@ -11,6 +11,7 @@ import { LogStream } from "@/components/LogStream";
 import { MetricsPanel } from "@/components/metrics";
 import { Backups } from "./service-backups";
 import { Files } from "./service-files";
+import { NoteCard } from "./service-note";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -239,6 +240,7 @@ function Overview({ svc, routes, onTab }: { svc: ServiceView; routes: RouteView[
         </Button>
       </div>
     ))}
+    <NoteCard svc={svc} />
     <div className="grid gap-3 md:grid-cols-[1.4fr_1fr]">
       <Card className="gap-4 py-5 shadow-xs">
         <CardHeader className="px-5">

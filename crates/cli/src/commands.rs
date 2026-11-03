@@ -960,6 +960,20 @@ async fn service(
       });
       Ok(())
     }
+    ServiceCmd::Note { name, note } => {
+      let v: serde_json::Value = c
+        .put(
+          &format!("/api/services/{}/note", seg(&name)),
+          &serde_json::json!({ "note": note }),
+        )
+        .await?;
+      if j {
+        out(j, &v, pretty);
+      } else {
+        println!("已保存 {name} 的备注");
+      }
+      Ok(())
+    }
     ServiceCmd::Show { name } => {
       let v: ServiceView =
         c.get(&format!("/api/services/{}", seg(&name))).await?;
