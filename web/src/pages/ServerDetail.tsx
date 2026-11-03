@@ -300,7 +300,11 @@ type Settings = ServerView["settings"] & {
   mirrors_only?: boolean;
   build_env?: Record<string, string>;
   git_proxy?: string;
+  lan_addrs?: string[];
 };
+
+/** 私有网段 IPv4：10/8、172.16/12、192.168/16。公网地址不能绑，否则服务直接暴露。 */
+const isPrivate = (ip: string) => /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)\d+\.\d+(\.\d+)?$/.test(ip) && ip.split(".").length === 4;
 
 const mirrorsText = (m?: Record<string, string[]>) =>
   Object.entries(m ?? {})
@@ -328,6 +332,9 @@ function SettingsForm({ server, canRemove }: { server: ServerView; canRemove: bo
   const [mirrorsOnly, setMirrorsOnly] = useState(!!cur.mirrors_only);
   const [buildEnv, setBuildEnv] = useState(formatEnv(cur.build_env));
   const [gitProxy, setGitProxy] = useState(cur.git_proxy ?? "");
+  const [lanAddrs, setLanAddrs] = useState<string[]>(cur.lan_addrs ?? []);
+  // 候选：agent 上报的私有网段地址，加上已经设置的。
+  const lanChoices = [...new Set([...(server.report?.lan_ips ?? []).filter(isPrivate), ...(cur.lan_addrs ?? [])])];
   const [hostTerminal, setHostTerminal] = useState(cur.host_terminal);
   const [hostExec, setHostExec] = useState(cur.host_exec);
   const [removing, setRemoving] = useState(false);
@@ -339,11 +346,12 @@ function SettingsForm({ server, canRemove }: { server: ServerView; canRemove: bo
     mirrors_only: mirrorsOnly,
     build_env: parseEnv(buildEnv),
     git_proxy: gitProxy.trim() || undefined,
+    lan_addrs: lanAddrs.length ? lanAddrs : undefined,
     host_terminal: hostTerminal,
     host_exec: hostExec,
   };
   const norm = (x: Settings) =>
-    JSON.stringify({ ...x, public_ip: x.public_ip || undefined, git_proxy: x.git_proxy || undefined, registry_mirrors: x.registry_mirrors ?? {}, build_env: x.build_env ?? {}, mirrors_only: !!x.mirrors_only });
+    JSON.stringify({ ...x, public_ip: x.public_ip || undefined, git_proxy: x.git_proxy || undefined, registry_mirrors: x.registry_mirrors ?? {}, build_env: x.build_env ?? {}, mirrors_only: !!x.mirrors_only, lan_addrs: x.lan_addrs?.length ? x.lan_addrs : undefined });
   const changed = norm(next) !== norm(cur);
 
   const remove = async () => {
@@ -369,6 +377,20 @@ function SettingsForm({ server, canRemove }: { server: ServerView; canRemove: bo
         <Checkbox checked={mirrorsOnly} onCheckedChange={(v) => setMirrorsOnly(v === true)} />
         有镜像源时不再尝试原地址
       </label>
+      <Field label="局域网访问" help="勾选后，镜像和代码部署的服务端口也绑到这些地址，同一局域网里可以直接打开。机器之间仍走内网地址。保存后这台机器上的服务会重建容器。">
+        {lanChoices.length ? (
+          <div className="grid gap-2">
+            {lanChoices.map((ip) => (
+              <label key={ip} className="flex cursor-pointer items-center gap-2.5 font-mono text-sm">
+                <Checkbox checked={lanAddrs.includes(ip)} onCheckedChange={(v) => setLanAddrs(v === true ? [...lanAddrs, ip] : lanAddrs.filter((x) => x !== ip))} />
+                {ip}
+              </label>
+            ))}
+          </div>
+        ) : (
+          <span className="text-sm text-muted-foreground">agent 没有发现私有网段的地址</span>
+        )}
+      </Field>
       <Field label="构建参数" htmlFor="build-env" help="每行 KEY=VALUE，传给内置模板。国内机器常配 PIP_INDEX_URL、GOPROXY。">
         <Textarea id="build-env" rows={3} className="font-mono text-xs" value={buildEnv} onChange={(e) => setBuildEnv(e.target.value)} />
       </Field>

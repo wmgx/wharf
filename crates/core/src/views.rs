@@ -240,6 +240,22 @@ pub fn service_view(
       (port.clone(), format!("{ip}:{host}"))
     })
     .collect();
+  let lan_addresses = net
+    .lan_addrs
+    .get(&row.spec.server)
+    .map(|ips| {
+      row
+        .host_ports
+        .iter()
+        .map(|(port, host)| {
+          (
+            port.clone(),
+            ips.iter().map(|ip| format!("{ip}:{host}")).collect(),
+          )
+        })
+        .collect()
+    })
+    .unwrap_or_default();
   let hash = live.and_then(|_| {
     snapshot::service_resolved(&snap.world, net, name, &snap.secrets)
       .ok()
@@ -270,6 +286,7 @@ pub fn service_view(
     spec: row.spec.clone(),
     host_ports: row.host_ports.clone(),
     addresses,
+    lan_addresses,
     version: row.version,
     containers,
     data: crate::data::mounts(name, &row.spec),

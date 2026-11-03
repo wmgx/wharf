@@ -238,6 +238,7 @@ pub struct ApplyFlags {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)] // 命令行参数，只解析一次
 pub enum ServerCmd {
   List,
   Show {
@@ -283,6 +284,13 @@ pub enum ServerCmd {
     /// public（不用内网地址，网关一律走反向隧道）、auto（按检测到的地址推断）。
     #[arg(long, value_parser = ["tailscale", "lan", "public", "auto"])]
     mode: Option<String>,
+    /// 额外绑定的局域网地址（私有网段），可以多次使用；服务端口也绑到这些地址上。
+    /// 可选地址见 `wharf server show <name>` 里 agent 上报的 lan_ips。
+    #[arg(long)]
+    lan_ip: Vec<String>,
+    /// 清空额外绑定的局域网地址。
+    #[arg(long)]
+    clear_lan_ips: bool,
     /// 构建时传给内置模板的参数 `KEY=VALUE`（国内机器配 PIP_INDEX_URL、GOPROXY），可以多次使用。
     #[arg(long)]
     build_env: Vec<String>,

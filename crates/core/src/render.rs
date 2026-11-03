@@ -34,6 +34,8 @@ pub struct Net {
   pub private: BTreeMap<String, PrivateAddr>,
   /// agent 上报的其他网卡地址，用来在缺内网地址时给出建议命令。
   pub lan_ips: BTreeMap<String, Vec<String>>,
+  /// 服务器设置里额外绑定的局域网地址。
+  pub lan_addrs: BTreeMap<String, Vec<String>>,
   pub public_ip: BTreeMap<String, String>,
   /// 连通性探测结果：(网关所在机器, 服务所在机器) → 能否直连内网地址。没探测过的不在里面。
   pub reach: crate::db::Reach,
@@ -68,6 +70,11 @@ impl Net {
       if let Some(r) = report {
         net.lan_ips.insert(name.clone(), r.lan_ips.clone());
       }
+      if !server.settings.lan_addrs.is_empty() {
+        net
+          .lan_addrs
+          .insert(name.clone(), server.settings.lan_addrs.clone());
+      }
       if let Some(ip) = server
         .settings
         .public_ip
@@ -81,6 +88,22 @@ impl Net {
   }
 
   /// 只取影响渲染的地址，给 plan 的 inputs 指纹用。
+  /// 服务端口除 127.0.0.1 外要绑定的地址：内网地址，加上设置的局域网地址。
+  pub fn bind_ips(&self, server: &str) -> Vec<String> {
+    let mut ips: Vec<String> = self
+      .private
+      .get(server)
+      .map(|a| a.ip.clone())
+      .into_iter()
+      .collect();
+    for ip in self.lan_addrs.get(server).into_iter().flatten() {
+      if !ips.contains(ip) {
+        ips.push(ip.clone());
+      }
+    }
+    ips
+  }
+
   pub fn addresses(&self) -> Addresses {
     Addresses {
       private: self.private.clone(),
@@ -259,7 +282,7 @@ pub fn service_compose(
   name: &str,
   spec: &ServiceSpec,
   host_ports: &BTreeMap<String, u16>,
-  private_ip: Option<&str>,
+  bind_ips: &[String],
   secrets: Option<&BTreeMap<String, String>>,
 ) -> Result<String, ApiError> {
   match &spec.source {
@@ -286,7 +309,7 @@ pub fn service_compose(
           continue;
         };
         ports.push(format!("127.0.0.1:{host}:{container}"));
-        if let Some(ip) = private_ip {
+        for ip in bind_ips {
           ports.push(format!("{ip}:{host}:{container}"));
         }
       }
@@ -697,7 +720,7 @@ mod tests {
       "whoami",
       &spec(),
       &ports,
-      Some("100.1.2.3"),
+      &["100.1.2.3".to_string(), "192.168.1.5".to_string()],
       Some(&secrets),
     )
     .unwrap();
@@ -706,13 +729,14 @@ mod tests {
     let svc = &yaml["services"]["whoami"];
     assert_eq!(svc["ports"][0], "127.0.0.1:20000:80");
     assert_eq!(svc["ports"][1], "100.1.2.3:20000:80");
+    assert_eq!(svc["ports"][2], "192.168.1.5:20000:80");
     assert_eq!(svc["environment"]["A"], "x$$y");
     assert_eq!(svc["environment"]["TOKEN"], "s3$$cret");
     assert_eq!(svc["volumes"][0], "/srv/whoami/data:/data");
     assert!(!out.contains("0.0.0.0"));
     // 不带密钥渲染时保留占位符，用于展示。
     let template =
-      service_compose("whoami", &spec(), &ports, None, None).unwrap();
+      service_compose("whoami", &spec(), &ports, &[], None).unwrap();
     assert!(template.contains("[[WHO_TOKEN]]"));
     assert!(!template.contains("s3"));
   }

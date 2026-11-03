@@ -662,6 +662,8 @@ async fn server(
       private_ip,
       network,
       mode,
+      lan_ip,
+      clear_lan_ips,
       build_env,
       clear_build_env,
       git_proxy,
@@ -709,6 +711,15 @@ async fn server(
       }
       if let Some(only) = mirrors_only {
         settings.mirrors_only = only;
+      }
+      if clear_lan_ips {
+        settings.lan_addrs.clear();
+      }
+      for ip in lan_ip {
+        let ip = ip.trim().to_string();
+        if !settings.lan_addrs.contains(&ip) {
+          settings.lan_addrs.push(ip);
+        }
       }
       if clear_build_env {
         settings.build_env.clear();

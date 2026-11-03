@@ -158,7 +158,7 @@ pub fn service_resolved(
     name,
     &row.spec,
     &row.host_ports,
-    net.private.get(&row.spec.server).map(|a| a.ip.as_str()),
+    &net.bind_ips(&row.spec.server),
     Some(secrets),
   )?;
   let hash = render::hash(&resolved);
@@ -175,7 +175,7 @@ pub fn service_template(
     name,
     &row.spec,
     &row.host_ports,
-    net.private.get(&row.spec.server).map(|a| a.ip.as_str()),
+    &net.bind_ips(&row.spec.server),
     None,
   )
 }

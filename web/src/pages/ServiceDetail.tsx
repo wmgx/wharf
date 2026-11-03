@@ -267,9 +267,15 @@ function Overview({ svc, routes, onTab }: { svc: ServiceView; routes: RouteView[
             <dt className="text-muted-foreground">内网地址</dt>
             <dd className="font-mono text-[13px]">
               {Object.entries(svc.addresses).map(([p, a]) => (
-                <div key={p} className="flex items-center gap-1.5">
+                <div key={p} className="flex flex-wrap items-center gap-x-3 gap-y-0.5">
                   <span className="text-muted-foreground">{p}</span>
                   <OpenLink value={a} />
+                  {(svc.lan_addresses?.[p] ?? []).map((l) => (
+                    <span key={l} className="inline-flex items-center gap-1">
+                      <span className="font-sans text-xs text-muted-foreground">局域网</span>
+                      <OpenLink value={l} />
+                    </span>
+                  ))}
                 </div>
               ))}
               {Object.keys(svc.addresses).length === 0 && "-"}

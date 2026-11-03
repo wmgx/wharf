@@ -165,6 +165,8 @@ export interface ServiceView {
   spec: ServiceSpec;
   host_ports: Record<string, number>;
   addresses: Record<string, string>;
+  /** 局域网地址：端口名 → 各局域网地址:宿主机端口。 */
+  lan_addresses?: Record<string, string[]>;
   version: number;
   containers?: ContainerInfo[];
   data?: DataMount[];

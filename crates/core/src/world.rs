@@ -209,6 +209,7 @@ impl World {
             .servers
             .get_mut(name)
             .ok_or_else(|| server_not_found(name))?;
+          validate_lan_addrs(&settings.lan_addrs)?;
           server.settings = settings.clone();
         }
         Change::UpsertService { name, spec, adopt } => {
@@ -1128,6 +1129,24 @@ fn valid_upstream(up: &str) -> bool {
       && port.parse::<u16>().is_ok()
       && !h.chars().any(|c| c.is_whitespace() || c == '/')
   })
+}
+
+/// 额外绑定的地址只能是私有网段，否则服务端口会暴露到公网。
+fn validate_lan_addrs(addrs: &[String]) -> Result<(), ApiError> {
+  for addr in addrs {
+    let ok = addr
+      .parse::<std::net::Ipv4Addr>()
+      .is_ok_and(|ip| ip.is_private());
+    if !ok {
+      return Err(
+        ApiError::invalid(format!(
+          "局域网地址 {addr} 不是私有网段的 IPv4（10/8、172.16/12、192.168/16）"
+        ))
+        .with_hint("公网地址不能绑定，否则服务端口会直接暴露到公网"),
+      );
+    }
+  }
+  Ok(())
 }
 
 #[cfg(test)]

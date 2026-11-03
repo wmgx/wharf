@@ -114,6 +114,9 @@ pub struct ServiceView {
   pub host_ports: BTreeMap<String, u16>,
   /// 服务之间互相访问用的地址（内网地址:宿主机端口），例如 `100.101.102.103:20001`。
   pub addresses: BTreeMap<String, String>,
+  /// 局域网地址：端口名 → 各个局域网地址:宿主机端口（服务器设置了 lan_addrs 时才有）。
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub lan_addresses: BTreeMap<String, Vec<String>>,
   pub version: u64,
   /// 容器现状，查不到时为空；状态看 `status`。
   #[serde(default, skip_serializing_if = "Vec::is_empty")]

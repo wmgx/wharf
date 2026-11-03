@@ -45,6 +45,11 @@ pub struct ServerSettings {
   /// 覆盖 agent 探测到的内网地址。没有组网工具、直接走内网时用它。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub private_addr: Option<PrivateAddr>,
+  /// 额外绑定的局域网地址（只能是 10/8、172.16/12、192.168/16）。镜像和代码来源服务的端口
+  /// 除了 127.0.0.1 和内网地址，也绑到这些地址上，在同一局域网里可以直接访问。
+  /// 机器之间互相访问仍走内网地址，不受影响。
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub lan_addrs: Vec<String>,
   /// 构建时传给内置模板的参数，例如 `PIP_INDEX_URL`、`GOPROXY`（国内机器配镜像源）。
   #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
   pub build_env: BTreeMap<String, String>,
