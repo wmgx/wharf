@@ -1,47 +1,21 @@
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal as XTerm, type ITheme } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import { ArrowLeftIcon, ClipboardPasteIcon, RotateCwIcon } from "lucide-react";
+import { ArrowLeftIcon, ClipboardPasteIcon, Maximize2Icon, Minimize2Icon, RotateCwIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { useTheme, type Theme } from "@/theme";
 import { Dot } from "./common";
 
 type State = "connecting" | "open" | "closed";
 
-/** 跟着页面的深浅色走；浅色下黄色、青色压暗一点，不然看不清。 */
-const THEMES: Record<Theme, ITheme> = {
-  light: {
-    background: "#ffffff",
-    foreground: "#171717",
-    cursor: "#171717",
-    cursorAccent: "#ffffff",
-    selectionBackground: "#2563eb33",
-    black: "#171717",
-    red: "#dc2626",
-    green: "#15803d",
-    yellow: "#a16207",
-    blue: "#1d4ed8",
-    magenta: "#a21caf",
-    cyan: "#0e7490",
-    white: "#a3a3a3",
-    brightBlack: "#737373",
-    brightRed: "#ef4444",
-    brightGreen: "#16a34a",
-    brightYellow: "#ca8a04",
-    brightBlue: "#2563eb",
-    brightMagenta: "#c026d3",
-    brightCyan: "#0891b2",
-    brightWhite: "#d4d4d4",
-  },
-  dark: {
-    background: "#171717",
-    foreground: "#e5e5e5",
-    cursor: "#e5e5e5",
-    cursorAccent: "#171717",
-    selectionBackground: "#60a5fa55",
-  },
+/** 终端正文固定深色；外框和工具栏跟页面一致。 */
+const THEME: ITheme = {
+  background: "#171717",
+  foreground: "#e5e5e5",
+  cursor: "#e5e5e5",
+  cursorAccent: "#171717",
+  selectionBackground: "#60a5fa55",
 };
 type Target = "service" | "host";
 
@@ -71,9 +45,11 @@ export default function Terminal({
   name,
   service,
   target = "service",
-  fullScreen = false,
+  fullScreen: startFull = false,
   title,
   onBack,
+  session,
+  onConnected,
 }: {
   name: string;
   service?: string;
@@ -81,8 +57,15 @@ export default function Terminal({
   fullScreen?: boolean;
   title?: string;
   onBack?: () => void;
+  /** 宿主机终端接哪个 tmux 会话。 */
+  session?: string;
+  /** 连上之后调用一次，例如刷新会话列表。 */
+  onConnected?: () => void;
 }) {
+  const [fullScreen, setFullScreen] = useState(startFull);
   const root = useRef<HTMLDivElement>(null);
+  const connectedRef = useRef(onConnected);
+  connectedRef.current = onConnected;
   const box = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerm | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -91,9 +74,6 @@ export default function Terminal({
   const fitFrame = useRef<number | null>(null);
   const ctrlRef = useRef(false);
   const altRef = useRef(false);
-  const { theme } = useTheme();
-  const themeRef = useRef(theme);
-  themeRef.current = theme;
   const [state, setState] = useState<State>("connecting");
   const [round, setRound] = useState(0);
   const [fontSize, setFontSize] = useState(initialFontSize);
@@ -136,7 +116,7 @@ export default function Terminal({
       fontFamily: '"Geist Mono", ui-monospace, monospace',
       fontSize,
       scrollback: 2000,
-      theme: THEMES[themeRef.current],
+      theme: THEME,
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
@@ -154,6 +134,7 @@ export default function Terminal({
 
     const q = new URLSearchParams({ cols: String(term.cols), rows: String(term.rows) });
     if (service) q.set("service", service);
+    if (session) q.set("session", session);
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const path = target === "host" ? `/api/servers/${encodeURIComponent(name)}/terminal` : `/api/services/${encodeURIComponent(name)}/terminal`;
     const ws = new WebSocket(`${proto}://${location.host}${path}?${q}`);
@@ -163,6 +144,8 @@ export default function Terminal({
     sendRef.current = (data) => send({ data });
     ws.onopen = () => {
       setState("open");
+      // tmux 会话在连上后一两秒才建好。
+      setTimeout(() => connectedRef.current?.(), 2000);
       send({ cols: term.cols, rows: term.rows });
       term.focus();
     };
@@ -188,11 +171,8 @@ export default function Terminal({
       termRef.current = null;
       fitRef.current = null;
     };
-  }, [clearModifiers, name, round, scheduleFit, service, target]);
+  }, [clearModifiers, name, round, scheduleFit, service, session, target]);
 
-  useEffect(() => {
-    if (termRef.current) termRef.current.options.theme = THEMES[theme];
-  }, [theme]);
 
   useEffect(() => {
     const term = termRef.current;
@@ -202,9 +182,12 @@ export default function Terminal({
   }, [fontSize, scheduleFit]);
 
   useEffect(() => {
-    if (!fullScreen) return;
     const el = root.current;
     if (!el) return;
+    if (!fullScreen) {
+      scheduleFit();
+      return;
+    }
     const viewport = window.visualViewport;
     const resize = () => {
       el.style.top = `${viewport?.offsetTop ?? 0}px`;
@@ -219,8 +202,10 @@ export default function Terminal({
     return () => {
       (viewport ?? window).removeEventListener("resize", resize);
       viewport?.removeEventListener("scroll", resize);
+      el.style.top = el.style.left = el.style.width = el.style.height = "";
     };
   }, [fullScreen, scheduleFit]);
+
 
   useEffect(
     () => () => {
@@ -295,6 +280,11 @@ export default function Terminal({
               粘贴
             </Button>
           )}
+          {!onBack && (
+            <Button aria-label={fullScreen ? "退出全屏" : "全屏"} title={fullScreen ? "退出全屏" : "全屏"} size="xs" variant="ghost" onClick={() => setFullScreen((v) => !v)}>
+              {fullScreen ? <Minimize2Icon /> : <Maximize2Icon />}
+            </Button>
+          )}
           {state === "closed" && (
             <Button size="xs" variant="ghost" onClick={() => setRound((n) => n + 1)}>
               <RotateCwIcon />
@@ -303,7 +293,7 @@ export default function Terminal({
           )}
         </div>
       </div>
-      <div ref={box} className={cn("overscroll-contain p-2", fullScreen ? "min-h-0 flex-1" : "h-[calc(100svh-22rem)] min-h-80")} />
+      <div ref={box} className={cn("overscroll-contain bg-[#171717] p-2", fullScreen ? "min-h-0 flex-1" : "h-[calc(100svh-16rem)] min-h-80")} />
       <div className="flex shrink-0 gap-1 overflow-x-auto border-t bg-muted/40 p-1.5 text-foreground pointer-fine:hidden">
         <TerminalKey label="Esc" onPress={() => sendKey("\x1b")} />
         <TerminalKey label="Tab" onPress={() => sendKey("\t")} />

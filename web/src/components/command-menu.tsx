@@ -74,7 +74,7 @@ export function CommandMenu({ onLogout }: { onLogout: () => void }) {
               <AnchorIcon />
               首页
             </CommandItem>
-            <CommandItem value="入口 网关 gateway" onSelect={() => run(() => nav("/servers?tab=entries"))}>
+            <CommandItem value="入口 网关 gateway" onSelect={() => run(() => nav("/entries"))}>
               <WaypointsIcon />
               入口
             </CommandItem>
@@ -82,7 +82,7 @@ export function CommandMenu({ onLogout }: { onLogout: () => void }) {
               <ServerIcon />
               服务器
             </CommandItem>
-            <CommandItem value="组网 network tailscale" onSelect={() => run(() => nav("/servers?tab=network"))}>
+            <CommandItem value="组网 network tailscale" onSelect={() => run(() => nav("/network"))}>
               <CableIcon />
               组网
             </CommandItem>
@@ -94,11 +94,11 @@ export function CommandMenu({ onLogout }: { onLogout: () => void }) {
               <SettingsIcon />
               设置
             </CommandItem>
-            <CommandItem value="拓扑 topology" onSelect={() => run(() => nav("/servers?tab=topology"))}>
+            <CommandItem value="拓扑 topology" onSelect={() => run(() => nav("/network"))}>
               <NetworkIcon />
               拓扑
             </CommandItem>
-            <CommandItem value="数据 备份 data" onSelect={() => run(() => nav("/servers?tab=data"))}>
+            <CommandItem value="数据 备份 data" onSelect={() => run(() => nav("/data"))}>
               <HardDriveIcon />
               数据
             </CommandItem>
@@ -123,7 +123,7 @@ export function CommandMenu({ onLogout }: { onLogout: () => void }) {
               </CommandItem>
             ))}
             {status?.gateways.map((g) => (
-              <CommandItem key={g.name} value={`网关 ${g.name} ${g.spec.server}`} onSelect={() => run(() => nav(`/servers?tab=entries&open=${g.name}`))}>
+              <CommandItem key={g.name} value={`网关 ${g.name} ${g.spec.server}`} onSelect={() => run(() => nav(`/entries?open=${g.name}`))}>
                 <WaypointsIcon />
                 {g.name}
                 <span className="text-xs text-muted-foreground">网关 · {g.spec.server}</span>
@@ -176,7 +176,7 @@ export function CommandMenu({ onLogout }: { onLogout: () => void }) {
             {op("n-svc", "部署服务 新建服务 new deploy", <PlusIcon />, "部署服务", () => nav("/?new=1"))}
             {op("n-imp", "导入已有容器 import", <DownloadIcon />, "导入服务器上已有的容器", () => nav("/?import=1"))}
             {op("n-edge", "导入 Workers Pages cloudflare edge", <CloudIcon />, "导入 Cloudflare Workers / Pages", () => nav("/?edge=1"))}
-            {op("n-gw", "新建入口 网关 new gateway", <WaypointsIcon />, "新建入口", () => nav("/servers?tab=entries&new=1"))}
+            {op("n-gw", "新建入口 网关 new gateway", <WaypointsIcon />, "新建入口", () => nav("/entries?new=1"))}
             {op("n-acc", "加 Cloudflare 账号 account", <KeyRoundIcon />, "加 Cloudflare 账号", () => nav("/settings?add=account"))}
           </CommandGroup>
           <CommandSeparator />

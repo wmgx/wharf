@@ -44,7 +44,7 @@ export function NewMenu() {
             <GlobeIcon />
             加域名
           </DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => nav("/servers?tab=entries&new=1")}>
+          <DropdownMenuItem onSelect={() => nav("/entries?new=1")}>
             <WaypointsIcon />
             新建入口
           </DropdownMenuItem>

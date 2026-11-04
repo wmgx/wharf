@@ -235,8 +235,14 @@ async fn session(
               crate::terminal::run(&ops.docker, &job, &ctx, input)
                 .await
             }
-            (AgentOp::HostTerminal { size }, Some(input)) => {
-              ops.host_shell.terminal(size, &ctx, input).await
+            (
+              AgentOp::HostTerminal { size, session },
+              Some(input),
+            ) => {
+              ops
+                .host_shell
+                .terminal(size, session, &ctx, input)
+                .await
             }
             (op, _) => ops.handle(op, &ctx).await,
           };

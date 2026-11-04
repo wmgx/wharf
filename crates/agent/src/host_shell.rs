@@ -19,7 +19,7 @@ use wharf_api_types::{
   ApiError, ErrorCode,
   agent::{
     HostExecFailure, HostExecJob, HostExecOutcome, HostExecResult,
-    TerminalInput, TerminalSize,
+    HostSession, TerminalInput, TerminalSize,
   },
 };
 
@@ -37,18 +37,31 @@ const CLEANUP_STEP_TIMEOUT: Duration = Duration::from_secs(3);
 const OUTPUT_LIMIT: usize = 64 * 1024;
 const COMMAND_LIMIT: usize = 64 * 1024;
 const TAIL_LIMIT: usize = 512;
-/// 宿主机终端：有 tmux 就接上同一个会话 `wharf`，关掉页面后会话还在，换个地方打开接着用。
+/// 宿主机终端：有 tmux 就接上 `$1` 指定的会话（没有就新建），关掉页面后会话还在，换个地方打开接着用。
+/// 没有 tmux 时先用系统包管理器装一次（限时 120 秒），装不上再退回普通 shell。
 /// 终端跑在临时容器里，容器删掉时它的进程都会被杀；tmux 服务端要用 `systemd-run --scope`
-/// 放进宿主机自己的 cgroup 才活得下来。没有 tmux 时退回普通 shell，并提示怎么装。
+/// 放进宿主机自己的 cgroup 才活得下来。
 const HOST_SHELL: &str = "cd /root 2>/dev/null || cd /; \
-if command -v tmux >/dev/null 2>&1; then \
-  tmux has-session -t wharf 2>/dev/null || \
-    { command -v systemd-run >/dev/null 2>&1 && systemd-run --scope --quiet --collect tmux new-session -d -s wharf; } || \
-    tmux new-session -d -s wharf; \
-  exec tmux attach-session -t wharf; \
+if ! command -v tmux >/dev/null 2>&1; then \
+  printf '\\033[33m正在安装 tmux，用来在关掉页面后保留会话…\\033[0m\\r\\n'; \
+  if command -v apt-get >/dev/null 2>&1; then \
+    export DEBIAN_FRONTEND=noninteractive; \
+    timeout 120 sh -c 'apt-get install -y -qq tmux || { apt-get update -qq && apt-get install -y -qq tmux; }' >/dev/null 2>&1; \
+  elif command -v dnf >/dev/null 2>&1; then timeout 120 dnf install -y -q tmux >/dev/null 2>&1; \
+  elif command -v yum >/dev/null 2>&1; then timeout 120 yum install -y -q tmux >/dev/null 2>&1; \
+  elif command -v apk >/dev/null 2>&1; then timeout 120 apk add -q tmux >/dev/null 2>&1; \
+  fi; \
 fi; \
-printf '\\033[33m这台机器没装 tmux：关掉页面后会话不会保留。装上后再打开就能保留（Debian/Ubuntu：apt install -y tmux）。\\033[0m\\r\\n'; \
+if command -v tmux >/dev/null 2>&1; then \
+  tmux has-session -t \"=$1\" 2>/dev/null || \
+    { command -v systemd-run >/dev/null 2>&1 && systemd-run --scope --quiet --collect tmux new-session -d -s \"$1\"; } || \
+    tmux new-session -d -s \"$1\"; \
+  exec tmux attach-session -t \"=$1\"; \
+fi; \
+printf '\\033[33mtmux 没装上：关掉页面后会话不会保留。\\033[0m\\r\\n'; \
 command -v bash >/dev/null 2>&1 && exec bash -l || exec sh -l";
+const DEFAULT_SESSION: &str = "wharf";
+const SESSION_CMD_TIMEOUT: u64 = 20;
 const EXEC_WRAPPER: &str = "/bin/sh -c \"$1\"; code=$?; printf '\\n%s%d\\n' \"$2\" \"$code\" >&2; exit \"$code\"";
 
 struct Prepared {
@@ -152,16 +165,25 @@ impl HostShell {
   pub async fn terminal(
     &self,
     size: TerminalSize,
+    session: Option<String>,
     ctx: &Ctx,
     mut input: mpsc::Receiver<TerminalInput>,
   ) -> Result<Value, ApiError> {
+    let session = session.unwrap_or_else(|| DEFAULT_SESSION.into());
+    validate_session(&session)?;
     let image = self.image().await?;
     let name = self.name();
     let (master, slave) = open_pty(size)?;
     let mut writer = File::from(master.try_clone().map_err(io)?);
     let mut reader = File::from(master.try_clone().map_err(io)?);
     let mut args = self.run_args(&name, "/", true, &image);
-    args.extend(["/bin/sh".into(), "-c".into(), HOST_SHELL.into()]);
+    args.extend([
+      "/bin/sh".into(),
+      "-c".into(),
+      HOST_SHELL.into(),
+      "wharf-host-shell".into(),
+      session,
+    ]);
     let mut cmd = tokio::process::Command::new(&self.docker.bin);
     cmd
       .args(args)
@@ -218,6 +240,53 @@ impl HostShell {
     let _ = tokio::time::timeout(Duration::from_secs(1), pump).await;
     first_cleanup.and(second_cleanup)?;
     result.map(Value::from)
+  }
+
+  /// 宿主机上的 tmux 会话。没装 tmux 或者一个会话都没有时是空列表。
+  pub async fn sessions(
+    &self,
+    ctx: &Ctx,
+  ) -> Result<Vec<HostSession>, ApiError> {
+    let out = self
+      .quick(
+        "command -v tmux >/dev/null 2>&1 || exit 0; tmux list-sessions -F '#{session_name}\t#{session_attached}\t#{session_created}' 2>/dev/null || true",
+        ctx,
+      )
+      .await?;
+    Ok(parse_sessions(&out))
+  }
+
+  pub async fn kill_session(
+    &self,
+    session: &str,
+    ctx: &Ctx,
+  ) -> Result<(), ApiError> {
+    validate_session(session)?;
+    // 会话名已校验只含字母数字和 `_-`，可以直接拼进命令。
+    self
+      .quick(
+        &format!(
+          "tmux kill-session -t '={session}' 2>/dev/null || true"
+        ),
+        ctx,
+      )
+      .await
+      .map(|_| ())
+  }
+
+  async fn quick(
+    &self,
+    command: &str,
+    ctx: &Ctx,
+  ) -> Result<String, ApiError> {
+    let job = HostExecJob {
+      command: command.into(),
+      timeout_secs: SESSION_CMD_TIMEOUT,
+      cwd: "/".into(),
+    };
+    let result =
+      self.exec_inner(&job, ctx).await.map_err(|(e, _)| e)?;
+    Ok(result.stdout)
   }
 
   pub async fn exec(
@@ -602,5 +671,61 @@ mod tests {
       })
       .is_err()
     );
+  }
+}
+
+/// 会话名只允许字母、数字、`_`、`-`，最长 64：直接拼进 shell 命令和 tmux 目标里也安全。
+fn validate_session(name: &str) -> Result<(), ApiError> {
+  let ok = !name.is_empty()
+    && name.len() <= 64
+    && name
+      .bytes()
+      .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+  if ok {
+    Ok(())
+  } else {
+    Err(ApiError::new(
+      ErrorCode::InvalidInput,
+      format!(
+        "会话名 {name:?} 不合法：只能用字母、数字、_ 和 -，最长 64 个字符"
+      ),
+    ))
+  }
+}
+
+fn parse_sessions(out: &str) -> Vec<HostSession> {
+  let mut list: Vec<HostSession> = out
+    .lines()
+    .filter_map(|line| {
+      let mut parts = line.split('\t');
+      let name = parts.next()?.trim().to_string();
+      let attached = parts.next()?.trim().parse().ok()?;
+      let created = parts.next()?.trim().parse().ok()?;
+      (!name.is_empty()).then_some(HostSession {
+        name,
+        attached,
+        created,
+      })
+    })
+    .collect();
+  list.sort_by_key(|s| s.created);
+  list
+}
+
+#[cfg(test)]
+mod session_tests {
+  use super::*;
+
+  #[test]
+  fn parses_tmux_list_and_rejects_bad_names() {
+    let list =
+      parse_sessions("wharf-2\t0\t200\nwharf\t1\t100\ngarbage\n");
+    assert_eq!(
+      list.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+      ["wharf", "wharf-2"]
+    );
+    assert!(validate_session("wharf-3").is_ok());
+    assert!(validate_session("a;rm -rf /").is_err());
+    assert!(validate_session("").is_err());
   }
 }

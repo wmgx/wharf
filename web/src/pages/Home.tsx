@@ -219,7 +219,7 @@ function Onboarding({ status }: { status: Status }) {
       title: "建一个入口",
       hint: "域名从哪进来：有公网 IP 的机器直连，或 Cloudflare 隧道",
       action: "新建入口",
-      go: () => nav("/servers?tab=entries&new=1"),
+      go: () => nav("/entries?new=1"),
     },
     {
       done: status.services.length + (status.edge_apps?.length ?? 0) > 0,
@@ -233,7 +233,7 @@ function Onboarding({ status }: { status: Status }) {
       title: "给它一个域名",
       hint: "证书和 DNS 自动配好",
       action: "加域名",
-      go: () => nav("/servers?tab=entries"),
+      go: () => nav("/entries"),
     },
     {
       done: tokens.some((t) => !!t.last_used_at),

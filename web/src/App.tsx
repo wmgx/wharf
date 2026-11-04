@@ -21,6 +21,7 @@ import { Login } from "./pages/Login";
 import { HostTerminal } from "./pages/HostTerminal";
 import { ServiceDetail } from "./pages/ServiceDetail";
 import { EdgeDetail } from "./pages/EdgeDetail";
+import { DataPage, Entries, NetworkPage } from "./pages/Panels";
 import { StatusContext } from "./status";
 import { ThemeProvider } from "./theme";
 import type { Status } from "./types";
@@ -64,6 +65,9 @@ const TITLES: [string, string][] = [
   ["/services/", "服务详情"],
   ["/edge/", "服务详情"],
   ["/servers", "服务器"],
+  ["/entries", "入口"],
+  ["/network", "网络"],
+  ["/data", "数据与备份"],
   ["/activity", "活动"],
   ["/settings", "设置"],
   ["/", "首页"],
@@ -91,7 +95,7 @@ function Shell({ username, onLogout }: { username: string; onLogout: () => void 
                 <NewMenu />
               </div>
             </header>
-            <div className="mx-auto w-full max-w-6xl flex-1 px-4 py-8 md:px-8">
+            <div className={pathname.startsWith("/servers") && !pathname.endsWith("/terminal") ? "flex flex-1" : "mx-auto w-full max-w-6xl flex-1 px-4 py-8 md:px-8"}>
               <Boundary>
                 <Routes>
                   <Route path="/" element={<Home />} />
@@ -101,14 +105,15 @@ function Shell({ username, onLogout }: { username: string; onLogout: () => void 
                   <Route path="/servers/:name" element={<Servers />} />
                   <Route path="/servers/:name/terminal" element={<HostTerminal />} />
                   <Route path="/servers" element={<Servers />} />
-                  <Route path="/domains" element={<Moved to="/servers" tab="entries" />} />
+                  <Route path="/entries" element={<Entries />} />
+                  <Route path="/domains" element={<Moved to="/entries" />} />
                   <Route path="/activity" element={<Activity />} />
                   <Route path="/settings" element={<Settings />} />
-                  <Route path="/data" element={<Moved to="/servers" tab="data" />} />
-                  <Route path="/gateways" element={<Moved to="/servers" tab="entries" />} />
-                  <Route path="/network" element={<Moved to="/servers" tab="network" />} />
+                  <Route path="/data" element={<DataPage />} />
+                  <Route path="/gateways" element={<Moved to="/entries" />} />
+                  <Route path="/network" element={<NetworkPage />} />
                   <Route path="/accounts" element={<Moved to="/settings" />} />
-                  <Route path="/topology" element={<Moved to="/servers" tab="topology" />} />
+                  <Route path="/topology" element={<Moved to="/network" />} />
                   <Route path="*" element={<Navigate to="/" replace />} />
                 </Routes>
               </Boundary>
@@ -121,16 +126,16 @@ function Shell({ username, onLogout }: { username: string; onLogout: () => void 
 }
 
 /** 旧地址跳到新位置，保留查询参数（例如 `/gateways?open=x`）。 */
-/** 服务列表并进了首页；数据与备份挪到了服务器下面。 */
+/** 服务列表并进了首页；`/services?tab=data` 是数据与备份。 */
 function ServicesMoved() {
   const { search } = useLocation();
-  return new URLSearchParams(search).get("tab") === "data" ? <Moved to="/servers" tab="data" /> : <Moved to="/" />;
+  return new URLSearchParams(search).get("tab") === "data" ? <Moved to="/data" /> : <Moved to="/" />;
 }
 
-function Moved({ to, tab }: { to: string; tab?: string }) {
+function Moved({ to }: { to: string }) {
   const { search } = useLocation();
   const params = new URLSearchParams(search);
-  if (tab) params.set("tab", tab);
+  params.delete("tab");
   const q = params.toString();
   return <Navigate to={q ? `${to}?${q}` : to} replace />;
 }

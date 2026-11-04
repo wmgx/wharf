@@ -53,6 +53,8 @@ pub struct OpenQuery {
   rows: u16,
   /// compose 里的服务名，不填时用第一个在运行的容器。
   service: Option<String>,
+  /// 宿主机终端接哪个 tmux 会话，不填是默认会话。
+  session: Option<String>,
 }
 
 fn default_cols() -> u16 {
@@ -147,13 +149,19 @@ pub async fn open_host(
     rows: q.rows,
   };
   Ok(ws.on_upgrade(move |socket| {
-    session(s, name, Target::Host(size), socket, Some(audit_id))
+    session(
+      s,
+      name,
+      Target::Host(size, q.session),
+      socket,
+      Some(audit_id),
+    )
   }))
 }
 
 enum Target {
   Service(TerminalJob),
-  Host(TerminalSize),
+  Host(TerminalSize, Option<String>),
 }
 
 async fn session(
@@ -188,7 +196,9 @@ async fn session(
     tokio::spawn(async move {
       let op = match target {
         Target::Service(job) => AgentOp::Terminal(job),
-        Target::Host(size) => AgentOp::HostTerminal { size },
+        Target::Host(size, session) => {
+          AgentOp::HostTerminal { size, session }
+        }
       };
       state
         .hub

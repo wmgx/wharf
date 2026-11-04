@@ -1,4 +1,4 @@
-import { ArrowLeftIcon, ArrowUpCircleIcon, RefreshCwIcon, TerminalIcon, Trash2Icon } from "lucide-react";
+import { ArrowLeftIcon, ArrowUpCircleIcon, RefreshCwIcon, Trash2Icon } from "lucide-react";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
@@ -18,6 +18,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { HostSessions } from "@/components/host-sessions";
 import { useStatus } from "@/status";
 import type { HostInfo, ServerView } from "@/types";
 
@@ -171,7 +172,7 @@ export function ServerDetail() {
                 </Link>
               ))}
               {gateways.map((g) => (
-                <Link key={g.name} to={`/servers?tab=entries&open=${g.name}`} className="rounded-lg border border-dashed bg-card px-3 py-1.5 text-sm hover:bg-accent">
+                <Link key={g.name} to={`/entries?open=${g.name}`} className="rounded-lg border border-dashed bg-card px-3 py-1.5 text-sm hover:bg-accent">
                   入口 {g.name}
                 </Link>
               ))}
@@ -214,12 +215,7 @@ export function ServerDetail() {
               {terminalStatus === "未开启" ? "宿主机终端没有开启，在“设置”标签里打开。" : terminalStatus === "离线" ? "服务器离线。" : "agent 版本太旧，先升级 agent。"}
             </Empty>
           ) : (
-            <Button asChild>
-              <Link to={`/servers/${encodeURIComponent(name)}/terminal`}>
-                <TerminalIcon />
-                打开宿主机终端
-              </Link>
-            </Button>
+            <HostSessions server={name} />
           )}
         </TabsContent>
 
@@ -421,7 +417,7 @@ function SettingsForm({ server, canRemove }: { server: ServerView; canRemove: bo
         <Button disabled={!changed} onClick={() => actions.plan({ title: `设置 ${server.name}`, changes: [{ op: "update_server", name: server.name, settings: next }] })}>
           预览改动
         </Button>
-        <span className="text-xs text-muted-foreground">接入方式和内网地址在<Link to="/servers?tab=network" className="mx-0.5 underline underline-offset-2">组网</Link>里改</span>
+        <span className="text-xs text-muted-foreground">接入方式和内网地址在<Link to="/network" className="mx-0.5 underline underline-offset-2">组网</Link>里改</span>
       </div>
       <div className="mt-6 flex flex-wrap items-center gap-3 rounded-xl border border-destructive/30 p-4">
         <div className="grid flex-1 gap-0.5 text-sm">

@@ -1,4 +1,4 @@
-import { AnchorIcon, ChevronsUpDownIcon, HistoryIcon, LogOutIcon, MoonIcon, ServerIcon, SettingsIcon, SunIcon } from "lucide-react";
+import { AnchorIcon, DatabaseIcon, NetworkIcon, WaypointsIcon, ChevronsUpDownIcon, HistoryIcon, LogOutIcon, MoonIcon, ServerIcon, SettingsIcon, SunIcon } from "lucide-react";
 import { NavLink, useLocation } from "react-router-dom";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import {
@@ -40,6 +40,9 @@ export function AppSidebar({ username, onLogout }: { username: string; onLogout:
       items: [
         { to: "/", label: "首页", icon: AnchorIcon, count: status ? status.services.length + (status.edge_apps?.length ?? 0) : undefined },
         { to: "/servers", label: "服务器", icon: ServerIcon, count: status?.servers.length },
+        { to: "/entries", label: "入口", icon: WaypointsIcon, count: status?.gateways.length },
+        { to: "/network", label: "网络", icon: NetworkIcon },
+        { to: "/data", label: "数据与备份", icon: DatabaseIcon },
         { to: "/activity", label: "活动", icon: HistoryIcon },
       ],
     },

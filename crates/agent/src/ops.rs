@@ -199,6 +199,12 @@ impl Ops {
         )
         .await?,
       ),
+      AgentOp::HostSessions => {
+        to_value(self.host_shell.sessions(ctx).await?)
+      }
+      AgentOp::HostSessionKill { session } => {
+        to_value(self.host_shell.kill_session(&session, ctx).await?)
+      }
       AgentOp::HostExec(job) => {
         to_value(self.host_shell.exec(job, ctx).await)
       }

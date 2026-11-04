@@ -259,6 +259,15 @@ pub enum AgentOp {
   /// 在宿主机命名空间里开一个 root shell。输入输出与 [AgentOp::Terminal] 相同。
   HostTerminal {
     size: TerminalSize,
+    /// 接上哪个 tmux 会话；不填是默认会话 `wharf`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    session: Option<String>,
+  },
+  /// 宿主机上的 tmux 会话列表，结果是 `Vec<HostSession>`。没装 tmux 时是空列表。
+  HostSessions,
+  /// 结束宿主机上的一个 tmux 会话，里面跑着的程序会一起结束。
+  HostSessionKill {
+    session: String,
   },
   /// 在宿主机命名空间里执行一次命令。结果是 [HostExecOutcome]。
   HostExec(HostExecJob),
@@ -406,6 +415,16 @@ pub struct TerminalJob {
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub service: Option<String>,
   pub size: TerminalSize,
+}
+
+/// 宿主机上的一个 tmux 会话。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostSession {
+  pub name: String,
+  /// 现在有几个终端连着它。
+  pub attached: u32,
+  /// 创建时间，unix 秒。
+  pub created: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

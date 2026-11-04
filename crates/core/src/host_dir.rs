@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
   ApiError, ErrorCode,
-  agent::{AgentOp, HostPackJob, PackedUpload},
+  agent::{AgentOp, HostPackJob, HostSession, PackedUpload},
   view::Perm,
 };
 
@@ -171,4 +171,61 @@ pub async fn origin(
     .call(move |c| db::setting(c, &format!("pack.origin.{name}")))
     .await?;
   Ok(Json(raw.and_then(|r| serde_json::from_str(&r).ok())))
+}
+
+const SESSION_TIMEOUT: Duration = Duration::from_secs(40);
+
+/// `GET /api/servers/{name}/sessions`：宿主机上的 tmux 会话，终端页拿来列标签。
+pub async fn sessions(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Path(name): Path<String>,
+) -> ApiResult<Vec<HostSession>> {
+  auth.require(Perm::Exec)?;
+  check_server(&s, &name).await?;
+  Ok(Json(
+    s.hub
+      .call(
+        &name,
+        AgentOp::HostSessions,
+        SESSION_TIMEOUT,
+        None,
+        &CancellationToken::new(),
+      )
+      .await?,
+  ))
+}
+
+/// `DELETE /api/servers/{name}/sessions/{session}`：结束一个 tmux 会话，记审计。
+pub async fn kill_session(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Path((name, session)): Path<(String, String)>,
+) -> ApiResult<()> {
+  auth.require(Perm::Exec)?;
+  check_server(&s, &name).await?;
+  let audit =
+    start(&s.db, &auth.name, &name, "terminal.kill", Some(&session))
+      .await?;
+  let result: Result<(), ApiError> = s
+    .hub
+    .call(
+      &name,
+      AgentOp::HostSessionKill { session },
+      SESSION_TIMEOUT,
+      None,
+      &CancellationToken::new(),
+    )
+    .await;
+  let end = match &result {
+    Ok(()) => End {
+      exit_code: Some(0),
+      duration_ms: None,
+      output_bytes: None,
+      error: None,
+    },
+    Err(e) => End::error(e),
+  };
+  finish(&s.db, audit, end).await;
+  Ok(Json(result?))
 }

@@ -116,6 +116,14 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route("/api/servers/{name}/host", get(host_info))
     .route("/api/servers/{name}/dirs", get(crate::host_dir::list))
     .route("/api/servers/{name}/pack", post(crate::host_dir::pack))
+    .route(
+      "/api/servers/{name}/sessions",
+      get(crate::host_dir::sessions),
+    )
+    .route(
+      "/api/servers/{name}/sessions/{session}",
+      axum::routing::delete(crate::host_dir::kill_session),
+    )
     .route("/api/servers/{name}/exec", post(crate::shell::exec))
     .route(
       "/api/servers/{name}/terminal",
