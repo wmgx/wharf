@@ -29,8 +29,8 @@ const RECONNECT_WAIT: Duration = Duration::from_secs(150);
 /// agent 连上后立刻上报，留够这么长时间再看构建号。
 const FIRST_REPORT_WAIT: Duration = Duration::from_secs(15);
 
-/// 拉控制面镜像的时间，要短于 CLI 请求的超时（180 秒）。
-const CORE_PULL_TIMEOUT: Duration = Duration::from_secs(150);
+/// 拉控制面镜像的时间（家里出口慢，给足），要短于 CLI 这个请求的超时（见 CLI 的 CORE_UPGRADE_REQUEST）。
+const CORE_PULL_TIMEOUT: Duration = Duration::from_secs(540);
 /// 控制面开始服务时打的日志，见 main.rs。
 const CORE_READY: &str = " 监听 ";
 

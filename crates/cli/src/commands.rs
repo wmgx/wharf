@@ -840,8 +840,18 @@ async fn upgrade_outdated(c: &Client, j: bool) -> CliResult<()> {
 }
 
 /// 控制面重启后，等它带着新构建号回来、agent 重新连上。
-const CORE_RESTART_WAIT: Duration = Duration::from_secs(150);
+const CORE_RESTART_WAIT: Duration = Duration::from_secs(300);
+/// 控制面拉新镜像可能很慢（控制面那边最多 540 秒）。
+const CORE_UPGRADE_REQUEST: Duration = Duration::from_secs(600);
 const AGENT_RECONNECT_WAIT: Duration = Duration::from_secs(60);
+
+/// 连不上或者代理报 5xx：请求没有拿到控制面自己的答复。
+fn connection_lost(e: &ApiError) -> bool {
+  e.code == ErrorCode::AgentOffline
+    || (e.code == ErrorCode::Internal
+      && (e.message.starts_with("控制面返回 HTTP 5")
+        || e.message.starts_with("读取响应失败")))
+}
 
 async fn upgrade(c: &Client, j: bool) -> CliResult<()> {
   // 替换控制面要靠同机的 agent，落后的 agent 先升到和控制面一致。
@@ -851,7 +861,34 @@ async fn upgrade(c: &Client, j: bool) -> CliResult<()> {
     eprintln!("有 agent 没升级成功，继续升级控制面");
   }
   let before: Value = c.get("/api/version").await?;
-  let r: UpgradeResult = c.post("/api/upgrade", &json!({})).await?;
+  // 请求可能在控制面拉镜像或重启时被代理掐断（超时、502/524），这时按"正在换"处理，
+  // 等新构建号出现；等不到再报原来的错误。
+  let (r, lost) = match c
+    .post_timeout::<_, UpgradeResult>(
+      "/api/upgrade",
+      &json!({}),
+      CORE_UPGRADE_REQUEST,
+    )
+    .await
+  {
+    Ok(r) => (r, None),
+    Err(CliError::Api(e)) if connection_lost(&e) => {
+      if !j {
+        eprintln!(
+          "请求断了（{}），控制面可能正在换，等它回来",
+          e.message
+        );
+      }
+      (
+        UpgradeResult {
+          image: "新版本".into(),
+          started: true,
+        },
+        Some(e),
+      )
+    }
+    Err(e) => return Err(e),
+  };
   if !r.started {
     if !j {
       println!("控制面已经是最新版本");
@@ -876,6 +913,9 @@ async fn upgrade(c: &Client, j: bool) -> CliResult<()> {
         break;
       }
       if tokio::time::Instant::now() > deadline {
+        if let Some(e) = lost {
+          return Err(e.into());
+        }
         return Err(
           ApiError::new(ErrorCode::AgentFailed, "控制面没有换成新版本")
             .with_hint("接班容器会恢复旧的控制面；在控制面所在的机器上 docker logs wharf-agent-upgrade 查看原因")
@@ -887,7 +927,17 @@ async fn upgrade(c: &Client, j: bool) -> CliResult<()> {
   // agent 断线重连要几秒，最多等一分钟；还没连上的这次跳过。
   let deadline = tokio::time::Instant::now() + AGENT_RECONNECT_WAIT;
   let servers = loop {
-    let v: Vec<ServerView> = c.get("/api/servers").await?;
+    // 控制面刚换完，反向代理或连接可能还会断一下，重试到期限为止。
+    let v: Vec<ServerView> = match c.get("/api/servers").await {
+      Ok(v) => v,
+      Err(e) if tokio::time::Instant::now() > deadline => {
+        return Err(e);
+      }
+      Err(_) => {
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        continue;
+      }
+    };
     if !r.started
       || v.iter().all(|s| s.online)
       || tokio::time::Instant::now() > deadline
