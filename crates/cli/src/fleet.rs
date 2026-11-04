@@ -10,8 +10,19 @@ use wharf_api_types::spec::{Fleet, Source};
 pub fn load(path: &Path) -> anyhow::Result<Fleet> {
   let text = std::fs::read_to_string(path)
     .with_context(|| format!("读取 {}", path.display()))?;
-  let mut fleet: Fleet = toml::from_str(&text)
+  // 类型本身容忍未知字段（新旧版本互通）；自己写的文件仍然报出来，防止拼错。
+  let mut unknown = Vec::new();
+  let de = toml::Deserializer::parse(&text)
     .with_context(|| format!("{} 格式不对", path.display()))?;
+  let mut fleet: Fleet =
+    serde_ignored::deserialize(de, |p| unknown.push(p.to_string()))
+      .with_context(|| format!("{} 格式不对", path.display()))?;
+  anyhow::ensure!(
+    unknown.is_empty(),
+    "{} 里有不认识的字段：{}（拼错了，或者本机 wharf 太旧）",
+    path.display(),
+    unknown.join("、")
+  );
   let base = path.parent().unwrap_or(Path::new("."));
   for (name, service) in &mut fleet.services {
     if let Source::Compose { content, file } = &mut service.source
@@ -92,5 +103,10 @@ service = "whoami"
     let text = to_toml(&fleet).unwrap();
     let back: Fleet = toml::from_str(&text).unwrap();
     assert_eq!(back, fleet);
+
+    // 自己写的文件拼错字段要报出来。
+    std::fs::write(&path, "[services.x]\nserver = \"node1\"\nsource = { image = \"a\" }\nprots = []\n").unwrap();
+    let err = load(&path).unwrap_err().to_string();
+    assert!(err.contains("services.x.prots"), "{err}");
   }
 }

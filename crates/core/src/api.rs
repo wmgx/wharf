@@ -234,7 +234,49 @@ pub fn router(state: Arc<AppState>) -> Router {
         crate::web::serve(uri).await
       }
     })
+    .layer(axum::middleware::from_fn(check_cli))
     .with_state(state)
+}
+
+/// 拦下太旧的 CLI。页面和控制面一起发布，不带这个头；更早的 CLI 也不带，放过。
+async fn check_cli(
+  req: axum::extract::Request,
+  next: axum::middleware::Next,
+) -> Response {
+  let api = req
+    .headers()
+    .get(wharf_api_types::CLI_API_HEADER)
+    .and_then(|v| v.to_str().ok())
+    .and_then(|v| v.parse::<u32>().ok());
+  if let Some(api) = api
+    && api < wharf_api_types::MIN_CLI_API
+  {
+    let host = req
+      .headers()
+      .get("host")
+      .and_then(|v| v.to_str().ok())
+      .unwrap_or("<控制面地址>");
+    let scheme = req
+      .headers()
+      .get("x-forwarded-proto")
+      .and_then(|v| v.to_str().ok())
+      .unwrap_or("http");
+    let base = format!("{scheme}://{host}");
+    return AppError(
+      ApiError::new(
+        ErrorCode::InvalidInput,
+        format!(
+          "本机 wharf 太旧（接口版本 {api}，控制面至少要 {}）",
+          wharf_api_types::MIN_CLI_API
+        ),
+      )
+      .with_hint(format!(
+        "更新后再试：curl -fsSL {base}/cli.sh | sh -s -- {base}"
+      )),
+    )
+    .into_response();
+  }
+  next.run(req).await
 }
 
 // STATUS

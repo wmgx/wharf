@@ -21,6 +21,13 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// agent 和控制面之间的协议版本。控制面拒绝不兼容的 agent；旧 agent 不发这个字段，当作 0。
 pub const PROTOCOL: u32 = 1;
 
+/// CLI 和控制面之间的接口版本，CLI 每个请求都带在 [CLI_API_HEADER] 里。
+/// 新增字段都有默认值，旧 CLI 照常能用；只有控制面必须拿到旧 CLI 发不出的字段时，
+/// 才把 [CLI_API] 和 [MIN_CLI_API] 一起加一，控制面会拦下旧 CLI 并提示更新。
+pub const CLI_API: u32 = 1;
+pub const MIN_CLI_API: u32 = 1;
+pub const CLI_API_HEADER: &str = "x-wharf-cli-api";
+
 /// 构建号：CI 构建镜像时传入的短提交号，本地构建是 `dev`。
 /// 控制面拿它判断 agent 要不要升级，升级时拉 `sha-<构建号>` 标签的镜像。
 pub const BUILD: &str = match option_env!("WHARF_BUILD") {

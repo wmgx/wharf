@@ -96,6 +96,18 @@ impl Client {
       http: reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(15))
         .timeout(Duration::from_secs(180))
+        .default_headers(
+          [(
+            reqwest::header::HeaderName::from_static(
+              wharf_api_types::CLI_API_HEADER,
+            ),
+            reqwest::header::HeaderValue::from(
+              wharf_api_types::CLI_API,
+            ),
+          )]
+          .into_iter()
+          .collect(),
+        )
         .build()
         .map_err(|e| ApiError::internal(e.to_string()))?,
       base: base.trim_end_matches('/').to_string(),
@@ -125,6 +137,17 @@ impl Client {
     if !status.is_success() {
       let err = serde_json::from_slice::<ApiError>(&bytes)
         .unwrap_or_else(|_| {
+          // 请求体解析失败（缺字段等）：多半是本机 CLI 比控制面旧。
+          if status.as_u16() == 422 {
+            return ApiError::new(
+              ErrorCode::InvalidInput,
+              format!(
+                "控制面不接受这个请求：{}",
+                String::from_utf8_lossy(&bytes)
+              ),
+            )
+            .with_hint(self.update_hint());
+          }
           ApiError::internal(format!(
             "控制面返回 HTTP {}：{}",
             status.as_u16(),
@@ -137,8 +160,18 @@ impl Client {
       return Err(err.into());
     }
     serde_json::from_slice(&bytes).map_err(|e| {
-      ApiError::internal(format!("无法解析控制面响应：{e}")).into()
+      // 多半是控制面升级后多了字段，本机 CLI 还是旧的。
+      ApiError::internal(format!("无法解析控制面响应：{e}"))
+        .with_hint(self.update_hint())
+        .into()
     })
+  }
+
+  fn update_hint(&self) -> String {
+    format!(
+      "本机 wharf 可能比控制面旧，更新后再试：curl -fsSL {0}/cli.sh | sh -s -- {0}",
+      self.base
+    )
   }
 
   /// 读取分块响应（日志流），收到一块就交给 `on_chunk`，直到服务端结束。

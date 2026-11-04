@@ -28,7 +28,6 @@ pub enum Region {
 #[derive(
   Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema,
 )]
-#[serde(deny_unknown_fields)]
 pub struct ServerSettings {
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub region: Option<Region>,
@@ -106,7 +105,6 @@ impl NetworkMode {
 #[derive(
   Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema,
 )]
-#[serde(deny_unknown_fields)]
 pub struct PrivateAddr {
   pub ip: String,
   pub network: PrivateNetwork,
@@ -156,7 +154,7 @@ impl PrivateNetwork {
 #[derive(
   Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
 )]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub enum Source {
   /// 单个镜像，系统自动生成只有一个服务的 compose。
   Image(String),
@@ -176,7 +174,6 @@ pub enum Source {
 #[derive(
   Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema,
 )]
-#[serde(deny_unknown_fields)]
 pub struct BuildSource {
   /// CLI 上传到控制面的代码包（tar.gz）的 sha256。
   #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -210,7 +207,6 @@ pub struct BuildSource {
 #[derive(
   Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
 )]
-#[serde(deny_unknown_fields)]
 pub struct GitSource {
   /// https 地址，例如 `https://github.com/owner/repo`。
   pub repo: String,
@@ -225,7 +221,6 @@ pub struct GitSource {
 #[derive(
   Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
 )]
-#[serde(deny_unknown_fields)]
 pub struct PortSpec {
   /// 端口名，路由用它指定目标端口，例如 `http`。
   pub name: String,
@@ -242,7 +237,6 @@ pub struct PortSpec {
 #[derive(
   Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
 )]
-#[serde(deny_unknown_fields)]
 pub struct VolumeSpec {
   pub name: String,
   pub target: String,
@@ -251,7 +245,6 @@ pub struct VolumeSpec {
 #[derive(
   Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
 )]
-#[serde(deny_unknown_fields)]
 pub struct ServiceSpec {
   /// 运行在哪台服务器上。
   pub server: String,
@@ -276,7 +269,6 @@ pub struct ServiceSpec {
 #[derive(
   Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema,
 )]
-#[serde(deny_unknown_fields)]
 pub struct AdoptSpec {
   /// 原来的 compose 项目名（和服务名不同时）：停掉它的容器。
   #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -289,7 +281,6 @@ pub struct AdoptSpec {
 #[derive(
   Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
 )]
-#[serde(deny_unknown_fields)]
 pub struct BackupSpec {
   /// 备份存到哪台服务器，不能是服务所在的服务器。
   pub to: String,
@@ -324,7 +315,6 @@ impl GatewayKind {
 #[derive(
   Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
 )]
-#[serde(deny_unknown_fields)]
 pub struct GatewaySpec {
   pub kind: GatewayKind,
   /// 网关跑在哪台服务器上。
@@ -384,7 +374,6 @@ impl GatewayTls {
 #[derive(
   Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
 )]
-#[serde(deny_unknown_fields)]
 pub struct RouteSpec {
   /// 例如 `blog.example.com`。
   pub hostname: String,
@@ -441,7 +430,6 @@ impl LinkMode {
 #[derive(
   Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
 )]
-#[serde(deny_unknown_fields)]
 pub struct PathRoute {
   /// Caddy 的路径匹配：`/ws` 只匹配这个路径，`/api/*` 匹配前缀。
   pub path: String,
@@ -488,7 +476,6 @@ impl EdgeKind {
 #[derive(
   Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema,
 )]
-#[serde(deny_unknown_fields)]
 pub struct EdgeSource {
   /// 本机目录上传到控制面的代码包 sha256（`wharf edge deploy` 自动填）。
   #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -514,7 +501,6 @@ pub struct EdgeSource {
 #[derive(
   Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
 )]
-#[serde(deny_unknown_fields)]
 pub struct EdgeAppSpec {
   /// 厂商账号。
   pub account: String,
@@ -545,7 +531,6 @@ impl EdgeAppSpec {
 #[derive(
   Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema,
 )]
-#[serde(deny_unknown_fields)]
 pub struct Fleet {
   /// 服务器设置。服务器本身通过 `wharf server add` 加入，不在这里创建或删除。
   #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -564,7 +549,7 @@ pub struct Fleet {
 #[derive(
   Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
 )]
-#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "op", rename_all = "snake_case")]
 pub enum Change {
   /// 服务器必须已经 `wharf server add` 过。
   UpdateServer {

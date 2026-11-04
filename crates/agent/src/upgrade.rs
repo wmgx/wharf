@@ -147,6 +147,21 @@ pub async fn start(
       .await?
       .check("docker tag")?;
   }
+  // 上一次升级的接班容器还在跑：不能删，删了会把换到一半的容器丢下（旧的已停、新的没起）。
+  let running = docker
+    .cmd()
+    .args(["inspect", "-f", "{{.State.Running}}", HELPER])
+    .timeout(QUICK)
+    .run(ctx)
+    .await
+    .is_ok_and(|o| o.success && o.stdout.trim() == "true");
+  if running {
+    return Err(
+      ApiError::new(ErrorCode::Busy, "上一次升级还在进行").with_hint(
+        "等一两分钟再试；docker logs wharf-agent-upgrade 可以看进度",
+      ),
+    );
+  }
   let _ = docker
     .cmd()
     .args(["rm", "-f", HELPER])
