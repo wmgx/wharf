@@ -61,7 +61,8 @@ fi; \
 printf '\\033[33mtmux 没装上：关掉页面后会话不会保留。\\033[0m\\r\\n'; \
 command -v bash >/dev/null 2>&1 && exec bash -l || exec sh -l";
 const DEFAULT_SESSION: &str = "wharf";
-const SESSION_CMD_TIMEOUT: u64 = 20;
+/// 每次都要起一个临时容器，磁盘忙的机器上要十几二十秒，留足余量。
+const SESSION_CMD_TIMEOUT: u64 = 60;
 const EXEC_WRAPPER: &str = "/bin/sh -c \"$1\"; code=$?; printf '\\n%s%d\\n' \"$2\" \"$code\" >&2; exit \"$code\"";
 
 struct Prepared {
@@ -272,6 +273,36 @@ impl HostShell {
       )
       .await
       .map(|_| ())
+  }
+
+  pub async fn rename_session(
+    &self,
+    session: &str,
+    to: &str,
+    ctx: &Ctx,
+  ) -> Result<(), ApiError> {
+    validate_session(session)?;
+    validate_session(to)?;
+    // 两个名字都已校验只含字母数字和 `_-`，可以直接拼进命令。
+    let out = self
+      .quick(
+        &format!(
+          "if tmux has-session -t '={to}' 2>/dev/null; then echo exists; else tmux rename-session -t '={session}' '{to}' 2>&1; fi"
+        ),
+        ctx,
+      )
+      .await?;
+    match out.trim() {
+      "" => Ok(()),
+      "exists" => Err(ApiError::new(
+        ErrorCode::Conflict,
+        format!("已经有叫 {to} 的会话了"),
+      )),
+      other => Err(ApiError::new(
+        ErrorCode::AgentFailed,
+        format!("改名失败：{other}"),
+      )),
+    }
   }
 
   async fn quick(

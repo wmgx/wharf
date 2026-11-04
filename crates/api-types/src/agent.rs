@@ -269,6 +269,11 @@ pub enum AgentOp {
   HostSessionKill {
     session: String,
   },
+  /// 给宿主机上的 tmux 会话改名。
+  HostSessionRename {
+    session: String,
+    to: String,
+  },
   /// 在宿主机命名空间里执行一次命令。结果是 [HostExecOutcome]。
   HostExec(HostExecJob),
   /// 读宿主机的系统版本、待装更新、docker 和日志占用，结果是 [HostInfo]。只读。

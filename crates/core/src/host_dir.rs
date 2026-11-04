@@ -173,7 +173,7 @@ pub async fn origin(
   Ok(Json(raw.and_then(|r| serde_json::from_str(&r).ok())))
 }
 
-const SESSION_TIMEOUT: Duration = Duration::from_secs(40);
+const SESSION_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// `GET /api/servers/{name}/sessions`：宿主机上的 tmux 会话，终端页拿来列标签。
 pub async fn sessions(
@@ -228,4 +228,34 @@ pub async fn kill_session(
   };
   finish(&s.db, audit, end).await;
   Ok(Json(result?))
+}
+
+#[derive(Deserialize)]
+pub struct RenameRequest {
+  to: String,
+}
+
+/// `PUT /api/servers/{name}/sessions/{session}`：给 tmux 会话改名。
+pub async fn rename_session(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Path((name, session)): Path<(String, String)>,
+  Json(req): Json<RenameRequest>,
+) -> ApiResult<()> {
+  auth.require(Perm::Exec)?;
+  check_server(&s, &name).await?;
+  Ok(Json(
+    s.hub
+      .call(
+        &name,
+        AgentOp::HostSessionRename {
+          session,
+          to: req.to,
+        },
+        SESSION_TIMEOUT,
+        None,
+        &CancellationToken::new(),
+      )
+      .await?,
+  ))
 }

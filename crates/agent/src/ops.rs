@@ -205,6 +205,9 @@ impl Ops {
       AgentOp::HostSessionKill { session } => {
         to_value(self.host_shell.kill_session(&session, ctx).await?)
       }
+      AgentOp::HostSessionRename { session, to } => to_value(
+        self.host_shell.rename_session(&session, &to, ctx).await?,
+      ),
       AgentOp::HostExec(job) => {
         to_value(self.host_shell.exec(job, ctx).await)
       }
