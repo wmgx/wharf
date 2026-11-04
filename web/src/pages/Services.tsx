@@ -1,4 +1,5 @@
-import { ArrowRightLeftIcon, CloudIcon, EllipsisIcon, HistoryIcon, PlayIcon, PlusIcon, RefreshCwIcon, RotateCwIcon, ScrollTextIcon, SquareIcon, Trash2Icon } from "lucide-react";
+import { splitNote } from "@/lib/vault";
+import { ArrowRightLeftIcon, CloudIcon, EllipsisIcon, HistoryIcon, LockIcon, PlayIcon, PlusIcon, RefreshCwIcon, RotateCwIcon, ScrollTextIcon, SquareIcon, Trash2Icon } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useActions } from "@/components/actions";
 import { Empty, OpenLink, useClickable, PageHeader, ServerTag, StatusBadge, imageOf, type Tone } from "@/components/common";
@@ -101,7 +102,7 @@ export function Services() {
                             {!r.svc && <CloudIcon className="size-3.5 text-muted-foreground" />}
                             {r.name}
                           </span>
-                          {r.svc?.note && <div className="max-w-56 truncate text-xs font-normal text-muted-foreground" title={r.svc.note}>{r.svc.note.split("\n")[0]}</div>}
+                          {r.svc?.note && <NotePreview note={r.svc.note} />}
                         </TableCell>
                         <TableCell>
                           <StatusBadge tone={r.tone}>{r.text}</StatusBadge>
@@ -215,5 +216,16 @@ function RowMenu({ svc }: { svc: ServiceView }) {
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
+  );
+}
+
+/** 列表里只显示公开备注的第一行；只有私密内容时显示一把锁。 */
+function NotePreview({ note }: { note: string }) {
+  const { plain, sealed } = splitNote(note);
+  return (
+    <div className="flex max-w-56 items-center gap-1 text-xs font-normal text-muted-foreground" title={plain}>
+      {sealed && <LockIcon className="size-3 shrink-0" />}
+      <span className="truncate">{plain.split("\n")[0] || "私密备注"}</span>
+    </div>
   );
 }

@@ -11,7 +11,7 @@ import { LogStream } from "@/components/LogStream";
 import { MetricsPanel } from "@/components/metrics";
 import { Backups } from "./service-backups";
 import { Files } from "./service-files";
-import { NoteCard } from "./service-note";
+import { ServiceNote } from "./service-note";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -21,7 +21,7 @@ import { Sheet, SheetContent, SheetFooter, SheetHeader, SheetTitle } from "@/com
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Textarea } from "@/components/ui/textarea";
+import { CodeEditor, highlight } from "@/components/code-editor";
 import { useStatus } from "@/status";
 import { AddRoute } from "@/components/add-route";
 import { CodePackageField, type CodePackage } from "@/components/code-package";
@@ -99,9 +99,12 @@ export function ServiceDetail() {
           </>
         }
         description={
-          <span className="flex items-center gap-1.5">
-            <span className="font-mono text-xs">{source}</span>· 在 <ServerTag name={svc.spec.server} />
-          </span>
+          <div className="grid justify-items-start">
+            <span className="flex items-center gap-1.5">
+              <span className="font-mono text-xs">{source}</span>· 在 <ServerTag name={svc.spec.server} />
+            </span>
+            <ServiceNote svc={svc} />
+          </div>
         }
         actions={
           <>
@@ -240,7 +243,6 @@ function Overview({ svc, routes, onTab }: { svc: ServiceView; routes: RouteView[
         </Button>
       </div>
     ))}
-    <NoteCard svc={svc} />
     <div className="grid gap-3 md:grid-cols-[1.4fr_1fr]">
       <Card className="gap-4 py-5 shadow-xs">
         <CardHeader className="px-5">
@@ -390,13 +392,8 @@ function ConfigTab({ svc, onEdit }: { svc: ServiceView; onEdit: () => void }) {
               {!svc.spec.ports?.length && "-"}
             </dd>
             <dt className="text-muted-foreground">环境变量</dt>
-            <dd className="grid gap-0.5 font-mono text-[13px]">
-              {env.map(([k, v]) => (
-                <div key={k} className="truncate">
-                  {k}={/\[\[.+\]\]/.test(v) ? v : "••••"}
-                </div>
-              ))}
-              {env.length === 0 && "-"}
+            <dd className="min-w-0 font-mono text-[13px] break-all whitespace-pre-wrap">
+              {env.length ? highlight(env.map(([k, v]) => `${k}=${/\[\[.+\]\]/.test(v) ? v : "••••"}`).join("\n"), "env") : "-"}
             </dd>
             {svc.import && (
               <>
@@ -662,7 +659,7 @@ function EditForm({ svc, onClose }: { svc: ServiceView; onClose: () => void }) {
         </Field>
         {(isImage || build) && (
           <Field label="环境变量" htmlFor="env">
-            <Textarea id="env" className="min-h-32 font-mono text-xs" value={envText} onChange={(e) => setEnvText(e.target.value)} />
+            <CodeEditor id="env" lang="env" secrets className="min-h-32" placeholder={"KEY=value\nTOKEN=[[MY_SECRET]]"} value={envText} onChange={setEnvText} />
           </Field>
         )}
       </div>

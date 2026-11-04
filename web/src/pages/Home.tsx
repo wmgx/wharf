@@ -1,8 +1,8 @@
-import { ArrowRightIcon, ArrowUpRightIcon, CheckIcon, CloudIcon, PlusIcon } from "lucide-react";
+import { ArrowRightIcon, CheckIcon, ChevronRightIcon, CloudIcon, PlusIcon } from "lucide-react";
 import type { CSSProperties } from "react";
 import { useNavigate } from "react-router-dom";
 import { usePoll } from "@/api";
-import { CardsSkeleton, CopyButton, useClickable, Mark, PageHeader, SectionTitle, ServerTag, StatusBadge, type Tone } from "@/components/common";
+import { CardsSkeleton, OpenLink, useClickable, Mark, PageHeader, SectionTitle, ServerTag, StatusBadge, type Tone } from "@/components/common";
 import { serviceTruth } from "@/components/health";
 import { Button } from "@/components/ui/button";
 import { useStatus } from "@/status";
@@ -67,25 +67,22 @@ export function Home() {
 }
 
 function Cards({ items }: { items: Item[] }) {
-  const nav = useNavigate();
   const clickable = useClickable();
   if (items.length === 0) return null;
   return (
     <div className="grid grid-cols-[repeat(auto-fill,minmax(min(100%,260px),1fr))] gap-3">
       {items.map((it, i) => {
         const style = { animationDelay: `${i * 30}ms` } as CSSProperties;
-        // 只在内网的服务点卡片直接打开内网地址。
-        const href = it.url ?? (it.address ? `http://${it.address}` : undefined);
-        const shown = it.url ? it.url.replace(/^https?:\/\//, "") : it.address;
+        // 点卡片进详情；点地址才去打开服务本身。
+        const shown = it.url ?? it.address;
         const body = (
           <>
             <div className="flex items-center gap-3">
               <Mark name={it.name} url={it.url} />
               <div className="min-w-0">
                 <div className="font-semibold">{it.name}</div>
-                <div className="flex min-w-0 items-center gap-0.5 font-mono text-xs text-muted-foreground">
-                  <span className="truncate">{shown ?? "-"}</span>
-                  {shown && <CopyButton text={shown} className="size-5 opacity-0 transition-opacity group-hover:opacity-100" />}
+                <div className="flex min-w-0 font-mono text-xs text-muted-foreground">
+                  {shown ? <OpenLink value={shown} label={shown.replace(/^https?:\/\//, "")} /> : "-"}
                 </div>
               </div>
             </div>
@@ -99,24 +96,12 @@ function Cards({ items }: { items: Item[] }) {
               ) : (
                 <ServerTag name={it.where} />
               )}
-              <span
-                role="link"
-                tabIndex={0}
-                onClick={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  nav(it.detail);
-                }}
-                className="ml-auto cursor-pointer text-xs text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 hover:text-foreground"
-              >
-                详情
-              </span>
-              {href && <ArrowUpRightIcon className="size-4 text-muted-foreground transition-transform group-hover:translate-x-0.5 group-hover:-translate-y-0.5 group-hover:text-primary" />}
+              <ChevronRightIcon className="ml-auto size-4 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
             </div>
           </>
         );
         return (
-          <div key={it.detail} className={`${card} cursor-pointer`} style={style} {...clickable(href ? { href } : { to: it.detail })}>
+          <div key={it.detail} className={`${card} cursor-pointer`} style={style} {...clickable({ to: it.detail })}>
             {body}
           </div>
         );

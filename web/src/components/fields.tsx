@@ -15,9 +15,12 @@ export function parseEnv(text: string): Record<string, string> {
   for (const raw of text.split("\n")) {
     const line = raw.trim();
     if (!line || line.startsWith("#")) continue;
-    const i = line.indexOf("=");
+    const kv = line.replace(/^export\s+/, "");
+    const i = kv.indexOf("=");
     if (i <= 0) continue;
-    env[line.slice(0, i).trim()] = line.slice(i + 1);
+    const v = kv.slice(i + 1);
+    // 从 .env 粘贴来的 "value" / 'value' 去掉外层引号。
+    env[kv.slice(0, i).trim()] = /^(["']).*\1$/.test(v) ? v.slice(1, -1) : v;
   }
   return env;
 }

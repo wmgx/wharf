@@ -1,6 +1,6 @@
 import { Field, Picker, Segmented } from "@/components/fields";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
+import { CodeEditor } from "@/components/code-editor";
 import type { BuildSource } from "@/types";
 
 /** 怎么构建的那几个字段。 */
@@ -60,12 +60,13 @@ export function BuildEditor({ value, onChange }: { value: BuildHow; onChange: (v
       </Field>
       {mode === "dockerfile" ? (
         <Field label="Dockerfile" htmlFor="dockerfile-content">
-          <Textarea
+          <CodeEditor
             id="dockerfile-content"
-            className="min-h-48 font-mono text-xs"
+            lang="dockerfile"
+            className="min-h-48"
             placeholder={"FROM python:3.13-slim\nWORKDIR /app\nCOPY . .\nCMD [\"python\", \"main.py\"]"}
             value={value.dockerfile_content ?? ""}
-            onChange={(e) => set({ dockerfile_content: e.target.value })}
+            onChange={(v) => set({ dockerfile_content: v })}
           />
         </Field>
       ) : (
@@ -89,12 +90,13 @@ export function BuildEditor({ value, onChange }: { value: BuildHow; onChange: (v
             </Field>
           )}
           <Field label="启动命令 / 脚本" htmlFor="start">
-            <Textarea
+            <CodeEditor
               id="start"
-              className="min-h-20 font-mono text-xs"
+              lang="shell"
+              className="min-h-20"
               placeholder={"自动识别\n\n例如：\nalembic upgrade head\nexec uvicorn main:app --host 0.0.0.0 --port $PORT"}
               value={value.start ?? ""}
-              onChange={(e) => set({ start: e.target.value })}
+              onChange={(v) => set({ start: v })}
             />
           </Field>
         </>

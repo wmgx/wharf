@@ -2,6 +2,7 @@ import { ArrowLeftIcon, ArrowUpCircleIcon, RefreshCwIcon, TerminalIcon, Trash2Ic
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
+import { CodeEditor } from "@/components/code-editor";
 import { Field, formatEnv, parseEnv } from "@/components/fields";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -392,7 +393,7 @@ function SettingsForm({ server, canRemove }: { server: ServerView; canRemove: bo
         )}
       </Field>
       <Field label="构建参数" htmlFor="build-env" help="每行 KEY=VALUE，传给内置模板。国内机器常配 PIP_INDEX_URL、GOPROXY。">
-        <Textarea id="build-env" rows={3} className="font-mono text-xs" value={buildEnv} onChange={(e) => setBuildEnv(e.target.value)} />
+        <CodeEditor id="build-env" lang="env" className="min-h-16" value={buildEnv} onChange={setBuildEnv} />
       </Field>
       <Field label="拉代码代理" htmlFor="git-proxy" help="只用于 git。国内机器连不上 GitHub 时经海外机器转发。">
         <Input id="git-proxy" value={gitProxy} placeholder="http://100.x.x.x:8118" onChange={(e) => setGitProxy(e.target.value)} />

@@ -587,7 +587,8 @@ struct NoteRequest {
   note: String,
 }
 
-const NOTE_LIMIT: usize = 4000;
+// 私密内容在浏览器里加密后以 base64 存进来，比原文长不少，所以放宽到 2 万字。
+const NOTE_LIMIT: usize = 20000;
 
 /// 改服务备注：不影响部署，直接保存，不走计划。传空字符串清除。
 async fn set_note(

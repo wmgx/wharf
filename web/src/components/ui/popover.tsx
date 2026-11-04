@@ -18,10 +18,13 @@ function PopoverContent({
   className,
   align = "center",
   sideOffset = 4,
+  inline = false,
   ...props
-}: React.ComponentProps<typeof PopoverPrimitive.Content>) {
+}: React.ComponentProps<typeof PopoverPrimitive.Content> & { inline?: boolean }) {
+  // inline：不挂到 body，留在原位置。用在 Sheet/Dialog 里，避免被它们的焦点锁和遮罩拦住。
+  const Wrap = inline ? React.Fragment : PopoverPrimitive.Portal
   return (
-    <PopoverPrimitive.Portal>
+    <Wrap>
       <PopoverPrimitive.Content
         data-slot="popover-content"
         align={align}
@@ -32,7 +35,7 @@ function PopoverContent({
         )}
         {...props}
       />
-    </PopoverPrimitive.Portal>
+    </Wrap>
   )
 }
 

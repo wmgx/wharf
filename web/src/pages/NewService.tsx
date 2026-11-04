@@ -12,7 +12,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
 import { Sheet, SheetContent, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
-import { Textarea } from "@/components/ui/textarea";
+import { CodeEditor } from "@/components/code-editor";
 import { useStatus } from "@/status";
 import type { AccountView, Change, PortSpec, ServiceSpec } from "@/types";
 
@@ -261,7 +261,7 @@ function Form({ onClose }: { onClose: () => void }) {
             label="环境变量"
             htmlFor="env"
           >
-            <Textarea id="env" className="min-h-24 font-mono text-xs" placeholder={"KEY=value\nTOKEN=[[MY_SECRET]]"} value={envText} onChange={(e) => setEnvText(e.target.value)} />
+            <CodeEditor id="env" lang="env" secrets className="min-h-24" placeholder={"KEY=value\nTOKEN=[[MY_SECRET]]"} value={envText} onChange={setEnvText} />
           </Field>
         )}
 

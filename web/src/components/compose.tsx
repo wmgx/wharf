@@ -1,8 +1,7 @@
 import { Link } from "react-router-dom";
-import { useRef } from "react";
+import { CodeEditor } from "@/components/code-editor";
 import type { PortSpec, ServerView } from "@/types";
 import { toName } from "@/components/fields";
-import { cn } from "@/lib/utils";
 
 export interface ComposePort {
   service: string;
@@ -141,54 +140,6 @@ export function MirrorHint({ server, images }: { server?: ServerView; images: st
   );
 }
 
-const TOKEN =
-  /(#.*$)|^(\s*-?\s*)([\w.-]+)(:)(?=\s|$)|("[^"]*"|'[^']*')|(\b\d+(?:\.\d+)?(?::\d+)*(?:\/(?:tcp|udp))?\b)/gm;
-
-function highlight(text: string): React.ReactNode[] {
-  const out: React.ReactNode[] = [];
-  let last = 0;
-  let k = 0;
-  for (const m of text.matchAll(TOKEN)) {
-    const i = m.index ?? 0;
-    if (i > last) out.push(text.slice(last, i));
-    if (m[1]) out.push(<span key={k++} className="text-muted-foreground italic">{m[1]}</span>);
-    else if (m[3]) {
-      out.push(m[2]);
-      const strong = ["ports", "volumes", "image"].includes(m[3]);
-      out.push(<span key={k++} className={cn("text-sky-700 dark:text-sky-400", strong && "font-semibold")}>{m[3]}</span>, ":");
-    } else if (m[5]) out.push(<span key={k++} className="text-emerald-700 dark:text-emerald-400">{m[5]}</span>);
-    else out.push(<span key={k++} className="text-amber-700 dark:text-amber-400">{m[6]}</span>);
-    last = i + m[0].length;
-  }
-  out.push(text.slice(last));
-  return out;
-}
-
-/** 带 YAML 高亮的 compose 编辑框：透明 textarea 叠在高亮层上，滚动同步。 */
-export function ComposeEditor({ id, value, onChange, placeholder }: { id?: string; value: string; onChange: (v: string) => void; placeholder?: string }) {
-  const pre = useRef<HTMLPreElement>(null);
-  const shared = "col-start-1 row-start-1 m-0 min-h-48 w-full whitespace-pre-wrap break-words rounded-md border px-3 py-2 font-mono text-xs leading-5";
-  return (
-    <div className="grid">
-      <pre ref={pre} aria-hidden className={cn(shared, "pointer-events-none overflow-hidden border-transparent bg-transparent")}>
-        {highlight(value)}
-        {"\n"}
-      </pre>
-      <textarea
-        id={id}
-        spellCheck={false}
-        value={value}
-        placeholder={placeholder}
-        onChange={(e) => onChange(e.target.value)}
-        onScroll={(e) => {
-          if (pre.current) pre.current.scrollTop = e.currentTarget.scrollTop;
-        }}
-        className={cn(shared, "resize-y border-input bg-transparent text-transparent caret-foreground outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/50")}
-      />
-    </div>
-  );
-}
-
 /** compose 里写的端口转成表单端口：名称取服务名，同一服务多个端口时加容器端口区分。 */
 export function composePorts(info: ComposeInfo): PortSpec[] {
   const count = new Map<string, number>();
@@ -200,7 +151,7 @@ export function composePorts(info: ComposeInfo): PortSpec[] {
 export function ComposeField({ info, ...editor }: { id?: string; value: string; onChange: (v: string) => void; placeholder?: string; info: ComposeInfo }) {
   return (
     <>
-      <ComposeEditor {...editor} />
+      <CodeEditor lang="yaml" secrets className="min-h-48" {...editor} />
       {info.volumes.length > 0 && (
         <div className="grid gap-0.5 text-xs text-muted-foreground">
           <div>识别到的挂载：</div>
