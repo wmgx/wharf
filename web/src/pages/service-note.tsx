@@ -9,7 +9,7 @@ import * as vault from "@/lib/vault";
 import type { ServiceView } from "@/types";
 
 const SHOW_MS = 60_000;
-const box = "w-full rounded-md border bg-background px-3 py-1.5 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring/50";
+const box = "w-full rounded-md border bg-card px-3 py-1.5 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring/50";
 
 /**
  * 服务备注：放在页头标题下面。公开部分直接显示；私密部分在浏览器里用口令加密，服务器只存密文。

@@ -13,12 +13,12 @@ export type Lang = "yaml" | "shell" | "dockerfile" | "env";
 
 const C = {
   comment: "text-muted-foreground italic",
-  key: "text-sky-700 dark:text-sky-400",
+  key: "text-foreground font-medium",
   strong: "text-sky-700 dark:text-sky-400 font-semibold",
   string: "text-emerald-700 dark:text-emerald-400",
   number: "text-amber-700 dark:text-amber-400",
   variable: "text-amber-700 dark:text-amber-400",
-  secret: "rounded-sm bg-violet-500/15 text-violet-700 dark:text-violet-300",
+  secret: "text-amber-700 dark:text-amber-400",
   keyword: "text-fuchsia-700 dark:text-fuchsia-400",
   command: "text-sky-700 dark:text-sky-400 font-medium",
   bad: "underline decoration-destructive decoration-wavy underline-offset-4",
@@ -206,7 +206,7 @@ export function CodeEditor({
   return (
     <div className="grid gap-1.5">
       <div className="relative grid">
-        <pre ref={pre} aria-hidden className={cn(shared, "pointer-events-none overflow-hidden border-transparent bg-transparent")}>
+        <pre ref={pre} aria-hidden className={cn(shared, "pointer-events-none overflow-hidden border-transparent bg-card dark:bg-input/30")}>
           {highlight(value, lang)}
           {"\n"}
         </pre>
@@ -269,7 +269,7 @@ export function CodeEditor({
                 }}
                 className={cn("flex items-center gap-2 rounded px-2 py-1 text-left font-mono", i === pick && "bg-accent")}
               >
-                <span className="text-violet-700 dark:text-violet-300">[[{s.name}]]</span>
+                <span className="text-amber-700 dark:text-amber-400">[[{s.name}]]</span>
                 {s.used_by?.length ? <span className="ml-auto font-sans text-muted-foreground">{s.used_by.join("、")} 在用</span> : null}
               </button>
             ))}
@@ -309,7 +309,7 @@ export function setVar(text: string, key: string, value: string): string {
   return [...lines.filter((l, k) => l.trim() || k < lines.length - 1), `${key}=${value}`].join("\n");
 }
 
-/** 环境变量下面的快捷入口：从已有密钥里选，或者当场建一个密钥并引用。 */
+/** 环境变量下面的快捷入口：引用已有配置，或者新建一个（可选加密存成密钥）。 */
 function EnvTools({ secrets, onAdd, refresh }: { secrets: SecretView[]; onAdd: (key: string, value: string) => void; refresh: () => void }) {
   const [q, setQ] = useState("");
   const [pickOpen, setPickOpen] = useState(false);
@@ -317,22 +317,26 @@ function EnvTools({ secrets, onAdd, refresh }: { secrets: SecretView[]; onAdd: (
   const [key, setKey] = useState("");
   const [val, setVal] = useState("");
   const [busy, setBusy] = useState(false);
+  const [encrypt, setEncrypt] = useState(true);
   const shown = secrets.filter((s) => !s.managed && s.name.toLowerCase().includes(q.toLowerCase()));
   const name = envName(key);
   const exists = secrets.some((s) => s.name === name);
 
+  const reset = () => (setKey(""), setVal(""), setNewOpen(false));
   const create = async () => {
+    if (!encrypt) {
+      onAdd(name, val);
+      return reset();
+    }
     setBusy(true);
     try {
       await api.put(`/api/secrets/${encodeURIComponent(name)}`, { value: val });
       onAdd(name, `[[${name}]]`);
       refresh();
-      toast.success(`已保存密钥 ${name}，并加到环境变量`);
-      setKey("");
-      setVal("");
-      setNewOpen(false);
+      toast.success(`已加密保存 ${name}，并加到环境变量`);
+      reset();
     } catch (e) {
-      toast.error("密钥没有保存", { description: (e as Error).message });
+      toast.error("配置没有保存", { description: (e as Error).message });
     } finally {
       setBusy(false);
     }
@@ -344,11 +348,11 @@ function EnvTools({ secrets, onAdd, refresh }: { secrets: SecretView[]; onAdd: (
         <PopoverTrigger asChild>
           <Button type="button" size="xs" variant="outline">
             <KeyRoundIcon />
-            引用已有密钥
+            引用已有配置
           </Button>
         </PopoverTrigger>
         <PopoverContent inline align="start" className="w-80 p-1.5">
-          <Input autoFocus placeholder="搜索密钥" value={q} onChange={(e) => setQ(e.target.value)} className="mb-1 h-8" />
+          <Input autoFocus placeholder="搜索配置" value={q} onChange={(e) => setQ(e.target.value)} className="mb-1 h-8" />
           <div className="grid max-h-64 overflow-auto">
             {shown.map((s) => (
               <button
@@ -360,11 +364,11 @@ function EnvTools({ secrets, onAdd, refresh }: { secrets: SecretView[]; onAdd: (
                 }}
                 className="flex items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-accent"
               >
-                <span className="font-mono text-violet-700 dark:text-violet-300">{s.name}</span>
+                <span className="font-mono text-amber-700 dark:text-amber-400">{s.name}</span>
                 {s.used_by?.length ? <span className="ml-auto truncate text-muted-foreground">{s.used_by.join("、")} 在用</span> : null}
               </button>
             ))}
-            {shown.length === 0 && <div className="px-2 py-3 text-center text-xs text-muted-foreground">没有匹配的密钥</div>}
+            {shown.length === 0 && <div className="px-2 py-3 text-center text-xs text-muted-foreground">没有匹配的配置</div>}
           </div>
         </PopoverContent>
       </Popover>
@@ -372,7 +376,7 @@ function EnvTools({ secrets, onAdd, refresh }: { secrets: SecretView[]; onAdd: (
         <PopoverTrigger asChild>
           <Button type="button" size="xs" variant="outline">
             <PlusIcon />
-            新建密钥并引用
+            新建配置并引用
           </Button>
         </PopoverTrigger>
         <PopoverContent inline align="start" className="w-80">
@@ -380,14 +384,18 @@ function EnvTools({ secrets, onAdd, refresh }: { secrets: SecretView[]; onAdd: (
             className="grid gap-2"
             onSubmit={(e) => {
               e.preventDefault();
-              if (name && val && !exists) create();
+              if (name && val && !(encrypt && exists)) create();
             }}
           >
             <Input autoFocus placeholder="变量名，例如 DB_PASSWORD" value={key} onChange={(e) => setKey(e.target.value)} className="h-8 font-mono text-xs" />
             {key && name !== key && <div className="text-xs text-muted-foreground">会保存为 {name}</div>}
-            {exists && <div className="text-xs text-amber-700 dark:text-amber-400">已经有密钥 {name}，直接用"引用已有密钥"</div>}
-            <Input type="password" autoComplete="new-password" placeholder="值（只保存在 Wharf，页面上不再显示）" value={val} onChange={(e) => setVal(e.target.value)} className="h-8 font-mono text-xs" />
-            <Button size="sm" type="submit" disabled={busy || !name || !val || exists}>
+            {encrypt && exists && <div className="text-xs text-amber-700 dark:text-amber-400">已经有配置 {name}，直接用"引用已有配置"</div>}
+            <label className="flex items-center gap-2 text-xs">
+              <input type="checkbox" checked={encrypt} onChange={(e) => setEncrypt(e.target.checked)} />
+              加密保存（存到 设置 → 密钥，环境变量里只留引用）
+            </label>
+            <Input type={encrypt ? "password" : "text"} autoComplete="new-password" placeholder={encrypt ? "值（加密保存，页面上不再显示）" : "值（明文写进环境变量）"} value={val} onChange={(e) => setVal(e.target.value)} className="h-8 font-mono text-xs" />
+            <Button size="sm" type="submit" disabled={busy || !name || !val || (encrypt && exists)}>
               保存并加入
             </Button>
           </form>
