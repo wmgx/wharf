@@ -847,7 +847,9 @@ const AGENT_RECONNECT_WAIT: Duration = Duration::from_secs(60);
 
 /// 连不上或者代理报 5xx：请求没有拿到控制面自己的答复。
 fn connection_lost(e: &ApiError) -> bool {
-  e.code == ErrorCode::AgentOffline
+  // AgentOffline 也用于"某台 agent 不在线"，只有连不上控制面本身才算断线。
+  (e.code == ErrorCode::AgentOffline
+    && e.message.starts_with("无法连接控制面"))
     || (e.code == ErrorCode::Internal
       && (e.message.starts_with("控制面返回 HTTP 5")
         || e.message.starts_with("读取响应失败")))
