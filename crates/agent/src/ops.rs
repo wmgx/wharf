@@ -180,6 +180,9 @@ impl Ops {
           .await
           .map_err(|e| ApiError::internal(e.to_string()))?
       }
+      AgentOp::UpgradeLog => {
+        to_value(crate::upgrade::helper_log(ctx).await)
+      }
       AgentOp::HostInfo => {
         to_value(crate::host::info(&self.docker, ctx).await?)
       }

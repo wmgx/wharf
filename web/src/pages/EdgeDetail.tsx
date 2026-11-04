@@ -34,9 +34,9 @@ export function EdgeDetail() {
     app && actions.plan({ title, changes: [{ op: "upsert_edge_app", name, spec: { ...app.spec, domains: list } }] });
 
   const back = (
-    <Link className="mb-3 inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground" to="/services">
+    <Link className="mb-3 inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground" to="/">
       <ArrowLeftIcon className="size-3.5" />
-      服务
+      首页
     </Link>
   );
   if (!app) {
@@ -79,7 +79,7 @@ export function EdgeDetail() {
   const remove = () =>
     actions.plan({
       title: `不再纳管 ${name}`,
-      then: "/services",
+      then: "/",
       changes: [{ op: "remove_edge_app", name }],
     });
 

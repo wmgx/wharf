@@ -607,7 +607,7 @@ async fn list_services(
   auth.require(Perm::Read)?;
   let snap = snapshot::load(&s.db).await?;
   let net = snap.net(&snap.world);
-  let live = views::live_states(&s, &snap.world).await;
+  let live = views::cached_live(&s, &snap.world).await;
   Ok(Json(
     snap
       .world
@@ -699,7 +699,7 @@ async fn show_service(
   auth.require(Perm::Read)?;
   let snap = snapshot::load(&s.db).await?;
   let net = snap.net(&snap.world);
-  let live = views::live_states(&s, &snap.world).await;
+  let live = views::cached_live(&s, &snap.world).await;
   Ok(Json(
     views::service_view(&snap, &net, &name, Some(&live))
       .ok_or_else(|| service_not_found(&name))?,
@@ -825,7 +825,7 @@ async fn list_gateways(
   auth.require(Perm::Read)?;
   let snap = snapshot::load(&s.db).await?;
   let net = snap.net(&snap.world);
-  let live = views::live_states(&s, &snap.world).await;
+  let live = views::cached_live(&s, &snap.world).await;
   Ok(Json(
     snap
       .world
@@ -851,7 +851,7 @@ async fn show_gateway(
   auth.require(Perm::Read)?;
   let snap = snapshot::load(&s.db).await?;
   let net = snap.net(&snap.world);
-  let live = views::live_states(&s, &snap.world).await;
+  let live = views::cached_live(&s, &snap.world).await;
   Ok(Json(
     views::gateway_view(&snap, &net, &name, Some(&live))
       .ok_or_else(|| gateway_not_found(&name))?,

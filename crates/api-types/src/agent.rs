@@ -264,6 +264,8 @@ pub enum AgentOp {
   HostExec(HostExecJob),
   /// 读宿主机的系统版本、待装更新、docker 和日志占用，结果是 [HostInfo]。只读。
   HostInfo,
+  /// 上一次升级接班容器的最后几十行日志，升级失败时控制面拿来显示原因。结果是字符串。
+  UpgradeLog,
   /// 服务数据目录 `/srv/<service>/` 里的文件：列目录、分块读、分块写。
   Files(FilesOp),
   /// 列宿主机上的一个目录（只读挂载宿主机根目录），结果是 `Vec<String>`，目录名以 `/` 结尾。

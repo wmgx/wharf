@@ -59,6 +59,8 @@ struct Conn {
   /// 最近一次 ping 的往返延迟，毫秒。
   rtt_ms: Arc<AtomicU64>,
   host_shell: bool,
+  /// 协议版本不一致：连接放行，但只接受升级相关的请求，好让它升上来。
+  upgrade_only: bool,
 }
 
 #[derive(Default)]
@@ -155,6 +157,17 @@ impl Hub {
       .get(server)
       .cloned()
       .ok_or_else(|| offline(server))?;
+    if conn.upgrade_only
+      && !matches!(&op, AgentOp::Upgrade(_) | AgentOp::UpgradeLog)
+    {
+      return Err(
+        ApiError::new(
+          ErrorCode::Conflict,
+          format!("服务器 {server} 的 agent 协议版本和控制面不一致，只能升级"),
+        )
+        .with_hint("运行 wharf upgrade 把 agent 升到和控制面一致"),
+      );
+    }
     if matches!(
       &op,
       AgentOp::HostTerminal { .. } | AgentOp::HostExec(_)
@@ -313,22 +326,12 @@ async fn handle_socket(
   else {
     anyhow::bail!("agent 没有先发 hello");
   };
-  if !protocol_ok(protocol) {
-    let reason = format!(
-      "agent 协议版本 {protocol}，控制面要求 {PROTOCOL}，请运行 wharf upgrade"
+  // 协议不一致也放行（认证照做），只接受升级请求，否则 agent 永远收不到升级指令。
+  let upgrade_only = !protocol_ok(protocol);
+  if upgrade_only {
+    tracing::warn!(
+      "服务器 {server} 的 agent 协议版本 {protocol}，控制面要求 {PROTOCOL}：只接受升级请求，请运行 wharf upgrade"
     );
-    tracing::warn!("服务器 {server} 拒绝连接：{reason}");
-    let _ = tokio::time::timeout(
-      SOCKET_WRITE_TIMEOUT,
-      socket.send(Message::Close(Some(
-        axum::extract::ws::CloseFrame {
-          code: 4002,
-          reason: reason.clone().into(),
-        },
-      ))),
-    )
-    .await;
-    anyhow::bail!("{reason}");
   }
   let registered = {
     let server = server.clone();
@@ -382,6 +385,7 @@ async fn handle_socket(
     closed: CancellationToken::new(),
     rtt_ms: Arc::new(AtomicU64::new(u64::MAX)),
     host_shell,
+    upgrade_only,
   };
   state.hub.register(&server, conn.clone());
   tracing::info!("服务器 {server} 上线（agent {version}）");

@@ -1,4 +1,4 @@
-import { AnchorIcon, BoxesIcon, ChevronsUpDownIcon, GlobeIcon, HistoryIcon, LogOutIcon, MoonIcon, ServerIcon, SettingsIcon, SunIcon } from "lucide-react";
+import { AnchorIcon, ChevronsUpDownIcon, HistoryIcon, LogOutIcon, MoonIcon, ServerIcon, SettingsIcon, SunIcon } from "lucide-react";
 import { NavLink, useLocation } from "react-router-dom";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import {
@@ -38,9 +38,7 @@ export function AppSidebar({ username, onLogout }: { username: string; onLogout:
     {
       label: "",
       items: [
-        { to: "/", label: "首页", icon: AnchorIcon },
-        { to: "/services", label: "服务", icon: BoxesIcon, count: status ? status.services.length + (status.edge_apps?.length ?? 0) : undefined },
-        { to: "/domains", label: "域名", icon: GlobeIcon, count: status ? status.routes.length : undefined },
+        { to: "/", label: "首页", icon: AnchorIcon, count: status ? status.services.length + (status.edge_apps?.length ?? 0) : undefined },
         { to: "/servers", label: "服务器", icon: ServerIcon, count: status?.servers.length },
         { to: "/activity", label: "活动", icon: HistoryIcon },
       ],
@@ -50,7 +48,8 @@ export function AppSidebar({ username, onLogout }: { username: string; onLogout:
       items: [{ to: "/settings", label: "设置", icon: SettingsIcon }],
     },
   ];
-  const active = (to: string) => (to === "/" ? pathname === "/" : pathname.startsWith(to));
+  // 服务详情从首页点进去，算在首页下面。
+  const active = (to: string) => (to === "/" ? pathname === "/" || pathname.startsWith("/services/") || pathname.startsWith("/edge/") : pathname.startsWith(to));
 
   return (
     <Sidebar collapsible="icon">

@@ -37,7 +37,18 @@ const CLEANUP_STEP_TIMEOUT: Duration = Duration::from_secs(3);
 const OUTPUT_LIMIT: usize = 64 * 1024;
 const COMMAND_LIMIT: usize = 64 * 1024;
 const TAIL_LIMIT: usize = 512;
-const HOST_SHELL: &str = "cd /root 2>/dev/null || cd /; command -v bash >/dev/null 2>&1 && exec bash -l || exec sh -l";
+/// 宿主机终端：有 tmux 就接上同一个会话 `wharf`，关掉页面后会话还在，换个地方打开接着用。
+/// 终端跑在临时容器里，容器删掉时它的进程都会被杀；tmux 服务端要用 `systemd-run --scope`
+/// 放进宿主机自己的 cgroup 才活得下来。没有 tmux 时退回普通 shell，并提示怎么装。
+const HOST_SHELL: &str = "cd /root 2>/dev/null || cd /; \
+if command -v tmux >/dev/null 2>&1; then \
+  tmux has-session -t wharf 2>/dev/null || \
+    { command -v systemd-run >/dev/null 2>&1 && systemd-run --scope --quiet --collect tmux new-session -d -s wharf; } || \
+    tmux new-session -d -s wharf; \
+  exec tmux attach-session -t wharf; \
+fi; \
+printf '\\033[33m这台机器没装 tmux：关掉页面后会话不会保留。装上后再打开就能保留（Debian/Ubuntu：apt install -y tmux）。\\033[0m\\r\\n'; \
+command -v bash >/dev/null 2>&1 && exec bash -l || exec sh -l";
 const EXEC_WRAPPER: &str = "/bin/sh -c \"$1\"; code=$?; printf '\\n%s%d\\n' \"$2\" \"$code\" >&2; exit \"$code\"";
 
 struct Prepared {

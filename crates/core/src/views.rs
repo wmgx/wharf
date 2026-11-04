@@ -132,7 +132,7 @@ pub fn spawn_live(state: Arc<AppState>) {
 }
 
 /// 缓存里的现状；没有或太旧时现查。
-async fn cached_live(state: &AppState, world: &World) -> LiveMap {
+pub async fn cached_live(state: &AppState, world: &World) -> LiveMap {
   let cached = LIVE_CACHE
     .lock()
     .ok()

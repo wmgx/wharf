@@ -1,4 +1,4 @@
-import { AnchorIcon, ArrowRightLeftIcon, ArrowUpCircleIcon, BoxIcon, BoxesIcon, CableIcon, CloudIcon, DownloadIcon, GlobeIcon, HammerIcon, HardDriveIcon, HistoryIcon, KeyRoundIcon, LockIcon, LogOutIcon, MoonIcon, NetworkIcon, PencilIcon, PlayIcon, PlusIcon, RefreshCwIcon, RotateCwIcon, ScrollTextIcon, SearchIcon, ServerIcon, SettingsIcon, SquareIcon, SunIcon, TerminalIcon, Trash2Icon, WaypointsIcon, WrenchIcon } from "lucide-react";
+import { AnchorIcon, ArrowRightLeftIcon, ArrowUpCircleIcon, BoxIcon, CableIcon, CloudIcon, DownloadIcon, GlobeIcon, HammerIcon, HardDriveIcon, HistoryIcon, KeyRoundIcon, LockIcon, LogOutIcon, MoonIcon, NetworkIcon, PencilIcon, PlayIcon, PlusIcon, RefreshCwIcon, RotateCwIcon, ScrollTextIcon, SearchIcon, ServerIcon, SettingsIcon, SquareIcon, SunIcon, TerminalIcon, Trash2Icon, WaypointsIcon, WrenchIcon } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
@@ -74,15 +74,7 @@ export function CommandMenu({ onLogout }: { onLogout: () => void }) {
               <AnchorIcon />
               首页
             </CommandItem>
-            <CommandItem value="服务 services" onSelect={() => run(() => nav("/services"))}>
-              <BoxesIcon />
-              服务
-            </CommandItem>
-            <CommandItem value="域名 domains route" onSelect={() => run(() => nav("/domains"))}>
-              <GlobeIcon />
-              域名
-            </CommandItem>
-            <CommandItem value="入口 网关 gateway" onSelect={() => run(() => nav("/domains?tab=entries"))}>
+            <CommandItem value="入口 网关 gateway" onSelect={() => run(() => nav("/servers?tab=entries"))}>
               <WaypointsIcon />
               入口
             </CommandItem>
@@ -106,7 +98,7 @@ export function CommandMenu({ onLogout }: { onLogout: () => void }) {
               <NetworkIcon />
               拓扑
             </CommandItem>
-            <CommandItem value="数据 备份 data" onSelect={() => run(() => nav("/services?tab=data"))}>
+            <CommandItem value="数据 备份 data" onSelect={() => run(() => nav("/servers?tab=data"))}>
               <HardDriveIcon />
               数据
             </CommandItem>
@@ -131,7 +123,7 @@ export function CommandMenu({ onLogout }: { onLogout: () => void }) {
               </CommandItem>
             ))}
             {status?.gateways.map((g) => (
-              <CommandItem key={g.name} value={`网关 ${g.name} ${g.spec.server}`} onSelect={() => run(() => nav(`/domains?tab=entries&open=${g.name}`))}>
+              <CommandItem key={g.name} value={`网关 ${g.name} ${g.spec.server}`} onSelect={() => run(() => nav(`/servers?tab=entries&open=${g.name}`))}>
                 <WaypointsIcon />
                 {g.name}
                 <span className="text-xs text-muted-foreground">网关 · {g.spec.server}</span>
@@ -181,10 +173,10 @@ export function CommandMenu({ onLogout }: { onLogout: () => void }) {
           )}
           <CommandSeparator />
           <CommandGroup heading="新建">
-            {op("n-svc", "部署服务 新建服务 new deploy", <PlusIcon />, "部署服务", () => nav("/services?new=1"))}
-            {op("n-imp", "导入已有容器 import", <DownloadIcon />, "导入服务器上已有的容器", () => nav("/services?import=1"))}
-            {op("n-edge", "导入 Workers Pages cloudflare edge", <CloudIcon />, "导入 Cloudflare Workers / Pages", () => nav("/services?edge=1"))}
-            {op("n-gw", "新建入口 网关 new gateway", <WaypointsIcon />, "新建入口", () => nav("/domains?tab=entries&new=1"))}
+            {op("n-svc", "部署服务 新建服务 new deploy", <PlusIcon />, "部署服务", () => nav("/?new=1"))}
+            {op("n-imp", "导入已有容器 import", <DownloadIcon />, "导入服务器上已有的容器", () => nav("/?import=1"))}
+            {op("n-edge", "导入 Workers Pages cloudflare edge", <CloudIcon />, "导入 Cloudflare Workers / Pages", () => nav("/?edge=1"))}
+            {op("n-gw", "新建入口 网关 new gateway", <WaypointsIcon />, "新建入口", () => nav("/servers?tab=entries&new=1"))}
             {op("n-acc", "加 Cloudflare 账号 account", <KeyRoundIcon />, "加 Cloudflare 账号", () => nav("/settings?add=account"))}
           </CommandGroup>
           <CommandSeparator />

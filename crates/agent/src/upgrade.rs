@@ -181,7 +181,8 @@ pub async fn start(
   ctx.say(format!("启动接班容器，换成 {pulled}"));
   docker
     .cmd()
-    .args(["run", "-d", "--rm", "--name", HELPER])
+    // 不加 --rm：失败时留着日志给控制面看，下一次升级开始前删掉。
+    .args(["run", "-d", "--name", HELPER])
     .args(["-v", &sock])
     .args(["--entrypoint", "wharf-agent", &helper_image])
     .args(["replace", &id, &current, &old_id])
@@ -194,6 +195,19 @@ pub async fn start(
     image: pulled,
     started: true,
   })
+}
+
+/// 接班容器最后的日志；没有这个容器时是空字符串。
+pub async fn helper_log(ctx: &Ctx) -> String {
+  match Cmd::new("docker")
+    .args(["logs", "--tail", "40", HELPER])
+    .timeout(QUICK)
+    .run(ctx)
+    .await
+  {
+    Ok(o) if o.success => format!("{}{}", o.stdout, o.stderr),
+    _ => String::new(),
+  }
 }
 
 /// 按旧容器的配置拼 `docker run` 参数（不含镜像）。

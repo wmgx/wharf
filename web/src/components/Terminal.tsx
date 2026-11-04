@@ -1,13 +1,48 @@
 import { FitAddon } from "@xterm/addon-fit";
-import { Terminal as XTerm } from "@xterm/xterm";
+import { Terminal as XTerm, type ITheme } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { ArrowLeftIcon, ClipboardPasteIcon, RotateCwIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { useTheme, type Theme } from "@/theme";
 import { Dot } from "./common";
 
 type State = "connecting" | "open" | "closed";
+
+/** 跟着页面的深浅色走；浅色下黄色、青色压暗一点，不然看不清。 */
+const THEMES: Record<Theme, ITheme> = {
+  light: {
+    background: "#ffffff",
+    foreground: "#171717",
+    cursor: "#171717",
+    cursorAccent: "#ffffff",
+    selectionBackground: "#2563eb33",
+    black: "#171717",
+    red: "#dc2626",
+    green: "#15803d",
+    yellow: "#a16207",
+    blue: "#1d4ed8",
+    magenta: "#a21caf",
+    cyan: "#0e7490",
+    white: "#a3a3a3",
+    brightBlack: "#737373",
+    brightRed: "#ef4444",
+    brightGreen: "#16a34a",
+    brightYellow: "#ca8a04",
+    brightBlue: "#2563eb",
+    brightMagenta: "#c026d3",
+    brightCyan: "#0891b2",
+    brightWhite: "#d4d4d4",
+  },
+  dark: {
+    background: "#171717",
+    foreground: "#e5e5e5",
+    cursor: "#e5e5e5",
+    cursorAccent: "#171717",
+    selectionBackground: "#60a5fa55",
+  },
+};
 type Target = "service" | "host";
 
 const FONT_KEY = "wharf-terminal-font-size";
@@ -56,6 +91,9 @@ export default function Terminal({
   const fitFrame = useRef<number | null>(null);
   const ctrlRef = useRef(false);
   const altRef = useRef(false);
+  const { theme } = useTheme();
+  const themeRef = useRef(theme);
+  themeRef.current = theme;
   const [state, setState] = useState<State>("connecting");
   const [round, setRound] = useState(0);
   const [fontSize, setFontSize] = useState(initialFontSize);
@@ -98,7 +136,7 @@ export default function Terminal({
       fontFamily: '"Geist Mono", ui-monospace, monospace',
       fontSize,
       scrollback: 2000,
-      theme: { background: "#0a0a0a" },
+      theme: THEMES[themeRef.current],
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
@@ -151,6 +189,10 @@ export default function Terminal({
       fitRef.current = null;
     };
   }, [clearModifiers, name, round, scheduleFit, service, target]);
+
+  useEffect(() => {
+    if (termRef.current) termRef.current.options.theme = THEMES[theme];
+  }, [theme]);
 
   useEffect(() => {
     const term = termRef.current;
@@ -227,34 +269,34 @@ export default function Terminal({
   return (
     <div
       ref={root}
-      className={cn("overflow-hidden bg-[#0a0a0a]", fullScreen ? "fixed z-50 flex flex-col" : "rounded-xl border")}
+      className={cn("overflow-hidden bg-card", fullScreen ? "fixed z-50 flex flex-col" : "rounded-xl border shadow-xs")}
     >
-      <div className="flex min-h-10 flex-wrap items-center gap-2 border-b border-white/10 px-2 py-1.5 text-xs text-neutral-400">
+      <div className="flex min-h-10 flex-wrap items-center gap-2 border-b px-2 py-1.5 text-xs text-muted-foreground">
         {onBack && (
-          <Button size="xs" variant="ghost" className="text-neutral-300" onClick={onBack}>
+          <Button size="xs" variant="ghost" onClick={onBack}>
             <ArrowLeftIcon />
             返回
           </Button>
         )}
-        {title && <span className="font-medium text-neutral-200">{title}</span>}
+        {title && <span className="font-medium text-foreground">{title}</span>}
         <Dot tone={state === "open" ? "ok" : state === "connecting" ? "warn" : "idle"} />
         {state === "open" ? "已连接" : state === "connecting" ? "连接中" : "已断开"}
         <div className="ml-auto flex items-center gap-1">
-          <Button aria-label="减小字号" size="xs" variant="ghost" className="text-neutral-300" disabled={fontSize <= 10} onClick={() => changeFont(fontSize - 1)}>
+          <Button aria-label="减小字号" size="xs" variant="ghost" disabled={fontSize <= 10} onClick={() => changeFont(fontSize - 1)}>
             A−
           </Button>
           <span className="w-5 text-center tabular-nums">{fontSize}</span>
-          <Button aria-label="增大字号" size="xs" variant="ghost" className="text-neutral-300" disabled={fontSize >= 20} onClick={() => changeFont(fontSize + 1)}>
+          <Button aria-label="增大字号" size="xs" variant="ghost" disabled={fontSize >= 20} onClick={() => changeFont(fontSize + 1)}>
             A+
           </Button>
           {pasteVisible && (
-            <Button size="xs" variant="ghost" className="text-neutral-300" onClick={paste}>
+            <Button size="xs" variant="ghost" onClick={paste}>
               <ClipboardPasteIcon />
               粘贴
             </Button>
           )}
           {state === "closed" && (
-            <Button size="xs" variant="ghost" className="text-neutral-300" onClick={() => setRound((n) => n + 1)}>
+            <Button size="xs" variant="ghost" onClick={() => setRound((n) => n + 1)}>
               <RotateCwIcon />
               重连
             </Button>
@@ -262,7 +304,7 @@ export default function Terminal({
         </div>
       </div>
       <div ref={box} className={cn("overscroll-contain p-2", fullScreen ? "min-h-0 flex-1" : "h-[calc(100svh-22rem)] min-h-80")} />
-      <div className="flex shrink-0 gap-1 overflow-x-auto border-t border-white/10 p-1.5 text-neutral-200">
+      <div className="flex shrink-0 gap-1 overflow-x-auto border-t bg-muted/40 p-1.5 text-foreground pointer-fine:hidden">
         <TerminalKey label="Esc" onPress={() => sendKey("\x1b")} />
         <TerminalKey label="Tab" onPress={() => sendKey("\t")} />
         <TerminalKey label="Ctrl" active={ctrl} onPress={toggleCtrl} />
@@ -286,8 +328,8 @@ function TerminalKey({ label, aria, active, onPress }: { label: string; aria?: s
       aria-label={aria ?? label}
       aria-pressed={active == null ? undefined : active}
       className={cn(
-        "h-10 min-w-11 shrink-0 rounded-md border border-white/15 bg-white/5 px-2 text-sm active:bg-white/20",
-        active && "border-primary bg-primary/25 text-white",
+        "h-10 min-w-11 shrink-0 rounded-md border bg-card px-2 text-sm active:bg-accent",
+        active && "border-primary bg-primary/10 text-primary",
       )}
       onPointerDown={(event) => event.preventDefault()}
       onClick={onPress}

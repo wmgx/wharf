@@ -26,15 +26,15 @@ export function NewMenu() {
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="w-60">
           <DropdownMenuLabel className="text-xs text-muted-foreground">放东西上去</DropdownMenuLabel>
-          <DropdownMenuItem onSelect={() => nav("/services?new=1")}>
+          <DropdownMenuItem onSelect={() => nav("/?new=1")}>
             <BoxIcon />
             部署服务
           </DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => nav("/services?import=1")}>
+          <DropdownMenuItem onSelect={() => nav("/?import=1")}>
             <DownloadIcon />
             导入服务器上已有的容器
           </DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => nav("/services?edge=1")}>
+          <DropdownMenuItem onSelect={() => nav("/?edge=1")}>
             <CloudIcon />
             导入 Cloudflare Workers / Pages
           </DropdownMenuItem>
@@ -44,7 +44,7 @@ export function NewMenu() {
             <GlobeIcon />
             加域名
           </DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => nav("/domains?tab=entries&new=1")}>
+          <DropdownMenuItem onSelect={() => nav("/servers?tab=entries&new=1")}>
             <WaypointsIcon />
             新建入口
           </DropdownMenuItem>

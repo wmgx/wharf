@@ -45,9 +45,9 @@ export function ServiceDetail() {
 
   const routes = status?.routes.filter((r) => r.spec.service === name) ?? [];
   const back = (
-    <Link className="mb-3 inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground" to="/services">
+    <Link className="mb-3 inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground" to="/">
       <ArrowLeftIcon className="size-3.5" />
-      服务
+      首页
     </Link>
   );
 

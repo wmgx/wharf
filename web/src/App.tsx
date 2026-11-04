@@ -2,7 +2,6 @@ import { useEffect, useState } from "react";
 import * as vault from "@/lib/vault";
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { Activity } from "./pages/Activity";
-import { Domains } from "./pages/Domains";
 import { Servers } from "./pages/Servers";
 import { api, setUnauthorizedHandler, usePoll, type Session } from "./api";
 import { ActionsProvider } from "./components/actions";
@@ -19,11 +18,9 @@ import { TooltipProvider } from "./components/ui/tooltip";
 import { Settings } from "./pages/Settings";
 import { Home } from "./pages/Home";
 import { Login } from "./pages/Login";
-import { ServerDetail } from "./pages/ServerDetail";
 import { HostTerminal } from "./pages/HostTerminal";
 import { ServiceDetail } from "./pages/ServiceDetail";
 import { EdgeDetail } from "./pages/EdgeDetail";
-import { Services } from "./pages/Services";
 import { StatusContext } from "./status";
 import { ThemeProvider } from "./theme";
 import type { Status } from "./types";
@@ -65,9 +62,7 @@ export function App() {
 
 const TITLES: [string, string][] = [
   ["/services/", "服务详情"],
-  ["/services", "服务"],
   ["/edge/", "服务详情"],
-  ["/domains", "域名"],
   ["/servers", "服务器"],
   ["/activity", "活动"],
   ["/settings", "设置"],
@@ -100,17 +95,17 @@ function Shell({ username, onLogout }: { username: string; onLogout: () => void 
               <Boundary>
                 <Routes>
                   <Route path="/" element={<Home />} />
-                  <Route path="/services" element={<Services />} />
+                  <Route path="/services" element={<ServicesMoved />} />
                   <Route path="/services/:name" element={<ServiceDetail />} />
                   <Route path="/edge/:name" element={<EdgeDetail />} />
-                  <Route path="/servers/:name" element={<ServerDetail />} />
+                  <Route path="/servers/:name" element={<Servers />} />
                   <Route path="/servers/:name/terminal" element={<HostTerminal />} />
                   <Route path="/servers" element={<Servers />} />
-                  <Route path="/domains" element={<Domains />} />
+                  <Route path="/domains" element={<Moved to="/servers" tab="entries" />} />
                   <Route path="/activity" element={<Activity />} />
                   <Route path="/settings" element={<Settings />} />
-                  <Route path="/data" element={<Moved to="/services" tab="data" />} />
-                  <Route path="/gateways" element={<Moved to="/domains" tab="entries" />} />
+                  <Route path="/data" element={<Moved to="/servers" tab="data" />} />
+                  <Route path="/gateways" element={<Moved to="/servers" tab="entries" />} />
                   <Route path="/network" element={<Moved to="/servers" tab="network" />} />
                   <Route path="/accounts" element={<Moved to="/settings" />} />
                   <Route path="/topology" element={<Moved to="/servers" tab="topology" />} />
@@ -126,6 +121,12 @@ function Shell({ username, onLogout }: { username: string; onLogout: () => void 
 }
 
 /** 旧地址跳到新位置，保留查询参数（例如 `/gateways?open=x`）。 */
+/** 服务列表并进了首页；数据与备份挪到了服务器下面。 */
+function ServicesMoved() {
+  const { search } = useLocation();
+  return new URLSearchParams(search).get("tab") === "data" ? <Moved to="/servers" tab="data" /> : <Moved to="/" />;
+}
+
 function Moved({ to, tab }: { to: string; tab?: string }) {
   const { search } = useLocation();
   const params = new URLSearchParams(search);

@@ -81,7 +81,7 @@ export function ServerDetail() {
   const host = useHostInfo(name, !!server?.online);
 
   const back = (
-    <Link className="mb-3 inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground" to="/servers">
+    <Link className="mb-3 inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground md:hidden" to="/servers">
       <ArrowLeftIcon className="size-3.5" />
       服务器
     </Link>
@@ -100,6 +100,9 @@ export function ServerDetail() {
   const info = host.data;
   const services = status?.services.filter((s) => s.spec.server === name) ?? [];
   const gateways = status?.gateways.filter((g) => g.spec.server === name) ?? [];
+  // 不指向服务、直接指向这台机器某个端口的域名（例如 Wharf 控制面自己）。
+  const ips = [server.public_ip, server.private_addr?.ip].filter(Boolean);
+  const direct = status?.routes.filter((r) => !r.spec.service && ips.some((ip) => r.spec.upstream?.split(":")[0] === ip)) ?? [];
   const terminalStatus = !server.settings.host_terminal ? "未开启" : !server.online ? "离线" : !server.host_shell ? "待升级" : undefined;
 
   return (
@@ -156,8 +159,8 @@ export function ServerDetail() {
             <Row k="docker" v={r?.docker_version && `${r.docker_version}${r.compose_version ? ` · compose ${r.compose_version}` : ""}`} />
             <Row k="agent" v={r && `${r.version}${r.build ? ` · ${r.build}` : ""}`} />
           </dl>
-          <SectionTitle count={services.length + gateways.length}>在这台机器上</SectionTitle>
-          {services.length + gateways.length === 0 ? (
+          <SectionTitle count={services.length + gateways.length + direct.length}>在这台机器上</SectionTitle>
+          {services.length + gateways.length + direct.length === 0 ? (
             <Empty>还没有服务</Empty>
           ) : (
             <div className="flex flex-wrap gap-2">
@@ -168,9 +171,15 @@ export function ServerDetail() {
                 </Link>
               ))}
               {gateways.map((g) => (
-                <Link key={g.name} to={`/domains?tab=entries&open=${g.name}`} className="rounded-lg border border-dashed bg-card px-3 py-1.5 text-sm hover:bg-accent">
+                <Link key={g.name} to={`/servers?tab=entries&open=${g.name}`} className="rounded-lg border border-dashed bg-card px-3 py-1.5 text-sm hover:bg-accent">
                   入口 {g.name}
                 </Link>
+              ))}
+              {direct.map((r) => (
+                <a key={r.id} href={r.url} target="_blank" rel="noreferrer" title={`直接指向 ${r.spec.upstream}`} className="flex items-center gap-1.5 rounded-lg border border-dashed bg-card px-3 py-1.5 text-sm hover:bg-accent">
+                  <span className="font-mono">{r.spec.hostname}</span>
+                  <span className="text-xs text-muted-foreground">→ :{r.spec.upstream?.split(":")[1]}{r.spec.upstream?.endsWith(":7700") ? " · Wharf 控制面" : ""}</span>
+                </a>
               ))}
             </div>
           )}

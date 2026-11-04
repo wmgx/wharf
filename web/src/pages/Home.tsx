@@ -1,13 +1,27 @@
-import { ArrowRightIcon, CheckIcon, ChevronRightIcon, CloudIcon, PlusIcon } from "lucide-react";
-import type { CSSProperties } from "react";
-import { useNavigate } from "react-router-dom";
+import { ArrowRightIcon, CheckIcon, ChevronRightIcon, CloudIcon, LayoutGridIcon, ListIcon, PlusIcon } from "lucide-react";
+import { useState, type CSSProperties } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { usePoll } from "@/api";
 import { CardsSkeleton, OpenLink, useClickable, Mark, PageHeader, SectionTitle, ServerTag, StatusBadge, type Tone } from "@/components/common";
 import { serviceTruth } from "@/components/health";
 import { Button } from "@/components/ui/button";
 import { useStatus } from "@/status";
 import type { AccountView, Status, TokenView } from "@/types";
-import { edgeTone } from "./edge";
+import { UnmanagedList } from "./containers";
+import { EdgeList, edgeTone } from "./edge";
+import { NewService } from "./NewService";
+import { ServiceTable } from "./Services";
+import { cn } from "@/lib/utils";
+
+type View = "cards" | "list";
+const VIEW_KEY = "wharf.home.view";
+const savedView = (): View => {
+  try {
+    return localStorage.getItem(VIEW_KEY) === "list" ? "list" : "cards";
+  } catch {
+    return "cards";
+  }
+};
 
 const card =
   "group flex flex-col gap-3 rounded-xl border bg-card p-4 shadow-xs transition-all hover:-translate-y-px hover:border-foreground/15 hover:shadow-md animate-in fade-in slide-in-from-bottom-1 fill-mode-both";
@@ -38,22 +52,66 @@ function itemsOf(status: Status): Item[] {
   return [...services, ...edge].sort((x, y) => x.name.localeCompare(y.name));
 }
 
-/** 首页：每个服务一张卡片，点开就用；系统还没配完时顶部是上手清单。 */
+/** 首页：全部服务。默认卡片，可以切成列表、按服务器筛选；系统还没配完时顶部是上手清单。 */
 export function Home() {
-  const { status } = useStatus();
-  const items = status ? itemsOf(status) : [];
+  const { status, refresh } = useStatus();
+  const [params, setParams] = useSearchParams();
+  const [view, setViewState] = useState<View>(savedView);
+  const [server, setServer] = useState<string | undefined>(undefined);
+  const setView = (v: View) => {
+    setViewState(v);
+    try {
+      localStorage.setItem(VIEW_KEY, v);
+    } catch {
+      // 存不了就只在这次有效
+    }
+  };
+  const items = (status ? itemsOf(status) : []).filter((i) => !server || (i.cloud ? server === "cloudflare" : i.where === server));
   const open = items.filter((i) => i.url);
   const internal = items.filter((i) => !i.url);
+  const where = status ? [...status.servers.map((s) => s.name), ...(status.edge_apps?.length ? ["cloudflare"] : [])] : [];
 
   return (
     <>
       <PageHeader
         title="首页"
-        description={status ? `${status.servers.length} 台服务器 · ${items.length} 个服务 · ${status.routes.length} 个域名` : "载入中…"}
+        description={status ? `${status.servers.length} 台服务器 · ${status.services.length + (status.edge_apps?.length ?? 0)} 个服务 · ${status.routes.length} 个域名` : "载入中…"}
+        actions={
+          <Button onClick={() => setParams({ new: "1" })}>
+            <PlusIcon />
+            新建服务
+          </Button>
+        }
       />
       {status && <Onboarding status={status} />}
+      {status && (
+        <div className="mb-4 flex flex-wrap items-center gap-2">
+          <div className="flex flex-wrap items-center gap-1">
+            {[undefined, ...where].map((w) => (
+              <button
+                key={w ?? "all"}
+                type="button"
+                onClick={() => setServer(w)}
+                className={cn("rounded-md px-2.5 py-1 text-sm text-muted-foreground transition-colors hover:text-foreground", server === w && "bg-accent font-medium text-foreground")}
+              >
+                {w === undefined ? "全部" : w === "cloudflare" ? "Cloudflare" : w}
+              </button>
+            ))}
+          </div>
+          <div className="ml-auto flex rounded-md border bg-card p-0.5">
+            <ViewButton on={view === "cards"} label="卡片" onClick={() => setView("cards")}>
+              <LayoutGridIcon />
+            </ViewButton>
+            <ViewButton on={view === "list"} label="列表" onClick={() => setView("list")}>
+              <ListIcon />
+            </ViewButton>
+          </div>
+        </div>
+      )}
       {!status ? (
         <CardsSkeleton />
+      ) : view === "list" ? (
+        <ServiceTable status={status} server={server} />
       ) : (
         <>
           {open.length > 0 && <SectionTitle count={open.length}>能从外网打开</SectionTitle>}
@@ -62,7 +120,31 @@ export function Home() {
           <Cards items={internal} />
         </>
       )}
+      <UnmanagedList />
+      <EdgeList />
+      <NewService
+        open={params.get("new") === "1"}
+        onClose={() => {
+          setParams({});
+          refresh();
+        }}
+      />
     </>
+  );
+}
+
+function ViewButton({ on, label, onClick, children }: { on: boolean; label: string; onClick: () => void; children: React.ReactNode }) {
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      aria-pressed={on}
+      title={label}
+      onClick={onClick}
+      className={cn("grid size-7 place-items-center rounded text-muted-foreground [&_svg]:size-4 hover:text-foreground", on && "bg-accent text-foreground")}
+    >
+      {children}
+    </button>
   );
 }
 
@@ -137,21 +219,21 @@ function Onboarding({ status }: { status: Status }) {
       title: "建一个入口",
       hint: "域名从哪进来：有公网 IP 的机器直连，或 Cloudflare 隧道",
       action: "新建入口",
-      go: () => nav("/domains?tab=entries&new=1"),
+      go: () => nav("/servers?tab=entries&new=1"),
     },
     {
       done: status.services.length + (status.edge_apps?.length ?? 0) > 0,
       title: "部署第一个服务",
       hint: "镜像、git 仓库或 compose 都行",
       action: "部署服务",
-      go: () => nav("/services?new=1"),
+      go: () => nav("/?new=1"),
     },
     {
       done: status.routes.length > 0,
       title: "给它一个域名",
       hint: "证书和 DNS 自动配好",
       action: "加域名",
-      go: () => nav("/domains"),
+      go: () => nav("/servers?tab=entries"),
     },
     {
       done: tokens.some((t) => !!t.last_used_at),

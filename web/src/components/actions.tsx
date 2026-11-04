@@ -212,7 +212,7 @@ export function ActionsProvider({ children }: { children: ReactNode }) {
     setRemoving(null);
     actions.plan({
       title: `删除 ${name}`,
-      then: "/services",
+      then: "/",
       changes: [...routes.map((r) => ({ op: "remove_route", hostname: r.spec.hostname }) as Change), { op: "remove_service", name }],
     });
   };

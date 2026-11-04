@@ -314,13 +314,16 @@ pub async fn upgrade(
       let seen =
         *new_conn_at.get_or_insert_with(tokio::time::Instant::now);
       if build.is_some() && seen.elapsed() > FIRST_REPORT_WAIT {
+        let log = helper_log(state, server, cancel).await;
         return Err(
           ApiError::new(
             ErrorCode::AgentFailed,
-            format!("{server} 的新 agent 没有起来，已恢复旧 agent"),
+            format!(
+              "{server} 的新 agent 没有起来，已恢复旧 agent{log}"
+            ),
           )
           .with_hint(
-            "在服务器上 docker logs wharf-agent-upgrade 查看原因",
+            "在服务器上 docker logs wharf-agent-upgrade 查看完整原因",
           ),
         );
       }
@@ -351,4 +354,29 @@ async fn reported_build(
       .map(|r| r.build)
       .filter(|b| !b.is_empty()),
   )
+}
+
+/// 接班容器最后的日志，拼在错误信息后面；拿不到（旧 agent 不认识这个请求等）时为空。
+async fn helper_log(
+  state: &AppState,
+  server: &str,
+  cancel: &CancellationToken,
+) -> String {
+  let log: String = state
+    .hub
+    .call(
+      server,
+      AgentOp::UpgradeLog,
+      Duration::from_secs(20),
+      None,
+      cancel,
+    )
+    .await
+    .unwrap_or_default();
+  let log = log.trim();
+  if log.is_empty() {
+    String::new()
+  } else {
+    format!("。接班容器的日志：\n{log}")
+  }
 }
