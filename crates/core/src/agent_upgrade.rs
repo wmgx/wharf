@@ -234,7 +234,15 @@ pub async fn upgrade_core(
         }
         return Ok(Json(r));
       }
-      Err(e) if e.code == ErrorCode::NotFound => continue,
+      // 不在这台机器上，或者这台刚好掉线：问下一台。
+      Err(e)
+        if matches!(
+          e.code,
+          ErrorCode::NotFound | ErrorCode::AgentOffline
+        ) =>
+      {
+        continue;
+      }
       Err(e) => return Err(e.into()),
     }
   }
