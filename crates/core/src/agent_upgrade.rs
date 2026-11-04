@@ -313,7 +313,13 @@ pub async fn upgrade(
       // 就是接班容器已经把旧 agent 恢复回来了。
       let seen =
         *new_conn_at.get_or_insert_with(tokio::time::Instant::now);
-      if build.is_some() && seen.elapsed() > FIRST_REPORT_WAIT {
+      // 交接时新旧 agent 可能轮流连上，构建号旧不等于失败；接班容器说恢复了旧容器才算失败。
+      if build.is_some()
+        && seen.elapsed() > FIRST_REPORT_WAIT
+        && raw_helper_log(state, server, cancel)
+          .await
+          .contains("恢复旧容器")
+      {
         let log = helper_log(state, server, cancel).await;
         return Err(
           ApiError::new(
@@ -357,12 +363,12 @@ async fn reported_build(
 }
 
 /// 接班容器最后的日志，拼在错误信息后面；拿不到（旧 agent 不认识这个请求等）时为空。
-async fn helper_log(
+async fn raw_helper_log(
   state: &AppState,
   server: &str,
   cancel: &CancellationToken,
 ) -> String {
-  let log: String = state
+  state
     .hub
     .call(
       server,
@@ -372,7 +378,15 @@ async fn helper_log(
       cancel,
     )
     .await
-    .unwrap_or_default();
+    .unwrap_or_default()
+}
+
+async fn helper_log(
+  state: &AppState,
+  server: &str,
+  cancel: &CancellationToken,
+) -> String {
+  let log = raw_helper_log(state, server, cancel).await;
   let log = log.trim();
   if log.is_empty() {
     String::new()

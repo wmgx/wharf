@@ -974,7 +974,9 @@ pub fn token_scope(
   if let Some((name, _)) = &found {
     conn
       .execute(
-        "UPDATE api_tokens SET last_used_at = ?1 WHERE name = ?2",
+        // 每个请求都要过这里；一分钟内用过就不再写，磁盘忙时不拖慢请求。
+        "UPDATE api_tokens SET last_used_at = ?1 WHERE name = ?2 \
+         AND (last_used_at IS NULL OR last_used_at < ?1 - 60000)",
         params![now_ms(), name],
       )
       .map_err(sql_err)?;
