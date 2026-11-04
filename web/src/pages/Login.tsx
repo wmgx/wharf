@@ -6,6 +6,7 @@ import { Field } from "@/components/fields";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import * as vault from "@/lib/vault";
 
 /**
  * 登录页。三种情况：
@@ -40,6 +41,7 @@ function CredentialsForm({ mode, onDone }: { mode: "login" | "setup"; onDone: (s
   const [again, setAgain] = useState("");
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
+  const [stale, setStale] = useState<{ session: Session; password: string } | null>(null);
 
   const mismatch = setup && !!again && again !== password;
   const tooShort = setup && !!password && password.length < 8;
@@ -50,13 +52,18 @@ function CredentialsForm({ mode, onDone }: { mode: "login" | "setup"; onDone: (s
     setBusy(true);
     setError(null);
     try {
-      onDone(await api.post<Session>(setup ? "/api/setup" : "/api/login", { username: username.trim(), password }));
+      const session = await api.post<Session>(setup ? "/api/setup" : "/api/login", { username: username.trim(), password });
+      // 用登录密码解开备注私密内容的数据密钥；密码重置过时先让用户同步一次。
+      if ((await vault.afterLogin(password)) === "stale") setStale({ session, password });
+      else onDone(session);
     } catch (err) {
       setError(err);
     } finally {
       setBusy(false);
     }
   };
+
+  if (stale) return <SyncVault password={stale.password} onDone={() => onDone(stale.session)} />;
 
   return (
     <Card>
@@ -87,6 +94,48 @@ function CredentialsForm({ mode, onDone }: { mode: "login" | "setup"; onDone: (s
           <ErrorNote error={error} />
           <Button type="submit" className="w-full" disabled={!ready || busy}>
             {busy ? "请稍候…" : setup ? "设置并进入" : "登录"}
+          </Button>
+        </form>
+      </CardContent>
+    </Card>
+  );
+}
+
+/** 密码重置过：备注私密内容的数据密钥还是旧密码包的，输一次旧密码换成新密码包。 */
+function SyncVault({ password, onDone }: { password: string; onDone: () => void }) {
+  const [old, setOld] = useState("");
+  const [error, setError] = useState<unknown>(null);
+  const [busy, setBusy] = useState(false);
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      await vault.migrate(old, password);
+      onDone();
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-lg">同步私密备注</CardTitle>
+        <CardDescription>登录密码改过了。备注里的私密内容是用旧密码保护的，输一次旧密码，换成现在的密码。</CardDescription>
+      </CardHeader>
+      <CardContent>
+        <form className="grid gap-4" onSubmit={submit}>
+          <Field label="旧密码" htmlFor="old-password">
+            <Input id="old-password" type="password" autoFocus autoComplete="off" value={old} onChange={(e) => setOld(e.target.value)} />
+          </Field>
+          <ErrorNote error={error} />
+          <Button type="submit" disabled={!old || busy}>
+            {busy ? "同步中…" : "同步并进入"}
+          </Button>
+          <Button type="button" variant="ghost" onClick={onDone}>
+            先跳过（私密内容暂时打不开，下次登录还会问）
           </Button>
         </form>
       </CardContent>

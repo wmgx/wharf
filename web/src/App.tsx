@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import * as vault from "@/lib/vault";
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { Activity } from "./pages/Activity";
 import { Domains } from "./pages/Domains";
@@ -44,6 +45,7 @@ export function App() {
 
   const logout = async () => {
     await api.post("/api/logout", {}).catch(() => {});
+    vault.lock();
     load();
   };
 

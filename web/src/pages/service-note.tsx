@@ -89,24 +89,21 @@ function Sealed({ sealed }: { sealed: string }) {
           </Button>
         </span>
       </div>
-      {asking && <Unlock check={sealed} onDone={(ok) => (setAsking(false), ok && reveal())} />}
+      {asking && <Unlock onDone={(ok) => (setAsking(false), ok && reveal())} />}
     </div>
   );
 }
 
-/** 输入口令解锁。没有已有密文可校验时（第一次用），要输两遍。 */
-function Unlock({ check, onDone }: { check: string | null; onDone: (ok: boolean) => void }) {
+/** 查看、复制、编辑私密内容前的二次验证：输登录密码，5 分钟内有效。 */
+function Unlock({ onDone }: { onDone: (ok: boolean) => void }) {
   const [pass, setPass] = useState("");
-  const [again, setAgain] = useState("");
   const [busy, setBusy] = useState(false);
-  const first = !check;
-  if (!crypto.subtle) return <div className="text-xs text-destructive">加密需要用 https 打开 Wharf，当前地址不支持</div>;
+  if (!vault.supported()) return <div className="text-xs text-destructive">加密需要用 https 打开 Wharf，当前地址不支持</div>;
 
   const submit = async () => {
-    if (first && pass !== again) return toast.error("两次输入的口令不一样");
     setBusy(true);
     try {
-      await vault.unlock(pass, check);
+      await vault.unlock(pass);
       onDone(true);
     } catch (e) {
       toast.error((e as Error).message);
@@ -123,19 +120,15 @@ function Unlock({ check, onDone }: { check: string | null; onDone: (ok: boolean)
         submit();
       }}
     >
-      <div className="text-xs text-muted-foreground">
-        {first ? "第一次用：设一个口令。所有服务的私密备注都用它，忘了就解不开，没有找回。" : "输入口令解锁，本机 7 天内不用再输"}
-      </div>
-      <Input type="password" autoFocus autoComplete="off" placeholder="口令" value={pass} onChange={(e) => setPass(e.target.value)} className="h-8" />
-      {first && <Input type="password" autoComplete="off" placeholder="再输一遍" value={again} onChange={(e) => setAgain(e.target.value)} className="h-8" />}
+      <div className="text-xs text-muted-foreground">查看私密内容需要再验证一次登录密码，5 分钟内不用重复输入</div>
+      <Input type="password" autoFocus autoComplete="current-password" placeholder="登录密码" value={pass} onChange={(e) => setPass(e.target.value)} className="h-8" />
       <div className="flex gap-2">
-        <Button size="sm" type="submit" disabled={busy || pass.length < 6}>
+        <Button size="sm" type="submit" disabled={busy || !pass}>
           {busy ? "解锁中…" : "解锁"}
         </Button>
         <Button size="sm" type="button" variant="ghost" onClick={() => onDone(false)}>
           取消
         </Button>
-        {pass && pass.length < 6 && <span className="self-center text-xs text-muted-foreground">至少 6 位</span>}
       </div>
     </form>
   );
@@ -162,6 +155,8 @@ function Editor({ name, plain, sealed, onDone }: { name: string; plain: string; 
       await api.put(`/api/services/${encodeURIComponent(name)}/note`, { note });
       onDone(note);
     } catch (e) {
+      // 编辑时超过了 5 分钟：先验证，已填的内容保留。
+      if (!vault.isUnlocked()) setUnlocked(false);
       toast.error("备注没有保存", { description: (e as Error).message });
     } finally {
       setBusy(false);
@@ -195,7 +190,7 @@ function Editor({ name, plain, sealed, onDone }: { name: string; plain: string; 
         <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
           <LockIcon className="size-3 text-violet-600 dark:text-violet-400" />
           私密内容
-          <span className="text-muted-foreground/70">在浏览器里加密，服务器只存密文</span>
+          <span className="text-muted-foreground/70">用登录密码保护，在浏览器里加密，服务器只存密文</span>
           {unlocked && (
             <button
               type="button"
@@ -207,7 +202,7 @@ function Editor({ name, plain, sealed, onDone }: { name: string; plain: string; 
               }}
             >
               <LockOpenIcon className="size-3" />
-              本机已解锁 · 锁上
+              已验证 · 锁上
             </button>
           )}
         </div>
@@ -224,7 +219,7 @@ function Editor({ name, plain, sealed, onDone }: { name: string; plain: string; 
         ) : unlocked ? (
           <div className="text-xs text-muted-foreground">解密中…</div>
         ) : (
-          <Unlock check={sealed} onDone={(ok) => (ok ? setUnlocked(true) : !sealed && setWantSecret(false))} />
+          <Unlock onDone={(ok) => (ok ? setUnlocked(true) : !sealed && setWantSecret(false))} />
         )}
       </div>
       )}

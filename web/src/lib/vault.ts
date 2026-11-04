@@ -1,18 +1,31 @@
+import { api } from "@/api";
+
 /**
- * 备注里的私密内容：在浏览器里用口令加密（PBKDF2 → AES-GCM），服务器只存密文。
- * 口令本身不保存；派生出的密钥存在本机 localStorage，过期前不用再输口令。
- * 口令忘了就解不开，没有找回。
+ * 备注里的私密内容，在浏览器里加密，控制面只存密文。
+ *
+ * 两层密钥：
+ * - 数据密钥（随机 AES-256）加密备注内容；
+ * - 登录密码派生出的密钥（PBKDF2）把数据密钥包起来，包好的结果存在控制面（`/api/vault`）。
+ * 改密码只需要用新密码把数据密钥重新包一次，备注不用重新加密。
+ * 查看私密内容要二次验证：解开的数据密钥只放在内存里 5 分钟，不落盘；过期或刷新页面后要再输登录密码。
  */
 
 const PREFIX = "wharf-enc:v1:";
-const STORE = "wharf.vault";
-const REMEMBER_MS = 7 * 24 * 3600 * 1000;
-// 一个人用的系统，所有备注共用同一个口令，盐固定，换机器输同一个口令就能解开。
-const SALT = new TextEncoder().encode("wharf-note-vault-v1");
+const GRACE_MS = 5 * 60 * 1000;
 const ITERATIONS = 600_000;
 
+interface Wrapped {
+  v: 1;
+  salt: string;
+  iv: string;
+  key: string;
+}
+
+const enc = new TextEncoder();
 const b64 = (buf: ArrayBuffer | Uint8Array) => btoa(String.fromCharCode(...new Uint8Array(buf)));
 const unb64 = (s: string) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+
+export const supported = () => typeof crypto !== "undefined" && !!crypto.subtle;
 
 /** 把备注拆成公开部分和密文（如果有）。 */
 export function splitNote(note: string): { plain: string; sealed: string | null } {
@@ -26,69 +39,106 @@ export function joinNote(plain: string, sealed: string | null): string {
   return [plain.trim(), sealed ?? ""].filter(Boolean).join("\n");
 }
 
-let cached: CryptoKey | null = null;
-
-function readStore(): { key: string; until: number } | null {
-  try {
-    const v = JSON.parse(localStorage.getItem(STORE) ?? "null");
-    return v && v.until > Date.now() ? v : null;
-  } catch {
-    return null;
-  }
+// 旧版本把密钥存在 localStorage，清掉。
+try {
+  localStorage.removeItem("wharf.vault");
+} catch {
+  // ignore
 }
 
-/** 本机是否已解锁（口令派生的密钥还在有效期内）。 */
-export async function unlockedKey(): Promise<CryptoKey | null> {
-  if (cached) return cached;
-  const v = readStore();
-  if (!v) return null;
-  cached = await crypto.subtle.importKey("raw", unb64(v.key), "AES-GCM", false, ["encrypt", "decrypt"]);
-  return cached;
+let cached: { key: CryptoKey; until: number } | null = null;
+
+async function remember(raw: ArrayBuffer | Uint8Array) {
+  const key = await crypto.subtle.importKey("raw", raw, "AES-GCM", false, ["encrypt", "decrypt"]);
+  cached = { key, until: Date.now() + GRACE_MS };
 }
 
 export function isUnlocked(): boolean {
-  return !!cached || !!readStore();
+  return !!cached && cached.until > Date.now();
 }
 
-/** 用口令解锁；`check` 是已有密文时，先确认口令能解开它。 */
-export async function unlock(passphrase: string, check?: string | null): Promise<void> {
-  const base = await crypto.subtle.importKey("raw", new TextEncoder().encode(passphrase), "PBKDF2", false, ["deriveKey"]);
-  const key = await crypto.subtle.deriveKey({ name: "PBKDF2", salt: SALT, iterations: ITERATIONS, hash: "SHA-256" }, base, { name: "AES-GCM", length: 256 }, true, ["encrypt", "decrypt"]);
-  if (check) await decryptWith(key, check).catch(() => Promise.reject(new Error("口令不对")));
-  const raw = await crypto.subtle.exportKey("raw", key);
-  try {
-    localStorage.setItem(STORE, JSON.stringify({ key: b64(raw), until: Date.now() + REMEMBER_MS }));
-  } catch {
-    // 存不了就只在这个页面里有效。
-  }
-  cached = await crypto.subtle.importKey("raw", raw, "AES-GCM", false, ["encrypt", "decrypt"]);
+function dataKey(): CryptoKey | null {
+  return isUnlocked() ? cached!.key : null;
 }
 
 export function lock() {
   cached = null;
+}
+
+async function kek(password: string, salt: Uint8Array): Promise<CryptoKey> {
+  const base = await crypto.subtle.importKey("raw", enc.encode(password), "PBKDF2", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey({ name: "PBKDF2", salt, iterations: ITERATIONS, hash: "SHA-256" }, base, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+}
+
+async function wrap(raw: ArrayBuffer | Uint8Array, password: string): Promise<Wrapped> {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, await kek(password, salt), raw);
+  return { v: 1, salt: b64(salt), iv: b64(iv), key: b64(key) };
+}
+
+async function unwrap(w: Wrapped, password: string): Promise<ArrayBuffer> {
+  return crypto.subtle.decrypt({ name: "AES-GCM", iv: unb64(w.iv) }, await kek(password, unb64(w.salt)), unb64(w.key));
+}
+
+async function loadWrapped(): Promise<Wrapped | null> {
+  const { vault } = await api.get<{ vault: string | null }>("/api/vault");
+  return vault ? (JSON.parse(vault) as Wrapped) : null;
+}
+
+const saveWrapped = (w: Wrapped) => api.put("/api/vault", { vault: JSON.stringify(w) });
+
+/**
+ * 登录成功后调用：用登录密码解开数据密钥；第一次用时生成一个。
+ * 返回 "stale" 表示密码重置过、旧的数据密钥还是旧密码包的，需要 `migrate` 一次。
+ */
+export async function afterLogin(password: string): Promise<"ok" | "stale" | "skip"> {
+  if (!supported()) return "skip";
   try {
-    localStorage.removeItem(STORE);
-  } catch {
-    // ignore
+    const w = await loadWrapped();
+    if (!w) {
+      const raw = crypto.getRandomValues(new Uint8Array(32));
+      await saveWrapped(await wrap(raw, password));
+      await remember(raw);
+      return "ok";
+    }
+    await remember(await unwrap(w, password).catch(() => Promise.reject("stale")));
+    return "ok";
+  } catch (e) {
+    return e === "stale" ? "stale" : "skip";
   }
 }
 
-async function decryptWith(key: CryptoKey, sealed: string): Promise<string> {
-  const [iv, data] = sealed.slice(PREFIX.length).split(":");
-  const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv: unb64(iv) }, key, unb64(data));
-  return new TextDecoder().decode(plain);
+/** 密码重置后：用旧密码解开数据密钥，再用现在的密码包好存回去。 */
+export async function migrate(oldPassword: string, password: string): Promise<void> {
+  const w = await loadWrapped();
+  if (!w) return;
+  const raw = await unwrap(w, oldPassword).catch(() => Promise.reject(new Error("旧密码不对")));
+  await saveWrapped(await wrap(raw, password));
+  await remember(raw);
+}
+
+/** 二次验证：输登录密码解开数据密钥，5 分钟内有效：输一次登录密码解开。 */
+export async function unlock(password: string): Promise<void> {
+  if (!supported()) throw new Error("加密需要用 https 打开 Wharf");
+  const w = await loadWrapped();
+  if (!w) return void (await afterLogin(password));
+  const raw = await unwrap(w, password).catch(() => Promise.reject(new Error("密码不对。如果最近重置过密码，退出后重新登录一次，按提示同步")));
+  await remember(raw);
 }
 
 export async function open(sealed: string): Promise<string> {
-  const key = await unlockedKey();
-  if (!key) throw new Error("还没解锁");
-  return decryptWith(key, sealed).catch(() => Promise.reject(new Error("这段内容不是用当前口令加密的")));
+  const key = dataKey();
+  if (!key) throw new Error("需要再输一次登录密码");
+  const [iv, data] = sealed.slice(PREFIX.length).split(":");
+  const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv: unb64(iv) }, key, unb64(data)).catch(() => Promise.reject(new Error("解不开这段内容")));
+  return new TextDecoder().decode(plain);
 }
 
 export async function seal(text: string): Promise<string> {
-  const key = await unlockedKey();
-  if (!key) throw new Error("还没解锁");
+  const key = dataKey();
+  if (!key) throw new Error("需要再输一次登录密码");
   const iv = crypto.getRandomValues(new Uint8Array(12));
-  const data = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(text));
+  const data = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, enc.encode(text));
   return `${PREFIX}${b64(iv)}:${b64(data)}`;
 }

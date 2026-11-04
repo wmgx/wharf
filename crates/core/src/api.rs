@@ -140,6 +140,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     )
     .route("/api/services/{name}/deployments", get(deployments))
     .route("/api/services/{name}/note", put(set_note))
+    .route("/api/vault", get(show_vault).put(set_vault))
     .route(
       "/api/services/{name}/origin",
       get(crate::host_dir::origin),
@@ -589,6 +590,40 @@ struct NoteRequest {
 
 // 私密内容在浏览器里加密后以 base64 存进来，比原文长不少，所以放宽到 2 万字。
 const NOTE_LIMIT: usize = 20000;
+
+/// 备注私密内容的数据密钥，由浏览器用登录密码包好后存在这里；控制面只存不解。
+const VAULT_KEY: &str = "note_vault";
+
+#[derive(Deserialize)]
+struct VaultRequest {
+  vault: String,
+}
+
+async fn show_vault(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+) -> ApiResult<Value> {
+  auth.require(Perm::Admin)?;
+  let vault = s.db.call(|c| crate::db::setting(c, VAULT_KEY)).await?;
+  Ok(Json(json!({ "vault": vault })))
+}
+
+async fn set_vault(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Json(req): Json<VaultRequest>,
+) -> ApiResult<Value> {
+  auth.require(Perm::Admin)?;
+  if req.vault.len() > 2000 || !req.vault.starts_with('{') {
+    return Err(ApiError::invalid("vault 格式不对").into());
+  }
+  s.db
+    .call(move |c| {
+      crate::db::set_setting(c, VAULT_KEY, Some(&req.vault))
+    })
+    .await?;
+  Ok(Json(json!({ "ok": true })))
+}
 
 /// 改服务备注：不影响部署，直接保存，不走计划。传空字符串清除。
 async fn set_note(
