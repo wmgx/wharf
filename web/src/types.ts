@@ -309,6 +309,8 @@ export interface RouteDiagnosis {
   hostname: string;
   url: string;
   checks: DoctorCheck[];
+  /** HTTPS 证书到期时间，连不上或不是 HTTPS 时没有。 */
+  cert_expires?: string;
 }
 
 export interface DoctorReport {

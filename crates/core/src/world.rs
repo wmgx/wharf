@@ -210,6 +210,14 @@ impl World {
             .get_mut(name)
             .ok_or_else(|| server_not_found(name))?;
           validate_lan_addrs(&settings.lan_addrs)?;
+          if settings
+            .traffic_reset_day
+            .is_some_and(|d| !(1..=28).contains(&d))
+          {
+            return Err(ApiError::invalid(
+              "流量重置日要在 1 到 28 之间",
+            ));
+          }
           server.settings = settings.clone();
         }
         Change::UpsertService { name, spec, adopt } => {

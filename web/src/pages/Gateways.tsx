@@ -12,6 +12,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Sheet, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { CertDays, diagnosisOf } from "@/components/health";
 import { useStatus } from "@/status";
 import type { AccountView, GatewaySpec, GatewayTls, GatewayView } from "@/types";
 
@@ -101,6 +102,7 @@ export function GatewaysPanel() {
 
 function GatewayDetail({ g, onDone }: { g: GatewayView; onDone: () => void }) {
   const actions = useActions();
+  const { status } = useStatus();
   const { data: config } = usePoll<{ config: string; compose: string }>(`/api/gateways/${encodeURIComponent(g.name)}/config`, 30000);
   return (
     <>
@@ -142,8 +144,9 @@ function GatewayDetail({ g, onDone }: { g: GatewayView; onDone: () => void }) {
             {g.routes.length ? (
               <div className="divide-y rounded-lg border">
                 {g.routes.map((h) => (
-                  <div className="px-3.5 py-2.5 font-mono text-[13px]" key={h}>
-                    {h}
+                  <div className="flex items-center justify-between gap-3 px-3.5 py-2.5 text-[13px]" key={h}>
+                    <span className="font-mono">{h}</span>
+                    <CertDays d={diagnosisOf(status, h)} />
                   </div>
                 ))}
               </div>

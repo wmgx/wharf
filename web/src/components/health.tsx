@@ -16,6 +16,13 @@ export function diagnosisOf(status: Status | null | undefined, hostname: string)
   return status?.health?.routes.find((r) => r.hostname === hostname);
 }
 
+/** 证书还剩几天，少于 14 天标黄。 */
+export function CertDays({ d }: { d?: RouteDiagnosis }) {
+  if (!d?.cert_expires) return null;
+  const days = Math.floor((new Date(d.cert_expires).getTime() - Date.now()) / 86400000);
+  return <span className={days < 14 ? "text-amber-600 dark:text-amber-400" : "text-muted-foreground"}>证书剩 {days} 天</span>;
+}
+
 /** 一个域名能不能打开：第一个不通的层就是原因。 */
 export function routeTone(d?: RouteDiagnosis): { tone: Tone; text: string; detail?: string } {
   if (!d) return { tone: "idle", text: "还没检查" };

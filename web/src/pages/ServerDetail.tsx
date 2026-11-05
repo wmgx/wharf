@@ -71,6 +71,33 @@ function useHostInfo(name: string, online: boolean) {
   return { data, error, loading, load };
 }
 
+interface Traffic {
+  since: string;
+  rx: number;
+  tx: number;
+  quota?: number;
+}
+
+/** 本周期流量：控制面按上报的网速累加，打开时读一次。 */
+function useTraffic(name: string) {
+  const [data, setData] = useState<Traffic | null>(null);
+  useEffect(() => {
+    setData(null);
+    api
+      .get<Traffic>(`/api/servers/${encodeURIComponent(name)}/traffic`)
+      .then(setData)
+      .catch(() => setData(null));
+  }, [name]);
+  return data;
+}
+
+function trafficText(t: Traffic | null): string | undefined {
+  if (!t) return undefined;
+  const used = t.rx + t.tx;
+  const quota = t.quota ? ` · 额度 ${size(t.quota)}，已用 ${Math.round((used / t.quota) * 100)}%` : "";
+  return `收 ${size(t.rx)} · 发 ${size(t.tx)}（${t.since.slice(5)} 起）${quota}`;
+}
+
 /** 服务器详情：系统、资源、待装更新、磁盘占用、上面跑的服务。 */
 export function ServerDetail() {
   const { name = "" } = useParams();
@@ -80,6 +107,7 @@ export function ServerDetail() {
   const tab = params.get("tab") ?? "overview";
   const server = status?.servers.find((s) => s.name === name);
   const host = useHostInfo(name, !!server?.online);
+  const traffic = useTraffic(name);
 
   const back = (
     <Link className="mb-3 inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground md:hidden" to="/servers">
@@ -157,6 +185,7 @@ export function ServerDetail() {
           <dl className="mt-4 grid gap-x-6 gap-y-1 text-sm sm:grid-cols-[auto_1fr]">
             <Row k="公网 IP" v={server.public_ip} />
             <Row k="内网地址" v={server.private_addr?.ip} />
+            <Row k="本期流量" v={trafficText(traffic)} />
             <Row k="docker" v={r?.docker_version && `${r.docker_version}${r.compose_version ? ` · compose ${r.compose_version}` : ""}`} />
             <Row k="agent" v={r && `${r.version}${r.build ? ` · ${r.build}` : ""}`} />
           </dl>
@@ -307,6 +336,8 @@ type Settings = ServerView["settings"] & {
   build_env?: Record<string, string>;
   git_proxy?: string;
   lan_addrs?: string[];
+  traffic_quota_gb?: number;
+  traffic_reset_day?: number;
 };
 
 /** 私有网段 IPv4：10/8、172.16/12、192.168/16。公网地址不能绑，否则服务直接暴露。 */
@@ -343,6 +374,11 @@ function SettingsForm({ server, canRemove }: { server: ServerView; canRemove: bo
   const lanChoices = [...new Set([...(server.report?.lan_ips ?? []).filter(isPrivate), ...(cur.lan_addrs ?? [])])];
   const [hostTerminal, setHostTerminal] = useState(cur.host_terminal);
   const [hostExec, setHostExec] = useState(cur.host_exec);
+  const [quota, setQuota] = useState(cur.traffic_quota_gb ? String(cur.traffic_quota_gb) : "");
+  const [resetDay, setResetDay] = useState(cur.traffic_reset_day ? String(cur.traffic_reset_day) : "");
+  const quotaNum = Number(quota.trim() || 0);
+  const resetNum = Number(resetDay.trim() || 0);
+  const trafficValid = Number.isInteger(quotaNum) && quotaNum >= 0 && Number.isInteger(resetNum) && resetNum >= 0 && resetNum <= 28;
   const [removing, setRemoving] = useState(false);
 
   const next: Settings = {
@@ -355,6 +391,8 @@ function SettingsForm({ server, canRemove }: { server: ServerView; canRemove: bo
     lan_addrs: lanAddrs.length ? lanAddrs : undefined,
     host_terminal: hostTerminal,
     host_exec: hostExec,
+    traffic_quota_gb: quotaNum > 0 ? quotaNum : undefined,
+    traffic_reset_day: resetNum > 0 ? resetNum : undefined,
   };
   const norm = (x: Settings) =>
     JSON.stringify({ ...x, public_ip: x.public_ip || undefined, git_proxy: x.git_proxy || undefined, registry_mirrors: x.registry_mirrors ?? {}, build_env: x.build_env ?? {}, mirrors_only: !!x.mirrors_only, lan_addrs: x.lan_addrs?.length ? x.lan_addrs : undefined });
@@ -403,6 +441,12 @@ function SettingsForm({ server, canRemove }: { server: ServerView; canRemove: bo
       <Field label="拉代码代理" htmlFor="git-proxy" help="只用于 git。国内机器连不上 GitHub 时经海外机器转发。">
         <Input id="git-proxy" value={gitProxy} placeholder="http://100.x.x.x:8118" onChange={(e) => setGitProxy(e.target.value)} />
       </Field>
+      <Field label="流量" help="每月额度（GB）和重置日（1 到 28，北京时间），只用于显示本期用了多少。都不填按每月 1 号算、不显示额度。">
+        <div className="flex gap-2">
+          <Input inputMode="numeric" className="w-32" value={quota} placeholder="额度 GB" onChange={(e) => setQuota(e.target.value)} />
+          <Input inputMode="numeric" className="w-32" value={resetDay} placeholder="重置日" onChange={(e) => setResetDay(e.target.value)} />
+        </div>
+      </Field>
       <div className="grid gap-2">
         <label className="flex cursor-pointer items-center gap-2.5 text-sm">
           <Checkbox checked={hostTerminal} onCheckedChange={(v) => setHostTerminal(v === true)} />
@@ -414,7 +458,7 @@ function SettingsForm({ server, canRemove }: { server: ServerView; canRemove: bo
         </label>
       </div>
       <div className="flex flex-wrap items-center gap-2">
-        <Button disabled={!changed} onClick={() => actions.plan({ title: `设置 ${server.name}`, changes: [{ op: "update_server", name: server.name, settings: next }] })}>
+        <Button disabled={!changed || !trafficValid} onClick={() => actions.plan({ title: `设置 ${server.name}`, changes: [{ op: "update_server", name: server.name, settings: next }] })}>
           预览改动
         </Button>
         <span className="text-xs text-muted-foreground">接入方式和内网地址在<Link to="/network" className="mx-0.5 underline underline-offset-2">组网</Link>里改</span>

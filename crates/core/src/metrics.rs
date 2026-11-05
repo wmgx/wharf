@@ -62,6 +62,7 @@ pub async fn record_report(
     .call(move |c| {
       let at = now_ms();
       let s = owned.as_str();
+      crate::traffic::add(c, s, at, m.net_rx, m.net_tx)?;
       insert(
         c,
         at,

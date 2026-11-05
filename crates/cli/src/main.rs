@@ -306,6 +306,12 @@ pub enum ServerCmd {
     /// 是否允许通过 API 在宿主机执行命令。
     #[arg(long)]
     host_exec: Option<bool>,
+    /// 每月流量额度（GB），只用于显示用了多少；0 清除。
+    #[arg(long)]
+    traffic_quota_gb: Option<u32>,
+    /// 流量每月几号重置（1 到 28，北京时间）；0 清除（按 1 号）。
+    #[arg(long)]
+    traffic_reset_day: Option<u8>,
     #[command(flatten)]
     apply: ApplyFlags,
   },

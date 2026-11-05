@@ -8,7 +8,7 @@ use axum::{
   Json,
   extract::{Query, State},
 };
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
@@ -106,6 +106,7 @@ pub async fn run(
   let client = reqwest::Client::builder()
     .redirect(reqwest::redirect::Policy::none())
     .timeout(HTTP_TIMEOUT)
+    .tls_info(true)
     .build()
     .map_err(|e| {
       wharf_api_types::ApiError::internal(format!("HTTP 客户端：{e}"))
@@ -179,13 +180,16 @@ async fn route(
     .as_ref()
     .and_then(|g| world.gateways.get(g).map(|row| (g, &row.spec)));
   let mut checks = vec![dns(host, gateway.map(|g| g.1), net).await];
-  checks.push(https(client, &view.url, view.spec.auth).await);
+  let (https, cert_expires) =
+    https(client, &view.url, view.spec.auth).await;
+  checks.push(https);
   let Some((gw_name, gw)) = gateway else {
     // 边缘应用的域名直接指到厂商，不经过网关和服务器。
     return Some(RouteDiagnosis {
       hostname: host.into(),
       url: view.url,
       checks,
+      cert_expires,
     });
   };
   checks.push(gateway_check(live, gw_name, &gw.server));
@@ -203,6 +207,7 @@ async fn route(
     hostname: host.into(),
     url: view.url,
     checks,
+    cert_expires,
   })
 }
 
@@ -262,19 +267,27 @@ async fn dns(
 }
 
 /// 从控制面访问一次。502 / 504 是网关连不上上游，看后面几层。
+/// 顺带读证书到期时间，快到期时标黄。
 async fn https(
   client: &reqwest::Client,
   url: &str,
   auth: bool,
-) -> DoctorCheck {
+) -> (DoctorCheck, Option<DateTime<Utc>>) {
   let layer = if url.starts_with("https") {
     "https"
   } else {
     "http"
   };
   match client.get(url).send().await {
-    Err(e) => check(layer, url, CheckStatus::Bad, error_chain(&e)),
+    Err(e) => {
+      (check(layer, url, CheckStatus::Bad, error_chain(&e)), None)
+    }
     Ok(r) => {
+      let expires = r
+        .extensions()
+        .get::<reqwest::tls::TlsInfo>()
+        .and_then(|t| t.peer_certificate())
+        .and_then(crate::cert::not_after);
       let code = r.status();
       let status = if code.is_server_error() {
         CheckStatus::Bad
@@ -296,7 +309,16 @@ async fn https(
       {
         detail.push_str(&format!(" → {to}"));
       }
-      check(layer, url, status, detail)
+      let mut status = status;
+      if let Some(t) = expires {
+        let days = (t - Utc::now()).num_days();
+        detail.push_str(&format!("，证书剩 {days} 天"));
+        if days < crate::cert::WARN_DAYS && status == CheckStatus::Ok
+        {
+          status = CheckStatus::Warn;
+        }
+      }
+      (check(layer, url, status, detail), expires)
     }
   }
 }

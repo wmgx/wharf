@@ -816,6 +816,9 @@ pub struct RouteDiagnosis {
   pub url: String,
   /// 按访问顺序：域名解析 → HTTPS → 网关 → 网关到上游 → 容器。
   pub checks: Vec<DoctorCheck>,
+  /// HTTPS 证书到期时间，连不上或不是 HTTPS 时没有。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub cert_expires: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
