@@ -29,7 +29,7 @@ use crate::{
 const LIST_TIMEOUT: Duration = Duration::from_secs(40);
 const PACK_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
-async fn check_server(
+pub async fn check_server(
   s: &AppState,
   name: &str,
 ) -> Result<(), ApiError> {

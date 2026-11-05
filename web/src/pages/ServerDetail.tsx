@@ -18,6 +18,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { AptUpgrade } from "@/components/apt-upgrade";
 import { HostSessions } from "@/components/host-sessions";
 import { useStatus } from "@/status";
 import type { HostInfo, ServerView } from "@/types";
@@ -234,7 +235,7 @@ export function ServerDetail() {
           {!info ? (
             host.loading ? <Skeleton className="h-40 rounded-xl" /> : <Empty>{server.online ? "读取中…" : "服务器离线，读不到系统信息"}</Empty>
           ) : (
-            <SystemInfo info={info} />
+            <SystemInfo info={info} apt={<AptUpgrade server={server.name} enabled={server.online && !!server.settings.host_terminal} count={info.updates?.length ?? 0} onDone={host.load} />} />
           )}
         </TabsContent>
 
@@ -256,10 +257,11 @@ export function ServerDetail() {
   );
 }
 
-function SystemInfo({ info }: { info: HostInfo }) {
+function SystemInfo({ info, apt }: { info: HostInfo; apt: ReactNode }) {
   return (
     <>
       <SectionTitle count={info.updates?.length}>待装更新</SectionTitle>
+      {info.updates && apt}
       {info.reboot_required && <Notice kind="warn" className="mb-3">需要重启</Notice>}
       {!info.updates ? (
         <Empty>不是 apt 系统</Empty>

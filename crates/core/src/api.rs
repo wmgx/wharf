@@ -118,6 +118,10 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route("/api/servers/{name}/pack", post(crate::host_dir::pack))
     .route("/api/updates/check", post(crate::updates::check_now))
     .route(
+      "/api/servers/{name}/apt",
+      get(crate::apt::status).post(crate::apt::upgrade),
+    )
+    .route(
       "/api/servers/{name}/traffic",
       get(crate::traffic::traffic),
     )

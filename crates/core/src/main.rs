@@ -9,6 +9,7 @@ use ed25519_dalek::SigningKey;
 mod agent_upgrade;
 mod api;
 mod apply;
+mod apt;
 mod auth;
 mod backup;
 mod build;
