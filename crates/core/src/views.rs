@@ -479,6 +479,7 @@ pub async fn status(
     routes,
     problems,
     health: crate::doctor::last(),
+    updates: crate::updates::last(),
   })
 }
 

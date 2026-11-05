@@ -121,10 +121,8 @@ pub async fn traffic(
     .get(&name)
     .ok_or_else(|| crate::world::server_not_found(&name))?;
   let reset = row.settings.traffic_reset_day.unwrap_or(1) as u32;
-  let quota = row
-    .settings
-    .traffic_quota_gb
-    .map(|g| g as u64 * (1 << 30));
+  let quota =
+    row.settings.traffic_quota_gb.map(|g| g as u64 * (1 << 30));
   let today = Utc::now().with_timezone(&beijing()).date_naive();
   let since = period_start(today, reset);
   let from = midnight(since);

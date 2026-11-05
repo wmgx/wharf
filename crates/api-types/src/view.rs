@@ -560,6 +560,9 @@ pub struct Status {
   /// 最近一次域名检查（后台每 5 分钟），控制面刚启动时为空。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub health: Option<DoctorReport>,
+  /// 后台检查的新版本和未执行的改动，控制面刚启动时为空。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub updates: Option<UpdatesView>,
 }
 
 /// `wharf server add` 的返回：在目标机器上执行 `join` 里的任一命令即可加入。
@@ -849,4 +852,40 @@ pub enum CheckStatus {
   Bad,
   /// 前面一层已经不通，或这一层不适用。
   Skip,
+}
+
+/// 后台检查：镜像标签、代码分支有没有比固定版本新的（每 6 小时），
+/// 现在的配置和机器上的现状差几项（每 10 分钟算一次计划，不保存）。
+#[derive(
+  Debug, Clone, Default, Serialize, Deserialize, JsonSchema,
+)]
+pub struct UpdatesView {
+  /// 服务 → 版本检查结果，只有 image 和 git 构建来源的服务。
+  #[serde(default)]
+  pub services: BTreeMap<String, VersionCheck>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub pending: Option<PendingCheck>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct VersionCheck {
+  pub at: DateTime<Utc>,
+  /// 仓库里有比固定版本新的。
+  pub newer: bool,
+  /// 查到的最新版本（镜像 digest 或 commit）。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub latest: Option<String>,
+  /// 这次没查到时的原因，`newer` 沿用上一次的结果。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct PendingCheck {
+  pub at: DateTime<Utc>,
+  /// 计划项的地址，例如 `service/whoami`。
+  #[serde(default)]
+  pub items: Vec<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub error: Option<String>,
 }

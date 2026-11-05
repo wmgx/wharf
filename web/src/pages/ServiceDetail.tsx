@@ -104,6 +104,11 @@ export function ServiceDetail() {
               <span className="font-mono text-xs">{source}</span>· 在 <ServerTag name={svc.spec.server} />
             </span>
             <ServiceNote svc={svc} />
+            {status?.updates?.services[name]?.newer && (
+              <button type="button" className="text-xs text-primary underline underline-offset-2" onClick={() => actions.plan({ title: `更新 ${name}`, changes: [{ op: "refresh_images", name }] })}>
+                有新版本
+              </button>
+            )}
           </div>
         }
         actions={

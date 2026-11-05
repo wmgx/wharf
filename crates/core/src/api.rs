@@ -116,6 +116,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route("/api/servers/{name}/host", get(host_info))
     .route("/api/servers/{name}/dirs", get(crate::host_dir::list))
     .route("/api/servers/{name}/pack", post(crate::host_dir::pack))
+    .route("/api/updates/check", post(crate::updates::check_now))
     .route(
       "/api/servers/{name}/traffic",
       get(crate::traffic::traffic),

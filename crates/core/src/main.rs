@@ -49,6 +49,7 @@ mod tailscale;
 mod terminal;
 mod traffic;
 mod tunnel;
+mod updates;
 mod uploads;
 mod views;
 mod web;
@@ -152,6 +153,7 @@ async fn main() -> anyhow::Result<()> {
   agent_upgrade::spawn_agents_after(state.clone());
   heal::spawn(state.clone());
   doctor::spawn(state.clone());
+  updates::spawn(state.clone());
   views::spawn_live(state.clone());
 
   let listener = tokio::net::TcpListener::bind(cli.listen)

@@ -293,6 +293,20 @@ export interface Status {
   problems?: string[];
   /** 最近一次域名检查，控制面刚启动时没有。 */
   health?: DoctorReport;
+  /** 后台检查的新版本（6 小时）和未执行的改动（10 分钟）。 */
+  updates?: UpdatesView;
+}
+
+export interface VersionCheck {
+  at: string;
+  newer: boolean;
+  latest?: string;
+  error?: string;
+}
+
+export interface UpdatesView {
+  services: Record<string, VersionCheck>;
+  pending?: { at: string; items: string[]; error?: string };
 }
 
 export type CheckStatus = "ok" | "warn" | "bad" | "skip";
