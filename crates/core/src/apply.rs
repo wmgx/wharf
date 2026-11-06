@@ -777,6 +777,17 @@ async fn run_step(
       )
       .await?;
     }
+    Step::DockerProxy { server } => {
+      let settings = &world
+        .servers
+        .get(server)
+        .ok_or_else(|| crate::world::server_not_found(server))?
+        .settings;
+      crate::docker_proxy::apply(
+        state, server, settings, progress, cancel,
+      )
+      .await?;
+    }
     Step::Prune { server } => {
       crate::prune::prune(state, server, progress, cancel).await?;
     }

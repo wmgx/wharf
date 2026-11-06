@@ -337,6 +337,7 @@ type Settings = ServerView["settings"] & {
   mirrors_only?: boolean;
   build_env?: Record<string, string>;
   git_proxy?: string;
+  pull_proxy?: string;
   lan_addrs?: string[];
   traffic_quota_gb?: number;
   traffic_reset_day?: number;
@@ -371,6 +372,7 @@ function SettingsForm({ server, canRemove }: { server: ServerView; canRemove: bo
   const [mirrorsOnly, setMirrorsOnly] = useState(!!cur.mirrors_only);
   const [buildEnv, setBuildEnv] = useState(formatEnv(cur.build_env));
   const [gitProxy, setGitProxy] = useState(cur.git_proxy ?? "");
+  const [pullProxy, setPullProxy] = useState(cur.pull_proxy ?? "");
   const [lanAddrs, setLanAddrs] = useState<string[]>(cur.lan_addrs ?? []);
   // 候选：agent 上报的私有网段地址，加上已经设置的。
   const lanChoices = [...new Set([...(server.report?.lan_ips ?? []).filter(isPrivate), ...(cur.lan_addrs ?? [])])];
@@ -390,6 +392,7 @@ function SettingsForm({ server, canRemove }: { server: ServerView; canRemove: bo
     mirrors_only: mirrorsOnly,
     build_env: parseEnv(buildEnv),
     git_proxy: gitProxy.trim() || undefined,
+    pull_proxy: pullProxy.trim() || undefined,
     lan_addrs: lanAddrs.length ? lanAddrs : undefined,
     host_terminal: hostTerminal,
     host_exec: hostExec,
@@ -397,7 +400,7 @@ function SettingsForm({ server, canRemove }: { server: ServerView; canRemove: bo
     traffic_reset_day: resetNum > 0 ? resetNum : undefined,
   };
   const norm = (x: Settings) =>
-    JSON.stringify({ ...x, public_ip: x.public_ip || undefined, git_proxy: x.git_proxy || undefined, registry_mirrors: x.registry_mirrors ?? {}, build_env: x.build_env ?? {}, mirrors_only: !!x.mirrors_only, lan_addrs: x.lan_addrs?.length ? x.lan_addrs : undefined });
+    JSON.stringify({ ...x, public_ip: x.public_ip || undefined, git_proxy: x.git_proxy || undefined, pull_proxy: x.pull_proxy || undefined, registry_mirrors: x.registry_mirrors ?? {}, build_env: x.build_env ?? {}, mirrors_only: !!x.mirrors_only, lan_addrs: x.lan_addrs?.length ? x.lan_addrs : undefined });
   const changed = norm(next) !== norm(cur);
 
   const remove = async () => {
@@ -442,6 +445,9 @@ function SettingsForm({ server, canRemove }: { server: ServerView; canRemove: bo
       </Field>
       <Field label="拉代码代理" htmlFor="git-proxy" help="只用于 git。国内机器连不上 GitHub 时经海外机器转发。">
         <Input id="git-proxy" value={gitProxy} placeholder="http://100.x.x.x:8118" onChange={(e) => setGitProxy(e.target.value)} />
+      </Field>
+      <Field label="拉镜像代理" htmlFor="pull-proxy" help="写进宿主机 dockerd 配置，ghcr 等海外仓库经它拉，镜像源和内网直连。执行时会重启 dockerd（开启 live-restore，容器不停）。">
+        <Input id="pull-proxy" value={pullProxy} placeholder="http://100.x.x.x:8118" onChange={(e) => setPullProxy(e.target.value)} />
       </Field>
       <Field label="流量" help="每月额度（GB）和重置日（1 到 28，北京时间），只用于显示本期用了多少。都不填按每月 1 号算、不显示额度。">
         <div className="flex gap-2">

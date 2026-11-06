@@ -56,6 +56,10 @@ pub struct ServerSettings {
   /// 国内机器连不上 GitHub 时经海外机器转发；只用于 git，不影响构建和拉镜像。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub git_proxy: Option<String>,
+  /// 拉镜像时 dockerd 用的 HTTP 代理，例如 `http://<海外机器内网地址>:<端口>`。
+  /// 写进宿主机的 /etc/docker/daemon.json；镜像源和内网地址直连，其余仓库（ghcr 等）走代理。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub pull_proxy: Option<String>,
   /// 接入方式（design 2.10）。不填按检测到的地址推断。`tailscale` 且没检测到 Tailscale 时
   /// 由 Wharf 装 Tailscale 容器并加入；`public` 不用内网地址，网关到这台一律走反向隧道。
   #[serde(default, skip_serializing_if = "Option::is_none")]

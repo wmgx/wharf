@@ -18,6 +18,7 @@ mod cli_dist;
 mod core_backup;
 mod data;
 mod db;
+mod docker_proxy;
 mod doctor;
 mod edge;
 mod edge_api;
