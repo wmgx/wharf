@@ -708,6 +708,9 @@ pub struct PullPolicy {
   /// 拉代码、查 commit 时用的 HTTP 代理（服务器设置 `git_proxy`）。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub git_proxy: Option<String>,
+  /// 代替 `https://github.com/` 的地址（服务器设置 `github_mirror`，已替换密钥）。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub github_mirror: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

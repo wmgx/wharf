@@ -338,6 +338,7 @@ type Settings = ServerView["settings"] & {
   build_env?: Record<string, string>;
   git_proxy?: string;
   pull_proxy?: string;
+  github_mirror?: string;
   lan_addrs?: string[];
   traffic_quota_gb?: number;
   traffic_reset_day?: number;
@@ -373,6 +374,7 @@ function SettingsForm({ server, canRemove }: { server: ServerView; canRemove: bo
   const [buildEnv, setBuildEnv] = useState(formatEnv(cur.build_env));
   const [gitProxy, setGitProxy] = useState(cur.git_proxy ?? "");
   const [pullProxy, setPullProxy] = useState(cur.pull_proxy ?? "");
+  const [githubMirror, setGithubMirror] = useState(cur.github_mirror ?? "");
   const [lanAddrs, setLanAddrs] = useState<string[]>(cur.lan_addrs ?? []);
   // 候选：agent 上报的私有网段地址，加上已经设置的。
   const lanChoices = [...new Set([...(server.report?.lan_ips ?? []).filter(isPrivate), ...(cur.lan_addrs ?? [])])];
@@ -393,6 +395,7 @@ function SettingsForm({ server, canRemove }: { server: ServerView; canRemove: bo
     build_env: parseEnv(buildEnv),
     git_proxy: gitProxy.trim() || undefined,
     pull_proxy: pullProxy.trim() || undefined,
+    github_mirror: githubMirror.trim().replace(/\/+$/, "") || undefined,
     lan_addrs: lanAddrs.length ? lanAddrs : undefined,
     host_terminal: hostTerminal,
     host_exec: hostExec,
@@ -400,7 +403,7 @@ function SettingsForm({ server, canRemove }: { server: ServerView; canRemove: bo
     traffic_reset_day: resetNum > 0 ? resetNum : undefined,
   };
   const norm = (x: Settings) =>
-    JSON.stringify({ ...x, public_ip: x.public_ip || undefined, git_proxy: x.git_proxy || undefined, pull_proxy: x.pull_proxy || undefined, registry_mirrors: x.registry_mirrors ?? {}, build_env: x.build_env ?? {}, mirrors_only: !!x.mirrors_only, lan_addrs: x.lan_addrs?.length ? x.lan_addrs : undefined });
+    JSON.stringify({ ...x, public_ip: x.public_ip || undefined, git_proxy: x.git_proxy || undefined, pull_proxy: x.pull_proxy || undefined, github_mirror: x.github_mirror || undefined, registry_mirrors: x.registry_mirrors ?? {}, build_env: x.build_env ?? {}, mirrors_only: !!x.mirrors_only, lan_addrs: x.lan_addrs?.length ? x.lan_addrs : undefined });
   const changed = norm(next) !== norm(cur);
 
   const remove = async () => {
@@ -448,6 +451,9 @@ function SettingsForm({ server, canRemove }: { server: ServerView; canRemove: bo
       </Field>
       <Field label="拉镜像代理" htmlFor="pull-proxy" help="写进宿主机 dockerd 配置，ghcr 等海外仓库经它拉，镜像源和内网直连。执行时会重启 dockerd（开启 live-restore，容器不停）。">
         <Input id="pull-proxy" value={pullProxy} placeholder="http://100.x.x.x:8118" onChange={(e) => setPullProxy(e.target.value)} />
+      </Field>
+      <Field label="GitHub 镜像" htmlFor="github-mirror" help="拉代码时代替 https://github.com/ 的地址（Wharf 的 mirror 服务），可以用 [[密钥名]] 引用访问口令。">
+        <Input id="github-mirror" value={githubMirror} placeholder="https://github.wmgx.top/[[MIRROR_TOKEN]]" onChange={(e) => setGithubMirror(e.target.value)} />
       </Field>
       <Field label="流量" help="每月额度（GB）和重置日（1 到 28，北京时间），只用于显示本期用了多少。都不填按每月 1 号算、不显示额度。">
         <div className="flex gap-2">

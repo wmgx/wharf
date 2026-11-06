@@ -77,7 +77,25 @@ impl Snapshot {
   }
 }
 
+/// 最近一次加载的密钥：拉镜像策略里的 `[[NAME]]`（例如镜像源地址里的访问口令）用它替换。
+/// 每个调用 [pull_policy] 的地方都是刚加载完快照，所以是新的。
+static SECRETS: std::sync::RwLock<BTreeMap<String, String>> =
+  std::sync::RwLock::new(BTreeMap::new());
+
+fn with_secrets(text: &str) -> String {
+  let secrets = SECRETS.read().unwrap_or_else(|e| e.into_inner());
+  crate::render::substitute(text, Some(&secrets))
+    .unwrap_or_else(|_| text.to_string())
+}
+
 pub async fn load(db: &Db) -> Result<Snapshot, ApiError> {
+  let snap = load_inner(db).await?;
+  *SECRETS.write().unwrap_or_else(|e| e.into_inner()) =
+    snap.secrets.clone();
+  Ok(snap)
+}
+
+async fn load_inner(db: &Db) -> Result<Snapshot, ApiError> {
   db.call(|c| {
     Ok(
       Snapshot {
@@ -140,10 +158,22 @@ impl Snapshot {
 
 pub fn pull_policy(server: &ServerRow) -> PullPolicy {
   PullPolicy {
-    mirrors: server.settings.registry_mirrors.clone(),
+    mirrors: server
+      .settings
+      .registry_mirrors
+      .iter()
+      .map(|(k, v)| {
+        (k.clone(), v.iter().map(|m| with_secrets(m)).collect())
+      })
+      .collect(),
     mirrors_only: server.settings.mirrors_only,
     attempt_timeout_secs: PULL_ATTEMPT_SECS,
     git_proxy: server.settings.git_proxy.clone(),
+    github_mirror: server
+      .settings
+      .github_mirror
+      .as_deref()
+      .map(with_secrets),
   }
 }
 
