@@ -1,9 +1,9 @@
 //! `wharf-agent mirror`：镜像仓库和 GitHub 的反向代理，部署在海外机器上，前面挂 HTTPS 网关。
 //!
 //! 按请求域名的第一段选上游，换机器、换根域名都不用改配置：
-//! - `ghcr.*` → ghcr.io，`docker.*` → Docker Hub：只转发拉取（GET / HEAD）；
+//! - `ghcr.*` → ghcr.io，`docker.*` 或 `hub.*` → Docker Hub：只转发拉取（GET / HEAD）；
 //!   上游要的 token 由这里匿名去换，镜像层的跳转（到 CDN）也在这里跟随，客户端只连这一个地址；
-//! - `github.*` → github.com：转发 git 的 HTTP 请求（clone、fetch、ls-remote）。
+//! - `github.*` 或 `gh.*` → github.com：转发 git 的 HTTP 请求（clone、fetch、ls-remote）。
 //!
 //! 认证：路径第一段是访问口令（`MIRROR_TOKEN`），不对时一律 404。
 //! 镜像源写成 `ghcr.<域名>/<口令>`，`docker pull ghcr.<域名>/<口令>/owner/image` 就能用，不用 `docker login`。
@@ -38,8 +38,10 @@ fn upstream(host: &str) -> Option<(&'static str, Kind)> {
   let first = host.split('.').next()?;
   Some(match first {
     "ghcr" => ("https://ghcr.io", Kind::Registry),
-    "docker" => ("https://registry-1.docker.io", Kind::Registry),
-    "github" => ("https://github.com", Kind::Git),
+    "docker" | "hub" => {
+      ("https://registry-1.docker.io", Kind::Registry)
+    }
+    "github" | "gh" => ("https://github.com", Kind::Git),
     _ => return None,
   })
 }
@@ -310,6 +312,11 @@ mod tests {
       "https://ghcr.io"
     );
     assert_eq!(upstream("github.example.com").unwrap().1, Kind::Git);
+    assert_eq!(upstream("gh.wmgx.top").unwrap().1, Kind::Git);
+    assert_eq!(
+      upstream("hub.wmgx.top").unwrap().0,
+      "https://registry-1.docker.io"
+    );
     assert!(upstream("evil.wmgx.top").is_none());
     let t = "0123456789abcdef";
     assert_eq!(
