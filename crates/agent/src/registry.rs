@@ -200,7 +200,7 @@ fn arch() -> &'static str {
 }
 
 /// 按 `WWW-Authenticate: Bearer realm=…,service=…,scope=…` 匿名换 token。
-async fn token(
+pub(crate) async fn token(
   client: &reqwest::Client,
   challenge: &str,
 ) -> Result<String, String> {

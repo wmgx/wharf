@@ -124,6 +124,16 @@ impl Cmd {
     self
   }
 
+  pub fn envs(
+    mut self,
+    vars: impl IntoIterator<Item = (&'static str, String)>,
+  ) -> Self {
+    self
+      .env
+      .extend(vars.into_iter().map(|(k, v)| (k.to_string(), v)));
+    self
+  }
+
   pub fn timeout(mut self, timeout: Duration) -> Self {
     self.timeout = timeout;
     self

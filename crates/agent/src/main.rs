@@ -24,6 +24,7 @@ mod host_dir;
 mod host_shell;
 mod identity;
 mod metrics;
+mod mirror;
 mod ops;
 mod probe;
 mod registry;
@@ -89,6 +90,11 @@ enum Command {
     #[arg(long)]
     out: PathBuf,
   },
+  /// 镜像仓库和 GitHub 的反向代理（见 mirror 模块），口令从环境变量 `MIRROR_TOKEN` 读。
+  Mirror {
+    #[arg(long, default_value = "0.0.0.0:8080")]
+    listen: String,
+  },
   /// 升级用：在接班容器里换掉旧 agent 容器（由 agent 自己启动）。
   #[command(hide = true)]
   Replace {
@@ -113,6 +119,9 @@ async fn main() -> anyhow::Result<()> {
   if let Some(Command::Pack { dir, out }) = &cli.command {
     return host_dir::pack_cli(dir, out);
   }
+  if let Some(Command::Mirror { listen }) = &cli.command {
+    return mirror::run(listen).await;
+  }
   std::fs::create_dir_all(&cli.data_dir)
     .with_context(|| format!("创建 {}", cli.data_dir.display()))?;
 
@@ -121,7 +130,9 @@ async fn main() -> anyhow::Result<()> {
     join_token: std::env::var("WHARF_JOIN_TOKEN").ok(),
   });
   let joined = match command {
-    Command::Pack { .. } => unreachable!("前面已经处理"),
+    Command::Pack { .. } | Command::Mirror { .. } => {
+      unreachable!("前面已经处理")
+    }
     Command::Replace {
       container,
       image,

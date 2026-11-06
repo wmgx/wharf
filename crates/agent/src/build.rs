@@ -191,6 +191,7 @@ pub async fn fetch_code(
         reference,
         token.as_ref().map(|t| t.0.as_str()),
         pull.git_proxy.as_deref(),
+        pull.github_mirror.as_deref(),
         &src,
         ctx,
       )
@@ -401,6 +402,7 @@ async fn clone(
   reference: &str,
   token: Option<&str>,
   proxy: Option<&str>,
+  mirror: Option<&str>,
   src: &Path,
   ctx: &Ctx,
 ) -> Result<String, ApiError> {
@@ -438,12 +440,14 @@ rm -rf .git"#;
       "-e",
       "HTTP_PROXY",
     ])
+    .args(GIT_MIRROR_ENV)
     .args(["--entrypoint", "sh", GIT_IMAGE, "-c", script])
     .env("REPO", repo)
     .env("REF", reference)
     .env("GIT_TOKEN", token.unwrap_or_default())
     .env("HTTPS_PROXY", proxy.unwrap_or_default())
     .env("HTTP_PROXY", proxy.unwrap_or_default())
+    .envs(github_mirror_env(mirror))
     .timeout(CLONE_TIMEOUT)
     .run(ctx)
     .await;
@@ -464,6 +468,37 @@ rm -rf .git"#;
     .to_string();
   ctx.say(format!("commit {}", &commit[..12]));
   Ok(commit)
+}
+
+/// 传给 git 容器的环境变量名：用 git 的 `GIT_CONFIG_*` 设 `url.<镜像>.insteadOf`。
+const GIT_MIRROR_ENV: [&str; 6] = [
+  "-e",
+  "GIT_CONFIG_COUNT",
+  "-e",
+  "GIT_CONFIG_KEY_0",
+  "-e",
+  "GIT_CONFIG_VALUE_0",
+];
+
+/// 有 GitHub 镜像时把 `https://github.com/` 换成它；没有时 `GIT_CONFIG_COUNT=0`。
+fn github_mirror_env(
+  mirror: Option<&str>,
+) -> Vec<(&'static str, String)> {
+  match mirror.map(str::trim).filter(|m| !m.is_empty()) {
+    Some(m) => vec![
+      ("GIT_CONFIG_COUNT", "1".into()),
+      (
+        "GIT_CONFIG_KEY_0",
+        format!("url.{}/.insteadOf", m.trim_end_matches('/')),
+      ),
+      ("GIT_CONFIG_VALUE_0", "https://github.com/".into()),
+    ],
+    None => vec![
+      ("GIT_CONFIG_COUNT", "0".into()),
+      ("GIT_CONFIG_KEY_0", String::new()),
+      ("GIT_CONFIG_VALUE_0", String::new()),
+    ],
+  }
 }
 
 /// 分支或标签现在指向的 commit。已经是 commit 的原样返回。
@@ -512,6 +547,7 @@ fi"#;
       "-e",
       "HTTP_PROXY",
     ])
+    .args(GIT_MIRROR_ENV)
     .args(["--entrypoint", "sh", GIT_IMAGE, "-c", script])
     .env("REPO", repo)
     .env("REF", reference)
@@ -527,6 +563,7 @@ fi"#;
       "HTTP_PROXY",
       job.pull.git_proxy.as_deref().unwrap_or_default(),
     )
+    .envs(github_mirror_env(job.pull.github_mirror.as_deref()))
     .timeout(LS_REMOTE_TIMEOUT)
     .run(ctx)
     .await;

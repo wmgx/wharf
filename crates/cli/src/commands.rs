@@ -668,6 +668,7 @@ async fn server(
       clear_build_env,
       git_proxy,
       pull_proxy,
+      github_mirror,
       host_terminal,
       host_exec,
       traffic_quota_gb,
@@ -756,6 +757,19 @@ async fn server(
           );
         }
         settings.pull_proxy = (!p.is_empty()).then(|| p.to_string());
+      }
+      if let Some(m) = github_mirror {
+        let m = m.trim().trim_end_matches('/');
+        if !m.is_empty() && !m.starts_with("https://") {
+          return Err(
+            ApiError::invalid(format!(
+              "--github-mirror {m} 要以 https:// 开头"
+            ))
+            .into(),
+          );
+        }
+        settings.github_mirror =
+          (!m.is_empty()).then(|| m.to_string());
       }
       for e in &build_env {
         let (k, v) = parse_kv(e, "--build-env")?;
