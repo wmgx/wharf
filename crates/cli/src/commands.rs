@@ -667,6 +667,7 @@ async fn server(
       build_env,
       clear_build_env,
       git_proxy,
+      pull_proxy,
       host_terminal,
       host_exec,
       traffic_quota_gb,
@@ -743,6 +744,18 @@ async fn server(
           );
         }
         settings.git_proxy = (!p.is_empty()).then(|| p.to_string());
+      }
+      if let Some(p) = pull_proxy {
+        let p = p.trim();
+        if !p.is_empty() && !p.starts_with("http://") {
+          return Err(
+            ApiError::invalid(format!(
+              "--pull-proxy {p} 要以 http:// 开头"
+            ))
+            .into(),
+          );
+        }
+        settings.pull_proxy = (!p.is_empty()).then(|| p.to_string());
       }
       for e in &build_env {
         let (k, v) = parse_kv(e, "--build-env")?;

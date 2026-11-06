@@ -137,6 +137,10 @@ pub enum Step {
   TailscaleUp {
     server: String,
   },
+  /// 按服务器设置 `pull_proxy` 改 dockerd 的代理，有变化时重启 dockerd。
+  DockerProxy {
+    server: String,
+  },
   /// 备份和恢复不来自计划，是单独发起的执行。
   Backup {
     service: String,
@@ -205,6 +209,8 @@ impl Step {
   fn order(&self) -> u8 {
     match self {
       Self::DnsDelete { .. } | Self::EdgeDetach { .. } => 0,
+      // 先换好拉镜像的路，后面起服务时就用上。
+      Self::DockerProxy { .. } => 1,
       Self::EnsureDirs { .. } => 1,
       Self::VolumeSync { .. } => 2,
       Self::ServiceUp { .. }
@@ -423,6 +429,7 @@ pub async fn make_plan(
   leftover_items(&mut b, &snap.deployed, &current, &desired, &status);
   link_items(&mut b, &current, &desired, &net, &status)?;
   tailscale_items(&mut b, &snap, &desired, &status);
+  docker_proxy_items(&mut b, &current, &desired);
   gateway_items(&mut b, &snap, &current, &desired, &net, &status)?;
   dns_items(&mut b, &snap, &desired, &net).await?;
   mark("DNS");
@@ -1271,6 +1278,60 @@ fn link_items(
 }
 
 /// Wharf 管理的 Tailscale 容器：要的时候起，接入方式改掉之后删。
+/// 拉镜像代理的设置（或它要直连的镜像源）变了：改 dockerd 配置。
+fn docker_proxy_items(
+  b: &mut Builder,
+  current: &World,
+  desired: &World,
+) {
+  use crate::docker_proxy::wanted;
+  for (server, row) in &desired.servers {
+    let after = wanted(&row.settings);
+    let before = current
+      .servers
+      .get(server)
+      .and_then(|r| wanted(&r.settings));
+    if after == before {
+      continue;
+    }
+    let (reason, title) = match &after {
+      Some((proxy, _)) => (
+        format!(
+          "拉镜像改走代理 {proxy}，镜像源和内网直连；重启 dockerd，开启 live-restore 后容器不停"
+        ),
+        format!("在 {server} 上给 dockerd 配拉镜像代理"),
+      ),
+      None => (
+        "去掉拉镜像代理，重启 dockerd（开启 live-restore，容器不停）"
+          .to_string(),
+        format!("在 {server} 上去掉 dockerd 的拉镜像代理"),
+      ),
+    };
+    let id = b.item(
+      format!("docker/{server}"),
+      Layer::Container,
+      if before.is_none() {
+        Action::Create
+      } else if after.is_none() {
+        Action::Delete
+      } else {
+        Action::Update
+      },
+      before.map(|(p, n)| json!({ "proxy": p, "no_proxy": n })),
+      after.map(|(p, n)| json!({ "proxy": p, "no_proxy": n })),
+      vec![Impact::Restart],
+      reason,
+    );
+    b.step(
+      vec![id],
+      title,
+      Step::DockerProxy {
+        server: server.clone(),
+      },
+    );
+  }
+}
+
 fn tailscale_items(
   b: &mut Builder,
   snap: &Snapshot,

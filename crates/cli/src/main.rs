@@ -300,6 +300,10 @@ pub enum ServerCmd {
     /// 拉代码时用的 HTTP 代理，例如 `http://100.x.x.x:8118`（国内机器经海外机器连 GitHub）；传空字符串清除。
     #[arg(long)]
     git_proxy: Option<String>,
+    /// 拉镜像时 dockerd 用的 HTTP 代理，例如 `http://100.x.x.x:8118`；镜像源和内网直连。
+    /// apply 时改宿主机的 daemon.json 并重启 dockerd（开启 live-restore，容器不停）；传空字符串清除。
+    #[arg(long)]
+    pull_proxy: Option<String>,
     /// 是否允许从页面打开宿主机终端。
     #[arg(long)]
     host_terminal: Option<bool>,
