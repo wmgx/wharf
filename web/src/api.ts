@@ -36,16 +36,28 @@ function headers(json: boolean): HeadersInit {
   return h;
 }
 
-async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+async function request<T>(
+  method: string,
+  path: string,
+  body?: unknown,
+): Promise<T> {
   let resp: Response;
   try {
     resp = await fetch(path, {
       method,
       headers: headers(body !== undefined && !(body instanceof Blob)),
-      body: body === undefined ? undefined : body instanceof Blob ? body : JSON.stringify(body),
+      body:
+        body === undefined
+          ? undefined
+          : body instanceof Blob
+            ? body
+            : JSON.stringify(body),
     });
   } catch {
-    throw new ApiError({ code: "Network", message: "连不上控制面，检查网络或控制面是否在运行" }, 0);
+    throw new ApiError(
+      { code: "Network", message: "连不上控制面，检查网络或控制面是否在运行" },
+      0,
+    );
   }
   const text = await resp.text();
   if (!resp.ok) {
@@ -62,32 +74,41 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 }
 
 export const api = {
-  get: <T,>(path: string) => request<T>("GET", path),
-  post: <T,>(path: string, body: unknown) => request<T>("POST", path, body),
-  put: <T,>(path: string, body: unknown) => request<T>("PUT", path, body),
+  get: <T>(path: string) => request<T>("GET", path),
+  post: <T>(path: string, body: unknown) => request<T>("POST", path, body),
+  put: <T>(path: string, body: unknown) => request<T>("PUT", path, body),
   /** 请求体是文件原样内容。 */
-  upload: <T,>(path: string, file: Blob) => request<T>("PUT", path, file),
-  del: <T,>(path: string) => request<T>("DELETE", path),
+  upload: <T>(path: string, file: Blob) => request<T>("PUT", path, file),
+  del: <T>(path: string) => request<T>("DELETE", path),
   plan: (changes: Change[]) => request<Plan>("POST", "/api/plan", { changes }),
   apply: (plan_id: string, confirm: string[]) =>
     request<{ run_id: string }>("POST", "/api/apply", { plan_id, confirm }),
   run: (id: string) => request<Run>("GET", `/api/runs/${id}`),
-  cancelRun: (id: string) => request<unknown>("POST", `/api/runs/${id}/cancel`, {}),
+  cancelRun: (id: string) =>
+    request<unknown>("POST", `/api/runs/${id}/cancel`, {}),
 };
 
 /**
  * 读取分块的日志流，每收到一行调用一次 onLine。返回的函数用于停止。
  * 连接断开后 3 秒自动重连（控制面那边的跟随有最长时长）。
  */
-export function followLogs(path: string, onLine: (line: string) => void, onState: (live: boolean) => void) {
+export function followLogs(
+  path: string,
+  onLine: (line: string) => void,
+  onState: (live: boolean) => void,
+  initialTail = 200,
+) {
   let stopped = false;
   let controller: AbortController | null = null;
-  let tail = 200;
+  let tail = initialTail;
 
   const connect = async () => {
     controller = new AbortController();
     try {
-      const resp = await fetch(`${path}?tail=${tail}`, { headers: headers(false), signal: controller.signal });
+      const resp = await fetch(`${path}?tail=${tail}`, {
+        headers: headers(false),
+        signal: controller.signal,
+      });
       if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
       onState(true);
       // 重连时不再重复拉历史。
