@@ -249,6 +249,11 @@ pub enum AgentOp {
   },
   /// 从本机发一次 HTTP GET（自定义监控），结果是 [HttpCheckResult]。
   HttpCheck(HttpCheck),
+  /// 链路质量：对每个目标连 `count` 次，结果是 `Vec<LinkSample>`（和 `targets` 一一对应）。
+  Quality {
+    targets: Vec<ProbeTarget>,
+    count: u8,
+  },
   /// 升级 agent 自己（或 `container` 指定的同机容器，例如控制面）：
   /// 拉新镜像，起一个接班容器换掉当前容器，结果是 [UpgradeResult]。
   /// 回复之后连接会断开，新 agent 重新连上才算完成。
@@ -530,6 +535,19 @@ pub struct ProbeTarget {
   /// 只看 TCP 能不能连上，不要求对方是 agent 的探测端口（诊断网关到上游用）。
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub plain: bool,
+}
+
+/// 一个目标的链路质量采样。
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct LinkSample {
+  pub sent: u8,
+  /// 连上并且对方回了正确名字的次数。
+  pub ok: u8,
+  /// 成功那几次 TCP 建连的平均耗时（毫秒），一次都没成功时为空。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub avg_ms: Option<f64>,
 }
 
 /// agent 的探测端口：连上后回一行 `wharf <服务器名>`。

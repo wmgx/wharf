@@ -552,14 +552,33 @@ pub fn network(v: &NetworkView) {
   }
   println!("\n谁能连谁的内网地址：");
   for r in &v.reach {
+    let quality = v
+      .links
+      .iter()
+      .find(|l| l.from == r.from && l.to == r.to)
+      .map(|l| {
+        let ms = l
+          .ms
+          .map(|m| format!("{m:.0}ms"))
+          .unwrap_or_else(|| "-".into());
+        format!("  延迟 {ms:<6} 丢包 {:.0}%", l.loss)
+      })
+      .unwrap_or_default();
     println!(
-      "  {} → {}  {}  ({})",
+      "  {} → {}  {}{}  ({})",
       r.from,
       r.to,
       if r.ok { "通" } else { "不通" },
+      quality,
       r.checked_at
         .with_timezone(&chrono::Local)
         .format("%m-%d %H:%M")
+    );
+  }
+  for h in &v.relays {
+    println!(
+      "\n建议：{} → {} 直连丢包 {:.0}%，经 {} 中转约 {:.0}%",
+      h.from, h.to, h.direct_loss, h.via, h.via_loss
     );
   }
 }

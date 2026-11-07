@@ -154,6 +154,9 @@ impl Ops {
       AgentOp::Probe { targets } => {
         to_value(crate::probe::check(targets).await)
       }
+      AgentOp::Quality { targets, count } => {
+        to_value(crate::probe::quality(targets, count).await)
+      }
       AgentOp::HttpCheck(job) => {
         to_value(crate::probe::http(job).await)
       }
