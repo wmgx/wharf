@@ -47,6 +47,7 @@ mod pins;
 mod planner;
 mod probe;
 mod prune;
+mod quality;
 mod render;
 mod rollback;
 mod shell;
@@ -166,6 +167,7 @@ async fn main() -> anyhow::Result<()> {
   updates::spawn(state.clone());
   alerts::spawn(state.clone());
   monitor::spawn(state.clone());
+  quality::spawn(state.clone());
   tasks::spawn(state.clone());
   views::spawn_live(state.clone());
 

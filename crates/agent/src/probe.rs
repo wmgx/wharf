@@ -64,6 +64,49 @@ async fn one(target: &ProbeTarget) -> bool {
     .unwrap_or(false)
 }
 
+/// 链路质量：每个目标间隔 200 毫秒连 `count` 次，记建连耗时，所有目标并行。
+pub async fn quality(
+  targets: Vec<ProbeTarget>,
+  count: u8,
+) -> Vec<wharf_api_types::agent::LinkSample> {
+  let count = count.clamp(1, 30);
+  futures_util::future::join_all(targets.iter().map(|t| async move {
+    let mut times = Vec::new();
+    for i in 0..count {
+      if i > 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(200))
+          .await;
+      }
+      if let Some(ms) = timed(t).await {
+        times.push(ms);
+      }
+    }
+    wharf_api_types::agent::LinkSample {
+      sent: count,
+      ok: times.len() as u8,
+      avg_ms: (!times.is_empty())
+        .then(|| times.iter().sum::<f64>() / times.len() as f64),
+    }
+  }))
+  .await
+}
+
+/// 一次探测，成功时返回 TCP 建连耗时（毫秒）。
+async fn timed(target: &ProbeTarget) -> Option<f64> {
+  let start = std::time::Instant::now();
+  let attempt = async {
+    let stream = TcpStream::connect(&target.addr).await.ok()?;
+    let ms = start.elapsed().as_secs_f64() * 1000.0;
+    let mut line = String::new();
+    BufReader::new(stream).read_line(&mut line).await.ok()?;
+    (line == banner(&target.server)).then_some(ms)
+  };
+  tokio::time::timeout(CONNECT_TIMEOUT, attempt)
+    .await
+    .ok()
+    .flatten()
+}
+
 /// 自定义监控：从本机发一次 GET，只读前 64KB 找关键字，不跟随跳转。
 pub async fn http(
   job: wharf_api_types::agent::HttpCheck,

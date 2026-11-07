@@ -529,6 +529,8 @@ export interface NetworkView {
     checked_at: string;
     stale?: boolean;
   }[];
+  links?: { from: string; to: string; ms?: number; loss: number; at: string }[];
+  relays?: { from: string; to: string; via: string; direct_loss: number; via_loss: number }[];
 }
 
 export interface SecretView {

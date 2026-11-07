@@ -1,6 +1,7 @@
 //! 打点：一张通用的表，每个点是（名称，对象，时间，数值）。
 //! - `host.*`：服务器资源，对象是服务器名，agent 每分钟上报；
 //! - `svc.*`：服务（compose project）的容器资源，对象是 project 名；
+//! - `link.*`：机器之间的链路质量，对象是 `<from>><to>`，见 quality.rs；
 //! - 其余是事件：部署、备份的耗时和结果，自动重启，对象是服务名。
 //!
 //! 资源点 24 小时后合成 10 分钟一个，保留 7 天；事件保留 90 天。
@@ -30,7 +31,8 @@ const KEEP_RESOURCE_MS: i64 = 7 * DAY_MS;
 const KEEP_EVENT_MS: i64 = 90 * DAY_MS;
 
 /// 合成和按时间段平均的只有资源点，事件点原样保留。
-const RESOURCE: &str = "(name LIKE 'host.%' OR name LIKE 'svc.%')";
+const RESOURCE: &str =
+  "(name LIKE 'host.%' OR name LIKE 'svc.%' OR name LIKE 'link.%')";
 
 fn insert(
   c: &Connection,
@@ -48,6 +50,38 @@ fn insert(
       .map_err(sql_err)?;
   }
   Ok(())
+}
+
+/// 一轮链路质量：`link.loss`（丢包率），成功过才记 `link.ms`。
+pub async fn record_links(
+  state: &AppState,
+  links: &[wharf_api_types::view::LinkView],
+) {
+  let rows: Vec<(String, String, f64)> = links
+    .iter()
+    .flat_map(|l| {
+      let subject = format!("{}>{}", l.from, l.to);
+      let mut v =
+        vec![("link.loss".to_string(), subject.clone(), l.loss)];
+      if let Some(ms) = l.ms {
+        v.push(("link.ms".to_string(), subject, ms));
+      }
+      v
+    })
+    .collect();
+  let result = state
+    .db
+    .call(move |c| {
+      let points: Vec<(&str, &str, f64)> = rows
+        .iter()
+        .map(|(n, s, v)| (n.as_str(), s.as_str(), *v))
+        .collect();
+      insert(c, now_ms(), &points)
+    })
+    .await;
+  if let Err(e) = result {
+    tracing::warn!("记录链路质量失败：{}", e.message);
+  }
 }
 
 /// agent 上报的资源采样。

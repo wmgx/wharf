@@ -102,5 +102,13 @@ async fn view(
         .unwrap_or_default(),
     })
     .collect();
-  Ok(NetworkView { servers, reach })
+  let names: Vec<String> =
+    snap.world.servers.keys().cloned().collect();
+  let (links, relays) = crate::quality::view(&names);
+  Ok(NetworkView {
+    servers,
+    reach,
+    links,
+    relays,
+  })
 }

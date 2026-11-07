@@ -20,6 +20,37 @@ pub struct NetworkView {
   pub servers: Vec<NetworkServer>,
   /// 探测过的方向，没探测过的不在里面。
   pub reach: Vec<ReachView>,
+  /// 最近一轮链路质量（每 5 分钟测一次，控制面重启后要等下一轮）。
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub links: Vec<LinkView>,
+  /// 直连差、经第三台中转两段都好的方向。
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub relays: Vec<RelayHint>,
+}
+
+/// 一个方向的链路质量。历史曲线：`GET /api/metrics?subject=<from>><to>&names=link.ms,link.loss`。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct LinkView {
+  pub from: String,
+  pub to: String,
+  /// TCP 建连平均耗时（毫秒），全部失败时为空。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub ms: Option<f64>,
+  /// 丢包率，0 到 100。
+  pub loss: f64,
+  pub at: DateTime<Utc>,
+}
+
+/// 中转建议：`from` → `via` → `to` 比直连好。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RelayHint {
+  pub from: String,
+  pub to: String,
+  pub via: String,
+  /// 直连丢包率。
+  pub direct_loss: f64,
+  /// 经中转两段合计的丢包率。
+  pub via_loss: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

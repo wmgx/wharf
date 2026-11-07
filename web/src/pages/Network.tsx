@@ -70,6 +70,7 @@ export function NetworkPanel() {
 
   const reach = new Map(data?.reach.map((r) => [`${r.from}\u0000${r.to}`, r]));
   const names = data?.servers.map((s) => s.name) ?? [];
+  const links = new Map(data?.links?.map((l) => [`${l.from}\u0000${l.to}`, l]));
 
   return (
     <>
@@ -136,6 +137,7 @@ export function NetworkPanel() {
                       {names.map((to) => (
                         <TableCell key={to} className="text-center">
                           <Cell self={from === to} r={reach.get(`${from}\u0000${to}`)} from={from} to={to} />
+                          <Quality l={links.get(`${from}\u0000${to}`)} />
                         </TableCell>
                       ))}
                     </TableRow>
@@ -143,6 +145,12 @@ export function NetworkPanel() {
                 </TableBody>
               </Table>
             </div>
+            <p className="text-xs text-muted-foreground">格子里是每 5 分钟测一次的延迟和丢包。</p>
+            {data.relays?.map((h) => (
+              <p key={`${h.from}-${h.to}`} className="text-sm text-warning">
+                {h.from} → {h.to} 直连丢包 {h.direct_loss.toFixed(0)}%，经 {h.via} 中转约 {h.via_loss.toFixed(0)}%
+              </p>
+            ))}
           </div>
         </div>
       )}
@@ -172,5 +180,16 @@ function Cell({ self, r, from, to }: { self: boolean; r?: NetworkView["reach"][n
     <span title={`不通：${from} 不能迁移到 ${to}，也不能备份到 ${to} · ${ago(r.checked_at)}`} className="inline-flex text-destructive">
       <XIcon className="size-4" />
     </span>
+  );
+}
+
+function Quality({ l }: { l?: NonNullable<NetworkView["links"]>[number] }) {
+  if (!l) return null;
+  const tone = l.loss >= 20 ? "text-destructive" : l.loss > 0 ? "text-warning" : "text-muted-foreground";
+  return (
+    <div className={`text-xs tabular-nums ${tone}`} title={`${ago(l.at)}测量`}>
+      {l.ms === undefined ? "-" : `${l.ms.toFixed(0)}ms`}
+      {l.loss > 0 && ` · ${l.loss.toFixed(0)}%`}
+    </div>
   );
 }
