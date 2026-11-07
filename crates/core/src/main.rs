@@ -28,6 +28,7 @@ mod edge_api;
 mod edge_plan;
 mod edge_sync;
 mod egress;
+mod failover;
 mod files_api;
 mod heal;
 mod host_dir;
@@ -171,6 +172,7 @@ async fn main() -> anyhow::Result<()> {
   monitor::spawn(state.clone());
   quality::spawn(state.clone());
   baseline::spawn(state.clone());
+  failover::spawn(state.clone());
   tasks::spawn(state.clone());
   views::spawn_live(state.clone());
 

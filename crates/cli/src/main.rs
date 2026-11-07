@@ -630,6 +630,9 @@ pub enum RouteCmd {
     /// 网关，不填用默认网关。
     #[arg(long)]
     gateway: Option<String>,
+    /// 备用入口：另一台机器上的网关。主网关那台连续离线 5 分钟，DNS 自动切到它，恢复后切回。
+    #[arg(long)]
+    backup_gateway: Option<String>,
     /// 登录保护：访问时要输入账号密码。账号用 `wharf secret set BASIC_AUTH` 设置。
     #[arg(long)]
     auth: bool,

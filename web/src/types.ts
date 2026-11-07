@@ -60,6 +60,7 @@ export interface ServerView {
   private_addr?: PrivateAddr;
   rtt_ms?: number;
   agent_outdated?: boolean;
+  baseline_drift?: string[];
 }
 
 export interface BuildSource {
@@ -247,6 +248,7 @@ export interface RouteView {
   upstream?: string;
   url: string;
   probe?: ProbeView;
+  on_backup?: boolean;
 }
 
 /** 域名探测（控制面每 5 分钟一次）。 */

@@ -123,10 +123,13 @@ fn routes_by_gateway(
   world: &World,
 ) -> impl Iterator<Item = (&GatewaySpec, &RouteSpec, Vec<(String, String)>)>
 {
-  world.routes.values().filter_map(move |r| {
-    let gw = world.route_gateway(&r.spec)?;
-    let spec = &world.gateways.get(gw)?.spec;
-    Some((spec, &r.spec, route_targets(world, &r.spec)))
+  world.routes.values().flat_map(move |r| {
+    world
+      .route_gateways(&r.spec)
+      .into_iter()
+      .filter_map(|gw| world.gateways.get(gw))
+      .map(|g| (&g.spec, &r.spec, route_targets(world, &r.spec)))
+      .collect::<Vec<_>>()
   })
 }
 

@@ -476,6 +476,10 @@ pub struct RouteSpec {
   /// 入口网关。不填则用默认网关；边缘应用的域名不经过网关，不填。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub gateway: Option<String>,
+  /// 备用入口：这个网关也配好这个域名；主网关所在机器连续离线 5 分钟，
+  /// DNS 自动切到它，主网关恢复后切回。caddy 备用入口在切过去后才申请证书。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub backup_gateway: Option<String>,
   /// 登录保护（P3）。
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub auth: bool,

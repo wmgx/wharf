@@ -1841,6 +1841,7 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
       upstream,
       port,
       gateway,
+      backup_gateway,
       auth,
       paths,
       tunnel,
@@ -1857,6 +1858,7 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
         upstream,
         port,
         gateway,
+        backup_gateway,
         auth,
         paths: paths
           .iter()
