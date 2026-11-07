@@ -16,7 +16,7 @@ use wharf_api_types::{
 };
 
 use crate::{
-  api::{ApiResult, AppError},
+  api::ApiResult,
   auth::Auth,
   db::{Db, now_ms, sql_err, to_time},
   snapshot,
@@ -83,6 +83,16 @@ pub async fn exec(
 ) -> ApiResult<HostExecResponse> {
   auth.require(Perm::Exec)?;
   let job = req.job()?;
+  Ok(Json(run_host(state, &auth.name, name, job).await?))
+}
+
+/// 在宿主机执行一次命令：检查开关、记审计。页面、CLI 和定时任务共用。
+pub async fn run_host(
+  state: Arc<AppState>,
+  actor: &str,
+  name: String,
+  job: HostExecJob,
+) -> Result<HostExecResponse, ApiError> {
   let snap = snapshot::load(&state.db).await?;
   let server = snap
     .world
@@ -90,7 +100,7 @@ pub async fn exec(
     .get(&name)
     .ok_or_else(|| server_not_found(&name))?;
   let audit_id =
-    start(&state.db, &auth.name, &name, "exec", Some(&job.command))
+    start(&state.db, actor, &name, "exec", Some(&job.command))
       .await?;
   if !server.settings.host_exec {
     let error = ApiError::new(
@@ -98,7 +108,7 @@ pub async fn exec(
       "命令执行未开启，请到“服务器详情 → 设置”开启“命令执行”。",
     );
     finish(&state.db, audit_id, End::error(&error)).await;
-    return Err(error.into());
+    return Err(error);
   }
 
   let cancel = CancellationToken::new();
@@ -157,9 +167,7 @@ pub async fn exec(
       }
     }
   });
-  Ok(Json(task.await.map_err(|e| {
-    AppError(ApiError::internal(e.to_string()))
-  })??))
+  task.await.map_err(|e| ApiError::internal(e.to_string()))?
 }
 
 #[derive(Deserialize)]

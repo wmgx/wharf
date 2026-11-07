@@ -15,6 +15,7 @@ mod fleet;
 mod gh;
 mod pack;
 mod print;
+mod task;
 
 #[derive(Parser)]
 #[command(
@@ -73,6 +74,10 @@ pub enum Command {
   },
   /// 升级 Wharf：控制面换成最新镜像，再把各服务器的 agent 升到同一版本。
   Upgrade,
+  /// 通知：发一条测试消息。渠道用密钥配置，飞书群机器人设 NOTIFY_FEISHU_WEBHOOK
+  /// （开了签名校验再设 NOTIFY_FEISHU_SECRET）。
+  #[command(subcommand)]
+  Notify(NotifyCmd),
   /// 只读诊断：沿每个域名逐层检查（解析 → HTTPS → 网关 → 网关连上游 → 容器）。
   /// 有不通的项时退出码为 1。
   Doctor {
@@ -139,6 +144,10 @@ pub enum Command {
   /// 备份：服务的 /srv/<服务>/ 每天用 restic 备份到另一台服务器。
   #[command(subcommand)]
   Backup(BackupCmd),
+  /// 定时任务：按 cron（北京时间）在服务容器里、一次性容器里或宿主机上执行命令。
+  /// 改动直接生效，不走计划。
+  #[command(subcommand)]
+  Task(task::TaskCmd),
   /// 生成计划。不带参数时只检查漂移；`-f` 时以意图文件为完整期望状态。
   Plan {
     #[arg(short = 'f', long)]
@@ -710,4 +719,10 @@ async fn main() {
     }
   };
   std::process::exit(code);
+}
+
+#[derive(Subcommand)]
+pub enum NotifyCmd {
+  /// 给所有已配置的渠道发一条测试消息。
+  Test,
 }

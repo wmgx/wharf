@@ -479,6 +479,7 @@ pub async fn status(
       problems.push(format!("边缘应用 {} 同步失败：{e}", app.name));
     }
   }
+  problems.extend(crate::tasks::problems(state).await);
   let mut edge_unmanaged: Vec<EdgeProjectView> =
     snap.edge_accounts.values().flatten().cloned().collect();
   crate::edge_sync::mark_managed(&snap, &mut edge_unmanaged);
