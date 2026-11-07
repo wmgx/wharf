@@ -167,6 +167,12 @@ pub struct ServiceView {
   /// 自定义监控的最近一次结果；没配监控或还没检查过时为空。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub monitor: Option<MonitorView>,
+  /// 用 `[[@服务]]` 引用了哪些服务。
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub uses: Vec<String>,
+  /// 被哪些服务引用。
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub used_by: Vec<String>,
 }
 
 /// 服务的分层状态：期望、已应用、实际、健康、执行，加上按优先级挑出的一句话。

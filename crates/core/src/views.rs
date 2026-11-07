@@ -313,6 +313,16 @@ pub fn service_view(
     import: import_record(snap, name),
     status,
     monitor: crate::monitor::last(name),
+    uses: crate::refs::uses(&row.spec),
+    used_by: snap
+      .world
+      .services
+      .iter()
+      .filter(|(_, r)| {
+        crate::refs::uses(&r.spec).iter().any(|u| u == name)
+      })
+      .map(|(n, _)| n.clone())
+      .collect(),
   })
 }
 
