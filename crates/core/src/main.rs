@@ -38,6 +38,7 @@ mod logs_stream;
 mod metrics;
 mod migrate;
 mod network;
+mod notify;
 mod pins;
 mod planner;
 mod prune;

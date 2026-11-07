@@ -231,6 +231,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     )
     .route("/api/edge/{name}/accept", post(crate::edge_api::accept))
     .route("/api/secrets", get(list_secrets))
+    .route("/api/notify/test", post(crate::notify::test))
     .route(
       "/api/secrets/{name}",
       put(set_secret).delete(remove_secret),
