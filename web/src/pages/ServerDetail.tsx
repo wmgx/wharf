@@ -327,6 +327,35 @@ function SystemInfo({ info, apt }: { info: HostInfo; apt: ReactNode }) {
           </TableBody>
         </Table>
       </div>
+      {!!info.ssh_logins?.length && (
+        <>
+          <SectionTitle>SSH 登录</SectionTitle>
+          <div className="rounded-xl border bg-card">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>时间</TableHead>
+                  <TableHead>用户</TableHead>
+                  <TableHead>来源</TableHead>
+                  <TableHead>方式</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {info.ssh_logins.map((l, i) => (
+                  <TableRow key={i}>
+                    <TableCell>
+                      <span title={new Date(l.at).toLocaleString("zh-CN")}>{ago(l.at)}</span>
+                    </TableCell>
+                    <TableCell className="font-mono text-xs">{l.user}</TableCell>
+                    <TableCell className="font-mono text-xs">{l.from}</TableCell>
+                    <TableCell className="text-xs text-muted-foreground">{l.method}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        </>
+      )}
     </>
   );
 }

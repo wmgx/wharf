@@ -543,6 +543,14 @@ export interface HostInfo {
   container_logs?: number;
   journal?: number;
   var_log?: number;
+  ssh_logins?: SshLogin[];
+}
+
+export interface SshLogin {
+  at: string;
+  user: string;
+  from: string;
+  method: string;
 }
 
 export interface FileEntry {

@@ -373,6 +373,22 @@ pub fn host(v: &wharf_api_types::agent::HostInfo) {
     opt(v.journal),
     opt(v.var_log)
   );
+  if !v.ssh_logins.is_empty() {
+    println!("SSH 登录（近 30 天 sshd）");
+    for l in &v.ssh_logins {
+      println!(
+        "  {}  {:<10} {:<16} {}",
+        l.at
+          .with_timezone(
+            &chrono::FixedOffset::east_opt(8 * 3600).unwrap()
+          )
+          .format("%m-%d %H:%M"),
+        l.user,
+        l.from,
+        l.method
+      );
+    }
+  }
 }
 
 /// 每条序列一行：最新、平均、最大。
