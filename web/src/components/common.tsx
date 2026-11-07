@@ -13,7 +13,10 @@ export type Tone = "ok" | "warn" | "bad" | "idle";
 /** 现状 → 颜色和文字。 */
 /** 服务状态：控制面按优先级挑好的一句话。 */
 export function serviceTone(svc?: Pick<ServiceView, "status">): { tone: Tone; text: string } {
-  return svc?.status ? { tone: svc.status.tone, text: svc.status.summary } : { tone: "idle", text: "未知" };
+  const s = svc?.status;
+  if (!s) return { tone: "idle", text: "未知" };
+  const seen = (s.actual === "offline" || s.actual === "unknown") && s.observed_at ? ` · ${ago(s.observed_at)}看到` : "";
+  return { tone: s.tone, text: s.summary + seen };
 }
 
 export function liveTone(live?: LiveState | null): { tone: Tone; text: string } {

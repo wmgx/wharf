@@ -432,6 +432,7 @@ export interface DeploymentView {
   spec?: ServiceSpec;
   hash: string;
   created_at: string;
+  commit?: string;
 }
 
 export interface RollbackTarget {
@@ -542,6 +543,14 @@ export interface HostInfo {
   container_logs?: number;
   journal?: number;
   var_log?: number;
+  ssh_logins?: SshLogin[];
+}
+
+export interface SshLogin {
+  at: string;
+  user: string;
+  from: string;
+  method: string;
 }
 
 export interface FileEntry {
@@ -596,4 +605,5 @@ export interface ServiceStatus {
   tone: "ok" | "warn" | "bad" | "idle";
   summary: string;
   error?: string;
+  observed_at?: string;
 }
