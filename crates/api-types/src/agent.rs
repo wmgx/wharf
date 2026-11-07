@@ -388,6 +388,20 @@ pub struct HostInfo {
   /// `/var/log` 合计字节数（含 journal）。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub var_log: Option<u64>,
+  /// 近 30 天 sshd 的成功登录，最多 20 条，新的在前；读不到 journal 时为空。
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub ssh_logins: Vec<SshLogin>,
+}
+
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct SshLogin {
+  pub at: chrono::DateTime<chrono::Utc>,
+  pub user: String,
+  pub from: String,
+  /// 认证方式，例如 publickey、password。
+  pub method: String,
 }
 
 #[derive(
