@@ -26,8 +26,8 @@ use wharf_api_types::{
 
 use crate::{
   AccountCmd, ApplyFlags, BackupCmd, BuildArgs, Cli, Command,
-  GatewayCmd, RouteCmd, RunCmd, SecretCmd, ServerCmd, ServiceCmd,
-  TokenCmd,
+  GatewayCmd, NotifyCmd, RouteCmd, RunCmd, SecretCmd, ServerCmd,
+  ServiceCmd, TokenCmd,
   client::{CliError, CliResult, Client, Config, read_secret, seg},
   fleet, print,
 };
@@ -119,6 +119,11 @@ async fn dispatch(
       shell_log(c, server, limit, j).await
     }
     Command::Upgrade => upgrade(c, j).await,
+    Command::Notify(NotifyCmd::Test) => {
+      let r: Value = c.post("/api/notify/test", &json!({})).await?;
+      out(j, &r, |_| println!("已发送测试消息"));
+      Ok(())
+    }
     Command::Metrics {
       subject,
       names,
@@ -169,6 +174,7 @@ async fn dispatch(
     Command::Account(cmd) => account(c, cmd, j).await,
     Command::Secret(cmd) => secret(c, cmd, j).await,
     Command::Backup(cmd) => backup(c, cmd, j).await,
+    Command::Task(cmd) => crate::task::task(c, cmd, j).await,
     Command::Edge(cmd) => crate::edge::edge(c, cmd, j).await,
     Command::Plan { file, apply } => {
       let req = match file {

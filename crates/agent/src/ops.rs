@@ -211,6 +211,9 @@ impl Ops {
       AgentOp::HostExec(job) => {
         to_value(self.host_shell.exec(job, ctx).await)
       }
+      AgentOp::TaskRun(job) => {
+        to_value(crate::task::run(&self.docker, &job, ctx).await?)
+      }
       // 要接收输入，由连接那边直接处理。
       AgentOp::Terminal(_) | AgentOp::HostTerminal { .. } => {
         Err(ApiError::internal("终端请求没有输入通道"))

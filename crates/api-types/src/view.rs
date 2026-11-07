@@ -895,3 +895,95 @@ pub struct PendingCheck {
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub error: Option<String>,
 }
+
+/// 定时任务。名字全局唯一。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TaskSpec {
+  pub server: String,
+  /// 5 段 cron（分 时 日 月 周），北京时间。
+  pub schedule: String,
+  #[serde(flatten)]
+  pub how: TaskKind,
+  /// 超时秒数，默认 600；宿主机命令最长 600，其他最长 6 小时。
+  #[serde(default = "default_task_timeout")]
+  pub timeout_secs: u64,
+  #[serde(default = "yes")]
+  pub enabled: bool,
+  /// 失败和恢复时发通知。
+  #[serde(default = "yes")]
+  pub notify: bool,
+}
+
+fn default_task_timeout() -> u64 {
+  600
+}
+
+fn yes() -> bool {
+  true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TaskKind {
+  /// 在服务的容器里执行命令。
+  Exec {
+    service: String,
+    /// compose 服务名，服务只有一个容器时不用填。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    container: Option<String>,
+    command: String,
+  },
+  /// 一次性容器，跑完删除。
+  Container {
+    image: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    command: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    env: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    mounts: Vec<String>,
+  },
+  /// 宿主机命令，要服务器开了"命令执行"。
+  Host { command: String },
+}
+
+#[derive(
+  Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskStatus {
+  Running,
+  Succeeded,
+  Failed,
+  TimedOut,
+  /// 上一次还没跑完。
+  Skipped,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TaskRunView {
+  pub id: i64,
+  pub task: String,
+  pub status: TaskStatus,
+  /// 定时触发还是手动（`manual`）。
+  pub trigger: String,
+  pub started_at: DateTime<Utc>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub ended_at: Option<DateTime<Utc>>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub exit_code: Option<i32>,
+  /// 输出的最后 16 KB，密钥值已换成 `***`；出错时是错误信息。
+  pub output: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TaskView {
+  pub name: String,
+  pub spec: TaskSpec,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub last: Option<TaskRunView>,
+  /// 下次运行时间；停用时没有。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub next_at: Option<DateTime<Utc>>,
+  pub updated_at: DateTime<Utc>,
+}
