@@ -40,6 +40,7 @@ mod login;
 mod logs_stream;
 mod metrics;
 mod migrate;
+mod monitor;
 mod network;
 mod notify;
 mod pins;
@@ -164,6 +165,7 @@ async fn main() -> anyhow::Result<()> {
   doctor::spawn(state.clone());
   updates::spawn(state.clone());
   alerts::spawn(state.clone());
+  monitor::spawn(state.clone());
   tasks::spawn(state.clone());
   views::spawn_live(state.clone());
 

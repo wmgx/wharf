@@ -284,6 +284,32 @@ pub struct ServiceSpec {
   /// 停止：容器保留但不运行，部署后也保持停止。不影响 compose，也就不会重建容器。
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub stopped: bool,
+  /// 自定义监控：服务所在机器的 agent 每分钟从本机请求一次，连续 3 次不正常推送。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub monitor: Option<MonitorSpec>,
+}
+
+/// 自定义监控：`http://127.0.0.1:<宿主机端口><path>`。
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct MonitorSpec {
+  /// 请求路径，默认 `/`。
+  #[serde(default = "default_monitor_path")]
+  pub path: String,
+  /// 端口名，默认第一个端口。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub port: Option<String>,
+  /// 期望的状态码；不写时 2xx、3xx 都算正常。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub expect: Option<u16>,
+  /// 响应里必须包含的文字（只看前 64KB）。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub keyword: Option<String>,
+}
+
+fn default_monitor_path() -> String {
+  "/".into()
 }
 
 /// 导入前容器是怎么跑的。和服务同名的 compose 项目不需要接管，Wharf 直接沿用。
@@ -571,6 +597,7 @@ pub struct Fleet {
   Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
 )]
 #[serde(tag = "op", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)] // 一次计划只有几个，装箱改动面太大
 pub enum Change {
   /// 服务器必须已经 `wharf server add` 过。
   UpdateServer {
