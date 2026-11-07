@@ -92,7 +92,39 @@ pub async fn load(db: &Db) -> Result<Snapshot, ApiError> {
   let snap = load_inner(db).await?;
   *SECRETS.write().unwrap_or_else(|e| e.into_inner()) =
     snap.secrets.clone();
+  let exits = snap
+    .world
+    .servers
+    .iter()
+    .filter(|(_, r)| r.settings.egress)
+    .filter_map(|(n, _)| {
+      crate::egress::resolve(n, &snap)
+        .ok()
+        .map(|e| (n.clone(), e.url))
+    })
+    .collect();
+  *EXITS.write().unwrap_or_else(|e| e.into_inner()) = exits;
+  let api = db
+    .call(|c| crate::db::setting(c, crate::egress::API_PROXY))
+    .await?;
+  wharf_providers::http::set_proxy(proxy_url(api.as_deref()));
   Ok(snap)
+}
+
+/// 最近一次加载时各出口的地址（带口令），[pull_policy] 用它解析写成服务器名的 `git_proxy`。
+static EXITS: std::sync::RwLock<BTreeMap<String, String>> =
+  std::sync::RwLock::new(BTreeMap::new());
+
+/// 代理设置的实际地址：服务器名查出口，查不到（没开出口）时不用代理。
+pub fn proxy_url(value: Option<&str>) -> Option<String> {
+  let v = value?.trim();
+  if v.is_empty() {
+    return None;
+  }
+  if !crate::egress::is_server(v) {
+    return Some(v.to_string());
+  }
+  EXITS.read().ok()?.get(v).cloned()
 }
 
 async fn load_inner(db: &Db) -> Result<Snapshot, ApiError> {
@@ -168,7 +200,7 @@ pub fn pull_policy(server: &ServerRow) -> PullPolicy {
       .collect(),
     mirrors_only: server.settings.mirrors_only,
     attempt_timeout_secs: PULL_ATTEMPT_SECS,
-    git_proxy: server.settings.git_proxy.clone(),
+    git_proxy: proxy_url(server.settings.git_proxy.as_deref()),
     github_mirror: server
       .settings
       .github_mirror

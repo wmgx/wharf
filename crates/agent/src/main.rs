@@ -17,6 +17,7 @@ mod build;
 mod conn;
 mod docker;
 mod edge;
+mod egress;
 mod exec;
 mod files;
 mod host;
@@ -174,6 +175,7 @@ async fn main() -> anyhow::Result<()> {
   };
 
   let key = identity::load_or_create_key(&cli.data_dir)?;
+  egress::restore(&cli.data_dir);
   tokio::spawn(probe::serve(joined.server.clone(), cli.probe_port));
   let docker = docker::Docker {
     bin: cli.docker,

@@ -1,19 +1,41 @@
 import { useSearchParams } from "react-router-dom";
 import { useActions } from "@/components/actions";
 import { ArrowUpCircleIcon, LockIcon } from "lucide-react";
-import { CloudIcon, KeyRoundIcon, PlusIcon, RefreshCwIcon, Trash2Icon } from "lucide-react";
+import {
+  CloudIcon,
+  KeyRoundIcon,
+  PlusIcon,
+  RefreshCwIcon,
+  Trash2Icon,
+} from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { api, usePoll } from "@/api";
-import { ago, CardsSkeleton, Empty, ErrorNote, Notice, PageHeader, SectionTitle } from "@/components/common";
+import {
+  ago,
+  CardsSkeleton,
+  Empty,
+  ErrorNote,
+  Notice,
+  PageHeader,
+  SectionTitle,
+} from "@/components/common";
 import { Field, toName } from "@/components/fields";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import type { AccountView } from "@/types";
 import { CoreBackup } from "./core-backup";
 import { EdgeImport } from "./edge-import";
+import { Egress } from "./egress";
 import { Notify } from "./notify";
 import { Secrets } from "./secrets";
 import { Tokens } from "./tokens";
@@ -21,7 +43,10 @@ import { Tokens } from "./tokens";
 /** 设置：厂商账号、密钥、CLI 与 AI 接入、控制面备份、登录保护账号、升级。 */
 export function Settings() {
   const actions = useActions();
-  const { data, error, refresh } = usePoll<AccountView[]>("/api/accounts", 30000);
+  const { data, error, refresh } = usePoll<AccountView[]>(
+    "/api/accounts",
+    30000,
+  );
   const [params, setParams] = useSearchParams();
   const [addingNow, setAdding] = useState(false);
   const adding = addingNow || params.get("add") === "account";
@@ -32,7 +57,10 @@ export function Settings() {
   const rediscover = async (name: string) => {
     setBusy(name);
     try {
-      const a = await api.post<AccountView>(`/api/accounts/${encodeURIComponent(name)}/discover`, {});
+      const a = await api.post<AccountView>(
+        `/api/accounts/${encodeURIComponent(name)}/discover`,
+        {},
+      );
       toast.success(`${name}：发现 ${a.zones.length} 个域名`);
       refresh();
     } catch (e) {
@@ -85,7 +113,10 @@ export function Settings() {
       ) : (
         <div className="grid grid-cols-[repeat(auto-fill,minmax(300px,1fr))] gap-3">
           {data.map((a) => (
-            <div key={a.name} className="flex flex-col gap-3 rounded-xl border bg-card p-4 shadow-xs">
+            <div
+              key={a.name}
+              className="flex flex-col gap-3 rounded-xl border bg-card p-4 shadow-xs"
+            >
               <div className="flex items-center gap-3">
                 <span className="grid size-9 place-items-center rounded-lg border bg-muted text-muted-foreground">
                   <KeyRoundIcon className="size-4" />
@@ -105,7 +136,9 @@ export function Settings() {
                     </Badge>
                   ))
                 ) : (
-                  <span className="text-sm text-muted-foreground">没有发现域名</span>
+                  <span className="text-sm text-muted-foreground">
+                    没有发现域名
+                  </span>
                 )}
               </div>
               {a.warnings?.map((w) => (
@@ -114,18 +147,38 @@ export function Settings() {
                 </Notice>
               ))}
               <div className="mt-auto flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
-                <span className="whitespace-nowrap">更新于 {ago(a.updated_at)}</span>
+                <span className="whitespace-nowrap">
+                  更新于 {ago(a.updated_at)}
+                </span>
                 {a.kind === "cloudflare" && (
-                  <Button variant="ghost" size="xs" className="ml-auto" onClick={() => setImporting(a.name)}>
+                  <Button
+                    variant="ghost"
+                    size="xs"
+                    className="ml-auto"
+                    onClick={() => setImporting(a.name)}
+                  >
                     <CloudIcon />
                     Workers / Pages
                   </Button>
                 )}
-                <Button variant="ghost" size="xs" className={a.kind === "cloudflare" ? undefined : "ml-auto"} disabled={busy === a.name} onClick={() => rediscover(a.name)}>
-                  <RefreshCwIcon className={busy === a.name ? "animate-spin" : undefined} />
+                <Button
+                  variant="ghost"
+                  size="xs"
+                  className={a.kind === "cloudflare" ? undefined : "ml-auto"}
+                  disabled={busy === a.name}
+                  onClick={() => rediscover(a.name)}
+                >
+                  <RefreshCwIcon
+                    className={busy === a.name ? "animate-spin" : undefined}
+                  />
                   重新发现
                 </Button>
-                <Button variant="ghost" size="xs" className="text-destructive" onClick={() => setRemoving(a.name)}>
+                <Button
+                  variant="ghost"
+                  size="xs"
+                  className="text-destructive"
+                  onClick={() => setRemoving(a.name)}
+                >
                   <Trash2Icon />
                   删除
                 </Button>
@@ -147,8 +200,13 @@ export function Settings() {
         <div>
           <Notify />
         </div>
+        <div>
+          <Egress />
+        </div>
       </div>
-      {importing && <EdgeImport account={importing} onClose={() => setImporting(null)} />}
+      {importing && (
+        <EdgeImport account={importing} onClose={() => setImporting(null)} />
+      )}
       {adding && (
         <AddAccount
           taken={(data ?? []).map((a) => a.name)}
@@ -173,7 +231,10 @@ export function Settings() {
             <Button variant="ghost" onClick={() => setRemoving(null)}>
               取消
             </Button>
-            <Button variant="destructive" onClick={() => removing && remove(removing)}>
+            <Button
+              variant="destructive"
+              onClick={() => removing && remove(removing)}
+            >
               删除
             </Button>
           </DialogFooter>
@@ -184,7 +245,15 @@ export function Settings() {
 }
 
 /** 只在打开时挂载，关掉就丢弃输入的 token。 */
-function AddAccount({ taken, onClose, onAdded }: { taken: string[]; onClose: () => void; onAdded: () => void }) {
+function AddAccount({
+  taken,
+  onClose,
+  onAdded,
+}: {
+  taken: string[];
+  onClose: () => void;
+  onAdded: () => void;
+}) {
   const [name, setName] = useState(() => (taken.includes("cf") ? "" : "cf"));
   const [token, setToken] = useState("");
   const [saving, setSaving] = useState(false);
@@ -194,9 +263,17 @@ function AddAccount({ taken, onClose, onAdded }: { taken: string[]; onClose: () 
     setSaving(true);
     setError(null);
     try {
-      const a = await api.post<AccountView>("/api/accounts", { name, kind: "cloudflare", token: token.trim() });
+      const a = await api.post<AccountView>("/api/accounts", {
+        name,
+        kind: "cloudflare",
+        token: token.trim(),
+      });
       setToken("");
-      toast.success(`已添加 ${a.name}`, { description: a.zones.length ? `发现域名：${a.zones.join("、")}` : "没有发现域名，检查 token 权限" });
+      toast.success(`已添加 ${a.name}`, {
+        description: a.zones.length
+          ? `发现域名：${a.zones.join("、")}`
+          : "没有发现域名，检查 token 权限",
+      });
       onAdded();
     } catch (e) {
       setError(e);
@@ -213,18 +290,34 @@ function AddAccount({ taken, onClose, onAdded }: { taken: string[]; onClose: () 
         </DialogHeader>
         <div className="grid gap-4">
           <Field label="名称" htmlFor="acc-name">
-            <Input id="acc-name" value={name} onChange={(e) => setName(toName(e.target.value))} />
+            <Input
+              id="acc-name"
+              value={name}
+              onChange={(e) => setName(toName(e.target.value))}
+            />
           </Field>
           <Field
             label="API token"
             htmlFor="acc-token"
             help={
-              <>权限：Zone.DNS 编辑、Zone 读取；可选 Cloudflare Tunnel、Workers Scripts、Cloudflare Pages、Workers Routes 编辑</>
+              <>
+                权限：Zone.DNS 编辑、Zone 读取；可选 Cloudflare Tunnel、Workers
+                Scripts、Cloudflare Pages、Workers Routes 编辑
+              </>
             }
           >
-            <Input id="acc-token" type="password" autoComplete="off" value={token} onChange={(e) => setToken(e.target.value)} className="font-mono" />
+            <Input
+              id="acc-token"
+              type="password"
+              autoComplete="off"
+              value={token}
+              onChange={(e) => setToken(e.target.value)}
+              className="font-mono"
+            />
           </Field>
-          {name && taken.includes(name) && <Notice kind="warn">会替换同名账号的 token</Notice>}
+          {name && taken.includes(name) && (
+            <Notice kind="warn">会替换同名账号的 token</Notice>
+          )}
           <ErrorNote error={error} />
         </div>
         <DialogFooter>

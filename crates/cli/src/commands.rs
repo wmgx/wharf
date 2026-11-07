@@ -26,8 +26,8 @@ use wharf_api_types::{
 
 use crate::{
   AccountCmd, ApplyFlags, BackupCmd, BuildArgs, Cli, Command,
-  GatewayCmd, NotifyCmd, RouteCmd, RunCmd, SecretCmd, ServerCmd,
-  ServiceCmd, TokenCmd,
+  EgressCmd, GatewayCmd, NotifyCmd, RouteCmd, RunCmd, SecretCmd,
+  ServerCmd, ServiceCmd, TokenCmd,
   client::{CliError, CliResult, Client, Config, read_secret, seg},
   fleet, print,
 };
@@ -119,6 +119,26 @@ async fn dispatch(
       shell_log(c, server, limit, j).await
     }
     Command::Upgrade => upgrade(c, j).await,
+    Command::Egress { cmd } => {
+      let v: Value = match cmd {
+        Some(EgressCmd::Api { value }) => {
+          c.put("/api/egress", &json!({ "api_proxy": value })).await?
+        }
+        None => c.get("/api/egress").await?,
+      };
+      out(j, &v, |v| {
+        let p = v["api_proxy"].as_str().unwrap_or("");
+        println!(
+          "调厂商 API：{}",
+          match p {
+            "" => "直连".to_string(),
+            p if !p.contains("://") => format!("经 {p} 出口"),
+            p => p.to_string(),
+          }
+        );
+      });
+      Ok(())
+    }
     Command::Notify(NotifyCmd::Test) => {
       let r: Value = c.post("/api/notify/test", &json!({})).await?;
       out(j, &r, |_| println!("已发送测试消息"));
@@ -674,6 +694,7 @@ async fn server(
       clear_build_env,
       git_proxy,
       pull_proxy,
+      egress,
       github_mirror,
       host_terminal,
       host_exec,
@@ -742,10 +763,10 @@ async fn server(
       }
       if let Some(p) = git_proxy {
         let p = p.trim();
-        if !p.is_empty() && !p.starts_with("http://") {
+        if p.contains("://") && !p.starts_with("http://") {
           return Err(
             ApiError::invalid(format!(
-              "--git-proxy {p} 要以 http:// 开头"
+              "--git-proxy {p} 要写服务器名或 http:// 地址"
             ))
             .into(),
           );
@@ -754,15 +775,18 @@ async fn server(
       }
       if let Some(p) = pull_proxy {
         let p = p.trim();
-        if !p.is_empty() && !p.starts_with("http://") {
+        if p.contains("://") && !p.starts_with("http://") {
           return Err(
             ApiError::invalid(format!(
-              "--pull-proxy {p} 要以 http:// 开头"
+              "--pull-proxy {p} 要写服务器名或 http:// 地址"
             ))
             .into(),
           );
         }
         settings.pull_proxy = (!p.is_empty()).then(|| p.to_string());
+      }
+      if let Some(e) = egress {
+        settings.egress = e;
       }
       if let Some(m) = github_mirror {
         let m = m.trim().trim_end_matches('/');

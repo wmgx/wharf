@@ -211,6 +211,10 @@ impl Ops {
       AgentOp::HostExec(job) => {
         to_value(self.host_shell.exec(job, ctx).await)
       }
+      AgentOp::Egress(cfg) => {
+        crate::egress::apply(self.data_dir.clone(), cfg).await?;
+        Ok(Value::Null)
+      }
       AgentOp::TaskRun(job) => {
         to_value(crate::task::run(&self.docker, &job, ctx).await?)
       }

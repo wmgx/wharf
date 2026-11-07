@@ -8,7 +8,7 @@
 
 use std::time::Duration;
 
-use reqwest::{Client, Method, StatusCode};
+use reqwest::{Method, StatusCode};
 use serde_json::Value;
 
 use crate::error::{ProviderError, code, redact};
@@ -16,7 +16,7 @@ use crate::error::{ProviderError, code, redact};
 type Result<T> = std::result::Result<T, ProviderError>;
 
 pub struct CloudflareClient {
-  client: Client,
+  client: crate::http::Http,
   token: String,
   #[cfg(test)]
   base_url: Option<String>,
@@ -77,10 +77,7 @@ impl CloudflareClient {
         "账号 token 为空",
       ));
     }
-    let client = Client::builder()
-      .timeout(Duration::from_secs(25))
-      .redirect(reqwest::redirect::Policy::none())
-      .build()
+    let client = crate::http::Http::new(Duration::from_secs(25))
       .map_err(|e| {
         ProviderError::internal(redact(&e.to_string(), token))
       })?;
@@ -108,15 +105,19 @@ impl CloudflareClient {
   ) -> Result<Value> {
     let mut attempt = 0u32;
     loop {
-      let mut req = self
+      let response = self
         .client
-        .request(method.clone(), self.endpoint(path))
-        .bearer_auth(&self.token);
-      if let Some(body) = body {
-        req = req.json(body);
-      }
-      let response =
-        req.send().await.map_err(|e| self.send_error(e))?;
+        .send(|c| {
+          let req = c
+            .request(method.clone(), self.endpoint(path))
+            .bearer_auth(&self.token);
+          match body {
+            Some(body) => req.json(body),
+            None => req,
+          }
+        })
+        .await
+        .map_err(|e| self.send_error(e))?;
       let status = response.status();
       if method == Method::GET
         && attempt < 2
@@ -227,9 +228,7 @@ impl CloudflareClient {
   pub async fn get_text(&self, path: &str) -> Result<String> {
     let response = self
       .client
-      .get(self.endpoint(path))
-      .bearer_auth(&self.token)
-      .send()
+      .send(|c| c.get(self.endpoint(path)).bearer_auth(&self.token))
       .await
       .map_err(|e| self.send_error(e))?;
     let status = response.status();
@@ -272,15 +271,16 @@ impl CloudflareClient {
     body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
     let response = self
       .client
-      .request(method.clone(), self.endpoint(path))
-      .bearer_auth(&self.token)
-      .header(
-        "content-type",
-        format!("multipart/form-data; boundary={boundary}"),
-      )
-      .timeout(Duration::from_secs(120))
-      .body(body)
-      .send()
+      .send(|c| {
+        c.request(method.clone(), self.endpoint(path))
+          .bearer_auth(&self.token)
+          .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+          )
+          .timeout(Duration::from_secs(120))
+          .body(body.clone())
+      })
       .await
       .map_err(|e| self.send_error(e))?;
     let status = response.status();

@@ -6,7 +6,6 @@
 
 use std::time::Duration;
 
-use reqwest::Client;
 use serde_json::{Value, json};
 
 use crate::error::{ProviderError, code, redact};
@@ -25,10 +24,7 @@ pub async fn auth_key(
       "Tailscale 凭据格式不对，应为 client_id:client_secret",
     )
   })?;
-  let client = Client::builder()
-    .timeout(Duration::from_secs(25))
-    .redirect(reqwest::redirect::Policy::none())
-    .build()
+  let client = crate::http::Http::new(Duration::from_secs(25))
     .map_err(|e| {
       ProviderError::internal(redact(&e.to_string(), secret))
     })?;
@@ -42,14 +38,15 @@ pub async fn auth_key(
   };
 
   let resp = client
-    .post(format!("{API}/oauth/token"))
-    .header("content-type", "application/x-www-form-urlencoded")
-    .body(format!(
-      "client_id={}&client_secret={}",
-      urlencoding::encode(id),
-      urlencoding::encode(secret)
-    ))
-    .send()
+    .send(|c| {
+      c.post(format!("{API}/oauth/token"))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(format!(
+          "client_id={}&client_secret={}",
+          urlencoding::encode(id),
+          urlencoding::encode(secret)
+        ))
+    })
     .await
     .map_err(fail)?;
   if !resp.status().is_success() {
@@ -69,20 +66,22 @@ pub async fn auth_key(
     )
   })?;
 
+  let body = json!({
+    "capabilities": { "devices": { "create": {
+      "reusable": false,
+      "ephemeral": false,
+      "preauthorized": true,
+      "tags": [tag],
+    }}},
+    "expirySeconds": KEY_TTL_SECS,
+    "description": description,
+  });
   let resp = client
-    .post(format!("{API}/tailnet/-/keys"))
-    .bearer_auth(token)
-    .json(&json!({
-      "capabilities": { "devices": { "create": {
-        "reusable": false,
-        "ephemeral": false,
-        "preauthorized": true,
-        "tags": [tag],
-      }}},
-      "expirySeconds": KEY_TTL_SECS,
-      "description": description,
-    }))
-    .send()
+    .send(|c| {
+      c.post(format!("{API}/tailnet/-/keys"))
+        .bearer_auth(token)
+        .json(&body)
+    })
     .await
     .map_err(fail)?;
   let status = resp.status();

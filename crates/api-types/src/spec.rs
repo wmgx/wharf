@@ -52,11 +52,14 @@ pub struct ServerSettings {
   /// 构建时传给内置模板的参数，例如 `PIP_INDEX_URL`、`GOPROXY`（国内机器配镜像源）。
   #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
   pub build_env: BTreeMap<String, String>,
-  /// 拉代码、查 commit 时用的 HTTP 代理，例如 `http://<海外机器内网地址>:<端口>`。
-  /// 国内机器连不上 GitHub 时经海外机器转发；只用于 git，不影响构建和拉镜像。
+  /// 拉代码、查 commit、构建时用的 HTTP 代理：提供出口的服务器名（例如 `us1`），
+  /// 或 `http://` 地址。出口连不上时退回直连。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub git_proxy: Option<String>,
-  /// 拉镜像时 dockerd 用的 HTTP 代理，例如 `http://<海外机器内网地址>:<端口>`。
+  /// 这台机器提供出口：agent 在内网地址上起 HTTP 代理（要口令），别的机器可以经它出去。
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub egress: bool,
+  /// 拉镜像时 dockerd 用的 HTTP 代理：提供出口的服务器名，或 `http://` 地址。
   /// 写进宿主机的 /etc/docker/daemon.json；镜像源和内网地址直连，其余仓库（ghcr 等）走代理。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub pull_proxy: Option<String>,

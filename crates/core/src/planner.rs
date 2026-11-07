@@ -141,6 +141,10 @@ pub enum Step {
   DockerProxy {
     server: String,
   },
+  /// 按服务器设置 `egress` 开关这台的出口代理。
+  Egress {
+    server: String,
+  },
   /// 备份和恢复不来自计划，是单独发起的执行。
   Backup {
     service: String,
@@ -211,6 +215,7 @@ impl Step {
       Self::DnsDelete { .. } | Self::EdgeDetach { .. } => 0,
       // 先换好拉镜像的路，后面起服务时就用上。
       Self::DockerProxy { .. } => 1,
+      Self::Egress { .. } => 1,
       Self::EnsureDirs { .. } => 1,
       Self::VolumeSync { .. } => 2,
       Self::ServiceUp { .. }
@@ -429,6 +434,7 @@ pub async fn make_plan(
   leftover_items(&mut b, &snap.deployed, &current, &desired, &status);
   link_items(&mut b, &current, &desired, &net, &status)?;
   tailscale_items(&mut b, &snap, &desired, &status);
+  egress_items(&mut b, &current, &desired);
   docker_proxy_items(&mut b, &current, &desired);
   gateway_items(&mut b, &snap, &current, &desired, &net, &status)?;
   dns_items(&mut b, &snap, &desired, &net).await?;
@@ -1277,6 +1283,48 @@ fn link_items(
   Ok(())
 }
 
+/// 出口开关变了：让那台的 agent 起或停代理。排在 dockerd 代理前面，那边可能要用它。
+fn egress_items(b: &mut Builder, current: &World, desired: &World) {
+  for (server, row) in &desired.servers {
+    let after = row.settings.egress;
+    let before = current
+      .servers
+      .get(server)
+      .is_some_and(|r| r.settings.egress);
+    if after == before {
+      continue;
+    }
+    let id = b.item(
+      format!("egress/{server}"),
+      Layer::Container,
+      if after {
+        Action::Create
+      } else {
+        Action::Delete
+      },
+      Some(json!({ "egress": before })),
+      Some(json!({ "egress": after })),
+      vec![],
+      if after {
+        format!("{server} 在内网地址上提供出口（HTTP 代理，要口令）")
+      } else {
+        format!("{server} 不再提供出口，经它出去的请求改为直连")
+      },
+    );
+    b.step(
+      vec![id],
+      if after {
+        format!("在 {server} 上开启出口")
+      } else {
+        format!("在 {server} 上关闭出口")
+      },
+      Step::Egress {
+        server: server.clone(),
+      },
+    );
+  }
+}
+
 /// Wharf 管理的 Tailscale 容器：要的时候起，接入方式改掉之后删。
 /// 拉镜像代理的设置（或它要直连的镜像源）变了：改 dockerd 配置。
 fn docker_proxy_items(
@@ -1297,7 +1345,8 @@ fn docker_proxy_items(
     let (reason, title) = match &after {
       Some((proxy, _)) => (
         format!(
-          "拉镜像改走代理 {proxy}，镜像源和内网直连；重启 dockerd，开启 live-restore 后容器不停"
+          "拉镜像改走{}，镜像源和内网直连；重启 dockerd，开启 live-restore 后容器不停",
+          shown(proxy)
         ),
         format!("在 {server} 上给 dockerd 配拉镜像代理"),
       ),
@@ -1317,8 +1366,10 @@ fn docker_proxy_items(
       } else {
         Action::Update
       },
-      before.map(|(p, n)| json!({ "proxy": p, "no_proxy": n })),
-      after.map(|(p, n)| json!({ "proxy": p, "no_proxy": n })),
+      before
+        .map(|(p, n)| json!({ "proxy": shown(&p), "no_proxy": n })),
+      after
+        .map(|(p, n)| json!({ "proxy": shown(&p), "no_proxy": n })),
       vec![Impact::Restart],
       reason,
     );
@@ -1329,6 +1380,15 @@ fn docker_proxy_items(
         server: server.clone(),
       },
     );
+  }
+}
+
+/// 代理设置给人看的样子：服务器名显示成"经 X 出口"，地址去掉密码。
+fn shown(value: &str) -> String {
+  if crate::egress::is_server(value) {
+    format!("经 {value} 出口")
+  } else {
+    format!("代理 {}", crate::egress::mask(value))
   }
 }
 
