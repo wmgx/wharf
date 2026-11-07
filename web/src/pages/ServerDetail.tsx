@@ -237,7 +237,7 @@ export function ServerDetail() {
           setParams(t === "overview" ? {} : { tab: t }, { replace: true })
         }
       >
-        <TabsList>
+        <TabsList className="max-w-full justify-start overflow-x-auto">
           <TabsTrigger value="overview">概览</TabsTrigger>
           <TabsTrigger value="metrics">资源</TabsTrigger>
           <TabsTrigger value="system">系统</TabsTrigger>
