@@ -909,14 +909,32 @@ fn service_items(
         {
           let before = json!({ "hash": state.hash, "containers": state.containers });
           let adopting = svc.import.is_some();
-          let reason = if state.hash.is_none() && adopting {
+          let reason: String = if state.hash.is_none() && adopting {
             "接管服务器上的同名 compose 项目，配置一致时不重建容器"
+              .into()
           } else if state.hash.is_none() {
-            "服务器上已有同名 project，但不是 Wharf 部署的，将被接管重建"
+            "服务器上已有同名 project，但不是 Wharf 部署的，将被接管重建".into()
           } else if changed(writes, KIND_SERVICE, name) {
-            "配置变化，重建容器"
+            current
+              .services
+              .contains_key(name)
+              .then(|| {
+                snapshot::service_template(current, net, name).ok()
+              })
+              .flatten()
+              .and_then(|old| changed_components(&old, &template))
+              .map_or(
+                "配置变化，重建容器".into(),
+                |(redo, keep)| {
+                  format!(
+                    "配置变化，只重建 {}（{} 不变）",
+                    redo.join("、"),
+                    keep.join("、")
+                  )
+                },
+              )
           } else {
-            "漂移：服务器上的部署和配置不一致，重新部署"
+            "漂移：服务器上的部署和配置不一致，重新部署".into()
           };
           let risk = if state.hash.is_none() && !adopting {
             vec![Impact::Restart, Impact::Overwrite]
@@ -1085,6 +1103,40 @@ fn service_items(
     );
   }
   Ok(())
+}
+
+/// compose 里多个组件时，比较新旧模板逐个组件看：有的变了、有的没变时返回 (要重建的, 不变的)。
+/// `docker compose up -d` 本来就只重建配置变了的组件，这里只是在计划里说清楚。
+fn changed_components(
+  old: &str,
+  new: &str,
+) -> Option<(Vec<String>, Vec<String>)> {
+  let parse =
+    |t: &str| -> Option<BTreeMap<String, serde_yaml_ng::Value>> {
+      let doc: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(t).ok()?;
+      let services = doc.get("services")?.as_mapping()?;
+      Some(
+        services
+          .iter()
+          .filter_map(|(k, v)| {
+            Some((k.as_str()?.to_string(), v.clone()))
+          })
+          .collect(),
+      )
+    };
+  let (old, new) = (parse(old)?, parse(new)?);
+  if new.len() < 2 {
+    return None;
+  }
+  let (redo, keep): (Vec<&String>, Vec<&String>) =
+    new.keys().partition(|k| old.get(*k) != new.get(*k));
+  (!redo.is_empty() && !keep.is_empty()).then(|| {
+    (
+      redo.into_iter().cloned().collect(),
+      keep.into_iter().cloned().collect(),
+    )
+  })
 }
 
 /// 部署过、但配置里已经没有的服务：(服务, 最后部署在的服务器)。
@@ -2083,6 +2135,16 @@ fn plaintext_hop(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn names_only_changed_components() {
+    let old = "services:\n  web:\n    image: a\n  worker:\n    image: w:1\n  db:\n    image: pg\n";
+    let new = "services:\n  web:\n    image: a\n  worker:\n    image: w:2\n  db:\n    image: pg\n";
+    let (redo, keep) = changed_components(old, new).unwrap();
+    assert_eq!(redo, vec!["worker"]);
+    assert_eq!(keep, vec!["db", "web"]);
+    assert!(changed_components(new, new).is_none());
+  }
 
   #[test]
   fn cleans_up_unfinished_deletes() {
