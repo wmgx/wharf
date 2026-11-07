@@ -313,7 +313,7 @@ pub enum ServerCmd {
     /// apply 时改宿主机的 daemon.json 并重启 dockerd（开启 live-restore，容器不停）；传空字符串清除。
     #[arg(long)]
     pull_proxy: Option<String>,
-    /// 代替 `https://github.com/` 拉代码的地址，例如 `https://github.wmgx.top/[[MIRROR_TOKEN]]`；
+    /// 代替 `https://github.com/` 拉代码的地址，例如 `https://gh.example.com/[[MIRROR_TOKEN]]`；
     /// 可以引用密钥；传空字符串清除。
     #[arg(long)]
     github_mirror: Option<String>,

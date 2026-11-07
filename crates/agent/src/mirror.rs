@@ -308,16 +308,16 @@ mod tests {
   #[test]
   fn routes_and_token() {
     assert_eq!(
-      upstream("ghcr.wmgx.top").unwrap().0,
+      upstream("ghcr.example.com").unwrap().0,
       "https://ghcr.io"
     );
     assert_eq!(upstream("github.example.com").unwrap().1, Kind::Git);
-    assert_eq!(upstream("gh.wmgx.top").unwrap().1, Kind::Git);
+    assert_eq!(upstream("gh.example.com").unwrap().1, Kind::Git);
     assert_eq!(
-      upstream("hub.wmgx.top").unwrap().0,
+      upstream("hub.example.com").unwrap().0,
       "https://registry-1.docker.io"
     );
-    assert!(upstream("evil.wmgx.top").is_none());
+    assert!(upstream("evil.example.com").is_none());
     let t = "0123456789abcdef";
     assert_eq!(
       strip_token(
