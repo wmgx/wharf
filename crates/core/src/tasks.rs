@@ -71,6 +71,13 @@ async fn tick(
     let Ok(cron) = Cron::parse(&spec.schedule) else {
       continue;
     };
+    if let TaskKind::Ping { grace_mins, .. } = spec.how {
+      crate::ping::check_due(
+        state, &name, &spec, &cron, grace_mins, after, until,
+      )
+      .await;
+      continue;
+    }
     if cron.next_after(after).is_some_and(|t| t <= until) {
       let _ = start(state, &name, spec, "schedule").await;
     }
@@ -78,7 +85,7 @@ async fn tick(
   Ok(())
 }
 
-async fn load(
+pub(crate) async fn load(
   state: &AppState,
 ) -> Result<Vec<(String, TaskSpec, i64)>, ApiError> {
   state
@@ -164,30 +171,42 @@ async fn start(
     let (status, code, output) = execute(&state, &name, &spec).await;
     finish(&state, id, status, code, &output).await;
     release(&name);
-    if spec.notify {
-      let ok = status == TaskStatus::Succeeded;
-      let title = if ok {
-        format!("定时任务 {name} 恢复正常")
-      } else {
-        format!("定时任务 {name} {}", status_text(status))
-      };
-      crate::notify::on_result(
-        &state,
-        &format!("task.{name}"),
-        ok,
-        crate::notify::Event {
-          title,
-          body: format!(
-            "服务器 {}\n{}",
-            spec.server,
-            last_lines(&output, 10)
-          ),
-        },
-      )
-      .await;
-    }
+    notify_result(&state, &name, &spec, status, &output).await;
   });
   Ok(id)
+}
+
+/// 任务失败和恢复时推送（任务开了通知时）。
+pub(crate) async fn notify_result(
+  state: &AppState,
+  name: &str,
+  spec: &TaskSpec,
+  status: TaskStatus,
+  output: &str,
+) {
+  if !spec.notify {
+    return;
+  }
+  let ok = status == TaskStatus::Succeeded;
+  let title = if ok {
+    format!("定时任务 {name} 恢复正常")
+  } else {
+    format!("定时任务 {name} {}", status_text(status))
+  };
+  crate::notify::on_result(
+    state,
+    &format!("task.{name}"),
+    ok,
+    crate::notify::Event {
+      title,
+      body: format!(
+        "服务器 {}\n{}",
+        spec.server,
+        last_lines(output, 10)
+      ),
+    },
+  )
+  .await;
 }
 
 fn release(name: &str) {
@@ -277,6 +296,9 @@ async fn run_on_agent(
     .get(&spec.server)
     .ok_or_else(|| crate::world::server_not_found(&spec.server))?;
   let how = match &spec.how {
+    TaskKind::Ping { .. } => {
+      return Err(ApiError::invalid("外部报到任务由别处运行"));
+    }
     TaskKind::Host { command } => {
       let job = HostExecJob {
         command: sub(command)?,
@@ -357,7 +379,7 @@ async fn run_on_agent(
     .await
 }
 
-async fn insert_run(
+pub(crate) async fn insert_run(
   state: &AppState,
   name: &str,
   status: TaskStatus,
@@ -384,7 +406,7 @@ async fn insert_run(
     .await
 }
 
-async fn finish(
+pub(crate) async fn finish(
   state: &AppState,
   id: i64,
   status: TaskStatus,
@@ -516,6 +538,13 @@ fn validate(
         return Err(ApiError::invalid("命令不能为空"));
       }
     }
+    TaskKind::Ping { grace_mins, .. } => {
+      if !(1..=7 * 24 * 60).contains(grace_mins) {
+        return Err(ApiError::invalid(
+          "宽限时间要在 1 分钟到 7 天之间",
+        ));
+      }
+    }
   }
   Ok(())
 }
@@ -553,6 +582,7 @@ pub async fn list(
 ) -> ApiResult<Vec<TaskView>> {
   auth.require(Perm::Read)?;
   let tasks = load(&s).await?;
+  let base = crate::join::default_url(&s).await;
   let mut out = Vec::new();
   let now = Utc::now();
   for (name, spec, updated) in tasks {
@@ -573,11 +603,18 @@ pub async fn list(
       .enabled
       .then(|| Cron::parse(&spec.schedule).ok()?.next_after(now))
       .flatten();
+    let ping_url = match (&spec.how, &base) {
+      (TaskKind::Ping { token, .. }, Some(b)) => {
+        Some(format!("{}/ping/{token}", b.trim_end_matches('/')))
+      }
+      _ => None,
+    };
     out.push(TaskView {
       name,
       spec,
       last,
       next_at,
+      ping_url,
       updated_at: to_time(updated),
     });
   }
@@ -597,6 +634,16 @@ pub async fn put(
   }
   let snap = snapshot::load(&s.db).await?;
   validate(&name, &spec, &snap)?;
+  let mut spec = spec;
+  if let TaskKind::Ping { token, .. } = &mut spec.how
+    && token.is_empty()
+  {
+    // 修改时沿用原来的口令，脚本里的地址不用改。
+    *token = match load_one(&s, &name).await.map(|o| o.how) {
+      Ok(TaskKind::Ping { token: old, .. }) if !old.is_empty() => old,
+      _ => crate::auth::new_token(),
+    };
+  }
   let text = serde_json::to_string(&spec)
     .map_err(|e| ApiError::internal(e.to_string()))?;
   s.db
@@ -643,6 +690,15 @@ pub async fn run_now(
 ) -> ApiResult<serde_json::Value> {
   let spec = load_one(&s, &name).await?;
   need_perm(&auth, &spec)?;
+  if matches!(spec.how, TaskKind::Ping { .. }) {
+    return Err(
+      ApiError::invalid(format!(
+        "{name} 由外部运行，Wharf 不能替它跑"
+      ))
+      .with_hint("在运行它的机器上手动跑一次脚本")
+      .into(),
+    );
+  }
   let id = start(&s, &name, spec, "manual").await?;
   Ok(Json(serde_json::json!({ "id": id })))
 }

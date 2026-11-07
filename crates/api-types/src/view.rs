@@ -1026,6 +1026,19 @@ pub enum TaskKind {
   },
   /// 宿主机命令，要服务器开了"命令执行"。
   Host { command: String },
+  /// 外部报到：Wharf 不执行，由别处（cron、systemd timer、脚本）跑完后请求报到地址。
+  /// `schedule` 是预期的运行时间，过了 `grace_mins` 分钟还没报到就记一次失败并通知。
+  Ping {
+    /// 报到地址里的口令，新建时自动生成。
+    #[serde(default)]
+    token: String,
+    #[serde(default = "default_grace")]
+    grace_mins: u32,
+  },
+}
+
+fn default_grace() -> u32 {
+  60
 }
 
 #[derive(
@@ -1066,5 +1079,8 @@ pub struct TaskView {
   /// 下次运行时间；停用时没有。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub next_at: Option<DateTime<Utc>>,
+  /// 外部报到任务的报到地址：成功请求它，失败请求它加 `/fail`。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub ping_url: Option<String>,
   pub updated_at: DateTime<Utc>,
 }

@@ -57,6 +57,14 @@ pub(crate) type ApiResult<T> = Result<Json<T>, AppError>;
 pub fn router(state: Arc<AppState>) -> Router {
   Router::new()
     .route("/healthz", get(|| async { "ok" }))
+    .route(
+      "/ping/{token}",
+      get(crate::ping::ok).post(crate::ping::ok),
+    )
+    .route(
+      "/ping/{token}/fail",
+      get(crate::ping::fail).post(crate::ping::fail),
+    )
     .route("/agent/ws", get(hub::agent_ws))
     .route("/agent/join", post(agent_join))
     .route("/join.sh", get(crate::join::script))

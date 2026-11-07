@@ -683,7 +683,8 @@ export type TaskKind =
       env?: Record<string, string>;
       mounts?: string[];
     }
-  | { kind: "host"; command: string };
+  | { kind: "host"; command: string }
+  | { kind: "ping"; token?: string; grace_mins: number };
 
 export type TaskSpec = TaskKind & {
   server: string;
@@ -712,6 +713,8 @@ export interface TaskView {
   spec: TaskSpec;
   last?: TaskRunView;
   next_at?: string;
+  /** 外部报到任务的报到地址。 */
+  ping_url?: string;
   updated_at: string;
 }
 
