@@ -432,6 +432,7 @@ export interface DeploymentView {
   spec?: ServiceSpec;
   hash: string;
   created_at: string;
+  commit?: string;
 }
 
 export interface RollbackTarget {

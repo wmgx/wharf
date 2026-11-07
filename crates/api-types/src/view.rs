@@ -535,6 +535,9 @@ pub struct DeploymentView {
   pub spec: Option<ServiceSpec>,
   pub hash: String,
   pub created_at: DateTime<Utc>,
+  /// git 来源时部署的 commit。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub commit: Option<String>,
 }
 
 /// 回滚到某次部署时要提交的服务配置。image 来源会固定到当时的镜像 digest。
