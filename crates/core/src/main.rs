@@ -21,6 +21,7 @@ mod core_backup;
 mod cron;
 mod data;
 mod db;
+mod disk;
 mod docker_proxy;
 mod doctor;
 mod edge;
@@ -173,6 +174,7 @@ async fn main() -> anyhow::Result<()> {
   monitor::spawn(state.clone());
   quality::spawn(state.clone());
   baseline::spawn(state.clone());
+  disk::spawn(state.clone());
   failover::spawn(state.clone());
   tasks::spawn(state.clone());
   views::spawn_live(state.clone());
