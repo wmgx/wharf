@@ -401,6 +401,7 @@ export function ServerDetail() {
 
         <TabsContent value="network" className="mt-4">
           <ServerLinks server={name} />
+          <SectionTitle>网络设置</SectionTitle>
           <SettingsForm server={server} canRemove={false} section="network" />
         </TabsContent>
 
