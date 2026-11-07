@@ -174,6 +174,7 @@ async fn dispatch(
     Command::Account(cmd) => account(c, cmd, j).await,
     Command::Secret(cmd) => secret(c, cmd, j).await,
     Command::Backup(cmd) => backup(c, cmd, j).await,
+    Command::Task(cmd) => crate::task::task(c, cmd, j).await,
     Command::Edge(cmd) => crate::edge::edge(c, cmd, j).await,
     Command::Plan { file, apply } => {
       let req = match file {
