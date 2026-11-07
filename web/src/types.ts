@@ -211,7 +211,12 @@ export interface RouteSpec {
   /** 网关到服务的走法：不填为自动，tunnel 总是走反向隧道。 */
   link?: "auto" | "tunnel";
   /** 按路径转发，service 和 upstream 二选一。 */
-  paths?: { path: string; service?: string; port?: string; upstream?: string }[];
+  paths?: {
+    path: string;
+    service?: string;
+    port?: string;
+    upstream?: string;
+  }[];
 }
 
 export interface RouteView {
@@ -355,7 +360,8 @@ export type Change =
   | { op: "upsert_edge_app"; name: string; spec: EdgeAppSpec }
   | { op: "remove_edge_app"; name: string };
 
-export type Impact = "restart" | "downtime" | "remove" | "data_loss" | "overwrite" | "public";
+export type Impact =
+  "restart" | "downtime" | "remove" | "data_loss" | "overwrite" | "public";
 
 export interface PlanItem {
   id: number;
@@ -478,8 +484,21 @@ export interface BackupsView {
 export type NetworkMode = "tailscale" | "lan" | "public";
 
 export interface NetworkView {
-  servers: { name: string; mode: NetworkMode; configured?: boolean; private_ip?: string; public_ip?: string; online: boolean }[];
-  reach: { from: string; to: string; ok: boolean; checked_at: string; stale?: boolean }[];
+  servers: {
+    name: string;
+    mode: NetworkMode;
+    configured?: boolean;
+    private_ip?: string;
+    public_ip?: string;
+    online: boolean;
+  }[];
+  reach: {
+    from: string;
+    to: string;
+    ok: boolean;
+    checked_at: string;
+    stale?: boolean;
+  }[];
 }
 
 export interface SecretView {
@@ -488,7 +507,6 @@ export interface SecretView {
   used_by?: string[];
   managed?: boolean;
 }
-
 
 export type Perm = "read" | "plan" | "apply" | "confirm" | "exec" | "admin";
 
@@ -601,9 +619,56 @@ export interface ServiceStatus {
   actual: "running" | "partial" | "stopped" | "missing" | "offline" | "unknown";
   actual_hash?: string;
   health: "healthy" | "unhealthy" | "starting" | "none";
-  last_op?: { action: string; run_id: string; status: "running" | "succeeded" | "failed"; at: string; error?: string };
+  last_op?: {
+    action: string;
+    run_id: string;
+    status: "running" | "succeeded" | "failed";
+    at: string;
+    error?: string;
+  };
   tone: "ok" | "warn" | "bad" | "idle";
   summary: string;
   error?: string;
   observed_at?: string;
+}
+
+export type TaskKind =
+  | { kind: "exec"; service: string; container?: string; command: string }
+  | {
+      kind: "container";
+      image: string;
+      command?: string;
+      env?: Record<string, string>;
+      mounts?: string[];
+    }
+  | { kind: "host"; command: string };
+
+export type TaskSpec = TaskKind & {
+  server: string;
+  schedule: string;
+  timeout_secs: number;
+  enabled: boolean;
+  notify: boolean;
+};
+
+export type TaskStatus =
+  "running" | "succeeded" | "failed" | "timed_out" | "skipped";
+
+export interface TaskRunView {
+  id: number;
+  task: string;
+  status: TaskStatus;
+  trigger: string;
+  started_at: string;
+  ended_at?: string;
+  exit_code?: number;
+  output: string;
+}
+
+export interface TaskView {
+  name: string;
+  spec: TaskSpec;
+  last?: TaskRunView;
+  next_at?: string;
+  updated_at: string;
 }
