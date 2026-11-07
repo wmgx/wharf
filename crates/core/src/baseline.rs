@@ -220,7 +220,7 @@ if size:
             if not had_live:
                 subprocess.run(['sh', '-c', 'kill -HUP "$(pidof dockerd)"; sleep 2'])
             subprocess.run(['systemctl', 'reset-failed', 'wharf-docker-restart'], capture_output=True)
-            run('systemd-run', '--unit=wharf-docker-restart', '--on-active=3', 'systemctl', 'restart', 'docker')
+            run('systemd-run', '--unit=wharf-docker-restart', '--on-active=20', 'systemctl', 'restart', 'docker')
         item('容器日志轮转', cur, f'{size} × {files}', fix_log)
 
 journal = want.get('journal_max')
@@ -346,9 +346,9 @@ pub async fn apply(
   for d in &r.done {
     progress(format!("已纠正：{d}"));
   }
-  // 改了 daemon.json 时 dockerd 几秒后重启，等它回来再检查。
+  // 改了 daemon.json 时 dockerd 20 秒后重启（先让 agent 清理完这次的命令容器），等它回来再检查。
   if !r.done.is_empty() {
-    tokio::time::sleep(Duration::from_secs(10)).await;
+    tokio::time::sleep(Duration::from_secs(40)).await;
   }
   if let Ok(after) =
     run(state, server, baseline, false, Some(cancel)).await
