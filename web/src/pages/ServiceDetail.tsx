@@ -505,7 +505,7 @@ function History({ name }: { name: string }) {
             <TableHead className="pl-4">#</TableHead>
             <TableHead>时间</TableHead>
             <TableHead>服务器</TableHead>
-            <TableHead>镜像</TableHead>
+            <TableHead>版本</TableHead>
             <TableHead />
           </TableRow>
         </TableHeader>
@@ -519,7 +519,8 @@ function History({ name }: { name: string }) {
               <TableCell>
                 <ServerTag name={d.server} />
               </TableCell>
-              <TableCell className="max-w-md truncate font-mono text-xs text-muted-foreground" title={d.images.map((im) => im.digest ?? im.image).join(" ")}>
+              <TableCell className="max-w-md truncate font-mono text-xs text-muted-foreground" title={[d.commit, ...d.images.map((im) => im.digest ?? im.image)].filter(Boolean).join(" ")}>
+                {d.commit && <span className="mr-2 text-foreground">{d.commit.slice(0, 12)}</span>}
                 {d.images.map((im) => im.digest ?? im.image).join(" ")}
               </TableCell>
               <TableCell className="pr-4 text-right">
