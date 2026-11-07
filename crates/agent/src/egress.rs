@@ -43,14 +43,33 @@ pub fn restore(data_dir: &Path) {
   let Ok(text) = std::fs::read_to_string(data_dir.join(FILE)) else {
     return;
   };
-  match serde_json::from_str::<EgressConfig>(&text) {
-    Ok(cfg) => {
-      if let Err(e) = start(cfg) {
-        tracing::warn!("恢复出口失败：{}", e.message);
-      }
+  let cfg = match serde_json::from_str::<EgressConfig>(&text) {
+    Ok(cfg) => cfg,
+    Err(e) => {
+      tracing::warn!("出口配置读不了：{e}");
+      return;
     }
-    Err(e) => tracing::warn!("出口配置读不了：{e}"),
-  }
+  };
+  // 开机时组网可能还没起来，内网地址绑不上：每 10 秒重试，最多 10 分钟。
+  tokio::spawn(async move {
+    for attempt in 1..=60 {
+      // 控制面已经下发过新配置，不用再恢复旧的。
+      if RUNNING.lock().map(|r| r.is_some()).unwrap_or(true) {
+        return;
+      }
+      match start(cfg.clone()) {
+        Ok(()) => return,
+        Err(e) if attempt == 1 || attempt == 60 => {
+          tracing::warn!(
+            "恢复出口失败（第 {attempt} 次）：{}",
+            e.message
+          )
+        }
+        Err(_) => {}
+      }
+      tokio::time::sleep(Duration::from_secs(10)).await;
+    }
+  });
 }
 
 /// 设置出口。配置没变时什么都不做。
