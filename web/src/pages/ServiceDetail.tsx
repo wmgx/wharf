@@ -566,7 +566,7 @@ function statusLayers(s: ServiceStatus): string[] {
   return [
     `期望：${s.want_running ? "运行" : "停止"} · ${short(s.desired_hash)}`,
     `已应用：${s.applied ? `${short(s.applied.hash)} · ${ago(s.applied.at)}` : "没有部署记录"}`,
-    `实际：${ACTUAL[s.actual]}${s.actual_hash ? ` · ${short(s.actual_hash)}` : ""}`,
+    `实际：${ACTUAL[s.actual]}${s.actual_hash ? ` · ${short(s.actual_hash)}` : ""}${s.observed_at ? ` · ${ago(s.observed_at)}看到` : ""}`,
     `健康：${HEALTH[s.health]}`,
     `执行：${op ? `${op.action}${OP[op.status]} · ${ago(op.at)}${op.error ? ` · ${op.error}` : ""}` : "-"}`,
   ];

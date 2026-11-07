@@ -596,4 +596,5 @@ export interface ServiceStatus {
   tone: "ok" | "warn" | "bad" | "idle";
   summary: string;
   error?: string;
+  observed_at?: string;
 }
