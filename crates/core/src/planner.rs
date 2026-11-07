@@ -443,7 +443,10 @@ pub async fn make_plan(
   docker_proxy_items(&mut b, &current, &desired);
   baseline_items(&mut b, &current, &desired);
   gateway_items(&mut b, &snap, &current, &desired, &net, &status)?;
-  dns_items(&mut b, &snap, &desired, &net).await?;
+  // 带改动的计划只看受影响的域名；只检查漂移（没有改动）时看全部。
+  let scope = (!req.changes.is_empty() && req.fleet.is_none())
+    .then(|| affected_hosts(&snap, &current, &desired, &net));
+  dns_items(&mut b, &snap, &desired, &net, scope.as_ref()).await?;
   mark("DNS");
   crate::edge_plan::edge_items(&mut b, &snap, &current, &desired)
     .await?;
@@ -1740,12 +1743,39 @@ fn remote_ref(r: &RemoteRecord) -> RemoteRef {
 type DnsTarget<'a> =
   (String, String, Option<(&'a str, &'a EdgeAppSpec)>);
 
+/// 这次改动会让 DNS 期望值变化的域名：新增或改了的路由、指向变了的路由、改了的 Pages。
+fn affected_hosts(
+  snap: &Snapshot,
+  current: &World,
+  desired: &World,
+  net: &Net,
+) -> BTreeSet<String> {
+  let mut out: BTreeSet<String> = desired
+    .routes
+    .iter()
+    .filter(|(host, r)| {
+      current.routes.get(*host).is_none_or(|c| c != *r)
+        || desired_record(snap, current, net, host).ok()
+          != desired_record(snap, desired, net, host).ok()
+    })
+    .map(|(h, _)| h.clone())
+    .collect();
+  for (name, app) in &desired.edge_apps {
+    if current.edge_apps.get(name).is_none_or(|c| c.spec != app.spec) {
+      out.extend(app.spec.domains.iter().cloned());
+    }
+  }
+  out
+}
+
 async fn dns_items(
   b: &mut Builder,
   snap: &Snapshot,
   desired: &World,
   net: &Net,
+  scope: Option<&BTreeSet<String>>,
 ) -> Result<(), ApiError> {
+  let in_scope = |h: &str| scope.is_none_or(|s| s.contains(h));
   let edge_ids: Vec<String> = desired
     .edge_apps
     .values()
@@ -1789,6 +1819,9 @@ async fn dns_items(
   }
 
   for (host, route) in &desired.routes {
+    if !in_scope(host) {
+      continue;
+    }
     if let Some(warning) = plaintext_hop(desired, net, &route.spec) {
       b.warnings.push(format!("路由 {host}：{warning}"));
     }
@@ -1798,13 +1831,14 @@ async fn dns_items(
   let mut targets: Vec<DnsTarget> = desired
     .routes
     .iter()
+    .filter(|(host, _)| in_scope(host))
     .map(|(host, r)| (host.clone(), r.id.clone(), None))
     .collect();
   for (name, app) in &desired.edge_apps {
     if app.spec.kind != EdgeKind::Pages {
       continue;
     }
-    for d in &app.spec.domains {
+    for d in app.spec.domains.iter().filter(|d| in_scope(d)) {
       targets.push((
         d.clone(),
         crate::world::edge_owner(d),
