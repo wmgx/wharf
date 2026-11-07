@@ -27,6 +27,25 @@ const CONNECT_WAIT: Duration = Duration::from_secs(60);
 pub const CONNECTED: &str = "已连接控制面";
 const SOCK: &str = "/var/run/docker.sock";
 
+/// 启动一会儿后，把以前成功升级留下的接班容器删掉（正常退出的才删，失败的留着看日志）。
+pub fn sweep_helper() {
+  tokio::spawn(async {
+    tokio::time::sleep(Duration::from_secs(120)).await;
+    let ctx = Ctx::detached();
+    let Ok(out) = Cmd::new("docker")
+      .args(["inspect", "-f", "{{.State.Running}} {{.State.ExitCode}}", HELPER])
+      .timeout(QUICK)
+      .run(&ctx)
+      .await
+    else {
+      return;
+    };
+    if out.success && out.stdout.trim() == "false 0" {
+      docker_ok(&ctx, &["rm", HELPER]).await;
+    }
+  });
+}
+
 /// 当前 agent 所在的容器 id。
 fn self_container() -> Result<String, ApiError> {
   std::fs::read_to_string("/proc/self/mountinfo")
@@ -358,6 +377,8 @@ pub async fn replace(
     // 旧镜像没有别的容器在用时删掉；在用就删不掉，不影响。
     docker_ok(&ctx, &["rmi", old_image]).await;
     tracing::info!("升级完成：{name} 已换成 {image}");
+    // 成功就不留接班容器（自己删自己，放在最后）；失败才留着日志给人看。
+    docker_ok(&ctx, &["rm", "-f", HELPER]).await;
     return Ok(());
   }
   tracing::warn!("新容器没有起来，恢复旧容器");

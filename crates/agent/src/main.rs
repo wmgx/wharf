@@ -173,6 +173,7 @@ async fn main() -> anyhow::Result<()> {
       },
     },
   };
+  upgrade::sweep_helper();
 
   let key = identity::load_or_create_key(&cli.data_dir)?;
   egress::restore(&cli.data_dir);
