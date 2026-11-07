@@ -1,6 +1,6 @@
-import { Background, Controls, Handle, Position, ReactFlow, type Edge, type Node, type NodeProps } from "@xyflow/react";
+import { Background, Controls, Handle, Position, ReactFlow, type Edge, type Node, type NodeChange, type NodeProps } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { ArrowUpCircleIcon, ExternalLinkIcon, PlayIcon, RotateCwIcon, SquareIcon, Trash2Icon, XIcon } from "lucide-react";
+import { ArrowUpCircleIcon, ExternalLinkIcon, LayoutGridIcon, PlayIcon, RotateCwIcon, SquareIcon, Trash2Icon, XIcon } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { usePoll } from "@/api";
@@ -71,6 +71,27 @@ const stop = "var(--destructive)";
 const fog = "var(--muted-foreground)";
 const labelStyle = { fill: "var(--muted-foreground)", fontFamily: "Geist Mono, monospace", fontSize: 11 };
 
+function perServerCount(status: Status, server: string): number {
+  return status.routes.filter((r) => status.gateways.find((g) => g.name === r.gateway)?.spec.server === server).length;
+}
+
+type XY = { x: number; y: number };
+const LAYOUT_KEY = "wharf.topology.layout";
+function loadLayout(): Record<string, XY> {
+  try {
+    return JSON.parse(localStorage.getItem(LAYOUT_KEY) ?? "{}");
+  } catch {
+    return {};
+  }
+}
+function saveLayout(l: Record<string, XY>) {
+  try {
+    localStorage.setItem(LAYOUT_KEY, JSON.stringify(l));
+  } catch {
+    // 存不了就只在这次有效
+  }
+}
+
 function build(status: Status, net: NetworkView | null): { nodes: Node[]; edges: Edge<LinkData>[] } {
   const nodes: Node[] = [];
   const edges: Edge<LinkData>[] = [];
@@ -98,7 +119,6 @@ function build(status: Status, net: NetworkView | null): { nodes: Node[]; edges:
         id: `gw:${g.name}`,
         type: "box",
         parentId: `srv:${srv.name}`,
-        extent: "parent",
         position: { x: 20 + i * COL, y: 44 },
         data: { kind: "网关", name: g.name, tone: liveTone(g.live).tone, to: "/entries" },
       });
@@ -108,7 +128,6 @@ function build(status: Status, net: NetworkView | null): { nodes: Node[]; edges:
         id: `svc:${s.name}`,
         type: "box",
         parentId: `srv:${srv.name}`,
-        extent: "parent",
         position: { x: 20 + i * COL, y: 150 },
         data: { kind: "服务", name: s.name, tone: serviceTone(s).tone, to: `/services/${s.name}` },
       });
@@ -128,16 +147,23 @@ function build(status: Status, net: NetworkView | null): { nodes: Node[]; edges:
   nodes.unshift({
     id: "core",
     type: "box",
-    position: { x: Math.max(0, x - 60) / 2 - 80, y: -150 },
+    position: { x: Math.max(0, x - 60) / 2 - 80, y: -110 - Math.ceil(Math.max(1, ...status.servers.map((s) => perServerCount(status, s.name))) / 3) * 70 - 60 },
     data: { kind: "控制面", name: "wharf-core", cls: "core" },
   });
 
-  status.routes.forEach((r, i) => {
+  // 域名放在它的网关所在机器上方，一排排往上摞；没有网关的放最左。
+  const groupX = new Map(nodes.filter((n) => n.type === "group").map((n) => [n.id.slice(4), n.position.x]));
+  const perServer = new Map<string, number>();
+  status.routes.forEach((r) => {
     const id = `rt:${r.spec.hostname}`;
+    const server = status.gateways.find((g) => g.name === r.gateway)?.spec.server ?? "";
+    const k = perServer.get(server) ?? 0;
+    perServer.set(server, k + 1);
+    const base = groupX.get(server) ?? -COL - 60;
     nodes.push({
       id,
       type: "box",
-      position: { x: -300, y: i * 74 },
+      position: { x: base + 20 + (k % 3) * COL, y: -110 - Math.floor(k / 3) * 70 },
       data: { kind: "域名", name: r.spec.hostname, cls: "route", to: r.spec.service ? `/services/${r.spec.service}` : undefined },
     });
     if (!r.gateway) return;
@@ -226,7 +252,21 @@ export function Topology() {
   const { theme } = useTheme();
   const nav = useNavigate();
   const [sel, setSel] = useState<string | null>(null);
-  const graph = useMemo(() => (status ? build(status, net) : null), [status, net]);
+  const [layout, setLayout] = useState<Record<string, XY>>(loadLayout);
+  const graph = useMemo(() => {
+    if (!status) return null;
+    const g = build(status, net);
+    return { ...g, nodes: g.nodes.map((n) => (layout[n.id] ? { ...n, position: layout[n.id] } : n)) };
+  }, [status, net, layout]);
+  const onNodesChange = (changes: NodeChange[]) => {
+    const moved = changes.flatMap((c) => (c.type === "position" && c.position ? [[c.id, c.position] as const] : []));
+    if (!moved.length) return;
+    setLayout((cur) => ({ ...cur, ...Object.fromEntries(moved) }));
+  };
+  const resetLayout = () => {
+    setLayout({});
+    saveLayout({});
+  };
   const shown = useMemo(() => {
     if (!graph || !sel || !graph.nodes.some((n) => n.id === sel)) return graph;
     const r = related(graph.nodes, graph.edges, sel);
@@ -248,6 +288,13 @@ export function Topology() {
           内网直连（明文）
         </Legend>
         <Legend color={stop}>延迟超过 {SLOW_MS}ms、断开或不通</Legend>
+        <span className="ml-auto">拖动调整位置，会记住</span>
+        {Object.keys(layout).length > 0 && (
+          <button type="button" className="flex items-center gap-1 hover:text-foreground" onClick={resetLayout}>
+            <LayoutGridIcon className="size-3.5" />
+            重置布局
+          </button>
+        )}
       </div>
       <div className="relative h-[calc(100svh-15rem)] min-h-[480px] overflow-hidden rounded-xl border bg-card shadow-xs">
         {shown && (
@@ -256,7 +303,9 @@ export function Topology() {
             edges={shown.edges}
             nodeTypes={nodeTypes}
             fitView
-            nodesDraggable={false}
+            nodesDraggable
+            onNodesChange={onNodesChange}
+            onNodeDragStop={() => setLayout((cur) => (saveLayout(cur), cur))}
             nodesConnectable={false}
             fitViewOptions={{ padding: 0.2 }}
             colorMode={theme}

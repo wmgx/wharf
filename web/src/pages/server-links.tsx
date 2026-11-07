@@ -3,9 +3,7 @@ import { usePoll } from "@/api";
 import { SectionTitle } from "@/components/common";
 import { useStatus } from "@/status";
 import type { NetworkView } from "@/types";
-import { Quality } from "./Network";
-
-const MODE: Record<string, string> = { tailscale: "Tailscale", lan: "局域网", public: "公网" };
+import { ModeMenu, Quality } from "./Network";
 
 /** 服务器"网络"标签上半部分：这台机器的地址、和其他机器的连通、端口、域名、出口。 */
 export function ServerLinks({ server }: { server: string }) {
@@ -36,16 +34,16 @@ export function ServerLinks({ server }: { server: string }) {
     <div className="mb-8 grid gap-6">
       <dl className="grid max-w-2xl grid-cols-[88px_1fr] gap-x-4 gap-y-1.5 text-sm">
         <dt className="text-muted-foreground">接入方式</dt>
-        <dd>{me ? (MODE[me.mode] ?? me.mode) : "-"}</dd>
+        <dd>{me ? <ModeMenu server={me} /> : "-"}</dd>
         <dt className="text-muted-foreground">内网地址</dt>
         <dd className="font-mono text-[13px]">{me?.private_ip ?? "-"}</dd>
         <dt className="text-muted-foreground">公网 IP</dt>
         <dd className="font-mono text-[13px]">{me?.public_ip ?? "-"}</dd>
-        <dt className="text-muted-foreground">出口</dt>
+        <dt className="text-muted-foreground">外网代理</dt>
         <dd>
-          {settings?.egress ? "提供出口" : "不提供出口"}
-          {exitFor.length > 0 && `，${exitFor.join("、")} 经它出去`}
-          {via && `；自己经 ${via} 出去`}
+          {settings?.egress ? "给其他机器当代理" : "不当代理"}
+          {exitFor.length > 0 && `，${exitFor.join("、")} 借它访问外网`}
+          {via && `；自己借 ${via} 访问外网`}
         </dd>
       </dl>
 

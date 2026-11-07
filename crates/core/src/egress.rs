@@ -46,7 +46,7 @@ pub fn route(
     .get(exit)
     .ok_or_else(|| crate::world::server_not_found(exit))?;
   let spec = row.settings.egress.as_ref().ok_or_else(|| {
-    ApiError::invalid(format!("服务器 {exit} 没有提供出口"))
+    ApiError::invalid(format!("服务器 {exit} 没有开外网代理"))
       .with_hint(format!(
         "wharf server set {exit} --egress github,cloudflare --apply"
       ))
@@ -54,8 +54,8 @@ pub fn route(
   let ip = private_ip(exit, snap)?;
   let token =
     snap.secrets.get(TOKEN_SECRET).cloned().ok_or_else(|| {
-      ApiError::new(ErrorCode::Conflict, "出口口令还没生成")
-        .with_hint(format!("先执行 wharf apply，让 {exit} 开启出口"))
+      ApiError::new(ErrorCode::Conflict, "外网代理的口令还没生成")
+        .with_hint(format!("先执行 wharf apply，让 {exit} 开启外网代理"))
     })?;
   Ok(EgressRoute {
     exit: format!("{ip}:{SERVE_PORT}"),
@@ -77,7 +77,7 @@ fn private_ip(
     .ok_or_else(|| {
       ApiError::new(
         ErrorCode::Conflict,
-        format!("服务器 {server} 没有内网地址，出口用不了"),
+        format!("服务器 {server} 没有内网地址，外网代理用不了"),
       )
     })
 }
@@ -101,7 +101,7 @@ pub fn validate(
   {
     return Err(
       ApiError::invalid(format!(
-        "{user} 还在经 {name} 的出口出去，不能关"
+        "{user} 还在借 {name} 访问外网，不能关"
       ))
       .with_hint(format!(
         "先执行 wharf server set {user} --via \"\""
@@ -110,13 +110,13 @@ pub fn validate(
   }
   if let Some(v) = via(s) {
     if v == name {
-      return Err(ApiError::invalid("不能经自己的出口出去"));
+      return Err(ApiError::invalid("不能借自己访问外网"));
     }
     let ok =
       servers.get(v).is_some_and(|r| r.settings.egress.is_some());
     if !ok {
       return Err(
-        ApiError::invalid(format!("服务器 {v} 不存在或没有提供出口"))
+        ApiError::invalid(format!("服务器 {v} 不存在或没有开外网代理"))
           .with_hint(format!(
             "wharf server set {v} --egress github,cloudflare"
           )),
@@ -283,7 +283,7 @@ pub async fn apply(
     return Err(
       ApiError::new(
         ErrorCode::Conflict,
-        format!("服务器 {server} 的 agent 版本太旧，不支持出口"),
+        format!("服务器 {server} 的 agent 版本太旧，不支持外网代理"),
       )
       .with_hint("运行 wharf upgrade"),
     );

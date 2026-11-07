@@ -46,16 +46,16 @@ export function EgressFields({
   return (
     <>
       <Field
-        label="经哪台出口"
-        help="本机起分流代理：拉镜像、构建、拉代码按那台出口的规则走，其余直连；出口连不上时直连。设了它，下面两项代理不再生效。"
+        label="访问外网经过"
+        help="这台访问 GitHub、海外镜像仓库等被墙的网站时，借选中的机器转发，其余照常直连；那台连不上时也直连。设了它，下面两项单独的代理不再生效。"
       >
         <Picker
           value={via}
           options={[
-            { value: "", label: "不经出口" },
+            { value: "", label: "不借道，直接访问" },
             ...exits.map((n) => ({ value: n, label: n })),
             ...(via && !exits.includes(via)
-              ? [{ value: via, label: via, hint: "没有提供出口" }]
+              ? [{ value: via, label: via, hint: "那台没开代理" }]
               : []),
           ]}
           onChange={onVia}
@@ -69,9 +69,9 @@ export function EgressFields({
               onEgress(v === true ? { presets: ["github"] } : undefined)
             }
           />
-          提供出口
+          给其他机器当代理
           <span className="font-normal text-muted-foreground">
-            （在内网地址上起要口令的 HTTP 代理）
+            （其他机器可以借这台访问外网，只在内网开放、需要口令）
           </span>
         </label>
         {egress && (
@@ -83,7 +83,7 @@ export function EgressFields({
                   update({ all: v === true || undefined })
                 }
               />
-              全部走出口（内网地址除外）
+              所有网站都可以借道（不只下面勾选的）
             </label>
             {!egress.all && (
               <>

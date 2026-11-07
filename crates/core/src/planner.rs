@@ -1315,17 +1315,17 @@ fn egress_items(b: &mut Builder, current: &World, desired: &World) {
     if let Some((own, via, _)) = &after {
       if let Some(o) = own {
         what.push(if o.all {
-          "提供出口（全部走）".to_string()
+          "给其他机器当外网代理（所有网站）".to_string()
         } else {
-          format!("提供出口（{} 个域名）", o.domains().len())
+          format!("给其他机器当外网代理（{} 个域名）", o.domains().len())
         });
       }
       if let Some(v) = via {
-        what.push(format!("经 {v} 出口（本机分流，出口不通时直连）"));
+        what.push(format!("访问外网借 {v}（只转发规则里的网站，{v} 不通时直连）"));
       }
     }
     let reason = if what.is_empty() {
-      format!("{server} 不再提供或使用出口，相关请求改为直连")
+      format!("{server} 不再当外网代理或借道，相关请求改为直连")
     } else {
       format!("{server}：{}", what.join("；"))
     };
@@ -1344,7 +1344,7 @@ fn egress_items(b: &mut Builder, current: &World, desired: &World) {
     );
     b.step(
       vec![id],
-      format!("更新 {server} 的出口"),
+      format!("更新 {server} 的外网代理"),
       Step::Egress {
         server: server.clone(),
       },
@@ -1450,7 +1450,7 @@ fn docker_proxy_items(
 /// 代理地址给人看的样子。
 fn shown(value: &str) -> String {
   if value == crate::egress::local_url() {
-    "本机分流代理（按出口规则）".into()
+    "本机分流代理（按借道规则）".into()
   } else {
     format!("代理 {value}")
   }
