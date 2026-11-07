@@ -137,6 +137,52 @@ pub fn run_summary(run: &Run) {
   println!("执行 {}：{status}", run.run_id);
 }
 
+/// 列表里的一行：编号、状态、开始时间、做了什么；在跑的带上进度和当前步骤。
+pub fn run_line(run: &Run) {
+  use wharf_api_types::plan::StepStatus;
+  let status = match run.status {
+    RunStatus::Running => "执行中",
+    RunStatus::Succeeded => "成功",
+    RunStatus::Failed => "失败",
+    RunStatus::Cancelled => "已取消",
+  };
+  let at = run
+    .started_at
+    .with_timezone(&chrono::Local)
+    .format("%m-%d %H:%M");
+  let titles: Vec<&str> =
+    run.steps.iter().map(|s| s.title.as_str()).collect();
+  let what = match titles.len() {
+    0 => "空执行".to_string(),
+    1 | 2 => titles.join("、"),
+    n => format!("{} 等 {n} 步", titles[..2].join("、")),
+  };
+  println!("{}  {status}  {at}  {what}", run.run_id);
+  if run.status == RunStatus::Running {
+    let done = run
+      .steps
+      .iter()
+      .filter(|s| {
+        !matches!(s.status, StepStatus::Running | StepStatus::Pending)
+      })
+      .count();
+    let doing = run
+      .steps
+      .iter()
+      .find(|s| s.status == StepStatus::Running)
+      .map(|s| s.title.as_str())
+      .unwrap_or("-");
+    println!(
+      "    进度 {done}/{}，正在：{doing}。取消：wharf run cancel {}",
+      run.steps.len(),
+      run.run_id
+    );
+  }
+  if let Some(e) = run.steps.iter().find_map(|s| s.error.as_ref()) {
+    println!("    失败原因：{}", e.message);
+  }
+}
+
 pub fn run(run: &Run) {
   run_summary(run);
   for step in &run.steps {

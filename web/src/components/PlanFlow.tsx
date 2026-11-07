@@ -1,3 +1,4 @@
+import { useActions } from "@/components/actions";
 import { ArrowLeftIcon, CheckIcon, CircleIcon, LoaderIcon, MinusIcon, XIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { api } from "@/api";
@@ -54,6 +55,7 @@ export function PlanFlow({
   /** 有值时，执行前显示"返回修改"。 */
   onBack?: () => void;
 }) {
+  const actions = useActions();
   const [stage, setStage] = useState<Stage>(runId ? "running" : "planning");
   const [plan, setPlan] = useState<Plan | null>(null);
   const [run, setRun] = useState<Run | null>(null);
@@ -122,6 +124,11 @@ export function PlanFlow({
         </p>
       )}
       <ErrorNote error={error} />
+      {busyRun(error) && (
+        <Button variant="outline" size="sm" className="w-fit" onClick={() => actions.view(busyRun(error)!, "正在进行的执行")}>
+          查看 {busyRun(error)} 在做什么
+        </Button>
+      )}
 
       {plan && stage === "review" && <PlanReview plan={plan} confirmed={confirmed} setConfirmed={setConfirmed} />}
       {(stage === "review" || (stage === "planning" && !!error)) && (
@@ -308,4 +315,10 @@ function RunView({ run }: { run: Run }) {
       {run.status === "cancelled" && <Notice>已取消。</Notice>}
     </div>
   );
+}
+
+/** "已有执行"的报错里带着执行编号：r_xxx 正在执行（…）。 */
+function busyRun(error: unknown): string | undefined {
+  const m = error instanceof Error ? /^(r_[0-9a-z]+) 正在执行/.exec(error.message) : null;
+  return m?.[1];
 }

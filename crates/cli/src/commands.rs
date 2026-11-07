@@ -441,7 +441,7 @@ async fn run_cmd(c: &Client, cmd: RunCmd, j: bool) -> CliResult<()> {
         c.get(&format!("/api/runs?limit={limit}")).await?;
       out(j, &runs, |runs| {
         for r in runs {
-          print::run_summary(r);
+          print::run_line(r);
         }
       });
       Ok(())
