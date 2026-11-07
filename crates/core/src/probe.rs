@@ -29,6 +29,11 @@ pub fn problems() -> Vec<String> {
   m.iter()
     .filter(|(_, p)| p.fails >= FAILS)
     .map(|(h, p)| format!("域名 {h} 打不开：{}", p.detail))
+    .chain(m.iter().filter_map(|(h, p)| {
+      p.cert_days
+        .filter(|d| *d < crate::cert::WARN_DAYS)
+        .map(|d| format!("域名 {h} 的证书 {d} 天后到期"))
+    }))
     .collect()
 }
 
@@ -40,6 +45,7 @@ pub fn spawn(state: Arc<AppState>) {
       .timeout(TIMEOUT)
       .redirect(reqwest::redirect::Policy::none())
       .user_agent("wharf-probe")
+      .tls_info(true)
       .build()
     {
       Ok(c) => c,
@@ -77,9 +83,12 @@ async fn round(state: &AppState, client: &reqwest::Client) {
     let r = check(client, &url).await;
     (host, url, r)
   });
-  for (host, url, (ok, detail, ms)) in
+  for (host, url, (ok, detail, ms, cert_days)) in
     futures_util::future::join_all(checks).await
   {
+    if let Some(days) = cert_days {
+      cert_notify(state, &host, days).await;
+    }
     let prev = last(&host).map_or(0, |p| p.fails);
     let fails = if ok { 0 } else { prev + 1 };
     if let Ok(mut m) = LAST.lock() {
@@ -91,6 +100,7 @@ async fn round(state: &AppState, client: &reqwest::Client) {
           ms,
           at: chrono::Utc::now().timestamp_millis(),
           fails,
+          cert_days,
         },
       );
     }
@@ -118,23 +128,48 @@ async fn round(state: &AppState, client: &reqwest::Client) {
   }
 }
 
-/// 返回（通不通，说明，耗时毫秒）。
+/// 证书剩不到 [crate::cert::WARN_DAYS] 天时推送，续上后再推一次。
+async fn cert_notify(state: &AppState, host: &str, days: i64) {
+  let ok = days >= crate::cert::WARN_DAYS;
+  crate::notify::on_result(
+    state,
+    &format!("cert.{host}"),
+    ok,
+    crate::notify::Event {
+      title: if ok {
+        format!("域名 {host} 的证书已续期")
+      } else {
+        format!("域名 {host} 的证书 {days} 天后到期")
+      },
+      body: format!("证书还剩 {days} 天"),
+    },
+  )
+  .await;
+}
+
+/// 返回（通不通，说明，耗时毫秒，证书剩几天）。
 async fn check(
   client: &reqwest::Client,
   url: &str,
-) -> (bool, String, u64) {
+) -> (bool, String, u64, Option<i64>) {
   let start = std::time::Instant::now();
   let r = client.get(url).send().await;
   let ms = start.elapsed().as_millis() as u64;
   match r {
     Ok(resp) => {
       let code = resp.status().as_u16();
-      (code < 500, format!("HTTP {code}"), ms)
+      let days = resp
+        .extensions()
+        .get::<reqwest::tls::TlsInfo>()
+        .and_then(|t| t.peer_certificate())
+        .and_then(crate::cert::not_after)
+        .map(|t| (t - chrono::Utc::now()).num_days());
+      (code < 500, format!("HTTP {code}"), ms, days)
     }
     Err(e) if e.is_timeout() => {
-      (false, format!("{} 秒没有应答", TIMEOUT.as_secs()), ms)
+      (false, format!("{} 秒没有应答", TIMEOUT.as_secs()), ms, None)
     }
-    Err(e) if e.is_connect() => (false, "连不上".into(), ms),
-    Err(e) => (false, e.without_url().to_string(), ms),
+    Err(e) if e.is_connect() => (false, "连不上".into(), ms, None),
+    Err(e) => (false, e.without_url().to_string(), ms, None),
   }
 }

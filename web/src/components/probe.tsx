@@ -8,10 +8,12 @@ export function Probe({ probe }: { probe?: ProbeView }) {
   const text = probe.ok
     ? `${probe.detail} · ${probe.ms} ms`
     : `${probe.detail}${probe.fails > 1 ? `（连续 ${probe.fails} 次）` : ""}`;
+  const cert =
+    probe.cert_days === undefined ? "" : ` · 证书剩 ${probe.cert_days} 天`;
   return (
     <span
       className="inline-flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground"
-      title={`${ago(new Date(probe.at).toISOString())}探测：${text}`}
+      title={`${ago(new Date(probe.at).toISOString())}探测：${text}${cert}`}
     >
       <Dot tone={tone} />
       {!probe.ok && (
