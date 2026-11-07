@@ -28,6 +28,8 @@ pub const PROTOCOL: u32 = 1;
 pub const CLI_API: u32 = 1;
 pub const MIN_CLI_API: u32 = 1;
 pub const CLI_API_HEADER: &str = "x-wharf-cli-api";
+/// 控制面在每个响应里带上自己的构建号，CLI 比对后提醒更新。
+pub const BUILD_HEADER: &str = "x-wharf-build";
 
 /// 构建号：CI 构建镜像时传入的短提交号，本地构建是 `dev`。
 /// 控制面拿它判断 agent 要不要升级，升级时拉 `sha-<构建号>` 标签的镜像。
