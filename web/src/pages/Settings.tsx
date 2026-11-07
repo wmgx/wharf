@@ -14,6 +14,7 @@ import { Input } from "@/components/ui/input";
 import type { AccountView } from "@/types";
 import { CoreBackup } from "./core-backup";
 import { EdgeImport } from "./edge-import";
+import { Notify } from "./notify";
 import { Secrets } from "./secrets";
 import { Tokens } from "./tokens";
 
@@ -142,6 +143,9 @@ export function Settings() {
         </div>
         <div>
           <CoreBackup />
+        </div>
+        <div>
+          <Notify />
         </div>
       </div>
       {importing && <EdgeImport account={importing} onClose={() => setImporting(null)} />}

@@ -441,6 +441,22 @@ pub(crate) async fn record(
     )
     .await;
   }
+  crate::notify::on_result(
+    state,
+    &format!("backup.{service}"),
+    result.is_ok(),
+    crate::notify::Event {
+      title: match result {
+        Ok(_) => format!("服务 {service} 的备份恢复正常"),
+        Err(_) => format!("服务 {service} 备份失败"),
+      },
+      body: match result {
+        Ok(_) => format!("备份到 {}", w.target),
+        Err(e) => format!("备份到 {}：{}", w.target, e.message),
+      },
+    },
+  )
+  .await;
   let (ok, body) = match result {
     Ok(s) => (true, serde_json::to_string(s).map_err(json_err)?),
     Err(e) => {

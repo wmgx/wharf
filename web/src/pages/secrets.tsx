@@ -128,7 +128,7 @@ export function Secrets() {
 }
 
 /** 只在打开时挂载，关掉就丢弃输入的值。 */
-function SetSecret({ initial, fresh, onClose, onSaved }: { initial: string; fresh: boolean; onClose: () => void; onSaved: () => void }) {
+export function SetSecret({ initial, fresh, onClose, onSaved }: { initial: string; fresh: boolean; onClose: () => void; onSaved: () => void }) {
   const [name, setName] = useState(initial);
   const [value, setValue] = useState("");
   const [saving, setSaving] = useState(false);
