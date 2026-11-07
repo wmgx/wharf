@@ -544,6 +544,8 @@ export interface SecretView {
   updated_at: string;
   used_by?: string[];
   managed?: boolean;
+  /** 系统功能用的，在对应功能里改。 */
+  system?: string;
 }
 
 export type Perm = "read" | "plan" | "apply" | "confirm" | "exec" | "admin";

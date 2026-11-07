@@ -597,6 +597,9 @@ pub struct SecretView {
   /// Wharf 自己生成的，不能改也不能删。
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub managed: bool,
+  /// 系统功能用的（网关登录、组网、通知等）：在对应功能里改，不算应用密钥。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub system: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

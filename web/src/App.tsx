@@ -3,7 +3,7 @@ import * as vault from "@/lib/vault";
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { Activity } from "./pages/Activity";
 import { Servers } from "./pages/Servers";
-import { api, setUnauthorizedHandler, usePoll, type Session } from "./api";
+import { api, clearPollCache, setUnauthorizedHandler, usePoll, type Session } from "./api";
 import { ActionsProvider } from "./components/actions";
 import { AppSidebar } from "./components/app-sidebar";
 import { Boundary } from "./components/Boundary";
@@ -45,6 +45,7 @@ export function App() {
   const logout = async () => {
     await api.post("/api/logout", {}).catch(() => {});
     vault.lock();
+    clearPollCache();
     load();
   };
 

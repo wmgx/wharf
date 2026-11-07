@@ -1168,6 +1168,7 @@ async fn list_secrets(
       .map(|(name, at)| SecretView {
         used_by: secret_users(&snap.world, &name),
         managed: managed_secret(&name),
+        system: system_secret(&name).map(str::to_string),
         name,
         updated_at: to_time(at),
       })
@@ -1183,11 +1184,9 @@ fn managed_secret(name: &str) -> bool {
     || name == crate::egress::TOKEN_SECRET
 }
 
-fn secret_users(
-  world: &crate::world::World,
-  name: &str,
-) -> Vec<String> {
-  let system = match name {
+/// 系统功能用的密钥对应的功能名。
+fn system_secret(name: &str) -> Option<&'static str> {
+  match name {
     n if crate::backup::MANAGED_SECRETS.contains(&n) => Some("备份"),
     n if n == crate::core_backup::OWNER_SECRET => Some("控制面备份"),
     n if n == crate::link::TOKEN_SECRET => Some("机器互联"),
@@ -1197,8 +1196,20 @@ fn secret_users(
     }
     n if n == crate::render::BASIC_AUTH_SECRET => Some("网关登录"),
     n if n == crate::render::TUNNEL_TOKEN_SECRET => Some("隧道"),
+    n if n == crate::notify::FEISHU_WEBHOOK
+      || n == crate::notify::FEISHU_SECRET =>
+    {
+      Some("通知")
+    }
     _ => None,
-  };
+  }
+}
+
+fn secret_users(
+  world: &crate::world::World,
+  name: &str,
+) -> Vec<String> {
+  let system = system_secret(name);
   let reference = format!("[[{name}]]");
   let token = format!("\"token_secret\":\"{name}\"");
   system
@@ -1274,6 +1285,7 @@ async fn set_secret(
   Ok(Json(SecretView {
     used_by: vec![],
     managed: false,
+    system: system_secret(&name).map(str::to_string),
     name,
     updated_at: to_time(now),
   }))
