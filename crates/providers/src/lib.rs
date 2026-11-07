@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 
 mod cloudflare;
 pub mod error;
+pub mod http;
 pub mod tailscale;
 pub mod validate;
 

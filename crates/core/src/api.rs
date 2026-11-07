@@ -232,6 +232,10 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route("/api/edge/{name}/accept", post(crate::edge_api::accept))
     .route("/api/secrets", get(list_secrets))
     .route("/api/notify/test", post(crate::notify::test))
+    .route(
+      "/api/egress",
+      get(crate::egress::get).put(crate::egress::put),
+    )
     .route("/api/tasks", get(crate::tasks::list))
     .route(
       "/api/tasks/{name}",
@@ -1166,6 +1170,7 @@ fn managed_secret(name: &str) -> bool {
   crate::backup::MANAGED_SECRETS.contains(&name)
     || name == crate::core_backup::OWNER_SECRET
     || name == crate::link::TOKEN_SECRET
+    || name == crate::egress::TOKEN_SECRET
 }
 
 fn secret_users(
@@ -1176,6 +1181,7 @@ fn secret_users(
     n if crate::backup::MANAGED_SECRETS.contains(&n) => Some("备份"),
     n if n == crate::core_backup::OWNER_SECRET => Some("控制面备份"),
     n if n == crate::link::TOKEN_SECRET => Some("机器互联"),
+    n if n == crate::egress::TOKEN_SECRET => Some("出口"),
     n if n == crate::tailscale::OAUTH_SECRET => {
       Some("Tailscale 组网")
     }

@@ -92,6 +92,10 @@ pub async fn load(db: &Db) -> Result<Snapshot, ApiError> {
   let snap = load_inner(db).await?;
   *SECRETS.write().unwrap_or_else(|e| e.into_inner()) =
     snap.secrets.clone();
+  let api = db
+    .call(|c| crate::db::setting(c, crate::egress::API_VIA))
+    .await?;
+  crate::egress::apply_api_route(api.as_deref(), &snap);
   Ok(snap)
 }
 
@@ -168,7 +172,11 @@ pub fn pull_policy(server: &ServerRow) -> PullPolicy {
       .collect(),
     mirrors_only: server.settings.mirrors_only,
     attempt_timeout_secs: PULL_ATTEMPT_SECS,
-    git_proxy: server.settings.git_proxy.clone(),
+    // 经出口时拉代码、构建都指向本机的分流代理。
+    git_proxy: match crate::egress::via(&server.settings) {
+      Some(_) => Some(crate::egress::local_url()),
+      None => server.settings.git_proxy.clone(),
+    },
     github_mirror: server
       .settings
       .github_mirror

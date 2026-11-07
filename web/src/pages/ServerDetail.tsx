@@ -37,6 +37,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
+import { EgressFields } from "./server-egress";
 import {
   Dialog,
   DialogContent,
@@ -56,7 +57,7 @@ import {
 import { AptUpgrade } from "@/components/apt-upgrade";
 import { HostSessions } from "@/components/host-sessions";
 import { useStatus } from "@/status";
-import type { HostInfo, ServerView } from "@/types";
+import type { EgressSpec, HostInfo, ServerView } from "@/types";
 import { ServerTasks } from "./server-tasks";
 
 const DOCKER_KIND: Record<string, string> = {
@@ -613,6 +614,8 @@ function SettingsForm({
   ];
   const [hostTerminal, setHostTerminal] = useState(cur.host_terminal);
   const [hostExec, setHostExec] = useState(cur.host_exec);
+  const [egress, setEgress] = useState<EgressSpec | undefined>(cur.egress);
+  const [via, setVia] = useState(cur.via ?? "");
   const [quota, setQuota] = useState(
     cur.traffic_quota_gb ? String(cur.traffic_quota_gb) : "",
   );
@@ -641,6 +644,8 @@ function SettingsForm({
     lan_addrs: lanAddrs.length ? lanAddrs : undefined,
     host_terminal: hostTerminal,
     host_exec: hostExec,
+    egress,
+    via: via || undefined,
     traffic_quota_gb: quotaNum > 0 ? quotaNum : undefined,
     traffic_reset_day: resetNum > 0 ? resetNum : undefined,
   };
@@ -654,6 +659,8 @@ function SettingsForm({
       registry_mirrors: x.registry_mirrors ?? {},
       build_env: x.build_env ?? {},
       mirrors_only: !!x.mirrors_only,
+      egress: x.egress ?? undefined,
+      via: x.via || undefined,
       lan_addrs: x.lan_addrs?.length ? x.lan_addrs : undefined,
     });
   const changed = norm(next) !== norm(cur);
@@ -749,6 +756,13 @@ function SettingsForm({
           onChange={setBuildEnv}
         />
       </Field>
+      <EgressFields
+        server={server.name}
+        egress={egress}
+        onEgress={setEgress}
+        via={via}
+        onVia={setVia}
+      />
       <Field
         label="拉代码代理"
         htmlFor="git-proxy"
