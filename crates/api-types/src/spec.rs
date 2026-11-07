@@ -274,6 +274,8 @@ pub struct ServiceSpec {
   pub ports: Vec<PortSpec>,
   /// 环境变量。值里可以用 `[[SECRET_NAME]]` 引用密钥，仅 image 来源生效；
   /// compose 来源的整个文件内容都会做同样的替换。
+  /// 也可以用 `[[@服务]]` 引用别的服务，部署时换成它的 `内网地址:宿主机端口`；
+  /// `[[@服务.端口名]]` 指定端口，末尾加 `:host` / `:port` 只取地址或端口。
   #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
   pub env: BTreeMap<String, String>,
   #[serde(default, skip_serializing_if = "Vec::is_empty")]

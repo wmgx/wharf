@@ -48,6 +48,7 @@ mod planner;
 mod probe;
 mod prune;
 mod quality;
+mod refs;
 mod render;
 mod rollback;
 mod shell;

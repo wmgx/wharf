@@ -202,6 +202,7 @@ pub fn service_resolved(
     &net.bind_ips(&row.spec.server),
     Some(secrets),
   )?;
+  let resolved = crate::refs::resolve(&resolved, name, world, net)?;
   let hash = render::hash(&resolved);
   Ok((resolved, hash))
 }
@@ -212,13 +213,14 @@ pub fn service_template(
   name: &str,
 ) -> Result<String, ApiError> {
   let row = &world.services[name];
-  render::service_compose(
+  let text = render::service_compose(
     name,
     &row.spec,
     &row.host_ports,
     &net.bind_ips(&row.spec.server),
     None,
-  )
+  )?;
+  crate::refs::resolve(&text, name, world, net)
 }
 
 /// 网关的 compose、Caddyfile，以及它承载的站点。
@@ -553,6 +555,52 @@ mod tests {
     };
     assert_eq!(hash(&same), hash(&same));
     assert_ne!(hash(&same), hash(&moved));
+  }
+
+  #[test]
+  fn references_follow_the_target_service() {
+    use wharf_api_types::spec::{PrivateAddr, PrivateNetwork};
+    let mut net = Net::default();
+    for (s, ip) in [("s1", "100.64.0.1"), ("s2", "100.64.0.2")] {
+      net.private.insert(
+        s.to_string(),
+        PrivateAddr {
+          ip: ip.to_string(),
+          network: PrivateNetwork::Tailscale,
+        },
+      );
+    }
+    let with_web = |db_server: &str| {
+      let mut w = world(21000);
+      w.servers.insert(
+        "s2".to_string(),
+        ServerRow {
+          settings: Default::default(),
+          version: 1,
+        },
+      );
+      let mut web = w.services["app"].clone();
+      web.spec.env.insert("DB".into(), "http://[[@app]]/".into());
+      w.services.insert("web".to_string(), web);
+      w.services.get_mut("app").unwrap().spec.server =
+        db_server.into();
+      w
+    };
+    let secrets = BTreeMap::new();
+    let (here, _) =
+      service_resolved(&with_web("s1"), &net, "web", &secrets)
+        .unwrap();
+    assert!(here.contains("http://100.64.0.1:21000/"));
+    let (moved, _) =
+      service_resolved(&with_web("s2"), &net, "web", &secrets)
+        .unwrap();
+    assert!(moved.contains("http://100.64.0.2:21000/"));
+
+    let mut gone = with_web("s1");
+    gone.services.remove("app");
+    let err =
+      service_resolved(&gone, &net, "web", &secrets).unwrap_err();
+    assert!(err.message.contains("不存在"));
   }
 
   #[test]

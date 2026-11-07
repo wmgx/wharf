@@ -180,6 +180,8 @@ export interface LiveState {
 
 export interface ServiceView {
   monitor?: MonitorView;
+  uses?: string[];
+  used_by?: string[];
   name: string;
   spec: ServiceSpec;
   host_ports: Record<string, number>;

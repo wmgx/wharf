@@ -473,6 +473,15 @@ function Overview({
                 ))}
                 {Object.keys(svc.addresses).length === 0 && "-"}
               </dd>
+              {(svc.uses?.length || svc.used_by?.length) ? (
+                <>
+                  <dt className="text-muted-foreground">依赖</dt>
+                  <dd className="flex flex-col gap-0.5">
+                    {svc.uses?.length ? <Deps label="引用" names={svc.uses} /> : null}
+                    {svc.used_by?.length ? <Deps label="被引用" names={svc.used_by} /> : null}
+                  </dd>
+                </>
+              ) : null}
               <dt className="text-muted-foreground">数据</dt>
               <dd>
                 <button
@@ -1104,6 +1113,19 @@ function TerminalTab({ svc }: { svc: ServiceView }) {
       <Suspense fallback={<Skeleton className="h-80 rounded-xl" />}>
         <Terminal name={svc.name} service={current} />
       </Suspense>
+    </div>
+  );
+}
+
+function Deps({ label, names }: { label: string; names: string[] }) {
+  return (
+    <div className="flex flex-wrap items-center gap-x-2">
+      <span className="text-xs text-muted-foreground">{label}</span>
+      {names.map((n) => (
+        <Link key={n} to={`/services/${encodeURIComponent(n)}`} className="hover:underline">
+          {n}
+        </Link>
+      ))}
     </div>
   );
 }
