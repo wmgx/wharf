@@ -278,6 +278,8 @@ pub enum AgentOp {
   HostExec(HostExecJob),
   /// 定时任务：在服务容器里执行命令，或跑一次性容器。结果是 [TaskRunResult]。
   TaskRun(TaskRunJob),
+  /// 设置这台机器的出口代理，`None` 关闭。配置存在 agent 数据目录，重启后自动恢复。
+  Egress(Option<EgressConfig>),
   /// 读宿主机的系统版本、待装更新、docker 和日志占用，结果是 [HostInfo]。只读。
   HostInfo,
   /// 上一次升级接班容器的最后几十行日志，升级失败时控制面拿来显示原因。结果是字符串。
@@ -738,7 +740,22 @@ impl PullPolicy {
       .values()
       .flatten()
       .chain(self.github_mirror.iter());
-    addrs.fold(text.to_string(), |acc, addr| redact_addr(&acc, addr))
+    let text = addrs
+      .fold(text.to_string(), |acc, addr| redact_addr(&acc, addr));
+    match self.git_proxy.as_deref() {
+      Some(p) if p.contains('@') => text.replace(p, &mask_url(p)),
+      _ => text,
+    }
+  }
+}
+
+/// 去掉地址里的用户名和密码：`http://u:p@h:1` → `http://***@h:1`。
+pub fn mask_url(url: &str) -> String {
+  match (url.split_once("://"), url.rfind('@')) {
+    (Some((scheme, _)), Some(at)) => {
+      format!("{scheme}://***@{}", &url[at + 1..])
+    }
+    _ => url.to_string(),
   }
 }
 
@@ -1048,3 +1065,14 @@ pub struct TaskRunResult {
   pub output: String,
   pub duration_ms: u64,
 }
+
+/// 出口代理：监听内网地址，要口令。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EgressConfig {
+  pub bind: String,
+  pub port: u16,
+  pub token: String,
+}
+
+/// 出口代理的端口。
+pub const EGRESS_PORT: u16 = 8118;

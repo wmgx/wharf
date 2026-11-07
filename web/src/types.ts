@@ -48,6 +48,7 @@ export interface ServerView {
   settings: Record<string, unknown> & {
     host_terminal: boolean;
     host_exec: boolean;
+    egress?: boolean;
   };
   joined: boolean;
   online: boolean;

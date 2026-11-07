@@ -74,6 +74,12 @@ pub enum Command {
   },
   /// 升级 Wharf：控制面换成最新镜像，再把各服务器的 agent 升到同一版本。
   Upgrade,
+  /// 出口：控制面调厂商 API（Cloudflare、Tailscale）用哪个出口。
+  /// 不带参数时显示现状；`wharf egress api us1` 经 us1 出去，`wharf egress api ""` 直连。
+  Egress {
+    #[command(subcommand)]
+    cmd: Option<EgressCmd>,
+  },
   /// 通知：发一条测试消息。渠道用密钥配置，飞书群机器人设 NOTIFY_FEISHU_WEBHOOK
   /// （开了签名校验再设 NOTIFY_FEISHU_SECRET）。
   #[command(subcommand)]
@@ -306,13 +312,17 @@ pub enum ServerCmd {
     /// 清空构建参数。
     #[arg(long)]
     clear_build_env: bool,
-    /// 拉代码时用的 HTTP 代理，例如 `http://100.x.x.x:8118`（国内机器经海外机器连 GitHub）；传空字符串清除。
+    /// 拉代码、查 commit、构建时用的出口：提供出口的服务器名（例如 `us1`）或 `http://` 地址；
+    /// 出口连不上时退回直连。传空字符串清除。
     #[arg(long)]
     git_proxy: Option<String>,
-    /// 拉镜像时 dockerd 用的 HTTP 代理，例如 `http://100.x.x.x:8118`；镜像源和内网直连。
+    /// 拉镜像时 dockerd 用的出口：提供出口的服务器名或 `http://` 地址；镜像源和内网直连。
     /// apply 时改宿主机的 daemon.json 并重启 dockerd（开启 live-restore，容器不停）；传空字符串清除。
     #[arg(long)]
     pull_proxy: Option<String>,
+    /// 这台机器提供出口：在内网地址上起 HTTP 代理（要口令），别的机器的出口设置可以写它的名字。
+    #[arg(long)]
+    egress: Option<bool>,
     /// 代替 `https://github.com/` 拉代码的地址，例如 `https://gh.example.com/[[MIRROR_TOKEN]]`；
     /// 可以引用密钥；传空字符串清除。
     #[arg(long)]
@@ -725,4 +735,10 @@ async fn main() {
 pub enum NotifyCmd {
   /// 给所有已配置的渠道发一条测试消息。
   Test,
+}
+
+#[derive(Subcommand)]
+pub enum EgressCmd {
+  /// 设置控制面调厂商 API 用的出口：服务器名、`http://` 地址，或空字符串（直连）。
+  Api { value: String },
 }

@@ -25,6 +25,7 @@ mod edge;
 mod edge_api;
 mod edge_plan;
 mod edge_sync;
+mod egress;
 mod files_api;
 mod heal;
 mod host_dir;

@@ -123,6 +123,22 @@ async fn build_in(
   for (key, value) in &job.build_env {
     cmd = cmd.args(["--build-arg", &format!("{key}={value}")]);
   }
+  // 构建时下载依赖也走出口；镜像源、内网直连。代理参数是预定义的，不会写进镜像历史。
+  if let Some(p) =
+    usable_proxy(job.pull.git_proxy.as_deref(), ctx).await
+  {
+    let direct = no_proxy(job);
+    for (k, v) in [
+      ("HTTP_PROXY", &p),
+      ("HTTPS_PROXY", &p),
+      ("http_proxy", &p),
+      ("https_proxy", &p),
+      ("NO_PROXY", &direct),
+      ("no_proxy", &direct),
+    ] {
+      cmd = cmd.args(["--build-arg", &format!("{k}={v}")]);
+    }
+  }
   let out = cmd
     .arg(context.to_string_lossy().to_string())
     .timeout(BUILD_TIMEOUT)
@@ -190,7 +206,9 @@ pub async fn fetch_code(
         repo,
         reference,
         token.as_ref().map(|t| t.0.as_str()),
-        pull.git_proxy.as_deref(),
+        usable_proxy(pull.git_proxy.as_deref(), ctx)
+          .await
+          .as_deref(),
         pull.github_mirror.as_deref(),
         &src,
         ctx,
@@ -276,6 +294,61 @@ fn dockerfile(
   std::fs::write(&path, &generated.dockerfile)
     .map_err(io_err(&path))?;
   Ok((path, generated.images))
+}
+
+/// 代理能连上才用；连不上（出口机器离线）时退回直连。
+pub(crate) async fn usable_proxy(
+  proxy: Option<&str>,
+  ctx: &Ctx,
+) -> Option<String> {
+  let p = proxy?.trim();
+  if p.is_empty() {
+    return None;
+  }
+  let rest = p.split_once("://").map_or(p, |(_, r)| r);
+  let host = rest.rsplit_once('@').map_or(rest, |(_, h)| h);
+  let host = host.trim_end_matches('/');
+  let ok = tokio::time::timeout(
+    Duration::from_secs(3),
+    tokio::net::TcpStream::connect(host),
+  )
+  .await
+  .is_ok_and(|r| r.is_ok());
+  if !ok {
+    ctx.say(format!(
+      "提醒：代理 {} 连不上，改用直连",
+      wharf_api_types::agent::mask_url(p)
+    ));
+  }
+  ok.then(|| p.to_string())
+}
+
+/// 构建时不走代理的地址：内网、镜像源、构建参数里写的镜像站。
+fn no_proxy(job: &BuildJob) -> String {
+  let mut hosts: Vec<String> = [
+    "localhost",
+    "127.0.0.1",
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "100.64.0.0/10",
+  ]
+  .map(String::from)
+  .to_vec();
+  let urls = job
+    .pull
+    .mirrors
+    .values()
+    .flatten()
+    .chain(job.build_env.values());
+  for u in urls {
+    let rest = u.split_once("://").map_or(u.as_str(), |(_, r)| r);
+    let host = rest.split(['/', ':']).next().unwrap_or("");
+    if host.contains('.') && !hosts.iter().any(|h| h == host) {
+      hosts.push(host.to_string());
+    }
+  }
+  hosts.join(",")
 }
 
 /// 只接受代码里的相对路径，不能跳出去。
@@ -407,9 +480,10 @@ async fn clone(
   ctx: &Ctx,
 ) -> Result<String, ApiError> {
   match proxy {
-    Some(p) => {
-      ctx.say(format!("拉取代码 {repo} @ {reference}（经代理 {p}）"))
-    }
+    Some(p) => ctx.say(format!(
+      "拉取代码 {repo} @ {reference}（经代理 {}）",
+      wharf_api_types::agent::mask_url(p)
+    )),
     None => ctx.say(format!("拉取代码 {repo} @ {reference}")),
   }
   let name = format!("wharf-git-{service}");
@@ -530,6 +604,9 @@ pub async fn resolve_commit(
       .pull(GIT_IMAGE, &job.pull, ctx, &mut Vec::new())
       .await?;
   }
+  let proxy = usable_proxy(job.pull.git_proxy.as_deref(), ctx)
+    .await
+    .unwrap_or_default();
   let name = format!("wharf-git-ls-{}", job.service);
   remove_container(docker, &name).await;
   // 带上 `^{}`：附注标签要取它指向的 commit，不是标签对象本身。
@@ -561,14 +638,8 @@ fi"#;
       "GIT_TOKEN",
       token.as_ref().map(|t| t.0.as_str()).unwrap_or_default(),
     )
-    .env(
-      "HTTPS_PROXY",
-      job.pull.git_proxy.as_deref().unwrap_or_default(),
-    )
-    .env(
-      "HTTP_PROXY",
-      job.pull.git_proxy.as_deref().unwrap_or_default(),
-    )
+    .env("HTTPS_PROXY", &proxy)
+    .env("HTTP_PROXY", &proxy)
     .envs(github_mirror_env(job.pull.github_mirror.as_deref()))
     .timeout(LS_REMOTE_TIMEOUT)
     .run(ctx)

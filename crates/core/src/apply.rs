@@ -788,6 +788,9 @@ async fn run_step(
       )
       .await?;
     }
+    Step::Egress { server } => {
+      crate::egress::apply(state, server, cancel).await?;
+    }
     Step::Prune { server } => {
       crate::prune::prune(state, server, progress, cancel).await?;
     }
