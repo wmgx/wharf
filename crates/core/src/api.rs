@@ -1294,9 +1294,57 @@ async fn make_plan(
   Json(req): Json<PlanRequest>,
 ) -> ApiResult<Plan> {
   auth.require(Perm::Plan)?;
+  if !auth.human {
+    guard_dangerous(&s, &req).await?;
+  }
   let planned = planner::make_plan(&s, req).await?;
   planner::save(&s, &planned).await?;
   Ok(Json(planned.plan))
+}
+
+/// 宿主机终端、宿主机命令执行这类危险开关：API token（CLI、AI）只能关，打开要人在页面上操作。
+async fn guard_dangerous(
+  s: &AppState,
+  req: &PlanRequest,
+) -> Result<(), ApiError> {
+  let snap = crate::snapshot::load(&s.db).await?;
+  let wanted = req
+    .changes
+    .iter()
+    .filter_map(|c| match c {
+      wharf_api_types::spec::Change::UpdateServer {
+        name,
+        settings,
+      } => Some((name, settings)),
+      _ => None,
+    })
+    .chain(req.fleet.iter().flat_map(|f| f.servers.iter()));
+  for (name, after) in wanted {
+    let before = snap.world.servers.get(name).map(|r| &r.settings);
+    let was =
+      |f: fn(&wharf_api_types::spec::ServerSettings) -> bool| {
+        before.is_some_and(f)
+      };
+    let opened = [
+      (
+        "宿主机终端",
+        after.host_terminal && !was(|b| b.host_terminal),
+      ),
+      ("宿主机命令执行", after.host_exec && !was(|b| b.host_exec)),
+    ];
+    if let Some((what, _)) = opened.iter().find(|(_, o)| *o) {
+      return Err(
+        ApiError::new(
+          ErrorCode::Forbidden,
+          format!("不能用 API token 打开 {name} 的{what}，只能关"),
+        )
+        .with_hint(format!(
+          "请用户在页面\u{201c}服务器详情 → {name} → 设置\u{201d}里打开"
+        )),
+      );
+    }
+  }
+  Ok(())
 }
 
 async fn show_plan(
