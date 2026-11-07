@@ -105,6 +105,8 @@ pub struct Auth {
   #[allow(dead_code)]
   pub name: String,
   pub perms: BTreeSet<Perm>,
+  /// 页面登录（人）。API token（CLI、AI）为 false。
+  pub human: bool,
 }
 
 impl Auth {
@@ -166,6 +168,7 @@ impl FromRequestParts<Arc<AppState>> for Auth {
       return Ok(Auth {
         name: format!("页面:{user}"),
         perms: Perm::ALL.into_iter().collect(),
+        human: true,
       });
     };
     let hash = hash_token(token);
@@ -178,6 +181,7 @@ impl FromRequestParts<Arc<AppState>> for Auth {
     Ok(Auth {
       name,
       perms: decode_perms(&perms).ok_or_else(unauthorized)?,
+      human: false,
     })
   }
 }
