@@ -436,6 +436,9 @@ pub struct ProbeView {
   /// 连续失败次数。
   #[serde(default)]
   pub fails: u32,
+  /// https 证书还剩几天。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub cert_days: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
