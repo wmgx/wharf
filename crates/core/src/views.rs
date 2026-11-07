@@ -501,6 +501,7 @@ pub async fn status(
   problems.extend(crate::alerts::problems());
   problems.extend(crate::monitor::problems());
   problems.extend(crate::baseline::problems());
+  problems.extend(crate::host_units::problems());
   let mut edge_unmanaged: Vec<EdgeProjectView> =
     snap.edge_accounts.values().flatten().cloned().collect();
   crate::edge_sync::mark_managed(&snap, &mut edge_unmanaged);

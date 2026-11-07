@@ -33,6 +33,7 @@ mod failover;
 mod files_api;
 mod heal;
 mod host_dir;
+mod host_units;
 mod hub;
 mod import;
 mod import_api;
@@ -175,6 +176,7 @@ async fn main() -> anyhow::Result<()> {
   quality::spawn(state.clone());
   baseline::spawn(state.clone());
   disk::spawn(state.clone());
+  host_units::spawn(state.clone());
   failover::spawn(state.clone());
   tasks::spawn(state.clone());
   views::spawn_live(state.clone());

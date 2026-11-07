@@ -23,6 +23,7 @@ import { MetricsPanel } from "@/components/metrics";
 import { ServerLinks } from "./server-links";
 import { ServerBaseline } from "./server-baseline";
 import { ServerDisk } from "./server-disk";
+import { ServerHostUnits } from "./server-host-units";
 import { ServiceUsage } from "@/components/usage";
 import {
   Dot,
@@ -243,6 +244,7 @@ export function ServerDetail() {
           <TabsTrigger value="metrics">资源</TabsTrigger>
           <TabsTrigger value="system">系统</TabsTrigger>
           <TabsTrigger value="network">网络</TabsTrigger>
+          <TabsTrigger value="host">宿主机程序</TabsTrigger>
           <TabsTrigger value="terminal">终端</TabsTrigger>
           <TabsTrigger value="settings">设置</TabsTrigger>
         </TabsList>
@@ -399,6 +401,10 @@ export function ServerDetail() {
               }
             />
           )}
+        </TabsContent>
+
+        <TabsContent value="host" className="mt-4">
+          {tab === "host" && <ServerHostUnits server={name} online={server.online} />}
         </TabsContent>
 
         <TabsContent value="network" className="mt-4">

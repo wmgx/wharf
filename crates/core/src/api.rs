@@ -124,6 +124,18 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route("/api/servers/{name}/prune", post(crate::prune::prune_now))
     .route("/api/servers/{name}/disk", get(crate::disk::show))
     .route(
+      "/api/servers/{name}/host-units",
+      get(crate::host_units::list),
+    )
+    .route(
+      "/api/servers/{name}/host-units/{unit}/watch",
+      axum::routing::put(crate::host_units::set_watch),
+    )
+    .route(
+      "/api/servers/{name}/host-units/{unit}/logs",
+      get(crate::host_units::logs),
+    )
+    .route(
       "/api/servers/{name}/disk/measure",
       post(crate::disk::measure_now),
     )
