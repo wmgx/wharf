@@ -20,6 +20,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/api";
 import { useActions } from "@/components/actions";
 import { MetricsPanel } from "@/components/metrics";
+import { ServiceUsage } from "@/components/usage";
 import {
   Dot,
   Empty,
@@ -346,6 +347,7 @@ export function ServerDetail() {
 
         <TabsContent value="metrics" className="mt-4">
           <MetricsPanel subject={name} kind="host" title="" />
+          <ServiceUsage server={name} />
         </TabsContent>
 
         <TabsContent value="system" className="mt-4">
