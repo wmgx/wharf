@@ -1,3 +1,4 @@
+import { Checkbox } from "@/components/ui/checkbox";
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
@@ -207,13 +208,13 @@ export function ActionsProvider({ children }: { children: ReactNode }) {
     });
   };
 
-  const confirmRemove = (name: string) => {
+  const confirmRemove = (name: string, purge: boolean) => {
     const routes = status?.routes.filter((r) => r.spec.service === name) ?? [];
     setRemoving(null);
     actions.plan({
-      title: `删除 ${name}`,
+      title: purge ? `删除 ${name} 和它的数据` : `删除 ${name}`,
       then: "/",
-      changes: [...routes.map((r) => ({ op: "remove_route", hostname: r.spec.hostname }) as Change), { op: "remove_service", name }],
+      changes: [...routes.map((r) => ({ op: "remove_route", hostname: r.spec.hostname }) as Change), { op: "remove_service", name, purge_data: purge || undefined }],
     });
   };
 
@@ -276,9 +277,13 @@ export function ActionsProvider({ children }: { children: ReactNode }) {
 }
 
 /** 删除前输入 `service/名称` 确认，和 CLI 的 `--confirm` 一样。 */
-function RemoveDialog({ name, onCancel, onConfirm }: { name: string | null; onCancel: () => void; onConfirm: (name: string) => void }) {
+function RemoveDialog({ name, onCancel, onConfirm }: { name: string | null; onCancel: () => void; onConfirm: (name: string, purge: boolean) => void }) {
   const [typed, setTyped] = useState("");
-  useEffect(() => setTyped(""), [name]);
+  const [purge, setPurge] = useState(false);
+  useEffect(() => {
+    setTyped("");
+    setPurge(false);
+  }, [name]);
   const expect = `service/${name}`;
   return (
     <AlertDialog open={!!name} onOpenChange={(o) => !o && onCancel()}>
@@ -286,18 +291,31 @@ function RemoveDialog({ name, onCancel, onConfirm }: { name: string | null; onCa
         <AlertDialogHeader>
           <AlertDialogTitle>删除服务 {name}？</AlertDialogTitle>
           <AlertDialogDescription>
-            会停止并删除它的容器，连同它的域名一起移除。数据卷保留。输入 <code className="font-mono text-foreground">{expect}</code> 确认。
+            会停止并删除它的容器，连同它的域名一起移除。输入 <code className="font-mono text-foreground">{expect}</code> 确认。
           </AlertDialogDescription>
         </AlertDialogHeader>
+        <label className="flex cursor-pointer items-start gap-2.5 text-sm">
+          <Checkbox className="mt-0.5" checked={purge} onCheckedChange={(v) => setPurge(v === true)} />
+          <span>
+            连同数据一起删除
+            <span className="block text-xs text-muted-foreground">
+              {purge ? (
+                <span className="text-destructive">/srv/{name} 目录和 compose 里声明的命名卷会被永久删除，不能恢复；外部目录不动。</span>
+              ) : (
+                "不勾选时数据保留在服务器上，以后重新部署同名服务还能接着用。"
+              )}
+            </span>
+          </span>
+        </label>
         <Input autoFocus value={typed} onChange={(e) => setTyped(e.target.value)} placeholder={expect} className="font-mono" />
         <AlertDialogFooter>
           <AlertDialogCancel>取消</AlertDialogCancel>
           <AlertDialogAction
             disabled={typed.trim() !== expect}
             className="bg-destructive text-white hover:bg-destructive/90"
-            onClick={() => name && onConfirm(name)}
+            onClick={() => name && onConfirm(name, purge)}
           >
-            生成删除计划
+            {purge ? "生成删除计划（含数据）" : "生成删除计划"}
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>

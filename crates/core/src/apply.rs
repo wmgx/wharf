@@ -881,13 +881,18 @@ async fn run_step(
       crate::edge::rollback(state, &snap, app, version, &progress)
         .await?;
     }
-    Step::ServiceDown { server, service } => {
+    Step::ServiceDown {
+      server,
+      service,
+      purge_data,
+    } => {
       state
         .hub
         .call::<serde_json::Value>(
           server,
           AgentOp::ProjectDown {
             project: service.clone(),
+            purge: *purge_data,
           },
           SHORT_TIMEOUT,
           Some(progress),
@@ -1037,6 +1042,7 @@ async fn run_step(
           server,
           AgentOp::ProjectDown {
             project: project.clone(),
+            purge: false,
           },
           SHORT_TIMEOUT,
           Some(progress),
@@ -1051,6 +1057,7 @@ async fn run_step(
           server,
           AgentOp::ProjectDown {
             project: gateway_project(gateway),
+            purge: false,
           },
           SHORT_TIMEOUT,
           Some(progress.clone()),
@@ -1446,6 +1453,7 @@ async fn restore(
       server,
       AgentOp::ProjectDown {
         project: service.to_string(),
+        purge: false,
       },
       SHORT_TIMEOUT,
       Some(progress.clone()),

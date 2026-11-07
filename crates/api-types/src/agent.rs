@@ -199,9 +199,11 @@ pub enum AgentOp {
   },
   /// 写入 compose、拉镜像、`up -d`。结果是 [ProjectUpResult]。
   ProjectUp(ProjectUp),
-  /// `down` 并删除 project 目录。数据目录保留。
+  /// `down` 并删除 project 目录。数据目录保留；`purge` 时连同 `/srv/<project>` 和 compose 声明的命名卷一起删。
   ProjectDown {
     project: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    purge: bool,
   },
   /// 最近的日志，结果是字符串。`follow` 时持续把新日志作为进度推送，
   /// 直到被取消或超时，结果是空字符串。

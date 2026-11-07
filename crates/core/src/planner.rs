@@ -164,6 +164,9 @@ pub enum Step {
   ServiceDown {
     server: String,
     service: String,
+    /// 连同数据目录和命名卷一起删。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    purge_data: bool,
   },
   /// 发布边缘应用的代码。
   EdgeDeploy {
@@ -266,6 +269,8 @@ pub(crate) struct Builder {
   pub(crate) warnings: Vec<String>,
   /// 这次计划查到的镜像 ID：服务 → `sha256:…`。
   image_ids: BTreeMap<String, String>,
+  /// 删除时连同数据一起删的服务。
+  purge_data: BTreeSet<String>,
 }
 
 impl Builder {
@@ -414,6 +419,17 @@ pub async fn make_plan(
   let mut b = Builder {
     image_ids: resolved.image_ids,
     warnings,
+    purge_data: req
+      .changes
+      .iter()
+      .filter_map(|c| match c {
+        wharf_api_types::spec::Change::RemoveService {
+          name,
+          purge_data: true,
+        } => Some(name.clone()),
+        _ => None,
+      })
+      .collect(),
     ..Builder::default()
   };
   config_items(&mut b, &current, &desired, &writes);
@@ -1023,6 +1039,7 @@ fn service_items(
         Step::ServiceDown {
           server: server.clone(),
           service: name.clone(),
+          purge_data: false,
         },
       );
       continue;
@@ -1037,18 +1054,33 @@ fn service_items(
       vec![Impact::Remove],
       "停止并删除容器",
     );
+    let purge = b.purge_data.contains(name);
     for m in crate::data::mounts(name, &svc.spec) {
-      b.warnings.push(format!(
-        "服务 {name} 的{} 会保留在 {server} 上，需要时手动删除",
-        crate::data::describe(&m)
-      ));
+      let gone = purge
+        && m.kind != wharf_api_types::view::DataKind::ExternalDir;
+      b.warnings.push(if gone {
+        format!(
+          "服务 {name} 的{} 会被永久删除，不能恢复",
+          crate::data::describe(&m)
+        )
+      } else {
+        format!(
+          "服务 {name} 的{} 会保留在 {server} 上，需要时手动删除",
+          crate::data::describe(&m)
+        )
+      });
     }
     b.step(
       vec![id],
-      format!("在 {server} 上删除 {name}"),
+      if purge {
+        format!("在 {server} 上删除 {name} 和它的数据")
+      } else {
+        format!("在 {server} 上删除 {name}")
+      },
       Step::ServiceDown {
         server: server.clone(),
         service: name.clone(),
+        purge_data: purge,
       },
     );
   }
@@ -1104,6 +1136,7 @@ fn leftover_items(
       Step::ServiceDown {
         server: server.to_string(),
         service: name.to_string(),
+        purge_data: false,
       },
     );
   }

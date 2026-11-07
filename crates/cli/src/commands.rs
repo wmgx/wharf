@@ -1605,8 +1605,18 @@ async fn service(
       )
       .await
     }
-    ServiceCmd::Rm { name, apply } => {
-      changes(c, vec![Change::RemoveService { name }], apply, j).await
+    ServiceCmd::Rm {
+      name,
+      purge_data,
+      apply,
+    } => {
+      changes(
+        c,
+        vec![Change::RemoveService { name, purge_data }],
+        apply,
+        j,
+      )
+      .await
     }
     ServiceCmd::Rebuild { name, no_wait } => {
       // 用 gh token 的服务先刷新密钥，gh 重新登录后旧 token 会失效。
