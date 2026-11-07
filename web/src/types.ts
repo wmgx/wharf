@@ -227,6 +227,16 @@ export interface RouteView {
   gateway?: string;
   upstream?: string;
   url: string;
+  probe?: ProbeView;
+}
+
+/** 域名探测（控制面每 5 分钟一次）。 */
+export interface ProbeView {
+  ok: boolean;
+  detail: string;
+  ms: number;
+  at: number;
+  fails: number;
 }
 
 export type EdgeKind = "worker" | "pages";

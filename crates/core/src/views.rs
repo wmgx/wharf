@@ -393,6 +393,7 @@ pub fn route_view(
     spec: row.spec.clone(),
     gateway,
     upstream,
+    probe: crate::probe::last(hostname),
     url,
     version: row.version,
   })
@@ -480,6 +481,7 @@ pub async fn status(
     }
   }
   problems.extend(crate::tasks::problems(state).await);
+  problems.extend(crate::probe::problems());
   let mut edge_unmanaged: Vec<EdgeProjectView> =
     snap.edge_accounts.values().flatten().cloned().collect();
   crate::edge_sync::mark_managed(&snap, &mut edge_unmanaged);
