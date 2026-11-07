@@ -48,7 +48,8 @@ export interface ServerView {
   settings: Record<string, unknown> & {
     host_terminal: boolean;
     host_exec: boolean;
-    egress?: boolean;
+    egress?: EgressSpec;
+    via?: string;
   };
   joined: boolean;
   online: boolean;
@@ -673,3 +674,11 @@ export interface TaskView {
   next_at?: string;
   updated_at: string;
 }
+
+/** 出口规则：全部走，或预置分组加自定义域名。 */
+export type EgressSpec = {
+  all?: boolean;
+  presets?: string[];
+  domains?: string[];
+};
+export type EgressPreset = { name: string; label: string; domains: string[] };

@@ -278,8 +278,9 @@ pub enum AgentOp {
   HostExec(HostExecJob),
   /// 定时任务：在服务容器里执行命令，或跑一次性容器。结果是 [TaskRunResult]。
   TaskRun(TaskRunJob),
-  /// 设置这台机器的出口代理，`None` 关闭。配置存在 agent 数据目录，重启后自动恢复。
-  Egress(Option<EgressConfig>),
+  /// 设置这台机器的出口：提供出口、本地分流，两部分都可以没有。
+  /// 配置存在 agent 数据目录，重启后自动恢复。
+  Egress(EgressConfig),
   /// 读宿主机的系统版本、待装更新、docker 和日志占用，结果是 [HostInfo]。只读。
   HostInfo,
   /// 上一次升级接班容器的最后几十行日志，升级失败时控制面拿来显示原因。结果是字符串。
@@ -1066,13 +1067,30 @@ pub struct TaskRunResult {
   pub duration_ms: u64,
 }
 
-/// 出口代理：监听内网地址，要口令。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(
+  Debug, Clone, Default, PartialEq, Serialize, Deserialize,
+)]
 pub struct EgressConfig {
+  /// 提供出口：在内网地址 `bind` 上起代理，要口令。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub serve: Option<EgressServe>,
+  /// 本地分流：在 127.0.0.1 和 docker 网桥地址上起代理，命中规则的转给出口。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub route: Option<EgressRoute>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EgressServe {
   pub bind: String,
-  pub port: u16,
   pub token: String,
 }
 
-/// 出口代理的端口。
-pub const EGRESS_PORT: u16 = 8118;
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EgressRoute {
+  /// 出口的 `内网地址:端口`。
+  pub exit: String,
+  pub token: String,
+  pub all: bool,
+  /// 已展开的域名清单。
+  pub domains: Vec<String>,
+}

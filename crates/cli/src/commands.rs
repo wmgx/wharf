@@ -121,21 +121,26 @@ async fn dispatch(
     Command::Upgrade => upgrade(c, j).await,
     Command::Egress { cmd } => {
       let v: Value = match cmd {
-        Some(EgressCmd::Api { value }) => {
-          c.put("/api/egress", &json!({ "api_proxy": value })).await?
+        Some(EgressCmd::Api { server }) => {
+          c.put("/api/egress", &json!({ "via": server })).await?
+        }
+        Some(EgressCmd::Presets) => {
+          let v = json!(wharf_api_types::egress::PRESETS
+            .iter()
+            .map(|(n, d, hosts)| json!({ "name": n, "label": d, "domains": hosts }))
+            .collect::<Vec<_>>());
+          out(j, &v, |_| {
+            for (n, d, hosts) in wharf_api_types::egress::PRESETS {
+              println!("{n:<11}{d}：{}", hosts.join(" "));
+            }
+          });
+          return Ok(());
         }
         None => c.get("/api/egress").await?,
       };
-      out(j, &v, |v| {
-        let p = v["api_proxy"].as_str().unwrap_or("");
-        println!(
-          "调厂商 API：{}",
-          match p {
-            "" => "直连".to_string(),
-            p if !p.contains("://") => format!("经 {p} 出口"),
-            p => p.to_string(),
-          }
-        );
+      out(j, &v, |v| match v["via"].as_str() {
+        Some(s) => println!("调厂商 API：按 {s} 出口的规则分流"),
+        None => println!("调厂商 API：直连"),
       });
       Ok(())
     }
@@ -695,6 +700,7 @@ async fn server(
       git_proxy,
       pull_proxy,
       egress,
+      via,
       github_mirror,
       host_terminal,
       host_exec,
@@ -763,10 +769,10 @@ async fn server(
       }
       if let Some(p) = git_proxy {
         let p = p.trim();
-        if p.contains("://") && !p.starts_with("http://") {
+        if !p.is_empty() && !p.starts_with("http://") {
           return Err(
             ApiError::invalid(format!(
-              "--git-proxy {p} 要写服务器名或 http:// 地址"
+              "--git-proxy {p} 要以 http:// 开头"
             ))
             .into(),
           );
@@ -775,10 +781,10 @@ async fn server(
       }
       if let Some(p) = pull_proxy {
         let p = p.trim();
-        if p.contains("://") && !p.starts_with("http://") {
+        if !p.is_empty() && !p.starts_with("http://") {
           return Err(
             ApiError::invalid(format!(
-              "--pull-proxy {p} 要写服务器名或 http:// 地址"
+              "--pull-proxy {p} 要以 http:// 开头"
             ))
             .into(),
           );
@@ -786,7 +792,11 @@ async fn server(
         settings.pull_proxy = (!p.is_empty()).then(|| p.to_string());
       }
       if let Some(e) = egress {
-        settings.egress = e;
+        settings.egress = parse_egress(&e)?;
+      }
+      if let Some(v) = via {
+        let v = v.trim();
+        settings.via = (!v.is_empty()).then(|| v.to_string());
       }
       if let Some(m) = github_mirror {
         let m = m.trim().trim_end_matches('/');
@@ -1972,6 +1982,26 @@ async fn token(c: &Client, cmd: TokenCmd, j: bool) -> CliResult<()> {
       Ok(())
     }
   }
+}
+
+/// `--egress`：`off` 关闭，`all` 全部走，否则逗号分隔的预置分组名和域名。
+fn parse_egress(
+  v: &str,
+) -> Result<Option<wharf_api_types::egress::EgressSpec>, CliError> {
+  let v = v.trim();
+  if v.is_empty() || v == "off" {
+    return Ok(None);
+  }
+  let mut spec = wharf_api_types::egress::EgressSpec::default();
+  for part in v.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+    match part {
+      "all" => spec.all = true,
+      p if p.contains('.') => spec.domains.push(p.to_lowercase()),
+      p => spec.presets.push(p.to_string()),
+    }
+  }
+  spec.validate().map_err(ApiError::invalid)?;
+  Ok(Some(spec))
 }
 
 #[cfg(test)]

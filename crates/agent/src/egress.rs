@@ -1,12 +1,17 @@
-//! 出口：在内网地址上跑一个 HTTP 代理，给别的机器访问海外地址用。
+//! 出口（p8），两种监听都跑在 agent 进程里：
 //!
-//! - 支持 `CONNECT host:port`（https）和绝对地址的普通 HTTP 请求（`GET http://…`）；
-//! - 要 `Proxy-Authorization: Basic wharf:<口令>`，不对一律 407；
-//! - 配置存在数据目录的 `egress.json`，agent 重启后自动恢复。
+//! - 提供出口（serve）：在内网地址的 8118 端口起 HTTP 代理，要 `Proxy-Authorization: Basic wharf:<口令>`；
+//! - 本地分流（route）：在 8119 端口起 HTTP 代理，只接受本机和 docker 网段来的连接。
+//!   命中规则的经出口（CONNECT 隧道）出去，其余直连；出口连不上时也直连。
+//!   dockerd、构建、拉代码都指向它，改规则不用重启 dockerd。
+//!
+//! 两种都支持 `CONNECT host:port` 和绝对地址的普通 HTTP 请求。
+//! 配置存在数据目录的 `egress.json`，agent 重启后自动恢复。
 
 use std::{
+  net::{IpAddr, SocketAddr},
   path::{Path, PathBuf},
-  sync::Mutex,
+  sync::{Arc, Mutex},
   time::Duration,
 };
 
@@ -16,14 +21,20 @@ use tokio::{
   net::{TcpListener, TcpStream},
 };
 use tokio_util::sync::CancellationToken;
-use wharf_api_types::{ApiError, agent::EgressConfig};
+use wharf_api_types::{
+  ApiError,
+  agent::{EgressConfig, EgressRoute},
+  egress::{LOCAL_PORT, SERVE_PORT, via_exit},
+};
 
 const FILE: &str = "egress.json";
 const HEAD_LIMIT: usize = 16 * 1024;
 const HEAD_TIMEOUT: Duration = Duration::from_secs(10);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// 连出口的超时：超过就当出口不通，改用直连。
+const EXIT_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// 正在运行的代理：配置和停止它用的 token。
+/// 正在运行的配置和停止它用的 token。
 static RUNNING: Mutex<Option<(EgressConfig, CancellationToken)>> =
   Mutex::new(None);
 
@@ -35,49 +46,36 @@ pub fn restore(data_dir: &Path) {
   match serde_json::from_str::<EgressConfig>(&text) {
     Ok(cfg) => {
       if let Err(e) = start(cfg) {
-        tracing::warn!("恢复出口代理失败：{}", e.message);
+        tracing::warn!("恢复出口失败：{}", e.message);
       }
     }
     Err(e) => tracing::warn!("出口配置读不了：{e}"),
   }
 }
 
-/// 设置出口：`None` 关闭。配置没变时什么都不做。
+/// 设置出口。配置没变时什么都不做。
 pub async fn apply(
   data_dir: PathBuf,
-  cfg: Option<EgressConfig>,
+  cfg: EgressConfig,
 ) -> Result<(), ApiError> {
   let same = RUNNING
     .lock()
-    .map(|r| r.as_ref().map(|(c, _)| c) == cfg.as_ref())
+    .map(|r| r.as_ref().map(|(c, _)| c) == Some(&cfg))
     .unwrap_or(false);
-  if same && cfg.is_some() {
+  if same {
     return Ok(());
   }
   stop();
   let path = data_dir.join(FILE);
-  match cfg {
-    Some(cfg) => {
-      // 先确认能监听，再保存配置。
-      let probe =
-        std::net::TcpListener::bind((cfg.bind.as_str(), cfg.port));
-      drop(probe.map_err(|e| {
-        ApiError::invalid(format!(
-          "出口不能监听 {}:{}：{e}",
-          cfg.bind, cfg.port
-        ))
-      })?);
-      start(cfg.clone())?;
-      write_private(
-        &path,
-        &serde_json::to_string(&cfg).unwrap_or_default(),
-      )
-    }
-    None => {
-      let _ = std::fs::remove_file(&path);
-      Ok(())
-    }
+  if cfg.serve.is_none() && cfg.route.is_none() {
+    let _ = std::fs::remove_file(&path);
+    return Ok(());
   }
+  start(cfg.clone())?;
+  write_private(
+    &path,
+    &serde_json::to_string(&cfg).unwrap_or_default(),
+  )
 }
 
 fn write_private(path: &Path, text: &str) -> Result<(), ApiError> {
@@ -103,58 +101,107 @@ fn stop() {
   }
 }
 
-fn start(cfg: EgressConfig) -> Result<(), ApiError> {
-  let cancel = CancellationToken::new();
-  let std_listener =
-    std::net::TcpListener::bind((cfg.bind.as_str(), cfg.port))
-      .map_err(|e| {
-        ApiError::invalid(format!(
-          "出口不能监听 {}:{}：{e}",
-          cfg.bind, cfg.port
-        ))
-      })?;
-  std_listener
-    .set_nonblocking(true)
-    .map_err(|e| ApiError::internal(e.to_string()))?;
-  let listener = TcpListener::from_std(std_listener)
-    .map_err(|e| ApiError::internal(e.to_string()))?;
-  let expected = format!(
+fn basic(token: &str) -> String {
+  format!(
     "Basic {}",
     base64::engine::general_purpose::STANDARD
-      .encode(format!("wharf:{}", cfg.token))
-  );
-  tracing::info!("出口代理监听 {}:{}", cfg.bind, cfg.port);
-  let stop = cancel.clone();
-  tokio::spawn(async move {
-    loop {
-      let accepted = tokio::select! {
-        a = listener.accept() => a,
-        _ = stop.cancelled() => break,
-      };
-      let Ok((conn, _)) = accepted else { continue };
-      let expected = expected.clone();
-      let stop = stop.clone();
-      tokio::spawn(async move {
-        tokio::select! {
-          r = handle(conn, &expected) => {
-            if let Err(e) = r {
-              tracing::debug!("出口连接结束：{e}");
-            }
-          }
-          _ = stop.cancelled() => {}
+      .encode(format!("wharf:{token}"))
+  )
+}
+
+#[derive(Clone)]
+enum Mode {
+  /// 提供出口：要口令，直连目标。
+  Serve { expected: String },
+  /// 本地分流：按规则经出口或直连。
+  Route(Arc<EgressRoute>),
+}
+
+fn listen(addr: (&str, u16)) -> Result<TcpListener, ApiError> {
+  let l = std::net::TcpListener::bind(addr).map_err(|e| {
+    ApiError::invalid(format!(
+      "出口不能监听 {}:{}：{e}",
+      addr.0, addr.1
+    ))
+  })?;
+  l.set_nonblocking(true)
+    .map_err(|e| ApiError::internal(e.to_string()))?;
+  TcpListener::from_std(l)
+    .map_err(|e| ApiError::internal(e.to_string()))
+}
+
+fn start(cfg: EgressConfig) -> Result<(), ApiError> {
+  // 先把要监听的都绑上，有一个失败就都不起。
+  let mut listeners = Vec::new();
+  if let Some(s) = &cfg.serve {
+    listeners.push((
+      listen((s.bind.as_str(), SERVE_PORT))?,
+      Mode::Serve {
+        expected: basic(&s.token),
+      },
+    ));
+    tracing::info!("出口代理监听 {}:{SERVE_PORT}", s.bind);
+  }
+  if let Some(r) = &cfg.route {
+    listeners.push((
+      listen(("0.0.0.0", LOCAL_PORT))?,
+      Mode::Route(Arc::new(r.clone())),
+    ));
+    tracing::info!("本地分流代理监听 {LOCAL_PORT}，出口 {}", r.exit);
+  }
+  let cancel = CancellationToken::new();
+  for (listener, mode) in listeners {
+    let stop = cancel.clone();
+    tokio::spawn(async move {
+      loop {
+        let accepted = tokio::select! {
+          a = listener.accept() => a,
+          _ = stop.cancelled() => break,
+        };
+        let Ok((conn, peer)) = accepted else { continue };
+        if matches!(mode, Mode::Route(_)) && !local_peer(peer) {
+          continue;
         }
-      });
-    }
-  });
+        let mode = mode.clone();
+        let stop = stop.clone();
+        tokio::spawn(async move {
+          tokio::select! {
+            r = handle(conn, &mode) => {
+              if let Err(e) = r {
+                tracing::debug!("出口连接结束：{e}");
+              }
+            }
+            _ = stop.cancelled() => {}
+          }
+        });
+      }
+    });
+  }
   if let Ok(mut r) = RUNNING.lock() {
     *r = Some((cfg, cancel));
   }
   Ok(())
 }
 
+/// 本地分流只接受本机和 docker 网段（172.16.0.0/12）来的连接。
+fn local_peer(peer: SocketAddr) -> bool {
+  match peer.ip() {
+    IpAddr::V4(ip) => {
+      let o = ip.octets();
+      ip.is_loopback() || (o[0] == 172 && (16..32).contains(&o[1]))
+    }
+    IpAddr::V6(ip) => {
+      ip.is_loopback()
+        || ip.to_ipv4_mapped().is_some_and(|v4| {
+          local_peer(SocketAddr::new(IpAddr::V4(v4), peer.port()))
+        })
+    }
+  }
+}
+
 async fn handle(
   mut client: TcpStream,
-  expected: &str,
+  mode: &Mode,
 ) -> std::io::Result<()> {
   let head =
     tokio::time::timeout(HEAD_TIMEOUT, read_head(&mut client))
@@ -163,28 +210,54 @@ async fn handle(
   let Some(req) = parse(&head.text) else {
     return reply(&mut client, "400 Bad Request").await;
   };
-  if !same(req.auth.unwrap_or_default(), expected) {
-    return client
-      .write_all(
-        b"HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"wharf\"\r\nContent-Length: 0\r\n\r\n",
-      )
-      .await;
-  }
-  let upstream = match tokio::time::timeout(
-    CONNECT_TIMEOUT,
-    TcpStream::connect(&req.target),
-  )
-  .await
-  {
-    Ok(Ok(s)) => s,
-    _ => return reply(&mut client, "502 Bad Gateway").await,
+  let tunneled = match mode {
+    Mode::Serve { expected } => {
+      if !same(req.auth.unwrap_or_default(), expected) {
+        return client
+          .write_all(
+            b"HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"wharf\"\r\nContent-Length: 0\r\n\r\n",
+          )
+          .await;
+      }
+      None
+    }
+    Mode::Route(r)
+      if via_exit(host_of(&req.target), r.all, &r.domains) =>
+    {
+      match through_exit(r, &req.target).await {
+        Ok(Ok(t)) => Some(t),
+        // 出口连上了但它连不上目标：照实告诉客户端。
+        Ok(Err(status)) => return reply(&mut client, &status).await,
+        Err(e) => {
+          tracing::debug!(
+            "出口 {} 连不上（{e}），{} 改用直连",
+            r.exit,
+            req.target
+          );
+          None
+        }
+      }
+    }
+    Mode::Route(_) => None,
   };
-  let mut upstream = upstream;
+  let (mut upstream, early) = match tunneled {
+    Some(t) => t,
+    None => match tokio::time::timeout(
+      CONNECT_TIMEOUT,
+      TcpStream::connect(&req.target),
+    )
+    .await
+    {
+      Ok(Ok(s)) => (s, Vec::new()),
+      _ => return reply(&mut client, "502 Bad Gateway").await,
+    },
+  };
   match req.forward {
     None => {
       client
         .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
         .await?;
+      client.write_all(&early).await?;
       upstream.write_all(&head.rest).await?;
     }
     Some(first) => {
@@ -194,6 +267,50 @@ async fn handle(
   }
   tokio::io::copy_bidirectional(&mut client, &mut upstream).await?;
   Ok(())
+}
+
+/// `host:port` 或 `[v6]:port` 里的主机部分。
+fn host_of(target: &str) -> &str {
+  match target.rsplit_once(':') {
+    Some((h, _)) => h.trim_matches(['[', ']']),
+    None => target,
+  }
+}
+
+/// 经出口打通到 `target` 的隧道。外层错误表示出口本身连不上（应改用直连），
+/// 内层错误是出口返回的失败状态。
+async fn through_exit(
+  r: &EgressRoute,
+  target: &str,
+) -> std::io::Result<Result<(TcpStream, Vec<u8>), String>> {
+  let mut exit =
+    tokio::time::timeout(EXIT_TIMEOUT, TcpStream::connect(&r.exit))
+      .await
+      .map_err(|_| std::io::Error::other("连接超时"))??;
+  exit
+    .write_all(
+      format!(
+        "CONNECT {target} HTTP/1.1\r\nHost: {target}\r\nProxy-Authorization: {}\r\n\r\n",
+        basic(&r.token)
+      )
+      .as_bytes(),
+    )
+    .await?;
+  let head =
+    tokio::time::timeout(CONNECT_TIMEOUT, read_head(&mut exit))
+      .await
+      .map_err(|_| std::io::Error::other("出口应答超时"))??;
+  let status = head.text.lines().next().unwrap_or("").to_string();
+  let code = status.split(' ').nth(1).unwrap_or("");
+  Ok(match code {
+    "200" => Ok((exit, head.rest)),
+    "" => Err("502 Bad Gateway".into()),
+    _ => Err(
+      status
+        .split_once(' ')
+        .map_or("502 Bad Gateway".into(), |(_, s)| s.to_string()),
+    ),
+  })
 }
 
 async fn reply(
@@ -343,14 +460,13 @@ mod tests {
     });
     let proxy = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = proxy.local_addr().unwrap();
-    let expected = format!(
-      "Basic {}",
-      base64::engine::general_purpose::STANDARD.encode("wharf:t0ken")
-    );
+    let mode = Mode::Serve {
+      expected: basic("t0ken"),
+    };
     tokio::spawn(async move {
       while let Ok((c, _)) = proxy.accept().await {
-        let e = expected.clone();
-        tokio::spawn(async move { handle(c, &e).await });
+        let m = mode.clone();
+        tokio::spawn(async move { handle(c, &m).await });
       }
     });
     let ask = |auth: &'static str| async move {
@@ -373,5 +489,55 @@ mod tests {
     assert!(ok.ends_with("hi"), "{ok}");
     let bad = ask("d2hhcmY6d3Jvbmc=").await;
     assert!(bad.starts_with("HTTP/1.1 407"), "{bad}");
+  }
+
+  #[tokio::test]
+  async fn routes_through_exit() {
+    let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target = upstream.local_addr().unwrap().to_string();
+    tokio::spawn(async move {
+      while let Ok((mut c, _)) = upstream.accept().await {
+        let _ = c.write_all(b"hi").await;
+      }
+    });
+    let exit = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let exit_addr = exit.local_addr().unwrap().to_string();
+    let mode = Mode::Serve {
+      expected: basic("t0ken"),
+    };
+    tokio::spawn(async move {
+      while let Ok((c, _)) = exit.accept().await {
+        let m = mode.clone();
+        tokio::spawn(async move { handle(c, &m).await });
+      }
+    });
+    let route = |token: &str, exit: &str| EgressRoute {
+      exit: exit.into(),
+      token: token.into(),
+      all: true,
+      domains: vec![],
+    };
+    let (mut s, _) =
+      through_exit(&route("t0ken", &exit_addr), &target)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut out = String::new();
+    s.read_to_string(&mut out).await.unwrap();
+    assert_eq!(out, "hi");
+    let denied = through_exit(&route("bad", &exit_addr), &target)
+      .await
+      .unwrap();
+    assert!(denied.unwrap_err().starts_with("407"));
+    // 出口不在：外层错误，调用方改直连。
+    assert!(
+      through_exit(&route("t0ken", "127.0.0.1:1"), &target)
+        .await
+        .is_err()
+    );
+    assert_eq!(host_of("[::1]:443"), "::1");
+    assert_eq!(host_of("github.com:443"), "github.com");
+    assert!(local_peer("172.17.0.2:1".parse().unwrap()));
+    assert!(!local_peer("100.64.0.2:1".parse().unwrap()));
   }
 }
