@@ -1241,11 +1241,12 @@ async fn service(
       out(j, &v, |v| {
         for d in v {
           let images: Vec<String> = d
-            .images
+            .commit
             .iter()
-            .map(|i| {
+            .map(|c| format!("commit {}", &c[..c.len().min(12)]))
+            .chain(d.images.iter().map(|i| {
               i.digest.clone().unwrap_or_else(|| i.image.clone())
-            })
+            }))
             .collect();
           println!(
             "#{} {} {} {}  {}",

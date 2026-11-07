@@ -505,7 +505,7 @@ function History({ name }: { name: string }) {
             <TableHead className="pl-4">#</TableHead>
             <TableHead>时间</TableHead>
             <TableHead>服务器</TableHead>
-            <TableHead>镜像</TableHead>
+            <TableHead>版本</TableHead>
             <TableHead />
           </TableRow>
         </TableHeader>
@@ -519,7 +519,8 @@ function History({ name }: { name: string }) {
               <TableCell>
                 <ServerTag name={d.server} />
               </TableCell>
-              <TableCell className="max-w-md truncate font-mono text-xs text-muted-foreground" title={d.images.map((im) => im.digest ?? im.image).join(" ")}>
+              <TableCell className="max-w-md truncate font-mono text-xs text-muted-foreground" title={[d.commit, ...d.images.map((im) => im.digest ?? im.image)].filter(Boolean).join(" ")}>
+                {d.commit && <span className="mr-2 text-foreground">{d.commit.slice(0, 12)}</span>}
                 {d.images.map((im) => im.digest ?? im.image).join(" ")}
               </TableCell>
               <TableCell className="pr-4 text-right">
@@ -566,7 +567,7 @@ function statusLayers(s: ServiceStatus): string[] {
   return [
     `期望：${s.want_running ? "运行" : "停止"} · ${short(s.desired_hash)}`,
     `已应用：${s.applied ? `${short(s.applied.hash)} · ${ago(s.applied.at)}` : "没有部署记录"}`,
-    `实际：${ACTUAL[s.actual]}${s.actual_hash ? ` · ${short(s.actual_hash)}` : ""}`,
+    `实际：${ACTUAL[s.actual]}${s.actual_hash ? ` · ${short(s.actual_hash)}` : ""}${s.observed_at ? ` · ${ago(s.observed_at)}看到` : ""}`,
     `健康：${HEALTH[s.health]}`,
     `执行：${op ? `${op.action}${OP[op.status]} · ${ago(op.at)}${op.error ? ` · ${op.error}` : ""}` : "-"}`,
   ];

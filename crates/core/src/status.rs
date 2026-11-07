@@ -15,6 +15,7 @@ pub struct Inputs<'a> {
   /// 这台服务器的查询结果；`None` 表示没查。
   pub live: Option<&'a Result<&'a ProjectState, &'a ApiError>>,
   pub last_op: Option<&'a LastOp>,
+  pub observed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 pub fn service_status(i: Inputs<'_>) -> ServiceStatus {
@@ -46,6 +47,7 @@ pub fn service_status(i: Inputs<'_>) -> ServiceStatus {
     tone,
     summary,
     error,
+    observed_at: i.observed_at,
   }
 }
 
@@ -182,6 +184,7 @@ mod tests {
         applied: Some(&applied),
         live: Some(&live),
         last_op: op,
+        observed_at: None,
       })
       .summary
     };

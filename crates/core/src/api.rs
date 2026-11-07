@@ -784,7 +784,7 @@ async fn deployments(
     .call(move |c| {
       let mut stmt = c
         .prepare(
-          "SELECT id, service, server, run_id, compose, images, created_at, spec, hash FROM deployments
+          "SELECT id, service, server, run_id, compose, images, created_at, spec, hash, commit_sha FROM deployments
            WHERE service = ?1 ORDER BY id DESC LIMIT 50",
         )
         .map_err(sql_err)?;
@@ -800,6 +800,7 @@ async fn deployments(
             r.get::<_, i64>(6)?,
             r.get::<_, Option<String>>(7)?,
             r.get::<_, String>(8)?,
+            r.get::<_, Option<String>>(9)?,
           ))
         })
         .map_err(sql_err)?;
@@ -817,6 +818,7 @@ async fn deployments(
     created,
     spec,
     hash,
+    commit,
   ) in rows
   {
     out.push(DeploymentView {
@@ -829,6 +831,7 @@ async fn deployments(
       spec: spec.and_then(|s| serde_json::from_str(&s).ok()),
       hash,
       created_at: to_time(created),
+      commit,
     });
   }
   Ok(Json(out))
