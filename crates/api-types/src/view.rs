@@ -465,6 +465,9 @@ pub struct RouteView {
   /// 最近一次域名体检的 HTTP(S) 结果和连续失败次数；还没检查过时为空。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub probe: Option<ProbeView>,
+  /// 主网关那台离线，DNS 现在指向备用入口（`gateway` 是备用网关）。
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub on_backup: bool,
 }
 
 /// 自定义监控的最近一次结果。

@@ -338,7 +338,7 @@ pub fn gateway_view(
   let routes = world
     .routes
     .iter()
-    .filter(|(_, r)| world.route_gateway(&r.spec) == Some(name))
+    .filter(|(_, r)| world.route_gateways(&r.spec).contains(&name))
     .map(|(h, _)| h.clone())
     .collect();
   let live = live.map(|live| {
@@ -383,7 +383,10 @@ pub fn route_view(
 ) -> Option<RouteView> {
   let world = &snap.world;
   let row = world.routes.get(hostname)?;
-  let gateway = world.route_gateway(&row.spec).map(str::to_string);
+  let gateway =
+    world.live_gateway(hostname, &row.spec).map(str::to_string);
+  let on_backup = row.spec.backup_gateway.is_some()
+    && crate::failover::active(hostname);
   let gw_spec = gateway.as_ref().and_then(|g| world.gateways.get(g));
   let upstream = gw_spec.and_then(|g| {
     world.route_upstream(net, &g.spec, hostname, &row.spec).ok()
@@ -408,6 +411,7 @@ pub fn route_view(
     probe: crate::probe::last(hostname),
     url,
     version: row.version,
+    on_backup,
   })
 }
 

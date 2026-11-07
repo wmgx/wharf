@@ -441,6 +441,33 @@ impl World {
     route.gateway.as_deref().or_else(|| self.default_gateway())
   }
 
+  /// 路由经过的全部网关：主网关，加上备用入口。
+  pub fn route_gateways<'a>(
+    &'a self,
+    route: &'a RouteSpec,
+  ) -> Vec<&'a str> {
+    let mut out: Vec<&str> =
+      self.route_gateway(route).into_iter().collect();
+    if let Some(b) = route.backup_gateway.as_deref()
+      && !out.contains(&b)
+    {
+      out.push(b);
+    }
+    out
+  }
+
+  /// 现在 DNS 应该指向的网关：切到备用入口时是备用网关。
+  pub fn live_gateway<'a>(
+    &'a self,
+    host: &str,
+    route: &'a RouteSpec,
+  ) -> Option<&'a str> {
+    match route.backup_gateway.as_deref() {
+      Some(b) if crate::failover::active(host) => Some(b),
+      _ => self.route_gateway(route),
+    }
+  }
+
   /// 绑定了这个域名的边缘应用。
   pub fn edge_domain(&self, host: &str) -> Option<(&str, &EdgeRow)> {
     self
@@ -604,7 +631,29 @@ impl World {
         ApiError::invalid(format!("路由 {host} 的网关 {gw} 不存在"))
           .suggest("wharf gateway list"),
       ),
-      Some(_) => Ok(()),
+      Some(primary) => match route.backup_gateway.as_deref() {
+        None => Ok(()),
+        Some(b) if b == primary => Err(ApiError::invalid(format!(
+          "路由 {host} 的备用入口和主网关是同一个 {b}"
+        ))),
+        Some(b) => match self.gateways.get(b) {
+          None => Err(
+            ApiError::invalid(format!(
+              "路由 {host} 的备用入口 {b} 不存在"
+            ))
+            .suggest("wharf gateway list"),
+          ),
+          Some(g)
+            if g.spec.server
+              == self.gateways[primary].spec.server =>
+          {
+            Err(ApiError::invalid(format!(
+              "路由 {host} 的备用入口 {b} 和主网关在同一台机器上，起不到备用作用"
+            )))
+          }
+          Some(_) => Ok(()),
+        },
+      },
     }
   }
 
@@ -1308,6 +1357,7 @@ mod tests {
           service: "who".into(),
           port: None,
           gateway: None,
+          backup_gateway: None,
           auth: false,
           paths: vec![],
           upstream: None,
@@ -1348,6 +1398,72 @@ mod tests {
       .unwrap();
     let err = w.validate().unwrap_err();
     assert!(err.message.contains("二选一"), "{}", err.message);
+  }
+
+  #[test]
+  fn backup_gateway_must_be_on_another_server() {
+    let mut w = sample();
+    w.servers.insert(
+      "node2".into(),
+      ServerRow {
+        settings: Default::default(),
+        version: 1,
+      },
+    );
+    let gw = |server: &str, default: bool| GatewaySpec {
+      kind: GatewayKind::Caddy,
+      server: server.into(),
+      default,
+      http_port: None,
+      https_port: None,
+      tls: Default::default(),
+      email: None,
+      image: None,
+      account: None,
+    };
+    let route = |backup: &str| RouteSpec {
+      hostname: "who.example.com".into(),
+      service: "who".into(),
+      port: None,
+      gateway: None,
+      backup_gateway: Some(backup.into()),
+      auth: false,
+      paths: vec![],
+      upstream: None,
+      link: Default::default(),
+    };
+    w.apply_changes(&[
+      Change::UpsertService {
+        name: "who".into(),
+        spec: image_service("node1"),
+        adopt: None,
+      },
+      Change::UpsertGateway {
+        name: "main".into(),
+        spec: gw("node1", true),
+      },
+      Change::UpsertGateway {
+        name: "same".into(),
+        spec: gw("node1", false),
+      },
+      Change::UpsertGateway {
+        name: "spare".into(),
+        spec: gw("node2", false),
+      },
+      Change::UpsertRoute {
+        spec: route("same"),
+      },
+    ])
+    .unwrap();
+    let err = w.validate().unwrap_err();
+    assert!(err.message.contains("同一台机器"), "{}", err.message);
+    w.apply_changes(&[Change::UpsertRoute {
+      spec: route("spare"),
+    }])
+    .unwrap();
+    w.validate().unwrap();
+    let spec = &w.routes["who.example.com"].spec;
+    assert_eq!(w.route_gateways(spec), vec!["main", "spare"]);
   }
 
   #[test]

@@ -271,7 +271,7 @@ pub fn gateway_render(
   })?;
   let mut sites = Vec::new();
   for (host, route) in &world.routes {
-    if world.route_gateway(&route.spec) != Some(name) {
+    if !world.route_gateways(&route.spec).contains(&name) {
       continue;
     }
     let tunnel = gateway.spec.kind == GatewayKind::CloudflareTunnel;

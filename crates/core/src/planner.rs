@@ -1692,8 +1692,9 @@ fn desired_record(
   hostname: &str,
 ) -> Result<DnsSpec, ApiError> {
   let route = &desired.routes[hostname];
-  let gateway =
-    desired.route_gateway(&route.spec).unwrap_or_default();
+  let gateway = desired
+    .live_gateway(hostname, &route.spec)
+    .unwrap_or_default();
   let gw = &desired.gateways[gateway].spec;
   if gw.kind == GatewayKind::CloudflareTunnel {
     return Ok(DnsSpec {
