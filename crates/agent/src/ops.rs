@@ -95,11 +95,11 @@ impl Ops {
         let _guard = lock.lock().await;
         to_value(self.project_up(&up, ctx).await?)
       }
-      AgentOp::ProjectDown { project } => {
+      AgentOp::ProjectDown { project, purge } => {
         check_project(&project)?;
         let lock = self.lock_for(&project);
         let _guard = lock.lock().await;
-        self.docker.down(&project, ctx).await?;
+        self.docker.down(&project, purge, ctx).await?;
         Ok(Value::Null)
       }
       AgentOp::Logs {
@@ -381,7 +381,7 @@ impl Ops {
       Ok(result) => Ok(ProjectUpResult { retired, ..result }),
       Err(e) if !retired.is_empty() => {
         ctx.say("启动失败，恢复原来的容器");
-        let _ = self.docker.down(&up.project, ctx).await;
+        let _ = self.docker.down(&up.project, false, ctx).await;
         if let Err(back) =
           crate::adopt::unretire(&self.docker, &retired, ctx).await
         {

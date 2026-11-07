@@ -657,6 +657,9 @@ pub enum Change {
   },
   RemoveService {
     name: String,
+    /// 连同数据一起删：`/srv/<服务>` 目录和 compose 声明的命名卷。外部目录不动。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    purge_data: bool,
   },
   /// 检查更新：重新查镜像标签（image 来源）或分支（git 构建来源）现在对应的版本，有新版本时计划里会更新。
   RefreshImages {

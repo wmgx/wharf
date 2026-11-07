@@ -530,6 +530,9 @@ pub enum ServiceCmd {
   /// 删除服务（数据目录保留）。
   Rm {
     name: String,
+    /// 连同数据一起删：/srv/<服务> 目录和 compose 声明的命名卷，不能恢复。外部目录不动。
+    #[arg(long)]
+    purge_data: bool,
     #[command(flatten)]
     apply: ApplyFlags,
   },

@@ -290,7 +290,7 @@ impl World {
           row.pins.clear();
           row.commit = None;
         }
-        Change::RemoveService { name } => {
+        Change::RemoveService { name, .. } => {
           if self.services.remove(name).is_none() {
             return Err(
               ApiError::not_found(format!("服务 {name} 不存在"))
@@ -1336,8 +1336,11 @@ mod tests {
     assert_eq!(w.services["a"].host_ports["http"], 20000);
     assert_eq!(w.services["b"].host_ports["http"], 20001);
     // 删除 a 之后 b 的端口不变。
-    w.apply_changes(&[Change::RemoveService { name: "a".into() }])
-      .unwrap();
+    w.apply_changes(&[Change::RemoveService {
+      name: "a".into(),
+      purge_data: false,
+    }])
+    .unwrap();
     w.allocate_ports().unwrap();
     assert_eq!(w.services["b"].host_ports["http"], 20001);
   }

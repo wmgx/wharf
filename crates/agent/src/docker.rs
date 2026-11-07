@@ -399,6 +399,7 @@ impl Docker {
   pub async fn down(
     &self,
     project: &str,
+    purge: bool,
     ctx: &Ctx,
   ) -> Result<(), ApiError> {
     let dir = self.project_dir(project);
@@ -407,8 +408,12 @@ impl Docker {
     } else {
       self.cmd().args(["compose", "-p", project])
     };
+    let mut args = vec!["down", "--remove-orphans"];
+    if purge {
+      args.push("--volumes");
+    }
     cmd
-      .args(["down", "--remove-orphans"])
+      .args(args)
       .timeout(Duration::from_secs(180))
       .stream(true)
       .run(ctx)
@@ -416,6 +421,13 @@ impl Docker {
       .check("docker compose down")?;
     if dir.exists() {
       std::fs::remove_dir_all(&dir).map_err(io_err(&dir))?;
+    }
+    if purge {
+      let data = std::path::Path::new("/srv").join(project);
+      if data.exists() {
+        ctx.say(format!("删除数据目录 {}", data.display()));
+        std::fs::remove_dir_all(&data).map_err(io_err(&data))?;
+      }
     }
     Ok(())
   }
