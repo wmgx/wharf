@@ -418,6 +418,32 @@ fn dec(s: &str) -> TaskStatus {
   serde_json::from_value(s.into()).unwrap_or(TaskStatus::Failed)
 }
 
+/// 最近一次（不算跳过和运行中）失败或超时的任务，给"需要注意"。
+pub async fn problems(state: &AppState) -> Vec<String> {
+  let rows = state
+    .db
+    .call(|c| {
+      let mut stmt = c
+        .prepare(
+          "SELECT t.name, r.status FROM tasks t JOIN task_runs r ON r.id = (
+             SELECT id FROM task_runs WHERE task = t.name AND status NOT IN ('skipped', 'running')
+             ORDER BY id DESC LIMIT 1)
+           WHERE r.status IN ('failed', 'timed_out') ORDER BY t.name",
+        )
+        .map_err(sql_err)?;
+      let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .map_err(sql_err)?;
+      rows.collect::<Result<Vec<_>, _>>().map_err(sql_err)
+    })
+    .await
+    .unwrap_or_default();
+  rows
+    .into_iter()
+    .map(|(n, s)| format!("定时任务 {n} {}", status_text(dec(&s))))
+    .collect()
+}
+
 /// 控制面启动时把上次没跑完的记录标成中断。
 pub async fn recover(state: &AppState) -> Result<(), ApiError> {
   state
