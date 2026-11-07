@@ -115,6 +115,30 @@ impl Client {
     })
   }
 
+  /// 控制面和本机 CLI 的构建号不一致时提醒一次（写 stderr，不影响 `--json`）。
+  fn check_build(&self, headers: &reqwest::header::HeaderMap) {
+    static WARNED: std::sync::atomic::AtomicBool =
+      std::sync::atomic::AtomicBool::new(false);
+    let mine = env!("WHARF_CLI_BUILD");
+    let Some(theirs) = headers
+      .get(wharf_api_types::BUILD_HEADER)
+      .and_then(|v| v.to_str().ok())
+    else {
+      return;
+    };
+    if mine == "dev"
+      || theirs == "dev"
+      || mine == theirs
+      || WARNED.swap(true, std::sync::atomic::Ordering::Relaxed)
+    {
+      return;
+    }
+    eprintln!(
+      "提醒：本机 wharf 是构建 {mine}，控制面是 {theirs}；版本不同时新字段可能显示不出来。\n  更新：curl -fsSL {0}/cli.sh | sh -s -- {0}",
+      self.base
+    );
+  }
+
   async fn send<T: DeserializeOwned>(
     &self,
     req: reqwest::RequestBuilder,
@@ -130,6 +154,7 @@ impl Client {
       )
       .with_hint("检查控制面是否在运行、地址是否正确（WHARF_URL 或 wharf login）")
     })?;
+    self.check_build(resp.headers());
     let status = resp.status();
     let bytes = resp.bytes().await.map_err(|e| {
       ApiError::internal(format!("读取响应失败：{e}"))
