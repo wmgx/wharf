@@ -45,7 +45,7 @@ export function Egress() {
               Cloudflare、Tailscale
             </div>
           </div>
-          <div className="ml-auto w-56">
+          <div className="w-full sm:ml-auto sm:w-56">
             <Picker
               value={current}
               options={[
