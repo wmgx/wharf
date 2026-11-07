@@ -205,13 +205,14 @@ pub async fn start(
   ctx.say(format!("启动接班容器，换成 {pulled}"));
   docker
     .cmd()
-    // 不加 --rm：失败时留着日志给控制面看，下一次升级开始前删掉。
+    // 不加 --rm：失败时留着日志给控制面看；成功时接班容器自己删掉。
     .args(["run", "-d", "--name", HELPER])
     .args(["-v", &sock])
     .args(["--entrypoint", "wharf-agent", &helper_image])
     .args(["replace", &id, &current, &old_id])
     .args(["--ready", job.ready.as_deref().unwrap_or(CONNECTED)])
-    .timeout(QUICK)
+    // 机器忙时（刚解压完新镜像、控制面正在重启）docker run 也可能要几十秒。
+    .timeout(Duration::from_secs(120))
     .run(ctx)
     .await?
     .check("启动接班容器")?;
