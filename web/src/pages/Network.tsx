@@ -183,7 +183,7 @@ function Cell({ self, r, from, to }: { self: boolean; r?: NetworkView["reach"][n
   );
 }
 
-function Quality({ l }: { l?: NonNullable<NetworkView["links"]>[number] }) {
+export function Quality({ l }: { l?: NonNullable<NetworkView["links"]>[number] }) {
   if (!l) return null;
   const tone = l.loss >= 20 ? "text-destructive" : l.loss > 0 ? "text-warning" : "text-muted-foreground";
   return (

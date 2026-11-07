@@ -32,6 +32,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { AccountView } from "@/types";
 import { CoreBackup } from "./core-backup";
 import { EdgeImport } from "./edge-import";
@@ -50,6 +51,7 @@ export function Settings() {
   const [params, setParams] = useSearchParams();
   const [addingNow, setAdding] = useState(false);
   const adding = addingNow || params.get("add") === "account";
+  const tab = params.get("tab") ?? "accounts";
   const [removing, setRemoving] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [importing, setImporting] = useState<string | null>(null);
@@ -98,6 +100,19 @@ export function Settings() {
           </>
         }
       />
+      <Tabs
+        value={tab}
+        onValueChange={(t) => setParams(t === "accounts" ? {} : { tab: t }, { replace: true })}
+      >
+        <TabsList>
+          <TabsTrigger value="accounts">厂商账号</TabsTrigger>
+          <TabsTrigger value="secrets">密钥</TabsTrigger>
+          <TabsTrigger value="tokens">访问令牌</TabsTrigger>
+          <TabsTrigger value="notify">通知</TabsTrigger>
+          <TabsTrigger value="egress">出口</TabsTrigger>
+          <TabsTrigger value="backup">控制面备份</TabsTrigger>
+        </TabsList>
+        <TabsContent value="accounts" className="mt-4">
       <div className="mb-3 flex items-center justify-between [&>h2]:mb-0">
         <SectionTitle count={data?.length}>厂商账号</SectionTitle>
         <Button variant="ghost" size="sm" onClick={() => setAdding(true)}>
@@ -187,23 +202,23 @@ export function Settings() {
           ))}
         </div>
       )}
-      <div className="mt-8 grid gap-8">
-        <div>
+        </TabsContent>
+        <TabsContent value="secrets" className="mt-4">
           <Secrets />
-        </div>
-        <div>
+        </TabsContent>
+        <TabsContent value="tokens" className="mt-4">
           <Tokens />
-        </div>
-        <div>
-          <CoreBackup />
-        </div>
-        <div>
+        </TabsContent>
+        <TabsContent value="notify" className="mt-4">
           <Notify />
-        </div>
-        <div>
+        </TabsContent>
+        <TabsContent value="egress" className="mt-4">
           <Egress />
-        </div>
-      </div>
+        </TabsContent>
+        <TabsContent value="backup" className="mt-4">
+          <CoreBackup />
+        </TabsContent>
+      </Tabs>
       {importing && (
         <EdgeImport account={importing} onClose={() => setImporting(null)} />
       )}

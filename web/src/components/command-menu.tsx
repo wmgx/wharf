@@ -266,7 +266,7 @@ export function CommandMenu({ onLogout }: { onLogout: () => void }) {
                   onSelect={() =>
                     run(() =>
                       nav(
-                        `/servers/${encodeURIComponent(t.spec.server)}?tab=tasks`,
+                        `/tasks?server=${encodeURIComponent(t.spec.server)}`,
                       ),
                     )
                   }
@@ -283,7 +283,7 @@ export function CommandMenu({ onLogout }: { onLogout: () => void }) {
                 <CommandItem
                   key={`secret-${s.name}`}
                   value={`密钥 secret ${s.name}`}
-                  onSelect={() => run(() => nav("/settings"))}
+                  onSelect={() => run(() => nav("/settings?tab=secrets"))}
                 >
                   <KeyRoundIcon />
                   <span className="font-mono text-[13px]">{s.name}</span>

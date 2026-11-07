@@ -20,6 +20,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/api";
 import { useActions } from "@/components/actions";
 import { MetricsPanel } from "@/components/metrics";
+import { ServerLinks } from "./server-links";
+import { ServerBaseline } from "./server-baseline";
 import { ServiceUsage } from "@/components/usage";
 import {
   Dot,
@@ -59,7 +61,6 @@ import { AptUpgrade } from "@/components/apt-upgrade";
 import { HostSessions } from "@/components/host-sessions";
 import { useStatus } from "@/status";
 import type { EgressSpec, HostInfo, ServerView } from "@/types";
-import { ServerTasks } from "./server-tasks";
 
 const DOCKER_KIND: Record<string, string> = {
   Images: "镜像",
@@ -240,7 +241,7 @@ export function ServerDetail() {
           <TabsTrigger value="overview">概览</TabsTrigger>
           <TabsTrigger value="metrics">资源</TabsTrigger>
           <TabsTrigger value="system">系统</TabsTrigger>
-          <TabsTrigger value="tasks">定时任务</TabsTrigger>
+          <TabsTrigger value="network">网络</TabsTrigger>
           <TabsTrigger value="terminal">终端</TabsTrigger>
           <TabsTrigger value="settings">设置</TabsTrigger>
         </TabsList>
@@ -351,6 +352,7 @@ export function ServerDetail() {
         </TabsContent>
 
         <TabsContent value="system" className="mt-4">
+          <ServerBaseline server={server} />
           <div className="mb-4 flex flex-wrap gap-2">
             <Button
               variant="outline"
@@ -397,8 +399,9 @@ export function ServerDetail() {
           )}
         </TabsContent>
 
-        <TabsContent value="tasks" className="mt-4">
-          <ServerTasks server={name} />
+        <TabsContent value="network" className="mt-4">
+          <ServerLinks server={name} />
+          <SettingsForm server={server} canRemove={false} section="network" />
         </TabsContent>
 
         <TabsContent value="terminal" className="mt-4">
@@ -589,13 +592,17 @@ function parseMirrors(text: string): Record<string, string[]> {
 }
 
 /** 服务器设置：和 `wharf server set` 同一组字段；接入方式和内网地址在"服务器 → 组网"里改。 */
+/** 服务器设置。`network` 只放公网 IP、局域网、出口和代理，其余在"设置"标签。 */
 function SettingsForm({
   server,
   canRemove,
+  section = "settings",
 }: {
   server: ServerView;
   canRemove: boolean;
+  section?: "settings" | "network";
 }) {
+  const net = section === "network";
   const actions = useActions();
   const nav = useNavigate();
   const cur = server.settings as Settings;
@@ -682,162 +689,178 @@ function SettingsForm({
 
   return (
     <div className="grid max-w-2xl gap-5">
-      <Field
-        label="公网 IP"
-        htmlFor="public-ip"
-        help={`不填用 agent 探测的${server.public_ip ? `（现在是 ${server.public_ip}）` : ""}。直连入口的 DNS 指向它。`}
-      >
-        <Input
-          id="public-ip"
-          value={publicIp}
-          placeholder="自动探测"
-          onChange={(e) => setPublicIp(e.target.value)}
-        />
-      </Field>
-      <Field
-        label="镜像源"
-        htmlFor="mirrors"
-        help="每行一个仓库，例如 docker.io=docker.1ms.run,docker.m.daocloud.io，按顺序尝试。"
-      >
-        <Textarea
-          id="mirrors"
-          rows={3}
-          className="font-mono text-xs"
-          value={mirrors}
-          onChange={(e) => setMirrors(e.target.value)}
-        />
-      </Field>
-      <label className="-mt-3 flex cursor-pointer items-center gap-2 text-sm">
-        <Checkbox
-          checked={mirrorsOnly}
-          onCheckedChange={(v) => setMirrorsOnly(v === true)}
-        />
-        有镜像源时不再尝试原地址
-      </label>
-      <Field
-        label="局域网访问"
-        help="勾选后，镜像和代码部署的服务端口也绑到这些地址，同一局域网里可以直接打开。机器之间仍走内网地址。保存后这台机器上的服务会重建容器。"
-      >
-        {lanChoices.length ? (
+      {net && (
+        <>
+          <Field
+            label="公网 IP"
+            htmlFor="public-ip"
+            help={`不填用 agent 探测的${server.public_ip ? `（现在是 ${server.public_ip}）` : ""}。直连入口的 DNS 指向它。`}
+          >
+            <Input
+              id="public-ip"
+              value={publicIp}
+              placeholder="自动探测"
+              onChange={(e) => setPublicIp(e.target.value)}
+            />
+          </Field>
+        </>
+      )}
+      {!net && (
+        <>
+          <Field
+            label="镜像源"
+            htmlFor="mirrors"
+            help="每行一个仓库，例如 docker.io=docker.1ms.run,docker.m.daocloud.io，按顺序尝试。"
+          >
+            <Textarea
+              id="mirrors"
+              rows={3}
+              className="font-mono text-xs"
+              value={mirrors}
+              onChange={(e) => setMirrors(e.target.value)}
+            />
+          </Field>
+          <label className="-mt-3 flex cursor-pointer items-center gap-2 text-sm">
+            <Checkbox
+              checked={mirrorsOnly}
+              onCheckedChange={(v) => setMirrorsOnly(v === true)}
+            />
+            有镜像源时不再尝试原地址
+          </label>
+          <Field
+            label="构建参数"
+            htmlFor="build-env"
+            help="每行 KEY=VALUE，传给内置模板。国内机器常配 PIP_INDEX_URL、GOPROXY。"
+          >
+            <CodeEditor
+              id="build-env"
+              lang="env"
+              className="min-h-16"
+              value={buildEnv}
+              onChange={setBuildEnv}
+            />
+          </Field>
+        </>
+      )}
+      {net && (
+        <>
+          <Field
+            label="局域网访问"
+            help="勾选后，镜像和代码部署的服务端口也绑到这些地址，同一局域网里可以直接打开。机器之间仍走内网地址。保存后这台机器上的服务会重建容器。"
+          >
+            {lanChoices.length ? (
+              <div className="grid gap-2">
+                {lanChoices.map((ip) => (
+                  <label
+                    key={ip}
+                    className="flex cursor-pointer items-center gap-2.5 font-mono text-sm"
+                  >
+                    <Checkbox
+                      checked={lanAddrs.includes(ip)}
+                      onCheckedChange={(v) =>
+                        setLanAddrs(
+                          v === true
+                            ? [...lanAddrs, ip]
+                            : lanAddrs.filter((x) => x !== ip),
+                        )
+                      }
+                    />
+                    {ip}
+                  </label>
+                ))}
+              </div>
+            ) : (
+              <span className="text-sm text-muted-foreground">
+                agent 没有发现私有网段的地址
+              </span>
+            )}
+          </Field>
+          <EgressFields
+            server={server.name}
+            egress={egress}
+            onEgress={setEgress}
+            via={via}
+            onVia={setVia}
+          />
+          <Field
+            label="拉代码代理"
+            htmlFor="git-proxy"
+            help="只用于 git。国内机器连不上 GitHub 时经海外机器转发。"
+          >
+            <Input
+              id="git-proxy"
+              value={gitProxy}
+              placeholder="http://100.x.x.x:8118"
+              onChange={(e) => setGitProxy(e.target.value)}
+            />
+          </Field>
+          <Field
+            label="拉镜像代理"
+            htmlFor="pull-proxy"
+            help="写进宿主机 dockerd 配置，ghcr 等海外仓库经它拉，镜像源和内网直连。执行时会重启 dockerd（开启 live-restore，容器不停）。"
+          >
+            <Input
+              id="pull-proxy"
+              value={pullProxy}
+              placeholder="http://100.x.x.x:8118"
+              onChange={(e) => setPullProxy(e.target.value)}
+            />
+          </Field>
+          <Field
+            label="GitHub 镜像"
+            htmlFor="github-mirror"
+            help="拉代码时代替 https://github.com/ 的地址（Wharf 的 mirror 服务），可以用 [[密钥名]] 引用访问口令。"
+          >
+            <Input
+              id="github-mirror"
+              value={githubMirror}
+              placeholder="https://gh.example.com/[[MIRROR_TOKEN]]"
+              onChange={(e) => setGithubMirror(e.target.value)}
+            />
+          </Field>
+        </>
+      )}
+      {!net && (
+        <>
+          <Field
+            label="流量"
+            help="每月额度（GB）和重置日（1 到 28，北京时间），只用于显示本期用了多少。都不填按每月 1 号算、不显示额度。"
+          >
+            <div className="flex gap-2">
+              <Input
+                inputMode="numeric"
+                className="w-32"
+                value={quota}
+                placeholder="额度 GB"
+                onChange={(e) => setQuota(e.target.value)}
+              />
+              <Input
+                inputMode="numeric"
+                className="w-32"
+                value={resetDay}
+                placeholder="重置日"
+                onChange={(e) => setResetDay(e.target.value)}
+              />
+            </div>
+          </Field>
           <div className="grid gap-2">
-            {lanChoices.map((ip) => (
-              <label
-                key={ip}
-                className="flex cursor-pointer items-center gap-2.5 font-mono text-sm"
-              >
-                <Checkbox
-                  checked={lanAddrs.includes(ip)}
-                  onCheckedChange={(v) =>
-                    setLanAddrs(
-                      v === true
-                        ? [...lanAddrs, ip]
-                        : lanAddrs.filter((x) => x !== ip),
-                    )
-                  }
-                />
-                {ip}
-              </label>
-            ))}
+            <label className="flex cursor-pointer items-center gap-2.5 text-sm">
+              <Checkbox
+                checked={hostTerminal}
+                onCheckedChange={(v) => setHostTerminal(v === true)}
+              />
+              允许从页面打开宿主机终端
+            </label>
+            <label className="flex cursor-pointer items-center gap-2.5 text-sm">
+              <Checkbox
+                checked={hostExec}
+                onCheckedChange={(v) => setHostExec(v === true)}
+              />
+              允许通过 API 在宿主机执行命令（CLI、AI 用）
+            </label>
           </div>
-        ) : (
-          <span className="text-sm text-muted-foreground">
-            agent 没有发现私有网段的地址
-          </span>
-        )}
-      </Field>
-      <Field
-        label="构建参数"
-        htmlFor="build-env"
-        help="每行 KEY=VALUE，传给内置模板。国内机器常配 PIP_INDEX_URL、GOPROXY。"
-      >
-        <CodeEditor
-          id="build-env"
-          lang="env"
-          className="min-h-16"
-          value={buildEnv}
-          onChange={setBuildEnv}
-        />
-      </Field>
-      <EgressFields
-        server={server.name}
-        egress={egress}
-        onEgress={setEgress}
-        via={via}
-        onVia={setVia}
-      />
-      <Field
-        label="拉代码代理"
-        htmlFor="git-proxy"
-        help="只用于 git。国内机器连不上 GitHub 时经海外机器转发。"
-      >
-        <Input
-          id="git-proxy"
-          value={gitProxy}
-          placeholder="http://100.x.x.x:8118"
-          onChange={(e) => setGitProxy(e.target.value)}
-        />
-      </Field>
-      <Field
-        label="拉镜像代理"
-        htmlFor="pull-proxy"
-        help="写进宿主机 dockerd 配置，ghcr 等海外仓库经它拉，镜像源和内网直连。执行时会重启 dockerd（开启 live-restore，容器不停）。"
-      >
-        <Input
-          id="pull-proxy"
-          value={pullProxy}
-          placeholder="http://100.x.x.x:8118"
-          onChange={(e) => setPullProxy(e.target.value)}
-        />
-      </Field>
-      <Field
-        label="GitHub 镜像"
-        htmlFor="github-mirror"
-        help="拉代码时代替 https://github.com/ 的地址（Wharf 的 mirror 服务），可以用 [[密钥名]] 引用访问口令。"
-      >
-        <Input
-          id="github-mirror"
-          value={githubMirror}
-          placeholder="https://gh.example.com/[[MIRROR_TOKEN]]"
-          onChange={(e) => setGithubMirror(e.target.value)}
-        />
-      </Field>
-      <Field
-        label="流量"
-        help="每月额度（GB）和重置日（1 到 28，北京时间），只用于显示本期用了多少。都不填按每月 1 号算、不显示额度。"
-      >
-        <div className="flex gap-2">
-          <Input
-            inputMode="numeric"
-            className="w-32"
-            value={quota}
-            placeholder="额度 GB"
-            onChange={(e) => setQuota(e.target.value)}
-          />
-          <Input
-            inputMode="numeric"
-            className="w-32"
-            value={resetDay}
-            placeholder="重置日"
-            onChange={(e) => setResetDay(e.target.value)}
-          />
-        </div>
-      </Field>
-      <div className="grid gap-2">
-        <label className="flex cursor-pointer items-center gap-2.5 text-sm">
-          <Checkbox
-            checked={hostTerminal}
-            onCheckedChange={(v) => setHostTerminal(v === true)}
-          />
-          允许从页面打开宿主机终端
-        </label>
-        <label className="flex cursor-pointer items-center gap-2.5 text-sm">
-          <Checkbox
-            checked={hostExec}
-            onCheckedChange={(v) => setHostExec(v === true)}
-          />
-          允许通过 API 在宿主机执行命令（CLI、AI 用）
-        </label>
-      </div>
+        </>
+      )}
       <div className="flex flex-wrap items-center gap-2">
         <Button
           disabled={!changed || !trafficValid}
@@ -852,32 +875,36 @@ function SettingsForm({
         >
           预览改动
         </Button>
-        <span className="text-xs text-muted-foreground">
-          接入方式和内网地址在
-          <Link to="/network" className="mx-0.5 underline underline-offset-2">
-            组网
-          </Link>
-          里改
-        </span>
-      </div>
-      <div className="mt-6 flex flex-wrap items-center gap-3 rounded-xl border border-destructive/30 p-4">
-        <div className="grid flex-1 gap-0.5 text-sm">
-          <span className="font-medium">删除服务器</span>
+        {net && (
           <span className="text-xs text-muted-foreground">
-            {canRemove
-              ? "只删除 Wharf 里的记录，机器上的 agent 需要自己停掉。"
-              : "上面还有服务或入口，先迁走或删掉。"}
+            接入方式和内网地址在
+            <Link to="/network" className="mx-0.5 underline underline-offset-2">
+              组网
+            </Link>
+            里改
           </span>
-        </div>
-        <Button
-          variant="destructive"
-          size="sm"
-          disabled={!canRemove}
-          onClick={() => setRemoving(true)}
-        >
-          删除
-        </Button>
+        )}
       </div>
+      {!net && (
+        <div className="mt-6 flex flex-wrap items-center gap-3 rounded-xl border border-destructive/30 p-4">
+          <div className="grid flex-1 gap-0.5 text-sm">
+            <span className="font-medium">删除服务器</span>
+            <span className="text-xs text-muted-foreground">
+              {canRemove
+                ? "只删除 Wharf 里的记录，机器上的 agent 需要自己停掉。"
+                : "上面还有服务或入口，先迁走或删掉。"}
+            </span>
+          </div>
+          <Button
+            variant="destructive"
+            size="sm"
+            disabled={!canRemove}
+            onClick={() => setRemoving(true)}
+          >
+            删除
+          </Button>
+        </div>
+      )}
       <Dialog open={removing} onOpenChange={setRemoving}>
         <DialogContent aria-describedby={undefined}>
           <DialogHeader>

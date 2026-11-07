@@ -59,13 +59,13 @@ const KIND = {
   host: "宿主机",
 } as const;
 
-/** 服务器详情的"定时任务"标签。 */
-export function ServerTasks({ server }: { server: string }) {
+/** 定时任务列表。给了 `server` 只看这台，否则列出全部并多一列服务器。 */
+export function ServerTasks({ server }: { server?: string }) {
   const { data, error, refresh } = usePoll<TaskView[]>("/api/tasks", 10000);
   const [editing, setEditing] = useState<TaskView | "new" | null>(null);
   const [history, setHistory] = useState<string | null>(null);
   const [removing, setRemoving] = useState<string | null>(null);
-  const tasks = data?.filter((t) => t.spec.server === server);
+  const tasks = data?.filter((t) => !server || t.spec.server === server);
 
   const run = async (name: string) => {
     try {
@@ -106,6 +106,7 @@ export function ServerTasks({ server }: { server: string }) {
               <TableHeader>
                 <TableRow>
                   <TableHead>名称</TableHead>
+                  {!server && <TableHead>服务器</TableHead>}
                   <TableHead>时间</TableHead>
                   <TableHead>形式</TableHead>
                   <TableHead>上次</TableHead>
@@ -117,6 +118,11 @@ export function ServerTasks({ server }: { server: string }) {
                 {tasks.map((t) => (
                   <TableRow key={t.name}>
                     <TableCell className="font-medium">{t.name}</TableCell>
+                    {!server && (
+                      <TableCell className="text-xs text-muted-foreground">
+                        {t.spec.server}
+                      </TableCell>
+                    )}
                     <TableCell className="font-mono text-xs">
                       {t.spec.schedule}
                     </TableCell>
@@ -202,7 +208,7 @@ export function ServerTasks({ server }: { server: string }) {
       )}
       {editing && (
         <EditTask
-          server={server}
+          server={editing === "new" ? server : editing.spec.server}
           task={editing === "new" ? null : editing}
           taken={(data ?? []).map((t) => t.name)}
           onClose={() => setEditing(null)}
@@ -296,13 +302,14 @@ type Kind = TaskSpec["kind"];
 
 /** 只在打开时挂载。 */
 function EditTask({
-  server,
+  server: fixed,
   task,
   taken,
   onClose,
   onSaved,
 }: {
-  server: string;
+  /** 不给时新建要选服务器。 */
+  server?: string;
   task: TaskView | null;
   taken: string[];
   onClose: () => void;
@@ -310,6 +317,8 @@ function EditTask({
 }) {
   const { status } = useStatus();
   const s = task?.spec;
+  const servers = (status?.servers ?? []).map((v) => v.name);
+  const [server, setServer] = useState(fixed ?? servers[0] ?? "");
   const [name, setName] = useState(task?.name ?? "");
   const [kind, setKind] = useState<Kind>(s?.kind ?? "exec");
   const [schedule, setSchedule] = useState(s?.schedule ?? "0 4 * * *");
@@ -387,6 +396,7 @@ function EditTask({
 
   const ready =
     name &&
+    server &&
     !clash &&
     schedule.trim() &&
     (kind === "exec"
@@ -404,6 +414,18 @@ function EditTask({
           </DialogTitle>
         </DialogHeader>
         <div className="grid gap-4">
+          {!fixed && !task && (
+            <Field label="服务器">
+              <Segmented
+                value={server}
+                options={servers.map((v) => [v, v] as [string, string])}
+                onChange={(v) => {
+                  setServer(v);
+                  setService("");
+                }}
+              />
+            </Field>
+          )}
           {!task && (
             <Field
               label="名称"

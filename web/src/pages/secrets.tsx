@@ -4,11 +4,10 @@ import { toast } from "sonner";
 import { api, usePoll } from "@/api";
 import { ago, Empty, ErrorNote, SectionTitle } from "@/components/common";
 import { Field } from "@/components/fields";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { useStatus } from "@/status";
 import { Textarea } from "@/components/ui/textarea";
 import type { SecretView } from "@/types";
 
@@ -17,6 +16,8 @@ export function Secrets() {
   const { data, error, refresh } = usePoll<SecretView[]>("/api/secrets", 30000);
   const [editing, setEditing] = useState<{ name: string; fresh: boolean } | null>(null);
   const [removing, setRemoving] = useState<SecretView | null>(null);
+  const { status } = useStatus();
+  const serviceNames = new Set([...(status?.services ?? []).map((x) => x.name), ...(status?.edge_apps ?? []).map((x) => x.name)]);
 
   const remove = async (s: SecretView) => {
     setRemoving(null);
@@ -43,56 +44,22 @@ export function Secrets() {
         <Empty>还没有密钥</Empty>
       ) : (
         data && (
-          <div className="rounded-xl border bg-card">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>名称</TableHead>
-                  <TableHead>用在</TableHead>
-                  <TableHead>更新</TableHead>
-                  <TableHead className="w-0" />
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {data.map((s) => (
-                  <TableRow key={s.name}>
-                    <TableCell className="font-mono text-xs">{s.name}</TableCell>
-                    <TableCell>
-                      <div className="flex flex-wrap gap-1">
-                        {s.used_by?.length ? (
-                          s.used_by.map((u) => (
-                            <Badge key={u} variant="secondary">
-                              {u}
-                            </Badge>
-                          ))
-                        ) : (
-                          <span className="text-xs text-muted-foreground">没在用</span>
-                        )}
-                      </div>
-                    </TableCell>
-                    <TableCell className="text-xs text-muted-foreground">{ago(s.updated_at)}</TableCell>
-                    <TableCell>
-                      {s.managed ? (
-                        <span className="flex items-center gap-1 px-2 text-xs text-muted-foreground">
-                          <LockIcon className="size-3" />
-                          自动生成
-                        </span>
-                      ) : (
-                        <div className="flex">
-                          <Button variant="ghost" size="xs" onClick={() => setEditing({ name: s.name, fresh: false })}>
-                            <PencilIcon />
-                            替换
-                          </Button>
-                          <Button variant="ghost" size="xs" className="text-destructive" onClick={() => setRemoving(s)}>
-                            <Trash2Icon />
-                          </Button>
-                        </div>
-                      )}
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+          <div className="grid gap-6">
+            {groups(data, serviceNames).map((g) => (
+              <div key={g.title}>
+                <h3 className="mb-2 text-sm font-medium text-muted-foreground">{g.title}</h3>
+                <div className="grid grid-cols-[repeat(auto-fill,minmax(280px,1fr))] gap-3">
+                  {g.cards.map((c) => (
+                    <div key={c.label} className="rounded-xl border bg-card p-3 shadow-xs">
+                      {c.label && <div className="mb-1.5 px-1 text-sm font-semibold">{c.label}</div>}
+                      {c.secrets.map((x) => (
+                        <SecretRow key={x.name} s={x} onEdit={() => setEditing({ name: x.name, fresh: false })} onRemove={() => setRemoving(x)} />
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
           </div>
         )
       )}
@@ -124,6 +91,48 @@ export function Secrets() {
         </DialogContent>
       </Dialog>
     </>
+  );
+}
+
+type Group = { title: string; cards: { label: string; secrets: SecretView[] }[] };
+
+/** 按用途分组：每个服务一张卡；系统功能按功能名一张卡；没在用的放最后。 */
+function groups(data: SecretView[], services: Set<string>): Group[] {
+  const by = (keyOf: (u: string) => boolean) => {
+    const m = new Map<string, SecretView[]>();
+    for (const s of data) for (const u of s.used_by ?? []) if (keyOf(u)) m.set(u, [...(m.get(u) ?? []), s]);
+    return [...m.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([label, secrets]) => ({ label, secrets }));
+  };
+  const unused = data.filter((s) => !s.used_by?.length);
+  return [
+    { title: "服务", cards: by((u) => services.has(u)) },
+    { title: "系统功能", cards: by((u) => !services.has(u)) },
+    { title: "没在用", cards: unused.length ? [{ label: "", secrets: unused }] : [] },
+  ].filter((g) => g.cards.length);
+}
+
+function SecretRow({ s, onEdit, onRemove }: { s: SecretView; onEdit: () => void; onRemove: () => void }) {
+  return (
+    <div className="group flex items-center gap-2 rounded-md px-1 py-1 hover:bg-accent/50">
+      <span className="min-w-0 flex-1 truncate font-mono text-xs" title={s.used_by?.length ? `用在 ${s.used_by.join("、")}` : undefined}>
+        {s.name}
+      </span>
+      <span className="text-xs text-muted-foreground">{ago(s.updated_at)}</span>
+      {s.managed ? (
+        <span title="Wharf 自动生成，不能改删">
+          <LockIcon className="size-3 text-muted-foreground" />
+        </span>
+      ) : (
+        <span className="flex opacity-60 group-hover:opacity-100">
+          <Button variant="ghost" size="icon-xs" title="替换" onClick={onEdit}>
+            <PencilIcon />
+          </Button>
+          <Button variant="ghost" size="icon-xs" title="删除" className="text-destructive" onClick={onRemove}>
+            <Trash2Icon />
+          </Button>
+        </span>
+      )}
+    </div>
   );
 }
 

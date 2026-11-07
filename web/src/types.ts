@@ -229,6 +229,8 @@ export interface RouteSpec {
   upstream?: string;
   port?: string;
   gateway?: string;
+  /** 另一台机器上的网关：主网关那台离线 5 分钟后 DNS 自动切过去。 */
+  backup_gateway?: string;
   auth?: boolean;
   /** 网关到服务的走法：不填为自动，tunnel 总是走反向隧道。 */
   link?: "auto" | "tunnel";

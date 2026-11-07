@@ -22,6 +22,7 @@ import { HostTerminal } from "./pages/HostTerminal";
 import { ServiceDetail } from "./pages/ServiceDetail";
 import { EdgeDetail } from "./pages/EdgeDetail";
 import { DataPage, Entries, NetworkPage } from "./pages/Panels";
+import { TasksPage } from "./pages/tasks";
 import { StatusContext } from "./status";
 import { ThemeProvider } from "./theme";
 import type { Status } from "./types";
@@ -67,6 +68,7 @@ const TITLES: [string, string][] = [
   ["/servers", "服务器"],
   ["/entries", "入口"],
   ["/network", "网络"],
+  ["/tasks", "定时任务"],
   ["/data", "数据与备份"],
   ["/activity", "活动"],
   ["/settings", "设置"],
@@ -109,6 +111,7 @@ function Shell({ username, onLogout }: { username: string; onLogout: () => void 
                   <Route path="/domains" element={<Moved to="/entries" />} />
                   <Route path="/activity" element={<Activity />} />
                   <Route path="/settings" element={<Settings />} />
+                  <Route path="/tasks" element={<TasksPage />} />
                   <Route path="/data" element={<DataPage />} />
                   <Route path="/gateways" element={<Moved to="/entries" />} />
                   <Route path="/network" element={<NetworkPage />} />
