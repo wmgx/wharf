@@ -8,6 +8,7 @@ description = "厂商实现：DNS、入口。从 Komodo fork 的 domain/provider
 [dependencies]
 hex.workspace = true
 reqwest.workspace = true
+wharf-api-types.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

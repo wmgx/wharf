@@ -8,6 +8,7 @@
 
 pub mod agent;
 pub mod build;
+pub mod egress;
 pub mod error;
 pub mod plan;
 pub mod spec;

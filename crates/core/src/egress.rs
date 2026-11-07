@@ -1,9 +1,18 @@
-//! 出口（p8）：一台服务器设置 `egress` 后，它的 agent 在内网地址上起 HTTP 代理。
-//! 其他设置（控制面 `api_proxy`、服务器 `git_proxy`、`pull_proxy`）可以直接写这台的名字，
-//! 在这里解析成带口令的地址。带口令的地址只在下发时用，计划、日志里只显示服务器名或 [mask] 后的地址。
+//! 出口（p8）。服务器设置里两项：
+//!
+//! - `egress`：这台提供出口，规则（全部 / 预置分组 / 自定义域名）决定经它出去的域名；
+//! - `via`：这台经哪台的出口出去。它的 agent 在本机起分流代理，dockerd 拉镜像、
+//!   构建、拉代码都指向本机代理（[local_url]），按出口的规则分流，出口连不上时直连。
+//!
+//! 控制面调厂商 API（Cloudflare、Tailscale）用控制面设置 [API_VIA]，按同一套规则分流。
 
 use rusqlite::params;
-use wharf_api_types::{ApiError, ErrorCode, agent::EGRESS_PORT};
+use wharf_api_types::{
+  ApiError, ErrorCode,
+  agent::{AgentOp, EgressConfig, EgressRoute, EgressServe},
+  egress::{EgressSpec, LOCAL_PORT, SERVE_PORT},
+  spec::ServerSettings,
+};
 
 use crate::{
   db::{now_ms, sql_err},
@@ -13,67 +22,150 @@ use crate::{
 
 /// 代理口令，Wharf 自动生成。
 pub const TOKEN_SECRET: &str = "EGRESS_TOKEN";
-/// 控制面设置：调厂商 API 用的出口。
-pub const API_PROXY: &str = "api_proxy";
+/// 控制面设置：调厂商 API 经哪台的出口。
+pub const API_VIA: &str = "egress.api_via";
 
-pub struct Exit {
-  /// 带口令的代理地址。
-  pub url: String,
+/// 本机分流代理的地址（agent 和 dockerd 用宿主机网络，git 容器也是）。
+pub fn local_url() -> String {
+  format!("http://127.0.0.1:{LOCAL_PORT}")
 }
 
-/// 设置值是不是服务器名（不是 `http://` 地址）。
-pub fn is_server(value: &str) -> bool {
-  !value.contains("://")
+/// 这台经哪台出口出去（空字符串当没设）。
+pub fn via(s: &ServerSettings) -> Option<&str> {
+  s.via.as_deref().map(str::trim).filter(|v| !v.is_empty())
 }
 
-/// 解析设置值。服务器名要存在、开了出口、有内网地址。
-pub fn resolve(
-  value: &str,
+/// 经 `exit` 出去要用的东西：出口的 `内网地址:端口`、口令、规则。
+pub fn route(
+  exit: &str,
   snap: &Snapshot,
-) -> Result<Exit, ApiError> {
-  let value = value.trim();
-  if !is_server(value) {
-    return Ok(Exit {
-      url: value.to_string(),
-    });
-  }
+) -> Result<EgressRoute, ApiError> {
   let row = snap
     .world
     .servers
-    .get(value)
-    .ok_or_else(|| crate::world::server_not_found(value))?;
-  if !row.settings.egress {
-    return Err(
-      ApiError::invalid(format!("服务器 {value} 没有开出口"))
-        .with_hint(format!(
-          "wharf server set {value} --egress true --apply"
-        )),
-    );
-  }
-  let ip = snap
+    .get(exit)
+    .ok_or_else(|| crate::world::server_not_found(exit))?;
+  let spec = row.settings.egress.as_ref().ok_or_else(|| {
+    ApiError::invalid(format!("服务器 {exit} 没有提供出口"))
+      .with_hint(format!(
+        "wharf server set {exit} --egress github,cloudflare --apply"
+      ))
+  })?;
+  let ip = private_ip(exit, snap)?;
+  let token =
+    snap.secrets.get(TOKEN_SECRET).cloned().ok_or_else(|| {
+      ApiError::new(ErrorCode::Conflict, "出口口令还没生成")
+        .with_hint(format!("先执行 wharf apply，让 {exit} 开启出口"))
+    })?;
+  Ok(EgressRoute {
+    exit: format!("{ip}:{SERVE_PORT}"),
+    token,
+    all: spec.all,
+    domains: spec.domains(),
+  })
+}
+
+fn private_ip(
+  server: &str,
+  snap: &Snapshot,
+) -> Result<String, ApiError> {
+  snap
     .net(&snap.world)
     .private
-    .get(value)
+    .get(server)
     .map(|a| a.ip.clone())
     .ok_or_else(|| {
       ApiError::new(
         ErrorCode::Conflict,
-        format!("服务器 {value} 没有内网地址，出口用不了"),
+        format!("服务器 {server} 没有内网地址，出口用不了"),
       )
-    })?;
-  let token = snap.secrets.get(TOKEN_SECRET).ok_or_else(|| {
-    ApiError::new(ErrorCode::Conflict, "出口口令还没生成").with_hint(
-      format!(
-        "先执行 wharf server set {value} --egress true --apply"
-      ),
-    )
-  })?;
-  Ok(Exit {
-    url: format!("http://wharf:{token}@{ip}:{EGRESS_PORT}"),
-  })
+    })
 }
 
-pub use wharf_api_types::agent::mask_url as mask;
+/// 设置是否自洽：规则写对，`via` 指向别的、提供出口的服务器。
+pub fn validate(
+  name: &str,
+  s: &ServerSettings,
+  servers: &std::collections::BTreeMap<
+    String,
+    crate::world::ServerRow,
+  >,
+) -> Result<(), ApiError> {
+  if let Some(spec) = &s.egress {
+    spec.validate().map_err(ApiError::invalid)?;
+  }
+  if s.egress.is_none()
+    && let Some((user, _)) = servers
+      .iter()
+      .find(|(n, r)| *n != name && via(&r.settings) == Some(name))
+  {
+    return Err(
+      ApiError::invalid(format!(
+        "{user} 还在经 {name} 的出口出去，不能关"
+      ))
+      .with_hint(format!(
+        "先执行 wharf server set {user} --via \"\""
+      )),
+    );
+  }
+  if let Some(v) = via(s) {
+    if v == name {
+      return Err(ApiError::invalid("不能经自己的出口出去"));
+    }
+    let ok =
+      servers.get(v).is_some_and(|r| r.settings.egress.is_some());
+    if !ok {
+      return Err(
+        ApiError::invalid(format!("服务器 {v} 不存在或没有提供出口"))
+          .with_hint(format!(
+            "wharf server set {v} --egress github,cloudflare"
+          )),
+      );
+    }
+  }
+  Ok(())
+}
+
+/// 下发给这台 agent 的出口配置（计划比较时也用，口令除外）。
+pub fn config_for(
+  server: &str,
+  snap: &Snapshot,
+  token: &str,
+) -> Result<EgressConfig, ApiError> {
+  let row = snap
+    .world
+    .servers
+    .get(server)
+    .ok_or_else(|| crate::world::server_not_found(server))?;
+  let serve = match &row.settings.egress {
+    Some(_) => Some(EgressServe {
+      bind: private_ip(server, snap)?,
+      token: token.to_string(),
+    }),
+    None => None,
+  };
+  let route = match via(&row.settings) {
+    Some(exit) => Some(route(exit, snap)?),
+    None => None,
+  };
+  Ok(EgressConfig { serve, route })
+}
+
+/// 计划用：这台出口相关的有效设置（自己的规则、经哪台、那台的规则）。
+pub fn effective(
+  server: &str,
+  world: &crate::world::World,
+) -> Option<(Option<EgressSpec>, Option<String>, Option<EgressSpec>)>
+{
+  let s = &world.servers.get(server)?.settings;
+  let v = via(s).map(str::to_string);
+  let exit_spec = v
+    .as_ref()
+    .and_then(|x| world.servers.get(x))
+    .and_then(|r| r.settings.egress.clone());
+  let e = (s.egress.clone(), v, exit_spec);
+  (e != (None, None, None)).then_some(e)
+}
 
 /// 没有就生成口令，返回它。
 pub async fn ensure_token(
@@ -98,74 +190,91 @@ pub async fn ensure_token(
     .await
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
-pub struct ApiProxy {
-  /// 提供出口的服务器名或 `http://` 地址；空表示直连。
-  #[serde(default)]
-  pub api_proxy: Option<String>,
+/// 控制面加载快照后调用：按 [API_VIA] 设置厂商 API 的分流。出口配置不全时直连。
+pub fn apply_api_route(via: Option<&str>, snap: &Snapshot) {
+  let r = via
+    .map(str::trim)
+    .filter(|v| !v.is_empty())
+    .and_then(|v| route(v, snap).ok());
+  wharf_providers::http::set_route(r.map(|r| {
+    wharf_providers::http::Route {
+      proxy: format!("http://wharf:{}@{}", r.token, r.exit),
+      all: r.all,
+      domains: r.domains,
+    }
+  }));
 }
 
-/// `GET /api/egress`：控制面调厂商 API 用的出口。地址里的口令不返回。
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct ApiVia {
+  /// 提供出口的服务器名；空表示直连。
+  #[serde(default)]
+  pub via: Option<String>,
+  /// 预置分组（只读，给页面用）。
+  #[serde(default, skip_deserializing)]
+  pub presets: Vec<serde_json::Value>,
+}
+
+fn presets() -> Vec<serde_json::Value> {
+  wharf_api_types::egress::PRESETS
+    .iter()
+    .map(|(n, l, d)| serde_json::json!({ "name": n, "label": l, "domains": d }))
+    .collect()
+}
+
+/// `GET /api/egress`：控制面调厂商 API 经哪台出口。
 pub async fn get(
   axum::extract::State(s): axum::extract::State<
     std::sync::Arc<AppState>,
   >,
   auth: crate::auth::Auth,
-) -> crate::api::ApiResult<ApiProxy> {
+) -> crate::api::ApiResult<ApiVia> {
   auth.require(wharf_api_types::view::Perm::Read)?;
-  let v = s.db.call(|c| crate::db::setting(c, API_PROXY)).await?;
-  Ok(axum::Json(ApiProxy {
-    api_proxy: v.map(|v| mask(&v)),
+  let via = s.db.call(|c| crate::db::setting(c, API_VIA)).await?;
+  Ok(axum::Json(ApiVia {
+    via,
+    presets: presets(),
   }))
 }
 
-/// `PUT /api/egress`：设置控制面调厂商 API 用的出口，马上生效。
+/// `PUT /api/egress`：设置控制面调厂商 API 经哪台出口，马上生效。
 pub async fn put(
   axum::extract::State(s): axum::extract::State<
     std::sync::Arc<AppState>,
   >,
   auth: crate::auth::Auth,
-  axum::Json(req): axum::Json<ApiProxy>,
-) -> crate::api::ApiResult<ApiProxy> {
+  axum::Json(req): axum::Json<ApiVia>,
+) -> crate::api::ApiResult<ApiVia> {
   auth.require(wharf_api_types::view::Perm::Admin)?;
-  let value = req
-    .api_proxy
+  let via = req
+    .via
     .map(|v| v.trim().to_string())
     .filter(|v| !v.is_empty());
-  if let Some(v) = &value {
-    if !is_server(v) && !v.starts_with("http://") {
-      return Err(
-        ApiError::invalid("要写服务器名或 http:// 地址").into(),
-      );
-    }
+  if let Some(v) = &via {
     let snap = crate::snapshot::load(&s.db).await?;
-    resolve(v, &snap)?;
+    route(v, &snap)?;
   }
-  let saved = value.clone();
+  let saved = via.clone();
   s.db
     .call(move |c| {
-      crate::db::set_setting(c, API_PROXY, saved.as_deref())
+      crate::db::set_setting(c, API_VIA, saved.as_deref())
     })
     .await?;
   // 重新加载一次，让新设置马上生效。
   crate::snapshot::load(&s.db).await?;
-  Ok(axum::Json(ApiProxy {
-    api_proxy: value.map(|v| mask(&v)),
+  Ok(axum::Json(ApiVia {
+    via,
+    presets: presets(),
   }))
 }
 
-/// 计划步骤：按服务器设置开关这台的出口代理。
+/// 计划步骤：按设置让这台的 agent 起停出口、本地分流。
 pub async fn apply(
   state: &AppState,
   server: &str,
   cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<(), ApiError> {
   let snap = crate::snapshot::load(&state.db).await?;
-  let row = snap
-    .world
-    .servers
-    .get(server)
-    .ok_or_else(|| crate::world::server_not_found(server))?;
   let build = snap
     .agent(server)
     .and_then(|a| a.report.as_ref())
@@ -179,53 +288,19 @@ pub async fn apply(
       .with_hint("运行 wharf upgrade"),
     );
   }
-  let cfg = if row.settings.egress {
-    let ip = snap
-      .net(&snap.world)
-      .private
-      .get(server)
-      .map(|a| a.ip.clone())
-      .ok_or_else(|| {
-        ApiError::new(
-          ErrorCode::Conflict,
-          format!("服务器 {server} 没有内网地址，不能提供出口"),
-        )
-      })?;
-    Some(wharf_api_types::agent::EgressConfig {
-      bind: ip,
-      port: EGRESS_PORT,
-      token: ensure_token(state).await?,
-    })
-  } else {
-    None
-  };
+  let token = ensure_token(state).await?;
+  // 口令刚生成时快照里还没有，重新加载。
+  let snap = crate::snapshot::load(&state.db).await?;
+  let cfg = config_for(server, &snap, &token)?;
   state
     .hub
     .call::<serde_json::Value>(
       server,
-      wharf_api_types::agent::AgentOp::Egress(cfg),
+      AgentOp::Egress(cfg),
       std::time::Duration::from_secs(30),
       None,
       cancel,
     )
     .await?;
   Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-  use super::*;
-
-  #[test]
-  fn masks_credentials() {
-    assert_eq!(
-      mask("http://wharf:abc@100.64.0.1:8118"),
-      "http://***@100.64.0.1:8118"
-    );
-    assert_eq!(
-      mask("http://100.64.0.1:8118"),
-      "http://100.64.0.1:8118"
-    );
-    assert!(is_server("s1") && !is_server("http://x"));
-  }
 }

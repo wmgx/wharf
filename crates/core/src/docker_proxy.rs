@@ -25,7 +25,12 @@ const ALWAYS_DIRECT: &str = "localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,19
 
 /// 想要的 dockerd 代理配置：`(代理, no-proxy)`。没设代理时为 `None`。
 pub fn wanted(s: &ServerSettings) -> Option<(String, String)> {
-  let proxy = s.pull_proxy.as_deref()?.trim();
+  // 经出口时指向本机的分流代理，改规则不用再动 dockerd。
+  let local = crate::egress::local_url();
+  let proxy = match crate::egress::via(s) {
+    Some(_) => local.as_str(),
+    None => s.pull_proxy.as_deref()?.trim(),
+  };
   if proxy.is_empty() {
     return None;
   }
@@ -129,19 +134,7 @@ pub async fn apply(
   progress: ProgressFn,
   cancel: &CancellationToken,
 ) -> Result<(), ApiError> {
-  let (raw, no_proxy) = wanted(settings).unwrap_or_default();
-  // 写成服务器名时换成那台出口的地址（带口令）；日志里只显示去掉口令的样子。
-  let proxy = if raw.is_empty() {
-    String::new()
-  } else {
-    crate::snapshot::load(&state.db).await?;
-    crate::snapshot::proxy_url(Some(&raw)).ok_or_else(|| {
-      ApiError::invalid(format!("{raw} 没有开出口")).with_hint(
-        format!("wharf server set {raw} --egress true --apply"),
-      )
-    })?
-  };
-  let shown = crate::egress::mask(&proxy);
+  let (proxy, no_proxy) = wanted(settings).unwrap_or_default();
   let script =
     format!("P={}\nN={}\n{WRITE}", quote(&proxy), quote(&no_proxy));
   let (code, out) = exec(state, server, script, cancel).await?;
@@ -160,7 +153,7 @@ pub async fn apply(
     return Ok(());
   }
   progress("已写入 daemon.json，重启 dockerd（容器不停）".into());
-  let want = format!("{}|true", docker_masked(&proxy));
+  let want = format!("{proxy}|true");
   let deadline =
     tokio::time::Instant::now() + Duration::from_secs(READY_SECS);
   tokio::time::sleep(Duration::from_secs(8)).await;
@@ -172,7 +165,7 @@ pub async fn apply(
       progress(if proxy.is_empty() {
         "dockerd 已去掉拉镜像代理".into()
       } else {
-        format!("dockerd 已经通过 {shown} 拉海外镜像")
+        format!("dockerd 已经通过 {proxy} 拉海外镜像")
       });
       return Ok(());
     }
@@ -208,34 +201,5 @@ mod tests {
     assert!(n.starts_with("localhost,"));
     assert!(n.ends_with(",ghcr.nju.edu.cn"));
     assert_eq!(quote("a'b"), r"'a'\''b'");
-  }
-}
-
-/// `docker info` 显示代理时把密码换成 `xxxxx`。
-fn docker_masked(url: &str) -> String {
-  match (url.split_once("://"), url.rfind('@')) {
-    (Some((scheme, rest)), Some(_)) => {
-      let (cred, host) = rest.rsplit_once('@').unwrap_or(("", rest));
-      match cred.split_once(':') {
-        Some((user, _)) => format!("{scheme}://{user}:xxxxx@{host}"),
-        None => url.to_string(),
-      }
-    }
-    _ => url.to_string(),
-  }
-}
-
-#[cfg(test)]
-mod mask_tests {
-  #[test]
-  fn masks_like_docker() {
-    assert_eq!(
-      super::docker_masked("http://wharf:abc@100.64.0.1:8118"),
-      "http://wharf:xxxxx@100.64.0.1:8118"
-    );
-    assert_eq!(
-      super::docker_masked("http://100.64.0.1:8118"),
-      "http://100.64.0.1:8118"
-    );
   }
 }

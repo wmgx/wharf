@@ -1283,41 +1283,59 @@ fn link_items(
   Ok(())
 }
 
-/// 出口开关变了：让那台的 agent 起或停代理。排在 dockerd 代理前面，那边可能要用它。
+/// 出口设置变了（自己的规则、经哪台、那台的规则）：让这台的 agent 重新起出口和本地分流。
+/// 排在 dockerd 代理前面，那边要用本机的分流代理。
 fn egress_items(b: &mut Builder, current: &World, desired: &World) {
-  for (server, row) in &desired.servers {
-    let after = row.settings.egress;
-    let before = current
-      .servers
-      .get(server)
-      .is_some_and(|r| r.settings.egress);
+  use crate::egress::effective;
+  for server in desired.servers.keys() {
+    let after = effective(server, desired);
+    let before = effective(server, current);
     if after == before {
       continue;
     }
+    let show = |e: &Option<(
+      Option<wharf_api_types::egress::EgressSpec>,
+      Option<String>,
+      Option<wharf_api_types::egress::EgressSpec>,
+    )>| {
+      e.as_ref().map(|(own, via, rules)| {
+        json!({ "egress": own, "via": via, "via_rules": rules })
+      })
+    };
+    let mut what = Vec::new();
+    if let Some((own, via, _)) = &after {
+      if let Some(o) = own {
+        what.push(if o.all {
+          "提供出口（全部走）".to_string()
+        } else {
+          format!("提供出口（{} 个域名）", o.domains().len())
+        });
+      }
+      if let Some(v) = via {
+        what.push(format!("经 {v} 出口（本机分流，出口不通时直连）"));
+      }
+    }
+    let reason = if what.is_empty() {
+      format!("{server} 不再提供或使用出口，相关请求改为直连")
+    } else {
+      format!("{server}：{}", what.join("；"))
+    };
     let id = b.item(
       format!("egress/{server}"),
       Layer::Container,
-      if after {
-        Action::Create
-      } else {
-        Action::Delete
+      match (&before, &after) {
+        (None, _) => Action::Create,
+        (_, None) => Action::Delete,
+        _ => Action::Update,
       },
-      Some(json!({ "egress": before })),
-      Some(json!({ "egress": after })),
+      show(&before),
+      show(&after),
       vec![],
-      if after {
-        format!("{server} 在内网地址上提供出口（HTTP 代理，要口令）")
-      } else {
-        format!("{server} 不再提供出口，经它出去的请求改为直连")
-      },
+      reason,
     );
     b.step(
       vec![id],
-      if after {
-        format!("在 {server} 上开启出口")
-      } else {
-        format!("在 {server} 上关闭出口")
-      },
+      format!("更新 {server} 的出口"),
       Step::Egress {
         server: server.clone(),
       },
@@ -1383,12 +1401,12 @@ fn docker_proxy_items(
   }
 }
 
-/// 代理设置给人看的样子：服务器名显示成"经 X 出口"，地址去掉密码。
+/// 代理地址给人看的样子。
 fn shown(value: &str) -> String {
-  if crate::egress::is_server(value) {
-    format!("经 {value} 出口")
+  if value == crate::egress::local_url() {
+    "本机分流代理（按出口规则）".into()
   } else {
-    format!("代理 {}", crate::egress::mask(value))
+    format!("代理 {value}")
   }
 }
 

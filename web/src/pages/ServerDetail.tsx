@@ -37,6 +37,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
+import { EgressFields } from "./server-egress";
 import {
   Dialog,
   DialogContent,
@@ -56,7 +57,7 @@ import {
 import { AptUpgrade } from "@/components/apt-upgrade";
 import { HostSessions } from "@/components/host-sessions";
 import { useStatus } from "@/status";
-import type { HostInfo, ServerView } from "@/types";
+import type { EgressSpec, HostInfo, ServerView } from "@/types";
 import { ServerTasks } from "./server-tasks";
 
 const DOCKER_KIND: Record<string, string> = {
@@ -613,7 +614,8 @@ function SettingsForm({
   ];
   const [hostTerminal, setHostTerminal] = useState(cur.host_terminal);
   const [hostExec, setHostExec] = useState(cur.host_exec);
-  const [egress, setEgress] = useState(!!cur.egress);
+  const [egress, setEgress] = useState<EgressSpec | undefined>(cur.egress);
+  const [via, setVia] = useState(cur.via ?? "");
   const [quota, setQuota] = useState(
     cur.traffic_quota_gb ? String(cur.traffic_quota_gb) : "",
   );
@@ -642,7 +644,8 @@ function SettingsForm({
     lan_addrs: lanAddrs.length ? lanAddrs : undefined,
     host_terminal: hostTerminal,
     host_exec: hostExec,
-    egress: egress || undefined,
+    egress,
+    via: via || undefined,
     traffic_quota_gb: quotaNum > 0 ? quotaNum : undefined,
     traffic_reset_day: resetNum > 0 ? resetNum : undefined,
   };
@@ -656,7 +659,8 @@ function SettingsForm({
       registry_mirrors: x.registry_mirrors ?? {},
       build_env: x.build_env ?? {},
       mirrors_only: !!x.mirrors_only,
-      egress: x.egress || undefined,
+      egress: x.egress ?? undefined,
+      via: x.via || undefined,
       lan_addrs: x.lan_addrs?.length ? x.lan_addrs : undefined,
     });
   const changed = norm(next) !== norm(cur);
@@ -752,27 +756,34 @@ function SettingsForm({
           onChange={setBuildEnv}
         />
       </Field>
+      <EgressFields
+        server={server.name}
+        egress={egress}
+        onEgress={setEgress}
+        via={via}
+        onVia={setVia}
+      />
       <Field
-        label="拉代码和构建的出口"
+        label="拉代码代理"
         htmlFor="git-proxy"
-        help="提供出口的服务器名，或 http:// 地址。出口连不上时直连。"
+        help="只用于 git。国内机器连不上 GitHub 时经海外机器转发。"
       >
         <Input
           id="git-proxy"
           value={gitProxy}
-          placeholder="us1"
+          placeholder="http://100.x.x.x:8118"
           onChange={(e) => setGitProxy(e.target.value)}
         />
       </Field>
       <Field
-        label="拉镜像的出口"
+        label="拉镜像代理"
         htmlFor="pull-proxy"
-        help="提供出口的服务器名，或 http:// 地址。写进宿主机 dockerd 配置，镜像源和内网直连。执行时会重启 dockerd（开启 live-restore，容器不停）。"
+        help="写进宿主机 dockerd 配置，ghcr 等海外仓库经它拉，镜像源和内网直连。执行时会重启 dockerd（开启 live-restore，容器不停）。"
       >
         <Input
           id="pull-proxy"
           value={pullProxy}
-          placeholder="us1"
+          placeholder="http://100.x.x.x:8118"
           onChange={(e) => setPullProxy(e.target.value)}
         />
       </Field>
@@ -823,13 +834,6 @@ function SettingsForm({
             onCheckedChange={(v) => setHostExec(v === true)}
           />
           允许通过 API 在宿主机执行命令（CLI、AI 用）
-        </label>
-        <label className="flex cursor-pointer items-center gap-2.5 text-sm">
-          <Checkbox
-            checked={egress}
-            onCheckedChange={(v) => setEgress(v === true)}
-          />
-          提供出口（在内网地址上起 HTTP 代理，别的机器可以经它出去）
         </label>
       </div>
       <div className="flex flex-wrap items-center gap-2">

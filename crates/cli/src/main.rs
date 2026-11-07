@@ -74,8 +74,8 @@ pub enum Command {
   },
   /// 升级 Wharf：控制面换成最新镜像，再把各服务器的 agent 升到同一版本。
   Upgrade,
-  /// 出口：控制面调厂商 API（Cloudflare、Tailscale）用哪个出口。
-  /// 不带参数时显示现状；`wharf egress api us1` 经 us1 出去，`wharf egress api ""` 直连。
+  /// 出口：控制面调厂商 API（Cloudflare、Tailscale）经哪台出口，以及预置分组。
+  /// 不带参数时显示现状。
   Egress {
     #[command(subcommand)]
     cmd: Option<EgressCmd>,
@@ -312,17 +312,21 @@ pub enum ServerCmd {
     /// 清空构建参数。
     #[arg(long)]
     clear_build_env: bool,
-    /// 拉代码、查 commit、构建时用的出口：提供出口的服务器名（例如 `us1`）或 `http://` 地址；
-    /// 出口连不上时退回直连。传空字符串清除。
+    /// 拉代码时用的 HTTP 代理，例如 `http://100.x.x.x:8118`；传空字符串清除。设了 `--via` 时不用它。
     #[arg(long)]
     git_proxy: Option<String>,
-    /// 拉镜像时 dockerd 用的出口：提供出口的服务器名或 `http://` 地址；镜像源和内网直连。
+    /// 拉镜像时 dockerd 用的 HTTP 代理，例如 `http://100.x.x.x:8118`；镜像源和内网直连。
     /// apply 时改宿主机的 daemon.json 并重启 dockerd（开启 live-restore，容器不停）；传空字符串清除。
-    #[arg(long)]
+    /// 设了 `--via` 时不用它。
     pull_proxy: Option<String>,
-    /// 这台机器提供出口：在内网地址上起 HTTP 代理（要口令），别的机器的出口设置可以写它的名字。
+    /// 这台提供出口，以及经它出去的规则：`all`（除内网外全部），或逗号分隔的预置分组和域名，
+    /// 例如 `github,cloudflare,*.example.com`（分组见 `wharf egress presets`）；`off` 关闭。
     #[arg(long)]
-    egress: Option<bool>,
+    egress: Option<String>,
+    /// 经哪台的出口出去：本机起分流代理，拉镜像、构建、拉代码按那台的规则分流，出口连不上时直连；
+    /// 传空字符串清除。
+    #[arg(long)]
+    via: Option<String>,
     /// 代替 `https://github.com/` 拉代码的地址，例如 `https://gh.example.com/[[MIRROR_TOKEN]]`；
     /// 可以引用密钥；传空字符串清除。
     #[arg(long)]
@@ -739,6 +743,8 @@ pub enum NotifyCmd {
 
 #[derive(Subcommand)]
 pub enum EgressCmd {
-  /// 设置控制面调厂商 API 用的出口：服务器名、`http://` 地址，或空字符串（直连）。
-  Api { value: String },
+  /// 设置控制面调厂商 API 经哪台出口（按那台的规则分流）；空字符串直连。
+  Api { server: String },
+  /// 列出预置分组和包含的域名。
+  Presets,
 }

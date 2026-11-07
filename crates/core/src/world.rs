@@ -205,6 +205,7 @@ impl World {
     for change in changes {
       match change {
         Change::UpdateServer { name, settings } => {
+          crate::egress::validate(name, settings, &self.servers)?;
           let server = self
             .servers
             .get_mut(name)

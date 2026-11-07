@@ -8,22 +8,21 @@ import { useStatus } from "@/status";
 
 /** 控制面调厂商 API（Cloudflare、Tailscale）用的出口。 */
 export function Egress() {
-  const { data, refresh } = usePoll<{ api_proxy?: string }>(
-    "/api/egress",
-    30000,
-  );
+  const { data, refresh } = usePoll<{ via?: string }>("/api/egress", 30000);
   const { status } = useStatus();
   const [saving, setSaving] = useState(false);
   const exits = (status?.servers ?? [])
-    .filter((s) => (s.settings as { egress?: boolean }).egress)
+    .filter((s) => s.settings.egress)
     .map((s) => s.name);
-  const current = data?.api_proxy ?? "";
+  const current = data?.via ?? "";
 
   const save = async (v: string) => {
     setSaving(true);
     try {
-      await api.put("/api/egress", { api_proxy: v || null });
-      toast.success(v ? `调厂商 API 改为经 ${v} 出口` : "调厂商 API 改为直连");
+      await api.put("/api/egress", { via: v || null });
+      toast.success(
+        v ? `调厂商 API 改为按 ${v} 出口的规则分流` : "调厂商 API 改为直连",
+      );
       refresh();
     } catch (e) {
       toast.error("没能保存", { description: (e as Error).message });
@@ -51,7 +50,10 @@ export function Egress() {
               value={current}
               options={[
                 { value: "", label: "直连" },
-                ...exits.map((n) => ({ value: n, label: `经 ${n} 出口` })),
+                ...exits.map((n) => ({
+                  value: n,
+                  label: `按 ${n} 出口的规则`,
+                })),
                 ...(current && !exits.includes(current)
                   ? [{ value: current, label: current }]
                   : []),

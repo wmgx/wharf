@@ -127,6 +127,14 @@ async fn build_in(
   if let Some(p) =
     usable_proxy(job.pull.git_proxy.as_deref(), ctx).await
   {
+    // 本机的分流代理：构建容器里要经宿主机网关访问。
+    let p = if p.contains("://127.0.0.1:") {
+      cmd =
+        cmd.args(["--add-host", "host.docker.internal:host-gateway"]);
+      p.replace("://127.0.0.1:", "://host.docker.internal:")
+    } else {
+      p
+    };
     let direct = no_proxy(job);
     for (k, v) in [
       ("HTTP_PROXY", &p),
