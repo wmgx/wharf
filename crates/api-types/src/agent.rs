@@ -237,6 +237,12 @@ pub enum AgentOp {
   EdgeBuild(Box<EdgeBuildJob>),
   /// 列出本机的全部容器（不含 agent 自己），结果是 `Vec<FoundContainer>`。
   Discover,
+  /// 删除没纳管的容器（`docker rm -f`）；`volumes` 时连同它们的具名数据卷一起删，别的容器还在用的不删。
+  RemoveContainers {
+    containers: Vec<String>,
+    #[serde(default)]
+    volumes: bool,
+  },
   /// 读取要导入的 compose 项目或容器的配置，结果是 [ImportRaw]。
   ImportRead(ImportTarget),
   /// 恢复 [ProjectUp::retire] 停掉的容器。
@@ -569,6 +575,21 @@ pub struct FoundContainer {
   /// 所属的 compose 项目，`docker run` 起的为空。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub project: Option<String>,
+  /// 挂载的具名数据卷（不含宿主机目录和匿名卷）。
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub volumes: Vec<String>,
+}
+
+/// [AgentOp::RemoveContainers] 的结果。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RemovedContainers {
+  pub containers: Vec<String>,
+  /// 删掉的数据卷。
+  #[serde(default)]
+  pub volumes: Vec<String>,
+  /// 还有别的容器在用、没删的数据卷。
+  #[serde(default)]
+  pub kept_volumes: Vec<String>,
 }
 
 /// 导入哪个：compose 项目或单个容器，二选一。

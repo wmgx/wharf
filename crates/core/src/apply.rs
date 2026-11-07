@@ -73,8 +73,11 @@ impl Runs {
   pub fn busy_error(&self) -> ApiError {
     let active = lock(&self.active);
     let Some((id, a)) = active.iter().next() else {
-      return ApiError::new(ErrorCode::Busy, "已有一个执行在进行，马上结束")
-        .with_hint("几秒后再试");
+      return ApiError::new(
+        ErrorCode::Busy,
+        "已有一个执行在进行，马上结束",
+      )
+      .with_hint("几秒后再试");
     };
     let run = lock(&a.run);
     let doing = run
@@ -87,7 +90,10 @@ impl Runs {
     let done = run
       .steps
       .iter()
-      .filter(|s| s.status != StepStatus::Running && s.status != StepStatus::Pending)
+      .filter(|s| {
+        s.status != StepStatus::Running
+          && s.status != StepStatus::Pending
+      })
       .count();
     let secs = (chrono::Utc::now() - run.started_at).num_seconds();
     ApiError::new(
@@ -258,8 +264,11 @@ pub async fn start(
   req: ApplyRequest,
   perms: std::collections::BTreeSet<Perm>,
 ) -> Result<ApplyResponse, ApiError> {
-  let guard =
-    state.apply_lock.clone().try_lock_owned().map_err(|_| state.runs.busy_error())?;
+  let guard = state
+    .apply_lock
+    .clone()
+    .try_lock_owned()
+    .map_err(|_| state.runs.busy_error())?;
   let stored = stored_plan(&state, &req.plan_id).await?;
   let plan = &stored.plan;
   let replan = "wharf plan".to_string();
@@ -476,8 +485,11 @@ pub async fn start_task(
   title: String,
   step: Step,
 ) -> Result<ApplyResponse, ApiError> {
-  let guard =
-    state.apply_lock.clone().try_lock_owned().map_err(|_| state.runs.busy_error())?;
+  let guard = state
+    .apply_lock
+    .clone()
+    .try_lock_owned()
+    .map_err(|_| state.runs.busy_error())?;
   let run_id = crate::world::new_id("r");
   let run = Run {
     run_id: run_id.clone(),

@@ -1317,11 +1317,16 @@ fn egress_items(b: &mut Builder, current: &World, desired: &World) {
         what.push(if o.all {
           "给其他机器当外网代理（所有网站）".to_string()
         } else {
-          format!("给其他机器当外网代理（{} 个域名）", o.domains().len())
+          format!(
+            "给其他机器当外网代理（{} 个域名）",
+            o.domains().len()
+          )
         });
       }
       if let Some(v) = via {
-        what.push(format!("访问外网借 {v}（只转发规则里的网站，{v} 不通时直连）"));
+        what.push(format!(
+          "访问外网借 {v}（只转发规则里的网站，{v} 不通时直连）"
+        ));
       }
     }
     let reason = if what.is_empty() {
@@ -1761,7 +1766,11 @@ fn affected_hosts(
     .map(|(h, _)| h.clone())
     .collect();
   for (name, app) in &desired.edge_apps {
-    if current.edge_apps.get(name).is_none_or(|c| c.spec != app.spec) {
+    if current
+      .edge_apps
+      .get(name)
+      .is_none_or(|c| c.spec != app.spec)
+    {
       out.extend(app.spec.domains.iter().cloned());
     }
   }

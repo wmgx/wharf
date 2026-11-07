@@ -163,6 +163,13 @@ impl Ops {
       AgentOp::Discover => {
         to_value(crate::adopt::discover(&self.docker, ctx).await?)
       }
+      AgentOp::RemoveContainers {
+        containers,
+        volumes,
+      } => to_value(
+        crate::adopt::remove(&self.docker, &containers, volumes, ctx)
+          .await?,
+      ),
       AgentOp::ImportRead(target) => to_value(
         crate::adopt::read(&self.docker, &target, ctx).await?,
       ),

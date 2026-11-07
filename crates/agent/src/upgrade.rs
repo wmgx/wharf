@@ -33,7 +33,12 @@ pub fn sweep_helper() {
     tokio::time::sleep(Duration::from_secs(120)).await;
     let ctx = Ctx::detached();
     let Ok(out) = Cmd::new("docker")
-      .args(["inspect", "-f", "{{.State.Running}} {{.State.ExitCode}}", HELPER])
+      .args([
+        "inspect",
+        "-f",
+        "{{.State.Running}} {{.State.ExitCode}}",
+        HELPER,
+      ])
       .timeout(QUICK)
       .run(&ctx)
       .await
