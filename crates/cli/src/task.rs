@@ -56,6 +56,13 @@ pub struct AddArgs {
   /// 在宿主机执行（要服务器开了"命令执行"）。
   #[arg(long, group = "how")]
   host: bool,
+  /// 外部报到：Wharf 不执行，脚本跑完请求报到地址；`--schedule` 写预期运行时间，
+  /// 超过 `--grace` 分钟没报到就通知。保存后 `wharf task show` 看报到地址。
+  #[arg(long, group = "how")]
+  ping: bool,
+  /// 外部报到的宽限分钟数。
+  #[arg(long, default_value_t = 60)]
+  grace: u32,
   /// 服务器；`--exec` 时可以不填。
   #[arg(long)]
   server: Option<String>,
@@ -129,6 +136,10 @@ pub async fn task(
           "{}",
           serde_json::to_string_pretty(&t.spec).unwrap_or_default()
         );
+        if let Some(url) = &t.ping_url {
+          println!("\n报到：脚本成功后 curl -fsS -m 10 {url}");
+          println!("失败时：curl -fsS -m 10 {url}/fail");
+        }
       });
       Ok(())
     }
@@ -199,6 +210,14 @@ async fn add(c: &Client, a: AddArgs, j: bool) -> CliResult<()> {
       mounts: a.mount,
     };
     (how, need_server(a.server)?)
+  } else if a.ping {
+    (
+      TaskKind::Ping {
+        token: String::new(),
+        grace_mins: a.grace,
+      },
+      need_server(a.server)?,
+    )
   } else if a.host {
     (
       TaskKind::Host {
@@ -209,7 +228,7 @@ async fn add(c: &Client, a: AddArgs, j: bool) -> CliResult<()> {
   } else {
     return Err(
       ApiError::invalid("要选一种任务形式")
-        .with_hint("--exec <服务>、--image <镜像> 或 --host")
+        .with_hint("--exec <服务>、--image <镜像>、--host 或 --ping")
         .into(),
     );
   };
@@ -285,6 +304,7 @@ fn kind(k: &TaskKind) -> &'static str {
     TaskKind::Exec { .. } => "容器内",
     TaskKind::Container { .. } => "一次性容器",
     TaskKind::Host { .. } => "宿主机",
+    TaskKind::Ping { .. } => "外部报到",
   }
 }
 

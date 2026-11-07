@@ -57,6 +57,7 @@ const KIND = {
   exec: "容器内",
   container: "一次性容器",
   host: "宿主机",
+  ping: "外部报到",
 } as const;
 
 /** 定时任务列表。给了 `server` 只看这台，否则列出全部并多一列服务器。 */
@@ -129,6 +130,7 @@ export function ServerTasks({ server }: { server?: string }) {
                     <TableCell className="text-xs text-muted-foreground">
                       {KIND[t.spec.kind]}
                       {t.spec.kind === "exec" && ` · ${t.spec.service}`}
+                      {t.ping_url && <PingUrl url={t.ping_url} />}
                     </TableCell>
                     <TableCell>
                       {t.last ? (
@@ -160,15 +162,17 @@ export function ServerTasks({ server }: { server?: string }) {
                     </TableCell>
                     <TableCell>
                       <div className="flex gap-1">
-                        <Button
-                          variant="ghost"
-                          size="icon-xs"
-                          aria-label="立即运行"
-                          title="立即运行"
-                          onClick={() => run(t.name)}
-                        >
-                          <PlayIcon />
-                        </Button>
+                        {t.spec.kind !== "ping" && (
+                          <Button
+                            variant="ghost"
+                            size="icon-xs"
+                            aria-label="立即运行"
+                            title="立即运行"
+                            onClick={() => run(t.name)}
+                          >
+                            <PlayIcon />
+                          </Button>
+                        )}
                         <Button
                           variant="ghost"
                           size="icon-xs"
@@ -327,8 +331,11 @@ function EditTask({
     s?.kind === "exec" ? (s.container ?? "") : "",
   );
   const [image, setImage] = useState(s?.kind === "container" ? s.image : "");
+  const [grace, setGrace] = useState(
+    String(s?.kind === "ping" ? s.grace_mins : 60),
+  );
   const [command, setCommand] = useState(
-    s && s.kind !== "container"
+    s && (s.kind === "exec" || s.kind === "host")
       ? s.command
       : s?.kind === "container"
         ? (s.command ?? "")
@@ -367,6 +374,8 @@ function EditTask({
         command,
       };
     if (kind === "host") return { ...base, kind, command };
+    if (kind === "ping")
+      return { ...base, kind, grace_mins: Number(grace) || 60 };
     return {
       ...base,
       kind,
@@ -403,7 +412,9 @@ function EditTask({
       ? service && command.trim()
       : kind === "host"
         ? command.trim()
-        : image.trim());
+        : kind === "ping"
+          ? Number(grace) > 0
+          : image.trim());
 
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
@@ -447,6 +458,7 @@ function EditTask({
                 ["exec", "服务容器内"],
                 ["container", "一次性容器"],
                 ["host", "宿主机"],
+                ["ping", "外部报到"],
               ]}
               onChange={setKind}
             />
@@ -483,19 +495,25 @@ function EditTask({
               />
             </Field>
           )}
-          <Field
-            label="命令"
-            htmlFor="task-command"
-            help={<>用 sh -c 执行，可以写 [[密钥]]</>}
-          >
-            <Textarea
-              id="task-command"
-              spellCheck={false}
-              value={command}
-              onChange={(e) => setCommand(e.target.value)}
-              className="min-h-20 font-mono text-xs"
-            />
-          </Field>
+          {kind === "ping" ? (
+            <p className="text-sm text-muted-foreground">
+              Wharf 不执行它：机器上已有的 cron、systemd timer 或脚本跑完后请求一下报到地址（保存后显示），到了下面的时间再过宽限还没报到就记为失败并通知。
+            </p>
+          ) : (
+            <Field
+              label="命令"
+              htmlFor="task-command"
+              help={<>用 sh -c 执行，可以写 [[密钥]]</>}
+            >
+              <Textarea
+                id="task-command"
+                spellCheck={false}
+                value={command}
+                onChange={(e) => setCommand(e.target.value)}
+                className="min-h-20 font-mono text-xs"
+              />
+            </Field>
+          )}
           {kind === "container" && (
             <div className="grid gap-4 sm:grid-cols-2">
               <Field label="环境变量" htmlFor="task-env">
@@ -521,7 +539,7 @@ function EditTask({
             </div>
           )}
           <div className="grid gap-4 sm:grid-cols-2">
-            <Field label="时间（cron，北京时间）" htmlFor="task-schedule">
+            <Field label={kind === "ping" ? "预期运行时间（cron，北京时间）" : "时间（cron，北京时间）"} htmlFor="task-schedule">
               <Input
                 id="task-schedule"
                 value={schedule}
@@ -529,15 +547,27 @@ function EditTask({
                 className="font-mono"
               />
             </Field>
-            <Field label="超时（秒）" htmlFor="task-timeout">
-              <Input
-                id="task-timeout"
-                inputMode="numeric"
-                value={timeout}
-                onChange={(e) => setTimeout_(e.target.value.replace(/\D/g, ""))}
-                className="font-mono"
-              />
-            </Field>
+            {kind === "ping" ? (
+              <Field label="宽限（分钟）" htmlFor="task-grace">
+                <Input
+                  id="task-grace"
+                  inputMode="numeric"
+                  value={grace}
+                  onChange={(e) => setGrace(e.target.value.replace(/\D/g, ""))}
+                  className="font-mono"
+                />
+              </Field>
+            ) : (
+              <Field label="超时（秒）" htmlFor="task-timeout">
+                <Input
+                  id="task-timeout"
+                  inputMode="numeric"
+                  value={timeout}
+                  onChange={(e) => setTimeout_(e.target.value.replace(/\D/g, ""))}
+                  className="font-mono"
+                />
+              </Field>
+            )}
           </div>
           <div className="flex gap-6 text-sm">
             <label className="flex items-center gap-2">
@@ -567,5 +597,25 @@ function EditTask({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+/** 报到地址：点一下复制成可以直接贴进脚本的 curl。 */
+function PingUrl({ url }: { url: string }) {
+  const line = `curl -fsS -m 10 ${url}`;
+  return (
+    <button
+      type="button"
+      title={`复制：${line}\n失败时请求 ${url}/fail`}
+      className="mt-0.5 block max-w-64 truncate font-mono text-[11px] text-primary hover:underline"
+      onClick={() => {
+        navigator.clipboard?.writeText(line).then(
+          () => toast.success("已复制报到命令", { description: line }),
+          () => toast.error("复制失败", { description: line }),
+        );
+      }}
+    >
+      {url}
+    </button>
   );
 }

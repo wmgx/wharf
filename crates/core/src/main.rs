@@ -45,6 +45,7 @@ mod migrate;
 mod monitor;
 mod network;
 mod notify;
+mod ping;
 mod pins;
 mod planner;
 mod probe;
