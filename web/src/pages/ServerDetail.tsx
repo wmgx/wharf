@@ -781,7 +781,7 @@ function SettingsForm({
         <Input
           id="github-mirror"
           value={githubMirror}
-          placeholder="https://github.wmgx.top/[[MIRROR_TOKEN]]"
+          placeholder="https://gh.example.com/[[MIRROR_TOKEN]]"
           onChange={(e) => setGithubMirror(e.target.value)}
         />
       </Field>
