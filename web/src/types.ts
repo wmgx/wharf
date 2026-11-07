@@ -237,6 +237,7 @@ export interface ProbeView {
   ms: number;
   at: number;
   fails: number;
+  cert_days?: number;
 }
 
 export type EdgeKind = "worker" | "pages";

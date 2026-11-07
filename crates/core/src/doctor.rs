@@ -77,7 +77,10 @@ pub fn spawn(state: Arc<AppState>) {
     tokio::time::sleep(FIRST_TICK).await;
     loop {
       match run(&state, None).await {
-        Ok(report) => remember(report),
+        Ok(report) => {
+          crate::probe::observe(&state, &report).await;
+          remember(report)
+        }
         Err(e) => tracing::warn!("域名检查失败：{e}"),
       }
       tokio::time::sleep(TICK).await;

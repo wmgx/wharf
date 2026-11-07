@@ -108,6 +108,15 @@ async fn versions(state: &AppState) {
   };
   let mut found: BTreeMap<String, Found> = images(state, &snap).await;
   found.extend(commits(state, &snap).await);
+  let fresh: Vec<(String, String)> = found
+    .iter()
+    .filter_map(|(n, r)| match r {
+      Ok((latest, pinned)) if latest != pinned => {
+        Some((n.clone(), latest.clone()))
+      }
+      _ => None,
+    })
+    .collect();
   let now = Utc::now();
   update(|u| {
     let old = std::mem::take(&mut u.services);
@@ -129,6 +138,43 @@ async fn versions(state: &AppState) {
       u.services.insert(name, check);
     }
   });
+  for (name, latest) in fresh {
+    notify_newer(state, &name, &latest).await;
+  }
+}
+
+/// 同一个新版本只推一次：推过的版本记在设置 `notify.update.<服务>` 里。
+async fn notify_newer(state: &AppState, name: &str, latest: &str) {
+  let key = format!("notify.update.{name}");
+  let value = latest.to_string();
+  let seen = state
+    .db
+    .call(move |c| {
+      let prev = crate::db::setting(c, &key)?;
+      if prev.as_deref() != Some(value.as_str()) {
+        crate::db::set_setting(c, &key, Some(&value))?;
+      }
+      Ok(prev.as_deref() == Some(value.as_str()))
+    })
+    .await
+    .unwrap_or(true);
+  if seen {
+    return;
+  }
+  let short: String = latest
+    .trim_start_matches("sha256:")
+    .chars()
+    .take(12)
+    .collect();
+  let event = crate::notify::Event {
+    title: format!("服务 {name} 有新版本"),
+    body: format!(
+      "最新版本 {short}。看改动：wharf plan，要更新：wharf service update {name}（或在页面上点\u{201c}更新\u{201d}）"
+    ),
+  };
+  if let Err(e) = crate::notify::send(state, &event).await {
+    tracing::warn!("推送 {name} 的新版本提醒失败：{}", e.message);
+  }
 }
 
 /// image 来源：按服务器分组，一台 agent 一次查完。没固定版本或标签本身就是 digest 的跳过。

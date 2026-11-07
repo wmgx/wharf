@@ -95,6 +95,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route("/api/core-backup/run", post(crate::core_backup::run_now))
     .route("/api/doctor", get(crate::doctor::doctor))
     .route("/api/metrics", get(crate::metrics::query))
+    .route("/api/metrics/usage", get(crate::metrics::usage))
     .route(
       "/api/core-backup/recovery-key",
       post(crate::core_backup::recovery_key),
