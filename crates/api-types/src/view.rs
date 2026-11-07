@@ -163,6 +163,9 @@ pub struct ServiceStatus {
   /// 查不到现状时的原因。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub error: Option<String>,
+  /// 最后一次成功查到这台服务器现状的时间；服务器离线时就是"多久前看到的"。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub observed_at: Option<DateTime<Utc>>,
 }
 
 #[derive(

@@ -1,5 +1,6 @@
 //! 组装 API 视图，必要时向 agent 查实时状态。
 
+use chrono::{DateTime, Utc};
 use std::{
   collections::BTreeMap,
   sync::{Arc, Mutex},
@@ -91,10 +92,27 @@ pub async fn live_states(state: &AppState, world: &World) -> LiveMap {
       .await;
       (server, result)
     });
-  futures_util::future::join_all(futures)
+  let live: LiveMap = futures_util::future::join_all(futures)
     .await
     .into_iter()
-    .collect()
+    .collect();
+  if let Ok(mut seen) = OBSERVED.lock() {
+    let now = Utc::now();
+    for (server, r) in &live {
+      if r.is_ok() {
+        seen.insert(server.clone(), now);
+      }
+    }
+  }
+  live
+}
+
+/// 每台服务器最后一次查到现状的时间，只在内存里（控制面重启后清空）。
+static OBSERVED: Mutex<BTreeMap<String, DateTime<Utc>>> =
+  Mutex::new(BTreeMap::new());
+
+fn observed_at(server: &str) -> Option<DateTime<Utc>> {
+  OBSERVED.lock().ok()?.get(server).copied()
 }
 
 /// 后台每隔 [LIVE_EVERY] 查一次各服务器现状，`status` 读这份缓存，不用等最慢的那台。
@@ -273,6 +291,7 @@ pub fn service_view(
       applied: snap.applied.get(name),
       live: project.as_ref(),
       last_op: snap.ops.get(name),
+      observed_at: observed_at(&row.spec.server),
     })
   });
   let containers = live
