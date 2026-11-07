@@ -344,3 +344,84 @@ mod tests {
     assert_eq!(series["deploy.secs"].len(), 2);
   }
 }
+
+#[derive(Deserialize)]
+pub struct UsageQuery {
+  pub server: String,
+}
+
+/// 一个服务（或网关）最近 10 分钟的平均用量。
+#[derive(Serialize)]
+pub struct Usage {
+  pub name: String,
+  /// `service` 或 `gateway`。
+  pub kind: &'static str,
+  pub cpu: f64,
+  pub mem: f64,
+  pub net_rx: f64,
+  pub net_tx: f64,
+}
+
+/// `GET /api/metrics/usage?server=`：这台服务器上各服务的资源用量，按内存从大到小。
+pub async fn usage(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Query(q): Query<UsageQuery>,
+) -> ApiResult<Vec<Usage>> {
+  auth.require(Perm::Read)?;
+  let snap = crate::snapshot::load(&s.db).await?;
+  let mut subjects: Vec<(String, String, &'static str)> = snap
+    .world
+    .services
+    .iter()
+    .filter(|(_, r)| r.spec.server == q.server)
+    .map(|(n, _)| (n.clone(), n.clone(), "service"))
+    .collect();
+  subjects.extend(
+    snap
+      .world
+      .gateways
+      .iter()
+      .filter(|(_, g)| g.spec.server == q.server)
+      .map(|(n, _)| {
+        (crate::world::gateway_project(n), n.clone(), "gateway")
+      }),
+  );
+  let from = now_ms() - 10 * 60 * 1000;
+  let avg: BTreeMap<(String, String), f64> = s
+    .db
+    .call(move |c| {
+      let mut stmt = c
+        .prepare(
+          "SELECT name, subject, AVG(value) FROM points
+           WHERE name LIKE 'svc.%' AND at >= ?1 GROUP BY name, subject",
+        )
+        .map_err(sql_err)?;
+      let rows = stmt
+        .query_map(params![from], |r| {
+          Ok(((r.get::<_, String>(0)?, r.get::<_, String>(1)?), r.get(2)?))
+        })
+        .map_err(sql_err)?;
+      rows.collect::<Result<_, _>>().map_err(sql_err)
+    })
+    .await?;
+  let get = |metric: &str, subject: &str| {
+    avg
+      .get(&(format!("svc.{metric}"), subject.to_string()))
+      .copied()
+      .unwrap_or(0.0)
+  };
+  let mut out: Vec<Usage> = subjects
+    .into_iter()
+    .map(|(subject, name, kind)| Usage {
+      cpu: get("cpu", &subject),
+      mem: get("mem", &subject),
+      net_rx: get("net_rx", &subject),
+      net_tx: get("net_tx", &subject),
+      name,
+      kind,
+    })
+    .collect();
+  out.sort_by(|a, b| b.mem.total_cmp(&a.mem));
+  Ok(Json(out))
+}

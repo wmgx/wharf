@@ -7,6 +7,7 @@ use clap::Parser;
 use ed25519_dalek::SigningKey;
 
 mod agent_upgrade;
+mod alerts;
 mod api;
 mod apply;
 mod apt;
@@ -162,7 +163,7 @@ async fn main() -> anyhow::Result<()> {
   heal::spawn(state.clone());
   doctor::spawn(state.clone());
   updates::spawn(state.clone());
-  probe::spawn(state.clone());
+  alerts::spawn(state.clone());
   tasks::spawn(state.clone());
   views::spawn_live(state.clone());
 
