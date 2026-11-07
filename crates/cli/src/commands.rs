@@ -861,6 +861,120 @@ async fn server(
       )
       .await
     }
+    ServerCmd::Baseline {
+      name,
+      timezone,
+      swap_gb,
+      sysctl,
+      docker_log,
+      journal_max,
+      security_updates,
+      copy_from,
+      apply,
+    } => {
+      let edits = timezone.is_some()
+        || swap_gb.is_some()
+        || !sysctl.is_empty()
+        || docker_log.is_some()
+        || journal_max.is_some()
+        || security_updates.is_some()
+        || copy_from.is_some();
+      if !edits && !apply.apply {
+        #[derive(serde::Deserialize, serde::Serialize)]
+        struct Report {
+          diffs: Vec<String>,
+          errors: Vec<String>,
+        }
+        let r: Report = c
+          .post(
+            &format!("/api/servers/{}/baseline/check", seg(&name)),
+            &json!({}),
+          )
+          .await?;
+        out(j, &r, |r| {
+          if r.diffs.is_empty() && r.errors.is_empty() {
+            println!("{name} 符合基线");
+          }
+          for d in &r.diffs {
+            println!("差异  {d}");
+          }
+          for e in &r.errors {
+            println!("问题  {e}");
+          }
+          if !r.diffs.is_empty() {
+            println!("\n纠正：wharf server baseline {name} --apply");
+          }
+        });
+        return Ok(());
+      }
+      let current: ServerView =
+        c.get(&format!("/api/servers/{}", seg(&name))).await?;
+      let mut settings = current.settings;
+      let b = &mut settings.baseline;
+      if let Some(from) = copy_from {
+        let other: ServerView =
+          c.get(&format!("/api/servers/{}", seg(&from))).await?;
+        *b = other.settings.baseline;
+      }
+      let text = |v: String| {
+        let v = v.trim().to_string();
+        (!v.is_empty()).then_some(v)
+      };
+      if let Some(tz) = timezone {
+        b.timezone = text(tz);
+      }
+      if let Some(n) = swap_gb {
+        b.swap_gb = (n > 0).then_some(n);
+      }
+      for kv in &sysctl {
+        let (k, v) = parse_kv(kv, "--sysctl")?;
+        if v.is_empty() {
+          b.sysctl.remove(&k);
+        } else {
+          b.sysctl.insert(k, v);
+        }
+      }
+      if let Some(d) = docker_log {
+        match text(d) {
+          None => {
+            b.docker_log_size = None;
+            b.docker_log_files = None;
+          }
+          Some(d) => {
+            let (size, files) = match d.split_once(':') {
+              Some((s, f)) => (
+                s.to_string(),
+                Some(f.parse::<u32>().map_err(|_| {
+                  ApiError::invalid(format!(
+                    "--docker-log {d} 格式不对，应为 20m:3"
+                  ))
+                })?),
+              ),
+              None => (d.clone(), None),
+            };
+            b.docker_log_size = Some(size);
+            b.docker_log_files = files;
+          }
+        }
+      }
+      if let Some(m) = journal_max {
+        b.journal_max = text(m);
+      }
+      if let Some(s) = security_updates {
+        b.security_updates = match s.as_str() {
+          "on" => Some(true),
+          "off" => Some(false),
+          _ => None,
+        };
+      }
+      changes(
+        c,
+        vec![Change::UpdateServer { name, settings }],
+        apply,
+        j,
+      )
+      .await
+    }
     ServerCmd::Rm { name } => {
       let v: Value =
         c.delete(&format!("/api/servers/{}", seg(&name))).await?;

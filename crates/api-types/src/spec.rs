@@ -87,6 +87,44 @@ pub struct ServerSettings {
   /// 流量每月几号重置（1 到 28，按北京时间），不填是 1 号。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub traffic_reset_day: Option<u8>,
+  /// 机器基线：系统设置的期望值，agent 定时检查差异，apply 时纠正。
+  #[serde(default, skip_serializing_if = "Baseline::is_empty")]
+  pub baseline: Baseline,
+}
+
+/// 机器基线（P9）。字段不填就不管；去掉某项只是不再管，不会改回去。
+/// 不含 ssh 和防火墙：配错会把自己锁在机器外面。
+#[derive(
+  Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct Baseline {
+  /// 时区，例如 `Asia/Shanghai`。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub timezone: Option<String>,
+  /// 没有 swap 时建一个这么大的 /swapfile（GB）；已有 swap 不改。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub swap_gb: Option<u32>,
+  /// 内核参数，写进 /etc/sysctl.d/90-wharf.conf，例如 `net.ipv4.tcp_congestion_control = bbr`。
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub sysctl: BTreeMap<String, String>,
+  /// 容器日志轮转：单个文件上限，例如 `20m`。写进 daemon.json，只对新建的容器生效。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub docker_log_size: Option<String>,
+  /// 容器日志轮转：保留几个文件，默认 3。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub docker_log_files: Option<u32>,
+  /// journald 日志总上限，例如 `500M`。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub journal_max: Option<String>,
+  /// 自动安装安全更新（unattended-upgrades，只支持 apt 系统）。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub security_updates: Option<bool>,
+}
+
+impl Baseline {
+  pub fn is_empty(&self) -> bool {
+    self == &Self::default()
+  }
 }
 
 /// 机器的接入方式（design 2.10）。不指定时按检测到的地址推断：有 Tailscale 地址是 `tailscale`，

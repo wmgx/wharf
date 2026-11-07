@@ -211,6 +211,7 @@ impl World {
             .get_mut(name)
             .ok_or_else(|| server_not_found(name))?;
           validate_lan_addrs(&settings.lan_addrs)?;
+          validate_baseline(&settings.baseline)?;
           if settings
             .traffic_reset_day
             .is_some_and(|d| !(1..=28).contains(&d))
@@ -1158,6 +1159,63 @@ fn valid_upstream(up: &str) -> bool {
 }
 
 /// 额外绑定的地址只能是私有网段，否则服务端口会暴露到公网。
+/// 基线的值会写进宿主机的配置文件，只允许安全的字符。
+fn validate_baseline(
+  b: &wharf_api_types::spec::Baseline,
+) -> Result<(), ApiError> {
+  let ok = |v: &str, extra: &[u8]| {
+    !v.is_empty()
+      && v
+        .bytes()
+        .all(|c| c.is_ascii_alphanumeric() || extra.contains(&c))
+  };
+  let size = |v: &str| {
+    let digits = v.trim_end_matches(|c: char| "kKmMgG".contains(c));
+    !digits.is_empty()
+      && digits.bytes().all(|c| c.is_ascii_digit())
+      && v.len() - digits.len() <= 1
+  };
+  if let Some(tz) = &b.timezone
+    && !ok(tz, b"/_+-")
+  {
+    return Err(ApiError::invalid(format!(
+      "时区 {tz} 不对，例如 Asia/Shanghai"
+    )));
+  }
+  for (k, v) in &b.sysctl {
+    if !ok(k, b"._-") || k.starts_with('.') || k.contains("..") {
+      return Err(ApiError::invalid(format!(
+        "内核参数名 {k} 不对，例如 net.ipv4.tcp_congestion_control"
+      )));
+    }
+    if !ok(v, b" ._-") {
+      return Err(ApiError::invalid(format!(
+        "内核参数 {k} 的值 {v} 不对"
+      )));
+    }
+  }
+  for (label, v) in [
+    ("容器日志大小", &b.docker_log_size),
+    ("journald 上限", &b.journal_max),
+  ] {
+    if let Some(v) = v
+      && !size(v)
+    {
+      return Err(ApiError::invalid(format!(
+        "{label} {v} 不对，写成数字加单位，例如 20m、500M"
+      )));
+    }
+  }
+  if b.swap_gb.is_some_and(|g| g > 64)
+    || b.docker_log_files == Some(0)
+  {
+    return Err(ApiError::invalid(
+      "swap 最多 64G，容器日志至少保留 1 个文件",
+    ));
+  }
+  Ok(())
+}
+
 fn validate_lan_addrs(addrs: &[String]) -> Result<(), ApiError> {
   for addr in addrs {
     let ok = addr

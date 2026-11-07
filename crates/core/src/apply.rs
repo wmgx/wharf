@@ -788,6 +788,18 @@ async fn run_step(
       )
       .await?;
     }
+    Step::Baseline { server } => {
+      let baseline = &world
+        .servers
+        .get(server)
+        .ok_or_else(|| crate::world::server_not_found(server))?
+        .settings
+        .baseline;
+      crate::baseline::apply(
+        state, server, baseline, progress, cancel,
+      )
+      .await?;
+    }
     Step::Egress { server } => {
       crate::egress::apply(state, server, cancel).await?;
     }

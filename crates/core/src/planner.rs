@@ -141,6 +141,10 @@ pub enum Step {
   DockerProxy {
     server: String,
   },
+  /// 按服务器设置 `baseline` 纠正系统设置（机器基线）。
+  Baseline {
+    server: String,
+  },
   /// 按服务器设置 `egress` 开关这台的出口代理。
   Egress {
     server: String,
@@ -215,6 +219,7 @@ impl Step {
       Self::DnsDelete { .. } | Self::EdgeDetach { .. } => 0,
       // 先换好拉镜像的路，后面起服务时就用上。
       Self::DockerProxy { .. } => 1,
+      Self::Baseline { .. } => 1,
       Self::Egress { .. } => 1,
       Self::EnsureDirs { .. } => 1,
       Self::VolumeSync { .. } => 2,
@@ -436,6 +441,7 @@ pub async fn make_plan(
   tailscale_items(&mut b, &snap, &desired, &status);
   egress_items(&mut b, &current, &desired);
   docker_proxy_items(&mut b, &current, &desired);
+  baseline_items(&mut b, &current, &desired);
   gateway_items(&mut b, &snap, &current, &desired, &net, &status)?;
   dns_items(&mut b, &snap, &desired, &net).await?;
   mark("DNS");
@@ -1337,6 +1343,43 @@ fn egress_items(b: &mut Builder, current: &World, desired: &World) {
       vec![id],
       format!("更新 {server} 的出口"),
       Step::Egress {
+        server: server.clone(),
+      },
+    );
+  }
+}
+
+/// 机器基线：设置改了，或者最近一次检查有差异时，加一步纠正。
+fn baseline_items(b: &mut Builder, current: &World, desired: &World) {
+  for (server, row) in &desired.servers {
+    let want = &row.settings.baseline;
+    if want.is_empty() {
+      continue;
+    }
+    let before =
+      current.servers.get(server).map(|r| &r.settings.baseline);
+    let drift = crate::baseline::drift(server);
+    if before == Some(want) && drift.is_empty() {
+      continue;
+    }
+    let reason = if drift.is_empty() {
+      "按新的基线检查并纠正系统设置".to_string()
+    } else {
+      drift.join("；")
+    };
+    let id = b.item(
+      format!("baseline/{server}"),
+      Layer::Container,
+      Action::Update,
+      before.map(|b| json!(b)),
+      Some(json!(want)),
+      vec![],
+      reason,
+    );
+    b.step(
+      vec![id],
+      format!("纠正 {server} 的基线"),
+      Step::Baseline {
         server: server.clone(),
       },
     );
