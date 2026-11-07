@@ -350,6 +350,34 @@ pub enum ServerCmd {
   Rm {
     name: String,
   },
+  /// 机器基线：不带设置参数时立即检查并列出差异；带参数时修改基线，--apply 时纠正。
+  /// 有差异时只加 --apply 也会纠正。不管 ssh 和防火墙。
+  Baseline {
+    name: String,
+    /// 时区，例如 Asia/Shanghai；传空字符串不再管。
+    #[arg(long)]
+    timezone: Option<String>,
+    /// 没有 swap 时建一个这么大的 /swapfile（GB）；0 不再管。
+    #[arg(long)]
+    swap_gb: Option<u32>,
+    /// 内核参数 `KEY=VALUE`，例如 net.ipv4.tcp_congestion_control=bbr，可以多次使用；值为空不再管。
+    #[arg(long)]
+    sysctl: Vec<String>,
+    /// 容器日志轮转：单个文件上限和保留个数，例如 `20m:3`；传空字符串不再管。
+    #[arg(long)]
+    docker_log: Option<String>,
+    /// journald 日志总上限，例如 500M；传空字符串不再管。
+    #[arg(long)]
+    journal_max: Option<String>,
+    /// 自动安装安全更新：on、off，或 none 不再管。
+    #[arg(long, value_parser = ["on", "off", "none"])]
+    security_updates: Option<String>,
+    /// 从另一台服务器复制整份基线。
+    #[arg(long)]
+    copy_from: Option<String>,
+    #[command(flatten)]
+    apply: ApplyFlags,
+  },
   /// 升级 agent 到和控制面相同的版本：拉新镜像，换掉 agent 容器，新 agent 连不上就恢复旧的。
   Upgrade {
     /// 服务器名；不给时用 `--all`。

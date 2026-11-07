@@ -114,6 +114,10 @@ pub fn router(state: Arc<AppState>) -> Router {
       post(crate::agent_upgrade::upgrade_now),
     )
     .route("/api/servers/{name}/prune", post(crate::prune::prune_now))
+    .route(
+      "/api/servers/{name}/baseline/check",
+      post(crate::baseline::check_now),
+    )
     .route("/api/servers/{name}/host", get(host_info))
     .route("/api/servers/{name}/dirs", get(crate::host_dir::list))
     .route("/api/servers/{name}/pack", post(crate::host_dir::pack))

@@ -13,6 +13,7 @@ mod apply;
 mod apt;
 mod auth;
 mod backup;
+mod baseline;
 mod build;
 mod cert;
 mod cli_dist;
@@ -169,6 +170,7 @@ async fn main() -> anyhow::Result<()> {
   alerts::spawn(state.clone());
   monitor::spawn(state.clone());
   quality::spawn(state.clone());
+  baseline::spawn(state.clone());
   tasks::spawn(state.clone());
   views::spawn_live(state.clone());
 

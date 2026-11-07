@@ -107,6 +107,9 @@ pub struct ServerView {
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub agent_outdated: bool,
   pub version: u64,
+  /// 最近一次检查和基线不一样的项（每 6 小时检查一次）。
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub baseline_drift: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
