@@ -10,6 +10,7 @@ import { Boundary } from "./components/Boundary";
 import { CommandMenu } from "./components/command-menu";
 import { NewMenu } from "./components/new-menu";
 import { Problems } from "./components/problems";
+import { Running } from "./components/running";
 import { Separator } from "./components/ui/separator";
 import { SidebarInset, SidebarProvider, SidebarTrigger } from "./components/ui/sidebar";
 import { Toaster } from "./components/ui/sonner";
@@ -93,6 +94,7 @@ function Shell({ username, onLogout }: { username: string; onLogout: () => void 
               <Separator orientation="vertical" className="mr-1 data-[orientation=vertical]:h-4" />
               <span className="hidden text-sm font-medium sm:inline">{title}</span>
               <div className="ml-auto flex min-w-0 flex-1 items-center justify-end gap-2">
+                <Running />
                 <Problems />
                 <CommandMenu onLogout={onLogout} />
                 <NewMenu />

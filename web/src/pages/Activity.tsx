@@ -16,7 +16,7 @@ const RUN_TONE: Record<Run["status"], [Tone, string]> = {
 };
 
 /** 一次执行的标题：步骤标题合起来，太多时只列前两个。 */
-function runTitle(r: Run): string {
+export function runTitle(r: Run): string {
   const titles = r.steps.map((s) => s.title);
   if (titles.length === 0) return "空执行";
   return titles.length <= 2 ? titles.join("、") : `${titles.slice(0, 2).join("、")} 等 ${titles.length} 步`;
