@@ -454,7 +454,13 @@ rm -rf .git"#;
   if result.is_err() {
     remove_container(docker, &name).await;
   }
-  let out = result?.check("拉取代码")?;
+  let hide = |mut e: ApiError| {
+    if let Some(m) = mirror {
+      e.message = wharf_api_types::agent::redact_addr(&e.message, m);
+    }
+    e
+  };
+  let out = result.and_then(|o| o.check("拉取代码")).map_err(hide)?;
   let commit = out
     .stdout
     .lines()
@@ -570,7 +576,12 @@ fi"#;
   if result.is_err() {
     remove_container(docker, &name).await;
   }
-  let out = result?.check("查询代码版本")?;
+  let out = result.and_then(|o| o.check("查询代码版本")).map_err(
+    |mut e| {
+      e.message = job.pull.redact(&e.message);
+      e
+    },
+  )?;
   pick_commit(&out.stdout, reference).ok_or_else(|| {
     ApiError::invalid(format!("仓库里没有分支或标签 {reference}"))
   })

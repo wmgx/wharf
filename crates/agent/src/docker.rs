@@ -289,7 +289,7 @@ impl Docker {
     }
     let mut errors = Vec::new();
     for candidate in candidates {
-      ctx.say(format!("拉取 {candidate}"));
+      ctx.say(policy.redact(&format!("拉取 {candidate}")));
       let result = self.pull_once(&candidate, timeout, ctx).await;
       match result {
         Ok(_) => {
@@ -304,7 +304,7 @@ impl Docker {
           return Ok(());
         }
         Err(e) if e.code == ErrorCode::Cancelled => return Err(e),
-        Err(e) => errors.push(e.message),
+        Err(e) => errors.push(policy.redact(&e.message)),
       }
     }
     Err(
@@ -330,7 +330,7 @@ impl Docker {
       Duration::from_secs(policy.attempt_timeout_secs.max(10));
     let mut errors = Vec::new();
     for candidate in pull_candidates(image, policy) {
-      ctx.say(format!("拉取 {candidate}"));
+      ctx.say(policy.redact(&format!("拉取 {candidate}")));
       let result = self.pull_once(&candidate, timeout, ctx).await;
       match result {
         Ok(_) => {
@@ -355,8 +355,10 @@ impl Docker {
         }
         Err(e) if e.code == ErrorCode::Cancelled => return Err(e),
         Err(e) => {
-          ctx.say(format!("失败：{}", e.message));
-          errors.push(format!("{candidate}：{}", e.message));
+          let message = policy.redact(&e.message);
+          ctx.say(format!("失败：{message}"));
+          errors
+            .push(policy.redact(&format!("{candidate}：{message}")));
         }
       }
     }

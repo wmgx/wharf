@@ -713,6 +713,30 @@ pub struct PullPolicy {
   pub github_mirror: Option<String>,
 }
 
+impl PullPolicy {
+  /// 把镜像源和 GitHub 镜像地址里主机名后面的路径（可能是访问口令）换成 `***`，
+  /// 用于日志和报错。
+  pub fn redact(&self, text: &str) -> String {
+    let addrs = self
+      .mirrors
+      .values()
+      .flatten()
+      .chain(self.github_mirror.iter());
+    addrs.fold(text.to_string(), |acc, addr| redact_addr(&acc, addr))
+  }
+}
+
+/// 把 `text` 里出现的 `addr`（形如 `host/口令` 或 `https://host/口令`）的路径部分换成 `***`。
+pub fn redact_addr(text: &str, addr: &str) -> String {
+  let bare = addr.split_once("://").map_or(addr, |(_, r)| r);
+  match bare.trim_end_matches('/').split_once('/') {
+    Some((host, path)) if !path.is_empty() => {
+      text.replace(&format!("{host}/{path}"), &format!("{host}/***"))
+    }
+    _ => text.to_string(),
+  }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectUp {
   pub project: String,
@@ -934,4 +958,33 @@ pub struct BuildResult {
   /// git 来源实际构建的 commit。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub commit: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn redact_hides_mirror_paths() {
+    let policy = PullPolicy {
+      mirrors: BTreeMap::from([(
+        "docker.io".into(),
+        vec![
+          "hub.example.com/secret123".into(),
+          "docker.1ms.run".into(),
+        ],
+      )]),
+      mirrors_only: false,
+      attempt_timeout_secs: 60,
+      git_proxy: None,
+      github_mirror: Some("https://gh.example.com/secret123/".into()),
+    };
+    let text = "docker pull hub.example.com/secret123/library/busybox:1 失败；\
+      fatal: unable to access 'https://gh.example.com/secret123/o/r/'；docker.1ms.run/x";
+    let out = policy.redact(text);
+    assert!(!out.contains("secret123"), "{out}");
+    assert!(out.contains("hub.example.com/***/library/busybox:1"));
+    assert!(out.contains("https://gh.example.com/***/o/r/"));
+    assert!(out.contains("docker.1ms.run/x"));
+  }
 }
