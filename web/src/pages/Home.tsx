@@ -1,7 +1,8 @@
-import { ArrowRightIcon, CheckIcon, ChevronRightIcon, CloudIcon, LayoutGridIcon, ListIcon, PlusIcon } from "lucide-react";
+import { ArrowRightIcon, ArrowUpCircleIcon, CheckIcon, ChevronRightIcon, CloudIcon, LayoutGridIcon, ListIcon, PlusIcon } from "lucide-react";
 import { useState, type CSSProperties } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { usePoll } from "@/api";
+import { useActions } from "@/components/actions";
 import { CardsSkeleton, OpenLink, useClickable, Mark, PageHeader, SectionTitle, ServerTag, StatusBadge, type Tone } from "@/components/common";
 import { serviceTruth } from "@/components/health";
 import { Button } from "@/components/ui/button";
@@ -36,13 +37,14 @@ interface Item {
   cloud: boolean;
   tone: Tone;
   text: string;
+  newer?: boolean;
 }
 
 function itemsOf(status: Status): Item[] {
   const services: Item[] = status.services.map((s) => {
     const route = status.routes.find((r) => r.spec.service === s.name);
     const { tone, text } = serviceTruth(s, status);
-    return { name: s.name, url: route?.url, address: Object.values(s.addresses)[0], detail: `/services/${s.name}`, where: s.spec.server, cloud: false, tone, text };
+    return { name: s.name, url: route?.url, address: Object.values(s.addresses)[0], detail: `/services/${s.name}`, where: s.spec.server, cloud: false, tone, text, newer: status.updates?.services[s.name]?.newer };
   });
   const edge: Item[] = (status.edge_apps ?? []).map((a) => {
     const { tone, text } = edgeTone(a.live, a.drift);
@@ -84,6 +86,7 @@ export function Home() {
         }
       />
       {status && <Onboarding status={status} />}
+      {status && <UpdatesBanner status={status} />}
       {status && (
         <div className="mb-4 flex flex-wrap items-center gap-2">
           <div className="flex flex-wrap items-center gap-1">
@@ -148,6 +151,35 @@ function ViewButton({ on, label, onClick, children }: { on: boolean; label: stri
   );
 }
 
+/** 有服务出了新版本时，首页顶部一条横幅，一次预览全部更新。 */
+function UpdatesBanner({ status }: { status: Status }) {
+  const actions = useActions();
+  const names = Object.entries(status.updates?.services ?? {})
+    .filter(([n, c]) => c.newer && status.services.some((s) => s.name === n))
+    .map(([n]) => n)
+    .sort();
+  if (!names.length) return null;
+  return (
+    <div className="mb-4 flex flex-wrap items-center gap-3 rounded-xl border border-primary/30 bg-primary/5 px-4 py-3 text-sm">
+      <ArrowUpCircleIcon className="size-4 text-primary" />
+      <span className="flex-1">
+        {names.length} 个服务有新版本：{names.join("、")}
+      </span>
+      <Button
+        size="sm"
+        onClick={() =>
+          actions.plan({
+            title: names.length === 1 ? `更新 ${names[0]}` : `更新 ${names.length} 个服务`,
+            changes: names.map((name) => ({ op: "refresh_images", name })),
+          })
+        }
+      >
+        预览更新
+      </Button>
+    </div>
+  );
+}
+
 function Cards({ items }: { items: Item[] }) {
   const clickable = useClickable();
   if (items.length === 0) return null;
@@ -170,6 +202,12 @@ function Cards({ items }: { items: Item[] }) {
             </div>
             <div className="flex items-center gap-1.5">
               <StatusBadge tone={it.tone}>{it.text}</StatusBadge>
+              {it.newer && (
+                <span className="inline-flex items-center gap-1 rounded-md bg-primary/10 px-1.5 py-0.5 text-xs font-medium text-primary">
+                  <ArrowUpCircleIcon className="size-3" />
+                  新版本
+                </span>
+              )}
               {it.cloud ? (
                 <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
                   <CloudIcon className="size-3" />

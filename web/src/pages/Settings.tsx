@@ -36,7 +36,6 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { AccountView } from "@/types";
 import { CoreBackup } from "./core-backup";
 import { EdgeImport } from "./edge-import";
-import { Egress } from "./egress";
 import { Notify } from "./notify";
 import { Secrets } from "./secrets";
 import { Tokens } from "./tokens";
@@ -109,7 +108,6 @@ export function Settings() {
           <TabsTrigger value="secrets">密钥</TabsTrigger>
           <TabsTrigger value="tokens">访问令牌</TabsTrigger>
           <TabsTrigger value="notify">通知</TabsTrigger>
-          <TabsTrigger value="egress">出口</TabsTrigger>
           <TabsTrigger value="backup">控制面备份</TabsTrigger>
         </TabsList>
         <TabsContent value="accounts" className="mt-4">
@@ -211,9 +209,6 @@ export function Settings() {
         </TabsContent>
         <TabsContent value="notify" className="mt-4">
           <Notify />
-        </TabsContent>
-        <TabsContent value="egress" className="mt-4">
-          <Egress />
         </TabsContent>
         <TabsContent value="backup" className="mt-4">
           <CoreBackup />

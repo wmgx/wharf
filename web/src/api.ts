@@ -136,9 +136,15 @@ export function followLogs(
   };
 }
 
+/** 每个接口最近一次的结果：再次打开页面时先显示它，后台再刷新。 */
+const pollCache = new Map<string, unknown>();
+
+/** 退出登录时清掉，别把上一次的数据留给下一个会话。 */
+export const clearPollCache = () => pollCache.clear();
+
 /** 定时拉取一个接口。返回数据、错误和手动刷新。 */
 export function usePoll<T>(path: string | null, intervalMs = 5000) {
-  const [data, setData] = useState<T | null>(null);
+  const [data, setData] = useState<T | null>(() => (path ? ((pollCache.get(path) as T) ?? null) : null));
   const [error, setError] = useState<ApiError | null>(null);
   const pathRef = useRef(path);
   pathRef.current = path;
@@ -148,6 +154,7 @@ export function usePoll<T>(path: string | null, intervalMs = 5000) {
     if (!p) return;
     try {
       const v = await api.get<T>(p);
+      pollCache.set(p, v);
       if (pathRef.current === p) {
         setData(v);
         setError(null);
@@ -158,7 +165,7 @@ export function usePoll<T>(path: string | null, intervalMs = 5000) {
   }, []);
 
   useEffect(() => {
-    setData(null);
+    setData(path ? ((pollCache.get(path) as T) ?? null) : null);
     refresh();
     if (!path) return;
     const t = setInterval(refresh, intervalMs);

@@ -3,6 +3,7 @@ import { PageHeader } from "@/components/common";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Data } from "./Data";
 import { GatewaysPanel } from "./Gateways";
+import { Egress } from "./egress";
 import { NetworkPanel } from "./Network";
 
 // 拓扑图依赖的 @xyflow/react 比较大，只在打开网络页时加载。
@@ -22,8 +23,11 @@ export function Entries() {
 export function NetworkPage() {
   return (
     <>
-      <PageHeader title="网络" description="机器之间怎么连：Tailscale、内网地址" />
+      <PageHeader title="网络" description="机器之间怎么连、流量从哪出去" />
       <NetworkPanel />
+      <div className="mt-10">
+        <Egress />
+      </div>
       <h2 className="mt-10 mb-3 font-medium">拓扑</h2>
       <Suspense fallback={<Skeleton className="h-[480px] rounded-xl" />}>
         <Topology />

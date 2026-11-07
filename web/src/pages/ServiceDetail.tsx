@@ -1,5 +1,6 @@
 import {
   PackageIcon,
+  ArrowUpCircleIcon,
   WrenchIcon,
   ArrowRightIcon,
   ArrowRightLeftIcon,
@@ -200,10 +201,13 @@ export function ServiceDetail() {
               <ServerTag name={svc.spec.server} />
             </span>
             <ServiceNote svc={svc} />
+          </div>
+        }
+        actions={
+          <>
             {status?.updates?.services[name]?.newer && (
-              <button
-                type="button"
-                className="text-xs text-primary underline underline-offset-2"
+              <Button
+                title={status.updates.services[name].latest ? `最新 ${status.updates.services[name].latest}` : undefined}
                 onClick={() =>
                   actions.plan({
                     title: `更新 ${name}`,
@@ -211,13 +215,10 @@ export function ServiceDetail() {
                   })
                 }
               >
-                有新版本
-              </button>
+                <ArrowUpCircleIcon />
+                有新版本，更新
+              </Button>
             )}
-          </div>
-        }
-        actions={
-          <>
             <Button variant="outline" onClick={() => setEditing(true)}>
               <PencilIcon />
               修改配置
