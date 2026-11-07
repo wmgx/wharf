@@ -103,6 +103,22 @@ export interface ServiceSpec {
   backup?: { to: string };
   /** 停止：容器保留但不运行。 */
   stopped?: boolean;
+  /** 自定义监控。 */
+  monitor?: MonitorSpec;
+}
+
+export interface MonitorSpec {
+  path: string;
+  port?: string;
+  expect?: number;
+  keyword?: string;
+}
+
+export interface MonitorView {
+  ok: boolean;
+  detail: string;
+  at: number;
+  fails: number;
 }
 
 export interface FoundContainer {
@@ -163,6 +179,7 @@ export interface LiveState {
 }
 
 export interface ServiceView {
+  monitor?: MonitorView;
   name: string;
   spec: ServiceSpec;
   host_ports: Record<string, number>;

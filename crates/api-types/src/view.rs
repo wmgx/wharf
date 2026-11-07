@@ -133,6 +133,9 @@ pub struct ServiceView {
   /// 分层状态；只读配置、不查现状时为空。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub status: Option<ServiceStatus>,
+  /// 自定义监控的最近一次结果；没配监控或还没检查过时为空。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub monitor: Option<MonitorView>,
 }
 
 /// 服务的分层状态：期望、已应用、实际、健康、执行，加上按优先级挑出的一句话。
@@ -422,6 +425,18 @@ pub struct RouteView {
   /// 最近一次域名体检的 HTTP(S) 结果和连续失败次数；还没检查过时为空。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub probe: Option<ProbeView>,
+}
+
+/// 自定义监控的最近一次结果。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct MonitorView {
+  pub ok: bool,
+  /// 例如 `HTTP 200 · 12 ms`、`HTTP 502，期望 2xx 或 3xx`。
+  pub detail: String,
+  /// 毫秒时间戳。
+  pub at: i64,
+  #[serde(default)]
+  pub fails: u32,
 }
 
 /// 域名探测结果。

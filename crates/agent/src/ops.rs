@@ -154,6 +154,9 @@ impl Ops {
       AgentOp::Probe { targets } => {
         to_value(crate::probe::check(targets).await)
       }
+      AgentOp::HttpCheck(job) => {
+        to_value(crate::probe::http(job).await)
+      }
       AgentOp::Discover => {
         to_value(crate::adopt::discover(&self.docker, ctx).await?)
       }
