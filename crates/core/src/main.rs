@@ -16,6 +16,7 @@ mod build;
 mod cert;
 mod cli_dist;
 mod core_backup;
+mod cron;
 mod data;
 mod db;
 mod docker_proxy;
@@ -49,6 +50,7 @@ mod snapshot;
 mod state;
 mod status;
 mod tailscale;
+mod tasks;
 mod terminal;
 mod traffic;
 mod tunnel;
@@ -152,11 +154,13 @@ async fn main() -> anyhow::Result<()> {
   });
   apply::recover(&state).await?;
   shell::recover(&state).await?;
+  tasks::recover(&state).await?;
   jobs::spawn(state.clone());
   agent_upgrade::spawn_agents_after(state.clone());
   heal::spawn(state.clone());
   doctor::spawn(state.clone());
   updates::spawn(state.clone());
+  tasks::spawn(state.clone());
   views::spawn_live(state.clone());
 
   let listener = tokio::net::TcpListener::bind(cli.listen)

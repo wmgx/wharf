@@ -32,6 +32,7 @@ mod report;
 mod restic;
 mod settle;
 mod sync;
+mod task;
 mod terminal;
 mod upgrade;
 

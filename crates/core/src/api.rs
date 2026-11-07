@@ -232,6 +232,13 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route("/api/edge/{name}/accept", post(crate::edge_api::accept))
     .route("/api/secrets", get(list_secrets))
     .route("/api/notify/test", post(crate::notify::test))
+    .route("/api/tasks", get(crate::tasks::list))
+    .route(
+      "/api/tasks/{name}",
+      put(crate::tasks::put).delete(crate::tasks::remove),
+    )
+    .route("/api/tasks/{name}/run", post(crate::tasks::run_now))
+    .route("/api/tasks/{name}/runs", get(crate::tasks::runs))
     .route(
       "/api/secrets/{name}",
       put(set_secret).delete(remove_secret),

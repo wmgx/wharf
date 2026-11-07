@@ -243,6 +243,26 @@ CREATE TABLE service_notes (
   updated_at INTEGER NOT NULL
 );
 "#,
+  // 定时任务（直接改，不走计划）和运行记录，见 tasks.rs。
+  r#"
+CREATE TABLE tasks (
+  name TEXT PRIMARY KEY,
+  spec TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE task_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task TEXT NOT NULL,
+  status TEXT NOT NULL,
+  trigger TEXT NOT NULL,
+  started_at INTEGER NOT NULL,
+  ended_at INTEGER,
+  exit_code INTEGER,
+  output TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX task_runs_task ON task_runs (task, id);
+"#,
 ];
 
 /// git 构建来源固定到上次部署构建的 commit（仓库和分支没换过的）。当时没记下 commit 的留给 plan 提醒。

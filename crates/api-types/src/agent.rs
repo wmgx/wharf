@@ -276,6 +276,8 @@ pub enum AgentOp {
   },
   /// 在宿主机命名空间里执行一次命令。结果是 [HostExecOutcome]。
   HostExec(HostExecJob),
+  /// 定时任务：在服务容器里执行命令，或跑一次性容器。结果是 [TaskRunResult]。
+  TaskRun(TaskRunJob),
   /// 读宿主机的系统版本、待装更新、docker 和日志占用，结果是 [HostInfo]。只读。
   HostInfo,
   /// 上一次升级接班容器的最后几十行日志，升级失败时控制面拿来显示原因。结果是字符串。
@@ -1001,4 +1003,48 @@ mod tests {
     assert!(out.contains("https://gh.example.com/***/o/r/"));
     assert!(out.contains("docker.1ms.run/x"));
   }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskRunJob {
+  /// 任务名，一次性容器叫 `wharf-task-<任务名>`。
+  pub name: String,
+  pub how: TaskHow,
+  pub timeout_secs: u64,
+  pub pull: PullPolicy,
+}
+
+/// 命令都用 `sh -c` 执行，密钥已经替换好。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TaskHow {
+  /// 在 compose 项目 `project` 的容器里执行；`service` 是 compose 服务名，只有一个容器时可以不填。
+  Exec {
+    project: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    service: Option<String>,
+    command: String,
+  },
+  /// `docker run --rm`；有 `command` 时用 `sh -c` 代替镜像的入口。
+  Container {
+    image: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    command: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    env: BTreeMap<String, String>,
+    /// `宿主机路径:容器路径[:ro]`。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    mounts: Vec<String>,
+  },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskRunResult {
+  /// 超时被杀掉时没有。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub exit_code: Option<i32>,
+  pub timed_out: bool,
+  /// stdout 和 stderr 合起来的最后一段。
+  pub output: String,
+  pub duration_ms: u64,
 }
