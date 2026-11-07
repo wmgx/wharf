@@ -100,6 +100,40 @@ export function GatewaysPanel() {
   );
 }
 
+/** 域名的备用入口：只能选另一台机器上的网关。 */
+function BackupPicker({ g, hostname }: { g: GatewayView; hostname: string }) {
+  const actions = useActions();
+  const { status } = useStatus();
+  const route = status?.routes.find((r) => r.spec.hostname === hostname);
+  if (!route) return null;
+  const choices = (status?.gateways ?? []).filter((x) => x.spec.server !== g.spec.server);
+  if (!choices.length && !route.spec.backup_gateway) return null;
+  const set = (v: string) =>
+    actions.plan({
+      title: v ? `${hostname} 的备用入口改为 ${v}` : `去掉 ${hostname} 的备用入口`,
+      changes: [{ op: "upsert_route", spec: { ...route.spec, backup_gateway: v || undefined } }],
+    });
+  return (
+    <span className="ml-auto flex items-center gap-2 text-xs text-muted-foreground">
+      {route.on_backup && <Badge variant="destructive">正走备用</Badge>}
+      备用
+      <select
+        className="rounded-md border bg-background px-1.5 py-1 text-xs text-foreground"
+        value={route.spec.backup_gateway ?? ""}
+        onChange={(e) => set(e.target.value)}
+        title="主网关所在机器离线 5 分钟后，DNS 自动切到备用入口，恢复 5 分钟后切回"
+      >
+        <option value="">无</option>
+        {choices.map((x) => (
+          <option key={x.name} value={x.name}>
+            {x.name}（{x.spec.server}）
+          </option>
+        ))}
+      </select>
+    </span>
+  );
+}
+
 function GatewayDetail({ g, onDone }: { g: GatewayView; onDone: () => void }) {
   const actions = useActions();
   const { status } = useStatus();
@@ -144,9 +178,10 @@ function GatewayDetail({ g, onDone }: { g: GatewayView; onDone: () => void }) {
             {g.routes.length ? (
               <div className="divide-y rounded-lg border">
                 {g.routes.map((h) => (
-                  <div className="flex items-center justify-between gap-3 px-3.5 py-2.5 text-[13px]" key={h}>
+                  <div className="flex flex-wrap items-center gap-3 px-3.5 py-2.5 text-[13px]" key={h}>
                     <span className="font-mono">{h}</span>
                     <CertDays d={diagnosisOf(status, h)} />
+                    <BackupPicker g={g} hostname={h} />
                   </div>
                 ))}
               </div>

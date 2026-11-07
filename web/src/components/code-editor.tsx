@@ -282,7 +282,7 @@ export function CodeEditor({
         <div className="text-xs text-muted-foreground">
           {missing.length ? (
             <span className="text-destructive">还没有密钥 {missing.join("、")}，部署会失败。先到{" "}
-              <Link to="/settings" target="_blank" className="underline underline-offset-2">
+              <Link to="/settings?tab=secrets" target="_blank" className="underline underline-offset-2">
                 设置 → 密钥
               </Link>{" "}
               里添加。
