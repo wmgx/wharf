@@ -33,7 +33,7 @@ export function Servers() {
   return (
     <div className="flex flex-1 flex-col md:flex-row">
       <Side name={name} />
-      <div className="min-w-0 flex-1 px-4 py-8 md:px-8">
+      <div className="min-w-0 flex-1 px-4 py-5 md:px-8 md:py-8">
         <div className="mx-auto max-w-5xl">
           {name ? (
             <ServerDetail key={name} />
@@ -55,7 +55,7 @@ function Side({ name }: { name?: string }) {
   const [adding, setAdding] = useState(false);
 
   return (
-    <nav className="grid content-start gap-0.5 border-b p-2 md:sticky md:top-14 md:h-[calc(100svh-3.5rem)] md:w-56 md:flex-none md:overflow-y-auto md:border-r md:border-b-0">
+    <nav className="sticky top-14 z-[5] flex gap-1 overflow-x-auto border-b bg-background p-2 md:grid md:content-start md:gap-0.5 md:overflow-x-visible md:sticky md:top-14 md:h-[calc(100svh-3.5rem)] md:w-56 md:flex-none md:overflow-y-auto md:border-r md:border-b-0">
       {!status
         ? [0, 1, 2].map((i) => <Skeleton key={i} className="h-12 rounded-lg" />)
         : status.servers.map((s) => {
@@ -68,16 +68,16 @@ function Side({ name }: { name?: string }) {
                     {s.name}
                     {s.agent_outdated && <ArrowUpCircleIcon className="size-3.5 text-warning" aria-label="agent 可升级" />}
                   </span>
-                  <span className="truncate text-xs text-muted-foreground">
+                  <span className="hidden truncate text-xs text-muted-foreground md:block">
                     {s.online ? `${count} 个服务${s.rtt_ms != null ? ` · ${s.rtt_ms} ms` : ""}` : "离线"}
                   </span>
                 </span>
               </Entry>
             );
           })}
-      <Button variant="ghost" size="sm" className="justify-start text-muted-foreground" onClick={() => setAdding(true)}>
+      <Button variant="ghost" size="sm" className="shrink-0 justify-start text-muted-foreground md:shrink" onClick={() => setAdding(true)}>
         <PlusIcon />
-        加服务器
+        <span className="hidden md:inline">加服务器</span>
       </Button>
       <AddServer open={adding} onClose={() => setAdding(false)} />
     </nav>
@@ -86,7 +86,7 @@ function Side({ name }: { name?: string }) {
 
 function Entry({ to, on, children }: { to: string; on: boolean; children: ReactNode }) {
   return (
-    <Link to={to} aria-current={on ? "page" : undefined} className={cn(item, on && "bg-accent font-medium")}>
+    <Link to={to} aria-current={on ? "page" : undefined} className={cn(item, "shrink-0 md:shrink", on && "bg-accent font-medium")}>
       {children}
     </Link>
   );
