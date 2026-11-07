@@ -419,7 +419,7 @@ pub struct RouteView {
   pub upstream: Option<String>,
   pub url: String,
   pub version: u64,
-  /// 最近一次探测（控制面每 5 分钟一次）；还没探测过时为空。
+  /// 最近一次域名体检的 HTTP(S) 结果和连续失败次数；还没检查过时为空。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub probe: Option<ProbeView>,
 }

@@ -6,7 +6,7 @@ export function Probe({ probe }: { probe?: ProbeView }) {
   if (!probe) return null;
   const tone = probe.ok ? "ok" : probe.fails >= 3 ? "bad" : "warn";
   const text = probe.ok
-    ? `${probe.detail} · ${probe.ms} ms`
+    ? probe.detail
     : `${probe.detail}${probe.fails > 1 ? `（连续 ${probe.fails} 次）` : ""}`;
   const cert =
     probe.cert_days === undefined ? "" : ` · 证书剩 ${probe.cert_days} 天`;

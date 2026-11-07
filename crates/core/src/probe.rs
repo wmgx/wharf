@@ -1,17 +1,14 @@
-//! 域名探测：控制面每 5 分钟对每个路由的地址发一次请求。
-//! 2xx、3xx、4xx 算通（服务在应答），5xx、超时、连不上算不通。
-//! 连续 [FAILS] 次不通进"需要注意"并推送，恢复时再推一次。结果只存在内存里。
+//! 域名告警：不自己发请求，用后台域名体检（[crate::doctor]，每 2 分钟一轮）的结果。
+//! HTTP(S) 那一层是坏的算不通（5xx、超时、连不上）。
+//! 连续 [FAILS] 轮不通进"需要注意"并推送，恢复时再推一次；证书剩不到 14 天也推送。
+//! 结果只存在内存里。
 
-use std::{
-  collections::BTreeMap, sync::Arc, sync::Mutex, time::Duration,
-};
+use std::{collections::BTreeMap, sync::Mutex};
 
-use wharf_api_types::view::ProbeView;
+use wharf_api_types::view::{CheckStatus, DoctorReport, ProbeView};
 
 use crate::state::AppState;
 
-const EVERY: Duration = Duration::from_secs(300);
-const TIMEOUT: Duration = Duration::from_secs(15);
 /// 连续失败几次才算挂了，避开偶发抖动。
 const FAILS: u32 = 3;
 
@@ -37,55 +34,23 @@ pub fn problems() -> Vec<String> {
     .collect()
 }
 
-pub fn spawn(state: Arc<AppState>) {
-  tokio::spawn(async move {
-    // 刚启动时网络、网关可能还没就绪，晚一点开始。
-    tokio::time::sleep(Duration::from_secs(60)).await;
-    let client = match reqwest::Client::builder()
-      .timeout(TIMEOUT)
-      .redirect(reqwest::redirect::Policy::none())
-      .user_agent("wharf-probe")
-      .tls_info(true)
-      .build()
-    {
-      Ok(c) => c,
-      Err(e) => {
-        tracing::warn!("域名探测起不来：{e}");
-        return;
-      }
-    };
-    loop {
-      round(&state, &client).await;
-      tokio::time::sleep(EVERY).await;
-    }
-  });
-}
-
-async fn round(state: &AppState, client: &reqwest::Client) {
-  let Ok(snap) = crate::snapshot::load(&state.db).await else {
-    return;
-  };
-  let net = snap.net(&snap.world);
-  let urls: Vec<(String, String)> = snap
-    .world
-    .routes
-    .keys()
-    .filter_map(|h| {
-      crate::views::route_view(&snap, &net, h)
-        .map(|v| (h.clone(), v.url))
-    })
-    .collect();
-  // 删掉的路由不再显示。
+/// 每轮完整体检后调用。
+pub async fn observe(state: &AppState, report: &DoctorReport) {
   if let Ok(mut m) = LAST.lock() {
-    m.retain(|h, _| urls.iter().any(|(u, _)| u == h));
+    m.retain(|h, _| report.routes.iter().any(|r| &r.hostname == h));
   }
-  let checks = urls.into_iter().map(|(host, url)| async move {
-    let r = check(client, &url).await;
-    (host, url, r)
-  });
-  for (host, url, (ok, detail, ms, cert_days)) in
-    futures_util::future::join_all(checks).await
-  {
+  for r in &report.routes {
+    let Some(web) = r
+      .checks
+      .iter()
+      .find(|c| c.layer == "https" || c.layer == "http")
+    else {
+      continue;
+    };
+    let ok = web.status != CheckStatus::Bad;
+    let host = r.hostname.clone();
+    let cert_days =
+      r.cert_expires.map(|t| (t - chrono::Utc::now()).num_days());
     if let Some(days) = cert_days {
       cert_notify(state, &host, days).await;
     }
@@ -96,9 +61,9 @@ async fn round(state: &AppState, client: &reqwest::Client) {
         host.clone(),
         ProbeView {
           ok,
-          detail: detail.clone(),
-          ms,
-          at: chrono::Utc::now().timestamp_millis(),
+          detail: web.detail.clone(),
+          ms: 0,
+          at: web.at.timestamp_millis(),
           fails,
           cert_days,
         },
@@ -117,9 +82,12 @@ async fn round(state: &AppState, client: &reqwest::Client) {
             format!("域名 {host} 打不开")
           },
           body: if ok {
-            format!("{url}：{detail}")
+            format!("{}：{}", r.url, web.detail)
           } else {
-            format!("{url} 连续 {FAILS} 次探测失败（每 5 分钟一次）：{detail}")
+            format!(
+              "{} 连续 {FAILS} 次检查失败（每 2 分钟一次）：{}。诊断：wharf doctor {host}",
+              r.url, web.detail
+            )
           },
         },
       )
@@ -145,31 +113,4 @@ async fn cert_notify(state: &AppState, host: &str, days: i64) {
     },
   )
   .await;
-}
-
-/// 返回（通不通，说明，耗时毫秒，证书剩几天）。
-async fn check(
-  client: &reqwest::Client,
-  url: &str,
-) -> (bool, String, u64, Option<i64>) {
-  let start = std::time::Instant::now();
-  let r = client.get(url).send().await;
-  let ms = start.elapsed().as_millis() as u64;
-  match r {
-    Ok(resp) => {
-      let code = resp.status().as_u16();
-      let days = resp
-        .extensions()
-        .get::<reqwest::tls::TlsInfo>()
-        .and_then(|t| t.peer_certificate())
-        .and_then(crate::cert::not_after)
-        .map(|t| (t - chrono::Utc::now()).num_days());
-      (code < 500, format!("HTTP {code}"), ms, days)
-    }
-    Err(e) if e.is_timeout() => {
-      (false, format!("{} 秒没有应答", TIMEOUT.as_secs()), ms, None)
-    }
-    Err(e) if e.is_connect() => (false, "连不上".into(), ms, None),
-    Err(e) => (false, e.without_url().to_string(), ms, None),
-  }
 }
