@@ -1190,7 +1190,7 @@ fn system_secret(name: &str) -> Option<&'static str> {
     n if crate::backup::MANAGED_SECRETS.contains(&n) => Some("备份"),
     n if n == crate::core_backup::OWNER_SECRET => Some("控制面备份"),
     n if n == crate::link::TOKEN_SECRET => Some("机器互联"),
-    n if n == crate::egress::TOKEN_SECRET => Some("出口"),
+    n if n == crate::egress::TOKEN_SECRET => Some("外网代理"),
     n if n == crate::tailscale::OAUTH_SECRET => {
       Some("Tailscale 组网")
     }

@@ -12,7 +12,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import type { NetworkMode, NetworkView } from "@/types";
 
 /** 接入方式：选"自动"时按检测到的地址推断。 */
-function ModeMenu({ server }: { server: NetworkView["servers"][number] }) {
+export function ModeMenu({ server }: { server: NetworkView["servers"][number] }) {
   const actions = useActions();
   const choose = async (value: string) => {
     const mode = value === "auto" ? undefined : (value as NetworkMode);

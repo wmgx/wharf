@@ -592,7 +592,7 @@ function parseMirrors(text: string): Record<string, string[]> {
   return out;
 }
 
-/** 服务器设置：和 `wharf server set` 同一组字段；接入方式和内网地址在"服务器 → 组网"里改。 */
+/** 服务器设置：和 `wharf server set` 同一组字段；网络相关字段在"网络"标签。 */
 /** 服务器设置。`network` 只放公网 IP、局域网、出口和代理，其余在"设置"标签。 */
 function SettingsForm({
   server,
@@ -876,15 +876,6 @@ function SettingsForm({
         >
           预览改动
         </Button>
-        {net && (
-          <span className="text-xs text-muted-foreground">
-            接入方式和内网地址在
-            <Link to="/network" className="mx-0.5 underline underline-offset-2">
-              组网
-            </Link>
-            里改
-          </span>
-        )}
       </div>
       {!net && (
         <div className="mt-6 flex flex-wrap items-center gap-3 rounded-xl border border-destructive/30 p-4">

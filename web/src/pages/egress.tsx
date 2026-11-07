@@ -21,7 +21,7 @@ export function Egress() {
     try {
       await api.put("/api/egress", { via: v || null });
       toast.success(
-        v ? `调厂商 API 改为按 ${v} 出口的规则分流` : "调厂商 API 改为直连",
+        v ? `访问厂商 API 改为借 ${v}` : "访问厂商 API 改为直接访问",
       );
       refresh();
     } catch (e) {
@@ -33,26 +33,26 @@ export function Egress() {
 
   return (
     <>
-      <SectionTitle>出口</SectionTitle>
+      <SectionTitle>控制面访问外网</SectionTitle>
       {data && (
         <div className="flex flex-wrap items-center gap-3 rounded-xl border bg-card p-4 shadow-xs">
           <span className="grid size-9 place-items-center rounded-lg border bg-muted text-muted-foreground">
             <GlobeIcon className="size-4" />
           </span>
           <div className="min-w-0">
-            <div className="font-semibold">调厂商 API</div>
+            <div className="font-semibold">访问厂商 API 经过</div>
             <div className="text-xs text-muted-foreground">
-              Cloudflare、Tailscale
+              改 DNS、隧道、组网时调 Cloudflare、Tailscale；国内连不上时借一台海外机器
             </div>
           </div>
           <div className="w-full sm:ml-auto sm:w-56">
             <Picker
               value={current}
               options={[
-                { value: "", label: "直连" },
+                { value: "", label: "直接访问" },
                 ...exits.map((n) => ({
                   value: n,
-                  label: `按 ${n} 出口的规则`,
+                  label: `借 ${n}`,
                 })),
                 ...(current && !exits.includes(current)
                   ? [{ value: current, label: current }]
