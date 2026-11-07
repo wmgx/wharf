@@ -149,6 +149,10 @@ pub fn router(state: Arc<AppState>) -> Router {
       "/api/servers/{name}/unmanaged",
       get(crate::import_api::unmanaged),
     )
+    .route(
+      "/api/servers/{name}/unmanaged/remove",
+      post(crate::import_api::remove),
+    )
     .route("/api/import", post(crate::import_api::preview))
     .route("/api/services", get(list_services))
     .route("/api/services/{name}", get(show_service))

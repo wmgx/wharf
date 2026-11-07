@@ -129,6 +129,8 @@ export interface FoundContainer {
   status: string;
   ports?: string[];
   project?: string;
+  /** 挂载的具名数据卷。 */
+  volumes?: string[];
 }
 
 /** 服务器上没纳管的一个 compose 项目或单个容器。 */

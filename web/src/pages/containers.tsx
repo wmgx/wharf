@@ -1,4 +1,6 @@
-import { BoxIcon, DownloadIcon, LayersIcon, ServerIcon } from "lucide-react";
+import { BoxIcon, DownloadIcon, LayersIcon, ServerIcon, Trash2Icon } from "lucide-react";
+import { toast } from "sonner";
+import { Checkbox } from "@/components/ui/checkbox";
 import { type ReactNode, useCallback, useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api } from "@/api";
@@ -14,7 +16,7 @@ import { useStatus } from "@/status";
 import type { ImportPreview, Unmanaged } from "@/types";
 
 /** 各台在线服务器上没纳管的容器，30 秒刷新一次。 */
-function useUnmanaged(): Unmanaged[] {
+function useUnmanaged(): { items: Unmanaged[]; reload: () => void } {
   const { status } = useStatus();
   const servers = (status?.servers ?? []).filter((s) => s.online).map((s) => s.name);
   const key = servers.join(",");
@@ -29,7 +31,7 @@ function useUnmanaged(): Unmanaged[] {
     const t = setInterval(load, 30000);
     return () => clearInterval(t);
   }, [load]);
-  return items;
+  return { items, reload: load };
 }
 
 const target = (u: Unmanaged) => u.project ?? u.container ?? "";
@@ -55,7 +57,8 @@ export function HintRow({ icon, label, text, onClick }: { icon: ReactNode; label
 
 /** 每台服务器一行提示：有多少容器没纳管，点开逐个导入。 */
 export function UnmanagedList() {
-  const items = useUnmanaged();
+  const { items, reload } = useUnmanaged();
+  const [removing, setRemoving] = useState<Unmanaged | null>(null);
   const [params, setParams] = useSearchParams();
   const [picked, setServer] = useState<string | null>(null);
   const [importing, setImporting] = useState<Unmanaged | null>(null);
@@ -79,17 +82,27 @@ export function UnmanagedList() {
           </DialogHeader>
           <div className="grid max-h-[60vh] gap-1.5 overflow-y-auto">
             {list.map((u) => (
-              <UnmanagedRow key={target(u)} item={u} onImport={() => setImporting(u)} />
+              <UnmanagedRow key={target(u)} item={u} onImport={() => setImporting(u)} onRemove={() => setRemoving(u)} />
             ))}
           </div>
         </DialogContent>
       </Dialog>
       {importing && <ImportDialog item={importing} onClose={() => setImporting(null)} />}
+      {removing && (
+        <RemoveDialog
+          item={removing}
+          onClose={() => setRemoving(null)}
+          onDone={() => {
+            setRemoving(null);
+            reload();
+          }}
+        />
+      )}
     </div>
   );
 }
 
-function UnmanagedRow({ item, onImport }: { item: Unmanaged; onImport: () => void }) {
+function UnmanagedRow({ item, onImport, onRemove }: { item: Unmanaged; onImport: () => void; onRemove: () => void }) {
   const total = item.containers.length;
   const running = item.containers.filter((c) => c.state === "running").length;
   const ports = item.containers.flatMap((c) => c.ports ?? []);
@@ -112,6 +125,9 @@ function UnmanagedRow({ item, onImport }: { item: Unmanaged; onImport: () => voi
       <Button variant="outline" size="xs" onClick={onImport}>
         <DownloadIcon />
         导入
+      </Button>
+      <Button variant="ghost" size="icon-xs" className="text-destructive" title="删除" onClick={onRemove}>
+        <Trash2Icon />
       </Button>
     </div>
   );
@@ -193,6 +209,71 @@ function ImportDialog({ item, onClose }: { item: Unmanaged; onClose: () => void 
           </Button>
           <Button disabled={!preview || stale || loading} onClick={submit}>
             生成计划
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/** 删除没纳管的容器或 compose 项目，可以勾选连同具名数据卷一起删。 */
+function RemoveDialog({ item, onClose, onDone }: { item: Unmanaged; onClose: () => void; onDone: () => void }) {
+  const [volumes, setVolumes] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const vols = [...new Set(item.containers.flatMap((c) => c.volumes ?? []))];
+  const remove = async () => {
+    setBusy(true);
+    try {
+      const r = await api.post<{ containers: string[]; volumes: string[]; kept_volumes: string[] }>(
+        `/api/servers/${encodeURIComponent(item.server)}/unmanaged/remove`,
+        { project: item.project, container: item.container, volumes },
+      );
+      toast.success(`已删除 ${target(item)}`, {
+        description: [
+          `${r.containers.length} 个容器`,
+          r.volumes.length ? `数据卷 ${r.volumes.join("、")}` : "",
+          r.kept_volumes.length ? `还在被别的容器使用、没删：${r.kept_volumes.join("、")}` : "",
+        ]
+          .filter(Boolean)
+          .join("；"),
+      });
+      onDone();
+    } catch (e) {
+      toast.error(`没删掉 ${target(item)}`, { description: (e as Error).message });
+      setBusy(false);
+    }
+  };
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent aria-describedby={undefined}>
+        <DialogHeader>
+          <DialogTitle>
+            删除 {item.server} 上的 {target(item)}？
+          </DialogTitle>
+        </DialogHeader>
+        <div className="grid gap-3 text-sm">
+          <p className="text-muted-foreground">
+            {item.project ? `compose 项目里的 ${item.containers.length} 个容器` : "这个容器"}会被强制停止并删除（docker rm -f），镜像保留。
+          </p>
+          {vols.length > 0 ? (
+            <label className="flex cursor-pointer items-start gap-2.5">
+              <Checkbox className="mt-0.5" checked={volumes} onCheckedChange={(v) => setVolumes(v === true)} />
+              <span>
+                连同数据卷一起删除
+                <span className="block font-mono text-xs text-muted-foreground">{vols.join("、")}</span>
+                <span className="block text-xs text-destructive">数据卷里的数据会永久丢失；还被别的容器用着的会跳过。</span>
+              </span>
+            </label>
+          ) : (
+            <p className="text-xs text-muted-foreground">没有具名数据卷。挂载的宿主机目录不会删。</p>
+          )}
+        </div>
+        <DialogFooter>
+          <Button variant="ghost" onClick={onClose}>
+            取消
+          </Button>
+          <Button variant="destructive" disabled={busy} onClick={remove}>
+            {busy ? "删除中…" : volumes ? "删除容器和数据卷" : "删除容器"}
           </Button>
         </DialogFooter>
       </DialogContent>
