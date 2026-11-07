@@ -31,6 +31,81 @@ struct PsLine {
   ports: String,
   #[serde(default)]
   labels: String,
+  #[serde(default)]
+  mounts: String,
+}
+
+/// `docker ps` 的 Mounts 列：具名卷是名字，宿主机目录是路径，匿名卷是 64 位十六进制。
+fn named_volumes(mounts: &str) -> Vec<String> {
+  mounts
+    .split(',')
+    .map(str::trim)
+    .filter(|m| {
+      let anonymous =
+        m.len() == 64 && m.bytes().all(|c| c.is_ascii_hexdigit());
+      !(m.is_empty()
+        || m.starts_with('/')
+        || m.contains('…')
+        || anonymous)
+    })
+    .map(str::to_string)
+    .collect()
+}
+
+/// 删除容器，`volumes` 时再删它们的具名数据卷（还被别的容器用着的会失败，留着）。
+pub async fn remove(
+  docker: &Docker,
+  containers: &[String],
+  volumes: bool,
+  ctx: &Ctx,
+) -> Result<wharf_api_types::agent::RemovedContainers, ApiError> {
+  let mut out = wharf_api_types::agent::RemovedContainers::default();
+  let mut vols: Vec<String> = Vec::new();
+  if volumes {
+    for c in containers {
+      let r = docker
+        .cmd()
+        .args([
+          "inspect",
+          "-f",
+          "{{range .Mounts}}{{if eq .Type \"volume\"}}{{.Name}},{{end}}{{end}}",
+          c,
+        ])
+        .timeout(QUICK)
+        .run(ctx)
+        .await?
+        .check("docker inspect")?;
+      for v in named_volumes(&r.stdout) {
+        if !vols.contains(&v) {
+          vols.push(v);
+        }
+      }
+    }
+  }
+  for c in containers {
+    docker
+      .cmd()
+      .args(["rm", "-f", c])
+      .timeout(QUICK)
+      .run(ctx)
+      .await?
+      .check("docker rm")?;
+    out.containers.push(c.clone());
+  }
+  for v in vols {
+    let r = docker
+      .cmd()
+      .args(["volume", "rm", &v])
+      .timeout(QUICK)
+      .run(ctx)
+      .await?;
+    if r.success {
+      out.volumes.push(v);
+    } else {
+      out.kept_volumes.push(v);
+    }
+  }
+  Ok(out)
 }
 
 fn labels(raw: &str) -> BTreeMap<&str, &str> {
@@ -75,6 +150,7 @@ pub async fn discover(
             .map(str::to_string)
             .collect(),
           project,
+          volumes: named_volumes(&ps.mounts),
         }
       })
       .collect(),

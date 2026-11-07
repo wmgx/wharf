@@ -55,7 +55,9 @@ pub fn route(
   let token =
     snap.secrets.get(TOKEN_SECRET).cloned().ok_or_else(|| {
       ApiError::new(ErrorCode::Conflict, "外网代理的口令还没生成")
-        .with_hint(format!("先执行 wharf apply，让 {exit} 开启外网代理"))
+        .with_hint(format!(
+          "先执行 wharf apply，让 {exit} 开启外网代理"
+        ))
     })?;
   Ok(EgressRoute {
     exit: format!("{ip}:{SERVE_PORT}"),
@@ -116,10 +118,12 @@ pub fn validate(
       servers.get(v).is_some_and(|r| r.settings.egress.is_some());
     if !ok {
       return Err(
-        ApiError::invalid(format!("服务器 {v} 不存在或没有开外网代理"))
-          .with_hint(format!(
-            "wharf server set {v} --egress github,cloudflare"
-          )),
+        ApiError::invalid(format!(
+          "服务器 {v} 不存在或没有开外网代理"
+        ))
+        .with_hint(format!(
+          "wharf server set {v} --egress github,cloudflare"
+        )),
       );
     }
   }
