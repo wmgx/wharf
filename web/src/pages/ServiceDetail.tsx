@@ -29,6 +29,7 @@ import {
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { api, usePoll } from "@/api";
 import { useActions } from "@/components/actions";
+import { MonitorCard } from "./service-monitor";
 import {
   BuildEditor,
   type BuildHow,
@@ -649,6 +650,7 @@ function ConfigTab({ svc, onEdit }: { svc: ServiceView; onEdit: () => void }) {
           </dl>
         </CardContent>
       </Card>
+      <MonitorCard svc={svc} />
       <Button variant="outline" className="w-fit" onClick={onEdit}>
         <PencilIcon />
         修改配置
