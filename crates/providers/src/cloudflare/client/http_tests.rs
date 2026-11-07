@@ -5,7 +5,6 @@ use std::{
   time::Duration,
 };
 
-use reqwest::Client;
 use serde_json::{Value, json};
 
 use super::CloudflareClient;
@@ -131,12 +130,7 @@ impl Fixture {
   }
   fn client(&self, timeout: Duration) -> CloudflareClient {
     CloudflareClient {
-      client: Client::builder()
-        .no_proxy()
-        .timeout(timeout)
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .unwrap(),
+      client: crate::http::Http::new(timeout).unwrap(),
       token: "fixture-secret".into(),
       base_url: Some(self.base.clone()),
     }

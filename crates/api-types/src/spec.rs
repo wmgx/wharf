@@ -53,10 +53,17 @@ pub struct ServerSettings {
   #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
   pub build_env: BTreeMap<String, String>,
   /// 拉代码、查 commit 时用的 HTTP 代理，例如 `http://<海外机器内网地址>:<端口>`。
-  /// 国内机器连不上 GitHub 时经海外机器转发；只用于 git，不影响构建和拉镜像。
+  /// 设了 `via` 时不用它。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub git_proxy: Option<String>,
-  /// 拉镜像时 dockerd 用的 HTTP 代理，例如 `http://<海外机器内网地址>:<端口>`。
+  /// 这台提供出口：agent 在内网地址上起 HTTP 代理（要口令），规则决定哪些域名经它出去。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub egress: Option<crate::egress::EgressSpec>,
+  /// 经哪台的出口出去（那台要设了 `egress`）：本机 agent 起分流代理，
+  /// dockerd 拉镜像、构建、拉代码都经它，按出口的规则分流，出口连不上时直连。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub via: Option<String>,
+  /// 拉镜像时 dockerd 用的 HTTP 代理，例如 `http://<海外机器内网地址>:<端口>`。设了 `via` 时不用它。
   /// 写进宿主机的 /etc/docker/daemon.json；镜像源和内网地址直连，其余仓库（ghcr 等）走代理。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub pull_proxy: Option<String>,

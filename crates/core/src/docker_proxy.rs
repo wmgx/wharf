@@ -25,7 +25,12 @@ const ALWAYS_DIRECT: &str = "localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,19
 
 /// 想要的 dockerd 代理配置：`(代理, no-proxy)`。没设代理时为 `None`。
 pub fn wanted(s: &ServerSettings) -> Option<(String, String)> {
-  let proxy = s.pull_proxy.as_deref()?.trim();
+  // 经出口时指向本机的分流代理，改规则不用再动 dockerd。
+  let local = crate::egress::local_url();
+  let proxy = match crate::egress::via(s) {
+    Some(_) => local.as_str(),
+    None => s.pull_proxy.as_deref()?.trim(),
+  };
   if proxy.is_empty() {
     return None;
   }

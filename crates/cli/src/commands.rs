@@ -26,8 +26,8 @@ use wharf_api_types::{
 
 use crate::{
   AccountCmd, ApplyFlags, BackupCmd, BuildArgs, Cli, Command,
-  GatewayCmd, NotifyCmd, RouteCmd, RunCmd, SecretCmd, ServerCmd,
-  ServiceCmd, TokenCmd,
+  EgressCmd, GatewayCmd, NotifyCmd, RouteCmd, RunCmd, SecretCmd,
+  ServerCmd, ServiceCmd, TokenCmd,
   client::{CliError, CliResult, Client, Config, read_secret, seg},
   fleet, print,
 };
@@ -119,6 +119,31 @@ async fn dispatch(
       shell_log(c, server, limit, j).await
     }
     Command::Upgrade => upgrade(c, j).await,
+    Command::Egress { cmd } => {
+      let v: Value = match cmd {
+        Some(EgressCmd::Api { server }) => {
+          c.put("/api/egress", &json!({ "via": server })).await?
+        }
+        Some(EgressCmd::Presets) => {
+          let v = json!(wharf_api_types::egress::PRESETS
+            .iter()
+            .map(|(n, d, hosts)| json!({ "name": n, "label": d, "domains": hosts }))
+            .collect::<Vec<_>>());
+          out(j, &v, |_| {
+            for (n, d, hosts) in wharf_api_types::egress::PRESETS {
+              println!("{n:<11}{d}：{}", hosts.join(" "));
+            }
+          });
+          return Ok(());
+        }
+        None => c.get("/api/egress").await?,
+      };
+      out(j, &v, |v| match v["via"].as_str() {
+        Some(s) => println!("调厂商 API：按 {s} 出口的规则分流"),
+        None => println!("调厂商 API：直连"),
+      });
+      Ok(())
+    }
     Command::Notify(NotifyCmd::Test) => {
       let r: Value = c.post("/api/notify/test", &json!({})).await?;
       out(j, &r, |_| println!("已发送测试消息"));
@@ -674,6 +699,8 @@ async fn server(
       clear_build_env,
       git_proxy,
       pull_proxy,
+      egress,
+      via,
       github_mirror,
       host_terminal,
       host_exec,
@@ -763,6 +790,13 @@ async fn server(
           );
         }
         settings.pull_proxy = (!p.is_empty()).then(|| p.to_string());
+      }
+      if let Some(e) = egress {
+        settings.egress = parse_egress(&e)?;
+      }
+      if let Some(v) = via {
+        let v = v.trim();
+        settings.via = (!v.is_empty()).then(|| v.to_string());
       }
       if let Some(m) = github_mirror {
         let m = m.trim().trim_end_matches('/');
@@ -1948,6 +1982,26 @@ async fn token(c: &Client, cmd: TokenCmd, j: bool) -> CliResult<()> {
       Ok(())
     }
   }
+}
+
+/// `--egress`：`off` 关闭，`all` 全部走，否则逗号分隔的预置分组名和域名。
+fn parse_egress(
+  v: &str,
+) -> Result<Option<wharf_api_types::egress::EgressSpec>, CliError> {
+  let v = v.trim();
+  if v.is_empty() || v == "off" {
+    return Ok(None);
+  }
+  let mut spec = wharf_api_types::egress::EgressSpec::default();
+  for part in v.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+    match part {
+      "all" => spec.all = true,
+      p if p.contains('.') => spec.domains.push(p.to_lowercase()),
+      p => spec.presets.push(p.to_string()),
+    }
+  }
+  spec.validate().map_err(ApiError::invalid)?;
+  Ok(Some(spec))
 }
 
 #[cfg(test)]

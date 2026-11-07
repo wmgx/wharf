@@ -141,6 +141,10 @@ pub enum Step {
   DockerProxy {
     server: String,
   },
+  /// 按服务器设置 `egress` 开关这台的出口代理。
+  Egress {
+    server: String,
+  },
   /// 备份和恢复不来自计划，是单独发起的执行。
   Backup {
     service: String,
@@ -211,6 +215,7 @@ impl Step {
       Self::DnsDelete { .. } | Self::EdgeDetach { .. } => 0,
       // 先换好拉镜像的路，后面起服务时就用上。
       Self::DockerProxy { .. } => 1,
+      Self::Egress { .. } => 1,
       Self::EnsureDirs { .. } => 1,
       Self::VolumeSync { .. } => 2,
       Self::ServiceUp { .. }
@@ -429,6 +434,7 @@ pub async fn make_plan(
   leftover_items(&mut b, &snap.deployed, &current, &desired, &status);
   link_items(&mut b, &current, &desired, &net, &status)?;
   tailscale_items(&mut b, &snap, &desired, &status);
+  egress_items(&mut b, &current, &desired);
   docker_proxy_items(&mut b, &current, &desired);
   gateway_items(&mut b, &snap, &current, &desired, &net, &status)?;
   dns_items(&mut b, &snap, &desired, &net).await?;
@@ -1277,6 +1283,66 @@ fn link_items(
   Ok(())
 }
 
+/// 出口设置变了（自己的规则、经哪台、那台的规则）：让这台的 agent 重新起出口和本地分流。
+/// 排在 dockerd 代理前面，那边要用本机的分流代理。
+fn egress_items(b: &mut Builder, current: &World, desired: &World) {
+  use crate::egress::effective;
+  for server in desired.servers.keys() {
+    let after = effective(server, desired);
+    let before = effective(server, current);
+    if after == before {
+      continue;
+    }
+    let show = |e: &Option<(
+      Option<wharf_api_types::egress::EgressSpec>,
+      Option<String>,
+      Option<wharf_api_types::egress::EgressSpec>,
+    )>| {
+      e.as_ref().map(|(own, via, rules)| {
+        json!({ "egress": own, "via": via, "via_rules": rules })
+      })
+    };
+    let mut what = Vec::new();
+    if let Some((own, via, _)) = &after {
+      if let Some(o) = own {
+        what.push(if o.all {
+          "提供出口（全部走）".to_string()
+        } else {
+          format!("提供出口（{} 个域名）", o.domains().len())
+        });
+      }
+      if let Some(v) = via {
+        what.push(format!("经 {v} 出口（本机分流，出口不通时直连）"));
+      }
+    }
+    let reason = if what.is_empty() {
+      format!("{server} 不再提供或使用出口，相关请求改为直连")
+    } else {
+      format!("{server}：{}", what.join("；"))
+    };
+    let id = b.item(
+      format!("egress/{server}"),
+      Layer::Container,
+      match (&before, &after) {
+        (None, _) => Action::Create,
+        (_, None) => Action::Delete,
+        _ => Action::Update,
+      },
+      show(&before),
+      show(&after),
+      vec![],
+      reason,
+    );
+    b.step(
+      vec![id],
+      format!("更新 {server} 的出口"),
+      Step::Egress {
+        server: server.clone(),
+      },
+    );
+  }
+}
+
 /// Wharf 管理的 Tailscale 容器：要的时候起，接入方式改掉之后删。
 /// 拉镜像代理的设置（或它要直连的镜像源）变了：改 dockerd 配置。
 fn docker_proxy_items(
@@ -1297,7 +1363,8 @@ fn docker_proxy_items(
     let (reason, title) = match &after {
       Some((proxy, _)) => (
         format!(
-          "拉镜像改走代理 {proxy}，镜像源和内网直连；重启 dockerd，开启 live-restore 后容器不停"
+          "拉镜像改走{}，镜像源和内网直连；重启 dockerd，开启 live-restore 后容器不停",
+          shown(proxy)
         ),
         format!("在 {server} 上给 dockerd 配拉镜像代理"),
       ),
@@ -1317,8 +1384,10 @@ fn docker_proxy_items(
       } else {
         Action::Update
       },
-      before.map(|(p, n)| json!({ "proxy": p, "no_proxy": n })),
-      after.map(|(p, n)| json!({ "proxy": p, "no_proxy": n })),
+      before
+        .map(|(p, n)| json!({ "proxy": shown(&p), "no_proxy": n })),
+      after
+        .map(|(p, n)| json!({ "proxy": shown(&p), "no_proxy": n })),
       vec![Impact::Restart],
       reason,
     );
@@ -1329,6 +1398,15 @@ fn docker_proxy_items(
         server: server.clone(),
       },
     );
+  }
+}
+
+/// 代理地址给人看的样子。
+fn shown(value: &str) -> String {
+  if value == crate::egress::local_url() {
+    "本机分流代理（按出口规则）".into()
+  } else {
+    format!("代理 {value}")
   }
 }
 
