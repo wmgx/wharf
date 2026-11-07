@@ -331,10 +331,10 @@ pub enum ServerCmd {
     /// 可以引用密钥；传空字符串清除。
     #[arg(long)]
     github_mirror: Option<String>,
-    /// 是否允许从页面打开宿主机终端。
+    /// 是否允许从页面打开宿主机终端。用 token 只能关（false），打开要在页面上操作。
     #[arg(long)]
     host_terminal: Option<bool>,
-    /// 是否允许通过 API 在宿主机执行命令。
+    /// 是否允许通过 API 在宿主机执行命令。用 token 只能关（false），打开要在页面上操作。
     #[arg(long)]
     host_exec: Option<bool>,
     /// 每月流量额度（GB），只用于显示用了多少；0 清除。
