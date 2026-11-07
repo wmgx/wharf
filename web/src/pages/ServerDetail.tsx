@@ -22,6 +22,7 @@ import { useActions } from "@/components/actions";
 import { MetricsPanel } from "@/components/metrics";
 import { ServerLinks } from "./server-links";
 import { ServerBaseline } from "./server-baseline";
+import { ServerDisk } from "./server-disk";
 import { ServiceUsage } from "@/components/usage";
 import {
   Dot,
@@ -353,6 +354,7 @@ export function ServerDetail() {
 
         <TabsContent value="system" className="mt-4">
           <ServerBaseline server={server} />
+          <ServerDisk server={name} online={server.online} />
           <div className="mb-4 flex flex-wrap gap-2">
             <Button
               variant="outline"

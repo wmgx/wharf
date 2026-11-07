@@ -196,6 +196,15 @@ impl Ops {
       AgentOp::UpgradeLog => {
         to_value(crate::upgrade::helper_log(ctx).await)
       }
+      AgentOp::DiskUsage { services } => {
+        for s in &services {
+          check_project(s)?;
+        }
+        to_value(
+          crate::host::disk_usage(&self.docker, &services, ctx)
+            .await?,
+        )
+      }
       AgentOp::HostInfo => {
         to_value(crate::host::info(&self.docker, ctx).await?)
       }

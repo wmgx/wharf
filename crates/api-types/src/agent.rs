@@ -239,6 +239,10 @@ pub enum AgentOp {
   EdgeBuild(Box<EdgeBuildJob>),
   /// 列出本机的全部容器（不含 agent 自己），结果是 `Vec<FoundContainer>`。
   Discover,
+  /// 测各服务的占用：`/srv/<服务>`、容器日志、挂载的命名卷。要遍历文件，结果是 `Vec<ServiceDisk>`。
+  DiskUsage {
+    services: Vec<String>,
+  },
   /// 删除没纳管的容器（`docker rm -f`）；`volumes` 时连同它们的具名数据卷一起删，别的容器还在用的不删。
   RemoveContainers {
     containers: Vec<String>,
@@ -580,6 +584,19 @@ pub struct FoundContainer {
   /// 挂载的具名数据卷（不含宿主机目录和匿名卷）。
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub volumes: Vec<String>,
+}
+
+/// 一个服务的磁盘占用（字节）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ServiceDisk {
+  pub service: String,
+  /// `/srv/<服务>` 目录。
+  pub data: u64,
+  /// 容器的 json 日志（含轮转出来的）。
+  pub logs: u64,
+  /// 挂载的命名卷：卷名 → 大小。
+  #[serde(default)]
+  pub volumes: std::collections::BTreeMap<String, u64>,
 }
 
 /// [AgentOp::RemoveContainers] 的结果。

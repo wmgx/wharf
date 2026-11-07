@@ -249,3 +249,138 @@ mod tests {
     assert_eq!(l[1].at.to_rfc3339(), "2026-11-07T08:29:15+00:00");
   }
 }
+
+/// 卷名、容器 id 只认这些字符，拼进脚本前先过滤。
+fn safe(s: &str) -> bool {
+  !s.is_empty()
+    && s.bytes().all(|c| {
+      c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'.')
+    })
+}
+
+/// 测各服务的占用。和 [info] 一样借 agent 镜像只读挂载宿主机根目录跑脚本，低优先级。
+pub async fn disk_usage(
+  docker: &Docker,
+  services: &[String],
+  ctx: &Ctx,
+) -> Result<Vec<wharf_api_types::agent::ServiceDisk>, ApiError> {
+  let root = docker
+    .cmd()
+    .args(["info", "--format", "{{.DockerRootDir}}"])
+    .timeout(QUICK)
+    .run(ctx)
+    .await
+    .ok()
+    .filter(|o| o.success)
+    .map(|o| o.stdout.trim().to_string())
+    .unwrap_or_else(|| "/var/lib/docker".into());
+  let mut script = String::from("cd /host\n");
+  for svc in services.iter().filter(|s| safe(s)) {
+    script.push_str(&format!(
+      "echo \"data {svc} $(du -sb /host/srv/{svc} 2>/dev/null | cut -f1)\"\n"
+    ));
+    let ids = docker
+      .cmd()
+      .args(["ps", "-aq", "--no-trunc", "--filter"])
+      .arg(format!("label=com.docker.compose.project={svc}"))
+      .timeout(QUICK)
+      .run(ctx)
+      .await?
+      .check("docker ps")?;
+    for id in ids.stdout.lines().map(str::trim).filter(|i| safe(i)) {
+      script.push_str(&format!(
+        "echo \"logs {svc} $(find \"/host$ROOT/containers/{id}\" -name '*-json.log*' -printf '%s\\n' 2>/dev/null | awk '{{s+=$1}} END {{print s+0}}')\"\n"
+      ));
+      let vols = docker
+        .cmd()
+        .args([
+          "inspect",
+          "-f",
+          "{{range .Mounts}}{{if eq .Type \"volume\"}}{{.Name}} {{end}}{{end}}",
+          id,
+        ])
+        .timeout(QUICK)
+        .run(ctx)
+        .await?
+        .check("docker inspect")?;
+      for v in vols.stdout.split_whitespace().filter(|v| safe(v)) {
+        script.push_str(&format!(
+          "echo \"vol {svc} {v} $(du -sb \"/host$ROOT/volumes/{v}/_data\" 2>/dev/null | cut -f1)\"\n"
+        ));
+      }
+    }
+  }
+  let image = crate::adopt::self_image(docker, ctx).await?;
+  let out = docker
+    .cmd()
+    .args([
+      "run",
+      "--rm",
+      "--network",
+      "none",
+      "--entrypoint",
+      "nice",
+      "--mount",
+      "type=bind,src=/,dst=/host,readonly",
+      "-e",
+    ])
+    .arg(format!("ROOT={root}"))
+    .args([image.as_str(), "-n", "19", "sh", "-c", &script])
+    .timeout(Duration::from_secs(1800))
+    .run(ctx)
+    .await?
+    .check("测量磁盘占用")?;
+  Ok(parse_disk(&out.stdout))
+}
+
+fn parse_disk(out: &str) -> Vec<wharf_api_types::agent::ServiceDisk> {
+  let mut by: std::collections::BTreeMap<
+    String,
+    wharf_api_types::agent::ServiceDisk,
+  > = Default::default();
+  for line in out.lines() {
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    let num = |s: Option<&&str>| {
+      s.and_then(|v| v.parse::<u64>().ok()).unwrap_or(0)
+    };
+    let (kind, svc) = match (parts.first(), parts.get(1)) {
+      (Some(k), Some(s)) => (*k, *s),
+      _ => continue,
+    };
+    let e = by.entry(svc.to_string()).or_insert_with(|| {
+      wharf_api_types::agent::ServiceDisk {
+        service: svc.to_string(),
+        ..Default::default()
+      }
+    });
+    match kind {
+      "data" => e.data = num(parts.get(2)),
+      "logs" => e.logs += num(parts.get(2)),
+      "vol" => {
+        if let Some(v) = parts.get(2) {
+          e.volumes.insert(v.to_string(), num(parts.get(3)));
+        }
+      }
+      _ => {}
+    }
+  }
+  by.into_values().collect()
+}
+
+#[cfg(test)]
+mod disk_tests {
+  use super::*;
+
+  #[test]
+  fn parses_disk_lines() {
+    let out = "data blog 100\nlogs blog 5\nlogs blog 7\nvol blog blog_db 42\ndata empty \n";
+    let v = parse_disk(out);
+    let blog = v.iter().find(|d| d.service == "blog").unwrap();
+    assert_eq!((blog.data, blog.logs), (100, 12));
+    assert_eq!(blog.volumes["blog_db"], 42);
+    assert_eq!(
+      v.iter().find(|d| d.service == "empty").unwrap().data,
+      0
+    );
+  }
+}
