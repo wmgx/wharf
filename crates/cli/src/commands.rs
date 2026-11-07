@@ -1372,6 +1372,7 @@ async fn service(
             volumes: vec![],
             backup: None,
             stopped: false,
+            monitor: None,
           }
         }
       };
@@ -1436,6 +1437,48 @@ async fn service(
         );
       }
       spec.server = to;
+      changes(
+        c,
+        vec![Change::UpsertService {
+          name,
+          spec,
+          adopt: None,
+        }],
+        apply,
+        j,
+      )
+      .await
+    }
+    ServiceCmd::Monitor {
+      name,
+      path,
+      port,
+      expect,
+      keyword,
+      off,
+      apply,
+    } => {
+      let mut spec = c
+        .get::<ServiceView>(&format!("/api/services/{}", seg(&name)))
+        .await?
+        .spec;
+      spec.monitor = if off {
+        None
+      } else {
+        let cur = spec.monitor.take();
+        Some(wharf_api_types::spec::MonitorSpec {
+          path: path
+            .or_else(|| cur.as_ref().map(|m| m.path.clone()))
+            .unwrap_or_else(|| "/".into()),
+          port: port
+            .or_else(|| cur.as_ref().and_then(|m| m.port.clone())),
+          expect: expect
+            .or_else(|| cur.as_ref().and_then(|m| m.expect)),
+          keyword: keyword
+            .or_else(|| cur.as_ref().and_then(|m| m.keyword.clone()))
+            .filter(|k| !k.is_empty()),
+        })
+      };
       changes(
         c,
         vec![Change::UpsertService {

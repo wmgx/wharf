@@ -505,6 +505,28 @@ pub enum ServiceCmd {
     #[command(flatten)]
     apply: ApplyFlags,
   },
+  /// 自定义监控：服务所在机器每分钟请求 `http://127.0.0.1:<端口><路径>`，连续 3 次不正常推送。
+  /// 例：`wharf service monitor blog --path /health --keyword ok --apply`；`--off` 关闭。
+  Monitor {
+    name: String,
+    /// 请求路径，默认 `/`。
+    #[arg(long)]
+    path: Option<String>,
+    /// 端口名，默认第一个端口。
+    #[arg(long)]
+    port: Option<String>,
+    /// 期望的状态码；不写时 2xx、3xx 都算正常。
+    #[arg(long)]
+    expect: Option<u16>,
+    /// 应答里必须包含的文字。
+    #[arg(long)]
+    keyword: Option<String>,
+    /// 关闭监控。
+    #[arg(long)]
+    off: bool,
+    #[command(flatten)]
+    apply: ApplyFlags,
+  },
 }
 
 #[derive(Subcommand)]

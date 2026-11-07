@@ -312,6 +312,7 @@ pub fn service_view(
     data: crate::data::mounts(name, &row.spec),
     import: import_record(snap, name),
     status,
+    monitor: crate::monitor::last(name),
   })
 }
 
@@ -483,6 +484,7 @@ pub async fn status(
   problems.extend(crate::tasks::problems(state).await);
   problems.extend(crate::probe::problems());
   problems.extend(crate::alerts::problems());
+  problems.extend(crate::monitor::problems());
   let mut edge_unmanaged: Vec<EdgeProjectView> =
     snap.edge_accounts.values().flatten().cloned().collect();
   crate::edge_sync::mark_managed(&snap, &mut edge_unmanaged);

@@ -223,6 +223,23 @@ impl World {
         }
         Change::UpsertService { name, spec, adopt } => {
           validate_name("服务", name)?;
+          if let Some(m) = &spec.monitor {
+            if !m.path.starts_with('/') {
+              return Err(ApiError::invalid("监控路径要以 / 开头"));
+            }
+            if spec.ports.is_empty() {
+              return Err(ApiError::invalid(format!(
+                "服务 {name} 没有端口，监控不了"
+              )));
+            }
+            if let Some(p) = &m.port
+              && !spec.ports.iter().any(|x| &x.name == p)
+            {
+              return Err(ApiError::invalid(format!(
+                "服务 {name} 没有端口 {p}"
+              )));
+            }
+          }
           let old = self.services.get(name);
           let host_ports =
             old.map(|s| s.host_ports.clone()).unwrap_or_default();
@@ -1179,6 +1196,7 @@ mod tests {
     ServiceSpec {
       backup: None,
       stopped: false,
+      monitor: None,
       server: server.into(),
       source: Source::Image("traefik/whoami".into()),
       ports: vec![PortSpec {

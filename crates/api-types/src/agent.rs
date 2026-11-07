@@ -247,6 +247,8 @@ pub enum AgentOp {
   Probe {
     targets: Vec<ProbeTarget>,
   },
+  /// 从本机发一次 HTTP GET（自定义监控），结果是 [HttpCheckResult]。
+  HttpCheck(HttpCheck),
   /// 升级 agent 自己（或 `container` 指定的同机容器，例如控制面）：
   /// 拉新镜像，起一个接班容器换掉当前容器，结果是 [UpgradeResult]。
   /// 回复之后连接会断开，新 agent 重新连上才算完成。
@@ -1093,4 +1095,26 @@ pub struct EgressRoute {
   pub all: bool,
   /// 已展开的域名清单。
   pub domains: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HttpCheck {
+  pub url: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub keyword: Option<String>,
+  pub timeout_secs: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HttpCheckResult {
+  /// 拿到应答时的状态码。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub status: Option<u16>,
+  pub ms: u64,
+  /// 设了关键字时：应答里有没有。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub found: Option<bool>,
+  /// 连不上、超时等。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub error: Option<String>,
 }

@@ -64,6 +64,69 @@ async fn one(target: &ProbeTarget) -> bool {
     .unwrap_or(false)
 }
 
+/// 自定义监控：从本机发一次 GET，只读前 64KB 找关键字，不跟随跳转。
+pub async fn http(
+  job: wharf_api_types::agent::HttpCheck,
+) -> wharf_api_types::agent::HttpCheckResult {
+  use wharf_api_types::agent::HttpCheckResult;
+  let start = std::time::Instant::now();
+  let client = match reqwest::Client::builder()
+    .timeout(std::time::Duration::from_secs(
+      job.timeout_secs.clamp(1, 60),
+    ))
+    .redirect(reqwest::redirect::Policy::none())
+    .no_proxy()
+    .user_agent("wharf-monitor")
+    .build()
+  {
+    Ok(c) => c,
+    Err(e) => {
+      return HttpCheckResult {
+        error: Some(e.to_string()),
+        ..Default::default()
+      };
+    }
+  };
+  let ms = |s: std::time::Instant| s.elapsed().as_millis() as u64;
+  let mut resp = match client.get(&job.url).send().await {
+    Ok(r) => r,
+    Err(e) => {
+      let error = if e.is_timeout() {
+        "超时没有应答".to_string()
+      } else if e.is_connect() {
+        "连不上".to_string()
+      } else {
+        e.without_url().to_string()
+      };
+      return HttpCheckResult {
+        ms: ms(start),
+        error: Some(error),
+        ..Default::default()
+      };
+    }
+  };
+  let status = resp.status().as_u16();
+  let found = match &job.keyword {
+    None => None,
+    Some(k) => {
+      let mut body = Vec::new();
+      while body.len() < 64 * 1024 {
+        match resp.chunk().await {
+          Ok(Some(c)) => body.extend_from_slice(&c),
+          _ => break,
+        }
+      }
+      Some(String::from_utf8_lossy(&body).contains(k.as_str()))
+    }
+  };
+  HttpCheckResult {
+    status: Some(status),
+    ms: ms(start),
+    found,
+    error: None,
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
