@@ -10,6 +10,8 @@ use tokio::{
 use wharf_api_types::agent::ProbeTarget;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+/// TCP 第一次重传 SYN 大约在 1 秒后。
+const RETRANSMIT_MS: f64 = 1000.0;
 
 fn banner(server: &str) -> String {
   format!("wharf {server}\n")
@@ -81,9 +83,12 @@ pub async fn quality(
         times.push(ms);
       }
     }
+    // 握手包丢了 TCP 会在约 1 秒后重传，最后照样连上；超过这个时间的算一次丢包，
+    // 否则丢包全被算进延迟里，看不出来。延迟仍按全部成功的几次平均。
+    let ok = times.iter().filter(|ms| **ms < RETRANSMIT_MS).count();
     wharf_api_types::agent::LinkSample {
       sent: count,
-      ok: times.len() as u8,
+      ok: ok as u8,
       avg_ms: (!times.is_empty())
         .then(|| times.iter().sum::<f64>() / times.len() as f64),
     }
