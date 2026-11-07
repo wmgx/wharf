@@ -419,6 +419,23 @@ pub struct RouteView {
   pub upstream: Option<String>,
   pub url: String,
   pub version: u64,
+  /// 最近一次探测（控制面每 5 分钟一次）；还没探测过时为空。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub probe: Option<ProbeView>,
+}
+
+/// 域名探测结果。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ProbeView {
+  pub ok: bool,
+  /// 例如 `HTTP 200`、`15 秒没有应答`。
+  pub detail: String,
+  pub ms: u64,
+  /// 毫秒时间戳。
+  pub at: i64,
+  /// 连续失败次数。
+  #[serde(default)]
+  pub fails: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
