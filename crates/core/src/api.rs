@@ -306,7 +306,12 @@ async fn check_cli(
     )
     .into_response();
   }
-  next.run(req).await
+  let mut resp = next.run(req).await;
+  resp.headers_mut().insert(
+    wharf_api_types::BUILD_HEADER,
+    axum::http::HeaderValue::from_static(wharf_api_types::BUILD),
+  );
+  resp
 }
 
 // STATUS
