@@ -23,6 +23,7 @@ mod files;
 mod host;
 mod host_dir;
 mod host_shell;
+mod host_units;
 mod identity;
 mod metrics;
 mod mirror;

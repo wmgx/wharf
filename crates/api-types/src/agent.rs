@@ -239,6 +239,13 @@ pub enum AgentOp {
   EdgeBuild(Box<EdgeBuildJob>),
   /// 列出本机的全部容器（不含 agent 自己），结果是 `Vec<FoundContainer>`。
   Discover,
+  /// 宿主机上 systemd 跑的、自己装的程序（只读），结果是 `Vec<HostUnit>`。
+  HostUnits,
+  /// 宿主机程序最近的日志（journalctl -u），结果是字符串。
+  HostUnitLogs {
+    unit: String,
+    lines: u32,
+  },
   /// 测各服务的占用：`/srv/<服务>`、容器日志、挂载的命名卷。要遍历文件，结果是 `Vec<ServiceDisk>`。
   DiskUsage {
     services: Vec<String>,
@@ -584,6 +591,48 @@ pub struct FoundContainer {
   /// 挂载的具名数据卷（不含宿主机目录和匿名卷）。
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub volumes: Vec<String>,
+}
+
+/// 宿主机上 systemd 跑的一个程序。
+#[derive(
+  Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct HostUnit {
+  /// unit 名，例如 `api.service`。
+  pub unit: String,
+  #[serde(default)]
+  pub description: String,
+  /// 启动命令。
+  #[serde(default)]
+  pub command: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub working_dir: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub user: Option<String>,
+  /// unit 文件位置。
+  #[serde(default)]
+  pub unit_file: String,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub env_files: Vec<String>,
+  /// running、exited、failed 等。
+  #[serde(default)]
+  pub state: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub since: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub memory: Option<u64>,
+  /// 监听的地址，例如 `127.0.0.1:8080`。
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub listens: Vec<String>,
+  /// 宿主机上的 Caddy、nginx、cloudflared 配置里转发到这些端口的域名。
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub domains: Vec<String>,
+  /// 是网关本身（Caddy、nginx、cloudflared），它的 domains 是它承载的全部域名。
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub gateway: bool,
+  /// 配置文件：网关的配置、环境文件。
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub configs: Vec<String>,
 }
 
 /// 一个服务的磁盘占用（字节）。
