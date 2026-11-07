@@ -15,6 +15,7 @@ mod fleet;
 mod gh;
 mod pack;
 mod print;
+mod task;
 
 #[derive(Parser)]
 #[command(
@@ -143,6 +144,10 @@ pub enum Command {
   /// 备份：服务的 /srv/<服务>/ 每天用 restic 备份到另一台服务器。
   #[command(subcommand)]
   Backup(BackupCmd),
+  /// 定时任务：按 cron（北京时间）在服务容器里、一次性容器里或宿主机上执行命令。
+  /// 改动直接生效，不走计划。
+  #[command(subcommand)]
+  Task(task::TaskCmd),
   /// 生成计划。不带参数时只检查漂移；`-f` 时以意图文件为完整期望状态。
   Plan {
     #[arg(short = 'f', long)]
