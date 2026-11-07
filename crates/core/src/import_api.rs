@@ -164,3 +164,98 @@ pub async fn preview(
     warnings,
   }))
 }
+
+#[derive(serde::Deserialize)]
+pub struct RemoveRequest {
+  #[serde(default)]
+  project: Option<String>,
+  #[serde(default)]
+  container: Option<String>,
+  /// 连同具名数据卷一起删。
+  #[serde(default)]
+  volumes: bool,
+}
+
+/// `POST /api/servers/{name}/unmanaged/remove`：删掉一个没纳管的容器或 compose 项目的全部容器。
+/// 只认现在仍然没纳管的，Wharf 自己的服务、网关不会被删。
+pub async fn remove(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Path(server): Path<String>,
+  Json(req): Json<RemoveRequest>,
+) -> ApiResult<wharf_api_types::agent::RemovedContainers> {
+  auth.require(Perm::Apply)?;
+  let snap = snapshot::load(&s.db).await?;
+  if !snap.world.servers.contains_key(&server) {
+    return Err(server_not_found(&server).into());
+  }
+  let found: Vec<FoundContainer> = s
+    .hub
+    .call(
+      &server,
+      AgentOp::Discover,
+      Duration::from_secs(40),
+      None,
+      &CancellationToken::new(),
+    )
+    .await?;
+  let names: Vec<String> = match (&req.project, &req.container) {
+    (Some(p), None) => {
+      if managed(&snap.world, p) {
+        return Err(
+          ApiError::invalid(format!(
+            "{p} 是 Wharf 管理的，不能在这里删"
+          ))
+          .into(),
+        );
+      }
+      found
+        .iter()
+        .filter(|c| c.project.as_deref() == Some(p.as_str()))
+        .map(|c| c.name.clone())
+        .collect()
+    }
+    (None, Some(name)) => found
+      .iter()
+      .filter(|c| &c.name == name && c.project.is_none())
+      .map(|c| c.name.clone())
+      .collect(),
+    _ => {
+      return Err(
+        ApiError::invalid("project 和 container 二选一").into(),
+      );
+    }
+  };
+  if names.is_empty() {
+    return Err(
+      ApiError::new(
+        ErrorCode::NotFound,
+        "没找到这个容器，可能已经删掉了",
+      )
+      .into(),
+    );
+  }
+  let removed = s
+    .hub
+    .call(
+      &server,
+      AgentOp::RemoveContainers {
+        containers: names,
+        volumes: req.volumes,
+      },
+      Duration::from_secs(180),
+      None,
+      &CancellationToken::new(),
+    )
+    .await?;
+  tracing::info!(
+    "删除 {server} 上没纳管的 {}（数据卷：{}）",
+    req
+      .project
+      .as_deref()
+      .or(req.container.as_deref())
+      .unwrap_or(""),
+    req.volumes
+  );
+  Ok(Json(removed))
+}
