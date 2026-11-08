@@ -21,8 +21,6 @@ pub struct AppState {
   /// 数据目录，上传的代码包放在它下面的 `uploads/`。
   pub data_dir: std::path::PathBuf,
   pub downloads: crate::uploads::Downloads,
-  /// 启动时间：没有管理员账号时，启动后 30 分钟内可以在页面上设置。
-  pub started: std::time::Instant,
   /// 正在后台同步的边缘应用。
   pub edge_syncing: crate::edge_sync::Syncing,
 }

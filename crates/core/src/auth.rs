@@ -161,6 +161,13 @@ impl FromRequestParts<Arc<AppState>> for Auth {
       .filter(|t| !t.is_empty());
     let Some(token) = token else {
       // 页面：账号密码登录后的会话 cookie，权限和管理员 token 一样。
+      // WebSocket 不受 CORS 保护，SameSite 也挡不住同站子域，所以带 Origin 时必须同源。
+      if !same_origin(&parts.headers) {
+        return Err(AppError::from(ApiError::new(
+          ErrorCode::Forbidden,
+          "请求来源和控制面地址不一致",
+        )));
+      }
       let user = crate::login::session_user(state, &parts.headers)
         .await
         .map_err(AppError::from)?
@@ -171,6 +178,21 @@ impl FromRequestParts<Arc<AppState>> for Auth {
         human: true,
       });
     };
+    // token 只能经 CLI 加密通道使用，防止在明文内网上被窃听；本机（如 docker exec 里的脚本）除外。
+    let sealed = parts.extensions.get::<crate::cli_tunnel::Sealed>().is_some();
+    let local = parts
+      .extensions
+      .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+      .is_some_and(|c| c.0.ip().is_loopback());
+    if !sealed && !local {
+      return Err(AppError::from(
+        ApiError::new(
+          ErrorCode::Unauthorized,
+          "本机 wharf 太旧，不支持加密通道，控制面已拒绝明文 token",
+        )
+        .with_hint("在页面“设置 → CLI 与 AI 接入”按步骤更新 wharf 并重新 wharf login"),
+      ));
+    }
     let hash = hash_token(token);
     let found = state
       .db
@@ -186,9 +208,38 @@ impl FromRequestParts<Arc<AppState>> for Auth {
   }
 }
 
+/// 浏览器带的 `Origin` 的 host[:port] 必须等于请求的 Host（经网关时网关会保留原 Host）。
+/// 没有 `Origin`（非浏览器、同源普通导航）放行。
+fn same_origin(headers: &axum::http::HeaderMap) -> bool {
+  let Some(origin) = headers.get(axum::http::header::ORIGIN) else {
+    return true;
+  };
+  let host = headers
+    .get("x-forwarded-host")
+    .or_else(|| headers.get(axum::http::header::HOST))
+    .and_then(|v| v.to_str().ok());
+  let origin_host = origin
+    .to_str()
+    .ok()
+    .and_then(|o| o.split_once("://"))
+    .map(|(_, rest)| rest.trim_end_matches('/'));
+  matches!((origin_host, host), (Some(o), Some(h)) if o.eq_ignore_ascii_case(h.trim()))
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn origin_must_match_host() {
+    let mut h = axum::http::HeaderMap::new();
+    h.insert("host", "wharf.example.com".parse().unwrap());
+    assert!(same_origin(&h));
+    h.insert("origin", "https://wharf.example.com".parse().unwrap());
+    assert!(same_origin(&h));
+    h.insert("origin", "https://evil.example.com".parse().unwrap());
+    assert!(!same_origin(&h));
+  }
 
   #[test]
   fn legacy_scopes_and_perm_lists() {

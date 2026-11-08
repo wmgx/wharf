@@ -17,6 +17,7 @@ mod gh;
 mod pack;
 mod print;
 mod task;
+mod tunnel;
 
 #[derive(Parser)]
 #[command(
@@ -49,6 +50,9 @@ pub enum Command {
   Login {
     #[arg(long)]
     url: String,
+    /// 控制面公钥（页面“设置 → CLI 与 AI 接入”里的登录命令带着）。之后只认这个公钥，防中间人。
+    #[arg(long, env = "WHARF_CORE_KEY")]
+    core_key: String,
   },
   /// 总览：服务器、服务、网关、路由的状态。
   Status,

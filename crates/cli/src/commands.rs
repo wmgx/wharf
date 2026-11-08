@@ -35,7 +35,7 @@ use crate::{
 pub async fn run(cli: Cli) -> CliResult<()> {
   let j = cli.json;
   match cli.command {
-    Command::Login { url } => login(url, j).await,
+    Command::Login { url, core_key } => login(url, core_key, j).await,
     Command::Schema { resource } => schema(resource.as_deref()),
     command => {
       let c = Client::new(cli.url, cli.token)?;
@@ -262,14 +262,20 @@ async fn dispatch(
   }
 }
 
-async fn login(url: String, j: bool) -> CliResult<()> {
+async fn login(url: String, core_key: String, j: bool) -> CliResult<()> {
+  crate::tunnel::parse_core_key(&core_key)?;
   let token = read_secret("API token：")?;
-  let c = Client::new(Some(url.clone()), Some(token.clone()))?;
+  let c = Client::with_key(
+    Some(url.clone()),
+    Some(token.clone()),
+    Some(core_key.clone()),
+  )?;
   // 验证一下能用。
   let _: Vec<ServerView> = c.get("/api/servers").await?;
   let path = Config {
     url: Some(url.trim_end_matches('/').to_string()),
     token: Some(token),
+    core_key: Some(core_key.trim().to_string()),
   }
   .save()?;
   if j {

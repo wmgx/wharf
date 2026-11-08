@@ -1,10 +1,15 @@
-//! 控制面和 agent 之间的 websocket 协议。消息都是 JSON 文本帧。
+//! 控制面和 agent 之间的 websocket 协议。握手是 JSON 文本帧，之后是加密的二进制帧。
 //!
-//! 握手（双向认证，传输加密依赖服务器之间的网络）：
+//! 握手（双向认证 + 交换临时密钥，不依赖 TLS）：
 //! 1. agent 连上 `/agent/ws`，控制面发 [CoreMsg::Challenge]；
-//! 2. agent 回 [AgentMsg::Hello]：对 [auth_payload] 的签名，以及自己的 nonce；
-//! 3. 控制面验证 agent 公钥，回 [CoreMsg::Welcome]：对 agent nonce 的签名；
-//! 4. agent 用 join 时记下的控制面公钥验证，之后开始上报和处理请求。
+//! 2. agent 回 [AgentMsg::Hello]：自己的 nonce、临时公钥 `kx`，
+//!    以及对 [auth_payload_v2]（含 challenge nonce 和 `kx`）的签名；
+//! 3. 控制面验证 agent 公钥，回 [CoreMsg::Welcome]：自己的临时公钥 `kx`，
+//!    以及对 agent nonce 和双方临时公钥的签名；
+//! 4. agent 用 join 时记下的控制面公钥验证，双方用临时密钥派生会话密钥（[crate::seal]），
+//!    之后每条消息都是一个加密的二进制帧，内容仍是 JSON。
+//!
+//! 旧 agent（协议版本低于 [crate::PROTOCOL]）不发 `kx`，按旧握手认证、明文通信，只接受升级请求。
 //!
 //! 请求：控制面发 [CoreMsg::Request]，agent 执行中可以发任意条
 //! [AgentMsg::Progress]，最后发一条 [AgentMsg::Response]。
@@ -26,6 +31,16 @@ pub fn auth_payload(
   format!("wharf-auth-v1|{role}|{server}|{nonce}").into_bytes()
 }
 
+/// 带临时公钥的签名内容。`keys`：agent 签自己的临时公钥；控制面签 `控制面临时公钥,agent 临时公钥`。
+pub fn auth_payload_v2(
+  role: &str,
+  server: &str,
+  nonce: &str,
+  keys: &str,
+) -> Vec<u8> {
+  format!("wharf-auth-v2|{role}|{server}|{nonce}|{keys}").into_bytes()
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -33,9 +48,13 @@ pub enum CoreMsg {
   Challenge {
     nonce: String,
   },
-  /// `signature`：控制面对 `auth_payload("core", server, agent_nonce)` 的签名。
+  /// `signature`：控制面对 `auth_payload_v2("core", server, agent_nonce, "<kx>,<agent kx>")` 的签名；
+  /// 旧 agent 收到的是对 `auth_payload("core", server, agent_nonce)` 的签名，没有 `kx`。
   Welcome {
     signature: String,
+    /// 控制面的临时 X25519 公钥，hex。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kx: Option<String>,
   },
   Request {
     id: u64,
@@ -74,9 +93,12 @@ pub enum AgentMsg {
   Hello {
     server: String,
     public_key: String,
-    /// 对 `auth_payload("agent", server, challenge_nonce)` 的签名。
+    /// 对 `auth_payload_v2("agent", server, challenge_nonce, kx)` 的签名（旧 agent 是 `auth_payload`）。
     signature: String,
     nonce: String,
+    /// agent 的临时 X25519 公钥，hex。旧 agent 没有。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kx: Option<String>,
     version: String,
     /// 协议版本，见 [crate::PROTOCOL]。旧 agent 不发这个字段，反序列化成 0。
     #[serde(default)]

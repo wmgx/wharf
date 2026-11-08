@@ -17,6 +17,7 @@ mod baseline;
 mod build;
 mod cert;
 mod cli_dist;
+mod cli_tunnel;
 mod connect;
 mod core_backup;
 mod cron;
@@ -148,6 +149,7 @@ async fn main() -> anyhow::Result<()> {
   }
   let key = load_or_create_key(&cli.data_dir.join("core.key"))?;
   auth::bootstrap(&db, &cli.data_dir).await?;
+  login::bootstrap_setup_code(&db, &cli.data_dir).await?;
 
   let state = Arc::new(state::AppState {
     db,
@@ -162,7 +164,6 @@ async fn main() -> anyhow::Result<()> {
     listen_port: cli.listen.port(),
     data_dir: cli.data_dir.clone(),
     downloads: Default::default(),
-    started: std::time::Instant::now(),
     edge_syncing: Default::default(),
   });
   apply::recover(&state).await?;
@@ -191,7 +192,11 @@ async fn main() -> anyhow::Result<()> {
     wharf_api_types::VERSION,
     cli.listen
   );
-  axum::serve(listener, api::router(state))
+  axum::serve(
+    listener,
+    api::router(state)
+      .into_make_service_with_connect_info::<SocketAddr>(),
+  )
     .with_graceful_shutdown(async {
       let _ = tokio::signal::ctrl_c().await;
     })

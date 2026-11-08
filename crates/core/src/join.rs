@@ -265,13 +265,14 @@ pub fn check_image(image: &str) -> Result<String, ApiError> {
 pub fn script_command(
   core_url: &str,
   token: &str,
+  core_key: &str,
   image: Option<&str>,
 ) -> String {
   let env = image
     .map(|i| format!("WHARF_AGENT_IMAGE={i} "))
     .unwrap_or_default();
   format!(
-    "curl -fsSL {core_url}/join.sh | {env}sh -s -- {core_url} {token}"
+    "curl -fsSL {core_url}/join.sh | {env}sh -s -- {core_url} {token} {core_key}"
   )
 }
 
@@ -285,10 +286,11 @@ pub async fn script(State(s): State<Arc<AppState>>) -> Response {
 }
 
 const SCRIPT: &str = r#"#!/bin/sh
-# Wharf agent 安装：curl -fsSL <控制面>/join.sh | sh -s -- <控制面> <加入凭据>
+# Wharf agent 安装：curl -fsSL <控制面>/join.sh | sh -s -- <控制面> <加入凭据> [控制面公钥]
 set -eu
 CORE_URL="${1:?缺少控制面地址}"
 TOKEN="${2:?缺少加入凭据}"
+CORE_KEY="${3:-}"
 IMAGE="${WHARF_AGENT_IMAGE:-{image}}"
 DATA=/var/lib/wharf
 
@@ -346,7 +348,7 @@ if ! run 900 $DOCKER pull "$IMAGE"; then
 fi
 
 step "加入 $CORE_URL"
-run 60 $DOCKER run --rm --network host -v "$DATA:$DATA" "$IMAGE" join "$CORE_URL" "$TOKEN" \
+run 60 $DOCKER run --rm --network host -v "$DATA:$DATA" "$IMAGE" join "$CORE_URL" "$TOKEN" ${CORE_KEY:+--core-key "$CORE_KEY"} \
   || fail "加入失败，确认这台机器能访问 $CORE_URL"
 
 step "启动 agent"

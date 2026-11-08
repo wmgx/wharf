@@ -28,7 +28,10 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
   ApiError, ErrorCode, PROTOCOL,
-  agent::{AgentMsg, AgentOp, CoreMsg, TerminalInput, auth_payload},
+  agent::{
+    AgentMsg, AgentOp, CoreMsg, TerminalInput, auth_payload, auth_payload_v2,
+  },
+  seal::{KeyShare, Opener, Role, Sealer},
 };
 
 use crate::{
@@ -305,9 +308,34 @@ async fn send_msg(
   Ok(())
 }
 
-/// 协议版本是否兼容：0 是旧 agent（不发这个字段），必须放行；其余版本必须相等。
+/// 协议版本是否兼容。旧 agent（含不发这个字段的 0）只能明文连接，只接受升级请求。
 fn protocol_ok(agent: u32) -> bool {
-  agent == 0 || agent == PROTOCOL
+  agent == PROTOCOL
+}
+
+/// 握手之后的收发：新 agent 全部加密；旧 agent 明文，只用于下发升级。
+enum Wire {
+  Plain,
+  Sealed(Sealer, Opener),
+}
+
+impl Wire {
+  fn encode(&mut self, msg: &CoreMsg) -> anyhow::Result<Message> {
+    let text = serde_json::to_string(msg)?;
+    Ok(match self {
+      Wire::Plain => Message::text(text),
+      Wire::Sealed(tx, _) => Message::binary(tx.seal(text.as_bytes())),
+    })
+  }
+
+  /// `Ok(None)`：不是这种通道该收的帧，忽略。解密失败返回错误，调用方断开。
+  fn decode(&mut self, msg: Message) -> anyhow::Result<Option<Vec<u8>>> {
+    Ok(match (self, msg) {
+      (Wire::Plain, Message::Text(t)) => Some(t.as_bytes().to_vec()),
+      (Wire::Sealed(_, rx), Message::Binary(b)) => Some(rx.open(&b)?),
+      _ => None,
+    })
+  }
 }
 
 async fn handle_socket(
@@ -329,6 +357,7 @@ async fn handle_socket(
     public_key,
     signature,
     nonce: agent_nonce,
+    kx: agent_kx,
     version,
     protocol,
     host_shell,
@@ -338,7 +367,11 @@ async fn handle_socket(
     anyhow::bail!("agent 没有先发 hello");
   };
   // 协议不一致也放行（认证照做），只接受升级请求，否则 agent 永远收不到升级指令。
-  let upgrade_only = !protocol_ok(protocol);
+  // 协议版本对但没交换密钥：不是正常 agent，拒绝。
+  if protocol_ok(protocol) && agent_kx.is_none() {
+    anyhow::bail!("服务器 {server} 的 agent 没有交换会话密钥");
+  }
+  let upgrade_only = !protocol_ok(protocol) || agent_kx.is_none();
   if upgrade_only {
     tracing::warn!(
       "服务器 {server} 的 agent 协议版本 {protocol}，控制面要求 {PROTOCOL}：只接受升级请求，请运行 wharf upgrade"
@@ -358,7 +391,13 @@ async fn handle_socket(
       .zip(decode_sig(&signature))
       .is_some_and(|(key, sig)| {
         key
-          .verify(&auth_payload("agent", &server, &nonce), &sig)
+          .verify(
+            &match &agent_kx {
+              Some(kx) => auth_payload_v2("agent", &server, &nonce, kx),
+              None => auth_payload("agent", &server, &nonce),
+            },
+            &sig,
+          )
           .is_ok()
       });
   if !verified {
@@ -372,21 +411,39 @@ async fn handle_socket(
     .await;
     anyhow::bail!("服务器 {server} 认证失败");
   }
-  if protocol == 0 {
-    // 线上旧 agent 不发这个字段。不能拒绝，否则控制面一升级所有 agent 都连不上。
-    tracing::warn!(
-      "服务器 {server} 的 agent 没有上报协议版本（旧版本），按兼容处理，建议运行 wharf upgrade"
-    );
-  }
-  let welcome =
-    state.key.sign(&auth_payload("core", &server, &agent_nonce));
-  send_msg(
-    &mut socket,
-    &CoreMsg::Welcome {
-      signature: hex::encode(welcome.to_bytes()),
-    },
-  )
-  .await?;
+  let (welcome, mut wire) = match &agent_kx {
+    Some(akx) => {
+      let share = KeyShare::generate();
+      let kx = share.public.clone();
+      let sig = state.key.sign(&auth_payload_v2(
+        "core",
+        &server,
+        &agent_nonce,
+        &format!("{kx},{akx}"),
+      ));
+      let (tx, rx) = share
+        .finish(akx, &format!("{nonce}{agent_nonce}"), Role::Core)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+      (
+        CoreMsg::Welcome {
+          signature: hex::encode(sig.to_bytes()),
+          kx: Some(kx),
+        },
+        Wire::Sealed(tx, rx),
+      )
+    }
+    None => {
+      let sig = state.key.sign(&auth_payload("core", &server, &agent_nonce));
+      (
+        CoreMsg::Welcome {
+          signature: hex::encode(sig.to_bytes()),
+          kx: None,
+        },
+        Wire::Plain,
+      )
+    }
+  };
+  send_msg(&mut socket, &welcome).await?;
 
   let (tx, mut rx) = mpsc::channel(4096);
   let conn = Conn {
@@ -412,7 +469,7 @@ async fn handle_socket(
       _ = conn.closed.cancelled() => break Ok(()),
       out = rx.recv() => {
         let Some(out) = out else { break Ok(()) };
-        match tokio::time::timeout(SOCKET_WRITE_TIMEOUT, sink.send(Message::text(serde_json::to_string(&out)?))).await {
+        match tokio::time::timeout(SOCKET_WRITE_TIMEOUT, sink.send(wire.encode(&out)?)).await {
           Ok(Ok(())) => {}
           Ok(Err(e)) => break Err(e.into()),
           Err(_) => break Err(anyhow::anyhow!("发送 WebSocket 消息超时")),
@@ -438,7 +495,6 @@ async fn handle_socket(
         };
         last_recv = tokio::time::Instant::now();
         let text = match msg {
-          Message::Text(text) => text,
           Message::Close(_) => break Ok(()),
           Message::Pong(_) => {
             if let Some(sent) = ping_sent.take() {
@@ -446,9 +502,13 @@ async fn handle_socket(
             }
             continue;
           }
-          _ => continue,
+          msg => match wire.decode(msg) {
+            Ok(Some(text)) => text,
+            Ok(None) => continue,
+            Err(e) => break Err(e),
+          },
         };
-        match serde_json::from_str::<AgentMsg>(&text) {
+        match serde_json::from_slice::<AgentMsg>(&text) {
           Ok(AgentMsg::Report(mut report)) => {
             if let Some(mut m) = report.metrics.take() {
               let hosts = std::mem::take(&mut m.hosts);
@@ -510,8 +570,9 @@ mod tests {
 
   #[test]
   fn protocol_gate() {
-    // 旧 agent 不发 protocol 字段，控制面升级后必须还能连上
-    assert!(protocol_ok(0));
+    // 旧 agent 只能升级
+    assert!(!protocol_ok(0));
+    assert!(!protocol_ok(1));
     assert!(protocol_ok(PROTOCOL));
     assert!(!protocol_ok(PROTOCOL + 1));
     assert!(!protocol_ok(u32::MAX));
@@ -557,6 +618,7 @@ mod tests {
       public_key: "k".into(),
       signature: "s".into(),
       nonce: "n".into(),
+      kx: Some("k".into()),
       version: "0.1.0".into(),
       protocol: PROTOCOL,
       host_shell: true,

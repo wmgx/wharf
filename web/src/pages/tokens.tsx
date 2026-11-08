@@ -1,7 +1,7 @@
 import { CheckIcon, CopyIcon, PlusIcon, Trash2Icon } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
-import { api, usePoll } from "@/api";
+import { api, type Session, usePoll } from "@/api";
 import { ago, CodeBlock, Empty, ErrorNote, Notice, SectionTitle } from "@/components/common";
 import { Field, Segmented, toName } from "@/components/fields";
 import { Badge } from "@/components/ui/badge";
@@ -63,6 +63,7 @@ const AI_GUIDE = (origin: string) => `## Wharf（服务器管理）
 /** 设置里的"CLI 与 AI 接入"：装 CLI、建 token、登录，以及给 AI 的说明。 */
 export function Tokens() {
   const { data, error, refresh } = usePoll<TokenView[]>("/api/tokens", 30000);
+  const coreKey = usePoll<Session>("/api/session", 600000).data?.core_key ?? "<控制面公钥>";
   const [creating, setCreating] = useState(false);
   const [removing, setRemoving] = useState<string | null>(null);
   const origin = window.location.origin;
@@ -97,7 +98,7 @@ export function Tokens() {
           </li>
           <li className="grid gap-1.5">
             <span className="text-sm font-medium">3. 登录（粘贴刚才的 token），然后试一下</span>
-            <Command>{`wharf login --url ${origin}\nwharf status`}</Command>
+            <Command>{`wharf login --url ${origin} --core-key ${coreKey}\nwharf status`}</Command>
           </li>
           <li className="grid gap-1.5">
             <span className="text-sm font-medium">4. 给 AI 用：把这段贴进项目的 AGENTS.md 或 CLAUDE.md</span>

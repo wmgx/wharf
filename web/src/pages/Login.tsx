@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { api, type Session } from "@/api";
 import { Logo } from "@/components/app-sidebar";
-import { ErrorNote, Notice } from "@/components/common";
+import { ErrorNote } from "@/components/common";
 import { Field } from "@/components/fields";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -9,12 +9,11 @@ import { Input } from "@/components/ui/input";
 import * as vault from "@/lib/vault";
 
 /**
- * 登录页。三种情况：
- * - 还没有管理员账号、在启动后 30 分钟内：设置账号密码，设置完直接进入；
- * - 还没有管理员账号、已超过 30 分钟：提示重启控制面或在服务器上重置；
+ * 登录页。两种情况：
+ * - 还没有管理员账号：凭服务器上的一次性初始化码设置账号密码，设置完直接进入；
  * - 已有账号：账号密码登录。
  */
-export function Login({ session, onDone, onRetry }: { session: Session; onDone: (s: Session) => void; onRetry: () => void }) {
+export function Login({ session, onDone }: { session: Session; onDone: (s: Session) => void }) {
   return (
     <div className="grid min-h-svh place-items-center bg-[radial-gradient(800px_400px_at_50%_0%,color-mix(in_oklch,var(--primary)_10%,transparent),transparent_70%)] p-4">
       <div className="grid w-full max-w-sm gap-6">
@@ -22,13 +21,7 @@ export function Login({ session, onDone, onRetry }: { session: Session; onDone: 
           <Logo />
           Wharf
         </div>
-        {!session.setup_needed ? (
-          <CredentialsForm mode="login" onDone={onDone} />
-        ) : session.setup_open ? (
-          <CredentialsForm mode="setup" onDone={onDone} />
-        ) : (
-          <SetupClosed onRetry={onRetry} />
-        )}
+        <CredentialsForm mode={session.setup_needed ? "setup" : "login"} onDone={onDone} />
       </div>
     </div>
   );
@@ -39,20 +32,21 @@ function CredentialsForm({ mode, onDone }: { mode: "login" | "setup"; onDone: (s
   const [username, setUsername] = useState(setup ? "admin" : "");
   const [password, setPassword] = useState("");
   const [again, setAgain] = useState("");
+  const [code, setCode] = useState("");
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
   const [stale, setStale] = useState<{ session: Session; password: string } | null>(null);
 
   const mismatch = setup && !!again && again !== password;
   const tooShort = setup && !!password && password.length < 8;
-  const ready = !!username.trim() && !!password && (!setup || (password === again && !tooShort));
+  const ready = !!username.trim() && !!password && (!setup || (password === again && !tooShort && !!code.trim()));
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setBusy(true);
     setError(null);
     try {
-      const session = await api.post<Session>(setup ? "/api/setup" : "/api/login", { username: username.trim(), password });
+      const session = await api.post<Session>(setup ? "/api/setup" : "/api/login", setup ? { username: username.trim(), password, code: code.trim() } : { username: username.trim(), password });
       // 用登录密码解开备注私密内容的数据密钥；密码重置过时先让用户同步一次。
       if ((await vault.afterLogin(password)) === "stale") setStale({ session, password });
       else onDone(session);
@@ -72,6 +66,19 @@ function CredentialsForm({ mode, onDone }: { mode: "login" | "setup"; onDone: (s
       </CardHeader>
       <CardContent>
         <form className="grid gap-4" onSubmit={submit}>
+          {setup && (
+            <Field
+              label="初始化码"
+              htmlFor="setup-code"
+              help={
+                <>
+                  在服务器上执行 <code className="font-mono">docker exec wharf-core cat /var/lib/wharf-core/setup.code</code>
+                </>
+              }
+            >
+              <Input id="setup-code" autoFocus autoComplete="off" value={code} onChange={(e) => setCode(e.target.value)} />
+            </Field>
+          )}
           <Field label="账号" htmlFor="username">
             <Input id="username" autoFocus={!setup} autoComplete="username" value={username} onChange={(e) => setUsername(e.target.value)} />
           </Field>
@@ -79,7 +86,6 @@ function CredentialsForm({ mode, onDone }: { mode: "login" | "setup"; onDone: (s
             <Input
               id="password"
               type="password"
-              autoFocus={setup}
               autoComplete={setup ? "new-password" : "current-password"}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
@@ -138,33 +144,6 @@ function SyncVault({ password, onDone }: { password: string; onDone: () => void 
             先跳过（私密内容暂时打不开，下次登录还会问）
           </Button>
         </form>
-      </CardContent>
-    </Card>
-  );
-}
-
-function SetupClosed({ onRetry }: { onRetry: () => void }) {
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-lg">还没有管理员账号</CardTitle>
-        <CardDescription>控制面启动已超过 30 分钟</CardDescription>
-      </CardHeader>
-      <CardContent className="grid gap-4">
-        <Notice>
-          二选一：
-          <ul className="mt-1.5 list-disc space-y-1 pl-4">
-            <li>
-              重启控制面（<code className="font-mono">docker restart wharf-core</code>）后刷新这个页面；
-            </li>
-            <li>
-              在服务器上执行 <code className="font-mono">docker exec -it wharf-core wharf-core reset-password</code> 直接设置。
-            </li>
-          </ul>
-        </Notice>
-        <Button variant="outline" onClick={onRetry}>
-          已处理，刷新
-        </Button>
       </CardContent>
     </Card>
   );
