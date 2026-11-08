@@ -131,10 +131,15 @@ pub async fn run(c: &Client, a: Args, j: bool) -> CliResult<()> {
       Some(t) => format!("直连 {t}"),
       None => "经控制面中转".to_string(),
     };
+    let t = a.ttl.as_secs();
+    let ttl = if t < 60 {
+      format!("{t} 秒")
+    } else {
+      format!("{} 分钟", t / 60)
+    };
     println!(
-      "{local} → {}（{how}），{} 分钟后断开，Ctrl-C 结束",
-      a.service,
-      a.ttl.as_secs() / 60
+      "{local} → {}（{how}），{ttl}后断开，Ctrl-C 结束",
+      a.service
     );
   }
   let serve = async {
