@@ -329,6 +329,26 @@ pub struct ServiceSpec {
   pub monitor: Option<MonitorSpec>,
 }
 
+impl ServiceSpec {
+  /// 按端口名、容器端口或宿主机端口找声明过的端口。`arg` 为空时只有一个端口就用它。
+  pub fn find_port(&self, arg: Option<&str>) -> Option<&PortSpec> {
+    let Some(arg) = arg else {
+      return match self.ports.as_slice() {
+        [only] => Some(only),
+        _ => None,
+      };
+    };
+    if let Some(p) = self.ports.iter().find(|p| p.name == arg) {
+      return Some(p);
+    }
+    let n: u16 = arg.parse().ok()?;
+    self
+      .ports
+      .iter()
+      .find(|p| p.container == Some(n) || p.host == Some(n))
+  }
+}
+
 /// 自定义监控：`http://127.0.0.1:<宿主机端口><path>`。
 #[derive(
   Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,

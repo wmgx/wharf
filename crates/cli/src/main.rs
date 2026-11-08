@@ -9,6 +9,7 @@ use clap::{Args, Parser, Subcommand};
 
 mod client;
 mod commands;
+mod connect;
 mod deploy;
 mod edge;
 mod fleet;
@@ -102,6 +103,26 @@ pub enum Command {
   },
   /// 数据：每个服务的挂载和备份情况。
   Data,
+  /// 按服务名在本机开一个端口连到服务（数据库客户端等用）。
+  /// 能直连组网或局域网地址就直连，否则经控制面中转。
+  Connect {
+    service: String,
+    /// 端口名、容器端口或宿主机端口；服务只有一个端口时可以不填。
+    #[arg(long)]
+    port: Option<String>,
+    /// compose 里的组件名，连没有发布的容器端口时用。
+    #[arg(long)]
+    component: Option<String>,
+    /// 本机端口，默认用服务的端口号，被占用时随机。
+    #[arg(long)]
+    local: Option<u16>,
+    /// 多久后自动断开，例如 30m、2h。
+    #[arg(long, default_value = "2h", value_parser = connect::parse_ttl)]
+    ttl: std::time::Duration,
+    /// 不探测直连，直接经控制面中转。
+    #[arg(long)]
+    relay: bool,
+  },
   /// 在宿主机执行一次非交互 shell 命令。
   Exec {
     server: String,

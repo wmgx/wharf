@@ -229,6 +229,7 @@ pub fn router(state: Arc<AppState>) -> Router {
       "/api/services/{name}/terminal",
       get(crate::terminal::open),
     )
+    .route("/api/services/{name}/connect", get(crate::connect::open))
     .route("/api/gateways", get(list_gateways))
     .route("/api/gateways/{name}", get(show_gateway))
     .route("/api/gateways/{name}/config", get(gateway_config))
