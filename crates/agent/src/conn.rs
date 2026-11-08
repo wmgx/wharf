@@ -84,6 +84,7 @@ async fn session(
     version: wharf_api_types::VERSION.to_string(),
     protocol: wharf_api_types::PROTOCOL,
     host_shell: true,
+    forward: true,
   };
   tokio::time::timeout(
     SOCKET_WRITE_TIMEOUT,
@@ -195,9 +196,17 @@ async fn session(
         running.lock().await.insert(id, cancel.clone());
         let input = if matches!(
           op,
-          AgentOp::Terminal(_) | AgentOp::HostTerminal { .. }
+          AgentOp::Terminal(_)
+            | AgentOp::HostTerminal { .. }
+            | AgentOp::Forward(_)
         ) {
-          let (itx, irx) = mpsc::channel(256);
+          // 转发的输入是数据块，多留些余量。
+          let cap = if matches!(op, AgentOp::Forward(_)) {
+            4096
+          } else {
+            256
+          };
+          let (itx, irx) = mpsc::channel(cap);
           inputs.lock().await.insert(id, itx);
           Some(irx)
         } else {
@@ -243,6 +252,17 @@ async fn session(
                 .host_shell
                 .terminal(size, session, &ctx, input)
                 .await
+            }
+            (AgentOp::Forward(job), Some(input)) => {
+              crate::forward::run(
+                &ops.docker,
+                &job,
+                &ctx,
+                input,
+                id,
+                tx.clone(),
+              )
+              .await
             }
             (op, _) => ops.handle(op, &ctx).await,
           };
