@@ -42,7 +42,10 @@ pub fn parse_core_key(hex_key: &str) -> anyhow::Result<VerifyingKey> {
 }
 
 /// 必须在 tokio 运行时里调用。
-pub fn start(base: &str, core_key: VerifyingKey) -> anyhow::Result<Tunnel> {
+pub fn start(
+  base: &str,
+  core_key: VerifyingKey,
+) -> anyhow::Result<Tunnel> {
   let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
   listener.set_nonblocking(true)?;
   let local = format!("http://{}", listener.local_addr()?);
@@ -91,12 +94,14 @@ async fn handshake(
   })?;
   let share = KeyShare::generate();
   let mut nonce = [0u8; 24];
-  getrandom::fill(&mut nonce).map_err(|e| anyhow!("随机数不可用：{e}"))?;
+  getrandom::fill(&mut nonce)
+    .map_err(|e| anyhow!("随机数不可用：{e}"))?;
   let hello = TunnelHello {
     kx: share.public.clone(),
     nonce: hex::encode(nonce),
   };
-  ws.send(Message::text(serde_json::to_string(&hello)?)).await?;
+  ws.send(Message::text(serde_json::to_string(&hello)?))
+    .await?;
   let welcome = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
     loop {
       match ws.next().await {
@@ -159,7 +164,8 @@ async fn pipe(
     while let Some(msg) = stream.next().await {
       match msg? {
         Message::Binary(frame) => {
-          let plain = opener.open(&frame).map_err(|e| anyhow!("{e}"))?;
+          let plain =
+            opener.open(&frame).map_err(|e| anyhow!("{e}"))?;
           tx.write_all(&plain).await?;
         }
         Message::Close(_) => break,

@@ -74,7 +74,8 @@ impl KeyShare {
     if !shared.was_contributory() {
       return Err(SealError::BadKey);
     }
-    let hk = Hkdf::<Sha256>::new(Some(salt.as_bytes()), shared.as_bytes());
+    let hk =
+      Hkdf::<Sha256>::new(Some(salt.as_bytes()), shared.as_bytes());
     let derive = |info: &[u8]| {
       let mut key = [0u8; 32];
       hk.expand(info, &mut key).expect("32 字节在 HKDF 上限内");
@@ -145,7 +146,8 @@ mod tests {
   fn round_trip_and_rejects_tamper_and_replay() {
     let core = KeyShare::generate();
     let agent = KeyShare::generate();
-    let (core_pub, agent_pub) = (core.public.clone(), agent.public.clone());
+    let (core_pub, agent_pub) =
+      (core.public.clone(), agent.public.clone());
     let (mut c_tx, mut c_rx) =
       core.finish(&agent_pub, "n1n2", Role::Core).unwrap();
     let (mut a_tx, mut a_rx) =
@@ -164,6 +166,8 @@ mod tests {
   #[test]
   fn rejects_low_order_key() {
     let zero = hex::encode([0u8; 32]);
-    assert!(KeyShare::generate().finish(&zero, "s", Role::Core).is_err());
+    assert!(
+      KeyShare::generate().finish(&zero, "s", Role::Core).is_err()
+    );
   }
 }

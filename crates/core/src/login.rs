@@ -57,7 +57,10 @@ fn client_key(peer: std::net::IpAddr, headers: &HeaderMap) -> String {
         || (ip.octets()[0] == 100 && ip.octets()[1] & 0xc0 == 64)
     }
     std::net::IpAddr::V6(ip) => {
-      ip.is_loopback() || ip.to_ipv4_mapped().is_some_and(|v| v.is_loopback() || v.is_private())
+      ip.is_loopback()
+        || ip
+          .to_ipv4_mapped()
+          .is_some_and(|v| v.is_loopback() || v.is_private())
     }
   };
   trusted
@@ -90,7 +93,8 @@ fn record_failure(key: &str) {
   let mut map = FAILURES.lock().unwrap_or_else(|e| e.into_inner());
   map.retain(|_, (_, at)| at.elapsed() < LOCKOUT);
   for k in [key, ALL] {
-    let entry = map.entry(k.to_string()).or_insert((0, Instant::now()));
+    let entry =
+      map.entry(k.to_string()).or_insert((0, Instant::now()));
     *entry = (entry.0 + 1, Instant::now());
   }
 }
@@ -138,7 +142,11 @@ pub async fn bootstrap_setup_code(
   data_dir: &std::path::Path,
 ) -> anyhow::Result<()> {
   let path = data_dir.join(SETUP_CODE);
-  if admin(db).await.map_err(|e| anyhow::anyhow!(e.message))?.is_some() {
+  if admin(db)
+    .await
+    .map_err(|e| anyhow::anyhow!(e.message))?
+    .is_some()
+  {
     let _ = std::fs::remove_file(&path);
     return Ok(());
   }
@@ -502,7 +510,10 @@ mod tests {
       "1.2.3.4, 203.0.113.9".parse().unwrap(),
     );
     // 公网直连伪造的头不认，经本机网关时认。
-    assert_eq!(client_key("198.51.100.7".parse().unwrap(), &h), "198.51.100.7");
+    assert_eq!(
+      client_key("198.51.100.7".parse().unwrap(), &h),
+      "198.51.100.7"
+    );
     let key = client_key("127.0.0.1".parse().unwrap(), &h);
     assert_eq!(key, "203.0.113.9");
     for _ in 0..MAX_FAILURES - 1 {

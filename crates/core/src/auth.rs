@@ -179,7 +179,10 @@ impl FromRequestParts<Arc<AppState>> for Auth {
       });
     };
     // token 只能经 CLI 加密通道使用，防止在明文内网上被窃听；本机（如 docker exec 里的脚本）除外。
-    let sealed = parts.extensions.get::<crate::cli_tunnel::Sealed>().is_some();
+    let sealed = parts
+      .extensions
+      .get::<crate::cli_tunnel::Sealed>()
+      .is_some();
     let local = parts
       .extensions
       .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()

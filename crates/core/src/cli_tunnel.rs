@@ -34,8 +34,12 @@ pub struct Sealed;
 
 /// 通道内请求要沿用外层连接的这些头：Host 是 CLI 真正连的控制面地址
 /// （通道内是本机端口），`X-Forwarded-*` 是网关加的。
-const OUTER_HEADERS: [&str; 4] =
-  ["host", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto"];
+const OUTER_HEADERS: [&str; 4] = [
+  "host",
+  "x-forwarded-for",
+  "x-forwarded-host",
+  "x-forwarded-proto",
+];
 
 /// `GET /api/tunnel`（WebSocket）。不需要登录：通道只负责加密，里面的请求照常带 token。
 pub async fn open(
@@ -46,9 +50,7 @@ pub async fn open(
 ) -> Response {
   let outer: Vec<_> = OUTER_HEADERS
     .iter()
-    .filter_map(|name| {
-      headers.get(*name).map(|v| (*name, v.clone()))
-    })
+    .filter_map(|name| headers.get(*name).map(|v| (*name, v.clone())))
     .collect();
   ws.on_upgrade(move |socket| async move {
     if let Err(e) = serve(s, peer, outer, socket).await {
@@ -75,7 +77,8 @@ async fn handshake(
   };
   let share = KeyShare::generate();
   let kx = share.public.clone();
-  let signature = s.key.sign(&tunnel_payload(&hello.nonce, &kx, &hello.kx));
+  let signature =
+    s.key.sign(&tunnel_payload(&hello.nonce, &kx, &hello.kx));
   let welcome = TunnelWelcome {
     kx,
     signature: hex::encode(signature.to_bytes()),
@@ -107,8 +110,9 @@ async fn serve(
     while let Some(msg) = stream.next().await {
       match msg? {
         Message::Binary(frame) => {
-          let plain =
-            opener.open(&frame).map_err(|e| anyhow::anyhow!("{e}"))?;
+          let plain = opener
+            .open(&frame)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
           outer_tx.write_all(&plain).await?;
         }
         Message::Close(_) => break,

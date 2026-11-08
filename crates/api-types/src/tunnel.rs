@@ -23,6 +23,11 @@ pub struct TunnelWelcome {
 }
 
 /// 控制面签名的内容。角色和 agent 握手不同，签名不能互相挪用。
-pub fn tunnel_payload(nonce: &str, core_kx: &str, cli_kx: &str) -> Vec<u8> {
-  format!("wharf-tunnel-v1|core|{nonce}|{core_kx},{cli_kx}").into_bytes()
+pub fn tunnel_payload(
+  nonce: &str,
+  core_kx: &str,
+  cli_kx: &str,
+) -> Vec<u8> {
+  format!("wharf-tunnel-v1|core|{nonce}|{core_kx},{cli_kx}")
+    .into_bytes()
 }

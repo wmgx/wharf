@@ -10,7 +10,9 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
   ApiError, ErrorCode,
-  agent::{AgentMsg, AgentOp, CoreMsg, TerminalInput, auth_payload_v2},
+  agent::{
+    AgentMsg, AgentOp, CoreMsg, TerminalInput, auth_payload_v2,
+  },
   seal::{KeyShare, Role},
 };
 
@@ -80,7 +82,12 @@ async fn session(
     public_key: hex::encode(key.verifying_key().to_bytes()),
     signature: hex::encode(
       key
-        .sign(&auth_payload_v2("agent", &joined.server, &nonce, &my_kx))
+        .sign(&auth_payload_v2(
+          "agent",
+          &joined.server,
+          &nonce,
+          &my_kx,
+        ))
         .to_bytes(),
     ),
     nonce: my_nonce.clone(),
@@ -102,7 +109,8 @@ async fn session(
     bail!("控制面拒绝了连接");
   };
   // 新 agent 只接受加密通道，防止被降级成明文。
-  let core_kx = kx.context("控制面没有交换会话密钥，请先升级控制面")?;
+  let core_kx =
+    kx.context("控制面没有交换会话密钥，请先升级控制面")?;
   joined
     .core_key()?
     .verify(
@@ -118,7 +126,10 @@ async fn session(
   let (mut sealer, mut opener) = share
     .finish(&core_kx, &format!("{nonce}{my_nonce}"), Role::Agent)
     .map_err(|e| anyhow!("{e}"))?;
-  tracing::info!("已连接控制面 {url}，服务器名 {}（通道已加密）", joined.server);
+  tracing::info!(
+    "已连接控制面 {url}，服务器名 {}（通道已加密）",
+    joined.server
+  );
 
   // 所有出站消息走一个通道，由写任务统一发送。
   let (tx, mut rx) = mpsc::channel::<AgentMsg>(4096);
