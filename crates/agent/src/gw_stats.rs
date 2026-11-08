@@ -1,7 +1,8 @@
 //! 网关请求统计：读本机 Caddy 网关的 `/metrics`（管理口是 `/srv/wharf-gw-*/config/` 下的 unix socket），
 //! 按域名汇总 `caddy_http_request_duration_seconds`，和上一次比得到这一段的请求数、5xx 数和延迟分位。
 //!
-//! 只数 `handler="reverse_proxy"`：同一个请求经过每个中间件都会记一次，只取转发那一层不会重复。
+//! 只取一层 handler，免得重复计数：有 `reverse_proxy` 就用它（旧版 Caddy 每层中间件各记一次），
+//! 否则用 `subroute`（新版只记站点最外层，Wharf 的站点都包在 subroute 里）。
 //! 需要 Caddyfile 全局开 `metrics { per_host }`，否则没有 host 标签，这里什么也拿不到。
 
 use std::{
@@ -74,9 +75,10 @@ async fn fetch(sock: &std::path::Path) -> std::io::Result<String> {
   )
 }
 
-/// 解析 Prometheus 文本里 reverse_proxy 那层的直方图，按 host 汇总。
+/// 解析 Prometheus 文本里的请求直方图，按 host 汇总。
 pub fn parse(text: &str) -> HashMap<String, Totals> {
-  let mut out: HashMap<String, Totals> = HashMap::new();
+  let mut proxy: HashMap<String, Totals> = HashMap::new();
+  let mut sub: HashMap<String, Totals> = HashMap::new();
   for line in text.lines() {
     let Some(rest) = line.strip_prefix(METRIC) else {
       continue;
@@ -92,11 +94,11 @@ pub fn parse(text: &str) -> HashMap<String, Totals> {
       continue;
     };
     let labels = parse_labels(labels);
-    if labels.get("handler").map(String::as_str)
-      != Some("reverse_proxy")
-    {
-      continue;
-    }
+    let out = match labels.get("handler").map(String::as_str) {
+      Some("reverse_proxy") => &mut proxy,
+      Some("subroute") => &mut sub,
+      _ => continue,
+    };
     let Some(host) = labels.get("host").filter(|h| !h.is_empty())
     else {
       continue;
@@ -122,7 +124,10 @@ pub fn parse(text: &str) -> HashMap<String, Totals> {
       _ => {}
     }
   }
-  out
+  for (host, t) in proxy {
+    sub.insert(host, t);
+  }
+  sub
 }
 
 fn parse_labels(s: &str) -> HashMap<String, String> {
@@ -206,7 +211,8 @@ caddy_http_request_duration_seconds_bucket{code="200",handler="reverse_proxy",ho
 caddy_http_request_duration_seconds_bucket{code="200",handler="reverse_proxy",host="a.example.com",method="GET",server="srv0",le="1"} 10
 caddy_http_request_duration_seconds_bucket{code="200",handler="reverse_proxy",host="a.example.com",method="GET",server="srv0",le="+Inf"} 10
 caddy_http_request_duration_seconds_count{code="200",handler="reverse_proxy",host="a.example.com",method="GET",server="srv0"} 10
-caddy_http_request_duration_seconds_count{code="200",handler="basic_auth",host="a.example.com",method="GET",server="srv0"} 99
+caddy_http_request_duration_seconds_count{code="200",handler="subroute",host="a.example.com",method="GET",server="srv0"} 99
+caddy_http_request_duration_seconds_count{code="200",handler="subroute",host="b.example.com",method="GET",server="srv0"} 5
 "#;
   const AFTER: &str = r#"
 caddy_http_request_duration_seconds_bucket{code="200",handler="reverse_proxy",host="a.example.com",method="GET",server="srv0",le="0.1"} 90
@@ -229,5 +235,7 @@ caddy_http_request_duration_seconds_count{code="502",handler="reverse_proxy",hos
     assert!(a.p95_ms > 100.0 && a.p95_ms < 1000.0);
     // 计数变小（网关重启）不算。
     assert!(diff(&parse(BEFORE), &parse(AFTER), 60.0).is_empty());
+    // 没有 reverse_proxy 那层时用 subroute。
+    assert_eq!(parse(BEFORE)["b.example.com"].count, 5);
   }
 }
