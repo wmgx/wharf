@@ -450,7 +450,11 @@ async fn handle_socket(
         };
         match serde_json::from_str::<AgentMsg>(&text) {
           Ok(AgentMsg::Report(mut report)) => {
-            if let Some(m) = report.metrics.take() {
+            if let Some(mut m) = report.metrics.take() {
+              let hosts = std::mem::take(&mut m.hosts);
+              if !hosts.is_empty() {
+                tokio::spawn(crate::http_stats::record(state.clone(), hosts));
+              }
               crate::metrics::record_report(&state, &server, *m).await;
             }
             touch(&state, &server, Some(*report)).await

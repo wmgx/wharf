@@ -15,6 +15,8 @@ const STATS_TIMEOUT: Duration = Duration::from_secs(20);
 #[derive(Default)]
 pub struct Sampler {
   prev: Option<Prev>,
+  gateway:
+    Option<(Instant, HashMap<String, crate::gw_stats::Totals>)>,
 }
 
 struct Prev {
@@ -33,6 +35,15 @@ impl Sampler {
     disk: Option<wharf_api_types::agent::Disk>,
   ) -> Option<Metrics> {
     let now = Instant::now();
+    let gw_now = crate::gw_stats::collect().await;
+    let hosts = match self.gateway.replace((now, gw_now.clone())) {
+      Some((at, old)) => crate::gw_stats::diff(
+        &gw_now,
+        &old,
+        now.duration_since(at).as_secs_f64().max(1.0),
+      ),
+      None => Default::default(),
+    };
     let cpu = cpu_ticks(&read("/proc/stat"))?;
     let net = host_net(&read("/proc/net/dev"));
     let cpus = cpu_count();
@@ -87,6 +98,7 @@ impl Sampler {
       disk_used: disk.map_or(0, |d| d.total.saturating_sub(d.free)),
       disk_total: disk.map_or(0, |d| d.total),
       projects,
+      hosts,
     })
   }
 }
