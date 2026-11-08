@@ -17,6 +17,7 @@ mod baseline;
 mod build;
 mod cert;
 mod cli_dist;
+mod connect;
 mod core_backup;
 mod cron;
 mod data;

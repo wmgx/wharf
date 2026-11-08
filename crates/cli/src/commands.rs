@@ -109,6 +109,28 @@ async fn dispatch(
       out(j, &v, print::data);
       Ok(())
     }
+    Command::Connect {
+      service,
+      port,
+      component,
+      local,
+      ttl,
+      relay,
+    } => {
+      crate::connect::run(
+        c,
+        crate::connect::Args {
+          service,
+          port,
+          component,
+          local,
+          ttl,
+          relay,
+        },
+        j,
+      )
+      .await
+    }
     Command::Exec {
       server,
       timeout,

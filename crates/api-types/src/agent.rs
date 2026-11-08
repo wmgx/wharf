@@ -45,7 +45,7 @@ pub enum CoreMsg {
   Cancel {
     id: u64,
   },
-  /// 发给进行中的 [AgentOp::Terminal] 或 [AgentOp::HostTerminal]：键盘输入或窗口大小变化。
+  /// 发给进行中的 [AgentOp::Terminal]、[AgentOp::HostTerminal] 或 [AgentOp::Forward]：输入字节或窗口大小变化。
   Input {
     id: u64,
     #[serde(flatten)]
@@ -84,6 +84,9 @@ pub enum AgentMsg {
     /// 是否支持宿主机终端和命令执行。旧 agent 缺省为不支持。
     #[serde(default)]
     host_shell: bool,
+    /// 是否支持 [AgentOp::Forward]。旧 agent 缺省为不支持。
+    #[serde(default)]
+    forward: bool,
   },
   Report(Box<AgentReport>),
   Progress {
@@ -289,6 +292,9 @@ pub enum AgentOp {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     session: Option<String>,
   },
+  /// 转发一条 TCP 连接：连上目标后，收到的字节作为进度（base64）推回，
+  /// 经 [CoreMsg::Input] 送进来的字节写给目标。任一方关闭就结束，结果是转发的字节数。
+  Forward(ForwardJob),
   /// 宿主机上的 tmux 会话列表，结果是 `Vec<HostSession>`。没装 tmux 时是空列表。
   HostSessions,
   /// 结束宿主机上的一个 tmux 会话，里面跑着的程序会一起结束。
@@ -465,6 +471,18 @@ pub struct TerminalJob {
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub service: Option<String>,
   pub size: TerminalSize,
+}
+
+/// 转发目标。`project` 为空时连宿主机 `127.0.0.1:port`，
+/// 否则连该 compose 项目里在运行的容器的 `容器地址:port`。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForwardJob {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub project: Option<String>,
+  /// compose 里的服务名，不填时用第一个在运行的容器。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub service: Option<String>,
+  pub port: u16,
 }
 
 /// 宿主机上的一个 tmux 会话。
