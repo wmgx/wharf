@@ -629,7 +629,7 @@ pub fn caddyfile(
   link: bool,
 ) -> String {
   let mut out = format!(
-    "# 由 Wharf 生成，不要手改。网关：{name}\n# 手写的站点放到 conf/extra.d/*.caddy\n{{\n\tadmin {CADDY_ADMIN}\n"
+    "# 由 Wharf 生成，不要手改。网关：{name}\n# 手写的站点放到 conf/extra.d/*.caddy\n{{\n\tadmin {CADDY_ADMIN}\n\tmetrics {{\n\t\tper_host\n\t}}\n"
   );
   if let Some(port) = spec.http_port.filter(|p| *p != 80) {
     out.push_str(&format!("\thttp_port {port}\n"));

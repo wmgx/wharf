@@ -32,6 +32,8 @@ export function bytes(n: number): string {
 
 const pct = (n: number) => `${n.toFixed(1)}%`;
 const rate = (n: number) => `${bytes(n)}/s`;
+const qps = (n: number) => `${n.toFixed(n < 10 ? 2 : 0)}/s`;
+const ms = (n: number) => (n < 1000 ? `${n.toFixed(0)}ms` : `${(n / 1000).toFixed(1)}s`);
 const secs = (n: number) => (n < 90 ? `${n.toFixed(0)} 秒` : `${(n / 60).toFixed(1)} 分`);
 
 interface Line {
@@ -82,6 +84,22 @@ export function MetricsPanel({ subject, kind, title = "资源" }: { subject: str
             { label: "发", points: get("net_tx"), color: "var(--success)" },
           ]}
         />
+        {kind === "svc" && (s["req.qps"]?.length ?? 0) > 0 && (
+          <>
+            <Chart title="请求" span={span} gap={gap} format={qps} lines={[{ label: "QPS", points: s["req.qps"] ?? [], color: "var(--primary)" }]} />
+            <Chart
+              title="延迟"
+              span={span}
+              gap={gap}
+              format={ms}
+              lines={[
+                { label: "p50", points: s["req.p50"] ?? [], color: "var(--primary)" },
+                { label: "p95", points: s["req.p95"] ?? [], color: "var(--warning)" },
+              ]}
+            />
+            <Chart title="5xx" span={span} gap={gap} format={pct} lines={[{ label: "5xx", points: s["req.err"] ?? [], color: "var(--destructive)" }]} />
+          </>
+        )}
         {kind === "host" ? (
           <Chart
             title="磁盘"
