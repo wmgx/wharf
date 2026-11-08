@@ -20,6 +20,7 @@ mod edge;
 mod egress;
 mod exec;
 mod files;
+mod forward;
 mod host;
 mod host_dir;
 mod host_shell;

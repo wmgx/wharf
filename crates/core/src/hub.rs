@@ -59,6 +59,7 @@ struct Conn {
   /// 最近一次 ping 的往返延迟，毫秒。
   rtt_ms: Arc<AtomicU64>,
   host_shell: bool,
+  forward: bool,
   /// 协议版本不一致：连接放行，但只接受升级相关的请求，好让它升上来。
   upgrade_only: bool,
 }
@@ -177,6 +178,15 @@ impl Hub {
         ApiError::new(
           ErrorCode::Conflict,
           format!("服务器 {server} 的 agent 还不支持宿主机终端"),
+        )
+        .with_hint("请先运行 wharf upgrade"),
+      );
+    }
+    if matches!(&op, AgentOp::Forward(_)) && !conn.forward {
+      return Err(
+        ApiError::new(
+          ErrorCode::Conflict,
+          format!("服务器 {server} 的 agent 还不支持端口转发"),
         )
         .with_hint("请先运行 wharf upgrade"),
       );
@@ -322,6 +332,7 @@ async fn handle_socket(
     version,
     protocol,
     host_shell,
+    forward,
   } = hello
   else {
     anyhow::bail!("agent 没有先发 hello");
@@ -385,6 +396,7 @@ async fn handle_socket(
     closed: CancellationToken::new(),
     rtt_ms: Arc::new(AtomicU64::new(u64::MAX)),
     host_shell,
+    forward,
     upgrade_only,
   };
   state.hub.register(&server, conn.clone());
@@ -544,6 +556,7 @@ mod tests {
       version: "0.1.0".into(),
       protocol: PROTOCOL,
       host_shell: true,
+      forward: true,
     };
     let json = serde_json::to_string(&hello).unwrap();
     let old = serde_json::from_str::<OldAgentMsg>(&json);

@@ -192,6 +192,33 @@ impl Client {
     })
   }
 
+  /// WebSocket 请求：地址换成 ws(s)://，带上 token 和 CLI 标识。
+  pub fn ws_request(
+    &self,
+    path: &str,
+  ) -> CliResult<
+    tokio_tungstenite::tungstenite::handshake::client::Request,
+  > {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let url = format!("{}{path}", self.base)
+      .replacen("http://", "ws://", 1)
+      .replacen("https://", "wss://", 1);
+    let mut req = url
+      .into_client_request()
+      .map_err(|e| ApiError::internal(format!("地址无效：{e}")))?;
+    let h = req.headers_mut();
+    h.insert(
+      wharf_api_types::CLI_API_HEADER,
+      wharf_api_types::CLI_API.into(),
+    );
+    if let Some(token) = &self.token
+      && let Ok(v) = format!("Bearer {token}").parse()
+    {
+      h.insert("authorization", v);
+    }
+    Ok(req)
+  }
+
   fn update_hint(&self) -> String {
     format!(
       "本机 wharf 可能比控制面旧，更新后再试：curl -fsSL {0}/cli.sh | sh -s -- {0}",
