@@ -262,7 +262,11 @@ async fn dispatch(
   }
 }
 
-async fn login(url: String, core_key: String, j: bool) -> CliResult<()> {
+async fn login(
+  url: String,
+  core_key: String,
+  j: bool,
+) -> CliResult<()> {
   crate::tunnel::parse_core_key(&core_key)?;
   let token = read_secret("API token：")?;
   let c = Client::with_key(

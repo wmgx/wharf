@@ -66,7 +66,10 @@ pub fn router(state: Arc<AppState>) -> Router {
       get(crate::ping::fail).post(crate::ping::fail),
     )
     .route("/agent/ws", get(hub::agent_ws))
-    .route(wharf_api_types::tunnel::TUNNEL_PATH, get(crate::cli_tunnel::open))
+    .route(
+      wharf_api_types::tunnel::TUNNEL_PATH,
+      get(crate::cli_tunnel::open),
+    )
     .route("/agent/join", post(agent_join))
     .route("/join.sh", get(crate::join::script))
     .route("/cli.sh", get(crate::cli_dist::script))

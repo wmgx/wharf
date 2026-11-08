@@ -181,8 +181,13 @@ async fn main() -> anyhow::Result<()> {
       Some(joined) => joined,
       None => match (core_url, join_token) {
         (Some(url), Some(token)) if !token.is_empty() => {
-          identity::join(&cli.data_dir, &url, &token, core_key.as_deref())
-            .await?
+          identity::join(
+            &cli.data_dir,
+            &url,
+            &token,
+            core_key.as_deref(),
+          )
+          .await?
         }
         _ => bail!(
           "还没有加入控制面。先在控制面执行 `wharf server add <name>`，再按提示运行 join"

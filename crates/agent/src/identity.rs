@@ -150,7 +150,8 @@ pub async fn join(
   }
   let joined: JoinResponse = resp.json().await?;
   parse_public_key(&joined.core_public_key)?;
-  if let Some(expected) = core_key.map(str::trim).filter(|k| !k.is_empty())
+  if let Some(expected) =
+    core_key.map(str::trim).filter(|k| !k.is_empty())
     && !expected.eq_ignore_ascii_case(&joined.core_public_key)
   {
     bail!(

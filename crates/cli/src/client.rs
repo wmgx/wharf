@@ -117,8 +117,10 @@ impl Client {
           .with_hint("在页面“设置 → CLI 与 AI 接入”复制带 --core-key 的 wharf login 命令重新登录，或设置环境变量 WHARF_CORE_KEY")
       })?;
     let core_key = crate::tunnel::parse_core_key(&core_key)?;
-    let tunnel = crate::tunnel::start(&base, core_key)
-      .map_err(|e| ApiError::internal(format!("启动加密通道失败：{e:#}")))?;
+    let tunnel =
+      crate::tunnel::start(&base, core_key).map_err(|e| {
+        ApiError::internal(format!("启动加密通道失败：{e:#}"))
+      })?;
     Ok(Self {
       http: reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(15))
@@ -175,7 +177,8 @@ impl Client {
       .lock()
       .unwrap_or_else(|e| e.into_inner())
       .take();
-    let reason = tunnel.unwrap_or_else(|| e.without_url().to_string());
+    let reason =
+      tunnel.unwrap_or_else(|| e.without_url().to_string());
     ApiError::new(
       ErrorCode::AgentOffline,
       format!("无法连接控制面 {}：{reason}", self.base),
@@ -238,7 +241,8 @@ impl Client {
     tokio_tungstenite::tungstenite::handshake::client::Request,
   > {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-    let url = format!("{}{path}", self.endpoint).replacen("http://", "ws://", 1);
+    let url = format!("{}{path}", self.endpoint)
+      .replacen("http://", "ws://", 1);
     let mut req = url
       .into_client_request()
       .map_err(|e| ApiError::internal(format!("地址无效：{e}")))?;
@@ -276,7 +280,8 @@ impl Client {
       Some(token) => req.bearer_auth(token),
       None => req,
     };
-    let mut resp = req.send().await.map_err(|e| self.conn_error(e))?;
+    let mut resp =
+      req.send().await.map_err(|e| self.conn_error(e))?;
     if !resp.status().is_success() {
       let bytes = resp.bytes().await.unwrap_or_default();
       return Err(
@@ -308,7 +313,12 @@ impl Client {
     body: &B,
   ) -> CliResult<T> {
     self
-      .send(self.http.post(format!("{}{path}", self.endpoint)).json(body))
+      .send(
+        self
+          .http
+          .post(format!("{}{path}", self.endpoint))
+          .json(body),
+      )
       .await
   }
 
@@ -335,7 +345,9 @@ impl Client {
     body: &B,
   ) -> CliResult<T> {
     self
-      .send(self.http.put(format!("{}{path}", self.endpoint)).json(body))
+      .send(
+        self.http.put(format!("{}{path}", self.endpoint)).json(body),
+      )
       .await
   }
 

@@ -29,7 +29,8 @@ use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
   ApiError, ErrorCode, PROTOCOL,
   agent::{
-    AgentMsg, AgentOp, CoreMsg, TerminalInput, auth_payload, auth_payload_v2,
+    AgentMsg, AgentOp, CoreMsg, TerminalInput, auth_payload,
+    auth_payload_v2,
   },
   seal::{KeyShare, Opener, Role, Sealer},
 };
@@ -324,12 +325,17 @@ impl Wire {
     let text = serde_json::to_string(msg)?;
     Ok(match self {
       Wire::Plain => Message::text(text),
-      Wire::Sealed(tx, _) => Message::binary(tx.seal(text.as_bytes())),
+      Wire::Sealed(tx, _) => {
+        Message::binary(tx.seal(text.as_bytes()))
+      }
     })
   }
 
   /// `Ok(None)`：不是这种通道该收的帧，忽略。解密失败返回错误，调用方断开。
-  fn decode(&mut self, msg: Message) -> anyhow::Result<Option<Vec<u8>>> {
+  fn decode(
+    &mut self,
+    msg: Message,
+  ) -> anyhow::Result<Option<Vec<u8>>> {
     Ok(match (self, msg) {
       (Wire::Plain, Message::Text(t)) => Some(t.as_bytes().to_vec()),
       (Wire::Sealed(_, rx), Message::Binary(b)) => Some(rx.open(&b)?),
@@ -393,7 +399,9 @@ async fn handle_socket(
         key
           .verify(
             &match &agent_kx {
-              Some(kx) => auth_payload_v2("agent", &server, &nonce, kx),
+              Some(kx) => {
+                auth_payload_v2("agent", &server, &nonce, kx)
+              }
               None => auth_payload("agent", &server, &nonce),
             },
             &sig,
@@ -433,7 +441,8 @@ async fn handle_socket(
       )
     }
     None => {
-      let sig = state.key.sign(&auth_payload("core", &server, &agent_nonce));
+      let sig =
+        state.key.sign(&auth_payload("core", &server, &agent_nonce));
       (
         CoreMsg::Welcome {
           signature: hex::encode(sig.to_bytes()),
