@@ -2,6 +2,7 @@
 //! - `host.*`：服务器资源，对象是服务器名，agent 每分钟上报；
 //! - `svc.*`：服务（compose project）的容器资源，对象是 project 名；
 //! - `link.*`：机器之间的链路质量，对象是 `<from>><to>`，见 quality.rs；
+//! - `req.*`：经网关的请求，对象是服务名，见 http_stats.rs；
 //! - 其余是事件：部署、备份的耗时和结果，自动重启，对象是服务名。
 //!
 //! 资源点 24 小时后合成 10 分钟一个，保留 7 天；事件保留 90 天。
@@ -31,8 +32,7 @@ const KEEP_RESOURCE_MS: i64 = 7 * DAY_MS;
 const KEEP_EVENT_MS: i64 = 90 * DAY_MS;
 
 /// 合成和按时间段平均的只有资源点，事件点原样保留。
-const RESOURCE: &str =
-  "(name LIKE 'host.%' OR name LIKE 'svc.%' OR name LIKE 'link.%')";
+const RESOURCE: &str = "(name LIKE 'host.%' OR name LIKE 'svc.%' OR name LIKE 'link.%' OR name LIKE 'req.%')";
 
 fn insert(
   c: &Connection,
@@ -50,6 +50,29 @@ fn insert(
       .map_err(sql_err)?;
   }
   Ok(())
+}
+
+/// 记一批现在的点，失败只记日志。
+pub async fn insert_owned(
+  state: &AppState,
+  points: Vec<(String, String, f64)>,
+) {
+  if points.is_empty() {
+    return;
+  }
+  let result = state
+    .db
+    .call(move |c| {
+      let rows: Vec<(&str, &str, f64)> = points
+        .iter()
+        .map(|(n, s, v)| (n.as_str(), s.as_str(), *v))
+        .collect();
+      insert(c, now_ms(), &rows)
+    })
+    .await;
+  if let Err(e) = result {
+    tracing::warn!("记录请求打点失败：{e}");
+  }
 }
 
 /// 一轮链路质量：`link.loss`（丢包率），成功过才记 `link.ms`。

@@ -155,6 +155,23 @@ pub struct Metrics {
   /// compose project 名到它的容器合计。
   #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
   pub projects: BTreeMap<String, ProjectMetrics>,
+  /// 本机 Caddy 网关上一段时间各域名的请求统计。旧 agent 没有。
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub hosts: BTreeMap<String, HostTraffic>,
+}
+
+/// 一个域名在上报间隔内经网关的请求（只算转发到上游的）。
+#[derive(
+  Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct HostTraffic {
+  pub reqs: u64,
+  /// 5xx 的个数。
+  pub errors: u64,
+  /// 这段统计的秒数。
+  pub secs: f32,
+  pub p50_ms: f32,
+  pub p95_ms: f32,
 }
 
 #[derive(

@@ -35,6 +35,7 @@ mod files_api;
 mod heal;
 mod host_dir;
 mod host_units;
+mod http_stats;
 mod hub;
 mod import;
 mod import_api;
