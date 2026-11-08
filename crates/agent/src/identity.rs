@@ -123,6 +123,7 @@ pub async fn join(
   data_dir: &Path,
   core_url: &str,
   join_token: &str,
+  core_key: Option<&str>,
 ) -> anyhow::Result<Joined> {
   let key = load_or_create_key(data_dir)?;
   let core_url = core_url.trim_end_matches('/').to_string();
@@ -149,6 +150,13 @@ pub async fn join(
   }
   let joined: JoinResponse = resp.json().await?;
   parse_public_key(&joined.core_public_key)?;
+  if let Some(expected) = core_key.map(str::trim).filter(|k| !k.is_empty())
+    && !expected.eq_ignore_ascii_case(&joined.core_public_key)
+  {
+    bail!(
+      "控制面返回的公钥和加入命令里的不一致：可能连到了假的控制面（中间人）。没有加入"
+    );
+  }
   let joined = Joined {
     core_url,
     server: joined.server,

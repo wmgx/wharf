@@ -10,7 +10,8 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
   ApiError, ErrorCode,
-  agent::{AgentMsg, AgentOp, CoreMsg, TerminalInput, auth_payload},
+  agent::{AgentMsg, AgentOp, CoreMsg, TerminalInput, auth_payload_v2},
+  seal::{KeyShare, Role},
 };
 
 use crate::{
@@ -72,15 +73,18 @@ async fn session(
     bail!("控制面没有先发 challenge");
   };
   let my_nonce = random_nonce();
+  let share = KeyShare::generate();
+  let my_kx = share.public.clone();
   let hello = AgentMsg::Hello {
     server: joined.server.clone(),
     public_key: hex::encode(key.verifying_key().to_bytes()),
     signature: hex::encode(
       key
-        .sign(&auth_payload("agent", &joined.server, &nonce))
+        .sign(&auth_payload_v2("agent", &joined.server, &nonce, &my_kx))
         .to_bytes(),
     ),
     nonce: my_nonce.clone(),
+    kx: Some(my_kx.clone()),
     version: wharf_api_types::VERSION.to_string(),
     protocol: wharf_api_types::PROTOCOL,
     host_shell: true,
@@ -92,19 +96,29 @@ async fn session(
   )
   .await
   .context("发送 hello 超时")??;
-  let CoreMsg::Welcome { signature } =
+  let CoreMsg::Welcome { signature, kx } =
     next_core_msg(&mut stream).await?
   else {
     bail!("控制面拒绝了连接");
   };
+  // 新 agent 只接受加密通道，防止被降级成明文。
+  let core_kx = kx.context("控制面没有交换会话密钥，请先升级控制面")?;
   joined
     .core_key()?
     .verify(
-      &auth_payload("core", &joined.server, &my_nonce),
+      &auth_payload_v2(
+        "core",
+        &joined.server,
+        &my_nonce,
+        &format!("{core_kx},{my_kx}"),
+      ),
       &parse_signature(&signature)?,
     )
     .map_err(|_| anyhow!("控制面签名不对，可能连到了假的控制面"))?;
-  tracing::info!("已连接控制面 {url}，服务器名 {}", joined.server);
+  let (mut sealer, mut opener) = share
+    .finish(&core_kx, &format!("{nonce}{my_nonce}"), Role::Agent)
+    .map_err(|e| anyhow!("{e}"))?;
+  tracing::info!("已连接控制面 {url}，服务器名 {}（通道已加密）", joined.server);
 
   // 所有出站消息走一个通道，由写任务统一发送。
   let (tx, mut rx) = mpsc::channel::<AgentMsg>(4096);
@@ -119,7 +133,7 @@ async fn session(
         if !matches!(
           tokio::time::timeout(
             SOCKET_WRITE_TIMEOUT,
-            sink.send(Message::text(text)),
+            sink.send(Message::binary(sealer.seal(text.as_bytes()))),
           )
           .await,
           Ok(Ok(()))
@@ -178,12 +192,16 @@ async fn session(
       Ok(Some(Err(e))) => break Err(e.into()),
       Ok(Some(Ok(msg))) => msg,
     };
-    let text = match msg {
-      Message::Text(text) => text,
+    let frame = match msg {
+      Message::Binary(frame) => frame,
       Message::Close(_) => break Ok(()),
       _ => continue,
     };
-    let msg: CoreMsg = match serde_json::from_str(&text) {
+    let text = match opener.open(&frame) {
+      Ok(text) => text,
+      Err(e) => break Err(anyhow!("{e}")),
+    };
+    let msg: CoreMsg = match serde_json::from_slice(&text) {
       Ok(msg) => msg,
       Err(e) => {
         tracing::warn!("无法解析控制面消息：{e}");

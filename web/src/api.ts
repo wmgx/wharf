@@ -13,6 +13,8 @@ export interface Session {
   username?: string;
   setup_needed: boolean;
   setup_open: boolean;
+  /** 控制面公钥，`wharf login --core-key` 用。 */
+  core_key?: string;
 }
 
 export class ApiError extends Error {

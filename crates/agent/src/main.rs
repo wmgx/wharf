@@ -79,6 +79,9 @@ enum Command {
   Join {
     core_url: String,
     join_token: String,
+    /// 控制面公钥（加入命令里带着）。填了就核对控制面返回的公钥，防止加入时被中间人冒充。
+    #[arg(long, env = "WHARF_CORE_KEY")]
+    core_key: Option<String>,
   },
   /// 连接控制面并处理请求（默认）。
   Run {
@@ -87,6 +90,8 @@ enum Command {
     core_url: Option<String>,
     #[arg(long, env = "WHARF_JOIN_TOKEN", hide_env_values = true)]
     join_token: Option<String>,
+    #[arg(long, env = "WHARF_CORE_KEY")]
+    core_key: Option<String>,
   },
   /// 打包目录（在只读挂载宿主机根目录的临时容器里执行，见 host_dir）。
   #[command(hide = true)]
@@ -133,6 +138,7 @@ async fn main() -> anyhow::Result<()> {
   let command = cli.command.unwrap_or(Command::Run {
     core_url: std::env::var("WHARF_CORE_URL").ok(),
     join_token: std::env::var("WHARF_JOIN_TOKEN").ok(),
+    core_key: std::env::var("WHARF_CORE_KEY").ok(),
   });
   let joined = match command {
     Command::Pack { .. } | Command::Mirror { .. } => {
@@ -152,9 +158,15 @@ async fn main() -> anyhow::Result<()> {
     Command::Join {
       core_url,
       join_token,
+      core_key,
     } => {
-      let joined =
-        identity::join(&cli.data_dir, &core_url, &join_token).await?;
+      let joined = identity::join(
+        &cli.data_dir,
+        &core_url,
+        &join_token,
+        core_key.as_deref(),
+      )
+      .await?;
       println!(
         "已加入 {}，服务器名 {}。现在运行：wharf-agent run",
         joined.core_url, joined.server
@@ -164,11 +176,13 @@ async fn main() -> anyhow::Result<()> {
     Command::Run {
       core_url,
       join_token,
+      core_key,
     } => match identity::Joined::load(&cli.data_dir)? {
       Some(joined) => joined,
       None => match (core_url, join_token) {
         (Some(url), Some(token)) if !token.is_empty() => {
-          identity::join(&cli.data_dir, &url, &token).await?
+          identity::join(&cli.data_dir, &url, &token, core_key.as_deref())
+            .await?
         }
         _ => bail!(
           "还没有加入控制面。先在控制面执行 `wharf server add <name>`，再按提示运行 join"

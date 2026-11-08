@@ -4,6 +4,7 @@
 //! - [view]：API 返回的视图；
 //! - [plan]：plan / apply / 执行记录；
 //! - [agent]：控制面和 agent 之间的 websocket 协议；
+//! - [seal]：agent 通道的消息加密；
 //! - [error]：统一错误格式 `{ code, message, hint, suggest }`。
 
 pub mod agent;
@@ -11,7 +12,9 @@ pub mod build;
 pub mod egress;
 pub mod error;
 pub mod plan;
+pub mod seal;
 pub mod spec;
+pub mod tunnel;
 pub mod view;
 
 pub use error::{ApiError, ErrorCode};
@@ -19,14 +22,16 @@ pub use error::{ApiError, ErrorCode};
 /// CLI 和控制面在请求头里互相报告的版本。
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// agent 和控制面之间的协议版本。控制面拒绝不兼容的 agent；旧 agent 不发这个字段，当作 0。
-pub const PROTOCOL: u32 = 1;
+/// agent 和控制面之间的协议版本。版本不一致（含不发这个字段的旧 agent，当作 0）时控制面只接受升级请求。
+/// 2：握手交换临时密钥，之后的消息全部加密（见 [seal]）。
+pub const PROTOCOL: u32 = 2;
 
 /// CLI 和控制面之间的接口版本，CLI 每个请求都带在 [CLI_API_HEADER] 里。
 /// 新增字段都有默认值，旧 CLI 照常能用；只有控制面必须拿到旧 CLI 发不出的字段时，
 /// 才把 [CLI_API] 和 [MIN_CLI_API] 一起加一，控制面会拦下旧 CLI 并提示更新。
-pub const CLI_API: u32 = 1;
-pub const MIN_CLI_API: u32 = 1;
+/// 2：CLI 必须经加密通道（[tunnel]）访问控制面。
+pub const CLI_API: u32 = 2;
+pub const MIN_CLI_API: u32 = 2;
 pub const CLI_API_HEADER: &str = "x-wharf-cli-api";
 /// 控制面在每个响应里带上自己的构建号，CLI 比对后提醒更新。
 pub const BUILD_HEADER: &str = "x-wharf-build";

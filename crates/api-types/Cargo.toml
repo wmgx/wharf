@@ -10,3 +10,9 @@ chrono.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+chacha20poly1305 = { version = "=0.10.1", default-features = false, features = ["alloc"] }
+getrandom.workspace = true
+hex.workspace = true
+hkdf = "=0.12.4"
+sha2.workspace = true
+x25519-dalek = { version = "=2.0.1", features = ["static_secrets"] }

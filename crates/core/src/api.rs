@@ -66,6 +66,7 @@ pub fn router(state: Arc<AppState>) -> Router {
       get(crate::ping::fail).post(crate::ping::fail),
     )
     .route("/agent/ws", get(hub::agent_ws))
+    .route(wharf_api_types::tunnel::TUNNEL_PATH, get(crate::cli_tunnel::open))
     .route("/agent/join", post(agent_join))
     .route("/join.sh", get(crate::join::script))
     .route("/cli.sh", get(crate::cli_dist::script))
@@ -533,12 +534,14 @@ async fn add_server(
       .unwrap_or("127.0.0.1:7700");
     format!("http://{host}")
   });
+  let core_key = hex::encode(s.key.verifying_key().to_bytes());
   let commands = BTreeMap::from([
     (
       "script".to_string(),
       crate::join::script_command(
         &core_url,
         &token,
+        &core_key,
         image.as_deref(),
       ),
     ),
@@ -547,14 +550,14 @@ async fn add_server(
       format!(
         "docker run -d --name wharf-agent --restart unless-stopped --network host \
          -v /var/run/docker.sock:/var/run/docker.sock -v /var/lib/wharf:/var/lib/wharf -v /srv:/srv \
-         -e WHARF_CORE_URL={core_url} -e WHARF_JOIN_TOKEN={token} {}",
+         -e WHARF_CORE_URL={core_url} -e WHARF_JOIN_TOKEN={token} -e WHARF_CORE_KEY={core_key} {}",
         image.as_deref().unwrap_or(&s.agent_image)
       ),
     ),
     (
       "binary".to_string(),
       format!(
-        "wharf-agent join {core_url} {token} && wharf-agent run"
+        "wharf-agent join {core_url} {token} --core-key {core_key} && wharf-agent run"
       ),
     ),
   ]);

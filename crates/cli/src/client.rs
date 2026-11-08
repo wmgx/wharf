@@ -34,6 +34,9 @@ pub type CliResult<T> = Result<T, CliError>;
 pub struct Config {
   pub url: Option<String>,
   pub token: Option<String>,
+  /// 控制面 ed25519 公钥（hex），建加密通道时验证控制面身份。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub core_key: Option<String>,
 }
 
 pub fn config_path() -> PathBuf {
@@ -75,7 +78,11 @@ impl Config {
 
 pub struct Client {
   http: reqwest::Client,
+  /// 控制面地址，只用于提示。
   base: String,
+  /// 实际发请求的地址：本机加密通道的入口。
+  endpoint: String,
+  tunnel_error: std::sync::Arc<std::sync::Mutex<Option<String>>>,
   token: Option<String>,
 }
 
@@ -83,6 +90,15 @@ impl Client {
   pub fn new(
     url: Option<String>,
     token: Option<String>,
+  ) -> CliResult<Self> {
+    Self::with_key(url, token, None)
+  }
+
+  /// 所有请求都经加密通道（[crate::tunnel]），`core_key` 不填时用 WHARF_CORE_KEY 或配置里的。
+  pub fn with_key(
+    url: Option<String>,
+    token: Option<String>,
+    core_key: Option<String>,
   ) -> CliResult<Self> {
     let config = Config::load();
     let base = url.or(config.url).ok_or_else(|| {
@@ -92,6 +108,17 @@ impl Client {
         )
         .suggest("wharf login --url http://100.101.102.103:7700")
     })?;
+    let base = base.trim_end_matches('/').to_string();
+    let core_key = core_key
+      .or_else(|| std::env::var("WHARF_CORE_KEY").ok())
+      .or(config.core_key)
+      .ok_or_else(|| {
+        ApiError::new(ErrorCode::InvalidInput, "不知道控制面公钥，无法建立加密通道")
+          .with_hint("在页面“设置 → CLI 与 AI 接入”复制带 --core-key 的 wharf login 命令重新登录，或设置环境变量 WHARF_CORE_KEY")
+      })?;
+    let core_key = crate::tunnel::parse_core_key(&core_key)?;
+    let tunnel = crate::tunnel::start(&base, core_key)
+      .map_err(|e| ApiError::internal(format!("启动加密通道失败：{e:#}")))?;
     Ok(Self {
       http: reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(15))
@@ -110,7 +137,9 @@ impl Client {
         )
         .build()
         .map_err(|e| ApiError::internal(e.to_string()))?,
-      base: base.trim_end_matches('/').to_string(),
+      base,
+      endpoint: tunnel.local,
+      tunnel_error: tunnel.last_error,
       token: token.or(config.token),
     })
   }
@@ -139,6 +168,21 @@ impl Client {
     );
   }
 
+  /// 连接失败：多半是加密通道没建起来，附上原因。
+  fn conn_error(&self, e: reqwest::Error) -> ApiError {
+    let tunnel = self
+      .tunnel_error
+      .lock()
+      .unwrap_or_else(|e| e.into_inner())
+      .take();
+    let reason = tunnel.unwrap_or_else(|| e.without_url().to_string());
+    ApiError::new(
+      ErrorCode::AgentOffline,
+      format!("无法连接控制面 {}：{reason}", self.base),
+    )
+    .with_hint("检查控制面是否在运行、地址是否正确（WHARF_URL 或 wharf login）")
+  }
+
   async fn send<T: DeserializeOwned>(
     &self,
     req: reqwest::RequestBuilder,
@@ -147,13 +191,7 @@ impl Client {
       Some(token) => req.bearer_auth(token),
       None => req,
     };
-    let resp = req.send().await.map_err(|e| {
-      ApiError::new(
-        ErrorCode::AgentOffline,
-        format!("无法连接控制面 {}：{}", self.base, e.without_url()),
-      )
-      .with_hint("检查控制面是否在运行、地址是否正确（WHARF_URL 或 wharf login）")
-    })?;
+    let resp = req.send().await.map_err(|e| self.conn_error(e))?;
     self.check_build(resp.headers());
     let status = resp.status();
     let bytes = resp.bytes().await.map_err(|e| {
@@ -200,9 +238,7 @@ impl Client {
     tokio_tungstenite::tungstenite::handshake::client::Request,
   > {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-    let url = format!("{}{path}", self.base)
-      .replacen("http://", "ws://", 1)
-      .replacen("https://", "wss://", 1);
+    let url = format!("{}{path}", self.endpoint).replacen("http://", "ws://", 1);
     let mut req = url
       .into_client_request()
       .map_err(|e| ApiError::internal(format!("地址无效：{e}")))?;
@@ -234,18 +270,13 @@ impl Client {
   ) -> CliResult<()> {
     let req = self
       .http
-      .get(format!("{}{path}", self.base))
+      .get(format!("{}{path}", self.endpoint))
       .timeout(Duration::from_secs(2 * 3600));
     let req = match &self.token {
       Some(token) => req.bearer_auth(token),
       None => req,
     };
-    let mut resp = req.send().await.map_err(|e| {
-      ApiError::new(
-        ErrorCode::AgentOffline,
-        format!("无法连接控制面 {}：{}", self.base, e.without_url()),
-      )
-    })?;
+    let mut resp = req.send().await.map_err(|e| self.conn_error(e))?;
     if !resp.status().is_success() {
       let bytes = resp.bytes().await.unwrap_or_default();
       return Err(
@@ -267,7 +298,7 @@ impl Client {
     path: &str,
   ) -> CliResult<T> {
     self
-      .send(self.http.get(format!("{}{path}", self.base)))
+      .send(self.http.get(format!("{}{path}", self.endpoint)))
       .await
   }
 
@@ -277,7 +308,7 @@ impl Client {
     body: &B,
   ) -> CliResult<T> {
     self
-      .send(self.http.post(format!("{}{path}", self.base)).json(body))
+      .send(self.http.post(format!("{}{path}", self.endpoint)).json(body))
       .await
   }
 
@@ -291,7 +322,7 @@ impl Client {
       .send(
         self
           .http
-          .post(format!("{}{path}", self.base))
+          .post(format!("{}{path}", self.endpoint))
           .timeout(timeout)
           .json(body),
       )
@@ -304,7 +335,7 @@ impl Client {
     body: &B,
   ) -> CliResult<T> {
     self
-      .send(self.http.put(format!("{}{path}", self.base)).json(body))
+      .send(self.http.put(format!("{}{path}", self.endpoint)).json(body))
       .await
   }
 
@@ -318,7 +349,7 @@ impl Client {
       .send(
         self
           .http
-          .put(format!("{}{path}", self.base))
+          .put(format!("{}{path}", self.endpoint))
           .header("content-type", "application/gzip")
           .timeout(Duration::from_secs(30 * 60))
           .body(bytes),
@@ -331,7 +362,7 @@ impl Client {
     path: &str,
   ) -> CliResult<T> {
     self
-      .send(self.http.delete(format!("{}{path}", self.base)))
+      .send(self.http.delete(format!("{}{path}", self.endpoint)))
       .await
   }
 }

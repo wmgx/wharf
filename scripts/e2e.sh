@@ -44,10 +44,11 @@ for _ in $(seq 30); do
   sleep 1
 done
 TOKEN=$(docker exec "$CORE" cat /var/lib/wharf-core/admin.token)
+CORE_KEY=$(curl -sf "http://127.0.0.1:$PORT/api/session" | python3 -c 'import json,sys; print(json.load(sys.stdin)["core_key"])')
 
 # 在控制面容器里执行 wharf。
 wharf() {
-  docker exec -e WHARF_URL="http://127.0.0.1:$PORT" -e WHARF_TOKEN="$TOKEN" "$CORE" wharf "$@"
+  docker exec -e WHARF_URL="http://127.0.0.1:$PORT" -e WHARF_TOKEN="$TOKEN" -e WHARF_CORE_KEY="$CORE_KEY" "$CORE" wharf "$@"
 }
 # 从 JSON 里取字段：jget '<python 表达式，d 是解析后的对象>'
 jget() { python3 -c "import json,sys; d=json.load(sys.stdin); print($1)"; }

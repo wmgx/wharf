@@ -3,7 +3,7 @@
 
 use std::{
   io::{Read, Seek, SeekFrom, Write},
-  os::unix::fs::MetadataExt,
+  os::unix::fs::{MetadataExt, OpenOptionsExt},
   path::{Component, Path, PathBuf},
 };
 
@@ -165,12 +165,26 @@ fn write(
   let bytes = STANDARD
     .decode(data)
     .map_err(|e| ApiError::invalid(format!("数据不对：{e}")))?;
+  // 临时文件不能是符号链接或硬链接（服务容器能写数据目录，可能预先布好链接，
+  // 让上传写到数据目录外）：第一块先删掉旧的再独占新建，之后各块不跟随链接打开并检查。
+  if offset == 0 {
+    match std::fs::remove_file(&tmp) {
+      Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+        return Err(io_err(&tmp)(e));
+      }
+      _ => {}
+    }
+  }
   let mut f = std::fs::OpenOptions::new()
-    .create(true)
     .write(true)
-    .truncate(offset == 0)
+    .create_new(offset == 0)
+    .custom_flags(libc::O_NOFOLLOW)
     .open(&tmp)
     .map_err(io_err(&tmp))?;
+  let tmp_meta = f.metadata().map_err(io_err(&tmp))?;
+  if !tmp_meta.is_file() || tmp_meta.nlink() != 1 {
+    return Err(ApiError::invalid("临时文件被替换了，请重新上传"));
+  }
   f.seek(SeekFrom::Start(offset)).map_err(io_err(&tmp))?;
   f.write_all(&bytes).map_err(io_err(&tmp))?;
   if !last {
@@ -178,19 +192,17 @@ fn write(
   }
   f.sync_all().map_err(io_err(&tmp))?;
   // 属主跟原文件走；新文件跟所在目录走，服务以非 root 运行时也能读写。
+  // 都通过文件句柄改，不按路径（路径可能在这期间被换成链接）。
   let owner = target
-    .metadata()
+    .symlink_metadata()
     .or_else(|_| real_parent.metadata())
     .map_err(io_err(&real_parent))?;
-  if let Ok(m) = target.metadata() {
-    let _ = std::fs::set_permissions(&tmp, m.permissions());
+  if let Ok(m) = target.symlink_metadata() {
+    let _ = f.set_permissions(m.permissions());
   }
-  std::os::unix::fs::chown(
-    &tmp,
-    Some(owner.uid()),
-    Some(owner.gid()),
-  )
-  .map_err(io_err(&tmp))?;
+  std::os::unix::fs::fchown(&f, Some(owner.uid()), Some(owner.gid()))
+    .map_err(io_err(&tmp))?;
+  drop(f);
   std::fs::rename(&tmp, &target).map_err(io_err(&target))
 }
 

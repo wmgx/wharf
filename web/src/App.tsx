@@ -56,7 +56,7 @@ export function App() {
         {!session ? null : session.username ? (
           <Shell username={session.username} onLogout={logout} />
         ) : (
-          <Login session={session} onDone={setSession} onRetry={load} />
+          <Login session={session} onDone={setSession} />
         )}
         <Toaster position="bottom-right" />
       </TooltipProvider>
