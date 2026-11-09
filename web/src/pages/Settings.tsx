@@ -1,6 +1,6 @@
 import { useSearchParams } from "react-router-dom";
 import { useActions } from "@/components/actions";
-import { ArrowUpCircleIcon, LockIcon } from "lucide-react";
+import { ArrowUpCircleIcon } from "lucide-react";
 import {
   CloudIcon,
   KeyRoundIcon,
@@ -36,12 +36,11 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { AccountView } from "@/types";
 import { CoreBackup } from "./core-backup";
 import { EdgeImport } from "./edge-import";
-import { Alerts } from "./alerts";
-import { Notify } from "./notify";
+import { checkUpdate, type VersionView } from "@/components/upgrade";
 import { Secrets } from "./secrets";
 import { Tokens } from "./tokens";
 
-/** 设置：厂商账号、密钥、CLI 与 AI 接入、控制面备份、登录保护账号、升级。 */
+/** 设置：厂商账号、密钥、访问令牌、控制面备份，检查更新和升级。 */
 export function Settings() {
   const actions = useActions();
   const { data, error, refresh } = usePoll<AccountView[]>(
@@ -52,6 +51,7 @@ export function Settings() {
   const [addingNow, setAdding] = useState(false);
   const adding = addingNow || params.get("add") === "account";
   const tab = params.get("tab") ?? "accounts";
+  const { data: version, refresh: refreshVersion } = usePoll<VersionView>("/api/version", 600000);
   const [removing, setRemoving] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [importing, setImporting] = useState<string | null>(null);
@@ -89,14 +89,17 @@ export function Settings() {
         title="设置"
         actions={
           <>
-            <Button variant="outline" onClick={actions.basicAuth}>
-              <LockIcon />
-              登录保护账号
-            </Button>
-            <Button variant="outline" onClick={actions.upgrade}>
-              <ArrowUpCircleIcon />
-              升级 Wharf
-            </Button>
+            {version?.newer ? (
+              <Button onClick={actions.upgrade}>
+                <ArrowUpCircleIcon />
+                升级到 {version.newer}
+              </Button>
+            ) : (
+              <Button variant="outline" onClick={async () => (await checkUpdate()) && refreshVersion()}>
+                <RefreshCwIcon />
+                检查更新
+              </Button>
+            )}
           </>
         }
       />
@@ -108,7 +111,6 @@ export function Settings() {
           <TabsTrigger value="accounts">厂商账号</TabsTrigger>
           <TabsTrigger value="secrets">密钥</TabsTrigger>
           <TabsTrigger value="tokens">访问令牌</TabsTrigger>
-          <TabsTrigger value="notify">告警与通知</TabsTrigger>
           <TabsTrigger value="backup">控制面备份</TabsTrigger>
         </TabsList>
         <TabsContent value="accounts" className="mt-4">
@@ -207,10 +209,6 @@ export function Settings() {
         </TabsContent>
         <TabsContent value="tokens" className="mt-4">
           <Tokens />
-        </TabsContent>
-        <TabsContent value="notify" className="mt-4">
-          <Notify />
-          <Alerts />
         </TabsContent>
         <TabsContent value="backup" className="mt-4">
           <CoreBackup />

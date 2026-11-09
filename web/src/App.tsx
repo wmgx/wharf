@@ -17,6 +17,7 @@ import { Toaster } from "./components/ui/sonner";
 import { announceUpgrade } from "./components/upgrade";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { Settings } from "./pages/Settings";
+import { AlertsPage } from "./pages/alerts";
 import { Home } from "./pages/Home";
 import { Login } from "./pages/Login";
 import { HostTerminal } from "./pages/HostTerminal";
@@ -114,6 +115,7 @@ function Shell({ username, onLogout }: { username: string; onLogout: () => void 
                   <Route path="/domains" element={<Moved to="/entries" />} />
                   <Route path="/activity" element={<Activity />} />
                   <Route path="/settings" element={<Settings />} />
+                  <Route path="/alerts" element={<AlertsPage />} />
                   <Route path="/tasks" element={<TasksPage />} />
                   <Route path="/data" element={<DataPage />} />
                   <Route path="/gateways" element={<Moved to="/entries" />} />

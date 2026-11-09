@@ -176,6 +176,7 @@ async fn main() -> anyhow::Result<()> {
   doctor::spawn(state.clone());
   updates::spawn(state.clone());
   alerts::spawn(state.clone());
+  agent_upgrade::spawn_check();
   monitor::spawn(state.clone());
   quality::spawn(state.clone());
   baseline::spawn(state.clone());

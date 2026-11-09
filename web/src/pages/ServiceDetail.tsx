@@ -566,24 +566,34 @@ function DomainsTab({
                 {r.gateway ? `经 ${r.gateway}` : ""}
                 {r.spec.link === "tunnel" ? " · 反向隧道" : ""}
               </span>
-              <Button
-                variant="ghost"
-                size="xs"
-                onClick={() =>
-                  actions.plan({
-                    title: `${r.spec.auth ? "关闭" : "开启"} ${r.spec.hostname} 的登录保护`,
-                    changes: [
-                      {
-                        op: "upsert_route",
-                        spec: { ...r.spec, auth: !r.spec.auth },
-                      },
-                    ],
-                  })
-                }
-              >
-                {r.spec.auth ? <LockIcon /> : <LockOpenIcon />}
-                {r.spec.auth ? "已开登录保护" : "开启登录保护"}
-              </Button>
+              {r.spec.auth ? (
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button variant="ghost" size="xs">
+                      <LockIcon />
+                      已开登录保护
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    <DropdownMenuItem onSelect={() => actions.basicAuth(r.spec.hostname)}>改账号密码</DropdownMenuItem>
+                    <DropdownMenuItem
+                      onSelect={() =>
+                        actions.plan({
+                          title: `关闭 ${r.spec.hostname} 的登录保护`,
+                          changes: [{ op: "upsert_route", spec: { ...r.spec, auth: false } }],
+                        })
+                      }
+                    >
+                      关闭登录保护
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              ) : (
+                <Button variant="ghost" size="xs" onClick={() => actions.basicAuth(r.spec.hostname, true)}>
+                  <LockOpenIcon />
+                  开启登录保护
+                </Button>
+              )}
               <Button
                 variant="ghost"
                 size="xs"

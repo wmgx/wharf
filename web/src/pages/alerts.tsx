@@ -2,13 +2,27 @@ import { BellOffIcon, RotateCcwIcon } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { api, usePoll } from "@/api";
-import { ago, Empty, SectionTitle, StatusBadge } from "@/components/common";
+import { ago, Empty, PageHeader, SectionTitle, StatusBadge } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import type { AlertPatch, AlertsView } from "@/types";
+import { Notify } from "./notify";
+
+/** 告警：正在触发的、规则、事件通知、最近推送，以及推到哪（通知渠道）。 */
+export function AlertsPage() {
+  return (
+    <>
+      <PageHeader title="告警" />
+      <Alerts />
+      <div className="mt-8">
+        <Notify />
+      </div>
+    </>
+  );
+}
 
 const MUTES: [number, string][] = [
   [60, "1 小时"],

@@ -175,10 +175,75 @@ pub struct UpgradeCore {
   pub then_agents: bool,
 }
 
-/// `GET /api/version`
+/// 发布 Wharf 的仓库，查有没有新构建用。
+const REPO: &str = "wmgx/wharf";
+const CHECK_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
+
+/// 最近一次查新构建的结果：（查的时间，更新的构建，查失败的原因）。
+type Latest = (i64, Option<String>, Option<String>);
+static LATEST: std::sync::Mutex<Option<Latest>> =
+  std::sync::Mutex::new(None);
+
+async fn check_latest() {
+  if BUILD == "dev" {
+    return;
+  }
+  let (newer, error) =
+    match wharf_providers::http::newer_build(REPO, BUILD).await {
+      Ok(n) => (n, None),
+      Err(e) => {
+        tracing::debug!("查新版本失败：{e}");
+        // 查失败时沿用上次查到的。
+        let prev = LATEST
+          .lock()
+          .ok()
+          .and_then(|l| l.clone())
+          .and_then(|l| l.1);
+        (prev, Some(e))
+      }
+    };
+  if let Ok(mut l) = LATEST.lock() {
+    *l = Some((crate::db::now_ms(), newer, error));
+  }
+}
+
+/// 启动后每 6 小时查一次有没有新构建。
+pub fn spawn_check() {
+  tokio::spawn(async {
+    loop {
+      check_latest().await;
+      tokio::time::sleep(CHECK_EVERY).await;
+    }
+  });
+}
+
+fn version_json() -> Value {
+  let latest = LATEST.lock().ok().and_then(|l| l.clone());
+  json!({
+    "version": VERSION,
+    "build": BUILD,
+    "newer": latest.as_ref().and_then(|l| l.1.clone()),
+    "checked_at": latest.as_ref().map(|l| l.0),
+    "check_error": latest.and_then(|l| l.2),
+  })
+}
+
+/// `GET /api/version`：当前构建，以及最近一次查到的更新构建（`newer`）。
 pub async fn version(auth: Auth) -> ApiResult<Value> {
   auth.require(Perm::Read)?;
-  Ok(Json(json!({ "version": VERSION, "build": BUILD })))
+  Ok(Json(version_json()))
+}
+
+/// `POST /api/version/check`：马上查一次有没有新构建。
+pub async fn check(auth: Auth) -> ApiResult<Value> {
+  auth.require(Perm::Read)?;
+  if BUILD == "dev" {
+    return Err(
+      ApiError::invalid("本地构建（dev）不检查更新").into(),
+    );
+  }
+  check_latest().await;
+  Ok(Json(version_json()))
 }
 
 /// `POST /api/upgrade`：让同机的 agent 拉最新的控制面镜像、起接班容器换掉控制面。

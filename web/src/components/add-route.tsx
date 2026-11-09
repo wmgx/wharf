@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useActions } from "@/components/actions";
-import { useBasicAuthSetAt } from "@/components/basic-auth";
-import { Notice } from "@/components/common";
+import { AuthFields, authReady, saveAuth } from "@/components/basic-auth";
+import { toast } from "sonner";
 import { EntryField, useEntry } from "@/components/entry";
 import { DomainChips, Field, Picker } from "@/components/fields";
 import { Button } from "@/components/ui/button";
@@ -22,9 +22,20 @@ export function AddRoute({ service: fixed, open, onClose }: { service?: string; 
   const [authWanted, setAuth] = useState(false);
   const [tunnel, setTunnel] = useState(false);
   const auth = authWanted && !entry.tunnel;
-  const authSetAt = useBasicAuthSetAt(open ? 1 : 0);
+  const [user, setUser] = useState("admin");
+  const [password, setPassword] = useState("");
   const suffixes = [...new Set(status?.routes.map((r) => r.spec.hostname.split(".").slice(1).join(".")).filter(Boolean))];
-  const submit = () => {
+  const submit = async () => {
+    const host = hostname.trim().toLowerCase();
+    if (auth) {
+      try {
+        await saveAuth(host, user, password);
+      } catch (e) {
+        toast.error("登录账号没保存上", { description: (e as Error).message });
+        return;
+      }
+    }
+    setPassword("");
     onClose();
     setHostname("");
     setAuth(false);
@@ -32,7 +43,7 @@ export function AddRoute({ service: fixed, open, onClose }: { service?: string; 
     const { gateway, changes } = entry.resolve();
     actions.plan({
       title: "加域名",
-      changes: [...changes, { op: "upsert_route", spec: { hostname: hostname.trim().toLowerCase(), service, gateway, auth: auth || undefined, link: tunnel ? "tunnel" : undefined } }],
+      changes: [...changes, { op: "upsert_route", spec: { hostname: host, service, gateway, auth: auth || undefined, link: tunnel ? "tunnel" : undefined } }],
     });
   };
   return (
@@ -68,20 +79,13 @@ export function AddRoute({ service: fixed, open, onClose }: { service?: string; 
             总是走反向隧道
             <span className="text-xs text-muted-foreground">默认自动：能直连就直连</span>
           </label>
-          {auth && authSetAt === null && (
-            <Notice kind="warn">
-              还没有设置登录保护账号。{" "}
-              <button type="button" className="font-medium underline underline-offset-2" onClick={actions.basicAuth}>
-                现在设置
-              </button>
-            </Notice>
-          )}
+          {auth && <AuthFields user={user} password={password} onUser={setUser} onPassword={setPassword} />}
         </div>
         <DialogFooter>
           <Button variant="ghost" onClick={onClose}>
             取消
           </Button>
-          <Button disabled={!service || !hostname.trim() || !entry.ready || (auth && authSetAt === null)} onClick={submit}>
+          <Button disabled={!service || !hostname.trim() || !entry.ready || (auth && !authReady(user, password))} onClick={submit}>
             生成计划
           </Button>
         </DialogFooter>

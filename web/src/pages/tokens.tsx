@@ -1,4 +1,4 @@
-import { CheckIcon, CopyIcon, PlusIcon, Trash2Icon } from "lucide-react";
+import { CopyIcon, PlusIcon, TerminalIcon, Trash2Icon } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { api, type Session, usePoll } from "@/api";
@@ -68,8 +68,8 @@ export function Tokens() {
   const [creating, setCreating] = useState(false);
   // 刚建的 token 留在页面上，复制完登录命令还能回来复制它；刷新页面就没了。
   const [fresh, setFresh] = useState<CreatedToken | null>(null);
+  const [guide, setGuide] = useState(false);
   const [removing, setRemoving] = useState<string | null>(null);
-  const connected = data?.filter((t) => t.last_used_at) ?? [];
 
   const remove = async (name: string) => {
     setRemoving(null);
@@ -84,54 +84,61 @@ export function Tokens() {
 
   return (
     <>
-      <SectionTitle>CLI 与 AI 接入</SectionTitle>
-      <div className="grid gap-4 rounded-xl border bg-card p-4 shadow-xs">
-        <ol className="grid gap-4">
-          <li className="grid gap-1.5">
-            <span className="text-sm font-medium">1. 在你的电脑上装 wharf 命令（macOS、Linux）</span>
-            <Command>{`curl -fsSL ${origin}/cli.sh | sh -s -- ${origin}`}</Command>
-          </li>
-          <li className="grid gap-1.5">
-            <span className="text-sm font-medium">2. 建一个 token，按用途选权限</span>
-            <div className="flex flex-wrap items-start gap-2">
-              <Button variant="outline" size="sm" className="w-fit" onClick={() => setCreating(true)}>
-                <PlusIcon />
-                新建 token
-              </Button>
-              {fresh && (
-                <div className="grid min-w-0 flex-1 gap-1">
-                  <Command>{fresh.token}</Command>
-                  <span className="text-xs text-warning">token {fresh.name} 只显示这一次，刷新或离开页面就看不到了。</span>
-                </div>
-              )}
-            </div>
-          </li>
-          <li className="grid gap-1.5">
-            <span className="text-sm font-medium">3. 登录：执行后提示输入 token 时，粘贴上一步的 token</span>
-            <Command>{`wharf login --url ${origin} --core-key ${coreKey}`}</Command>
-          </li>
-          <li className="grid gap-1.5">
-            <span className="text-sm font-medium">4. 试一下</span>
-            <Command>wharf status</Command>
-          </li>
-          <li className="grid gap-1.5">
-            <span className="text-sm font-medium">5. 给 AI 用：把这段贴进项目的 AGENTS.md 或 CLAUDE.md</span>
-            <Command>{AI_GUIDE(origin)}</Command>
-          </li>
-        </ol>
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          {connected.length ? (
-            <>
-              <CheckIcon className="size-4 text-success" />
-              已接入：{connected.map((t) => `${t.name}（${ago(t.last_used_at)}）`).join("、")}
-            </>
-          ) : (
-            "还没有 token 被用过"
-          )}
+      <div className="mb-3 flex items-center justify-between [&>h2]:mb-0">
+        <SectionTitle count={data?.length}>访问令牌</SectionTitle>
+        <div className="flex gap-2">
+          <Button variant="outline" size="sm" onClick={() => setGuide(true)}>
+            <TerminalIcon />
+            接入 CLI / AI
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => setCreating(true)}>
+            <PlusIcon />
+            新建 token
+          </Button>
         </div>
       </div>
-
-      <SectionTitle count={data?.length}>Token</SectionTitle>
+      <Dialog open={guide} onOpenChange={setGuide}>
+        <DialogContent className="sm:max-w-2xl" aria-describedby={undefined}>
+          <DialogHeader>
+            <DialogTitle>接入 CLI / AI</DialogTitle>
+          </DialogHeader>
+          <div className="grid max-h-[70vh] gap-4 overflow-auto">
+            <ol className="grid gap-4">
+              <li className="grid gap-1.5">
+                <span className="text-sm font-medium">1. 在你的电脑上装 wharf 命令（macOS、Linux）</span>
+                <Command>{`curl -fsSL ${origin}/cli.sh | sh -s -- ${origin}`}</Command>
+              </li>
+              <li className="grid gap-1.5">
+                <span className="text-sm font-medium">2. 建一个 token，按用途选权限</span>
+                <div className="flex flex-wrap items-start gap-2">
+                  <Button variant="outline" size="sm" className="w-fit" onClick={() => setCreating(true)}>
+                    <PlusIcon />
+                    新建 token
+                  </Button>
+                  {fresh && (
+                    <div className="grid min-w-0 flex-1 gap-1">
+                      <Command>{fresh.token}</Command>
+                      <span className="text-xs text-warning">token {fresh.name} 只显示这一次，刷新或离开页面就看不到了。</span>
+                    </div>
+                  )}
+                </div>
+              </li>
+              <li className="grid gap-1.5">
+                <span className="text-sm font-medium">3. 登录：执行后提示输入 token 时，粘贴上一步的 token</span>
+                <Command>{`wharf login --url ${origin} --core-key ${coreKey}`}</Command>
+              </li>
+              <li className="grid gap-1.5">
+                <span className="text-sm font-medium">4. 试一下</span>
+                <Command>wharf status</Command>
+              </li>
+              <li className="grid gap-1.5">
+                <span className="text-sm font-medium">5. 给 AI 用：把这段贴进项目的 AGENTS.md 或 CLAUDE.md</span>
+                <Command>{AI_GUIDE(origin)}</Command>
+              </li>
+            </ol>
+          </div>
+        </DialogContent>
+      </Dialog>
       <ErrorNote error={error} />
       {data && data.length === 0 ? (
         <Empty>还没有 token</Empty>
@@ -178,7 +185,10 @@ export function Tokens() {
       {creating && (
         <CreateToken
           taken={(data ?? []).map((t) => t.name)}
-          onCreated={setFresh}
+          onCreated={(t) => {
+            setFresh(t);
+            setGuide(true);
+          }}
           onClose={() => {
             setCreating(false);
             refresh();

@@ -1,4 +1,4 @@
-import { AnchorIcon, DatabaseIcon, NetworkIcon, WaypointsIcon, ChevronsUpDownIcon, HistoryIcon, LogOutIcon, TimerIcon, MoonIcon, ServerIcon, SettingsIcon, SunIcon } from "lucide-react";
+import { BellIcon, AnchorIcon, DatabaseIcon, NetworkIcon, WaypointsIcon, ChevronsUpDownIcon, HistoryIcon, LogOutIcon, TimerIcon, MoonIcon, ServerIcon, SettingsIcon, SunIcon } from "lucide-react";
 import { NavLink, useLocation } from "react-router-dom";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import {
@@ -14,7 +14,10 @@ import {
   SidebarMenuItem,
   SidebarRail,
 } from "@/components/ui/sidebar";
+import { usePoll } from "@/api";
 import { useStatus } from "@/status";
+import type { AlertsView } from "@/types";
+import type { VersionView } from "./upgrade";
 import { useTheme } from "@/theme";
 
 export function Logo({ className = "size-8" }: { className?: string }) {
@@ -34,6 +37,8 @@ export function AppSidebar({ username, onLogout }: { username: string; onLogout:
   const { pathname } = useLocation();
   const { theme, toggle } = useTheme();
 
+  const alerts = usePoll<AlertsView>("/api/alerts", 60000).data;
+  const version = usePoll<VersionView>("/api/version", 600000).data;
   const groups = [
     {
       label: "",
@@ -44,12 +49,13 @@ export function AppSidebar({ username, onLogout }: { username: string; onLogout:
         { to: "/network", label: "网络", icon: NetworkIcon },
         { to: "/tasks", label: "定时任务", icon: TimerIcon },
         { to: "/data", label: "数据与备份", icon: DatabaseIcon },
+        { to: "/alerts", label: "告警", icon: BellIcon, count: alerts?.firing.length || undefined },
         { to: "/activity", label: "活动", icon: HistoryIcon },
       ],
     },
     {
       label: "",
-      items: [{ to: "/settings", label: "设置", icon: SettingsIcon }],
+      items: [{ to: "/settings", label: "设置", icon: SettingsIcon, dot: !!version?.newer }],
     },
   ];
   // 服务详情从首页点进去，算在首页下面。
@@ -84,6 +90,7 @@ export function AppSidebar({ username, onLogout }: { username: string; onLogout:
                       <NavLink to={it.to}>
                         <it.icon />
                         <span>{it.label}</span>
+                        {"dot" in it && it.dot && <span className="ml-auto size-2 rounded-full bg-primary" aria-label="有新版本" />}
                       </NavLink>
                     </SidebarMenuButton>
                     {"count" in it && it.count != null && <SidebarMenuBadge>{it.count}</SidebarMenuBadge>}

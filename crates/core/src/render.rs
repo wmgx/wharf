@@ -39,8 +39,9 @@ pub struct Net {
   pub public_ip: BTreeMap<String, String>,
   /// 连通性探测结果：(网关所在机器, 服务所在机器) → 能否直连内网地址。没探测过的不在里面。
   pub reach: crate::db::Reach,
-  /// 登录保护的账号（密钥 BASIC_AUTH）。不是网络信息，但渲染网关时要用，放在这里不必到处传。
-  pub basic_auth: Option<BasicAuth>,
+  /// 登录保护的账号，按密钥名（[BASIC_AUTH_SECRET] 和每个域名的 [route_auth_secret]）。
+  /// 不是网络信息，但渲染网关时要用，放在这里不必到处传。
+  pub basic_auth: BTreeMap<String, BasicAuth>,
 }
 
 impl Net {
@@ -120,8 +121,29 @@ pub struct Addresses {
   pub public_ip: BTreeMap<String, String>,
 }
 
-/// 密钥 BASIC_AUTH 的名字。写入时值是 `用户名:密码`，保存的是 `用户名 bcrypt哈希`。
+/// 旧的全局登录保护账号，域名没有自己的账号时用它。
+/// 写入时值是 `用户名:密码`，保存的是 `用户名 bcrypt哈希`，每个域名的账号也一样。
 pub const BASIC_AUTH_SECRET: &str = "BASIC_AUTH";
+
+/// 某个域名的登录保护账号存在这个密钥里（域名里的 `.` 换成 `_`，域名本身没有 `_`，不会撞）。
+pub fn route_auth_secret(hostname: &str) -> String {
+  format!("{BASIC_AUTH_SECRET}_{}", hostname.replace('.', "_"))
+}
+
+pub fn is_auth_secret(name: &str) -> bool {
+  name == BASIC_AUTH_SECRET
+    || name.starts_with(&format!("{BASIC_AUTH_SECRET}_"))
+}
+
+impl Net {
+  /// 域名的登录保护账号：自己的，没有就用旧的全局账号。
+  pub fn auth_for(&self, hostname: &str) -> Option<&BasicAuth> {
+    self
+      .basic_auth
+      .get(&route_auth_secret(hostname))
+      .or_else(|| self.basic_auth.get(BASIC_AUTH_SECRET))
+  }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct BasicAuth {
@@ -616,7 +638,8 @@ pub fn frpc_compose(
 pub struct Site {
   pub hostname: String,
   pub upstream: String,
-  pub auth: bool,
+  /// 登录保护的账号，没开是 `None`。
+  pub auth: Option<BasicAuth>,
   /// 按路径转发：（路径，上游）。
   pub paths: Vec<(String, String)>,
 }
@@ -625,7 +648,6 @@ pub fn caddyfile(
   name: &str,
   spec: &GatewaySpec,
   sites: &[Site],
-  auth: Option<&BasicAuth>,
   link: bool,
 ) -> String {
   let mut out = format!(
@@ -654,7 +676,7 @@ pub fn caddyfile(
   sites.sort_by(|a, b| a.hostname.cmp(&b.hostname));
   for site in sites {
     out.push_str(&format!("\n{scheme}{} {{\n", site.hostname));
-    if let (true, Some(a)) = (site.auth, auth) {
+    if let Some(a) = &site.auth {
       out.push_str(&format!(
         "\tbasic_auth {{\n\t\t{} {}\n\t}}\n",
         a.user, a.hash
@@ -788,17 +810,16 @@ mod tests {
         Site {
           hostname: "z.example.com".into(),
           upstream: "127.0.0.1:1".into(),
-          auth: true,
+          auth: BasicAuth::parse("admin $2b$12$abc"),
           paths: vec![],
         },
         Site {
           hostname: "a.example.com".into(),
           upstream: "100.1.1.1:2".into(),
-          auth: false,
+          auth: None,
           paths: vec![("/ws".into(), "127.0.0.1:17891".into())],
         },
       ],
-      BasicAuth::parse("admin $2b$12$abc").as_ref(),
       true,
     );
     assert!(out.contains(
@@ -831,10 +852,9 @@ mod tests {
       &[Site {
         hostname: "a.example.com".into(),
         upstream: "127.0.0.1:1".into(),
-        auth: false,
+        auth: None,
         paths: vec![],
       }],
-      None,
       false,
     );
     assert!(out.contains("auto_https off"));
@@ -861,6 +881,23 @@ mod tests {
     );
     assert!(out.contains("network_mode: host"));
     assert!(out.contains(DEFAULT_CLOUDFLARED_IMAGE));
+  }
+
+  #[test]
+  fn route_auth_overrides_global() {
+    let a =
+      |u: &str| BasicAuth::parse(&format!("{u} $2b$12$x")).unwrap();
+    let mut net = Net::default();
+    net.basic_auth.insert(BASIC_AUTH_SECRET.into(), a("old"));
+    net
+      .basic_auth
+      .insert(route_auth_secret("a.example.com"), a("mine"));
+    assert_eq!(net.auth_for("a.example.com").unwrap().user, "mine");
+    assert_eq!(net.auth_for("b.example.com").unwrap().user, "old");
+    assert_eq!(
+      route_auth_secret("a.example.com"),
+      "BASIC_AUTH_a_example_com"
+    );
   }
 
   #[test]

@@ -11,7 +11,6 @@ import {
   HardDriveIcon,
   HistoryIcon,
   KeyRoundIcon,
-  LockIcon,
   LogOutIcon,
   MoonIcon,
   NetworkIcon,
@@ -506,13 +505,6 @@ export function CommandMenu({ onLogout }: { onLogout: () => void }) {
           </CommandGroup>
           <CommandSeparator />
           <CommandGroup heading="其他">
-            {op(
-              "o-auth",
-              "登录保护账号 basic auth 密码",
-              <LockIcon />,
-              "登录保护账号",
-              actions.basicAuth,
-            )}
             {op(
               "o-up",
               "升级 Wharf upgrade 控制面 agent",
