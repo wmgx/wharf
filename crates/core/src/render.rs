@@ -39,7 +39,7 @@ pub struct Net {
   pub public_ip: BTreeMap<String, String>,
   /// 连通性探测结果：(网关所在机器, 服务所在机器) → 能否直连内网地址。没探测过的不在里面。
   pub reach: crate::db::Reach,
-  /// 登录保护的账号，按密钥名（[BASIC_AUTH_SECRET] 和每个域名的 [route_auth_secret]）。
+  /// 登录保护的账号，按密钥名（每个域名的 [route_auth_secret]）。
   /// 不是网络信息，但渲染网关时要用，放在这里不必到处传。
   pub basic_auth: BTreeMap<String, BasicAuth>,
 }
@@ -121,27 +121,22 @@ pub struct Addresses {
   pub public_ip: BTreeMap<String, String>,
 }
 
-/// 旧的全局登录保护账号，域名没有自己的账号时用它。
-/// 写入时值是 `用户名:密码`，保存的是 `用户名 bcrypt哈希`，每个域名的账号也一样。
-pub const BASIC_AUTH_SECRET: &str = "BASIC_AUTH";
+/// 登录保护账号的密钥名前缀。写入时值是 `用户名:密码`，保存的是 `用户名 bcrypt哈希`。
+const AUTH_PREFIX: &str = "BASIC_AUTH_";
 
 /// 某个域名的登录保护账号存在这个密钥里（域名里的 `.` 换成 `_`，域名本身没有 `_`，不会撞）。
 pub fn route_auth_secret(hostname: &str) -> String {
-  format!("{BASIC_AUTH_SECRET}_{}", hostname.replace('.', "_"))
+  format!("{AUTH_PREFIX}{}", hostname.replace('.', "_"))
 }
 
 pub fn is_auth_secret(name: &str) -> bool {
-  name == BASIC_AUTH_SECRET
-    || name.starts_with(&format!("{BASIC_AUTH_SECRET}_"))
+  name.starts_with(AUTH_PREFIX)
 }
 
 impl Net {
-  /// 域名的登录保护账号：自己的，没有就用旧的全局账号。
+  /// 域名的登录保护账号。
   pub fn auth_for(&self, hostname: &str) -> Option<&BasicAuth> {
-    self
-      .basic_auth
-      .get(&route_auth_secret(hostname))
-      .or_else(|| self.basic_auth.get(BASIC_AUTH_SECRET))
+    self.basic_auth.get(&route_auth_secret(hostname))
   }
 }
 
@@ -166,7 +161,7 @@ impl BasicAuth {
   pub fn hash_input(input: &str) -> Result<String, ApiError> {
     let (user, password) =
       input.split_once(':').ok_or_else(|| {
-        ApiError::invalid("BASIC_AUTH 的值要写成 用户名:密码")
+        ApiError::invalid("登录保护账号要写成 用户名:密码")
       })?;
     let user_ok = !user.is_empty()
       && user
@@ -174,11 +169,11 @@ impl BasicAuth {
         .all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c));
     if !user_ok {
       return Err(ApiError::invalid(
-        "BASIC_AUTH 的用户名只能用字母、数字、. _ -",
+        "登录保护的用户名只能用字母、数字、. _ -",
       ));
     }
     if password.len() < 8 {
-      return Err(ApiError::invalid("BASIC_AUTH 的密码至少 8 位"));
+      return Err(ApiError::invalid("登录保护的密码至少 8 位"));
     }
     let hash =
       bcrypt::hash(password, bcrypt::DEFAULT_COST).map_err(|e| {
@@ -884,16 +879,14 @@ mod tests {
   }
 
   #[test]
-  fn route_auth_overrides_global() {
-    let a =
-      |u: &str| BasicAuth::parse(&format!("{u} $2b$12$x")).unwrap();
+  fn auth_is_per_route() {
     let mut net = Net::default();
-    net.basic_auth.insert(BASIC_AUTH_SECRET.into(), a("old"));
-    net
-      .basic_auth
-      .insert(route_auth_secret("a.example.com"), a("mine"));
+    net.basic_auth.insert(
+      route_auth_secret("a.example.com"),
+      BasicAuth::parse("mine $2b$12$x").unwrap(),
+    );
     assert_eq!(net.auth_for("a.example.com").unwrap().user, "mine");
-    assert_eq!(net.auth_for("b.example.com").unwrap().user, "old");
+    assert!(net.auth_for("b.example.com").is_none());
     assert_eq!(
       route_auth_secret("a.example.com"),
       "BASIC_AUTH_a_example_com"

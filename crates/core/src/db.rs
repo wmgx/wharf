@@ -282,6 +282,14 @@ CREATE TABLE alert_history (
 );
 CREATE INDEX alert_history_at ON alert_history (at);
 "#,
+  // 登录保护账号改为按域名：旧的全局账号复制给开了登录保护的域名，然后删掉。
+  r#"
+INSERT OR IGNORE INTO secrets (name, value, updated_at)
+SELECT 'BASIC_AUTH_' || replace(r.name, '.', '_'), s.value, s.updated_at
+FROM resources r, secrets s
+WHERE r.kind = 'route' AND json_extract(r.spec, '$.auth') = 1 AND s.name = 'BASIC_AUTH';
+DELETE FROM secrets WHERE name = 'BASIC_AUTH';
+"#,
 ];
 
 /// git 构建来源固定到上次部署构建的 commit（仓库和分支没换过的）。当时没记下 commit 的留给 plan 提醒。

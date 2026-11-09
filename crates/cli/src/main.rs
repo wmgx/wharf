@@ -691,7 +691,7 @@ pub enum RouteCmd {
     /// 备用入口：另一台机器上的网关。主网关那台连续离线 5 分钟，DNS 自动切到它，恢复后切回。
     #[arg(long)]
     backup_gateway: Option<String>,
-    /// 登录保护：访问时要输入账号密码。账号用 `wharf secret set BASIC_AUTH` 设置。
+    /// 登录保护：访问时要输入账号密码。账号用 `wharf secret set BASIC_AUTH_<域名，. 换成 _>` 设置。
     #[arg(long)]
     auth: bool,
     /// 按路径转发，可以多次给：`/ws=服务[:端口名]` 或 `/ws=127.0.0.1:17891`（不归 Wharf 管的上游）。
@@ -733,7 +733,7 @@ pub enum AccountCmd {
 pub enum SecretCmd {
   List,
   /// 设置密钥，值从标准输入读取。
-  /// `BASIC_AUTH` 是登录保护的账号，值写成 `用户名:密码`，只保存哈希。
+  /// `BASIC_AUTH_<域名，. 换成 _>` 是这个域名的登录保护账号，值写成 `用户名:密码`，只保存哈希。
   Set {
     name: String,
   },

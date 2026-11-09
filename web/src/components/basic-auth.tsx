@@ -7,29 +7,23 @@ import { Input } from "@/components/ui/input";
 import { ago, ErrorNote } from "./common";
 import { Field } from "./fields";
 
-/** 旧的全局账号，域名没有自己的账号时网关用它。和后端 BASIC_AUTH_SECRET 一致。 */
-const LEGACY = "BASIC_AUTH";
-
-/** 域名自己的登录保护账号存在这个密钥里，和后端 route_auth_secret 一致。 */
-export const authSecret = (hostname: string) => `${LEGACY}_${hostname.replaceAll(".", "_")}`;
+/** 域名的登录保护账号存在这个密钥里，和后端 route_auth_secret 一致。 */
+export const authSecret = (hostname: string) => `BASIC_AUTH_${hostname.replaceAll(".", "_")}`;
 
 /** 保存账号：密码只发给控制面，控制面只保存 bcrypt 哈希。 */
 export async function saveAuth(hostname: string, user: string, password: string) {
   await api.put(`/api/secrets/${authSecret(hostname)}`, { value: `${user.trim()}:${password}` });
 }
 
-/** 域名的账号什么时候设的：自己的、旧的全局账号。还在查是 undefined。 */
+/** 域名的账号什么时候设的，没设是 null，还在查是 undefined。 */
 export function useAuthSetAt(hostname: string | null) {
-  const [at, setAt] = useState<{ own: string | null; legacy: string | null } | undefined>(undefined);
+  const [at, setAt] = useState<string | null | undefined>(undefined);
   useEffect(() => {
     if (!hostname) return;
     api
       .get<{ name: string; updated_at: string }[]>("/api/secrets")
-      .then((list) => {
-        const find = (n: string) => list.find((s) => s.name === n)?.updated_at ?? null;
-        setAt({ own: find(authSecret(hostname)), legacy: find(LEGACY) });
-      })
-      .catch(() => setAt({ own: null, legacy: null }));
+      .then((list) => setAt(list.find((s) => s.name === authSecret(hostname))?.updated_at ?? null))
+      .catch(() => setAt(null));
   }, [hostname]);
   return at;
 }
@@ -85,7 +79,7 @@ export function BasicAuthDialog({ hostname, enable, onClose, onSaved }: { hostna
           <DialogTitle>{enable ? `开启 ${hostname} 的登录保护` : `${hostname} 的登录账号`}</DialogTitle>
           <DialogDescription>
             打开这个域名时浏览器会要求输入这组账号密码。
-            {at?.own ? `上次设置于 ${ago(at.own)}。` : at?.legacy ? "现在用的是以前全部域名共用的账号，保存后这个域名改用自己的。" : ""}
+            {at ? `上次设置于 ${ago(at)}。` : ""}
           </DialogDescription>
         </DialogHeader>
         <form

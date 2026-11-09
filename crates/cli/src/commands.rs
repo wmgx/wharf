@@ -2081,7 +2081,7 @@ async fn secret(
       Ok(())
     }
     SecretCmd::Set { name } => {
-      let prompt = if name == "BASIC_AUTH" {
+      let prompt = if name.starts_with("BASIC_AUTH_") {
         "登录保护账号（用户名:密码）：".to_string()
       } else {
         format!("{name} 的值：")
