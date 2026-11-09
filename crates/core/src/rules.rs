@@ -5,7 +5,8 @@
 //! - 事件通知（定时任务、备份结果、切换入口、新版本）发生就推，只有开关和静默（[notice]）。
 //!
 //! 规则内置，页面上能改开关、阈值、连续次数、静默，改动存在设置 `alerts.config`。
-//! 状态沿用 `notify.state.<key>`（跨重启不重复推），序列、正在触发、推送记录只在内存里。
+//! 状态沿用 `notify.state.<key>`（跨重启不重复推）；正在触发的存在 `alert_firing`，
+//! 推送记录存在 `alert_history`（保留 7 天）；指标序列只在内存里。
 
 use std::{
   collections::{BTreeMap, VecDeque},
@@ -36,7 +37,9 @@ use crate::{
 const CONFIG_KEY: &str = "alerts.config";
 /// 每个序列最多留多少个点，也是"连续次数"的上限。
 const KEEP: usize = 60;
-const HISTORY: usize = 100;
+/// 页面和 CLI 一次最多看多少条推送。
+const HISTORY: usize = 200;
+const KEEP_HISTORY_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 /// 这么久没有新点的序列（服务器删了、服务停了监控）就丢掉。
 const STALE_MS: i64 = 2 * 60 * 60 * 1000;
 
@@ -378,9 +381,8 @@ struct Memory {
   config: Option<BTreeMap<String, Override>>,
   /// （指标，对象）→ 最近的点和最后更新时间。
   series: BTreeMap<(String, String), (VecDeque<f64>, i64)>,
-  /// （规则，对象）→（开始时间，标题）。
+  /// （规则，对象）→（开始时间，标题），和表 `alert_firing` 一致，第一次用时从库里读。
   firing: BTreeMap<(String, String), (i64, String)>,
-  history: VecDeque<AlertHistoryView>,
 }
 
 static MEMORY: Mutex<Option<Memory>> = Mutex::new(None);
@@ -396,13 +398,40 @@ async fn config(state: &AppState) -> BTreeMap<String, Override> {
   }
   let loaded = state
     .db
-    .call(|c| db::setting(c, CONFIG_KEY))
-    .await
-    .ok()
-    .flatten()
-    .and_then(|v| serde_json::from_str(&v).ok())
-    .unwrap_or_default();
-  with(|m| m.config.get_or_insert(loaded).clone())
+    .call(|c| {
+      let cfg = db::setting(c, CONFIG_KEY)?;
+      let mut stmt = c
+        .prepare(
+          "SELECT rule, subject, since, title FROM alert_firing",
+        )
+        .map_err(db::sql_err)?;
+      let firing = stmt
+        .query_map([], |r| {
+          Ok(((r.get(0)?, r.get(1)?), (r.get(2)?, r.get(3)?)))
+        })
+        .and_then(Iterator::collect::<Result<BTreeMap<_, _>, _>>)
+        .map_err(db::sql_err)?;
+      Ok((cfg, firing))
+    })
+    .await;
+  let (cfg, firing) = match loaded {
+    Ok((cfg, firing)) => (
+      cfg
+        .and_then(|v| serde_json::from_str(&v).ok())
+        .unwrap_or_default(),
+      firing,
+    ),
+    Err(e) => {
+      tracing::warn!("读告警配置失败：{}", e.message);
+      return BTreeMap::new();
+    }
+  };
+  with(|m| {
+    if m.config.is_none() {
+      m.firing = firing;
+    }
+    m.config.get_or_insert(cfg).clone()
+  })
 }
 
 enum Verdict {
@@ -480,7 +509,7 @@ pub async fn observe(
     let o = cfg.get(rule.id).cloned().unwrap_or_default();
     let fkey = (rule.id.to_string(), subject.to_string());
     if !o.enabled() {
-      with(|m| m.firing.remove(&fkey));
+      set_firing(state, fkey, None).await;
       continue;
     }
     let threshold = o.threshold.unwrap_or(rule.threshold);
@@ -496,14 +525,11 @@ pub async fn observe(
       Verdict::Hold => continue,
       Verdict::Fire => {
         let e = (rule.fire)(&ctx);
-        let title = e.title.clone();
-        with(|m| {
-          m.firing.entry(fkey).or_insert((now, title));
-        });
+        set_firing(state, fkey, Some((now, e.title.clone()))).await;
         (false, e)
       }
       Verdict::Recover => {
-        with(|m| m.firing.remove(&fkey));
+        set_firing(state, fkey, None).await;
         (true, (rule.ok)(&ctx))
       }
     };
@@ -528,7 +554,7 @@ pub async fn notice(
   }
   let o = config(state).await.get(id).cloned().unwrap_or_default();
   if !o.enabled() {
-    record(id, &event, ok, Some("已关闭".into()));
+    record(state, id, &event, ok, Some("已关闭".into())).await;
     return;
   }
   push(state, id, &o, ok, event).await;
@@ -548,25 +574,109 @@ async fn push(
   } else {
     notify::deliver(state, &event).await
   };
-  record(id, &event, ok, skipped);
+  record(state, id, &event, ok, skipped).await;
 }
 
-fn record(
+/// 开始触发（已经在触发就保留原来的开始时间）或结束触发，内存和库一起改。
+async fn set_firing(
+  state: &AppState,
+  key: (String, String),
+  fire: Option<(i64, String)>,
+) {
+  let changed = with(|m| match &fire {
+    Some(v) if !m.firing.contains_key(&key) => {
+      m.firing.insert(key.clone(), v.clone());
+      true
+    }
+    Some(_) => false,
+    None => m.firing.remove(&key).is_some(),
+  });
+  if !changed {
+    return;
+  }
+  let result = state
+    .db
+    .call(move |c| {
+      let (rule, subject) = key;
+      match fire {
+        Some((since, title)) => c.execute(
+          "INSERT OR REPLACE INTO alert_firing (rule, subject, since, title) VALUES (?1, ?2, ?3, ?4)",
+          rusqlite::params![rule, subject, since, title],
+        ),
+        None => c.execute(
+          "DELETE FROM alert_firing WHERE rule = ?1 AND subject = ?2",
+          rusqlite::params![rule, subject],
+        ),
+      }
+      .map(|_| ())
+      .map_err(db::sql_err)
+    })
+    .await;
+  if let Err(e) = result {
+    tracing::warn!("记录正在触发的告警失败：{}", e.message);
+  }
+}
+
+/// 记一条推送，顺手删掉 7 天前的。
+async fn record(
+  state: &AppState,
   id: &str,
   event: &Event,
   ok: bool,
   skipped: Option<String>,
 ) {
-  with(|m| {
-    m.history.push_front(AlertHistoryView {
-      at: now_ms(),
-      source: id.to_string(),
-      title: event.title.clone(),
-      ok,
-      skipped,
-    });
-    m.history.truncate(HISTORY);
-  });
+  let (id, title) = (id.to_string(), event.title.clone());
+  let now = now_ms();
+  let result = state
+    .db
+    .call(move |c| {
+      c.execute(
+        "INSERT INTO alert_history (at, source, title, ok, skipped) VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![now, id, title, ok, skipped],
+      )
+      .and_then(|_| {
+        c.execute(
+          "DELETE FROM alert_history WHERE at < ?1",
+          [now - KEEP_HISTORY_MS],
+        )
+      })
+      .map(|_| ())
+      .map_err(db::sql_err)
+    })
+    .await;
+  if let Err(e) = result {
+    tracing::warn!("记录推送失败：{}", e.message);
+  }
+}
+
+/// 最近的推送，新的在前。
+async fn history(state: &AppState) -> Vec<AlertHistoryView> {
+  state
+    .db
+    .call(|c| {
+      let mut stmt = c
+        .prepare(
+          "SELECT at, source, title, ok, skipped FROM alert_history ORDER BY id DESC LIMIT ?1",
+        )
+        .map_err(db::sql_err)?;
+      stmt
+        .query_map([HISTORY as i64], |r| {
+          Ok(AlertHistoryView {
+            at: r.get(0)?,
+            source: r.get(1)?,
+            title: r.get(2)?,
+            ok: r.get(3)?,
+            skipped: r.get(4)?,
+          })
+        })
+        .and_then(Iterator::collect)
+        .map_err(db::sql_err)
+    })
+    .await
+    .unwrap_or_else(|e| {
+      tracing::warn!("读推送记录失败：{}", e.message);
+      vec![]
+    })
 }
 
 /// 某条规则正在触发的标题，给"需要注意"用。
@@ -628,6 +738,7 @@ async fn view(state: &AppState) -> AlertsView {
       }
     })
     .collect();
+  let history = history(state).await;
   with(|m| AlertsView {
     rules,
     notices,
@@ -641,7 +752,7 @@ async fn view(state: &AppState) -> AlertsView {
         since: *since,
       })
       .collect(),
-    history: m.history.iter().cloned().collect(),
+    history,
   })
 }
 
