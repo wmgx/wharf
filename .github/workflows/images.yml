@@ -62,8 +62,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, name: wharf-linux-amd64 }
-          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, name: wharf-linux-arm64 }
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl, name: wharf-linux-amd64 }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, name: wharf-linux-arm64 }
           - { os: macos-15, target: aarch64-apple-darwin, name: wharf-macos-arm64 }
           - { os: macos-15, target: x86_64-apple-darwin, name: wharf-macos-amd64 }
     runs-on: ${{ matrix.os }}
@@ -76,6 +76,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: cli-${{ matrix.target }}
+      # Linux 静态链接 musl，不依赖机器上的 glibc 版本。
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
       - name: build
         run: |
           export WHARF_BUILD="${GITHUB_SHA::7}"

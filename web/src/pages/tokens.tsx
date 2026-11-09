@@ -65,8 +65,9 @@ export function Tokens() {
   const { data, error, refresh } = usePoll<TokenView[]>("/api/tokens", 30000);
   const coreKey = usePoll<Session>("/api/session", 600000).data?.core_key ?? "<控制面公钥>";
   const origin = window.location.origin;
-  const loginCmd = `wharf login --url ${origin} --core-key ${coreKey}\nwharf status`;
   const [creating, setCreating] = useState(false);
+  // 刚建的 token 留在页面上，复制完登录命令还能回来复制它；刷新页面就没了。
+  const [fresh, setFresh] = useState<CreatedToken | null>(null);
   const [removing, setRemoving] = useState<string | null>(null);
   const connected = data?.filter((t) => t.last_used_at) ?? [];
 
@@ -92,17 +93,29 @@ export function Tokens() {
           </li>
           <li className="grid gap-1.5">
             <span className="text-sm font-medium">2. 建一个 token，按用途选权限</span>
-            <Button variant="outline" size="sm" className="w-fit" onClick={() => setCreating(true)}>
-              <PlusIcon />
-              新建 token
-            </Button>
+            <div className="flex flex-wrap items-start gap-2">
+              <Button variant="outline" size="sm" className="w-fit" onClick={() => setCreating(true)}>
+                <PlusIcon />
+                新建 token
+              </Button>
+              {fresh && (
+                <div className="grid min-w-0 flex-1 gap-1">
+                  <Command>{fresh.token}</Command>
+                  <span className="text-xs text-warning">token {fresh.name} 只显示这一次，刷新或离开页面就看不到了。</span>
+                </div>
+              )}
+            </div>
           </li>
           <li className="grid gap-1.5">
-            <span className="text-sm font-medium">3. 登录（粘贴刚才的 token），然后试一下</span>
-            <Command>{loginCmd}</Command>
+            <span className="text-sm font-medium">3. 登录：执行后提示输入 token 时，粘贴上一步的 token</span>
+            <Command>{`wharf login --url ${origin} --core-key ${coreKey}`}</Command>
           </li>
           <li className="grid gap-1.5">
-            <span className="text-sm font-medium">4. 给 AI 用：把这段贴进项目的 AGENTS.md 或 CLAUDE.md</span>
+            <span className="text-sm font-medium">4. 试一下</span>
+            <Command>wharf status</Command>
+          </li>
+          <li className="grid gap-1.5">
+            <span className="text-sm font-medium">5. 给 AI 用：把这段贴进项目的 AGENTS.md 或 CLAUDE.md</span>
             <Command>{AI_GUIDE(origin)}</Command>
           </li>
         </ol>
@@ -163,8 +176,9 @@ export function Tokens() {
         )
       )}
       {creating && (
-        <CreateToken loginCmd={loginCmd}
+        <CreateToken
           taken={(data ?? []).map((t) => t.name)}
+          onCreated={setFresh}
           onClose={() => {
             setCreating(false);
             refresh();
@@ -191,12 +205,11 @@ export function Tokens() {
   );
 }
 
-/** 只在打开时挂载：关掉后新 token 就再也看不到了。 */
-function CreateToken({ taken, loginCmd, onClose }: { taken: string[]; loginCmd: string; onClose: () => void }) {
+/** 建好就关掉，token 交给页面显示。 */
+function CreateToken({ taken, onCreated, onClose }: { taken: string[]; onCreated: (t: CreatedToken) => void; onClose: () => void }) {
   const [name, setName] = useState("");
   const [preset, setPreset] = useState<Preset>("ai");
   const [custom, setCustom] = useState<Perm[]>(PRESETS.ai);
-  const [created, setCreated] = useState<CreatedToken | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const perms = preset === "custom" ? custom : PRESETS[preset];
@@ -205,7 +218,8 @@ function CreateToken({ taken, loginCmd, onClose }: { taken: string[]; loginCmd: 
     setSaving(true);
     setError(null);
     try {
-      setCreated(await api.post<CreatedToken>("/api/tokens", { name, perms }));
+      onCreated(await api.post<CreatedToken>("/api/tokens", { name, perms }));
+      onClose();
     } catch (e) {
       setError(e);
     } finally {
@@ -215,19 +229,10 @@ function CreateToken({ taken, loginCmd, onClose }: { taken: string[]; loginCmd: 
 
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent aria-describedby={undefined} onInteractOutside={(e) => created && e.preventDefault()}>
+      <DialogContent aria-describedby={undefined}>
         <DialogHeader>
-          <DialogTitle>{created ? `token ${created.name}` : "新建 token"}</DialogTitle>
+          <DialogTitle>新建 token</DialogTitle>
         </DialogHeader>
-        {created ? (
-          <div className="grid gap-3">
-            <span className="text-sm">1. 复制登录命令到终端执行</span>
-            <Command>{loginCmd}</Command>
-            <span className="text-sm">2. 提示输入 token 时，回来复制它粘贴进去</span>
-            <Command>{created.token}</Command>
-            <Notice kind="warn">token 只显示这一次，关掉窗口就看不到了。</Notice>
-          </div>
-        ) : (
           <div className="grid gap-4">
             <Field label="名称" htmlFor="token-name" help="例如 laptop、claude">
               <Input id="token-name" value={name} onChange={(e) => setName(toName(e.target.value))} placeholder="laptop" />
@@ -264,24 +269,13 @@ function CreateToken({ taken, loginCmd, onClose }: { taken: string[]; loginCmd: 
             {name && taken.includes(name) && <Notice kind="warn">已有同名 token</Notice>}
             <ErrorNote error={error} />
           </div>
-        )}
         <DialogFooter>
-          {created ? (
-            <>
-              <Button variant="ghost" onClick={onClose}>
-                关闭
-              </Button>
-            </>
-          ) : (
-            <>
-              <Button variant="ghost" onClick={onClose}>
-                取消
-              </Button>
-              <Button disabled={!name || taken.includes(name) || saving} onClick={create}>
-                {saving ? "创建中…" : "创建"}
-              </Button>
-            </>
-          )}
+          <Button variant="ghost" onClick={onClose}>
+            取消
+          </Button>
+          <Button disabled={!name || taken.includes(name) || saving} onClick={create}>
+            {saving ? "创建中…" : "创建"}
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
