@@ -148,9 +148,8 @@ async fn round(
         ),
       }
     };
-    if let Err(e) = notify::send(state, &event).await {
-      tracing::debug!("备用入口通知没发出去：{}", e.message);
-    }
+    crate::rules::notice(state, "failover", None, !*to_backup, event)
+      .await;
   }
   let pending: Vec<String> =
     with(|m| m.pending.iter().cloned().collect());

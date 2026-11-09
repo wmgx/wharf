@@ -193,9 +193,10 @@ pub(crate) async fn notify_result(
   } else {
     format!("定时任务 {name} {}", status_text(status))
   };
-  crate::notify::on_result(
+  crate::rules::notice(
     state,
-    &format!("task.{name}"),
+    "task",
+    Some(&format!("task.{name}")),
     ok,
     crate::notify::Event {
       title,

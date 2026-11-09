@@ -182,26 +182,14 @@ async fn round(state: &AppState) {
         },
       );
     }
-    if ok || fails == FAILS {
-      crate::notify::on_result(
-        state,
-        &format!("monitor.{name}"),
-        ok,
-        crate::notify::Event {
-          title: if ok {
-            format!("服务 {name} 的监控恢复正常")
-          } else {
-            format!("服务 {name} 的监控不正常")
-          },
-          body: if ok {
-            detail
-          } else {
-            format!("连续 {FAILS} 次检查失败（每分钟一次）：{detail}")
-          },
-        },
-      )
-      .await;
-    }
+    crate::rules::observe(
+      state,
+      "monitor.ok",
+      &name,
+      f64::from(u8::from(ok)),
+      &detail,
+    )
+    .await;
   }
 }
 

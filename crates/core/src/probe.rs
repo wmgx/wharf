@@ -69,48 +69,19 @@ pub async fn observe(state: &AppState, report: &DoctorReport) {
         },
       );
     }
-    // 只在"刚满次数"和"恢复"时交给通知，它自己只在状态变化时发。
-    if ok || fails == FAILS {
-      crate::notify::on_result(
-        state,
-        &format!("probe.{host}"),
-        ok,
-        crate::notify::Event {
-          title: if ok {
-            format!("域名 {host} 恢复了")
-          } else {
-            format!("域名 {host} 打不开")
-          },
-          body: if ok {
-            format!("{}：{}", r.url, web.detail)
-          } else {
-            format!(
-              "{} 连续 {FAILS} 次检查失败（每 2 分钟一次）：{}。诊断：wharf doctor {host}",
-              r.url, web.detail
-            )
-          },
-        },
-      )
-      .await;
-    }
+    crate::rules::observe(
+      state,
+      "probe.ok",
+      &host,
+      f64::from(u8::from(ok)),
+      &format!("{}：{}", r.url, web.detail),
+    )
+    .await;
   }
 }
 
-/// 证书剩不到 [crate::cert::WARN_DAYS] 天时推送，续上后再推一次。
+/// 证书剩余天数，规则见 [crate::rules]。
 async fn cert_notify(state: &AppState, host: &str, days: i64) {
-  let ok = days >= crate::cert::WARN_DAYS;
-  crate::notify::on_result(
-    state,
-    &format!("cert.{host}"),
-    ok,
-    crate::notify::Event {
-      title: if ok {
-        format!("域名 {host} 的证书已续期")
-      } else {
-        format!("域名 {host} 的证书 {days} 天后到期")
-      },
-      body: format!("证书还剩 {days} 天"),
-    },
-  )
-  .await;
+  crate::rules::observe(state, "cert.days", host, days as f64, "")
+    .await;
 }

@@ -59,6 +59,7 @@ mod quality;
 mod refs;
 mod render;
 mod rollback;
+mod rules;
 mod shell;
 mod snapshot;
 mod state;

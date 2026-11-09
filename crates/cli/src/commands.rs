@@ -25,9 +25,9 @@ use wharf_api_types::{
 };
 
 use crate::{
-  AccountCmd, ApplyFlags, BackupCmd, BuildArgs, Cli, Command,
-  EgressCmd, GatewayCmd, NotifyCmd, RouteCmd, RunCmd, SecretCmd,
-  ServerCmd, ServiceCmd, TokenCmd,
+  AccountCmd, AlertCmd, ApplyFlags, BackupCmd, BuildArgs, Cli,
+  Command, EgressCmd, GatewayCmd, NotifyCmd, RouteCmd, RunCmd,
+  SecretCmd, ServerCmd, ServiceCmd, TokenCmd,
   client::{CliError, CliResult, Client, Config, read_secret, seg},
   fleet, print,
 };
@@ -214,6 +214,7 @@ async fn dispatch(
       out(j, &v, print::network);
       Ok(())
     }
+    Command::Alert(cmd) => alert(c, cmd, j).await,
     Command::Server(cmd) => server(c, cmd, j).await,
     Command::Service(cmd) => service(c, cmd, j).await,
     Command::Gateway(cmd) => gateway(c, cmd, j).await,
@@ -1725,6 +1726,74 @@ async fn pick_server(c: &Client) -> CliResult<String> {
 }
 
 // GATEWAYS / ROUTES
+
+async fn alert(c: &Client, cmd: AlertCmd, j: bool) -> CliResult<()> {
+  use wharf_api_types::view::{AlertPatch, AlertsView};
+  let v: AlertsView = match cmd {
+    AlertCmd::List => c.get("/api/alerts").await?,
+    AlertCmd::Set {
+      id,
+      on,
+      off,
+      threshold,
+      for_n,
+      mute,
+      reset,
+    } => {
+      let patch = AlertPatch {
+        enabled: (on || off).then_some(on),
+        threshold,
+        for_n,
+        mute_minutes: mute,
+        reset,
+      };
+      c.put(&format!("/api/alerts/{}", seg(&id)), &patch).await?
+    }
+  };
+  out(j, &v, |v| {
+    let state = |on: bool, muted: Option<i64>| match (on, muted) {
+      (false, _) => "关".to_string(),
+      (true, Some(t)) => format!("静默到 {}", fmt_ms(t)),
+      (true, None) => "开".to_string(),
+    };
+    println!("告警规则：");
+    for r in &v.rules {
+      println!(
+        "  {:<22} {:<8} {}  {}",
+        r.id,
+        state(r.enabled, r.muted_until),
+        r.name,
+        r.condition
+      );
+    }
+    println!("事件通知：");
+    for n in &v.notices {
+      println!(
+        "  {:<22} {:<8} {}",
+        n.id,
+        state(n.enabled, n.muted_until),
+        n.name
+      );
+    }
+    if !v.firing.is_empty() {
+      println!("正在触发：");
+      for f in &v.firing {
+        println!("  {}（{} 起）", f.title, fmt_ms(f.since));
+      }
+    }
+  });
+  Ok(())
+}
+
+fn fmt_ms(ms: i64) -> String {
+  chrono::DateTime::from_timestamp_millis(ms)
+    .map(|t| {
+      t.with_timezone(&chrono::Local)
+        .format("%m-%d %H:%M")
+        .to_string()
+    })
+    .unwrap_or_default()
+}
 
 async fn gateway(
   c: &Client,

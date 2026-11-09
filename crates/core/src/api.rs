@@ -271,6 +271,11 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route("/api/edge/{name}/accept", post(crate::edge_api::accept))
     .route("/api/secrets", get(list_secrets))
     .route("/api/notify/test", post(crate::notify::test))
+    .route("/api/alerts", get(crate::rules::list))
+    .route(
+      "/api/alerts/{id}",
+      axum::routing::put(crate::rules::patch),
+    )
     .route(
       "/api/egress",
       get(crate::egress::get).put(crate::egress::put),
