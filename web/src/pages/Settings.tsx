@@ -35,6 +35,7 @@ import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { AccountView } from "@/types";
 import { CoreBackup } from "./core-backup";
+import { Egress } from "./egress";
 import { EdgeImport } from "./edge-import";
 import { checkUpdate, type VersionView } from "@/components/upgrade";
 import { Secrets } from "./secrets";
@@ -111,7 +112,7 @@ export function Settings() {
           <TabsTrigger value="accounts">厂商账号</TabsTrigger>
           <TabsTrigger value="secrets">密钥</TabsTrigger>
           <TabsTrigger value="tokens">访问令牌</TabsTrigger>
-          <TabsTrigger value="backup">控制面备份</TabsTrigger>
+          <TabsTrigger value="backup">控制面</TabsTrigger>
         </TabsList>
         <TabsContent value="accounts" className="mt-4">
       <div className="mb-3 flex items-center justify-between [&>h2]:mb-0">
@@ -212,6 +213,9 @@ export function Settings() {
         </TabsContent>
         <TabsContent value="backup" className="mt-4">
           <CoreBackup />
+          <div className="mt-8">
+            <Egress />
+          </div>
         </TabsContent>
       </Tabs>
       {importing && (

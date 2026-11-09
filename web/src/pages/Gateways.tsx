@@ -35,8 +35,7 @@ export function GatewaysPanel() {
 
   return (
     <>
-      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-        <p className="text-sm text-muted-foreground">入口决定域名从哪进来：服务器上的 Caddy（有公网 IP，国内可备案）或 Cloudflare 隧道（全球可达）。</p>
+      <div className="mb-4 flex flex-wrap items-center justify-end gap-3">
         <Button variant="outline" size="sm" onClick={() => setParams({ tab: "entries", new: "1" })}>
           <PlusIcon />
           新建入口

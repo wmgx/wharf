@@ -42,7 +42,7 @@ export function Egress() {
           <div className="min-w-0">
             <div className="font-semibold">访问厂商 API 经过</div>
             <div className="text-xs text-muted-foreground">
-              改 DNS、隧道、组网时调 Cloudflare、Tailscale；国内连不上时借一台海外机器
+              调 Cloudflare、Tailscale 时经哪台出去
             </div>
           </div>
           <div className="w-full sm:ml-auto sm:w-56">

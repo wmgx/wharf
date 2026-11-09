@@ -48,6 +48,7 @@ import {
   Notice,
   OpenLink,
   PageHeader,
+  SectionTitle,
   ServerTag,
   StatusBadge,
   ago,
@@ -125,7 +126,8 @@ const Terminal = lazy(() => import("@/components/Terminal"));
 export function ServiceDetail() {
   const { name = "" } = useParams();
   const [params, setParams] = useSearchParams();
-  const tab = params.get("tab") ?? "overview";
+  // 旧链接的 ?tab=domains 也落到"网络"。
+  const tab = params.get("tab") === "domains" ? "network" : (params.get("tab") ?? "overview");
   const { status } = useStatus();
   const actions = useActions();
   const { data: svc, error } = usePoll<ServiceView>(
@@ -314,8 +316,8 @@ export function ServiceDetail() {
         <div className="-mx-1 overflow-x-auto px-1">
           <TabsList>
             <TabsTrigger value="overview">概览</TabsTrigger>
-            <TabsTrigger value="domains">
-              域名
+            <TabsTrigger value="network">
+              网络
               {routes.length > 0 && (
                 <span className="ml-1 text-muted-foreground">
                   {routes.length}
@@ -338,8 +340,11 @@ export function ServiceDetail() {
             onTab={(t) => setParams({ tab: t }, { replace: true })}
           />
         </TabsContent>
-        <TabsContent value="domains" className="mt-4">
+        <TabsContent value="network" className="mt-4">
+          <SectionTitle count={routes.length}>域名</SectionTitle>
           <DomainsTab routes={routes} onAdd={() => setAddingRoute(true)} />
+          <SectionTitle>内网</SectionTitle>
+          <NetFacts svc={svc} />
         </TabsContent>
         <TabsContent value="config" className="mt-4">
           <ConfigTab svc={svc} onEdit={() => setEditing(true)} />
@@ -392,7 +397,7 @@ function Overview({
     hints.push({
       text: "还没有域名，现在只能从内网访问。",
       action: "加域名",
-      tab: "domains",
+      tab: "network",
     });
   if (svc.data?.some((m) => m.kind === "managed") && !svc.spec.backup)
     hints.push({
@@ -447,42 +452,12 @@ function Overview({
                   <button
                     type="button"
                     className="w-fit text-left text-muted-foreground hover:text-foreground"
-                    onClick={() => onTab("domains")}
+                    onClick={() => onTab("network")}
                   >
                     只在内网访问 · <span className="text-primary">加域名</span>
                   </button>
                 )}
               </dd>
-              <dt className="text-muted-foreground">内网地址</dt>
-              <dd className="font-mono text-[13px]">
-                {Object.entries(svc.addresses).map(([p, a]) => (
-                  <div
-                    key={p}
-                    className="flex flex-wrap items-center gap-x-3 gap-y-0.5"
-                  >
-                    <span className="text-muted-foreground">{p}</span>
-                    <OpenLink value={a} />
-                    {(svc.lan_addresses?.[p] ?? []).map((l) => (
-                      <span key={l} className="inline-flex items-center gap-1">
-                        <span className="font-sans text-xs text-muted-foreground">
-                          局域网
-                        </span>
-                        <OpenLink value={l} />
-                      </span>
-                    ))}
-                  </div>
-                ))}
-                {Object.keys(svc.addresses).length === 0 && "-"}
-              </dd>
-              {(svc.uses?.length || svc.used_by?.length) ? (
-                <>
-                  <dt className="text-muted-foreground">依赖</dt>
-                  <dd className="flex flex-col gap-0.5">
-                    {svc.uses?.length ? <Deps label="引用" names={svc.uses} /> : null}
-                    {svc.used_by?.length ? <Deps label="被引用" names={svc.used_by} /> : null}
-                  </dd>
-                </>
-              ) : null}
               <dt className="text-muted-foreground">数据</dt>
               <dd>
                 <button
@@ -1125,6 +1100,60 @@ function TerminalTab({ svc }: { svc: ServiceView }) {
         <Terminal name={svc.name} service={current} />
       </Suspense>
     </div>
+  );
+}
+
+/** 服务在内网怎么被访问、依赖谁、怎么出外网。 */
+function NetFacts({ svc }: { svc: ServiceView }) {
+  const { status } = useStatus();
+  const via = status?.servers.find((x) => x.name === svc.spec.server)?.settings.via as string | undefined;
+  return (
+    <dl className="grid max-w-3xl grid-cols-[88px_1fr] gap-x-4 gap-y-2 text-sm">
+      <dt className="text-muted-foreground">内网地址</dt>
+      <dd className="font-mono text-[13px]">
+        {Object.entries(svc.addresses).map(([p, a]) => (
+          <div
+            key={p}
+            className="flex flex-wrap items-center gap-x-3 gap-y-0.5"
+          >
+            <span className="text-muted-foreground">{p}</span>
+            <OpenLink value={a} />
+            {(svc.lan_addresses?.[p] ?? []).map((l) => (
+              <span key={l} className="inline-flex items-center gap-1">
+                <span className="font-sans text-xs text-muted-foreground">
+                  局域网
+                </span>
+                <OpenLink value={l} />
+              </span>
+            ))}
+          </div>
+        ))}
+        {Object.keys(svc.addresses).length === 0 && "-"}
+      </dd>
+      {(svc.uses?.length || svc.used_by?.length) ? (
+        <>
+          <dt className="text-muted-foreground">依赖</dt>
+          <dd className="flex flex-col gap-0.5">
+            {svc.uses?.length ? <Deps label="引用" names={svc.uses} /> : null}
+            {svc.used_by?.length ? <Deps label="被引用" names={svc.used_by} /> : null}
+          </dd>
+        </>
+      ) : null}
+      <dt className="text-muted-foreground">访问外网</dt>
+      <dd>
+        {via ? (
+          <>
+            经{" "}
+            <Link to={`/servers/${encodeURIComponent(via)}?tab=network`} className="hover:underline">
+              {via}
+            </Link>{" "}
+            的出口（所在服务器 {svc.spec.server} 的设置）
+          </>
+        ) : (
+          "直连"
+        )}
+      </dd>
+    </dl>
   );
 }
 

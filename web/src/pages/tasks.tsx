@@ -12,7 +12,7 @@ export function TasksPage() {
   return (
     <>
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-        <p className="text-sm text-muted-foreground">按 cron 时间在服务器上跑命令：进服务容器执行、起临时容器，或在宿主机上执行。</p>
+        <p className="text-sm text-muted-foreground">按 cron 时间在服务器上跑命令。</p>
         {servers.length > 1 && (
           <Segmented
             value={server}
