@@ -2,7 +2,10 @@
 //! 二进制由 CI 按构建号发布到 GitHub Release `build-<构建号>`，安装的版本和控制面一致。
 //! 脚本只给出下载地址和安装位置，不接触任何凭据；登录由用户执行 `wharf login`。
 
+use std::sync::Arc;
+
 use axum::{
+  extract::State,
   http::header,
   response::{IntoResponse, Response},
 };
@@ -12,14 +15,20 @@ const RELEASES: &str =
   "https://github.com/wmgx/wharf/releases/download";
 
 /// `GET /cli.sh`：不需要登录。
-pub async fn script() -> Response {
+pub async fn script(
+  State(s): State<Arc<crate::state::AppState>>,
+) -> Response {
   let base = std::env::var("WHARF_CLI_RELEASES")
     .unwrap_or_else(|_| RELEASES.to_string());
   (
     [(header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8")],
     SCRIPT
       .replace("{build}", wharf_api_types::BUILD)
-      .replace("{releases}", &base),
+      .replace("{releases}", &base)
+      .replace(
+        "{core_key}",
+        &hex::encode(s.key.verifying_key().to_bytes()),
+      ),
   )
     .into_response()
 }
@@ -58,16 +67,19 @@ mv "$TMP" "$DEST/wharf"
 trap - EXIT
 printf '==> 已安装到 %s/wharf\n' "$DEST"
 
+WHARF=wharf
 case ":$PATH:" in
   *":$DEST:"*) ;;
-  *) printf '\n%s 不在 PATH 里，加到 shell 配置：\n  export PATH="%s:$PATH"\n' "$DEST" "$DEST" ;;
+  *)
+    WHARF="$DEST/wharf"
+    printf '\n%s 不在 PATH 里，按你用的 shell 执行一行（写进配置，新开终端生效）：\n' "$DEST"
+    printf '  bash：echo '"'"'export PATH="%s:$PATH"'"'"' >> ~/.bashrc\n' "$DEST"
+    printf '  zsh： echo '"'"'export PATH="%s:$PATH"'"'"' >> ~/.zshrc\n' "$DEST"
+    printf '  fish：fish_add_path %s\n' "$DEST"
+    ;;
 esac
 
-printf '\n下一步：\n'
-if [ -n "$CORE_URL" ]; then
-  printf '  wharf login --url %s     # 粘贴页面上新建的 token\n' "$CORE_URL"
-else
-  printf '  wharf login --url <控制面地址>\n'
-fi
-printf '  wharf status\n'
+printf '\n下一步（会提示输入 token，粘贴页面上新建的 token）：\n'
+printf '  %s login --url %s --core-key %s\n' "$WHARF" "${CORE_URL:-<控制面地址>}" "{core_key}"
+printf '  %s status\n' "$WHARF"
 "#;

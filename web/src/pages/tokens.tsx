@@ -64,9 +64,10 @@ const AI_GUIDE = (origin: string) => `## Wharf（服务器管理）
 export function Tokens() {
   const { data, error, refresh } = usePoll<TokenView[]>("/api/tokens", 30000);
   const coreKey = usePoll<Session>("/api/session", 600000).data?.core_key ?? "<控制面公钥>";
+  const origin = window.location.origin;
+  const loginCmd = `wharf login --url ${origin} --core-key ${coreKey}\nwharf status`;
   const [creating, setCreating] = useState(false);
   const [removing, setRemoving] = useState<string | null>(null);
-  const origin = window.location.origin;
   const connected = data?.filter((t) => t.last_used_at) ?? [];
 
   const remove = async (name: string) => {
@@ -98,7 +99,7 @@ export function Tokens() {
           </li>
           <li className="grid gap-1.5">
             <span className="text-sm font-medium">3. 登录（粘贴刚才的 token），然后试一下</span>
-            <Command>{`wharf login --url ${origin} --core-key ${coreKey}\nwharf status`}</Command>
+            <Command>{loginCmd}</Command>
           </li>
           <li className="grid gap-1.5">
             <span className="text-sm font-medium">4. 给 AI 用：把这段贴进项目的 AGENTS.md 或 CLAUDE.md</span>
@@ -162,7 +163,7 @@ export function Tokens() {
         )
       )}
       {creating && (
-        <CreateToken
+        <CreateToken loginCmd={loginCmd}
           taken={(data ?? []).map((t) => t.name)}
           onClose={() => {
             setCreating(false);
@@ -191,7 +192,7 @@ export function Tokens() {
 }
 
 /** 只在打开时挂载：关掉后新 token 就再也看不到了。 */
-function CreateToken({ taken, onClose }: { taken: string[]; onClose: () => void }) {
+function CreateToken({ taken, loginCmd, onClose }: { taken: string[]; loginCmd: string; onClose: () => void }) {
   const [name, setName] = useState("");
   const [preset, setPreset] = useState<Preset>("ai");
   const [custom, setCustom] = useState<Perm[]>(PRESETS.ai);
@@ -214,14 +215,17 @@ function CreateToken({ taken, onClose }: { taken: string[]; onClose: () => void 
 
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent aria-describedby={undefined}>
+      <DialogContent aria-describedby={undefined} onInteractOutside={(e) => created && e.preventDefault()}>
         <DialogHeader>
           <DialogTitle>{created ? `token ${created.name}` : "新建 token"}</DialogTitle>
         </DialogHeader>
         {created ? (
           <div className="grid gap-3">
-            <CodeBlock className="break-all whitespace-pre-wrap">{created.token}</CodeBlock>
-            <Notice kind="warn">只显示这一次。复制后执行 wharf login 粘贴进去。</Notice>
+            <span className="text-sm">1. 复制登录命令到终端执行</span>
+            <Command>{loginCmd}</Command>
+            <span className="text-sm">2. 提示输入 token 时，回来复制它粘贴进去</span>
+            <Command>{created.token}</Command>
+            <Notice kind="warn">token 只显示这一次，关掉窗口就看不到了。</Notice>
           </div>
         ) : (
           <div className="grid gap-4">
@@ -266,10 +270,6 @@ function CreateToken({ taken, onClose }: { taken: string[]; onClose: () => void 
             <>
               <Button variant="ghost" onClick={onClose}>
                 关闭
-              </Button>
-              <Button onClick={() => copy(created.token)}>
-                <CopyIcon />
-                复制
               </Button>
             </>
           ) : (
