@@ -263,6 +263,25 @@ CREATE TABLE task_runs (
 );
 CREATE INDEX task_runs_task ON task_runs (task, id);
 "#,
+  // 告警：正在触发的和推送记录（保留 7 天），见 rules.rs。
+  r#"
+CREATE TABLE alert_firing (
+  rule TEXT NOT NULL,
+  subject TEXT NOT NULL,
+  since INTEGER NOT NULL,
+  title TEXT NOT NULL,
+  PRIMARY KEY (rule, subject)
+);
+CREATE TABLE alert_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  at INTEGER NOT NULL,
+  source TEXT NOT NULL,
+  title TEXT NOT NULL,
+  ok INTEGER NOT NULL,
+  skipped TEXT
+);
+CREATE INDEX alert_history_at ON alert_history (at);
+"#,
 ];
 
 /// git 构建来源固定到上次部署构建的 commit（仓库和分支没换过的）。当时没记下 commit 的留给 plan 提醒。

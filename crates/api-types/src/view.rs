@@ -1091,7 +1091,7 @@ pub struct AlertsView {
   pub rules: Vec<AlertRuleView>,
   pub notices: Vec<NoticeView>,
   pub firing: Vec<FiringView>,
-  /// 最近的推送（新的在前，只存在内存里）。
+  /// 最近的推送（新的在前，保留 7 天）。
   pub history: Vec<AlertHistoryView>,
 }
 

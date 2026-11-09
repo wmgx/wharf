@@ -124,7 +124,7 @@ export function Alerts() {
           ))}
         </div>
       ) : (
-        <Empty>控制面这次启动后还没有推送</Empty>
+        <Empty>最近 7 天没有推送</Empty>
       )}
     </>
   );
