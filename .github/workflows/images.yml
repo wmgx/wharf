@@ -97,6 +97,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: dist
+          pattern: wharf-*
           merge-multiple: true
       - env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
