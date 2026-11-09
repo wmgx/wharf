@@ -725,3 +725,39 @@ export type EgressSpec = {
   domains?: string[];
 };
 export type EgressPreset = { name: string; label: string; domains: string[] };
+
+export interface AlertRuleView {
+  id: string;
+  name: string;
+  metric: string;
+  condition: string;
+  op: string;
+  threshold: number;
+  for_n: number;
+  threshold_editable: boolean;
+  enabled: boolean;
+  muted_until?: number;
+  customized: boolean;
+}
+
+export interface NoticeView {
+  id: string;
+  name: string;
+  enabled: boolean;
+  muted_until?: number;
+}
+
+export interface AlertsView {
+  rules: AlertRuleView[];
+  notices: NoticeView[];
+  firing: { rule: string; subject: string; title: string; since: number }[];
+  history: { at: number; source: string; title: string; ok: boolean; skipped?: string }[];
+}
+
+export interface AlertPatch {
+  enabled?: boolean;
+  threshold?: number;
+  for_n?: number;
+  mute_minutes?: number;
+  reset?: boolean;
+}

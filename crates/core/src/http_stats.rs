@@ -2,8 +2,8 @@
 //! `req.qps`、`req.p50`、`req.p95`（毫秒）、`req.err`（5xx 占比，百分数），对象是服务名。
 //! 只覆盖经 Wharf Caddy 网关进来的 HTTP；Cloudflare 隧道和服务之间的调用不在里面。
 //!
-//! 5xx 告警：最近 [WINDOW] 次上报合计至少 [MIN_ERRORS] 个 5xx 且占比超过 [ALERT_PCT]% 时推送，
-//! 合计占比回到 [RECOVER_PCT]% 以下时推恢复。计数只在内存里。
+//! 5xx 告警：最近 [WINDOW] 次上报合计的 5xx 占比交给 [crate::rules]（规则 http_5xx），5xx 不到 [MIN_ERRORS] 个时
+//! 只报低于 [RECOVER_PCT]% 的点（只能恢复，不会触发）。计数只在内存里。
 
 use std::{
   collections::{BTreeMap, VecDeque},
@@ -12,11 +12,10 @@ use std::{
 
 use wharf_api_types::agent::HostTraffic;
 
-use crate::{notify, state::AppState};
+use crate::state::AppState;
 
 const WINDOW: usize = 5;
 const MIN_ERRORS: u64 = 10;
-const ALERT_PCT: f64 = 10.0;
 const RECOVER_PCT: f64 = 2.0;
 
 static WINDOWS: Mutex<BTreeMap<String, VecDeque<(u64, u64)>>> =
@@ -103,28 +102,14 @@ pub async fn record(
       } else {
         100.0 * errors as f64 / reqs as f64
       };
-      if errors >= MIN_ERRORS && pct > ALERT_PCT {
-        events.push((svc.clone(), false, pct));
-      } else if pct < RECOVER_PCT {
-        events.push((svc.clone(), true, pct));
+      // 错误太少时不算触发，只报能让它恢复的点。
+      if errors >= MIN_ERRORS || pct < RECOVER_PCT {
+        events.push((svc.clone(), pct));
       }
     }
   }
-  for (svc, ok, pct) in events {
-    let event = if ok {
-      notify::Event {
-        title: format!("服务 {svc} 的 5xx 已恢复"),
-        body: format!("最近 {WINDOW} 分钟 5xx 占比 {pct:.1}%"),
-      }
-    } else {
-      notify::Event {
-        title: format!("服务 {svc} 的 5xx 变多"),
-        body: format!(
-          "最近 {WINDOW} 分钟经网关的请求里 {pct:.1}% 返回 5xx。看日志：wharf service logs {svc}"
-        ),
-      }
-    };
-    notify::on_result(&state, &format!("http5xx.{svc}"), ok, event)
+  for (svc, pct) in events {
+    crate::rules::observe(&state, "req.err_pct_5m", &svc, pct, "")
       .await;
   }
 }

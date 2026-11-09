@@ -1,4 +1,4 @@
-//! 通知：把事件推到一个地方。只在状态变化时发（成功 → 失败、失败 → 恢复），不做告警规则。
+//! 通知渠道：把消息推到一个地方。什么时候推由 [crate::rules] 决定（告警规则和事件通知的开关）。
 //!
 //! 渠道从密钥里读，有哪个就用哪个；以后加渠道就是 [Channel] 多一种。
 //! - 飞书群自定义机器人：`NOTIFY_FEISHU_WEBHOOK`，开了签名校验时再设 `NOTIFY_FEISHU_SECRET`。
@@ -73,14 +73,13 @@ pub async fn send(
   Ok(())
 }
 
-/// 状态变化时才发：`key` 上次的结果存在设置 `notify.state.<key>` 里。
-/// 第一次就成功不发；发送失败只记日志，不影响调用方。
-pub async fn on_result(
+/// 记下 `key` 这次的结果（存在设置 `notify.state.<key>`），返回状态是不是变了。
+/// 第一次就成功不算变化；读写失败也不算。
+pub async fn transition(
   state: &AppState,
   key: &str,
   ok: bool,
-  event: Event,
-) {
+) -> bool {
   let setting = format!("notify.state.{key}");
   let now = if ok { "ok" } else { "fail" };
   let prev = state
@@ -91,20 +90,28 @@ pub async fn on_result(
       Ok(prev)
     })
     .await;
-  let changed = match prev.as_ref().map(|p| p.as_deref()) {
+  match prev.as_ref().map(|p| p.as_deref()) {
     Ok(Some(p)) => p != now,
     Ok(None) => !ok,
     Err(_) => false,
-  };
-  if !changed {
-    return;
   }
-  match send(state, &event).await {
-    Ok(()) => {}
+}
+
+/// 发出去，失败只记日志；返回没发出去的原因。
+pub async fn deliver(
+  state: &AppState,
+  event: &Event,
+) -> Option<String> {
+  match send(state, event).await {
+    Ok(()) => None,
     Err(e) if channels(state).await.is_ok_and(|c| c.is_empty()) => {
-      tracing::debug!("没有通知渠道，跳过：{}", e.message)
+      tracing::debug!("没有通知渠道，跳过：{}", e.message);
+      Some("没有配置通知渠道".into())
     }
-    Err(e) => tracing::warn!("发送通知失败：{}", e.message),
+    Err(e) => {
+      tracing::warn!("发送通知失败：{}", e.message);
+      Some(format!("发送失败：{}", e.message))
+    }
   }
 }
 

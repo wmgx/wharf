@@ -31,7 +31,7 @@ export function Notify() {
 
   return (
     <>
-      <SectionTitle>通知</SectionTitle>
+      <SectionTitle>通知渠道</SectionTitle>
       {data && (
         <div className="flex flex-wrap items-center gap-3 rounded-xl border bg-card p-4 shadow-xs">
           <span className="grid size-9 place-items-center rounded-lg border bg-muted text-muted-foreground">

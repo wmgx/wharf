@@ -1,7 +1,7 @@
 //! 链路质量：每 [EVERY] 让每台在线机器对其余机器的探测端口连 [COUNT] 次，
 //! 记延迟和丢包（打点 `link.ms`、`link.loss`，对象是 `<from>><to>`，和资源点一样保留 7 天）。
 //!
-//! - 告警：连续 [BAD_ROUNDS] 轮丢包不低于 [BAD_LOSS]% 推送，恢复再推；
+//! - 告警：每轮把丢包率交给 [crate::rules]（规则 link_loss）；
 //! - 中转建议：直连差、经第三台两段都好时给出建议。
 //!
 //! 最近一轮结果和连续计数只在内存里，控制面重启后等下一轮。
@@ -19,12 +19,11 @@ use wharf_api_types::{
   view::{LinkView, RelayHint},
 };
 
-use crate::{notify, state::AppState};
+use crate::state::AppState;
 
 const EVERY: Duration = Duration::from_secs(300);
 const COUNT: u8 = 10;
 const BAD_LOSS: f64 = 20.0;
-const BAD_ROUNDS: u32 = 3;
 /// 中转两段各自都要好于这个丢包率，合计还要比直连少一半以上。
 const GOOD_LOSS: f64 = 5.0;
 const TIMEOUT: Duration = Duration::from_secs(60);
@@ -34,7 +33,6 @@ type Pair = (String, String);
 #[derive(Default)]
 struct Memory {
   latest: BTreeMap<Pair, LinkView>,
-  bad: BTreeMap<Pair, u32>,
 }
 
 static MEMORY: Mutex<Option<Memory>> = Mutex::new(None);
@@ -183,35 +181,22 @@ async fn round(state: &AppState) -> Result<(), ApiError> {
     .collect();
   crate::metrics::record_links(state, &views).await;
 
-  let mut events = Vec::new();
   {
     let mut guard = MEMORY.lock().unwrap_or_else(|e| e.into_inner());
     let m = guard.get_or_insert_with(Memory::default);
     m.latest
       .retain(|(f, t), _| names.contains(f) && names.contains(t));
-    m.bad
-      .retain(|(f, t), _| names.contains(f) && names.contains(t));
-    for v in views {
-      let pair = (v.from.clone(), v.to.clone());
-      let n = m.bad.entry(pair.clone()).or_default();
-      if v.loss >= BAD_LOSS {
-        *n += 1;
-        if *n == BAD_ROUNDS {
-          events.push((pair.clone(), false, v.loss));
-        }
-      } else {
-        *n = 0;
-        events.push((pair.clone(), true, v.loss));
-      }
-      m.latest.insert(pair, v);
+    for v in &views {
+      m.latest.insert((v.from.clone(), v.to.clone()), v.clone());
     }
   }
-  for ((from, to), ok, loss) in events {
-    notify::on_result(
+  for v in &views {
+    crate::rules::observe(
       state,
-      &format!("link.{from}>{to}"),
-      ok,
-      event(&from, &to, ok, loss),
+      "link.loss",
+      &format!("{}>{}", v.from, v.to),
+      v.loss,
+      "",
     )
     .await;
   }
@@ -223,22 +208,6 @@ fn loss(s: &LinkSample) -> f64 {
     return 0.0;
   }
   100.0 * f64::from(s.sent - s.ok.min(s.sent)) / f64::from(s.sent)
-}
-
-fn event(from: &str, to: &str, ok: bool, loss: f64) -> notify::Event {
-  if ok {
-    notify::Event {
-      title: format!("链路 {from} → {to} 恢复"),
-      body: format!("{from} 到 {to} 的内网地址丢包降到 {loss:.0}%"),
-    }
-  } else {
-    notify::Event {
-      title: format!("链路 {from} → {to} 丢包严重"),
-      body: format!(
-        "{from} 到 {to} 的内网地址连续 {BAD_ROUNDS} 轮丢包不低于 {BAD_LOSS:.0}%（最近一轮 {loss:.0}%），跨机器的网关转发、构建、备份都会受影响。看详情：wharf network"
-      ),
-    }
-  }
 }
 
 #[cfg(test)]

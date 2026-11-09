@@ -441,9 +441,10 @@ pub(crate) async fn record(
     )
     .await;
   }
-  crate::notify::on_result(
+  crate::rules::notice(
     state,
-    &format!("backup.{service}"),
+    "backup",
+    Some(&format!("backup.{service}")),
     result.is_ok(),
     crate::notify::Event {
       title: match result {

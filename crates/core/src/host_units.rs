@@ -100,20 +100,12 @@ async fn check(state: &AppState, server: &str) {
     if !ok {
       down.push((unit.clone(), st.clone()));
     }
-    crate::notify::on_result(
+    crate::rules::observe(
       state,
-      &format!("hostunit.{server}.{unit}"),
-      ok,
-      crate::notify::Event {
-        title: if ok {
-          format!("{server} 上的 {unit} 恢复运行")
-        } else {
-          format!("{server} 上的 {unit} 停了")
-        },
-        body: format!(
-          "状态：{st}。看日志：服务器 {server} → 宿主机程序"
-        ),
-      },
+      "hostunit.running",
+      &format!("{server}:{unit}"),
+      f64::from(u8::from(ok)),
+      &st,
     )
     .await;
   }

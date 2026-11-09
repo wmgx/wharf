@@ -172,9 +172,7 @@ async fn notify_newer(state: &AppState, name: &str, latest: &str) {
       "最新版本 {short}。看改动：wharf plan，要更新：wharf service update {name}（或在页面上点\u{201c}更新\u{201d}）"
     ),
   };
-  if let Err(e) = crate::notify::send(state, &event).await {
-    tracing::warn!("推送 {name} 的新版本提醒失败：{}", e.message);
-  }
+  crate::rules::notice(state, "update", None, true, event).await;
 }
 
 /// image 来源：按服务器分组，一台 agent 一次查完。没固定版本或标签本身就是 digest 的跳过。

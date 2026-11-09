@@ -1084,3 +1084,86 @@ pub struct TaskView {
   pub ping_url: Option<String>,
   pub updated_at: DateTime<Utc>,
 }
+
+/// `GET /api/alerts`：告警规则、事件通知的开关，正在触发的告警和最近的推送。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AlertsView {
+  pub rules: Vec<AlertRuleView>,
+  pub notices: Vec<NoticeView>,
+  pub firing: Vec<FiringView>,
+  /// 最近的推送（新的在前，只存在内存里）。
+  pub history: Vec<AlertHistoryView>,
+}
+
+/// 一条告警规则：对一个指标的每个对象，最近 `for_n` 个点都满足 `比较 阈值` 时触发。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AlertRuleView {
+  pub id: String,
+  pub name: String,
+  /// 指标名，例如 `server.online`。
+  pub metric: String,
+  /// 人能读的条件，例如"在线 < 1 连续 3 次（每分钟一次）"。
+  pub condition: String,
+  /// `<`、`>`、`>=`。
+  pub op: String,
+  pub threshold: f64,
+  pub for_n: u32,
+  /// 阈值是不是有意义可改（`online < 1` 这种就不让改）。
+  pub threshold_editable: bool,
+  pub enabled: bool,
+  /// 静默到这个时间（毫秒），期间照常判断但不推送。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub muted_until: Option<i64>,
+  /// 和内置默认值不同。
+  pub customized: bool,
+}
+
+/// 一类事件通知：发生就推，没有阈值。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct NoticeView {
+  pub id: String,
+  pub name: String,
+  pub enabled: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub muted_until: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct FiringView {
+  pub rule: String,
+  pub subject: String,
+  pub title: String,
+  /// 开始触发的时间（毫秒）。
+  pub since: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AlertHistoryView {
+  pub at: i64,
+  /// 规则或事件通知的 id。
+  pub source: String,
+  pub title: String,
+  /// true 是恢复。
+  pub ok: bool,
+  /// 没发出去的原因：关了、静默中、没有渠道、发送失败。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub skipped: Option<String>,
+}
+
+/// `PUT /api/alerts/{id}`：只改给了的字段。`reset` 恢复默认值。
+#[derive(
+  Debug, Clone, Default, Serialize, Deserialize, JsonSchema,
+)]
+pub struct AlertPatch {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub enabled: Option<bool>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub threshold: Option<f64>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub for_n: Option<u32>,
+  /// 静默多少分钟，0 取消静默。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub mute_minutes: Option<u32>,
+  #[serde(default)]
+  pub reset: bool,
+}
