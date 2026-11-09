@@ -75,7 +75,7 @@ export function ServerHostUnits({ server, online }: { server: string; online: bo
     <>
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <p className="flex-1 text-sm text-muted-foreground">
-          宿主机上 systemd 跑的、自己装的程序（unit 文件在 /etc/systemd/system），以及从 Caddy、nginx、cloudflared 配置反查到的域名。只读；"接管"后停了会进需要注意并推送。
+          宿主机上自己装的 systemd 程序。"接管"后停了会告警。
         </p>
         <Button variant="ghost" size="sm" disabled={loading} onClick={load}>
           <RefreshCwIcon className={loading ? "animate-spin" : undefined} />

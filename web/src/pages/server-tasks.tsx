@@ -497,7 +497,7 @@ function EditTask({
           )}
           {kind === "ping" ? (
             <p className="text-sm text-muted-foreground">
-              Wharf 不执行它：机器上已有的 cron、systemd timer 或脚本跑完后请求一下报到地址（保存后显示），到了下面的时间再过宽限还没报到就记为失败并通知。
+              机器上已有的定时任务跑完后请求报到地址（保存后显示），过了宽限还没报到就算失败。
             </p>
           ) : (
             <Field

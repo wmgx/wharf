@@ -1,5 +1,6 @@
 import { CheckIcon, ChevronDownIcon, MinusIcon, RadarIcon, XIcon } from "lucide-react";
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import { toast } from "sonner";
 import { api, usePoll } from "@/api";
 import { useActions } from "@/components/actions";
@@ -74,8 +75,7 @@ export function NetworkPanel() {
 
   return (
     <>
-      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-        <p className="text-sm text-muted-foreground">服务器之间靠内网地址互相访问；迁移、备份、网关转发都要能连通。</p>
+      <div className="mb-4 flex flex-wrap items-center justify-end gap-3">
         <div className="flex items-center gap-2">
           <TailscaleSetup />
           <Button variant="outline" size="sm" onClick={probe} disabled={probing}>
@@ -103,9 +103,13 @@ export function NetworkPanel() {
               <TableBody>
                 {data.servers.map((s) => (
                   <TableRow key={s.name}>
-                    <TableCell className="font-medium">{s.name}</TableCell>
+                    <TableCell className="font-medium">
+                      <Link to={`/servers/${encodeURIComponent(s.name)}?tab=network`} className="hover:underline">
+                        {s.name}
+                      </Link>
+                    </TableCell>
                     <TableCell>
-                      <ModeMenu server={s} />
+                      <Badge variant={s.mode === "public" ? "outline" : "secondary"}>{MODES[s.mode]}</Badge>
                     </TableCell>
                     <TableCell className="font-mono text-xs">{s.private_ip ?? "-"}</TableCell>
                     <TableCell className="font-mono text-xs">{s.public_ip ?? "-"}</TableCell>
@@ -117,7 +121,7 @@ export function NetworkPanel() {
           </div>
 
           <div className="flex flex-col gap-2">
-            <h2 className="text-sm font-medium text-muted-foreground">谁能连谁（行 → 列）</h2>
+            <h2 className="text-sm font-medium text-muted-foreground">连通和链路质量（行 → 列，每 5 分钟测一次）</h2>
             <div className="overflow-x-auto rounded-xl border bg-card shadow-xs">
               <Table>
                 <TableHeader>
@@ -145,7 +149,6 @@ export function NetworkPanel() {
                 </TableBody>
               </Table>
             </div>
-            <p className="text-xs text-muted-foreground">格子里是每 5 分钟测一次的延迟和丢包。</p>
             {data.relays?.map((h) => (
               <p key={`${h.from}-${h.to}`} className="text-sm text-warning">
                 {h.from} → {h.to} 直连丢包 {h.direct_loss.toFixed(0)}%，经 {h.via} 中转约 {h.via_loss.toFixed(0)}%

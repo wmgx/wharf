@@ -33,7 +33,7 @@ export function Activity() {
   const [tab, setTab] = useTab(TABS, "runs");
   return (
     <>
-      <PageHeader title="活动" description="谁在什么时候改了什么；点开可以回看每一步的日志" />
+      <PageHeader title="活动" />
       <Tabs value={tab} onValueChange={(v) => setTab(v as (typeof TABS)[number])}>
         <TabsList className="mb-4">
           <TabsTrigger value="runs">执行记录</TabsTrigger>
