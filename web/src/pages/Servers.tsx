@@ -18,7 +18,8 @@ export function Servers() {
   const { search } = useLocation();
   const { status } = useStatus();
   const params = new URLSearchParams(search);
-  const old = OLD_TABS[params.get("tab") ?? ""];
+  // 只有不带机器名的 `/servers?tab=x` 才是旧地址；`/servers/home?tab=network` 是服务器自己的标签。
+  const old = name ? undefined : OLD_TABS[params.get("tab") ?? ""];
 
   if (old) {
     params.delete("tab");
