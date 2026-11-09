@@ -137,8 +137,12 @@ impl Snapshot {
     Net {
       basic_auth: self
         .secrets
-        .get(render::BASIC_AUTH_SECRET)
-        .and_then(|v| render::BasicAuth::parse(v)),
+        .iter()
+        .filter(|(k, _)| render::is_auth_secret(k))
+        .filter_map(|(k, v)| {
+          Some((k.clone(), render::BasicAuth::parse(v)?))
+        })
+        .collect(),
       reach: self.reach.clone(),
       ..Net::derive(&world.servers, &self.agents)
     }
@@ -255,10 +259,10 @@ impl GatewayRender {
 
 /// 给人看的网关配置：不带出登录保护的密码哈希。
 pub fn redacted_config(config: &str, net: &Net) -> String {
-  match &net.basic_auth {
-    Some(a) => config.replace(&a.hash, "<bcrypt>"),
-    None => config.to_string(),
-  }
+  net
+    .basic_auth
+    .values()
+    .fold(config.to_string(), |c, a| c.replace(&a.hash, "<bcrypt>"))
 }
 
 pub fn gateway_render(
@@ -280,7 +284,7 @@ pub fn gateway_render(
         "路由 {host}：cloudflare_tunnel 网关还不支持登录保护，换 caddy 网关或去掉 --auth"
       )));
     }
-    if route.spec.auth && net.basic_auth.is_none() {
+    if route.spec.auth && net.auth_for(host).is_none() {
       return Err(
         ApiError::invalid(format!(
           "路由 {host} 开启了登录保护，但还没有设置账号"
@@ -290,7 +294,7 @@ pub fn gateway_render(
         )
         .suggest(format!(
           "wharf secret set {}",
-          render::BASIC_AUTH_SECRET
+          render::route_auth_secret(host)
         )),
       );
     }
@@ -327,7 +331,11 @@ pub fn gateway_render(
     }
     sites.push(render::Site {
       paths,
-      auth: route.spec.auth,
+      auth: route
+        .spec
+        .auth
+        .then(|| net.auth_for(host).cloned())
+        .flatten(),
       hostname: host.clone(),
       upstream: world.route_upstream(
         net,
@@ -345,7 +353,6 @@ pub fn gateway_render(
         name,
         &gateway.spec,
         &sites,
-        net.basic_auth.as_ref(),
         crate::link::caddy_site(world, net, name, &gateway.spec)?,
       ),
     ),

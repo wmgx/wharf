@@ -17,7 +17,6 @@ export function Secrets() {
   const [editing, setEditing] = useState<{ name: string; fresh: boolean } | null>(null);
   const [removing, setRemoving] = useState<SecretView | null>(null);
   const apps = (data ?? []).filter((x) => !x.system && !x.managed);
-  const systemCount = (data ?? []).length - apps.length;
 
   const remove = async (s: SecretView) => {
     setRemoving(null);
@@ -75,9 +74,6 @@ export function Secrets() {
             ))}
           </div>
         ))}
-      {systemCount > 0 && (
-        <p className="mt-3 text-xs text-muted-foreground">另有 {systemCount} 个由 Wharf 自己的功能使用（登录保护、组网、通知、备份等），在对应功能里设置，这里不显示。</p>
-      )}
       {editing && (
         <SetSecret
           initial={editing.name}

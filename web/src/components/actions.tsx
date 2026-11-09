@@ -54,8 +54,8 @@ interface Actions {
   remove: (name: string) => void;
   /** 选目标服务器，再生成迁移计划。 */
   move: (svc: ServiceView) => void;
-  /** 设置登录保护账号。已有域名开了登录保护时，保存后生成更新网关的计划。 */
-  basicAuth: () => void;
+  /** 设置一个域名的登录保护账号；`enable` 时保存后生成开启登录保护的计划。 */
+  basicAuth: (hostname: string, enable?: boolean) => void;
   /** 确认后升级控制面和全部 agent。 */
   upgrade: () => void;
   /** 打开一次已经开始的执行（备份、恢复），结束时提示。 */
@@ -80,7 +80,7 @@ export function ActionsProvider({ children }: { children: ReactNode }) {
   const [open, setOpen] = useState<Open | null>(null);
   const [removing, setRemoving] = useState<string | null>(null);
   const [moving, setMoving] = useState<ServiceView | null>(null);
-  const [settingAuth, setSettingAuth] = useState(false);
+  const [settingAuth, setSettingAuth] = useState<{ hostname: string; enable: boolean } | null>(null);
   const [upgrading, setUpgrading] = useState(false);
   const seq = useRef(0);
   // 正在执行的那次：关掉面板后继续在后台盯着，结束时弹提示。
@@ -183,7 +183,7 @@ export function ActionsProvider({ children }: { children: ReactNode }) {
     },
     remove: (name) => setRemoving(name),
     move: (svc) => setMoving(svc),
-    basicAuth: () => setSettingAuth(true),
+    basicAuth: (hostname, enable = false) => setSettingAuth({ hostname, enable }),
     upgrade: () => setUpgrading(true),
     watch: (runId, title) => {
       setOpen({ key: ++seq.current, title, runId });
@@ -193,9 +193,14 @@ export function ActionsProvider({ children }: { children: ReactNode }) {
   };
 
   const authSaved = () => {
-    setSettingAuth(false);
-    if (status?.routes.some((r) => r.spec.auth)) {
-      actions.plan({ title: "更新登录保护账号", changes: [] });
+    const s = settingAuth;
+    setSettingAuth(null);
+    const route = status?.routes.find((r) => r.spec.hostname === s?.hostname);
+    if (!s || !route) return;
+    if (s.enable && !route.spec.auth) {
+      actions.plan({ title: `开启 ${s.hostname} 的登录保护`, changes: [{ op: "upsert_route", spec: { ...route.spec, auth: true } }] });
+    } else if (route.spec.auth) {
+      actions.plan({ title: `更新 ${s.hostname} 的登录账号`, changes: [] });
     }
   };
 
@@ -250,7 +255,7 @@ export function ActionsProvider({ children }: { children: ReactNode }) {
       </Sheet>
       <RemoveDialog name={removing} onCancel={() => setRemoving(null)} onConfirm={confirmRemove} />
       <MoveDialog svc={moving} onCancel={() => setMoving(null)} onConfirm={confirmMove} />
-      <BasicAuthDialog open={settingAuth} onClose={() => setSettingAuth(false)} onSaved={authSaved} />
+      <BasicAuthDialog hostname={settingAuth?.hostname ?? null} enable={!!settingAuth?.enable} onClose={() => setSettingAuth(null)} onSaved={authSaved} />
       <Dialog open={upgrading} onOpenChange={setUpgrading}>
         <DialogContent>
           <DialogHeader>

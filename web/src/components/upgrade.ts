@@ -67,3 +67,27 @@ export function announceUpgrade() {
   }
   if (build) toast.success(`已升级到构建 ${build}`, { description: "agent 一分钟后逐台升级" });
 }
+
+export interface VersionView {
+  version: string;
+  build: string;
+  /** 比当前新的构建（短提交号），没有就是已经最新。 */
+  newer?: string | null;
+  checked_at?: number | null;
+  check_error?: string | null;
+}
+
+/** 马上查一次有没有新构建。 */
+export async function checkUpdate(): Promise<VersionView | null> {
+  const id = toast.loading("检查更新");
+  try {
+    const v = await api.post<VersionView>("/api/version/check", {});
+    if (v.newer) toast.success(`有新版本 ${v.newer}`, { id, description: "点\u201c升级\u201d换成新版本" });
+    else if (v.check_error) toast.error("没查到", { id, description: v.check_error });
+    else toast.success("已经是最新版本", { id, description: `构建 ${v.build}` });
+    return v;
+  } catch (e) {
+    toast.error("检查更新失败", { id, description: (e as Error).message });
+    return null;
+  }
+}

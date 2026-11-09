@@ -96,6 +96,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     )
     .route("/api/status", get(status))
     .route("/api/version", get(crate::agent_upgrade::version))
+    .route("/api/version/check", post(crate::agent_upgrade::check))
     .route("/api/network", get(crate::network::show))
     .route("/api/data", get(data_overview))
     .route("/api/network/probe", post(crate::network::probe))
@@ -1235,7 +1236,7 @@ fn system_secret(name: &str) -> Option<&'static str> {
     n if n == crate::tailscale::OAUTH_SECRET => {
       Some("Tailscale 组网")
     }
-    n if n == crate::render::BASIC_AUTH_SECRET => Some("网关登录"),
+    n if crate::render::is_auth_secret(n) => Some("登录保护"),
     n if n == crate::render::TUNNEL_TOKEN_SECRET => Some("隧道"),
     n if n == crate::notify::FEISHU_WEBHOOK
       || n == crate::notify::FEISHU_SECRET =>
@@ -1305,7 +1306,7 @@ async fn set_secret(
   auth.require(Perm::Admin)?;
   check_secret_name(&name)?;
   refuse_managed(&name)?;
-  let value = if name == crate::render::BASIC_AUTH_SECRET {
+  let value = if crate::render::is_auth_secret(&name) {
     crate::render::BasicAuth::hash_input(&req.value)?
   } else {
     req.value

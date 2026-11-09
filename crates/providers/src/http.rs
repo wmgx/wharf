@@ -70,3 +70,57 @@ impl Http {
     }
   }
 }
+
+/// 查 GitHub 上最新发布的 Wharf 构建（`build-<短提交号>`），和 `current` 比。
+/// 返回 `Some(短提交号)` 表示有更新的构建，`None` 表示已经是最新。
+pub async fn newer_build(
+  repo: &str,
+  current: &str,
+) -> Result<Option<String>, String> {
+  let http =
+    Http::new(Duration::from_secs(15)).map_err(|e| e.to_string())?;
+  let get = |url: String| {
+    let http = &http;
+    async move {
+      let r = http
+        .send(|c| {
+          c.get(&url)
+            .header("user-agent", "wharf")
+            .header("accept", "application/vnd.github+json")
+        })
+        .await
+        .map_err(|e| format!("连不上 GitHub：{e}"))?;
+      if !r.status().is_success() {
+        return Err(format!("GitHub 返回 {}", r.status()));
+      }
+      r.json::<serde_json::Value>()
+        .await
+        .map_err(|e| format!("GitHub 返回的内容不对：{e}"))
+    }
+  };
+  let releases = get(format!(
+    "https://api.github.com/repos/{repo}/releases?per_page=5"
+  ))
+  .await?;
+  let latest = releases
+    .as_array()
+    .into_iter()
+    .flatten()
+    .find_map(|r| {
+      r["tag_name"].as_str()?.strip_prefix("build-")?;
+      r["target_commitish"].as_str().map(str::to_string)
+    })
+    .ok_or("GitHub 上还没有发布过构建")?;
+  if latest.starts_with(current) {
+    return Ok(None);
+  }
+  // 发布可能比自己旧（新提交的发布还在打包），比一下先后。
+  let cmp = get(format!(
+    "https://api.github.com/repos/{repo}/compare/{current}...{latest}"
+  ))
+  .await?;
+  Ok(
+    (cmp["status"].as_str() == Some("ahead"))
+      .then(|| latest.chars().take(7).collect()),
+  )
+}
