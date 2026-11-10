@@ -777,3 +777,16 @@ export interface AuditEntry {
   detail?: string;
   source?: string;
 }
+
+export interface TimelineItem {
+  at: number;
+  kind: string;
+  title: string;
+  ok: boolean | null;
+  actor?: string;
+}
+
+export interface Timeline {
+  items: TimelineItem[];
+  next_before: number | null;
+}

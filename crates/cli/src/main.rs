@@ -440,6 +440,15 @@ pub enum ServerCmd {
 // 只在启动时解析一次，变体大小无所谓。
 #[allow(clippy::large_enum_variant)]
 pub enum ServiceCmd {
+  /// 服务的时间线：部署、备份、任务、自动重启、告警、操作记录。
+  Timeline {
+    name: String,
+    #[arg(long, default_value_t = 50)]
+    limit: u32,
+    /// 只看这个毫秒时间戳之前的（上一页返回的 next_before）。
+    #[arg(long)]
+    before: Option<i64>,
+  },
   List,
   Show {
     name: String,
