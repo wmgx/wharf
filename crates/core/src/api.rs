@@ -300,6 +300,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route("/api/runs/{id}", get(show_run))
     .route("/api/runs/{id}/cancel", post(cancel_run))
     .route("/api/export", get(export))
+    .route("/api/audit", get(crate::audit::list))
     .route("/api/tokens", get(list_tokens).post(create_token))
     .route("/api/tokens/{name}", axum::routing::delete(remove_token))
     .fallback(|uri: axum::http::Uri| async move {
@@ -310,6 +311,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         crate::web::serve(uri).await
       }
     })
+    .layer(axum::middleware::from_fn_with_state(
+      state.clone(),
+      crate::audit::layer,
+    ))
     .layer(axum::middleware::from_fn(check_cli))
     .with_state(state)
 }
@@ -1356,6 +1361,7 @@ async fn remove_secret(
 async fn make_plan(
   State(s): State<Arc<AppState>>,
   auth: Auth,
+  axum::Extension(audit): axum::Extension<crate::audit::AuditSlot>,
   Json(req): Json<PlanRequest>,
 ) -> ApiResult<Plan> {
   auth.require(Perm::Plan)?;
@@ -1364,6 +1370,20 @@ async fn make_plan(
   }
   let planned = planner::make_plan(&s, req).await?;
   planner::save(&s, &planned).await?;
+  let mut seen = std::collections::BTreeSet::new();
+  let addresses = planned
+    .plan
+    .items
+    .iter()
+    .map(|item| item.address.as_str())
+    .filter(|address| seen.insert(*address))
+    .take(20)
+    .collect::<Vec<_>>()
+    .join(",");
+  audit.set_detail(format!(
+    "plan={} {}",
+    planned.plan.plan_id, addresses
+  ));
   Ok(Json(planned.plan))
 }
 
@@ -1424,10 +1444,14 @@ async fn show_plan(
 async fn apply_plan(
   State(s): State<Arc<AppState>>,
   auth: Auth,
+  axum::Extension(audit): axum::Extension<crate::audit::AuditSlot>,
   Json(req): Json<ApplyRequest>,
 ) -> ApiResult<ApplyResponse> {
   auth.require(Perm::Apply)?;
-  Ok(Json(apply::start(s.clone(), req, auth.perms).await?))
+  let plan_id = req.plan_id.clone();
+  let resp = apply::start(s.clone(), req, auth.perms).await?;
+  audit.set_detail(format!("plan={plan_id} run={}", resp.run_id));
+  Ok(Json(resp))
 }
 
 #[derive(Deserialize)]

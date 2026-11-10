@@ -34,6 +34,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { AccountView } from "@/types";
+import { AuditLog } from "./audit";
 import { CoreBackup } from "./core-backup";
 import { Egress } from "./egress";
 import { EdgeImport } from "./edge-import";
@@ -218,6 +219,8 @@ export function Settings() {
           </div>
         </TabsContent>
       </Tabs>
+      <SectionTitle>操作记录</SectionTitle>
+      <AuditLog />
       {importing && (
         <EdgeImport account={importing} onClose={() => setImporting(null)} />
       )}

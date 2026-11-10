@@ -12,6 +12,7 @@ mod alerts;
 mod api;
 mod apply;
 mod apt;
+mod audit;
 mod auth;
 mod backup;
 mod baseline;
