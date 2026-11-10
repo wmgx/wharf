@@ -273,6 +273,15 @@ pub fn status(s: &Status) {
   if !s.routes.is_empty() {
     println!("路由");
     for r in &s.routes {
+      if let Some(target) = &r.spec.redirect {
+        println!(
+          "  {}  →  跳转 {}  经 {}",
+          r.url,
+          target,
+          r.gateway.as_deref().unwrap_or("-")
+        );
+        continue;
+      }
       println!(
         "  {}  →  {}:{}  经 {}（上游 {}）",
         r.url,

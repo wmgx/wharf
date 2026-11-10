@@ -65,7 +65,12 @@ pub async fn record(
     return;
   };
   let sums = by_service(&hosts, |h| {
-    snap.world.routes.get(h).map(|r| r.spec.service.clone())
+    snap
+      .world
+      .routes
+      .get(h)
+      .map(|r| r.spec.service.clone())
+      .filter(|s| !s.is_empty())
   });
   let mut points: Vec<(String, String, f64)> = Vec::new();
   for (svc, s) in &sums {

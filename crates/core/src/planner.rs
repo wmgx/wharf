@@ -648,7 +648,9 @@ fn config_items(
       (KIND_ROUTE, Action::Create) => {
         let route = desired.routes.get(name);
         let auth = route.is_some_and(|r| r.spec.auth);
-        if auth {
+        if route.is_some_and(|r| r.spec.redirect.is_some()) {
+          (vec![], "新增跳转".to_string())
+        } else if auth {
           (vec![], "新增路由".to_string())
         } else {
           (
