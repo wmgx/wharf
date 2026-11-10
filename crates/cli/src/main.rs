@@ -586,6 +586,21 @@ pub enum ServiceCmd {
     #[command(flatten)]
     apply: ApplyFlags,
   },
+  /// 资源上限。例：`wharf service limits blog --memory 512 --cpus 0.5 --apply`；`--off` 去掉全部上限。
+  Limits {
+    name: String,
+    /// 内存上限，单位 MB；给 0 去掉这一项。
+    #[arg(long)]
+    memory: Option<u32>,
+    /// CPU 上限，单位核，可以是小数；给 0 去掉这一项。
+    #[arg(long)]
+    cpus: Option<f64>,
+    /// 去掉全部上限。
+    #[arg(long)]
+    off: bool,
+    #[command(flatten)]
+    apply: ApplyFlags,
+  },
 }
 
 #[derive(Subcommand)]
