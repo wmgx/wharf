@@ -1093,6 +1093,9 @@ pub struct AlertsView {
   pub firing: Vec<FiringView>,
   /// 最近的推送（新的在前，保留 7 天）。
   pub history: Vec<AlertHistoryView>,
+  /// 触发的告警里附带服务最近的日志。
+  #[serde(default)]
+  pub include_logs: bool,
 }
 
 /// 一条告警规则：对一个指标的每个对象，最近 `for_n` 个点都满足 `比较 阈值` 时触发。
@@ -1166,4 +1169,9 @@ pub struct AlertPatch {
   pub mute_minutes: Option<u32>,
   #[serde(default)]
   pub reset: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AlertOptions {
+  pub include_logs: bool,
 }
