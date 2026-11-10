@@ -1380,7 +1380,10 @@ async fn make_plan(
     .take(20)
     .collect::<Vec<_>>()
     .join(",");
-  audit.set_detail(format!("plan={} {}", planned.plan.plan_id, addresses));
+  audit.set_detail(format!(
+    "plan={} {}",
+    planned.plan.plan_id, addresses
+  ));
   Ok(Json(planned.plan))
 }
 
