@@ -78,9 +78,15 @@ fn client_key(peer: std::net::IpAddr, headers: &HeaderMap) -> String {
 
 fn source(peer: std::net::IpAddr, headers: &HeaderMap) -> String {
   let addr = client_key(peer, headers);
-  match headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()) {
+  match headers
+    .get(header::USER_AGENT)
+    .and_then(|v| v.to_str().ok())
+  {
     Some(agent) => {
-      format!("{addr} {}", agent.chars().take(120).collect::<String>())
+      format!(
+        "{addr} {}",
+        agent.chars().take(120).collect::<String>()
+      )
     }
     None => addr,
   }
@@ -390,7 +396,13 @@ pub async fn setup(
     .await?;
   let _ = std::fs::remove_file(s.data_dir.join(SETUP_CODE));
   tracing::info!("已在页面上设置管理员账号 {username}");
-  crate::audit::login_event(&s, "setup", &username, source(peer.ip(), &headers)).await;
+  crate::audit::login_event(
+    &s,
+    "setup",
+    &username,
+    source(peer.ip(), &headers),
+  )
+  .await;
   start_session(&s, &headers, username).await
 }
 
@@ -424,7 +436,13 @@ pub async fn login(
       .as_ref()
       .filter(|(name, _)| name == &username)
       .map_or("未知用户", |(name, _)| name.as_str());
-    crate::audit::login_event(&s, "login_failed", actor, source(peer.ip(), &headers)).await;
+    crate::audit::login_event(
+      &s,
+      "login_failed",
+      actor,
+      source(peer.ip(), &headers),
+    )
+    .await;
     // 拖慢猜密码。
     tokio::time::sleep(Duration::from_secs(1)).await;
     return Err(
@@ -435,7 +453,13 @@ pub async fn login(
     .lock()
     .unwrap_or_else(|e| e.into_inner())
     .remove(&key);
-  crate::audit::login_event(&s, "login", &username, source(peer.ip(), &headers)).await;
+  crate::audit::login_event(
+    &s,
+    "login",
+    &username,
+    source(peer.ip(), &headers),
+  )
+  .await;
   start_session(&s, &headers, username).await
 }
 
@@ -448,7 +472,13 @@ pub async fn logout(
   headers: HeaderMap,
 ) -> Result<Response, AppError> {
   if let Ok(Some(user)) = session_user(&s, &headers).await {
-    crate::audit::login_event(&s, "logout", &user, source(peer.ip(), &headers)).await;
+    crate::audit::login_event(
+      &s,
+      "logout",
+      &user,
+      source(peer.ip(), &headers),
+    )
+    .await;
   }
   if let Some(id) = cookie_value(&headers) {
     let hash = hash_token(id);

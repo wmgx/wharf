@@ -216,10 +216,7 @@ mod tests {
       "/api/services/blog/terminal"
     ));
     assert!(!should_record(&Method::GET, "/api/services"));
-    assert!(!should_record(
-      &Method::GET,
-      "/api/services/blog/logs"
-    ));
+    assert!(!should_record(&Method::GET, "/api/services/blog/logs"));
     assert!(!should_record(&Method::POST, "/ping/abc"));
     assert!(!should_record(&Method::POST, "/agent/join"));
     assert!(!should_record(&Method::POST, "/api/login"));

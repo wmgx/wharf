@@ -142,7 +142,9 @@ impl FromRequestParts<Arc<AppState>> for Auth {
     state: &Arc<AppState>,
   ) -> Result<Self, Self::Rejection> {
     let auth = authenticate(parts, state).await?;
-    if let Some(slot) = parts.extensions.get::<crate::audit::AuditSlot>() {
+    if let Some(slot) =
+      parts.extensions.get::<crate::audit::AuditSlot>()
+    {
       slot.set_actor(&auth.name);
     }
     Ok(auth)
