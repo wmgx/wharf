@@ -69,12 +69,23 @@ pub async fn observe(state: &AppState, report: &DoctorReport) {
         },
       );
     }
+    // 除了 HTTPS 这层，还有哪一层不通：多半就是原因。
+    let cause = r
+      .checks
+      .iter()
+      .find(|c| c.status == CheckStatus::Bad && c.layer != web.layer);
+    let detail = match cause {
+      Some(c) if !ok => {
+        format!("{}：{}；{}：{}", r.url, web.detail, c.subject, c.detail)
+      }
+      _ => format!("{}：{}", r.url, web.detail),
+    };
     crate::rules::observe(
       state,
       "probe.ok",
       &host,
       f64::from(u8::from(ok)),
-      &format!("{}：{}", r.url, web.detail),
+      &detail,
     )
     .await;
   }

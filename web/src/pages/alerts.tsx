@@ -48,6 +48,15 @@ export function Alerts() {
     }
   };
 
+  const setOptions = async (include_logs: boolean) => {
+    try {
+      setView(await api.put<AlertsView>("/api/alerts/options", { include_logs }));
+      refresh();
+    } catch (e) {
+      toast.error("保存失败", { description: (e as Error).message });
+    }
+  };
+
   if (!v) return null;
   const nameOf = (id: string) => v.rules.find((r) => r.id === id)?.name ?? v.notices.find((n) => n.id === id)?.name ?? id;
 
@@ -124,6 +133,10 @@ export function Alerts() {
         ))}
       </div>
 
+      <label className="mt-6 flex w-fit cursor-pointer items-center gap-2.5 text-sm">
+        <Checkbox checked={!!v.include_logs} onCheckedChange={(c) => setOptions(c === true)} />
+        告警附带日志
+      </label>
       <SectionTitle count={v.history.length}>最近推送</SectionTitle>
       {v.history.length ? (
         <div className="grid gap-1.5 rounded-xl border bg-card p-4 text-sm shadow-xs">

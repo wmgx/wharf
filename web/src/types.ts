@@ -750,6 +750,7 @@ export interface NoticeView {
 }
 
 export interface AlertsView {
+  include_logs?: boolean;
   rules: AlertRuleView[];
   notices: NoticeView[];
   firing: { rule: string; subject: string; title: string; since: number }[];
