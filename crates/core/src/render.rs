@@ -207,6 +207,10 @@ struct ComposeService {
   image: String,
   restart: &'static str,
   #[serde(skip_serializing_if = "Option::is_none")]
+  mem_limit: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  cpus: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
   network_mode: Option<&'static str>,
   #[serde(skip_serializing_if = "Option::is_none")]
   entrypoint: Option<Vec<String>>,
@@ -293,6 +297,12 @@ pub fn build_port(ports: &[PortSpec]) -> u16 {
   ports.first().and_then(|p| p.container).unwrap_or(8080)
 }
 
+/// compose 里 cpus 的写法：500 → "0.5"，1000 → "1"，1250 → "1.25"。
+fn cpus_text(milli: u32) -> String {
+  let s = format!("{:.3}", f64::from(milli) / 1000.0);
+  s.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
 /// 服务的 compose 文件。image 来源自动生成；compose 来源原样使用。
 /// 端口只绑定 127.0.0.1 和内网地址，不绑定 0.0.0.0。
 pub fn service_compose(
@@ -344,6 +354,16 @@ pub fn service_compose(
           ComposeService {
             image,
             restart: "unless-stopped",
+            mem_limit: spec
+              .limits
+              .as_ref()
+              .and_then(|l| l.memory_mb)
+              .map(|mb| format!("{mb}m")),
+            cpus: spec
+              .limits
+              .as_ref()
+              .and_then(|l| l.cpu_milli)
+              .map(cpus_text),
             network_mode: None,
             entrypoint: None,
             command: None,
@@ -416,6 +436,8 @@ pub fn tunnel_compose(name: &str, spec: &GatewaySpec) -> String {
       ComposeService {
         image: gateway_image(spec),
         restart: "unless-stopped",
+        mem_limit: None,
+        cpus: None,
         network_mode: Some("host"),
         entrypoint: None,
         command: Some(
@@ -449,6 +471,8 @@ pub fn gateway_compose(name: &str, spec: &GatewaySpec) -> String {
       ComposeService {
         image: gateway_image(spec),
         restart: "unless-stopped",
+        mem_limit: None,
+        cpus: None,
         network_mode: Some("host"),
         entrypoint: None,
         command: Some(
@@ -505,6 +529,8 @@ pub fn backup_server_compose(
       ComposeService {
         image: REST_SERVER_IMAGE.to_string(),
         restart: "unless-stopped",
+        mem_limit: None,
+        cpus: None,
         network_mode: Some("host"),
         entrypoint: None,
         command: Some(vec!["sh".into(), "-c".into(), script]),
@@ -566,6 +592,8 @@ fn frp_service(
   ComposeService {
     image: image.to_string(),
     restart: "unless-stopped",
+    mem_limit: None,
+    cpus: None,
     network_mode: Some("host"),
     entrypoint: Some(vec!["sh".into(), "-c".into()]),
     command: Some(vec![format!(
@@ -709,6 +737,7 @@ mod tests {
       backup: None,
       stopped: false,
       monitor: None,
+      limits: None,
       server: "node1".into(),
       source: Source::Image("traefik/whoami".into()),
       ports: vec![PortSpec {
@@ -757,6 +786,30 @@ mod tests {
       service_compose("whoami", &spec(), &ports, &[], None).unwrap();
     assert!(template.contains("[[WHO_TOKEN]]"));
     assert!(!template.contains("s3"));
+  }
+
+  #[test]
+  fn service_limits_are_optional() {
+    let mut spec = spec();
+    let out =
+      service_compose("s1", &spec, &BTreeMap::new(), &[], None)
+        .unwrap();
+    assert!(!out.contains("mem_limit"));
+    assert!(!out.contains("cpus"));
+    spec.limits = Some(wharf_api_types::spec::Limits {
+      memory_mb: Some(512),
+      cpu_milli: Some(500),
+    });
+    let out =
+      service_compose("s1", &spec, &BTreeMap::new(), &[], None)
+        .unwrap();
+    let yaml: serde_yaml_ng::Value =
+      serde_yaml_ng::from_str(&out).unwrap();
+    let svc = &yaml["services"]["s1"];
+    assert_eq!(svc["mem_limit"], "512m");
+    assert_eq!(svc["cpus"], "0.5");
+    assert_eq!(cpus_text(1000), "1");
+    assert_eq!(cpus_text(1250), "1.25");
   }
 
   #[test]

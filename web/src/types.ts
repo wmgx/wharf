@@ -106,6 +106,8 @@ export interface ServiceSpec {
   stopped?: boolean;
   /** 自定义监控。 */
   monitor?: MonitorSpec;
+  /** 资源上限：内存 MB、CPU 千分之一核。 */
+  limits?: { memory_mb?: number; cpu_milli?: number };
 }
 
 export interface MonitorSpec {
