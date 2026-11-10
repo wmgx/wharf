@@ -1647,9 +1647,7 @@ async fn service(
       apply,
     } => {
       if cpus.is_some_and(|n| {
-        !n.is_finite()
-          || n < 0.0
-          || n * 1000.0 > f64::from(u32::MAX)
+        !n.is_finite() || n < 0.0 || n * 1000.0 > f64::from(u32::MAX)
       }) {
         return Err(
           ApiError::invalid("CPU 上限不合法")
@@ -1673,8 +1671,8 @@ async fn service(
           limits.memory_mb = (memory != 0).then_some(memory);
         }
         if let Some(cpus) = cpus {
-          limits.cpu_milli = (cpus != 0.0)
-            .then_some((cpus * 1000.0).round() as u32);
+          limits.cpu_milli =
+            (cpus != 0.0).then_some((cpus * 1000.0).round() as u32);
         }
       }
       changes(

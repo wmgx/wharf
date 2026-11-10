@@ -262,13 +262,9 @@ impl World {
             .and_then(|o| o.commit.clone());
           // compose 来源没填端口时按 compose 里映射的端口补上，否则服务没有内网地址。
           let mut spec = spec.clone();
-          if spec
-            .limits
-            .as_ref()
-            .is_some_and(|l| {
-              l.memory_mb.is_none() && l.cpu_milli.is_none()
-            })
-          {
+          if spec.limits.as_ref().is_some_and(|l| {
+            l.memory_mb.is_none() && l.cpu_milli.is_none()
+          }) {
             spec.limits = None;
           }
           if let Some(limits) = &spec.limits {
@@ -277,7 +273,9 @@ impl World {
                 ApiError::invalid(format!(
                   "服务 {name} 是 compose 来源，不能在这里设资源上限"
                 ))
-                .with_hint("在 compose 文件里自己写 mem_limit 和 cpus"),
+                .with_hint(
+                  "在 compose 文件里自己写 mem_limit 和 cpus",
+                ),
               );
             }
             if limits.memory_mb.is_some_and(|n| n < 32) {
