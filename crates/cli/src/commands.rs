@@ -1378,6 +1378,31 @@ async fn service(
       )
       .await
     }
+    ServiceCmd::Timeline { name, limit, before } => {
+      let mut path = format!(
+        "/api/services/{}/timeline?limit={limit}",
+        seg(&name)
+      );
+      if let Some(before) = before {
+        path.push_str(&format!("&before={before}"));
+      }
+      let v: wharf_api_types::view::Timeline = c.get(&path).await?;
+      out(j, &v, |v| {
+        for item in &v.items {
+          let result = match item.ok {
+            Some(true) => "成功",
+            Some(false) => "失败",
+            None => "",
+          };
+          println!(
+            "{}  {}  {}  {}  {}",
+            fmt_ms(item.at), item.kind, item.title, result,
+            item.actor.as_deref().unwrap_or_default()
+          );
+        }
+      });
+      Ok(())
+    }
     ServiceCmd::Logs {
       name,
       tail,

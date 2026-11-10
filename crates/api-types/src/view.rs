@@ -1190,3 +1190,24 @@ pub struct AuditEntry {
   pub detail: Option<String>,
   pub source: Option<String>,
 }
+
+/// 服务时间线上的一条。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TimelineItem {
+  pub at: i64,
+  /// deploy / backup / task / heal / alert / op
+  pub kind: String,
+  pub title: String,
+  /// 成功还是失败；没有这个概念的（自动重启）为空。
+  pub ok: Option<bool>,
+  /// 只有 op 有：谁做的。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub actor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct Timeline {
+  pub items: Vec<TimelineItem>,
+  /// 还有更早的记录时，下一页用它作 `before`。
+  pub next_before: Option<i64>,
+}
