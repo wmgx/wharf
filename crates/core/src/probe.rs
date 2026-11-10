@@ -76,7 +76,10 @@ pub async fn observe(state: &AppState, report: &DoctorReport) {
       .find(|c| c.status == CheckStatus::Bad && c.layer != web.layer);
     let detail = match cause {
       Some(c) if !ok => {
-        format!("{}：{}；{}：{}", r.url, web.detail, c.subject, c.detail)
+        format!(
+          "{}：{}；{}：{}",
+          r.url, web.detail, c.subject, c.detail
+        )
       }
       _ => format!("{}：{}", r.url, web.detail),
     };
