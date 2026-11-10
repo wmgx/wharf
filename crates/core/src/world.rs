@@ -7,8 +7,8 @@ use wharf_api_types::{
   ApiError,
   spec::{
     AdoptSpec, BuildSource, Change, EdgeAppSpec, Fleet, GatewayKind,
-    GatewaySpec, GatewayTls, LinkMode, RouteSpec, ServerSettings, ServiceSpec,
-    Source,
+    GatewaySpec, GatewayTls, LinkMode, RouteSpec, ServerSettings,
+    ServiceSpec, Source,
   },
   validate_name,
 };
@@ -698,16 +698,24 @@ impl World {
       )));
     }
     let target_host = redirect_host(target).ok_or_else(|| {
-      ApiError::invalid(format!("路由 {host} 的跳转目标 {target} 不合法"))
-        .with_hint("写成 https://主机[:端口][/路径]，不带 ?、#，末尾不带 /")
+      ApiError::invalid(format!(
+        "路由 {host} 的跳转目标 {target} 不合法"
+      ))
+      .with_hint(
+        "写成 https://主机[:端口][/路径]，不带 ?、#，末尾不带 /",
+      )
     })?;
     if target_host.eq_ignore_ascii_case(host) {
-      return Err(ApiError::invalid(format!("路由 {host} 不能跳转到自己")));
+      return Err(ApiError::invalid(format!(
+        "路由 {host} 不能跳转到自己"
+      )));
     }
     if self.route_gateways(route).iter().any(|name| {
       self.gateways[*name].spec.kind == GatewayKind::CloudflareTunnel
     }) {
-      return Err(ApiError::invalid(format!("路由 {host}：跳转只支持 caddy 网关")));
+      return Err(ApiError::invalid(format!(
+        "路由 {host}：跳转只支持 caddy 网关"
+      )));
     }
     Ok(())
   }
@@ -1454,7 +1462,10 @@ mod tests {
   #[test]
   fn redirect_target_uses_safe_characters() {
     assert_eq!(redirect_host("https://a.com"), Some("a.com"));
-    assert_eq!(redirect_host("http://a.com:8080/blog"), Some("a.com"));
+    assert_eq!(
+      redirect_host("http://a.com:8080/blog"),
+      Some("a.com")
+    );
     for target in [
       "a.com",
       "https://a.com/",

@@ -2026,7 +2026,11 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
           println!(
             "{}  →  {}  经 {}",
             r.url,
-            r.spec.redirect.as_deref().or(r.spec.upstream.as_deref()).unwrap_or(&r.spec.service),
+            r.spec
+              .redirect
+              .as_deref()
+              .or(r.spec.upstream.as_deref())
+              .unwrap_or(&r.spec.service),
             r.gateway.as_deref().unwrap_or("-")
           );
           for p in &r.spec.paths {
