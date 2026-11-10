@@ -500,7 +500,7 @@ impl GatewayTls {
 pub struct RouteSpec {
   /// 例如 `blog.example.com`。
   pub hostname: String,
-  /// 目标服务。和 `upstream` 二选一。边缘应用的域名写在边缘应用的 `domains` 里。
+  /// 目标服务。和 `upstream`、`redirect` 三选一。边缘应用的域名写在边缘应用的 `domains` 里。
   #[serde(default, skip_serializing_if = "String::is_empty")]
   pub service: String,
   /// 不归 Wharf 管的上游，写网关所在机器能访问到的 `主机:端口`，例如 `127.0.0.1:7700`。
@@ -525,6 +525,10 @@ pub struct RouteSpec {
   /// 网关到服务的走法。不填为自动：同机、能直连内网地址就直连，否则走反向隧道。
   #[serde(default, skip_serializing_if = "LinkMode::is_auto")]
   pub link: LinkMode,
+  /// 跳转：整个域名 301 到这个网址，保留路径和参数，例如 `https://a.com`。
+  /// 和 `service`、`upstream` 三选一。只支持 caddy 网关。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub redirect: Option<String>,
 }
 
 /// 网关到服务的走法偏好。
