@@ -196,6 +196,10 @@ pub fn router(state: Arc<AppState>) -> Router {
       get(crate::rollback::target),
     )
     .route("/api/services/{name}/deployments", get(deployments))
+    .route(
+      "/api/services/{name}/timeline",
+      get(crate::timeline::show),
+    )
     .route("/api/services/{name}/note", put(set_note))
     .route("/api/vault", get(show_vault).put(set_vault))
     .route(
