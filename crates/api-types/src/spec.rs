@@ -327,6 +327,9 @@ pub struct ServiceSpec {
   /// 自定义监控：服务所在机器的 agent 每分钟从本机请求一次，连续 3 次不正常推送。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub monitor: Option<MonitorSpec>,
+  /// 资源上限，不填不限。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub limits: Option<Limits>,
 }
 
 impl ServiceSpec {
@@ -366,6 +369,19 @@ pub struct MonitorSpec {
   /// 响应里必须包含的文字（只看前 64KB）。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub keyword: Option<String>,
+}
+
+/// 资源上限。只对 image 和 build 来源生效。
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct Limits {
+  /// 内存上限，单位 MB。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub memory_mb: Option<u32>,
+  /// CPU 上限，单位是千分之一核，500 表示 0.5 核。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub cpu_milli: Option<u32>,
 }
 
 fn default_monitor_path() -> String {
