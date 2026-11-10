@@ -1378,7 +1378,11 @@ async fn service(
       )
       .await
     }
-    ServiceCmd::Timeline { name, limit, before } => {
+    ServiceCmd::Timeline {
+      name,
+      limit,
+      before,
+    } => {
       let mut path = format!(
         "/api/services/{}/timeline?limit={limit}",
         seg(&name)
@@ -1396,7 +1400,10 @@ async fn service(
           };
           println!(
             "{}  {}  {}  {}  {}",
-            fmt_ms(item.at), item.kind, item.title, result,
+            fmt_ms(item.at),
+            item.kind,
+            item.title,
+            result,
             item.actor.as_deref().unwrap_or_default()
           );
         }
