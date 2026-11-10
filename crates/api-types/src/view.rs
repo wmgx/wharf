@@ -1175,3 +1175,18 @@ pub struct AlertPatch {
 pub struct AlertOptions {
   pub include_logs: bool,
 }
+
+/// 一条操作记录或登录记录。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AuditEntry {
+  pub id: i64,
+  pub at: i64,
+  pub kind: String,
+  pub actor: String,
+  pub method: String,
+  pub path: String,
+  pub status: Option<u16>,
+  pub duration_ms: Option<i64>,
+  pub detail: Option<String>,
+  pub source: Option<String>,
+}

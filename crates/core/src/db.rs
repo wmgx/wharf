@@ -290,6 +290,22 @@ FROM resources r, secrets s
 WHERE r.kind = 'route' AND json_extract(r.spec, '$.auth') = 1 AND s.name = 'BASIC_AUTH';
 DELETE FROM secrets WHERE name = 'BASIC_AUTH';
 "#,
+  r#"
+CREATE TABLE audit_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  at INTEGER NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('api', 'login')),
+  actor TEXT NOT NULL,
+  method TEXT NOT NULL,
+  path TEXT NOT NULL,
+  status INTEGER,
+  duration_ms INTEGER,
+  detail TEXT,
+  source TEXT
+);
+CREATE INDEX audit_log_actor ON audit_log (actor, id);
+CREATE INDEX audit_log_at ON audit_log (at);
+"#,
 ];
 
 /// git 构建来源固定到上次部署构建的 commit（仓库和分支没换过的）。当时没记下 commit 的留给 plan 提醒。

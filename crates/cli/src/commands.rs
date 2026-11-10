@@ -137,6 +137,9 @@ async fn dispatch(
       cwd,
       command,
     } => host_exec(c, server, timeout, cwd, command, j).await,
+    Command::Audit { actor, kind, limit } => {
+      crate::audit::audit(c, actor, kind, limit, j).await
+    }
     Command::ShellLog { server, limit } => {
       shell_log(c, server, limit, j).await
     }
