@@ -67,12 +67,12 @@ export function LimitsCard({ svc }: { svc: ServiceView }) {
         </div>
         {editing && (
           <div className="grid gap-3 sm:grid-cols-2">
-            <Field label="内存（MB）">
-              <Input type="number" min={32} step={1} value={memory} onChange={(e) => setMemory(e.target.value)} />
+            <Field label="内存（MB）" htmlFor={`${svc.name}-memory-limit`}>
+              <Input id={`${svc.name}-memory-limit`} type="number" min={32} step={1} value={memory} onChange={(e) => setMemory(e.target.value)} />
               {points.length > 0 && <span className="text-xs text-muted-foreground">近 7 天最高 {bytes(peak)}</span>}
             </Field>
-            <Field label="CPU（核）">
-              <Input type="number" min={0.01} step={0.01} value={cpus} onChange={(e) => setCpus(e.target.value)} />
+            <Field label="CPU（核）" htmlFor={`${svc.name}-cpu-limit`}>
+              <Input id={`${svc.name}-cpu-limit`} type="number" min={0.01} step={0.01} value={cpus} onChange={(e) => setCpus(e.target.value)} />
             </Field>
             <div className="flex flex-wrap gap-2 sm:col-span-2">
               <Button size="sm" disabled={!valid} onClick={save}>生成计划</Button>
