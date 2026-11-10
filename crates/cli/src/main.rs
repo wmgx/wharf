@@ -7,6 +7,7 @@
 
 use clap::{Args, Parser, Subcommand};
 
+mod audit;
 mod client;
 mod commands;
 mod connect;
@@ -137,6 +138,17 @@ pub enum Command {
     /// 完整 shell 命令；写在 `--` 后并用本地 shell 引号保护。
     #[arg(last = true, required = true)]
     command: String,
+  },
+  /// 操作记录和登录记录：谁在什么时候做了什么。
+  Audit {
+    /// 只看这个发起人（令牌名，或 页面:<用户名>）。
+    #[arg(long)]
+    actor: Option<String>,
+    /// 只看一类：api 或 login。
+    #[arg(long, value_parser = ["api", "login"])]
+    kind: Option<String>,
+    #[arg(long, default_value_t = 50)]
+    limit: u32,
   },
   /// 宿主机终端和命令执行审计。
   ShellLog {

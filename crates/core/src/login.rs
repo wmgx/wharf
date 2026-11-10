@@ -76,6 +76,22 @@ fn client_key(peer: std::net::IpAddr, headers: &HeaderMap) -> String {
     .unwrap_or_else(|| peer.to_string())
 }
 
+fn source(peer: std::net::IpAddr, headers: &HeaderMap) -> String {
+  let addr = client_key(peer, headers);
+  match headers
+    .get(header::USER_AGENT)
+    .and_then(|v| v.to_str().ok())
+  {
+    Some(agent) => {
+      format!(
+        "{addr} {}",
+        agent.chars().take(120).collect::<String>()
+      )
+    }
+    None => addr,
+  }
+}
+
 /// 还在锁定期时返回剩余分钟数：这个来源或全部来源超过上限都算。
 fn locked(key: &str) -> Option<u64> {
   let map = FAILURES.lock().unwrap_or_else(|e| e.into_inner());
@@ -338,6 +354,9 @@ async fn start_session(
 /// `POST /api/setup`：首次设置管理员账号，设置完直接登录。
 pub async fn setup(
   axum::extract::State(s): axum::extract::State<Arc<AppState>>,
+  axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<
+    std::net::SocketAddr,
+  >,
   headers: HeaderMap,
   Json(req): Json<SetupRequest>,
 ) -> Result<Response, AppError> {
@@ -377,6 +396,13 @@ pub async fn setup(
     .await?;
   let _ = std::fs::remove_file(s.data_dir.join(SETUP_CODE));
   tracing::info!("已在页面上设置管理员账号 {username}");
+  crate::audit::login_event(
+    &s,
+    "setup",
+    &username,
+    source(peer.ip(), &headers),
+  )
+  .await;
   start_session(&s, &headers, username).await
 }
 
@@ -400,14 +426,23 @@ pub async fn login(
     );
   }
   let username = req.username.trim().to_lowercase();
-  let ok = match admin(&s.db).await? {
-    Some((name, hash)) => {
-      name == username && verify_password(&req.password, &hash)
-    }
-    None => false,
-  };
+  let account = admin(&s.db).await?;
+  let ok = account.as_ref().is_some_and(|(name, hash)| {
+    name == &username && verify_password(&req.password, hash)
+  });
   if !ok {
     record_failure(&key);
+    let actor = account
+      .as_ref()
+      .filter(|(name, _)| name == &username)
+      .map_or("未知用户", |(name, _)| name.as_str());
+    crate::audit::login_event(
+      &s,
+      "login_failed",
+      actor,
+      source(peer.ip(), &headers),
+    )
+    .await;
     // 拖慢猜密码。
     tokio::time::sleep(Duration::from_secs(1)).await;
     return Err(
@@ -418,14 +453,33 @@ pub async fn login(
     .lock()
     .unwrap_or_else(|e| e.into_inner())
     .remove(&key);
+  crate::audit::login_event(
+    &s,
+    "login",
+    &username,
+    source(peer.ip(), &headers),
+  )
+  .await;
   start_session(&s, &headers, username).await
 }
 
 /// `POST /api/logout`：删掉这个浏览器的会话。
 pub async fn logout(
   axum::extract::State(s): axum::extract::State<Arc<AppState>>,
+  axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<
+    std::net::SocketAddr,
+  >,
   headers: HeaderMap,
 ) -> Result<Response, AppError> {
+  if let Ok(Some(user)) = session_user(&s, &headers).await {
+    crate::audit::login_event(
+      &s,
+      "logout",
+      &user,
+      source(peer.ip(), &headers),
+    )
+    .await;
+  }
   if let Some(id) = cookie_value(&headers) {
     let hash = hash_token(id);
     s.db
