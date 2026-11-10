@@ -278,6 +278,16 @@ pub fn gateway_render(
     if !world.route_gateways(&route.spec).contains(&name) {
       continue;
     }
+    if let Some(target) = &route.spec.redirect {
+      sites.push(render::Site {
+        hostname: host.clone(),
+        upstream: String::new(),
+        auth: None,
+        paths: Vec::new(),
+        redirect: Some(target.clone()),
+      });
+      continue;
+    }
     let tunnel = gateway.spec.kind == GatewayKind::CloudflareTunnel;
     if route.spec.auth && tunnel {
       return Err(ApiError::invalid(format!(
@@ -330,6 +340,7 @@ pub fn gateway_render(
       paths.push((p.path.clone(), upstream));
     }
     sites.push(render::Site {
+      redirect: None,
       paths,
       auth: route
         .spec
