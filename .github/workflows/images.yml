@@ -57,6 +57,33 @@ jobs:
           build-args: WHARF_BUILD=${{ steps.tag.outputs.build }}
           cache-from: type=gha
 
+  # 用刚推上去的镜像跑端到端验证。观察期内失败不让整个 workflow 变红。
+  e2e:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    continue-on-error: true
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: e2e
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          tag="sha-${GITHUB_SHA::7}"
+          export CORE_IMAGE="ghcr.io/$OWNER/wharf-core:$tag"
+          export AGENT_IMAGE="ghcr.io/$OWNER/wharf-agent:$tag"
+          docker pull "$CORE_IMAGE"
+          docker pull "$AGENT_IMAGE"
+          scripts/e2e.sh
+
   cli:
     strategy:
       fail-fast: false
