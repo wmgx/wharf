@@ -69,6 +69,7 @@ mod status;
 mod tailscale;
 mod tasks;
 mod terminal;
+mod timeline;
 mod traffic;
 mod tunnel;
 mod updates;

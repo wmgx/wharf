@@ -554,7 +554,7 @@ pub async fn notice(
   }
   let o = config(state).await.get(id).cloned().unwrap_or_default();
   if !o.enabled() {
-    record(state, id, &event, ok, Some("已关闭".into())).await;
+    record(state, id, None, &event, ok, Some("已关闭".into())).await;
     return;
   }
   push(state, id, None, &o, ok, event).await;
@@ -584,7 +584,7 @@ async fn push(
     Some(s) => Some(s),
     None => notify::deliver(state, &event).await,
   };
-  record(state, id, &event, ok, skipped).await;
+  record(state, id, subject, &event, ok, skipped).await;
 }
 
 /// 开始触发（已经在触发就保留原来的开始时间）或结束触发，内存和库一起改。
@@ -631,18 +631,20 @@ async fn set_firing(
 async fn record(
   state: &AppState,
   id: &str,
+  subject: Option<&str>,
   event: &Event,
   ok: bool,
   skipped: Option<String>,
 ) {
   let (id, title) = (id.to_string(), event.title.clone());
+  let subject = subject.map(str::to_string);
   let now = now_ms();
   let result = state
     .db
     .call(move |c| {
       c.execute(
-        "INSERT INTO alert_history (at, source, title, ok, skipped) VALUES (?1, ?2, ?3, ?4, ?5)",
-        rusqlite::params![now, id, title, ok, skipped],
+        "INSERT INTO alert_history (at, source, subject, title, ok, skipped) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params![now, id, subject, title, ok, skipped],
       )
       .and_then(|_| {
         c.execute(
