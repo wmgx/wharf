@@ -32,7 +32,12 @@ pub async fn show(
   Query(q): Query<TimelineQuery>,
 ) -> ApiResult<Timeline> {
   auth.require(Perm::Read)?;
-  if !snapshot::load(&state.db).await?.world.services.contains_key(&name) {
+  if !snapshot::load(&state.db)
+    .await?
+    .world
+    .services
+    .contains_key(&name)
+  {
     return Err(service_not_found(&name).into());
   }
   let before = q.before.unwrap_or(i64::MAX);
@@ -60,15 +65,17 @@ fn read(
        ) WHERE page <= ?3 ORDER BY created_at DESC",
     )?;
   rows.extend(
-    stmt.query_map(params![name, before, limit as i64 + 1], |r| {
-      Ok(TimelineItem {
-        at: r.get(0)?,
-        kind: "deploy".into(),
-        title: "部署".into(),
-        ok: Some(true),
-        actor: None,
-      })
-    })?.collect::<rusqlite::Result<Vec<_>>>()?,
+    stmt
+      .query_map(params![name, before, limit as i64 + 1], |r| {
+        Ok(TimelineItem {
+          at: r.get(0)?,
+          kind: "deploy".into(),
+          title: "部署".into(),
+          ok: Some(true),
+          actor: None,
+        })
+      })?
+      .collect::<rusqlite::Result<Vec<_>>>()?,
   );
   let mut stmt = c.prepare(
       "SELECT created_at, ok FROM (
@@ -77,15 +84,17 @@ fn read(
        ) WHERE page <= ?3 ORDER BY created_at DESC",
     )?;
   rows.extend(
-    stmt.query_map(params![name, before, limit as i64 + 1], |r| {
-      Ok(TimelineItem {
-        at: r.get(0)?,
-        kind: "backup".into(),
-        title: "备份".into(),
-        ok: Some(r.get(1)?),
-        actor: None,
-      })
-    })?.collect::<rusqlite::Result<Vec<_>>>()?,
+    stmt
+      .query_map(params![name, before, limit as i64 + 1], |r| {
+        Ok(TimelineItem {
+          at: r.get(0)?,
+          kind: "backup".into(),
+          title: "备份".into(),
+          ok: Some(r.get(1)?),
+          actor: None,
+        })
+      })?
+      .collect::<rusqlite::Result<Vec<_>>>()?,
   );
   let mut stmt = c.prepare(
       "SELECT started_at, task, status FROM (
@@ -94,19 +103,21 @@ fn read(
        ) WHERE page <= ?3 ORDER BY started_at DESC",
     )?;
   rows.extend(
-    stmt.query_map(params![name, before, limit as i64 + 1], |r| {
-      Ok(TimelineItem {
-        at: r.get(0)?,
-        kind: "task".into(),
-        title: format!("任务 {}", r.get::<_, String>(1)?),
-        ok: match r.get::<_, String>(2)?.as_str() {
+    stmt
+      .query_map(params![name, before, limit as i64 + 1], |r| {
+        Ok(TimelineItem {
+          at: r.get(0)?,
+          kind: "task".into(),
+          title: format!("任务 {}", r.get::<_, String>(1)?),
+          ok: match r.get::<_, String>(2)?.as_str() {
             "succeeded" => Some(true),
             "running" => None,
             _ => Some(false),
           },
-        actor: None,
-      })
-    })?.collect::<rusqlite::Result<Vec<_>>>()?,
+          actor: None,
+        })
+      })?
+      .collect::<rusqlite::Result<Vec<_>>>()?,
   );
   let mut stmt = c.prepare(
       "SELECT at FROM (
@@ -115,15 +126,17 @@ fn read(
        ) WHERE page <= ?3 ORDER BY at DESC",
     )?;
   rows.extend(
-    stmt.query_map(params![name, before, limit as i64 + 1], |r| {
-      Ok(TimelineItem {
-        at: r.get(0)?,
-        kind: "heal".into(),
-        title: "自动重启".into(),
-        ok: None,
-        actor: None,
-      })
-    })?.collect::<rusqlite::Result<Vec<_>>>()?,
+    stmt
+      .query_map(params![name, before, limit as i64 + 1], |r| {
+        Ok(TimelineItem {
+          at: r.get(0)?,
+          kind: "heal".into(),
+          title: "自动重启".into(),
+          ok: None,
+          actor: None,
+        })
+      })?
+      .collect::<rusqlite::Result<Vec<_>>>()?,
   );
   let mut stmt = c.prepare(
       "SELECT at, title, ok FROM (
@@ -132,15 +145,17 @@ fn read(
        ) WHERE page <= ?3 ORDER BY at DESC",
     )?;
   rows.extend(
-    stmt.query_map(params![name, before, limit as i64 + 1], |r| {
-      Ok(TimelineItem {
-        at: r.get(0)?,
-        kind: "alert".into(),
-        title: r.get(1)?,
-        ok: Some(r.get(2)?),
-        actor: None,
-      })
-    })?.collect::<rusqlite::Result<Vec<_>>>()?,
+    stmt
+      .query_map(params![name, before, limit as i64 + 1], |r| {
+        Ok(TimelineItem {
+          at: r.get(0)?,
+          kind: "alert".into(),
+          title: r.get(1)?,
+          ok: Some(r.get(2)?),
+          actor: None,
+        })
+      })?
+      .collect::<rusqlite::Result<Vec<_>>>()?,
   );
   let mut stmt = c.prepare(
       "SELECT at, actor, method, path, status FROM (
@@ -149,17 +164,23 @@ fn read(
        ) WHERE page <= ?3 ORDER BY at DESC",
     )?;
   rows.extend(
-    stmt.query_map(params![name, before, limit as i64 + 1], |r| {
-      let path: String = r.get(3)?;
-      let prefix = format!("/api/services/{name}");
-      Ok(TimelineItem {
-        at: r.get(0)?,
-        kind: "op".into(),
-        title: format!("{} {}", r.get::<_, String>(2)?, &path[prefix.len()..]),
-        ok: Some(r.get::<_, u16>(4)? < 400),
-        actor: Some(r.get(1)?),
-      })
-    })?.collect::<rusqlite::Result<Vec<_>>>()?,
+    stmt
+      .query_map(params![name, before, limit as i64 + 1], |r| {
+        let path: String = r.get(3)?;
+        let prefix = format!("/api/services/{name}");
+        Ok(TimelineItem {
+          at: r.get(0)?,
+          kind: "op".into(),
+          title: format!(
+            "{} {}",
+            r.get::<_, String>(2)?,
+            &path[prefix.len()..]
+          ),
+          ok: Some(r.get::<_, u16>(4)? < 400),
+          actor: Some(r.get(1)?),
+        })
+      })?
+      .collect::<rusqlite::Result<Vec<_>>>()?,
   );
   Ok(rows)
 }
@@ -185,16 +206,22 @@ mod tests {
   #[test]
   fn merge_keeps_complete_milliseconds() {
     let rows = |times: &[i64]| {
-      times.iter().map(|&at| TimelineItem {
-        at,
-        kind: "deploy".into(),
-        title: "部署".into(),
-        ok: Some(true),
-        actor: None,
-      }).collect()
+      times
+        .iter()
+        .map(|&at| TimelineItem {
+          at,
+          kind: "deploy".into(),
+          title: "部署".into(),
+          ok: Some(true),
+          actor: None,
+        })
+        .collect()
     };
     let (items, next) = merge(rows(&[1, 3, 2]), 5);
-    assert_eq!(items.iter().map(|i| i.at).collect::<Vec<_>>(), [3, 2, 1]);
+    assert_eq!(
+      items.iter().map(|i| i.at).collect::<Vec<_>>(),
+      [3, 2, 1]
+    );
     assert_eq!(next, None);
     let (items, next) = merge(rows(&[5, 4, 3, 2, 1]), 3);
     assert_eq!(items.len(), 3);

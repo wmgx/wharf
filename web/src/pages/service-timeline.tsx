@@ -7,7 +7,12 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import type { Timeline } from "@/types";
 
 const KINDS: Record<string, string> = {
-  deploy: "部署", backup: "备份", task: "任务", heal: "自动重启", alert: "告警", op: "操作",
+  deploy: "部署",
+  backup: "备份",
+  task: "任务",
+  heal: "自动重启",
+  alert: "告警",
+  op: "操作",
 };
 
 export function ServiceTimeline({ name }: { name: string }) {
@@ -55,7 +60,11 @@ export function ServiceTimeline({ name }: { name: string }) {
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>时间</TableHead><TableHead>类型</TableHead><TableHead>标题</TableHead><TableHead>结果</TableHead><TableHead>发起人</TableHead>
+              <TableHead>时间</TableHead>
+              <TableHead>类型</TableHead>
+              <TableHead>标题</TableHead>
+              <TableHead>结果</TableHead>
+              <TableHead>发起人</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
