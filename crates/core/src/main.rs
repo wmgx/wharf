@@ -11,6 +11,7 @@ mod alert_context;
 mod alerts;
 mod api;
 mod apply;
+mod audit;
 mod apt;
 mod auth;
 mod backup;

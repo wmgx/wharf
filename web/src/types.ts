@@ -764,3 +764,16 @@ export interface AlertPatch {
   mute_minutes?: number;
   reset?: boolean;
 }
+
+export interface AuditEntry {
+  id: number;
+  at: number;
+  kind: string;
+  actor: string;
+  method: string;
+  path: string;
+  status?: number;
+  duration_ms?: number;
+  detail?: string;
+  source?: string;
+}
