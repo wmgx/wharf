@@ -227,10 +227,12 @@ export interface GatewayView {
 
 export interface RouteSpec {
   hostname: string;
-  /** 和 upstream 二选一，指向地址时为空。 */
+  /** 和 upstream、redirect 三选一，指向地址或跳转时为空。 */
   service?: string;
   /** 不归 Wharf 管的上游，例如 127.0.0.1:7700。 */
   upstream?: string;
+  /** 只做跳转：整个域名 301 到这个网址。和 service、upstream 三选一。 */
+  redirect?: string;
   port?: string;
   gateway?: string;
   /** 另一台机器上的网关：主网关那台离线 5 分钟后 DNS 自动切过去。 */

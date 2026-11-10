@@ -716,13 +716,16 @@ pub enum RouteCmd {
     /// 服务或边缘应用（Workers / Pages）的名字。
     #[arg(
       long,
-      required_unless_present = "upstream",
-      conflicts_with = "upstream"
+      required_unless_present_any = ["upstream", "redirect"],
+      conflicts_with_all = ["upstream", "redirect"]
     )]
     service: Option<String>,
     /// 不归 Wharf 管的上游，写网关所在机器能访问到的 主机:端口，例如 127.0.0.1:7700。
     #[arg(long)]
     upstream: Option<String>,
+    /// 只做跳转：整个域名 301 到这个网址，保留路径和参数，例如 https://a.com。只支持 caddy 网关。
+    #[arg(long, conflicts_with = "upstream")]
+    redirect: Option<String>,
     /// 端口名，服务只有一个端口时可以不填。
     #[arg(long)]
     port: Option<String>,

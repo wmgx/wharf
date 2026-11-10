@@ -186,8 +186,10 @@ async fn route(
   let (https, cert_expires) =
     https(client, &view.url, view.spec.auth).await;
   checks.push(https);
-  let Some((gw_name, gw)) = gateway else {
-    // 边缘应用的域名直接指到厂商，不经过网关和服务器。
+  let Some((gw_name, gw)) =
+    gateway.filter(|_| view.spec.redirect.is_none())
+  else {
+    // 边缘应用的域名不经过网关；跳转的域名没有上游和容器。都只查到 HTTPS 这一层。
     return Some(RouteDiagnosis {
       hostname: host.into(),
       url: view.url,

@@ -665,6 +665,8 @@ pub struct Site {
   pub auth: Option<BasicAuth>,
   /// 按路径转发：（路径，上游）。
   pub paths: Vec<(String, String)>,
+  /// 跳转目标。有值时这个站点只做跳转，`upstream`、`auth`、`paths` 不用。
+  pub redirect: Option<String>,
 }
 
 pub fn caddyfile(
@@ -699,6 +701,12 @@ pub fn caddyfile(
   sites.sort_by(|a, b| a.hostname.cmp(&b.hostname));
   for site in sites {
     out.push_str(&format!("\n{scheme}{} {{\n", site.hostname));
+    if let Some(target) = &site.redirect {
+      out.push_str(&format!(
+        "\tredir {target}{{uri}} permanent\n}}\n"
+      ));
+      continue;
+    }
     if let Some(a) = &site.auth {
       out.push_str(&format!(
         "\tbasic_auth {{\n\t\t{} {}\n\t}}\n",
@@ -860,12 +868,14 @@ mod tests {
           upstream: "127.0.0.1:1".into(),
           auth: BasicAuth::parse("admin $2b$12$abc"),
           paths: vec![],
+          redirect: None,
         },
         Site {
           hostname: "a.example.com".into(),
           upstream: "100.1.1.1:2".into(),
           auth: None,
           paths: vec![("/ws".into(), "127.0.0.1:17891".into())],
+          redirect: None,
         },
       ],
       true,
@@ -902,11 +912,41 @@ mod tests {
         upstream: "127.0.0.1:1".into(),
         auth: None,
         paths: vec![],
+        redirect: None,
       }],
       false,
     );
     assert!(out.contains("auto_https off"));
     assert!(out.contains("\nhttp://a.example.com {"));
+  }
+
+  #[test]
+  fn caddyfile_redirect_keeps_uri() {
+    let gw = GatewaySpec {
+      kind: GatewayKind::Caddy,
+      server: "s1".into(),
+      default: true,
+      http_port: None,
+      https_port: None,
+      email: None,
+      image: None,
+      tls: GatewayTls::Auto,
+      account: None,
+    };
+    let out = caddyfile(
+      "edge",
+      &gw,
+      &[Site {
+        hostname: "www.a.com".into(),
+        upstream: String::new(),
+        auth: None,
+        paths: vec![],
+        redirect: Some("https://a.com".into()),
+      }],
+      false,
+    );
+    assert!(out.contains("\tredir https://a.com{uri} permanent\n"));
+    assert!(!out.contains("reverse_proxy"));
   }
 
   #[test]
