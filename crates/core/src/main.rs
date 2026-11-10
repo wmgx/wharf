@@ -7,6 +7,7 @@ use clap::Parser;
 use ed25519_dalek::SigningKey;
 
 mod agent_upgrade;
+mod alert_context;
 mod alerts;
 mod api;
 mod apply;

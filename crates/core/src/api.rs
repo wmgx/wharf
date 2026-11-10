@@ -273,6 +273,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route("/api/secrets", get(list_secrets))
     .route("/api/notify/test", post(crate::notify::test))
     .route("/api/alerts", get(crate::rules::list))
+    .route("/api/alerts/options", put(crate::rules::set_options))
     .route(
       "/api/alerts/{id}",
       axum::routing::put(crate::rules::patch),
