@@ -1777,9 +1777,18 @@ async fn pick_server(c: &Client) -> CliResult<String> {
 // GATEWAYS / ROUTES
 
 async fn alert(c: &Client, cmd: AlertCmd, j: bool) -> CliResult<()> {
-  use wharf_api_types::view::{AlertPatch, AlertsView};
+  use wharf_api_types::view::{AlertOptions, AlertPatch, AlertsView};
   let v: AlertsView = match cmd {
     AlertCmd::List => c.get("/api/alerts").await?,
+    AlertCmd::Options { include_logs } => {
+      c.put(
+        "/api/alerts/options",
+        &AlertOptions {
+          include_logs: include_logs == "on",
+        },
+      )
+      .await?
+    }
     AlertCmd::Set {
       id,
       on,
@@ -1830,6 +1839,10 @@ async fn alert(c: &Client, cmd: AlertCmd, j: bool) -> CliResult<()> {
         println!("  {}（{} 起）", f.title, fmt_ms(f.since));
       }
     }
+    println!(
+      "告警附带日志：{}",
+      if v.include_logs { "开" } else { "关" }
+    );
   });
   Ok(())
 }

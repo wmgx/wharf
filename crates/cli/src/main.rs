@@ -605,6 +605,11 @@ pub enum ServiceCmd {
 
 #[derive(Subcommand)]
 pub enum AlertCmd {
+  /// 告警里附带服务最近的日志：`wharf alert options --include-logs on`。
+  Options {
+    #[arg(long, value_parser = ["on", "off"])]
+    include_logs: String,
+  },
   /// 规则、事件通知、正在触发的告警、最近的推送。
   List,
   /// 改一条规则或事件通知（id 见 list）。只改给了的选项。
