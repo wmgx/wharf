@@ -262,6 +262,29 @@ impl World {
             .and_then(|o| o.commit.clone());
           // compose 来源没填端口时按 compose 里映射的端口补上，否则服务没有内网地址。
           let mut spec = spec.clone();
+          if spec.limits.as_ref().is_some_and(|l| {
+            l.memory_mb.is_none() && l.cpu_milli.is_none()
+          }) {
+            spec.limits = None;
+          }
+          if let Some(limits) = &spec.limits {
+            if matches!(spec.source, Source::Compose { .. }) {
+              return Err(
+                ApiError::invalid(format!(
+                  "服务 {name} 是 compose 来源，不能在这里设资源上限"
+                ))
+                .with_hint(
+                  "在 compose 文件里自己写 mem_limit 和 cpus",
+                ),
+              );
+            }
+            if limits.memory_mb.is_some_and(|n| n < 32) {
+              return Err(ApiError::invalid("内存上限至少 32 MB"));
+            }
+            if limits.cpu_milli.is_some_and(|n| n < 10) {
+              return Err(ApiError::invalid("CPU 上限至少 0.01 核"));
+            }
+          }
           if spec.ports.is_empty()
             && let Source::Compose {
               content: Some(content),
@@ -1304,6 +1327,7 @@ mod tests {
       backup: None,
       stopped: false,
       monitor: None,
+      limits: None,
       server: server.into(),
       source: Source::Image("traefik/whoami".into()),
       ports: vec![PortSpec {
@@ -1314,6 +1338,28 @@ mod tests {
       env: Default::default(),
       volumes: vec![],
     }
+  }
+
+  #[test]
+  fn compose_service_rejects_limits() {
+    let mut w = sample();
+    let mut spec = image_service("s1");
+    spec.source = Source::Compose {
+      content: Some("services:\n  web:\n    image: nginx\n".into()),
+      file: None,
+    };
+    spec.limits = Some(wharf_api_types::spec::Limits {
+      memory_mb: Some(512),
+      cpu_milli: None,
+    });
+    let err = w
+      .apply_changes(&[Change::UpsertService {
+        name: "s1".into(),
+        spec,
+        adopt: None,
+      }])
+      .unwrap_err();
+    assert!(err.message.contains("compose 来源"));
   }
 
   #[test]

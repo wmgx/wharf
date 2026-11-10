@@ -1520,6 +1520,7 @@ async fn service(
             backup: None,
             stopped: false,
             monitor: None,
+            limits: None,
           }
         }
       };
@@ -1626,6 +1627,54 @@ async fn service(
             .filter(|k| !k.is_empty()),
         })
       };
+      changes(
+        c,
+        vec![Change::UpsertService {
+          name,
+          spec,
+          adopt: None,
+        }],
+        apply,
+        j,
+      )
+      .await
+    }
+    ServiceCmd::Limits {
+      name,
+      memory,
+      cpus,
+      off,
+      apply,
+    } => {
+      if cpus.is_some_and(|n| {
+        !n.is_finite() || n < 0.0 || n * 1000.0 > f64::from(u32::MAX)
+      }) {
+        return Err(
+          ApiError::invalid("CPU 上限不合法")
+            .with_hint("填写有限的非负核数，0 表示去掉 CPU 上限")
+            .into(),
+        );
+      }
+      let mut spec = c
+        .get::<ServiceView>(&format!("/api/services/{}", seg(&name)))
+        .await?
+        .spec;
+      if off {
+        spec.limits = None;
+      } else {
+        let limits =
+          spec.limits.get_or_insert(wharf_api_types::spec::Limits {
+            memory_mb: None,
+            cpu_milli: None,
+          });
+        if let Some(memory) = memory {
+          limits.memory_mb = (memory != 0).then_some(memory);
+        }
+        if let Some(cpus) = cpus {
+          limits.cpu_milli =
+            (cpus != 0.0).then_some((cpus * 1000.0).round() as u32);
+        }
+      }
       changes(
         c,
         vec![Change::UpsertService {
