@@ -702,7 +702,9 @@ pub fn caddyfile(
   for site in sites {
     out.push_str(&format!("\n{scheme}{} {{\n", site.hostname));
     if let Some(target) = &site.redirect {
-      out.push_str(&format!("\tredir {target}{{uri}} permanent\n}}\n"));
+      out.push_str(&format!(
+        "\tredir {target}{{uri}} permanent\n}}\n"
+      ));
       continue;
     }
     if let Some(a) = &site.auth {
