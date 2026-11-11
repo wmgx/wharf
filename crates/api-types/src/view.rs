@@ -1093,6 +1093,9 @@ pub struct AlertsView {
   pub firing: Vec<FiringView>,
   /// 最近的推送（新的在前，保留 7 天）。
   pub history: Vec<AlertHistoryView>,
+  /// 触发的告警里附带服务最近的日志。
+  #[serde(default)]
+  pub include_logs: bool,
 }
 
 /// 一条告警规则：对一个指标的每个对象，最近 `for_n` 个点都满足 `比较 阈值` 时触发。
@@ -1166,4 +1169,45 @@ pub struct AlertPatch {
   pub mute_minutes: Option<u32>,
   #[serde(default)]
   pub reset: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AlertOptions {
+  pub include_logs: bool,
+}
+
+/// 一条操作记录或登录记录。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AuditEntry {
+  pub id: i64,
+  pub at: i64,
+  pub kind: String,
+  pub actor: String,
+  pub method: String,
+  pub path: String,
+  pub status: Option<u16>,
+  pub duration_ms: Option<i64>,
+  pub detail: Option<String>,
+  pub source: Option<String>,
+}
+
+/// 服务时间线上的一条。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TimelineItem {
+  pub at: i64,
+  /// deploy / backup / task / heal / alert / op
+  pub kind: String,
+  pub title: String,
+  /// 成功还是失败；没有这个概念的（自动重启）为空。
+  pub ok: Option<bool>,
+  /// 只有 op 有：谁做的。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub actor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct Timeline {
+  pub items: Vec<TimelineItem>,
+  /// 还有更早的记录时，下一页用它作 `before`。
+  pub next_before: Option<i64>,
 }

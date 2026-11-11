@@ -102,7 +102,6 @@ pub async fn bootstrap(
 
 /// 请求者的身份。
 pub struct Auth {
-  #[allow(dead_code)]
   pub name: String,
   pub perms: BTreeSet<Perm>,
   /// 页面登录（人）。API token（CLI、AI）为 false。
@@ -142,73 +141,86 @@ impl FromRequestParts<Arc<AppState>> for Auth {
     parts: &mut Parts,
     state: &Arc<AppState>,
   ) -> Result<Self, Self::Rejection> {
-    let unauthorized = || {
-      AppError::from(
-        ApiError::new(
-          ErrorCode::Unauthorized,
-          "没有登录，或 API token 无效",
-        )
-        .with_hint("设置环境变量 WHARF_TOKEN，或执行 wharf login")
-        .suggest("wharf login --url <控制面地址>"),
-      )
-    };
-    let token = parts
-      .headers
-      .get(axum::http::header::AUTHORIZATION)
-      .and_then(|v| v.to_str().ok())
-      .and_then(|v| v.strip_prefix("Bearer "))
-      .map(str::trim)
-      .filter(|t| !t.is_empty());
-    let Some(token) = token else {
-      // 页面：账号密码登录后的会话 cookie，权限和管理员 token 一样。
-      // WebSocket 不受 CORS 保护，SameSite 也挡不住同站子域，所以带 Origin 时必须同源。
-      if !same_origin(&parts.headers) {
-        return Err(AppError::from(ApiError::new(
-          ErrorCode::Forbidden,
-          "请求来源和控制面地址不一致",
-        )));
-      }
-      let user = crate::login::session_user(state, &parts.headers)
-        .await
-        .map_err(AppError::from)?
-        .ok_or_else(unauthorized)?;
-      return Ok(Auth {
-        name: format!("页面:{user}"),
-        perms: Perm::ALL.into_iter().collect(),
-        human: true,
-      });
-    };
-    // token 只能经 CLI 加密通道使用，防止在明文内网上被窃听；本机（如 docker exec 里的脚本）除外。
-    let sealed = parts
-      .extensions
-      .get::<crate::cli_tunnel::Sealed>()
-      .is_some();
-    let local = parts
-      .extensions
-      .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-      .is_some_and(|c| c.0.ip().is_loopback());
-    if !sealed && !local {
-      return Err(AppError::from(
-        ApiError::new(
-          ErrorCode::Unauthorized,
-          "本机 wharf 太旧，不支持加密通道，控制面已拒绝明文 token",
-        )
-        .with_hint("在页面“设置 → CLI 与 AI 接入”按步骤更新 wharf 并重新 wharf login"),
-      ));
+    let auth = authenticate(parts, state).await?;
+    if let Some(slot) =
+      parts.extensions.get::<crate::audit::AuditSlot>()
+    {
+      slot.set_actor(&auth.name);
     }
-    let hash = hash_token(token);
-    let found = state
-      .db
-      .call(move |c| db::token_scope(c, &hash))
-      .await
-      .map_err(AppError::from)?;
-    let (name, perms) = found.ok_or_else(unauthorized)?;
-    Ok(Auth {
-      name,
-      perms: decode_perms(&perms).ok_or_else(unauthorized)?,
-      human: false,
-    })
+    Ok(auth)
   }
+}
+
+async fn authenticate(
+  parts: &mut Parts,
+  state: &Arc<AppState>,
+) -> Result<Auth, AppError> {
+  let unauthorized = || {
+    AppError::from(
+      ApiError::new(
+        ErrorCode::Unauthorized,
+        "没有登录，或 API token 无效",
+      )
+      .with_hint("设置环境变量 WHARF_TOKEN，或执行 wharf login")
+      .suggest("wharf login --url <控制面地址>"),
+    )
+  };
+  let token = parts
+    .headers
+    .get(axum::http::header::AUTHORIZATION)
+    .and_then(|v| v.to_str().ok())
+    .and_then(|v| v.strip_prefix("Bearer "))
+    .map(str::trim)
+    .filter(|t| !t.is_empty());
+  let Some(token) = token else {
+    // 页面：账号密码登录后的会话 cookie，权限和管理员 token 一样。
+    // WebSocket 不受 CORS 保护，SameSite 也挡不住同站子域，所以带 Origin 时必须同源。
+    if !same_origin(&parts.headers) {
+      return Err(AppError::from(ApiError::new(
+        ErrorCode::Forbidden,
+        "请求来源和控制面地址不一致",
+      )));
+    }
+    let user = crate::login::session_user(state, &parts.headers)
+      .await
+      .map_err(AppError::from)?
+      .ok_or_else(unauthorized)?;
+    return Ok(Auth {
+      name: format!("页面:{user}"),
+      perms: Perm::ALL.into_iter().collect(),
+      human: true,
+    });
+  };
+  // token 只能经 CLI 加密通道使用，防止在明文内网上被窃听；本机（如 docker exec 里的脚本）除外。
+  let sealed = parts
+    .extensions
+    .get::<crate::cli_tunnel::Sealed>()
+    .is_some();
+  let local = parts
+    .extensions
+    .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+    .is_some_and(|c| c.0.ip().is_loopback());
+  if !sealed && !local {
+    return Err(AppError::from(
+      ApiError::new(
+        ErrorCode::Unauthorized,
+        "本机 wharf 太旧，不支持加密通道，控制面已拒绝明文 token",
+      )
+      .with_hint("在页面“设置 → CLI 与 AI 接入”按步骤更新 wharf 并重新 wharf login"),
+    ));
+  }
+  let hash = hash_token(token);
+  let found = state
+    .db
+    .call(move |c| db::token_scope(c, &hash))
+    .await
+    .map_err(AppError::from)?;
+  let (name, perms) = found.ok_or_else(unauthorized)?;
+  Ok(Auth {
+    name,
+    perms: decode_perms(&perms).ok_or_else(unauthorized)?,
+    human: false,
+  })
 }
 
 /// 浏览器带的 `Origin` 的 host[:port] 必须等于请求的 Host（经网关时网关会保留原 Host）。

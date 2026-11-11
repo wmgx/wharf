@@ -230,6 +230,7 @@ mod tests {
       backup: None,
       stopped: false,
       monitor: None,
+      limits: None,
     };
     let hp = BTreeMap::from([("pg".to_string(), 20001)]);
     let j = target("db", &spec, &hp, None, None).unwrap();

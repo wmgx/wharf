@@ -176,13 +176,17 @@ function GatewayDetail({ g, onDone }: { g: GatewayView; onDone: () => void }) {
           <TabsContent value="routes" className="mt-3">
             {g.routes.length ? (
               <div className="divide-y rounded-lg border">
-                {g.routes.map((h) => (
-                  <div className="flex flex-wrap items-center gap-3 px-3.5 py-2.5 text-[13px]" key={h}>
-                    <span className="font-mono">{h}</span>
-                    <CertDays d={diagnosisOf(status, h)} />
-                    <BackupPicker g={g} hostname={h} />
-                  </div>
-                ))}
+                {g.routes.map((h) => {
+                  const redirect = status?.routes.find((r) => r.spec.hostname === h)?.spec.redirect;
+                  return (
+                    <div className="flex flex-wrap items-center gap-3 px-3.5 py-2.5 text-[13px]" key={h}>
+                      <span className="font-mono">{h}</span>
+                      {redirect && <span className="text-muted-foreground">→ {redirect}</span>}
+                      <CertDays d={diagnosisOf(status, h)} />
+                      <BackupPicker g={g} hostname={h} />
+                    </div>
+                  );
+                })}
               </div>
             ) : (
               <Empty>没有域名</Empty>

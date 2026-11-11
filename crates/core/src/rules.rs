@@ -21,8 +21,8 @@ use serde::{Deserialize, Serialize};
 use wharf_api_types::{
   ApiError,
   view::{
-    AlertHistoryView, AlertPatch, AlertRuleView, AlertsView,
-    FiringView, NoticeView, Perm,
+    AlertHistoryView, AlertOptions, AlertPatch, AlertRuleView,
+    AlertsView, FiringView, NoticeView, Perm,
   },
 };
 
@@ -534,7 +534,7 @@ pub async fn observe(
       }
     };
     if notify::transition(state, &(rule.key)(subject), ok).await {
-      push(state, rule.id, &o, ok, event).await;
+      push(state, rule.id, Some(subject), &o, ok, event).await;
     }
   }
 }
@@ -554,15 +554,16 @@ pub async fn notice(
   }
   let o = config(state).await.get(id).cloned().unwrap_or_default();
   if !o.enabled() {
-    record(state, id, &event, ok, Some("已关闭".into())).await;
+    record(state, id, None, &event, ok, Some("已关闭".into())).await;
     return;
   }
-  push(state, id, &o, ok, event).await;
+  push(state, id, None, &o, ok, event).await;
 }
 
 async fn push(
   state: &AppState,
   id: &str,
+  subject: Option<&str>,
   o: &Override,
   ok: bool,
   event: Event,
@@ -572,9 +573,18 @@ async fn push(
   } else if o.muted(now_ms()) {
     Some("静默中".to_string())
   } else {
-    notify::deliver(state, &event).await
+    None
   };
-  record(state, id, &event, ok, skipped).await;
+  let event = if skipped.is_none() && !ok {
+    crate::alert_context::enrich(state, id, subject, event).await
+  } else {
+    event
+  };
+  let skipped = match skipped {
+    Some(s) => Some(s),
+    None => notify::deliver(state, &event).await,
+  };
+  record(state, id, subject, &event, ok, skipped).await;
 }
 
 /// 开始触发（已经在触发就保留原来的开始时间）或结束触发，内存和库一起改。
@@ -621,18 +631,20 @@ async fn set_firing(
 async fn record(
   state: &AppState,
   id: &str,
+  subject: Option<&str>,
   event: &Event,
   ok: bool,
   skipped: Option<String>,
 ) {
   let (id, title) = (id.to_string(), event.title.clone());
+  let subject = subject.map(str::to_string);
   let now = now_ms();
   let result = state
     .db
     .call(move |c| {
       c.execute(
-        "INSERT INTO alert_history (at, source, title, ok, skipped) VALUES (?1, ?2, ?3, ?4, ?5)",
-        rusqlite::params![now, id, title, ok, skipped],
+        "INSERT INTO alert_history (at, source, subject, title, ok, skipped) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params![now, id, subject, title, ok, skipped],
       )
       .and_then(|_| {
         c.execute(
@@ -690,7 +702,12 @@ pub fn firing(rule: &str) -> Vec<String> {
   })
 }
 
-async fn view(state: &AppState) -> AlertsView {
+async fn view(state: &AppState) -> Result<AlertsView, ApiError> {
+  let include_logs = state
+    .db
+    .call(|c| db::setting(c, "alerts.include_logs"))
+    .await?
+    .is_some();
   let cfg = config(state).await;
   let now = now_ms();
   let muted = |o: &Override| o.muted_until.filter(|t| *t > now);
@@ -739,7 +756,8 @@ async fn view(state: &AppState) -> AlertsView {
     })
     .collect();
   let history = history(state).await;
-  with(|m| AlertsView {
+  Ok(with(|m| AlertsView {
+    include_logs,
     rules,
     notices,
     firing: m
@@ -753,7 +771,7 @@ async fn view(state: &AppState) -> AlertsView {
       })
       .collect(),
     history,
-  })
+  }))
 }
 
 /// `GET /api/alerts`
@@ -762,7 +780,7 @@ pub async fn list(
   auth: Auth,
 ) -> ApiResult<AlertsView> {
   auth.require(Perm::Read)?;
-  Ok(Json(view(&s).await))
+  Ok(Json(view(&s).await?))
 }
 
 /// `PUT /api/alerts/{id}`：规则或事件通知的开关、阈值、连续次数、静默。
@@ -841,7 +859,26 @@ pub async fn patch(
     .call(move |c| db::set_setting(c, CONFIG_KEY, Some(&json)))
     .await?;
   with(|m| m.config = Some(cfg));
-  Ok(Json(view(&s).await))
+  Ok(Json(view(&s).await?))
+}
+
+/// `PUT /api/alerts/options`：触发的告警是否附带服务日志。
+pub async fn set_options(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Json(o): Json<AlertOptions>,
+) -> ApiResult<AlertsView> {
+  auth.require(Perm::Admin)?;
+  s.db
+    .call(move |c| {
+      db::set_setting(
+        c,
+        "alerts.include_logs",
+        o.include_logs.then_some("1"),
+      )
+    })
+    .await?;
+  Ok(Json(view(&s).await?))
 }
 
 #[cfg(test)]

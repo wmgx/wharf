@@ -327,6 +327,9 @@ pub struct ServiceSpec {
   /// 自定义监控：服务所在机器的 agent 每分钟从本机请求一次，连续 3 次不正常推送。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub monitor: Option<MonitorSpec>,
+  /// 资源上限，不填不限。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub limits: Option<Limits>,
 }
 
 impl ServiceSpec {
@@ -366,6 +369,19 @@ pub struct MonitorSpec {
   /// 响应里必须包含的文字（只看前 64KB）。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub keyword: Option<String>,
+}
+
+/// 资源上限。只对 image 和 build 来源生效。
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct Limits {
+  /// 内存上限，单位 MB。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub memory_mb: Option<u32>,
+  /// CPU 上限，单位是千分之一核，500 表示 0.5 核。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub cpu_milli: Option<u32>,
 }
 
 fn default_monitor_path() -> String {
@@ -484,7 +500,7 @@ impl GatewayTls {
 pub struct RouteSpec {
   /// 例如 `blog.example.com`。
   pub hostname: String,
-  /// 目标服务。和 `upstream` 二选一。边缘应用的域名写在边缘应用的 `domains` 里。
+  /// 目标服务。和 `upstream`、`redirect` 三选一。边缘应用的域名写在边缘应用的 `domains` 里。
   #[serde(default, skip_serializing_if = "String::is_empty")]
   pub service: String,
   /// 不归 Wharf 管的上游，写网关所在机器能访问到的 `主机:端口`，例如 `127.0.0.1:7700`。
@@ -509,6 +525,10 @@ pub struct RouteSpec {
   /// 网关到服务的走法。不填为自动：同机、能直连内网地址就直连，否则走反向隧道。
   #[serde(default, skip_serializing_if = "LinkMode::is_auto")]
   pub link: LinkMode,
+  /// 跳转：整个域名 301 到这个网址，保留路径和参数，例如 `https://a.com`。
+  /// 和 `service`、`upstream` 三选一。只支持 caddy 网关。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub redirect: Option<String>,
 }
 
 /// 网关到服务的走法偏好。

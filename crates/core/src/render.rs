@@ -207,6 +207,10 @@ struct ComposeService {
   image: String,
   restart: &'static str,
   #[serde(skip_serializing_if = "Option::is_none")]
+  mem_limit: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  cpus: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
   network_mode: Option<&'static str>,
   #[serde(skip_serializing_if = "Option::is_none")]
   entrypoint: Option<Vec<String>>,
@@ -293,6 +297,12 @@ pub fn build_port(ports: &[PortSpec]) -> u16 {
   ports.first().and_then(|p| p.container).unwrap_or(8080)
 }
 
+/// compose 里 cpus 的写法：500 → "0.5"，1000 → "1"，1250 → "1.25"。
+fn cpus_text(milli: u32) -> String {
+  let s = format!("{:.3}", f64::from(milli) / 1000.0);
+  s.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
 /// 服务的 compose 文件。image 来源自动生成；compose 来源原样使用。
 /// 端口只绑定 127.0.0.1 和内网地址，不绑定 0.0.0.0。
 pub fn service_compose(
@@ -344,6 +354,16 @@ pub fn service_compose(
           ComposeService {
             image,
             restart: "unless-stopped",
+            mem_limit: spec
+              .limits
+              .as_ref()
+              .and_then(|l| l.memory_mb)
+              .map(|mb| format!("{mb}m")),
+            cpus: spec
+              .limits
+              .as_ref()
+              .and_then(|l| l.cpu_milli)
+              .map(cpus_text),
             network_mode: None,
             entrypoint: None,
             command: None,
@@ -416,6 +436,8 @@ pub fn tunnel_compose(name: &str, spec: &GatewaySpec) -> String {
       ComposeService {
         image: gateway_image(spec),
         restart: "unless-stopped",
+        mem_limit: None,
+        cpus: None,
         network_mode: Some("host"),
         entrypoint: None,
         command: Some(
@@ -449,6 +471,8 @@ pub fn gateway_compose(name: &str, spec: &GatewaySpec) -> String {
       ComposeService {
         image: gateway_image(spec),
         restart: "unless-stopped",
+        mem_limit: None,
+        cpus: None,
         network_mode: Some("host"),
         entrypoint: None,
         command: Some(
@@ -505,6 +529,8 @@ pub fn backup_server_compose(
       ComposeService {
         image: REST_SERVER_IMAGE.to_string(),
         restart: "unless-stopped",
+        mem_limit: None,
+        cpus: None,
         network_mode: Some("host"),
         entrypoint: None,
         command: Some(vec!["sh".into(), "-c".into(), script]),
@@ -566,6 +592,8 @@ fn frp_service(
   ComposeService {
     image: image.to_string(),
     restart: "unless-stopped",
+    mem_limit: None,
+    cpus: None,
     network_mode: Some("host"),
     entrypoint: Some(vec!["sh".into(), "-c".into()]),
     command: Some(vec![format!(
@@ -637,6 +665,8 @@ pub struct Site {
   pub auth: Option<BasicAuth>,
   /// 按路径转发：（路径，上游）。
   pub paths: Vec<(String, String)>,
+  /// 跳转目标。有值时这个站点只做跳转，`upstream`、`auth`、`paths` 不用。
+  pub redirect: Option<String>,
 }
 
 pub fn caddyfile(
@@ -671,6 +701,12 @@ pub fn caddyfile(
   sites.sort_by(|a, b| a.hostname.cmp(&b.hostname));
   for site in sites {
     out.push_str(&format!("\n{scheme}{} {{\n", site.hostname));
+    if let Some(target) = &site.redirect {
+      out.push_str(&format!(
+        "\tredir {target}{{uri}} permanent\n}}\n"
+      ));
+      continue;
+    }
     if let Some(a) = &site.auth {
       out.push_str(&format!(
         "\tbasic_auth {{\n\t\t{} {}\n\t}}\n",
@@ -709,6 +745,7 @@ mod tests {
       backup: None,
       stopped: false,
       monitor: None,
+      limits: None,
       server: "node1".into(),
       source: Source::Image("traefik/whoami".into()),
       ports: vec![PortSpec {
@@ -760,6 +797,30 @@ mod tests {
   }
 
   #[test]
+  fn service_limits_are_optional() {
+    let mut spec = spec();
+    let out =
+      service_compose("s1", &spec, &BTreeMap::new(), &[], None)
+        .unwrap();
+    assert!(!out.contains("mem_limit"));
+    assert!(!out.contains("cpus"));
+    spec.limits = Some(wharf_api_types::spec::Limits {
+      memory_mb: Some(512),
+      cpu_milli: Some(500),
+    });
+    let out =
+      service_compose("s1", &spec, &BTreeMap::new(), &[], None)
+        .unwrap();
+    let yaml: serde_yaml_ng::Value =
+      serde_yaml_ng::from_str(&out).unwrap();
+    let svc = &yaml["services"]["s1"];
+    assert_eq!(svc["mem_limit"], "512m");
+    assert_eq!(svc["cpus"], "0.5");
+    assert_eq!(cpus_text(1000), "1");
+    assert_eq!(cpus_text(1250), "1.25");
+  }
+
+  #[test]
   fn missing_secret_suggests_command() {
     let err =
       substitute("a [[NOPE]] b", Some(&BTreeMap::new())).unwrap_err();
@@ -807,12 +868,14 @@ mod tests {
           upstream: "127.0.0.1:1".into(),
           auth: BasicAuth::parse("admin $2b$12$abc"),
           paths: vec![],
+          redirect: None,
         },
         Site {
           hostname: "a.example.com".into(),
           upstream: "100.1.1.1:2".into(),
           auth: None,
           paths: vec![("/ws".into(), "127.0.0.1:17891".into())],
+          redirect: None,
         },
       ],
       true,
@@ -849,11 +912,41 @@ mod tests {
         upstream: "127.0.0.1:1".into(),
         auth: None,
         paths: vec![],
+        redirect: None,
       }],
       false,
     );
     assert!(out.contains("auto_https off"));
     assert!(out.contains("\nhttp://a.example.com {"));
+  }
+
+  #[test]
+  fn caddyfile_redirect_keeps_uri() {
+    let gw = GatewaySpec {
+      kind: GatewayKind::Caddy,
+      server: "s1".into(),
+      default: true,
+      http_port: None,
+      https_port: None,
+      email: None,
+      image: None,
+      tls: GatewayTls::Auto,
+      account: None,
+    };
+    let out = caddyfile(
+      "edge",
+      &gw,
+      &[Site {
+        hostname: "www.a.com".into(),
+        upstream: String::new(),
+        auth: None,
+        paths: vec![],
+        redirect: Some("https://a.com".into()),
+      }],
+      false,
+    );
+    assert!(out.contains("\tredir https://a.com{uri} permanent\n"));
+    assert!(!out.contains("reverse_proxy"));
   }
 
   #[test]
