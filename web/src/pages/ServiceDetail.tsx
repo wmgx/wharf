@@ -31,6 +31,8 @@ import { Link, useParams, useSearchParams } from "react-router-dom";
 import { api, usePoll } from "@/api";
 import { useActions } from "@/components/actions";
 import { MonitorCard } from "./service-monitor";
+import { LimitsCard } from "./service-limits";
+import { ServiceTimeline } from "./service-timeline";
 import {
   BuildEditor,
   type BuildHow,
@@ -328,6 +330,7 @@ export function ServiceDetail() {
             <TabsTrigger value="logs">日志</TabsTrigger>
             <TabsTrigger value="metrics">资源</TabsTrigger>
             <TabsTrigger value="history">版本</TabsTrigger>
+            <TabsTrigger value="timeline">时间线</TabsTrigger>
             <TabsTrigger value="data">数据与备份</TabsTrigger>
             <TabsTrigger value="files">文件</TabsTrigger>
             <TabsTrigger value="terminal">终端</TabsTrigger>
@@ -360,6 +363,7 @@ export function ServiceDetail() {
         <TabsContent value="history" className="mt-4">
           <History name={name} />
         </TabsContent>
+        <TabsContent value="timeline" className="mt-4"><ServiceTimeline name={name} /></TabsContent>
         <TabsContent value="data" className="mt-4">
           <DataTab svc={svc} />
         </TabsContent>
@@ -646,6 +650,7 @@ function ConfigTab({ svc, onEdit }: { svc: ServiceView; onEdit: () => void }) {
         </CardContent>
       </Card>
       <MonitorCard svc={svc} />
+      <LimitsCard svc={svc} />
       <Button variant="outline" className="w-fit" onClick={onEdit}>
         <PencilIcon />
         修改配置

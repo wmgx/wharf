@@ -7,6 +7,7 @@
 
 use clap::{Args, Parser, Subcommand};
 
+mod audit;
 mod client;
 mod commands;
 mod connect;
@@ -137,6 +138,17 @@ pub enum Command {
     /// 完整 shell 命令；写在 `--` 后并用本地 shell 引号保护。
     #[arg(last = true, required = true)]
     command: String,
+  },
+  /// 操作记录和登录记录：谁在什么时候做了什么。
+  Audit {
+    /// 只看这个发起人（令牌名，或 页面:<用户名>）。
+    #[arg(long)]
+    actor: Option<String>,
+    /// 只看一类：api 或 login。
+    #[arg(long, value_parser = ["api", "login"])]
+    kind: Option<String>,
+    #[arg(long, default_value_t = 50)]
+    limit: u32,
   },
   /// 宿主机终端和命令执行审计。
   ShellLog {
@@ -428,6 +440,15 @@ pub enum ServerCmd {
 // 只在启动时解析一次，变体大小无所谓。
 #[allow(clippy::large_enum_variant)]
 pub enum ServiceCmd {
+  /// 服务的时间线：部署、备份、任务、自动重启、告警、操作记录。
+  Timeline {
+    name: String,
+    #[arg(long, default_value_t = 50)]
+    limit: u32,
+    /// 只看这个毫秒时间戳之前的（上一页返回的 next_before）。
+    #[arg(long)]
+    before: Option<i64>,
+  },
   List,
   Show {
     name: String,
@@ -586,10 +607,30 @@ pub enum ServiceCmd {
     #[command(flatten)]
     apply: ApplyFlags,
   },
+  /// 资源上限。例：`wharf service limits blog --memory 512 --cpus 0.5 --apply`；`--off` 去掉全部上限。
+  Limits {
+    name: String,
+    /// 内存上限，单位 MB；给 0 去掉这一项。
+    #[arg(long)]
+    memory: Option<u32>,
+    /// CPU 上限，单位核，可以是小数；给 0 去掉这一项。
+    #[arg(long)]
+    cpus: Option<f64>,
+    /// 去掉全部上限。
+    #[arg(long)]
+    off: bool,
+    #[command(flatten)]
+    apply: ApplyFlags,
+  },
 }
 
 #[derive(Subcommand)]
 pub enum AlertCmd {
+  /// 告警里附带服务最近的日志：`wharf alert options --include-logs on`。
+  Options {
+    #[arg(long, value_parser = ["on", "off"])]
+    include_logs: String,
+  },
   /// 规则、事件通知、正在触发的告警、最近的推送。
   List,
   /// 改一条规则或事件通知（id 见 list）。只改给了的选项。
@@ -675,13 +716,16 @@ pub enum RouteCmd {
     /// 服务或边缘应用（Workers / Pages）的名字。
     #[arg(
       long,
-      required_unless_present = "upstream",
-      conflicts_with = "upstream"
+      required_unless_present_any = ["upstream", "redirect"],
+      conflicts_with_all = ["upstream", "redirect"]
     )]
     service: Option<String>,
     /// 不归 Wharf 管的上游，写网关所在机器能访问到的 主机:端口，例如 127.0.0.1:7700。
     #[arg(long)]
     upstream: Option<String>,
+    /// 只做跳转：整个域名 301 到这个网址，保留路径和参数，例如 https://a.com。只支持 caddy 网关。
+    #[arg(long, conflicts_with = "upstream")]
+    redirect: Option<String>,
     /// 端口名，服务只有一个端口时可以不填。
     #[arg(long)]
     port: Option<String>,

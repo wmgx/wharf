@@ -106,6 +106,8 @@ export interface ServiceSpec {
   stopped?: boolean;
   /** 自定义监控。 */
   monitor?: MonitorSpec;
+  /** 资源上限：内存 MB、CPU 千分之一核。 */
+  limits?: { memory_mb?: number; cpu_milli?: number };
 }
 
 export interface MonitorSpec {
@@ -225,10 +227,12 @@ export interface GatewayView {
 
 export interface RouteSpec {
   hostname: string;
-  /** 和 upstream 二选一，指向地址时为空。 */
+  /** 和 upstream、redirect 三选一，指向地址或跳转时为空。 */
   service?: string;
   /** 不归 Wharf 管的上游，例如 127.0.0.1:7700。 */
   upstream?: string;
+  /** 只做跳转：整个域名 301 到这个网址。和 service、upstream 三选一。 */
+  redirect?: string;
   port?: string;
   gateway?: string;
   /** 另一台机器上的网关：主网关那台离线 5 分钟后 DNS 自动切过去。 */
@@ -748,6 +752,7 @@ export interface NoticeView {
 }
 
 export interface AlertsView {
+  include_logs?: boolean;
   rules: AlertRuleView[];
   notices: NoticeView[];
   firing: { rule: string; subject: string; title: string; since: number }[];
@@ -760,4 +765,30 @@ export interface AlertPatch {
   for_n?: number;
   mute_minutes?: number;
   reset?: boolean;
+}
+
+export interface AuditEntry {
+  id: number;
+  at: number;
+  kind: string;
+  actor: string;
+  method: string;
+  path: string;
+  status?: number;
+  duration_ms?: number;
+  detail?: string;
+  source?: string;
+}
+
+export interface TimelineItem {
+  at: number;
+  kind: string;
+  title: string;
+  ok: boolean | null;
+  actor?: string;
+}
+
+export interface Timeline {
+  items: TimelineItem[];
+  next_before: number | null;
 }

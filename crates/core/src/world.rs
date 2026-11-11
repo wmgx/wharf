@@ -7,8 +7,8 @@ use wharf_api_types::{
   ApiError,
   spec::{
     AdoptSpec, BuildSource, Change, EdgeAppSpec, Fleet, GatewayKind,
-    GatewaySpec, GatewayTls, RouteSpec, ServerSettings, ServiceSpec,
-    Source,
+    GatewaySpec, GatewayTls, LinkMode, RouteSpec, ServerSettings,
+    ServiceSpec, Source,
   },
   validate_name,
 };
@@ -262,6 +262,29 @@ impl World {
             .and_then(|o| o.commit.clone());
           // compose 来源没填端口时按 compose 里映射的端口补上，否则服务没有内网地址。
           let mut spec = spec.clone();
+          if spec.limits.as_ref().is_some_and(|l| {
+            l.memory_mb.is_none() && l.cpu_milli.is_none()
+          }) {
+            spec.limits = None;
+          }
+          if let Some(limits) = &spec.limits {
+            if matches!(spec.source, Source::Compose { .. }) {
+              return Err(
+                ApiError::invalid(format!(
+                  "服务 {name} 是 compose 来源，不能在这里设资源上限"
+                ))
+                .with_hint(
+                  "在 compose 文件里自己写 mem_limit 和 cpus",
+                ),
+              );
+            }
+            if limits.memory_mb.is_some_and(|n| n < 32) {
+              return Err(ApiError::invalid("内存上限至少 32 MB"));
+            }
+            if limits.cpu_milli.is_some_and(|n| n < 10) {
+              return Err(ApiError::invalid("CPU 上限至少 0.01 核"));
+            }
+          }
           if spec.ports.is_empty()
             && let Source::Compose {
               content: Some(content),
@@ -657,6 +680,46 @@ impl World {
     }
   }
 
+  fn check_redirect(
+    &self,
+    host: &str,
+    route: &RouteSpec,
+    target: &str,
+  ) -> Result<(), ApiError> {
+    if !route.service.is_empty()
+      || route.upstream.is_some()
+      || route.port.is_some()
+      || !route.paths.is_empty()
+      || route.auth
+      || route.link != LinkMode::Auto
+    {
+      return Err(ApiError::invalid(format!(
+        "路由 {host}：跳转不能和服务、上游、端口、按路径转发、登录保护、反向隧道同时设置"
+      )));
+    }
+    let target_host = redirect_host(target).ok_or_else(|| {
+      ApiError::invalid(format!(
+        "路由 {host} 的跳转目标 {target} 不合法"
+      ))
+      .with_hint(
+        "写成 https://主机[:端口][/路径]，不带 ?、#，末尾不带 /",
+      )
+    })?;
+    if target_host.eq_ignore_ascii_case(host) {
+      return Err(ApiError::invalid(format!(
+        "路由 {host} 不能跳转到自己"
+      )));
+    }
+    if self.route_gateways(route).iter().any(|name| {
+      self.gateways[*name].spec.kind == GatewayKind::CloudflareTunnel
+    }) {
+      return Err(ApiError::invalid(format!(
+        "路由 {host}：跳转只支持 caddy 网关"
+      )));
+    }
+    Ok(())
+  }
+
   /// 整体校验。`joined` 是已经完成 join 的服务器。
   pub fn validate(&self) -> Result<(), ApiError> {
     for (name, service) in &self.services {
@@ -728,6 +791,10 @@ impl World {
         );
       }
       self.check_route_gateway(host, &route.spec)?;
+      if let Some(target) = &route.spec.redirect {
+        self.check_redirect(host, &route.spec, target)?;
+        continue;
+      }
       if let Some(up) = &route.spec.upstream {
         if !route.spec.service.is_empty() || route.spec.port.is_some()
         {
@@ -1207,6 +1274,30 @@ fn valid_upstream(up: &str) -> bool {
   })
 }
 
+/// 跳转目标里的主机名；格式不对返回 `None`。
+/// 只允许 `http(s)://主机[:端口][/路径]`，字符用白名单，防止往 Caddyfile 里注入内容。
+fn redirect_host(target: &str) -> Option<&str> {
+  let rest = target
+    .strip_prefix("https://")
+    .or_else(|| target.strip_prefix("http://"))?;
+  let (authority, path) =
+    rest.split_at(rest.find('/').unwrap_or(rest.len()));
+  let (host, port) = match authority.split_once(':') {
+    Some((h, p)) => (h, Some(p)),
+    None => (authority, None),
+  };
+  let host_ok = !host.is_empty()
+    && host
+      .bytes()
+      .all(|c| c.is_ascii_alphanumeric() || c == b'.' || c == b'-');
+  let port_ok = port.is_none_or(|p| p.parse::<u16>().is_ok());
+  let path_ok = !path.ends_with('/')
+    && path
+      .bytes()
+      .all(|c| c.is_ascii_alphanumeric() || b"/._~-".contains(&c));
+  (host_ok && port_ok && path_ok).then_some(host)
+}
+
 /// 额外绑定的地址只能是私有网段，否则服务端口会暴露到公网。
 /// 基线的值会写进宿主机的配置文件，只允许安全的字符。
 fn validate_baseline(
@@ -1304,6 +1395,7 @@ mod tests {
       backup: None,
       stopped: false,
       monitor: None,
+      limits: None,
       server: server.into(),
       source: Source::Image("traefik/whoami".into()),
       ports: vec![PortSpec {
@@ -1314,6 +1406,28 @@ mod tests {
       env: Default::default(),
       volumes: vec![],
     }
+  }
+
+  #[test]
+  fn compose_service_rejects_limits() {
+    let mut w = sample();
+    let mut spec = image_service("s1");
+    spec.source = Source::Compose {
+      content: Some("services:\n  web:\n    image: nginx\n".into()),
+      file: None,
+    };
+    spec.limits = Some(wharf_api_types::spec::Limits {
+      memory_mb: Some(512),
+      cpu_milli: None,
+    });
+    let err = w
+      .apply_changes(&[Change::UpsertService {
+        name: "s1".into(),
+        spec,
+        adopt: None,
+      }])
+      .unwrap_err();
+    assert!(err.message.contains("compose 来源"));
   }
 
   #[test]
@@ -1346,6 +1460,26 @@ mod tests {
   }
 
   #[test]
+  fn redirect_target_uses_safe_characters() {
+    assert_eq!(redirect_host("https://a.com"), Some("a.com"));
+    assert_eq!(
+      redirect_host("http://a.com:8080/blog"),
+      Some("a.com")
+    );
+    for target in [
+      "a.com",
+      "https://a.com/",
+      "https://a.com/?x=1",
+      "https://a.com/#top",
+      "https://a.com/{uri}",
+      "https://a.com/a b",
+      "https://a.com/\"x",
+    ] {
+      assert_eq!(redirect_host(target), None, "{target}");
+    }
+  }
+
+  #[test]
   fn route_needs_gateway_and_port() {
     let mut w = sample();
     w.apply_changes(&[
@@ -1365,6 +1499,7 @@ mod tests {
           paths: vec![],
           upstream: None,
           link: Default::default(),
+          redirect: None,
         },
       },
     ])
@@ -1434,6 +1569,7 @@ mod tests {
       paths: vec![],
       upstream: None,
       link: Default::default(),
+      redirect: None,
     };
     w.apply_changes(&[
       Change::UpsertService {

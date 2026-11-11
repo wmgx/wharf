@@ -137,6 +137,9 @@ async fn dispatch(
       cwd,
       command,
     } => host_exec(c, server, timeout, cwd, command, j).await,
+    Command::Audit { actor, kind, limit } => {
+      crate::audit::audit(c, actor, kind, limit, j).await
+    }
     Command::ShellLog { server, limit } => {
       shell_log(c, server, limit, j).await
     }
@@ -1375,6 +1378,38 @@ async fn service(
       )
       .await
     }
+    ServiceCmd::Timeline {
+      name,
+      limit,
+      before,
+    } => {
+      let mut path = format!(
+        "/api/services/{}/timeline?limit={limit}",
+        seg(&name)
+      );
+      if let Some(before) = before {
+        path.push_str(&format!("&before={before}"));
+      }
+      let v: wharf_api_types::view::Timeline = c.get(&path).await?;
+      out(j, &v, |v| {
+        for item in &v.items {
+          let result = match item.ok {
+            Some(true) => "成功",
+            Some(false) => "失败",
+            None => "",
+          };
+          println!(
+            "{}  {}  {}  {}  {}",
+            fmt_ms(item.at),
+            item.kind,
+            item.title,
+            result,
+            item.actor.as_deref().unwrap_or_default()
+          );
+        }
+      });
+      Ok(())
+    }
     ServiceCmd::Logs {
       name,
       tail,
@@ -1520,6 +1555,7 @@ async fn service(
             backup: None,
             stopped: false,
             monitor: None,
+            limits: None,
           }
         }
       };
@@ -1638,6 +1674,54 @@ async fn service(
       )
       .await
     }
+    ServiceCmd::Limits {
+      name,
+      memory,
+      cpus,
+      off,
+      apply,
+    } => {
+      if cpus.is_some_and(|n| {
+        !n.is_finite() || n < 0.0 || n * 1000.0 > f64::from(u32::MAX)
+      }) {
+        return Err(
+          ApiError::invalid("CPU 上限不合法")
+            .with_hint("填写有限的非负核数，0 表示去掉 CPU 上限")
+            .into(),
+        );
+      }
+      let mut spec = c
+        .get::<ServiceView>(&format!("/api/services/{}", seg(&name)))
+        .await?
+        .spec;
+      if off {
+        spec.limits = None;
+      } else {
+        let limits =
+          spec.limits.get_or_insert(wharf_api_types::spec::Limits {
+            memory_mb: None,
+            cpu_milli: None,
+          });
+        if let Some(memory) = memory {
+          limits.memory_mb = (memory != 0).then_some(memory);
+        }
+        if let Some(cpus) = cpus {
+          limits.cpu_milli =
+            (cpus != 0.0).then_some((cpus * 1000.0).round() as u32);
+        }
+      }
+      changes(
+        c,
+        vec![Change::UpsertService {
+          name,
+          spec,
+          adopt: None,
+        }],
+        apply,
+        j,
+      )
+      .await
+    }
     ServiceCmd::Rm {
       name,
       purge_data,
@@ -1728,9 +1812,18 @@ async fn pick_server(c: &Client) -> CliResult<String> {
 // GATEWAYS / ROUTES
 
 async fn alert(c: &Client, cmd: AlertCmd, j: bool) -> CliResult<()> {
-  use wharf_api_types::view::{AlertPatch, AlertsView};
+  use wharf_api_types::view::{AlertOptions, AlertPatch, AlertsView};
   let v: AlertsView = match cmd {
     AlertCmd::List => c.get("/api/alerts").await?,
+    AlertCmd::Options { include_logs } => {
+      c.put(
+        "/api/alerts/options",
+        &AlertOptions {
+          include_logs: include_logs == "on",
+        },
+      )
+      .await?
+    }
     AlertCmd::Set {
       id,
       on,
@@ -1781,6 +1874,10 @@ async fn alert(c: &Client, cmd: AlertCmd, j: bool) -> CliResult<()> {
         println!("  {}（{} 起）", f.title, fmt_ms(f.since));
       }
     }
+    println!(
+      "告警附带日志：{}",
+      if v.include_logs { "开" } else { "关" }
+    );
   });
   Ok(())
 }
@@ -1929,7 +2026,11 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
           println!(
             "{}  →  {}  经 {}",
             r.url,
-            r.spec.upstream.as_deref().unwrap_or(&r.spec.service),
+            r.spec
+              .redirect
+              .as_deref()
+              .or(r.spec.upstream.as_deref())
+              .unwrap_or(&r.spec.service),
             r.gateway.as_deref().unwrap_or("-")
           );
           for p in &r.spec.paths {
@@ -1950,6 +2051,7 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
       hostname,
       service,
       upstream,
+      redirect,
       port,
       gateway,
       backup_gateway,
@@ -1967,6 +2069,7 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
         hostname,
         service: service.unwrap_or_default(),
         upstream,
+        redirect,
         port,
         gateway,
         backup_gateway,
