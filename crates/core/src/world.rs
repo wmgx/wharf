@@ -762,9 +762,10 @@ impl World {
           || s.https_port.is_some()
           || s.email.is_some()
           || s.tls != GatewayTls::Auto
+          || s.error_page.is_some()
         {
           return Err(ApiError::invalid(format!(
-            "网关 {name}：http_port、https_port、email、tls 只适用于 caddy 网关"
+            "网关 {name}：http_port、https_port、email、tls、error_page 只适用于 caddy 网关"
           )));
         }
         continue;
@@ -775,6 +776,9 @@ impl World {
         return Err(ApiError::invalid(format!(
           "网关 {name} 的 http_port 和 https_port 不能相同"
         )));
+      }
+      if let Some(page) = &gateway.spec.error_page {
+        check_error_page(name, page)?;
       }
     }
     for (host, route) in &self.routes {
@@ -1265,6 +1269,31 @@ fn validate_service(
   Ok(())
 }
 
+/// 自定义错误页能不能放进 Caddyfile。
+fn check_error_page(name: &str, page: &str) -> Result<(), ApiError> {
+  if page.len() > 64 * 1024 {
+    return Err(
+      ApiError::invalid(format!("网关 {name} 的错误页超过 64 KB"))
+        .with_hint("图片用外链，或压缩后再放"),
+    );
+  }
+  if page.contains(crate::render::ERROR_PAGE_END) {
+    return Err(ApiError::invalid(format!(
+      "网关 {name} 的错误页里不能出现 {}",
+      crate::render::ERROR_PAGE_END
+    )));
+  }
+  if page.contains("{$") {
+    return Err(
+      ApiError::invalid(format!(
+        "网关 {name} 的错误页里不能出现 {{$"
+      ))
+      .with_hint("Caddy 会把 {$名字} 换成环境变量；改写成别的写法"),
+    );
+  }
+  Ok(())
+}
+
 /// `主机:端口`，主机里不能有空白和 `/`。
 fn valid_upstream(up: &str) -> bool {
   up.rsplit_once(':').is_some_and(|(h, port)| {
@@ -1409,6 +1438,20 @@ mod tests {
   }
 
   #[test]
+  fn error_page_checks_content() {
+    assert!(
+      check_error_page(
+        "edge",
+        "<style>body{margin:0}</style><p>{err.status_code}</p>"
+      )
+      .is_ok()
+    );
+    assert!(check_error_page("edge", &"x".repeat(64 * 1024 + 1)).is_err());
+    assert!(check_error_page("edge", "x WHARF_ERROR_PAGE y").is_err());
+    assert!(check_error_page("edge", "{$HOME}").is_err());
+  }
+
+  #[test]
   fn compose_service_rejects_limits() {
     let mut w = sample();
     let mut spec = image_service("s1");
@@ -1519,6 +1562,7 @@ mod tests {
         email: None,
         image: None,
         account: None,
+        error_page: None,
       },
     }])
     .unwrap();
@@ -1558,6 +1602,7 @@ mod tests {
       email: None,
       image: None,
       account: None,
+      error_page: None,
     };
     let route = |backup: &str| RouteSpec {
       hostname: "who.example.com".into(),

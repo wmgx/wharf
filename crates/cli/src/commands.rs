@@ -1948,6 +1948,28 @@ async fn gateway(
       });
       Ok(())
     }
+    GatewayCmd::ErrorPage { name, file, apply, .. } => {
+      let mut spec = c
+        .get::<GatewayView>(&format!("/api/gateways/{}", seg(&name)))
+        .await?
+        .spec;
+      spec.error_page = match file {
+        None => None,
+        Some(path) => Some(
+          (if path == "-" {
+            std::io::read_to_string(std::io::stdin())
+          } else {
+            std::fs::read_to_string(&path)
+          })
+          .map_err(|e| {
+            ApiError::invalid(format!("读不了文件 {path}：{e}"))
+              .with_hint("检查路径；从标准输入读用 --file -")
+          })?,
+        ),
+      };
+      changes(c, vec![Change::UpsertGateway { name, spec }], apply, j)
+        .await
+    }
     GatewayCmd::Add {
       name,
       server,
@@ -1997,6 +2019,13 @@ async fn gateway(
         }
         (_, account) => account,
       };
+      // 重复执行 add 修改已有的网关时，保留它的错误页。
+      let error_page = c
+        .get::<Vec<GatewayView>>("/api/gateways")
+        .await?
+        .into_iter()
+        .find(|g| g.name == name)
+        .and_then(|g| g.spec.error_page);
       let spec = GatewaySpec {
         kind,
         server,
@@ -2007,6 +2036,7 @@ async fn gateway(
         image,
         tls,
         account,
+        error_page,
       };
       changes(c, vec![Change::UpsertGateway { name, spec }], apply, j)
         .await

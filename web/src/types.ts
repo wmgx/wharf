@@ -215,6 +215,7 @@ export interface GatewaySpec {
   tls?: GatewayTls;
   /** cloudflare_tunnel：在哪个厂商账号下建隧道。 */
   account?: string;
+  error_page?: string;
 }
 
 export interface GatewayView {
