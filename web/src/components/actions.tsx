@@ -1,3 +1,4 @@
+import { ConfirmDialog } from "@/components/kit";
 import { Checkbox } from "@/components/ui/checkbox";
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
@@ -34,7 +35,7 @@ interface FlowRequest {
   back?: string;
 }
 
-interface Actions {
+export interface Actions {
   /** 打开计划面板：计划 → 确认 → 执行。 */
   plan: (req: FlowRequest) => void;
   redeploy: (svc: ServiceView) => void;
@@ -50,11 +51,11 @@ interface Actions {
   prune: (server: string) => void;
   /** 不给 `to` 就回到上一个不同的版本。 */
   rollback: (name: string, to?: number) => void;
-  /** 先要求输入名称确认，再生成删除计划（连同它的域名）。 */
+  /** 先要求输入名称确认，再预览改动（连同它的域名）。 */
   remove: (name: string) => void;
-  /** 选目标服务器，再生成迁移计划。 */
+  /** 选目标服务器，再预览改动。 */
   move: (svc: ServiceView) => void;
-  /** 设置一个域名的登录保护账号；`enable` 时保存后生成开启登录保护的计划。 */
+  /** 设置一个域名的登录保护账号；`enable` 时保存后预览开启登录保护的改动。 */
   basicAuth: (hostname: string, enable?: boolean) => void;
   /** 确认后升级控制面和全部 agent。 */
   upgrade: () => void;
@@ -176,7 +177,7 @@ export function ActionsProvider({ children }: { children: ReactNode }) {
       try {
         const q = to != null ? `?to=${to}` : "";
         const t = await api.get<RollbackTarget>(`/api/services/${encodeURIComponent(name)}/rollback${q}`);
-        actions.plan({ title: `回滚 ${name} 到 #${t.deployment_id}`, changes: [{ op: "upsert_service", name, spec: t.spec }] });
+        actions.plan({ title: `${name} 回到版本 #${t.deployment_id}`, changes: [{ op: "upsert_service", name, spec: t.spec }] });
       } catch (e) {
         toast.error(`不能回滚 ${name}`, { description: (e as Error).message });
       }
@@ -218,7 +219,7 @@ export function ActionsProvider({ children }: { children: ReactNode }) {
     setRemoving(null);
     actions.plan({
       title: purge ? `删除 ${name} 和它的数据` : `删除 ${name}`,
-      then: "/",
+      then: "/services",
       changes: [...routes.map((r) => ({ op: "remove_route", hostname: r.spec.hostname }) as Change), { op: "remove_service", name, purge_data: purge || undefined }],
     });
   };
@@ -256,27 +257,7 @@ export function ActionsProvider({ children }: { children: ReactNode }) {
       <RemoveDialog name={removing} onCancel={() => setRemoving(null)} onConfirm={confirmRemove} />
       <MoveDialog svc={moving} onCancel={() => setMoving(null)} onConfirm={confirmMove} />
       <BasicAuthDialog hostname={settingAuth?.hostname ?? null} enable={!!settingAuth?.enable} onClose={() => setSettingAuth(null)} onSaved={authSaved} />
-      <Dialog open={upgrading} onOpenChange={setUpgrading}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>升级 Wharf？</DialogTitle>
-            <DialogDescription>控制面会重启，页面断开一会儿</DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="ghost" onClick={() => setUpgrading(false)}>
-              取消
-            </Button>
-            <Button
-              onClick={() => {
-                setUpgrading(false);
-                upgradeWharf();
-              }}
-            >
-              升级
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <ConfirmDialog open={upgrading} title="升级 Wharf？" confirmText="升级" danger={false} onCancel={() => setUpgrading(false)} onConfirm={() => { setUpgrading(false); upgradeWharf(); }}>控制面会重启，页面断开一会儿。</ConfirmDialog>
     </Ctx.Provider>
   );
 }
@@ -320,7 +301,7 @@ function RemoveDialog({ name, onCancel, onConfirm }: { name: string | null; onCa
             className="bg-destructive text-white hover:bg-destructive/90"
             onClick={() => name && onConfirm(name, purge)}
           >
-            {purge ? "生成删除计划（含数据）" : "生成删除计划"}
+            预览改动
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>
@@ -356,7 +337,7 @@ function MoveDialog({ svc, onCancel, onConfirm }: { svc: ServiceView | null; onC
             取消
           </Button>
           <Button disabled={!to} onClick={() => svc && onConfirm(svc, to)}>
-            生成迁移计划
+            预览改动
           </Button>
         </DialogFooter>
       </DialogContent>

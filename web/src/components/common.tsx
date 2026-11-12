@@ -1,8 +1,9 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { ArrowUpRightIcon, CheckIcon, CopyIcon } from "lucide-react";
-import { useNavigate } from "react-router-dom";
+import { ArrowLeftIcon, ArrowUpRightIcon, CheckIcon, CopyIcon } from "lucide-react";
+import { Link, useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { ApiError } from "@/api";
+import { Tip } from "@/components/kit";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
@@ -96,7 +97,7 @@ export function StatusBadge({ tone, children }: { tone: Tone; children: ReactNod
 /** 服务器名：等宽小标签。 */
 export function ServerTag({ name }: { name: string }) {
   return (
-    <Badge variant="outline" className="font-mono text-[11px] font-normal text-muted-foreground">
+    <Badge variant="outline" className="font-mono text-xs font-normal text-muted-foreground">
       {name}
     </Badge>
   );
@@ -167,11 +168,20 @@ export function ErrorNote({ error }: { error: unknown }) {
   );
 }
 
-export function PageHeader({ title, description, actions }: { title: ReactNode; description?: ReactNode; actions?: ReactNode }) {
+export function PageHeader({ title, description, actions, back, count }: { title: ReactNode; description?: ReactNode; actions?: ReactNode; back?: { to: string; label: string }; count?: number }) {
   return (
     <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
       <div className="min-w-0">
-        <h1 className="flex items-center gap-3 text-2xl font-semibold tracking-tight">{title}</h1>
+        {back && (
+          <Link to={back.to} className="mb-3 inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground">
+            <ArrowLeftIcon className="size-3.5" />
+            {back.label}
+          </Link>
+        )}
+        <h1 className="flex items-center gap-3 text-2xl font-semibold tracking-tight">
+          {title}
+          {count != null && <span className="text-base font-normal text-muted-foreground">{count}</span>}
+        </h1>
         {description && <div className="mt-1 text-sm text-muted-foreground">{description}</div>}
       </div>
       {actions && <div className="flex shrink-0 items-center gap-2">{actions}</div>}
@@ -179,17 +189,25 @@ export function PageHeader({ title, description, actions }: { title: ReactNode; 
   );
 }
 
-export function SectionTitle({ children, count }: { children: ReactNode; count?: number }) {
+export function SectionTitle({ children, count, action }: { children: ReactNode; count?: number; action?: ReactNode }) {
   return (
-    <h2 className="mt-8 mb-3 flex items-baseline gap-2 text-sm font-medium text-muted-foreground first:mt-0">
-      {children}
-      {count != null && <span className="font-normal text-muted-foreground/70">{count}</span>}
-    </h2>
+    <div className="mt-8 mb-3 flex items-center justify-between gap-2 first:mt-0">
+      <h2 className="flex items-baseline gap-2 text-sm font-medium text-muted-foreground">
+        {children}
+        {count != null && <span className="font-normal text-muted-foreground/70">{count}</span>}
+      </h2>
+      {action}
+    </div>
   );
 }
 
-export function Empty({ children }: { children: ReactNode }) {
-  return <div className="rounded-lg border border-dashed px-6 py-10 text-center text-sm text-muted-foreground">{children}</div>;
+export function Empty({ children, action }: { children: ReactNode; action?: ReactNode }) {
+  return (
+    <div className="rounded-lg border border-dashed px-6 py-10 text-center text-sm text-muted-foreground">
+      {children}
+      {action && <div className="mt-3">{action}</div>}
+    </div>
+  );
 }
 
 export function CodeBlock({ children, className }: { children: ReactNode; className?: string }) {
@@ -224,10 +242,9 @@ export function ago(iso?: string): string {
 export function CopyButton({ text, className }: { text: string; className?: string }) {
   const [done, setDone] = useState(false);
   return (
-    <button
+    <Tip text="复制"><button
       type="button"
       aria-label={`复制 ${text}`}
-      title="复制"
       className={cn("inline-flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground", className)}
       onClick={async (e) => {
         e.preventDefault();
@@ -241,8 +258,8 @@ export function CopyButton({ text, className }: { text: string; className?: stri
         }
       }}
     >
-      {done ? <CheckIcon className="size-3.5 text-emerald-600" /> : <CopyIcon className="size-3.5" />}
-    </button>
+      {done ? <CheckIcon className="size-3.5 text-success" /> : <CopyIcon className="size-3.5" />}
+    </button></Tip>
   );
 }
 

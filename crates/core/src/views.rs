@@ -13,8 +13,8 @@ use wharf_api_types::{
   spec::{Fleet, GatewayKind, GatewayTls},
   view::{
     EdgeAppView, EdgeLive, EdgeProjectView, GatewayView,
-    ImportRecord, LiveState, RouteView, ServerView, ServiceView,
-    Status, Tone,
+    ImportRecord, Issue, IssueLevel, IssueSubject, LiveState,
+    RouteView, ServerView, ServiceView, Status, Tone,
   },
 };
 
@@ -415,13 +415,23 @@ pub fn route_view(
   })
 }
 
+fn problems_text(issues: &[Issue]) -> Vec<String> {
+  issues
+    .iter()
+    .filter(|i| i.level != IssueLevel::Info)
+    .map(|i| {
+      format!("{}{}", i.title, i.hint.as_deref().unwrap_or(""))
+    })
+    .collect()
+}
+
 pub async fn status(
   state: &AppState,
 ) -> Result<Status, wharf_api_types::ApiError> {
   let snap = snapshot::load(&state.db).await?;
   let net = snap.net(&snap.world);
   let live = cached_live(state, &snap.world).await;
-  let mut problems = Vec::new();
+  let mut issues = Vec::new();
   let servers: Vec<ServerView> = snap
     .world
     .servers
@@ -430,10 +440,27 @@ pub async fn status(
     .collect();
   for s in &servers {
     if !s.joined {
-      problems
-        .push(format!("服务器 {} 还没有完成 agent 加入", s.name));
+      issues.push(Issue {
+        code: "server_not_joined".into(),
+        level: IssueLevel::Warn,
+        subject: Some(IssueSubject {
+          kind: "server".into(),
+          name: s.name.clone(),
+        }),
+        title: format!("服务器 {} 还没有完成 agent 加入", s.name),
+        hint: None,
+      });
     } else if !s.online {
-      problems.push(format!("服务器 {} 离线", s.name));
+      issues.push(Issue {
+        code: "server_offline".into(),
+        level: IssueLevel::Fault,
+        subject: Some(IssueSubject {
+          kind: "server".into(),
+          name: s.name.clone(),
+        }),
+        title: format!("服务器 {} 离线", s.name),
+        hint: None,
+      });
     }
     let disks = s
       .report
@@ -444,11 +471,20 @@ pub async fn status(
       if let Some(d) = d
         && low_disk(d)
       {
-        problems.push(format!(
-          "服务器 {} {label}只剩 {:.1} GB",
-          s.name,
-          d.free as f64 / GB
-        ));
+        issues.push(Issue {
+          code: "disk_low".into(),
+          level: IssueLevel::Warn,
+          subject: Some(IssueSubject {
+            kind: "server".into(),
+            name: s.name.clone(),
+          }),
+          title: format!(
+            "服务器 {} {label}只剩 {:.1} GB",
+            s.name,
+            d.free as f64 / GB
+          ),
+          hint: None,
+        });
       }
     }
   }
@@ -468,7 +504,20 @@ pub async fn status(
     if let Some(st) = &s.status
       && matches!(st.tone, Tone::Warn | Tone::Bad)
     {
-      problems.push(format!("服务 {}：{}", s.name, st.summary));
+      issues.push(Issue {
+        code: "service_unhealthy".into(),
+        level: if st.tone == Tone::Bad {
+          IssueLevel::Fault
+        } else {
+          IssueLevel::Warn
+        },
+        subject: Some(IssueSubject {
+          kind: "service".into(),
+          name: s.name.clone(),
+        }),
+        title: format!("服务 {}：{}", s.name, st.summary),
+        hint: None,
+      });
     }
   }
   for (kind, name, live) in
@@ -476,11 +525,27 @@ pub async fn status(
   {
     let Some(live) = live else { continue };
     if live.state != "running" && live.state != "unknown" {
-      problems.push(format!("{kind} {name} 状态是 {}", live.state));
+      issues.push(Issue {
+        code: "gateway_state".into(),
+        level: IssueLevel::Fault,
+        subject: Some(IssueSubject {
+          kind: "gateway".into(),
+          name: name.clone(),
+        }),
+        title: format!("{kind} {name} 状态是 {}", live.state),
+        hint: None,
+      });
     } else if live.in_sync == Some(false) {
-      problems.push(format!(
-        "{kind} {name} 和配置不一致，执行 wharf plan 查看"
-      ));
+      issues.push(Issue {
+        code: "gateway_drift".into(),
+        level: IssueLevel::Warn,
+        subject: Some(IssueSubject {
+          kind: "gateway".into(),
+          name: name.clone(),
+        }),
+        title: format!("{kind} {name} 和配置不一致"),
+        hint: Some("，执行 wharf plan 查看".into()),
+      });
     }
   }
   let edge_apps: Vec<EdgeAppView> = snap
@@ -491,17 +556,80 @@ pub async fn status(
     .collect();
   for app in &edge_apps {
     if let Some(d) = &app.drift {
-      problems.push(format!("边缘应用 {}：{d}", app.name));
+      issues.push(Issue {
+        code: "edge_drift".into(),
+        level: IssueLevel::Warn,
+        subject: Some(IssueSubject {
+          kind: "edge".into(),
+          name: app.name.clone(),
+        }),
+        title: format!("边缘应用 {}：{d}", app.name),
+        hint: None,
+      });
     } else if let Some(EdgeLive { error: Some(e), .. }) = &app.live {
-      problems.push(format!("边缘应用 {} 同步失败：{e}", app.name));
+      issues.push(Issue {
+        code: "edge_sync".into(),
+        level: IssueLevel::Warn,
+        subject: Some(IssueSubject {
+          kind: "edge".into(),
+          name: app.name.clone(),
+        }),
+        title: format!("边缘应用 {} 同步失败：{e}", app.name),
+        hint: None,
+      });
     }
   }
-  problems.extend(crate::tasks::problems(state).await);
-  problems.extend(crate::probe::problems());
-  problems.extend(crate::alerts::problems());
-  problems.extend(crate::monitor::problems());
-  problems.extend(crate::baseline::problems());
-  problems.extend(crate::host_units::problems());
+  issues.extend(crate::tasks::issues(state).await);
+  issues.extend(crate::probe::issues());
+  issues.extend(crate::alerts::issues());
+  issues.extend(crate::monitor::issues());
+  issues.extend(crate::baseline::issues());
+  issues.extend(crate::host_units::issues());
+  let updates = crate::updates::last();
+  if let Some(updates) = &updates {
+    for (name, check) in &updates.services {
+      if check.newer && services.iter().any(|s| &s.name == name) {
+        issues.push(Issue {
+          code: "update_available".into(),
+          level: IssueLevel::Info,
+          subject: Some(IssueSubject {
+            kind: "service".into(),
+            name: name.clone(),
+          }),
+          title: format!("{name} 有新版本"),
+          hint: None,
+        });
+      }
+    }
+    if let Some(pending) = &updates.pending
+      && !pending.items.is_empty()
+    {
+      let items = &pending.items;
+      issues.push(Issue {
+        code: "pending_changes".into(),
+        level: IssueLevel::Info,
+        subject: None,
+        title: format!(
+          "有 {} 项改动还没执行：{}{}",
+          items.len(),
+          items
+            .iter()
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("、"),
+          if items.len() > 3 { " 等" } else { "" }
+        ),
+        hint: None,
+      });
+    }
+  }
+  let problems = problems_text(&issues);
+  issues.sort_by_key(|i| match i.level {
+    IssueLevel::Fault => 0,
+    IssueLevel::Warn => 1,
+    IssueLevel::Info => 2,
+  });
   let mut edge_unmanaged: Vec<EdgeProjectView> =
     snap.edge_accounts.values().flatten().cloned().collect();
   crate::edge_sync::mark_managed(&snap, &mut edge_unmanaged);
@@ -520,8 +648,9 @@ pub async fn status(
     gateways,
     routes,
     problems,
+    issues,
     health: crate::doctor::last(),
-    updates: crate::updates::last(),
+    updates,
   })
 }
 
@@ -574,4 +703,33 @@ const GB: f64 = (1u64 << 30) as f64;
 /// 剩余不到 10% 或不到 5 GB。
 fn low_disk(d: wharf_api_types::agent::Disk) -> bool {
   d.free < d.total / 10 || (d.free as f64) < 5.0 * GB
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn problems_text_keeps_hint_and_omits_info() {
+    let issues = vec![
+      Issue {
+        code: "gateway_drift".into(),
+        level: IssueLevel::Warn,
+        subject: None,
+        title: "网关 s1 和配置不一致".into(),
+        hint: Some("，执行 wharf plan 查看".into()),
+      },
+      Issue {
+        code: "update_available".into(),
+        level: IssueLevel::Info,
+        subject: None,
+        title: "s1 有新版本".into(),
+        hint: None,
+      },
+    ];
+    assert_eq!(
+      problems_text(&issues),
+      vec!["网关 s1 和配置不一致，执行 wharf plan 查看"]
+    );
+  }
 }

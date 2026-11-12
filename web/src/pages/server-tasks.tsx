@@ -1,3 +1,5 @@
+import { ConfirmDialog, Tip } from "@/components/kit";
+import { Panel } from "@/components/kit";
 import {
   HistoryIcon,
   PencilIcon,
@@ -102,7 +104,7 @@ export function ServerTasks({ server }: { server?: string }) {
         <Empty>没有定时任务</Empty>
       ) : (
         tasks && (
-          <div className="rounded-xl border bg-card">
+          <Panel>
             <Table>
               <TableHeader>
                 <TableRow>
@@ -163,51 +165,47 @@ export function ServerTasks({ server }: { server?: string }) {
                     <TableCell>
                       <div className="flex gap-1">
                         {t.spec.kind !== "ping" && (
-                          <Button
+                          <Tip text="立即运行"><Button
                             variant="ghost"
                             size="icon-xs"
                             aria-label="立即运行"
-                            title="立即运行"
                             onClick={() => run(t.name)}
                           >
                             <PlayIcon />
-                          </Button>
+                          </Button></Tip>
                         )}
-                        <Button
+                        <Tip text="运行记录"><Button
                           variant="ghost"
                           size="icon-xs"
                           aria-label="运行记录"
-                          title="运行记录"
                           onClick={() => setHistory(t.name)}
                         >
                           <HistoryIcon />
-                        </Button>
-                        <Button
+                        </Button></Tip>
+                        <Tip text="编辑"><Button
                           variant="ghost"
                           size="icon-xs"
                           aria-label="编辑"
-                          title="编辑"
                           onClick={() => setEditing(t)}
                         >
                           <PencilIcon />
-                        </Button>
-                        <Button
+                        </Button></Tip>
+                        <Tip text="删除"><Button
                           variant="ghost"
                           size="icon-xs"
                           className="text-destructive"
                           aria-label="删除"
-                          title="删除"
                           onClick={() => setRemoving(t.name)}
                         >
                           <Trash2Icon />
-                        </Button>
+                        </Button></Tip>
                       </div>
                     </TableCell>
                   </TableRow>
                 ))}
               </TableBody>
             </Table>
-          </div>
+          </Panel>
         )
       )}
       {editing && (
@@ -223,24 +221,7 @@ export function ServerTasks({ server }: { server?: string }) {
         />
       )}
       {history && <Runs name={history} onClose={() => setHistory(null)} />}
-      <Dialog open={!!removing} onOpenChange={(o) => !o && setRemoving(null)}>
-        <DialogContent aria-describedby={undefined}>
-          <DialogHeader>
-            <DialogTitle>删除定时任务 {removing}？</DialogTitle>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="ghost" onClick={() => setRemoving(null)}>
-              取消
-            </Button>
-            <Button
-              variant="destructive"
-              onClick={() => removing && remove(removing)}
-            >
-              删除
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <ConfirmDialog open={!!removing} title={`删除任务 ${removing}？`} onCancel={() => setRemoving(null)} onConfirm={() => removing && remove(removing)}>运行记录一起删除。</ConfirmDialog>
     </>
   );
 }
@@ -262,7 +243,7 @@ function Runs({ name, onClose }: { name: string; onClose: () => void }) {
         {data && data.length === 0 && <Empty>没有运行记录</Empty>}
         {data && data.length > 0 && (
           <div className="grid gap-3 sm:grid-cols-[12rem_1fr]">
-            <ul className="max-h-[460px] overflow-auto rounded-lg border">
+            <Panel className="max-h-[460px] overflow-auto"><ul>
               {data.map((r) => (
                 <li key={r.id}>
                   <button
@@ -279,7 +260,7 @@ function Runs({ name, onClose }: { name: string; onClose: () => void }) {
                   </button>
                 </li>
               ))}
-            </ul>
+            </ul></Panel>
             {shown && (
               <div className="min-w-0">
                 <div className="mb-2 text-xs text-muted-foreground">
@@ -607,7 +588,7 @@ function PingUrl({ url }: { url: string }) {
     <button
       type="button"
       title={`复制：${line}\n失败时请求 ${url}/fail`}
-      className="mt-0.5 block max-w-64 truncate font-mono text-[11px] text-primary hover:underline"
+      className="mt-0.5 block max-w-64 truncate font-mono text-xs text-primary hover:underline"
       onClick={() => {
         navigator.clipboard?.writeText(line).then(
           () => toast.success("已复制报到命令", { description: line }),

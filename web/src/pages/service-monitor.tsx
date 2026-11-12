@@ -1,3 +1,4 @@
+import { Tip } from "@/components/kit";
 import { ActivityIcon } from "lucide-react";
 import { useState } from "react";
 import { useActions } from "@/components/actions";
@@ -46,7 +47,7 @@ export function MonitorCard({ svc }: { svc: ServiceView }) {
           <ActivityIcon className="size-4 text-muted-foreground" />
           <span className="font-medium">监控</span>
           {cur ? (
-            <span className="font-mono text-[13px] text-muted-foreground">
+            <span className="font-mono text-xs text-muted-foreground">
               {cur.path}
               {cur.expect ? ` → ${cur.expect}` : ""}
               {cur.keyword ? ` 含“${cur.keyword}”` : ""}
@@ -57,16 +58,13 @@ export function MonitorCard({ svc }: { svc: ServiceView }) {
             </span>
           )}
           {m && (
-            <span
-              className="inline-flex items-center gap-1.5 text-xs text-muted-foreground"
-              title={`${ago(new Date(m.at).toISOString())}检查`}
-            >
+            <Tip text={`${ago(new Date(m.at).toISOString())}检查`}><span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
               <Dot tone={m.ok ? "ok" : m.fails >= 3 ? "bad" : "warn"} />
               <span className={!m.ok && m.fails >= 3 ? "text-destructive" : ""}>
                 {m.detail}
                 {!m.ok && m.fails > 1 ? `（连续 ${m.fails} 次）` : ""}
               </span>
-            </span>
+            </span></Tip>
           )}
           {!editing && (
             <Button
@@ -127,7 +125,7 @@ export function MonitorCard({ svc }: { svc: ServiceView }) {
                   })
                 }
               >
-                生成计划
+                预览改动
               </Button>
               {cur && (
                 <Button

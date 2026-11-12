@@ -1,23 +1,13 @@
+import { ConfirmDialog, Facts, Panel, Row, Rows, Tip } from "@/components/kit";
 import {
-  PackageIcon,
-  ArrowUpCircleIcon,
-  WrenchIcon,
   ArrowRightIcon,
-  ArrowRightLeftIcon,
   ArrowLeftIcon,
   ArrowUpRightIcon,
-  EllipsisIcon,
-  HammerIcon,
   HistoryIcon,
   LockIcon,
   LockOpenIcon,
   PencilIcon,
-  PlayIcon,
   PlusIcon,
-  RefreshCwIcon,
-  RotateCwIcon,
-  SquareIcon,
-  Trash2Icon,
   XIcon,
 } from "lucide-react";
 import { Suspense, lazy, useEffect, useMemo, useState } from "react";
@@ -30,6 +20,7 @@ import {
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { api, usePoll } from "@/api";
 import { useActions } from "@/components/actions";
+import { OpBar, serviceOps } from "@/components/ops";
 import { MonitorCard } from "./service-monitor";
 import { LimitsCard } from "./service-limits";
 import { ServiceTimeline } from "./service-timeline";
@@ -75,7 +66,6 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
@@ -131,23 +121,21 @@ export function ServiceDetail() {
   // 旧链接的 ?tab=domains 也落到"网络"。
   const tab = params.get("tab") === "domains" ? "network" : (params.get("tab") ?? "overview");
   const { status } = useStatus();
-  const actions = useActions();
   const { data: svc, error } = usePoll<ServiceView>(
     `/api/services/${encodeURIComponent(name)}`,
     5000,
   );
   const [editing, setEditing] = useState(false);
   const [addingRoute, setAddingRoute] = useState(false);
-  const [repacking, setRepacking] = useState(false);
 
   const routes = status?.routes.filter((r) => r.spec.service === name) ?? [];
   const back = (
     <Link
       className="mb-3 inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
-      to="/"
+      to="/services"
     >
       <ArrowLeftIcon className="size-3.5" />
-      首页
+      服务
     </Link>
   );
 
@@ -174,12 +162,11 @@ export function ServiceDetail() {
 
   const { tone, text, detail } = serviceTruth(svc, status);
   const source = sourceLabel(svc.spec.source);
-  const built = "build" in svc.spec.source;
 
   return (
     <>
-      {back}
       <PageHeader
+        back={{ to: "/services", label: "服务" }}
         title={
           <>
             {svc.name}
@@ -209,102 +196,8 @@ export function ServiceDetail() {
         }
         actions={
           <>
-            {status?.updates?.services[name]?.newer && (
-              <Button
-                title={status.updates.services[name].latest ? `最新 ${status.updates.services[name].latest}` : undefined}
-                onClick={() =>
-                  actions.plan({
-                    title: `更新 ${name}`,
-                    changes: [{ op: "refresh_images", name }],
-                  })
-                }
-              >
-                <ArrowUpCircleIcon />
-                有新版本，更新
-              </Button>
-            )}
-            <Button variant="outline" onClick={() => setEditing(true)}>
-              <PencilIcon />
-              修改配置
-            </Button>
-            {svc.spec.stopped ? (
-              <Button
-                variant="outline"
-                onClick={() => actions.setStopped(svc, false)}
-              >
-                <PlayIcon />
-                启动
-              </Button>
-            ) : (
-              <Button variant="outline" onClick={() => actions.restart(name)}>
-                <RotateCwIcon />
-                重启
-              </Button>
-            )}
-            <DropdownMenu modal={false}>
-              <DropdownMenuTrigger asChild>
-                <Button variant="outline" size="icon" aria-label="更多操作">
-                  <EllipsisIcon />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-48">
-                {("image" in svc.spec.source ||
-                  ("build" in svc.spec.source &&
-                    !!svc.spec.source.build.git)) && (
-                  <DropdownMenuItem
-                    onSelect={() =>
-                      actions.plan({
-                        title: `检查 ${name} 的更新`,
-                        changes: [{ op: "refresh_images", name }],
-                      })
-                    }
-                  >
-                    <RefreshCwIcon />
-                    检查更新
-                  </DropdownMenuItem>
-                )}
-                {"build" in svc.spec.source && !svc.spec.source.build.git && (
-                  <DropdownMenuItem onSelect={() => setRepacking(true)}>
-                    <PackageIcon />
-                    更新代码包
-                  </DropdownMenuItem>
-                )}
-                {built && (
-                  <DropdownMenuItem onSelect={() => actions.rebuild(name)}>
-                    <HammerIcon />
-                    重新构建
-                  </DropdownMenuItem>
-                )}
-                <DropdownMenuItem onSelect={() => actions.redeploy(svc)}>
-                  <WrenchIcon />
-                  检查并修复
-                </DropdownMenuItem>
-                {!svc.spec.stopped && (
-                  <DropdownMenuItem
-                    onSelect={() => actions.setStopped(svc, true)}
-                  >
-                    <SquareIcon />
-                    停止
-                  </DropdownMenuItem>
-                )}
-                <DropdownMenuItem onSelect={() => actions.rollback(name)}>
-                  <HistoryIcon />
-                  回到上一个版本
-                </DropdownMenuItem>
-                <DropdownMenuItem onSelect={() => actions.move(svc)}>
-                  <ArrowRightLeftIcon />
-                  迁移到其他服务器
-                </DropdownMenuItem>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem
-                  variant="destructive"
-                  onSelect={() => actions.remove(name)}
-                >
-                  <Trash2Icon />
-                  删除服务
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
+            <Button variant="outline" onClick={() => setEditing(true)}><PencilIcon />修改配置</Button>
+            <OpBar ops={serviceOps} target={svc} label={`${svc.name} 的操作`} />
           </>
         }
       />
@@ -376,7 +269,11 @@ export function ServiceDetail() {
       </Tabs>
 
       <EditService svc={svc} open={editing} onClose={() => setEditing(false)} />
-      {repacking && <Repack svc={svc} onClose={() => setRepacking(false)} />}
+      {params.get("repack") === "1" && <Repack svc={svc} onClose={() => {
+        const next = new URLSearchParams(params);
+        next.delete("repack");
+        setParams(next, { replace: true });
+      }} />}
       <AddRoute
         service={name}
         open={addingRoute}
@@ -431,13 +328,12 @@ function Overview({
             </CardTitle>
           </CardHeader>
           <CardContent className="px-5">
-            <dl className="grid grid-cols-[88px_minmax(0,1fr)] gap-x-4 gap-y-3 text-sm">
-              <dt className="text-muted-foreground">域名</dt>
-              <dd className="grid min-w-0 gap-1">
+            <Facts items={[
+              ["域名", <div className="grid min-w-0 gap-1">
                 {routes.map((r) => (
                   <div key={r.id} className="flex min-w-0 items-center gap-0.5">
                     <a
-                      className="inline-flex min-w-0 items-center gap-1 font-mono text-[13px] text-primary hover:underline"
+                      className="inline-flex min-w-0 items-center gap-1 font-mono text-xs text-primary hover:underline"
                       href={r.url}
                       target="_blank"
                       rel="noreferrer"
@@ -461,9 +357,8 @@ function Overview({
                     只在内网访问 · <span className="text-primary">加域名</span>
                   </button>
                 )}
-              </dd>
-              <dt className="text-muted-foreground">数据</dt>
-              <dd>
+              </div>],
+              ["数据", <div>
                 <button
                   type="button"
                   className="text-left hover:underline"
@@ -471,8 +366,8 @@ function Overview({
                 >
                   {dataSummary(svc)}
                 </button>
-              </dd>
-            </dl>
+              </div>]
+            ]} />
           </CardContent>
         </Card>
         <Card className="gap-4 py-5 shadow-xs">
@@ -520,17 +415,15 @@ function DomainsTab({
   onAdd: () => void;
 }) {
   const actions = useActions();
+  const [removing, setRemoving] = useState<string | null>(null);
   return (
     <div className="grid gap-3">
       {routes.length === 0 ? (
         <Empty>还没有域名，现在只能从内网访问。</Empty>
       ) : (
-        <div className="divide-y overflow-hidden rounded-xl border bg-card shadow-xs">
+        <Rows>
           {routes.map((r) => (
-            <div
-              key={r.id}
-              className="flex flex-wrap items-center gap-3 px-4 py-3"
-            >
+            <Row key={r.id}>
               <a
                 className="inline-flex min-w-0 flex-1 items-center gap-1 font-mono text-sm text-primary hover:underline"
                 href={r.url}
@@ -573,25 +466,15 @@ function DomainsTab({
                   开启登录保护
                 </Button>
               )}
-              <Button
-                variant="ghost"
-                size="xs"
-                onClick={() =>
-                  actions.plan({
-                    title: `移除 ${r.spec.hostname}`,
-                    changes: [
-                      { op: "remove_route", hostname: r.spec.hostname },
-                    ],
-                  })
-                }
-              >
+              <Button variant="ghost" size="xs" onClick={() => setRemoving(r.spec.hostname)}>
                 <XIcon />
                 移除
               </Button>
-            </div>
+            </Row>
           ))}
-        </div>
+        </Rows>
       )}
+      <ConfirmDialog open={!!removing} title={`移除域名 ${removing}？`} onCancel={() => setRemoving(null)} onConfirm={() => { const hostname = removing!; setRemoving(null); actions.plan({ title: `移除 ${hostname}`, changes: [{ op: "remove_route", hostname }] }); }}>服务不受影响，DNS 记录和证书一起移除。</ConfirmDialog>
       <Button variant="outline" className="w-fit" onClick={onAdd}>
         <PlusIcon />
         加域名
@@ -607,17 +490,14 @@ function ConfigTab({ svc, onEdit }: { svc: ServiceView; onEdit: () => void }) {
     <div className="grid gap-4">
       <Card className="gap-4 py-5 shadow-xs">
         <CardContent className="px-5">
-          <dl className="grid grid-cols-[88px_minmax(0,1fr)] gap-x-4 gap-y-3 text-sm">
-            <dt className="text-muted-foreground">来源</dt>
-            <dd className="font-mono text-[13px] break-all">
+          <Facts items={[
+              ["来源", <div className="font-mono text-xs break-all">
               {sourceLabel(svc.spec.source)}
-            </dd>
-            <dt className="text-muted-foreground">服务器</dt>
-            <dd>
+            </div>],
+              ["服务器", <div>
               <ServerTag name={svc.spec.server} />
-            </dd>
-            <dt className="text-muted-foreground">端口</dt>
-            <dd className="font-mono text-[13px]">
+            </div>],
+              ["端口", <div className="font-mono text-xs">
               {(svc.spec.ports ?? []).map((p) => (
                 <div key={p.name}>
                   {p.name}：
@@ -626,9 +506,8 @@ function ConfigTab({ svc, onEdit }: { svc: ServiceView; onEdit: () => void }) {
                 </div>
               ))}
               {!svc.spec.ports?.length && "-"}
-            </dd>
-            <dt className="text-muted-foreground">环境变量</dt>
-            <dd className="min-w-0 font-mono text-[13px] break-all whitespace-pre-wrap">
+            </div>],
+              ["环境变量", <div className="min-w-0 font-mono text-xs break-all whitespace-pre-wrap">
               {env.length
                 ? highlight(
                     env
@@ -639,14 +518,9 @@ function ConfigTab({ svc, onEdit }: { svc: ServiceView; onEdit: () => void }) {
                     "env",
                   )
                 : "-"}
-            </dd>
-            {svc.import && (
-              <>
-                <dt className="text-muted-foreground">导入</dt>
-                <dd className="text-xs">{importText(svc.import)}</dd>
-              </>
-            )}
-          </dl>
+            </div>],
+              ["导入", svc.import && <div className="text-xs">{importText(svc.import)}</div>]
+            ]} />
         </CardContent>
       </Card>
       <MonitorCard svc={svc} />
@@ -671,16 +545,13 @@ function DataTab({ svc }: { svc: ServiceView }) {
   return (
     <div className="grid gap-6">
       <div>
-        <h3 className="mb-2 text-sm font-medium text-muted-foreground">挂载</h3>
+        <SectionTitle>挂载</SectionTitle>
         {!svc.data?.length ? (
           <Empty>这个服务没有数据卷</Empty>
         ) : (
-          <div className="divide-y overflow-hidden rounded-xl border bg-card shadow-xs">
+          <Rows>
             {svc.data.map((m, i) => (
-              <div
-                key={i}
-                className="flex flex-wrap items-center gap-2 px-4 py-2.5 font-mono text-xs"
-              >
+              <Row key={i} className="gap-2 font-mono text-xs">
                 <span>{m.source || "匿名卷"}</span>
                 <span className="text-muted-foreground">→ {m.target}</span>
                 <Badge
@@ -693,13 +564,13 @@ function DataTab({ svc }: { svc: ServiceView }) {
                 >
                   {DATA_KIND[m.kind]}
                 </Badge>
-              </div>
+              </Row>
             ))}
-          </div>
+          </Rows>
         )}
       </div>
       <div>
-        <h3 className="mb-2 text-sm font-medium text-muted-foreground">备份</h3>
+        <SectionTitle>备份</SectionTitle>
         <Backups svc={svc} />
       </div>
     </div>
@@ -788,9 +659,9 @@ function History({ name }: { name: string }) {
   );
   const actions = useActions();
   if (!data) return <Skeleton className="h-40 rounded-xl" />;
-  if (data.length === 0) return <Empty>没有部署记录</Empty>;
+  if (data.length === 0) return <Empty>没有版本</Empty>;
   return (
-    <div className="overflow-hidden rounded-xl border bg-card shadow-xs">
+    <Panel>
       <Table>
         <TableHeader className="bg-muted/50">
           <TableRow>
@@ -806,9 +677,9 @@ function History({ name }: { name: string }) {
             <TableRow key={d.id}>
               <TableCell className="pl-4 font-mono text-xs">#{d.id}</TableCell>
               <TableCell>
-                <span title={new Date(d.created_at).toLocaleString("zh-CN")}>
+                <Tip text={new Date(d.created_at).toLocaleString("zh-CN")}><span>
                   {ago(d.created_at)}
-                </span>
+                </span></Tip>
               </TableCell>
               <TableCell>
                 <ServerTag name={d.server} />
@@ -845,7 +716,7 @@ function History({ name }: { name: string }) {
                     onClick={() => actions.rollback(name, d.id)}
                   >
                     <HistoryIcon />
-                    回滚到这里
+                    回到这个版本
                   </Button>
                 )}
               </TableCell>
@@ -853,7 +724,7 @@ function History({ name }: { name: string }) {
           ))}
         </TableBody>
       </Table>
-    </div>
+    </Panel>
   );
 }
 
@@ -907,7 +778,7 @@ function statusLayers(s: ServiceStatus): string[] {
   const op = s.last_op;
   return [
     `期望：${s.want_running ? "运行" : "停止"} · ${short(s.desired_hash)}`,
-    `已应用：${s.applied ? `${short(s.applied.hash)} · ${ago(s.applied.at)}` : "没有部署记录"}`,
+    `已应用：${s.applied ? `${short(s.applied.hash)} · ${ago(s.applied.at)}` : "没有版本"}`,
     `实际：${ACTUAL[s.actual]}${s.actual_hash ? ` · ${short(s.actual_hash)}` : ""}${s.observed_at ? ` · ${ago(s.observed_at)}看到` : ""}`,
     `健康：${HEALTH[s.health]}`,
     `执行：${op ? `${op.action}${OP[op.status]} · ${ago(op.at)}${op.error ? ` · ${op.error}` : ""}` : "-"}`,
@@ -1066,7 +937,7 @@ function EditForm({ svc, onClose }: { svc: ServiceView; onClose: () => void }) {
           取消
         </Button>
         <Button disabled={!howReady(how)} onClick={submit}>
-          生成计划
+          预览改动
         </Button>
       </SheetFooter>
     </>
@@ -1113,9 +984,8 @@ function NetFacts({ svc }: { svc: ServiceView }) {
   const { status } = useStatus();
   const via = status?.servers.find((x) => x.name === svc.spec.server)?.settings.via as string | undefined;
   return (
-    <dl className="grid max-w-3xl grid-cols-[88px_1fr] gap-x-4 gap-y-2 text-sm">
-      <dt className="text-muted-foreground">内网地址</dt>
-      <dd className="font-mono text-[13px]">
+    <Facts className="max-w-3xl" items={[
+              ["内网地址", <div className="font-mono text-xs">
         {Object.entries(svc.addresses).map(([p, a]) => (
           <div
             key={p}
@@ -1134,18 +1004,12 @@ function NetFacts({ svc }: { svc: ServiceView }) {
           </div>
         ))}
         {Object.keys(svc.addresses).length === 0 && "-"}
-      </dd>
-      {(svc.uses?.length || svc.used_by?.length) ? (
-        <>
-          <dt className="text-muted-foreground">依赖</dt>
-          <dd className="flex flex-col gap-0.5">
+      </div>],
+              ["依赖", !!(svc.uses?.length || svc.used_by?.length) && <div className="flex flex-col gap-0.5">
             {svc.uses?.length ? <Deps label="引用" names={svc.uses} /> : null}
             {svc.used_by?.length ? <Deps label="被引用" names={svc.used_by} /> : null}
-          </dd>
-        </>
-      ) : null}
-      <dt className="text-muted-foreground">访问外网</dt>
-      <dd>
+          </div>],
+              ["访问外网", <div>
         {via ? (
           <>
             经{" "}
@@ -1157,8 +1021,8 @@ function NetFacts({ svc }: { svc: ServiceView }) {
         ) : (
           "直连"
         )}
-      </dd>
-    </dl>
+      </div>]
+            ]} />
   );
 }
 

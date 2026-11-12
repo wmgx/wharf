@@ -1,3 +1,5 @@
+import { ConfirmDialog } from "@/components/kit";
+import { Panel } from "@/components/kit";
 import { CopyIcon, PlusIcon, TerminalIcon, Trash2Icon } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
@@ -14,7 +16,7 @@ import type { CreatedToken, Perm, TokenView } from "@/types";
 
 const PERMS: [Perm, string, string][] = [
   ["read", "查看", "看所有状态、日志、配置（不含密钥明文）"],
-  ["plan", "预览改动", "生成计划、探测网络"],
+  ["plan", "预览改动", "预览改动、探测网络"],
   ["apply", "执行改动", "执行不含高风险项的计划、上传代码、触发备份"],
   ["confirm", "确认高风险", "删数据、覆盖、公开到外网、从备份恢复"],
   ["exec", "宿主机", "在宿主机执行命令、打开终端、改服务文件"],
@@ -84,9 +86,7 @@ export function Tokens() {
 
   return (
     <>
-      <div className="mb-3 flex items-center justify-between [&>h2]:mb-0">
-        <SectionTitle count={data?.length}>访问令牌</SectionTitle>
-        <div className="flex gap-2">
+      <SectionTitle count={data?.length} action={<div className="flex gap-2">
           <Button variant="outline" size="sm" onClick={() => setGuide(true)}>
             <TerminalIcon />
             接入 CLI / AI
@@ -95,8 +95,7 @@ export function Tokens() {
             <PlusIcon />
             新建 token
           </Button>
-        </div>
-      </div>
+        </div>}>访问令牌</SectionTitle>
       <Dialog open={guide} onOpenChange={setGuide}>
         <DialogContent className="sm:max-w-2xl" aria-describedby={undefined}>
           <DialogHeader>
@@ -144,7 +143,7 @@ export function Tokens() {
         <Empty>还没有 token</Empty>
       ) : (
         data && (
-          <div className="overflow-hidden rounded-xl border bg-card shadow-xs">
+          <Panel>
             <Table>
               <TableHeader>
                 <TableRow>
@@ -179,7 +178,7 @@ export function Tokens() {
                 ))}
               </TableBody>
             </Table>
-          </div>
+          </Panel>
         )
       )}
       {creating && (
@@ -195,22 +194,7 @@ export function Tokens() {
           }}
         />
       )}
-      <Dialog open={!!removing} onOpenChange={(o) => !o && setRemoving(null)}>
-        <DialogContent aria-describedby={undefined}>
-          <DialogHeader>
-            <DialogTitle>删除 token {removing}？</DialogTitle>
-          </DialogHeader>
-          <Notice kind="warn">用它的 CLI 和 AI 会立刻失去权限</Notice>
-          <DialogFooter>
-            <Button variant="ghost" onClick={() => setRemoving(null)}>
-              取消
-            </Button>
-            <Button variant="destructive" onClick={() => removing && remove(removing)}>
-              删除
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <ConfirmDialog open={!!removing} title={`删除令牌 ${removing}？`} onCancel={() => setRemoving(null)} onConfirm={() => removing && remove(removing)}>用它的 CLI 和 AI 会立刻不能访问。</ConfirmDialog>
     </>
   );
 }

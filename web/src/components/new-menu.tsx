@@ -25,21 +25,21 @@ export function NewMenu() {
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="w-60">
-          <DropdownMenuLabel className="text-xs text-muted-foreground">放东西上去</DropdownMenuLabel>
-          <DropdownMenuItem onSelect={() => nav("/?new=1")}>
+          <DropdownMenuLabel className="text-xs text-muted-foreground">服务</DropdownMenuLabel>
+          <DropdownMenuItem onSelect={() => nav("/services?new=1")}>
             <BoxIcon />
             部署服务
           </DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => nav("/?import=1")}>
+          <DropdownMenuItem onSelect={() => nav("/services?import=1")}>
             <DownloadIcon />
             导入服务器上已有的容器
           </DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => nav("/?edge=1")}>
+          <DropdownMenuItem onSelect={() => nav("/services?edge=1")}>
             <CloudIcon />
             导入 Cloudflare Workers / Pages
           </DropdownMenuItem>
           <DropdownMenuSeparator />
-          <DropdownMenuLabel className="text-xs text-muted-foreground">让人能打开</DropdownMenuLabel>
+          <DropdownMenuLabel className="text-xs text-muted-foreground">域名</DropdownMenuLabel>
           <DropdownMenuItem disabled={!hasServices} onSelect={() => setRoute(true)}>
             <GlobeIcon />
             加域名
@@ -49,7 +49,7 @@ export function NewMenu() {
             新建入口
           </DropdownMenuItem>
           <DropdownMenuSeparator />
-          <DropdownMenuLabel className="text-xs text-muted-foreground">基础设施</DropdownMenuLabel>
+          <DropdownMenuLabel className="text-xs text-muted-foreground">机器和账号</DropdownMenuLabel>
           <DropdownMenuItem onSelect={() => setServer(true)}>
             <ServerIcon />
             加服务器

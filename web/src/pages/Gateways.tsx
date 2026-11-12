@@ -1,3 +1,4 @@
+import { ConfirmDialog, Facts, Rows, Row } from "@/components/kit";
 import { PlusIcon, Trash2Icon, WaypointsIcon } from "lucide-react";
 import { useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
@@ -118,25 +119,14 @@ function BackupPicker({ g, hostname }: { g: GatewayView; hostname: string }) {
     <span className="ml-auto flex items-center gap-2 text-xs text-muted-foreground">
       {route.on_backup && <Badge variant="destructive">正走备用</Badge>}
       备用
-      <select
-        className="rounded-md border bg-background px-1.5 py-1 text-xs text-foreground"
-        value={route.spec.backup_gateway ?? ""}
-        onChange={(e) => set(e.target.value)}
-        title="主网关所在机器离线 5 分钟后，DNS 自动切到备用入口，恢复 5 分钟后切回"
-      >
-        <option value="">无</option>
-        {choices.map((x) => (
-          <option key={x.name} value={x.name}>
-            {x.name}（{x.spec.server}）
-          </option>
-        ))}
-      </select>
+      <Picker value={route.spec.backup_gateway ?? ""} onChange={set} options={[{ value: "", label: "无" }, ...choices.map((x) => ({ value: x.name, label: `${x.name}（${x.spec.server}）` }))]} />
     </span>
   );
 }
 
 function GatewayDetail({ g, onDone }: { g: GatewayView; onDone: () => void }) {
   const actions = useActions();
+  const [removing, setRemoving] = useState(false);
   const { status } = useStatus();
   const { data: config } = usePoll<{ config: string; compose: string }>(`/api/gateways/${encodeURIComponent(g.name)}/config`, 30000);
   return (
@@ -146,31 +136,14 @@ function GatewayDetail({ g, onDone }: { g: GatewayView; onDone: () => void }) {
         <SheetDescription>入口（网关）</SheetDescription>
       </SheetHeader>
       <div className="flex-1 overflow-auto p-4">
-        <dl className="grid grid-cols-[88px_minmax(0,1fr)] gap-x-4 gap-y-3 text-sm">
-          <dt className="text-muted-foreground">服务器</dt>
-          <dd>
-            <ServerTag name={g.spec.server} />
-          </dd>
-          {g.spec.kind === "cloudflare_tunnel" ? (
-            <>
-              <dt className="text-muted-foreground">类型</dt>
-              <dd>Cloudflare 隧道（wharf-{g.name}）</dd>
-              <dt className="text-muted-foreground">厂商账号</dt>
-              <dd>{g.spec.account}</dd>
-            </>
-          ) : (
-            <>
-              <dt className="text-muted-foreground">证书</dt>
-              <dd>{TLS_TEXT[g.spec.tls ?? "auto"]}</dd>
-              <dt className="text-muted-foreground">端口</dt>
-              <dd className="font-mono text-[13px]">
-                HTTP {g.spec.http_port ?? 80} · HTTPS {g.spec.https_port ?? 443}
-              </dd>
-              <dt className="text-muted-foreground">错误页</dt>
-              <dd><GatewayErrorPage g={g} /></dd>
-            </>
-          )}
-        </dl>
+        <Facts items={[
+          ["服务器", <ServerTag name={g.spec.server} />],
+          ["类型", g.spec.kind === "cloudflare_tunnel" && `Cloudflare 隧道（wharf-${g.name}）`],
+          ["厂商账号", g.spec.kind === "cloudflare_tunnel" && g.spec.account],
+          ["证书", g.spec.kind === "caddy" && TLS_TEXT[g.spec.tls ?? "auto"]],
+          ["端口", g.spec.kind === "caddy" && <span className="font-mono text-xs">HTTP {g.spec.http_port ?? 80} · HTTPS {g.spec.https_port ?? 443}</span>],
+          ["错误页", g.spec.kind === "caddy" && <GatewayErrorPage g={g} />],
+        ]} />
         <Tabs defaultValue="routes" className="mt-6">
           <TabsList>
             <TabsTrigger value="routes">域名</TabsTrigger>
@@ -179,19 +152,19 @@ function GatewayDetail({ g, onDone }: { g: GatewayView; onDone: () => void }) {
           </TabsList>
           <TabsContent value="routes" className="mt-3">
             {g.routes.length ? (
-              <div className="divide-y rounded-lg border">
+              <Rows>
                 {g.routes.map((h) => {
                   const redirect = status?.routes.find((r) => r.spec.hostname === h)?.spec.redirect;
                   return (
-                    <div className="flex flex-wrap items-center gap-3 px-3.5 py-2.5 text-[13px]" key={h}>
+                    <Row className="gap-3" key={h}>
                       <span className="font-mono">{h}</span>
                       {redirect && <span className="text-muted-foreground">→ {redirect}</span>}
                       <CertDays d={diagnosisOf(status, h)} />
                       <BackupPicker g={g} hostname={h} />
-                    </div>
+                    </Row>
                   );
                 })}
-              </div>
+              </Rows>
             ) : (
               <Empty>没有域名</Empty>
             )}
@@ -205,23 +178,18 @@ function GatewayDetail({ g, onDone }: { g: GatewayView; onDone: () => void }) {
         </Tabs>
       </div>
       <SheetFooter className="flex-row items-center justify-between border-t">
-        <span className="text-xs text-muted-foreground">{g.routes.length ? "先移除这个网关上的域名才能删除。" : ""}</span>
+        <span className="text-xs text-muted-foreground">{g.routes.length ? "先移除这个入口上的域名才能删除。" : ""}</span>
         <Button
           variant="outline"
           className="text-destructive"
           disabled={g.routes.length > 0}
-          onClick={() => {
-            onDone();
-            actions.plan({
-              title: `删除网关 ${g.name}`,
-              changes: [{ op: "remove_gateway", name: g.name }],
-            });
-          }}
+          onClick={() => setRemoving(true)}
         >
           <Trash2Icon />
-          删除网关
+          删除入口
         </Button>
       </SheetFooter>
+      <ConfirmDialog open={removing} title={`删除入口 ${g.name}？`} onCancel={() => setRemoving(false)} onConfirm={() => { setRemoving(false); onDone(); actions.plan({ title: `删除入口 ${g.name}`, changes: [{ op: "remove_gateway", name: g.name }] }); }}>入口的容器会被删除。</ConfirmDialog>
     </>
   );
 }
@@ -252,7 +220,7 @@ function NewGateway({ onDone }: { onDone: () => void }) {
   const submit = () => {
     onDone();
     actions.plan({
-      title: `新建网关 ${gwName}`,
+      title: `新建入口 ${gwName}`,
       changes: [
         {
           op: "upsert_gateway",
@@ -342,7 +310,7 @@ function NewGateway({ onDone }: { onDone: () => void }) {
         )}
         <label className="flex cursor-pointer items-center gap-2.5 text-sm">
           <Checkbox checked={isDefault} onCheckedChange={(v) => setDefault(v === true)} />
-          设为默认网关（加域名时不选网关就用它）
+          设为默认入口
         </label>
       </div>
       <SheetFooter className="flex-row justify-end border-t">
@@ -350,7 +318,7 @@ function NewGateway({ onDone }: { onDone: () => void }) {
           取消
         </Button>
         <Button disabled={!chosen || !gwName || (tunnel && !chosenAccount)} onClick={submit}>
-          生成计划
+          预览改动
         </Button>
       </SheetFooter>
     </>

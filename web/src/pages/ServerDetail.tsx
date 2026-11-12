@@ -1,6 +1,7 @@
+import { ConfirmDialog, Facts, Tip } from "@/components/kit";
+import { Panel } from "@/components/kit";
 import {
   ArrowLeftIcon,
-  ArrowUpCircleIcon,
   RefreshCwIcon,
   Trash2Icon,
 } from "lucide-react";
@@ -19,6 +20,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/api";
 import { useActions } from "@/components/actions";
+import { OpBar, serverOps } from "@/components/ops";
 import { MetricsPanel } from "@/components/metrics";
 import { ServerLinks } from "./server-links";
 import { ServerBaseline } from "./server-baseline";
@@ -43,13 +45,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { EgressFields } from "./server-egress";
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Table,
@@ -219,18 +215,7 @@ export function ServerDetail() {
               ? `${r.os} · ${r.arch}`
               : undefined
         }
-        actions={
-          server.agent_outdated && (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => actions.upgradeAgent(name)}
-            >
-              <ArrowUpCircleIcon />
-              升级 agent
-            </Button>
-          )
-        }
+        actions={<OpBar ops={serverOps} target={server} label={`${server.name} 的操作`} />}
       />
 
       <Tabs
@@ -283,22 +268,13 @@ export function ServerDetail() {
               used={disk ? 1 - disk.free / disk.total : undefined}
             />
           </div>
-          <dl className="mt-4 grid gap-x-6 gap-y-1 text-sm sm:grid-cols-[auto_1fr]">
-            <Row k="公网 IP" v={server.public_ip} />
-            <Row k="内网地址" v={server.private_addr?.ip} />
-            <Row k="本期流量" v={trafficText(traffic)} />
-            <Row
-              k="docker"
-              v={
-                r?.docker_version &&
-                `${r.docker_version}${r.compose_version ? ` · compose ${r.compose_version}` : ""}`
-              }
-            />
-            <Row
-              k="agent"
-              v={r && `${r.version}${r.build ? ` · ${r.build}` : ""}`}
-            />
-          </dl>
+          <Facts className="mt-4" items={[
+            ["公网 IP", server.public_ip && <span className="font-mono text-xs">{server.public_ip}</span>],
+            ["内网地址", server.private_addr?.ip && <span className="font-mono text-xs">{server.private_addr.ip}</span>],
+            ["本期流量", trafficText(traffic)],
+            ["docker", r?.docker_version && `${r.docker_version}${r.compose_version ? ` · compose ${r.compose_version}` : ""}`],
+            ["agent", r && `${r.version}${r.build ? ` · ${r.build}` : ""}`],
+          ]} />
           <SectionTitle
             count={services.length + gateways.length + direct.length}
           >
@@ -453,7 +429,7 @@ function SystemInfo({ info, apt }: { info: HostInfo; apt: ReactNode }) {
       ) : info.updates.length === 0 ? (
         <Empty>没有</Empty>
       ) : (
-        <div className="rounded-xl border bg-card">
+        <Panel>
           <Table>
             <TableHeader>
               <TableRow>
@@ -483,10 +459,10 @@ function SystemInfo({ info, apt }: { info: HostInfo; apt: ReactNode }) {
                 ))}
             </TableBody>
           </Table>
-        </div>
+        </Panel>
       )}
       <SectionTitle>磁盘占用</SectionTitle>
-      <div className="rounded-xl border bg-card">
+      <Panel>
         <Table>
           <TableHeader>
             <TableRow>
@@ -520,11 +496,11 @@ function SystemInfo({ info, apt }: { info: HostInfo; apt: ReactNode }) {
             <LogRow label="/var/log" bytes={info.var_log} />
           </TableBody>
         </Table>
-      </div>
+      </Panel>
       {!!info.ssh_logins?.length && (
         <>
           <SectionTitle>SSH 登录</SectionTitle>
-          <div className="rounded-xl border bg-card">
+          <Panel>
             <Table>
               <TableHeader>
                 <TableRow>
@@ -538,9 +514,9 @@ function SystemInfo({ info, apt }: { info: HostInfo; apt: ReactNode }) {
                 {info.ssh_logins.map((l, i) => (
                   <TableRow key={i}>
                     <TableCell>
-                      <span title={new Date(l.at).toLocaleString("zh-CN")}>
+                      <Tip text={new Date(l.at).toLocaleString("zh-CN")}><span>
                         {ago(l.at)}
-                      </span>
+                      </span></Tip>
                     </TableCell>
                     <TableCell className="font-mono text-xs">
                       {l.user}
@@ -555,7 +531,7 @@ function SystemInfo({ info, apt }: { info: HostInfo; apt: ReactNode }) {
                 ))}
               </TableBody>
             </Table>
-          </div>
+          </Panel>
         </>
       )}
     </>
@@ -905,21 +881,7 @@ function SettingsForm({
           </Button>
         </div>
       )}
-      <Dialog open={removing} onOpenChange={setRemoving}>
-        <DialogContent aria-describedby={undefined}>
-          <DialogHeader>
-            <DialogTitle>删除服务器 {server.name}？</DialogTitle>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="ghost" onClick={() => setRemoving(false)}>
-              取消
-            </Button>
-            <Button variant="destructive" onClick={remove}>
-              删除
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <ConfirmDialog open={removing} title={`删除服务器 ${server.name}？`} onCancel={() => setRemoving(false)} onConfirm={remove}>只删除 Wharf 里的记录，这台机器上的 agent 要自己停掉。</ConfirmDialog>
     </div>
   );
 }
@@ -961,16 +923,6 @@ function Stat({
         )}
       </CardContent>
     </Card>
-  );
-}
-
-function Row({ k, v }: { k: string; v?: string | null | false }) {
-  if (!v) return null;
-  return (
-    <>
-      <dt className="text-muted-foreground">{k}</dt>
-      <dd className="font-mono text-xs leading-5">{v}</dd>
-    </>
   );
 }
 

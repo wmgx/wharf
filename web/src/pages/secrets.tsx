@@ -1,3 +1,5 @@
+import { ConfirmDialog, Tip } from "@/components/kit";
+import { Panel } from "@/components/kit";
 import { PencilIcon, PlusIcon, Trash2Icon } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
@@ -5,7 +7,7 @@ import { api, usePoll } from "@/api";
 import { ago, Empty, ErrorNote, SectionTitle } from "@/components/common";
 import { Field } from "@/components/fields";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Link } from "react-router-dom";
 import { Textarea } from "@/components/ui/textarea";
@@ -31,13 +33,10 @@ export function Secrets() {
 
   return (
     <>
-      <div className="mb-3 flex items-center justify-between [&>h2]:mb-0">
-        <SectionTitle count={apps.length}>应用密钥</SectionTitle>
-        <Button variant="ghost" size="sm" onClick={() => setEditing({ name: "", fresh: true })}>
+      <SectionTitle count={apps.length} action={ <Button variant="ghost" size="sm" onClick={() => setEditing({ name: "", fresh: true })}>
           <PlusIcon />
           添加
-        </Button>
-      </div>
+        </Button> }>应用密钥</SectionTitle>
       <p className="mb-3 text-sm text-muted-foreground">
         服务的环境变量和 compose 里写 <code className="font-mono">[[名称]]</code> 引用，部署时替换。值只能写入、不能读出。
       </p>
@@ -46,10 +45,10 @@ export function Secrets() {
         (apps.length === 0 ? (
           <Empty>还没有应用密钥</Empty>
         ) : (
-          <div className="divide-y rounded-xl border bg-card">
+          <Panel className="divide-y">
             {apps.map((x) => (
               <div key={x.name} className="group flex flex-wrap items-center gap-x-4 gap-y-1 px-4 py-2.5">
-                <span className="min-w-48 font-mono text-[13px]">{x.name}</span>
+                <span className="min-w-48 font-mono text-xs">{x.name}</span>
                 <span className="flex flex-1 flex-wrap gap-1.5 text-sm">
                   {x.used_by?.length ? (
                     x.used_by.map((u) => (
@@ -63,16 +62,16 @@ export function Secrets() {
                 </span>
                 <span className="text-xs text-muted-foreground">{ago(x.updated_at)}</span>
                 <span className="flex">
-                  <Button variant="ghost" size="icon-xs" title="替换值" onClick={() => setEditing({ name: x.name, fresh: false })}>
+                  <Tip text="替换值"><Button aria-label="替换值" variant="ghost" size="icon-xs" onClick={() => setEditing({ name: x.name, fresh: false })}>
                     <PencilIcon />
-                  </Button>
-                  <Button variant="ghost" size="icon-xs" title="删除" className="text-destructive" onClick={() => setRemoving(x)}>
+                  </Button></Tip>
+                  <Tip text="删除"><Button aria-label="删除" variant="ghost" size="icon-xs" className="text-destructive" onClick={() => setRemoving(x)}>
                     <Trash2Icon />
-                  </Button>
+                  </Button></Tip>
                 </span>
               </div>
             ))}
-          </div>
+          </Panel>
         ))}
       {editing && (
         <SetSecret
@@ -85,22 +84,7 @@ export function Secrets() {
           }}
         />
       )}
-      <Dialog open={!!removing} onOpenChange={(o) => !o && setRemoving(null)}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>删除密钥 {removing?.name}？</DialogTitle>
-            {removing?.used_by?.length ? <DialogDescription>还在用：{removing.used_by.join("、")}</DialogDescription> : null}
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="ghost" onClick={() => setRemoving(null)}>
-              取消
-            </Button>
-            <Button variant="destructive" onClick={() => removing && remove(removing)}>
-              删除
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <ConfirmDialog open={!!removing} title={`删除密钥 ${removing?.name}？`} onCancel={() => setRemoving(null)} onConfirm={() => removing && remove(removing)}>{removing?.used_by?.length ? `还在用：${removing.used_by.join("、")}` : null}</ConfirmDialog>
     </>
   );
 }

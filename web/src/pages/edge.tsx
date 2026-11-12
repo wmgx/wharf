@@ -32,7 +32,7 @@ export function edgeSourceLabel(source?: EdgeSource): string {
 
 export const projectOf = (a: EdgeAppView) => a.spec.project ?? a.name;
 
-/** 发起一次边缘应用的单步任务（重新发布、回滚），返回 run_id。 */
+/** 发起一次Cloudflare 应用的单步任务（重新发布、回滚），返回 run_id。 */
 export async function edgeTask(path: string, body: object, what: string): Promise<string | null> {
   try {
     const { run_id } = await api.post<{ run_id: string }>(path, body);
