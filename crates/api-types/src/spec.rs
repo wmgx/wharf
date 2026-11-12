@@ -454,7 +454,7 @@ pub struct GatewaySpec {
   /// caddy：ACME 账号邮箱，可选。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub email: Option<String>,
-  /// caddy：镜像，默认 `caddy:2`。
+  /// caddy：镜像，默认 Wharf 自建的 wharf-caddy。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub image: Option<String>,
   /// caddy：证书方式，默认 `auto`（公网签证书）。
