@@ -1,4 +1,4 @@
-import { BellIcon, AnchorIcon, DatabaseIcon, NetworkIcon, WaypointsIcon, ChevronsUpDownIcon, HistoryIcon, LogOutIcon, TimerIcon, MoonIcon, ServerIcon, SettingsIcon, SunIcon } from "lucide-react";
+import { BellIcon, AnchorIcon, BoxIcon, DatabaseIcon, NetworkIcon, WaypointsIcon, ChevronsUpDownIcon, HistoryIcon, LogOutIcon, TimerIcon, MoonIcon, ServerIcon, SettingsIcon, SunIcon } from "lucide-react";
 import { NavLink, useLocation } from "react-router-dom";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import {
@@ -7,6 +7,7 @@ import {
   SidebarFooter,
   SidebarGroup,
   SidebarGroupContent,
+  SidebarGroupLabel,
   SidebarHeader,
   SidebarMenu,
   SidebarMenuBadge,
@@ -40,26 +41,24 @@ export function AppSidebar({ username, onLogout }: { username: string; onLogout:
   const alerts = usePoll<AlertsView>("/api/alerts", 60000).data;
   const version = usePoll<VersionView>("/api/version", 600000).data;
   const groups = [
-    {
-      label: "",
-      items: [
-        { to: "/", label: "首页", icon: AnchorIcon, count: status ? status.services.length + (status.edge_apps?.length ?? 0) : undefined },
-        { to: "/servers", label: "服务器", icon: ServerIcon, count: status?.servers.length },
-        { to: "/entries", label: "入口", icon: WaypointsIcon, count: status?.gateways.length },
-        { to: "/network", label: "网络", icon: NetworkIcon },
-        { to: "/tasks", label: "定时任务", icon: TimerIcon },
-        { to: "/data", label: "数据与备份", icon: DatabaseIcon },
-        { to: "/alerts", label: "告警", icon: BellIcon, count: alerts?.firing.length || undefined },
-        { to: "/activity", label: "活动", icon: HistoryIcon },
-      ],
-    },
-    {
-      label: "",
-      items: [{ to: "/settings", label: "设置", icon: SettingsIcon, dot: !!version?.newer }],
-    },
+    { label: "", items: [{ to: "/", label: "首页", icon: AnchorIcon }] },
+    { label: "应用", items: [
+      { to: "/services", label: "服务", icon: BoxIcon, count: status ? status.services.length + (status.edge_apps?.length ?? 0) : undefined },
+      { to: "/entries", label: "入口", icon: WaypointsIcon, count: status?.gateways.length },
+      { to: "/tasks", label: "定时任务", icon: TimerIcon },
+    ] },
+    { label: "机器", items: [
+      { to: "/servers", label: "服务器", icon: ServerIcon, count: status?.servers.length },
+      { to: "/network", label: "网络", icon: NetworkIcon },
+    ] },
+    { label: "保障", items: [
+      { to: "/alerts", label: "告警", icon: BellIcon, count: alerts?.firing.length || undefined },
+      { to: "/data", label: "数据与备份", icon: DatabaseIcon },
+      { to: "/activity", label: "活动", icon: HistoryIcon },
+    ] },
+    { label: "", items: [{ to: "/settings", label: "设置", icon: SettingsIcon, dot: !!version?.newer }] },
   ];
-  // 服务详情从首页点进去，算在首页下面。
-  const active = (to: string) => (to === "/" ? pathname === "/" || pathname.startsWith("/services/") || pathname.startsWith("/edge/") : pathname.startsWith(to));
+  const active = (to: string) => to === "/" ? pathname === "/" : to === "/services" ? pathname.startsWith("/services") || pathname.startsWith("/edge/") : pathname.startsWith(to);
 
   return (
     <Sidebar collapsible="icon">
@@ -71,7 +70,6 @@ export function AppSidebar({ username, onLogout }: { username: string; onLogout:
                 <Logo />
                 <div className="grid leading-tight">
                   <span className="font-semibold">Wharf</span>
-                  <span className="text-xs text-muted-foreground">多服务器管理</span>
                 </div>
               </NavLink>
             </SidebarMenuButton>
@@ -82,6 +80,7 @@ export function AppSidebar({ username, onLogout }: { username: string; onLogout:
       <SidebarContent>
         {groups.map((g, gi) => (
           <SidebarGroup key={gi} className={gi === groups.length - 1 ? "mt-auto" : undefined}>
+            {g.label && <SidebarGroupLabel>{g.label}</SidebarGroupLabel>}
             <SidebarGroupContent>
               <SidebarMenu>
                 {g.items.map((it) => (

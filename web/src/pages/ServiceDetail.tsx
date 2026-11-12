@@ -1,24 +1,13 @@
 import { ConfirmDialog, Facts, Panel, Row, Rows, Tip } from "@/components/kit";
 import {
-  PackageIcon,
-  ArrowUpCircleIcon,
-  WrenchIcon,
   ArrowRightIcon,
-  ArrowRightLeftIcon,
   ArrowLeftIcon,
   ArrowUpRightIcon,
-  EllipsisIcon,
-  HammerIcon,
   HistoryIcon,
   LockIcon,
   LockOpenIcon,
   PencilIcon,
-  PlayIcon,
   PlusIcon,
-  RefreshCwIcon,
-  RotateCwIcon,
-  SquareIcon,
-  Trash2Icon,
   XIcon,
 } from "lucide-react";
 import { Suspense, lazy, useEffect, useMemo, useState } from "react";
@@ -31,6 +20,7 @@ import {
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { api, usePoll } from "@/api";
 import { useActions } from "@/components/actions";
+import { OpBar, serviceOps } from "@/components/ops";
 import { MonitorCard } from "./service-monitor";
 import { LimitsCard } from "./service-limits";
 import { ServiceTimeline } from "./service-timeline";
@@ -76,7 +66,6 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
@@ -132,23 +121,21 @@ export function ServiceDetail() {
   // 旧链接的 ?tab=domains 也落到"网络"。
   const tab = params.get("tab") === "domains" ? "network" : (params.get("tab") ?? "overview");
   const { status } = useStatus();
-  const actions = useActions();
   const { data: svc, error } = usePoll<ServiceView>(
     `/api/services/${encodeURIComponent(name)}`,
     5000,
   );
   const [editing, setEditing] = useState(false);
   const [addingRoute, setAddingRoute] = useState(false);
-  const [repacking, setRepacking] = useState(false);
 
   const routes = status?.routes.filter((r) => r.spec.service === name) ?? [];
   const back = (
     <Link
       className="mb-3 inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
-      to="/"
+      to="/services"
     >
       <ArrowLeftIcon className="size-3.5" />
-      首页
+      服务
     </Link>
   );
 
@@ -175,12 +162,11 @@ export function ServiceDetail() {
 
   const { tone, text, detail } = serviceTruth(svc, status);
   const source = sourceLabel(svc.spec.source);
-  const built = "build" in svc.spec.source;
 
   return (
     <>
-      {back}
       <PageHeader
+        back={{ to: "/services", label: "服务" }}
         title={
           <>
             {svc.name}
@@ -210,102 +196,8 @@ export function ServiceDetail() {
         }
         actions={
           <>
-            {status?.updates?.services[name]?.newer && (
-              <Button
-                title={status.updates.services[name].latest ? `最新 ${status.updates.services[name].latest}` : undefined}
-                onClick={() =>
-                  actions.plan({
-                    title: `更新 ${name}`,
-                    changes: [{ op: "refresh_images", name }],
-                  })
-                }
-              >
-                <ArrowUpCircleIcon />
-                有新版本，更新
-              </Button>
-            )}
-            <Button variant="outline" onClick={() => setEditing(true)}>
-              <PencilIcon />
-              修改配置
-            </Button>
-            {svc.spec.stopped ? (
-              <Button
-                variant="outline"
-                onClick={() => actions.setStopped(svc, false)}
-              >
-                <PlayIcon />
-                启动
-              </Button>
-            ) : (
-              <Button variant="outline" onClick={() => actions.restart(name)}>
-                <RotateCwIcon />
-                重启
-              </Button>
-            )}
-            <DropdownMenu modal={false}>
-              <DropdownMenuTrigger asChild>
-                <Button variant="outline" size="icon" aria-label="更多操作">
-                  <EllipsisIcon />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-48">
-                {("image" in svc.spec.source ||
-                  ("build" in svc.spec.source &&
-                    !!svc.spec.source.build.git)) && (
-                  <DropdownMenuItem
-                    onSelect={() =>
-                      actions.plan({
-                        title: `检查 ${name} 的更新`,
-                        changes: [{ op: "refresh_images", name }],
-                      })
-                    }
-                  >
-                    <RefreshCwIcon />
-                    检查更新
-                  </DropdownMenuItem>
-                )}
-                {"build" in svc.spec.source && !svc.spec.source.build.git && (
-                  <DropdownMenuItem onSelect={() => setRepacking(true)}>
-                    <PackageIcon />
-                    更新代码包
-                  </DropdownMenuItem>
-                )}
-                {built && (
-                  <DropdownMenuItem onSelect={() => actions.rebuild(name)}>
-                    <HammerIcon />
-                    重新构建
-                  </DropdownMenuItem>
-                )}
-                <DropdownMenuItem onSelect={() => actions.redeploy(svc)}>
-                  <WrenchIcon />
-                  重新部署
-                </DropdownMenuItem>
-                {!svc.spec.stopped && (
-                  <DropdownMenuItem
-                    onSelect={() => actions.setStopped(svc, true)}
-                  >
-                    <SquareIcon />
-                    停止
-                  </DropdownMenuItem>
-                )}
-                <DropdownMenuItem onSelect={() => actions.rollback(name)}>
-                  <HistoryIcon />
-                  回到上一个版本
-                </DropdownMenuItem>
-                <DropdownMenuItem onSelect={() => actions.move(svc)}>
-                  <ArrowRightLeftIcon />
-                  迁移到其他服务器
-                </DropdownMenuItem>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem
-                  variant="destructive"
-                  onSelect={() => actions.remove(name)}
-                >
-                  <Trash2Icon />
-                  删除服务
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
+            <Button variant="outline" onClick={() => setEditing(true)}><PencilIcon />修改配置</Button>
+            <OpBar ops={serviceOps} target={svc} label={`${svc.name} 的操作`} />
           </>
         }
       />
@@ -377,7 +269,11 @@ export function ServiceDetail() {
       </Tabs>
 
       <EditService svc={svc} open={editing} onClose={() => setEditing(false)} />
-      {repacking && <Repack svc={svc} onClose={() => setRepacking(false)} />}
+      {params.get("repack") === "1" && <Repack svc={svc} onClose={() => {
+        const next = new URLSearchParams(params);
+        next.delete("repack");
+        setParams(next, { replace: true });
+      }} />}
       <AddRoute
         service={name}
         open={addingRoute}

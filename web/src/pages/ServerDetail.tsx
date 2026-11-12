@@ -2,7 +2,6 @@ import { ConfirmDialog, Facts, Tip } from "@/components/kit";
 import { Panel } from "@/components/kit";
 import {
   ArrowLeftIcon,
-  ArrowUpCircleIcon,
   RefreshCwIcon,
   Trash2Icon,
 } from "lucide-react";
@@ -21,6 +20,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/api";
 import { useActions } from "@/components/actions";
+import { OpBar, serverOps } from "@/components/ops";
 import { MetricsPanel } from "@/components/metrics";
 import { ServerLinks } from "./server-links";
 import { ServerBaseline } from "./server-baseline";
@@ -215,18 +215,7 @@ export function ServerDetail() {
               ? `${r.os} · ${r.arch}`
               : undefined
         }
-        actions={
-          server.agent_outdated && (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => actions.upgradeAgent(name)}
-            >
-              <ArrowUpCircleIcon />
-              升级 agent
-            </Button>
-          )
-        }
+        actions={<OpBar ops={serverOps} target={server} label={`${server.name} 的操作`} />}
       />
 
       <Tabs
