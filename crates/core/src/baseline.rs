@@ -19,6 +19,7 @@ use wharf_api_types::{
   ApiError, ErrorCode,
   agent::{AgentOp, HostExecJob, HostExecOutcome},
   spec::Baseline,
+  view::{Issue, IssueLevel, IssueSubject},
 };
 
 use crate::{hub::ProgressFn, state::AppState};
@@ -48,16 +49,24 @@ fn remember(server: &str, diffs: Vec<String>) {
   }
 }
 
-pub fn problems() -> Vec<String> {
+pub fn issues() -> Vec<Issue> {
   DRIFT
     .lock()
     .map(|d| {
       d.iter()
         .map(|(s, diffs)| {
-          format!(
-            "服务器 {s} 偏离基线 {} 项（wharf server baseline {s} --apply 纠正）",
-            diffs.len()
-          )
+          Issue {
+            code: "baseline_drift".into(),
+            level: IssueLevel::Warn,
+            subject: Some(IssueSubject {
+              kind: "server".into(),
+              name: s.clone(),
+            }),
+            title: format!("服务器 {s} 偏离基线 {} 项", diffs.len()),
+            hint: Some(format!(
+              "（wharf server baseline {s} --apply 纠正）"
+            )),
+          }
         })
         .collect()
     })

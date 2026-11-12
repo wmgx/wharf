@@ -20,7 +20,8 @@ use wharf_api_types::{
   agent::{AgentOp, HostExecJob, TaskHow, TaskRunJob, TaskRunResult},
   validate_name,
   view::{
-    Perm, TaskKind, TaskRunView, TaskSpec, TaskStatus, TaskView,
+    Issue, IssueLevel, IssueSubject, Perm, TaskKind, TaskRunView,
+    TaskSpec, TaskStatus, TaskView,
   },
 };
 
@@ -442,7 +443,7 @@ fn dec(s: &str) -> TaskStatus {
 }
 
 /// 最近一次（不算跳过和运行中）失败或超时的任务，给"需要注意"。
-pub async fn problems(state: &AppState) -> Vec<String> {
+pub async fn issues(state: &AppState) -> Vec<Issue> {
   let rows = state
     .db
     .call(|c| {
@@ -463,7 +464,16 @@ pub async fn problems(state: &AppState) -> Vec<String> {
     .unwrap_or_default();
   rows
     .into_iter()
-    .map(|(n, s)| format!("定时任务 {n} {}", status_text(dec(&s))))
+    .map(|(n, s)| Issue {
+      code: "task_failed".into(),
+      level: IssueLevel::Warn,
+      title: format!("定时任务 {n} {}", status_text(dec(&s))),
+      subject: Some(IssueSubject {
+        kind: "task".into(),
+        name: n,
+      }),
+      hint: None,
+    })
     .collect()
 }
 
