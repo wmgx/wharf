@@ -35,7 +35,7 @@ interface FlowRequest {
   back?: string;
 }
 
-interface Actions {
+export interface Actions {
   /** 打开计划面板：计划 → 确认 → 执行。 */
   plan: (req: FlowRequest) => void;
   redeploy: (svc: ServiceView) => void;
@@ -219,7 +219,7 @@ export function ActionsProvider({ children }: { children: ReactNode }) {
     setRemoving(null);
     actions.plan({
       title: purge ? `删除 ${name} 和它的数据` : `删除 ${name}`,
-      then: "/",
+      then: "/services",
       changes: [...routes.map((r) => ({ op: "remove_route", hostname: r.spec.hostname }) as Change), { op: "remove_service", name, purge_data: purge || undefined }],
     });
   };

@@ -1,7 +1,7 @@
 import { Panel } from "@/components/kit";
-import { ArrowRightIcon, ArrowUpCircleIcon, CheckIcon, ChevronRightIcon, CloudIcon, LayoutGridIcon, ListIcon, PlusIcon } from "lucide-react";
+import { ArrowRightIcon, ArrowUpCircleIcon, CheckIcon, ChevronRightIcon, CloudIcon, PlusIcon } from "lucide-react";
 import { useState, type CSSProperties } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { usePoll } from "@/api";
 import { useActions } from "@/components/actions";
 import { CardsSkeleton, OpenLink, useClickable, Mark, PageHeader, SectionTitle, ServerTag, StatusBadge, type Tone } from "@/components/common";
@@ -9,21 +9,8 @@ import { serviceTruth } from "@/components/health";
 import { Button } from "@/components/ui/button";
 import { useStatus } from "@/status";
 import type { AccountView, Status, TokenView } from "@/types";
-import { UnmanagedList } from "./containers";
-import { EdgeList, edgeTone } from "./edge";
-import { NewService } from "./NewService";
-import { ServiceTable } from "./Services";
+import { edgeTone } from "./edge";
 import { cn } from "@/lib/utils";
-
-type View = "cards" | "list";
-const VIEW_KEY = "wharf.home.view";
-const savedView = (): View => {
-  try {
-    return localStorage.getItem(VIEW_KEY) === "list" ? "list" : "cards";
-  } catch {
-    return "cards";
-  }
-};
 
 const card =
   "group flex flex-col gap-3 rounded-xl border bg-card p-4 shadow-xs transition-all hover:-translate-y-px hover:border-foreground/15 hover:shadow-md animate-in fade-in slide-in-from-bottom-1 fill-mode-both";
@@ -55,20 +42,11 @@ function itemsOf(status: Status): Item[] {
   return [...services, ...edge].sort((x, y) => x.name.localeCompare(y.name));
 }
 
-/** 首页：全部服务。默认卡片，可以切成列表、按服务器筛选；系统还没配完时顶部是上手清单。 */
+/** 首页：服务卡片和服务器筛选；系统还没配完时顶部是上手清单。 */
 export function Home() {
-  const { status, refresh } = useStatus();
-  const [params, setParams] = useSearchParams();
-  const [view, setViewState] = useState<View>(savedView);
+  const { status } = useStatus();
+  const nav = useNavigate();
   const [server, setServer] = useState<string | undefined>(undefined);
-  const setView = (v: View) => {
-    setViewState(v);
-    try {
-      localStorage.setItem(VIEW_KEY, v);
-    } catch {
-      // 存不了就只在这次有效
-    }
-  };
   const items = (status ? itemsOf(status) : []).filter((i) => !server || (i.cloud ? server === "cloudflare" : i.where === server));
   const open = items.filter((i) => i.url);
   const internal = items.filter((i) => !i.url);
@@ -80,7 +58,7 @@ export function Home() {
         title="首页"
         description={status ? `${status.servers.length} 台服务器 · ${status.services.length + (status.edge_apps?.length ?? 0)} 个服务 · ${status.routes.length} 个域名` : "载入中…"}
         actions={
-          <Button onClick={() => setParams({ new: "1" })}>
+          <Button onClick={() => nav("/services?new=1")}>
             <PlusIcon />
             新建服务
           </Button>
@@ -102,20 +80,10 @@ export function Home() {
               </button>
             ))}
           </div>
-          <div className="ml-auto flex rounded-md border bg-card p-0.5">
-            <ViewButton on={view === "cards"} label="卡片" onClick={() => setView("cards")}>
-              <LayoutGridIcon />
-            </ViewButton>
-            <ViewButton on={view === "list"} label="列表" onClick={() => setView("list")}>
-              <ListIcon />
-            </ViewButton>
-          </div>
         </div>
       )}
       {!status ? (
         <CardsSkeleton />
-      ) : view === "list" ? (
-        <ServiceTable status={status} server={server} />
       ) : (
         <>
           {open.length > 0 && <SectionTitle count={open.length}>能从外网打开</SectionTitle>}
@@ -124,31 +92,7 @@ export function Home() {
           <Cards items={internal} />
         </>
       )}
-      <UnmanagedList />
-      <EdgeList />
-      <NewService
-        open={params.get("new") === "1"}
-        onClose={() => {
-          setParams({});
-          refresh();
-        }}
-      />
     </>
-  );
-}
-
-function ViewButton({ on, label, onClick, children }: { on: boolean; label: string; onClick: () => void; children: React.ReactNode }) {
-  return (
-    <button
-      type="button"
-      aria-label={label}
-      aria-pressed={on}
-      title={label}
-      onClick={onClick}
-      className={cn("grid size-7 place-items-center rounded text-muted-foreground [&_svg]:size-4 hover:text-foreground", on && "bg-accent text-foreground")}
-    >
-      {children}
-    </button>
   );
 }
 
@@ -265,7 +209,7 @@ function Onboarding({ status }: { status: Status }) {
       title: "部署第一个服务",
       hint: "镜像、git 仓库或 compose 都行",
       action: "部署服务",
-      go: () => nav("/?new=1"),
+      go: () => nav("/services?new=1"),
     },
     {
       done: status.routes.length > 0,
