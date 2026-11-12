@@ -4,7 +4,7 @@ name: dev-images
 
 on:
   push:
-    branches: [p12-dev]
+    branches: [ui-dev]
   workflow_dispatch:
 
 permissions:
