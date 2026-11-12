@@ -12,10 +12,10 @@ export function Probe({ probe }: { probe?: ProbeView }) {
   const cert =
     probe.cert_days === undefined ? "" : ` · 证书剩 ${probe.cert_days} 天`;
   return (
-    <Tip text={`${ago(new Date(probe.at).toISOString())}探测：${text}${cert}`}><span className="inline-flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
+    <Tip text={`${ago(new Date(probe.at).toISOString())}探测：${text}${cert}`}><span className="inline-flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
       <Dot tone={tone} />
       {!probe.ok && (
-        <span className={probe.fails >= 3 ? "text-destructive" : ""}>
+        <span className={probe.fails >= 3 ? "min-w-0 break-all text-destructive" : "min-w-0 break-all"}>
           {text}
         </span>
       )}
