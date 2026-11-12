@@ -21,7 +21,12 @@ export function Settings({ svc, active }: { svc: ServiceView; active: boolean })
   const [key, setKey] = useState(0);
   const location = useLocation();
   const actions = useActions();
-  useEffect(() => { if (active && location.hash) document.getElementById(location.hash.slice(1))?.scrollIntoView(); }, [active, location.hash]);
+  useEffect(() => {
+    if (active && location.hash) {
+      document.getElementById(location.hash.slice(1))?.scrollIntoView();
+      if (location.hash === "#backup") document.getElementById("service-backup")?.focus();
+    }
+  }, [active, location.hash]);
   const changed = ([['来源', 'source'], ['端口', 'ports'], ['环境变量', 'env'], ['健康检查', 'monitor'], ['资源上限', 'limits'], ['备份', 'backup']] as [string, keyof ServiceSpec][]).filter(([, field]) => dirty([field])).map(([label]) => label);
   return <SettingsFields key={key} svc={svc} draft={draft} set={set} changed={changed} onReset={() => { reset(); setKey((n) => n + 1); }} onSubmit={() => actions.plan({ title: `修改 ${svc.name}`, changes: [{ op: "upsert_service", name: svc.name, spec: draft }] })} />;
 }
