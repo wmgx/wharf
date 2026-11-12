@@ -463,6 +463,10 @@ pub struct GatewaySpec {
   /// cloudflare_tunnel：在哪个厂商账号下建隧道（`wharf account list`）。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub account: Option<String>,
+  /// caddy：网关连不上服务时（502、503、504）显示的 HTML。不填用内置的默认页。
+  /// 内容里可以写 `{err.status_code}`，显示时换成状态码。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub error_page: Option<String>,
 }
 
 /// 网关的证书方式。

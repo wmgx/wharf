@@ -672,6 +672,34 @@ pub struct Site {
   pub redirect: Option<String>,
 }
 
+/// 内置的错误页。
+const DEFAULT_ERROR_PAGE: &str = include_str!("error_page.html");
+/// 错误页在 Caddyfile 里的结束标记；内容里不能出现它。
+pub const ERROR_PAGE_END: &str = "WHARF_ERROR_PAGE";
+
+/// 错误页的 snippet：网关自己产生的 502、503、504 返回这张页面。没填或是空的用内置的默认页。
+fn error_snippet(spec: &GatewaySpec) -> String {
+  let page = spec
+    .error_page
+    .as_deref()
+    .filter(|p| !p.trim().is_empty())
+    .unwrap_or(DEFAULT_ERROR_PAGE);
+  let mut out = format!(
+    "\n(wharf_errors) {{\n\thandle_errors 502 503 504 {{\n\t\theader Content-Type \"text/html; charset=utf-8\"\n\t\trespond <<{ERROR_PAGE_END}\n"
+  );
+  for line in page.lines() {
+    if !line.is_empty() {
+      out.push_str("\t\t");
+      out.push_str(line);
+    }
+    out.push('\n');
+  }
+  out.push_str(&format!(
+    "\t\t{ERROR_PAGE_END} {{err.status_code}}\n\t}}\n}}\n"
+  ));
+  out
+}
+
 pub fn caddyfile(
   name: &str,
   spec: &GatewaySpec,
@@ -695,7 +723,9 @@ pub fn caddyfile(
     GatewayTls::Internal => out.push_str("\tlocal_certs\n"),
     GatewayTls::Off => out.push_str("\tauto_https off\n"),
   }
-  out.push_str("}\n\nimport /etc/caddy/extra.d/*.caddy\n");
+  out.push_str("}\n");
+  out.push_str(&error_snippet(spec));
+  out.push_str("\nimport /etc/caddy/extra.d/*.caddy\n");
   let scheme = match spec.tls {
     GatewayTls::Off => "http://",
     _ => "",
@@ -710,6 +740,7 @@ pub fn caddyfile(
       ));
       continue;
     }
+    out.push_str("\timport wharf_errors\n");
     if let Some(a) = &site.auth {
       out.push_str(&format!(
         "\tbasic_auth {{\n\t\t{} {}\n\t}}\n",
@@ -874,6 +905,7 @@ mod tests {
       image: None,
       tls: GatewayTls::Auto,
       account: None,
+      error_page: None,
     };
     let out = caddyfile(
       "edge",
@@ -904,7 +936,7 @@ mod tests {
     assert!(z.contains("basic_auth {\n\t\tadmin $2b$12$abc\n\t}"));
     assert_eq!(out.matches("basic_auth").count(), 1);
     assert!(out.contains(
-      "a.example.com {\n\treverse_proxy /ws 127.0.0.1:17891\n\treverse_proxy 100.1.1.1:2\n}"
+      "a.example.com {\n\timport wharf_errors\n\treverse_proxy /ws 127.0.0.1:17891\n\treverse_proxy 100.1.1.1:2\n}"
     ));
     assert!(out.contains("http_port 8080"));
     assert!(!out.contains("https_port"));
@@ -937,6 +969,53 @@ mod tests {
   }
 
   #[test]
+  fn caddyfile_has_default_error_page() {
+    let spec = serde_json::from_value(serde_json::json!({
+      "kind": "caddy", "server": "s1"
+    }))
+    .unwrap();
+    let out = caddyfile(
+      "edge",
+      &spec,
+      &[
+        Site {
+          hostname: "a.example.com".into(),
+          upstream: "127.0.0.1:21000".into(),
+          auth: None,
+          paths: vec![],
+          redirect: None,
+        },
+        Site {
+          hostname: "b.example.com".into(),
+          upstream: String::new(),
+          auth: None,
+          paths: vec![],
+          redirect: Some("https://a.example.com".into()),
+        },
+      ],
+      false,
+    );
+    assert!(out.contains("(wharf_errors) {"));
+    assert!(out.contains("handle_errors 502 503 504"));
+    assert!(out.contains("服务暂时不可用"));
+    assert_eq!(out.matches("import wharf_errors").count(), 1);
+  }
+
+  #[test]
+  fn caddyfile_has_custom_error_page() {
+    let spec = serde_json::from_value(serde_json::json!({
+      "kind": "caddy", "server": "s1",
+      "error_page": "<p>x</p>\n\n<p>y</p>"
+    }))
+    .unwrap();
+    let out = caddyfile("edge", &spec, &[], false);
+    assert!(out.contains(
+      "\t\t<p>x</p>\n\n\t\t<p>y</p>\n\t\tWHARF_ERROR_PAGE {err.status_code}\n"
+    ));
+    assert!(!out.contains("服务暂时不可用"));
+  }
+
+  #[test]
   fn caddyfile_redirect_keeps_uri() {
     let gw = GatewaySpec {
       kind: GatewayKind::Caddy,
@@ -948,6 +1027,7 @@ mod tests {
       image: None,
       tls: GatewayTls::Auto,
       account: None,
+      error_page: None,
     };
     let out = caddyfile(
       "edge",
@@ -977,6 +1057,7 @@ mod tests {
       image: None,
       tls: GatewayTls::Auto,
       account: Some("cf".into()),
+      error_page: None,
     };
     let out = tunnel_compose("cf", &spec);
     assert!(
