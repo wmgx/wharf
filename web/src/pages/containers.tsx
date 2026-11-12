@@ -1,4 +1,4 @@
-import { ConfirmDialog, Tip } from "@/components/kit";
+import { ConfirmDialog, Row, Rows, Tip } from "@/components/kit";
 import { BoxIcon, DownloadIcon, LayersIcon, ServerIcon, Trash2Icon } from "lucide-react";
 import { toast } from "sonner";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -17,7 +17,7 @@ import { useStatus } from "@/status";
 import type { ImportPreview, Unmanaged } from "@/types";
 
 /** 各台在线服务器上没纳管的容器，30 秒刷新一次。 */
-function useUnmanaged(): { items: Unmanaged[]; reload: () => void } {
+export function useUnmanaged(): { items: Unmanaged[]; reload: () => void } {
   const { status } = useStatus();
   const servers = (status?.servers ?? []).filter((s) => s.online).map((s) => s.name);
   const key = servers.join(",");
@@ -40,11 +40,7 @@ const target = (u: Unmanaged) => u.project ?? u.container ?? "";
 /** 一行"还有多少没纳管"的提示，点开逐个导入。 */
 export function HintRow({ icon, label, text, onClick }: { icon: ReactNode; label: string; text: string; onClick: () => void }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="flex items-center gap-2 rounded-lg border border-dashed px-4 py-2.5 text-left text-sm text-muted-foreground transition-colors hover:border-primary hover:text-foreground"
-    >
+    <Row onClick={onClick} className="text-muted-foreground">
       {icon}
       <span className="font-medium text-foreground">{label}</span>
       <span>· {text}</span>
@@ -52,13 +48,12 @@ export function HintRow({ icon, label, text, onClick }: { icon: ReactNode; label
         <DownloadIcon className="size-3.5" />
         导入
       </span>
-    </button>
+    </Row>
   );
 }
 
 /** 每台服务器一行提示：有多少容器没纳管，点开逐个导入。 */
-export function UnmanagedList() {
-  const { items, reload } = useUnmanaged();
+export function UnmanagedList({ items, reload }: { items: Unmanaged[]; reload: () => void }) {
   const [removing, setRemoving] = useState<Unmanaged | null>(null);
   const [params, setParams] = useSearchParams();
   const [picked, setServer] = useState<string | null>(null);
@@ -72,10 +67,10 @@ export function UnmanagedList() {
   if (byServer.size === 0) return null;
   const list = server === "*" ? items : server ? (byServer.get(server) ?? []) : [];
   return (
-    <div className="mt-3 grid gap-2">
-      {[...byServer].map(([name, group]) => (
+    <>
+      <Rows>{[...byServer].map(([name, group]) => (
         <HintRow key={name} icon={<ServerIcon className="size-4" />} label={name} text={`${group.length} 个容器未纳管`} onClick={() => setServer(name)} />
-      ))}
+      ))}</Rows>
       <Dialog open={!!server && !importing} onOpenChange={(o) => !o && close()}>
         <DialogContent aria-describedby={undefined} className="sm:max-w-2xl">
           <DialogHeader>
@@ -99,7 +94,7 @@ export function UnmanagedList() {
           }}
         />
       )}
-    </div>
+    </>
   );
 }
 

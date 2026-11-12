@@ -4,7 +4,8 @@ import { useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import { api } from "@/api";
 import { useActions } from "@/components/actions";
-import { SectionTitle, ago, type Tone } from "@/components/common";
+import { ago, type Tone } from "@/components/common";
+import { Rows } from "@/components/kit";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -59,15 +60,12 @@ export function EdgeList() {
   for (const p of unmanaged) byAccount.set(p.account, [...(byAccount.get(p.account) ?? []), p]);
   const list = account ? (byAccount.get(account) ?? []) : [];
   return (
-    <section className="mt-8">
-      <SectionTitle>Cloudflare 上还没纳管的</SectionTitle>
-      {byAccount.size > 0 && (
-        <div className="mt-3 grid gap-2">
-          {[...byAccount].map(([acc, group]) => (
-            <HintRow key={acc} icon={<CloudIcon className="size-4" />} label={acc} text={`${group.length} 个 Workers / Pages 未纳管`} onClick={() => setAccount(acc)} />
-          ))}
-        </div>
-      )}
+    <>
+      <Rows>
+        {[...byAccount].map(([acc, group]) => (
+          <HintRow key={acc} icon={<CloudIcon className="size-4" />} label={acc} text={`${group.length} 个 Workers / Pages 未纳管`} onClick={() => setAccount(acc)} />
+        ))}
+      </Rows>
       <Dialog open={!!account} onOpenChange={(o) => !o && (setAccount(null), setParams({}))}>
         <DialogContent aria-describedby={undefined} className="sm:max-w-2xl">
           <DialogHeader>
@@ -103,6 +101,6 @@ export function EdgeList() {
           </div>
         </DialogContent>
       </Dialog>
-    </section>
+    </>
   );
 }
