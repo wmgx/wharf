@@ -1,3 +1,4 @@
+import { Fragment } from "react";
 import { usePoll } from "@/api";
 import { useActions } from "@/components/actions";
 import { ago, Empty, SectionTitle, StatusBadge } from "@/components/common";
@@ -18,10 +19,10 @@ export function Open() {
       {groups.map(([level, label]) => {
         const items = issues.filter((i) => i.level === level);
         if (!items.length) return null;
-        return <div key={level}>
+        return <Fragment key={level}>
           <SectionTitle count={items.length} action={level === "info" && updates.length > 1 ? <Button variant="outline" size="sm" onClick={() => actions.plan({ title: `更新 ${updates.length} 个服务`, changes: updates.map((i) => ({ op: "refresh_images", name: i.subject!.name })) })}>全部更新</Button> : undefined}>{label}</SectionTitle>
           <Rows>{items.map((i, index) => <IssueRow key={`${i.code}-${i.subject?.name ?? ""}-${index}`} issue={i} />)}</Rows>
-        </div>;
+        </Fragment>;
       })}
       {!!alerts?.firing.length && <>
         <SectionTitle count={alerts.firing.length}>正在告警</SectionTitle>
