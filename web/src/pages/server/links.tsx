@@ -1,10 +1,10 @@
 import { Facts } from "@/components/kit";
 import { Link } from "react-router-dom";
 import { usePoll } from "@/api";
-import { SectionTitle } from "@/components/common";
+import { MODES, SectionTitle } from "@/components/common";
 import { useStatus } from "@/status";
 import type { NetworkView } from "@/types";
-import { ModeMenu, Quality } from "./Network";
+import { Quality } from "../Network";
 
 /** 服务器"网络"标签上半部分：这台机器的地址、和其他机器的连通、端口、域名、出口。 */
 export function ServerLinks({ server }: { server: string }) {
@@ -34,7 +34,7 @@ export function ServerLinks({ server }: { server: string }) {
   return (
     <div className="mb-8 grid gap-6">
       <Facts className="max-w-2xl" items={[
-        ["接入方式", me ? <ModeMenu server={me} /> : "-"],
+        ["接入方式", me ? <>{MODES[me.mode]} {!me.configured && <span className="text-xs text-muted-foreground">自动</span>}</> : "-"],
         ["内网地址", <span className="font-mono text-xs">{me?.private_ip ?? "-"}</span>],
         ["公网 IP", <span className="font-mono text-xs">{me?.public_ip ?? "-"}</span>],
         ["访问外网", <>{settings?.egress ? "给其他服务器当出口" : "不开出口"}{exitFor.length > 0 && `，${exitFor.join("、")} 经它访问外网`}{via && `；自己经 ${via} 访问外网`}</>],
