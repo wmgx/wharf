@@ -1,3 +1,4 @@
+import { Facts } from "@/components/kit";
 import { Link } from "react-router-dom";
 import { usePoll } from "@/api";
 import { SectionTitle } from "@/components/common";
@@ -32,20 +33,12 @@ export function ServerLinks({ server }: { server: string }) {
 
   return (
     <div className="mb-8 grid gap-6">
-      <dl className="grid max-w-2xl grid-cols-[88px_1fr] gap-x-4 gap-y-1.5 text-sm">
-        <dt className="text-muted-foreground">接入方式</dt>
-        <dd>{me ? <ModeMenu server={me} /> : "-"}</dd>
-        <dt className="text-muted-foreground">内网地址</dt>
-        <dd className="font-mono text-[13px]">{me?.private_ip ?? "-"}</dd>
-        <dt className="text-muted-foreground">公网 IP</dt>
-        <dd className="font-mono text-[13px]">{me?.public_ip ?? "-"}</dd>
-        <dt className="text-muted-foreground">外网代理</dt>
-        <dd>
-          {settings?.egress ? "给其他机器当代理" : "不当代理"}
-          {exitFor.length > 0 && `，${exitFor.join("、")} 借它访问外网`}
-          {via && `；自己借 ${via} 访问外网`}
-        </dd>
-      </dl>
+      <Facts className="max-w-2xl" items={[
+        ["接入方式", me ? <ModeMenu server={me} /> : "-"],
+        ["内网地址", <span className="font-mono text-xs">{me?.private_ip ?? "-"}</span>],
+        ["公网 IP", <span className="font-mono text-xs">{me?.public_ip ?? "-"}</span>],
+        ["访问外网", <>{settings?.egress ? "给其他服务器当出口" : "不开出口"}{exitFor.length > 0 && `，${exitFor.join("、")} 经它访问外网`}{via && `；自己经 ${via} 访问外网`}</>],
+      ]} />
 
       {others.length > 0 && (
         <div>
@@ -80,7 +73,7 @@ export function ServerLinks({ server }: { server: string }) {
           <div className="grid max-w-2xl grid-cols-[auto_1fr] gap-x-6 gap-y-1 text-sm">
             {ports.map((p) => (
               <div key={`${p.service}.${p.name}`} className="contents">
-                <span className="font-mono text-[13px]">{p.port}</span>
+                <span className="font-mono text-xs">{p.port}</span>
                 <Link to={`/services/${p.service}`} className="hover:underline">
                   {p.service}
                   <span className="text-xs text-muted-foreground"> · {p.name}</span>
@@ -99,7 +92,7 @@ export function ServerLinks({ server }: { server: string }) {
           <div className="grid max-w-2xl gap-1 text-sm">
             {routes.map((r) => (
               <div key={r.id} className="flex items-center gap-2">
-                <a href={r.url} target="_blank" rel="noreferrer" className="font-mono text-[13px] hover:underline">
+                <a href={r.url} target="_blank" rel="noreferrer" className="font-mono text-xs hover:underline">
                   {r.spec.hostname}
                 </a>
                 <span className="text-xs text-muted-foreground">

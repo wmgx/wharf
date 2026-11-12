@@ -1,3 +1,4 @@
+import { Panel } from "@/components/kit";
 import { Link } from "react-router-dom";
 import { usePoll } from "@/api";
 import { ErrorNote, SectionTitle } from "@/components/common";
@@ -32,7 +33,7 @@ export function ServiceUsage({ server }: { server: string }) {
   return (
     <div className="mt-6">
       <SectionTitle>各服务用量（最近 10 分钟平均）</SectionTitle>
-      <div className="overflow-x-auto rounded-xl border bg-card shadow-xs">
+      <Panel className="overflow-x-auto">
         <Table>
           <TableHeader>
             <TableRow>
@@ -57,7 +58,7 @@ export function ServiceUsage({ server }: { server: string }) {
                     <span>
                       {u.name}{" "}
                       <span className="text-xs text-muted-foreground">
-                        网关
+                        入口
                       </span>
                     </span>
                   )}
@@ -85,7 +86,7 @@ export function ServiceUsage({ server }: { server: string }) {
             ))}
           </TableBody>
         </Table>
-      </div>
+      </Panel>
     </div>
   );
 }

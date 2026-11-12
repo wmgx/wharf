@@ -75,7 +75,7 @@ export function LimitsCard({ svc }: { svc: ServiceView }) {
               <Input id={`${svc.name}-cpu-limit`} type="number" min={0.01} step={0.01} value={cpus} onChange={(e) => setCpus(e.target.value)} />
             </Field>
             <div className="flex flex-wrap gap-2 sm:col-span-2">
-              <Button size="sm" disabled={!valid} onClick={save}>生成计划</Button>
+              <Button size="sm" disabled={!valid} onClick={save}>预览改动</Button>
               <Button size="sm" variant="ghost" onClick={() => setEditing(false)}>取消</Button>
             </div>
           </div>

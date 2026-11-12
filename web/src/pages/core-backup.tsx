@@ -1,3 +1,4 @@
+import { Panel } from "@/components/kit";
 import { ArchiveIcon, DownloadIcon, PlayIcon } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
@@ -32,7 +33,7 @@ export function CoreBackup() {
       <SectionTitle>控制面备份</SectionTitle>
       <ErrorNote error={error} />
       {data && (
-        <div className="flex flex-col gap-3 rounded-xl border bg-card p-4 shadow-xs">
+        <Panel className="flex flex-col gap-3 p-4">
           <div className="flex flex-wrap items-center gap-3">
             <span className="grid size-9 place-items-center rounded-lg border bg-muted text-muted-foreground">
               <ArchiveIcon className="size-4" />
@@ -71,7 +72,7 @@ export function CoreBackup() {
               <CodeBlock className="mt-2 break-all whitespace-pre-wrap">{data.restore_command}</CodeBlock>
             </details>
           )}
-        </div>
+        </Panel>
       )}
       {asking === "enable" && (
         <Enable

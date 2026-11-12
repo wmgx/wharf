@@ -213,7 +213,7 @@ function OpenPublic({ core, onDone }: { core: CoreAddresses; onDone: () => void 
   return (
     <div className="grid gap-3 rounded-lg border p-3">
       <div className="grid grid-cols-2 gap-3">
-        <Field label="网关" htmlFor="core-gateway">
+        <Field label="入口" htmlFor="core-gateway">
           <Picker id="core-gateway" value={gateway} options={gateways.map((g) => ({ value: g.name, label: g.name, hint: g.spec.server }))} onChange={setGateway} />
         </Field>
         <Field label="域名" htmlFor="core-hostname">
@@ -224,7 +224,7 @@ function OpenPublic({ core, onDone }: { core: CoreAddresses; onDone: () => void 
       {gw && !upstream && <Notice kind="warn">{core.server ? `${core.server} 没有内网地址` : "找不到控制面所在的服务器"}</Notice>}
       {upstream && <div className="font-mono text-xs text-muted-foreground">→ {upstream}</div>}
       <Button className="w-fit" disabled={!hostname.trim() || !upstream} onClick={submit}>
-        生成计划
+        预览改动
       </Button>
     </div>
   );

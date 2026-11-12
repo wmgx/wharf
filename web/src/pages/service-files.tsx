@@ -1,3 +1,4 @@
+import { Panel, Tip } from "@/components/kit";
 import { ChevronRightIcon, DownloadIcon, EyeIcon, FileIcon, FolderIcon, LinkIcon, UploadIcon } from "lucide-react";
 import { useRef, useState } from "react";
 import { toast } from "sonner";
@@ -97,7 +98,7 @@ export function Files({ name }: { name: string }) {
         <Empty>空目录</Empty>
       ) : (
         data && (
-          <div className="rounded-xl border bg-card">
+          <Panel>
             <Table>
               <TableHeader>
                 <TableRow>
@@ -128,14 +129,14 @@ export function Files({ name }: { name: string }) {
                     <TableCell>
                       {!f.dir && !f.link && (
                         <div className="flex">
-                          <Button variant="ghost" size="xs" title="预览" disabled={f.size > PREVIEW_MAX} onClick={() => open(f)}>
+                          <Tip text="预览"><Button variant="ghost" size="xs" aria-label="预览" disabled={f.size > PREVIEW_MAX} onClick={() => open(f)}>
                             <EyeIcon />
-                          </Button>
-                          <Button variant="ghost" size="xs" title="下载" asChild>
+                          </Button></Tip>
+                          <Tip text="下载"><Button variant="ghost" size="xs" aria-label="下载" asChild>
                             <a href={download(join(dir, f.name))} download={f.name}>
                               <DownloadIcon />
                             </a>
-                          </Button>
+                          </Button></Tip>
                         </div>
                       )}
                     </TableCell>
@@ -143,7 +144,7 @@ export function Files({ name }: { name: string }) {
                 ))}
               </TableBody>
             </Table>
-          </div>
+          </Panel>
         )
       )}
       <Dialog open={!!preview} onOpenChange={(o) => !o && setPreview(null)}>

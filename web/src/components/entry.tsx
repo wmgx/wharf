@@ -58,10 +58,10 @@ export function EntryField({ entry }: { entry: ReturnType<typeof useEntry> }) {
   return (
     <>
       <Field
-        label="公网入口"
+        label="入口"
         htmlFor="entry"
       >
-        <Picker id="entry" value={entry.chosen} options={entry.options} onChange={entry.setChoice} placeholder="还没有网关" />
+        <Picker id="entry" value={entry.chosen} options={entry.options} onChange={entry.setChoice} placeholder="还没有入口" />
       </Field>
       {entry.needsAccount && (
         <Notice kind="warn">

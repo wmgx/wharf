@@ -20,7 +20,7 @@ export function EdgeImport({ account, onClose }: { account: string; onClose: () 
   const submit = () => {
     onClose();
     actions.plan({
-      title: `导入 ${picked.length} 个边缘应用`,
+      title: `导入 ${picked.length} 个Cloudflare 应用`,
       then: "/",
       changes: fresh
         .filter((p) => picked.includes(p.project))
