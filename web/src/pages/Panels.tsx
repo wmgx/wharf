@@ -1,5 +1,5 @@
 import { lazy, Suspense } from "react";
-import { PageHeader } from "@/components/common";
+import { PageHeader, SectionTitle } from "@/components/common";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Data } from "./Data";
 import { GatewaysPanel } from "./Gateways";
@@ -24,7 +24,7 @@ export function NetworkPage() {
     <>
       <PageHeader title="网络" />
       <NetworkPanel />
-      <h2 className="mt-10 mb-3 font-medium">拓扑</h2>
+      <SectionTitle>拓扑</SectionTitle>
       <Suspense fallback={<Skeleton className="h-[480px] rounded-xl" />}>
         <Topology />
       </Suspense>

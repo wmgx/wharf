@@ -1,3 +1,4 @@
+import { Tip } from "@/components/kit";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal as XTerm, type ITheme } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
@@ -281,9 +282,9 @@ export default function Terminal({
             </Button>
           )}
           {!onBack && (
-            <Button aria-label={fullScreen ? "退出全屏" : "全屏"} title={fullScreen ? "退出全屏" : "全屏"} size="xs" variant="ghost" onClick={() => setFullScreen((v) => !v)}>
+            <Tip text={fullScreen ? "退出全屏" : "全屏"}><Button aria-label={fullScreen ? "退出全屏" : "全屏"} size="xs" variant="ghost" onClick={() => setFullScreen((v) => !v)}>
               {fullScreen ? <Minimize2Icon /> : <Maximize2Icon />}
-            </Button>
+            </Button></Tip>
           )}
           {state === "closed" && (
             <Button size="xs" variant="ghost" onClick={() => setRound((n) => n + 1)}>

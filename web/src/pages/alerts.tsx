@@ -1,3 +1,4 @@
+import { Panel, Tip } from "@/components/kit";
 import { BellOffIcon, RotateCcwIcon } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
@@ -64,7 +65,7 @@ export function Alerts() {
     <>
       <SectionTitle count={v.firing.length}>正在触发</SectionTitle>
       {v.firing.length ? (
-        <div className="grid gap-1.5 rounded-xl border bg-card p-4 text-sm shadow-xs">
+        <Panel className="grid gap-1.5 p-4 text-sm">
           {v.firing.map((f) => (
             <div key={`${f.rule}/${f.subject}`} className="flex flex-wrap items-center gap-2">
               <StatusBadge tone="bad">{nameOf(f.rule)}</StatusBadge>
@@ -72,13 +73,13 @@ export function Alerts() {
               <span className="text-xs text-muted-foreground">{ago(iso(f.since))}起</span>
             </div>
           ))}
-        </div>
+        </Panel>
       ) : (
         <Empty>没有正在触发的告警</Empty>
       )}
 
       <SectionTitle>告警规则</SectionTitle>
-      <div className="rounded-xl border bg-card shadow-xs">
+      <Panel>
         <Table>
           <TableHeader>
             <TableRow>
@@ -118,10 +119,10 @@ export function Alerts() {
             ))}
           </TableBody>
         </Table>
-      </div>
+      </Panel>
 
       <SectionTitle>事件通知</SectionTitle>
-      <div className="grid gap-2 rounded-xl border bg-card p-4 shadow-xs">
+      <Panel className="grid gap-2 p-4">
         {v.notices.map((n) => (
           <div key={n.id} className="flex items-center gap-2.5 text-sm">
             <Checkbox checked={n.enabled} aria-label={`开关 ${n.name}`} onCheckedChange={(c) => patch(n.id, { enabled: c === true })} />
@@ -131,7 +132,7 @@ export function Alerts() {
             </span>
           </div>
         ))}
-      </div>
+      </Panel>
 
       <label className="mt-6 flex w-fit cursor-pointer items-center gap-2.5 text-sm">
         <Checkbox checked={!!v.include_logs} onCheckedChange={(c) => setOptions(c === true)} />
@@ -139,7 +140,7 @@ export function Alerts() {
       </label>
       <SectionTitle count={v.history.length}>最近推送</SectionTitle>
       {v.history.length ? (
-        <div className="grid gap-1.5 rounded-xl border bg-card p-4 text-sm shadow-xs">
+        <Panel className="grid gap-1.5 p-4 text-sm">
           {v.history.map((h, i) => (
             <div key={i} className="flex flex-wrap items-center gap-2">
               <span className="w-24 shrink-0 text-xs text-muted-foreground tabular-nums">{clock(h.at)}</span>
@@ -149,7 +150,7 @@ export function Alerts() {
               <span className="ml-auto text-xs text-muted-foreground">{nameOf(h.source)}</span>
             </div>
           ))}
-        </div>
+        </Panel>
       ) : (
         <Empty>最近 7 天没有推送</Empty>
       )}
@@ -183,9 +184,9 @@ function Controls({ muted, customized, onPatch }: { muted?: number; customized?:
         </DropdownMenu>
       )}
       {customized && (
-        <Button variant="ghost" size="icon-xs" aria-label="恢复默认" title="恢复默认" onClick={() => onPatch({ reset: true })}>
+        <Tip text="恢复默认"><Button variant="ghost" size="icon-xs" aria-label="恢复默认" onClick={() => onPatch({ reset: true })}>
           <RotateCcwIcon />
-        </Button>
+        </Button></Tip>
       )}
     </span>
   );

@@ -1,4 +1,5 @@
 import { useSearchParams } from "react-router-dom";
+import { PageHeader } from "@/components/common";
 import { Segmented } from "@/components/fields";
 import { useStatus } from "@/status";
 import { ServerTasks } from "./server-tasks";
@@ -11,8 +12,9 @@ export function TasksPage() {
   const servers = (status?.servers ?? []).map((s) => s.name);
   return (
     <>
+      <PageHeader title="定时任务" />
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-        <p className="text-sm text-muted-foreground">按 cron 时间在服务器上跑命令。</p>
+
         {servers.length > 1 && (
           <Segmented
             value={server}

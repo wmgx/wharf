@@ -230,7 +230,7 @@ function Editor({ name, plain, sealed, onDone }: { name: string; plain: string; 
         <Button size="sm" variant="ghost" onClick={() => onDone(null)}>
           取消
         </Button>
-        <span className="ml-auto text-[11px] text-muted-foreground">⌘/Ctrl + Enter 保存 · Esc 取消 · 不影响部署</span>
+        <span className="ml-auto text-xs text-muted-foreground">⌘/Ctrl + Enter 保存 · Esc 取消 · 不影响部署</span>
       </div>
     </div>
   );
