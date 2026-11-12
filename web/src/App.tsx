@@ -22,7 +22,7 @@ import { Home } from "./pages/Home";
 import { ServicesPage } from "./pages/services";
 import { Login } from "./pages/Login";
 import { HostTerminal } from "./pages/HostTerminal";
-import { ServiceDetail } from "./pages/ServiceDetail";
+import { ServiceDetail } from "./pages/service";
 import { EdgeDetail } from "./pages/EdgeDetail";
 import { DataPage, Entries, NetworkPage } from "./pages/Panels";
 import { TasksPage } from "./pages/tasks";

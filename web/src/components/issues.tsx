@@ -24,7 +24,7 @@ export function subjectPath(s: IssueSubject, status: Status | null): string {
     case "task": return "/tasks";
     case "route": {
       const service = status?.routes.find((r) => r.spec.hostname === s.name)?.spec.service;
-      return service ? `/services/${encodeURIComponent(service)}?tab=network` : "/entries";
+      return service ? `/services/${encodeURIComponent(service)}?tab=domains` : "/entries";
     }
     default: return "/entries";
   }
