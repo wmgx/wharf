@@ -54,19 +54,17 @@ pub fn issues() -> Vec<Issue> {
     .lock()
     .map(|d| {
       d.iter()
-        .map(|(s, diffs)| {
-          Issue {
-            code: "baseline_drift".into(),
-            level: IssueLevel::Warn,
-            subject: Some(IssueSubject {
-              kind: "server".into(),
-              name: s.clone(),
-            }),
-            title: format!("服务器 {s} 偏离基线 {} 项", diffs.len()),
-            hint: Some(format!(
-              "（wharf server baseline {s} --apply 纠正）"
-            )),
-          }
+        .map(|(s, diffs)| Issue {
+          code: "baseline_drift".into(),
+          level: IssueLevel::Warn,
+          subject: Some(IssueSubject {
+            kind: "server".into(),
+            name: s.clone(),
+          }),
+          title: format!("服务器 {s} 偏离基线 {} 项", diffs.len()),
+          hint: Some(format!(
+            "（wharf server baseline {s} --apply 纠正）"
+          )),
         })
         .collect()
     })

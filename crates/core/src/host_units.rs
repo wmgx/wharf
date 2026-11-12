@@ -121,17 +121,15 @@ pub fn issues() -> Vec<Issue> {
     .map(|d| {
       d.iter()
         .flat_map(|(s, v)| {
-          v.iter().map(move |(u, st)| {
-            Issue {
-              code: "host_unit_down".into(),
-              level: IssueLevel::Fault,
-              subject: Some(IssueSubject {
-                kind: "server".into(),
-                name: s.clone(),
-              }),
-              title: format!("{s} 上的宿主机程序 {u} 不在运行（{st}）"),
-              hint: None,
-            }
+          v.iter().map(move |(u, st)| Issue {
+            code: "host_unit_down".into(),
+            level: IssueLevel::Fault,
+            subject: Some(IssueSubject {
+              kind: "server".into(),
+              name: s.clone(),
+            }),
+            title: format!("{s} 上的宿主机程序 {u} 不在运行（{st}）"),
+            hint: None,
           })
         })
         .collect()
