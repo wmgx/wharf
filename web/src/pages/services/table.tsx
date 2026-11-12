@@ -94,7 +94,7 @@ export function ServiceTable({ status, rows }: { status: Status; rows: Row[] }) 
 function BackupDot({ data }: { data?: ServiceData }) {
   if (!data || data.status === "none") return null;
   const tone = data.status === "ok" ? "ok" : data.status === "stale" ? "bad" : "warn";
-  const text = data.status === "ok" ? `备份正常 · ${ago(data.last_ok)}` : data.status === "stale" ? "备份过期" : data.status === "off" ? "有数据但没开备份" : "有数据不在备份范围";
+  const text = data.status === "ok" ? `备份正常 · ${data.last_ok ? ago(data.last_ok) : "-"}` : data.status === "stale" ? "备份过期" : data.status === "off" ? "有数据但没开备份" : "有数据不在备份范围";
   return <Tip text={text}><span><Dot tone={tone} /></span></Tip>;
 }
 
