@@ -382,7 +382,7 @@ export function CommandMenu({ onLogout }: { onLogout: () => void }) {
                       ),
                     op(
                       `fix-${s.name}`,
-                      `重新部署 重新部署 redeploy ${s.name}`,
+                      `重新部署 修复 redeploy ${s.name}`,
                       <WrenchIcon />,
                       `重新部署 ${s.name}`,
                       () => actions.redeploy(s),

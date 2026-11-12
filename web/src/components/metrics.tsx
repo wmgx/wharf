@@ -216,7 +216,7 @@ function Chart({
           ))}
           <line x1={0} x2={W} y1={y(0)} y2={y(0)} className="stroke-border" vectorEffect="non-scaling-stroke" />
           {empty && (
-            <text x={W / 2} y={H / 2} textAnchor="middle" className="fill-muted-foreground text-xs" style={{ fontSize: 11 }}>
+            <text x={W / 2} y={H / 2} textAnchor="middle" className="fill-muted-foreground text-xs" style={{ fontSize: 12 }}>
               没有数据
             </text>
           )}
