@@ -2,13 +2,24 @@
 
 use std::{sync::Arc, time::Duration};
 
+use wharf_api_types::view::{Issue, IssueLevel};
+
 use crate::state::AppState;
 
 const EVERY: Duration = Duration::from_secs(60);
 
 /// 正在反复重启的服务，进"需要注意"。
-pub fn problems() -> Vec<String> {
+pub fn issues() -> Vec<Issue> {
   crate::rules::firing("container_restarting")
+    .into_iter()
+    .map(|title| Issue {
+      code: "container_restarting".into(),
+      level: IssueLevel::Fault,
+      subject: None,
+      title,
+      hint: None,
+    })
+    .collect()
 }
 
 pub fn spawn(state: Arc<AppState>) {
