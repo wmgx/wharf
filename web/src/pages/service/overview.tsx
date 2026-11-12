@@ -19,7 +19,7 @@ export function Overview({ svc, routes, onTab, onBackup }: { svc: ServiceView; r
   const [timeline, setTimeline] = useState<Timeline | null>(null);
   useEffect(() => { api.get<Timeline>(`/api/services/${encodeURIComponent(svc.name)}/timeline?limit=3`).then(setTimeline).catch(() => setTimeline(null)); }, [svc.name]);
   const { tone, text, detail } = serviceTruth(svc, status);
-  const routeProblem = routes.some((r) => routeTone(diagnosisOf(status, r.spec.hostname)).tone === "bad");
+  const routeProblem = svc.status?.tone !== "bad" && svc.status?.tone !== "warn" && routes.some((r) => routeTone(diagnosisOf(status, r.spec.hostname)).tone === "bad");
   const via = status?.servers.find((s) => s.name === svc.spec.server)?.settings.via as string | undefined;
   const hints: { text: string; action: string; go: () => void }[] = [];
   if (!routes.length) hints.push({ text: "还没有域名，现在只能从内网访问。", action: "加域名", go: () => onTab("domains") });
