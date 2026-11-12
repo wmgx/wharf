@@ -1,36 +1,44 @@
 import { PlusIcon } from "lucide-react";
 import { useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { CardsSkeleton, PageHeader } from "@/components/common";
+import { CardsSkeleton, Empty, PageHeader, SectionTitle } from "@/components/common";
+import { Segmented } from "@/components/fields";
 import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
+import { Input } from "@/components/ui/input";
 import { useStatus } from "@/status";
-import { UnmanagedList } from "../containers";
+import { UnmanagedList, useUnmanaged } from "../containers";
 import { EdgeList } from "../edge";
 import { NewService } from "../NewService";
-import { ServiceTable } from "./table";
+import { rowsOf, ServiceTable } from "./table";
 
 export function ServicesPage() {
   const { status, refresh } = useStatus();
+  const unmanaged = useUnmanaged();
   const [params, setParams] = useSearchParams();
-  const [server, setServer] = useState<string | undefined>();
-  const where = status ? [...status.servers.map((s) => s.name), ...(status.edge_apps?.length ? ["cloudflare"] : [])] : [];
+  const [query, setQuery] = useState("");
+  const [problems, setProblems] = useState(false);
+  const server = params.get("server") ?? "";
+  const rows = status ? rowsOf(status) : [];
+  const problemCount = rows.filter((r) => r.tone === "warn" || r.tone === "bad").length;
+  const filtered = rows.filter((r) => (!server || (r.svc ? r.where === server : server === "cloudflare")) &&
+    [r.name, ...r.domains].some((s) => s.toLowerCase().includes(query.toLowerCase())) &&
+    (!problems || r.tone === "warn" || r.tone === "bad"));
+  const options: [string, string][] = [["", "全部"], ...(status?.servers.map((s): [string, string] => [s.name, s.name]) ?? []), ...(status?.edge_apps?.length ? [["cloudflare", "Cloudflare"] as [string, string]] : [])];
+  const count = unmanaged.items.reduce((n, item) => n + item.containers.length, 0) + (status?.edge_unmanaged?.length ?? 0);
+  const deploy = <Button onClick={() => { const next = new URLSearchParams(params); next.set("new", "1"); setParams(next); }}><PlusIcon />部署服务</Button>;
   return (
     <>
-      <PageHeader title="服务" count={status ? status.services.length + (status.edge_apps?.length ?? 0) : undefined} actions={<Button onClick={() => setParams({ new: "1" })}><PlusIcon />部署服务</Button>} />
+      <PageHeader title="服务" count={status ? rows.length : undefined} actions={deploy} />
       {status && (
-        <div className="mb-4 flex flex-wrap items-center gap-1">
-          {[undefined, ...where].map((w) => (
-            <button key={w ?? "all"} type="button" onClick={() => setServer(w)} className={cn("rounded-md px-2.5 py-1 text-sm text-muted-foreground transition-colors hover:text-foreground", server === w && "bg-accent font-medium text-foreground")}>
-              {w === undefined ? "全部" : w === "cloudflare" ? "Cloudflare" : w}
-            </button>
-          ))}
+        <div className="mb-4 flex flex-wrap items-center gap-2">
+          <div className="max-w-full overflow-x-auto"><Segmented value={server} options={options} onChange={(value) => { const next = new URLSearchParams(params); if (value) next.set("server", value); else next.delete("server"); setParams(next); }} /></div>
+          <Input className="w-48" placeholder="搜索" value={query} onChange={(e) => setQuery(e.target.value)} />
+          {problemCount > 0 && <Button variant={problems ? "secondary" : "outline"} size="sm" onClick={() => setProblems(!problems)}>只看有问题的</Button>}
         </div>
       )}
-      {status ? <ServiceTable status={status} server={server} /> : <CardsSkeleton />}
-      <UnmanagedList />
-      <EdgeList />
-      <NewService open={params.get("new") === "1"} onClose={() => { setParams({}); refresh(); }} />
+      {!status ? <CardsSkeleton /> : rows.length === 0 ? <Empty action={deploy}>还没有服务</Empty> : filtered.length === 0 ? <Empty>没有符合条件的服务</Empty> : <ServiceTable status={status} rows={filtered} />}
+      {count > 0 && <section className="mt-8"><SectionTitle count={count}>没纳管的</SectionTitle><div className="mt-3 grid gap-3"><UnmanagedList {...unmanaged} /><EdgeList /></div></section>}
+      <NewService open={params.get("new") === "1"} onClose={() => { const next = new URLSearchParams(params); next.delete("new"); setParams(next); refresh(); }} />
     </>
   );
 }
