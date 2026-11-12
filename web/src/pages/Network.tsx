@@ -1,57 +1,15 @@
 import { Panel, Tip } from "@/components/kit";
-import { CheckIcon, ChevronDownIcon, MinusIcon, RadarIcon, XIcon } from "lucide-react";
+import { CheckIcon, MinusIcon, RadarIcon, XIcon } from "lucide-react";
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { toast } from "sonner";
 import { api, usePoll } from "@/api";
-import { useActions } from "@/components/actions";
 import { ago, CardsSkeleton, ErrorNote, MODES, SectionTitle } from "@/components/common";
 import { TailscaleSetup } from "@/components/tailscale-setup";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import type { NetworkMode, NetworkView } from "@/types";
-
-/** 接入方式：选"自动"时按检测到的地址推断。 */
-export function ModeMenu({ server }: { server: NetworkView["servers"][number] }) {
-  const actions = useActions();
-  const choose = async (value: string) => {
-    const mode = value === "auto" ? undefined : (value as NetworkMode);
-    if (mode === (server.configured ? server.mode : undefined)) return;
-    try {
-      const v = await api.get<{ settings: Record<string, unknown> }>(`/api/servers/${encodeURIComponent(server.name)}`);
-      const settings = { ...v.settings, network_mode: mode };
-      actions.plan({
-        title: `${server.name} 的接入方式改为${mode ? MODES[mode] : "自动"}`,
-        changes: [{ op: "update_server", name: server.name, settings }],
-      });
-    } catch (e) {
-      toast.error("读取服务器设置失败", { description: (e as Error).message });
-    }
-  };
-  return (
-    <DropdownMenu modal={false}>
-      <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="xs" className="-ml-2">
-          <Badge variant={server.mode === "public" ? "outline" : "secondary"}>{MODES[server.mode]}</Badge>
-          {!server.configured && <span className="text-xs text-muted-foreground">自动</span>}
-          <ChevronDownIcon className="size-3 text-muted-foreground" />
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" className="w-36">
-        <DropdownMenuRadioGroup value={server.configured ? server.mode : "auto"} onValueChange={choose}>
-          <DropdownMenuRadioItem value="auto">自动</DropdownMenuRadioItem>
-          {(Object.keys(MODES) as NetworkMode[]).map((m) => (
-            <DropdownMenuRadioItem key={m} value={m}>
-              {MODES[m]}
-            </DropdownMenuRadioItem>
-          ))}
-        </DropdownMenuRadioGroup>
-      </DropdownMenuContent>
-    </DropdownMenu>
-  );
-}
+import type { NetworkView } from "@/types";
 
 /** 服务器页的"组网"标签：各机器怎么接入、谁能连谁的内网地址（design 2.10）。 */
 export function NetworkPanel() {
