@@ -32,7 +32,7 @@ export function Servers() {
   }
 
   return (
-    <div className="flex flex-1 flex-col md:flex-row">
+    <div className="flex min-w-0 flex-1 flex-col md:flex-row">
       <Side name={name} />
       <div className="min-w-0 flex-1 px-4 py-5 md:px-8 md:py-8">
         <div className="mx-auto max-w-5xl">
