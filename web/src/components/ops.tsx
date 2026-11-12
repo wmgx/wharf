@@ -1,5 +1,5 @@
 import {
-  ArrowRightLeftIcon, ArrowUpCircleIcon, EllipsisIcon, HammerIcon, HistoryIcon, PackageIcon,
+  ArrowRightLeftIcon, ArrowUpCircleIcon, ArrowUpRightIcon, EllipsisIcon, HammerIcon, HistoryIcon, KeyRoundIcon, LockIcon, LockOpenIcon, PackageIcon,
   PlayIcon, RefreshCwIcon, RotateCwIcon, ScrollTextIcon, SquareIcon, TerminalIcon, Trash2Icon,
   WrenchIcon, type LucideIcon,
 } from "lucide-react";
@@ -9,7 +9,7 @@ import { useActions, type Actions } from "@/components/actions";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { useStatus } from "@/status";
-import type { ServerView, ServiceView, Status } from "@/types";
+import type { RouteView, ServerView, ServiceView, Status } from "@/types";
 
 export interface OpCtx {
   actions: Actions;
@@ -44,6 +44,14 @@ export const serviceOps: Op<ServiceView>[] = [
   { id: "stop", label: "停止", icon: SquareIcon, keywords: "停止 stop", group: "more", show: (s) => !s.spec.stopped, run: (s, c) => c.actions.setStopped(s, true) },
   { id: "move", label: "迁移到其他服务器", icon: ArrowRightLeftIcon, keywords: "迁移 move", group: "more", run: (s, c) => c.actions.move(s) },
   { id: "remove", label: "删除服务", icon: Trash2Icon, keywords: "删除 remove rm", group: "danger", run: (s, c) => c.actions.remove(s.name) },
+];
+
+export const routeOps: Op<RouteView>[] = [
+  { id: "open", label: "打开", icon: ArrowUpRightIcon, group: "more", run: (r) => window.open(r.url, "_blank", "noreferrer") },
+  { id: "auth-on", label: "开启登录保护", icon: LockIcon, group: "more", show: (r, c) => !r.spec.auth && !r.spec.redirect && c.status?.gateways.find((g) => g.name === r.gateway)?.spec.kind === "caddy", run: (r, c) => c.actions.basicAuth(r.spec.hostname, true) },
+  { id: "auth-edit", label: "改登录账号", icon: KeyRoundIcon, group: "more", show: (r) => !!r.spec.auth, run: (r, c) => c.actions.basicAuth(r.spec.hostname) },
+  { id: "auth-off", label: "关闭登录保护", icon: LockOpenIcon, group: "more", show: (r) => !!r.spec.auth, run: (r, c) => c.actions.plan({ title: `关闭 ${r.spec.hostname} 的登录保护`, changes: [{ op: "upsert_route", spec: { ...r.spec, auth: false } }] }) },
+  { id: "remove", label: "移除域名", icon: Trash2Icon, group: "danger", run: (r, c) => c.actions.removeRoute(r.spec.hostname) },
 ];
 
 export const serverOps: Op<ServerView>[] = [

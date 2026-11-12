@@ -53,6 +53,7 @@ export interface Actions {
   rollback: (name: string, to?: number) => void;
   /** 先要求输入名称确认，再预览改动（连同它的域名）。 */
   remove: (name: string) => void;
+  removeRoute: (hostname: string) => void;
   /** 选目标服务器，再预览改动。 */
   move: (svc: ServiceView) => void;
   /** 设置一个域名的登录保护账号；`enable` 时保存后预览开启登录保护的改动。 */
@@ -80,6 +81,7 @@ export function ActionsProvider({ children }: { children: ReactNode }) {
   const nav = useNavigate();
   const [open, setOpen] = useState<Open | null>(null);
   const [removing, setRemoving] = useState<string | null>(null);
+  const [removingRoute, setRemovingRoute] = useState<string | null>(null);
   const [moving, setMoving] = useState<ServiceView | null>(null);
   const [settingAuth, setSettingAuth] = useState<{ hostname: string; enable: boolean } | null>(null);
   const [upgrading, setUpgrading] = useState(false);
@@ -183,6 +185,7 @@ export function ActionsProvider({ children }: { children: ReactNode }) {
       }
     },
     remove: (name) => setRemoving(name),
+    removeRoute: (hostname) => setRemovingRoute(hostname),
     move: (svc) => setMoving(svc),
     basicAuth: (hostname, enable = false) => setSettingAuth({ hostname, enable }),
     upgrade: () => setUpgrading(true),
@@ -254,6 +257,7 @@ export function ActionsProvider({ children }: { children: ReactNode }) {
           </div>
         </SheetContent>
       </Sheet>
+      <ConfirmDialog open={!!removingRoute} title={`移除域名 ${removingRoute}？`} onCancel={() => setRemovingRoute(null)} onConfirm={() => { const hostname = removingRoute!; setRemovingRoute(null); actions.plan({ title: `移除 ${hostname}`, changes: [{ op: "remove_route", hostname }] }); }}>服务不受影响，DNS 记录和证书一起移除。</ConfirmDialog>
       <RemoveDialog name={removing} onCancel={() => setRemoving(null)} onConfirm={confirmRemove} />
       <MoveDialog svc={moving} onCancel={() => setMoving(null)} onConfirm={confirmMove} />
       <BasicAuthDialog hostname={settingAuth?.hostname ?? null} enable={!!settingAuth?.enable} onClose={() => setSettingAuth(null)} onSaved={authSaved} />

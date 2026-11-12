@@ -118,7 +118,7 @@ function Onboarding({ status, onAdd }: { status: Status; onAdd: () => void }) {
       title: "建一个入口",
       hint: "域名从哪进来：有公网 IP 的机器直连，或 Cloudflare 隧道",
       action: "新建入口",
-      go: () => nav("/entries?new=1"),
+      go: () => nav("/domains?tab=entries&new=1"),
     },
     {
       done: status.services.length + (status.edge_apps?.length ?? 0) > 0,
