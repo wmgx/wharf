@@ -1446,8 +1446,12 @@ mod tests {
       )
       .is_ok()
     );
-    assert!(check_error_page("edge", &"x".repeat(64 * 1024 + 1)).is_err());
-    assert!(check_error_page("edge", "x WHARF_ERROR_PAGE y").is_err());
+    assert!(
+      check_error_page("edge", &"x".repeat(64 * 1024 + 1)).is_err()
+    );
+    assert!(
+      check_error_page("edge", "x WHARF_ERROR_PAGE y").is_err()
+    );
     assert!(check_error_page("edge", "{$HOME}").is_err());
   }
 

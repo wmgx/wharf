@@ -705,7 +705,11 @@ pub enum GatewayCmd {
   ErrorPage {
     name: String,
     /// HTML 文件；`-` 从标准输入读。
-    #[arg(long, conflicts_with = "default", required_unless_present = "default")]
+    #[arg(
+      long,
+      conflicts_with = "default",
+      required_unless_present = "default"
+    )]
     file: Option<String>,
     /// 换回内置的默认页。
     #[arg(long)]

@@ -1948,7 +1948,9 @@ async fn gateway(
       });
       Ok(())
     }
-    GatewayCmd::ErrorPage { name, file, apply, .. } => {
+    GatewayCmd::ErrorPage {
+      name, file, apply, ..
+    } => {
       let mut spec = c
         .get::<GatewayView>(&format!("/api/gateways/{}", seg(&name)))
         .await?
