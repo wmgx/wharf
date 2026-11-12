@@ -1,3 +1,4 @@
+import { Tip } from "@/components/kit";
 import { PencilIcon, PlusIcon, XIcon } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
@@ -84,24 +85,22 @@ export function HostSessions({ server }: { server: string }) {
                 {label(name)}
                 {name !== active && attached > 0 && <span className="ml-1 text-xs text-muted-foreground">· 使用中</span>}
               </button>
-              <button
+              <Tip text="改名"><button
                 type="button"
                 aria-label={`给${label(name)}改名`}
-                title="改名"
                 className="grid size-5 place-items-center rounded text-muted-foreground opacity-0 group-hover:opacity-60 hover:bg-accent hover:opacity-100 pointer-coarse:opacity-60"
                 onClick={() => rename(name)}
               >
                 <PencilIcon className="size-3" />
-              </button>
-              <button
+              </button></Tip>
+              <Tip text="结束这个会话"><button
                 type="button"
                 aria-label={`结束${label(name)}`}
-                title="结束这个会话"
                 className="mr-1 grid size-5 place-items-center rounded text-muted-foreground opacity-60 hover:bg-accent hover:opacity-100"
                 onClick={() => close(name)}
               >
                 <XIcon className="size-3.5" />
-              </button>
+              </button></Tip>
             </div>
           );
         })}

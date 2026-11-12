@@ -63,7 +63,7 @@ interface Draft {
 let lastDraft: Draft | null = null;
 
 /** 回到新建服务表单，恢复上一次填写的内容。 */
-export const NEW_SERVICE_DRAFT_URL = "/?new=1&draft=1";
+export const NEW_SERVICE_DRAFT_URL = "/services?new=1&draft=1";
 
 function Form({ onClose }: { onClose: () => void }) {
   const { status } = useStatus();
@@ -285,7 +285,7 @@ function Form({ onClose }: { onClose: () => void }) {
           取消
         </Button>
         <Button disabled={!ready} onClick={submit}>
-          生成计划
+          预览改动
           <ArrowRightIcon />
         </Button>
       </SheetFooter>

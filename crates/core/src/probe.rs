@@ -5,7 +5,10 @@
 
 use std::{collections::BTreeMap, sync::Mutex};
 
-use wharf_api_types::view::{CheckStatus, DoctorReport, ProbeView};
+use wharf_api_types::view::{
+  CheckStatus, DoctorReport, Issue, IssueLevel, IssueSubject,
+  ProbeView,
+};
 
 use crate::state::AppState;
 
@@ -21,15 +24,33 @@ pub fn last(host: &str) -> Option<ProbeView> {
 }
 
 /// 连续失败够次数的域名。
-pub fn problems() -> Vec<String> {
+pub fn issues() -> Vec<Issue> {
   let Ok(m) = LAST.lock() else { return vec![] };
   m.iter()
     .filter(|(_, p)| p.fails >= FAILS)
-    .map(|(h, p)| format!("域名 {h} 打不开：{}", p.detail))
+    .map(|(h, p)| Issue {
+      code: "route_down".into(),
+      level: IssueLevel::Fault,
+      subject: Some(IssueSubject {
+        kind: "route".into(),
+        name: h.clone(),
+      }),
+      title: format!("域名 {h} 打不开：{}", p.detail),
+      hint: None,
+    })
     .chain(m.iter().filter_map(|(h, p)| {
       p.cert_days
         .filter(|d| *d < crate::cert::WARN_DAYS)
-        .map(|d| format!("域名 {h} 的证书 {d} 天后到期"))
+        .map(|d| Issue {
+          code: "cert_expiring".into(),
+          level: IssueLevel::Warn,
+          subject: Some(IssueSubject {
+            kind: "route".into(),
+            name: h.clone(),
+          }),
+          title: format!("域名 {h} 的证书 {d} 天后到期"),
+          hint: None,
+        })
     }))
     .collect()
 }

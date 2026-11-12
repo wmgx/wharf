@@ -1,17 +1,15 @@
+import { Panel } from "@/components/kit";
 import { splitNote } from "@/lib/vault";
-import { ArrowRightLeftIcon, CloudIcon, EllipsisIcon, HistoryIcon, LockIcon, PlayIcon, RefreshCwIcon, RotateCwIcon, ScrollTextIcon, SquareIcon, Trash2Icon } from "lucide-react";
-import { useNavigate } from "react-router-dom";
-import { useActions } from "@/components/actions";
+import { CloudIcon, LockIcon } from "lucide-react";
+import { OpMenu, serviceOps } from "@/components/ops";
 import { Empty, OpenLink, useClickable, ServerTag, StatusBadge, imageOf, type Tone } from "@/components/common";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import type { ServiceView, Status } from "@/types";
 import { serviceTruth } from "@/components/health";
-import { KIND_NAME, edgeSourceLabel, edgeTone } from "./edge";
+import { KIND_NAME, edgeSourceLabel, edgeTone } from "../edge";
 
-/** 列表里的一行：服务器上的服务和 Cloudflare 上的边缘应用放在一起。 */
+/** 列表里的一行：服务器上的服务和 Cloudflare 应用放在一起。 */
 interface Row {
   name: string;
   to: string;
@@ -47,7 +45,7 @@ export function ServiceTable({ status, server }: { status: Status; server?: stri
   if (rows.length === 0) return <Empty>这台服务器上还没有服务。</Empty>;
   return (
     <>
-      <div className="hidden overflow-hidden rounded-xl border bg-card shadow-xs md:block">
+      <Panel className="hidden md:block">
         <Table>
           <TableHeader className="bg-muted/50">
             <TableRow>
@@ -82,15 +80,15 @@ export function ServiceTable({ status, server }: { status: Status; server?: stri
                   ))}
                   {r.domains.length === 0 && (r.address ? <OpenLink value={r.address} className="text-muted-foreground" /> : <span className="text-muted-foreground">-</span>)}
                 </TableCell>
-                <TableCell onClick={(e) => e.stopPropagation()}>{r.svc && <RowMenu svc={r.svc} />}</TableCell>
+                <TableCell onClick={(e) => e.stopPropagation()}>{r.svc && <OpMenu ops={serviceOps} target={r.svc} label={`${r.svc.name} 的操作`} size="icon-sm" />}</TableCell>
               </TableRow>
             ))}
           </TableBody>
         </Table>
-      </div>
+      </Panel>
       <div className="grid gap-2 md:hidden">
         {rows.map((r) => (
-          <div key={r.to} className="flex cursor-pointer items-start gap-2 rounded-xl border bg-card p-3 shadow-xs" {...clickable({ to: r.to })}>
+          <div key={r.to} className="cursor-pointer" {...clickable({ to: r.to })}><Panel className="flex items-start gap-2 p-3">
             <div className="grid min-w-0 flex-1 gap-1.5">
               <div className="flex items-center gap-1.5 font-medium">
                 {!r.svc && <CloudIcon className="size-3.5 text-muted-foreground" />}
@@ -108,65 +106,11 @@ export function ServiceTable({ status, server }: { status: Status; server?: stri
                 </div>
               )}
             </div>
-            <div onClick={(e) => e.stopPropagation()}>{r.svc && <RowMenu svc={r.svc} />}</div>
-          </div>
+            <div onClick={(e) => e.stopPropagation()}>{r.svc && <OpMenu ops={serviceOps} target={r.svc} label={`${r.svc.name} 的操作`} size="icon-sm" />}</div>
+          </Panel></div>
         ))}
       </div>
     </>
-  );
-}
-
-function RowMenu({ svc }: { svc: ServiceView }) {
-  const actions = useActions();
-  const nav = useNavigate();
-  return (
-    <DropdownMenu modal={false}>
-      <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="icon-sm" aria-label={`${svc.name} 的操作`}>
-          <EllipsisIcon />
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-44">
-        <DropdownMenuItem onSelect={() => nav(`/services/${svc.name}?tab=logs`)}>
-          <ScrollTextIcon />
-          看日志
-        </DropdownMenuItem>
-        {svc.spec.stopped ? (
-          <DropdownMenuItem onSelect={() => actions.setStopped(svc, false)}>
-            <PlayIcon />
-            启动
-          </DropdownMenuItem>
-        ) : (
-          <>
-            <DropdownMenuItem onSelect={() => actions.restart(svc.name)}>
-              <RotateCwIcon />
-              重启
-            </DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => actions.setStopped(svc, true)}>
-              <SquareIcon />
-              停止
-            </DropdownMenuItem>
-          </>
-        )}
-        <DropdownMenuItem onSelect={() => actions.redeploy(svc)}>
-          <RefreshCwIcon />
-          重新部署
-        </DropdownMenuItem>
-        <DropdownMenuItem onSelect={() => actions.rollback(svc.name)}>
-          <HistoryIcon />
-          回滚到上一个版本
-        </DropdownMenuItem>
-        <DropdownMenuItem onSelect={() => actions.move(svc)}>
-          <ArrowRightLeftIcon />
-          迁移到其他服务器
-        </DropdownMenuItem>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem variant="destructive" onSelect={() => actions.remove(svc.name)}>
-          <Trash2Icon />
-          删除
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
   );
 }
 

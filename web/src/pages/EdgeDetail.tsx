@@ -1,3 +1,5 @@
+import { ConfirmDialog } from "@/components/kit";
+import { Panel } from "@/components/kit";
 import { ArrowLeftIcon, ArrowUpRightIcon, PlusIcon, RefreshCwIcon, RotateCwIcon, Trash2Icon, Undo2Icon, XIcon } from "lucide-react";
 import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
@@ -18,10 +20,11 @@ import { useStatus } from "@/status";
 import type { EdgeAppView, EdgeVersionView } from "@/types";
 import { KIND_NAME, edgeSourceLabel, edgeTask, edgeTone, projectOf } from "./edge";
 
-/** 边缘应用详情：访问地址、域名、Cloudflare 那边的版本（可以切换回旧版本）。 */
+/** Cloudflare 应用详情：访问地址、域名、Cloudflare 那边的版本（可以切换回旧版本）。 */
 export function EdgeDetail() {
   const { name = "" } = useParams();
   const actions = useActions();
+  const [removing, setRemoving] = useState(false);
   const path = `/api/edge/${encodeURIComponent(name)}`;
   // 读控制面里存的同步结果；旧了控制面会在后台再同步。
   const { data: app, error, refresh } = usePoll<EdgeAppView>(path, 10000);
@@ -34,9 +37,9 @@ export function EdgeDetail() {
     app && actions.plan({ title, changes: [{ op: "upsert_edge_app", name, spec: { ...app.spec, domains: list } }] });
 
   const back = (
-    <Link className="mb-3 inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground" to="/">
+    <Link className="mb-3 inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground" to="/services">
       <ArrowLeftIcon className="size-3.5" />
-      首页
+      服务
     </Link>
   );
   if (!app) {
@@ -79,14 +82,15 @@ export function EdgeDetail() {
   const remove = () =>
     actions.plan({
       title: `不再纳管 ${name}`,
-      then: "/",
+      then: "/services",
       changes: [{ op: "remove_edge_app", name }],
     });
 
   return (
     <>
-      {back}
+      <ConfirmDialog open={removing} title={`不再纳管 ${name}？`} onCancel={() => setRemoving(false)} onConfirm={() => { setRemoving(false); remove(); }}>Cloudflare 上的应用不受影响，只是 Wharf 不再管理它。</ConfirmDialog>
       <PageHeader
+        back={{ to: "/services", label: "服务" }}
         title={
           <>
             {app.name}
@@ -116,7 +120,7 @@ export function EdgeDetail() {
                 重新发布
               </Button>
             )}
-            <Button variant="outline" className="text-destructive" onClick={remove}>
+            <Button variant="outline" className="text-destructive" onClick={() => setRemoving(true)}>
               <Trash2Icon />
               不再纳管
             </Button>
@@ -165,7 +169,7 @@ export function EdgeDetail() {
               </Button>
             </dd>
             <dt className="text-muted-foreground">Cloudflare</dt>
-            <dd className="font-mono text-[13px]">
+            <dd className="font-mono text-xs">
               {app.spec.account} / {projectOf(app)}
             </dd>
             <dt className="text-muted-foreground">同步于</dt>
@@ -196,7 +200,7 @@ export function EdgeDetail() {
 
 function ExternalLink({ url }: { url: string }) {
   return (
-    <a className="inline-flex min-w-0 items-center gap-1 font-mono text-[13px] text-primary hover:underline" href={url} target="_blank" rel="noreferrer">
+    <a className="inline-flex min-w-0 items-center gap-1 font-mono text-xs text-primary hover:underline" href={url} target="_blank" rel="noreferrer">
       <span className="truncate">{url}</span>
       <ArrowUpRightIcon className="size-3.5 shrink-0" />
     </a>
@@ -224,7 +228,7 @@ function Versions({ name, onChanged }: { name: string; onChanged: () => void }) 
       ) : data.length === 0 ? (
         <Empty>没有版本</Empty>
       ) : (
-        <div className="overflow-hidden rounded-xl border bg-card shadow-xs">
+        <Panel>
           <Table>
             <TableHeader className="bg-muted/50">
               <TableRow>
@@ -267,7 +271,7 @@ function Versions({ name, onChanged }: { name: string; onChanged: () => void }) 
               ))}
             </TableBody>
           </Table>
-        </div>
+        </Panel>
       )}
     </>
   );
@@ -297,7 +301,7 @@ function AddEdgeRoute({ app, open, onClose, onAdd }: { app: string; open: boolea
             取消
           </Button>
           <Button disabled={!hostname.trim()} onClick={submit}>
-            生成计划
+            预览改动
           </Button>
         </DialogFooter>
       </DialogContent>

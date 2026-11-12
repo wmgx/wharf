@@ -12,7 +12,7 @@ export function GatewayErrorPage({ g }: { g: GatewayView }) {
   const save = (error_page: string | undefined) => {
     setOpen(false);
     actions.plan({
-      title: `修改网关 ${g.name} 的错误页`,
+      title: `修改入口 ${g.name} 的错误页`,
       changes: [{ op: "upsert_gateway", name: g.name, spec: { ...g.spec, error_page } }],
     });
   };
@@ -31,7 +31,7 @@ export function GatewayErrorPage({ g }: { g: GatewayView }) {
           <DialogHeader>
             <DialogTitle>错误页</DialogTitle>
           </DialogHeader>
-          <Textarea aria-label="错误页 HTML" className="min-h-64 font-mono text-[13px]" value={page} onChange={(e) => setPage(e.target.value)} />
+          <Textarea aria-label="错误页 HTML" className="min-h-64 font-mono text-xs" value={page} onChange={(e) => setPage(e.target.value)} />
           <DialogFooter>
             <Button variant="outline" onClick={() => save(undefined)}>换回默认</Button>
             <Button onClick={() => save(page)}>保存</Button>

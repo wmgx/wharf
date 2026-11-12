@@ -1,3 +1,4 @@
+import { Panel } from "@/components/kit";
 import { EyeIcon, EyeOffIcon, FileTextIcon, RefreshCwIcon } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
@@ -90,13 +91,13 @@ export function ServerHostUnits({ server, online }: { server: string; online: bo
       ) : (
         <div className="grid gap-3">
           {data.map((u) => (
-            <div key={u.unit} className="rounded-xl border bg-card p-4 shadow-xs">
+            <Panel key={u.unit} className="p-4">
               <div className="flex flex-wrap items-center gap-2">
                 <span className="font-mono text-sm font-semibold">{u.unit.replace(/\.service$/, "")}</span>
                 <StatusBadge tone={u.state === "running" ? "ok" : u.state === "failed" ? "bad" : "warn"}>
                   {u.state === "running" ? "运行中" : u.state}
                 </StatusBadge>
-                {u.gateway && <Badge variant="outline">网关</Badge>}
+                {u.gateway && <Badge variant="outline">入口</Badge>}
                 {u.watched && <Badge variant="secondary">已接管</Badge>}
                 <span className="truncate text-xs text-muted-foreground">{u.description}</span>
                 <span className="ml-auto flex gap-1">
@@ -130,7 +131,7 @@ export function ServerHostUnits({ server, online }: { server: string; online: bo
                 {u.unit_file && <Item k="unit 文件" v={u.unit_file} mono />}
                 {!!u.configs?.length && <Item k="配置" v={u.configs.join("  ")} mono />}
               </dl>
-            </div>
+            </Panel>
           ))}
         </div>
       )}

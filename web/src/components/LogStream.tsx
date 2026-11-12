@@ -1,3 +1,4 @@
+import { Tip } from "@/components/kit";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   DownloadIcon,
@@ -124,31 +125,31 @@ export function LogStream({ path }: { path: string }) {
             ? `${shown.length} / ${lines.length} 行`
             : `${lines.length} 行`}
         </span>
-        <Button
+        <Tip text={paused ? "继续滚动" : "暂停滚动"}><Button
           variant="ghost"
           size="xs"
           onClick={() => setPaused((p) => !p)}
-          title={paused ? "继续滚动" : "暂停滚动"}
+          aria-label={paused ? "继续滚动" : "暂停滚动"}
         >
           {paused ? <PlayIcon /> : <PauseIcon />}
-        </Button>
-        <Button
+        </Button></Tip>
+        <Tip text="下载当前显示的日志"><Button
           variant="ghost"
           size="xs"
           onClick={download}
           disabled={!shown.length}
-          title="下载当前显示的日志"
+          aria-label="下载当前显示的日志"
         >
           <DownloadIcon />
-        </Button>
-        <Button
+        </Button></Tip>
+        <Tip text="清屏"><Button
           variant="ghost"
           size="xs"
           onClick={() => setLines([])}
-          title="清屏"
+          aria-label="清屏"
         >
           <EraserIcon />
-        </Button>
+        </Button></Tip>
       </div>
       <div
         className="h-[60vh] min-h-72 overflow-auto bg-muted/30 px-3.5 py-3 font-mono text-xs leading-relaxed break-all whitespace-pre-wrap"

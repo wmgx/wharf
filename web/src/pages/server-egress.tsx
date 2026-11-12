@@ -52,7 +52,7 @@ export function EgressFields({
         <Picker
           value={via}
           options={[
-            { value: "", label: "不借道，直接访问" },
+            { value: "", label: "直接访问" },
             ...exits.map((n) => ({ value: n, label: n })),
             ...(via && !exits.includes(via)
               ? [{ value: via, label: via, hint: "那台没开代理" }]
@@ -83,7 +83,7 @@ export function EgressFields({
                   update({ all: v === true || undefined })
                 }
               />
-              所有网站都可以借道（不只下面勾选的）
+              所有网站都可以访问（不只下面勾选的）
             </label>
             {!egress.all && (
               <>

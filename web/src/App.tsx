@@ -17,8 +17,9 @@ import { Toaster } from "./components/ui/sonner";
 import { announceUpgrade } from "./components/upgrade";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { Settings } from "./pages/Settings";
-import { AlertsPage } from "./pages/alerts";
+import { InboxPage } from "./pages/inbox";
 import { Home } from "./pages/Home";
+import { ServicesPage } from "./pages/services";
 import { Login } from "./pages/Login";
 import { HostTerminal } from "./pages/HostTerminal";
 import { ServiceDetail } from "./pages/ServiceDetail";
@@ -65,24 +66,10 @@ export function App() {
   );
 }
 
-const TITLES: [string, string][] = [
-  ["/services/", "服务详情"],
-  ["/edge/", "服务详情"],
-  ["/servers", "服务器"],
-  ["/entries", "入口"],
-  ["/network", "网络"],
-  ["/tasks", "定时任务"],
-  ["/data", "数据与备份"],
-  ["/activity", "活动"],
-  ["/settings", "设置"],
-  ["/", "首页"],
-];
-
 function Shell({ username, onLogout }: { username: string; onLogout: () => void }) {
   const { data: status, refresh } = usePoll<Status>("/api/status", 5000);
   useEffect(announceUpgrade, []);
   const { pathname } = useLocation();
-  const title = TITLES.find(([p]) => pathname.startsWith(p))?.[1] ?? "";
 
   return (
     <StatusContext.Provider value={{ status, refresh }}>
@@ -93,19 +80,18 @@ function Shell({ username, onLogout }: { username: string; onLogout: () => void 
             <header className="sticky top-0 z-10 flex h-14 shrink-0 items-center gap-2 border-b bg-background/80 px-4 backdrop-blur">
               <SidebarTrigger className="-ml-1" />
               <Separator orientation="vertical" className="mr-1 data-[orientation=vertical]:h-4" />
-              <span className="hidden text-sm font-medium sm:inline">{title}</span>
-              <div className="ml-auto flex min-w-0 flex-1 items-center justify-end gap-2">
+              <div className="min-w-0 flex-1 max-w-sm"><CommandMenu onLogout={onLogout} /></div>
+              <div className="ml-auto flex items-center justify-end gap-2">
                 <Running />
                 <Problems />
-                <CommandMenu onLogout={onLogout} />
                 <NewMenu />
               </div>
             </header>
             <div className={pathname.startsWith("/servers") && !pathname.endsWith("/terminal") ? "flex flex-1" : "mx-auto w-full max-w-6xl flex-1 px-4 py-8 md:px-8"}>
               <Boundary>
                 <Routes>
-                  <Route path="/" element={<Home />} />
-                  <Route path="/services" element={<ServicesMoved />} />
+                  <Route path="/" element={<HomeRoute />} />
+                  <Route path="/services" element={<ServicesRoute />} />
                   <Route path="/services/:name" element={<ServiceDetail />} />
                   <Route path="/edge/:name" element={<EdgeDetail />} />
                   <Route path="/servers/:name" element={<Servers />} />
@@ -115,7 +101,8 @@ function Shell({ username, onLogout }: { username: string; onLogout: () => void 
                   <Route path="/domains" element={<Moved to="/entries" />} />
                   <Route path="/activity" element={<Activity />} />
                   <Route path="/settings" element={<Settings />} />
-                  <Route path="/alerts" element={<AlertsPage />} />
+                  <Route path="/alerts" element={<Navigate to="/inbox?tab=rules" replace />} />
+                  <Route path="/inbox" element={<InboxPage />} />
                   <Route path="/tasks" element={<TasksPage />} />
                   <Route path="/data" element={<DataPage />} />
                   <Route path="/gateways" element={<Moved to="/entries" />} />
@@ -133,13 +120,19 @@ function Shell({ username, onLogout }: { username: string; onLogout: () => void 
   );
 }
 
-/** 旧地址跳到新位置，保留查询参数（例如 `/gateways?open=x`）。 */
-/** 服务列表并进了首页；`/services?tab=data` 是数据与备份。 */
-function ServicesMoved() {
+function HomeRoute() {
   const { search } = useLocation();
-  return new URLSearchParams(search).get("tab") === "data" ? <Moved to="/data" /> : <Moved to="/" />;
+  const params = new URLSearchParams(search);
+  return ["new", "import", "edge"].some((key) => params.get(key) === "1")
+    ? <Navigate to={`/services${search}`} replace /> : <Home />;
 }
 
+function ServicesRoute() {
+  const { search } = useLocation();
+  return new URLSearchParams(search).get("tab") === "data" ? <Moved to="/data" /> : <ServicesPage />;
+}
+
+/** 旧地址跳到新位置，保留查询参数（例如 `/gateways?open=x`）。 */
 function Moved({ to }: { to: string }) {
   const { search } = useLocation();
   const params = new URLSearchParams(search);

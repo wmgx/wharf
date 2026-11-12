@@ -1,5 +1,7 @@
+import { ConfirmDialog, Tip } from "@/components/kit";
+import { Panel } from "@/components/kit";
 import { ArchiveRestoreIcon, DatabaseBackupIcon } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { toast } from "sonner";
 import { api, usePoll } from "@/api";
 import { useActions } from "@/components/actions";
@@ -8,8 +10,6 @@ import { Field, Picker, serverOptions } from "@/components/fields";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useStatus } from "@/status";
@@ -78,7 +78,7 @@ export function Backups({ svc }: { svc: ServiceView }) {
           {target ? (
             <>
               <p>
-                每天把 <code className="font-mono text-[13px]">/srv/{name}/</code> 备份到 <ServerTag name={target} />
+                每天把 <code className="font-mono text-xs">/srv/{name}/</code> 备份到 <ServerTag name={target} />
                 ，备份时会先停服务、备份完再启动。保留最近 7 天、4 周、6 个月各一份。
               </p>
               {last && (
@@ -116,7 +116,7 @@ export function Backups({ svc }: { svc: ServiceView }) {
       ) : data.snapshots.length === 0 ? (
         target && <Empty>还没有快照</Empty>
       ) : (
-        <div className="overflow-hidden rounded-xl border bg-card shadow-xs">
+        <Panel>
           <Table>
             <TableHeader className="bg-muted/50">
               <TableRow>
@@ -131,7 +131,7 @@ export function Backups({ svc }: { svc: ServiceView }) {
                 <TableRow key={s.id}>
                   <TableCell className="pl-4 font-mono text-xs">{s.short_id}</TableCell>
                   <TableCell>
-                    <span title={new Date(s.time).toLocaleString("zh-CN")}>{ago(s.time)}</span>
+                    <Tip text={new Date(s.time).toLocaleString("zh-CN")}><span>{ago(s.time)}</span></Tip>
                     {i === 0 && (
                       <Badge variant="secondary" className="ml-2">
                         最新
@@ -151,7 +151,7 @@ export function Backups({ svc }: { svc: ServiceView }) {
               ))}
             </TableBody>
           </Table>
-        </div>
+        </Panel>
       )}
       <RestoreDialog name={name} snapshot={restoring} onCancel={() => setRestoring(null)} onConfirm={restore} />
     </div>
@@ -180,31 +180,7 @@ function EnableBackup({ svc }: { svc: ServiceView }) {
   );
 }
 
-/** 恢复前输入 `service/名称` 确认，和 CLI 的 `--confirm` 一样。 */
+/** 恢复前输入服务名确认。 */
 function RestoreDialog({ name, snapshot, onCancel, onConfirm }: { name: string; snapshot: Snapshot | null; onCancel: () => void; onConfirm: (s: Snapshot) => void }) {
-  const [typed, setTyped] = useState("");
-  useEffect(() => setTyped(""), [snapshot]);
-  const expect = `service/${name}`;
-  return (
-    <Dialog open={!!snapshot} onOpenChange={(o) => !o && onCancel()}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>恢复 {name} 到快照 {snapshot?.short_id}？</DialogTitle>
-          <DialogDescription>
-            停服后用 {snapshot && new Date(snapshot.time).toLocaleString("zh-CN")} 的快照替换 /srv/{name}/，原数据移到 /srv/.wharf-restore/。输入{" "}
-            <code className="font-mono text-foreground">{expect}</code> 确认。
-          </DialogDescription>
-        </DialogHeader>
-        <Input autoFocus value={typed} onChange={(e) => setTyped(e.target.value)} placeholder={expect} className="font-mono" />
-        <DialogFooter>
-          <Button variant="ghost" onClick={onCancel}>
-            取消
-          </Button>
-          <Button variant="destructive" disabled={typed.trim() !== expect} onClick={() => snapshot && onConfirm(snapshot)}>
-            恢复
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
+  return <ConfirmDialog open={!!snapshot} title={`恢复 ${name} 到快照 ${snapshot?.short_id}？`} typed={`service/${name}`} confirmText="恢复" onCancel={onCancel} onConfirm={() => snapshot && onConfirm(snapshot)}>停服后用 {snapshot && new Date(snapshot.time).toLocaleString("zh-CN")} 的快照替换 /srv/{name}/，原数据移到 /srv/.wharf-restore/。</ConfirmDialog>;
 }

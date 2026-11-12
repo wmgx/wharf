@@ -1,3 +1,4 @@
+import { Panel } from "@/components/kit";
 import { BellIcon, SendIcon } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
@@ -5,7 +6,7 @@ import { api, usePoll } from "@/api";
 import { SectionTitle, StatusBadge } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import type { SecretView } from "@/types";
-import { SetSecret } from "./secrets";
+import { SetSecret } from "../secrets";
 
 const WEBHOOK = "NOTIFY_FEISHU_WEBHOOK";
 const SIGN = "NOTIFY_FEISHU_SECRET";
@@ -33,7 +34,7 @@ export function Notify() {
     <>
       <SectionTitle>通知渠道</SectionTitle>
       {data && (
-        <div className="flex flex-wrap items-center gap-3 rounded-xl border bg-card p-4 shadow-xs">
+        <Panel className="flex flex-wrap items-center gap-3 p-4">
           <span className="grid size-9 place-items-center rounded-lg border bg-muted text-muted-foreground">
             <BellIcon className="size-4" />
           </span>
@@ -67,7 +68,7 @@ export function Notify() {
               发测试消息
             </Button>
           </div>
-        </div>
+        </Panel>
       )}
       {editing && (
         <SetSecret

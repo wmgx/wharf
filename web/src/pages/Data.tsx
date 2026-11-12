@@ -1,3 +1,4 @@
+import { Panel } from "@/components/kit";
 import { usePoll } from "@/api";
 import { ago, Empty, useClickable, ErrorNote, ServerTag, StatusBadge, type Tone } from "@/components/common";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -42,7 +43,7 @@ export function Data() {
       ) : services.length === 0 ? (
         <Empty>还没有服务</Empty>
       ) : (
-        <div className="overflow-hidden rounded-xl border bg-card shadow-xs">
+        <Panel>
           <Table>
             <TableHeader className="bg-muted/50">
               <TableRow>
@@ -78,7 +79,7 @@ export function Data() {
               ))}
             </TableBody>
           </Table>
-        </div>
+        </Panel>
       )}
     </>
   );
