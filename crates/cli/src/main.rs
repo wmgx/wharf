@@ -700,6 +700,23 @@ pub enum GatewayCmd {
     #[command(flatten)]
     apply: ApplyFlags,
   },
+  /// 错误页：网关连不上服务时（502、503、504）显示的页面。
+  /// 例：`wharf gateway error-page edge --file 502.html --apply`；`--default` 换回内置页。
+  ErrorPage {
+    name: String,
+    /// HTML 文件；`-` 从标准输入读。
+    #[arg(
+      long,
+      conflicts_with = "default",
+      required_unless_present = "default"
+    )]
+    file: Option<String>,
+    /// 换回内置的默认页。
+    #[arg(long)]
+    default: bool,
+    #[command(flatten)]
+    apply: ApplyFlags,
+  },
   Rm {
     name: String,
     #[command(flatten)]
