@@ -3,7 +3,7 @@ import { RefreshCwIcon } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { api, usePoll } from "@/api";
-import { ago, Empty, SectionTitle } from "@/components/common";
+import { ago, Empty } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
@@ -49,12 +49,13 @@ export function ServerDisk({ server, online }: { server: string; online: boolean
   };
   return (
     <div className="mb-6">
-      <SectionTitle action={<div className="flex flex-wrap items-center gap-2"><span className="text-xs text-muted-foreground">
-          {data?.measured_at ? `${ago(new Date(data.measured_at).toISOString())}测量，每天一次` : "每天测量一次"}
-        </span><Button variant="ghost" size="sm" className="ml-auto" disabled={busy || !online} onClick={measure}>
-          <RefreshCwIcon className={busy ? "animate-spin" : undefined} />
-          {busy ? "测量中，可能要几分钟…" : "立即测量"}
-        </Button></div>}>占用增长</SectionTitle>
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <span className="text-xs text-muted-foreground">各服务占用</span>
+        <span className="text-xs text-muted-foreground">{data?.measured_at ? `${ago(new Date(data.measured_at).toISOString())}测量，每天一次` : "每天测量一次"}</span>
+        <Button variant="ghost" size="sm" className="ml-auto" disabled={busy || !online} onClick={measure}>
+          <RefreshCwIcon className={busy ? "animate-spin" : undefined} />{busy ? "测量中，可能要几分钟…" : "立即测量"}
+        </Button>
+      </div>
       {!data?.rows.length ? (
         <Empty>还没有测量过</Empty>
       ) : (

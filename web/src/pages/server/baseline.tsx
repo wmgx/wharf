@@ -2,7 +2,7 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { api } from "@/api";
 import { useActions } from "@/components/actions";
-import { Notice, SectionTitle } from "@/components/common";
+import { Notice } from "@/components/common";
 import { Field, Segmented } from "@/components/fields";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -77,7 +77,6 @@ export function ServerBaseline({ server }: { server: ServerView }) {
 
   return (
     <div className="mb-6">
-      <SectionTitle>基线</SectionTitle>
       {drift.length > 0 && (
         <Notice kind="warn" className="mb-3">
           和基线不一致：{drift.join("；")}。预览改动或下次 plan 会纠正。

@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import * as vault from "@/lib/vault";
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { Activity } from "./pages/Activity";
-import { Servers } from "./pages/Servers";
+import { Servers } from "./pages/server";
 import { api, clearPollCache, setUnauthorizedHandler, usePoll, type Session } from "./api";
 import { ActionsProvider } from "./components/actions";
 import { AppSidebar } from "./components/app-sidebar";
