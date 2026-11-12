@@ -12,7 +12,7 @@ import type { ServiceView, Status } from "@/types";
 import { serviceTruth } from "@/components/health";
 import { KIND_NAME, edgeSourceLabel, edgeTone } from "./edge";
 
-/** 列表里的一行：服务器上的服务和 Cloudflare 上的Cloudflare 应用放在一起。 */
+/** 列表里的一行：服务器上的服务和 Cloudflare 应用放在一起。 */
 interface Row {
   name: string;
   to: string;

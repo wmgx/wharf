@@ -86,7 +86,7 @@ export function ServiceUsage({ server }: { server: string }) {
             ))}
           </TableBody>
         </Table>
-      </div>
-    </Panel>
+      </Panel>
+    </div>
   );
 }

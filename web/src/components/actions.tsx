@@ -301,7 +301,7 @@ function RemoveDialog({ name, onCancel, onConfirm }: { name: string | null; onCa
             className="bg-destructive text-white hover:bg-destructive/90"
             onClick={() => name && onConfirm(name, purge)}
           >
-            {purge ? "预览改动" : "预览改动"}
+            预览改动
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>
