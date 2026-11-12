@@ -2137,6 +2137,8 @@ fn plaintext_hop(
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::world::{RouteRow, ServerRow, ServiceRow};
+  use wharf_api_types::{agent::ContainerInfo, spec::Limits};
 
   #[test]
   fn names_only_changed_components() {
@@ -2175,5 +2177,327 @@ mod tests {
       b.items.iter().map(|i| i.address.as_str()).collect();
     assert_eq!(found, ["service/half"]);
     assert!(b.items[0].needs_confirm());
+  }
+
+  /// 一台 s1，一个 image 服务 app（nginx:1，端口 80）。
+  fn world() -> World {
+    let spec = serde_json::from_value(json!({
+      "server": "s1",
+      "source": {"image": "nginx:1"},
+      "ports": [{"name": "http", "container": 80}],
+    }))
+    .unwrap();
+    let mut world = World::default();
+    world.servers.insert(
+      "s1".to_string(),
+      ServerRow {
+        settings: Default::default(),
+        version: 1,
+      },
+    );
+    world.services.insert(
+      "app".to_string(),
+      ServiceRow {
+        spec,
+        host_ports: BTreeMap::from([("http".to_string(), 21000)]),
+        import: None,
+        pins: BTreeMap::new(),
+        commit: None,
+        version: 1,
+      },
+    );
+    world
+  }
+
+  fn container(state: &str) -> ContainerInfo {
+    ContainerInfo {
+      service: "app".into(),
+      name: "app-app-1".into(),
+      state: state.into(),
+      status: String::new(),
+      health: None,
+      image: String::new(),
+      foreign: false,
+      working_dir: None,
+    }
+  }
+
+  /// s1 上 app 的现状。`hash` 为 None 表示不是 Wharf 部署的。
+  fn live(
+    hash: Option<String>,
+    containers: Vec<ContainerInfo>,
+  ) -> StatusMap {
+    StatusMap::from([(
+      "s1".to_string(),
+      Some(BTreeMap::from([(
+        "app".to_string(),
+        ProjectState {
+          project: "app".into(),
+          hash,
+          config_hash: None,
+          containers,
+        },
+      )])),
+    )])
+  }
+
+  fn hash_of(w: &World) -> String {
+    snapshot::service_resolved(
+      w,
+      &Net::default(),
+      "app",
+      &BTreeMap::new(),
+    )
+    .unwrap()
+    .1
+  }
+
+  /// 跑一次 service_items，返回生成的计划项。
+  fn plan(
+    current: &World,
+    desired: &World,
+    status: &StatusMap,
+  ) -> Builder {
+    let mut b = Builder::default();
+    let writes = desired.writes_from(current);
+    service_items(
+      &mut b,
+      &Snapshot {
+        world: current.clone(),
+        ..Snapshot::default()
+      },
+      current,
+      desired,
+      &Net::default(),
+      status,
+      &writes,
+    )
+    .unwrap();
+    b
+  }
+
+  #[test]
+  fn no_change_no_item() {
+    let w = world();
+    let b = plan(
+      &w,
+      &w,
+      &live(Some(hash_of(&w)), vec![container("running")]),
+    );
+    assert!(b.items.is_empty());
+  }
+
+  #[test]
+  fn new_service_creates() {
+    let desired = world();
+    let mut current = desired.clone();
+    current.services.clear();
+    let status =
+      StatusMap::from([("s1".into(), Some(BTreeMap::new()))]);
+    let b = plan(&current, &desired, &status);
+    assert_eq!(b.items.len(), 1);
+    assert_eq!(b.items[0].action, Action::Create);
+    assert!(b.items[0].impacts.is_empty());
+    assert!(b.items[0].reason.contains("部署新服务"));
+  }
+
+  #[test]
+  fn config_change_restarts() {
+    let current = world();
+    let mut desired = current.clone();
+    desired
+      .services
+      .get_mut("app")
+      .unwrap()
+      .spec
+      .env
+      .insert("MODE".into(), "new".into());
+    let b = plan(
+      &current,
+      &desired,
+      &live(Some(hash_of(&current)), vec![container("running")]),
+    );
+    assert_eq!(b.items.len(), 1);
+    assert_eq!(b.items[0].action, Action::Update);
+    assert_eq!(b.items[0].impacts, vec![Impact::Restart]);
+    assert!(b.items[0].reason.contains("配置变化"));
+  }
+
+  #[test]
+  fn drift_redeploys() {
+    let w = world();
+    let b = plan(
+      &w,
+      &w,
+      &live(Some("old".into()), vec![container("running")]),
+    );
+    assert_eq!(b.items.len(), 1);
+    assert_eq!(b.items[0].action, Action::Update);
+    assert_eq!(b.items[0].impacts, vec![Impact::Restart]);
+    assert!(b.items[0].reason.contains("漂移"));
+  }
+
+  #[test]
+  fn stopped_container_is_drift() {
+    let w = world();
+    let b = plan(
+      &w,
+      &w,
+      &live(Some(hash_of(&w)), vec![container("exited")]),
+    );
+    assert_eq!(b.items.len(), 1);
+    assert_eq!(b.items[0].action, Action::Update);
+    assert_eq!(b.items[0].impacts, vec![Impact::Restart]);
+    assert!(b.items[0].reason.contains("容器没在运行"));
+  }
+
+  #[test]
+  fn stop_keeps_containers() {
+    let current = world();
+    let mut desired = current.clone();
+    desired.services.get_mut("app").unwrap().spec.stopped = true;
+    let b = plan(
+      &current,
+      &desired,
+      &live(Some(hash_of(&desired)), vec![container("running")]),
+    );
+    assert_eq!(b.items.len(), 1);
+    assert_eq!(b.items[0].action, Action::Update);
+    assert_eq!(b.items[0].impacts, vec![Impact::Downtime]);
+    assert!(b.items[0].reason.contains("停止服务"));
+    assert!(matches!(b.steps[0].step, Step::ServiceStop { .. }));
+  }
+
+  #[test]
+  fn unreachable_server() {
+    let current = world();
+    let mut desired = current.clone();
+    desired
+      .services
+      .get_mut("app")
+      .unwrap()
+      .spec
+      .env
+      .insert("MODE".into(), "new".into());
+    let status = StatusMap::from([("s1".into(), None)]);
+    let b = plan(&current, &desired, &status);
+    assert_eq!(b.items.len(), 1);
+    assert_eq!(b.items[0].action, Action::Update);
+    assert_eq!(b.items[0].impacts, vec![Impact::Restart]);
+    assert!(b.items[0].reason.contains("无法读取现状"));
+    assert!(plan(&current, &current, &status).items.is_empty());
+  }
+
+  #[test]
+  fn foreign_project_overwrites() {
+    let desired = world();
+    let mut current = desired.clone();
+    current.services.clear();
+    let b = plan(
+      &current,
+      &desired,
+      &live(None, vec![container("running")]),
+    );
+    assert_eq!(b.items.len(), 1);
+    assert_eq!(b.items[0].action, Action::Update);
+    assert!(b.items[0].impacts.contains(&Impact::Overwrite));
+    assert!(b.items[0].needs_confirm());
+  }
+
+  #[test]
+  fn foreign_container_warns() {
+    let w = world();
+    let mut c = container("running");
+    c.foreign = true;
+    let b = plan(&w, &w, &live(Some("old".into()), vec![c]));
+    assert_eq!(b.items.len(), 1);
+    assert_eq!(b.items[0].action, Action::Update);
+    assert!(b.items[0].impacts.contains(&Impact::Overwrite));
+    assert!(b.items[0].reason.contains("会删除它们"));
+  }
+
+  #[test]
+  fn remove_keeps_data() {
+    let current = world();
+    let mut desired = current.clone();
+    desired.services.clear();
+    let b = plan(&current, &desired, &StatusMap::new());
+    assert_eq!(b.items.len(), 1);
+    assert_eq!(b.items[0].action, Action::Delete);
+    assert_eq!(b.items[0].impacts, vec![Impact::Remove]);
+    assert!(b.items[0].needs_confirm());
+    assert!(matches!(
+      b.steps[0].step,
+      Step::ServiceDown {
+        purge_data: false,
+        ..
+      }
+    ));
+  }
+
+  #[test]
+  fn limits_change_restarts() {
+    let current = world();
+    let mut desired = current.clone();
+    desired.services.get_mut("app").unwrap().spec.limits =
+      Some(Limits {
+        memory_mb: Some(256),
+        cpu_milli: None,
+      });
+    let b = plan(
+      &current,
+      &desired,
+      &live(Some(hash_of(&current)), vec![container("running")]),
+    );
+    assert_eq!(b.items.len(), 1);
+    assert_eq!(b.items[0].action, Action::Update);
+    assert_eq!(b.items[0].impacts, vec![Impact::Restart]);
+    assert!(hash_of(&current) != hash_of(&desired));
+  }
+
+  #[test]
+  fn route_impacts() {
+    let current = world();
+    let mut desired = current.clone();
+    desired.routes.insert(
+      "a.example.com".into(),
+      RouteRow {
+        id: "a".into(),
+        spec: serde_json::from_value(json!({"service": "app"}))
+          .unwrap(),
+        version: 1,
+      },
+    );
+    desired.routes.insert(
+      "b.example.com".into(),
+      RouteRow {
+        id: "b".into(),
+        spec: serde_json::from_value(json!({
+          "redirect": "https://a.example.com"
+        }))
+        .unwrap(),
+        version: 1,
+      },
+    );
+    let mut b = Builder::default();
+    config_items(
+      &mut b,
+      &current,
+      &desired,
+      &desired.writes_from(&current),
+    );
+    let a = b
+      .items
+      .iter()
+      .find(|i| i.address == "route/a.example.com")
+      .unwrap();
+    let redirect = b
+      .items
+      .iter()
+      .find(|i| i.address == "route/b.example.com")
+      .unwrap();
+    assert!(a.impacts.contains(&Impact::Public));
+    assert!(redirect.impacts.is_empty());
+    assert!(redirect.reason.contains("新增跳转"));
   }
 }
