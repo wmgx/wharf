@@ -6,13 +6,11 @@ import { toast } from "sonner";
 import { api, usePoll } from "@/api";
 import { useActions } from "@/components/actions";
 import { ago, Empty, ErrorNote, Notice, ServerTag } from "@/components/common";
-import { Field, Picker, serverOptions } from "@/components/fields";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { useStatus } from "@/status";
 import type { BackupsView, ServiceView, Snapshot } from "@/types";
 
 function size(bytes: number): string {
@@ -27,7 +25,7 @@ function size(bytes: number): string {
 }
 
 /** 服务详情的"备份"标签：开关自动备份、立即备份、看快照、恢复。 */
-export function Backups({ svc }: { svc: ServiceView }) {
+export function Backups({ svc, onSettings }: { svc: ServiceView; onSettings: () => void }) {
   const name = svc.name;
   const { data, error, refresh } = usePoll<BackupsView>(`/api/services/${encodeURIComponent(name)}/backups`, 30000);
   const actions = useActions();
@@ -91,19 +89,9 @@ export function Backups({ svc }: { svc: ServiceView }) {
                   )}
                 </p>
               )}
-              <div>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="text-muted-foreground"
-                  onClick={() => actions.plan({ title: `关闭 ${name} 的自动备份`, changes: [{ op: "upsert_service", name, spec: { ...svc.spec, backup: undefined } }] })}
-                >
-                  关闭自动备份
-                </Button>
-              </div>
             </>
           ) : (
-            <EnableBackup svc={svc} />
+            <Empty action={<Button onClick={onSettings}>去开启</Button>}>还没开备份</Empty>
           )}
         </CardContent>
       </Card>
@@ -154,28 +142,6 @@ export function Backups({ svc }: { svc: ServiceView }) {
         </Panel>
       )}
       <RestoreDialog name={name} snapshot={restoring} onCancel={() => setRestoring(null)} onConfirm={restore} />
-    </div>
-  );
-}
-
-function EnableBackup({ svc }: { svc: ServiceView }) {
-  const { status } = useStatus();
-  const actions = useActions();
-  const [to, setTo] = useState("");
-  const options = serverOptions((status?.servers ?? []).filter((s) => s.joined && s.name !== svc.spec.server));
-  if (!options.length) return <p className="text-muted-foreground">需要另一台服务器存放备份，现在只有 {svc.spec.server}。</p>;
-  return (
-    <div className="grid gap-3 sm:grid-cols-[1fr_auto] sm:items-end">
-      <Field label="备份到" htmlFor="backup-to">
-        <Picker id="backup-to" value={to} options={options} onChange={setTo} placeholder="选择服务器…" />
-      </Field>
-      <Button
-        disabled={!to}
-        className="sm:mb-6"
-        onClick={() => actions.plan({ title: `开启 ${svc.name} 的自动备份`, changes: [{ op: "upsert_service", name: svc.name, spec: { ...svc.spec, backup: { to } } }] })}
-      >
-        开启自动备份
-      </Button>
     </div>
   );
 }
