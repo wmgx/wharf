@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
   ApiError,
   agent::{AgentOp, HostUnit},
-  view::Perm,
+  view::{Issue, IssueLevel, IssueSubject, Perm},
 };
 
 use crate::{
@@ -115,14 +115,21 @@ async fn check(state: &AppState, server: &str) {
 }
 
 /// 给"需要注意"。
-pub fn problems() -> Vec<String> {
+pub fn issues() -> Vec<Issue> {
   DOWN
     .lock()
     .map(|d| {
       d.iter()
         .flat_map(|(s, v)| {
-          v.iter().map(move |(u, st)| {
-            format!("{s} 上的宿主机程序 {u} 不在运行（{st}）")
+          v.iter().map(move |(u, st)| Issue {
+            code: "host_unit_down".into(),
+            level: IssueLevel::Fault,
+            subject: Some(IssueSubject {
+              kind: "server".into(),
+              name: s.clone(),
+            }),
+            title: format!("{s} 上的宿主机程序 {u} 不在运行（{st}）"),
+            hint: None,
           })
         })
         .collect()

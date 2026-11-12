@@ -1,5 +1,5 @@
 import {
-  AnchorIcon, ArrowUpCircleIcon, BellIcon, BoxIcon, CloudIcon, DownloadIcon, GlobeIcon, HardDriveIcon,
+  AnchorIcon, ArrowUpCircleIcon, InboxIcon, BoxIcon, CloudIcon, DownloadIcon, GlobeIcon, HardDriveIcon,
   HistoryIcon, KeyRoundIcon, LogOutIcon, MoonIcon, NetworkIcon, PlusIcon, SearchIcon, ServerIcon,
   SettingsIcon, SunIcon, TimerIcon, WaypointsIcon,
 } from "lucide-react";
@@ -105,7 +105,7 @@ export function CommandMenu({ onLogout }: { onLogout: () => void }) {
             {([
               ["首页", "/", AnchorIcon], ["服务", "/services", BoxIcon], ["入口", "/entries", WaypointsIcon],
               ["定时任务", "/tasks", TimerIcon], ["服务器", "/servers", ServerIcon], ["网络", "/network", NetworkIcon],
-              ["告警", "/alerts", BellIcon], ["数据与备份", "/data", HardDriveIcon], ["活动", "/activity", HistoryIcon],
+              ["待处理", "/inbox", InboxIcon], ["数据与备份", "/data", HardDriveIcon], ["活动", "/activity", HistoryIcon],
               ["设置", "/settings", SettingsIcon],
             ] as const).map(([label, path, Icon]) => <CommandItem key={path} value={label} onSelect={() => run(() => nav(path))}><Icon />{label}</CommandItem>)}
           </CommandGroup>

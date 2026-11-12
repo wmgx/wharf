@@ -1,4 +1,4 @@
-import { BellIcon, AnchorIcon, BoxIcon, DatabaseIcon, NetworkIcon, WaypointsIcon, ChevronsUpDownIcon, HistoryIcon, LogOutIcon, TimerIcon, MoonIcon, ServerIcon, SettingsIcon, SunIcon } from "lucide-react";
+import { InboxIcon, AnchorIcon, BoxIcon, DatabaseIcon, NetworkIcon, WaypointsIcon, ChevronsUpDownIcon, HistoryIcon, LogOutIcon, TimerIcon, MoonIcon, ServerIcon, SettingsIcon, SunIcon } from "lucide-react";
 import { NavLink, useLocation } from "react-router-dom";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import {
@@ -17,7 +17,7 @@ import {
 } from "@/components/ui/sidebar";
 import { usePoll } from "@/api";
 import { useStatus } from "@/status";
-import type { AlertsView } from "@/types";
+import { issueCount, useIssues } from "@/components/issues";
 import type { VersionView } from "./upgrade";
 import { useTheme } from "@/theme";
 
@@ -38,7 +38,7 @@ export function AppSidebar({ username, onLogout }: { username: string; onLogout:
   const { pathname } = useLocation();
   const { theme, toggle } = useTheme();
 
-  const alerts = usePoll<AlertsView>("/api/alerts", 60000).data;
+  const issues = useIssues();
   const version = usePoll<VersionView>("/api/version", 600000).data;
   const groups = [
     { label: "", items: [{ to: "/", label: "首页", icon: AnchorIcon }] },
@@ -52,7 +52,7 @@ export function AppSidebar({ username, onLogout }: { username: string; onLogout:
       { to: "/network", label: "网络", icon: NetworkIcon },
     ] },
     { label: "保障", items: [
-      { to: "/alerts", label: "告警", icon: BellIcon, count: alerts?.firing.length || undefined },
+      { to: "/inbox", label: "待处理", icon: InboxIcon, count: issueCount(issues) || undefined },
       { to: "/data", label: "数据与备份", icon: DatabaseIcon },
       { to: "/activity", label: "活动", icon: HistoryIcon },
     ] },

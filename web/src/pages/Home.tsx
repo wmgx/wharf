@@ -3,7 +3,6 @@ import { ArrowRightIcon, ArrowUpCircleIcon, CheckIcon, ChevronRightIcon, CloudIc
 import { useState, type CSSProperties } from "react";
 import { useNavigate } from "react-router-dom";
 import { usePoll } from "@/api";
-import { useActions } from "@/components/actions";
 import { CardsSkeleton, OpenLink, useClickable, Mark, PageHeader, SectionTitle, ServerTag, StatusBadge, type Tone } from "@/components/common";
 import { serviceTruth } from "@/components/health";
 import { Button } from "@/components/ui/button";
@@ -65,7 +64,6 @@ export function Home() {
         }
       />
       {status && <Onboarding status={status} />}
-      {status && <UpdatesBanner status={status} />}
       {status && (
         <div className="mb-4 flex flex-wrap items-center gap-2">
           <div className="flex flex-wrap items-center gap-1">
@@ -93,35 +91,6 @@ export function Home() {
         </>
       )}
     </>
-  );
-}
-
-/** 有服务出了新版本时，首页顶部一条横幅，一次预览全部更新。 */
-function UpdatesBanner({ status }: { status: Status }) {
-  const actions = useActions();
-  const names = Object.entries(status.updates?.services ?? {})
-    .filter(([n, c]) => c.newer && status.services.some((s) => s.name === n))
-    .map(([n]) => n)
-    .sort();
-  if (!names.length) return null;
-  return (
-    <div className="mb-4 flex flex-wrap items-center gap-3 rounded-xl border border-primary/30 bg-primary/5 px-4 py-3 text-sm">
-      <ArrowUpCircleIcon className="size-4 text-primary" />
-      <span className="flex-1">
-        {names.length} 个服务有新版本：{names.join("、")}
-      </span>
-      <Button
-        size="sm"
-        onClick={() =>
-          actions.plan({
-            title: names.length === 1 ? `更新 ${names[0]}` : `更新 ${names.length} 个服务`,
-            changes: names.map((name) => ({ op: "refresh_images", name })),
-          })
-        }
-      >
-        预览改动
-      </Button>
-    </div>
   );
 }
 

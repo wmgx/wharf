@@ -3,27 +3,13 @@ import { BellOffIcon, RotateCcwIcon } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { api, usePoll } from "@/api";
-import { ago, Empty, PageHeader, SectionTitle, StatusBadge } from "@/components/common";
+import { SectionTitle } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import type { AlertPatch, AlertsView } from "@/types";
-import { Notify } from "./notify";
-
-/** 告警：正在触发的、规则、事件通知、最近推送，以及推到哪（通知渠道）。 */
-export function AlertsPage() {
-  return (
-    <>
-      <PageHeader title="告警" />
-      <Alerts />
-      <div className="mt-8">
-        <Notify />
-      </div>
-    </>
-  );
-}
 
 const MUTES: [number, string][] = [
   [60, "1 小时"],
@@ -31,11 +17,9 @@ const MUTES: [number, string][] = [
   [7 * 24 * 60, "7 天"],
 ];
 
-const iso = (ms: number) => new Date(ms).toISOString();
 const clock = (ms: number) => new Date(ms).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
 
-/** 告警规则（指标 + 阈值）和事件通知的开关、静默，正在触发的告警，最近推送。 */
-export function Alerts() {
+export function Rules() {
   const { data, refresh } = usePoll<AlertsView>("/api/alerts", 30000);
   const [view, setView] = useState<AlertsView | null>(null);
   const v = view ?? data;
@@ -59,25 +43,8 @@ export function Alerts() {
   };
 
   if (!v) return null;
-  const nameOf = (id: string) => v.rules.find((r) => r.id === id)?.name ?? v.notices.find((n) => n.id === id)?.name ?? id;
-
   return (
     <>
-      <SectionTitle count={v.firing.length}>正在触发</SectionTitle>
-      {v.firing.length ? (
-        <Panel className="grid gap-1.5 p-4 text-sm">
-          {v.firing.map((f) => (
-            <div key={`${f.rule}/${f.subject}`} className="flex flex-wrap items-center gap-2">
-              <StatusBadge tone="bad">{nameOf(f.rule)}</StatusBadge>
-              <span>{f.title}</span>
-              <span className="text-xs text-muted-foreground">{ago(iso(f.since))}起</span>
-            </div>
-          ))}
-        </Panel>
-      ) : (
-        <Empty>没有正在触发的告警</Empty>
-      )}
-
       <SectionTitle>告警规则</SectionTitle>
       <Panel>
         <Table>
@@ -138,22 +105,6 @@ export function Alerts() {
         <Checkbox checked={!!v.include_logs} onCheckedChange={(c) => setOptions(c === true)} />
         告警附带日志
       </label>
-      <SectionTitle count={v.history.length}>最近推送</SectionTitle>
-      {v.history.length ? (
-        <Panel className="grid gap-1.5 p-4 text-sm">
-          {v.history.map((h, i) => (
-            <div key={i} className="flex flex-wrap items-center gap-2">
-              <span className="w-24 shrink-0 text-xs text-muted-foreground tabular-nums">{clock(h.at)}</span>
-              <StatusBadge tone={h.ok ? "ok" : "bad"}>{h.ok ? "恢复" : "告警"}</StatusBadge>
-              <span className="min-w-0">{h.title}</span>
-              {h.skipped && <span className="text-xs text-muted-foreground">（没发：{h.skipped}）</span>}
-              <span className="ml-auto text-xs text-muted-foreground">{nameOf(h.source)}</span>
-            </div>
-          ))}
-        </Panel>
-      ) : (
-        <Empty>最近 7 天没有推送</Empty>
-      )}
     </>
   );
 }

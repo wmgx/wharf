@@ -6,7 +6,7 @@ import { api, usePoll } from "@/api";
 import { SectionTitle, StatusBadge } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import type { SecretView } from "@/types";
-import { SetSecret } from "./secrets";
+import { SetSecret } from "../secrets";
 
 const WEBHOOK = "NOTIFY_FEISHU_WEBHOOK";
 const SIGN = "NOTIFY_FEISHU_SECRET";
