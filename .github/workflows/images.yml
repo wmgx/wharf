@@ -57,12 +57,11 @@ jobs:
           build-args: WHARF_BUILD=${{ steps.tag.outputs.build }}
           cache-from: type=gha
 
-  # 用刚推上去的镜像跑端到端验证。观察期内失败不让整个 workflow 变红。
+  # 用刚推上去的镜像跑端到端验证。失败时 workflow 变红；镜像已经推送，红了不要执行 wharf upgrade。
   e2e:
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    continue-on-error: true
     permissions:
       contents: read
       packages: read

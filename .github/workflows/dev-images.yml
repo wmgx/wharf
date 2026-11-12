@@ -1,10 +1,10 @@
-# 开发分支 p11-dev：构建 wharf-core / wharf-agent 镜像，只打 dev-<短提交号> 标签。
+# 开发分支（p12-dev 等）：构建 wharf-core / wharf-agent 镜像，只打 dev-<短提交号> 标签。
 # 不打 latest，不发布 CLI（core 镜像里自带 wharf CLI），线上不会拉到这些镜像。
 name: dev-images
 
 on:
   push:
-    branches: [p11-dev]
+    branches: [p12-dev]
   workflow_dispatch:
 
 permissions:
