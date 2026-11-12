@@ -20,7 +20,7 @@ const LAYER: Record<string, string> = {
   config: "配置",
   volume: "数据卷",
   container: "容器",
-  gateway: "网关",
+  gateway: "入口",
   dns: "DNS",
   tunnel: "隧道",
   edge: "边缘",
@@ -168,7 +168,7 @@ function Steps({ stage }: { stage: Stage }) {
         <li key={label} className={cn("flex flex-1 items-center gap-2", i > at ? "text-muted-foreground" : "text-foreground", i === at && "font-medium")}>
           <span
             className={cn(
-              "grid size-5 place-items-center rounded-full border text-[10px]",
+              "grid size-5 place-items-center rounded-full border text-xs",
               i < at && "border-success bg-success text-white",
               i === at && "border-primary text-primary",
             )}
@@ -201,7 +201,7 @@ function PlanReview({ plan, confirmed, setConfirmed }: { plan: Plan; confirmed: 
             <div className="grid grid-cols-[44px_1fr_auto] items-center gap-3 px-3.5 py-2.5" key={it.id}>
               <span className={cn("text-xs font-medium", ACTION[it.action].cls)}>{ACTION[it.action].text}</span>
               <div className="min-w-0">
-                <div className="truncate font-mono text-[13px]">
+                <div className="truncate font-mono text-xs">
                   {it.address}
                   <span className="ml-2 font-sans text-xs text-muted-foreground">{LAYER[it.layer] ?? it.layer}</span>
                 </div>
@@ -227,7 +227,7 @@ function PlanReview({ plan, confirmed, setConfirmed }: { plan: Plan; confirmed: 
             {needs.map((a) => (
               <label className="flex cursor-pointer items-center gap-2.5 text-sm" key={a}>
                 <Checkbox checked={confirmed.has(a)} onCheckedChange={() => toggle(a)} />
-                <span className="font-mono text-[13px]">{a}</span>
+                <span className="font-mono text-xs">{a}</span>
                 <span className="text-xs text-muted-foreground">
                   {[...new Set(plan.items.filter((i) => i.address === a).flatMap((i) => (i.impacts ?? []).map((k) => IMPACT[k]?.text)))]
                     .filter(Boolean)
@@ -298,7 +298,7 @@ function RunView({ run }: { run: Run }) {
               {s.title}
             </div>
             {!!s.log?.length && (
-              <pre className="mt-2 ml-6.5 max-h-44 overflow-auto rounded-md border bg-muted/40 px-2.5 py-2 font-mono text-[11px] leading-relaxed whitespace-pre-wrap break-all text-muted-foreground">
+              <pre className="mt-2 ml-6.5 max-h-44 overflow-auto rounded-md border bg-muted/40 px-2.5 py-2 font-mono text-xs leading-relaxed whitespace-pre-wrap break-all text-muted-foreground">
                 {s.log.slice(-40).join("\n")}
               </pre>
             )}

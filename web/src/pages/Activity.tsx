@@ -1,3 +1,4 @@
+import { Row, Rows } from "@/components/kit";
 import { ChevronRightIcon, TerminalIcon } from "lucide-react";
 import { usePoll } from "@/api";
 import { useActions } from "@/components/actions";
@@ -53,17 +54,13 @@ function Runs() {
   if (!data) return <CardsSkeleton count={2} />;
   if (data.length === 0) return <Empty>还没有执行过改动</Empty>;
   return (
-    <div className="divide-y overflow-hidden rounded-xl border bg-card shadow-xs">
+    <Rows>
       {data.map((r) => {
         const [tone, text] = RUN_TONE[r.status];
         const title = runTitle(r);
         const failed = r.steps.find((s) => s.status === "failed");
         return (
-          <button
-            key={r.run_id}
-            onClick={() => actions.view(r.run_id, title)}
-            className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-accent/50"
-          >
+          <Row key={r.run_id} onClick={() => actions.view(r.run_id, title)}>
             <StatusBadge tone={tone}>{text}</StatusBadge>
             <div className="grid min-w-0 flex-1 gap-0.5">
               <span className="truncate text-sm font-medium">{title}</span>
@@ -72,10 +69,10 @@ function Runs() {
               </span>
             </div>
             <ChevronRightIcon className="size-4 shrink-0 text-muted-foreground" />
-          </button>
+          </Row>
         );
       })}
-    </div>
+    </Rows>
   );
 }
 
@@ -85,11 +82,11 @@ function Shell() {
   if (!data) return <CardsSkeleton count={2} />;
   if (data.length === 0) return <Empty>还没有在宿主机上开过终端或执行过命令</Empty>;
   return (
-    <div className="divide-y overflow-hidden rounded-xl border bg-card shadow-xs">
+    <Rows>
       {data.map((l) => {
         const ok = !l.error && (l.exit_code == null || l.exit_code === 0);
         return (
-          <div key={l.id} className="flex items-start gap-3 px-4 py-3">
+          <Row key={l.id} className="items-start">
             <TerminalIcon className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
             <div className="grid min-w-0 flex-1 gap-0.5">
               <span className="truncate font-mono text-sm">{l.command ?? (l.kind === "terminal" ? "打开终端" : l.kind)}</span>
@@ -98,9 +95,9 @@ function Shell() {
               </span>
             </div>
             {l.exit_code != null && <StatusBadge tone={ok ? "ok" : "bad"}>{`退出 ${l.exit_code}`}</StatusBadge>}
-          </div>
+          </Row>
         );
       })}
-    </div>
+    </Rows>
   );
 }

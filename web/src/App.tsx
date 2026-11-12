@@ -74,6 +74,7 @@ const TITLES: [string, string][] = [
   ["/tasks", "定时任务"],
   ["/data", "数据与备份"],
   ["/activity", "活动"],
+  ["/alerts", "告警"],
   ["/settings", "设置"],
   ["/", "首页"],
 ];

@@ -1,3 +1,4 @@
+import { ConfirmDialog } from "@/components/kit";
 import { useSearchParams } from "react-router-dom";
 import { useActions } from "@/components/actions";
 import { ArrowUpCircleIcon } from "lucide-react";
@@ -26,7 +27,6 @@ import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -116,13 +116,10 @@ export function Settings() {
           <TabsTrigger value="backup">控制面</TabsTrigger>
         </TabsList>
         <TabsContent value="accounts" className="mt-4">
-      <div className="mb-3 flex items-center justify-between [&>h2]:mb-0">
-        <SectionTitle count={data?.length}>厂商账号</SectionTitle>
-        <Button variant="ghost" size="sm" onClick={() => setAdding(true)}>
+      <SectionTitle count={data?.length} action={ <Button variant="ghost" size="sm" onClick={() => setAdding(true)}>
           <PlusIcon />
           添加
-        </Button>
-      </div>
+        </Button> }>厂商账号</SectionTitle>
       <ErrorNote error={error} />
       {!data ? (
         <CardsSkeleton count={1} />
@@ -238,25 +235,7 @@ export function Settings() {
           }}
         />
       )}
-      <Dialog open={!!removing} onOpenChange={(o) => !o && setRemoving(null)}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>删除账号 {removing}？</DialogTitle>
-            <DialogDescription>只删除 Wharf 保存的 token</DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="ghost" onClick={() => setRemoving(null)}>
-              取消
-            </Button>
-            <Button
-              variant="destructive"
-              onClick={() => removing && remove(removing)}
-            >
-              删除
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <ConfirmDialog open={!!removing} title={`删除账号 ${removing}？`} onCancel={() => setRemoving(null)} onConfirm={() => removing && remove(removing)}>只删除 Wharf 保存的 token。</ConfirmDialog>
     </>
   );
 }

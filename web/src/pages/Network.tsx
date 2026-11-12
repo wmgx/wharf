@@ -1,10 +1,11 @@
+import { Panel, Tip } from "@/components/kit";
 import { CheckIcon, ChevronDownIcon, MinusIcon, RadarIcon, XIcon } from "lucide-react";
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { toast } from "sonner";
 import { api, usePoll } from "@/api";
 import { useActions } from "@/components/actions";
-import { ago, CardsSkeleton, ErrorNote, MODES } from "@/components/common";
+import { ago, CardsSkeleton, ErrorNote, MODES, SectionTitle } from "@/components/common";
 import { TailscaleSetup } from "@/components/tailscale-setup";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -89,7 +90,7 @@ export function NetworkPanel() {
         <CardsSkeleton count={1} />
       ) : (
         <div className="flex flex-col gap-6">
-          <div className="rounded-xl border bg-card shadow-xs">
+          <Panel>
             <Table>
               <TableHeader>
                 <TableRow>
@@ -118,11 +119,11 @@ export function NetworkPanel() {
                 ))}
               </TableBody>
             </Table>
-          </div>
+          </Panel>
 
           <div className="flex flex-col gap-2">
-            <h2 className="text-sm font-medium text-muted-foreground">连通和链路质量（行 → 列，每 5 分钟测一次）</h2>
-            <div className="overflow-x-auto rounded-xl border bg-card shadow-xs">
+            <SectionTitle>连通和链路质量（行 → 列，每 5 分钟测一次）</SectionTitle>
+            <Panel className="overflow-x-auto">
               <Table>
                 <TableHeader>
                   <TableRow>
@@ -148,7 +149,7 @@ export function NetworkPanel() {
                   ))}
                 </TableBody>
               </Table>
-            </div>
+            </Panel>
             {data.relays?.map((h) => (
               <p key={`${h.from}-${h.to}`} className="text-sm text-warning">
                 {h.from} → {h.to} 直连丢包 {h.direct_loss.toFixed(0)}%，经 {h.via} 中转约 {h.via_loss.toFixed(0)}%
@@ -165,24 +166,24 @@ function Cell({ self, r, from, to }: { self: boolean; r?: NetworkView["reach"][n
   if (self) return <span className="text-muted-foreground">·</span>;
   if (!r)
     return (
-      <span title="未探测" className="inline-flex text-muted-foreground">
+      <Tip text="未探测"><span className="inline-flex text-muted-foreground">
         <MinusIcon className="size-4" />
-      </span>
+      </span></Tip>
     );
   if (r.stale)
     return (
-      <span title={`${r.ok ? "通" : "不通"} · ${ago(r.checked_at)}，已过期`} className="inline-flex text-muted-foreground">
+      <Tip text={`${r.ok ? "通" : "不通"} · ${ago(r.checked_at)}，已过期`}><span className="inline-flex text-muted-foreground">
         {r.ok ? <CheckIcon className="size-4" /> : <XIcon className="size-4" />}
-      </span>
+      </span></Tip>
     );
   return r.ok ? (
-    <span title={`通 · ${ago(r.checked_at)}`} className="inline-flex text-success">
+    <Tip text={`通 · ${ago(r.checked_at)}`}><span className="inline-flex text-success">
       <CheckIcon className="size-4" />
-    </span>
+    </span></Tip>
   ) : (
-    <span title={`不通：${from} 不能迁移到 ${to}，也不能备份到 ${to} · ${ago(r.checked_at)}`} className="inline-flex text-destructive">
+    <Tip text={`不通：${from} 不能迁移到 ${to}，也不能备份到 ${to} · ${ago(r.checked_at)}`}><span className="inline-flex text-destructive">
       <XIcon className="size-4" />
-    </span>
+    </span></Tip>
   );
 }
 
@@ -190,9 +191,9 @@ export function Quality({ l }: { l?: NonNullable<NetworkView["links"]>[number] }
   if (!l) return null;
   const tone = l.loss >= 20 ? "text-destructive" : l.loss > 0 ? "text-warning" : "text-muted-foreground";
   return (
-    <div className={`text-xs tabular-nums ${tone}`} title={`${ago(l.at)}测量`}>
+    <Tip text={`${ago(l.at)}测量`}><div className={`text-xs tabular-nums ${tone}`}>
       {l.ms === undefined ? "-" : `${l.ms.toFixed(0)}ms`}
       {l.loss > 0 && ` · ${l.loss.toFixed(0)}%`}
-    </div>
+    </div></Tip>
   );
 }

@@ -1,3 +1,4 @@
+import { ConfirmDialog, Tip } from "@/components/kit";
 import { BoxIcon, DownloadIcon, LayersIcon, ServerIcon, Trash2Icon } from "lucide-react";
 import { toast } from "sonner";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -126,9 +127,9 @@ function UnmanagedRow({ item, onImport, onRemove }: { item: Unmanaged; onImport:
         <DownloadIcon />
         导入
       </Button>
-      <Button variant="ghost" size="icon-xs" className="text-destructive" title="删除" onClick={onRemove}>
+      <Tip text="删除"><Button aria-label="删除" variant="ghost" size="icon-xs" className="text-destructive" onClick={onRemove}>
         <Trash2Icon />
-      </Button>
+      </Button></Tip>
     </div>
   );
 }
@@ -208,7 +209,7 @@ function ImportDialog({ item, onClose }: { item: Unmanaged; onClose: () => void 
             取消
           </Button>
           <Button disabled={!preview || stale || loading} onClick={submit}>
-            生成计划
+            预览改动
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -244,13 +245,7 @@ function RemoveDialog({ item, onClose, onDone }: { item: Unmanaged; onClose: () 
     }
   };
   return (
-    <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent aria-describedby={undefined}>
-        <DialogHeader>
-          <DialogTitle>
-            删除 {item.server} 上的 {target(item)}？
-          </DialogTitle>
-        </DialogHeader>
+    <ConfirmDialog open title={`删除 ${item.server} 上的 ${target(item)}？`} typed={target(item)} busy={busy} confirmText={volumes ? "删除容器和数据卷" : "删除容器"} onCancel={onClose} onConfirm={remove}>
         <div className="grid gap-3 text-sm">
           <p className="text-muted-foreground">
             {item.project ? `compose 项目里的 ${item.containers.length} 个容器` : "这个容器"}会被强制停止并删除（docker rm -f），镜像保留。
@@ -268,15 +263,6 @@ function RemoveDialog({ item, onClose, onDone }: { item: Unmanaged; onClose: () 
             <p className="text-xs text-muted-foreground">没有具名数据卷。挂载的宿主机目录不会删。</p>
           )}
         </div>
-        <DialogFooter>
-          <Button variant="ghost" onClick={onClose}>
-            取消
-          </Button>
-          <Button variant="destructive" disabled={busy} onClick={remove}>
-            {busy ? "删除中…" : volumes ? "删除容器和数据卷" : "删除容器"}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+    </ConfirmDialog>
   );
 }

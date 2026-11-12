@@ -285,7 +285,7 @@ function Form({ onClose }: { onClose: () => void }) {
           取消
         </Button>
         <Button disabled={!ready} onClick={submit}>
-          生成计划
+          预览改动
           <ArrowRightIcon />
         </Button>
       </SheetFooter>

@@ -1,3 +1,4 @@
+import { Panel } from "@/components/kit";
 import { ArrowRightIcon, ArrowUpCircleIcon, CheckIcon, ChevronRightIcon, CloudIcon, LayoutGridIcon, ListIcon, PlusIcon } from "lucide-react";
 import { useState, type CSSProperties } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
@@ -174,7 +175,7 @@ function UpdatesBanner({ status }: { status: Status }) {
           })
         }
       >
-        预览更新
+        预览改动
       </Button>
     </div>
   );
@@ -286,7 +287,7 @@ function Onboarding({ status }: { status: Status }) {
   const next = steps.findIndex((s) => !s.done);
 
   return (
-    <section className="mb-8 rounded-xl border bg-card p-4 shadow-xs">
+    <Panel className="mb-8 p-4">
       <div className="mb-3 flex items-baseline justify-between gap-2">
         <h2 className="font-medium">开始使用</h2>
         <span className="text-xs text-muted-foreground">还剩 {left} 步</span>
@@ -311,6 +312,6 @@ function Onboarding({ status }: { status: Status }) {
           </li>
         ))}
       </ol>
-    </section>
+    </Panel>
   );
 }

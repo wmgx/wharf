@@ -6,7 +6,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { useStatus } from "@/status";
 import { routeTone } from "./health";
 
-/** 顶栏的"需要注意"：点开看完整列表，提到的服务可以直接跳过去。 */
+/** 顶栏的"待处理"：点开看完整列表，提到的服务可以直接跳过去。 */
 export function Problems() {
   const { status } = useStatus();
   const actions = useActions();
@@ -31,11 +31,11 @@ export function Problems() {
       <PopoverTrigger asChild>
         <Button variant="ghost" size="sm" className="h-8 gap-1.5 bg-warning/10 text-warning hover:bg-warning/15 hover:text-warning">
           <TriangleAlertIcon />
-          <span>{problems.length + notes.length}<span className="hidden sm:inline"> 项需要注意</span></span>
+          <span>{problems.length + notes.length}<span className="hidden sm:inline"> 项待处理</span></span>
         </Button>
       </PopoverTrigger>
       <PopoverContent align="end" className="w-[min(24rem,calc(100vw-2rem))] p-0">
-        <div className="border-b px-4 py-3 text-sm font-medium">需要注意</div>
+        <div className="border-b px-4 py-3 text-sm font-medium">待处理</div>
         <ul className="max-h-80 divide-y overflow-auto">
           {problems.map((p) => {
             const svc = mentioned(p);

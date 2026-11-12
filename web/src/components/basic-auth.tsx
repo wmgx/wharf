@@ -96,7 +96,7 @@ export function BasicAuthDialog({ hostname, enable, onClose, onSaved }: { hostna
               取消
             </Button>
             <Button type="submit" disabled={saving || !authReady(user, password)}>
-              {enable ? "保存并生成计划" : "保存并更新网关"}
+              {enable ? "预览改动" : "保存并更新入口"}
             </Button>
           </DialogFooter>
         </form>
