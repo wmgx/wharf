@@ -2463,8 +2463,11 @@ mod tests {
       "a.example.com".into(),
       RouteRow {
         id: "a".into(),
-        spec: serde_json::from_value(json!({"service": "app"}))
-          .unwrap(),
+        spec: serde_json::from_value(json!({
+          "hostname": "a.example.com",
+          "service": "app"
+        }))
+        .unwrap(),
         version: 1,
       },
     );
@@ -2473,6 +2476,7 @@ mod tests {
       RouteRow {
         id: "b".into(),
         spec: serde_json::from_value(json!({
+          "hostname": "b.example.com",
           "redirect": "https://a.example.com"
         }))
         .unwrap(),
