@@ -16,6 +16,8 @@ import { CertDays, diagnosisOf } from "@/components/health";
 import { useStatus } from "@/status";
 import type { AccountView, GatewaySpec, GatewayTls, GatewayView } from "@/types";
 
+import { GatewayErrorPage } from "./gateway-error-page";
+
 type GatewayKind = GatewaySpec["kind"];
 
 const TLS_TEXT: Record<GatewayTls, string> = {
@@ -164,6 +166,8 @@ function GatewayDetail({ g, onDone }: { g: GatewayView; onDone: () => void }) {
               <dd className="font-mono text-[13px]">
                 HTTP {g.spec.http_port ?? 80} · HTTPS {g.spec.https_port ?? 443}
               </dd>
+              <dt className="text-muted-foreground">错误页</dt>
+              <dd><GatewayErrorPage g={g} /></dd>
             </>
           )}
         </dl>
