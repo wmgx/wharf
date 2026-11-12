@@ -10,7 +10,7 @@ import { useStatus } from "@/status";
 import { ServerDetail } from "./ServerDetail";
 
 /** 旧地址 `/servers?tab=x` 指向的页面，现在是独立页面。 */
-const OLD_TABS: Record<string, string> = { entries: "/entries", network: "/network", topology: "/network", data: "/data" };
+const OLD_TABS: Record<string, string> = { entries: "/domains?tab=entries", network: "/network", topology: "/network", data: "/data" };
 
 /** 服务器：左边一列机器，贴着侧边栏；右边是选中那台的详情。 */
 export function Servers() {
@@ -23,8 +23,12 @@ export function Servers() {
 
   if (old) {
     params.delete("tab");
+    if (old === "/domains?tab=entries" && params.has("open")) {
+      params.set("entry", params.get("open")!);
+      params.delete("open");
+    }
     const q = params.toString();
-    return <Navigate to={q ? `${old}?${q}` : old} replace />;
+    return <Navigate to={q ? `${old}${old.includes("?") ? "&" : "?"}${q}` : old} replace />;
   }
   // 没选机器：默认打开第一台。
   if (!name && status?.servers.length) {

@@ -74,12 +74,15 @@ export function AddRoute({ service: fixed, open, onClose }: { service?: string; 
             登录保护
             <span className="text-xs text-muted-foreground">{entry.tunnel ? "隧道入口暂不支持" : "访问时要输入账号密码"}</span>
           </label>
-          <label className="flex cursor-pointer items-center gap-2.5 text-sm">
-            <Checkbox checked={tunnel} onCheckedChange={(v) => setTunnel(v === true)} />
-            总是走反向隧道
-            <span className="text-xs text-muted-foreground">默认自动：能直连就直连</span>
-          </label>
           {auth && <AuthFields user={user} password={password} onUser={setUser} onPassword={setPassword} />}
+          <details>
+            <summary className="cursor-pointer text-sm text-muted-foreground">更多</summary>
+            <label className="mt-3 flex cursor-pointer items-center gap-2.5 text-sm">
+              <Checkbox checked={tunnel} onCheckedChange={(v) => setTunnel(v === true)} />
+              总是走反向隧道
+              <span className="text-xs text-muted-foreground">默认自动：能直连就直连</span>
+            </label>
+          </details>
         </div>
         <DialogFooter>
           <Button variant="ghost" onClick={onClose}>

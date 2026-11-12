@@ -2,21 +2,10 @@ import { lazy, Suspense } from "react";
 import { PageHeader, SectionTitle } from "@/components/common";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Data } from "./Data";
-import { GatewaysPanel } from "./Gateways";
 import { NetworkPanel } from "./Network";
 
 // 拓扑图依赖的 @xyflow/react 比较大，只在打开网络页时加载。
 const Topology = lazy(() => import("./Topology").then((m) => ({ default: m.Topology })));
-
-/** 入口：域名从哪进来，以及每个入口上挂的域名。 */
-export function Entries() {
-  return (
-    <>
-      <PageHeader title="入口" description="域名从哪进来：有公网 IP 的机器直连，或 Cloudflare 隧道" />
-      <GatewaysPanel />
-    </>
-  );
-}
 
 /** 网络：机器之间怎么连，以及入口、服务器、服务的连接图。 */
 export function NetworkPage() {

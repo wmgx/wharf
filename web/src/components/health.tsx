@@ -1,4 +1,4 @@
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { Tip } from "@/components/kit";
 import type { CheckStatus, RouteDiagnosis, ServiceView, Status } from "@/types";
 import { Dot, serviceTone, type Tone } from "./common";
 
@@ -20,7 +20,7 @@ export function diagnosisOf(status: Status | null | undefined, hostname: string)
 export function CertDays({ d }: { d?: RouteDiagnosis }) {
   if (!d?.cert_expires) return null;
   const days = Math.floor((new Date(d.cert_expires).getTime() - Date.now()) / 86400000);
-  return <span className={days < 14 ? "text-warning" : "text-muted-foreground"}>证书剩 {days} 天</span>;
+  return <span className={days < 14 ? "text-warning" : "text-muted-foreground"}>剩 {days} 天</span>;
 }
 
 /** 一个域名能不能打开：第一个不通的层就是原因。 */
@@ -50,19 +50,9 @@ export function Lamps({ d }: { d?: RouteDiagnosis }) {
   return (
     <span className="inline-flex items-center gap-1">
       {d.checks.map((c, i) => (
-        <Tooltip key={`${c.layer}-${i}`}>
-          <TooltipTrigger asChild>
-            <span className="grid size-4 place-items-center">
-              <Dot tone={TONE[c.status]} />
-            </span>
-          </TooltipTrigger>
-          <TooltipContent className="max-w-80">
-            <div className="font-medium">
-              {LAYER[c.layer] ?? c.layer} · {c.subject}
-            </div>
-            <div className="opacity-80">{c.detail}</div>
-          </TooltipContent>
-        </Tooltip>
+        <Tip key={`${c.layer}-${i}`} text={`${LAYER[c.layer] ?? c.layer} · ${c.subject}：${c.detail}`}>
+          <span className="grid size-4 place-items-center"><Dot tone={TONE[c.status]} /></span>
+        </Tip>
       ))}
     </span>
   );

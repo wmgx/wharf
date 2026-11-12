@@ -121,7 +121,7 @@ function build(status: Status, net: NetworkView | null): { nodes: Node[]; edges:
         type: "box",
         parentId: `srv:${srv.name}`,
         position: { x: 20 + i * COL, y: 44 },
-        data: { kind: "入口", name: g.name, tone: liveTone(g.live).tone, to: "/entries" },
+        data: { kind: "入口", name: g.name, tone: liveTone(g.live).tone, to: "/domains?tab=entries" },
       });
     });
     svcs.forEach((s, i) => {
@@ -399,7 +399,7 @@ function NodePanel({ status, sel, onClose }: { status: Status; sel: string; onCl
       ["域名", String(status.routes.filter((r) => r.gateway === g.name).length)],
     ];
     buttons = (
-      <Button size="sm" variant="outline" onClick={() => nav("/entries")}>
+      <Button size="sm" variant="outline" onClick={() => nav("/domains?tab=entries")}>
         打开
       </Button>
     );

@@ -297,7 +297,7 @@ export function ServerDetail() {
               {gateways.map((g) => (
                 <Link
                   key={g.name}
-                  to={`/entries?open=${g.name}`}
+                  to={`/domains?tab=entries&entry=${g.name}`}
                   className="rounded-lg border border-dashed bg-card px-3 py-1.5 text-sm hover:bg-accent"
                 >
                   入口 {g.name}
