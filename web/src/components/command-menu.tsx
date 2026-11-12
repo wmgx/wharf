@@ -118,7 +118,7 @@ export function CommandMenu({ onLogout }: { onLogout: () => void }) {
         open={open}
         onOpenChange={setOpen}
         title="命令面板"
-        description="搜索服务、网关，或直接执行操作"
+        description="搜索服务、入口，或直接执行操作"
       >
         <CommandInput
           placeholder="输入服务名、页面或操作，例如「回滚 hello」"
@@ -223,7 +223,7 @@ export function CommandMenu({ onLogout }: { onLogout: () => void }) {
                 <WaypointsIcon />
                 {g.name}
                 <span className="text-xs text-muted-foreground">
-                  网关 · {g.spec.server}
+                  入口 · {g.spec.server}
                 </span>
               </CommandItem>
             ))}
@@ -254,7 +254,7 @@ export function CommandMenu({ onLogout }: { onLogout: () => void }) {
               >
                 <CloudIcon />
                 {e.name}
-                <span className="text-xs text-muted-foreground">边缘应用</span>
+                <span className="text-xs text-muted-foreground">Cloudflare 应用</span>
               </CommandItem>
             ))}
             {showOps &&
@@ -285,7 +285,7 @@ export function CommandMenu({ onLogout }: { onLogout: () => void }) {
                   onSelect={() => run(() => nav("/settings?tab=secrets"))}
                 >
                   <KeyRoundIcon />
-                  <span className="font-mono text-[13px]">{s.name}</span>
+                  <span className="font-mono text-xs">{s.name}</span>
                   <span className="text-xs text-muted-foreground">密钥</span>
                 </CommandItem>
               ))}
@@ -382,9 +382,9 @@ export function CommandMenu({ onLogout }: { onLogout: () => void }) {
                       ),
                     op(
                       `fix-${s.name}`,
-                      `检查并修复 重新部署 redeploy ${s.name}`,
+                      `重新部署 修复 redeploy ${s.name}`,
                       <WrenchIcon />,
-                      `检查并修复 ${s.name}`,
+                      `重新部署 ${s.name}`,
                       () => actions.redeploy(s),
                     ),
                     op(

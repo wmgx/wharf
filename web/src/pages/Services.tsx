@@ -1,3 +1,4 @@
+import { Panel } from "@/components/kit";
 import { splitNote } from "@/lib/vault";
 import { ArrowRightLeftIcon, CloudIcon, EllipsisIcon, HistoryIcon, LockIcon, PlayIcon, RefreshCwIcon, RotateCwIcon, ScrollTextIcon, SquareIcon, Trash2Icon } from "lucide-react";
 import { useNavigate } from "react-router-dom";
@@ -11,7 +12,7 @@ import type { ServiceView, Status } from "@/types";
 import { serviceTruth } from "@/components/health";
 import { KIND_NAME, edgeSourceLabel, edgeTone } from "./edge";
 
-/** 列表里的一行：服务器上的服务和 Cloudflare 上的边缘应用放在一起。 */
+/** 列表里的一行：服务器上的服务和 Cloudflare 应用放在一起。 */
 interface Row {
   name: string;
   to: string;
@@ -47,7 +48,7 @@ export function ServiceTable({ status, server }: { status: Status; server?: stri
   if (rows.length === 0) return <Empty>这台服务器上还没有服务。</Empty>;
   return (
     <>
-      <div className="hidden overflow-hidden rounded-xl border bg-card shadow-xs md:block">
+      <Panel className="hidden md:block">
         <Table>
           <TableHeader className="bg-muted/50">
             <TableRow>
@@ -87,10 +88,10 @@ export function ServiceTable({ status, server }: { status: Status; server?: stri
             ))}
           </TableBody>
         </Table>
-      </div>
+      </Panel>
       <div className="grid gap-2 md:hidden">
         {rows.map((r) => (
-          <div key={r.to} className="flex cursor-pointer items-start gap-2 rounded-xl border bg-card p-3 shadow-xs" {...clickable({ to: r.to })}>
+          <div key={r.to} className="cursor-pointer" {...clickable({ to: r.to })}><Panel className="flex items-start gap-2 p-3">
             <div className="grid min-w-0 flex-1 gap-1.5">
               <div className="flex items-center gap-1.5 font-medium">
                 {!r.svc && <CloudIcon className="size-3.5 text-muted-foreground" />}
@@ -109,7 +110,7 @@ export function ServiceTable({ status, server }: { status: Status; server?: stri
               )}
             </div>
             <div onClick={(e) => e.stopPropagation()}>{r.svc && <RowMenu svc={r.svc} />}</div>
-          </div>
+          </Panel></div>
         ))}
       </div>
     </>
@@ -154,7 +155,7 @@ function RowMenu({ svc }: { svc: ServiceView }) {
         </DropdownMenuItem>
         <DropdownMenuItem onSelect={() => actions.rollback(svc.name)}>
           <HistoryIcon />
-          回滚到上一个版本
+          回到上一个版本
         </DropdownMenuItem>
         <DropdownMenuItem onSelect={() => actions.move(svc)}>
           <ArrowRightLeftIcon />

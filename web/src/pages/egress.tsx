@@ -1,3 +1,4 @@
+import { Panel } from "@/components/kit";
 import { GlobeIcon } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
@@ -35,7 +36,7 @@ export function Egress() {
     <>
       <SectionTitle>控制面访问外网</SectionTitle>
       {data && (
-        <div className="flex flex-wrap items-center gap-3 rounded-xl border bg-card p-4 shadow-xs">
+        <Panel className="flex flex-wrap items-center gap-3 p-4">
           <span className="grid size-9 place-items-center rounded-lg border bg-muted text-muted-foreground">
             <GlobeIcon className="size-4" />
           </span>
@@ -61,7 +62,7 @@ export function Egress() {
               onChange={(v) => !saving && v !== current && save(v)}
             />
           </div>
-        </div>
+        </Panel>
       )}
     </>
   );

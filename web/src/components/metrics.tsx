@@ -58,10 +58,7 @@ export function MetricsPanel({ subject, kind, title = "资源" }: { subject: str
 
   return (
     <>
-      <div className={`${title ? "mt-8" : ""} mb-3 flex items-center justify-between [&>h2]:my-0`}>
-        {title ? <SectionTitle>{title}</SectionTitle> : <span />}
-        <Segmented value={range} options={RANGES} onChange={setRange} />
-      </div>
+      {title ? <SectionTitle action={<Segmented value={range} options={RANGES} onChange={setRange} />}>{title}</SectionTitle> : <div className="mb-3 flex justify-end"><Segmented value={range} options={RANGES} onChange={setRange} /></div>}
       <ErrorNote error={error} />
       <div className="grid gap-3 md:grid-cols-2">
         <Chart title="CPU" span={span} gap={gap} max={kind === "host" ? 100 : undefined} format={pct} lines={[{ label: "CPU", points: get("cpu"), color: "var(--primary)" }]} />
@@ -219,7 +216,7 @@ function Chart({
           ))}
           <line x1={0} x2={W} y1={y(0)} y2={y(0)} className="stroke-border" vectorEffect="non-scaling-stroke" />
           {empty && (
-            <text x={W / 2} y={H / 2} textAnchor="middle" className="fill-muted-foreground text-[11px]" style={{ fontSize: 11 }}>
+            <text x={W / 2} y={H / 2} textAnchor="middle" className="fill-muted-foreground text-xs" style={{ fontSize: 12 }}>
               没有数据
             </text>
           )}
@@ -232,7 +229,7 @@ function Chart({
           )}
           {hover != null && <line x1={hover} x2={hover} y1={PAD.top} y2={H - PAD.bottom} className="stroke-muted-foreground/50" vectorEffect="non-scaling-stroke" />}
         </svg>
-        <div className="mt-1 flex justify-between font-mono text-[10px] text-muted-foreground">
+        <div className="mt-1 flex justify-between font-mono text-xs text-muted-foreground">
           <span>{clock(from, to - from)}</span>
           <span>{empty ? "" : `最高 ${format(top)}`}</span>
           <span>现在</span>

@@ -1,3 +1,4 @@
+import { Tip } from "@/components/kit";
 import { Dot, ago } from "@/components/common";
 import type { ProbeView } from "@/types";
 
@@ -11,16 +12,13 @@ export function Probe({ probe }: { probe?: ProbeView }) {
   const cert =
     probe.cert_days === undefined ? "" : ` · 证书剩 ${probe.cert_days} 天`;
   return (
-    <span
-      className="inline-flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground"
-      title={`${ago(new Date(probe.at).toISOString())}探测：${text}${cert}`}
-    >
+    <Tip text={`${ago(new Date(probe.at).toISOString())}探测：${text}${cert}`}><span className="inline-flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
       <Dot tone={tone} />
       {!probe.ok && (
         <span className={probe.fails >= 3 ? "text-destructive" : ""}>
           {text}
         </span>
       )}
-    </span>
+    </span></Tip>
   );
 }

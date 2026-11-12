@@ -1,3 +1,4 @@
+import { Panel } from "@/components/kit";
 import { RefreshCwIcon } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
@@ -48,20 +49,16 @@ export function ServerDisk({ server, online }: { server: string; online: boolean
   };
   return (
     <div className="mb-6">
-      <div className="mb-3 flex flex-wrap items-center gap-2 [&>h2]:mb-0">
-        <SectionTitle>占用增长</SectionTitle>
-        <span className="text-xs text-muted-foreground">
+      <SectionTitle action={<div className="flex flex-wrap items-center gap-2"><span className="text-xs text-muted-foreground">
           {data?.measured_at ? `${ago(new Date(data.measured_at).toISOString())}测量，每天一次` : "每天测量一次"}
-        </span>
-        <Button variant="ghost" size="sm" className="ml-auto" disabled={busy || !online} onClick={measure}>
+        </span><Button variant="ghost" size="sm" className="ml-auto" disabled={busy || !online} onClick={measure}>
           <RefreshCwIcon className={busy ? "animate-spin" : undefined} />
           {busy ? "测量中，可能要几分钟…" : "立即测量"}
-        </Button>
-      </div>
+        </Button></div>}>占用增长</SectionTitle>
       {!data?.rows.length ? (
         <Empty>还没有测量过</Empty>
       ) : (
-        <div className="overflow-x-auto rounded-xl border bg-card">
+        <Panel className="overflow-x-auto">
           <Table>
             <TableHeader>
               <TableRow>
@@ -95,7 +92,7 @@ export function ServerDisk({ server, online }: { server: string; online: boolean
               ))}
             </TableBody>
           </Table>
-        </div>
+        </Panel>
       )}
     </div>
   );

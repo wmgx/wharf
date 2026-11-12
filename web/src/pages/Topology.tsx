@@ -1,3 +1,4 @@
+import { Facts, Panel } from "@/components/kit";
 import { Background, Controls, Handle, Position, ReactFlow, type Edge, type Node, type NodeChange, type NodeProps } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { ArrowUpCircleIcon, ExternalLinkIcon, LayoutGridIcon, PlayIcon, RotateCwIcon, SquareIcon, Trash2Icon, XIcon } from "lucide-react";
@@ -31,8 +32,8 @@ function BoxNode({ data }: NodeProps<Node<BoxData>>) {
       )}
     >
       <Handle type="target" position={Position.Top} style={{ opacity: 0 }} />
-      <div className="text-[10px] text-muted-foreground">{data.kind}</div>
-      <div className={cn("flex items-center gap-1.5 text-[13px] font-medium", data.cls === "route" && "font-mono text-xs font-normal")}>
+      <div className="text-xs text-muted-foreground">{data.kind}</div>
+      <div className={cn("flex items-center gap-1.5 text-sm font-medium", data.cls === "route" && "font-mono text-xs font-normal")}>
         {data.tone && <Dot tone={data.tone} />}
         {data.name}
       </div>
@@ -49,13 +50,13 @@ function GroupNode({ data }: NodeProps<Node<GroupData>>) {
       <Handle type="target" position={Position.Top} style={{ opacity: 0 }} />
       <Handle id="bs" type="source" position={Position.Bottom} style={{ opacity: 0 }} />
       <Handle id="bt" type="target" position={Position.Bottom} style={{ opacity: 0 }} />
-      <div className="absolute top-2.5 left-3.5 flex items-center gap-2 text-[13px] font-semibold">
+      <div className="absolute top-2.5 left-3.5 flex items-center gap-2 text-sm font-semibold">
         <Dot tone={data.tone} />
         {data.name}
-        <span className="font-mono text-[11px] font-normal text-muted-foreground">{data.sub}</span>
+        <span className="font-mono text-xs font-normal text-muted-foreground">{data.sub}</span>
       </div>
       {data.disk && (
-        <div className={cn("absolute right-3.5 bottom-2.5 font-mono text-[11px]", data.disk.low ? "text-warning" : "text-muted-foreground")}>
+        <div className={cn("absolute right-3.5 bottom-2.5 font-mono text-xs", data.disk.low ? "text-warning" : "text-muted-foreground")}>
           磁盘剩 {data.disk.text}
         </div>
       )}
@@ -120,7 +121,7 @@ function build(status: Status, net: NetworkView | null): { nodes: Node[]; edges:
         type: "box",
         parentId: `srv:${srv.name}`,
         position: { x: 20 + i * COL, y: 44 },
-        data: { kind: "网关", name: g.name, tone: liveTone(g.live).tone, to: "/entries" },
+        data: { kind: "入口", name: g.name, tone: liveTone(g.live).tone, to: "/entries" },
       });
     });
     svcs.forEach((s, i) => {
@@ -296,7 +297,7 @@ export function Topology() {
           </button>
         )}
       </div>
-      <div className="relative h-[calc(100svh-15rem)] min-h-[480px] overflow-hidden rounded-xl border bg-card shadow-xs">
+      <Panel className="relative h-[calc(100svh-15rem)] min-h-[480px]">
         {shown && (
           <ReactFlow
             nodes={shown.nodes}
@@ -321,14 +322,14 @@ export function Topology() {
             <Controls showInteractive={false} />
           </ReactFlow>
         )}
-        {status && sel && <Panel status={status} sel={sel} onClose={() => setSel(null)} />}
-      </div>
+        {status && sel && <NodePanel status={status} sel={sel} onClose={() => setSel(null)} />}
+      </Panel>
     </>
   );
 }
 
 /** 选中节点的信息和操作。 */
-function Panel({ status, sel, onClose }: { status: Status; sel: string; onClose: () => void }) {
+function NodePanel({ status, sel, onClose }: { status: Status; sel: string; onClose: () => void }) {
   const actions = useActions();
   const nav = useNavigate();
   const [kind, name] = [sel.slice(0, sel.indexOf(":")), sel.slice(sel.indexOf(":") + 1)];
@@ -395,7 +396,7 @@ function Panel({ status, sel, onClose }: { status: Status; sel: string; onClose:
     rows = [
       ["服务器", g.spec.server],
       ["状态", liveTone(g.live).text],
-      ["路由", String(status.routes.filter((r) => r.gateway === g.name).length)],
+      ["域名", String(status.routes.filter((r) => r.gateway === g.name).length)],
     ];
     buttons = (
       <Button size="sm" variant="outline" onClick={() => nav("/entries")}>
@@ -407,7 +408,7 @@ function Panel({ status, sel, onClose }: { status: Status; sel: string; onClose:
     if (!r) return null;
     rows = [
       ["服务", r.spec.service ?? "-"],
-      ["网关", r.gateway ?? "-"],
+      ["入口", r.gateway ?? "-"],
     ];
     buttons = (
       <Button size="sm" variant="outline" asChild>
@@ -429,14 +430,7 @@ function Panel({ status, sel, onClose }: { status: Status; sel: string; onClose:
         </button>
       </div>
       {rows.length > 0 && (
-        <dl className="grid grid-cols-[4rem_1fr] gap-y-1 text-xs">
-          {rows.map(([k, v]) => (
-            <div key={k} className="contents">
-              <dt className="text-muted-foreground">{k}</dt>
-              <dd className="truncate font-mono">{v}</dd>
-            </div>
-          ))}
-        </dl>
+        <Facts items={rows.map(([k, v]) => [k, <span className="truncate font-mono text-xs">{v}</span>])} />
       )}
       {buttons && <div className="mt-3 flex flex-wrap gap-2">{buttons}</div>}
     </div>

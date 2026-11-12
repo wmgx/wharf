@@ -86,7 +86,7 @@ export function AddRoute({ service: fixed, open, onClose }: { service?: string; 
             取消
           </Button>
           <Button disabled={!service || !hostname.trim() || !entry.ready || (auth && !authReady(user, password))} onClick={submit}>
-            生成计划
+            预览改动
           </Button>
         </DialogFooter>
       </DialogContent>
