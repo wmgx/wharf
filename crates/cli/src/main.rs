@@ -691,7 +691,7 @@ pub enum GatewayCmd {
     https_port: Option<u16>,
     #[arg(long)]
     email: Option<String>,
-    /// 镜像：caddy 默认 caddy:2，cloudflare_tunnel 默认 cloudflare/cloudflared。
+    /// 镜像：caddy 默认 Wharf 自建的 wharf-caddy，cloudflare_tunnel 默认 cloudflare/cloudflared。
     #[arg(long)]
     image: Option<String>,
     /// 证书方式：auto（公网签证书）、internal（自签）、off（只走 HTTP，内网用）。
