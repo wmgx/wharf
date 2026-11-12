@@ -11,7 +11,7 @@ use std::{
 use wharf_api_types::{
   agent::{AgentOp, HttpCheck, HttpCheckResult},
   spec::MonitorSpec,
-  view::MonitorView,
+  view::{Issue, IssueLevel, IssueSubject, MonitorView},
 };
 
 use crate::{state::AppState, world::ServiceRow};
@@ -27,11 +27,20 @@ pub fn last(service: &str) -> Option<MonitorView> {
   LAST.lock().ok()?.get(service).cloned()
 }
 
-pub fn problems() -> Vec<String> {
+pub fn issues() -> Vec<Issue> {
   let Ok(m) = LAST.lock() else { return vec![] };
   m.iter()
     .filter(|(_, v)| v.fails >= FAILS)
-    .map(|(s, v)| format!("服务 {s} 的监控不正常：{}", v.detail))
+    .map(|(s, v)| Issue {
+      code: "monitor_down".into(),
+      level: IssueLevel::Fault,
+      subject: Some(IssueSubject {
+        kind: "service".into(),
+        name: s.clone(),
+      }),
+      title: format!("服务 {s} 的监控不正常：{}", v.detail),
+      hint: None,
+    })
     .collect()
 }
 

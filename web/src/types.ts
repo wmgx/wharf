@@ -330,6 +330,16 @@ export interface EdgeVersionView {
   url?: string;
 }
 
+export type IssueLevel = "fault" | "warn" | "info";
+export interface IssueSubject { kind: string; name: string }
+export interface Issue {
+  code: string;
+  level: IssueLevel;
+  subject?: IssueSubject;
+  title: string;
+  hint?: string;
+}
+
 export interface Status {
   servers: ServerView[];
   services: ServiceView[];
@@ -339,6 +349,7 @@ export interface Status {
   gateways: GatewayView[];
   routes: RouteView[];
   problems?: string[];
+  issues: Issue[];
   /** 最近一次域名检查，控制面刚启动时没有。 */
   health?: DoctorReport;
   /** 后台检查的新版本（6 小时）和未执行的改动（10 分钟）。 */

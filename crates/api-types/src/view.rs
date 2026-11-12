@@ -630,6 +630,47 @@ pub struct RollbackTarget {
   pub spec: ServiceSpec,
 }
 
+#[derive(
+  Debug,
+  Clone,
+  Copy,
+  PartialEq,
+  Eq,
+  Serialize,
+  Deserialize,
+  JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueLevel {
+  /// 现在就不能用。
+  Fault,
+  /// 能用，但要看一眼。
+  Warn,
+  /// 可以做的事：有新版本、有没执行完的改动。
+  Info,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct IssueSubject {
+  /// server、service、gateway、edge、task、route。
+  pub kind: String,
+  pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct Issue {
+  /// 这是哪一类问题，页面按它决定给什么按钮。取值见下表。
+  pub code: String,
+  pub level: IssueLevel,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub subject: Option<IssueSubject>,
+  /// 给人看的一句话。
+  pub title: String,
+  /// 只给命令行看的补充（怎么用命令处理）。页面不显示。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub hint: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Status {
   pub servers: Vec<ServerView>,
@@ -644,6 +685,8 @@ pub struct Status {
   /// 需要注意的问题，例如服务器离线、服务没在运行。
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub problems: Vec<String>,
+  #[serde(default)]
+  pub issues: Vec<Issue>,
   /// 最近一次域名检查（后台每 5 分钟），控制面刚启动时为空。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub health: Option<DoctorReport>,
