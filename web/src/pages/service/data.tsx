@@ -1,6 +1,7 @@
 import { Empty, SectionTitle } from "@/components/common";
 import { Row, Rows } from "@/components/kit";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import type { ServiceView } from "@/types";
 import { Backups } from "./backups";
 import { Files } from "./files";
@@ -37,6 +38,7 @@ export function DataTab({ svc, onSettings }: { svc: ServiceView; onSettings: () 
       <div>
         <SectionTitle>备份</SectionTitle>
         <Backups svc={svc} onSettings={onSettings} />
+        {svc.spec.backup?.to && <Button variant="outline" className="mt-3" onClick={onSettings}>在设置中关闭自动备份</Button>}
       </div>
       <div>
         <SectionTitle>文件</SectionTitle>
