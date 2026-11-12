@@ -21,7 +21,7 @@ export function EdgeImport({ account, onClose }: { account: string; onClose: () 
     onClose();
     actions.plan({
       title: `导入 ${picked.length} 个Cloudflare 应用`,
-      then: "/",
+      then: "/services",
       changes: fresh
         .filter((p) => picked.includes(p.project))
         .map((p) => ({ op: "upsert_edge_app", name: p.project, spec: { account, kind: p.kind } })),

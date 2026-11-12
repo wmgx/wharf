@@ -37,9 +37,9 @@ export function EdgeDetail() {
     app && actions.plan({ title, changes: [{ op: "upsert_edge_app", name, spec: { ...app.spec, domains: list } }] });
 
   const back = (
-    <Link className="mb-3 inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground" to="/">
+    <Link className="mb-3 inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground" to="/services">
       <ArrowLeftIcon className="size-3.5" />
-      首页
+      服务
     </Link>
   );
   if (!app) {
@@ -82,15 +82,15 @@ export function EdgeDetail() {
   const remove = () =>
     actions.plan({
       title: `不再纳管 ${name}`,
-      then: "/",
+      then: "/services",
       changes: [{ op: "remove_edge_app", name }],
     });
 
   return (
     <>
-      {back}
       <ConfirmDialog open={removing} title={`不再纳管 ${name}？`} onCancel={() => setRemoving(false)} onConfirm={() => { setRemoving(false); remove(); }}>Cloudflare 上的应用不受影响，只是 Wharf 不再管理它。</ConfirmDialog>
       <PageHeader
+        back={{ to: "/services", label: "服务" }}
         title={
           <>
             {app.name}
