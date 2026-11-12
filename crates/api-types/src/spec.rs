@@ -454,7 +454,7 @@ pub struct GatewaySpec {
   /// caddy：ACME 账号邮箱，可选。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub email: Option<String>,
-  /// caddy：镜像，默认 `caddy:2`。
+  /// caddy：镜像，默认 Wharf 自建的 wharf-caddy。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub image: Option<String>,
   /// caddy：证书方式，默认 `auto`（公网签证书）。
@@ -463,6 +463,10 @@ pub struct GatewaySpec {
   /// cloudflare_tunnel：在哪个厂商账号下建隧道（`wharf account list`）。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub account: Option<String>,
+  /// caddy：网关连不上服务时（502、503、504）显示的 HTML。不填用内置的默认页。
+  /// 内容里可以写 `{err.status_code}`，显示时换成状态码。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub error_page: Option<String>,
 }
 
 /// 网关的证书方式。
