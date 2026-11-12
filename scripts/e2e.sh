@@ -125,6 +125,26 @@ code=$?
 set -e
 [ "$code" = 3 ] || fail "过期计划退出码是 $code"
 
+step "新版本起不来：自动换回上一版，服务恢复"
+set +e
+wharf service deploy whoami --image busybox:1.36 --apply >/tmp/wharf-e2e-bad.log 2>&1
+code=$?
+set -e
+[ "$code" != 0 ] || fail "起不来的版本 apply 成功了"
+grep -q '换回上一版' /tmp/wharf-e2e-bad.log || { cat /tmp/wharf-e2e-bad.log; fail "没有换回上一版"; }
+ok=
+for _ in $(seq 20); do
+  if curl -sk --resolve "$HOST:$HTTPS_PORT:127.0.0.1" "https://$HOST:$HTTPS_PORT/" | grep -q '^Hostname:'; then
+    ok=1; break
+  fi
+  sleep 1
+done
+[ -n "$ok" ] || fail "换回上一版后经网关访问 whoami 失败"
+# 配置还是 busybox，改回去，plan 回到空。
+wharf service deploy whoami --image traefik/whoami --apply >/dev/null
+[ "$(wharf plan --json | jget 'len(d["items"])')" = 0 ] || { wharf plan; fail "改回后 plan 不为空"; }
+echo "起不来的版本被换回，服务正常"
+
 step "status 和 export"
 wharf status
 wharf export | grep -q 'traefik/whoami' || fail "export 里没有 whoami"
