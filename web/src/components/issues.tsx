@@ -21,7 +21,7 @@ export function subjectPath(s: IssueSubject): string {
     case "service": return `/services/${name}`;
     case "gateway": return `/domains?tab=entries&entry=${name}`;
     case "edge": return `/edge/${name}`;
-    case "task": return "/tasks";
+    case "task": return `/tasks/${name}?tab=runs`;
     case "route": return `/domains?open=${name}`;
     default: return "/domains";
   }

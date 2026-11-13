@@ -104,7 +104,7 @@ export function CommandMenu({ onLogout }: { onLogout: () => void }) {
           <CommandGroup heading="页面">
             {([
               ["首页", "/", AnchorIcon], ["服务", "/services", BoxIcon], ["入口", "/domains?tab=entries", WaypointsIcon],
-              ["定时任务", "/tasks", TimerIcon], ["服务器", "/servers", ServerIcon], ["网络", "/network", NetworkIcon],
+              ["任务", "/tasks", TimerIcon], ["服务器", "/servers", ServerIcon], ["网络", "/network", NetworkIcon],
               ["待处理", "/inbox", InboxIcon], ["数据与备份", "/data", HardDriveIcon], ["活动", "/activity", HistoryIcon],
               ["设置", "/settings", SettingsIcon],
             ] as const).map(([label, path, Icon]) => <CommandItem key={path} value={label} onSelect={() => run(() => nav(path))}><Icon />{label}</CommandItem>)}
@@ -183,7 +183,7 @@ export function CommandMenu({ onLogout }: { onLogout: () => void }) {
                   onSelect={() =>
                     run(() =>
                       nav(
-                        `/tasks?server=${encodeURIComponent(t.spec.server)}`,
+                        `/tasks/${encodeURIComponent(t.name)}`,
                       ),
                     )
                   }
@@ -191,7 +191,7 @@ export function CommandMenu({ onLogout }: { onLogout: () => void }) {
                   <TimerIcon />
                   {t.name}
                   <span className="text-xs text-muted-foreground">
-                    定时任务 · {t.spec.server}
+                    任务 · {t.spec.server}
                   </span>
                 </CommandItem>
               ))}
