@@ -3,13 +3,15 @@ import {
   PlayIcon, RefreshCwIcon, RotateCwIcon, ScrollTextIcon, SquareIcon, TerminalIcon, Trash2Icon,
   WrenchIcon, type LucideIcon,
 } from "lucide-react";
+import { toast } from "sonner";
+import { api } from "@/api";
 import { useNavigate, type NavigateFunction } from "react-router-dom";
 import { Tip } from "@/components/kit";
 import { useActions, type Actions } from "@/components/actions";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { useStatus } from "@/status";
-import type { RouteView, ServerView, ServiceView, Status } from "@/types";
+import type { RouteView, ServerView, ServiceView, Status, TaskView } from "@/types";
 
 export interface OpCtx {
   actions: Actions;
@@ -52,6 +54,13 @@ export const routeOps: Op<RouteView>[] = [
   { id: "auth-edit", label: "改登录账号", icon: KeyRoundIcon, group: "more", show: (r) => !!r.spec.auth, run: (r, c) => c.actions.basicAuth(r.spec.hostname) },
   { id: "auth-off", label: "关闭登录保护", icon: LockOpenIcon, group: "more", show: (r) => !!r.spec.auth, run: (r, c) => c.actions.plan({ title: `关闭 ${r.spec.hostname} 的登录保护`, changes: [{ op: "upsert_route", spec: { ...r.spec, auth: false } }] }) },
   { id: "remove", label: "移除域名", icon: Trash2Icon, group: "danger", run: (r, c) => c.actions.removeRoute(r.spec.hostname) },
+];
+
+export const taskOps: Op<TaskView>[] = [
+  { id: "run", label: "立即运行", icon: PlayIcon, group: "main", show: (t) => t.spec.kind !== "ping", run: async (t, c) => { try { await api.post(`/api/tasks/${encodeURIComponent(t.name)}/run`, {}); toast.success(`已开始运行 ${t.name}`); window.dispatchEvent(new Event("wharf:tasks")); c.nav(`/tasks/${encodeURIComponent(t.name)}?tab=runs`); } catch (e) { toast.error(`没能运行 ${t.name}`, { description: (e as Error).message }); } } },
+  { id: "disable", label: "停用", icon: SquareIcon, group: "more", show: (t) => t.spec.enabled, run: async (t) => { try { await api.put(`/api/tasks/${encodeURIComponent(t.name)}`, { ...t.spec, enabled: false }); window.dispatchEvent(new Event("wharf:tasks")); toast.success("已保存"); } catch (e) { toast.error("不能停用", { description: (e as Error).message }); } } },
+  { id: "enable", label: "启用", icon: PlayIcon, group: "more", show: (t) => !t.spec.enabled, run: async (t) => { try { await api.put(`/api/tasks/${encodeURIComponent(t.name)}`, { ...t.spec, enabled: true }); window.dispatchEvent(new Event("wharf:tasks")); toast.success("已保存"); } catch (e) { toast.error("不能启用", { description: (e as Error).message }); } } },
+  { id: "remove", label: "删除任务", icon: Trash2Icon, group: "danger", run: (t, c) => c.actions.removeTask(t.name) },
 ];
 
 export const serverOps: Op<ServerView>[] = [

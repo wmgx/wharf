@@ -54,6 +54,7 @@ export interface Actions {
   /** 先要求输入名称确认，再预览改动（连同它的域名）。 */
   remove: (name: string) => void;
   removeRoute: (hostname: string) => void;
+  removeTask: (name: string) => void;
   /** 选目标服务器，再预览改动。 */
   move: (svc: ServiceView) => void;
   /** 设置一个域名的登录保护账号；`enable` 时保存后预览开启登录保护的改动。 */
@@ -82,6 +83,7 @@ export function ActionsProvider({ children }: { children: ReactNode }) {
   const [open, setOpen] = useState<Open | null>(null);
   const [removing, setRemoving] = useState<string | null>(null);
   const [removingRoute, setRemovingRoute] = useState<string | null>(null);
+  const [removingTask, setRemovingTask] = useState<string | null>(null);
   const [moving, setMoving] = useState<ServiceView | null>(null);
   const [settingAuth, setSettingAuth] = useState<{ hostname: string; enable: boolean } | null>(null);
   const [upgrading, setUpgrading] = useState(false);
@@ -186,6 +188,7 @@ export function ActionsProvider({ children }: { children: ReactNode }) {
     },
     remove: (name) => setRemoving(name),
     removeRoute: (hostname) => setRemovingRoute(hostname),
+    removeTask: (name) => setRemovingTask(name),
     move: (svc) => setMoving(svc),
     basicAuth: (hostname, enable = false) => setSettingAuth({ hostname, enable }),
     upgrade: () => setUpgrading(true),
@@ -258,6 +261,7 @@ export function ActionsProvider({ children }: { children: ReactNode }) {
         </SheetContent>
       </Sheet>
       <ConfirmDialog open={!!removingRoute} title={`移除域名 ${removingRoute}？`} onCancel={() => setRemovingRoute(null)} onConfirm={() => { const hostname = removingRoute!; setRemovingRoute(null); actions.plan({ title: `移除 ${hostname}`, changes: [{ op: "remove_route", hostname }] }); }}>服务不受影响，DNS 记录和证书一起移除。</ConfirmDialog>
+      <ConfirmDialog open={!!removingTask} title={`删除任务 ${removingTask}？`} onCancel={() => setRemovingTask(null)} onConfirm={async () => { const name = removingTask!; setRemovingTask(null); try { await api.del(`/api/tasks/${encodeURIComponent(name)}`); toast.success(`已删除 ${name}`); window.dispatchEvent(new Event("wharf:tasks")); nav("/tasks"); } catch (e) { toast.error(`不能删除 ${name}`, { description: (e as Error).message }); } }}>运行记录一起删除。</ConfirmDialog>
       <RemoveDialog name={removing} onCancel={() => setRemoving(null)} onConfirm={confirmRemove} />
       <MoveDialog svc={moving} onCancel={() => setMoving(null)} onConfirm={confirmMove} />
       <BasicAuthDialog hostname={settingAuth?.hostname ?? null} enable={!!settingAuth?.enable} onClose={() => setSettingAuth(null)} onSaved={authSaved} />
