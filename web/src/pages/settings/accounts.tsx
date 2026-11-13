@@ -1,49 +1,19 @@
-import { ConfirmDialog } from "@/components/kit";
-import { useSearchParams } from "react-router-dom";
-import { useActions } from "@/components/actions";
-import { ArrowUpCircleIcon } from "lucide-react";
-import {
-  CloudIcon,
-  KeyRoundIcon,
-  PlusIcon,
-  RefreshCwIcon,
-  Trash2Icon,
-} from "lucide-react";
 import { useState } from "react";
+import { useSearchParams } from "react-router-dom";
+import { CloudIcon, KeyRoundIcon, PlusIcon, RefreshCwIcon, Trash2Icon } from "lucide-react";
 import { toast } from "sonner";
 import { api, usePoll } from "@/api";
-import {
-  ago,
-  CardsSkeleton,
-  Empty,
-  ErrorNote,
-  Notice,
-  PageHeader,
-  SectionTitle,
-} from "@/components/common";
+import { ago, CardsSkeleton, Empty, ErrorNote, Notice, SectionTitle } from "@/components/common";
 import { Field, toName } from "@/components/fields";
+import { ConfirmDialog, Panel } from "@/components/kit";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { AccountView } from "@/types";
-import { AuditLog } from "./audit";
-import { CoreBackup } from "./core-backup";
-import { EdgeImport } from "./edge-import";
-import { checkUpdate, type VersionView } from "@/components/upgrade";
-import { Secrets } from "./secrets";
-import { Tokens } from "./tokens";
+import { EdgeImport } from "../edge-import";
 
-/** 设置：厂商账号、密钥、访问令牌、控制面备份，检查更新和升级。 */
-export function Settings() {
-  const actions = useActions();
+export function Accounts() {
   const { data, error, refresh } = usePoll<AccountView[]>(
     "/api/accounts",
     30000,
@@ -51,8 +21,6 @@ export function Settings() {
   const [params, setParams] = useSearchParams();
   const [addingNow, setAdding] = useState(false);
   const adding = addingNow || params.get("add") === "account";
-  const tab = params.get("tab") ?? "accounts";
-  const { data: version, refresh: refreshVersion } = usePoll<VersionView>("/api/version", 600000);
   const [removing, setRemoving] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [importing, setImporting] = useState<string | null>(null);
@@ -84,40 +52,10 @@ export function Settings() {
     }
   };
 
-  return (
-    <>
-      <PageHeader
-        title="设置"
-        actions={
-          <>
-            {version?.newer ? (
-              <Button onClick={actions.upgrade}>
-                <ArrowUpCircleIcon />
-                升级到 {version.newer}
-              </Button>
-            ) : (
-              <Button variant="outline" onClick={async () => (await checkUpdate()) && refreshVersion()}>
-                <RefreshCwIcon />
-                检查更新
-              </Button>
-            )}
-          </>
-        }
-      />
-      <Tabs
-        value={tab}
-        onValueChange={(t) => setParams(t === "accounts" ? {} : { tab: t }, { replace: true })}
-      >
-        <TabsList>
-          <TabsTrigger value="accounts">厂商账号</TabsTrigger>
-          <TabsTrigger value="secrets">密钥</TabsTrigger>
-          <TabsTrigger value="tokens">访问令牌</TabsTrigger>
-          <TabsTrigger value="backup">控制面</TabsTrigger>
-        </TabsList>
-        <TabsContent value="accounts" className="mt-4">
+  return <>
       <SectionTitle count={data?.length} action={ <Button variant="ghost" size="sm" onClick={() => setAdding(true)}>
           <PlusIcon />
-          添加
+          加账号
         </Button> }>厂商账号</SectionTitle>
       <ErrorNote error={error} />
       {!data ? (
@@ -125,12 +63,9 @@ export function Settings() {
       ) : data.length === 0 ? (
         <Empty>还没有厂商账号</Empty>
       ) : (
-        <div className="grid grid-cols-[repeat(auto-fill,minmax(300px,1fr))] gap-3">
+        <div className="grid grid-cols-[repeat(auto-fill,minmax(min(100%,300px),1fr))] gap-3">
           {data.map((a) => (
-            <div
-              key={a.name}
-              className="flex flex-col gap-3 rounded-xl border bg-card p-4 shadow-xs"
-            >
+            <Panel key={a.name} className="flex flex-col gap-3 p-4">
               <div className="flex items-center gap-3">
                 <span className="grid size-9 place-items-center rounded-lg border bg-muted text-muted-foreground">
                   <KeyRoundIcon className="size-4" />
@@ -197,25 +132,10 @@ export function Settings() {
                   删除
                 </Button>
               </div>
-            </div>
+            </Panel>
           ))}
         </div>
       )}
-        </TabsContent>
-        <TabsContent value="secrets" className="mt-4">
-          <Secrets />
-        </TabsContent>
-        <TabsContent value="tokens" className="mt-4">
-          <Tokens />
-        </TabsContent>
-        <TabsContent value="backup" className="mt-4">
-          <CoreBackup />
-          <div className="mt-8">
-          </div>
-        </TabsContent>
-      </Tabs>
-      <SectionTitle>操作记录</SectionTitle>
-      <AuditLog />
       {importing && (
         <EdgeImport account={importing} onClose={() => setImporting(null)} />
       )}
@@ -234,8 +154,7 @@ export function Settings() {
         />
       )}
       <ConfirmDialog open={!!removing} title={`删除账号 ${removing}？`} onCancel={() => setRemoving(null)} onConfirm={() => removing && remove(removing)}>只删除 Wharf 保存的 token。</ConfirmDialog>
-    </>
-  );
+  </>;
 }
 
 /** 只在打开时挂载，关掉就丢弃输入的 token。 */

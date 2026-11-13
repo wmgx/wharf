@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import * as vault from "@/lib/vault";
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
-import { Activity } from "./pages/Activity";
+import { Activity } from "./pages/activity";
 import { Servers } from "./pages/server";
 import { api, clearPollCache, setUnauthorizedHandler, usePoll, type Session } from "./api";
 import { ActionsProvider } from "./components/actions";
@@ -16,7 +16,7 @@ import { SidebarInset, SidebarProvider, SidebarTrigger } from "./components/ui/s
 import { Toaster } from "./components/ui/sonner";
 import { announceUpgrade } from "./components/upgrade";
 import { TooltipProvider } from "./components/ui/tooltip";
-import { Settings } from "./pages/Settings";
+import { Settings } from "./pages/settings";
 import { InboxPage } from "./pages/inbox";
 import { Home } from "./pages/Home";
 import { ServicesPage } from "./pages/services";
