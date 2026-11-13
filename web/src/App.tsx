@@ -28,6 +28,7 @@ import { DataPage } from "./pages/Data";
 import { NetworkPage } from "./pages/network";
 import { Domains } from "./pages/domains";
 import { TasksPage } from "./pages/tasks";
+import { TaskDetail } from "./pages/tasks/detail";
 import { StatusContext } from "./status";
 import { ThemeProvider } from "./theme";
 import type { Status } from "./types";
@@ -106,6 +107,7 @@ function Shell({ username, onLogout }: { username: string; onLogout: () => void 
                   <Route path="/alerts" element={<Navigate to="/inbox?tab=rules" replace />} />
                   <Route path="/inbox" element={<InboxPage />} />
                   <Route path="/tasks" element={<TasksPage />} />
+                  <Route path="/tasks/:name" element={<TaskDetail />} />
                   <Route path="/data" element={<DataPage />} />
                   <Route path="/gateways" element={<OldEntries />} />
                   <Route path="/network" element={<NetworkPage />} />

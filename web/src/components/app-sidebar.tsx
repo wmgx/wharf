@@ -45,7 +45,7 @@ export function AppSidebar({ username, onLogout }: { username: string; onLogout:
     { label: "应用", items: [
       { to: "/services", label: "服务", icon: BoxIcon, count: status ? status.services.length + (status.edge_apps?.length ?? 0) : undefined },
       { to: "/domains", label: "域名", icon: GlobeIcon, count: status?.routes.length },
-      { to: "/tasks", label: "定时任务", icon: TimerIcon },
+      { to: "/tasks", label: "任务", icon: TimerIcon },
     ] },
     { label: "机器", items: [
       { to: "/servers", label: "服务器", icon: ServerIcon, count: status?.servers.length },
