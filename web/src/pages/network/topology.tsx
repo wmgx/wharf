@@ -1,27 +1,26 @@
-import { Facts, Panel } from "@/components/kit";
+import { Facts, Panel, Tip } from "@/components/kit";
 import { Background, Controls, Handle, Position, ReactFlow, type Edge, type Node, type NodeChange, type NodeProps } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { ArrowUpCircleIcon, ExternalLinkIcon, LayoutGridIcon, PlayIcon, RotateCwIcon, SquareIcon, Trash2Icon, XIcon } from "lucide-react";
+import { ExternalLinkIcon, LayoutGridIcon, XIcon } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { usePoll } from "@/api";
-import { useActions } from "@/components/actions";
 import { diskText, Dot, MODES, liveTone, serverText, serviceTone, serverTone, type Tone } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { useStatus } from "@/status";
 import { useTheme } from "@/theme";
 import type { NetworkView, Status } from "@/types";
+import { hopOf } from "@/components/hop";
+import { pairs } from "./model";
 
-/** 控制面到 agent 超过这个延迟标红。 */
-const SLOW_MS = 150;
 const COL = 200;
 const GROUP_H = 250;
 
 type BoxData = { kind: string; name: string; tone?: Tone; cls?: string; to?: string };
 type GroupData = { name: string; tone: Tone; sub: string; disk?: { text: string; low: boolean } | null };
 /** 域名链路上的线都记着属于哪个域名，点一个节点时顺着域名找上下游。 */
-type LinkData = { route?: string; reachOk?: boolean };
+type LinkData = { route?: string; reachOk?: boolean; okLabel?: string };
 
 function BoxNode({ data }: NodeProps<Node<BoxData>>) {
   return (
@@ -97,8 +96,6 @@ function build(status: Status, net: NetworkView | null): { nodes: Node[]; edges:
   const nodes: Node[] = [];
   const edges: Edge<LinkData>[] = [];
   const modeOf = new Map(net?.servers.map((s) => [s.name, s.mode]));
-  const serverOf = new Map(status.services.map((s) => [s.name, s.spec.server]));
-  const addrOf = new Map(status.servers.map((s) => [s.name, s.private_addr]));
 
   let x = 0;
   status.servers.forEach((srv) => {
@@ -133,14 +130,13 @@ function build(status: Status, net: NetworkView | null): { nodes: Node[]; edges:
         data: { kind: "服务", name: s.name, tone: serviceTone(s).tone, to: `/services/${s.name}` },
       });
     });
-    const slow = srv.rtt_ms != null && srv.rtt_ms > SLOW_MS;
     edges.push({
       id: `core-${srv.name}`,
       source: "core",
       target: `srv:${srv.name}`,
-      label: srv.online ? (srv.rtt_ms != null ? `${srv.rtt_ms} ms` : "在线") : "断开",
-      style: { stroke: !srv.online ? stop : slow ? stop : fog, strokeDasharray: srv.online ? undefined : "6 4" },
-      labelStyle: { ...labelStyle, fill: slow || !srv.online ? stop : labelStyle.fill },
+      label: srv.online ? (srv.rtt_ms != null ? `${srv.rtt_ms} ms` : "在线") : "离线",
+      style: { stroke: !srv.online ? stop : fog, strokeDasharray: srv.online ? undefined : "6 4" },
+      labelStyle: { ...labelStyle, fill: !srv.online ? stop : labelStyle.fill },
     });
     x += width + 60;
   });
@@ -179,53 +175,34 @@ function build(status: Status, net: NetworkView | null): { nodes: Node[]; edges:
       style: { stroke: go },
     });
     if (!r.spec.service) return;
-    const gwServer = status.gateways.find((g) => g.name === r.gateway)?.spec.server;
-    const svcServer = serverOf.get(r.spec.service);
-    const same = gwServer === svcServer;
-    const net = svcServer ? addrOf.get(svcServer)?.network : undefined;
-    const plain = !same && net === "lan";
+    const hop = hopOf(r, status);
+    const plain = hop.kind === "direct" && hop.plain;
     edges.push({
       id: `${id}-svc`,
       source: `gw:${r.gateway}`,
       target: `svc:${r.spec.service}`,
-      label: same ? undefined : plain ? "明文" : net,
+      label: hop.kind === "local" ? undefined : hop.text.replace(/^直连 · /, ""),
       type: "smoothstep",
       data: { route: id },
-      style: { stroke: plain ? signal : go, strokeDasharray: plain ? "6 4" : undefined },
+      style: { stroke: plain ? signal : go, strokeDasharray: plain ? "6 4" : hop.kind === "tunnel" ? "2 4" : undefined },
       labelStyle: { ...labelStyle, fill: plain ? signal : labelStyle.fill },
     });
   });
 
-  // 机器之间能不能连上对方的内网地址，两个方向合成一条线。
-  const pairs = new Map<string, { a: string; b: string; ok: boolean }>();
-  for (const r of net?.reach.filter((r) => !r.stale) ?? []) {
-    const [a, b] = [r.from, r.to].sort();
-    const p = pairs.get(`${a}|${b}`) ?? { a, b, ok: true };
-    pairs.set(`${a}|${b}`, { ...p, ok: p.ok && r.ok });
-  }
   const known = new Set(status.servers.map((s) => s.name));
-  [...pairs.values()]
-    .filter((p) => known.has(p.a) && known.has(p.b))
-    .forEach((p, i) => {
-      // pathOptions 是 smoothstep 线才有的字段，Edge 类型里没有。
-      const edge = {
-        id: `reach:${p.a}|${p.b}`,
-        source: `srv:${p.a}`,
-        sourceHandle: "bs",
-        target: `srv:${p.b}`,
-        targetHandle: "bt",
-        // 都从机器底部出发，往下错开，免得叠在一起。
-        type: "smoothstep",
-        pathOptions: { offset: 24 + i * 16 },
-        // 通的线只在选中机器时出现。
-        hidden: p.ok,
-        data: { reachOk: p.ok },
-        label: p.ok ? "通" : "不通",
-        style: { stroke: p.ok ? go : stop, strokeDasharray: p.ok ? undefined : "6 4" },
-        labelStyle: { ...labelStyle, fill: p.ok ? go : stop },
-      } as Edge<LinkData>;
-      edges.push(edge);
-    });
+  (net ? pairs(net) : []).filter((p) => p.tone !== "idle" && known.has(p.a) && known.has(p.b)).forEach((p, i) => {
+    const order = { bad: 0, warn: 1, idle: 2, ok: 3 };
+    const worst = order[p.ab.tone] <= order[p.ba.tone] ? p.ab : p.ba;
+    const metrics = net?.links?.filter((l) => (l.from === p.a && l.to === p.b) || (l.from === p.b && l.to === p.a)).map((l) => l.ms).filter((v): v is number => v != null) ?? [];
+    const okLabel = metrics.length ? `${Math.max(...metrics).toFixed(0)} ms` : "正常";
+    const color = p.tone === "bad" ? stop : p.tone === "warn" ? signal : go;
+    edges.push({
+      id: `reach:${p.a}|${p.b}`, source: `srv:${p.a}`, sourceHandle: "bs", target: `srv:${p.b}`, targetHandle: "bt",
+      type: "smoothstep", pathOptions: { offset: 24 + i * 16 },
+      data: { reachOk: p.tone === "ok", okLabel }, label: p.tone === "ok" ? undefined : worst.text,
+      style: { stroke: color, strokeDasharray: p.tone === "bad" ? "6 4" : undefined }, labelStyle: { ...labelStyle, fill: color },
+    } as Edge<LinkData>);
+  });
 
   return { nodes, edges };
 }
@@ -251,7 +228,6 @@ export function Topology() {
   const { status } = useStatus();
   const { data: net } = usePoll<NetworkView>("/api/network", 30000);
   const { theme } = useTheme();
-  const nav = useNavigate();
   const [sel, setSel] = useState<string | null>(null);
   const [layout, setLayout] = useState<Record<string, XY>>(loadLayout);
   const graph = useMemo(() => {
@@ -275,8 +251,8 @@ export function Topology() {
       nodes: graph.nodes.map((n) => ({ ...n, selected: n.id === sel, style: { ...n.style, opacity: r.nodes.has(n.id) ? 1 : 0.3 } })),
       edges: graph.edges.map((e) =>
         r.edges.has(e.id)
-          ? { ...e, hidden: false, animated: !e.data?.reachOk, style: { ...e.style, strokeWidth: 2, opacity: 1 } }
-          : { ...e, animated: false, style: { ...e.style, opacity: 0.12 }, label: undefined },
+          ? { ...e, label: e.data?.reachOk && sel.startsWith("srv:") ? e.data.okLabel : e.label, animated: !e.data?.reachOk, style: { ...e.style, strokeWidth: 2, opacity: 1 } }
+          : { ...e, animated: false, style: { ...e.style, opacity: 0.12 }, label: e.id.startsWith("reach:") && !e.data?.reachOk ? e.label : undefined },
       ),
     };
   }, [graph, sel]);
@@ -284,20 +260,10 @@ export function Topology() {
   return (
     <>
       <div className="mb-3 flex flex-wrap gap-5 text-xs text-muted-foreground">
-        <Legend color={go}>加密 / 本机 / 互通</Legend>
-        <Legend color={signal} dashed>
-          内网直连（明文）
-        </Legend>
-        <Legend color={stop}>延迟超过 {SLOW_MS}ms、断开或不通</Legend>
-        <span className="ml-auto">拖动调整位置，会记住</span>
-        {Object.keys(layout).length > 0 && (
-          <button type="button" className="flex items-center gap-1 hover:text-foreground" onClick={resetLayout}>
-            <LayoutGridIcon className="size-3.5" />
-            重置布局
-          </button>
-        )}
+        <Legend color={go}>加密或本机</Legend><Legend color={signal} dashed>没加密的内网</Legend><Legend color={stop} dashed>不通或离线</Legend>
       </div>
-      <Panel className="relative h-[calc(100svh-15rem)] min-h-[480px]">
+      <Panel className="relative h-[calc(100svh-13rem)] min-h-[480px]">
+        {Object.keys(layout).length > 0 && <Tip text="重置布局"><Button aria-label="重置布局" variant="outline" size="icon-sm" className="absolute top-3 right-3 z-10" onClick={resetLayout}><LayoutGridIcon /></Button></Tip>}
         {shown && (
           <ReactFlow
             nodes={shown.nodes}
@@ -312,129 +278,52 @@ export function Topology() {
             colorMode={theme}
             proOptions={{ hideAttribution: true }}
             onNodeClick={(_, n) => setSel((cur) => (cur === n.id ? null : n.id))}
-            onNodeDoubleClick={(_, n) => {
-              const to = (n.data as BoxData).to;
-              if (to) nav(to);
-            }}
             onPaneClick={() => setSel(null)}
           >
             <Background gap={20} size={1} />
             <Controls showInteractive={false} />
           </ReactFlow>
         )}
-        {status && sel && <NodePanel status={status} sel={sel} onClose={() => setSel(null)} />}
+        {status && sel && sel !== "core" && <NodePanel status={status} sel={sel} onClose={() => setSel(null)} />}
       </Panel>
     </>
   );
 }
 
-/** 选中节点的信息和操作。 */
+/** 选中节点的信息。 */
 function NodePanel({ status, sel, onClose }: { status: Status; sel: string; onClose: () => void }) {
-  const actions = useActions();
   const nav = useNavigate();
   const [kind, name] = [sel.slice(0, sel.indexOf(":")), sel.slice(sel.indexOf(":") + 1)];
-  let title = name;
   let rows: [string, string][] = [];
-  let buttons: React.ReactNode = null;
+  let to = "";
+  let url: string | undefined;
   if (kind === "srv") {
     const s = status.servers.find((x) => x.name === name);
     if (!s) return null;
-    rows = [
-      ["状态", serverText(s)],
-      ["内网", s.private_addr?.ip ?? "-"],
-      ["公网", s.public_ip ?? "-"],
-      ["磁盘剩", diskText(s)?.text ?? "-"],
-    ];
-    buttons = (
-      <>
-        <Button size="sm" variant="outline" disabled={!s.online} onClick={() => actions.prune(s.name)}>
-          <Trash2Icon />
-          清理镜像
-        </Button>
-        {s.agent_outdated && (
-          <Button size="sm" variant="outline" onClick={() => actions.upgradeAgent(s.name)}>
-            <ArrowUpCircleIcon />
-            升级 agent
-          </Button>
-        )}
-      </>
-    );
+    rows = [["状态", serverText(s)], ["内网地址", s.private_addr?.ip ?? "-"], ["公网 IP", s.public_ip ?? "-"], ["磁盘", diskText(s)?.text ?? "-"]];
+    to = `/servers/${encodeURIComponent(name)}`;
   } else if (kind === "svc") {
     const s = status.services.find((x) => x.name === name);
     if (!s) return null;
-    rows = [
-      ["服务器", s.spec.server],
-      ["状态", serviceTone(s).text],
-    ];
-    buttons = (
-      <>
-        {s.spec.stopped ? (
-          <Button size="sm" variant="outline" onClick={() => actions.setStopped(s, false)}>
-            <PlayIcon />
-            启动
-          </Button>
-        ) : (
-          <>
-            <Button size="sm" variant="outline" onClick={() => actions.restart(s.name)}>
-              <RotateCwIcon />
-              重启
-            </Button>
-            <Button size="sm" variant="outline" onClick={() => actions.setStopped(s, true)}>
-              <SquareIcon />
-              停止
-            </Button>
-          </>
-        )}
-        <Button size="sm" variant="outline" onClick={() => nav(`/services/${s.name}`)}>
-          打开
-        </Button>
-      </>
-    );
+    rows = [["所在", s.spec.server], ["状态", serviceTone(s).text]];
+    to = `/services/${encodeURIComponent(name)}`;
   } else if (kind === "gw") {
     const g = status.gateways.find((x) => x.name === name);
     if (!g) return null;
-    rows = [
-      ["服务器", g.spec.server],
-      ["状态", liveTone(g.live).text],
-      ["域名", String(status.routes.filter((r) => r.gateway === g.name).length)],
-    ];
-    buttons = (
-      <Button size="sm" variant="outline" onClick={() => nav("/domains?tab=entries")}>
-        打开
-      </Button>
-    );
+    rows = [["所在", g.spec.server], ["状态", liveTone(g.live).text], ["域名数", String(g.routes.length)]];
+    to = `/domains?tab=entries&entry=${encodeURIComponent(name)}`;
   } else if (kind === "rt") {
     const r = status.routes.find((x) => x.spec.hostname === name);
     if (!r) return null;
-    rows = [
-      ["服务", r.spec.service ?? "-"],
-      ["入口", r.gateway ?? "-"],
-    ];
-    buttons = (
-      <Button size="sm" variant="outline" asChild>
-        <a href={r.url} target="_blank" rel="noreferrer">
-          <ExternalLinkIcon />
-          访问
-        </a>
-      </Button>
-    );
-  } else {
-    title = "wharf-core";
-  }
-  return (
-    <div className="absolute top-3 right-3 z-10 w-64 rounded-lg border bg-card p-3 text-sm shadow-md">
-      <div className="mb-2 flex items-center justify-between">
-        <span className={cn("font-medium", kind === "rt" && "font-mono text-xs")}>{title}</span>
-        <button type="button" className="text-muted-foreground hover:text-foreground" onClick={onClose} aria-label="关闭">
-          <XIcon className="size-4" />
-        </button>
-      </div>
-      {rows.length > 0 && (
-        <Facts items={rows.map(([k, v]) => [k, <span className="truncate font-mono text-xs">{v}</span>])} />
-      )}
-      {buttons && <div className="mt-3 flex flex-wrap gap-2">{buttons}</div>}
-    </div>
-  );
+    rows = [["指向", r.spec.service ?? r.spec.redirect ?? r.spec.upstream ?? "-"], ["入口", r.gateway ?? "-"], ["走法", hopOf(r, status).text]];
+    to = `/domains?open=${encodeURIComponent(name)}`;
+    url = r.url;
+  } else return null;
+  return <div className="absolute top-3 right-3 z-10 w-64 rounded-lg border bg-card p-3 text-sm shadow-md">
+    <div className="mb-2 flex items-center justify-between"><span className={cn("font-medium", kind === "rt" && "font-mono text-xs")}>{name}</span><Tip text="关闭"><Button variant="ghost" size="icon-xs" onClick={onClose} aria-label="关闭"><XIcon /></Button></Tip></div>
+    <Facts items={rows.map(([k, v]) => [k, <span className="truncate font-mono text-xs">{v}</span>])} />
+    <div className="mt-3 flex flex-wrap gap-2"><Button size="sm" variant="outline" onClick={() => nav(to)}>打开</Button>{url && <Button size="sm" variant="outline" asChild><a href={url} target="_blank" rel="noreferrer"><ExternalLinkIcon />访问</a></Button>}</div>
+  </div>;
 }
 
 function Legend({ color, dashed, children }: { color: string; dashed?: boolean; children: React.ReactNode }) {

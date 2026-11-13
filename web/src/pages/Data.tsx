@@ -1,6 +1,6 @@
 import { Panel } from "@/components/kit";
 import { usePoll } from "@/api";
-import { ago, Empty, useClickable, ErrorNote, ServerTag, StatusBadge, type Tone } from "@/components/common";
+import { ago, Empty, useClickable, ErrorNote, PageHeader, ServerTag, StatusBadge, type Tone } from "@/components/common";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import type { DataKind, DataStatus, DataView } from "@/types";
@@ -83,4 +83,8 @@ export function Data() {
       )}
     </>
   );
+}
+
+export function DataPage() {
+  return <><PageHeader title="数据与备份" description="每个服务的数据目录和备份" /><Data /></>;
 }

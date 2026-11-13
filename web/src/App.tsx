@@ -24,7 +24,8 @@ import { Login } from "./pages/Login";
 import { HostTerminal } from "./pages/HostTerminal";
 import { ServiceDetail } from "./pages/service";
 import { EdgeDetail } from "./pages/EdgeDetail";
-import { DataPage, NetworkPage } from "./pages/Panels";
+import { DataPage } from "./pages/Data";
+import { NetworkPage } from "./pages/network";
 import { Domains } from "./pages/domains";
 import { TasksPage } from "./pages/tasks";
 import { StatusContext } from "./status";
@@ -109,7 +110,7 @@ function Shell({ username, onLogout }: { username: string; onLogout: () => void 
                   <Route path="/gateways" element={<OldEntries />} />
                   <Route path="/network" element={<NetworkPage />} />
                   <Route path="/accounts" element={<Moved to="/settings" />} />
-                  <Route path="/topology" element={<Moved to="/network" />} />
+                  <Route path="/topology" element={<Navigate to="/network?tab=map" replace />} />
                   <Route path="*" element={<Navigate to="/" replace />} />
                 </Routes>
               </Boundary>
