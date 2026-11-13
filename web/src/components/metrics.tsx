@@ -131,7 +131,7 @@ const H = 140;
 const PAD = { top: 8, bottom: 18, left: 0, right: 0 };
 
 /** 折线图：时间是横轴；相邻两点隔得比 `gap` 远就断开（agent 离线）。`gap` 为 0 时只画点（事件）。 */
-function Chart({
+export function Chart({
   title,
   note,
   lines,
