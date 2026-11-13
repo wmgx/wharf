@@ -133,7 +133,7 @@ export function Accounts() {
                 </Button>
               </div>
             </Panel>
-          ))
+          ))}
         </div>
       )}
       {importing && (
