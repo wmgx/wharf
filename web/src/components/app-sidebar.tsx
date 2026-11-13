@@ -86,7 +86,7 @@ export function AppSidebar({ username, onLogout }: { username: string; onLogout:
                 {g.items.map((it) => (
                   <SidebarMenuItem key={it.to}>
                     <SidebarMenuButton asChild isActive={active(it.to)} tooltip={it.label}>
-                      <NavLink to={it.to}>
+                      <NavLink to={it.to === "/settings" && "dot" in it && it.dot ? "/settings?tab=core" : it.to}>
                         <it.icon />
                         <span>{it.label}</span>
                         {"dot" in it && it.dot && <span className="ml-auto size-2 rounded-full bg-primary" aria-label="有新版本" />}
