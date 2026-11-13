@@ -69,7 +69,7 @@ export function AuditLog() {
             ))}
           </TableBody>
         </Table>
-      ) : !loading && !error ? <Empty>没有</Empty> : null}
+      ) : !loading && !error ? <Empty>还没有操作记录</Empty> : null}
       {more && <Button variant="outline" className="w-fit" disabled={loading} onClick={earlier}>更早</Button>}
     </div>
   );
