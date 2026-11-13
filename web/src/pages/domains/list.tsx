@@ -15,7 +15,7 @@ import type { RouteView, Status } from "@/types";
 
 export function DomainList({ status, add }: { status: Status; add: React.ReactNode }) {
   const [params, setParams] = useSearchParams();
-  const [query, setQuery] = useState("");
+  const [query, setQuery] = useState(() => params.get("q") ?? "");
   const [problems, setProblems] = useState(false);
   const clickable = useClickable();
   const gateway = params.get("gateway") ?? "";

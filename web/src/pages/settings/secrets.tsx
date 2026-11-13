@@ -1,6 +1,6 @@
 import { ConfirmDialog, Tip } from "@/components/kit";
 import { Panel } from "@/components/kit";
-import { PencilIcon, PlusIcon, Trash2Icon } from "lucide-react";
+import { EllipsisIcon, PencilIcon, PlusIcon, Trash2Icon } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { api, usePoll } from "@/api";
@@ -9,6 +9,7 @@ import { Field } from "@/components/fields";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Link } from "react-router-dom";
 import { Textarea } from "@/components/ui/textarea";
 import type { SecretView } from "@/types";
@@ -61,14 +62,14 @@ export function Secrets() {
                   )}
                 </span>
                 <span className="text-xs text-muted-foreground">{ago(x.updated_at)}</span>
-                <span className="flex">
-                  <Tip text="替换值"><Button aria-label="替换值" variant="ghost" size="icon-xs" onClick={() => setEditing({ name: x.name, fresh: false })}>
-                    <PencilIcon />
-                  </Button></Tip>
-                  <Tip text="删除"><Button aria-label="删除" variant="ghost" size="icon-xs" className="text-destructive" onClick={() => setRemoving(x)}>
-                    <Trash2Icon />
-                  </Button></Tip>
-                </span>
+                <DropdownMenu>
+                  <Tip text="密钥操作"><DropdownMenuTrigger asChild><Button aria-label={`${x.name} 的操作`} variant="ghost" size="icon-xs"><EllipsisIcon /></Button></DropdownMenuTrigger></Tip>
+                  <DropdownMenuContent align="end">
+                    <DropdownMenuItem onSelect={() => setEditing({ name: x.name, fresh: false })}><PencilIcon />替换</DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem variant="destructive" onSelect={() => setRemoving(x)}><Trash2Icon />删除</DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
               </div>
             ))}
           </Panel>

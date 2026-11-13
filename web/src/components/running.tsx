@@ -2,7 +2,7 @@ import { LoaderIcon } from "lucide-react";
 import { usePoll } from "@/api";
 import { useActions } from "@/components/actions";
 import { Button } from "@/components/ui/button";
-import { runTitle } from "@/pages/Activity";
+import { runTitle } from "@/pages/activity/runs";
 import type { Run } from "@/types";
 
 /** 顶栏：有执行在跑时显示在做什么、到第几步，点开看每一步和取消。 */
