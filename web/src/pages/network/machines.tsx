@@ -14,7 +14,7 @@ import { pairs, type Pair } from "./model";
 const order = { bad: 0, warn: 1, idle: 2, ok: 3 };
 
 export function PairTable({ items, server }: { items: Pair[]; server?: string }) {
-  const [params, setParams] = useSearchParams();
+  const [params] = useSearchParams();
   const clickable = useClickable();
   return <Panel>
     <Table>
