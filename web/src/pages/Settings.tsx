@@ -36,7 +36,6 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { AccountView } from "@/types";
 import { AuditLog } from "./audit";
 import { CoreBackup } from "./core-backup";
-import { Egress } from "./egress";
 import { EdgeImport } from "./edge-import";
 import { checkUpdate, type VersionView } from "@/components/upgrade";
 import { Secrets } from "./secrets";
@@ -212,7 +211,6 @@ export function Settings() {
         <TabsContent value="backup" className="mt-4">
           <CoreBackup />
           <div className="mt-8">
-            <Egress />
           </div>
         </TabsContent>
       </Tabs>
