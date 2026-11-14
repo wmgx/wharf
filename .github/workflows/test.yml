@@ -27,6 +27,12 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+      - name: 验证页面 schema
+        run: cargo run -q -p wharf-cli -- schema web > /tmp/web-schema.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-schema
+          path: /tmp/web-schema.json
 
   web:
     runs-on: ubuntu-latest

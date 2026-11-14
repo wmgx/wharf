@@ -16,6 +16,7 @@ pub mod seal;
 pub mod spec;
 pub mod tunnel;
 pub mod view;
+pub mod web_schema;
 
 pub use error::{ApiError, ErrorCode};
 
