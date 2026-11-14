@@ -1256,7 +1256,7 @@ pub struct AuditEntry {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct TimelineItem {
   pub at: i64,
-  /// deploy / backup / task / heal / alert / op
+  /// deploy / backup / task / heal / alert / op / auto_update
   pub kind: String,
   pub title: String,
   /// 成功还是失败；没有这个概念的（自动重启）为空。
@@ -1271,4 +1271,18 @@ pub struct Timeline {
   pub items: Vec<TimelineItem>,
   /// 还有更早的记录时，下一页用它作 `before`。
   pub next_before: Option<i64>,
+}
+
+/// 一个服务的一次自动更新。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AutoUpdateResult {
+  pub service: String,
+  /// `updated`、`failed`、`skipped`。
+  pub status: String,
+  /// 这次要更新到的版本（镜像 digest 或 commit）。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub latest: Option<String>,
+  /// 失败或跳过的原因。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub reason: Option<String>,
 }

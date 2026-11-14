@@ -14,6 +14,7 @@ mod apply;
 mod apt;
 mod audit;
 mod auth;
+mod auto_update;
 mod backup;
 mod baseline;
 mod build;

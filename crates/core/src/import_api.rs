@@ -159,6 +159,7 @@ pub async fn preview(
       stopped: false,
       monitor: None,
       limits: None,
+      auto_update: false,
     },
     adopt: converted.adopt,
     name,

@@ -103,6 +103,7 @@ pub async fn target(
     backup: current.spec.backup.clone(),
     stopped: current.spec.stopped,
     limits: current.spec.limits.clone(),
+    auto_update: false,
     ..pin_commit(pin_image(spec, &images), commit.as_deref())
   };
   Ok(Json(RollbackTarget {
