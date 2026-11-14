@@ -121,7 +121,9 @@ pub fn issues() -> Vec<Issue> {
 
 pub fn spawn(state: Arc<AppState>) {
   tokio::spawn(async move {
+    // rdap.org 会拒绝没有 User-Agent 的请求（403）。
     let client = match reqwest::Client::builder()
+      .user_agent(concat!("wharf/", env!("CARGO_PKG_VERSION")))
       .timeout(Duration::from_secs(10))
       .build()
     {
