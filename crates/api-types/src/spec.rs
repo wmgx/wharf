@@ -81,7 +81,7 @@ pub struct ServerSettings {
   /// 允许通过 API 在宿主机执行命令。
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub host_exec: bool,
-  /// 每月流量额度（GB），只用于显示本月用了多少。
+  /// 每月流量额度（GB），用于显示本期用了多少，用到 80% 时提醒（阈值在告警规则里改）。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub traffic_quota_gb: Option<u32>,
   /// 流量每月几号重置（1 到 28，按北京时间），不填是 1 号。
