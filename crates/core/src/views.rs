@@ -592,6 +592,7 @@ pub async fn status(
   issues.extend(crate::rdap::issues());
   issues.extend(crate::disk_forecast::issues());
   issues.extend(crate::clock::issues());
+  issues.extend(crate::traffic::issues());
   issues.extend(crate::baseline::issues());
   issues.extend(crate::host_units::issues());
   let updates = crate::updates::last();

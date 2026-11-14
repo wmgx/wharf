@@ -151,6 +151,31 @@ fn expiry_ok(c: &Ctx) -> Event {
 
 const RULES: &[Rule] = &[
   Rule {
+    id: "traffic_quota",
+    name: "流量快用完",
+    metric: "traffic.used_pct",
+    op: Op::Ge,
+    threshold: 80.0,
+    threshold_editable: true,
+    for_n: 1,
+    mode: Mode::Consecutive,
+    recover: None,
+    every: "每 5 分钟一次，按本期用量",
+    key: |s| format!("traffic.{s}"),
+    fire: |c| {
+      ev(
+        format!("服务器 {} 本期流量已用 {:.0}%", c.subject, c.value),
+        format!("{}。到额度后可能被限速或产生额外费用，可以在服务器设置里调整额度或重置日", c.detail),
+      )
+    },
+    ok: |c| {
+      ev(
+        format!("服务器 {} 的流量回到额度内", c.subject),
+        c.detail.into(),
+      )
+    },
+  },
+  Rule {
     id: "clock_skew",
     name: "时间不准",
     metric: "clock.skew_s",
