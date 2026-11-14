@@ -151,6 +151,34 @@ fn expiry_ok(c: &Ctx) -> Event {
 
 const RULES: &[Rule] = &[
   Rule {
+    id: "clock_skew",
+    name: "时间不准",
+    metric: "clock.skew_s",
+    op: Op::Gt,
+    threshold: 5.0,
+    threshold_editable: true,
+    for_n: 3,
+    mode: Mode::Consecutive,
+    recover: Some(2.0),
+    every: "每 30 秒一次",
+    key: |s| format!("clock.{s}"),
+    fire: |c| {
+      let n = c.value as i64;
+      ev(
+        format!("服务器 {} 的时间和控制面差了 {n} 秒", c.subject),
+        format!(
+          "这台机器的时间和控制面差了 {n} 秒（已扣除网络往返）。时间不准会让证书校验、两步验证、备份时间戳出问题。检查这台机器的时间同步服务（systemd-timesyncd 或 chrony）"
+        ),
+      )
+    },
+    ok: |c| {
+      ev(
+        format!("服务器 {} 的时间恢复正常", c.subject),
+        format!("和控制面的时间差降到 {:.1} 秒", c.value),
+      )
+    },
+  },
+  Rule {
     id: "disk_forecast",
     name: "磁盘预计写满",
     metric: "disk.days_left",

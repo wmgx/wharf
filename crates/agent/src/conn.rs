@@ -170,6 +170,7 @@ async fn session(
           report.metrics = ops.reporter.metrics().await.map(Box::new);
         }
         sample = !sample;
+        report.time_ms = Some(chrono::Utc::now().timestamp_millis());
         if tx.send(AgentMsg::Report(Box::new(report))).await.is_err()
         {
           break;

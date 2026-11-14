@@ -65,6 +65,11 @@ pub fn server_view(
     version: row.version,
     baseline_drift: crate::baseline::drift(name),
     disk_days_left: crate::disk_forecast::days_left(name),
+    clock_offset_ms: if state.hub.is_online(name) {
+      crate::clock::offset_of(name)
+    } else {
+      None
+    },
   })
 }
 
@@ -586,6 +591,7 @@ pub async fn status(
   issues.extend(crate::monitor::issues());
   issues.extend(crate::rdap::issues());
   issues.extend(crate::disk_forecast::issues());
+  issues.extend(crate::clock::issues());
   issues.extend(crate::baseline::issues());
   issues.extend(crate::host_units::issues());
   let updates = crate::updates::last();

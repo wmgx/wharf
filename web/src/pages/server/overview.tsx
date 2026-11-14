@@ -11,6 +11,7 @@ export function Overview({ server, status, info, traffic, loading }: { server: S
   const name = server.name;
   const r = server.report;
   const disk = r?.disk;
+  const offset = server.clock_offset_ms;
   const services = status.services.filter((s) => s.spec.server === name);
   const gateways = status.gateways.filter((g) => g.spec.server === name);
   const ips = [server.public_ip, server.private_addr?.ip].filter(Boolean);
@@ -38,6 +39,7 @@ export function Overview({ server, status, info, traffic, loading }: { server: S
           {server.private_addr.ip}
         </span>],
         ["延迟", server.rtt_ms != null ? `${server.rtt_ms} ms` : "-"],
+        ["时间偏差", offset != null ? <span className={Math.abs(offset) > 5000 ? "text-warning" : undefined}>{Math.abs(offset) < 1000 ? "< 1 秒" : `${offset > 0 ? "快" : "慢"} ${(Math.abs(offset) / 1000).toFixed(1)} 秒`}</span> : "-"],
         ["系统", info ? `${info.os ?? r?.os ?? "-"} · 内核 ${info.kernel}` : r?.os],
         ["docker", r?.docker_version && `${r.docker_version}${r.compose_version ? ` · compose ${r.compose_version}` : ""}`],
         ["agent", r && `${r.version}${r.build ? ` · ${r.build}` : ""}`],
