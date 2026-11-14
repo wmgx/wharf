@@ -178,13 +178,25 @@ async fn round(
           Ok(r) if r.status() == reqwest::StatusCode::NOT_FOUND => {
             Some(None)
           }
-          Ok(r) if r.status() == reqwest::StatusCode::OK => r
-            .json::<serde_json::Value>()
-            .await
-            .ok()
-            .and_then(|v| parse_expiry(&v))
-            .map(Some),
-          _ => None,
+          Ok(r) if r.status() == reqwest::StatusCode::OK => {
+            let parsed = r
+              .json::<serde_json::Value>()
+              .await
+              .ok()
+              .and_then(|v| parse_expiry(&v));
+            if parsed.is_none() {
+              tracing::warn!("RDAP {name}：响应里没有可用的到期日");
+            }
+            parsed.map(Some)
+          }
+          Ok(r) => {
+            tracing::warn!("RDAP {name}：状态码 {}", r.status());
+            None
+          }
+          Err(e) => {
+            tracing::warn!("RDAP {name}：请求失败：{e:?}");
+            None
+          }
         };
         if let Some(expires) = expires {
           CACHE.lock().unwrap_or_else(|e| e.into_inner()).insert(
