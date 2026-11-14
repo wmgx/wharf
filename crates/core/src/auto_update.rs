@@ -99,9 +99,6 @@ pub async fn run(state: &Arc<AppState>) -> Vec<AutoUpdateResult> {
     let Some(check) = checks.get(&name) else {
       continue;
     };
-    if !check.newer {
-      continue;
-    }
     let Some(latest) = check.latest.clone() else {
       continue;
     };
@@ -110,7 +107,14 @@ pub async fn run(state: &Arc<AppState>) -> Vec<AutoUpdateResult> {
       .db
       .call({
         let key = key.clone();
-        move |c| db::setting(c, &key)
+        let latest = latest.clone();
+        move |c| {
+          let previous = db::setting(c, &key)?;
+          if previous.as_ref().is_some_and(|p| p != &latest) {
+            db::set_setting(c, &key, None)?;
+          }
+          Ok(previous)
+        }
       })
       .await;
     let result = match previous {
@@ -118,6 +122,7 @@ pub async fn run(state: &Arc<AppState>) -> Vec<AutoUpdateResult> {
         "skipped",
         Some("这个版本上次自动更新失败过，等下一个版本".into()),
       )),
+      Ok(_) if !check.newer => continue,
       Ok(_) => execute(state, &name).await,
       Err(e) => Err(e),
     };
