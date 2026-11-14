@@ -50,6 +50,7 @@ export interface ServerView {
     host_exec: boolean;
     egress?: EgressSpec;
     via?: string;
+    renew_at?: string;
   };
   joined: boolean;
   online: boolean;
@@ -384,6 +385,7 @@ export interface RouteDiagnosis {
   checks: DoctorCheck[];
   /** HTTPS 证书到期时间，连不上或不是 HTTPS 时没有。 */
   cert_expires?: string;
+  domain_expires?: string;
 }
 
 export interface DoctorReport {

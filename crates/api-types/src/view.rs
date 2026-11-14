@@ -952,6 +952,9 @@ pub struct RouteDiagnosis {
   /// HTTPS 证书到期时间，连不上或不是 HTTPS 时没有。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub cert_expires: Option<DateTime<Utc>>,
+  /// 这个域名的注册到期时间（后台用 RDAP 查，查不到没有）。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub domain_expires: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
