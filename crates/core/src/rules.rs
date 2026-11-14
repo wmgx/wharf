@@ -165,7 +165,10 @@ const RULES: &[Rule] = &[
     fire: |c| {
       ev(
         format!("服务器 {} 本期流量已用 {:.0}%", c.subject, c.value),
-        format!("{}。到额度后可能被限速或产生额外费用，可以在服务器设置里调整额度或重置日", c.detail),
+        format!(
+          "{}。到额度后可能被限速或产生额外费用，可以在服务器设置里调整额度或重置日",
+          c.detail
+        ),
       )
     },
     ok: |c| {
