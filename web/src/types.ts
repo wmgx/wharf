@@ -1,5 +1,7 @@
 // 和 crates/api-types 对应的类型，只写页面用到的字段。
 
+import type * as Gen from "./types.gen";
+
 export type PrivateNetwork = "tailscale" | "overlay" | "lan";
 
 export interface CoreAddress {
@@ -66,59 +68,17 @@ export interface ServerView {
   clock_offset_ms?: number;
 }
 
-export interface BuildSource {
-  /** 本机目录上传的代码包 sha256。 */
-  upload?: string;
-  git?: { repo: string; ref: string; token_secret?: string };
-  path?: string;
-  dockerfile?: string;
-  base?: string;
-  start?: string;
-  template?: string;
-  install?: string;
-  dockerfile_content?: string;
-}
+export type BuildSource = Gen.BuildSource;
 
-export type Source =
-  | { image: string }
-  | { compose: { content?: string; file?: string } }
-  | { build: BuildSource };
+export type Source = Gen.Source;
 
-export interface PortSpec {
-  name: string;
-  /** 容器内端口。image / build 来源必填，compose 来源不填。 */
-  container?: number;
-  /** 宿主机端口。compose 来源必填；其余来源不填时自动分配。 */
-  host?: number;
-}
+export type PortSpec = Gen.PortSpec;
 
-export interface VolumeSpec {
-  name: string;
-  target: string;
-}
+export type VolumeSpec = Gen.VolumeSpec;
 
-export interface ServiceSpec {
-  server: string;
-  source: Source;
-  ports?: PortSpec[];
-  env?: Record<string, string>;
-  volumes?: VolumeSpec[];
-  /** 每天自动备份到另一台服务器。 */
-  backup?: { to: string };
-  /** 停止：容器保留但不运行。 */
-  stopped?: boolean;
-  /** 自定义监控。 */
-  monitor?: MonitorSpec;
-  /** 资源上限：内存 MB、CPU 千分之一核。 */
-  limits?: { memory_mb?: number; cpu_milli?: number };
-}
+export type ServiceSpec = Gen.ServiceSpec;
 
-export interface MonitorSpec {
-  path: string;
-  port?: string;
-  expect?: number;
-  keyword?: string;
-}
+export type MonitorSpec = Gen.MonitorSpec;
 
 export interface MonitorView {
   ok: boolean;
@@ -333,15 +293,9 @@ export interface EdgeVersionView {
   url?: string;
 }
 
-export type IssueLevel = "fault" | "warn" | "info";
-export interface IssueSubject { kind: string; name: string }
-export interface Issue {
-  code: string;
-  level: IssueLevel;
-  subject?: IssueSubject;
-  title: string;
-  hint?: string;
-}
+export type IssueLevel = Gen.IssueLevel;
+export type IssueSubject = Gen.IssueSubject;
+export type Issue = Gen.Issue;
 
 export interface Status {
   bookmarks: BookmarkView[];
@@ -360,17 +314,9 @@ export interface Status {
   updates?: UpdatesView;
 }
 
-export interface VersionCheck {
-  at: string;
-  newer: boolean;
-  latest?: string;
-  error?: string;
-}
+export type VersionCheck = Gen.VersionCheck;
 
-export interface UpdatesView {
-  services: Record<string, VersionCheck>;
-  pending?: { at: string; items: string[]; error?: string };
-}
+export type UpdatesView = Gen.UpdatesView;
 
 export type CheckStatus = "ok" | "warn" | "bad" | "skip";
 
@@ -812,15 +758,6 @@ export interface AuditEntry {
   source?: string;
 }
 
-export interface TimelineItem {
-  at: number;
-  kind: string;
-  title: string;
-  ok: boolean | null;
-  actor?: string;
-}
+export type TimelineItem = Gen.TimelineItem;
 
-export interface Timeline {
-  items: TimelineItem[];
-  next_before: number | null;
-}
+export type Timeline = Gen.Timeline;
