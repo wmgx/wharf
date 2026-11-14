@@ -25,6 +25,8 @@ pub const DEFAULT_CLOUDFLARED_IMAGE: &str =
 pub const TUNNEL_TOKEN_SECRET: &str = "WHARF_TUNNEL_TOKEN";
 /// 和 agent 里的 `CADDY_ADMIN` 一致：管理接口走 unix socket，不占端口。
 const CADDY_ADMIN: &str = "unix//config/caddy-admin.sock";
+const UPSTREAM_TRY_DURATION: &str = "8s";
+const UPSTREAM_TRY_INTERVAL: &str = "250ms";
 
 pub fn hash(content: &str) -> String {
   hex::encode(Sha256::digest(content.as_bytes()))
@@ -725,6 +727,9 @@ pub fn caddyfile(
   }
   out.push_str("}\n");
   out.push_str(&error_snippet(spec));
+  out.push_str(&format!(
+    "\n(wharf_upstream) {{\n\tlb_try_duration {UPSTREAM_TRY_DURATION}\n\tlb_try_interval {UPSTREAM_TRY_INTERVAL}\n}}\n"
+  ));
   out.push_str("\nimport /etc/caddy/extra.d/*.caddy\n");
   let scheme = match spec.tls {
     GatewayTls::Off => "http://",
@@ -749,9 +754,14 @@ pub fn caddyfile(
     }
     // 带路径的 reverse_proxy 由 Caddy 排在不带路径的前面。
     for (path, upstream) in &site.paths {
-      out.push_str(&format!("\treverse_proxy {path} {upstream}\n"));
+      out.push_str(&format!(
+        "\treverse_proxy {path} {upstream} {{\n\t\timport wharf_upstream\n\t}}\n"
+      ));
     }
-    out.push_str(&format!("\treverse_proxy {}\n}}\n", site.upstream));
+    out.push_str(&format!(
+      "\treverse_proxy {} {{\n\t\timport wharf_upstream\n\t}}\n}}\n",
+      site.upstream
+    ));
   }
   // 反向隧道：frpc 按 IP 连进来，握手带固定名字，用 Caddy 自己签的证书。
   if link {
@@ -936,7 +946,7 @@ mod tests {
     assert!(z.contains("basic_auth {\n\t\tadmin $2b$12$abc\n\t}"));
     assert_eq!(out.matches("basic_auth").count(), 1);
     assert!(out.contains(
-      "a.example.com {\n\timport wharf_errors\n\treverse_proxy /ws 127.0.0.1:17891\n\treverse_proxy 100.1.1.1:2\n}"
+      "a.example.com {\n\timport wharf_errors\n\treverse_proxy /ws 127.0.0.1:17891 {\n\t\timport wharf_upstream\n\t}\n\treverse_proxy 100.1.1.1:2 {\n\t\timport wharf_upstream\n\t}\n}"
     ));
     assert!(out.contains("http_port 8080"));
     assert!(!out.contains("https_port"));
@@ -966,6 +976,35 @@ mod tests {
     );
     assert!(out.contains("auto_https off"));
     assert!(out.contains("\nhttp://a.example.com {"));
+  }
+
+  #[test]
+  fn caddyfile_retries_only_service_upstreams() {
+    let spec = serde_json::from_value(serde_json::json!({
+      "kind": "caddy", "server": "s1"
+    }))
+    .unwrap();
+    let site = Site {
+      hostname: "a.example.com".into(),
+      upstream: "127.0.0.1:20000".into(),
+      auth: None,
+      paths: vec![("/api".into(), "100.64.0.1:20001".into())],
+      redirect: None,
+    };
+    let redirect = Site {
+      hostname: "b.example.com".into(),
+      redirect: Some("https://a.example.com".into()),
+      paths: vec![],
+      ..site.clone()
+    };
+    let out = caddyfile("edge", &spec, &[site, redirect], true);
+    assert_eq!(out.matches("import wharf_upstream").count(), 2);
+    assert_eq!(out.matches("(wharf_upstream) {").count(), 1);
+    assert!(out.contains("lb_try_duration 8s"));
+    assert!(out.contains("lb_try_interval 250ms"));
+    let excluded = &out[out.find("\nb.example.com {").unwrap()..];
+    assert!(excluded.contains("link.wharf.internal {"));
+    assert!(!excluded.contains("import wharf_upstream"));
   }
 
   #[test]
