@@ -30,6 +30,8 @@ const FOLLOW_MAX: Duration = Duration::from_secs(30 * 60);
 pub struct Previous {
   pub compose: String,
   pub hash: String,
+  /// 旧容器用的镜像：(compose 里写的镜像名, 镜像 ID)。只有一个镜像、一个容器时才有。
+  pub image: Option<(String, String)>,
 }
 
 #[derive(Clone)]
@@ -195,6 +197,34 @@ impl Docker {
       .run(ctx)
       .await
       .is_ok_and(|o| o.success)
+  }
+
+  /// 这个项目现在唯一的容器用的镜像 ID；容器不是正好一个、或查不到时返回 None。
+  pub async fn running_image(
+    &self,
+    project: &str,
+    ctx: &Ctx,
+  ) -> Option<String> {
+    let out = self
+      .cmd()
+      .args(["ps", "-aq", "--no-trunc", "--filter"])
+      .arg(format!("label=com.docker.compose.project={project}"))
+      .timeout(Duration::from_secs(15))
+      .run(ctx)
+      .await
+      .ok()
+      .filter(|o| o.success)?;
+    let ids: Vec<_> = out.stdout.split_whitespace().collect();
+    let [id] = ids.as_slice() else { return None };
+    self
+      .cmd()
+      .args(["inspect", "--format", "{{.Image}}", *id])
+      .timeout(Duration::from_secs(15))
+      .run(ctx)
+      .await
+      .ok()
+      .filter(|o| o.success)
+      .map(|o| o.stdout.trim().to_string())
   }
 
   /// 本地的 `image` 是不是这个 digest（`sha256:…`）。
@@ -442,6 +472,7 @@ impl Docker {
         .ok()?
         .trim()
         .to_string(),
+      image: None,
     })
   }
 

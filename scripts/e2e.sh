@@ -27,7 +27,7 @@ cleanup() {
     kill "$PROBE" 2>/dev/null || true; wait "$PROBE" 2>/dev/null || true
   fi
   docker rm -f "$CORE" "$AGENT" >/dev/null 2>&1 || true
-  for p in whoami wharf-gw-edge; do
+  for p in whoami wharf-gw-edge wharf-try-whoami; do
     docker ps -aq --filter "label=com.docker.compose.project=$p" | xargs -r docker rm -f >/dev/null
   done
   docker volume rm -f wharf-e2e-core >/dev/null 2>&1 || true
@@ -150,13 +150,19 @@ wharf service deploy whoami --env A=3 --apply >/dev/null
 sleep 2
 probe_stop
 
-step "新版本起不来：自动换回上一版，服务恢复"
+step "新版本起不来：线上的容器没有动"
+BEFORE=$(docker ps -q --no-trunc --filter label=com.docker.compose.project=whoami)
+probe_start
 set +e
 wharf service deploy whoami --image busybox:1.36 --apply >/tmp/wharf-e2e-bad.log 2>&1
 code=$?
 set -e
+sleep 2
+probe_stop
 [ "$code" != 0 ] || fail "起不来的版本 apply 成功了"
-grep -q '换回上一版' /tmp/wharf-e2e-bad.log || { cat /tmp/wharf-e2e-bad.log; fail "没有换回上一版"; }
+grep -q '线上的容器没有动' /tmp/wharf-e2e-bad.log || { cat /tmp/wharf-e2e-bad.log; fail "试跑失败后旧容器未保留"; }
+AFTER=$(docker ps -q --no-trunc --filter label=com.docker.compose.project=whoami)
+[ "$BEFORE" = "$AFTER" ] || fail "试跑失败后旧容器被替换"
 ok=
 for _ in $(seq 20); do
   if curl -sk --resolve "$HOST:$HTTPS_PORT:127.0.0.1" "https://$HOST:$HTTPS_PORT/" | grep -q '^Hostname:'; then
@@ -168,7 +174,7 @@ done
 # 配置还是 busybox，改回去，plan 回到空。
 wharf service deploy whoami --image traefik/whoami --apply >/dev/null
 [ "$(wharf plan --json | jget 'len(d["items"])')" = 0 ] || { wharf plan; fail "改回后 plan 不为空"; }
-echo "起不来的版本被换回，服务正常"
+echo "试跑失败后旧容器未动，服务正常"
 
 step "status 和 export"
 wharf status
@@ -181,5 +187,6 @@ wharf gateway rm edge --apply
 [ -z "$(docker ps -aq --filter label=com.docker.compose.project=whoami)" ] || fail "whoami 容器还在"
 [ -z "$(docker ps -aq --filter label=com.docker.compose.project=wharf-gw-edge)" ] || fail "网关容器还在"
 [ "$(wharf plan --json | jget 'len(d["items"])')" = 0 ] || fail "删除后 plan 不为空"
+[ -z "$(docker ps -aq --filter label=wharf.trial)" ] || fail "试跑容器仍有残留"
 
 step "全部通过"

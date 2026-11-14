@@ -6,7 +6,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use wharf_api_types::{
   ApiError,
-  agent::BUILD_IMAGE_PREFIX,
+  agent::{BUILD_IMAGE_PREFIX, TRIAL_PROJECT_PREFIX},
   spec::{
     BuildSource, GatewayKind, GatewaySpec, GatewayTls, PortSpec,
     PrivateAddr, ServiceSpec, Source,
@@ -322,30 +322,19 @@ pub fn service_compose(
       substitute(content.as_deref().unwrap_or_default(), secrets)
     }
     Source::Image(_) | Source::Build(_) => {
-      let image = match &spec.source {
-        Source::Build(b) => build_image(name, b, &spec.ports),
-        Source::Image(image) => image.clone(),
-        Source::Compose { .. } => unreachable!(),
-      };
-      let mut environment = BTreeMap::new();
-      for (key, value) in &spec.env {
-        // compose 会对 `$` 做变量插值，原样传给容器要写成 `$$`。
-        let value = substitute(value, secrets)?;
-        environment.insert(key.clone(), value.replace('$', "$$"));
-      }
-      let mut ports = Vec::new();
+      let mut service = image_service(name, spec, secrets)?;
       for port in &spec.ports {
         let (Some(host), Some(container)) =
           (host_ports.get(&port.name), port.container)
         else {
           continue;
         };
-        ports.push(format!("127.0.0.1:{host}:{container}"));
+        service.ports.push(format!("127.0.0.1:{host}:{container}"));
         for ip in bind_ips {
-          ports.push(format!("{ip}:{host}:{container}"));
+          service.ports.push(format!("{ip}:{host}:{container}"));
         }
       }
-      let volumes = spec
+      service.volumes = spec
         .volumes
         .iter()
         .map(|v| {
@@ -354,37 +343,70 @@ pub fn service_compose(
         .collect();
       let file = ComposeFile {
         name: name.to_string(),
-        services: BTreeMap::from([(
-          name.to_string(),
-          ComposeService {
-            image,
-            restart: "unless-stopped",
-            mem_limit: spec
-              .limits
-              .as_ref()
-              .and_then(|l| l.memory_mb)
-              .map(|mb| format!("{mb}m")),
-            cpus: spec
-              .limits
-              .as_ref()
-              .and_then(|l| l.cpu_milli)
-              .map(cpus_text),
-            network_mode: None,
-            entrypoint: None,
-            command: None,
-            environment,
-            ports,
-            volumes,
-            labels: BTreeMap::from([(
-              "wharf.service".to_string(),
-              name.to_string(),
-            )]),
-          },
-        )]),
+        services: BTreeMap::from([(name.to_string(), service)]),
       };
       Ok(to_yaml(&file))
     }
   }
+}
+
+fn image_service(
+  name: &str,
+  spec: &ServiceSpec,
+  secrets: Option<&BTreeMap<String, String>>,
+) -> Result<ComposeService, ApiError> {
+  let image = match &spec.source {
+    Source::Build(b) => build_image(name, b, &spec.ports),
+    Source::Image(image) => image.clone(),
+    Source::Compose { .. } => unreachable!(),
+  };
+  let mut environment = BTreeMap::new();
+  for (key, value) in &spec.env {
+    // compose 会对 `$` 做变量插值，原样传给容器要写成 `$$`。
+    let value = substitute(value, secrets)?;
+    environment.insert(key.clone(), value.replace('$', "$$"));
+  }
+  Ok(ComposeService {
+    image,
+    restart: "unless-stopped",
+    mem_limit: spec
+      .limits
+      .as_ref()
+      .and_then(|l| l.memory_mb)
+      .map(|mb| format!("{mb}m")),
+    cpus: spec
+      .limits
+      .as_ref()
+      .and_then(|l| l.cpu_milli)
+      .map(cpus_text),
+    network_mode: None,
+    entrypoint: None,
+    command: None,
+    environment,
+    ports: Vec::new(),
+    volumes: Vec::new(),
+    labels: BTreeMap::from([(
+      "wharf.service".to_string(),
+      name.to_string(),
+    )]),
+  })
+}
+
+/// 试跑用的 compose：同一个镜像和环境变量，不发布端口、不自动重启。
+/// 只用于 image、build 来源且没有数据卷的服务。
+pub fn trial_compose(
+  name: &str,
+  spec: &ServiceSpec,
+  secrets: Option<&BTreeMap<String, String>>,
+) -> Result<String, ApiError> {
+  let mut service = image_service(name, spec, secrets)?;
+  service.restart = "no";
+  service.labels =
+    BTreeMap::from([("wharf.trial".into(), name.into())]);
+  Ok(to_yaml(&ComposeFile {
+    name: format!("{TRIAL_PROJECT_PREFIX}{name}"),
+    services: BTreeMap::from([(name.to_string(), service)]),
+  }))
 }
 
 /// compose 来源的基本检查：必须有 services，P1 不支持 build。
@@ -851,6 +873,22 @@ mod tests {
       service_compose("whoami", &spec(), &ports, &[], None).unwrap();
     assert!(template.contains("[[WHO_TOKEN]]"));
     assert!(!template.contains("s3"));
+  }
+
+  #[test]
+  fn trial_compose_does_not_publish_ports() {
+    let mut spec = spec();
+    spec.volumes.clear();
+    let out = trial_compose("s1", &spec, None).unwrap();
+    let yaml: serde_yaml_ng::Value =
+      serde_yaml_ng::from_str(&out).unwrap();
+    let service = &yaml["services"]["s1"];
+    assert_eq!(yaml["name"], "wharf-try-s1");
+    assert_eq!(service["restart"], "no");
+    assert_eq!(service["environment"]["A"], "x$$y");
+    assert_eq!(service["labels"]["wharf.trial"], "s1");
+    assert!(service.get("ports").is_none());
+    assert!(!out.contains("wharf.service"));
   }
 
   #[test]
