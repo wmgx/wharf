@@ -664,6 +664,18 @@ impl EdgeAppSpec {
   }
 }
 
+/// 首页上的一条书签：不归 Wharf 管的地址。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct BookmarkSpec {
+  pub title: String,
+  /// 只允许 http:// 或 https://。
+  pub url: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub group: Option<String>,
+  #[serde(default)]
+  pub order: i32,
+}
+
 /// 意图文件 fleet.toml 的全部内容。plan 时作为完整期望状态：
 /// 文件里没有的服务、网关、路由会被计划删除。
 #[derive(
@@ -679,6 +691,8 @@ pub struct Fleet {
   pub gateways: BTreeMap<String, GatewaySpec>,
   #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
   pub edge_apps: BTreeMap<String, EdgeAppSpec>,
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub bookmarks: BTreeMap<String, BookmarkSpec>,
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub routes: Vec<RouteSpec>,
 }
@@ -690,6 +704,14 @@ pub struct Fleet {
 #[serde(tag = "op", rename_all = "snake_case")]
 #[allow(clippy::large_enum_variant)] // 一次计划只有几个，装箱改动面太大
 pub enum Change {
+  /// id 为空时新建，否则修改已有书签。
+  UpsertBookmark {
+    id: Option<String>,
+    spec: BookmarkSpec,
+  },
+  RemoveBookmark {
+    id: String,
+  },
   /// 服务器必须已经 `wharf server add` 过。
   UpdateServer {
     name: String,
