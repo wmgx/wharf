@@ -6,9 +6,9 @@ use serde_json::{Value, json};
 use wharf_api_types::{
   ApiError,
   spec::{
-    AdoptSpec, BuildSource, Change, EdgeAppSpec, Fleet, GatewayKind,
-    GatewaySpec, GatewayTls, LinkMode, RouteSpec, ServerSettings,
-    ServiceSpec, Source,
+    AdoptSpec, BookmarkSpec, BuildSource, Change, EdgeAppSpec, Fleet,
+    GatewayKind, GatewaySpec, GatewayTls, LinkMode, RouteSpec,
+    ServerSettings, ServiceSpec, Source,
   },
   validate_name,
 };
@@ -20,6 +20,7 @@ pub const KIND_SERVICE: &str = "service";
 pub const KIND_GATEWAY: &str = "gateway";
 pub const KIND_ROUTE: &str = "route";
 pub const KIND_EDGE: &str = "edge";
+pub const KIND_BOOKMARK: &str = "bookmark";
 
 /// 网关的 compose project 名前缀，服务名不能用。
 pub const GATEWAY_PROJECT_PREFIX: &str = "wharf-gw-";
@@ -59,6 +60,12 @@ pub struct EdgeRow {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct BookmarkRow {
+  pub spec: BookmarkSpec,
+  pub version: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct RouteRow {
   pub id: String,
   pub spec: RouteSpec,
@@ -71,6 +78,7 @@ pub struct World {
   pub services: BTreeMap<String, ServiceRow>,
   pub gateways: BTreeMap<String, GatewayRow>,
   pub edge_apps: BTreeMap<String, EdgeRow>,
+  pub bookmarks: BTreeMap<String, BookmarkRow>,
   /// key 是 hostname。
   pub routes: BTreeMap<String, RouteRow>,
 }
@@ -170,6 +178,16 @@ impl World {
             },
           );
         }
+        KIND_BOOKMARK => {
+          world.bookmarks.insert(
+            row.name,
+            BookmarkRow {
+              spec: serde_json::from_value(row.spec)
+                .map_err(json_err)?,
+              version,
+            },
+          );
+        }
         other => tracing::warn!("未知资源类型 {other}，忽略"),
       }
     }
@@ -194,6 +212,9 @@ impl World {
     for (name, r) in &self.edge_apps {
       out.insert(format!("{KIND_EDGE}/{name}"), r.version);
     }
+    for (id, r) in &self.bookmarks {
+      out.insert(format!("{KIND_BOOKMARK}/{id}"), r.version);
+    }
     out
   }
 
@@ -204,6 +225,37 @@ impl World {
   ) -> Result<(), ApiError> {
     for change in changes {
       match change {
+        Change::UpsertBookmark { id, spec } => {
+          let version = match id {
+            Some(id) => {
+              self
+                .bookmarks
+                .get(id)
+                .ok_or_else(|| {
+                  ApiError::not_found(format!("书签 {id} 不存在"))
+                    .suggest("wharf bookmark list")
+                })?
+                .version
+            }
+            None => {
+              if self.bookmarks.len() >= 200 {
+                return Err(ApiError::invalid("书签最多 200 条"));
+              }
+              0
+            }
+          };
+          let spec = check_bookmark(spec.clone())?;
+          let id = id.clone().unwrap_or_else(|| new_id("bm"));
+          self.bookmarks.insert(id, BookmarkRow { spec, version });
+        }
+        Change::RemoveBookmark { id } => {
+          if self.bookmarks.remove(id).is_none() {
+            return Err(
+              ApiError::not_found(format!("书签 {id} 不存在"))
+                .suggest("wharf bookmark list"),
+            );
+          }
+        }
         Change::UpdateServer { name, settings } => {
           crate::egress::validate(name, settings, &self.servers)?;
           let server = self
@@ -434,6 +486,16 @@ impl World {
       .retain(|name, _| fleet.edge_apps.contains_key(name));
     self.gateways.retain(|name, _| keep_gateways.contains(name));
     self.routes.retain(|host, _| keep_routes.contains(host));
+    self
+      .bookmarks
+      .retain(|id, _| fleet.bookmarks.contains_key(id));
+    for (id, spec) in &fleet.bookmarks {
+      let version = self.bookmarks.get(id).map_or(0, |r| r.version);
+      let spec = check_bookmark(spec.clone())?;
+      self
+        .bookmarks
+        .insert(id.clone(), BookmarkRow { spec, version });
+    }
     for (name, spec) in &fleet.services {
       changes.push(Change::UpsertService {
         name: name.clone(),
@@ -975,8 +1037,41 @@ impl World {
       |r| (to_json(&r.spec), json!({})),
       &mut out,
     );
+    diff_map(
+      &current.bookmarks,
+      &self.bookmarks,
+      KIND_BOOKMARK,
+      |r| (to_json(&r.spec), json!({})),
+      &mut out,
+    );
     out
   }
+}
+
+fn check_bookmark(
+  mut spec: BookmarkSpec,
+) -> Result<BookmarkSpec, ApiError> {
+  spec.title = spec.title.trim().to_string();
+  if !(1..=40).contains(&spec.title.chars().count()) {
+    return Err(ApiError::invalid("书签标题要 1 到 40 个字"));
+  }
+  if !(spec.url.starts_with("http://")
+    || spec.url.starts_with("https://"))
+    || spec.url.len() > 2048
+    || spec.url.contains(char::is_whitespace)
+  {
+    return Err(ApiError::invalid(
+      "书签网址要以 http:// 或 https:// 开头",
+    ));
+  }
+  spec.group = spec
+    .group
+    .map(|g| g.trim().to_string())
+    .filter(|g| !g.is_empty());
+  if spec.group.as_ref().is_some_and(|g| g.chars().count() > 20) {
+    return Err(ApiError::invalid("书签分组要 1 到 20 个字"));
+  }
+  Ok(spec)
 }
 
 fn to_json<T: serde::Serialize>(v: &T) -> Value {
@@ -1417,6 +1512,65 @@ fn validate_lan_addrs(addrs: &[String]) -> Result<(), ApiError> {
 mod tests {
   use super::*;
   use wharf_api_types::spec::PortSpec;
+
+  #[test]
+  fn checks_bookmark_fields() {
+    let spec = BookmarkSpec {
+      title: " 路由器 ".into(),
+      url: "http://router.example".into(),
+      group: Some(" 家里 ".into()),
+      order: 10,
+    };
+    let valid = check_bookmark(spec.clone()).unwrap();
+    assert_eq!(
+      (&*valid.title, valid.group.as_deref()),
+      ("路由器", Some("家里"))
+    );
+    assert!(
+      check_bookmark(BookmarkSpec {
+        title: " ".into(),
+        ..spec.clone()
+      })
+      .is_err()
+    );
+    assert!(
+      check_bookmark(BookmarkSpec {
+        url: "ftp://x".into(),
+        ..spec.clone()
+      })
+      .is_err()
+    );
+    assert!(
+      check_bookmark(BookmarkSpec {
+        group: Some("字".repeat(21)),
+        ..spec
+      })
+      .is_err()
+    );
+  }
+
+  #[test]
+  fn restores_exported_bookmarks_with_their_ids() {
+    let mut original = World::default();
+    original
+      .apply_changes(&[Change::UpsertBookmark {
+        id: None,
+        spec: BookmarkSpec {
+          title: "路由器".into(),
+          url: "http://router.example".into(),
+          group: Some("家里".into()),
+          order: 20,
+        },
+      }])
+      .unwrap();
+    let fleet = crate::views::export(&original);
+    let mut restored = World::default();
+    restored.replace_with(&fleet).unwrap();
+    assert_eq!(
+      crate::views::export(&restored).bookmarks,
+      fleet.bookmarks
+    );
+  }
 
   pub fn sample() -> World {
     let mut w = World::default();
