@@ -175,20 +175,28 @@ pub fn spawn(state: Arc<AppState>) {
           for (name, row) in &snap.world.servers {
             let Some(quota) = row.settings.traffic_quota_gb else {
               rules::observe(
-                &state, "traffic.used_pct", name, 0.0, "没有设置额度",
-              ).await;
+                &state,
+                "traffic.used_pct",
+                name,
+                0.0,
+                "没有设置额度",
+              )
+              .await;
               continue;
             };
             let reset =
               row.settings.traffic_reset_day.unwrap_or(1) as u32;
             let (_, rx, tx) =
               match period_usage(&state.db, reset, name).await {
-              Ok(usage) => usage,
-              Err(e) => {
-                tracing::warn!("服务器 {name} 的流量查询失败：{}", e.message);
-                continue;
-              }
-            };
+                Ok(usage) => usage,
+                Err(e) => {
+                  tracing::warn!(
+                    "服务器 {name} 的流量查询失败：{}",
+                    e.message
+                  );
+                  continue;
+                }
+              };
             let used_gb =
               (rx as f64 + tx as f64) / (1_u64 << 30) as f64;
             let detail = format!(
@@ -205,7 +213,9 @@ pub fn spawn(state: Arc<AppState>) {
             .await;
           }
         }
-        Err(e) => tracing::warn!("流量检查读取配置失败：{}", e.message),
+        Err(e) => {
+          tracing::warn!("流量检查读取配置失败：{}", e.message)
+        }
       }
       tokio::time::sleep(Duration::from_secs(300)).await;
     }
@@ -237,7 +247,8 @@ mod tests {
   async fn period_usage_excludes_previous_period() {
     let db = Db::memory();
     let since = period_start(
-      Utc::now().with_timezone(&beijing()).date_naive(), 1,
+      Utc::now().with_timezone(&beijing()).date_naive(),
+      1,
     );
     let from = midnight(since);
     db.call(move |c| {
@@ -249,7 +260,8 @@ mod tests {
         c.execute(
           "INSERT INTO points VALUES (?1, 's1', ?2, ?3)",
           params![name, at, value],
-        ).map_err(sql_err)?;
+        )
+        .map_err(sql_err)?;
       }
       Ok(())
     })
