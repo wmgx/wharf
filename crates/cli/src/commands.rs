@@ -298,6 +298,10 @@ async fn login(
 }
 
 fn schema(resource: Option<&str>) -> CliResult<()> {
+  if resource == Some("web") {
+    print::json(&wharf_api_types::web_schema::web_schema());
+    return Ok(());
+  }
   use schemars::schema_for;
   use wharf_api_types::{plan, spec, view};
   let all: Vec<(&str, schemars::Schema)> = vec![
