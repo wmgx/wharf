@@ -733,8 +733,10 @@ pub fn export(world: &World) -> Fleet {
 const GB: f64 = (1u64 << 30) as f64;
 
 /// 剩余不到 10% 或不到 5 GB。
+/// 剩余不到总量的 10%，或者不到 5 GB 且不到总量的 25%（小盘不会因为总量本来就小而一直告警）。
 fn low_disk(d: wharf_api_types::agent::Disk) -> bool {
-  d.free < d.total / 10 || (d.free as f64) < 5.0 * GB
+  d.free < d.total / 10
+    || ((d.free as f64) < 5.0 * GB && d.free < d.total / 4)
 }
 
 #[cfg(test)]
