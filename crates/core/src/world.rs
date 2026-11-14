@@ -224,10 +224,12 @@ impl World {
             && chrono::NaiveDate::parse_from_str(v, "%Y-%m-%d")
               .is_err()
           {
-            return Err(ApiError::invalid(format!(
-              "服务器 {name} 的续费日 {v} 格式不对"
-            ))
-            .with_hint("写成 2027-01-31"));
+            return Err(
+              ApiError::invalid(format!(
+                "服务器 {name} 的续费日 {v} 格式不对"
+              ))
+              .with_hint("写成 2027-01-31"),
+            );
           }
           server.settings = settings.clone();
         }
