@@ -1929,7 +1929,7 @@ export interface TaskRunView {
 /**
  * 定时任务。名字全局唯一。
  */
-export interface TaskSpec {
+export type TaskSpec = {
   command: string;
   /**
    * compose 服务名，服务只有一个容器时不用填。
@@ -1953,7 +1953,7 @@ export interface TaskSpec {
    * 报到地址里的口令，新建时自动生成。
    */
   token: string;
-}
+};
 
 export type TaskStatus = "running" | "succeeded" | "failed" | "timed_out" | "skipped";
 
