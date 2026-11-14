@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import * as vault from "@/lib/vault";
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
-import { Activity } from "./pages/Activity";
-import { Servers } from "./pages/Servers";
+import { Activity } from "./pages/activity";
+import { Servers } from "./pages/server";
 import { api, clearPollCache, setUnauthorizedHandler, usePoll, type Session } from "./api";
 import { ActionsProvider } from "./components/actions";
 import { AppSidebar } from "./components/app-sidebar";
@@ -16,16 +16,19 @@ import { SidebarInset, SidebarProvider, SidebarTrigger } from "./components/ui/s
 import { Toaster } from "./components/ui/sonner";
 import { announceUpgrade } from "./components/upgrade";
 import { TooltipProvider } from "./components/ui/tooltip";
-import { Settings } from "./pages/Settings";
+import { Settings } from "./pages/settings";
 import { InboxPage } from "./pages/inbox";
 import { Home } from "./pages/Home";
 import { ServicesPage } from "./pages/services";
 import { Login } from "./pages/Login";
 import { HostTerminal } from "./pages/HostTerminal";
-import { ServiceDetail } from "./pages/ServiceDetail";
+import { ServiceDetail } from "./pages/service";
 import { EdgeDetail } from "./pages/EdgeDetail";
-import { DataPage, Entries, NetworkPage } from "./pages/Panels";
+import { DataPage } from "./pages/Data";
+import { NetworkPage } from "./pages/network";
+import { Domains } from "./pages/domains";
 import { TasksPage } from "./pages/tasks";
+import { TaskDetail } from "./pages/tasks/detail";
 import { StatusContext } from "./status";
 import { ThemeProvider } from "./theme";
 import type { Status } from "./types";
@@ -97,18 +100,19 @@ function Shell({ username, onLogout }: { username: string; onLogout: () => void 
                   <Route path="/servers/:name" element={<Servers />} />
                   <Route path="/servers/:name/terminal" element={<HostTerminal />} />
                   <Route path="/servers" element={<Servers />} />
-                  <Route path="/entries" element={<Entries />} />
-                  <Route path="/domains" element={<Moved to="/entries" />} />
+                  <Route path="/entries" element={<OldEntries />} />
+                  <Route path="/domains" element={<Domains />} />
                   <Route path="/activity" element={<Activity />} />
                   <Route path="/settings" element={<Settings />} />
                   <Route path="/alerts" element={<Navigate to="/inbox?tab=rules" replace />} />
                   <Route path="/inbox" element={<InboxPage />} />
                   <Route path="/tasks" element={<TasksPage />} />
+                  <Route path="/tasks/:name" element={<TaskDetail />} />
                   <Route path="/data" element={<DataPage />} />
-                  <Route path="/gateways" element={<Moved to="/entries" />} />
+                  <Route path="/gateways" element={<OldEntries />} />
                   <Route path="/network" element={<NetworkPage />} />
                   <Route path="/accounts" element={<Moved to="/settings" />} />
-                  <Route path="/topology" element={<Moved to="/network" />} />
+                  <Route path="/topology" element={<Navigate to="/network?tab=map" replace />} />
                   <Route path="*" element={<Navigate to="/" replace />} />
                 </Routes>
               </Boundary>
@@ -139,4 +143,13 @@ function Moved({ to }: { to: string }) {
   params.delete("tab");
   const q = params.toString();
   return <Navigate to={q ? `${to}?${q}` : to} replace />;
+}
+
+function OldEntries() {
+  const { search } = useLocation();
+  const params = new URLSearchParams(search);
+  const open = params.get("open");
+  if (open) { params.set("entry", open); params.delete("open"); }
+  params.set("tab", "entries");
+  return <Navigate to={`/domains?${params}`} replace />;
 }

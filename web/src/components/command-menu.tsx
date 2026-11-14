@@ -103,8 +103,8 @@ export function CommandMenu({ onLogout }: { onLogout: () => void }) {
           <CommandEmpty>没有匹配的结果</CommandEmpty>
           <CommandGroup heading="页面">
             {([
-              ["首页", "/", AnchorIcon], ["服务", "/services", BoxIcon], ["入口", "/entries", WaypointsIcon],
-              ["定时任务", "/tasks", TimerIcon], ["服务器", "/servers", ServerIcon], ["网络", "/network", NetworkIcon],
+              ["首页", "/", AnchorIcon], ["服务", "/services", BoxIcon], ["入口", "/domains?tab=entries", WaypointsIcon],
+              ["任务", "/tasks", TimerIcon], ["服务器", "/servers", ServerIcon], ["网络", "/network", NetworkIcon],
               ["待处理", "/inbox", InboxIcon], ["数据与备份", "/data", HardDriveIcon], ["活动", "/activity", HistoryIcon],
               ["设置", "/settings", SettingsIcon],
             ] as const).map(([label, path, Icon]) => <CommandItem key={path} value={label} onSelect={() => run(() => nav(path))}><Icon />{label}</CommandItem>)}
@@ -142,7 +142,7 @@ export function CommandMenu({ onLogout }: { onLogout: () => void }) {
               <CommandItem
                 key={g.name}
                 value={`网关 ${g.name} ${g.spec.server}`}
-                onSelect={() => run(() => nav(`/entries?open=${g.name}`))}
+                onSelect={() => run(() => nav(`/domains?tab=entries&entry=${g.name}`))}
               >
                 <WaypointsIcon />
                 {g.name}
@@ -155,13 +155,7 @@ export function CommandMenu({ onLogout }: { onLogout: () => void }) {
               <CommandItem
                 key={`route-${r.spec.hostname}`}
                 value={`域名 ${r.spec.hostname} ${r.spec.service ?? ""}`}
-                onSelect={() =>
-                  run(() =>
-                    r.spec.service
-                      ? nav(`/services/${r.spec.service}?tab=domains`)
-                      : nav("/entries"),
-                  )
-                }
+                onSelect={() => run(() => nav(`/domains?open=${encodeURIComponent(r.spec.hostname)}`))}
               >
                 <GlobeIcon />
                 <span className="truncate">{r.spec.hostname}</span>
@@ -189,7 +183,7 @@ export function CommandMenu({ onLogout }: { onLogout: () => void }) {
                   onSelect={() =>
                     run(() =>
                       nav(
-                        `/tasks?server=${encodeURIComponent(t.spec.server)}`,
+                        `/tasks/${encodeURIComponent(t.name)}`,
                       ),
                     )
                   }
@@ -197,7 +191,7 @@ export function CommandMenu({ onLogout }: { onLogout: () => void }) {
                   <TimerIcon />
                   {t.name}
                   <span className="text-xs text-muted-foreground">
-                    定时任务 · {t.spec.server}
+                    任务 · {t.spec.server}
                   </span>
                 </CommandItem>
               ))}
@@ -257,7 +251,7 @@ export function CommandMenu({ onLogout }: { onLogout: () => void }) {
               "新建入口 网关 new gateway",
               <WaypointsIcon />,
               "新建入口",
-              () => nav("/entries?new=1"),
+              () => nav("/domains?tab=entries&new=1"),
             )}
             {op(
               "n-acc",

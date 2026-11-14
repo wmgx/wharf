@@ -4,7 +4,7 @@ import { useActions } from "@/components/actions";
 import { Row } from "@/components/kit";
 import { Button } from "@/components/ui/button";
 import { useStatus } from "@/status";
-import type { Issue, IssueSubject, Status } from "@/types";
+import type { Issue, IssueSubject } from "@/types";
 
 export function useIssues(): Issue[] {
   return useStatus().status?.issues ?? [];
@@ -14,26 +14,22 @@ export function issueCount(issues: Issue[]): number {
   return issues.filter((i) => i.level !== "info").length;
 }
 
-export function subjectPath(s: IssueSubject, status: Status | null): string {
+export function subjectPath(s: IssueSubject): string {
   const name = encodeURIComponent(s.name);
   switch (s.kind) {
     case "server": return `/servers/${name}`;
     case "service": return `/services/${name}`;
-    case "gateway": return `/entries?open=${name}`;
+    case "gateway": return `/domains?tab=entries&entry=${name}`;
     case "edge": return `/edge/${name}`;
-    case "task": return "/tasks";
-    case "route": {
-      const service = status?.routes.find((r) => r.spec.hostname === s.name)?.spec.service;
-      return service ? `/services/${encodeURIComponent(service)}?tab=network` : "/entries";
-    }
-    default: return "/entries";
+    case "task": return `/tasks/${name}?tab=runs`;
+    case "route": return `/domains?open=${name}`;
+    default: return "/domains";
   }
 }
 
 export function IssueRow({ issue }: { issue: Issue }) {
   const actions = useActions();
   const nav = useNavigate();
-  const { status } = useStatus();
   const Icon = issue.level === "fault" ? CircleAlertIcon : issue.level === "warn" ? TriangleAlertIcon : InfoIcon;
   const color = issue.level === "fault" ? "text-destructive" : issue.level === "warn" ? "text-warning" : "text-muted-foreground";
   const subject = issue.subject;
@@ -46,7 +42,7 @@ export function IssueRow({ issue }: { issue: Issue }) {
       ) : issue.code === "pending_changes" ? (
         <Button variant="outline" size="xs" onClick={() => actions.plan({ title: "执行未完成的改动", changes: [] })}>预览改动</Button>
       ) : subject ? (
-        <Button variant="outline" size="xs" onClick={() => nav(issue.code === "baseline_drift" ? `/servers/${encodeURIComponent(subject.name)}?tab=system` : issue.code === "host_unit_down" ? `/servers/${encodeURIComponent(subject.name)}?tab=host` : subjectPath(subject, status))}>查看</Button>
+        <Button variant="outline" size="xs" onClick={() => nav(issue.code === "baseline_drift" ? `/servers/${encodeURIComponent(subject.name)}?tab=system` : issue.code === "host_unit_down" ? `/servers/${encodeURIComponent(subject.name)}?tab=host` : subjectPath(subject))}>查看</Button>
       ) : null}
     </Row>
   );

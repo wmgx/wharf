@@ -47,7 +47,7 @@ export function serverText(s: ServerView): string {
 }
 
 /** 接入方式的显示名。 */
-export const MODES: Record<NetworkMode, string> = { tailscale: "Tailscale", lan: "局域网", public: "公网" };
+export const MODES: Record<NetworkMode, string> = { tailscale: "Tailscale", lan: "内网直连", public: "仅公网" };
 
 const GB = 1024 ** 3;
 

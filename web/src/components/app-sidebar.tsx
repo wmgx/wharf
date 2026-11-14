@@ -1,4 +1,4 @@
-import { InboxIcon, AnchorIcon, BoxIcon, DatabaseIcon, NetworkIcon, WaypointsIcon, ChevronsUpDownIcon, HistoryIcon, LogOutIcon, TimerIcon, MoonIcon, ServerIcon, SettingsIcon, SunIcon } from "lucide-react";
+import { InboxIcon, AnchorIcon, BoxIcon, DatabaseIcon, NetworkIcon, GlobeIcon, ChevronsUpDownIcon, HistoryIcon, LogOutIcon, TimerIcon, MoonIcon, ServerIcon, SettingsIcon, SunIcon } from "lucide-react";
 import { NavLink, useLocation } from "react-router-dom";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import {
@@ -44,8 +44,8 @@ export function AppSidebar({ username, onLogout }: { username: string; onLogout:
     { label: "", items: [{ to: "/", label: "首页", icon: AnchorIcon }] },
     { label: "应用", items: [
       { to: "/services", label: "服务", icon: BoxIcon, count: status ? status.services.length + (status.edge_apps?.length ?? 0) : undefined },
-      { to: "/entries", label: "入口", icon: WaypointsIcon, count: status?.gateways.length },
-      { to: "/tasks", label: "定时任务", icon: TimerIcon },
+      { to: "/domains", label: "域名", icon: GlobeIcon, count: status?.routes.length },
+      { to: "/tasks", label: "任务", icon: TimerIcon },
     ] },
     { label: "机器", items: [
       { to: "/servers", label: "服务器", icon: ServerIcon, count: status?.servers.length },
@@ -86,7 +86,7 @@ export function AppSidebar({ username, onLogout }: { username: string; onLogout:
                 {g.items.map((it) => (
                   <SidebarMenuItem key={it.to}>
                     <SidebarMenuButton asChild isActive={active(it.to)} tooltip={it.label}>
-                      <NavLink to={it.to}>
+                      <NavLink to={it.to === "/settings" && "dot" in it && it.dot ? "/settings?tab=core" : it.to}>
                         <it.icon />
                         <span>{it.label}</span>
                         {"dot" in it && it.dot && <span className="ml-auto size-2 rounded-full bg-primary" aria-label="有新版本" />}
