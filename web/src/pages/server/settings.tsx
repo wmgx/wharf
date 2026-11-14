@@ -27,6 +27,7 @@ type Settings = ServerView["settings"] & {
   github_mirror?: string;
   traffic_quota_gb?: number;
   traffic_reset_day?: number;
+  renew_at?: string;
 };
 
 export function SettingsForm({ server, canRemove, active }: { server: ServerView; canRemove: boolean; active: boolean }) {
@@ -40,6 +41,7 @@ export function SettingsForm({ server, canRemove, active }: { server: ServerView
     ["访问外网", ["via", "egress", "git_proxy", "pull_proxy", "github_mirror"]],
     ["部署", ["registry_mirrors", "mirrors_only", "build_env"]],
     ["流量", ["traffic_quota_gb", "traffic_reset_day"]],
+    ["续费", ["renew_at"]],
     ["权限", ["host_terminal", "host_exec"]],
   ];
   const changed = groups.filter(([, keys]) => dirty(keys)).map(([label]) => label);
@@ -128,11 +130,17 @@ function SettingsFields({ server, canRemove, draft, set, changed, onReset, onSub
     </Panel>
     <SectionTitle>流量</SectionTitle>
     <Panel className="p-4">
-      <Field label="流量" help="每月额度（GB）和重置日（1 到 28，北京时间），只用于显示本期用了多少。都不填按每月 1 号算、不显示额度。">
+      <Field label="流量" help="每月额度（GB）和重置日（1 到 28，北京时间），用于显示本期用了多少，用到 80% 时提醒（阈值在告警规则里改）。都不填按每月 1 号算、不显示额度。">
         <div className="flex gap-2">
           <Input aria-label="每月额度" inputMode="numeric" className="w-32" value={quota} placeholder="额度 GB" onChange={(e) => { const v = e.target.value; setTextEdited(true); setQuota(v); set({ traffic_quota_gb: v.trim() ? Number(v) : undefined }); }} />
           <Input aria-label="重置日" inputMode="numeric" className="w-32" value={resetDay} placeholder="重置日" onChange={(e) => { const v = e.target.value; setTextEdited(true); setResetDay(v); set({ traffic_reset_day: v.trim() ? Number(v) : undefined }); }} />
         </div>
+      </Field>
+    </Panel>
+    <SectionTitle>续费</SectionTitle>
+    <Panel className="p-4">
+      <Field label="续费日" htmlFor="renew-at">
+        <Input id="renew-at" type="date" value={draft.renew_at ?? ""} onChange={(e) => set({ renew_at: e.target.value || undefined })} />
       </Field>
     </Panel>
     <div id="access" className="mt-8">

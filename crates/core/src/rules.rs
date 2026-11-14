@@ -112,7 +112,167 @@ fn split_unit(s: &str) -> (&str, &str) {
   s.split_once(':').unwrap_or((s, ""))
 }
 
+fn expiry_fire(c: &Ctx) -> Event {
+  let (kind, name) = split_unit(c.subject);
+  let kind = if kind == "domain" {
+    "域名"
+  } else {
+    "服务器"
+  };
+  ev(
+    if c.value < 0.0 {
+      format!("{kind} {name} 已经到期")
+    } else {
+      format!("{kind} {name} 还有 {} 天到期", c.value as i64)
+    },
+    "到期前处理：域名在注册商续费；服务器在服务商续费，然后在服务器设置里更新续费日".into(),
+  )
+}
+
+fn expiry_ok(c: &Ctx) -> Event {
+  let (kind, name) = split_unit(c.subject);
+  let kind = if kind == "domain" {
+    "域名"
+  } else {
+    "服务器"
+  };
+  if c.value >= 9999.0 {
+    ev(
+      format!("{kind} {name} 不再提醒到期"),
+      "续费日已清除，或域名已经不在路由里".into(),
+    )
+  } else {
+    ev(
+      format!("{kind} {name} 已续期"),
+      format!("距离到期还有 {} 天", c.value as i64),
+    )
+  }
+}
+
 const RULES: &[Rule] = &[
+  Rule {
+    id: "traffic_quota",
+    name: "流量快用完",
+    metric: "traffic.used_pct",
+    op: Op::Ge,
+    threshold: 80.0,
+    threshold_editable: true,
+    for_n: 1,
+    mode: Mode::Consecutive,
+    recover: None,
+    every: "每 5 分钟一次，按本期用量",
+    key: |s| format!("traffic.{s}"),
+    fire: |c| {
+      ev(
+        format!("服务器 {} 本期流量已用 {:.0}%", c.subject, c.value),
+        format!(
+          "{}。到额度后可能被限速或产生额外费用，可以在服务器设置里调整额度或重置日",
+          c.detail
+        ),
+      )
+    },
+    ok: |c| {
+      ev(
+        format!("服务器 {} 的流量回到额度内", c.subject),
+        c.detail.into(),
+      )
+    },
+  },
+  Rule {
+    id: "clock_skew",
+    name: "时间不准",
+    metric: "clock.skew_s",
+    op: Op::Gt,
+    threshold: 5.0,
+    threshold_editable: true,
+    for_n: 3,
+    mode: Mode::Consecutive,
+    recover: Some(2.0),
+    every: "每 30 秒一次",
+    key: |s| format!("clock.{s}"),
+    fire: |c| {
+      let n = c.value as i64;
+      ev(
+        format!("服务器 {} 的时间和控制面差了 {n} 秒", c.subject),
+        format!(
+          "这台机器的时间和控制面差了 {n} 秒（已扣除网络往返）。时间不准会让证书校验、两步验证、备份时间戳出问题。检查这台机器的时间同步服务（systemd-timesyncd 或 chrony）"
+        ),
+      )
+    },
+    ok: |c| {
+      ev(
+        format!("服务器 {} 的时间恢复正常", c.subject),
+        format!("和控制面的时间差降到 {:.1} 秒", c.value),
+      )
+    },
+  },
+  Rule {
+    id: "disk_forecast",
+    name: "磁盘预计写满",
+    metric: "disk.days_left",
+    op: Op::Lt,
+    threshold: 14.0,
+    threshold_editable: true,
+    for_n: 1,
+    mode: Mode::Consecutive,
+    recover: Some(21.0),
+    every: "每小时一次，按近 7 天趋势",
+    key: |s| format!("diskfc.{s}"),
+    fire: |c| {
+      let n = if c.value < 1.0 {
+        "不到 1".into()
+      } else {
+        (c.value as i64).to_string()
+      };
+      ev(
+        format!("服务器 {} 的磁盘预计 {n} 天后写满", c.subject),
+        format!(
+          "按近 7 天的增长速度，磁盘预计 {n} 天后写满。清理没在用的镜像：服务器 {} → 系统 → 磁盘；或扩容",
+          c.subject
+        ),
+      )
+    },
+    ok: |c| {
+      ev(
+        format!("服务器 {} 的磁盘不再预计很快写满", c.subject),
+        if c.value >= 9999.0 {
+          "近 7 天磁盘没有增长".into()
+        } else {
+          format!("按近 7 天的趋势，预计还能用 {} 天", c.value as i64)
+        },
+      )
+    },
+  },
+  Rule {
+    id: "expiry_soon",
+    name: "快到期",
+    metric: "expiry.days",
+    op: Op::Lt,
+    threshold: 14.0,
+    threshold_editable: true,
+    for_n: 1,
+    mode: Mode::Consecutive,
+    recover: None,
+    every: "每小时一次",
+    key: |s| format!("expiry.soon.{s}"),
+    fire: expiry_fire,
+    ok: expiry_ok,
+  },
+  Rule {
+    id: "expiry_urgent",
+    name: "马上到期",
+    metric: "expiry.days",
+    op: Op::Lt,
+    threshold: 3.0,
+    threshold_editable: true,
+    for_n: 1,
+    mode: Mode::Consecutive,
+    recover: None,
+    every: "每小时一次",
+    key: |s| format!("expiry.urgent.{s}"),
+    fire: expiry_fire,
+    ok: expiry_ok,
+  },
   Rule {
     id: "server_offline",
     name: "服务器离线",
@@ -698,6 +858,17 @@ pub fn firing(rule: &str) -> Vec<String> {
       .iter()
       .filter(|((r, _), _)| r == rule)
       .map(|(_, (_, t))| t.clone())
+      .collect()
+  })
+}
+
+/// 某条规则正在触发的对象和标题：`(对象, 标题)`。
+pub fn firing_subjects(rule: &str) -> Vec<(String, String)> {
+  with(|m| {
+    m.firing
+      .iter()
+      .filter(|((r, _), _)| r == rule)
+      .map(|((_, s), (_, t))| (s.clone(), t.clone()))
       .collect()
   })
 }

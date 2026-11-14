@@ -4,14 +4,15 @@ import { useNavigate } from "react-router-dom";
 import { usePoll } from "@/api";
 import { AddRoute } from "@/components/add-route";
 import { CardsSkeleton, Dot, Empty, Mark, SectionTitle, useClickable, type Tone } from "@/components/common";
-import { serviceTruth } from "@/components/health";
+import { diagnosisOf, routeTone, serviceTruth } from "@/components/health";
 import { issueCount, useIssues } from "@/components/issues";
 import { Panel, Tip } from "@/components/kit";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useStatus } from "@/status";
-import type { AccountView, Status, TokenView } from "@/types";
+import type { AccountView, BookmarkView, Status, TokenView } from "@/types";
 import { edgeTone } from "./edge";
+import { HomeBookmarks, bookmarkGroups } from "./home-bookmarks";
 
 interface Item {
   name: string;
@@ -29,6 +30,9 @@ export function Home() {
   const nav = useNavigate();
   const [query, setQuery] = useState("");
   const [adding, setAdding] = useState(false);
+  const [bookmarksOpen, setBookmarksOpen] = useState(false);
+  const bookmarks = status?.bookmarks ?? [];
+  const filteredBookmarks = bookmarks.filter(({ spec }) => [spec.title, spec.url, spec.group ?? ""].some((v) => v.toLowerCase().includes(query.toLowerCase())));
   const items: Item[] = status ? [
     ...status.services.map((svc) => {
       const routes = status.routes.filter((r) => r.spec.service === svc.name);
@@ -52,10 +56,14 @@ export function Home() {
   const fault = issues.some((i) => i.level === "fault");
   return (
     <>
-      <div className="relative max-w-md">
+      <div className="flex items-center gap-2">
+      <div className="relative min-w-0 max-w-md flex-1">
         <SearchIcon className="absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
         <Input autoFocus placeholder="找服务或网址" value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && filtered.length === 1) go(filtered[0]); }} className="pl-9" />
       </div>
+      <Button variant="outline" onClick={() => setBookmarksOpen(true)}>管理书签</Button>
+      </div>
+      <HomeBookmarks open={bookmarksOpen} onClose={() => setBookmarksOpen(false)} />
       {count > 0 && <div className={`mt-4 flex items-center gap-3 rounded-xl border px-4 py-3 text-sm ${fault ? "border-destructive/30 bg-destructive/5" : "border-warning/30 bg-warning/5"}`}>
         <TriangleAlertIcon className={`size-4 shrink-0 ${fault ? "text-destructive" : "text-warning"}`} />
         <span className="min-w-0 flex-1 break-words">{count} 项待处理：{issues[0].title}{count > 1 ? " 等" : ""}</span>
@@ -63,12 +71,34 @@ export function Home() {
       </div>}
       {status && <Onboarding status={status} onAdd={() => setAdding(true)} />}
       <AddRoute open={adding} onClose={() => setAdding(false)} />
-      {!status ? <CardsSkeleton /> : items.length === 0 ? <Empty action={<Button onClick={() => nav("/services?new=1")}>部署服务</Button>}>还没有服务</Empty> : filtered.length === 0 ? <Empty>没有叫这个名字的服务</Empty> : <>
+      {!status ? <CardsSkeleton /> : items.length + bookmarks.length === 0 ? <Empty action={<Button onClick={() => nav("/services?new=1")}>部署服务</Button>}>还没有服务</Empty> : filtered.length + filteredBookmarks.length === 0 ? <Empty>没有叫这个名字的服务</Empty> : <>
         <CardGroup title="能从外网打开" items={filtered.filter((i) => i.url)} />
         <CardGroup title="只在内网" items={filtered.filter((i) => !i.url)} />
+        <BookmarkCards bookmarks={filteredBookmarks} status={status} />
       </>}
     </>
   );
+}
+
+function BookmarkCards({ bookmarks, status }: { bookmarks: BookmarkView[]; status: Status }) {
+  const clickable = useClickable();
+  return bookmarkGroups(bookmarks).map(([group, items]) => <section key={group}>
+    <SectionTitle count={items.length}>{group}</SectionTitle>
+    <div className="grid grid-cols-[repeat(auto-fill,minmax(min(100%,220px),1fr))] gap-3">
+      {items.map((b) => {
+        let host = b.spec.url;
+        let href: string | undefined;
+        try { host = new URL(b.spec.url).hostname; href = b.spec.url; } catch { href = undefined; }
+        const d = diagnosisOf(status, host);
+        const truth = d && routeTone(d);
+        return <div key={b.id} {...clickable({ href })} aria-disabled={!href} className="group flex cursor-pointer items-center gap-3 rounded-xl border bg-card p-3 shadow-xs hover:bg-accent/50">
+          <Mark name={b.spec.title} url={href} />
+          <div className="min-w-0 flex-1"><div className="truncate font-medium">{b.spec.title}</div><div className="truncate font-mono text-xs text-muted-foreground">{host}</div></div>
+          {truth && <Tip text={truth.detail ?? truth.text}><span><Dot tone={truth.tone} /></span></Tip>}
+        </div>;
+      })}
+    </div>
+  </section>);
 }
 
 function CardGroup({ title, items }: { title: string; items: Item[] }) {

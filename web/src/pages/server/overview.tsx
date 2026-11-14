@@ -11,6 +11,7 @@ export function Overview({ server, status, info, traffic, loading }: { server: S
   const name = server.name;
   const r = server.report;
   const disk = r?.disk;
+  const offset = server.clock_offset_ms;
   const services = status.services.filter((s) => s.spec.server === name);
   const gateways = status.gateways.filter((g) => g.spec.server === name);
   const ips = [server.public_ip, server.private_addr?.ip].filter(Boolean);
@@ -21,7 +22,9 @@ export function Overview({ server, status, info, traffic, loading }: { server: S
     <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
       <Stat label="CPU" value={info ? `负载 ${info.load[0].toFixed(2)}` : undefined} sub={info ? `${info.cpus} 核` : undefined} used={info ? info.load[0] / info.cpus : undefined} loading={!info && loading} />
       <Stat label="内存" value={info ? `可用 ${size(info.mem_available)}` : undefined} sub={info ? `共 ${size(info.mem_total)}` : undefined} used={info ? 1 - info.mem_available / info.mem_total : undefined} loading={!info && loading} />
-      <Stat label="磁盘" value={disk ? `剩 ${size(disk.free)}` : undefined} sub={disk && <>共 {size(disk.total)}{r?.docker_disk && r.docker_disk.total !== disk.total && <span className="block">Docker 盘剩 {size(r.docker_disk.free)}
+      <Stat label="磁盘" value={disk ? `剩 ${size(disk.free)}` : undefined} sub={disk && <>共 {size(disk.total)}
+      {server.disk_days_left != null && server.disk_days_left <= 90 && <span className={`block ${server.disk_days_left <= 14 ? "text-warning" : ""}`}>预计 {server.disk_days_left < 1 ? "不到 1" : Math.floor(server.disk_days_left)} 天写满</span>}
+      {r?.docker_disk && r.docker_disk.total !== disk.total && <span className="block">Docker 盘剩 {size(r.docker_disk.free)}
       </span>}
       </>} used={disk ? 1 - disk.free / disk.total : undefined} />
       <Stat label="流量" value={traffic ? `本期 ${size(used)}` : undefined} sub={traffic ? traffic.quota ? `额度 ${size(traffic.quota)} · 已用 ${Math.round(used / traffic.quota * 100)}%` : `${traffic.since.slice(5)} 起` : undefined} used={traffic?.quota ? used / traffic.quota : undefined} />
@@ -36,6 +39,7 @@ export function Overview({ server, status, info, traffic, loading }: { server: S
           {server.private_addr.ip}
         </span>],
         ["延迟", server.rtt_ms != null ? `${server.rtt_ms} ms` : "-"],
+        ["时间偏差", offset != null ? <span className={Math.abs(offset) > 5000 ? "text-warning" : undefined}>{Math.abs(offset) < 1000 ? "< 1 秒" : `${offset > 0 ? "快" : "慢"} ${(Math.abs(offset) / 1000).toFixed(1)} 秒`}</span> : "-"],
         ["系统", info ? `${info.os ?? r?.os ?? "-"} · 内核 ${info.kernel}` : r?.os],
         ["docker", r?.docker_version && `${r.docker_version}${r.compose_version ? ` · compose ${r.compose_version}` : ""}`],
         ["agent", r && `${r.version}${r.build ? ` · ${r.build}` : ""}`],

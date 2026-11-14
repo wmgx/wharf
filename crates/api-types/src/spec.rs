@@ -81,12 +81,15 @@ pub struct ServerSettings {
   /// 允许通过 API 在宿主机执行命令。
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub host_exec: bool,
-  /// 每月流量额度（GB），只用于显示本月用了多少。
+  /// 每月流量额度（GB），用于显示本期用了多少，用到 80% 时提醒（阈值在告警规则里改）。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub traffic_quota_gb: Option<u32>,
   /// 流量每月几号重置（1 到 28，按北京时间），不填是 1 号。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub traffic_reset_day: Option<u8>,
+  /// 服务器续费日（`YYYY-MM-DD`，北京时间）。只用来提醒，不影响任何部署。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub renew_at: Option<String>,
   /// 机器基线：系统设置的期望值，agent 定时检查差异，apply 时纠正。
   #[serde(default, skip_serializing_if = "Baseline::is_empty")]
   pub baseline: Baseline,
@@ -661,6 +664,20 @@ impl EdgeAppSpec {
   }
 }
 
+/// 首页上的一条书签：不归 Wharf 管的地址。
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct BookmarkSpec {
+  pub title: String,
+  /// 只允许 http:// 或 https://。
+  pub url: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub group: Option<String>,
+  #[serde(default)]
+  pub order: i32,
+}
+
 /// 意图文件 fleet.toml 的全部内容。plan 时作为完整期望状态：
 /// 文件里没有的服务、网关、路由会被计划删除。
 #[derive(
@@ -676,6 +693,8 @@ pub struct Fleet {
   pub gateways: BTreeMap<String, GatewaySpec>,
   #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
   pub edge_apps: BTreeMap<String, EdgeAppSpec>,
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub bookmarks: BTreeMap<String, BookmarkSpec>,
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub routes: Vec<RouteSpec>,
 }
@@ -687,6 +706,14 @@ pub struct Fleet {
 #[serde(tag = "op", rename_all = "snake_case")]
 #[allow(clippy::large_enum_variant)] // 一次计划只有几个，装箱改动面太大
 pub enum Change {
+  /// id 为空时新建，否则修改已有书签。
+  UpsertBookmark {
+    id: Option<String>,
+    spec: BookmarkSpec,
+  },
+  RemoveBookmark {
+    id: String,
+  },
   /// 服务器必须已经 `wharf server add` 过。
   UpdateServer {
     name: String,

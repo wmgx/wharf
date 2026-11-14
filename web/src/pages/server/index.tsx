@@ -60,6 +60,7 @@ const item = "flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm transitio
 
 function Side({ name, onAdd }: { name?: string; onAdd: () => void }) {
   const { status } = useStatus();
+  const today = Date.parse(`${new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Shanghai" })}T00:00:00+08:00`);
 
   return (
     <nav className="sticky top-14 z-[5] flex gap-1 overflow-x-auto border-b bg-background p-2 md:flex md:flex-col md:gap-0.5 md:overflow-x-visible md:sticky md:top-14 md:h-[calc(100svh-3.5rem)] md:w-56 md:flex-none md:overflow-y-auto md:border-r md:border-b-0">
@@ -67,6 +68,7 @@ function Side({ name, onAdd }: { name?: string; onAdd: () => void }) {
         ? [0, 1, 2].map((i) => <Skeleton key={i} className="h-12 rounded-lg" />)
         : status.servers.map((s) => {
             const count = status.services.filter((v) => v.spec.server === s.name).length;
+            const days = s.settings.renew_at ? Math.round((Date.parse(`${s.settings.renew_at}T00:00:00+08:00`) - today) / 86400000) : undefined;
             return (
               <Entry key={s.name} to={`/servers/${encodeURIComponent(s.name)}`} on={s.name === name}>
                 <Dot tone={serverTone(s)} />
@@ -77,6 +79,7 @@ function Side({ name, onAdd }: { name?: string; onAdd: () => void }) {
                   </span>
                   <span className="truncate text-xs text-muted-foreground">
                     {!s.joined ? "等待加入" : s.online ? `${count} 个服务` : `离线${s.last_seen ? ` · ${ago(s.last_seen)}` : ""}`}
+                    {days != null && <span className={days < 14 ? "text-warning" : undefined}> · {days < 0 ? "续费日已过" : `续费 ${days} 天后`}</span>}
                   </span>
                 </span>
               </Entry>

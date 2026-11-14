@@ -50,6 +50,7 @@ export interface ServerView {
     host_exec: boolean;
     egress?: EgressSpec;
     via?: string;
+    renew_at?: string;
   };
   joined: boolean;
   online: boolean;
@@ -61,6 +62,8 @@ export interface ServerView {
   rtt_ms?: number;
   agent_outdated?: boolean;
   baseline_drift?: string[];
+  disk_days_left?: number;
+  clock_offset_ms?: number;
 }
 
 export interface BuildSource {
@@ -341,6 +344,7 @@ export interface Issue {
 }
 
 export interface Status {
+  bookmarks: BookmarkView[];
   servers: ServerView[];
   services: ServiceView[];
   edge_apps?: EdgeAppView[];
@@ -384,6 +388,7 @@ export interface RouteDiagnosis {
   checks: DoctorCheck[];
   /** HTTPS 证书到期时间，连不上或不是 HTTPS 时没有。 */
   cert_expires?: string;
+  domain_expires?: string;
 }
 
 export interface DoctorReport {
@@ -402,7 +407,22 @@ export interface AccountView {
   updated_at: string;
 }
 
+export interface BookmarkSpec {
+  title: string;
+  url: string;
+  group?: string;
+  order: number;
+}
+
+export interface BookmarkView {
+  id: string;
+  spec: BookmarkSpec;
+  version: number;
+}
+
 export type Change =
+  | { op: "upsert_bookmark"; id?: string; spec: BookmarkSpec }
+  | { op: "remove_bookmark"; id: string }
   | { op: "update_server"; name: string; settings: Record<string, unknown> }
   | { op: "upsert_service"; name: string; spec: ServiceSpec; adopt?: AdoptSpec }
   | { op: "remove_service"; name: string; purge_data?: boolean }

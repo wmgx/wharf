@@ -519,6 +519,8 @@ async fn handle_socket(
         };
         match serde_json::from_slice::<AgentMsg>(&text) {
           Ok(AgentMsg::Report(mut report)) => {
+            let agent_ms = report.time_ms.take();
+            crate::clock::record(&state, &server, agent_ms).await;
             if let Some(mut m) = report.metrics.take() {
               let hosts = std::mem::take(&mut m.hosts);
               if !hosts.is_empty() {

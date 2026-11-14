@@ -67,6 +67,7 @@ impl Reporter {
       disk: disk(&self.docker.data_dir),
       docker_disk: docker_disk(&self.docker.data_dir),
       metrics: None,
+      time_ms: None,
     }
   }
 

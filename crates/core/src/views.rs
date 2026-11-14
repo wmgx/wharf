@@ -12,9 +12,9 @@ use wharf_api_types::{
   agent::ProjectState,
   spec::{Fleet, GatewayKind, GatewayTls},
   view::{
-    EdgeAppView, EdgeLive, EdgeProjectView, GatewayView,
-    ImportRecord, Issue, IssueLevel, IssueSubject, LiveState,
-    RouteView, ServerView, ServiceView, Status, Tone,
+    BookmarkView, EdgeAppView, EdgeLive, EdgeProjectView,
+    GatewayView, ImportRecord, Issue, IssueLevel, IssueSubject,
+    LiveState, RouteView, ServerView, ServiceView, Status, Tone,
   },
 };
 
@@ -64,6 +64,12 @@ pub fn server_view(
     report,
     version: row.version,
     baseline_drift: crate::baseline::drift(name),
+    disk_days_left: crate::disk_forecast::days_left(name),
+    clock_offset_ms: if state.hub.is_online(name) {
+      crate::clock::offset_of(name)
+    } else {
+      None
+    },
   })
 }
 
@@ -583,6 +589,10 @@ pub async fn status(
   issues.extend(crate::probe::issues());
   issues.extend(crate::alerts::issues());
   issues.extend(crate::monitor::issues());
+  issues.extend(crate::rdap::issues());
+  issues.extend(crate::disk_forecast::issues());
+  issues.extend(crate::clock::issues());
+  issues.extend(crate::traffic::issues());
   issues.extend(crate::baseline::issues());
   issues.extend(crate::host_units::issues());
   let updates = crate::updates::last();
@@ -640,7 +650,24 @@ pub async fn status(
     .keys()
     .filter_map(|h| route_view(&snap, &net, h))
     .collect();
+  let mut bookmarks: Vec<_> = snap
+    .world
+    .bookmarks
+    .iter()
+    .map(|(id, r)| BookmarkView {
+      id: id.clone(),
+      spec: r.spec.clone(),
+      version: r.version,
+    })
+    .collect();
+  bookmarks.sort_by(|a, b| {
+    a.spec
+      .order
+      .cmp(&b.spec.order)
+      .then_with(|| a.spec.title.cmp(&b.spec.title))
+  });
   Ok(Status {
+    bookmarks,
     servers,
     services,
     edge_apps,
@@ -674,6 +701,11 @@ pub fn edge_view(snap: &Snapshot, name: &str) -> Option<EdgeAppView> {
 
 pub fn export(world: &World) -> Fleet {
   Fleet {
+    bookmarks: world
+      .bookmarks
+      .iter()
+      .map(|(id, r)| (id.clone(), r.spec.clone()))
+      .collect(),
     servers: world
       .servers
       .iter()
