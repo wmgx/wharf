@@ -18,7 +18,8 @@ pub enum BookmarkCmd {
   List,
   Add {
     title: String,
-    url: String,
+    #[arg(value_name = "URL")]
+    bookmark_url: String,
     #[arg(long)]
     group: Option<String>,
     #[arg(long)]
@@ -48,7 +49,7 @@ pub async fn bookmark(
     }
     BookmarkCmd::Add {
       title,
-      url,
+      bookmark_url,
       group,
       order,
       id,
@@ -72,7 +73,7 @@ pub async fn bookmark(
       };
       let spec = BookmarkSpec {
         title,
-        url,
+        url: bookmark_url,
         group: group
           .or_else(|| old.as_ref().and_then(|s| s.group.clone())),
         order: order
