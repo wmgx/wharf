@@ -1,151 +1,98 @@
-import { Panel } from "@/components/kit";
-import { ArrowRightIcon, ArrowUpCircleIcon, CheckIcon, ChevronRightIcon, CloudIcon, PlusIcon } from "lucide-react";
-import { useState, type CSSProperties } from "react";
+import { SearchIcon, Settings2Icon, TriangleAlertIcon, ArrowRightIcon, CheckIcon, PlusIcon } from "lucide-react";
+import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { usePoll } from "@/api";
-import { CardsSkeleton, OpenLink, useClickable, Mark, PageHeader, SectionTitle, ServerTag, StatusBadge, type Tone } from "@/components/common";
+import { AddRoute } from "@/components/add-route";
+import { CardsSkeleton, Dot, Empty, Mark, SectionTitle, useClickable, type Tone } from "@/components/common";
 import { serviceTruth } from "@/components/health";
+import { issueCount, useIssues } from "@/components/issues";
+import { Panel, Tip } from "@/components/kit";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { useStatus } from "@/status";
 import type { AccountView, Status, TokenView } from "@/types";
 import { edgeTone } from "./edge";
-import { cn } from "@/lib/utils";
 
-const card =
-  "group flex flex-col gap-3 rounded-xl border bg-card p-4 shadow-xs transition-all hover:-translate-y-px hover:border-foreground/15 hover:shadow-md animate-in fade-in slide-in-from-bottom-1 fill-mode-both";
-
-/** 首页的一张卡片：一个服务（服务器上的或 Cloudflare 上的）。 */
 interface Item {
   name: string;
   url?: string;
   address?: string;
   detail: string;
-  where: string;
-  cloud: boolean;
   tone: Tone;
   text: string;
-  newer?: boolean;
+  search: string;
 }
 
-function itemsOf(status: Status): Item[] {
-  const services: Item[] = status.services.map((s) => {
-    const route = status.routes.find((r) => r.spec.service === s.name);
-    const { tone, text } = serviceTruth(s, status);
-    return { name: s.name, url: route?.url, address: Object.values(s.addresses)[0], detail: `/services/${s.name}`, where: s.spec.server, cloud: false, tone, text, newer: status.updates?.services[s.name]?.newer };
-  });
-  const edge: Item[] = (status.edge_apps ?? []).map((a) => {
-    const { tone, text } = edgeTone(a.live, a.drift);
-    const url = a.spec.domains?.[0] ? `https://${a.spec.domains[0]}` : a.live?.url;
-    return { name: a.name, url, detail: `/edge/${a.name}`, where: "Cloudflare", cloud: true, tone, text };
-  });
-  return [...services, ...edge].sort((x, y) => x.name.localeCompare(y.name));
-}
-
-/** 首页：服务卡片和服务器筛选；系统还没配完时顶部是上手清单。 */
 export function Home() {
   const { status } = useStatus();
+  const issues = useIssues().filter((i) => i.level !== "info");
   const nav = useNavigate();
-  const [server, setServer] = useState<string | undefined>(undefined);
-  const items = (status ? itemsOf(status) : []).filter((i) => !server || (i.cloud ? server === "cloudflare" : i.where === server));
-  const open = items.filter((i) => i.url);
-  const internal = items.filter((i) => !i.url);
-  const where = status ? [...status.servers.map((s) => s.name), ...(status.edge_apps?.length ? ["cloudflare"] : [])] : [];
-
+  const [query, setQuery] = useState("");
+  const [adding, setAdding] = useState(false);
+  const items: Item[] = status ? [
+    ...status.services.map((svc) => {
+      const routes = status.routes.filter((r) => r.spec.service === svc.name);
+      const addresses = Object.values(svc.addresses);
+      const { tone, text, detail } = serviceTruth(svc, status);
+      return { name: svc.name, url: routes[0]?.url, address: addresses[0], detail: `/services/${svc.name}`, tone, text: detail ? `${text} · ${detail}` : text, search: [svc.name, ...routes.map((r) => r.spec.hostname), ...addresses].join(" ").toLowerCase() };
+    }),
+    ...(status.edge_apps ?? []).map((app) => {
+      const { tone, text } = edgeTone(app.live, app.drift);
+      const url = app.spec.domains?.[0] ? `https://${app.spec.domains[0]}` : app.live?.url;
+      return { name: app.name, url, detail: `/edge/${app.name}`, tone, text, search: [app.name, ...(app.spec.domains ?? []), app.live?.url ?? ""].join(" ").toLowerCase() };
+    }),
+  ].sort((a, b) => a.name.localeCompare(b.name)) : [];
+  const filtered = items.filter((item) => item.search.includes(query.toLowerCase()));
+  const go = (item: Item) => {
+    const href = item.url ?? (item.address ? `http://${item.address}` : undefined);
+    if (href) window.open(href, "_blank", "noreferrer");
+    else nav(item.detail);
+  };
+  const count = issueCount(issues);
+  const fault = issues.some((i) => i.level === "fault");
   return (
     <>
-      <PageHeader
-        title="首页"
-        description={status ? `${status.servers.length} 台服务器 · ${status.services.length + (status.edge_apps?.length ?? 0)} 个服务 · ${status.routes.length} 个域名` : "载入中…"}
-        actions={
-          <Button onClick={() => nav("/services?new=1")}>
-            <PlusIcon />
-            新建服务
-          </Button>
-        }
-      />
-      {status && <Onboarding status={status} />}
-      {status && (
-        <div className="mb-4 flex flex-wrap items-center gap-2">
-          <div className="flex flex-wrap items-center gap-1">
-            {[undefined, ...where].map((w) => (
-              <button
-                key={w ?? "all"}
-                type="button"
-                onClick={() => setServer(w)}
-                className={cn("rounded-md px-2.5 py-1 text-sm text-muted-foreground transition-colors hover:text-foreground", server === w && "bg-accent font-medium text-foreground")}
-              >
-                {w === undefined ? "全部" : w === "cloudflare" ? "Cloudflare" : w}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-      {!status ? (
-        <CardsSkeleton />
-      ) : (
-        <>
-          {open.length > 0 && <SectionTitle count={open.length}>能从外网打开</SectionTitle>}
-          <Cards items={open} />
-          {internal.length > 0 && <SectionTitle count={internal.length}>只在内网</SectionTitle>}
-          <Cards items={internal} />
-        </>
-      )}
+      <div className="relative max-w-md">
+        <SearchIcon className="absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
+        <Input autoFocus placeholder="找服务或网址" value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && filtered.length === 1) go(filtered[0]); }} className="pl-9" />
+      </div>
+      {count > 0 && <div className={`mt-4 flex items-center gap-3 rounded-xl border px-4 py-3 text-sm ${fault ? "border-destructive/30 bg-destructive/5" : "border-warning/30 bg-warning/5"}`}>
+        <TriangleAlertIcon className={`size-4 shrink-0 ${fault ? "text-destructive" : "text-warning"}`} />
+        <span className="min-w-0 flex-1 break-words">{count} 项待处理：{issues[0].title}{count > 1 ? " 等" : ""}</span>
+        <Button variant="outline" size="sm" onClick={() => nav("/inbox")}>查看</Button>
+      </div>}
+      {status && <Onboarding status={status} onAdd={() => setAdding(true)} />}
+      <AddRoute open={adding} onClose={() => setAdding(false)} />
+      {!status ? <CardsSkeleton /> : items.length === 0 ? <Empty action={<Button onClick={() => nav("/services?new=1")}>部署服务</Button>}>还没有服务</Empty> : filtered.length === 0 ? <Empty>没有叫这个名字的服务</Empty> : <>
+        <CardGroup title="能从外网打开" items={filtered.filter((i) => i.url)} />
+        <CardGroup title="只在内网" items={filtered.filter((i) => !i.url)} />
+      </>}
     </>
   );
 }
 
-function Cards({ items }: { items: Item[] }) {
+function CardGroup({ title, items }: { title: string; items: Item[] }) {
   const clickable = useClickable();
-  if (items.length === 0) return null;
-  return (
-    <div className="grid grid-cols-[repeat(auto-fill,minmax(min(100%,260px),1fr))] gap-3">
-      {items.map((it, i) => {
-        const style = { animationDelay: `${i * 30}ms` } as CSSProperties;
-        // 点卡片进详情；点地址才去打开服务本身。
-        const shown = it.url ?? it.address;
-        const body = (
-          <>
-            <div className="flex items-center gap-3">
-              <Mark name={it.name} url={it.url} />
-              <div className="min-w-0">
-                <div className="font-semibold">{it.name}</div>
-                <div className="flex min-w-0 font-mono text-xs text-muted-foreground">
-                  {shown ? <OpenLink value={shown} label={shown.replace(/^https?:\/\//, "")} /> : "-"}
-                </div>
-              </div>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <StatusBadge tone={it.tone}>{it.text}</StatusBadge>
-              {it.newer && (
-                <span className="inline-flex items-center gap-1 rounded-md bg-primary/10 px-1.5 py-0.5 text-xs font-medium text-primary">
-                  <ArrowUpCircleIcon className="size-3" />
-                  新版本
-                </span>
-              )}
-              {it.cloud ? (
-                <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
-                  <CloudIcon className="size-3" />
-                  Cloudflare
-                </span>
-              ) : (
-                <ServerTag name={it.where} />
-              )}
-              <ChevronRightIcon className="ml-auto size-4 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
-            </div>
-          </>
-        );
-        return (
-          <div key={it.detail} className={`${card} cursor-pointer`} style={style} {...clickable({ to: it.detail })}>
-            {body}
-          </div>
-        );
+  const nav = useNavigate();
+  if (!items.length) return null;
+  return <>
+    <SectionTitle count={items.length}>{title}</SectionTitle>
+    <div className="grid grid-cols-[repeat(auto-fill,minmax(min(100%,220px),1fr))] gap-3">
+      {items.map((item) => {
+        const href = item.url ?? (item.address ? `http://${item.address}` : undefined);
+        const link = clickable(href ? { href } : { to: item.detail });
+        return <div key={item.detail} {...link} onKeyDown={(e) => { if (e.key.toLowerCase() === "m" && e.target === e.currentTarget) nav(item.detail); else link.onKeyDown(e); }} className="group flex cursor-pointer items-center gap-3 rounded-xl border bg-card p-3 shadow-xs hover:bg-accent/50">
+          <Mark name={item.name} url={item.url} />
+          <div className="min-w-0 flex-1"><div className="truncate font-medium">{item.name}</div><div className="truncate font-mono text-xs text-muted-foreground">{(item.url ?? item.address ?? "-").replace(/^https?:\/\//, "")}</div></div>
+          <div className="flex flex-col items-end gap-1"><Tip text="管理"><Button variant="ghost" size="icon-xs" aria-label={`管理 ${item.name}`} className="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100" onClick={(e) => { e.stopPropagation(); nav(item.detail); }}><Settings2Icon /></Button></Tip><Tip text={item.text}><span><Dot tone={item.tone} /></span></Tip></div>
+        </div>;
       })}
     </div>
-  );
+  </>;
 }
 
 /** 上手清单：按顺序做完就能用；全部做完后不再显示。 */
-function Onboarding({ status }: { status: Status }) {
+function Onboarding({ status, onAdd }: { status: Status; onAdd: () => void }) {
   const nav = useNavigate();
   const { data: accounts } = usePoll<AccountView[]>("/api/accounts", 60000);
   const { data: tokens } = usePoll<TokenView[]>("/api/tokens", 60000);
@@ -171,7 +118,7 @@ function Onboarding({ status }: { status: Status }) {
       title: "建一个入口",
       hint: "域名从哪进来：有公网 IP 的机器直连，或 Cloudflare 隧道",
       action: "新建入口",
-      go: () => nav("/entries?new=1"),
+      go: () => nav("/domains?tab=entries&new=1"),
     },
     {
       done: status.services.length + (status.edge_apps?.length ?? 0) > 0,
@@ -185,7 +132,7 @@ function Onboarding({ status }: { status: Status }) {
       title: "给它一个域名",
       hint: "证书和 DNS 自动配好",
       action: "加域名",
-      go: () => nav("/entries"),
+      go: onAdd,
     },
     {
       done: tokens.some((t) => !!t.last_used_at),
@@ -200,7 +147,7 @@ function Onboarding({ status }: { status: Status }) {
   const next = steps.findIndex((s) => !s.done);
 
   return (
-    <Panel className="mb-8 p-4">
+    <Panel className="mt-4 mb-8 p-4">
       <div className="mb-3 flex items-baseline justify-between gap-2">
         <h2 className="font-medium">开始使用</h2>
         <span className="text-xs text-muted-foreground">还剩 {left} 步</span>

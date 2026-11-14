@@ -1,4 +1,4 @@
-import { ConfirmDialog } from "@/components/kit";
+import { ConfirmDialog, Facts, Row, Rows, Tip } from "@/components/kit";
 import { Panel } from "@/components/kit";
 import { ArrowLeftIcon, ArrowUpRightIcon, PlusIcon, RefreshCwIcon, RotateCwIcon, Trash2Icon, Undo2Icon, XIcon } from "lucide-react";
 import { useState } from "react";
@@ -10,7 +10,6 @@ import { CodeBlock, Empty, ErrorNote, Notice, PageHeader, SectionTitle, StatusBa
 import { DomainChips, Field } from "@/components/fields";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -18,7 +17,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useStatus } from "@/status";
 import type { EdgeAppView, EdgeVersionView } from "@/types";
-import { KIND_NAME, edgeSourceLabel, edgeTask, edgeTone, projectOf } from "./edge";
+import { edgeTask, edgeTone, projectOf } from "./edge";
 
 /** Cloudflare 应用详情：访问地址、域名、Cloudflare 那边的版本（可以切换回旧版本）。 */
 export function EdgeDetail() {
@@ -63,7 +62,7 @@ export function EdgeDetail() {
       await api.get(`${path}?sync=1`);
       refresh();
       setTick((t) => t + 1);
-    } catch (e) {
+    } catch(e) {
       toast.error(`同步 ${name} 失败`, { description: (e as Error).message });
     } finally {
       setSyncing(false);
@@ -75,7 +74,7 @@ export function EdgeDetail() {
       toast.success("已以线上版本为准");
       refresh();
       setTick((t) => t + 1);
-    } catch (e) {
+    } catch(e) {
       toast.error("操作失败", { description: (e as Error).message });
     }
   };
@@ -94,15 +93,12 @@ export function EdgeDetail() {
         title={
           <>
             {app.name}
-            <StatusBadge tone={tone}>{text}</StatusBadge>
+            <StatusBadge tone={tone}>
+              {text}
+            </StatusBadge>
           </>
         }
-        description={
-          <span className="flex flex-wrap items-center gap-1.5">
-            <Badge variant="secondary">{KIND_NAME[app.spec.kind]}</Badge>
-            <span className="font-mono text-xs">{edgeSourceLabel(app.spec.source)}</span>
-          </span>
-        }
+        description={`${app.spec.kind === "worker" ? "Workers" : "Pages"} · ${app.spec.account}`}
         actions={
           <>
             <Tooltip>
@@ -112,7 +108,9 @@ export function EdgeDetail() {
                   同步
                 </Button>
               </TooltipTrigger>
-              <TooltipContent>{app.live ? `上次同步 ${ago(app.live.checked_at)}` : "未同步"}</TooltipContent>
+              <TooltipContent>
+                {app.live ? `上次同步 ${ago(app.live.checked_at)}` : "未同步"}
+              </TooltipContent>
             </Tooltip>
             {app.spec.source && (
               <Button variant="outline" onClick={redeploy}>
@@ -120,10 +118,6 @@ export function EdgeDetail() {
                 重新发布
               </Button>
             )}
-            <Button variant="outline" className="text-destructive" onClick={() => setRemoving(true)}>
-              <Trash2Icon />
-              不再纳管
-            </Button>
           </>
         }
       />
@@ -144,54 +138,48 @@ export function EdgeDetail() {
         </Notice>
       )}
 
-      <Card className="py-5 shadow-xs">
-        <CardContent className="px-5">
-          <dl className="grid grid-cols-[88px_minmax(0,1fr)] gap-x-4 gap-y-3 text-sm">
-            <dt className="text-muted-foreground">地址</dt>
-            <dd className="grid min-w-0 gap-1">
-              {app.live?.url && <ExternalLink url={app.live.url} />}
-              {domains.map((d) => (
-                <div key={d} className="flex items-center justify-between gap-2">
-                  <ExternalLink url={`https://${d}`} />
-                  <Button
-                    variant="ghost"
-                    size="icon-xs"
-                    aria-label={`移除 ${d}`}
-                    onClick={() => setDomains(`移除 ${d}`, domains.filter((x) => x !== d))}
-                  >
-                    <XIcon />
-                  </Button>
-                </div>
-              ))}
-              <Button variant="outline" size="xs" className="w-fit" onClick={() => setAddingRoute(true)}>
-                <PlusIcon />
-                加域名
-              </Button>
-            </dd>
-            <dt className="text-muted-foreground">Cloudflare</dt>
-            <dd className="font-mono text-xs">
-              {app.spec.account} / {projectOf(app)}
-            </dd>
-            <dt className="text-muted-foreground">同步于</dt>
-            <dd className="text-muted-foreground">{app.live ? ago(app.live.checked_at) : "-"}</dd>
-            <dt className="text-muted-foreground">最近发布</dt>
-            <dd>
-              {app.live?.deployed_at ? `${ago(app.live.deployed_at)}${app.live.deployed_by ? `（${app.live.deployed_by}）` : ""}` : "-"}
-            </dd>
-            {app.spec.builder && (
-              <>
-                <dt className="text-muted-foreground">执行 wrangler</dt>
-                <dd>{app.spec.builder}</dd>
-              </>
-            )}
-          </dl>
-        </CardContent>
-      </Card>
+      <Panel className="p-4">
+        <Facts items={[
+          ["地址", app.live?.url && <ExternalLink url={app.live.url} />],
+          ["Cloudflare", <span className="font-mono text-xs">
+            {app.spec.account} / {projectOf(app)}
+          </span>],
+          ["同步于", app.live ? ago(app.live.checked_at) : "-"],
+          ["最近发布", app.live?.deployed_at ? `${ago(app.live.deployed_at)}${app.live.deployed_by ? `（${app.live.deployed_by}）` : ""}` : "-"],
+          ["执行 wrangler", app.spec.builder],
+        ]} />
+      </Panel>
+      <SectionTitle action={<Button variant="outline" size="xs" onClick={() => setAddingRoute(true)}>
+        <PlusIcon />加域名</Button>}>域名</SectionTitle>
+      {domains.length ? <Rows>
+        {domains.map((domain) => <Row key={domain} to={`/domains?q=${encodeURIComponent(domain)}`}>
+          <span className="min-w-0 flex-1 truncate font-mono text-xs">
+            {domain}
+          </span>
+          <Tip text="移除">
+            <Button variant="ghost" size="icon-xs" aria-label={`移除 ${domain}`} onClick={() => setDomains(`移除 ${domain}`, domains.filter((x) => x !== domain))}>
+              <XIcon />
+            </Button>
+          </Tip>
+        </Row>)}
+      </Rows> : <Empty>还没有域名</Empty>}
 
       <Versions key={tick} name={name} onChanged={refresh} />
 
       <SectionTitle>配置</SectionTitle>
-      <CodeBlock>{JSON.stringify(app.spec, null, 2)}</CodeBlock>
+      <CodeBlock>
+        {JSON.stringify(app.spec, null, 2)}
+      </CodeBlock>
+
+      <SectionTitle>危险操作</SectionTitle>
+      <Panel className="flex flex-wrap items-center gap-3 border-destructive/30 p-4">
+        <div className="grid flex-1 gap-0.5 text-sm">
+          <span className="font-medium">不再纳管</span>
+          <span className="text-xs text-muted-foreground">Cloudflare 上的应用不受影响。</span>
+        </div>
+        <Button variant="destructive" size="sm" onClick={() => setRemoving(true)}>
+          <Trash2Icon />不再纳管</Button>
+      </Panel>
 
       <AddEdgeRoute app={name} open={addingRoute} onClose={() => setAddingRoute(false)} onAdd={(h) => setDomains("加域名", [...domains, h])} />
     </>
@@ -201,7 +189,9 @@ export function EdgeDetail() {
 function ExternalLink({ url }: { url: string }) {
   return (
     <a className="inline-flex min-w-0 items-center gap-1 font-mono text-xs text-primary hover:underline" href={url} target="_blank" rel="noreferrer">
-      <span className="truncate">{url}</span>
+      <span className="truncate">
+        {url}
+      </span>
       <ArrowUpRightIcon className="size-3.5 shrink-0" />
     </a>
   );
@@ -256,9 +246,15 @@ function Versions({ name, onChanged }: { name: string; onChanged: () => void }) 
                       </Badge>
                     )}
                   </TableCell>
-                  <TableCell className="text-muted-foreground">{v.created_at ? ago(v.created_at) : "-"}</TableCell>
-                  <TableCell className="text-muted-foreground">{v.source ?? "-"}</TableCell>
-                  <TableCell className="max-w-64 truncate text-muted-foreground">{v.message ?? ""}</TableCell>
+                  <TableCell className="text-muted-foreground">
+                    {v.created_at ? ago(v.created_at) : "-"}
+                  </TableCell>
+                  <TableCell className="text-muted-foreground">
+                    {v.source ?? "-"}
+                  </TableCell>
+                  <TableCell className="max-w-64 truncate text-muted-foreground">
+                    {v.message ?? ""}
+                  </TableCell>
                   <TableCell className="pr-4 text-right">
                     {!v.active && (
                       <Button variant="ghost" size="xs" onClick={() => rollback(v)}>
