@@ -195,6 +195,7 @@ async fn route(
       url: view.url,
       checks,
       cert_expires,
+      domain_expires: crate::rdap::expires_of(host),
     });
   };
   checks.push(gateway_check(live, gw_name, &gw.server));
@@ -213,6 +214,7 @@ async fn route(
     url: view.url,
     checks,
     cert_expires,
+    domain_expires: crate::rdap::expires_of(host),
   })
 }
 

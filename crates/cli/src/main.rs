@@ -383,6 +383,9 @@ pub enum ServerCmd {
     /// 流量每月几号重置（1 到 28，北京时间）；0 清除（按 1 号）。
     #[arg(long)]
     traffic_reset_day: Option<u8>,
+    /// 服务器续费日（YYYY-MM-DD，北京时间）；传空字符串清除。
+    #[arg(long)]
+    renew_at: Option<String>,
     #[command(flatten)]
     apply: ApplyFlags,
   },
