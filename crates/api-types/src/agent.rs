@@ -158,6 +158,9 @@ pub struct AgentReport {
   /// 资源采样，每分钟一次（其余上报没有）。控制面存进曲线后不再保留。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub metrics: Option<Box<Metrics>>,
+  /// agent 发送上报时的 Unix 毫秒时间，旧版本没有。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub time_ms: Option<i64>,
 }
 
 /// 一次资源采样。速率是和上一次采样相比的平均值。

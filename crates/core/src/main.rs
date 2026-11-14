@@ -20,6 +20,7 @@ mod build;
 mod cert;
 mod cli_dist;
 mod cli_tunnel;
+mod clock;
 mod connect;
 mod core_backup;
 mod cron;

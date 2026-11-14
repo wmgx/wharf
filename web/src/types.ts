@@ -63,6 +63,7 @@ export interface ServerView {
   agent_outdated?: boolean;
   baseline_drift?: string[];
   disk_days_left?: number;
+  clock_offset_ms?: number;
 }
 
 export interface BuildSource {

@@ -113,6 +113,9 @@ pub struct ServerView {
   /// 按近 7 天趋势预计几天后磁盘写满；数据不足或没在增长时没有。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub disk_days_left: Option<f64>,
+  /// 和控制面的时间差（毫秒，agent 比控制面快为正）。旧 agent 没有。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub clock_offset_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
