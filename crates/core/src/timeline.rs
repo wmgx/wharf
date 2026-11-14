@@ -139,6 +139,25 @@ fn read(
       .collect::<rusqlite::Result<Vec<_>>>()?,
   );
   let mut stmt = c.prepare(
+      "SELECT at, name FROM (
+         SELECT at, name, DENSE_RANK() OVER (ORDER BY at DESC) AS page
+         FROM points WHERE subject = ?1 AND name IN ('autoupdate.ok', 'autoupdate.fail') AND at < ?2
+       ) WHERE page <= ?3 ORDER BY at DESC",
+    )?;
+  rows.extend(
+    stmt
+      .query_map(params![name, before, limit as i64 + 1], |r| {
+        Ok(TimelineItem {
+          at: r.get(0)?,
+          kind: "auto_update".into(),
+          title: "自动更新".into(),
+          ok: Some(r.get::<_, String>(1)? == "autoupdate.ok"),
+          actor: None,
+        })
+      })?
+      .collect::<rusqlite::Result<Vec<_>>>()?,
+  );
+  let mut stmt = c.prepare(
       "SELECT at, title, ok FROM (
          SELECT at, title, ok, DENSE_RANK() OVER (ORDER BY at DESC) AS page
          FROM alert_history WHERE subject = ?1 AND source IN ('container_restarting', 'monitor_failed', 'http_5xx') AND at < ?2

@@ -75,10 +75,17 @@ async fn resolve_one(
   }
   let mut errors = Vec::new();
   for host in hosts {
+    let scheme = if host.starts_with("127.0.0.1:")
+      || host.starts_with("localhost:")
+    {
+      "http"
+    } else {
+      "https"
+    };
     let mut repo = Repo {
       client,
       base: format!(
-        "https://{}/v2/{path}",
+        "{scheme}://{}/v2/{path}",
         host.trim_end_matches('/')
       ),
       token: None,

@@ -333,6 +333,9 @@ pub struct ServiceSpec {
   /// 资源上限，不填不限。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub limits: Option<Limits>,
+  /// 自动更新：每天检查一次，有新版本就自动更新。只支持镜像来源和 git 构建来源、没有数据卷的服务。
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub auto_update: bool,
 }
 
 impl ServiceSpec {

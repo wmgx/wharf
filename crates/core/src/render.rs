@@ -812,6 +812,7 @@ mod tests {
       stopped: false,
       monitor: None,
       limits: None,
+      auto_update: false,
       server: "node1".into(),
       source: Source::Image("traefik/whoami".into()),
       ports: vec![PortSpec {
