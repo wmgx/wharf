@@ -58,6 +58,7 @@ mod planner;
 mod probe;
 mod prune;
 mod quality;
+mod rdap;
 mod refs;
 mod render;
 mod rollback;
@@ -177,6 +178,7 @@ async fn main() -> anyhow::Result<()> {
   agent_upgrade::spawn_agents_after(state.clone());
   heal::spawn(state.clone());
   doctor::spawn(state.clone());
+  rdap::spawn(state.clone());
   updates::spawn(state.clone());
   alerts::spawn(state.clone());
   agent_upgrade::spawn_check();

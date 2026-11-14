@@ -112,7 +112,66 @@ fn split_unit(s: &str) -> (&str, &str) {
   s.split_once(':').unwrap_or((s, ""))
 }
 
+fn expiry_fire(c: &Ctx) -> Event {
+  let (kind, name) = split_unit(c.subject);
+  let kind = if kind == "domain" { "域名" } else { "服务器" };
+  ev(
+    if c.value < 0.0 {
+      format!("{kind} {name} 已经到期")
+    } else {
+      format!("{kind} {name} 还有 {} 天到期", c.value as i64)
+    },
+    "到期前处理：域名在注册商续费；服务器在服务商续费，然后在服务器设置里更新续费日".into(),
+  )
+}
+
+fn expiry_ok(c: &Ctx) -> Event {
+  let (kind, name) = split_unit(c.subject);
+  let kind = if kind == "domain" { "域名" } else { "服务器" };
+  if c.value >= 9999.0 {
+    ev(
+      format!("{kind} {name} 不再提醒到期"),
+      "续费日已清除，或域名已经不在路由里".into(),
+    )
+  } else {
+    ev(
+      format!("{kind} {name} 已续期"),
+      format!("距离到期还有 {} 天", c.value as i64),
+    )
+  }
+}
+
 const RULES: &[Rule] = &[
+  Rule {
+    id: "expiry_soon",
+    name: "快到期",
+    metric: "expiry.days",
+    op: Op::Lt,
+    threshold: 14.0,
+    threshold_editable: true,
+    for_n: 1,
+    mode: Mode::Consecutive,
+    recover: None,
+    every: "每小时一次",
+    key: |s| format!("expiry.soon.{s}"),
+    fire: expiry_fire,
+    ok: expiry_ok,
+  },
+  Rule {
+    id: "expiry_urgent",
+    name: "马上到期",
+    metric: "expiry.days",
+    op: Op::Lt,
+    threshold: 3.0,
+    threshold_editable: true,
+    for_n: 1,
+    mode: Mode::Consecutive,
+    recover: None,
+    every: "每小时一次",
+    key: |s| format!("expiry.urgent.{s}"),
+    fire: expiry_fire,
+    ok: expiry_ok,
+  },
   Rule {
     id: "server_offline",
     name: "服务器离线",
@@ -698,6 +757,17 @@ pub fn firing(rule: &str) -> Vec<String> {
       .iter()
       .filter(|((r, _), _)| r == rule)
       .map(|(_, (_, t))| t.clone())
+      .collect()
+  })
+}
+
+/// 某条规则正在触发的对象和标题：`(对象, 标题)`。
+pub fn firing_subjects(rule: &str) -> Vec<(String, String)> {
+  with(|m| {
+    m.firing
+      .iter()
+      .filter(|((r, _), _)| r == rule)
+      .map(|((_, s), (_, t))| (s.clone(), t.clone()))
       .collect()
   })
 }
