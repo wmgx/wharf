@@ -166,7 +166,9 @@ const RULES: &[Rule] = &[
       let n = c.value as i64;
       ev(
         format!("服务器 {} 的时间和控制面差了 {n} 秒", c.subject),
-        format!("这台机器的时间和控制面差了 {n} 秒（已扣除网络往返）。时间不准会让证书校验、两步验证、备份时间戳出问题。检查这台机器的时间同步服务（systemd-timesyncd 或 chrony）"),
+        format!(
+          "这台机器的时间和控制面差了 {n} 秒（已扣除网络往返）。时间不准会让证书校验、两步验证、备份时间戳出问题。检查这台机器的时间同步服务（systemd-timesyncd 或 chrony）"
+        ),
       )
     },
     ok: |c| {

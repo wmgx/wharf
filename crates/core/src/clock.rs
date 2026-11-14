@@ -20,16 +20,25 @@ pub async fn record(
 ) {
   let recv_ms = crate::db::now_ms();
   let Some(agent_ms) = agent_ms else { return };
-  let Some(rtt) = state.hub.rtt_ms(server) else { return };
+  let Some(rtt) = state.hub.rtt_ms(server) else {
+    return;
+  };
   if rtt > 2000 {
     return;
   }
   let offset = offset_ms(agent_ms, recv_ms, rtt);
-  LAST.lock().unwrap_or_else(|e| e.into_inner())
+  LAST
+    .lock()
+    .unwrap_or_else(|e| e.into_inner())
     .insert(server.into(), offset);
   rules::observe(
-    state, "clock.skew_s", server, offset.unsigned_abs() as f64 / 1000.0, "",
-  ).await;
+    state,
+    "clock.skew_s",
+    server,
+    offset.unsigned_abs() as f64 / 1000.0,
+    "",
+  )
+  .await;
 }
 
 pub fn offset_of(server: &str) -> Option<i64> {
