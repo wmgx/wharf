@@ -214,7 +214,10 @@ async fn round(
         cache.get(h).and_then(|e| e.expires).map(|t| (h, t))
       }) {
         let ms = (expires - Utc::now()).num_milliseconds();
-        days.insert(format!("domain:{name}"), ms.div_euclid(86_400_000));
+        days.insert(
+          format!("domain:{name}"),
+          ms.div_euclid(86_400_000),
+        );
       }
     }
   }
