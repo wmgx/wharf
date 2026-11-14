@@ -227,6 +227,7 @@ async fn dispatch(
     Command::Backup(cmd) => backup(c, cmd, j).await,
     Command::Task(cmd) => crate::task::task(c, cmd, j).await,
     Command::Edge(cmd) => crate::edge::edge(c, cmd, j).await,
+    Command::Bookmark(cmd) => crate::bookmark::bookmark(c, cmd, j).await,
     Command::Plan { file, apply } => {
       let req = match file {
         Some(path) => PlanRequest {

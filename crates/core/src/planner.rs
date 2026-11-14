@@ -31,7 +31,7 @@ use crate::{
   snapshot::{self, Snapshot},
   state::AppState,
   world::{
-    KIND_EDGE, KIND_GATEWAY, KIND_ROUTE, KIND_SERVER, KIND_SERVICE,
+    KIND_BOOKMARK, KIND_EDGE, KIND_GATEWAY, KIND_ROUTE, KIND_SERVER, KIND_SERVICE,
     World, gateway_project, new_id,
   },
 };
@@ -573,6 +573,7 @@ fn spec_json(world: &World, kind: &str, name: &str) -> Option<Value> {
     }
     KIND_ROUTE => world.routes.get(name).map(|r| to_json(&r.spec)),
     KIND_EDGE => world.edge_apps.get(name).map(|r| to_json(&r.spec)),
+    KIND_BOOKMARK => world.bookmarks.get(name).map(|r| to_json(&r.spec)),
     _ => None,
   }
 }
@@ -598,6 +599,16 @@ fn config_items(
       _ => Action::Update,
     };
     let (risk, reason) = match (kind, action) {
+      (KIND_BOOKMARK, action) => {
+        let spec = if action == Action::Delete { &before } else { &after };
+        let title = spec.as_ref().and_then(|v| v["title"].as_str()).unwrap_or_default();
+        let verb = match action {
+          Action::Create => "新增",
+          Action::Delete => "删除",
+          _ => "修改",
+        };
+        (vec![], format!("{verb}书签 {title}"))
+      }
       (KIND_SERVICE, Action::Delete) => {
         (vec![Impact::Remove], "删除服务（数据目录保留）".to_string())
       }
