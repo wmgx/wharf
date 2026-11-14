@@ -114,7 +114,11 @@ fn split_unit(s: &str) -> (&str, &str) {
 
 fn expiry_fire(c: &Ctx) -> Event {
   let (kind, name) = split_unit(c.subject);
-  let kind = if kind == "domain" { "域名" } else { "服务器" };
+  let kind = if kind == "domain" {
+    "域名"
+  } else {
+    "服务器"
+  };
   ev(
     if c.value < 0.0 {
       format!("{kind} {name} 已经到期")
@@ -127,7 +131,11 @@ fn expiry_fire(c: &Ctx) -> Event {
 
 fn expiry_ok(c: &Ctx) -> Event {
   let (kind, name) = split_unit(c.subject);
-  let kind = if kind == "domain" { "域名" } else { "服务器" };
+  let kind = if kind == "domain" {
+    "域名"
+  } else {
+    "服务器"
+  };
   if c.value >= 9999.0 {
     ev(
       format!("{kind} {name} 不再提醒到期"),
