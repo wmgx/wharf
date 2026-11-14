@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
   agent::{AgentReport, ContainerInfo},
   spec::{
-    BookmarkSpec, EdgeAppSpec, EdgeKind, GatewaySpec, NetworkMode, PrivateAddr,
-    RouteSpec, ServerSettings, ServiceSpec,
+    BookmarkSpec, EdgeAppSpec, EdgeKind, GatewaySpec, NetworkMode,
+    PrivateAddr, RouteSpec, ServerSettings, ServiceSpec,
   },
 };
 

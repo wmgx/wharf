@@ -31,8 +31,8 @@ use crate::{
   snapshot::{self, Snapshot},
   state::AppState,
   world::{
-    KIND_BOOKMARK, KIND_EDGE, KIND_GATEWAY, KIND_ROUTE, KIND_SERVER, KIND_SERVICE,
-    World, gateway_project, new_id,
+    KIND_BOOKMARK, KIND_EDGE, KIND_GATEWAY, KIND_ROUTE, KIND_SERVER,
+    KIND_SERVICE, World, gateway_project, new_id,
   },
 };
 
@@ -573,7 +573,9 @@ fn spec_json(world: &World, kind: &str, name: &str) -> Option<Value> {
     }
     KIND_ROUTE => world.routes.get(name).map(|r| to_json(&r.spec)),
     KIND_EDGE => world.edge_apps.get(name).map(|r| to_json(&r.spec)),
-    KIND_BOOKMARK => world.bookmarks.get(name).map(|r| to_json(&r.spec)),
+    KIND_BOOKMARK => {
+      world.bookmarks.get(name).map(|r| to_json(&r.spec))
+    }
     _ => None,
   }
 }
@@ -600,8 +602,15 @@ fn config_items(
     };
     let (risk, reason) = match (kind, action) {
       (KIND_BOOKMARK, action) => {
-        let spec = if action == Action::Delete { &before } else { &after };
-        let title = spec.as_ref().and_then(|v| v["title"].as_str()).unwrap_or_default();
+        let spec = if action == Action::Delete {
+          &before
+        } else {
+          &after
+        };
+        let title = spec
+          .as_ref()
+          .and_then(|v| v["title"].as_str())
+          .unwrap_or_default();
         let verb = match action {
           Action::Create => "新增",
           Action::Delete => "删除",

@@ -665,7 +665,9 @@ impl EdgeAppSpec {
 }
 
 /// 首页上的一条书签：不归 Wharf 管的地址。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
 pub struct BookmarkSpec {
   pub title: String,
   /// 只允许 http:// 或 https://。
