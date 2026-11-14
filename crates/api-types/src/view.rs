@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
   agent::{AgentReport, ContainerInfo},
   spec::{
-    EdgeAppSpec, EdgeKind, GatewaySpec, NetworkMode, PrivateAddr,
-    RouteSpec, ServerSettings, ServiceSpec,
+    BookmarkSpec, EdgeAppSpec, EdgeKind, GatewaySpec, NetworkMode,
+    PrivateAddr, RouteSpec, ServerSettings, ServiceSpec,
   },
 };
 
@@ -110,6 +110,12 @@ pub struct ServerView {
   /// 最近一次检查和基线不一样的项（每 6 小时检查一次）。
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub baseline_drift: Vec<String>,
+  /// 按近 7 天趋势预计几天后磁盘写满；数据不足或没在增长时没有。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub disk_days_left: Option<f64>,
+  /// 和控制面的时间差（毫秒，agent 比控制面快为正）。旧 agent 没有。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub clock_offset_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -673,6 +679,8 @@ pub struct Issue {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Status {
+  #[serde(default)]
+  pub bookmarks: Vec<BookmarkView>,
   pub servers: Vec<ServerView>,
   pub services: Vec<ServiceView>,
   #[serde(default)]
@@ -693,6 +701,13 @@ pub struct Status {
   /// 后台检查的新版本和未执行的改动，控制面刚启动时为空。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub updates: Option<UpdatesView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct BookmarkView {
+  pub id: String,
+  pub spec: BookmarkSpec,
+  pub version: u64,
 }
 
 /// `wharf server add` 的返回：在目标机器上执行 `join` 里的任一命令即可加入。
@@ -952,6 +967,9 @@ pub struct RouteDiagnosis {
   /// HTTPS 证书到期时间，连不上或不是 HTTPS 时没有。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub cert_expires: Option<DateTime<Utc>>,
+  /// 这个域名的注册到期时间（后台用 RDAP 查，查不到没有）。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub domain_expires: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

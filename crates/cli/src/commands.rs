@@ -227,6 +227,9 @@ async fn dispatch(
     Command::Backup(cmd) => backup(c, cmd, j).await,
     Command::Task(cmd) => crate::task::task(c, cmd, j).await,
     Command::Edge(cmd) => crate::edge::edge(c, cmd, j).await,
+    Command::Bookmark(cmd) => {
+      crate::bookmark::bookmark(c, cmd, j).await
+    }
     Command::Plan { file, apply } => {
       let req = match file {
         Some(path) => PlanRequest {
@@ -742,6 +745,7 @@ async fn server(
       host_exec,
       traffic_quota_gb,
       traffic_reset_day,
+      renew_at,
       apply,
     } => {
       let current: ServerView =
@@ -802,6 +806,10 @@ async fn server(
       }
       if let Some(d) = traffic_reset_day {
         settings.traffic_reset_day = (d > 0).then_some(d);
+      }
+      if let Some(v) = renew_at {
+        settings.renew_at =
+          (!v.trim().is_empty()).then(|| v.trim().to_string());
       }
       if let Some(p) = git_proxy {
         let p = p.trim();

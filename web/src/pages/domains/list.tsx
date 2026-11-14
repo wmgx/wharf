@@ -51,12 +51,14 @@ export function DomainList({ status, add }: { status: Status; add: React.ReactNo
             <TableHead>入口</TableHead>
             <TableHead>保护</TableHead>
             <TableHead>证书</TableHead>
+            <TableHead>到期</TableHead>
             <TableHead />
           </TableRow>
         </TableHeader>
         <TableBody>
           {filtered.map(({ hostname, route, edge: app }) => {
             const d = diagnosisOf(status, hostname);
+            const days = d?.domain_expires ? Math.floor((Date.parse(d.domain_expires) - Date.now()) / 86400000) : undefined;
             const hop = route && hopOf(route, status);
             return <TableRow key={`${hostname}-${app ?? "route"}`} className="cursor-pointer" {...clickable({ to: app ? `/edge/${encodeURIComponent(app)}` : `?open=${encodeURIComponent(hostname)}` })}>
               <TableCell className="font-mono text-xs">
@@ -92,6 +94,11 @@ export function DomainList({ status, add }: { status: Status; add: React.ReactNo
               </TableCell>
               <TableCell>
                 {d?.cert_expires ? <CertDays d={d} /> : "-"}
+              </TableCell>
+              <TableCell onClick={(e) => e.stopPropagation()}>
+                {app ? "-" : days != null ? <Tip text={new Date(d!.domain_expires!).toLocaleDateString("zh-CN", { timeZone: "Asia/Shanghai" })}>
+                  <span className={days < 3 ? "text-destructive" : days < 14 ? "text-warning" : "text-muted-foreground"}>{days < 0 ? "已到期" : `剩 ${days} 天`}</span>
+                </Tip> : <span className="text-muted-foreground">未知</span>}
               </TableCell>
               <TableCell onClick={(e) => e.stopPropagation()}>
                 {route && <OpMenu ops={routeOps} target={route} label={`${hostname} 的操作`} size="icon-sm" />}
