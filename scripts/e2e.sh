@@ -26,13 +26,13 @@ cleanup() {
   if [ -n "${PROBE:-}" ]; then
     kill "$PROBE" 2>/dev/null || true; wait "$PROBE" 2>/dev/null || true
   fi
-  docker rm -f "$CORE" "$AGENT" >/dev/null 2>&1 || true
-  for p in whoami wharf-gw-edge wharf-try-whoami; do
+  docker rm -f "$CORE" "$AGENT" wharf-e2e-registry >/dev/null 2>&1 || true
+  for p in whoami app wharf-gw-edge wharf-try-whoami wharf-try-app; do
     docker ps -aq --filter "label=com.docker.compose.project=$p" | xargs -r docker rm -f >/dev/null
   done
   docker volume rm -f wharf-e2e-core >/dev/null 2>&1 || true
   docker run --rm -v /srv:/srv -v /var/lib:/hostlib debian:bookworm-slim \
-    rm -rf /srv/wharf-gw-edge /srv/whoami /hostlib/wharf-e2e >/dev/null 2>&1 || true
+    rm -rf /srv/wharf-gw-edge /srv/whoami /srv/app /hostlib/wharf-e2e >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 cleanup
@@ -175,6 +175,47 @@ done
 wharf service deploy whoami --image traefik/whoami --apply >/dev/null
 [ "$(wharf plan --json | jget 'len(d["items"])')" = 0 ] || { wharf plan; fail "改回后 plan 不为空"; }
 echo "试跑失败后旧容器未动，服务正常"
+
+step "自动更新：有新版本就更新"
+docker run -d --name wharf-e2e-registry -p 127.0.0.1:5005:5000 registry:2 >/dev/null
+for _ in $(seq 20); do
+  curl -sf --max-time 2 --noproxy '*' http://127.0.0.1:5005/v2/ >/dev/null && break
+  sleep 1
+done
+curl -sf --max-time 2 --noproxy '*' http://127.0.0.1:5005/v2/ >/dev/null || fail "临时镜像仓库没有就绪"
+APP=127.0.0.1:5005/app:latest
+docker tag traefik/whoami "$APP" && docker push -q "$APP"
+wharf service deploy app --image "$APP" --port http=80 --apply
+wharf service auto-update app --apply
+wharf route add app.localhost --service app --apply --confirm route/app.localhost
+HOST=app.localhost
+printf 'FROM traefik/whoami\nENV E2E=2\n' | docker build -q -t "$APP" - >/dev/null && docker push -q "$APP"
+before=$(docker ps -q --no-trunc --filter label=com.docker.compose.project=app)
+probe_start
+[ "$(wharf service auto-update-run --json | jget 'd[0]["status"]')" = updated ] || fail "自动更新没有成功"
+sleep 2
+probe_stop
+after=$(docker ps -q --no-trunc --filter label=com.docker.compose.project=app)
+[ "$before" != "$after" ] || fail "自动更新后容器没有换"
+[ "$(wharf plan --json | jget 'len(d["items"])')" = 0 ] || { wharf plan; fail "自动更新后 plan 不为空"; }
+
+step "自动更新：新版本起不来，线上不动，同一个版本不再重试"
+printf 'FROM busybox:1.36\nCMD ["false"]\n' | docker build -q -t "$APP" - >/dev/null && docker push -q "$APP"
+probe_start
+set +e
+OUT=$(wharf service auto-update-run --json)
+code=$?
+set -e
+sleep 2
+probe_stop
+[ "$code" != 0 ] || fail "起不来的版本自动更新成功了"
+[ "$(echo "$OUT" | jget 'd[0]["status"]')" = failed ] || fail "自动更新没有报失败"
+[ "$(docker ps -q --no-trunc --filter label=com.docker.compose.project=app)" = "$after" ] || fail "自动更新失败后容器被换了"
+[ "$(wharf service auto-update-run --json | jget 'd[0]["status"]')" = skipped ] || fail "同一个坏版本又重试了"
+wharf service deploy app --image traefik/whoami --apply >/dev/null
+wharf route rm app.localhost --apply
+wharf service rm app --apply --confirm service/app
+HOST=who.localhost
 
 step "status 和 export"
 wharf status

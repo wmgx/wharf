@@ -152,6 +152,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route("/api/servers/{name}/dirs", get(crate::host_dir::list))
     .route("/api/servers/{name}/pack", post(crate::host_dir::pack))
     .route("/api/updates/check", post(crate::updates::check_now))
+    .route("/api/updates/auto", post(auto_update_now))
     .route(
       "/api/servers/{name}/apt",
       get(crate::apt::status).post(crate::apt::upgrade),
@@ -1361,6 +1362,14 @@ async fn remove_secret(
 }
 
 // PLAN / APPLY / RUNS
+
+async fn auto_update_now(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+) -> ApiResult<Vec<wharf_api_types::view::AutoUpdateResult>> {
+  auth.require(Perm::Apply)?;
+  Ok(Json(crate::auto_update::run(&s).await))
+}
 
 async fn make_plan(
   State(s): State<Arc<AppState>>,

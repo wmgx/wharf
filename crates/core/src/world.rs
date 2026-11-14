@@ -357,6 +357,40 @@ impl World {
               return Err(ApiError::invalid("CPU 上限至少 0.01 核"));
             }
           }
+          if spec.auto_update {
+            match &spec.source {
+              Source::Compose { .. } => {
+                return Err(
+                  ApiError::invalid(format!(
+                    "服务 {name} 是 compose 来源，不支持自动更新"
+                  ))
+                  .with_hint("自动更新只支持镜像来源和 git 构建来源"),
+                );
+              }
+              Source::Build(build) if build.git.is_none() => {
+                return Err(
+                  ApiError::invalid(format!(
+                    "服务 {name} 的代码是上传的，没有可以检查的新版本"
+                  ))
+                  .with_hint("自动更新只支持镜像来源和 git 构建来源"),
+                );
+              }
+              Source::Image(image) if image.contains('@') => {
+                return Err(
+                  ApiError::invalid(format!(
+                    "服务 {name} 的镜像固定在一个版本上，不会有新版本"
+                  ))
+                  .with_hint("镜像名去掉 @sha256:… 再开自动更新"),
+                );
+              }
+              _ => {}
+            }
+            if !spec.volumes.is_empty() {
+              return Err(ApiError::invalid(format!(
+                "服务 {name} 有数据卷，新版本起不来时不能自动换回，不支持自动更新"
+              )).with_hint(format!("用 wharf service update {name} 手动更新")));
+            }
+          }
           if spec.ports.is_empty()
             && let Source::Compose {
               content: Some(content),
@@ -1599,6 +1633,7 @@ mod tests {
       stopped: false,
       monitor: None,
       limits: None,
+      auto_update: false,
       server: server.into(),
       source: Source::Image("traefik/whoami".into()),
       ports: vec![PortSpec {
@@ -1609,6 +1644,31 @@ mod tests {
       env: Default::default(),
       volumes: vec![],
     }
+  }
+
+  #[test]
+  fn auto_update_requires_no_volumes() {
+    let mut w = sample();
+    let mut spec = image_service("node1");
+    spec.auto_update = true;
+    w.apply_changes(&[Change::UpsertService {
+      name: "app".into(),
+      spec: spec.clone(),
+      adopt: None,
+    }])
+    .unwrap();
+    spec.volumes.push(wharf_api_types::spec::VolumeSpec {
+      name: "data".into(),
+      target: "/data".into(),
+    });
+    let err = w
+      .apply_changes(&[Change::UpsertService {
+        name: "app".into(),
+        spec,
+        adopt: None,
+      }])
+      .unwrap_err();
+    assert!(err.message.contains("数据卷"));
   }
 
   #[test]
