@@ -178,6 +178,11 @@ echo "试跑失败后旧容器未动，服务正常"
 
 step "自动更新：有新版本就更新"
 docker run -d --name wharf-e2e-registry -p 127.0.0.1:5005:5000 registry:2 >/dev/null
+for _ in $(seq 20); do
+  curl -sf --max-time 2 --noproxy '*' http://127.0.0.1:5005/v2/ >/dev/null && break
+  sleep 1
+done
+curl -sf --max-time 2 --noproxy '*' http://127.0.0.1:5005/v2/ >/dev/null || fail "临时镜像仓库没有就绪"
 APP=127.0.0.1:5005/app:latest
 docker tag traefik/whoami "$APP" && docker push -q "$APP"
 wharf service deploy app --image "$APP" --port http=80 --apply
