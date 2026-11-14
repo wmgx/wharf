@@ -155,9 +155,8 @@ mod tests {
   #[test]
   fn insufficient_or_flat() {
     assert!(matches!(forecast(&[], 100.0), Forecast::Insufficient));
-    let points: Vec<_> = (0..=7 * 144)
-      .map(|m| (m * 600_000, 20.0))
-      .collect();
+    let points: Vec<_> =
+      (0..=7 * 144).map(|m| (m * 600_000, 20.0)).collect();
     assert!(matches!(forecast(&points, 100.0), Forecast::Flat));
   }
 }
