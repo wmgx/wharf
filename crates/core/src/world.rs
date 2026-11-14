@@ -6,9 +6,9 @@ use serde_json::{Value, json};
 use wharf_api_types::{
   ApiError,
   spec::{
-    AdoptSpec, BookmarkSpec, BuildSource, Change, EdgeAppSpec, Fleet, GatewayKind,
-    GatewaySpec, GatewayTls, LinkMode, RouteSpec, ServerSettings,
-    ServiceSpec, Source,
+    AdoptSpec, BookmarkSpec, BuildSource, Change, EdgeAppSpec, Fleet,
+    GatewayKind, GatewaySpec, GatewayTls, LinkMode, RouteSpec,
+    ServerSettings, ServiceSpec, Source,
   },
   validate_name,
 };
@@ -179,10 +179,14 @@ impl World {
           );
         }
         KIND_BOOKMARK => {
-          world.bookmarks.insert(row.name, BookmarkRow {
-            spec: serde_json::from_value(row.spec).map_err(json_err)?,
-            version,
-          });
+          world.bookmarks.insert(
+            row.name,
+            BookmarkRow {
+              spec: serde_json::from_value(row.spec)
+                .map_err(json_err)?,
+              version,
+            },
+          );
         }
         other => tracing::warn!("未知资源类型 {other}，忽略"),
       }
@@ -223,10 +227,16 @@ impl World {
       match change {
         Change::UpsertBookmark { id, spec } => {
           let version = match id {
-            Some(id) => self.bookmarks.get(id).ok_or_else(|| {
-              ApiError::not_found(format!("书签 {id} 不存在"))
-                .suggest("wharf bookmark list")
-            })?.version,
+            Some(id) => {
+              self
+                .bookmarks
+                .get(id)
+                .ok_or_else(|| {
+                  ApiError::not_found(format!("书签 {id} 不存在"))
+                    .suggest("wharf bookmark list")
+                })?
+                .version
+            }
             None => {
               if self.bookmarks.len() >= 200 {
                 return Err(ApiError::invalid("书签最多 200 条"));
@@ -240,8 +250,10 @@ impl World {
         }
         Change::RemoveBookmark { id } => {
           if self.bookmarks.remove(id).is_none() {
-            return Err(ApiError::not_found(format!("书签 {id} 不存在"))
-              .suggest("wharf bookmark list"));
+            return Err(
+              ApiError::not_found(format!("书签 {id} 不存在"))
+                .suggest("wharf bookmark list"),
+            );
           }
         }
         Change::UpdateServer { name, settings } => {
@@ -474,11 +486,15 @@ impl World {
       .retain(|name, _| fleet.edge_apps.contains_key(name));
     self.gateways.retain(|name, _| keep_gateways.contains(name));
     self.routes.retain(|host, _| keep_routes.contains(host));
-    self.bookmarks.retain(|id, _| fleet.bookmarks.contains_key(id));
+    self
+      .bookmarks
+      .retain(|id, _| fleet.bookmarks.contains_key(id));
     for (id, spec) in &fleet.bookmarks {
       let version = self.bookmarks.get(id).map_or(0, |r| r.version);
       let spec = check_bookmark(spec.clone())?;
-      self.bookmarks.insert(id.clone(), BookmarkRow { spec, version });
+      self
+        .bookmarks
+        .insert(id.clone(), BookmarkRow { spec, version });
     }
     for (name, spec) in &fleet.services {
       changes.push(Change::UpsertService {
@@ -1032,17 +1048,26 @@ impl World {
   }
 }
 
-fn check_bookmark(mut spec: BookmarkSpec) -> Result<BookmarkSpec, ApiError> {
+fn check_bookmark(
+  mut spec: BookmarkSpec,
+) -> Result<BookmarkSpec, ApiError> {
   spec.title = spec.title.trim().to_string();
   if !(1..=40).contains(&spec.title.chars().count()) {
     return Err(ApiError::invalid("书签标题要 1 到 40 个字"));
   }
-  if !(spec.url.starts_with("http://") || spec.url.starts_with("https://"))
-    || spec.url.len() > 2048 || spec.url.contains(char::is_whitespace)
+  if !(spec.url.starts_with("http://")
+    || spec.url.starts_with("https://"))
+    || spec.url.len() > 2048
+    || spec.url.contains(char::is_whitespace)
   {
-    return Err(ApiError::invalid("书签网址要以 http:// 或 https:// 开头"));
+    return Err(ApiError::invalid(
+      "书签网址要以 http:// 或 https:// 开头",
+    ));
   }
-  spec.group = spec.group.map(|g| g.trim().to_string()).filter(|g| !g.is_empty());
+  spec.group = spec
+    .group
+    .map(|g| g.trim().to_string())
+    .filter(|g| !g.is_empty());
   if spec.group.as_ref().is_some_and(|g| g.chars().count() > 20) {
     return Err(ApiError::invalid("书签分组要 1 到 20 个字"));
   }
@@ -1491,30 +1516,60 @@ mod tests {
   #[test]
   fn checks_bookmark_fields() {
     let spec = BookmarkSpec {
-      title: " 路由器 ".into(), url: "http://router.example".into(),
-      group: Some(" 家里 ".into()), order: 10,
+      title: " 路由器 ".into(),
+      url: "http://router.example".into(),
+      group: Some(" 家里 ".into()),
+      order: 10,
     };
     let valid = check_bookmark(spec.clone()).unwrap();
-    assert_eq!((&*valid.title, valid.group.as_deref()), ("路由器", Some("家里")));
-    assert!(check_bookmark(BookmarkSpec { title: " ".into(), ..spec.clone() }).is_err());
-    assert!(check_bookmark(BookmarkSpec { url: "ftp://x".into(), ..spec.clone() }).is_err());
-    assert!(check_bookmark(BookmarkSpec { group: Some("字".repeat(21)), ..spec }).is_err());
+    assert_eq!(
+      (&*valid.title, valid.group.as_deref()),
+      ("路由器", Some("家里"))
+    );
+    assert!(
+      check_bookmark(BookmarkSpec {
+        title: " ".into(),
+        ..spec.clone()
+      })
+      .is_err()
+    );
+    assert!(
+      check_bookmark(BookmarkSpec {
+        url: "ftp://x".into(),
+        ..spec.clone()
+      })
+      .is_err()
+    );
+    assert!(
+      check_bookmark(BookmarkSpec {
+        group: Some("字".repeat(21)),
+        ..spec
+      })
+      .is_err()
+    );
   }
 
   #[test]
   fn restores_exported_bookmarks_with_their_ids() {
     let mut original = World::default();
-    original.apply_changes(&[Change::UpsertBookmark {
-      id: None,
-      spec: BookmarkSpec {
-        title: "路由器".into(), url: "http://router.example".into(),
-        group: Some("家里".into()), order: 20,
-      },
-    }]).unwrap();
+    original
+      .apply_changes(&[Change::UpsertBookmark {
+        id: None,
+        spec: BookmarkSpec {
+          title: "路由器".into(),
+          url: "http://router.example".into(),
+          group: Some("家里".into()),
+          order: 20,
+        },
+      }])
+      .unwrap();
     let fleet = crate::views::export(&original);
     let mut restored = World::default();
     restored.replace_with(&fleet).unwrap();
-    assert_eq!(crate::views::export(&restored).bookmarks, fleet.bookmarks);
+    assert_eq!(
+      crate::views::export(&restored).bookmarks,
+      fleet.bookmarks
+    );
   }
 
   pub fn sample() -> World {
