@@ -16,11 +16,12 @@ use wharf_api_types::{
     VolumeSpec,
   },
   view::{
-    AccountView, BackupsView, CheckStatus, CreatedToken, DataView,
-    DeploymentView, DoctorReport, GatewayView, HostExecResponse,
-    ImportPreview, ImportRequest, JoinInfo, NetworkView,
-    RestoreRequest, RollbackTarget, RouteView, SecretView,
-    ServerView, ServiceView, ShellLog, Status, TokenView, Unmanaged,
+    AccountView, AutoUpdateResult, BackupsView, CheckStatus,
+    CreatedToken, DataView, DeploymentView, DoctorReport,
+    GatewayView, HostExecResponse, ImportPreview, ImportRequest,
+    JoinInfo, NetworkView, RestoreRequest, RollbackTarget, RouteView,
+    SecretView, ServerView, ServiceView, ShellLog, Status, TokenView,
+    Unmanaged,
   },
 };
 
@@ -1360,6 +1361,55 @@ async fn service(
     ServiceCmd::Update { name, apply } => {
       changes(c, vec![Change::RefreshImages { name }], apply, j).await
     }
+    ServiceCmd::AutoUpdate { name, off, apply } => {
+      let mut spec = c
+        .get::<ServiceView>(&format!("/api/services/{}", seg(&name)))
+        .await?
+        .spec;
+      spec.auto_update = !off;
+      changes(
+        c,
+        vec![Change::UpsertService {
+          name,
+          spec,
+          adopt: None,
+        }],
+        apply,
+        j,
+      )
+      .await
+    }
+    ServiceCmd::AutoUpdateRun => {
+      let results: Vec<AutoUpdateResult> = c
+        .post_timeout(
+          "/api/updates/auto",
+          &json!({}),
+          Duration::from_secs(90 * 60),
+        )
+        .await?;
+      out(j, &results, |results| {
+        if results.is_empty() {
+          println!("没有要自动更新的服务");
+        }
+        for result in results {
+          let status = match result.status.as_str() {
+            "updated" => "已更新",
+            "failed" => "失败",
+            _ => "跳过",
+          };
+          println!(
+            "{}  {status}  {}",
+            result.service,
+            result.reason.as_deref().unwrap_or_default()
+          );
+        }
+      });
+      if results.iter().any(|r| r.status == "failed") {
+        Err(CliError::Exit(1))
+      } else {
+        Ok(())
+      }
+    }
     ServiceCmd::Rollback { name, to, apply } => {
       let path = match to {
         Some(id) => {
@@ -1568,6 +1618,7 @@ async fn service(
             stopped: false,
             monitor: None,
             limits: None,
+            auto_update: false,
           }
         }
       };
