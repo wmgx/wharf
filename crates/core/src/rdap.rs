@@ -213,10 +213,8 @@ async fn round(
       if let Some((name, expires)) = host.iter().find_map(|h| {
         cache.get(h).and_then(|e| e.expires).map(|t| (h, t))
       }) {
-        days.insert(
-          format!("domain:{name}"),
-          (expires - Utc::now()).num_days(),
-        );
+        let ms = (expires - Utc::now()).num_milliseconds();
+        days.insert(format!("domain:{name}"), ms.div_euclid(86_400_000));
       }
     }
   }
