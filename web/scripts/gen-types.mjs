@@ -27,8 +27,15 @@ function type(schema, path) {
   if (schema === true || schema === false || Object.keys(schema).length === 0) {
     return "unknown";
   }
-  for (const key of ["const", "allOf", "not", "prefixItems", "if", "then", "else"]) {
+  for (const key of ["allOf", "not", "prefixItems", "if", "then", "else"]) {
     if (key in schema) fail(path, `不支持 ${key}`);
+  }
+  if ("const" in schema) {
+    const value = schema.const;
+    if (value !== null && !["string", "number", "boolean"].includes(typeof value)) {
+      fail(path, "const 只支持字符串、数字、布尔或 null");
+    }
+    return JSON.stringify(value);
   }
   if (schema.$ref) {
     if (!schema.$ref.startsWith("#/$defs/")) fail(path, `不支持引用 ${schema.$ref}`);
