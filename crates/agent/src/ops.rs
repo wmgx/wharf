@@ -12,7 +12,7 @@ use wharf_api_types::{
   ApiError, ErrorCode,
   agent::{
     AgentOp, BUILD_IMAGE_PREFIX, GatewayApply, ProjectUp,
-    ProjectUpResult,
+    ProjectUpResult, TRIAL_PROJECT_PREFIX,
   },
   validate_name,
 };
@@ -351,6 +351,7 @@ impl Ops {
       Err(e) => {
         let Some(prev) = previous else { return Err(e) };
         ctx.say(format!("{}，换回上一版", e.message));
+        self.restore_image(&prev, ctx).await?;
         self.docker.write_compose(&up.project, &prev.compose)?;
         self.docker.write_hash(&up.project, &prev.hash)?;
         self.docker.up(&up.project, ctx).await?;
@@ -376,18 +377,56 @@ impl Ops {
     up: &ProjectUp,
     ctx: &Ctx,
   ) -> Result<ProjectUpResult, ApiError> {
-    // 换回上一版要用的旧 compose；同一版重新部署时没有"上一版"。
-    let previous = if up.rollback {
-      self
+    if up.trial.is_some()
+      && let Err(e) = self
         .docker
-        .previous(&up.project)
-        .filter(|p| p.hash != up.hash)
+        .down(
+          &format!("{TRIAL_PROJECT_PREFIX}{}", up.project),
+          false,
+          &Ctx::detached(),
+        )
+        .await
+    {
+      ctx.say(format!("清理上次试跑失败：{}", e.message));
+    }
+    let mut previous = if up.rollback {
+      self.docker.previous(&up.project)
     } else {
       None
     };
+    if let Some(prev) = &mut previous {
+      let images = self.docker.images(&up.project, ctx).await?;
+      if let [image] = images.as_slice()
+        && let Some(id) =
+          self.docker.running_image(&up.project, ctx).await
+      {
+        prev.image = Some((image.clone(), id));
+      }
+    }
     self.docker.write_compose(&up.project, &up.compose)?;
     let mut warnings = Vec::new();
     let images = self.pull_all(up, ctx, &mut warnings).await?;
+    if let Some(prev) = &previous {
+      let now = match &prev.image {
+        Some((image, _)) => self
+          .docker
+          .image_info(std::slice::from_ref(image), ctx)
+          .await
+          .into_iter()
+          .next()
+          .filter(|i| !i.id.is_empty())
+          .map(|i| i.id),
+        None => None,
+      };
+      if !has_previous(
+        &prev.hash,
+        &up.hash,
+        prev.image.as_ref().map(|(_, id)| id.as_str()),
+        now.as_deref(),
+      ) {
+        previous = None;
+      }
+    }
     // 镜像拉好之后再停原来的容器，中断只有切换的那几秒。
     let retired = match &up.retire {
       Some(r) if r.service == up.project => {
@@ -395,6 +434,9 @@ impl Ops {
       }
       _ => vec![],
     };
+    if up.trial.is_some() {
+      self.trial_run(up, previous.as_ref(), ctx).await?;
+    }
     match self.finish_up(up, &images, warnings, previous, ctx).await {
       Ok(result) => Ok(ProjectUpResult { retired, ..result }),
       Err(e) if !retired.is_empty() => {
@@ -409,6 +451,94 @@ impl Ops {
         Err(e)
       }
       Err(e) => Err(e),
+    }
+  }
+
+  async fn restore_image(
+    &self,
+    previous: &Previous,
+    ctx: &Ctx,
+  ) -> Result<(), ApiError> {
+    if let Some((image, id)) = &previous.image
+      && self
+        .docker
+        .image_info(std::slice::from_ref(image), ctx)
+        .await[0]
+        .id
+        != *id
+    {
+      self
+        .docker
+        .cmd()
+        .args(["tag", id, image])
+        .timeout(Duration::from_secs(15))
+        .run(ctx)
+        .await?
+        .check("docker tag")?;
+    }
+    Ok(())
+  }
+
+  async fn trial_run(
+    &self,
+    up: &ProjectUp,
+    previous: Option<&Previous>,
+    ctx: &Ctx,
+  ) -> Result<(), ApiError> {
+    let project = format!("{TRIAL_PROJECT_PREFIX}{}", up.project);
+    let trial = up.trial.as_ref().unwrap();
+    ctx.say("试跑新版本");
+    let result = async {
+      self.docker.write_compose(&project, trial)?;
+      self.docker.up(&project, ctx).await?;
+      crate::settle::watch(&self.docker, &project, ctx).await?;
+      Ok(())
+    }
+    .await;
+    match self.docker.logs(&project, 30, &Ctx::detached()).await {
+      Ok(logs) if result.is_err() => {
+        for line in logs.lines() {
+          ctx.say(line);
+        }
+      }
+      Err(e) => ctx.say(format!("读取试跑日志失败：{}", e.message)),
+      _ => {}
+    }
+    let cleanup =
+      self.docker.down(&project, false, &Ctx::detached()).await;
+    if let Err(e) = &cleanup {
+      ctx.say(format!("清理试跑失败：{}", e.message));
+    }
+    match result.and(cleanup) {
+      Ok(()) => {
+        ctx.say("试跑通过，替换线上的容器");
+        Ok(())
+      }
+      Err(e) => {
+        if let Some(prev) = previous {
+          self.docker.write_compose(&up.project, &prev.compose)?;
+          if let Err(back) =
+            self.restore_image(prev, &Ctx::detached()).await
+          {
+            ctx.say(format!("恢复镜像标签失败：{}", back.message));
+          }
+        }
+        if e.code == ErrorCode::Cancelled {
+          return Err(e);
+        }
+        let prefix = format!("{project} 没起来：");
+        let why =
+          e.message.strip_prefix(&prefix).unwrap_or(&e.message);
+        Err(
+          ApiError::new(
+            ErrorCode::AgentFailed,
+            format!("新版本试跑没通过：{why}，线上的容器没有动"),
+          )
+          .with_hint(
+            "配置还是新版本，修好后重新部署；试跑的日志在上面",
+          ),
+        )
+      }
     }
   }
 
@@ -545,6 +675,17 @@ fn to_value<T: serde::Serialize>(v: T) -> Result<Value, ApiError> {
     .map_err(|e| ApiError::internal(e.to_string()))
 }
 
+/// 配置变了，或者配置没变但同一个标签现在指向了别的镜像。
+fn has_previous(
+  old_hash: &str,
+  new_hash: &str,
+  old_image: Option<&str>,
+  now_image: Option<&str>,
+) -> bool {
+  old_hash != new_hash
+    || (old_image.is_some() && old_image != now_image)
+}
+
 /// project 名会拼进路径，必须先校验。网关 project 是 `wharf-gw-<name>`。
 fn check_project(project: &str) -> Result<(), ApiError> {
   validate_name("project", project)
@@ -574,6 +715,14 @@ fn ensure_dir(dir: &str) -> Result<(), ApiError> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn previous_tracks_config_or_image_change() {
+    assert!(has_previous("a", "b", None, None));
+    assert!(has_previous("a", "a", Some("old"), Some("new")));
+    assert!(!has_previous("a", "a", Some("old"), Some("old")));
+    assert!(!has_previous("a", "a", None, None));
+  }
 
   #[test]
   fn dirs_stay_under_srv() {

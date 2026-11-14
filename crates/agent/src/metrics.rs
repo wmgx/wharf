@@ -6,7 +6,9 @@ use std::{
   time::{Duration, Instant},
 };
 
-use wharf_api_types::agent::{Metrics, ProjectMetrics};
+use wharf_api_types::agent::{
+  Metrics, ProjectMetrics, TRIAL_PROJECT_PREFIX,
+};
 
 use crate::{docker::Docker, exec::Ctx};
 
@@ -196,7 +198,9 @@ async fn container_stats(docker: &Docker) -> BTreeMap<String, Stat> {
     .stdout
     .lines()
     .filter_map(|l| l.split_once('\t'))
-    .filter(|(_, p)| !p.is_empty())
+    .filter(|(_, p)| {
+      !p.is_empty() && !p.starts_with(TRIAL_PROJECT_PREFIX)
+    })
     .collect();
   #[derive(serde::Deserialize)]
   #[serde(rename_all = "PascalCase")]
