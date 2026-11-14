@@ -86,12 +86,13 @@ function BookmarkCards({ bookmarks, status }: { bookmarks: BookmarkView[]; statu
     <SectionTitle count={items.length}>{group}</SectionTitle>
     <div className="grid grid-cols-[repeat(auto-fill,minmax(min(100%,220px),1fr))] gap-3">
       {items.map((b) => {
-        let host: string;
-        try { host = new URL(b.spec.url).hostname; } catch { host = b.spec.url; }
+        let host = b.spec.url;
+        let href: string | undefined;
+        try { host = new URL(b.spec.url).hostname; href = b.spec.url; } catch { href = undefined; }
         const d = diagnosisOf(status, host);
         const truth = d && routeTone(d);
-        return <div key={b.id} {...clickable({ href: b.spec.url })} className="group flex cursor-pointer items-center gap-3 rounded-xl border bg-card p-3 shadow-xs hover:bg-accent/50">
-          <Mark name={b.spec.title} url={b.spec.url} />
+        return <div key={b.id} {...clickable({ href })} aria-disabled={!href} className="group flex cursor-pointer items-center gap-3 rounded-xl border bg-card p-3 shadow-xs hover:bg-accent/50">
+          <Mark name={b.spec.title} url={href} />
           <div className="min-w-0 flex-1"><div className="truncate font-medium">{b.spec.title}</div><div className="truncate font-mono text-xs text-muted-foreground">{host}</div></div>
           {truth && <Tip text={truth.detail ?? truth.text}><span><Dot tone={truth.tone} /></span></Tip>}
         </div>;
