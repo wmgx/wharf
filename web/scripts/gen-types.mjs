@@ -46,6 +46,13 @@ function type(schema, path) {
   if (Array.isArray(schema.type)) {
     return schema.type.map(t => type({ ...schema, type: t }, path)).join(" | ");
   }
+  if (schema.type === undefined) {
+    // 只有 default、description 这类注解，没有类型约束。
+    if (Array.isArray(schema.enum)) {
+      return schema.enum.map(value => JSON.stringify(value)).join(" | ");
+    }
+    return "unknown";
+  }
   switch (schema.type) {
     case "object":
       if (schema.properties) return `{\n${fields(schema, path)}\n}`;
