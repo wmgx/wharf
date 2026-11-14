@@ -62,6 +62,7 @@ export interface ServerView {
   rtt_ms?: number;
   agent_outdated?: boolean;
   baseline_drift?: string[];
+  disk_days_left?: number;
 }
 
 export interface BuildSource {
