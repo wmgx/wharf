@@ -7,44 +7,99 @@ use crate::{agent, egress, plan, spec, view};
 pub fn web_schema() -> Value {
   let mut generator =
     SchemaGenerator::new(SchemaSettings::default().for_serialize());
-  macro_rules! types {
-    ($($ty:ty),* $(,)?) => {
-      $(let _ = generator.subschema_for::<$ty>();)*
-    };
-  }
-  types!(
-    spec::PrivateNetwork, view::CoreAddress, view::CoreAddresses,
-    view::JoinInfo, spec::PrivateAddr, agent::AgentReport,
-    view::ServerView, spec::BuildSource, spec::Source,
-    spec::PortSpec, spec::VolumeSpec, spec::ServiceSpec,
-    spec::MonitorSpec, view::MonitorView, agent::FoundContainer,
-    view::Unmanaged, spec::AdoptSpec, view::ImportRecord,
-    view::ImportPreview, agent::ContainerInfo, view::LiveState,
-    view::ServiceView, spec::GatewayTls, spec::GatewaySpec,
-    view::GatewayView, spec::RouteSpec, view::RouteView,
-    view::ProbeView, spec::EdgeKind, spec::EdgeSource,
-    spec::EdgeAppSpec, view::EdgeLive, view::EdgeAppView,
-    view::EdgeProjectView, view::EdgeVersionView, view::IssueLevel,
-    view::IssueSubject, view::Issue, view::Status,
-    view::VersionCheck, view::UpdatesView, view::CheckStatus,
-    view::DoctorCheck, view::RouteDiagnosis, view::DoctorReport,
-    view::AccountView, spec::BookmarkSpec, view::BookmarkView,
-    spec::Change, plan::Impact, plan::PlanItem, plan::Plan,
-    plan::StepStatus, plan::RunStep, plan::Run, view::ShellLog,
-    agent::ImageInfo, view::DeploymentView, view::RollbackTarget,
-    agent::BackupSummary, view::BackupRecord, agent::Snapshot,
-    view::BackupsView, spec::NetworkMode, view::NetworkView,
-    view::SecretView, view::Perm, view::TokenView,
-    view::CreatedToken, agent::PackageUpdate, agent::DockerUsage,
-    agent::HostInfo, agent::SshLogin, agent::FileEntry,
-    view::DataKind, view::DataMount, view::DataStatus,
-    view::ServiceData, view::DataView, view::ServiceStatus,
-    view::TaskKind, view::TaskSpec, view::TaskStatus,
-    view::TaskRunView, view::TaskView, egress::EgressSpec,
-    view::AlertRuleView, view::NoticeView, view::AlertsView,
-    view::AlertPatch, view::AuditEntry, view::TimelineItem,
-    view::Timeline,
-  );
+  let _ = generator.subschema_for::<spec::PrivateNetwork>();
+  let _ = generator.subschema_for::<view::CoreAddress>();
+  let _ = generator.subschema_for::<view::CoreAddresses>();
+  let _ = generator.subschema_for::<view::JoinInfo>();
+  let _ = generator.subschema_for::<spec::PrivateAddr>();
+  let _ = generator.subschema_for::<agent::AgentReport>();
+  let _ = generator.subschema_for::<view::ServerView>();
+  let _ = generator.subschema_for::<spec::BuildSource>();
+  let _ = generator.subschema_for::<spec::Source>();
+  let _ = generator.subschema_for::<spec::PortSpec>();
+  let _ = generator.subschema_for::<spec::VolumeSpec>();
+  let _ = generator.subschema_for::<spec::ServiceSpec>();
+  let _ = generator.subschema_for::<spec::MonitorSpec>();
+  let _ = generator.subschema_for::<view::MonitorView>();
+  let _ = generator.subschema_for::<agent::FoundContainer>();
+  let _ = generator.subschema_for::<view::Unmanaged>();
+  let _ = generator.subschema_for::<spec::AdoptSpec>();
+  let _ = generator.subschema_for::<view::ImportRecord>();
+  let _ = generator.subschema_for::<view::ImportPreview>();
+  let _ = generator.subschema_for::<agent::ContainerInfo>();
+  let _ = generator.subschema_for::<view::LiveState>();
+  let _ = generator.subschema_for::<view::ServiceView>();
+  let _ = generator.subschema_for::<spec::GatewayTls>();
+  let _ = generator.subschema_for::<spec::GatewaySpec>();
+  let _ = generator.subschema_for::<view::GatewayView>();
+  let _ = generator.subschema_for::<spec::RouteSpec>();
+  let _ = generator.subschema_for::<view::RouteView>();
+  let _ = generator.subschema_for::<view::ProbeView>();
+  let _ = generator.subschema_for::<spec::EdgeKind>();
+  let _ = generator.subschema_for::<spec::EdgeSource>();
+  let _ = generator.subschema_for::<spec::EdgeAppSpec>();
+  let _ = generator.subschema_for::<view::EdgeLive>();
+  let _ = generator.subschema_for::<view::EdgeAppView>();
+  let _ = generator.subschema_for::<view::EdgeProjectView>();
+  let _ = generator.subschema_for::<view::EdgeVersionView>();
+  let _ = generator.subschema_for::<view::IssueLevel>();
+  let _ = generator.subschema_for::<view::IssueSubject>();
+  let _ = generator.subschema_for::<view::Issue>();
+  let _ = generator.subschema_for::<view::Status>();
+  let _ = generator.subschema_for::<view::VersionCheck>();
+  let _ = generator.subschema_for::<view::UpdatesView>();
+  let _ = generator.subschema_for::<view::CheckStatus>();
+  let _ = generator.subschema_for::<view::DoctorCheck>();
+  let _ = generator.subschema_for::<view::RouteDiagnosis>();
+  let _ = generator.subschema_for::<view::DoctorReport>();
+  let _ = generator.subschema_for::<view::AccountView>();
+  let _ = generator.subschema_for::<spec::BookmarkSpec>();
+  let _ = generator.subschema_for::<view::BookmarkView>();
+  let _ = generator.subschema_for::<spec::Change>();
+  let _ = generator.subschema_for::<plan::Impact>();
+  let _ = generator.subschema_for::<plan::PlanItem>();
+  let _ = generator.subschema_for::<plan::Plan>();
+  let _ = generator.subschema_for::<plan::StepStatus>();
+  let _ = generator.subschema_for::<plan::RunStep>();
+  let _ = generator.subschema_for::<plan::Run>();
+  let _ = generator.subschema_for::<view::ShellLog>();
+  let _ = generator.subschema_for::<agent::ImageInfo>();
+  let _ = generator.subschema_for::<view::DeploymentView>();
+  let _ = generator.subschema_for::<view::RollbackTarget>();
+  let _ = generator.subschema_for::<agent::BackupSummary>();
+  let _ = generator.subschema_for::<view::BackupRecord>();
+  let _ = generator.subschema_for::<agent::Snapshot>();
+  let _ = generator.subschema_for::<view::BackupsView>();
+  let _ = generator.subschema_for::<spec::NetworkMode>();
+  let _ = generator.subschema_for::<view::NetworkView>();
+  let _ = generator.subschema_for::<view::SecretView>();
+  let _ = generator.subschema_for::<view::Perm>();
+  let _ = generator.subschema_for::<view::TokenView>();
+  let _ = generator.subschema_for::<view::CreatedToken>();
+  let _ = generator.subschema_for::<agent::PackageUpdate>();
+  let _ = generator.subschema_for::<agent::DockerUsage>();
+  let _ = generator.subschema_for::<agent::HostInfo>();
+  let _ = generator.subschema_for::<agent::SshLogin>();
+  let _ = generator.subschema_for::<agent::FileEntry>();
+  let _ = generator.subschema_for::<view::DataKind>();
+  let _ = generator.subschema_for::<view::DataMount>();
+  let _ = generator.subschema_for::<view::DataStatus>();
+  let _ = generator.subschema_for::<view::ServiceData>();
+  let _ = generator.subschema_for::<view::DataView>();
+  let _ = generator.subschema_for::<view::ServiceStatus>();
+  let _ = generator.subschema_for::<view::TaskKind>();
+  let _ = generator.subschema_for::<view::TaskSpec>();
+  let _ = generator.subschema_for::<view::TaskStatus>();
+  let _ = generator.subschema_for::<view::TaskRunView>();
+  let _ = generator.subschema_for::<view::TaskView>();
+  let _ = generator.subschema_for::<egress::EgressSpec>();
+  let _ = generator.subschema_for::<view::AlertRuleView>();
+  let _ = generator.subschema_for::<view::NoticeView>();
+  let _ = generator.subschema_for::<view::AlertsView>();
+  let _ = generator.subschema_for::<view::AlertPatch>();
+  let _ = generator.subschema_for::<view::AuditEntry>();
+  let _ = generator.subschema_for::<view::TimelineItem>();
+  let _ = generator.subschema_for::<view::Timeline>();
   json!({ "$defs": generator.take_definitions(true) })
 }
 
