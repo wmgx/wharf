@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
   agent::{AgentReport, ContainerInfo},
   spec::{
-    EdgeAppSpec, EdgeKind, GatewaySpec, NetworkMode, PrivateAddr,
-    RouteSpec, ServerSettings, ServiceSpec,
+    BookmarkSpec, EdgeAppSpec, EdgeKind, GatewaySpec, NetworkMode,
+    PrivateAddr, RouteSpec, ServerSettings, ServiceSpec,
   },
 };
 
@@ -679,6 +679,8 @@ pub struct Issue {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Status {
+  #[serde(default)]
+  pub bookmarks: Vec<BookmarkView>,
   pub servers: Vec<ServerView>,
   pub services: Vec<ServiceView>,
   #[serde(default)]
@@ -699,6 +701,13 @@ pub struct Status {
   /// 后台检查的新版本和未执行的改动，控制面刚启动时为空。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub updates: Option<UpdatesView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct BookmarkView {
+  pub id: String,
+  pub spec: BookmarkSpec,
+  pub version: u64,
 }
 
 /// `wharf server add` 的返回：在目标机器上执行 `join` 里的任一命令即可加入。

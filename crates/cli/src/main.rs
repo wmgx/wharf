@@ -8,6 +8,7 @@
 use clap::{Args, Parser, Subcommand};
 
 mod audit;
+mod bookmark;
 mod client;
 mod commands;
 mod connect;
@@ -184,6 +185,9 @@ pub enum Command {
   /// 边缘应用（Cloudflare Workers / Pages）：导入、发布、版本和回滚。
   #[command(subcommand)]
   Edge(edge::EdgeCmd),
+  /// 首页书签。
+  #[command(subcommand)]
+  Bookmark(bookmark::BookmarkCmd),
   /// 密钥。服务的环境变量里用 `[[NAME]]` 引用。
   #[command(subcommand)]
   Secret(SecretCmd),

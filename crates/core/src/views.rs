@@ -12,9 +12,9 @@ use wharf_api_types::{
   agent::ProjectState,
   spec::{Fleet, GatewayKind, GatewayTls},
   view::{
-    EdgeAppView, EdgeLive, EdgeProjectView, GatewayView,
-    ImportRecord, Issue, IssueLevel, IssueSubject, LiveState,
-    RouteView, ServerView, ServiceView, Status, Tone,
+    BookmarkView, EdgeAppView, EdgeLive, EdgeProjectView,
+    GatewayView, ImportRecord, Issue, IssueLevel, IssueSubject,
+    LiveState, RouteView, ServerView, ServiceView, Status, Tone,
   },
 };
 
@@ -649,7 +649,24 @@ pub async fn status(
     .keys()
     .filter_map(|h| route_view(&snap, &net, h))
     .collect();
+  let mut bookmarks: Vec<_> = snap
+    .world
+    .bookmarks
+    .iter()
+    .map(|(id, r)| BookmarkView {
+      id: id.clone(),
+      spec: r.spec.clone(),
+      version: r.version,
+    })
+    .collect();
+  bookmarks.sort_by(|a, b| {
+    a.spec
+      .order
+      .cmp(&b.spec.order)
+      .then_with(|| a.spec.title.cmp(&b.spec.title))
+  });
   Ok(Status {
+    bookmarks,
     servers,
     services,
     edge_apps,
@@ -683,6 +700,11 @@ pub fn edge_view(snap: &Snapshot, name: &str) -> Option<EdgeAppView> {
 
 pub fn export(world: &World) -> Fleet {
   Fleet {
+    bookmarks: world
+      .bookmarks
+      .iter()
+      .map(|(id, r)| (id.clone(), r.spec.clone()))
+      .collect(),
     servers: world
       .servers
       .iter()
