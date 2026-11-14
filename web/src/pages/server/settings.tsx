@@ -130,7 +130,7 @@ function SettingsFields({ server, canRemove, draft, set, changed, onReset, onSub
     </Panel>
     <SectionTitle>流量</SectionTitle>
     <Panel className="p-4">
-      <Field label="流量" help="每月额度（GB）和重置日（1 到 28，北京时间），只用于显示本期用了多少。都不填按每月 1 号算、不显示额度。">
+      <Field label="流量" help="每月额度（GB）和重置日（1 到 28，北京时间），用于显示本期用了多少，用到 80% 时提醒（阈值在告警规则里改）。都不填按每月 1 号算、不显示额度。">
         <div className="flex gap-2">
           <Input aria-label="每月额度" inputMode="numeric" className="w-32" value={quota} placeholder="额度 GB" onChange={(e) => { const v = e.target.value; setTextEdited(true); setQuota(v); set({ traffic_quota_gb: v.trim() ? Number(v) : undefined }); }} />
           <Input aria-label="重置日" inputMode="numeric" className="w-32" value={resetDay} placeholder="重置日" onChange={(e) => { const v = e.target.value; setTextEdited(true); setResetDay(v); set({ traffic_reset_day: v.trim() ? Number(v) : undefined }); }} />
