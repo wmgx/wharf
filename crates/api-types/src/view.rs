@@ -110,6 +110,9 @@ pub struct ServerView {
   /// 最近一次检查和基线不一样的项（每 6 小时检查一次）。
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub baseline_drift: Vec<String>,
+  /// 按近 7 天趋势预计几天后磁盘写满；数据不足或没在增长时没有。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub disk_days_left: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

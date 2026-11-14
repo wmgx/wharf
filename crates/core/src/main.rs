@@ -26,6 +26,7 @@ mod cron;
 mod data;
 mod db;
 mod disk;
+mod disk_forecast;
 mod docker_proxy;
 mod doctor;
 mod edge;
@@ -186,6 +187,7 @@ async fn main() -> anyhow::Result<()> {
   quality::spawn(state.clone());
   baseline::spawn(state.clone());
   disk::spawn(state.clone());
+  disk_forecast::spawn(state.clone());
   host_units::spawn(state.clone());
   failover::spawn(state.clone());
   tasks::spawn(state.clone());
