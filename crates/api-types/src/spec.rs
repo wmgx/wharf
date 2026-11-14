@@ -374,7 +374,7 @@ pub struct MonitorSpec {
   pub keyword: Option<String>,
 }
 
-/// 资源上限。只对 image 和 build 来源生效（漂移验证）。
+/// 资源上限。只对 image 和 build 来源生效。
 #[derive(
   Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
 )]
