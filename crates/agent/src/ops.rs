@@ -534,7 +534,9 @@ impl Ops {
             ErrorCode::AgentFailed,
             format!("新版本试跑没通过：{why}，线上的容器没有动"),
           )
-          .with_hint("配置还是新版本，修好后重新部署；试跑的日志在上面"),
+          .with_hint(
+            "配置还是新版本，修好后重新部署；试跑的日志在上面",
+          ),
         )
       }
     }
