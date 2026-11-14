@@ -30,7 +30,10 @@ export function HomeBookmarks({ open, onClose }: { open: boolean; onClose: () =>
   const [editing, setEditing] = useState<{ id?: string; spec: BookmarkSpec }>();
   const [removing, setRemoving] = useState<BookmarkView>();
   const [busy, setBusy] = useState(false);
-  const validUrl = !!editing && /^https?:\/\//.test(editing.spec.url) && editing.spec.url.length <= 2048 && !/\s/.test(editing.spec.url);
+  let validUrl = !!editing && /^https?:\/\//.test(editing.spec.url) && editing.spec.url.length <= 2048 && !/\s/.test(editing.spec.url);
+  if (editing && validUrl) {
+    try { new URL(editing.spec.url); } catch { validUrl = false; }
+  }
   const patch = (spec: Partial<BookmarkSpec>) => setEditing((b) => b && { ...b, spec: { ...b.spec, ...spec } });
   const save = async (title: string, changes: Change[]) => {
     setBusy(true);
