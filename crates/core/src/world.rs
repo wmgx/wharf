@@ -220,6 +220,15 @@ impl World {
               "流量重置日要在 1 到 28 之间",
             ));
           }
+          if let Some(v) = &settings.renew_at
+            && chrono::NaiveDate::parse_from_str(v, "%Y-%m-%d")
+              .is_err()
+          {
+            return Err(ApiError::invalid(format!(
+              "服务器 {name} 的续费日 {v} 格式不对"
+            ))
+            .with_hint("写成 2027-01-31"));
+          }
           server.settings = settings.clone();
         }
         Change::UpsertService { name, spec, adopt } => {

@@ -87,6 +87,9 @@ pub struct ServerSettings {
   /// 流量每月几号重置（1 到 28，按北京时间），不填是 1 号。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub traffic_reset_day: Option<u8>,
+  /// 服务器续费日（`YYYY-MM-DD`，北京时间）。只用来提醒，不影响任何部署。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub renew_at: Option<String>,
   /// 机器基线：系统设置的期望值，agent 定时检查差异，apply 时纠正。
   #[serde(default, skip_serializing_if = "Baseline::is_empty")]
   pub baseline: Baseline,
