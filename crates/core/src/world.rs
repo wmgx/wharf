@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::{Value, json};
 use wharf_api_types::{
   ApiError,
+  agent::TRIAL_PROJECT_PREFIX,
   spec::{
     AdoptSpec, BookmarkSpec, BuildSource, Change, EdgeAppSpec, Fleet,
     GatewayKind, GatewaySpec, GatewayTls, LinkMode, RouteSpec,
@@ -287,6 +288,14 @@ impl World {
         }
         Change::UpsertService { name, spec, adopt } => {
           validate_name("服务", name)?;
+          if name.starts_with(TRIAL_PROJECT_PREFIX) {
+            return Err(
+              ApiError::invalid(format!(
+                "服务名 {name} 不能以 wharf-try- 开头"
+              ))
+              .with_hint("这个前缀留给部署时的试跑容器"),
+            );
+          }
           if let Some(m) = &spec.monitor {
             if !m.path.starts_with('/') {
               return Err(ApiError::invalid("监控路径要以 / 开头"));
@@ -1600,6 +1609,18 @@ mod tests {
       env: Default::default(),
       volumes: vec![],
     }
+  }
+
+  #[test]
+  fn trial_service_name_is_rejected() {
+    let err = sample()
+      .apply_changes(&[Change::UpsertService {
+        name: "wharf-try-s1".into(),
+        spec: image_service("s1"),
+        adopt: None,
+      }])
+      .unwrap_err();
+    assert!(err.message.contains("不能以 wharf-try- 开头"));
   }
 
   #[test]

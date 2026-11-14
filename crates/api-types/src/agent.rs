@@ -823,6 +823,7 @@ pub const RESTIC_IMAGE: &str = "restic/restic:0.18.1";
 pub const GIT_IMAGE: &str = "alpine/git:v2.49.1";
 /// 构建出的镜像都在这个名字下，只在本机，不拉取。
 pub const BUILD_IMAGE_PREFIX: &str = "wharf-build/";
+pub const TRIAL_PROJECT_PREFIX: &str = "wharf-try-";
 /// 执行 wrangler 的镜像。
 pub const NODE_IMAGE: &str = "node:22-bookworm-slim";
 /// 项目里没装 wrangler 时用这个版本。
@@ -961,6 +962,10 @@ pub struct ProjectUp {
   /// compose 不用改；本地已经是这个 digest 就不拉。
   #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
   pub pins: BTreeMap<String, String>,
+  /// 试跑用的 compose（已替换密钥）：正式替换之前先用它起一个不发布端口的容器，
+  /// 稳定运行了才动线上的容器。旧版本 agent 不认识这个字段，直接部署。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub trial: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
