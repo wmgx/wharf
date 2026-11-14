@@ -151,6 +151,43 @@ fn expiry_ok(c: &Ctx) -> Event {
 
 const RULES: &[Rule] = &[
   Rule {
+    id: "disk_forecast",
+    name: "磁盘预计写满",
+    metric: "disk.days_left",
+    op: Op::Lt,
+    threshold: 14.0,
+    threshold_editable: true,
+    for_n: 1,
+    mode: Mode::Consecutive,
+    recover: Some(21.0),
+    every: "每小时一次，按近 7 天趋势",
+    key: |s| format!("diskfc.{s}"),
+    fire: |c| {
+      let n = if c.value < 1.0 {
+        "不到 1".into()
+      } else {
+        (c.value as i64).to_string()
+      };
+      ev(
+        format!("服务器 {} 的磁盘预计 {n} 天后写满", c.subject),
+        format!(
+          "按近 7 天的增长速度，磁盘预计 {n} 天后写满。清理没在用的镜像：服务器 {} → 系统 → 磁盘；或扩容",
+          c.subject
+        ),
+      )
+    },
+    ok: |c| {
+      ev(
+        format!("服务器 {} 的磁盘不再预计很快写满", c.subject),
+        if c.value >= 9999.0 {
+          "近 7 天磁盘没有增长".into()
+        } else {
+          format!("按近 7 天的趋势，预计还能用 {} 天", c.value as i64)
+        },
+      )
+    },
+  },
+  Rule {
     id: "expiry_soon",
     name: "快到期",
     metric: "expiry.days",

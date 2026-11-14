@@ -64,6 +64,7 @@ pub fn server_view(
     report,
     version: row.version,
     baseline_drift: crate::baseline::drift(name),
+    disk_days_left: crate::disk_forecast::days_left(name),
   })
 }
 
@@ -584,6 +585,7 @@ pub async fn status(
   issues.extend(crate::alerts::issues());
   issues.extend(crate::monitor::issues());
   issues.extend(crate::rdap::issues());
+  issues.extend(crate::disk_forecast::issues());
   issues.extend(crate::baseline::issues());
   issues.extend(crate::host_units::issues());
   let updates = crate::updates::last();
