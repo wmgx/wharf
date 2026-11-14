@@ -89,7 +89,7 @@ try {
   const output = Object.entries(schema.$defs).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
     .map(([name, definition]) => {
       const value = type(definition, name);
-      const declaration = definition.type === "object" && definition.properties
+      const declaration = definition.type === "object" && definition.properties && !definition.oneOf && !definition.anyOf
         ? `export interface ${name} ${value}`
         : `export type ${name} = ${value};`;
       return comment(definition.description) + declaration;
