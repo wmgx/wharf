@@ -1682,6 +1682,10 @@ export interface ServiceData {
 
 export interface ServiceSpec {
   /**
+   * 自动更新：每天检查一次，有新版本就自动更新。只支持镜像来源和 git 构建来源、没有数据卷的服务。
+   */
+  auto_update?: boolean;
+  /**
    * 每天自动备份 `/srv/<服务>/` 到另一台服务器（restic）。
    */
   backup?: BackupSpec | null;
@@ -1990,7 +1994,7 @@ export interface TimelineItem {
   actor?: string | null;
   at: number;
   /**
-   * deploy / backup / task / heal / alert / op
+   * deploy / backup / task / heal / alert / op / auto_update
    */
   kind: string;
   /**
