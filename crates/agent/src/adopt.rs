@@ -8,7 +8,10 @@ use std::{collections::BTreeMap, path::Path, time::Duration};
 use serde::Deserialize;
 use wharf_api_types::{
   ApiError, ErrorCode,
-  agent::{FoundContainer, ImportRaw, ImportTarget, Retire, Retired},
+  agent::{
+    FoundContainer, ImportRaw, ImportTarget, Retire, Retired,
+    TRIAL_PROJECT_PREFIX,
+  },
 };
 
 use crate::{docker::Docker, exec::Ctx};
@@ -133,6 +136,9 @@ pub async fn discover(
       .filter(|ps| {
         !ps.image.contains("wharf-agent")
           && !ps.image.contains("wharf-core")
+          && !labels(&ps.labels)
+            .get(PROJECT_LABEL)
+            .is_some_and(|p| p.starts_with(TRIAL_PROJECT_PREFIX))
       })
       .map(|ps| {
         let project = labels(&ps.labels)
