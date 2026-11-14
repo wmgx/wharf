@@ -23,6 +23,9 @@ fail() { printf '\n!! 失败：%s\n' "$*"; exit 1; }
 
 cleanup() {
   step "清理"
+  if [ -n "${PROBE:-}" ]; then
+    kill "$PROBE" 2>/dev/null || true; wait "$PROBE" 2>/dev/null || true
+  fi
   docker rm -f "$CORE" "$AGENT" >/dev/null 2>&1 || true
   for p in whoami wharf-gw-edge; do
     docker ps -aq --filter "label=com.docker.compose.project=$p" | xargs -r docker rm -f >/dev/null
@@ -124,6 +127,28 @@ wharf apply "$OLD" >/dev/null 2>&1
 code=$?
 set -e
 [ "$code" = 3 ] || fail "过期计划退出码是 $code"
+
+probe_start() {
+  : > /tmp/wharf-e2e-probe.log
+  ( while :; do
+      curl -sk -o /dev/null -w '%{http_code} %{time_total}\n' --max-time 20 \
+        --resolve "$HOST:$HTTPS_PORT:127.0.0.1" "https://$HOST:$HTTPS_PORT/" >> /tmp/wharf-e2e-probe.log
+      sleep 0.2
+    done ) &
+  PROBE=$!
+}
+probe_stop() {
+  kill "$PROBE" 2>/dev/null || true; wait "$PROBE" 2>/dev/null || true
+  bad=$(grep -vc '^200 ' /tmp/wharf-e2e-probe.log || true)
+  [ "$bad" = 0 ] || { cat /tmp/wharf-e2e-probe.log; fail "部署期间有 $bad 次请求失败"; }
+  [ "$(wc -l < /tmp/wharf-e2e-probe.log)" -ge 10 ] || fail "持续请求没有跑起来"
+}
+
+step "部署期间持续请求不失败"
+probe_start
+wharf service deploy whoami --env A=3 --apply >/dev/null
+sleep 2
+probe_stop
 
 step "新版本起不来：自动换回上一版，服务恢复"
 set +e
