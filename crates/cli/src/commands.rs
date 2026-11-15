@@ -2155,7 +2155,17 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
       tunnel,
       apply,
     } => {
+      let existing = c
+        .get::<Vec<RouteView>>("/api/routes")
+        .await?
+        .into_iter()
+        .find(|r| {
+          r.spec.hostname == hostname.trim().to_ascii_lowercase()
+        });
+      let guard = existing.filter(|_| redirect.is_none());
       let spec = RouteSpec {
+        rate_limit: guard.as_ref().and_then(|r| r.spec.rate_limit),
+        block_scanners: guard.is_some_and(|r| r.spec.block_scanners),
         link: if tunnel {
           wharf_api_types::spec::LinkMode::Tunnel
         } else {
@@ -2174,6 +2184,40 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
           .map(|p| parse_path_route(p))
           .collect::<Result<_, _>>()?,
       };
+      changes(c, vec![Change::UpsertRoute { spec }], apply, j).await
+    }
+    RouteCmd::Guard {
+      name,
+      rate,
+      no_rate,
+      block,
+      no_block,
+      apply,
+    } => {
+      if rate.is_none() && !no_rate && !block && !no_block {
+        return Err(
+          ApiError::invalid(
+            "至少给一个：--rate、--no-rate、--block、--no-block",
+          )
+          .into(),
+        );
+      }
+      let mut spec = c
+        .get::<Vec<RouteView>>("/api/routes")
+        .await?
+        .into_iter()
+        .find(|r| r.spec.hostname == name.trim().to_ascii_lowercase())
+        .ok_or_else(|| {
+          ApiError::not_found(format!("路由 {name} 不存在"))
+            .suggest("wharf route list")
+        })?
+        .spec;
+      if rate.is_some() || no_rate {
+        spec.rate_limit = rate;
+      }
+      if block || no_block {
+        spec.block_scanners = block;
+      }
       changes(c, vec![Change::UpsertRoute { spec }], apply, j).await
     }
     RouteCmd::Rm { hostname, apply } => {
