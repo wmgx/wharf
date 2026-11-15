@@ -1,5 +1,6 @@
 import { PlusIcon } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
+import { AddRedirect } from "@/components/add-redirect";
 import { AddRoute } from "@/components/add-route";
 import { CardsSkeleton, PageHeader } from "@/components/common";
 import { Tip } from "@/components/kit";
@@ -29,7 +30,7 @@ export function Domains() {
   </Tip>;
   const close = (key: string) => { const next = new URLSearchParams(params); next.delete(key); setParams(next); };
   return <>
-    <PageHeader title="域名" count={status ? status.routes.length + (status.edge_apps ?? []).reduce((n, a) => n + (a.spec.domains?.length ?? 0), 0) : undefined} actions={tab === "domains" ? action : undefined} />
+    <PageHeader title="域名" count={status ? status.routes.length + (status.edge_apps ?? []).reduce((n, a) => n + (a.spec.domains?.length ?? 0), 0) : undefined} actions={tab === "domains" ? <><Button variant="outline" onClick={() => setParams({ redirect: "1" })}>加跳转</Button>{action}</> : undefined} />
     <Tabs value={tab} onValueChange={(v) => setTab(v as typeof TABS[number])}>
       <TabsList>
         <TabsTrigger value="domains">域名</TabsTrigger>
@@ -47,6 +48,7 @@ export function Domains() {
         {selected && status && <DomainDetail key={selected.id} route={selected} status={status} onClose={() => close("open")} />}
       </SheetContent>
     </Sheet>
+    <AddRedirect open={params.get("redirect") === "1"} onClose={() => close("redirect")} />
     <AddRoute open={params.get("add") === "1"} onClose={() => close("add")} />
   </>;
 }
