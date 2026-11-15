@@ -1330,3 +1330,17 @@ pub struct TotpView {
   pub enabled: bool,
   pub recovery_left: u32,
 }
+
+/// 页面登录设备。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SessionRow {
+  pub id: String,
+  pub created_at: i64,
+  #[serde(default)]
+  pub last_seen_at: Option<i64>,
+  #[serde(default)]
+  pub addr: Option<String>,
+  #[serde(default)]
+  pub agent: Option<String>,
+  pub current: bool,
+}
