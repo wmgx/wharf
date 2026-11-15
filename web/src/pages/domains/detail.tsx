@@ -10,12 +10,16 @@ import { hopOf } from "@/components/hop";
 import { Facts, Panel, Row, Rows } from "@/components/kit";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
 import { SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import type { RouteView, Status } from "@/types";
 
 export function DomainDetail({ route, status, onClose }: { route: RouteView; status: Status; onClose: () => void }) {
   const actions = useActions();
+  const [gateOpen, setGateOpen] = useState(false);
+  const [skipPaths, setSkipPaths] = useState((route.spec.sso?.skip_paths ?? []).join("\n"));
   const [alias, setAlias] = useState(false);
   const [redirect, setRedirect] = useState(false);
   const [, setParams] = useSearchParams();
@@ -106,6 +110,17 @@ export function DomainDetail({ route, status, onClose }: { route: RouteView; sta
             <Button variant="outline" size="sm" onClick={() => actions.plan({ title: `关闭 ${route.spec.hostname} 的登录保护`, changes: [{ op: "upsert_route", spec: { ...route.spec, auth: false } }] })}>关闭</Button>
           </> : <Button variant="outline" size="sm" onClick={() => actions.basicAuth(route.spec.hostname, true)}>开启</Button>}
         </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="min-w-0 flex-1">门禁：{route.spec.sso ? "已开启" : "没开"}</span>
+          {gateway?.spec.kind === "cloudflare_tunnel" ? <span className="text-muted-foreground">隧道入口暂不支持门禁</span> : route.spec.sso ? <>
+            <Button variant="outline" size="sm" onClick={() => setGateOpen(true)}>改</Button>
+            <Button variant="outline" size="sm" onClick={() => actions.plan({ title: `关闭 ${route.spec.hostname} 的门禁`, changes: [{ op: "upsert_route", spec: { ...route.spec, sso: undefined } }] })}>关闭</Button>
+          </> : <>
+            {route.spec.auth && <span className="text-muted-foreground">先关掉登录保护</span>}
+            <Button variant="outline" size="sm" disabled={route.spec.auth || !!route.spec.redirect} onClick={() => setGateOpen(true)}>开启</Button>
+          </>}
+        </div>
+        {!!route.spec.sso?.skip_paths?.length && <span className="break-all font-mono text-xs text-muted-foreground">{route.spec.sso.skip_paths.join("、")}</span>}
         {!route.spec.redirect && (gateway?.spec.kind === "cloudflare_tunnel" ? <span className="text-muted-foreground">隧道入口不支持限速和拦截扫描</span> : <>
           <label className="flex flex-wrap items-center gap-2">
             <Checkbox checked={rate !== null} onCheckedChange={(v) => setRate(v === true ? 600 : null)} />限速
@@ -128,6 +143,18 @@ export function DomainDetail({ route, status, onClose }: { route: RouteView; sta
       <Button variant="outline" className="text-destructive" onClick={() => actions.removeRoute(route.spec.hostname)}>移除域名</Button>
       <Button disabled={!changed || (rate !== null && (!Number.isInteger(rate) || rate < 10 || rate > 100000))} onClick={() => { onClose(); actions.plan({ title: `修改 ${route.spec.hostname}`, changes: [{ op: "upsert_route", spec: { ...route.spec, link, backup_gateway: backup || undefined, rate_limit: rate ?? undefined, block_scanners: block || undefined } }] }); }}>预览改动</Button>
     </SheetFooter>
+    <Dialog open={gateOpen} onOpenChange={setGateOpen}>
+      <DialogContent aria-describedby={undefined}>
+        <DialogHeader><DialogTitle>{route.spec.sso ? "修改门禁" : "开启门禁"}</DialogTitle></DialogHeader>
+        <Field label="不用登录的路径（每行一个，可以不填）" htmlFor="gate-skip">
+          <Textarea id="gate-skip" value={skipPaths} onChange={(e) => setSkipPaths(e.target.value)} />
+        </Field>
+        <DialogFooter>
+          <Button variant="ghost" onClick={() => setGateOpen(false)}>取消</Button>
+          <Button onClick={() => { setGateOpen(false); actions.plan({ title: `修改 ${route.spec.hostname} 的门禁`, changes: [{ op: "upsert_route", spec: { ...route.spec, sso: { mode: "gate", skip_paths: skipPaths.split("\n").map((p) => p.trim()).filter(Boolean) } } }] }); }}>预览改动</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
     <AddAlias route={route} open={alias} onClose={() => setAlias(false)} />
     <AddRedirect open={redirect} onClose={() => setRedirect(false)} target={route.url} gateway={route.gateway} />
   </>;

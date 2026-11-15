@@ -193,6 +193,7 @@ export interface GatewayView {
 }
 
 export interface RouteSpec {
+  sso?: Gen.SsoSpec;
   rate_limit?: number;
   block_scanners?: boolean;
   internal?: boolean;

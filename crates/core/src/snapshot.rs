@@ -135,7 +135,12 @@ impl Snapshot {
   }
 
   pub fn net(&self, world: &World) -> Net {
+    let base = Net::derive(&world.servers, &self.agents);
+    let (gate_public, gate_login) =
+      crate::gate::render_context(world, &base);
     Net {
+      gate_public,
+      gate_login,
       basic_auth: self
         .secrets
         .iter()
@@ -145,7 +150,7 @@ impl Snapshot {
         })
         .collect(),
       reach: self.reach.clone(),
-      ..Net::derive(&world.servers, &self.agents)
+      ..base
     }
   }
 
@@ -354,7 +359,53 @@ pub fn gateway_render(
       };
       paths.push((p.path.clone(), upstream));
     }
+    let gate = route
+      .spec
+      .sso
+      .as_ref()
+      .map(|sso| {
+        let login = net
+          .gate_login
+          .as_ref()
+          .filter(|u| u.starts_with("https://"))
+          .ok_or_else(|| {
+            ApiError::invalid("控制面还没有公网域名，开不了门禁")
+              .with_hint("先给控制面加一个域名")
+          })?;
+        let url = reqwest::Url::parse(login).map_err(|_| {
+          ApiError::invalid("控制面还没有公网域名，开不了门禁")
+        })?;
+        if url.host_str() == Some(host.as_str())
+          || crate::gate::is_core_host(world, net, host)
+        {
+          return Err(ApiError::invalid(
+            "控制面自己的域名不能开门禁",
+          ));
+        }
+        let core = url
+          .host_str()
+          .and_then(|h| world.routes.get(h))
+          .filter(|r| world.route_gateways(&r.spec).contains(&name))
+          .map(|r| {
+            world.route_upstream(
+              net,
+              &gateway.spec,
+              &r.spec.hostname,
+              &r.spec,
+            )
+          })
+          .transpose()?
+          .map(|u| format!("http://{u}"))
+          .unwrap_or_else(|| login.clone());
+        Ok(render::Gate {
+          login: login.clone(),
+          core,
+          skip_paths: sso.skip_paths.clone(),
+        })
+      })
+      .transpose()?;
     sites.push(render::Site {
+      gate,
       wildcard: false,
       internal: route.spec.internal,
       expires_at: route.spec.expires_at,
@@ -438,6 +489,7 @@ pub fn gateway_render(
           &caddy_sites,
           &forwards,
           crate::link::caddy_site(world, net, name, &gateway.spec)?,
+          net.gate_public.as_deref(),
         ),
       )
     }
@@ -700,5 +752,53 @@ mod tests {
     assert_eq!(fingerprint("a", "b"), fingerprint("a", "b"));
     assert_ne!(fingerprint("a", "b"), fingerprint("a2", "b"));
     assert_ne!(fingerprint("a", "b"), fingerprint("a", "b2"));
+  }
+  #[test]
+  fn gate_core_uses_local_upstream() {
+    let mut world = World::default();
+    for (name, server) in [("edge", "s1"), ("other", "s2")] {
+      world.gateways.insert(
+        name.into(),
+        crate::world::GatewayRow {
+          version: 1,
+          spec: serde_json::from_value(
+            serde_json::json!({"kind":"caddy","server":server}),
+          )
+          .unwrap(),
+        },
+      );
+    }
+    for (host, gateway, sso) in [
+      ("core.example.test", "edge", false),
+      ("a.example.test", "edge", true),
+      ("b.example.test", "other", true),
+    ] {
+      let spec=serde_json::from_value(serde_json::json!({"hostname":host,"gateway":gateway,"upstream":"127.0.0.1:7700","sso":if sso {Some(serde_json::json!({"mode":"gate"}))} else {None}})).unwrap();
+      world.routes.insert(
+        host.into(),
+        crate::world::RouteRow {
+          id: host.into(),
+          version: 1,
+          spec,
+        },
+      );
+    }
+    let net = Net {
+      gate_login: Some("https://core.example.test".into()),
+      gate_public: Some("public".into()),
+      ..Default::default()
+    };
+    assert!(
+      gateway_render(&world, &net, "edge")
+        .unwrap()
+        .config
+        .contains("core http://127.0.0.1:7700")
+    );
+    assert!(
+      gateway_render(&world, &net, "other")
+        .unwrap()
+        .config
+        .contains("core https://core.example.test")
+    );
   }
 }

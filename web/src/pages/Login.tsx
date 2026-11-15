@@ -27,7 +27,12 @@ export function Login({ session, onDone }: { session: Session; onDone: (s: Sessi
   );
 }
 
-function CredentialsForm({ mode, onDone }: { mode: "login" | "setup"; onDone: (s: Session) => void }) {
+function CredentialsForm({ mode, onDone: finish }: { mode: "login" | "setup"; onDone: (s: Session) => void }) {
+  const onDone = (session: Session) => {
+    const next = new URLSearchParams(window.location.search).get("next");
+    if (next?.startsWith("/gate/login?")) window.location.assign(next);
+    else finish(session);
+  };
   const setup = mode === "setup";
   const [username, setUsername] = useState(setup ? "admin" : "");
   const [password, setPassword] = useState("");

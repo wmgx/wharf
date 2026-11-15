@@ -843,6 +843,16 @@ pub enum RouteCmd {
     #[command(flatten)]
     apply: ApplyFlags,
   },
+  /// 域名门禁；不给 --mode 时显示当前配置。
+  Sso {
+    name: String,
+    #[arg(long, value_parser = ["gate", "off"])]
+    mode: Option<String>,
+    #[arg(long = "skip", requires = "mode")]
+    skip: Vec<String>,
+    #[command(flatten)]
+    apply: ApplyFlags,
+  },
   /// 防护：按来源 IP 限速、拦截常见扫描。例：`wharf route guard a.example.com --rate 600 --block --apply`。
   Guard {
     name: String,
