@@ -817,6 +817,10 @@ export interface GatewaySpec {
   image?: string | null;
   kind: GatewayKind;
   /**
+   * caddy：四层转发，只经过入口所在机器，服务自己的端口不对公网开放。
+   */
+  layer4?: Layer4Forward[];
+  /**
    * 网关跑在哪台服务器上。
    */
   server: string;
@@ -1031,6 +1035,17 @@ export interface LastOp {
 }
 
 export type Layer = "volume" | "container" | "gateway" | "dns" | "tunnel" | "config" | "edge";
+
+/**
+ * 在入口机器上监听 TCP 或 UDP，原样转给服务。服务和上游二选一。
+ */
+export interface Layer4Forward {
+  listen: number;
+  port?: string | null;
+  service?: string | null;
+  udp?: boolean;
+  upstream?: string | null;
+}
 
 /**
  * 资源上限。compose 来源只支持一个容器的 compose。
@@ -1311,6 +1326,10 @@ export interface PortSpec {
    * 端口名，路由用它指定目标端口，例如 `http`。
    */
   name: string;
+  /**
+   * UDP 端口，只能用于四层转发，不能给域名用。默认 TCP。
+   */
+  udp?: boolean;
 }
 
 /**
