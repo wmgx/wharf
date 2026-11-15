@@ -1859,6 +1859,18 @@ export interface ServiceView {
   version: number;
 }
 
+/**
+ * 页面登录设备。
+ */
+export interface SessionRow {
+  addr: string | null;
+  agent: string | null;
+  created_at: number;
+  current: boolean;
+  id: string;
+  last_seen_at: number | null;
+}
+
 export interface ShellLog {
   actor: string;
   at: string;

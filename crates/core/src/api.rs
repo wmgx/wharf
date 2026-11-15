@@ -83,6 +83,15 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route("/api/setup", post(crate::login::setup))
     .route("/api/login", post(crate::login::login))
     .route("/api/logout", post(crate::login::logout))
+    .route("/api/sessions", get(crate::sessions::list))
+    .route(
+      "/api/sessions/{id}",
+      axum::routing::delete(crate::sessions::revoke),
+    )
+    .route(
+      "/api/sessions/revoke-others",
+      post(crate::sessions::revoke_others),
+    )
     .route("/api/totp", get(crate::totp::show))
     .route("/api/totp/begin", post(crate::totp::begin))
     .route("/api/totp/enable", post(crate::totp::enable))

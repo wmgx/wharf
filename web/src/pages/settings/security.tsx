@@ -1,13 +1,13 @@
 import { useState } from "react";
 import { api, usePoll } from "@/api";
-import { ErrorNote, SectionTitle } from "@/components/common";
+import { ago, ErrorNote, SectionTitle } from "@/components/common";
 import { Field } from "@/components/fields";
-import { Panel } from "@/components/kit";
+import { ConfirmDialog, Panel, Row, Rows } from "@/components/kit";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import type { TotpView } from "@/types.gen";
+import type { SessionRow, TotpView } from "@/types.gen";
 
 type Mode = "begin" | "recovery" | "disable";
 type Pending = { secret: string; uri: string; qr_svg: string };
@@ -26,6 +26,7 @@ export function Security() {
         <Button variant="outline" size="sm" onClick={() => setMode("disable")}>关闭</Button>
       </>}
     </Panel>}
+    <Sessions />
     {mode && <TotpDialog mode={mode} onClose={() => { setMode(null); refresh(); }} onChanged={refresh} />}
   </>;
 }
@@ -83,4 +84,39 @@ function TotpDialog({ mode, onClose, onChanged }: { mode: Mode; onClose: () => v
       </form>
     </DialogContent>
   </Dialog>;
+}
+
+function browser(agent?: string | null): string {
+  if (!agent) return "未知";
+  const name = /Edg\//.test(agent) ? "Edge" : /Firefox\//.test(agent) ? "Firefox" : /Chrome\//.test(agent) ? "Chrome" : /Safari\//.test(agent) ? "Safari" : "";
+  const os = /Android/.test(agent) ? "Android" : /iPhone|iPad/.test(agent) ? "iOS" : /Windows/.test(agent) ? "Windows" : /Macintosh/.test(agent) ? "macOS" : /Linux/.test(agent) ? "Linux" : "";
+  return name ? [name, os].filter(Boolean).join(" · ") : agent.slice(0, 40);
+}
+
+function Sessions() {
+  const { data, error, refresh } = usePoll<SessionRow[]>("/api/sessions", 30000);
+  const [confirm, setConfirm] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [failure, setFailure] = useState<unknown>(null);
+  const revoke = async (id?: string) => {
+    setBusy(true); setFailure(null);
+    try {
+      if (id) await api.del(`/api/sessions/${id}`);
+      else await api.post("/api/sessions/revoke-others", {});
+      setConfirm(false); refresh();
+    } catch (err) { setFailure(err); } finally { setBusy(false); }
+  };
+  return <>
+    <SectionTitle action={<Button variant="outline" size="sm" disabled={busy || !data?.some((s) => !s.current)} onClick={() => setConfirm(true)}>退出其他全部</Button>}>登录设备</SectionTitle>
+    <ErrorNote error={error || failure} />
+    {data && <Rows>{data.map((s) => <Row key={s.id}>
+      <div className="min-w-0 flex-1 break-words">
+        <div>{browser(s.agent)}{s.current && <span className="ml-2 text-xs text-muted-foreground">当前设备</span>}</div>
+        <div className="text-xs text-muted-foreground break-all">{s.addr || "未知"} · 最近使用 {s.last_seen_at == null ? "未知" : ago(new Date(s.last_seen_at).toISOString())}</div>
+        <div className="text-xs text-muted-foreground">登录于 {new Date(s.created_at).toLocaleString()}</div>
+      </div>
+      {!s.current && <Button variant="outline" size="sm" disabled={busy} onClick={() => revoke(s.id)}>退出</Button>}
+    </Row>)}</Rows>}
+    <ConfirmDialog open={confirm} title="退出其他全部设备？" confirmText="退出" busy={busy} onCancel={() => setConfirm(false)} onConfirm={() => revoke()} />
+  </>;
 }
