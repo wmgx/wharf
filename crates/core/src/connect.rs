@@ -231,6 +231,7 @@ mod tests {
       stopped: false,
       monitor: None,
       limits: None,
+      auto_update: false,
     };
     let hp = BTreeMap::from([("pg".to_string(), 20001)]);
     let j = target("db", &spec, &hp, None, None).unwrap();

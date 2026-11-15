@@ -77,7 +77,7 @@ export function Segmented<T extends string>({ value, options, onChange }: { valu
   );
 }
 
-const portOk = (n?: number) => n != null && n > 0 && n < 65536;
+const portOk = (n?: number | null) => n != null && n > 0 && n < 65536;
 
 /** compose 来源只有宿主机端口；其余来源容器端口必填、宿主机端口选填。 */
 export function portsValid(ports: PortSpec[], compose: boolean): boolean {

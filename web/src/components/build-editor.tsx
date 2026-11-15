@@ -24,8 +24,8 @@ export function howOf(b: BuildSource | null | undefined): BuildHow {
 
 /** 去掉空字符串，按方式清掉另一种方式的字段。 */
 export function cleanHow(h: BuildHow): BuildHow {
-  const t = (s?: string) => (s?.trim() ? s.replace(/\s+$/, "") : undefined);
-  if (h.dockerfile_content !== undefined) return { dockerfile_content: t(h.dockerfile_content) };
+  const t = (s?: string | null) => (s?.trim() ? s.replace(/\s+$/, "") : undefined);
+  if (h.dockerfile_content != null) return { dockerfile_content: t(h.dockerfile_content) };
   const template = h.template && h.template !== AUTO ? h.template : undefined;
   const withInstall = !template || TEMPLATES.find((x) => x.id === template)?.install;
   return {
@@ -38,7 +38,7 @@ export function cleanHow(h: BuildHow): BuildHow {
 }
 
 export function howReady(h: BuildHow): boolean {
-  return h.dockerfile_content === undefined || !!h.dockerfile_content.trim();
+  return h.dockerfile_content == null || !!h.dockerfile_content.trim();
 }
 
 export function BuildEditor({ value, onChange }: { value: BuildHow; onChange: (v: BuildHow) => void }) {

@@ -212,6 +212,19 @@ pub fn service_resolved(
   Ok((resolved, hash))
 }
 
+pub fn service_trial(
+  world: &World,
+  net: &Net,
+  name: &str,
+  secrets: &BTreeMap<String, String>,
+) -> Result<String, ApiError> {
+  let row = world.services.get(name).ok_or_else(|| {
+    ApiError::not_found(format!("服务 {name} 不存在"))
+  })?;
+  let trial = render::trial_compose(name, &row.spec, Some(secrets))?;
+  crate::refs::resolve(&trial, name, world, net)
+}
+
 pub fn service_template(
   world: &World,
   net: &Net,

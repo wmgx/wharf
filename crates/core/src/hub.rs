@@ -522,11 +522,17 @@ async fn handle_socket(
             let agent_ms = report.time_ms.take();
             crate::clock::record(&state, &server, agent_ms).await;
             if let Some(mut m) = report.metrics.take() {
+              let oom = m.oom.take();
               let hosts = std::mem::take(&mut m.hosts);
               if !hosts.is_empty() {
                 tokio::spawn(crate::http_stats::record(state.clone(), hosts));
               }
               crate::metrics::record_report(&state, &server, *m).await;
+              let state = state.clone();
+              let server = server.clone();
+              tokio::spawn(async move {
+                crate::oom::record(&state, &server, oom).await;
+              });
             }
             touch(&state, &server, Some(*report)).await
           }

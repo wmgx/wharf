@@ -330,6 +330,34 @@ const RULES: &[Rule] = &[
     },
   },
   Rule {
+    id: "oom_killed",
+    name: "内存超限被杀",
+    metric: "container.oom",
+    op: Op::Ge,
+    threshold: 1.0,
+    threshold_editable: false,
+    for_n: 1,
+    mode: Mode::Window(30),
+    recover: None,
+    every: "每分钟一次",
+    key: |s| format!("oom.{s}"),
+    fire: |c| {
+      ev(
+        format!("服务 {} 因内存超限被杀", c.subject),
+        format!(
+          "容器用的内存超过上限，被系统杀掉了（{}）。看内存曲线和日志：wharf service logs {}",
+          c.detail, c.subject
+        ),
+      )
+    },
+    ok: |c| {
+      ev(
+        format!("服务 {} 没有再因内存超限被杀", c.subject),
+        "最近 30 分钟没有再发生".into(),
+      )
+    },
+  },
+  Rule {
     id: "monitor_failed",
     name: "服务监控失败",
     metric: "monitor.ok",
@@ -511,6 +539,7 @@ const NOTICES: &[(&str, &str)] = &[
   ("backup", "服务备份失败和恢复"),
   ("failover", "网关切到备用入口、切回"),
   ("update", "服务有新版本"),
+  ("auto_update", "服务自动更新的结果"),
 ];
 
 /// 页面上改过的值，没改的字段用默认。
@@ -1079,6 +1108,21 @@ mod tests {
       judge(r, 1.0, 3, &v(&[0.0, 0.0, 1.0])),
       Verdict::Recover
     ));
+  }
+
+  #[test]
+  fn oom_fires_once_in_a_thirty_sample_window() {
+    let r = rule("oom_killed");
+    assert_eq!(r.for_n, 1);
+    assert!(matches!(r.mode, Mode::Window(30)));
+    let event = (r.fire)(&Ctx {
+      subject: "web",
+      value: 1.0,
+      detail: "上限 32 MB",
+      threshold: r.threshold,
+      for_n: r.for_n,
+    });
+    assert_eq!(event.title, "服务 web 因内存超限被杀");
   }
 
   #[test]

@@ -21,7 +21,7 @@ use wharf_api_types::{
   ApiError, ErrorCode,
   agent::{
     AgentOp, GatewayApply, ProjectUp, ProjectUpResult, Retire,
-    Retired,
+    Retired, TRIAL_PROJECT_PREFIX,
   },
   plan::{
     ApplyRequest, ApplyResponse, Plan, PlanStatus, Run, RunStatus,
@@ -934,6 +934,7 @@ async fn run_step(
               retire: None,
               rollback: false,
               pins: Default::default(),
+              trial: None,
             },
             caddyfile: r.config,
             caddyfile_hash: r.config_hash,
@@ -985,6 +986,7 @@ async fn run_step(
             retire: None,
             rollback: false,
             pins: Default::default(),
+            trial: None,
           }),
           GATEWAY_TIMEOUT,
           Some(progress),
@@ -1020,6 +1022,7 @@ async fn run_step(
             retire: None,
             rollback: false,
             pins: Default::default(),
+            trial: None,
           }),
           GATEWAY_TIMEOUT,
           Some(progress),
@@ -1314,6 +1317,23 @@ async fn service_up(
   let rollback = row.spec.volumes.is_empty()
     && retire.is_none()
     && !matches!(row.spec.source, Source::Compose { .. });
+  // 先试跑再替换：和自动换回上一版的条件一样，另外要已经部署过、不是要保持停止的。
+  let trial = if rollback
+    && !row.spec.stopped
+    && has_deployment(state, service).await?
+    && !world
+      .services
+      .contains_key(&format!("{TRIAL_PROJECT_PREFIX}{service}"))
+  {
+    Some(snapshot::service_trial(
+      world,
+      &net,
+      service,
+      &snap.secrets,
+    )?)
+  } else {
+    None
+  };
   let result: ProjectUpResult = state
     .hub
     .call(
@@ -1327,6 +1347,7 @@ async fn service_up(
         retire,
         rollback,
         pins: row.pins.clone(),
+        trial,
       }),
       SERVICE_UP_TIMEOUT,
       Some(progress.clone()),

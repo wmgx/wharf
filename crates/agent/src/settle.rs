@@ -40,10 +40,7 @@ pub async fn watch(
     if !restarted.is_empty() {
       return Err(failed(project, restarted.join("，")));
     }
-    let starting = state
-      .containers
-      .iter()
-      .any(|c| c.health.as_deref() == Some("health: starting"));
+    let starting = starting(&state);
     let elapsed = start.elapsed();
     if elapsed >= MIN_WATCH && !starting {
       ctx.say("容器运行正常");
@@ -62,6 +59,13 @@ pub async fn watch(
       }
     }
   }
+}
+
+fn starting(state: &ProjectState) -> bool {
+  state
+    .containers
+    .iter()
+    .any(|c| c.health.as_deref() == Some("starting"))
 }
 
 /// 已经能下结论的问题：没有容器、容器退出、健康检查失败。
@@ -142,6 +146,16 @@ mod tests {
   }
 
   #[test]
+  fn normalized_health_is_still_starting() {
+    assert!(starting(&ProjectState {
+      project: "app".into(),
+      hash: None,
+      config_hash: None,
+      containers: vec![container("running", Some("starting"))],
+    }));
+  }
+
+  #[test]
   fn judges_containers() {
     let state = |c| ProjectState {
       project: "app".into(),
@@ -151,7 +165,7 @@ mod tests {
     };
     assert!(problem(&state(container("running", None))).is_none());
     assert!(
-      problem(&state(container("running", Some("health: starting"))))
+      problem(&state(container("running", Some("starting"))))
         .is_none()
     );
     assert!(problem(&state(container("exited", None))).is_some());

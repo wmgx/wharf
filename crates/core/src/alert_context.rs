@@ -16,7 +16,10 @@ pub async fn enrich(
 ) -> Event {
   if matches!(
     rule,
-    "container_restarting" | "monitor_failed" | "http_5xx"
+    "container_restarting"
+      | "monitor_failed"
+      | "http_5xx"
+      | "oom_killed"
   ) && let Some(service) = subject
   {
     let name = service.to_string();
@@ -111,7 +114,10 @@ fn page_path(rule: &str, subject: Option<&str>) -> String {
   };
   match rule {
     "server_offline" => format!("/servers/{subject}"),
-    "container_restarting" | "monitor_failed" | "http_5xx" => {
+    "container_restarting"
+    | "monitor_failed"
+    | "http_5xx"
+    | "oom_killed" => {
       format!("/services/{subject}")
     }
     "domain_down" | "cert_expiring" => "/entries".into(),

@@ -2,11 +2,13 @@
 //! 容器用 `docker stats`。速率要和上一次比，第一次只记下基准。
 
 use std::{
-  collections::{BTreeMap, HashMap},
-  time::{Duration, Instant},
+  collections::{BTreeMap, BTreeSet, HashMap},
+  time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use wharf_api_types::agent::{Metrics, ProjectMetrics};
+use wharf_api_types::agent::{
+  Metrics, ProjectMetrics, TRIAL_PROJECT_PREFIX,
+};
 
 use crate::{docker::Docker, exec::Ctx};
 
@@ -17,6 +19,7 @@ pub struct Sampler {
   prev: Option<Prev>,
   gateway:
     Option<(Instant, HashMap<String, crate::gw_stats::Totals>)>,
+  events_since: Option<u64>,
 }
 
 struct Prev {
@@ -35,6 +38,14 @@ impl Sampler {
     disk: Option<wharf_api_types::agent::Disk>,
   ) -> Option<Metrics> {
     let now = Instant::now();
+    let unix_now = SystemTime::now()
+      .duration_since(UNIX_EPOCH)
+      .unwrap_or_default()
+      .as_secs();
+    let oom = match self.events_since.replace(unix_now) {
+      Some(since) => oom_events(docker, since, unix_now).await,
+      None => None,
+    };
     let gw_now = crate::gw_stats::collect().await;
     let hosts = match self.gateway.replace((now, gw_now.clone())) {
       Some((at, old)) => crate::gw_stats::diff(
@@ -99,8 +110,57 @@ impl Sampler {
       disk_total: disk.map_or(0, |d| d.total),
       projects,
       hosts,
+      oom,
     })
   }
+}
+
+async fn oom_events(
+  docker: &Docker,
+  since: u64,
+  until: u64,
+) -> Option<Vec<String>> {
+  let result = docker
+    .cmd()
+    .args([
+      "events".to_string(),
+      "--since".into(),
+      since.to_string(),
+      "--until".into(),
+      until.to_string(),
+      "--filter".into(),
+      "type=container".into(),
+      "--filter".into(),
+      "event=oom".into(),
+      "--format".into(),
+      "{{index .Actor.Attributes \"com.docker.compose.project\"}}"
+        .into(),
+    ])
+    .timeout(STATS_TIMEOUT)
+    .run(&Ctx::detached())
+    .await;
+  match result {
+    Ok(out) if out.success => Some(parse_oom(&out.stdout)),
+    Ok(out) => {
+      tracing::warn!(code = ?out.code, "读取容器 OOM 事件失败");
+      None
+    }
+    Err(e) => {
+      tracing::warn!("读取容器 OOM 事件失败：{e}");
+      None
+    }
+  }
+}
+
+fn parse_oom(text: &str) -> Vec<String> {
+  text
+    .lines()
+    .map(str::trim)
+    .filter(|s| !s.is_empty() && *s != "<no value>")
+    .map(str::to_string)
+    .collect::<BTreeSet<_>>()
+    .into_iter()
+    .collect()
 }
 
 fn read(path: &str) -> String {
@@ -196,7 +256,9 @@ async fn container_stats(docker: &Docker) -> BTreeMap<String, Stat> {
     .stdout
     .lines()
     .filter_map(|l| l.split_once('\t'))
-    .filter(|(_, p)| !p.is_empty())
+    .filter(|(_, p)| {
+      !p.is_empty() && !p.starts_with(TRIAL_PROJECT_PREFIX)
+    })
     .collect();
   #[derive(serde::Deserialize)]
   #[serde(rename_all = "PascalCase")]
@@ -257,6 +319,14 @@ fn size(s: &str) -> u64 {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn oom_projects_are_sorted_and_unique() {
+    assert_eq!(
+      parse_oom("web\n\n<no value>\nweb\napi\n"),
+      ["api", "web"]
+    );
+  }
 
   #[test]
   fn parse() {
