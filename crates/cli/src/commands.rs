@@ -2035,6 +2035,28 @@ async fn gateway(
       changes(c, vec![Change::UpsertGateway { name, spec }], apply, j)
         .await
     }
+    GatewayCmd::Wildcard {
+      name,
+      zone,
+      off,
+      apply,
+    } => {
+      let mut spec = c
+        .get::<GatewayView>(&format!("/api/gateways/{}", seg(&name)))
+        .await?
+        .spec;
+      let zone =
+        zone.trim().trim_end_matches('.').to_ascii_lowercase();
+      if off {
+        spec.wildcard.retain(|z| z != &zone);
+      } else if !spec.wildcard.contains(&zone) {
+        spec.wildcard.push(zone);
+      }
+      spec.wildcard.sort();
+      spec.wildcard.dedup();
+      changes(c, vec![Change::UpsertGateway { name, spec }], apply, j)
+        .await
+    }
     GatewayCmd::Add {
       name,
       server,
@@ -2084,13 +2106,16 @@ async fn gateway(
         }
         (_, account) => account,
       };
-      // 重复执行 add 修改已有的网关时，保留它的错误页。
-      let error_page = c
+      // 重复执行 add 时保留错误页和泛域名证书。
+      let existing = c
         .get::<Vec<GatewayView>>("/api/gateways")
         .await?
         .into_iter()
         .find(|g| g.name == name)
-        .and_then(|g| g.spec.error_page);
+        .map(|g| g.spec);
+      let (error_page, wildcard) = existing
+        .map(|s| (s.error_page, s.wildcard))
+        .unwrap_or_default();
       let spec = GatewaySpec {
         kind,
         server,
@@ -2102,6 +2127,7 @@ async fn gateway(
         tls,
         account,
         error_page,
+        wildcard,
       };
       changes(c, vec![Change::UpsertGateway { name, spec }], apply, j)
         .await

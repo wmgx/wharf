@@ -473,6 +473,9 @@ pub struct GatewaySpec {
   /// 内容里可以写 `{err.status_code}`，显示时换成状态码。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub error_page: Option<String>,
+  /// caddy：签一张 *.<zone>，这个入口上 zone 下一级的域名都用它。
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub wildcard: Vec<String>,
 }
 
 /// 网关的证书方式。

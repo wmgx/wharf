@@ -18,8 +18,8 @@ use wharf_api_types::{
     Action, Impact, Layer, Plan, PlanItem, PlanRequest, PlanStatus,
   },
   spec::{
-    BuildSource, EdgeAppSpec, EdgeKind, GatewayKind, NetworkMode,
-    RouteSpec, Source,
+    BuildSource, EdgeAppSpec, EdgeKind, GatewayKind, GatewayTls,
+    NetworkMode, RouteSpec, Source,
   },
   view::DataKind,
 };
@@ -1660,6 +1660,26 @@ fn gateway_items(
 ) -> Result<(), ApiError> {
   for name in desired.gateways.keys() {
     let gw = &desired.gateways[name];
+    if gw.spec.kind == GatewayKind::Caddy {
+      for zone in &gw.spec.wildcard {
+        if current
+          .gateways
+          .get(name)
+          .is_some_and(|g| g.spec.wildcard.contains(zone))
+        {
+          continue;
+        }
+        if gw.spec.tls == GatewayTls::Auto
+          && snap.account_for(zone).is_none()
+        {
+          return Err(ApiError::invalid(format!(
+                        "入口 {name} 的泛域名证书 *.{zone}：没有厂商账号管理 {zone}"
+                    ))
+                    .suggest("wharf account list"));
+        }
+        b.warnings.push(format!("入口 {name} 开启 *.{zone} 的泛域名证书：这个入口上 {zone} 下一级的域名都改用这张证书，签出来之前（DNS 验证通常几十秒）这些域名的 HTTPS 打不开（验证记录由控制面写）"));
+      }
+    }
     let server = &gw.spec.server;
     let project = gateway_project(name);
     let r = snapshot::gateway_render(desired, net, name)?;

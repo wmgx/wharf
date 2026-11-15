@@ -5,7 +5,7 @@ use std::{collections::BTreeMap, time::Duration};
 use wharf_api_types::{
   ApiError, ErrorCode,
   agent::{ProjectState, PullPolicy},
-  spec::GatewayKind,
+  spec::{GatewayKind, GatewayTls},
 };
 use wharf_providers::{
   Credentials, DnsProvider, ProviderError, error::code,
@@ -355,6 +355,8 @@ pub fn gateway_render(
       paths.push((p.path.clone(), upstream));
     }
     sites.push(render::Site {
+      wildcard: false,
+      dns: None,
       rate_limit: route.spec.rate_limit,
       block_scanners: route.spec.block_scanners,
       redirect: None,
@@ -375,15 +377,27 @@ pub fn gateway_render(
   }
   sites.sort_by(|a, b| a.hostname.cmp(&b.hostname));
   let (compose, config) = match gateway.spec.kind {
-    GatewayKind::Caddy => (
-      render::gateway_compose(name, &gateway.spec),
-      render::caddyfile(
-        name,
-        &gateway.spec,
-        &sites,
-        crate::link::caddy_site(world, net, name, &gateway.spec)?,
-      ),
-    ),
+    GatewayKind::Caddy => {
+      let mut caddy_sites = sites.clone();
+      for zone in &gateway.spec.wildcard {
+        caddy_sites.push(render::Site {
+          hostname: format!("*.{zone}"),
+          wildcard: true,
+          dns: (gateway.spec.tls == GatewayTls::Auto)
+            .then(|| zone.clone()),
+          ..Default::default()
+        });
+      }
+      (
+        render::gateway_compose(name, &gateway.spec),
+        render::caddyfile(
+          name,
+          &gateway.spec,
+          &caddy_sites,
+          crate::link::caddy_site(world, net, name, &gateway.spec)?,
+        ),
+      )
+    }
     GatewayKind::CloudflareTunnel => {
       let rules: Vec<serde_json::Value> = sites
         .iter()

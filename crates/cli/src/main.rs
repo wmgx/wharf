@@ -734,6 +734,17 @@ pub enum GatewayCmd {
     #[command(flatten)]
     apply: ApplyFlags,
   },
+  /// 泛域名证书：给 *.<zone> 签一张证书，DNS 验证记录由控制面写。
+  /// 例：`wharf gateway wildcard edge --zone example.com --apply`；`--off` 关闭。
+  Wildcard {
+    name: String,
+    #[arg(long)]
+    zone: String,
+    #[arg(long)]
+    off: bool,
+    #[command(flatten)]
+    apply: ApplyFlags,
+  },
   Rm {
     name: String,
     #[command(flatten)]

@@ -179,6 +179,7 @@ export interface GatewaySpec {
   /** cloudflare_tunnel：在哪个厂商账号下建隧道。 */
   account?: string;
   error_page?: string;
+  wildcard?: string[];
 }
 
 export interface GatewayView {
