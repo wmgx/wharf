@@ -139,6 +139,25 @@ fn read(
       .collect::<rusqlite::Result<Vec<_>>>()?,
   );
   let mut stmt = c.prepare(
+      "SELECT at FROM (
+         SELECT at, DENSE_RANK() OVER (ORDER BY at DESC) AS page
+         FROM points WHERE subject = ?1 AND name = 'oom.kill' AND at < ?2
+       ) WHERE page <= ?3 ORDER BY at DESC",
+    )?;
+  rows.extend(
+    stmt
+      .query_map(params![name, before, limit as i64 + 1], |r| {
+        Ok(TimelineItem {
+          at: r.get(0)?,
+          kind: "oom".into(),
+          title: "内存超限被杀".into(),
+          ok: None,
+          actor: None,
+        })
+      })?
+      .collect::<rusqlite::Result<Vec<_>>>()?,
+  );
+  let mut stmt = c.prepare(
       "SELECT at, name FROM (
          SELECT at, name, DENSE_RANK() OVER (ORDER BY at DESC) AS page
          FROM points WHERE subject = ?1 AND name IN ('autoupdate.ok', 'autoupdate.fail') AND at < ?2
