@@ -910,6 +910,31 @@ impl World {
         );
       }
       self.check_route_gateway(host, &route.spec)?;
+      if route.spec.rate_limit.is_some() || route.spec.block_scanners
+      {
+        if route.spec.redirect.is_some() {
+          return Err(ApiError::invalid(format!(
+            "路由 {host}：跳转不能设置限速和拦截扫描"
+          )));
+        }
+        if self.route_gateways(&route.spec).iter().any(|name| {
+          self.gateways[*name].spec.kind
+            == GatewayKind::CloudflareTunnel
+        }) {
+          return Err(ApiError::invalid(format!(
+            "路由 {host}：限速和拦截扫描只支持 caddy 网关"
+          )));
+        }
+      }
+      if route
+        .spec
+        .rate_limit
+        .is_some_and(|n| !(10..=100000).contains(&n))
+      {
+        return Err(ApiError::invalid(format!(
+          "路由 {host} 的限速要在每分钟 10 到 100000 次之间"
+        )));
+      }
       if let Some(target) = &route.spec.redirect {
         self.check_redirect(host, &route.spec, target)?;
         continue;
@@ -1772,6 +1797,52 @@ mod tests {
   }
 
   #[test]
+  fn route_guard_checks() {
+    let mut w = sample();
+    w.apply_changes(&[
+      Change::UpsertGateway {
+        name: "edge".into(),
+        spec: serde_json::from_value(json!({
+          "kind": "caddy", "server": "node1", "default": true
+        }))
+        .unwrap(),
+      },
+      Change::UpsertRoute {
+        spec: serde_json::from_value(json!({
+          "hostname": "a.example.com", "upstream": "127.0.0.1:80",
+          "rate_limit": 10
+        }))
+        .unwrap(),
+      },
+    ])
+    .unwrap();
+    w.validate().unwrap();
+    w.routes.get_mut("a.example.com").unwrap().spec.redirect =
+      Some("https://b.example.com".into());
+    assert_eq!(
+      w.validate().unwrap_err().message,
+      "路由 a.example.com：跳转不能设置限速和拦截扫描"
+    );
+    w.routes.get_mut("a.example.com").unwrap().spec.redirect = None;
+    w.gateways.get_mut("edge").unwrap().spec.kind =
+      GatewayKind::CloudflareTunnel;
+    w.gateways.get_mut("edge").unwrap().spec.account =
+      Some("cf".into());
+    assert_eq!(
+      w.validate().unwrap_err().message,
+      "路由 a.example.com：限速和拦截扫描只支持 caddy 网关"
+    );
+    w.gateways.get_mut("edge").unwrap().spec.kind =
+      GatewayKind::Caddy;
+    w.routes.get_mut("a.example.com").unwrap().spec.rate_limit =
+      Some(9);
+    assert_eq!(
+      w.validate().unwrap_err().message,
+      "路由 a.example.com 的限速要在每分钟 10 到 100000 次之间"
+    );
+  }
+
+  #[test]
   fn route_needs_gateway_and_port() {
     let mut w = sample();
     w.apply_changes(&[
@@ -1792,6 +1863,8 @@ mod tests {
           upstream: None,
           link: Default::default(),
           redirect: None,
+          rate_limit: None,
+          block_scanners: false,
         },
       },
     ])
@@ -1864,6 +1937,8 @@ mod tests {
       upstream: None,
       link: Default::default(),
       redirect: None,
+      rate_limit: None,
+      block_scanners: false,
     };
     w.apply_changes(&[
       Change::UpsertService {
