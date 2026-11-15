@@ -90,12 +90,12 @@ export function DomainDetail({ route, status, onClose }: { route: RouteView; sta
       <SectionTitle>保护</SectionTitle>
       <Panel className="flex flex-col gap-3 p-4 text-sm">
         <div className="flex flex-wrap items-center gap-2">
-        <span className="flex-1">登录保护：{route.spec.auth ? "已开启 · 账号密码" : "没开"}
-        </span>
-        {gateway?.spec.kind === "cloudflare_tunnel" ? <span className="text-muted-foreground">隧道入口暂不支持登录保护</span> : route.spec.auth ? <>
-          <Button variant="outline" size="sm" onClick={() => actions.basicAuth(route.spec.hostname)}>改账号</Button>
-          <Button variant="outline" size="sm" onClick={() => actions.plan({ title: `关闭 ${route.spec.hostname} 的登录保护`, changes: [{ op: "upsert_route", spec: { ...route.spec, auth: false } }] })}>关闭</Button>
-        </> : <Button variant="outline" size="sm" onClick={() => actions.basicAuth(route.spec.hostname, true)}>开启</Button>}
+          <span className="flex-1">登录保护：{route.spec.auth ? "已开启 · 账号密码" : "没开"}
+          </span>
+          {gateway?.spec.kind === "cloudflare_tunnel" ? <span className="text-muted-foreground">隧道入口暂不支持登录保护</span> : route.spec.auth ? <>
+            <Button variant="outline" size="sm" onClick={() => actions.basicAuth(route.spec.hostname)}>改账号</Button>
+            <Button variant="outline" size="sm" onClick={() => actions.plan({ title: `关闭 ${route.spec.hostname} 的登录保护`, changes: [{ op: "upsert_route", spec: { ...route.spec, auth: false } }] })}>关闭</Button>
+          </> : <Button variant="outline" size="sm" onClick={() => actions.basicAuth(route.spec.hostname, true)}>开启</Button>}
         </div>
         {!route.spec.redirect && (gateway?.spec.kind === "cloudflare_tunnel" ? <span className="text-muted-foreground">隧道入口不支持限速和拦截扫描</span> : <>
           <label className="flex flex-wrap items-center gap-2">
