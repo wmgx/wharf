@@ -952,6 +952,20 @@ async fn run_step(
         {
           return Err(ApiError::invalid(format!("控制面的域名 {host} 在入口 {gateway} 的泛域名证书 *.{zone} 下，开了以后签证书时连不回控制面")).with_hint("用 --public-url 给控制面指定一个不经过这个入口的地址，或者把控制面的域名换到别的 zone"));
         }
+        if let Ok(parsed) = reqwest::Url::parse(&url)
+          && let Some(host) = parsed.host_str()
+          && world.routes.get(host).is_some_and(|route| {
+            route.spec.internal
+              && world.route_gateway(&route.spec)
+                == Some(gateway.as_str())
+          })
+          && r
+            .sites
+            .iter()
+            .any(|site| site.hostname == host && site.dns.is_some())
+        {
+          return Err(ApiError::invalid(format!("控制面的域名 {host} 是内网域名，证书要用 DNS 验证签，签的时候连不回控制面")).with_hint("用 --public-url 给控制面指定一个不经过这个入口的地址，或者把控制面的域名换到别的 zone"));
+        }
         crate::acme_dns::fill(&r.config, &key, &url)
       } else {
         r.config

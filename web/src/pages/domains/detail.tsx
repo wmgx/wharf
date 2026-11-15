@@ -88,6 +88,7 @@ export function DomainDetail({ route, status, onClose }: { route: RouteView; sta
             </span>
           </>],
           ["走法", hopOf(route, status).text],
+          ...(!route.spec.redirect ? [["访问范围", route.spec.internal ? "只在内网" : "公网"] as [string, string]] : []),
         ]} />
         {route.spec.service && gateway?.spec.kind === "caddy" && <label className="flex items-center gap-2 text-sm">
           <Checkbox checked={link === "tunnel"} onCheckedChange={(v) => setLink(v === true ? "tunnel" : undefined)} />总是走反向隧道</label>}

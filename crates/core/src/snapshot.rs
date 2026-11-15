@@ -356,7 +356,13 @@ pub fn gateway_render(
     }
     sites.push(render::Site {
       wildcard: false,
-      dns: None,
+      internal: route.spec.internal,
+      dns: (route.spec.internal
+        && gateway.spec.tls == GatewayTls::Auto
+        && !host.split_once('.').is_some_and(|(_, zone)| {
+          gateway.spec.wildcard.iter().any(|z| z == zone)
+        }))
+      .then(|| host.clone()),
       rate_limit: route.spec.rate_limit,
       block_scanners: route.spec.block_scanners,
       redirect: None,
