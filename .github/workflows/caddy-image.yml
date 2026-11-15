@@ -13,7 +13,7 @@ permissions:
 
 env:
   CADDY_VERSION: 2.11.9
-  TAG: 2.11.9-1
+  TAG: 2.11.9-2
 
 jobs:
   build:
@@ -52,7 +52,7 @@ jobs:
           docker run --rm "$image" caddy version | grep -q "^v$CADDY_VERSION " \
             || { docker run --rm "$image" caddy version; echo "Caddy 版本不是 v$CADDY_VERSION"; exit 1; }
           modules=$(docker run --rm "$image" caddy list-modules)
-          for m in layer4 http.handlers.rate_limit dns.providers.cloudflare; do
+          for m in layer4 http.handlers.rate_limit dns.providers.cloudflare dns.providers.acmedns; do
             echo "$modules" | grep -qx "$m" || { echo "缺少模块 $m"; exit 1; }
           done
           docker push "$image"
