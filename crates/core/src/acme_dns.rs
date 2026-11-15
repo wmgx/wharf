@@ -114,7 +114,7 @@ pub async fn update(
       format!("这个入口不能签 {subdomain}"),
     );
   }
-  let Some(account) = snap.account_for(&subdomain) else {
+  let Some((account, _)) = snap.account_for(&subdomain) else {
     return error(
       StatusCode::UNPROCESSABLE_ENTITY,
       format!("没有厂商账号管理 {subdomain}"),
