@@ -21,8 +21,12 @@ pub fn secret_name(gateway: &str) -> String {
   format!("WHARF_ACME_DNS_{gateway}")
 }
 
-pub fn allowed(_world: &World, _gateway: &str) -> Vec<String> {
-  Vec::new()
+pub fn allowed(world: &World, gateway: &str) -> Vec<String> {
+  world
+    .gateways
+    .get(gateway)
+    .map(|g| g.spec.wildcard.clone())
+    .unwrap_or_default()
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
@@ -167,6 +171,29 @@ pub async fn update(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn acme_dns_allowed() {
+    let mut world = World::default();
+    for (name, zone) in
+      [("edge", "example.com"), ("other", "other.com")]
+    {
+      world.gateways.insert(
+        name.into(),
+        crate::world::GatewayRow {
+          spec: serde_json::from_value(
+            json!({"kind":"caddy", "server":"s1", "wildcard":[zone]}),
+          )
+          .unwrap(),
+          version: 1,
+        },
+      );
+    }
+    let zones = allowed(&world, "edge");
+    assert!(zones.contains(&"example.com".into()));
+    assert!(!zones.contains(&"other.com".into()));
+    assert!(!zones.contains(&"a.example.com".into()));
+  }
 
   #[test]
   fn constant_time_eq_works() {
