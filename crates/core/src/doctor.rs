@@ -104,6 +104,18 @@ pub async fn run(
       .suggest("wharf route ls"),
     );
   }
+  let expired =
+    crate::share::expired(&snap.world, Utc::now().timestamp_millis());
+  if let Some(host) = host
+    && expired.iter().any(|h| h == host)
+  {
+    return Err(
+      wharf_api_types::ApiError::invalid(format!(
+        "临时分享 {host} 已失效，不做体检"
+      ))
+      .suggest(format!("wharf route rm {host} --apply")),
+    );
+  }
   let net = snap.net(&snap.world);
   let live = live_states(s, &snap.world).await;
   let client = reqwest::Client::builder()
@@ -118,7 +130,9 @@ pub async fn run(
     .world
     .routes
     .keys()
-    .filter(|h| host.is_none_or(|q| q == h.as_str()))
+    .filter(|h| {
+      host.is_none_or(|q| q == h.as_str()) && !expired.contains(h)
+    })
     .collect();
   let routes = futures_util::future::join_all(
     hosts

@@ -132,6 +132,103 @@ async fn dispatch(
       )
       .await
     }
+    Command::Share {
+      name,
+      ttl,
+      port,
+      gateway,
+      zone,
+      apply,
+    } => {
+      let ttl = share_ttl(&ttl).map_err(ApiError::invalid)?;
+      let gateways: Vec<GatewayView> = c.get("/api/gateways").await?;
+      let gw = if let Some(name) = gateway {
+        gateways.iter().find(|g| g.name == name).ok_or_else(|| {
+          ApiError::not_found(format!("入口 {name} 不存在"))
+        })?
+      } else {
+        gateways.iter().find(|g| g.spec.default).ok_or_else(|| {
+          ApiError::invalid("没有默认入口，用 --gateway 指定")
+        })?
+      };
+      if gw.spec.kind != GatewayKind::Caddy
+        || gw.spec.wildcard.is_empty()
+      {
+        return Err(
+          ApiError::invalid(format!(
+            "入口 {} 没开泛域名证书，临时分享要用它",
+            gw.name
+          ))
+          .suggest(format!(
+            "wharf gateway wildcard {} --zone <zone> --apply",
+            gw.name
+          ))
+          .into(),
+        );
+      }
+      let zone = match zone {
+        Some(zone) if gw.spec.wildcard.contains(&zone) => zone,
+        Some(zone) => {
+          return Err(
+            ApiError::invalid(format!(
+              "入口 {} 没开 {zone} 的泛域名证书",
+              gw.name
+            ))
+            .into(),
+          );
+        }
+        None if gw.spec.wildcard.len() == 1 => {
+          gw.spec.wildcard[0].clone()
+        }
+        None => {
+          return Err(
+            ApiError::invalid(format!(
+              "入口 {} 开了多个泛域名证书，用 --zone 选一个：{}",
+              gw.name,
+              gw.spec.wildcard.join("、")
+            ))
+            .into(),
+          );
+        }
+      };
+      let mut bytes = [0u8; 10];
+      getrandom::fill(&mut bytes).map_err(|e| {
+        ApiError::internal(format!("生成分享域名失败：{e}"))
+      })?;
+      let label: String = bytes
+        .iter()
+        .map(|b| {
+          b"0123456789abcdefghijklmnopqrstuvwxyz"[(b % 36) as usize]
+            as char
+        })
+        .collect();
+      let hostname = format!("{label}.{zone}");
+      let expires = chrono::Utc::now()
+        + chrono::Duration::seconds(ttl.as_secs() as i64);
+      if !j {
+        println!(
+          "分享地址 https://{hostname}，{} 到期",
+          expires.with_timezone(&chrono::Local).format("%m-%d %H:%M")
+        );
+      }
+      let spec = RouteSpec {
+        hostname,
+        service: name,
+        port,
+        gateway: Some(gw.name.clone()),
+        expires_at: Some(expires.timestamp_millis()),
+        upstream: None,
+        redirect: None,
+        backup_gateway: None,
+        auth: false,
+        paths: vec![],
+        link: Default::default(),
+        rate_limit: None,
+        block_scanners: false,
+        internal: false,
+      };
+      changes(c, vec![Change::UpsertRoute { spec }], apply, j).await
+    }
     Command::Exec {
       server,
       timeout,
@@ -2194,14 +2291,30 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
       out(j, &v, |v| {
         for r in v {
           println!(
-            "{}  →  {}  经 {}",
+            "{}  →  {}  经 {}{}",
             r.url,
             r.spec
               .redirect
               .as_deref()
               .or(r.spec.upstream.as_deref())
               .unwrap_or(&r.spec.service),
-            r.gateway.as_deref().unwrap_or("-")
+            r.gateway.as_deref().unwrap_or("-"),
+            r.spec
+              .expires_at
+              .map(|ms| {
+                if ms <= chrono::Utc::now().timestamp_millis() {
+                  "（临时分享，已失效）".to_string()
+                } else {
+                  format!(
+                    "（临时分享，{} 到期）",
+                    chrono::DateTime::from_timestamp_millis(ms)
+                      .unwrap()
+                      .with_timezone(&chrono::Local)
+                      .format("%m-%d %H:%M")
+                  )
+                }
+              })
+              .unwrap_or_default()
           );
           for p in &r.spec.paths {
             println!(
@@ -2240,6 +2353,7 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
         });
       let guard = existing.filter(|_| redirect.is_none());
       let spec = RouteSpec {
+        expires_at: None,
         internal,
         rate_limit: guard.as_ref().and_then(|r| r.spec.rate_limit),
         block_scanners: guard.is_some_and(|r| r.spec.block_scanners),
@@ -2591,6 +2705,26 @@ fn parse_egress(
   }
   spec.validate().map_err(ApiError::invalid)?;
   Ok(Some(spec))
+}
+
+fn share_ttl(s: &str) -> Result<Duration, String> {
+  let s = s.trim();
+  let (num, unit) = s.split_at(
+    s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len()),
+  );
+  let n: u64 = num.parse().map_err(|_| format!("时长写错了：{s}"))?;
+  let factor = match unit {
+    "s" => 1,
+    "" | "m" => 60,
+    "h" => 3600,
+    "d" => 86400,
+    _ => return Err(format!("时长单位只能是 s、m、h、d：{s}")),
+  };
+  let secs = n
+    .checked_mul(factor)
+    .filter(|n| (60..=7 * 86400).contains(n))
+    .ok_or("时长要在 1 分钟到 7 天之间")?;
+  Ok(Duration::from_secs(secs))
 }
 
 #[cfg(test)]
