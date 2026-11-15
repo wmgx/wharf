@@ -1132,12 +1132,7 @@ mod tests {
       memory_mb: Some(512),
       cpu_milli: None,
     };
-    let error = compose_with_limits(
-            "s1",
-            "services:\n  web:\n    image: nginx\n  worker:\n    image: nginx\n",
-            &limits,
-        )
-        .unwrap_err();
+    let error = compose_with_limits("s1", "services:\n  web:\n    image: nginx\n  worker:\n    image: nginx\n", &limits).unwrap_err();
     assert!(error.message.contains("2 个容器"));
     let error = compose_with_limits(
       "s1",

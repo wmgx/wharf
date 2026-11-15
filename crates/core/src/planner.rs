@@ -1414,8 +1414,9 @@ fn egress_items(b: &mut Builder, current: &World, desired: &World) {
       Option<String>,
       Option<wharf_api_types::egress::EgressSpec>,
     )>| {
-      e.as_ref()
-                .map(|(own, via, rules)| json!({ "egress": own, "via": via, "via_rules": rules }))
+      e.as_ref().map(|(own, via, rules)| {
+        json!({ "egress": own, "via": via, "via_rules": rules })
+      })
     };
     let mut what = Vec::new();
     if let Some((own, via, _)) = &after {
