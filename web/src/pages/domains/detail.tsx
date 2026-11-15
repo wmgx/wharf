@@ -1,5 +1,7 @@
 import { useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
+import { AddAlias } from "@/components/add-alias";
+import { AddRedirect } from "@/components/add-redirect";
 import { useActions } from "@/components/actions";
 import { Dot, SectionTitle, StatusBadge, ago } from "@/components/common";
 import { Field, Picker } from "@/components/fields";
@@ -14,6 +16,8 @@ import type { RouteView, Status } from "@/types";
 
 export function DomainDetail({ route, status, onClose }: { route: RouteView; status: Status; onClose: () => void }) {
   const actions = useActions();
+  const [alias, setAlias] = useState(false);
+  const [redirect, setRedirect] = useState(false);
   const [, setParams] = useSearchParams();
   const [link, setLink] = useState(route.spec.link);
   const [rate, setRate] = useState<number | null>(route.spec.rate_limit ?? null);
@@ -68,6 +72,10 @@ export function DomainDetail({ route, status, onClose }: { route: RouteView; sta
             {route.upstream ?? "-"}
           </span>],
         ]} />
+        <div className="mt-4 flex flex-wrap gap-2">
+          {!route.spec.redirect && <Button variant="outline" onClick={() => setAlias(true)}>加别名</Button>}
+          <Button variant="outline" onClick={() => setRedirect(true)}>跳转到这里</Button>
+        </div>
       </Panel>
       <SectionTitle>入口</SectionTitle>
       <Panel className="grid gap-4 p-4">
@@ -119,5 +127,7 @@ export function DomainDetail({ route, status, onClose }: { route: RouteView; sta
       <Button variant="outline" className="text-destructive" onClick={() => actions.removeRoute(route.spec.hostname)}>移除域名</Button>
       <Button disabled={!changed || (rate !== null && (!Number.isInteger(rate) || rate < 10 || rate > 100000))} onClick={() => { onClose(); actions.plan({ title: `修改 ${route.spec.hostname}`, changes: [{ op: "upsert_route", spec: { ...route.spec, link, backup_gateway: backup || undefined, rate_limit: rate ?? undefined, block_scanners: block || undefined } }] }); }}>预览改动</Button>
     </SheetFooter>
+    <AddAlias route={route} open={alias} onClose={() => setAlias(false)} />
+    <AddRedirect open={redirect} onClose={() => setRedirect(false)} target={route.url} gateway={route.gateway} />
   </>;
 }
