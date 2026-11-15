@@ -970,6 +970,7 @@ export interface ImportRecord {
 export interface Issue {
   /**
    * 这是哪一类问题，页面按它决定给什么按钮。取值见下表。
+   * oom_killed：服务的容器因内存超限被杀。
    */
   code: string;
   /**
@@ -1097,6 +1098,11 @@ export interface Metrics {
    */
   net_rx: number;
   net_tx: number;
+  /**
+   * 上次上报以来因内存超限被杀过容器的 compose project 名。
+   * 旧 agent 没有这个字段；新 agent 每次都带，没有就是空列表。
+   */
+  oom?: string[] | null;
   /**
    * compose project 名到它的容器合计。
    */
