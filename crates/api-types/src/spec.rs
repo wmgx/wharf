@@ -377,7 +377,7 @@ pub struct MonitorSpec {
   pub keyword: Option<String>,
 }
 
-/// 资源上限。只对 image 和 build 来源生效。
+/// 资源上限。compose 来源只支持一个容器的 compose。
 #[derive(
   Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
 )]
