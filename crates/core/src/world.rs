@@ -870,8 +870,7 @@ impl World {
             ApiError::invalid(format!(
               "网关 {name} 是 cloudflare_tunnel，要指定在哪个厂商账号下建隧道"
             ))
-            .suggest("wharf account list"),
-          );
+                    .suggest("wharf account list"));
         }
         if s.http_port.is_some()
           || s.https_port.is_some()
@@ -883,7 +882,34 @@ impl World {
             "网关 {name}：http_port、https_port、email、tls、error_page 只适用于 caddy 网关"
           )));
         }
+        if !s.wildcard.is_empty() {
+          return Err(ApiError::invalid(format!(
+            "网关 {name}：泛域名证书只适用于 caddy 网关"
+          )));
+        }
         continue;
+      }
+      if gateway.spec.tls == GatewayTls::Off
+        && !gateway.spec.wildcard.is_empty()
+      {
+        return Err(ApiError::invalid(format!(
+          "入口 {name} 只走 HTTP，不能开泛域名证书"
+        )));
+      }
+      let mut zones = std::collections::BTreeSet::new();
+      for zone in &gateway.spec.wildcard {
+        if zone.starts_with("*.")
+          || normalize_hostname(zone).ok().as_ref() != Some(zone)
+        {
+          return Err(ApiError::invalid(format!(
+            "入口 {name} 的泛域名证书写 zone 本身，例如 example.com"
+          )));
+        }
+        if !zones.insert(zone) {
+          return Err(ApiError::invalid(format!(
+            "入口 {name} 的泛域名证书 {zone} 写了两次"
+          )));
+        }
       }
       let http = gateway.spec.http_port.unwrap_or(80);
       let https = gateway.spec.https_port.unwrap_or(443);
@@ -906,8 +932,7 @@ impl World {
           .suggest(format!(
             "wharf edge domain add {} {host}",
             route.spec.service
-          )),
-        );
+                )));
       }
       self.check_route_gateway(host, &route.spec)?;
       if route.spec.rate_limit.is_some() || route.spec.block_scanners
@@ -1568,8 +1593,7 @@ fn validate_lan_addrs(addrs: &[String]) -> Result<(), ApiError> {
         ApiError::invalid(format!(
           "局域网地址 {addr} 不是私有网段的 IPv4（10/8、172.16/12、192.168/16）"
         ))
-        .with_hint("公网地址不能绑定，否则服务端口会直接暴露到公网"),
-      );
+            .with_hint("公网地址不能绑定，否则服务端口会直接暴露到公网"));
     }
   }
   Ok(())
@@ -1579,6 +1603,52 @@ fn validate_lan_addrs(addrs: &[String]) -> Result<(), ApiError> {
 mod tests {
   use super::*;
   use wharf_api_types::spec::PortSpec;
+
+  #[test]
+  fn wildcard_checks() {
+    let mut w = sample();
+    let spec: GatewaySpec = serde_json::from_value(
+            serde_json::json!({"kind":"caddy", "server":"node1", "wildcard":["example.com"]}),
+        )
+        .unwrap();
+    w.gateways
+      .insert("edge".into(), GatewayRow { spec, version: 1 });
+    w.validate().unwrap();
+    let valid = w.gateways["edge"].spec.clone();
+    {
+      let spec = &mut w.gateways.get_mut("edge").unwrap().spec;
+      spec.kind = GatewayKind::CloudflareTunnel;
+      spec.account = Some("cf".into());
+    }
+    assert_eq!(
+      w.validate().unwrap_err().message,
+      "网关 edge：泛域名证书只适用于 caddy 网关"
+    );
+    w.gateways.get_mut("edge").unwrap().spec = GatewaySpec {
+      tls: GatewayTls::Off,
+      ..valid.clone()
+    };
+    assert_eq!(
+      w.validate().unwrap_err().message,
+      "入口 edge 只走 HTTP，不能开泛域名证书"
+    );
+    w.gateways.get_mut("edge").unwrap().spec = GatewaySpec {
+      wildcard: vec!["*.example.com".into()],
+      ..valid.clone()
+    };
+    assert_eq!(
+      w.validate().unwrap_err().message,
+      "入口 edge 的泛域名证书写 zone 本身，例如 example.com"
+    );
+    w.gateways.get_mut("edge").unwrap().spec = GatewaySpec {
+      wildcard: vec!["example.com".into(), "example.com".into()],
+      ..valid
+    };
+    assert_eq!(
+      w.validate().unwrap_err().message,
+      "入口 edge 的泛域名证书 example.com 写了两次"
+    );
+  }
 
   #[test]
   fn checks_bookmark_fields() {
@@ -1730,7 +1800,9 @@ mod tests {
     let mut w = sample();
     let mut spec = image_service("s1");
     spec.source = Source::Compose {
-      content: Some("services:\n  web:\n    image: nginx\n  worker:\n    image: nginx\n".into()),
+            content: Some(
+                "services:\n  web:\n    image: nginx\n  worker:\n    image: nginx\n".into(),
+            ),
       file: None,
     };
     spec.limits = Some(wharf_api_types::spec::Limits {
@@ -1885,6 +1957,7 @@ mod tests {
         image: None,
         account: None,
         error_page: None,
+        wildcard: vec![],
       },
     }])
     .unwrap();
@@ -1925,6 +1998,7 @@ mod tests {
       image: None,
       account: None,
       error_page: None,
+      wildcard: vec![],
     };
     let route = |backup: &str| RouteSpec {
       hostname: "who.example.com".into(),
