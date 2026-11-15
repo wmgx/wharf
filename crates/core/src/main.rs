@@ -55,6 +55,7 @@ mod migrate;
 mod monitor;
 mod network;
 mod notify;
+mod oom;
 mod ping;
 mod pins;
 mod planner;

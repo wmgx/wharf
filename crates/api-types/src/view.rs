@@ -666,6 +666,7 @@ pub struct IssueSubject {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Issue {
   /// 这是哪一类问题，页面按它决定给什么按钮。取值见下表。
+  /// oom_killed：服务的容器因内存超限被杀。
   pub code: String,
   pub level: IssueLevel,
   #[serde(default, skip_serializing_if = "Option::is_none")]

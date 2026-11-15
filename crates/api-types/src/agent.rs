@@ -183,6 +183,10 @@ pub struct Metrics {
   /// 本机 Caddy 网关上一段时间各域名的请求统计。旧 agent 没有。
   #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
   pub hosts: BTreeMap<String, HostTraffic>,
+  /// 上次上报以来因内存超限被杀过容器的 compose project 名。
+  /// 旧 agent 没有这个字段；新 agent 每次都带，没有就是空列表。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub oom: Option<Vec<String>>,
 }
 
 /// 一个域名在上报间隔内经网关的请求（只算转发到上游的）。
