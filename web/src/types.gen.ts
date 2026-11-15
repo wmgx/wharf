@@ -1950,6 +1950,7 @@ export type TaskKind = {
   mounts?: string[];
 } | {
   code: string;
+  deps?: string;
   env?: Record<string, string>;
   hook?: string | null;
   image?: string | null;
@@ -1971,6 +1972,7 @@ export interface TaskRunView {
   ended_at?: string | null;
   exit_code?: number | null;
   id: number;
+  mem_peak?: number | null;
   /**
    * 输出的最后 16 KB，密钥值已换成 `***`；出错时是错误信息。
    */
@@ -2003,6 +2005,7 @@ export type TaskSpec = {
   mounts?: string[];
 } | {
   code: string;
+  deps?: string;
   env?: Record<string, string>;
   hook?: string | null;
   image?: string | null;
@@ -2023,6 +2026,7 @@ export type TaskSpec = {
 export type TaskStatus = "running" | "succeeded" | "failed" | "timed_out" | "skipped";
 
 export interface TaskView {
+  data_bytes?: number | null;
   hook_url?: string | null;
   last?: TaskRunView | null;
   name: string;

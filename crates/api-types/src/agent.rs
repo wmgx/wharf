@@ -1203,6 +1203,8 @@ mod tests {
   }
 }
 
+pub const TASK_DATA_PREFIX: &str = "wharf-task-";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskRunJob {
   /// 任务名，一次性容器叫 `wharf-task-<任务名>`。
@@ -1230,6 +1232,10 @@ pub enum TaskHow {
     image: String,
     runtime: crate::view::ScriptRuntime,
     code: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    deps: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    mirrors: BTreeMap<String, String>,
     env: BTreeMap<String, String>,
   },
   /// 在 compose 项目 `project` 的容器里执行；`service` 是 compose 服务名，只有一个容器时可以不填。
@@ -1254,6 +1260,8 @@ pub enum TaskHow {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskRunResult {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub mem_peak: Option<u64>,
   /// 超时被杀掉时没有。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub exit_code: Option<i32>,

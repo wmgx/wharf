@@ -33,6 +33,7 @@ export function TaskForm({ task, server: fixed, taken, onSaved, onCancel }: { ta
   const [container, setContainer] = useState(s?.kind === "exec" ? s.container ?? "" : "");
   const [image, setImage] = useState(s?.kind === "container" ? s.image : "");
   const [runtime, setRuntime] = useState<ScriptRuntime>(s?.kind === "script" ? s.runtime : "python");
+  const [deps, setDeps] = useState(s?.kind === "script" ? s.deps ?? "" : "");
   const [code, setCode] = useState(s?.kind === "script" ? s.code : "");
   const [scriptImage, setScriptImage] = useState(s?.kind === "script" ? s.image ?? "" : "");
   const [hook, setHook] = useState(s?.kind === "script" && s.hook != null);
@@ -50,7 +51,7 @@ export function TaskForm({ task, server: fixed, taken, onSaved, onCancel }: { ta
   const validSchedule = (kind === "script" && !schedule.trim()) || schedule.trim().split(/\s+/).length === 5;
   const spec = (): TaskSpec => {
     const base = { server, schedule: schedule.trim(), timeout_secs: Number(timeout) || 600, enabled, notify };
-    if (kind === "script") return { ...base, kind, runtime, code, image: scriptImage.trim() || undefined, env: parseEnv(env), hook: hook ? (s?.kind === "script" ? s.hook ?? "" : "") : undefined };
+    if (kind === "script") return { ...base, kind, runtime, code, deps: runtime === "shell" ? undefined : deps, image: scriptImage.trim() || undefined, env: parseEnv(env), hook: hook ? (s?.kind === "script" ? s.hook ?? "" : "") : undefined };
     if (kind === "exec") return { ...base, kind, service, container: container.trim() || undefined, command };
     if (kind === "host") return { ...base, kind, command };
     if (kind === "ping") return { ...base, kind, grace_mins: Number(grace) || 60 };
@@ -99,6 +100,9 @@ export function TaskForm({ task, server: fixed, taken, onSaved, onCancel }: { ta
         <Field label="代码" htmlFor="task-code">
           {runtime === "shell" ? <CodeEditor id="task-code" lang="shell" value={code} onChange={setCode} className="min-h-64" /> : <Textarea id="task-code" rows={12} spellCheck={false} value={code} onChange={(e) => setCode(e.target.value)} className="min-h-64 font-mono text-xs" />}
         </Field>
+        {runtime !== "shell" && <Field label="依赖" htmlFor="task-deps">
+          <Textarea id="task-deps" rows={4} spellCheck={false} value={deps} onChange={(e) => setDeps(e.target.value)} className="font-mono text-xs" />
+        </Field>}
         <Field label="镜像" htmlFor="task-script-image">
           <Input id="task-script-image" value={scriptImage} onChange={(e) => setScriptImage(e.target.value)} className="font-mono" />
         </Field>
@@ -149,6 +153,7 @@ export function TaskForm({ task, server: fixed, taken, onSaved, onCancel }: { ta
     </div>
     <ErrorNote error={error} />
     <div className="mt-6 flex justify-end gap-2">
+      {kind === "script" && task && server !== s?.server && <span className="text-sm text-muted-foreground">数据不会跟着换服务器</span>}
       {onCancel && <Button variant="ghost" onClick={onCancel}>取消</Button>}<Button disabled={!ready || saving || (!!task && JSON.stringify(spec()) === initial)} onClick={save}>
         {saving ? "保存中…" : "保存"}
       </Button>

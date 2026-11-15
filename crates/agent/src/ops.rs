@@ -688,7 +688,12 @@ fn has_previous(
 
 /// project 名会拼进路径，必须先校验。网关 project 是 `wharf-gw-<name>`。
 fn check_project(project: &str) -> Result<(), ApiError> {
-  validate_name("project", project)
+  validate_name(
+    "project",
+    project
+      .strip_prefix(wharf_api_types::agent::TASK_DATA_PREFIX)
+      .unwrap_or(project),
+  )
 }
 
 /// 只允许在 `/srv/` 下建目录，防止控制面被冒充时随便写。

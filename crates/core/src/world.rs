@@ -288,6 +288,13 @@ impl World {
         }
         Change::UpsertService { name, spec, adopt } => {
           validate_name("服务", name)?;
+          if name
+            .starts_with(wharf_api_types::agent::TASK_DATA_PREFIX)
+          {
+            return Err(ApiError::invalid(
+              "服务名不能以 wharf-task- 开头",
+            ));
+          }
           if name.starts_with(TRIAL_PROJECT_PREFIX) {
             return Err(
               ApiError::invalid(format!(
@@ -2187,6 +2194,18 @@ mod tests {
       }])
       .unwrap_err();
     assert!(err.message.contains("不能以 wharf-try- 开头"));
+  }
+
+  #[test]
+  fn task_service_name_is_rejected() {
+    let err = sample()
+      .apply_changes(&[Change::UpsertService {
+        name: "wharf-task-x".into(),
+        spec: image_service("s1"),
+        adopt: None,
+      }])
+      .unwrap_err();
+    assert!(err.message.contains("不能以 wharf-task- 开头"));
   }
 
   #[test]
