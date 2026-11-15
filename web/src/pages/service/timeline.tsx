@@ -11,6 +11,7 @@ const KINDS: Record<string, string> = {
   backup: "备份",
   task: "任务",
   heal: "自动重启",
+  oom: "内存超限",
   auto_update: "自动更新",
   alert: "告警",
   op: "操作",
