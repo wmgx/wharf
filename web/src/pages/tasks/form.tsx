@@ -2,13 +2,14 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { api } from "@/api";
 import { ErrorNote, SectionTitle } from "@/components/common";
+import { CodeEditor } from "@/components/code-editor";
 import { Field, Picker, Segmented, formatEnv, parseEnv, serverOptions, toName } from "@/components/fields";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { useStatus } from "@/status";
-import type { TaskSpec, TaskView } from "@/types";
+import type { ScriptRuntime, TaskSpec, TaskView } from "@/types";
 import { cronText } from "./model";
 
 type Kind = TaskSpec["kind"];
@@ -17,6 +18,7 @@ const DESCRIPTIONS: Record<Kind, string> = {
   container: "用一个镜像起容器跑一次，跑完就删。",
   host: "直接在服务器上执行，要先在服务器设置里开启命令执行。",
   ping: "任务在别处跑，跑完来报到；没按时报到就通知。",
+  script: "直接写代码，在一次性容器里执行。",
 };
 
 export function TaskForm({ task, server: fixed, taken, onSaved, onCancel }: { task: TaskView | null; server?: string; taken: string[]; onSaved: (name: string) => void; onCancel?: () => void }) {
@@ -30,9 +32,13 @@ export function TaskForm({ task, server: fixed, taken, onSaved, onCancel }: { ta
   const [service, setService] = useState(s?.kind === "exec" ? s.service : "");
   const [container, setContainer] = useState(s?.kind === "exec" ? s.container ?? "" : "");
   const [image, setImage] = useState(s?.kind === "container" ? s.image : "");
+  const [runtime, setRuntime] = useState<ScriptRuntime>(s?.kind === "script" ? s.runtime : "python");
+  const [code, setCode] = useState(s?.kind === "script" ? s.code : "");
+  const [scriptImage, setScriptImage] = useState(s?.kind === "script" ? s.image ?? "" : "");
+  const [hook, setHook] = useState(s?.kind === "script" && s.hook != null);
   const [grace, setGrace] = useState(String(s?.kind === "ping" ? s.grace_mins : 60));
   const [command, setCommand] = useState(s && (s.kind === "exec" || s.kind === "host") ? s.command : s?.kind === "container" ? s.command ?? "" : "");
-  const [env, setEnv] = useState(s?.kind === "container" ? formatEnv(s.env) : "");
+  const [env, setEnv] = useState(s?.kind === "container" || s?.kind === "script" ? formatEnv(s.env) : "");
   const [mounts, setMounts] = useState(s?.kind === "container" ? (s.mounts ?? []).join("\n") : "");
   const [timeout, setTimeout_] = useState(String(s?.timeout_secs ?? 600));
   const [enabled, setEnabled] = useState(s?.enabled ?? true);
@@ -41,16 +47,17 @@ export function TaskForm({ task, server: fixed, taken, onSaved, onCancel }: { ta
   const [error, setError] = useState<unknown>(null);
   const services = (status?.services ?? []).filter((v) => v.spec.server === server);
   const clash = !task && taken.includes(name);
-  const validSchedule = schedule.trim().split(/\s+/).length === 5;
+  const validSchedule = (kind === "script" && !schedule.trim()) || schedule.trim().split(/\s+/).length === 5;
   const spec = (): TaskSpec => {
     const base = { server, schedule: schedule.trim(), timeout_secs: Number(timeout) || 600, enabled, notify };
+    if (kind === "script") return { ...base, kind, runtime, code, image: scriptImage.trim() || undefined, env: parseEnv(env), hook: hook ? (s?.kind === "script" ? s.hook ?? "" : "") : undefined };
     if (kind === "exec") return { ...base, kind, service, container: container.trim() || undefined, command };
     if (kind === "host") return { ...base, kind, command };
     if (kind === "ping") return { ...base, kind, grace_mins: Number(grace) || 60 };
     return { ...base, kind, image: image.trim(), command: command.trim() || undefined, env: parseEnv(env), mounts: mounts.split("\n").map((m) => m.trim()).filter(Boolean) };
   };
   const [initial] = useState(() => JSON.stringify(spec()));
-  const ready = name && server && !clash && validSchedule && (kind === "exec" ? service && command.trim() : kind === "host" ? command.trim() : kind === "ping" ? Number(grace) > 0 : image.trim());
+  const ready = name && server && !clash && validSchedule && (kind === "exec" ? service && command.trim() : kind === "host" ? command.trim() : kind === "ping" ? Number(grace) > 0 : kind === "script" ? code.trim() : image.trim());
   const save = async () => {
     setSaving(true); setError(null);
     try { await api.put(`/api/tasks/${encodeURIComponent(name)}`, spec()); toast.success("已保存"); onSaved(name); }
@@ -65,7 +72,7 @@ export function TaskForm({ task, server: fixed, taken, onSaved, onCancel }: { ta
       </Field>
       <Field label="形式">
         <fieldset disabled={!!task} className="max-w-full overflow-x-auto">
-          <Segmented value={kind} options={[["exec", "在服务里执行"], ["container", "一次性容器"], ["host", "宿主机命令"], ["ping", "外部报到"]]} onChange={setKind} />
+          <Segmented value={kind} options={[["exec", "在服务里执行"], ["container", "一次性容器"], ["host", "宿主机命令"], ["ping", "外部报到"], ["script", "脚本"]]} onChange={setKind} />
         </fieldset>
         <span className="text-xs text-muted-foreground">
           {DESCRIPTIONS[kind]}
@@ -85,18 +92,32 @@ export function TaskForm({ task, server: fixed, taken, onSaved, onCancel }: { ta
       {kind === "container" && <Field label="镜像" htmlFor="task-image">
         <Input id="task-image" value={image} onChange={(e) => setImage(e.target.value)} className="font-mono" />
       </Field>}
-      {kind !== "ping" && <Field label="命令" htmlFor="task-command" help="用 sh -c 执行，可以写 [[密钥名]]。">
+      {kind === "script" && <>
+        <Field label="运行环境">
+          <Segmented value={runtime} options={[["python", "Python"], ["node", "Node"], ["shell", "Shell"]]} onChange={setRuntime} />
+        </Field>
+        <Field label="代码" htmlFor="task-code">
+          {runtime === "shell" ? <CodeEditor id="task-code" lang="shell" value={code} onChange={setCode} className="min-h-64" /> : <Textarea id="task-code" rows={12} spellCheck={false} value={code} onChange={(e) => setCode(e.target.value)} className="min-h-64 font-mono text-xs" />}
+        </Field>
+        <Field label="镜像" htmlFor="task-script-image">
+          <Input id="task-script-image" value={scriptImage} onChange={(e) => setScriptImage(e.target.value)} className="font-mono" />
+        </Field>
+        <label className="flex items-center gap-2 text-sm">
+          <Checkbox checked={hook} onCheckedChange={(v) => setHook(!!v)} />可以用网址触发
+        </label>
+      </>}
+      {kind !== "ping" && kind !== "script" && <Field label="命令" htmlFor="task-command" help="用 sh -c 执行，可以写 [[密钥名]]。">
         <Textarea id="task-command" spellCheck={false} value={command} onChange={(e) => setCommand(e.target.value)} className="min-h-20 font-mono text-xs" />
       </Field>}
-      {kind === "container" && <details open={task && (env || mounts) ? true : undefined}>
-        <summary className="cursor-pointer text-sm">环境变量和挂载</summary>
+      {(kind === "container" || kind === "script") && <details open={task && (env || mounts) ? true : undefined}>
+        <summary className="cursor-pointer text-sm">{kind === "script" ? "环境变量" : "环境变量和挂载"}</summary>
         <div className="mt-3 grid gap-4 sm:grid-cols-2">
           <Field label="环境变量" htmlFor="task-env">
             <Textarea id="task-env" value={env} onChange={(e) => setEnv(e.target.value)} className="min-h-16 font-mono text-xs" placeholder="KEY=VALUE" />
           </Field>
-          <Field label="挂载" htmlFor="task-mounts">
+          {kind === "container" && <Field label="挂载" htmlFor="task-mounts">
             <Textarea id="task-mounts" value={mounts} onChange={(e) => setMounts(e.target.value)} className="min-h-16 font-mono text-xs" placeholder="/srv/app:/data:ro" />
-          </Field>
+          </Field>}
         </div>
       </details>}
     </div>
@@ -105,7 +126,7 @@ export function TaskForm({ task, server: fixed, taken, onSaved, onCancel }: { ta
       <Field label={kind === "ping" ? "预期运行时间" : "时间"} htmlFor="task-schedule">
         <Input id="task-schedule" value={schedule} onChange={(e) => setSchedule(e.target.value)} placeholder="0 3 * * *" className="font-mono" />
         <span className={validSchedule ? "text-xs text-muted-foreground" : "text-xs text-destructive"}>
-          {validSchedule ? `${cronText(schedule) ? `${cronText(schedule)}，` : ""}北京时间` : "cron 格式不对，要 5 段"}
+          {kind === "script" && !schedule.trim() ? "不定时" : validSchedule ? `${cronText(schedule) ? `${cronText(schedule)}，` : ""}北京时间` : "cron 格式不对，要 5 段"}
         </span>
         <div className="flex flex-wrap gap-1.5">
           {presets.map(([label, value]) => <button type="button" key={value} className="h-6 rounded-full border px-2.5 text-xs text-muted-foreground hover:border-primary hover:text-primary" onClick={() => setSchedule(value)}>

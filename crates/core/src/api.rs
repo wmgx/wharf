@@ -65,6 +65,10 @@ pub fn router(state: Arc<AppState>) -> Router {
       "/ping/{token}/fail",
       get(crate::ping::fail).post(crate::ping::fail),
     )
+    .route(
+      "/hook/{token}",
+      get(crate::tasks::hook).post(crate::tasks::hook),
+    )
     .route("/agent/ws", get(hub::agent_ws))
     .route(
       wharf_api_types::tunnel::TUNNEL_PATH,
