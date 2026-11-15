@@ -1526,6 +1526,10 @@ export interface RouteSpec {
    */
   service?: string;
   /**
+   * 门禁。
+   */
+  sso?: SsoSpec | null;
+  /**
    * 不归 Wharf 管的上游，写网关所在机器能访问到的 `主机:端口`，例如 `127.0.0.1:7700`。
    */
   upstream?: string | null;
@@ -1944,6 +1948,16 @@ export interface SshLogin {
    */
   method: string;
   user: string;
+}
+
+export type SsoMode = "gate";
+
+export interface SsoSpec {
+  mode: SsoMode;
+  /**
+   * 不过门禁的路径前缀。
+   */
+  skip_paths?: string[];
 }
 
 export interface Status {

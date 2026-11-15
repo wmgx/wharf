@@ -551,6 +551,9 @@ pub struct RouteSpec {
   /// DNS 自动切到它，主网关恢复后切回。caddy 备用入口在切过去后才申请证书。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub backup_gateway: Option<String>,
+  /// 门禁。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub sso: Option<SsoSpec>,
   /// 登录保护（P3）。
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub auth: bool,
@@ -576,6 +579,23 @@ pub struct RouteSpec {
   /// 临时分享：到这个时间（毫秒时间戳）以后，网关直接断开这个域名的请求；路由和 DNS 记录留着，等人删除。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub expires_at: Option<i64>,
+}
+
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct SsoSpec {
+  pub mode: SsoMode,
+  /// 不过门禁的路径前缀。
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub skip_paths: Vec<String>,
+}
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum SsoMode {
+  Gate,
 }
 
 /// 网关到服务的走法偏好。

@@ -1042,6 +1042,38 @@ impl World {
         );
       }
       self.check_route_gateway(host, &route.spec)?;
+      if let Some(sso) = &route.spec.sso {
+        if route.spec.auth {
+          return Err(ApiError::invalid(format!(
+            "域名 {host}：门禁和登录保护只能开一个"
+          )));
+        }
+        if route.spec.redirect.is_some() {
+          return Err(ApiError::invalid(format!(
+            "域名 {host}：跳转的域名不能开门禁"
+          )));
+        }
+        if self.route_gateways(&route.spec).iter().any(|name| {
+          self.gateways[*name].spec.kind != GatewayKind::Caddy
+        }) {
+          return Err(ApiError::invalid(format!(
+            "域名 {host}：Cloudflare 隧道入口不支持门禁"
+          )));
+        }
+        for path in &sso.skip_paths {
+          if sso.skip_paths.len() > 20
+            || path.len() > 100
+            || !path.starts_with('/')
+            || !path.bytes().all(|b| {
+              b.is_ascii_alphanumeric() || b"/_-.".contains(&b)
+            })
+          {
+            return Err(ApiError::invalid(format!(
+              "域名 {host}：排除的路径 {path} 写得不对"
+            )));
+          }
+        }
+      }
       if route.spec.rate_limit.is_some() || route.spec.block_scanners
       {
         if route.spec.redirect.is_some() {
@@ -2354,6 +2386,7 @@ mod tests {
       },
       Change::UpsertRoute {
         spec: RouteSpec {
+          sso: None,
           hostname: "Who.EXAMPLE.com".into(),
           service: "who".into(),
           port: None,
@@ -2434,6 +2467,7 @@ mod tests {
       layer4: vec![],
     };
     let route = |backup: &str| RouteSpec {
+      sso: None,
       hostname: "who.example.com".into(),
       service: "who".into(),
       port: None,
@@ -2511,5 +2545,30 @@ mod tests {
     desired.allocate_ports().unwrap();
     let writes = desired.writes_from(&current);
     assert_eq!(writes.len(), 1);
+  }
+  #[test]
+  fn route_sso_checks() {
+    let mut w = World::default();
+    w.servers.insert(
+      "s1".into(),
+      ServerRow {
+        settings: Default::default(),
+        version: 1,
+      },
+    );
+    w.apply_changes(&[Change::UpsertGateway{name:"edge".into(),spec:serde_json::from_value(json!({"kind":"caddy","server":"s1","default":true})).unwrap()},Change::UpsertRoute{spec:serde_json::from_value(json!({"hostname":"a.example.com","upstream":"127.0.0.1:8080","sso":{"mode":"gate","skip_paths":["/api"]}})).unwrap()}]).unwrap();
+    w.validate().unwrap();
+    w.routes.get_mut("a.example.com").unwrap().spec.auth = true;
+    assert!(w.validate().unwrap_err().message.contains("只能开一个"));
+    w.routes.get_mut("a.example.com").unwrap().spec.auth = false;
+    w.routes
+      .get_mut("a.example.com")
+      .unwrap()
+      .spec
+      .sso
+      .as_mut()
+      .unwrap()
+      .skip_paths = vec!["/api*".into()];
+    assert!(w.validate().unwrap_err().message.contains("写得不对"));
   }
 }

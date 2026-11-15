@@ -13,7 +13,7 @@ permissions:
 
 env:
   CADDY_VERSION: 2.11.9
-  TAG: 2.11.9-2
+  TAG: 2.11.9-3
 
 jobs:
   build:
@@ -44,7 +44,7 @@ jobs:
           load: true
           tags: ${{ steps.image.outputs.name }}
           build-args: CADDY_VERSION=${{ env.CADDY_VERSION }}
-      # 插件的依赖可能把 Caddy 抬到更高的版本，推送前先确认版本和三个插件。
+      # 插件的依赖可能把 Caddy 抬到更高的版本，推送前先确认版本和所需插件。
       - if: steps.image.outputs.exists == 'false'
         name: check
         run: |
@@ -52,7 +52,7 @@ jobs:
           docker run --rm "$image" caddy version | grep -q "^v$CADDY_VERSION " \
             || { docker run --rm "$image" caddy version; echo "Caddy 版本不是 v$CADDY_VERSION"; exit 1; }
           modules=$(docker run --rm "$image" caddy list-modules)
-          for m in layer4 http.handlers.rate_limit dns.providers.cloudflare dns.providers.acmedns; do
+          for m in layer4 http.handlers.rate_limit dns.providers.cloudflare dns.providers.acmedns http.handlers.wharf_sso; do
             echo "$modules" | grep -qx "$m" || { echo "缺少模块 $m"; exit 1; }
           done
           docker push "$image"

@@ -212,6 +212,7 @@ async fn dispatch(
         );
       }
       let spec = RouteSpec {
+        sso: None,
         hostname,
         service: name,
         port,
@@ -2395,6 +2396,11 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
                 }
               })
               .unwrap_or_default()
+              + if r.spec.sso.is_some() {
+                "（门禁）"
+              } else {
+                ""
+              }
           );
           for p in &r.spec.paths {
             println!(
@@ -2433,6 +2439,7 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
         });
       let guard = existing.filter(|_| redirect.is_none());
       let spec = RouteSpec {
+        sso: None,
         expires_at: None,
         internal,
         rate_limit: guard.as_ref().and_then(|r| r.spec.rate_limit),
@@ -2455,6 +2462,47 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
           .map(|p| parse_path_route(p))
           .collect::<Result<_, _>>()?,
       };
+      changes(c, vec![Change::UpsertRoute { spec }], apply, j).await
+    }
+    RouteCmd::Sso {
+      name,
+      mode,
+      skip,
+      apply,
+    } => {
+      let mut spec = c
+        .get::<Vec<RouteView>>("/api/routes")
+        .await?
+        .into_iter()
+        .find(|r| r.spec.hostname == name.trim().to_ascii_lowercase())
+        .ok_or_else(|| {
+          ApiError::not_found(format!("域名 {name} 不存在"))
+        })?
+        .spec;
+      let Some(mode) = mode else {
+        out(j, &spec.sso, |sso| {
+          println!(
+            "{}",
+            sso
+              .as_ref()
+              .map(|s| format!(
+                "门禁：已开启{}",
+                if s.skip_paths.is_empty() {
+                  String::new()
+                } else {
+                  format!("，排除 {}", s.skip_paths.join("、"))
+                }
+              ))
+              .unwrap_or_else(|| "门禁：没开".into())
+          )
+        });
+        return Ok(());
+      };
+      spec.sso =
+        (mode == "gate").then_some(wharf_api_types::spec::SsoSpec {
+          mode: wharf_api_types::spec::SsoMode::Gate,
+          skip_paths: skip,
+        });
       changes(c, vec![Change::UpsertRoute { spec }], apply, j).await
     }
     RouteCmd::Guard {

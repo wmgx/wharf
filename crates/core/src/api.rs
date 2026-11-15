@@ -56,6 +56,14 @@ pub(crate) type ApiResult<T> = Result<Json<T>, AppError>;
 
 pub fn router(state: Arc<AppState>) -> Router {
   Router::new()
+    .route("/gate/login", get(crate::gate::login))
+    .route("/gate/refresh", axum::routing::any(crate::gate::refresh))
+    .route("/gate/site/gate", get(crate::gate::site_gate))
+    .route("/gate/site/logout", get(crate::gate::site_logout))
+    .route(
+      "/gate/site/{*path}",
+      get(|| async { StatusCode::NOT_FOUND }),
+    )
     .route("/healthz", get(|| async { "ok" }))
     .route(
       "/ping/{token}",
