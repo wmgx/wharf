@@ -68,6 +68,7 @@ mod refs;
 mod render;
 mod rollback;
 mod rules;
+mod sessions;
 mod share;
 mod shell;
 mod snapshot;

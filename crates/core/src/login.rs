@@ -276,7 +276,7 @@ async fn admin(
   .await
 }
 
-fn cookie_value(headers: &HeaderMap) -> Option<&str> {
+pub(crate) fn cookie_value(headers: &HeaderMap) -> Option<&str> {
   headers
     .get_all(header::COOKIE)
     .iter()
@@ -298,14 +298,19 @@ pub async fn session_user(
   state
     .db
     .call(move |c| {
-      c.query_row(
+      let now = now_ms();
+      let user = c.query_row(
         "SELECT a.username FROM sessions s, admin a
          WHERE s.hash = ?1 AND s.expires_at > ?2 AND a.id = 1",
-        params![hash, now_ms()],
+        params![hash, now],
         |r| r.get(0),
       )
       .optional()
-      .map_err(sql_err)
+      .map_err(sql_err)?;
+      if user.is_some() {
+        let _ = c.execute("UPDATE sessions SET last_seen_at = ?2 WHERE hash = ?1 AND (last_seen_at IS NULL OR last_seen_at < ?2 - 60000)", params![hash, now]);
+      }
+      Ok(user)
     })
     .await
 }
@@ -330,6 +335,7 @@ async fn start_session(
   state: &AppState,
   headers: &HeaderMap,
   username: String,
+  source: String,
 ) -> Result<Response, AppError> {
   let id = new_token();
   let hash = hash_token(&id);
@@ -341,8 +347,8 @@ async fn start_session(
       c.execute("DELETE FROM sessions WHERE expires_at <= ?1", params![now])
         .map_err(sql_err)?;
       c.execute(
-        "INSERT INTO sessions (hash, created_at, expires_at) VALUES (?1, ?2, ?3)",
-        params![hash, now, expires],
+        "INSERT INTO sessions (hash, created_at, expires_at, source, last_seen_at) VALUES (?1, ?2, ?3, ?4, ?2)",
+        params![hash, now, expires, source],
       )
       .map_err(sql_err)
     })
@@ -419,7 +425,8 @@ pub async fn setup(
     source(peer.ip(), &headers),
   )
   .await;
-  start_session(&s, &headers, username).await
+  start_session(&s, &headers, username, source(peer.ip(), &headers))
+    .await
 }
 
 /// `POST /api/login`。
@@ -512,6 +519,7 @@ pub async fn login(
     .lock()
     .unwrap_or_else(|e| e.into_inner())
     .remove(&key);
+  crate::sessions::notify_new(&s, &key, &headers).await;
   crate::audit::login_event(
     &s,
     "login",
@@ -519,7 +527,8 @@ pub async fn login(
     source(peer.ip(), &headers),
   )
   .await;
-  start_session(&s, &headers, username).await
+  start_session(&s, &headers, username, source(peer.ip(), &headers))
+    .await
 }
 
 /// `POST /api/logout`：删掉这个浏览器的会话。
