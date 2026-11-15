@@ -4,7 +4,8 @@ FROM caddy:${CADDY_VERSION}-builder AS build
 RUN xcaddy build \
     --with github.com/mholt/caddy-l4@eafc300ef23bcb2a28cc329a18e1e98bcd2b7cee \
     --with github.com/mholt/caddy-ratelimit@5625512f24f6f59d6f64fb3aafe5eecff0b286db \
-    --with github.com/caddy-dns/cloudflare@v0.2.4
+    --with github.com/caddy-dns/cloudflare@v0.2.4 \
+    --with github.com/caddy-dns/acmedns@v0.7.0
 
 FROM caddy:${CADDY_VERSION}
 COPY --from=build /usr/bin/caddy /usr/bin/caddy
