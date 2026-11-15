@@ -762,6 +762,74 @@ async fn server(
   j: bool,
 ) -> CliResult<()> {
   match cmd {
+    ServerCmd::Exposure {
+      name,
+      refresh,
+      ack,
+      unack,
+    } => {
+      use wharf_api_types::view::{ExposureView, risk_text};
+      let base = format!("/api/servers/{}/exposure", seg(&name));
+      if refresh {
+        let _: ExposureView =
+          c.post(&format!("{base}/refresh"), &json!({})).await?;
+      }
+      if let Some(port) = ack.as_ref().or(unack.as_ref()) {
+        let _: ExposureView = c
+          .post(
+            &format!("{base}/ack"),
+            &json!({"port":port,"acked":ack.is_some()}),
+          )
+          .await?;
+      }
+      let v: ExposureView = c.get(&base).await?;
+      out(j, &v, |v| {
+        if v.outdated {
+          println!("agent 版本太旧，没有数据");
+          return;
+        }
+        if v.checked_at.is_none() {
+          println!("还没有检查过");
+          return;
+        }
+        println!("本机监听\n协议/端口  地址  归属  名字  状态");
+        for p in &v.ports {
+          println!(
+            "{}/{}  {}  {}  {}  {}",
+            p.proto,
+            p.port,
+            p.addr,
+            p.owner,
+            p.name,
+            if p.expected {
+              "预期"
+            } else if p.acked {
+              "已确认"
+            } else {
+              "未确认"
+            }
+          );
+        }
+        println!("权限较大的容器\n容器  所属  风险");
+        for r in &v.risks {
+          println!(
+            "{}  {}  {}",
+            r.container,
+            if r.own {
+              "Wharf 自身"
+            } else {
+              r.service.as_deref().unwrap_or("未纳管")
+            },
+            r.risks
+              .iter()
+              .map(|c| risk_text(c))
+              .collect::<Vec<_>>()
+              .join("、")
+          );
+        }
+      });
+      Ok(())
+    }
     ServerCmd::List => {
       let v: Vec<ServerView> = c.get("/api/servers").await?;
       out(j, &v, |v| {
@@ -1367,7 +1435,19 @@ async fn service(
     ServiceCmd::Show { name } => {
       let v: ServiceView =
         c.get(&format!("/api/services/{}", seg(&name))).await?;
-      out(j, &v, pretty);
+      out(j, &v, |v| {
+        pretty(v);
+        if !v.risks.is_empty() {
+          println!(
+            "风险：{}",
+            v.risks
+              .iter()
+              .map(|r| wharf_api_types::view::risk_text(r))
+              .collect::<Vec<_>>()
+              .join("、")
+          );
+        }
+      });
       Ok(())
     }
     ServiceCmd::Logs {

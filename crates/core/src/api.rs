@@ -147,6 +147,15 @@ pub fn router(state: Arc<AppState>) -> Router {
     )
     .route("/api/servers/{name}/prune", post(crate::prune::prune_now))
     .route("/api/servers/{name}/disk", get(crate::disk::show))
+    .route("/api/servers/{name}/exposure", get(crate::exposure::show))
+    .route(
+      "/api/servers/{name}/exposure/refresh",
+      post(crate::exposure::refresh_now),
+    )
+    .route(
+      "/api/servers/{name}/exposure/ack",
+      post(crate::exposure::ack),
+    )
     .route(
       "/api/servers/{name}/host-units",
       get(crate::host_units::list),

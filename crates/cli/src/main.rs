@@ -318,6 +318,16 @@ pub struct ApplyFlags {
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)] // 命令行参数，只解析一次
 pub enum ServerCmd {
+  /// 本机监听端口和容器风险。
+  Exposure {
+    name: String,
+    #[arg(long)]
+    refresh: bool,
+    #[arg(long, conflicts_with = "unack")]
+    ack: Option<String>,
+    #[arg(long)]
+    unack: Option<String>,
+  },
   List,
   Show {
     name: String,

@@ -147,6 +147,7 @@ export interface LiveState {
 }
 
 export interface ServiceView {
+  risks?: string[];
   monitor?: MonitorView;
   uses?: string[];
   used_by?: string[];

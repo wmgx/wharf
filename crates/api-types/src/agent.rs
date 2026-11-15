@@ -290,6 +290,8 @@ pub enum AgentOp {
   Discover,
   /// 宿主机上 systemd 跑的、自己装的程序（只读），结果是 `Vec<HostUnit>`。
   HostUnits,
+  /// 结果是 [ExposureReport]。
+  Exposure,
   /// 宿主机程序最近的日志（journalctl -u），结果是字符串。
   HostUnitLogs {
     unit: String,
@@ -1319,4 +1321,33 @@ pub struct HttpCheckResult {
   /// 连不上、超时等。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub error: Option<String>,
+}
+
+#[derive(
+  Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct ExposureReport {
+  pub listens: Vec<Listen>,
+  pub containers: Vec<ContainerRisk>,
+}
+
+#[derive(
+  Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct Listen {
+  pub proto: String,
+  pub addr: String,
+  pub port: u16,
+  pub process: String,
+  pub container: Option<String>,
+  pub project: Option<String>,
+}
+
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct ContainerRisk {
+  pub name: String,
+  pub project: Option<String>,
+  pub risks: Vec<String>,
 }
