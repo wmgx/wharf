@@ -6,10 +6,10 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use wharf_api_types::{
   ApiError,
-  agent::BUILD_IMAGE_PREFIX,
+  agent::{BUILD_IMAGE_PREFIX, TRIAL_PROJECT_PREFIX},
   spec::{
-    BuildSource, GatewayKind, GatewaySpec, GatewayTls, PortSpec,
-    PrivateAddr, ServiceSpec, Source,
+    BuildSource, GatewayKind, GatewaySpec, GatewayTls, Limits,
+    PortSpec, PrivateAddr, ServiceSpec, Source,
   },
 };
 
@@ -25,6 +25,8 @@ pub const DEFAULT_CLOUDFLARED_IMAGE: &str =
 pub const TUNNEL_TOKEN_SECRET: &str = "WHARF_TUNNEL_TOKEN";
 /// 和 agent 里的 `CADDY_ADMIN` 一致：管理接口走 unix socket，不占端口。
 const CADDY_ADMIN: &str = "unix//config/caddy-admin.sock";
+const UPSTREAM_TRY_DURATION: &str = "8s";
+const UPSTREAM_TRY_INTERVAL: &str = "250ms";
 
 pub fn hash(content: &str) -> String {
   hex::encode(Sha256::digest(content.as_bytes()))
@@ -306,6 +308,99 @@ fn cpus_text(milli: u32) -> String {
   s.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
+/// 给单容器 compose 插入资源上限，其余文本保持原样。
+pub fn compose_with_limits(
+  name: &str,
+  content: &str,
+  limits: &Limits,
+) -> Result<String, ApiError> {
+  let unsupported = || {
+    ApiError::invalid(format!(
+      "服务 {name} 的 compose 写法没法自动加上资源上限"
+    ))
+    .with_hint("在 compose 文件里自己写 mem_limit 和 cpus，然后去掉这里的资源上限")
+  };
+  let value: serde_yaml_ng::Value =
+    serde_yaml_ng::from_str(content).map_err(|_| unsupported())?;
+  let services = value
+    .get("services")
+    .and_then(|s| s.as_mapping())
+    .ok_or_else(unsupported)?;
+  if services.len() != 1 {
+    return Err(ApiError::invalid(format!(
+      "服务 {name} 的 compose 里有 {} 个容器，资源上限只支持一个容器的 compose",
+      services.len()
+    )).with_hint("在 compose 文件里给每个容器自己写 mem_limit 和 cpus，然后去掉这里的资源上限"));
+  }
+  let (service, body) = services.iter().next().unwrap();
+  if ["mem_limit", "cpus", "deploy"]
+    .iter()
+    .any(|key| body.get(*key).is_some())
+  {
+    return Err(ApiError::invalid(format!(
+      "服务 {name} 的 compose 里已经写了 mem_limit、cpus 或 deploy，不能再在这里设资源上限"
+    )).with_hint("两处留一处：去掉 compose 里的，或者去掉这里的资源上限"));
+  }
+  let mut lines = content
+    .split_inclusive('\n')
+    .scan(0, |offset, line| {
+      let start = *offset;
+      *offset += line.len();
+      Some((start, line))
+    })
+    .filter(|(_, line)| {
+      !line.trim().is_empty() && !line.trim_start().starts_with('#')
+    });
+  lines
+    .find(|(_, line)| {
+      line.split(" #").next().unwrap().trim_end() == "services:"
+    })
+    .ok_or_else(unsupported)?;
+  let (offset, line) = lines.next().ok_or_else(unsupported)?;
+  let n = line.len() - line.trim_start_matches(' ').len();
+  if n == 0
+    || line.contains('\t')
+    || !line.split(" #").next().unwrap().trim_end().ends_with(':')
+  {
+    return Err(unsupported());
+  }
+  let (_, next) = lines.next().ok_or_else(unsupported)?;
+  let m = next.len() - next.trim_start_matches(' ').len();
+  if m <= n || next.contains('\t') {
+    return Err(unsupported());
+  }
+  let indent = " ".repeat(m);
+  let eol = if line.ends_with("\r\n") { "\r\n" } else { "\n" };
+  let memory = limits.memory_mb.map(|mb| format!("{mb}m"));
+  let cpus = limits.cpu_milli.map(cpus_text);
+  let mut added = String::new();
+  if let Some(memory) = &memory {
+    added.push_str(&format!("{indent}mem_limit: {memory}{eol}"));
+  }
+  if let Some(cpus) = &cpus {
+    added.push_str(&format!("{indent}cpus: \"{cpus}\"{eol}"));
+  }
+  let at = offset + line.len();
+  let out = format!("{}{}{}", &content[..at], added, &content[at..]);
+  let parsed: serde_yaml_ng::Value =
+    serde_yaml_ng::from_str(&out).map_err(|_| unsupported())?;
+  let actual = parsed
+    .get("services")
+    .and_then(|s| s.as_mapping())
+    .filter(|s| s.len() == 1)
+    .and_then(|s| s.get(service))
+    .ok_or_else(unsupported)?;
+  for (key, expected) in [("mem_limit", memory), ("cpus", cpus)] {
+    if let Some(expected) = expected
+      && actual.get(key).and_then(|v| v.as_str())
+        != Some(expected.as_str())
+    {
+      return Err(unsupported());
+    }
+  }
+  Ok(out)
+}
+
 /// 服务的 compose 文件。image 来源自动生成；compose 来源原样使用。
 /// 端口只绑定 127.0.0.1 和内网地址，不绑定 0.0.0.0。
 pub fn service_compose(
@@ -317,33 +412,29 @@ pub fn service_compose(
 ) -> Result<String, ApiError> {
   match &spec.source {
     Source::Compose { content, .. } => {
-      substitute(content.as_deref().unwrap_or_default(), secrets)
+      let content = content.as_deref().unwrap_or_default();
+      match &spec.limits {
+        Some(limits) => substitute(
+          &compose_with_limits(name, content, limits)?,
+          secrets,
+        ),
+        None => substitute(content, secrets),
+      }
     }
     Source::Image(_) | Source::Build(_) => {
-      let image = match &spec.source {
-        Source::Build(b) => build_image(name, b, &spec.ports),
-        Source::Image(image) => image.clone(),
-        Source::Compose { .. } => unreachable!(),
-      };
-      let mut environment = BTreeMap::new();
-      for (key, value) in &spec.env {
-        // compose 会对 `$` 做变量插值，原样传给容器要写成 `$$`。
-        let value = substitute(value, secrets)?;
-        environment.insert(key.clone(), value.replace('$', "$$"));
-      }
-      let mut ports = Vec::new();
+      let mut service = image_service(name, spec, secrets)?;
       for port in &spec.ports {
         let (Some(host), Some(container)) =
           (host_ports.get(&port.name), port.container)
         else {
           continue;
         };
-        ports.push(format!("127.0.0.1:{host}:{container}"));
+        service.ports.push(format!("127.0.0.1:{host}:{container}"));
         for ip in bind_ips {
-          ports.push(format!("{ip}:{host}:{container}"));
+          service.ports.push(format!("{ip}:{host}:{container}"));
         }
       }
-      let volumes = spec
+      service.volumes = spec
         .volumes
         .iter()
         .map(|v| {
@@ -352,37 +443,70 @@ pub fn service_compose(
         .collect();
       let file = ComposeFile {
         name: name.to_string(),
-        services: BTreeMap::from([(
-          name.to_string(),
-          ComposeService {
-            image,
-            restart: "unless-stopped",
-            mem_limit: spec
-              .limits
-              .as_ref()
-              .and_then(|l| l.memory_mb)
-              .map(|mb| format!("{mb}m")),
-            cpus: spec
-              .limits
-              .as_ref()
-              .and_then(|l| l.cpu_milli)
-              .map(cpus_text),
-            network_mode: None,
-            entrypoint: None,
-            command: None,
-            environment,
-            ports,
-            volumes,
-            labels: BTreeMap::from([(
-              "wharf.service".to_string(),
-              name.to_string(),
-            )]),
-          },
-        )]),
+        services: BTreeMap::from([(name.to_string(), service)]),
       };
       Ok(to_yaml(&file))
     }
   }
+}
+
+fn image_service(
+  name: &str,
+  spec: &ServiceSpec,
+  secrets: Option<&BTreeMap<String, String>>,
+) -> Result<ComposeService, ApiError> {
+  let image = match &spec.source {
+    Source::Build(b) => build_image(name, b, &spec.ports),
+    Source::Image(image) => image.clone(),
+    Source::Compose { .. } => unreachable!(),
+  };
+  let mut environment = BTreeMap::new();
+  for (key, value) in &spec.env {
+    // compose 会对 `$` 做变量插值，原样传给容器要写成 `$$`。
+    let value = substitute(value, secrets)?;
+    environment.insert(key.clone(), value.replace('$', "$$"));
+  }
+  Ok(ComposeService {
+    image,
+    restart: "unless-stopped",
+    mem_limit: spec
+      .limits
+      .as_ref()
+      .and_then(|l| l.memory_mb)
+      .map(|mb| format!("{mb}m")),
+    cpus: spec
+      .limits
+      .as_ref()
+      .and_then(|l| l.cpu_milli)
+      .map(cpus_text),
+    network_mode: None,
+    entrypoint: None,
+    command: None,
+    environment,
+    ports: Vec::new(),
+    volumes: Vec::new(),
+    labels: BTreeMap::from([(
+      "wharf.service".to_string(),
+      name.to_string(),
+    )]),
+  })
+}
+
+/// 试跑用的 compose：同一个镜像和环境变量，不发布端口、不自动重启。
+/// 只用于 image、build 来源且没有数据卷的服务。
+pub fn trial_compose(
+  name: &str,
+  spec: &ServiceSpec,
+  secrets: Option<&BTreeMap<String, String>>,
+) -> Result<String, ApiError> {
+  let mut service = image_service(name, spec, secrets)?;
+  service.restart = "no";
+  service.labels =
+    BTreeMap::from([("wharf.trial".into(), name.into())]);
+  Ok(to_yaml(&ComposeFile {
+    name: format!("{TRIAL_PROJECT_PREFIX}{name}"),
+    services: BTreeMap::from([(name.to_string(), service)]),
+  }))
 }
 
 /// compose 来源的基本检查：必须有 services，P1 不支持 build。
@@ -725,6 +849,9 @@ pub fn caddyfile(
   }
   out.push_str("}\n");
   out.push_str(&error_snippet(spec));
+  out.push_str(&format!(
+    "\n(wharf_upstream) {{\n\tlb_try_duration {UPSTREAM_TRY_DURATION}\n\tlb_try_interval {UPSTREAM_TRY_INTERVAL}\n}}\n"
+  ));
   out.push_str("\nimport /etc/caddy/extra.d/*.caddy\n");
   let scheme = match spec.tls {
     GatewayTls::Off => "http://",
@@ -749,9 +876,14 @@ pub fn caddyfile(
     }
     // 带路径的 reverse_proxy 由 Caddy 排在不带路径的前面。
     for (path, upstream) in &site.paths {
-      out.push_str(&format!("\treverse_proxy {path} {upstream}\n"));
+      out.push_str(&format!(
+        "\treverse_proxy {path} {upstream} {{\n\t\timport wharf_upstream\n\t}}\n"
+      ));
     }
-    out.push_str(&format!("\treverse_proxy {}\n}}\n", site.upstream));
+    out.push_str(&format!(
+      "\treverse_proxy {} {{\n\t\timport wharf_upstream\n\t}}\n}}\n",
+      site.upstream
+    ));
   }
   // 反向隧道：frpc 按 IP 连进来，握手带固定名字，用 Caddy 自己签的证书。
   if link {
@@ -780,6 +912,7 @@ mod tests {
       stopped: false,
       monitor: None,
       limits: None,
+      auto_update: false,
       server: "node1".into(),
       source: Source::Image("traefik/whoami".into()),
       ports: vec![PortSpec {
@@ -844,6 +977,22 @@ mod tests {
   }
 
   #[test]
+  fn trial_compose_does_not_publish_ports() {
+    let mut spec = spec();
+    spec.volumes.clear();
+    let out = trial_compose("s1", &spec, None).unwrap();
+    let yaml: serde_yaml_ng::Value =
+      serde_yaml_ng::from_str(&out).unwrap();
+    let service = &yaml["services"]["s1"];
+    assert_eq!(yaml["name"], "wharf-try-s1");
+    assert_eq!(service["restart"], "no");
+    assert_eq!(service["environment"]["A"], "x$$y");
+    assert_eq!(service["labels"]["wharf.trial"], "s1");
+    assert!(service.get("ports").is_none());
+    assert!(!out.contains("wharf.service"));
+  }
+
+  #[test]
   fn service_limits_are_optional() {
     let mut spec = spec();
     let out =
@@ -865,6 +1014,49 @@ mod tests {
     assert_eq!(svc["cpus"], "0.5");
     assert_eq!(cpus_text(1000), "1");
     assert_eq!(cpus_text(1250), "1.25");
+  }
+
+  #[test]
+  fn compose_limits_keep_original_text() {
+    let source = "# 原样保留\nservices: # 服务\n  # 注释\n  web: # 容器\n    image: nginx\n    environment:\n      KEY: [[SECRET]]\n    ports:\n      - \"127.0.0.1:8080:80\"\n";
+    let expected = "# 原样保留\nservices: # 服务\n  # 注释\n  web: # 容器\n    mem_limit: 512m\n    cpus: \"0.5\"\n    image: nginx\n    environment:\n      KEY: [[SECRET]]\n    ports:\n      - \"127.0.0.1:8080:80\"\n";
+    let mut limits = Limits {
+      memory_mb: Some(512),
+      cpu_milli: Some(500),
+    };
+    assert_eq!(
+      compose_with_limits("s1", source, &limits).unwrap(),
+      expected
+    );
+    limits.cpu_milli = None;
+    assert_eq!(
+      compose_with_limits("s1", source, &limits).unwrap(),
+      expected.replace("    cpus: \"0.5\"\n", "")
+    );
+  }
+
+  #[test]
+  fn compose_limits_reject_unsupported_forms() {
+    let limits = Limits {
+      memory_mb: Some(512),
+      cpu_milli: None,
+    };
+    let error = compose_with_limits("s1", "services:\n  web:\n    image: nginx\n  worker:\n    image: nginx\n", &limits).unwrap_err();
+    assert!(error.message.contains("2 个容器"));
+    let error = compose_with_limits(
+      "s1",
+      "services:\n  web:\n    image: nginx\n    mem_limit: 64m\n",
+      &limits,
+    )
+    .unwrap_err();
+    assert!(error.message.contains("已经写了 mem_limit"));
+    let error = compose_with_limits(
+      "s1",
+      "services: {web: {image: nginx}}",
+      &limits,
+    )
+    .unwrap_err();
+    assert!(error.message.contains("写法没法自动加上"));
   }
 
   #[test]
@@ -936,7 +1128,7 @@ mod tests {
     assert!(z.contains("basic_auth {\n\t\tadmin $2b$12$abc\n\t}"));
     assert_eq!(out.matches("basic_auth").count(), 1);
     assert!(out.contains(
-      "a.example.com {\n\timport wharf_errors\n\treverse_proxy /ws 127.0.0.1:17891\n\treverse_proxy 100.1.1.1:2\n}"
+      "a.example.com {\n\timport wharf_errors\n\treverse_proxy /ws 127.0.0.1:17891 {\n\t\timport wharf_upstream\n\t}\n\treverse_proxy 100.1.1.1:2 {\n\t\timport wharf_upstream\n\t}\n}"
     ));
     assert!(out.contains("http_port 8080"));
     assert!(!out.contains("https_port"));
@@ -966,6 +1158,35 @@ mod tests {
     );
     assert!(out.contains("auto_https off"));
     assert!(out.contains("\nhttp://a.example.com {"));
+  }
+
+  #[test]
+  fn caddyfile_retries_only_service_upstreams() {
+    let spec = serde_json::from_value(serde_json::json!({
+      "kind": "caddy", "server": "s1"
+    }))
+    .unwrap();
+    let site = Site {
+      hostname: "a.example.com".into(),
+      upstream: "127.0.0.1:20000".into(),
+      auth: None,
+      paths: vec![("/api".into(), "100.64.0.1:20001".into())],
+      redirect: None,
+    };
+    let redirect = Site {
+      hostname: "b.example.com".into(),
+      redirect: Some("https://a.example.com".into()),
+      paths: vec![],
+      ..site.clone()
+    };
+    let out = caddyfile("edge", &spec, &[site, redirect], true);
+    assert_eq!(out.matches("import wharf_upstream").count(), 2);
+    assert_eq!(out.matches("(wharf_upstream) {").count(), 1);
+    assert!(out.contains("lb_try_duration 8s"));
+    assert!(out.contains("lb_try_interval 250ms"));
+    let excluded = &out[out.find("\nb.example.com {").unwrap()..];
+    assert!(excluded.contains("link.wharf.internal {"));
+    assert!(!excluded.contains("import wharf_upstream"));
   }
 
   #[test]

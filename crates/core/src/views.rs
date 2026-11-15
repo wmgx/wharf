@@ -592,6 +592,7 @@ pub async fn status(
   issues.extend(crate::rdap::issues());
   issues.extend(crate::disk_forecast::issues());
   issues.extend(crate::clock::issues());
+  issues.extend(crate::oom::issues());
   issues.extend(crate::traffic::issues());
   issues.extend(crate::baseline::issues());
   issues.extend(crate::host_units::issues());
@@ -634,6 +635,7 @@ pub async fn status(
       });
     }
   }
+  issues.extend(crate::auto_update::issues());
   let problems = problems_text(&issues);
   issues.sort_by_key(|i| match i.level {
     IssueLevel::Fault => 0,

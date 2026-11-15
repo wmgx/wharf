@@ -27,7 +27,7 @@ export function Settings({ svc, active }: { svc: ServiceView; active: boolean })
       if (location.hash === "#backup") document.getElementById("service-backup")?.focus();
     }
   }, [active, location.hash]);
-  const changed = ([['来源', 'source'], ['端口', 'ports'], ['环境变量', 'env'], ['健康检查', 'monitor'], ['资源上限', 'limits'], ['备份', 'backup']] as [string, keyof ServiceSpec][]).filter(([, field]) => dirty([field])).map(([label]) => label);
+  const changed = ([['来源', 'source'], ['端口', 'ports'], ['环境变量', 'env'], ['健康检查', 'monitor'], ['资源上限', 'limits'], ['自动更新', 'auto_update'], ['备份', 'backup']] as [string, keyof ServiceSpec][]).filter(([, field]) => dirty([field])).map(([label]) => label);
   return <SettingsFields key={key} svc={svc} draft={draft} set={set} changed={changed} onReset={() => { reset(); setKey((n) => n + 1); }} onSubmit={() => actions.plan({ title: `修改 ${svc.name}`, changes: [{ op: "upsert_service", name: svc.name, spec: draft }] })} />;
 }
 
@@ -120,7 +120,7 @@ function SettingsFields({ svc, draft, set, changed, onReset, onSubmit }: { svc: 
         </Field>
       </div>}
     </Panel>
-    {!isCompose && <>
+    {(!isCompose || composeInfo.images.length === 1) && <>
       <SectionTitle>资源上限</SectionTitle>
       <Panel className="grid gap-3 p-4 sm:grid-cols-2">
         <Field label="内存（MB）" htmlFor="service-memory">
@@ -131,6 +131,15 @@ function SettingsFields({ svc, draft, set, changed, onReset, onSubmit }: { svc: 
         <Field label="CPU（核）" htmlFor="service-cpu">
           <Input id="service-cpu" type="number" min={0.01} step={0.01} value={cpus} onChange={(e) => { setCpus(e.target.value); updateLimits(memory, e.target.value); }} />
         </Field>
+      </Panel>
+    </>}
+    {((isImage && !source.image.includes("@")) || !!build?.git) && !draft.volumes?.length && <>
+      <SectionTitle>自动更新</SectionTitle>
+      <Panel className="grid gap-3 p-4">
+        <label className="flex items-center gap-2 text-sm">
+          <Checkbox checked={!!draft.auto_update} onCheckedChange={(checked) => set({ auto_update: checked ? true : undefined })} />有新版本时自动更新
+        </label>
+        <span className="text-xs text-muted-foreground">每天凌晨 3 点到 6 点检查一次。新版本起不来时线上不受影响，会发通知。</span>
       </Panel>
     </>}
     <div id="backup" className="mt-8">

@@ -500,6 +500,16 @@ pub enum ServiceCmd {
     #[command(flatten)]
     apply: ApplyFlags,
   },
+  /// 有新版本时每天自动更新；--off 关闭。生成计划。
+  AutoUpdate {
+    name: String,
+    #[arg(long)]
+    off: bool,
+    #[command(flatten)]
+    apply: ApplyFlags,
+  },
+  /// 现在跑一轮自动更新，不受每天更新时间限制。
+  AutoUpdateRun,
   /// 回滚到之前的一次部署（默认是上一个不同的版本）。
   /// image 来源会固定到当时的镜像 digest。
   Rollback {

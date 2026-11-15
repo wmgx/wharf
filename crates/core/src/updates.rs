@@ -56,6 +56,7 @@ pub fn spawn(state: Arc<AppState>) {
         versions(&state).await;
       }
       pending(&state).await;
+      crate::auto_update::tick(&state).await;
       n = n.wrapping_add(1);
       tokio::time::sleep(PENDING_EVERY).await;
     }
@@ -98,7 +99,7 @@ async fn pending(state: &AppState) {
 /// 查一个服务的结果：(查到的版本, 固定的版本) 或者错误。
 type Found = Result<(String, String), String>;
 
-async fn versions(state: &AppState) {
+pub(crate) async fn versions(state: &AppState) {
   let snap = match snapshot::load(&state.db).await {
     Ok(s) => s,
     Err(e) => {
