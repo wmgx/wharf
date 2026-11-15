@@ -824,6 +824,10 @@ export interface GatewaySpec {
    * caddy：证书方式，默认 `auto`（公网签证书）。
    */
   tls?: GatewayTls;
+  /**
+   * caddy：签一张 *.<zone>，这个入口上 zone 下一级的域名都用它。
+   */
+  wildcard?: string[];
 }
 
 /**

@@ -687,7 +687,8 @@ fn check_expect(
       ),
     )
     .with_hint("重新 plan，确认新的差异后再 apply")
-    .suggest("wharf plan"))
+    .suggest("wharf plan"),
+  )
 }
 
 /// 失败只记日志：状态显示不全不影响执行本身。

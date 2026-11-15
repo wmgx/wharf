@@ -870,7 +870,8 @@ impl World {
             ApiError::invalid(format!(
               "网关 {name} 是 cloudflare_tunnel，要指定在哪个厂商账号下建隧道"
             ))
-                    .suggest("wharf account list"));
+            .suggest("wharf account list"),
+          );
         }
         if s.http_port.is_some()
           || s.https_port.is_some()
@@ -932,7 +933,8 @@ impl World {
           .suggest(format!(
             "wharf edge domain add {} {host}",
             route.spec.service
-                )));
+          )),
+        );
       }
       self.check_route_gateway(host, &route.spec)?;
       if route.spec.rate_limit.is_some() || route.spec.block_scanners
@@ -1593,7 +1595,8 @@ fn validate_lan_addrs(addrs: &[String]) -> Result<(), ApiError> {
         ApiError::invalid(format!(
           "局域网地址 {addr} 不是私有网段的 IPv4（10/8、172.16/12、192.168/16）"
         ))
-            .with_hint("公网地址不能绑定，否则服务端口会直接暴露到公网"));
+        .with_hint("公网地址不能绑定，否则服务端口会直接暴露到公网"),
+      );
     }
   }
   Ok(())
@@ -1800,9 +1803,7 @@ mod tests {
     let mut w = sample();
     let mut spec = image_service("s1");
     spec.source = Source::Compose {
-            content: Some(
-                "services:\n  web:\n    image: nginx\n  worker:\n    image: nginx\n".into(),
-            ),
+      content: Some("services:\n  web:\n    image: nginx\n  worker:\n    image: nginx\n".into()),
       file: None,
     };
     spec.limits = Some(wharf_api_types::spec::Limits {
