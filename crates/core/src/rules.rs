@@ -535,6 +535,7 @@ const RULES: &[Rule] = &[
 
 /// 事件通知：id 和名称。
 const NOTICES: &[(&str, &str)] = &[
+  ("recovery", "用掉了一个恢复码"),
   ("task", "定时任务失败和恢复（任务自己也要开通知）"),
   ("backup", "服务备份失败和恢复"),
   ("failover", "网关切到备用入口、切回"),
