@@ -662,6 +662,8 @@ export interface ServiceStatus {
   observed_at?: string;
 }
 
+export type ScriptRuntime = "python" | "node" | "shell";
+
 export type TaskKind =
   | { kind: "exec"; service: string; container?: string; command: string }
   | {
@@ -671,6 +673,7 @@ export type TaskKind =
       env?: Record<string, string>;
       mounts?: string[];
     }
+  | { kind: "script"; runtime: ScriptRuntime; code: string; image?: string; env?: Record<string, string>; hook?: string }
   | { kind: "host"; command: string }
   | { kind: "ping"; token?: string; grace_mins: number };
 
@@ -703,6 +706,7 @@ export interface TaskView {
   next_at?: string;
   /** 外部报到任务的报到地址。 */
   ping_url?: string;
+  hook_url?: string;
   updated_at: string;
 }
 

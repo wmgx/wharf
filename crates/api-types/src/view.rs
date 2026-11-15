@@ -1086,6 +1086,17 @@ pub enum TaskKind {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     mounts: Vec<String>,
   },
+  /// 在一次性容器里执行代码。
+  Script {
+    runtime: ScriptRuntime,
+    code: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    image: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    env: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hook: Option<String>,
+  },
   /// 宿主机命令，要服务器开了"命令执行"。
   Host { command: String },
   /// 外部报到：Wharf 不执行，由别处（cron、systemd timer、脚本）跑完后请求报到地址。
@@ -1097,6 +1108,23 @@ pub enum TaskKind {
     #[serde(default = "default_grace")]
     grace_mins: u32,
   },
+}
+
+#[derive(
+  Debug,
+  Clone,
+  Copy,
+  PartialEq,
+  Eq,
+  Serialize,
+  Deserialize,
+  JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ScriptRuntime {
+  Python,
+  Node,
+  Shell,
 }
 
 fn default_grace() -> u32 {
@@ -1144,6 +1172,8 @@ pub struct TaskView {
   /// 外部报到任务的报到地址：成功请求它，失败请求它加 `/fail`。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub ping_url: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub hook_url: Option<String>,
   pub updated_at: DateTime<Utc>,
 }
 
