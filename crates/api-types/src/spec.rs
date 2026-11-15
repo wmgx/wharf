@@ -293,6 +293,9 @@ pub struct PortSpec {
   /// image / build 来源选填，不填由系统从 20000 起自动分配。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub host: Option<u16>,
+  /// UDP 端口，只能用于四层转发，不能给域名用。默认 TCP。
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub udp: bool,
 }
 
 /// 目录挂载：宿主机 `/srv/<service>/<name>/` 挂到容器内 `target`。
@@ -476,6 +479,25 @@ pub struct GatewaySpec {
   /// caddy：签一张 *.<zone>，这个入口上 zone 下一级的域名都用它。
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub wildcard: Vec<String>,
+  /// caddy：四层转发，只经过入口所在机器，服务自己的端口不对公网开放。
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub layer4: Vec<Layer4Forward>,
+}
+
+/// 在入口机器上监听 TCP 或 UDP，原样转给服务。服务和上游二选一。
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct Layer4Forward {
+  pub listen: u16,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub udp: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub service: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub port: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub upstream: Option<String>,
 }
 
 /// 网关的证书方式。

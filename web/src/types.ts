@@ -180,6 +180,7 @@ export interface GatewaySpec {
   account?: string;
   error_page?: string;
   wildcard?: string[];
+  layer4?: Gen.Layer4Forward[];
 }
 
 export interface GatewayView {

@@ -436,9 +436,14 @@ pub fn service_compose(
         else {
           continue;
         };
-        service.ports.push(format!("127.0.0.1:{host}:{container}"));
+        let protocol = if port.udp { "/udp" } else { "" };
+        service
+          .ports
+          .push(format!("127.0.0.1:{host}:{container}{protocol}"));
         for ip in bind_ips {
-          service.ports.push(format!("{ip}:{host}:{container}"));
+          service
+            .ports
+            .push(format!("{ip}:{host}:{container}{protocol}"));
         }
       }
       service.volumes = spec
@@ -849,6 +854,7 @@ pub fn caddyfile(
   name: &str,
   spec: &GatewaySpec,
   sites: &[Site],
+  forwards: &[(bool, u16, String)],
   link: bool,
 ) -> String {
   let mut out = format!(
@@ -873,6 +879,16 @@ pub fn caddyfile(
     .any(|s| s.redirect.is_none() && s.rate_limit.is_some())
   {
     out.push_str("\torder rate_limit before basic_auth\n");
+  }
+  if !forwards.is_empty() {
+    out.push_str("\tlayer4 {\n");
+    let mut forwards = forwards.to_vec();
+    forwards.sort_by_key(|(udp, listen, _)| (*udp, *listen));
+    for (udp, listen, upstream) in forwards {
+      let protocol = if udp { "udp/" } else { "" };
+      out.push_str(&format!("\t\t{protocol}:{listen} {{\n\t\t\troute {{\n\t\t\t\tproxy {protocol}{upstream}\n\t\t\t}}\n\t\t}}\n"));
+    }
+    out.push_str("\t}\n");
   }
   out.push_str("}\n");
   out.push_str(&error_snippet(spec));
@@ -967,6 +983,7 @@ mod tests {
         name: "http".into(),
         container: Some(80),
         host: None,
+        udp: false,
       }],
       env: BTreeMap::from([
         ("A".to_string(), "x$y".to_string()),
@@ -980,6 +997,68 @@ mod tests {
   }
 
   #[test]
+  fn caddyfile_layer4_only_when_used() {
+    let gw: GatewaySpec = serde_json::from_value(
+      serde_json::json!({"kind":"caddy","server":"s1"}),
+    )
+    .unwrap();
+    let sites = vec![Site {
+      hostname: "example.com".into(),
+      upstream: "127.0.0.1:20005".into(),
+      ..Default::default()
+    }];
+    let empty = caddyfile("edge", &gw, &sites, &[], false);
+    assert!(!empty.contains("layer4"));
+    let out = caddyfile(
+      "edge",
+      &gw,
+      &sites,
+      &[
+        (false, 15432, "127.0.0.1:20005".into()),
+        (false, 2222, "127.0.0.1:20007".into()),
+        (true, 27015, "127.0.0.1:20006".into()),
+      ],
+      false,
+    );
+    assert_eq!(out.matches("layer4 {").count(), 1);
+    assert!(
+      out.find(":2222 {").unwrap() < out.find(":15432 {").unwrap()
+    );
+    assert!(out.contains(
+      ":15432 {\n\t\t\troute {\n\t\t\t\tproxy 127.0.0.1:20005"
+    ));
+    assert!(out.contains("udp/:27015 {"));
+    assert!(out.contains("proxy udp/127.0.0.1:20006"));
+    assert_eq!(
+      &out[out.find("\nexample.com {").unwrap()..],
+      &empty[empty.find("\nexample.com {").unwrap()..]
+    );
+    let mut svc = spec();
+    svc.env.clear();
+    svc.ports.push(PortSpec {
+      name: "game".into(),
+      container: Some(27015),
+      host: None,
+      udp: true,
+    });
+    let compose = service_compose(
+      "app",
+      &svc,
+      &BTreeMap::from([
+        ("http".into(), 20005),
+        ("game".into(), 20006),
+      ]),
+      &["100.64.0.1".into()],
+      None,
+    )
+    .unwrap();
+    assert!(compose.contains("127.0.0.1:20006:27015/udp"));
+    assert!(compose.contains("100.64.0.1:20006:27015/udp"));
+    assert!(compose.contains("127.0.0.1:20005:80"));
+    assert!(!compose.contains("20005:80/"));
+  }
+
+  #[test]
   fn caddyfile_wildcard_site() {
     let mut gw: GatewaySpec =
       serde_json::from_str(r#"{"kind":"caddy","server":"s1"}"#)
@@ -990,9 +1069,9 @@ mod tests {
       dns: Some("example.com".into()),
       ..Default::default()
     };
-    let empty = caddyfile("edge", &gw, &[], false);
+    let empty = caddyfile("edge", &gw, &[], &[], false);
     let auto =
-      caddyfile("edge", &gw, std::slice::from_ref(&site), false);
+      caddyfile("edge", &gw, std::slice::from_ref(&site), &[], false);
     for text in [
       "*.example.com {",
       "dns acmedns {",
@@ -1007,7 +1086,7 @@ mod tests {
     assert!(auto.ends_with("\tabort\n}\n"));
     gw.tls = GatewayTls::Internal;
     site.dns = None;
-    let internal = caddyfile("edge", &gw, &[site], false);
+    let internal = caddyfile("edge", &gw, &[site], &[], false);
     assert!(!internal.contains("acmedns"));
     let global = |s: &str| {
       s.split("\n(wharf_errors)").next().unwrap().to_string()
@@ -1015,7 +1094,7 @@ mod tests {
     assert_eq!(global(&auto), global(&empty));
     assert_eq!(
       global(&internal),
-      global(&caddyfile("edge", &gw, &[], false))
+      global(&caddyfile("edge", &gw, &[], &[], false))
     );
     for out in [&empty, &auto, &internal] {
       assert!(!out.contains("prefer_wildcard"));
@@ -1190,6 +1269,7 @@ mod tests {
       account: None,
       error_page: None,
       wildcard: vec![],
+      layer4: vec![],
     };
     let out = caddyfile(
       "edge",
@@ -1212,6 +1292,7 @@ mod tests {
           ..Default::default()
         },
       ],
+      &[],
       true,
     );
     assert!(out.contains(
@@ -1249,6 +1330,7 @@ mod tests {
         redirect: None,
         ..Default::default()
       }],
+      &[],
       false,
     );
     assert!(out.contains("auto_https off"));
@@ -1278,6 +1360,7 @@ mod tests {
           ..Default::default()
         },
       ],
+      &[],
       false,
     );
     assert_eq!(
@@ -1323,7 +1406,7 @@ mod tests {
       paths: vec![],
       ..site.clone()
     };
-    let out = caddyfile("edge", &spec, &[site, redirect], true);
+    let out = caddyfile("edge", &spec, &[site, redirect], &[], true);
     assert_eq!(out.matches("import wharf_upstream").count(), 2);
     assert_eq!(out.matches("(wharf_upstream) {").count(), 1);
     assert!(out.contains("lb_try_duration 8s"));
@@ -1360,6 +1443,7 @@ mod tests {
           ..Default::default()
         },
       ],
+      &[],
       false,
     );
     assert!(out.contains("(wharf_errors) {"));
@@ -1375,7 +1459,7 @@ mod tests {
       "error_page": "<p>x</p>\n\n<p>y</p>"
     }))
     .unwrap();
-    let out = caddyfile("edge", &spec, &[], false);
+    let out = caddyfile("edge", &spec, &[], &[], false);
     assert!(out.contains(
       "\t\t<p>x</p>\n\n\t\t<p>y</p>\n\t\tWHARF_ERROR_PAGE {err.status_code}\n"
     ));
@@ -1396,6 +1480,7 @@ mod tests {
       account: None,
       error_page: None,
       wildcard: vec![],
+      layer4: vec![],
     };
     let out = caddyfile(
       "edge",
@@ -1408,6 +1493,7 @@ mod tests {
         redirect: Some("https://a.com".into()),
         ..Default::default()
       }],
+      &[],
       false,
     );
     assert!(out.contains("\tredir https://a.com{uri} permanent\n"));
@@ -1428,6 +1514,7 @@ mod tests {
       account: Some("cf".into()),
       error_page: None,
       wildcard: vec![],
+      layer4: vec![],
     };
     let out = tunnel_compose("cf", &spec);
     assert!(
