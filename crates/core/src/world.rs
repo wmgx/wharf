@@ -1045,6 +1045,33 @@ impl World {
           "路由 {host} 的限速要在每分钟 10 到 100000 次之间"
         )));
       }
+      if route.spec.internal {
+        if route.spec.redirect.is_some() {
+          return Err(ApiError::invalid(format!(
+            "路由 {host}：跳转不能设成只在内网访问"
+          )));
+        }
+        if self.route_gateways(&route.spec).iter().any(|name| {
+          self.gateways[*name].spec.kind
+            == GatewayKind::CloudflareTunnel
+        }) {
+          return Err(ApiError::invalid(format!(
+            "路由 {host}：只在内网访问只支持 caddy 网关"
+          )));
+        }
+        if route.spec.backup_gateway.is_some() {
+          return Err(ApiError::invalid(format!(
+            "路由 {host}：只在内网访问的域名不能设备用入口"
+          )));
+        }
+        if let Some(gw) = self.route_gateway(&route.spec)
+          && self.gateways[gw].spec.wildcard.contains(host)
+        {
+          return Err(ApiError::invalid(format!(
+            "路由 {host}：它是入口 {gw} 泛域名证书的 zone 本身，不能设成只在内网访问"
+          )));
+        }
+      }
       if let Some(target) = &route.spec.redirect {
         self.check_redirect(host, &route.spec, target)?;
         continue;
@@ -1707,6 +1734,78 @@ mod tests {
   use wharf_api_types::spec::PortSpec;
 
   #[test]
+  fn internal_route_checks() {
+    let mut w = World::default();
+    for server in ["s1", "s2"] {
+      w.servers.insert(
+        server.into(),
+        ServerRow {
+          settings: Default::default(),
+          version: 1,
+        },
+      );
+    }
+    for (name, server) in [("edge", "s1"), ("backup", "s2")] {
+      w.gateways.insert(
+        name.into(),
+        GatewayRow {
+          spec: serde_json::from_value(
+            serde_json::json!({"kind":"caddy", "server":server}),
+          )
+          .unwrap(),
+          version: 1,
+        },
+      );
+    }
+    let valid: RouteSpec = serde_json::from_value(serde_json::json!({
+      "hostname":"i.example.com", "gateway":"edge", "upstream":"127.0.0.1:8080", "internal":true
+    })).unwrap();
+    w.routes.insert(
+      "i.example.com".into(),
+      RouteRow {
+        id: "r1".into(),
+        spec: valid.clone(),
+        version: 1,
+      },
+    );
+    w.validate().unwrap();
+    w.routes.get_mut("i.example.com").unwrap().spec.redirect =
+      Some("https://example.com".into());
+    assert_eq!(
+      w.validate().unwrap_err().message,
+      "路由 i.example.com：跳转不能设成只在内网访问"
+    );
+    w.routes.get_mut("i.example.com").unwrap().spec = valid.clone();
+    w.gateways.get_mut("edge").unwrap().spec.kind =
+      GatewayKind::CloudflareTunnel;
+    w.gateways.get_mut("edge").unwrap().spec.account =
+      Some("cf".into());
+    assert_eq!(
+      w.validate().unwrap_err().message,
+      "路由 i.example.com：只在内网访问只支持 caddy 网关"
+    );
+    w.gateways.get_mut("edge").unwrap().spec.kind =
+      GatewayKind::Caddy;
+    w.gateways.get_mut("edge").unwrap().spec.account = None;
+    w.routes
+      .get_mut("i.example.com")
+      .unwrap()
+      .spec
+      .backup_gateway = Some("backup".into());
+    assert_eq!(
+      w.validate().unwrap_err().message,
+      "路由 i.example.com：只在内网访问的域名不能设备用入口"
+    );
+    w.routes.get_mut("i.example.com").unwrap().spec = valid;
+    w.gateways.get_mut("edge").unwrap().spec.wildcard =
+      vec!["i.example.com".into()];
+    assert_eq!(
+      w.validate().unwrap_err().message,
+      "路由 i.example.com：它是入口 edge 泛域名证书的 zone 本身，不能设成只在内网访问"
+    );
+  }
+
+  #[test]
   fn wildcard_checks() {
     let mut w = sample();
     let spec: GatewaySpec = serde_json::from_value(
@@ -2131,6 +2230,7 @@ mod tests {
           redirect: None,
           rate_limit: None,
           block_scanners: false,
+          internal: false,
         },
       },
     ])
@@ -2209,6 +2309,7 @@ mod tests {
       redirect: None,
       rate_limit: None,
       block_scanners: false,
+      internal: false,
     };
     w.apply_changes(&[
       Change::UpsertService {

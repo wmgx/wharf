@@ -22,11 +22,22 @@ pub fn secret_name(gateway: &str) -> String {
 }
 
 pub fn allowed(world: &World, gateway: &str) -> Vec<String> {
-  world
+  let mut names = world
     .gateways
     .get(gateway)
     .map(|g| g.spec.wildcard.clone())
-    .unwrap_or_default()
+    .unwrap_or_default();
+  names.extend(
+    world
+      .routes
+      .iter()
+      .filter(|(_, r)| {
+        r.spec.internal
+          && world.route_gateway(&r.spec) == Some(gateway)
+      })
+      .map(|(host, _)| host.clone()),
+  );
+  names
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
@@ -193,6 +204,19 @@ mod tests {
     assert!(zones.contains(&"example.com".into()));
     assert!(!zones.contains(&"other.com".into()));
     assert!(!zones.contains(&"a.example.com".into()));
+    for (host, internal) in
+      [("i.example.com", true), ("a.example.com", false)]
+    {
+      world.routes.insert(host.into(), crate::world::RouteRow {
+        id:host.into(), spec:serde_json::from_value(json!({"hostname":host, "gateway":"edge", "upstream":"127.0.0.1:8080", "internal":internal})).unwrap(), version:1,
+      });
+    }
+    let names = allowed(&world, "edge");
+    assert!(names.contains(&"i.example.com".into()));
+    assert!(!names.contains(&"a.example.com".into()));
+    assert!(
+      !allowed(&world, "other").contains(&"i.example.com".into())
+    );
   }
 
   #[test]
