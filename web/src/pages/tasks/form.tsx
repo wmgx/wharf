@@ -71,7 +71,7 @@ export function TaskForm({ task, server: fixed, taken, onSaved, onCancel }: { ta
         <Input id="task-name" disabled={!!task} value={name} onChange={(e) => setName(toName(e.target.value))} className="font-mono" />
       </Field>
       <Field label="形式">
-        <fieldset disabled={!!task} className="max-w-full overflow-x-auto">
+        <fieldset disabled={!!task} className="min-w-0 max-w-full overflow-x-auto whitespace-nowrap">
           <Segmented value={kind} options={[["exec", "在服务里执行"], ["container", "一次性容器"], ["host", "宿主机命令"], ["ping", "外部报到"], ["script", "脚本"]]} onChange={setKind} />
         </fieldset>
         <span className="text-xs text-muted-foreground">
