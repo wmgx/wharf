@@ -1745,7 +1745,25 @@ fn gateway_items(
         Some(_) => None,
       },
     };
-    if let Some((action, risk, reason)) = decision {
+    if let Some((action, mut risk, reason)) = decision {
+      if gw.spec.kind == GatewayKind::Caddy {
+        for f in &gw.spec.layer4 {
+          if current.gateways.get(name).is_some_and(|g| {
+            g.spec
+              .layer4
+              .iter()
+              .any(|old| old.udp == f.udp && old.listen == f.listen)
+          }) {
+            continue;
+          }
+          if !risk.contains(&Impact::Public) {
+            risk.push(Impact::Public);
+          }
+          let protocol = if f.udp { "UDP" } else { "TCP" };
+          let listen = f.listen;
+          b.warnings.push(format!("入口 {name} 在 {server} 上对公网开放 {protocol} 端口 {listen}（四层转发，没有登录保护）；云厂商的安全组、机器的防火墙要自己放行"));
+        }
+      }
       let (layer, reason) = match gw.spec.kind {
         GatewayKind::Caddy => (Layer::Gateway, reason),
         GatewayKind::CloudflareTunnel

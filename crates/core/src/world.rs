@@ -730,6 +730,16 @@ impl World {
               "服务 {service} 没有名为 {port} 的端口"
             ));
           }
+          if self.services[service]
+            .spec
+            .ports
+            .iter()
+            .any(|p| p.name == port && p.udp)
+          {
+            return bad(format!(
+              "服务 {service} 的端口 {port} 是 UDP，不能给域名用"
+            ));
+          }
         }
         (None, Some(up)) => {
           if p.port.is_some() || !valid_upstream(up) {
@@ -859,6 +869,7 @@ impl World {
           .join("、")
       )));
     }
+    let mut forwards = BTreeSet::new();
     for (name, gateway) in &self.gateways {
       if !self.servers.contains_key(&gateway.spec.server) {
         return Err(server_not_found(&gateway.spec.server));
@@ -881,6 +892,11 @@ impl World {
         {
           return Err(ApiError::invalid(format!(
             "网关 {name}：http_port、https_port、email、tls、error_page 只适用于 caddy 网关"
+          )));
+        }
+        if !s.layer4.is_empty() {
+          return Err(ApiError::invalid(format!(
+            "网关 {name}：四层转发只适用于 caddy 网关"
           )));
         }
         if !s.wildcard.is_empty() {
@@ -918,6 +934,73 @@ impl World {
         return Err(ApiError::invalid(format!(
           "网关 {name} 的 http_port 和 https_port 不能相同"
         )));
+      }
+      let server = &gateway.spec.server;
+      for f in &gateway.spec.layer4 {
+        let listen = f.listen;
+        match (&f.service, &f.upstream) {
+          (Some(svc), None) => {
+            let service = self.services.get(svc).ok_or_else(|| ApiError::invalid(format!("入口 {name} 的四层转发 {listen} 指向的服务 {svc} 不存在")).suggest("wharf service list"))?;
+            let port = self.service_port(svc, f.port.as_deref()).ok_or_else(|| ApiError::invalid(format!("入口 {name} 的四层转发 {listen}：找不到服务 {svc} 的端口")).with_hint("服务有多个端口时要写端口名"))?;
+            let target = service.spec.ports.iter().find(|p| p.name == port).ok_or_else(|| ApiError::invalid(format!("入口 {name} 的四层转发 {listen}：找不到服务 {svc} 的端口")).with_hint("服务有多个端口时要写端口名"))?;
+            if f.udp != target.udp {
+              return Err(ApiError::invalid(format!(
+                "入口 {name} 的四层转发 {listen}：协议和服务 {svc} 的端口 {port} 不一致"
+              )));
+            }
+          }
+          (None, Some(up)) => {
+            if !valid_upstream(up) {
+              return Err(ApiError::invalid(format!(
+                "入口 {name} 的四层转发 {listen} 的上游 {up} 要写成 主机:端口"
+              )));
+            }
+          }
+          _ => {
+            return Err(ApiError::invalid(format!(
+              "入口 {name} 的四层转发 {listen}：服务和上游二选一"
+            )));
+          }
+        }
+        if [
+          0,
+          22,
+          80,
+          443,
+          crate::link::FRPS_PORT,
+          7700,
+          wharf_api_types::agent::PROBE_PORT,
+          wharf_api_types::agent::REST_SERVER_PORT,
+          wharf_api_types::egress::SERVE_PORT,
+          wharf_api_types::egress::LOCAL_PORT,
+        ]
+        .contains(&listen)
+          || (30000..=39999).contains(&listen)
+          || self.gateways.values().any(|g| {
+            g.spec.kind == GatewayKind::Caddy
+              && g.spec.server == *server
+              && (listen == g.spec.http_port.unwrap_or(80)
+                || listen == g.spec.https_port.unwrap_or(443))
+          })
+        {
+          return Err(ApiError::invalid(format!(
+            "入口 {name} 的四层转发端口 {listen} 被 Wharf 占用或保留，换一个"
+          )));
+        }
+        if !forwards.insert((server, f.udp, listen)) {
+          return Err(ApiError::invalid(format!(
+            "服务器 {server} 上的端口 {listen} 被多个四层转发使用"
+          )));
+        }
+        for (svc, service) in &self.services {
+          if service.spec.server == *server
+            && service.host_ports.values().any(|p| *p == listen)
+          {
+            return Err(ApiError::invalid(format!(
+              "服务器 {server} 上的端口 {listen} 已经给了服务 {svc}"
+            )));
+          }
+        }
       }
       if let Some(page) = &gateway.spec.error_page {
         check_error_page(name, page)?;
@@ -1018,6 +1101,12 @@ impl World {
           route.spec.service
         )));
       }
+      if service.spec.ports.iter().any(|p| p.name == port && p.udp) {
+        let svc = &route.spec.service;
+        return Err(ApiError::invalid(format!(
+          "路由 {host}：服务 {svc} 的端口 {port} 是 UDP，不能给域名用"
+        )));
+      }
       self.validate_paths(host, &route.spec)?;
     }
     Ok(())
@@ -1058,6 +1147,16 @@ impl World {
         }
       }
       self.services.get_mut(name).unwrap().host_ports = assigned;
+    }
+    for gateway in self.gateways.values() {
+      if gateway.spec.kind == GatewayKind::Caddy {
+        for f in &gateway.spec.layer4 {
+          used
+            .entry(gateway.spec.server.clone())
+            .or_default()
+            .insert(f.listen);
+        }
+      }
     }
     for (name, port_name) in pending {
       let server = self.services[&name].spec.server.clone();
@@ -1737,10 +1836,104 @@ mod tests {
         name: "http".into(),
         container: Some(80),
         host: None,
+        udp: false,
       }],
       env: Default::default(),
       volumes: vec![],
     }
+  }
+
+  #[test]
+  fn layer4_checks() {
+    let mut w = sample();
+    let server = w.servers.remove("node1").unwrap();
+    w.servers.insert("s1".into(), server);
+    let gw: GatewaySpec = serde_json::from_value(
+      json!({"kind":"caddy","server":"s1","default":true}),
+    )
+    .unwrap();
+    w.apply_changes(&[
+      Change::UpsertGateway {
+        name: "edge".into(),
+        spec: gw,
+      },
+      Change::UpsertService {
+        name: "app".into(),
+        spec: image_service("s1"),
+        adopt: None,
+      },
+    ])
+    .unwrap();
+    w.allocate_ports().unwrap();
+    let forward = |listen, udp| {
+      serde_json::from_value(json!({"listen":listen,"udp":udp,"upstream":"127.0.0.1:9999"})).unwrap()
+    };
+    w.gateways.get_mut("edge").unwrap().spec.layer4 =
+      vec![forward(443, false)];
+    assert!(
+      w.validate()
+        .unwrap_err()
+        .message
+        .contains("被 Wharf 占用或保留")
+    );
+    w.gateways.get_mut("edge").unwrap().spec.layer4 =
+      vec![forward(15432, false), forward(15432, false)];
+    assert!(
+      w.validate()
+        .unwrap_err()
+        .message
+        .contains("被多个四层转发使用")
+    );
+    w.gateways.get_mut("edge").unwrap().spec.layer4 =
+      vec![forward(20000, false)];
+    assert!(
+      w.validate()
+        .unwrap_err()
+        .message
+        .contains("已经给了服务 app")
+    );
+    w.gateways.get_mut("edge").unwrap().spec.layer4 = vec![
+      serde_json::from_value(
+        json!({"listen":15432,"udp":true,"service":"app"}),
+      )
+      .unwrap(),
+    ];
+    assert!(
+      w.validate()
+        .unwrap_err()
+        .message
+        .contains("协议和服务 app 的端口 http 不一致")
+    );
+    w.gateways.get_mut("edge").unwrap().spec.layer4 =
+      vec![forward(15432, false), forward(15432, true)];
+    w.validate().unwrap();
+    w.services.get_mut("app").unwrap().spec.ports[0].udp = true;
+    let route: RouteSpec = serde_json::from_value(
+      json!({"hostname":"example.com","service":"app"}),
+    )
+    .unwrap();
+    w.apply_changes(&[Change::UpsertRoute { spec: route }])
+      .unwrap();
+    assert!(
+      w.validate()
+        .unwrap_err()
+        .message
+        .contains("是 UDP，不能给域名用")
+    );
+    w.routes.clear();
+    w.services.clear();
+    w.gateways.get_mut("edge").unwrap().spec.layer4 =
+      vec![forward(20000, false)];
+    w.validate().unwrap();
+    w.apply_changes(&[Change::UpsertService {
+      name: "new".into(),
+      spec: image_service("s1"),
+      adopt: None,
+    }])
+    .unwrap();
+    w.allocate_ports().unwrap();
+    assert_eq!(w.services["new"].host_ports["http"], 20001);
+    w.validate().unwrap();
   }
 
   #[test]
@@ -1959,6 +2152,7 @@ mod tests {
         account: None,
         error_page: None,
         wildcard: vec![],
+        layer4: vec![],
       },
     }])
     .unwrap();
@@ -2000,6 +2194,7 @@ mod tests {
       account: None,
       error_page: None,
       wildcard: vec![],
+      layer4: vec![],
     };
     let route = |backup: &str| RouteSpec {
       hostname: "who.example.com".into(),

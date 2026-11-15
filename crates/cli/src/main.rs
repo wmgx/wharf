@@ -745,6 +745,24 @@ pub enum GatewayCmd {
     #[command(flatten)]
     apply: ApplyFlags,
   },
+  /// 四层转发：入口监听公网 TCP 或 UDP 端口，转给服务。--rm 删除。
+  Forward {
+    name: String,
+    #[arg(long)]
+    listen: u16,
+    #[arg(long)]
+    udp: bool,
+    #[arg(long, conflicts_with = "upstream")]
+    service: Option<String>,
+    #[arg(long)]
+    port: Option<String>,
+    #[arg(long)]
+    upstream: Option<String>,
+    #[arg(long, conflicts_with_all = ["service", "upstream", "port"])]
+    rm: bool,
+    #[command(flatten)]
+    apply: ApplyFlags,
+  },
   Rm {
     name: String,
     #[command(flatten)]
