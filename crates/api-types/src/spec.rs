@@ -573,6 +573,9 @@ pub struct RouteSpec {
   /// 只在内网访问：DNS 指向入口所在机器的内网地址，证书用 DNS 验证签，入口只放行内网来源。只支持 caddy 网关。
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub internal: bool,
+  /// 临时分享：到这个时间（毫秒时间戳）以后，网关直接断开这个域名的请求；路由和 DNS 记录留着，等人删除。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub expires_at: Option<i64>,
 }
 
 /// 网关到服务的走法偏好。

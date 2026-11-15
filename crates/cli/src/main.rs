@@ -129,6 +129,25 @@ pub enum Command {
     #[arg(long)]
     relay: bool,
   },
+  /// 临时分享：给服务生成一个随机子域名，到期后自动失效。用入口上的泛域名证书，不用等签证书。
+  /// 例：`wharf share blog --ttl 2h --apply`。查看用 `wharf route list`，删除用 `wharf route rm`。
+  Share {
+    name: String,
+    /// 多久后失效，例如 30m、2h、1d，最长 7d。
+    #[arg(long)]
+    ttl: String,
+    /// 端口名，服务只有一个端口时可以不填。
+    #[arg(long)]
+    port: Option<String>,
+    /// 入口，不填用默认入口。
+    #[arg(long)]
+    gateway: Option<String>,
+    /// 入口开了多个泛域名证书时选一个 zone。
+    #[arg(long)]
+    zone: Option<String>,
+    #[command(flatten)]
+    apply: ApplyFlags,
+  },
   /// 在宿主机执行一次非交互 shell 命令。
   Exec {
     server: String,
