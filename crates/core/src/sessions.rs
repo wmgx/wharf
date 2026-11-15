@@ -193,7 +193,7 @@ mod tests {
   fn known_network() {
     let history = vec!["203.0.113.7 Browser".into()];
     assert!(!is_new(&history, "203.0.113.99"));
-    assert!(is_new(&history, "203.0.114.1"));
+    assert!(is_new(&history, "100.64.0.1"));
     assert!(!is_new(&[], "203.0.113.7"));
   }
 }
