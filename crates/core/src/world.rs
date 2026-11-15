@@ -340,15 +340,14 @@ impl World {
             spec.limits = None;
           }
           if let Some(limits) = &spec.limits {
-            if matches!(spec.source, Source::Compose { .. }) {
-              return Err(
-                ApiError::invalid(format!(
-                  "服务 {name} 是 compose 来源，不能在这里设资源上限"
-                ))
-                .with_hint(
-                  "在 compose 文件里自己写 mem_limit 和 cpus",
-                ),
-              );
+            if let Source::Compose {
+              content: Some(content),
+              ..
+            } = &spec.source
+            {
+              crate::render::compose_with_limits(
+                name, content, limits,
+              )?;
             }
             if limits.memory_mb.is_some_and(|n| n < 32) {
               return Err(ApiError::invalid("内存上限至少 32 MB"));
@@ -1706,7 +1705,7 @@ mod tests {
     let mut w = sample();
     let mut spec = image_service("s1");
     spec.source = Source::Compose {
-      content: Some("services:\n  web:\n    image: nginx\n".into()),
+      content: Some("services:\n  web:\n    image: nginx\n  worker:\n    image: nginx\n".into()),
       file: None,
     };
     spec.limits = Some(wharf_api_types::spec::Limits {
@@ -1720,7 +1719,7 @@ mod tests {
         adopt: None,
       }])
       .unwrap_err();
-    assert!(err.message.contains("compose 来源"));
+    assert!(err.message.contains("只支持一个容器"));
   }
 
   #[test]

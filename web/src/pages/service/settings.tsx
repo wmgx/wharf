@@ -120,7 +120,7 @@ function SettingsFields({ svc, draft, set, changed, onReset, onSubmit }: { svc: 
         </Field>
       </div>}
     </Panel>
-    {!isCompose && <>
+    {(!isCompose || composeInfo.images.length === 1) && <>
       <SectionTitle>资源上限</SectionTitle>
       <Panel className="grid gap-3 p-4 sm:grid-cols-2">
         <Field label="内存（MB）" htmlFor="service-memory">
