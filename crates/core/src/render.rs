@@ -991,7 +991,8 @@ mod tests {
       ..Default::default()
     };
     let empty = caddyfile("edge", &gw, &[], false);
-    let auto = caddyfile("edge", &gw, std::slice::from_ref(&site), false);
+    let auto =
+      caddyfile("edge", &gw, std::slice::from_ref(&site), false);
     for text in [
       "*.example.com {",
       "dns acmedns {",
