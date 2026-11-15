@@ -29,6 +29,7 @@ pub fn web_schema() -> Value {
   let _ = generator.subschema_for::<agent::ContainerInfo>();
   let _ = generator.subschema_for::<view::LiveState>();
   let _ = generator.subschema_for::<view::ServiceView>();
+  let _ = generator.subschema_for::<view::ExposureView>();
   let _ = generator.subschema_for::<spec::GatewayTls>();
   let _ = generator.subschema_for::<spec::GatewaySpec>();
   let _ = generator.subschema_for::<view::GatewayView>();

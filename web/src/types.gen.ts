@@ -737,6 +737,13 @@ export interface EgressSpec {
  */
 export type ErrorCode = "InvalidInput" | "NotFound" | "AlreadyExists" | "Conflict" | "Unauthorized" | "Forbidden" | "AgentOffline" | "Timeout" | "Cancelled" | "NotImplemented" | "Internal" | "PlanStale" | "ConfirmRequired" | "Busy" | "AgentFailed" | "Provider";
 
+export interface ExposureView {
+  checked_at: number | null;
+  outdated: boolean;
+  ports: PortRow[];
+  risks: RiskRow[];
+}
+
 export interface FileEntry {
   dir: boolean;
   /**
@@ -980,6 +987,7 @@ export interface Issue {
    * 这是哪一类问题，页面按它决定给什么按钮。取值见下表。
    * oom_killed：服务的容器因内存超限被杀。
    * recovery_low：恢复码少于 3 个。
+   * exposed_port：未确认的对公网监听端口。
    */
   code: string;
   /**
@@ -1313,6 +1321,16 @@ export interface PlanItem {
 
 export type PlanStatus = "pending" | "applied";
 
+export interface PortRow {
+  acked: boolean;
+  addr: string;
+  expected: boolean;
+  name: string;
+  owner: string;
+  port: number;
+  proto: string;
+}
+
 export interface PortSpec {
   /**
    * 容器内端口。image / build 来源必填；compose 来源不填（映射写在 compose 里）。
@@ -1415,6 +1433,14 @@ export interface RelayHint {
    * 经中转两段合计的丢包率。
    */
   via_loss: number;
+}
+
+export interface RiskRow {
+  container: string;
+  own: boolean;
+  project: string | null;
+  risks: string[];
+  service: string | null;
 }
 
 /**
@@ -1843,6 +1869,7 @@ export interface ServiceView {
    * 备注：给人看的说明，不影响部署。
    */
   note?: string | null;
+  risks?: string[];
   spec: ServiceSpec;
   /**
    * 分层状态；只读配置、不查现状时为空。
