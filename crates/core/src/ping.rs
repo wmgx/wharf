@@ -81,7 +81,9 @@ async fn record(
   output: &str,
 ) {
   match tasks::insert_run(state, name, status, trigger).await {
-    Ok(id) => tasks::finish(state, id, status, None, output).await,
+    Ok(id) => {
+      tasks::finish(state, id, status, None, output, None).await
+    }
     Err(e) => tracing::warn!("记录 {name} 的报到失败：{e}"),
   }
   tasks::notify_result(state, name, spec, status, output).await;

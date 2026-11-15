@@ -43,6 +43,8 @@ pub enum TaskCmd {
   /// 删除任务和它的运行记录。
   Rm {
     name: String,
+    #[arg(long)]
+    data: bool,
   },
 }
 
@@ -61,6 +63,9 @@ pub struct AddArgs {
   /// 脚本使用的镜像。
   #[arg(long, requires = "script")]
   script_image: Option<String>,
+  /// 从文件读取依赖清单。
+  #[arg(long, requires = "script")]
+  deps: Option<String>,
   /// 开启网址触发。
   #[arg(long, requires = "script")]
   hook: bool,
@@ -146,12 +151,8 @@ pub async fn task(
       Ok(())
     }
     TaskCmd::Show { name } => {
-      let v: Vec<TaskView> = c.get("/api/tasks").await?;
-      let t =
-        v.into_iter().find(|t| t.name == name).ok_or_else(|| {
-          ApiError::not_found(format!("没有定时任务 {name}"))
-            .with_hint("wharf task ls")
-        })?;
+      let t: TaskView =
+        c.get(&format!("/api/tasks/{}", seg(&name))).await?;
       out(j, &t, |t| {
         println!(
           "{}",
@@ -186,9 +187,10 @@ pub async fn task(
       });
       Ok(())
     }
-    TaskCmd::Rm { name } => {
-      let r: serde_json::Value =
-        c.delete(&format!("/api/tasks/{}", seg(&name))).await?;
+    TaskCmd::Rm { name, data } => {
+      let r: serde_json::Value = c
+        .delete(&format!("/api/tasks/{}?data={data}", seg(&name)))
+        .await?;
       out(j, &r, |_| println!("已删除定时任务 {name}"));
       Ok(())
     }
@@ -256,6 +258,13 @@ async fn add(c: &Client, a: AddArgs, j: bool) -> CliResult<()> {
       TaskKind::Script {
         runtime,
         code,
+        deps: a
+          .deps
+          .as_deref()
+          .map(std::fs::read_to_string)
+          .transpose()
+          .map_err(|_| ApiError::invalid("读取依赖清单失败"))?
+          .unwrap_or_default(),
         image: a.script_image,
         env,
         hook: if a.hook { Some(String::new()) } else { old },
@@ -389,8 +398,11 @@ fn line(r: &TaskRunView) -> String {
     "hook" => " 网址",
     _ => "",
   };
+  let mem = r
+    .mem_peak
+    .map_or(String::new(), |m| format!(" 内存峰值 {m} 字节"));
   format!(
-    "#{} {} {}{secs}{code}{by}",
+    "#{} {} {}{secs}{code}{by}{mem}",
     r.id,
     local(r.started_at),
     status(r.status)

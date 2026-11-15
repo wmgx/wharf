@@ -83,6 +83,7 @@ export function ActionsProvider({ children }: { children: ReactNode }) {
   const [open, setOpen] = useState<Open | null>(null);
   const [removing, setRemoving] = useState<string | null>(null);
   const [removingRoute, setRemovingRoute] = useState<string | null>(null);
+  const [removeTaskData, setRemoveTaskData] = useState(false);
   const [removingTask, setRemovingTask] = useState<string | null>(null);
   const [moving, setMoving] = useState<ServiceView | null>(null);
   const [settingAuth, setSettingAuth] = useState<{ hostname: string; enable: boolean } | null>(null);
@@ -188,7 +189,7 @@ export function ActionsProvider({ children }: { children: ReactNode }) {
     },
     remove: (name) => setRemoving(name),
     removeRoute: (hostname) => setRemovingRoute(hostname),
-    removeTask: (name) => setRemovingTask(name),
+    removeTask: (name) => { setRemoveTaskData(false); setRemovingTask(name); },
     move: (svc) => setMoving(svc),
     basicAuth: (hostname, enable = false) => setSettingAuth({ hostname, enable }),
     upgrade: () => setUpgrading(true),
@@ -261,7 +262,7 @@ export function ActionsProvider({ children }: { children: ReactNode }) {
         </SheetContent>
       </Sheet>
       <ConfirmDialog open={!!removingRoute} title={`移除域名 ${removingRoute}？`} onCancel={() => setRemovingRoute(null)} onConfirm={() => { const hostname = removingRoute!; setRemovingRoute(null); actions.plan({ title: `移除 ${hostname}`, changes: [{ op: "remove_route", hostname }] }); }}>服务不受影响，DNS 记录和证书一起移除。</ConfirmDialog>
-      <ConfirmDialog open={!!removingTask} title={`删除任务 ${removingTask}？`} onCancel={() => setRemovingTask(null)} onConfirm={async () => { const name = removingTask!; setRemovingTask(null); try { await api.del(`/api/tasks/${encodeURIComponent(name)}`); toast.success(`已删除 ${name}`); window.dispatchEvent(new Event("wharf:tasks")); nav("/tasks"); } catch (e) { toast.error(`不能删除 ${name}`, { description: (e as Error).message }); } }}>运行记录一起删除。</ConfirmDialog>
+      <ConfirmDialog open={!!removingTask} title={`删除任务 ${removingTask}？`} onCancel={() => setRemovingTask(null)} onConfirm={async () => { const name = removingTask!; setRemovingTask(null); try { await api.del(`/api/tasks/${encodeURIComponent(name)}?data=${removeTaskData}`); toast.success(`已删除 ${name}`); window.dispatchEvent(new Event("wharf:tasks")); nav("/tasks"); } catch (e) { toast.error(`不能删除 ${name}`, { description: (e as Error).message }); } }}>运行记录一起删除。<label className="mt-3 flex items-center gap-2"><Checkbox checked={removeTaskData} onCheckedChange={(v) => setRemoveTaskData(!!v)} />同时删除数据</label></ConfirmDialog>
       <RemoveDialog name={removing} onCancel={() => setRemoving(null)} onConfirm={confirmRemove} />
       <MoveDialog svc={moving} onCancel={() => setMoving(null)} onConfirm={confirmMove} />
       <BasicAuthDialog hostname={settingAuth?.hostname ?? null} enable={!!settingAuth?.enable} onClose={() => setSettingAuth(null)} onSaved={authSaved} />
