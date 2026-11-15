@@ -326,6 +326,16 @@ pub fn service_view(
     .map(|p| p.containers.clone())
     .unwrap_or_default();
   Some(ServiceView {
+    risks: if crate::agent_upgrade::outdated(
+      snap
+        .agent(&row.spec.server)
+        .and_then(|a| a.report.as_ref())
+        .map(|r| r.build.as_str()),
+    ) {
+      vec![]
+    } else {
+      crate::exposure::service_risks(&row.spec.server, name)
+    },
     name: name.to_string(),
     spec: row.spec.clone(),
     host_ports: row.host_ports.clone(),
@@ -606,6 +616,7 @@ pub async fn status(
   issues.extend(crate::totp::issues(&state.db).await?);
   issues.extend(crate::tasks::issues(state).await);
   issues.extend(crate::probe::issues());
+  issues.extend(crate::exposure::issues(state).await?);
   issues.extend(crate::alerts::issues());
   issues.extend(crate::monitor::issues());
   issues.extend(crate::rdap::issues());

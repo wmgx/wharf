@@ -196,6 +196,9 @@ impl Ops {
       AgentOp::UpgradeLog => {
         to_value(crate::upgrade::helper_log(ctx).await)
       }
+      AgentOp::Exposure => {
+        to_value(crate::exposure::collect(&self.docker, ctx).await?)
+      }
       AgentOp::HostUnits => {
         to_value(crate::host_units::list(&self.docker, ctx).await?)
       }

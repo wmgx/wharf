@@ -42,7 +42,7 @@ export function IssueRow({ issue }: { issue: Issue }) {
       ) : issue.code === "pending_changes" ? (
         <Button variant="outline" size="xs" onClick={() => actions.plan({ title: "执行未完成的改动", changes: [] })}>预览改动</Button>
       ) : subject ? (
-        <Button variant="outline" size="xs" onClick={() => nav(issue.code === "baseline_drift" ? `/servers/${encodeURIComponent(subject.name)}?tab=system` : issue.code === "host_unit_down" ? `/servers/${encodeURIComponent(subject.name)}?tab=host` : subjectPath(subject))}>查看</Button>
+        <Button variant="outline" size="xs" onClick={() => nav(issue.code === "baseline_drift" ? `/servers/${encodeURIComponent(subject.name)}?tab=system` : issue.code === "exposed_port" ? `/servers/${encodeURIComponent(subject.name)}?tab=exposure` : issue.code === "host_unit_down" ? `/servers/${encodeURIComponent(subject.name)}?tab=host` : subjectPath(subject))}>查看</Button>
       ) : null}
     </Row>
   );

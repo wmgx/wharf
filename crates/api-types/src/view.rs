@@ -148,6 +148,8 @@ pub struct ShellLog {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ServiceView {
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub risks: Vec<String>,
   pub name: String,
   pub spec: ServiceSpec,
   /// 端口名到宿主机端口。
@@ -668,6 +670,7 @@ pub struct Issue {
   /// 这是哪一类问题，页面按它决定给什么按钮。取值见下表。
   /// oom_killed：服务的容器因内存超限被杀。
   /// recovery_low：恢复码少于 3 个。
+  /// exposed_port：未确认的对公网监听端口。
   pub code: String,
   pub level: IssueLevel,
   #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1343,4 +1346,51 @@ pub struct SessionRow {
   #[serde(default)]
   pub agent: Option<String>,
   pub current: bool,
+}
+
+#[derive(
+  Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct ExposureView {
+  pub checked_at: Option<i64>,
+  pub outdated: bool,
+  pub ports: Vec<PortRow>,
+  pub risks: Vec<RiskRow>,
+}
+
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct PortRow {
+  pub proto: String,
+  pub port: u16,
+  pub addr: String,
+  pub owner: String,
+  pub name: String,
+  pub expected: bool,
+  pub acked: bool,
+}
+
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct RiskRow {
+  pub container: String,
+  pub project: Option<String>,
+  pub service: Option<String>,
+  pub risks: Vec<String>,
+  pub own: bool,
+}
+
+pub fn risk_text(code: &str) -> &str {
+  match code {
+    "privileged" => "特权模式",
+    "docker_sock" => "挂了 docker 套接字",
+    "host_root" => "挂了宿主机根目录",
+    "host_sensitive" => "挂了宿主机敏感目录",
+    "host_network" => "host 网络",
+    "host_pid" => "host 进程空间",
+    "cap_admin" => "加了高危权限",
+    _ => code,
+  }
 }

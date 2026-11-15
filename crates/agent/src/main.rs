@@ -19,6 +19,7 @@ mod docker;
 mod edge;
 mod egress;
 mod exec;
+mod exposure;
 mod files;
 mod forward;
 mod gw_stats;

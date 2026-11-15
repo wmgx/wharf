@@ -15,6 +15,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useStatus } from "@/status";
 import type { HostInfo } from "@/types";
 import { type Traffic, uptime } from "./format";
+import { ServerExposure } from "./exposure";
 import { ServerHostUnits } from "./host-units";
 import { ServerLinks } from "./links";
 import { Overview } from "./overview";
@@ -59,7 +60,7 @@ function useTraffic(name: string) {
   return data;
 }
 
-const TABS = ["overview", "metrics", "network", "system", "host", "terminal", "settings"] as const;
+const TABS = ["overview", "metrics", "network", "system", "host", "exposure", "terminal", "settings"] as const;
 
 export function ServerDetail() {
   const { name = "" } = useParams();
@@ -96,6 +97,7 @@ export function ServerDetail() {
         <TabsTrigger value="network">网络</TabsTrigger>
         <TabsTrigger value="system">系统</TabsTrigger>
         <TabsTrigger value="host">宿主机程序</TabsTrigger>
+        <TabsTrigger value="exposure">暴露面</TabsTrigger>
         <TabsTrigger value="terminal">终端</TabsTrigger>
         <TabsTrigger value="settings">设置</TabsTrigger>
       </TabsList>
@@ -119,6 +121,7 @@ export function ServerDetail() {
       <TabsContent value="host" className="mt-4">
         {tab === "host" && <ServerHostUnits server={name} online={server.online} />}
       </TabsContent>
+      <TabsContent value="exposure" className="mt-4">{tab === "exposure" && <ServerExposure server={name} />}</TabsContent>
       <TabsContent value="terminal" className="mt-4">
         {!server.settings.host_terminal ? <Empty action={<Button onClick={() => settingsAt("access")}>去开启</Button>}>宿主机终端没有开启</Empty> : !server.online ? <Empty>服务器离线</Empty> : !server.host_shell ? <Empty action={<Button onClick={() => actions.upgradeAgent(name)}>升级 agent</Button>}>agent 版本太旧</Empty> : <HostSessions server={name} />}
       </TabsContent>
