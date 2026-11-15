@@ -670,6 +670,20 @@ fn config_items(
         let auth = route.is_some_and(|r| r.spec.auth);
         if route.is_some_and(|r| r.spec.redirect.is_some()) {
           (vec![], "新增跳转".to_string())
+        } else if let Some(ms) = route.and_then(|r| r.spec.expires_at)
+        {
+          let time = chrono::DateTime::from_timestamp_millis(ms)
+            .unwrap()
+            .with_timezone(
+              &chrono::FixedOffset::east_opt(8 * 3600).unwrap(),
+            );
+          (
+            vec![],
+            format!(
+              "新增临时分享，{} 到期失效",
+              time.format("%m-%d %H:%M")
+            ),
+          )
         } else if route.is_some_and(|r| r.spec.internal) {
           (vec![], "新增内网域名".to_string())
         } else if auth {
@@ -708,6 +722,22 @@ fn config_items(
         (
           vec![Impact::Public],
           "内网域名改成公网域名，未开启 auth".to_string(),
+        )
+      }
+      (KIND_ROUTE, Action::Update)
+        if current
+          .routes
+          .get(name)
+          .is_some_and(|r| r.spec.expires_at.is_some())
+          && desired.routes.get(name).is_some_and(|r| {
+            r.spec.expires_at.is_none()
+              && !r.spec.auth
+              && !r.spec.internal
+          }) =>
+      {
+        (
+          vec![Impact::Public],
+          "临时分享改成长期公网路由，未开启 auth".to_string(),
         )
       }
       _ => (vec![], "修改配置".to_string()),

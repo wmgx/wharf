@@ -24,7 +24,8 @@ export function AddAlias({ route, open, onClose }: { route: RouteView; open: boo
         return;
       }
     }
-    actions.plan({ title: `给 ${original} 加别名`, changes: [{ op: "upsert_route", spec: { ...route.spec, hostname: host } }] });
+    const { expires_at: _, ...rest } = route.spec;
+    actions.plan({ title: `给 ${original} 加别名`, changes: [{ op: "upsert_route", spec: { ...rest, hostname: host } }] });
     onClose();
     setHostname("");
     setPassword("");
