@@ -920,6 +920,32 @@ async fn run_step(
         &r.fingerprint(),
         &format!("网关 {gateway}"),
       )?;
+      let needs_key = r.config.contains(render::ACME_DNS_KEY);
+      let needs_url = r.config.contains(render::ACME_DNS_URL);
+      let config = if needs_key || needs_url {
+        let key = if needs_key {
+          let name = crate::acme_dns::secret_name(gateway);
+          state
+            .db
+            .call(move |c| db::ensure_secret(c, &name, db::now_ms()))
+            .await?
+        } else {
+          String::new()
+        };
+        let url = if needs_url {
+          crate::join::default_url(state).await.ok_or_else(|| {
+            ApiError::invalid(format!(
+              "控制面没有对外地址，入口 {gateway} 做 DNS 验证时要连回控制面"
+            ))
+            .with_hint("用 --public-url 启动控制面，或者给控制面加一个域名")
+          })?
+        } else {
+          String::new()
+        };
+        crate::acme_dns::fill(&r.config, &key, &url)
+      } else {
+        r.config
+      };
       let result: ProjectUpResult = state
         .hub
         .call(
@@ -936,7 +962,7 @@ async fn run_step(
               pins: Default::default(),
               trial: None,
             },
-            caddyfile: r.config,
+            caddyfile: config,
             caddyfile_hash: r.config_hash,
             image: render::gateway_image(&gw.spec),
           }),

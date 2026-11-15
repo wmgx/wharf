@@ -185,6 +185,52 @@ impl DnsProvider for CloudflareDns {
     })
   }
 
+  fn list_txt<'a>(
+    &'a self,
+    name: &'a str,
+    owner: &'a Owner,
+  ) -> BoxFut<'a, Vec<RemoteRecord>> {
+    Box::pin(async move {
+      let zone = self.zone_for(name).await?;
+      self
+        .client
+        .list_dns(&zone.id, name)
+        .await?
+        .iter()
+        .filter(|r| {
+          r["type"].as_str() == Some("TXT")
+            && r["comment"].as_str() == Some(owner.marker().as_str())
+        })
+        .map(|r| record_from(&zone.id, r))
+        .collect()
+    })
+  }
+
+  fn create_txt<'a>(
+    &'a self,
+    name: &'a str,
+    value: &'a str,
+    owner: &'a Owner,
+  ) -> BoxFut<'a, RemoteRecord> {
+    Box::pin(async move {
+      let zone = self.zone_for(name).await?;
+      let result = self
+        .client
+        .create_dns(
+          &zone.id,
+          &json!({
+            "type": "TXT",
+            "name": name,
+            "content": value,
+            "ttl": 60,
+            "comment": owner.marker(),
+          }),
+        )
+        .await?;
+      record_from(&zone.id, &result)
+    })
+  }
+
   fn upsert<'a>(
     &'a self,
     hostname: &'a str,

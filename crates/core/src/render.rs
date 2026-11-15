@@ -18,7 +18,12 @@ use crate::world::{ServerRow, World, gateway_project};
 /// 网关默认镜像：官方 Caddy 加 layer4、限速、Cloudflare DNS 插件（deploy/caddy/Dockerfile）。
 /// 标签只在 Caddy 或插件版本变化时改，改了会重建所有没指定镜像的 caddy 网关。
 pub const DEFAULT_CADDY_IMAGE: &str =
-  "ghcr.io/wmgx/wharf-caddy:2.11.9-1";
+  "ghcr.io/wmgx/wharf-caddy:2.11.9-2";
+
+/// Caddyfile 里 acme-dns 密码的占位，执行时换成入口的密钥。
+pub const ACME_DNS_KEY: &str = "[[WHARF_ACME_DNS_KEY]]";
+/// Caddyfile 里控制面地址的占位，执行时换成 join::default_url。
+pub const ACME_DNS_URL: &str = "[[WHARF_ACME_DNS_URL]]";
 pub const DEFAULT_CLOUDFLARED_IMAGE: &str =
   "cloudflare/cloudflared:2026.9.3";
 /// 隧道连接器 compose 里 token 的占位，执行时才替换，不进计划、不算进哈希。
