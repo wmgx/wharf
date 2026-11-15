@@ -1208,12 +1208,14 @@ fn parse_port(s: &str) -> CliResult<PortSpec> {
   let (name, value) = parse_kv(s, "--port")?;
   let bad = || {
     ApiError::invalid(format!(
-      "--port {s} 格式不对，应为 http=80、http=80:20080，compose 来源写 http=:41773"
+      "--port {s} 格式不对，应为 http=80、http=80:20080，compose 来源写 http=:41773、UDP 写 game=27015/udp"
     ))
   };
+  let udp = value.ends_with("/udp");
+  let value = value.strip_suffix("/udp").unwrap_or(&value);
   let (port, host) = match value.split_once(':') {
     Some((p, h)) => (p, Some(h)),
-    None => (value.as_str(), None),
+    None => (value, None),
   };
   // compose 来源只有宿主机端口，写成 `http=:41773`。
   let container = match port.trim() {
@@ -1221,6 +1223,7 @@ fn parse_port(s: &str) -> CliResult<PortSpec> {
     p => Some(p.parse().map_err(|_| bad())?),
   };
   Ok(PortSpec {
+    udp,
     name,
     container,
     host: host
@@ -1638,6 +1641,7 @@ async fn service(
           name: "http".into(),
           container: Some(p),
           host: None,
+          udp: false,
         }];
       }
       for e in &env {
@@ -2057,6 +2061,50 @@ async fn gateway(
       changes(c, vec![Change::UpsertGateway { name, spec }], apply, j)
         .await
     }
+    GatewayCmd::Forward {
+      name,
+      listen,
+      udp,
+      service,
+      port,
+      upstream,
+      rm,
+      apply,
+    } => {
+      let mut spec = c
+        .get::<GatewayView>(&format!("/api/gateways/{}", seg(&name)))
+        .await?
+        .spec;
+      let before = spec.layer4.len();
+      spec.layer4.retain(|f| f.listen != listen || f.udp != udp);
+      if rm {
+        if before == spec.layer4.len() {
+          let protocol = if udp { "UDP 端口" } else { "端口" };
+          return Err(
+            ApiError::invalid(format!(
+              "入口 {name} 上没有{protocol} {listen} 的四层转发"
+            ))
+            .into(),
+          );
+        }
+      } else {
+        if service.is_none() && upstream.is_none() {
+          return Err(
+            ApiError::invalid("要给 --service 或 --upstream").into(),
+          );
+        }
+        spec.layer4.push(wharf_api_types::spec::Layer4Forward {
+          listen,
+          udp,
+          service,
+          port,
+          upstream,
+        });
+      }
+      spec.layer4.sort_by_key(|f| (f.udp, f.listen));
+      changes(c, vec![Change::UpsertGateway { name, spec }], apply, j)
+        .await
+    }
     GatewayCmd::Add {
       name,
       server,
@@ -2106,15 +2154,15 @@ async fn gateway(
         }
         (_, account) => account,
       };
-      // 重复执行 add 时保留错误页和泛域名证书。
+      // 重复执行 add 时保留错误页、泛域名证书和四层转发。
       let existing = c
         .get::<Vec<GatewayView>>("/api/gateways")
         .await?
         .into_iter()
         .find(|g| g.name == name)
         .map(|g| g.spec);
-      let (error_page, wildcard) = existing
-        .map(|s| (s.error_page, s.wildcard))
+      let (error_page, wildcard, layer4) = existing
+        .map(|s| (s.error_page, s.wildcard, s.layer4))
         .unwrap_or_default();
       let spec = GatewaySpec {
         kind,
@@ -2128,6 +2176,7 @@ async fn gateway(
         account,
         error_page,
         wildcard,
+        layer4,
       };
       changes(c, vec![Change::UpsertGateway { name, spec }], apply, j)
         .await

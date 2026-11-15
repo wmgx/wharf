@@ -83,6 +83,12 @@ fn target(
   component: Option<String>,
 ) -> Result<ForwardJob, ApiError> {
   if let Some(p) = spec.find_port(port) {
+    if p.udp {
+      let port = &p.name;
+      return Err(ApiError::invalid(format!(
+        "服务 {name} 的端口 {port} 是 UDP，wharf connect 只转发 TCP"
+      )));
+    }
     if let Some(host) = host_ports.get(&p.name).copied().or(p.host) {
       return Ok(ForwardJob {
         project: None,
@@ -224,6 +230,7 @@ mod tests {
         name: "pg".into(),
         container: Some(5432),
         host: None,
+        udp: false,
       }],
       env: Default::default(),
       volumes: vec![],

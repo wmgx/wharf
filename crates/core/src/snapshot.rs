@@ -378,6 +378,41 @@ pub fn gateway_render(
   sites.sort_by(|a, b| a.hostname.cmp(&b.hostname));
   let (compose, config) = match gateway.spec.kind {
     GatewayKind::Caddy => {
+      let mut forwards = Vec::new();
+      for f in &gateway.spec.layer4 {
+        let upstream = if let Some(up) = &f.upstream {
+          up.clone()
+        } else if let Some(svc) = &f.service {
+          let port = world
+            .service_port(svc, f.port.as_deref())
+            .ok_or_else(|| {
+              ApiError::invalid(format!(
+                "入口 {name} 的四层转发 {}：找不到服务 {svc} 的端口",
+                f.listen
+              ))
+            })?;
+          let host = world.services[svc]
+            .host_ports
+            .get(port)
+            .ok_or_else(|| {
+              ApiError::internal(format!(
+                "服务 {svc} 的端口 {port} 没有分配"
+              ))
+            })?;
+          match crate::link::choose(world, net, &gateway.spec, svc, wharf_api_types::spec::LinkMode::Auto)? {
+            crate::link::Choice::Local => format!("127.0.0.1:{host}"),
+            crate::link::Choice::Direct(ip) => format!("{ip}:{host}"),
+            crate::link::Choice::Tunnel => return Err(ApiError::invalid(format!("入口 {name} 的四层转发 {}：入口所在机器连不到 {svc} 所在机器的内网地址，四层转发不支持反向隧道", f.listen)).with_hint(format!("让两台机器在同一个组网里，或者在 {svc} 所在的机器上建入口"))),
+          }
+        } else {
+          return Err(ApiError::invalid(format!(
+            "入口 {name} 的四层转发 {}：服务和上游二选一",
+            f.listen
+          )));
+        };
+        forwards.push((f.udp, f.listen, upstream));
+      }
+      forwards.sort_by_key(|(udp, listen, _)| (*udp, *listen));
       let mut caddy_sites = sites.clone();
       for zone in &gateway.spec.wildcard {
         caddy_sites.push(render::Site {
@@ -394,6 +429,7 @@ pub fn gateway_render(
           name,
           &gateway.spec,
           &caddy_sites,
+          &forwards,
           crate::link::caddy_site(world, net, name, &gateway.spec)?,
         ),
       )
