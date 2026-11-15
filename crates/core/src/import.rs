@@ -235,6 +235,7 @@ fn port_specs(mut ports: Vec<u16>) -> Vec<PortSpec> {
       },
       container: None,
       host: Some(port),
+      udp: false,
     })
     .collect()
 }

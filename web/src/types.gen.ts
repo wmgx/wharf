@@ -817,6 +817,10 @@ export interface GatewaySpec {
   image?: string | null;
   kind: GatewayKind;
   /**
+   * caddy：四层转发，只经过入口所在机器，服务自己的端口不对公网开放。
+   */
+  layer4?: Layer4Forward[];
+  /**
    * 网关跑在哪台服务器上。
    */
   server: string;
@@ -824,6 +828,10 @@ export interface GatewaySpec {
    * caddy：证书方式，默认 `auto`（公网签证书）。
    */
   tls?: GatewayTls;
+  /**
+   * caddy：签一张 *.<zone>，这个入口上 zone 下一级的域名都用它。
+   */
+  wildcard?: string[];
 }
 
 /**
@@ -1027,6 +1035,17 @@ export interface LastOp {
 }
 
 export type Layer = "volume" | "container" | "gateway" | "dns" | "tunnel" | "config" | "edge";
+
+/**
+ * 在入口机器上监听 TCP 或 UDP，原样转给服务。服务和上游二选一。
+ */
+export interface Layer4Forward {
+  listen: number;
+  port?: string | null;
+  service?: string | null;
+  udp?: boolean;
+  upstream?: string | null;
+}
 
 /**
  * 资源上限。compose 来源只支持一个容器的 compose。
@@ -1307,6 +1326,10 @@ export interface PortSpec {
    * 端口名，路由用它指定目标端口，例如 `http`。
    */
   name: string;
+  /**
+   * UDP 端口，只能用于四层转发，不能给域名用。默认 TCP。
+   */
+  udp?: boolean;
 }
 
 /**
@@ -1431,6 +1454,14 @@ export interface RouteSpec {
    */
   backup_gateway?: string | null;
   /**
+   * 拦截常见扫描：请求命中扫描路径或扫描器的 UA 时直接返回 404，不转给服务。只支持 caddy 网关。
+   */
+  block_scanners?: boolean;
+  /**
+   * 临时分享：到这个时间（毫秒时间戳）以后，网关直接断开这个域名的请求；路由和 DNS 记录留着，等人删除。
+   */
+  expires_at?: number | null;
+  /**
    * 入口网关。不填则用默认网关；边缘应用的域名不经过网关，不填。
    */
   gateway?: string | null;
@@ -1438,6 +1469,10 @@ export interface RouteSpec {
    * 例如 `blog.example.com`。
    */
   hostname: string;
+  /**
+   * 只在内网访问：DNS 指向入口所在机器的内网地址，证书用 DNS 验证签，入口只放行内网来源。只支持 caddy 网关。
+   */
+  internal?: boolean;
   /**
    * 网关到服务的走法。不填为自动：同机、能直连内网地址就直连，否则走反向隧道。
    */
@@ -1450,6 +1485,10 @@ export interface RouteSpec {
    * 目标端口名。服务只有一个端口时可以不填；边缘应用不填。
    */
   port?: string | null;
+  /**
+   * 限速：同一个来源 IP 每分钟最多这么多次请求，超过的返回 429。只支持 caddy 网关。
+   */
+  rate_limit?: number | null;
   /**
    * 跳转：整个域名 301 到这个网址，保留路径和参数，例如 `https://a.com`。
    * 和 `service`、`upstream` 三选一。只支持 caddy 网关。

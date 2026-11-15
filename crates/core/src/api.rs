@@ -71,6 +71,7 @@ pub fn router(state: Arc<AppState>) -> Router {
       get(crate::cli_tunnel::open),
     )
     .route("/agent/join", post(agent_join))
+    .route("/agent/acme-dns/update", post(crate::acme_dns::update))
     .route("/join.sh", get(crate::join::script))
     .route("/cli.sh", get(crate::cli_dist::script))
     .route("/api/core/addresses", get(crate::join::addresses))

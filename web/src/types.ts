@@ -179,6 +179,8 @@ export interface GatewaySpec {
   /** cloudflare_tunnel：在哪个厂商账号下建隧道。 */
   account?: string;
   error_page?: string;
+  wildcard?: string[];
+  layer4?: Gen.Layer4Forward[];
 }
 
 export interface GatewayView {
@@ -190,6 +192,10 @@ export interface GatewayView {
 }
 
 export interface RouteSpec {
+  rate_limit?: number;
+  block_scanners?: boolean;
+  internal?: boolean;
+  expires_at?: number;
   hostname: string;
   /** 和 upstream、redirect 三选一，指向地址或跳转时为空。 */
   service?: string;

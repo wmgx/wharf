@@ -21,6 +21,8 @@ export function AddRoute({ service: fixed, open, onClose }: { service?: string; 
   const entry = useEntry(server);
   const [authWanted, setAuth] = useState(false);
   const [tunnel, setTunnel] = useState(false);
+  const [internalWanted, setInternal] = useState(false);
+  const internal = internalWanted && !entry.tunnel;
   const auth = authWanted && !entry.tunnel;
   const [user, setUser] = useState("admin");
   const [password, setPassword] = useState("");
@@ -40,10 +42,11 @@ export function AddRoute({ service: fixed, open, onClose }: { service?: string; 
     setHostname("");
     setAuth(false);
     setTunnel(false);
+    setInternal(false);
     const { gateway, changes } = entry.resolve();
     actions.plan({
       title: "加域名",
-      changes: [...changes, { op: "upsert_route", spec: { hostname: host, service, gateway, auth: auth || undefined, link: tunnel ? "tunnel" : undefined } }],
+      changes: [...changes, { op: "upsert_route", spec: { hostname: host, service, gateway, internal: internal || undefined, auth: auth || undefined, link: tunnel ? "tunnel" : undefined } }],
     });
   };
   return (
@@ -81,6 +84,11 @@ export function AddRoute({ service: fixed, open, onClose }: { service?: string; 
               <Checkbox checked={tunnel} onCheckedChange={(v) => setTunnel(v === true)} />
               总是走反向隧道
               <span className="text-xs text-muted-foreground">默认自动：能直连就直连</span>
+            </label>
+            <label className={`mt-3 flex items-center gap-2.5 text-sm ${entry.tunnel ? "text-muted-foreground" : "cursor-pointer"}`}>
+              <Checkbox checked={internal} disabled={entry.tunnel} onCheckedChange={(v) => setInternal(v === true)} />
+              只在内网访问
+              {entry.tunnel && <span className="text-xs text-muted-foreground">隧道入口不支持</span>}
             </label>
           </details>
         </div>

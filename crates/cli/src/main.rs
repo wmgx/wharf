@@ -129,6 +129,25 @@ pub enum Command {
     #[arg(long)]
     relay: bool,
   },
+  /// 临时分享：给服务生成一个随机子域名，到期后自动失效。用入口上的泛域名证书，不用等签证书。
+  /// 例：`wharf share blog --ttl 2h --apply`。查看用 `wharf route list`，删除用 `wharf route rm`。
+  Share {
+    name: String,
+    /// 多久后失效，例如 30m、2h、1d，最长 7d。
+    #[arg(long)]
+    ttl: String,
+    /// 端口名，服务只有一个端口时可以不填。
+    #[arg(long)]
+    port: Option<String>,
+    /// 入口，不填用默认入口。
+    #[arg(long)]
+    gateway: Option<String>,
+    /// 入口开了多个泛域名证书时选一个 zone。
+    #[arg(long)]
+    zone: Option<String>,
+    #[command(flatten)]
+    apply: ApplyFlags,
+  },
   /// 在宿主机执行一次非交互 shell 命令。
   Exec {
     server: String,
@@ -734,6 +753,35 @@ pub enum GatewayCmd {
     #[command(flatten)]
     apply: ApplyFlags,
   },
+  /// 泛域名证书：给 *.<zone> 签一张证书，DNS 验证记录由控制面写。
+  /// 例：`wharf gateway wildcard edge --zone example.com --apply`；`--off` 关闭。
+  Wildcard {
+    name: String,
+    #[arg(long)]
+    zone: String,
+    #[arg(long)]
+    off: bool,
+    #[command(flatten)]
+    apply: ApplyFlags,
+  },
+  /// 四层转发：入口监听公网 TCP 或 UDP 端口，转给服务。--rm 删除。
+  Forward {
+    name: String,
+    #[arg(long)]
+    listen: u16,
+    #[arg(long)]
+    udp: bool,
+    #[arg(long, conflicts_with = "upstream")]
+    service: Option<String>,
+    #[arg(long)]
+    port: Option<String>,
+    #[arg(long)]
+    upstream: Option<String>,
+    #[arg(long, conflicts_with_all = ["service", "upstream", "port"])]
+    rm: bool,
+    #[command(flatten)]
+    apply: ApplyFlags,
+  },
   Rm {
     name: String,
     #[command(flatten)]
@@ -779,6 +827,27 @@ pub enum RouteCmd {
     /// 总是走反向隧道。不给时自动选：同机、能直连内网地址就直连，否则走隧道。
     #[arg(long)]
     tunnel: bool,
+    /// 只在内网访问：DNS 指向入口所在机器的内网地址，入口只放行内网来源，证书用 DNS 验证签。
+    #[arg(long)]
+    internal: bool,
+    #[command(flatten)]
+    apply: ApplyFlags,
+  },
+  /// 防护：按来源 IP 限速、拦截常见扫描。例：`wharf route guard a.example.com --rate 600 --block --apply`。
+  Guard {
+    name: String,
+    /// 每个来源 IP 每分钟最多多少次请求，超过返回 429。
+    #[arg(long, conflicts_with = "no_rate")]
+    rate: Option<u32>,
+    /// 关闭限速。
+    #[arg(long)]
+    no_rate: bool,
+    /// 拦截常见扫描路径和扫描器，返回 404。
+    #[arg(long, conflicts_with = "no_block")]
+    block: bool,
+    /// 关闭拦截。
+    #[arg(long)]
+    no_block: bool,
     #[command(flatten)]
     apply: ApplyFlags,
   },
