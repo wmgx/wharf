@@ -54,10 +54,14 @@ pub fn url(
     None => row
       .spec
       .ports
-      .first()
+      .iter()
+      .find(|p| !p.udp)
       .map(|p| p.name.clone())
-      .ok_or("服务没有端口，监控不了")?,
+      .ok_or("服务没有 TCP 端口，监控不了")?,
   };
+  if row.spec.ports.iter().any(|p| p.name == name && p.udp) {
+    return Err(format!("端口 {name} 是 UDP，监控不了"));
+  }
   let port = row
     .host_ports
     .get(&name)
@@ -205,6 +209,49 @@ async fn round(state: &AppState) {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn url_skips_udp_ports() {
+    let mut row: ServiceRow = ServiceRow {
+      spec: serde_json::from_value(serde_json::json!({
+        "server": "s1",
+        "source": { "image": "traefik/whoami" },
+        "ports": [
+          { "name": "game", "container": 9999, "udp": true },
+          { "name": "http", "container": 80 }
+        ]
+      }))
+      .unwrap(),
+      host_ports: BTreeMap::from([
+        ("game".into(), 20001),
+        ("http".into(), 20002),
+      ]),
+      import: None,
+      pins: BTreeMap::new(),
+      commit: None,
+      version: 1,
+    };
+    let mut m = MonitorSpec {
+      path: "/health".into(),
+      port: None,
+      expect: None,
+      keyword: None,
+    };
+    assert_eq!(
+      url(&row, &m).unwrap(),
+      "http://127.0.0.1:20002/health"
+    );
+    row.spec.ports.pop();
+    assert_eq!(
+      url(&row, &m).unwrap_err(),
+      "服务没有 TCP 端口，监控不了"
+    );
+    m.port = Some("game".into());
+    assert_eq!(
+      url(&row, &m).unwrap_err(),
+      "端口 game 是 UDP，监控不了"
+    );
+  }
 
   #[test]
   fn judges_results() {
