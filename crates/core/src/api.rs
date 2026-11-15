@@ -83,6 +83,11 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route("/api/setup", post(crate::login::setup))
     .route("/api/login", post(crate::login::login))
     .route("/api/logout", post(crate::login::logout))
+    .route("/api/totp", get(crate::totp::show))
+    .route("/api/totp/begin", post(crate::totp::begin))
+    .route("/api/totp/enable", post(crate::totp::enable))
+    .route("/api/totp/disable", post(crate::totp::disable))
+    .route("/api/totp/recovery", post(crate::totp::recovery))
     .route(
       "/agent/uploads/{sha256}",
       get(crate::uploads::download)

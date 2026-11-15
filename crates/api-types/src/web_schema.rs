@@ -74,6 +74,7 @@ pub fn web_schema() -> Value {
   let _ = generator.subschema_for::<view::NetworkView>();
   let _ = generator.subschema_for::<view::SecretView>();
   let _ = generator.subschema_for::<view::Perm>();
+  let _ = generator.subschema_for::<view::TotpView>();
   let _ = generator.subschema_for::<view::TokenView>();
   let _ = generator.subschema_for::<view::CreatedToken>();
   let _ = generator.subschema_for::<agent::PackageUpdate>();

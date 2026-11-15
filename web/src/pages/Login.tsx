@@ -33,20 +33,24 @@ function CredentialsForm({ mode, onDone }: { mode: "login" | "setup"; onDone: (s
   const [password, setPassword] = useState("");
   const [again, setAgain] = useState("");
   const [code, setCode] = useState("");
+  const [second, setSecond] = useState(false);
+  const [recovery, setRecovery] = useState(false);
+  const [factor, setFactor] = useState("");
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
   const [stale, setStale] = useState<{ session: Session; password: string } | null>(null);
 
   const mismatch = setup && !!again && again !== password;
   const tooShort = setup && !!password && password.length < 8;
-  const ready = !!username.trim() && !!password && (!setup || (password === again && !tooShort && !!code.trim()));
+  const ready = (!second || !!factor.trim()) && !!username.trim() && !!password && (!setup || (password === again && !tooShort && !!code.trim()));
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setBusy(true);
     setError(null);
     try {
-      const session = await api.post<Session>(setup ? "/api/setup" : "/api/login", setup ? { username: username.trim(), password, code: code.trim() } : { username: username.trim(), password });
+      const session = await api.post<Session>(setup ? "/api/setup" : "/api/login", setup ? { username: username.trim(), password, code: code.trim() } : { username: username.trim(), password, code: second ? factor : undefined });
+      if (session.totp_required) { setSecond(true); return; }
       // 用登录密码解开备注私密内容的数据密钥；密码重置过时先让用户同步一次。
       if ((await vault.afterLogin(password)) === "stale") setStale({ session, password });
       else onDone(session);
@@ -79,6 +83,7 @@ function CredentialsForm({ mode, onDone }: { mode: "login" | "setup"; onDone: (s
               <Input id="setup-code" autoFocus autoComplete="off" value={code} onChange={(e) => setCode(e.target.value)} />
             </Field>
           )}
+          {!second && <>
           <Field label="账号" htmlFor="username">
             <Input id="username" autoFocus={!setup} autoComplete="username" value={username} onChange={(e) => setUsername(e.target.value)} />
           </Field>
@@ -97,6 +102,13 @@ function CredentialsForm({ mode, onDone }: { mode: "login" | "setup"; onDone: (s
               <Input id="again" type="password" autoComplete="new-password" value={again} onChange={(e) => setAgain(e.target.value)} aria-invalid={mismatch || undefined} />
             </Field>
           )}
+          </>}
+          {second && <>
+            <Field label={recovery ? "恢复码" : "验证码"} htmlFor="factor">
+              <Input id="factor" autoFocus inputMode={recovery ? "text" : "numeric"} autoComplete="one-time-code" value={factor} onChange={(e) => setFactor(e.target.value)} />
+            </Field>
+            <Button type="button" variant="link" onClick={() => { setRecovery(!recovery); setFactor(""); }}>{recovery ? "用验证码" : "用恢复码"}</Button>
+          </>}
           <ErrorNote error={error} />
           <Button type="submit" className="w-full" disabled={!ready || busy}>
             {busy ? "请稍候…" : setup ? "设置并进入" : "登录"}
