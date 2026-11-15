@@ -1554,6 +1554,8 @@ export interface RunStep {
   title: string;
 }
 
+export type ScriptRuntime = "python" | "node" | "shell";
+
 export interface SecretView {
   /**
    * Wharf 自己生成的，不能改也不能删。
@@ -1947,6 +1949,13 @@ export type TaskKind = {
   kind: "container";
   mounts?: string[];
 } | {
+  code: string;
+  env?: Record<string, string>;
+  hook?: string | null;
+  image?: string | null;
+  kind: "script";
+  runtime: ScriptRuntime;
+} | {
   command: string;
   kind: "host";
 } | {
@@ -1993,6 +2002,13 @@ export type TaskSpec = {
   kind: "container";
   mounts?: string[];
 } | {
+  code: string;
+  env?: Record<string, string>;
+  hook?: string | null;
+  image?: string | null;
+  kind: "script";
+  runtime: ScriptRuntime;
+} | {
   command: string;
   kind: "host";
 } | {
@@ -2007,6 +2023,7 @@ export type TaskSpec = {
 export type TaskStatus = "running" | "succeeded" | "failed" | "timed_out" | "skipped";
 
 export interface TaskView {
+  hook_url?: string | null;
   last?: TaskRunView | null;
   name: string;
   /**

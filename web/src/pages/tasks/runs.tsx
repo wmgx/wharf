@@ -17,7 +17,7 @@ export function Runs({ task }: { task: TaskView }) {
   const ctx = useOpCtx();
   const nav = useNavigate();
   const run = taskOps.find((op) => op.id === "run")!;
-  const triggers: Record<string, string> = { schedule: "定时", scheduled: "定时", manual: "手动", ping: "报到", late: "迟到" };
+  const triggers: Record<string, string> = { schedule: "定时", scheduled: "定时", manual: "手动", hook: "网址", ping: "报到", late: "迟到" };
   return <>
     <ErrorNote error={error} />
     {data?.length === 0 ? <Empty action={task.spec.kind !== "ping" ? <Button onClick={() => run.run(task, { ...ctx, nav })}>立即运行</Button> : undefined}>

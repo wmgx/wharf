@@ -1,11 +1,16 @@
 //! `wharf task`：定时任务。改动直接生效，不走计划。
 
-use std::{collections::BTreeMap, time::Duration};
+use std::{
+  collections::BTreeMap, io::Read, path::Path, time::Duration,
+};
 
 use clap::{Args, Subcommand};
 use wharf_api_types::{
   ApiError,
-  view::{TaskKind, TaskRunView, TaskSpec, TaskStatus, TaskView},
+  view::{
+    ScriptRuntime, TaskKind, TaskRunView, TaskSpec, TaskStatus,
+    TaskView,
+  },
 };
 
 use crate::{
@@ -46,7 +51,19 @@ pub struct AddArgs {
   name: String,
   /// 5 段 cron，北京时间，例如 `30 3 * * *`。
   #[arg(long)]
-  schedule: String,
+  schedule: Option<String>,
+  /// 从文件读取脚本，- 表示标准输入。
+  #[arg(long, group = "how")]
+  script: Option<String>,
+  /// python、node 或 shell；默认按脚本扩展名判断。
+  #[arg(long, requires = "script", value_parser = ["python", "node", "shell"])]
+  runtime: Option<String>,
+  /// 脚本使用的镜像。
+  #[arg(long, requires = "script")]
+  script_image: Option<String>,
+  /// 开启网址触发。
+  #[arg(long, requires = "script")]
+  hook: bool,
   /// 在这个服务的容器里执行；服务器取服务所在的服务器。
   #[arg(long, group = "how")]
   exec: Option<String>,
@@ -107,7 +124,11 @@ pub async fn task(
             "{:<16} {:<8} {:<16} {:<9} {}{}",
             t.name,
             t.spec.server,
-            t.spec.schedule,
+            if t.spec.schedule.is_empty() {
+              "不定时"
+            } else {
+              &t.spec.schedule
+            },
             kind(&t.spec.how),
             t.last.as_ref().map_or("没运行过".into(), |r| format!(
               "{} {}",
@@ -136,6 +157,13 @@ pub async fn task(
           "{}",
           serde_json::to_string_pretty(&t.spec).unwrap_or_default()
         );
+        if let TaskKind::Script { runtime, code, .. } = &t.spec.how {
+          println!("运行环境：{}", runtime_name(*runtime));
+          if let Some(url) = &t.hook_url {
+            println!("触发地址：{url}");
+          }
+          print!("\n{code}");
+        }
         if let Some(url) = &t.ping_url {
           println!("\n报到：脚本成功后 curl -fsS -m 10 {url}");
           println!("失败时：curl -fsS -m 10 {url}/fail");
@@ -174,7 +202,67 @@ async fn add(c: &Client, a: AddArgs, j: bool) -> CliResult<()> {
       ApiError::invalid("缺少命令").with_hint("命令写在 `--` 后面")
     })
   };
-  let (how, server) = if let Some(service) = a.exec {
+  let (how, server) = if let Some(file) = &a.script {
+    let runtime = match a.runtime.as_deref().or_else(|| {
+      match Path::new(file).extension().and_then(|s| s.to_str()) {
+        Some("py") => Some("python"),
+        Some("js" | "mjs") => Some("node"),
+        Some("sh") => Some("shell"),
+        _ => None,
+      }
+    }) {
+      Some("python") => ScriptRuntime::Python,
+      Some("node") => ScriptRuntime::Node,
+      Some("shell") => ScriptRuntime::Shell,
+      _ => {
+        return Err(
+          ApiError::invalid("无法判断运行环境")
+            .with_hint("加 --runtime python、node 或 shell")
+            .into(),
+        );
+      }
+    };
+    let code = if file == "-" {
+      let mut code = String::new();
+      std::io::stdin()
+        .read_to_string(&mut code)
+        .map_err(|_| ApiError::invalid("读取脚本失败"))?;
+      code
+    } else {
+      std::fs::read_to_string(file)
+        .map_err(|_| ApiError::invalid("读取脚本失败"))?
+    };
+    let tasks: Vec<TaskView> = c.get("/api/tasks").await?;
+    let old =
+      tasks.into_iter().find(|t| t.name == a.name).and_then(|t| {
+        if let TaskKind::Script { hook, .. } = t.spec.how {
+          hook
+        } else {
+          None
+        }
+      });
+    let env = a
+      .env
+      .iter()
+      .map(|e| {
+        e.split_once('=')
+          .map(|(k, v)| (k.to_string(), v.to_string()))
+          .ok_or_else(|| {
+            ApiError::invalid("环境变量要写成 KEY=VALUE")
+          })
+      })
+      .collect::<Result<BTreeMap<_, _>, _>>()?;
+    (
+      TaskKind::Script {
+        runtime,
+        code,
+        image: a.script_image,
+        env,
+        hook: if a.hook { Some(String::new()) } else { old },
+      },
+      need_server(a.server)?,
+    )
+  } else if let Some(service) = a.exec {
     let server = match a.server {
       Some(s) => s,
       None => {
@@ -228,13 +316,19 @@ async fn add(c: &Client, a: AddArgs, j: bool) -> CliResult<()> {
   } else {
     return Err(
       ApiError::invalid("要选一种任务形式")
-        .with_hint("--exec <服务>、--image <镜像>、--host 或 --ping")
+        .with_hint("--exec <服务>、--image <镜像>、--host、--ping 或 --script <文件>")
         .into(),
     );
   };
   let spec = TaskSpec {
     server,
-    schedule: a.schedule,
+    schedule: match a.schedule {
+      Some(s) => s,
+      None if matches!(how, TaskKind::Script { .. }) => String::new(),
+      None => {
+        return Err(ApiError::invalid("缺少 --schedule").into());
+      }
+    },
     how,
     timeout_secs: a.timeout,
     enabled: !a.disabled,
@@ -290,7 +384,11 @@ fn line(r: &TaskRunView) -> String {
   let code = r
     .exit_code
     .map_or(String::new(), |c| format!(" 退出码 {c}"));
-  let by = if r.trigger == "manual" { " 手动" } else { "" };
+  let by = match r.trigger.as_str() {
+    "manual" => " 手动",
+    "hook" => " 网址",
+    _ => "",
+  };
   format!(
     "#{} {} {}{secs}{code}{by}",
     r.id,
@@ -305,6 +403,7 @@ fn kind(k: &TaskKind) -> &'static str {
     TaskKind::Container { .. } => "一次性容器",
     TaskKind::Host { .. } => "宿主机",
     TaskKind::Ping { .. } => "外部报到",
+    TaskKind::Script { .. } => "脚本",
   }
 }
 
@@ -324,4 +423,12 @@ fn local(t: chrono::DateTime<chrono::Utc>) -> String {
   )
   .format("%m-%d %H:%M")
   .to_string()
+}
+
+fn runtime_name(runtime: ScriptRuntime) -> &'static str {
+  match runtime {
+    ScriptRuntime::Python => "Python",
+    ScriptRuntime::Node => "Node",
+    ScriptRuntime::Shell => "Shell",
+  }
 }
