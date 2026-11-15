@@ -357,6 +357,7 @@ pub fn gateway_render(
     sites.push(render::Site {
       wildcard: false,
       internal: route.spec.internal,
+      expires_at: route.spec.expires_at,
       dns: (route.spec.internal
         && gateway.spec.tls == GatewayTls::Auto
         && !host.split_once('.').is_some_and(|(_, zone)| {

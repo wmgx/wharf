@@ -99,7 +99,7 @@ export function ServiceDetail() {
         <Overview svc={svc} routes={routes} onTab={onTab} onBackup={() => settingsAt("backup")} />
       </TabsContent>
       <TabsContent value="domains" className="mt-4">
-        <DomainsTab routes={routes} onAdd={() => setAddingRoute(true)} />
+        <DomainsTab service={name} routes={routes} onAdd={() => setAddingRoute(true)} />
       </TabsContent>
       <TabsContent value="logs" className="mt-4">
         <LogStream path={`/api/services/${encodeURIComponent(name)}/logs/stream`} />

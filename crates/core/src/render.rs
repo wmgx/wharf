@@ -812,6 +812,8 @@ pub struct Site {
   pub block_scanners: bool,
   /// 只放行内网来源。
   pub internal: bool,
+  /// 临时分享的到期时间（毫秒），过了就断开。
+  pub expires_at: Option<i64>,
   /// 泛域名站点：只签证书，未匹配具体域名的请求直接断开。
   pub wildcard: bool,
   /// DNS 验证的 subdomain（zone 或域名本身）。
@@ -882,7 +884,7 @@ pub fn caddyfile(
   {
     out.push_str("\torder rate_limit before basic_auth\n");
   }
-  if sites.iter().any(|s| s.internal) {
+  if sites.iter().any(|s| s.internal || s.expires_at.is_some()) {
     out.push_str("\torder abort before basic_auth\n");
   }
   if !forwards.is_empty() {
@@ -928,6 +930,12 @@ pub fn caddyfile(
       continue;
     }
     out.push_str("\timport wharf_errors\n");
+    if let Some(ms) = site.expires_at {
+      out.push_str(&format!(
+        "\t@wharf_expired expression `int({{time.now.unix}}) >= {}`\n\tabort @wharf_expired\n",
+        ms / 1000
+      ));
+    }
     if let Some(subdomain) = &site.dns {
       out.push_str(&dns_tls(name, subdomain));
     }
@@ -1005,6 +1013,36 @@ mod tests {
         target: "/data".into(),
       }],
     }
+  }
+
+  #[test]
+  fn caddyfile_share_expires() {
+    let gw: GatewaySpec =
+      serde_json::from_str(r#"{"kind":"caddy","server":"s1"}"#)
+        .unwrap();
+    let mut site = Site {
+      hostname: "a.example.com".into(),
+      expires_at: Some(1_800_000_000_000),
+      ..Default::default()
+    };
+    let out = caddyfile("edge", &gw, &[site.clone()], &[], false);
+    assert_eq!(
+      out.matches("order abort before basic_auth").count(),
+      1
+    );
+    assert!(out.contains(
+      "@wharf_expired expression `int({time.now.unix}) >= 1800000000`"
+    ));
+    assert!(out.contains("abort @wharf_expired"));
+    assert!(
+      out.find("import wharf_errors").unwrap()
+        < out.find("@wharf_expired").unwrap()
+    );
+    site.expires_at = None;
+    assert!(
+      !caddyfile("edge", &gw, &[site], &[], false)
+        .contains("wharf_expired")
+    );
   }
 
   #[test]

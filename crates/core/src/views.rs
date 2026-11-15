@@ -636,6 +636,10 @@ pub async fn status(
     }
   }
   issues.extend(crate::auto_update::issues());
+  issues.extend(crate::share::issues(
+    &snap.world,
+    Utc::now().timestamp_millis(),
+  ));
   let problems = problems_text(&issues);
   issues.sort_by_key(|i| match i.level {
     IssueLevel::Fault => 0,
