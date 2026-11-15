@@ -979,6 +979,7 @@ export interface Issue {
   /**
    * 这是哪一类问题，页面按它决定给什么按钮。取值见下表。
    * oom_killed：服务的容器因内存超限被杀。
+   * recovery_low：恢复码少于 3 个。
    */
   code: string;
   /**
@@ -2081,6 +2082,11 @@ export interface TokenView {
  * 页面上的颜色。
  */
 export type Tone = "ok" | "warn" | "bad" | "idle";
+
+export interface TotpView {
+  enabled: boolean;
+  recovery_left: number;
+}
 
 /**
  * `GET /api/servers/{name}/unmanaged`：服务器上还没纳管的一组容器，

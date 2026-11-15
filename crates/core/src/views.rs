@@ -603,6 +603,7 @@ pub async fn status(
       });
     }
   }
+  issues.extend(crate::totp::issues(&state.db).await?);
   issues.extend(crate::tasks::issues(state).await);
   issues.extend(crate::probe::issues());
   issues.extend(crate::alerts::issues());

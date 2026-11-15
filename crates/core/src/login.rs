@@ -48,7 +48,10 @@ static FAILURES: LazyLock<Mutex<HashMap<String, (u32, Instant)>>> =
 
 /// 登录请求的来源：用 TCP 对端地址。对端是本机或内网（网关所在）时，
 /// 才取网关追加在 `X-Forwarded-For` 最后的客户端地址；公网直连伪造的头不认。
-fn client_key(peer: std::net::IpAddr, headers: &HeaderMap) -> String {
+pub(crate) fn client_key(
+  peer: std::net::IpAddr,
+  headers: &HeaderMap,
+) -> String {
   let trusted = match peer {
     std::net::IpAddr::V4(ip) => {
       ip.is_loopback()
@@ -76,7 +79,10 @@ fn client_key(peer: std::net::IpAddr, headers: &HeaderMap) -> String {
     .unwrap_or_else(|| peer.to_string())
 }
 
-fn source(peer: std::net::IpAddr, headers: &HeaderMap) -> String {
+pub(crate) fn source(
+  peer: std::net::IpAddr,
+  headers: &HeaderMap,
+) -> String {
   let addr = client_key(peer, headers);
   match headers
     .get(header::USER_AGENT)
@@ -93,7 +99,7 @@ fn source(peer: std::net::IpAddr, headers: &HeaderMap) -> String {
 }
 
 /// 还在锁定期时返回剩余分钟数：这个来源或全部来源超过上限都算。
-fn locked(key: &str) -> Option<u64> {
+pub(crate) fn locked(key: &str) -> Option<u64> {
   let map = FAILURES.lock().unwrap_or_else(|e| e.into_inner());
   [(key, MAX_FAILURES), (ALL, MAX_TOTAL_FAILURES)]
     .into_iter()
@@ -105,7 +111,7 @@ fn locked(key: &str) -> Option<u64> {
     .max()
 }
 
-fn record_failure(key: &str) {
+pub(crate) fn record_failure(key: &str) {
   let mut map = FAILURES.lock().unwrap_or_else(|e| e.into_inner());
   map.retain(|_, (_, at)| at.elapsed() < LOCKOUT);
   for k in [key, ALL] {
@@ -128,6 +134,8 @@ fn secure_attr(headers: &HeaderMap) -> &'static str {
 pub struct SessionView {
   /// 当前浏览器已登录时是账号名。
   username: Option<String>,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  totp_required: bool,
   /// 还没有管理员账号。
   setup_needed: bool,
   /// 现在可以在页面上设置管理员账号（凭初始化码）。
@@ -141,6 +149,8 @@ pub struct SessionView {
 pub struct Credentials {
   username: String,
   password: String,
+  #[serde(default)]
+  code: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -243,6 +253,10 @@ pub fn set_admin(
       params![username, password_hash, now_ms()],
     )
     .map_err(sql_err)?;
+  conn.execute("UPDATE admin SET totp_secret = NULL, totp_pending = NULL, totp_last_step = NULL WHERE id = 1", []).map_err(sql_err)?;
+  conn
+    .execute("DELETE FROM recovery_codes", [])
+    .map_err(sql_err)?;
   conn.execute("DELETE FROM sessions", []).map_err(sql_err)?;
   Ok(())
 }
@@ -305,6 +319,7 @@ pub async fn show(
   Ok(Json(SessionView {
     username: session_user(&s, &headers).await?,
     setup_needed,
+    totp_required: false,
     setup_open: setup_needed,
     core_key: Some(hex::encode(s.key.verifying_key().to_bytes())),
   }))
@@ -342,6 +357,7 @@ async fn start_session(
       AppendHeaders([(header::SET_COOKIE, cookie)]),
       Json(SessionView {
         username: Some(username),
+        totp_required: false,
         setup_needed: false,
         setup_open: false,
         core_key: None,
@@ -449,6 +465,49 @@ pub async fn login(
       ApiError::new(ErrorCode::Unauthorized, "账号或密码不对").into(),
     );
   }
+  let enabled = crate::totp::view(&s.db).await?.enabled;
+  if enabled {
+    let Some(code) = req.code.filter(|v| !v.trim().is_empty()) else {
+      return Ok(
+        Json(SessionView {
+          username: None,
+          totp_required: true,
+          setup_needed: false,
+          setup_open: false,
+          core_key: None,
+        })
+        .into_response(),
+      );
+    };
+    let result =
+      s.db.call(move |c| crate::totp::verify(c, &code)).await?;
+    match result {
+      Some(recovery) => {
+        if recovery {
+          crate::totp::used(
+            &s,
+            &username,
+            source(peer.ip(), &headers),
+          )
+          .await;
+        }
+      }
+      None => {
+        record_failure(&key);
+        crate::audit::login_event(
+          &s,
+          "login_failed",
+          &username,
+          source(peer.ip(), &headers),
+        )
+        .await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        return Err(
+          ApiError::new(ErrorCode::Unauthorized, "验证码不对").into(),
+        );
+      }
+    }
+  }
   FAILURES
     .lock()
     .unwrap_or_else(|e| e.into_inner())
@@ -531,8 +590,26 @@ pub fn reset_password(
     .map_err(|e| anyhow::anyhow!(e.message))?;
   set_admin(&conn, &username, &hash)
     .map_err(|e| anyhow::anyhow!(e.message))?;
-  println!("已重置管理员 {username} 的密码，所有页面会话已退出");
+  println!(
+    "已重置管理员 {username} 的密码，两步验证已关闭，所有页面会话已退出"
+  );
   Ok(())
+}
+
+pub fn require_human(
+  auth: &crate::auth::Auth,
+) -> Result<(), AppError> {
+  if auth.human {
+    Ok(())
+  } else {
+    Err(
+      ApiError::new(
+        ErrorCode::Forbidden,
+        "这个操作只能在页面上登录后进行",
+      )
+      .into(),
+    )
+  }
 }
 
 #[cfg(test)]

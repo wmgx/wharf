@@ -77,6 +77,7 @@ mod tailscale;
 mod tasks;
 mod terminal;
 mod timeline;
+mod totp;
 mod traffic;
 mod tunnel;
 mod updates;
