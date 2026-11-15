@@ -27,6 +27,8 @@ pub const TUNNEL_TOKEN_SECRET: &str = "WHARF_TUNNEL_TOKEN";
 const CADDY_ADMIN: &str = "unix//config/caddy-admin.sock";
 const UPSTREAM_TRY_DURATION: &str = "8s";
 const UPSTREAM_TRY_INTERVAL: &str = "250ms";
+pub const SCANNER_PATHS: &str = "/.env /.env.* /.git/* /.svn/* /.aws/* /.DS_Store /wp-login.php /wp-admin /wp-admin/* /xmlrpc.php /phpmyadmin/* /vendor/phpunit/* /cgi-bin/* /boaform/* /HNAP1";
+pub const SCANNER_UA: &str = "(?i)(sqlmap|nikto|nmap|masscan|zgrab|nuclei|wpscan|dirbuster|gobuster|ffuf|feroxbuster|acunetix|netsparker)";
 
 pub fn hash(content: &str) -> String {
   hex::encode(Sha256::digest(content.as_bytes()))
@@ -784,7 +786,7 @@ pub fn frpc_compose(
 }
 
 /// 一条 Caddy 站点：hostname → 上游。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Site {
   pub hostname: String,
   pub upstream: String,
@@ -794,6 +796,10 @@ pub struct Site {
   pub paths: Vec<(String, String)>,
   /// 跳转目标。有值时这个站点只做跳转，`upstream`、`auth`、`paths` 不用。
   pub redirect: Option<String>,
+  /// 每分钟限速次数，没开是 `None`。
+  pub rate_limit: Option<u32>,
+  /// 拦截常见扫描。
+  pub block_scanners: bool,
 }
 
 /// 内置的错误页。
@@ -847,11 +853,22 @@ pub fn caddyfile(
     GatewayTls::Internal => out.push_str("\tlocal_certs\n"),
     GatewayTls::Off => out.push_str("\tauto_https off\n"),
   }
+  if sites
+    .iter()
+    .any(|s| s.redirect.is_none() && s.rate_limit.is_some())
+  {
+    out.push_str("\torder rate_limit before basic_auth\n");
+  }
   out.push_str("}\n");
   out.push_str(&error_snippet(spec));
   out.push_str(&format!(
     "\n(wharf_upstream) {{\n\tlb_try_duration {UPSTREAM_TRY_DURATION}\n\tlb_try_interval {UPSTREAM_TRY_INTERVAL}\n}}\n"
   ));
+  if sites.iter().any(|s| s.block_scanners) {
+    out.push_str(&format!(
+      "\n(wharf_scanners) {{\n\t@wharf_scanner_path path {SCANNER_PATHS}\n\t@wharf_scanner_ua header_regexp User-Agent \"{SCANNER_UA}\"\n\trespond @wharf_scanner_path 404\n\trespond @wharf_scanner_ua 404\n}}\n"
+    ));
+  }
   out.push_str("\nimport /etc/caddy/extra.d/*.caddy\n");
   let scheme = match spec.tls {
     GatewayTls::Off => "http://",
@@ -868,6 +885,15 @@ pub fn caddyfile(
       continue;
     }
     out.push_str("\timport wharf_errors\n");
+    if site.block_scanners {
+      out.push_str("\timport wharf_scanners\n");
+    }
+    if let Some(n) = site.rate_limit {
+      let zone = site.hostname.replace('.', "_");
+      out.push_str(&format!(
+        "\trate_limit {{\n\t\tzone wharf_{zone} {{\n\t\t\tkey {{remote_host}}\n\t\t\tevents {n}\n\t\t\twindow 1m\n\t\t}}\n\t}}\n"
+      ));
+    }
     if let Some(a) = &site.auth {
       out.push_str(&format!(
         "\tbasic_auth {{\n\t\t{} {}\n\t}}\n",
@@ -1109,6 +1135,7 @@ mod tests {
           auth: BasicAuth::parse("admin $2b$12$abc"),
           paths: vec![],
           redirect: None,
+          ..Default::default()
         },
         Site {
           hostname: "a.example.com".into(),
@@ -1116,6 +1143,7 @@ mod tests {
           auth: None,
           paths: vec![("/ws".into(), "127.0.0.1:17891".into())],
           redirect: None,
+          ..Default::default()
         },
       ],
       true,
@@ -1153,11 +1181,60 @@ mod tests {
         auth: None,
         paths: vec![],
         redirect: None,
+        ..Default::default()
       }],
       false,
     );
     assert!(out.contains("auto_https off"));
     assert!(out.contains("\nhttp://a.example.com {"));
+  }
+
+  #[test]
+  fn caddyfile_guard_per_site() {
+    let spec = serde_json::from_value(serde_json::json!({
+      "kind": "caddy", "server": "s1"
+    }))
+    .unwrap();
+    let out = caddyfile(
+      "edge",
+      &spec,
+      &[
+        Site {
+          hostname: "a.example.com".into(),
+          upstream: "127.0.0.1:1".into(),
+          rate_limit: Some(600),
+          block_scanners: true,
+          ..Default::default()
+        },
+        Site {
+          hostname: "b.example.com".into(),
+          upstream: "127.0.0.1:2".into(),
+          ..Default::default()
+        },
+      ],
+      false,
+    );
+    assert_eq!(
+      out.matches("order rate_limit before basic_auth").count(),
+      1
+    );
+    assert_eq!(out.matches("(wharf_scanners) {").count(), 1);
+    assert_eq!(out.matches("import wharf_scanners").count(), 1);
+    let a = out
+      .split("\na.example.com {\n")
+      .nth(1)
+      .unwrap()
+      .split("\nb.example.com {\n")
+      .next()
+      .unwrap();
+    assert!(a.contains("import wharf_scanners"));
+    assert!(a.contains("zone wharf_a_example_com {"));
+    assert!(a.contains("events 600"));
+    assert!(a.contains("window 1m"));
+    assert!(out.contains("b.example.com {\n\timport wharf_errors\n\treverse_proxy 127.0.0.1:2 {\n\t\timport wharf_upstream\n\t}\n}"));
+    assert!(!SCANNER_PATHS.contains(" / "));
+    assert!(!SCANNER_UA.contains("curl"));
+    assert!(!SCANNER_UA.contains("reqwest"));
   }
 
   #[test]
@@ -1172,6 +1249,7 @@ mod tests {
       auth: None,
       paths: vec![("/api".into(), "100.64.0.1:20001".into())],
       redirect: None,
+      ..Default::default()
     };
     let redirect = Site {
       hostname: "b.example.com".into(),
@@ -1205,6 +1283,7 @@ mod tests {
           auth: None,
           paths: vec![],
           redirect: None,
+          ..Default::default()
         },
         Site {
           hostname: "b.example.com".into(),
@@ -1212,6 +1291,7 @@ mod tests {
           auth: None,
           paths: vec![],
           redirect: Some("https://a.example.com".into()),
+          ..Default::default()
         },
       ],
       false,
@@ -1259,6 +1339,7 @@ mod tests {
         auth: None,
         paths: vec![],
         redirect: Some("https://a.com".into()),
+        ..Default::default()
       }],
       false,
     );
