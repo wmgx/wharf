@@ -10,6 +10,7 @@ try {
 
 /** `GET /api/session`：已登录时有 username；没有管理员账号时 setup_needed。 */
 export interface Session {
+  totp_required?: boolean;
   username?: string;
   setup_needed: boolean;
   setup_open: boolean;

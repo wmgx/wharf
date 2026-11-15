@@ -6,9 +6,10 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Accounts } from "./accounts";
 import { Core } from "./core";
 import { Secrets } from "./secrets";
+import { Security } from "./security";
 import { Tokens } from "./tokens";
 
-const TABS = ["accounts", "secrets", "tokens", "core"] as const;
+const TABS = ["accounts", "secrets", "tokens", "security", "core"] as const;
 
 export function Settings() {
   const [params, setParams] = useSearchParams();
@@ -21,6 +22,7 @@ export function Settings() {
         <TabsTrigger value="accounts">厂商账号</TabsTrigger>
         <TabsTrigger value="secrets">密钥</TabsTrigger>
         <TabsTrigger value="tokens">访问令牌</TabsTrigger>
+        <TabsTrigger value="security">登录与安全</TabsTrigger>
         <TabsTrigger value="core">控制面</TabsTrigger>
       </TabsList>
       <TabsContent value="accounts" className="mt-4">
@@ -32,6 +34,7 @@ export function Settings() {
       <TabsContent value="tokens" className="mt-4">
         <Tokens />
       </TabsContent>
+      <TabsContent value="security" className="mt-4"><Security /></TabsContent>
       <TabsContent value="core" className="mt-4">
         <Core />
       </TabsContent>

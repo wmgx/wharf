@@ -667,6 +667,7 @@ pub struct IssueSubject {
 pub struct Issue {
   /// 这是哪一类问题，页面按它决定给什么按钮。取值见下表。
   /// oom_killed：服务的容器因内存超限被杀。
+  /// recovery_low：恢复码少于 3 个。
   pub code: String,
   pub level: IssueLevel,
   #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1322,4 +1323,10 @@ pub struct AutoUpdateResult {
   /// 失败或跳过的原因。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TotpView {
+  pub enabled: bool,
+  pub recovery_left: u32,
 }

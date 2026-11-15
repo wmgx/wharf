@@ -50,6 +50,7 @@ mod jobs;
 mod join;
 mod link;
 mod login;
+mod totp;
 mod logs_stream;
 mod metrics;
 mod migrate;
