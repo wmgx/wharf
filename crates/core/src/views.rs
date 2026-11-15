@@ -262,7 +262,13 @@ pub fn service_view(
         .get(&row.spec.server)
         .map(|a| a.ip.clone())
         .unwrap_or_else(|| "127.0.0.1".into());
-      (port.clone(), format!("{ip}:{host}"))
+      let suffix =
+        if row.spec.find_port(Some(port)).is_some_and(|p| p.udp) {
+          "/udp"
+        } else {
+          ""
+        };
+      (port.clone(), format!("{ip}:{host}{suffix}"))
     })
     .collect();
   let lan_addresses = net
@@ -273,9 +279,21 @@ pub fn service_view(
         .host_ports
         .iter()
         .map(|(port, host)| {
+          let suffix = if row
+            .spec
+            .find_port(Some(port))
+            .is_some_and(|p| p.udp)
+          {
+            "/udp"
+          } else {
+            ""
+          };
           (
             port.clone(),
-            ips.iter().map(|ip| format!("{ip}:{host}")).collect(),
+            ips
+              .iter()
+              .map(|ip| format!("{ip}:{host}{suffix}"))
+              .collect(),
           )
         })
         .collect()
