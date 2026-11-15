@@ -2,6 +2,8 @@ import { Trash2Icon } from "lucide-react";
 import { useState } from "react";
 import { usePoll } from "@/api";
 import { useActions } from "@/components/actions";
+import { Picker } from "@/components/fields";
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { CodeBlock, Empty, SectionTitle, ServerTag } from "@/components/common";
 import { CertDays, diagnosisOf } from "@/components/health";
 import { ConfirmDialog, Facts, Row, Rows } from "@/components/kit";
@@ -9,7 +11,7 @@ import { LogStream } from "@/components/LogStream";
 import { Button } from "@/components/ui/button";
 import { SheetDescription, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { useStatus } from "@/status";
-import type { GatewayTls, GatewayView } from "@/types";
+import type { AccountView, GatewayTls, GatewayView } from "@/types";
 import { GatewayErrorPage } from "../gateway-error-page";
 
 const TLS_TEXT: Record<GatewayTls, string> = { auto: "自动签证书", internal: "自签证书", off: "只走 HTTP" };
@@ -20,6 +22,15 @@ export function GatewayDetail({ g, onDone, onDomain }: { g: GatewayView; onDone:
   const [configOpen, setConfigOpen] = useState(false);
   const [logsOpen, setLogsOpen] = useState(false);
   const { status } = useStatus();
+  const [wildcardOpen, setWildcardOpen] = useState(false);
+  const [zone, setZone] = useState("");
+  const { data: accounts } = usePoll<AccountView[]>(g.spec.kind === "caddy" && g.spec.tls !== "off" ? "/api/accounts" : null, 30000);
+  const wildcard = g.spec.wildcard ?? [];
+  const zones = [...new Set((accounts ?? []).flatMap((a) => a.zones))].filter((z) => !wildcard.includes(z)).sort();
+  const saveWildcard = (next: string[], title: string) => {
+    setWildcardOpen(false);
+    actions.plan({ title, changes: [{ op: "upsert_gateway", name: g.name, spec: { ...g.spec, wildcard: next } }] });
+  };
   const { data: config } = usePoll<{ config: string; compose: string }>(configOpen ? `/api/gateways/${encodeURIComponent(g.name)}/config` : null, 30000);
   return <>
     <SheetHeader className="border-b">
@@ -37,6 +48,13 @@ export function GatewayDetail({ g, onDone, onDomain }: { g: GatewayView; onDone:
         ["端口", g.spec.kind === "caddy" && <span className="font-mono text-xs">HTTP {g.spec.http_port ?? 80} · HTTPS {g.spec.https_port ?? 443}
         </span>],
         ["错误页", g.spec.kind === "caddy" && <GatewayErrorPage g={g} />],
+        ["泛域名证书", g.spec.kind === "caddy" && g.spec.tls !== "off" && <div className="flex flex-wrap items-center gap-2">
+          {wildcard.length ? wildcard.map((z) => <span key={z} className="inline-flex min-w-0 max-w-full items-center gap-1">
+            <span className="break-all font-mono text-xs">*.{z}</span>
+            <Button variant="ghost" size="xs" onClick={() => saveWildcard(wildcard.filter((v) => v !== z), `关闭 *.${z} 的泛域名证书`)}>关闭</Button>
+          </span>) : "没开"}
+          <Button variant="ghost" size="xs" disabled={!zones.length} onClick={() => { setZone(zones[0] ?? ""); setWildcardOpen(true); }}>开启</Button>
+        </div>],
       ]} />
       <SectionTitle>域名</SectionTitle>
       {g.routes.length ? <Rows>
@@ -65,6 +83,13 @@ export function GatewayDetail({ g, onDone, onDomain }: { g: GatewayView; onDone:
       <Button variant="outline" className="text-destructive" disabled={g.routes.length > 0} onClick={() => setRemoving(true)}>
         <Trash2Icon />删除入口</Button>
     </SheetFooter>
+    <Dialog open={wildcardOpen} onOpenChange={setWildcardOpen}>
+      <DialogContent aria-describedby={undefined}>
+        <DialogHeader><DialogTitle>开启泛域名证书</DialogTitle></DialogHeader>
+        <Picker value={zone} options={zones.map((z) => ({ value: z, label: z }))} onChange={setZone} />
+        <DialogFooter><Button disabled={!zones.includes(zone)} onClick={() => saveWildcard([...wildcard, zone].sort(), `开启 *.${zone} 的泛域名证书`)}>预览改动</Button></DialogFooter>
+      </DialogContent>
+    </Dialog>
     <ConfirmDialog open={removing} title={`删除入口 ${g.name}？`} onCancel={() => setRemoving(false)} onConfirm={() => { setRemoving(false); onDone(); actions.plan({ title: `删除入口 ${g.name}`, changes: [{ op: "remove_gateway", name: g.name }] }); }}>入口的容器会被删除。</ConfirmDialog>
   </>;
 }

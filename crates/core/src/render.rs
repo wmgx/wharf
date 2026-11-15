@@ -805,6 +805,10 @@ pub struct Site {
   pub rate_limit: Option<u32>,
   /// 拦截常见扫描。
   pub block_scanners: bool,
+  /// 泛域名站点：只签证书，未匹配具体域名的请求直接断开。
+  pub wildcard: bool,
+  /// DNS 验证的 subdomain（zone 或域名本身）。
+  pub dns: Option<String>,
 }
 
 /// 内置的错误页。
@@ -833,6 +837,12 @@ fn error_snippet(spec: &GatewaySpec) -> String {
     "\t\t{ERROR_PAGE_END} {{err.status_code}}\n\t}}\n}}\n"
   ));
   out
+}
+
+fn dns_tls(gateway: &str, subdomain: &str) -> String {
+  format!(
+    "\ttls {{\n\t\tdns acmedns {{\n\t\t\tusername {gateway}\n\t\t\tpassword {ACME_DNS_KEY}\n\t\t\tsubdomain {subdomain}\n\t\t\tserver_url {ACME_DNS_URL}\n\t\t}}\n\t}}\n"
+  )
 }
 
 pub fn caddyfile(
@@ -883,6 +893,13 @@ pub fn caddyfile(
   sites.sort_by(|a, b| a.hostname.cmp(&b.hostname));
   for site in sites {
     out.push_str(&format!("\n{scheme}{} {{\n", site.hostname));
+    if let Some(subdomain) = &site.dns {
+      out.push_str(&dns_tls(name, subdomain));
+    }
+    if site.wildcard {
+      out.push_str("\tabort\n}\n");
+      continue;
+    }
     if let Some(target) = &site.redirect {
       out.push_str(&format!(
         "\tredir {target}{{uri}} permanent\n}}\n"
@@ -959,6 +976,49 @@ mod tests {
         name: "data".into(),
         target: "/data".into(),
       }],
+    }
+  }
+
+  #[test]
+  fn caddyfile_wildcard_site() {
+    let mut gw: GatewaySpec =
+      serde_json::from_str(r#"{"kind":"caddy","server":"s1"}"#)
+        .unwrap();
+    let mut site = Site {
+      hostname: "*.example.com".into(),
+      wildcard: true,
+      dns: Some("example.com".into()),
+      ..Default::default()
+    };
+    let empty = caddyfile("edge", &gw, &[], false);
+    let auto =
+      caddyfile("edge", &gw, std::slice::from_ref(&site), false);
+    for text in [
+      "*.example.com {",
+      "dns acmedns {",
+      "username edge",
+      "password [[WHARF_ACME_DNS_KEY]]",
+      "subdomain example.com",
+      "server_url [[WHARF_ACME_DNS_URL]]",
+      "\tabort\n}",
+    ] {
+      assert!(auto.contains(text), "{text}");
+    }
+    assert!(auto.ends_with("\tabort\n}\n"));
+    gw.tls = GatewayTls::Internal;
+    site.dns = None;
+    let internal = caddyfile("edge", &gw, &[site], false);
+    assert!(!internal.contains("acmedns"));
+    let global = |s: &str| {
+      s.split("\n(wharf_errors)").next().unwrap().to_string()
+    };
+    assert_eq!(global(&auto), global(&empty));
+    assert_eq!(
+      global(&internal),
+      global(&caddyfile("edge", &gw, &[], false))
+    );
+    for out in [&empty, &auto, &internal] {
+      assert!(!out.contains("prefer_wildcard"));
     }
   }
 
@@ -1129,6 +1189,7 @@ mod tests {
       tls: GatewayTls::Auto,
       account: None,
       error_page: None,
+      wildcard: vec![],
     };
     let out = caddyfile(
       "edge",
@@ -1334,6 +1395,7 @@ mod tests {
       tls: GatewayTls::Auto,
       account: None,
       error_page: None,
+      wildcard: vec![],
     };
     let out = caddyfile(
       "edge",
@@ -1365,6 +1427,7 @@ mod tests {
       tls: GatewayTls::Auto,
       account: Some("cf".into()),
       error_page: None,
+      wildcard: vec![],
     };
     let out = tunnel_compose("cf", &spec);
     assert!(
