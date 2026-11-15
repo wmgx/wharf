@@ -23,7 +23,8 @@ use wharf_api_types::{
   ApiError, ErrorCode,
   agent::{
     AgentOp, HostExecJob, NODE_IMAGE, PYTHON_IMAGE, SHELL_IMAGE,
-    TaskHow, TaskInput, TaskRunJob, TaskRunResult,
+    ServiceDisk, TASK_DATA_PREFIX, TaskHow, TaskInput, TaskRunJob,
+    TaskRunResult,
   },
   validate_name,
   view::{
@@ -172,16 +173,23 @@ async fn start(
     }
   };
   if busy {
-    finish(state, id, TaskStatus::Skipped, None, "上一次还没跑完")
-      .await;
+    finish(
+      state,
+      id,
+      TaskStatus::Skipped,
+      None,
+      "上一次还没跑完",
+      None,
+    )
+    .await;
     return Ok((id, true));
   }
   let state = state.clone();
   let name = name.to_string();
   tokio::spawn(async move {
-    let (status, code, output) =
+    let (status, code, output, mem_peak) =
       execute(&state, &name, &spec, input).await;
-    finish(&state, id, status, code, &output).await;
+    finish(&state, id, status, code, &output, mem_peak).await;
     release(&name);
     notify_result(&state, &name, &spec, status, &output).await;
   });
@@ -249,10 +257,10 @@ async fn execute(
   name: &str,
   spec: &TaskSpec,
   input: Option<TaskInput>,
-) -> (TaskStatus, Option<i32>, String) {
+) -> (TaskStatus, Option<i32>, String, Option<u64>) {
   let snap = match snapshot::load(&state.db).await {
     Ok(s) => s,
-    Err(e) => return (TaskStatus::Failed, None, e.message),
+    Err(e) => return (TaskStatus::Failed, None, e.message, None),
   };
   let secrets = &snap.secrets;
   let used: Vec<&String> = secrets
@@ -272,7 +280,7 @@ async fn execute(
       } else {
         TaskStatus::Failed
       };
-      (status, r.exit_code, redact(r.output))
+      (status, r.exit_code, redact(r.output), r.mem_peak)
     }
     Err(e) => {
       let status = if e.code == ErrorCode::Timeout {
@@ -280,7 +288,7 @@ async fn execute(
       } else {
         TaskStatus::Failed
       };
-      (status, None, redact(e.message))
+      (status, None, redact(e.message), None)
     }
   }
 }
@@ -328,6 +336,7 @@ async fn run_on_agent(
       )
       .await?;
       return Ok(TaskRunResult {
+        mem_peak: None,
         exit_code: Some(r.exit_code),
         timed_out: false,
         output: format!("{}{}", r.stdout, r.stderr),
@@ -346,6 +355,7 @@ async fn run_on_agent(
     TaskKind::Script {
       runtime,
       code,
+      deps,
       image,
       env,
       ..
@@ -360,6 +370,8 @@ async fn run_on_agent(
       }),
       runtime: *runtime,
       code: code.clone(),
+      deps: deps.clone(),
+      mirrors: server.settings.build_env.clone(),
       env: env
         .iter()
         .map(|(k, v)| Ok((k.clone(), sub(v)?)))
@@ -450,14 +462,15 @@ pub(crate) async fn finish(
   status: TaskStatus,
   code: Option<i32>,
   output: &str,
+  mem_peak: Option<u64>,
 ) {
   let (status, output) = (enc(status), output.to_string());
   let r = state
     .db
     .call(move |c| {
       c.execute(
-        "UPDATE task_runs SET status = ?2, exit_code = ?3, output = ?4, ended_at = ?5 WHERE id = ?1",
-        params![id, status, code, output, now_ms()],
+        "UPDATE task_runs SET status = ?2, exit_code = ?3, output = ?4, ended_at = ?5, mem_peak = ?6 WHERE id = ?1",
+        params![id, status, code, output, now_ms(), mem_peak],
       )
       .map_err(sql_err)
     })
@@ -567,7 +580,19 @@ fn validate(
         return Err(ApiError::invalid("命令不能为空"));
       }
     }
-    TaskKind::Script { code, image, .. } => {
+    TaskKind::Script {
+      code,
+      image,
+      deps,
+      runtime,
+      ..
+    } => {
+      if deps.len() > 16 * 1024 {
+        return Err(ApiError::invalid("依赖清单不能超过 16KB"));
+      }
+      if *runtime == ScriptRuntime::Shell && !deps.trim().is_empty() {
+        return Err(ApiError::invalid("shell 脚本不支持依赖清单"));
+      }
       if blank(code) {
         return Err(ApiError::invalid("脚本内容不能为空"));
       }
@@ -628,10 +653,11 @@ fn run_view(r: &rusqlite::Row) -> rusqlite::Result<TaskRunView> {
     ended_at: r.get::<_, Option<i64>>(5)?.map(to_time),
     exit_code: r.get(6)?,
     output: r.get(7)?,
+    mem_peak: r.get(8)?,
   })
 }
 
-const RUN_COLS: &str = "id, task, status, trigger, started_at, ended_at, exit_code, output";
+const RUN_COLS: &str = "id, task, status, trigger, started_at, ended_at, exit_code, output, mem_peak";
 
 /// `GET /api/tasks`
 pub async fn list(
@@ -677,6 +703,7 @@ pub async fn list(
       _ => None,
     };
     out.push(TaskView {
+      data_bytes: None,
       name,
       spec,
       last,
@@ -687,6 +714,39 @@ pub async fn list(
     });
   }
   Ok(Json(out))
+}
+
+/// 单任务详情才测持久目录，失败不影响读取配置。
+pub async fn get(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Path(name): Path<String>,
+) -> ApiResult<TaskView> {
+  let mut task = list(State(s.clone()), auth)
+    .await?
+    .0
+    .into_iter()
+    .find(|t| t.name == name)
+    .ok_or_else(|| {
+      ApiError::not_found(format!("没有定时任务 {name}"))
+    })?;
+  if matches!(task.spec.how, TaskKind::Script { .. }) {
+    let disks: Result<Vec<ServiceDisk>, _> = s
+      .hub
+      .call(
+        &task.spec.server,
+        AgentOp::DiskUsage {
+          services: vec![format!("{TASK_DATA_PREFIX}{name}")],
+        },
+        Duration::from_secs(30),
+        None,
+        &CancellationToken::new(),
+      )
+      .await;
+    task.data_bytes =
+      disks.ok().and_then(|v| v.first().map(|d| d.data));
+  }
+  Ok(Json(task))
 }
 
 /// `PUT /api/tasks/{name}`：新建或修改。
@@ -735,14 +795,22 @@ pub async fn put(
   Ok(Json(spec))
 }
 
+#[derive(Deserialize)]
+pub struct RemoveQuery {
+  #[serde(default)]
+  data: bool,
+}
+
 /// `DELETE /api/tasks/{name}`：连运行记录一起删。
 pub async fn remove(
   State(s): State<Arc<AppState>>,
   auth: Auth,
   Path(name): Path<String>,
+  Query(q): Query<RemoveQuery>,
 ) -> ApiResult<serde_json::Value> {
   let spec = load_one(&s, &name).await?;
   need_perm(&auth, &spec)?;
+  let task_name = name.clone();
   s.db
     .call(move |c| {
       c.execute("DELETE FROM tasks WHERE name = ?1", params![name])
@@ -754,6 +822,20 @@ pub async fn remove(
       .map_err(sql_err)
     })
     .await?;
+  if q.data && matches!(spec.how, TaskKind::Script { .. }) {
+    let _: serde_json::Value = s
+      .hub
+      .call(
+        &spec.server,
+        AgentOp::RemoveData {
+          service: format!("{TASK_DATA_PREFIX}{task_name}"),
+        },
+        Duration::from_secs(30),
+        None,
+        &CancellationToken::new(),
+      )
+      .await?;
+  }
   Ok(Json(serde_json::json!({ "ok": true })))
 }
 

@@ -673,7 +673,7 @@ export type TaskKind =
       env?: Record<string, string>;
       mounts?: string[];
     }
-  | { kind: "script"; runtime: ScriptRuntime; code: string; image?: string; env?: Record<string, string>; hook?: string }
+  | { kind: "script"; runtime: ScriptRuntime; code: string; deps?: string; image?: string; env?: Record<string, string>; hook?: string }
   | { kind: "host"; command: string }
   | { kind: "ping"; token?: string; grace_mins: number };
 
@@ -689,6 +689,7 @@ export type TaskStatus =
   "running" | "succeeded" | "failed" | "timed_out" | "skipped";
 
 export interface TaskRunView {
+  mem_peak?: number;
   id: number;
   task: string;
   status: TaskStatus;
@@ -700,6 +701,7 @@ export interface TaskRunView {
 }
 
 export interface TaskView {
+  data_bytes?: number;
   name: string;
   spec: TaskSpec;
   last?: TaskRunView;
