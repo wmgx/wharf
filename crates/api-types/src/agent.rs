@@ -830,6 +830,8 @@ pub const BUILD_IMAGE_PREFIX: &str = "wharf-build/";
 pub const TRIAL_PROJECT_PREFIX: &str = "wharf-try-";
 /// 执行 wrangler 的镜像。
 pub const NODE_IMAGE: &str = "node:22-bookworm-slim";
+pub const PYTHON_IMAGE: &str = "python:3.13-slim";
+pub const SHELL_IMAGE: &str = "alpine:3.22";
 /// 项目里没装 wrangler 时用这个版本。
 pub const WRANGLER_VERSION: &str = "4.148.0";
 pub const REST_SERVER_IMAGE: &str = "restic/rest-server:0.14.0";
@@ -1206,14 +1208,30 @@ pub struct TaskRunJob {
   /// 任务名，一次性容器叫 `wharf-task-<任务名>`。
   pub name: String,
   pub how: TaskHow,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub input: Option<TaskInput>,
   pub timeout_secs: u64,
   pub pull: PullPolicy,
 }
 
-/// 命令都用 `sh -c` 执行，密钥已经替换好。
+/// 网址触发带来的请求，请求体使用 base64。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskInput {
+  pub method: String,
+  pub query: String,
+  pub body: String,
+}
+
+/// 命令里的密钥已经替换好，脚本正文保持原样。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TaskHow {
+  Script {
+    image: String,
+    runtime: crate::view::ScriptRuntime,
+    code: String,
+    env: BTreeMap<String, String>,
+  },
   /// 在 compose 项目 `project` 的容器里执行；`service` 是 compose 服务名，只有一个容器时可以不填。
   Exec {
     project: String,
