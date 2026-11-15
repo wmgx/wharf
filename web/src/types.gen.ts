@@ -1466,6 +1466,10 @@ export interface RouteSpec {
    */
   hostname: string;
   /**
+   * 只在内网访问：DNS 指向入口所在机器的内网地址，证书用 DNS 验证签，入口只放行内网来源。只支持 caddy 网关。
+   */
+  internal?: boolean;
+  /**
    * 网关到服务的走法。不填为自动：同机、能直连内网地址就直连，否则走反向隧道。
    */
   link?: LinkMode;

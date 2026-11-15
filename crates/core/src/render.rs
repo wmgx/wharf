@@ -810,6 +810,8 @@ pub struct Site {
   pub rate_limit: Option<u32>,
   /// 拦截常见扫描。
   pub block_scanners: bool,
+  /// 只放行内网来源。
+  pub internal: bool,
   /// 泛域名站点：只签证书，未匹配具体域名的请求直接断开。
   pub wildcard: bool,
   /// DNS 验证的 subdomain（zone 或域名本身）。
@@ -880,6 +882,9 @@ pub fn caddyfile(
   {
     out.push_str("\torder rate_limit before basic_auth\n");
   }
+  if sites.iter().any(|s| s.internal) {
+    out.push_str("\torder abort before basic_auth\n");
+  }
   if !forwards.is_empty() {
     out.push_str("\tlayer4 {\n");
     let mut forwards = forwards.to_vec();
@@ -909,10 +914,10 @@ pub fn caddyfile(
   sites.sort_by(|a, b| a.hostname.cmp(&b.hostname));
   for site in sites {
     out.push_str(&format!("\n{scheme}{} {{\n", site.hostname));
-    if let Some(subdomain) = &site.dns {
-      out.push_str(&dns_tls(name, subdomain));
-    }
     if site.wildcard {
+      if let Some(subdomain) = &site.dns {
+        out.push_str(&dns_tls(name, subdomain));
+      }
       out.push_str("\tabort\n}\n");
       continue;
     }
@@ -923,6 +928,12 @@ pub fn caddyfile(
       continue;
     }
     out.push_str("\timport wharf_errors\n");
+    if let Some(subdomain) = &site.dns {
+      out.push_str(&dns_tls(name, subdomain));
+    }
+    if site.internal {
+      out.push_str("\t@wharf_outside not remote_ip private_ranges 100.64.0.0/10\n\tabort @wharf_outside\n");
+    }
     if site.block_scanners {
       out.push_str("\timport wharf_scanners\n");
     }
@@ -994,6 +1005,44 @@ mod tests {
         target: "/data".into(),
       }],
     }
+  }
+
+  #[test]
+  fn caddyfile_internal_site() {
+    let gw: GatewaySpec =
+      serde_json::from_str(r#"{"kind":"caddy","server":"s1"}"#)
+        .unwrap();
+    let mut site = Site {
+      hostname: "i.example.com".into(),
+      upstream: "127.0.0.1:21000".into(),
+      internal: true,
+      dns: Some("i.example.com".into()),
+      ..Default::default()
+    };
+    let out = caddyfile("edge", &gw, &[site.clone()], &[], false);
+    assert!(out.contains("dns acmedns {"));
+    assert!(out.contains("@wharf_outside not remote_ip private_ranges 100.64.0.0/10\n\tabort @wharf_outside"));
+    assert!(
+      out.find("import wharf_errors").unwrap()
+        < out.find("\ttls {").unwrap()
+    );
+    assert!(
+      out.find("\ttls {").unwrap()
+        < out.find("@wharf_outside").unwrap()
+    );
+    assert_eq!(
+      out.matches("order abort before basic_auth").count(),
+      1
+    );
+    site.dns = None;
+    let out = caddyfile("edge", &gw, &[site.clone()], &[], false);
+    assert!(out.contains("abort @wharf_outside"));
+    assert!(!out.contains("dns acmedns"));
+    site.internal = false;
+    let out = caddyfile("edge", &gw, &[site], &[], false);
+    assert!(!out.contains("wharf_outside"));
+    assert!(!out.contains("dns acmedns"));
+    assert!(!out.contains("order abort"));
   }
 
   #[test]

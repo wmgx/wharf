@@ -2228,6 +2228,7 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
       auth,
       paths,
       tunnel,
+      internal,
       apply,
     } => {
       let existing = c
@@ -2239,6 +2240,7 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
         });
       let guard = existing.filter(|_| redirect.is_none());
       let spec = RouteSpec {
+        internal,
         rate_limit: guard.as_ref().and_then(|r| r.spec.rate_limit),
         block_scanners: guard.is_some_and(|r| r.spec.block_scanners),
         link: if tunnel {

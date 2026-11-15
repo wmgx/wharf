@@ -182,7 +182,9 @@ async fn route(
     .gateway
     .as_ref()
     .and_then(|g| world.gateways.get(g).map(|row| (g, &row.spec)));
-  let mut checks = vec![dns(host, gateway.map(|g| g.1), net).await];
+  let mut checks = vec![
+    dns(host, gateway.map(|g| g.1), net, view.spec.internal).await,
+  ];
   let (https, cert_expires) =
     https(client, &view.url, view.spec.auth).await;
   checks.push(https);
@@ -223,6 +225,7 @@ async fn dns(
   host: &str,
   gateway: Option<&wharf_api_types::spec::GatewaySpec>,
   net: &Net,
+  internal: bool,
 ) -> DoctorCheck {
   let lookup = tokio::time::timeout(
     DNS_TIMEOUT,
@@ -254,17 +257,31 @@ async fn dns(
     .join(", ");
   let expected = gateway
     .filter(|g| g.kind == GatewayKind::Caddy)
-    .and_then(|g| net.public_ip.get(&g.server).map(|ip| (g, ip)));
+    .and_then(|g| {
+      let ip = if internal {
+        net.private.get(&g.server).map(|a| &a.ip)
+      } else {
+        net.public_ip.get(&g.server)
+      };
+      ip.map(|ip| (g, ip))
+    });
   match expected {
     Some((g, ip)) if !ips.iter().any(|a| a.to_string() == *ip) => {
       check(
         "dns",
         host,
         CheckStatus::Warn,
-        format!(
-          "解析到 {shown}，不是网关所在 {} 的公网 IP {ip}（经 CDN 代理时正常）",
-          g.server
-        ),
+        if internal {
+          format!(
+            "解析到 {shown}，不是入口所在 {} 的内网地址 {ip}",
+            g.server
+          )
+        } else {
+          format!(
+            "解析到 {shown}，不是网关所在 {} 的公网 IP {ip}（经 CDN 代理时正常）",
+            g.server
+          )
+        },
       )
     }
     _ => {

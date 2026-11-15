@@ -808,6 +808,9 @@ pub enum RouteCmd {
     /// 总是走反向隧道。不给时自动选：同机、能直连内网地址就直连，否则走隧道。
     #[arg(long)]
     tunnel: bool,
+    /// 只在内网访问：DNS 指向入口所在机器的内网地址，入口只放行内网来源，证书用 DNS 验证签。
+    #[arg(long)]
+    internal: bool,
     #[command(flatten)]
     apply: ApplyFlags,
   },

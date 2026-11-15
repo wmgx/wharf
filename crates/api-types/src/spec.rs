@@ -570,6 +570,9 @@ pub struct RouteSpec {
   /// 拦截常见扫描：请求命中扫描路径或扫描器的 UA 时直接返回 404，不转给服务。只支持 caddy 网关。
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub block_scanners: bool,
+  /// 只在内网访问：DNS 指向入口所在机器的内网地址，证书用 DNS 验证签，入口只放行内网来源。只支持 caddy 网关。
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub internal: bool,
 }
 
 /// 网关到服务的走法偏好。
