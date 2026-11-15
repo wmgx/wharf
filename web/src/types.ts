@@ -190,6 +190,8 @@ export interface GatewayView {
 }
 
 export interface RouteSpec {
+  rate_limit?: number;
+  block_scanners?: boolean;
   hostname: string;
   /** 和 upstream、redirect 三选一，指向地址或跳转时为空。 */
   service?: string;

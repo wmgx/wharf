@@ -539,6 +539,12 @@ pub struct RouteSpec {
   /// 和 `service`、`upstream` 三选一。只支持 caddy 网关。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub redirect: Option<String>,
+  /// 限速：同一个来源 IP 每分钟最多这么多次请求，超过的返回 429。只支持 caddy 网关。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub rate_limit: Option<u32>,
+  /// 拦截常见扫描：请求命中扫描路径或扫描器的 UA 时直接返回 404，不转给服务。只支持 caddy 网关。
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub block_scanners: bool,
 }
 
 /// 网关到服务的走法偏好。

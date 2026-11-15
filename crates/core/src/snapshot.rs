@@ -299,6 +299,7 @@ pub fn gateway_render(
         auth: None,
         paths: Vec::new(),
         redirect: Some(target.clone()),
+        ..Default::default()
       });
       continue;
     }
@@ -354,6 +355,8 @@ pub fn gateway_render(
       paths.push((p.path.clone(), upstream));
     }
     sites.push(render::Site {
+      rate_limit: route.spec.rate_limit,
+      block_scanners: route.spec.block_scanners,
       redirect: None,
       paths,
       auth: route

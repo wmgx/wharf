@@ -1431,6 +1431,10 @@ export interface RouteSpec {
    */
   backup_gateway?: string | null;
   /**
+   * 拦截常见扫描：请求命中扫描路径或扫描器的 UA 时直接返回 404，不转给服务。只支持 caddy 网关。
+   */
+  block_scanners?: boolean;
+  /**
    * 入口网关。不填则用默认网关；边缘应用的域名不经过网关，不填。
    */
   gateway?: string | null;
@@ -1450,6 +1454,10 @@ export interface RouteSpec {
    * 目标端口名。服务只有一个端口时可以不填；边缘应用不填。
    */
   port?: string | null;
+  /**
+   * 限速：同一个来源 IP 每分钟最多这么多次请求，超过的返回 429。只支持 caddy 网关。
+   */
+  rate_limit?: number | null;
   /**
    * 跳转：整个域名 301 到这个网址，保留路径和参数，例如 `https://a.com`。
    * 和 `service`、`upstream` 三选一。只支持 caddy 网关。

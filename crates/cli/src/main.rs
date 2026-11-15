@@ -782,6 +782,24 @@ pub enum RouteCmd {
     #[command(flatten)]
     apply: ApplyFlags,
   },
+  /// 防护：按来源 IP 限速、拦截常见扫描。例：`wharf route guard a.example.com --rate 600 --block --apply`。
+  Guard {
+    name: String,
+    /// 每个来源 IP 每分钟最多多少次请求，超过返回 429。
+    #[arg(long, conflicts_with = "no_rate")]
+    rate: Option<u32>,
+    /// 关闭限速。
+    #[arg(long)]
+    no_rate: bool,
+    /// 拦截常见扫描路径和扫描器，返回 404。
+    #[arg(long, conflicts_with = "no_block")]
+    block: bool,
+    /// 关闭拦截。
+    #[arg(long)]
+    no_block: bool,
+    #[command(flatten)]
+    apply: ApplyFlags,
+  },
   Rm {
     hostname: String,
     #[command(flatten)]
