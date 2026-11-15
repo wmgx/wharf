@@ -63,6 +63,7 @@ export function DomainList({ status, add }: { status: Status; add: React.ReactNo
             return <TableRow key={`${hostname}-${app ?? "route"}`} className="cursor-pointer" {...clickable({ to: app ? `/edge/${encodeURIComponent(app)}` : `?open=${encodeURIComponent(hostname)}` })}>
               <TableCell className="font-mono text-xs">
                 <OpenLink value={hostname} />
+                {route?.spec.expires_at != null && <div className={`font-sans text-xs ${route.spec.expires_at <= Date.now() ? "text-warning" : "text-muted-foreground"}`}>{route.spec.expires_at <= Date.now() ? "已失效" : `临时分享，${new Date(route.spec.expires_at).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })} 到期`}</div>}
                 {route?.on_backup && <Badge variant="destructive">正走备用</Badge>}
               </TableCell>
               <TableCell>

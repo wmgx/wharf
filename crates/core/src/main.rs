@@ -6,6 +6,7 @@ use anyhow::Context;
 use clap::Parser;
 use ed25519_dalek::SigningKey;
 
+mod acme_dns;
 mod agent_upgrade;
 mod alert_context;
 mod alerts;
@@ -67,6 +68,7 @@ mod refs;
 mod render;
 mod rollback;
 mod rules;
+mod share;
 mod shell;
 mod snapshot;
 mod state;

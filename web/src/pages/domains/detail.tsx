@@ -1,5 +1,7 @@
 import { useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
+import { AddAlias } from "@/components/add-alias";
+import { AddRedirect } from "@/components/add-redirect";
 import { useActions } from "@/components/actions";
 import { Dot, SectionTitle, StatusBadge, ago } from "@/components/common";
 import { Field, Picker } from "@/components/fields";
@@ -8,13 +10,18 @@ import { hopOf } from "@/components/hop";
 import { Facts, Panel, Row, Rows } from "@/components/kit";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
 import { SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import type { RouteView, Status } from "@/types";
 
 export function DomainDetail({ route, status, onClose }: { route: RouteView; status: Status; onClose: () => void }) {
   const actions = useActions();
+  const [alias, setAlias] = useState(false);
+  const [redirect, setRedirect] = useState(false);
   const [, setParams] = useSearchParams();
   const [link, setLink] = useState(route.spec.link);
+  const [rate, setRate] = useState<number | null>(route.spec.rate_limit ?? null);
+  const [block, setBlock] = useState(!!route.spec.block_scanners);
   const [backup, setBackup] = useState(route.spec.backup_gateway ?? "");
   const gateway = status.gateways.find((g) => g.name === route.gateway);
   const choices = status.gateways.filter((g) => g.spec.server !== gateway?.spec.server);
@@ -22,7 +29,7 @@ export function DomainDetail({ route, status, onClose }: { route: RouteView; sta
   const { tone, text } = routeTone(diagnosis);
   const cert = diagnosis?.cert_expires;
   const days = cert ? Math.floor((new Date(cert).getTime() - Date.now()) / 86400000) : 0;
-  const changed = link !== route.spec.link || backup !== (route.spec.backup_gateway ?? "");
+  const changed = link !== route.spec.link || backup !== (route.spec.backup_gateway ?? "") || rate !== (route.spec.rate_limit ?? null) || block !== !!route.spec.block_scanners;
   return <>
     <SheetHeader className="border-b">
       <SheetTitle className="font-mono">
@@ -65,6 +72,10 @@ export function DomainDetail({ route, status, onClose }: { route: RouteView; sta
             {route.upstream ?? "-"}
           </span>],
         ]} />
+        <div className="mt-4 flex flex-wrap gap-2">
+          {!route.spec.redirect && <Button variant="outline" onClick={() => setAlias(true)}>加别名</Button>}
+          <Button variant="outline" onClick={() => setRedirect(true)}>跳转到这里</Button>
+        </div>
       </Panel>
       <SectionTitle>入口</SectionTitle>
       <Panel className="grid gap-4 p-4">
@@ -77,6 +88,7 @@ export function DomainDetail({ route, status, onClose }: { route: RouteView; sta
             </span>
           </>],
           ["走法", hopOf(route, status).text],
+          ...(!route.spec.redirect ? [["访问范围", route.spec.internal ? "只在内网" : "公网"] as [string, string]] : []),
         ]} />
         {route.spec.service && gateway?.spec.kind === "caddy" && <label className="flex items-center gap-2 text-sm">
           <Checkbox checked={link === "tunnel"} onCheckedChange={(v) => setLink(v === true ? "tunnel" : undefined)} />总是走反向隧道</label>}
@@ -85,13 +97,24 @@ export function DomainDetail({ route, status, onClose }: { route: RouteView; sta
         </Field>}
       </Panel>
       <SectionTitle>保护</SectionTitle>
-      <Panel className="flex flex-wrap items-center gap-2 p-4 text-sm">
-        <span className="flex-1">登录保护：{route.spec.auth ? "已开启 · 账号密码" : "没开"}
-        </span>
-        {gateway?.spec.kind === "cloudflare_tunnel" ? <span className="text-muted-foreground">隧道入口暂不支持登录保护</span> : route.spec.auth ? <>
-          <Button variant="outline" size="sm" onClick={() => actions.basicAuth(route.spec.hostname)}>改账号</Button>
-          <Button variant="outline" size="sm" onClick={() => actions.plan({ title: `关闭 ${route.spec.hostname} 的登录保护`, changes: [{ op: "upsert_route", spec: { ...route.spec, auth: false } }] })}>关闭</Button>
-        </> : <Button variant="outline" size="sm" onClick={() => actions.basicAuth(route.spec.hostname, true)}>开启</Button>}
+      <Panel className="flex flex-col gap-3 p-4 text-sm">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="flex-1">登录保护：{route.spec.auth ? "已开启 · 账号密码" : "没开"}
+          </span>
+          {gateway?.spec.kind === "cloudflare_tunnel" ? <span className="text-muted-foreground">隧道入口暂不支持登录保护</span> : route.spec.auth ? <>
+            <Button variant="outline" size="sm" onClick={() => actions.basicAuth(route.spec.hostname)}>改账号</Button>
+            <Button variant="outline" size="sm" onClick={() => actions.plan({ title: `关闭 ${route.spec.hostname} 的登录保护`, changes: [{ op: "upsert_route", spec: { ...route.spec, auth: false } }] })}>关闭</Button>
+          </> : <Button variant="outline" size="sm" onClick={() => actions.basicAuth(route.spec.hostname, true)}>开启</Button>}
+        </div>
+        {!route.spec.redirect && (gateway?.spec.kind === "cloudflare_tunnel" ? <span className="text-muted-foreground">隧道入口不支持限速和拦截扫描</span> : <>
+          <label className="flex flex-wrap items-center gap-2">
+            <Checkbox checked={rate !== null} onCheckedChange={(v) => setRate(v === true ? 600 : null)} />限速
+            {rate !== null && <><Input aria-label="限速次数" className="w-24" type="number" min={10} max={100000} value={rate} onChange={(e) => setRate(Number(e.target.value))} /><span>次/分钟/IP</span></>}
+          </label>
+          <label className="flex items-center gap-2">
+            <Checkbox checked={block} onCheckedChange={(v) => setBlock(v === true)} />拦截常见扫描
+          </label>
+        </>)}
       </Panel>
       {cert && <>
         <SectionTitle>证书</SectionTitle>
@@ -103,7 +126,9 @@ export function DomainDetail({ route, status, onClose }: { route: RouteView; sta
     </div>
     <SheetFooter className="flex-row justify-between border-t">
       <Button variant="outline" className="text-destructive" onClick={() => actions.removeRoute(route.spec.hostname)}>移除域名</Button>
-      <Button disabled={!changed} onClick={() => { onClose(); actions.plan({ title: `修改 ${route.spec.hostname}`, changes: [{ op: "upsert_route", spec: { ...route.spec, link, backup_gateway: backup || undefined } }] }); }}>预览改动</Button>
+      <Button disabled={!changed || (rate !== null && (!Number.isInteger(rate) || rate < 10 || rate > 100000))} onClick={() => { onClose(); actions.plan({ title: `修改 ${route.spec.hostname}`, changes: [{ op: "upsert_route", spec: { ...route.spec, link, backup_gateway: backup || undefined, rate_limit: rate ?? undefined, block_scanners: block || undefined } }] }); }}>预览改动</Button>
     </SheetFooter>
+    <AddAlias route={route} open={alias} onClose={() => setAlias(false)} />
+    <AddRedirect open={redirect} onClose={() => setRedirect(false)} target={route.url} gateway={route.gateway} />
   </>;
 }

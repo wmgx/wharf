@@ -450,6 +450,21 @@ impl World {
           let mut spec = spec.clone();
           spec.hostname = normalize_hostname(&spec.hostname)?;
           let existing = self.routes.get(&spec.hostname);
+          if let Some(expires) = spec.expires_at
+            && existing.and_then(|r| r.spec.expires_at)
+              != Some(expires)
+          {
+            let now = chrono::Utc::now().timestamp_millis();
+            if expires <= now {
+              return Err(ApiError::invalid(format!(
+                "临时分享 {} 的到期时间已经过了",
+                spec.hostname
+              )));
+            }
+            if expires > now + (7 * 86400 + 5 * 60) * 1000 {
+              return Err(ApiError::invalid("临时分享最长 7 天"));
+            }
+          }
           let id = existing
             .map(|r| r.id.clone())
             .unwrap_or_else(|| new_id("rt"));
@@ -730,6 +745,16 @@ impl World {
               "服务 {service} 没有名为 {port} 的端口"
             ));
           }
+          if self.services[service]
+            .spec
+            .ports
+            .iter()
+            .any(|p| p.name == port && p.udp)
+          {
+            return bad(format!(
+              "服务 {service} 的端口 {port} 是 UDP，不能给域名用"
+            ));
+          }
         }
         (None, Some(up)) => {
           if p.port.is_some() || !valid_upstream(up) {
@@ -859,6 +884,7 @@ impl World {
           .join("、")
       )));
     }
+    let mut forwards = BTreeSet::new();
     for (name, gateway) in &self.gateways {
       if !self.servers.contains_key(&gateway.spec.server) {
         return Err(server_not_found(&gateway.spec.server));
@@ -883,7 +909,39 @@ impl World {
             "网关 {name}：http_port、https_port、email、tls、error_page 只适用于 caddy 网关"
           )));
         }
+        if !s.layer4.is_empty() {
+          return Err(ApiError::invalid(format!(
+            "网关 {name}：四层转发只适用于 caddy 网关"
+          )));
+        }
+        if !s.wildcard.is_empty() {
+          return Err(ApiError::invalid(format!(
+            "网关 {name}：泛域名证书只适用于 caddy 网关"
+          )));
+        }
         continue;
+      }
+      if gateway.spec.tls == GatewayTls::Off
+        && !gateway.spec.wildcard.is_empty()
+      {
+        return Err(ApiError::invalid(format!(
+          "入口 {name} 只走 HTTP，不能开泛域名证书"
+        )));
+      }
+      let mut zones = std::collections::BTreeSet::new();
+      for zone in &gateway.spec.wildcard {
+        if zone.starts_with("*.")
+          || normalize_hostname(zone).ok().as_ref() != Some(zone)
+        {
+          return Err(ApiError::invalid(format!(
+            "入口 {name} 的泛域名证书写 zone 本身，例如 example.com"
+          )));
+        }
+        if !zones.insert(zone) {
+          return Err(ApiError::invalid(format!(
+            "入口 {name} 的泛域名证书 {zone} 写了两次"
+          )));
+        }
       }
       let http = gateway.spec.http_port.unwrap_or(80);
       let https = gateway.spec.https_port.unwrap_or(443);
@@ -891,6 +949,73 @@ impl World {
         return Err(ApiError::invalid(format!(
           "网关 {name} 的 http_port 和 https_port 不能相同"
         )));
+      }
+      let server = &gateway.spec.server;
+      for f in &gateway.spec.layer4 {
+        let listen = f.listen;
+        match (&f.service, &f.upstream) {
+          (Some(svc), None) => {
+            let service = self.services.get(svc).ok_or_else(|| ApiError::invalid(format!("入口 {name} 的四层转发 {listen} 指向的服务 {svc} 不存在")).suggest("wharf service list"))?;
+            let port = self.service_port(svc, f.port.as_deref()).ok_or_else(|| ApiError::invalid(format!("入口 {name} 的四层转发 {listen}：找不到服务 {svc} 的端口")).with_hint("服务有多个端口时要写端口名"))?;
+            let target = service.spec.ports.iter().find(|p| p.name == port).ok_or_else(|| ApiError::invalid(format!("入口 {name} 的四层转发 {listen}：找不到服务 {svc} 的端口")).with_hint("服务有多个端口时要写端口名"))?;
+            if f.udp != target.udp {
+              return Err(ApiError::invalid(format!(
+                "入口 {name} 的四层转发 {listen}：协议和服务 {svc} 的端口 {port} 不一致"
+              )));
+            }
+          }
+          (None, Some(up)) => {
+            if !valid_upstream(up) {
+              return Err(ApiError::invalid(format!(
+                "入口 {name} 的四层转发 {listen} 的上游 {up} 要写成 主机:端口"
+              )));
+            }
+          }
+          _ => {
+            return Err(ApiError::invalid(format!(
+              "入口 {name} 的四层转发 {listen}：服务和上游二选一"
+            )));
+          }
+        }
+        if [
+          0,
+          22,
+          80,
+          443,
+          crate::link::FRPS_PORT,
+          7700,
+          wharf_api_types::agent::PROBE_PORT,
+          wharf_api_types::agent::REST_SERVER_PORT,
+          wharf_api_types::egress::SERVE_PORT,
+          wharf_api_types::egress::LOCAL_PORT,
+        ]
+        .contains(&listen)
+          || (30000..=39999).contains(&listen)
+          || self.gateways.values().any(|g| {
+            g.spec.kind == GatewayKind::Caddy
+              && g.spec.server == *server
+              && (listen == g.spec.http_port.unwrap_or(80)
+                || listen == g.spec.https_port.unwrap_or(443))
+          })
+        {
+          return Err(ApiError::invalid(format!(
+            "入口 {name} 的四层转发端口 {listen} 被 Wharf 占用或保留，换一个"
+          )));
+        }
+        if !forwards.insert((server, f.udp, listen)) {
+          return Err(ApiError::invalid(format!(
+            "服务器 {server} 上的端口 {listen} 被多个四层转发使用"
+          )));
+        }
+        for (svc, service) in &self.services {
+          if service.spec.server == *server
+            && service.host_ports.values().any(|p| *p == listen)
+          {
+            return Err(ApiError::invalid(format!(
+              "服务器 {server} 上的端口 {listen} 已经给了服务 {svc}"
+            )));
+          }
+        }
       }
       if let Some(page) = &gateway.spec.error_page {
         check_error_page(name, page)?;
@@ -910,6 +1035,85 @@ impl World {
         );
       }
       self.check_route_gateway(host, &route.spec)?;
+      if route.spec.rate_limit.is_some() || route.spec.block_scanners
+      {
+        if route.spec.redirect.is_some() {
+          return Err(ApiError::invalid(format!(
+            "路由 {host}：跳转不能设置限速和拦截扫描"
+          )));
+        }
+        if self.route_gateways(&route.spec).iter().any(|name| {
+          self.gateways[*name].spec.kind
+            == GatewayKind::CloudflareTunnel
+        }) {
+          return Err(ApiError::invalid(format!(
+            "路由 {host}：限速和拦截扫描只支持 caddy 网关"
+          )));
+        }
+      }
+      if route
+        .spec
+        .rate_limit
+        .is_some_and(|n| !(10..=100000).contains(&n))
+      {
+        return Err(ApiError::invalid(format!(
+          "路由 {host} 的限速要在每分钟 10 到 100000 次之间"
+        )));
+      }
+      if route.spec.internal {
+        if route.spec.redirect.is_some() {
+          return Err(ApiError::invalid(format!(
+            "路由 {host}：跳转不能设成只在内网访问"
+          )));
+        }
+        if self.route_gateways(&route.spec).iter().any(|name| {
+          self.gateways[*name].spec.kind
+            == GatewayKind::CloudflareTunnel
+        }) {
+          return Err(ApiError::invalid(format!(
+            "路由 {host}：只在内网访问只支持 caddy 网关"
+          )));
+        }
+        if route.spec.backup_gateway.is_some() {
+          return Err(ApiError::invalid(format!(
+            "路由 {host}：只在内网访问的域名不能设备用入口"
+          )));
+        }
+        if let Some(gw) = self.route_gateway(&route.spec)
+          && self.gateways[gw].spec.wildcard.contains(host)
+        {
+          return Err(ApiError::invalid(format!(
+            "路由 {host}：它是入口 {gw} 泛域名证书的 zone 本身，不能设成只在内网访问"
+          )));
+        }
+      }
+      if route.spec.expires_at.is_some() {
+        if route.spec.service.is_empty() {
+          return Err(ApiError::invalid(format!(
+            "路由 {host}：临时分享只能指向服务"
+          )));
+        }
+        if route.spec.backup_gateway.is_some()
+          || self.route_gateways(&route.spec).iter().any(|name| {
+            self.gateways[*name].spec.kind
+              == GatewayKind::CloudflareTunnel
+          })
+        {
+          return Err(ApiError::invalid(format!(
+            "路由 {host}：临时分享只支持 caddy 入口，不能设备用入口"
+          )));
+        }
+        if let Some(gw) = self.route_gateway(&route.spec)
+          && !self.gateways[gw].spec.wildcard.iter().any(|zone| {
+            host.split_once('.').is_some_and(|(_, rest)| rest == zone)
+          })
+        {
+          return Err(ApiError::invalid(format!(
+            "路由 {host}：临时分享的域名要在入口 {gw} 的泛域名证书下"
+          )).suggest(format!("wharf gateway wildcard {gw} --zone <zone> --apply"))
+            .with_hint(format!("要关掉泛域名证书，先删掉这个分享：wharf route rm {host} --apply")));
+        }
+      }
       if let Some(target) = &route.spec.redirect {
         self.check_redirect(host, &route.spec, target)?;
         continue;
@@ -966,6 +1170,12 @@ impl World {
           route.spec.service
         )));
       }
+      if service.spec.ports.iter().any(|p| p.name == port && p.udp) {
+        let svc = &route.spec.service;
+        return Err(ApiError::invalid(format!(
+          "路由 {host}：服务 {svc} 的端口 {port} 是 UDP，不能给域名用"
+        )));
+      }
       self.validate_paths(host, &route.spec)?;
     }
     Ok(())
@@ -1006,6 +1216,16 @@ impl World {
         }
       }
       self.services.get_mut(name).unwrap().host_ports = assigned;
+    }
+    for gateway in self.gateways.values() {
+      if gateway.spec.kind == GatewayKind::Caddy {
+        for f in &gateway.spec.layer4 {
+          used
+            .entry(gateway.spec.server.clone())
+            .or_default()
+            .insert(f.listen);
+        }
+      }
     }
     for (name, port_name) in pending {
       let server = self.services[&name].spec.server.clone();
@@ -1556,6 +1776,199 @@ mod tests {
   use wharf_api_types::spec::PortSpec;
 
   #[test]
+  fn share_route_checks() {
+    let mut w = sample();
+    let server = w.servers.remove("node1").unwrap();
+    w.servers.insert("s1".into(), server);
+    w.apply_changes(&[
+      Change::UpsertGateway { name: "edge".into(), spec: serde_json::from_value(json!({"kind":"caddy","server":"s1","default":true,"wildcard":["example.com"]})).unwrap() },
+      Change::UpsertService { name: "app".into(), spec: image_service("s1"), adopt: None },
+    ]).unwrap();
+    w.allocate_ports().unwrap();
+    let now = chrono::Utc::now().timestamp_millis();
+    let spec: RouteSpec = serde_json::from_value(json!({"hostname":"a.example.com","service":"app","expires_at":now + 60000})).unwrap();
+    let upsert = |spec| Change::UpsertRoute { spec };
+    assert!(
+      w.apply_changes(&[upsert(RouteSpec {
+        expires_at: Some(now - 1),
+        ..spec.clone()
+      })])
+      .unwrap_err()
+      .message
+      .contains("到期时间已经过了")
+    );
+    assert_eq!(
+      w.apply_changes(&[upsert(RouteSpec {
+        expires_at: Some(now + 8 * 86400000),
+        ..spec.clone()
+      })])
+      .unwrap_err()
+      .message,
+      "临时分享最长 7 天"
+    );
+    w.apply_changes(&[upsert(spec.clone())]).unwrap();
+    w.validate().unwrap();
+    w.routes
+      .get_mut("a.example.com")
+      .unwrap()
+      .spec
+      .service
+      .clear();
+    w.routes.get_mut("a.example.com").unwrap().spec.upstream =
+      Some("127.0.0.1:80".into());
+    assert_eq!(
+      w.validate().unwrap_err().message,
+      "路由 a.example.com：临时分享只能指向服务"
+    );
+    w.routes.get_mut("a.example.com").unwrap().spec = spec.clone();
+    w.gateways.get_mut("edge").unwrap().spec.wildcard.clear();
+    assert_eq!(
+      w.validate().unwrap_err().message,
+      "路由 a.example.com：临时分享的域名要在入口 edge 的泛域名证书下"
+    );
+    w.gateways.get_mut("edge").unwrap().spec.wildcard =
+      vec!["example.com".into()];
+    let expired = RouteSpec {
+      expires_at: Some(now - 1),
+      ..spec.clone()
+    };
+    w.routes.get_mut("a.example.com").unwrap().spec = expired.clone();
+    w.validate().unwrap();
+    w.apply_changes(&[
+      upsert(expired),
+      upsert(RouteSpec {
+        hostname: "b.example.com".into(),
+        ..spec.clone()
+      }),
+      upsert(RouteSpec {
+        hostname: "c.example.com".into(),
+        expires_at: None,
+        ..spec
+      }),
+    ])
+    .unwrap();
+    assert_eq!(crate::share::expired(&w, now), vec!["a.example.com"]);
+  }
+
+  #[test]
+  fn internal_route_checks() {
+    let mut w = World::default();
+    for server in ["s1", "s2"] {
+      w.servers.insert(
+        server.into(),
+        ServerRow {
+          settings: Default::default(),
+          version: 1,
+        },
+      );
+    }
+    for (name, server) in [("edge", "s1"), ("backup", "s2")] {
+      w.gateways.insert(
+        name.into(),
+        GatewayRow {
+          spec: serde_json::from_value(
+            serde_json::json!({"kind":"caddy", "server":server}),
+          )
+          .unwrap(),
+          version: 1,
+        },
+      );
+    }
+    let valid: RouteSpec = serde_json::from_value(serde_json::json!({
+      "hostname":"i.example.com", "gateway":"edge", "upstream":"127.0.0.1:8080", "internal":true
+    })).unwrap();
+    w.routes.insert(
+      "i.example.com".into(),
+      RouteRow {
+        id: "r1".into(),
+        spec: valid.clone(),
+        version: 1,
+      },
+    );
+    w.validate().unwrap();
+    w.routes.get_mut("i.example.com").unwrap().spec.redirect =
+      Some("https://example.com".into());
+    assert_eq!(
+      w.validate().unwrap_err().message,
+      "路由 i.example.com：跳转不能设成只在内网访问"
+    );
+    w.routes.get_mut("i.example.com").unwrap().spec = valid.clone();
+    w.gateways.get_mut("edge").unwrap().spec.kind =
+      GatewayKind::CloudflareTunnel;
+    w.gateways.get_mut("edge").unwrap().spec.account =
+      Some("cf".into());
+    assert_eq!(
+      w.validate().unwrap_err().message,
+      "路由 i.example.com：只在内网访问只支持 caddy 网关"
+    );
+    w.gateways.get_mut("edge").unwrap().spec.kind =
+      GatewayKind::Caddy;
+    w.gateways.get_mut("edge").unwrap().spec.account = None;
+    w.routes
+      .get_mut("i.example.com")
+      .unwrap()
+      .spec
+      .backup_gateway = Some("backup".into());
+    assert_eq!(
+      w.validate().unwrap_err().message,
+      "路由 i.example.com：只在内网访问的域名不能设备用入口"
+    );
+    w.routes.get_mut("i.example.com").unwrap().spec = valid;
+    w.gateways.get_mut("edge").unwrap().spec.wildcard =
+      vec!["i.example.com".into()];
+    assert_eq!(
+      w.validate().unwrap_err().message,
+      "路由 i.example.com：它是入口 edge 泛域名证书的 zone 本身，不能设成只在内网访问"
+    );
+  }
+
+  #[test]
+  fn wildcard_checks() {
+    let mut w = sample();
+    let spec: GatewaySpec = serde_json::from_value(
+            serde_json::json!({"kind":"caddy", "server":"node1", "wildcard":["example.com"]}),
+        )
+        .unwrap();
+    w.gateways
+      .insert("edge".into(), GatewayRow { spec, version: 1 });
+    w.validate().unwrap();
+    let valid = w.gateways["edge"].spec.clone();
+    {
+      let spec = &mut w.gateways.get_mut("edge").unwrap().spec;
+      spec.kind = GatewayKind::CloudflareTunnel;
+      spec.account = Some("cf".into());
+    }
+    assert_eq!(
+      w.validate().unwrap_err().message,
+      "网关 edge：泛域名证书只适用于 caddy 网关"
+    );
+    w.gateways.get_mut("edge").unwrap().spec = GatewaySpec {
+      tls: GatewayTls::Off,
+      ..valid.clone()
+    };
+    assert_eq!(
+      w.validate().unwrap_err().message,
+      "入口 edge 只走 HTTP，不能开泛域名证书"
+    );
+    w.gateways.get_mut("edge").unwrap().spec = GatewaySpec {
+      wildcard: vec!["*.example.com".into()],
+      ..valid.clone()
+    };
+    assert_eq!(
+      w.validate().unwrap_err().message,
+      "入口 edge 的泛域名证书写 zone 本身，例如 example.com"
+    );
+    w.gateways.get_mut("edge").unwrap().spec = GatewaySpec {
+      wildcard: vec!["example.com".into(), "example.com".into()],
+      ..valid
+    };
+    assert_eq!(
+      w.validate().unwrap_err().message,
+      "入口 edge 的泛域名证书 example.com 写了两次"
+    );
+  }
+
+  #[test]
   fn checks_bookmark_fields() {
     let spec = BookmarkSpec {
       title: " 路由器 ".into(),
@@ -1639,10 +2052,104 @@ mod tests {
         name: "http".into(),
         container: Some(80),
         host: None,
+        udp: false,
       }],
       env: Default::default(),
       volumes: vec![],
     }
+  }
+
+  #[test]
+  fn layer4_checks() {
+    let mut w = sample();
+    let server = w.servers.remove("node1").unwrap();
+    w.servers.insert("s1".into(), server);
+    let gw: GatewaySpec = serde_json::from_value(
+      json!({"kind":"caddy","server":"s1","default":true}),
+    )
+    .unwrap();
+    w.apply_changes(&[
+      Change::UpsertGateway {
+        name: "edge".into(),
+        spec: gw,
+      },
+      Change::UpsertService {
+        name: "app".into(),
+        spec: image_service("s1"),
+        adopt: None,
+      },
+    ])
+    .unwrap();
+    w.allocate_ports().unwrap();
+    let forward = |listen, udp| {
+      serde_json::from_value(json!({"listen":listen,"udp":udp,"upstream":"127.0.0.1:9999"})).unwrap()
+    };
+    w.gateways.get_mut("edge").unwrap().spec.layer4 =
+      vec![forward(443, false)];
+    assert!(
+      w.validate()
+        .unwrap_err()
+        .message
+        .contains("被 Wharf 占用或保留")
+    );
+    w.gateways.get_mut("edge").unwrap().spec.layer4 =
+      vec![forward(15432, false), forward(15432, false)];
+    assert!(
+      w.validate()
+        .unwrap_err()
+        .message
+        .contains("被多个四层转发使用")
+    );
+    w.gateways.get_mut("edge").unwrap().spec.layer4 =
+      vec![forward(20000, false)];
+    assert!(
+      w.validate()
+        .unwrap_err()
+        .message
+        .contains("已经给了服务 app")
+    );
+    w.gateways.get_mut("edge").unwrap().spec.layer4 = vec![
+      serde_json::from_value(
+        json!({"listen":15432,"udp":true,"service":"app"}),
+      )
+      .unwrap(),
+    ];
+    assert!(
+      w.validate()
+        .unwrap_err()
+        .message
+        .contains("协议和服务 app 的端口 http 不一致")
+    );
+    w.gateways.get_mut("edge").unwrap().spec.layer4 =
+      vec![forward(15432, false), forward(15432, true)];
+    w.validate().unwrap();
+    w.services.get_mut("app").unwrap().spec.ports[0].udp = true;
+    let route: RouteSpec = serde_json::from_value(
+      json!({"hostname":"example.com","service":"app"}),
+    )
+    .unwrap();
+    w.apply_changes(&[Change::UpsertRoute { spec: route }])
+      .unwrap();
+    assert!(
+      w.validate()
+        .unwrap_err()
+        .message
+        .contains("是 UDP，不能给域名用")
+    );
+    w.routes.clear();
+    w.services.clear();
+    w.gateways.get_mut("edge").unwrap().spec.layer4 =
+      vec![forward(20000, false)];
+    w.validate().unwrap();
+    w.apply_changes(&[Change::UpsertService {
+      name: "new".into(),
+      spec: image_service("s1"),
+      adopt: None,
+    }])
+    .unwrap();
+    w.allocate_ports().unwrap();
+    assert_eq!(w.services["new"].host_ports["http"], 20001);
+    w.validate().unwrap();
   }
 
   #[test]
@@ -1772,6 +2279,52 @@ mod tests {
   }
 
   #[test]
+  fn route_guard_checks() {
+    let mut w = sample();
+    w.apply_changes(&[
+      Change::UpsertGateway {
+        name: "edge".into(),
+        spec: serde_json::from_value(json!({
+          "kind": "caddy", "server": "node1", "default": true
+        }))
+        .unwrap(),
+      },
+      Change::UpsertRoute {
+        spec: serde_json::from_value(json!({
+          "hostname": "a.example.com", "upstream": "127.0.0.1:80",
+          "rate_limit": 10
+        }))
+        .unwrap(),
+      },
+    ])
+    .unwrap();
+    w.validate().unwrap();
+    w.routes.get_mut("a.example.com").unwrap().spec.redirect =
+      Some("https://b.example.com".into());
+    assert_eq!(
+      w.validate().unwrap_err().message,
+      "路由 a.example.com：跳转不能设置限速和拦截扫描"
+    );
+    w.routes.get_mut("a.example.com").unwrap().spec.redirect = None;
+    w.gateways.get_mut("edge").unwrap().spec.kind =
+      GatewayKind::CloudflareTunnel;
+    w.gateways.get_mut("edge").unwrap().spec.account =
+      Some("cf".into());
+    assert_eq!(
+      w.validate().unwrap_err().message,
+      "路由 a.example.com：限速和拦截扫描只支持 caddy 网关"
+    );
+    w.gateways.get_mut("edge").unwrap().spec.kind =
+      GatewayKind::Caddy;
+    w.routes.get_mut("a.example.com").unwrap().spec.rate_limit =
+      Some(9);
+    assert_eq!(
+      w.validate().unwrap_err().message,
+      "路由 a.example.com 的限速要在每分钟 10 到 100000 次之间"
+    );
+  }
+
+  #[test]
   fn route_needs_gateway_and_port() {
     let mut w = sample();
     w.apply_changes(&[
@@ -1792,6 +2345,10 @@ mod tests {
           upstream: None,
           link: Default::default(),
           redirect: None,
+          rate_limit: None,
+          block_scanners: false,
+          internal: false,
+          expires_at: None,
         },
       },
     ])
@@ -1812,6 +2369,8 @@ mod tests {
         image: None,
         account: None,
         error_page: None,
+        wildcard: vec![],
+        layer4: vec![],
       },
     }])
     .unwrap();
@@ -1852,6 +2411,8 @@ mod tests {
       image: None,
       account: None,
       error_page: None,
+      wildcard: vec![],
+      layer4: vec![],
     };
     let route = |backup: &str| RouteSpec {
       hostname: "who.example.com".into(),
@@ -1864,6 +2425,10 @@ mod tests {
       upstream: None,
       link: Default::default(),
       redirect: None,
+      rate_limit: None,
+      block_scanners: false,
+      internal: false,
+      expires_at: None,
     };
     w.apply_changes(&[
       Change::UpsertService {

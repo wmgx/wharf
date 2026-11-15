@@ -18,7 +18,12 @@ use crate::world::{ServerRow, World, gateway_project};
 /// 网关默认镜像：官方 Caddy 加 layer4、限速、Cloudflare DNS 插件（deploy/caddy/Dockerfile）。
 /// 标签只在 Caddy 或插件版本变化时改，改了会重建所有没指定镜像的 caddy 网关。
 pub const DEFAULT_CADDY_IMAGE: &str =
-  "ghcr.io/wmgx/wharf-caddy:2.11.9-1";
+  "ghcr.io/wmgx/wharf-caddy:2.11.9-2";
+
+/// Caddyfile 里 acme-dns 密码的占位，执行时换成入口的密钥。
+pub const ACME_DNS_KEY: &str = "[[WHARF_ACME_DNS_KEY]]";
+/// Caddyfile 里控制面地址的占位，执行时换成 join::default_url。
+pub const ACME_DNS_URL: &str = "[[WHARF_ACME_DNS_URL]]";
 pub const DEFAULT_CLOUDFLARED_IMAGE: &str =
   "cloudflare/cloudflared:2026.9.3";
 /// 隧道连接器 compose 里 token 的占位，执行时才替换，不进计划、不算进哈希。
@@ -27,6 +32,8 @@ pub const TUNNEL_TOKEN_SECRET: &str = "WHARF_TUNNEL_TOKEN";
 const CADDY_ADMIN: &str = "unix//config/caddy-admin.sock";
 const UPSTREAM_TRY_DURATION: &str = "8s";
 const UPSTREAM_TRY_INTERVAL: &str = "250ms";
+pub const SCANNER_PATHS: &str = "/.env /.env.* /.git/* /.svn/* /.aws/* /.DS_Store /wp-login.php /wp-admin /wp-admin/* /xmlrpc.php /phpmyadmin/* /vendor/phpunit/* /cgi-bin/* /boaform/* /HNAP1";
+pub const SCANNER_UA: &str = "(?i)(sqlmap|nikto|nmap|masscan|zgrab|nuclei|wpscan|dirbuster|gobuster|ffuf|feroxbuster|acunetix|netsparker)";
 
 pub fn hash(content: &str) -> String {
   hex::encode(Sha256::digest(content.as_bytes()))
@@ -429,9 +436,14 @@ pub fn service_compose(
         else {
           continue;
         };
-        service.ports.push(format!("127.0.0.1:{host}:{container}"));
+        let protocol = if port.udp { "/udp" } else { "" };
+        service
+          .ports
+          .push(format!("127.0.0.1:{host}:{container}{protocol}"));
         for ip in bind_ips {
-          service.ports.push(format!("{ip}:{host}:{container}"));
+          service
+            .ports
+            .push(format!("{ip}:{host}:{container}{protocol}"));
         }
       }
       service.volumes = spec
@@ -784,7 +796,7 @@ pub fn frpc_compose(
 }
 
 /// 一条 Caddy 站点：hostname → 上游。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Site {
   pub hostname: String,
   pub upstream: String,
@@ -794,6 +806,18 @@ pub struct Site {
   pub paths: Vec<(String, String)>,
   /// 跳转目标。有值时这个站点只做跳转，`upstream`、`auth`、`paths` 不用。
   pub redirect: Option<String>,
+  /// 每分钟限速次数，没开是 `None`。
+  pub rate_limit: Option<u32>,
+  /// 拦截常见扫描。
+  pub block_scanners: bool,
+  /// 只放行内网来源。
+  pub internal: bool,
+  /// 临时分享的到期时间（毫秒），过了就断开。
+  pub expires_at: Option<i64>,
+  /// 泛域名站点：只签证书，未匹配具体域名的请求直接断开。
+  pub wildcard: bool,
+  /// DNS 验证的 subdomain（zone 或域名本身）。
+  pub dns: Option<String>,
 }
 
 /// 内置的错误页。
@@ -824,10 +848,17 @@ fn error_snippet(spec: &GatewaySpec) -> String {
   out
 }
 
+fn dns_tls(gateway: &str, subdomain: &str) -> String {
+  format!(
+    "\ttls {{\n\t\tdns acmedns {{\n\t\t\tusername {gateway}\n\t\t\tpassword {ACME_DNS_KEY}\n\t\t\tsubdomain {subdomain}\n\t\t\tserver_url {ACME_DNS_URL}\n\t\t}}\n\t}}\n"
+  )
+}
+
 pub fn caddyfile(
   name: &str,
   spec: &GatewaySpec,
   sites: &[Site],
+  forwards: &[(bool, u16, String)],
   link: bool,
 ) -> String {
   let mut out = format!(
@@ -847,11 +878,35 @@ pub fn caddyfile(
     GatewayTls::Internal => out.push_str("\tlocal_certs\n"),
     GatewayTls::Off => out.push_str("\tauto_https off\n"),
   }
+  if sites
+    .iter()
+    .any(|s| s.redirect.is_none() && s.rate_limit.is_some())
+  {
+    out.push_str("\torder rate_limit before basic_auth\n");
+  }
+  if sites.iter().any(|s| s.internal || s.expires_at.is_some()) {
+    out.push_str("\torder abort before basic_auth\n");
+  }
+  if !forwards.is_empty() {
+    out.push_str("\tlayer4 {\n");
+    let mut forwards = forwards.to_vec();
+    forwards.sort_by_key(|(udp, listen, _)| (*udp, *listen));
+    for (udp, listen, upstream) in forwards {
+      let protocol = if udp { "udp/" } else { "" };
+      out.push_str(&format!("\t\t{protocol}:{listen} {{\n\t\t\troute {{\n\t\t\t\tproxy {protocol}{upstream}\n\t\t\t}}\n\t\t}}\n"));
+    }
+    out.push_str("\t}\n");
+  }
   out.push_str("}\n");
   out.push_str(&error_snippet(spec));
   out.push_str(&format!(
     "\n(wharf_upstream) {{\n\tlb_try_duration {UPSTREAM_TRY_DURATION}\n\tlb_try_interval {UPSTREAM_TRY_INTERVAL}\n}}\n"
   ));
+  if sites.iter().any(|s| s.block_scanners) {
+    out.push_str(&format!(
+      "\n(wharf_scanners) {{\n\t@wharf_scanner_path path {SCANNER_PATHS}\n\t@wharf_scanner_ua header_regexp User-Agent \"{SCANNER_UA}\"\n\trespond @wharf_scanner_path 404\n\trespond @wharf_scanner_ua 404\n}}\n"
+    ));
+  }
   out.push_str("\nimport /etc/caddy/extra.d/*.caddy\n");
   let scheme = match spec.tls {
     GatewayTls::Off => "http://",
@@ -861,6 +916,13 @@ pub fn caddyfile(
   sites.sort_by(|a, b| a.hostname.cmp(&b.hostname));
   for site in sites {
     out.push_str(&format!("\n{scheme}{} {{\n", site.hostname));
+    if site.wildcard {
+      if let Some(subdomain) = &site.dns {
+        out.push_str(&dns_tls(name, subdomain));
+      }
+      out.push_str("\tabort\n}\n");
+      continue;
+    }
     if let Some(target) = &site.redirect {
       out.push_str(&format!(
         "\tredir {target}{{uri}} permanent\n}}\n"
@@ -868,6 +930,27 @@ pub fn caddyfile(
       continue;
     }
     out.push_str("\timport wharf_errors\n");
+    if let Some(ms) = site.expires_at {
+      out.push_str(&format!(
+        "\t@wharf_expired expression `int({{time.now.unix}}) >= {}`\n\tabort @wharf_expired\n",
+        ms / 1000
+      ));
+    }
+    if let Some(subdomain) = &site.dns {
+      out.push_str(&dns_tls(name, subdomain));
+    }
+    if site.internal {
+      out.push_str("\t@wharf_outside not remote_ip private_ranges 100.64.0.0/10\n\tabort @wharf_outside\n");
+    }
+    if site.block_scanners {
+      out.push_str("\timport wharf_scanners\n");
+    }
+    if let Some(n) = site.rate_limit {
+      let zone = site.hostname.replace('.', "_");
+      out.push_str(&format!(
+        "\trate_limit {{\n\t\tzone wharf_{zone} {{\n\t\t\tkey {{remote_host}}\n\t\t\tevents {n}\n\t\t\twindow 1m\n\t\t}}\n\t}}\n"
+      ));
+    }
     if let Some(a) = &site.auth {
       out.push_str(&format!(
         "\tbasic_auth {{\n\t\t{} {}\n\t}}\n",
@@ -919,6 +1002,7 @@ mod tests {
         name: "http".into(),
         container: Some(80),
         host: None,
+        udp: false,
       }],
       env: BTreeMap::from([
         ("A".to_string(), "x$y".to_string()),
@@ -928,6 +1012,179 @@ mod tests {
         name: "data".into(),
         target: "/data".into(),
       }],
+    }
+  }
+
+  #[test]
+  fn caddyfile_share_expires() {
+    let gw: GatewaySpec =
+      serde_json::from_str(r#"{"kind":"caddy","server":"s1"}"#)
+        .unwrap();
+    let mut site = Site {
+      hostname: "a.example.com".into(),
+      expires_at: Some(1_800_000_000_000),
+      ..Default::default()
+    };
+    let out = caddyfile("edge", &gw, &[site.clone()], &[], false);
+    assert_eq!(
+      out.matches("order abort before basic_auth").count(),
+      1
+    );
+    assert!(out.contains(
+      "@wharf_expired expression `int({time.now.unix}) >= 1800000000`"
+    ));
+    assert!(out.contains("abort @wharf_expired"));
+    assert!(
+      out.find("import wharf_errors").unwrap()
+        < out.find("@wharf_expired").unwrap()
+    );
+    site.expires_at = None;
+    assert!(
+      !caddyfile("edge", &gw, &[site], &[], false)
+        .contains("wharf_expired")
+    );
+  }
+
+  #[test]
+  fn caddyfile_internal_site() {
+    let gw: GatewaySpec =
+      serde_json::from_str(r#"{"kind":"caddy","server":"s1"}"#)
+        .unwrap();
+    let mut site = Site {
+      hostname: "i.example.com".into(),
+      upstream: "127.0.0.1:21000".into(),
+      internal: true,
+      dns: Some("i.example.com".into()),
+      ..Default::default()
+    };
+    let out = caddyfile("edge", &gw, &[site.clone()], &[], false);
+    assert!(out.contains("dns acmedns {"));
+    assert!(out.contains("@wharf_outside not remote_ip private_ranges 100.64.0.0/10\n\tabort @wharf_outside"));
+    assert!(
+      out.find("import wharf_errors").unwrap()
+        < out.find("\ttls {").unwrap()
+    );
+    assert!(
+      out.find("\ttls {").unwrap()
+        < out.find("@wharf_outside").unwrap()
+    );
+    assert_eq!(
+      out.matches("order abort before basic_auth").count(),
+      1
+    );
+    site.dns = None;
+    let out = caddyfile("edge", &gw, &[site.clone()], &[], false);
+    assert!(out.contains("abort @wharf_outside"));
+    assert!(!out.contains("dns acmedns"));
+    site.internal = false;
+    let out = caddyfile("edge", &gw, &[site], &[], false);
+    assert!(!out.contains("wharf_outside"));
+    assert!(!out.contains("dns acmedns"));
+    assert!(!out.contains("order abort"));
+  }
+
+  #[test]
+  fn caddyfile_layer4_only_when_used() {
+    let gw: GatewaySpec = serde_json::from_value(
+      serde_json::json!({"kind":"caddy","server":"s1"}),
+    )
+    .unwrap();
+    let sites = vec![Site {
+      hostname: "example.com".into(),
+      upstream: "127.0.0.1:20005".into(),
+      ..Default::default()
+    }];
+    let empty = caddyfile("edge", &gw, &sites, &[], false);
+    assert!(!empty.contains("layer4"));
+    let out = caddyfile(
+      "edge",
+      &gw,
+      &sites,
+      &[
+        (false, 15432, "127.0.0.1:20005".into()),
+        (false, 2222, "127.0.0.1:20007".into()),
+        (true, 27015, "127.0.0.1:20006".into()),
+      ],
+      false,
+    );
+    assert_eq!(out.matches("layer4 {").count(), 1);
+    assert!(
+      out.find(":2222 {").unwrap() < out.find(":15432 {").unwrap()
+    );
+    assert!(out.contains(
+      ":15432 {\n\t\t\troute {\n\t\t\t\tproxy 127.0.0.1:20005"
+    ));
+    assert!(out.contains("udp/:27015 {"));
+    assert!(out.contains("proxy udp/127.0.0.1:20006"));
+    assert_eq!(
+      &out[out.find("\nexample.com {").unwrap()..],
+      &empty[empty.find("\nexample.com {").unwrap()..]
+    );
+    let mut svc = spec();
+    svc.env.clear();
+    svc.ports.push(PortSpec {
+      name: "game".into(),
+      container: Some(27015),
+      host: None,
+      udp: true,
+    });
+    let compose = service_compose(
+      "app",
+      &svc,
+      &BTreeMap::from([
+        ("http".into(), 20005),
+        ("game".into(), 20006),
+      ]),
+      &["100.64.0.1".into()],
+      None,
+    )
+    .unwrap();
+    assert!(compose.contains("127.0.0.1:20006:27015/udp"));
+    assert!(compose.contains("100.64.0.1:20006:27015/udp"));
+    assert!(compose.contains("127.0.0.1:20005:80"));
+    assert!(!compose.contains("20005:80/"));
+  }
+
+  #[test]
+  fn caddyfile_wildcard_site() {
+    let mut gw: GatewaySpec =
+      serde_json::from_str(r#"{"kind":"caddy","server":"s1"}"#)
+        .unwrap();
+    let mut site = Site {
+      hostname: "*.example.com".into(),
+      wildcard: true,
+      dns: Some("example.com".into()),
+      ..Default::default()
+    };
+    let empty = caddyfile("edge", &gw, &[], &[], false);
+    let auto =
+      caddyfile("edge", &gw, std::slice::from_ref(&site), &[], false);
+    for text in [
+      "*.example.com {",
+      "dns acmedns {",
+      "username edge",
+      "password [[WHARF_ACME_DNS_KEY]]",
+      "subdomain example.com",
+      "server_url [[WHARF_ACME_DNS_URL]]",
+      "\tabort\n}",
+    ] {
+      assert!(auto.contains(text), "{text}");
+    }
+    assert!(auto.ends_with("\tabort\n}\n"));
+    gw.tls = GatewayTls::Internal;
+    site.dns = None;
+    let internal = caddyfile("edge", &gw, &[site], &[], false);
+    assert!(!internal.contains("acmedns"));
+    let global = |s: &str| {
+      s.split("\n(wharf_errors)").next().unwrap().to_string()
+    };
+    assert_eq!(global(&auto), global(&empty));
+    assert_eq!(
+      global(&internal),
+      global(&caddyfile("edge", &gw, &[], &[], false))
+    );
+    for out in [&empty, &auto, &internal] {
+      assert!(!out.contains("prefer_wildcard"));
     }
   }
 
@@ -1098,6 +1355,8 @@ mod tests {
       tls: GatewayTls::Auto,
       account: None,
       error_page: None,
+      wildcard: vec![],
+      layer4: vec![],
     };
     let out = caddyfile(
       "edge",
@@ -1109,6 +1368,7 @@ mod tests {
           auth: BasicAuth::parse("admin $2b$12$abc"),
           paths: vec![],
           redirect: None,
+          ..Default::default()
         },
         Site {
           hostname: "a.example.com".into(),
@@ -1116,8 +1376,10 @@ mod tests {
           auth: None,
           paths: vec![("/ws".into(), "127.0.0.1:17891".into())],
           redirect: None,
+          ..Default::default()
         },
       ],
+      &[],
       true,
     );
     assert!(out.contains(
@@ -1153,11 +1415,62 @@ mod tests {
         auth: None,
         paths: vec![],
         redirect: None,
+        ..Default::default()
       }],
+      &[],
       false,
     );
     assert!(out.contains("auto_https off"));
     assert!(out.contains("\nhttp://a.example.com {"));
+  }
+
+  #[test]
+  fn caddyfile_guard_per_site() {
+    let spec = serde_json::from_value(serde_json::json!({
+      "kind": "caddy", "server": "s1"
+    }))
+    .unwrap();
+    let out = caddyfile(
+      "edge",
+      &spec,
+      &[
+        Site {
+          hostname: "a.example.com".into(),
+          upstream: "127.0.0.1:1".into(),
+          rate_limit: Some(600),
+          block_scanners: true,
+          ..Default::default()
+        },
+        Site {
+          hostname: "b.example.com".into(),
+          upstream: "127.0.0.1:2".into(),
+          ..Default::default()
+        },
+      ],
+      &[],
+      false,
+    );
+    assert_eq!(
+      out.matches("order rate_limit before basic_auth").count(),
+      1
+    );
+    assert_eq!(out.matches("(wharf_scanners) {").count(), 1);
+    assert_eq!(out.matches("import wharf_scanners").count(), 1);
+    let a = out
+      .split("\na.example.com {\n")
+      .nth(1)
+      .unwrap()
+      .split("\nb.example.com {\n")
+      .next()
+      .unwrap();
+    assert!(a.contains("import wharf_scanners"));
+    assert!(a.contains("zone wharf_a_example_com {"));
+    assert!(a.contains("events 600"));
+    assert!(a.contains("window 1m"));
+    assert!(out.contains("b.example.com {\n\timport wharf_errors\n\treverse_proxy 127.0.0.1:2 {\n\t\timport wharf_upstream\n\t}\n}"));
+    assert!(!SCANNER_PATHS.contains(" / "));
+    assert!(!SCANNER_UA.contains("curl"));
+    assert!(!SCANNER_UA.contains("reqwest"));
   }
 
   #[test]
@@ -1172,6 +1485,7 @@ mod tests {
       auth: None,
       paths: vec![("/api".into(), "100.64.0.1:20001".into())],
       redirect: None,
+      ..Default::default()
     };
     let redirect = Site {
       hostname: "b.example.com".into(),
@@ -1179,7 +1493,7 @@ mod tests {
       paths: vec![],
       ..site.clone()
     };
-    let out = caddyfile("edge", &spec, &[site, redirect], true);
+    let out = caddyfile("edge", &spec, &[site, redirect], &[], true);
     assert_eq!(out.matches("import wharf_upstream").count(), 2);
     assert_eq!(out.matches("(wharf_upstream) {").count(), 1);
     assert!(out.contains("lb_try_duration 8s"));
@@ -1205,6 +1519,7 @@ mod tests {
           auth: None,
           paths: vec![],
           redirect: None,
+          ..Default::default()
         },
         Site {
           hostname: "b.example.com".into(),
@@ -1212,8 +1527,10 @@ mod tests {
           auth: None,
           paths: vec![],
           redirect: Some("https://a.example.com".into()),
+          ..Default::default()
         },
       ],
+      &[],
       false,
     );
     assert!(out.contains("(wharf_errors) {"));
@@ -1229,7 +1546,7 @@ mod tests {
       "error_page": "<p>x</p>\n\n<p>y</p>"
     }))
     .unwrap();
-    let out = caddyfile("edge", &spec, &[], false);
+    let out = caddyfile("edge", &spec, &[], &[], false);
     assert!(out.contains(
       "\t\t<p>x</p>\n\n\t\t<p>y</p>\n\t\tWHARF_ERROR_PAGE {err.status_code}\n"
     ));
@@ -1249,6 +1566,8 @@ mod tests {
       tls: GatewayTls::Auto,
       account: None,
       error_page: None,
+      wildcard: vec![],
+      layer4: vec![],
     };
     let out = caddyfile(
       "edge",
@@ -1259,7 +1578,9 @@ mod tests {
         auth: None,
         paths: vec![],
         redirect: Some("https://a.com".into()),
+        ..Default::default()
       }],
+      &[],
       false,
     );
     assert!(out.contains("\tredir https://a.com{uri} permanent\n"));
@@ -1279,6 +1600,8 @@ mod tests {
       tls: GatewayTls::Auto,
       account: Some("cf".into()),
       error_page: None,
+      wildcard: vec![],
+      layer4: vec![],
     };
     let out = tunnel_compose("cf", &spec);
     assert!(

@@ -293,6 +293,9 @@ pub struct PortSpec {
   /// image / build 来源选填，不填由系统从 20000 起自动分配。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub host: Option<u16>,
+  /// UDP 端口，只能用于四层转发，不能给域名用。默认 TCP。
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub udp: bool,
 }
 
 /// 目录挂载：宿主机 `/srv/<service>/<name>/` 挂到容器内 `target`。
@@ -473,6 +476,28 @@ pub struct GatewaySpec {
   /// 内容里可以写 `{err.status_code}`，显示时换成状态码。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub error_page: Option<String>,
+  /// caddy：签一张 *.<zone>，这个入口上 zone 下一级的域名都用它。
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub wildcard: Vec<String>,
+  /// caddy：四层转发，只经过入口所在机器，服务自己的端口不对公网开放。
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub layer4: Vec<Layer4Forward>,
+}
+
+/// 在入口机器上监听 TCP 或 UDP，原样转给服务。服务和上游二选一。
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct Layer4Forward {
+  pub listen: u16,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub udp: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub service: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub port: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub upstream: Option<String>,
 }
 
 /// 网关的证书方式。
@@ -539,6 +564,18 @@ pub struct RouteSpec {
   /// 和 `service`、`upstream` 三选一。只支持 caddy 网关。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub redirect: Option<String>,
+  /// 限速：同一个来源 IP 每分钟最多这么多次请求，超过的返回 429。只支持 caddy 网关。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub rate_limit: Option<u32>,
+  /// 拦截常见扫描：请求命中扫描路径或扫描器的 UA 时直接返回 404，不转给服务。只支持 caddy 网关。
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub block_scanners: bool,
+  /// 只在内网访问：DNS 指向入口所在机器的内网地址，证书用 DNS 验证签，入口只放行内网来源。只支持 caddy 网关。
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub internal: bool,
+  /// 临时分享：到这个时间（毫秒时间戳）以后，网关直接断开这个域名的请求；路由和 DNS 记录留着，等人删除。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub expires_at: Option<i64>,
 }
 
 /// 网关到服务的走法偏好。

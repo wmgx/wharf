@@ -132,6 +132,103 @@ async fn dispatch(
       )
       .await
     }
+    Command::Share {
+      name,
+      ttl,
+      port,
+      gateway,
+      zone,
+      apply,
+    } => {
+      let ttl = share_ttl(&ttl).map_err(ApiError::invalid)?;
+      let gateways: Vec<GatewayView> = c.get("/api/gateways").await?;
+      let gw = if let Some(name) = gateway {
+        gateways.iter().find(|g| g.name == name).ok_or_else(|| {
+          ApiError::not_found(format!("入口 {name} 不存在"))
+        })?
+      } else {
+        gateways.iter().find(|g| g.spec.default).ok_or_else(|| {
+          ApiError::invalid("没有默认入口，用 --gateway 指定")
+        })?
+      };
+      if gw.spec.kind != GatewayKind::Caddy
+        || gw.spec.wildcard.is_empty()
+      {
+        return Err(
+          ApiError::invalid(format!(
+            "入口 {} 没开泛域名证书，临时分享要用它",
+            gw.name
+          ))
+          .suggest(format!(
+            "wharf gateway wildcard {} --zone <zone> --apply",
+            gw.name
+          ))
+          .into(),
+        );
+      }
+      let zone = match zone {
+        Some(zone) if gw.spec.wildcard.contains(&zone) => zone,
+        Some(zone) => {
+          return Err(
+            ApiError::invalid(format!(
+              "入口 {} 没开 {zone} 的泛域名证书",
+              gw.name
+            ))
+            .into(),
+          );
+        }
+        None if gw.spec.wildcard.len() == 1 => {
+          gw.spec.wildcard[0].clone()
+        }
+        None => {
+          return Err(
+            ApiError::invalid(format!(
+              "入口 {} 开了多个泛域名证书，用 --zone 选一个：{}",
+              gw.name,
+              gw.spec.wildcard.join("、")
+            ))
+            .into(),
+          );
+        }
+      };
+      let mut bytes = [0u8; 10];
+      getrandom::fill(&mut bytes).map_err(|e| {
+        ApiError::internal(format!("生成分享域名失败：{e}"))
+      })?;
+      let label: String = bytes
+        .iter()
+        .map(|b| {
+          b"0123456789abcdefghijklmnopqrstuvwxyz"[(b % 36) as usize]
+            as char
+        })
+        .collect();
+      let hostname = format!("{label}.{zone}");
+      let expires = chrono::Utc::now()
+        + chrono::Duration::seconds(ttl.as_secs() as i64);
+      if !j {
+        println!(
+          "分享地址 https://{hostname}，{} 到期",
+          expires.with_timezone(&chrono::Local).format("%m-%d %H:%M")
+        );
+      }
+      let spec = RouteSpec {
+        hostname,
+        service: name,
+        port,
+        gateway: Some(gw.name.clone()),
+        expires_at: Some(expires.timestamp_millis()),
+        upstream: None,
+        redirect: None,
+        backup_gateway: None,
+        auth: false,
+        paths: vec![],
+        link: Default::default(),
+        rate_limit: None,
+        block_scanners: false,
+        internal: false,
+      };
+      changes(c, vec![Change::UpsertRoute { spec }], apply, j).await
+    }
     Command::Exec {
       server,
       timeout,
@@ -1208,12 +1305,14 @@ fn parse_port(s: &str) -> CliResult<PortSpec> {
   let (name, value) = parse_kv(s, "--port")?;
   let bad = || {
     ApiError::invalid(format!(
-      "--port {s} 格式不对，应为 http=80、http=80:20080，compose 来源写 http=:41773"
+      "--port {s} 格式不对，应为 http=80、http=80:20080，compose 来源写 http=:41773、UDP 写 game=27015/udp"
     ))
   };
+  let udp = value.ends_with("/udp");
+  let value = value.strip_suffix("/udp").unwrap_or(&value);
   let (port, host) = match value.split_once(':') {
     Some((p, h)) => (p, Some(h)),
-    None => (value.as_str(), None),
+    None => (value, None),
   };
   // compose 来源只有宿主机端口，写成 `http=:41773`。
   let container = match port.trim() {
@@ -1221,6 +1320,7 @@ fn parse_port(s: &str) -> CliResult<PortSpec> {
     p => Some(p.parse().map_err(|_| bad())?),
   };
   Ok(PortSpec {
+    udp,
     name,
     container,
     host: host
@@ -1638,6 +1738,7 @@ async fn service(
           name: "http".into(),
           container: Some(p),
           host: None,
+          udp: false,
         }];
       }
       for e in &env {
@@ -2035,6 +2136,72 @@ async fn gateway(
       changes(c, vec![Change::UpsertGateway { name, spec }], apply, j)
         .await
     }
+    GatewayCmd::Wildcard {
+      name,
+      zone,
+      off,
+      apply,
+    } => {
+      let mut spec = c
+        .get::<GatewayView>(&format!("/api/gateways/{}", seg(&name)))
+        .await?
+        .spec;
+      let zone =
+        zone.trim().trim_end_matches('.').to_ascii_lowercase();
+      if off {
+        spec.wildcard.retain(|z| z != &zone);
+      } else if !spec.wildcard.contains(&zone) {
+        spec.wildcard.push(zone);
+      }
+      spec.wildcard.sort();
+      spec.wildcard.dedup();
+      changes(c, vec![Change::UpsertGateway { name, spec }], apply, j)
+        .await
+    }
+    GatewayCmd::Forward {
+      name,
+      listen,
+      udp,
+      service,
+      port,
+      upstream,
+      rm,
+      apply,
+    } => {
+      let mut spec = c
+        .get::<GatewayView>(&format!("/api/gateways/{}", seg(&name)))
+        .await?
+        .spec;
+      let before = spec.layer4.len();
+      spec.layer4.retain(|f| f.listen != listen || f.udp != udp);
+      if rm {
+        if before == spec.layer4.len() {
+          let protocol = if udp { "UDP 端口" } else { "端口" };
+          return Err(
+            ApiError::invalid(format!(
+              "入口 {name} 上没有{protocol} {listen} 的四层转发"
+            ))
+            .into(),
+          );
+        }
+      } else {
+        if service.is_none() && upstream.is_none() {
+          return Err(
+            ApiError::invalid("要给 --service 或 --upstream").into(),
+          );
+        }
+        spec.layer4.push(wharf_api_types::spec::Layer4Forward {
+          listen,
+          udp,
+          service,
+          port,
+          upstream,
+        });
+      }
+      spec.layer4.sort_by_key(|f| (f.udp, f.listen));
+      changes(c, vec![Change::UpsertGateway { name, spec }], apply, j)
+        .await
+    }
     GatewayCmd::Add {
       name,
       server,
@@ -2084,13 +2251,16 @@ async fn gateway(
         }
         (_, account) => account,
       };
-      // 重复执行 add 修改已有的网关时，保留它的错误页。
-      let error_page = c
+      // 重复执行 add 时保留错误页、泛域名证书和四层转发。
+      let existing = c
         .get::<Vec<GatewayView>>("/api/gateways")
         .await?
         .into_iter()
         .find(|g| g.name == name)
-        .and_then(|g| g.spec.error_page);
+        .map(|g| g.spec);
+      let (error_page, wildcard, layer4) = existing
+        .map(|s| (s.error_page, s.wildcard, s.layer4))
+        .unwrap_or_default();
       let spec = GatewaySpec {
         kind,
         server,
@@ -2102,6 +2272,8 @@ async fn gateway(
         tls,
         account,
         error_page,
+        wildcard,
+        layer4,
       };
       changes(c, vec![Change::UpsertGateway { name, spec }], apply, j)
         .await
@@ -2119,14 +2291,30 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
       out(j, &v, |v| {
         for r in v {
           println!(
-            "{}  →  {}  经 {}",
+            "{}  →  {}  经 {}{}",
             r.url,
             r.spec
               .redirect
               .as_deref()
               .or(r.spec.upstream.as_deref())
               .unwrap_or(&r.spec.service),
-            r.gateway.as_deref().unwrap_or("-")
+            r.gateway.as_deref().unwrap_or("-"),
+            r.spec
+              .expires_at
+              .map(|ms| {
+                if ms <= chrono::Utc::now().timestamp_millis() {
+                  "（临时分享，已失效）".to_string()
+                } else {
+                  format!(
+                    "（临时分享，{} 到期）",
+                    chrono::DateTime::from_timestamp_millis(ms)
+                      .unwrap()
+                      .with_timezone(&chrono::Local)
+                      .format("%m-%d %H:%M")
+                  )
+                }
+              })
+              .unwrap_or_default()
           );
           for p in &r.spec.paths {
             println!(
@@ -2153,9 +2341,22 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
       auth,
       paths,
       tunnel,
+      internal,
       apply,
     } => {
+      let existing = c
+        .get::<Vec<RouteView>>("/api/routes")
+        .await?
+        .into_iter()
+        .find(|r| {
+          r.spec.hostname == hostname.trim().to_ascii_lowercase()
+        });
+      let guard = existing.filter(|_| redirect.is_none());
       let spec = RouteSpec {
+        expires_at: None,
+        internal,
+        rate_limit: guard.as_ref().and_then(|r| r.spec.rate_limit),
+        block_scanners: guard.is_some_and(|r| r.spec.block_scanners),
         link: if tunnel {
           wharf_api_types::spec::LinkMode::Tunnel
         } else {
@@ -2174,6 +2375,40 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
           .map(|p| parse_path_route(p))
           .collect::<Result<_, _>>()?,
       };
+      changes(c, vec![Change::UpsertRoute { spec }], apply, j).await
+    }
+    RouteCmd::Guard {
+      name,
+      rate,
+      no_rate,
+      block,
+      no_block,
+      apply,
+    } => {
+      if rate.is_none() && !no_rate && !block && !no_block {
+        return Err(
+          ApiError::invalid(
+            "至少给一个：--rate、--no-rate、--block、--no-block",
+          )
+          .into(),
+        );
+      }
+      let mut spec = c
+        .get::<Vec<RouteView>>("/api/routes")
+        .await?
+        .into_iter()
+        .find(|r| r.spec.hostname == name.trim().to_ascii_lowercase())
+        .ok_or_else(|| {
+          ApiError::not_found(format!("路由 {name} 不存在"))
+            .suggest("wharf route list")
+        })?
+        .spec;
+      if rate.is_some() || no_rate {
+        spec.rate_limit = rate;
+      }
+      if block || no_block {
+        spec.block_scanners = block;
+      }
       changes(c, vec![Change::UpsertRoute { spec }], apply, j).await
     }
     RouteCmd::Rm { hostname, apply } => {
@@ -2470,6 +2705,26 @@ fn parse_egress(
   }
   spec.validate().map_err(ApiError::invalid)?;
   Ok(Some(spec))
+}
+
+fn share_ttl(s: &str) -> Result<Duration, String> {
+  let s = s.trim();
+  let (num, unit) = s.split_at(
+    s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len()),
+  );
+  let n: u64 = num.parse().map_err(|_| format!("时长写错了：{s}"))?;
+  let factor = match unit {
+    "s" => 1,
+    "" | "m" => 60,
+    "h" => 3600,
+    "d" => 86400,
+    _ => return Err(format!("时长单位只能是 s、m、h、d：{s}")),
+  };
+  let secs = n
+    .checked_mul(factor)
+    .filter(|n| (60..=7 * 86400).contains(n))
+    .ok_or("时长要在 1 分钟到 7 天之间")?;
+  Ok(Duration::from_secs(secs))
 }
 
 #[cfg(test)]

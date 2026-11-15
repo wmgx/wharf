@@ -18,8 +18,8 @@ use wharf_api_types::{
     Action, Impact, Layer, Plan, PlanItem, PlanRequest, PlanStatus,
   },
   spec::{
-    BuildSource, EdgeAppSpec, EdgeKind, GatewayKind, NetworkMode,
-    RouteSpec, Source,
+    BuildSource, EdgeAppSpec, EdgeKind, GatewayKind, GatewayTls,
+    NetworkMode, RouteSpec, Source,
   },
   view::DataKind,
 };
@@ -670,6 +670,22 @@ fn config_items(
         let auth = route.is_some_and(|r| r.spec.auth);
         if route.is_some_and(|r| r.spec.redirect.is_some()) {
           (vec![], "新增跳转".to_string())
+        } else if let Some(ms) = route.and_then(|r| r.spec.expires_at)
+        {
+          let time = chrono::DateTime::from_timestamp_millis(ms)
+            .unwrap()
+            .with_timezone(
+              &chrono::FixedOffset::east_opt(8 * 3600).unwrap(),
+            );
+          (
+            vec![],
+            format!(
+              "新增临时分享，{} 到期失效",
+              time.format("%m-%d %H:%M")
+            ),
+          )
+        } else if route.is_some_and(|r| r.spec.internal) {
+          (vec![], "新增内网域名".to_string())
         } else if auth {
           (vec![], "新增路由".to_string())
         } else {
@@ -691,6 +707,38 @@ fn config_items(
           Some(d) => (vec![], format!("固定镜像版本 {d}，不重建")),
           None => (vec![], "更新内部记录，不重建".to_string()),
         }
+      }
+      (KIND_ROUTE, Action::Update)
+        if current
+          .routes
+          .get(name)
+          .is_some_and(|r| r.spec.internal)
+          && desired.routes.get(name).is_some_and(|r| {
+            !r.spec.internal
+              && !r.spec.auth
+              && r.spec.redirect.is_none()
+          }) =>
+      {
+        (
+          vec![Impact::Public],
+          "内网域名改成公网域名，未开启 auth".to_string(),
+        )
+      }
+      (KIND_ROUTE, Action::Update)
+        if current
+          .routes
+          .get(name)
+          .is_some_and(|r| r.spec.expires_at.is_some())
+          && desired.routes.get(name).is_some_and(|r| {
+            r.spec.expires_at.is_none()
+              && !r.spec.auth
+              && !r.spec.internal
+          }) =>
+      {
+        (
+          vec![Impact::Public],
+          "临时分享改成长期公网路由，未开启 auth".to_string(),
+        )
       }
       _ => (vec![], "修改配置".to_string()),
     };
@@ -1660,6 +1708,41 @@ fn gateway_items(
 ) -> Result<(), ApiError> {
   for name in desired.gateways.keys() {
     let gw = &desired.gateways[name];
+    if gw.spec.kind == GatewayKind::Caddy {
+      for zone in &gw.spec.wildcard {
+        if current
+          .gateways
+          .get(name)
+          .is_some_and(|g| g.spec.wildcard.contains(zone))
+        {
+          continue;
+        }
+        if gw.spec.tls == GatewayTls::Auto
+          && snap.account_for(zone).is_none()
+        {
+          return Err(ApiError::invalid(format!(
+                        "入口 {name} 的泛域名证书 *.{zone}：没有厂商账号管理 {zone}"
+                    ))
+                    .suggest("wharf account list"));
+        }
+        b.warnings.push(format!("入口 {name} 开启 *.{zone} 的泛域名证书：这个入口上 {zone} 下一级的域名都改用这张证书，签出来之前（DNS 验证通常几十秒）这些域名的 HTTPS 打不开（验证记录由控制面写）"));
+      }
+    }
+    if gw.spec.kind == GatewayKind::Caddy
+      && gw.spec.tls == GatewayTls::Auto
+    {
+      for (host, route) in &desired.routes {
+        if desired.route_gateway(&route.spec) == Some(name.as_str())
+          && route.spec.internal
+          && !host.split_once('.').is_some_and(|(_, zone)| {
+            gw.spec.wildcard.iter().any(|z| z == zone)
+          })
+          && snap.account_for(host).is_none()
+        {
+          b.warnings.push(format!("内网域名 {host} 的证书要用 DNS 验证签，但没有厂商账号管理它，证书签不出来"));
+        }
+      }
+    }
     let server = &gw.spec.server;
     let project = gateway_project(name);
     let r = snapshot::gateway_render(desired, net, name)?;
@@ -1725,7 +1808,25 @@ fn gateway_items(
         Some(_) => None,
       },
     };
-    if let Some((action, risk, reason)) = decision {
+    if let Some((action, mut risk, reason)) = decision {
+      if gw.spec.kind == GatewayKind::Caddy {
+        for f in &gw.spec.layer4 {
+          if current.gateways.get(name).is_some_and(|g| {
+            g.spec
+              .layer4
+              .iter()
+              .any(|old| old.udp == f.udp && old.listen == f.listen)
+          }) {
+            continue;
+          }
+          if !risk.contains(&Impact::Public) {
+            risk.push(Impact::Public);
+          }
+          let protocol = if f.udp { "UDP" } else { "TCP" };
+          let listen = f.listen;
+          b.warnings.push(format!("入口 {name} 在 {server} 上对公网开放 {protocol} 端口 {listen}（四层转发，没有登录保护）；云厂商的安全组、机器的防火墙要自己放行"));
+        }
+      }
       let (layer, reason) = match gw.spec.kind {
         GatewayKind::Caddy => (Layer::Gateway, reason),
         GatewayKind::CloudflareTunnel
@@ -1824,13 +1925,21 @@ fn desired_record(
     });
   }
   let server = &gw.server;
-  let ip = net.public_ip.get(server).ok_or_else(|| {
+  let ip = if route.spec.internal {
+    net.private.get(server).map(|a| &a.ip).ok_or_else(|| {
+      ApiError::invalid(format!("路由 {hostname} 只在内网访问，但入口 {gateway} 所在的 {server} 没有内网地址"))
+        .with_hint("装好组网或手动指定内网地址")
+        .suggest(format!("wharf server set {server} --private-ip <ip>"))
+    })?
+  } else {
+    net.public_ip.get(server).ok_or_else(|| {
     ApiError::invalid(format!(
       "网关 {gateway} 所在的服务器 {server} 没有公网 IP，{hostname} 的 DNS 无处可指"
     ))
     .with_hint("agent 没探测到公网 IP 时，可以手动设置")
     .suggest(format!("wharf server set {server} --public-ip <ip>"))
-  })?;
+  })?
+  };
   let record_type = if ip.parse::<std::net::Ipv6Addr>().is_ok() {
     "AAAA"
   } else {
@@ -2159,6 +2268,54 @@ mod tests {
   use super::*;
   use crate::world::{RouteRow, ServerRow, ServiceRow};
   use wharf_api_types::{agent::ContainerInfo, spec::Limits};
+
+  #[test]
+  fn internal_route_points_to_private_ip() {
+    let snap = Snapshot::default();
+    let mut w = world();
+    w.gateways.insert(
+      "edge".into(),
+      crate::world::GatewayRow {
+        spec: serde_json::from_value(
+          json!({"kind":"caddy", "server":"s1"}),
+        )
+        .unwrap(),
+        version: 1,
+      },
+    );
+    w.routes.insert("i.example.com".into(), crate::world::RouteRow {
+      id:"r1".into(), spec:serde_json::from_value(json!({"hostname":"i.example.com", "service":"app", "gateway":"edge"})).unwrap(), version:1,
+    });
+    let mut net = Net::default();
+    net.public_ip.insert("s1".into(), "203.0.113.1".into());
+    net.private.insert(
+      "s1".into(),
+      wharf_api_types::spec::PrivateAddr {
+        ip: "100.64.0.1".into(),
+        network: wharf_api_types::spec::PrivateNetwork::Tailscale,
+      },
+    );
+    assert_eq!(
+      desired_record(&snap, &w, &net, "i.example.com")
+        .unwrap()
+        .content,
+      "203.0.113.1"
+    );
+    w.routes.get_mut("i.example.com").unwrap().spec.internal = true;
+    assert_eq!(
+      desired_record(&snap, &w, &net, "i.example.com")
+        .unwrap()
+        .content,
+      "100.64.0.1"
+    );
+    net.private.clear();
+    assert_eq!(
+      desired_record(&snap, &w, &net, "i.example.com")
+        .unwrap_err()
+        .message,
+      "路由 i.example.com 只在内网访问，但入口 edge 所在的 s1 没有内网地址"
+    );
+  }
 
   #[test]
   fn names_only_changed_components() {

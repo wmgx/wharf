@@ -920,6 +920,56 @@ async fn run_step(
         &r.fingerprint(),
         &format!("网关 {gateway}"),
       )?;
+      let needs_key = r.config.contains(render::ACME_DNS_KEY);
+      let needs_url = r.config.contains(render::ACME_DNS_URL);
+      let config = if needs_key || needs_url {
+        let key = if needs_key {
+          let name = crate::acme_dns::secret_name(gateway);
+          state
+            .db
+            .call(move |c| db::ensure_secret(c, &name, db::now_ms()))
+            .await?
+        } else {
+          String::new()
+        };
+        let url = if needs_url {
+          crate::join::default_url(state).await.ok_or_else(|| {
+            ApiError::invalid(format!(
+              "控制面没有对外地址，入口 {gateway} 做 DNS 验证时要连回控制面"
+            ))
+            .with_hint("用 --public-url 启动控制面，或者给控制面加一个域名")
+          })?
+        } else {
+          String::new()
+        };
+        if let Ok(parsed) = reqwest::Url::parse(&url)
+          && let Some(host) = parsed.host_str()
+          && world.routes.get(host).is_some_and(|route| {
+            world.route_gateway(&route.spec) == Some(gateway.as_str())
+          })
+          && let Some((_, zone)) = host.split_once('.')
+          && gw.spec.wildcard.iter().any(|z| z == zone)
+        {
+          return Err(ApiError::invalid(format!("控制面的域名 {host} 在入口 {gateway} 的泛域名证书 *.{zone} 下，开了以后签证书时连不回控制面")).with_hint("用 --public-url 给控制面指定一个不经过这个入口的地址，或者把控制面的域名换到别的 zone"));
+        }
+        if let Ok(parsed) = reqwest::Url::parse(&url)
+          && let Some(host) = parsed.host_str()
+          && world.routes.get(host).is_some_and(|route| {
+            route.spec.internal
+              && world.route_gateway(&route.spec)
+                == Some(gateway.as_str())
+          })
+          && r
+            .sites
+            .iter()
+            .any(|site| site.hostname == host && site.dns.is_some())
+        {
+          return Err(ApiError::invalid(format!("控制面的域名 {host} 是内网域名，证书要用 DNS 验证签，签的时候连不回控制面")).with_hint("用 --public-url 给控制面指定一个不经过这个入口的地址，或者把控制面的域名换到别的 zone"));
+        }
+        crate::acme_dns::fill(&r.config, &key, &url)
+      } else {
+        r.config
+      };
       let result: ProjectUpResult = state
         .hub
         .call(
@@ -936,7 +986,7 @@ async fn run_step(
               pins: Default::default(),
               trial: None,
             },
-            caddyfile: r.config,
+            caddyfile: config,
             caddyfile_hash: r.config_hash,
             image: render::gateway_image(&gw.spec),
           }),

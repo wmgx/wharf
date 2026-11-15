@@ -122,6 +122,25 @@ pub trait DnsProvider: Send + Sync {
     hostname: &'a str,
   ) -> BoxFut<'a, Vec<RemoteRecord>>;
 
+  /// 只看 TXT：`name` 上带 `owner` 标记的 TXT 记录。不影响 [Self::list]。
+  fn list_txt<'a>(
+    &'a self,
+    _name: &'a str,
+    _owner: &'a Owner,
+  ) -> BoxFut<'a, Vec<RemoteRecord>> {
+    Box::pin(async { Err(ProviderError::invalid("不支持 TXT")) })
+  }
+
+  /// 新建一条 TXT 记录，带 `owner` 标记，TTL 60 秒。
+  fn create_txt<'a>(
+    &'a self,
+    _name: &'a str,
+    _value: &'a str,
+    _owner: &'a Owner,
+  ) -> BoxFut<'a, RemoteRecord> {
+    Box::pin(async { Err(ProviderError::invalid("不支持 TXT")) })
+  }
+
   /// Create the record, or update `existing`. Writes the ownership marker.
   fn upsert<'a>(
     &'a self,
