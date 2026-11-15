@@ -1090,6 +1090,8 @@ pub enum TaskKind {
   Script {
     runtime: ScriptRuntime,
     code: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    deps: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     image: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -1146,6 +1148,8 @@ pub enum TaskStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct TaskRunView {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub mem_peak: Option<u64>,
   pub id: i64,
   pub task: String,
   pub status: TaskStatus,
@@ -1162,6 +1166,8 @@ pub struct TaskRunView {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct TaskView {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub data_bytes: Option<u64>,
   pub name: String,
   pub spec: TaskSpec,
   #[serde(default, skip_serializing_if = "Option::is_none")]

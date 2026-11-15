@@ -295,7 +295,9 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route("/api/tasks", get(crate::tasks::list))
     .route(
       "/api/tasks/{name}",
-      put(crate::tasks::put).delete(crate::tasks::remove),
+      get(crate::tasks::get)
+        .put(crate::tasks::put)
+        .delete(crate::tasks::remove),
     )
     .route("/api/tasks/{name}/run", post(crate::tasks::run_now))
     .route("/api/tasks/{name}/runs", get(crate::tasks::runs))
