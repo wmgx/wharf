@@ -3,6 +3,7 @@
 //! 计划里只存"要做什么"（[StepPlan]），apply 时从已提交的数据库重新渲染
 //! 具体内容，所以密钥只在发给 agent 的那一刻才被替换进去。
 
+use rusqlite::OptionalExtension;
 use std::{
   collections::{BTreeMap, BTreeSet},
   time::Duration,
@@ -365,6 +366,23 @@ pub async fn make_plan(
   )
   .await?;
   let mut warnings = resolved.warnings;
+  if desired.routes.values().any(|r| r.spec.sso.is_some())
+    && state
+      .db
+      .call(|c| {
+        c.query_row(
+          "SELECT totp_secret IS NOT NULL FROM admin WHERE id=1",
+          [],
+          |r| r.get::<_, bool>(0),
+        )
+        .optional()
+        .map_err(crate::db::sql_err)
+      })
+      .await?
+      != Some(true)
+  {
+    warnings.push("还没开两步验证，门禁只有密码一道".into());
+  }
   crate::pins::resolve_commits(
     state,
     &snap,
@@ -667,7 +685,8 @@ fn config_items(
       ),
       (KIND_ROUTE, Action::Create) => {
         let route = desired.routes.get(name);
-        let auth = route.is_some_and(|r| r.spec.auth);
+        let auth =
+          route.is_some_and(|r| r.spec.auth || r.spec.sso.is_some());
         if route.is_some_and(|r| r.spec.redirect.is_some()) {
           (vec![], "新增跳转".to_string())
         } else if let Some(ms) = route.and_then(|r| r.spec.expires_at)
@@ -707,6 +726,20 @@ fn config_items(
           Some(d) => (vec![], format!("固定镜像版本 {d}，不重建")),
           None => (vec![], "更新内部记录，不重建".to_string()),
         }
+      }
+      (KIND_ROUTE, Action::Update)
+        if current
+          .routes
+          .get(name)
+          .is_some_and(|r| r.spec.sso.is_some())
+          && desired.routes.get(name).is_some_and(|r| {
+            r.spec.sso.is_none() && !r.spec.auth
+          }) =>
+      {
+        (
+          vec![Impact::Public],
+          "去掉门禁后这个域名对公网开放".to_string(),
+        )
       }
       (KIND_ROUTE, Action::Update)
         if current
@@ -2680,5 +2713,21 @@ mod tests {
     assert!(a.impacts.contains(&Impact::Public));
     assert!(redirect.impacts.is_empty());
     assert!(redirect.reason.contains("新增跳转"));
+  }
+  #[test]
+  fn removing_gate_requires_public_confirmation() {
+    let mut current = world();
+    current.routes.insert("a.example.com".into(),RouteRow{id:"a".into(),version:1,spec:serde_json::from_value(json!({"hostname":"a.example.com","service":"app","sso":{"mode":"gate"}})).unwrap()});
+    let mut desired = current.clone();
+    desired.routes.get_mut("a.example.com").unwrap().spec.sso = None;
+    let mut b = Builder::default();
+    config_items(
+      &mut b,
+      &current,
+      &desired,
+      &desired.writes_from(&current),
+    );
+    assert_eq!(b.items[0].impacts, vec![Impact::Public]);
+    assert_eq!(b.items[0].reason, "去掉门禁后这个域名对公网开放");
   }
 }
