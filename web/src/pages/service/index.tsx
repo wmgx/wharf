@@ -81,7 +81,7 @@ export function ServiceDetail() {
       </span>· 在 <ServerTag name={svc.spec.server} />
     </span>} actions={<OpBar ops={serviceOps} target={svc} label={`${svc.name} 的操作`} />} />
     <Tabs value={tab} onValueChange={(v) => setTab(v as Tab)}>
-      <div className="-mx-1 overflow-x-auto px-1">
+      <div className="min-w-0">
         <TabsList>
           <TabsTrigger value="overview">概览</TabsTrigger>
           <TabsTrigger value="domains">域名{routes.length > 0 && <span className="ml-1 text-muted-foreground">

@@ -21,7 +21,6 @@ import { Label } from "@/components/ui/label";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { useStatus } from "@/status";
 import type { Change, RollbackTarget, Run, ServiceView } from "@/types";
-import { BasicAuthDialog } from "./basic-auth";
 import { Picker, serverOptions } from "./fields";
 import { PlanFlow } from "./PlanFlow";
 import { upgradeWharf } from "./upgrade";
@@ -57,8 +56,6 @@ export interface Actions {
   removeTask: (name: string) => void;
   /** 选目标服务器，再预览改动。 */
   move: (svc: ServiceView) => void;
-  /** 设置一个域名的登录保护账号；`enable` 时保存后预览开启登录保护的改动。 */
-  basicAuth: (hostname: string, enable?: boolean) => void;
   /** 确认后升级控制面和全部 agent。 */
   upgrade: () => void;
   /** 打开一次已经开始的执行（备份、恢复），结束时提示。 */
@@ -86,7 +83,6 @@ export function ActionsProvider({ children }: { children: ReactNode }) {
   const [removeTaskData, setRemoveTaskData] = useState(false);
   const [removingTask, setRemovingTask] = useState<string | null>(null);
   const [moving, setMoving] = useState<ServiceView | null>(null);
-  const [settingAuth, setSettingAuth] = useState<{ hostname: string; enable: boolean } | null>(null);
   const [upgrading, setUpgrading] = useState(false);
   const seq = useRef(0);
   // 正在执行的那次：关掉面板后继续在后台盯着，结束时弹提示。
@@ -191,25 +187,12 @@ export function ActionsProvider({ children }: { children: ReactNode }) {
     removeRoute: (hostname) => setRemovingRoute(hostname),
     removeTask: (name) => { setRemoveTaskData(false); setRemovingTask(name); },
     move: (svc) => setMoving(svc),
-    basicAuth: (hostname, enable = false) => setSettingAuth({ hostname, enable }),
     upgrade: () => setUpgrading(true),
     watch: (runId, title) => {
       setOpen({ key: ++seq.current, title, runId });
       setRunning({ runId, title });
     },
     view: (runId, title) => setOpen({ key: ++seq.current, title, runId }),
-  };
-
-  const authSaved = () => {
-    const s = settingAuth;
-    setSettingAuth(null);
-    const route = status?.routes.find((r) => r.spec.hostname === s?.hostname);
-    if (!s || !route) return;
-    if (s.enable && !route.spec.auth) {
-      actions.plan({ title: `开启 ${s.hostname} 的登录保护`, changes: [{ op: "upsert_route", spec: { ...route.spec, auth: true } }] });
-    } else if (route.spec.auth) {
-      actions.plan({ title: `更新 ${s.hostname} 的登录账号`, changes: [] });
-    }
   };
 
   const confirmMove = (svc: ServiceView, to: string) => {
@@ -265,7 +248,6 @@ export function ActionsProvider({ children }: { children: ReactNode }) {
       <ConfirmDialog open={!!removingTask} title={`删除任务 ${removingTask}？`} onCancel={() => setRemovingTask(null)} onConfirm={async () => { const name = removingTask!; setRemovingTask(null); try { await api.del(`/api/tasks/${encodeURIComponent(name)}?data=${removeTaskData}`); toast.success(`已删除 ${name}`); window.dispatchEvent(new Event("wharf:tasks")); nav("/tasks"); } catch (e) { toast.error(`不能删除 ${name}`, { description: (e as Error).message }); } }}>运行记录一起删除。<label className="mt-3 flex items-center gap-2"><Checkbox checked={removeTaskData} onCheckedChange={(v) => setRemoveTaskData(!!v)} />同时删除数据</label></ConfirmDialog>
       <RemoveDialog name={removing} onCancel={() => setRemoving(null)} onConfirm={confirmRemove} />
       <MoveDialog svc={moving} onCancel={() => setMoving(null)} onConfirm={confirmMove} />
-      <BasicAuthDialog hostname={settingAuth?.hostname ?? null} enable={!!settingAuth?.enable} onClose={() => setSettingAuth(null)} onSaved={authSaved} />
       <ConfirmDialog open={upgrading} title="升级 Wharf？" confirmText="升级" danger={false} onCancel={() => setUpgrading(false)} onConfirm={() => { setUpgrading(false); upgradeWharf(); }}>控制面会重启，页面断开一会儿。</ConfirmDialog>
     </Ctx.Provider>
   );

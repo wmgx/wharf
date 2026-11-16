@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { RefreshCwIcon, Trash2Icon } from "lucide-react";
 import { useActions } from "@/components/actions";
 import { AptUpgrade } from "@/components/apt-upgrade";
@@ -20,9 +21,10 @@ const DOCKER_KIND: Record<string, string> = {
 
 export function SystemInfo({ info, server, onRefresh, loading }: { info: HostInfo; server: ServerView; onRefresh: () => void; loading: boolean }) {
   const actions = useActions();
+  const [allUpdates, setAllUpdates] = useState(false);
   return (
     <>
-      <SectionTitle action={<Tip text="重新读取"><Button aria-label="重新读取" variant="ghost" size="icon-sm" disabled={loading} onClick={onRefresh}><RefreshCwIcon className={loading ? "animate-spin" : undefined} /></Button></Tip>}>更新</SectionTitle>
+      <SectionTitle action={<Tip text="重新读取"><Button aria-label="重新读取" variant="ghost" size="icon-sm" disabled={loading} onClick={onRefresh}><RefreshCwIcon className={loading ? "animate-spin" : undefined} /></Button></Tip>}>更新（{info.updates?.length ?? 0}）</SectionTitle>
       {info.reboot_required && (
         <Notice kind="warn" className="mb-3">
           装了需要重启才生效的更新
@@ -46,6 +48,7 @@ export function SystemInfo({ info, server, onRefresh, loading }: { info: HostInf
             <TableBody>
               {[...info.updates]
                 .sort((a, b) => Number(b.security) - Number(a.security))
+                .slice(0, allUpdates ? undefined : 5)
                 .map((u) => (
                   <TableRow key={u.name}>
                     <TableCell className="font-mono text-xs">
@@ -66,6 +69,7 @@ export function SystemInfo({ info, server, onRefresh, loading }: { info: HostInf
           </Table>
         </Panel>
       )}
+      {info.updates && info.updates.length > 5 && <Button className="mt-2" variant="ghost" size="sm" onClick={() => setAllUpdates(!allUpdates)}>{allUpdates ? "收起" : `查看全部（${info.updates.length}）`}</Button>}
       <SectionTitle action={<Button variant="outline" size="sm" onClick={() => actions.prune(server.name)}><Trash2Icon />清理没在用的镜像</Button>}>磁盘</SectionTitle>
       <Panel>
         <Table>

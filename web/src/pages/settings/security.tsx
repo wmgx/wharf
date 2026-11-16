@@ -17,7 +17,7 @@ export function Security() {
   const { data, error, refresh } = usePoll<TotpView>("/api/totp", 30000);
   const [mode, setMode] = useState<Mode | null>(null);
   return <>
-    <SectionTitle>两步验证</SectionTitle>
+    <div id="two-factor"><SectionTitle>两步验证</SectionTitle></div>
     <ErrorNote error={error} />
     {data && <Panel className="flex flex-wrap items-center gap-3 p-4">
       <span className="flex-1 text-sm">{data.enabled ? `已开启 · 恢复码剩 ${data.recovery_left} 个` : "没开"}</span>
@@ -150,7 +150,7 @@ function GateKeys() {
     catch (e) { setFailure(e); } finally { setBusy(false); }
   };
   return <>
-    <SectionTitle count={data?.length} action={<Button variant="outline" size="sm" onClick={() => edit("new")}>新建</Button>}>访问凭证</SectionTitle>
+    <div id="gate-keys" /><SectionTitle count={data?.length} action={<Button variant="outline" size="sm" onClick={() => edit("new")}>新建</Button>}>访问凭证</SectionTitle>
     <ErrorNote error={error || failure} />
     {fresh && <Panel className="grid gap-2 p-4">
       <div className="flex min-w-0 items-start gap-2"><code className="min-w-0 flex-1 break-all text-xs" data-gate-key>{fresh}</code><Button variant="outline" size="sm" onClick={async () => { try { await navigator.clipboard.writeText(fresh); } catch (e) { setFailure(e); } }}>复制</Button></div>
