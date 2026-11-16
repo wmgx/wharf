@@ -69,6 +69,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     )
     .route("/gate/login", get(crate::gate::login))
     .route("/gate/refresh", axum::routing::any(crate::gate::refresh))
+    .route("/gate/site/login", get(crate::gate::site_login))
     .route("/gate/site/gate", get(crate::gate::site_gate))
     .route("/gate/site/logout", get(crate::gate::site_logout))
     .route(

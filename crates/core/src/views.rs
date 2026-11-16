@@ -438,6 +438,13 @@ pub fn route_view(
     },
   };
   Some(RouteView {
+    sso_login: row
+      .spec
+      .sso
+      .as_ref()
+      .filter(|s| s.mode == wharf_api_types::spec::SsoMode::Login)
+      .and_then(|_| snap.sso_login.get(hostname))
+      .and_then(|s| serde_json::from_str(s).ok()),
     id: row.id.clone(),
     spec: row.spec.clone(),
     gateway,
@@ -617,6 +624,7 @@ pub async fn status(
   issues.extend(crate::tasks::issues(state).await);
   issues.extend(crate::probe::issues());
   issues.extend(crate::exposure::issues(state).await?);
+  issues.extend(crate::sso_login::issues(&snap));
   issues.extend(crate::alerts::issues());
   issues.extend(crate::monitor::issues());
   issues.extend(crate::rdap::issues());

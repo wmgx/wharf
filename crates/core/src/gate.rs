@@ -460,6 +460,218 @@ pub async fn refresh(
     Ok(response(401, None, "{\"error\":\"需要登录\"}", &cookies))
   }
 }
+async fn rt_user(
+  db: &Db,
+  headers: &HeaderMap,
+) -> Result<Option<String>, ApiError> {
+  let key = rt_key(db).await?;
+  let Some(hash) = cookie(headers, "wharf_gate_rt")
+    .and_then(|t| rt_parse(&key, t, now_ms() / 1000))
+  else {
+    return Ok(None);
+  };
+  Ok(session(db, hash).await?.map(|(user, _)| user))
+}
+fn verify(key: &SigningKey, token: &str, now: i64) -> Option<String> {
+  let parts: Vec<_> = token.split('.').collect();
+  if parts.len() != 3 {
+    return None;
+  }
+  let head: serde_json::Value =
+    serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[0]).ok()?)
+      .ok()?;
+  if head["alg"] != "EdDSA" {
+    return None;
+  }
+  let signature = ed25519_dalek::Signature::from_slice(
+    &URL_SAFE_NO_PAD.decode(parts[2]).ok()?,
+  )
+  .ok()?;
+  key
+    .verifying_key()
+    .verify_strict(
+      format!("{}.{}", parts[0], parts[1]).as_bytes(),
+      &signature,
+    )
+    .ok()?;
+  let claims: serde_json::Value =
+    serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[1]).ok()?)
+      .ok()?;
+  if claims["iss"] != "wharf" || claims["exp"].as_i64()? <= now {
+    return None;
+  }
+  let user = claims["sub"].as_str()?;
+  (!user.is_empty()).then(|| user.to_string())
+}
+fn login_rd(rd: &str) -> &str {
+  let rd = safe_path(rd);
+  if rd.starts_with("/_wharf/") { "/" } else { rd }
+}
+fn storage_page(
+  values: &[(bool, String, String)],
+  rd: &str,
+) -> String {
+  let js = |s: &str| {
+    serde_json::to_string(s).unwrap().replace('<', "\\u003c")
+  };
+  let mut script = String::new();
+  for (local, key, value) in values {
+    script.push_str(&format!(
+      "{}Storage.setItem({},{});",
+      if *local { "local" } else { "session" },
+      js(key),
+      js(value)
+    ));
+  }
+  format!(
+    "<!doctype html><meta charset=\"utf-8\"><script>{script}location.replace({});</script><noscript>需要开启脚本才能自动登录</noscript>",
+    js(rd)
+  )
+}
+#[derive(Deserialize)]
+pub struct SiteLoginQuery {
+  rd: Option<String>,
+}
+pub async fn site_login(
+  State(s): State<Arc<AppState>>,
+  Query(q): Query<SiteLoginQuery>,
+  headers: HeaderMap,
+) -> Result<Response, AppError> {
+  use wharf_api_types::spec::{LoginWrite, SsoMode};
+  let host = forwarded_host(&headers);
+  let snap = crate::snapshot::load(&s.db).await?;
+  let Some(login) = snap
+    .world
+    .routes
+    .get(host)
+    .and_then(|r| r.spec.sso.as_ref())
+    .filter(|s| s.mode == SsoMode::Login)
+    .and_then(|s| s.login.as_ref())
+  else {
+    return Ok(response(404, None, "域名没有配置代登录", &[]));
+  };
+  let rd = login_rd(q.rd.as_deref().unwrap_or("/"));
+  let signing = key(&s.db).await?;
+  let authenticated = cookie(&headers, "wharf_gate")
+    .and_then(|t| verify(&signing, t, now_ms() / 1000))
+    .is_some()
+    || rt_user(&s.db, &headers).await?.is_some();
+  if !authenticated {
+    let target = format!(
+      "https://{host}/_wharf/login?rd={}",
+      urlencoding::encode(rd)
+    );
+    let core = crate::join::default_url(&s).await.unwrap_or_default();
+    return Ok(response(
+      302,
+      Some(&format!("{core}{}", login_path(&target))),
+      "",
+      &[],
+    ));
+  }
+  let outcome = crate::sso_login::run(&s, host).await;
+  let mut cookies = Vec::new();
+  let mut storage = Vec::new();
+  let result = (|| -> Result<bool, ApiError> {
+    let outcome = outcome.as_ref().map_err(|e| e.clone())?;
+    if !outcome.ok {
+      return Ok(false);
+    }
+    for write in &login.write {
+      match write {
+        LoginWrite::Cookies(_) => {
+          cookies.extend(outcome.set_cookies.clone())
+        }
+        LoginWrite::Cookie {
+          name,
+          value,
+          http_only,
+        } => {
+          let value = crate::sso_login::render(
+            value,
+            &outcome.vars,
+            &snap.secrets,
+          )?;
+          if name.is_empty()
+            || !name.bytes().all(|b| {
+              b.is_ascii_alphanumeric()
+                || b"!#$%&'*+-.^_`|~".contains(&b)
+            })
+            || !value.bytes().all(|b| {
+              b == 0x21
+                || (0x23..=0x2b).contains(&b)
+                || (0x2d..=0x3a).contains(&b)
+                || (0x3c..=0x5b).contains(&b)
+                || (0x5d..=0x7e).contains(&b)
+            })
+          {
+            return Err(ApiError::invalid("应用 cookie 格式不对"));
+          }
+          cookies.push(format!(
+            "{name}={value}; Path=/; Secure{}",
+            if *http_only { "; HttpOnly" } else { "" }
+          ));
+        }
+        LoginWrite::LocalStorage { key, value }
+        | LoginWrite::SessionStorage { key, value } => {
+          storage.push((
+            matches!(write, LoginWrite::LocalStorage { .. }),
+            key.clone(),
+            crate::sso_login::render(
+              value,
+              &outcome.vars,
+              &snap.secrets,
+            )?,
+          ))
+        }
+      }
+    }
+    if cookies
+      .iter()
+      .any(|v| v.parse::<axum::http::HeaderValue>().is_err())
+    {
+      return Err(ApiError::invalid("应用 cookie 格式不对"));
+    }
+    Ok(true)
+  })();
+  let ok = result.as_ref().is_ok_and(|ok| *ok);
+  // 执行器已记录步骤结果；交接失败也覆盖最近状态，不保存任何值。
+  if let Err(e) = result
+    && outcome.is_ok()
+  {
+    crate::sso_login::record(&s, host, false, Some(e.message))
+      .await?;
+  }
+  if !ok {
+    let age = std::env::var("WHARF_SSO_FAIL_SECS")
+      .ok()
+      .and_then(|s| s.parse::<i64>().ok())
+      .filter(|n| *n > 0 && *n <= 300)
+      .unwrap_or(300);
+    return Ok(response(
+      302,
+      Some(rd),
+      "",
+      &[gate_cookie("wharf_sso", "fail", age)],
+    ));
+  }
+  cookies.push(gate_cookie(
+    "wharf_sso",
+    "1",
+    i64::from(login.ttl_hours) * 3600,
+  ));
+  if storage.is_empty() {
+    return Ok(response(302, Some(rd), "", &cookies));
+  }
+  let mut response =
+    response(200, None, &storage_page(&storage, rd), &cookies);
+  response.headers_mut().insert(
+    header::CONTENT_TYPE,
+    "text/html; charset=utf-8".parse().unwrap(),
+  );
+  Ok(response)
+}
+
 pub async fn site_logout() -> Response {
   response(
     200,
@@ -613,6 +825,41 @@ pub async fn check_key(
 
 #[cfg(test)]
 mod tests {
+  #[test]
+  fn login_redirect_path() {
+    for bad in ["//evil", "/\\evil", "/_wharf/login"] {
+      assert_eq!(super::login_rd(bad), "/");
+    }
+    assert_eq!(super::login_rd("/a?x=1&y=2"), "/a?x=1&y=2");
+  }
+  #[test]
+  fn access_verify() {
+    let key = ed25519_dalek::SigningKey::from_bytes(&[1; 32]);
+    let token = super::sign_ttl(&key, "admin", 100, 10);
+    assert_eq!(
+      super::verify(&key, &token, 101).as_deref(),
+      Some("admin")
+    );
+    assert!(super::verify(&key, &token, 110).is_none());
+    assert!(
+      super::verify(
+        &ed25519_dalek::SigningKey::from_bytes(&[2; 32]),
+        &token,
+        101
+      )
+      .is_none()
+    );
+  }
+  #[test]
+  fn storage_script_escape() {
+    let page = super::storage_page(
+      &[(true, "</script>".into(), "</script>".into())],
+      "/</script>",
+    );
+    assert_eq!(page.matches("</script>").count(), 1);
+    assert!(page.contains("\\u003c/script>"));
+  }
+
   use super::*;
   use wharf_api_types::spec::RouteSpec;
   fn world() -> crate::world::World {

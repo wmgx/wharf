@@ -1,4 +1,4 @@
-import { usePoll } from "@/api";
+import { api, usePoll } from "@/api";
 import { useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { AddAlias } from "@/components/add-alias";
@@ -15,10 +15,22 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
 import { SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import type { SsoTestResult } from "@/types.gen";
 import type { GateKeyView, RouteView, Status } from "@/types";
 
 export function DomainDetail({ route, status, onClose }: { route: RouteView; status: Status; onClose: () => void }) {
   const actions = useActions();
+  const [testOpen, setTestOpen] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<SsoTestResult>();
+  const [testError, setTestError] = useState("");
+  const [dropLogin, setDropLogin] = useState(false);
+  const testLogin = async () => {
+    setTestOpen(true); setTesting(true); setTestResult(undefined); setTestError("");
+    try { setTestResult(await api.post<SsoTestResult>(`/api/routes/${encodeURIComponent(route.spec.hostname)}/sso/test`, {})); }
+    catch (e) { setTestError(e instanceof Error ? e.message : "测试失败"); }
+    finally { setTesting(false); }
+  };
   const keys = usePoll<GateKeyView[]>("/api/gate/keys", 30000).data;
   const keyCount = keys?.filter((k) => k.hosts.includes(route.spec.hostname)).length ?? 0;
   const [trustInternal, setTrustInternal] = useState(!!route.spec.sso?.trust_internal);
@@ -126,6 +138,11 @@ export function DomainDetail({ route, status, onClose }: { route: RouteView; sta
             <Button variant="outline" size="sm" disabled={route.spec.auth || !!route.spec.redirect} onClick={() => setGateOpen(true)}>开启</Button>
           </>}
         </div>
+        {route.spec.sso?.mode === "login" && <>
+          <div className="flex flex-wrap items-center gap-2"><span className="flex-1">替我登录应用 · {route.spec.sso.login?.steps.length ?? 0} 步</span><Button size="sm" variant="outline" disabled={testing} onClick={testLogin}>测试</Button><a className="text-xs underline" href={`https://${route.spec.hostname}/_wharf/login?rd=/`} target="_blank" rel="noreferrer">重新登录</a></div>
+          {route.sso_login && <span className="break-all text-xs text-muted-foreground">{route.sso_login.ok ? `上次登录 ${ago(new Date(route.sso_login.at).toISOString())}，成功` : `上次登录失败：${route.sso_login.error ?? "登录失败"}`}</span>}
+          <span className="break-all text-xs text-muted-foreground">登录步骤由 CLI 配置：wharf route sso {route.spec.hostname} --mode login --file …</span>
+        </>}
         {route.spec.sso?.mode === "header" && <span className="break-all text-xs text-muted-foreground">传用户名（{route.spec.sso.header ?? "Remote-User"}）</span>}
         {route.spec.sso?.trust_internal && <span className="text-xs text-muted-foreground">组网内免登录</span>}
         {route.spec.sso && keyCount > 0 && <span className="text-xs text-muted-foreground">{keyCount} 个访问凭证</span>}
@@ -155,17 +172,31 @@ export function DomainDetail({ route, status, onClose }: { route: RouteView; sta
     <Dialog open={gateOpen} onOpenChange={setGateOpen}>
       <DialogContent aria-describedby={undefined}>
         <DialogHeader><DialogTitle>{route.spec.sso ? "修改门禁" : "开启门禁"}</DialogTitle></DialogHeader>
-        <Segmented value={gateMode} options={[["gate", "只挡一道门"], ["header", "传用户名给应用"]]} onChange={setGateMode} />
+        <Segmented value={gateMode} options={[["gate", "只挡一道门"], ["header", "传用户名给应用"], ...(route.spec.sso?.mode === "login" ? [["login", "替我登录应用"] as ["login", string]] : [])]} onChange={setGateMode} />
         {gateMode === "header" && <Field label="请求头" htmlFor="gate-header"><Input id="gate-header" value={userHeader} onChange={(e) => setUserHeader(e.target.value)} /><p className="text-xs text-muted-foreground">应用要配置成信任这个请求头。</p></Field>}
         <Field label="不用登录的路径（每行一个，可以不填）" htmlFor="gate-skip">
           <Textarea id="gate-skip" value={skipPaths} onChange={(e) => setSkipPaths(e.target.value)} />
         </Field>
         <label className="flex items-center gap-2 text-sm"><Checkbox checked={trustInternal} onCheckedChange={(v) => setTrustInternal(v === true)} />从组网内访问不用登录</label>
         {trustInternal && <p className="text-xs text-muted-foreground">只有经组网地址或这台机器的内网访问入口时才算；从别的网络访问公网入口仍然要登录。</p>}
+        {route.spec.sso?.mode === "login" && gateMode !== "login" && <label className="flex items-center gap-2 text-sm"><Checkbox checked={dropLogin} onCheckedChange={(v) => setDropLogin(v === true)} />登录步骤会被删掉</label>}
         <DialogFooter>
           <Button variant="ghost" onClick={() => setGateOpen(false)}>取消</Button>
-          <Button onClick={() => { setGateOpen(false); actions.plan({ title: `修改 ${route.spec.hostname} 的门禁`, changes: [{ op: "upsert_route", spec: { ...route.spec, sso: { mode: gateMode, login: gateMode === "login" ? route.spec.sso?.login : undefined, header: gateMode === "header" ? userHeader : undefined, trust_internal: trustInternal, skip_paths: skipPaths.split("\n").map((p) => p.trim()).filter(Boolean) } } }] }); }}>预览改动</Button>
+          <Button disabled={route.spec.sso?.mode === "login" && gateMode !== "login" && !dropLogin} onClick={() => { setGateOpen(false); actions.plan({ title: `修改 ${route.spec.hostname} 的门禁`, changes: [{ op: "upsert_route", spec: { ...route.spec, sso: { mode: gateMode, login: gateMode === "login" ? route.spec.sso?.login : undefined, header: gateMode === "header" ? userHeader : undefined, trust_internal: trustInternal, skip_paths: skipPaths.split("\n").map((p) => p.trim()).filter(Boolean) } } }] }); }}>预览改动</Button>
         </DialogFooter>
+      </DialogContent>
+    </Dialog>
+    <Dialog open={testOpen} onOpenChange={setTestOpen}>
+      <DialogContent aria-describedby={undefined} className="max-h-[85vh] overflow-auto">
+        <DialogHeader><DialogTitle>代登录测试</DialogTitle></DialogHeader>
+        {testing && <p>测试中</p>}
+        {testError && <p className="break-all text-destructive">{testError}</p>}
+        {testResult && <>
+          <p>{testResult.ok ? "成功" : "失败"}</p>
+          <Rows>{[...testResult.steps, ...(testResult.check ? [testResult.check] : [])].map((step) => <Row key={step.number} className="flex-wrap break-all"><span>{step.method} {step.path}</span><span>{step.status ?? "未响应"}</span><span>{Object.entries(step.extracted).map(([name, n]) => `${name}（${n} 个字符）`).join("、")}</span>{step.error && <span className="text-destructive">{step.error}</span>}</Row>)}</Rows>
+          {testResult.would_write.map((text, i) => <p className="break-all text-xs text-muted-foreground" key={i}>{text}</p>)}
+        </>}
+        <DialogFooter><Button variant="outline" onClick={() => setTestOpen(false)}>关闭</Button></DialogFooter>
       </DialogContent>
     </Dialog>
     <AddAlias route={route} open={alias} onClose={() => setAlias(false)} />

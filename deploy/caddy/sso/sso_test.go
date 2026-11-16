@@ -324,3 +324,67 @@ func TestUserHeaderBypass(t *testing.T) {
 		}
 	}
 }
+
+func TestAppLoginRedirect(t *testing.T) {
+	key := ed25519.NewKeyFromSeed(make([]byte, 32))
+	core := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Add("Set-Cookie", "wharf_gate=new; Secure")
+		w.Header().Set("X-Wharf-User", "admin")
+	}))
+	defer core.Close()
+	for _, credential := range []string{"wharf_gate=" + token(key, "EdDSA", "wharf", time.Now().Unix()+600), "wharf_gate_rt=refresh"} {
+		s := plugin(t, core.URL)
+		s.AppLogin = true
+		r := httptest.NewRequest("GET", "https://a.example.test/a?x=1&y=2", nil)
+		r.Header.Set("Accept", "text/html")
+		r.Header.Set("Cookie", credential)
+		w := httptest.NewRecorder()
+		err := s.ServeHTTP(w, r, caddyhttp.HandlerFunc(func(http.ResponseWriter, *http.Request) error { t.Fatal("不能转给应用"); return nil }))
+		if err != nil || w.Code != 302 || w.Header().Get("Location") != "/_wharf/login?rd=%2Fa%3Fx%3D1%26y%3D2" {
+			t.Fatal("代登录跳转不对")
+		}
+		if strings.HasPrefix(credential, "wharf_gate_rt=") && w.Header().Get("Set-Cookie") == "" {
+			t.Fatal("续签 cookie 丢失")
+		}
+	}
+}
+func TestAppLoginBypass(t *testing.T) {
+	key := ed25519.NewKeyFromSeed(make([]byte, 32))
+	core := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer core.Close()
+	for _, mode := range []string{"marker", "json", "post", "key", "skip", "trust"} {
+		t.Run(mode, func(t *testing.T) {
+			s := plugin(t, core.URL)
+			s.AppLogin = true
+			r := httptest.NewRequest("GET", "https://a.example.test/", nil)
+			r.Header.Set("Accept", "text/html")
+			r.Header.Set("Cookie", "wharf_gate="+token(key, "EdDSA", "wharf", time.Now().Unix()+600)+"; wharf_gate_rt=refresh; app=1")
+			switch mode {
+			case "marker":
+				r.Header.Add("Cookie", "wharf_sso=fail")
+			case "json":
+				r.Header.Set("Accept", "application/json")
+			case "post":
+				r.Method = "POST"
+			case "key":
+				r.Header.Set("X-Wharf-Key", "lab-key")
+			case "skip":
+				s.Skip = []string{"/"}
+			case "trust":
+				s.trusted = []netip.Prefix{netip.MustParsePrefix("203.0.113.0/24")}
+				r.RemoteAddr = "203.0.113.1:1234"
+			}
+			called := false
+			err := s.ServeHTTP(httptest.NewRecorder(), r, caddyhttp.HandlerFunc(func(w http.ResponseWriter, r *http.Request) error {
+				called = true
+				if r.Header.Get("Cookie") != "app=1" {
+					t.Fatal("应用收到门禁 cookie")
+				}
+				return nil
+			}))
+			if err != nil || !called {
+				t.Fatal("请求不应跳转")
+			}
+		})
+	}
+}
