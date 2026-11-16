@@ -36,6 +36,7 @@ export function TerminalTab({ svc }: { svc: ServiceView }) {
       <Suspense fallback={<Skeleton className="h-80 rounded-xl" />}>
         <Terminal name={svc.name} service={current} />
       </Suspense>
+      <span className="text-xs text-muted-foreground">关掉页面后会话保留，30 分钟内回来接着用；输入 exit 结束会话。</span>
     </div>
   );
 }

@@ -2331,7 +2331,9 @@ mod tests {
         adopt: None,
       }])
       .unwrap_err();
-    assert!(err.message.contains("要选环境变量和资源上限加在哪个容器上"));
+    assert!(
+      err.message.contains("要选环境变量和资源上限加在哪个容器上")
+    );
   }
 
   #[test]
