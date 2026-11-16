@@ -174,6 +174,18 @@ fn env_warning() -> String {
 /// compose 内容里映射到宿主机的 TCP 端口，短写法（`18880:8880`、`127.0.0.1:80:80`）
 /// 和长写法（`published`）都认。只写容器端口、端口范围、UDP 的跳过。
 /// compose 来源没填 ports 时用它补上，这样服务有内网地址、路由也能指过来。
+/// compose 里有没有容器挂载了目录或卷（解析不了的当作有）。
+pub fn compose_has_volumes(content: &str) -> bool {
+  let Ok(value) = serde_yaml_ng::from_str::<Value>(content) else {
+    return true;
+  };
+  value["services"].as_mapping().is_none_or(|m| {
+    m.values().any(|svc| {
+      svc["volumes"].as_sequence().is_some_and(|v| !v.is_empty())
+    })
+  })
+}
+
 pub fn compose_ports(content: &str) -> Vec<PortSpec> {
   let Ok(doc) = serde_yaml_ng::from_str::<Value>(content) else {
     return Vec::new();

@@ -1104,7 +1104,7 @@ export interface Layer4Forward {
 }
 
 /**
- * 资源上限。compose 来源只支持一个容器的 compose。
+ * 资源上限。compose 来源加在 `container` 指定的容器上。
  */
 export interface Limits {
   /**
@@ -1913,7 +1913,7 @@ export interface ServiceData {
 
 export interface ServiceSpec {
   /**
-   * 自动更新：每天检查一次，有新版本就自动更新。只支持镜像来源和 git 构建来源、没有数据卷的服务。
+   * 自动更新：每天检查一次，有新版本就自动更新。只支持没有数据卷的服务（compose 来源看 compose 里有没有挂载）。
    */
   auto_update?: boolean;
   /**
@@ -1921,8 +1921,12 @@ export interface ServiceSpec {
    */
   backup?: BackupSpec | null;
   /**
-   * 环境变量。值里可以用 `[[SECRET_NAME]]` 引用密钥，仅 image 来源生效；
-   * compose 来源的整个文件内容都会做同样的替换。
+   * compose 来源：环境变量和资源上限加在哪个容器上。只有一个容器时不用填。
+   */
+  container?: string | null;
+  /**
+   * 环境变量。值里可以用 `[[SECRET_NAME]]` 引用密钥；compose 来源加到 `container` 指定的容器上，
+   * compose 文件内容也会做同样的替换。
    * 也可以用 `[[@服务]]` 引用别的服务，部署时换成它的 `内网地址:宿主机端口`；
    * `[[@服务.端口名]]` 指定端口，末尾加 `:host` / `:port` 只取地址或端口。
    */

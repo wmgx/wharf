@@ -348,16 +348,16 @@ impl World {
           }) {
             spec.limits = None;
           }
+          if let Source::Compose {
+            content: Some(content),
+            ..
+          } = &spec.source
+          {
+            crate::render::compose_with_settings(
+              name, content, &spec,
+            )?;
+          }
           if let Some(limits) = &spec.limits {
-            if let Source::Compose {
-              content: Some(content),
-              ..
-            } = &spec.source
-            {
-              crate::render::compose_with_limits(
-                name, content, limits,
-              )?;
-            }
             if limits.memory_mb.is_some_and(|n| n < 32) {
               return Err(ApiError::invalid("内存上限至少 32 MB"));
             }
@@ -367,13 +367,25 @@ impl World {
           }
           if spec.auto_update {
             match &spec.source {
-              Source::Compose { .. } => {
-                return Err(
-                  ApiError::invalid(format!(
-                    "服务 {name} 是 compose 来源，不支持自动更新"
-                  ))
-                  .with_hint("自动更新只支持镜像来源和 git 构建来源"),
-                );
+              Source::Compose { content, .. } => {
+                if crate::pins::images(&spec.source).is_empty() {
+                  return Err(
+                    ApiError::invalid(format!(
+                      "服务 {name} 的 compose 里没有可以检查更新的镜像"
+                    ))
+                    .with_hint("镜像写了 digest、用了变量或在本地构建时没法自动更新"),
+                  );
+                }
+                if crate::import::compose_has_volumes(
+                  content.as_deref().unwrap_or_default(),
+                ) {
+                  return Err(
+                    ApiError::invalid(format!(
+                      "服务 {name} 的 compose 里挂载了数据，不支持自动更新"
+                    ))
+                    .with_hint("有数据的服务升级可能要迁移数据，请手动检查更新"),
+                  );
+                }
               }
               Source::Build(build) if build.git.is_none() => {
                 return Err(
@@ -2126,6 +2138,7 @@ mod tests {
       monitor: None,
       limits: None,
       auto_update: false,
+      container: None,
       server: server.into(),
       source: Source::Image("traefik/whoami".into()),
       ports: vec![PortSpec {
@@ -2300,7 +2313,7 @@ mod tests {
   }
 
   #[test]
-  fn compose_service_rejects_limits() {
+  fn compose_service_needs_container_for_limits() {
     let mut w = sample();
     let mut spec = image_service("s1");
     spec.source = Source::Compose {
@@ -2318,7 +2331,7 @@ mod tests {
         adopt: None,
       }])
       .unwrap_err();
-    assert!(err.message.contains("只支持一个容器"));
+    assert!(err.message.contains("要选环境变量和资源上限加在哪个容器上"));
   }
 
   #[test]
