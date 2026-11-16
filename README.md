@@ -1,55 +1,55 @@
 # Wharf
 
-一个人用的多服务器管理系统：把几台机器上的服务、域名、数据放在一处管理。人用页面查看和部署，AI 用 `wharf` 命令行操作。
+**把家里的机器和几台 VPS 当成一台来用。** 一条命令把本机代码部署到任意一台服务器，再一条命令给它挂上 HTTPS 域名；DNS、证书、跨机器的隧道全自动。你在页面上看，AI 在命令行里干活。
 
-> 状态：个人项目，作者在自己的几台机器上日常使用。版本号还是 0.1，没有稳定性承诺；界面、命令行和文档目前只有中文。
-
-四个核心概念：
-
-- **服务器**：每台机器跑一个 agent，主动连接控制面；
-- **服务**：一个服务就是一个 compose 项目，来源可以是镜像、compose 文件、git 仓库或本机代码目录；
-- **网关**：公网入口，支持 Caddy 和 Cloudflare 隧道；
-- **路由**：域名 → 网关 → 服务，DNS、证书、上游地址自动处理。
+```bash
+wharf deploy ./my-app --server home --apply            # 打包本机代码，在服务器上构建运行（自动识别 Python / Node / Go / 静态站）
+wharf route add app.example.com --service my-app --apply   # 建 DNS、签证书、配网关，服务在没公网 IP 的家里机器上也行
+```
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/overview-dark.png">
   <img alt="总览" src="docs/screenshots/overview-light.png">
 </picture>
 
+> 个人项目，作者每天用它管自己的几台机器。版本 0.1，没有稳定性承诺；界面和文档目前只有中文。
 
-## 能做什么
+## 为什么用它
 
-- **部署**：镜像、compose、git 仓库、本机代码（Python、Node、Go、静态站点自动识别，有 Dockerfile 就用）；部署历史、回滚、固定镜像 digest 和 commit；
-- **域名**：自动建 DNS 记录、签证书；网关和服务不在一台机器时自动选直连或反向隧道；登录保护、备用入口；
-- **Cloudflare Workers / Pages**：导入、发布、绑定域名；
-- **数据**：服务迁移到另一台机器、restic 备份和恢复、数据卷文件浏览、控制面自身备份；
-- **组网**：Tailscale 接入、连通性和链路质量、服务之间按名字引用、外网代理；
-- **运维**：容器终端和宿主机终端、日志、资源和请求曲线、域名逐层诊断（`wharf doctor`）、定时任务、告警和飞书通知、机器基线、系统更新、一键升级；
-- **给 AI 用**：所有命令支持 `--json`，修改先 plan 再 apply，高风险项要显式确认，token 按权限点授权。
+**域名这件事不用再想。** 服务在 A 机器、公网入口在 B 机器、A 还没有公网 IP——这些 Wharf 自己判断：能走内网就直连，不行就自动起反向隧道，DNS 记录和证书一起配好。主入口那台机器挂了，可以配一个备用入口，DNS 自动切过去。
 
-### 截图
+**打不开时，告诉你断在哪一层。** `wharf doctor app.example.com` 沿着 解析 → HTTPS → 网关 → 网关连上游 → 容器 一层层查，直接指出第一个不通的地方，不用再挨个 ssh 上去猜。
 
-服务详情：访问地址、容器、对公网开放的端口、最近操作。
+**数据跟着服务走。** `wharf service move blog --to vultr` 同步数据、在新机器启动、网关改指，域名不变。`wharf backup enable` 每天用 restic 备份到另一台机器，一条命令恢复。
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/service-dark.png">
-  <img alt="服务详情" src="docs/screenshots/service-light.png">
-</picture>
+**放心交给 AI。** 所有命令输出 JSON，任何改动先出计划再执行；删数据、覆盖、对公网开放这类高风险项，必须带 `--confirm` 才会执行，AI 拿到的令牌可以不给这个权限。装 CLI 时顺带装好 Skill，Claude Code、Codex 直接就会用——你只要说"把这个目录部署上去，挂到 app.example.com"。
 
-域名：每个域名指向哪个服务、经哪个入口、是否加登录保护、证书到期时间。
+**一眼看到哪里不对。** 每台机器对公网开放了哪些端口、归谁，没预期到的端口进待处理；容器被 OOM 杀掉、证书快到期、磁盘快满、域名打不开，推到飞书。
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/domains-dark.png">
-  <img alt="域名列表" src="docs/screenshots/domains-light.png">
-</picture>
+<table>
+<tr>
+<td><picture><source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/service-dark.png"><img alt="服务详情" src="docs/screenshots/service-light.png"></picture></td>
+<td><picture><source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/domains-dark.png"><img alt="域名" src="docs/screenshots/domains-light.png"></picture></td>
+</tr>
+<tr>
+<td align="center">服务：访问地址、容器、对公网开放的端口</td>
+<td align="center">域名：指向、入口、登录保护、证书</td>
+</tr>
+</table>
 
-暴露面：每台服务器对公网开放的端口和归属，没预期到的端口会进待处理。
+<details>
+<summary>全部功能</summary>
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/exposure-dark.png">
-  <img alt="暴露面" src="docs/screenshots/exposure-light.png">
-</picture>
+- **部署**：镜像、compose 文件、git 仓库、本机代码目录；有 Dockerfile 就用，没有按语言套模板；部署历史、回滚、固定镜像 digest 和 commit、有新版本自动更新；
+- **域名**：自动建 DNS、签证书（含泛域名）；直连或反向隧道自动选；登录保护、按路径转发、跳转、限速和拦截扫描、备用入口、临时分享链接（`wharf share`）；
+- **网关**：Caddy（要公网 IP 和 80/443）或 Cloudflare 隧道（不用开端口）；四层 TCP/UDP 转发；自定义错误页；
+- **Cloudflare Workers / Pages**：导入、发布、版本回滚、绑定域名；
+- **数据**：服务迁移、restic 备份恢复、数据卷文件浏览、控制面自身备份；
+- **组网**：Tailscale 接入、机器间连通性和链路质量、服务之间按名字引用（`[[@db]]`）、出口代理、本机直连远端服务（`wharf connect`）；
+- **运维**：容器和宿主机终端、日志、资源和请求曲线、定时任务、告警和飞书通知、对公网暴露面、机器基线、系统更新、一键升级；
+- **给 AI**：`--json`、先 plan 再 apply、统一错误格式带下一步建议、令牌按权限点授权、操作审计。
 
+</details>
 
 ## 适合谁
 
