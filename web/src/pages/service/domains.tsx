@@ -52,7 +52,7 @@ export function DomainsTab({
                 <ArrowUpRightIcon className="size-3.5 shrink-0" />
               </a>
               <Probe probe={r.probe} />
-              <Button variant="outline" size="xs" onClick={() => setProtecting(r)}>{r.spec.sso?.public ? "公开" : r.spec.sso ? "门禁" : r.spec.auth ? "账号密码" : "不保护"}</Button>
+              <Button variant="outline" size="xs" onClick={() => setProtecting(r)}>{r.spec.sso?.mode === "oidc" ? "OIDC" : r.spec.sso?.public ? "公开" : r.spec.sso ? "门禁" : r.spec.auth ? "账号密码" : "不保护"}</Button>
               {r.spec.internal && <span className="text-xs text-muted-foreground">内网域名</span>}
               {r.spec.sso?.mode === "login" && <span className="text-xs text-muted-foreground">代登录 · {r.sso_login ? r.sso_login.ok ? "成功" : "失败" : "未登录"}</span>}
               <span className="text-xs text-muted-foreground">

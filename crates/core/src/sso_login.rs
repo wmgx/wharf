@@ -98,13 +98,14 @@ pub fn validate(host: &str, sso: &SsoSpec) -> Result<(), ApiError> {
       "只有 login 方式才能写登录步骤，login 方式必须有登录步骤",
     ));
   }
+  crate::oidc::validate(host, sso)?;
   if sso.public
-    && (sso.mode != SsoMode::Login
+    && (!matches!(sso.mode, SsoMode::Login | SsoMode::Oidc)
       || sso.trust_internal
       || !sso.skip_paths.is_empty())
   {
     return Err(fail(
-      "公开站点只能用 login 方式，也不需要排除路径和组网内免登录",
+      "公开站点只能用 login 或 oidc 方式，也不需要排除路径和组网内免登录",
     ));
   }
   let Some(login) = &sso.login else {

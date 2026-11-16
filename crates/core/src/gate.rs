@@ -41,7 +41,7 @@ struct Ticket {
   expires: i64,
 }
 
-fn seed(
+pub(crate) fn seed(
   c: &rusqlite::Connection,
   name: &str,
 ) -> Result<[u8; 32], ApiError> {
@@ -153,7 +153,7 @@ fn rt_parse(key: &[u8], text: &str, now: i64) -> Option<String> {
   mac.verify_slice(&URL_SAFE_NO_PAD.decode(sig).ok()?).ok()?;
   Some(hash.into())
 }
-async fn session(
+pub(crate) async fn session(
   db: &Db,
   hash: String,
 ) -> Result<Option<(String, i64)>, ApiError> {

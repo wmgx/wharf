@@ -52,11 +52,23 @@ pub enum SsoCmd {
     long_about = "实际登录一次应用并检查结果。先用 wharf secret set 存应用账号，写登录步骤配置文件，再用 wharf route sso <域名> --mode login --file <文件> --apply 应用，运行 wharf sso test <域名>。不通就改配置再试，改不通就换回 --mode gate。"
   )]
   Test { hostname: String },
+  /// Wharf 当 OIDC 身份提供方的信息：issuer、发现地址、各应用的 client_id 和密钥引用。
+  #[command(
+    long_about = "给了域名就只看这个应用。接入步骤：先 wharf route sso <域名> --mode oidc --redirect <回调路径> --apply；再把这里输出的 issuer、client_id、secret_ref 写进服务环境变量（secret_ref 原样写，例如 [[OIDC_BLOG_EXAMPLE_COM]]，部署时自动换成密钥），重新部署服务。很多应用要求邮箱，没设时用 wharf sso email <邮箱> 设置。"
+  )]
+  Oidc { hostname: Option<String> },
+  /// 设置发给应用的邮箱；--clear 清除。
+  Email {
+    #[arg(required_unless_present = "clear")]
+    email: Option<String>,
+    #[arg(long, conflicts_with = "email")]
+    clear: bool,
+  },
 }
 
 #[derive(Subcommand)]
 pub enum Command {
-  /// 代登录测试。
+  /// 统一登录：代登录测试、OIDC 信息和邮箱。
   #[command(subcommand)]
   Sso(SsoCmd),
   /// 保存控制面地址和 token（token 从标准输入读取，不回显）。
@@ -861,8 +873,12 @@ pub enum RouteCmd {
   /// 域名门禁；不给 --mode 时显示当前配置。
   Sso {
     name: String,
-    #[arg(long, value_parser = ["gate", "header", "login", "off"])]
+    /// gate 只挡门；header 传用户名；login 代登录；oidc 让应用用 Wharf 账号登录（应用要支持 OIDC）。
+    #[arg(long, value_parser = ["gate", "header", "login", "oidc", "off"])]
     mode: Option<String>,
+    /// oidc 方式的回调地址，可写多次：本域名路径（如 /login/generic_oauth）或手机 app 的自定义协议。
+    #[arg(long = "redirect", requires = "mode")]
+    redirect: Vec<String>,
     #[arg(long = "skip", requires = "mode")]
     skip: Vec<String>,
     #[arg(
@@ -878,7 +894,7 @@ pub enum RouteCmd {
     /// 登录步骤的 YAML 或 JSON 文件，- 从标准输入读。文件里可以写 entry（代登录后跳到的路径，例如 /ghost/）。
     #[arg(long, requires = "mode")]
     file: Option<String>,
-    /// 公开站点（如博客）：不加门禁，访客照常访问；主人打开 https://<域名>/_wharf/login 登录 Wharf 后代登录进应用后台。只能配 --mode login。
+    /// 公开站点（如博客）：不加门禁，访客照常访问。login 方式由主人打开 https://<域名>/_wharf/login 代登录进后台；oidc 方式由应用自己决定哪里要登录。只能配 login 或 oidc。
     #[arg(long, requires = "mode")]
     public: bool,
     #[command(flatten)]

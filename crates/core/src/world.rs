@@ -869,6 +869,7 @@ impl World {
 
   /// 整体校验。`joined` 是已经完成 join 的服务器。
   pub fn validate(&self) -> Result<(), ApiError> {
+    crate::oidc::validate_names(self)?;
     for (name, service) in &self.services {
       validate_service(self, name, &service.spec)?;
     }

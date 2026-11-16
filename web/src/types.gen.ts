@@ -1298,6 +1298,54 @@ export interface NoticeView {
   name: string;
 }
 
+/**
+ * OIDC 客户端。client_id 就是域名，密钥由 Wharf 生成，
+ * 服务环境变量里用 `[[OIDC_<域名大写，. 和 - 换成 _>]]` 引用。
+ */
+export interface OidcClientSpec {
+  /**
+   * 登录完成后的回调地址。`/` 开头的是本域名下的路径；
+   * 也可以写本域名的完整 https 地址，或手机 app 的自定义协议（如 `app.immich:///oauth-callback`）。
+   */
+  redirect_uris: string[];
+}
+
+export interface OidcClientView {
+  client_id: string;
+  public: boolean;
+  redirect_uris: string[];
+  /**
+   * 服务环境变量里引用密钥的写法，例如 `[[OIDC_BLOG_EXAMPLE_COM]]`。
+   */
+  secret_ref: string;
+}
+
+export interface OidcSecretView {
+  client_id: string;
+  client_secret: string;
+}
+
+export interface OidcSettingsRequest {
+  email: string | null;
+}
+
+/**
+ * Wharf 作为 OIDC 身份提供方的信息；不含任何密钥值。
+ */
+export interface OidcView {
+  clients: OidcClientView[];
+  discovery: string | null;
+  /**
+   * 发给应用的邮箱；很多应用要求有邮箱。
+   */
+  email: string | null;
+  /**
+   * 控制面没有对外 https 地址时为空，OIDC 不可用。
+   */
+  issuer: string | null;
+  username: string;
+}
+
 export type OpStatus = "running" | "succeeded" | "failed";
 
 export interface PackageUpdate {
@@ -2033,15 +2081,20 @@ export interface SsoLoginState {
   ok: boolean;
 }
 
-export type SsoMode = "gate" | "header" | "login";
+export type SsoMode = "gate" | "header" | "login" | "oidc";
 
 export interface SsoSpec {
   header?: string | null;
   login?: LoginSpec | null;
   mode: SsoMode;
   /**
-   * 公开站点：不加门禁，所有人都能访问；只提供 `/_wharf/login` 入口，
-   * 主人从入口登录 Wharf 后代登录进应用。只能和 login 方式一起用。
+   * oidc 方式：应用用 Wharf 账号登录（Wharf 当 OIDC 身份提供方）。
+   */
+  oidc?: OidcClientSpec | null;
+  /**
+   * 公开站点：不加门禁，所有人都能访问。login 方式只提供 `/_wharf/login`
+   * 入口，主人从入口登录 Wharf 后代登录进应用；oidc 方式由应用自己决定哪里要登录。
+   * 只能和 login、oidc 方式一起用。
    */
   public?: boolean;
   /**

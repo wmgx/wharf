@@ -76,6 +76,13 @@ DNS 记录、证书、网关配置都会自动处理，前提是用户已经在�
 
 要加登录保护：`wharf route sso <域名> --help`。博客这类公开站点不要加门禁；应用后台想免密进入时，用 `--mode login --public`，登录步骤文件里用 `entry` 写后台路径。
 
+应用支持 OIDC 时优先用 OIDC（比代登录稳）：
+
+1. `wharf route sso <域名> --mode oidc --redirect <回调路径> --apply`，回调路径看应用的 OIDC 文档；公开站点加 `--public`，私有站点不加（门禁和 OIDC 一起生效）。
+2. `wharf sso oidc <域名> --json` 拿 issuer、client_id、secret_ref。
+3. 把它们写进服务环境变量，密钥原样写 secret_ref（如 `[[OIDC_BLOG_EXAMPLE_COM]]`），不要读出明文；scope 用 `openid profile email`，要角色映射时加 `groups`（值是 `["admin"]`）。
+4. 重新部署服务。很多应用要求邮箱，`wharf sso oidc` 显示邮箱没设时让用户在页面设置，或 `wharf sso email <邮箱>`。
+
 ### 域名打不开
 
 ```bash

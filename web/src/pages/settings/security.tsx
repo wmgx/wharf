@@ -9,6 +9,7 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import { Input } from "@/components/ui/input";
 import type { SessionRow, TotpView } from "@/types.gen";
 import type { GateKeyView, RouteView } from "@/types";
+import { Oidc } from "./oidc";
 
 type Mode = "begin" | "recovery" | "disable";
 type Pending = { secret: string; uri: string; qr_svg: string };
@@ -29,6 +30,7 @@ export function Security() {
     </Panel>}
     <Sessions />
     <GateKeys />
+    <Oidc />
     {mode && <TotpDialog mode={mode} onClose={() => { setMode(null); refresh(); }} onChanged={refresh} />}
   </>;
 }
