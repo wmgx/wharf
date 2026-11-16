@@ -285,6 +285,17 @@ pub async fn refresh(
   Ok(())
 }
 
+fn should_refresh(
+  online: bool,
+  outdated: bool,
+  checked_at: Option<i64>,
+  now: i64,
+) -> bool {
+  online
+    && !outdated
+    && checked_at.is_none_or(|at| now.saturating_sub(at) > 3_600_000)
+}
+
 pub fn spawn(state: Arc<AppState>) {
   tokio::spawn(async move {
     tokio::time::sleep(Duration::from_secs(180)).await;
@@ -296,15 +307,23 @@ pub fn spawn(state: Arc<AppState>) {
           },
         );
         for server in snap.world.servers.keys() {
-          if state.hub.is_online(server)
-            && !outdated(&snap, server)
-            && let Err(e) = refresh(&state, server).await
+          let checked_at = LAST
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(server)
+            .map(|(at, _)| *at);
+          if should_refresh(
+            state.hub.is_online(server),
+            outdated(&snap, server),
+            checked_at,
+            db::now_ms(),
+          ) && let Err(e) = refresh(&state, server).await
           {
             tracing::warn!("检查 {server} 暴露面失败：{e}");
           }
         }
       }
-      tokio::time::sleep(Duration::from_secs(3600)).await;
+      tokio::time::sleep(Duration::from_secs(300)).await;
     }
   });
 }
@@ -458,6 +477,18 @@ pub async fn ack(
 #[cfg(test)]
 mod tests {
   use super::*;
+  #[test]
+  fn refresh_only_online_current_and_missing_or_expired() {
+    let now = 7_200_000;
+    assert!(should_refresh(true, false, None, now));
+    assert!(should_refresh(true, false, Some(now - 3_600_001), now));
+    assert!(!should_refresh(true, false, Some(now - 3_600_000), now));
+    assert!(!should_refresh(true, false, Some(now), now));
+    assert!(!should_refresh(true, false, Some(now + 1), now));
+    assert!(!should_refresh(false, false, None, now));
+    assert!(!should_refresh(true, true, None, now));
+  }
+
   #[test]
   fn gateway_expected_container_not_expected() {
     let l = Listen {
