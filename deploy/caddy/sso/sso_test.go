@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
 	"strings"
 	"sync"
@@ -169,5 +170,88 @@ func TestFailuresAndSkip(t *testing.T) {
 		if w.Code != status || w.Body.String() != "原正文" || w.Header().Get("Location") != "/login" || len(w.Header().Values("Set-Cookie")) != 1 {
 			t.Fatal("错误应答被改变")
 		}
+	}
+}
+
+func TestTrustDirectPeer(t *testing.T) {
+	s := plugin(t, "http://127.0.0.1:1")
+	s.trusted = []netip.Prefix{netip.MustParsePrefix("100.64.0.0/10")}
+	for _, peer := range []string{"100.64.0.7:1234", "172.30.0.7:1234"} {
+		r := httptest.NewRequest("GET", "https://a.example.test/", nil)
+		r.RemoteAddr = peer
+		r.Header.Set("Accept", "text/html")
+		r.Header.Set("X-Forwarded-For", "100.64.0.7")
+		r.Header.Set("Cookie", "wharf_gate=bad;wharf_gate_rt=bad;other=1")
+		// 非信任来源不用长凭据，以验证伪造转发头仍然走登录。
+		if strings.HasPrefix(peer, "172.") {
+			r.Header.Set("Cookie", "other=1")
+		}
+		w := httptest.NewRecorder()
+		err := s.ServeHTTP(w, r, caddyhttp.HandlerFunc(func(w http.ResponseWriter, r *http.Request) error {
+			if r.Header.Get("Cookie") != "other=1" {
+				t.Fatal("残留门禁cookie")
+			}
+			w.WriteHeader(200)
+			return nil
+		}))
+		want := 302
+		if strings.HasPrefix(peer, "100.") {
+			want = 200
+		}
+		if err != nil || w.Code != want {
+			t.Fatalf("来源判定失败: %s %d", peer, w.Code)
+		}
+	}
+}
+func TestAccessKey(t *testing.T) {
+	var calls int
+	core := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.URL.Path != "/gate/key" || r.Header.Get("X-Wharf-Key") != "lab-key" || r.Header.Get("X-Forwarded-Host") != "a.example.test" || r.Header.Get("X-Forwarded-For") != "203.0.113.7" {
+			t.Error("校验请求不对")
+		}
+	}))
+	defer core.Close()
+	s := plugin(t, core.URL)
+	for i := 0; i < 2; i++ {
+		r := httptest.NewRequest("POST", "https://a.example.test/", strings.NewReader("body"))
+		r.RemoteAddr = "203.0.113.7:1234"
+		r.Header.Set("X-Wharf-Key", "lab-key")
+		r.Header.Set("Cookie", "wharf_gate=bad;wharf_gate_rt=bad;other=1")
+		w := httptest.NewRecorder()
+		err := s.ServeHTTP(w, r, caddyhttp.HandlerFunc(func(w http.ResponseWriter, r *http.Request) error {
+			b, _ := io.ReadAll(r.Body)
+			if r.Header.Get("X-Wharf-Key") != "" || r.Header.Get("Cookie") != "other=1" || string(b) != "body" {
+				t.Error("凭证残留或正文丢失")
+			}
+			w.WriteHeader(200)
+			return nil
+		}))
+		if err != nil || w.Code != 200 {
+			t.Fatal("有效凭证被拒")
+		}
+	}
+	if calls != 2 {
+		t.Fatal("访问凭证被缓存")
+	}
+}
+func TestInvalidKeyDoesNotFallback(t *testing.T) {
+	calls := 0
+	core := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(401)
+		fmt.Fprint(w, `{"error":"访问凭证无效"}`)
+	}))
+	defer core.Close()
+	s := plugin(t, core.URL)
+	r := httptest.NewRequest("GET", "https://a.example.test/", nil)
+	r.Header.Set("X-Wharf-Key", "wrong")
+	r.Header.Set("Cookie", "wharf_gate="+token(ed25519.NewKeyFromSeed(make([]byte, 32)), "EdDSA", "wharf", time.Now().Unix()+600))
+	w := httptest.NewRecorder()
+	if err := s.ServeHTTP(w, r, caddyhttp.HandlerFunc(func(http.ResponseWriter, *http.Request) error { t.Fatal("无效凭证回退cookie"); return nil })); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || w.Code != 401 || w.Body.String() != `{"error":"访问凭证无效"}` {
+		t.Fatal("未原样拒绝凭证")
 	}
 }

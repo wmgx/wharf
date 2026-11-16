@@ -1,12 +1,12 @@
 //! 门禁凭据与一次性票据；页面会话仍是唯一的登录状态。
 use crate::{
   api::AppError,
-  auth::{hash_token, new_token},
+  auth::{Auth, hash_token, new_token},
   db::{self, Db, now_ms, sql_err},
   state::AppState,
 };
 use axum::{
-  extract::{Query, State},
+  extract::{ConnectInfo, Path, Query, State},
   http::{HeaderMap, header},
   response::{IntoResponse, Response},
 };
@@ -24,7 +24,10 @@ use std::{
   collections::BTreeMap,
   sync::{Arc, LazyLock, Mutex, OnceLock},
 };
-use wharf_api_types::ApiError;
+use wharf_api_types::{
+  ApiError, validate_name,
+  view::{GateKeyRequest, GateKeyView, Perm},
+};
 
 const ACCESS_TTL: i64 = 600;
 // 同步渲染只读的启动参数和公钥，不保存私钥。
@@ -469,6 +472,145 @@ pub async fn site_logout() -> Response {
   )
 }
 
+pub fn trusted_ranges(
+  net: &crate::render::Net,
+  server: &str,
+) -> Vec<String> {
+  let mut ranges = std::collections::BTreeSet::from([
+    "127.0.0.0/8".to_string(),
+    "100.64.0.0/10".to_string(),
+  ]);
+  for ip in net.lan_ips.get(server).into_iter().flatten() {
+    if let Ok(ip) = ip.parse::<std::net::Ipv4Addr>() {
+      let [a, b, c, _] = ip.octets();
+      ranges.insert(format!("{a}.{b}.{c}.0/24"));
+    }
+  }
+  ranges.into_iter().collect()
+}
+
+pub async fn list_keys(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+) -> Result<axum::Json<Vec<GateKeyView>>, AppError> {
+  auth.require(Perm::Admin)?;
+  Ok(axum::Json(s.db.call(|c| {
+    let mut stmt = c.prepare("SELECT name, hosts, created_at, last_used_at FROM gate_keys ORDER BY name").map_err(sql_err)?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?,r.get::<_, String>(1)?,r.get::<_, i64>(2)?,r.get::<_, Option<i64>>(3)?))).map_err(sql_err)?;
+    rows.map(|r| {
+      let (name, hosts, created_at, last_used_at) = r.map_err(sql_err)?;
+      Ok(GateKeyView { name, hosts: serde_json::from_str(&hosts).map_err(|_| ApiError::internal("访问凭证域名格式不对"))?, created_at, last_used_at })
+    }).collect()
+  }).await?))
+}
+
+pub async fn put_key(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Path(name): Path<String>,
+  axum::Json(req): axum::Json<GateKeyRequest>,
+) -> Result<axum::Json<serde_json::Value>, AppError> {
+  auth.require(Perm::Admin)?;
+  validate_name("访问凭证", &name)?;
+  if req.hosts.is_empty() {
+    return Err(ApiError::invalid("至少选一个域名").into());
+  }
+  let world = crate::snapshot::load(&s.db).await?.world;
+  for host in &req.hosts {
+    if world.routes.get(host).is_none_or(|r| r.spec.sso.is_none()) {
+      return Err(
+        ApiError::invalid(format!("域名 {host} 没开门禁")).into(),
+      );
+    }
+  }
+  Ok(axum::Json(s.db.call(move |c| {
+    let hosts = serde_json::to_string(&req.hosts).map_err(|_| ApiError::internal("访问凭证域名格式不对"))?;
+    let tx = c.unchecked_transaction().map_err(sql_err)?;
+    let changed = tx.execute("UPDATE gate_keys SET hosts=?2 WHERE name=?1", params![name,hosts]).map_err(sql_err)?;
+    let mut result = json!({"name":name,"hosts":req.hosts});
+    if changed == 0 {
+      let key = format!("wgk_{}", new_token());
+      tx.execute("INSERT INTO gate_keys (name,hash,hosts,created_at) VALUES (?1,?2,?3,?4)",params![name,hash_token(&key),hosts,now_ms()]).map_err(sql_err)?;
+      result["key"] = key.into();
+    }
+    tx.commit().map_err(sql_err)?;
+    Ok(result)
+  }).await?))
+}
+
+pub async fn remove_key(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Path(name): Path<String>,
+) -> Result<axum::Json<serde_json::Value>, AppError> {
+  auth.require(Perm::Admin)?;
+  let removed = s
+    .db
+    .call(move |c| {
+      c.execute("DELETE FROM gate_keys WHERE name=?1", [name])
+        .map_err(sql_err)
+    })
+    .await?;
+  Ok(axum::Json(json!({"removed":removed > 0})))
+}
+
+fn key_allowed(
+  c: &rusqlite::Connection,
+  key: &str,
+  host: &str,
+  now: i64,
+) -> Result<bool, ApiError> {
+  let hash = hash_token(key);
+  let hosts: Option<String> = c
+    .query_row(
+      "SELECT hosts FROM gate_keys WHERE hash=?1",
+      [&hash],
+      |r| r.get(0),
+    )
+    .optional()
+    .map_err(sql_err)?;
+  let allowed = hosts
+    .and_then(|h| serde_json::from_str::<Vec<String>>(&h).ok())
+    .is_some_and(|h| h.iter().any(|h| h == host));
+  if allowed {
+    c.execute("UPDATE gate_keys SET last_used_at=?2 WHERE hash=?1 AND (last_used_at IS NULL OR last_used_at<=?2-60000)",params![hash,now]).map_err(sql_err)?;
+  }
+  Ok(allowed)
+}
+
+pub async fn check_key(
+  State(s): State<Arc<AppState>>,
+  ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
+  headers: HeaderMap,
+) -> Result<Response, AppError> {
+  let source = crate::login::client_key(peer.ip(), &headers);
+  if crate::login::locked(&source).is_some() {
+    tracing::warn!(source = %source, "门禁访问凭证来源已锁定");
+    return Ok(response(
+      401,
+      None,
+      "{\"error\":\"访问凭证无效\"}",
+      &[],
+    ));
+  }
+  let key = headers
+    .get("x-wharf-key")
+    .and_then(|v| v.to_str().ok())
+    .unwrap_or_default()
+    .to_string();
+  let host = forwarded_host(&headers).to_string();
+  if s
+    .db
+    .call(move |c| key_allowed(c, &key, &host, now_ms()))
+    .await?
+  {
+    return Ok(response(200, None, "", &[]));
+  }
+  crate::login::record_failure(&source);
+  tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+  Ok(response(401, None, "{\"error\":\"访问凭证无效\"}", &[]))
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -485,6 +627,72 @@ mod tests {
       },
     );
     w
+  }
+  #[test]
+  fn trusted_lan_ranges() {
+    let net = crate::render::Net {
+      lan_ips: BTreeMap::from([(
+        "s1".into(),
+        vec!["203.0.113.7".into(), "203.0.113.9".into()],
+      )]),
+      ..Default::default()
+    };
+    assert_eq!(
+      trusted_ranges(&net, "s1"),
+      vec!["100.64.0.0/10", "127.0.0.0/8", "203.0.113.0/24"]
+    );
+    assert_eq!(
+      trusted_ranges(&net, "s2"),
+      vec!["100.64.0.0/10", "127.0.0.0/8"]
+    );
+  }
+  fn key_db() -> rusqlite::Connection {
+    let c = rusqlite::Connection::open_in_memory().unwrap();
+    c.execute_batch("CREATE TABLE gate_keys (name TEXT PRIMARY KEY,hash TEXT UNIQUE,hosts TEXT,created_at INTEGER,last_used_at INTEGER);").unwrap();
+    c.execute("INSERT INTO gate_keys VALUES ('k1',?1,'[\"a.example.test\"]',0,NULL)",[hash_token("lab-key")]).unwrap();
+    c
+  }
+  #[test]
+  fn key_scope_and_last_use() {
+    let c = key_db();
+    assert!(
+      !key_allowed(&c, "wrong", "a.example.test", 100000).unwrap()
+    );
+    assert!(
+      !key_allowed(&c, "lab-key", "b.example.test", 100000).unwrap()
+    );
+    assert!(
+      key_allowed(&c, "lab-key", "a.example.test", 100000).unwrap()
+    );
+    assert!(
+      key_allowed(&c, "lab-key", "a.example.test", 100001).unwrap()
+    );
+    let used: i64 = c
+      .query_row("SELECT last_used_at FROM gate_keys", [], |r| {
+        r.get(0)
+      })
+      .unwrap();
+    assert_eq!(used, 100000);
+    assert!(
+      key_allowed(&c, "lab-key", "a.example.test", 160000).unwrap()
+    );
+    let used: i64 = c
+      .query_row("SELECT last_used_at FROM gate_keys", [], |r| {
+        r.get(0)
+      })
+      .unwrap();
+    assert_eq!(used, 160000);
+  }
+  #[test]
+  fn key_revocation_is_immediate() {
+    let c = key_db();
+    assert!(
+      key_allowed(&c, "lab-key", "a.example.test", 100000).unwrap()
+    );
+    c.execute("DELETE FROM gate_keys", []).unwrap();
+    assert!(
+      !key_allowed(&c, "lab-key", "a.example.test", 100001).unwrap()
+    );
   }
   #[test]
   fn rd_query_roundtrip() {

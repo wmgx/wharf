@@ -775,3 +775,5 @@ export interface AuditEntry {
 export type TimelineItem = Gen.TimelineItem;
 
 export type Timeline = Gen.Timeline;
+export type GateKeyView = Gen.GateKeyView;
+export type GateKeyRequest = Gen.GateKeyRequest;
