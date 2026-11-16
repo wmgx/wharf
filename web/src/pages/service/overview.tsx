@@ -6,7 +6,7 @@ import { useEffect, useState } from "react";
 import { ObjectIssues } from "@/components/issues";
 import { Link } from "react-router-dom";
 import { api, usePoll } from "@/api";
-import { CopyButton, Dot, OpenLink, SectionTitle, ago } from "@/components/common";
+import { CopyButton, Dot, ErrorNote, OpenLink, SectionTitle, ago } from "@/components/common";
 import { diagnosisOf, routeTone, serviceTruth } from "@/components/health";
 import { Facts, Panel, Row, Rows } from "@/components/kit";
 import { Probe } from "@/components/probe";
@@ -128,6 +128,7 @@ export function Overview({ svc, routes, onTab, onBackup, onOpen }: { svc: Servic
         </Panel>
       </div>
     </div>
+    <ErrorNote error={exposure.error} />
     {!!ports.length && <>
       <SectionTitle>对公网开放的端口</SectionTitle>
       <Rows>{ports.map((p) => <Row key={`${p.proto}/${p.port}/${p.addr}`} className={!p.acked && !p.expected ? "bg-warning/10" : undefined}>
