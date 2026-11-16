@@ -1394,3 +1394,16 @@ pub fn risk_text(code: &str) -> &str {
     _ => code,
   }
 }
+
+/// 门禁访问凭证；列表不包含明文或哈希。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct GateKeyView {
+  pub name: String,
+  pub hosts: Vec<String>,
+  pub created_at: i64,
+  pub last_used_at: Option<i64>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct GateKeyRequest {
+  pub hosts: Vec<String>,
+}

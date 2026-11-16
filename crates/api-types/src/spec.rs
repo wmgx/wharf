@@ -585,6 +585,8 @@ pub struct RouteSpec {
   Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
 )]
 pub struct SsoSpec {
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub trust_internal: bool,
   pub mode: SsoMode,
   /// 不过门禁的路径前缀。
   #[serde(default, skip_serializing_if = "Vec::is_empty")]

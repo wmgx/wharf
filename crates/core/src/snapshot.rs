@@ -398,6 +398,11 @@ pub fn gateway_render(
           .map(|u| format!("http://{u}"))
           .unwrap_or_else(|| login.clone());
         Ok(render::Gate {
+          trusted: if sso.trust_internal {
+            crate::gate::trusted_ranges(net, &gateway.spec.server)
+          } else {
+            vec![]
+          },
           login: login.clone(),
           core,
           skip_paths: sso.skip_paths.clone(),
