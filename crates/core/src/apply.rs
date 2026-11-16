@@ -1593,6 +1593,21 @@ async fn record_deployment(
     serde_json::to_string(&result.images).map_err(json_err)?;
   let spec = serde_json::to_string(d.spec).map_err(json_err)?;
   let commit = d.commit.map(str::to_string);
+  // 记下实际跑起来的版本：导入（按本机已有的镜像启动）和每次部署之后，固定的版本都和正在跑的一致。
+  let pinnable = crate::pins::images(&d.spec.source);
+  let pins: std::collections::BTreeMap<&str, &str> = result
+    .images
+    .iter()
+    .filter(|i| pinnable.contains(&i.image))
+    .filter_map(|i| {
+      let (_, digest) = i.digest.as_deref()?.split_once('@')?;
+      Some((i.image.as_str(), digest))
+    })
+    .collect();
+  let pins = (!pins.is_empty())
+    .then(|| serde_json::to_string(&pins))
+    .transpose()
+    .map_err(json_err)?;
   let values = (
     d.service.to_string(),
     d.server.to_string(),
@@ -1610,6 +1625,14 @@ async fn record_deployment(
         params![service, server, run_id, hash, compose, images, now_ms(), spec, commit],
       )
       .map_err(sql_err)?;
+      if let Some(pins) = pins {
+        c.execute(
+          "UPDATE resources SET meta = json_set(COALESCE(meta, '{}'), '$.pins', json(?1))
+           WHERE kind = 'service' AND name = ?2",
+          params![pins, service],
+        )
+        .map_err(sql_err)?;
+      }
       Ok(())
     })
     .await
