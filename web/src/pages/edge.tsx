@@ -39,7 +39,7 @@ export async function edgeTask(path: string, body: object, what: string): Promis
     const { run_id } = await api.post<{ run_id: string }>(path, body);
     return run_id;
   } catch (e) {
-    toast.error(`不能${what}`, { description: (e as Error).message });
+    toast.error(`${what}失败`, { description: (e as Error).message });
     return null;
   }
 }
