@@ -4,6 +4,7 @@ import { AuthFields, authReady, saveAuth } from "@/components/basic-auth";
 import { toast } from "sonner";
 import { EntryField, useEntry } from "@/components/entry";
 import { DomainChips, Field, Picker } from "@/components/fields";
+import { WildcardHints } from "@/components/wildcard-hints";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -19,11 +20,11 @@ export function AddRoute({ service: fixed, open, onClose }: { service?: string; 
   const service = fixed ?? picked;
   const server = status?.services.find((s) => s.name === service)?.spec.server ?? "";
   const entry = useEntry(server);
-  const [authWanted, setAuth] = useState(false);
+  const [protection, setProtection] = useState("gate");
   const [tunnel, setTunnel] = useState(false);
   const [internalWanted, setInternal] = useState(false);
   const internal = internalWanted && !entry.tunnel;
-  const auth = authWanted && !entry.tunnel;
+  const auth = protection === "basic" && !entry.tunnel;
   const [user, setUser] = useState("admin");
   const [password, setPassword] = useState("");
   const suffixes = [...new Set(status?.routes.map((r) => r.spec.hostname.split(".").slice(1).join(".")).filter(Boolean))];
@@ -40,13 +41,13 @@ export function AddRoute({ service: fixed, open, onClose }: { service?: string; 
     setPassword("");
     onClose();
     setHostname("");
-    setAuth(false);
+    setProtection("gate");
     setTunnel(false);
     setInternal(false);
     const { gateway, changes } = entry.resolve();
     actions.plan({
       title: "加域名",
-      changes: [...changes, { op: "upsert_route", spec: { hostname: host, service, gateway, internal: internal || undefined, auth: auth || undefined, link: tunnel ? "tunnel" : undefined } }],
+      changes: [...changes, { op: "upsert_route", spec: { hostname: host, service, gateway, internal: internal || undefined, auth: auth || undefined, sso: protection === "gate" && !entry.tunnel ? { mode: "gate" } : undefined, link: tunnel ? "tunnel" : undefined } }],
     });
   };
   return (
@@ -72,12 +73,14 @@ export function AddRoute({ service: fixed, open, onClose }: { service?: string; 
             {!hostname && service && <DomainChips suggestions={suffixes.map((s) => `${service}.${s}`)} onPick={setHostname} />}
           </Field>
           <EntryField entry={entry} />
-          <label className={`flex items-center gap-2.5 text-sm ${entry.tunnel ? "text-muted-foreground" : "cursor-pointer"}`}>
-            <Checkbox checked={auth} disabled={entry.tunnel} onCheckedChange={(v) => setAuth(v === true)} />
-            登录保护
-            <span className="text-xs text-muted-foreground">{entry.tunnel ? "隧道入口暂不支持" : "访问时要输入账号密码"}</span>
-          </label>
+          {status && <WildcardHints status={status} gateway={entry.chosen} />}
+          {entry.tunnel ? <p className="text-sm text-muted-foreground">隧道入口暂不支持访问保护</p> : <Field label="访问保护"><Picker value={protection} onChange={setProtection} options={[{ value: "gate", label: "门禁（用 Wharf 登录，推荐）" }, { value: "basic", label: "账号密码" }, { value: "none", label: "不保护" }]} /></Field>}
           {auth && <AuthFields user={user} password={password} onUser={setUser} onPassword={setPassword} />}
+            <label className={`mt-3 flex items-center gap-2.5 text-sm ${entry.tunnel ? "text-muted-foreground" : "cursor-pointer"}`}>
+              <Checkbox checked={internal} disabled={entry.tunnel} onCheckedChange={(v) => setInternal(v === true)} />
+              只在内网访问
+              {entry.tunnel && <span className="text-xs text-muted-foreground">隧道入口不支持</span>}
+            </label>
           <details>
             <summary className="cursor-pointer text-sm text-muted-foreground">更多</summary>
             <label className="mt-3 flex cursor-pointer items-center gap-2.5 text-sm">
@@ -85,11 +88,7 @@ export function AddRoute({ service: fixed, open, onClose }: { service?: string; 
               总是走反向隧道
               <span className="text-xs text-muted-foreground">默认自动：能直连就直连</span>
             </label>
-            <label className={`mt-3 flex items-center gap-2.5 text-sm ${entry.tunnel ? "text-muted-foreground" : "cursor-pointer"}`}>
-              <Checkbox checked={internal} disabled={entry.tunnel} onCheckedChange={(v) => setInternal(v === true)} />
-              只在内网访问
-              {entry.tunnel && <span className="text-xs text-muted-foreground">隧道入口不支持</span>}
-            </label>
+
           </details>
         </div>
         <DialogFooter>

@@ -1,5 +1,5 @@
 import {
-  ArrowRightLeftIcon, ArrowUpCircleIcon, ArrowUpRightIcon, EllipsisIcon, HammerIcon, HistoryIcon, KeyRoundIcon, LockIcon, LockOpenIcon, PackageIcon,
+  ArrowRightLeftIcon, ArrowUpCircleIcon, ArrowUpRightIcon, EllipsisIcon, HammerIcon, HistoryIcon, LockIcon, PackageIcon,
   PlayIcon, RefreshCwIcon, RotateCwIcon, ScrollTextIcon, SquareIcon, TerminalIcon, Trash2Icon,
   WrenchIcon, type LucideIcon,
 } from "lucide-react";
@@ -50,9 +50,7 @@ export const serviceOps: Op<ServiceView>[] = [
 
 export const routeOps: Op<RouteView>[] = [
   { id: "open", label: "打开", icon: ArrowUpRightIcon, group: "more", run: (r) => window.open(r.url, "_blank", "noreferrer") },
-  { id: "auth-on", label: "开启登录保护", icon: LockIcon, group: "more", show: (r, c) => !r.spec.auth && !r.spec.redirect && c.status?.gateways.find((g) => g.name === r.gateway)?.spec.kind === "caddy", run: (r, c) => c.actions.basicAuth(r.spec.hostname, true) },
-  { id: "auth-edit", label: "改登录账号", icon: KeyRoundIcon, group: "more", show: (r) => !!r.spec.auth, run: (r, c) => c.actions.basicAuth(r.spec.hostname) },
-  { id: "auth-off", label: "关闭登录保护", icon: LockOpenIcon, group: "more", show: (r) => !!r.spec.auth, run: (r, c) => c.actions.plan({ title: `关闭 ${r.spec.hostname} 的登录保护`, changes: [{ op: "upsert_route", spec: { ...r.spec, auth: false } }] }) },
+  { id: "protection", label: "访问保护", icon: LockIcon, group: "more", run: (r, c) => c.nav(`/domains?open=${encodeURIComponent(r.spec.hostname)}&protection=1`) },
   { id: "remove", label: "移除域名", icon: Trash2Icon, group: "danger", run: (r, c) => c.actions.removeRoute(r.spec.hostname) },
 ];
 

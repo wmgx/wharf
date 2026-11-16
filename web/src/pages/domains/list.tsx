@@ -1,4 +1,4 @@
-import { CloudIcon, LockIcon, SearchIcon } from "lucide-react";
+import { CloudIcon, SearchIcon } from "lucide-react";
 import { useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { Empty, OpenLink, useClickable } from "@/components/common";
@@ -6,6 +6,8 @@ import { Picker, Segmented } from "@/components/fields";
 import { CertDays, Lamps, diagnosisOf, routeTone } from "@/components/health";
 import { hopOf } from "@/components/hop";
 import { Panel, Tip } from "@/components/kit";
+import { WildcardHints } from "@/components/wildcard-hints";
+import { Probe } from "@/components/probe";
 import { OpMenu, routeOps } from "@/components/ops";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -31,6 +33,7 @@ export function DomainList({ status, add }: { status: Status; add: React.ReactNo
     {status.gateways.length ? "还没有域名" : "还没有域名。先建一个入口"}
   </Empty>;
   return <>
+    <WildcardHints status={status} gateway={gateway || undefined} />
     <div className="mb-4 flex flex-wrap items-center gap-2">
       {status.gateways.length <= 3 ? <div className="max-w-full overflow-x-auto">
         <Segmented value={gateway} options={options.map((o) => [o.value, o.label])} onChange={select} />
@@ -67,7 +70,7 @@ export function DomainList({ status, add }: { status: Status; add: React.ReactNo
                 {route?.on_backup && <Badge variant="destructive">正走备用</Badge>}
               </TableCell>
               <TableCell>
-                {route ? <Lamps d={d} /> : "-"}
+                {route?.probe ? <Probe probe={route.probe} /> : route ? <Lamps d={d} /> : "-"}
               </TableCell>
               <TableCell>
                 {app ? <Link to={`/edge/${encodeURIComponent(app)}`} className="inline-flex items-center gap-1 hover:underline" onClick={(e) => e.stopPropagation()}>
@@ -87,11 +90,7 @@ export function DomainList({ status, add }: { status: Status; add: React.ReactNo
                 </>}
               </TableCell>
               <TableCell>
-                {route?.spec.auth ? <Tip text="登录保护：账号密码">
-                  <span>
-                    <LockIcon className="size-4" />
-                  </span>
-                </Tip> : "-"}
+                {route ? <Button variant="ghost" size="xs" onClick={(e) => { e.stopPropagation(); setParams({ open: hostname, protection: "1" }); }}>{route.spec.sso ? "门禁" : route.spec.auth ? "账号密码" : "无"}</Button> : "-"}
               </TableCell>
               <TableCell>
                 {d?.cert_expires ? <CertDays d={d} /> : "-"}

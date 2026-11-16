@@ -48,7 +48,7 @@ export function nameFromImage(image: string): string {
 
 export function Field({ label, htmlFor, help, children }: { label?: ReactNode; htmlFor?: string; help?: ReactNode; children: ReactNode }) {
   return (
-    <div className="grid gap-2">
+    <div className="grid content-start gap-2">
       {label && <Label htmlFor={htmlFor}>{label}</Label>}
       {children}
       {help && <p className="text-xs text-muted-foreground">{help}</p>}
