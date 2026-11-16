@@ -166,6 +166,8 @@ export interface AlertsView {
   rules: AlertRuleView[];
 }
 
+export type AllCookies = "all";
+
 /**
  * 统一错误格式。`message` 可以直接给用户看，不含 token 和厂商原始响应。
  */
@@ -744,6 +746,24 @@ export interface ExposureView {
   risks: RiskRow[];
 }
 
+export type Extract = {
+  from: "json";
+  name: string;
+  path: string;
+} | {
+  between: string[];
+  from: "body";
+  name: string;
+} | {
+  from: "header";
+  header: string;
+  name: string;
+} | {
+  cookie: string;
+  from: "cookie";
+  name: string;
+};
+
 export interface FileEntry {
   dir: boolean;
   /**
@@ -1118,6 +1138,44 @@ export interface LiveState {
    */
   state: string;
 }
+
+export interface LoginSpec {
+  check?: LoginStep | null;
+  steps: LoginStep[];
+  ttl_hours: number;
+  write: LoginWrite[];
+}
+
+export interface LoginStep {
+  body?: string | null;
+  expect?: number[] | null;
+  extract?: Extract[];
+  form?: Record<string, string> | null;
+  headers?: Record<string, string>;
+  json?: unknown;
+  method: string;
+  path: string;
+}
+
+export type LoginWrite = {
+  cookies: AllCookies;
+} | {
+  cookie: {
+  http_only: boolean;
+  name: string;
+  value: string;
+};
+} | {
+  local_storage: {
+  key: string;
+  value: string;
+};
+} | {
+  session_storage: {
+  key: string;
+  value: string;
+};
+};
 
 /**
  * 一次资源采样。速率是和上一次采样相比的平均值。
@@ -1964,16 +2022,34 @@ export interface SshLogin {
   user: string;
 }
 
-export type SsoMode = "gate" | "header";
+export type SsoMode = "gate" | "header" | "login";
 
 export interface SsoSpec {
   header?: string | null;
+  login?: LoginSpec | null;
   mode: SsoMode;
   /**
    * 不过门禁的路径前缀。
    */
   skip_paths?: string[];
   trust_internal?: boolean;
+}
+
+export interface SsoStepResult {
+  error: string | null;
+  extracted: Record<string, number>;
+  method: string;
+  ms: number;
+  number: number;
+  path: string;
+  status: number | null;
+}
+
+export interface SsoTestResult {
+  check: SsoStepResult | null;
+  ok: boolean;
+  steps: SsoStepResult[];
+  would_write: string[];
 }
 
 export interface Status {

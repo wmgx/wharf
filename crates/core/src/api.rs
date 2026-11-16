@@ -57,6 +57,10 @@ pub(crate) type ApiResult<T> = Result<Json<T>, AppError>;
 pub fn router(state: Arc<AppState>) -> Router {
   Router::new()
     .route("/gate/key", get(crate::gate::check_key))
+    .route(
+      "/api/routes/{hostname}/sso/test",
+      post(crate::sso_login::test),
+    )
     .route("/api/gate/keys", get(crate::gate::list_keys))
     .route(
       "/api/gate/keys/{name}",
