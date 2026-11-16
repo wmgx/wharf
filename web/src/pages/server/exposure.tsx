@@ -34,9 +34,9 @@ export function ServerExposure({ server }: { server: string }) {
         <Button variant="outline" size="sm" disabled={busy} onClick={() => load("refresh")}>{busy ? "检查中" : "重新检查"}</Button>
       </div>
       {!data?.checked_at ? <Empty>{busy ? "读取中" : "还没有检查过"}</Empty> : <>
-        <SectionTitle>对公网开放的端口</SectionTitle>
+        <SectionTitle>{noPublic ? "本机监听的端口" : "对公网开放的端口"}</SectionTitle>
         <p className="mb-3 text-xs text-muted-foreground">本机在监听的端口，云厂商的安全组可能挡掉其中一部分</p>
-        {!data.ports.length ? <Empty>没有对公网开放的端口</Empty> : <Rows limit={10}>{data.ports.map((p) => <Row key={`${p.proto}/${p.port}/${p.addr}`} className={!noPublic && !p.expected && !p.acked ? "bg-warning/10" : undefined}>
+        {!data.ports.length ? <Empty>{noPublic ? "没有监听的端口" : "没有对公网开放的端口"}</Empty> : <Rows limit={10}>{data.ports.map((p) => <Row key={`${p.proto}/${p.port}/${p.addr}`} className={!noPublic && !p.expected && !p.acked ? "bg-warning/10" : undefined}>
           <span className="font-mono">{p.proto}/{p.port}</span>
           <span className="min-w-0 flex-1 break-all">{owners[p.owner]} · {p.name}</span>
           {p.expected ? <StatusBadge tone="idle">预期</StatusBadge> : <span className="flex items-center gap-2">
