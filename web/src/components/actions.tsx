@@ -79,7 +79,6 @@ export function ActionsProvider({ children }: { children: ReactNode }) {
   const nav = useNavigate();
   const [open, setOpen] = useState<Open | null>(null);
   const [removing, setRemoving] = useState<string | null>(null);
-  const [removingRoute, setRemovingRoute] = useState<string | null>(null);
   const [removeTaskData, setRemoveTaskData] = useState(false);
   const [removingTask, setRemovingTask] = useState<string | null>(null);
   const [moving, setMoving] = useState<ServiceView | null>(null);
@@ -142,7 +141,7 @@ export function ActionsProvider({ children }: { children: ReactNode }) {
         const { run_id } = await api.post<{ run_id: string }>(`/api/services/${encodeURIComponent(name)}/rebuild`, {});
         actions.watch(run_id, `重新构建 ${name}`);
       } catch (e) {
-        toast.error(`不能重新构建 ${name}`, { description: (e as Error).message });
+        toast.error(`重新构建 ${name} 失败`, { description: (e as Error).message });
       }
     },
     upgradeAgent: async (server) => {
@@ -150,7 +149,7 @@ export function ActionsProvider({ children }: { children: ReactNode }) {
         const { run_id } = await api.post<{ run_id: string }>(`/api/servers/${encodeURIComponent(server)}/upgrade`, {});
         actions.watch(run_id, `升级 ${server} 的 agent`);
       } catch (e) {
-        toast.error(`不能升级 ${server} 的 agent`, { description: (e as Error).message });
+        toast.error(`升级 ${server} 的 agent 失败`, { description: (e as Error).message });
       }
     },
     setStopped: (svc, stopped) =>
@@ -163,7 +162,7 @@ export function ActionsProvider({ children }: { children: ReactNode }) {
         const { run_id } = await api.post<{ run_id: string }>(`/api/services/${encodeURIComponent(name)}/restart`, {});
         actions.watch(run_id, `重启 ${name}`);
       } catch (e) {
-        toast.error(`不能重启 ${name}`, { description: (e as Error).message });
+        toast.error(`重启 ${name} 失败`, { description: (e as Error).message });
       }
     },
     prune: async (server) => {
@@ -171,7 +170,7 @@ export function ActionsProvider({ children }: { children: ReactNode }) {
         const { run_id } = await api.post<{ run_id: string }>(`/api/servers/${encodeURIComponent(server)}/prune`, {});
         actions.watch(run_id, `清理 ${server} 上没在用的镜像`);
       } catch (e) {
-        toast.error(`不能清理 ${server}`, { description: (e as Error).message });
+        toast.error(`清理 ${server} 失败`, { description: (e as Error).message });
       }
     },
     rollback: async (name, to) => {
@@ -180,11 +179,11 @@ export function ActionsProvider({ children }: { children: ReactNode }) {
         const t = await api.get<RollbackTarget>(`/api/services/${encodeURIComponent(name)}/rollback${q}`);
         actions.plan({ title: `${name} 回到版本 #${t.deployment_id}`, changes: [{ op: "upsert_service", name, spec: t.spec }] });
       } catch (e) {
-        toast.error(`不能回滚 ${name}`, { description: (e as Error).message });
+        toast.error(`回滚 ${name} 失败`, { description: (e as Error).message });
       }
     },
     remove: (name) => setRemoving(name),
-    removeRoute: (hostname) => setRemovingRoute(hostname),
+    removeRoute: (hostname) => actions.plan({ title: `移除 ${hostname}`, changes: [{ op: "remove_route", hostname }] }),
     removeTask: (name) => { setRemoveTaskData(false); setRemovingTask(name); },
     move: (svc) => setMoving(svc),
     upgrade: () => setUpgrading(true),
@@ -244,8 +243,7 @@ export function ActionsProvider({ children }: { children: ReactNode }) {
           </div>
         </SheetContent>
       </Sheet>
-      <ConfirmDialog open={!!removingRoute} title={`移除域名 ${removingRoute}？`} onCancel={() => setRemovingRoute(null)} onConfirm={() => { const hostname = removingRoute!; setRemovingRoute(null); actions.plan({ title: `移除 ${hostname}`, changes: [{ op: "remove_route", hostname }] }); }}>服务不受影响，DNS 记录和证书一起移除。</ConfirmDialog>
-      <ConfirmDialog open={!!removingTask} title={`删除任务 ${removingTask}？`} onCancel={() => setRemovingTask(null)} onConfirm={async () => { const name = removingTask!; setRemovingTask(null); try { await api.del(`/api/tasks/${encodeURIComponent(name)}?data=${removeTaskData}`); toast.success(`已删除 ${name}`); window.dispatchEvent(new Event("wharf:tasks")); nav("/tasks"); } catch (e) { toast.error(`不能删除 ${name}`, { description: (e as Error).message }); } }}>运行记录一起删除。<label className="mt-3 flex items-center gap-2"><Checkbox checked={removeTaskData} onCheckedChange={(v) => setRemoveTaskData(!!v)} />同时删除数据</label></ConfirmDialog>
+      <ConfirmDialog open={!!removingTask} title={`删除任务 ${removingTask}？`} onCancel={() => setRemovingTask(null)} onConfirm={async () => { const name = removingTask!; setRemovingTask(null); try { await api.del(`/api/tasks/${encodeURIComponent(name)}?data=${removeTaskData}`); toast.success(`已删除 ${name}`); window.dispatchEvent(new Event("wharf:tasks")); nav("/tasks"); } catch (e) { toast.error(`删除 ${name} 失败`, { description: (e as Error).message }); } }}>运行记录一起删除。<label className="mt-3 flex items-center gap-2"><Checkbox checked={removeTaskData} onCheckedChange={(v) => setRemoveTaskData(!!v)} />同时删除数据</label></ConfirmDialog>
       <RemoveDialog name={removing} onCancel={() => setRemoving(null)} onConfirm={confirmRemove} />
       <MoveDialog svc={moving} onCancel={() => setMoving(null)} onConfirm={confirmMove} />
       <ConfirmDialog open={upgrading} title="升级 Wharf？" confirmText="升级" danger={false} onCancel={() => setUpgrading(false)} onConfirm={() => { setUpgrading(false); upgradeWharf(); }}>控制面会重启，页面断开一会儿。</ConfirmDialog>

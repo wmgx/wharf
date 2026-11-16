@@ -26,7 +26,7 @@ export function Egress({ status }: { status: Status }) {
   const current = data?.via ?? "";
   useEffect(() => { setValue(current); }, [current]);
   const exits = status.servers.filter((s) => s.settings.egress).map((s) => s.name);
-  const save = async () => { setSaving(true); try { await api.put("/api/egress", { via: value || null }); toast.success("已保存"); refresh(); } catch(e) { toast.error("没能保存", { description: (e as Error).message }); } finally { setSaving(false); } };
+  const save = async () => { setSaving(true); try { await api.put("/api/egress", { via: value || null }); toast.success("已保存"); refresh(); } catch(e) { toast.error("保存失败", { description: (e as Error).message }); } finally { setSaving(false); } };
   return <>
     <SectionTitle>各台机器</SectionTitle>
     {!status.servers.some((s) => s.settings.egress || s.settings.via) && <p className="mb-3 text-sm text-muted-foreground">所有机器都直接访问外网。</p>}

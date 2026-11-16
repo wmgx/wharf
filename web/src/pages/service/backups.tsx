@@ -25,7 +25,7 @@ function size(bytes: number): string {
 }
 
 /** 服务详情的"备份"标签：开关自动备份、立即备份、看快照、恢复。 */
-export function Backups({ svc, onSettings }: { svc: ServiceView; onSettings: () => void }) {
+export function Backups({ svc }: { svc: ServiceView }) {
   const name = svc.name;
   const { data, error, refresh } = usePoll<BackupsView>(`/api/services/${encodeURIComponent(name)}/backups`, 30000);
   const actions = useActions();
@@ -91,7 +91,7 @@ export function Backups({ svc, onSettings }: { svc: ServiceView; onSettings: () 
               )}
             </>
           ) : (
-            <Empty action={<Button onClick={onSettings}>去开启</Button>}>还没开备份</Empty>
+            <span className="text-muted-foreground">还没开备份</span>
           )}
         </CardContent>
       </Card>

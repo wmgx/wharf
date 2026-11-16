@@ -1,13 +1,13 @@
 import { Empty, SectionTitle } from "@/components/common";
 import { Row, Rows } from "@/components/kit";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { ServiceChecks } from "./checks";
 import type { ServiceView } from "@/types";
 import { Backups } from "./backups";
 import { Files } from "./files";
 import { DATA_KIND } from "./status-text";
 
-export function DataTab({ svc, onSettings }: { svc: ServiceView; onSettings: () => void }) {
+export function DataTab({ svc }: { svc: ServiceView }) {
   return (
     <div className="grid gap-6">
       <div>
@@ -37,8 +37,8 @@ export function DataTab({ svc, onSettings }: { svc: ServiceView; onSettings: () 
       </div>
       <div>
         <SectionTitle>备份</SectionTitle>
-        <Backups svc={svc} onSettings={onSettings} />
-        {svc.spec.backup?.to && <Button variant="outline" className="mt-3" onClick={onSettings}>在设置中关闭自动备份</Button>}
+        <ServiceChecks svc={svc} kind="backup" />
+        <Backups svc={svc} />
       </div>
       <div>
         <SectionTitle>文件</SectionTitle>

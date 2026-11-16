@@ -32,7 +32,7 @@ export function rowsOf(status: Status): Row[] {
     const domains = a.spec.domains?.length ? a.spec.domains : a.live?.url ? [a.live.url.replace(/^https:\/\//, "")] : [];
     return { name: a.name, to: `/edge/${a.name}`, where: a.spec.kind === "worker" ? "Workers" : "Pages", domains, tone, text };
   });
-  return [...services, ...edge].sort((x, y) => x.name.localeCompare(y.name));
+  return [...services, ...edge].sort((x, y) => Number(y.tone === "bad") - Number(x.tone === "bad") || Number(y.tone === "warn") - Number(x.tone === "warn") || x.name.localeCompare(y.name));
 }
 
 export function ServiceTable({ status, rows }: { status: Status; rows: Row[] }) {

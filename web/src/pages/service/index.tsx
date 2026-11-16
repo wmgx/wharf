@@ -4,19 +4,20 @@ import { useEffect, useState } from "react";
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { usePoll } from "@/api";
 import { AddRoute } from "@/components/add-route";
-import { Dot, Empty, ErrorNote, PageHeader, SectionTitle, ServerTag, StatusBadge, ago, sourceLabel } from "@/components/common";
+import { Dot, ErrorNote, PageHeader, SectionTitle, ServerTag, StatusBadge, ago, sourceLabel } from "@/components/common";
 import { serviceTruth } from "@/components/health";
 import { Panel } from "@/components/kit";
 import { LogStream } from "@/components/LogStream";
 import { MetricsPanel } from "@/components/metrics";
 import { OpBar, serviceOps } from "@/components/ops";
 import { useTab } from "@/components/page-tabs";
-import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useStatus } from "@/status";
 import type { ServiceView } from "@/types";
+import { DomainSheet } from "../domains/detail";
+import { ServiceChecks } from "./checks";
 import { DataTab } from "./data";
 import { DomainsTab } from "./domains";
 import { HistoryTab } from "./history";
@@ -38,10 +39,10 @@ export function ServiceDetail() {
   const navigate = useNavigate();
   const { status } = useStatus();
   const { data: svc, error } = usePoll<ServiceView>(`/api/services/${encodeURIComponent(name)}`, 5000);
+  const [domain, setDomain] = useState<string>();
   const [addingRoute, setAddingRoute] = useState(false);
   const raw = params.get("tab");
   useEffect(() => { if (raw && aliases[raw]) { const next = new URLSearchParams(params); next.set("tab", aliases[raw]); navigate({ search: `?${next}`, hash: location.hash }, { replace: true }); } }, [raw, params, navigate, location.hash]);
-  const settingsAt = (section: string) => navigate({ search: "?tab=settings", hash: `#${section}` });
   const back = <Link className="mb-3 inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground" to="/services">
     <ArrowLeftIcon className="size-3.5" />服务</Link>;
   if (error && !svc) return <>
@@ -97,10 +98,10 @@ export function ServiceDetail() {
         </TabsList>
       </div>
       <TabsContent value="overview" className="mt-4">
-        <Overview svc={svc} routes={routes} onTab={onTab} onBackup={() => settingsAt("backup")} />
+        <Overview svc={svc} routes={routes} onTab={onTab} onBackup={() => setTab("data")} onOpen={setDomain} />
       </TabsContent>
       <TabsContent value="domains" className="mt-4">
-        <DomainsTab service={name} routes={routes} onAdd={() => setAddingRoute(true)} />
+        <DomainsTab service={name} routes={routes} onAdd={() => setAddingRoute(true)} onOpen={setDomain} />
       </TabsContent>
       <TabsContent value="logs" className="mt-4">
         <LogStream path={`/api/services/${encodeURIComponent(name)}/logs/stream`} />
@@ -108,6 +109,7 @@ export function ServiceDetail() {
       <TabsContent value="metrics" className="mt-4">
         <MetricsPanel subject={name} kind="svc" title="" />
         <SectionTitle>健康检查</SectionTitle>
+        <ServiceChecks svc={svc} kind="monitor" />
         {monitor ? <Panel className="flex flex-wrap items-center gap-2 p-4 text-sm">
           {result && <>
             <Dot tone={result.ok ? "ok" : result.fails >= 3 ? "bad" : "warn"} />
@@ -119,13 +121,13 @@ export function ServiceDetail() {
           </>}<span className="ml-auto font-mono text-xs text-muted-foreground">
             {monitor.path}{monitor.expect ? ` → ${monitor.expect}` : ""}{monitor.keyword ? ` 含“${monitor.keyword}”` : ""}
           </span>
-        </Panel> : <Empty action={<Button onClick={() => settingsAt("monitor")}>去设置</Button>}>没开健康检查</Empty>}
+        </Panel> : null}
       </TabsContent>
       <TabsContent value="history" className="mt-4">
         <HistoryTab name={name} />
       </TabsContent>
       <TabsContent value="data" className="mt-4">
-        <DataTab svc={svc} onSettings={() => settingsAt("backup")} />
+        <DataTab svc={svc} />
       </TabsContent>
       <TabsContent value="terminal" className="mt-4">
         <TerminalTab svc={svc} />
@@ -135,6 +137,7 @@ export function ServiceDetail() {
       </TabsContent>
     </Tabs>
     {params.get("repack") === "1" && <Repack svc={svc} onClose={() => { const next = new URLSearchParams(params); next.delete("repack"); setParams(next, { replace: true }); }} />}
+    {status && <DomainSheet route={routes.find((r) => r.spec.hostname === domain)} status={status} onClose={() => setDomain(undefined)} />}
     <AddRoute service={name} open={addingRoute} onClose={() => setAddingRoute(false)} />
   </>;
 }

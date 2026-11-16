@@ -6,10 +6,10 @@ import { CardsSkeleton, PageHeader } from "@/components/common";
 import { Tip } from "@/components/kit";
 import { useTab } from "@/components/page-tabs";
 import { Button } from "@/components/ui/button";
-import { Sheet, SheetContent } from "@/components/ui/sheet";
+import { AccessProtection } from "@/components/access-protection";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useStatus } from "@/status";
-import { DomainDetail } from "./detail";
+import { DomainSheet } from "./detail";
 import { Entries } from "./entries";
 import { DomainList } from "./list";
 
@@ -20,6 +20,7 @@ export function Domains() {
   const [tab, setTab] = useTab(TABS, "domains");
   const [params, setParams] = useSearchParams();
   const selected = status?.routes.find((r) => r.spec.hostname === params.get("open"));
+  const protecting = status?.routes.find((r) => r.spec.hostname === params.get("protection") || params.get("protection") === "1" && r === selected);
   const available = !!status?.services.length;
   const add = <Button disabled={!available} onClick={() => setParams({ add: "1" })}>
     <PlusIcon />加域名</Button>;
@@ -43,11 +44,8 @@ export function Domains() {
         <Entries />
       </TabsContent>
     </Tabs>
-    <Sheet open={!!selected} onOpenChange={(open) => !open && close("open")}>
-      <SheetContent className="w-full gap-0 sm:max-w-xl" aria-describedby={undefined}>
-        {selected && status && <DomainDetail key={selected.id} route={selected} status={status} onClose={() => close("open")} />}
-      </SheetContent>
-    </Sheet>
+    {status && <DomainSheet route={protecting ? undefined : selected} status={status} onClose={() => close("open")} />}
+    {protecting && <AccessProtection route={protecting} onClose={() => close("protection")} />}
     <AddRedirect open={params.get("redirect") === "1"} onClose={() => close("redirect")} />
     <AddRoute open={params.get("add") === "1"} onClose={() => close("add")} />
   </>;

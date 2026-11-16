@@ -28,7 +28,7 @@ export function Secrets() {
       toast.success(`已删除 ${s.name}`);
       refresh();
     } catch (e) {
-      toast.error(`不能删除 ${s.name}`, { description: (e as Error).message });
+      toast.error(`删除 ${s.name} 失败`, { description: (e as Error).message });
     }
   };
 

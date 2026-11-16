@@ -50,12 +50,12 @@ export const serviceOps: Op<ServiceView>[] = [
 
 export const routeOps: Op<RouteView>[] = [
   { id: "open", label: "打开", icon: ArrowUpRightIcon, group: "more", run: (r) => window.open(r.url, "_blank", "noreferrer") },
-  { id: "protection", label: "访问保护", icon: LockIcon, group: "more", run: (r, c) => c.nav(`/domains?open=${encodeURIComponent(r.spec.hostname)}&protection=1`) },
+  { id: "protection", label: "访问保护", icon: LockIcon, group: "more", run: (r, c) => c.nav(`/domains?protection=${encodeURIComponent(r.spec.hostname)}`) },
   { id: "remove", label: "移除域名", icon: Trash2Icon, group: "danger", run: (r, c) => c.actions.removeRoute(r.spec.hostname) },
 ];
 
 export const taskOps: Op<TaskView>[] = [
-  { id: "run", label: "立即运行", icon: PlayIcon, group: "main", show: (t) => t.spec.kind !== "ping", run: async (t, c) => { try { await api.post(`/api/tasks/${encodeURIComponent(t.name)}/run`, {}); toast.success(`已开始运行 ${t.name}`); window.dispatchEvent(new Event("wharf:tasks")); c.nav(`/tasks/${encodeURIComponent(t.name)}?tab=runs`); } catch (e) { toast.error(`没能运行 ${t.name}`, { description: (e as Error).message }); } } },
+  { id: "run", label: "立即运行", icon: PlayIcon, group: "main", show: (t) => t.spec.kind !== "ping", run: async (t, c) => { try { await api.post(`/api/tasks/${encodeURIComponent(t.name)}/run`, {}); toast.success(`已开始运行 ${t.name}`); window.dispatchEvent(new Event("wharf:tasks")); c.nav(`/tasks/${encodeURIComponent(t.name)}?tab=runs`); } catch (e) { toast.error(`运行 ${t.name} 失败`, { description: (e as Error).message }); } } },
   { id: "disable", label: "停用", icon: SquareIcon, group: "more", show: (t) => t.spec.enabled, run: async (t) => { try { await api.put(`/api/tasks/${encodeURIComponent(t.name)}`, { ...t.spec, enabled: false }); window.dispatchEvent(new Event("wharf:tasks")); toast.success("已保存"); } catch (e) { toast.error("不能停用", { description: (e as Error).message }); } } },
   { id: "enable", label: "启用", icon: PlayIcon, group: "more", show: (t) => !t.spec.enabled, run: async (t) => { try { await api.put(`/api/tasks/${encodeURIComponent(t.name)}`, { ...t.spec, enabled: true }); window.dispatchEvent(new Event("wharf:tasks")); toast.success("已保存"); } catch (e) { toast.error("不能启用", { description: (e as Error).message }); } } },
   { id: "remove", label: "删除任务", icon: Trash2Icon, group: "danger", run: (t, c) => c.actions.removeTask(t.name) },
@@ -90,7 +90,7 @@ export function OpBar<T>({ ops, target, label }: { ops: Op<T>[]; target: T; labe
   const main = ops.filter((op) => op.group === "main" && (!op.show || op.show(target, ctx)));
   return (
     <>
-      {main.map((op, i) => <Button key={op.id} variant={i === 0 ? "default" : "outline"} onClick={() => op.run(target, ctx)}><op.icon />{op.label}</Button>)}
+      {main.map((op, i) => <Button key={op.id} variant={i === 0 && op.id !== "restart" ? "default" : "outline"} onClick={() => op.run(target, ctx)}><op.icon />{op.label}</Button>)}
       <OpMenu ops={ops.filter((op) => op.group !== "main")} target={target} label={label} />
     </>
   );

@@ -58,7 +58,7 @@ export function ServerHostUnits({ server, online }: { server: string; online: bo
       toast.success(u.watched ? `不再盯着 ${u.unit}` : `已接管 ${u.unit}：停了会提醒`);
       load();
     } catch (e) {
-      toast.error("没改成", { description: (e as Error).message });
+      toast.error("修改失败", { description: (e as Error).message });
     }
   };
   const openLogs = async (unit: string) => {
