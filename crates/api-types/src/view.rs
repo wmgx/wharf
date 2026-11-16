@@ -460,6 +460,8 @@ pub struct GatewayView {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RouteView {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub sso_login: Option<SsoLoginState>,
   pub id: String,
   pub spec: RouteSpec,
   /// 实际使用的网关（spec 里没填时是默认网关）。
@@ -1423,5 +1425,12 @@ pub struct SsoStepResult {
   pub status: Option<u16>,
   pub ms: u64,
   pub extracted: std::collections::BTreeMap<String, usize>,
+  pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SsoLoginState {
+  pub at: i64,
+  pub ok: bool,
   pub error: Option<String>,
 }

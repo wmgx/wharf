@@ -23,6 +23,7 @@ pub const PULL_ATTEMPT_SECS: u64 = 30 * 60;
 #[derive(Default)]
 pub struct Snapshot {
   pub world: World,
+  pub sso_login: BTreeMap<String, String>,
   pub agents: Vec<AgentRow>,
   pub accounts: Vec<AccountRow>,
   pub owned: Vec<OwnedRecord>,
@@ -107,6 +108,7 @@ async fn load_inner(db: &Db) -> Result<Snapshot, ApiError> {
         world: World::from_rows(db::all_resources(c)?)?,
         agents: db::agents(c)?,
         accounts: db::accounts(c)?,
+        sso_login: db::settings_with_prefix(c, "sso.login.")?,
         owned: db::owned_records(c)?,
         secrets: db::secrets(c)?,
         deployed: db::deployed_servers(c)?,
@@ -398,6 +400,8 @@ pub fn gateway_render(
           .map(|u| format!("http://{u}"))
           .unwrap_or_else(|| login.clone());
         Ok(render::Gate {
+          app_login: sso.mode
+            == wharf_api_types::spec::SsoMode::Login,
           user_header: (sso.mode
             == wharf_api_types::spec::SsoMode::Header)
             .then(|| {

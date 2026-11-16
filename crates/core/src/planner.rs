@@ -464,6 +464,36 @@ pub async fn make_plan(
   };
   config_items(&mut b, &current, &desired, &writes);
 
+  for (host, route) in &desired.routes {
+    let Some(sso) = route
+      .spec
+      .sso
+      .as_ref()
+      .filter(|s| s.mode == wharf_api_types::spec::SsoMode::Login)
+    else {
+      continue;
+    };
+    if current
+      .routes
+      .get(host)
+      .and_then(|r| r.spec.sso.as_ref())
+      .is_some_and(|s| {
+        s.mode == wharf_api_types::spec::SsoMode::Login
+      })
+    {
+      continue;
+    }
+    b.warnings.push(format!(
+      "Wharf 会用保存的应用账号替每个过了门禁的人登录 {host}"
+    ));
+    let hostname = host.clone();
+    let has_key = state.db.call(move |c| c.query_row("SELECT EXISTS(SELECT 1 FROM gate_keys, json_each(gate_keys.hosts) WHERE json_each.value=?1)", [hostname], |r| r.get::<_, bool>(0)).map_err(crate::db::sql_err)).await?;
+    if !sso.skip_paths.is_empty() || sso.trust_internal || has_key {
+      b.warnings.push(
+        "不经过门禁的请求不会被代登录，会看到应用自己的登录页".into(),
+      );
+    }
+  }
   let mut net = snap.net(&desired);
   for (host, route) in &desired.routes {
     let Some(sso) = route

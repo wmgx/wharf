@@ -222,6 +222,7 @@ export interface RouteSpec {
 }
 
 export interface RouteView {
+  sso_login?: Gen.SsoLoginState;
   id: string;
   spec: RouteSpec;
   gateway?: string;
