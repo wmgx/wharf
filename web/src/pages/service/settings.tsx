@@ -58,7 +58,7 @@ function SettingsFields({ svc, draft, set, changed, onReset, onSubmit }: { svc: 
   const limitsValid = (memoryNum === undefined || (Number.isInteger(memoryNum) && memoryNum >= 32 && memoryNum <= 4294967295)) && (cpuNum === undefined || (Number.isFinite(cpuNum) && cpuNum >= 0.01 && cpuNum * 1000 <= 4294967295));
   const disabled = !limitsValid ? "资源上限不正确" : build && !howReady(how) ? "来源的 Dockerfile 不能为空" : undefined;
   const updateLimits = (m: string, c: string) => { const mn = m.trim() ? Number(m) : undefined; const cn = c.trim() ? Number(c) : undefined; set({ limits: mn === undefined && cn === undefined ? undefined : { memory_mb: mn, cpu_milli: cn === undefined ? undefined : Math.round(cn * 1000) } }); };
-  return <div className="max-w-2xl">
+  return <div className="max-w-5xl">
     <SectionTitle>来源</SectionTitle>
     <Panel className="grid gap-3 p-4">
       {isImage ? <Field label="镜像" htmlFor="service-image">
