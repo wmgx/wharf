@@ -255,3 +255,72 @@ func TestInvalidKeyDoesNotFallback(t *testing.T) {
 		t.Fatal("未原样拒绝凭证")
 	}
 }
+
+func TestUserHeaderAccess(t *testing.T) {
+	s := plugin(t, "http://127.0.0.1:1")
+	s.UserHeader = "Remote-User"
+	r := httptest.NewRequest("GET", "https://a.example.test/", nil)
+	r.Header["Remote-User"] = []string{"someone-else", "another"}
+	r.AddCookie(&http.Cookie{Name: "wharf_gate", Value: token(ed25519.NewKeyFromSeed(make([]byte, 32)), "EdDSA", "wharf", time.Now().Unix()+60)})
+	called := false
+	s.ServeHTTP(httptest.NewRecorder(), r, caddyhttp.HandlerFunc(func(w http.ResponseWriter, r *http.Request) error {
+		called = true
+		if values := r.Header.Values("Remote-User"); len(values) != 1 || values[0] != "admin" {
+			t.Fatal("用户名未替换伪造头")
+		}
+		return nil
+	}))
+	if !called {
+		t.Fatal("有效凭据未放行")
+	}
+}
+func TestUserHeaderRefresh(t *testing.T) {
+	core := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Header().Set("X-Wharf-User", "admin") }))
+	defer core.Close()
+	s := plugin(t, core.URL)
+	s.UserHeader = "Remote-Name"
+	r := httptest.NewRequest("GET", "https://a.example.test/", nil)
+	r.Header.Add("Remote-Name", "someone-else")
+	r.AddCookie(&http.Cookie{Name: "wharf_gate_rt", Value: "long"})
+	called := false
+	s.ServeHTTP(httptest.NewRecorder(), r, caddyhttp.HandlerFunc(func(w http.ResponseWriter, r *http.Request) error {
+		called = true
+		if values := r.Header.Values("Remote-Name"); len(values) != 1 || values[0] != "admin" {
+			t.Fatal("续签未传用户名")
+		}
+		return nil
+	}))
+	if !called {
+		t.Fatal("续签未放行")
+	}
+}
+func TestUserHeaderBypass(t *testing.T) {
+	core := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer core.Close()
+	for _, bypass := range []string{"skip", "key", "trust"} {
+		s := plugin(t, core.URL)
+		s.UserHeader = "Remote-User"
+		r := httptest.NewRequest("GET", "https://a.example.test/api", nil)
+		r.Header["Remote-User"] = []string{"someone-else", "another"}
+		switch bypass {
+		case "skip":
+			s.Skip = []string{"/api"}
+		case "key":
+			r.Header.Set("X-Wharf-Key", "lab-key")
+		case "trust":
+			s.trusted = []netip.Prefix{netip.MustParsePrefix("100.64.0.0/10")}
+			r.RemoteAddr = "100.64.0.7:1234"
+		}
+		called := false
+		s.ServeHTTP(httptest.NewRecorder(), r, caddyhttp.HandlerFunc(func(w http.ResponseWriter, r *http.Request) error {
+			called = true
+			if len(r.Header.Values("Remote-User")) != 0 {
+				t.Fatal("绕过门禁残留伪造用户名：", bypass)
+			}
+			return nil
+		}))
+		if !called {
+			t.Fatal("未放行：", bypass)
+		}
+	}
+}
