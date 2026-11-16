@@ -1043,6 +1043,7 @@ impl World {
       }
       self.check_route_gateway(host, &route.spec)?;
       if let Some(sso) = &route.spec.sso {
+        crate::sso_login::validate(host, sso)?;
         if let Some(header) = &sso.header {
           if sso.mode != wharf_api_types::spec::SsoMode::Header {
             return Err(ApiError::invalid(format!(
@@ -2574,6 +2575,21 @@ mod tests {
     let writes = desired.writes_from(&current);
     assert_eq!(writes.len(), 1);
   }
+  #[test]
+  fn route_login_checks() {
+    let mut sso: wharf_api_types::spec::SsoSpec = serde_json::from_value(json!({"mode":"login","login":{"steps":[{"path":"/login","extract":[{"from":"body","name":"csrf","between":["a=",";"]}]},{"method":"POST","path":"/login","form":{"csrf":"{{csrf}}","password":"{{secret.PASS}}"}}],"write":[{"cookies":"all"}],"check":{"path":"/me"}}})).unwrap();
+    assert!(
+      crate::sso_login::validate("a.example.com", &sso).is_ok()
+    );
+    sso.login.as_mut().unwrap().steps[0].path = "/{{missing}}".into();
+    assert!(
+      crate::sso_login::validate("a.example.com", &sso)
+        .unwrap_err()
+        .message
+        .contains("前面没有取过")
+    );
+  }
+
   #[test]
   fn route_sso_checks() {
     let mut w = World::default();

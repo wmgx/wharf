@@ -157,6 +157,12 @@ impl Ops {
       AgentOp::Quality { targets, count } => {
         to_value(crate::probe::quality(targets, count).await)
       }
+      AgentOp::HttpFetch(job) => {
+        tokio::select! {
+          result = crate::probe::fetch(job) => to_value(result),
+          _ = ctx.cancel.cancelled() => Err(ApiError::new(ErrorCode::Cancelled, "已取消")),
+        }
+      }
       AgentOp::HttpCheck(job) => {
         to_value(crate::probe::http(job).await)
       }

@@ -22,7 +22,7 @@ export function DomainDetail({ route, status, onClose }: { route: RouteView; sta
   const keys = usePoll<GateKeyView[]>("/api/gate/keys", 30000).data;
   const keyCount = keys?.filter((k) => k.hosts.includes(route.spec.hostname)).length ?? 0;
   const [trustInternal, setTrustInternal] = useState(!!route.spec.sso?.trust_internal);
-  const [gateMode, setGateMode] = useState<"gate" | "header">(route.spec.sso?.mode ?? "gate");
+  const [gateMode, setGateMode] = useState<"gate" | "header" | "login">(route.spec.sso?.mode ?? "gate");
   const [userHeader, setUserHeader] = useState(route.spec.sso?.header ?? "Remote-User");
   const [gateOpen, setGateOpen] = useState(false);
   const [skipPaths, setSkipPaths] = useState((route.spec.sso?.skip_paths ?? []).join("\n"));
@@ -164,7 +164,7 @@ export function DomainDetail({ route, status, onClose }: { route: RouteView; sta
         {trustInternal && <p className="text-xs text-muted-foreground">只有经组网地址或这台机器的内网访问入口时才算；从别的网络访问公网入口仍然要登录。</p>}
         <DialogFooter>
           <Button variant="ghost" onClick={() => setGateOpen(false)}>取消</Button>
-          <Button onClick={() => { setGateOpen(false); actions.plan({ title: `修改 ${route.spec.hostname} 的门禁`, changes: [{ op: "upsert_route", spec: { ...route.spec, sso: { mode: gateMode, header: gateMode === "header" ? userHeader : undefined, trust_internal: trustInternal, skip_paths: skipPaths.split("\n").map((p) => p.trim()).filter(Boolean) } } }] }); }}>预览改动</Button>
+          <Button onClick={() => { setGateOpen(false); actions.plan({ title: `修改 ${route.spec.hostname} 的门禁`, changes: [{ op: "upsert_route", spec: { ...route.spec, sso: { mode: gateMode, login: gateMode === "login" ? route.spec.sso?.login : undefined, header: gateMode === "header" ? userHeader : undefined, trust_internal: trustInternal, skip_paths: skipPaths.split("\n").map((p) => p.trim()).filter(Boolean) } } }] }); }}>预览改动</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

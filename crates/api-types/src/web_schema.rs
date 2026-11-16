@@ -7,6 +7,7 @@ use crate::{agent, egress, plan, spec, view};
 pub fn web_schema() -> Value {
   let mut generator =
     SchemaGenerator::new(SchemaSettings::default().for_serialize());
+  let _ = generator.subschema_for::<view::SsoTestResult>();
   let _ = generator.subschema_for::<view::GateKeyView>();
   let _ = generator.subschema_for::<view::GateKeyRequest>();
   let _ = generator.subschema_for::<spec::PrivateNetwork>();

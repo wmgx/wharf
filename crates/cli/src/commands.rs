@@ -69,6 +69,37 @@ async fn dispatch(
 ) -> CliResult<()> {
   match command {
     Command::Login { .. } | Command::Schema { .. } => unreachable!(),
+    Command::Sso(crate::SsoCmd::Test { hostname }) => {
+      let result: wharf_api_types::view::SsoTestResult = c
+        .post(
+          &format!("/api/routes/{}/sso/test", seg(&hostname)),
+          &json!({}),
+        )
+        .await?;
+      out(j, &result, |r| {
+        for step in r.steps.iter().chain(r.check.iter()) {
+          println!(
+            "{} {} {} {:?} {:?} {}ms{}",
+            step.number,
+            step.method,
+            step.path,
+            step.status,
+            step.extracted,
+            step.ms,
+            step
+              .error
+              .as_ref()
+              .map(|e| format!("：{e}"))
+              .unwrap_or_default()
+          );
+        }
+        println!("{}", if r.ok { "登录成功" } else { "登录失败" });
+      });
+      if !result.ok {
+        return Err(CliError::Exit(1));
+      }
+      Ok(())
+    }
     Command::Status => {
       let s: Status = c.get("/api/status").await?;
       out(j, &s, print::status);
@@ -2522,6 +2553,7 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
       trust_internal,
       no_trust_internal,
       header,
+      file,
       apply,
     } => {
       let mut spec = c
@@ -2554,7 +2586,36 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
       };
       spec.sso =
         (mode != "off").then_some(wharf_api_types::spec::SsoSpec {
-          mode: if mode == "header" {
+          login: if mode == "login" {
+            let file = file.ok_or_else(|| {
+              ApiError::invalid("login 方式需要 --file")
+            })?;
+            let text = if file == "-" {
+              std::io::read_to_string(std::io::stdin())
+                .map_err(|_| ApiError::invalid("读取登录配置失败"))?
+            } else {
+              std::fs::read_to_string(file)
+                .map_err(|_| ApiError::invalid("读取登录配置失败"))?
+            };
+            let value: serde_json::Value =
+              serde_yaml_ng::from_str(&text).map_err(|_| {
+                ApiError::invalid("登录配置不是有效的 YAML 或 JSON")
+              })?;
+            Some(serde_json::from_value(value).map_err(|_| {
+              ApiError::invalid("登录配置字段不符合要求")
+            })?)
+          } else {
+            if file.is_some() {
+              return Err(
+                ApiError::invalid("只有 login 方式才能用 --file")
+                  .into(),
+              );
+            }
+            None
+          },
+          mode: if mode == "login" {
+            wharf_api_types::spec::SsoMode::Login
+          } else if mode == "header" {
             wharf_api_types::spec::SsoMode::Header
           } else {
             wharf_api_types::spec::SsoMode::Gate
