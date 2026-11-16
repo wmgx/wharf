@@ -21,7 +21,7 @@ export function Open() {
         if (!items.length) return null;
         return <Fragment key={level}>
           <SectionTitle count={items.length} action={level === "info" && updates.length > 1 ? <Button variant="outline" size="sm" onClick={() => actions.plan({ title: `更新 ${updates.length} 个服务`, changes: updates.map((i) => ({ op: "refresh_images", name: i.subject!.name })) })}>全部更新</Button> : undefined}>{label}</SectionTitle>
-          <Rows>{items.map((i, index) => <IssueRow key={`${i.code}-${i.subject?.name ?? ""}-${index}`} issue={i} />)}</Rows>
+          <Rows limit={10}>{items.map((i, index) => <IssueRow key={`${i.code}-${i.subject?.name ?? ""}-${index}`} issue={i} />)}</Rows>
         </Fragment>;
       })}
       {!!alerts?.firing.length && <>

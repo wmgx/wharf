@@ -117,6 +117,7 @@ export function AppSidebar({ username, onLogout }: { username: string; onLogout:
                 </SidebarMenuButton>
               </DropdownMenuTrigger>
               <DropdownMenuContent side="top" align="start" className="w-(--radix-dropdown-menu-trigger-width) min-w-52">
+                <DropdownMenuItem asChild><NavLink to="/settings?tab=security"><SettingsIcon />登录与安全</NavLink></DropdownMenuItem>
                 <DropdownMenuItem onSelect={toggle}>
                   {theme === "light" ? <MoonIcon /> : <SunIcon />}
                   {theme === "light" ? "切换到深色" : "切换到浅色"}
