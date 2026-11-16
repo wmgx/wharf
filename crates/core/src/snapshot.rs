@@ -398,6 +398,14 @@ pub fn gateway_render(
           .map(|u| format!("http://{u}"))
           .unwrap_or_else(|| login.clone());
         Ok(render::Gate {
+          user_header: (sso.mode
+            == wharf_api_types::spec::SsoMode::Header)
+            .then(|| {
+              sso
+                .header
+                .clone()
+                .unwrap_or_else(|| "Remote-User".into())
+            }),
           trusted: if sso.trust_internal {
             crate::gate::trusted_ranges(net, &gateway.spec.server)
           } else {

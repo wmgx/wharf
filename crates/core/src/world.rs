@@ -1043,6 +1043,34 @@ impl World {
       }
       self.check_route_gateway(host, &route.spec)?;
       if let Some(sso) = &route.spec.sso {
+        if let Some(header) = &sso.header {
+          if sso.mode != wharf_api_types::spec::SsoMode::Header {
+            return Err(ApiError::invalid(format!(
+              "域名 {host}：只有 header 方式才能设请求头名字"
+            )));
+          }
+          if header.is_empty()
+            || header.len() > 64
+            || !header.as_bytes()[0].is_ascii_alphabetic()
+            || !header
+              .bytes()
+              .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+          {
+            return Err(ApiError::invalid(format!(
+              "域名 {host}：请求头名字 {header} 写得不对"
+            )));
+          }
+          let lower = header.to_ascii_lowercase();
+          if matches!(
+            lower.as_str(),
+            "cookie" | "host" | "authorization" | "x-wharf-key"
+          ) || lower.starts_with("x-forwarded-")
+          {
+            return Err(ApiError::invalid(format!(
+              "域名 {host}：不能用 {header} 做用户名请求头"
+            )));
+          }
+        }
         if route.spec.auth {
           return Err(ApiError::invalid(format!(
             "域名 {host}：门禁和登录保护只能开一个"
@@ -2570,5 +2598,61 @@ mod tests {
       .unwrap()
       .skip_paths = vec!["/api*".into()];
     assert!(w.validate().unwrap_err().message.contains("写得不对"));
+  }
+  #[test]
+  fn route_header_checks() {
+    let mut w = World::default();
+    w.servers.insert(
+      "s1".into(),
+      ServerRow {
+        settings: Default::default(),
+        version: 1,
+      },
+    );
+    w.apply_changes(&[Change::UpsertGateway{name:"edge".into(),spec:serde_json::from_value(json!({"kind":"caddy","server":"s1","default":true})).unwrap()},Change::UpsertRoute{spec:serde_json::from_value(json!({"hostname":"a.example.com","upstream":"127.0.0.1:8080","sso":{"mode":"header"}})).unwrap()}]).unwrap();
+    w.validate().unwrap();
+    let sso = w
+      .routes
+      .get_mut("a.example.com")
+      .unwrap()
+      .spec
+      .sso
+      .as_mut()
+      .unwrap();
+    sso.header = Some("Remote-Name".into());
+    w.validate().unwrap();
+    for (header, message) in [
+      ("", "写得不对"),
+      ("1User", "写得不对"),
+      ("Remote_User", "写得不对"),
+      ("cookie", "不能用"),
+      ("HOST", "不能用"),
+      ("Authorization", "不能用"),
+      ("X-Wharf-Key", "不能用"),
+      ("x-forwarded-User", "不能用"),
+    ] {
+      w.routes
+        .get_mut("a.example.com")
+        .unwrap()
+        .spec
+        .sso
+        .as_mut()
+        .unwrap()
+        .header = Some(header.into());
+      assert!(w.validate().unwrap_err().message.contains(message));
+    }
+    let sso = w
+      .routes
+      .get_mut("a.example.com")
+      .unwrap()
+      .spec
+      .sso
+      .as_mut()
+      .unwrap();
+    sso.header = Some("Remote-User".into());
+    sso.mode = wharf_api_types::spec::SsoMode::Gate;
+    assert!(
+      w.validate().unwrap_err().message.contains("只有 header")
+    );
   }
 }

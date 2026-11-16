@@ -849,7 +849,7 @@ pub enum RouteCmd {
   /// 域名门禁；不给 --mode 时显示当前配置。
   Sso {
     name: String,
-    #[arg(long, value_parser = ["gate", "off"])]
+    #[arg(long, value_parser = ["gate", "header", "off"])]
     mode: Option<String>,
     #[arg(long = "skip", requires = "mode")]
     skip: Vec<String>,
@@ -861,6 +861,8 @@ pub enum RouteCmd {
     trust_internal: bool,
     #[arg(long, requires = "mode")]
     no_trust_internal: bool,
+    #[arg(long, requires = "mode")]
+    header: Option<String>,
     #[command(flatten)]
     apply: ApplyFlags,
   },

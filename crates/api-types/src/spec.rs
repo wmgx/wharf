@@ -585,6 +585,8 @@ pub struct RouteSpec {
   Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
 )]
 pub struct SsoSpec {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub header: Option<String>,
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub trust_internal: bool,
   pub mode: SsoMode,
@@ -598,6 +600,7 @@ pub struct SsoSpec {
 #[serde(rename_all = "snake_case")]
 pub enum SsoMode {
   Gate,
+  Header,
 }
 
 /// 网关到服务的走法偏好。

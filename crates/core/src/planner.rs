@@ -453,6 +453,70 @@ pub async fn make_plan(
   config_items(&mut b, &current, &desired, &writes);
 
   let mut net = snap.net(&desired);
+  for (host, route) in &desired.routes {
+    let Some(sso) = route
+      .spec
+      .sso
+      .as_ref()
+      .filter(|s| s.mode == wharf_api_types::spec::SsoMode::Header)
+    else {
+      continue;
+    };
+    if current
+      .routes
+      .get(host)
+      .is_some_and(|r| r.spec.sso.as_ref() == Some(sso))
+    {
+      continue;
+    }
+    let header = sso.header.as_deref().unwrap_or("Remote-User");
+    if let Some(service) = desired.services.get(&route.spec.service)
+      && !net.bind_ips(&service.spec.server).is_empty()
+      && match &service.spec.source {
+        Source::Compose { content, .. } => {
+          let compose: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str(
+              content.as_deref().unwrap_or_default(),
+            )
+            .map_err(|e| {
+              ApiError::invalid(format!("compose 内容解析失败：{e}"))
+            })?;
+          compose["services"].as_mapping().is_some_and(|services| {
+            services.values().any(|svc| {
+              svc["network_mode"].as_str() == Some("host")
+                || svc["ports"].as_sequence().is_some_and(|ports| {
+                  ports.iter().any(|p| {
+                    if let Some(raw) = p.as_str() {
+                      raw.contains(':')
+                        && !raw.starts_with("127.0.0.1:")
+                        && !raw.starts_with("[::1]:")
+                    } else {
+                      p.get("published").is_some()
+                        && !matches!(
+                          p["host_ip"].as_str(),
+                          Some("127.0.0.1" | "::1")
+                        )
+                    }
+                  })
+                })
+            })
+          })
+        }
+        _ => true,
+      }
+    {
+      b.warnings.push(format!("{} 的端口能被同一个内网里的其他机器直接访问，绕过入口的请求可以自己填 {header} 冒充登录", route.spec.service));
+    }
+    let hostname = host.clone();
+    let has_key = state.db.call(move |c| {
+      c.query_row("SELECT EXISTS(SELECT 1 FROM gate_keys, json_each(gate_keys.hosts) WHERE json_each.value=?1)", [hostname], |r| r.get::<_, bool>(0)).map_err(crate::db::sql_err)
+    }).await?;
+    if !sso.skip_paths.is_empty() || sso.trust_internal || has_key {
+      b.warnings.push(
+        "不经过门禁的请求不带用户名，应用会把它们当成没登录".into(),
+      );
+    }
+  }
   net.reach = crate::link::probe(state, &net, &desired).await;
   mark("探测互通");
   // 迁移要源机器把数据推到目标机器（design 2.10）。

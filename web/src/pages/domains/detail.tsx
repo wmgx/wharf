@@ -5,7 +5,7 @@ import { AddAlias } from "@/components/add-alias";
 import { AddRedirect } from "@/components/add-redirect";
 import { useActions } from "@/components/actions";
 import { Dot, SectionTitle, StatusBadge, ago } from "@/components/common";
-import { Field, Picker } from "@/components/fields";
+import { Field, Picker, Segmented } from "@/components/fields";
 import { LAYER, diagnosisOf, routeTone } from "@/components/health";
 import { hopOf } from "@/components/hop";
 import { Facts, Panel, Row, Rows } from "@/components/kit";
@@ -22,6 +22,8 @@ export function DomainDetail({ route, status, onClose }: { route: RouteView; sta
   const keys = usePoll<GateKeyView[]>("/api/gate/keys", 30000).data;
   const keyCount = keys?.filter((k) => k.hosts.includes(route.spec.hostname)).length ?? 0;
   const [trustInternal, setTrustInternal] = useState(!!route.spec.sso?.trust_internal);
+  const [gateMode, setGateMode] = useState<"gate" | "header">(route.spec.sso?.mode ?? "gate");
+  const [userHeader, setUserHeader] = useState(route.spec.sso?.header ?? "Remote-User");
   const [gateOpen, setGateOpen] = useState(false);
   const [skipPaths, setSkipPaths] = useState((route.spec.sso?.skip_paths ?? []).join("\n"));
   const [alias, setAlias] = useState(false);
@@ -124,6 +126,7 @@ export function DomainDetail({ route, status, onClose }: { route: RouteView; sta
             <Button variant="outline" size="sm" disabled={route.spec.auth || !!route.spec.redirect} onClick={() => setGateOpen(true)}>开启</Button>
           </>}
         </div>
+        {route.spec.sso?.mode === "header" && <span className="break-all text-xs text-muted-foreground">传用户名（{route.spec.sso.header ?? "Remote-User"}）</span>}
         {route.spec.sso?.trust_internal && <span className="text-xs text-muted-foreground">组网内免登录</span>}
         {route.spec.sso && keyCount > 0 && <span className="text-xs text-muted-foreground">{keyCount} 个访问凭证</span>}
         {!!route.spec.sso?.skip_paths?.length && <span className="break-all font-mono text-xs text-muted-foreground">{route.spec.sso.skip_paths.join("、")}</span>}
@@ -152,6 +155,8 @@ export function DomainDetail({ route, status, onClose }: { route: RouteView; sta
     <Dialog open={gateOpen} onOpenChange={setGateOpen}>
       <DialogContent aria-describedby={undefined}>
         <DialogHeader><DialogTitle>{route.spec.sso ? "修改门禁" : "开启门禁"}</DialogTitle></DialogHeader>
+        <Segmented value={gateMode} options={[["gate", "只挡一道门"], ["header", "传用户名给应用"]]} onChange={setGateMode} />
+        {gateMode === "header" && <Field label="请求头" htmlFor="gate-header"><Input id="gate-header" value={userHeader} onChange={(e) => setUserHeader(e.target.value)} /><p className="text-xs text-muted-foreground">应用要配置成信任这个请求头。</p></Field>}
         <Field label="不用登录的路径（每行一个，可以不填）" htmlFor="gate-skip">
           <Textarea id="gate-skip" value={skipPaths} onChange={(e) => setSkipPaths(e.target.value)} />
         </Field>
@@ -159,7 +164,7 @@ export function DomainDetail({ route, status, onClose }: { route: RouteView; sta
         {trustInternal && <p className="text-xs text-muted-foreground">只有经组网地址或这台机器的内网访问入口时才算；从别的网络访问公网入口仍然要登录。</p>}
         <DialogFooter>
           <Button variant="ghost" onClick={() => setGateOpen(false)}>取消</Button>
-          <Button onClick={() => { setGateOpen(false); actions.plan({ title: `修改 ${route.spec.hostname} 的门禁`, changes: [{ op: "upsert_route", spec: { ...route.spec, sso: { mode: "gate", trust_internal: trustInternal, skip_paths: skipPaths.split("\n").map((p) => p.trim()).filter(Boolean) } } }] }); }}>预览改动</Button>
+          <Button onClick={() => { setGateOpen(false); actions.plan({ title: `修改 ${route.spec.hostname} 的门禁`, changes: [{ op: "upsert_route", spec: { ...route.spec, sso: { mode: gateMode, header: gateMode === "header" ? userHeader : undefined, trust_internal: trustInternal, skip_paths: skipPaths.split("\n").map((p) => p.trim()).filter(Boolean) } } }] }); }}>预览改动</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
