@@ -6,7 +6,6 @@ import { Picker, Segmented } from "@/components/fields";
 import { CertDays, Lamps, diagnosisOf, routeTone } from "@/components/health";
 import { hopOf } from "@/components/hop";
 import { Panel, Tip } from "@/components/kit";
-import { WildcardHints } from "@/components/wildcard-hints";
 import { Probe } from "@/components/probe";
 import { OpMenu, routeOps } from "@/components/ops";
 import { Badge } from "@/components/ui/badge";
@@ -33,7 +32,6 @@ export function DomainList({ status, add }: { status: Status; add: React.ReactNo
     {status.gateways.length ? "还没有域名" : "还没有域名。先建一个入口"}
   </Empty>;
   return <>
-    <WildcardHints status={status} gateway={gateway || undefined} />
     <div className="mb-4 flex flex-wrap items-center gap-2">
       {status.gateways.length <= 3 ? <div className="max-w-full overflow-x-auto">
         <Segmented value={gateway} options={options.map((o) => [o.value, o.label])} onChange={select} />
