@@ -93,7 +93,18 @@ async fn dispatch(
               .unwrap_or_default()
           );
         }
-        println!("{}", if r.ok { "登录成功" } else { "登录失败" });
+        println!(
+          "{}",
+          if r.ok {
+            "登录成功"
+          } else {
+            r.steps
+              .iter()
+              .chain(r.check.iter())
+              .find_map(|s| s.error.as_deref())
+              .unwrap_or("登录失败")
+          }
+        );
       });
       if !result.ok {
         return Err(CliError::Exit(1));
