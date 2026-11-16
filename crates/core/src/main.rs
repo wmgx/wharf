@@ -74,6 +74,7 @@ mod sessions;
 mod share;
 mod shell;
 mod snapshot;
+mod sso_login;
 mod state;
 mod status;
 mod tailscale;
