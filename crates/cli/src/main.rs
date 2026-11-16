@@ -70,7 +70,7 @@ pub enum Command {
   /// 总览：服务器、服务、网关、路由的状态。
   Status,
   /// 部署本机代码目录：打包上传，在服务器上构建并运行。
-  /// Python、Go 自动识别，有 Dockerfile 就用。再次执行就是发布新版本。
+  /// Python、Node、Go、静态站点自动识别，有 Dockerfile 就用。再次执行就是发布新版本。
   Deploy {
     /// 代码目录，默认当前目录。
     #[arg(default_value = ".")]
@@ -80,7 +80,7 @@ pub enum Command {
     name: Option<String>,
     #[arg(long)]
     server: Option<String>,
-    /// 端口 `名字=容器端口`，不给时 Python 用 8000、Go 用 8080。
+    /// 端口 `名字=容器端口`，不给时 Python 用 8000、Node 用 3000，其余用 8080。
     #[arg(long)]
     port: Vec<String>,
     #[arg(long)]
@@ -269,7 +269,7 @@ pub enum Command {
 /// 从代码构建：本机目录或 git 仓库，加上构建选项。
 #[derive(Args, Clone, Default)]
 pub struct BuildArgs {
-  /// 本机代码目录：打包上传，在服务器上构建（Python、Go 自动识别，有 Dockerfile 就用）。
+  /// 本机代码目录：打包上传，在服务器上构建（Python、Node、Go、静态站点自动识别，有 Dockerfile 就用）。
   #[arg(long)]
   pub dir: Option<std::path::PathBuf>,
   /// git 仓库（https 地址），在服务器上拉代码构建。
@@ -405,6 +405,7 @@ pub enum ServerCmd {
     /// 拉镜像时 dockerd 用的 HTTP 代理，例如 `http://100.x.x.x:8118`；镜像源和内网直连。
     /// apply 时改宿主机的 daemon.json 并重启 dockerd（开启 live-restore，容器不停）；传空字符串清除。
     /// 设了 `--via` 时不用它。
+    #[arg(long)]
     pull_proxy: Option<String>,
     /// 这台提供出口，以及经它出去的规则：`all`（除内网外全部），或逗号分隔的预置分组和域名，
     /// 例如 `github,cloudflare,*.example.com`（分组见 `wharf egress presets`）；`off` 关闭。
