@@ -70,7 +70,7 @@ export function AuditLog() {
           </TableBody>
         </Table></div>
       ) : !loading && !error ? <Empty>还没有操作记录</Empty> : null}
-      <div className="flex gap-2"><Button variant="outline" disabled={loading} onClick={() => { setLoading(true); api.get<AuditEntry[]>("/api/audit?limit=100").then((data) => { setRows(data); setMore(data.length === 100); }).catch(setError).finally(() => setLoading(false)); }}>最新</Button>{more && <Button variant="outline" className="w-fit" disabled={loading} onClick={earlier}>更早</Button>}</div>
+      <div className="flex gap-2"><Button variant="outline" disabled={loading} onClick={() => { setLoading(true); setError(null); api.get<AuditEntry[]>("/api/audit?limit=100").then((data) => { setRows(data); setMore(data.length === 100); }).catch(setError).finally(() => setLoading(false)); }}>最新</Button>{more && <Button variant="outline" className="w-fit" disabled={loading} onClick={earlier}>更早</Button>}</div>
     </div>
   );
 }
