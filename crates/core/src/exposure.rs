@@ -433,26 +433,47 @@ pub async fn issues(
     if public_ip(&snap, server).is_none() {
       continue;
     }
-    for p in view(state, server).await?.ports {
-      if !p.expected && !p.acked {
-        issues.push(Issue {
-          code: "exposed_port".into(),
-          level: IssueLevel::Warn,
-          subject: Some(IssueSubject {
-            kind: "server".into(),
-            name: server.clone(),
-          }),
-          title: format!(
-            "{server} 的 {} 对公网开放（{}）",
-            port_key(&p),
-            p.name
-          ),
-          hint: Some("确认没问题就在服务器详情里点“我知道”".into()),
-        });
-      }
+    let open: Vec<_> = view(state, server)
+      .await?
+      .ports
+      .into_iter()
+      .filter(|p| !p.expected && !p.acked)
+      .collect();
+    if let Some(title) = exposed_title(server, &open) {
+      issues.push(Issue {
+        code: "exposed_port".into(),
+        level: IssueLevel::Warn,
+        subject: Some(IssueSubject {
+          kind: "server".into(),
+          name: server.clone(),
+        }),
+        title,
+        hint: Some("确认没问题就在服务器详情里点“我知道”".into()),
+      });
     }
   }
   Ok(issues)
+}
+
+/// 一台服务器的未确认端口合成一条待处理，只列前 3 个。
+fn exposed_title(server: &str, open: &[PortRow]) -> Option<String> {
+  match open {
+    [] => None,
+    [p] => Some(format!(
+      "{server} 的 {} 对公网开放（{}）",
+      port_key(p),
+      p.name
+    )),
+    _ => {
+      let names: Vec<_> = open.iter().take(3).map(port_key).collect();
+      let more = if open.len() > 3 { " 等" } else { "" };
+      Some(format!(
+        "{server} 有 {} 个未确认的公网端口：{}{more}",
+        open.len(),
+        names.join("、")
+      ))
+    }
+  }
 }
 
 pub fn service_risks(server: &str, service: &str) -> Vec<String> {
@@ -540,6 +561,28 @@ pub async fn ack(
 #[cfg(test)]
 mod tests {
   use super::*;
+  #[test]
+  fn exposed_title_groups_per_server() {
+    let row = |port: u16| PortRow {
+      proto: "tcp".into(),
+      port,
+      name: "x".into(),
+      addr: "*".into(),
+      owner: "host".into(),
+      expected: false,
+      acked: false,
+    };
+    assert_eq!(exposed_title("s", &[]), None);
+    assert_eq!(
+      exposed_title("s", &[row(1)]).unwrap(),
+      "s 的 tcp/1 对公网开放（x）"
+    );
+    assert_eq!(
+      exposed_title("s", &[row(1), row(2), row(3), row(4)]).unwrap(),
+      "s 有 4 个未确认的公网端口：tcp/1、tcp/2、tcp/3 等"
+    );
+  }
+
   #[test]
   fn declared_host_port_belongs_to_service() {
     let services =
