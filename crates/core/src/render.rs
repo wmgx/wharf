@@ -8,8 +8,8 @@ use wharf_api_types::{
   ApiError,
   agent::{BUILD_IMAGE_PREFIX, TRIAL_PROJECT_PREFIX},
   spec::{
-    BuildSource, GatewayKind, GatewaySpec, GatewayTls, Limits,
-    PortSpec, PrivateAddr, ServiceSpec, Source,
+    BuildSource, GatewayKind, GatewaySpec, GatewayTls, PortSpec,
+    PrivateAddr, ServiceSpec, Source,
   },
 };
 
@@ -1183,6 +1183,7 @@ pub fn caddyfile(
 #[cfg(test)]
 mod tests {
   use super::*;
+  use wharf_api_types::spec::Limits;
   use wharf_api_types::spec::{GatewayKind, PortSpec, VolumeSpec};
 
   fn spec() -> ServiceSpec {
