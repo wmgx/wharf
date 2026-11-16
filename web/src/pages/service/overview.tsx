@@ -1,14 +1,16 @@
+import { ShareDialog } from "@/components/share-dialog";
 import { ContainerRisk } from "@/components/container-risk";
 import { ArrowRightIcon, ArrowUpRightIcon, LockIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { api } from "@/api";
+import { api, usePoll } from "@/api";
 import { CopyButton, Dot, OpenLink, SectionTitle, ago } from "@/components/common";
 import { diagnosisOf, routeTone, serviceTruth } from "@/components/health";
 import { Facts, Panel, Row, Rows } from "@/components/kit";
 import { Probe } from "@/components/probe";
 import { Button } from "@/components/ui/button";
 import { useStatus } from "@/status";
+import type { ExposureView } from "@/types.gen";
 import type { RouteView, ServiceView, Timeline } from "@/types";
 import { ServiceNote } from "./note";
 import { dataSummary } from "./status-text";
@@ -17,6 +19,9 @@ const kinds: Record<string, string> = { deploy: "部署", backup: "备份", task
 
 export function Overview({ svc, routes, onTab, onBackup }: { svc: ServiceView; routes: RouteView[]; onTab: (t: string) => void; onBackup: () => void }) {
   const { status } = useStatus();
+  const [sharing, setSharing] = useState(false);
+  const exposure = usePoll<ExposureView>(`/api/servers/${encodeURIComponent(svc.spec.server)}/exposure`, 30000);
+  const ports = exposure.data?.ports.filter((p) => p.owner === "service" && p.name === svc.name) ?? [];
   const [timeline, setTimeline] = useState<Timeline | null>(null);
   useEffect(() => { api.get<Timeline>(`/api/services/${encodeURIComponent(svc.name)}/timeline?limit=3`).then(setTimeline).catch(() => setTimeline(null)); }, [svc.name]);
   const { tone, text, detail } = serviceTruth(svc, status);
@@ -26,6 +31,7 @@ export function Overview({ svc, routes, onTab, onBackup }: { svc: ServiceView; r
   if (!routes.length) hints.push({ text: "还没有域名，现在只能从内网访问。", action: "加域名", go: () => onTab("domains") });
   if (svc.data?.some((m) => m.kind === "managed") && !svc.spec.backup) hints.push({ text: "有数据，但还没开备份。", action: "开备份", go: onBackup });
   return <>
+    <ShareDialog service={svc.name} open={sharing} onClose={() => setSharing(false)} />
     <Panel className="p-4">
       <div className="flex items-center gap-3">
         <div className="min-w-0 flex-1">
@@ -52,7 +58,7 @@ export function Overview({ svc, routes, onTab, onBackup }: { svc: ServiceView; r
     </div>)}
     <div className="mt-8 grid gap-3 md:grid-cols-[1.4fr_1fr]">
       <div>
-        <SectionTitle>访问</SectionTitle>
+        <SectionTitle action={<Button variant="outline" size="sm" onClick={() => setSharing(true)}>临时分享</Button>}>访问</SectionTitle>
         <Panel className="p-4">
           <Facts items={[
             ["域名", routes.length ? <div className="grid min-w-0 gap-1">
@@ -101,7 +107,7 @@ export function Overview({ svc, routes, onTab, onBackup }: { svc: ServiceView; r
       </div>
       <div>
         <SectionTitle>容器</SectionTitle>
-        <Panel className="grid gap-2.5 p-4 text-sm">
+        <Panel className="grid max-h-72 gap-2.5 overflow-auto p-4 text-sm">
           {svc.containers?.map((c) => <div key={c.name} className="flex items-center gap-3">
             <span className="w-24 truncate text-muted-foreground">
               {c.service}
@@ -116,6 +122,8 @@ export function Overview({ svc, routes, onTab, onBackup }: { svc: ServiceView; r
         </Panel>
       </div>
     </div>
+    <SectionTitle action={<Link className="text-sm text-primary hover:underline" to={`/servers/${encodeURIComponent(svc.spec.server)}?tab=exposure`}>服务器暴露面</Link>}>对公网开放的端口</SectionTitle>
+    {exposure.error ? <p className="text-sm text-destructive">暴露面读取失败</p> : <Panel className="p-4 text-sm">{ports.length ? <div className="max-h-60 overflow-auto">{ports.map((p) => <div key={`${p.proto}/${p.port}/${p.addr}`} className="flex flex-wrap gap-2"><span className="font-mono">{p.proto}/{p.port}</span><span>{p.acked ? "已确认" : p.expected ? "预期" : "未确认"}</span></div>)}</div> : exposure.data?.outdated ? "agent 版本太旧，没有数据" : !exposure.data?.checked_at ? "还没有检查过" : "没有归属本服务的公网监听"}</Panel>}
     <SectionTitle>备注</SectionTitle>
     <ServiceNote svc={svc} />
     {!!timeline?.items.length && <>

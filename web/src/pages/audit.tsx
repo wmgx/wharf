@@ -34,7 +34,7 @@ export function AuditLog() {
     setError(null);
     try {
       const data = await api.get<AuditEntry[]>(`/api/audit?limit=100&before=${rows[rows.length - 1].id}`);
-      setRows((current) => [...current, ...data]);
+      setRows(data);
       setMore(data.length === 100);
     } catch (e) {
       setError(e);
@@ -47,7 +47,7 @@ export function AuditLog() {
     <div className="grid gap-3">
       <ErrorNote error={error} />
       {rows.length ? (
-        <Table>
+        <div className="max-h-[65svh] overflow-y-auto"><Table>
           <TableHeader>
             <TableRow>
               <TableHead>时间</TableHead>
@@ -68,9 +68,9 @@ export function AuditLog() {
               </TableRow>
             ))}
           </TableBody>
-        </Table>
+        </Table></div>
       ) : !loading && !error ? <Empty>还没有操作记录</Empty> : null}
-      {more && <Button variant="outline" className="w-fit" disabled={loading} onClick={earlier}>更早</Button>}
+      <div className="flex gap-2"><Button variant="outline" disabled={loading} onClick={() => { setLoading(true); api.get<AuditEntry[]>("/api/audit?limit=100").then((data) => { setRows(data); setMore(data.length === 100); }).catch(setError).finally(() => setLoading(false)); }}>最新</Button>{more && <Button variant="outline" className="w-fit" disabled={loading} onClick={earlier}>更早</Button>}</div>
     </div>
   );
 }

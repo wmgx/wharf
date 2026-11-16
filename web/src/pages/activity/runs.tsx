@@ -32,7 +32,7 @@ export function Runs() {
   if (!data) return <CardsSkeleton count={2} />;
   if (data.length === 0) return <Empty>还没有执行过改动</Empty>;
   return (
-    <Rows>
+    <Rows limit={10}>
       {[...data].sort((a, b) => Number(b.status === "running") - Number(a.status === "running")).map((r) => {
         const [tone, text] = RUN_TONE[r.status];
         const title = runTitle(r);

@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState, type ReactElement, type ReactNode } from "react";
+import { Children, Fragment, useEffect, useRef, useState, type ReactElement, type ReactNode } from "react";
 import { useClickable } from "@/components/common";
 import { AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
@@ -10,8 +10,10 @@ export function Panel({ className, children }: { className?: string; children: R
   return <div className={cn("overflow-hidden rounded-xl border bg-card shadow-xs", className)}>{children}</div>;
 }
 
-export function Rows({ children }: { children: ReactNode }) {
-  return <Panel><div className="divide-y">{children}</div></Panel>;
+export function Rows({ children, limit }: { children: ReactNode; limit?: number }) {
+  const [all, setAll] = useState(false);
+  const rows = Children.toArray(children);
+  return <Panel><div className="divide-y">{limit && !all ? rows.slice(0, limit) : children}</div>{limit && rows.length > limit && <Button variant="ghost" size="sm" className="m-2" onClick={() => setAll(!all)}>{all ? "收起" : `查看全部（${rows.length}）`}</Button>}</Panel>;
 }
 
 export function Row({ to, onClick, className, children }: { to?: string; onClick?: () => void; className?: string; children: ReactNode }) {

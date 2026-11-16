@@ -83,7 +83,11 @@ fn classify(
   } else if let Some(c) = &l.container {
     ("container", c.clone(), false)
   } else if !l.process.is_empty() {
-    ("host", l.process.clone(), l.process == "sshd")
+    (
+      "host",
+      l.process.clone(),
+      matches!(l.process.as_str(), "sshd" | "tailscaled"),
+    )
   } else {
     ("unknown", "未知".into(), false)
   };
@@ -479,6 +483,22 @@ mod tests {
         .unwrap();
     assert!(!p.expected);
     assert_eq!(p.owner, "container");
+  }
+  #[test]
+  fn tailscaled_is_expected() {
+    let l = Listen {
+      proto: "udp".into(),
+      addr: "0.0.0.0".into(),
+      port: 41641,
+      process: "tailscaled".into(),
+      ..Default::default()
+    };
+    let p =
+      classify(&l, &AgentReport::default(), &[], &BTreeSet::new())
+        .unwrap();
+    assert!(p.expected);
+    assert_eq!(p.owner, "host");
+    assert!(new_ports(&[p], Some(&BTreeSet::new())).is_empty());
   }
   #[test]
   fn private_listeners_excluded() {

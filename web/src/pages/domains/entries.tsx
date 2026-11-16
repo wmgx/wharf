@@ -34,6 +34,8 @@ export function Entries() {
             <TableHead>所在</TableHead>
             <TableHead>状态</TableHead>
             <TableHead>域名</TableHead>
+            <TableHead>泛域名证书</TableHead>
+            <TableHead>四层转发</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -58,6 +60,8 @@ export function Entries() {
                   {g.routes.length}
                 </Button>
               </TableCell>
+              <TableCell>{g.spec.kind === "caddy" ? g.spec.wildcard?.length ? g.spec.wildcard.map((z) => `*.${z}`).join("、") : "没开" : "不支持"}</TableCell>
+              <TableCell>{g.spec.kind === "caddy" ? `${g.spec.layer4?.length ?? 0} 条` : "不支持"}</TableCell>
             </TableRow>;
           })}
         </TableBody>

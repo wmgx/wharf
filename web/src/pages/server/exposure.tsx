@@ -33,7 +33,7 @@ export function ServerExposure({ server }: { server: string }) {
       {!data?.checked_at ? <Empty>{busy ? "读取中" : "还没有检查过"}</Empty> : <>
         <SectionTitle>对公网开放的端口</SectionTitle>
         <p className="mb-3 text-xs text-muted-foreground">本机在监听的端口，云厂商的安全组可能挡掉其中一部分</p>
-        {!data.ports.length ? <Empty>没有对公网开放的端口</Empty> : <Rows>{data.ports.map((p) => <Row key={`${p.proto}/${p.port}/${p.addr}`} className={!p.expected && !p.acked ? "bg-warning/10" : undefined}>
+        {!data.ports.length ? <Empty>没有对公网开放的端口</Empty> : <Rows limit={10}>{data.ports.map((p) => <Row key={`${p.proto}/${p.port}/${p.addr}`} className={!p.expected && !p.acked ? "bg-warning/10" : undefined}>
           <span className="font-mono">{p.proto}/{p.port}</span>
           <span className="min-w-0 flex-1 break-all">{owners[p.owner]} · {p.name}</span>
           {p.expected ? <StatusBadge tone="idle">预期</StatusBadge> : <span className="flex items-center gap-2">
@@ -42,7 +42,7 @@ export function ServerExposure({ server }: { server: string }) {
           </span>}
         </Row>)}</Rows>}
         <div className="mt-6"><SectionTitle>权限较大的容器</SectionTitle></div>
-        {!data.risks.length ? <Empty>没有权限较大的容器</Empty> : <Rows>{data.risks.map((r) => <Row key={r.container} className={r.own ? "text-muted-foreground" : undefined}>
+        {!data.risks.length ? <Empty>没有权限较大的容器</Empty> : <Rows limit={10}>{data.risks.map((r) => <Row key={r.container} className={r.own ? "text-muted-foreground" : undefined}>
           <span className="min-w-0 flex-1 break-all font-mono">{r.container}</span>
           {r.own ? <span>Wharf 自身</span> : r.service ? <Link className="text-primary hover:underline" to={`/services/${encodeURIComponent(r.service)}`}>{r.service}</Link> : <span>未纳管</span>}
           <span className="w-full break-words text-xs">{riskText(r.risks)}</span>
