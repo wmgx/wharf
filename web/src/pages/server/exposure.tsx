@@ -14,7 +14,9 @@ export function ServerExposure({ server }: { server: string }) {
   const [data, setData] = useState<ExposureView | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
-  const { refresh: refreshStatus } = useStatus();
+  const { status, refresh: refreshStatus } = useStatus();
+  const machine = status?.servers.find((s) => s.name === server);
+  const noPublic = !!machine && !machine.public_ip;
   const load = useCallback(async (action?: string, body?: unknown) => {
     setBusy(true); setError(null);
     try {
@@ -25,6 +27,7 @@ export function ServerExposure({ server }: { server: string }) {
   useEffect(() => { setData(null); load(); }, [load]);
   return <>
     <ErrorNote error={error} />
+    {noPublic && <p className="mb-3 text-sm text-muted-foreground">这台没有公网地址，以下端口从公网连不到</p>}
     {data?.outdated ? <Empty>agent 版本太旧，没有数据</Empty> : <>
       <div className="mb-3 flex flex-wrap items-center justify-end gap-2">
         {data?.checked_at && <span className="text-xs text-muted-foreground">检查于 {ago(new Date(data.checked_at).toISOString())}</span>}
@@ -33,7 +36,7 @@ export function ServerExposure({ server }: { server: string }) {
       {!data?.checked_at ? <Empty>{busy ? "读取中" : "还没有检查过"}</Empty> : <>
         <SectionTitle>对公网开放的端口</SectionTitle>
         <p className="mb-3 text-xs text-muted-foreground">本机在监听的端口，云厂商的安全组可能挡掉其中一部分</p>
-        {!data.ports.length ? <Empty>没有对公网开放的端口</Empty> : <Rows limit={10}>{data.ports.map((p) => <Row key={`${p.proto}/${p.port}/${p.addr}`} className={!p.expected && !p.acked ? "bg-warning/10" : undefined}>
+        {!data.ports.length ? <Empty>没有对公网开放的端口</Empty> : <Rows limit={10}>{data.ports.map((p) => <Row key={`${p.proto}/${p.port}/${p.addr}`} className={!noPublic && !p.expected && !p.acked ? "bg-warning/10" : undefined}>
           <span className="font-mono">{p.proto}/{p.port}</span>
           <span className="min-w-0 flex-1 break-all">{owners[p.owner]} · {p.name}</span>
           {p.expected ? <StatusBadge tone="idle">预期</StatusBadge> : <span className="flex items-center gap-2">
