@@ -4,7 +4,6 @@ import { AuthFields, authReady, saveAuth } from "@/components/basic-auth";
 import { toast } from "sonner";
 import { EntryField, useEntry } from "@/components/entry";
 import { DomainChips, Field, Picker } from "@/components/fields";
-import { WildcardHints } from "@/components/wildcard-hints";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -73,7 +72,6 @@ export function AddRoute({ service: fixed, open, onClose }: { service?: string; 
             {!hostname && service && <DomainChips suggestions={suffixes.map((s) => `${service}.${s}`)} onPick={setHostname} />}
           </Field>
           <EntryField entry={entry} />
-          {status && <WildcardHints status={status} gateway={entry.chosen} />}
           {entry.tunnel ? <p className="text-sm text-muted-foreground">隧道入口暂不支持访问保护</p> : <Field label="访问保护"><Picker value={protection} onChange={setProtection} options={[{ value: "gate", label: "门禁（用 Wharf 登录，推荐）" }, { value: "basic", label: "账号密码" }, { value: "none", label: "不保护" }]} /></Field>}
           {auth && <AuthFields user={user} password={password} onUser={setUser} onPassword={setPassword} />}
             <label className={`mt-3 flex items-center gap-2.5 text-sm ${entry.tunnel ? "text-muted-foreground" : "cursor-pointer"}`}>

@@ -56,7 +56,7 @@ export function ServiceTable({ status, rows }: { status: Status; rows: Row[] }) 
                   {r.svc?.note && <NotePreview note={r.svc.note} />}
                 </TableCell>
                 <TableCell><StatusBadge tone={r.tone}>{r.text}</StatusBadge>{r.svc && status.updates?.services[r.name]?.newer && <span className="ml-1.5 inline-flex items-center gap-1 rounded-md bg-primary/10 px-1.5 py-0.5 text-xs font-medium text-primary"><ArrowUpCircleIcon className="size-3" />新版本</span>}</TableCell>
-                <TableCell>{r.svc ? <ServerTag name={r.where} /> : r.where}</TableCell>
+                <TableCell><ServerTag name={r.where} /></TableCell>
                 <TableCell className="font-mono text-xs">
                   {r.domains.map((d) => <div key={d}><OpenLink value={d} /></div>)}
                   {r.domains.length === 0 && (r.address ? <OpenLink value={r.address} className="text-muted-foreground" /> : <span className="text-muted-foreground">-</span>)}
@@ -78,7 +78,7 @@ export function ServiceTable({ status, rows }: { status: Status; rows: Row[] }) 
                 <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
                   <StatusBadge tone={r.tone}>{r.text}</StatusBadge>
                   {r.svc && status.updates?.services[r.name]?.newer && <span className="inline-flex items-center gap-1 rounded-md bg-primary/10 px-1.5 py-0.5 text-xs font-medium text-primary"><ArrowUpCircleIcon className="size-3" />新版本</span>}
-                  {r.svc ? <ServerTag name={r.where} /> : <span>{r.where}</span>}
+                  <ServerTag name={r.where} />
                   <BackupDot data={backup(r)} />
                 </div>
                 {(r.domains.length > 0 || r.address) && <div className="flex min-w-0 flex-wrap gap-x-2 font-mono text-xs text-muted-foreground">{(r.domains.length ? r.domains : [r.address!]).map((d) => <OpenLink key={d} value={d} />)}</div>}
