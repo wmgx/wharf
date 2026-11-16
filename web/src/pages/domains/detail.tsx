@@ -116,12 +116,12 @@ function DomainDetail({ route, status, onClose, onDirty }: { route: RouteView; s
       <SectionTitle>访问保护</SectionTitle>
       <Panel className="flex flex-col gap-3 p-4 text-sm">
         <div className="flex flex-wrap items-center gap-2">
-          <span className="flex-1">{route.spec.sso ? "门禁 · 用 Wharf 登录" : route.spec.auth ? "账号密码" : "不保护"}</span>
+          <span className="flex-1">{route.spec.sso?.public ? "公开 · 代登录入口" : route.spec.sso ? "门禁 · 用 Wharf 登录" : route.spec.auth ? "账号密码" : "不保护"}</span>
           {gateway?.spec.kind === "cloudflare_tunnel" ? <span className="text-muted-foreground">隧道入口暂不支持访问保护</span> : <Button variant="outline" size="sm" onClick={() => setGateOpen(true)}>设置访问保护</Button>}
         </div>
-        {route.spec.sso && <Link className="text-primary hover:underline" to="/settings?tab=security#gate-keys">访问凭证（{keyCount}）</Link>}
+        {route.spec.sso && !route.spec.sso.public && <Link className="text-primary hover:underline" to="/settings?tab=security#gate-keys">访问凭证（{keyCount}）</Link>}
         {route.spec.sso?.mode === "login" && <>
-          <div className="flex flex-wrap items-center gap-2"><span className="flex-1">替我登录应用 · {route.spec.sso.login?.steps.length ?? 0} 步</span><Button size="sm" variant="outline" disabled={testing} onClick={testLogin}>测试</Button><a className="text-xs underline" href={`https://${route.spec.hostname}/_wharf/login?rd=/`} target="_blank" rel="noreferrer">重新登录</a></div>
+          <div className="flex flex-wrap items-center gap-2"><span className="flex-1">替我登录应用 · {route.spec.sso.login?.steps.length ?? 0} 步</span><Button size="sm" variant="outline" disabled={testing} onClick={testLogin}>测试</Button><a className="text-xs underline" href={`https://${route.spec.hostname}/_wharf/login`} target="_blank" rel="noreferrer">{route.spec.sso.public ? "进入后台" : "重新登录"}</a></div>
           {route.sso_login && <span className="break-all text-xs text-muted-foreground">{route.sso_login.ok ? `上次登录 ${ago(new Date(route.sso_login.at).toISOString())}，成功` : `上次登录失败：${route.sso_login.error ?? "登录失败"}`}</span>}
 
         </>}

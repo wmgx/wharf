@@ -25,6 +25,8 @@ export function AccessProtection({ route, onClose }: { route: RouteView; onClose
   const [saveError, setSaveError] = useState<unknown>(null);
   const [skipPaths, setSkipPaths] = useState((route.spec.sso?.skip_paths ?? []).join("\n"));
   const [dropLogin, setDropLogin] = useState(false);
+  const [isPublic, setIsPublic] = useState(!!route.spec.sso?.public);
+  const publicLogin = gateMode === "login" && isPublic;
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
       <DialogContent aria-describedby={undefined} className="max-h-[85svh] overflow-y-auto">
@@ -37,11 +39,14 @@ export function AccessProtection({ route, onClose }: { route: RouteView; onClose
           <Picker id="gate-mode" value={gateMode} options={[{ value: "gate", label: "仅检查 Wharf 登录" }, { value: "header", label: "向应用传递用户名" }, ...(route.spec.sso?.mode === "login" ? [{ value: "login", label: "自动登录应用" }] : [])]} onChange={(v) => setGateMode(v as typeof gateMode)} />
         </Field>
         {gateMode === "header" && <Field label="请求头" htmlFor="gate-header"><Input id="gate-header" value={userHeader} onChange={(e) => setUserHeader(e.target.value)} /></Field>}
+        {gateMode === "login" && <label className="flex items-center gap-2 text-sm"><Checkbox checked={isPublic} onCheckedChange={(v) => setIsPublic(v === true)} />公开站点，访客不用登录</label>}
+        {!publicLogin && <>
         <Field label="不用登录的路径（每行一个，可以不填）" htmlFor="gate-skip">
           <Textarea id="gate-skip" value={skipPaths} onChange={(e) => setSkipPaths(e.target.value)} />
         </Field>
         <label className="flex items-center gap-2 text-sm"><Checkbox checked={trustInternal} onCheckedChange={(v) => setTrustInternal(v === true)} />从组网内访问不用登录</label>
         {trustInternal && <p className="text-xs text-muted-foreground">只有经组网地址或这台机器的内网访问入口时才算；从别的网络访问公网入口仍然要登录。</p>}
+        </>}
         </>}
         {protection === "gate" && route.spec.redirect && <p className="text-sm text-muted-foreground">跳转域名不支持门禁</p>}
         {route.spec.sso?.mode === "login" && (protection !== "gate" || gateMode !== "login") && <label className="flex items-center gap-2 text-sm"><Checkbox checked={dropLogin} onCheckedChange={(v) => setDropLogin(v === true)} />登录步骤会被删掉</label>}
@@ -52,7 +57,7 @@ export function AccessProtection({ route, onClose }: { route: RouteView; onClose
             try {
               if (protection === "basic") await saveAuth(route.spec.hostname, user, password);
               setPassword(""); onClose();
-              actions.plan({ title: `修改 ${route.spec.hostname} 的访问保护`, changes: [{ op: "upsert_route", spec: { ...route.spec, auth: protection === "basic", sso: protection === "gate" ? { mode: gateMode, login: gateMode === "login" ? route.spec.sso?.login : undefined, header: gateMode === "header" ? userHeader : undefined, trust_internal: trustInternal, skip_paths: skipPaths.split("\n").map((p) => p.trim()).filter(Boolean) } : undefined } }] });
+              actions.plan({ title: `修改 ${route.spec.hostname} 的访问保护`, changes: [{ op: "upsert_route", spec: { ...route.spec, auth: protection === "basic", sso: protection === "gate" ? { mode: gateMode, login: gateMode === "login" ? route.spec.sso?.login : undefined, header: gateMode === "header" ? userHeader : undefined, trust_internal: !publicLogin && trustInternal, skip_paths: publicLogin ? [] : skipPaths.split("\n").map((p) => p.trim()).filter(Boolean), public: publicLogin || undefined } : undefined } }] });
             } catch (e) { setSaveError(e); } finally { setSaving(false); }
           }}>预览改动</Button>
         </DialogFooter>

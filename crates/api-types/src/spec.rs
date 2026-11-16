@@ -595,6 +595,16 @@ pub struct SsoSpec {
   /// 不过门禁的路径前缀。
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub skip_paths: Vec<String>,
+  /// 公开站点：不加门禁，所有人都能访问；只提供 `/_wharf/login` 入口，
+  /// 主人从入口登录 Wharf 后代登录进应用。只能和 login 方式一起用。
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub public: bool,
+}
+impl SsoSpec {
+  /// 网关是否挡住没登录的访问。
+  pub fn gated(&self) -> bool {
+    !self.public
+  }
 }
 #[derive(
   Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
@@ -837,6 +847,9 @@ pub struct LoginSpec {
   pub check: Option<LoginStep>,
   #[serde(default = "login_ttl")]
   pub ttl_hours: u16,
+  /// 代登录完成后跳到的路径，例如后台 `/ghost/`；不填就是 `/`。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub entry: Option<String>,
 }
 fn login_ttl() -> u16 {
   24

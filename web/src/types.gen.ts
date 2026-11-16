@@ -1141,6 +1141,10 @@ export interface LiveState {
 
 export interface LoginSpec {
   check?: LoginStep | null;
+  /**
+   * 代登录完成后跳到的路径，例如后台 `/ghost/`；不填就是 `/`。
+   */
+  entry?: string | null;
   steps: LoginStep[];
   ttl_hours: number;
   write: LoginWrite[];
@@ -2035,6 +2039,11 @@ export interface SsoSpec {
   header?: string | null;
   login?: LoginSpec | null;
   mode: SsoMode;
+  /**
+   * 公开站点：不加门禁，所有人都能访问；只提供 `/_wharf/login` 入口，
+   * 主人从入口登录 Wharf 后代登录进应用。只能和 login 方式一起用。
+   */
+  public?: boolean;
   /**
    * 不过门禁的路径前缀。
    */

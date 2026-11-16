@@ -791,8 +791,10 @@ fn config_items(
       ),
       (KIND_ROUTE, Action::Create) => {
         let route = desired.routes.get(name);
-        let auth =
-          route.is_some_and(|r| r.spec.auth || r.spec.sso.is_some());
+        let auth = route.is_some_and(|r| {
+          r.spec.auth
+            || r.spec.sso.as_ref().is_some_and(|s| s.gated())
+        });
         if route.is_some_and(|r| r.spec.redirect.is_some()) {
           (vec![], "新增跳转".to_string())
         } else if let Some(ms) = route.and_then(|r| r.spec.expires_at)
@@ -834,13 +836,12 @@ fn config_items(
         }
       }
       (KIND_ROUTE, Action::Update)
-        if current
-          .routes
-          .get(name)
-          .is_some_and(|r| r.spec.sso.is_some())
-          && desired.routes.get(name).is_some_and(|r| {
-            r.spec.sso.is_none() && !r.spec.auth
-          }) =>
+        if current.routes.get(name).is_some_and(|r| {
+          r.spec.sso.as_ref().is_some_and(|s| s.gated())
+        }) && desired.routes.get(name).is_some_and(|r| {
+          !r.spec.sso.as_ref().is_some_and(|s| s.gated())
+            && !r.spec.auth
+        }) =>
       {
         (
           vec![Impact::Public],

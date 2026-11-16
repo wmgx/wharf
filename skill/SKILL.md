@@ -74,7 +74,7 @@ wharf route add blog.example.com --service blog --json
 
 DNS 记录、证书、网关配置都会自动处理，前提是用户已经在页面上加了 Cloudflare 账号。网关和服务不在同一台机器时会自动选直连或反向隧道。
 
-要加登录保护：`wharf route sso <域名> --help`。
+要加登录保护：`wharf route sso <域名> --help`。博客这类公开站点不要加门禁；应用后台想免密进入时，用 `--mode login --public`，登录步骤文件里用 `entry` 写后台路径。
 
 ### 域名打不开
 

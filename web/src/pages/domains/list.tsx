@@ -88,7 +88,7 @@ export function DomainList({ status, add }: { status: Status; add: React.ReactNo
                 </>}
               </TableCell>
               <TableCell>
-                {route ? <Button variant="outline" size="xs" onClick={(e) => { e.stopPropagation(); setParams({ protection: hostname }); }}>{route.spec.sso ? "门禁" : route.spec.auth ? "账号密码" : "不保护"}</Button> : "-"}
+                {route ? <Button variant="outline" size="xs" onClick={(e) => { e.stopPropagation(); setParams({ protection: hostname }); }}>{route.spec.sso?.public ? "公开" : route.spec.sso ? "门禁" : route.spec.auth ? "账号密码" : "不保护"}</Button> : "-"}
               </TableCell>
               <TableCell>
                 {d?.cert_expires ? <CertDays d={d} /> : "-"}

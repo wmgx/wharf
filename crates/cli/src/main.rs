@@ -875,9 +875,12 @@ pub enum RouteCmd {
     no_trust_internal: bool,
     #[arg(long, requires = "mode")]
     header: Option<String>,
-    /// 登录步骤的 YAML 或 JSON 文件，- 从标准输入读。
+    /// 登录步骤的 YAML 或 JSON 文件，- 从标准输入读。文件里可以写 entry（代登录后跳到的路径，例如 /ghost/）。
     #[arg(long, requires = "mode")]
     file: Option<String>,
+    /// 公开站点（如博客）：不加门禁，访客照常访问；主人打开 https://<域名>/_wharf/login 登录 Wharf 后代登录进应用后台。只能配 --mode login。
+    #[arg(long, requires = "mode")]
+    public: bool,
     #[command(flatten)]
     apply: ApplyFlags,
   },

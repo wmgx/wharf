@@ -2489,6 +2489,9 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
                   == wharf_api_types::spec::SsoMode::Header)
               {
                 "（门禁 · 传用户名）"
+              } else if r.spec.sso.as_ref().is_some_and(|s| s.public)
+              {
+                "（公开 · 代登录入口）"
               } else if r.spec.sso.is_some() {
                 "（门禁）"
               } else {
@@ -2565,6 +2568,7 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
       no_trust_internal,
       header,
       file,
+      public,
       apply,
     } => {
       let mut spec = c
@@ -2582,14 +2586,21 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
             "{}",
             sso
               .as_ref()
-              .map(|s| format!(
-                "门禁：已开启{}",
-                if s.skip_paths.is_empty() {
-                  String::new()
-                } else {
-                  format!("，排除 {}", s.skip_paths.join("、"))
-                }
-              ))
+              .map(|s| if s.public {
+                format!(
+                  "公开站点，代登录入口：https://{}/_wharf/login",
+                  spec.hostname
+                )
+              } else {
+                format!(
+                  "门禁：已开启{}",
+                  if s.skip_paths.is_empty() {
+                    String::new()
+                  } else {
+                    format!("，排除 {}", s.skip_paths.join("、"))
+                  }
+                )
+              })
               .unwrap_or_else(|| "门禁：没开".into())
           )
         });
@@ -2632,10 +2643,12 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
             wharf_api_types::spec::SsoMode::Gate
           },
           header,
-          trust_internal: !no_trust_internal
+          trust_internal: !public
+            && !no_trust_internal
             && (trust_internal
               || spec.sso.as_ref().is_some_and(|s| s.trust_internal)),
           skip_paths: skip,
+          public,
         });
       changes(c, vec![Change::UpsertRoute { spec }], apply, j).await
     }

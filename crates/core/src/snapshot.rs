@@ -400,6 +400,7 @@ pub fn gateway_render(
           .map(|u| format!("http://{u}"))
           .unwrap_or_else(|| login.clone());
         Ok(render::Gate {
+          public: sso.public,
           app_login: sso.mode
             == wharf_api_types::spec::SsoMode::Login,
           user_header: (sso.mode
