@@ -51,7 +51,6 @@ export function Overview({ svc, routes, onTab, onBackup, onOpen }: { svc: Servic
         </Button>}
       </div>
     </Panel>
-    {svc.spec.monitor && <div className="mt-3 flex items-center gap-2 text-sm"><Dot tone={!svc.monitor ? "idle" : svc.monitor.ok ? "ok" : "bad"} />健康检查：{!svc.monitor ? "等待检查" : svc.monitor.ok ? "正常" : "不正常"}<Button size="xs" variant="outline" onClick={() => onTab("metrics")}>查看</Button></div>}
     <ObjectIssues kind="service" name={svc.name} />
     {hints.map((h) => <div key={h.action} className="mt-3 flex items-center gap-3 rounded-xl border border-dashed px-4 py-2.5 text-sm">
       <span className="flex-1 text-muted-foreground">
@@ -115,8 +114,8 @@ export function Overview({ svc, routes, onTab, onBackup, onOpen }: { svc: Servic
         <SectionTitle>容器</SectionTitle>
         <Panel className="grid max-h-72 gap-2.5 overflow-auto p-4 text-sm">
           {svc.containers?.map((c) => <div key={c.name} className="flex items-center gap-3">
-            <span className="w-24 truncate text-muted-foreground">
-              {c.service}
+            <span className="w-24 truncate text-muted-foreground" title={c.name}>
+              {c.name}
             </span>
             <Dot tone={c.state === "running" ? "ok" : "bad"} />
             <span>
