@@ -40,6 +40,7 @@ mod egress;
 mod exposure;
 mod failover;
 mod files_api;
+mod gate;
 mod heal;
 mod host_dir;
 mod host_units;
@@ -180,6 +181,9 @@ async fn main() -> anyhow::Result<()> {
     downloads: Default::default(),
     edge_syncing: Default::default(),
   });
+  gate::init(&state)
+    .await
+    .map_err(|e| anyhow::anyhow!(e.message))?;
   apply::recover(&state).await?;
   shell::recover(&state).await?;
   tasks::recover(&state).await?;
