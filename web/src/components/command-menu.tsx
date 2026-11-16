@@ -1,6 +1,6 @@
 import {
-  AnchorIcon, ArrowUpCircleIcon, InboxIcon, BoxIcon, CloudIcon, DownloadIcon, GlobeIcon, HardDriveIcon,
-  HistoryIcon, KeyRoundIcon, LogOutIcon, MoonIcon, NetworkIcon, PlusIcon, SearchIcon, ServerIcon,
+  AnchorIcon, ArrowUpCircleIcon, InboxIcon, BoxIcon, CloudIcon, GlobeIcon, HardDriveIcon,
+  HistoryIcon, KeyRoundIcon, LogOutIcon, MoonIcon, NetworkIcon, SearchIcon, ServerIcon,
   SettingsIcon, SunIcon, TimerIcon, WaypointsIcon,
 } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
@@ -22,7 +22,8 @@ import { useStatus } from "@/status";
 import type { SecretView, TaskView } from "@/types";
 import { useTheme } from "@/theme";
 import { useActions } from "./actions";
-import { serverOps, serviceOps, useOpCtx } from "./ops";
+import { routeOps, serverOps, serviceOps, useOpCtx } from "./ops";
+import { NEW_ITEMS } from "./new-menu";
 import { Dot, serviceTone } from "./common";
 
 const isMac =
@@ -103,7 +104,7 @@ export function CommandMenu({ onLogout }: { onLogout: () => void }) {
           <CommandEmpty>没有匹配的结果</CommandEmpty>
           <CommandGroup heading="页面">
             {([
-              ["首页", "/", AnchorIcon], ["服务", "/services", BoxIcon], ["入口", "/domains?tab=entries", WaypointsIcon],
+              ["首页", "/", AnchorIcon], ["服务", "/services", BoxIcon], ["域名", "/domains", GlobeIcon], ["入口", "/domains?tab=entries", WaypointsIcon],
               ["任务", "/tasks", TimerIcon], ["服务器", "/servers", ServerIcon], ["网络", "/network", NetworkIcon],
               ["待处理", "/inbox", InboxIcon], ["数据与备份", "/data", HardDriveIcon], ["活动", "/activity", HistoryIcon],
               ["设置", "/settings", SettingsIcon],
@@ -216,6 +217,9 @@ export function CommandMenu({ onLogout }: { onLogout: () => void }) {
                   op(`${item.id}-${svc.name}`, `${item.label} ${svc.name} ${item.keywords ?? ""}`, <item.icon />, `${item.label} ${svc.name}`, () => item.run(svc, opCtx)),
                 ))}
               </CommandGroup>
+              <CommandGroup heading="域名操作">
+                {(status?.routes ?? []).flatMap((route) => routeOps.filter((item) => !item.show || item.show(route, opCtx)).map((item) => op(`${item.id}-${route.spec.hostname}`, `${item.label} ${route.spec.hostname}`, <item.icon />, `${item.label} ${route.spec.hostname}`, () => item.run(route, opCtx))))}
+              </CommandGroup>
               <CommandGroup heading="服务器操作">
                 {(status?.servers ?? []).flatMap((server) => serverOps.filter((item) => !item.show || item.show(server, opCtx)).map((item) =>
                   op(`${item.id}-${server.name}`, `${item.label} ${server.name} ${item.keywords ?? ""}`, <item.icon />, `${item.label} ${server.name}`, () => item.run(server, opCtx)),
@@ -225,41 +229,7 @@ export function CommandMenu({ onLogout }: { onLogout: () => void }) {
           )}
           <CommandSeparator />
           <CommandGroup heading="新建">
-            {op(
-              "n-svc",
-              "部署服务 新建服务 new deploy",
-              <PlusIcon />,
-              "部署服务",
-              () => nav("/services?new=1"),
-            )}
-            {op(
-              "n-imp",
-              "导入已有容器 import",
-              <DownloadIcon />,
-              "导入服务器上已有的容器",
-              () => nav("/services?import=1"),
-            )}
-            {op(
-              "n-edge",
-              "导入 Workers Pages cloudflare edge",
-              <CloudIcon />,
-              "导入 Cloudflare Workers / Pages",
-              () => nav("/services?edge=1"),
-            )}
-            {op(
-              "n-gw",
-              "新建入口 网关 new gateway",
-              <WaypointsIcon />,
-              "新建入口",
-              () => nav("/domains?tab=entries&new=1"),
-            )}
-            {op(
-              "n-acc",
-              "加 Cloudflare 账号 account",
-              <KeyRoundIcon />,
-              "加 Cloudflare 账号",
-              () => nav("/settings?add=account"),
-            )}
+            {NEW_ITEMS.map((item) => <CommandItem key={item.path} value={`${item.label} ${item.keywords ?? ""}`} disabled={item.needsService && !services.length} onSelect={() => run(() => nav(item.path))}><item.icon />{item.label}</CommandItem>)}
           </CommandGroup>
           <CommandSeparator />
           <CommandGroup heading="其他">

@@ -1,6 +1,6 @@
 import { ArrowLeftIcon } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api } from "@/api";
 import { useActions } from "@/components/actions";
 import { Empty, ErrorNote, PageHeader, StatusBadge, ago, serverTone } from "@/components/common";
@@ -19,8 +19,8 @@ import { ServerExposure } from "./exposure";
 import { ServerHostUnits } from "./host-units";
 import { ServerLinks } from "./links";
 import { Overview } from "./overview";
-import { SettingsForm } from "./settings";
-import { SystemInfo } from "./system";
+import { NetworkSettings, SettingsForm } from "./settings";
+import { SystemDisk, SystemInfo, SshLogins } from "./system";
 
 function useHostInfo(name: string, online: boolean) {
   const [data, setData] = useState<HostInfo | null>(null);
@@ -60,7 +60,7 @@ function useTraffic(name: string) {
   return data;
 }
 
-const TABS = ["overview", "metrics", "network", "system", "host", "exposure", "terminal", "settings"] as const;
+const TABS = ["overview", "metrics", "network", "updates", "disk", "host", "exposure", "terminal", "settings"] as const;
 
 export function ServerDetail() {
   const { name = "" } = useParams();
@@ -68,6 +68,8 @@ export function ServerDetail() {
   const actions = useActions();
   const nav = useNavigate();
   const [tab, setTab] = useTab(TABS, "overview");
+  const [params, setParams] = useSearchParams();
+  useEffect(() => { if (params.get("tab") === "system") { const next = new URLSearchParams(params); next.set("tab", "updates"); setParams(next, { replace: true }); } }, [params, setParams]);
   const server = status?.servers.find((s) => s.name === name);
   const host = useHostInfo(name, !!server?.online);
   const traffic = useTraffic(name);
@@ -95,7 +97,8 @@ export function ServerDetail() {
         <TabsTrigger value="overview">概览</TabsTrigger>
         <TabsTrigger value="metrics">监控</TabsTrigger>
         <TabsTrigger value="network">网络</TabsTrigger>
-        <TabsTrigger value="system">系统</TabsTrigger>
+        <TabsTrigger value="updates">更新</TabsTrigger>
+        <TabsTrigger value="disk">磁盘</TabsTrigger>
         <TabsTrigger value="host">宿主机程序</TabsTrigger>
         <TabsTrigger value="exposure">暴露面</TabsTrigger>
         <TabsTrigger value="terminal">终端</TabsTrigger>
@@ -110,18 +113,19 @@ export function ServerDetail() {
       </TabsContent>
       <TabsContent value="network" className="mt-4">
         <ServerLinks server={name} />
-        <Button variant="outline" onClick={() => settingsAt("network")}>修改网络设置</Button>
+        <NetworkSettings server={server} />
       </TabsContent>
-      <TabsContent value="system" className="mt-4">
+      <TabsContent value="updates" className="mt-4">
         {!server.online ? <Empty>服务器离线，读不到系统信息</Empty> : !info ? <>
           <ErrorNote error={host.error} />
           <Skeleton className="h-40 rounded-xl" />
         </> : <SystemInfo info={info} server={server} onRefresh={host.load} loading={host.loading} />}
       </TabsContent>
+      <TabsContent value="disk" className="mt-4">{info ? <SystemDisk info={info} server={server} /> : <Empty>读不到磁盘信息</Empty>}</TabsContent>
       <TabsContent value="host" className="mt-4">
         {tab === "host" && <ServerHostUnits server={name} online={server.online} />}
       </TabsContent>
-      <TabsContent value="exposure" className="mt-4">{tab === "exposure" && <ServerExposure server={name} />}</TabsContent>
+      <TabsContent value="exposure" className="mt-4">{tab === "exposure" && <><ServerExposure server={name} />{info && <SshLogins info={info} />}</>}</TabsContent>
       <TabsContent value="terminal" className="mt-4">
         {!server.settings.host_terminal ? <Empty action={<Button onClick={() => settingsAt("access")}>去开启</Button>}>宿主机终端没有开启</Empty> : !server.online ? <Empty>服务器离线</Empty> : !server.host_shell ? <Empty action={<Button onClick={() => actions.upgradeAgent(name)}>升级 agent</Button>}>agent 版本太旧</Empty> : <HostSessions server={name} />}
       </TabsContent>

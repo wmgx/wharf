@@ -108,8 +108,8 @@ pub fn issues() -> Vec<Issue> {
         } else {
           IssueLevel::Warn
         },
-        subject: (!domain).then(|| IssueSubject {
-          kind: "server".into(),
+        subject: Some(IssueSubject {
+          kind: if domain { "domain" } else { "server" }.into(),
           name: name.into(),
         }),
         title,

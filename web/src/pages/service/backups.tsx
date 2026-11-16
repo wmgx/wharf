@@ -25,7 +25,7 @@ function size(bytes: number): string {
 }
 
 /** 服务详情的"备份"标签：开关自动备份、立即备份、看快照、恢复。 */
-export function Backups({ svc, onSettings }: { svc: ServiceView; onSettings: () => void }) {
+export function Backups({ svc }: { svc: ServiceView }) {
   const name = svc.name;
   const { data, error, refresh } = usePoll<BackupsView>(`/api/services/${encodeURIComponent(name)}/backups`, 30000);
   const actions = useActions();
@@ -39,7 +39,7 @@ export function Backups({ svc, onSettings }: { svc: ServiceView; onSettings: () 
       actions.watch(run_id, `备份 ${name}`);
       setTimeout(refresh, 3000);
     } catch (e) {
-      toast.error("不能开始备份", { description: (e as Error).message });
+      toast.error("开始备份失败", { description: (e as Error).message });
     }
   };
 
@@ -52,7 +52,7 @@ export function Backups({ svc, onSettings }: { svc: ServiceView; onSettings: () 
       });
       actions.watch(run_id, `恢复 ${name} 到 ${snap.short_id}`);
     } catch (e) {
-      toast.error("不能开始恢复", { description: (e as Error).message });
+      toast.error("开始恢复失败", { description: (e as Error).message });
     }
   };
 
@@ -91,7 +91,7 @@ export function Backups({ svc, onSettings }: { svc: ServiceView; onSettings: () 
               )}
             </>
           ) : (
-            <Empty action={<Button onClick={onSettings}>去开启</Button>}>还没开备份</Empty>
+            <span className="text-muted-foreground">还没开备份</span>
           )}
         </CardContent>
       </Card>

@@ -235,7 +235,7 @@ function RemoveDialog({ item, onClose, onDone }: { item: Unmanaged; onClose: () 
       });
       onDone();
     } catch (e) {
-      toast.error(`没删掉 ${target(item)}`, { description: (e as Error).message });
+      toast.error(`删除 ${target(item)} 失败`, { description: (e as Error).message });
       setBusy(false);
     }
   };

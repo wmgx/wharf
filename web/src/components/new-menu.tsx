@@ -1,67 +1,29 @@
-import { BoxIcon, CloudIcon, DownloadIcon, GlobeIcon, KeyRoundIcon, PlusIcon, ServerIcon, WaypointsIcon } from "lucide-react";
-import { useState } from "react";
+import { TimerIcon, CornerDownRightIcon, BoxIcon, CloudIcon, DownloadIcon, GlobeIcon, KeyRoundIcon, PlusIcon, ServerIcon, WaypointsIcon } from "lucide-react";
 import { useNavigate } from "react-router-dom";
-import { AddRoute } from "@/components/add-route";
-import { AddServer } from "@/components/add-server";
 import { Button } from "@/components/ui/button";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { useStatus } from "@/status";
+
+export const NEW_ITEMS = [
+  { label: "部署服务", keywords: "新建服务 new deploy", path: "/services?new=1", icon: BoxIcon },
+  { label: "导入服务器上已有的容器", keywords: "导入已有容器 import", path: "/services?import=1", icon: DownloadIcon },
+  { label: "导入 Cloudflare Workers / Pages", keywords: "cloudflare edge", path: "/services?edge=1", icon: CloudIcon },
+  { label: "加域名", path: "/domains?add=1", icon: GlobeIcon, needsService: true },
+  { label: "加跳转", path: "/domains?redirect=1", icon: CornerDownRightIcon },
+  { label: "新建入口", keywords: "网关 new gateway", path: "/domains?tab=entries&new=1", icon: WaypointsIcon },
+  { label: "新建任务", path: "/tasks?new=1", icon: TimerIcon },
+  { label: "加服务器", path: "/servers?add=1", icon: ServerIcon },
+  { label: "加 Cloudflare 账号", keywords: "account", path: "/settings?add=account", icon: KeyRoundIcon },
+];
 
 /** 顶栏的"新建"：按"我要做什么"列出所有新建入口，任何页面都能直接开始。 */
 export function NewMenu() {
   const nav = useNavigate();
   const { status } = useStatus();
-  const [route, setRoute] = useState(false);
-  const [server, setServer] = useState(false);
-  const hasServices = !!status?.services.length;
-
-  return (
-    <>
-      <DropdownMenu modal={false}>
-        <DropdownMenuTrigger asChild>
-          <Button size="sm" className="h-8">
-            <PlusIcon />
-            <span className="hidden sm:inline">新建</span>
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" className="w-60">
-          <DropdownMenuLabel className="text-xs text-muted-foreground">服务</DropdownMenuLabel>
-          <DropdownMenuItem onSelect={() => nav("/services?new=1")}>
-            <BoxIcon />
-            部署服务
-          </DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => nav("/services?import=1")}>
-            <DownloadIcon />
-            导入服务器上已有的容器
-          </DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => nav("/services?edge=1")}>
-            <CloudIcon />
-            导入 Cloudflare Workers / Pages
-          </DropdownMenuItem>
-          <DropdownMenuSeparator />
-          <DropdownMenuLabel className="text-xs text-muted-foreground">域名</DropdownMenuLabel>
-          <DropdownMenuItem disabled={!hasServices} onSelect={() => setRoute(true)}>
-            <GlobeIcon />
-            加域名
-          </DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => nav("/domains?tab=entries&new=1")}>
-            <WaypointsIcon />
-            新建入口
-          </DropdownMenuItem>
-          <DropdownMenuSeparator />
-          <DropdownMenuLabel className="text-xs text-muted-foreground">机器和账号</DropdownMenuLabel>
-          <DropdownMenuItem onSelect={() => setServer(true)}>
-            <ServerIcon />
-            加服务器
-          </DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => nav("/settings?add=account")}>
-            <KeyRoundIcon />
-            加 Cloudflare 账号
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
-      <AddRoute open={route} onClose={() => setRoute(false)} />
-      <AddServer open={server} onClose={() => setServer(false)} />
-    </>
-  );
+  return <DropdownMenu modal={false}>
+    <DropdownMenuTrigger asChild><Button size="sm" className="h-8"><PlusIcon /><span className="hidden sm:inline">新建</span></Button></DropdownMenuTrigger>
+    <DropdownMenuContent align="end" className="w-60">
+      {NEW_ITEMS.map((item) => <DropdownMenuItem key={item.path} disabled={item.needsService && !status?.services.length} onSelect={() => nav(item.path)}><item.icon />{item.label}</DropdownMenuItem>)}
+    </DropdownMenuContent>
+  </DropdownMenu>;
 }

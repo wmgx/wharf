@@ -1,3 +1,4 @@
+import { ObjectIssues } from "@/components/issues";
 import { Link } from "react-router-dom";
 import type { ReactNode } from "react";
 import { Dot, Empty, Notice, SectionTitle, serviceTone } from "@/components/common";
@@ -18,6 +19,7 @@ export function Overview({ server, status, info, traffic, loading }: { server: S
   const direct = status.routes.filter((r) => !r.spec.service && ips.some((ip) => r.spec.upstream?.split(":")[0] === ip));
   const used = traffic ? traffic.rx + traffic.tx : 0;
   return <>
+    <ObjectIssues kind="server" name={server.name} />
     {info?.reboot_required && <Notice kind="warn" className="mb-3">装了需要重启才生效的更新</Notice>}
     <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
       <Stat label="CPU" value={info ? `负载 ${info.load[0].toFixed(2)}` : undefined} sub={info ? `${info.cpus} 核` : undefined} used={info ? info.load[0] / info.cpus : undefined} loading={!info && loading} />

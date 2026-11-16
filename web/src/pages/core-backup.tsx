@@ -24,7 +24,7 @@ export function CoreBackup() {
       const { run_id } = await api.post<{ run_id: string }>("/api/core-backup/run", {});
       actions.watch(run_id, "备份控制面");
     } catch (e) {
-      toast.error("没能开始备份", { description: (e as Error).message });
+      toast.error("开始备份失败", { description: (e as Error).message });
     }
   };
 

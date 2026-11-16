@@ -1,3 +1,4 @@
+import { useNavigate } from "react-router-dom";
 import { Fragment } from "react";
 import { usePoll } from "@/api";
 import { useActions } from "@/components/actions";
@@ -8,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import type { AlertsView, IssueLevel } from "@/types";
 
 export function Open() {
+  const nav = useNavigate();
   const issues = useIssues();
   const actions = useActions();
   const { data: alerts } = usePoll<AlertsView>("/api/alerts", 30000);
@@ -16,6 +18,16 @@ export function Open() {
   if (!issues.length && !alerts?.firing.length) return <Empty>现在没有要处理的</Empty>;
   return (
     <>
+      {!!alerts?.firing.length && <>
+        <SectionTitle count={alerts.firing.length}>正在告警</SectionTitle>
+        <Panel className="grid gap-1.5 p-4 text-sm">
+          {alerts.firing.map((f) => <div key={`${f.rule}/${f.subject}`} className="flex flex-wrap items-center gap-2">
+            <StatusBadge tone="bad">{alerts.rules.find((r) => r.id === f.rule)?.name ?? alerts.notices.find((n) => n.id === f.rule)?.name ?? f.rule}</StatusBadge>
+            <span className="min-w-0 flex-1 break-words">{f.title}</span><span className="text-xs text-muted-foreground">{ago(new Date(f.since).toISOString())}起</span>
+            <Button variant="outline" size="xs" onClick={() => nav(alertPath(f.rule, f.subject))}>查看</Button>
+          </div>)}
+        </Panel>
+      </>}
       {groups.map(([level, label]) => {
         const items = issues.filter((i) => i.level === level);
         if (!items.length) return null;
@@ -24,15 +36,16 @@ export function Open() {
           <Rows limit={10}>{items.map((i, index) => <IssueRow key={`${i.code}-${i.subject?.name ?? ""}-${index}`} issue={i} />)}</Rows>
         </Fragment>;
       })}
-      {!!alerts?.firing.length && <>
-        <SectionTitle count={alerts.firing.length}>正在告警</SectionTitle>
-        <Panel className="grid gap-1.5 p-4 text-sm">
-          {alerts.firing.map((f) => <div key={`${f.rule}/${f.subject}`} className="flex flex-wrap items-center gap-2">
-            <StatusBadge tone="bad">{alerts.rules.find((r) => r.id === f.rule)?.name ?? alerts.notices.find((n) => n.id === f.rule)?.name ?? f.rule}</StatusBadge>
-            <span>{f.title}</span><span className="text-xs text-muted-foreground">{ago(new Date(f.since).toISOString())}起</span>
-          </div>)}
-        </Panel>
-      </>}
     </>
   );
+}
+
+function alertPath(rule: string, subject: string): string {
+  if (rule === "expiry_soon" || rule === "expiry_urgent") { const [kind, ...parts] = subject.split(":"); const name = encodeURIComponent(parts.join(":")); return kind === "domain" ? `/domains?q=${name}` : `/servers/${name}?tab=settings`; }
+  const name = encodeURIComponent(subject);
+  if (["domain_down", "cert_expiring"].includes(rule)) return `/domains?open=${name}`;
+  if (["container_restarting", "monitor_failed", "http_5xx", "oom_killed"].includes(rule)) return `/services/${name}?tab=${rule === "monitor_failed" ? "metrics" : "logs"}`;
+  if (rule === "link_loss") return "/network";
+  if (rule === "host_unit_down") return `/servers/${encodeURIComponent(subject.split(":")[0])}?tab=host`;
+  return `/servers/${name}${rule === "disk_forecast" ? "?tab=disk" : ""}`;
 }

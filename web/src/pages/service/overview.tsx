@@ -1,10 +1,12 @@
+import { toast } from "sonner";
 import { ShareDialog } from "@/components/share-dialog";
 import { ContainerRisk } from "@/components/container-risk";
 import { ArrowRightIcon, ArrowUpRightIcon, LockIcon } from "lucide-react";
 import { useEffect, useState } from "react";
+import { ObjectIssues } from "@/components/issues";
 import { Link } from "react-router-dom";
 import { api, usePoll } from "@/api";
-import { CopyButton, Dot, OpenLink, SectionTitle, ago } from "@/components/common";
+import { CopyButton, Dot, ErrorNote, OpenLink, SectionTitle, ago } from "@/components/common";
 import { diagnosisOf, routeTone, serviceTruth } from "@/components/health";
 import { Facts, Panel, Row, Rows } from "@/components/kit";
 import { Probe } from "@/components/probe";
@@ -17,15 +19,16 @@ import { dataSummary } from "./status-text";
 
 const kinds: Record<string, string> = { deploy: "部署", backup: "备份", task: "任务", heal: "自动重启", alert: "告警", op: "操作" };
 
-export function Overview({ svc, routes, onTab, onBackup }: { svc: ServiceView; routes: RouteView[]; onTab: (t: string) => void; onBackup: () => void }) {
-  const { status } = useStatus();
+export function Overview({ svc, routes, onTab, onBackup, onOpen }: { svc: ServiceView; routes: RouteView[]; onTab: (t: string) => void; onBackup: () => void; onOpen: (hostname: string) => void }) {
+  const { status, refresh: refreshStatus } = useStatus();
   const [sharing, setSharing] = useState(false);
   const exposure = usePoll<ExposureView>(`/api/servers/${encodeURIComponent(svc.spec.server)}/exposure`, 30000);
   const ports = exposure.data?.ports.filter((p) => p.owner === "service" && p.name === svc.name) ?? [];
   const [timeline, setTimeline] = useState<Timeline | null>(null);
   useEffect(() => { api.get<Timeline>(`/api/services/${encodeURIComponent(svc.name)}/timeline?limit=3`).then(setTimeline).catch(() => setTimeline(null)); }, [svc.name]);
   const { tone, text, detail } = serviceTruth(svc, status);
-  const routeProblem = svc.status?.tone !== "bad" && svc.status?.tone !== "warn" && routes.some((r) => routeTone(diagnosisOf(status, r.spec.hostname)).tone === "bad");
+  const routeProblem = routes.find((r) => routeTone(diagnosisOf(status, r.spec.hostname)).tone === "bad");
+  const shortDetail = routeProblem ? routeTone(diagnosisOf(status, routeProblem.spec.hostname)).text : svc.status?.summary;
   const via = status?.servers.find((s) => s.name === svc.spec.server)?.settings.via as string | undefined;
   const hints: { text: string; action: string; go: () => void }[] = [];
   if (!routes.length) hints.push({ text: "还没有域名，现在只能从内网访问。", action: "加域名", go: () => onTab("domains") });
@@ -39,15 +42,16 @@ export function Overview({ svc, routes, onTab, onBackup }: { svc: ServiceView; r
             <Dot tone={tone} className="size-2.5" />
             {text}<ContainerRisk risks={svc.risks} />
           </div>
-          <div className="text-sm text-muted-foreground">
-            {detail || (routes.length ? `${routes.length} 个域名都能打开` : "只在内网访问")}
+          <div className="text-sm text-muted-foreground" title={detail}>
+            {shortDetail || (routes.length ? `${routes.length} 个域名都能打开` : "只在内网访问")}
           </div>
         </div>
-        {(tone === "bad" || tone === "warn") && <Button variant="outline" size="sm" onClick={() => onTab(routeProblem ? "domains" : "logs")}>
+        {(tone === "bad" || tone === "warn") && <Button variant="outline" size="sm" onClick={() => routeProblem ? onOpen(routeProblem.spec.hostname) : onTab("logs")}>
           {routeProblem ? "看域名" : "看日志"}
         </Button>}
       </div>
     </Panel>
+    <ObjectIssues kind="service" name={svc.name} />
     {hints.map((h) => <div key={h.action} className="mt-3 flex items-center gap-3 rounded-xl border border-dashed px-4 py-2.5 text-sm">
       <span className="flex-1 text-muted-foreground">
         {h.text}
@@ -62,7 +66,7 @@ export function Overview({ svc, routes, onTab, onBackup }: { svc: ServiceView; r
         <Panel className="p-4">
           <Facts items={[
             ["域名", routes.length ? <div className="grid min-w-0 gap-1">
-              {routes.map((r) => <div key={r.id} className="flex min-w-0 items-center gap-0.5">
+              {routes.slice(0, 3).map((r) => <div key={r.id} className="flex min-w-0 items-center gap-0.5">
                 <a className="inline-flex min-w-0 items-center gap-1 font-mono text-xs text-primary hover:underline" href={r.url} target="_blank" rel="noreferrer">
                   {r.spec.auth && <LockIcon className="size-3.5 shrink-0 text-muted-foreground" />}<span className="truncate">
                     {r.url}
@@ -72,6 +76,7 @@ export function Overview({ svc, routes, onTab, onBackup }: { svc: ServiceView; r
                 <CopyButton text={r.url} />
                 <Probe probe={r.probe} />
               </div>)}
+              {routes.length > 3 && <Button variant="outline" size="xs" onClick={() => onTab("domains")}>还有 {routes.length - 3} 个</Button>}
             </div> : "还没有域名"],
             ["内网地址", <div className="font-mono text-xs">
               {Object.entries(svc.addresses).map(([p, a]) => <div key={p} className="flex flex-wrap items-center gap-x-3 gap-y-0.5">
@@ -109,8 +114,8 @@ export function Overview({ svc, routes, onTab, onBackup }: { svc: ServiceView; r
         <SectionTitle>容器</SectionTitle>
         <Panel className="grid max-h-72 gap-2.5 overflow-auto p-4 text-sm">
           {svc.containers?.map((c) => <div key={c.name} className="flex items-center gap-3">
-            <span className="w-24 truncate text-muted-foreground">
-              {c.service}
+            <span className="w-24 truncate text-muted-foreground" title={c.name}>
+              {c.name}
             </span>
             <Dot tone={c.state === "running" ? "ok" : "bad"} />
             <span>
@@ -122,8 +127,14 @@ export function Overview({ svc, routes, onTab, onBackup }: { svc: ServiceView; r
         </Panel>
       </div>
     </div>
-    <SectionTitle action={<Link className="text-sm text-primary hover:underline" to={`/servers/${encodeURIComponent(svc.spec.server)}?tab=exposure`}>服务器暴露面</Link>}>对公网开放的端口</SectionTitle>
-    {exposure.error ? <p className="text-sm text-destructive">暴露面读取失败</p> : <Panel className="p-4 text-sm">{ports.length ? <div className="max-h-60 overflow-auto">{ports.map((p) => <div key={`${p.proto}/${p.port}/${p.addr}`} className="flex flex-wrap gap-2"><span className="font-mono">{p.proto}/{p.port}</span><span>{p.acked ? "已确认" : p.expected ? "预期" : "未确认"}</span></div>)}</div> : exposure.data?.outdated ? "agent 版本太旧，没有数据" : !exposure.data?.checked_at ? "还没有检查过" : "没有归属本服务的公网监听"}</Panel>}
+    <ErrorNote error={exposure.error} />
+    {!!ports.length && <>
+      <SectionTitle>对公网开放的端口</SectionTitle>
+      <Rows>{ports.map((p) => <Row key={`${p.proto}/${p.port}/${p.addr}`} className={!p.acked && !p.expected ? "bg-warning/10" : undefined}>
+        <span className="flex-1 font-mono text-xs">{p.proto}/{p.port}</span><span>{p.acked ? "已确认" : p.expected ? "预期" : "未确认"}</span>
+        {!p.acked && !p.expected && <Button variant="outline" size="xs" onClick={async () => { try { await api.post(`/api/servers/${encodeURIComponent(svc.spec.server)}/exposure/ack`, { port: `${p.proto}/${p.port}`, acked: true }); exposure.refresh(); refreshStatus(); } catch (e) { toast.error("确认失败", { description: (e as Error).message }); } }}>我知道</Button>}
+      </Row>)}</Rows>
+    </>}
     <SectionTitle>备注</SectionTitle>
     <ServiceNote svc={svc} />
     {!!timeline?.items.length && <>

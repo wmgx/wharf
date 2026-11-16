@@ -20,7 +20,7 @@ const PERMS: [Perm, string, string][] = [
   ["apply", "执行改动", "执行不含高风险项的计划、上传代码、触发备份"],
   ["confirm", "确认高风险", "删数据、覆盖、公开到外网、从备份恢复"],
   ["exec", "宿主机", "在宿主机执行命令、打开终端、改服务文件"],
-  ["admin", "管理", "服务器、账号、密钥、token，升级 Wharf"],
+  ["admin", "管理", "服务器、账号、密钥、访问令牌，升级 Wharf"],
 ];
 const PERM_LABEL = Object.fromEntries(PERMS.map(([p, l]) => [p, l])) as Record<Perm, string>;
 
@@ -77,10 +77,10 @@ export function Tokens() {
     setRemoving(null);
     try {
       await api.del(`/api/tokens/${encodeURIComponent(name)}`);
-      toast.success(`已删除 token ${name}`);
+      toast.success(`已删除访问令牌 ${name}`);
       refresh();
     } catch (e) {
-      toast.error(`不能删除 ${name}`, { description: (e as Error).message });
+      toast.error(`删除 ${name} 失败`, { description: (e as Error).message });
     }
   };
 
@@ -93,7 +93,7 @@ export function Tokens() {
           </Button>
           <Button variant="outline" size="sm" onClick={() => setCreating(true)}>
             <PlusIcon />
-            新建 token
+            新建访问令牌
           </Button>
         </div>}>访问令牌</SectionTitle>
       <Dialog open={guide} onOpenChange={setGuide}>
@@ -108,22 +108,22 @@ export function Tokens() {
                 <Command>{`curl -fsSL ${origin}/cli.sh | sh -s -- ${origin}`}</Command>
               </li>
               <li className="grid gap-1.5">
-                <span className="text-sm font-medium">2. 建一个 token，按用途选权限</span>
+                <span className="text-sm font-medium">2. 建一个访问令牌，按用途选权限</span>
                 <div className="flex flex-wrap items-start gap-2">
                   <Button variant="outline" size="sm" className="w-fit" onClick={() => setCreating(true)}>
                     <PlusIcon />
-                    新建 token
+                    新建访问令牌
                   </Button>
                   {fresh && (
                     <div className="grid min-w-0 flex-1 gap-1">
                       <Command>{fresh.token}</Command>
-                      <span className="text-xs text-warning">token {fresh.name} 只显示这一次，刷新或离开页面就看不到了。</span>
+                      <span className="text-xs text-warning">访问令牌 {fresh.name} 只显示这一次，刷新或离开页面就看不到了。</span>
                     </div>
                   )}
                 </div>
               </li>
               <li className="grid gap-1.5">
-                <span className="text-sm font-medium">3. 登录：执行后提示输入 token 时，粘贴上一步的 token</span>
+                <span className="text-sm font-medium">3. 登录：执行后提示输入访问令牌 时，粘贴上一步的访问令牌</span>
                 <Command>{`wharf login --url ${origin} --core-key ${coreKey}`}</Command>
               </li>
               <li className="grid gap-1.5">
@@ -140,7 +140,7 @@ export function Tokens() {
       </Dialog>
       <ErrorNote error={error} />
       {data && data.length === 0 ? (
-        <Empty>还没有 token</Empty>
+        <Empty>还没有访问令牌</Empty>
       ) : (
         data && (
           <Panel>
@@ -225,7 +225,7 @@ function CreateToken({ taken, onCreated, onClose }: { taken: string[]; onCreated
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent aria-describedby={undefined}>
         <DialogHeader>
-          <DialogTitle>新建 token</DialogTitle>
+          <DialogTitle>新建访问令牌</DialogTitle>
         </DialogHeader>
           <div className="grid gap-4">
             <Field label="名称" htmlFor="token-name" help="例如 laptop、claude">
@@ -260,7 +260,7 @@ function CreateToken({ taken, onCreated, onClose }: { taken: string[]; onCreated
               ))}
             </div>
             {preset === "ai" && <Notice>AI 能预览和执行普通改动、在宿主机执行命令；删数据、公开到外网这类高风险项要你在页面上确认。</Notice>}
-            {name && taken.includes(name) && <Notice kind="warn">已有同名 token</Notice>}
+            {name && taken.includes(name) && <Notice kind="warn">已有同名访问令牌</Notice>}
             <ErrorNote error={error} />
           </div>
         <DialogFooter>

@@ -6,7 +6,7 @@ import { ForwardDialog } from "@/components/forward-dialog";
 import { WildcardDialog } from "@/components/wildcard-dialog";
 import { CodeBlock, Empty, SectionTitle, ServerTag } from "@/components/common";
 import { CertDays, diagnosisOf } from "@/components/health";
-import { ConfirmDialog, Facts, Row, Rows } from "@/components/kit";
+import { Facts, Row, Rows } from "@/components/kit";
 import { LogStream } from "@/components/LogStream";
 import { Button } from "@/components/ui/button";
 import { SheetDescription, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
@@ -18,7 +18,6 @@ const TLS_TEXT: Record<GatewayTls, string> = { auto: "自动签证书", internal
 
 export function GatewayDetail({ g, onDone, onDomain }: { g: GatewayView; onDone: () => void; onDomain: (hostname: string) => void }) {
   const actions = useActions();
-  const [removing, setRemoving] = useState(false);
   const [configOpen, setConfigOpen] = useState(false);
   const [logsOpen, setLogsOpen] = useState(false);
   const { status } = useStatus();
@@ -29,7 +28,7 @@ export function GatewayDetail({ g, onDone, onDomain }: { g: GatewayView; onDone:
   const saveForwards = (next: NonNullable<GatewayView["spec"]["layer4"]>, title: string) => {
     actions.plan({ title, changes: [{ op: "upsert_gateway", name: g.name, spec: { ...g.spec, layer4: next } }] });
   };
-  const addForward = <Button variant="ghost" size="xs" onClick={() => setForwardOpen(true)}>加转发</Button>;
+  const addForward = <Button variant="outline" size="xs" onClick={() => setForwardOpen(true)}>加转发</Button>;
   const wildcard = g.spec.wildcard ?? [];
   const zones = [...new Set((accounts ?? []).flatMap((a) => a.zones))].filter((z) => !wildcard.includes(z)).sort();
   const saveWildcard = (next: string[], title: string) => {
@@ -56,9 +55,9 @@ export function GatewayDetail({ g, onDone, onDomain }: { g: GatewayView; onDone:
         ["泛域名证书", g.spec.kind === "caddy" && g.spec.tls !== "off" && <div className="flex flex-wrap items-center gap-2">
           {wildcard.length ? wildcard.map((z) => <span key={z} className="inline-flex min-w-0 max-w-full items-center gap-1">
             <span className="break-all font-mono text-xs">*.{z}</span>
-            <Button variant="ghost" size="xs" onClick={() => saveWildcard(wildcard.filter((v) => v !== z), `关闭 *.${z} 的泛域名证书`)}>关闭</Button>
+            <Button variant="outline" size="xs" onClick={() => saveWildcard(wildcard.filter((v) => v !== z), `关闭 *.${z} 的泛域名证书`)}>关闭</Button>
           </span>) : "没开"}
-          <Button variant="ghost" size="xs" disabled={!zones.length} onClick={() => setWildcardOpen(true)}>开启</Button>
+          <Button variant="outline" size="xs" disabled={!zones.length} onClick={() => setWildcardOpen(true)}>开启</Button>
         </div>],
       ]} />
       <SectionTitle>域名</SectionTitle>
@@ -76,7 +75,7 @@ export function GatewayDetail({ g, onDone, onDomain }: { g: GatewayView; onDone:
           <span className="shrink-0 font-mono text-xs">:{f.listen}{f.udp ? "/udp" : ""}</span>
           <span className="text-muted-foreground">→</span>
           <span className="min-w-0 flex-1 break-all font-mono text-xs">{f.service ? `${f.service}${f.port ? `:${f.port}` : ""}` : f.upstream}</span>
-          <Button variant="ghost" size="xs" onClick={() => saveForwards(forwards.filter((v) => v.listen !== f.listen || !!v.udp !== !!f.udp), `移除 ${g.name} 的四层转发 :${f.listen}`)}>移除</Button>
+          <Button variant="outline" size="xs" onClick={() => saveForwards(forwards.filter((v) => v.listen !== f.listen || !!v.udp !== !!f.udp), `移除 ${g.name} 的四层转发 :${f.listen}`)}>移除</Button>
         </Row>)}</Rows> : <Empty action={addForward}>还没有四层转发</Empty>}
       </>}
       <details className="mt-8 text-sm" onToggle={(e) => setConfigOpen(e.currentTarget.open)}>
@@ -94,11 +93,10 @@ export function GatewayDetail({ g, onDone, onDomain }: { g: GatewayView; onDone:
       <span className="text-xs text-muted-foreground">
         {g.routes.length ? "先移除这个入口上的域名" : ""}
       </span>
-      <Button variant="outline" className="text-destructive" disabled={g.routes.length > 0} onClick={() => setRemoving(true)}>
+      <Button variant="outline" className="text-destructive" disabled={g.routes.length > 0} onClick={() => { onDone(); actions.plan({ title: `删除入口 ${g.name}`, changes: [{ op: "remove_gateway", name: g.name }] }); }}>
         <Trash2Icon />删除入口</Button>
     </SheetFooter>
     {wildcardOpen && <WildcardDialog g={g} onClose={() => setWildcardOpen(false)} />}
     {forwardOpen && <ForwardDialog gateway={g} onClose={() => setForwardOpen(false)} />}
-    <ConfirmDialog open={removing} title={`删除入口 ${g.name}？`} onCancel={() => setRemoving(false)} onConfirm={() => { setRemoving(false); onDone(); actions.plan({ title: `删除入口 ${g.name}`, changes: [{ op: "remove_gateway", name: g.name }] }); }}>入口的容器会被删除。</ConfirmDialog>
   </>;
 }

@@ -20,7 +20,6 @@ const DOCKER_KIND: Record<string, string> = {
 };
 
 export function SystemInfo({ info, server, onRefresh, loading }: { info: HostInfo; server: ServerView; onRefresh: () => void; loading: boolean }) {
-  const actions = useActions();
   const [allUpdates, setAllUpdates] = useState(false);
   return (
     <>
@@ -70,6 +69,28 @@ export function SystemInfo({ info, server, onRefresh, loading }: { info: HostInf
         </Panel>
       )}
       {info.updates && info.updates.length > 5 && <Button className="mt-2" variant="ghost" size="sm" onClick={() => setAllUpdates(!allUpdates)}>{allUpdates ? "收起" : `查看全部（${info.updates.length}）`}</Button>}
+      <SectionTitle>基线</SectionTitle>
+      <ServerBaseline server={server} />
+    </>
+  );
+}
+
+function LogRow({ label, bytes }: { label: string; bytes?: number }) {
+  return (
+    <TableRow>
+      <TableCell>{label}</TableCell>
+      <TableCell />
+      <TableCell className="text-right font-mono text-xs">
+        {size(bytes)}
+      </TableCell>
+      <TableCell />
+    </TableRow>
+  );
+}
+
+export function SystemDisk({ info, server }: { info: HostInfo; server: ServerView }) {
+  const actions = useActions();
+  return <>
       <SectionTitle action={<Button variant="outline" size="sm" onClick={() => actions.prune(server.name)}><Trash2Icon />清理没在用的镜像</Button>}>磁盘</SectionTitle>
       <Panel>
         <Table>
@@ -107,8 +128,11 @@ export function SystemInfo({ info, server, onRefresh, loading }: { info: HostInf
         </Table>
       </Panel>
       <div className="mt-3"><ServerDisk server={server.name} online={server.online} /></div>
-      <SectionTitle>基线</SectionTitle>
-      <ServerBaseline server={server} />
+  </>;
+}
+
+export function SshLogins({ info }: { info: HostInfo }) {
+  return <>
       {!!info.ssh_logins?.length && (
         <>
           <SectionTitle>SSH 登录</SectionTitle>
@@ -146,19 +170,5 @@ export function SystemInfo({ info, server, onRefresh, loading }: { info: HostInf
           </Panel>
         </>
       )}
-    </>
-  );
-}
-
-function LogRow({ label, bytes }: { label: string; bytes?: number }) {
-  return (
-    <TableRow>
-      <TableCell>{label}</TableCell>
-      <TableCell />
-      <TableCell className="text-right font-mono text-xs">
-        {size(bytes)}
-      </TableCell>
-      <TableCell />
-    </TableRow>
-  );
+  </>;
 }
