@@ -26,7 +26,7 @@ export function Row({ to, onClick, className, children }: { to?: string; onClick
       onClick();
     },
     onKeyDown: (e: React.KeyboardEvent) => {
-      if (e.key === "Enter" && e.target === e.currentTarget) onClick();
+      if ((e.key === "Enter" || e.key === " ") && e.target === e.currentTarget) { e.preventDefault(); onClick(); }
     },
   };
   return (
