@@ -1418,6 +1418,35 @@ pub fn risk_text(code: &str) -> &str {
   }
 }
 
+/// Wharf 作为 OIDC 身份提供方的信息；不含任何密钥值。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct OidcView {
+  /// 控制面没有对外 https 地址时为空，OIDC 不可用。
+  pub issuer: Option<String>,
+  pub discovery: Option<String>,
+  pub username: String,
+  /// 发给应用的邮箱；很多应用要求有邮箱。
+  pub email: Option<String>,
+  pub clients: Vec<OidcClientView>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct OidcClientView {
+  pub client_id: String,
+  /// 服务环境变量里引用密钥的写法，例如 `[[OIDC_BLOG_EXAMPLE_COM]]`。
+  pub secret_ref: String,
+  pub redirect_uris: Vec<String>,
+  pub public: bool,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct OidcSettingsRequest {
+  pub email: Option<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct OidcSecretView {
+  pub client_id: String,
+  pub client_secret: String,
+}
+
 /// 门禁访问凭证；列表不包含明文或哈希。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct GateKeyView {

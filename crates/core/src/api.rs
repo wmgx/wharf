@@ -67,6 +67,27 @@ pub fn router(state: Arc<AppState>) -> Router {
       axum::routing::put(crate::gate::put_key)
         .delete(crate::gate::remove_key),
     )
+    .route(
+      "/.well-known/openid-configuration",
+      get(crate::oidc::discovery),
+    )
+    .route("/oidc/jwks", get(crate::oidc::jwks))
+    .route("/oidc/authorize", get(crate::oidc::authorize))
+    .route("/oidc/token", post(crate::oidc::token))
+    .route(
+      "/oidc/userinfo",
+      get(crate::oidc::userinfo).post(crate::oidc::userinfo),
+    )
+    .route("/oidc/logout", get(crate::oidc::logout))
+    .route("/api/oidc", get(crate::oidc::show))
+    .route(
+      "/api/oidc/settings",
+      axum::routing::put(crate::oidc::settings),
+    )
+    .route(
+      "/api/oidc/clients/{host}/secret",
+      get(crate::oidc::secret),
+    )
     .route("/gate/login", get(crate::gate::login))
     .route("/gate/refresh", axum::routing::any(crate::gate::refresh))
     .route("/gate/site/login", get(crate::gate::site_login))

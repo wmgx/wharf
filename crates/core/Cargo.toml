@@ -20,6 +20,8 @@ axum.workspace = true
 chrono.workspace = true
 clap.workspace = true
 ed25519-dalek.workspace = true
+# OIDC 的 RS256 签名；rustls 已经带进来，同一版本
+aws-lc-rs = "=1.18.2"
 futures-util.workspace = true
 # 页面登录密码
 argon2 = { version = "=0.6.0", default-features = false, features = ["alloc", "password-hash"] }

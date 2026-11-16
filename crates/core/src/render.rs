@@ -825,6 +825,8 @@ pub struct Site {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Gate {
+  /// 公开站点：只转发 `/_wharf/*` 入口，不挂门禁。
+  pub public: bool,
   pub app_login: bool,
   pub user_header: Option<String>,
   pub trusted: Vec<String>,
@@ -974,7 +976,10 @@ pub fn caddyfile(
       } else {
         ""
       };
-      out.push_str(&format!("\t@wharf_site path /_wharf/*\n\thandle @wharf_site {{\n\t\turi replace /_wharf/ /gate/site/\n\t\treverse_proxy {} {{{host_header}\n\t\t}}\n\t}}\n\twharf_sso {{\n\t\tpublic_key {}\n\t\tcore {}\n\t\tlogin {}\n",gate.core,gate_public.unwrap_or(""),gate.core,gate.login));
+      out.push_str(&format!("\t@wharf_site path /_wharf/*\n\thandle @wharf_site {{\n\t\turi replace /_wharf/ /gate/site/\n\t\treverse_proxy {} {{{host_header}\n\t\t}}\n\t}}\n",gate.core));
+    }
+    if let Some(gate) = site.gate.as_ref().filter(|g| !g.public) {
+      out.push_str(&format!("\twharf_sso {{\n\t\tpublic_key {}\n\t\tcore {}\n\t\tlogin {}\n",gate_public.unwrap_or(""),gate.core,gate.login));
       if gate.app_login {
         out.push_str("\t\tapp_login on\n");
       }
@@ -1796,11 +1801,25 @@ mod tests {
       .contains("app_login")
     );
   }
+  #[test]
+  fn caddyfile_public_login_entry_only() {
+    let gw = serde_json::from_value(
+      serde_json::json!({"kind":"caddy","server":"s1"}),
+    )
+    .unwrap();
+    let mut site = gate_site();
+    site.gate.as_mut().unwrap().public = true;
+    let out =
+      caddyfile("edge", &gw, &[site], &[], false, Some("public"));
+    assert!(out.contains("uri replace /_wharf/ /gate/site/"));
+    assert!(!out.contains("\twharf_sso {"));
+  }
   fn gate_site() -> Site {
     Site {
       hostname: "a.example.test".into(),
       upstream: "127.0.0.1:8080".into(),
       gate: Some(Gate {
+        public: false,
         app_login: false,
         user_header: None,
         trusted: vec![],

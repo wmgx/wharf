@@ -41,7 +41,7 @@ struct Ticket {
   expires: i64,
 }
 
-fn seed(
+pub(crate) fn seed(
   c: &rusqlite::Connection,
   name: &str,
 ) -> Result<[u8; 32], ApiError> {
@@ -153,7 +153,7 @@ fn rt_parse(key: &[u8], text: &str, now: i64) -> Option<String> {
   mac.verify_slice(&URL_SAFE_NO_PAD.decode(sig).ok()?).ok()?;
   Some(hash.into())
 }
-async fn session(
+pub(crate) async fn session(
   db: &Db,
   hash: String,
 ) -> Result<Option<(String, i64)>, ApiError> {
@@ -550,7 +550,9 @@ pub async fn site_login(
   else {
     return Ok(response(404, None, "域名没有配置代登录", &[]));
   };
-  let rd = login_rd(q.rd.as_deref().unwrap_or("/"));
+  let rd = login_rd(
+    q.rd.as_deref().or(login.entry.as_deref()).unwrap_or("/"),
+  );
   let signing = key(&s.db).await?;
   let authenticated = cookie(&headers, "wharf_gate")
     .and_then(|t| verify(&signing, t, now_ms() / 1000))
@@ -729,7 +731,12 @@ pub async fn put_key(
   }
   let world = crate::snapshot::load(&s.db).await?.world;
   for host in &req.hosts {
-    if world.routes.get(host).is_none_or(|r| r.spec.sso.is_none()) {
+    if world
+      .routes
+      .get(host)
+      .and_then(|r| r.spec.sso.as_ref())
+      .is_none_or(|s| !s.gated())
+    {
       return Err(
         ApiError::invalid(format!("域名 {host} 没开门禁")).into(),
       );

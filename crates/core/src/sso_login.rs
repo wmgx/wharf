@@ -98,9 +98,27 @@ pub fn validate(host: &str, sso: &SsoSpec) -> Result<(), ApiError> {
       "只有 login 方式才能写登录步骤，login 方式必须有登录步骤",
     ));
   }
+  crate::oidc::validate(host, sso)?;
+  if sso.public
+    && (!matches!(sso.mode, SsoMode::Login | SsoMode::Oidc)
+      || sso.trust_internal
+      || !sso.skip_paths.is_empty())
+  {
+    return Err(fail(
+      "公开站点只能用 login 或 oidc 方式，也不需要排除路径和组网内免登录",
+    ));
+  }
   let Some(login) = &sso.login else {
     return Ok(());
   };
+  if login.entry.as_deref().is_some_and(|e| {
+    !e.starts_with('/')
+      || e.starts_with("//")
+      || e.starts_with("/_wharf/")
+      || e.contains(['\\', '\r', '\n'])
+  }) {
+    return Err(fail("entry 要写成站内路径，例如 /admin/"));
+  }
   if !(1..=5).contains(&login.steps.len())
     || !(1..=8).contains(&login.write.len())
     || !(1..=720).contains(&login.ttl_hours)
@@ -681,6 +699,17 @@ mod tests {
       )
       .unwrap(),
       "{{csrf}}"
+    );
+  }
+  #[test]
+  fn public_only_with_login() {
+    let sso = |mode: &str, entry: &str| -> SsoSpec {
+      serde_json::from_value(serde_json::json!({"mode":mode,"public":true,"login":(mode=="login").then(||serde_json::json!({"steps":[{"path":"/login"}],"write":[{"cookies":"all"}],"entry":entry}))})).unwrap()
+    };
+    validate("a.example.test", &sso("login", "/admin/")).unwrap();
+    assert!(validate("a.example.test", &sso("gate", "/")).is_err());
+    assert!(
+      validate("a.example.test", &sso("login", "//evil")).is_err()
     );
   }
   #[test]

@@ -9,6 +9,7 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import { Input } from "@/components/ui/input";
 import type { SessionRow, TotpView } from "@/types.gen";
 import type { GateKeyView, RouteView } from "@/types";
+import { Oidc } from "./oidc";
 
 type Mode = "begin" | "recovery" | "disable";
 type Pending = { secret: string; uri: string; qr_svg: string };
@@ -29,6 +30,7 @@ export function Security() {
     </Panel>}
     <Sessions />
     <GateKeys />
+    <Oidc />
     {mode && <TotpDialog mode={mode} onClose={() => { setMode(null); refresh(); }} onChanged={refresh} />}
   </>;
 }
@@ -167,7 +169,7 @@ function GateKeys() {
         <Field label="名字" htmlFor="gate-key-name"><Input id="gate-key-name" value={name} disabled={editing !== "new"} onChange={(e) => setName(toName(e.target.value))} /></Field>
         <Field label="能进的域名">
           <div className="grid gap-2">{hosts.map((h) => <div key={h} className="flex min-w-0 items-center gap-2 text-sm"><span className="min-w-0 flex-1 break-all">{h}</span><Button variant="ghost" size="sm" onClick={() => setHosts(hosts.filter((v) => v !== h))}>移除</Button></div>)}</div>
-          <Picker value="" placeholder="添加域名" options={routes.filter((r) => r.spec.sso && !hosts.includes(r.spec.hostname)).map((r) => ({ value: r.spec.hostname, label: r.spec.hostname }))} onChange={(h) => setHosts([...hosts, h])} />
+          <Picker value="" placeholder="添加域名" options={routes.filter((r) => r.spec.sso && !r.spec.sso.public && !hosts.includes(r.spec.hostname)).map((r) => ({ value: r.spec.hostname, label: r.spec.hostname }))} onChange={(h) => setHosts([...hosts, h])} />
         </Field>
         <ErrorNote error={failure} />
         <DialogFooter><Button variant="ghost" onClick={() => setEditing(null)}>取消</Button><Button disabled={busy || !name || !hosts.length || (editing === "new" && data?.some((k) => k.name === name))} onClick={save}>{busy ? "保存中…" : "保存"}</Button></DialogFooter>

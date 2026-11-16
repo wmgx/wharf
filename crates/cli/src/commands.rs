@@ -69,6 +69,63 @@ async fn dispatch(
 ) -> CliResult<()> {
   match command {
     Command::Login { .. } | Command::Schema { .. } => unreachable!(),
+    Command::Sso(crate::SsoCmd::Oidc { hostname }) => {
+      let mut view: wharf_api_types::view::OidcView =
+        c.get("/api/oidc").await?;
+      if let Some(host) = hostname {
+        let host = host.trim().to_ascii_lowercase();
+        view.clients.retain(|c| c.client_id == host);
+        if view.clients.is_empty() {
+          return Err(
+            ApiError::not_found(format!("域名 {host} 没有用 oidc 方式"))
+              .suggest(format!(
+                "wharf route sso {host} --mode oidc --redirect <回调路径>"
+              ))
+              .into(),
+          );
+        }
+      }
+      out(j, &view, |v| {
+        println!(
+          "issuer：{}",
+          v.issuer
+            .as_deref()
+            .unwrap_or("不可用（控制面没有对外 https 地址）")
+        );
+        if let Some(d) = &v.discovery {
+          println!("发现地址：{d}");
+        }
+        println!(
+          "用户：{}  邮箱：{}",
+          v.username,
+          v.email.as_deref().unwrap_or("没设")
+        );
+        for client in &v.clients {
+          println!(
+            "{}  密钥 {}{}",
+            client.client_id,
+            client.secret_ref,
+            if client.public { "  公开站点" } else { "" }
+          );
+          for uri in &client.redirect_uris {
+            println!("    回调 {uri}");
+          }
+        }
+      });
+      Ok(())
+    }
+    Command::Sso(crate::SsoCmd::Email { email, clear }) => {
+      let _: serde_json::Value = c
+        .put(
+          "/api/oidc/settings",
+          &wharf_api_types::view::OidcSettingsRequest {
+            email: if clear { None } else { email },
+          },
+        )
+        .await?;
+      out(j, &json!({"ok": true}), |_| println!("已保存"));
+      Ok(())
+    }
     Command::Sso(crate::SsoCmd::Test { hostname }) => {
       let result: wharf_api_types::view::SsoTestResult = c
         .post(
@@ -2503,6 +2560,13 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
                   == wharf_api_types::spec::SsoMode::Header)
               {
                 "（门禁 · 传用户名）"
+              } else if r.spec.sso.as_ref().is_some_and(|s| {
+                s.mode == wharf_api_types::spec::SsoMode::Oidc
+              }) {
+                "（OIDC 登录）"
+              } else if r.spec.sso.as_ref().is_some_and(|s| s.public)
+              {
+                "（公开 · 代登录入口）"
               } else if r.spec.sso.is_some() {
                 "（门禁）"
               } else {
@@ -2579,6 +2643,8 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
       no_trust_internal,
       header,
       file,
+      public,
+      redirect,
       apply,
     } => {
       let mut spec = c
@@ -2596,14 +2662,27 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
             "{}",
             sso
               .as_ref()
-              .map(|s| format!(
-                "门禁：已开启{}",
-                if s.skip_paths.is_empty() {
-                  String::new()
-                } else {
-                  format!("，排除 {}", s.skip_paths.join("、"))
-                }
-              ))
+              .map(|s| if s.mode == wharf_api_types::spec::SsoMode::Oidc {
+                format!(
+                  "用 Wharf 账号登录（OIDC）{}，看接入信息：wharf sso oidc {}",
+                  if s.public { "，公开站点" } else { "，加门禁" },
+                  spec.hostname
+                )
+              } else if s.public {
+                format!(
+                  "公开站点，代登录入口：https://{}/_wharf/login",
+                  spec.hostname
+                )
+              } else {
+                format!(
+                  "门禁：已开启{}",
+                  if s.skip_paths.is_empty() {
+                    String::new()
+                  } else {
+                    format!("，排除 {}", s.skip_paths.join("、"))
+                  }
+                )
+              })
               .unwrap_or_else(|| "门禁：没开".into())
           )
         });
@@ -2638,7 +2717,27 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
             }
             None
           },
-          mode: if mode == "login" {
+          oidc: if mode == "oidc" {
+            if redirect.is_empty() {
+              return Err(
+                ApiError::invalid("oidc 方式至少要一个 --redirect")
+                  .with_hint("回调路径看应用的 OIDC 文档，例如 Grafana 是 /login/generic_oauth")
+                  .into(),
+              );
+            }
+            Some(wharf_api_types::spec::OidcClientSpec {
+              redirect_uris: redirect,
+            })
+          } else if !redirect.is_empty() {
+            return Err(
+              ApiError::invalid("只有 oidc 方式才能用 --redirect").into(),
+            );
+          } else {
+            None
+          },
+          mode: if mode == "oidc" {
+            wharf_api_types::spec::SsoMode::Oidc
+          } else if mode == "login" {
             wharf_api_types::spec::SsoMode::Login
           } else if mode == "header" {
             wharf_api_types::spec::SsoMode::Header
@@ -2646,10 +2745,12 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
             wharf_api_types::spec::SsoMode::Gate
           },
           header,
-          trust_internal: !no_trust_internal
+          trust_internal: !public
+            && !no_trust_internal
             && (trust_internal
               || spec.sso.as_ref().is_some_and(|s| s.trust_internal)),
           skip_paths: skip,
+          public,
         });
       changes(c, vec![Change::UpsertRoute { spec }], apply, j).await
     }

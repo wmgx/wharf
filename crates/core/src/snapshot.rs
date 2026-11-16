@@ -103,14 +103,17 @@ pub async fn load(db: &Db) -> Result<Snapshot, ApiError> {
 
 async fn load_inner(db: &Db) -> Result<Snapshot, ApiError> {
   db.call(|c| {
+    let world = World::from_rows(db::all_resources(c)?)?;
+    let secrets =
+      crate::oidc::with_client_secrets(&world, &db::secrets(c)?);
     Ok(
       Snapshot {
-        world: World::from_rows(db::all_resources(c)?)?,
+        world,
         agents: db::agents(c)?,
         accounts: db::accounts(c)?,
         sso_login: db::settings_with_prefix(c, "sso.login.")?,
         owned: db::owned_records(c)?,
-        secrets: db::secrets(c)?,
+        secrets,
         deployed: db::deployed_servers(c)?,
         applied: db::applied(c)?,
         ops: db::service_ops(c)?,
@@ -212,7 +215,7 @@ pub fn service_resolved(
     &row.spec,
     &row.host_ports,
     &net.bind_ips(&row.spec.server),
-    Some(secrets),
+    Some(&crate::oidc::with_client_secrets(world, secrets)),
   )?;
   let resolved = crate::refs::resolve(&resolved, name, world, net)?;
   let hash = render::hash(&resolved);
@@ -228,7 +231,11 @@ pub fn service_trial(
   let row = world.services.get(name).ok_or_else(|| {
     ApiError::not_found(format!("服务 {name} 不存在"))
   })?;
-  let trial = render::trial_compose(name, &row.spec, Some(secrets))?;
+  let trial = render::trial_compose(
+    name,
+    &row.spec,
+    Some(&crate::oidc::with_client_secrets(world, secrets)),
+  )?;
   crate::refs::resolve(&trial, name, world, net)
 }
 
@@ -400,6 +407,7 @@ pub fn gateway_render(
           .map(|u| format!("http://{u}"))
           .unwrap_or_else(|| login.clone());
         Ok(render::Gate {
+          public: sso.public,
           app_login: sso.mode
             == wharf_api_types::spec::SsoMode::Login,
           user_header: (sso.mode

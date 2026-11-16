@@ -595,6 +595,30 @@ pub struct SsoSpec {
   /// 不过门禁的路径前缀。
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub skip_paths: Vec<String>,
+  /// 公开站点：不加门禁，所有人都能访问。login 方式只提供 `/_wharf/login`
+  /// 入口，主人从入口登录 Wharf 后代登录进应用；oidc 方式由应用自己决定哪里要登录。
+  /// 只能和 login、oidc 方式一起用。
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub public: bool,
+  /// oidc 方式：应用用 Wharf 账号登录（Wharf 当 OIDC 身份提供方）。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub oidc: Option<OidcClientSpec>,
+}
+/// OIDC 客户端。client_id 就是域名，密钥由 Wharf 生成，
+/// 服务环境变量里用 `[[OIDC_<域名大写，. 和 - 换成 _>]]` 引用。
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct OidcClientSpec {
+  /// 登录完成后的回调地址。`/` 开头的是本域名下的路径；
+  /// 也可以写本域名的完整 https 地址，或手机 app 的自定义协议（如 `app.immich:///oauth-callback`）。
+  pub redirect_uris: Vec<String>,
+}
+impl SsoSpec {
+  /// 网关是否挡住没登录的访问。
+  pub fn gated(&self) -> bool {
+    !self.public
+  }
 }
 #[derive(
   Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
@@ -604,6 +628,7 @@ pub enum SsoMode {
   Gate,
   Header,
   Login,
+  Oidc,
 }
 
 /// 网关到服务的走法偏好。
@@ -845,6 +870,9 @@ pub struct LoginSpec {
   pub check: Option<LoginStep>,
   #[serde(default = "login_ttl")]
   pub ttl_hours: u16,
+  /// 代登录完成后跳到的路径，例如后台 `/ghost/`；不填就是 `/`。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub entry: Option<String>,
 }
 fn login_ttl() -> u16 {
   24

@@ -58,6 +58,7 @@ mod migrate;
 mod monitor;
 mod network;
 mod notify;
+mod oidc;
 mod oom;
 mod ping;
 mod pins;
@@ -183,6 +184,9 @@ async fn main() -> anyhow::Result<()> {
     edge_syncing: Default::default(),
   });
   gate::init(&state)
+    .await
+    .map_err(|e| anyhow::anyhow!(e.message))?;
+  oidc::init(&state)
     .await
     .map_err(|e| anyhow::anyhow!(e.message))?;
   apply::recover(&state).await?;

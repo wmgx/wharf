@@ -10,6 +10,9 @@ pub fn web_schema() -> Value {
   let _ = generator.subschema_for::<view::SsoTestResult>();
   let _ = generator.subschema_for::<view::GateKeyView>();
   let _ = generator.subschema_for::<view::GateKeyRequest>();
+  let _ = generator.subschema_for::<view::OidcView>();
+  let _ = generator.subschema_for::<view::OidcSettingsRequest>();
+  let _ = generator.subschema_for::<view::OidcSecretView>();
   let _ = generator.subschema_for::<spec::PrivateNetwork>();
   let _ = generator.subschema_for::<view::CoreAddress>();
   let _ = generator.subschema_for::<view::CoreAddresses>();
