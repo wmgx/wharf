@@ -33,8 +33,10 @@ export function AccessProtection({ route, onClose }: { route: RouteView; onClose
         {gateway?.spec.kind === "cloudflare_tunnel" && <p className="text-sm text-muted-foreground">隧道入口暂不支持访问保护</p>}
         {protection === "basic" && <AuthFields user={user} password={password} onUser={setUser} onPassword={setPassword} />}
         {protection === "gate" && !route.spec.redirect && <>
-        <Picker value={gateMode} options={[{ value: "gate", label: "只挡一道门" }, { value: "header", label: "传用户名给应用" }, ...(route.spec.sso?.mode === "login" ? [{ value: "login", label: "替我登录应用" }] : [])]} onChange={(v) => setGateMode(v as typeof gateMode)} />
-        {gateMode === "header" && <Field label="请求头" htmlFor="gate-header"><Input id="gate-header" value={userHeader} onChange={(e) => setUserHeader(e.target.value)} /><p className="text-xs text-muted-foreground">应用要配置成信任这个请求头。</p></Field>}
+        <Field label="通过门禁后" htmlFor="gate-mode" help={gateMode === "gate" ? "仅检查 Wharf 登录，不替你登录应用。应用如果还有登录页，需要另外登录。" : gateMode === "header" ? "将 Wharf 用户名传给应用；应用需要支持并信任这个请求头。" : "按已配置的登录步骤替你登录应用。"}>
+          <Picker id="gate-mode" value={gateMode} options={[{ value: "gate", label: "仅检查 Wharf 登录" }, { value: "header", label: "向应用传递用户名" }, ...(route.spec.sso?.mode === "login" ? [{ value: "login", label: "自动登录应用" }] : [])]} onChange={(v) => setGateMode(v as typeof gateMode)} />
+        </Field>
+        {gateMode === "header" && <Field label="请求头" htmlFor="gate-header"><Input id="gate-header" value={userHeader} onChange={(e) => setUserHeader(e.target.value)} /></Field>}
         <Field label="不用登录的路径（每行一个，可以不填）" htmlFor="gate-skip">
           <Textarea id="gate-skip" value={skipPaths} onChange={(e) => setSkipPaths(e.target.value)} />
         </Field>
