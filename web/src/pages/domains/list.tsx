@@ -7,6 +7,7 @@ import { CertDays, Lamps, diagnosisOf, routeTone } from "@/components/health";
 import { hopOf } from "@/components/hop";
 import { Panel, Tip } from "@/components/kit";
 import { WildcardHints } from "@/components/wildcard-hints";
+import { Probe } from "@/components/probe";
 import { OpMenu, routeOps } from "@/components/ops";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -69,7 +70,7 @@ export function DomainList({ status, add }: { status: Status; add: React.ReactNo
                 {route?.on_backup && <Badge variant="destructive">正走备用</Badge>}
               </TableCell>
               <TableCell>
-                {route ? <Lamps d={d} /> : "-"}
+                {route?.probe ? <Probe probe={route.probe} /> : route ? <Lamps d={d} /> : "-"}
               </TableCell>
               <TableCell>
                 {app ? <Link to={`/edge/${encodeURIComponent(app)}`} className="inline-flex items-center gap-1 hover:underline" onClick={(e) => e.stopPropagation()}>
