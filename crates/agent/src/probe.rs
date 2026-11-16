@@ -175,6 +175,76 @@ pub async fn http(
   }
 }
 
+/// 代登录：不跟随跳转，不记录可能含凭据的请求、应答或底层错误。
+pub async fn fetch(
+  job: wharf_api_types::agent::HttpFetch,
+) -> wharf_api_types::agent::HttpFetchResult {
+  use wharf_api_types::agent::HttpFetchResult;
+  let result = async {
+    let url =
+      reqwest::Url::parse(&job.url).map_err(|_| "请求地址无效")?;
+    if url.scheme() != "http"
+      || !url.username().is_empty()
+      || url.password().is_some()
+    {
+      return Err("代登录只支持 http 上游");
+    }
+    let method = match job.method.as_str() {
+      "GET" | "POST" | "PUT" | "PATCH" | "DELETE" => {
+        reqwest::Method::from_bytes(job.method.as_bytes())
+          .map_err(|_| "请求方法无效")?
+      }
+      _ => return Err("请求方法无效"),
+    };
+    let client = reqwest::Client::builder()
+      .no_proxy()
+      .redirect(reqwest::redirect::Policy::none())
+      .user_agent("wharf-sso")
+      .timeout(Duration::from_secs(job.timeout_secs.clamp(1, 30)))
+      .build()
+      .map_err(|_| "创建请求失败")?;
+    let mut request = client.request(method, url);
+    for (name, value) in job.headers {
+      request = request.header(name, value);
+    }
+    if let Some(body) = job.body {
+      request = request.body(body);
+    }
+    let mut response =
+      request.send().await.map_err(|_| "请求失败或超时")?;
+    let status = response.status().as_u16();
+    let headers = response
+      .headers()
+      .iter()
+      .filter_map(|(k, v)| {
+        Some((k.to_string(), v.to_str().ok()?.to_string()))
+      })
+      .collect();
+    let mut body = Vec::new();
+    while body.len() < 256 * 1024 {
+      let Some(chunk) =
+        response.chunk().await.map_err(|_| "读取应答失败或超时")?
+      else {
+        break;
+      };
+      body.extend_from_slice(
+        &chunk[..chunk.len().min(256 * 1024 - body.len())],
+      );
+    }
+    Ok(HttpFetchResult {
+      status: Some(status),
+      headers,
+      body: String::from_utf8_lossy(&body).into_owned(),
+      error: None,
+    })
+  }
+  .await;
+  result.unwrap_or_else(|e| HttpFetchResult {
+    error: Some(e.into()),
+    ..Default::default()
+  })
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;

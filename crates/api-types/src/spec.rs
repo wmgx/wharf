@@ -551,6 +551,9 @@ pub struct RouteSpec {
   /// DNS 自动切到它，主网关恢复后切回。caddy 备用入口在切过去后才申请证书。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub backup_gateway: Option<String>,
+  /// 门禁。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub sso: Option<SsoSpec>,
   /// 登录保护（P3）。
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub auth: bool,
@@ -576,6 +579,31 @@ pub struct RouteSpec {
   /// 临时分享：到这个时间（毫秒时间戳）以后，网关直接断开这个域名的请求；路由和 DNS 记录留着，等人删除。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub expires_at: Option<i64>,
+}
+
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct SsoSpec {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub login: Option<LoginSpec>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub header: Option<String>,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub trust_internal: bool,
+  pub mode: SsoMode,
+  /// 不过门禁的路径前缀。
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub skip_paths: Vec<String>,
+}
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum SsoMode {
+  Gate,
+  Header,
+  Login,
 }
 
 /// 网关到服务的走法偏好。
@@ -797,4 +825,93 @@ pub enum Change {
   RemoveEdgeApp {
     name: String,
   },
+}
+
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct LoginSpec {
+  pub steps: Vec<LoginStep>,
+  pub write: Vec<LoginWrite>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub check: Option<LoginStep>,
+  #[serde(default = "login_ttl")]
+  pub ttl_hours: u16,
+}
+fn login_ttl() -> u16 {
+  24
+}
+fn login_method() -> String {
+  "GET".into()
+}
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct LoginStep {
+  #[serde(default = "login_method")]
+  pub method: String,
+  pub path: String,
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub headers: BTreeMap<String, String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub form: Option<BTreeMap<String, String>>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub json: Option<serde_json::Value>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub body: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub expect: Option<Vec<u16>>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub extract: Vec<Extract>,
+}
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(tag = "from", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Extract {
+  Json { name: String, path: String },
+  Body { name: String, between: [String; 2] },
+  Header { name: String, header: String },
+  Cookie { name: String, cookie: String },
+}
+impl Extract {
+  pub fn name(&self) -> &str {
+    match self {
+      Self::Json { name, .. }
+      | Self::Body { name, .. }
+      | Self::Header { name, .. }
+      | Self::Cookie { name, .. } => name,
+    }
+  }
+}
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum LoginWrite {
+  Cookies(AllCookies),
+  Cookie {
+    name: String,
+    value: String,
+    #[serde(default = "cookie_http_only")]
+    http_only: bool,
+  },
+  LocalStorage {
+    key: String,
+    value: String,
+  },
+  SessionStorage {
+    key: String,
+    value: String,
+  },
+}
+fn cookie_http_only() -> bool {
+  true
+}
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum AllCookies {
+  All,
 }

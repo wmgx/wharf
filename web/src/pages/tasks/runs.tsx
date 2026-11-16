@@ -17,7 +17,7 @@ export function Runs({ task }: { task: TaskView }) {
   const ctx = useOpCtx();
   const nav = useNavigate();
   const run = taskOps.find((op) => op.id === "run")!;
-  const triggers: Record<string, string> = { schedule: "定时", scheduled: "定时", manual: "手动", ping: "报到", late: "迟到" };
+  const triggers: Record<string, string> = { schedule: "定时", scheduled: "定时", manual: "手动", hook: "网址", ping: "报到", late: "迟到" };
   return <>
     <ErrorNote error={error} />
     {data?.length === 0 ? <Empty action={task.spec.kind !== "ping" ? <Button onClick={() => run.run(task, { ...ctx, nav })}>立即运行</Button> : undefined}>
@@ -28,6 +28,7 @@ export function Runs({ task }: { task: TaskView }) {
           <TableRow>
             <TableHead>开始</TableHead>
             <TableHead>耗时</TableHead>
+            <TableHead>内存</TableHead>
             <TableHead>结果</TableHead>
             <TableHead>退出码</TableHead>
             <TableHead>触发</TableHead>
@@ -42,6 +43,7 @@ export function Runs({ task }: { task: TaskView }) {
               <TableCell>
                 {r.ended_at ? `${Math.round((new Date(r.ended_at).getTime() - new Date(r.started_at).getTime()) / 1000)} 秒` : "-"}
               </TableCell>
+              <TableCell>{r.mem_peak == null ? "—" : `${(r.mem_peak / 1024 / 1024).toFixed(1)} MB`}</TableCell>
               <TableCell>
                 <StatusBadge tone={STATUS[r.status][0]}>
                   {r.status === "running" && <LoaderCircleIcon className="size-3 animate-spin" />}{STATUS[r.status][1]}
@@ -55,7 +57,7 @@ export function Runs({ task }: { task: TaskView }) {
               </TableCell>
             </TableRow>
             {open === r.id && <TableRow>
-              <TableCell colSpan={5}>
+              <TableCell colSpan={6}>
                 <CodeBlock className="max-h-80 whitespace-pre-wrap break-all">
                   {r.output || "（没有输出）"}
                 </CodeBlock>

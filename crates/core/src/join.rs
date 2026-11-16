@@ -97,6 +97,38 @@ async fn candidates(s: &AppState) -> Result<CoreAddresses, ApiError> {
   })
 }
 
+/// 同步入口渲染和加入地址共用控制面路由识别。
+pub fn route_urls(
+  world: &World,
+  net: &Net,
+  port: u16,
+) -> Vec<String> {
+  let own = if_addrs::get_if_addrs()
+    .unwrap_or_default()
+    .into_iter()
+    .filter(|i| !is_bridge(&i.name))
+    .filter_map(|i| match i.ip() {
+      IpAddr::V4(ip) if !ip.is_loopback() => Some(ip.to_string()),
+      _ => None,
+    })
+    .collect();
+  let server = core_server(net, &own);
+  core_routes(world, net, server.as_deref(), &own, port)
+    .into_iter()
+    .map(|h| {
+      let scheme = world
+        .route_gateway(&world.routes[&h].spec)
+        .and_then(|g| world.gateways.get(g))
+        .filter(|g| {
+          g.spec.tls == wharf_api_types::spec::GatewayTls::Off
+        })
+        .map(|_| "http")
+        .unwrap_or("https");
+      format!("{scheme}://{h}")
+    })
+    .collect()
+}
+
 /// 控制面所在的服务器：哪台的 agent 上报了控制面网卡上的地址。
 fn core_server(net: &Net, own: &BTreeSet<String>) -> Option<String> {
   let hit = |ip: &String| own.contains(ip);

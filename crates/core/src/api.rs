@@ -56,6 +56,26 @@ pub(crate) type ApiResult<T> = Result<Json<T>, AppError>;
 
 pub fn router(state: Arc<AppState>) -> Router {
   Router::new()
+    .route("/gate/key", get(crate::gate::check_key))
+    .route(
+      "/api/routes/{hostname}/sso/test",
+      post(crate::sso_login::test),
+    )
+    .route("/api/gate/keys", get(crate::gate::list_keys))
+    .route(
+      "/api/gate/keys/{name}",
+      axum::routing::put(crate::gate::put_key)
+        .delete(crate::gate::remove_key),
+    )
+    .route("/gate/login", get(crate::gate::login))
+    .route("/gate/refresh", axum::routing::any(crate::gate::refresh))
+    .route("/gate/site/login", get(crate::gate::site_login))
+    .route("/gate/site/gate", get(crate::gate::site_gate))
+    .route("/gate/site/logout", get(crate::gate::site_logout))
+    .route(
+      "/gate/site/{*path}",
+      get(|| async { StatusCode::NOT_FOUND }),
+    )
     .route("/healthz", get(|| async { "ok" }))
     .route(
       "/ping/{token}",
@@ -64,6 +84,10 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route(
       "/ping/{token}/fail",
       get(crate::ping::fail).post(crate::ping::fail),
+    )
+    .route(
+      "/hook/{token}",
+      get(crate::tasks::hook).post(crate::tasks::hook),
     )
     .route("/agent/ws", get(hub::agent_ws))
     .route(
@@ -79,6 +103,20 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route("/api/setup", post(crate::login::setup))
     .route("/api/login", post(crate::login::login))
     .route("/api/logout", post(crate::login::logout))
+    .route("/api/sessions", get(crate::sessions::list))
+    .route(
+      "/api/sessions/{id}",
+      axum::routing::delete(crate::sessions::revoke),
+    )
+    .route(
+      "/api/sessions/revoke-others",
+      post(crate::sessions::revoke_others),
+    )
+    .route("/api/totp", get(crate::totp::show))
+    .route("/api/totp/begin", post(crate::totp::begin))
+    .route("/api/totp/enable", post(crate::totp::enable))
+    .route("/api/totp/disable", post(crate::totp::disable))
+    .route("/api/totp/recovery", post(crate::totp::recovery))
     .route(
       "/agent/uploads/{sha256}",
       get(crate::uploads::download)
@@ -129,6 +167,15 @@ pub fn router(state: Arc<AppState>) -> Router {
     )
     .route("/api/servers/{name}/prune", post(crate::prune::prune_now))
     .route("/api/servers/{name}/disk", get(crate::disk::show))
+    .route("/api/servers/{name}/exposure", get(crate::exposure::show))
+    .route(
+      "/api/servers/{name}/exposure/refresh",
+      post(crate::exposure::refresh_now),
+    )
+    .route(
+      "/api/servers/{name}/exposure/ack",
+      post(crate::exposure::ack),
+    )
     .route(
       "/api/servers/{name}/host-units",
       get(crate::host_units::list),
@@ -291,7 +338,9 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route("/api/tasks", get(crate::tasks::list))
     .route(
       "/api/tasks/{name}",
-      put(crate::tasks::put).delete(crate::tasks::remove),
+      get(crate::tasks::get)
+        .put(crate::tasks::put)
+        .delete(crate::tasks::remove),
     )
     .route("/api/tasks/{name}/run", post(crate::tasks::run_now))
     .route("/api/tasks/{name}/runs", get(crate::tasks::runs))

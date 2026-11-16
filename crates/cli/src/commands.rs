@@ -69,6 +69,48 @@ async fn dispatch(
 ) -> CliResult<()> {
   match command {
     Command::Login { .. } | Command::Schema { .. } => unreachable!(),
+    Command::Sso(crate::SsoCmd::Test { hostname }) => {
+      let result: wharf_api_types::view::SsoTestResult = c
+        .post(
+          &format!("/api/routes/{}/sso/test", seg(&hostname)),
+          &json!({}),
+        )
+        .await?;
+      out(j, &result, |r| {
+        for step in r.steps.iter().chain(r.check.iter()) {
+          println!(
+            "{} {} {} {:?} {:?} {}ms{}",
+            step.number,
+            step.method,
+            step.path,
+            step.status,
+            step.extracted,
+            step.ms,
+            step
+              .error
+              .as_ref()
+              .map(|e| format!("：{e}"))
+              .unwrap_or_default()
+          );
+        }
+        println!(
+          "{}",
+          if r.ok {
+            "登录成功"
+          } else {
+            r.steps
+              .iter()
+              .chain(r.check.iter())
+              .find_map(|s| s.error.as_deref())
+              .unwrap_or("登录失败")
+          }
+        );
+      });
+      if !result.ok {
+        return Err(CliError::Exit(1));
+      }
+      Ok(())
+    }
     Command::Status => {
       let s: Status = c.get("/api/status").await?;
       out(j, &s, print::status);
@@ -212,6 +254,7 @@ async fn dispatch(
         );
       }
       let spec = RouteSpec {
+        sso: None,
         hostname,
         service: name,
         port,
@@ -360,6 +403,49 @@ async fn dispatch(
         }
         None if j => print::json(&fleet),
         None => print!("{text}"),
+      }
+      Ok(())
+    }
+    Command::Gate(crate::GateCmd::Key(cmd)) => {
+      match cmd {
+        crate::GateKeyCmd::List => {
+          let rows: Vec<wharf_api_types::view::GateKeyView> =
+            c.get("/api/gate/keys").await?;
+          out(j, &rows, |rows| {
+            for row in rows {
+              println!(
+                "{}\t{}\t{}",
+                row.name,
+                row.hosts.join("、"),
+                row
+                  .last_used_at
+                  .map(|t| t.to_string())
+                  .unwrap_or_else(|| "没用过".into())
+              );
+            }
+          });
+        }
+        crate::GateKeyCmd::Add { name, hosts } => {
+          let result: Value = c
+            .put(
+              &format!("/api/gate/keys/{}", seg(&name)),
+              &wharf_api_types::view::GateKeyRequest { hosts },
+            )
+            .await?;
+          out(j, &result, |v| {
+            if let Some(key) = v["key"].as_str() {
+              println!("{key}");
+            } else {
+              println!("已修改域名");
+            }
+          });
+        }
+        crate::GateKeyCmd::Rm { name } => {
+          let result: Value = c
+            .delete(&format!("/api/gate/keys/{}", seg(&name)))
+            .await?;
+          out(j, &result, |_| println!("已删除"));
+        }
       }
       Ok(())
     }
@@ -762,6 +848,74 @@ async fn server(
   j: bool,
 ) -> CliResult<()> {
   match cmd {
+    ServerCmd::Exposure {
+      name,
+      refresh,
+      ack,
+      unack,
+    } => {
+      use wharf_api_types::view::{ExposureView, risk_text};
+      let base = format!("/api/servers/{}/exposure", seg(&name));
+      if refresh {
+        let _: ExposureView =
+          c.post(&format!("{base}/refresh"), &json!({})).await?;
+      }
+      if let Some(port) = ack.as_ref().or(unack.as_ref()) {
+        let _: ExposureView = c
+          .post(
+            &format!("{base}/ack"),
+            &json!({"port":port,"acked":ack.is_some()}),
+          )
+          .await?;
+      }
+      let v: ExposureView = c.get(&base).await?;
+      out(j, &v, |v| {
+        if v.outdated {
+          println!("agent 版本太旧，没有数据");
+          return;
+        }
+        if v.checked_at.is_none() {
+          println!("还没有检查过");
+          return;
+        }
+        println!("本机监听\n协议/端口  地址  归属  名字  状态");
+        for p in &v.ports {
+          println!(
+            "{}/{}  {}  {}  {}  {}",
+            p.proto,
+            p.port,
+            p.addr,
+            p.owner,
+            p.name,
+            if p.expected {
+              "预期"
+            } else if p.acked {
+              "已确认"
+            } else {
+              "未确认"
+            }
+          );
+        }
+        println!("权限较大的容器\n容器  所属  风险");
+        for r in &v.risks {
+          println!(
+            "{}  {}  {}",
+            r.container,
+            if r.own {
+              "Wharf 自身"
+            } else {
+              r.service.as_deref().unwrap_or("未纳管")
+            },
+            r.risks
+              .iter()
+              .map(|c| risk_text(c))
+              .collect::<Vec<_>>()
+              .join("、")
+          );
+        }
+      });
+      Ok(())
+    }
     ServerCmd::List => {
       let v: Vec<ServerView> = c.get("/api/servers").await?;
       out(j, &v, |v| {
@@ -1367,7 +1521,19 @@ async fn service(
     ServiceCmd::Show { name } => {
       let v: ServiceView =
         c.get(&format!("/api/services/{}", seg(&name))).await?;
-      out(j, &v, pretty);
+      out(j, &v, |v| {
+        pretty(v);
+        if !v.risks.is_empty() {
+          println!(
+            "风险：{}",
+            v.risks
+              .iter()
+              .map(|r| wharf_api_types::view::risk_text(r))
+              .collect::<Vec<_>>()
+              .join("、")
+          );
+        }
+      });
       Ok(())
     }
     ServiceCmd::Logs {
@@ -2315,6 +2481,19 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
                 }
               })
               .unwrap_or_default()
+              + if r
+                .spec
+                .sso
+                .as_ref()
+                .is_some_and(|s| s.mode
+                  == wharf_api_types::spec::SsoMode::Header)
+              {
+                "（门禁 · 传用户名）"
+              } else if r.spec.sso.is_some() {
+                "（门禁）"
+              } else {
+                ""
+              }
           );
           for p in &r.spec.paths {
             println!(
@@ -2353,6 +2532,7 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
         });
       let guard = existing.filter(|_| redirect.is_none());
       let spec = RouteSpec {
+        sso: None,
         expires_at: None,
         internal,
         rate_limit: guard.as_ref().and_then(|r| r.spec.rate_limit),
@@ -2375,6 +2555,88 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
           .map(|p| parse_path_route(p))
           .collect::<Result<_, _>>()?,
       };
+      changes(c, vec![Change::UpsertRoute { spec }], apply, j).await
+    }
+    RouteCmd::Sso {
+      name,
+      mode,
+      skip,
+      trust_internal,
+      no_trust_internal,
+      header,
+      file,
+      apply,
+    } => {
+      let mut spec = c
+        .get::<Vec<RouteView>>("/api/routes")
+        .await?
+        .into_iter()
+        .find(|r| r.spec.hostname == name.trim().to_ascii_lowercase())
+        .ok_or_else(|| {
+          ApiError::not_found(format!("域名 {name} 不存在"))
+        })?
+        .spec;
+      let Some(mode) = mode else {
+        out(j, &spec.sso, |sso| {
+          println!(
+            "{}",
+            sso
+              .as_ref()
+              .map(|s| format!(
+                "门禁：已开启{}",
+                if s.skip_paths.is_empty() {
+                  String::new()
+                } else {
+                  format!("，排除 {}", s.skip_paths.join("、"))
+                }
+              ))
+              .unwrap_or_else(|| "门禁：没开".into())
+          )
+        });
+        return Ok(());
+      };
+      spec.sso =
+        (mode != "off").then_some(wharf_api_types::spec::SsoSpec {
+          login: if mode == "login" {
+            let file = file.ok_or_else(|| {
+              ApiError::invalid("login 方式需要 --file")
+            })?;
+            let text = if file == "-" {
+              std::io::read_to_string(std::io::stdin())
+                .map_err(|_| ApiError::invalid("读取登录配置失败"))?
+            } else {
+              std::fs::read_to_string(file)
+                .map_err(|_| ApiError::invalid("读取登录配置失败"))?
+            };
+            let value: serde_json::Value =
+              serde_yaml_ng::from_str(&text).map_err(|_| {
+                ApiError::invalid("登录配置不是有效的 YAML 或 JSON")
+              })?;
+            Some(serde_json::from_value(value).map_err(|_| {
+              ApiError::invalid("登录配置字段不符合要求")
+            })?)
+          } else {
+            if file.is_some() {
+              return Err(
+                ApiError::invalid("只有 login 方式才能用 --file")
+                  .into(),
+              );
+            }
+            None
+          },
+          mode: if mode == "login" {
+            wharf_api_types::spec::SsoMode::Login
+          } else if mode == "header" {
+            wharf_api_types::spec::SsoMode::Header
+          } else {
+            wharf_api_types::spec::SsoMode::Gate
+          },
+          header,
+          trust_internal: !no_trust_internal
+            && (trust_internal
+              || spec.sso.as_ref().is_some_and(|s| s.trust_internal)),
+          skip_paths: skip,
+        });
       changes(c, vec![Change::UpsertRoute { spec }], apply, j).await
     }
     RouteCmd::Guard {

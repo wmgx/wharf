@@ -19,10 +19,10 @@ const TABS = ["overview", "runs", "settings"] as const;
 export function TaskDetail() {
   const { name = "" } = useParams();
   const actions = useActions();
-  const { data, error, refresh } = usePoll<TaskView[]>("/api/tasks", 10000);
+  const { data, error, refresh } = usePoll<TaskView>(`/api/tasks/${encodeURIComponent(name)}`, 10000);
   const [tab, setTab] = useTab(TABS, "overview");
   useEffect(() => { window.addEventListener("wharf:tasks", refresh); return () => window.removeEventListener("wharf:tasks", refresh); }, [refresh]);
-  const task = data?.find((t) => t.name === name);
+  const task = data;
   if (!data) return <>
     <ErrorNote error={error} />
     <Skeleton className="h-40 rounded-xl" />
@@ -50,7 +50,7 @@ export function TaskDetail() {
         <Runs task={task} />
       </TabsContent>
       <TabsContent value="settings" className="mt-4">
-        <TaskForm key={`${task.name}-${task.updated_at}`} task={task} taken={data.map((t) => t.name)} onSaved={() => refresh()} />
+        <TaskForm key={`${task.name}-${task.updated_at}`} task={task} taken={[task.name]} onSaved={() => refresh()} />
         <div className="mt-8 flex max-w-2xl items-center gap-3 rounded-xl border border-destructive/30 p-4">
           <span className="flex-1 text-sm">删除任务</span>
           <Button variant="destructive" size="sm" onClick={() => actions.removeTask(name)}>删除</Button>

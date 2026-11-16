@@ -1,0 +1,1045 @@
+//! 门禁凭据与一次性票据；页面会话仍是唯一的登录状态。
+use crate::{
+  api::AppError,
+  auth::{Auth, hash_token, new_token},
+  db::{self, Db, now_ms, sql_err},
+  state::AppState,
+};
+use axum::{
+  extract::{ConnectInfo, Path, Query, State},
+  http::{HeaderMap, header},
+  response::{IntoResponse, Response},
+};
+use base64::{
+  Engine,
+  engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+};
+use ed25519_dalek::{Signer, SigningKey};
+use hmac::{Hmac, Mac};
+use rusqlite::{OptionalExtension, params};
+use serde::Deserialize;
+use serde_json::json;
+use sha2::Sha256;
+use std::{
+  collections::BTreeMap,
+  sync::{Arc, LazyLock, Mutex, OnceLock},
+};
+use wharf_api_types::{
+  ApiError, validate_name,
+  view::{GateKeyRequest, GateKeyView, Perm},
+};
+
+const ACCESS_TTL: i64 = 600;
+// 同步渲染只读的启动参数和公钥，不保存私钥。
+static RENDER: OnceLock<(String, u16, Option<String>)> =
+  OnceLock::new();
+static TICKETS: LazyLock<Mutex<BTreeMap<String, Ticket>>> =
+  LazyLock::new(|| Mutex::new(BTreeMap::new()));
+struct Ticket {
+  host: String,
+  session_hash: String,
+  expires: i64,
+}
+
+fn seed(
+  c: &rusqlite::Connection,
+  name: &str,
+) -> Result<[u8; 32], ApiError> {
+  let text = match db::setting(c, name)? {
+    Some(text) => text,
+    None => {
+      let mut seed = [0; 32];
+      getrandom::fill(&mut seed)
+        .map_err(|_| ApiError::internal("随机数不可用"))?;
+      let text = hex::encode(seed);
+      db::set_setting(c, name, Some(&text))?;
+      text
+    }
+  };
+  hex::decode(text)
+    .ok()
+    .and_then(|b| b.try_into().ok())
+    .ok_or_else(|| ApiError::internal("门禁密钥格式不对"))
+}
+async fn key(db: &Db) -> Result<SigningKey, ApiError> {
+  db.call(|c| Ok(SigningKey::from_bytes(&seed(c, "gate.key")?)))
+    .await
+}
+async fn rt_key(db: &Db) -> Result<[u8; 32], ApiError> {
+  db.call(|c| seed(c, "gate.rt_key")).await
+}
+pub async fn init(s: &AppState) -> Result<(), ApiError> {
+  let public = public_b64(&key(&s.db).await?);
+  RENDER
+    .set((public, s.listen_port, s.public_url.clone()))
+    .map_err(|_| ApiError::internal("门禁重复初始化"))
+}
+pub fn render_context(
+  world: &crate::world::World,
+  net: &crate::render::Net,
+) -> (Option<String>, Option<String>) {
+  if !world.routes.values().any(|r| r.spec.sso.is_some()) {
+    return (None, None);
+  }
+  let Some((public, port, fallback)) = RENDER.get() else {
+    return (None, None);
+  };
+  let login = crate::join::route_urls(world, net, *port)
+    .into_iter()
+    .next()
+    .or_else(|| fallback.clone());
+  (Some(public.clone()), login)
+}
+pub fn is_core_host(
+  world: &crate::world::World,
+  net: &crate::render::Net,
+  host: &str,
+) -> bool {
+  RENDER.get().is_some_and(|(_, port, _)| {
+    crate::join::route_urls(world, net, *port)
+      .iter()
+      .any(|url| {
+        reqwest::Url::parse(url)
+          .ok()
+          .is_some_and(|u| u.host_str() == Some(host))
+      })
+  })
+}
+fn sign(key: &SigningKey, username: &str, now: i64) -> String {
+  sign_ttl(key, username, now, ACCESS_TTL)
+}
+fn sign_ttl(
+  key: &SigningKey,
+  username: &str,
+  now: i64,
+  ttl: i64,
+) -> String {
+  let header =
+    URL_SAFE_NO_PAD.encode(br#"{"alg":"EdDSA","typ":"JWT"}"#);
+  let claims = URL_SAFE_NO_PAD.encode(
+    json!({"iss":"wharf","sub":username,"iat":now,"exp":now+ttl})
+      .to_string(),
+  );
+  let raw = format!("{header}.{claims}");
+  format!(
+    "{raw}.{}",
+    URL_SAFE_NO_PAD.encode(key.sign(raw.as_bytes()).to_bytes())
+  )
+}
+fn public_b64(key: &SigningKey) -> String {
+  STANDARD.encode(key.verifying_key().to_bytes())
+}
+fn rt_sign(key: &[u8], hash: &str, exp: i64) -> String {
+  let raw = format!("{hash}.{exp}");
+  let mut mac = Hmac::<Sha256>::new_from_slice(key)
+    .expect("HMAC 接受任意长度密钥");
+  mac.update(raw.as_bytes());
+  format!(
+    "{raw}.{}",
+    URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
+  )
+}
+fn rt_parse(key: &[u8], text: &str, now: i64) -> Option<String> {
+  let (raw, sig) = text.rsplit_once('.')?;
+  let (hash, exp) = raw.split_once('.')?;
+  if hash.len() != 64
+    || !hash.bytes().all(|b| b.is_ascii_hexdigit())
+    || exp.parse::<i64>().ok()? <= now
+  {
+    return None;
+  }
+  let mut mac = Hmac::<Sha256>::new_from_slice(key).ok()?;
+  mac.update(raw.as_bytes());
+  mac.verify_slice(&URL_SAFE_NO_PAD.decode(sig).ok()?).ok()?;
+  Some(hash.into())
+}
+async fn session(
+  db: &Db,
+  hash: String,
+) -> Result<Option<(String, i64)>, ApiError> {
+  db.call(move |c| c.query_row("SELECT a.username, s.expires_at FROM sessions s, admin a WHERE s.hash=?1 AND s.expires_at>?2 AND a.id=1",params![hash, now_ms()],|r| Ok((r.get(0)?,r.get::<_,i64>(1)?/1000))).optional().map_err(sql_err)).await
+}
+fn cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+  headers
+    .get_all(header::COOKIE)
+    .iter()
+    .filter_map(|v| v.to_str().ok())
+    .flat_map(|v| v.split(';'))
+    .find_map(|p| {
+      p.trim()
+        .split_once('=')
+        .filter(|(k, v)| *k == name && !v.is_empty())
+        .map(|(_, v)| v)
+    })
+}
+fn response(
+  status: u16,
+  location: Option<&str>,
+  body: &str,
+  cookies: &[String],
+) -> Response {
+  let mut r = (
+    axum::http::StatusCode::from_u16(status).unwrap(),
+    body.to_string(),
+  )
+    .into_response();
+  r.headers_mut()
+    .insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+  if let Some(location) = location
+    && let Ok(value) = location.parse()
+  {
+    r.headers_mut().insert(header::LOCATION, value);
+  }
+  for cookie in cookies {
+    r.headers_mut()
+      .append(header::SET_COOKIE, cookie.parse().unwrap());
+  }
+  r
+}
+fn gate_cookie(name: &str, value: &str, age: i64) -> String {
+  format!(
+    "{name}={value}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age={age}"
+  )
+}
+fn access_cookie(key: &SigningKey, user: &str, now: i64) -> String {
+  // 只给隔离 lab 缩短凭据，不改变正式的十分钟有效期。
+  let ttl = std::env::var("WHARF_GATE_ACCESS_SECS")
+    .ok()
+    .and_then(|v| v.parse::<i64>().ok())
+    .filter(|n| *n > 0 && *n <= ACCESS_TTL)
+    .unwrap_or(ACCESS_TTL);
+  let token = if ttl == ACCESS_TTL {
+    sign(key, user, now)
+  } else {
+    sign_ttl(key, user, now, ttl)
+  };
+  gate_cookie("wharf_gate", &token, ttl)
+}
+fn rd_url(
+  world: &crate::world::World,
+  rd: &str,
+) -> Option<reqwest::Url> {
+  let url = reqwest::Url::parse(rd).ok()?;
+  if url.scheme() != "https"
+    || !url.username().is_empty()
+    || url.password().is_some()
+    || url.port().is_some()
+  {
+    return None;
+  }
+  world
+    .routes
+    .get(url.host_str()?)
+    .filter(|r| r.spec.sso.is_some())?;
+  Some(url)
+}
+fn take_ticket(
+  tickets: &mut BTreeMap<String, Ticket>,
+  code: &str,
+  host: &str,
+  now: i64,
+) -> Option<Ticket> {
+  tickets
+    .remove(code)
+    .filter(|t| t.host == host && t.expires > now)
+}
+#[derive(Deserialize)]
+pub struct LoginQuery {
+  rd: String,
+  hop: Option<String>,
+}
+fn login_path(rd: &str) -> String {
+  format!(
+    "/gate/login?{}",
+    reqwest::Url::parse_with_params(
+      "https://example.test",
+      [("rd", rd)]
+    )
+    .unwrap()
+    .query()
+    .unwrap()
+  )
+}
+pub async fn login(
+  State(s): State<Arc<AppState>>,
+  Query(q): Query<LoginQuery>,
+  headers: HeaderMap,
+) -> Result<Response, AppError> {
+  let snap = crate::snapshot::load(&s.db).await?;
+  let Some(url) = rd_url(&snap.world, &q.rd) else {
+    return Ok(response(400, None, "跳转地址不对", &[]));
+  };
+  if let Some(user) = crate::login::session_user(&s, &headers).await?
+  {
+    let hash =
+      hash_token(crate::login::cookie_value(&headers).unwrap());
+    let code = new_token();
+    let now = now_ms() / 1000;
+    {
+      let mut tickets =
+        TICKETS.lock().unwrap_or_else(|e| e.into_inner());
+      tickets.retain(|_, t| t.expires > now);
+      if tickets.len() >= 1000 {
+        return Ok(response(
+          503,
+          None,
+          "登录请求太多，稍后重试",
+          &[],
+        ));
+      }
+      tickets.insert(
+        code.clone(),
+        Ticket {
+          host: url.host_str().unwrap().into(),
+          session_hash: hash,
+          expires: now + 60,
+        },
+      );
+    }
+    let mut target = url.clone();
+    target.set_path("/_wharf/gate");
+    target.set_query(None);
+    target.set_fragment(None);
+    let rd = format!(
+      "{}{}",
+      url.path(),
+      url.query().map(|q| format!("?{q}")).unwrap_or_default()
+    );
+    target
+      .query_pairs_mut()
+      .append_pair("code", &code)
+      .append_pair("rd", &rd);
+    let host = url.host_str().unwrap().to_string();
+    s.db.call(move|c|{c.execute("INSERT INTO audit_log (at,kind,actor,method,path) VALUES (?1,'login',?2,'gate',?3)",params![now_ms(),user,host]).map_err(sql_err)?;Ok(())}).await?;
+    return Ok(response(302, Some(target.as_str()), "", &[]));
+  }
+  let path = login_path(&q.rd);
+  if q.hop.as_deref() != Some("1") {
+    let target = format!("{path}&hop=1")
+      .replace('&', "&amp;")
+      .replace('"', "&quot;");
+    let mut r = response(
+      200,
+      None,
+      &format!(
+        "<meta http-equiv=\"refresh\" content=\"0;url={target}\">正在跳转…"
+      ),
+      &[],
+    );
+    r.headers_mut().insert(
+      header::CONTENT_TYPE,
+      "text/html; charset=utf-8".parse().unwrap(),
+    );
+    return Ok(r);
+  }
+  let next = reqwest::Url::parse_with_params(
+    "https://example.test/login",
+    [("next", path)],
+  )
+  .unwrap();
+  Ok(response(
+    302,
+    Some(&format!("/login?{}", next.query().unwrap())),
+    "",
+    &[],
+  ))
+}
+#[derive(Deserialize)]
+pub struct SiteQuery {
+  code: String,
+  rd: Option<String>,
+}
+fn forwarded_host(headers: &HeaderMap) -> &str {
+  headers
+    .get("x-forwarded-host")
+    .and_then(|v| v.to_str().ok())
+    .unwrap_or("")
+    .split(':')
+    .next()
+    .unwrap_or("")
+}
+fn safe_path(rd: &str) -> &str {
+  if rd.starts_with('/')
+    && !rd.starts_with("//")
+    && !rd.contains(['\\', '\r', '\n'])
+  {
+    rd
+  } else {
+    "/"
+  }
+}
+pub async fn site_gate(
+  State(s): State<Arc<AppState>>,
+  Query(q): Query<SiteQuery>,
+  headers: HeaderMap,
+) -> Result<Response, AppError> {
+  let now = now_ms() / 1000;
+  let ticket = take_ticket(
+    &mut TICKETS.lock().unwrap_or_else(|e| e.into_inner()),
+    &q.code,
+    forwarded_host(&headers),
+    now,
+  );
+  let expired =
+    || response(400, None, "登录链接已经过期，重新打开页面", &[]);
+  let Some(ticket) = ticket else {
+    return Ok(expired());
+  };
+  let Some((user, exp)) =
+    session(&s.db, ticket.session_hash.clone()).await?
+  else {
+    return Ok(expired());
+  };
+  let cookies = vec![
+    access_cookie(&key(&s.db).await?, &user, now),
+    gate_cookie(
+      "wharf_gate_rt",
+      &rt_sign(&rt_key(&s.db).await?, &ticket.session_hash, exp),
+      exp - now,
+    ),
+  ];
+  Ok(response(
+    302,
+    Some(safe_path(q.rd.as_deref().unwrap_or("/"))),
+    "",
+    &cookies,
+  ))
+}
+pub async fn refresh(
+  State(s): State<Arc<AppState>>,
+  headers: HeaderMap,
+) -> Result<Response, AppError> {
+  let now = now_ms() / 1000;
+  let rt_key = rt_key(&s.db).await?;
+  if let Some(hash) = cookie(&headers, "wharf_gate_rt")
+    .and_then(|t| rt_parse(&rt_key, t, now))
+    && let Some((user, _)) = session(&s.db, hash).await?
+  {
+    let mut r = response(
+      200,
+      None,
+      "",
+      &[access_cookie(&key(&s.db).await?, &user, now)],
+    );
+    if let Ok(value) = user.parse() {
+      r.headers_mut().insert("X-Wharf-User", value);
+    }
+    return Ok(r);
+  }
+  let cookies = [gate_cookie("wharf_gate_rt", "", 0)];
+  if headers
+    .get("x-forwarded-method")
+    .and_then(|v| v.to_str().ok())
+    == Some("GET")
+    && headers
+      .get(header::ACCEPT)
+      .and_then(|v| v.to_str().ok())
+      .is_some_and(|v| v.contains("text/html"))
+  {
+    let field = |name| {
+      headers
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+    };
+    let rd = format!(
+      "{}://{}{}",
+      field("x-forwarded-proto"),
+      field("x-forwarded-host"),
+      field("x-forwarded-uri")
+    );
+    let login =
+      crate::join::default_url(&s).await.unwrap_or_default();
+    Ok(response(
+      302,
+      Some(&format!("{login}{}", login_path(&rd))),
+      "",
+      &cookies,
+    ))
+  } else {
+    Ok(response(401, None, "{\"error\":\"需要登录\"}", &cookies))
+  }
+}
+async fn rt_user(
+  db: &Db,
+  headers: &HeaderMap,
+) -> Result<Option<String>, ApiError> {
+  let key = rt_key(db).await?;
+  let Some(hash) = cookie(headers, "wharf_gate_rt")
+    .and_then(|t| rt_parse(&key, t, now_ms() / 1000))
+  else {
+    return Ok(None);
+  };
+  Ok(session(db, hash).await?.map(|(user, _)| user))
+}
+fn verify(key: &SigningKey, token: &str, now: i64) -> Option<String> {
+  let parts: Vec<_> = token.split('.').collect();
+  if parts.len() != 3 {
+    return None;
+  }
+  let head: serde_json::Value =
+    serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[0]).ok()?)
+      .ok()?;
+  if head["alg"] != "EdDSA" {
+    return None;
+  }
+  let signature = ed25519_dalek::Signature::from_slice(
+    &URL_SAFE_NO_PAD.decode(parts[2]).ok()?,
+  )
+  .ok()?;
+  key
+    .verifying_key()
+    .verify_strict(
+      format!("{}.{}", parts[0], parts[1]).as_bytes(),
+      &signature,
+    )
+    .ok()?;
+  let claims: serde_json::Value =
+    serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[1]).ok()?)
+      .ok()?;
+  if claims["iss"] != "wharf" || claims["exp"].as_i64()? <= now {
+    return None;
+  }
+  let user = claims["sub"].as_str()?;
+  (!user.is_empty()).then(|| user.to_string())
+}
+fn login_rd(rd: &str) -> &str {
+  let rd = safe_path(rd);
+  if rd.starts_with("/_wharf/") { "/" } else { rd }
+}
+fn storage_page(
+  values: &[(bool, String, String)],
+  rd: &str,
+) -> String {
+  let js = |s: &str| {
+    serde_json::to_string(s).unwrap().replace('<', "\\u003c")
+  };
+  let mut script = String::new();
+  for (local, key, value) in values {
+    script.push_str(&format!(
+      "{}Storage.setItem({},{});",
+      if *local { "local" } else { "session" },
+      js(key),
+      js(value)
+    ));
+  }
+  format!(
+    "<!doctype html><meta charset=\"utf-8\"><script>{script}location.replace({});</script><noscript>需要开启脚本才能自动登录</noscript>",
+    js(rd)
+  )
+}
+#[derive(Deserialize)]
+pub struct SiteLoginQuery {
+  rd: Option<String>,
+}
+pub async fn site_login(
+  State(s): State<Arc<AppState>>,
+  Query(q): Query<SiteLoginQuery>,
+  headers: HeaderMap,
+) -> Result<Response, AppError> {
+  use wharf_api_types::spec::{LoginWrite, SsoMode};
+  let host = forwarded_host(&headers);
+  let snap = crate::snapshot::load(&s.db).await?;
+  let Some(login) = snap
+    .world
+    .routes
+    .get(host)
+    .and_then(|r| r.spec.sso.as_ref())
+    .filter(|s| s.mode == SsoMode::Login)
+    .and_then(|s| s.login.as_ref())
+  else {
+    return Ok(response(404, None, "域名没有配置代登录", &[]));
+  };
+  let rd = login_rd(q.rd.as_deref().unwrap_or("/"));
+  let signing = key(&s.db).await?;
+  let authenticated = cookie(&headers, "wharf_gate")
+    .and_then(|t| verify(&signing, t, now_ms() / 1000))
+    .is_some()
+    || rt_user(&s.db, &headers).await?.is_some();
+  if !authenticated {
+    let target = format!(
+      "https://{host}/_wharf/login?rd={}",
+      urlencoding::encode(rd)
+    );
+    let core = crate::join::default_url(&s).await.unwrap_or_default();
+    return Ok(response(
+      302,
+      Some(&format!("{core}{}", login_path(&target))),
+      "",
+      &[],
+    ));
+  }
+  let outcome = crate::sso_login::run(&s, host).await;
+  let mut cookies = Vec::new();
+  let mut storage = Vec::new();
+  let result = (|| -> Result<bool, ApiError> {
+    let outcome = outcome.as_ref().map_err(|e| e.clone())?;
+    if !outcome.ok {
+      return Ok(false);
+    }
+    for write in &login.write {
+      match write {
+        LoginWrite::Cookies(_) => {
+          cookies.extend(outcome.set_cookies.clone())
+        }
+        LoginWrite::Cookie {
+          name,
+          value,
+          http_only,
+        } => {
+          let value = crate::sso_login::render(
+            value,
+            &outcome.vars,
+            &snap.secrets,
+          )?;
+          if name.is_empty()
+            || !name.bytes().all(|b| {
+              b.is_ascii_alphanumeric()
+                || b"!#$%&'*+-.^_`|~".contains(&b)
+            })
+            || !value.bytes().all(|b| {
+              b == 0x21
+                || (0x23..=0x2b).contains(&b)
+                || (0x2d..=0x3a).contains(&b)
+                || (0x3c..=0x5b).contains(&b)
+                || (0x5d..=0x7e).contains(&b)
+            })
+          {
+            return Err(ApiError::invalid("应用 cookie 格式不对"));
+          }
+          cookies.push(format!(
+            "{name}={value}; Path=/; Secure{}",
+            if *http_only { "; HttpOnly" } else { "" }
+          ));
+        }
+        LoginWrite::LocalStorage { key, value }
+        | LoginWrite::SessionStorage { key, value } => {
+          storage.push((
+            matches!(write, LoginWrite::LocalStorage { .. }),
+            key.clone(),
+            crate::sso_login::render(
+              value,
+              &outcome.vars,
+              &snap.secrets,
+            )?,
+          ))
+        }
+      }
+    }
+    if cookies
+      .iter()
+      .any(|v| v.parse::<axum::http::HeaderValue>().is_err())
+    {
+      return Err(ApiError::invalid("应用 cookie 格式不对"));
+    }
+    Ok(true)
+  })();
+  let ok = result.as_ref().is_ok_and(|ok| *ok);
+  // 执行器已记录步骤结果；交接失败也覆盖最近状态，不保存任何值。
+  if let Err(e) = result
+    && outcome.is_ok()
+  {
+    crate::sso_login::record(&s, host, false, Some(e.message))
+      .await?;
+  }
+  if !ok {
+    let age = std::env::var("WHARF_SSO_FAIL_SECS")
+      .ok()
+      .and_then(|s| s.parse::<i64>().ok())
+      .filter(|n| *n > 0 && *n <= 300)
+      .unwrap_or(300);
+    return Ok(response(
+      302,
+      Some(rd),
+      "",
+      &[gate_cookie("wharf_sso", "fail", age)],
+    ));
+  }
+  cookies.push(gate_cookie(
+    "wharf_sso",
+    "1",
+    i64::from(login.ttl_hours) * 3600,
+  ));
+  if storage.is_empty() {
+    return Ok(response(302, Some(rd), "", &cookies));
+  }
+  let mut response =
+    response(200, None, &storage_page(&storage, rd), &cookies);
+  response.headers_mut().insert(
+    header::CONTENT_TYPE,
+    "text/html; charset=utf-8".parse().unwrap(),
+  );
+  Ok(response)
+}
+
+pub async fn site_logout() -> Response {
+  response(
+    200,
+    None,
+    "已退出",
+    &[
+      gate_cookie("wharf_gate", "", 0),
+      gate_cookie("wharf_gate_rt", "", 0),
+    ],
+  )
+}
+
+pub fn trusted_ranges(
+  net: &crate::render::Net,
+  server: &str,
+) -> Vec<String> {
+  let mut ranges = std::collections::BTreeSet::from([
+    "127.0.0.0/8".to_string(),
+    "100.64.0.0/10".to_string(),
+  ]);
+  for ip in net.lan_ips.get(server).into_iter().flatten() {
+    if let Ok(ip) = ip.parse::<std::net::Ipv4Addr>() {
+      let [a, b, c, _] = ip.octets();
+      ranges.insert(format!("{a}.{b}.{c}.0/24"));
+    }
+  }
+  ranges.into_iter().collect()
+}
+
+pub async fn list_keys(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+) -> Result<axum::Json<Vec<GateKeyView>>, AppError> {
+  auth.require(Perm::Admin)?;
+  Ok(axum::Json(s.db.call(|c| {
+    let mut stmt = c.prepare("SELECT name, hosts, created_at, last_used_at FROM gate_keys ORDER BY name").map_err(sql_err)?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?,r.get::<_, String>(1)?,r.get::<_, i64>(2)?,r.get::<_, Option<i64>>(3)?))).map_err(sql_err)?;
+    rows.map(|r| {
+      let (name, hosts, created_at, last_used_at) = r.map_err(sql_err)?;
+      Ok(GateKeyView { name, hosts: serde_json::from_str(&hosts).map_err(|_| ApiError::internal("访问凭证域名格式不对"))?, created_at, last_used_at })
+    }).collect()
+  }).await?))
+}
+
+pub async fn put_key(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Path(name): Path<String>,
+  axum::Json(req): axum::Json<GateKeyRequest>,
+) -> Result<axum::Json<serde_json::Value>, AppError> {
+  auth.require(Perm::Admin)?;
+  validate_name("访问凭证", &name)?;
+  if req.hosts.is_empty() {
+    return Err(ApiError::invalid("至少选一个域名").into());
+  }
+  let world = crate::snapshot::load(&s.db).await?.world;
+  for host in &req.hosts {
+    if world.routes.get(host).is_none_or(|r| r.spec.sso.is_none()) {
+      return Err(
+        ApiError::invalid(format!("域名 {host} 没开门禁")).into(),
+      );
+    }
+  }
+  Ok(axum::Json(s.db.call(move |c| {
+    let hosts = serde_json::to_string(&req.hosts).map_err(|_| ApiError::internal("访问凭证域名格式不对"))?;
+    let tx = c.unchecked_transaction().map_err(sql_err)?;
+    let changed = tx.execute("UPDATE gate_keys SET hosts=?2 WHERE name=?1", params![name,hosts]).map_err(sql_err)?;
+    let mut result = json!({"name":name,"hosts":req.hosts});
+    if changed == 0 {
+      let key = format!("wgk_{}", new_token());
+      tx.execute("INSERT INTO gate_keys (name,hash,hosts,created_at) VALUES (?1,?2,?3,?4)",params![name,hash_token(&key),hosts,now_ms()]).map_err(sql_err)?;
+      result["key"] = key.into();
+    }
+    tx.commit().map_err(sql_err)?;
+    Ok(result)
+  }).await?))
+}
+
+pub async fn remove_key(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Path(name): Path<String>,
+) -> Result<axum::Json<serde_json::Value>, AppError> {
+  auth.require(Perm::Admin)?;
+  let removed = s
+    .db
+    .call(move |c| {
+      c.execute("DELETE FROM gate_keys WHERE name=?1", [name])
+        .map_err(sql_err)
+    })
+    .await?;
+  Ok(axum::Json(json!({"removed":removed > 0})))
+}
+
+fn key_allowed(
+  c: &rusqlite::Connection,
+  key: &str,
+  host: &str,
+  now: i64,
+) -> Result<bool, ApiError> {
+  let hash = hash_token(key);
+  let hosts: Option<String> = c
+    .query_row(
+      "SELECT hosts FROM gate_keys WHERE hash=?1",
+      [&hash],
+      |r| r.get(0),
+    )
+    .optional()
+    .map_err(sql_err)?;
+  let allowed = hosts
+    .and_then(|h| serde_json::from_str::<Vec<String>>(&h).ok())
+    .is_some_and(|h| h.iter().any(|h| h == host));
+  if allowed {
+    c.execute("UPDATE gate_keys SET last_used_at=?2 WHERE hash=?1 AND (last_used_at IS NULL OR last_used_at<=?2-60000)",params![hash,now]).map_err(sql_err)?;
+  }
+  Ok(allowed)
+}
+
+pub async fn check_key(
+  State(s): State<Arc<AppState>>,
+  ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
+  headers: HeaderMap,
+) -> Result<Response, AppError> {
+  let source = crate::login::client_key(peer.ip(), &headers);
+  if crate::login::locked(&source).is_some() {
+    tracing::warn!(source = %source, "门禁访问凭证来源已锁定");
+    return Ok(response(
+      401,
+      None,
+      "{\"error\":\"访问凭证无效\"}",
+      &[],
+    ));
+  }
+  let key = headers
+    .get("x-wharf-key")
+    .and_then(|v| v.to_str().ok())
+    .unwrap_or_default()
+    .to_string();
+  let host = forwarded_host(&headers).to_string();
+  if s
+    .db
+    .call(move |c| key_allowed(c, &key, &host, now_ms()))
+    .await?
+  {
+    return Ok(response(200, None, "", &[]));
+  }
+  crate::login::record_failure(&source);
+  tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+  Ok(response(401, None, "{\"error\":\"访问凭证无效\"}", &[]))
+}
+
+#[cfg(test)]
+mod tests {
+  #[test]
+  fn login_redirect_path() {
+    for bad in ["//evil", "/\\evil", "/_wharf/login"] {
+      assert_eq!(super::login_rd(bad), "/");
+    }
+    assert_eq!(super::login_rd("/a?x=1&y=2"), "/a?x=1&y=2");
+  }
+  #[test]
+  fn access_verify() {
+    let key = ed25519_dalek::SigningKey::from_bytes(&[1; 32]);
+    let token = super::sign_ttl(&key, "admin", 100, 10);
+    assert_eq!(
+      super::verify(&key, &token, 101).as_deref(),
+      Some("admin")
+    );
+    assert!(super::verify(&key, &token, 110).is_none());
+    assert!(
+      super::verify(
+        &ed25519_dalek::SigningKey::from_bytes(&[2; 32]),
+        &token,
+        101
+      )
+      .is_none()
+    );
+  }
+  #[test]
+  fn storage_script_escape() {
+    let page = super::storage_page(
+      &[(true, "</script>".into(), "</script>".into())],
+      "/</script>",
+    );
+    assert_eq!(page.matches("</script>").count(), 1);
+    assert!(page.contains("\\u003c/script>"));
+  }
+
+  use super::*;
+  use wharf_api_types::spec::RouteSpec;
+  fn world() -> crate::world::World {
+    let mut w = crate::world::World::default();
+    let spec: RouteSpec = serde_json::from_value(json!({"hostname":"a.example.test","upstream":"127.0.0.1:8080","sso":{"mode":"gate"}})).unwrap();
+    w.routes.insert(
+      spec.hostname.clone(),
+      crate::world::RouteRow {
+        id: "r1".into(),
+        spec,
+        version: 1,
+      },
+    );
+    w
+  }
+  #[test]
+  fn trusted_lan_ranges() {
+    let net = crate::render::Net {
+      lan_ips: BTreeMap::from([(
+        "s1".into(),
+        vec!["203.0.113.7".into(), "203.0.113.9".into()],
+      )]),
+      ..Default::default()
+    };
+    assert_eq!(
+      trusted_ranges(&net, "s1"),
+      vec!["100.64.0.0/10", "127.0.0.0/8", "203.0.113.0/24"]
+    );
+    assert_eq!(
+      trusted_ranges(&net, "s2"),
+      vec!["100.64.0.0/10", "127.0.0.0/8"]
+    );
+  }
+  fn key_db() -> rusqlite::Connection {
+    let c = rusqlite::Connection::open_in_memory().unwrap();
+    c.execute_batch("CREATE TABLE gate_keys (name TEXT PRIMARY KEY,hash TEXT UNIQUE,hosts TEXT,created_at INTEGER,last_used_at INTEGER);").unwrap();
+    c.execute("INSERT INTO gate_keys VALUES ('k1',?1,'[\"a.example.test\"]',0,NULL)",[hash_token("lab-key")]).unwrap();
+    c
+  }
+  #[test]
+  fn key_scope_and_last_use() {
+    let c = key_db();
+    assert!(
+      !key_allowed(&c, "wrong", "a.example.test", 100000).unwrap()
+    );
+    assert!(
+      !key_allowed(&c, "lab-key", "b.example.test", 100000).unwrap()
+    );
+    assert!(
+      key_allowed(&c, "lab-key", "a.example.test", 100000).unwrap()
+    );
+    assert!(
+      key_allowed(&c, "lab-key", "a.example.test", 100001).unwrap()
+    );
+    let used: i64 = c
+      .query_row("SELECT last_used_at FROM gate_keys", [], |r| {
+        r.get(0)
+      })
+      .unwrap();
+    assert_eq!(used, 100000);
+    assert!(
+      key_allowed(&c, "lab-key", "a.example.test", 160000).unwrap()
+    );
+    let used: i64 = c
+      .query_row("SELECT last_used_at FROM gate_keys", [], |r| {
+        r.get(0)
+      })
+      .unwrap();
+    assert_eq!(used, 160000);
+  }
+  #[test]
+  fn key_revocation_is_immediate() {
+    let c = key_db();
+    assert!(
+      key_allowed(&c, "lab-key", "a.example.test", 100000).unwrap()
+    );
+    c.execute("DELETE FROM gate_keys", []).unwrap();
+    assert!(
+      !key_allowed(&c, "lab-key", "a.example.test", 100001).unwrap()
+    );
+  }
+  #[test]
+  fn rd_query_roundtrip() {
+    let rd = "https://a.example.test/x?a=1&b=2";
+    let path = login_path(rd);
+    let url = reqwest::Url::parse(&format!(
+      "https://core.example.test{path}"
+    ))
+    .unwrap();
+    assert_eq!(
+      url.query_pairs().find(|(k, _)| k == "rd").unwrap().1,
+      rd
+    );
+    assert_eq!(
+      rd_url(&world(), rd).unwrap().query(),
+      Some("a=1&b=2")
+    );
+    assert_eq!(safe_path("//evil.example"), "/");
+    assert_eq!(safe_path("/\\evil.example"), "/");
+  }
+  #[test]
+  fn rd_requires_gate() {
+    let mut w = world();
+    assert!(rd_url(&w, "https://evil.example/").is_none());
+    assert!(rd_url(&w, "http://a.example.test/").is_none());
+    w.routes.get_mut("a.example.test").unwrap().spec.sso = None;
+    assert!(rd_url(&w, "https://a.example.test/").is_none());
+  }
+  #[test]
+  fn refresh_signature_and_expiry() {
+    let hash = "a".repeat(64);
+    let key = [7; 32];
+    let good = rt_sign(&key, &hash, 2000);
+    assert_eq!(rt_parse(&key, &good, 1000), Some(hash));
+    assert!(rt_parse(&[8; 32], &good, 1000).is_none());
+    assert!(rt_parse(&key, &good, 2000).is_none());
+    assert!(
+      rt_parse(&key, &good.replace(".2000.", ".3000."), 1000)
+        .is_none()
+    );
+  }
+  #[test]
+  fn credential_formats_and_fixture() {
+    let key = SigningKey::from_bytes(&[0; 32]);
+    let token = sign(&key, "admin", 1700000000);
+    assert!(rt_parse(&[0; 32], &token, 1700000000).is_none());
+    let rt = rt_sign(&[0; 32], &"a".repeat(64), 1700000600);
+    assert!(
+      URL_SAFE_NO_PAD
+        .decode(rt.split('.').next().unwrap())
+        .is_ok()
+    );
+    assert!(
+      serde_json::from_slice::<serde_json::Value>(
+        &URL_SAFE_NO_PAD
+          .decode(rt.split('.').next().unwrap())
+          .unwrap()
+      )
+      .is_err()
+    );
+    assert_eq!(
+      token,
+      "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3MDAwMDA2MDAsImlhdCI6MTcwMDAwMDAwMCwiaXNzIjoid2hhcmYiLCJzdWIiOiJhZG1pbiJ9.J-x_gW3JdQqN7lpvfll72TH40DsjtJCgW3TDzgM20dlmY78RWQESgnYWBtD2X4Pki4WpS-F6s0poysRCdKrGAg"
+    );
+  }
+  #[test]
+  fn ticket_once_and_host_bound() {
+    let mut tickets = BTreeMap::new();
+    let add = |tickets: &mut BTreeMap<_, _>| {
+      tickets.insert(
+        "code".into(),
+        Ticket {
+          host: "a.example.test".into(),
+          session_hash: "hash".into(),
+          expires: 100,
+        },
+      );
+    };
+    add(&mut tickets);
+    assert!(
+      take_ticket(&mut tickets, "code", "b.example.test", 1)
+        .is_none()
+    );
+    assert!(
+      take_ticket(&mut tickets, "code", "a.example.test", 1)
+        .is_none()
+    );
+    add(&mut tickets);
+    assert!(
+      take_ticket(&mut tickets, "code", "a.example.test", 1)
+        .is_some()
+    );
+    assert!(
+      take_ticket(&mut tickets, "code", "a.example.test", 1)
+        .is_none()
+    );
+    add(&mut tickets);
+    assert!(
+      take_ticket(&mut tickets, "code", "a.example.test", 100)
+        .is_none()
+    );
+  }
+}

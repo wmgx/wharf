@@ -7,6 +7,9 @@ use crate::{agent, egress, plan, spec, view};
 pub fn web_schema() -> Value {
   let mut generator =
     SchemaGenerator::new(SchemaSettings::default().for_serialize());
+  let _ = generator.subschema_for::<view::SsoTestResult>();
+  let _ = generator.subschema_for::<view::GateKeyView>();
+  let _ = generator.subschema_for::<view::GateKeyRequest>();
   let _ = generator.subschema_for::<spec::PrivateNetwork>();
   let _ = generator.subschema_for::<view::CoreAddress>();
   let _ = generator.subschema_for::<view::CoreAddresses>();
@@ -29,6 +32,7 @@ pub fn web_schema() -> Value {
   let _ = generator.subschema_for::<agent::ContainerInfo>();
   let _ = generator.subschema_for::<view::LiveState>();
   let _ = generator.subschema_for::<view::ServiceView>();
+  let _ = generator.subschema_for::<view::ExposureView>();
   let _ = generator.subschema_for::<spec::GatewayTls>();
   let _ = generator.subschema_for::<spec::GatewaySpec>();
   let _ = generator.subschema_for::<view::GatewayView>();
@@ -74,6 +78,8 @@ pub fn web_schema() -> Value {
   let _ = generator.subschema_for::<view::NetworkView>();
   let _ = generator.subschema_for::<view::SecretView>();
   let _ = generator.subschema_for::<view::Perm>();
+  let _ = generator.subschema_for::<view::TotpView>();
+  let _ = generator.subschema_for::<view::SessionRow>();
   let _ = generator.subschema_for::<view::TokenView>();
   let _ = generator.subschema_for::<view::CreatedToken>();
   let _ = generator.subschema_for::<agent::PackageUpdate>();

@@ -3,6 +3,7 @@
 //! 计划里只存"要做什么"（[StepPlan]），apply 时从已提交的数据库重新渲染
 //! 具体内容，所以密钥只在发给 agent 的那一刻才被替换进去。
 
+use rusqlite::OptionalExtension;
 use std::{
   collections::{BTreeMap, BTreeSet},
   time::Duration,
@@ -365,6 +366,23 @@ pub async fn make_plan(
   )
   .await?;
   let mut warnings = resolved.warnings;
+  if desired.routes.values().any(|r| r.spec.sso.is_some())
+    && state
+      .db
+      .call(|c| {
+        c.query_row(
+          "SELECT totp_secret IS NOT NULL FROM admin WHERE id=1",
+          [],
+          |r| r.get::<_, bool>(0),
+        )
+        .optional()
+        .map_err(crate::db::sql_err)
+      })
+      .await?
+      != Some(true)
+  {
+    warnings.push("还没开两步验证，门禁只有密码一道".into());
+  }
   crate::pins::resolve_commits(
     state,
     &snap,
@@ -415,6 +433,18 @@ pub async fn make_plan(
     }
   }
 
+  for route in desired.routes.values() {
+    if let Some(login) =
+      route.spec.sso.as_ref().and_then(|s| s.login.as_ref())
+    {
+      for name in crate::sso_login::secret_refs(login) {
+        if !snap.secrets.contains_key(&name) {
+          warnings
+            .push(format!("密钥 {name} 还没有设置，代登录会失败"));
+        }
+      }
+    }
+  }
   let writes = desired.writes_from(&current);
   let mut b = Builder {
     image_ids: resolved.image_ids,
@@ -434,7 +464,101 @@ pub async fn make_plan(
   };
   config_items(&mut b, &current, &desired, &writes);
 
+  for (host, route) in &desired.routes {
+    let Some(sso) = route
+      .spec
+      .sso
+      .as_ref()
+      .filter(|s| s.mode == wharf_api_types::spec::SsoMode::Login)
+    else {
+      continue;
+    };
+    if current
+      .routes
+      .get(host)
+      .and_then(|r| r.spec.sso.as_ref())
+      .is_some_and(|s| {
+        s.mode == wharf_api_types::spec::SsoMode::Login
+      })
+    {
+      continue;
+    }
+    b.warnings.push(format!(
+      "Wharf 会用保存的应用账号替每个过了门禁的人登录 {host}"
+    ));
+    let hostname = host.clone();
+    let has_key = state.db.call(move |c| c.query_row("SELECT EXISTS(SELECT 1 FROM gate_keys, json_each(gate_keys.hosts) WHERE json_each.value=?1)", [hostname], |r| r.get::<_, bool>(0)).map_err(crate::db::sql_err)).await?;
+    if !sso.skip_paths.is_empty() || sso.trust_internal || has_key {
+      b.warnings.push(
+        "不经过门禁的请求不会被代登录，会看到应用自己的登录页".into(),
+      );
+    }
+  }
   let mut net = snap.net(&desired);
+  for (host, route) in &desired.routes {
+    let Some(sso) = route
+      .spec
+      .sso
+      .as_ref()
+      .filter(|s| s.mode == wharf_api_types::spec::SsoMode::Header)
+    else {
+      continue;
+    };
+    if current
+      .routes
+      .get(host)
+      .is_some_and(|r| r.spec.sso.as_ref() == Some(sso))
+    {
+      continue;
+    }
+    let header = sso.header.as_deref().unwrap_or("Remote-User");
+    if let Some(service) = desired.services.get(&route.spec.service)
+      && !net.bind_ips(&service.spec.server).is_empty()
+      && match &service.spec.source {
+        Source::Compose { content, .. } => {
+          let compose: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str(
+              content.as_deref().unwrap_or_default(),
+            )
+            .map_err(|e| {
+              ApiError::invalid(format!("compose 内容解析失败：{e}"))
+            })?;
+          compose["services"].as_mapping().is_some_and(|services| {
+            services.values().any(|svc| {
+              svc["network_mode"].as_str() == Some("host")
+                || svc["ports"].as_sequence().is_some_and(|ports| {
+                  ports.iter().any(|p| {
+                    if let Some(raw) = p.as_str() {
+                      raw.contains(':')
+                        && !raw.starts_with("127.0.0.1:")
+                        && !raw.starts_with("[::1]:")
+                    } else {
+                      p.get("published").is_some()
+                        && !matches!(
+                          p["host_ip"].as_str(),
+                          Some("127.0.0.1" | "::1")
+                        )
+                    }
+                  })
+                })
+            })
+          })
+        }
+        _ => true,
+      }
+    {
+      b.warnings.push(format!("{} 的端口能被同一个内网里的其他机器直接访问，绕过入口的请求可以自己填 {header} 冒充登录", route.spec.service));
+    }
+    let hostname = host.clone();
+    let has_key = state.db.call(move |c| {
+      c.query_row("SELECT EXISTS(SELECT 1 FROM gate_keys, json_each(gate_keys.hosts) WHERE json_each.value=?1)", [hostname], |r| r.get::<_, bool>(0)).map_err(crate::db::sql_err)
+    }).await?;
+    if !sso.skip_paths.is_empty() || sso.trust_internal || has_key {
+      b.warnings.push(
+        "不经过门禁的请求不带用户名，应用会把它们当成没登录".into(),
+      );
+    }
+  }
   net.reach = crate::link::probe(state, &net, &desired).await;
   mark("探测互通");
   // 迁移要源机器把数据推到目标机器（design 2.10）。
@@ -667,7 +791,8 @@ fn config_items(
       ),
       (KIND_ROUTE, Action::Create) => {
         let route = desired.routes.get(name);
-        let auth = route.is_some_and(|r| r.spec.auth);
+        let auth =
+          route.is_some_and(|r| r.spec.auth || r.spec.sso.is_some());
         if route.is_some_and(|r| r.spec.redirect.is_some()) {
           (vec![], "新增跳转".to_string())
         } else if let Some(ms) = route.and_then(|r| r.spec.expires_at)
@@ -707,6 +832,20 @@ fn config_items(
           Some(d) => (vec![], format!("固定镜像版本 {d}，不重建")),
           None => (vec![], "更新内部记录，不重建".to_string()),
         }
+      }
+      (KIND_ROUTE, Action::Update)
+        if current
+          .routes
+          .get(name)
+          .is_some_and(|r| r.spec.sso.is_some())
+          && desired.routes.get(name).is_some_and(|r| {
+            r.spec.sso.is_none() && !r.spec.auth
+          }) =>
+      {
+        (
+          vec![Impact::Public],
+          "去掉门禁后这个域名对公网开放".to_string(),
+        )
       }
       (KIND_ROUTE, Action::Update)
         if current
@@ -2680,5 +2819,21 @@ mod tests {
     assert!(a.impacts.contains(&Impact::Public));
     assert!(redirect.impacts.is_empty());
     assert!(redirect.reason.contains("新增跳转"));
+  }
+  #[test]
+  fn removing_gate_requires_public_confirmation() {
+    let mut current = world();
+    current.routes.insert("a.example.com".into(),RouteRow{id:"a".into(),version:1,spec:serde_json::from_value(json!({"hostname":"a.example.com","service":"app","sso":{"mode":"gate"}})).unwrap()});
+    let mut desired = current.clone();
+    desired.routes.get_mut("a.example.com").unwrap().spec.sso = None;
+    let mut b = Builder::default();
+    config_items(
+      &mut b,
+      &current,
+      &desired,
+      &desired.writes_from(&current),
+    );
+    assert_eq!(b.items[0].impacts, vec![Impact::Public]);
+    assert_eq!(b.items[0].reason, "去掉门禁后这个域名对公网开放");
   }
 }

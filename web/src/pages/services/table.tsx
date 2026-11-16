@@ -1,3 +1,4 @@
+import { ContainerRisk } from "@/components/container-risk";
 import { ArrowUpCircleIcon, CloudIcon, LockIcon } from "lucide-react";
 import { usePoll } from "@/api";
 import { Dot, OpenLink, ServerTag, StatusBadge, ago, useClickable, type Tone } from "@/components/common";
@@ -51,7 +52,7 @@ export function ServiceTable({ status, rows }: { status: Status; rows: Row[] }) 
             {rows.map((r) => (
               <TableRow key={r.to} className="cursor-pointer" {...clickable({ to: r.to })}>
                 <TableCell className="pl-4 font-medium">
-                  <span className="inline-flex items-center gap-1.5">{!r.svc && <CloudIcon className="size-3.5 text-muted-foreground" />}{r.name}</span>
+                  <span className="inline-flex items-center gap-1.5">{!r.svc && <CloudIcon className="size-3.5 text-muted-foreground" />}{r.name}{r.svc && <ContainerRisk risks={r.svc.risks} />}</span>
                   {r.svc?.note && <NotePreview note={r.svc.note} />}
                 </TableCell>
                 <TableCell><StatusBadge tone={r.tone}>{r.text}</StatusBadge>{r.svc && status.updates?.services[r.name]?.newer && <span className="ml-1.5 inline-flex items-center gap-1 rounded-md bg-primary/10 px-1.5 py-0.5 text-xs font-medium text-primary"><ArrowUpCircleIcon className="size-3" />新版本</span>}</TableCell>
@@ -72,7 +73,7 @@ export function ServiceTable({ status, rows }: { status: Status; rows: Row[] }) 
           <div key={r.to} className="cursor-pointer" {...clickable({ to: r.to })}>
             <Panel className="flex items-start gap-2 p-3">
               <div className="grid min-w-0 flex-1 gap-1.5">
-                <div className="flex items-center gap-1.5 font-medium">{!r.svc && <CloudIcon className="size-3.5 text-muted-foreground" />}{r.name}</div>
+                <div className="flex items-center gap-1.5 font-medium">{!r.svc && <CloudIcon className="size-3.5 text-muted-foreground" />}{r.name}{r.svc && <ContainerRisk risks={r.svc.risks} />}</div>
                 {r.svc?.note && <NotePreview note={r.svc.note} />}
                 <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
                   <StatusBadge tone={r.tone}>{r.text}</StatusBadge>

@@ -157,6 +157,12 @@ impl Ops {
       AgentOp::Quality { targets, count } => {
         to_value(crate::probe::quality(targets, count).await)
       }
+      AgentOp::HttpFetch(job) => {
+        tokio::select! {
+          result = crate::probe::fetch(job) => to_value(result),
+          _ = ctx.cancel.cancelled() => Err(ApiError::new(ErrorCode::Cancelled, "已取消")),
+        }
+      }
       AgentOp::HttpCheck(job) => {
         to_value(crate::probe::http(job).await)
       }
@@ -195,6 +201,9 @@ impl Ops {
       }
       AgentOp::UpgradeLog => {
         to_value(crate::upgrade::helper_log(ctx).await)
+      }
+      AgentOp::Exposure => {
+        to_value(crate::exposure::collect(&self.docker, ctx).await?)
       }
       AgentOp::HostUnits => {
         to_value(crate::host_units::list(&self.docker, ctx).await?)
@@ -688,7 +697,12 @@ fn has_previous(
 
 /// project 名会拼进路径，必须先校验。网关 project 是 `wharf-gw-<name>`。
 fn check_project(project: &str) -> Result<(), ApiError> {
-  validate_name("project", project)
+  validate_name(
+    "project",
+    project
+      .strip_prefix(wharf_api_types::agent::TASK_DATA_PREFIX)
+      .unwrap_or(project),
+  )
 }
 
 /// 只允许在 `/srv/` 下建目录，防止控制面被冒充时随便写。

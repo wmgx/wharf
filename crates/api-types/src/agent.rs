@@ -290,6 +290,8 @@ pub enum AgentOp {
   Discover,
   /// 宿主机上 systemd 跑的、自己装的程序（只读），结果是 `Vec<HostUnit>`。
   HostUnits,
+  /// 结果是 [ExposureReport]。
+  Exposure,
   /// 宿主机程序最近的日志（journalctl -u），结果是字符串。
   HostUnitLogs {
     unit: String,
@@ -317,6 +319,8 @@ pub enum AgentOp {
   },
   /// 从本机发一次 HTTP GET（自定义监控），结果是 [HttpCheckResult]。
   HttpCheck(HttpCheck),
+  /// 代登录请求，不记录请求和应答内容。
+  HttpFetch(HttpFetch),
   /// 链路质量：对每个目标连 `count` 次，结果是 `Vec<LinkSample>`（和 `targets` 一一对应）。
   Quality {
     targets: Vec<ProbeTarget>,
@@ -830,6 +834,8 @@ pub const BUILD_IMAGE_PREFIX: &str = "wharf-build/";
 pub const TRIAL_PROJECT_PREFIX: &str = "wharf-try-";
 /// 执行 wrangler 的镜像。
 pub const NODE_IMAGE: &str = "node:22-bookworm-slim";
+pub const PYTHON_IMAGE: &str = "python:3.13-slim";
+pub const SHELL_IMAGE: &str = "alpine:3.22";
 /// 项目里没装 wrangler 时用这个版本。
 pub const WRANGLER_VERSION: &str = "4.148.0";
 pub const REST_SERVER_IMAGE: &str = "restic/rest-server:0.14.0";
@@ -1201,19 +1207,41 @@ mod tests {
   }
 }
 
+pub const TASK_DATA_PREFIX: &str = "wharf-task-";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskRunJob {
   /// 任务名，一次性容器叫 `wharf-task-<任务名>`。
   pub name: String,
   pub how: TaskHow,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub input: Option<TaskInput>,
   pub timeout_secs: u64,
   pub pull: PullPolicy,
 }
 
-/// 命令都用 `sh -c` 执行，密钥已经替换好。
+/// 网址触发带来的请求，请求体使用 base64。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskInput {
+  pub method: String,
+  pub query: String,
+  pub body: String,
+}
+
+/// 命令里的密钥已经替换好，脚本正文保持原样。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TaskHow {
+  Script {
+    image: String,
+    runtime: crate::view::ScriptRuntime,
+    code: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    deps: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    mirrors: BTreeMap<String, String>,
+    env: BTreeMap<String, String>,
+  },
   /// 在 compose 项目 `project` 的容器里执行；`service` 是 compose 服务名，只有一个容器时可以不填。
   Exec {
     project: String,
@@ -1236,6 +1264,8 @@ pub enum TaskHow {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskRunResult {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub mem_peak: Option<u64>,
   /// 超时被杀掉时没有。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub exit_code: Option<i32>,
@@ -1292,5 +1322,50 @@ pub struct HttpCheckResult {
   pub found: Option<bool>,
   /// 连不上、超时等。
   #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub error: Option<String>,
+}
+
+#[derive(
+  Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct ExposureReport {
+  pub listens: Vec<Listen>,
+  pub containers: Vec<ContainerRisk>,
+}
+
+#[derive(
+  Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct Listen {
+  pub proto: String,
+  pub addr: String,
+  pub port: u16,
+  pub process: String,
+  pub container: Option<String>,
+  pub project: Option<String>,
+}
+
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct ContainerRisk {
+  pub name: String,
+  pub project: Option<String>,
+  pub risks: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HttpFetch {
+  pub url: String,
+  pub method: String,
+  pub headers: Vec<(String, String)>,
+  pub body: Option<String>,
+  pub timeout_secs: u64,
+}
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HttpFetchResult {
+  pub status: Option<u16>,
+  pub headers: Vec<(String, String)>,
+  pub body: String,
   pub error: Option<String>,
 }

@@ -166,6 +166,8 @@ export interface AlertsView {
   rules: AlertRuleView[];
 }
 
+export type AllCookies = "all";
+
 /**
  * 统一错误格式。`message` 可以直接给用户看，不含 token 和厂商原始响应。
  */
@@ -737,6 +739,31 @@ export interface EgressSpec {
  */
 export type ErrorCode = "InvalidInput" | "NotFound" | "AlreadyExists" | "Conflict" | "Unauthorized" | "Forbidden" | "AgentOffline" | "Timeout" | "Cancelled" | "NotImplemented" | "Internal" | "PlanStale" | "ConfirmRequired" | "Busy" | "AgentFailed" | "Provider";
 
+export interface ExposureView {
+  checked_at: number | null;
+  outdated: boolean;
+  ports: PortRow[];
+  risks: RiskRow[];
+}
+
+export type Extract = {
+  from: "json";
+  name: string;
+  path: string;
+} | {
+  between: string[];
+  from: "body";
+  name: string;
+} | {
+  from: "header";
+  header: string;
+  name: string;
+} | {
+  cookie: string;
+  from: "cookie";
+  name: string;
+};
+
 export interface FileEntry {
   dir: boolean;
   /**
@@ -781,6 +808,20 @@ export interface FoundContainer {
    * 挂载的具名数据卷（不含宿主机目录和匿名卷）。
    */
   volumes?: string[];
+}
+
+export interface GateKeyRequest {
+  hosts: string[];
+}
+
+/**
+ * 门禁访问凭证；列表不包含明文或哈希。
+ */
+export interface GateKeyView {
+  created_at: number;
+  hosts: string[];
+  last_used_at: number | null;
+  name: string;
 }
 
 export type GatewayKind = "caddy" | "cloudflare_tunnel";
@@ -979,6 +1020,8 @@ export interface Issue {
   /**
    * 这是哪一类问题，页面按它决定给什么按钮。取值见下表。
    * oom_killed：服务的容器因内存超限被杀。
+   * recovery_low：恢复码少于 3 个。
+   * exposed_port：未确认的对公网监听端口。
    */
   code: string;
   /**
@@ -1095,6 +1138,44 @@ export interface LiveState {
    */
   state: string;
 }
+
+export interface LoginSpec {
+  check?: LoginStep | null;
+  steps: LoginStep[];
+  ttl_hours: number;
+  write: LoginWrite[];
+}
+
+export interface LoginStep {
+  body?: string | null;
+  expect?: number[] | null;
+  extract?: Extract[];
+  form?: Record<string, string> | null;
+  headers?: Record<string, string>;
+  json?: unknown;
+  method: string;
+  path: string;
+}
+
+export type LoginWrite = {
+  cookies: AllCookies;
+} | {
+  cookie: {
+  http_only: boolean;
+  name: string;
+  value: string;
+};
+} | {
+  local_storage: {
+  key: string;
+  value: string;
+};
+} | {
+  session_storage: {
+  key: string;
+  value: string;
+};
+};
 
 /**
  * 一次资源采样。速率是和上一次采样相比的平均值。
@@ -1312,6 +1393,16 @@ export interface PlanItem {
 
 export type PlanStatus = "pending" | "applied";
 
+export interface PortRow {
+  acked: boolean;
+  addr: string;
+  expected: boolean;
+  name: string;
+  owner: string;
+  port: number;
+  proto: string;
+}
+
 export interface PortSpec {
   /**
    * 容器内端口。image / build 来源必填；compose 来源不填（映射写在 compose 里）。
@@ -1416,6 +1507,14 @@ export interface RelayHint {
   via_loss: number;
 }
 
+export interface RiskRow {
+  container: string;
+  own: boolean;
+  project: string | null;
+  risks: string[];
+  service: string | null;
+}
+
 /**
  * 回滚到某次部署时要提交的服务配置。image 来源会固定到当时的镜像 digest。
  */
@@ -1499,6 +1598,10 @@ export interface RouteSpec {
    */
   service?: string;
   /**
+   * 门禁。
+   */
+  sso?: SsoSpec | null;
+  /**
    * 不归 Wharf 管的上游，写网关所在机器能访问到的 `主机:端口`，例如 `127.0.0.1:7700`。
    */
   upstream?: string | null;
@@ -1519,6 +1622,7 @@ export interface RouteView {
    */
   probe?: ProbeView | null;
   spec: RouteSpec;
+  sso_login?: SsoLoginState | null;
   /**
    * 网关转发到的上游地址。
    */
@@ -1553,6 +1657,8 @@ export interface RunStep {
   status: StepStatus;
   title: string;
 }
+
+export type ScriptRuntime = "python" | "node" | "shell";
 
 export interface SecretView {
   /**
@@ -1840,6 +1946,7 @@ export interface ServiceView {
    * 备注：给人看的说明，不影响部署。
    */
   note?: string | null;
+  risks?: string[];
   spec: ServiceSpec;
   /**
    * 分层状态；只读配置、不查现状时为空。
@@ -1854,6 +1961,18 @@ export interface ServiceView {
    */
   uses?: string[];
   version: number;
+}
+
+/**
+ * 页面登录设备。
+ */
+export interface SessionRow {
+  addr: string | null;
+  agent: string | null;
+  created_at: number;
+  current: boolean;
+  id: string;
+  last_seen_at: number | null;
 }
 
 export interface ShellLog {
@@ -1904,6 +2023,42 @@ export interface SshLogin {
   user: string;
 }
 
+export interface SsoLoginState {
+  at: number;
+  error: string | null;
+  ok: boolean;
+}
+
+export type SsoMode = "gate" | "header" | "login";
+
+export interface SsoSpec {
+  header?: string | null;
+  login?: LoginSpec | null;
+  mode: SsoMode;
+  /**
+   * 不过门禁的路径前缀。
+   */
+  skip_paths?: string[];
+  trust_internal?: boolean;
+}
+
+export interface SsoStepResult {
+  error: string | null;
+  extracted: Record<string, number>;
+  method: string;
+  ms: number;
+  number: number;
+  path: string;
+  status: number | null;
+}
+
+export interface SsoTestResult {
+  check: SsoStepResult | null;
+  ok: boolean;
+  steps: SsoStepResult[];
+  would_write: string[];
+}
+
 export interface Status {
   bookmarks: BookmarkView[];
   edge_apps: EdgeAppView[];
@@ -1947,6 +2102,14 @@ export type TaskKind = {
   kind: "container";
   mounts?: string[];
 } | {
+  code: string;
+  deps?: string;
+  env?: Record<string, string>;
+  hook?: string | null;
+  image?: string | null;
+  kind: "script";
+  runtime: ScriptRuntime;
+} | {
   command: string;
   kind: "host";
 } | {
@@ -1962,6 +2125,7 @@ export interface TaskRunView {
   ended_at?: string | null;
   exit_code?: number | null;
   id: number;
+  mem_peak?: number | null;
   /**
    * 输出的最后 16 KB，密钥值已换成 `***`；出错时是错误信息。
    */
@@ -1993,6 +2157,14 @@ export type TaskSpec = {
   kind: "container";
   mounts?: string[];
 } | {
+  code: string;
+  deps?: string;
+  env?: Record<string, string>;
+  hook?: string | null;
+  image?: string | null;
+  kind: "script";
+  runtime: ScriptRuntime;
+} | {
   command: string;
   kind: "host";
 } | {
@@ -2007,6 +2179,8 @@ export type TaskSpec = {
 export type TaskStatus = "running" | "succeeded" | "failed" | "timed_out" | "skipped";
 
 export interface TaskView {
+  data_bytes?: number | null;
+  hook_url?: string | null;
   last?: TaskRunView | null;
   name: string;
   /**
@@ -2060,6 +2234,11 @@ export interface TokenView {
  * 页面上的颜色。
  */
 export type Tone = "ok" | "warn" | "bad" | "idle";
+
+export interface TotpView {
+  enabled: boolean;
+  recovery_left: number;
+}
 
 /**
  * `GET /api/servers/{name}/unmanaged`：服务器上还没纳管的一组容器，
