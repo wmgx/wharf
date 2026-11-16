@@ -50,7 +50,7 @@ export function AptUpgrade({ server, enabled, count, onDone }: { server: string;
       await api.post(path, {});
       setSt({ state: "running", log: "" });
     } catch (e) {
-      toast.error("不能开始安装", { description: (e as Error).message });
+      toast.error("开始安装失败", { description: (e as Error).message });
     }
   };
 

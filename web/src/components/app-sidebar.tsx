@@ -1,4 +1,4 @@
-import { InboxIcon, AnchorIcon, BoxIcon, DatabaseIcon, NetworkIcon, GlobeIcon, ChevronsUpDownIcon, HistoryIcon, LogOutIcon, TimerIcon, MoonIcon, ServerIcon, SettingsIcon, SunIcon } from "lucide-react";
+import { WaypointsIcon, InboxIcon, AnchorIcon, BoxIcon, DatabaseIcon, NetworkIcon, GlobeIcon, ChevronsUpDownIcon, HistoryIcon, LogOutIcon, TimerIcon, MoonIcon, ServerIcon, SettingsIcon, SunIcon } from "lucide-react";
 import { NavLink, useLocation } from "react-router-dom";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import {
@@ -35,7 +35,7 @@ export function Logo({ className = "size-8" }: { className?: string }) {
 
 export function AppSidebar({ username, onLogout }: { username: string; onLogout: () => void }) {
   const { status } = useStatus();
-  const { pathname } = useLocation();
+  const { pathname, search } = useLocation();
   const { theme, toggle } = useTheme();
 
   const issues = useIssues();
@@ -45,6 +45,7 @@ export function AppSidebar({ username, onLogout }: { username: string; onLogout:
     { label: "应用", items: [
       { to: "/services", label: "服务", icon: BoxIcon, count: status ? status.services.length + (status.edge_apps?.length ?? 0) : undefined },
       { to: "/domains", label: "域名", icon: GlobeIcon, count: status?.routes.length },
+      { to: "/domains?tab=entries", label: "入口", icon: WaypointsIcon, count: status?.gateways.length },
       { to: "/tasks", label: "任务", icon: TimerIcon },
     ] },
     { label: "机器", items: [
@@ -58,7 +59,7 @@ export function AppSidebar({ username, onLogout }: { username: string; onLogout:
     ] },
     { label: "", items: [{ to: "/settings", label: "设置", icon: SettingsIcon, dot: !!version?.newer }] },
   ];
-  const active = (to: string) => to === "/" ? pathname === "/" : to === "/services" ? pathname.startsWith("/services") || pathname.startsWith("/edge/") : pathname.startsWith(to);
+  const active = (to: string) => to.startsWith("/domains") ? pathname === "/domains" && (new URLSearchParams(search).get("tab") === "entries") === to.includes("entries") : to === "/" ? pathname === "/" : to === "/services" ? pathname.startsWith("/services") || pathname.startsWith("/edge/") : pathname.startsWith(to);
 
   return (
     <Sidebar collapsible="icon">

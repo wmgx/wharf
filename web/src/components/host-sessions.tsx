@@ -1,4 +1,4 @@
-import { Tip } from "@/components/kit";
+import { ConfirmDialog, Tip } from "@/components/kit";
 import { PencilIcon, PlusIcon, XIcon } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
@@ -24,6 +24,7 @@ export function HostSessions({ server }: { server: string }) {
   const { data, refresh } = usePoll<HostSession[]>(path, 15000);
   // 页面上已经有的标签。会话列表读得慢或者读失败时，标签也不会消失；
   // 新建的会话要等终端连上才在机器上出现，也先记在这里。
+  const [closing, setClosing] = useState<string | null>(null);
   const [tabs, setTabs] = useState<string[]>([]);
   const [current, setCurrent] = useState<string | undefined>(undefined);
 
@@ -41,7 +42,7 @@ export function HostSessions({ server }: { server: string }) {
   };
 
   const close = async (name: string) => {
-    if (!window.confirm(`结束「${label(name)}」？里面还在运行的程序会一起结束。`)) return;
+    setClosing(null);
     try {
       if (live.includes(name)) await api.del(`${path}/${encodeURIComponent(name)}`);
       const rest = names.filter((x) => x !== name);
@@ -97,7 +98,7 @@ export function HostSessions({ server }: { server: string }) {
                 type="button"
                 aria-label={`结束${label(name)}`}
                 className="mr-1 grid size-5 place-items-center rounded text-muted-foreground opacity-60 hover:bg-accent hover:opacity-100"
-                onClick={() => close(name)}
+                onClick={() => setClosing(name)}
               >
                 <XIcon className="size-3.5" />
               </button></Tip>
@@ -113,6 +114,7 @@ export function HostSessions({ server }: { server: string }) {
           新建会话
         </button>
       </div>
+      <ConfirmDialog open={closing !== null} title={`结束「${label(closing ?? DEFAULT)}」？`} onCancel={() => setClosing(null)} onConfirm={() => closing && close(closing)}>里面还在运行的程序会一起结束。</ConfirmDialog>
       <Terminal key={active} name={server} target="host" session={active} title={`${server} · ${label(active)}`} onConnected={refresh} />
     </div>
   );

@@ -1,6 +1,6 @@
 import { api, usePoll } from "@/api";
-import { useState } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { AddAlias } from "@/components/add-alias";
 import { AddRedirect } from "@/components/add-redirect";
 import { AccessProtection } from "@/components/access-protection";
@@ -9,16 +9,16 @@ import { Dot, SectionTitle, StatusBadge, ago } from "@/components/common";
 import { Field, Picker } from "@/components/fields";
 import { LAYER, diagnosisOf, routeTone } from "@/components/health";
 import { hopOf } from "@/components/hop";
-import { Facts, Panel, Row, Rows } from "@/components/kit";
+import { ConfirmDialog, Facts, Panel, Row, Rows } from "@/components/kit";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { Sheet, SheetContent, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import type { SsoTestResult } from "@/types.gen";
 import type { GateKeyView, RouteView, Status } from "@/types";
 
-export function DomainDetail({ route, status, onClose }: { route: RouteView; status: Status; onClose: () => void }) {
+function DomainDetail({ route, status, onClose, onDirty }: { route: RouteView; status: Status; onClose: () => void; onDirty: (dirty: boolean) => void }) {
   const actions = useActions();
   const [testOpen, setTestOpen] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -32,11 +32,9 @@ export function DomainDetail({ route, status, onClose }: { route: RouteView; sta
   };
   const keys = usePoll<GateKeyView[]>("/api/gate/keys", 30000).data;
   const keyCount = keys?.filter((k) => k.hosts.includes(route.spec.hostname)).length ?? 0;
-  const [params] = useSearchParams();
-  const [gateOpen, setGateOpen] = useState(params.get("protection") === "1");
+  const [gateOpen, setGateOpen] = useState(false);
   const [alias, setAlias] = useState(false);
   const [redirect, setRedirect] = useState(false);
-  const [, setParams] = useSearchParams();
   const [link, setLink] = useState(route.spec.link);
   const [rate, setRate] = useState<number | null>(route.spec.rate_limit ?? null);
   const [block, setBlock] = useState(!!route.spec.block_scanners);
@@ -48,6 +46,7 @@ export function DomainDetail({ route, status, onClose }: { route: RouteView; sta
   const cert = diagnosis?.cert_expires;
   const days = cert ? Math.floor((new Date(cert).getTime() - Date.now()) / 86400000) : 0;
   const changed = link !== route.spec.link || backup !== (route.spec.backup_gateway ?? "") || rate !== (route.spec.rate_limit ?? null) || block !== !!route.spec.block_scanners;
+  useEffect(() => { onDirty(changed); }, [changed, onDirty]);
   return <>
     <SheetHeader className="border-b">
       <SheetTitle className="font-mono">
@@ -99,9 +98,9 @@ export function DomainDetail({ route, status, onClose }: { route: RouteView; sta
       <Panel className="grid gap-4 p-4">
         <Facts items={[
           ["入口", gateway && <>
-            <button className="hover:underline" onClick={() => setParams({ tab: "entries", entry: gateway.name })}>
+            <Link className="hover:underline" to={`/domains?tab=entries&entry=${encodeURIComponent(gateway.name)}`}>
               {gateway.name}
-            </button> <span className="text-muted-foreground">
+            </Link> <span className="text-muted-foreground">
               {gateway.spec.server}
             </span>
           </>],
@@ -130,6 +129,9 @@ export function DomainDetail({ route, status, onClose }: { route: RouteView; sta
         {route.spec.sso?.trust_internal && <span className="text-xs text-muted-foreground">组网内免登录</span>}
         {route.spec.sso && keyCount > 0 && <span className="text-xs text-muted-foreground">{keyCount} 个访问凭证</span>}
         {!!route.spec.sso?.skip_paths?.length && <span className="break-all font-mono text-xs text-muted-foreground">{route.spec.sso.skip_paths.join("、")}</span>}
+      </Panel>
+      <SectionTitle>防护</SectionTitle>
+      <Panel className="grid gap-3 p-4 text-sm">
         {!route.spec.redirect && (gateway?.spec.kind === "cloudflare_tunnel" ? <span className="text-muted-foreground">隧道入口不支持限速和拦截扫描</span> : <>
           <label className="flex flex-wrap items-center gap-2">
             <Checkbox checked={rate !== null} onCheckedChange={(v) => setRate(v === true ? 600 : null)} />限速
@@ -150,7 +152,8 @@ export function DomainDetail({ route, status, onClose }: { route: RouteView; sta
     </div>
     <SheetFooter className="flex-row justify-between border-t">
       <Button variant="outline" className="text-destructive" onClick={() => actions.removeRoute(route.spec.hostname)}>移除域名</Button>
-      <Button disabled={!changed || (rate !== null && (!Number.isInteger(rate) || rate < 10 || rate > 100000))} onClick={() => { onClose(); actions.plan({ title: `修改 ${route.spec.hostname}`, changes: [{ op: "upsert_route", spec: { ...route.spec, link, backup_gateway: backup || undefined, rate_limit: rate ?? undefined, block_scanners: block || undefined } }] }); }}>预览改动</Button>
+      <div className="grid min-w-0 gap-2">{changed && <span className="text-xs text-muted-foreground">改了：{[link !== route.spec.link && "走法", backup !== (route.spec.backup_gateway ?? "") && "备用入口", rate !== (route.spec.rate_limit ?? null) && "限速", block !== !!route.spec.block_scanners && "拦截常见扫描"].filter(Boolean).join("、")}</span>}
+      <Button disabled={!changed || (rate !== null && (!Number.isInteger(rate) || rate < 10 || rate > 100000))} onClick={() => { onClose(); actions.plan({ title: `修改 ${route.spec.hostname}`, changes: [{ op: "upsert_route", spec: { ...route.spec, link, backup_gateway: backup || undefined, rate_limit: rate ?? undefined, block_scanners: block || undefined } }] }); }}>预览改动</Button></div>
     </SheetFooter>
     {gateOpen && <AccessProtection route={route} onClose={() => setGateOpen(false)} />}
     <Dialog open={testOpen} onOpenChange={setTestOpen}>
@@ -168,5 +171,19 @@ export function DomainDetail({ route, status, onClose }: { route: RouteView; sta
     </Dialog>
     <AddAlias route={route} open={alias} onClose={() => setAlias(false)} />
     <AddRedirect open={redirect} onClose={() => setRedirect(false)} target={route.url} gateway={route.gateway} />
+  </>;
+}
+
+export function DomainSheet({ route, status, onClose }: { route?: RouteView; status: Status; onClose: () => void }) {
+  const [dirty, setDirty] = useState(false);
+  const [discard, setDiscard] = useState(false);
+  const close = () => { if (dirty) setDiscard(true); else onClose(); };
+  return <>
+    <Sheet open={!!route} onOpenChange={(open) => !open && close()}>
+      <SheetContent className="w-full gap-0 sm:max-w-xl" aria-describedby={undefined}>
+        {route && <DomainDetail key={route.id} route={route} status={status} onClose={() => { setDirty(false); onClose(); }} onDirty={setDirty} />}
+      </SheetContent>
+    </Sheet>
+    <ConfirmDialog open={discard} title="放弃改动？" confirmText="放弃" onCancel={() => setDiscard(false)} onConfirm={() => { setDiscard(false); setDirty(false); onClose(); }}>未预览的改动不会保存。</ConfirmDialog>
   </>;
 }

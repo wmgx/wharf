@@ -37,7 +37,7 @@ export function SettingsForm({ server, canRemove, active }: { server: ServerView
   const actions = useActions();
   useEffect(() => { if (active && hash) document.getElementById(hash.slice(1))?.scrollIntoView(); }, [active, hash]);
   const groups: [string, (keyof Settings)[]][] = [
-    ["网络", ["network_mode", "public_ip", "lan_addrs"]],
+    ["网络", ["public_ip", "lan_addrs"]],
     ["访问外网", ["via", "egress", "git_proxy", "pull_proxy", "github_mirror"]],
     ["部署", ["registry_mirrors", "mirrors_only", "build_env"]],
     ["流量", ["traffic_quota_gb", "traffic_reset_day"]],
@@ -45,14 +45,11 @@ export function SettingsForm({ server, canRemove, active }: { server: ServerView
     ["权限", ["host_terminal", "host_exec"]],
   ];
   const changed = groups.filter(([, keys]) => dirty(keys)).map(([label]) => label);
-  return <SettingsFields key={version} server={server} canRemove={canRemove} draft={draft} set={set} changed={changed} onReset={() => { reset(); setVersion((v) => v + 1); }} onSubmit={() => actions.plan({ title: `设置 ${server.name}`, changes: [{ op: "update_server", name: server.name, settings: draft }] })} />;
+  return <SettingsFields key={version} server={server} canRemove={canRemove} draft={draft} set={set} changed={changed} onReset={() => { reset(); setVersion((v) => v + 1); }} onSubmit={() => actions.plan({ title: `设置 ${server.name}`, changes: [{ op: "update_server", name: server.name, settings: { ...draft, network_mode: server.settings.network_mode } }] })} />;
 }
 
 function SettingsFields({ server, canRemove, draft, set, changed, onReset, onSubmit }: { server: ServerView; canRemove: boolean; draft: Settings; set: (patch: Partial<Settings>) => void; changed: string[]; onReset: () => void; onSubmit: () => void }) {
   const nav = useNavigate();
-  const { data: network } = usePoll<NetworkView>("/api/network", 30000);
-  const detected = network?.servers.find((s) => s.name === server.name);
-  const currentMode = detected && !detected.configured ? detected.mode : undefined;
   const [mirrors, setMirrors] = useState(mirrorsText(draft.registry_mirrors));
   const [buildEnv, setBuildEnv] = useState(formatEnv(draft.build_env));
   const [quota, setQuota] = useState(draft.traffic_quota_gb?.toString() ?? "");
@@ -75,16 +72,14 @@ function SettingsFields({ server, canRemove, draft, set, changed, onReset, onSub
   const remove = async () => {
     setRemoving(false);
     try { await api.del(`/api/servers/${encodeURIComponent(server.name)}`); toast.success(`已删除服务器 ${server.name}`); nav("/servers"); }
-    catch(e) { toast.error(`不能删除 ${server.name}`, { description: (e as Error).message }); }
+    catch(e) { toast.error(`删除 ${server.name} 失败`, { description: (e as Error).message }); }
   };
   return <div className="max-w-2xl">
     <div id="network">
       <SectionTitle>网络</SectionTitle>
     </div>
     <Panel className="grid gap-4 p-4">
-      <Field label="接入方式" help={`这台和其他机器怎么连。自动：按检测到的地址判断${currentMode ? `，现在是${MODES[currentMode]}` : ""}。`}>
-        <div className="max-w-full overflow-x-auto"><Segmented value={draft.network_mode ?? "auto"} options={[["auto", "自动"], ["tailscale", "Tailscale"], ["lan", "内网直连"], ["public", "仅公网"]]} onChange={(v) => set({ network_mode: v === "auto" ? undefined : v })} /></div>
-      </Field>
+      <Button variant="outline" onClick={() => nav(`/servers/${encodeURIComponent(server.name)}?tab=network`)}>修改接入方式</Button>
       <Field label="公网 IP" htmlFor="public-ip" help={`不填用探测到的${server.public_ip ? `（现在是 ${server.public_ip}）` : ""}。入口的 DNS 指向它。`}>
         <Input id="public-ip" value={draft.public_ip ?? ""} placeholder="自动探测" onChange={(e) => set({ public_ip: e.target.value || undefined })} />
       </Field>
@@ -170,4 +165,17 @@ function SettingsFields({ server, canRemove, draft, set, changed, onReset, onSub
     <ConfirmDialog open={removing} title={`删除服务器 ${server.name}？`} onCancel={() => setRemoving(false)} onConfirm={remove}>只删除 Wharf 里的记录，这台机器上的 agent 要自己停掉。</ConfirmDialog>
     <SaveBar changed={changed} disabled={trafficValid ? undefined : "流量额度或重置日不正确"} onReset={onReset} onSubmit={onSubmit} />
   </div>;
+}
+
+export function NetworkSettings({ server }: { server: ServerView }) {
+  const { draft, set, reset, dirty } = useDraft(server.settings as Settings);
+  const actions = useActions();
+  const { data: network } = usePoll<NetworkView>("/api/network", 30000);
+  const detected = network?.servers.find((s) => s.name === server.name);
+  const currentMode = detected && !detected.configured ? detected.mode : undefined;
+  return <div className="mt-4"><Panel className="p-4">
+      <Field label="接入方式" help={`这台和其他机器怎么连。自动：按检测到的地址判断${currentMode ? `，现在是${MODES[currentMode]}` : ""}。`}>
+        <div className="max-w-full overflow-x-auto"><Segmented value={draft.network_mode ?? "auto"} options={[["auto", "自动"], ["tailscale", "Tailscale"], ["lan", "内网直连"], ["public", "仅公网"]]} onChange={(v) => set({ network_mode: v === "auto" ? undefined : v })} /></div>
+      </Field>
+  </Panel><SaveBar changed={dirty(["network_mode"]) ? ["接入方式"] : []} onReset={reset} onSubmit={() => actions.plan({ title: `设置 ${server.name}`, changes: [{ op: "update_server", name: server.name, settings: { ...server.settings, network_mode: draft.network_mode } }] })} /></div>;
 }

@@ -21,9 +21,12 @@ export function Row({ to, onClick, className, children }: { to?: string; onClick
   const button = onClick && {
     role: "button",
     tabIndex: 0,
-    onClick,
+    onClick: (e: React.MouseEvent) => {
+      if (window.getSelection()?.toString() || (e.target as HTMLElement).closest("a,button,input,label,[role=menuitem]")) return;
+      onClick();
+    },
     onKeyDown: (e: React.KeyboardEvent) => {
-      if (e.key === "Enter" && e.target === e.currentTarget) onClick();
+      if ((e.key === "Enter" || e.key === " ") && e.target === e.currentTarget) { e.preventDefault(); onClick(); }
     },
   };
   return (

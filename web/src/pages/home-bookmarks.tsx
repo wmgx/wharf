@@ -53,7 +53,7 @@ export function HomeBookmarks({ open, onClose }: { open: boolean; onClose: () =>
       toast.success(`已保存书签 ${title}`);
       return true;
     } catch (e) {
-      toast.error(`不能保存书签 ${title}`, { description: (e as Error).message });
+      toast.error(`保存书签 ${title} 失败`, { description: (e as Error).message });
       return false;
     } finally { setBusy(false); }
   };

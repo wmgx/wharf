@@ -2,7 +2,7 @@
 
 use std::{sync::Arc, time::Duration};
 
-use wharf_api_types::view::{Issue, IssueLevel};
+use wharf_api_types::view::{Issue, IssueLevel, IssueSubject};
 
 use crate::state::AppState;
 
@@ -10,12 +10,15 @@ const EVERY: Duration = Duration::from_secs(60);
 
 /// 正在反复重启的服务，进"需要注意"。
 pub fn issues() -> Vec<Issue> {
-  crate::rules::firing("container_restarting")
+  crate::rules::firing_subjects("container_restarting")
     .into_iter()
-    .map(|title| Issue {
+    .map(|(name, title)| Issue {
       code: "container_restarting".into(),
       level: IssueLevel::Fault,
-      subject: None,
+      subject: Some(IssueSubject {
+        kind: "service".into(),
+        name,
+      }),
       title,
       hint: None,
     })

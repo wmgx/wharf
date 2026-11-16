@@ -38,7 +38,7 @@ export function ServerExposure({ server }: { server: string }) {
           <span className="min-w-0 flex-1 break-all">{owners[p.owner]} · {p.name}</span>
           {p.expected ? <StatusBadge tone="idle">预期</StatusBadge> : <span className="flex items-center gap-2">
             {p.acked && <StatusBadge tone="idle">已确认</StatusBadge>}
-            <Button size="xs" variant="ghost" disabled={busy} onClick={() => load("ack", { port: `${p.proto}/${p.port}`, acked: !p.acked })}>{p.acked ? "取消确认" : "我知道"}</Button>
+            <Button size="xs" variant="outline" disabled={busy} onClick={() => load("ack", { port: `${p.proto}/${p.port}`, acked: !p.acked })}>{p.acked ? "取消确认" : "我知道"}</Button>
           </span>}
         </Row>)}</Rows>}
         <div className="mt-6"><SectionTitle>权限较大的容器</SectionTitle></div>
