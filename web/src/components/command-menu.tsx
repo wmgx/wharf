@@ -229,7 +229,7 @@ export function CommandMenu({ onLogout }: { onLogout: () => void }) {
           )}
           <CommandSeparator />
           <CommandGroup heading="新建">
-            {NEW_ITEMS.map((item) => <CommandItem key={item.path} value={item.label} disabled={item.needsService && !services.length} onSelect={() => run(() => nav(item.path))}><item.icon />{item.label}</CommandItem>)}
+            {NEW_ITEMS.map((item) => <CommandItem key={item.path} value={`${item.label} ${item.keywords ?? ""}`} disabled={item.needsService && !services.length} onSelect={() => run(() => nav(item.path))}><item.icon />{item.label}</CommandItem>)}
           </CommandGroup>
           <CommandSeparator />
           <CommandGroup heading="其他">

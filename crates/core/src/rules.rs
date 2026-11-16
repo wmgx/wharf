@@ -883,17 +883,6 @@ async fn history(state: &AppState) -> Vec<AlertHistoryView> {
     })
 }
 
-/// 某条规则正在触发的标题，给"需要注意"用。
-pub fn firing(rule: &str) -> Vec<String> {
-  with(|m| {
-    m.firing
-      .iter()
-      .filter(|((r, _), _)| r == rule)
-      .map(|(_, (_, t))| t.clone())
-      .collect()
-  })
-}
-
 /// 某条规则正在触发的对象和标题：`(对象, 标题)`。
 pub fn firing_subjects(rule: &str) -> Vec<(String, String)> {
   with(|m| {

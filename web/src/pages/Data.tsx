@@ -35,7 +35,7 @@ export function Data() {
   const set = (key: string, value: string, fallback: string) => { const next = new URLSearchParams(params); if (value === fallback) next.delete(key); else next.set(key, value); setParams(next); };
   const run = async (name: string) => {
     try { const { run_id } = await api.post<{ run_id: string }>(`/api/services/${encodeURIComponent(name)}/backups`, {}); actions.watch(run_id, `备份 ${name}`); setTimeout(refresh, 3000); }
-    catch(e) { toast.error("不能开始备份", { description: (e as Error).message }); }
+    catch(e) { toast.error("开始备份失败", { description: (e as Error).message }); }
   };
   return <>
     <ErrorNote error={error} />

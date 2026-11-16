@@ -39,7 +39,7 @@ export function Backups({ svc }: { svc: ServiceView }) {
       actions.watch(run_id, `备份 ${name}`);
       setTimeout(refresh, 3000);
     } catch (e) {
-      toast.error("不能开始备份", { description: (e as Error).message });
+      toast.error("开始备份失败", { description: (e as Error).message });
     }
   };
 
@@ -52,7 +52,7 @@ export function Backups({ svc }: { svc: ServiceView }) {
       });
       actions.watch(run_id, `恢复 ${name} 到 ${snap.short_id}`);
     } catch (e) {
-      toast.error("不能开始恢复", { description: (e as Error).message });
+      toast.error("开始恢复失败", { description: (e as Error).message });
     }
   };
 
