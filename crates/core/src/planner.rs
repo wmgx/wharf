@@ -268,8 +268,8 @@ pub(crate) struct Builder {
   pub(crate) items: Vec<PlanItem>,
   steps: Vec<StepPlan>,
   pub(crate) warnings: Vec<String>,
-  /// 这次计划查到的镜像 ID：服务 → `sha256:…`。
-  image_ids: BTreeMap<String, String>,
+  /// 这次计划查到的镜像 ID：服务 → 镜像 → `sha256:…`。
+  image_ids: BTreeMap<String, BTreeMap<String, String>>,
   /// 删除时连同数据一起删的服务。
   purge_data: BTreeSet<String>,
 }
@@ -366,6 +366,15 @@ pub async fn make_plan(
   )
   .await?;
   let mut warnings = resolved.warnings;
+  for name in &refresh {
+    if let Some(why) = desired
+      .services
+      .get(name)
+      .and_then(|r| crate::pins::unsupported(&r.spec.source))
+    {
+      warnings.push(format!("服务 {name} 没法检查更新：{why}"));
+    }
+  }
   if desired.routes.values().any(|r| r.spec.sso.is_some())
     && state
       .db
@@ -1082,10 +1091,17 @@ fn service_items(
     let upgrade = crate::pins::change(
       snap.applied.get(name),
       &svc.pins,
-      b.image_ids.get(name).map(String::as_str),
+      b.image_ids.get(name),
     )
-    .map(|(old, new)| {
-      format!("更新镜像版本 {old} → {}", crate::pins::short(&new))
+    .map(|(image, old, new)| {
+      let what = match &svc.spec.source {
+        Source::Image(_) => String::new(),
+        _ => format!(" {image}"),
+      };
+      format!(
+        "更新镜像版本{what} {old} → {}",
+        crate::pins::short(&new)
+      )
     })
     .or_else(|| {
       crate::pins::commit_change(

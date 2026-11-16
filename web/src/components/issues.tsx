@@ -33,15 +33,19 @@ export function subjectPath(s: IssueSubject): string {
 export function IssueRow({ issue }: { issue: Issue }) {
   const actions = useActions();
   const nav = useNavigate();
+  const { status } = useStatus();
   const Icon = issue.level === "fault" ? CircleAlertIcon : issue.level === "warn" ? TriangleAlertIcon : InfoIcon;
   const color = issue.level === "fault" ? "text-destructive" : issue.level === "warn" ? "text-warning" : "text-muted-foreground";
   const subject = issue.subject;
+  const tag = subject ? status?.updates?.services[subject.name]?.tags?.[0] : undefined;
   return (
     <Row className="items-start">
       <Icon className={`mt-0.5 size-4 shrink-0 ${color}`} />
       <span className="min-w-0 flex-1 break-all">{issue.title}</span>
       {issue.code === "update_available" && subject ? (
         <Button variant="outline" size="xs" onClick={() => actions.plan({ title: `更新 ${subject.name}`, changes: [{ op: "refresh_images", name: subject.name }] })}>更新</Button>
+      ) : issue.code === "tag_available" && subject && tag ? (
+        <Button variant="outline" size="xs" onClick={() => actions.plan({ title: `${subject.name} 升级到 ${tag.tag}`, changes: [{ op: "retag_image", name: subject.name, image: tag.image, tag: tag.tag }] })}>升级到 {tag.tag}</Button>
       ) : issue.code === "agent_outdated" && subject ? (
         <Button variant="outline" size="xs" onClick={() => actions.upgradeAgent(subject.name)}>升级 agent</Button>
       ) : issue.code === "pending_changes" ? (

@@ -804,6 +804,14 @@ pub enum Change {
   RefreshImages {
     name: String,
   },
+  /// 把服务里的镜像换成同一仓库的另一个标签（image 来源改镜像，compose 来源改 `image:` 那一行），
+  /// 计划时查新标签的版本。例：`halo/halo:2.20` 换成 `2.21`。
+  RetagImage {
+    name: String,
+    /// 现在写的镜像，和 compose 里的一字不差。
+    image: String,
+    tag: String,
+  },
   UpsertGateway {
     name: String,
     spec: GatewaySpec,

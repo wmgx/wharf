@@ -35,10 +35,11 @@ export function useOpCtx(): OpCtx {
 
 export const serviceOps: Op<ServiceView>[] = [
   { id: "update", label: "更新", icon: ArrowUpCircleIcon, keywords: "更新 升级 update", group: "main", show: (s, c) => !!c.status?.updates?.services[s.name]?.newer, run: (s, c) => c.actions.plan({ title: `更新 ${s.name}`, changes: [{ op: "refresh_images", name: s.name }] }) },
+  { id: "retag", label: "升级到更高版本", icon: ArrowUpCircleIcon, keywords: "升级 标签 版本 retag", group: "main", show: (s, c) => !!c.status?.updates?.services[s.name]?.tags?.length, run: (s, c) => { const t = c.status!.updates!.services[s.name].tags![0]; c.actions.plan({ title: `${s.name} 升级到 ${t.tag}`, changes: [{ op: "retag_image", name: s.name, image: t.image, tag: t.tag }] }); } },
   { id: "start", label: "启动", icon: PlayIcon, keywords: "启动 start", group: "main", show: (s) => !!s.spec.stopped, run: (s, c) => c.actions.setStopped(s, false) },
   { id: "restart", label: "重启", icon: RotateCwIcon, keywords: "重启 restart", group: "main", show: (s) => !s.spec.stopped, run: (s, c) => c.actions.restart(s.name) },
   { id: "logs", label: "看日志", icon: ScrollTextIcon, keywords: "日志 logs", group: "more", run: (s, c) => c.nav(`/services/${encodeURIComponent(s.name)}?tab=logs`) },
-  { id: "check-update", label: "检查更新", icon: RefreshCwIcon, keywords: "更新 升级 update", group: "more", show: (s, c) => !c.status?.updates?.services[s.name]?.newer && ("image" in s.spec.source || ("build" in s.spec.source && !!s.spec.source.build.git)), run: (s, c) => c.actions.plan({ title: `检查 ${s.name} 的更新`, changes: [{ op: "refresh_images", name: s.name }] }) },
+  { id: "check-update", label: "检查更新", icon: RefreshCwIcon, keywords: "更新 升级 update", group: "more", show: (s, c) => !c.status?.updates?.services[s.name]?.newer && ("image" in s.spec.source || "compose" in s.spec.source || ("build" in s.spec.source && !!s.spec.source.build.git)), run: (s, c) => c.actions.plan({ title: `检查 ${s.name} 的更新`, changes: [{ op: "refresh_images", name: s.name }] }) },
   { id: "repack", label: "更新代码包", icon: PackageIcon, keywords: "代码包 上传", group: "more", show: (s) => "build" in s.spec.source && !s.spec.source.build.git, run: (s, c) => c.nav(`/services/${encodeURIComponent(s.name)}?repack=1`) },
   { id: "rebuild", label: "重新构建", icon: HammerIcon, keywords: "构建 build", group: "more", show: (s) => "build" in s.spec.source, run: (s, c) => c.actions.rebuild(s.name) },
   { id: "redeploy", label: "重新部署", icon: WrenchIcon, keywords: "重新部署 修复 redeploy", group: "more", run: (s, c) => c.actions.redeploy(s) },

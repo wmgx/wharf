@@ -991,6 +991,9 @@ pub struct ResolveCommit {
 pub struct ResolveImages {
   pub images: Vec<String>,
   pub pull: PullPolicy,
+  /// 顺便列出仓库里更高版本的标签。旧版本 agent 不认识这个字段，不返回。
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub tags: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1004,6 +1007,9 @@ pub struct ResolvedImage {
   pub config: Option<String>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub error: Option<String>,
+  /// `tags` 时：同一大版本里最高的标签，和跨大版本最高的标签（没有就不列）。
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub newer_tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

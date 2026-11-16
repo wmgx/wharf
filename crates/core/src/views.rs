@@ -649,6 +649,32 @@ pub async fn status(
           hint: None,
         });
       }
+      if let Some(t) = check.tags.first()
+        && services.iter().any(|s| &s.name == name)
+      {
+        let all = check
+          .tags
+          .iter()
+          .map(|t| {
+            let major = if t.major { "（大版本）" } else { "" };
+            format!("{}{major}", t.tag)
+          })
+          .collect::<Vec<_>>()
+          .join("、");
+        issues.push(Issue {
+          code: "tag_available".into(),
+          level: IssueLevel::Info,
+          subject: Some(IssueSubject {
+            kind: "service".into(),
+            name: name.clone(),
+          }),
+          title: format!("{name} 有更高版本的镜像：{all}"),
+          hint: Some(format!(
+            "换标签要改配置：wharf service retag {name} {} {}",
+            t.image, t.tag
+          )),
+        });
+      }
     }
     if let Some(pending) = &updates.pending
       && !pending.items.is_empty()

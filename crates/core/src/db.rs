@@ -1268,6 +1268,18 @@ pub fn applied(
             .first()
             .map(|i| i.id.clone())
             .filter(|i| !i.is_empty()),
+          digests: images
+            .iter()
+            .filter_map(|i| {
+              let (_, d) = i.digest.as_deref()?.split_once('@')?;
+              Some((i.image.clone(), d.to_string()))
+            })
+            .collect(),
+          image_ids: images
+            .iter()
+            .filter(|i| !i.id.is_empty())
+            .map(|i| (i.image.clone(), i.id.clone()))
+            .collect(),
           commit: r.get(4)?,
           git: r.get(5)?,
         },

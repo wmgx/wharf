@@ -333,7 +333,9 @@ impl World {
             .map(|s| s.pins.clone())
             .unwrap_or_default()
             .into_iter()
-            .filter(|(image, _)| matches!(&spec.source, Source::Image(i) if i == image))
+            .filter(|(image, _)| {
+              crate::pins::images(&spec.source).contains(image)
+            })
             .collect();
           // 改构建配置不换代码；换了仓库或分支的，计划时重新查。
           let commit = old
@@ -424,6 +426,15 @@ impl World {
           })?;
           row.pins.clear();
           row.commit = None;
+        }
+        Change::RetagImage { name, image, tag } => {
+          let row = self.services.get_mut(name).ok_or_else(|| {
+            ApiError::not_found(format!("服务 {name} 不存在"))
+              .suggest("wharf service list")
+          })?;
+          row.spec.source =
+            crate::pins::retag(&row.spec.source, image, tag)?;
+          row.pins.remove(image);
         }
         Change::RemoveService { name, .. } => {
           if self.services.remove(name).is_none() {

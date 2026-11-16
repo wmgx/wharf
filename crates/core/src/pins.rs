@@ -1,4 +1,4 @@
-//! 计划时固定 image 来源服务的镜像版本：没固定过的（新服务、换了镜像、检查更新）
+//! 计划时固定镜像版本（image 来源和 compose 里的各个镜像）：没固定过的（新服务、换了镜像、检查更新）
 //! 由服务所在机器的 agent 查出标签当前的 digest，执行时按它拉取，不会被中途更新的标签替换。
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -23,14 +23,76 @@ const COMMIT_TIMEOUT: std::time::Duration =
   std::time::Duration::from_secs(180);
 
 pub struct Resolved {
-  /// 这次查到的镜像 ID：服务 → `sha256:…`，用来判断正在跑的是不是这个版本。
-  pub image_ids: BTreeMap<String, String>,
+  /// 这次查到的镜像 ID：服务 → 镜像 → `sha256:…`，用来判断正在跑的是不是这个版本。
+  pub image_ids: BTreeMap<String, BTreeMap<String, String>>,
   pub warnings: Vec<String>,
 }
 
-/// 给还没固定版本的 image 来源服务定版本。`refresh` 是这次要检查更新的服务。
+/// 服务里能固定版本、能检查更新的镜像（compose 里写的名字）：image 来源就是那个镜像；
+/// compose 来源是各组件的 `image`，跳过写了 digest、用了 `${变量}`、或者本地构建（有 `build`）的。
+pub fn images(source: &Source) -> Vec<String> {
+  let content = match source {
+    Source::Image(image) => return vec![image.clone()],
+    Source::Compose { content, .. } => {
+      content.as_deref().unwrap_or_default()
+    }
+    Source::Build(_) => return vec![],
+  };
+  let Ok(compose) =
+    serde_yaml_ng::from_str::<serde_yaml_ng::Value>(content)
+  else {
+    return vec![];
+  };
+  let mut out: Vec<String> = compose["services"]
+    .as_mapping()
+    .into_iter()
+    .flat_map(|m| m.values())
+    .filter(|svc| svc.get("build").is_none())
+    .filter_map(|svc| svc["image"].as_str())
+    .map(str::trim)
+    .filter(|i| !i.is_empty() && !i.contains('@') && !i.contains('$'))
+    .map(str::to_string)
+    .collect();
+  out.sort();
+  out.dedup();
+  out
+}
+
+/// 为什么这个服务没法检查更新；能检查时为空。
+pub fn unsupported(source: &Source) -> Option<&'static str> {
+  match source {
+    Source::Compose { .. } if images(source).is_empty() => Some(
+      "compose 里的镜像都写了 digest、用了变量或在本地构建，没有可以检查的标签",
+    ),
+    Source::Build(b) if b.git.is_none() => {
+      Some("从本机目录构建的服务没有远端版本，要更新请重新上传代码包")
+    }
+    _ => None,
+  }
+}
+
+/// 上次部署时这个镜像的 (digest, 镜像 ID)。
+fn running(
+  a: &Applied,
+  image: &str,
+) -> (Option<String>, Option<String>) {
+  let old = a.image.as_deref() == Some(image);
+  (
+    a.digests
+      .get(image)
+      .cloned()
+      .or_else(|| a.digest.clone().filter(|_| old)),
+    a.image_ids
+      .get(image)
+      .cloned()
+      .or_else(|| a.image_id.clone().filter(|_| old)),
+  )
+}
+
+/// 给还没固定版本的镜像定版本。`refresh` 是这次要检查更新的服务。
 /// 部署过、镜像没换的：固定到正在跑的版本，不会因为补查版本而升级；
 /// 正在跑的版本查不清又不是最新的，不固定，提醒用户检查更新。
+/// compose 来源查不到时（例如要登录的私有仓库）只提醒，照旧按标签拉取。
 pub async fn resolve(
   state: &AppState,
   applied: &BTreeMap<String, Applied>,
@@ -45,25 +107,23 @@ pub async fn resolve(
   let mut todo: BTreeMap<String, Vec<(String, String)>> =
     BTreeMap::new();
   for (name, row) in desired.services.iter_mut() {
-    let Source::Image(image) = &row.spec.source else {
-      continue;
-    };
-    if row.pins.contains_key(image) {
-      continue;
+    for image in images(&row.spec.source) {
+      if row.pins.contains_key(&image) {
+        continue;
+      }
+      let digest =
+        applied.get(name).and_then(|a| running(a, &image).0);
+      if !refresh.contains(name)
+        && let Some(digest) = digest
+      {
+        row.pins.insert(image, digest);
+        continue;
+      }
+      todo
+        .entry(row.spec.server.clone())
+        .or_default()
+        .push((name.clone(), image));
     }
-    let same = applied
-      .get(name)
-      .filter(|a| a.image.as_deref() == Some(image.as_str()));
-    if !refresh.contains(name)
-      && let Some(digest) = same.and_then(|a| a.digest.clone())
-    {
-      row.pins.insert(image.clone(), digest);
-      continue;
-    }
-    todo
-      .entry(row.spec.server.clone())
-      .or_default()
-      .push((name.clone(), image.clone()));
   }
   for (server, items) in todo {
     let images = items.iter().map(|(_, i)| i.clone()).collect();
@@ -74,6 +134,7 @@ pub async fn resolve(
         AgentOp::ResolveImages(ResolveImages {
           images,
           pull: snapshot::pull_policy(&desired.servers[&server]),
+          tags: false,
         }),
         RESOLVE_TIMEOUT,
         None,
@@ -84,34 +145,56 @@ pub async fn resolve(
         e.with_hint("确认这台机器的 agent 在线并已升级；查不到镜像版本就没法固定要部署的版本")
       })?;
     for (name, image) in items {
+      let compose = matches!(
+        desired.services.get(&name).map(|r| &r.spec.source),
+        Some(Source::Compose { .. })
+      );
       let found = resolved.iter().find(|r| r.image == image);
-      let digest =
-        found.and_then(|r| r.digest.clone()).ok_or_else(|| {
+      let digest = match found.and_then(|r| r.digest.clone()) {
+        Some(d) => d,
+        None => {
           let why = found
             .and_then(|r| r.error.clone())
             .unwrap_or_else(|| "agent 没有返回结果".into());
-          ApiError::invalid(format!(
-            "查不到服务 {name} 的镜像 {image} 现在的版本：{why}"
-          ))
-          .with_hint(
-            "镜像名写错了，或者仓库暂时连不上；稍后重新 plan",
-          )
-        })?;
+          if compose {
+            out.warnings.push(format!(
+              "查不到服务 {name} 的镜像 {image} 现在的版本，这次不固定、照旧按标签拉取：{why}"
+            ));
+            continue;
+          }
+          return Err(
+            ApiError::invalid(format!(
+              "查不到服务 {name} 的镜像 {image} 现在的版本：{why}"
+            ))
+            .with_hint(
+              "镜像名写错了，或者仓库暂时连不上；稍后重新 plan",
+            ),
+          );
+        }
+      };
       let config = found.and_then(|r| r.config.clone());
-      let running = applied
+      let deployed = applied
         .get(&name)
-        .filter(|a| a.image.as_deref() == Some(image.as_str()));
-      if !refresh.contains(&name)
-        && let Some(a) = running
-        && (config.is_none() || a.image_id != config)
+        .filter(|_| !refresh.contains(&name))
+        .filter(|a| {
+          a.digests.contains_key(&image)
+            || a.image_ids.contains_key(&image)
+            || a.image.as_deref() == Some(image.as_str())
+        });
+      if let Some(a) = deployed
+        && (config.is_none() || running(a, &image).1 != config)
       {
         out.warnings.push(format!(
-          "服务 {name} 正在跑的镜像不是仓库里 {image} 的最新版本，这次不固定版本；要更新执行 wharf service update {name}"
+          "服务 {name} 正在跑的镜像 {image} 不是仓库里的最新版本，这次不固定版本；要更新执行 wharf service update {name}"
         ));
         continue;
       }
       if let Some(config) = config {
-        out.image_ids.insert(name.clone(), config);
+        out
+          .image_ids
+          .entry(name.clone())
+          .or_default()
+          .insert(image.clone(), config);
       }
       if let Some(row) = desired.services.get_mut(&name) {
         row.pins.insert(image, digest);
@@ -215,25 +298,111 @@ pub fn commit_change(
   }
 }
 
-/// image 来源的服务要换镜像版本：(上次部署的，看得懂的写法, 这次固定的)。
+/// 服务要换镜像版本：(哪个镜像, 上次部署的，看得懂的写法, 这次固定的)，只报第一个变了的。
 /// 部署记录里没有 digest 时（经镜像源拉取的旧部署），用这次查到的镜像 ID 和部署时的比。
 pub fn change(
   applied: Option<&Applied>,
   pins: &BTreeMap<String, String>,
-  config: Option<&str>,
-) -> Option<(String, String)> {
-  let new = pins.values().next()?;
+  configs: Option<&BTreeMap<String, String>>,
+) -> Option<(String, String, String)> {
   let applied = applied?;
-  match (&applied.digest, config) {
-    (Some(old), _) if old != new => {
-      Some((short(old).into(), new.clone()))
+  pins.iter().find_map(|(image, new)| {
+    let (digest, id) = running(applied, image);
+    let config = configs.and_then(|c| c.get(image));
+    let old = match (digest, config) {
+      (Some(old), _) if old != *new => short(&old).to_string(),
+      (None, Some(config)) if id.as_ref() != Some(config) => {
+        "当前版本未知".into()
+      }
+      _ => return None,
+    };
+    Some((image.clone(), old, new.clone()))
+  })
+}
+
+/// 把镜像换成同一仓库的另一个标签：`halo/halo:2.20` + `2.21` → `halo/halo:2.21`。
+pub fn with_tag(image: &str, tag: &str) -> Result<String, ApiError> {
+  let bad = |m: &str| {
+    ApiError::invalid(m.to_string()).with_hint(
+      "标签只能有字母、数字和 . _ -，例如 2.21；看可用的标签：wharf service show <服务>",
+    )
+  };
+  if tag.is_empty()
+    || !tag.chars().all(|c| {
+      c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')
+    })
+  {
+    return Err(bad(&format!("标签 {tag} 不合法")));
+  }
+  if image.contains('@') {
+    return Err(bad(&format!(
+      "镜像 {image} 写的是 digest，没有标签可换"
+    )));
+  }
+  let slash = image.rfind('/').map_or(0, |i| i + 1);
+  let name = match image[slash..].find(':') {
+    Some(i) => &image[..slash + i],
+    None => image,
+  };
+  Ok(format!("{name}:{tag}"))
+}
+
+/// 服务换标签后的来源：image 来源直接换；compose 来源只改值和 `image` 一字不差的 `image:` 行，
+/// 其余内容（注释、引号、缩进）不动。
+pub fn retag(
+  source: &Source,
+  image: &str,
+  tag: &str,
+) -> Result<Source, ApiError> {
+  let new = with_tag(image, tag)?;
+  let missing = || {
+    ApiError::invalid(format!("服务里没有镜像 {image}"))
+      .suggest("wharf service show <服务>")
+  };
+  match source {
+    Source::Image(i) if i == image => Ok(Source::Image(new)),
+    Source::Compose {
+      content: Some(content),
+      file,
+    } => {
+      let mut hit = false;
+      let lines: Vec<String> = content
+        .split_inclusive('\n')
+        .map(|line| {
+          let body = line.trim_end_matches(['\n', '\r']);
+          let indent = &body[..body.len() - body.trim_start().len()];
+          let Some(value) = body.trim_start().strip_prefix("image:")
+          else {
+            return line.to_string();
+          };
+          let (value, comment) = match value.find(" #") {
+            Some(i) => (&value[..i], &value[i..]),
+            None => (value, ""),
+          };
+          let quote = value
+            .trim()
+            .chars()
+            .next()
+            .filter(|c| matches!(c, '"' | '\''));
+          let bare = value.trim().trim_matches(['"', '\'']);
+          if bare != image {
+            return line.to_string();
+          }
+          hit = true;
+          let q = quote.map(String::from).unwrap_or_default();
+          let end = &line[body.len()..];
+          format!("{indent}image: {q}{new}{q}{comment}{end}")
+        })
+        .collect();
+      if !hit {
+        return Err(missing());
+      }
+      Ok(Source::Compose {
+        content: Some(lines.concat()),
+        file: file.clone(),
+      })
     }
-    (None, Some(config))
-      if applied.image_id.as_deref() != Some(config) =>
-    {
-      Some(("当前版本未知".into(), new.clone()))
-    }
-    _ => None,
+    _ => Err(missing()),
   }
 }
 
@@ -257,26 +426,79 @@ mod tests {
       digest: digest.map(str::to_string),
       image: Some("x:latest".into()),
       image_id: Some("sha256:id1".into()),
+      digests: Default::default(),
+      image_ids: Default::default(),
       commit: None,
       git: None,
     };
+    let id =
+      |v: &str| BTreeMap::from([("x:latest".into(), v.into())]);
     assert_eq!(
       change(Some(&applied(Some("sha256:new"))), &pins, None),
       None
     );
     assert_eq!(
       change(Some(&applied(Some("sha256:old"))), &pins, None),
-      Some(("old".into(), "sha256:new".into()))
+      Some(("x:latest".into(), "old".into(), "sha256:new".into()))
     );
     // 部署记录里没有 digest：查到的镜像 ID 和部署时的一样，就是同一个版本。
     assert_eq!(
-      change(Some(&applied(None)), &pins, Some("sha256:id1")),
+      change(Some(&applied(None)), &pins, Some(&id("sha256:id1"))),
       None
     );
     assert_eq!(
-      change(Some(&applied(None)), &pins, Some("sha256:id2")),
-      Some(("当前版本未知".into(), "sha256:new".into()))
+      change(Some(&applied(None)), &pins, Some(&id("sha256:id2"))),
+      Some((
+        "x:latest".into(),
+        "当前版本未知".into(),
+        "sha256:new".into()
+      ))
     );
     assert_eq!(change(Some(&applied(None)), &pins, None), None);
+    // compose：按镜像比，只报变了的那个。
+    let compose = Applied {
+      digests: BTreeMap::from([
+        ("db:8".into(), "sha256:db".into()),
+        ("app:2".into(), "sha256:a1".into()),
+      ]),
+      ..applied(None)
+    };
+    let pins = BTreeMap::from([
+      ("db:8".into(), "sha256:db".into()),
+      ("app:2".into(), "sha256:a2".into()),
+    ]);
+    assert_eq!(
+      change(Some(&compose), &pins, None),
+      Some(("app:2".into(), "a1".into(), "sha256:a2".into()))
+    );
+  }
+
+  #[test]
+  fn compose_images() {
+    let source = Source::Compose {
+      content: Some(
+        "services:\n  db:\n    image: mysql:8.0.36\n  app:\n    image: \"halo/halo:2.20\"\n  x:\n    image: a@sha256:1\n  y:\n    image: ${IMG}\n  z:\n    build: .\n    image: local:1\n"
+          .into(),
+      ),
+      file: None,
+    };
+    assert_eq!(
+      images(&source),
+      vec!["halo/halo:2.20", "mysql:8.0.36"]
+    );
+    let Source::Compose {
+      content: Some(c), ..
+    } = retag(&source, "halo/halo:2.20", "2.21").unwrap()
+    else {
+      panic!()
+    };
+    assert!(c.contains("    image: \"halo/halo:2.21\"\n"));
+    assert!(c.contains("image: mysql:8.0.36\n"));
+    assert!(retag(&source, "nope:1", "2").is_err());
+    assert_eq!(
+      with_tag("reg.io:5000/a/b:1", "2").unwrap(),
+      "reg.io:5000/a/b:2"
+    );
+    assert_eq!(with_tag("nginx", "1.27").unwrap(), "nginx:1.27");
   }
 }

@@ -1627,6 +1627,20 @@ async fn service(
     ServiceCmd::Update { name, apply } => {
       changes(c, vec![Change::RefreshImages { name }], apply, j).await
     }
+    ServiceCmd::Retag {
+      name,
+      image,
+      tag,
+      apply,
+    } => {
+      changes(
+        c,
+        vec![Change::RetagImage { name, image, tag }],
+        apply,
+        j,
+      )
+      .await
+    }
     ServiceCmd::AutoUpdate { name, off, apply } => {
       let mut spec = c
         .get::<ServiceView>(&format!("/api/services/{}", seg(&name)))
