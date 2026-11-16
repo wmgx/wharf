@@ -34,7 +34,7 @@ export function AddRoute({ service: fixed, open, onClose }: { service?: string; 
       try {
         await saveAuth(host, user, password);
       } catch (e) {
-        toast.error("登录账号没保存上", { description: (e as Error).message });
+        toast.error("登录账号保存失败", { description: (e as Error).message });
         return;
       }
     }

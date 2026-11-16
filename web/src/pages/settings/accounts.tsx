@@ -48,7 +48,7 @@ export function Accounts() {
       toast.success(`已删除账号 ${name}`);
       refresh();
     } catch (e) {
-      toast.error(`不能删除 ${name}`, { description: (e as Error).message });
+      toast.error(`删除 ${name} 失败`, { description: (e as Error).message });
     }
   };
 

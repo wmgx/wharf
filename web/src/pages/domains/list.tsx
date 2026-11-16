@@ -23,7 +23,7 @@ export function DomainList({ status, add }: { status: Status; add: React.ReactNo
   const gateway = params.get("gateway") ?? "";
   const routes = status.routes.map((route) => ({ hostname: route.spec.hostname, route, edge: undefined as string | undefined }));
   const edge = (status.edge_apps ?? []).flatMap((app) => (app.spec.domains ?? []).map((hostname) => ({ hostname, route: undefined as RouteView | undefined, edge: app.name })));
-  const rows: { hostname: string; route?: RouteView; edge?: string }[] = [...routes, ...edge].sort((a, b) => a.hostname.localeCompare(b.hostname));
+  const rows: { hostname: string; route?: RouteView; edge?: string }[] = [...routes, ...edge].sort((a, b) => Number(!!b.route && ["bad", "warn"].includes(routeTone(diagnosisOf(status, b.hostname)).tone)) - Number(!!a.route && ["bad", "warn"].includes(routeTone(diagnosisOf(status, a.hostname)).tone)) || a.hostname.localeCompare(b.hostname));
   const bad = (r: RouteView) => ["bad", "warn"].includes(routeTone(diagnosisOf(status, r.spec.hostname)).tone);
   const problemCount = status.routes.filter(bad).length;
   const filtered = rows.filter((r) => (!gateway || (r.edge ? gateway === "cloudflare" : r.route?.gateway === gateway)) && [r.hostname, r.edge, r.route?.spec.service, r.route?.spec.upstream, r.route?.spec.redirect].some((v) => v?.toLowerCase().includes(query.toLowerCase())) && (!problems || !!r.route && bad(r.route)));
@@ -90,7 +90,7 @@ export function DomainList({ status, add }: { status: Status; add: React.ReactNo
                 </>}
               </TableCell>
               <TableCell>
-                {route ? <Button variant="ghost" size="xs" onClick={(e) => { e.stopPropagation(); setParams({ open: hostname, protection: "1" }); }}>{route.spec.sso ? "门禁" : route.spec.auth ? "账号密码" : "无"}</Button> : "-"}
+                {route ? <Button variant="outline" size="xs" onClick={(e) => { e.stopPropagation(); setParams({ protection: hostname }); }}>{route.spec.sso ? "门禁" : route.spec.auth ? "账号密码" : "不保护"}</Button> : "-"}
               </TableCell>
               <TableCell>
                 {d?.cert_expires ? <CertDays d={d} /> : "-"}

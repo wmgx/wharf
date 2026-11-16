@@ -16,10 +16,12 @@ export function DomainsTab({
   service,
   routes,
   onAdd,
+  onOpen,
 }: {
   service: string;
   routes: RouteView[];
   onAdd: () => void;
+  onOpen: (hostname: string) => void;
 }) {
   const { status } = useStatus();
   const actions = useActions();
@@ -27,7 +29,7 @@ export function DomainsTab({
   const [forwarding, setForwarding] = useState(false);
   const forwards = (status?.gateways ?? []).flatMap((g) => (g.spec.layer4 ?? []).filter((f) => f.service === service).map((f) => ({ g, f })));
   const [sharing, setSharing] = useState(false);
-  const add = <div className="flex gap-2"><Button variant="outline" size="sm" onClick={() => setSharing(true)}>分享</Button><Button variant="outline" size="sm" onClick={onAdd}><PlusIcon />加域名</Button></div>;
+  const add = <div className="flex gap-2"><Button variant="outline" size="sm" onClick={() => setSharing(true)}>临时分享</Button><Button variant="outline" size="sm" onClick={onAdd}><PlusIcon />加域名</Button></div>;
   return (
     <div>
       {protecting && <AccessProtection route={protecting} onClose={() => setProtecting(null)} />}
@@ -39,7 +41,7 @@ export function DomainsTab({
       ) : (
         <Rows limit={10}>
           {routes.map((r) => (
-            <Row className="flex-wrap" key={r.id} to={`/domains?open=${encodeURIComponent(r.spec.hostname)}`}>
+            <Row className="flex-wrap" key={r.id} onClick={() => onOpen(r.spec.hostname)}>
               <a
                 className="inline-flex min-w-0 flex-1 items-center gap-1 font-mono text-sm text-primary hover:underline"
                 href={r.url}
@@ -50,7 +52,7 @@ export function DomainsTab({
                 <ArrowUpRightIcon className="size-3.5 shrink-0" />
               </a>
               <Probe probe={r.probe} />
-              <Button variant="ghost" size="xs" onClick={() => setProtecting(r)}>{r.spec.sso ? "门禁" : r.spec.auth ? "账号密码" : "无"}</Button>
+              <Button variant="outline" size="xs" onClick={() => setProtecting(r)}>{r.spec.sso ? "门禁" : r.spec.auth ? "账号密码" : "不保护"}</Button>
               {r.spec.internal && <span className="text-xs text-muted-foreground">内网域名</span>}
               {r.spec.sso?.mode === "login" && <span className="text-xs text-muted-foreground">代登录 · {r.sso_login ? r.sso_login.ok ? "成功" : "失败" : "未登录"}</span>}
               <span className="text-xs text-muted-foreground">
@@ -66,8 +68,8 @@ export function DomainsTab({
       <SectionTitle count={forwards.length} action={<Button variant="outline" size="sm" disabled={!status?.gateways.some((g) => g.spec.kind === "caddy")} onClick={() => setForwarding(true)}>加转发</Button>}>四层转发</SectionTitle>
       {forwards.length ? <Rows limit={10}>{forwards.map(({ g, f }) => <Row key={`${g.name}/${!!f.udp}/${f.listen}`}>
         <span className="min-w-0 flex-1 break-all text-sm">{g.name} · :{f.listen}/{f.udp ? "UDP" : "TCP"} → {f.port ?? "默认端口"}</span>
-        <Button variant="ghost" size="xs" onClick={() => actions.plan({ title: `移除 ${g.name} 的四层转发 :${f.listen}`, changes: [{ op: "upsert_gateway", name: g.name, spec: { ...g.spec, layer4: (g.spec.layer4 ?? []).filter((v) => v.listen !== f.listen || !!v.udp !== !!f.udp) } }] })}>移除</Button>
-      </Row>)}</Rows> : <Empty>还没有四层转发</Empty>}
+        <Button variant="outline" size="xs" onClick={() => actions.plan({ title: `移除 ${g.name} 的四层转发 :${f.listen}`, changes: [{ op: "upsert_gateway", name: g.name, spec: { ...g.spec, layer4: (g.spec.layer4 ?? []).filter((v) => v.listen !== f.listen || !!v.udp !== !!f.udp) } }] })}>移除</Button>
+      </Row>)}</Rows> : null}
     </div>
   );
 }

@@ -1,12 +1,12 @@
-import { SearchIcon, Settings2Icon, TriangleAlertIcon, ArrowRightIcon, CheckIcon, PlusIcon } from "lucide-react";
+import { SearchIcon, Settings2Icon, ArrowRightIcon, CheckIcon, PlusIcon } from "lucide-react";
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { usePoll } from "@/api";
 import { AddRoute } from "@/components/add-route";
 import { CardsSkeleton, Dot, Empty, Mark, SectionTitle, useClickable, type Tone } from "@/components/common";
 import { diagnosisOf, routeTone, serviceTruth } from "@/components/health";
-import { issueCount, useIssues } from "@/components/issues";
-import { Panel, Tip } from "@/components/kit";
+import { IssueRow, issueCount, useIssues } from "@/components/issues";
+import { Panel, Rows, Tip } from "@/components/kit";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useStatus } from "@/status";
@@ -45,15 +45,16 @@ export function Home() {
       const url = app.spec.domains?.[0] ? `https://${app.spec.domains[0]}` : app.live?.url;
       return { name: app.name, url, detail: `/edge/${app.name}`, tone, text, search: [app.name, ...(app.spec.domains ?? []), app.live?.url ?? ""].join(" ").toLowerCase() };
     }),
-  ].sort((a, b) => a.name.localeCompare(b.name)) : [];
+  ].sort((a, b) => Number(b.tone === "bad") - Number(a.tone === "bad") || Number(b.tone === "warn") - Number(a.tone === "warn") || a.name.localeCompare(b.name)) : [];
   const filtered = items.filter((item) => item.search.includes(query.toLowerCase()));
   const go = (item: Item) => {
+    if (item.tone === "bad" || item.tone === "warn") return nav(item.detail);
     const href = item.url ?? (item.address ? `http://${item.address}` : undefined);
     if (href) window.open(href, "_blank", "noreferrer");
     else nav(item.detail);
   };
   const count = issueCount(issues);
-  const fault = issues.some((i) => i.level === "fault");
+
   return (
     <>
       <div className="flex items-center gap-2">
@@ -64,11 +65,7 @@ export function Home() {
       <Button variant="outline" onClick={() => setBookmarksOpen(true)}>管理书签</Button>
       </div>
       <HomeBookmarks open={bookmarksOpen} onClose={() => setBookmarksOpen(false)} />
-      {count > 0 && <div className={`mt-4 flex items-center gap-3 rounded-xl border px-4 py-3 text-sm ${fault ? "border-destructive/30 bg-destructive/5" : "border-warning/30 bg-warning/5"}`}>
-        <TriangleAlertIcon className={`size-4 shrink-0 ${fault ? "text-destructive" : "text-warning"}`} />
-        <span className="min-w-0 flex-1 break-words">{count} 项待处理：{issues[0].title}{count > 1 ? " 等" : ""}</span>
-        <Button variant="outline" size="sm" onClick={() => nav("/inbox")}>查看</Button>
-      </div>}
+      {count > 0 && <div className="mt-4"><Rows>{issues.slice(0, 3).map((issue, i) => <IssueRow key={i} issue={issue} />)}</Rows><Button variant="outline" size="xs" className="mt-2" onClick={() => nav("/inbox")}>全部 {count} 项</Button></div>}
       {status && <Onboarding status={status} onAdd={() => setAdding(true)} />}
       <AddRoute open={adding} onClose={() => setAdding(false)} />
       {!status ? <CardsSkeleton /> : items.length + bookmarks.length === 0 ? <Empty action={<Button onClick={() => nav("/services?new=1")}>部署服务</Button>}>还没有服务</Empty> : filtered.length + filteredBookmarks.length === 0 ? <Empty>没有叫这个名字的服务</Empty> : <>
@@ -110,11 +107,12 @@ function CardGroup({ title, items }: { title: string; items: Item[] }) {
     <div className="grid grid-cols-[repeat(auto-fill,minmax(min(100%,220px),1fr))] gap-3">
       {items.map((item) => {
         const href = item.url ?? (item.address ? `http://${item.address}` : undefined);
-        const link = clickable(href ? { href } : { to: item.detail });
+        const problem = item.tone === "bad" || item.tone === "warn";
+        const link = clickable(!problem && href ? { href } : { to: item.detail });
         return <div key={item.detail} {...link} onKeyDown={(e) => { if (e.key.toLowerCase() === "m" && e.target === e.currentTarget) nav(item.detail); else link.onKeyDown(e); }} className="group flex cursor-pointer items-center gap-3 rounded-xl border bg-card p-3 shadow-xs hover:bg-accent/50">
           <Mark name={item.name} url={item.url} />
-          <div className="min-w-0 flex-1"><div className="truncate font-medium">{item.name}</div><div className="truncate font-mono text-xs text-muted-foreground">{(item.url ?? item.address ?? "-").replace(/^https?:\/\//, "")}</div></div>
-          <div className="flex flex-col items-end gap-1"><Tip text="管理"><Button variant="ghost" size="icon-xs" aria-label={`管理 ${item.name}`} className="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100" onClick={(e) => { e.stopPropagation(); nav(item.detail); }}><Settings2Icon /></Button></Tip><Tip text={item.text}><span><Dot tone={item.tone} /></span></Tip></div>
+          <div className="min-w-0 flex-1"><div className="truncate font-medium">{item.name}</div><div className="truncate font-mono text-xs text-muted-foreground">{(problem ? item.text : item.url ?? item.address ?? "-").replace(/^https?:\/\//, "")}</div></div>
+          <div className="flex flex-col items-end gap-1"><Tip text="管理"><Button variant="ghost" size="icon-xs" aria-label={`管理 ${item.name}`} className="opacity-100 md:opacity-0 group-hover:opacity-100 group-focus-within:opacity-100" onClick={(e) => { e.stopPropagation(); nav(item.detail); }}><Settings2Icon /></Button></Tip><Tip text={item.text}><span><Dot tone={item.tone} /></span></Tip></div>
         </div>;
       })}
     </div>
@@ -169,7 +167,7 @@ function Onboarding({ status, onAdd }: { status: Status; onAdd: () => void }) {
       title: "接入 CLI 或 AI",
       hint: "命令行和 AI 用同一套操作，先预览改动再执行",
       action: "去接入",
-      go: () => nav("/settings"),
+      go: () => nav("/settings?tab=tokens"),
     },
   ];
   const left = steps.filter((s) => !s.done).length;

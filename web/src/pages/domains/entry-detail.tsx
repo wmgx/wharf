@@ -6,7 +6,7 @@ import { ForwardDialog } from "@/components/forward-dialog";
 import { WildcardDialog } from "@/components/wildcard-dialog";
 import { CodeBlock, Empty, SectionTitle, ServerTag } from "@/components/common";
 import { CertDays, diagnosisOf } from "@/components/health";
-import { ConfirmDialog, Facts, Row, Rows } from "@/components/kit";
+import { Facts, Row, Rows } from "@/components/kit";
 import { LogStream } from "@/components/LogStream";
 import { Button } from "@/components/ui/button";
 import { SheetDescription, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
@@ -18,7 +18,6 @@ const TLS_TEXT: Record<GatewayTls, string> = { auto: "自动签证书", internal
 
 export function GatewayDetail({ g, onDone, onDomain }: { g: GatewayView; onDone: () => void; onDomain: (hostname: string) => void }) {
   const actions = useActions();
-  const [removing, setRemoving] = useState(false);
   const [configOpen, setConfigOpen] = useState(false);
   const [logsOpen, setLogsOpen] = useState(false);
   const { status } = useStatus();
@@ -94,11 +93,10 @@ export function GatewayDetail({ g, onDone, onDomain }: { g: GatewayView; onDone:
       <span className="text-xs text-muted-foreground">
         {g.routes.length ? "先移除这个入口上的域名" : ""}
       </span>
-      <Button variant="outline" className="text-destructive" disabled={g.routes.length > 0} onClick={() => setRemoving(true)}>
+      <Button variant="outline" className="text-destructive" disabled={g.routes.length > 0} onClick={() => { onDone(); actions.plan({ title: `删除入口 ${g.name}`, changes: [{ op: "remove_gateway", name: g.name }] }); }}>
         <Trash2Icon />删除入口</Button>
     </SheetFooter>
     {wildcardOpen && <WildcardDialog g={g} onClose={() => setWildcardOpen(false)} />}
     {forwardOpen && <ForwardDialog gateway={g} onClose={() => setForwardOpen(false)} />}
-    <ConfirmDialog open={removing} title={`删除入口 ${g.name}？`} onCancel={() => setRemoving(false)} onConfirm={() => { setRemoving(false); onDone(); actions.plan({ title: `删除入口 ${g.name}`, changes: [{ op: "remove_gateway", name: g.name }] }); }}>入口的容器会被删除。</ConfirmDialog>
   </>;
 }

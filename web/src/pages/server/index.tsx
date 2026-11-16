@@ -1,6 +1,7 @@
 import { ArrowUpCircleIcon, PlusIcon } from "lucide-react";
-import { useState, type ReactNode } from "react";
-import { Link, Navigate, useLocation, useParams } from "react-router-dom";
+import { useEffect, useState, type ReactNode } from "react";
+import { Link, Navigate, useLocation, useParams, useSearchParams } from "react-router-dom";
+import { useIssues, issueCount } from "@/components/issues";
 import { AddServer } from "@/components/add-server";
 import { Dot, Empty, ago, serverTone } from "@/components/common";
 import { Tip } from "@/components/kit";
@@ -18,7 +19,9 @@ export function Servers() {
   const { name } = useParams();
   const { search } = useLocation();
   const { status } = useStatus();
-  const [adding, setAdding] = useState(false);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [adding, setAdding] = useState(searchParams.get("add") === "1");
+  useEffect(() => { if (searchParams.get("add") === "1") setAdding(true); }, [searchParams]);
   const params = new URLSearchParams(search);
   // 只有不带机器名的 `/servers?tab=x` 才是旧地址；`/servers/home?tab=network` 是服务器自己的标签。
   const old = name ? undefined : OLD_TABS[params.get("tab") ?? ""];
@@ -34,7 +37,7 @@ export function Servers() {
   }
   // 没选机器：默认打开第一台。
   if (!name && status?.servers.length) {
-    return <Navigate to={`/servers/${encodeURIComponent(status.servers[0].name)}`} replace />;
+    return <Navigate to={`/servers/${encodeURIComponent(status.servers[0].name)}${searchParams.get("add") === "1" ? "?add=1" : ""}`} replace />;
   }
 
   return (
@@ -51,7 +54,7 @@ export function Servers() {
           )}
         </div>
       </div>
-      <AddServer open={adding} onClose={() => setAdding(false)} />
+      <AddServer open={adding} onClose={() => { setAdding(false); const next = new URLSearchParams(searchParams); next.delete("add"); setSearchParams(next); }} />
     </div>
   );
 }
@@ -60,6 +63,7 @@ const item = "flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm transitio
 
 function Side({ name, onAdd }: { name?: string; onAdd: () => void }) {
   const { status } = useStatus();
+  const issues = useIssues();
   const today = Date.parse(`${new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Shanghai" })}T00:00:00+08:00`);
 
   return (
@@ -72,6 +76,7 @@ function Side({ name, onAdd }: { name?: string; onAdd: () => void }) {
             return (
               <Entry key={s.name} to={`/servers/${encodeURIComponent(s.name)}`} on={s.name === name}>
                 <Dot tone={serverTone(s)} />
+                {issueCount(issues.filter((i) => i.subject?.kind === "server" && i.subject.name === s.name)) > 0 && <span className="text-xs text-warning">{issueCount(issues.filter((i) => i.subject?.kind === "server" && i.subject.name === s.name))}</span>}
                 <span className="grid min-w-0 flex-1">
                   <span className="flex items-center gap-1.5 font-medium">
                     {s.name}
