@@ -2439,7 +2439,15 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
                 }
               })
               .unwrap_or_default()
-              + if r.spec.sso.is_some() {
+              + if r
+                .spec
+                .sso
+                .as_ref()
+                .is_some_and(|s| s.mode
+                  == wharf_api_types::spec::SsoMode::Header)
+              {
+                "（门禁 · 传用户名）"
+              } else if r.spec.sso.is_some() {
                 "（门禁）"
               } else {
                 ""
@@ -2513,6 +2521,7 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
       skip,
       trust_internal,
       no_trust_internal,
+      header,
       apply,
     } => {
       let mut spec = c
@@ -2544,8 +2553,13 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
         return Ok(());
       };
       spec.sso =
-        (mode == "gate").then_some(wharf_api_types::spec::SsoSpec {
-          mode: wharf_api_types::spec::SsoMode::Gate,
+        (mode != "off").then_some(wharf_api_types::spec::SsoSpec {
+          mode: if mode == "header" {
+            wharf_api_types::spec::SsoMode::Header
+          } else {
+            wharf_api_types::spec::SsoMode::Gate
+          },
+          header,
           trust_internal: !no_trust_internal
             && (trust_internal
               || spec.sso.as_ref().is_some_and(|s| s.trust_internal)),

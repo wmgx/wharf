@@ -31,16 +31,17 @@ func init() {
 }
 
 type SSO struct {
-	PublicKey string   `json:"public_key"`
-	Core      string   `json:"core"`
-	Login     string   `json:"login"`
-	Skip      []string `json:"skip,omitempty"`
-	Trust     []string `json:"trust,omitempty"`
-	trusted   []netip.Prefix
-	key       ed25519.PublicKey
-	client    *http.Client
-	mu        sync.Mutex
-	cache     map[[32]byte]*refreshResult
+	PublicKey  string   `json:"public_key"`
+	Core       string   `json:"core"`
+	Login      string   `json:"login"`
+	Skip       []string `json:"skip,omitempty"`
+	Trust      []string `json:"trust,omitempty"`
+	UserHeader string   `json:"user_header,omitempty"`
+	trusted    []netip.Prefix
+	key        ed25519.PublicKey
+	client     *http.Client
+	mu         sync.Mutex
+	cache      map[[32]byte]*refreshResult
 }
 
 type refreshResult struct {
@@ -68,6 +69,10 @@ func (s *SSO) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				}
 			case "login":
 				if !d.Args(&s.Login) {
+					return d.ArgErr()
+				}
+			case "user_header":
+				if !d.Args(&s.UserHeader) {
 					return d.ArgErr()
 				}
 			case "trust":
@@ -173,7 +178,10 @@ func originalURL(r *http.Request) string {
 	}
 	return scheme + "://" + r.Host + r.URL.RequestURI()
 }
-func setUser(r *http.Request, user string) {
+func (s *SSO) setUser(r *http.Request, user string) {
+	if s.UserHeader != "" && user != "" {
+		r.Header.Set(s.UserHeader, user)
+	}
 	if repl, ok := r.Context().Value(caddy.ReplacerCtxKey).(*caddy.Replacer); ok {
 		repl.Set("http.wharf_sso.user", user)
 	}
@@ -273,11 +281,14 @@ func (s *SSO) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.H
 	if strings.HasPrefix(r.URL.Path, "/_wharf/") {
 		return next.ServeHTTP(w, r)
 	}
+	if s.UserHeader != "" {
+		r.Header.Del(s.UserHeader)
+	}
 	access, refresh := stripCookies(r)
 	keyValues, hasKey := r.Header["X-Wharf-Key"]
 	key := strings.Join(keyValues, ",")
 	r.Header.Del("X-Wharf-Key")
-	setUser(r, "")
+	s.setUser(r, "")
 	for _, p := range s.Skip {
 		if r.URL.Path == p || strings.HasPrefix(r.URL.Path, strings.TrimRight(p, "/")+"/") {
 			return next.ServeHTTP(w, r)
@@ -298,7 +309,7 @@ func (s *SSO) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.H
 		return err
 	}
 	if user, ok := verify(s.key, access, time.Now().Unix()); ok {
-		setUser(r, user)
+		s.setUser(r, user)
 		return next.ServeHTTP(w, r)
 	}
 	if refresh != "" {
@@ -307,7 +318,7 @@ func (s *SSO) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.H
 			w.Header().Add("Set-Cookie", cookie)
 		}
 		if result.status == 200 {
-			setUser(r, result.header.Get("X-Wharf-User"))
+			s.setUser(r, result.header.Get("X-Wharf-User"))
 			return next.ServeHTTP(w, r)
 		}
 		if location := result.header.Get("Location"); location != "" {
