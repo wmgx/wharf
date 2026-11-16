@@ -71,8 +71,10 @@ wharf route add app.example.com --service my-app --apply   # 建 DNS、签证书
 ```bash
 docker run -d --name wharf-core --restart unless-stopped --network host \
   -v /var/lib/wharf-core:/var/lib/wharf-core \
-  ghcr.io/wmgx/wharf-core:latest
+  ghcr.io/wmgx/wharf-core:0.1
 ```
+
+镜像标签：`0.1.0` 这类是正式版本（见 [Releases](https://github.com/wmgx/wharf/releases)），`0.1` 跟随 0.1.x 的最新版；`latest` 是 `main` 分支的每次构建，相当于开发版。之后在页面上或用 `wharf upgrade` 升级。
 
 打开 `http://<这台机器>:7700`，第一次进入要填初始化码并设置管理员账号：
 
@@ -175,6 +177,8 @@ cargo run -q -p wharf-cli -- schema web | node web/scripts/gen-types.mjs > web/s
 scripts/build-images.sh    # 构建 wharf-core / wharf-agent 镜像
 scripts/e2e.sh             # 在有 Docker 的机器上做端到端验证
 ```
+
+发版：先把 `Cargo.toml` 的 `version` 改好合进 `main`，等 `main` 的构建通过后执行 `scripts/release.sh 0.1.0`。它会打标签 `v0.1.0`，CI 给同一个构建的镜像加上版本标签，并发布带 CLI 的正式 Release。
 
 欢迎提 issue。这是个人项目，功能取舍以作者自己的使用为准，较大的改动请先开 issue 讨论。
 
