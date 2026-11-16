@@ -233,6 +233,11 @@ pub struct Applied {
   pub image: Option<String>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub image_id: Option<String>,
+  /// 部署时 compose 里每个镜像的 digest 和镜像 ID：镜像（compose 里写的名字）→ `sha256:…`。
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub digests: BTreeMap<String, String>,
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub image_ids: BTreeMap<String, String>,
   /// git 构建来源实际构建的 commit，和当时的 `仓库#分支`。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub commit: Option<String>,
@@ -1033,6 +1038,22 @@ pub struct VersionCheck {
   /// 这次没查到时的原因，`newer` 沿用上一次的结果。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub error: Option<String>,
+  /// 仓库里有比现在写的标签更高的版本（例如 `2.20` → `2.21`）。换标签要改配置，不会自动升级。
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub tags: Vec<NewerTag>,
+}
+
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct NewerTag {
+  /// compose 里写的镜像，例如 `halo/halo:2.20`。
+  pub image: String,
+  /// 更高版本的标签，例如 `2.21`。
+  pub tag: String,
+  /// 换了大版本（第一位数字变了），通常有不兼容的改动。
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub major: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

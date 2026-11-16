@@ -55,7 +55,7 @@ export function ServiceTable({ status, rows }: { status: Status; rows: Row[] }) 
                   <span className="inline-flex items-center gap-1.5">{!r.svc && <CloudIcon className="size-3.5 text-muted-foreground" />}{r.name}{r.svc && <ContainerRisk risks={r.svc.risks} />}</span>
                   {r.svc?.note && <NotePreview note={r.svc.note} />}
                 </TableCell>
-                <TableCell><StatusBadge tone={r.tone}>{r.text}</StatusBadge>{r.svc && status.updates?.services[r.name]?.newer && <span className="ml-1.5 inline-flex items-center gap-1 rounded-md bg-primary/10 px-1.5 py-0.5 text-xs font-medium text-primary"><ArrowUpCircleIcon className="size-3" />新版本</span>}</TableCell>
+                <TableCell><StatusBadge tone={r.tone}>{r.text}</StatusBadge>{r.svc && (status.updates?.services[r.name]?.newer || !!status.updates?.services[r.name]?.tags?.length) && <span className="ml-1.5 inline-flex items-center gap-1 rounded-md bg-primary/10 px-1.5 py-0.5 text-xs font-medium text-primary"><ArrowUpCircleIcon className="size-3" />{status.updates?.services[r.name]?.newer ? "新版本" : `可升级 ${status.updates?.services[r.name]?.tags?.[0]?.tag}`}</span>}</TableCell>
                 <TableCell><ServerTag name={r.where} /></TableCell>
                 <TableCell className="font-mono text-xs">
                   {r.domains.map((d) => <div key={d}><OpenLink value={d} /></div>)}
@@ -77,7 +77,7 @@ export function ServiceTable({ status, rows }: { status: Status; rows: Row[] }) 
                 {r.svc?.note && <NotePreview note={r.svc.note} />}
                 <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
                   <StatusBadge tone={r.tone}>{r.text}</StatusBadge>
-                  {r.svc && status.updates?.services[r.name]?.newer && <span className="inline-flex items-center gap-1 rounded-md bg-primary/10 px-1.5 py-0.5 text-xs font-medium text-primary"><ArrowUpCircleIcon className="size-3" />新版本</span>}
+                  {r.svc && (status.updates?.services[r.name]?.newer || !!status.updates?.services[r.name]?.tags?.length) && <span className="inline-flex items-center gap-1 rounded-md bg-primary/10 px-1.5 py-0.5 text-xs font-medium text-primary"><ArrowUpCircleIcon className="size-3" />{status.updates?.services[r.name]?.newer ? "新版本" : `可升级 ${status.updates?.services[r.name]?.tags?.[0]?.tag}`}</span>}
                   <ServerTag name={r.where} />
                   <BackupDot data={backup(r)} />
                 </div>

@@ -194,6 +194,10 @@ export interface Applied {
    * image 来源实际部署的镜像 digest（`sha256:…`）。
    */
   digest?: string | null;
+  /**
+   * 部署时 compose 里每个镜像的 digest 和镜像 ID：镜像（compose 里写的名字）→ `sha256:…`。
+   */
+  digests?: Record<string, string>;
   git?: string | null;
   hash: string;
   /**
@@ -201,6 +205,7 @@ export interface Applied {
    */
   image?: string | null;
   image_id?: string | null;
+  image_ids?: Record<string, string>;
 }
 
 /**
@@ -405,6 +410,14 @@ export type Change = {
 } | {
   name: string;
   op: "refresh_images";
+} | {
+  /**
+   * 现在写的镜像，和 compose 里的一字不差。
+   */
+  image: string;
+  name: string;
+  op: "retag_image";
+  tag: string;
 } | {
   name: string;
   op: "upsert_gateway";
@@ -1282,6 +1295,21 @@ export interface NetworkView {
    */
   relays?: RelayHint[];
   servers: NetworkServer[];
+}
+
+export interface NewerTag {
+  /**
+   * compose 里写的镜像，例如 `halo/halo:2.20`。
+   */
+  image: string;
+  /**
+   * 换了大版本（第一位数字变了），通常有不兼容的改动。
+   */
+  major?: boolean;
+  /**
+   * 更高版本的标签，例如 `2.21`。
+   */
+  tag: string;
 }
 
 /**
@@ -2281,6 +2309,10 @@ export interface VersionCheck {
    * 仓库里有比固定版本新的。
    */
   newer: boolean;
+  /**
+   * 仓库里有比现在写的标签更高的版本（例如 `2.20` → `2.21`）。换标签要改配置，不会自动升级。
+   */
+  tags?: NewerTag[];
 }
 
 /**

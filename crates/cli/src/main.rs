@@ -537,10 +537,21 @@ pub enum ServiceCmd {
   Restart {
     name: String,
   },
-  /// 检查更新：image 来源重新查镜像标签现在的版本，git 构建来源重新查分支现在的 commit，
-  /// 有新版本时计划里会更新。平时改配置不会换版本。
+  /// 检查更新：镜像（image 来源和 compose 里的镜像）重新查标签现在的版本，git 构建来源重新查分支现在的 commit，
+  /// 有新版本时计划里会更新。平时改配置不会换版本。不会换标签，换标签用 `wharf service retag`。
   Update {
     name: String,
+    #[command(flatten)]
+    apply: ApplyFlags,
+  },
+  /// 把服务里的镜像换成另一个标签（例如升级大版本），compose 来源只改对应的 `image:` 行。生成计划。
+  /// 例：`wharf service retag halo registry.fit2cloud.com/halo/halo:2.20 2.21 --apply`。
+  /// 更高版本的标签在 `wharf status` 的“需要注意”和更新提醒里能看到。
+  Retag {
+    name: String,
+    /// 现在写的镜像，和 compose 里的一字不差。
+    image: String,
+    tag: String,
     #[command(flatten)]
     apply: ApplyFlags,
   },

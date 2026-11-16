@@ -155,6 +155,8 @@ mod tests {
       digest: None,
       image: None,
       image_id: None,
+      digests: Default::default(),
+      image_ids: Default::default(),
       commit: None,
       git: None,
     };
