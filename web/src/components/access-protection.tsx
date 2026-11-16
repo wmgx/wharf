@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useActions } from "@/components/actions";
 import { AuthFields, authReady, saveAuth } from "@/components/basic-auth";
 import { ErrorNote } from "@/components/common";
-import { Field, Picker, Segmented } from "@/components/fields";
+import { Field, Picker } from "@/components/fields";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -33,7 +33,7 @@ export function AccessProtection({ route, onClose }: { route: RouteView; onClose
         {gateway?.spec.kind === "cloudflare_tunnel" && <p className="text-sm text-muted-foreground">隧道入口暂不支持访问保护</p>}
         {protection === "basic" && <AuthFields user={user} password={password} onUser={setUser} onPassword={setPassword} />}
         {protection === "gate" && !route.spec.redirect && <>
-        <Segmented value={gateMode} options={[["gate", "只挡一道门"], ["header", "传用户名给应用"], ...(route.spec.sso?.mode === "login" ? [["login", "替我登录应用"] as ["login", string]] : [])]} onChange={setGateMode} />
+        <Picker value={gateMode} options={[{ value: "gate", label: "只挡一道门" }, { value: "header", label: "传用户名给应用" }, ...(route.spec.sso?.mode === "login" ? [{ value: "login", label: "替我登录应用" }] : [])]} onChange={(v) => setGateMode(v as typeof gateMode)} />
         {gateMode === "header" && <Field label="请求头" htmlFor="gate-header"><Input id="gate-header" value={userHeader} onChange={(e) => setUserHeader(e.target.value)} /><p className="text-xs text-muted-foreground">应用要配置成信任这个请求头。</p></Field>}
         <Field label="不用登录的路径（每行一个，可以不填）" htmlFor="gate-skip">
           <Textarea id="gate-skip" value={skipPaths} onChange={(e) => setSkipPaths(e.target.value)} />
