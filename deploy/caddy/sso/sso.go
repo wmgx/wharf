@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"sync"
@@ -34,6 +35,8 @@ type SSO struct {
 	Core      string   `json:"core"`
 	Login     string   `json:"login"`
 	Skip      []string `json:"skip,omitempty"`
+	Trust     []string `json:"trust,omitempty"`
+	trusted   []netip.Prefix
 	key       ed25519.PublicKey
 	client    *http.Client
 	mu        sync.Mutex
@@ -67,6 +70,8 @@ func (s *SSO) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				if !d.Args(&s.Login) {
 					return d.ArgErr()
 				}
+			case "trust":
+				s.Trust = d.RemainingArgs()
 			case "skip":
 				s.Skip = d.RemainingArgs()
 			default:
@@ -86,6 +91,13 @@ func (s *SSO) Provision(ctx caddy.Context) error {
 		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
 			return fmt.Errorf("门禁地址无效")
 		}
+	}
+	for _, raw := range s.Trust {
+		prefix, err := netip.ParsePrefix(raw)
+		if err != nil {
+			return fmt.Errorf("门禁免登录网段无效")
+		}
+		s.trusted = append(s.trusted, prefix)
 	}
 	s.key = key
 	s.client = &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
@@ -225,15 +237,65 @@ func (s *SSO) refresh(r *http.Request, token string) *refreshResult {
 	s.mu.Unlock()
 	return result
 }
+func (s *SSO) checkKey(w http.ResponseWriter, r *http.Request, key string) (bool, error) {
+	req, err := http.NewRequestWithContext(r.Context(), "GET", strings.TrimRight(s.Core, "/")+"/gate/key", nil)
+	if err == nil {
+		req.Header.Set("X-Wharf-Key", key)
+		req.Header.Set("X-Forwarded-Host", r.Host)
+		if peer, e := netip.ParseAddrPort(r.RemoteAddr); e == nil {
+			req.Header.Set("X-Forwarded-For", peer.Addr().Unmap().String())
+		}
+		var resp *http.Response
+		resp, err = s.client.Do(req)
+		if err == nil {
+			defer resp.Body.Close()
+			if resp.StatusCode == 200 {
+				return true, nil
+			}
+			body, e := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+			if e == nil {
+				if ct := resp.Header.Get("Content-Type"); ct != "" {
+					w.Header().Set("Content-Type", ct)
+				}
+				if location := resp.Header.Get("Location"); location != "" {
+					w.Header().Set("Location", location)
+				}
+				w.WriteHeader(resp.StatusCode)
+				_, e = w.Write(body)
+				return false, e
+			}
+		}
+	}
+	http.Error(w, "登录服务暂时连不上", http.StatusBadGateway)
+	return false, nil
+}
 func (s *SSO) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
 	if strings.HasPrefix(r.URL.Path, "/_wharf/") {
 		return next.ServeHTTP(w, r)
 	}
 	access, refresh := stripCookies(r)
+	keyValues, hasKey := r.Header["X-Wharf-Key"]
+	key := strings.Join(keyValues, ",")
+	r.Header.Del("X-Wharf-Key")
+	setUser(r, "")
 	for _, p := range s.Skip {
 		if r.URL.Path == p || strings.HasPrefix(r.URL.Path, strings.TrimRight(p, "/")+"/") {
 			return next.ServeHTTP(w, r)
 		}
+	}
+	if peer, err := netip.ParseAddrPort(r.RemoteAddr); err == nil {
+		for _, prefix := range s.trusted {
+			if prefix.Contains(peer.Addr().Unmap()) {
+				return next.ServeHTTP(w, r)
+			}
+		}
+	}
+	if hasKey {
+		ok, err := s.checkKey(w, r, key)
+		if ok {
+			return next.ServeHTTP(w, r)
+		}
+		return err
 	}
 	if user, ok := verify(s.key, access, time.Now().Unix()); ok {
 		setUser(r, user)

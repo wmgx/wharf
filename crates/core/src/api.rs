@@ -56,6 +56,13 @@ pub(crate) type ApiResult<T> = Result<Json<T>, AppError>;
 
 pub fn router(state: Arc<AppState>) -> Router {
   Router::new()
+    .route("/gate/key", get(crate::gate::check_key))
+    .route("/api/gate/keys", get(crate::gate::list_keys))
+    .route(
+      "/api/gate/keys/{name}",
+      axum::routing::put(crate::gate::put_key)
+        .delete(crate::gate::remove_key),
+    )
     .route("/gate/login", get(crate::gate::login))
     .route("/gate/refresh", axum::routing::any(crate::gate::refresh))
     .route("/gate/site/gate", get(crate::gate::site_gate))

@@ -316,6 +316,14 @@ ALTER TABLE alert_history ADD COLUMN subject TEXT;
    CREATE TABLE recovery_codes (hash TEXT PRIMARY KEY, used_at INTEGER);",
   "ALTER TABLE sessions ADD COLUMN source TEXT;
    ALTER TABLE sessions ADD COLUMN last_seen_at INTEGER;",
+  "CREATE TABLE gate_keys (
+    name TEXT PRIMARY KEY,
+    hash TEXT NOT NULL UNIQUE,
+    hosts TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    last_used_at INTEGER
+  );",
+
 ];
 
 /// git 构建来源固定到上次部署构建的 commit（仓库和分支没换过的）。当时没记下 commit 的留给 plan 提醒。

@@ -790,6 +790,20 @@ export interface FoundContainer {
   volumes?: string[];
 }
 
+export interface GateKeyRequest {
+  hosts: string[];
+}
+
+/**
+ * 门禁访问凭证；列表不包含明文或哈希。
+ */
+export interface GateKeyView {
+  created_at: number;
+  hosts: string[];
+  last_used_at: number | null;
+  name: string;
+}
+
 export type GatewayKind = "caddy" | "cloudflare_tunnel";
 
 export interface GatewaySpec {
@@ -1958,6 +1972,7 @@ export interface SsoSpec {
    * 不过门禁的路径前缀。
    */
   skip_paths?: string[];
+  trust_internal?: boolean;
 }
 
 export interface Status {

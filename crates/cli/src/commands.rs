@@ -364,6 +364,49 @@ async fn dispatch(
       }
       Ok(())
     }
+    Command::Gate(crate::GateCmd::Key(cmd)) => {
+      match cmd {
+        crate::GateKeyCmd::List => {
+          let rows: Vec<wharf_api_types::view::GateKeyView> =
+            c.get("/api/gate/keys").await?;
+          out(j, &rows, |rows| {
+            for row in rows {
+              println!(
+                "{}\t{}\t{}",
+                row.name,
+                row.hosts.join("、"),
+                row
+                  .last_used_at
+                  .map(|t| t.to_string())
+                  .unwrap_or_else(|| "没用过".into())
+              );
+            }
+          });
+        }
+        crate::GateKeyCmd::Add { name, hosts } => {
+          let result: Value = c
+            .put(
+              &format!("/api/gate/keys/{}", seg(&name)),
+              &wharf_api_types::view::GateKeyRequest { hosts },
+            )
+            .await?;
+          out(j, &result, |v| {
+            if let Some(key) = v["key"].as_str() {
+              println!("{key}");
+            } else {
+              println!("已修改域名");
+            }
+          });
+        }
+        crate::GateKeyCmd::Rm { name } => {
+          let result: Value = c
+            .delete(&format!("/api/gate/keys/{}", seg(&name)))
+            .await?;
+          out(j, &result, |_| println!("已删除"));
+        }
+      }
+      Ok(())
+    }
     Command::Token(cmd) => token(c, cmd, j).await,
   }
 }
@@ -2468,6 +2511,8 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
       name,
       mode,
       skip,
+      trust_internal,
+      no_trust_internal,
       apply,
     } => {
       let mut spec = c
@@ -2501,6 +2546,9 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
       spec.sso =
         (mode == "gate").then_some(wharf_api_types::spec::SsoSpec {
           mode: wharf_api_types::spec::SsoMode::Gate,
+          trust_internal: !no_trust_internal
+            && (trust_internal
+              || spec.sso.as_ref().is_some_and(|s| s.trust_internal)),
           skip_paths: skip,
         });
       changes(c, vec![Change::UpsertRoute { spec }], apply, j).await
