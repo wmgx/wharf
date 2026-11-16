@@ -62,7 +62,15 @@ async fn collect_inner(
       "sh",
       &image,
       "-c",
-      "chroot /host ss -H -tulnp",
+      r#"ss=$(chroot /host ss -H -tulnp) || exit $?
+printf '%s\n@range\n' "$ss"
+cat /host/proc/sys/net/ipv4/ip_local_port_range 2>/dev/null || true
+printf '\n@cgroups\n'
+for pid in $(printf '%s\n' "$ss" | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u); do
+  printf '%s ' "$pid"
+  tr '\n' ' ' < /host/proc/$pid/cgroup 2>/dev/null || true
+  printf '\n'
+done"#,
     ])
     .timeout(Duration::from_secs(30))
     .run(ctx)
@@ -76,7 +84,14 @@ async fn collect_inner(
     .await;
   let out = out?.check("读取监听端口")?;
   cleanup?;
-  let mut listens = parse_ss(&out.stdout);
+  let (ss, rest) = out
+    .stdout
+    .split_once("@range\n")
+    .unwrap_or((&out.stdout, ""));
+  let (range, cgroups) =
+    rest.split_once("@cgroups\n").unwrap_or(("", ""));
+  let range = ephemeral_range(range);
+  let mut listens = parse_ss(ss);
   let ids = docker
     .cmd()
     .args(["ps", "-q"])
@@ -107,6 +122,16 @@ async fn collect_inner(
         v["Config"]["Labels"]["com.docker.compose.project"]
           .as_str()
           .map(str::to_string);
+      for (line, listen) in ss
+        .lines()
+        .filter(|line| !parse_ss(line).is_empty())
+        .zip(&mut listens)
+      {
+        if host_container(line, cgroups, &v) {
+          listen.container = Some(name.clone());
+          listen.project = project.clone();
+        }
+      }
       if let Some(ports) = v["NetworkSettings"]["Ports"].as_object() {
         for (key, bindings) in ports {
           let Some((_, proto)) = key.split_once('/') else {
@@ -159,9 +184,53 @@ async fn collect_inner(
       }
     }
   }
+  listens.retain(|l| !client_socket(l, range));
   Ok(ExposureReport {
     listens,
     containers,
+  })
+}
+
+fn ephemeral_range(text: &str) -> (u16, u16) {
+  let mut parts = text.split_whitespace();
+  match (
+    parts.next().and_then(|p| p.parse().ok()),
+    parts.next().and_then(|p| p.parse().ok()),
+  ) {
+    (Some(start), Some(end)) if start <= end => (start, end),
+    _ => (32768, 60999),
+  }
+}
+
+fn client_socket(l: &Listen, range: (u16, u16)) -> bool {
+  l.proto == "udp" && (range.0..=range.1).contains(&l.port)
+}
+
+fn host_container(
+  line: &str,
+  cgroups: &str,
+  container: &Value,
+) -> bool {
+  if container["HostConfig"]["NetworkMode"] != "host" {
+    return false;
+  }
+  let Some(id) = container["Id"].as_str().filter(|id| !id.is_empty())
+  else {
+    return false;
+  };
+  line.split("pid=").skip(1).any(|part| {
+    let pid = part
+      .split(|c: char| !c.is_ascii_digit())
+      .next()
+      .unwrap_or("");
+    cgroups.lines().any(|row| {
+      row.split_once(' ').is_some_and(|(p, group)| {
+        p == pid
+          && group
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|value| value == id)
+      })
+    })
   })
 }
 
@@ -250,6 +319,35 @@ fn risks(v: &Value) -> Vec<String> {
 #[cfg(test)]
 mod tests {
   use super::*;
+  #[test]
+  fn host_network_process_uses_cgroup_container() {
+    let v = serde_json::json!({"Id":"abc123", "HostConfig":{"NetworkMode":"host"}});
+    let line = "users:((\"java\",pid=42,fd=3))";
+    assert!(host_container(
+      line,
+      "42 0::/system.slice/docker-abc123.scope",
+      &v
+    ));
+    assert!(!host_container(line, "42 0::/", &v));
+  }
+  #[test]
+  fn udp_ephemeral_only() {
+    let range = ephemeral_range("40000 50000");
+    let l = Listen {
+      proto: "udp".into(),
+      port: 45000,
+      ..Default::default()
+    };
+    assert!(client_socket(&l, range));
+    assert!(!client_socket(
+      &Listen {
+        proto: "tcp".into(),
+        ..l
+      },
+      range
+    ));
+    assert_eq!(ephemeral_range(""), (32768, 60999));
+  }
   #[test]
   fn parses_tcp_udp_and_ipv6() {
     let rows = parse_ss(
