@@ -23,6 +23,8 @@ export function Overview({ svc, routes, onTab, onBackup, onOpen }: { svc: Servic
   const { status, refresh: refreshStatus } = useStatus();
   const [sharing, setSharing] = useState(false);
   const exposure = usePoll<ExposureView>(`/api/servers/${encodeURIComponent(svc.spec.server)}/exposure`, 30000);
+  const machine = status?.servers.find((s) => s.name === svc.spec.server);
+  const noPublic = !!machine && !machine.public_ip;
   const ports = exposure.data?.ports.filter((p) => p.owner === "service" && p.name === svc.name) ?? [];
   const [timeline, setTimeline] = useState<Timeline | null>(null);
   useEffect(() => { api.get<Timeline>(`/api/services/${encodeURIComponent(svc.name)}/timeline?limit=3`).then(setTimeline).catch(() => setTimeline(null)); }, [svc.name]);
@@ -129,10 +131,10 @@ export function Overview({ svc, routes, onTab, onBackup, onOpen }: { svc: Servic
     </div>
     <ErrorNote error={exposure.error} />
     {!!ports.length && <>
-      <SectionTitle>对公网开放的端口</SectionTitle>
-      <Rows>{ports.map((p) => <Row key={`${p.proto}/${p.port}/${p.addr}`} className={!p.acked && !p.expected ? "bg-warning/10" : undefined}>
-        <span className="flex-1 font-mono text-xs">{p.proto}/{p.port}</span><span>{p.acked ? "已确认" : p.expected ? "预期" : "未确认"}</span>
-        {!p.acked && !p.expected && <Button variant="outline" size="xs" onClick={async () => { try { await api.post(`/api/servers/${encodeURIComponent(svc.spec.server)}/exposure/ack`, { port: `${p.proto}/${p.port}`, acked: true }); exposure.refresh(); refreshStatus(); } catch (e) { toast.error("确认失败", { description: (e as Error).message }); } }}>我知道</Button>}
+      <SectionTitle>{noPublic ? "监听端口" : "对公网开放的端口"}</SectionTitle>
+      <Rows>{ports.map((p) => <Row key={`${p.proto}/${p.port}/${p.addr}`} className={!noPublic && !p.acked && !p.expected ? "bg-warning/10" : undefined}>
+        <span className="flex-1 font-mono text-xs">{p.proto}/{p.port}</span><span>{noPublic ? "无公网地址" : p.acked ? "已确认" : p.expected ? "预期" : "未确认"}</span>
+        {!noPublic && !p.acked && !p.expected && <Button variant="outline" size="xs" onClick={async () => { try { await api.post(`/api/servers/${encodeURIComponent(svc.spec.server)}/exposure/ack`, { port: `${p.proto}/${p.port}`, acked: true }); exposure.refresh(); refreshStatus(); } catch (e) { toast.error("确认失败", { description: (e as Error).message }); } }}>我知道</Button>}
       </Row>)}</Rows>
     </>}
     <SectionTitle>备注</SectionTitle>

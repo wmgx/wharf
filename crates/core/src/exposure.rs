@@ -42,11 +42,28 @@ fn outdated(snap: &Snapshot, server: &str) -> bool {
   )
 }
 
+fn public_ip<'a>(
+  snap: &'a Snapshot,
+  server: &str,
+) -> Option<&'a str> {
+  snap
+    .world
+    .servers
+    .get(server)
+    .and_then(|s| s.settings.public_ip.as_deref())
+    .or_else(|| {
+      snap
+        .agent(server)
+        .and_then(|a| a.report.as_ref())
+        .and_then(|r| r.public_ip.as_deref())
+    })
+}
+
 fn classify(
   l: &Listen,
   report: &AgentReport,
   gateways: &[(String, String, u16)],
-  services: &BTreeSet<String>,
+  services: &BTreeMap<String, Vec<(String, u16)>>,
 ) -> Option<PortRow> {
   let wildcard = matches!(l.addr.as_str(), "0.0.0.0" | "::" | "*");
   if !wildcard
@@ -58,14 +75,15 @@ fn classify(
   }
   let project = l.project.as_deref().unwrap_or("");
   let gateway = gateways.iter().find(|(name, proto, port)| {
-    *port == l.port
-      && *proto == l.proto
-      && (project == format!("wharf-gw-{name}")
-        || l.process == "caddy")
+    project == format!("wharf-gw-{name}")
+      || (*port == l.port
+        && *proto == l.proto
+        && l.process == "caddy")
   });
   let (owner, name, expected) = if let Some((name, _, _)) = gateway {
     ("gateway", name.clone(), true)
-  } else if project.starts_with("wharf-")
+  } else if l.process == "wharf-core"
+    || project.starts_with("wharf-")
     || matches!(
       l.container.as_deref(),
       Some("wharf-agent" | "wharf-core")
@@ -78,15 +96,33 @@ fn classify(
       l.container.clone().unwrap_or_else(|| l.process.clone()),
       true,
     )
-  } else if services.contains(project) {
-    ("service", project.into(), false)
+  } else if let Some((name, _)) =
+    services.get_key_value(project).or_else(|| {
+      services.iter().find(|(_, ports)| {
+        ports
+          .iter()
+          .any(|(proto, port)| proto == &l.proto && *port == l.port)
+      })
+    })
+  {
+    ("service", name.clone(), false)
   } else if let Some(c) = &l.container {
     ("container", c.clone(), false)
   } else if !l.process.is_empty() {
     (
       "host",
       l.process.clone(),
-      matches!(l.process.as_str(), "sshd" | "tailscaled"),
+      matches!(l.process.as_str(), "sshd" | "tailscaled")
+        || (l.proto == "udp"
+          && ((l.port == 68 && l.process == "dhclient")
+            || (l.port == 123
+              && matches!(
+                l.process.as_str(),
+                "ntpd"
+                  | "chronyd"
+                  | "systemd-timesyncd"
+                  | "systemd-timesyn"
+              )))),
     )
   } else {
     ("unknown", "未知".into(), false)
@@ -111,22 +147,38 @@ fn rows(
   server: &str,
   report: &ExposureReport,
 ) -> (Vec<PortRow>, Vec<RiskRow>) {
-  let agent = snap
+  let mut agent = snap
     .agent(server)
     .and_then(|a| a.report.clone())
     .unwrap_or_default();
-  let services: BTreeSet<_> = snap
+  agent.public_ip = public_ip(snap, server).map(str::to_string);
+  let services: BTreeMap<_, _> = snap
     .world
     .services
     .iter()
     .filter(|(_, r)| r.spec.server == server)
-    .map(|(name, _)| name.clone())
+    .map(|(name, r)| {
+      (
+        name.clone(),
+        r.spec
+          .ports
+          .iter()
+          .filter_map(|p| {
+            p.host.or_else(|| r.host_ports.get(&p.name).copied()).map(
+              |port| (if p.udp { "udp" } else { "tcp" }.into(), port),
+            )
+          })
+          .collect(),
+      )
+    })
     .collect();
   let mut gateways = vec![];
   for (name, g) in &snap.world.gateways {
-    if g.spec.server != server
-      || g.spec.kind != wharf_api_types::spec::GatewayKind::Caddy
-    {
+    if g.spec.server != server {
+      continue;
+    }
+    if g.spec.kind != wharf_api_types::spec::GatewayKind::Caddy {
+      gateways.push((name.clone(), String::new(), 0));
       continue;
     }
     for port in [
@@ -181,7 +233,7 @@ fn rows(
         service: c
           .project
           .as_ref()
-          .filter(|p| services.contains(*p) && !own)
+          .filter(|p| services.contains_key(*p) && !own)
           .cloned(),
         risks: c.risks.clone(),
         own,
@@ -214,7 +266,11 @@ fn read(
 fn new_ports<'a>(
   ports: &'a [PortRow],
   seen: Option<&BTreeSet<String>>,
+  has_public_ip: bool,
 ) -> Vec<&'a PortRow> {
+  if !has_public_ip {
+    return vec![];
+  }
   let Some(seen) = seen else { return vec![] };
   ports
     .iter()
@@ -249,7 +305,11 @@ pub async fn refresh(
     .await?;
   let (ports, _) = rows(&snap, server, &report);
   let mut seen = setting(state, "exposure.seen").await?;
-  let new = new_ports(&ports, seen.get(server));
+  let new = new_ports(
+    &ports,
+    seen.get(server),
+    public_ip(&snap, server).is_some(),
+  );
   let body = new
     .iter()
     .map(|p| format!("{} · {}", port_key(p), p.name))
@@ -370,6 +430,9 @@ pub async fn issues(
   let snap = snapshot::load(&state.db).await?;
   let mut issues = vec![];
   for server in snap.world.servers.keys() {
+    if public_ip(&snap, server).is_none() {
+      continue;
+    }
     for p in view(state, server).await?.ports {
       if !p.expected && !p.acked {
         issues.push(Issue {
@@ -478,6 +541,97 @@ pub async fn ack(
 mod tests {
   use super::*;
   #[test]
+  fn declared_host_port_belongs_to_service() {
+    let services =
+      BTreeMap::from([("app".into(), vec![("tcp".into(), 8090)])]);
+    let l = Listen {
+      proto: "tcp".into(),
+      addr: "0.0.0.0".into(),
+      port: 8090,
+      process: "java".into(),
+      ..Default::default()
+    };
+    let p =
+      classify(&l, &AgentReport::default(), &[], &services).unwrap();
+    assert_eq!(
+      (p.owner.as_str(), p.name.as_str(), p.expected),
+      ("service", "app", false)
+    );
+  }
+  #[test]
+  fn core_and_local_tunnel_are_expected() {
+    let l = Listen {
+      addr: "0.0.0.0".into(),
+      process: "wharf-core".into(),
+      ..Default::default()
+    };
+    assert!(
+      classify(&l, &AgentReport::default(), &[], &BTreeMap::new())
+        .unwrap()
+        .expected
+    );
+    let l = Listen {
+      process: "cloudflared".into(),
+      project: Some("wharf-gw-edge".into()),
+      ..l
+    };
+    let p = classify(
+      &l,
+      &AgentReport::default(),
+      &[("edge".into(), String::new(), 0)],
+      &BTreeMap::new(),
+    )
+    .unwrap();
+    assert_eq!(
+      (p.owner.as_str(), p.name.as_str(), p.expected),
+      ("gateway", "edge", true)
+    );
+  }
+  #[test]
+  fn system_udp_clients_are_expected() {
+    let l = Listen {
+      proto: "udp".into(),
+      addr: "0.0.0.0".into(),
+      port: 68,
+      process: "dhclient".into(),
+      ..Default::default()
+    };
+    assert!(
+      classify(&l, &AgentReport::default(), &[], &BTreeMap::new())
+        .unwrap()
+        .expected
+    );
+    let l = Listen {
+      port: 123,
+      process: "ntpd".into(),
+      ..l
+    };
+    assert!(
+      classify(&l, &AgentReport::default(), &[], &BTreeMap::new())
+        .unwrap()
+        .expected
+    );
+  }
+  #[test]
+  fn no_public_address_does_not_notify() {
+    let ports = vec![PortRow {
+      proto: "tcp".into(),
+      port: 8090,
+      addr: "0.0.0.0".into(),
+      owner: "service".into(),
+      name: "app".into(),
+      expected: false,
+      acked: false,
+    }];
+    assert!(
+      new_ports(&ports, Some(&BTreeSet::new()), false).is_empty()
+    );
+    assert_eq!(
+      new_ports(&ports, Some(&BTreeSet::new()), true).len(),
+      1
+    );
+  }
+  #[test]
   fn refresh_only_online_current_and_missing_or_expired() {
     let now = 7_200_000;
     assert!(should_refresh(true, false, None, now));
@@ -500,7 +654,7 @@ mod tests {
     };
     let g = vec![("edge".into(), "tcp".into(), 443)];
     let p =
-      classify(&l, &AgentReport::default(), &g, &BTreeSet::new())
+      classify(&l, &AgentReport::default(), &g, &BTreeMap::new())
         .unwrap();
     assert!(p.expected);
     assert_eq!(p.owner, "gateway");
@@ -510,7 +664,7 @@ mod tests {
       ..l
     };
     let p =
-      classify(&l, &AgentReport::default(), &g, &BTreeSet::new())
+      classify(&l, &AgentReport::default(), &g, &BTreeMap::new())
         .unwrap();
     assert!(!p.expected);
     assert_eq!(p.owner, "container");
@@ -525,11 +679,11 @@ mod tests {
       ..Default::default()
     };
     let p =
-      classify(&l, &AgentReport::default(), &[], &BTreeSet::new())
+      classify(&l, &AgentReport::default(), &[], &BTreeMap::new())
         .unwrap();
     assert!(p.expected);
     assert_eq!(p.owner, "host");
-    assert!(new_ports(&[p], Some(&BTreeSet::new())).is_empty());
+    assert!(new_ports(&[p], Some(&BTreeSet::new()), true).is_empty());
   }
   #[test]
   fn private_listeners_excluded() {
@@ -538,7 +692,7 @@ mod tests {
       ..Default::default()
     };
     assert!(
-      classify(&l, &AgentReport::default(), &[], &BTreeSet::new())
+      classify(&l, &AgentReport::default(), &[], &BTreeMap::new())
         .is_none()
     );
   }
@@ -554,11 +708,18 @@ mod tests {
       acked: false,
     };
     let ports = vec![p];
-    assert!(new_ports(&ports, None).is_empty());
-    assert_eq!(new_ports(&ports, Some(&BTreeSet::new())).len(), 1);
+    assert!(new_ports(&ports, None, true).is_empty());
+    assert_eq!(
+      new_ports(&ports, Some(&BTreeSet::new()), true).len(),
+      1
+    );
     assert!(
-      new_ports(&ports, Some(&BTreeSet::from(["tcp/8080".into()])))
-        .is_empty()
+      new_ports(
+        &ports,
+        Some(&BTreeSet::from(["tcp/8080".into()])),
+        true
+      )
+      .is_empty()
     );
   }
 }
