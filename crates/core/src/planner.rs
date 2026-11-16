@@ -433,6 +433,18 @@ pub async fn make_plan(
     }
   }
 
+  for route in desired.routes.values() {
+    if let Some(login) =
+      route.spec.sso.as_ref().and_then(|s| s.login.as_ref())
+    {
+      for name in crate::sso_login::secret_refs(login) {
+        if !snap.secrets.contains_key(&name) {
+          warnings
+            .push(format!("密钥 {name} 还没有设置，代登录会失败"));
+        }
+      }
+    }
+  }
   let writes = desired.writes_from(&current);
   let mut b = Builder {
     image_ids: resolved.image_ids,

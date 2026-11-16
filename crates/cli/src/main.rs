@@ -47,7 +47,18 @@ pub struct Cli {
 }
 
 #[derive(Subcommand)]
+pub enum SsoCmd {
+  #[command(
+    long_about = "实际登录一次应用并检查结果。先用 wharf secret set 存应用账号，写登录步骤配置文件，再用 wharf route sso <域名> --mode login --file <文件> --apply 应用，运行 wharf sso test <域名>。不通就改配置再试，改不通就换回 --mode gate。"
+  )]
+  Test { hostname: String },
+}
+
+#[derive(Subcommand)]
 pub enum Command {
+  /// 代登录测试。
+  #[command(subcommand)]
+  Sso(SsoCmd),
   /// 保存控制面地址和 token（token 从标准输入读取，不回显）。
   Login {
     #[arg(long)]
@@ -849,7 +860,7 @@ pub enum RouteCmd {
   /// 域名门禁；不给 --mode 时显示当前配置。
   Sso {
     name: String,
-    #[arg(long, value_parser = ["gate", "header", "off"])]
+    #[arg(long, value_parser = ["gate", "header", "login", "off"])]
     mode: Option<String>,
     #[arg(long = "skip", requires = "mode")]
     skip: Vec<String>,
@@ -863,6 +874,9 @@ pub enum RouteCmd {
     no_trust_internal: bool,
     #[arg(long, requires = "mode")]
     header: Option<String>,
+    /// 登录步骤的 YAML 或 JSON 文件，- 从标准输入读。
+    #[arg(long, requires = "mode")]
+    file: Option<String>,
     #[command(flatten)]
     apply: ApplyFlags,
   },

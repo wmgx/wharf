@@ -586,6 +586,8 @@ pub struct RouteSpec {
 )]
 pub struct SsoSpec {
   #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub login: Option<LoginSpec>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
   pub header: Option<String>,
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub trust_internal: bool,
@@ -601,6 +603,7 @@ pub struct SsoSpec {
 pub enum SsoMode {
   Gate,
   Header,
+  Login,
 }
 
 /// 网关到服务的走法偏好。
@@ -822,4 +825,93 @@ pub enum Change {
   RemoveEdgeApp {
     name: String,
   },
+}
+
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct LoginSpec {
+  pub steps: Vec<LoginStep>,
+  pub write: Vec<LoginWrite>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub check: Option<LoginStep>,
+  #[serde(default = "login_ttl")]
+  pub ttl_hours: u16,
+}
+fn login_ttl() -> u16 {
+  24
+}
+fn login_method() -> String {
+  "GET".into()
+}
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct LoginStep {
+  #[serde(default = "login_method")]
+  pub method: String,
+  pub path: String,
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub headers: BTreeMap<String, String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub form: Option<BTreeMap<String, String>>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub json: Option<serde_json::Value>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub body: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub expect: Option<Vec<u16>>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub extract: Vec<Extract>,
+}
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(tag = "from", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Extract {
+  Json { name: String, path: String },
+  Body { name: String, between: [String; 2] },
+  Header { name: String, header: String },
+  Cookie { name: String, cookie: String },
+}
+impl Extract {
+  pub fn name(&self) -> &str {
+    match self {
+      Self::Json { name, .. }
+      | Self::Body { name, .. }
+      | Self::Header { name, .. }
+      | Self::Cookie { name, .. } => name,
+    }
+  }
+}
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum LoginWrite {
+  Cookies(AllCookies),
+  Cookie {
+    name: String,
+    value: String,
+    #[serde(default = "cookie_http_only")]
+    http_only: bool,
+  },
+  LocalStorage {
+    key: String,
+    value: String,
+  },
+  SessionStorage {
+    key: String,
+    value: String,
+  },
+}
+fn cookie_http_only() -> bool {
+  true
+}
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum AllCookies {
+  All,
 }

@@ -1407,3 +1407,21 @@ pub struct GateKeyView {
 pub struct GateKeyRequest {
   pub hosts: Vec<String>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SsoTestResult {
+  pub ok: bool,
+  pub steps: Vec<SsoStepResult>,
+  pub check: Option<SsoStepResult>,
+  pub would_write: Vec<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SsoStepResult {
+  pub number: usize,
+  pub method: String,
+  pub path: String,
+  pub status: Option<u16>,
+  pub ms: u64,
+  pub extracted: std::collections::BTreeMap<String, usize>,
+  pub error: Option<String>,
+}

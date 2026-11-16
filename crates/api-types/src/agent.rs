@@ -319,6 +319,8 @@ pub enum AgentOp {
   },
   /// 从本机发一次 HTTP GET（自定义监控），结果是 [HttpCheckResult]。
   HttpCheck(HttpCheck),
+  /// 代登录请求，不记录请求和应答内容。
+  HttpFetch(HttpFetch),
   /// 链路质量：对每个目标连 `count` 次，结果是 `Vec<LinkSample>`（和 `targets` 一一对应）。
   Quality {
     targets: Vec<ProbeTarget>,
@@ -1350,4 +1352,20 @@ pub struct ContainerRisk {
   pub name: String,
   pub project: Option<String>,
   pub risks: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HttpFetch {
+  pub url: String,
+  pub method: String,
+  pub headers: Vec<(String, String)>,
+  pub body: Option<String>,
+  pub timeout_secs: u64,
+}
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HttpFetchResult {
+  pub status: Option<u16>,
+  pub headers: Vec<(String, String)>,
+  pub body: String,
+  pub error: Option<String>,
 }
