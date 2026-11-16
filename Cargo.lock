@@ -1646,6 +1646,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "qrcode"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d68782463e408eb1e668cf6152704bd856c78c5b6417adaee3203d8f4c1fc9ec"
+
+[[package]]
 name = "quinn"
 version = "0.11.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3092,6 +3098,7 @@ dependencies = [
  "serde",
  "serde_ignored",
  "serde_json",
+ "serde_yaml_ng",
  "sha2 0.10.9",
  "tempfile",
  "tokio",
@@ -3117,9 +3124,11 @@ dependencies = [
  "futures-util",
  "getrandom 0.3.4",
  "hex",
+ "hmac",
  "hyper",
  "hyper-util",
  "if-addrs",
+ "qrcode",
  "reqwest",
  "rpassword",
  "rusqlite",
@@ -3127,6 +3136,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml_ng",
+ "sha1 0.10.7",
  "sha2 0.10.9",
  "tar",
  "tempfile",
@@ -3135,6 +3145,7 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "urlencoding",
  "wharf-api-types",
  "wharf-providers",
 ]

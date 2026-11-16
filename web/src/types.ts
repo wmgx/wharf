@@ -147,6 +147,7 @@ export interface LiveState {
 }
 
 export interface ServiceView {
+  risks?: string[];
   monitor?: MonitorView;
   uses?: string[];
   used_by?: string[];
@@ -192,6 +193,7 @@ export interface GatewayView {
 }
 
 export interface RouteSpec {
+  sso?: Gen.SsoSpec;
   rate_limit?: number;
   block_scanners?: boolean;
   internal?: boolean;
@@ -220,6 +222,7 @@ export interface RouteSpec {
 }
 
 export interface RouteView {
+  sso_login?: Gen.SsoLoginState;
   id: string;
   spec: RouteSpec;
   gateway?: string;
@@ -662,6 +665,8 @@ export interface ServiceStatus {
   observed_at?: string;
 }
 
+export type ScriptRuntime = "python" | "node" | "shell";
+
 export type TaskKind =
   | { kind: "exec"; service: string; container?: string; command: string }
   | {
@@ -671,6 +676,7 @@ export type TaskKind =
       env?: Record<string, string>;
       mounts?: string[];
     }
+  | { kind: "script"; runtime: ScriptRuntime; code: string; deps?: string; image?: string; env?: Record<string, string>; hook?: string }
   | { kind: "host"; command: string }
   | { kind: "ping"; token?: string; grace_mins: number };
 
@@ -686,6 +692,7 @@ export type TaskStatus =
   "running" | "succeeded" | "failed" | "timed_out" | "skipped";
 
 export interface TaskRunView {
+  mem_peak?: number;
   id: number;
   task: string;
   status: TaskStatus;
@@ -697,12 +704,14 @@ export interface TaskRunView {
 }
 
 export interface TaskView {
+  data_bytes?: number;
   name: string;
   spec: TaskSpec;
   last?: TaskRunView;
   next_at?: string;
   /** 外部报到任务的报到地址。 */
   ping_url?: string;
+  hook_url?: string;
   updated_at: string;
 }
 
@@ -767,3 +776,5 @@ export interface AuditEntry {
 export type TimelineItem = Gen.TimelineItem;
 
 export type Timeline = Gen.Timeline;
+export type GateKeyView = Gen.GateKeyView;
+export type GateKeyRequest = Gen.GateKeyRequest;

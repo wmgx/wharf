@@ -1,3 +1,4 @@
+import { ContainerRisk } from "@/components/container-risk";
 import { ArrowLeftIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
@@ -60,7 +61,7 @@ export function ServiceDetail() {
   const result = svc.monitor;
   return <>
     <PageHeader back={{ to: "/services", label: "服务" }} title={<>
-      {svc.name}<Tooltip>
+      {svc.name}<ContainerRisk risks={svc.risks} /><Tooltip>
         <TooltipTrigger>
           <StatusBadge tone={tone}>
             {text}

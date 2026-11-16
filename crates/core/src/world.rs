@@ -288,6 +288,13 @@ impl World {
         }
         Change::UpsertService { name, spec, adopt } => {
           validate_name("服务", name)?;
+          if name
+            .starts_with(wharf_api_types::agent::TASK_DATA_PREFIX)
+          {
+            return Err(ApiError::invalid(
+              "服务名不能以 wharf-task- 开头",
+            ));
+          }
           if name.starts_with(TRIAL_PROJECT_PREFIX) {
             return Err(
               ApiError::invalid(format!(
@@ -1035,6 +1042,67 @@ impl World {
         );
       }
       self.check_route_gateway(host, &route.spec)?;
+      if let Some(sso) = &route.spec.sso {
+        crate::sso_login::validate(host, sso)?;
+        if let Some(header) = &sso.header {
+          if sso.mode != wharf_api_types::spec::SsoMode::Header {
+            return Err(ApiError::invalid(format!(
+              "域名 {host}：只有 header 方式才能设请求头名字"
+            )));
+          }
+          if header.is_empty()
+            || header.len() > 64
+            || !header.as_bytes()[0].is_ascii_alphabetic()
+            || !header
+              .bytes()
+              .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+          {
+            return Err(ApiError::invalid(format!(
+              "域名 {host}：请求头名字 {header} 写得不对"
+            )));
+          }
+          let lower = header.to_ascii_lowercase();
+          if matches!(
+            lower.as_str(),
+            "cookie" | "host" | "authorization" | "x-wharf-key"
+          ) || lower.starts_with("x-forwarded-")
+          {
+            return Err(ApiError::invalid(format!(
+              "域名 {host}：不能用 {header} 做用户名请求头"
+            )));
+          }
+        }
+        if route.spec.auth {
+          return Err(ApiError::invalid(format!(
+            "域名 {host}：门禁和登录保护只能开一个"
+          )));
+        }
+        if route.spec.redirect.is_some() {
+          return Err(ApiError::invalid(format!(
+            "域名 {host}：跳转的域名不能开门禁"
+          )));
+        }
+        if self.route_gateways(&route.spec).iter().any(|name| {
+          self.gateways[*name].spec.kind != GatewayKind::Caddy
+        }) {
+          return Err(ApiError::invalid(format!(
+            "域名 {host}：Cloudflare 隧道入口不支持门禁"
+          )));
+        }
+        for path in &sso.skip_paths {
+          if sso.skip_paths.len() > 20
+            || path.len() > 100
+            || !path.starts_with('/')
+            || !path.bytes().all(|b| {
+              b.is_ascii_alphanumeric() || b"/_-.".contains(&b)
+            })
+          {
+            return Err(ApiError::invalid(format!(
+              "域名 {host}：排除的路径 {path} 写得不对"
+            )));
+          }
+        }
+      }
       if route.spec.rate_limit.is_some() || route.spec.block_scanners
       {
         if route.spec.redirect.is_some() {
@@ -2190,6 +2258,18 @@ mod tests {
   }
 
   #[test]
+  fn task_service_name_is_rejected() {
+    let err = sample()
+      .apply_changes(&[Change::UpsertService {
+        name: "wharf-task-x".into(),
+        spec: image_service("s1"),
+        adopt: None,
+      }])
+      .unwrap_err();
+    assert!(err.message.contains("不能以 wharf-task- 开头"));
+  }
+
+  #[test]
   fn error_page_checks_content() {
     assert!(
       check_error_page(
@@ -2335,6 +2415,7 @@ mod tests {
       },
       Change::UpsertRoute {
         spec: RouteSpec {
+          sso: None,
           hostname: "Who.EXAMPLE.com".into(),
           service: "who".into(),
           port: None,
@@ -2415,6 +2496,7 @@ mod tests {
       layer4: vec![],
     };
     let route = |backup: &str| RouteSpec {
+      sso: None,
       hostname: "who.example.com".into(),
       service: "who".into(),
       port: None,
@@ -2492,5 +2574,101 @@ mod tests {
     desired.allocate_ports().unwrap();
     let writes = desired.writes_from(&current);
     assert_eq!(writes.len(), 1);
+  }
+  #[test]
+  fn route_login_checks() {
+    let mut sso: wharf_api_types::spec::SsoSpec = serde_json::from_value(json!({"mode":"login","login":{"steps":[{"path":"/login","extract":[{"from":"body","name":"csrf","between":["a=",";"]}]},{"method":"POST","path":"/login","form":{"csrf":"{{csrf}}","password":"{{secret.PASS}}"}}],"write":[{"cookies":"all"}],"check":{"path":"/me"}}})).unwrap();
+    assert!(
+      crate::sso_login::validate("a.example.com", &sso).is_ok()
+    );
+    sso.login.as_mut().unwrap().steps[0].path = "/{{missing}}".into();
+    assert!(
+      crate::sso_login::validate("a.example.com", &sso)
+        .unwrap_err()
+        .message
+        .contains("前面没有取过")
+    );
+  }
+
+  #[test]
+  fn route_sso_checks() {
+    let mut w = World::default();
+    w.servers.insert(
+      "s1".into(),
+      ServerRow {
+        settings: Default::default(),
+        version: 1,
+      },
+    );
+    w.apply_changes(&[Change::UpsertGateway{name:"edge".into(),spec:serde_json::from_value(json!({"kind":"caddy","server":"s1","default":true})).unwrap()},Change::UpsertRoute{spec:serde_json::from_value(json!({"hostname":"a.example.com","upstream":"127.0.0.1:8080","sso":{"mode":"gate","skip_paths":["/api"]}})).unwrap()}]).unwrap();
+    w.validate().unwrap();
+    w.routes.get_mut("a.example.com").unwrap().spec.auth = true;
+    assert!(w.validate().unwrap_err().message.contains("只能开一个"));
+    w.routes.get_mut("a.example.com").unwrap().spec.auth = false;
+    w.routes
+      .get_mut("a.example.com")
+      .unwrap()
+      .spec
+      .sso
+      .as_mut()
+      .unwrap()
+      .skip_paths = vec!["/api*".into()];
+    assert!(w.validate().unwrap_err().message.contains("写得不对"));
+  }
+  #[test]
+  fn route_header_checks() {
+    let mut w = World::default();
+    w.servers.insert(
+      "s1".into(),
+      ServerRow {
+        settings: Default::default(),
+        version: 1,
+      },
+    );
+    w.apply_changes(&[Change::UpsertGateway{name:"edge".into(),spec:serde_json::from_value(json!({"kind":"caddy","server":"s1","default":true})).unwrap()},Change::UpsertRoute{spec:serde_json::from_value(json!({"hostname":"a.example.com","upstream":"127.0.0.1:8080","sso":{"mode":"header"}})).unwrap()}]).unwrap();
+    w.validate().unwrap();
+    let sso = w
+      .routes
+      .get_mut("a.example.com")
+      .unwrap()
+      .spec
+      .sso
+      .as_mut()
+      .unwrap();
+    sso.header = Some("Remote-Name".into());
+    w.validate().unwrap();
+    for (header, message) in [
+      ("", "写得不对"),
+      ("1User", "写得不对"),
+      ("Remote_User", "写得不对"),
+      ("cookie", "不能用"),
+      ("HOST", "不能用"),
+      ("Authorization", "不能用"),
+      ("X-Wharf-Key", "不能用"),
+      ("x-forwarded-User", "不能用"),
+    ] {
+      w.routes
+        .get_mut("a.example.com")
+        .unwrap()
+        .spec
+        .sso
+        .as_mut()
+        .unwrap()
+        .header = Some(header.into());
+      assert!(w.validate().unwrap_err().message.contains(message));
+    }
+    let sso = w
+      .routes
+      .get_mut("a.example.com")
+      .unwrap()
+      .spec
+      .sso
+      .as_mut()
+      .unwrap();
+    sso.header = Some("Remote-User".into());
+    sso.mode = wharf_api_types::spec::SsoMode::Gate;
+    assert!(
+      w.validate().unwrap_err().message.contains("只有 header")
+    );
   }
 }

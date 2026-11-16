@@ -2,26 +2,34 @@
 //! 任务定义直接改，不走计划（定义本身不改机器）。控制面停机期间错过的不补跑。
 
 use std::{
-  collections::BTreeSet,
-  sync::{Arc, Mutex},
-  time::Duration,
+  collections::{BTreeSet, HashMap},
+  sync::{Arc, LazyLock, Mutex},
+  time::{Duration, Instant},
 };
 
 use axum::{
   Json,
+  body::{Body, to_bytes},
   extract::{Path, Query, State},
+  http::{Request, StatusCode},
+  response::{IntoResponse, Response},
 };
+use base64::{Engine, engine::general_purpose::STANDARD};
 use chrono::{DateTime, Utc};
 use rusqlite::{OptionalExtension, params};
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
   ApiError, ErrorCode,
-  agent::{AgentOp, HostExecJob, TaskHow, TaskRunJob, TaskRunResult},
+  agent::{
+    AgentOp, HostExecJob, NODE_IMAGE, PYTHON_IMAGE, SHELL_IMAGE,
+    ServiceDisk, TASK_DATA_PREFIX, TaskHow, TaskInput, TaskRunJob,
+    TaskRunResult,
+  },
   validate_name,
   view::{
-    Issue, IssueLevel, IssueSubject, Perm, TaskKind, TaskRunView,
-    TaskSpec, TaskStatus, TaskView,
+    Issue, IssueLevel, IssueSubject, Perm, ScriptRuntime, TaskKind,
+    TaskRunView, TaskSpec, TaskStatus, TaskView,
   },
 };
 
@@ -41,6 +49,8 @@ const OTHER_MAX: u64 = 6 * 3600;
 
 /// 正在跑的任务，同一个任务不并发。
 static RUNNING: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+static HOOKS: LazyLock<Mutex<HashMap<String, (u32, Instant)>>> =
+  LazyLock::new(Default::default);
 
 pub fn spawn(state: Arc<AppState>) {
   tokio::spawn(async move {
@@ -66,7 +76,7 @@ async fn tick(
     return Ok(());
   }
   for (name, spec, _) in load(state).await? {
-    if !spec.enabled {
+    if !spec.enabled || spec.schedule.is_empty() {
       continue;
     }
     let Ok(cron) = Cron::parse(&spec.schedule) else {
@@ -80,7 +90,7 @@ async fn tick(
       continue;
     }
     if cron.next_after(after).is_some_and(|t| t <= until) {
-      let _ = start(state, &name, spec, "schedule").await;
+      let _ = start(state, &name, spec, "schedule", None).await;
     }
   }
   Ok(())
@@ -141,7 +151,8 @@ async fn start(
   name: &str,
   spec: TaskSpec,
   trigger: &str,
-) -> Result<i64, ApiError> {
+  input: Option<TaskInput>,
+) -> Result<(i64, bool), ApiError> {
   let busy = !RUNNING
     .lock()
     .map(|mut r| r.insert(name.to_string()))
@@ -162,19 +173,27 @@ async fn start(
     }
   };
   if busy {
-    finish(state, id, TaskStatus::Skipped, None, "上一次还没跑完")
-      .await;
-    return Ok(id);
+    finish(
+      state,
+      id,
+      TaskStatus::Skipped,
+      None,
+      "上一次还没跑完",
+      None,
+    )
+    .await;
+    return Ok((id, true));
   }
   let state = state.clone();
   let name = name.to_string();
   tokio::spawn(async move {
-    let (status, code, output) = execute(&state, &name, &spec).await;
-    finish(&state, id, status, code, &output).await;
+    let (status, code, output, mem_peak) =
+      execute(&state, &name, &spec, input).await;
+    finish(&state, id, status, code, &output, mem_peak).await;
     release(&name);
     notify_result(&state, &name, &spec, status, &output).await;
   });
-  Ok(id)
+  Ok((id, false))
 }
 
 /// 任务失败和恢复时推送（任务开了通知时）。
@@ -237,10 +256,11 @@ async fn execute(
   state: &Arc<AppState>,
   name: &str,
   spec: &TaskSpec,
-) -> (TaskStatus, Option<i32>, String) {
+  input: Option<TaskInput>,
+) -> (TaskStatus, Option<i32>, String, Option<u64>) {
   let snap = match snapshot::load(&state.db).await {
     Ok(s) => s,
-    Err(e) => return (TaskStatus::Failed, None, e.message),
+    Err(e) => return (TaskStatus::Failed, None, e.message, None),
   };
   let secrets = &snap.secrets;
   let used: Vec<&String> = secrets
@@ -250,7 +270,7 @@ async fn execute(
   let redact = |s: String| {
     used.iter().fold(s, |acc, v| acc.replace(v.as_str(), "***"))
   };
-  let result = run_on_agent(state, name, spec, &snap).await;
+  let result = run_on_agent(state, name, spec, &snap, input).await;
   match result {
     Ok(r) => {
       let status = if r.timed_out {
@@ -260,7 +280,7 @@ async fn execute(
       } else {
         TaskStatus::Failed
       };
-      (status, r.exit_code, redact(r.output))
+      (status, r.exit_code, redact(r.output), r.mem_peak)
     }
     Err(e) => {
       let status = if e.code == ErrorCode::Timeout {
@@ -268,7 +288,7 @@ async fn execute(
       } else {
         TaskStatus::Failed
       };
-      (status, None, redact(e.message))
+      (status, None, redact(e.message), None)
     }
   }
 }
@@ -290,6 +310,7 @@ async fn run_on_agent(
   name: &str,
   spec: &TaskSpec,
   snap: &snapshot::Snapshot,
+  input: Option<TaskInput>,
 ) -> Result<TaskRunResult, ApiError> {
   let sub = |t: &str| render::substitute(t, Some(&snap.secrets));
   let server = snap
@@ -315,6 +336,7 @@ async fn run_on_agent(
       )
       .await?;
       return Ok(TaskRunResult {
+        mem_peak: None,
         exit_code: Some(r.exit_code),
         timed_out: false,
         output: format!("{}{}", r.stdout, r.stderr),
@@ -329,6 +351,31 @@ async fn run_on_agent(
       project: service.clone(),
       service: container.clone(),
       command: sub(command)?,
+    },
+    TaskKind::Script {
+      runtime,
+      code,
+      deps,
+      image,
+      env,
+      ..
+    } => TaskHow::Script {
+      image: image.clone().unwrap_or_else(|| {
+        match runtime {
+          ScriptRuntime::Python => PYTHON_IMAGE,
+          ScriptRuntime::Node => NODE_IMAGE,
+          ScriptRuntime::Shell => SHELL_IMAGE,
+        }
+        .to_string()
+      }),
+      runtime: *runtime,
+      code: code.clone(),
+      deps: deps.clone(),
+      mirrors: server.settings.build_env.clone(),
+      env: env
+        .iter()
+        .map(|(k, v)| Ok((k.clone(), sub(v)?)))
+        .collect::<Result<_, ApiError>>()?,
     },
     TaskKind::Container {
       image,
@@ -364,6 +411,7 @@ async fn run_on_agent(
   let job = TaskRunJob {
     name: name.to_string(),
     how,
+    input,
     timeout_secs: spec.timeout_secs,
     pull: snapshot::pull_policy(server),
   };
@@ -414,14 +462,15 @@ pub(crate) async fn finish(
   status: TaskStatus,
   code: Option<i32>,
   output: &str,
+  mem_peak: Option<u64>,
 ) {
   let (status, output) = (enc(status), output.to_string());
   let r = state
     .db
     .call(move |c| {
       c.execute(
-        "UPDATE task_runs SET status = ?2, exit_code = ?3, output = ?4, ended_at = ?5 WHERE id = ?1",
-        params![id, status, code, output, now_ms()],
+        "UPDATE task_runs SET status = ?2, exit_code = ?3, output = ?4, ended_at = ?5, mem_peak = ?6 WHERE id = ?1",
+        params![id, status, code, output, now_ms(), mem_peak],
       )
       .map_err(sql_err)
     })
@@ -501,7 +550,7 @@ fn validate(
   if !snap.world.servers.contains_key(&spec.server) {
     return Err(crate::world::server_not_found(&spec.server));
   }
-  Cron::parse(&spec.schedule)?;
+  validate_schedule(spec)?;
   let max = match spec.how {
     TaskKind::Host { .. } => HOST_MAX,
     _ => OTHER_MAX,
@@ -529,6 +578,29 @@ fn validate(
       }
       if blank(command) {
         return Err(ApiError::invalid("命令不能为空"));
+      }
+    }
+    TaskKind::Script {
+      code,
+      image,
+      deps,
+      runtime,
+      ..
+    } => {
+      if deps.len() > 16 * 1024 {
+        return Err(ApiError::invalid("依赖清单不能超过 16KB"));
+      }
+      if *runtime == ScriptRuntime::Shell && !deps.trim().is_empty() {
+        return Err(ApiError::invalid("shell 脚本不支持依赖清单"));
+      }
+      if blank(code) {
+        return Err(ApiError::invalid("脚本内容不能为空"));
+      }
+      if code.len() > 256 * 1024 {
+        return Err(ApiError::invalid("脚本内容不能超过 256KB"));
+      }
+      if image.as_deref().is_some_and(blank) {
+        return Err(ApiError::invalid("镜像不能为空"));
       }
     }
     TaskKind::Container { image, mounts, .. } => {
@@ -581,10 +653,11 @@ fn run_view(r: &rusqlite::Row) -> rusqlite::Result<TaskRunView> {
     ended_at: r.get::<_, Option<i64>>(5)?.map(to_time),
     exit_code: r.get(6)?,
     output: r.get(7)?,
+    mem_peak: r.get(8)?,
   })
 }
 
-const RUN_COLS: &str = "id, task, status, trigger, started_at, ended_at, exit_code, output";
+const RUN_COLS: &str = "id, task, status, trigger, started_at, ended_at, exit_code, output, mem_peak";
 
 /// `GET /api/tasks`
 pub async fn list(
@@ -620,16 +693,60 @@ pub async fn list(
       }
       _ => None,
     };
+    let hook_url = match (&spec.how, &base) {
+      (
+        TaskKind::Script {
+          hook: Some(token), ..
+        },
+        Some(b),
+      ) => Some(format!("{}/hook/{token}", b.trim_end_matches('/'))),
+      _ => None,
+    };
     out.push(TaskView {
+      data_bytes: None,
       name,
       spec,
       last,
       next_at,
       ping_url,
+      hook_url,
       updated_at: to_time(updated),
     });
   }
   Ok(Json(out))
+}
+
+/// 单任务详情才测持久目录，失败不影响读取配置。
+pub async fn get(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Path(name): Path<String>,
+) -> ApiResult<TaskView> {
+  let mut task = list(State(s.clone()), auth)
+    .await?
+    .0
+    .into_iter()
+    .find(|t| t.name == name)
+    .ok_or_else(|| {
+      ApiError::not_found(format!("没有定时任务 {name}"))
+    })?;
+  if matches!(task.spec.how, TaskKind::Script { .. }) {
+    let disks: Result<Vec<ServiceDisk>, _> = s
+      .hub
+      .call(
+        &task.spec.server,
+        AgentOp::DiskUsage {
+          services: vec![format!("{TASK_DATA_PREFIX}{name}")],
+        },
+        Duration::from_secs(30),
+        None,
+        &CancellationToken::new(),
+      )
+      .await;
+    task.data_bytes =
+      disks.ok().and_then(|v| v.first().map(|d| d.data));
+  }
+  Ok(Json(task))
 }
 
 /// `PUT /api/tasks/{name}`：新建或修改。
@@ -655,6 +772,13 @@ pub async fn put(
       _ => crate::auth::new_token(),
     };
   }
+  if let TaskKind::Script { hook, .. } = &mut spec.how {
+    let old = match load_one(&s, &name).await.map(|o| o.how) {
+      Ok(TaskKind::Script { hook, .. }) => hook,
+      _ => None,
+    };
+    *hook = next_hook(old, hook.take());
+  }
   let text = serde_json::to_string(&spec)
     .map_err(|e| ApiError::internal(e.to_string()))?;
   s.db
@@ -671,14 +795,22 @@ pub async fn put(
   Ok(Json(spec))
 }
 
+#[derive(Deserialize)]
+pub struct RemoveQuery {
+  #[serde(default)]
+  data: bool,
+}
+
 /// `DELETE /api/tasks/{name}`：连运行记录一起删。
 pub async fn remove(
   State(s): State<Arc<AppState>>,
   auth: Auth,
   Path(name): Path<String>,
+  Query(q): Query<RemoveQuery>,
 ) -> ApiResult<serde_json::Value> {
   let spec = load_one(&s, &name).await?;
   need_perm(&auth, &spec)?;
+  let task_name = name.clone();
   s.db
     .call(move |c| {
       c.execute("DELETE FROM tasks WHERE name = ?1", params![name])
@@ -690,6 +822,20 @@ pub async fn remove(
       .map_err(sql_err)
     })
     .await?;
+  if q.data && matches!(spec.how, TaskKind::Script { .. }) {
+    let _: serde_json::Value = s
+      .hub
+      .call(
+        &spec.server,
+        AgentOp::RemoveData {
+          service: format!("{TASK_DATA_PREFIX}{task_name}"),
+        },
+        Duration::from_secs(30),
+        None,
+        &CancellationToken::new(),
+      )
+      .await?;
+  }
   Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -710,7 +856,7 @@ pub async fn run_now(
       .into(),
     );
   }
-  let id = start(&s, &name, spec, "manual").await?;
+  let (id, _) = start(&s, &name, spec, "manual", None).await?;
   Ok(Json(serde_json::json!({ "id": id })))
 }
 
@@ -748,4 +894,106 @@ pub async fn runs(
     })
     .await?;
   Ok(Json(rows))
+}
+
+fn validate_schedule(spec: &TaskSpec) -> Result<(), ApiError> {
+  if spec.schedule.is_empty()
+    && matches!(spec.how, TaskKind::Script { .. })
+  {
+    return Ok(());
+  }
+  Cron::parse(&spec.schedule).map(|_| ())
+}
+
+fn next_hook(
+  old: Option<String>,
+  new: Option<String>,
+) -> Option<String> {
+  new.map(|token| {
+    if token.is_empty() {
+      old
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(crate::auth::new_token)
+    } else {
+      token
+    }
+  })
+}
+
+/// 公开触发地址只按口令查找，不泄露任务是否存在。
+pub async fn hook(
+  State(s): State<Arc<AppState>>,
+  Path(token): Path<String>,
+  request: Request<Body>,
+) -> Result<Response, crate::api::AppError> {
+  let found = load(&s).await?.into_iter().find(|(_, spec, _)| {
+    spec.enabled && matches!(&spec.how, TaskKind::Script { hook: Some(t), .. } if !t.is_empty() && t == &token)
+  });
+  let Some((name, spec, _)) = found else {
+    return Ok(StatusCode::NOT_FOUND.into_response());
+  };
+  {
+    let mut counts = HOOKS.lock().unwrap_or_else(|e| e.into_inner());
+    counts
+      .retain(|_, (_, at)| at.elapsed() < Duration::from_secs(60));
+    let (count, _) =
+      counts.entry(token).or_insert((0, Instant::now()));
+    if *count >= 30 {
+      return Ok(StatusCode::TOO_MANY_REQUESTS.into_response());
+    }
+    *count += 1;
+  }
+  let method = request.method().to_string();
+  let query = request.uri().query().unwrap_or_default().to_string();
+  let body = match to_bytes(request.into_body(), 1024 * 1024).await {
+    Ok(body) => body,
+    Err(_) => {
+      return Ok(StatusCode::PAYLOAD_TOO_LARGE.into_response());
+    }
+  };
+  let input = TaskInput {
+    method,
+    query,
+    body: STANDARD.encode(body),
+  };
+  let (id, skipped) =
+    start(&s, &name, spec, "hook", Some(input)).await?;
+  Ok(if skipped {
+    (
+      StatusCode::CONFLICT,
+      Json(serde_json::json!({ "error": "上一次还没跑完" })),
+    )
+      .into_response()
+  } else {
+    (StatusCode::ACCEPTED, Json(serde_json::json!({ "run": id })))
+      .into_response()
+  })
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn empty_schedule_only_for_script() {
+    let mut spec: TaskSpec = serde_json::from_value(serde_json::json!({
+      "server": "s1", "schedule": "", "kind": "script", "runtime": "shell", "code": "echo ok"
+    })).unwrap();
+    assert!(validate_schedule(&spec).is_ok());
+    spec.how = TaskKind::Host {
+      command: "echo ok".into(),
+    };
+    assert!(validate_schedule(&spec).is_err());
+  }
+
+  #[test]
+  fn empty_hook_generates_and_preserves_token() {
+    let token = next_hook(None, Some(String::new())).unwrap();
+    assert!(!token.is_empty());
+    assert_eq!(
+      next_hook(Some(token.clone()), Some(String::new())),
+      Some(token)
+    );
+    assert_eq!(next_hook(Some("old".into()), None), None);
+  }
 }

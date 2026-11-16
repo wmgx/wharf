@@ -1,3 +1,4 @@
+import { ContainerRisk } from "@/components/container-risk";
 import { ArrowRightIcon, ArrowUpRightIcon, LockIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
@@ -30,7 +31,7 @@ export function Overview({ svc, routes, onTab, onBackup }: { svc: ServiceView; r
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 text-base font-medium">
             <Dot tone={tone} className="size-2.5" />
-            {text}
+            {text}<ContainerRisk risks={svc.risks} />
           </div>
           <div className="text-sm text-muted-foreground">
             {detail || (routes.length ? `${routes.length} 个域名都能打开` : "只在内网访问")}

@@ -19,6 +19,7 @@ mod docker;
 mod edge;
 mod egress;
 mod exec;
+mod exposure;
 mod files;
 mod forward;
 mod gw_stats;
@@ -196,6 +197,7 @@ async fn main() -> anyhow::Result<()> {
     },
   };
   upgrade::sweep_helper();
+  task::cleanup(&cli.data_dir)?;
 
   let key = identity::load_or_create_key(&cli.data_dir)?;
   egress::restore(&cli.data_dir);

@@ -47,7 +47,18 @@ pub struct Cli {
 }
 
 #[derive(Subcommand)]
+pub enum SsoCmd {
+  #[command(
+    long_about = "实际登录一次应用并检查结果。先用 wharf secret set 存应用账号，写登录步骤配置文件，再用 wharf route sso <域名> --mode login --file <文件> --apply 应用，运行 wharf sso test <域名>。不通就改配置再试，改不通就换回 --mode gate。"
+  )]
+  Test { hostname: String },
+}
+
+#[derive(Subcommand)]
 pub enum Command {
+  /// 代登录测试。
+  #[command(subcommand)]
+  Sso(SsoCmd),
   /// 保存控制面地址和 token（token 从标准输入读取，不回显）。
   Login {
     #[arg(long)]
@@ -198,6 +209,9 @@ pub enum Command {
   /// 路由（域名）。
   #[command(subcommand)]
   Route(RouteCmd),
+  /// 门禁访问凭证。
+  #[command(subcommand)]
+  Gate(GateCmd),
   /// 厂商账号（Cloudflare）。
   #[command(subcommand)]
   Account(AccountCmd),
@@ -318,6 +332,16 @@ pub struct ApplyFlags {
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)] // 命令行参数，只解析一次
 pub enum ServerCmd {
+  /// 本机监听端口和容器风险。
+  Exposure {
+    name: String,
+    #[arg(long)]
+    refresh: bool,
+    #[arg(long, conflicts_with = "unack")]
+    ack: Option<String>,
+    #[arg(long)]
+    unack: Option<String>,
+  },
   List,
   Show {
     name: String,
@@ -833,6 +857,29 @@ pub enum RouteCmd {
     #[command(flatten)]
     apply: ApplyFlags,
   },
+  /// 域名门禁；不给 --mode 时显示当前配置。
+  Sso {
+    name: String,
+    #[arg(long, value_parser = ["gate", "header", "login", "off"])]
+    mode: Option<String>,
+    #[arg(long = "skip", requires = "mode")]
+    skip: Vec<String>,
+    #[arg(
+      long,
+      requires = "mode",
+      conflicts_with = "no_trust_internal"
+    )]
+    trust_internal: bool,
+    #[arg(long, requires = "mode")]
+    no_trust_internal: bool,
+    #[arg(long, requires = "mode")]
+    header: Option<String>,
+    /// 登录步骤的 YAML 或 JSON 文件，- 从标准输入读。
+    #[arg(long, requires = "mode")]
+    file: Option<String>,
+    #[command(flatten)]
+    apply: ApplyFlags,
+  },
   /// 防护：按来源 IP 限速、拦截常见扫描。例：`wharf route guard a.example.com --rate 600 --block --apply`。
   Guard {
     name: String,
@@ -1005,4 +1052,22 @@ pub enum EgressCmd {
   Api { server: String },
   /// 列出预置分组和包含的域名。
   Presets,
+}
+
+#[derive(Subcommand)]
+pub enum GateCmd {
+  #[command(subcommand)]
+  Key(GateKeyCmd),
+}
+#[derive(Subcommand)]
+pub enum GateKeyCmd {
+  Add {
+    name: String,
+    #[arg(long = "host", required = true)]
+    hosts: Vec<String>,
+  },
+  List,
+  Rm {
+    name: String,
+  },
 }

@@ -148,6 +148,8 @@ pub struct ShellLog {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ServiceView {
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub risks: Vec<String>,
   pub name: String,
   pub spec: ServiceSpec,
   /// 端口名到宿主机端口。
@@ -458,6 +460,8 @@ pub struct GatewayView {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RouteView {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub sso_login: Option<SsoLoginState>,
   pub id: String,
   pub spec: RouteSpec,
   /// 实际使用的网关（spec 里没填时是默认网关）。
@@ -667,6 +671,8 @@ pub struct IssueSubject {
 pub struct Issue {
   /// 这是哪一类问题，页面按它决定给什么按钮。取值见下表。
   /// oom_killed：服务的容器因内存超限被杀。
+  /// recovery_low：恢复码少于 3 个。
+  /// exposed_port：未确认的对公网监听端口。
   pub code: String,
   pub level: IssueLevel,
   #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1086,6 +1092,19 @@ pub enum TaskKind {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     mounts: Vec<String>,
   },
+  /// 在一次性容器里执行代码。
+  Script {
+    runtime: ScriptRuntime,
+    code: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    deps: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    image: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    env: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hook: Option<String>,
+  },
   /// 宿主机命令，要服务器开了"命令执行"。
   Host { command: String },
   /// 外部报到：Wharf 不执行，由别处（cron、systemd timer、脚本）跑完后请求报到地址。
@@ -1097,6 +1116,23 @@ pub enum TaskKind {
     #[serde(default = "default_grace")]
     grace_mins: u32,
   },
+}
+
+#[derive(
+  Debug,
+  Clone,
+  Copy,
+  PartialEq,
+  Eq,
+  Serialize,
+  Deserialize,
+  JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ScriptRuntime {
+  Python,
+  Node,
+  Shell,
 }
 
 fn default_grace() -> u32 {
@@ -1118,6 +1154,8 @@ pub enum TaskStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct TaskRunView {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub mem_peak: Option<u64>,
   pub id: i64,
   pub task: String,
   pub status: TaskStatus,
@@ -1134,6 +1172,8 @@ pub struct TaskRunView {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct TaskView {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub data_bytes: Option<u64>,
   pub name: String,
   pub spec: TaskSpec,
   #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1144,6 +1184,8 @@ pub struct TaskView {
   /// 外部报到任务的报到地址：成功请求它，失败请求它加 `/fail`。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub ping_url: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub hook_url: Option<String>,
   pub updated_at: DateTime<Utc>,
 }
 
@@ -1286,4 +1328,109 @@ pub struct AutoUpdateResult {
   /// 失败或跳过的原因。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TotpView {
+  pub enabled: bool,
+  pub recovery_left: u32,
+}
+
+/// 页面登录设备。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SessionRow {
+  pub id: String,
+  pub created_at: i64,
+  #[serde(default)]
+  pub last_seen_at: Option<i64>,
+  #[serde(default)]
+  pub addr: Option<String>,
+  #[serde(default)]
+  pub agent: Option<String>,
+  pub current: bool,
+}
+
+#[derive(
+  Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct ExposureView {
+  pub checked_at: Option<i64>,
+  pub outdated: bool,
+  pub ports: Vec<PortRow>,
+  pub risks: Vec<RiskRow>,
+}
+
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct PortRow {
+  pub proto: String,
+  pub port: u16,
+  pub addr: String,
+  pub owner: String,
+  pub name: String,
+  pub expected: bool,
+  pub acked: bool,
+}
+
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct RiskRow {
+  pub container: String,
+  pub project: Option<String>,
+  pub service: Option<String>,
+  pub risks: Vec<String>,
+  pub own: bool,
+}
+
+pub fn risk_text(code: &str) -> &str {
+  match code {
+    "privileged" => "特权模式",
+    "docker_sock" => "挂了 docker 套接字",
+    "host_root" => "挂了宿主机根目录",
+    "host_sensitive" => "挂了宿主机敏感目录",
+    "host_network" => "host 网络",
+    "host_pid" => "host 进程空间",
+    "cap_admin" => "加了高危权限",
+    _ => code,
+  }
+}
+
+/// 门禁访问凭证；列表不包含明文或哈希。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct GateKeyView {
+  pub name: String,
+  pub hosts: Vec<String>,
+  pub created_at: i64,
+  pub last_used_at: Option<i64>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct GateKeyRequest {
+  pub hosts: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SsoTestResult {
+  pub ok: bool,
+  pub steps: Vec<SsoStepResult>,
+  pub check: Option<SsoStepResult>,
+  pub would_write: Vec<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SsoStepResult {
+  pub number: usize,
+  pub method: String,
+  pub path: String,
+  pub status: Option<u16>,
+  pub ms: u64,
+  pub extracted: std::collections::BTreeMap<String, usize>,
+  pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SsoLoginState {
+  pub at: i64,
+  pub ok: bool,
+  pub error: Option<String>,
 }

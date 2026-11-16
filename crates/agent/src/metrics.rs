@@ -290,7 +290,7 @@ async fn container_stats(docker: &Docker) -> BTreeMap<String, Stat> {
   out
 }
 
-fn first_size(s: &str) -> u64 {
+pub(crate) fn first_size(s: &str) -> u64 {
   size(s.split('/').next().unwrap_or(""))
 }
 

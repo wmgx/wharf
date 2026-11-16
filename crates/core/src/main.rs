@@ -37,8 +37,10 @@ mod edge_api;
 mod edge_plan;
 mod edge_sync;
 mod egress;
+mod exposure;
 mod failover;
 mod files_api;
+mod gate;
 mod heal;
 mod host_dir;
 mod host_units;
@@ -68,15 +70,18 @@ mod refs;
 mod render;
 mod rollback;
 mod rules;
+mod sessions;
 mod share;
 mod shell;
 mod snapshot;
+mod sso_login;
 mod state;
 mod status;
 mod tailscale;
 mod tasks;
 mod terminal;
 mod timeline;
+mod totp;
 mod traffic;
 mod tunnel;
 mod updates;
@@ -177,6 +182,9 @@ async fn main() -> anyhow::Result<()> {
     downloads: Default::default(),
     edge_syncing: Default::default(),
   });
+  gate::init(&state)
+    .await
+    .map_err(|e| anyhow::anyhow!(e.message))?;
   apply::recover(&state).await?;
   shell::recover(&state).await?;
   tasks::recover(&state).await?;
@@ -195,6 +203,7 @@ async fn main() -> anyhow::Result<()> {
   disk_forecast::spawn(state.clone());
   traffic::spawn(state.clone());
   host_units::spawn(state.clone());
+  exposure::spawn(state.clone());
   failover::spawn(state.clone());
   tasks::spawn(state.clone());
   views::spawn_live(state.clone());
