@@ -1964,9 +1964,10 @@ export interface SshLogin {
   user: string;
 }
 
-export type SsoMode = "gate";
+export type SsoMode = "gate" | "header";
 
 export interface SsoSpec {
+  header?: string | null;
   mode: SsoMode;
   /**
    * 不过门禁的路径前缀。

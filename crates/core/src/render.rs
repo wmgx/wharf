@@ -18,7 +18,7 @@ use crate::world::{ServerRow, World, gateway_project};
 /// 网关默认镜像：官方 Caddy 加 layer4、限速、Cloudflare DNS 插件（deploy/caddy/Dockerfile）。
 /// 标签只在 Caddy 或插件版本变化时改，改了会重建所有没指定镜像的 caddy 网关。
 pub const DEFAULT_CADDY_IMAGE: &str =
-  "ghcr.io/wmgx/wharf-caddy:2.11.9-4";
+  "ghcr.io/wmgx/wharf-caddy:2.11.9-5";
 
 /// Caddyfile 里 acme-dns 密码的占位，执行时换成入口的密钥。
 pub const ACME_DNS_KEY: &str = "[[WHARF_ACME_DNS_KEY]]";
@@ -825,6 +825,7 @@ pub struct Site {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Gate {
+  pub user_header: Option<String>,
   pub trusted: Vec<String>,
   pub login: String,
   pub core: String,
@@ -978,6 +979,9 @@ pub fn caddyfile(
           "\t\tskip {}\n",
           gate.skip_paths.join(" ")
         ));
+      }
+      if let Some(header) = &gate.user_header {
+        out.push_str(&format!("\t\tuser_header {header}\n"));
       }
       if !gate.trusted.is_empty() {
         out.push_str(&format!(
@@ -1762,6 +1766,7 @@ mod tests {
       hostname: "a.example.test".into(),
       upstream: "127.0.0.1:8080".into(),
       gate: Some(Gate {
+        user_header: None,
         trusted: vec![],
         login: "https://core.example.test".into(),
         core: "http://127.0.0.1:7700".into(),
@@ -1834,6 +1839,47 @@ mod tests {
       out.contains("\t\tlogin https://core.example.test\n\t}\n")
     );
     assert!(!out.contains("\t\ttrust "));
+  }
+  #[test]
+  fn caddyfile_gate_header() {
+    let gw: GatewaySpec = serde_json::from_value(
+      serde_json::json!({"kind":"caddy","server":"s1"}),
+    )
+    .unwrap();
+    let mut site = gate_site();
+    let before = caddyfile(
+      "edge",
+      &gw,
+      std::slice::from_ref(&site),
+      &[],
+      false,
+      Some("public"),
+    );
+    site.gate.as_mut().unwrap().user_header =
+      Some("Remote-User".into());
+    let after =
+      caddyfile("edge", &gw, &[site], &[], false, Some("public"));
+    assert!(after.contains("\t\tuser_header Remote-User\n"));
+    assert_eq!(
+      after.replace("\t\tuser_header Remote-User\n", ""),
+      before
+    );
+  }
+  #[test]
+  fn caddyfile_gate_without_header() {
+    let gw: GatewaySpec = serde_json::from_value(
+      serde_json::json!({"kind":"caddy","server":"s1"}),
+    )
+    .unwrap();
+    let out = caddyfile(
+      "edge",
+      &gw,
+      &[gate_site()],
+      &[],
+      false,
+      Some("public"),
+    );
+    assert!(!out.contains("user_header"));
   }
   #[test]
   fn caddyfile_gate_skip() {
