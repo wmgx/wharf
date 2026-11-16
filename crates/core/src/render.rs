@@ -18,7 +18,7 @@ use crate::world::{ServerRow, World, gateway_project};
 /// 网关默认镜像：官方 Caddy 加 layer4、限速、Cloudflare DNS 插件（deploy/caddy/Dockerfile）。
 /// 标签只在 Caddy 或插件版本变化时改，改了会重建所有没指定镜像的 caddy 网关。
 pub const DEFAULT_CADDY_IMAGE: &str =
-  "ghcr.io/wmgx/wharf-caddy:2.11.9-3";
+  "ghcr.io/wmgx/wharf-caddy:2.11.9-4";
 
 /// Caddyfile 里 acme-dns 密码的占位，执行时换成入口的密钥。
 pub const ACME_DNS_KEY: &str = "[[WHARF_ACME_DNS_KEY]]";
@@ -825,6 +825,7 @@ pub struct Site {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Gate {
+  pub trusted: Vec<String>,
   pub login: String,
   pub core: String,
   pub skip_paths: Vec<String>,
@@ -976,6 +977,12 @@ pub fn caddyfile(
         out.push_str(&format!(
           "\t\tskip {}\n",
           gate.skip_paths.join(" ")
+        ));
+      }
+      if !gate.trusted.is_empty() {
+        out.push_str(&format!(
+          "\t\ttrust {}\n",
+          gate.trusted.join(" ")
         ));
       }
       out.push_str("\t}\n");
@@ -1755,6 +1762,7 @@ mod tests {
       hostname: "a.example.test".into(),
       upstream: "127.0.0.1:8080".into(),
       gate: Some(Gate {
+        trusted: vec![],
         login: "https://core.example.test".into(),
         core: "http://127.0.0.1:7700".into(),
         skip_paths: vec![],
@@ -1782,6 +1790,50 @@ mod tests {
     assert!(out.contains("public_key public"));
     assert!(out.contains("core http://127.0.0.1:7700"));
     assert!(!out.contains("skip "));
+  }
+  #[test]
+  fn caddyfile_gate_trust() {
+    let gw: GatewaySpec = serde_json::from_value(
+      serde_json::json!({"kind":"caddy","server":"s1"}),
+    )
+    .unwrap();
+    let mut site = gate_site();
+    let before = caddyfile(
+      "edge",
+      &gw,
+      std::slice::from_ref(&site),
+      &[],
+      false,
+      Some("public"),
+    );
+    site.gate.as_mut().unwrap().trusted =
+      vec!["100.64.0.0/10".into(), "127.0.0.0/8".into()];
+    let after =
+      caddyfile("edge", &gw, &[site], &[], false, Some("public"));
+    assert_eq!(
+      after.replace("\t\ttrust 100.64.0.0/10 127.0.0.0/8\n", ""),
+      before
+    );
+    assert!(after.contains("\t\ttrust 100.64.0.0/10 127.0.0.0/8\n"));
+  }
+  #[test]
+  fn caddyfile_gate_without_trust_unchanged() {
+    let gw: GatewaySpec = serde_json::from_value(
+      serde_json::json!({"kind":"caddy","server":"s1"}),
+    )
+    .unwrap();
+    let out = caddyfile(
+      "edge",
+      &gw,
+      &[gate_site()],
+      &[],
+      false,
+      Some("public"),
+    );
+    assert!(
+      out.contains("\t\tlogin https://core.example.test\n\t}\n")
+    );
+    assert!(!out.contains("\t\ttrust "));
   }
   #[test]
   fn caddyfile_gate_skip() {

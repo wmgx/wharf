@@ -1,3 +1,4 @@
+import { usePoll } from "@/api";
 import { useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { AddAlias } from "@/components/add-alias";
@@ -14,10 +15,13 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
 import { SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
-import type { RouteView, Status } from "@/types";
+import type { GateKeyView, RouteView, Status } from "@/types";
 
 export function DomainDetail({ route, status, onClose }: { route: RouteView; status: Status; onClose: () => void }) {
   const actions = useActions();
+  const keys = usePoll<GateKeyView[]>("/api/gate/keys", 30000).data;
+  const keyCount = keys?.filter((k) => k.hosts.includes(route.spec.hostname)).length ?? 0;
+  const [trustInternal, setTrustInternal] = useState(!!route.spec.sso?.trust_internal);
   const [gateOpen, setGateOpen] = useState(false);
   const [skipPaths, setSkipPaths] = useState((route.spec.sso?.skip_paths ?? []).join("\n"));
   const [alias, setAlias] = useState(false);
@@ -120,6 +124,8 @@ export function DomainDetail({ route, status, onClose }: { route: RouteView; sta
             <Button variant="outline" size="sm" disabled={route.spec.auth || !!route.spec.redirect} onClick={() => setGateOpen(true)}>开启</Button>
           </>}
         </div>
+        {route.spec.sso?.trust_internal && <span className="text-xs text-muted-foreground">组网内免登录</span>}
+        {route.spec.sso && keyCount > 0 && <span className="text-xs text-muted-foreground">{keyCount} 个访问凭证</span>}
         {!!route.spec.sso?.skip_paths?.length && <span className="break-all font-mono text-xs text-muted-foreground">{route.spec.sso.skip_paths.join("、")}</span>}
         {!route.spec.redirect && (gateway?.spec.kind === "cloudflare_tunnel" ? <span className="text-muted-foreground">隧道入口不支持限速和拦截扫描</span> : <>
           <label className="flex flex-wrap items-center gap-2">
@@ -149,9 +155,11 @@ export function DomainDetail({ route, status, onClose }: { route: RouteView; sta
         <Field label="不用登录的路径（每行一个，可以不填）" htmlFor="gate-skip">
           <Textarea id="gate-skip" value={skipPaths} onChange={(e) => setSkipPaths(e.target.value)} />
         </Field>
+        <label className="flex items-center gap-2 text-sm"><Checkbox checked={trustInternal} onCheckedChange={(v) => setTrustInternal(v === true)} />从组网内访问不用登录</label>
+        {trustInternal && <p className="text-xs text-muted-foreground">只有经组网地址或这台机器的内网访问入口时才算；从别的网络访问公网入口仍然要登录。</p>}
         <DialogFooter>
           <Button variant="ghost" onClick={() => setGateOpen(false)}>取消</Button>
-          <Button onClick={() => { setGateOpen(false); actions.plan({ title: `修改 ${route.spec.hostname} 的门禁`, changes: [{ op: "upsert_route", spec: { ...route.spec, sso: { mode: "gate", skip_paths: skipPaths.split("\n").map((p) => p.trim()).filter(Boolean) } } }] }); }}>预览改动</Button>
+          <Button onClick={() => { setGateOpen(false); actions.plan({ title: `修改 ${route.spec.hostname} 的门禁`, changes: [{ op: "upsert_route", spec: { ...route.spec, sso: { mode: "gate", trust_internal: trustInternal, skip_paths: skipPaths.split("\n").map((p) => p.trim()).filter(Boolean) } } }] }); }}>预览改动</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

@@ -198,6 +198,9 @@ pub enum Command {
   /// 路由（域名）。
   #[command(subcommand)]
   Route(RouteCmd),
+  /// 门禁访问凭证。
+  #[command(subcommand)]
+  Gate(GateCmd),
   /// 厂商账号（Cloudflare）。
   #[command(subcommand)]
   Account(AccountCmd),
@@ -850,6 +853,14 @@ pub enum RouteCmd {
     mode: Option<String>,
     #[arg(long = "skip", requires = "mode")]
     skip: Vec<String>,
+    #[arg(
+      long,
+      requires = "mode",
+      conflicts_with = "no_trust_internal"
+    )]
+    trust_internal: bool,
+    #[arg(long, requires = "mode")]
+    no_trust_internal: bool,
     #[command(flatten)]
     apply: ApplyFlags,
   },
@@ -1025,4 +1036,22 @@ pub enum EgressCmd {
   Api { server: String },
   /// 列出预置分组和包含的域名。
   Presets,
+}
+
+#[derive(Subcommand)]
+pub enum GateCmd {
+  #[command(subcommand)]
+  Key(GateKeyCmd),
+}
+#[derive(Subcommand)]
+pub enum GateKeyCmd {
+  Add {
+    name: String,
+    #[arg(long = "host", required = true)]
+    hosts: Vec<String>,
+  },
+  List,
+  Rm {
+    name: String,
+  },
 }

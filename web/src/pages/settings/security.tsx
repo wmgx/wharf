@@ -1,13 +1,14 @@
 import { useState } from "react";
 import { api, usePoll } from "@/api";
 import { ago, ErrorNote, SectionTitle } from "@/components/common";
-import { Field } from "@/components/fields";
+import { Field, Picker, toName } from "@/components/fields";
 import { ConfirmDialog, Panel, Row, Rows } from "@/components/kit";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import type { SessionRow, TotpView } from "@/types.gen";
+import type { GateKeyView, RouteView } from "@/types";
 
 type Mode = "begin" | "recovery" | "disable";
 type Pending = { secret: string; uri: string; qr_svg: string };
@@ -27,6 +28,7 @@ export function Security() {
       </>}
     </Panel>}
     <Sessions />
+    <GateKeys />
     {mode && <TotpDialog mode={mode} onClose={() => { setMode(null); refresh(); }} onChanged={refresh} />}
   </>;
 }
@@ -118,5 +120,59 @@ function Sessions() {
       {!s.current && <Button variant="outline" size="sm" disabled={busy} onClick={() => revoke(s.id)}>退出</Button>}
     </Row>)}</Rows>}
     <ConfirmDialog open={confirm} title="退出其他全部设备？" confirmText="退出" busy={busy} onCancel={() => setConfirm(false)} onConfirm={() => revoke()} />
+  </>;
+}
+
+
+function GateKeys() {
+  const { data, error, refresh } = usePoll<GateKeyView[]>("/api/gate/keys", 30000);
+  const routes = usePoll<RouteView[]>("/api/routes", 30000).data ?? [];
+  const [editing, setEditing] = useState<GateKeyView | "new" | null>(null);
+  const [name, setName] = useState("");
+  const [hosts, setHosts] = useState<string[]>([]);
+  const [fresh, setFresh] = useState<string | null>(null);
+  const [removing, setRemoving] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [failure, setFailure] = useState<unknown>(null);
+  const edit = (key: GateKeyView | "new") => {
+    setEditing(key); setName(key === "new" ? "" : key.name); setHosts(key === "new" ? [] : key.hosts); setFailure(null);
+  };
+  const save = async () => {
+    setBusy(true); setFailure(null);
+    try {
+      const result = await api.put<{ key?: string }>(`/api/gate/keys/${encodeURIComponent(name)}`, { hosts });
+      setFresh(result.key ?? null); setEditing(null); refresh();
+    } catch (e) { setFailure(e); } finally { setBusy(false); }
+  };
+  const remove = async () => {
+    setBusy(true); setFailure(null);
+    try { await api.del(`/api/gate/keys/${encodeURIComponent(removing!)}`); setRemoving(null); refresh(); }
+    catch (e) { setFailure(e); } finally { setBusy(false); }
+  };
+  return <>
+    <SectionTitle count={data?.length} action={<Button variant="outline" size="sm" onClick={() => edit("new")}>新建</Button>}>访问凭证</SectionTitle>
+    <ErrorNote error={error || failure} />
+    {fresh && <Panel className="grid gap-2 p-4">
+      <div className="flex min-w-0 items-start gap-2"><code className="min-w-0 flex-1 break-all text-xs" data-gate-key>{fresh}</code><Button variant="outline" size="sm" onClick={async () => { try { await navigator.clipboard.writeText(fresh); } catch (e) { setFailure(e); } }}>复制</Button></div>
+      <span className="text-xs text-muted-foreground">凭证只显示这一次</span>
+      <Button className="w-fit" variant="ghost" size="sm" onClick={() => setFresh(null)}>完成</Button>
+    </Panel>}
+    {data && <Rows>{data.length === 0 ? <Row>还没有访问凭证</Row> : data.map((k) => <Row key={k.name} className="flex-wrap">
+      <div className="min-w-0 flex-1 break-all"><div>{k.name}</div><div className="text-xs text-muted-foreground">{k.hosts.join("、")}</div><div className="text-xs text-muted-foreground">最近使用：{k.last_used_at == null ? "没用过" : ago(new Date(k.last_used_at).toISOString())}</div></div>
+      <div className="flex gap-2"><Button variant="outline" size="sm" onClick={() => edit(k)}>改域名</Button><Button variant="outline" size="sm" onClick={() => setRemoving(k.name)}>删除</Button></div>
+    </Row>)}</Rows>}
+    <Dialog open={editing !== null} onOpenChange={(open) => { if (!open) setEditing(null); }}>
+      <DialogContent aria-describedby={undefined}>
+        <DialogHeader><DialogTitle>{editing === "new" ? "新建访问凭证" : "修改域名"}</DialogTitle></DialogHeader>
+        <Field label="名字" htmlFor="gate-key-name"><Input id="gate-key-name" value={name} disabled={editing !== "new"} onChange={(e) => setName(toName(e.target.value))} /></Field>
+        <Field label="能进的域名">
+          <div className="grid gap-2">{hosts.map((h) => <div key={h} className="flex min-w-0 items-center gap-2 text-sm"><span className="min-w-0 flex-1 break-all">{h}</span><Button variant="ghost" size="sm" onClick={() => setHosts(hosts.filter((v) => v !== h))}>移除</Button></div>)}</div>
+          <Picker value="" placeholder="添加域名" options={routes.filter((r) => r.spec.sso && !hosts.includes(r.spec.hostname)).map((r) => ({ value: r.spec.hostname, label: r.spec.hostname }))} onChange={(h) => setHosts([...hosts, h])} />
+        </Field>
+        <ErrorNote error={failure} />
+        <DialogFooter><Button variant="ghost" onClick={() => setEditing(null)}>取消</Button><Button disabled={busy || !name || !hosts.length || (editing === "new" && data?.some((k) => k.name === name))} onClick={save}>{busy ? "保存中…" : "保存"}</Button></DialogFooter>
+      </DialogContent>
+    </Dialog>
+    <ConfirmDialog open={!!removing} title={`删除访问凭证 ${removing}？`} busy={busy} onCancel={() => setRemoving(null)} onConfirm={remove} />
   </>;
 }
