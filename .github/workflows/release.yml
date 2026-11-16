@@ -1,0 +1,68 @@
+# 推 v* 标签时发正式版本，例如 v0.1.0：
+# - 不重新构建：这个提交推到 main 时已经构建过镜像 sha-<短提交号> 和 CLI Release build-<短提交号>，
+#   这里只给镜像加上 0.1.0、0.1 标签，并把同一批 CLI 附到正式 Release v0.1.0 上。
+#   构建号不变，控制面和 agent 判断版本是否一致的逻辑不受影响。
+# - 更新说明由 GitHub 按上一个 v* 标签以来合并的 PR 生成。
+# 发版用 scripts/release.sh，它会先检查 main 上的构建已经成功。
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: 版本号和 Cargo.toml 一致
+        id: v
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          cargo_version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "$version" != "$cargo_version" ]; then
+            echo "::error::标签 $GITHUB_REF_NAME 和 Cargo.toml 的版本 $cargo_version 不一致"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "minor=${version%.*}" >> "$GITHUB_OUTPUT"
+          echo "build=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: 镜像加版本标签
+        env:
+          OWNER: ${{ github.repository_owner }}
+          V: ${{ steps.v.outputs.version }}
+          MINOR: ${{ steps.v.outputs.minor }}
+          BUILD: ${{ steps.v.outputs.build }}
+        run: |
+          for name in wharf-core wharf-agent; do
+            src="ghcr.io/$OWNER/$name:sha-$BUILD"
+            docker buildx imagetools inspect "$src" >/dev/null \
+              || { echo "::error::没有 $src，先等 main 上的 images 构建完成"; exit 1; }
+            docker buildx imagetools create -t "ghcr.io/$OWNER/$name:$V" -t "ghcr.io/$OWNER/$name:$MINOR" "$src"
+          done
+      - name: 正式 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BUILD: ${{ steps.v.outputs.build }}
+          OWNER: ${{ github.repository_owner }}
+          V: ${{ steps.v.outputs.version }}
+        run: |
+          mkdir dist
+          gh release download "build-$BUILD" --repo "$GITHUB_REPOSITORY" --dir dist --pattern 'wharf-*' \
+            || { echo "::error::没有 Release build-$BUILD，先等 main 上的 images 构建完成"; exit 1; }
+          cat > notes.md <<EOF
+          镜像：\`ghcr.io/$OWNER/wharf-core:$V\`、\`ghcr.io/$OWNER/wharf-agent:$V\`（构建 $BUILD）。
+          CLI 推荐用控制面的 \`/cli.sh\` 安装，版本会和控制面一致；下面的文件也可以直接下载。
+          EOF
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "$GITHUB_REF_NAME" --notes-file notes.md --generate-notes --latest

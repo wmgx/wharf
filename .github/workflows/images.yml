@@ -1,4 +1,4 @@
-# 推到 main 时构建 wharf-core / wharf-agent 镜像，推到 ghcr。
+# 推到 main 时构建 wharf-core / wharf-agent 镜像，推到 ghcr（正式版本的标签由 release.yml 加）。
 # 标签：latest 和 sha-<短提交号>。国内机器可以从 ghcr.nju.edu.cn 拉。
 # 同时构建各平台的 wharf CLI，发布到 Release build-<短提交号>；控制面的 /cli.sh 按自己的构建号下载。
 name: images
