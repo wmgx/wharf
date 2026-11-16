@@ -1622,6 +1622,7 @@ export interface RouteView {
    */
   probe?: ProbeView | null;
   spec: RouteSpec;
+  sso_login?: SsoLoginState | null;
   /**
    * 网关转发到的上游地址。
    */
@@ -2020,6 +2021,12 @@ export interface SshLogin {
    */
   method: string;
   user: string;
+}
+
+export interface SsoLoginState {
+  at: number;
+  error: string | null;
+  ok: boolean;
 }
 
 export type SsoMode = "gate" | "header" | "login";

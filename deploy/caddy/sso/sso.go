@@ -31,6 +31,7 @@ func init() {
 }
 
 type SSO struct {
+	AppLogin   bool     `json:"app_login,omitempty"`
 	PublicKey  string   `json:"public_key"`
 	Core       string   `json:"core"`
 	Login      string   `json:"login"`
@@ -71,6 +72,12 @@ func (s *SSO) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				if !d.Args(&s.Login) {
 					return d.ArgErr()
 				}
+			case "app_login":
+				var value string
+				if !d.Args(&value) || value != "on" {
+					return d.ArgErr()
+				}
+				s.AppLogin = true
 			case "user_header":
 				if !d.Args(&s.UserHeader) {
 					return d.ArgErr()
@@ -118,7 +125,7 @@ func stripCookies(r *http.Request) (string, string) {
 		for _, part := range strings.Split(line, ";") {
 			part = strings.TrimSpace(part)
 			name, value, ok := strings.Cut(part, "=")
-			if ok && (name == "wharf_gate" || name == "wharf_gate_rt") {
+			if ok && (name == "wharf_gate" || name == "wharf_gate_rt" || name == "wharf_sso") {
 				if value != "" {
 					if name == "wharf_gate" && access == "" {
 						access = value
@@ -284,6 +291,8 @@ func (s *SSO) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.H
 	if s.UserHeader != "" {
 		r.Header.Del(s.UserHeader)
 	}
+	_, markerError := r.Cookie("wharf_sso")
+	appLogin := s.AppLogin && markerError != nil && r.Method == "GET" && strings.Contains(r.Header.Get("Accept"), "text/html")
 	access, refresh := stripCookies(r)
 	keyValues, hasKey := r.Header["X-Wharf-Key"]
 	key := strings.Join(keyValues, ",")
@@ -310,6 +319,10 @@ func (s *SSO) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.H
 	}
 	if user, ok := verify(s.key, access, time.Now().Unix()); ok {
 		s.setUser(r, user)
+		if appLogin {
+			http.Redirect(w, r, "/_wharf/login?rd="+url.QueryEscape(r.URL.RequestURI()), http.StatusFound)
+			return nil
+		}
 		return next.ServeHTTP(w, r)
 	}
 	if refresh != "" {
@@ -319,6 +332,10 @@ func (s *SSO) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.H
 		}
 		if result.status == 200 {
 			s.setUser(r, result.header.Get("X-Wharf-User"))
+			if appLogin {
+				http.Redirect(w, r, "/_wharf/login?rd="+url.QueryEscape(r.URL.RequestURI()), http.StatusFound)
+				return nil
+			}
 			return next.ServeHTTP(w, r)
 		}
 		if location := result.header.Get("Location"); location != "" {

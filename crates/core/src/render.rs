@@ -18,7 +18,7 @@ use crate::world::{ServerRow, World, gateway_project};
 /// 网关默认镜像：官方 Caddy 加 layer4、限速、Cloudflare DNS 插件（deploy/caddy/Dockerfile）。
 /// 标签只在 Caddy 或插件版本变化时改，改了会重建所有没指定镜像的 caddy 网关。
 pub const DEFAULT_CADDY_IMAGE: &str =
-  "ghcr.io/wmgx/wharf-caddy:2.11.9-5";
+  "ghcr.io/wmgx/wharf-caddy:2.11.9-6";
 
 /// Caddyfile 里 acme-dns 密码的占位，执行时换成入口的密钥。
 pub const ACME_DNS_KEY: &str = "[[WHARF_ACME_DNS_KEY]]";
@@ -825,6 +825,7 @@ pub struct Site {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Gate {
+  pub app_login: bool,
   pub user_header: Option<String>,
   pub trusted: Vec<String>,
   pub login: String,
@@ -974,6 +975,9 @@ pub fn caddyfile(
         ""
       };
       out.push_str(&format!("\t@wharf_site path /_wharf/*\n\thandle @wharf_site {{\n\t\turi replace /_wharf/ /gate/site/\n\t\treverse_proxy {} {{{host_header}\n\t\t}}\n\t}}\n\twharf_sso {{\n\t\tpublic_key {}\n\t\tcore {}\n\t\tlogin {}\n",gate.core,gate_public.unwrap_or(""),gate.core,gate.login));
+      if gate.app_login {
+        out.push_str("\t\tapp_login on\n");
+      }
       if !gate.skip_paths.is_empty() {
         out.push_str(&format!(
           "\t\tskip {}\n",
@@ -1761,11 +1765,43 @@ mod tests {
     );
     assert_ne!(base, overridden);
   }
+  #[test]
+  fn caddyfile_app_login() {
+    let gw = serde_json::from_value(
+      serde_json::json!({"kind":"caddy","server":"s1"}),
+    )
+    .unwrap();
+    let mut site = gate_site();
+    site.gate.as_mut().unwrap().app_login = true;
+    assert!(
+      caddyfile("edge", &gw, &[site], &[], false, Some("public"))
+        .contains("\t\tapp_login on\n")
+    );
+  }
+  #[test]
+  fn caddyfile_gate_without_app_login() {
+    let gw = serde_json::from_value(
+      serde_json::json!({"kind":"caddy","server":"s1"}),
+    )
+    .unwrap();
+    assert!(
+      !caddyfile(
+        "edge",
+        &gw,
+        &[gate_site()],
+        &[],
+        false,
+        Some("public")
+      )
+      .contains("app_login")
+    );
+  }
   fn gate_site() -> Site {
     Site {
       hostname: "a.example.test".into(),
       upstream: "127.0.0.1:8080".into(),
       gate: Some(Gate {
+        app_login: false,
         user_header: None,
         trusted: vec![],
         login: "https://core.example.test".into(),

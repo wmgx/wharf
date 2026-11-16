@@ -349,7 +349,7 @@ fn job(
   })
 }
 
-pub async fn run(
+async fn execute(
   state: &AppState,
   hostname: &str,
 ) -> Result<Outcome, ApiError> {
@@ -526,6 +526,82 @@ pub async fn run(
   outcome.set_cookies =
     jar.into_values().map(|(_, raw)| raw).collect();
   Ok(outcome)
+}
+
+pub async fn record(
+  state: &AppState,
+  host: &str,
+  ok: bool,
+  error: Option<String>,
+) -> Result<(), ApiError> {
+  let host = host.to_string();
+  let result = wharf_api_types::view::SsoLoginState {
+    at: crate::db::now_ms(),
+    ok,
+    error,
+  };
+  state.db.call(move |c| {
+    let value = serde_json::to_string(&result).map_err(|_| ApiError::internal("代登录结果格式不对"))?;
+    let tx = c.unchecked_transaction().map_err(crate::db::sql_err)?;
+    crate::db::set_setting(&tx, &format!("sso.login.{host}"), Some(&value))?;
+    tx.execute("INSERT INTO audit_log (at,kind,actor,method,path,status,detail) VALUES (?1,'api','Wharf','sso',?2,?3,?4)", rusqlite::params![result.at, host, if ok {200} else {400}, result.error]).map_err(crate::db::sql_err)?;
+    tx.commit().map_err(crate::db::sql_err)
+  }).await
+}
+pub fn issues(
+  snap: &snapshot::Snapshot,
+) -> Vec<wharf_api_types::view::Issue> {
+  use wharf_api_types::view::{
+    Issue, IssueLevel, IssueSubject, SsoLoginState,
+  };
+  snap
+    .world
+    .routes
+    .iter()
+    .filter(|(_, r)| {
+      r.spec
+        .sso
+        .as_ref()
+        .is_some_and(|s| s.mode == SsoMode::Login)
+    })
+    .filter_map(|(host, _)| {
+      let result: SsoLoginState =
+        serde_json::from_str(snap.sso_login.get(host)?).ok()?;
+      (!result.ok).then(|| Issue {
+        code: "sso_login_failed".into(),
+        level: IssueLevel::Warn,
+        subject: Some(IssueSubject {
+          kind: "route".into(),
+          name: host.clone(),
+        }),
+        title: format!("{host} 代登录失败"),
+        hint: Some(format!(
+          "{}；用 wharf sso test {host} 查看",
+          result.error.as_deref().unwrap_or("登录失败")
+        )),
+      })
+    })
+    .collect()
+}
+pub async fn run(
+  state: &AppState,
+  hostname: &str,
+) -> Result<Outcome, ApiError> {
+  let outcome = execute(state, hostname).await;
+  let (ok, error) = match &outcome {
+    Ok(o) => (
+      o.ok,
+      o.steps.iter().chain(o.check.iter()).find_map(|step| {
+        step
+          .error
+          .as_ref()
+          .map(|e| format!("第 {} 步：{e}", step.number))
+      }),
+    ),
+    Err(e) => (false, Some(e.message.clone())),
+  };
+  record(state, hostname, ok, error).await?;
+  outcome
 }
 
 pub async fn test(
