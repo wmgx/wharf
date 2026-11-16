@@ -51,16 +51,11 @@ function Command({ children }: { children: string }) {
   );
 }
 
+// 只放一句指引，具体规则以 Skill（仓库里的 skill/SKILL.md）为准，避免两份说明对不上。
 const AI_GUIDE = (origin: string) => `## Wharf（服务器管理）
 
 用 \`wharf\` 命令管理服务器、服务、域名，控制面 ${origin}。
-
-- 一律加 \`--json\`，按 JSON 读结果；出错时看 \`hint\` 和 \`suggest\`。
-- 改动先 \`wharf plan\`（或子命令不带 \`--apply\`）看计划，确认后 \`wharf apply <plan_id>\`。
-- 计划里标了"需确认"的项（删数据、覆盖、公开）不要自己确认，交给用户。
-- 字段说明：\`wharf schema <对象>\`；总览：\`wharf status --json\`；诊断域名：\`wharf doctor --json\`。
-- 部署本机代码：\`wharf deploy <目录>\`；看日志：\`wharf service logs <服务>\`。
-- 不打印、不写入 token 和密钥。`;
+操作前先读 ${origin}/skill.md，按里面的守则执行。`;
 
 /** 设置里的"CLI 与 AI 接入"：装 CLI、建 token、登录，以及给 AI 的说明。 */
 export function Tokens() {
@@ -104,11 +99,7 @@ export function Tokens() {
           <div className="grid max-h-[70vh] gap-4 overflow-auto">
             <ol className="grid gap-4">
               <li className="grid gap-1.5">
-                <span className="text-sm font-medium">1. 在你的电脑上装 wharf 命令（macOS、Linux）</span>
-                <Command>{`curl -fsSL ${origin}/cli.sh | sh -s -- ${origin}`}</Command>
-              </li>
-              <li className="grid gap-1.5">
-                <span className="text-sm font-medium">2. 建一个访问令牌，按用途选权限</span>
+                <span className="text-sm font-medium">1. 建一个访问令牌，按用途选权限</span>
                 <div className="flex flex-wrap items-start gap-2">
                   <Button variant="outline" size="sm" className="w-fit" onClick={() => setCreating(true)}>
                     <PlusIcon />
@@ -123,15 +114,14 @@ export function Tokens() {
                 </div>
               </li>
               <li className="grid gap-1.5">
-                <span className="text-sm font-medium">3. 登录：执行后提示输入访问令牌 时，粘贴上一步的访问令牌</span>
+                <span className="text-sm font-medium">2. 在你的电脑上安装并登录（macOS、Linux）：提示输入访问令牌时粘贴上一步的令牌</span>
+                <Command>{`curl -fsSL ${origin}/cli.sh | sh -s -- ${origin}`}</Command>
+                <span className="text-xs text-muted-foreground">会同时把 wharf Skill 装到 ~/.agents/skills/wharf（Codex 等直接读），装了 Claude Code 的话再软链到 ~/.claude/skills/wharf。没有终端时脚本只打印登录命令：</span>
                 <Command>{`wharf login --url ${origin} --core-key ${coreKey}`}</Command>
               </li>
               <li className="grid gap-1.5">
-                <span className="text-sm font-medium">4. 试一下</span>
-                <Command>wharf status</Command>
-              </li>
-              <li className="grid gap-1.5">
-                <span className="text-sm font-medium">5. 给 AI 用：把这段贴进项目的 AGENTS.md 或 CLAUDE.md</span>
+                <span className="text-sm font-medium">3. 其他 AI 工具：下载 Skill 放进它的 skills 目录，或把这段贴进项目的 AGENTS.md</span>
+                <Command>{`curl -fsSL ${origin}/skill.md`}</Command>
                 <Command>{AI_GUIDE(origin)}</Command>
               </li>
             </ol>

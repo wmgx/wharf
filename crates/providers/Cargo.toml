@@ -3,7 +3,7 @@ name = "wharf-providers"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "厂商实现：DNS、入口。从 Komodo fork 的 domain/provider 搬来"
+description = "厂商 API 封装：Cloudflare（DNS 记录、隧道、Workers / Pages）和 Tailscale（加入密钥）"
 
 [dependencies]
 hex.workspace = true

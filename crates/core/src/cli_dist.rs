@@ -1,6 +1,7 @@
 //! CLI 分发：`curl -fsSL <控制面>/cli.sh | sh -s -- <控制面>`。
 //! 二进制由 CI 按构建号发布到 GitHub Release `build-<构建号>`，安装的版本和控制面一致。
-//! 脚本只给出下载地址和安装位置，不接触任何凭据；登录由用户执行 `wharf login`。
+//! 在终端里运行时，装完直接 `wharf login`（从 /dev/tty 读 token，token 不进命令行）；
+//! 顺手把 `/skill.md` 装到 `~/.agents/skills/wharf`，本机有 `~/.claude` 时软链到 `~/.claude/skills/wharf`。
 
 use std::sync::Arc;
 
@@ -13,6 +14,15 @@ use axum::{
 /// 公开仓库的 Release 地址；可以用 `WHARF_CLI_RELEASES` 换成镜像。
 const RELEASES: &str =
   "https://github.com/wmgx/wharf/releases/download";
+
+/// `GET /skill.md`：给 AI 的 Skill，随控制面版本发布，不需要登录。
+pub async fn skill() -> Response {
+  (
+    [(header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
+    include_str!("../../../skill/SKILL.md"),
+  )
+    .into_response()
+}
 
 /// `GET /cli.sh`：不需要登录。
 pub async fn script(
@@ -82,8 +92,51 @@ case ":$PATH:" in
     ;;
 esac
 
+# Skill：正本放在 ~/.agents/skills/wharf（Codex 等读这里），其他 agent 的 skills 目录软链过去，
+# 以后更新只换正本。只给本机已经装了的 agent 建链接。
+if [ -n "$CORE_URL" ]; then
+  SKILL_DIR="$HOME/.agents/skills/wharf"
+  mkdir -p "$SKILL_DIR"
+  if curl -fsSL --connect-timeout 15 --max-time 60 -o "$SKILL_DIR/SKILL.md.tmp" "$CORE_URL/skill.md"; then
+    mv "$SKILL_DIR/SKILL.md.tmp" "$SKILL_DIR/SKILL.md"
+    printf '==> 已安装 Skill：%s/SKILL.md\n' "$SKILL_DIR"
+    for AGENT_HOME in "$HOME/.claude"; do
+      [ -d "$AGENT_HOME" ] || continue
+      LINK="$AGENT_HOME/skills/wharf"
+      mkdir -p "$AGENT_HOME/skills"
+      # 旧版本装的是普通目录：只有 SKILL.md 时换成链接，有别的文件就不动。
+      if [ -d "$LINK" ] && [ ! -L "$LINK" ]; then
+        rm -f "$LINK/SKILL.md"
+        rmdir "$LINK" 2>/dev/null || { printf '==> %s 里有其他文件，没有改成链接\n' "$LINK"; continue; }
+      fi
+      ln -sfn "$SKILL_DIR" "$LINK"
+      printf '==> 已链接：%s -> %s\n' "$LINK" "$SKILL_DIR"
+    done
+  else
+    rm -f "$SKILL_DIR/SKILL.md.tmp"
+    printf '==> Skill 下载失败，跳过：%s/skill.md\n' "$CORE_URL"
+  fi
+fi
+
+LOGIN="$WHARF login --url ${CORE_URL:-<控制面地址>} --core-key {core_key}"
+# 已经登录过（比如这次是更新）就不再登录。
+if [ -n "$CORE_URL" ] && "$WHARF" status --json >/dev/null 2>&1; then
+  printf '==> 已登录，完成\n'
+  return 0
+fi
+# 有终端就直接登录；管道运行时标准输入是脚本本身，所以从 /dev/tty 读。
+if [ -n "$CORE_URL" ] && { : </dev/tty; } 2>/dev/null; then
+  printf '\n==> 登录：粘贴页面上新建的访问令牌\n'
+  if $LOGIN </dev/tty; then
+    "$WHARF" status || true
+    return 0
+  fi
+  printf '\n登录没有完成，可以稍后重试：\n  %s\n' "$LOGIN"
+  return 0
+fi
+
 printf '\n下一步（会提示输入 token，粘贴页面上新建的 token）：\n'
-printf '  %s login --url %s --core-key %s\n' "$WHARF" "${CORE_URL:-<控制面地址>}" "{core_key}"
+printf '  %s\n' "$LOGIN"
 printf '  %s status\n' "$WHARF"
 }
 
