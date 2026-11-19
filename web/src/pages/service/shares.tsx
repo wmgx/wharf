@@ -13,7 +13,7 @@ export function SharesTab({ service, shares }: { service: string; shares: RouteV
   return <div>
     {protecting && <AccessProtection route={protecting} onClose={() => setProtecting(null)} />}
     <ShareDialog service={service} open={sharing} onClose={() => setSharing(false)} />
-    <SectionTitle count={shares.length} action={<Button variant="outline" size="sm" onClick={() => setSharing(true)}>新建分享</Button>}>临时分享</SectionTitle>
+    <SectionTitle count={shares.length} action={<Button variant="outline" size="sm" onClick={() => setSharing(true)}>新建分享</Button>}>临时域名</SectionTitle>
     <ShareList routes={shares} empty="还没有分享。新建一个随机地址给别人临时访问，到期自动失效" onProtect={setProtecting} />
   </div>;
 }

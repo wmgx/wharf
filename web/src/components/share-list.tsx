@@ -25,7 +25,7 @@ export function ShareList({ routes, showService = false, empty, onProtect }: { r
       <a className={`inline-flex min-w-0 flex-1 items-center gap-1 font-mono text-sm hover:underline ${expired ? "text-muted-foreground line-through" : "text-primary"}`} href={r.url} target="_blank" rel="noreferrer">
         <span className="truncate">{r.url}</span><ArrowUpRightIcon className="size-3.5 shrink-0" />
       </a>
-      {showService && <Link className="text-xs hover:underline" to={`/services/${encodeURIComponent(r.spec.service ?? "")}?tab=domains`}>{r.spec.service}</Link>}
+      {showService && <Link className="text-xs hover:underline" to={`/services/${encodeURIComponent(r.spec.service ?? "")}?tab=domains&view=shares`}>{r.spec.service}</Link>}
       <span className="text-xs text-muted-foreground">{r.spec.auth ? "账号密码" : r.spec.sso ? "Wharf 登录" : "不保护"}</span>
       <span className={`text-xs ${expired ? "text-warning" : "text-muted-foreground"}`}>{expired ? "已失效" : `${at(r.spec.expires_at!)} 到期`}</span>
       {onProtect && !expired && <Button variant="outline" size="xs" onClick={() => onProtect(r)}>访问保护</Button>}
