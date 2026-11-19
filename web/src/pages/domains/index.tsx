@@ -37,7 +37,7 @@ export function Domains() {
     <Tabs value={tab} onValueChange={(v) => setTab(v as typeof TABS[number])}>
       <TabsList>
         <TabsTrigger value="domains">域名</TabsTrigger>
-        <TabsTrigger value="shares">分享{shares.length > 0 && <span className="ml-1 text-muted-foreground">{shares.length}</span>}</TabsTrigger>
+        <TabsTrigger value="shares" className="gap-1">临时域名{shares.length > 0 && <span className="rounded-full bg-muted px-1.5 text-xs leading-4 tabular-nums text-muted-foreground">{shares.length}</span>}</TabsTrigger>
         <TabsTrigger value="entries">入口</TabsTrigger>
       </TabsList>
       <TabsContent value="domains" className="mt-4">
