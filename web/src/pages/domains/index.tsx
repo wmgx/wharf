@@ -12,8 +12,9 @@ import { useStatus } from "@/status";
 import { DomainSheet } from "./detail";
 import { Entries } from "./entries";
 import { DomainList } from "./list";
+import { isShare, ShareList } from "@/components/share-list";
 
-const TABS = ["domains", "entries"] as const;
+const TABS = ["domains", "shares", "entries"] as const;
 
 export function Domains() {
   const { status } = useStatus();
@@ -22,6 +23,7 @@ export function Domains() {
   const selected = status?.routes.find((r) => r.spec.hostname === params.get("open"));
   const protecting = status?.routes.find((r) => r.spec.hostname === params.get("protection") || params.get("protection") === "1" && r === selected);
   const available = !!status?.services.length;
+  const shares = (status?.routes ?? []).filter(isShare);
   const add = <Button disabled={!available} onClick={() => setParams({ add: "1" })}>
     <PlusIcon />加域名</Button>;
   const action = available ? add : <Tip text="先部署一个服务">
@@ -31,14 +33,18 @@ export function Domains() {
   </Tip>;
   const close = (key: string) => { const next = new URLSearchParams(params); next.delete(key); setParams(next); };
   return <>
-    <PageHeader title="域名" count={status ? status.routes.length + (status.edge_apps ?? []).reduce((n, a) => n + (a.spec.domains?.length ?? 0), 0) : undefined} actions={tab === "domains" ? <><Button variant="outline" onClick={() => setParams({ redirect: "1" })}>加跳转</Button>{action}</> : undefined} />
+    <PageHeader title="域名" count={status ? status.routes.length - shares.length + (status.edge_apps ?? []).reduce((n, a) => n + (a.spec.domains?.length ?? 0), 0) : undefined} actions={tab === "domains" ? <><Button variant="outline" onClick={() => setParams({ redirect: "1" })}>加跳转</Button>{action}</> : undefined} />
     <Tabs value={tab} onValueChange={(v) => setTab(v as typeof TABS[number])}>
       <TabsList>
         <TabsTrigger value="domains">域名</TabsTrigger>
+        <TabsTrigger value="shares">分享{shares.length > 0 && <span className="ml-1 text-muted-foreground">{shares.length}</span>}</TabsTrigger>
         <TabsTrigger value="entries">入口</TabsTrigger>
       </TabsList>
       <TabsContent value="domains" className="mt-4">
         {status ? <DomainList status={status} add={action} /> : <CardsSkeleton />}
+      </TabsContent>
+      <TabsContent value="shares" className="mt-4">
+        <ShareList routes={shares} showService empty="还没有分享。在服务的 域名 里新建" onProtect={(r) => setParams({ tab: "shares", protection: r.spec.hostname })} />
       </TabsContent>
       <TabsContent value="entries" className="mt-4">
         <Entries />

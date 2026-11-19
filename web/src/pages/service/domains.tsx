@@ -4,6 +4,7 @@ import { ForwardDialog } from "@/components/forward-dialog";
 import { useActions } from "@/components/actions";
 import { useStatus } from "@/status";
 import { ShareDialog } from "@/components/share-dialog";
+import { isShare, shareExpired, ShareList } from "@/components/share-list";
 import { ArrowUpRightIcon, PlusIcon } from "lucide-react";
 import { Empty, SectionTitle } from "@/components/common";
 import { Row, Rows } from "@/components/kit";
@@ -14,7 +15,7 @@ import type { RouteView } from "@/types";
 
 export function DomainsTab({
   service,
-  routes,
+  routes: all,
   onAdd,
   onOpen,
 }: {
@@ -29,7 +30,9 @@ export function DomainsTab({
   const [forwarding, setForwarding] = useState(false);
   const forwards = (status?.gateways ?? []).flatMap((g) => (g.spec.layer4 ?? []).filter((f) => f.service === service).map((f) => ({ g, f })));
   const [sharing, setSharing] = useState(false);
-  const add = <div className="flex gap-2"><Button variant="outline" size="sm" onClick={() => setSharing(true)}>临时分享</Button><Button variant="outline" size="sm" onClick={onAdd}><PlusIcon />加域名</Button></div>;
+  const routes = all.filter((r) => !isShare(r));
+  const shares = all.filter((r) => isShare(r) && !shareExpired(r));
+  const add = <Button variant="outline" size="sm" onClick={onAdd}><PlusIcon />加域名</Button>;
   return (
     <div>
       {protecting && <AccessProtection route={protecting} onClose={() => setProtecting(null)} />}
@@ -58,13 +61,14 @@ export function DomainsTab({
               <span className="text-xs text-muted-foreground">
                 {r.gateway ? `经 ${r.gateway}` : ""}
                 {r.spec.link === "tunnel" ? " · 反向隧道" : ""}
-                {r.spec.expires_at != null && <span className={r.spec.expires_at <= Date.now() ? "text-warning" : ""}>{r.spec.expires_at <= Date.now() ? " · 已失效" : ` · 临时分享，${new Date(r.spec.expires_at).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })} 到期`}</span>}
-              </span>
+                </span>
               <OpMenu ops={routeOps.map((op) => op.id === "protection" ? { ...op, run: (route: RouteView) => setProtecting(route) } : op)} target={r} label={`${r.spec.hostname} 的操作`} size="icon-sm" />
             </Row>
           ))}
         </Rows>
       )}
+      <SectionTitle count={shares.length} action={<Button variant="outline" size="sm" onClick={() => setSharing(true)}>新建分享</Button>}>临时分享</SectionTitle>
+      <ShareList routes={shares} empty="没有进行中的分享。已失效的在 域名 · 分享 里" onProtect={setProtecting} />
       <SectionTitle count={forwards.length} action={<Button variant="outline" size="sm" disabled={!status?.gateways.some((g) => g.spec.kind === "caddy")} onClick={() => setForwarding(true)}>加转发</Button>}>四层转发</SectionTitle>
       {forwards.length ? <Rows limit={10}>{forwards.map(({ g, f }) => <Row key={`${g.name}/${!!f.udp}/${f.listen}`}>
         <span className="min-w-0 flex-1 break-all text-sm">{g.name} · :{f.listen}/{f.udp ? "UDP" : "TCP"} → {f.port ?? "默认端口"}</span>
