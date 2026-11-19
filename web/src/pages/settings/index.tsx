@@ -7,6 +7,7 @@ import { Accounts } from "./accounts";
 import { Core } from "./core";
 import { Secrets } from "./secrets";
 import { Security } from "./security";
+import { ShareDomains } from "./share-domains";
 import { Tokens } from "./tokens";
 
 const TABS = ["accounts", "secrets", "tokens", "security", "core"] as const;
@@ -27,6 +28,7 @@ export function Settings() {
       </TabsList>
       <TabsContent value="accounts" className="mt-4">
         <Accounts />
+        <ShareDomains />
       </TabsContent>
       <TabsContent value="secrets" className="mt-4">
         <Secrets />

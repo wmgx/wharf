@@ -30,7 +30,7 @@ export function GatewayDetail({ g, onDone, onDomain }: { g: GatewayView; onDone:
   };
   const addForward = <Button variant="outline" size="xs" onClick={() => setForwardOpen(true)}>加转发</Button>;
   const wildcard = g.spec.wildcard ?? [];
-  const zones = [...new Set((accounts ?? []).flatMap((a) => a.zones))].filter((z) => !wildcard.includes(z)).sort();
+  const hasZones = (accounts ?? []).some((a) => a.zones.length > 0);
   const saveWildcard = (next: string[], title: string) => {
     setWildcardOpen(false);
     actions.plan({ title, changes: [{ op: "upsert_gateway", name: g.name, spec: { ...g.spec, wildcard: next } }] });
@@ -57,7 +57,7 @@ export function GatewayDetail({ g, onDone, onDomain }: { g: GatewayView; onDone:
             <span className="break-all font-mono text-xs">*.{z}</span>
             <Button variant="outline" size="xs" onClick={() => saveWildcard(wildcard.filter((v) => v !== z), `关闭 *.${z} 的泛域名证书`)}>关闭</Button>
           </span>) : "没开"}
-          <Button variant="outline" size="xs" disabled={!zones.length} onClick={() => setWildcardOpen(true)}>开启</Button>
+          <Button variant="outline" size="xs" disabled={!hasZones} onClick={() => setWildcardOpen(true)}>开启</Button>
         </div>],
       ]} />
       <SectionTitle>域名</SectionTitle>
@@ -96,7 +96,7 @@ export function GatewayDetail({ g, onDone, onDomain }: { g: GatewayView; onDone:
       <Button variant="outline" className="text-destructive" disabled={g.routes.length > 0} onClick={() => { onDone(); actions.plan({ title: `删除入口 ${g.name}`, changes: [{ op: "remove_gateway", name: g.name }] }); }}>
         <Trash2Icon />删除入口</Button>
     </SheetFooter>
-    {wildcardOpen && <WildcardDialog g={g} onClose={() => setWildcardOpen(false)} />}
+    {wildcardOpen && <WildcardDialog gateways={[g]} onClose={() => setWildcardOpen(false)} />}
     {forwardOpen && <ForwardDialog gateway={g} onClose={() => setForwardOpen(false)} />}
   </>;
 }
