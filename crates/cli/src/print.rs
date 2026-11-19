@@ -84,6 +84,9 @@ pub fn plan_with(p: &Plan, next_step: bool) {
         layer(item.layer),
         item.reason,
       );
+      for c in &item.changes {
+        change(c);
+      }
     }
   }
   for w in &p.warnings {
@@ -93,6 +96,39 @@ pub fn plan_with(p: &Plan, next_step: bool) {
     for s in &p.suggest {
       println!("下一步：{s}");
     }
+  }
+}
+
+/// 计划里改动的一个字段，缩进在条目下面。
+fn change(c: &wharf_api_types::plan::FieldChange) {
+  if !c.lines.is_empty() {
+    println!("      {}:", c.path);
+    for l in &c.lines {
+      println!("        {l}");
+    }
+    return;
+  }
+  let show = |v: &Option<serde_json::Value>| match v {
+    None => "（无）".to_string(),
+    Some(serde_json::Value::String(s)) => short(s),
+    Some(v) => short(&v.to_string()),
+  };
+  println!(
+    "      {}: {} → {}",
+    c.path,
+    show(&c.before),
+    show(&c.after)
+  );
+}
+
+/// 太长的值截到 80 个字符。
+fn short(s: &str) -> String {
+  const MAX: usize = 80;
+  if s.chars().count() <= MAX {
+    s.to_string()
+  } else {
+    let head: String = s.chars().take(MAX).collect();
+    format!("{head}…")
   }
 }
 

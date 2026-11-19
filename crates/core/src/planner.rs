@@ -287,6 +287,12 @@ impl Builder {
     reason: impl Into<String>,
   ) -> u32 {
     let id = self.items.len() as u32 + 1;
+    let changes = match (&before, &after) {
+      (Some(b), Some(a)) => {
+        wharf_api_types::plan::field_changes(b, a)
+      }
+      _ => vec![],
+    };
     self.items.push(PlanItem {
       id,
       address,
@@ -296,6 +302,7 @@ impl Builder {
       after,
       impacts,
       reason: reason.into(),
+      changes,
     });
     id
   }
