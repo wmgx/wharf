@@ -1277,9 +1277,10 @@ pub fn applied(
         Applied {
           hash: r.get(1)?,
           at: to_time(r.get(2)?),
+          // 和 image、image_id 一样只看第一个镜像；取别的镜像的 digest 会把它钉到第一个镜像上。
           digest: images
-            .iter()
-            .find_map(|i| i.digest.as_deref()?.split_once('@'))
+            .first()
+            .and_then(|i| i.digest.as_deref()?.split_once('@'))
             .map(|(_, d)| d.to_string()),
           image: images.first().map(|i| i.image.clone()),
           image_id: images
