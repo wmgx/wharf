@@ -203,7 +203,10 @@ async fn execute(
   let planned = planner::make_plan(
     state,
     PlanRequest {
-      changes: vec![Change::RefreshImages { name: name.into() }],
+      changes: vec![Change::RefreshImages {
+        name: name.into(),
+        image: None,
+      }],
       fleet: None,
     },
   )

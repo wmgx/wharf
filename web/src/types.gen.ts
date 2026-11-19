@@ -408,6 +408,10 @@ export type Change = {
    */
   purge_data?: boolean;
 } | {
+  /**
+   * 只检查这一个镜像（compose 里写的名字）；不填检查服务里的全部镜像。
+   */
+  image?: string | null;
   name: string;
   op: "refresh_images";
 } | {

@@ -1263,7 +1263,7 @@ pub fn applied(
 ) -> Result<std::collections::BTreeMap<String, Applied>, ApiError> {
   let mut stmt = c
     .prepare(
-      "SELECT service, hash, created_at, images, commit_sha, json_extract(spec, '$.source.build.git.repo') || '#' || json_extract(spec, '$.source.build.git.ref') FROM deployments
+      "SELECT service, hash, created_at, images, commit_sha, json_extract(spec, '$.source.build.git.repo') || '#' || json_extract(spec, '$.source.build.git.ref'), spec FROM deployments
        WHERE id IN (SELECT MAX(id) FROM deployments GROUP BY service)",
     )
     .map_err(sql_err)?;
@@ -1301,6 +1301,9 @@ pub fn applied(
             .collect(),
           commit: r.get(4)?,
           git: r.get(5)?,
+          spec: r
+            .get::<_, Option<String>>(6)?
+            .and_then(|s| serde_json::from_str(&s).ok()),
         },
       ))
     })

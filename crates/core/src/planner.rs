@@ -352,9 +352,10 @@ pub async fn make_plan(
     .changes
     .iter()
     .filter_map(|c| match c {
-      wharf_api_types::spec::Change::RefreshImages { name } => {
-        Some(name.clone())
-      }
+      wharf_api_types::spec::Change::RefreshImages {
+        name,
+        image,
+      } => Some(crate::pins::refresh_key(name, image.as_deref())),
       _ => None,
     })
     .collect();
@@ -1147,27 +1148,29 @@ fn service_items(
               .into()
           } else if state.hash.is_none() {
             "服务器上已有同名 project，但不是 Wharf 部署的，将被接管重建".into()
-          } else if changed(writes, KIND_SERVICE, name) {
-            current
-              .services
-              .contains_key(name)
-              .then(|| {
-                snapshot::service_template(current, net, name).ok()
-              })
-              .flatten()
-              .and_then(|old| changed_components(&old, &template))
-              .map_or(
-                "配置变化，重建容器".into(),
-                |(redo, keep)| {
-                  format!(
-                    "配置变化，只重建 {}（{} 不变）",
-                    redo.join("、"),
-                    keep.join("、")
-                  )
-                },
-              )
           } else {
-            "漂移：服务器上的部署和配置不一致，重新部署".into()
+            let (head, all) = if changed(writes, KIND_SERVICE, name) {
+              ("配置变化", "配置变化，重建容器")
+            } else {
+              (
+                "漂移：服务器上的部署和配置不一致",
+                "漂移：服务器上的部署和配置不一致，重新部署",
+              )
+            };
+            deployed_template(
+              current,
+              net,
+              name,
+              snap.applied.get(name),
+            )
+            .and_then(|old| changed_components(&old, &template))
+            .map_or(all.to_string(), |(redo, keep)| {
+              format!(
+                "{head}，只重建 {}（{} 不变）",
+                redo.join("、"),
+                keep.join("、")
+              )
+            })
           };
           let risk = if state.hash.is_none() && !adopting {
             vec![Impact::Restart, Impact::Overwrite]
@@ -1340,6 +1343,25 @@ fn service_items(
 
 /// compose 里多个组件时，比较新旧模板逐个组件看：有的变了、有的没变时返回 (要重建的, 不变的)。
 /// `docker compose up -d` 本来就只重建配置变了的组件，这里只是在计划里说清楚。
+/// 服务器上现在跑的 compose：按上次部署的配置渲染；没有记录时退回当前配置。
+/// 上次部署失败时新配置已经写进去了，拿当前配置比会看不出哪些容器要重建。
+fn deployed_template(
+  current: &World,
+  net: &Net,
+  name: &str,
+  applied: Option<&wharf_api_types::view::Applied>,
+) -> Option<String> {
+  current.services.get(name)?;
+  match applied.and_then(|a| a.spec.clone()) {
+    Some(spec) => {
+      let mut world = current.clone();
+      world.services.get_mut(name)?.spec = spec;
+      snapshot::service_template(&world, net, name).ok()
+    }
+    None => snapshot::service_template(current, net, name).ok(),
+  }
+}
+
 fn changed_components(
   old: &str,
   new: &str,

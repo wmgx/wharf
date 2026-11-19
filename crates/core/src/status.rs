@@ -159,6 +159,7 @@ mod tests {
       image_ids: Default::default(),
       commit: None,
       git: None,
+      spec: None,
     };
     let failed = LastOp {
       action: "部署".into(),

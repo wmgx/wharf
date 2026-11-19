@@ -71,6 +71,20 @@ pub fn unsupported(source: &Source) -> Option<&'static str> {
   }
 }
 
+/// 计划里要检查更新的范围：整个服务是服务名，单个镜像是 `服务名\n镜像`。
+pub fn refresh_key(name: &str, image: Option<&str>) -> String {
+  image.map_or_else(|| name.to_string(), |i| format!("{name}\n{i}"))
+}
+
+fn refreshing(
+  refresh: &BTreeSet<String>,
+  name: &str,
+  image: &str,
+) -> bool {
+  refresh.contains(name)
+    || refresh.contains(&refresh_key(name, Some(image)))
+}
+
 /// 上次部署时这个镜像的 (digest, 镜像 ID)。
 fn running(
   a: &Applied,
@@ -117,7 +131,7 @@ pub async fn resolve(
       }
       let digest =
         applied.get(name).and_then(|a| running(a, &image).0);
-      if !refresh.contains(name)
+      if !refreshing(refresh, name, &image)
         && let Some(digest) = digest
       {
         row.pins.insert(image, digest);
@@ -179,7 +193,7 @@ pub async fn resolve(
       let config = found.and_then(|r| r.config.clone());
       let deployed = applied
         .get(&name)
-        .filter(|_| !refresh.contains(&name))
+        .filter(|_| !refreshing(refresh, &name, &image))
         .filter(|a| {
           a.digests.contains_key(&image)
             || a.image_ids.contains_key(&image)
@@ -434,6 +448,7 @@ mod tests {
       image_ids: Default::default(),
       commit: None,
       git: None,
+      spec: None,
     };
     let id =
       |v: &str| BTreeMap::from([("x:latest".into(), v.into())]);

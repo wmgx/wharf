@@ -431,13 +431,31 @@ impl World {
             },
           );
         }
-        Change::RefreshImages { name } => {
+        Change::RefreshImages { name, image } => {
           let row = self.services.get_mut(name).ok_or_else(|| {
             ApiError::not_found(format!("服务 {name} 不存在"))
               .suggest("wharf service list")
           })?;
-          row.pins.clear();
-          row.commit = None;
+          match image {
+            Some(image) => {
+              if !crate::pins::images(&row.spec.source)
+                .contains(image)
+              {
+                return Err(
+                  ApiError::invalid(format!(
+                    "服务 {name} 里没有镜像 {image}"
+                  ))
+                  .with_hint("镜像名要和 compose 里写的一字不差")
+                  .suggest(format!("wharf service show {name}")),
+                );
+              }
+              row.pins.remove(image);
+            }
+            None => {
+              row.pins.clear();
+              row.commit = None;
+            }
+          }
         }
         Change::RetagImage { name, image, tag } => {
           let row = self.services.get_mut(name).ok_or_else(|| {
@@ -2584,6 +2602,40 @@ mod tests {
     .unwrap();
     let err = w.validate().unwrap_err();
     assert_eq!(err.code, wharf_api_types::ErrorCode::NotFound);
+  }
+
+  #[test]
+  fn refresh_one_image_keeps_other_pins() {
+    let mut w = sample();
+    let mut spec = image_service("node1");
+    spec.source = serde_json::from_value(json!({"compose":{"content":"services:\n  db:\n    image: db:8\n  app:\n    image: app:2\n"}})).unwrap();
+    w.apply_changes(&[Change::UpsertService {
+      name: "x".into(),
+      spec,
+      adopt: None,
+    }])
+    .unwrap();
+    let row = w.services.get_mut("x").unwrap();
+    row.pins = BTreeMap::from([
+      ("db:8".into(), "sha256:db".into()),
+      ("app:2".into(), "sha256:app".into()),
+    ]);
+    w.apply_changes(&[Change::RefreshImages {
+      name: "x".into(),
+      image: Some("app:2".into()),
+    }])
+    .unwrap();
+    assert_eq!(
+      w.services["x"].pins,
+      BTreeMap::from([("db:8".into(), "sha256:db".into())])
+    );
+    let err = w
+      .apply_changes(&[Change::RefreshImages {
+        name: "x".into(),
+        image: Some("nope:1".into()),
+      }])
+      .unwrap_err();
+    assert_eq!(err.message, "服务 x 里没有镜像 nope:1");
   }
 
   #[test]
