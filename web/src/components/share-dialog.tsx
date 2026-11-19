@@ -16,7 +16,7 @@ export function ShareDialog({ service, open, onClose }: { service: string; open:
   const [zone, setZone] = useState("");
   const [port, setPort] = useState("");
   const [setting, setSetting] = useState(false);
-  const [protection, setProtection] = useState<"none" | "basic">("none");
+  const [protection, setProtection] = useState<"none" | "basic" | "gate">("none");
   const [user, setUser] = useState("guest");
   const [password, setPassword] = useState("");
   const [saving, setSaving] = useState(false);
@@ -38,7 +38,7 @@ export function ShareDialog({ service, open, onClose }: { service: string; open:
     catch (e) { setFailure(e); return; }
     finally { setSaving(false); }
     setPassword("");
-    actions.plan({ title: `分享 ${service}`, changes: [{ op: "upsert_route", spec: { hostname, service, port: selectedPort, gateway: selected.name, expires_at: Date.now() + Number(ttl), auth: basic } }] });
+    actions.plan({ title: `分享 ${service}`, changes: [{ op: "upsert_route", spec: { hostname, service, port: selectedPort, gateway: selected.name, expires_at: Date.now() + Number(ttl), auth: basic, sso: protection === "gate" ? { mode: "gate" } : undefined } }] });
     onClose();
   };
   if (setting) return <WildcardDialog gateways={candidates} title="设置分享域名" initialPrefix="s" onDone={onClose} onClose={() => setSetting(false)} />;
@@ -59,8 +59,8 @@ export function ShareDialog({ service, open, onClose }: { service: string; open:
         {zones.length > 1 && <Field label="域名后缀" htmlFor="share-zone">
           <Picker id="share-zone" value={suffix} options={zones.map((z) => ({ value: z, label: z }))} onChange={setZone} />
         </Field>}
-        {selected && <Field label="访问保护" help={protection === "basic" ? "对方打开链接时要输入这组账号密码，密码至少 8 位" : "拿到链接的人都能直接访问"}>
-          <Segmented value={protection} options={[["none", "不保护"], ["basic", "账号密码"]]} onChange={setProtection} />
+        {selected && <Field label="访问保护" help={protection === "basic" ? "对方打开链接时要输入这组账号密码，密码至少 8 位" : protection === "gate" ? "要先登录 Wharf 才能打开，只适合你自己用" : "拿到链接的人都能直接访问"}>
+          <Segmented value={protection} options={[["none", "不保护"], ["basic", "账号密码"], ["gate", "Wharf 登录"]]} onChange={setProtection} />
         </Field>}
         {selected && protection === "basic" && <AuthFields user={user} password={password} onUser={setUser} onPassword={setPassword} />}
         {ports.length > 1 && <Field label="端口" htmlFor="share-port">
