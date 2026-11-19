@@ -557,6 +557,8 @@ async fn execute(
 ) {
   let run_id = lock(&run).run_id.clone();
   let mut failed = false;
+  // 部署过服务就重新查一次版本，免得页面还按旧镜像提示升级。
+  let mut deployed = false;
   for (i, step) in steps.iter().enumerate() {
     let index = offset + i;
     if failed || cancel.is_cancelled() {
@@ -604,6 +606,11 @@ async fn execute(
         Ok(()) => (OpStatus::Succeeded, None),
         Err(e) => (OpStatus::Failed, Some(e.message.clone())),
       };
+      deployed |= result.is_ok()
+        && matches!(
+          step.step,
+          Step::ServiceUp { .. } | Step::Rebuild { .. }
+        );
       record_op(&state, service, action, &run_id, status, error)
         .await;
     }
@@ -649,6 +656,11 @@ async fn execute(
   }
   lock(&state.runs.active).remove(&run_id);
   tracing::info!("[{run_id}] 结束：{:?}", final_run.status);
+  if deployed {
+    tokio::spawn(
+      async move { crate::updates::versions(&state).await },
+    );
+  }
 }
 
 /// 会改变服务现状的步骤，记进服务状态的"执行"一层。

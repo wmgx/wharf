@@ -43,6 +43,28 @@ pub fn last() -> Option<UpdatesView> {
   LAST.read().ok().and_then(|l| l.clone())
 }
 
+/// 按现在的配置修正上次的结论：检查之后服务已经换了标签或升级过，
+/// 旧镜像的"更高版本"和已经固定下来的"新版本"都不再提示，等下次检查重新算。
+pub fn current(snap: &Snapshot) -> Option<UpdatesView> {
+  let mut view = last()?;
+  view.services.retain(|name, check| {
+    let Some(row) = snap.world.services.get(name) else {
+      return false;
+    };
+    let images = crate::pins::images(&row.spec.source);
+    check.tags.retain(|t| images.contains(&t.image));
+    if check
+      .latest
+      .as_ref()
+      .is_some_and(|l| row.pins.values().any(|p| p == l))
+    {
+      check.newer = false;
+    }
+    true
+  });
+  Some(view)
+}
+
 fn update(f: impl FnOnce(&mut UpdatesView)) {
   if let Ok(mut last) = LAST.write() {
     f(last.get_or_insert_with(UpdatesView::default));
