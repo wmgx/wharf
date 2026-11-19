@@ -8,8 +8,8 @@ use wharf_api_types::{
   ApiError,
   agent::{BUILD_IMAGE_PREFIX, TRIAL_PROJECT_PREFIX},
   spec::{
-    BuildSource, GatewayKind, GatewaySpec, GatewayTls, Limits,
-    PortSpec, PrivateAddr, ServiceSpec, Source,
+    BuildSource, GatewayKind, GatewaySpec, GatewayTls, PortSpec,
+    PrivateAddr, ServiceSpec, Source,
   },
 };
 
@@ -317,93 +317,243 @@ fn cpus_text(milli: u32) -> String {
   s.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
-/// 给单容器 compose 插入资源上限，其余文本保持原样。
-pub fn compose_with_limits(
+/// 服务设置作用的容器：写了 `container` 就是它，否则 compose 里只能有一个容器。
+pub fn compose_target(
   name: &str,
   content: &str,
-  limits: &Limits,
+  container: Option<&str>,
 ) -> Result<String, ApiError> {
+  let value: serde_yaml_ng::Value = serde_yaml_ng::from_str(content)
+    .map_err(|e| {
+      ApiError::invalid(format!("compose 内容解析失败：{e}"))
+    })?;
+  let names: Vec<String> = value
+    .get("services")
+    .and_then(|s| s.as_mapping())
+    .into_iter()
+    .flat_map(|m| m.keys())
+    .filter_map(|k| k.as_str().map(str::to_string))
+    .collect();
+  match container {
+    Some(c) if names.iter().any(|n| n == c) => Ok(c.to_string()),
+    Some(c) => Err(ApiError::invalid(format!(
+      "服务 {name} 的 compose 里没有容器 {c}"
+    ))
+    .with_hint(format!("可选的容器：{}", names.join("、")))),
+    None if names.len() == 1 => Ok(names[0].clone()),
+    None => Err(ApiError::invalid(format!(
+      "服务 {name} 的 compose 里有 {} 个容器，要选环境变量和资源上限加在哪个容器上",
+      names.len()
+    ))
+    .with_hint(format!("在设置里选择容器（{}）", names.join("、")))),
+  }
+}
+
+/// 给 compose 里的一个容器加上服务设置里的资源上限和环境变量，其余文本保持原样
+/// （注释、`[[密钥]]` 引用都不动，所以不重新生成 YAML，只插入几行）。
+pub fn compose_with_settings(
+  name: &str,
+  content: &str,
+  spec: &ServiceSpec,
+) -> Result<String, ApiError> {
+  let limits = spec.limits.clone().unwrap_or_default();
+  if limits.memory_mb.is_none()
+    && limits.cpu_milli.is_none()
+    && spec.env.is_empty()
+  {
+    return Ok(content.to_string());
+  }
+  let target =
+    compose_target(name, content, spec.container.as_deref())?;
   let unsupported = || {
     ApiError::invalid(format!(
-      "服务 {name} 的 compose 写法没法自动加上资源上限"
+      "服务 {name} 的 compose 写法没法自动加上环境变量或资源上限"
     ))
-    .with_hint("在 compose 文件里自己写 mem_limit 和 cpus，然后去掉这里的资源上限")
+    .with_hint("直接写在 compose 文件里（environment、mem_limit、cpus），然后去掉设置里的")
   };
   let value: serde_yaml_ng::Value =
     serde_yaml_ng::from_str(content).map_err(|_| unsupported())?;
-  let services = value
-    .get("services")
-    .and_then(|s| s.as_mapping())
-    .ok_or_else(unsupported)?;
-  if services.len() != 1 {
-    return Err(ApiError::invalid(format!(
-      "服务 {name} 的 compose 里有 {} 个容器，资源上限只支持一个容器的 compose",
-      services.len()
-    )).with_hint("在 compose 文件里给每个容器自己写 mem_limit 和 cpus，然后去掉这里的资源上限"));
-  }
-  let (service, body) = services.iter().next().unwrap();
-  if ["mem_limit", "cpus", "deploy"]
-    .iter()
-    .any(|key| body.get(*key).is_some())
+  let body = &value["services"][target.as_str()];
+  if (limits.memory_mb.is_some() || limits.cpu_milli.is_some())
+    && ["mem_limit", "cpus", "deploy"]
+      .iter()
+      .any(|key| body.get(*key).is_some())
   {
     return Err(ApiError::invalid(format!(
       "服务 {name} 的 compose 里已经写了 mem_limit、cpus 或 deploy，不能再在这里设资源上限"
     )).with_hint("两处留一处：去掉 compose 里的，或者去掉这里的资源上限"));
   }
-  let mut lines = content
+  let existing: Vec<String> = match body.get("environment") {
+    Some(serde_yaml_ng::Value::Mapping(m)) => m
+      .keys()
+      .filter_map(|k| k.as_str().map(str::to_string))
+      .collect(),
+    Some(serde_yaml_ng::Value::Sequence(l)) => l
+      .iter()
+      .filter_map(|v| v.as_str())
+      .map(|v| v.split('=').next().unwrap_or(v).to_string())
+      .collect(),
+    _ => vec![],
+  };
+  if let Some(dup) = spec.env.keys().find(|k| existing.contains(k)) {
+    return Err(
+      ApiError::invalid(format!(
+        "环境变量 {dup} 在 compose 里已经写了"
+      ))
+      .with_hint("两处留一处：去掉 compose 里的，或者去掉设置里的"),
+    );
+  }
+
+  // 按行定位：services 下的容器、容器里的 environment。
+  let lines: Vec<(usize, &str)> = content
     .split_inclusive('\n')
     .scan(0, |offset, line| {
       let start = *offset;
       *offset += line.len();
       Some((start, line))
     })
-    .filter(|(_, line)| {
-      !line.trim().is_empty() && !line.trim_start().starts_with('#')
-    });
-  lines
-    .find(|(_, line)| {
-      line.split(" #").next().unwrap().trim_end() == "services:"
+    .collect();
+  let code = |line: &str| {
+    !line.trim().is_empty() && !line.trim_start().starts_with('#')
+  };
+  let indent =
+    |line: &str| line.len() - line.trim_start_matches(' ').len();
+  let key = |line: &str| {
+    line
+      .split(" #")
+      .next()
+      .unwrap()
+      .trim()
+      .strip_suffix(':')
+      .map(|k| k.trim_matches(['"', '\'']).to_string())
+  };
+  if lines.iter().any(|(_, l)| l.contains('\t')) {
+    return Err(unsupported());
+  }
+  let services = lines
+    .iter()
+    .position(|(_, l)| {
+      code(l)
+        && indent(l) == 0
+        && key(l).as_deref() == Some("services")
     })
     .ok_or_else(unsupported)?;
-  let (offset, line) = lines.next().ok_or_else(unsupported)?;
-  let n = line.len() - line.trim_start_matches(' ').len();
-  if n == 0
-    || line.contains('\t')
-    || !line.split(" #").next().unwrap().trim_end().ends_with(':')
-  {
-    return Err(unsupported());
-  }
-  let (_, next) = lines.next().ok_or_else(unsupported)?;
-  let m = next.len() - next.trim_start_matches(' ').len();
-  if m <= n || next.contains('\t') {
-    return Err(unsupported());
-  }
-  let indent = " ".repeat(m);
-  let eol = if line.ends_with("\r\n") { "\r\n" } else { "\n" };
+  let n = lines[services + 1..]
+    .iter()
+    .find(|(_, l)| code(l))
+    .map(|(_, l)| indent(l))
+    .filter(|n| *n > 0)
+    .ok_or_else(unsupported)?;
+  let header = (services + 1..lines.len())
+    .take_while(|i| !code(lines[*i].1) || indent(lines[*i].1) >= n)
+    .find(|i| {
+      let l = lines[*i].1;
+      code(l)
+        && indent(l) == n
+        && key(l).as_deref() == Some(target.as_str())
+    })
+    .ok_or_else(unsupported)?;
+  let body_end = (header + 1..lines.len())
+    .find(|i| code(lines[*i].1) && indent(lines[*i].1) <= n)
+    .unwrap_or(lines.len());
+  let m = lines[header + 1..body_end]
+    .iter()
+    .find(|(_, l)| code(l))
+    .map(|(_, l)| indent(l))
+    .filter(|m| *m > n)
+    .ok_or_else(unsupported)?;
+  let eol = if lines[header].1.ends_with("\r\n") {
+    "\r\n"
+  } else {
+    "\n"
+  };
+  let pad = " ".repeat(m);
+  let quote = |v: &str| {
+    serde_json::to_string(&v.replace('$', "$$")).unwrap_or_default()
+  };
+  let mut inserts: Vec<(usize, String)> = Vec::new();
   let memory = limits.memory_mb.map(|mb| format!("{mb}m"));
   let cpus = limits.cpu_milli.map(cpus_text);
   let mut added = String::new();
   if let Some(memory) = &memory {
-    added.push_str(&format!("{indent}mem_limit: {memory}{eol}"));
+    added.push_str(&format!("{pad}mem_limit: {memory}{eol}"));
   }
   if let Some(cpus) = &cpus {
-    added.push_str(&format!("{indent}cpus: \"{cpus}\"{eol}"));
+    added.push_str(&format!("{pad}cpus: \"{cpus}\"{eol}"));
   }
-  let at = offset + line.len();
-  let out = format!("{}{}{}", &content[..at], added, &content[at..]);
+  if !spec.env.is_empty() {
+    let env_line = (header + 1..body_end).find(|i| {
+      let l = lines[*i].1;
+      code(l)
+        && indent(l) == m
+        && l.trim_start().starts_with("environment:")
+    });
+    match env_line {
+      None => {
+        added.push_str(&format!("{pad}environment:{eol}"));
+        for (k, v) in &spec.env {
+          added.push_str(&format!("{pad}  {k}: {}{eol}", quote(v)));
+        }
+      }
+      Some(e) => {
+        if key(lines[e].1).as_deref() != Some("environment") {
+          return Err(unsupported());
+        }
+        let item = lines[e + 1..body_end]
+          .iter()
+          .find(|(_, l)| code(l))
+          .filter(|(_, l)| indent(l) > m)
+          .map(|(_, l)| *l)
+          .ok_or_else(unsupported)?;
+        let k_pad = " ".repeat(indent(item));
+        let list = item.trim_start().starts_with("- ");
+        let mut text = String::new();
+        for (k, v) in &spec.env {
+          if list {
+            text.push_str(&format!(
+              "{k_pad}- {}{eol}",
+              quote(&format!("{k}={v}"))
+            ));
+          } else {
+            text.push_str(&format!("{k_pad}{k}: {}{eol}", quote(v)));
+          }
+        }
+        inserts.push((lines[e].0 + lines[e].1.len(), text));
+      }
+    }
+  }
+  if !added.is_empty() {
+    inserts.push((lines[header].0 + lines[header].1.len(), added));
+  }
+  inserts.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
+  let mut out = content.to_string();
+  for (at, text) in inserts {
+    out.insert_str(at, &text);
+  }
+  // 插完再解析一遍，确认加到了对的容器上。
   let parsed: serde_yaml_ng::Value =
     serde_yaml_ng::from_str(&out).map_err(|_| unsupported())?;
-  let actual = parsed
-    .get("services")
-    .and_then(|s| s.as_mapping())
-    .filter(|s| s.len() == 1)
-    .and_then(|s| s.get(service))
-    .ok_or_else(unsupported)?;
+  let actual = &parsed["services"][target.as_str()];
   for (key, expected) in [("mem_limit", memory), ("cpus", cpus)] {
     if let Some(expected) = expected
       && actual.get(key).and_then(|v| v.as_str())
         != Some(expected.as_str())
     {
+      return Err(unsupported());
+    }
+  }
+  for k in spec.env.keys() {
+    let found = match actual.get("environment") {
+      Some(serde_yaml_ng::Value::Mapping(map)) => {
+        map.get(k.as_str()).is_some()
+      }
+      Some(serde_yaml_ng::Value::Sequence(l)) => l
+        .iter()
+        .filter_map(|v| v.as_str())
+        .any(|v| v.split('=').next() == Some(k.as_str())),
+      _ => false,
+    };
+    if !found {
       return Err(unsupported());
     }
   }
@@ -422,13 +572,10 @@ pub fn service_compose(
   match &spec.source {
     Source::Compose { content, .. } => {
       let content = content.as_deref().unwrap_or_default();
-      match &spec.limits {
-        Some(limits) => substitute(
-          &compose_with_limits(name, content, limits)?,
-          secrets,
-        ),
-        None => substitute(content, secrets),
-      }
+      substitute(
+        &compose_with_settings(name, content, spec)?,
+        secrets,
+      )
     }
     Source::Image(_) | Source::Build(_) => {
       let mut service = image_service(name, spec, secrets)?;
@@ -1036,6 +1183,7 @@ pub fn caddyfile(
 #[cfg(test)]
 mod tests {
   use super::*;
+  use wharf_api_types::spec::Limits;
   use wharf_api_types::spec::{GatewayKind, PortSpec, VolumeSpec};
 
   fn spec() -> ServiceSpec {
@@ -1045,6 +1193,7 @@ mod tests {
       monitor: None,
       limits: None,
       auto_update: false,
+      container: None,
       server: "node1".into(),
       source: Source::Image("traefik/whoami".into()),
       ports: vec![PortSpec {
@@ -1332,47 +1481,140 @@ mod tests {
     assert_eq!(cpus_text(1250), "1.25");
   }
 
+  fn compose_spec(
+    content: &str,
+    memory: Option<u32>,
+    cpu: Option<u32>,
+    env: &[(&str, &str)],
+    container: Option<&str>,
+  ) -> ServiceSpec {
+    let mut spec: ServiceSpec =
+      serde_json::from_value(serde_json::json!({
+        "server": "s1",
+        "source": { "compose": { "content": content } },
+      }))
+      .unwrap();
+    if memory.is_some() || cpu.is_some() {
+      spec.limits = Some(Limits {
+        memory_mb: memory,
+        cpu_milli: cpu,
+      });
+    }
+    spec.env = env
+      .iter()
+      .map(|(k, v)| (k.to_string(), v.to_string()))
+      .collect();
+    spec.container = container.map(str::to_string);
+    spec
+  }
+
   #[test]
   fn compose_limits_keep_original_text() {
     let source = "# 原样保留\nservices: # 服务\n  # 注释\n  web: # 容器\n    image: nginx\n    environment:\n      KEY: [[SECRET]]\n    ports:\n      - \"127.0.0.1:8080:80\"\n";
     let expected = "# 原样保留\nservices: # 服务\n  # 注释\n  web: # 容器\n    mem_limit: 512m\n    cpus: \"0.5\"\n    image: nginx\n    environment:\n      KEY: [[SECRET]]\n    ports:\n      - \"127.0.0.1:8080:80\"\n";
-    let mut limits = Limits {
-      memory_mb: Some(512),
-      cpu_milli: Some(500),
+    let with = |cpu| {
+      compose_with_settings(
+        "s1",
+        source,
+        &compose_spec(source, Some(512), cpu, &[], None),
+      )
+      .unwrap()
     };
+    assert_eq!(with(Some(500)), expected);
     assert_eq!(
-      compose_with_limits("s1", source, &limits).unwrap(),
-      expected
-    );
-    limits.cpu_milli = None;
-    assert_eq!(
-      compose_with_limits("s1", source, &limits).unwrap(),
+      with(None),
       expected.replace("    cpus: \"0.5\"\n", "")
     );
   }
 
   #[test]
+  fn compose_env_goes_to_chosen_container() {
+    let source = "services:\n  db:\n    image: mysql\n    environment:\n      - A=1\n  app:\n    image: halo # 主容器\n    environment:\n      KEY: [[SECRET]]\n  side:\n    image: x\n";
+    // 多个容器：没选容器时报错，提示可选的容器。
+    let error = compose_with_settings(
+      "s1",
+      source,
+      &compose_spec(source, None, None, &[("B", "2")], None),
+    )
+    .unwrap_err();
+    assert!(error.message.contains("3 个容器"));
+    // mapping 写法的 environment 里追加，`$` 转义。
+    let out = compose_with_settings(
+      "s1",
+      source,
+      &compose_spec(
+        source,
+        Some(256),
+        None,
+        &[("B", "a$b")],
+        Some("app"),
+      ),
+    )
+    .unwrap();
+    assert_eq!(
+      out,
+      "services:\n  db:\n    image: mysql\n    environment:\n      - A=1\n  app:\n    mem_limit: 256m\n    image: halo # 主容器\n    environment:\n      B: \"a$$b\"\n      KEY: [[SECRET]]\n  side:\n    image: x\n"
+    );
+    // 列表写法。
+    let out = compose_with_settings(
+      "s1",
+      source,
+      &compose_spec(source, None, None, &[("B", "2")], Some("db")),
+    )
+    .unwrap();
+    assert!(
+      out
+        .contains("    environment:\n      - \"B=2\"\n      - A=1\n")
+    );
+    // 没有 environment 的容器新加一段。
+    let out = compose_with_settings(
+      "s1",
+      source,
+      &compose_spec(source, None, None, &[("B", "2")], Some("side")),
+    )
+    .unwrap();
+    assert!(out.ends_with(
+      "  side:\n    environment:\n      B: \"2\"\n    image: x\n"
+    ));
+    // 和 compose 里重复的变量。
+    let error = compose_with_settings(
+      "s1",
+      source,
+      &compose_spec(source, None, None, &[("A", "2")], Some("db")),
+    )
+    .unwrap_err();
+    assert!(error.message.contains("已经写了"));
+    let error = compose_with_settings(
+      "s1",
+      source,
+      &compose_spec(source, None, None, &[("B", "2")], Some("nope")),
+    )
+    .unwrap_err();
+    assert!(error.message.contains("没有容器 nope"));
+  }
+
+  #[test]
   fn compose_limits_reject_unsupported_forms() {
-    let limits = Limits {
-      memory_mb: Some(512),
-      cpu_milli: None,
+    let check = |source: &str| {
+      compose_with_settings(
+        "s1",
+        source,
+        &compose_spec(source, Some(512), None, &[], None),
+      )
+      .unwrap_err()
+      .message
     };
-    let error = compose_with_limits("s1", "services:\n  web:\n    image: nginx\n  worker:\n    image: nginx\n", &limits).unwrap_err();
-    assert!(error.message.contains("2 个容器"));
-    let error = compose_with_limits(
-      "s1",
-      "services:\n  web:\n    image: nginx\n    mem_limit: 64m\n",
-      &limits,
-    )
-    .unwrap_err();
-    assert!(error.message.contains("已经写了 mem_limit"));
-    let error = compose_with_limits(
-      "s1",
-      "services: {web: {image: nginx}}",
-      &limits,
-    )
-    .unwrap_err();
-    assert!(error.message.contains("写法没法自动加上"));
+    assert!(check("services:\n  web:\n    image: nginx\n  worker:\n    image: nginx\n").contains("2 个容器"));
+    assert!(
+      check(
+        "services:\n  web:\n    image: nginx\n    mem_limit: 64m\n"
+      )
+      .contains("已经写了 mem_limit")
+    );
+    assert!(
+      check("services: {web: {image: nginx}}")
+        .contains("写法没法自动加上")
+    );
   }
 
   #[test]

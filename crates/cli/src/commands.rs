@@ -1956,6 +1956,7 @@ async fn service(
             monitor: None,
             limits: None,
             auto_update: false,
+            container: None,
           }
         }
       };

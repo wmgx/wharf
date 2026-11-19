@@ -316,8 +316,8 @@ pub struct ServiceSpec {
   pub source: Source,
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub ports: Vec<PortSpec>,
-  /// 环境变量。值里可以用 `[[SECRET_NAME]]` 引用密钥，仅 image 来源生效；
-  /// compose 来源的整个文件内容都会做同样的替换。
+  /// 环境变量。值里可以用 `[[SECRET_NAME]]` 引用密钥；compose 来源加到 `container` 指定的容器上，
+  /// compose 文件内容也会做同样的替换。
   /// 也可以用 `[[@服务]]` 引用别的服务，部署时换成它的 `内网地址:宿主机端口`；
   /// `[[@服务.端口名]]` 指定端口，末尾加 `:host` / `:port` 只取地址或端口。
   #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -336,9 +336,12 @@ pub struct ServiceSpec {
   /// 资源上限，不填不限。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub limits: Option<Limits>,
-  /// 自动更新：每天检查一次，有新版本就自动更新。只支持镜像来源和 git 构建来源、没有数据卷的服务。
+  /// 自动更新：每天检查一次，有新版本就自动更新。只支持没有数据卷的服务（compose 来源看 compose 里有没有挂载）。
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub auto_update: bool,
+  /// compose 来源：环境变量和资源上限加在哪个容器上。只有一个容器时不用填。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub container: Option<String>,
 }
 
 impl ServiceSpec {
@@ -380,9 +383,9 @@ pub struct MonitorSpec {
   pub keyword: Option<String>,
 }
 
-/// 资源上限。compose 来源只支持一个容器的 compose。
+/// 资源上限。compose 来源加在 `container` 指定的容器上。
 #[derive(
-  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+  Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema,
 )]
 pub struct Limits {
   /// 内存上限，单位 MB。

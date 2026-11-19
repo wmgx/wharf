@@ -324,6 +324,7 @@ ALTER TABLE alert_history ADD COLUMN subject TEXT;
     last_used_at INTEGER
   );",
 
+  COMPOSE_PINS_MIGRATION,
 ];
 
 /// git 构建来源固定到上次部署构建的 commit（仓库和分支没换过的）。当时没记下 commit 的留给 plan 提醒。
@@ -353,6 +354,23 @@ SET meta = json_set(meta, '$.pins', json_object(
 WHERE kind = 'service' AND json_type(spec, '$.source.image') = 'text'
   AND (SELECT json_extract(d.images, '$[0].digest') FROM deployments d
        WHERE d.service = resources.name ORDER BY d.id DESC LIMIT 1) LIKE '%@sha256:%';
+DELETE FROM plans WHERE status = 'pending';
+"#;
+
+/// compose 来源固定到上次部署实际用的各个镜像 digest，和 image 来源一样，升级后不用再执行一次“固定镜像版本”。
+const COMPOSE_PINS_MIGRATION: &str = r#"
+UPDATE resources
+SET meta = json_set(COALESCE(meta, '{}'), '$.pins', (
+  SELECT json_group_object(json_extract(j.value, '$.image'),
+    substr(json_extract(j.value, '$.digest'), instr(json_extract(j.value, '$.digest'), '@') + 1))
+  FROM json_each((SELECT d.images FROM deployments d
+    WHERE d.service = resources.name ORDER BY d.id DESC LIMIT 1)) j
+  WHERE json_extract(j.value, '$.digest') LIKE '%@sha256:%'))
+WHERE kind = 'service' AND json_type(spec, '$.source.compose') = 'object'
+  AND json_extract(COALESCE(meta, '{}'), '$.pins') IS NULL
+  AND EXISTS (SELECT 1 FROM json_each((SELECT d.images FROM deployments d
+    WHERE d.service = resources.name ORDER BY d.id DESC LIMIT 1)) j
+    WHERE json_extract(j.value, '$.digest') LIKE '%@sha256:%');
 DELETE FROM plans WHERE status = 'pending';
 "#;
 
@@ -1450,6 +1468,36 @@ mod tests {
         r#"{"host_ports":{"http":20000},"pins":{"nginx:1":"sha256:bb"}}"#
       ]
     );
+  }
+  #[test]
+  fn compose_pins_migration() {
+    let c = Connection::open_in_memory().unwrap();
+    c.execute_batch(
+      r#"CREATE TABLE resources (kind TEXT, name TEXT, spec TEXT, meta TEXT);
+       CREATE TABLE deployments (id INTEGER PRIMARY KEY, service TEXT, images TEXT);
+       CREATE TABLE plans (status TEXT);
+       INSERT INTO resources VALUES
+         ('service', 'halo', '{"source":{"compose":{"content":"x"}}}', '{}'),
+         ('service', 'local', '{"source":{"compose":{"content":"x"}}}', NULL);
+       INSERT INTO deployments (service, images) VALUES
+         ('halo', '[{"image":"db:8","id":"i","digest":"db@sha256:aa"},{"image":"app:2","id":"j","digest":"app@sha256:bb"},{"image":"wharf-build/x","id":"k"}]'),
+         ('local', '[{"image":"wharf-build/x","id":"k"}]');"#,
+    )
+    .unwrap();
+    c.execute_batch(COMPOSE_PINS_MIGRATION).unwrap();
+    let meta = |n: &str| -> Option<String> {
+      c.query_row(
+        "SELECT meta FROM resources WHERE name=?1",
+        [n],
+        |r| r.get(0),
+      )
+      .unwrap()
+    };
+    assert_eq!(
+      meta("halo").as_deref(),
+      Some(r#"{"pins":{"db:8":"sha256:aa","app:2":"sha256:bb"}}"#)
+    );
+    assert_eq!(meta("local"), None);
   }
 
   #[test]

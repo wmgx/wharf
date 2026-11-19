@@ -107,6 +107,10 @@ pub async fn resolve(
   let mut todo: BTreeMap<String, Vec<(String, String)>> =
     BTreeMap::new();
   for (name, row) in desired.services.iter_mut() {
+    // 导入时按本机已有的镜像启动，不查仓库里的最新版本；部署后记下实际的版本。
+    if row.import.is_some() && !applied.contains_key(name) {
+      continue;
+    }
     for image in images(&row.spec.source) {
       if row.pins.contains_key(&image) {
         continue;

@@ -16,6 +16,8 @@ export interface ComposeVolume {
 }
 
 export interface ComposeInfo {
+  /** compose 里的容器名，按出现顺序。 */
+  services: string[];
   images: string[];
   ports: ComposePort[];
   volumes: ComposeVolume[];
@@ -37,7 +39,7 @@ function parsePort(text: string): { host?: number; container: number } | null {
  * 只用来给表单预填和提示，真正的校验在控制面。
  */
 export function parseCompose(text: string): ComposeInfo {
-  const info: ComposeInfo = { images: [], ports: [], volumes: [] };
+  const info: ComposeInfo = { services: [], images: [], ports: [], volumes: [] };
   let svcIndent = -1;
   let service = "";
   let list: "ports" | "volumes" | null = null;
@@ -67,7 +69,8 @@ export function parseCompose(text: string): ComposeInfo {
     if (svcIndent < 0) svcIndent = indent;
     if (indent === svcIndent) {
       flush();
-      service = t.replace(/:$/, "");
+      service = unquote(t.replace(/:$/, ""));
+      info.services.push(service);
       list = null;
       continue;
     }

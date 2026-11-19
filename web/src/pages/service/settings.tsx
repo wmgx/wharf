@@ -56,9 +56,10 @@ function SettingsFields({ svc, draft, set, changed, onReset, onSubmit }: { svc: 
   const memoryNum = memory.trim() ? Number(memory) : undefined;
   const cpuNum = cpus.trim() ? Number(cpus) : undefined;
   const limitsValid = (memoryNum === undefined || (Number.isInteger(memoryNum) && memoryNum >= 32 && memoryNum <= 4294967295)) && (cpuNum === undefined || (Number.isFinite(cpuNum) && cpuNum >= 0.01 && cpuNum * 1000 <= 4294967295));
-  const disabled = !limitsValid ? "资源上限不正确" : build && !howReady(how) ? "来源的 Dockerfile 不能为空" : undefined;
+  const needsContainer = isCompose && composeInfo.services.length > 1 && !draft.container && (Object.keys(draft.env ?? {}).length > 0 || !!draft.limits);
+  const disabled = needsContainer ? "compose 里有多个容器，先选环境变量和资源上限加在哪个容器上" : !limitsValid ? "资源上限不正确" : build && !howReady(how) ? "来源的 Dockerfile 不能为空" : undefined;
   const updateLimits = (m: string, c: string) => { const mn = m.trim() ? Number(m) : undefined; const cn = c.trim() ? Number(c) : undefined; set({ limits: mn === undefined && cn === undefined ? undefined : { memory_mb: mn, cpu_milli: cn === undefined ? undefined : Math.round(cn * 1000) } }); };
-  return <div className="max-w-2xl">
+  return <div className="max-w-5xl">
     <SectionTitle>来源</SectionTitle>
     <Panel className="grid gap-3 p-4">
       {isImage ? <Field label="镜像" htmlFor="service-image">
@@ -84,10 +85,20 @@ function SettingsFields({ svc, draft, set, changed, onReset, onSubmit }: { svc: 
     <Panel className="p-4">
       <PortsEditor ports={ports} compose={isCompose} onChange={(value) => { setPortsTouched(true); setPorts(value); set({ ports: portsFor(value, isCompose) }); }} />
     </Panel>
-    {!isCompose && <>
+    {isCompose && composeInfo.services.length > 1 && <>
+      <SectionTitle>设置作用的容器</SectionTitle>
+      <Panel className="grid gap-2 p-4">
+        <select id="service-container" className="h-9 w-full rounded-md border bg-background px-3 text-sm sm:w-64" value={draft.container ?? ""} onChange={(e) => set({ container: e.target.value || undefined })}>
+          <option value="">选择容器</option>
+          {composeInfo.services.map((c) => <option key={c} value={c}>{c}</option>)}
+        </select>
+        <span className="text-xs text-muted-foreground">下面的环境变量和资源上限加在这个容器上，compose 文件本身不改。</span>
+      </Panel>
+    </>}
+    {<>
       <SectionTitle>环境变量</SectionTitle>
       <Panel className="p-4">
-        <Field label="环境变量" htmlFor="service-env">
+        <Field label={isCompose ? "环境变量（部署时加到 compose 里，和 compose 里已有的不能重名）" : "环境变量"} htmlFor="service-env">
           <CodeEditor id="service-env" lang="env" secrets className="min-h-32" placeholder={"KEY=value\nTOKEN=[[MY_SECRET]]"} value={env} onChange={(value) => { setEnvTouched(true); setEnv(value); set({ env: parseEnv(value) }); }} />
         </Field>
       </Panel>
@@ -96,7 +107,7 @@ function SettingsFields({ svc, draft, set, changed, onReset, onSubmit }: { svc: 
       <SectionTitle>健康检查</SectionTitle>
     </div>
     <Button variant="outline" onClick={() => setParams({ tab: "metrics" })}>到监控页设置健康检查</Button>
-    {(!isCompose || composeInfo.images.length === 1) && <>
+    {<>
       <SectionTitle>资源上限</SectionTitle>
       <Panel className="grid gap-3 p-4 sm:grid-cols-2">
         <Field label="内存（MB）" htmlFor="service-memory">
@@ -109,7 +120,7 @@ function SettingsFields({ svc, draft, set, changed, onReset, onSubmit }: { svc: 
         </Field>
       </Panel>
     </>}
-    {((isImage && !source.image.includes("@")) || !!build?.git) && !draft.volumes?.length && <>
+    {((isImage && !source.image.includes("@")) || !!build?.git || (isCompose && composeInfo.images.some((i) => !i.includes("@") && !i.includes("$")) && composeInfo.volumes.length === 0)) && !draft.volumes?.length && <>
       <SectionTitle>自动更新</SectionTitle>
       <Panel className="grid gap-3 p-4">
         <label className="flex items-center gap-2 text-sm">
