@@ -381,7 +381,7 @@ export type Change =
   | { op: "update_server"; name: string; settings: Record<string, unknown> }
   | { op: "upsert_service"; name: string; spec: ServiceSpec; adopt?: AdoptSpec }
   | { op: "remove_service"; name: string; purge_data?: boolean }
-  | { op: "refresh_images"; name: string }
+  | { op: "refresh_images"; name: string; image?: string }
   | { op: "retag_image"; name: string; image: string; tag: string }
   | { op: "upsert_gateway"; name: string; spec: GatewaySpec }
   | { op: "remove_gateway"; name: string }

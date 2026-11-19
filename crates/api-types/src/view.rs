@@ -243,6 +243,10 @@ pub struct Applied {
   pub commit: Option<String>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub git: Option<String>,
+  /// 上次部署时的服务配置，计划时用它判断 compose 里哪些容器要重建。
+  #[serde(skip)]
+  #[schemars(skip)]
+  pub spec: Option<crate::spec::ServiceSpec>,
 }
 
 #[derive(

@@ -1681,8 +1681,14 @@ async fn service(
       )
       .await
     }
-    ServiceCmd::Update { name, apply } => {
-      changes(c, vec![Change::RefreshImages { name }], apply, j).await
+    ServiceCmd::Update { name, image, apply } => {
+      changes(
+        c,
+        vec![Change::RefreshImages { name, image }],
+        apply,
+        j,
+      )
+      .await
     }
     ServiceCmd::Retag {
       name,

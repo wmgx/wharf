@@ -553,6 +553,10 @@ pub enum ServiceCmd {
   /// 有新版本时计划里会更新。平时改配置不会换版本。不会换标签，换标签用 `wharf service retag`。
   Update {
     name: String,
+    /// 只检查这一个镜像，和 compose 里写的一字不差；不填检查全部镜像。
+    /// 例：`wharf service update halo --image mysql:8.0.36`。
+    #[arg(long)]
+    image: Option<String>,
     #[command(flatten)]
     apply: ApplyFlags,
   },

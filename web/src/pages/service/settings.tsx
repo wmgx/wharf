@@ -76,6 +76,13 @@ function SettingsFields({ svc, draft, set, changed, onReset, onSubmit }: { svc: 
       </div> : build && <div className="flex items-center gap-2 text-sm">代码包 {build.upload?.slice(0, 12)}<Button variant="outline" size="sm" onClick={() => { const next = new URLSearchParams(params); next.set("repack", "1"); setParams(next); }}>更新代码包</Button>
       </div>}
       {(isImage || isCompose) && <MirrorHint server={status?.servers.find((s) => s.name === svc.spec.server)} images={isImage ? [source.image] : composeInfo.images} />}
+      {isCompose && composeInfo.images.filter((i) => !i.includes("@") && !i.includes("$")).length > 1 && <div className="grid gap-1">
+        <span className="text-xs text-muted-foreground">单独检查某个镜像的新版本，其他镜像保持现在的版本、容器不重建</span>
+        {composeInfo.images.filter((i) => !i.includes("@") && !i.includes("$")).map((image) => <div key={image} className="flex items-center justify-between gap-2">
+          <span className="min-w-0 break-all font-mono text-xs">{image}</span>
+          <Button variant="outline" size="xs" onClick={() => actions.plan({ title: `检查 ${svc.name} 的 ${image} 的更新`, changes: [{ op: "refresh_images", name: svc.name, image }] })}>检查更新</Button>
+        </div>)}
+      </div>}
       {build && <BuildEditor value={how} onChange={(value) => { setHow(value); set({ source: { build: { ...build, ...cleanHow(value) } } }); }} />}
       {svc.import && <div className="text-xs text-muted-foreground">
         {importText(svc.import)}

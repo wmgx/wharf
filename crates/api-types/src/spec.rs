@@ -831,6 +831,9 @@ pub enum Change {
   /// 检查更新：重新查镜像标签（image 来源）或分支（git 构建来源）现在对应的版本，有新版本时计划里会更新。
   RefreshImages {
     name: String,
+    /// 只检查这一个镜像（compose 里写的名字）；不填检查服务里的全部镜像。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    image: Option<String>,
   },
   /// 把服务里的镜像换成同一仓库的另一个标签（image 来源改镜像，compose 来源改 `image:` 那一行），
   /// 计划时查新标签的版本。例：`halo/halo:2.20` 换成 `2.21`。
