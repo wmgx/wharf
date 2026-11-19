@@ -3,7 +3,7 @@ import { AccessProtection } from "@/components/access-protection";
 import { ForwardDialog } from "@/components/forward-dialog";
 import { useActions } from "@/components/actions";
 import { useStatus } from "@/status";
-import { ShareDialog } from "@/components/share-dialog";
+import { isShare } from "@/components/share-list";
 import { ArrowUpRightIcon, PlusIcon } from "lucide-react";
 import { Empty, SectionTitle } from "@/components/common";
 import { Row, Rows } from "@/components/kit";
@@ -14,7 +14,7 @@ import type { RouteView } from "@/types";
 
 export function DomainsTab({
   service,
-  routes,
+  routes: all,
   onAdd,
   onOpen,
 }: {
@@ -28,13 +28,12 @@ export function DomainsTab({
   const [protecting, setProtecting] = useState<RouteView | null>(null);
   const [forwarding, setForwarding] = useState(false);
   const forwards = (status?.gateways ?? []).flatMap((g) => (g.spec.layer4 ?? []).filter((f) => f.service === service).map((f) => ({ g, f })));
-  const [sharing, setSharing] = useState(false);
-  const add = <div className="flex gap-2"><Button variant="outline" size="sm" onClick={() => setSharing(true)}>临时分享</Button><Button variant="outline" size="sm" onClick={onAdd}><PlusIcon />加域名</Button></div>;
+  const routes = all.filter((r) => !isShare(r));
+  const add = <Button variant="outline" size="sm" onClick={onAdd}><PlusIcon />加域名</Button>;
   return (
     <div>
       {protecting && <AccessProtection route={protecting} onClose={() => setProtecting(null)} />}
       {forwarding && <ForwardDialog service={service} onClose={() => setForwarding(false)} />}
-      <ShareDialog service={service} open={sharing} onClose={() => setSharing(false)} />
       <SectionTitle action={routes.length ? add : undefined}>域名</SectionTitle>
       {routes.length === 0 ? (
         <Empty action={add}>还没有域名，现在只能从内网访问</Empty>
@@ -58,8 +57,7 @@ export function DomainsTab({
               <span className="text-xs text-muted-foreground">
                 {r.gateway ? `经 ${r.gateway}` : ""}
                 {r.spec.link === "tunnel" ? " · 反向隧道" : ""}
-                {r.spec.expires_at != null && <span className={r.spec.expires_at <= Date.now() ? "text-warning" : ""}>{r.spec.expires_at <= Date.now() ? " · 已失效" : ` · 临时分享，${new Date(r.spec.expires_at).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })} 到期`}</span>}
-              </span>
+                </span>
               <OpMenu ops={routeOps.map((op) => op.id === "protection" ? { ...op, run: (route: RouteView) => setProtecting(route) } : op)} target={r} label={`${r.spec.hostname} 的操作`} size="icon-sm" />
             </Row>
           ))}

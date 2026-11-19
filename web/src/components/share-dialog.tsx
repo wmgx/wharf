@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { useActions } from "@/components/actions";
-import { Field, Picker } from "@/components/fields";
+import { AuthFields, authReady, saveAuth } from "@/components/basic-auth";
+import { ErrorNote } from "@/components/common";
+import { Field, Picker, Segmented } from "@/components/fields";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { WildcardDialog } from "@/components/wildcard-dialog";
@@ -14,6 +16,11 @@ export function ShareDialog({ service, open, onClose }: { service: string; open:
   const [zone, setZone] = useState("");
   const [port, setPort] = useState("");
   const [setting, setSetting] = useState(false);
+  const [protection, setProtection] = useState<"none" | "basic">("none");
+  const [user, setUser] = useState("guest");
+  const [password, setPassword] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [failure, setFailure] = useState<unknown>(null);
   const candidates = (status?.gateways ?? []).filter((g) => g.spec.kind === "caddy" && g.spec.tls !== "off");
   const gateways = (status?.gateways ?? []).filter((g) => g.spec.kind === "caddy" && (g.spec.wildcard ?? []).length > 0);
   const selected = gateways.find((g) => g.name === gateway) ?? gateways.find((g) => g.spec.default) ?? gateways[0];
@@ -21,10 +28,17 @@ export function ShareDialog({ service, open, onClose }: { service: string; open:
   const suffix = zones.includes(zone) ? zone : zones[0];
   const ports = (status?.services.find((s) => s.name === service)?.spec.ports ?? []).filter((p) => !p.udp);
   const selectedPort = ports.find((p) => p.name === port)?.name ?? ports[0]?.name;
-  const submit = () => {
+  const submit = async () => {
     if (!selected || !suffix) return;
     const label = [...crypto.getRandomValues(new Uint8Array(10))].map((b) => "0123456789abcdefghijklmnopqrstuvwxyz"[b % 36]).join("");
-    actions.plan({ title: `分享 ${service}`, changes: [{ op: "upsert_route", spec: { hostname: `${label}.${suffix}`, service, port: selectedPort, gateway: selected.name, expires_at: Date.now() + Number(ttl) } }] });
+    const hostname = `${label}.${suffix}`;
+    const basic = protection === "basic";
+    setSaving(true); setFailure(null);
+    try { if (basic) await saveAuth(hostname, user, password); }
+    catch (e) { setFailure(e); return; }
+    finally { setSaving(false); }
+    setPassword("");
+    actions.plan({ title: `分享 ${service}`, changes: [{ op: "upsert_route", spec: { hostname, service, port: selectedPort, gateway: selected.name, expires_at: Date.now() + Number(ttl), auth: basic } }] });
     onClose();
   };
   if (setting) return <WildcardDialog gateways={candidates} title="设置分享域名" initialPrefix="s" onDone={onClose} onClose={() => setSetting(false)} />;
@@ -45,13 +59,18 @@ export function ShareDialog({ service, open, onClose }: { service: string; open:
         {zones.length > 1 && <Field label="域名后缀" htmlFor="share-zone">
           <Picker id="share-zone" value={suffix} options={zones.map((z) => ({ value: z, label: z }))} onChange={setZone} />
         </Field>}
+        {selected && <Field label="访问保护" help={protection === "basic" ? "对方打开链接时要输入这组账号密码，密码至少 8 位" : "拿到链接的人都能直接访问"}>
+          <Segmented value={protection} options={[["none", "不保护"], ["basic", "账号密码"]]} onChange={setProtection} />
+        </Field>}
+        {selected && protection === "basic" && <AuthFields user={user} password={password} onUser={setUser} onPassword={setPassword} />}
         {ports.length > 1 && <Field label="端口" htmlFor="share-port">
           <Picker id="share-port" value={selectedPort ?? ""} options={ports.map((p) => ({ value: p.name, label: p.name }))} onChange={setPort} />
         </Field>}
       </div>
+      <ErrorNote error={failure} />
       <DialogFooter>
         <Button variant="ghost" onClick={onClose}>取消</Button>
-        <Button disabled={!selected} onClick={submit}>预览改动</Button>
+        <Button disabled={!selected || saving || (protection === "basic" && !authReady(user, password))} onClick={submit}>{saving ? "保存中…" : "预览改动"}</Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>;
