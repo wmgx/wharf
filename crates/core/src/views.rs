@@ -634,7 +634,7 @@ pub async fn status(
   issues.extend(crate::traffic::issues());
   issues.extend(crate::baseline::issues());
   issues.extend(crate::host_units::issues());
-  let updates = crate::updates::last();
+  let updates = crate::updates::current(&snap);
   if let Some(updates) = &updates {
     for (name, check) in &updates.services {
       if check.newer && services.iter().any(|s| &s.name == name) {
