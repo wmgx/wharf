@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { cn } from "@/lib/utils";
 import type { Change, Plan, PlanItem, Run, StepStatus } from "@/types";
+import type { FieldChange } from "@/types.gen";
 import { ErrorNote, Notice } from "./common";
 
 const ACTION: Record<PlanItem["action"], { text: string; cls: string }> = {
@@ -206,6 +207,7 @@ function PlanReview({ plan, confirmed, setConfirmed }: { plan: Plan; confirmed: 
                   <span className="ml-2 font-sans text-xs text-muted-foreground">{LAYER[it.layer] ?? it.layer}</span>
                 </div>
                 <div className="text-xs text-muted-foreground">{it.reason}</div>
+                {(it.changes?.length ?? 0) > 0 && <Changes changes={it.changes!} />}
               </div>
               <div className="flex shrink-0 gap-1">
                 {(it.impacts ?? []).map((k) =>
@@ -241,6 +243,42 @@ function PlanReview({ plan, confirmed, setConfirmed }: { plan: Plan; confirmed: 
       <Warnings plan={plan} />
     </div>
   );
+}
+
+/** 修改了哪些字段，默认折叠。 */
+function Changes({ changes }: { changes: FieldChange[] }) {
+  return (
+    <details className="mt-1 text-xs">
+      <summary className="cursor-pointer text-muted-foreground">改了 {changes.length} 处</summary>
+      <div className="mt-1.5 grid gap-1.5">
+        {changes.map((c) => (
+          <div key={c.path} className="min-w-0">
+            <div className="font-mono text-muted-foreground">{c.path}</div>
+            {c.lines?.length ? (
+              <pre className="mt-0.5 overflow-x-auto rounded bg-muted px-2 py-1 font-mono leading-5">
+                {c.lines.map((l, i) => (
+                  <div key={i} className={cn(l.startsWith("+") && "text-success", l.startsWith("-") && "text-destructive", !/^[+-]/.test(l) && "text-muted-foreground")}>
+                    {l}
+                  </div>
+                ))}
+              </pre>
+            ) : (
+              <div className="font-mono break-all">
+                <span className="text-destructive line-through">{show(c.before)}</span>
+                <span className="mx-1.5 text-muted-foreground">→</span>
+                <span className="text-success">{show(c.after)}</span>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </details>
+  );
+}
+
+function show(v: unknown): string {
+  if (v === undefined || v === null) return "（无）";
+  return typeof v === "string" ? v : JSON.stringify(v);
 }
 
 /** 和这次计划相关的提醒直接显示，其余的（plan 总是全量对比）折叠起来。 */

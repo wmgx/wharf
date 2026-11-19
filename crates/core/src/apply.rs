@@ -1736,6 +1736,7 @@ mod tests {
         after: Some(serde_json::json!({"host_exec": true})),
         impacts: vec![],
         reason: "修改配置".into(),
+        changes: vec![],
       }],
       warnings: vec![],
       needs_confirm: vec![],

@@ -126,6 +126,143 @@ pub struct PlanItem {
   #[serde(default)]
   pub impacts: Vec<Impact>,
   pub reason: String,
+  /// 修改时具体改了哪些字段，由 `before`、`after` 算出。旧计划里没有。
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub changes: Vec<FieldChange>,
+}
+
+/// 配置里改动的一个字段。
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct FieldChange {
+  /// 字段路径，例如 `env.TZ`、`source.compose.content`。
+  pub path: String,
+  /// 没有这个字段时为空。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub before: Option<Value>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub after: Option<Value>,
+  /// 多行文本（比如 compose）按行对比：`-` 删掉的行，`+` 新增的行，
+  /// 空格开头是上下文，`…` 表示省略了没变的行。
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub lines: Vec<String>,
+}
+
+/// 逐字段对比两份配置。对象按键展开，数组和标量整体比较。
+pub fn field_changes(
+  before: &Value,
+  after: &Value,
+) -> Vec<FieldChange> {
+  let mut out = Vec::new();
+  walk("", Some(before), Some(after), &mut out);
+  out
+}
+
+fn walk(
+  path: &str,
+  before: Option<&Value>,
+  after: Option<&Value>,
+  out: &mut Vec<FieldChange>,
+) {
+  if before == after {
+    return;
+  }
+  if let (Some(Value::Object(b)), Some(Value::Object(a))) =
+    (before, after)
+  {
+    let keys: std::collections::BTreeSet<&String> =
+      b.keys().chain(a.keys()).collect();
+    for k in keys {
+      let sub = if path.is_empty() {
+        k.clone()
+      } else {
+        format!("{path}.{k}")
+      };
+      walk(&sub, b.get(k), a.get(k), out);
+    }
+    return;
+  }
+  // 字段从无到有或从有到无时，null 和缺失看作一样。
+  let before = before.filter(|v| !v.is_null());
+  let after = after.filter(|v| !v.is_null());
+  if before == after {
+    return;
+  }
+  let lines = match (before, after) {
+    (Some(Value::String(b)), Some(Value::String(a)))
+      if b.contains('\n') || a.contains('\n') =>
+    {
+      line_diff(b, a)
+    }
+    _ => vec![],
+  };
+  let (before, after) = if lines.is_empty() {
+    (before.cloned(), after.cloned())
+  } else {
+    (None, None)
+  };
+  out.push(FieldChange {
+    path: path.to_string(),
+    before,
+    after,
+    lines,
+  });
+}
+
+/// 按行对比（最长公共子序列），改动处前后各留 2 行上下文。
+fn line_diff(before: &str, after: &str) -> Vec<String> {
+  const CONTEXT: usize = 2;
+  let b: Vec<&str> = before.lines().collect();
+  let a: Vec<&str> = after.lines().collect();
+  let (n, m) = (b.len(), a.len());
+  let mut lcs = vec![vec![0u32; m + 1]; n + 1];
+  for i in (0..n).rev() {
+    for j in (0..m).rev() {
+      lcs[i][j] = if b[i] == a[j] {
+        lcs[i + 1][j + 1] + 1
+      } else {
+        lcs[i + 1][j].max(lcs[i][j + 1])
+      };
+    }
+  }
+  let mut ops: Vec<(char, &str)> = Vec::new();
+  let (mut i, mut j) = (0, 0);
+  while i < n || j < m {
+    if i < n && j < m && b[i] == a[j] {
+      ops.push((' ', b[i]));
+      i += 1;
+      j += 1;
+    } else if i < n && (j == m || lcs[i + 1][j] >= lcs[i][j + 1]) {
+      ops.push(('-', b[i]));
+      i += 1;
+    } else {
+      ops.push(('+', a[j]));
+      j += 1;
+    }
+  }
+  let near = |k: usize| {
+    let lo = k.saturating_sub(CONTEXT);
+    let hi = (k + CONTEXT + 1).min(ops.len());
+    ops[lo..hi].iter().any(|(c, _)| *c != ' ')
+  };
+  let mut out = Vec::new();
+  let mut skipped = false;
+  for (k, (c, line)) in ops.iter().enumerate() {
+    if near(k) {
+      if skipped {
+        out.push("…".to_string());
+        skipped = false;
+      }
+      out.push(format!("{c} {line}"));
+    } else {
+      skipped = true;
+    }
+  }
+  if skipped {
+    out.push("…".to_string());
+  }
+  out
 }
 
 impl PlanItem {
@@ -288,6 +425,7 @@ mod tests {
       after: None,
       impacts,
       reason: String::new(),
+      changes: vec![],
     };
     assert!(item("service/a", vec![Impact::Remove]).needs_confirm());
     // 删除网关、隧道只提示，不用确认。
@@ -298,6 +436,35 @@ mod tests {
     assert!(
       item("route/a", vec![Impact::Restart, Impact::Public])
         .needs_confirm()
+    );
+  }
+
+  #[test]
+  fn field_changes_by_path() {
+    let before = serde_json::json!({
+      "env": {"TZ": "UTC", "OLD": "1"},
+      "ports": [80],
+      "source": {"compose": {"content": "a\nb\nc\nd\ne\nf\ng\n"}},
+      "auth": null,
+    });
+    let after = serde_json::json!({
+      "env": {"TZ": "Asia/Shanghai", "NEW": "2"},
+      "ports": [80],
+      "source": {"compose": {"content": "a\nb\nc\nd\nE\nf\ng\n"}},
+    });
+    let c = field_changes(&before, &after);
+    let paths: Vec<&str> =
+      c.iter().map(|c| c.path.as_str()).collect();
+    assert_eq!(
+      paths,
+      ["env.NEW", "env.OLD", "env.TZ", "source.compose.content"]
+    );
+    assert_eq!(c[0].before, None);
+    assert_eq!(c[0].after, Some(serde_json::json!("2")));
+    assert_eq!(c[1].after, None);
+    assert_eq!(
+      c[3].lines,
+      ["…", "  c", "  d", "- e", "+ E", "  f", "  g"]
     );
   }
 }

@@ -402,6 +402,7 @@ export interface PlanItem {
   after?: unknown;
   impacts?: Impact[];
   reason: string;
+  changes?: Gen.FieldChange[];
 }
 
 export interface Plan {

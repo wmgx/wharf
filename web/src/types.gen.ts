@@ -777,6 +777,26 @@ export type Extract = {
   name: string;
 };
 
+/**
+ * 配置里改动的一个字段。
+ */
+export interface FieldChange {
+  after?: unknown;
+  /**
+   * 没有这个字段时为空。
+   */
+  before?: unknown;
+  /**
+   * 多行文本（比如 compose）按行对比：`-` 删掉的行，`+` 新增的行，
+   * 空格开头是上下文，`…` 表示省略了没变的行。
+   */
+  lines?: string[];
+  /**
+   * 字段路径，例如 `env.TZ`、`source.compose.content`。
+   */
+  path: string;
+}
+
 export interface FileEntry {
   dir: boolean;
   /**
@@ -1462,6 +1482,10 @@ export interface PlanItem {
   address: string;
   after: unknown;
   before: unknown;
+  /**
+   * 修改时具体改了哪些字段，由 `before`、`after` 算出。旧计划里没有。
+   */
+  changes?: FieldChange[];
   id: number;
   /**
    * 旧计划里没有这个字段（当时是单个 `risk`），读出来为空。
