@@ -3,8 +3,7 @@ import { AccessProtection } from "@/components/access-protection";
 import { ForwardDialog } from "@/components/forward-dialog";
 import { useActions } from "@/components/actions";
 import { useStatus } from "@/status";
-import { ShareDialog } from "@/components/share-dialog";
-import { isShare, shareExpired, ShareList } from "@/components/share-list";
+import { isShare } from "@/components/share-list";
 import { ArrowUpRightIcon, PlusIcon } from "lucide-react";
 import { Empty, SectionTitle } from "@/components/common";
 import { Row, Rows } from "@/components/kit";
@@ -29,15 +28,12 @@ export function DomainsTab({
   const [protecting, setProtecting] = useState<RouteView | null>(null);
   const [forwarding, setForwarding] = useState(false);
   const forwards = (status?.gateways ?? []).flatMap((g) => (g.spec.layer4 ?? []).filter((f) => f.service === service).map((f) => ({ g, f })));
-  const [sharing, setSharing] = useState(false);
   const routes = all.filter((r) => !isShare(r));
-  const shares = all.filter((r) => isShare(r) && !shareExpired(r));
   const add = <Button variant="outline" size="sm" onClick={onAdd}><PlusIcon />加域名</Button>;
   return (
     <div>
       {protecting && <AccessProtection route={protecting} onClose={() => setProtecting(null)} />}
       {forwarding && <ForwardDialog service={service} onClose={() => setForwarding(false)} />}
-      <ShareDialog service={service} open={sharing} onClose={() => setSharing(false)} />
       <SectionTitle action={routes.length ? add : undefined}>域名</SectionTitle>
       {routes.length === 0 ? (
         <Empty action={add}>还没有域名，现在只能从内网访问</Empty>
@@ -67,8 +63,6 @@ export function DomainsTab({
           ))}
         </Rows>
       )}
-      <SectionTitle count={shares.length} action={<Button variant="outline" size="sm" onClick={() => setSharing(true)}>新建分享</Button>}>临时分享</SectionTitle>
-      <ShareList routes={shares} empty="没有进行中的分享。已失效的在 域名 · 分享 里" onProtect={setProtecting} />
       <SectionTitle count={forwards.length} action={<Button variant="outline" size="sm" disabled={!status?.gateways.some((g) => g.spec.kind === "caddy")} onClick={() => setForwarding(true)}>加转发</Button>}>四层转发</SectionTitle>
       {forwards.length ? <Rows limit={10}>{forwards.map(({ g, f }) => <Row key={`${g.name}/${!!f.udp}/${f.listen}`}>
         <span className="min-w-0 flex-1 break-all text-sm">{g.name} · :{f.listen}/{f.udp ? "UDP" : "TCP"} → {f.port ?? "默认端口"}</span>

@@ -20,6 +20,8 @@ import { DomainSheet } from "../domains/detail";
 import { ServiceChecks } from "./checks";
 import { DataTab } from "./data";
 import { DomainsTab } from "./domains";
+import { SharesTab } from "./shares";
+import { isShare, shareExpired } from "@/components/share-list";
 import { HistoryTab } from "./history";
 import { Overview } from "./overview";
 import { Repack } from "./repack";
@@ -27,7 +29,7 @@ import { Settings } from "./settings";
 import { statusLayers } from "./status-text";
 import { TerminalTab } from "./terminal";
 
-const TABS = ["overview", "domains", "logs", "metrics", "history", "data", "terminal", "settings"] as const;
+const TABS = ["overview", "domains", "shares", "logs", "metrics", "history", "data", "terminal", "settings"] as const;
 type Tab = typeof TABS[number];
 const aliases: Record<string, Tab> = { network: "domains", config: "settings", timeline: "history", files: "data" };
 
@@ -56,6 +58,8 @@ export function ServiceDetail() {
     </div>
   </>;
   const routes = status?.routes.filter((r) => r.spec.service === name) ?? [];
+  const domainCount = routes.filter((r) => !isShare(r)).length;
+  const activeShares = routes.filter((r) => isShare(r) && !shareExpired(r)).length;
   const { tone, text, detail } = serviceTruth(svc, status);
   const onTab = (value: string) => setTab(value as Tab);
   const monitor = svc.spec.monitor;
@@ -85,10 +89,11 @@ export function ServiceDetail() {
       <div className="min-w-0">
         <TabsList>
           <TabsTrigger value="overview">概览</TabsTrigger>
-          <TabsTrigger value="domains">域名{routes.length > 0 && <span className="ml-1 text-muted-foreground">
-            {routes.length}
+          <TabsTrigger value="domains">域名{domainCount > 0 && <span className="ml-1 text-muted-foreground">
+            {domainCount}
           </span>}
           </TabsTrigger>
+          <TabsTrigger value="shares">分享{activeShares > 0 && <span className="ml-1 text-muted-foreground">{activeShares}</span>}</TabsTrigger>
           <TabsTrigger value="logs">日志</TabsTrigger>
           <TabsTrigger value="metrics">监控</TabsTrigger>
           <TabsTrigger value="history">历史</TabsTrigger>
@@ -102,6 +107,9 @@ export function ServiceDetail() {
       </TabsContent>
       <TabsContent value="domains" className="mt-4">
         <DomainsTab service={name} routes={routes} onAdd={() => setAddingRoute(true)} onOpen={setDomain} />
+      </TabsContent>
+      <TabsContent value="shares" className="mt-4">
+        <SharesTab service={name} shares={routes.filter(isShare)} />
       </TabsContent>
       <TabsContent value="logs" className="mt-4">
         <LogStream path={`/api/services/${encodeURIComponent(name)}/logs/stream`} />
