@@ -1176,12 +1176,22 @@ export interface LiveState {
   state: string;
 }
 
+export interface LoginScript {
+  code: string;
+  deps?: string;
+  env?: Record<string, string>;
+  image?: string | null;
+  runtime: ScriptRuntime;
+  timeout_secs: number;
+}
+
 export interface LoginSpec {
   check?: LoginStep | null;
   /**
    * 代登录完成后跳到的路径，例如后台 `/ghost/`；不填就是 `/`。
    */
   entry?: string | null;
+  script?: LoginScript | null;
   steps: LoginStep[];
   ttl_hours: number;
   write: LoginWrite[];
@@ -2177,6 +2187,7 @@ export interface SsoStepResult {
 export interface SsoTestResult {
   check: SsoStepResult | null;
   ok: boolean;
+  script_log?: string | null;
   steps: SsoStepResult[];
   would_write: string[];
 }

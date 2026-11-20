@@ -1222,6 +1222,11 @@ pub struct TaskRunJob {
   pub how: TaskHow,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub input: Option<TaskInput>,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub network_host: bool,
+  /// 代登录脚本用独立目录和容器名，并回传 /out/result.json。
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub out_dir: bool,
   pub timeout_secs: u64,
   pub pull: PullPolicy,
 }
@@ -1270,6 +1275,8 @@ pub enum TaskHow {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskRunResult {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub result: Option<String>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub mem_peak: Option<u64>,
   /// 超时被杀掉时没有。

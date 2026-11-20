@@ -1470,6 +1470,8 @@ pub struct SsoTestResult {
   pub steps: Vec<SsoStepResult>,
   pub check: Option<SsoStepResult>,
   pub would_write: Vec<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub script_log: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SsoStepResult {

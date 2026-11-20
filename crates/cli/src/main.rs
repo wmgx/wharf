@@ -49,7 +49,7 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum SsoCmd {
   #[command(
-    long_about = "实际登录一次应用并检查结果。先用 wharf secret set 存应用账号，写登录步骤配置文件，再用 wharf route sso <域名> --mode login --file <文件> --apply 应用，运行 wharf sso test <域名>。不通就改配置再试，改不通就换回 --mode gate。"
+    long_about = "实际登录一次应用并检查结果。先用 wharf secret set 存应用账号，写代登录配置文件（steps 或 script），再用 wharf route sso <域名> --mode login --file <文件> --apply 应用，运行 wharf sso test <域名>。不通就改配置再试，改不通就换回 --mode gate。"
   )]
   Test { hostname: String },
   /// Wharf 当 OIDC 身份提供方的信息：issuer、发现地址、各应用的 client_id 和密钥引用。
@@ -906,7 +906,7 @@ pub enum RouteCmd {
     no_trust_internal: bool,
     #[arg(long, requires = "mode")]
     header: Option<String>,
-    /// 登录步骤的 YAML 或 JSON 文件，- 从标准输入读。文件里可以写 entry（代登录后跳到的路径，例如 /ghost/）。
+    /// 代登录的 YAML 或 JSON 文件，steps 或 script 二选一。- 从标准输入读。entry 指定代登录后跳到的路径，例如 /ghost/。
     #[arg(long, requires = "mode")]
     file: Option<String>,
     /// 公开站点（如博客）：不加门禁，访客照常访问。login 方式由主人打开 https://<域名>/_wharf/login 代登录进后台；oidc 方式由应用自己决定哪里要登录。只能配 login 或 oidc。

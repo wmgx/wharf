@@ -870,8 +870,12 @@ pub enum Change {
   Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
 )]
 pub struct LoginSpec {
+  #[serde(default)]
   pub steps: Vec<LoginStep>,
+  #[serde(default)]
   pub write: Vec<LoginWrite>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub script: Option<LoginScript>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub check: Option<LoginStep>,
   #[serde(default = "login_ttl")]
@@ -882,6 +886,25 @@ pub struct LoginSpec {
 }
 fn login_ttl() -> u16 {
   24
+}
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(deny_unknown_fields)]
+pub struct LoginScript {
+  pub runtime: crate::view::ScriptRuntime,
+  pub code: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub image: Option<String>,
+  #[serde(default, skip_serializing_if = "String::is_empty")]
+  pub deps: String,
+  #[serde(default = "script_timeout")]
+  pub timeout_secs: u64,
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub env: BTreeMap<String, String>,
+}
+fn script_timeout() -> u64 {
+  30
 }
 fn login_method() -> String {
   "GET".into()

@@ -134,6 +134,11 @@ async fn dispatch(
         )
         .await?;
       out(j, &result, |r| {
+        if let Some(log) = &r.script_log
+          && !log.trim().is_empty()
+        {
+          println!("{log}");
+        }
         for step in r.steps.iter().chain(r.check.iter()) {
           println!(
             "{} {} {} {:?} {:?} {}ms{}",
@@ -162,6 +167,11 @@ async fn dispatch(
               .unwrap_or("登录失败")
           }
         );
+        if r.script_log.is_some() {
+          for summary in &r.would_write {
+            println!("{summary}");
+          }
+        }
       });
       if !result.ok {
         return Err(CliError::Exit(1));

@@ -24,8 +24,8 @@ use wharf_api_types::{
     Retired, TRIAL_PROJECT_PREFIX,
   },
   plan::{
-    ApplyRequest, ApplyResponse, Plan, PlanStatus, Run, RunStatus,
-    RunStep, StepStatus,
+    ApplyRequest, ApplyResponse, Layer, Plan, PlanStatus, Run,
+    RunStatus, RunStep, StepStatus,
   },
   spec::{GatewayKind, ServiceSpec, Source},
   view::{LastOp, OpStatus, Perm},
@@ -295,6 +295,26 @@ pub async fn start(
       )
       .with_hint("请用户在页面上执行，或用有 admin 权限的 token"),
     );
+  }
+  if !perms.contains(&Perm::Admin)
+    && plan.items.iter().any(|item| {
+      if item.layer != Layer::Config
+        || !item.address.starts_with("route/")
+      {
+        return false;
+      }
+      let before = item.before.as_ref().and_then(|v| v.get("sso"));
+      let after = item.after.as_ref().and_then(|v| v.get("sso"));
+      before != after
+        && [before, after].into_iter().flatten().any(|s| {
+          s.pointer("/login/script").is_some_and(|v| !v.is_null())
+        })
+    })
+  {
+    return Err(ApiError::new(
+      ErrorCode::Forbidden,
+      "配置脚本代登录需要 admin 权限",
+    ));
   }
   let missing: Vec<&String> = plan
     .needs_confirm

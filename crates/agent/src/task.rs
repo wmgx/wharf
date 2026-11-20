@@ -2,7 +2,7 @@
 
 use std::{
   fs::{self, DirBuilder, OpenOptions},
-  io::Write,
+  io::{Read, Write},
   os::unix::fs::{DirBuilderExt, OpenOptionsExt},
   path::{Path, PathBuf},
   time::{Duration, Instant},
@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 use wharf_api_types::{
   ApiError, ErrorCode,
   agent::{TASK_DATA_PREFIX, TaskHow, TaskRunJob, TaskRunResult},
-  validate_name,
+  mask_values, validate_name,
   view::ScriptRuntime,
 };
 
@@ -27,6 +27,8 @@ use crate::{
 const OUTPUT_TAIL: usize = 16 * 1024;
 const QUICK: Duration = Duration::from_secs(20);
 const MAX_TIMEOUT: u64 = 6 * 3600;
+const MAX_RESULT: u64 = 64 * 1024;
+const SSO_WORK: &str = "sso-scripts";
 
 pub async fn run(
   docker: &Docker,
@@ -40,6 +42,13 @@ pub async fn run(
   let timeout = Duration::from_secs(job.timeout_secs);
   let started = Instant::now();
   let mut mem_peak = None;
+  let mut result = None;
+  let mut hidden = Vec::new();
+  if (job.network_host || job.out_dir)
+    && !matches!(job.how, TaskHow::Script { .. })
+  {
+    return Err(ApiError::invalid("代登录参数只能用于脚本"));
+  }
   let output = match &job.how {
     TaskHow::Script {
       image,
@@ -52,7 +61,11 @@ pub async fn run(
       let mut random = [0u8; 4];
       getrandom::fill(&mut random)
         .map_err(|_| ApiError::internal("随机数不可用"))?;
-      let root = docker.data_dir.join("tasks");
+      let root = docker.data_dir.join(if job.out_dir {
+        SSO_WORK
+      } else {
+        "tasks"
+      });
       fs::create_dir_all(&root).map_err(io_err(&root))?;
       let dir =
         root.join(format!("{}-{}", job.name, hex::encode(random)));
@@ -63,13 +76,46 @@ pub async fn run(
       let _cleanup = WorkDir(dir.clone());
       let (file, entry) = script_command(*runtime);
       write_private(&dir.join(file), code.as_bytes())?;
-      let persistent = Path::new("/srv")
-        .join(format!("{TASK_DATA_PREFIX}{}", job.name));
+      let (persistent, name, install_name) = if job.out_dir {
+        (
+          Path::new("/srv/.wharf-sso").join(&job.name),
+          format!("wharf-sso-{}", job.name),
+          format!("wharf-sso-deps-{}", job.name),
+        )
+      } else {
+        (
+          Path::new("/srv")
+            .join(format!("{TASK_DATA_PREFIX}{}", job.name)),
+          format!("wharf-task-{}", job.name),
+          format!("wharf-deps-{}", job.name),
+        )
+      };
       let data_dir = persistent.join("data");
       let deps_dir = persistent.join("deps");
       for path in [&data_dir, &deps_dir] {
         fs::create_dir_all(path).map_err(io_err(path))?;
       }
+      // 控制面超时后 agent 可能还在清理，避免下一次登录删掉彼此的容器。
+      let _run_lock = if job.out_dir {
+        let lock = persistent.join("run.lock");
+        let file = OpenOptions::new()
+          .write(true)
+          .create(true)
+          .truncate(false)
+          .open(&lock)
+          .map_err(io_err(&lock))?;
+        file.try_lock().map_err(|_| {
+          ApiError::new(
+            ErrorCode::Conflict,
+            "上次代登录正在清理，请重试",
+          )
+        })?;
+        hidden
+          .extend(env.values().filter(|v| !v.is_empty()).cloned());
+        Some(file)
+      } else {
+        None
+      };
       let mut vars = env.clone();
       if *runtime == ScriptRuntime::Python {
         vars.insert("PYTHONPATH".into(), "/deps".into());
@@ -99,8 +145,9 @@ pub async fn run(
         }
         env_file.push_str(&format!("{k}={v}\n"));
       }
-      write_private(&dir.join("env"), env_file.as_bytes())?;
-      let name = format!("wharf-task-{}", job.name);
+      if !job.out_dir {
+        write_private(&dir.join("env"), env_file.as_bytes())?;
+      }
       crate::build::remove_container(docker, &name).await;
       docker.pull(image, &job.pull, ctx, &mut Vec::new()).await?;
       let execution_started = Instant::now();
@@ -120,7 +167,6 @@ pub async fn run(
           &dir.join("requirements.txt"),
           deps.as_bytes(),
         )?;
-        let install_name = format!("wharf-deps-{}", job.name);
         crate::build::remove_container(docker, &install_name).await;
         let mut cmd = docker
           .cmd()
@@ -173,10 +219,13 @@ pub async fn run(
           crate::build::remove_container(docker, &install_name).await;
         }
         let installed = installed?;
-        install_output =
-          tail(&format!("{}{}", installed.stdout, installed.stderr));
+        install_output = tail(&mask_values(
+          &format!("{}{}", installed.stdout, installed.stderr),
+          &hidden,
+        ));
         if !installed.success {
           return Ok(TaskRunResult {
+            result: None,
             exit_code: installed.code,
             timed_out: false,
             output: install_output,
@@ -208,6 +257,16 @@ pub async fn run(
         .args(["--env-file", &dir.join("env").to_string_lossy()])
         .args(["-v", &format!("{}:/data", data_dir.display())])
         .args(["-v", &format!("{}:/deps:ro", deps_dir.display())]);
+      if job.network_host {
+        cmd = cmd.args(["--network", "host"]);
+      }
+      let out_dir = dir.join("out");
+      if job.out_dir {
+        write_private(&dir.join("env"), env_file.as_bytes())?;
+        fs::create_dir(&out_dir).map_err(io_err(&out_dir))?;
+        cmd =
+          cmd.args(["-v", &format!("{}:/out", out_dir.display())]);
+      }
       if *runtime == ScriptRuntime::Node
         && !deps.trim().is_empty()
         && deps_dir.join("node_modules").is_dir()
@@ -250,6 +309,9 @@ pub async fn run(
       sampling_ctx.cancel.cancel();
       if let Ok(ref mut output) = out {
         output.stdout = format!("{install_output}{}", output.stdout);
+        if job.out_dir {
+          result = read_result(&out_dir);
+        }
       }
       if out.is_err() {
         crate::build::remove_container(docker, &name).await;
@@ -309,13 +371,18 @@ pub async fn run(
   let duration_ms = started.elapsed().as_millis() as u64;
   match output {
     Ok(o) => Ok(TaskRunResult {
+      result,
       mem_peak,
       exit_code: o.code,
       timed_out: false,
-      output: tail(&format!("{}{}", o.stdout, o.stderr)),
+      output: tail(&mask_values(
+        &format!("{}{}", o.stdout, o.stderr),
+        &hidden,
+      )),
       duration_ms,
     }),
     Err(e) if e.code == ErrorCode::Timeout => Ok(TaskRunResult {
+      result: None,
       mem_peak,
       exit_code: None,
       timed_out: true,
@@ -324,6 +391,23 @@ pub async fn run(
     }),
     Err(e) => Err(e),
   }
+}
+
+fn read_result(out: &Path) -> Option<String> {
+  let file = OpenOptions::new()
+    .read(true)
+    .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+    .open(out.join("result.json"))
+    .ok()?;
+  if !file.metadata().ok()?.is_file() {
+    return None;
+  }
+  let mut bytes = Vec::new();
+  file.take(MAX_RESULT + 1).read_to_end(&mut bytes).ok()?;
+  if bytes.len() as u64 > MAX_RESULT {
+    return None;
+  }
+  String::from_utf8(bytes).ok()
 }
 
 fn deps_hash(image: &str, deps: &str) -> String {
@@ -439,11 +523,14 @@ impl Drop for WorkDir {
 
 /// 启动时清掉上次进程被杀后留下的脚本文件。
 pub fn cleanup(data_dir: &Path) -> std::io::Result<()> {
-  let root = data_dir.join("tasks");
-  match fs::remove_dir_all(root) {
-    Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
-    _ => Ok(()),
+  for dir in ["tasks", SSO_WORK] {
+    if let Err(e) = fs::remove_dir_all(data_dir.join(dir))
+      && e.kind() != std::io::ErrorKind::NotFound
+    {
+      return Err(e);
+    }
   }
+  Ok(())
 }
 
 fn write_private(path: &Path, data: &[u8]) -> Result<(), ApiError> {

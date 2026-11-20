@@ -122,7 +122,7 @@ function DomainDetail({ route, status, onClose, onDirty }: { route: RouteView; s
         </div>
         {route.spec.sso && !route.spec.sso.public && <Link className="text-primary hover:underline" to="/settings?tab=security#gate-keys">访问凭证（{keyCount}）</Link>}
         {route.spec.sso?.mode === "login" && <>
-          <div className="flex flex-wrap items-center gap-2"><span className="flex-1">替我登录应用 · {route.spec.sso.login?.steps.length ?? 0} 步</span><Button size="sm" variant="outline" disabled={testing} onClick={testLogin}>测试</Button><a className="text-xs underline" href={`https://${route.spec.hostname}/_wharf/login`} target="_blank" rel="noreferrer">{route.spec.sso.public ? "进入后台" : "重新登录"}</a></div>
+          <div className="flex flex-wrap items-center gap-2"><span className="flex-1">{route.spec.sso.login?.script ? `脚本代登录（${route.spec.sso.login.script.runtime}）` : `替我登录应用 · ${route.spec.sso.login?.steps?.length ?? 0} 步`}</span><Button size="sm" variant="outline" disabled={testing} onClick={testLogin}>测试</Button><a className="text-xs underline" href={`https://${route.spec.hostname}/_wharf/login`} target="_blank" rel="noreferrer">{route.spec.sso.public ? "进入后台" : "重新登录"}</a></div>
           {route.sso_login && <span className="break-all text-xs text-muted-foreground">{route.sso_login.ok ? `上次登录 ${ago(new Date(route.sso_login.at).toISOString())}，成功` : `上次登录失败：${route.sso_login.error ?? "登录失败"}`}</span>}
 
         </>}
@@ -165,7 +165,7 @@ function DomainDetail({ route, status, onClose, onDirty }: { route: RouteView; s
         {testError && <p className="break-all text-destructive">{testError}</p>}
         {testResult && <>
           <p>{testResult.ok ? "成功" : "失败"}</p>
-          <Rows>{[...testResult.steps, ...(testResult.check ? [testResult.check] : [])].map((step) => <Row key={step.number} className="flex-wrap break-all"><span>{step.method} {step.path}</span><span>{step.status ?? "未响应"}</span><span>{Object.entries(step.extracted).map(([name, n]) => `${name}（${n} 个字符）`).join("、")}</span>{step.error && <span className="text-destructive">{step.error}</span>}</Row>)}</Rows>
+          <Rows>{[...testResult.steps, ...(testResult.check ? [testResult.check] : [])].map((step) => <Row key={step.number} className="flex-wrap break-all"><span>{step.method} {step.path}</span><span>{step.method === "SCRIPT" ? (step.error ? "失败" : "成功") : step.status ?? "未响应"}</span><span>{Object.entries(step.extracted).map(([name, n]) => `${name}（${n} 个字符）`).join("、")}</span>{step.error && <span className="text-destructive">{step.error}</span>}</Row>)}</Rows>
           {testResult.would_write.map((text, i) => <p className="break-all text-xs text-muted-foreground" key={i}>{text}</p>)}
         </>}
         <DialogFooter><Button variant="outline" onClick={() => setTestOpen(false)}>关闭</Button></DialogFooter>
