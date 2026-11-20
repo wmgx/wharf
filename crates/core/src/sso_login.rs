@@ -18,7 +18,7 @@ use wharf_api_types::{
   ApiError, ErrorCode,
   agent::{
     AgentOp, HttpFetch, HttpFetchResult, TaskHow, TaskRunJob,
-    TaskRunResult,
+    TaskRunResult, sso_runner_name,
   },
   mask_values as mask,
   spec::{
@@ -31,6 +31,7 @@ use wharf_api_types::{
 type Values = BTreeMap<String, String>;
 type CookieJar = BTreeMap<String, (String, String)>;
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(60);
+const TEST_TIMEOUT: Duration = Duration::from_secs(13 * 60);
 // 弱引用不保留已经完成的域名。
 static LOCKS: LazyLock<
   Mutex<BTreeMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>,
@@ -609,32 +610,11 @@ fn script_env(
 
 async fn run_script(
   state: &Arc<AppState>,
-  snap: &snapshot::Snapshot,
   server: &str,
-  hostname: &str,
-  env: Values,
-  script: &LoginScript,
+  job: TaskRunJob,
   cancel: &CancellationToken,
 ) -> Result<TaskRunResult, ApiError> {
-  let server_row = &snap.world.servers[server];
-  let job = TaskRunJob {
-    name: config::hash(hostname)[..32].to_string(),
-    how: TaskHow::Script {
-      image: script.image.clone().unwrap_or_else(|| {
-        tasks::script_image(script.runtime).into()
-      }),
-      runtime: script.runtime,
-      code: script.code.clone(),
-      deps: script.deps.clone(),
-      mirrors: server_row.settings.build_env.clone(),
-      env,
-    },
-    input: None,
-    network_host: true,
-    out_dir: true,
-    timeout_secs: script.timeout_secs,
-    pull: snapshot::pull_policy(server_row),
-  };
+  let wait_for_deps = job.wait_for_deps;
   let (state, server, cancel) =
     (state.clone(), server.to_string(), cancel.clone());
   // 请求被浏览器丢弃时，仍要让 hub 读到取消信号并通知 agent。
@@ -644,7 +624,11 @@ async fn run_script(
       .call(
         &server,
         AgentOp::TaskRun(job),
-        TOTAL_TIMEOUT,
+        if wait_for_deps {
+          TEST_TIMEOUT
+        } else {
+          TOTAL_TIMEOUT
+        },
         None,
         &cancel,
       )
@@ -657,6 +641,7 @@ async fn run_script(
 async fn execute(
   state: &Arc<AppState>,
   hostname: &str,
+  wait_for_deps: bool,
 ) -> Result<Outcome, ApiError> {
   let lock = {
     let mut locks = LOCKS.lock().unwrap_or_else(|e| e.into_inner());
@@ -668,7 +653,17 @@ async fn execute(
     locks.insert(hostname.into(), Arc::downgrade(&lock));
     lock
   };
-  let _guard = lock.lock().await;
+  let _guard = if wait_for_deps {
+    tokio::time::timeout(TEST_TIMEOUT, lock.lock())
+      .await
+      .map_err(|_| {
+        ApiError::new(ErrorCode::Timeout, "等待上次代登录超时")
+      })?
+  } else {
+    lock.try_lock().map_err(|_| {
+      ApiError::new(ErrorCode::Conflict, "已有代登录在运行，稍后重试")
+    })?
+  };
   let snap = snapshot::load(&state.db).await?;
   let route = snap.world.routes.get(hostname).ok_or_else(|| {
     ApiError::not_found(format!("域名 {hostname} 不存在"))
@@ -723,7 +718,7 @@ async fn execute(
     .upstream;
   let cancel = CancellationToken::new();
   let _cancel_on_drop = cancel.clone().drop_guard();
-  let deadline = tokio::time::Instant::now() + TOTAL_TIMEOUT;
+  let mut deadline = tokio::time::Instant::now() + TOTAL_TIMEOUT;
   let mut outcome = Outcome {
     ok: true,
     steps: vec![],
@@ -748,24 +743,41 @@ async fn execute(
       hostname,
       upstream,
     )?;
-    let result = tokio::time::timeout_at(
-      deadline,
-      run_script(
-        state, &snap, server, hostname, env, script, &cancel,
-      ),
-    )
-    .await
-    .map_err(|_| {
-      ApiError::new(ErrorCode::Timeout, "代登录超过 60 秒")
-    })?
-    .map_err(|mut e| {
-      e.message = mask(&e.message, &hidden);
-      e.hint = e.hint.map(|hint| mask(&hint, &hidden));
-      e.suggest
-        .iter_mut()
-        .for_each(|command| *command = mask(command, &hidden));
-      e
-    })?;
+    let server_row = &snap.world.servers[server];
+    let job = TaskRunJob {
+      name: config::hash(hostname)[..32].to_string(),
+      how: TaskHow::Script {
+        image: script.image.clone().unwrap_or_else(|| {
+          tasks::script_image(script.runtime).into()
+        }),
+        runtime: script.runtime,
+        code: script.code.clone(),
+        deps: script.deps.clone(),
+        mirrors: server_row.settings.build_env.clone(),
+        env,
+      },
+      input: None,
+      network_host: true,
+      out_dir: true,
+      wait_for_deps,
+      timeout_secs: script.timeout_secs,
+      pull: snapshot::pull_policy(server_row),
+    };
+    let result = run_script(state, server, job, &cancel)
+      .await
+      .map_err(|mut e| {
+        e.message = mask(&e.message, &hidden);
+        e.hint = e.hint.map(|hint| mask(&hint, &hidden));
+        e.suggest
+          .iter_mut()
+          .for_each(|command| *command = mask(command, &hidden));
+        e
+      })?;
+    if wait_for_deps {
+      deadline = tokio::time::Instant::now()
+        + TOTAL_TIMEOUT
+          .saturating_sub(Duration::from_millis(result.duration_ms));
+    }
     let json = result
       .result
       .as_deref()
@@ -800,7 +812,7 @@ async fn execute(
     outcome.steps.push(SsoStepResult {
       number: 1,
       method: "SCRIPT".into(),
-      path: "/out/result.json".into(),
+      path: "WHARF_OUT".into(),
       status: None,
       ms: result.duration_ms,
       extracted: BTreeMap::new(),
@@ -915,6 +927,71 @@ async fn execute(
   Ok(outcome)
 }
 
+pub async fn cleanup(state: &AppState) -> Result<(), ApiError> {
+  let snap = snapshot::load(&state.db).await?;
+  let mut wanted: BTreeMap<
+    &str,
+    (BTreeSet<String>, BTreeSet<String>),
+  > = BTreeMap::new();
+  for (host, route) in &snap.world.routes {
+    let Some(script) = route
+      .spec
+      .sso
+      .as_ref()
+      .and_then(|sso| sso.login.as_ref())
+      .and_then(|login| login.script.as_ref())
+    else {
+      continue;
+    };
+    let image = script
+      .image
+      .as_deref()
+      .unwrap_or_else(|| tasks::script_image(script.runtime));
+    let Some(gateway) = snap.world.route_gateway(&route.spec) else {
+      continue;
+    };
+    let Some(gateway) = snap.world.gateways.get(gateway) else {
+      continue;
+    };
+    let (domains, runners) =
+      wanted.entry(&gateway.spec.server).or_default();
+    domains.insert(config::hash(host)[..32].into());
+    runners.insert(sso_runner_name(script.runtime, image));
+  }
+  let cancel = CancellationToken::new();
+  for server in snap.world.servers.keys() {
+    if !state.hub.is_online(server)
+      || crate::agent_upgrade::outdated(
+        snap
+          .agent(server)
+          .and_then(|a| a.report.as_ref())
+          .map(|r| r.build.as_str()),
+      )
+    {
+      continue;
+    }
+    let (domains, runners) =
+      wanted.remove(server.as_str()).unwrap_or_default();
+    let result = state
+      .hub
+      .call::<serde_json::Value>(
+        server,
+        AgentOp::SsoCleanup {
+          domains: domains.into_iter().collect(),
+          runners: runners.into_iter().collect(),
+        },
+        Duration::from_secs(60),
+        None,
+        &cancel,
+      )
+      .await;
+    if let Err(e) = result {
+      tracing::warn!("清理服务器 {server} 上的代登录容器失败：{e}");
+    }
+  }
+  Ok(())
+}
+
 pub async fn record(
   state: &AppState,
   host: &str,
@@ -974,7 +1051,15 @@ pub async fn run(
   state: &Arc<AppState>,
   hostname: &str,
 ) -> Result<Outcome, ApiError> {
-  let outcome = execute(state, hostname).await;
+  run_with_deps(state, hostname, false).await
+}
+
+async fn run_with_deps(
+  state: &Arc<AppState>,
+  hostname: &str,
+  wait_for_deps: bool,
+) -> Result<Outcome, ApiError> {
+  let outcome = execute(state, hostname, wait_for_deps).await;
   let (ok, error) = match &outcome {
     Ok(o) => (
       o.ok,
@@ -997,7 +1082,14 @@ pub async fn test(
   Path(hostname): Path<String>,
 ) -> ApiResult<SsoTestResult> {
   auth.require(Perm::Admin)?;
-  let outcome = run(&state, &hostname).await?;
+  let outcome = tokio::time::timeout(
+    TEST_TIMEOUT,
+    run_with_deps(&state, &hostname, true),
+  )
+  .await
+  .map_err(|_| {
+    ApiError::new(ErrorCode::Timeout, "代登录测试超时")
+  })??;
   let mut would_write = Vec::new();
   if outcome.ok {
     let snap = snapshot::load(&state.db).await?;

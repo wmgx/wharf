@@ -131,9 +131,10 @@ async fn dispatch(
     }
     Command::Sso(crate::SsoCmd::Test { hostname }) => {
       let result: wharf_api_types::view::SsoTestResult = c
-        .post(
+        .post_timeout(
           &format!("/api/routes/{}/sso/test", seg(&hostname)),
           &json!({}),
+          Duration::from_secs(14 * 60),
         )
         .await?;
       out(j, &result, |r| {

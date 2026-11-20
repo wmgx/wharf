@@ -410,6 +410,7 @@ async fn run_on_agent(
     input,
     network_host: false,
     out_dir: false,
+    wait_for_deps: false,
     timeout_secs: spec.timeout_secs,
     pull: snapshot::pull_policy(server),
   };

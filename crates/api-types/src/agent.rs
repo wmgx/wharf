@@ -360,6 +360,13 @@ pub enum AgentOp {
   HostExec(HostExecJob),
   /// 定时任务：在服务容器里执行命令，或跑一次性容器。结果是 [TaskRunResult]。
   TaskRun(TaskRunJob),
+  /// 入口服务器上仍在使用的代登录目录和运行容器。
+  SsoCleanup {
+    #[serde(default)]
+    domains: Vec<String>,
+    #[serde(default)]
+    runners: Vec<String>,
+  },
   /// 设置这台机器的出口：提供出口、本地分流，两部分都可以没有。
   /// 配置存在 agent 数据目录，重启后自动恢复。
   Egress(EgressConfig),
@@ -1224,11 +1231,29 @@ pub struct TaskRunJob {
   pub input: Option<TaskInput>,
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub network_host: bool,
-  /// 代登录脚本用独立目录和容器名，并回传 /out/result.json。
+  /// 代登录脚本使用常驻容器，通过 WHARF_OUT 回传结果。
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub out_dir: bool,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub wait_for_deps: bool,
   pub timeout_secs: u64,
   pub pull: PullPolicy,
+}
+
+pub fn sso_runner_name(
+  runtime: crate::view::ScriptRuntime,
+  image: &str,
+) -> String {
+  use crate::view::ScriptRuntime;
+  use sha2::{Digest, Sha256};
+
+  let runtime = match runtime {
+    ScriptRuntime::Python => "python",
+    ScriptRuntime::Node => "node",
+    ScriptRuntime::Shell => "shell",
+  };
+  let hash = hex::encode(Sha256::digest(image));
+  format!("wharf-sso-runner-{runtime}-{}", &hash[..12])
 }
 
 /// 网址触发带来的请求，请求体使用 base64。
