@@ -44,6 +44,18 @@ pub const BUILD: &str = match option_env!("WHARF_BUILD") {
   None => "dev",
 };
 
+pub fn mask_values(text: &str, values: &[String]) -> String {
+  let mut values: Vec<_> =
+    values.iter().filter(|s| !s.is_empty()).collect();
+  values.sort_unstable_by(|a, b| {
+    b.len().cmp(&a.len()).then_with(|| a.cmp(b))
+  });
+  values.dedup();
+  values
+    .into_iter()
+    .fold(text.to_string(), |s, v| s.replace(v, "***"))
+}
+
 /// 名称规则：小写字母、数字、`-`，以字母或数字开头，最长 48 个字符。
 /// 服务名同时是 compose project 名，所以规则比 compose 更严。
 pub fn validate_name(kind: &str, name: &str) -> Result<(), ApiError> {

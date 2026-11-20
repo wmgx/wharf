@@ -336,6 +336,7 @@ async fn run_on_agent(
       )
       .await?;
       return Ok(TaskRunResult {
+        result: None,
         mem_peak: None,
         exit_code: Some(r.exit_code),
         timed_out: false,
@@ -360,14 +361,9 @@ async fn run_on_agent(
       env,
       ..
     } => TaskHow::Script {
-      image: image.clone().unwrap_or_else(|| {
-        match runtime {
-          ScriptRuntime::Python => PYTHON_IMAGE,
-          ScriptRuntime::Node => NODE_IMAGE,
-          ScriptRuntime::Shell => SHELL_IMAGE,
-        }
-        .to_string()
-      }),
+      image: image
+        .clone()
+        .unwrap_or_else(|| script_image(*runtime).to_string()),
       runtime: *runtime,
       code: code.clone(),
       deps: deps.clone(),
@@ -412,6 +408,8 @@ async fn run_on_agent(
     name: name.to_string(),
     how,
     input,
+    network_host: false,
+    out_dir: false,
     timeout_secs: spec.timeout_secs,
     pull: snapshot::pull_policy(server),
   };
@@ -427,6 +425,14 @@ async fn run_on_agent(
       &CancellationToken::new(),
     )
     .await
+}
+
+pub(crate) fn script_image(runtime: ScriptRuntime) -> &'static str {
+  match runtime {
+    ScriptRuntime::Python => PYTHON_IMAGE,
+    ScriptRuntime::Node => NODE_IMAGE,
+    ScriptRuntime::Shell => SHELL_IMAGE,
+  }
 }
 
 pub(crate) async fn insert_run(
@@ -541,6 +547,30 @@ pub async fn recover(state: &AppState) -> Result<(), ApiError> {
   Ok(())
 }
 
+pub(crate) fn validate_script(
+  runtime: ScriptRuntime,
+  code: &str,
+  deps: &str,
+  image: Option<&str>,
+) -> Result<(), ApiError> {
+  if deps.len() > 16 * 1024 {
+    return Err(ApiError::invalid("依赖清单不能超过 16KB"));
+  }
+  if runtime == ScriptRuntime::Shell && !deps.trim().is_empty() {
+    return Err(ApiError::invalid("shell 脚本不支持依赖清单"));
+  }
+  if code.trim().is_empty() {
+    return Err(ApiError::invalid("脚本内容不能为空"));
+  }
+  if code.len() > 256 * 1024 {
+    return Err(ApiError::invalid("脚本内容不能超过 256KB"));
+  }
+  if image.is_some_and(|s| s.trim().is_empty()) {
+    return Err(ApiError::invalid("镜像不能为空"));
+  }
+  Ok(())
+}
+
 fn validate(
   name: &str,
   spec: &TaskSpec,
@@ -586,23 +616,7 @@ fn validate(
       deps,
       runtime,
       ..
-    } => {
-      if deps.len() > 16 * 1024 {
-        return Err(ApiError::invalid("依赖清单不能超过 16KB"));
-      }
-      if *runtime == ScriptRuntime::Shell && !deps.trim().is_empty() {
-        return Err(ApiError::invalid("shell 脚本不支持依赖清单"));
-      }
-      if blank(code) {
-        return Err(ApiError::invalid("脚本内容不能为空"));
-      }
-      if code.len() > 256 * 1024 {
-        return Err(ApiError::invalid("脚本内容不能超过 256KB"));
-      }
-      if image.as_deref().is_some_and(blank) {
-        return Err(ApiError::invalid("镜像不能为空"));
-      }
-    }
+    } => validate_script(*runtime, code, deps, image.as_deref())?,
     TaskKind::Container { image, mounts, .. } => {
       if blank(image) {
         return Err(ApiError::invalid("镜像不能为空"));

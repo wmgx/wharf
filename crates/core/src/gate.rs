@@ -579,7 +579,18 @@ pub async fn site_login(
     if !outcome.ok {
       return Ok(false);
     }
-    for write in &login.write {
+    let scripted = outcome.script_log.is_some();
+    if scripted != login.script.is_some() {
+      return Err(ApiError::invalid("代登录配置已改变"));
+    }
+    let writes = if scripted {
+      cookies.extend(outcome.set_cookies.clone());
+      storage.extend(outcome.script_storage.clone());
+      &[]
+    } else {
+      login.write.as_slice()
+    };
+    for write in writes {
       match write {
         LoginWrite::Cookies(_) => {
           cookies.extend(outcome.set_cookies.clone())
@@ -594,25 +605,9 @@ pub async fn site_login(
             &outcome.vars,
             &snap.secrets,
           )?;
-          if name.is_empty()
-            || !name.bytes().all(|b| {
-              b.is_ascii_alphanumeric()
-                || b"!#$%&'*+-.^_`|~".contains(&b)
-            })
-            || !value.bytes().all(|b| {
-              b == 0x21
-                || (0x23..=0x2b).contains(&b)
-                || (0x2d..=0x3a).contains(&b)
-                || (0x3c..=0x5b).contains(&b)
-                || (0x5d..=0x7e).contains(&b)
-            })
-          {
-            return Err(ApiError::invalid("应用 cookie 格式不对"));
-          }
-          cookies.push(format!(
-            "{name}={value}; Path=/; Secure{}",
-            if *http_only { "; HttpOnly" } else { "" }
-          ));
+          cookies.push(crate::sso_login::cookie_header(
+            name, &value, *http_only,
+          )?);
         }
         LoginWrite::LocalStorage { key, value }
         | LoginWrite::SessionStorage { key, value } => {

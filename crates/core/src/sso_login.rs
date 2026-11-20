@@ -1,9 +1,13 @@
-//! 按域名配置代登录，只有遮盖后的步骤摘要能返回接口。
-use crate::{api::ApiResult, auth::Auth, snapshot, state::AppState};
+//! 按域名配置代登录，测试接口只返回遮盖后的摘要和脚本日志。
+use crate::{
+  api::ApiResult, auth::Auth, render as config, snapshot,
+  state::AppState, tasks,
+};
 use axum::{
   Json,
   extract::{Path, State},
 };
+use serde::Deserialize;
 use std::{
   collections::{BTreeMap, BTreeSet},
   sync::{Arc, LazyLock, Mutex},
@@ -12,14 +16,21 @@ use std::{
 use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
   ApiError, ErrorCode,
-  agent::{AgentOp, HttpFetch, HttpFetchResult},
+  agent::{
+    AgentOp, HttpFetch, HttpFetchResult, TaskHow, TaskRunJob,
+    TaskRunResult,
+  },
+  mask_values as mask,
   spec::{
-    Extract, LoginSpec, LoginStep, LoginWrite, SsoMode, SsoSpec,
+    Extract, LoginScript, LoginSpec, LoginStep, LoginWrite, SsoMode,
+    SsoSpec,
   },
   view::{Perm, SsoStepResult, SsoTestResult},
 };
 
 type Values = BTreeMap<String, String>;
+type CookieJar = BTreeMap<String, (String, String)>;
+const TOTAL_TIMEOUT: Duration = Duration::from_secs(60);
 // 弱引用不保留已经完成的域名。
 static LOCKS: LazyLock<
   Mutex<BTreeMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>,
@@ -31,6 +42,8 @@ pub struct Outcome {
   pub check: Option<SsoStepResult>,
   pub set_cookies: Vec<String>,
   pub vars: Values,
+  pub script_storage: Storage,
+  pub script_log: Option<String>,
 }
 
 fn references(text: &str) -> Result<Vec<&str>, ApiError> {
@@ -84,18 +97,51 @@ fn strings(value: &serde_json::Value) -> Vec<&str> {
   }
 }
 pub fn secret_refs(login: &LoginSpec) -> BTreeSet<String> {
-  strings(&serde_json::to_value(login).unwrap())
+  let mut value = serde_json::to_value(login).unwrap();
+  value.as_object_mut().unwrap().remove("script");
+  let mut names: BTreeSet<String> = strings(&value)
     .into_iter()
     .filter_map(|s| references(s).ok())
     .flatten()
     .filter_map(|s| s.strip_prefix("secret.").map(str::to_string))
-    .collect()
+    .collect();
+  if let Some(script) = &login.script {
+    names.extend(
+      script
+        .env
+        .values()
+        .filter_map(|value| env_refs(value).ok())
+        .flatten()
+        .map(str::to_string),
+    );
+  }
+  names
+}
+
+fn env_refs(value: &str) -> Result<Vec<&str>, ApiError> {
+  let mut rest = value;
+  let mut names = Vec::new();
+  while let Some((_, after)) = rest.split_once("[[") {
+    let (name, next) = after
+      .split_once("]]")
+      .ok_or_else(|| ApiError::invalid("密钥引用缺少 ]]"))?;
+    if name.is_empty()
+      || !name
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+      return Err(ApiError::invalid("密钥引用的名称无效"));
+    }
+    names.push(name);
+    rest = next;
+  }
+  Ok(names)
 }
 pub fn validate(host: &str, sso: &SsoSpec) -> Result<(), ApiError> {
   let fail = |s: &str| ApiError::invalid(format!("域名 {host}：{s}"));
   if (sso.mode == SsoMode::Login) != sso.login.is_some() {
     return Err(fail(
-      "只有 login 方式才能写登录步骤，login 方式必须有登录步骤",
+      "只有 login 方式才能写代登录配置，login 方式必须有配置",
     ));
   }
   crate::oidc::validate(host, sso)?;
@@ -119,13 +165,39 @@ pub fn validate(host: &str, sso: &SsoSpec) -> Result<(), ApiError> {
   }) {
     return Err(fail("entry 要写成站内路径，例如 /admin/"));
   }
-  if !(1..=5).contains(&login.steps.len())
+  if login.script.is_some() != login.steps.is_empty() {
+    return Err(fail("steps 和 script 必须二选一"));
+  }
+  if !(1..=720).contains(&login.ttl_hours) {
+    return Err(fail("ttl_hours 须为 1 到 720"));
+  }
+  if let Some(script) = &login.script {
+    tasks::validate_script(
+      script.runtime,
+      &script.code,
+      &script.deps,
+      script.image.as_deref(),
+    )
+    .map_err(|e| fail(&e.message))?;
+    if !(5..=120).contains(&script.timeout_secs) {
+      return Err(fail("脚本 timeout_secs 须为 5 到 120"));
+    }
+    for (key, value) in &script.env {
+      if key.is_empty()
+        || key.contains(['=', '\n', '\r', '\0'])
+        || matches!(key.as_str(), "WHARF_HOST" | "WHARF_UPSTREAM")
+      {
+        return Err(fail("脚本环境变量名无效或由 Wharf 提供"));
+      }
+      if value.contains(['\n', '\r', '\0']) {
+        return Err(fail("脚本环境变量的值含换行或空字符"));
+      }
+      env_refs(value).map_err(|e| fail(&e.message))?;
+    }
+  } else if login.steps.len() > 5
     || !(1..=8).contains(&login.write.len())
-    || !(1..=720).contains(&login.ttl_hours)
   {
-    return Err(fail(
-      "登录步骤须为 1 到 5 步，写入须为 1 到 8 项，ttl_hours 须为 1 到 720",
-    ));
+    return Err(fail("登录步骤须为 1 到 5 步，写入须为 1 到 8 项"));
   }
   let mut known = BTreeSet::new();
   for (i, step) in
@@ -201,10 +273,7 @@ pub fn validate(host: &str, sso: &SsoSpec) -> Result<(), ApiError> {
 }
 
 // 名字 -> (值, 原始 Set-Cookie)。不解释应用自己的 cookie 属性。
-pub fn jar_update(
-  jar: &mut BTreeMap<String, (String, String)>,
-  headers: &[(String, String)],
-) {
+fn jar_update(jar: &mut CookieJar, headers: &[(String, String)]) {
   for (_, raw) in headers
     .iter()
     .filter(|(k, _)| k.eq_ignore_ascii_case("set-cookie"))
@@ -219,11 +288,11 @@ pub fn jar_update(
     }
   }
 }
-pub fn extract(
+fn extract(
   rule: &Extract,
   headers: &[(String, String)],
   body: &str,
-  jar: &BTreeMap<String, (String, String)>,
+  jar: &CookieJar,
 ) -> Result<String, ApiError> {
   let value = match rule {
     Extract::Json { path, .. } => {
@@ -262,14 +331,6 @@ pub fn extract(
     ApiError::invalid(format!("取不到 {}", rule.name()))
   })
 }
-pub fn mask(text: &str, values: &[String]) -> String {
-  let mut values: Vec<_> =
-    values.iter().filter(|s| !s.is_empty()).collect();
-  values.sort_by_key(|v| std::cmp::Reverse(v.len()));
-  values
-    .into_iter()
-    .fold(text.to_string(), |s, v| s.replace(v, "***"))
-}
 fn render_json(
   value: &mut serde_json::Value,
   vars: &Values,
@@ -296,7 +357,7 @@ fn job(
   step: &LoginStep,
   vars: &Values,
   secrets: &Values,
-  jar: &BTreeMap<String, (String, String)>,
+  jar: &CookieJar,
 ) -> Result<HttpFetch, ApiError> {
   let path = render(&step.path, vars, secrets)?;
   if !path.starts_with('/') || path.starts_with("//") {
@@ -367,8 +428,172 @@ fn job(
   })
 }
 
+pub fn cookie_header(
+  name: &str,
+  value: &str,
+  http_only: bool,
+) -> Result<String, ApiError> {
+  if name.is_empty()
+    || !name.bytes().all(|b| {
+      b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)
+    })
+    || !value.bytes().all(|b| {
+      matches!(b, 0x21 | 0x23..=0x2b | 0x2d..=0x3a | 0x3c..=0x5b | 0x5d..=0x7e)
+    })
+  {
+    return Err(ApiError::invalid("应用 cookie 格式不对"));
+  }
+  Ok(format!(
+    "{name}={value}; Path=/; Secure{}",
+    if http_only { "; HttpOnly" } else { "" }
+  ))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScriptResult {
+  #[serde(default)]
+  cookies: Vec<ScriptCookie>,
+  #[serde(default)]
+  local_storage: Values,
+  #[serde(default)]
+  session_storage: Values,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScriptCookie {
+  name: String,
+  value: String,
+  #[serde(default = "default_http_only")]
+  http_only: bool,
+}
+
+fn default_http_only() -> bool {
+  true
+}
+
+type Storage = Vec<(bool, String, String)>;
+
+fn parse_script_result(
+  value: serde_json::Value,
+) -> Result<(CookieJar, Storage), ApiError> {
+  let result: ScriptResult = serde_json::from_value(value)
+    .map_err(|_| ApiError::invalid("result.json 格式不对"))?;
+  if result.cookies.is_empty()
+    && result.local_storage.is_empty()
+    && result.session_storage.is_empty()
+  {
+    return Err(ApiError::invalid(
+      "result.json 没有要写入浏览器的内容",
+    ));
+  }
+  if result.cookies.len() > 16
+    || result.cookies.iter().any(|c| c.value.len() > 4096)
+  {
+    return Err(ApiError::invalid(
+      "cookie 最多 16 个，单个值最多 4KB",
+    ));
+  }
+  let bytes: usize = result
+    .cookies
+    .iter()
+    .map(|c| c.name.len() + c.value.len())
+    .chain(
+      result
+        .local_storage
+        .iter()
+        .chain(&result.session_storage)
+        .map(|(k, v)| k.len() + v.len()),
+    )
+    .sum();
+  if bytes > 32 * 1024 {
+    return Err(ApiError::invalid("浏览器写入内容不能超过 32KB"));
+  }
+  let cookies = result
+    .cookies
+    .into_iter()
+    .map(|cookie| {
+      let header =
+        cookie_header(&cookie.name, &cookie.value, cookie.http_only)?;
+      Ok((cookie.name, (cookie.value, header)))
+    })
+    .collect::<Result<_, ApiError>>()?;
+  let storage = result
+    .local_storage
+    .into_iter()
+    .map(|(key, value)| (true, key, value))
+    .chain(
+      result
+        .session_storage
+        .into_iter()
+        .map(|(key, value)| (false, key, value)),
+    )
+    .collect();
+  Ok((cookies, storage))
+}
+
+async fn run_script(
+  state: &Arc<AppState>,
+  snap: &snapshot::Snapshot,
+  server: &str,
+  hostname: &str,
+  upstream: &str,
+  script: &LoginScript,
+  cancel: &CancellationToken,
+) -> Result<TaskRunResult, ApiError> {
+  let mut env: Values = script
+    .env
+    .iter()
+    .map(|(key, value)| {
+      Ok((
+        key.clone(),
+        config::substitute(value, Some(&snap.secrets))?,
+      ))
+    })
+    .collect::<Result<_, ApiError>>()?;
+  env.insert("WHARF_UPSTREAM".into(), format!("http://{upstream}"));
+  env.insert("WHARF_HOST".into(), hostname.into());
+  let server_row = &snap.world.servers[server];
+  let job = TaskRunJob {
+    name: config::hash(hostname)[..32].to_string(),
+    how: TaskHow::Script {
+      image: script.image.clone().unwrap_or_else(|| {
+        tasks::script_image(script.runtime).into()
+      }),
+      runtime: script.runtime,
+      code: script.code.clone(),
+      deps: script.deps.clone(),
+      mirrors: server_row.settings.build_env.clone(),
+      env,
+    },
+    input: None,
+    network_host: true,
+    out_dir: true,
+    timeout_secs: script.timeout_secs,
+    pull: snapshot::pull_policy(server_row),
+  };
+  let (state, server, cancel) =
+    (state.clone(), server.to_string(), cancel.clone());
+  // 请求被浏览器丢弃时，仍要让 hub 读到取消信号并通知 agent。
+  tokio::spawn(async move {
+    state
+      .hub
+      .call(
+        &server,
+        AgentOp::TaskRun(job),
+        TOTAL_TIMEOUT,
+        None,
+        &cancel,
+      )
+      .await
+  })
+  .await
+  .map_err(|_| ApiError::internal("代登录请求中断"))?
+}
+
 async fn execute(
-  state: &AppState,
+  state: &Arc<AppState>,
   hostname: &str,
 ) -> Result<Outcome, ApiError> {
   let lock = {
@@ -417,9 +642,12 @@ async fn execute(
       .and_then(|a| a.report.as_ref())
       .map(|r| r.build.as_str()),
   ) {
-    return Err(ApiError::invalid(format!(
-      "服务器 {server} 的 agent 版本太旧，升级后才能代登录"
-    )));
+    return Err(
+      ApiError::invalid(format!(
+        "服务器 {server} 的 agent 版本太旧，升级后才能代登录"
+      ))
+      .with_hint("先运行 wharf upgrade"),
+    );
   }
   let net = snap.net(&snap.world);
   let rendered =
@@ -432,25 +660,86 @@ async fn execute(
     .upstream;
   let cancel = CancellationToken::new();
   let _cancel_on_drop = cancel.clone().drop_guard();
-  let deadline =
-    tokio::time::Instant::now() + Duration::from_secs(60);
+  let deadline = tokio::time::Instant::now() + TOTAL_TIMEOUT;
   let mut outcome = Outcome {
     ok: true,
     steps: vec![],
     check: None,
     set_cookies: vec![],
     vars: Values::new(),
+    script_storage: vec![],
+    script_log: None,
   };
   let mut jar = BTreeMap::new();
   let mut hidden: Vec<String> =
     snap.secrets.values().cloned().collect();
+  if let Some(script) = &login.script {
+    let result = tokio::time::timeout_at(
+      deadline,
+      run_script(
+        state, &snap, server, hostname, upstream, script, &cancel,
+      ),
+    )
+    .await
+    .map_err(|_| {
+      ApiError::new(ErrorCode::Timeout, "代登录超过 60 秒")
+    })?
+    .map_err(|mut e| {
+      e.message = mask(&e.message, &hidden);
+      e
+    })?;
+    let json = result
+      .result
+      .as_deref()
+      .filter(|text| text.len() <= 64 * 1024)
+      .and_then(|text| {
+        serde_json::from_str::<serde_json::Value>(text).ok()
+      });
+    if let Some(json) = &json {
+      hidden.extend(strings(json).into_iter().map(str::to_string));
+    }
+    outcome.script_log = Some(mask(&result.output, &hidden));
+    let writes = if result.timed_out {
+      Err(ApiError::invalid("代登录脚本超时"))
+    } else if result.exit_code != Some(0) {
+      Err(ApiError::invalid("代登录脚本退出失败"))
+    } else {
+      json
+        .ok_or_else(|| ApiError::invalid("result.json 缺失或无效"))
+        .and_then(parse_script_result)
+    };
+    outcome.ok = writes.is_ok();
+    let error = match writes {
+      Ok((cookies, storage)) => {
+        outcome.set_cookies =
+          cookies.values().map(|(_, raw)| raw.clone()).collect();
+        jar = cookies;
+        outcome.script_storage = storage;
+        None
+      }
+      Err(e) => Some(e.message),
+    };
+    outcome.steps.push(SsoStepResult {
+      number: 1,
+      method: "SCRIPT".into(),
+      path: "/out/result.json".into(),
+      status: None,
+      ms: result.duration_ms,
+      extracted: BTreeMap::new(),
+      error,
+    });
+    if !outcome.ok {
+      return Ok(outcome);
+    }
+  }
+  let script_steps = outcome.steps.len();
   for (i, step) in
     login.steps.iter().chain(login.check.iter()).enumerate()
   {
     let start = Instant::now();
     let is_check = i == login.steps.len();
     let mut summary = SsoStepResult {
-      number: i + 1,
+      number: i + 1 + script_steps,
       method: step.method.clone(),
       path: step.path.clone(),
       status: None,
@@ -541,8 +830,10 @@ async fn execute(
       break;
     }
   }
-  outcome.set_cookies =
-    jar.into_values().map(|(_, raw)| raw).collect();
+  if outcome.script_log.is_none() {
+    outcome.set_cookies =
+      jar.into_values().map(|(_, raw)| raw).collect();
+  }
   Ok(outcome)
 }
 
@@ -602,7 +893,7 @@ pub fn issues(
     .collect()
 }
 pub async fn run(
-  state: &AppState,
+  state: &Arc<AppState>,
   hostname: &str,
 ) -> Result<Outcome, ApiError> {
   let outcome = execute(state, hostname).await;
@@ -632,44 +923,71 @@ pub async fn test(
   let mut would_write = Vec::new();
   if outcome.ok {
     let snap = snapshot::load(&state.db).await?;
-    let login = snap
-      .world
-      .routes
-      .get(&hostname)
-      .and_then(|r| r.spec.sso.as_ref())
-      .and_then(|s| s.login.as_ref())
-      .ok_or_else(|| ApiError::invalid("代登录配置已改变"))?;
-    for write in &login.write {
-      would_write.push(match write {
-        LoginWrite::Cookies(_) => format!(
-          "应用自己的 {} 个 cookie：{}",
-          outcome.set_cookies.len(),
-          outcome
-            .set_cookies
-            .iter()
-            .filter_map(|s| s.split_once('=').map(|(n, _)| n))
-            .collect::<Vec<_>>()
-            .join("、")
-        ),
-        LoginWrite::Cookie { name, value, .. } => format!(
-          "cookie {name}（{} 个字符）",
-          render(value, &outcome.vars, &snap.secrets)?
-            .chars()
-            .count()
-        ),
-        LoginWrite::LocalStorage { key, value } => format!(
-          "localStorage {key}（{} 个字符）",
-          render(value, &outcome.vars, &snap.secrets)?
-            .chars()
-            .count()
-        ),
-        LoginWrite::SessionStorage { key, value } => format!(
-          "sessionStorage {key}（{} 个字符）",
-          render(value, &outcome.vars, &snap.secrets)?
-            .chars()
-            .count()
-        ),
-      });
+    if outcome.script_log.is_some() {
+      let hidden: Vec<_> = snap.secrets.values().cloned().collect();
+      for raw in &outcome.set_cookies {
+        if let Some((name, value)) =
+          raw.split(';').next().and_then(|s| s.split_once('='))
+        {
+          would_write.push(format!(
+            "cookie {}（{} 个字符）",
+            mask(name, &hidden),
+            value.chars().count()
+          ));
+        }
+      }
+      for (local, key, value) in &outcome.script_storage {
+        let storage = if *local {
+          "localStorage"
+        } else {
+          "sessionStorage"
+        };
+        would_write.push(format!(
+          "{storage} {}（{} 个字符）",
+          mask(key, &hidden),
+          value.chars().count()
+        ));
+      }
+    } else {
+      let login = snap
+        .world
+        .routes
+        .get(&hostname)
+        .and_then(|r| r.spec.sso.as_ref())
+        .and_then(|s| s.login.as_ref())
+        .ok_or_else(|| ApiError::invalid("代登录配置已改变"))?;
+      for write in &login.write {
+        would_write.push(match write {
+          LoginWrite::Cookies(_) => format!(
+            "应用自己的 {} 个 cookie：{}",
+            outcome.set_cookies.len(),
+            outcome
+              .set_cookies
+              .iter()
+              .filter_map(|s| s.split_once('=').map(|(n, _)| n))
+              .collect::<Vec<_>>()
+              .join("、")
+          ),
+          LoginWrite::Cookie { name, value, .. } => format!(
+            "cookie {name}（{} 个字符）",
+            render(value, &outcome.vars, &snap.secrets)?
+              .chars()
+              .count()
+          ),
+          LoginWrite::LocalStorage { key, value } => format!(
+            "localStorage {key}（{} 个字符）",
+            render(value, &outcome.vars, &snap.secrets)?
+              .chars()
+              .count()
+          ),
+          LoginWrite::SessionStorage { key, value } => format!(
+            "sessionStorage {key}（{} 个字符）",
+            render(value, &outcome.vars, &snap.secrets)?
+              .chars()
+              .count()
+          ),
+        });
+      }
     }
   }
   Ok(Json(SsoTestResult {
@@ -677,12 +995,68 @@ pub async fn test(
     steps: outcome.steps,
     check: outcome.check,
     would_write,
+    script_log: outcome.script_log,
   }))
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
+  use serde_json::json;
+
+  #[test]
+  fn login_chooses_steps_or_script() {
+    let steps = json!([{"path": "/login"}]);
+    let script = json!({"runtime": "shell", "code": "exit 0"});
+    let check = |login| {
+      let sso = serde_json::from_value(json!({
+        "mode": "login", "login": login
+      }))
+      .unwrap();
+      validate("a.example.test", &sso)
+    };
+    assert!(
+      check(json!({"steps": steps, "write": [{"cookies": "all"}]}))
+        .is_ok()
+    );
+    assert!(check(json!({"script": script})).is_ok());
+    assert!(
+      check(json!({"steps": steps, "script": script})).is_err()
+    );
+    assert!(check(json!({})).is_err());
+  }
+
+  #[test]
+  fn valid_script_result() {
+    let (cookies, storage) = parse_script_result(json!({
+      "cookies": [{"name": "session", "value": "abc"}],
+      "local_storage": {"color": "green"},
+      "session_storage": {"tab": "one"},
+    }))
+    .unwrap();
+    assert_eq!(
+      cookies["session"].1,
+      "session=abc; Path=/; Secure; HttpOnly"
+    );
+    assert_eq!(
+      storage,
+      vec![
+        (true, "color".into(), "green".into()),
+        (false, "tab".into(), "one".into())
+      ]
+    );
+  }
+
+  #[test]
+  fn invalid_script_result() {
+    assert!(
+      parse_script_result(json!({
+        "cookies": [{"name": "session", "value": "invalid; Path=/"}],
+      }))
+      .is_err()
+    );
+  }
+
   #[test]
   fn templates() {
     let vars = Values::from([("csrf".into(), "value".into())]);
