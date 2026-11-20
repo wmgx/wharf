@@ -12,7 +12,7 @@ use wharf_api_types::{
   spec::{
     BackupSpec, Change, Fleet, GatewayKind, GatewaySpec, GatewayTls,
     NetworkMode, PathRoute, PortSpec, PrivateAddr, PrivateNetwork,
-    Region, RouteSpec, ServerSettings, ServiceSpec, Source,
+    Region, RouteSpec, ServerSettings, ServiceSpec, Source, SsoMode,
     VolumeSpec,
   },
   view::{
@@ -20,8 +20,9 @@ use wharf_api_types::{
     CheckStatus, CreatedToken, DataView, DeploymentView,
     DoctorReport, GatewayView, HostExecResponse, ImportPreview,
     ImportRequest, JoinInfo, NetworkView, RestoreRequest,
-    RollbackTarget, RouteView, SecretView, ServerView, ServiceView,
-    ShellLog, Status, TokenView, Unmanaged,
+    RollbackTarget, RouteView, ScriptRuntime, SecretView, ServerView,
+    ServiceView, ShellLog, SsoStepResult, SsoTestResult, Status,
+    TokenView, Unmanaged,
   },
 };
 
@@ -130,53 +131,27 @@ async fn dispatch(
       Ok(())
     }
     Command::Sso(crate::SsoCmd::Test { hostname }) => {
-      let result: wharf_api_types::view::SsoTestResult = c
+      let result: SsoTestResult = match c
         .post_timeout(
           &format!("/api/routes/{}/sso/test", seg(&hostname)),
           &json!({}),
           Duration::from_secs(14 * 60),
         )
-        .await?;
-      out(j, &result, |r| {
-        if let Some(log) = &r.script_log
-          && !log.trim().is_empty()
-        {
-          println!("{log}");
-        }
-        for step in r.steps.iter().chain(r.check.iter()) {
-          println!(
-            "{} {} {} {:?} {:?} {}ms{}",
-            step.number,
-            step.method,
-            step.path,
-            step.status,
-            step.extracted,
-            step.ms,
-            step
-              .error
-              .as_ref()
-              .map(|e| format!("：{e}"))
-              .unwrap_or_default()
-          );
-        }
-        println!(
-          "{}",
-          if r.ok {
-            "登录成功"
-          } else {
-            r.steps
-              .iter()
-              .chain(r.check.iter())
-              .find_map(|s| s.error.as_deref())
-              .unwrap_or("登录失败")
+        .await
+      {
+        Err(CliError::Api(e)) if !j => {
+          if let Some(hint) = e.hint {
+            eprintln!("提示：{hint}");
           }
-        );
-        if r.script_log.is_some() {
-          for summary in &r.would_write {
-            println!("{summary}");
+          for suggestion in e.suggest {
+            eprintln!("可以试试：{suggestion}");
           }
+          eprintln!("登录失败：{}", e.message);
+          return Err(CliError::Exit(e.code.exit_code()));
         }
-      });
+        result => result?,
+      };
+      out(j, &result, print_sso_test);
       if !result.ok {
         return Err(CliError::Exit(1));
       }
@@ -2668,16 +2643,100 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
       redirect,
       apply,
     } => {
-      let mut spec = c
+      let route = c
         .get::<Vec<RouteView>>("/api/routes")
         .await?
         .into_iter()
         .find(|r| r.spec.hostname == name.trim().to_ascii_lowercase())
         .ok_or_else(|| {
           ApiError::not_found(format!("域名 {name} 不存在"))
-        })?
-        .spec;
+        })?;
+      let mut spec = route.spec;
       let Some(mode) = mode else {
+        if !j
+          && let Some(sso) = &spec.sso
+          && sso.mode == SsoMode::Login
+          && let Some(login) = &sso.login
+        {
+          let accounts = if login.use_account {
+            match c
+              .get::<Vec<AppAccountView>>("/api/sso/accounts")
+              .await
+            {
+              Ok(accounts) => Some(accounts),
+              Err(CliError::Api(e))
+                if e.code == ErrorCode::Forbidden =>
+              {
+                None
+              }
+              Err(e) => return Err(e),
+            }
+          } else {
+            None
+          };
+          println!(
+            "方式：代登录（{}）",
+            if sso.public { "公开站点" } else { "门禁" }
+          );
+          println!(
+            "入口：https://{}/_wharf/login → {}",
+            spec.hostname,
+            login.entry.as_deref().unwrap_or("/")
+          );
+          if let Some(script) = &login.script {
+            let runtime = match script.runtime {
+              ScriptRuntime::Python => "python",
+              ScriptRuntime::Node => "node",
+              ScriptRuntime::Shell => "shell",
+            };
+            println!(
+              "登录：脚本（{runtime}，超时 {} 秒）",
+              script.timeout_secs
+            );
+          } else {
+            println!("登录：{} 步", login.steps.len());
+          }
+          if let Some(accounts) = accounts {
+            if let Some(a) = accounts.iter().find(|a| {
+              a.domains
+                .iter()
+                .any(|d| d.is_default && d.hostname == spec.hostname)
+            }) {
+              println!(
+                "账号：使用默认账号 {}（{}）",
+                a.name, a.username
+              );
+            } else {
+              println!("账号：没有默认账号，代登录会失败");
+            }
+          }
+          if let Some(takeover) = &login.takeover {
+            let skip = if takeover.skip_query.is_empty() {
+              String::new()
+            } else {
+              format!(
+                "带 {} 参数时不接管，",
+                takeover.skip_query.join("、")
+              )
+            };
+            println!(
+              "接管：{}（{skip}回退原生页 {} 分钟）",
+              takeover.paths.join("、"),
+              takeover.native_minutes
+            );
+          }
+          if let Some(last) = &route.sso_login
+            && let Some(at) =
+              chrono::DateTime::from_timestamp_millis(last.at)
+          {
+            println!(
+              "上次登录：{} {}",
+              beijing_time(at),
+              if last.ok { "成功" } else { "失败" }
+            );
+          }
+          return Ok(());
+        }
         out(j, &spec.sso, |sso| {
           println!(
             "{}",
@@ -2900,8 +2959,80 @@ async fn account(
   }
 }
 
-fn print_app_account(account: &AppAccountView) {
-  let domains = account
+fn print_sso_test(result: &SsoTestResult) {
+  for step in &result.steps {
+    print_sso_step(&format!("第 {} 步", step.number), step);
+  }
+  if let Some(check) = &result.check {
+    print_sso_step("检查  ", check);
+  }
+  if result.ok {
+    println!("登录成功");
+  }
+  if !result.would_write.is_empty() {
+    println!("会写入浏览器：");
+    for summary in &result.would_write {
+      println!("  {summary}");
+    }
+  }
+  if let Some(log) = &result.script_log
+    && !log.trim().is_empty()
+  {
+    println!("脚本输出：");
+    for line in log.lines() {
+      println!("  {line}");
+    }
+  }
+  if !result.ok {
+    let error = result
+      .steps
+      .iter()
+      .chain(result.check.iter())
+      .find_map(|step| step.error.as_deref());
+    if let Some(error) = error {
+      println!("登录失败：{error}");
+    } else {
+      println!("登录失败");
+    }
+  }
+}
+
+fn print_sso_step(label: &str, step: &SsoStepResult) {
+  if step.method == "SCRIPT" {
+    let status = if step.error.is_some() {
+      "失败"
+    } else {
+      "成功"
+    };
+    println!("{label}  脚本  {status}  {}ms", step.ms);
+  } else {
+    let status = step
+      .status
+      .map_or_else(|| "未响应".into(), |code| code.to_string());
+    print!(
+      "{label}  {} {}  {status}  {}ms",
+      step.method, step.path, step.ms
+    );
+    if !step.extracted.is_empty() {
+      let extracted = step
+        .extracted
+        .iter()
+        .map(|(name, n)| format!("{name}（{n} 个字符）"))
+        .collect::<Vec<_>>();
+      print!("  取到：{}", extracted.join("、"));
+    }
+    println!();
+  }
+}
+
+fn beijing_time(at: chrono::DateTime<chrono::Utc>) -> String {
+  at.with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap())
+    .format("%m-%d %H:%M")
+    .to_string()
+}
+
+fn app_account_domains(account: &AppAccountView) -> String {
+  account
     .domains
     .iter()
     .map(|d| {
@@ -2917,15 +3048,34 @@ fn print_app_account(account: &AppAccountView) {
       )
     })
     .collect::<Vec<_>>()
-    .join("、");
+    .join("、")
+}
+
+fn print_app_account(
+  account: &AppAccountView,
+  name_width: usize,
+  username_width: usize,
+) {
+  let domains = app_account_domains(account);
+  let domains = if domains.is_empty() {
+    "没有关联域名"
+  } else {
+    &domains
+  };
   println!(
-    "{}\t{}\t{}\t{}\t{}",
+    "{:<name_width$}  {:<username_width$}  {domains}  {}",
     account.name,
     account.username,
-    domains,
-    account.note,
-    account.updated_at.to_rfc3339()
+    beijing_time(account.updated_at)
   );
+  let mut lines = account.note.lines();
+  if let Some(first) = lines.next() {
+    let indent = " ".repeat(name_width + 2);
+    println!("{indent}备注：{first}");
+    for line in lines {
+      println!("{indent}      {line}");
+    }
+  }
 }
 
 async fn app_account(
@@ -2937,12 +3087,33 @@ async fn app_account(
   let domains = |name: &str, hostname: &str| {
     format!("{}/domains/{}", path(name), seg(hostname))
   };
+  let print_single = |a: &AppAccountView| {
+    print_app_account(a, a.name.len(), a.username.chars().count())
+  };
   match cmd {
     AppAccountCmd::List => {
       let accounts: Vec<AppAccountView> =
         c.get("/api/sso/accounts").await?;
       out(j, &accounts, |accounts| {
-        accounts.iter().for_each(print_app_account)
+        if accounts.is_empty() {
+          println!(
+            "还没有应用账号，用 wharf sso account set <名称> 添加"
+          );
+          return;
+        }
+        let name_width = accounts
+          .iter()
+          .map(|a| a.name.len())
+          .max()
+          .unwrap_or_default();
+        let username_width = accounts
+          .iter()
+          .map(|a| a.username.chars().count())
+          .max()
+          .unwrap_or_default();
+        for account in accounts {
+          print_app_account(account, name_width, username_width);
+        }
       });
     }
     AppAccountCmd::Set {
@@ -2990,11 +3161,11 @@ async fn app_account(
             password,
           });
         } else {
-          print_app_account(&account);
+          print_single(&account);
           println!("{password}");
         }
       } else {
-        out(j, &account, print_app_account);
+        out(j, &account, print_single);
       }
     }
     AppAccountCmd::Rm { name } => {
@@ -3012,12 +3183,12 @@ async fn app_account(
           &json!({"is_default": default}),
         )
         .await?;
-      out(j, &account, print_app_account);
+      out(j, &account, print_single);
     }
     AppAccountCmd::Unlink { name, hostname } => {
       let account: AppAccountView =
         c.delete(&domains(&name, &hostname)).await?;
-      out(j, &account, print_app_account);
+      out(j, &account, print_single);
     }
   }
   Ok(())

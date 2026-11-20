@@ -7,6 +7,7 @@ use axum::{
   Json,
   extract::{Path, State},
 };
+use rusqlite::OptionalExtension;
 use serde::Deserialize;
 use std::{
   collections::{BTreeMap, BTreeSet},
@@ -624,28 +625,28 @@ pub fn missing_account(hostname: &str) -> ApiError {
   ))
 }
 
-fn account_vars(
-  snap: &snapshot::Snapshot,
+async fn account_vars(
+  db: &crate::db::Db,
   hostname: &str,
   use_account: bool,
 ) -> Result<Values, ApiError> {
   if !use_account {
     return Ok(Values::new());
   }
-  let account = snap
-    .app_account_defaults
-    .get(hostname)
-    .ok_or_else(|| missing_account(hostname))?;
-  ["username", "password"]
-    .into_iter()
-    .map(|field| {
-      let value = snap
-        .service_values
-        .get(&format!("account.{account}.{field}"))
-        .ok_or_else(|| missing_account(hostname))?;
-      Ok((format!("account.{field}"), value.clone()))
-    })
-    .collect()
+  let hostname = hostname.to_string();
+  db.call_credentials(move |c, key| {
+    let (name, username): (String, String) = c.query_row(
+      "SELECT a.name, a.username FROM app_accounts a JOIN app_account_domains d ON d.account = a.name
+       WHERE d.hostname = ?1 AND d.is_default = 1",
+      [&hostname],
+      |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional().map_err(crate::db::sql_err)?.ok_or_else(|| missing_account(&hostname))?;
+    let password = key.app_password(c, &name)?.ok_or_else(|| missing_account(&hostname))?;
+    Ok(Values::from([
+      ("account.username".into(), username),
+      ("account.password".into(), password),
+    ]))
+  }).await
 }
 
 fn script_env(
@@ -742,7 +743,8 @@ async fn execute(
     .filter(|s| s.mode == SsoMode::Login)
     .and_then(|s| s.login.as_ref())
     .ok_or_else(|| ApiError::invalid("域名没有配置代登录"))?;
-  let vars = account_vars(&snap, hostname, login.use_account)?;
+  let vars =
+    account_vars(&state.db, hostname, login.use_account).await?;
   if !snap.world.services.contains_key(&route.spec.service) {
     return Err(ApiError::invalid(format!(
       "域名 {hostname} 没有指向服务，不能代登录"
@@ -1247,28 +1249,36 @@ mod tests {
   use super::*;
   use serde_json::json;
 
-  #[test]
-  fn script_env_includes_default_account() {
+  #[tokio::test]
+  async fn script_env_includes_default_account() {
     let hostname = "app.example.com";
-    let snap = snapshot::Snapshot {
-      app_account_defaults: BTreeMap::from([(
-        hostname.into(),
-        "x".into(),
-      )]),
-      service_values: BTreeMap::from([
-        ("account.x.username".into(), "fixture-user".into()),
-        ("account.x.password".into(), "fixture-value".into()),
-      ]),
-      ..Default::default()
-    };
+    let db = crate::db::Db::memory();
+    db.call_credentials(move |c, key| {
+      key.put_app_account(
+        c,
+        "x",
+        "fixture-user",
+        "fixture-value",
+        None,
+        0,
+      )?;
+      c.execute(
+        "INSERT INTO app_account_domains VALUES ('x', ?1, 1)",
+        [hostname],
+      )
+      .map_err(crate::db::sql_err)?;
+      Ok(())
+    })
+    .await
+    .unwrap();
     let script = serde_json::from_value(
       json!({ "runtime": "shell", "code": "true" }),
     )
     .unwrap();
-    let vars = account_vars(&snap, hostname, true).unwrap();
+    let vars = account_vars(&db, hostname, true).await.unwrap();
     let env = script_env(
       &script,
-      &snap.secrets,
+      &Values::new(),
       &vars,
       hostname,
       "127.0.0.1:80",

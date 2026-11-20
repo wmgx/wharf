@@ -4,6 +4,7 @@
 //! `version`，plan/apply 用它做乐观锁。其他表是运行数据。
 
 use std::{
+  collections::BTreeSet,
   fs::{self, OpenOptions},
   io::Write as _,
   os::unix::fs::OpenOptionsExt,
@@ -1124,25 +1125,32 @@ pub fn service_values(
   conn: &Connection,
   key: &CredentialsKey,
   mut values: std::collections::BTreeMap<String, String>,
+  account_refs: Option<&BTreeSet<String>>,
 ) -> Result<std::collections::BTreeMap<String, String>, ApiError> {
+  if account_refs.is_some_and(BTreeSet::is_empty) {
+    return Ok(values);
+  }
   let mut stmt = conn
     .prepare("SELECT name, username, password FROM app_accounts")
     .map_err(sql_err)?;
   let mut rows = stmt.query([]).map_err(sql_err)?;
   while let Some(row) = rows.next().map_err(sql_err)? {
     let name: String = row.get(0).map_err(sql_err)?;
-    values.insert(
-      format!("account.{name}.username"),
-      row.get(1).map_err(sql_err)?,
-    );
-    values.insert(
-      format!("account.{name}.password"),
-      key.decrypt(
-        "app_accounts",
-        &name,
-        &row.get::<_, String>(2).map_err(sql_err)?,
-      )?,
-    );
+    let username = format!("account.{name}.username");
+    if account_refs.is_none_or(|refs| refs.contains(&username)) {
+      values.insert(username, row.get(1).map_err(sql_err)?);
+    }
+    let password = format!("account.{name}.password");
+    if account_refs.is_none_or(|refs| refs.contains(&password)) {
+      values.insert(
+        password,
+        key.decrypt(
+          "app_accounts",
+          &name,
+          &row.get::<_, String>(2).map_err(sql_err)?,
+        )?,
+      );
+    }
   }
   Ok(values)
 }
@@ -1167,6 +1175,7 @@ pub fn inputs_fingerprint(
 pub fn inputs(
   conn: &Connection,
   key: &CredentialsKey,
+  account_refs: Option<&BTreeSet<String>>,
 ) -> Result<String, ApiError> {
   let world = crate::world::World::from_rows(all_resources(conn)?)?;
   let net =
@@ -1177,6 +1186,7 @@ pub fn inputs(
       conn,
       key,
       crate::oidc::with_client_secrets(&world, &secrets(conn, key)?),
+      account_refs,
     )?,
     &net.addresses(),
   ))
@@ -1962,6 +1972,29 @@ mod tests {
   }
 
   use super::*;
+
+  #[tokio::test]
+  async fn plan_inputs_ignore_unreferenced_app_account_fields() {
+    Db::memory()
+      .call_credentials(|c, key| {
+        let refs =
+          BTreeSet::from(["account.used.username".to_string()]);
+        let put = |name, user, pass| {
+          key.put_app_account(c, name, user, pass, None, 0)
+        };
+        put("used", "fixture-user", "old")?;
+        put("unused", "fixture-user", "old")?;
+        let before = inputs(c, key, Some(&refs))?;
+        put("unused", "other-user", "new")?;
+        put("used", "fixture-user", "new")?;
+        assert_eq!(before, inputs(c, key, Some(&refs))?);
+        put("used", "other-user", "new")?;
+        assert_ne!(before, inputs(c, key, Some(&refs))?);
+        Ok(())
+      })
+      .await
+      .unwrap();
+  }
 
   #[test]
   fn credentials_round_trip_and_reject_tampering() {

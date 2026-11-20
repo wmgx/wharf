@@ -1,3 +1,4 @@
+import { Loader2Icon } from "lucide-react";
 import { api, usePoll } from "@/api";
 import { OidcClient } from "@/components/oidc-client";
 import { useEffect, useState } from "react";
@@ -32,11 +33,11 @@ function DomainDetail({ route, status, onClose, onDirty }: { route: RouteView; s
     finally { setTesting(false); }
   };
   const keys = usePoll<GateKeyView[]>("/api/gate/keys", 30000).data;
-  const { data: accounts, error: accountError } = usePoll<AppAccountView[]>("/api/sso/accounts", null);
-  const linkedAccounts = accounts?.flatMap((account) => {
-    const domain = account.domains.find((domain) => domain.hostname === route.spec.hostname);
-    return domain ? [{ ...account, isDefault: domain.is_default }] : [];
-  }).sort((a, b) => Number(b.isDefault) - Number(a.isDefault));
+  const sso = route.spec.sso;
+  const login = sso?.mode === "login" ? sso.login : undefined;
+  const { data: accounts, error: accountError } = usePoll<AppAccountView[]>(sso?.mode === "login" ? "/api/sso/accounts" : null, null);
+  const account = accounts?.find((a) => a.domains.some((d) => d.hostname === route.spec.hostname && d.is_default));
+  const takeover = login?.takeover;
   const keyCount = keys?.filter((k) => k.hosts.includes(route.spec.hostname)).length ?? 0;
   const [gateOpen, setGateOpen] = useState(false);
   const [alias, setAlias] = useState(false);
@@ -126,16 +127,20 @@ function DomainDetail({ route, status, onClose, onDirty }: { route: RouteView; s
           {gateway?.spec.kind === "cloudflare_tunnel" ? <span className="text-muted-foreground">隧道入口暂不支持访问保护</span> : <Button variant="outline" size="sm" onClick={() => setGateOpen(true)}>设置访问保护</Button>}
         </div>
         {route.spec.sso && !route.spec.sso.public && <Link className="text-primary hover:underline" to="/settings?tab=security#gate-keys">访问凭证（{keyCount}）</Link>}
-        <ErrorNote error={accountError} />
-        {linkedAccounts?.map((account) => <Link key={account.name} className="text-primary hover:underline" to={`/settings?tab=app-accounts&account=${encodeURIComponent(account.name)}`}>
-          {account.isDefault ? "默认账号" : "应用账号"} {account.name}（{account.username}）
-        </Link>)}
-        {linkedAccounts?.length === 0 && <Link className="text-primary hover:underline" to={`/settings?tab=app-accounts&hostname=${encodeURIComponent(route.spec.hostname)}`}>关联账号</Link>}
-        {route.spec.sso?.mode === "login" && <>
-          <div className="flex flex-wrap items-center gap-2"><span className="flex-1">{route.spec.sso.login?.script ? `脚本代登录（${route.spec.sso.login.script.runtime}）` : `替我登录应用 · ${route.spec.sso.login?.steps?.length ?? 0} 步`}</span><Button size="sm" variant="outline" disabled={testing} onClick={testLogin}>测试</Button><a className="text-xs underline" href={`https://${route.spec.hostname}/_wharf/login`} target="_blank" rel="noreferrer">{route.spec.sso.public ? "进入后台" : "重新登录"}</a></div>
+        {login && <div className="grid gap-1 text-sm">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="flex-1">{login.script ? `代登录 · 脚本（${login.script.runtime}）` : `代登录 · ${login.steps.length} 步`}</span>
+            <Button size="sm" variant="outline" disabled={testing} onClick={testLogin}>测试</Button>
+            <a className="text-xs underline" href={`https://${route.spec.hostname}/_wharf/login`} target="_blank" rel="noreferrer">{sso?.public ? "进入后台" : "重新登录"}</a>
+          </div>
+          {login.use_account && <>
+            <ErrorNote error={accountError} />
+            {account ? <p className="break-all">使用账号 <Link className="text-primary hover:underline" to={`/settings?tab=app-accounts&account=${encodeURIComponent(account.name)}`}>{account.name}</Link>（{account.username}）</p>
+              : accounts && !accountError && <p className="text-destructive">没有默认账号，代登录会失败 <Link className="text-primary hover:underline" to={`/settings?tab=app-accounts&hostname=${encodeURIComponent(route.spec.hostname)}`}>去关联</Link></p>}
+          </>}
+          {takeover && <p className="break-all">接管登录页 {takeover.paths.join("、")}{!!takeover.skip_query?.length && `（带 ${takeover.skip_query.join("、")} 参数时不接管）`}</p>}
           {route.sso_login && <span className="break-all text-xs text-muted-foreground">{route.sso_login.ok ? `上次登录 ${ago(new Date(route.sso_login.at).toISOString())}，成功` : `上次登录失败：${route.sso_login.error ?? "登录失败"}`}</span>}
-
-        </>}
+        </div>}
         {route.spec.sso?.mode === "oidc" && <OidcClient hostname={route.spec.hostname} />}
         {route.spec.sso?.mode === "header" && <span className="break-all text-xs text-muted-foreground">传用户名（{route.spec.sso.header ?? "Remote-User"}）</span>}
         {route.spec.sso?.trust_internal && <span className="text-xs text-muted-foreground">组网内免登录</span>}
@@ -171,12 +176,31 @@ function DomainDetail({ route, status, onClose, onDirty }: { route: RouteView; s
     <Dialog open={testOpen} onOpenChange={setTestOpen}>
       <DialogContent aria-describedby={undefined} className="max-h-[85vh] overflow-auto">
         <DialogHeader><DialogTitle>代登录测试</DialogTitle></DialogHeader>
-        {testing && <p>测试中</p>}
+        {testing && <p className="flex items-center gap-2 text-sm" role="status"><Loader2Icon className="size-4 animate-spin" />正在登录…（脚本方式通常 1–3 秒）</p>}
         <ErrorNote error={testError} />
         {testResult && <>
           <p>{testResult.ok ? "成功" : "失败"}</p>
-          <Rows>{[...testResult.steps, ...(testResult.check ? [testResult.check] : [])].map((step) => <Row key={step.number} className="flex-wrap break-all"><span>{step.method} {step.path}</span><span>{step.method === "SCRIPT" ? (step.error ? "失败" : "成功") : step.status ?? "未响应"}</span><span>{Object.entries(step.extracted).map(([name, n]) => `${name}（${n} 个字符）`).join("、")}</span>{step.error && <span className="text-destructive">{step.error}</span>}</Row>)}</Rows>
-          {testResult.would_write.map((text, i) => <p className="break-all text-xs text-muted-foreground" key={i}>{text}</p>)}
+          <Rows>{[...testResult.steps, ...(testResult.check ? [testResult.check] : [])].map((step, i) => {
+            const script = step.method === "SCRIPT";
+            const extracted = Object.entries(step.extracted).map(([name, n]) => `${name}（${n} 个字符）`).join("、");
+            return <Row key={i} className="flex-wrap break-all">
+              <span>{script ? "脚本" : `${step.method} ${step.path}`}</span>
+              <span>{script ? (step.error ? "失败" : "成功") : step.status ?? "未响应"}</span>
+              <span>{step.ms}ms</span>
+              {extracted && <span>取到：{extracted}</span>}
+              {step.error && <span className="text-destructive">{step.error}</span>}
+            </Row>;
+          })}</Rows>
+          {testResult.would_write.length > 0 && <div className="grid gap-1">
+            <p className="text-sm">会写入浏览器：</p>
+            <ul className="grid gap-1 text-xs text-muted-foreground">
+              {testResult.would_write.map((text, i) => <li className="break-all" key={i}>{text}</li>)}
+            </ul>
+          </div>}
+          {testResult.script_log && <details className="text-sm">
+            <summary className="cursor-pointer">脚本输出</summary>
+            <pre className="max-h-60 overflow-auto text-xs">{testResult.script_log}</pre>
+          </details>}
         </>}
         <DialogFooter><Button variant="outline" onClick={() => setTestOpen(false)}>关闭</Button></DialogFooter>
       </DialogContent>

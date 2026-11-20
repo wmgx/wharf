@@ -8,7 +8,7 @@
 //! - 每一步都有超时，可以随时 `wharf run cancel`。
 
 use std::{
-  collections::HashMap,
+  collections::{BTreeSet, HashMap},
   sync::{Arc, Mutex},
   time::Duration,
 };
@@ -209,8 +209,17 @@ pub async fn load_run(
   serde_json::from_str(&body).map_err(json_err)
 }
 
-struct StoredPlan {
+#[derive(serde::Deserialize)]
+struct StoredPlanBody {
+  #[serde(flatten)]
   plan: Plan,
+  // 旧计划没有引用清单，沿用生成时取所有账号的指纹。
+  #[serde(default)]
+  account_refs: Option<BTreeSet<String>>,
+}
+
+struct StoredPlan {
+  body: StoredPlanBody,
   steps: Vec<StepPlan>,
   writes: Vec<Write>,
 }
@@ -219,7 +228,7 @@ pub async fn load_plan(
   state: &AppState,
   id: &str,
 ) -> Result<Plan, ApiError> {
-  Ok(stored_plan(state, id).await?.plan)
+  Ok(stored_plan(state, id).await?.body.plan)
 }
 
 async fn stored_plan(
@@ -247,13 +256,13 @@ async fn stored_plan(
       .with_hint("计划保留 7 天，过期后需要重新 plan")
       .suggest("wharf plan")
   })?;
-  let mut plan: Plan =
+  let mut body: StoredPlanBody =
     serde_json::from_str(&body).map_err(json_err)?;
   if status == "applied" {
-    plan.status = PlanStatus::Applied;
+    body.plan.status = PlanStatus::Applied;
   }
   Ok(StoredPlan {
-    plan,
+    body,
     steps: serde_json::from_str(&steps).map_err(json_err)?,
     writes: serde_json::from_str(&writes).map_err(json_err)?,
   })
@@ -270,7 +279,7 @@ pub async fn start(
     .try_lock_owned()
     .map_err(|_| state.runs.busy_error())?;
   let stored = stored_plan(&state, &req.plan_id).await?;
-  let plan = &stored.plan;
+  let plan = &stored.body.plan;
   let replan = "wharf plan".to_string();
   if plan.status == PlanStatus::Applied {
     return Err(
@@ -398,6 +407,7 @@ pub async fn start(
   {
     let base = plan.base_versions.clone();
     let inputs = plan.inputs.clone();
+    let account_refs = stored.body.account_refs;
     let replan_inputs = replan.clone();
     let writes = stored.writes.clone();
     let plan_id = plan.plan_id.clone();
@@ -413,7 +423,7 @@ pub async fn start(
       .call_credentials(move |c, key| {
         let tx = c.transaction().map_err(sql_err)?;
         if let Some(i) = inputs
-          && i != db::inputs(&tx, key)?
+          && i != db::inputs(&tx, key, account_refs.as_ref())?
         {
           return Err(
             ApiError::new(
