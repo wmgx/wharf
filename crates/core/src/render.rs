@@ -2,14 +2,15 @@
 
 use std::collections::BTreeMap;
 
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use wharf_api_types::{
   ApiError,
   agent::{BUILD_IMAGE_PREFIX, TRIAL_PROJECT_PREFIX},
   spec::{
-    BuildSource, GatewayKind, GatewaySpec, GatewayTls, PortSpec,
-    PrivateAddr, ServiceSpec, Source,
+    BuildSource, GatewayKind, GatewaySpec, GatewayTls, LoginTakeover,
+    PortSpec, PrivateAddr, ServiceSpec, Source,
   },
 };
 
@@ -18,7 +19,7 @@ use crate::world::{ServerRow, World, gateway_project};
 /// 网关默认镜像：官方 Caddy 加 layer4、限速、Cloudflare DNS 插件（deploy/caddy/Dockerfile）。
 /// 标签只在 Caddy 或插件版本变化时改，改了会重建所有没指定镜像的 caddy 网关。
 pub const DEFAULT_CADDY_IMAGE: &str =
-  "ghcr.io/wmgx/wharf-caddy:2.11.9-6";
+  "ghcr.io/wmgx/wharf-caddy:2.11.9-7";
 
 /// Caddyfile 里 acme-dns 密码的占位，执行时换成入口的密钥。
 pub const ACME_DNS_KEY: &str = "[[WHARF_ACME_DNS_KEY]]";
@@ -999,7 +1000,7 @@ pub struct Site {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Gate {
-  /// 公开站点：只转发 `/_wharf/*` 入口，不挂门禁。
+  /// 公开站点只处理代登录入口和配置了接管的路径。
   pub public: bool,
   pub app_login: bool,
   pub user_header: Option<String>,
@@ -1007,6 +1008,7 @@ pub struct Gate {
   pub login: String,
   pub core: String,
   pub skip_paths: Vec<String>,
+  pub takeover: Option<(LoginTakeover, String)>,
 }
 
 /// 内置的错误页。
@@ -1152,8 +1154,32 @@ pub fn caddyfile(
       };
       out.push_str(&format!("\t@wharf_site path /_wharf/*\n\thandle @wharf_site {{\n\t\turi replace /_wharf/ /gate/site/\n\t\treverse_proxy {} {{{host_header}\n\t\t}}\n\t}}\n",gate.core));
     }
-    if let Some(gate) = site.gate.as_ref().filter(|g| !g.public) {
+    if let Some(gate) = site
+      .gate
+      .as_ref()
+      .filter(|g| !g.public || g.takeover.is_some())
+    {
       out.push_str(&format!("\twharf_sso {{\n\t\tpublic_key {}\n\t\tcore {}\n\t\tlogin {}\n",gate_public.unwrap_or(""),gate.core,gate.login));
+      if gate.public {
+        out.push_str("\t\tpublic\n");
+      }
+      if let Some((takeover, entry)) = &gate.takeover {
+        #[derive(Serialize)]
+        struct Takeover<'a> {
+          #[serde(flatten)]
+          config: &'a LoginTakeover,
+          entry: &'a str,
+        }
+        let config = serde_json::to_vec(&Takeover {
+          config: takeover,
+          entry,
+        })
+        .unwrap();
+        out.push_str(&format!(
+          "\t\ttakeover {}\n",
+          URL_SAFE_NO_PAD.encode(config)
+        ));
+      }
       if gate.app_login {
         out.push_str("\t\tapp_login on\n");
       }
@@ -2117,6 +2143,7 @@ mod tests {
         login: "https://core.example.test".into(),
         core: "http://127.0.0.1:7700".into(),
         skip_paths: vec![],
+        takeover: None,
       }),
       ..Default::default()
     }

@@ -431,6 +431,11 @@ pub fn gateway_render(
           login: login.clone(),
           core,
           skip_paths: sso.skip_paths.clone(),
+          takeover: sso.login.as_ref().and_then(|login| {
+            login.takeover.clone().map(|takeover| {
+              (takeover, login.entry.as_deref().unwrap_or("/").into())
+            })
+          }),
         })
       })
       .transpose()?;

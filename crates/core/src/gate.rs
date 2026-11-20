@@ -247,6 +247,8 @@ fn take_ticket(
 pub struct LoginQuery {
   rd: String,
   hop: Option<String>,
+  silent: Option<String>,
+  native: Option<String>,
 }
 fn login_path(rd: &str) -> String {
   format!(
@@ -260,6 +262,32 @@ fn login_path(rd: &str) -> String {
     .unwrap()
   )
 }
+
+fn silent_native(
+  world: &crate::world::World,
+  url: &reqwest::Url,
+  rd: &str,
+) -> Option<reqwest::Url> {
+  use crate::sso_login::{takeover_matches, takeover_path};
+  use wharf_api_types::spec::SsoMode;
+  let config =
+    world.routes.get(url.host_str()?)?.spec.sso.as_ref()?;
+  let takeover = config.login.as_ref()?.takeover.as_ref()?;
+  if !config.public
+    || config.mode != SsoMode::Login
+    || url.path() != "/_wharf/login"
+    || !takeover_matches(&takeover_path(rd)?, &takeover.paths)
+  {
+    return None;
+  }
+  let mut target = url.clone();
+  target.set_path("/_wharf/native");
+  target.set_query(None);
+  target.set_fragment(None);
+  target.query_pairs_mut().append_pair("rd", rd);
+  Some(target)
+}
+
 pub async fn login(
   State(s): State<Arc<AppState>>,
   Query(q): Query<LoginQuery>,
@@ -268,6 +296,18 @@ pub async fn login(
   let snap = crate::snapshot::load(&s.db).await?;
   let Some(url) = rd_url(&snap.world, &q.rd) else {
     return Ok(response(400, None, "跳转地址不对", &[]));
+  };
+  let native_target = if q.silent.as_deref() == Some("1") {
+    let Some(target) = q
+      .native
+      .as_deref()
+      .and_then(|rd| silent_native(&snap.world, &url, rd))
+    else {
+      return Ok(response(400, None, "原生登录地址不对", &[]));
+    };
+    Some(target)
+  } else {
+    None
   };
   if let Some(user) = crate::login::session_user(&s, &headers).await?
   {
@@ -313,7 +353,14 @@ pub async fn login(
     s.db.call(move|c|{c.execute("INSERT INTO audit_log (at,kind,actor,method,path) VALUES (?1,'login',?2,'gate',?3)",params![now_ms(),user,host]).map_err(sql_err)?;Ok(())}).await?;
     return Ok(response(302, Some(target.as_str()), "", &[]));
   }
-  let path = login_path(&q.rd);
+  let mut path = login_path(&q.rd);
+  if let Some(target) = &native_target {
+    if q.hop.as_deref() == Some("1") {
+      return Ok(response(302, Some(target.as_str()), "", &[]));
+    }
+    path.push_str("&silent=1&native=");
+    path.push_str(&urlencoding::encode(q.native.as_deref().unwrap()));
+  }
   if q.hop.as_deref() != Some("1") {
     let target = format!("{path}&hop=1")
       .replace('&', "&amp;")
@@ -550,9 +597,13 @@ pub async fn site_login(
   else {
     return Ok(response(404, None, "域名没有配置代登录", &[]));
   };
-  let rd = login_rd(
-    q.rd.as_deref().or(login.entry.as_deref()).unwrap_or("/"),
-  );
+  let rd = if login.takeover.is_some() {
+    crate::sso_login::takeover_rd(login, q.rd.as_deref())
+  } else {
+    login_rd(
+      q.rd.as_deref().or(login.entry.as_deref()).unwrap_or("/"),
+    )
+  };
   let signing = key(&s.db).await?;
   let authenticated = cookie(&headers, "wharf_gate")
     .and_then(|t| verify(&signing, t, now_ms() / 1000))

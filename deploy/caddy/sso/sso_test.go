@@ -388,3 +388,71 @@ func TestAppLoginBypass(t *testing.T) {
 		})
 	}
 }
+
+func TestTakeover(t *testing.T) {
+	key := ed25519.NewKeyFromSeed(make([]byte, 32))
+	const login = "https://app.example.test/login/continue?rd=%2F%2Foutside.example.test"
+	const core = "https://core.example.test"
+	for _, test := range []struct {
+		name, target, cookie string
+	}{
+		{"有凭证", login, "wharf_gate=" + token(key, "EdDSA", "wharf", time.Now().Unix()+60)},
+		{"无凭证", login, ""},
+		{"原生登录", login, "wharf_native=1"},
+		{"退出登录", login + "&logout", ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			s := plugin(t, "http://127.0.0.1:1")
+			s.Login, s.Public = core, true
+			s.Takeover = &Takeover{Paths: []string{"/login"}, SkipQuery: []string{"logout"}, RDParam: "rd", Entry: "/console"}
+			request := func(target, cookie string) *httptest.ResponseRecorder {
+				r := httptest.NewRequest(http.MethodGet, target, nil)
+				r.Header.Set("Accept", "text/html")
+				r.Header.Set("Cookie", cookie)
+				w := httptest.NewRecorder()
+				err := s.ServeHTTP(w, r, caddyhttp.HandlerFunc(func(w http.ResponseWriter, r *http.Request) error {
+					if r.Header.Get("Cookie") != "" {
+						t.Fatal("应用收到 Wharf cookie")
+					}
+					w.WriteHeader(http.StatusNoContent)
+					return nil
+				}))
+				if err != nil {
+					t.Fatal(err)
+				}
+				return w
+			}
+			first := request(test.target, test.cookie)
+			switch test.name {
+			case "有凭证":
+				if first.Code != 302 || first.Header().Get("Location") != "/_wharf/login?rd=%2Fconsole" {
+					t.Fatal("应代登录并回到 entry")
+				}
+			case "无凭证":
+				loc, err := url.Parse(first.Header().Get("Location"))
+				if err != nil || first.Code != 302 || loc.Host != "core.example.test" || loc.Path != "/gate/login" ||
+					loc.Query().Get("silent") != "1" || loc.Query().Get("rd") != "https://app.example.test/_wharf/login?rd=%2Fconsole" {
+					t.Fatal("应静默检查 Wharf 会话")
+				}
+				// 模拟控制面确认访客后跳回当前域名。
+				native := loc.Query().Get("native")
+				back := request("https://app.example.test/_wharf/native?rd="+url.QueryEscape(native), "")
+				cookies := back.Result().Cookies()
+				if back.Code != 302 || back.Header().Get("Location") != native || len(cookies) != 1 {
+					t.Fatal("应跳回原生登录页")
+				}
+				c := cookies[0]
+				if c.Name != "wharf_native" || c.MaxAge != 600 || c.Path != "/" || !c.HttpOnly || !c.Secure || c.SameSite != http.SameSiteLaxMode {
+					t.Fatal("原生登录 cookie 无效")
+				}
+				if request("https://app.example.test"+native, c.Name+"="+c.Value).Code != 204 {
+					t.Fatal("回到原生登录页后应直接放行")
+				}
+			default:
+				if first.Code != 204 {
+					t.Fatal("应直接放行")
+				}
+			}
+		})
+	}
+}

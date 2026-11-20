@@ -1207,6 +1207,7 @@ export interface LoginSpec {
   entry?: string | null;
   script?: LoginScript | null;
   steps: LoginStep[];
+  takeover?: LoginTakeover | null;
   ttl_hours: number;
   use_account?: boolean;
   write: LoginWrite[];
@@ -1221,6 +1222,13 @@ export interface LoginStep {
   json?: unknown;
   method: string;
   path: string;
+}
+
+export interface LoginTakeover {
+  native_minutes: number;
+  paths: string[];
+  rd_param?: string | null;
+  skip_query?: string[];
 }
 
 export type LoginWrite = {

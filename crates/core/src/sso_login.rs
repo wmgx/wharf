@@ -138,6 +138,53 @@ fn env_refs(value: &str) -> Result<Vec<&str>, ApiError> {
   }
   Ok(names)
 }
+pub(crate) fn takeover_path(raw: &str) -> Option<String> {
+  if !raw.starts_with('/')
+    || raw.starts_with("//")
+    || raw.contains('\\')
+    || raw.chars().any(char::is_control)
+  {
+    return None;
+  }
+  let url =
+    reqwest::Url::parse(&format!("https://example.test{raw}"))
+      .ok()?;
+  let path = urlencoding::decode(url.path()).ok()?;
+  if path.starts_with("//")
+    || path == "/_wharf"
+    || path.starts_with("/_wharf/")
+  {
+    return None;
+  }
+  Some(path.into_owned())
+}
+
+pub(crate) fn takeover_matches(path: &str, paths: &[String]) -> bool {
+  paths.iter().any(|prefix| {
+    path == prefix
+      || path
+        .strip_prefix(prefix.trim_end_matches('/'))
+        .is_some_and(|rest| rest.starts_with('/'))
+  })
+}
+
+pub(crate) fn takeover_rd<'a>(
+  login: &'a LoginSpec,
+  raw: Option<&'a str>,
+) -> &'a str {
+  raw
+    .filter(|rd| {
+      takeover_path(rd).is_some_and(|path| {
+        login
+          .takeover
+          .as_ref()
+          .is_none_or(|t| !takeover_matches(&path, &t.paths))
+      })
+    })
+    .or(login.entry.as_deref())
+    .unwrap_or("/")
+}
+
 pub fn validate(host: &str, sso: &SsoSpec) -> Result<(), ApiError> {
   let fail = |s: &str| ApiError::invalid(format!("域名 {host}：{s}"));
   if (sso.mode == SsoMode::Login) != sso.login.is_some() {
@@ -174,6 +221,26 @@ pub fn validate(host: &str, sso: &SsoSpec) -> Result<(), ApiError> {
       || e.contains(['\\', '\r', '\n'])
   }) {
     return Err(fail("entry 要写成站内路径，例如 /admin/"));
+  }
+  if let Some(t) = &login.takeover {
+    if t.paths.is_empty()
+      || t.paths.iter().any(|p| {
+        p.contains(['?', '#']) || takeover_path(p).as_ref() != Some(p)
+      })
+    {
+      return Err(fail(
+        "takeover.paths 至少填一条站内登录路径，例如 /login",
+      ));
+    }
+    let entry = login.entry.as_deref().unwrap_or("/");
+    if takeover_path(entry)
+      .is_none_or(|path| takeover_matches(&path, &t.paths))
+    {
+      return Err(fail("代登录完成后的 entry 不能指向接管的登录页"));
+    }
+    if t.native_minutes == 0 {
+      return Err(fail("takeover.native_minutes 须大于 0"));
+    }
   }
   if login.script.is_some() != login.steps.is_empty() {
     return Err(fail("steps 和 script 必须二选一"));
@@ -1231,6 +1298,45 @@ mod tests {
       check(json!({"steps": steps, "script": script})).is_err()
     );
     assert!(check(json!({})).is_err());
+  }
+
+  #[test]
+  fn takeover_validates_paths_and_return_address() {
+    let spec = |path| {
+      serde_json::from_value::<SsoSpec>(json!({
+        "mode": "login",
+        "public": true,
+        "login": {
+          "script": {"runtime": "shell", "code": "true"},
+          "entry": "/console",
+          "takeover": {"paths": [path], "rd_param": "redirect_uri"}
+        }
+      }))
+      .unwrap()
+    };
+    for bad in [
+      "login",
+      "//outside.example.test",
+      "/_wharf/login",
+      "/a/../_wharf/login",
+    ] {
+      assert!(validate("a.example.test", &spec(bad)).is_err());
+    }
+    let sso = spec("/login");
+    assert!(validate("a.example.test", &sso).is_ok());
+    let login = sso.login.as_ref().unwrap();
+    for bad in [
+      "https://outside.example.test/",
+      "//outside.example.test/",
+      "/\\outside.example.test/",
+      "/login/",
+    ] {
+      assert_eq!(takeover_rd(login, Some(bad)), "/console");
+    }
+    assert_eq!(
+      takeover_rd(login, Some("/details?q=1")),
+      "/details?q=1"
+    );
   }
 
   #[test]
