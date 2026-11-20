@@ -75,20 +75,16 @@ pub(crate) async fn credentials(
     .map_err(|e| ApiError::internal(format!("计算哈希失败：{e}")))?;
   state
     .db
-    .call(move |c| {
+    .call_credentials(move |c, credentials| {
       let now = now_ms();
       for (name, value) in [
         (KEY_SECRET, key),
         (HTTP_SECRET, http),
         (HTTP_HASH_SECRET, http_hash),
       ] {
-        c.execute(
-          "INSERT OR IGNORE INTO secrets (name, value, updated_at) VALUES (?1, ?2, ?3)",
-          params![name, value, now],
-        )
-        .map_err(sql_err)?;
+        credentials.put_secret(c, name, &value, now, false)?;
       }
-      let secrets = crate::db::secrets(c)?;
+      let secrets = crate::db::secrets(c, credentials)?;
       let get = |n: &str| secrets.get(n).cloned().unwrap_or_default();
       Ok(Creds {
         key: get(KEY_SECRET),

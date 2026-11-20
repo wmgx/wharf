@@ -162,15 +162,11 @@ pub async fn enable(
   let owner = format!("{username}:{owner}");
   let to = req.to.clone();
   s.db
-    .call(move |c| {
-      db::set_setting(c, TO, Some(&to))?;
-      c.execute(
-        "INSERT INTO secrets (name, value, updated_at) VALUES (?1, ?2, ?3)
-         ON CONFLICT (name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-        params![OWNER_SECRET, owner, now_ms()],
-      )
-      .map_err(sql_err)?;
-      Ok(())
+    .call_credentials(move |c, key| {
+      let tx = c.transaction().map_err(sql_err)?;
+      db::set_setting(&tx, TO, Some(&to))?;
+      key.put_secret(&tx, OWNER_SECRET, &owner, now_ms(), true)?;
+      tx.commit().map_err(sql_err)
     })
     .await?;
   Ok(Json(
@@ -481,7 +477,7 @@ fn local_job(
   backup::job(snap, target, REPO, ResticRepo::Local, creds, action)
 }
 
-/// 把数据库快照、控制面密钥、管理员 token 放进 [CORE_BACKUP_DIR]，返回标记。
+/// 把数据库快照、控制面密钥、加密主密钥、管理员 token 放进 [CORE_BACKUP_DIR]，返回标记。
 async fn stage(state: &AppState) -> Result<String, ApiError> {
   let dir = Path::new(CORE_BACKUP_DIR);
   let _ = std::fs::remove_dir_all(dir);
@@ -513,6 +509,10 @@ async fn stage(state: &AppState) -> Result<String, ApiError> {
       })?;
     }
   }
+  let key = db::CREDENTIALS_KEY_FILE;
+  std::fs::copy(state.data_dir.join(key), dir.join(key)).map_err(
+    |e| ApiError::internal(format!("备份主密钥 {key} 失败：{e}")),
+  )?;
   let marker = backup::random_hex();
   std::fs::write(dir.join(".marker"), &marker)
     .map_err(|e| ApiError::internal(format!("写标记：{e}")))?;

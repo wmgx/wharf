@@ -79,9 +79,8 @@ pub async fn deploy_compose(
   let secret = OAUTH_SECRET.to_string();
   let credential = state
     .db
-    .call(move |c| crate::db::secrets(c))
+    .call_credentials(move |c, key| key.secret(c, &secret))
     .await?
-    .remove(&secret)
     .ok_or_else(|| {
       ApiError::invalid("还没有设置 Tailscale 的 OAuth 客户端")
         .with_hint(format!(

@@ -2968,8 +2968,15 @@ async fn app_account(
         struct Password {
           password: String,
         }
+        let wharf_password =
+          rpassword::prompt_password("Wharf 登录密码：").map_err(
+            |_| ApiError::invalid("需要在终端输入 Wharf 登录密码"),
+          )?;
         let Password { password } = c
-          .post(&format!("{}/password", path(&name)), &json!({}))
+          .post(
+            &format!("{}/password", path(&name)),
+            &json!({"password": wharf_password}),
+          )
           .await?;
         if j {
           #[derive(serde::Serialize)]

@@ -1,7 +1,7 @@
 import { EllipsisIcon, PlusIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { api, usePoll } from "@/api";
+import { api, ApiError, usePoll } from "@/api";
 import { ago, Empty, ErrorNote, SectionTitle } from "@/components/common";
 import { Field, Picker } from "@/components/fields";
 import { ConfirmDialog, Panel } from "@/components/kit";
@@ -15,6 +15,7 @@ import type { AppAccountView } from "@/types.gen";
 
 const endpoint = "/api/sso/accounts";
 const accountPath = (name: string) => `${endpoint}/${encodeURIComponent(name)}`;
+type PasswordAction = { name: string; copyOnly: boolean };
 
 export function AppAccounts({ selected, hostname }: { selected: string | null; hostname: string | null }) {
   const { status } = useStatus();
@@ -22,6 +23,7 @@ export function AppAccounts({ selected, hostname }: { selected: string | null; h
   const [editing, setEditing] = useState<AppAccountView | "new" | null>(null);
   const [removing, setRemoving] = useState<AppAccountView | null>(null);
   const [revealed, setRevealed] = useState<{ name: string; password: string } | null>(null);
+  const [verification, setVerification] = useState<PasswordAction | null>(null);
   const [failure, setFailure] = useState<unknown>(null);
   const selectedExists = data?.some((account) => account.name === selected);
   useEffect(() => {
@@ -32,13 +34,20 @@ export function AppAccounts({ selected, hostname }: { selected: string | null; h
     await navigator.clipboard.writeText(value);
     toast.success(`已复制${label}`);
   };
-  const readPassword = async (name: string, copyOnly: boolean) => {
+  const readPassword = async ({ name, copyOnly }: PasswordAction, wharfPassword?: string) => {
+    const { password } = await api.post<{ password: string }>(`${accountPath(name)}/password`, { password: wharfPassword });
+    if (copyOnly) await copy(password, "密码");
+    else setRevealed({ name, password });
+  };
+  const requestPassword = async (name: string, copyOnly: boolean) => {
     setFailure(null);
+    const action = { name, copyOnly };
     try {
-      const { password } = await api.post<{ password: string }>(`${accountPath(name)}/password`, {});
-      if (copyOnly) await copy(password, "密码");
-      else setRevealed({ name, password });
-    } catch (e) { setFailure(e); }
+      await readPassword(action);
+    } catch (e) {
+      if (e instanceof ApiError && e.body.code === "PasswordRequired") setVerification(action);
+      else setFailure(e);
+    }
   };
   const remove = async (account: AppAccountView) => {
     setRemoving(null);
@@ -65,8 +74,8 @@ export function AppAccounts({ selected, hostname }: { selected: string | null; h
             <DropdownMenuContent align="end">
               <DropdownMenuItem onSelect={() => setEditing(account)}>编辑</DropdownMenuItem>
               <DropdownMenuItem onSelect={() => { setFailure(null); void copy(account.username, "用户名").catch(setFailure); }}>复制用户名</DropdownMenuItem>
-              <DropdownMenuItem onSelect={() => void readPassword(account.name, false)}>显示密码</DropdownMenuItem>
-              <DropdownMenuItem onSelect={() => void readPassword(account.name, true)}>复制密码</DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => void requestPassword(account.name, false)}>显示密码</DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => void requestPassword(account.name, true)}>复制密码</DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuItem variant="destructive" onSelect={() => setRemoving(account)}>删除</DropdownMenuItem>
             </DropdownMenuContent>
@@ -79,6 +88,10 @@ export function AppAccounts({ selected, hostname }: { selected: string | null; h
     <ConfirmDialog open={!!removing} title={`删除应用账号 ${removing?.name}？`} onCancel={() => setRemoving(null)} onConfirm={() => removing && remove(removing)}>
       {!!removing?.domains.length && `关联域名 ${removing.domains.map((d) => d.hostname).join("、")}`}
     </ConfirmDialog>
+    {verification && <VerifyPassword onClose={() => setVerification(null)} onVerify={async (password) => {
+      await readPassword(verification, password);
+      setVerification(null);
+    }} />}
     {revealed && <Dialog open onOpenChange={(open) => !open && setRevealed(null)}>
       <DialogContent aria-describedby={undefined}>
         <DialogHeader><DialogTitle>{revealed.name} 的密码</DialogTitle></DialogHeader>
@@ -86,6 +99,33 @@ export function AppAccounts({ selected, hostname }: { selected: string | null; h
       </DialogContent>
     </Dialog>}
   </>;
+}
+
+function VerifyPassword({ onClose, onVerify }: { onClose: () => void; onVerify: (password: string) => Promise<void> }) {
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState<unknown>(null);
+  const [busy, setBusy] = useState(false);
+  return <Dialog open onOpenChange={(open) => !open && !busy && onClose()}>
+    <DialogContent aria-describedby={undefined}>
+      <DialogHeader><DialogTitle>验证 Wharf 登录密码</DialogTitle></DialogHeader>
+      <form className="grid gap-4" onSubmit={async (e) => {
+        e.preventDefault();
+        if (busy || !password) return;
+        setBusy(true);
+        setError(null);
+        try { await onVerify(password); }
+        catch (e) { setError(e); setPassword(""); }
+        finally { setBusy(false); }
+      }}>
+        <Input type="password" autoComplete="current-password" aria-label="Wharf 登录密码" autoFocus value={password} onChange={(e) => setPassword(e.target.value)} />
+        <ErrorNote error={error} />
+        <DialogFooter>
+          <Button type="button" variant="outline" disabled={busy} onClick={onClose}>取消</Button>
+          <Button disabled={busy || !password}>验证</Button>
+        </DialogFooter>
+      </form>
+    </DialogContent>
+  </Dialog>;
 }
 
 function AccountDomains({ account, preferred, hostnames, refresh }: { account: AppAccountView; preferred: string | null; hostnames: string[]; refresh: () => Promise<void> }) {

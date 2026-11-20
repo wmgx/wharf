@@ -28,7 +28,10 @@ enum Channel {
 async fn channels(
   state: &AppState,
 ) -> Result<Vec<Channel>, ApiError> {
-  let secrets = state.db.call(|c| db::secrets(c)).await?;
+  let secrets = state
+    .db
+    .call_credentials(|c, key| db::secrets(c, key))
+    .await?;
   let get = |n: &str| {
     secrets
       .get(n)

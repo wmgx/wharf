@@ -21,6 +21,7 @@ pub enum ErrorCode {
   Conflict,
   Unauthorized,
   Forbidden,
+  PasswordRequired,
   /// plan 之后资源已被修改，需要重新 plan。CLI 退出码 3。
   PlanStale,
   /// 计划里有高风险项，需要 `--confirm`。CLI 退出码 2。
@@ -47,6 +48,7 @@ impl ErrorCode {
       Self::Conflict => "Conflict",
       Self::Unauthorized => "Unauthorized",
       Self::Forbidden => "Forbidden",
+      Self::PasswordRequired => "PasswordRequired",
       Self::PlanStale => "PlanStale",
       Self::ConfirmRequired => "ConfirmRequired",
       Self::Busy => "Busy",
@@ -65,7 +67,7 @@ impl ErrorCode {
     match self {
       Self::InvalidInput => 400,
       Self::Unauthorized => 401,
-      Self::Forbidden => 403,
+      Self::Forbidden | Self::PasswordRequired => 403,
       Self::NotFound => 404,
       Self::AlreadyExists
       | Self::Conflict

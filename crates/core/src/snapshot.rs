@@ -104,11 +104,11 @@ pub async fn load(db: &Db) -> Result<Snapshot, ApiError> {
 }
 
 async fn load_inner(db: &Db) -> Result<Snapshot, ApiError> {
-  db.call(|c| {
+  db.call_credentials(|c, key| {
     let world = World::from_rows(db::all_resources(c)?)?;
     let secrets =
-      crate::oidc::with_client_secrets(&world, &db::secrets(c)?);
-    let service_values = db::service_values(c, secrets.clone())?;
+      crate::oidc::with_client_secrets(&world, &db::secrets(c, key)?);
+    let service_values = db::service_values(c, key, secrets.clone())?;
     Ok(
       Snapshot {
         world,
