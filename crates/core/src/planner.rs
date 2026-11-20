@@ -450,10 +450,20 @@ pub async fn make_plan(
     }
   }
 
-  for route in desired.routes.values() {
+  for (host, route) in &desired.routes {
     if let Some(login) =
       route.spec.sso.as_ref().and_then(|s| s.login.as_ref())
     {
+      if login.use_account
+        && !snap.app_account_defaults.contains_key(host)
+      {
+        let error = crate::sso_login::missing_account(host);
+        warnings.push(format!(
+          "{}（{}）",
+          error.message,
+          error.hint.unwrap_or_default()
+        ));
+      }
       for name in crate::sso_login::secret_refs(login) {
         if !snap.secrets.contains_key(&name) {
           warnings
@@ -657,7 +667,7 @@ pub async fn make_plan(
     base_versions: current.versions(),
     inputs: Some(crate::db::inputs_fingerprint(
       &snap.reach,
-      &snap.secrets,
+      &snap.service_values,
       &snap.net(&snap.world).addresses(),
     )),
     items: b.items,
@@ -1063,8 +1073,12 @@ fn service_items(
       move_items(b, current, name, from, server, net);
     }
 
-    let (_, hash) =
-      snapshot::service_resolved(desired, net, name, &snap.secrets)?;
+    let (_, hash) = snapshot::service_resolved(
+      desired,
+      net,
+      name,
+      &snap.service_values,
+    )?;
     let template = snapshot::service_template(desired, net, name)?;
     let after =
       Some(json!({ "server": server, "compose": template }));

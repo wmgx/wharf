@@ -300,9 +300,14 @@ pub fn service_view(
     })
     .unwrap_or_default();
   let hash = live.and_then(|_| {
-    snapshot::service_resolved(&snap.world, net, name, &snap.secrets)
-      .ok()
-      .map(|(_, h)| h)
+    snapshot::service_resolved(
+      &snap.world,
+      net,
+      name,
+      &snap.service_values,
+    )
+    .ok()
+    .map(|(_, h)| h)
   });
   let status = live.map(|live| {
     let project = live

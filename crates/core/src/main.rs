@@ -11,6 +11,7 @@ mod agent_upgrade;
 mod alert_context;
 mod alerts;
 mod api;
+mod app_accounts;
 mod apply;
 mod apt;
 mod audit;

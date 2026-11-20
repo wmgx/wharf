@@ -1372,8 +1372,12 @@ async fn service_up(
     )
   })?;
   let server = &row.spec.server;
-  let (compose, hash) =
-    snapshot::service_resolved(world, &net, service, &snap.secrets)?;
+  let (compose, hash) = snapshot::service_resolved(
+    world,
+    &net,
+    service,
+    &snap.service_values,
+  )?;
   // 先比对指纹再构建：计划过期时不用白构建一次。
   check_expect(expect, &hash, &format!("服务 {service}"))?;
   let commit = crate::build::ensure_image(
@@ -1411,7 +1415,7 @@ async fn service_up(
       world,
       &net,
       service,
-      &snap.secrets,
+      &snap.service_values,
     )?)
   } else {
     None

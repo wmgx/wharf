@@ -16,19 +16,19 @@ use wharf_api_types::{
     VolumeSpec,
   },
   view::{
-    AccountView, AutoUpdateResult, BackupsView, CheckStatus,
-    CreatedToken, DataView, DeploymentView, DoctorReport,
-    GatewayView, HostExecResponse, ImportPreview, ImportRequest,
-    JoinInfo, NetworkView, RestoreRequest, RollbackTarget, RouteView,
-    SecretView, ServerView, ServiceView, ShellLog, Status, TokenView,
-    Unmanaged,
+    AccountView, AppAccountView, AutoUpdateResult, BackupsView,
+    CheckStatus, CreatedToken, DataView, DeploymentView,
+    DoctorReport, GatewayView, HostExecResponse, ImportPreview,
+    ImportRequest, JoinInfo, NetworkView, RestoreRequest,
+    RollbackTarget, RouteView, SecretView, ServerView, ServiceView,
+    ShellLog, Status, TokenView, Unmanaged,
   },
 };
 
 use crate::{
-  AccountCmd, AlertCmd, ApplyFlags, BackupCmd, BuildArgs, Cli,
-  Command, EgressCmd, GatewayCmd, NotifyCmd, RouteCmd, RunCmd,
-  SecretCmd, ServerCmd, ServiceCmd, TokenCmd,
+  AccountCmd, AlertCmd, AppAccountCmd, ApplyFlags, BackupCmd,
+  BuildArgs, Cli, Command, EgressCmd, GatewayCmd, NotifyCmd,
+  RouteCmd, RunCmd, SecretCmd, ServerCmd, ServiceCmd, TokenCmd,
   client::{CliError, CliResult, Client, Config, read_secret, seg},
   fleet, print,
 };
@@ -69,6 +69,9 @@ async fn dispatch(
 ) -> CliResult<()> {
   match command {
     Command::Login { .. } | Command::Schema { .. } => unreachable!(),
+    Command::Sso(crate::SsoCmd::Account(cmd)) => {
+      app_account(c, cmd, j).await
+    }
     Command::Sso(crate::SsoCmd::Oidc { hostname }) => {
       let mut view: wharf_api_types::view::OidcView =
         c.get("/api/oidc").await?;
@@ -2894,6 +2897,122 @@ async fn account(
       Ok(())
     }
   }
+}
+
+fn print_app_account(account: &AppAccountView) {
+  let domains = account
+    .domains
+    .iter()
+    .map(|d| {
+      format!(
+        "{}{}{}",
+        d.hostname,
+        if d.is_default { "（默认）" } else { "" },
+        if d.exists {
+          ""
+        } else {
+          "（域名不存在）"
+        }
+      )
+    })
+    .collect::<Vec<_>>()
+    .join("、");
+  println!(
+    "{}\t{}\t{}\t{}\t{}",
+    account.name,
+    account.username,
+    domains,
+    account.note,
+    account.updated_at.to_rfc3339()
+  );
+}
+
+async fn app_account(
+  c: &Client,
+  cmd: AppAccountCmd,
+  j: bool,
+) -> CliResult<()> {
+  let path = |name: &str| format!("/api/sso/accounts/{}", seg(name));
+  let domains = |name: &str, hostname: &str| {
+    format!("{}/domains/{}", path(name), seg(hostname))
+  };
+  match cmd {
+    AppAccountCmd::List => {
+      let accounts: Vec<AppAccountView> =
+        c.get("/api/sso/accounts").await?;
+      out(j, &accounts, |accounts| {
+        accounts.iter().for_each(print_app_account)
+      });
+    }
+    AppAccountCmd::Set {
+      name,
+      user,
+      note,
+      keep_password,
+    } => {
+      let password = if keep_password {
+        None
+      } else {
+        Some(read_secret("应用账号密码：")?)
+      };
+      let account: AppAccountView = c.put(&path(&name), &json!({"username": user, "password": password, "note": note})).await?;
+      out(j, &account, |account| {
+        println!("已保存应用账号 {}", account.name)
+      });
+    }
+    AppAccountCmd::Show { name, reveal } => {
+      let account: AppAccountView = c.get(&path(&name)).await?;
+      if reveal {
+        #[derive(serde::Deserialize)]
+        struct Password {
+          password: String,
+        }
+        let Password { password } = c
+          .post(&format!("{}/password", path(&name)), &json!({}))
+          .await?;
+        if j {
+          #[derive(serde::Serialize)]
+          struct Revealed<'a> {
+            #[serde(flatten)]
+            account: &'a AppAccountView,
+            password: String,
+          }
+          print::json(&Revealed {
+            account: &account,
+            password,
+          });
+        } else {
+          print_app_account(&account);
+          println!("{password}");
+        }
+      } else {
+        out(j, &account, print_app_account);
+      }
+    }
+    AppAccountCmd::Rm { name } => {
+      let result: Value = c.delete(&path(&name)).await?;
+      out(j, &result, |_| println!("已删除应用账号 {name}"));
+    }
+    AppAccountCmd::Link {
+      name,
+      hostname,
+      default,
+    } => {
+      let account: AppAccountView = c
+        .put(
+          &domains(&name, &hostname),
+          &json!({"is_default": default}),
+        )
+        .await?;
+      out(j, &account, print_app_account);
+    }
+    AppAccountCmd::Unlink { name, hostname } => {
+      let account: AppAccountView =
+        c.delete(&domains(&name, &hostname)).await?;
+      out(j, &account, print_app_account);
+    }
+  }
+  Ok(())
 }
 
 async fn secret(

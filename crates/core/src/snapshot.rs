@@ -26,8 +26,10 @@ pub struct Snapshot {
   pub sso_login: BTreeMap<String, String>,
   pub agents: Vec<AgentRow>,
   pub accounts: Vec<AccountRow>,
+  pub app_account_defaults: BTreeMap<String, String>,
   pub owned: Vec<OwnedRecord>,
   pub secrets: BTreeMap<String, String>,
+  pub service_values: BTreeMap<String, String>,
   /// 每个服务最近一次成功部署在哪台服务器上。和配置里的服务器不同，说明迁移还没完成。
   pub deployed: BTreeMap<String, String>,
   /// cloudflare_tunnel 网关已经创建的隧道。
@@ -106,14 +108,17 @@ async fn load_inner(db: &Db) -> Result<Snapshot, ApiError> {
     let world = World::from_rows(db::all_resources(c)?)?;
     let secrets =
       crate::oidc::with_client_secrets(&world, &db::secrets(c)?);
+    let service_values = db::service_values(c, secrets.clone())?;
     Ok(
       Snapshot {
         world,
         agents: db::agents(c)?,
         accounts: db::accounts(c)?,
+        app_account_defaults: crate::app_accounts::defaults(c)?,
         sso_login: db::settings_with_prefix(c, "sso.login.")?,
         owned: db::owned_records(c)?,
         secrets,
+        service_values,
         deployed: db::deployed_servers(c)?,
         applied: db::applied(c)?,
         ops: db::service_ops(c)?,
