@@ -108,7 +108,12 @@ async fn load_inner(db: &Db) -> Result<Snapshot, ApiError> {
     let world = World::from_rows(db::all_resources(c)?)?;
     let secrets =
       crate::oidc::with_client_secrets(&world, &db::secrets(c, key)?);
-    let service_values = db::service_values(c, key, secrets.clone())?;
+    let service_values = db::service_values(
+      c,
+      key,
+      secrets.clone(),
+      Some(&render::service_account_refs(&world)),
+    )?;
     Ok(
       Snapshot {
         world,

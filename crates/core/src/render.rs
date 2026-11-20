@@ -1,6 +1,6 @@
 //! 由期望状态渲染出 compose 文件和 Caddyfile。纯函数，不碰网络和数据库。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::Serialize;
@@ -264,11 +264,8 @@ fn substitute_values(
   let mut out = String::with_capacity(text.len());
   let mut rest = text;
   let mut missing = Vec::new();
-  while let Some(start) = rest.find("[[") {
-    let Some(len) = rest[start + 2..].find("]]") else {
-      break;
-    };
-    let name = &rest[start + 2..start + 2 + len];
+  while let Some((start, name)) = next_placeholder(rest) {
+    let len = name.len();
     let is_name = !name.is_empty()
       && name
         .bytes()
@@ -309,6 +306,33 @@ fn substitute_values(
     );
   }
   Ok(out)
+}
+
+fn next_placeholder(text: &str) -> Option<(usize, &str)> {
+  let start = text.find("[[")?;
+  let rest = &text[start + 2..];
+  Some((start, &rest[..rest.find("]]")?]))
+}
+
+pub fn service_account_refs(world: &World) -> BTreeSet<String> {
+  let mut refs = BTreeSet::new();
+  for row in world.services.values() {
+    let content = match &row.spec.source {
+      Source::Compose { content, .. } => content.as_deref(),
+      _ => None,
+    };
+    for mut text in
+      row.spec.env.values().map(String::as_str).chain(content)
+    {
+      while let Some((start, name)) = next_placeholder(text) {
+        if account_ref(name).is_some() {
+          refs.insert(name.to_string());
+        }
+        text = &text[start + name.len() + 4..];
+      }
+    }
+  }
+  refs
 }
 
 fn account_ref(name: &str) -> Option<&str> {

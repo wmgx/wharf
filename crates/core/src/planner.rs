@@ -259,6 +259,7 @@ pub struct StepPlan {
 /// 存进数据库的完整计划。
 pub struct Planned {
   pub plan: Plan,
+  pub account_refs: BTreeSet<String>,
   pub steps: Vec<StepPlan>,
   pub writes: Vec<Write>,
 }
@@ -325,7 +326,7 @@ pub async fn make_plan(
   state: &AppState,
   req: PlanRequest,
 ) -> Result<Planned, ApiError> {
-  let snap = snapshot::load(&state.db).await?;
+  let mut snap = snapshot::load(&state.db).await?;
   let current = snap.world.clone();
   let mut desired = current.clone();
   if let Some(fleet) = &req.fleet {
@@ -600,6 +601,17 @@ pub async fn make_plan(
     gather_status(state, &snap, &current, &desired, &net, &mut b)
       .await;
   mark("容器状态");
+  let account_refs = crate::render::service_account_refs(&desired);
+  if account_refs != crate::render::service_account_refs(&current) {
+    let refs = account_refs.clone();
+    let secrets = snap.secrets.clone();
+    snap.service_values = state
+      .db
+      .call_credentials(move |c, key| {
+        crate::db::service_values(c, key, secrets, Some(&refs))
+      })
+      .await?;
+  }
   service_items(
     &mut b, &snap, &current, &desired, &net, &status, &writes,
   )?;
@@ -677,6 +689,7 @@ pub async fn make_plan(
   };
   Ok(Planned {
     plan,
+    account_refs,
     steps: b.steps,
     writes,
   })
@@ -2414,8 +2427,10 @@ pub async fn save(
   planned: &Planned,
 ) -> Result<(), ApiError> {
   let id = planned.plan.plan_id.clone();
-  let body =
-    serde_json::to_string(&planned.plan).map_err(db::json_err)?;
+  let mut body =
+    serde_json::to_value(&planned.plan).map_err(db::json_err)?;
+  body["account_refs"] = json!(&planned.account_refs);
+  let body = body.to_string();
   let steps =
     serde_json::to_string(&planned.steps).map_err(db::json_err)?;
   let writes =
