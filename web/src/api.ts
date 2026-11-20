@@ -146,7 +146,7 @@ const pollCache = new Map<string, unknown>();
 export const clearPollCache = () => pollCache.clear();
 
 /** 定时拉取一个接口。返回数据、错误和手动刷新。 */
-export function usePoll<T>(path: string | null, intervalMs = 5000) {
+export function usePoll<T>(path: string | null, intervalMs: number | null = 5000) {
   const [data, setData] = useState<T | null>(() => (path ? ((pollCache.get(path) as T) ?? null) : null));
   const [error, setError] = useState<ApiError | null>(null);
   const pathRef = useRef(path);
@@ -171,7 +171,7 @@ export function usePoll<T>(path: string | null, intervalMs = 5000) {
     setData(path ? ((pollCache.get(path) as T) ?? null) : null);
     refresh();
     if (!path) return;
-    const t = setInterval(refresh, intervalMs);
+    const t = intervalMs === null ? undefined : setInterval(refresh, intervalMs);
     const onFocus = () => refresh();
     window.addEventListener("focus", onFocus);
     return () => {

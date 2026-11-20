@@ -157,6 +157,15 @@ pub fn validate(host: &str, sso: &SsoSpec) -> Result<(), ApiError> {
   let Some(login) = &sso.login else {
     return Ok(());
   };
+  let account_ref = |name: &str| -> Result<bool, ApiError> {
+    if name.starts_with("account.") && !login.use_account {
+      return Err(
+        fail("代登录模板引用了应用账号")
+          .with_hint("在登录配置里加 use_account: true"),
+      );
+    }
+    Ok(matches!(name, "account.username" | "account.password"))
+  };
   if login.entry.as_deref().is_some_and(|e| {
     !e.starts_with('/')
       || e.starts_with("//")
@@ -183,11 +192,14 @@ pub fn validate(host: &str, sso: &SsoSpec) -> Result<(), ApiError> {
       return Err(fail("脚本 timeout_secs 须为 5 到 120"));
     }
     for (key, value) in &script.env {
-      if key.is_empty()
-        || key.contains(['=', '\n', '\r', '\0'])
-        || matches!(key.as_str(), "WHARF_HOST" | "WHARF_UPSTREAM")
-      {
-        return Err(fail("脚本环境变量名无效或由 Wharf 提供"));
+      if key.starts_with("WHARF_") {
+        return Err(
+          fail("脚本环境变量不能以 WHARF_ 开头")
+            .with_hint("WHARF_ 开头的环境变量由 Wharf 注入"),
+        );
+      }
+      if key.is_empty() || key.contains(['=', '\n', '\r', '\0']) {
+        return Err(fail("脚本环境变量名无效"));
       }
       if value.contains(['\n', '\r', '\0']) {
         return Err(fail("脚本环境变量的值含换行或空字符"));
@@ -235,6 +247,7 @@ pub fn validate(host: &str, sso: &SsoSpec) -> Result<(), ApiError> {
       for name in references(text)? {
         if name.strip_prefix("secret.").is_none_or(|n| n.is_empty())
           && !known.contains(name)
+          && !account_ref(name)?
         {
           return Err(fail(&format!(
             "第 {} 步用了 {name}，前面没有取过这个值",
@@ -263,6 +276,7 @@ pub fn validate(host: &str, sso: &SsoSpec) -> Result<(), ApiError> {
       for name in references(text)? {
         if name.strip_prefix("secret.").is_none_or(|n| n.is_empty())
           && !known.contains(name)
+          && !account_ref(name)?
         {
           return Err(fail(&format!("写入用了未取过的值 {name}")));
         }
@@ -533,27 +547,75 @@ fn parse_script_result(
   Ok((cookies, storage))
 }
 
+pub fn missing_account(hostname: &str) -> ApiError {
+  ApiError::invalid(format!(
+    "域名 {hostname} 没有默认应用账号，代登录会失败"
+  ))
+  .with_hint(format!(
+    "wharf sso account link <名称> {hostname} --default"
+  ))
+}
+
+fn account_vars(
+  snap: &snapshot::Snapshot,
+  hostname: &str,
+  use_account: bool,
+) -> Result<Values, ApiError> {
+  if !use_account {
+    return Ok(Values::new());
+  }
+  let account = snap
+    .app_account_defaults
+    .get(hostname)
+    .ok_or_else(|| missing_account(hostname))?;
+  ["username", "password"]
+    .into_iter()
+    .map(|field| {
+      let value = snap
+        .service_values
+        .get(&format!("account.{account}.{field}"))
+        .ok_or_else(|| missing_account(hostname))?;
+      Ok((format!("account.{field}"), value.clone()))
+    })
+    .collect()
+}
+
+fn script_env(
+  script: &LoginScript,
+  secrets: &Values,
+  vars: &Values,
+  hostname: &str,
+  upstream: &str,
+) -> Result<Values, ApiError> {
+  let mut env: Values = script
+    .env
+    .iter()
+    .map(|(key, value)| {
+      Ok((key.clone(), config::substitute(value, Some(secrets))?))
+    })
+    .collect::<Result<_, ApiError>>()?;
+  env.insert("WHARF_UPSTREAM".into(), format!("http://{upstream}"));
+  env.insert("WHARF_HOST".into(), hostname.into());
+  for (field, key) in [
+    ("account.username", "WHARF_USERNAME"),
+    ("account.password", "WHARF_PASSWORD"),
+  ] {
+    if let Some(value) = vars.get(field) {
+      env.insert(key.into(), value.clone());
+    }
+  }
+  Ok(env)
+}
+
 async fn run_script(
   state: &Arc<AppState>,
   snap: &snapshot::Snapshot,
   server: &str,
   hostname: &str,
-  upstream: &str,
+  env: Values,
   script: &LoginScript,
   cancel: &CancellationToken,
 ) -> Result<TaskRunResult, ApiError> {
-  let mut env: Values = script
-    .env
-    .iter()
-    .map(|(key, value)| {
-      Ok((
-        key.clone(),
-        config::substitute(value, Some(&snap.secrets))?,
-      ))
-    })
-    .collect::<Result<_, ApiError>>()?;
-  env.insert("WHARF_UPSTREAM".into(), format!("http://{upstream}"));
-  env.insert("WHARF_HOST".into(), hostname.into());
   let server_row = &snap.world.servers[server];
   let job = TaskRunJob {
     name: config::hash(hostname)[..32].to_string(),
@@ -618,6 +680,7 @@ async fn execute(
     .filter(|s| s.mode == SsoMode::Login)
     .and_then(|s| s.login.as_ref())
     .ok_or_else(|| ApiError::invalid("域名没有配置代登录"))?;
+  let vars = account_vars(&snap, hostname, login.use_account)?;
   if !snap.world.services.contains_key(&route.spec.service) {
     return Err(ApiError::invalid(format!(
       "域名 {hostname} 没有指向服务，不能代登录"
@@ -666,18 +729,29 @@ async fn execute(
     steps: vec![],
     check: None,
     set_cookies: vec![],
-    vars: Values::new(),
+    vars,
     script_storage: vec![],
     script_log: None,
   };
   let mut jar = BTreeMap::new();
-  let mut hidden: Vec<String> =
-    snap.secrets.values().cloned().collect();
+  let mut hidden: Vec<String> = snap
+    .secrets
+    .values()
+    .chain(outcome.vars.values())
+    .cloned()
+    .collect();
   if let Some(script) = &login.script {
+    let env = script_env(
+      script,
+      &snap.secrets,
+      &outcome.vars,
+      hostname,
+      upstream,
+    )?;
     let result = tokio::time::timeout_at(
       deadline,
       run_script(
-        state, &snap, server, hostname, upstream, script, &cancel,
+        state, &snap, server, hostname, env, script, &cancel,
       ),
     )
     .await
@@ -686,6 +760,10 @@ async fn execute(
     })?
     .map_err(|mut e| {
       e.message = mask(&e.message, &hidden);
+      e.hint = e.hint.map(|hint| mask(&hint, &hidden));
+      e.suggest
+        .iter_mut()
+        .for_each(|command| *command = mask(command, &hidden));
       e
     })?;
     let json = result
@@ -923,8 +1001,13 @@ pub async fn test(
   let mut would_write = Vec::new();
   if outcome.ok {
     let snap = snapshot::load(&state.db).await?;
+    let hidden: Vec<_> = snap
+      .secrets
+      .values()
+      .chain(outcome.vars.values())
+      .cloned()
+      .collect();
     if outcome.script_log.is_some() {
-      let hidden: Vec<_> = snap.secrets.values().cloned().collect();
       for raw in &outcome.set_cookies {
         if let Some((name, value)) =
           raw.split(';').next().and_then(|s| s.split_once('='))
@@ -957,7 +1040,7 @@ pub async fn test(
         .and_then(|s| s.login.as_ref())
         .ok_or_else(|| ApiError::invalid("代登录配置已改变"))?;
       for write in &login.write {
-        would_write.push(match write {
+        let summary = match write {
           LoginWrite::Cookies(_) => format!(
             "应用自己的 {} 个 cookie：{}",
             outcome.set_cookies.len(),
@@ -986,7 +1069,8 @@ pub async fn test(
               .chars()
               .count()
           ),
-        });
+        };
+        would_write.push(mask(&summary, &hidden));
       }
     }
   }
@@ -1003,6 +1087,37 @@ pub async fn test(
 mod tests {
   use super::*;
   use serde_json::json;
+
+  #[test]
+  fn script_env_includes_default_account() {
+    let hostname = "app.example.com";
+    let snap = snapshot::Snapshot {
+      app_account_defaults: BTreeMap::from([(
+        hostname.into(),
+        "x".into(),
+      )]),
+      service_values: BTreeMap::from([
+        ("account.x.username".into(), "fixture-user".into()),
+        ("account.x.password".into(), "fixture-value".into()),
+      ]),
+      ..Default::default()
+    };
+    let script = serde_json::from_value(
+      json!({ "runtime": "shell", "code": "true" }),
+    )
+    .unwrap();
+    let vars = account_vars(&snap, hostname, true).unwrap();
+    let env = script_env(
+      &script,
+      &snap.secrets,
+      &vars,
+      hostname,
+      "127.0.0.1:80",
+    )
+    .unwrap();
+    assert_eq!(env["WHARF_USERNAME"], "fixture-user");
+    assert_eq!(env["WHARF_PASSWORD"], "fixture-value");
+  }
 
   #[test]
   fn login_chooses_steps_or_script() {

@@ -325,6 +325,20 @@ ALTER TABLE alert_history ADD COLUMN subject TEXT;
   );",
 
   COMPOSE_PINS_MIGRATION,
+  "CREATE TABLE app_accounts (
+    name TEXT PRIMARY KEY,
+    username TEXT NOT NULL,
+    password TEXT NOT NULL,
+    note TEXT NOT NULL DEFAULT '',
+    updated_at INTEGER NOT NULL
+  );
+  CREATE TABLE app_account_domains (
+    account TEXT NOT NULL REFERENCES app_accounts(name),
+    hostname TEXT NOT NULL,
+    is_default INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (account, hostname)
+  );
+  CREATE UNIQUE INDEX app_account_default ON app_account_domains (hostname) WHERE is_default = 1;",
 ];
 
 /// git 构建来源固定到上次部署构建的 commit（仓库和分支没换过的）。当时没记下 commit 的留给 plan 提醒。
@@ -833,6 +847,28 @@ pub fn secrets(
   rows.collect::<Result<_, _>>().map_err(sql_err)
 }
 
+pub fn service_values(
+  conn: &Connection,
+  mut values: std::collections::BTreeMap<String, String>,
+) -> Result<std::collections::BTreeMap<String, String>, ApiError> {
+  let mut stmt = conn
+    .prepare("SELECT name, username, password FROM app_accounts")
+    .map_err(sql_err)?;
+  let mut rows = stmt.query([]).map_err(sql_err)?;
+  while let Some(row) = rows.next().map_err(sql_err)? {
+    let name: String = row.get(0).map_err(sql_err)?;
+    values.insert(
+      format!("account.{name}.username"),
+      row.get(1).map_err(sql_err)?,
+    );
+    values.insert(
+      format!("account.{name}.password"),
+      row.get(2).map_err(sql_err)?,
+    );
+  }
+  Ok(values)
+}
+
 /// 计划依赖、又不在资源版本里的输入的指纹：连通性结果、密钥、渲染要用的机器地址。
 pub fn inputs_fingerprint(
   reach: &Reach,
@@ -856,7 +892,10 @@ pub fn inputs(conn: &Connection) -> Result<String, ApiError> {
     crate::render::Net::derive(&world.servers, &agents(conn)?);
   Ok(inputs_fingerprint(
     &reach(conn)?,
-    &secrets(conn)?,
+    &service_values(
+      conn,
+      crate::oidc::with_client_secrets(&world, &secrets(conn)?),
+    )?,
     &net.addresses(),
   ))
 }

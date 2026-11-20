@@ -184,6 +184,20 @@ export interface ApiError {
   suggest?: string[];
 }
 
+export interface AppAccountDomain {
+  exists: boolean;
+  hostname: string;
+  is_default: boolean;
+}
+
+export interface AppAccountView {
+  domains: AppAccountDomain[];
+  name: string;
+  note: string;
+  updated_at: string;
+  username: string;
+}
+
 export interface Applied {
   at: string;
   /**
@@ -1194,6 +1208,7 @@ export interface LoginSpec {
   script?: LoginScript | null;
   steps: LoginStep[];
   ttl_hours: number;
+  use_account?: boolean;
   write: LoginWrite[];
 }
 

@@ -10,14 +10,17 @@ use axum::{
   extract::{Query, Request, State},
   http::Method,
   middleware::Next,
-  response::Response,
+  response::{IntoResponse, Response},
 };
 use rusqlite::params;
 use serde::Deserialize;
-use wharf_api_types::view::{AuditEntry, Perm};
+use wharf_api_types::{
+  ApiError,
+  view::{AuditEntry, Perm},
+};
 
 use crate::{
-  api::ApiResult,
+  api::{ApiResult, AppError},
   auth::Auth,
   db::{now_ms, sql_err},
   state::AppState,
@@ -31,6 +34,7 @@ pub struct AuditSlot(Arc<Mutex<Slot>>);
 struct Slot {
   actor: Option<String>,
   detail: Option<String>,
+  required: bool,
 }
 
 impl AuditSlot {
@@ -42,6 +46,12 @@ impl AuditSlot {
   pub fn set_detail(&self, detail: String) {
     self.0.lock().unwrap_or_else(|e| e.into_inner()).detail =
       Some(detail);
+  }
+
+  pub fn require_record(&self, detail: String) {
+    let mut slot = self.0.lock().unwrap_or_else(|e| e.into_inner());
+    slot.detail = Some(detail);
+    slot.required = true;
   }
 }
 
@@ -56,14 +66,14 @@ pub async fn layer(
   let slot = AuditSlot::default();
   req.extensions_mut().insert(slot.clone());
   let resp = next.run(req).await;
-  let (actor, detail) = {
+  let (actor, detail, required) = {
     let mut slot = slot.0.lock().unwrap_or_else(|e| e.into_inner());
-    (slot.actor.take(), slot.detail.take())
+    (slot.actor.take(), slot.detail.take(), slot.required)
   };
   if let Some(actor) = actor
     && should_record(&method, &path)
   {
-    insert(
+    let result = insert(
       &state,
       AuditEntry {
         id: 0,
@@ -79,6 +89,9 @@ pub async fn layer(
       },
     )
     .await;
+    if required && let Err(error) = result {
+      return AppError(error).into_response();
+    }
   }
   resp
 }
@@ -97,12 +110,17 @@ pub fn should_record(method: &Method, path: &str) -> bool {
   }
   *method == Method::GET
     && (path == "/api/export"
+      || path == "/api/sso/accounts"
+      || path.starts_with("/api/sso/accounts/")
       || path.ends_with("/terminal")
       || path.ends_with("/files/download")
       || path.ends_with("/connect"))
 }
 
-async fn insert(state: &AppState, row: AuditEntry) {
+async fn insert(
+  state: &AppState,
+  row: AuditEntry,
+) -> Result<(), ApiError> {
   let result = state
     .db
     .call(move |c| {
@@ -122,9 +140,10 @@ async fn insert(state: &AppState, row: AuditEntry) {
       .map_err(sql_err)
     })
     .await;
-  if let Err(e) = result {
+  if let Err(e) = &result {
     tracing::warn!("记录操作失败：{}", e.message);
   }
+  result
 }
 
 /// 记一条登录类的记录。`action` 是 login / login_failed / logout / setup。
@@ -134,7 +153,7 @@ pub async fn login_event(
   actor: &str,
   source: String,
 ) {
-  insert(
+  let _ = insert(
     state,
     AuditEntry {
       id: 0,

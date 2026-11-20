@@ -249,6 +249,14 @@ pub fn substitute(
   text: &str,
   secrets: Option<&BTreeMap<String, String>>,
 ) -> Result<String, ApiError> {
+  substitute_values(text, secrets, false)
+}
+
+fn substitute_values(
+  text: &str,
+  secrets: Option<&BTreeMap<String, String>>,
+  service_config: bool,
+) -> Result<String, ApiError> {
   let Some(secrets) = secrets else {
     return Ok(text.to_string());
   };
@@ -265,9 +273,19 @@ pub fn substitute(
         .bytes()
         .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-');
     out.push_str(&rest[..start]);
-    if is_name {
+    let account = service_config.then(|| account_ref(name)).flatten();
+    if is_name || account.is_some() {
       match secrets.get(name) {
         Some(value) => out.push_str(value),
+        None if let Some(account) = account => {
+          return Err(
+            ApiError::invalid(format!("应用账号 {account} 不存在"))
+              .with_hint("先设置应用账号，密码从标准输入读取")
+              .suggest(format!(
+                "wharf sso account set {account} --user <用户名>"
+              )),
+          );
+        }
         None => missing.push(name.to_string()),
       }
     } else {
@@ -290,6 +308,14 @@ pub fn substitute(
     );
   }
   Ok(out)
+}
+
+fn account_ref(name: &str) -> Option<&str> {
+  let (account, field) =
+    name.strip_prefix("account.")?.split_once('.')?;
+  (matches!(field, "username" | "password")
+    && wharf_api_types::validate_name("应用账号", account).is_ok())
+  .then_some(account)
 }
 
 /// 构建来源的镜像名：`wharf-build/<服务>:<指纹>`。指纹来自构建配置和端口
@@ -572,9 +598,10 @@ pub fn service_compose(
   match &spec.source {
     Source::Compose { content, .. } => {
       let content = content.as_deref().unwrap_or_default();
-      substitute(
+      substitute_values(
         &compose_with_settings(name, content, spec)?,
         secrets,
+        true,
       )
     }
     Source::Image(_) | Source::Build(_) => {
@@ -624,7 +651,7 @@ fn image_service(
   let mut environment = BTreeMap::new();
   for (key, value) in &spec.env {
     // compose 会对 `$` 做变量插值，原样传给容器要写成 `$$`。
-    let value = substitute(value, secrets)?;
+    let value = substitute_values(value, secrets, true)?;
     environment.insert(key.clone(), value.replace('$', "$$"));
   }
   Ok(ComposeService {
@@ -1627,6 +1654,28 @@ mod tests {
       substitute("[[a b]] [x]", Some(&BTreeMap::new())).unwrap(),
       "[[a b]] [x]"
     );
+  }
+
+  #[test]
+  fn renders_account_password() {
+    let spec = serde_json::from_value(serde_json::json!({
+      "server": "s1", "source": {"image": "example/app"},
+      "env": {"APP_PASSWORD": "[[account.x.password]]"}
+    }))
+    .unwrap();
+    let credentials = BTreeMap::from([(
+      "account.x.password".into(),
+      "fixture-value".into(),
+    )]);
+    let render = |values| {
+      service_compose("app", &spec, &BTreeMap::new(), &[], values)
+        .unwrap()
+    };
+    assert!(
+      render(Some(&credentials))
+        .contains("APP_PASSWORD: fixture-value")
+    );
+    assert!(render(None).contains("[[account.x.password]]"));
   }
 
   #[test]

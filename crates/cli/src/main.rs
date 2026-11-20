@@ -49,7 +49,7 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum SsoCmd {
   #[command(
-    long_about = "实际登录一次应用并检查结果。先用 wharf secret set 存应用账号，写代登录配置文件（steps 或 script），再用 wharf route sso <域名> --mode login --file <文件> --apply 应用，运行 wharf sso test <域名>。不通就改配置再试，改不通就换回 --mode gate。"
+    long_about = "实际登录一次应用并检查结果。开启 use_account 时，用 wharf sso account set 保存账号，再用 wharf sso account link <名称> <域名> --default 设为默认。用 wharf route sso <域名> --mode login --file <文件> --apply 应用代登录配置，再运行 wharf sso test <域名>。"
   )]
   Test { hostname: String },
   /// Wharf 当 OIDC 身份提供方的信息：issuer、发现地址、各应用的 client_id 和密钥引用。
@@ -64,11 +64,50 @@ pub enum SsoCmd {
     #[arg(long, conflicts_with = "email")]
     clear: bool,
   },
+  /// 管理应用账号和关联域名。
+  #[command(subcommand)]
+  Account(AppAccountCmd),
+}
+
+#[derive(Subcommand)]
+pub enum AppAccountCmd {
+  /// 列出应用账号。
+  List,
+  /// 新建或更新应用账号，密码从标准输入读取，不回显。
+  Set {
+    name: String,
+    #[arg(long)]
+    user: String,
+    #[arg(long)]
+    note: Option<String>,
+    /// 保留现有密码，跳过密码输入，仅适用于已有账号。
+    #[arg(long)]
+    keep_password: bool,
+  },
+  /// 查看应用账号。
+  Show {
+    name: String,
+    /// 显示密码，会记一条操作记录。
+    #[arg(long)]
+    reveal: bool,
+  },
+  /// 删除应用账号。
+  Rm { name: String },
+  /// 关联域名。
+  Link {
+    name: String,
+    hostname: String,
+    /// 设为该域名的默认账号。
+    #[arg(long)]
+    default: bool,
+  },
+  /// 取消关联域名。
+  Unlink { name: String, hostname: String },
 }
 
 #[derive(Subcommand)]
 pub enum Command {
-  /// 统一登录：代登录测试、OIDC 信息和邮箱。
+  /// 统一登录：应用账号、代登录测试、OIDC 信息和邮箱。
   #[command(subcommand)]
   Sso(SsoCmd),
   /// 保存控制面地址和 token（token 从标准输入读取，不回显）。

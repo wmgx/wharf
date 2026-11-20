@@ -870,6 +870,8 @@ pub enum Change {
   Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
 )]
 pub struct LoginSpec {
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub use_account: bool,
   #[serde(default)]
   pub steps: Vec<LoginStep>,
   #[serde(default)]

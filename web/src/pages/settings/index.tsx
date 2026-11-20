@@ -4,13 +4,14 @@ import { PageHeader } from "@/components/common";
 import { useTab } from "@/components/page-tabs";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Accounts } from "./accounts";
+import { AppAccounts } from "./app-accounts";
 import { Core } from "./core";
 import { Secrets } from "./secrets";
 import { Security } from "./security";
 import { ShareDomains } from "./share-domains";
 import { Tokens } from "./tokens";
 
-const TABS = ["accounts", "secrets", "tokens", "security", "core"] as const;
+const TABS = ["accounts", "secrets", "app-accounts", "tokens", "security", "core"] as const;
 
 export function Settings() {
   const [params, setParams] = useSearchParams();
@@ -22,6 +23,7 @@ export function Settings() {
       <TabsList className="max-w-full overflow-x-auto">
         <TabsTrigger value="accounts">厂商账号</TabsTrigger>
         <TabsTrigger value="secrets">密钥</TabsTrigger>
+        <TabsTrigger value="app-accounts">应用账号</TabsTrigger>
         <TabsTrigger value="tokens">访问令牌</TabsTrigger>
         <TabsTrigger value="security">登录与安全</TabsTrigger>
         <TabsTrigger value="core">控制面</TabsTrigger>
@@ -32,6 +34,9 @@ export function Settings() {
       </TabsContent>
       <TabsContent value="secrets" className="mt-4">
         <Secrets />
+      </TabsContent>
+      <TabsContent value="app-accounts" className="mt-4">
+        <AppAccounts selected={params.get("account")} hostname={params.get("hostname")} />
       </TabsContent>
       <TabsContent value="tokens" className="mt-4">
         <Tokens />

@@ -1473,6 +1473,22 @@ pub struct SsoTestResult {
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub script_log: Option<String>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AppAccountView {
+  pub name: String,
+  pub username: String,
+  pub note: String,
+  pub updated_at: DateTime<Utc>,
+  pub domains: Vec<AppAccountDomain>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AppAccountDomain {
+  pub hostname: String,
+  pub is_default: bool,
+  pub exists: bool,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SsoStepResult {
   pub number: usize,

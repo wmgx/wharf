@@ -61,6 +61,22 @@ pub fn router(state: Arc<AppState>) -> Router {
       "/api/routes/{hostname}/sso/test",
       post(crate::sso_login::test),
     )
+    .route("/api/sso/accounts", get(crate::app_accounts::list))
+    .route(
+      "/api/sso/accounts/{name}",
+      get(crate::app_accounts::show)
+        .put(crate::app_accounts::set)
+        .delete(crate::app_accounts::remove),
+    )
+    .route(
+      "/api/sso/accounts/{name}/password",
+      post(crate::app_accounts::reveal),
+    )
+    .route(
+      "/api/sso/accounts/{name}/domains/{host}",
+      put(crate::app_accounts::link)
+        .delete(crate::app_accounts::unlink),
+    )
     .route("/api/gate/keys", get(crate::gate::list_keys))
     .route(
       "/api/gate/keys/{name}",
