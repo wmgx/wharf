@@ -6,7 +6,6 @@
 //!
 //! 控制面调厂商 API（Cloudflare、Tailscale）用控制面设置 [API_VIA]，按同一套规则分流。
 
-use rusqlite::params;
 use wharf_api_types::{
   ApiError, ErrorCode,
   agent::{AgentOp, EgressConfig, EgressRoute, EgressServe},
@@ -14,11 +13,7 @@ use wharf_api_types::{
   spec::ServerSettings,
 };
 
-use crate::{
-  db::{now_ms, sql_err},
-  snapshot::Snapshot,
-  state::AppState,
-};
+use crate::{db::now_ms, snapshot::Snapshot, state::AppState};
 
 /// 代理口令，Wharf 自动生成。
 pub const TOKEN_SECRET: &str = "EGRESS_TOKEN";
@@ -178,18 +173,11 @@ pub async fn ensure_token(
   let fresh = crate::backup::random_hex();
   state
     .db
-    .call(move |c| {
-      c.execute(
-        "INSERT OR IGNORE INTO secrets (name, value, updated_at) VALUES (?1, ?2, ?3)",
-        params![TOKEN_SECRET, fresh, now_ms()],
-      )
-      .map_err(sql_err)?;
-      c.query_row(
-        "SELECT value FROM secrets WHERE name = ?1",
-        params![TOKEN_SECRET],
-        |r| r.get(0),
-      )
-      .map_err(sql_err)
+    .call_credentials(move |c, key| {
+      key.put_secret(c, TOKEN_SECRET, &fresh, now_ms(), false)?;
+      key
+        .secret(c, TOKEN_SECRET)?
+        .ok_or_else(|| ApiError::internal("出口口令不存在"))
     })
     .await
 }

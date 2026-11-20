@@ -256,6 +256,16 @@ impl Ops {
       AgentOp::TaskRun(job) => {
         to_value(crate::task::run(&self.docker, &job, ctx).await?)
       }
+      AgentOp::SsoCleanup { domains, runners } => {
+        crate::task::cleanup_sso(
+          &self.docker,
+          &domains,
+          &runners,
+          ctx,
+        )
+        .await?;
+        Ok(Value::Null)
+      }
       // 要接收输入，由连接那边直接处理。
       AgentOp::Terminal(_)
       | AgentOp::HostTerminal { .. }

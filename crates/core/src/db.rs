@@ -4,10 +4,18 @@
 //! `version`，plan/apply 用它做乐观锁。其他表是运行数据。
 
 use std::{
+  fs::{self, OpenOptions},
+  io::Write as _,
+  os::unix::fs::OpenOptionsExt,
   path::Path,
   sync::{Arc, Mutex},
 };
 
+use base64::{Engine, engine::general_purpose::STANDARD};
+use chacha20poly1305::{
+  ChaCha20Poly1305, KeyInit, Nonce,
+  aead::{Aead, Payload},
+};
 use chrono::{DateTime, TimeZone, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
@@ -534,22 +542,27 @@ pub fn set_setting(
 #[derive(Clone)]
 pub struct Db {
   conn: Arc<Mutex<Connection>>,
+  credentials: Arc<CredentialsKey>,
 }
 
 impl Db {
   pub fn open(path: &Path) -> anyhow::Result<Self> {
     let conn = Connection::open(path)?;
-    Self::init(conn)
+    Self::init(conn, Some(&path.with_file_name(CREDENTIALS_KEY_FILE)))
   }
 
   #[cfg(test)]
   pub fn memory() -> Self {
-    Self::init(Connection::open_in_memory().unwrap()).unwrap()
+    Self::init(Connection::open_in_memory().unwrap(), None).unwrap()
   }
 
-  fn init(mut conn: Connection) -> anyhow::Result<Self> {
+  fn init(
+    mut conn: Connection,
+    key_path: Option<&Path>,
+  ) -> anyhow::Result<Self> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
+    conn.pragma_update(None, "secure_delete", "ON")?;
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
     let current: usize =
       conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -559,8 +572,19 @@ impl Db {
       tx.pragma_update(None, "user_version", i + 1)?;
       tx.commit()?;
     }
+    let credentials = match key_path {
+      Some(path) => CredentialsKey::load(&conn, path)?,
+      None => CredentialsKey::new(&[0; 32]),
+    };
+    if credentials
+      .migrate(&mut conn)
+      .map_err(|e| anyhow::anyhow!(e.message))?
+    {
+      conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+    }
     Ok(Self {
       conn: Arc::new(Mutex::new(conn)),
+      credentials: Arc::new(credentials),
     })
   }
 
@@ -578,6 +602,20 @@ impl Db {
     })
     .await
     .map_err(|e| ApiError::internal(format!("数据库任务失败：{e}")))?
+  }
+
+  pub async fn call_credentials<R, F>(
+    &self,
+    f: F,
+  ) -> Result<R, ApiError>
+  where
+    R: Send + 'static,
+    F: FnOnce(&mut Connection, &CredentialsKey) -> Result<R, ApiError>
+      + Send
+      + 'static,
+  {
+    let key = self.credentials.clone();
+    self.call(move |c| f(c, &key)).await
   }
 }
 
@@ -833,8 +871,237 @@ pub fn agent(
 
 // SECRETS
 
+pub const CREDENTIALS_KEY_FILE: &str = "secrets.key";
+const ENCRYPTED: &str = "enc:v1:";
+const CREDENTIAL_COLUMNS: [(&str, &str); 2] =
+  [("secrets", "value"), ("app_accounts", "password")];
+
+pub struct CredentialsKey(ChaCha20Poly1305);
+
+impl CredentialsKey {
+  fn new(bytes: &[u8; 32]) -> Self {
+    Self(ChaCha20Poly1305::new(bytes.into()))
+  }
+
+  fn load(conn: &Connection, path: &Path) -> anyhow::Result<Self> {
+    use anyhow::Context;
+    let read = fs::read(path);
+    if let Ok(bytes) = &read
+      && let Ok(bytes) = <&[u8; 32]>::try_from(bytes.as_slice())
+    {
+      return Ok(Self::new(bytes));
+    }
+    let missing = read
+      .as_ref()
+      .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound);
+    if !missing && let Err(e) = read {
+      return Err(e)
+        .with_context(|| format!("读取主密钥 {}", path.display()));
+    }
+    for (table, column) in CREDENTIAL_COLUMNS {
+      let name: Option<String> = conn.query_row(
+        &format!("SELECT name FROM {table} WHERE instr({column}, ?1) = 1 LIMIT 1"),
+        [ENCRYPTED],
+        |r| r.get(0),
+      ).optional()?;
+      if let Some(name) = name {
+        anyhow::bail!("{}", Self::decrypt_error(&name).message);
+      }
+    }
+    anyhow::ensure!(
+      missing,
+      "主密钥文件长度不对：{}",
+      path.display()
+    );
+    let mut bytes = [0; 32];
+    getrandom::fill(&mut bytes)
+      .map_err(|_| anyhow::anyhow!("随机数不可用"))?;
+    let mut file = OpenOptions::new()
+      .create_new(true)
+      .write(true)
+      .mode(0o600)
+      .open(path)
+      .with_context(|| format!("创建主密钥 {}", path.display()))?;
+    if let Err(e) =
+      file.write_all(&bytes).and_then(|()| file.sync_all())
+    {
+      let _ = fs::remove_file(path);
+      return Err(e)
+        .with_context(|| format!("写入主密钥 {}", path.display()));
+    }
+    Ok(Self::new(&bytes))
+  }
+
+  fn decrypt_error(name: &str) -> ApiError {
+    ApiError::internal(format!("主密钥不匹配，无法解密密钥 {name}"))
+  }
+
+  fn encrypt(
+    &self,
+    table: &str,
+    name: &str,
+    value: &str,
+  ) -> Result<String, ApiError> {
+    let mut nonce = [0; 12];
+    getrandom::fill(&mut nonce)
+      .map_err(|_| ApiError::internal("随机数不可用"))?;
+    let aad = format!("{table}:{name}");
+    let ciphertext = self
+      .0
+      .encrypt(
+        Nonce::from_slice(&nonce),
+        Payload {
+          msg: value.as_bytes(),
+          aad: aad.as_bytes(),
+        },
+      )
+      .map_err(|_| {
+        ApiError::internal(format!("无法加密密钥 {name}"))
+      })?;
+    let mut record = nonce.to_vec();
+    record.extend(ciphertext);
+    Ok(format!("{ENCRYPTED}{}", STANDARD.encode(record)))
+  }
+
+  fn decrypt(
+    &self,
+    table: &str,
+    name: &str,
+    value: &str,
+  ) -> Result<String, ApiError> {
+    let err = || Self::decrypt_error(name);
+    let bytes = STANDARD
+      .decode(value.strip_prefix(ENCRYPTED).ok_or_else(err)?)
+      .map_err(|_| err())?;
+    let (nonce, ciphertext) =
+      bytes.split_at_checked(12).ok_or_else(err)?;
+    let aad = format!("{table}:{name}");
+    let plaintext = self
+      .0
+      .decrypt(
+        Nonce::from_slice(nonce),
+        Payload {
+          msg: ciphertext,
+          aad: aad.as_bytes(),
+        },
+      )
+      .map_err(|_| err())?;
+    String::from_utf8(plaintext).map_err(|_| err())
+  }
+
+  fn migrate(&self, conn: &mut Connection) -> Result<bool, ApiError> {
+    let tx = conn.transaction().map_err(sql_err)?;
+    let mut changed = false;
+    for (table, column) in CREDENTIAL_COLUMNS {
+      let mut read = tx
+        .prepare(&format!("SELECT name, {column} FROM {table}"))
+        .map_err(sql_err)?;
+      let rows = read
+        .query_map([], |row| {
+          Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(sql_err)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(sql_err)?;
+      let mut write = tx
+        .prepare(&format!(
+          "UPDATE {table} SET {column} = ?2 WHERE name = ?1"
+        ))
+        .map_err(sql_err)?;
+      for (name, value) in rows {
+        if value.starts_with(ENCRYPTED) {
+          self.decrypt(table, &name, &value)?;
+        } else {
+          write
+            .execute(params![
+              name,
+              self.encrypt(table, &name, &value)?
+            ])
+            .map_err(sql_err)?;
+          changed = true;
+        }
+      }
+    }
+    tx.commit().map_err(sql_err)?;
+    Ok(changed)
+  }
+
+  pub fn secret(
+    &self,
+    conn: &Connection,
+    name: &str,
+  ) -> Result<Option<String>, ApiError> {
+    let value: Option<String> = conn
+      .query_row(
+        "SELECT value FROM secrets WHERE name = ?1",
+        [name],
+        |r| r.get(0),
+      )
+      .optional()
+      .map_err(sql_err)?;
+    value
+      .map(|value| self.decrypt("secrets", name, &value))
+      .transpose()
+  }
+
+  pub fn put_secret(
+    &self,
+    conn: &Connection,
+    name: &str,
+    value: &str,
+    now: i64,
+    replace: bool,
+  ) -> Result<(), ApiError> {
+    let value = self.encrypt("secrets", name, value)?;
+    conn.execute(
+      "INSERT INTO secrets (name, value, updated_at) VALUES (?1, ?2, ?3)
+       ON CONFLICT (name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at WHERE ?4",
+      params![name, value, now, replace],
+    ).map_err(sql_err)?;
+    Ok(())
+  }
+
+  pub fn app_password(
+    &self,
+    conn: &Connection,
+    name: &str,
+  ) -> Result<Option<String>, ApiError> {
+    let value: Option<String> = conn
+      .query_row(
+        "SELECT password FROM app_accounts WHERE name = ?1",
+        [name],
+        |r| r.get(0),
+      )
+      .optional()
+      .map_err(sql_err)?;
+    value
+      .map(|value| self.decrypt("app_accounts", name, &value))
+      .transpose()
+  }
+
+  pub fn put_app_account(
+    &self,
+    conn: &Connection,
+    name: &str,
+    username: &str,
+    password: &str,
+    note: Option<&str>,
+    now: i64,
+  ) -> Result<(), ApiError> {
+    let password = self.encrypt("app_accounts", name, password)?;
+    conn.execute(
+      "INSERT INTO app_accounts (name, username, password, note, updated_at) VALUES (?1, ?2, ?3, COALESCE(?4, ''), ?5)
+       ON CONFLICT (name) DO UPDATE SET username = excluded.username, password = excluded.password,
+       note = COALESCE(?4, app_accounts.note), updated_at = excluded.updated_at",
+      params![name, username, password, note, now],
+    ).map_err(sql_err)?;
+    Ok(())
+  }
+}
+
 pub fn secrets(
   conn: &Connection,
+  key: &CredentialsKey,
 ) -> Result<std::collections::BTreeMap<String, String>, ApiError> {
   let mut stmt = conn
     .prepare("SELECT name, value FROM secrets")
@@ -844,11 +1111,18 @@ pub fn secrets(
       Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
     })
     .map_err(sql_err)?;
-  rows.collect::<Result<_, _>>().map_err(sql_err)
+  rows
+    .map(|row| {
+      let (name, value) = row.map_err(sql_err)?;
+      let value = key.decrypt("secrets", &name, &value)?;
+      Ok((name, value))
+    })
+    .collect()
 }
 
 pub fn service_values(
   conn: &Connection,
+  key: &CredentialsKey,
   mut values: std::collections::BTreeMap<String, String>,
 ) -> Result<std::collections::BTreeMap<String, String>, ApiError> {
   let mut stmt = conn
@@ -863,7 +1137,11 @@ pub fn service_values(
     );
     values.insert(
       format!("account.{name}.password"),
-      row.get(2).map_err(sql_err)?,
+      key.decrypt(
+        "app_accounts",
+        &name,
+        &row.get::<_, String>(2).map_err(sql_err)?,
+      )?,
     );
   }
   Ok(values)
@@ -886,7 +1164,10 @@ pub fn inputs_fingerprint(
   )
 }
 
-pub fn inputs(conn: &Connection) -> Result<String, ApiError> {
+pub fn inputs(
+  conn: &Connection,
+  key: &CredentialsKey,
+) -> Result<String, ApiError> {
   let world = crate::world::World::from_rows(all_resources(conn)?)?;
   let net =
     crate::render::Net::derive(&world.servers, &agents(conn)?);
@@ -894,7 +1175,8 @@ pub fn inputs(conn: &Connection) -> Result<String, ApiError> {
     &reach(conn)?,
     &service_values(
       conn,
-      crate::oidc::with_client_secrets(&world, &secrets(conn)?),
+      key,
+      crate::oidc::with_client_secrets(&world, &secrets(conn, key)?),
     )?,
     &net.addresses(),
   ))
@@ -959,29 +1241,17 @@ pub fn set_reach(
 /// 没有就生成一个随机值存进去，返回它。
 pub fn ensure_secret(
   conn: &Connection,
+  key: &CredentialsKey,
   name: &str,
   now: i64,
 ) -> Result<String, ApiError> {
-  let existing: Option<String> = conn
-    .query_row(
-      "SELECT value FROM secrets WHERE name = ?1",
-      params![name],
-      |r| r.get(0),
-    )
-    .optional()
-    .map_err(sql_err)?;
-  if let Some(v) = existing {
+  if let Some(v) = key.secret(conn, name)? {
     return Ok(v);
   }
   let mut bytes = [0u8; 24];
   getrandom::fill(&mut bytes).expect("随机数不可用");
   let value = hex::encode(bytes);
-  conn
-    .execute(
-      "INSERT INTO secrets (name, value, updated_at) VALUES (?1, ?2, ?3)",
-      params![name, value, now],
-    )
-    .map_err(sql_err)?;
+  key.put_secret(conn, name, &value, now, false)?;
   Ok(value)
 }
 
@@ -1692,6 +1962,70 @@ mod tests {
   }
 
   use super::*;
+
+  #[test]
+  fn credentials_round_trip_and_reject_tampering() {
+    let key = CredentialsKey::new(&[5; 32]);
+    let stored =
+      key.encrypt("secrets", "example", "fixture-value").unwrap();
+    assert_eq!(
+      key.decrypt("secrets", "example", &stored).unwrap(),
+      "fixture-value"
+    );
+    let mut raw = STANDARD
+      .decode(stored.strip_prefix(ENCRYPTED).unwrap())
+      .unwrap();
+    *raw.last_mut().unwrap() ^= 1;
+    let tampered = format!("{ENCRYPTED}{}", STANDARD.encode(raw));
+    assert!(key.decrypt("secrets", "example", &tampered).is_err());
+  }
+
+  #[tokio::test]
+  async fn credential_migration_is_idempotent() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("wharf.db");
+    let db = Db::open(&path).unwrap();
+    db.call(|c| {
+      c.execute_batch(
+        "INSERT INTO secrets VALUES ('example', 'fixture-secret', 0);
+       INSERT INTO app_accounts (name, username, password, updated_at)
+       VALUES ('example', 'fixture-user', 'fixture-value', 0);",
+      )
+      .map_err(sql_err)
+    })
+    .await
+    .unwrap();
+    drop(db);
+    let read = |c: &mut Connection| {
+      c.query_row(
+        "SELECT value, password FROM secrets, app_accounts WHERE secrets.name = app_accounts.name",
+        [],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+      ).map_err(sql_err)
+    };
+    let db = Db::open(&path).unwrap();
+    let first = db.call(read).await.unwrap();
+    assert!(
+      first.0.starts_with(ENCRYPTED)
+        && first.1.starts_with(ENCRYPTED)
+    );
+    drop(db);
+    let db = Db::open(&path).unwrap();
+    assert_eq!(db.call(read).await.unwrap(), first);
+    db.call_credentials(|c, key| {
+      assert_eq!(
+        key.secret(c, "example")?.as_deref(),
+        Some("fixture-secret")
+      );
+      assert_eq!(
+        key.app_password(c, "example")?.as_deref(),
+        Some("fixture-value")
+      );
+      Ok(())
+    })
+    .await
+    .unwrap();
+  }
   use serde_json::json;
 
   #[tokio::test]

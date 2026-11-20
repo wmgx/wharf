@@ -13,7 +13,7 @@ permissions:
 
 env:
   CADDY_VERSION: 2.11.9
-  TAG: 2.11.9-6
+  TAG: 2.11.9-7
 
 jobs:
   build:

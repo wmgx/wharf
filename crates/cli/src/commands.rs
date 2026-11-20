@@ -131,9 +131,10 @@ async fn dispatch(
     }
     Command::Sso(crate::SsoCmd::Test { hostname }) => {
       let result: wharf_api_types::view::SsoTestResult = c
-        .post(
+        .post_timeout(
           &format!("/api/routes/{}/sso/test", seg(&hostname)),
           &json!({}),
+          Duration::from_secs(14 * 60),
         )
         .await?;
       out(j, &result, |r| {
@@ -2967,8 +2968,15 @@ async fn app_account(
         struct Password {
           password: String,
         }
+        let wharf_password =
+          rpassword::prompt_password("Wharf 登录密码：").map_err(
+            |_| ApiError::invalid("需要在终端输入 Wharf 登录密码"),
+          )?;
         let Password { password } = c
-          .post(&format!("{}/password", path(&name)), &json!({}))
+          .post(
+            &format!("{}/password", path(&name)),
+            &json!({"password": wharf_password}),
+          )
           .await?;
         if j {
           #[derive(serde::Serialize)]

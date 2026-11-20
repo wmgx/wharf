@@ -885,9 +885,26 @@ pub struct LoginSpec {
   /// 代登录完成后跳到的路径，例如后台 `/ghost/`；不填就是 `/`。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub entry: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub takeover: Option<LoginTakeover>,
 }
 fn login_ttl() -> u16 {
   24
+}
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct LoginTakeover {
+  pub paths: Vec<String>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub skip_query: Vec<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub rd_param: Option<String>,
+  #[serde(default = "native_minutes")]
+  pub native_minutes: u16,
+}
+fn native_minutes() -> u16 {
+  10
 }
 #[derive(
   Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,

@@ -121,6 +121,13 @@ pub(crate) fn record_failure(key: &str) {
   }
 }
 
+pub(crate) fn clear_failures(key: &str) {
+  FAILURES
+    .lock()
+    .unwrap_or_else(|e| e.into_inner())
+    .remove(key);
+}
+
 /// 经网关走 HTTPS 时 cookie 加 `Secure`；直连 http 时加了浏览器会丢掉 cookie。
 fn secure_attr(headers: &HeaderMap) -> &'static str {
   let https = headers
@@ -261,7 +268,7 @@ pub fn set_admin(
   Ok(())
 }
 
-async fn admin(
+pub(crate) async fn admin(
   db: &Db,
 ) -> Result<Option<(String, String)>, ApiError> {
   db.call(|c| {
@@ -515,10 +522,7 @@ pub async fn login(
       }
     }
   }
-  FAILURES
-    .lock()
-    .unwrap_or_else(|e| e.into_inner())
-    .remove(&key);
+  clear_failures(&key);
   crate::sessions::notify_new(&s, &key, &headers).await;
   crate::audit::login_event(
     &s,

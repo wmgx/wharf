@@ -104,11 +104,11 @@ pub async fn load(db: &Db) -> Result<Snapshot, ApiError> {
 }
 
 async fn load_inner(db: &Db) -> Result<Snapshot, ApiError> {
-  db.call(|c| {
+  db.call_credentials(|c, key| {
     let world = World::from_rows(db::all_resources(c)?)?;
     let secrets =
-      crate::oidc::with_client_secrets(&world, &db::secrets(c)?);
-    let service_values = db::service_values(c, secrets.clone())?;
+      crate::oidc::with_client_secrets(&world, &db::secrets(c, key)?);
+    let service_values = db::service_values(c, key, secrets.clone())?;
     Ok(
       Snapshot {
         world,
@@ -431,6 +431,11 @@ pub fn gateway_render(
           login: login.clone(),
           core,
           skip_paths: sso.skip_paths.clone(),
+          takeover: sso.login.as_ref().and_then(|login| {
+            login.takeover.clone().map(|takeover| {
+              (takeover, login.entry.as_deref().unwrap_or("/").into())
+            })
+          }),
         })
       })
       .transpose()?;

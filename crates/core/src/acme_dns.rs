@@ -9,13 +9,12 @@ use axum::{
   http::{HeaderMap, StatusCode},
   response::{IntoResponse, Response},
 };
-use rusqlite::OptionalExtension;
 use serde::Deserialize;
 use serde_json::json;
 use wharf_api_types::spec::GatewayKind;
 use wharf_providers::Owner;
 
-use crate::{db, render, snapshot, state::AppState, world::World};
+use crate::{render, snapshot, state::AppState, world::World};
 
 pub fn secret_name(gateway: &str) -> String {
   format!("WHARF_ACME_DNS_{gateway}")
@@ -87,15 +86,7 @@ pub async fn update(
   let name = secret_name(gateway);
   let stored: Option<String> = match state
     .db
-    .call(move |c| {
-      c.query_row(
-        "SELECT value FROM secrets WHERE name = ?1",
-        [&name],
-        |r| r.get(0),
-      )
-      .optional()
-      .map_err(db::sql_err)
-    })
+    .call_credentials(move |c, key| key.secret(c, &name))
     .await
   {
     Ok(value) => value,

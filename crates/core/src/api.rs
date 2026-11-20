@@ -1413,14 +1413,8 @@ async fn set_secret(
   let now = now_ms();
   let n = name.clone();
   s.db
-    .call(move |c| {
-      c.execute(
-        "INSERT INTO secrets (name, value, updated_at) VALUES (?1, ?2, ?3)
-         ON CONFLICT (name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-        params![n, value, now],
-      )
-      .map_err(sql_err)?;
-      Ok(())
+    .call_credentials(move |c, key| {
+      key.put_secret(c, &n, &value, now, true)
     })
     .await?;
   Ok(Json(SecretView {

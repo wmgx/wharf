@@ -1,10 +1,12 @@
-//! 定时任务的执行：在服务容器里执行命令，或跑一次性容器。宿主机命令走 HostExec，不在这里。
+//! 定时任务和代登录脚本的容器执行。
 
 use std::{
+  collections::BTreeMap,
   fs::{self, DirBuilder, OpenOptions},
   io::{Read, Write},
   os::unix::fs::{DirBuilderExt, OpenOptionsExt},
   path::{Path, PathBuf},
+  sync::{Arc, LazyLock},
   time::{Duration, Instant},
 };
 
@@ -13,14 +15,17 @@ use sha2::{Digest, Sha256};
 
 use wharf_api_types::{
   ApiError, ErrorCode,
-  agent::{TASK_DATA_PREFIX, TaskHow, TaskRunJob, TaskRunResult},
+  agent::{
+    TASK_DATA_PREFIX, TaskHow, TaskRunJob, TaskRunResult,
+    sso_runner_name,
+  },
   mask_values, validate_name,
   view::ScriptRuntime,
 };
 
 use crate::{
   docker::{Docker, io_err},
-  exec::Ctx,
+  exec::{Ctx, Output},
 };
 
 /// 输出只留最后这么多字节。
@@ -28,7 +33,14 @@ const OUTPUT_TAIL: usize = 16 * 1024;
 const QUICK: Duration = Duration::from_secs(20);
 const MAX_TIMEOUT: u64 = 6 * 3600;
 const MAX_RESULT: u64 = 64 * 1024;
-const SSO_WORK: &str = "sso-scripts";
+const SSO_ROOT: &str = "/srv/.wharf-sso";
+const SSO_MOUNT: &str = "/wharf-sso";
+const SSO_LABEL: &str = "wharf.sso-runner";
+const DEPS_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+static SSO_ACTIVE: LazyLock<Arc<tokio::sync::RwLock<()>>> =
+  LazyLock::new(Default::default);
+static SSO_START: tokio::sync::Mutex<()> =
+  tokio::sync::Mutex::const_new(());
 
 pub async fn run(
   docker: &Docker,
@@ -39,14 +51,13 @@ pub async fn run(
   if !(1..=MAX_TIMEOUT).contains(&job.timeout_secs) {
     return Err(ApiError::invalid("超时必须在 1 秒到 6 小时之间"));
   }
+  if job.out_dir {
+    return run_sso(docker, job, ctx).await;
+  }
   let timeout = Duration::from_secs(job.timeout_secs);
   let started = Instant::now();
   let mut mem_peak = None;
-  let mut result = None;
-  let mut hidden = Vec::new();
-  if (job.network_host || job.out_dir)
-    && !matches!(job.how, TaskHow::Script { .. })
-  {
+  if job.network_host && !matches!(job.how, TaskHow::Script { .. }) {
     return Err(ApiError::invalid("代登录参数只能用于脚本"));
   }
   let output = match &job.how {
@@ -58,71 +69,28 @@ pub async fn run(
       mirrors,
       env,
     } => {
-      let mut random = [0u8; 4];
-      getrandom::fill(&mut random)
-        .map_err(|_| ApiError::internal("随机数不可用"))?;
-      let root = docker.data_dir.join(if job.out_dir {
-        SSO_WORK
-      } else {
-        "tasks"
-      });
+      let root = docker.data_dir.join("tasks");
       fs::create_dir_all(&root).map_err(io_err(&root))?;
-      let dir =
-        root.join(format!("{}-{}", job.name, hex::encode(random)));
-      DirBuilder::new()
-        .mode(0o700)
-        .create(&dir)
-        .map_err(io_err(&dir))?;
-      let _cleanup = WorkDir(dir.clone());
+      let work = work_dir(&root, &job.name)?;
+      let dir = &work.0;
       let (file, entry) = script_command(*runtime);
       write_private(&dir.join(file), code.as_bytes())?;
-      let (persistent, name, install_name) = if job.out_dir {
-        (
-          Path::new("/srv/.wharf-sso").join(&job.name),
-          format!("wharf-sso-{}", job.name),
-          format!("wharf-sso-deps-{}", job.name),
-        )
-      } else {
-        (
-          Path::new("/srv")
-            .join(format!("{TASK_DATA_PREFIX}{}", job.name)),
-          format!("wharf-task-{}", job.name),
-          format!("wharf-deps-{}", job.name),
-        )
-      };
+      let persistent = Path::new("/srv")
+        .join(format!("{TASK_DATA_PREFIX}{}", job.name));
+      let name = format!("wharf-task-{}", job.name);
+      let install_name = format!("wharf-deps-{}", job.name);
       let data_dir = persistent.join("data");
       let deps_dir = persistent.join("deps");
       for path in [&data_dir, &deps_dir] {
         fs::create_dir_all(path).map_err(io_err(path))?;
       }
-      // 控制面超时后 agent 可能还在清理，避免下一次登录删掉彼此的容器。
-      let _run_lock = if job.out_dir {
-        let lock = persistent.join("run.lock");
-        let file = OpenOptions::new()
-          .write(true)
-          .create(true)
-          .truncate(false)
-          .open(&lock)
-          .map_err(io_err(&lock))?;
-        file.try_lock().map_err(|_| {
-          ApiError::new(
-            ErrorCode::Conflict,
-            "上次代登录正在清理，请重试",
-          )
-        })?;
-        hidden
-          .extend(env.values().filter(|v| !v.is_empty()).cloned());
-        Some(file)
-      } else {
-        None
-      };
       let mut vars = env.clone();
       if *runtime == ScriptRuntime::Python {
         vars.insert("PYTHONPATH".into(), "/deps".into());
       }
       if *runtime == ScriptRuntime::Node {
         fs::create_dir(dir.join("node_modules"))
-          .map_err(io_err(&dir))?;
+          .map_err(io_err(dir))?;
       }
       if let Some(input) = &job.input {
         let body = STANDARD
@@ -133,21 +101,7 @@ pub async fn run(
         vars.insert("WHARF_QUERY".into(), input.query.clone());
         vars.insert("WHARF_BODY_FILE".into(), "/wharf/body".into());
       }
-      let mut env_file = String::new();
-      for (k, v) in vars {
-        if k.is_empty() || k.contains(['=', '\n', '\r', '\0']) {
-          return Err(ApiError::invalid("环境变量名无效"));
-        }
-        if v.contains(['\n', '\r']) {
-          return Err(ApiError::invalid(format!(
-            "环境变量 {k} 不能包含换行"
-          )));
-        }
-        env_file.push_str(&format!("{k}={v}\n"));
-      }
-      if !job.out_dir {
-        write_private(&dir.join("env"), env_file.as_bytes())?;
-      }
+      write_env(&dir.join("env"), &vars)?;
       crate::build::remove_container(docker, &name).await;
       docker.pull(image, &job.pull, ctx, &mut Vec::new()).await?;
       let execution_started = Instant::now();
@@ -219,10 +173,8 @@ pub async fn run(
           crate::build::remove_container(docker, &install_name).await;
         }
         let installed = installed?;
-        install_output = tail(&mask_values(
-          &format!("{}{}", installed.stdout, installed.stderr),
-          &hidden,
-        ));
+        install_output =
+          tail(&format!("{}{}", installed.stdout, installed.stderr));
         if !installed.success {
           return Ok(TaskRunResult {
             result: None,
@@ -259,13 +211,6 @@ pub async fn run(
         .args(["-v", &format!("{}:/deps:ro", deps_dir.display())]);
       if job.network_host {
         cmd = cmd.args(["--network", "host"]);
-      }
-      let out_dir = dir.join("out");
-      if job.out_dir {
-        write_private(&dir.join("env"), env_file.as_bytes())?;
-        fs::create_dir(&out_dir).map_err(io_err(&out_dir))?;
-        cmd =
-          cmd.args(["-v", &format!("{}:/out", out_dir.display())]);
       }
       if *runtime == ScriptRuntime::Node
         && !deps.trim().is_empty()
@@ -309,9 +254,6 @@ pub async fn run(
       sampling_ctx.cancel.cancel();
       if let Ok(ref mut output) = out {
         output.stdout = format!("{install_output}{}", output.stdout);
-        if job.out_dir {
-          result = read_result(&out_dir);
-        }
       }
       if out.is_err() {
         crate::build::remove_container(docker, &name).await;
@@ -371,14 +313,11 @@ pub async fn run(
   let duration_ms = started.elapsed().as_millis() as u64;
   match output {
     Ok(o) => Ok(TaskRunResult {
-      result,
+      result: None,
       mem_peak,
       exit_code: o.code,
       timed_out: false,
-      output: tail(&mask_values(
-        &format!("{}{}", o.stdout, o.stderr),
-        &hidden,
-      )),
+      output: tail(&format!("{}{}", o.stdout, o.stderr)),
       duration_ms,
     }),
     Err(e) if e.code == ErrorCode::Timeout => Ok(TaskRunResult {
@@ -391,6 +330,467 @@ pub async fn run(
     }),
     Err(e) => Err(e),
   }
+}
+
+async fn run_sso(
+  docker: &Docker,
+  job: &TaskRunJob,
+  ctx: &Ctx,
+) -> Result<TaskRunResult, ApiError> {
+  let TaskHow::Script {
+    image,
+    runtime,
+    code,
+    deps,
+    mirrors,
+    env,
+  } = &job.how
+  else {
+    return Err(ApiError::invalid("代登录参数只能用于脚本"));
+  };
+  let active = SSO_ACTIVE.clone().read_owned().await;
+  let dir = Path::new(SSO_ROOT).join(&job.name);
+  fs::create_dir_all(&dir).map_err(io_err(&dir))?;
+  let deps_dir = dir.join("deps");
+  let needs_deps = || {
+    needs_install(
+      fs::read_to_string(deps_dir.join(".wharf-hash"))
+        .ok()
+        .as_deref(),
+      image,
+      deps,
+    )
+  };
+  let installing = || {
+    ApiError::new(ErrorCode::Conflict, "代登录依赖正在安装，稍后重试")
+  };
+  let lock_path = dir.join("run.lock");
+  let lock = OpenOptions::new()
+    .create(true)
+    .truncate(false)
+    .write(true)
+    .open(&lock_path)
+    .map_err(io_err(&lock_path))?;
+  loop {
+    match lock.try_lock() {
+      Ok(()) => break,
+      Err(std::fs::TryLockError::WouldBlock) if job.wait_for_deps => {
+        tokio::select! {
+          _ = ctx.cancel.cancelled() => return Err(ApiError::new(ErrorCode::Cancelled, "代登录已取消")),
+          _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+        }
+      }
+      Err(std::fs::TryLockError::WouldBlock) => {
+        return Err(if needs_deps() {
+          installing()
+        } else {
+          ApiError::new(
+            ErrorCode::Conflict,
+            "上次代登录正在清理，请重试",
+          )
+        });
+      }
+      Err(std::fs::TryLockError::Error(e)) => {
+        return Err(io_err(&lock_path)(e));
+      }
+    }
+  }
+  let name = sso_runner_name(*runtime, image);
+  let mount = format!("{SSO_MOUNT}/{}", job.name);
+  if needs_deps() && !job.wait_for_deps {
+    let (docker, pull, image, runtime, deps, mirrors, ctx) = (
+      docker.clone(),
+      job.pull.clone(),
+      image.clone(),
+      *runtime,
+      deps.clone(),
+      mirrors.clone(),
+      Ctx {
+        cancel: ctx.cancel.clone(),
+        progress: None,
+      },
+    );
+    tokio::spawn(async move {
+      let (_active, _lock) = (active, lock);
+      let result = async {
+        let runner =
+          ensure_sso_runner(&docker, &name, &image, &pull, &ctx)
+            .await?;
+        install_sso_deps(
+          &docker, &runner, &dir, &mount, runtime, &image, &deps,
+          &mirrors, &ctx,
+        )
+        .await
+      }
+      .await;
+      if let Err(error) = result {
+        tracing::warn!(code = ?error.code, "后台安装代登录依赖失败");
+      }
+    });
+    return Err(installing());
+  }
+  let runner =
+    ensure_sso_runner(docker, &name, image, &job.pull, ctx).await?;
+  if needs_deps() {
+    install_sso_deps(
+      docker, &runner, &dir, &mount, *runtime, image, deps, mirrors,
+      ctx,
+    )
+    .await?;
+  }
+  let started = Instant::now();
+  let (file, entry) = script_command(*runtime);
+  let node_deps =
+    *runtime == ScriptRuntime::Node && !deps.trim().is_empty();
+  let work = work_dir(&dir, "run")?;
+  let script_dir = if node_deps { &deps_dir } else { &dir };
+  let script = script_dir.join(file);
+  if fs::read(&script).ok().as_deref() != Some(code.as_bytes()) {
+    let next = work.0.join(file);
+    write_private(&next, code.as_bytes())?;
+    fs::rename(&next, &script).map_err(io_err(&script))?;
+  }
+  let work_name = work.0.file_name().unwrap().to_string_lossy();
+  let mut vars = env.clone();
+  vars.insert(
+    "WHARF_OUT".into(),
+    format!("{mount}/{work_name}/result.json"),
+  );
+  if *runtime == ScriptRuntime::Python && !deps.trim().is_empty() {
+    vars.insert("PYTHONPATH".into(), format!("{mount}/deps"));
+  }
+  let env_file = work.0.join("env");
+  write_env(&env_file, &vars)?;
+  let timeout = Duration::from_secs(job.timeout_secs.min(60));
+  let script_path = if node_deps {
+    format!("deps/{file}")
+  } else {
+    file.into()
+  };
+  let args = sso_exec_args(
+    &runner,
+    &env_file,
+    &mount,
+    timeout,
+    [entry, &script_path],
+  );
+  let output = sso_exec(docker, args, &runner, timeout, ctx).await;
+  let hidden: Vec<String> = env
+    .values()
+    .filter(|value| !value.is_empty())
+    .cloned()
+    .collect();
+  let duration_ms = started.elapsed().as_millis() as u64;
+  match output {
+    Ok(o) => Ok(TaskRunResult {
+      result: read_result(&work.0),
+      mem_peak: None,
+      exit_code: o.code,
+      timed_out: o.code == Some(137),
+      output: tail(&mask_values(
+        &format!("{}{}", o.stdout, o.stderr),
+        &hidden,
+      )),
+      duration_ms,
+    }),
+    Err(e) if e.code == ErrorCode::Timeout => Ok(TaskRunResult {
+      result: None,
+      mem_peak: None,
+      exit_code: None,
+      timed_out: true,
+      output: e.message,
+      duration_ms,
+    }),
+    Err(e) => Err(e),
+  }
+}
+
+async fn ensure_sso_runner(
+  docker: &Docker,
+  name: &str,
+  image: &str,
+  pull: &wharf_api_types::agent::PullPolicy,
+  ctx: &Ctx,
+) -> Result<String, ApiError> {
+  let _start = tokio::select! {
+    guard = SSO_START.lock() => guard,
+    _ = ctx.cancel.cancelled() => return Err(ApiError::new(ErrorCode::Cancelled, "代登录已取消")),
+  };
+  let existing = docker
+    .cmd()
+    .args([
+      "ps",
+      "-aq",
+      "--no-trunc",
+      "--filter",
+      &format!("name=^/{name}$"),
+      "--filter",
+      &format!("label={SSO_LABEL}"),
+    ])
+    .timeout(QUICK)
+    .run(ctx)
+    .await?
+    .check("查找代登录容器")?;
+  let id = existing.stdout.trim();
+  if !id.is_empty() {
+    let state = docker
+      .cmd()
+      .args(["inspect", "--format", "{{.State.Running}}", id])
+      .timeout(QUICK)
+      .run(ctx)
+      .await?
+      .check("检查代登录容器")?;
+    if state.stdout.trim() != "true" {
+      docker
+        .cmd()
+        .args(["start", id])
+        .timeout(QUICK)
+        .run(ctx)
+        .await?
+        .check("启动代登录容器")?;
+    }
+    return Ok(id.into());
+  }
+  if !docker.image_exists(image, ctx).await {
+    docker.pull(image, pull, ctx, &mut Vec::new()).await?;
+  }
+  let out = docker
+    .cmd()
+    .args([
+      "run",
+      "-di",
+      "--init",
+      "--name",
+      name,
+      "--label",
+      SSO_LABEL,
+      "--network",
+      "host",
+      "--restart",
+      "unless-stopped",
+      "-v",
+      &format!("{SSO_ROOT}:{SSO_MOUNT}"),
+      "--entrypoint",
+      "sh",
+      image,
+    ])
+    .timeout(QUICK)
+    .run(ctx)
+    .await?
+    .check("创建代登录容器")?;
+  Ok(out.stdout.trim().into())
+}
+
+fn sso_exec_args(
+  runner: &str,
+  env_file: &Path,
+  mount: &str,
+  timeout: Duration,
+  command: impl IntoIterator<Item = impl Into<String>>,
+) -> Vec<String> {
+  [
+    "exec", "--env-file", &env_file.to_string_lossy(), "-w", mount,
+    runner, "sh", "-c",
+    r#"seconds=$1; shift; if command -v timeout >/dev/null 2>&1; then exec timeout -s KILL "$seconds" "$@"; fi; exec "$@""#,
+    "sh", &timeout.as_secs().to_string(),
+  ].into_iter().map(str::to_string).chain(command.into_iter().map(Into::into)).collect()
+}
+
+// 容器内外的超时和取消都可能留下子进程，重启可确认它们已退出。
+async fn sso_exec(
+  docker: &Docker,
+  args: Vec<String>,
+  runner: &str,
+  timeout: Duration,
+  ctx: &Ctx,
+) -> Result<Output, ApiError> {
+  if ctx.cancel.is_cancelled() {
+    return Err(ApiError::new(ErrorCode::Cancelled, "代登录已取消"));
+  }
+  let out = docker
+    .cmd()
+    .args(args)
+    .timeout(timeout + Duration::from_secs(2))
+    .run(ctx)
+    .await;
+  if !out.as_ref().is_ok_and(|o| o.code != Some(137)) {
+    docker
+      .cmd()
+      .args(["restart", "-t", "0", runner])
+      .timeout(QUICK)
+      .run(&Ctx::detached())
+      .await?
+      .check("回收代登录进程")?;
+  }
+  out
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn install_sso_deps(
+  docker: &Docker,
+  runner: &str,
+  dir: &Path,
+  mount: &str,
+  runtime: ScriptRuntime,
+  image: &str,
+  deps: &str,
+  mirrors: &BTreeMap<String, String>,
+  ctx: &Ctx,
+) -> Result<(), ApiError> {
+  let deps_dir = dir.join("deps");
+  if let Err(e) = fs::remove_dir_all(&deps_dir)
+    && e.kind() != std::io::ErrorKind::NotFound
+  {
+    return Err(io_err(&deps_dir)(e));
+  }
+  fs::create_dir(&deps_dir).map_err(io_err(&deps_dir))?;
+  let work = work_dir(dir, "run")?;
+  let env_file = work.0.join("env");
+  let source = match runtime {
+    ScriptRuntime::Python => "PIP_INDEX_URL",
+    ScriptRuntime::Node => "NPM_CONFIG_REGISTRY",
+    ScriptRuntime::Shell => {
+      return Err(ApiError::invalid("shell 脚本不支持依赖清单"));
+    }
+  };
+  let vars = mirrors
+    .get(source)
+    .map(|value| (source.to_string(), value.clone()))
+    .into_iter()
+    .collect();
+  write_env(&env_file, &vars)?;
+  let target = format!("{mount}/deps");
+  let requirements;
+  let command = match runtime {
+    ScriptRuntime::Python => {
+      let file = "requirements.txt";
+      write_private(&work.0.join(file), deps.as_bytes())?;
+      let work_name = work.0.file_name().unwrap().to_string_lossy();
+      requirements = format!("{mount}/{work_name}/{file}");
+      vec![
+        "pip",
+        "install",
+        "--no-cache-dir",
+        "--target",
+        &target,
+        "-r",
+        &requirements,
+      ]
+    }
+    ScriptRuntime::Node => {
+      let mut args = vec![
+        "npm",
+        "install",
+        "--prefix",
+        &target,
+        "--no-audit",
+        "--no-fund",
+        "--",
+      ];
+      args.extend(node_packages(deps));
+      args
+    }
+    ScriptRuntime::Shell => unreachable!(),
+  };
+  let args =
+    sso_exec_args(runner, &env_file, mount, DEPS_TIMEOUT, command);
+  let out = sso_exec(docker, args, runner, DEPS_TIMEOUT, ctx).await?;
+  if !out.success {
+    return Err(ApiError::new(
+      ErrorCode::AgentFailed,
+      "安装代登录依赖失败",
+    ));
+  }
+  write_private(
+    &deps_dir.join(".wharf-hash"),
+    deps_hash(image, deps).as_bytes(),
+  )
+}
+
+pub async fn cleanup_sso(
+  docker: &Docker,
+  domains: &[String],
+  runners: &[String],
+  ctx: &Ctx,
+) -> Result<(), ApiError> {
+  // 正在登录或安装依赖时等下一轮，避免删正在使用的容器或目录。
+  let Ok(_idle) = SSO_ACTIVE.try_write() else {
+    return Ok(());
+  };
+  let out = docker
+    .cmd()
+    .args([
+      "ps",
+      "-a",
+      "--filter",
+      &format!("label={SSO_LABEL}"),
+      "--format",
+      "{{.Names}}",
+    ])
+    .timeout(QUICK)
+    .run(ctx)
+    .await?
+    .check("列出代登录容器")?;
+  for name in out.stdout.lines() {
+    if !runners.iter().any(|runner| runner == name) {
+      docker
+        .cmd()
+        .args(["rm", "-f", name])
+        .timeout(QUICK)
+        .run(ctx)
+        .await?
+        .check("删除闲置代登录容器")?;
+    }
+  }
+  let root = Path::new(SSO_ROOT);
+  if !root.exists() {
+    return Ok(());
+  }
+  for entry in fs::read_dir(root).map_err(io_err(root))? {
+    let entry = entry.map_err(io_err(root))?;
+    let name = entry.file_name();
+    let name = name.to_string_lossy();
+    if name.len() != 32
+      || !name.bytes().all(|c| c.is_ascii_hexdigit())
+      || !entry.file_type().map_err(io_err(root))?.is_dir()
+    {
+      continue;
+    }
+    let dir = entry.path();
+    if !domains.iter().any(|domain| domain == &name) {
+      fs::remove_dir_all(&dir).map_err(io_err(&dir))?;
+    } else {
+      for work in fs::read_dir(&dir).map_err(io_err(&dir))? {
+        let work = work.map_err(io_err(&dir))?;
+        let name = work.file_name();
+        if name.to_string_lossy().starts_with("run-")
+          && work.file_type().map_err(io_err(&dir))?.is_dir()
+        {
+          fs::remove_dir_all(work.path()).map_err(io_err(&dir))?;
+        }
+      }
+    }
+  }
+  Ok(())
+}
+
+fn write_env(
+  path: &Path,
+  vars: &BTreeMap<String, String>,
+) -> Result<(), ApiError> {
+  let mut text = String::new();
+  for (k, v) in vars {
+    if k.is_empty() || k.contains(['=', '\n', '\r', '\0']) {
+      return Err(ApiError::invalid("环境变量名无效"));
+    }
+    if v.contains(['\n', '\r', '\0']) {
+      return Err(ApiError::invalid(format!(
+        "环境变量 {k} 不能包含换行或空字符"
+      )));
+    }
+    text.push_str(&format!("{k}={v}\n"));
+  }
+  write_private(path, text.as_bytes())
 }
 
 fn read_result(out: &Path) -> Option<String> {
@@ -511,6 +911,18 @@ fn tail(s: &str) -> String {
   format!("…{}", &s[start..])
 }
 
+fn work_dir(root: &Path, prefix: &str) -> Result<WorkDir, ApiError> {
+  let mut random = [0u8; 12];
+  getrandom::fill(&mut random)
+    .map_err(|_| ApiError::internal("随机数不可用"))?;
+  let dir = root.join(format!("{prefix}-{}", hex::encode(random)));
+  DirBuilder::new()
+    .mode(0o700)
+    .create(&dir)
+    .map_err(io_err(&dir))?;
+  Ok(WorkDir(dir))
+}
+
 struct WorkDir(PathBuf);
 
 impl Drop for WorkDir {
@@ -523,7 +935,7 @@ impl Drop for WorkDir {
 
 /// 启动时清掉上次进程被杀后留下的脚本文件。
 pub fn cleanup(data_dir: &Path) -> std::io::Result<()> {
-  for dir in ["tasks", SSO_WORK] {
+  for dir in ["tasks", "sso-scripts"] {
     if let Err(e) = fs::remove_dir_all(data_dir.join(dir))
       && e.kind() != std::io::ErrorKind::NotFound
     {
@@ -556,6 +968,30 @@ fn script_command(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn sso_credentials_only_go_in_env_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let env_file = dir.path().join("env");
+    let value = "fixture-value";
+    write_env(
+      &env_file,
+      &BTreeMap::from([("WHARF_PASSWORD".into(), value.into())]),
+    )
+    .unwrap();
+    let args = sso_exec_args(
+      "runner",
+      &env_file,
+      "/work",
+      Duration::from_secs(30),
+      ["python", "main.py"],
+    );
+    assert_eq!(
+      &args[..3],
+      ["exec", "--env-file", env_file.to_str().unwrap()]
+    );
+    assert!(args.iter().all(|arg| !arg.contains(value)));
+  }
 
   #[test]
   fn unchanged_deps_skip_install() {

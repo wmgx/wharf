@@ -410,10 +410,10 @@ pub async fn start(
     let run_id = run_id.clone();
     state
       .db
-      .call(move |c| {
+      .call_credentials(move |c, key| {
         let tx = c.transaction().map_err(sql_err)?;
         if let Some(i) = inputs
-          && i != db::inputs(&tx)?
+          && i != db::inputs(&tx, key)?
         {
           return Err(
             ApiError::new(
@@ -959,7 +959,9 @@ async fn run_step(
           let name = crate::acme_dns::secret_name(gateway);
           state
             .db
-            .call(move |c| db::ensure_secret(c, &name, db::now_ms()))
+            .call_credentials(move |c, key| {
+              db::ensure_secret(c, key, &name, db::now_ms())
+            })
             .await?
         } else {
           String::new()
@@ -1047,8 +1049,8 @@ async fn run_step(
       let now = Utc::now().timestamp_millis();
       let token = state
         .db
-        .call(move |c| {
-          db::ensure_secret(c, crate::link::TOKEN_SECRET, now)
+        .call_credentials(move |c, key| {
+          db::ensure_secret(c, key, crate::link::TOKEN_SECRET, now)
         })
         .await?;
       let compose = p.compose.replace(

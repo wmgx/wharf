@@ -1,26 +1,36 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+  collections::BTreeMap,
+  net::SocketAddr,
+  sync::{Arc, LazyLock, Mutex},
+  time::{Duration, Instant},
+};
 
 use axum::{
   Extension, Json,
-  extract::{Path, State},
-  http::{HeaderValue, header},
+  extract::{ConnectInfo, Path, State},
+  http::{HeaderMap, HeaderValue, header},
 };
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, params};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use wharf_api_types::{
-  ApiError, validate_name,
+  ApiError, ErrorCode, validate_name,
   view::{AppAccountDomain, AppAccountView, Perm},
 };
 
 use crate::{
   api::{ApiResult, AppError},
   audit::AuditSlot,
-  auth::Auth,
+  auth::{Auth, hash_token},
   db::{now_ms, sql_err, to_time},
+  login,
   state::AppState,
   world::normalize_hostname,
 };
+
+const REVEAL_TTL: Duration = Duration::from_secs(5 * 60);
+static VERIFIED: LazyLock<Mutex<BTreeMap<String, Instant>>> =
+  LazyLock::new(Default::default);
 
 pub fn defaults(
   conn: &Connection,
@@ -117,16 +127,11 @@ pub async fn set(
   if req.username.is_empty() || req.password.as_deref() == Some("") {
     return Err(ApiError::invalid("用户名和密码都不能为空").into());
   }
-  let view = s.db.call(move |c| {
+  let view = s.db.call_credentials(move |c, key| {
     let tx = c.transaction().map_err(sql_err)?;
     let now = now_ms();
     if let Some(password) = req.password {
-      tx.execute(
-        "INSERT INTO app_accounts (name, username, password, note, updated_at) VALUES (?1, ?2, ?3, COALESCE(?4, ''), ?5)
-         ON CONFLICT (name) DO UPDATE SET username = excluded.username, password = excluded.password,
-           note = COALESCE(?4, app_accounts.note), updated_at = excluded.updated_at",
-        params![name, req.username, password, req.note, now],
-      ).map_err(sql_err)?;
+      key.put_app_account(&tx, &name, &req.username, &password, req.note.as_deref(), now)?;
     } else if tx.execute(
       "UPDATE app_accounts SET username = ?2, note = COALESCE(?3, note), updated_at = ?4 WHERE name = ?1",
       params![name, req.username, req.note, now],
@@ -227,29 +232,103 @@ pub async fn unlink(
   }).await?))
 }
 
+#[derive(Deserialize)]
+pub struct RevealRequest {
+  password: Option<String>,
+}
+
+async fn verify_reveal(
+  state: &AppState,
+  headers: &HeaderMap,
+  auth: &Auth,
+  peer: SocketAddr,
+  password: Option<String>,
+) -> Result<(), ApiError> {
+  let Some((_, hash)) = login::admin(&state.db).await? else {
+    return Err(ApiError::new(ErrorCode::Forbidden, "还没有设置 Wharf 管理员登录密码")
+      .with_hint("打开控制面页面并用初始化码设置，或在控制面服务器运行 docker exec -it wharf-core wharf-core reset-password"));
+  };
+  let session = auth
+    .human
+    .then(|| login::cookie_value(headers).map(hash_token))
+    .flatten();
+  let Some(password) = password.filter(|p| !p.is_empty()) else {
+    let mut verified =
+      VERIFIED.lock().unwrap_or_else(|e| e.into_inner());
+    verified.retain(|_, until| *until > Instant::now());
+    if session.as_ref().is_some_and(|id| verified.contains_key(id)) {
+      return Ok(());
+    }
+    return Err(ApiError::new(
+      ErrorCode::PasswordRequired,
+      "请验证 Wharf 登录密码",
+    ));
+  };
+  let key = login::client_key(peer.ip(), headers);
+  if let Some(minutes) = login::locked(&key) {
+    return Err(ApiError::new(
+      ErrorCode::Forbidden,
+      format!("输错次数太多，{minutes} 分钟后再试"),
+    ));
+  }
+  if !tokio::task::spawn_blocking(move || {
+    login::verify_password(&password, &hash)
+  })
+  .await
+  .map_err(|_| ApiError::internal("验证登录密码失败"))?
+  {
+    login::record_failure(&key);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    return Err(ApiError::new(
+      ErrorCode::Forbidden,
+      "Wharf 登录密码不对",
+    ));
+  }
+  login::clear_failures(&key);
+  if let Some(session) = session {
+    let mut verified =
+      VERIFIED.lock().unwrap_or_else(|e| e.into_inner());
+    let now = Instant::now();
+    verified.retain(|_, until| *until > now);
+    verified.insert(session, now + REVEAL_TTL);
+  }
+  Ok(())
+}
+
 pub async fn reveal(
   State(s): State<Arc<AppState>>,
   auth: Auth,
   Extension(audit): Extension<AuditSlot>,
+  ConnectInfo(peer): ConnectInfo<SocketAddr>,
   Path(name): Path<String>,
+  headers: HeaderMap,
+  req: Option<Json<RevealRequest>>,
 ) -> Result<
   ([(header::HeaderName, HeaderValue); 1], Json<Value>),
   AppError,
 > {
   auth.require(Perm::Admin)?;
   validate_name("应用账号", &name)?;
+  if let Err(error) = verify_reveal(
+    &s,
+    &headers,
+    &auth,
+    peer,
+    req.and_then(|Json(req)| req.password),
+  )
+  .await
+  {
+    audit.set_detail(format!(
+      "查看应用账号 {name} 的密码被拒绝：{}",
+      error.message
+    ));
+    return Err(error.into());
+  }
   let detail = format!("查看了应用账号 {name} 的密码");
   let password: String = s
     .db
-    .call(move |c| {
-      c.query_row(
-        "SELECT password FROM app_accounts WHERE name = ?1",
-        [&name],
-        |r| r.get(0),
-      )
-      .optional()
-      .map_err(sql_err)?
-      .ok_or_else(|| missing(&name))
+    .call_credentials(move |c, key| {
+      key.app_password(c, &name)?.ok_or_else(|| missing(&name))
     })
     .await?;
   audit.require_record(detail);
@@ -262,6 +341,90 @@ pub async fn reveal(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn reveal_rejects_missing_and_incorrect_passwords() {
+    use axum::{
+      body::Body,
+      http::{Request, StatusCode},
+    };
+    use tower::ServiceExt;
+
+    let state = Arc::new(AppState {
+      db: crate::db::Db::memory(),
+      hub: Default::default(),
+      key: ed25519_dalek::SigningKey::from_bytes(&[0; 32]),
+      runs: Default::default(),
+      apply_lock: Default::default(),
+      public_url: None,
+      agent_image: String::new(),
+      listen_port: 7700,
+      data_dir: Default::default(),
+      downloads: Default::default(),
+      edge_syncing: Default::default(),
+    });
+    state
+      .db
+      .call_credentials(|c, key| {
+        crate::auth::insert_token(
+          c,
+          "fixture",
+          &Perm::ALL,
+          "fixture-token",
+        )?;
+        key.put_app_account(
+          c,
+          "example",
+          "fixture-user",
+          "fixture-value",
+          None,
+          0,
+        )?;
+        Ok(())
+      })
+      .await
+      .unwrap();
+    let app = crate::api::router(state.clone());
+    let request = |body: &'static str| {
+      app.clone().oneshot(
+        Request::post("/api/sso/accounts/example/password")
+          .header(header::CONTENT_TYPE, "application/json")
+          .header(header::AUTHORIZATION, "Bearer fixture-token")
+          .extension(ConnectInfo(
+            "127.0.0.20:1234".parse::<SocketAddr>().unwrap(),
+          ))
+          .body(Body::from(body))
+          .unwrap(),
+      )
+    };
+    let unset = request("{}").await.unwrap();
+    assert_eq!(unset.status(), StatusCode::FORBIDDEN);
+    let body =
+      axum::body::to_bytes(unset.into_body(), 4096).await.unwrap();
+    assert!(
+      serde_json::from_slice::<ApiError>(&body)
+        .unwrap()
+        .hint
+        .is_some()
+    );
+    state
+      .db
+      .call(|c| {
+        login::set_admin(
+          c,
+          "admin",
+          &login::hash_password("fixture-wharf")?,
+        )
+      })
+      .await
+      .unwrap();
+    for body in ["{}", r#"{"password":"fixture-wrong"}"#] {
+      assert_eq!(
+        request(body).await.unwrap().status(),
+        StatusCode::FORBIDDEN
+      );
+    }
+  }
 
   #[tokio::test]
   async fn linked_account_cannot_be_deleted() {

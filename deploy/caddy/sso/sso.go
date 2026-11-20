@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +22,7 @@ import (
 )
 
 const CLOCK_SKEW = 30
+const takeoverCookie = "wharf_takeover"
 
 func init() {
 	caddy.RegisterModule(SSO{})
@@ -30,14 +32,24 @@ func init() {
 	})
 }
 
+type Takeover struct {
+	Paths         []string `json:"paths"`
+	SkipQuery     []string `json:"skip_query"`
+	RDParam       string   `json:"rd_param"`
+	Entry         string   `json:"entry"`
+	NativeMinutes int      `json:"native_minutes"`
+}
+
 type SSO struct {
-	AppLogin   bool     `json:"app_login,omitempty"`
-	PublicKey  string   `json:"public_key"`
-	Core       string   `json:"core"`
-	Login      string   `json:"login"`
-	Skip       []string `json:"skip,omitempty"`
-	Trust      []string `json:"trust,omitempty"`
-	UserHeader string   `json:"user_header,omitempty"`
+	Public     bool      `json:"public,omitempty"`
+	Takeover   *Takeover `json:"takeover,omitempty"`
+	AppLogin   bool      `json:"app_login,omitempty"`
+	PublicKey  string    `json:"public_key"`
+	Core       string    `json:"core"`
+	Login      string    `json:"login"`
+	Skip       []string  `json:"skip,omitempty"`
+	Trust      []string  `json:"trust,omitempty"`
+	UserHeader string    `json:"user_header,omitempty"`
 	trusted    []netip.Prefix
 	key        ed25519.PublicKey
 	client     *http.Client
@@ -71,6 +83,17 @@ func (s *SSO) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 			case "login":
 				if !d.Args(&s.Login) {
 					return d.ArgErr()
+				}
+			case "public":
+				s.Public = true
+			case "takeover":
+				var value string
+				if !d.Args(&value) {
+					return d.ArgErr()
+				}
+				config, err := base64.RawURLEncoding.DecodeString(value)
+				if err != nil || json.Unmarshal(config, &s.Takeover) != nil || s.Takeover == nil {
+					return d.Err("接管登录页配置无效")
 				}
 			case "app_login":
 				var value string
@@ -125,7 +148,7 @@ func stripCookies(r *http.Request) (string, string) {
 		for _, part := range strings.Split(line, ";") {
 			part = strings.TrimSpace(part)
 			name, value, ok := strings.Cut(part, "=")
-			if ok && (name == "wharf_gate" || name == "wharf_gate_rt" || name == "wharf_sso") {
+			if ok && (name == "wharf_gate" || name == "wharf_gate_rt" || name == "wharf_sso" || name == "wharf_native" || name == takeoverCookie) {
 				if value != "" {
 					if name == "wharf_gate" && access == "" {
 						access = value
@@ -284,24 +307,121 @@ func (s *SSO) checkKey(w http.ResponseWriter, r *http.Request, key string) (bool
 	http.Error(w, "登录服务暂时连不上", http.StatusBadGateway)
 	return false, nil
 }
+func matchesPath(request string, prefixes []string) bool {
+	for _, prefix := range prefixes {
+		if request == prefix || strings.HasPrefix(request, strings.TrimRight(prefix, "/")+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+func localPath(raw string) (*url.URL, bool) {
+	if !strings.HasPrefix(raw, "/") || strings.HasPrefix(raw, "//") || strings.ContainsAny(raw, "\\\r\n\t") {
+		return nil, false
+	}
+	u, err := url.Parse(raw)
+	if err != nil || strings.HasPrefix(u.Path, "//") || strings.HasPrefix(path.Clean(u.Path)+"/", "/_wharf/") {
+		return nil, false
+	}
+	return u, true
+}
+
+func (t *Takeover) loginPath(r *http.Request) string {
+	query := r.URL.Query()
+	for _, skip := range t.SkipQuery {
+		if query.Has(skip) {
+			return ""
+		}
+	}
+	rd := t.Entry
+	if rd == "" {
+		rd = "/"
+	}
+	if t.RDParam != "" {
+		if candidate := query.Get(t.RDParam); candidate != "" {
+			if parsed, ok := localPath(candidate); ok && !matchesPath(path.Clean(parsed.Path), t.Paths) {
+				rd = candidate
+			}
+		}
+	}
+	return "/_wharf/login?" + url.Values{"rd": {rd}}.Encode()
+}
+
+func (s *SSO) native(w http.ResponseWriter, r *http.Request) {
+	rd := r.URL.Query().Get("rd")
+	parsed, ok := localPath(rd)
+	if r.Method != http.MethodGet || !ok || !matchesPath(parsed.Path, s.Takeover.Paths) {
+		http.Error(w, "跳转地址不对", http.StatusBadRequest)
+		return
+	}
+	minutes := s.Takeover.NativeMinutes
+	if minutes == 0 {
+		minutes = 10
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	http.SetCookie(w, &http.Cookie{
+		Name: "wharf_native", Value: "1", MaxAge: minutes * 60, Path: "/",
+		HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode,
+	})
+	http.Redirect(w, r, rd, http.StatusFound)
+}
+
+func (s *SSO) silentLogin(w http.ResponseWriter, r *http.Request, loginPath string) {
+	query := url.Values{
+		"rd":     {"https://" + r.Host + loginPath},
+		"silent": {"1"},
+		"native": {r.URL.RequestURI()},
+	}
+	redirectAppLogin(w, r, strings.TrimRight(s.Login, "/")+"/gate/login?"+query.Encode(), true)
+}
+
+func redirectAppLogin(w http.ResponseWriter, r *http.Request, target string, takeover bool) {
+	if takeover {
+		http.SetCookie(w, &http.Cookie{
+			Name: takeoverCookie, Value: "1", MaxAge: 60, Path: "/",
+			HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode,
+		})
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	http.Redirect(w, r, target, http.StatusFound)
+}
+
 func (s *SSO) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
 	if strings.HasPrefix(r.URL.Path, "/_wharf/") {
+		if s.Public && s.Takeover != nil && r.URL.Path == "/_wharf/native" {
+			s.native(w, r)
+			return nil
+		}
 		return next.ServeHTTP(w, r)
 	}
 	if s.UserHeader != "" {
 		r.Header.Del(s.UserHeader)
 	}
-	_, markerError := r.Cookie("wharf_sso")
-	appLogin := s.AppLogin && markerError != nil && r.Method == "GET" && strings.Contains(r.Header.Get("Accept"), "text/html")
+	marker, markerError := r.Cookie("wharf_sso")
+	native, _ := r.Cookie("wharf_native")
+	recentTakeover, _ := r.Cookie(takeoverCookie)
+	html := r.Method == http.MethodGet && strings.Contains(r.Header.Get("Accept"), "text/html")
+	takeoverPath := ""
+	if s.Takeover != nil && html && matchesPath(r.URL.Path, s.Takeover.Paths) &&
+		(recentTakeover == nil || recentTakeover.Value != "1") &&
+		(marker == nil || marker.Value != "fail") && (!s.Public || native == nil || native.Value != "1") {
+		takeoverPath = s.Takeover.loginPath(r)
+	}
+	appLogin := takeoverPath
+	if s.Takeover == nil && s.AppLogin && markerError != nil && html {
+		appLogin = "/_wharf/login?rd=" + url.QueryEscape(r.URL.RequestURI())
+	}
 	access, refresh := stripCookies(r)
+	if s.Public && takeoverPath == "" {
+		return next.ServeHTTP(w, r)
+	}
 	keyValues, hasKey := r.Header["X-Wharf-Key"]
 	key := strings.Join(keyValues, ",")
 	r.Header.Del("X-Wharf-Key")
 	s.setUser(r, "")
-	for _, p := range s.Skip {
-		if r.URL.Path == p || strings.HasPrefix(r.URL.Path, strings.TrimRight(p, "/")+"/") {
-			return next.ServeHTTP(w, r)
-		}
+	if matchesPath(r.URL.Path, s.Skip) {
+		return next.ServeHTTP(w, r)
 	}
 	if peer, err := netip.ParseAddrPort(r.RemoteAddr); err == nil {
 		for _, prefix := range s.trusted {
@@ -319,8 +439,8 @@ func (s *SSO) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.H
 	}
 	if user, ok := verify(s.key, access, time.Now().Unix()); ok {
 		s.setUser(r, user)
-		if appLogin {
-			http.Redirect(w, r, "/_wharf/login?rd="+url.QueryEscape(r.URL.RequestURI()), http.StatusFound)
+		if appLogin != "" {
+			redirectAppLogin(w, r, appLogin, takeoverPath != "")
 			return nil
 		}
 		return next.ServeHTTP(w, r)
@@ -332,11 +452,15 @@ func (s *SSO) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.H
 		}
 		if result.status == 200 {
 			s.setUser(r, result.header.Get("X-Wharf-User"))
-			if appLogin {
-				http.Redirect(w, r, "/_wharf/login?rd="+url.QueryEscape(r.URL.RequestURI()), http.StatusFound)
+			if appLogin != "" {
+				redirectAppLogin(w, r, appLogin, takeoverPath != "")
 				return nil
 			}
 			return next.ServeHTTP(w, r)
+		}
+		if s.Public {
+			s.silentLogin(w, r, takeoverPath)
+			return nil
 		}
 		if location := result.header.Get("Location"); location != "" {
 			w.Header().Set("Location", location)
@@ -345,7 +469,9 @@ func (s *SSO) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.H
 		_, err := w.Write(result.body)
 		return err
 	}
-	if r.Method == "GET" && strings.Contains(r.Header.Get("Accept"), "text/html") {
+	if s.Public {
+		s.silentLogin(w, r, takeoverPath)
+	} else if html {
 		http.Redirect(w, r, strings.TrimRight(s.Login, "/")+"/gate/login?rd="+url.QueryEscape(originalURL(r)), http.StatusFound)
 	} else {
 		http.Error(w, "需要登录", http.StatusUnauthorized)
