@@ -456,3 +456,61 @@ func TestTakeover(t *testing.T) {
 		})
 	}
 }
+
+func TestTakeoverLoopGuard(t *testing.T) {
+	key := ed25519.NewKeyFromSeed(make([]byte, 32))
+	gate := &http.Cookie{Name: "wharf_gate", Value: token(key, "EdDSA", "wharf", time.Now().Unix()+60)}
+	for _, mode := range []struct {
+		name   string
+		public bool
+	}{
+		{"公开站点", true},
+		{"非公开站点", false},
+	} {
+		t.Run(mode.name, func(t *testing.T) {
+			s := plugin(t, "http://127.0.0.1:1")
+			s.Public = mode.public
+			s.Takeover = &Takeover{Paths: []string{"/login"}, Entry: "/console"}
+			request := func(cookies ...*http.Cookie) *httptest.ResponseRecorder {
+				r := httptest.NewRequest(http.MethodGet, "https://app.example.test/login", nil)
+				r.Header.Set("Accept", "text/html")
+				for _, cookie := range cookies {
+					r.AddCookie(cookie)
+				}
+				w := httptest.NewRecorder()
+				if err := s.ServeHTTP(w, r, caddyhttp.HandlerFunc(func(w http.ResponseWriter, r *http.Request) error {
+					if r.Header.Get("Cookie") != "" {
+						t.Fatal("应用收到 Wharf cookie")
+					}
+					w.WriteHeader(http.StatusNoContent)
+					return nil
+				})); err != nil {
+					t.Fatal(err)
+				}
+				return w
+			}
+			first := request(gate)
+			cookies := first.Result().Cookies()
+			if first.Code != 302 || first.Header().Get("Location") != "/_wharf/login?rd=%2Fconsole" || len(cookies) != 1 {
+				t.Fatal("首次接管应跳到代登录并设置 cookie")
+			}
+			guard := cookies[0]
+			if guard.Name != "wharf_takeover" || guard.Value != "1" || guard.MaxAge != 60 || guard.Path != "/" ||
+				!guard.HttpOnly || !guard.Secure || guard.SameSite != http.SameSiteLaxMode {
+				t.Fatal("接管 cookie 无效")
+			}
+			success := &http.Cookie{Name: "wharf_sso", Value: "1"}
+			if request(gate, guard, success).Code != 204 {
+				t.Fatal("应用跳回原生登录页后应直接放行")
+			}
+			visitor := request(guard)
+			if mode.public {
+				if visitor.Code != 204 {
+					t.Fatal("公开站点应放行原生登录页")
+				}
+			} else if location := visitor.Header().Get("Location"); visitor.Code != 302 || !strings.Contains(location, "/gate/login?rd=") {
+				t.Fatal("非公开站点应继续要求门禁登录")
+			}
+		})
+	}
+}

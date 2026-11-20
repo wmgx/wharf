@@ -22,6 +22,7 @@ import (
 )
 
 const CLOCK_SKEW = 30
+const takeoverCookie = "wharf_takeover"
 
 func init() {
 	caddy.RegisterModule(SSO{})
@@ -147,7 +148,7 @@ func stripCookies(r *http.Request) (string, string) {
 		for _, part := range strings.Split(line, ";") {
 			part = strings.TrimSpace(part)
 			name, value, ok := strings.Cut(part, "=")
-			if ok && (name == "wharf_gate" || name == "wharf_gate_rt" || name == "wharf_sso" || name == "wharf_native") {
+			if ok && (name == "wharf_gate" || name == "wharf_gate_rt" || name == "wharf_sso" || name == "wharf_native" || name == takeoverCookie) {
 				if value != "" {
 					if name == "wharf_gate" && access == "" {
 						access = value
@@ -372,8 +373,18 @@ func (s *SSO) silentLogin(w http.ResponseWriter, r *http.Request, loginPath stri
 		"silent": {"1"},
 		"native": {r.URL.RequestURI()},
 	}
+	redirectAppLogin(w, r, strings.TrimRight(s.Login, "/")+"/gate/login?"+query.Encode(), true)
+}
+
+func redirectAppLogin(w http.ResponseWriter, r *http.Request, target string, takeover bool) {
+	if takeover {
+		http.SetCookie(w, &http.Cookie{
+			Name: takeoverCookie, Value: "1", MaxAge: 60, Path: "/",
+			HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode,
+		})
+	}
 	w.Header().Set("Cache-Control", "no-store")
-	http.Redirect(w, r, strings.TrimRight(s.Login, "/")+"/gate/login?"+query.Encode(), http.StatusFound)
+	http.Redirect(w, r, target, http.StatusFound)
 }
 
 func (s *SSO) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
@@ -389,9 +400,11 @@ func (s *SSO) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.H
 	}
 	marker, markerError := r.Cookie("wharf_sso")
 	native, _ := r.Cookie("wharf_native")
+	recentTakeover, _ := r.Cookie(takeoverCookie)
 	html := r.Method == http.MethodGet && strings.Contains(r.Header.Get("Accept"), "text/html")
 	takeoverPath := ""
 	if s.Takeover != nil && html && matchesPath(r.URL.Path, s.Takeover.Paths) &&
+		(recentTakeover == nil || recentTakeover.Value != "1") &&
 		(marker == nil || marker.Value != "fail") && (!s.Public || native == nil || native.Value != "1") {
 		takeoverPath = s.Takeover.loginPath(r)
 	}
@@ -427,8 +440,7 @@ func (s *SSO) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.H
 	if user, ok := verify(s.key, access, time.Now().Unix()); ok {
 		s.setUser(r, user)
 		if appLogin != "" {
-			w.Header().Set("Cache-Control", "no-store")
-			http.Redirect(w, r, appLogin, http.StatusFound)
+			redirectAppLogin(w, r, appLogin, takeoverPath != "")
 			return nil
 		}
 		return next.ServeHTTP(w, r)
@@ -441,8 +453,7 @@ func (s *SSO) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.H
 		if result.status == 200 {
 			s.setUser(r, result.header.Get("X-Wharf-User"))
 			if appLogin != "" {
-				w.Header().Set("Cache-Control", "no-store")
-				http.Redirect(w, r, appLogin, http.StatusFound)
+				redirectAppLogin(w, r, appLogin, takeoverPath != "")
 				return nil
 			}
 			return next.ServeHTTP(w, r)
