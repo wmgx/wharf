@@ -899,6 +899,18 @@ async fn show_service(
 struct LogsQuery {
   #[serde(default = "default_tail")]
   tail: u32,
+  /// 只看这个时间之后的：`30m`、`2h`、`3d` 或 RFC 3339 时间。
+  #[serde(default)]
+  since: Option<String>,
+  /// 关键字，不分大小写。
+  #[serde(default)]
+  grep: Option<String>,
+  /// 只看报错，按内容去重计数。
+  #[serde(default)]
+  errors: bool,
+  /// 每行最多多少字符。
+  #[serde(default)]
+  max_line: Option<usize>,
 }
 
 fn default_tail() -> u32 {
@@ -909,23 +921,52 @@ async fn project_logs(
   s: &AppState,
   server: &str,
   project: String,
-  tail: u32,
+  q: &LogsQuery,
 ) -> Result<Json<Value>, AppError> {
+  let since =
+    match q.since.as_deref().filter(|v| !v.trim().is_empty()) {
+      Some(v) => {
+        Some(crate::log_search::since_arg(v).ok_or_else(|| {
+          ApiError::invalid(format!("时间范围 {v} 看不懂")).with_hint(
+            "写成 30m、2h、3d，或 2026-11-22T08:00:00+08:00",
+          )
+        })?)
+      }
+      None => None,
+    };
+  let grep = q.grep.as_deref().filter(|g| !g.trim().is_empty());
+  let filtering = grep.is_some() || q.errors;
   let logs: String = s
     .hub
     .call(
       server,
       AgentOp::Logs {
         project,
-        tail,
+        // 过滤时多拿一些再挑，最终条数由 tail 控制。
+        tail: if filtering { 5000 } else { q.tail },
         follow: false,
+        since,
       },
       Duration::from_secs(40),
       None,
       &tokio_util::sync::CancellationToken::new(),
     )
     .await?;
-  Ok(Json(json!({ "server": server, "logs": logs })))
+  if !filtering && q.max_line.is_none() {
+    return Ok(Json(json!({ "server": server, "logs": logs })));
+  }
+  let found = crate::log_search::search(
+    &logs,
+    &crate::log_search::Options {
+      grep,
+      errors: q.errors,
+      max_line: q.max_line.unwrap_or(500).max(20),
+      limit: q.tail.max(1) as usize,
+    },
+  );
+  let mut v = serde_json::to_value(found).unwrap_or_default();
+  v["server"] = json!(server);
+  Ok(Json(v))
 }
 
 async fn service_logs(
@@ -941,7 +982,7 @@ async fn service_logs(
     .services
     .get(&name)
     .ok_or_else(|| service_not_found(&name))?;
-  project_logs(&s, &row.spec.server, name.clone(), q.tail).await
+  project_logs(&s, &row.spec.server, name.clone(), &q).await
 }
 
 async fn deployments(
@@ -1084,8 +1125,7 @@ async fn gateway_logs(
     .gateways
     .get(&name)
     .ok_or_else(|| gateway_not_found(&name))?;
-  project_logs(&s, &row.spec.server, gateway_project(&name), q.tail)
-    .await
+  project_logs(&s, &row.spec.server, gateway_project(&name), &q).await
 }
 
 // ROUTES

@@ -238,6 +238,7 @@ pub async fn status(
         project: crate::world::gateway_project(&gateway),
         tail: LOG_TAIL,
         follow: false,
+        since: None,
       },
       Duration::from_secs(40),
       None,
