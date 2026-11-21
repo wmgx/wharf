@@ -1789,6 +1789,7 @@ mod tests {
       warnings: vec![],
       needs_confirm: vec![],
       suggest: vec![],
+      note: None,
     };
     assert!(changes_host_access(&plan));
   }

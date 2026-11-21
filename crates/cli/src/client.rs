@@ -125,18 +125,7 @@ impl Client {
       http: reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(15))
         .timeout(Duration::from_secs(180))
-        .default_headers(
-          [(
-            reqwest::header::HeaderName::from_static(
-              wharf_api_types::CLI_API_HEADER,
-            ),
-            reqwest::header::HeaderValue::from(
-              wharf_api_types::CLI_API,
-            ),
-          )]
-          .into_iter()
-          .collect(),
-        )
+        .default_headers(default_headers())
         .build()
         .map_err(|e| ApiError::internal(e.to_string()))?,
       base,
@@ -415,6 +404,26 @@ impl Client {
       .send(self.http.delete(format!("{}{path}", self.endpoint)))
       .await
   }
+}
+
+/// `--reason`：这次操作的原因，跟着每个请求发给控制面，记进操作记录。
+pub static REASON: std::sync::OnceLock<String> =
+  std::sync::OnceLock::new();
+
+fn default_headers() -> reqwest::header::HeaderMap {
+  use reqwest::header::{HeaderName, HeaderValue};
+  let mut h = reqwest::header::HeaderMap::new();
+  h.insert(
+    HeaderName::from_static(wharf_api_types::CLI_API_HEADER),
+    HeaderValue::from(wharf_api_types::CLI_API),
+  );
+  // 请求头只能放 ASCII，中文按百分号编码。
+  if let Some(reason) = REASON.get()
+    && let Ok(v) = HeaderValue::from_str(&seg(reason))
+  {
+    h.insert(HeaderName::from_static("x-wharf-reason"), v);
+  }
+  h
 }
 
 /// URL 路径段编码。

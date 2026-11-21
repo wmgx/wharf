@@ -329,11 +329,18 @@ pub async fn make_plan(
   let mut snap = snapshot::load(&state.db).await?;
   let current = snap.world.clone();
   let mut desired = current.clone();
+  let given = usize::from(!req.changes.is_empty())
+    + usize::from(req.fleet.is_some())
+    + usize::from(req.partial.is_some());
+  if given > 1 {
+    return Err(ApiError::invalid(
+      "changes、fleet、partial 只能给一个",
+    ));
+  }
   if let Some(fleet) = &req.fleet {
-    if !req.changes.is_empty() {
-      return Err(ApiError::invalid("changes 和 fleet 只能给一个"));
-    }
     desired.replace_with(fleet)?;
+  } else if let Some(fleet) = &req.partial {
+    desired.merge_with(fleet)?;
   } else {
     desired.apply_changes(&req.changes)?;
   }
@@ -623,8 +630,9 @@ pub async fn make_plan(
   baseline_items(&mut b, &current, &desired);
   gateway_items(&mut b, &snap, &current, &desired, &net, &status)?;
   // 带改动的计划只看受影响的域名；只检查漂移（没有改动）时看全部。
-  let scope = (!req.changes.is_empty() && req.fleet.is_none())
-    .then(|| affected_hosts(&snap, &current, &desired, &net));
+  let scope = (req.fleet.is_none()
+    && (!req.changes.is_empty() || req.partial.is_some()))
+  .then(|| affected_hosts(&snap, &current, &desired, &net));
   dns_items(&mut b, &snap, &desired, &net, scope.as_ref()).await?;
   mark("DNS");
   crate::edge_plan::edge_items(&mut b, &snap, &current, &desired)
@@ -686,6 +694,12 @@ pub async fn make_plan(
     warnings: b.warnings,
     needs_confirm,
     suggest,
+    note: req
+      .note
+      .as_deref()
+      .map(str::trim)
+      .filter(|n| !n.is_empty())
+      .map(|n| n.chars().take(500).collect()),
   };
   Ok(Planned {
     plan,

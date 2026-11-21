@@ -39,6 +39,43 @@ pub async fn run(cli: Cli) -> CliResult<()> {
   match cli.command {
     Command::Login { url, core_key } => login(url, core_key, j).await,
     Command::Schema { resource } => schema(resource.as_deref()),
+    Command::Validate { file } => {
+      let v = fleet::validate(&file);
+      out(j, &v, |v| {
+        let list = |k: &str| -> Vec<String> {
+          v[k]
+            .as_array()
+            .map(|a| {
+              a.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+            })
+            .unwrap_or_default()
+        };
+        for e in list("errors") {
+          println!("错误：{e}");
+        }
+        for w in list("warnings") {
+          println!("提醒：{w}");
+        }
+        if v["ok"] == true {
+          println!(
+            "{} 没有问题（{}）",
+            v["file"].as_str().unwrap_or_default(),
+            if v["kind"] == "partial" {
+              "局部文件"
+            } else {
+              "完整状态"
+            }
+          );
+        }
+      });
+      if v["ok"] == true {
+        Ok(())
+      } else {
+        Err(CliError::Exit(1))
+      }
+    }
     Command::Commands { changes: true, .. } => {
       crate::selfcmd::command_changes(j)
     }
@@ -83,7 +120,9 @@ async fn dispatch(
   j: bool,
 ) -> CliResult<()> {
   match command {
-    Command::Login { .. } | Command::Schema { .. } => unreachable!(),
+    Command::Login { .. }
+    | Command::Schema { .. }
+    | Command::Validate { .. } => unreachable!(),
     Command::Sso(crate::SsoCmd::Account(cmd)) => {
       app_account(c, cmd, j).await
     }
@@ -497,12 +536,38 @@ async fn dispatch(
     Command::Bookmark(cmd) => {
       crate::bookmark::bookmark(c, cmd, j).await
     }
-    Command::Plan { file, apply } => {
+    Command::Plan {
+      file,
+      partial,
+      apply,
+    } => {
       let req = match file {
-        Some(path) => PlanRequest {
-          changes: vec![],
-          fleet: Some(fleet::load(&path)?),
-        },
+        Some(path) => {
+          let fleet = fleet::load(&path)?;
+          // 完整状态里一定有服务器；没有多半是局部导出的文件，按完整状态会删掉其余一切。
+          if !partial && fleet.servers.is_empty() {
+            return Err(
+              ApiError::invalid(format!(
+                "{} 里没有服务器，像是局部的意图文件；按完整期望状态计划会删掉文件里没写的服务、网关和路由",
+                path.display()
+              ))
+              .with_hint("只改文件里写到的对象：加 --partial")
+              .suggest(format!("wharf plan -f {} --partial", path.display()))
+              .into(),
+            );
+          }
+          if partial {
+            PlanRequest {
+              partial: Some(fleet),
+              ..Default::default()
+            }
+          } else {
+            PlanRequest {
+              fleet: Some(fleet),
+              ..Default::default()
+            }
+          }
+        }
         None => PlanRequest::default(),
       };
       plan_and_maybe_apply(c, req, apply, j).await
@@ -513,9 +578,15 @@ async fn dispatch(
       no_wait,
     } => apply(c, &plan_id, confirm, !no_wait, j, None).await,
     Command::Run(cmd) => run_cmd(c, cmd, j).await,
-    Command::Export { output } => {
+    Command::Export { output, service } => {
       let fleet: Fleet = c.get("/api/export").await?;
-      let text = fleet::to_toml(&fleet)?;
+      let partial = !service.is_empty();
+      let fleet = if partial {
+        fleet::only_services(fleet, &service)?
+      } else {
+        fleet
+      };
+      let text = fleet::to_toml(&fleet, partial)?;
       match output {
         Some(path) => {
           std::fs::write(&path, text).map_err(|e| {
@@ -660,6 +731,10 @@ async fn plan_and_maybe_apply(
   flags: ApplyFlags,
   j: bool,
 ) -> CliResult<()> {
+  let req = PlanRequest {
+    note: flags.note.clone().or(req.note),
+    ..req
+  };
   let plan: Plan = c.post("/api/plan", &req).await?;
   if !flags.apply || plan.items.is_empty() {
     out(j, &plan, print::plan);
@@ -840,7 +915,7 @@ pub(crate) async fn changes(
     c,
     PlanRequest {
       changes,
-      fleet: None,
+      ..Default::default()
     },
     flags,
     j,
@@ -1736,7 +1811,22 @@ async fn service(
       });
       Ok(())
     }
-    ServiceCmd::Note { name, note } => {
+    ServiceCmd::Note {
+      name,
+      note,
+      dry_run: true,
+    } => {
+      let v: ServiceView =
+        c.get(&format!("/api/services/{}", seg(&name))).await?;
+      let after = Some(note.trim()).filter(|n| !n.is_empty());
+      crate::preview::show(
+        j,
+        &format!("service/{name}"),
+        &json!({ "note": v.note }),
+        &json!({ "note": after }),
+      )
+    }
+    ServiceCmd::Note { name, note, .. } => {
       let v: serde_json::Value = c
         .put(
           &format!("/api/services/{}/note", seg(&name)),
@@ -2528,6 +2618,55 @@ async fn pick_server(c: &Client) -> CliResult<String> {
 
 // GATEWAYS / ROUTES
 
+/// `alert set --dry-run`：规则或事件通知改前改后。恢复默认值要控制面算，只标出来。
+fn alert_preview(
+  now: &wharf_api_types::view::AlertsView,
+  id: &str,
+  patch: &wharf_api_types::view::AlertPatch,
+  j: bool,
+) -> CliResult<()> {
+  let before = if let Some(r) = now.rules.iter().find(|r| r.id == id)
+  {
+    json!({
+      "enabled": r.enabled,
+      "threshold": r.threshold,
+      "for": r.for_n,
+      "muted_until": r.muted_until.map(fmt_ms),
+    })
+  } else if let Some(n) = now.notices.iter().find(|n| n.id == id) {
+    json!({ "enabled": n.enabled, "muted_until": n.muted_until.map(fmt_ms) })
+  } else {
+    return Err(
+      ApiError::not_found(format!("没有告警规则或事件通知 {id}"))
+        .suggest("wharf alert list")
+        .into(),
+    );
+  };
+  let mut after = before.clone();
+  if patch.reset {
+    after["reset"] = json!("恢复默认值");
+  }
+  if let Some(v) = patch.enabled {
+    after["enabled"] = json!(v);
+  }
+  if let Some(v) = patch.threshold {
+    after["threshold"] = json!(v);
+  }
+  if let Some(v) = patch.for_n {
+    after["for"] = json!(v);
+  }
+  match patch.mute_minutes {
+    Some(0) => after["muted_until"] = Value::Null,
+    Some(m) => {
+      after["muted_until"] = json!(fmt_ms(
+        chrono::Utc::now().timestamp_millis() + i64::from(m) * 60_000
+      ))
+    }
+    None => {}
+  }
+  crate::preview::show(j, &format!("alert/{id}"), &before, &after)
+}
+
 async fn alert(c: &Client, cmd: AlertCmd, j: bool) -> CliResult<()> {
   use wharf_api_types::view::{AlertOptions, AlertPatch, AlertsView};
   let v: AlertsView = match cmd {
@@ -2549,6 +2688,7 @@ async fn alert(c: &Client, cmd: AlertCmd, j: bool) -> CliResult<()> {
       for_n,
       mute,
       reset,
+      dry_run,
     } => {
       let patch = AlertPatch {
         enabled: (on || off).then_some(on),
@@ -2557,6 +2697,10 @@ async fn alert(c: &Client, cmd: AlertCmd, j: bool) -> CliResult<()> {
         mute_minutes: mute,
         reset,
       };
+      if dry_run {
+        let now: AlertsView = c.get("/api/alerts").await?;
+        return alert_preview(&now, &id, &patch, j);
+      }
       c.put(&format!("/api/alerts/{}", seg(&id)), &patch).await?
     }
   };
@@ -3777,6 +3921,32 @@ async fn app_account(
   Ok(())
 }
 
+/// 密钥预览：不读也不显示值，只说新建、覆盖还是删除，以及谁在用。
+async fn secret_preview(
+  c: &Client,
+  name: &str,
+  deleting: bool,
+  j: bool,
+) -> CliResult<()> {
+  let list: Vec<SecretView> = c.get("/api/secrets").await?;
+  let before = list
+    .iter()
+    .find(|s| s.name == name)
+    .map(|s| json!({"name": s.name, "used_by": s.used_by, "value": "（旧值）"}))
+    .unwrap_or(Value::Null);
+  if deleting && before.is_null() {
+    return Err(
+      ApiError::not_found(format!("密钥 {name} 不存在")).into(),
+    );
+  }
+  let after = if deleting {
+    Value::Null
+  } else {
+    json!({"name": name, "used_by": before["used_by"], "value": "（新值）"})
+  };
+  crate::preview::show(j, &format!("secret/{name}"), &before, &after)
+}
+
 async fn secret(
   c: &Client,
   cmd: SecretCmd,
@@ -3788,7 +3958,15 @@ async fn secret(
       out(j, &v, |v| v.iter().for_each(|s| println!("{}", s.name)));
       Ok(())
     }
-    SecretCmd::Set { name } => {
+    SecretCmd::Set {
+      name,
+      dry_run: true,
+    } => secret_preview(c, &name, false, j).await,
+    SecretCmd::Rm {
+      name,
+      dry_run: true,
+    } => secret_preview(c, &name, true, j).await,
+    SecretCmd::Set { name, .. } => {
       let prompt = if name.starts_with("BASIC_AUTH_") {
         "登录保护账号（用户名:密码）：".to_string()
       } else {
@@ -3804,7 +3982,7 @@ async fn secret(
       out(j, &v, |v| println!("已设置密钥 {}", v.name));
       Ok(())
     }
-    SecretCmd::Rm { name } => {
+    SecretCmd::Rm { name, .. } => {
       let v: Value =
         c.delete(&format!("/api/secrets/{}", seg(&name))).await?;
       out(j, &v, |_| println!("已删除密钥 {name}"));
