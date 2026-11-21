@@ -339,9 +339,24 @@ pub struct ServiceSpec {
   /// 自动更新：每天检查一次，有新版本就自动更新。只支持没有数据卷的服务（compose 来源看 compose 里有没有挂载）。
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub auto_update: bool,
-  /// compose 来源：环境变量和资源上限加在哪个容器上。只有一个容器时不用填。
+  /// compose 来源：环境变量、资源上限和配置文件加在哪个容器上。只有一个容器时不用填。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub container: Option<String>,
+  /// 配置文件：内容存在 Wharf 里，部署时放进容器（只读，属主 root），跟着部署历史和回滚走。
+  /// 应用自己改写的内容下次部署会被覆盖。
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub files: Vec<FileSpec>,
+}
+
+/// 一个配置文件。
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct FileSpec {
+  /// 容器内的绝对路径，例如 `/etc/app/config.yaml`。
+  pub path: String,
+  /// 文本内容，最大 64 KB。可以用 `[[密钥名]]` 和 `[[@服务]]`，部署时替换。
+  pub content: String,
 }
 
 impl ServiceSpec {

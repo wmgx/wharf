@@ -161,6 +161,7 @@ pub async fn preview(
       limits: None,
       auto_update: false,
       container: None,
+      files: vec![],
     },
     adopt: converted.adopt,
     name,

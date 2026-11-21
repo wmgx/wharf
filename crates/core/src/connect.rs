@@ -240,6 +240,7 @@ mod tests {
       limits: None,
       auto_update: false,
       container: None,
+      files: vec![],
     };
     let hp = BTreeMap::from([("pg".to_string(), 20001)]);
     let j = target("db", &spec, &hp, None, None).unwrap();
