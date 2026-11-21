@@ -563,6 +563,10 @@ pub struct RouteSpec {
   /// 按路径转发到别的上游，其余路径仍到 `service`。只支持 caddy 网关。
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub paths: Vec<PathRoute>,
+  /// 自定义 Caddy 配置：原样插进网关里这个域名的站点块，例如按路径拦截、加响应头。
+  /// 网关下发前会用 Caddy 校验，写错了不会生效。只支持 caddy 网关。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub caddy: Option<String>,
   /// 网关到服务的走法。不填为自动：同机、能直连内网地址就直连，否则走反向隧道。
   #[serde(default, skip_serializing_if = "LinkMode::is_auto")]
   pub link: LinkMode,

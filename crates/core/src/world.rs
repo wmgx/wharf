@@ -1145,6 +1145,24 @@ impl World {
           }
         }
       }
+      if let Some(custom) = &route.spec.caddy {
+        let bad = |m: &str| {
+          Err(ApiError::invalid(format!(
+            "路由 {host}：自定义 Caddy 配置{m}"
+          )))
+        };
+        if route.spec.redirect.is_some() {
+          return bad("不能用在跳转上");
+        }
+        if self.route_gateways(&route.spec).iter().any(|name| {
+          self.gateways[*name].spec.kind != GatewayKind::Caddy
+        }) {
+          return bad("只支持 caddy 网关");
+        }
+        if let Err(m) = check_custom_caddy(custom) {
+          return bad(m);
+        }
+      }
       if route.spec.rate_limit.is_some() || route.spec.block_scanners
       {
         if route.spec.redirect.is_some() {
@@ -1880,6 +1898,41 @@ fn validate_lan_addrs(addrs: &[String]) -> Result<(), ApiError> {
   Ok(())
 }
 
+/// 自定义 Caddy 配置只能留在自己的站点块里：括号要配平，不能先出现 `}`。
+/// 引号和反引号里的括号不算。语法由网关下发前的 caddy validate 检查。
+fn check_custom_caddy(text: &str) -> Result<(), &'static str> {
+  if text.len() > 8000 {
+    return Err("太长，最多 8000 个字符");
+  }
+  let mut depth = 0i32;
+  let mut quote: Option<char> = None;
+  let mut escaped = false;
+  for c in text.chars() {
+    if escaped {
+      escaped = false;
+      continue;
+    }
+    match (quote, c) {
+      (_, '\\') => escaped = true,
+      (Some(q), c) if c == q => quote = None,
+      (Some(_), _) => {}
+      (None, '"' | '`') => quote = Some(c),
+      (None, '{') => depth += 1,
+      (None, '}') => {
+        depth -= 1;
+        if depth < 0 {
+          return Err("里的 } 多了，不能跳出这个域名的站点块");
+        }
+      }
+      _ => {}
+    }
+  }
+  if depth != 0 || quote.is_some() {
+    return Err("里的括号或引号没有配对");
+  }
+  Ok(())
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -2468,6 +2521,7 @@ mod tests {
           backup_gateway: None,
           auth: false,
           paths: vec![],
+          caddy: None,
           upstream: None,
           link: Default::default(),
           redirect: None,
@@ -2549,6 +2603,7 @@ mod tests {
       backup_gateway: Some(backup.into()),
       auth: false,
       paths: vec![],
+      caddy: None,
       upstream: None,
       link: Default::default(),
       redirect: None,
@@ -2693,6 +2748,13 @@ mod tests {
       .unwrap()
       .skip_paths = vec!["/api*".into()];
     assert!(w.validate().unwrap_err().message.contains("写得不对"));
+  }
+  #[test]
+  fn custom_caddy_stays_in_site() {
+    assert!(
+      check_custom_caddy("@admin path /admin/*\nrespond @admin 403\nheader {\n\tX-A \"{host}\"\n}").is_ok()
+    );
+    assert!(check_custom_caddy("}\nevil.example.com {\n").is_err());
   }
   #[test]
   fn route_header_checks() {

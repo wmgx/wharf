@@ -72,7 +72,11 @@ wharf service restart <服务> --json     # 只重启容器，不改配置
 wharf route add blog.example.com --service blog --json
 ```
 
-DNS 记录、证书、网关配置都会自动处理，前提是用户已经在页面上加了 Cloudflare 账号。网关和服务不在同一台机器时会自动选直连或反向隧道。
+DNS 记录、证书、网关配置都会自动处理，前提是用户已经在页面上加了 Cloudflare 账号。网关和服务不在同一台机器时会自动选直连或反向隧道。对已有域名再执行 `route add` 只改给出的参数，门禁等其余设置保留。
+
+按路径拦截、加响应头这类网关规则：`wharf route caddy <域名> --file -` 写一段 Caddy 配置，插进这个域名的站点块；不带参数查看现状，`--off` 去掉。
+
+换默认入口：`wharf gateway add <入口> --default`，旧的默认入口会在同一个计划里取消。
 
 要加登录保护：`wharf route sso <域名> --help`。博客这类公开站点不要加门禁；应用后台想免密进入时，用 `--mode login --public`，登录步骤文件里用 `entry` 写后台路径。
 
