@@ -60,6 +60,7 @@ mod migrate;
 mod monitor;
 mod network;
 mod notify;
+mod notify_keys;
 mod oidc;
 mod oom;
 mod ping;

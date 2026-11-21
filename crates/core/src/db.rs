@@ -348,6 +348,12 @@ ALTER TABLE alert_history ADD COLUMN subject TEXT;
     PRIMARY KEY (account, hostname)
   );
   CREATE UNIQUE INDEX app_account_default ON app_account_domains (hostname) WHERE is_default = 1;",
+  "CREATE TABLE notify_keys (
+    name TEXT PRIMARY KEY,
+    hash TEXT NOT NULL UNIQUE,
+    created_at INTEGER NOT NULL,
+    last_used_at INTEGER
+  );",
 ];
 
 /// git 构建来源固定到上次部署构建的 commit（仓库和分支没换过的）。当时没记下 commit 的留给 plan 提醒。
