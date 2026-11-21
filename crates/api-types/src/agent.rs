@@ -305,6 +305,14 @@ pub enum AgentOp {
     unit: String,
     lines: u32,
   },
+  /// Wharf 自己的容器（agent、控制面）最近的日志，标准输出和标准错误按时间合在一起，结果是字符串。
+  /// 这台机器上没有这个容器时报 NotFound。旧 agent 不认识。
+  ContainerLogs {
+    container: String,
+    tail: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    since: Option<String>,
+  },
   /// 测各服务的占用：`/srv/<服务>`、容器日志、挂载的命名卷。要遍历文件，结果是 `Vec<ServiceDisk>`。
   DiskUsage {
     services: Vec<String>,

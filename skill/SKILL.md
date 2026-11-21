@@ -21,7 +21,9 @@ Wharf 是一个人用的多服务器管理系统。你通过 `wharf` 命令行�
 3. **高风险项不要自己确认。** 计划里标了需要确认的项（删数据、覆盖、对公网开放等），执行时会以退出码 `2` 拒绝。把这些项原样告诉用户，用户同意后才能加 `--confirm <地址>`。需要确认的地址在计划 JSON 的 `needs_confirm` 里，例如 `service/blog`。
 4. **出错先看 `hint` 和 `suggest`。** 错误格式是 `{ code, message, hint, suggest }`，按提示改，不要盲目重试同一条命令。
 5. **字段不要猜。** 参数不确定时看 `wharf commands [命令前缀]`（全部命令和参数的 JSON，例如 `wharf commands service`）或 `wharf <命令> --help`；意图文件和对象字段看 `wharf schema`。
-   结果太长时用 `--fields` 只取要的字段，例如 `wharf service list --fields name,status.summary`（隐含 `--json`）。
+   结果太长时用 `--fields` 只取要的字段，例如 `wharf service list --fields name,status.summary`（隐含 `--json`）；列表太长再加 `--page-size 20 --page 2`。
+   反复查同一件事时加 `--changed`，只输出和上次相比变了的地方。
+   `wharf whoami --json` 看当前 token 的权限；提示本机 wharf 和控制面版本不同时运行 `wharf self-update`，再用 `wharf commands --changes` 看新版本多了哪些命令和参数。
    要等部署完成、服务恢复、告警解除时用 `wharf wait`，不要自己循环查：`wharf wait service <服务>`、`wharf wait route <域名>`、`wharf wait clear --subject <服务>`，默认最多等 10 分钟（`--timeout`）。
 6. **不打印、不写入 token 和密钥。** 服务要用的密码放进密钥（`wharf secret`），环境变量里用 `[[NAME]]` 引用。
 7. **宿主机命令要用户同意。** `wharf exec <服务器> -- '<命令>'`、`wharf server prune`、`wharf server baseline --apply` 这类直接动机器的操作，先说明要做什么。
@@ -126,6 +128,9 @@ wharf doctor blog.example.com --json
 wharf service logs <服务> --tail 200
 wharf service logs <服务> --since 2h --errors --json      # 只看报错，同一种合成一条带次数，先用这个
 wharf service logs <服务> --grep timeout --tail 50       # 按关键字筛，--max-line 限制每行长度
+wharf server logs <服务器> --errors --json   # Wharf 自己：这台机器上 agent 的日志
+wharf core logs --since 1h --errors --json   # Wharf 自己：控制面的日志
+wharf service files <服务> [目录] --json     # 服务数据目录（/srv/<服务>/）里的文件；download 下载，upload 上传（覆盖，要用户同意）
 wharf service timeline <服务> --json    # 部署、备份、重启、告警按时间排
 wharf metrics <服务器或服务> --range 24h --json   # 资源曲线
 wharf server disk <服务器> --json        # 磁盘被哪个服务占了（数据、日志、数据卷），--measure 现测

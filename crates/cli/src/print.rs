@@ -64,19 +64,23 @@ pub fn pick(
   }
 }
 
+/// 输出结果：依次按 `--fields` 挑字段、`--page-size` 分页、`--changed` 比较上次。
 pub fn json<T: serde::Serialize>(value: &T) {
-  let text = match FIELDS.get().filter(|f| !f.is_empty()) {
-    Some(fields) => serde_json::to_value(value)
-      .map(|v| pick(&v, fields))
-      .and_then(|v| serde_json::to_string_pretty(&v)),
-    None => serde_json::to_string_pretty(value),
-  };
+  let text = serde_json::to_value(value).and_then(|v| {
+    let v = match FIELDS.get().filter(|f| !f.is_empty()) {
+      Some(fields) => pick(&v, fields),
+      None => v,
+    };
+    serde_json::to_string_pretty(&crate::view::apply(v))
+  });
   println!("{}", text.unwrap_or_else(|_| "null".into()));
 }
 
 pub fn error(e: &ApiError, as_json: bool) {
   if as_json {
-    json(e);
+    // 错误原样输出，不挑字段也不分页。
+    let text = serde_json::to_string_pretty(e);
+    println!("{}", text.unwrap_or_else(|_| "null".into()));
     return;
   }
   eprintln!("错误 [{}]：{}", e.code.as_str(), e.message);

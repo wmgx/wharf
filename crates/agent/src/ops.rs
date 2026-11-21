@@ -226,6 +226,19 @@ impl Ops {
         crate::host_units::logs(&self.docker, &unit, lines, ctx)
           .await?,
       ),
+      AgentOp::ContainerLogs {
+        container,
+        tail,
+        since,
+      } => {
+        check_own_container(&container)?;
+        to_value(
+          self
+            .docker
+            .container_logs(&container, tail, since.as_deref(), ctx)
+            .await?,
+        )
+      }
       AgentOp::DiskUsage { services } => {
         for s in &services {
           check_project(s)?;
@@ -731,6 +744,18 @@ fn check_project(project: &str) -> Result<(), ApiError> {
       .strip_prefix(wharf_api_types::agent::TASK_DATA_PREFIX)
       .unwrap_or(project),
   )
+}
+
+/// 只允许读 Wharf 自己的容器：agent 本身，或者控制面按容器 id 指定的它自己。
+fn check_own_container(container: &str) -> Result<(), ApiError> {
+  let hex_id = (12..=64).contains(&container.len())
+    && container.bytes().all(|b| b.is_ascii_hexdigit());
+  if container == "wharf-agent" || hex_id {
+    return Ok(());
+  }
+  Err(ApiError::invalid(format!(
+    "只能看 Wharf 自己的容器日志，不能看 {container}"
+  )))
 }
 
 /// 只允许在 `/srv/` 下建目录，防止控制面被冒充时随便写。

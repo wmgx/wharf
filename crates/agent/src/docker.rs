@@ -558,6 +558,40 @@ impl Docker {
     Ok(out.stdout)
   }
 
+  /// `docker logs <容器>`：容器的标准输出和标准错误分开返回，这里按时间合在一起。
+  /// 容器不在这台机器上时报 NotFound。
+  pub async fn container_logs(
+    &self,
+    container: &str,
+    tail: u32,
+    since: Option<&str>,
+    ctx: &Ctx,
+  ) -> Result<String, ApiError> {
+    let mut args = vec![
+      "logs".to_string(),
+      "--timestamps".into(),
+      "--tail".into(),
+      tail.min(5000).to_string(),
+    ];
+    if let Some(since) = since {
+      args.push(format!("--since={since}"));
+    }
+    args.push(container.to_string());
+    let out = self
+      .cmd()
+      .args(args)
+      .timeout(Duration::from_secs(30))
+      .run(ctx)
+      .await?;
+    if !out.success && out.stderr.contains("No such container") {
+      return Err(ApiError::not_found(format!(
+        "这台机器上没有容器 {container}"
+      )));
+    }
+    let out = out.check("docker logs")?;
+    Ok(merge_by_time(&out.stdout, &out.stderr))
+  }
+
   /// 持续推送新日志，直到被取消（页面关闭）或到达上限时长。
   /// 结束本身就是正常情况，所以不返回错误。
   pub async fn follow_logs(
@@ -859,8 +893,32 @@ fn layer_progress(ctx: &Ctx) -> Ctx {
   }
 }
 
+/// `docker logs --timestamps` 的每行以 RFC 3339 时间开头，按它排序把两路输出合成一份。
+/// 同一时间的行保持原来的先后。
+fn merge_by_time(stdout: &str, stderr: &str) -> String {
+  let mut lines: Vec<&str> =
+    stdout.lines().chain(stderr.lines()).collect();
+  lines.sort_by_key(|l| l.split_once(' ').map_or(*l, |(t, _)| t));
+  let mut out = lines.join("\n");
+  if !out.is_empty() {
+    out.push('\n');
+  }
+  out
+}
+
 #[cfg(test)]
 mod tests {
+  #[test]
+  fn merges_logs_by_time() {
+    let out = super::merge_by_time(
+      "2026-11-22T01:00:02.000Z b\n2026-11-22T01:00:04.000Z d\n",
+      "2026-11-22T01:00:01.000Z a\n2026-11-22T01:00:03.000Z c\n",
+    );
+    let order: Vec<&str> =
+      out.lines().map(|l| l.rsplit(' ').next().unwrap()).collect();
+    assert_eq!(order, ["a", "b", "c", "d"]);
+  }
+
   #[test]
   fn layer_progress_reports_counts() {
     let mut l = super::Layers::default();

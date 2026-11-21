@@ -165,8 +165,7 @@ impl Client {
       return;
     }
     eprintln!(
-      "提醒：本机 wharf 是构建 {mine}，控制面是 {theirs}；版本不同时新字段可能显示不出来。\n  更新：curl -fsSL {0}/cli.sh | sh -s -- {0}",
-      self.base
+      "提醒：本机 wharf 是构建 {mine}，控制面是 {theirs}；版本不同时新字段可能显示不出来。\n  更新：wharf self-update"
     );
   }
 
@@ -260,10 +259,7 @@ impl Client {
   }
 
   fn update_hint(&self) -> String {
-    format!(
-      "本机 wharf 可能比控制面旧，更新后再试：curl -fsSL {0}/cli.sh | sh -s -- {0}",
-      self.base
-    )
+    "本机 wharf 可能比控制面旧，更新后再试：wharf self-update".into()
   }
 
   /// 读取分块响应（日志流），收到一块就交给 `on_chunk`，直到服务端结束。
@@ -294,6 +290,48 @@ impl Client {
       ApiError::internal(format!("日志流中断：{}", e.without_url()))
     })? {
       on_chunk(&chunk);
+    }
+    Ok(())
+  }
+
+  /// 控制面地址（配置里写的那个）。
+  pub fn base(&self) -> &str {
+    &self.base
+  }
+
+  /// 边收边交给 `on_chunk`（下载文件），总共最多 `timeout`。
+  pub async fn download(
+    &self,
+    path: &str,
+    timeout: Duration,
+    mut on_chunk: impl FnMut(&[u8]) -> std::io::Result<()>,
+  ) -> CliResult<()> {
+    let req = self
+      .http
+      .get(format!("{}{path}", self.endpoint))
+      .timeout(timeout);
+    let req = match &self.token {
+      Some(token) => req.bearer_auth(token),
+      None => req,
+    };
+    let mut resp =
+      req.send().await.map_err(|e| self.conn_error(e))?;
+    if !resp.status().is_success() {
+      let status = resp.status().as_u16();
+      let bytes = resp.bytes().await.unwrap_or_default();
+      return Err(
+        serde_json::from_slice::<ApiError>(&bytes)
+          .unwrap_or_else(|_| {
+            ApiError::internal(format!("下载失败：HTTP {status}"))
+          })
+          .into(),
+      );
+    }
+    while let Some(chunk) = resp.chunk().await.map_err(|e| {
+      ApiError::internal(format!("下载中断：{}", e.without_url()))
+    })? {
+      on_chunk(&chunk)
+        .map_err(|e| ApiError::internal(format!("写入失败：{e}")))?;
     }
     Ok(())
   }
