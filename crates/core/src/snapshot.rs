@@ -457,6 +457,11 @@ pub fn gateway_render(
       .then(|| host.clone()),
       rate_limit: route.spec.rate_limit,
       block_scanners: route.spec.block_scanners,
+      custom: route
+        .spec
+        .caddy
+        .clone()
+        .filter(|c| !c.trim().is_empty()),
       redirect: None,
       paths,
       auth: route

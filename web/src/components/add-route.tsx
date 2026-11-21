@@ -4,6 +4,7 @@ import { AuthFields, authReady, saveAuth } from "@/components/basic-auth";
 import { toast } from "sonner";
 import { EntryField, useEntry } from "@/components/entry";
 import { DomainChips, Field, Picker } from "@/components/fields";
+import { TargetFields, targetError, type Target } from "@/components/target-fields";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -15,8 +16,14 @@ export function AddRoute({ service: fixed, open, onClose }: { service?: string; 
   const { status } = useStatus();
   const actions = useActions();
   const [hostname, setHostname] = useState("");
-  const [picked, setPicked] = useState("");
-  const service = fixed ?? picked;
+  const [target, setTarget] = useState<Target>({ kind: "service", service: fixed ?? "" });
+  const [touched, setTouched] = useState(false);
+  const services = status?.services ?? [];
+  // 固定服务时只选端口；服务换了（同一个对话框用于别的服务）按新服务算。
+  const picked: Target = fixed ? { kind: "service", service: fixed, port: target.kind === "service" && target.service === fixed ? target.port : undefined } : target;
+  const service = picked.kind === "service" ? picked.service : "";
+  const ports = (services.find((s) => s.name === service)?.spec.ports ?? []).filter((p) => !p.udp);
+  const current: Target = picked.kind === "service" && ports.length > 1 && !picked.port ? { ...picked, port: ports[0].name } : picked;
   const server = status?.services.find((s) => s.name === service)?.spec.server ?? "";
   const entry = useEntry(server);
   const [protection, setProtection] = useState("gate");
@@ -40,13 +47,15 @@ export function AddRoute({ service: fixed, open, onClose }: { service?: string; 
     setPassword("");
     onClose();
     setHostname("");
+    setTarget({ kind: "service", service: fixed ?? "" });
+    setTouched(false);
     setProtection("gate");
     setTunnel(false);
     setInternal(false);
     const { gateway, changes } = entry.resolve();
     actions.plan({
       title: "加域名",
-      changes: [...changes, { op: "upsert_route", spec: { hostname: host, service, gateway, internal: internal || undefined, auth: auth || undefined, sso: protection === "gate" && !entry.tunnel ? { mode: "gate" } : undefined, link: tunnel ? "tunnel" : undefined } }],
+      changes: [...changes, { op: "upsert_route", spec: { hostname: host, ...(current.kind === "service" ? { service: current.service, port: current.port } : { service: "", upstream: current.upstream.trim() }), gateway, internal: internal || undefined, auth: auth || undefined, sso: protection === "gate" && !entry.tunnel ? { mode: "gate" } : undefined, link: tunnel ? "tunnel" : undefined } }],
     });
   };
   return (
@@ -56,17 +65,7 @@ export function AddRoute({ service: fixed, open, onClose }: { service?: string; 
           <DialogTitle>{fixed ? `给 ${fixed} 加域名` : "加域名"}</DialogTitle>
         </DialogHeader>
         <div className="grid gap-4">
-          {!fixed && (
-            <Field label="服务" htmlFor="route-service">
-              <Picker
-                id="route-service"
-                value={picked}
-                placeholder="选一个服务"
-                options={(status?.services ?? []).map((s) => ({ value: s.name, label: s.name, hint: s.spec.server }))}
-                onChange={setPicked}
-              />
-            </Field>
-          )}
+          <TargetFields value={current} onChange={(t) => { setTarget(t); setTouched(true); }} services={services} idPrefix="route" fixedService={fixed} touched={touched} />
           <Field label="域名" htmlFor="hostname">
             <Input id="hostname" autoFocus value={hostname} onChange={(e) => setHostname(e.target.value)} placeholder="app.example.com" />
             {!hostname && service && <DomainChips suggestions={suffixes.map((s) => `${service}.${s}`)} onPick={setHostname} />}
@@ -93,7 +92,7 @@ export function AddRoute({ service: fixed, open, onClose }: { service?: string; 
           <Button variant="ghost" onClick={onClose}>
             取消
           </Button>
-          <Button disabled={!service || !hostname.trim() || !entry.ready || (auth && !authReady(user, password))} onClick={submit}>
+          <Button disabled={!!targetError(current, services) || !hostname.trim() || !entry.ready || (auth && !authReady(user, password))} onClick={submit}>
             预览改动
           </Button>
         </DialogFooter>

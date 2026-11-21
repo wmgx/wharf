@@ -311,6 +311,7 @@ async fn dispatch(
         backup_gateway: None,
         auth: false,
         paths: vec![],
+        caddy: None,
         link: Default::default(),
         rate_limit: None,
         block_scanners: false,
@@ -2448,68 +2449,108 @@ async fn gateway(
       tls,
       apply,
     } => {
-      let tls = match tls.as_str() {
+      let gateways: Vec<GatewayView> = c.get("/api/gateways").await?;
+      let old =
+        gateways.iter().find(|g| g.name == name).map(|g| &g.spec);
+      let kind = kind.map(|k| match k.as_str() {
+        "cloudflare_tunnel" => GatewayKind::CloudflareTunnel,
+        _ => GatewayKind::Caddy,
+      });
+      let tls = tls.map(|t| match t.as_str() {
         "internal" => GatewayTls::Internal,
         "off" => GatewayTls::Off,
         _ => GatewayTls::Auto,
-      };
-      let kind = match kind.as_str() {
-        "cloudflare_tunnel" => GatewayKind::CloudflareTunnel,
-        _ => GatewayKind::Caddy,
-      };
-      // 隧道网关只有一个厂商账号时自动选它。
-      let account = match (kind, account) {
-        (GatewayKind::CloudflareTunnel, None) => {
-          let accounts: Vec<AccountView> =
-            c.get("/api/accounts").await?;
-          match accounts.as_slice() {
-            [only] => Some(only.name.clone()),
-            [] => {
-              return Err(
-                ApiError::invalid("还没有厂商账号，隧道要建在账号下")
-                  .suggest("wharf account add cf --kind cloudflare")
-                  .into(),
-              );
-            }
-            _ => {
-              return Err(
-                ApiError::invalid(
-                  "有多个厂商账号，请用 --account 指定",
-                )
-                .suggest("wharf account list")
+      });
+      let spec = match old {
+        Some(old) => {
+          if kind.is_some_and(|k| k != old.kind) {
+            return Err(
+              ApiError::invalid("不能改入口类型，删掉重建")
+                .suggest(format!("wharf gateway rm {name}"))
                 .into(),
-              );
-            }
+            );
+          }
+          GatewaySpec {
+            server: server.unwrap_or_else(|| old.server.clone()),
+            default: default || old.default,
+            http_port: http_port.or(old.http_port),
+            https_port: https_port.or(old.https_port),
+            email: email.or_else(|| old.email.clone()),
+            image: image.or_else(|| old.image.clone()),
+            tls: tls.unwrap_or(old.tls),
+            account: account.or_else(|| old.account.clone()),
+            ..old.clone()
           }
         }
-        (_, account) => account,
+        None => {
+          let server = server.ok_or_else(|| {
+            ApiError::invalid("新入口要给 --server").suggest(format!(
+              "wharf gateway add {name} --server <服务器>"
+            ))
+          })?;
+          let kind = kind.unwrap_or(GatewayKind::Caddy);
+          // 隧道网关只有一个厂商账号时自动选它。
+          let account = match (kind, account) {
+            (GatewayKind::CloudflareTunnel, None) => {
+              let accounts: Vec<AccountView> =
+                c.get("/api/accounts").await?;
+              match accounts.as_slice() {
+                [only] => Some(only.name.clone()),
+                [] => {
+                  return Err(
+                    ApiError::invalid(
+                      "还没有厂商账号，隧道要建在账号下",
+                    )
+                    .suggest("wharf account add cf --kind cloudflare")
+                    .into(),
+                  );
+                }
+                _ => {
+                  return Err(
+                    ApiError::invalid(
+                      "有多个厂商账号，请用 --account 指定",
+                    )
+                    .suggest("wharf account list")
+                    .into(),
+                  );
+                }
+              }
+            }
+            (_, account) => account,
+          };
+          GatewaySpec {
+            kind,
+            server,
+            default,
+            http_port,
+            https_port,
+            email,
+            image,
+            tls: tls.unwrap_or_default(),
+            account,
+            error_page: None,
+            wildcard: vec![],
+            layer4: vec![],
+          }
+        }
       };
-      // 重复执行 add 时保留错误页、泛域名证书和四层转发。
-      let existing = c
-        .get::<Vec<GatewayView>>("/api/gateways")
-        .await?
-        .into_iter()
-        .find(|g| g.name == name)
-        .map(|g| g.spec);
-      let (error_page, wildcard, layer4) = existing
-        .map(|s| (s.error_page, s.wildcard, s.layer4))
-        .unwrap_or_default();
-      let spec = GatewaySpec {
-        kind,
-        server,
-        default,
-        http_port,
-        https_port,
-        email,
-        image,
-        tls,
-        account,
-        error_page,
-        wildcard,
-        layer4,
-      };
-      changes(c, vec![Change::UpsertGateway { name, spec }], apply, j)
-        .await
+      // 默认入口只能有一个：设了新的，同一个计划里取消旧的。
+      let mut list = Vec::new();
+      if default {
+        for g in
+          gateways.iter().filter(|g| g.name != name && g.spec.default)
+        {
+          list.push(Change::UpsertGateway {
+            name: g.name.clone(),
+            spec: GatewaySpec {
+              default: false,
+              ..g.spec.clone()
+            },
+          });
+        }
+      }
+      list.push(Change::UpsertGateway { name, spec });
+      changes(c, list, apply, j).await
     }
     GatewayCmd::Rm { name, apply } => {
       changes(c, vec![Change::RemoveGateway { name }], apply, j).await
@@ -2592,43 +2633,47 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
       gateway,
       backup_gateway,
       auth,
+      no_auth,
       paths,
+      no_paths,
       tunnel,
+      no_tunnel,
       internal,
+      no_internal,
       apply,
     } => {
-      let existing = c
+      let host = hostname.trim().to_ascii_lowercase();
+      let old = c
         .get::<Vec<RouteView>>("/api/routes")
         .await?
         .into_iter()
-        .find(|r| {
-          r.spec.hostname == hostname.trim().to_ascii_lowercase()
-        });
-      let guard = existing.filter(|_| redirect.is_none());
-      let spec = RouteSpec {
-        sso: None,
-        expires_at: None,
-        internal,
-        rate_limit: guard.as_ref().and_then(|r| r.spec.rate_limit),
-        block_scanners: guard.is_some_and(|r| r.spec.block_scanners),
-        link: if tunnel {
-          wharf_api_types::spec::LinkMode::Tunnel
-        } else {
-          wharf_api_types::spec::LinkMode::Auto
-        },
+        .find(|r| r.spec.hostname == host)
+        .map(|r| r.spec);
+      let args = RouteAddArgs {
         hostname,
-        service: service.unwrap_or_default(),
+        service,
         upstream,
         redirect,
         port,
         gateway,
         backup_gateway,
-        auth,
-        paths: paths
-          .iter()
-          .map(|p| parse_path_route(p))
-          .collect::<Result<_, _>>()?,
+        auth: flag(auth, no_auth),
+        paths: if no_paths {
+          Some(vec![])
+        } else if paths.is_empty() {
+          None
+        } else {
+          Some(
+            paths
+              .iter()
+              .map(|p| parse_path_route(p))
+              .collect::<Result<_, _>>()?,
+          )
+        },
+        tunnel: flag(tunnel, no_tunnel),
+        internal: flag(internal, no_internal),
       };
+      let spec = route_add_spec(old, args)?;
       changes(c, vec![Change::UpsertRoute { spec }], apply, j).await
     }
     RouteCmd::Sso {
@@ -2868,6 +2913,48 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
       }
       changes(c, vec![Change::UpsertRoute { spec }], apply, j).await
     }
+    RouteCmd::Caddy {
+      name,
+      file,
+      off,
+      apply,
+    } => {
+      let mut spec = c
+        .get::<Vec<RouteView>>("/api/routes")
+        .await?
+        .into_iter()
+        .find(|r| r.spec.hostname == name.trim().to_ascii_lowercase())
+        .ok_or_else(|| {
+          ApiError::not_found(format!("路由 {name} 不存在"))
+            .suggest("wharf route list")
+        })?
+        .spec;
+      if file.is_none() && !off {
+        out(j, &serde_json::json!({ "caddy": spec.caddy }), |_| {
+          match &spec.caddy {
+            Some(text) => print!("{text}"),
+            None => println!("没有自定义配置"),
+          }
+        });
+        return Ok(());
+      }
+      spec.caddy = match file {
+        None => None,
+        Some(path) => {
+          let text = (if path == "-" {
+            std::io::read_to_string(std::io::stdin())
+          } else {
+            std::fs::read_to_string(&path)
+          })
+          .map_err(|e| {
+            ApiError::invalid(format!("读不了文件 {path}：{e}"))
+              .with_hint("检查路径；从标准输入读用 --file -")
+          })?;
+          (!text.trim().is_empty()).then_some(text)
+        }
+      };
+      changes(c, vec![Change::UpsertRoute { spec }], apply, j).await
+    }
     RouteCmd::Rm { hostname, apply } => {
       changes(c, vec![Change::RemoveRoute { hostname }], apply, j)
         .await
@@ -2877,6 +2964,115 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
 
 /// `/ws=svc`、`/ws=svc:port`、`/ws=127.0.0.1:17891`。目标的主机部分带 `.`、`:` 或是
 /// `localhost` 时当作上游地址（服务名里不会有这些）。
+/// 一对开关参数：给了 `--x` 是 true，给了 `--no-x` 是 false，都没给是 None。
+fn flag(on: bool, off: bool) -> Option<bool> {
+  (on || off).then_some(on)
+}
+
+/// `wharf route add` 的参数；`None` 表示没给。
+struct RouteAddArgs {
+  hostname: String,
+  service: Option<String>,
+  upstream: Option<String>,
+  redirect: Option<String>,
+  port: Option<String>,
+  gateway: Option<String>,
+  backup_gateway: Option<String>,
+  auth: Option<bool>,
+  paths: Option<Vec<PathRoute>>,
+  tunnel: Option<bool>,
+  internal: Option<bool>,
+}
+
+/// 新建或修改路由：修改已有域名时只改给出的参数。
+fn route_add_spec(
+  old: Option<RouteSpec>,
+  a: RouteAddArgs,
+) -> CliResult<RouteSpec> {
+  let retarget = a.service.is_some()
+    || a.upstream.is_some()
+    || a.redirect.is_some();
+  let mut spec = match old {
+    Some(old) => old,
+    None if !retarget => {
+      return Err(
+        ApiError::invalid(
+          "新域名要给 --service、--upstream 或 --redirect 之一",
+        )
+        .suggest(format!(
+          "wharf route add {} --service <服务>",
+          a.hostname
+        ))
+        .into(),
+      );
+    }
+    None => RouteSpec {
+      hostname: a.hostname.clone(),
+      service: String::new(),
+      upstream: None,
+      port: None,
+      gateway: None,
+      backup_gateway: None,
+      sso: None,
+      auth: false,
+      paths: vec![],
+      caddy: None,
+      link: Default::default(),
+      redirect: None,
+      rate_limit: None,
+      block_scanners: false,
+      internal: false,
+      expires_at: None,
+    },
+  };
+  spec.hostname = a.hostname;
+  if retarget {
+    let same_service =
+      a.service.as_deref().is_some_and(|s| s == spec.service);
+    if !same_service {
+      spec.port = None;
+    }
+    spec.service = a.service.unwrap_or_default();
+    spec.upstream = a.upstream;
+    spec.redirect = a.redirect;
+  }
+  if spec.redirect.is_some() {
+    // 跳转不允许这些。
+    spec.paths.clear();
+    spec.sso = None;
+    spec.auth = false;
+    spec.internal = false;
+    spec.rate_limit = None;
+    spec.block_scanners = false;
+  }
+  if a.port.is_some() {
+    spec.port = a.port;
+  }
+  if a.gateway.is_some() {
+    spec.gateway = a.gateway;
+  }
+  if let Some(b) = a.backup_gateway {
+    spec.backup_gateway = (!b.is_empty()).then_some(b);
+  }
+  if let Some(v) = a.auth {
+    spec.auth = v;
+  }
+  if let Some(v) = a.paths {
+    spec.paths = v;
+  }
+  if let Some(v) = a.tunnel {
+    spec.link = if v {
+      wharf_api_types::spec::LinkMode::Tunnel
+    } else {
+      wharf_api_types::spec::LinkMode::Auto
+    };
+  }
+  if let Some(v) = a.internal {
+    spec.internal = v;
+  }
+  Ok(spec)
+}
+
 fn parse_path_route(arg: &str) -> CliResult<PathRoute> {
   let (path, target) = arg.split_once('=').ok_or_else(|| {
     ApiError::invalid(format!(
@@ -3423,6 +3619,38 @@ fn share_ttl(s: &str) -> Result<Duration, String> {
 mod tests {
   use super::*;
   use clap::Parser;
+
+  #[test]
+  fn route_add_keeps_unspecified_fields() {
+    let old: RouteSpec = serde_json::from_value(serde_json::json!({
+      "hostname": "a.example.com",
+      "service": "blog",
+      "sso": {"mode": "gate"},
+      "paths": [{"path": "/ws", "upstream": "127.0.0.1:1"}]
+    }))
+    .unwrap();
+    let spec = route_add_spec(
+      Some(old),
+      RouteAddArgs {
+        hostname: "a.example.com".into(),
+        service: None,
+        upstream: None,
+        redirect: None,
+        port: None,
+        gateway: None,
+        backup_gateway: Some("edge2".into()),
+        auth: None,
+        paths: None,
+        tunnel: None,
+        internal: None,
+      },
+    )
+    .unwrap_or_else(|_| panic!("应当成功"));
+    assert_eq!(spec.backup_gateway.as_deref(), Some("edge2"));
+    assert!(spec.sso.is_some());
+    assert_eq!(spec.paths.len(), 1);
+    assert_eq!(spec.service, "blog");
+  }
 
   #[test]
   fn ports() {

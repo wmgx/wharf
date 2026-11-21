@@ -1012,6 +1012,8 @@ pub struct Site {
   pub rate_limit: Option<u32>,
   /// 拦截常见扫描。
   pub block_scanners: bool,
+  /// 自定义 Caddy 配置，原样插进站点块。
+  pub custom: Option<String>,
   /// 只放行内网来源。
   pub internal: bool,
   /// 临时分享的到期时间（毫秒），过了就断开。
@@ -1169,6 +1171,16 @@ pub fn caddyfile(
       out.push_str(&format!(
         "\trate_limit {{\n\t\tzone wharf_{zone} {{\n\t\t\tkey {{remote_host}}\n\t\t\tevents {n}\n\t\t\twindow 1m\n\t\t}}\n\t}}\n"
       ));
+    }
+    if let Some(custom) = &site.custom {
+      for line in custom.lines() {
+        let line = line.trim_end();
+        if !line.is_empty() {
+          out.push('\t');
+          out.push_str(line);
+        }
+        out.push('\n');
+      }
     }
     if let Some(gate) = &site.gate {
       let host_header = if gate.core.starts_with("https://") {
@@ -1824,6 +1836,30 @@ mod tests {
     );
     assert!(out.contains("auto_https off"));
     assert!(out.contains("\nhttp://a.example.com {"));
+  }
+
+  #[test]
+  fn caddyfile_custom_in_site() {
+    let spec = serde_json::from_value(serde_json::json!({
+      "kind": "caddy", "server": "s1"
+    }))
+    .unwrap();
+    let out = caddyfile(
+      "edge",
+      &spec,
+      &[Site {
+        hostname: "a.example.com".into(),
+        upstream: "127.0.0.1:1".into(),
+        custom: Some(
+          "@admin path /admin/*\n\nrespond @admin 403  ".into(),
+        ),
+        ..Default::default()
+      }],
+      &[],
+      false,
+      None,
+    );
+    assert!(out.contains("\timport wharf_errors\n\t@admin path /admin/*\n\n\trespond @admin 403\n\treverse_proxy 127.0.0.1:1 {"));
   }
 
   #[test]

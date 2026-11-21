@@ -46,6 +46,16 @@ export function GatewayDetail({ g, onDone, onDomain }: { g: GatewayView; onDone:
     <div className="flex-1 overflow-auto p-4">
       <Facts items={[
         ["服务器", <ServerTag name={g.spec.server} />],
+        ["默认入口", g.spec.default ? "是" : <Button variant="outline" size="xs" onClick={() => {
+          const old = status?.gateways.find((x) => x.spec.default && x.name !== g.name);
+          actions.plan({
+            title: `把 ${g.name} 设为默认入口`,
+            changes: [
+              ...(old ? [{ op: "upsert_gateway" as const, name: old.name, spec: { ...old.spec, default: undefined } }] : []),
+              { op: "upsert_gateway" as const, name: g.name, spec: { ...g.spec, default: true } },
+            ],
+          });
+        }}>设为默认</Button>],
         ["类型", g.spec.kind === "cloudflare_tunnel" && `Cloudflare 隧道（wharf-${g.name}）`],
         ["厂商账号", g.spec.kind === "cloudflare_tunnel" && g.spec.account],
         ["证书", g.spec.kind === "caddy" && TLS_TEXT[g.spec.tls ?? "auto"]],

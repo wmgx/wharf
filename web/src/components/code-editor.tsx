@@ -9,7 +9,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { cn } from "@/lib/utils";
 import type { SecretView } from "@/types";
 
-export type Lang = "yaml" | "shell" | "dockerfile" | "env";
+export type Lang = "yaml" | "shell" | "dockerfile" | "env" | "caddy";
 
 const C = {
   comment: "text-muted-foreground italic",
@@ -54,6 +54,10 @@ const RULES: Record<Lang, { lineStart?: Rule[]; inline: Rule[] }> = {
       [/(?<=(?:&&|\|\||[|;])\s*)[\w./-]+/y, (m) => [span(SHELL_KW.test(m[0]) ? "keyword" : "command", m[0])]],
       [/(?<=\s)--?[\w-]+/y, "key"],
     ],
+  },
+  caddy: {
+    lineStart: [[/#.*/y, "comment"], [/@[\w-]+/y, "key"], [/[a-z_]+(?=\s|$)/y, "command"]],
+    inline: [[/#.*/y, "comment"], STRING, [/\{[\w.>-]+\}/y, "variable"], [/@[\w-]+/y, "key"], [/(?<![\d.\/])\d{3}(?![\d.\/])/y, "number"]],
   },
   env: {
     lineStart: [

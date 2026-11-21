@@ -798,18 +798,19 @@ pub enum GatewayCmd {
     #[arg(long, default_value_t = 200)]
     tail: u32,
   },
-  /// 在某台服务器上新建网关。
+  /// 在某台服务器上新建网关。修改已有网关时只改给出的参数。
   Add {
     name: String,
+    /// 新建时必填。
     #[arg(long)]
-    server: String,
-    /// caddy：服务器要有公网 IP 和 80/443；cloudflare_tunnel：走 Cloudflare 隧道，不用开端口。
-    #[arg(long, default_value = "caddy", value_parser = ["caddy", "cloudflare_tunnel"])]
-    kind: String,
+    server: Option<String>,
+    /// caddy（默认）：服务器要有公网 IP 和 80/443；cloudflare_tunnel：走 Cloudflare 隧道，不用开端口。
+    #[arg(long, value_parser = ["caddy", "cloudflare_tunnel"])]
+    kind: Option<String>,
     /// cloudflare_tunnel：在哪个厂商账号下建隧道，只有一个账号时可以不填。
     #[arg(long)]
     account: Option<String>,
-    /// 设为默认入口。
+    /// 设为默认入口，原来的默认入口在同一个计划里取消。
     #[arg(long)]
     default: bool,
     #[arg(long)]
@@ -821,9 +822,9 @@ pub enum GatewayCmd {
     /// 镜像：caddy 默认 Wharf 自建的 wharf-caddy，cloudflare_tunnel 默认 cloudflare/cloudflared。
     #[arg(long)]
     image: Option<String>,
-    /// 证书方式：auto（公网签证书）、internal（自签）、off（只走 HTTP，内网用）。
-    #[arg(long, default_value = "auto", value_parser = ["auto", "internal", "off"])]
-    tls: String,
+    /// 证书方式：auto（默认，公网签证书）、internal（自签）、off（只走 HTTP，内网用）。
+    #[arg(long, value_parser = ["auto", "internal", "off"])]
+    tls: Option<String>,
     #[command(flatten)]
     apply: ApplyFlags,
   },
@@ -883,15 +884,11 @@ pub enum GatewayCmd {
 #[derive(Subcommand)]
 pub enum RouteCmd {
   List,
-  /// 新增或修改路由。
+  /// 新增或修改路由。修改已有域名时只改给出的参数。
   Add {
     hostname: String,
     /// 服务或边缘应用（Workers / Pages）的名字。
-    #[arg(
-      long,
-      required_unless_present_any = ["upstream", "redirect"],
-      conflicts_with_all = ["upstream", "redirect"]
-    )]
+    #[arg(long, conflicts_with_all = ["upstream", "redirect"])]
     service: Option<String>,
     /// 不归 Wharf 管的上游，写网关所在机器能访问到的 主机:端口，例如 127.0.0.1:7700。
     #[arg(long)]
@@ -906,21 +903,38 @@ pub enum RouteCmd {
     #[arg(long)]
     gateway: Option<String>,
     /// 备用入口：另一台机器上的网关。主网关那台连续离线 5 分钟，DNS 自动切到它，恢复后切回。
+    /// 传空字符串清除。
     #[arg(long)]
     backup_gateway: Option<String>,
     /// 登录保护：访问时要输入账号密码。账号用 `wharf secret set BASIC_AUTH_<域名，. 换成 _>` 设置。
-    #[arg(long)]
+    #[arg(long, conflicts_with = "no_auth")]
     auth: bool,
+    /// 关闭登录保护。
+    #[arg(long)]
+    no_auth: bool,
     /// 按路径转发，可以多次给：`/ws=服务[:端口名]` 或 `/ws=127.0.0.1:17891`（不归 Wharf 管的上游）。
-    /// `/api/*` 匹配前缀。只支持 caddy 网关。
-    #[arg(long = "path", value_name = "PATH=TARGET")]
+    /// `/api/*` 匹配前缀。只支持 caddy 网关。给出后替换全部路径转发。
+    #[arg(
+      long = "path",
+      value_name = "PATH=TARGET",
+      conflicts_with = "no_paths"
+    )]
     paths: Vec<String>,
+    /// 清空全部路径转发。
+    #[arg(long)]
+    no_paths: bool,
     /// 总是走反向隧道。不给时自动选：同机、能直连内网地址就直连，否则走隧道。
-    #[arg(long)]
+    #[arg(long, conflicts_with = "no_tunnel")]
     tunnel: bool,
-    /// 只在内网访问：DNS 指向入口所在机器的内网地址，入口只放行内网来源，证书用 DNS 验证签。
+    /// 恢复自动选走法。
     #[arg(long)]
+    no_tunnel: bool,
+    /// 只在内网访问：DNS 指向入口所在机器的内网地址，入口只放行内网来源，证书用 DNS 验证签。
+    #[arg(long, conflicts_with = "no_internal")]
     internal: bool,
+    /// 恢复公网访问。
+    #[arg(long)]
+    no_internal: bool,
     #[command(flatten)]
     apply: ApplyFlags,
   },
@@ -969,6 +983,20 @@ pub enum RouteCmd {
     /// 关闭拦截。
     #[arg(long)]
     no_block: bool,
+    #[command(flatten)]
+    apply: ApplyFlags,
+  },
+  /// 自定义 Caddy 配置：原样插进网关里这个域名的站点块，Caddy 能做的都能写（按路径拦截、加响应头等）。
+  /// 网关下发前会用 Caddy 校验，写错了不会生效。不给参数时显示现在的配置。
+  /// 例：`printf '@admin path /admin/*\nrespond @admin 403\n' | wharf route caddy a.example.com --file - --apply`。
+  Caddy {
+    name: String,
+    /// 配置文件；`-` 从标准输入读。给出后替换整段。
+    #[arg(long, conflicts_with = "off")]
+    file: Option<String>,
+    /// 去掉自定义配置。
+    #[arg(long)]
+    off: bool,
     #[command(flatten)]
     apply: ApplyFlags,
   },
