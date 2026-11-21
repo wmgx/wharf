@@ -34,23 +34,29 @@ pub fn pick(
       Value::Array(items.iter().map(|i| pick(i, fields)).collect())
     }
     Value::Object(map) => {
-      let mut out = Map::new();
+      // 同一个字段下的子路径放在一起挑，`a.x,a.y` 不会互相覆盖。
+      let mut wanted: Vec<(&str, Option<Vec<String>>)> = Vec::new();
       for f in fields {
         let (head, rest) = match f.split_once('.') {
-          Some((h, r)) => (h, Some(r)),
+          Some((h, r)) => (h, Some(r.to_string())),
           None => (f.as_str(), None),
         };
-        let Some(v) = map.get(head) else { continue };
-        let picked = match rest {
-          None => v.clone(),
-          Some(r) => pick(v, &[r.to_string()]),
-        };
-        match (out.get_mut(head), picked) {
-          (Some(Value::Object(a)), Value::Object(b)) => a.extend(b),
-          (_, p) => {
-            out.insert(head.to_string(), p);
-          }
+        match wanted.iter_mut().find(|(h, _)| *h == head) {
+          Some((_, sub)) => match (sub.as_mut(), rest) {
+            (Some(list), Some(r)) => list.push(r),
+            _ => *sub = None,
+          },
+          None => wanted.push((head, rest.map(|r| vec![r]))),
         }
+      }
+      let mut out = Map::new();
+      for (head, sub) in wanted {
+        let Some(v) = map.get(head) else { continue };
+        let picked = match sub {
+          None => v.clone(),
+          Some(rest) => pick(v, &rest),
+        };
+        out.insert(head.to_string(), picked);
       }
       Value::Object(out)
     }
@@ -734,6 +740,15 @@ mod pick_tests {
     assert_eq!(
       out,
       serde_json::json!([{"name":"a","status":{"summary":"运行中"}}])
+    );
+    let v = serde_json::json!({"servers":[{"name":"s1","online":true,"x":1}]});
+    let out = super::pick(
+      &v,
+      &["servers.name".into(), "servers.online".into()],
+    );
+    assert_eq!(
+      out,
+      serde_json::json!({"servers":[{"name":"s1","online":true}]})
     );
   }
 }
