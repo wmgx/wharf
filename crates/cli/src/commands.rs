@@ -39,6 +39,11 @@ pub async fn run(cli: Cli) -> CliResult<()> {
   match cli.command {
     Command::Login { url, core_key } => login(url, core_key, j).await,
     Command::Schema { resource } => schema(resource.as_deref()),
+    Command::Commands { prefix } => {
+      // 紧凑输出：全部命令有上百条，省掉缩进能少一半多的字符。
+      println!("{}", crate::describe::commands(&prefix));
+      Ok(())
+    }
     command => {
       let c = Client::new(cli.url, cli.token)?;
       dispatch(&c, command, j).await
@@ -497,6 +502,10 @@ async fn dispatch(
       Ok(())
     }
     Command::Token(cmd) => token(c, cmd, j).await,
+    Command::Wait(cmd) => crate::wait::run(c, cmd, j).await,
+    Command::Commands { .. } => {
+      unreachable!("不连控制面，在 run 里处理")
+    }
   }
 }
 
