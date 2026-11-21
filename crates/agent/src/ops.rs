@@ -121,6 +121,14 @@ impl Ops {
         let _guard = lock.lock().await;
         to_value(self.gateway_apply(&apply, ctx).await?)
       }
+      AgentOp::GatewayReload { project } => {
+        check_project(&project)?;
+        let lock = self.lock_for(&project);
+        let _guard = lock.lock().await;
+        ctx.say("强制热重载 Caddy");
+        self.caddy_reload(&project, true, ctx).await?;
+        to_value(String::new())
+      }
       AgentOp::ProjectStop { project } => {
         self.stop_start(&project, false, ctx).await
       }
@@ -623,7 +631,7 @@ impl Ops {
 
     let result = if running && !compose_changed {
       ctx.say("热重载 Caddy");
-      match self.caddy_reload(&up.project, ctx).await {
+      match self.caddy_reload(&up.project, false, ctx).await {
         Ok(()) => {
           let state =
             self.docker.one_status(&up.project, ctx).await?;
@@ -652,7 +660,7 @@ impl Ops {
           ctx.say("失败，恢复旧配置");
           let _ = std::fs::rename(&prev, &current);
           if running {
-            let _ = self.caddy_reload(&up.project, ctx).await;
+            let _ = self.caddy_reload(&up.project, false, ctx).await;
           }
         }
         Err(e)
@@ -660,9 +668,11 @@ impl Ops {
     }
   }
 
+  /// `force`：配置没变也重载（Caddy 默认会跳过），证书管理随之重新开始。
   async fn caddy_reload(
     &self,
     project: &str,
+    force: bool,
     ctx: &Ctx,
   ) -> Result<(), ApiError> {
     self
@@ -681,6 +691,7 @@ impl Ops {
         "--address",
         CADDY_ADMIN,
       ])
+      .args(force.then_some("--force"))
       .timeout(Duration::from_secs(60))
       .run(ctx)
       .await?

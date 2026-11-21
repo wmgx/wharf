@@ -2913,6 +2913,74 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
       }
       changes(c, vec![Change::UpsertRoute { spec }], apply, j).await
     }
+    RouteCmd::Cert { name, retry } => {
+      use wharf_api_types::view::{CertState, CertStatus};
+      let path = format!("/api/routes/{}/cert", seg(name.trim()));
+      if retry {
+        let v: serde_json::Value = c
+          .post_timeout(
+            &format!("{path}/retry"),
+            &serde_json::json!({}),
+            std::time::Duration::from_secs(120),
+          )
+          .await?;
+        out(j, &v, |v| {
+          println!(
+            "已让入口 {} 重新申请证书，1 到 3 分钟后执行 wharf route cert {name} 查看",
+            v["gateway"].as_str().unwrap_or_default()
+          );
+        });
+        return Ok(());
+      }
+      let st: CertStatus = c.get(&path).await?;
+      let at = |ms: i64| {
+        chrono::DateTime::from_timestamp_millis(ms)
+          .map(|t| {
+            t.with_timezone(&chrono::Local)
+              .format("%m-%d %H:%M:%S")
+              .to_string()
+          })
+          .unwrap_or_default()
+      };
+      out(j, &st, |st| {
+        let state = match st.state {
+          CertState::Ok => "已签好",
+          CertState::Obtaining => "申请中",
+          CertState::Failed => "申请失败，网关会自动重试",
+          CertState::Unknown => "最近的日志里没有申请记录",
+        };
+        println!("{}（入口 {}）：{state}", st.hostname, st.gateway);
+        if let Some(t) = st.since {
+          println!("  开始申请：{}", at(t));
+        }
+        if st.state == CertState::Failed || st.error.is_some() {
+          if let Some(t) = st.failed_at {
+            println!(
+              "  上次失败：{}，已失败 {} 次",
+              at(t),
+              st.attempts
+            );
+          }
+          if let Some(r) = &st.reason {
+            println!("  原因：{r}");
+          }
+          if let Some(e) = &st.error {
+            println!("  报错：{e}");
+          }
+        }
+        if let Some(t) = st.next_retry_at {
+          println!("  下次自动重试：{}", at(t));
+        }
+        if matches!(st.state, CertState::Failed | CertState::Unknown)
+        {
+          println!(
+            "  立刻重试：wharf route cert {} --retry",
+            st.hostname
+          );
+        }
+      });
+      Ok(())
+    }
     RouteCmd::Caddy {
       name,
       file,

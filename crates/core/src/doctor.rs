@@ -199,8 +199,21 @@ async fn route(
   let mut checks = vec![
     dns(host, gateway.map(|g| g.1), net, view.spec.internal).await,
   ];
-  let (https, cert_expires) =
+  let (mut https, cert_expires) =
     https(client, &view.url, view.spec.auth).await;
+  let auto_tls = gateway.is_some_and(|(_, g)| {
+    g.kind == wharf_api_types::spec::GatewayKind::Caddy
+      && g.tls == wharf_api_types::spec::GatewayTls::Auto
+  });
+  if auto_tls
+    && https.status == CheckStatus::Bad
+    && tls_failed(&https.detail)
+  {
+    https.detail = format!(
+      "证书还没签下来（申请中或申请失败），执行 wharf route cert {host} 看原因：{}",
+      https.detail
+    );
+  }
   checks.push(https);
   let Some((gw_name, gw)) =
     gateway.filter(|_| view.spec.redirect.is_none())
@@ -359,6 +372,14 @@ async fn https(
       (check(layer, url, status, detail), expires)
     }
   }
+}
+
+/// TLS 握手失败：Caddy 还没有这个域名的证书时会直接断开握手。
+fn tls_failed(detail: &str) -> bool {
+  let d = detail.to_ascii_lowercase();
+  ["tls", "handshake", "certificate", "ssl"]
+    .iter()
+    .any(|k| d.contains(k))
 }
 
 /// reqwest 的错误信息在 source 链里（证书、连接拒绝等）。

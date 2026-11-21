@@ -21,6 +21,7 @@ mod backup;
 mod baseline;
 mod build;
 mod cert;
+mod cert_status;
 mod cli_dist;
 mod cli_tunnel;
 mod clock;

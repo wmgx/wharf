@@ -1464,6 +1464,54 @@ pub struct GateKeyRequest {
   pub hosts: Vec<String>,
 }
 
+/// 证书申请状态，从网关最近的日志里读出来。
+#[derive(
+  Debug,
+  Clone,
+  Copy,
+  PartialEq,
+  Eq,
+  Serialize,
+  Deserialize,
+  JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum CertState {
+  /// 已签好。
+  Ok,
+  /// 正在申请。
+  Obtaining,
+  /// 申请失败，网关会自动重试。
+  Failed,
+  /// 日志里没有这个域名的申请记录（日志被轮转掉了，或者入口还没加载这个域名）。
+  Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CertStatus {
+  pub hostname: String,
+  pub gateway: String,
+  pub state: CertState,
+  /// 这一轮开始申请的时间（毫秒）。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub since: Option<i64>,
+  /// 最近一次失败的原因，说人话。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub reason: Option<String>,
+  /// 最近一次失败的原始报错（截断）。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub error: Option<String>,
+  /// 失败的时间（毫秒）。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub failed_at: Option<i64>,
+  /// 网关下次自动重试的时间（毫秒）。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub next_retry_at: Option<i64>,
+  /// 这一轮已经失败了几次。
+  #[serde(default)]
+  pub attempts: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SsoTestResult {
   pub ok: bool,

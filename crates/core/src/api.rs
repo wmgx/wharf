@@ -61,6 +61,14 @@ pub fn router(state: Arc<AppState>) -> Router {
       "/api/routes/{hostname}/sso/test",
       post(crate::sso_login::test),
     )
+    .route(
+      "/api/routes/{hostname}/cert",
+      get(crate::cert_status::status),
+    )
+    .route(
+      "/api/routes/{hostname}/cert/retry",
+      post(crate::cert_status::retry),
+    )
     .route("/api/sso/accounts", get(crate::app_accounts::list))
     .route(
       "/api/sso/accounts/{name}",
