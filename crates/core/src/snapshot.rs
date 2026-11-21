@@ -207,6 +207,8 @@ pub fn pull_policy(server: &ServerRow) -> PullPolicy {
       .github_mirror
       .as_deref()
       .map(with_secrets),
+    registry_proxy: crate::docker_proxy::wanted(&server.settings)
+      .map(|(proxy, _)| proxy),
   }
 }
 
