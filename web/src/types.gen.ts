@@ -1047,7 +1047,7 @@ export interface HostInfo {
   updates?: PackageUpdate[] | null;
   uptime_secs: number;
   /**
-   * `/var/log` 合计���节数（含 journal）。
+   * `/var/log` 合计字节数（含 journal）。
    */
   var_log?: number | null;
 }
