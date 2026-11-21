@@ -207,7 +207,7 @@ async fn execute(
         name: name.into(),
         image: None,
       }],
-      fleet: None,
+      ..Default::default()
     },
   )
   .await?;

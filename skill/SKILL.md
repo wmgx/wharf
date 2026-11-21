@@ -26,7 +26,9 @@ Wharf 是一个人用的多服务器管理系统。你通过 `wharf` 命令行�
    `wharf whoami --json` 看当前 token 的权限；提示本机 wharf 和控制面版本不同时运行 `wharf self-update`，再用 `wharf commands --changes` 看新版本多了哪些命令和参数。
    要等部署完成、服务恢复、告警解除时用 `wharf wait`，不要自己循环查：`wharf wait service <服务>`、`wharf wait route <域名>`、`wharf wait clear --subject <服务>`，默认最多等 10 分钟（`--timeout`）。
 6. **不打印、不写入 token 和密钥。** 服务要用的密码放进密钥（`wharf secret`），环境变量里用 `[[NAME]]` 引用。
-7. **宿主机命令要用户同意。** `wharf exec <服务器> -- '<命令>'`、`wharf server prune`、`wharf server baseline --apply` 这类直接动机器的操作，先说明要做什么。
+7. **直接生效的命令先预览。** `wharf task add/rm`、`wharf secret set/rm`、`wharf alert set`、`wharf service note` 不走计划，先加 `--dry-run` 看会改什么。
+   修改时加 `--reason "<为什么>"`，生成计划时可以加 `--note "<备注>"`，都会记进操作记录。
+8. **宿主机命令要用户同意。** `wharf exec <服务器> -- '<命令>'`、`wharf server prune`、`wharf server baseline --apply` 这类直接动机器的操作，先说明要做什么。
 
 退出码：`0` 成功，`1` 出错，`2` 需要确认，`3` 计划已过期（重新 plan），`4` 部分失败。
 
@@ -180,5 +182,5 @@ wharf service import <服务器> --project <compose 项目名> --json   # 或 --
 ## 不确定时
 
 - 不知道有什么命令：`wharf --help`、`wharf <命令> --help`；
-- 想看完整期望状态：`wharf export`；
+- 想看完整期望状态：`wharf export`；只改一个服务时 `wharf export --service <服务> -o x.toml`，改完 `wharf validate x.toml`（不连控制面），再 `wharf plan -f x.toml --partial`（只动文件里写到的对象；不加 `--partial` 会删掉文件里没写的）；
 - 想知道最近谁做了什么：`wharf audit --json`。

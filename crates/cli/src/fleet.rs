@@ -41,12 +41,150 @@ pub fn load(path: &Path) -> anyhow::Result<Fleet> {
   Ok(fleet)
 }
 
-pub fn to_toml(fleet: &Fleet) -> anyhow::Result<String> {
+pub fn to_toml(
+  fleet: &Fleet,
+  partial: bool,
+) -> anyhow::Result<String> {
   let body =
     toml::to_string_pretty(fleet).context("生成 TOML 失败")?;
+  let how = if partial {
+    "这是局部导出，修改后执行 wharf plan -f <文件> --partial 查看差异（不加 --partial 会删掉文件里没写的对象）。"
+  } else {
+    "修改后执行 wharf plan -f <文件> 查看差异。"
+  };
   Ok(format!(
-    "# Wharf 意图文件，由 wharf export 生成。\n# 修改后执行 wharf plan -f <文件> 查看差异。\n\n{body}"
+    "# Wharf 意图文件，由 wharf export 生成。\n# {how}\n\n{body}"
   ))
+}
+
+/// 局部导出：只留这些服务和指向它们的域名。
+pub fn only_services(
+  fleet: Fleet,
+  names: &[String],
+) -> Result<Fleet, wharf_api_types::ApiError> {
+  if let Some(missing) =
+    names.iter().find(|n| !fleet.services.contains_key(*n))
+  {
+    return Err(
+      wharf_api_types::ApiError::not_found(format!(
+        "服务 {missing} 不存在"
+      ))
+      .suggest("wharf service list"),
+    );
+  }
+  Ok(Fleet {
+    services: fleet
+      .services
+      .into_iter()
+      .filter(|(n, _)| names.contains(n))
+      .collect(),
+    routes: fleet
+      .routes
+      .into_iter()
+      .filter(|r| names.contains(&r.service))
+      .collect(),
+    ..Default::default()
+  })
+}
+
+/// `wharf validate`：不连控制面能查出来的问题。文件里有服务器时按完整状态查引用，
+/// 没有时按局部文件查，引用不到的只提醒。
+pub fn validate(path: &Path) -> serde_json::Value {
+  use serde_json::json;
+  let fleet = match load(path) {
+    Ok(f) => f,
+    Err(e) => {
+      return json!({
+        "ok": false,
+        "file": path.display().to_string(),
+        "errors": [format!("{e:#}")],
+        "warnings": [],
+      });
+    }
+  };
+  let complete = !fleet.servers.is_empty();
+  let (mut errors, mut warnings) = (Vec::new(), Vec::new());
+  let names = [
+    ("服务器", fleet.servers.keys().collect::<Vec<_>>()),
+    ("服务", fleet.services.keys().collect()),
+    ("网关", fleet.gateways.keys().collect()),
+    ("边缘应用", fleet.edge_apps.keys().collect()),
+  ];
+  for (kind, list) in names {
+    for name in list {
+      if let Err(e) = wharf_api_types::validate_name(kind, name) {
+        errors.push(e.message);
+      }
+    }
+  }
+  // 引用不到：完整状态里是错，局部文件里以控制面为准，只提醒。
+  let mut missing = Vec::new();
+  for (name, svc) in &fleet.services {
+    if !fleet.servers.contains_key(&svc.server) {
+      missing.push(format!(
+        "服务 {name} 的服务器 {} 文件里没有",
+        svc.server
+      ));
+    }
+    if let Source::Compose {
+      content: Some(text),
+      ..
+    } = &svc.source
+      && let Err(e) =
+        serde_yaml_ng::from_str::<serde_yaml_ng::Value>(text)
+    {
+      errors
+        .push(format!("服务 {name} 的 compose 不是合法的 YAML：{e}"));
+    }
+  }
+  let mut hosts = std::collections::BTreeSet::new();
+  for route in &fleet.routes {
+    let host =
+      route.hostname.trim().trim_end_matches('.').to_lowercase();
+    if host.is_empty() || !host.contains('.') {
+      errors.push(format!("域名 {:?} 不完整", route.hostname));
+    }
+    if !hosts.insert(host.clone()) {
+      errors.push(format!("域名 {host} 写了两次"));
+    }
+    let target = !route.service.is_empty();
+    if target
+      && !fleet.services.contains_key(&route.service)
+      && !fleet.edge_apps.contains_key(&route.service)
+    {
+      missing.push(format!(
+        "域名 {host} 的服务 {} 文件里没有",
+        route.service
+      ));
+    }
+    for gw in route.gateway.iter().chain(&route.backup_gateway) {
+      if !fleet.gateways.contains_key(gw) {
+        missing.push(format!("域名 {host} 的网关 {gw} 文件里没有"));
+      }
+    }
+  }
+  for what in missing {
+    if complete {
+      errors.push(what);
+    } else {
+      warnings
+        .push(format!("{what}（局部文件，plan 时以控制面为准）"));
+    }
+  }
+  json!({
+    "ok": errors.is_empty(),
+    "file": path.display().to_string(),
+    "kind": if complete { "complete" } else { "partial" },
+    "counts": {
+      "servers": fleet.servers.len(),
+      "services": fleet.services.len(),
+      "gateways": fleet.gateways.len(),
+      "edge_apps": fleet.edge_apps.len(),
+      "routes": fleet.routes.len(),
+    },
+    "errors": errors,
+    "warnings": warnings,
+  })
 }
 
 #[cfg(test)]
@@ -100,7 +238,7 @@ service = "whoami"
       panic!("not compose");
     };
     assert!(content.as_deref().unwrap().contains("ghost"));
-    let text = to_toml(&fleet).unwrap();
+    let text = to_toml(&fleet, false).unwrap();
     let back: Fleet = toml::from_str(&text).unwrap();
     assert_eq!(back, fleet);
 
@@ -108,5 +246,21 @@ service = "whoami"
     std::fs::write(&path, "[services.x]\nserver = \"node1\"\nsource = { image = \"a\" }\nprots = []\n").unwrap();
     let err = load(&path).unwrap_err().to_string();
     assert!(err.contains("services.x.prots"), "{err}");
+  }
+
+  #[test]
+  fn validates_partial_and_complete_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("blog.toml");
+    let body = "[services.blog]\nserver = \"node1\"\nsource = { image = \"ghost\" }\n\n[[routes]]\nhostname = \"blog.example.com\"\nservice = \"blog\"\n";
+    std::fs::write(&path, body).unwrap();
+    let v = validate(&path);
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(v["kind"], "partial");
+    assert_eq!(v["warnings"].as_array().unwrap().len(), 1);
+    std::fs::write(&path, format!("[servers.other]\n\n{body}"))
+      .unwrap();
+    let v = validate(&path);
+    assert_eq!(v["ok"], false, "{v}");
   }
 }

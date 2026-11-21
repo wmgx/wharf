@@ -110,6 +110,9 @@ fn layer(l: wharf_api_types::plan::Layer) -> String {
 
 /// `next_step`：是否打印"下一步"（加了 --apply 时不打印）。
 pub fn plan_with(p: &Plan, next_step: bool) {
+  if let Some(note) = &p.note {
+    println!("备注：{note}");
+  }
   if p.items.is_empty() {
     println!("没有变化，现实和配置一致。");
   } else {

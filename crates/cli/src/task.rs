@@ -45,12 +45,18 @@ pub enum TaskCmd {
     name: String,
     #[arg(long)]
     data: bool,
+    /// 只预览会改什么，不执行。
+    #[arg(long)]
+    dry_run: bool,
   },
 }
 
 #[derive(Args)]
 pub struct AddArgs {
   name: String,
+  /// 只预览会改什么，不保存。
+  #[arg(long)]
+  dry_run: bool,
   /// 5 段 cron，北京时间，例如 `30 3 * * *`。
   #[arg(long)]
   schedule: Option<String>,
@@ -187,7 +193,30 @@ pub async fn task(
       });
       Ok(())
     }
-    TaskCmd::Rm { name, data } => {
+    TaskCmd::Rm {
+      name,
+      dry_run: true,
+      ..
+    } => {
+      let before = crate::preview::get_or_null(
+        c,
+        &format!("/api/tasks/{}", seg(&name)),
+      )
+      .await?;
+      if before.is_null() {
+        return Err(
+          ApiError::not_found(format!("定时任务 {name} 不存在"))
+            .into(),
+        );
+      }
+      crate::preview::show(
+        j,
+        &format!("task/{name}"),
+        &before["spec"],
+        &serde_json::Value::Null,
+      )
+    }
+    TaskCmd::Rm { name, data, .. } => {
       let r: serde_json::Value = c
         .delete(&format!("/api/tasks/{}?data={data}", seg(&name)))
         .await?;
@@ -343,6 +372,20 @@ async fn add(c: &Client, a: AddArgs, j: bool) -> CliResult<()> {
     enabled: !a.disabled,
     notify: !a.no_notify,
   };
+  if a.dry_run {
+    let before = crate::preview::get_or_null(
+      c,
+      &format!("/api/tasks/{}", seg(&a.name)),
+    )
+    .await?;
+    let after = serde_json::to_value(&spec).unwrap_or_default();
+    return crate::preview::show(
+      j,
+      &format!("task/{}", a.name),
+      &before["spec"],
+      &after,
+    );
+  }
   let r: TaskSpec = c
     .put(&format!("/api/tasks/{}", seg(&a.name)), &spec)
     .await?;

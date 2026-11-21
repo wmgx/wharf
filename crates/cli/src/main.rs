@@ -19,6 +19,7 @@ mod files;
 mod fleet;
 mod gh;
 mod pack;
+mod preview;
 mod print;
 mod selfcmd;
 mod task;
@@ -56,6 +57,10 @@ pub struct Cli {
   /// 第一次执行时整份输出算一条变化。上次的结果存在本机缓存目录里。
   #[arg(long, global = true)]
   pub changed: bool,
+  /// 这次操作的原因，记进操作记录（`wharf audit` 和页面上看得到）。
+  /// 例：`wharf service restart blog --reason "内存泄漏，先重启"`。
+  #[arg(long, global = true)]
+  pub reason: Option<String>,
   /// 控制面地址，默认读 `~/.config/wharf/config.toml`。
   #[arg(long, env = "WHARF_URL", global = true)]
   pub url: Option<String>,
@@ -314,10 +319,15 @@ pub enum Command {
   /// 改动直接生效，不走计划。
   #[command(subcommand)]
   Task(task::TaskCmd),
-  /// 生成计划。不带参数时只检查漂移；`-f` 时以意图文件为完整期望状态。
+  /// 生成计划。不带参数时只检查漂移；`-f` 时以意图文件为完整期望状态，
+  /// 加 `--partial` 时只新建或修改文件里写到的对象，其余不动。
+  /// 例：`wharf export --service blog -o blog.toml` 改完后 `wharf plan -f blog.toml --partial`。
   Plan {
     #[arg(short = 'f', long)]
     file: Option<std::path::PathBuf>,
+    /// 文件是局部的：没写到的服务、网关、路由保持原样，不会被删除。
+    #[arg(long, requires = "file")]
+    partial: bool,
     #[command(flatten)]
     apply: ApplyFlags,
   },
@@ -334,11 +344,18 @@ pub enum Command {
   /// 执行记录。
   #[command(subcommand)]
   Run(RunCmd),
-  /// 导出当前期望状态为 TOML 意图文件。
+  /// 导出当前期望状态为 TOML 意图文件。给了 `--service` 时只导出这些服务和指向它们的域名，
+  /// 改完用 `wharf plan -f <文件> --partial` 交回。
   Export {
     #[arg(short = 'o', long)]
     output: Option<std::path::PathBuf>,
+    /// 只导出这个服务（连同它的域名），可以多次使用。
+    #[arg(long)]
+    service: Vec<String>,
   },
+  /// 不连控制面，检查意图文件写得对不对：格式、拼错的字段、名字、域名重复、compose 语法、文件内的引用。
+  /// 机器、账号这些要控制面才知道的，用 `wharf plan -f` 检查。
+  Validate { file: std::path::PathBuf },
   /// 输出字段说明（JSON Schema），不需要连接控制面。
   Schema {
     /// fleet、service、gateway、route、server、change、plan、run、status、error。不填则列出全部。
@@ -472,6 +489,9 @@ pub struct ApplyFlags {
   /// 和 `--apply` 一起用：确认高风险项。
   #[arg(long)]
   pub confirm: Vec<String>,
+  /// 计划备注，随计划保存，执行时记进操作记录。
+  #[arg(long)]
+  pub note: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -719,6 +739,9 @@ pub enum ServiceCmd {
   Note {
     name: String,
     note: String,
+    /// 只预览会改什么，不执行。
+    #[arg(long)]
+    dry_run: bool,
   },
   /// 停止：容器保留但不运行，之后部署也保持停止。生成计划。
   Stop {
@@ -952,6 +975,9 @@ pub enum AlertCmd {
     /// 恢复默认值。
     #[arg(long)]
     reset: bool,
+    /// 只预览会改什么，不执行。
+    #[arg(long)]
+    dry_run: bool,
   },
 }
 
@@ -1213,9 +1239,15 @@ pub enum SecretCmd {
   /// `BASIC_AUTH_<域名，. 换成 _>` 是这个域名的登录保护账号，值写成 `用户名:密码`，只保存哈希。
   Set {
     name: String,
+    /// 只预览会改什么，不执行。
+    #[arg(long)]
+    dry_run: bool,
   },
   Rm {
     name: String,
+    /// 只预览会改什么，不执行。
+    #[arg(long)]
+    dry_run: bool,
   },
 }
 
@@ -1317,6 +1349,9 @@ async fn main() {
   }
   if cli.page_size.is_some() || cli.changed {
     cli.json = true;
+  }
+  if let Some(reason) = &cli.reason {
+    let _ = client::REASON.set(reason.clone());
   }
   let key: Vec<String> = std::env::args()
     .skip(1)

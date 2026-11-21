@@ -1631,9 +1631,15 @@ async fn make_plan(
     .take(20)
     .collect::<Vec<_>>()
     .join(",");
+  let note = planned
+    .plan
+    .note
+    .as_deref()
+    .map(|n| format!(" 备注：{n}"))
+    .unwrap_or_default();
   audit.set_detail(format!(
-    "plan={} {}",
-    planned.plan.plan_id, addresses
+    "plan={} {addresses}{note}",
+    planned.plan.plan_id
   ));
   Ok(Json(planned.plan))
 }
@@ -1654,7 +1660,13 @@ async fn guard_dangerous(
       } => Some((name, settings)),
       _ => None,
     })
-    .chain(req.fleet.iter().flat_map(|f| f.servers.iter()));
+    .chain(
+      req
+        .fleet
+        .iter()
+        .chain(&req.partial)
+        .flat_map(|f| f.servers.iter()),
+    );
   for (name, after) in wanted {
     let before = snap.world.servers.get(name).map(|r| &r.settings);
     let was =
@@ -1700,8 +1712,16 @@ async fn apply_plan(
 ) -> ApiResult<ApplyResponse> {
   auth.require(Perm::Apply)?;
   let plan_id = req.plan_id.clone();
+  // 计划备注跟着执行记下来，操作记录里看得到为什么做。
+  let note = apply::load_plan(&s, &plan_id)
+    .await
+    .ok()
+    .and_then(|p| p.note)
+    .map(|n| format!(" 备注：{n}"))
+    .unwrap_or_default();
   let resp = apply::start(s.clone(), req, auth.perms).await?;
-  audit.set_detail(format!("plan={plan_id} run={}", resp.run_id));
+  audit
+    .set_detail(format!("plan={plan_id} run={}{note}", resp.run_id));
   Ok(Json(resp))
 }
 

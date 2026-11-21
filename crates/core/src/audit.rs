@@ -63,6 +63,7 @@ pub async fn layer(
   let method = req.method().clone();
   let path = req.uri().path().to_string();
   let started = Instant::now();
+  let reason = reason(&req);
   let slot = AuditSlot::default();
   req.extensions_mut().insert(slot.clone());
   let resp = next.run(req).await;
@@ -84,7 +85,11 @@ pub async fn layer(
         path,
         status: Some(resp.status().as_u16()),
         duration_ms: Some(started.elapsed().as_millis() as i64),
-        detail,
+        detail: match (detail, reason) {
+          (Some(d), Some(r)) => Some(format!("{d} 原因：{r}")),
+          (None, Some(r)) => Some(format!("原因：{r}")),
+          (d, None) => d,
+        },
         source: None,
       },
     )
@@ -94,6 +99,31 @@ pub async fn layer(
     }
   }
   resp
+}
+
+/// CLI 的 `--reason`：请求头里百分号编码的一句话，最多 200 个字符。
+fn reason(req: &Request) -> Option<String> {
+  let raw = req.headers().get(REASON_HEADER)?.to_str().ok()?;
+  let text = percent_decode(raw)?;
+  let text = text.trim();
+  (!text.is_empty()).then(|| text.chars().take(200).collect())
+}
+
+pub const REASON_HEADER: &str = "x-wharf-reason";
+
+fn percent_decode(s: &str) -> Option<String> {
+  let mut out = Vec::with_capacity(s.len());
+  let mut bytes = s.bytes();
+  while let Some(b) = bytes.next() {
+    if b == b'%' {
+      let hex = [bytes.next()?, bytes.next()?];
+      let hex = std::str::from_utf8(&hex).ok()?;
+      out.push(u8::from_str_radix(hex, 16).ok()?);
+    } else {
+      out.push(b);
+    }
+  }
+  String::from_utf8(out).ok()
 }
 
 pub fn should_record(method: &Method, path: &str) -> bool {
@@ -224,6 +254,15 @@ pub async fn list(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn decodes_reason() {
+    assert_eq!(
+      percent_decode("%E5%8D%87%E7%BA%A7%20a").as_deref(),
+      Some("升级 a")
+    );
+    assert_eq!(percent_decode("%E5%8"), None);
+  }
 
   #[test]
   fn only_operations_and_sensitive_reads_are_recorded() {

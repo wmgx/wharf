@@ -561,10 +561,34 @@ impl World {
   }
 
   /// 用完整的意图文件替换期望状态。服务器只更新设置，不增删。
+  /// 以意图文件为完整期望状态：文件里没有的服务、网关、路由、边缘应用、书签都删掉。
   pub fn replace_with(
     &mut self,
     fleet: &Fleet,
   ) -> Result<(), ApiError> {
+    let keep_routes = route_hosts(fleet)?;
+    self
+      .services
+      .retain(|name, _| fleet.services.contains_key(name));
+    self
+      .edge_apps
+      .retain(|name, _| fleet.edge_apps.contains_key(name));
+    self
+      .gateways
+      .retain(|name, _| fleet.gateways.contains_key(name));
+    self.routes.retain(|host, _| keep_routes.contains(host));
+    self
+      .bookmarks
+      .retain(|id, _| fleet.bookmarks.contains_key(id));
+    self.merge_with(fleet)
+  }
+
+  /// 局部期望状态：只新建或整体替换文件里写到的对象，其余不动。
+  pub fn merge_with(
+    &mut self,
+    fleet: &Fleet,
+  ) -> Result<(), ApiError> {
+    route_hosts(fleet)?;
     let mut changes = Vec::new();
     for (name, settings) in &fleet.servers {
       changes.push(Change::UpdateServer {
@@ -572,28 +596,6 @@ impl World {
         settings: settings.clone(),
       });
     }
-    let keep_services: BTreeSet<&String> =
-      fleet.services.keys().collect();
-    let keep_gateways: BTreeSet<&String> =
-      fleet.gateways.keys().collect();
-    let mut keep_routes = BTreeSet::new();
-    for route in &fleet.routes {
-      let hostname = normalize_hostname(&route.hostname)?;
-      if !keep_routes.insert(hostname.clone()) {
-        return Err(ApiError::invalid(format!(
-          "意图文件里路由 {hostname} 出现了两次"
-        )));
-      }
-    }
-    self.services.retain(|name, _| keep_services.contains(name));
-    self
-      .edge_apps
-      .retain(|name, _| fleet.edge_apps.contains_key(name));
-    self.gateways.retain(|name, _| keep_gateways.contains(name));
-    self.routes.retain(|host, _| keep_routes.contains(host));
-    self
-      .bookmarks
-      .retain(|id, _| fleet.bookmarks.contains_key(id));
     for (id, spec) in &fleet.bookmarks {
       let version = self.bookmarks.get(id).map_or(0, |r| r.version);
       let spec = check_bookmark(spec.clone())?;
@@ -1620,6 +1622,20 @@ pub fn server_not_found(name: &str) -> ApiError {
     .suggest("wharf server list")
 }
 
+/// 意图文件里的域名（规范化后），同一个写了两次时报错。
+fn route_hosts(fleet: &Fleet) -> Result<BTreeSet<String>, ApiError> {
+  let mut hosts = BTreeSet::new();
+  for route in &fleet.routes {
+    let hostname = normalize_hostname(&route.hostname)?;
+    if !hosts.insert(hostname.clone()) {
+      return Err(ApiError::invalid(format!(
+        "意图文件里路由 {hostname} 出现了两次"
+      )));
+    }
+  }
+  Ok(hosts)
+}
+
 pub fn normalize_hostname(
   hostname: &str,
 ) -> Result<String, ApiError> {
@@ -2230,6 +2246,30 @@ mod tests {
       crate::views::export(&restored).bookmarks,
       fleet.bookmarks
     );
+  }
+
+  #[test]
+  fn partial_fleet_keeps_unlisted_objects() {
+    let mut w = sample();
+    let add = |name: &str| Change::UpsertService {
+      name: name.into(),
+      spec: image_service("node1"),
+      adopt: None,
+    };
+    w.apply_changes(&[add("a"), add("b")]).unwrap();
+    let mut changed = image_service("node1");
+    changed.source = Source::Image("nginx".into());
+    let fleet = Fleet {
+      services: [("a".to_string(), changed.clone())].into(),
+      ..Default::default()
+    };
+    let mut merged = w.clone();
+    merged.merge_with(&fleet).unwrap();
+    assert!(merged.services.contains_key("b"));
+    assert_eq!(merged.services["a"].spec.source, changed.source);
+    let mut replaced = w;
+    replaced.replace_with(&fleet).unwrap();
+    assert!(!replaced.services.contains_key("b"));
   }
 
   pub fn sample() -> World {

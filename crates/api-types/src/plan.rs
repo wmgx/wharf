@@ -17,12 +17,18 @@ use crate::{
 )]
 #[serde(deny_unknown_fields)]
 pub struct PlanRequest {
-  /// 局部修改。和 `fleet` 二选一；都不给时只检查漂移。
+  /// 局部修改。`changes`、`fleet`、`partial` 只能给一个；都不给时只检查漂移。
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub changes: Vec<Change>,
   /// 完整期望状态，文件里没有的服务、网关、路由会被计划删除。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub fleet: Option<Fleet>,
+  /// 局部期望状态：只新建或修改文件里写到的对象，没写到的不动，也不会删除。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub partial: Option<Fleet>,
+  /// 计划备注，随计划保存，执行时记进操作记录。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub note: Option<String>,
 }
 
 #[derive(
@@ -315,6 +321,9 @@ pub struct Plan {
   /// 建议的下一步命令。
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub suggest: Vec<String>,
+  /// 生成计划时写的备注。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub note: Option<String>,
 }
 
 impl Plan {
