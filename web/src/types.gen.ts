@@ -1698,6 +1698,11 @@ export interface RouteSpec {
    */
   block_scanners?: boolean;
   /**
+   * 自定义 Caddy 配置：原样插进网关里这个域名的站点块，例如按路径拦截、加响应头。
+   * 网关下发前会用 Caddy 校验，写错了不会生效。只支持 caddy 网关。
+   */
+  caddy?: string | null;
+  /**
    * 临时分享：到这个时间（毫秒时间戳）以后，网关直接断开这个域名的请求；路由和 DNS 记录留着，等人删除。
    */
   expires_at?: number | null;

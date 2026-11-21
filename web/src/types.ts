@@ -219,6 +219,8 @@ export interface RouteSpec {
     port?: string;
     upstream?: string;
   }[];
+  /** 自定义 Caddy 配置，原样插进网关里这个域名的站点块。 */
+  caddy?: string;
 }
 
 export interface RouteView {

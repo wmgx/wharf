@@ -7,7 +7,7 @@ import { AddAlias } from "@/components/add-alias";
 import { AddRedirect } from "@/components/add-redirect";
 import { AccessProtection } from "@/components/access-protection";
 import { useActions } from "@/components/actions";
-import { Dot, ErrorNote, SectionTitle, StatusBadge, ago } from "@/components/common";
+import { CodeBlock, Dot, ErrorNote, SectionTitle, StatusBadge, ago } from "@/components/common";
 import { Field, Picker } from "@/components/fields";
 import { LAYER, diagnosisOf, routeTone } from "@/components/health";
 import { hopOf } from "@/components/hop";
@@ -17,8 +17,12 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Sheet, SheetContent, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { sameTarget, targetText, type Target } from "@/components/target-fields";
 import type { AppAccountView, SsoTestResult } from "@/types.gen";
-import type { GateKeyView, RouteView, Status } from "@/types";
+import { AddPathDialog, CaddyDialog, EditRedirectDialog, EditTargetDialog } from "./route-dialogs";
+import type { GateKeyView, RouteSpec, RouteView, Status } from "@/types";
+
+type PathRoute = NonNullable<RouteSpec["paths"]>[number];
 
 function DomainDetail({ route, status, onClose, onDirty }: { route: RouteView; status: Status; onClose: () => void; onDirty: (dirty: boolean) => void }) {
   const actions = useActions();
@@ -46,14 +50,61 @@ function DomainDetail({ route, status, onClose, onDirty }: { route: RouteView; s
   const [rate, setRate] = useState<number | null>(route.spec.rate_limit ?? null);
   const [block, setBlock] = useState(!!route.spec.block_scanners);
   const [backup, setBackup] = useState(route.spec.backup_gateway ?? "");
-  const gateway = status.gateways.find((g) => g.name === route.gateway);
+  const isRedirect = route.spec.redirect != null;
+  const savedTarget: Target = route.spec.upstream ? { kind: "upstream", upstream: route.spec.upstream } : { kind: "service", service: route.spec.service ?? "", port: route.spec.port };
+  const [target, setTarget] = useState<Target>(savedTarget);
+  const [redirectUrl, setRedirectUrl] = useState(route.spec.redirect ?? "");
+  const [forwards, setForwards] = useState<PathRoute[]>(route.spec.paths ?? []);
+  const [gw, setGw] = useState(route.gateway ?? "");
+  const [internal, setInternal] = useState(!!route.spec.internal);
+  const [caddy, setCaddy] = useState(route.spec.caddy ?? "");
+  const [dialog, setDialog] = useState<"target" | "path" | "caddy" | null>(null);
+  const saved = status.gateways.find((g) => g.name === route.gateway);
+  const gateway = status.gateways.find((g) => g.name === gw);
+  const tunnel = gateway?.spec.kind === "cloudflare_tunnel";
   const choices = status.gateways.filter((g) => g.spec.server !== gateway?.spec.server);
+  const backupNow = choices.some((g) => g.name === backup) ? backup : "";
+  // 隧道入口不支持的设置，按改动后的状态算。
+  const blockers = [
+    (route.spec.sso || route.spec.auth) && "访问保护",
+    rate !== null && "限速",
+    block && "拦截常见扫描",
+    internal && "只在内网访问",
+    forwards.length > 0 && "按路径转发",
+    caddy.trim() && "Caddy 配置",
+    isRedirect && "跳转",
+  ].filter(Boolean) as string[];
   const diagnosis = diagnosisOf(status, route.spec.hostname);
   const { tone, text } = routeTone(diagnosis);
   const cert = diagnosis?.cert_expires;
   const days = cert ? Math.floor((new Date(cert).getTime() - Date.now()) / 86400000) : 0;
-  const changed = link !== route.spec.link || backup !== (route.spec.backup_gateway ?? "") || rate !== (route.spec.rate_limit ?? null) || block !== !!route.spec.block_scanners;
+  const diff: [string, boolean][] = [
+    ["指向", isRedirect ? redirectUrl !== route.spec.redirect : !sameTarget(target, savedTarget)],
+    ["路径", JSON.stringify(forwards) !== JSON.stringify(route.spec.paths ?? [])],
+    ["入口", gw !== (route.gateway ?? "")],
+    ["只在内网访问", internal !== !!route.spec.internal],
+    ["走法", link !== route.spec.link],
+    ["备用入口", backupNow !== (route.spec.backup_gateway ?? "")],
+    ["限速", rate !== (route.spec.rate_limit ?? null)],
+    ["拦截常见扫描", block !== !!route.spec.block_scanners],
+    ["Caddy 配置", caddy !== (route.spec.caddy ?? "")],
+  ];
+  const changedList = diff.filter(([, v]) => v).map(([k]) => k);
+  const changed = changedList.length > 0;
   useEffect(() => { onDirty(changed); }, [changed, onDirty]);
+  const nextSpec = (): RouteSpec => ({
+    ...route.spec,
+    ...(isRedirect ? { redirect: redirectUrl } : target.kind === "service" ? { service: target.service, port: target.port, upstream: undefined } : { service: "", port: undefined, upstream: target.upstream.trim() }),
+    paths: forwards.length ? forwards : undefined,
+    gateway: gw === (route.gateway ?? "") ? route.spec.gateway : gw,
+    internal: internal || undefined,
+    link,
+    backup_gateway: backupNow || undefined,
+    rate_limit: rate ?? undefined,
+    block_scanners: block || undefined,
+    caddy: caddy.trim() ? caddy : undefined,
+  });
+  const pathText = (f: PathRoute) => f.service ? (f.port ? `${f.service}:${f.port}` : f.service) : f.upstream;
   return <>
     <SheetHeader className="border-b">
       <SheetTitle className="font-mono">
@@ -87,44 +138,57 @@ function DomainDetail({ route, status, onClose, onDirty }: { route: RouteView; s
       <SectionTitle>指向</SectionTitle>
       <Panel className="p-4">
         <Facts items={[
-          ["指向", route.spec.service ? <Link className="hover:underline" to={`/services/${encodeURIComponent(route.spec.service)}`}>
-            {route.spec.service}
-          </Link> : <span className="break-all font-mono text-xs">
-            {route.spec.redirect ?? route.spec.upstream}
-          </span>],
-          ["地址", !route.spec.redirect && <span className="break-all font-mono text-xs">
+          [isRedirect ? "跳转到" : "指向", isRedirect ? <span className="break-all font-mono text-xs">{redirectUrl}</span>
+            : target.kind === "service" ? <span>
+              <Link className="hover:underline" to={`/services/${encodeURIComponent(target.service)}`}>{target.service}</Link>
+              {target.port && <span className="font-mono text-xs text-muted-foreground">:{target.port}</span>}
+            </span> : <span className="break-all font-mono text-xs">{targetText(target)}</span>],
+          ["地址", !isRedirect && sameTarget(target, savedTarget) && <span className="break-all font-mono text-xs">
             {route.upstream ?? "-"}
           </span>],
         ]} />
         <div className="mt-4 flex flex-wrap gap-2">
-          {!route.spec.redirect && <Button variant="outline" onClick={() => setAlias(true)}>加别名</Button>}
+          <Button variant="outline" onClick={() => setDialog("target")}>{isRedirect ? "修改跳转" : "修改指向"}</Button>
+          {!isRedirect && <Button variant="outline" onClick={() => setAlias(true)}>加别名</Button>}
           <Button variant="outline" onClick={() => setRedirect(true)}>跳转到这里</Button>
         </div>
       </Panel>
+      {!isRedirect && <>
+        <SectionTitle count={forwards.length || undefined} action={!tunnel && <Button variant="outline" size="xs" onClick={() => setDialog("path")}>加路径</Button>}>按路径转发</SectionTitle>
+        {tunnel ? <p className="text-sm text-muted-foreground">隧道入口不支持按路径转发</p>
+          : forwards.length ? <Rows>
+            {[...forwards].sort((a, b) => a.path.localeCompare(b.path)).map((f) => <Row key={f.path}>
+              <span className="shrink-0 font-mono text-xs">{f.path}</span>
+              <span className="text-muted-foreground">→</span>
+              <span className="min-w-0 flex-1 break-all font-mono text-xs">{pathText(f)}</span>
+              <Button variant="outline" size="xs" onClick={() => setForwards(forwards.filter((v) => v.path !== f.path))}>移除</Button>
+            </Row>)}
+          </Rows> : <p className="text-sm text-muted-foreground">所有路径都转给{target.kind === "service" ? "这个服务" : "这个地址"}</p>}
+      </>}
       <SectionTitle>入口</SectionTitle>
       <Panel className="grid gap-4 p-4">
-        <Facts items={[
-          ["入口", gateway && <>
-            <Link className="hover:underline" to={`/domains?tab=entries&entry=${encodeURIComponent(gateway.name)}`}>
-              {gateway.name}
-            </Link> <span className="text-muted-foreground">
-              {gateway.spec.server}
-            </span>
-          </>],
-          ["走法", hopOf(route, status).text],
-          ...(!route.spec.redirect ? [["访问范围", route.spec.internal ? "只在内网" : "公网"] as [string, string]] : []),
-        ]} />
-        {route.spec.service && gateway?.spec.kind === "caddy" && <label className="flex items-center gap-2 text-sm">
+        <Field label="入口" htmlFor="route-gateway">
+          <Picker id="route-gateway" value={gw} onChange={setGw} options={status.gateways.map((g) => {
+            const off = g.spec.kind === "cloudflare_tunnel" && g.name !== route.gateway && blockers.length > 0;
+            return { value: g.name, label: g.name, disabled: off, hint: off ? `不支持：${blockers.join("、")}` : `${g.spec.kind === "cloudflare_tunnel" ? "Cloudflare 隧道" : "Caddy"} · ${g.spec.server}${g.spec.default ? " · 默认" : ""}` };
+          })} />
+        </Field>
+        <Facts items={[["走法", hopOf(route, status).text]]} />
+        {!isRedirect && <label className={`flex items-center gap-2 text-sm ${tunnel ? "text-muted-foreground" : ""}`}>
+          <Checkbox checked={internal} disabled={tunnel} onCheckedChange={(v) => setInternal(v === true)} />只在内网访问
+          {tunnel && <span className="text-xs text-muted-foreground">隧道入口不支持</span>}
+        </label>}
+        {target.kind === "service" && !isRedirect && !tunnel && <label className="flex items-center gap-2 text-sm">
           <Checkbox checked={link === "tunnel"} onCheckedChange={(v) => setLink(v === true ? "tunnel" : undefined)} />总是走反向隧道</label>}
         {(choices.length > 0 || route.spec.backup_gateway) && <Field label="备用入口" htmlFor="backup-gateway" help="入口所在的机器离线 5 分钟后，DNS 自动切到备用入口，恢复 5 分钟后切回。">
-          <Picker id="backup-gateway" value={backup} onChange={setBackup} options={[{ value: "", label: "无" }, ...choices.map((g) => ({ value: g.name, label: `${g.name}（${g.spec.server}）` }))]} />
+          <Picker id="backup-gateway" value={backupNow} onChange={setBackup} options={[{ value: "", label: "无" }, ...choices.map((g) => ({ value: g.name, label: `${g.name}（${g.spec.server}）` }))]} />
         </Field>}
       </Panel>
       <SectionTitle>访问保护</SectionTitle>
       <Panel className="flex flex-col gap-3 p-4 text-sm">
         <div className="flex flex-wrap items-center gap-2">
           <span className="flex-1">{route.spec.sso?.mode === "oidc" ? (route.spec.sso.public ? "公开 · OIDC 登录" : "门禁 · OIDC 登录") : route.spec.sso?.public ? "公开 · 代登录入口" : route.spec.sso ? "门禁 · 用 Wharf 登录" : route.spec.auth ? "账号密码" : "不保护"}</span>
-          {gateway?.spec.kind === "cloudflare_tunnel" ? <span className="text-muted-foreground">隧道入口暂不支持访问保护</span> : <Button variant="outline" size="sm" onClick={() => setGateOpen(true)}>设置访问保护</Button>}
+          {saved?.spec.kind === "cloudflare_tunnel" ? <span className="text-muted-foreground">隧道入口暂不支持访问保护</span> : <Button variant="outline" size="sm" onClick={() => setGateOpen(true)}>设置访问保护</Button>}
         </div>
         {route.spec.sso && !route.spec.sso.public && <Link className="text-primary hover:underline" to="/settings?tab=security#gate-keys">访问凭证（{keyCount}）</Link>}
         {login && <div className="grid gap-1 text-sm">
@@ -149,7 +213,7 @@ function DomainDetail({ route, status, onClose, onDirty }: { route: RouteView; s
       </Panel>
       <SectionTitle>防护</SectionTitle>
       <Panel className="grid gap-3 p-4 text-sm">
-        {!route.spec.redirect && (gateway?.spec.kind === "cloudflare_tunnel" ? <span className="text-muted-foreground">隧道入口不支持限速和拦截扫描</span> : <>
+        {!isRedirect && (tunnel ? <span className="text-muted-foreground">隧道入口不支持限速和拦截扫描</span> : <>
           <label className="flex flex-wrap items-center gap-2">
             <Checkbox checked={rate !== null} onCheckedChange={(v) => setRate(v === true ? 600 : null)} />限速
             {rate !== null && <><Input aria-label="限速次数" className="w-24" type="number" min={10} max={100000} value={rate} onChange={(e) => setRate(Number(e.target.value))} /><span>次/分钟/IP</span></>}
@@ -159,6 +223,11 @@ function DomainDetail({ route, status, onClose, onDirty }: { route: RouteView; s
           </label>
         </>)}
       </Panel>
+      {!isRedirect && <>
+        <SectionTitle action={!tunnel && <Button variant="outline" size="xs" onClick={() => setDialog("caddy")}>{caddy.trim() ? "编辑" : "添加"}</Button>}>Caddy 配置</SectionTitle>
+        {tunnel ? <p className="text-sm text-muted-foreground">隧道入口不支持 Caddy 配置</p>
+          : caddy.trim() ? <CodeBlock>{caddy}</CodeBlock> : <p className="text-sm text-muted-foreground">没有自定义配置</p>}
+      </>}
       {cert && <>
         <SectionTitle>证书</SectionTitle>
         <Panel className="p-4">
@@ -169,10 +238,15 @@ function DomainDetail({ route, status, onClose, onDirty }: { route: RouteView; s
     </div>
     <SheetFooter className="flex-row justify-between border-t">
       <Button variant="outline" className="text-destructive" onClick={() => actions.removeRoute(route.spec.hostname)}>移除域名</Button>
-      <div className="grid min-w-0 gap-2">{changed && <span className="text-xs text-muted-foreground">改了：{[link !== route.spec.link && "走法", backup !== (route.spec.backup_gateway ?? "") && "备用入口", rate !== (route.spec.rate_limit ?? null) && "限速", block !== !!route.spec.block_scanners && "拦截常见扫描"].filter(Boolean).join("、")}</span>}
-      <Button disabled={!changed || (rate !== null && (!Number.isInteger(rate) || rate < 10 || rate > 100000))} onClick={() => { onClose(); actions.plan({ title: `修改 ${route.spec.hostname}`, changes: [{ op: "upsert_route", spec: { ...route.spec, link, backup_gateway: backup || undefined, rate_limit: rate ?? undefined, block_scanners: block || undefined } }] }); }}>预览改动</Button></div>
+      <div className="grid min-w-0 gap-2">{changed && <span className="text-xs text-muted-foreground">改了：{changedList.join("、")}</span>}
+      <Button disabled={!changed || (rate !== null && (!Number.isInteger(rate) || rate < 10 || rate > 100000))} onClick={() => { onClose(); actions.plan({ title: `修改 ${route.spec.hostname}`, changes: [{ op: "upsert_route", spec: nextSpec() }] }); }}>预览改动</Button></div>
     </SheetFooter>
     {gateOpen && <AccessProtection route={route} onClose={() => setGateOpen(false)} />}
+    {dialog === "target" && (isRedirect
+      ? <EditRedirectDialog hostname={route.spec.hostname} url={redirectUrl} onSave={setRedirectUrl} onClose={() => setDialog(null)} />
+      : <EditTargetDialog hostname={route.spec.hostname} target={target} onSave={setTarget} onClose={() => setDialog(null)} />)}
+    {dialog === "path" && <AddPathDialog taken={forwards.map((f) => f.path)} onAdd={(path, t) => setForwards([...forwards, t.kind === "service" ? { path, service: t.service, port: t.port } : { path, upstream: t.upstream.trim() }])} onClose={() => setDialog(null)} />}
+    {dialog === "caddy" && <CaddyDialog hostname={route.spec.hostname} value={caddy} onSave={setCaddy} onClose={() => setDialog(null)} />}
     <Dialog open={testOpen} onOpenChange={setTestOpen}>
       <DialogContent aria-describedby={undefined} className="max-h-[85vh] overflow-auto">
         <DialogHeader><DialogTitle>代登录测试</DialogTitle></DialogHeader>
