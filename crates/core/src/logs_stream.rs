@@ -100,6 +100,7 @@ fn follow(
           project,
           tail,
           follow: true,
+          since: None,
         },
         FOLLOW_TIMEOUT,
         Some(progress),

@@ -600,13 +600,28 @@ pub enum ServiceCmd {
   Show {
     name: String,
   },
+  /// 看日志。可以按时间、关键字筛，`--errors` 只看报错并把同一种报错合成一条带次数。
+  /// 例：`wharf service logs blog --since 2h --errors`、`wharf service logs blog --grep timeout --tail 50`。
   Logs {
     name: String,
+    /// 最多输出多少行（`--errors` 时是多少种报错）。
     #[arg(long, default_value_t = 200)]
     tail: u32,
     /// 持续输出新日志，Ctrl-C 结束。
-    #[arg(short, long)]
+    #[arg(short, long, conflicts_with_all = ["since", "grep", "errors", "max_line"])]
     follow: bool,
+    /// 只看这段时间内的：30m、2h、3d，或 RFC 3339 时间。
+    #[arg(long)]
+    since: Option<String>,
+    /// 只看含这个关键字的行，不分大小写。筛选时在最近 5000 行里找。
+    #[arg(long)]
+    grep: Option<String>,
+    /// 只看报错（error、exception、panic、failed 等），同一种报错只是 id、耗时不同的合成一条，带次数和首末时间。
+    #[arg(long)]
+    errors: bool,
+    /// 每行最多多少字符，超出截断（筛选时默认 500）。
+    #[arg(long)]
+    max_line: Option<usize>,
   },
   /// 部署历史。
   History {

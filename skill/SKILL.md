@@ -124,6 +124,8 @@ wharf doctor blog.example.com --json
 
 ```bash
 wharf service logs <服务> --tail 200
+wharf service logs <服务> --since 2h --errors --json      # 只看报错，同一种合成一条带次数，先用这个
+wharf service logs <服务> --grep timeout --tail 50       # 按关键字筛，--max-line 限制每行长度
 wharf service timeline <服务> --json    # 部署、备份、重启、告警按时间排
 wharf metrics <服务器或服务> --range 24h --json   # 资源曲线
 wharf server disk <服务器> --json        # 磁盘被哪个服务占了（数据、日志、数据卷），--measure 现测

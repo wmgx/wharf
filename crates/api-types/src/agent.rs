@@ -261,6 +261,9 @@ pub enum AgentOp {
     tail: u32,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     follow: bool,
+    /// 只要这个时间之后的：`30m`、`2h`，或 RFC 3339 时间。旧 agent 不认识，会忽略。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    since: Option<String>,
   },
   /// 校验并应用网关配置，失败自动回滚。结果是 [ProjectUpResult]。
   GatewayApply(GatewayApply),

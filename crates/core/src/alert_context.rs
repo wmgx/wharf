@@ -80,6 +80,7 @@ pub async fn enrich(
                   project: service.to_string(),
                   tail: 30,
                   follow: false,
+                  since: None,
                 },
                 Duration::from_secs(5),
                 None,

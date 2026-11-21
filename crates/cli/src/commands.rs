@@ -1706,6 +1706,7 @@ async fn service(
       name,
       tail,
       follow: true,
+      ..
     } => {
       use std::io::Write;
       let mut stdout = std::io::stdout();
@@ -1928,15 +1929,46 @@ async fn service(
       name,
       tail,
       follow: false,
+      since,
+      grep,
+      errors,
+      max_line,
     } => {
-      let v: Value = c
-        .get(&format!(
-          "/api/services/{}/logs?tail={tail}",
-          seg(&name)
-        ))
-        .await?;
+      let mut path =
+        format!("/api/services/{}/logs?tail={tail}", seg(&name));
+      if let Some(v) = &since {
+        path.push_str(&format!("&since={}", seg(v)));
+      }
+      if let Some(v) = &grep {
+        path.push_str(&format!("&grep={}", seg(v)));
+      }
+      if errors {
+        path.push_str("&errors=true");
+      }
+      if let Some(v) = max_line {
+        path.push_str(&format!("&max_line={v}"));
+      }
+      let v: Value = c.get(&path).await?;
       out(j, &v, |v| {
-        print!("{}", v["logs"].as_str().unwrap_or_default())
+        if let Some(groups) = v["groups"].as_array() {
+          if groups.is_empty() {
+            println!("没有报错（看了 {} 行）", v["scanned"]);
+          }
+          for g in groups {
+            println!(
+              "{} 次  {} ~ {}\n  {}",
+              g["count"],
+              g["first"].as_str().unwrap_or("-"),
+              g["last"].as_str().unwrap_or("-"),
+              g["line"].as_str().unwrap_or("")
+            );
+          }
+        } else {
+          print!("{}", v["logs"].as_str().unwrap_or_default());
+          if let Some(n) = v["matched"].as_u64() {
+            eprintln!("命中 {n} 行（看了 {} 行）", v["scanned"]);
+          }
+        }
       });
       Ok(())
     }

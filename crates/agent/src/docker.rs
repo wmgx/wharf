@@ -534,17 +534,22 @@ impl Docker {
     &self,
     project: &str,
     tail: u32,
+    since: Option<&str>,
     ctx: &Ctx,
   ) -> Result<String, ApiError> {
+    let mut args = vec![
+      "logs".to_string(),
+      "--no-color".into(),
+      "--timestamps".into(),
+      "--tail".into(),
+      tail.min(5000).to_string(),
+    ];
+    if let Some(since) = since {
+      args.push(format!("--since={since}"));
+    }
     let out = self
       .compose(project)
-      .args([
-        "logs".to_string(),
-        "--no-color".into(),
-        "--timestamps".into(),
-        "--tail".into(),
-        tail.min(5000).to_string(),
-      ])
+      .args(args)
       .timeout(Duration::from_secs(30))
       .run(ctx)
       .await?

@@ -106,13 +106,19 @@ impl Ops {
         project,
         tail,
         follow,
+        since,
       } => {
         check_project(&project)?;
         if follow {
           self.docker.follow_logs(&project, tail, ctx).await;
           to_value(String::new())
         } else {
-          to_value(self.docker.logs(&project, tail, ctx).await?)
+          to_value(
+            self
+              .docker
+              .logs(&project, tail, since.as_deref(), ctx)
+              .await?,
+          )
         }
       }
       AgentOp::GatewayApply(apply) => {
@@ -522,7 +528,8 @@ impl Ops {
       Ok(())
     }
     .await;
-    match self.docker.logs(&project, 30, &Ctx::detached()).await {
+    match self.docker.logs(&project, 30, None, &Ctx::detached()).await
+    {
       Ok(logs) if result.is_err() => {
         for line in logs.lines() {
           ctx.say(line);
