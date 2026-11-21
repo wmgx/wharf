@@ -1420,6 +1420,59 @@ async fn server(
         .await?;
       finish_task(c, &r.run_id, true, j).await
     }
+    ServerCmd::Disk { name, measure } => {
+      let path = format!("/api/servers/{}/disk", seg(&name));
+      let mut v: Value = if measure {
+        c.post(&format!("{path}/measure"), &json!({})).await?
+      } else {
+        c.get(&path).await?
+      };
+      if let Some(rows) = v["rows"].as_array_mut() {
+        rows.sort_by_key(|r| {
+          std::cmp::Reverse(r["total"].as_u64().unwrap_or(0))
+        });
+      }
+      out(j, &v, |v| {
+        let rows = v["rows"].as_array().cloned().unwrap_or_default();
+        if rows.is_empty() {
+          println!("还没有测量结果，用 --measure 现在测一次");
+          return;
+        }
+        let gb = |b: &Value| {
+          let b = b.as_f64().unwrap_or(0.0);
+          if b >= 1024.0 * 1024.0 * 1024.0 {
+            format!("{:.1}G", b / 1024.0 / 1024.0 / 1024.0)
+          } else {
+            format!("{:.0}M", b / 1024.0 / 1024.0)
+          }
+        };
+        println!(
+          "{:<24}{:>8}{:>8}{:>8}{:>8}{:>10}",
+          "服务", "合计", "数据", "日志", "数据卷", "7 天增长"
+        );
+        for r in rows {
+          let name = r["name"].as_str().unwrap_or("");
+          let name = if r["shared"].as_bool() == Some(true) {
+            format!("{name}（共用卷）")
+          } else {
+            name.to_string()
+          };
+          let week = match r["week"].as_i64() {
+            Some(w) if w >= 0 => format!("+{}", gb(&json!(w))),
+            Some(w) => format!("-{}", gb(&json!(-w))),
+            None => "-".into(),
+          };
+          println!(
+            "{name:<24}{:>8}{:>8}{:>8}{:>8}{week:>10}",
+            gb(&r["total"]),
+            gb(&r["data"]),
+            gb(&r["logs"]),
+            gb(&r["vols"])
+          );
+        }
+      });
+      Ok(())
+    }
     ServerCmd::Host { name } => {
       let v: wharf_api_types::agent::HostInfo =
         c.get(&format!("/api/servers/{}/host", seg(&name))).await?;

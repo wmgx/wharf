@@ -126,6 +126,8 @@ wharf doctor blog.example.com --json
 wharf service logs <服务> --tail 200
 wharf service timeline <服务> --json    # 部署、备份、重启、告警按时间排
 wharf metrics <服务器或服务> --range 24h --json   # 资源曲线
+wharf server disk <服务器> --json        # 磁盘被哪个服务占了（数据、日志、数据卷），--measure 现测
+wharf server host <服务器> --json        # 镜像、构建缓存、容器日志、journal 的占用
 ```
 
 ### 迁移和备份
