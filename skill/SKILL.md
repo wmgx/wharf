@@ -51,6 +51,12 @@ wharf service deploy blog --server <服务器> --compose ./compose.yml --port ht
 
 # git 仓库
 wharf service deploy blog --server <服务器> --git https://github.com/x/blog --port http=8000 --json
+
+# 照着文档里的 docker run 命令：端口、环境变量、数据卷、资源上限一起转过来，没转换的参数打在标准错误里
+wharf service deploy blog --server <服务器> --from-run 'docker run -d -p 8080:80 -v data:/data nginx' --json
+
+# compose 文件的网址（在本机下载，GitHub 网页链接自动换成原始文件）
+wharf service deploy blog --server <服务器> --compose-url https://github.com/x/blog/blob/main/compose.yml --json
 ```
 
 已存在的服务再执行 `service deploy` 只改给出的参数。部署后用 `wharf service show <服务> --json` 确认状态。

@@ -279,6 +279,10 @@ pub fn router(state: Arc<AppState>) -> Router {
       post(crate::import_api::remove),
     )
     .route("/api/import", post(crate::import_api::preview))
+    .route(
+      "/api/convert/docker-run",
+      post(crate::docker_run::convert),
+    )
     .route("/api/services", get(list_services))
     .route("/api/services/{name}", get(show_service))
     .route("/api/services/{name}/logs", get(service_logs))

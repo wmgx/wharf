@@ -34,6 +34,8 @@ pub fn web_schema() -> Value {
   let _ = generator.subschema_for::<spec::AdoptSpec>();
   let _ = generator.subschema_for::<view::ImportRecord>();
   let _ = generator.subschema_for::<view::ImportPreview>();
+  let _ = generator.subschema_for::<view::DockerRunRequest>();
+  let _ = generator.subschema_for::<view::ServiceDraft>();
   let _ = generator.subschema_for::<agent::ContainerInfo>();
   let _ = generator.subschema_for::<view::LiveState>();
   let _ = generator.subschema_for::<view::ServiceView>();
