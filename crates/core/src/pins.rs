@@ -143,25 +143,33 @@ pub async fn resolve(
         .push((name.clone(), image));
     }
   }
-  for (server, items) in todo {
-    let images = items.iter().map(|(_, i)| i.clone()).collect();
-    let resolved: Vec<ResolvedImage> = state
-      .hub
-      .call(
-        &server,
-        AgentOp::ResolveImages(ResolveImages {
-          images,
-          pull: snapshot::pull_policy(&desired.servers[&server]),
-          tags: false,
-        }),
-        RESOLVE_TIMEOUT,
-        None,
-        &Default::default(),
-      )
-      .await
-      .map_err(|e| {
-        e.with_hint("确认这台机器的 agent 在线并已升级；查不到镜像版本就没法固定要部署的版本")
-      })?;
+  // 各台机器同时查，一台慢不拖累别的。
+  let calls = todo.into_iter().map(|(server, items)| {
+    let pull = snapshot::pull_policy(&desired.servers[&server]);
+    async move {
+      let images = items.iter().map(|(_, i)| i.clone()).collect();
+      let resolved: Result<Vec<ResolvedImage>, ApiError> = state
+        .hub
+        .call(
+          &server,
+          AgentOp::ResolveImages(ResolveImages {
+            images,
+            pull,
+            tags: false,
+          }),
+          RESOLVE_TIMEOUT,
+          None,
+          &Default::default(),
+        )
+        .await;
+      (items, resolved)
+    }
+  });
+  for (items, resolved) in futures_util::future::join_all(calls).await
+  {
+    let resolved = resolved.map_err(|e| {
+      e.with_hint("确认这台机器的 agent 在线并已升级；查不到镜像版本就没法固定要部署的版本")
+    })?;
     for (name, image) in items {
       let compose = matches!(
         desired.services.get(&name).map(|r| &r.spec.source),

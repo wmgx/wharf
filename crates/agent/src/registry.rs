@@ -20,17 +20,44 @@ const ACCEPT: &str = "application/vnd.oci.image.index.v1+json, \
   application/vnd.docker.distribution.manifest.v2+json, \
   application/vnd.oci.image.manifest.v1+json";
 
+/// 镜像源直连；原仓库和 dockerd 拉镜像一样走代理（经出口时是本机的分流代理）。
+struct Clients {
+  direct: reqwest::Client,
+  origin: reqwest::Client,
+}
+
+impl Clients {
+  fn pick(&self, mirror: bool) -> &reqwest::Client {
+    if mirror { &self.direct } else { &self.origin }
+  }
+}
+
 pub async fn resolve(
   job: &ResolveImages,
   ctx: &Ctx,
 ) -> Result<Vec<ResolvedImage>, ApiError> {
-  let client = reqwest::Client::builder()
-    .timeout(ATTEMPT)
-    .build()
-    .map_err(|e| ApiError::internal(e.to_string()))?;
+  let build = |proxy: Option<&str>| {
+    let mut b = reqwest::Client::builder().timeout(ATTEMPT);
+    if let Some(p) = proxy {
+      b = b.proxy(
+        reqwest::Proxy::all(p)
+          .map_err(|e| ApiError::invalid(e.to_string()))?,
+      );
+    }
+    b.build().map_err(|e| ApiError::internal(e.to_string()))
+  };
+  let proxy = crate::build::usable_proxy(
+    job.pull.registry_proxy.as_deref(),
+    ctx,
+  )
+  .await;
+  let clients = Clients {
+    direct: build(None)?,
+    origin: build(proxy.as_deref())?,
+  };
   // 各镜像同时查，一台机器镜像多、出口慢时不会排队超时。
   let all = futures_util::future::join_all(
-    job.images.iter().map(|image| one(&client, image, job)),
+    job.images.iter().map(|image| one(&clients, image, job)),
   );
   tokio::select! {
     out = all => Ok(out),
@@ -41,15 +68,15 @@ pub async fn resolve(
 }
 
 async fn one(
-  client: &reqwest::Client,
+  clients: &Clients,
   image: &str,
   job: &ResolveImages,
 ) -> ResolvedImage {
-  let result = resolve_one(client, image, &job.pull).await;
+  let result = resolve_one(clients, image, &job.pull).await;
   let newer_tags = if job.tags {
     tokio::time::timeout(
       TAGS_LIMIT,
-      newer_tags(client, image, &job.pull),
+      newer_tags(clients, image, &job.pull),
     )
     .await
     .unwrap_or_default()
@@ -78,7 +105,7 @@ async fn one(
 type Found = (String, Option<String>);
 
 async fn resolve_one(
-  client: &reqwest::Client,
+  clients: &Clients,
   image: &str,
   policy: &PullPolicy,
 ) -> Result<Found, String> {
@@ -89,8 +116,8 @@ async fn resolve_one(
     .unwrap_or("latest")
     .to_string();
   let mut errors = Vec::new();
-  for host in hosts(&registry, policy) {
-    let mut repo = Repo::new(client, &host, &path);
+  for (host, mirror) in hosts(&registry, policy) {
+    let mut repo = Repo::new(clients.pick(mirror), &host, &path);
     match repo.head(&reference).await {
       Ok(digest) => {
         let config = repo.config(&digest).await.ok();
@@ -102,12 +129,17 @@ async fn resolve_one(
   Err(errors.join("；"))
 }
 
-/// 按镜像源顺序要试的仓库地址，和拉取一样。
-fn hosts(registry: &str, policy: &PullPolicy) -> Vec<String> {
-  let mut hosts: Vec<String> =
-    policy.mirrors.get(registry).cloned().unwrap_or_default();
+/// 按镜像源顺序要试的仓库地址，和拉取一样：（地址，是不是镜像源）。
+fn hosts(registry: &str, policy: &PullPolicy) -> Vec<(String, bool)> {
+  let mut hosts: Vec<(String, bool)> = policy
+    .mirrors
+    .get(registry)
+    .into_iter()
+    .flatten()
+    .map(|h| (h.clone(), true))
+    .collect();
   if hosts.is_empty() || !policy.mirrors_only {
-    hosts.push(registry_host(registry).to_string());
+    hosts.push((registry_host(registry).to_string(), false));
   }
   hosts
 }
@@ -121,7 +153,7 @@ const TAG_PAGES: usize = 20;
 /// 只认和现在的标签写法一样的（数字段数、`v` 前缀、后缀都相同），例如 `2.20` 只和 `2.21` 比，
 /// 不和 `2.21.0`、`2.21-rc1` 比。查不到就是空的。
 async fn newer_tags(
-  client: &reqwest::Client,
+  clients: &Clients,
   image: &str,
   policy: &PullPolicy,
 ) -> Vec<String> {
@@ -131,8 +163,8 @@ async fn newer_tags(
   else {
     return vec![];
   };
-  for host in hosts(&registry, policy) {
-    let mut repo = Repo::new(client, &host, &path);
+  for (host, mirror) in hosts(&registry, policy) {
+    let mut repo = Repo::new(clients.pick(mirror), &host, &path);
     if let Ok(tags) = repo.tags().await {
       return pick(&current, &tags);
     }
@@ -414,6 +446,24 @@ pub(crate) async fn token(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn origin_registry_is_not_a_mirror() {
+    let policy: PullPolicy =
+      serde_json::from_value(serde_json::json!({
+        "mirrors": {"docker.io": ["docker.1ms.run"]},
+        "mirrors_only": false,
+        "attempt_timeout_secs": 60
+      }))
+      .unwrap();
+    assert_eq!(
+      hosts("docker.io", &policy),
+      vec![
+        ("docker.1ms.run".to_string(), true),
+        (registry_host("docker.io").to_string(), false),
+      ]
+    );
+  }
 
   #[test]
   fn picks_newer_tags_of_same_shape() {

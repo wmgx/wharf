@@ -917,6 +917,10 @@ pub struct PullPolicy {
   /// 代替 `https://github.com/` 的地址（服务器设置 `github_mirror`，已替换密钥）。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub github_mirror: Option<String>,
+  /// 查镜像版本时访问原仓库用的 HTTP 代理，和 dockerd 拉镜像用的一样（经出口时是本机的分流代理）。
+  /// 镜像源总是直连。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub registry_proxy: Option<String>,
 }
 
 impl PullPolicy {
@@ -1209,6 +1213,7 @@ mod tests {
       attempt_timeout_secs: 60,
       git_proxy: None,
       github_mirror: Some("https://gh.example.com/secret123/".into()),
+      registry_proxy: None,
     };
     let text = "docker pull hub.example.com/secret123/library/busybox:1 失败；\
       fatal: unable to access 'https://gh.example.com/secret123/o/r/'；docker.1ms.run/x";

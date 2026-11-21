@@ -171,6 +171,7 @@ pub(crate) fn job(
         attempt_timeout_secs: snapshot::PULL_ATTEMPT_SECS,
         git_proxy: None,
         github_mirror: None,
+        registry_proxy: None,
       }),
     core_marker: None,
   })

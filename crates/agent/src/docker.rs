@@ -894,6 +894,7 @@ mod tests {
       attempt_timeout_secs: 60,
       git_proxy: None,
       github_mirror: None,
+      registry_proxy: None,
     }
   }
 
