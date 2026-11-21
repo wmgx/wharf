@@ -179,6 +179,8 @@ async fn dispatch(
         name,
         image: None,
         compose: None,
+        from_run: None,
+        compose_url: None,
         server,
         port,
         env,
@@ -1881,6 +1883,8 @@ async fn service(
       name,
       image,
       compose,
+      from_run,
+      compose_url,
       server,
       port,
       env,
@@ -1913,8 +1917,37 @@ async fn service(
       )
       .await?;
       let default_port = built.as_ref().map(|b| b.default_port);
+      let draft = match &from_run {
+        Some(command) => {
+          let d: wharf_api_types::view::ServiceDraft = c
+            .post(
+              "/api/convert/docker-run",
+              &wharf_api_types::view::DockerRunRequest {
+                command: command.clone(),
+                name: Some(name.clone()),
+              },
+            )
+            .await?;
+          for w in &d.warnings {
+            eprintln!("提醒：{w}");
+          }
+          Some(d)
+        }
+        None => None,
+      };
+      let url_compose = match &compose_url {
+        Some(url) => Some(crate::deploy::fetch_compose(url).await?),
+        None => None,
+      };
       let source = match (image, compose, built) {
         (_, _, Some(b)) => Some(b.source),
+        _ if draft.is_some() => {
+          draft.as_ref().map(|d| d.source.clone())
+        }
+        _ if url_compose.is_some() => Some(Source::Compose {
+          content: url_compose,
+          file: None,
+        }),
         (Some(image), _, _) => Some(Source::Image(image)),
         (None, Some(path), _) => Some(Source::Compose {
           content: Some(std::fs::read_to_string(&path).map_err(
@@ -1934,7 +1967,7 @@ async fn service(
         Some(spec) => spec,
         None => {
           let source = source.clone().ok_or_else(|| {
-            ApiError::invalid(format!("服务 {name} 不存在，新建时需要 --image、--compose、--dir 或 --git"))
+            ApiError::invalid(format!("服务 {name} 不存在，新建时需要 --image、--compose、--from-run、--compose-url、--dir 或 --git"))
               .suggest(format!("wharf service deploy {name} --image traefik/whoami --port http=80"))
           })?;
           let server = match server.clone() {
@@ -1961,6 +1994,12 @@ async fn service(
       }
       if let Some(server) = server {
         spec.server = server;
+      }
+      if let Some(d) = draft {
+        spec.ports = d.ports;
+        spec.env.extend(d.env);
+        spec.volumes = d.volumes;
+        spec.limits = d.limits;
       }
       if !port.is_empty() {
         spec.ports = port

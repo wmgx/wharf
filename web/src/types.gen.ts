@@ -614,6 +614,17 @@ export interface Disk {
   total: number;
 }
 
+/**
+ * `POST /api/convert/docker-run` 的请求：一条 `docker run` 命令。
+ */
+export interface DockerRunRequest {
+  command: string;
+  /**
+   * 服务名，不填时取命令里的 `--name` 或镜像名。compose 来源里的数据目录按它写。
+   */
+  name?: string | null;
+}
+
 export interface DockerUsage {
   active: string;
   /**
@@ -1039,7 +1050,7 @@ export interface HostInfo {
 }
 
 /**
- * 一个域名在上报间隔内经网关的请求（只算转发到上���的）。
+ * 一个域名在上报间隔内经网关的请求（只算转发到上游的）。
  */
 export interface HostTraffic {
   /**
@@ -2010,6 +2021,23 @@ export interface ServiceData {
    * 备份存到哪台服务器，没开备份时为空。
    */
   target?: string | null;
+}
+
+/**
+ * 从 `docker run` 命令转出的服务配置草稿，还没选服务器。
+ * 端口、环境变量、数据卷、资源上限能表达的转成镜像来源，用了别的参数时转成 compose 来源。
+ */
+export interface ServiceDraft {
+  env?: Record<string, string>;
+  limits?: Limits | null;
+  name: string;
+  ports?: PortSpec[];
+  source: Source;
+  volumes?: VolumeSpec[];
+  /**
+   * 转换时改动或没认出的地方，要给用户看。
+   */
+  warnings?: string[];
 }
 
 export interface ServiceSpec {

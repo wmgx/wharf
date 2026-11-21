@@ -76,6 +76,8 @@ export type PortSpec = Gen.PortSpec;
 
 export type VolumeSpec = Gen.VolumeSpec;
 
+export type ServiceDraft = Gen.ServiceDraft;
+
 export type ServiceSpec = Gen.ServiceSpec;
 
 export type MonitorSpec = Gen.MonitorSpec;

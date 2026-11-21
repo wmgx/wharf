@@ -966,6 +966,34 @@ pub struct ImportPreview {
   pub warnings: Vec<String>,
 }
 
+/// `POST /api/convert/docker-run` 的请求：一条 `docker run` 命令。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DockerRunRequest {
+  pub command: String,
+  /// 服务名，不填时取命令里的 `--name` 或镜像名。compose 来源里的数据目录按它写。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub name: Option<String>,
+}
+
+/// 从 `docker run` 命令转出的服务配置草稿，还没选服务器。
+/// 端口、环境变量、数据卷、资源上限能表达的转成镜像来源，用了别的参数时转成 compose 来源。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ServiceDraft {
+  pub name: String,
+  pub source: crate::spec::Source,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub ports: Vec<crate::spec::PortSpec>,
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub env: BTreeMap<String, String>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub volumes: Vec<crate::spec::VolumeSpec>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub limits: Option<crate::spec::Limits>,
+  /// 转换时改动或没认出的地方，要给用户看。
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub warnings: Vec<String>,
+}
+
 /// `wharf doctor` 的结果：沿每个域名的访问链路逐层检查。只读。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DoctorReport {

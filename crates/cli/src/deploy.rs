@@ -274,3 +274,73 @@ pub(crate) async fn upload(
   }
   Ok(packed.sha256)
 }
+
+/// compose 文件最大 1MB。
+const COMPOSE_MAX: usize = 1 << 20;
+
+/// GitHub 的网页链接换成原始文件：`github.com/o/r/blob/<ref>/<路径>` →
+/// `raw.githubusercontent.com/o/r/<ref>/<路径>`。
+pub fn raw_url(url: &str) -> String {
+  let url = url.trim();
+  if let Some(rest) = url.strip_prefix("https://github.com/")
+    && let [owner, repo, "blob", tail] =
+      rest.splitn(4, '/').collect::<Vec<_>>().as_slice()
+  {
+    return format!(
+      "https://raw.githubusercontent.com/{owner}/{repo}/{tail}"
+    );
+  }
+  url.to_string()
+}
+
+/// 在本机下载 compose 文件，15 秒超时，最大 1MB，内容要有 `services`。
+pub async fn fetch_compose(url: &str) -> CliResult<String> {
+  let url = raw_url(url);
+  if !url.starts_with("https://") && !url.starts_with("http://") {
+    return Err(
+      ApiError::invalid(format!("{url} 不是网址"))
+        .with_hint("写完整的 http:// 或 https:// 地址")
+        .into(),
+    );
+  }
+  let fail = |e: String| -> CliError {
+    ApiError::invalid(format!("下载 {url} 失败：{e}"))
+      .with_hint("网络不通时先下载到本地，再用 --compose <文件>")
+      .into()
+  };
+  let mut resp = reqwest::Client::builder()
+    .timeout(std::time::Duration::from_secs(15))
+    .build()
+    .map_err(|e| fail(e.to_string()))?
+    .get(&url)
+    .send()
+    .await
+    .map_err(|e| fail(e.to_string()))?;
+  if !resp.status().is_success() {
+    return Err(fail(format!("HTTP {}", resp.status().as_u16())));
+  }
+  let mut body = Vec::new();
+  while let Some(chunk) =
+    resp.chunk().await.map_err(|e| fail(e.to_string()))?
+  {
+    body.extend_from_slice(&chunk);
+    if body.len() > COMPOSE_MAX {
+      return Err(fail("文件超过 1MB，不像 compose 文件".into()));
+    }
+  }
+  let text = String::from_utf8(body)
+    .map_err(|_| fail("内容不是文本".into()))?;
+  let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&text)
+    .map_err(|e| fail(format!("不是 YAML：{e}")))?;
+  if !doc.get("services").is_some_and(|s| s.is_mapping()) {
+    return Err(fail(
+      "内容里没有 services，不是 compose 文件".into(),
+    ));
+  }
+  if text.contains("${") {
+    eprintln!(
+      "提醒：compose 里用了 ${{变量}}，原来靠 .env 文件提供的值要直接写进 compose，密码用 [[密钥名]]"
+    );
+  }
+  Ok(text)
+}

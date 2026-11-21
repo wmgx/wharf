@@ -7,14 +7,15 @@ import { usePoll } from "@/api";
 import { useActions } from "@/components/actions";
 import { BuildEditor, type BuildHow, cleanHow, howReady } from "@/components/build-editor";
 import { EntryField, useEntry } from "@/components/entry";
-import { DomainChips, Field, Picker, PortsEditor, Segmented, portsFor, portsValid, nameFromImage, parseEnv, serverOptions, toName } from "@/components/fields";
+import { DomainChips, Field, Picker, PortsEditor, Segmented, formatEnv, portsFor, portsValid, nameFromImage, parseEnv, serverOptions, toName } from "@/components/fields";
+import { ImportSource, type Imported } from "@/components/import-source";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
 import { Sheet, SheetContent, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { CodeEditor } from "@/components/code-editor";
 import { useStatus } from "@/status";
-import type { AccountView, Change, PortSpec, ServiceSpec } from "@/types";
+import type { AccountView, Change, PortSpec, ServiceSpec, VolumeSpec } from "@/types";
 
 /**
  * 新建服务：选来源、选服务器、（可选）加域名，然后看计划、确认、看日志。
@@ -57,6 +58,8 @@ interface Draft {
   hostname: string;
   entry: string;
   pkg: CodePackage | null;
+  volumes?: VolumeSpec[];
+  limits?: ServiceSpec["limits"];
 }
 
 /** 上一次提交的表单。计划生成失败或想改时点"返回修改"，用它恢复。 */
@@ -87,12 +90,44 @@ function Form({ onClose }: { onClose: () => void }) {
   const [envText, setEnvText] = useState(draft?.envText ?? "");
   const [hostname, setHostname] = useState(draft?.hostname ?? "");
   const [pkg, setPkg] = useState<CodePackage | null>(draft?.pkg ?? null);
+  // 从 docker run 命令识别出的数据卷和资源上限，只用于镜像来源。
+  const [volumes, setVolumes] = useState<VolumeSpec[]>(draft?.volumes ?? []);
+  const [limits, setLimits] = useState<ServiceSpec["limits"]>(draft?.limits ?? null);
   // 用户手动改过端口后，不再按 compose 内容自动填。
   const [portsTouched, setPortsTouched] = useState(!!draft);
   const composeInfo = useMemo(() => parseCompose(compose), [compose]);
   const onCompose = (text: string) => {
     setCompose(text);
     if (!portsTouched) setPorts(composePorts(parseCompose(text)));
+  };
+
+  const onImported = (r: Imported) => {
+    if (r.kind === "url") {
+      setKind("compose");
+      setCompose(r.compose);
+      setPortsTouched(false);
+      setPorts(composePorts(parseCompose(r.compose)));
+      setVolumes([]);
+      setLimits(null);
+      return;
+    }
+    const d = r.draft;
+    setName(d.name);
+    setNameTouched(true);
+    setPorts(d.ports ?? []);
+    setPortsTouched(true);
+    if ("image" in d.source) {
+      setKind("image");
+      setImage(d.source.image);
+      setEnvText(formatEnv(d.env));
+      setVolumes(d.volumes ?? []);
+      setLimits(d.limits ?? null);
+    } else if ("compose" in d.source) {
+      setKind("compose");
+      setCompose(d.source.compose.content ?? "");
+      setVolumes([]);
+      setLimits(null);
+    }
   };
 
   const svcName = nameTouched
@@ -143,13 +178,15 @@ function Form({ onClose }: { onClose: () => void }) {
               : { compose: { content: source } },
       ports: ports.length ? portsFor(ports, kind === "compose") : undefined,
       env: withEnv && envText.trim() ? parseEnv(envText) : undefined,
+      volumes: kind === "image" && volumes.length ? volumes : undefined,
+      limits: kind === "image" ? limits : undefined,
     };
     const changes: Change[] = [{ op: "upsert_service", name: svcName, spec }];
     if (hostname.trim()) {
       const { gateway, changes: gatewayChanges } = entry.resolve();
       changes.push(...gatewayChanges, { op: "upsert_route", spec: { hostname: hostname.trim().toLowerCase(), service: svcName, gateway } });
     }
-    lastDraft = { kind, image, compose, repo, gitRef, path, how, name: svcName, nameTouched, server: chosenServer, ports, envText, hostname, entry: entry.chosen, pkg };
+    lastDraft = { kind, image, compose, repo, gitRef, path, how, name: svcName, nameTouched, server: chosenServer, ports, envText, hostname, entry: entry.chosen, pkg, volumes, limits };
     onClose();
     actions.plan({ title: `部署 ${svcName}`, changes, then: `/services/${svcName}`, back: NEW_SERVICE_DRAFT_URL });
   };
@@ -157,6 +194,10 @@ function Form({ onClose }: { onClose: () => void }) {
   return (
     <>
       <div className="grid flex-1 content-start gap-5 overflow-auto p-4">
+        <Field label="从命令或网址识别">
+          <ImportSource name={nameTouched ? name : undefined} onImported={onImported} />
+        </Field>
+
         <Field label="来源">
           <Segmented
             value={kind}
@@ -255,6 +296,34 @@ function Form({ onClose }: { onClose: () => void }) {
             compose={kind === "compose"}
           />
         </Field>
+
+        {kind === "image" && volumes.length > 0 && (
+          <Field label="数据卷">
+            <div className="grid gap-1">
+              {volumes.map((v) => (
+                <div key={v.name} className="flex items-center gap-2 text-sm">
+                  <span className="font-mono">/srv/{svcName || "<服务>"}/{v.name}</span>
+                  <span className="text-muted-foreground">→</span>
+                  <span className="font-mono">{v.target}</span>
+                  <Button variant="ghost" size="xs" className="ml-auto" onClick={() => setVolumes(volumes.filter((x) => x.name !== v.name))}>
+                    移除
+                  </Button>
+                </div>
+              ))}
+            </div>
+          </Field>
+        )}
+
+        {kind === "image" && limits && (limits.memory_mb || limits.cpu_milli) && (
+          <Field label="资源上限">
+            <div className="flex items-center gap-2 text-sm">
+              {[limits.memory_mb && `内存 ${limits.memory_mb} MB`, limits.cpu_milli && `CPU ${limits.cpu_milli / 1000} 核`].filter(Boolean).join(" · ")}
+              <Button variant="ghost" size="xs" className="ml-auto" onClick={() => setLimits(null)}>
+                移除
+              </Button>
+            </div>
+          </Field>
+        )}
 
         {withEnv && (
           <Field

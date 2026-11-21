@@ -363,7 +363,7 @@ pub fn build_port(ports: &[PortSpec]) -> u16 {
 }
 
 /// compose 里 cpus 的写法：500 → "0.5"，1000 → "1"，1250 → "1.25"。
-fn cpus_text(milli: u32) -> String {
+pub fn cpus_text(milli: u32) -> String {
   let s = format!("{:.3}", f64::from(milli) / 1000.0);
   s.trim_end_matches('0').trim_end_matches('.').to_string()
 }
