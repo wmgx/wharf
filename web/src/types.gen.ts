@@ -1559,6 +1559,10 @@ export interface Plan {
    * 需要 `--confirm` 的地址。
    */
   needs_confirm?: string[];
+  /**
+   * 生成计划时写的备注。
+   */
+  note?: string | null;
   plan_id: string;
   status: PlanStatus;
   /**
