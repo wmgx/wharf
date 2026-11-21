@@ -364,6 +364,61 @@ async fn dispatch(
       out(j, &r, |_| println!("已发送测试消息"));
       Ok(())
     }
+    Command::Notify(NotifyCmd::Key(cmd)) => {
+      match cmd {
+        crate::NotifyKeyCmd::List => {
+          let rows: Vec<Value> = c.get("/api/notify/keys").await?;
+          out(j, &rows, |rows| {
+            if rows.is_empty() {
+              println!("还没有通知地址");
+            }
+            for r in rows {
+              let used = r["last_used_at"]
+                .as_i64()
+                .and_then(chrono::DateTime::from_timestamp_millis)
+                .map(|t| {
+                  t.with_timezone(&chrono::Local)
+                    .format("%m-%d %H:%M")
+                    .to_string()
+                })
+                .unwrap_or_else(|| "没用过".into());
+              println!(
+                "{}\t[[{}]]\t{used}",
+                r["name"].as_str().unwrap_or(""),
+                r["secret"].as_str().unwrap_or("")
+              );
+            }
+          });
+        }
+        crate::NotifyKeyCmd::Add { name, show } => {
+          let mut r: Value = c
+            .post(
+              &format!("/api/notify/keys/{}", seg(&name)),
+              &json!({}),
+            )
+            .await?;
+          if !show && let Some(o) = r.as_object_mut() {
+            o.remove("url");
+          }
+          out(j, &r, |r| {
+            let secret = r["secret"].as_str().unwrap_or("");
+            println!(
+              "已生成，地址存在密钥 {secret}，服务的环境变量里写 [[{secret}]]"
+            );
+            if let Some(url) = r["url"].as_str() {
+              println!("{url}");
+            }
+          });
+        }
+        crate::NotifyKeyCmd::Rm { name } => {
+          let r: Value = c
+            .delete(&format!("/api/notify/keys/{}", seg(&name)))
+            .await?;
+          out(j, &r, |_| println!("已删除"));
+        }
+      }
+      Ok(())
+    }
     Command::Metrics {
       subject,
       names,

@@ -137,6 +137,18 @@ wharf backup list <服务> --json
 wharf backup restore <服务> --snapshot <快照 id> --confirm service/<服务> --json
 ```
 
+### 让服务或脚本发通知
+
+用户的服务、脚本要发通知（备份完成、任务出错）时，不要自己接飞书，用 Wharf 的通知地址，消息走 Wharf 已配置的渠道：
+
+```bash
+wharf notify key add <名字> --json   # 地址存进密钥 NOTIFY_URL_<名字>，服务环境变量写 [[NOTIFY_URL_<名字>]]
+wharf notify key list --json
+```
+
+调用方式：`curl -d '消息' "$NOTIFY_URL"`，或者发 JSON `{"title": "...", "text": "..."}`。每个凭证每分钟最多 20 条。
+Wharf 以外的机器上的脚本要用地址时才加 `--show` 打印出来，地址就是凭证，不要写进仓库。
+
 ### 处理“需要注意”
 
 `wharf status --json` 里的 `issues` 各带 `code`、`title`，有的还带 `hint`（给命令行的处理办法），先照 `hint` 做。常见的：

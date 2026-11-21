@@ -1180,6 +1180,27 @@ async fn main() {
 pub enum NotifyCmd {
   /// 给所有已配置的渠道发一条测试消息。
   Test,
+  /// 通知地址：给自己的服务和脚本发通知用，`POST <地址>`，正文就是消息，
+  /// 或者发 JSON `{"title": "...", "text": "..."}`。每个凭证每分钟最多 20 条。
+  #[command(subcommand)]
+  Key(NotifyKeyCmd),
+}
+
+#[derive(Subcommand)]
+pub enum NotifyKeyCmd {
+  /// 新建（同名已有时换新地址，旧地址失效）。地址存进密钥 `NOTIFY_URL_<名字>`，
+  /// 服务的环境变量里写 `[[NOTIFY_URL_<名字>]]` 引用。
+  Add {
+    name: String,
+    /// 把地址打印出来（地址就是凭证，给 Wharf 以外的脚本用时才需要）。
+    #[arg(long)]
+    show: bool,
+  },
+  List,
+  /// 删除，地址立即失效，对应的密钥一起删。
+  Rm {
+    name: String,
+  },
 }
 
 #[derive(Subcommand)]
