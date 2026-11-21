@@ -130,6 +130,7 @@ pub fn router(state: Arc<AppState>) -> Router {
       "/ping/{token}/fail",
       get(crate::ping::fail).post(crate::ping::fail),
     )
+    .route("/notify/{token}", post(crate::notify_keys::send))
     .route(
       "/hook/{token}",
       get(crate::tasks::hook).post(crate::tasks::hook),
@@ -371,6 +372,12 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route("/api/edge/{name}/accept", post(crate::edge_api::accept))
     .route("/api/secrets", get(list_secrets))
     .route("/api/notify/test", post(crate::notify::test))
+    .route("/api/notify/keys", get(crate::notify_keys::list))
+    .route(
+      "/api/notify/keys/{name}",
+      post(crate::notify_keys::create)
+        .delete(crate::notify_keys::remove),
+    )
     .route("/api/alerts", get(crate::rules::list))
     .route("/api/alerts/options", put(crate::rules::set_options))
     .route(
@@ -1349,6 +1356,9 @@ fn system_secret(name: &str) -> Option<&'static str> {
       || n == crate::notify::FEISHU_SECRET =>
     {
       Some("通知")
+    }
+    n if n.starts_with(crate::notify_keys::SECRET_PREFIX) => {
+      Some("通知地址")
     }
     _ => None,
   }
