@@ -589,7 +589,8 @@ impl Docker {
       )));
     }
     let out = out.check("docker logs")?;
-    Ok(merge_by_time(&out.stdout, &out.stderr))
+    // Wharf 自己的日志带终端颜色，去掉再给人和 AI 看。
+    Ok(strip_ansi(&merge_by_time(&out.stdout, &out.stderr)))
   }
 
   /// 持续推送新日志，直到被取消（页面关闭）或到达上限时长。
@@ -906,8 +907,38 @@ fn merge_by_time(stdout: &str, stderr: &str) -> String {
   out
 }
 
+/// 去掉终端颜色之类的控制序列（`ESC [ ... 字母`）。
+fn strip_ansi(text: &str) -> String {
+  let mut out = String::with_capacity(text.len());
+  let mut chars = text.chars();
+  while let Some(c) = chars.next() {
+    if c != '\x1b' {
+      out.push(c);
+      continue;
+    }
+    if chars.next() == Some('[') {
+      for c in chars.by_ref() {
+        if c.is_ascii_alphabetic() {
+          break;
+        }
+      }
+    }
+  }
+  out
+}
+
 #[cfg(test)]
 mod tests {
+  #[test]
+  fn strips_colors() {
+    assert_eq!(
+      super::strip_ansi(
+        "\x1b[2mT\x1b[0m \x1b[32m INFO\x1b[0m 已连接"
+      ),
+      "T  INFO 已连接"
+    );
+  }
+
   #[test]
   fn merges_logs_by_time() {
     let out = super::merge_by_time(
