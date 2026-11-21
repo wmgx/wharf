@@ -222,14 +222,17 @@ pub fn service_resolved(
   let row = world.services.get(name).ok_or_else(|| {
     ApiError::not_found(format!("服务 {name} 不存在"))
   })?;
+  let secrets = crate::oidc::with_client_secrets(world, secrets);
   let resolved = render::service_compose(
     name,
     &row.spec,
     &row.host_ports,
     &net.bind_ips(&row.spec.server),
-    Some(&crate::oidc::with_client_secrets(world, secrets)),
+    Some(&secrets),
   )?;
   let resolved = crate::refs::resolve(&resolved, name, world, net)?;
+  let resolved =
+    with_files(world, net, name, &resolved, Some(&secrets))?;
   let hash = render::hash(&resolved);
   Ok((resolved, hash))
 }
@@ -243,12 +246,33 @@ pub fn service_trial(
   let row = world.services.get(name).ok_or_else(|| {
     ApiError::not_found(format!("服务 {name} 不存在"))
   })?;
-  let trial = render::trial_compose(
-    name,
-    &row.spec,
-    Some(&crate::oidc::with_client_secrets(world, secrets)),
-  )?;
-  crate::refs::resolve(&trial, name, world, net)
+  let secrets = crate::oidc::with_client_secrets(world, secrets);
+  let trial = render::trial_compose(name, &row.spec, Some(&secrets))?;
+  let trial = crate::refs::resolve(&trial, name, world, net)?;
+  with_files(world, net, name, &trial, Some(&secrets))
+}
+
+/// 加上服务的配置文件，内容里的密钥和 `[[@服务]]` 先替换好。
+fn with_files(
+  world: &World,
+  net: &Net,
+  name: &str,
+  compose: &str,
+  secrets: Option<&BTreeMap<String, String>>,
+) -> Result<String, ApiError> {
+  let spec = &world.services[name].spec;
+  let files = spec
+    .files
+    .iter()
+    .map(|f| {
+      let content = render::file_content(&f.content, secrets);
+      Ok((
+        f.path.clone(),
+        crate::refs::resolve(&content, name, world, net)?,
+      ))
+    })
+    .collect::<Result<Vec<_>, ApiError>>()?;
+  render::add_files(name, spec, compose, &files)
 }
 
 pub fn service_template(
@@ -264,7 +288,8 @@ pub fn service_template(
     &net.bind_ips(&row.spec.server),
     None,
   )?;
-  crate::refs::resolve(&text, name, world, net)
+  let text = crate::refs::resolve(&text, name, world, net)?;
+  with_files(world, net, name, &text, None)
 }
 
 /// 网关的 compose、Caddyfile，以及它承载的站点。

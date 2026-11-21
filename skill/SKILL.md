@@ -61,6 +61,18 @@ wharf service deploy blog --server <服务器> --compose-url https://github.com/
 
 已存在的服务再执行 `service deploy` 只改给出的参数。部署后用 `wharf service show <服务> --json` 确认状态。
 
+配置文件（应用靠配置文件而不是环境变量时用）：内容存在 Wharf 里，部署时放进容器，跟着部署历史和回滚走。
+不要让用户自己往数据目录里放配置文件。容器里是只读的，应用自己改写的内容下次部署会被覆盖。
+
+```bash
+wharf service file <服务> --json                                   # 列出
+wharf service file <服务> /etc/app/config.yaml                     # 打印内容
+wharf service file <服务> /etc/app/config.yaml --file ./config.yaml --json   # 新增或替换，出计划；--file - 读标准输入
+wharf service file <服务> /etc/app/config.yaml --rm --json         # 去掉
+```
+
+内容里可以写 `[[密钥名]]`（只替换存在的密钥，TOML 的 `[[servers]]` 不受影响）和 `[[@服务]]`。
+
 更新和回滚：
 
 ```bash

@@ -1986,6 +1986,7 @@ async fn service(
             limits: None,
             auto_update: false,
             container: None,
+            files: vec![],
           }
         }
       };
@@ -2146,6 +2147,89 @@ async fn service(
           limits.cpu_milli =
             (cpus != 0.0).then_some((cpus * 1000.0).round() as u32);
         }
+      }
+      changes(
+        c,
+        vec![Change::UpsertService {
+          name,
+          spec,
+          adopt: None,
+        }],
+        apply,
+        j,
+      )
+      .await
+    }
+    ServiceCmd::File {
+      name,
+      path,
+      file,
+      rm,
+      apply,
+    } => {
+      let mut spec = c
+        .get::<ServiceView>(&format!("/api/services/{}", seg(&name)))
+        .await?
+        .spec;
+      let Some(path) = path else {
+        let list: Vec<Value> = spec
+          .files
+          .iter()
+          .map(
+            |f| json!({ "path": f.path, "bytes": f.content.len() }),
+          )
+          .collect();
+        out(j, &list, |l| {
+          if l.is_empty() {
+            println!("服务 {name} 没有配置文件");
+          }
+          for f in l {
+            println!(
+              "{}  {} 字节",
+              f["path"].as_str().unwrap_or(""),
+              f["bytes"]
+            );
+          }
+        });
+        return Ok(());
+      };
+      let missing = || -> CliError {
+        ApiError::not_found(format!(
+          "服务 {name} 没有配置文件 {path}"
+        ))
+        .suggest(format!("wharf service file {name}"))
+        .into()
+      };
+      if rm {
+        let before = spec.files.len();
+        spec.files.retain(|f| f.path != path);
+        if spec.files.len() == before {
+          return Err(missing());
+        }
+      } else if let Some(src) = file {
+        let content = (if src == "-" {
+          std::io::read_to_string(std::io::stdin())
+        } else {
+          std::fs::read_to_string(&src)
+        })
+        .map_err(|e| {
+          ApiError::invalid(format!("读不了文件 {src}：{e}"))
+            .with_hint("只支持文本文件；从标准输入读用 --file -")
+        })?;
+        match spec.files.iter_mut().find(|f| f.path == path) {
+          Some(f) => f.content = content,
+          None => spec
+            .files
+            .push(wharf_api_types::spec::FileSpec { path, content }),
+        }
+      } else {
+        let f = spec
+          .files
+          .iter()
+          .find(|f| f.path == path)
+          .ok_or_else(missing)?;
+        out(j, f, |f| print!("{}", f.content));
+        return Ok(());
       }
       changes(
         c,

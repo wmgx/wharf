@@ -875,6 +875,20 @@ export interface FileEntry {
   size: number;
 }
 
+/**
+ * 一个配置文件。
+ */
+export interface FileSpec {
+  /**
+   * 文本内容，最大 64 KB。可以用 `[[密钥名]]` 和 `[[@服务]]`，部署时替换。
+   */
+  content: string;
+  /**
+   * 容器内的绝对路径，例如 `/etc/app/config.yaml`。
+   */
+  path: string;
+}
+
 export interface FiringView {
   rule: string;
   /**
@@ -2050,7 +2064,7 @@ export interface ServiceSpec {
    */
   backup?: BackupSpec | null;
   /**
-   * compose 来源：环境变量和资源上限加在哪个容器上。只有一个容器时不用填。
+   * compose 来源：环境变量、资源上限和配置文件加在哪个容器上。只有一个容器时不用填。
    */
   container?: string | null;
   /**
@@ -2060,6 +2074,11 @@ export interface ServiceSpec {
    * `[[@服务.端口名]]` 指定端口，末尾加 `:host` / `:port` 只取地址或端口。
    */
   env?: Record<string, string>;
+  /**
+   * 配置文件：内容存在 Wharf 里，部署时放进容器（只读，属主 root），跟着部署历史和回滚走。
+   * 应用自己改写的内容下次部署会被覆盖。
+   */
+  files?: FileSpec[];
   /**
    * 资源上限，不填不限。
    */

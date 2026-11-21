@@ -14,6 +14,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { useStatus } from "@/status";
 import type { PortSpec, ServiceSpec, ServiceView } from "@/types";
+import { ConfigFiles, filePathOk } from "./config-files";
 import { importText } from "./status-text";
 
 export function Settings({ svc, active }: { svc: ServiceView; active: boolean }) {
@@ -27,7 +28,7 @@ export function Settings({ svc, active }: { svc: ServiceView; active: boolean })
       if (location.hash === "#backup") document.getElementById("service-backup")?.focus();
     }
   }, [active, location.hash]);
-  const changed = ([['来源', 'source'], ['端口', 'ports'], ['环境变量', 'env'], ['资源上限', 'limits'], ['自动更新', 'auto_update']] as [string, keyof ServiceSpec][]).filter(([, field]) => dirty([field])).map(([label]) => label);
+  const changed = ([['来源', 'source'], ['端口', 'ports'], ['环境变量', 'env'], ['配置文件', 'files'], ['资源上限', 'limits'], ['自动更新', 'auto_update']] as [string, keyof ServiceSpec][]).filter(([, field]) => dirty([field])).map(([label]) => label);
   return <SettingsFields key={key} svc={svc} draft={draft} set={set} changed={changed} onReset={() => { reset(); setKey((n) => n + 1); }} onSubmit={() => actions.plan({ title: `修改 ${svc.name}`, changes: [{ op: "upsert_service", name: svc.name, spec: { ...draft, monitor: svc.spec.monitor, backup: svc.spec.backup } }] })} />;
 }
 
@@ -56,8 +57,10 @@ function SettingsFields({ svc, draft, set, changed, onReset, onSubmit }: { svc: 
   const memoryNum = memory.trim() ? Number(memory) : undefined;
   const cpuNum = cpus.trim() ? Number(cpus) : undefined;
   const limitsValid = (memoryNum === undefined || (Number.isInteger(memoryNum) && memoryNum >= 32 && memoryNum <= 4294967295)) && (cpuNum === undefined || (Number.isFinite(cpuNum) && cpuNum >= 0.01 && cpuNum * 1000 <= 4294967295));
-  const needsContainer = isCompose && composeInfo.services.length > 1 && !draft.container && (Object.keys(draft.env ?? {}).length > 0 || !!draft.limits);
-  const disabled = needsContainer ? "compose 里有多个容器，先选环境变量和资源上限加在哪个容器上" : !limitsValid ? "资源上限不正确" : build && !howReady(how) ? "来源的 Dockerfile 不能为空" : undefined;
+  const needsContainer = isCompose && composeInfo.services.length > 1 && !draft.container && (Object.keys(draft.env ?? {}).length > 0 || !!draft.limits || !!draft.files?.length);
+  const files = draft.files ?? [];
+  const filesValid = files.every((f) => filePathOk(f.path)) && new Set(files.map((f) => f.path)).size === files.length;
+  const disabled = needsContainer ? "compose 里有多个容器，先选环境变量、配置文件和资源上限加在哪个容器上" : !filesValid ? "配置文件的路径不正确或重复" : !limitsValid ? "资源上限不正确" : build && !howReady(how) ? "来源的 Dockerfile 不能为空" : undefined;
   const updateLimits = (m: string, c: string) => { const mn = m.trim() ? Number(m) : undefined; const cn = c.trim() ? Number(c) : undefined; set({ limits: mn === undefined && cn === undefined ? undefined : { memory_mb: mn, cpu_milli: cn === undefined ? undefined : Math.round(cn * 1000) } }); };
   return <div className="max-w-5xl">
     <SectionTitle>来源</SectionTitle>
@@ -99,7 +102,7 @@ function SettingsFields({ svc, draft, set, changed, onReset, onSubmit }: { svc: 
           <option value="">选择容器</option>
           {composeInfo.services.map((c) => <option key={c} value={c}>{c}</option>)}
         </select>
-        <span className="text-xs text-muted-foreground">下面的环境变量和资源上限加在这个容器上，compose 文件本身不改。</span>
+        <span className="text-xs text-muted-foreground">下面的环境变量、配置文件和资源上限加在这个容器上，compose 文件本身不改。</span>
       </Panel>
     </>}
     {<>
@@ -110,6 +113,10 @@ function SettingsFields({ svc, draft, set, changed, onReset, onSubmit }: { svc: 
         </Field>
       </Panel>
     </>}
+    <div id="files">
+      <SectionTitle>配置文件</SectionTitle>
+    </div>
+    <ConfigFiles files={files} onChange={(next) => set({ files: next.length ? next : undefined })} />
     <div id="monitor" className="mt-8">
       <SectionTitle>健康检查</SectionTitle>
     </div>

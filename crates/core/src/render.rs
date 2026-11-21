@@ -722,6 +722,106 @@ pub fn trial_compose(
   }))
 }
 
+/// 配置文件内容里的 `[[密钥名]]` 只替换确实存在的密钥，别的原样保留
+/// （TOML 的 `[[servers]]` 这类写法不能当成密钥引用）。`secrets` 为空时原样返回。
+pub fn file_content(
+  content: &str,
+  secrets: Option<&BTreeMap<String, String>>,
+) -> String {
+  let Some(secrets) = secrets else {
+    return content.to_string();
+  };
+  let mut out = String::with_capacity(content.len());
+  let mut rest = content;
+  while let Some((start, name)) = next_placeholder(rest) {
+    let end = start + 4 + name.len();
+    out.push_str(&rest[..start]);
+    match secrets.get(name) {
+      Some(value) => out.push_str(value),
+      None => out.push_str(&rest[start..end]),
+    }
+    rest = &rest[end..];
+  }
+  out.push_str(rest);
+  out
+}
+
+/// 把配置文件放进 compose：顶层 `configs` 用 `content` 写内容，容器的 `configs` 引用它。
+/// compose 判断要不要重建容器时不看内容，所以名字里带内容的哈希，内容一变名字就变，容器跟着重建。
+/// `files` 是（容器内路径，已替换好的内容）。没有配置文件时原样返回，不重新生成 YAML。
+pub fn add_files(
+  name: &str,
+  spec: &ServiceSpec,
+  compose: &str,
+  files: &[(String, String)],
+) -> Result<String, ApiError> {
+  if files.is_empty() {
+    return Ok(compose.to_string());
+  }
+  let target = match &spec.source {
+    Source::Compose { .. } => {
+      compose_target(name, compose, spec.container.as_deref())?
+    }
+    _ => name.to_string(),
+  };
+  let bad = || {
+    ApiError::invalid(format!(
+      "服务 {name} 的 compose 写法没法自动加上配置文件"
+    ))
+    .with_hint(
+      "直接写在 compose 文件的 configs 里，然后去掉设置里的配置文件",
+    )
+  };
+  let mut doc: serde_yaml_ng::Value =
+    serde_yaml_ng::from_str(compose).map_err(|_| bad())?;
+  let key = |s: &str| serde_yaml_ng::Value::String(s.to_string());
+  let mut defs = serde_yaml_ng::Mapping::new();
+  let mut refs = Vec::new();
+  for (i, (path, content)) in files.iter().enumerate() {
+    let content = content.replace('$', "$$");
+    let id = format!("wharf-file-{i}-{}", &hash(&content)[..12]);
+    let mut def = serde_yaml_ng::Mapping::new();
+    def.insert(key("content"), key(&content));
+    defs.insert(key(&id), serde_yaml_ng::Value::Mapping(def));
+    let mut r = serde_yaml_ng::Mapping::new();
+    r.insert(key("source"), key(&id));
+    r.insert(key("target"), key(path));
+    refs.push(serde_yaml_ng::Value::Mapping(r));
+  }
+  let root = doc.as_mapping_mut().ok_or_else(bad)?;
+  match root.entry(key("configs")).or_insert_with(|| {
+    serde_yaml_ng::Value::Mapping(Default::default())
+  }) {
+    serde_yaml_ng::Value::Mapping(m) => m.extend(defs),
+    _ => return Err(bad()),
+  }
+  let svc = root
+    .get_mut("services")
+    .and_then(|s| s.get_mut(target.as_str()))
+    .and_then(|s| s.as_mapping_mut())
+    .ok_or_else(bad)?;
+  match svc
+    .entry(key("configs"))
+    .or_insert_with(|| serde_yaml_ng::Value::Sequence(vec![]))
+  {
+    serde_yaml_ng::Value::Sequence(list) => list.extend(refs),
+    _ => return Err(bad()),
+  }
+  let head = if compose.starts_with('#') {
+    compose
+      .lines()
+      .next()
+      .map(|l| format!("{l}\n"))
+      .unwrap_or_default()
+  } else {
+    String::new()
+  };
+  Ok(format!(
+    "{head}{}",
+    serde_yaml_ng::to_string(&doc).map_err(|_| bad())?
+  ))
+}
+
 /// compose 来源的基本检查：必须有 services，P1 不支持 build。
 pub fn check_compose(
   name: &str,
@@ -1275,6 +1375,39 @@ mod tests {
   use wharf_api_types::spec::Limits;
   use wharf_api_types::spec::{GatewayKind, PortSpec, VolumeSpec};
 
+  #[test]
+  fn files_become_configs_named_by_content() {
+    let base =
+      service_compose("whoami", &spec(), &BTreeMap::new(), &[], None)
+        .unwrap();
+    let secrets =
+      BTreeMap::from([("PASS".to_string(), "p$w".to_string())]);
+    let content = file_content(
+      "[[servers]]\npass = \"[[PASS]]\"\n",
+      Some(&secrets),
+    );
+    assert_eq!(content, "[[servers]]\npass = \"p$w\"\n");
+    let files = vec![("/etc/app.toml".to_string(), content)];
+    let out = add_files("whoami", &spec(), &base, &files).unwrap();
+    let v: serde_yaml_ng::Value =
+      serde_yaml_ng::from_str(&out).unwrap();
+    let r = &v["services"]["whoami"]["configs"][0];
+    assert_eq!(r["target"].as_str(), Some("/etc/app.toml"));
+    let id = r["source"].as_str().unwrap();
+    assert_eq!(
+      v["configs"][id]["content"].as_str(),
+      Some("[[servers]]\npass = \"p$$w\"\n")
+    );
+    let changed =
+      vec![("/etc/app.toml".to_string(), "x".to_string())];
+    let out2 = add_files("whoami", &spec(), &base, &changed).unwrap();
+    assert!(!out2.contains(id));
+    assert_eq!(
+      add_files("whoami", &spec(), &base, &[]).unwrap(),
+      base
+    );
+  }
+
   fn spec() -> ServiceSpec {
     ServiceSpec {
       backup: None,
@@ -1283,6 +1416,7 @@ mod tests {
       limits: None,
       auto_update: false,
       container: None,
+      files: vec![],
       server: "node1".into(),
       source: Source::Image("traefik/whoami".into()),
       ports: vec![PortSpec {

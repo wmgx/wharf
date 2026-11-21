@@ -758,6 +758,22 @@ pub enum ServiceCmd {
     #[command(flatten)]
     apply: ApplyFlags,
   },
+  /// 配置文件：内容存在 Wharf 里，部署时放进容器（只读），跟着部署历史和回滚走。
+  /// 内容里可以用 `[[密钥名]]`、`[[@服务]]`。只给服务名时列出全部；给了路径不带参数时打印内容。
+  /// 例：`wharf service file app /etc/app/config.yaml --file ./config.yaml --apply`。
+  File {
+    name: String,
+    /// 容器内的绝对路径。
+    path: Option<String>,
+    /// 从本地文件读内容，`-` 表示标准输入。生成计划。
+    #[arg(long, requires = "path", conflicts_with = "rm")]
+    file: Option<String>,
+    /// 去掉这个配置文件。生成计划。
+    #[arg(long, requires = "path")]
+    rm: bool,
+    #[command(flatten)]
+    apply: ApplyFlags,
+  },
 }
 
 #[derive(Subcommand)]

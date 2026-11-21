@@ -83,8 +83,10 @@ function type(schema, path) {
 }
 
 try {
-  let input = "";
-  for await (const chunk of process.stdin) input += chunk;
+  // 先拼好再解码：逐块转字符串会把块边界上的汉字切坏。
+  const chunks = [];
+  for await (const chunk of process.stdin) chunks.push(chunk);
+  const input = Buffer.concat(chunks).toString("utf8");
   const schema = JSON.parse(input);
   const output = Object.entries(schema.$defs).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
     .map(([name, definition]) => {

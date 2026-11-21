@@ -1752,6 +1752,7 @@ fn validate_service(
       )));
     }
   }
+  check_files(name, &spec.files)?;
   for key in spec.env.keys() {
     let ok = !key.is_empty()
       && key.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
@@ -1760,6 +1761,47 @@ fn validate_service(
       return Err(ApiError::invalid(format!(
         "服务 {name} 的环境变量名 {key} 不合法"
       )));
+    }
+  }
+  Ok(())
+}
+
+/// 配置文件：容器内绝对路径、不重复，单个 64 KB 以内，最多 20 个。
+fn check_files(
+  name: &str,
+  files: &[wharf_api_types::spec::FileSpec],
+) -> Result<(), ApiError> {
+  if files.len() > 20 {
+    return Err(ApiError::invalid(format!(
+      "服务 {name} 的配置文件超过 20 个"
+    )));
+  }
+  let mut paths = BTreeSet::new();
+  for f in files {
+    let ok = f.path.starts_with('/')
+      && !f.path.ends_with('/')
+      && !f.path.split('/').any(|p| p == ".." || p == ".")
+      && !f.path.chars().any(|c| c.is_whitespace() || c == ':');
+    if !ok {
+      return Err(ApiError::invalid(format!(
+        "服务 {name} 的配置文件路径 {} 不对，要写容器内的绝对路径，例如 /etc/app/config.yaml",
+        f.path
+      )));
+    }
+    if !paths.insert(&f.path) {
+      return Err(ApiError::invalid(format!(
+        "服务 {name} 的配置文件 {} 重复",
+        f.path
+      )));
+    }
+    if f.content.len() > 64 * 1024 {
+      return Err(
+        ApiError::invalid(format!(
+          "服务 {name} 的配置文件 {} 超过 64 KB",
+          f.path
+        ))
+        .with_hint("大文件放进数据卷，用 wharf 的文件上传"),
+      );
     }
   }
   Ok(())
@@ -2210,6 +2252,7 @@ mod tests {
       limits: None,
       auto_update: false,
       container: None,
+      files: vec![],
       server: server.into(),
       source: Source::Image("traefik/whoami".into()),
       ports: vec![PortSpec {
