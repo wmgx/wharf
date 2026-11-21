@@ -369,7 +369,8 @@ pub struct BuildOpts {
   pub print_dockerfile: bool,
 }
 
-/// 修改类命令共用：生成计划后是否直接执行。
+// 修改类命令共用：生成计划后是否直接执行。
+// 用普通注释：文档注释会被 clap 当成没写说明的子命令（例如 `rm`）的说明。
 #[derive(Args, Clone, Default)]
 pub struct ApplyFlags {
   /// 生成计划后直接执行并等待结束。有高风险项时仍需要 `--confirm`。
@@ -874,6 +875,7 @@ pub enum GatewayCmd {
     #[command(flatten)]
     apply: ApplyFlags,
   },
+  /// 删除网关。生成计划。
   Rm {
     name: String,
     #[command(flatten)]
@@ -1007,6 +1009,7 @@ pub enum RouteCmd {
     #[command(flatten)]
     apply: ApplyFlags,
   },
+  /// 删除路由（域名）。生成计划。
   Rm {
     hostname: String,
     #[command(flatten)]
