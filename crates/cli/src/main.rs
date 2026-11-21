@@ -665,6 +665,14 @@ pub enum ServiceCmd {
     /// compose 文件路径。
     #[arg(long)]
     compose: Option<std::path::PathBuf>,
+    /// 照着一条 `docker run` 命令新建：端口、环境变量、数据卷、资源上限一起转过来，
+    /// 用了镜像来源表达不了的参数时转成 compose 来源。没转换的参数会列出来。
+    /// 例：`wharf service deploy app --from-run 'docker run -d -p 8080:80 -v data:/data nginx'`。
+    #[arg(long, conflicts_with_all = ["image", "compose", "compose_url"])]
+    from_run: Option<String>,
+    /// 从网址取 compose 文件（在本机下载，GitHub 的网页链接自动换成原始文件）。
+    #[arg(long, conflicts_with_all = ["image", "compose"])]
+    compose_url: Option<String>,
     /// 运行在哪台服务器上。只有一台服务器时可以不填。
     #[arg(long)]
     server: Option<String>,

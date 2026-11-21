@@ -33,6 +33,7 @@ mod db;
 mod disk;
 mod disk_forecast;
 mod docker_proxy;
+mod docker_run;
 mod doctor;
 mod edge;
 mod edge_api;
