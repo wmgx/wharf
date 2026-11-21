@@ -10,12 +10,62 @@ use wharf_api_types::{
   },
 };
 
+/// `--fields`：JSON 只输出这些字段（`a.b` 取嵌套字段），列表按每一项取。
+static FIELDS: std::sync::OnceLock<Vec<String>> =
+  std::sync::OnceLock::new();
+
+pub fn set_fields(fields: &str) {
+  let list = fields
+    .split(',')
+    .map(|f| f.trim().to_string())
+    .filter(|f| !f.is_empty())
+    .collect();
+  let _ = FIELDS.set(list);
+}
+
+/// 按字段路径挑出值，保留原来的嵌套结构；列表对每一项挑。没有的字段不输出。
+pub fn pick(
+  value: &serde_json::Value,
+  fields: &[String],
+) -> serde_json::Value {
+  use serde_json::{Map, Value};
+  match value {
+    Value::Array(items) => {
+      Value::Array(items.iter().map(|i| pick(i, fields)).collect())
+    }
+    Value::Object(map) => {
+      let mut out = Map::new();
+      for f in fields {
+        let (head, rest) = match f.split_once('.') {
+          Some((h, r)) => (h, Some(r)),
+          None => (f.as_str(), None),
+        };
+        let Some(v) = map.get(head) else { continue };
+        let picked = match rest {
+          None => v.clone(),
+          Some(r) => pick(v, &[r.to_string()]),
+        };
+        match (out.get_mut(head), picked) {
+          (Some(Value::Object(a)), Value::Object(b)) => a.extend(b),
+          (_, p) => {
+            out.insert(head.to_string(), p);
+          }
+        }
+      }
+      Value::Object(out)
+    }
+    other => other.clone(),
+  }
+}
+
 pub fn json<T: serde::Serialize>(value: &T) {
-  println!(
-    "{}",
-    serde_json::to_string_pretty(value)
-      .unwrap_or_else(|_| "null".into())
-  );
+  let text = match FIELDS.get().filter(|f| !f.is_empty()) {
+    Some(fields) => serde_json::to_value(value)
+      .map(|v| pick(&v, fields))
+      .and_then(|v| serde_json::to_string_pretty(&v)),
+    None => serde_json::to_string_pretty(value),
+  };
+  println!("{}", text.unwrap_or_else(|_| "null".into()));
 }
 
 pub fn error(e: &ApiError, as_json: bool) {
@@ -670,6 +720,20 @@ pub fn network(v: &NetworkView) {
     println!(
       "\n建议：{} → {} 直连丢包 {:.0}%，经 {} 中转约 {:.0}%",
       h.from, h.to, h.direct_loss, h.via, h.via_loss
+    );
+  }
+}
+
+#[cfg(test)]
+mod pick_tests {
+  #[test]
+  fn picks_nested_fields_per_item() {
+    let v = serde_json::json!([{"name":"a","status":{"summary":"运行中","tone":"ok"},"spec":{}}]);
+    let out =
+      super::pick(&v, &["name".into(), "status.summary".into()]);
+    assert_eq!(
+      out,
+      serde_json::json!([{"name":"a","status":{"summary":"运行中"}}])
     );
   }
 }

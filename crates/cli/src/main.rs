@@ -13,6 +13,7 @@ mod client;
 mod commands;
 mod connect;
 mod deploy;
+mod describe;
 mod edge;
 mod fleet;
 mod gh;
@@ -20,6 +21,7 @@ mod pack;
 mod print;
 mod task;
 mod tunnel;
+mod wait;
 
 #[derive(Parser)]
 #[command(
@@ -31,6 +33,10 @@ pub struct Cli {
   /// 输出 JSON（给程序和 AI 用）。
   #[arg(long, global = true)]
   pub json: bool,
+  /// 只输出这些字段，逗号分隔，`a.b` 取嵌套字段，列表按每一项取；隐含 `--json`。
+  /// 例：`wharf service list --fields name,status.summary`。
+  #[arg(long, global = true)]
+  pub fields: Option<String>,
   /// 控制面地址，默认读 `~/.config/wharf/config.toml`。
   #[arg(long, env = "WHARF_URL", global = true)]
   pub url: Option<String>,
@@ -315,6 +321,36 @@ pub enum Command {
   /// API token。
   #[command(subcommand)]
   Token(TokenCmd),
+  /// 等到某件事发生再返回：服务正常运行、域名各层都通、“需要注意”清空。每 5 秒查一次，超时退出码 1。
+  #[command(subcommand)]
+  Wait(WaitCmd),
+  /// 全部命令和参数的机器可读说明（JSON），不需要连接控制面。给了前缀只列这一组，例如 `wharf commands service`。
+  Commands { prefix: Vec<String> },
+}
+
+#[derive(Subcommand)]
+pub enum WaitCmd {
+  /// 服务按配置在运行、健康检查通过（没配就不看），而且容器是当前配置；停止的服务等到它停下。
+  /// 例：`wharf wait service blog --timeout 5m`。
+  Service {
+    name: String,
+    /// 最多等多久：90s、10m、1h。
+    #[arg(long, default_value = "10m")]
+    timeout: String,
+  },
+  /// 域名从解析到容器各层都通（和 `wharf doctor <域名>` 一样的检查）。
+  Route {
+    hostname: String,
+    #[arg(long, default_value = "10m")]
+    timeout: String,
+  },
+  /// “需要注意”里没有事了；给了 `--subject` 只看这一个对象（名字或 `service/blog` 这种写法）。
+  Clear {
+    #[arg(long)]
+    subject: Option<String>,
+    #[arg(long, default_value = "10m")]
+    timeout: String,
+  },
 }
 
 /// 从代码构建：本机目录或 git 仓库，加上构建选项。
@@ -1163,7 +1199,11 @@ pub enum TokenCmd {
 
 #[tokio::main]
 async fn main() {
-  let cli = Cli::parse();
+  let mut cli = Cli::parse();
+  if let Some(fields) = &cli.fields {
+    print::set_fields(fields);
+    cli.json = true;
+  }
   let as_json = cli.json;
   let code = match commands::run(cli).await {
     Ok(()) => 0,

@@ -20,7 +20,9 @@ Wharf 是一个人用的多服务器管理系统。你通过 `wharf` 命令行�
 2. **先计划，再执行。** 修改类命令不带 `--apply` 时只生成计划，先把计划给用户看；用户同意后再 `wharf apply <plan_id>`，或者重新执行原命令加 `--apply`。用户已经明确说“直接做”时可以一步 `--apply`。
 3. **高风险项不要自己确认。** 计划里标了需要确认的项（删数据、覆盖、对公网开放等），执行时会以退出码 `2` 拒绝。把这些项原样告诉用户，用户同意后才能加 `--confirm <地址>`。需要确认的地址在计划 JSON 的 `needs_confirm` 里，例如 `service/blog`。
 4. **出错先看 `hint` 和 `suggest`。** 错误格式是 `{ code, message, hint, suggest }`，按提示改，不要盲目重试同一条命令。
-5. **字段不要猜。** 参数不确定时看 `wharf <命令> --help`；意图文件和对象字段看 `wharf schema`。
+5. **字段不要猜。** 参数不确定时看 `wharf commands [命令前缀]`（全部命令和参数的 JSON，例如 `wharf commands service`）或 `wharf <命令> --help`；意图文件和对象字段看 `wharf schema`。
+   结果太长时用 `--fields` 只取要的字段，例如 `wharf service list --fields name,status.summary`（隐含 `--json`）。
+   要等部署完成、服务恢复、告警解除时用 `wharf wait`，不要自己循环查：`wharf wait service <服务>`、`wharf wait route <域名>`、`wharf wait clear --subject <服务>`，默认最多等 10 分钟（`--timeout`）。
 6. **不打印、不写入 token 和密钥。** 服务要用的密码放进密钥（`wharf secret`），环境变量里用 `[[NAME]]` 引用。
 7. **宿主机命令要用户同意。** `wharf exec <服务器> -- '<命令>'`、`wharf server prune`、`wharf server baseline --apply` 这类直接动机器的操作，先说明要做什么。
 
