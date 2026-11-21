@@ -713,6 +713,7 @@ pub async fn observe(
       threshold,
       for_n,
     };
+    let mut since = None;
     let (ok, event) = match judge(rule, threshold, for_n, &points) {
       Verdict::Hold => continue,
       Verdict::Fire => {
@@ -721,11 +722,22 @@ pub async fn observe(
         (false, e)
       }
       Verdict::Recover => {
+        since = with(|m| m.firing.get(&fkey).map(|(at, _)| *at));
         set_firing(state, fkey, None).await;
         (true, (rule.ok)(&ctx))
       }
     };
     if notify::transition(state, &(rule.key)(subject), ok).await {
+      let event = if ok && rule.id == "server_offline" {
+        // 开始触发前已经连续离线了 for_n 分钟。
+        let since = since.map(|at| at - i64::from(for_n) * 60_000);
+        crate::alert_context::back_online(
+          state, subject, since, event,
+        )
+        .await
+      } else {
+        event
+      };
       push(state, rule.id, Some(subject), &o, ok, event).await;
     }
   }

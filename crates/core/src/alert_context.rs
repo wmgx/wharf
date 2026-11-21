@@ -108,6 +108,89 @@ pub async fn enrich(
   event
 }
 
+/// 服务器恢复在线：离线了多久，这台机器上的服务现在是不是都起来了。
+/// 断电、断网恢复后不用自己挨个去看。
+pub async fn back_online(
+  state: &AppState,
+  server: &str,
+  since: Option<i64>,
+  mut event: Event,
+) -> Event {
+  if let Some(since) = since {
+    event.body.push_str(&format!(
+      "，离线约 {}",
+      duration(db::now_ms() - since)
+    ));
+  }
+  let Ok(snap) = snapshot::load(&state.db).await else {
+    return event;
+  };
+  let services: Vec<(String, bool)> = snap
+    .world
+    .services
+    .iter()
+    .filter(|(_, r)| r.spec.server == server)
+    .map(|(n, r)| (n.clone(), !r.spec.stopped))
+    .collect();
+  if services.is_empty() {
+    return event;
+  }
+  let projects = services.iter().map(|(n, _)| n.clone()).collect();
+  let live = snapshot::project_status(
+    &state.hub,
+    server,
+    projects,
+    Duration::from_secs(15),
+  )
+  .await;
+  let Ok(live) = live else {
+    event.body.push_str(
+      "\n这台机器上的服务现状查不到，稍后用 wharf status 看",
+    );
+    return event;
+  };
+  event.body.push_str(&services_summary(&services, &live));
+  event
+}
+
+/// `want` 是（服务，按配置应该在运行）。
+fn services_summary(
+  want: &[(String, bool)],
+  live: &std::collections::BTreeMap<
+    String,
+    wharf_api_types::agent::ProjectState,
+  >,
+) -> String {
+  let down: Vec<&str> = want
+    .iter()
+    .filter(|(n, running)| {
+      *running && !live.get(n).is_some_and(|p| p.all_running())
+    })
+    .map(|(n, _)| n.as_str())
+    .collect();
+  let total = want.iter().filter(|(_, r)| *r).count();
+  if down.is_empty() {
+    format!("\n受影响的 {total} 个服务都已恢复运行")
+  } else {
+    format!(
+      "\n受影响的 {total} 个服务里还有 {} 个没在运行：{}",
+      down.len(),
+      down.join("、")
+    )
+  }
+}
+
+fn duration(ms: i64) -> String {
+  let minutes = (ms / 60_000).max(1);
+  if minutes < 60 {
+    format!("{minutes} 分钟")
+  } else if minutes < 48 * 60 {
+    format!("{} 小时 {} 分钟", minutes / 60, minutes % 60)
+  } else {
+    format!("{} 天", minutes / (24 * 60))
+  }
+}
+
 fn page_path(rule: &str, subject: Option<&str>) -> String {
   let Some(subject) = subject else {
     return "/alerts".into();
@@ -171,6 +254,39 @@ fn redact_and_trim(logs: &str, secrets: &[String]) -> String {
 
 #[cfg(test)]
 mod tests {
+  #[test]
+  fn summary_lists_services_still_down() {
+    let state =
+      |running: bool| -> wharf_api_types::agent::ProjectState {
+        serde_json::from_value(serde_json::json!({
+        "project": "x",
+        "containers": [{"service": "x", "name": "x-1", "image": "i", "state": if running { "running" } else { "exited" }, "status": ""}],
+      }))
+      .unwrap()
+      };
+    let want = vec![
+      ("a".to_string(), true),
+      ("b".to_string(), true),
+      ("c".to_string(), false),
+    ];
+    let live = std::collections::BTreeMap::from([
+      ("a".to_string(), state(true)),
+      ("b".to_string(), state(false)),
+    ]);
+    assert_eq!(
+      super::services_summary(&want, &live),
+      "\n受影响的 2 个服务里还有 1 个没在运行：b"
+    );
+    let live = std::collections::BTreeMap::from([
+      ("a".to_string(), state(true)),
+      ("b".to_string(), state(true)),
+    ]);
+    assert_eq!(
+      super::services_summary(&want, &live),
+      "\n受影响的 2 个服务都已恢复运行"
+    );
+  }
+
   use super::*;
 
   #[test]
