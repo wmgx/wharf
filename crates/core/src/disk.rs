@@ -206,6 +206,52 @@ pub async fn measure_now(
   show(State(s), auth, Path(server)).await
 }
 
+/// 这台服务器上占磁盘最多的几个服务或共用卷（按最近一次测量），用在磁盘告警里。
+pub async fn top(
+  s: &AppState,
+  server: &str,
+  n: usize,
+) -> Vec<(String, u64)> {
+  let Ok(snap) = snapshot::load(&s.db).await else {
+    return vec![];
+  };
+  let services: Vec<String> = snap
+    .world
+    .services
+    .iter()
+    .filter(|(_, r)| r.spec.server == server)
+    .map(|(n, _)| n.clone())
+    .collect();
+  let Ok(v) = view(s, server, services).await else {
+    return vec![];
+  };
+  let mut rows: Vec<(String, u64)> =
+    v.rows.into_iter().map(|r| (r.name, r.total)).collect();
+  rows.sort_by_key(|r| std::cmp::Reverse(r.1));
+  rows.truncate(n);
+  rows
+}
+
+/// `halo 3.2 GB、blog 512 MB`。
+pub fn top_text(rows: &[(String, u64)]) -> String {
+  rows
+    .iter()
+    .map(|(name, bytes)| format!("{name} {}", human(*bytes)))
+    .collect::<Vec<_>>()
+    .join("、")
+}
+
+fn human(bytes: u64) -> String {
+  const GB: f64 = 1024.0 * 1024.0 * 1024.0;
+  const MB: f64 = 1024.0 * 1024.0;
+  let b = bytes as f64;
+  if b >= GB {
+    format!("{:.1} GB", b / GB)
+  } else {
+    format!("{:.0} MB", b / MB)
+  }
+}
+
 async fn view(
   s: &AppState,
   server: &str,
@@ -296,6 +342,18 @@ async fn view(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn top_text_reads_well() {
+    let rows = vec![
+      (
+        "halo".to_string(),
+        3 * 1024 * 1024 * 1024 + 300 * 1024 * 1024,
+      ),
+      ("blog".to_string(), 512 * 1024 * 1024),
+    ];
+    assert_eq!(top_text(&rows), "halo 3.3 GB、blog 512 MB");
+  }
 
   #[test]
   fn shared_volume_counted_once() {

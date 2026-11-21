@@ -537,6 +537,14 @@ pub enum ServerCmd {
   Host {
     name: String,
   },
+  /// 磁盘占用排行：每个服务的数据目录、容器日志、数据卷（每天测一次），从大到小。
+  /// 镜像、构建缓存和系统日志看 `wharf server host`。
+  Disk {
+    name: String,
+    /// 现在就测一次（要遍历文件，可能要几分钟）。
+    #[arg(long)]
+    measure: bool,
+  },
 }
 
 #[derive(Subcommand)]
