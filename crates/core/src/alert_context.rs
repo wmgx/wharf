@@ -98,6 +98,17 @@ pub async fn enrich(
       }
     }
   }
+  if rule == "disk_forecast"
+    && let Some(server) = subject
+  {
+    let top = crate::disk::top(state, server, 3).await;
+    if !top.is_empty() {
+      event.body.push_str(&format!(
+        "\n占得最多的服务：{}",
+        crate::disk::top_text(&top)
+      ));
+    }
+  }
   if let Some(url) = crate::join::default_url(state).await {
     event.body.push_str(&format!(
       "\n查看：{}{}",

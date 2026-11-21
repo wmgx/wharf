@@ -517,6 +517,19 @@ pub async fn status(
       if let Some(d) = d
         && low_disk(d)
       {
+        let top = crate::disk::top(state, &s.name, 3).await;
+        let hint = format!(
+          "完整排行：wharf server disk {0}；镜像、构建缓存和日志：wharf server host {0}",
+          s.name
+        );
+        let hint = if top.is_empty() {
+          hint
+        } else {
+          format!(
+            "占得最多的服务：{}。{hint}",
+            crate::disk::top_text(&top)
+          )
+        };
         issues.push(Issue {
           code: "disk_low".into(),
           level: IssueLevel::Warn,
@@ -529,7 +542,7 @@ pub async fn status(
             s.name,
             d.free as f64 / GB
           ),
-          hint: None,
+          hint: Some(hint),
         });
       }
     }
