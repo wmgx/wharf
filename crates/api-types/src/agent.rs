@@ -264,6 +264,11 @@ pub enum AgentOp {
   },
   /// 校验并应用网关配置，失败自动回滚。结果是 [ProjectUpResult]。
   GatewayApply(GatewayApply),
+  /// 配置不变，强制热重载网关（`caddy reload --force`），让还没签下来的证书立刻重新申请。
+  /// 旧 agent 不认识，会忽略，调用方等到超时。
+  GatewayReload {
+    project: String,
+  },
   /// `docker compose stop`：停止容器但不删除。project 不存在时什么也不做。
   ProjectStop {
     project: String,

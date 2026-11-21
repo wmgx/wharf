@@ -19,6 +19,7 @@ import { Input } from "@/components/ui/input";
 import { Sheet, SheetContent, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { sameTarget, targetText, type Target } from "@/components/target-fields";
 import type { AppAccountView, SsoTestResult } from "@/types.gen";
+import { CertProgress } from "./cert-status";
 import { AddPathDialog, CaddyDialog, EditRedirectDialog, EditTargetDialog } from "./route-dialogs";
 import type { GateKeyView, RouteSpec, RouteView, Status } from "@/types";
 
@@ -235,6 +236,7 @@ function DomainDetail({ route, status, onClose, onDirty }: { route: RouteView; s
             {new Date(cert).toLocaleDateString("zh-CN")}（剩 {days} 天）</span>]]} />
         </Panel>
       </>}
+      {!cert && saved?.spec.kind === "caddy" && (saved.spec.tls ?? "auto") === "auto" && <CertProgress hostname={route.spec.hostname} />}
     </div>
     <SheetFooter className="flex-row justify-between border-t">
       <Button variant="outline" className="text-destructive" onClick={() => actions.removeRoute(route.spec.hostname)}>移除域名</Button>

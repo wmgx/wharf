@@ -986,6 +986,13 @@ pub enum RouteCmd {
     #[command(flatten)]
     apply: ApplyFlags,
   },
+  /// 证书申请状态：申请中、失败原因和下次自动重试的时间。`--retry` 让入口立刻重新申请。
+  Cert {
+    name: String,
+    /// 让入口立刻重新申请（强制热重载入口，配置不变）。同一个入口 1 分钟内只能一次。
+    #[arg(long)]
+    retry: bool,
+  },
   /// 自定义 Caddy 配置：原样插进网关里这个域名的站点块，Caddy 能做的都能写（按路径拦截、加响应头等）。
   /// 网关下发前会用 Caddy 校验，写错了不会生效。不给参数时显示现在的配置。
   /// 例：`printf '@admin path /admin/*\nrespond @admin 403\n' | wharf route caddy a.example.com --file - --apply`。

@@ -393,6 +393,41 @@ export interface BuildSource {
 }
 
 /**
+ * 证书申请状态，从网关最近的日志里读出来。
+ */
+export type CertState = "ok" | "obtaining" | "failed" | "unknown";
+
+export interface CertStatus {
+  /**
+   * 这一轮已经失败了几次。
+   */
+  attempts: number;
+  /**
+   * 最近一次失败的原始报错（截断）。
+   */
+  error?: string | null;
+  /**
+   * 失败的时间（毫秒）。
+   */
+  failed_at?: number | null;
+  gateway: string;
+  hostname: string;
+  /**
+   * 网关下次自动重试的时间（毫秒）。
+   */
+  next_retry_at?: number | null;
+  /**
+   * 最近一次失败的原因，说人话。
+   */
+  reason?: string | null;
+  /**
+   * 这一轮开始申请的时间（毫秒）。
+   */
+  since?: number | null;
+  state: CertState;
+}
+
+/**
  * 对期望状态的局部修改。CLI 的 `service deploy`、`route add` 等命令都生成它。
  */
 export type Change = {
@@ -1004,7 +1039,7 @@ export interface HostInfo {
 }
 
 /**
- * 一个域名在上报间隔内经网关的请求（只算转发到上游的）。
+ * 一个域名在上报间隔内经网关的请求（只算转发到上���的）。
  */
 export interface HostTraffic {
   /**
