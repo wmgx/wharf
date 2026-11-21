@@ -225,6 +225,8 @@ fn version_json() -> Value {
     "newer": latest.as_ref().and_then(|l| l.1.clone()),
     "checked_at": latest.as_ref().map(|l| l.0),
     "check_error": latest.and_then(|l| l.2),
+    // `wharf self-update` 按这个前缀下载和控制面同一构建的 CLI。
+    "cli_releases": crate::cli_dist::releases(),
   })
 }
 

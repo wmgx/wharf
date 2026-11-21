@@ -15,6 +15,12 @@ use axum::{
 const RELEASES: &str =
   "https://github.com/wmgx/wharf/releases/download";
 
+/// CLI 二进制的下载地址前缀，`<前缀>/build-<构建号>/wharf-<系统>-<架构>`。
+pub fn releases() -> String {
+  std::env::var("WHARF_CLI_RELEASES")
+    .unwrap_or_else(|_| RELEASES.to_string())
+}
+
 /// `GET /skill.md`：给 AI 的 Skill，随控制面版本发布，不需要登录。
 pub async fn skill() -> Response {
   (
@@ -28,8 +34,7 @@ pub async fn skill() -> Response {
 pub async fn script(
   State(s): State<Arc<crate::state::AppState>>,
 ) -> Response {
-  let base = std::env::var("WHARF_CLI_RELEASES")
-    .unwrap_or_else(|_| RELEASES.to_string());
+  let base = releases();
   (
     [(header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8")],
     SCRIPT

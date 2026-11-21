@@ -39,9 +39,18 @@ pub async fn run(cli: Cli) -> CliResult<()> {
   match cli.command {
     Command::Login { url, core_key } => login(url, core_key, j).await,
     Command::Schema { resource } => schema(resource.as_deref()),
-    Command::Commands { prefix } => {
+    Command::Commands { changes: true, .. } => {
+      crate::selfcmd::command_changes(j)
+    }
+    Command::Commands { prefix, .. } => {
+      let all = crate::describe::commands(&[]);
+      crate::selfcmd::save_snapshot(&all);
       // 紧凑输出：全部命令有上百条，省掉缩进能少一半多的字符。
-      println!("{}", crate::describe::commands(&prefix));
+      if prefix.is_empty() {
+        println!("{all}");
+      } else {
+        println!("{}", crate::describe::commands(&prefix));
+      }
       Ok(())
     }
     command => {
@@ -338,7 +347,15 @@ async fn dispatch(
     Command::ShellLog { server, limit } => {
       shell_log(c, server, limit, j).await
     }
-    Command::Upgrade => upgrade(c, j).await,
+    Command::Upgrade => {
+      upgrade(c, j).await?;
+      crate::selfcmd::self_update(c, j).await
+    }
+    Command::SelfUpdate => crate::selfcmd::self_update(c, j).await,
+    Command::Whoami => crate::selfcmd::whoami(c, j).await,
+    Command::Core(crate::CoreCmd::Logs(args)) => {
+      show_logs(c, "/api/core/logs", &args, j).await
+    }
     Command::Egress { cmd } => {
       let v: Value = match cmd {
         Some(EgressCmd::Api { server }) => {
@@ -1420,6 +1437,10 @@ async fn server(
         .await?;
       finish_task(c, &r.run_id, true, j).await
     }
+    ServerCmd::Logs { name, logs } => {
+      let path = format!("/api/servers/{}/agent-logs", seg(&name));
+      show_logs(c, &path, &logs, j).await
+    }
     ServerCmd::Disk { name, measure } => {
       let path = format!("/api/servers/{}/disk", seg(&name));
       let mut v: Value = if measure {
@@ -1607,6 +1628,51 @@ async fn upgrade(c: &Client, j: bool) -> CliResult<()> {
     eprintln!("{} 不在线，跳过", s.name);
   }
   upgrade_outdated(c, j).await
+}
+
+/// 取日志并打印：服务、agent、控制面共用。
+async fn show_logs(
+  c: &Client,
+  path: &str,
+  args: &crate::LogArgs,
+  j: bool,
+) -> CliResult<()> {
+  let mut path = format!("{path}?tail={}", args.tail);
+  if let Some(v) = &args.since {
+    path.push_str(&format!("&since={}", seg(v)));
+  }
+  if let Some(v) = &args.grep {
+    path.push_str(&format!("&grep={}", seg(v)));
+  }
+  if args.errors {
+    path.push_str("&errors=true");
+  }
+  if let Some(v) = args.max_line {
+    path.push_str(&format!("&max_line={v}"));
+  }
+  let v: Value = c.get(&path).await?;
+  out(j, &v, |v| {
+    if let Some(groups) = v["groups"].as_array() {
+      if groups.is_empty() {
+        println!("没有报错（看了 {} 行）", v["scanned"]);
+      }
+      for g in groups {
+        println!(
+          "{} 次  {} ~ {}\n  {}",
+          g["count"],
+          g["first"].as_str().unwrap_or("-"),
+          g["last"].as_str().unwrap_or("-"),
+          g["line"].as_str().unwrap_or("")
+        );
+      }
+    } else {
+      print!("{}", v["logs"].as_str().unwrap_or_default());
+      if let Some(n) = v["matched"].as_u64() {
+        eprintln!("命中 {n} 行（看了 {} 行）", v["scanned"]);
+      }
+    }
+  });
+  Ok(())
 }
 
 // SERVICES
@@ -1934,43 +2000,24 @@ async fn service(
       errors,
       max_line,
     } => {
-      let mut path =
-        format!("/api/services/{}/logs?tail={tail}", seg(&name));
-      if let Some(v) = &since {
-        path.push_str(&format!("&since={}", seg(v)));
-      }
-      if let Some(v) = &grep {
-        path.push_str(&format!("&grep={}", seg(v)));
-      }
-      if errors {
-        path.push_str("&errors=true");
-      }
-      if let Some(v) = max_line {
-        path.push_str(&format!("&max_line={v}"));
-      }
-      let v: Value = c.get(&path).await?;
-      out(j, &v, |v| {
-        if let Some(groups) = v["groups"].as_array() {
-          if groups.is_empty() {
-            println!("没有报错（看了 {} 行）", v["scanned"]);
-          }
-          for g in groups {
-            println!(
-              "{} 次  {} ~ {}\n  {}",
-              g["count"],
-              g["first"].as_str().unwrap_or("-"),
-              g["last"].as_str().unwrap_or("-"),
-              g["line"].as_str().unwrap_or("")
-            );
-          }
-        } else {
-          print!("{}", v["logs"].as_str().unwrap_or_default());
-          if let Some(n) = v["matched"].as_u64() {
-            eprintln!("命中 {n} 行（看了 {} 行）", v["scanned"]);
-          }
-        }
-      });
-      Ok(())
+      let args = crate::LogArgs {
+        tail,
+        since,
+        grep,
+        errors,
+        max_line,
+      };
+      let path = format!("/api/services/{}/logs", seg(&name));
+      show_logs(c, &path, &args, j).await
+    }
+    ServiceCmd::Files { name, path } => {
+      crate::files::list(c, &name, &path, j).await
+    }
+    ServiceCmd::Download { name, path, output } => {
+      crate::files::download(c, &name, &path, output, j).await
+    }
+    ServiceCmd::Upload { name, local, path } => {
+      crate::files::upload(c, &name, &local, &path, j).await
     }
     ServiceCmd::Stop { .. } | ServiceCmd::Start { .. } => {
       let (name, apply, stopped) = match cmd {

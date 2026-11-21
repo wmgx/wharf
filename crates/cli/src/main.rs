@@ -15,12 +15,15 @@ mod connect;
 mod deploy;
 mod describe;
 mod edge;
+mod files;
 mod fleet;
 mod gh;
 mod pack;
 mod print;
+mod selfcmd;
 mod task;
 mod tunnel;
+mod view;
 mod wait;
 
 #[derive(Parser)]
@@ -37,6 +40,22 @@ pub struct Cli {
   /// 例：`wharf service list --fields name,status.summary`。
   #[arg(long, global = true)]
   pub fields: Option<String>,
+  /// 列表分页：每页多少项；隐含 `--json`。总数写在标准错误里。
+  /// 例：`wharf service list --page-size 20 --page 2`。
+  #[arg(long, global = true)]
+  pub page_size: Option<usize>,
+  /// 第几页，从 1 开始，和 `--page-size` 一起用。
+  #[arg(
+    long,
+    global = true,
+    default_value_t = 1,
+    requires = "page_size"
+  )]
+  pub page: usize,
+  /// 只输出和上次执行同一条命令相比变了的地方（`path`、`before`、`after`）；隐含 `--json`。
+  /// 第一次执行时整份输出算一条变化。上次的结果存在本机缓存目录里。
+  #[arg(long, global = true)]
+  pub changed: bool,
   /// 控制面地址，默认读 `~/.config/wharf/config.toml`。
   #[arg(long, env = "WHARF_URL", global = true)]
   pub url: Option<String>,
@@ -147,8 +166,15 @@ pub enum Command {
     #[command(flatten)]
     apply: ApplyFlags,
   },
-  /// 升级 Wharf：控制面换成最新镜像，再把各服务器的 agent 升到同一版本。
+  /// 升级 Wharf：控制面换成最新镜像，再把各服务器的 agent 升到同一版本，最后把本机 CLI 也换成同一版本。
   Upgrade,
+  /// 把本机 CLI 换成和控制面同一构建的版本，顺带更新已装的 Skill。
+  SelfUpdate,
+  /// 当前用的是哪个 token、有哪些权限、连的哪个控制面，以及 CLI 和控制面的版本。
+  Whoami,
+  /// 控制面自己：日志。
+  #[command(subcommand)]
+  Core(CoreCmd),
   /// 出口：控制面调厂商 API（Cloudflare、Tailscale）经哪台出口，以及预置分组。
   /// 不带参数时显示现状。
   Egress {
@@ -325,7 +351,38 @@ pub enum Command {
   #[command(subcommand)]
   Wait(WaitCmd),
   /// 全部命令和参数的机器可读说明（JSON），不需要连接控制面。给了前缀只列这一组，例如 `wharf commands service`。
-  Commands { prefix: Vec<String> },
+  Commands {
+    prefix: Vec<String>,
+    /// 只看这一版和本机上次用的版本相比，命令和参数有哪些增删改。
+    #[arg(long)]
+    changes: bool,
+  },
+}
+
+#[derive(Subcommand)]
+pub enum CoreCmd {
+  /// 控制面自己的日志。例：`wharf core logs --since 1h --errors`。
+  Logs(LogArgs),
+}
+
+/// 看日志的公共参数。
+#[derive(Args, Clone)]
+pub struct LogArgs {
+  /// 最多输出多少行（`--errors` 时是多少种报错）。
+  #[arg(long, default_value_t = 200)]
+  pub tail: u32,
+  /// 只看这段时间内的：30m、2h、3d，或 RFC 3339 时间。
+  #[arg(long)]
+  pub since: Option<String>,
+  /// 只看含这个关键字的行，不分大小写。筛选时在最近 5000 行里找。
+  #[arg(long)]
+  pub grep: Option<String>,
+  /// 只看报错，同一种报错合成一条，带次数和首末时间。
+  #[arg(long)]
+  pub errors: bool,
+  /// 每行最多多少字符，超出截断（筛选时默认 500）。
+  #[arg(long)]
+  pub max_line: Option<usize>,
 }
 
 #[derive(Subcommand)]
@@ -581,6 +638,12 @@ pub enum ServerCmd {
     #[arg(long)]
     measure: bool,
   },
+  /// 这台机器上 agent 自己的日志。例：`wharf server logs home --errors`。
+  Logs {
+    name: String,
+    #[command(flatten)]
+    logs: LogArgs,
+  },
 }
 
 #[derive(Subcommand)]
@@ -622,6 +685,31 @@ pub enum ServiceCmd {
     /// 每行最多多少字符，超出截断（筛选时默认 500）。
     #[arg(long)]
     max_line: Option<usize>,
+  },
+  /// 列出服务数据目录（`/srv/<服务>/`）里的文件。例：`wharf service files blog config`。
+  Files {
+    name: String,
+    /// 数据目录下的相对路径，不给是根目录。
+    #[arg(default_value = "")]
+    path: String,
+  },
+  /// 从服务数据目录下载一个文件。例：`wharf service download blog config/app.ini -o app.ini`。
+  Download {
+    name: String,
+    /// 数据目录下的相对路径。
+    path: String,
+    /// 存到哪里，不给时用文件名存在当前目录；`-` 输出到标准输出。
+    #[arg(short, long)]
+    output: Option<String>,
+  },
+  /// 上传一个本机文件到服务数据目录，已有的会被覆盖（最大 100 MB）。需要 exec 权限。
+  /// 例：`wharf service upload blog ./app.ini config/app.ini`。
+  Upload {
+    name: String,
+    /// 本机文件。
+    local: std::path::PathBuf,
+    /// 数据目录下的相对路径。
+    path: String,
   },
   /// 部署历史。
   History {
@@ -1227,6 +1315,17 @@ async fn main() {
     print::set_fields(fields);
     cli.json = true;
   }
+  if cli.page_size.is_some() || cli.changed {
+    cli.json = true;
+  }
+  let key: Vec<String> = std::env::args()
+    .skip(1)
+    .filter(|a| a != "--changed")
+    .collect();
+  view::set(
+    cli.page_size.map(|size| (size, cli.page)),
+    cli.changed.then_some(key.as_slice()),
+  );
   let as_json = cli.json;
   let code = match commands::run(cli).await {
     Ok(()) => 0,

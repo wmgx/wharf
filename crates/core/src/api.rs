@@ -343,6 +343,9 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route("/api/gateways/{name}", get(show_gateway))
     .route("/api/gateways/{name}/config", get(gateway_config))
     .route("/api/gateways/{name}/logs", get(gateway_logs))
+    .route("/api/servers/{name}/agent-logs", get(agent_logs))
+    .route("/api/core/logs", get(core_logs))
+    .route("/api/whoami", get(whoami))
     .route(
       "/api/gateways/{name}/logs/stream",
       get(crate::logs_stream::gateway),
@@ -934,6 +937,24 @@ async fn project_logs(
   project: String,
   q: &LogsQuery,
 ) -> Result<Json<Value>, AppError> {
+  Ok(Json(
+    fetch_logs(s, server, q, |tail, since| AgentOp::Logs {
+      project: project.clone(),
+      tail,
+      follow: false,
+      since,
+    })
+    .await?,
+  ))
+}
+
+/// 取日志并按 `q` 筛选。`op` 由行数和时间范围生成 agent 操作。
+async fn fetch_logs(
+  s: &AppState,
+  server: &str,
+  q: &LogsQuery,
+  op: impl Fn(u32, Option<String>) -> AgentOp,
+) -> Result<Value, ApiError> {
   let since =
     match q.since.as_deref().filter(|v| !v.trim().is_empty()) {
       Some(v) => {
@@ -951,20 +972,15 @@ async fn project_logs(
     .hub
     .call(
       server,
-      AgentOp::Logs {
-        project,
-        // 过滤时多拿一些再挑，最终条数由 tail 控制。
-        tail: if filtering { 5000 } else { q.tail },
-        follow: false,
-        since,
-      },
+      // 过滤时多拿一些再挑，最终条数由 tail 控制。
+      op(if filtering { 5000 } else { q.tail }, since),
       Duration::from_secs(40),
       None,
       &tokio_util::sync::CancellationToken::new(),
     )
     .await?;
   if !filtering && q.max_line.is_none() {
-    return Ok(Json(json!({ "server": server, "logs": logs })));
+    return Ok(json!({ "server": server, "logs": logs }));
   }
   let found = crate::log_search::search(
     &logs,
@@ -977,7 +993,85 @@ async fn project_logs(
   );
   let mut v = serde_json::to_value(found).unwrap_or_default();
   v["server"] = json!(server);
-  Ok(Json(v))
+  Ok(v)
+}
+
+/// `GET /api/whoami`：当前调用者是谁、有哪些权限，以及控制面的构建号。
+async fn whoami(auth: Auth) -> ApiResult<Value> {
+  Ok(Json(json!({
+    "name": auth.name,
+    "human": auth.human,
+    "perms": auth.perms.iter().map(|p| p.as_str()).collect::<Vec<_>>(),
+    "build": wharf_api_types::BUILD,
+    "version": env!("CARGO_PKG_VERSION"),
+  })))
+}
+
+/// `GET /api/servers/{name}/agent-logs`：这台机器上 agent 自己的日志。
+async fn agent_logs(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Path(name): Path<String>,
+  Query(q): Query<LogsQuery>,
+) -> ApiResult<Value> {
+  auth.require(Perm::Read)?;
+  let snap = snapshot::load(&s.db).await?;
+  if !snap.world.servers.contains_key(&name) {
+    return Err(crate::world::server_not_found(&name).into());
+  }
+  Ok(Json(
+    fetch_logs(&s, &name, &q, |tail, since| AgentOp::ContainerLogs {
+      container: "wharf-agent".into(),
+      tail,
+      since,
+    })
+    .await?,
+  ))
+}
+
+/// `GET /api/core/logs`：控制面自己的日志。控制面按自己的容器 id 挨台问，
+/// 和它在同一台机器上的 agent 能读到。
+async fn core_logs(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Query(q): Query<LogsQuery>,
+) -> ApiResult<Value> {
+  auth.require(Perm::Read)?;
+  let id = std::fs::read_to_string("/proc/self/mountinfo")
+    .ok()
+    .and_then(|m| wharf_api_types::agent::container_id(&m))
+    .ok_or_else(|| {
+      ApiError::invalid("控制面不在容器里运行，看不了它的日志")
+        .with_hint("在控制面所在的机器上直接看进程的输出")
+    })?;
+  let snap = snapshot::load(&s.db).await?;
+  for name in snap.world.servers.keys() {
+    if !s.hub.is_online(name) {
+      continue;
+    }
+    let found = fetch_logs(&s, name, &q, |tail, since| {
+      AgentOp::ContainerLogs {
+        container: id.clone(),
+        tail,
+        since,
+      }
+    })
+    .await;
+    match found {
+      Ok(v) => return Ok(Json(v)),
+      // 不在这台机器上：问下一台。
+      Err(e) if matches!(e.code, ErrorCode::NotFound) => continue,
+      Err(e) => return Err(e.into()),
+    }
+  }
+  Err(
+    ApiError::new(
+      ErrorCode::AgentFailed,
+      "找不到和控制面在同一台机器上、在线的 agent",
+    )
+    .with_hint("控制面所在机器的 agent 要在线，并且是最新版本：wharf server upgrade --all")
+    .into(),
+  )
 }
 
 async fn service_logs(
