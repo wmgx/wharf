@@ -57,7 +57,7 @@ const RULES: Record<Lang, { lineStart?: Rule[]; inline: Rule[] }> = {
   },
   caddy: {
     lineStart: [[/#.*/y, "comment"], [/@[\w-]+/y, "key"], [/[a-z_]+(?=\s|$)/y, "command"]],
-    inline: [[/#.*/y, "comment"], STRING, [/\{[\w.>-]+\}/y, "variable"], [/@[\w-]+/y, "key"], [/\b\d{3}\b/y, "number"]],
+    inline: [[/#.*/y, "comment"], STRING, [/\{[\w.>-]+\}/y, "variable"], [/@[\w-]+/y, "key"], [/(?<![\d.\/])\d{3}(?![\d.\/])/y, "number"]],
   },
   env: {
     lineStart: [

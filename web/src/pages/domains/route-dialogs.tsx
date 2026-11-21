@@ -86,6 +86,23 @@ export function AddPathDialog({ taken, onAdd, onClose }: { taken: string[]; onAd
   );
 }
 
+/** 常用片段。`@m` 插入时换成没用过的匹配器名，同一个片段插两次也不冲突。 */
+const SNIPPETS: [string, string, string][] = [
+  ["禁止访问路径", "deny", "@m path /admin/*\nrespond @m 403"],
+  ["路径只给内网", "outside", "@m {\n\tpath /admin/*\n\tnot remote_ip private_ranges 100.64.0.0/10\n}\nrespond @m 403"],
+  ["只允许这些 IP", "others", "@m not remote_ip 203.0.113.0/24 private_ranges 100.64.0.0/10\nrespond @m 403"],
+  ["安全响应头", "", "header {\n\tStrict-Transport-Security \"max-age=31536000\"\n\tX-Frame-Options SAMEORIGIN\n\tX-Content-Type-Options nosniff\n\tReferrer-Policy strict-origin-when-cross-origin\n}"],
+  ["禁止搜索引擎收录", "", "header X-Robots-Tag \"noindex, nofollow\""],
+];
+
+function insertSnippet(text: string, base: string, snippet: string): string {
+  let name = base;
+  for (let i = 2; base && new RegExp(`@${name}\\b`).test(text); i++) name = `${base}${i}`;
+  const body = base ? snippet.replaceAll("@m", `@${name}`) : snippet;
+  const head = text.trimEnd();
+  return `${head}${head ? "\n\n" : ""}${body}\n`;
+}
+
 /** 自定义 Caddy 配置，原样插进这个域名的站点块。 */
 export function CaddyDialog({ hostname, value, onSave, onClose }: { hostname: string; value: string; onSave: (text: string) => void; onClose: () => void }) {
   const [text, setText] = useState(value);
@@ -96,6 +113,10 @@ export function CaddyDialog({ hostname, value, onSave, onClose }: { hostname: st
         <Field label="插进站点块的配置" htmlFor="route-caddy" help="下发前用 Caddy 校验，写错了不会生效">
           <CodeEditor id="route-caddy" lang="caddy" className="min-h-64" value={text} onChange={setText} placeholder={"@admin path /admin/*\nrespond @admin 403"} />
         </Field>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-xs text-muted-foreground">插入</span>
+          {SNIPPETS.map(([label, base, snippet]) => <Button key={label} variant="outline" size="xs" onClick={() => setText(insertSnippet(text, base, snippet))}>{label}</Button>)}
+        </div>
         <DialogFooter>
           <Button variant="ghost" onClick={onClose}>取消</Button>
           <Button disabled={text === value} onClick={() => { onSave(text); onClose(); }}>确定</Button>
