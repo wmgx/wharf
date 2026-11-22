@@ -42,6 +42,7 @@ pub fn server_view(
   let agent = snap.agent(name);
   let report = agent.and_then(|a| a.report.clone());
   Some(ServerView {
+    note: snap.server_notes.get(name).cloned(),
     name: name.to_string(),
     settings: row.settings.clone(),
     joined: agent.is_some_and(|a| a.public_key.is_some()),
@@ -443,6 +444,7 @@ pub fn route_view(
     },
   };
   Some(RouteView {
+    note: snap.route_notes.get(hostname).cloned(),
     sso_login: row
       .spec
       .sso

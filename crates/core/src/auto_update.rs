@@ -223,7 +223,8 @@ async fn execute(
         plan_id: planned.plan.plan_id.clone(),
         confirm: vec![],
       },
-      BTreeSet::from([Perm::Read, Perm::Plan, Perm::Apply]),
+      &BTreeSet::from([Perm::Read, Perm::Plan, Perm::Apply]),
+      None,
     )
     .await
     {

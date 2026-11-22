@@ -17,19 +17,18 @@ use wharf_api_types::{
   },
   view::{
     AccountView, AppAccountView, AutoUpdateResult, BackupsView,
-    CheckStatus, CreatedToken, DataView, DeploymentView,
-    DoctorReport, GatewayView, HostExecResponse, ImportPreview,
-    ImportRequest, JoinInfo, NetworkView, RestoreRequest,
-    RollbackTarget, RouteView, ScriptRuntime, SecretView, ServerView,
-    ServiceView, ShellLog, SsoStepResult, SsoTestResult, Status,
-    TokenView, Unmanaged,
+    CheckStatus, DataView, DeploymentView, DoctorReport, GatewayView,
+    HostExecResponse, ImportPreview, ImportRequest, JoinInfo,
+    NetworkView, RestoreRequest, RollbackTarget, RouteView,
+    ScriptRuntime, SecretView, ServerView, ServiceView, ShellLog,
+    SsoStepResult, SsoTestResult, Status, Unmanaged,
   },
 };
 
 use crate::{
   AccountCmd, AlertCmd, AppAccountCmd, ApplyFlags, BackupCmd,
   BuildArgs, Cli, Command, EgressCmd, GatewayCmd, NotifyCmd,
-  RouteCmd, RunCmd, SecretCmd, ServerCmd, ServiceCmd, TokenCmd,
+  RouteCmd, RunCmd, SecretCmd, ServerCmd, ServiceCmd,
   client::{CliError, CliResult, Client, Config, read_secret, seg},
   fleet, print,
 };
@@ -90,6 +89,9 @@ pub async fn run(cli: Cli) -> CliResult<()> {
       }
       Ok(())
     }
+    Command::Token(cmd) => {
+      crate::token::run(cmd, cli.url, cli.token, j).await
+    }
     command => {
       let c = Client::new(cli.url, cli.token)?;
       dispatch(&c, command, j).await
@@ -122,7 +124,8 @@ async fn dispatch(
   match command {
     Command::Login { .. }
     | Command::Schema { .. }
-    | Command::Validate { .. } => unreachable!(),
+    | Command::Validate { .. }
+    | Command::Token(_) => unreachable!(),
     Command::Sso(crate::SsoCmd::Account(cmd)) => {
       app_account(c, cmd, j).await
     }
@@ -392,6 +395,22 @@ async fn dispatch(
     }
     Command::SelfUpdate => crate::selfcmd::self_update(c, j).await,
     Command::Whoami => crate::selfcmd::whoami(c, j).await,
+    Command::Core(crate::CoreCmd::Addresses) => {
+      let view: wharf_api_types::view::CoreAddresses =
+        c.get("/api/core/addresses").await?;
+      out(j, &view, |v| {
+        for a in &v.addresses {
+          println!("{}  {}", a.kind, a.url);
+        }
+      });
+      Ok(())
+    }
+    Command::Core(crate::CoreCmd::Check) => {
+      let value: Value =
+        c.post("/api/version/check", &json!({})).await?;
+      out(j, &value, pretty);
+      Ok(())
+    }
     Command::Core(crate::CoreCmd::Logs(args)) => {
       show_logs(c, "/api/core/logs", &args, j).await
     }
@@ -646,7 +665,6 @@ async fn dispatch(
       }
       Ok(())
     }
-    Command::Token(cmd) => token(c, cmd, j).await,
     Command::Wait(cmd) => crate::wait::run(c, cmd, j).await,
     Command::Commands { .. } => {
       unreachable!("不连控制面，在 run 里处理")
@@ -1053,6 +1071,38 @@ async fn server(
   j: bool,
 ) -> CliResult<()> {
   match cmd {
+    ServerCmd::Apt { name, apply } => {
+      crate::server::apt(c, &name, apply, j).await
+    }
+    ServerCmd::Dirs { name, path } => {
+      crate::server::dirs(c, &name, &path, j).await
+    }
+    ServerCmd::Pack {
+      name,
+      path,
+      service,
+    } => {
+      crate::server::pack(c, &name, &path, service.as_deref(), j)
+        .await
+    }
+    ServerCmd::Sessions { name, end, rename } => {
+      crate::server::sessions(c, &name, end, rename, j).await
+    }
+    ServerCmd::HostUnits { name } => {
+      crate::server::host_units(c, &name, j).await
+    }
+    ServerCmd::HostLogs { name, unit, lines } => {
+      crate::server::host_logs(c, &name, &unit, lines, j).await
+    }
+    ServerCmd::WatchUnit { name, unit, off } => {
+      crate::server::watch_unit(c, &name, &unit, !off, j).await
+    }
+    ServerCmd::Usage { name } => {
+      crate::server::usage(c, &name, j).await
+    }
+    ServerCmd::Traffic { name } => {
+      crate::server::traffic(c, &name, j).await
+    }
     ServerCmd::Exposure {
       name,
       refresh,
@@ -1145,6 +1195,9 @@ async fn server(
         }
       });
       Ok(())
+    }
+    ServerCmd::Note { name, args } => {
+      crate::note::run(c, "server", &name, args, j).await
     }
     ServerCmd::Show { name } => {
       let v: ServerView =
@@ -1706,6 +1759,16 @@ async fn upgrade(c: &Client, j: bool) -> CliResult<()> {
 }
 
 /// 取日志并打印：服务、agent、控制面共用。
+async fn follow_logs(c: &Client, path: &str) -> CliResult<()> {
+  use std::io::Write;
+  let mut stdout = std::io::stdout();
+  c.follow(path, |chunk| {
+    let _ = stdout.write_all(chunk);
+    let _ = stdout.flush();
+  })
+  .await
+}
+
 async fn show_logs(
   c: &Client,
   path: &str,
@@ -1797,6 +1860,26 @@ async fn service(
   j: bool,
 ) -> CliResult<()> {
   match cmd {
+    ServiceCmd::Origin { name } => {
+      let value: Value = c
+        .get(&format!("/api/services/{}/origin", seg(&name)))
+        .await?;
+      out(j, &value, pretty);
+      Ok(())
+    }
+    ServiceCmd::UnmanagedRemove {
+      server,
+      project,
+      container,
+      volumes,
+    } => {
+      let value: Value = c.post(
+        &format!("/api/servers/{}/unmanaged/remove", seg(&server)),
+        &json!({ "project": project, "container": container, "volumes": volumes }),
+      ).await?;
+      out(j, &value, pretty);
+      Ok(())
+    }
     ServiceCmd::List => {
       let v: Vec<ServiceView> = c.get("/api/services").await?;
       out(j, &v, |v| {
@@ -1811,34 +1894,8 @@ async fn service(
       });
       Ok(())
     }
-    ServiceCmd::Note {
-      name,
-      note,
-      dry_run: true,
-    } => {
-      let v: ServiceView =
-        c.get(&format!("/api/services/{}", seg(&name))).await?;
-      let after = Some(note.trim()).filter(|n| !n.is_empty());
-      crate::preview::show(
-        j,
-        &format!("service/{name}"),
-        &json!({ "note": v.note }),
-        &json!({ "note": after }),
-      )
-    }
-    ServiceCmd::Note { name, note, .. } => {
-      let v: serde_json::Value = c
-        .put(
-          &format!("/api/services/{}/note", seg(&name)),
-          &serde_json::json!({ "note": note }),
-        )
-        .await?;
-      if j {
-        out(j, &v, pretty);
-      } else {
-        println!("已保存 {name} 的备注");
-      }
-      Ok(())
+    ServiceCmd::Note { name, args } => {
+      crate::note::run(c, "service", &name, args, j).await
     }
     ServiceCmd::Show { name } => {
       let v: ServiceView =
@@ -1864,17 +1921,12 @@ async fn service(
       follow: true,
       ..
     } => {
-      use std::io::Write;
-      let mut stdout = std::io::stdout();
-      c.follow(
+      follow_logs(
+        c,
         &format!(
           "/api/services/{}/logs/stream?tail={tail}",
           seg(&name)
         ),
-        |chunk| {
-          let _ = stdout.write_all(chunk);
-          let _ = stdout.flush();
-        },
       )
       .await
     }
@@ -2797,7 +2849,25 @@ async fn gateway(
       });
       Ok(())
     }
-    GatewayCmd::Logs { name, tail } => {
+    GatewayCmd::Logs {
+      name,
+      tail,
+      follow: true,
+    } => {
+      follow_logs(
+        c,
+        &format!(
+          "/api/gateways/{}/logs/stream?tail={tail}",
+          seg(&name)
+        ),
+      )
+      .await
+    }
+    GatewayCmd::Logs {
+      name,
+      tail,
+      follow: false,
+    } => {
       let v: Value = c
         .get(&format!(
           "/api/gateways/{}/logs?tail={tail}",
@@ -3023,6 +3093,11 @@ async fn gateway(
 
 async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
   match cmd {
+    RouteCmd::Note { host, args } => {
+      let host =
+        host.trim().trim_end_matches('.').to_ascii_lowercase();
+      crate::note::run(c, "route", &host, args, j).await
+    }
     RouteCmd::List => {
       let v: Vec<RouteView> = c.get("/api/routes").await?;
       out(j, &v, |v| {
@@ -3073,6 +3148,9 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
                 ""
               }
           );
+          if let Some(note) = &r.note {
+            println!("    备注：{note}");
+          }
           for p in &r.spec.paths {
             println!(
               "    {}  →  {}",
@@ -4094,49 +4172,6 @@ pub(crate) async fn finish_task(
   match run.status {
     RunStatus::Succeeded => Ok(()),
     _ => Err(CliError::Exit(4)),
-  }
-}
-
-async fn token(c: &Client, cmd: TokenCmd, j: bool) -> CliResult<()> {
-  match cmd {
-    TokenCmd::List => {
-      let v: Vec<TokenView> = c.get("/api/tokens").await?;
-      out(j, &v, |v| {
-        for t in v {
-          let perms: Vec<&str> =
-            t.perms.iter().map(|p| p.as_str()).collect();
-          println!("{:<14} {}", t.name, perms.join(","));
-        }
-      });
-      Ok(())
-    }
-    TokenCmd::Create { name, perms, scope } => {
-      let body = match (perms, scope) {
-        (Some(p), _) => json!({
-          "name": name,
-          "perms": p.split(',').map(str::trim).filter(|x| !x.is_empty()).collect::<Vec<_>>(),
-        }),
-        (None, scope) => json!({ "name": name, "scope": scope }),
-      };
-      let v: CreatedToken = c.post("/api/tokens", &body).await?;
-      out(j, &v, |v| {
-        let perms: Vec<&str> =
-          v.perms.iter().map(|p| p.as_str()).collect();
-        println!(
-          "已创建 token {}（{}），只显示这一次：\n{}",
-          v.name,
-          perms.join(","),
-          v.token
-        )
-      });
-      Ok(())
-    }
-    TokenCmd::Rm { name } => {
-      let v: Value =
-        c.delete(&format!("/api/tokens/{}", seg(&name))).await?;
-      out(j, &v, |_| println!("已删除 token {name}"));
-      Ok(())
-    }
   }
 }
 

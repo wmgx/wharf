@@ -81,6 +81,8 @@ pub struct ReachView {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ServerView {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub note: Option<String>,
   pub name: String,
   pub settings: ServerSettings,
   /// agent 是否已经加入（完成过 join）。
@@ -469,6 +471,8 @@ pub struct GatewayView {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RouteView {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub note: Option<String>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub sso_login: Option<SsoLoginState>,
   pub id: String,
@@ -872,6 +876,12 @@ impl Perm {
 pub struct TokenView {
   pub name: String,
   pub perms: Vec<Perm>,
+  #[serde(default)]
+  pub expires_at: Option<DateTime<Utc>>,
+  #[serde(default)]
+  pub allowed_from: Vec<String>,
+  #[serde(default)]
+  pub services: Vec<String>,
   pub created_at: DateTime<Utc>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub last_used_at: Option<DateTime<Utc>>,
@@ -881,8 +891,25 @@ pub struct TokenView {
 pub struct CreatedToken {
   pub name: String,
   pub perms: Vec<Perm>,
+  #[serde(default)]
+  pub expires_at: Option<DateTime<Utc>>,
+  #[serde(default)]
+  pub allowed_from: Vec<String>,
+  #[serde(default)]
+  pub services: Vec<String>,
   /// 只返回这一次。
   pub token: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TokenSettings {
+  pub perms: Vec<Perm>,
+  #[serde(default)]
+  pub expires_at: Option<DateTime<Utc>>,
+  #[serde(default)]
+  pub allowed_from: Vec<String>,
+  #[serde(default)]
+  pub services: Vec<String>,
 }
 
 /// 一次备份的记录（成功或失败）。

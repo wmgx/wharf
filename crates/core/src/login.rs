@@ -46,12 +46,13 @@ const LOCKOUT: Duration = Duration::from_secs(15 * 60);
 static FAILURES: LazyLock<Mutex<HashMap<String, (u32, Instant)>>> =
   LazyLock::new(Default::default);
 
-/// 登录请求的来源：用 TCP 对端地址。对端是本机或内网（网关所在）时，
-/// 才取网关追加在 `X-Forwarded-For` 最后的客户端地址；公网直连伪造的头不认。
+/// 登录请求默认用 TCP 对端地址。对端是本机、内网或组网地址时，
+/// 取网关追加在 `X-Forwarded-For` 末尾的客户端地址。
 pub(crate) fn client_key(
   peer: std::net::IpAddr,
   headers: &HeaderMap,
 ) -> String {
+  let peer = peer.to_canonical();
   let trusted = match peer {
     std::net::IpAddr::V4(ip) => {
       ip.is_loopback()
@@ -61,15 +62,15 @@ pub(crate) fn client_key(
     }
     std::net::IpAddr::V6(ip) => {
       ip.is_loopback()
-        || ip
-          .to_ipv4_mapped()
-          .is_some_and(|v| v.is_loopback() || v.is_private())
+        || ip.segments()[..3] == [0xfd7a, 0x115c, 0xa1e0]
     }
   };
   trusted
     .then(|| {
       headers
-        .get("x-forwarded-for")
+        .get_all("x-forwarded-for")
+        .iter()
+        .next_back()
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.rsplit(',').next())
         .map(|v| v.trim().to_string())
@@ -649,7 +650,8 @@ mod tests {
   #[test]
   fn locks_after_repeated_failures_per_client() {
     let mut h = HeaderMap::new();
-    h.insert(
+    h.insert("x-forwarded-for", "1.2.3.4".parse().unwrap());
+    h.append(
       "x-forwarded-for",
       "1.2.3.4, 203.0.113.9".parse().unwrap(),
     );
@@ -660,6 +662,10 @@ mod tests {
     );
     let key = client_key("127.0.0.1".parse().unwrap(), &h);
     assert_eq!(key, "203.0.113.9");
+    assert_eq!(
+      client_key("fd7a:115c:a1e0::7".parse().unwrap(), &h),
+      key
+    );
     for _ in 0..MAX_FAILURES - 1 {
       record_failure(&key);
     }

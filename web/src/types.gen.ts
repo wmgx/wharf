@@ -546,8 +546,11 @@ export interface CoreAddresses {
 }
 
 export interface CreatedToken {
+  allowed_from: string[];
+  expires_at: string | null;
   name: string;
   perms: Perm[];
+  services: string[];
   /**
    * 只返回这一次。
    */
@@ -1823,6 +1826,7 @@ export interface RouteView {
    */
   gateway?: string | null;
   id: string;
+  note?: string | null;
   /**
    * 主网关那台离线，DNS 现在指向备用入口（`gateway` 是备用网关）。
    */
@@ -2001,6 +2005,7 @@ export interface ServerView {
   joined: boolean;
   last_seen?: string | null;
   name: string;
+  note?: string | null;
   online: boolean;
   /**
    * 实际使用的内网地址：设置里的覆盖值，否则是 agent 检测到的组网地址。
@@ -2470,11 +2475,21 @@ export interface TimelineItem {
   title: string;
 }
 
+export interface TokenSettings {
+  allowed_from: string[];
+  expires_at: string | null;
+  perms: Perm[];
+  services: string[];
+}
+
 export interface TokenView {
+  allowed_from: string[];
   created_at: string;
+  expires_at: string | null;
   last_used_at?: string | null;
   name: string;
   perms: Perm[];
+  services: string[];
 }
 
 /**

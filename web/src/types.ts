@@ -46,6 +46,7 @@ export interface AgentReport {
 }
 
 export interface ServerView {
+  note?: string;
   name: string;
   settings: Record<string, unknown> & {
     host_terminal: boolean;
@@ -226,6 +227,7 @@ export interface RouteSpec {
 }
 
 export interface RouteView {
+  note?: string;
   sso_login?: Gen.SsoLoginState;
   id: string;
   spec: RouteSpec;
@@ -547,20 +549,10 @@ export interface SecretView {
   system?: string;
 }
 
-export type Perm = "read" | "plan" | "apply" | "confirm" | "exec" | "admin";
-
-export interface TokenView {
-  name: string;
-  perms: Perm[];
-  created_at: string;
-  last_used_at?: string;
-}
-
-export interface CreatedToken {
-  name: string;
-  perms: Perm[];
-  token: string;
-}
+export type Perm = Gen.Perm;
+export type TokenView = Gen.TokenView;
+export type CreatedToken = Gen.CreatedToken;
+export type TokenSettings = Gen.TokenSettings;
 
 export interface CoreBackupView {
   to?: string;

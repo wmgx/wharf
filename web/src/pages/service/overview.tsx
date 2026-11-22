@@ -14,7 +14,7 @@ import { Button } from "@/components/ui/button";
 import { useStatus } from "@/status";
 import type { ExposureView } from "@/types.gen";
 import type { RouteView, ServiceView, Timeline } from "@/types";
-import { ServiceNote } from "./note";
+import { ResourceNote } from "./note";
 import { dataSummary } from "./status-text";
 
 const kinds: Record<string, string> = { deploy: "部署", backup: "备份", task: "任务", heal: "自动重启", alert: "告警", op: "操作" };
@@ -138,7 +138,7 @@ export function Overview({ svc, routes, onTab, onBackup, onOpen }: { svc: Servic
       </Row>)}</Rows>
     </>}
     <SectionTitle>备注</SectionTitle>
-    <ServiceNote svc={svc} />
+    <ResourceNote path={`/api/services/${encodeURIComponent(svc.name)}/note`} value={svc.note} />
     {!!timeline?.items.length && <>
       <SectionTitle action={<Button variant="ghost" size="xs" onClick={() => onTab("history")}>全部</Button>}>最近</SectionTitle>
       <Rows>

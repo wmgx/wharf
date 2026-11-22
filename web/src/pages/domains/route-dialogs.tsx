@@ -89,8 +89,8 @@ export function AddPathDialog({ taken, onAdd, onClose }: { taken: string[]; onAd
 /** 常用片段。`@m` 插入时换成没用过的匹配器名，同一个片段插两次也不冲突。 */
 const SNIPPETS: [string, string, string][] = [
   ["禁止访问路径", "deny", "@m path /admin/*\nrespond @m 403"],
-  ["路径只给内网", "outside", "@m {\n\tpath /admin/*\n\tnot remote_ip private_ranges 100.64.0.0/10\n}\nrespond @m 403"],
-  ["只允许这些 IP", "others", "@m not remote_ip 203.0.113.0/24 private_ranges 100.64.0.0/10\nrespond @m 403"],
+  ["路径只给内网", "outside", "@m {\n\tpath /admin/*\n\tnot remote_ip private_ranges 100.64.0.0/10 fd7a:115c:a1e0::/48\n}\nrespond @m 403"],
+  ["只允许这些 IP", "others", "@m not remote_ip 203.0.113.0/24 private_ranges 100.64.0.0/10 fd7a:115c:a1e0::/48\nrespond @m 403"],
   ["安全响应头", "", "header {\n\tStrict-Transport-Security \"max-age=31536000\"\n\tX-Frame-Options SAMEORIGIN\n\tX-Content-Type-Options nosniff\n\tReferrer-Policy strict-origin-when-cross-origin\n}"],
   ["禁止搜索引擎收录", "", "header X-Robots-Tag \"noindex, nofollow\""],
 ];

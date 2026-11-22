@@ -216,6 +216,8 @@ struct StoredPlanBody {
   // 旧计划没有引用清单，沿用生成时取所有账号的指纹。
   #[serde(default)]
   account_refs: Option<BTreeSet<String>>,
+  #[serde(default)]
+  route_effects: crate::token_scope::RouteEffects,
 }
 
 struct StoredPlan {
@@ -271,7 +273,8 @@ async fn stored_plan(
 pub async fn start(
   state: Arc<AppState>,
   req: ApplyRequest,
-  perms: std::collections::BTreeSet<Perm>,
+  perms: &std::collections::BTreeSet<Perm>,
+  auth: Option<&crate::auth::Auth>,
 ) -> Result<ApplyResponse, ApiError> {
   let guard = state
     .apply_lock
@@ -280,6 +283,13 @@ pub async fn start(
     .map_err(|_| state.runs.busy_error())?;
   let stored = stored_plan(&state, &req.plan_id).await?;
   let plan = &stored.body.plan;
+  if let Some(auth) = auth {
+    crate::token_scope::require_plan(
+      auth,
+      plan,
+      &stored.body.route_effects,
+    )?;
+  }
   let replan = "wharf plan".to_string();
   if plan.status == PlanStatus::Applied {
     return Err(

@@ -6,6 +6,7 @@ import { Facts, Panel } from "@/components/kit";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import type { HostInfo, ServerView, Status } from "@/types";
+import { ResourceNote } from "../service/note";
 import { size, type Traffic } from "./format";
 
 export function Overview({ server, status, info, traffic, loading }: { server: ServerView; status: Status; info: HostInfo | null; traffic: Traffic | null; loading: boolean }) {
@@ -31,6 +32,8 @@ export function Overview({ server, status, info, traffic, loading }: { server: S
       </>} used={disk ? 1 - disk.free / disk.total : undefined} />
       <Stat label="流量" value={traffic ? `本期 ${size(used)}` : undefined} sub={traffic ? traffic.quota ? `额度 ${size(traffic.quota)} · 已用 ${Math.round(used / traffic.quota * 100)}%` : `${traffic.since.slice(5)} 起` : undefined} used={traffic?.quota ? used / traffic.quota : undefined} />
     </div>
+    <SectionTitle>备注</SectionTitle>
+    <ResourceNote path={`/api/servers/${encodeURIComponent(name)}/note`} value={server.note} />
     <SectionTitle>基本信息</SectionTitle>
     <Panel className="p-4">
       <Facts items={[

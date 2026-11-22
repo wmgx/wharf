@@ -14,17 +14,19 @@ use crate::{
 const MAX_UPLOAD: u64 = 100 << 20;
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
-fn api(name: &str, sub: &str, path: &str) -> String {
-  format!("/api/services/{}/files{sub}?path={}", seg(name), seg(path))
-}
-
 pub async fn list(
   c: &Client,
   name: &str,
   path: &str,
   j: bool,
 ) -> CliResult<()> {
-  let v: Vec<FileEntry> = c.get(&api(name, "", path)).await?;
+  let v: Vec<FileEntry> = c
+    .get(&format!(
+      "/api/services/{}/files?path={}",
+      seg(name),
+      seg(path)
+    ))
+    .await?;
   out(j, &v, |v| {
     if v.is_empty() {
       println!("（空目录）");
@@ -70,7 +72,11 @@ pub async fn download(
   output: Option<String>,
   j: bool,
 ) -> CliResult<()> {
-  let url = api(name, "/download", path);
+  let url = format!(
+    "/api/services/{}/files/download?path={}",
+    seg(name),
+    seg(path)
+  );
   if output.as_deref() == Some("-") {
     let mut stdout = std::io::stdout();
     c.download(&url, DOWNLOAD_TIMEOUT, |b| stdout.write_all(b))
@@ -135,7 +141,16 @@ pub async fn upload(
   let bytes = std::fs::read(local).map_err(|e| {
     ApiError::invalid(format!("读不了 {}：{e}", local.display()))
   })?;
-  let v: Value = c.put_bytes(&api(name, "", path), bytes).await?;
+  let v: Value = c
+    .put_bytes(
+      &format!(
+        "/api/services/{}/files?path={}",
+        seg(name),
+        seg(path)
+      ),
+      bytes,
+    )
+    .await?;
   out(j, &v, |_| {
     println!("已上传到 {name}:{path}（{}）", human_size(size))
   });

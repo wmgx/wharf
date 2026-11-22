@@ -1,0 +1,19 @@
+{
+  "/api/core-backup/recovery-key": "页面重新验证登录密码后下载恢复密钥。",
+  "/api/login": "建立浏览器会话。CLI 登录使用访问令牌。",
+  "/api/logout": "退出浏览器会话。",
+  "/api/oidc/clients/{}/secret": "控制面仅允许页面会话查看客户端密钥。",
+  "/api/servers/{}/terminal": "待补：交互式宿主机终端需要处理本机终端模式、窗口大小、输入输出和断开清理。",
+  "/api/services/{}/terminal": "待补：交互式容器终端需要处理本机终端模式、窗口大小、输入输出和断开清理。",
+  "/api/session": "页面启动时判断首次设置或登录状态。",
+  "/api/sessions": "列出当前用户的浏览器会话。",
+  "/api/sessions/revoke-others": "保留当前浏览器会话并退出其他会话。",
+  "/api/sessions/{}": "从页面退出指定浏览器会话。",
+  "/api/setup": "首次设置页面管理员。",
+  "/api/totp": "页面安全设置展示两步验证状态。",
+  "/api/totp/begin": "页面重新验证密码后开始设置两步验证。",
+  "/api/totp/disable": "页面重新验证密码及验证码后关闭两步验证。",
+  "/api/totp/enable": "页面确认动态验证码后开启两步验证。",
+  "/api/totp/recovery": "页面重新验证身份后更新恢复码。",
+  "/api/vault": "页面用登录密码在浏览器中解密备注的数据密钥。"
+}

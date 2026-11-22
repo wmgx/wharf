@@ -260,6 +260,7 @@ pub struct StepPlan {
 pub struct Planned {
   pub plan: Plan,
   pub account_refs: BTreeSet<String>,
+  pub route_effects: crate::token_scope::RouteEffects,
   pub steps: Vec<StepPlan>,
   pub writes: Vec<Write>,
 }
@@ -268,6 +269,7 @@ pub struct Planned {
 pub(crate) struct Builder {
   pub(crate) items: Vec<PlanItem>,
   steps: Vec<StepPlan>,
+  route_effects: crate::token_scope::RouteEffects,
   pub(crate) warnings: Vec<String>,
   /// 这次计划查到的镜像 ID：服务 → 镜像 → `sha256:…`。
   image_ids: BTreeMap<String, BTreeMap<String, String>>,
@@ -638,6 +640,12 @@ pub async fn make_plan(
   crate::edge_plan::edge_items(&mut b, &snap, &current, &desired)
     .await?;
   mark("边缘应用");
+  crate::token_scope::record_dns_routes(
+    &mut b.route_effects,
+    &b.steps,
+    &current,
+    &desired,
+  );
   tracing::info!(
     "生成计划用时 {}ms：{}",
     started.elapsed().as_millis(),
@@ -704,6 +712,7 @@ pub async fn make_plan(
   Ok(Planned {
     plan,
     account_refs,
+    route_effects: b.route_effects,
     steps: b.steps,
     writes,
   })
@@ -2069,6 +2078,22 @@ fn gateway_items(
         }
         GatewayKind::CloudflareTunnel => (Layer::Tunnel, reason),
       };
+      let routes = if gw.spec.kind == GatewayKind::Caddy
+        && action == Action::Update
+        && risk.is_empty()
+        && current.gateways.get(name) == Some(gw)
+        && let Some(hash) = status
+          .get(server)
+          .and_then(Option::as_ref)
+          .and_then(|p| p.get(&project))
+          .and_then(|s| s.config_hash.as_deref())
+      {
+        crate::token_scope::gateway_routes(
+          &b.items, current, desired, net, name, hash,
+        )
+      } else {
+        vec![]
+      };
       let id = b.item(
         format!("{KIND_GATEWAY}/{name}"),
         layer,
@@ -2078,6 +2103,9 @@ fn gateway_items(
         risk,
         reason,
       );
+      if !routes.is_empty() {
+        b.route_effects.insert(id, routes);
+      }
       b.step(
         vec![id],
         format!("在 {server} 上应用网关 {name}"),
@@ -2444,6 +2472,9 @@ pub async fn save(
   let mut body =
     serde_json::to_value(&planned.plan).map_err(db::json_err)?;
   body["account_refs"] = json!(&planned.account_refs);
+  if !planned.route_effects.is_empty() {
+    body["route_effects"] = json!(&planned.route_effects);
+  }
   let body = body.to_string();
   let steps =
     serde_json::to_string(&planned.steps).map_err(db::json_err)?;

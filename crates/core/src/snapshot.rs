@@ -51,6 +51,8 @@ pub struct Snapshot {
   pub ops: BTreeMap<String, wharf_api_types::view::LastOp>,
   /// 服务备注。
   pub notes: BTreeMap<String, String>,
+  pub server_notes: BTreeMap<String, String>,
+  pub route_notes: BTreeMap<String, String>,
   /// Wharf 记录的线上版本。
   pub edge_expected: BTreeMap<String, db::EdgeExpected>,
   /// 边缘应用上次发布成功的配置指纹（或"发布中"）。
@@ -128,6 +130,14 @@ async fn load_inner(db: &Db) -> Result<Snapshot, ApiError> {
         applied: db::applied(c)?,
         ops: db::service_ops(c)?,
         notes: db::service_notes(c)?,
+        server_notes: crate::notes::resource_notes(
+          c,
+          crate::world::KIND_SERVER,
+        )?,
+        route_notes: crate::notes::resource_notes(
+          c,
+          crate::world::KIND_ROUTE,
+        )?,
         imports: db::imports(c)?,
         tunnels: db::tunnels(c)?,
         edge_domains: db::edge_domains(c)?,

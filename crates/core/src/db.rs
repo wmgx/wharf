@@ -354,6 +354,17 @@ ALTER TABLE alert_history ADD COLUMN subject TEXT;
     created_at INTEGER NOT NULL,
     last_used_at INTEGER
   );",
+  "ALTER TABLE api_tokens ADD COLUMN expires_at INTEGER;
+   ALTER TABLE api_tokens ADD COLUMN allowed_from TEXT;
+   ALTER TABLE api_tokens ADD COLUMN services TEXT;",
+  "CREATE TABLE resource_notes (
+    kind TEXT NOT NULL,
+    name TEXT NOT NULL,
+    note TEXT NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (kind, name),
+    FOREIGN KEY (kind, name) REFERENCES resources(kind, name) ON DELETE CASCADE
+  );",
 ];
 
 /// git 构建来源固定到上次部署构建的 commit（仓库和分支没换过的）。当时没记下 commit 的留给 plan 提醒。
@@ -1383,25 +1394,45 @@ pub fn remove_owned(
 
 // TOKENS
 
+pub struct TokenRow {
+  pub name: String,
+  pub perms: String,
+  pub expires_at: Option<i64>,
+  pub allowed_from: Option<String>,
+  pub services: Option<String>,
+}
+
+impl TokenRow {
+  pub fn read(r: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+    Ok(Self {
+      name: r.get(0)?,
+      perms: r.get(1)?,
+      expires_at: r.get(2)?,
+      allowed_from: r.get(3)?,
+      services: r.get(4)?,
+    })
+  }
+}
+
 pub fn token_scope(
   conn: &Connection,
   hash: &str,
-) -> Result<Option<(String, String)>, ApiError> {
-  let found: Option<(String, String)> = conn
+) -> Result<Option<TokenRow>, ApiError> {
+  let found = conn
     .query_row(
-      "SELECT name, scope FROM api_tokens WHERE hash = ?1",
+      "SELECT name, scope, expires_at, allowed_from, services FROM api_tokens WHERE hash = ?1",
       params![hash],
-      |r| Ok((r.get(0)?, r.get(1)?)),
+      TokenRow::read,
     )
     .optional()
     .map_err(sql_err)?;
-  if let Some((name, _)) = &found {
+  if let Some(row) = &found {
     conn
       .execute(
         // 每个请求都要过这里；一分钟内用过就不再写，磁盘忙时不拖慢请求。
         "UPDATE api_tokens SET last_used_at = ?1 WHERE name = ?2 \
          AND (last_used_at IS NULL OR last_used_at < ?1 - 60000)",
-        params![now_ms(), name],
+        params![now_ms(), row.name],
       )
       .map_err(sql_err)?;
   }

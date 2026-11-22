@@ -1261,7 +1261,7 @@ pub fn caddyfile(
       out.push_str(&dns_tls(name, subdomain));
     }
     if site.internal {
-      out.push_str("\t@wharf_outside not remote_ip private_ranges 100.64.0.0/10\n\tabort @wharf_outside\n");
+      out.push_str("\t@wharf_outside not remote_ip private_ranges 100.64.0.0/10 fd7a:115c:a1e0::/48\n\tabort @wharf_outside\n");
     }
     if site.block_scanners {
       out.push_str("\timport wharf_scanners\n");
@@ -1482,7 +1482,7 @@ mod tests {
     let out =
       caddyfile("edge", &gw, &[site.clone()], &[], false, None);
     assert!(out.contains("dns acmedns {"));
-    assert!(out.contains("@wharf_outside not remote_ip private_ranges 100.64.0.0/10\n\tabort @wharf_outside"));
+    assert!(out.contains("@wharf_outside not remote_ip private_ranges 100.64.0.0/10 fd7a:115c:a1e0::/48\n\tabort @wharf_outside"));
     assert!(
       out.find("import wharf_errors").unwrap()
         < out.find("\ttls {").unwrap()
@@ -2378,15 +2378,19 @@ mod tests {
       false,
       Some("public"),
     );
-    site.gate.as_mut().unwrap().trusted =
-      vec!["100.64.0.0/10".into(), "127.0.0.0/8".into()];
+    site.gate.as_mut().unwrap().trusted = vec![
+      "100.64.0.0/10".into(),
+      "127.0.0.0/8".into(),
+      "::1/128".into(),
+      "fd7a:115c:a1e0::/48".into(),
+    ];
     let after =
       caddyfile("edge", &gw, &[site], &[], false, Some("public"));
     assert_eq!(
-      after.replace("\t\ttrust 100.64.0.0/10 127.0.0.0/8\n", ""),
+      after.replace("\t\ttrust 100.64.0.0/10 127.0.0.0/8 ::1/128 fd7a:115c:a1e0::/48\n", ""),
       before
     );
-    assert!(after.contains("\t\ttrust 100.64.0.0/10 127.0.0.0/8\n"));
+    assert!(after.contains("\t\ttrust 100.64.0.0/10 127.0.0.0/8 ::1/128 fd7a:115c:a1e0::/48\n"));
   }
   #[test]
   fn caddyfile_gate_without_trust_unchanged() {
