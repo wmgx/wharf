@@ -6,7 +6,7 @@ use axum::{
   extract::{ConnectInfo, FromRequestParts},
   http::request::Parts,
 };
-use chrono::{DateTime, Local, Utc};
+use chrono::{DateTime, Utc};
 use rusqlite::params;
 use sha2::{Digest, Sha256};
 use wharf_api_types::{
@@ -232,8 +232,8 @@ async fn authenticate(
   if let Some(time) = expires_at.filter(|time| *time <= Utc::now()) {
     return Err(ApiError::new(
       ErrorCode::Unauthorized,
-      format!("访问令牌 {name} 已在 {} 过期", time.with_timezone(&Local).format("%Y-%m-%d %H:%M")),
-    ).with_hint(format!("在页面‘设置 → CLI 与 AI 接入’续期，或用有 admin 权限的令牌执行 wharf token set {name} --expires 30d")).into());
+      format!("访问令牌 {name} 已在 {} 过期", time.format("%Y-%m-%d %H:%M UTC")),
+    ).with_hint(format!("在页面\u{201c}设置 → CLI 与 AI 接入\u{201d}续期，或用有 admin 权限的令牌执行 wharf token set {name} --expires 30d")).into());
   }
   let allowed_from = crate::tokens::split_list(row.allowed_from);
   if !allowed_from.is_empty() {

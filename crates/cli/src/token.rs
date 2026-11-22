@@ -66,6 +66,18 @@ fn expiry(
   Ok(Some(time))
 }
 
+fn expiry_label(left: TimeDelta) -> String {
+  if left <= TimeDelta::zero() {
+    "已过期".into()
+  } else if left.num_days() > 0 {
+    format!("剩 {} 天", left.num_days())
+  } else if left.num_hours() > 0 {
+    format!("剩 {} 小时", left.num_hours())
+  } else {
+    format!("剩 {} 分钟", left.num_minutes().max(1))
+  }
+}
+
 pub async fn run(
   cmd: TokenCmd,
   url: Option<String>,
@@ -98,14 +110,7 @@ pub async fn run(
             .collect::<Vec<_>>();
           let mut limits = vec![];
           if let Some(expires) = token.expires_at {
-            let left = expires - Utc::now();
-            limits.push(if left <= TimeDelta::zero() {
-              "已过期".into()
-            } else if left.num_days() > 0 {
-              format!("剩 {} 天", left.num_days())
-            } else {
-              format!("剩 {} 小时", left.num_hours())
-            });
+            limits.push(expiry_label(expires - Utc::now()));
           }
           if !token.allowed_from.is_empty() {
             limits
@@ -223,4 +228,17 @@ pub async fn run(
     }
   }
   Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::{TimeDelta, expiry_label};
+
+  #[test]
+  fn formats_time_left() {
+    assert_eq!(expiry_label(TimeDelta::minutes(30)), "剩 30 分钟");
+    assert_eq!(expiry_label(TimeDelta::hours(3)), "剩 3 小时");
+    assert_eq!(expiry_label(TimeDelta::days(2)), "剩 2 天");
+    assert_eq!(expiry_label(TimeDelta::seconds(-1)), "已过期");
+  }
 }
