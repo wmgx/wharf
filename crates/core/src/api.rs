@@ -20,9 +20,9 @@ use wharf_api_types::{
   spec::Fleet,
   validate_name,
   view::{
-    AccountView, CreatedToken, DataView, DeploymentView, GatewayView,
-    JoinInfo, JoinRequest, JoinResponse, Perm, RouteView, SecretView,
-    ServerView, ServiceView, Status, TokenScope, TokenView,
+    AccountView, DataView, DeploymentView, GatewayView, JoinInfo,
+    JoinRequest, JoinResponse, Perm, RouteView, SecretView,
+    ServerView, ServiceView, Status,
   },
 };
 
@@ -213,6 +213,7 @@ pub fn router(state: Arc<AppState>) -> Router {
       post(crate::agent_upgrade::upgrade_now),
     )
     .route("/api/servers/{name}/prune", post(crate::prune::prune_now))
+    .route("/api/servers/{name}/note", put(crate::notes::server))
     .route("/api/servers/{name}/disk", get(crate::disk::show))
     .route("/api/servers/{name}/exposure", get(crate::exposure::show))
     .route(
@@ -300,7 +301,7 @@ pub fn router(state: Arc<AppState>) -> Router {
       "/api/services/{name}/timeline",
       get(crate::timeline::show),
     )
-    .route("/api/services/{name}/note", put(set_note))
+    .route("/api/services/{name}/note", put(crate::notes::service))
     .route("/api/vault", get(show_vault).put(set_vault))
     .route(
       "/api/services/{name}/origin",
@@ -345,12 +346,13 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route("/api/gateways/{name}/logs", get(gateway_logs))
     .route("/api/servers/{name}/agent-logs", get(agent_logs))
     .route("/api/core/logs", get(core_logs))
-    .route("/api/whoami", get(whoami))
+    .route("/api/whoami", get(crate::tokens::whoami))
     .route(
       "/api/gateways/{name}/logs/stream",
       get(crate::logs_stream::gateway),
     )
     .route("/api/routes", get(list_routes))
+    .route("/api/routes/{hostname}/note", put(crate::notes::route))
     .route("/api/accounts", get(list_accounts).post(add_account))
     .route(
       "/api/accounts/{name}",
@@ -416,8 +418,14 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route("/api/runs/{id}/cancel", post(cancel_run))
     .route("/api/export", get(export))
     .route("/api/audit", get(crate::audit::list))
-    .route("/api/tokens", get(list_tokens).post(create_token))
-    .route("/api/tokens/{name}", axum::routing::delete(remove_token))
+    .route(
+      "/api/tokens",
+      get(crate::tokens::list).post(crate::tokens::create),
+    )
+    .route(
+      "/api/tokens/{name}",
+      put(crate::tokens::set).delete(crate::tokens::remove),
+    )
     .fallback(|uri: axum::http::Uri| async move {
       let path = uri.path();
       if path.starts_with("/api/") || path.starts_with("/agent/") {
@@ -828,14 +836,6 @@ pub(crate) fn service_not_found(name: &str) -> ApiError {
     .suggest("wharf service list")
 }
 
-#[derive(Deserialize)]
-struct NoteRequest {
-  note: String,
-}
-
-// 私密内容在浏览器里加密后以 base64 存进来，比原文长不少，所以放宽到 2 万字。
-const NOTE_LIMIT: usize = 20000;
-
 /// 备注私密内容的数据密钥，由浏览器用登录密码包好后存在这里；控制面只存不解。
 const VAULT_KEY: &str = "note_vault";
 
@@ -866,30 +866,6 @@ async fn set_vault(
     .call(move |c| {
       crate::db::set_setting(c, VAULT_KEY, Some(&req.vault))
     })
-    .await?;
-  Ok(Json(json!({ "ok": true })))
-}
-
-/// 改服务备注：不影响部署，直接保存，不走计划。传空字符串清除。
-async fn set_note(
-  State(s): State<Arc<AppState>>,
-  auth: Auth,
-  Path(name): Path<String>,
-  Json(req): Json<NoteRequest>,
-) -> ApiResult<Value> {
-  auth.require(Perm::Apply)?;
-  let note = req.note.trim().to_string();
-  if note.chars().count() > NOTE_LIMIT {
-    return Err(
-      ApiError::invalid(format!("备注最多 {NOTE_LIMIT} 个字")).into(),
-    );
-  }
-  let snap = snapshot::load(&s.db).await?;
-  if !snap.world.services.contains_key(&name) {
-    return Err(service_not_found(&name).into());
-  }
-  s.db
-    .call(move |c| crate::db::set_service_note(c, &name, &note))
     .await?;
   Ok(Json(json!({ "ok": true })))
 }
@@ -994,17 +970,6 @@ async fn fetch_logs(
   let mut v = serde_json::to_value(found).unwrap_or_default();
   v["server"] = json!(server);
   Ok(v)
-}
-
-/// `GET /api/whoami`：当前调用者是谁、有哪些权限，以及控制面的构建号。
-async fn whoami(auth: Auth) -> ApiResult<Value> {
-  Ok(Json(json!({
-    "name": auth.name,
-    "human": auth.human,
-    "perms": auth.perms.iter().map(|p| p.as_str()).collect::<Vec<_>>(),
-    "build": wharf_api_types::BUILD,
-    "version": env!("CARGO_PKG_VERSION"),
-  })))
 }
 
 /// `GET /api/servers/{name}/agent-logs`：这台机器上 agent 自己的日志。
@@ -1620,6 +1585,11 @@ async fn make_plan(
     guard_dangerous(&s, &req).await?;
   }
   let planned = planner::make_plan(&s, req).await?;
+  crate::token_scope::require_plan(
+    &auth,
+    &planned.plan,
+    &planned.route_effects,
+  )?;
   planner::save(&s, &planned).await?;
   let mut seen = std::collections::BTreeSet::new();
   let addresses = planned
@@ -1719,7 +1689,8 @@ async fn apply_plan(
     .and_then(|p| p.note)
     .map(|n| format!(" 备注：{n}"))
     .unwrap_or_default();
-  let resp = apply::start(s.clone(), req, auth.perms).await?;
+  let resp =
+    apply::start(s.clone(), req, &auth.perms, Some(&auth)).await?;
   audit
     .set_detail(format!("plan={plan_id} run={}{note}", resp.run_id));
   Ok(Json(resp))
@@ -1780,101 +1751,4 @@ async fn export(
   auth.require(Perm::Read)?;
   let snap = snapshot::load(&s.db).await?;
   Ok(Json(views::export(&snap.world)))
-}
-
-// TOKENS
-
-async fn list_tokens(
-  State(s): State<Arc<AppState>>,
-  auth: Auth,
-) -> ApiResult<Vec<TokenView>> {
-  auth.require(Perm::Admin)?;
-  let rows: Vec<(String, String, i64, Option<i64>)> = s
-    .db
-    .call(|c| {
-      let mut stmt = c
-        .prepare("SELECT name, scope, created_at, last_used_at FROM api_tokens ORDER BY name")
-        .map_err(sql_err)?;
-      let rows = stmt
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
-        .map_err(sql_err)?;
-      rows.collect::<Result<_, _>>().map_err(sql_err)
-    })
-    .await?;
-  Ok(Json(
-    rows
-      .into_iter()
-      .filter_map(|(name, scope, created, used)| {
-        Some(TokenView {
-          name,
-          perms: auth::decode_perms(&scope)?.into_iter().collect(),
-          created_at: to_time(created),
-          last_used_at: used.map(to_time),
-        })
-      })
-      .collect(),
-  ))
-}
-
-/// 新建 token：给 `perms`（权限点），或给旧档位 `scope` 作为预设。
-#[derive(Deserialize)]
-struct CreateToken {
-  name: String,
-  #[serde(default)]
-  scope: Option<TokenScope>,
-  #[serde(default)]
-  perms: Option<Vec<Perm>>,
-}
-
-async fn create_token(
-  State(s): State<Arc<AppState>>,
-  auth: Auth,
-  Json(req): Json<CreateToken>,
-) -> ApiResult<CreatedToken> {
-  auth.require(Perm::Admin)?;
-  validate_name("token", &req.name)?;
-  let token = auth::new_token();
-  let perms = match (req.perms, req.scope) {
-    (Some(p), None) => p,
-    (None, Some(scope)) => Perm::of_scope(scope),
-    _ => {
-      return Err(
-        wharf_api_types::ApiError::invalid("perms 和 scope 要给且只给一个")
-          .with_hint("perms 是权限点列表：read、plan、apply、confirm、exec、admin")
-          .into(),
-      );
-    }
-  };
-  let stored = auth::encode_perms(&perms);
-  let (name, t, p) = (req.name.clone(), token.clone(), perms.clone());
-  s.db
-    .call(move |c| auth::insert_token(c, &name, &p, &t))
-    .await?;
-  Ok(Json(CreatedToken {
-    name: req.name,
-    perms: auth::decode_perms(&stored)
-      .unwrap_or_default()
-      .into_iter()
-      .collect(),
-    token,
-  }))
-}
-
-async fn remove_token(
-  State(s): State<Arc<AppState>>,
-  auth: Auth,
-  Path(name): Path<String>,
-) -> ApiResult<Value> {
-  auth.require(Perm::Admin)?;
-  let removed = s
-    .db
-    .call(move |c| {
-      c.execute(
-        "DELETE FROM api_tokens WHERE name = ?1",
-        params![name],
-      )
-      .map_err(sql_err)
-    })
-    .await?;
-  Ok(Json(json!({ "removed": removed > 0 })))
 }

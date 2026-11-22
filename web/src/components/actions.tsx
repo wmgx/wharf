@@ -175,8 +175,8 @@ export function ActionsProvider({ children }: { children: ReactNode }) {
     },
     rollback: async (name, to) => {
       try {
-        const q = to != null ? `?to=${to}` : "";
-        const t = await api.get<RollbackTarget>(`/api/services/${encodeURIComponent(name)}/rollback${q}`);
+        const q = to != null ? `to=${to}` : "";
+        const t = await api.get<RollbackTarget>(`/api/services/${encodeURIComponent(name)}/rollback?${q}`);
         actions.plan({ title: `${name} 回到版本 #${t.deployment_id}`, changes: [{ op: "upsert_service", name, spec: t.spec }] });
       } catch (e) {
         toast.error(`回滚 ${name} 失败`, { description: (e as Error).message });

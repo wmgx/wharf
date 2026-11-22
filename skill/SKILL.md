@@ -26,7 +26,7 @@ Wharf 是一个人用的多服务器管理系统。你通过 `wharf` 命令行�
    `wharf whoami --json` 看当前 token 的权限；提示本机 wharf 和控制面版本不同时运行 `wharf self-update`，再用 `wharf commands --changes` 看新版本多了哪些命令和参数。
    要等部署完成、服务恢复、告警解除时用 `wharf wait`，不要自己循环查：`wharf wait service <服务>`、`wharf wait route <域名>`、`wharf wait clear --subject <服务>`，默认最多等 10 分钟（`--timeout`）。
 6. **不打印、不写入 token 和密钥。** 服务要用的密码放进密钥（`wharf secret`），环境变量里用 `[[NAME]]` 引用。
-7. **直接生效的命令先预览。** `wharf task add/rm`、`wharf secret set/rm`、`wharf alert set`、`wharf service note` 不走计划，先加 `--dry-run` 看会改什么。
+7. **直接生效的命令先预览。** `wharf task add/rm`、`wharf secret set/rm`、`wharf alert set`、`wharf token set`、`wharf service note`、`wharf server note`、`wharf route note` 不走计划，先加 `--dry-run` 看会改什么。
    修改时加 `--reason "<为什么>"`，生成计划时可以加 `--note "<备注>"`，都会记进操作记录。
 8. **宿主机命令要用户同意。** `wharf exec <服务器> -- '<命令>'`、`wharf server prune`、`wharf server baseline --apply` 这类直接动机器的操作，先说明要做什么。
 
@@ -39,6 +39,11 @@ wharf status --json        # 服务器、服务、网关、路由；problems 和
 ```
 
 没有登录或连不上控制面时，让用户在页面“设置 → 访问令牌 → 接入 CLI / AI”里拿安装登录命令，不要自己找 token。
+
+给 AI 签发访问令牌时，建议用 `--expires 30d` 设置有效期，用 `--from <地址或网段>` 限制来源；`--services blog,halo` 可以限定可操作的服务。
+管理员用 `wharf token set <名称>` 修改这些限制或 `--perms`。用 `--expires never`、`--from any`、`--services all` 分别清除三项限制。
+
+服务器和域名的备注分别用 `wharf server note <服务器> "<文本>"`、`wharf route note <域名> "<文本>"` 保存，`--clear` 清除。
 
 ## 常见任务
 

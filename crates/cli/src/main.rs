@@ -18,11 +18,14 @@ mod edge;
 mod files;
 mod fleet;
 mod gh;
+mod note;
 mod pack;
 mod preview;
 mod print;
 mod selfcmd;
+mod server;
 mod task;
+mod token;
 mod tunnel;
 mod view;
 mod wait;
@@ -378,6 +381,11 @@ pub enum Command {
 
 #[derive(Subcommand)]
 pub enum CoreCmd {
+  /// 查看控制面的候选地址。
+  Addresses,
+  /// 立即检查控制面有没有新构建。
+  Check,
+
   /// 控制面自己的日志。例：`wharf core logs --since 1h --errors`。
   Logs(LogArgs),
 }
@@ -497,6 +505,71 @@ pub struct ApplyFlags {
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)] // 命令行参数，只解析一次
 pub enum ServerCmd {
+  /// 查看最近一次系统更新的状态，或开始安装更新。
+  Apt {
+    name: String,
+    /// 开始安装系统更新。
+    #[arg(long)]
+    apply: bool,
+  },
+  /// 列出宿主机目录。
+  Dirs {
+    name: String,
+    #[arg(default_value = "/")]
+    path: String,
+  },
+  /// 把宿主机目录打包并上传到控制面。
+  Pack {
+    name: String,
+    path: String,
+    /// 为这个服务记住代码来源目录。
+    #[arg(long)]
+    service: Option<String>,
+  },
+  /// 查看或管理宿主机终端会话。
+  Sessions {
+    name: String,
+    /// 结束指定会话。
+    #[arg(long, conflicts_with = "rename")]
+    end: Option<String>,
+    /// 给会话改名，依次传旧名和新名。
+    #[arg(long, num_args = 2, value_names = ["旧名", "新名"])]
+    rename: Option<Vec<String>>,
+  },
+  /// 查看宿主机程序。
+  HostUnits {
+    name: String,
+  },
+  /// 查看一个宿主机程序的日志。
+  HostLogs {
+    name: String,
+    unit: String,
+    #[arg(long, default_value_t = 200)]
+    lines: u32,
+  },
+  /// 监视一个宿主机程序。
+  WatchUnit {
+    name: String,
+    unit: String,
+    /// 取消监视。
+    #[arg(long)]
+    off: bool,
+  },
+  /// 查看服务器上服务和网关的资源用量。
+  Usage {
+    name: String,
+  },
+  /// 查看服务器本周期的流量。
+  Traffic {
+    name: String,
+  },
+
+  /// 设置服务器备注，直接生效。
+  Note {
+    name: String,
+    #[command(flatten)]
+    args: note::NoteArgs,
+  },
   /// 本机监听端口和容器风险。
   Exposure {
     name: String,
@@ -670,6 +743,26 @@ pub enum ServerCmd {
 // 只在启动时解析一次，变体大小无所谓。
 #[allow(clippy::large_enum_variant)]
 pub enum ServiceCmd {
+  /// 查看服务的代码包来自哪台服务器的哪个目录。
+  Origin {
+    name: String,
+  },
+  /// 删除未纳管的容器或 Compose 项目。
+  UnmanagedRemove {
+    server: String,
+    #[arg(
+      long,
+      required_unless_present = "container",
+      conflicts_with = "container"
+    )]
+    project: Option<String>,
+    #[arg(long)]
+    container: Option<String>,
+    /// 同时删除具名数据卷。
+    #[arg(long)]
+    volumes: bool,
+  },
+
   /// 服务的时间线：部署、备份、任务、自动重启、告警、操作记录。
   Timeline {
     name: String,
@@ -735,13 +828,11 @@ pub enum ServiceCmd {
   History {
     name: String,
   },
-  /// 设置备注（给人看的说明，不影响部署，直接保存）。传空字符串清除。
+  /// 设置备注，直接生效。
   Note {
     name: String,
-    note: String,
-    /// 只预览会改什么，不执行。
-    #[arg(long)]
-    dry_run: bool,
+    #[command(flatten)]
+    args: note::NoteArgs,
   },
   /// 停止：容器保留但不运行，之后部署也保持停止。生成计划。
   Stop {
@@ -995,6 +1086,9 @@ pub enum GatewayCmd {
     name: String,
     #[arg(long, default_value_t = 200)]
     tail: u32,
+    /// 持续跟随新日志。
+    #[arg(long, short)]
+    follow: bool,
   },
   /// 在某台服务器上新建网关。修改已有网关时只改给出的参数。
   Add {
@@ -1083,6 +1177,12 @@ pub enum GatewayCmd {
 #[derive(Subcommand)]
 pub enum RouteCmd {
   List,
+  /// 设置域名备注，直接生效。
+  Note {
+    host: String,
+    #[command(flatten)]
+    args: note::NoteArgs,
+  },
   /// 新增或修改路由。修改已有域名时只改给出的参数。
   Add {
     hostname: String,
@@ -1334,6 +1434,34 @@ pub enum TokenCmd {
     /// 旧档位预设：read、plan、apply_safe、apply_all。
     #[arg(long, value_parser = ["read", "plan", "apply_safe", "apply_all"])]
     scope: Option<String>,
+    /// 有效期，例如 30m、12h、7d 或 2026-12-31。
+    #[arg(long)]
+    expires: Option<String>,
+    /// 允许的来源地址或网段，逗号分隔。
+    #[arg(long)]
+    from: Option<String>,
+    /// 允许操作的服务，逗号分隔。
+    #[arg(long)]
+    services: Option<String>,
+  },
+  /// 修改访问令牌的权限和限制。
+  Set {
+    name: String,
+    /// 权限点，逗号分隔。
+    #[arg(long)]
+    perms: Option<String>,
+    /// 有效期，例如 30m、12h、7d、2026-12-31，或用 never 清除。
+    #[arg(long)]
+    expires: Option<String>,
+    /// 允许的来源地址或网段，逗号分隔，或用 any 清除。
+    #[arg(long)]
+    from: Option<String>,
+    /// 允许操作的服务，逗号分隔，或用 all 清除。
+    #[arg(long)]
+    services: Option<String>,
+    /// 只预览会改什么，不执行。
+    #[arg(long)]
+    dry_run: bool,
   },
   Rm {
     name: String,

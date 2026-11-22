@@ -26,15 +26,15 @@ pub fn parse_timeout(s: &str) -> Result<Duration, String> {
     Some((i, c)) if c.is_ascii_alphabetic() => (&s[..i], c),
     _ => (s, 's'),
   };
-  let n: u64 = num
-    .parse()
-    .map_err(|_| format!("时长 {s} 看不懂，写成 90s、10m 或 1h"))?;
-  let secs = match unit {
-    's' => n,
-    'm' => n * 60,
-    'h' => n * 3600,
-    _ => return Err(format!("时长 {s} 看不懂，写成 90s、10m 或 1h")),
+  let invalid = || format!("时长 {s} 看不懂，写成 90s、10m 或 1h");
+  let n: u64 = num.parse().map_err(|_| invalid())?;
+  let multiplier = match unit {
+    's' => 1,
+    'm' => 60,
+    'h' => 3600,
+    _ => return Err(invalid()),
   };
+  let secs = n.checked_mul(multiplier).ok_or_else(invalid)?;
   Ok(Duration::from_secs(secs))
 }
 

@@ -14,6 +14,7 @@ pub mod error;
 pub mod plan;
 pub mod seal;
 pub mod spec;
+pub mod token;
 pub mod tunnel;
 pub mod view;
 pub mod web_schema;

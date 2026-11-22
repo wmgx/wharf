@@ -51,3 +51,5 @@ jobs:
         working-directory: web
       - run: npx tsc --noEmit
         working-directory: web
+      - run: node scripts/api-parity.mjs
+        working-directory: web

@@ -6,23 +6,22 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import * as vault from "@/lib/vault";
-import type { ServiceView } from "@/types";
 
 const SHOW_MS = 60_000;
 const box = "w-full rounded-md border bg-card px-3 py-1.5 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring/50";
 
 /**
- * 服务备注：放在页头标题下面。公开部分直接显示；私密部分在浏览器里用口令加密，服务器只存密文。
+ * 公开部分直接显示；私密部分在浏览器里用口令加密，服务器只存密文。
  * 直接保存，不走计划、不影响部署。
  */
-export function ServiceNote({ svc }: { svc: ServiceView }) {
+export function ResourceNote({ path, value }: { path: string; value?: string }) {
   // 保存后先显示本地值，等轮询拿到新数据。
   const [saved, setSaved] = useState<string | undefined>(undefined);
-  const note = saved ?? svc.note ?? "";
+  const note = saved ?? value ?? "";
   const { plain, sealed } = vault.splitNote(note);
   const [editing, setEditing] = useState(false);
 
-  if (editing) return <Editor name={svc.name} plain={plain} sealed={sealed} onDone={(n) => (n !== null && setSaved(n), setEditing(false))} />;
+  if (editing) return <Editor path={path} plain={plain} sealed={sealed} onDone={(n) => (n !== null && setSaved(n), setEditing(false))} />;
 
   if (!note) {
     return (
@@ -134,7 +133,7 @@ function Unlock({ onDone }: { onDone: (ok: boolean) => void }) {
   );
 }
 
-function Editor({ name, plain, sealed, onDone }: { name: string; plain: string; sealed: string | null; onDone: (note: string | null) => void }) {
+function Editor({ path, plain, sealed, onDone }: { path: string; plain: string; sealed: string | null; onDone: (note: string | null) => void }) {
   const [text, setText] = useState(plain);
   // null：私密部分没动（可能还没解锁），保存时原样保留密文。
   const [secret, setSecret] = useState<string | null>(sealed ? null : "");
@@ -152,7 +151,7 @@ function Editor({ name, plain, sealed, onDone }: { name: string; plain: string; 
       let nextSealed = sealed;
       if (secret !== null) nextSealed = secret.trim() ? await vault.seal(secret.trim()) : null;
       const note = vault.joinNote(text, nextSealed);
-      await api.put(`/api/services/${encodeURIComponent(name)}/note`, { note });
+      await api.put(path, { note });
       onDone(note);
     } catch (e) {
       // 编辑时超过了 5 分钟：先验证，已填的内容保留。

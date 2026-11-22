@@ -50,7 +50,8 @@ function TotpDialog({ mode, onClose, onChanged }: { mode: Mode; onClose: () => v
         setPending(await api.post<Pending>("/api/totp/begin", { password }));
         setPassword("");
       } else {
-        const result = await api.post<{ recovery_codes: string[] }>(`/api/totp/${mode === "begin" ? "enable" : mode}`, { password, code });
+        const path = { begin: "/api/totp/enable", recovery: "/api/totp/recovery", disable: "/api/totp/disable" }[mode];
+        const result = await api.post<{ recovery_codes: string[] }>(path, { password, code });
         setPassword(""); setCode(""); setPending(null); onChanged();
         if (mode === "disable") onClose();
         else setCodes(result.recovery_codes);

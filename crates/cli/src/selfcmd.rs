@@ -20,7 +20,7 @@ const SKILL_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub async fn whoami(c: &Client, j: bool) -> CliResult<()> {
   let me: Value = c.get("/api/whoami").await?;
-  let v = json!({
+  let mut v = json!({
     "name": me["name"],
     "human": me["human"],
     "perms": me["perms"],
@@ -29,6 +29,11 @@ pub async fn whoami(c: &Client, j: bool) -> CliResult<()> {
     "core_build": me["build"],
     "core_version": me["version"],
   });
+  for key in ["expires_at", "allowed_from", "services"] {
+    if let Some(value) = me.get(key) {
+      v[key] = value.clone();
+    }
+  }
   out(j, &v, |v| {
     let perms: Vec<&str> = v["perms"]
       .as_array()
@@ -44,6 +49,28 @@ pub async fn whoami(c: &Client, j: bool) -> CliResult<()> {
       }
     );
     println!("权限：{}", perms.join("、"));
+    if let Some(time) = v["expires_at"]
+      .as_str()
+      .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+    {
+      println!(
+        "有效期：{}",
+        time.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M")
+      );
+    }
+    for (key, label) in
+      [("allowed_from", "来源"), ("services", "服务")]
+    {
+      let values = v[key]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+      if !values.is_empty() {
+        println!("{label}：{}", values.join("、"));
+      }
+    }
     println!(
       "控制面：{}  构建 {}",
       c.base(),

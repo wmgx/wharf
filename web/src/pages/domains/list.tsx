@@ -13,6 +13,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import type { RouteView, Status } from "@/types";
+import { ResourceNote } from "../service/note";
 
 export function DomainList({ status, add }: { status: Status; add: React.ReactNode }) {
   const [params, setParams] = useSearchParams();
@@ -66,6 +67,9 @@ export function DomainList({ status, add }: { status: Status; add: React.ReactNo
                 <OpenLink value={hostname} />
                 {route?.spec.expires_at != null && <div className={`font-sans text-xs ${route.spec.expires_at <= Date.now() ? "text-warning" : "text-muted-foreground"}`}>{route.spec.expires_at <= Date.now() ? "已失效" : `临时分享，${new Date(route.spec.expires_at).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })} 到期`}</div>}
                 {route?.on_backup && <Badge variant="destructive">正走备用</Badge>}
+                {route && <div className="font-sans" onClick={(e) => e.stopPropagation()}>
+                  <ResourceNote path={`/api/routes/${encodeURIComponent(hostname)}/note`} value={route.note} />
+                </div>}
               </TableCell>
               <TableCell>
                 {route?.probe ? <Probe probe={route.probe} /> : route ? <Lamps d={d} /> : "-"}

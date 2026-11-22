@@ -2,7 +2,11 @@
 
 use std::{collections::BTreeSet, path::Path, sync::Arc};
 
-use axum::{extract::FromRequestParts, http::request::Parts};
+use axum::{
+  extract::{ConnectInfo, FromRequestParts},
+  http::request::Parts,
+};
+use chrono::{DateTime, Local, Utc};
 use rusqlite::params;
 use sha2::{Digest, Sha256};
 use wharf_api_types::{
@@ -104,6 +108,9 @@ pub async fn bootstrap(
 pub struct Auth {
   pub name: String,
   pub perms: BTreeSet<Perm>,
+  pub expires_at: Option<DateTime<Utc>>,
+  pub allowed_from: Vec<String>,
+  pub services: Option<BTreeSet<String>>,
   /// 页面登录（人）。API token（CLI、AI）为 false。
   pub human: bool,
 }
@@ -189,6 +196,9 @@ async fn authenticate(
       name: format!("页面:{user}"),
       perms: Perm::ALL.into_iter().collect(),
       human: true,
+      expires_at: None,
+      allowed_from: vec![],
+      services: None,
     });
   };
   // token 只能经 CLI 加密通道使用，防止在明文内网上被窃听；本机（如 docker exec 里的脚本）除外。
@@ -196,10 +206,11 @@ async fn authenticate(
     .extensions
     .get::<crate::cli_tunnel::Sealed>()
     .is_some();
-  let local = parts
+  let peer = parts
     .extensions
-    .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-    .is_some_and(|c| c.0.ip().is_loopback());
+    .get::<ConnectInfo<std::net::SocketAddr>>()
+    .map(|c| c.0.ip());
+  let local = peer.is_some_and(|ip| ip.to_canonical().is_loopback());
   if !sealed && !local {
     return Err(AppError::from(
       ApiError::new(
@@ -215,11 +226,61 @@ async fn authenticate(
     .call(move |c| db::token_scope(c, &hash))
     .await
     .map_err(AppError::from)?;
-  let (name, perms) = found.ok_or_else(unauthorized)?;
+  let row = found.ok_or_else(unauthorized)?;
+  let name = row.name;
+  let expires_at = row.expires_at.map(db::to_time);
+  if let Some(time) = expires_at.filter(|time| *time <= Utc::now()) {
+    return Err(ApiError::new(
+      ErrorCode::Unauthorized,
+      format!("访问令牌 {name} 已在 {} 过期", time.with_timezone(&Local).format("%Y-%m-%d %H:%M")),
+    ).with_hint(format!("在页面‘设置 → CLI 与 AI 接入’续期，或用有 admin 权限的令牌执行 wharf token set {name} --expires 30d")).into());
+  }
+  let allowed_from = crate::tokens::split_list(row.allowed_from);
+  if !allowed_from.is_empty() {
+    let address =
+      peer.map(|peer| crate::login::client_key(peer, &parts.headers));
+    if !address
+      .as_deref()
+      .and_then(|raw| raw.parse().ok())
+      .is_some_and(|ip| {
+        crate::token_scope::ip_in_ranges(ip, &allowed_from)
+      })
+    {
+      return Err(
+        ApiError::new(
+          ErrorCode::Forbidden,
+          format!(
+            "访问令牌 {name} 只允许从 {} 使用，这次请求来自 {}",
+            allowed_from.join("、"),
+            address.as_deref().unwrap_or("未知地址")
+          ),
+        )
+        .into(),
+      );
+    }
+  }
+  let services: BTreeSet<_> = crate::tokens::split_list(row.services)
+    .into_iter()
+    .collect();
+  let services = (!services.is_empty()).then_some(services);
+  if let Some(services) = &services
+    && !crate::token_scope::check_service_scope(
+      services,
+      &parts.method,
+      parts.uri.path(),
+    )
+  {
+    return Err(
+      crate::token_scope::forbidden(&name, services, "").into(),
+    );
+  }
   Ok(Auth {
     name,
-    perms: decode_perms(&perms).ok_or_else(unauthorized)?,
+    perms: decode_perms(&row.perms).ok_or_else(unauthorized)?,
     human: false,
+    expires_at,
+    allowed_from,
+    services,
   })
 }
 

@@ -49,8 +49,10 @@ pub async fn open(
   ws: WebSocketUpgrade,
 ) -> Response {
   let outer: Vec<_> = OUTER_HEADERS
-    .iter()
-    .filter_map(|name| headers.get(*name).map(|v| (*name, v.clone())))
+    .into_iter()
+    .flat_map(|name| {
+      headers.get_all(name).iter().map(move |v| (name, v.clone()))
+    })
     .collect();
   ws.on_upgrade(move |socket| async move {
     if let Err(e) = serve(s, peer, outer, socket).await {
@@ -147,8 +149,9 @@ async fn serve(
         h.remove(name);
       }
       for (name, value) in &outer {
-        h.insert(*name, value.clone());
+        h.append(*name, value.clone());
       }
+      // 内层鉴权使用外层 TCP 对端，不能把 CLI 本地转发端口当作来源。
       req.extensions_mut().insert(ConnectInfo(peer));
       req.extensions_mut().insert(Sealed);
       tower::ServiceExt::oneshot(router.clone(), req)

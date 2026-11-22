@@ -10,20 +10,22 @@ import type { ExposureView } from "@/types.gen";
 
 const owners: Record<string, string> = { gateway: "入口", wharf: "Wharf", service: "服务", container: "容器", host: "宿主机程序", unknown: "未知" };
 export function ServerExposure({ server }: { server: string }) {
-  const base = `/api/servers/${encodeURIComponent(server)}/exposure`;
+  const name = encodeURIComponent(server);
   const [data, setData] = useState<ExposureView | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
   const { status, refresh: refreshStatus } = useStatus();
   const machine = status?.servers.find((s) => s.name === server);
   const noPublic = !!machine && !machine.public_ip;
-  const load = useCallback(async (action?: string, body?: unknown) => {
+  const load = useCallback(async (action?: "refresh" | "ack", body?: unknown) => {
     setBusy(true); setError(null);
     try {
-      setData(action ? await api.post<ExposureView>(`${base}/${action}`, body ?? {}) : await api.get<ExposureView>(base));
+      const path = action === "refresh" ? `/api/servers/${name}/exposure/refresh`
+        : action === "ack" ? `/api/servers/${name}/exposure/ack` : `/api/servers/${name}/exposure`;
+      setData(action ? await api.post<ExposureView>(path, body ?? {}) : await api.get<ExposureView>(path));
       if (action) refreshStatus();
     } catch (e) { setError(e); } finally { setBusy(false); }
-  }, [base, refreshStatus]);
+  }, [name, refreshStatus]);
   useEffect(() => { setData(null); load(); }, [load]);
   return <>
     <ErrorNote error={error} />

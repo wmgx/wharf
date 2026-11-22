@@ -739,6 +739,8 @@ pub fn trusted_ranges(
   let mut ranges = std::collections::BTreeSet::from([
     "127.0.0.0/8".to_string(),
     "100.64.0.0/10".to_string(),
+    "fd7a:115c:a1e0::/48".to_string(),
+    "::1/128".to_string(),
   ]);
   for ip in net.lan_ips.get(server).into_iter().flatten() {
     if let Ok(ip) = ip.parse::<std::net::Ipv4Addr>() {
@@ -939,11 +941,22 @@ mod tests {
     };
     assert_eq!(
       trusted_ranges(&net, "s1"),
-      vec!["100.64.0.0/10", "127.0.0.0/8", "203.0.113.0/24"]
+      vec![
+        "100.64.0.0/10",
+        "127.0.0.0/8",
+        "203.0.113.0/24",
+        "::1/128",
+        "fd7a:115c:a1e0::/48"
+      ]
     );
     assert_eq!(
       trusted_ranges(&net, "s2"),
-      vec!["100.64.0.0/10", "127.0.0.0/8"]
+      vec![
+        "100.64.0.0/10",
+        "127.0.0.0/8",
+        "::1/128",
+        "fd7a:115c:a1e0::/48"
+      ]
     );
   }
   fn key_db() -> rusqlite::Connection {
