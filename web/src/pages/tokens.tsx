@@ -204,7 +204,9 @@ function expiryLabel(expires?: string | null) {
   if (!expires) return "永不过期";
   const remaining = Date.parse(expires) - Date.now();
   if (remaining <= 0) return "已过期";
-  return remaining >= DAY ? `剩 ${Math.floor(remaining / DAY)} 天` : `剩 ${Math.floor(remaining / 3_600_000)} 小时`;
+  if (remaining >= DAY) return `剩 ${Math.floor(remaining / DAY)} 天`;
+  if (remaining >= 3_600_000) return `剩 ${Math.floor(remaining / 3_600_000)} 小时`;
+  return `剩 ${Math.max(1, Math.floor(remaining / 60_000))} 分钟`;
 }
 
 function Limits({ token }: { token: TokenView }) {
