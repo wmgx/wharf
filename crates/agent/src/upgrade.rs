@@ -18,7 +18,7 @@ use crate::{
   exec::{Cmd, Ctx},
 };
 
-const QUICK: Duration = Duration::from_secs(30);
+pub(crate) const QUICK: Duration = Duration::from_secs(30);
 /// 接班容器的名字，同一时间只有一个。
 const HELPER: &str = "wharf-agent-upgrade";
 /// 新 agent 要在这么长时间里连上控制面。
@@ -52,7 +52,7 @@ pub fn sweep_helper() {
 }
 
 /// 当前 agent 所在的容器 id。
-fn self_container() -> Result<String, ApiError> {
+pub(crate) fn self_container() -> Result<String, ApiError> {
   std::fs::read_to_string("/proc/self/mountinfo")
     .ok()
     .and_then(|m| wharf_api_types::agent::container_id(&m))
@@ -64,7 +64,7 @@ fn self_container() -> Result<String, ApiError> {
     })
 }
 
-async fn inspect(
+pub(crate) async fn inspect(
   docker: &Docker,
   target: &str,
   ctx: &Ctx,
@@ -247,6 +247,16 @@ fn run_args(old: &Value, name: &str) -> Vec<String> {
     args.push(f.to_string());
     args.push(v);
   };
+  for (path, arg) in [
+    ("/HostConfig/Memory", "--memory"),
+    ("/HostConfig/MemorySwap", "--memory-swap"),
+  ] {
+    if let Some(bytes) = old.pointer(path).and_then(Value::as_i64)
+      && (bytes > 0 || (arg == "--memory-swap" && bytes == -1))
+    {
+      flag(arg, bytes.to_string());
+    }
+  }
   for e in strs_at(old, &["Config", "Env"]) {
     flag("-e", e);
   }
@@ -411,6 +421,22 @@ mod tests {
     assert_eq!(repository("ghcr.io/o/a:latest"), "ghcr.io/o/a");
     assert_eq!(repository("localhost:5000/a"), "localhost:5000/a");
     assert_eq!(repository("a@sha256:abc"), "a");
+  }
+
+  #[test]
+  fn carries_memory_limits() {
+    for bytes in [268435456, 0] {
+      let old = serde_json::json!({"HostConfig":{"Memory":bytes,"MemorySwap":bytes}});
+      let args = run_args(&old, "wharf-agent");
+      for flag in ["--memory", "--memory-swap"] {
+        let value = args
+          .windows(2)
+          .find(|w| w[0] == flag)
+          .map(|w| w[1].as_str());
+        let expected = (bytes > 0).then(|| bytes.to_string());
+        assert_eq!(value, expected.as_deref());
+      }
+    }
   }
 
   #[test]

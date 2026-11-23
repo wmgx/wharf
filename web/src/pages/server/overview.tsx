@@ -13,6 +13,8 @@ export function Overview({ server, status, info, traffic, loading }: { server: S
   const name = server.name;
   const r = server.report;
   const disk = r?.disk;
+  const agent = server.agent;
+  const limit = (v: number) => v === 0 ? "不限" : size(v);
   const offset = server.clock_offset_ms;
   const services = status.services.filter((s) => s.spec.server === name);
   const gateways = status.gateways.filter((g) => g.spec.server === name);
@@ -31,7 +33,20 @@ export function Overview({ server, status, info, traffic, loading }: { server: S
       </span>}
       </>} used={disk ? 1 - disk.free / disk.total : undefined} />
       <Stat label="流量" value={traffic ? `本期 ${size(used)}` : undefined} sub={traffic ? traffic.quota ? `额度 ${size(traffic.quota)} · 已用 ${Math.round(used / traffic.quota * 100)}%` : `${traffic.since.slice(5)} 起` : undefined} used={traffic?.quota ? used / traffic.quota : undefined} />
+      {agent && <Stat label="agent"
+        value={agent.mem != null || agent.cpu != null
+          ? `内存 ${agent.mem != null ? size(agent.mem) : "-"} · CPU ${agent.cpu != null ? `${agent.cpu.toFixed(1)}%` : "-"}`
+          : undefined}
+        sub={<>
+          {agent.memory_limit == null || agent.configured_limit !== agent.memory_limit
+            ? `设置 ${limit(agent.configured_limit)} · 上限 ${agent.memory_limit != null ? limit(agent.memory_limit) : "-"}`
+            : `上限 ${limit(agent.memory_limit)}`}
+          {agent.memory_pct != null && ` · 已用 ${agent.memory_pct.toFixed(1)}%`}
+        </>}
+        used={agent.memory_pct != null ? agent.memory_pct / 100 : undefined}
+      />}
     </div>
+    {agent?.limit_error && <Notice kind="warn" className="mt-3">agent 内存上限设置失败：{agent.limit_error}</Notice>}
     <SectionTitle>备注</SectionTitle>
     <ResourceNote path={`/api/servers/${encodeURIComponent(name)}/note`} value={server.note} />
     <SectionTitle>基本信息</SectionTitle>

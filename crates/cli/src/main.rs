@@ -26,6 +26,7 @@ mod selfcmd;
 mod server;
 mod task;
 mod token;
+mod top;
 mod tunnel;
 mod view;
 mod wait;
@@ -153,6 +154,8 @@ pub enum Command {
   },
   /// 总览：服务器、服务、网关、路由的状态。
   Status,
+  /// 全局资源或镜像排行。server usage 看单台用量均值，server disk 看目录和卷，server host 看整机概况。
+  Top(top::TopArgs),
   /// 部署本机代码目录：打包上传，在服务器上构建并运行。
   /// Python、Node、Go、静态站点自动识别，有 Dockerfile 就用。再次执行就是发布新版本。
   Deploy {
@@ -555,7 +558,7 @@ pub enum ServerCmd {
     #[arg(long)]
     off: bool,
   },
-  /// 查看服务器上服务和网关的资源用量。
+  /// 查看单台服务器的服务、网关和 agent 最近 10 分钟平均资源用量。
   Usage {
     name: String,
   },
@@ -672,6 +675,9 @@ pub enum ServerCmd {
     /// 服务器续费日（YYYY-MM-DD，北京时间）；传空字符串清除。
     #[arg(long)]
     renew_at: Option<String>,
+    /// agent 内存上限，例如 256M、1G 或 none（不限）。默认 256 MiB，应用时无需重启 agent。
+    #[arg(long, value_parser = top::parse_agent_memory)]
+    agent_memory: Option<String>,
     #[command(flatten)]
     apply: ApplyFlags,
   },

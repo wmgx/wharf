@@ -265,6 +265,9 @@ impl World {
             .ok_or_else(|| server_not_found(name))?;
           validate_lan_addrs(&settings.lan_addrs)?;
           validate_baseline(&settings.baseline)?;
+          if let Some(memory) = &settings.agent_memory {
+            wharf_api_types::resources::parse_agent_memory(memory)?;
+          }
           if settings
             .traffic_reset_day
             .is_some_and(|d| !(1..=28).contains(&d))

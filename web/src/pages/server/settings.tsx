@@ -42,6 +42,7 @@ export function SettingsForm({ server, canRemove, active }: { server: ServerView
     ["部署", ["registry_mirrors", "mirrors_only", "build_env"]],
     ["流量", ["traffic_quota_gb", "traffic_reset_day"]],
     ["续费", ["renew_at"]],
+    ["agent", ["agent_memory"]],
     ["权限", ["host_terminal", "host_exec"]],
   ];
   const changed = groups.filter(([, keys]) => dirty(keys)).map(([label]) => label);
@@ -136,6 +137,12 @@ function SettingsFields({ server, canRemove, draft, set, changed, onReset, onSub
     <Panel className="p-4">
       <Field label="续费日" htmlFor="renew-at">
         <Input id="renew-at" type="date" value={draft.renew_at ?? ""} onChange={(e) => set({ renew_at: e.target.value || undefined })} />
+      </Field>
+    </Panel>
+    <SectionTitle>agent</SectionTitle>
+    <Panel className="p-4">
+      <Field label="内存上限" htmlFor="agent-memory" help="例如 256M、1G，none 表示不限。">
+        <Input id="agent-memory" value={draft.agent_memory ?? ""} placeholder="256M" onChange={(e) => set({ agent_memory: e.target.value || undefined })} />
       </Field>
     </Panel>
     <div id="access" className="mt-8">

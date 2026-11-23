@@ -14,11 +14,11 @@ import {
 
 type Usage = {
   name: string;
-  kind: "service" | "gateway";
-  cpu: number;
-  mem: number;
-  net_rx: number;
-  net_tx: number;
+  kind: "service" | "gateway" | "agent";
+  cpu: number | null;
+  mem: number | null;
+  net_rx: number | null;
+  net_tx: number | null;
 };
 
 /** 这台服务器上各服务最近 10 分钟的平均资源用量，按内存排。 */
@@ -29,7 +29,7 @@ export function ServiceUsage({ server }: { server: string }) {
   );
   if (error) return <ErrorNote error={error} />;
   if (!data?.length) return null;
-  const maxMem = Math.max(...data.map((u) => u.mem), 1);
+  const maxMem = Math.max(...data.map((u) => u.mem ?? 0), 1);
   return (
     <div className="mt-6">
       <SectionTitle>各服务用量（最近 10 分钟平均）</SectionTitle>
@@ -58,7 +58,7 @@ export function ServiceUsage({ server }: { server: string }) {
                     <span>
                       {u.name}{" "}
                       <span className="text-xs text-muted-foreground">
-                        入口
+                        {u.kind === "gateway" ? "入口" : "agent"}
                       </span>
                     </span>
                   )}
@@ -68,19 +68,19 @@ export function ServiceUsage({ server }: { server: string }) {
                     <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted">
                       <div
                         className="h-full rounded-full bg-primary"
-                        style={{ width: `${(u.mem / maxMem) * 100}%` }}
+                        style={{ width: `${((u.mem ?? 0) / maxMem) * 100}%` }}
                       />
                     </div>
                     <span className="w-14 text-right font-mono text-xs tabular-nums">
-                      {bytes(u.mem)}
+                      {u.mem == null ? "-" : bytes(u.mem)}
                     </span>
                   </div>
                 </TableCell>
                 <TableCell className="text-right font-mono text-xs tabular-nums">
-                  {u.cpu.toFixed(1)}%
+                  {u.cpu == null ? "-" : `${u.cpu.toFixed(1)}%`}
                 </TableCell>
                 <TableCell className="text-right font-mono text-xs tabular-nums text-muted-foreground">
-                  {bytes(u.net_rx)}/s / {bytes(u.net_tx)}/s
+                  {u.net_rx == null || u.net_tx == null ? "-" : `${bytes(u.net_rx)}/s / ${bytes(u.net_tx)}/s`}
                 </TableCell>
               </TableRow>
             ))}

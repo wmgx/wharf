@@ -93,6 +93,9 @@ pub struct ServerSettings {
   /// 机器基线：系统设置的期望值，agent 定时检查差异，apply 时纠正。
   #[serde(default, skip_serializing_if = "Baseline::is_empty")]
   pub baseline: Baseline,
+  /// agent 内存上限，例如 256M、1G，none 为不限，缺省为 256 MiB。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub agent_memory: Option<String>,
 }
 
 /// 机器基线（P9）。字段不填就不管；去掉某项只是不再管，不会改回去。

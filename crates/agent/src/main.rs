@@ -13,6 +13,7 @@ use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
 
 mod adopt;
+mod agent_memory;
 mod build;
 mod conn;
 mod docker;
@@ -28,6 +29,7 @@ mod host_dir;
 mod host_shell;
 mod host_units;
 mod identity;
+mod images;
 mod metrics;
 mod mirror;
 mod ops;

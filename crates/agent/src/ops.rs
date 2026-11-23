@@ -57,13 +57,11 @@ impl Ops {
       locks: Default::default(),
     }
   }
-
   fn lock_for(&self, project: &str) -> Arc<tokio::sync::Mutex<()>> {
     let mut locks =
       self.locks.lock().unwrap_or_else(|p| p.into_inner());
     locks.entry(project.to_string()).or_default().clone()
   }
-
   pub async fn handle(
     &self,
     op: AgentOp,
@@ -71,6 +69,9 @@ impl Ops {
   ) -> Result<Value, ApiError> {
     match op {
       AgentOp::Report => to_value(self.reporter.report(true).await),
+      AgentOp::ListImages => {
+        to_value(crate::images::list(&self.docker, ctx).await?)
+      }
       AgentOp::ResolveCommit(job) => to_value(
         crate::build::resolve_commit(&self.docker, &job, ctx).await?,
       ),
@@ -301,7 +302,6 @@ impl Ops {
       }
     }
   }
-
   /// 只删迁移留下的旧数据：这台机器上还部署着这个服务就拒绝。
   fn remove_data(
     &self,

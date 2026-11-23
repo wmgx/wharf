@@ -54,7 +54,9 @@ export interface ServerView {
     egress?: EgressSpec;
     via?: string;
     renew_at?: string;
+    agent_memory?: string | null;
   };
+  agent?: Gen.AgentUsage;
   joined: boolean;
   online: boolean;
   host_shell: boolean;

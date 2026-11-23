@@ -22,6 +22,8 @@ pub fn web_schema() -> Value {
   let _ = generator.subschema_for::<spec::PrivateAddr>();
   let _ = generator.subschema_for::<agent::AgentReport>();
   let _ = generator.subschema_for::<view::ServerView>();
+  let _ = generator.subschema_for::<crate::resources::UsageRow>();
+  let _ = generator.subschema_for::<crate::resources::ImagesView>();
   let _ = generator.subschema_for::<spec::BuildSource>();
   let _ = generator.subschema_for::<spec::Source>();
   let _ = generator.subschema_for::<spec::PortSpec>();
