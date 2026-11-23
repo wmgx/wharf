@@ -195,6 +195,8 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route("/api/doctor", get(crate::doctor::doctor))
     .route("/api/metrics", get(crate::metrics::query))
     .route("/api/metrics/usage", get(crate::metrics::usage))
+    .route("/api/metrics/top", get(crate::resource_top::usage))
+    .route("/api/metrics/images", get(crate::resource_top::images))
     .route(
       "/api/core-backup/recovery-key",
       post(crate::core_backup::recovery_key),

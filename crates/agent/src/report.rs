@@ -44,9 +44,15 @@ impl Reporter {
   /// 资源采样，只由定时上报调用（速率按两次调用的间隔算）。
   pub async fn metrics(
     &self,
+    ctx: &crate::exec::Ctx,
   ) -> Option<wharf_api_types::agent::Metrics> {
-    let disk = disk(&self.docker.data_dir);
-    self.sampler.lock().await.sample(&self.docker, disk).await
+    let disk = disk_stat(&self.docker.data_dir);
+    self
+      .sampler
+      .lock()
+      .await
+      .sample(&self.docker, disk, ctx)
+      .await
   }
 
   pub async fn report(&self, refresh: bool) -> AgentReport {
@@ -66,6 +72,7 @@ impl Reporter {
       build: wharf_api_types::BUILD.to_string(),
       disk: disk(&self.docker.data_dir),
       docker_disk: docker_disk(&self.docker.data_dir),
+      agent_memory: None,
       metrics: None,
       time_ms: None,
     }
@@ -193,8 +200,14 @@ fn docker_disk(data_dir: &std::path::Path) -> Option<Disk> {
   (disk(data_dir).map(|x| x.total) != Some(d.total)).then_some(d)
 }
 
-/// 挂载进来的数据目录在宿主机的磁盘上，statvfs 看到的就是宿主机的容量。
 fn disk(path: &std::path::Path) -> Option<Disk> {
+  disk_stat(path).map(|(disk, _)| disk)
+}
+
+pub(crate) type DiskSample = (Disk, Option<(u64, u64)>);
+
+/// 挂载进来的数据目录在宿主机的磁盘上，statvfs 看到的就是宿主机的容量。
+fn disk_stat(path: &std::path::Path) -> Option<DiskSample> {
   use std::os::unix::ffi::OsStrExt;
   let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
   let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
@@ -202,10 +215,15 @@ fn disk(path: &std::path::Path) -> Option<Disk> {
     return None;
   }
   let block = st.f_frsize as u64;
-  Some(Disk {
-    total: st.f_blocks as u64 * block,
-    free: st.f_bavail as u64 * block,
-  })
+  let total = st.f_files as u64;
+  let free = st.f_ffree as u64;
+  Some((
+    Disk {
+      total: st.f_blocks as u64 * block,
+      free: st.f_bavail as u64 * block,
+    },
+    (total > 0).then(|| (total.saturating_sub(free), total)),
+  ))
 }
 
 #[cfg(test)]

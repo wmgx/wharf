@@ -85,6 +85,8 @@ pub struct ServerView {
   pub note: Option<String>,
   pub name: String,
   pub settings: ServerSettings,
+  #[serde(default)]
+  pub agent: crate::resources::AgentUsage,
   /// agent 是否已经加入（完成过 join）。
   pub joined: bool,
   pub online: bool,

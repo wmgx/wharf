@@ -26,6 +26,7 @@ struct Prev {
   at: Instant,
   /// /proc/stat 的 (总, 空闲) 节拍数。
   cpu: (u64, u64),
+  agent_cpu: Option<(bool, u64)>,
   net: (u64, u64),
   /// project 的容器网络累计 (收, 发)。
   projects: HashMap<String, (u64, u64)>,
@@ -35,15 +36,17 @@ impl Sampler {
   pub async fn sample(
     &mut self,
     docker: &Docker,
-    disk: Option<wharf_api_types::agent::Disk>,
+    disk: Option<crate::report::DiskSample>,
+    ctx: &Ctx,
   ) -> Option<Metrics> {
     let now = Instant::now();
     let unix_now = SystemTime::now()
       .duration_since(UNIX_EPOCH)
       .unwrap_or_default()
       .as_secs();
+    let agent = crate::agent_memory::sample();
     let oom = match self.events_since.replace(unix_now) {
-      Some(since) => oom_events(docker, since, unix_now).await,
+      Some(since) => oom_events(docker, since, unix_now, ctx).await,
       None => None,
     };
     let gw_now = crate::gw_stats::collect().await;
@@ -58,7 +61,7 @@ impl Sampler {
     let cpu = cpu_ticks(&read("/proc/stat"))?;
     let net = host_net(&read("/proc/net/dev"));
     let cpus = cpu_count();
-    let containers = container_stats(docker).await;
+    let containers = container_stats(docker, ctx).await;
     let mem = read("/proc/meminfo");
     let mem_total = meminfo(&mem, "MemTotal:");
     let projects_now: HashMap<String, (u64, u64)> = containers
@@ -70,6 +73,7 @@ impl Sampler {
       cpu,
       net,
       projects: projects_now,
+      agent_cpu: agent.0,
     })?;
     let secs = now.duration_since(prev.at).as_secs_f64().max(1.0);
     let rate = |cur: u64, old: u64| {
@@ -95,7 +99,22 @@ impl Sampler {
         (name, m)
       })
       .collect();
+    let agent_cpu = agent.0.zip(prev.agent_cpu).and_then(
+      |((cgroup, now), (was_cgroup, old))| {
+        (cgroup == was_cgroup).then(|| {
+          (100.0 * now.saturating_sub(old) as f64
+            / (secs * 1e6 * f64::from(cpus)))
+          .min(100.0) as f32
+        })
+      },
+    );
+    let inode = disk.and_then(|(_, inode)| inode);
+    let disk = disk.map(|(disk, _)| disk);
     Some(Metrics {
+      agent_cpu,
+      agent_mem: agent.1,
+      inode_used: inode.map(|(used, _)| used),
+      inode_total: inode.map(|(_, total)| total),
       cpu: if total == 0 {
         0.0
       } else {
@@ -119,6 +138,7 @@ async fn oom_events(
   docker: &Docker,
   since: u64,
   until: u64,
+  ctx: &Ctx,
 ) -> Option<Vec<String>> {
   let result = docker
     .cmd()
@@ -137,7 +157,7 @@ async fn oom_events(
         .into(),
     ])
     .timeout(STATS_TIMEOUT)
-    .run(&Ctx::detached())
+    .run(ctx)
     .await;
   match result {
     Ok(out) if out.success => Some(parse_oom(&out.stdout)),
@@ -232,14 +252,16 @@ struct Stat {
 }
 
 /// 按 compose project 合计。不属于任何 project 的容器不算。
-async fn container_stats(docker: &Docker) -> BTreeMap<String, Stat> {
-  let ctx = Ctx::detached();
+async fn container_stats(
+  docker: &Docker,
+  ctx: &Ctx,
+) -> BTreeMap<String, Stat> {
   let run = |args: &'static [&'static str]| {
     docker
       .cmd()
       .args(args.iter().copied())
       .timeout(STATS_TIMEOUT)
-      .run(&ctx)
+      .run(ctx)
   };
   let (ps, stats) = tokio::join!(
     run(&[

@@ -32,7 +32,7 @@ const KEEP_RESOURCE_MS: i64 = 7 * DAY_MS;
 const KEEP_EVENT_MS: i64 = 90 * DAY_MS;
 
 /// 合成和按时间段平均的只有资源点，事件点原样保留。
-const RESOURCE: &str = "(name LIKE 'host.%' OR name LIKE 'svc.%' OR name LIKE 'link.%' OR name LIKE 'req.%')";
+const RESOURCE: &str = "(name LIKE 'host.%' OR name LIKE 'svc.%' OR name LIKE 'link.%' OR name LIKE 'req.%' OR name LIKE 'agent.%')";
 
 fn insert(
   c: &Connection,
@@ -111,9 +111,10 @@ pub async fn record_links(
 pub async fn record_report(
   state: &AppState,
   server: &str,
-  m: Metrics,
+  m: &Metrics,
 ) {
   let owned = server.to_string();
+  let m = m.clone();
   let result = state
     .db
     .call(move |c| {
@@ -133,6 +134,19 @@ pub async fn record_report(
           ("host.disk_total", s, m.disk_total as f64),
         ],
       )?;
+      let inode_pct =
+        m.inode_used.zip(m.inode_total).and_then(|(used, total)| {
+          wharf_api_types::resources::percent(used, total)
+        });
+      for (name, value) in [
+        ("host.inode_pct", inode_pct),
+        ("agent.cpu", m.agent_cpu.map(f64::from)),
+        ("agent.mem", m.agent_mem.map(|v| v as f64)),
+      ] {
+        if let Some(value) = value {
+          insert(c, at, &[(name, s, value)])?;
+        }
+      }
       for (p, v) in &m.projects {
         let p = p.as_str();
         insert(
@@ -411,12 +425,12 @@ pub struct UsageQuery {
 #[derive(Serialize)]
 pub struct Usage {
   pub name: String,
-  /// `service` 或 `gateway`。
+  /// `service`、`gateway` 或 `agent`。
   pub kind: &'static str,
-  pub cpu: f64,
-  pub mem: f64,
-  pub net_rx: f64,
-  pub net_tx: f64,
+  pub cpu: Option<f64>,
+  pub mem: Option<f64>,
+  pub net_rx: Option<f64>,
+  pub net_tx: Option<f64>,
 }
 
 /// `GET /api/metrics/usage?server=`：这台服务器上各服务的资源用量，按内存从大到小。
@@ -444,6 +458,8 @@ pub async fn usage(
         (crate::world::gateway_project(n), n.clone(), "gateway")
       }),
   );
+  let server = q.server;
+  let agent_subject = server.clone();
   let from = now_ms() - 10 * 60 * 1000;
   let avg: BTreeMap<(String, String), f64> = s
     .db
@@ -451,11 +467,12 @@ pub async fn usage(
       let mut stmt = c
         .prepare(
           "SELECT name, subject, AVG(value) FROM points
-           WHERE name LIKE 'svc.%' AND at >= ?1 GROUP BY name, subject",
+           WHERE at >= ?1 AND (name LIKE 'svc.%' OR (name LIKE 'agent.%' AND subject = ?2))
+           GROUP BY name, subject",
         )
         .map_err(sql_err)?;
       let rows = stmt
-        .query_map(params![from], |r| {
+        .query_map(params![from, server], |r| {
           Ok(((r.get::<_, String>(0)?, r.get::<_, String>(1)?), r.get(2)?))
         })
         .map_err(sql_err)?;
@@ -471,14 +488,33 @@ pub async fn usage(
   let mut out: Vec<Usage> = subjects
     .into_iter()
     .map(|(subject, name, kind)| Usage {
-      cpu: get("cpu", &subject),
-      mem: get("mem", &subject),
-      net_rx: get("net_rx", &subject),
-      net_tx: get("net_tx", &subject),
+      cpu: Some(get("cpu", &subject)),
+      mem: Some(get("mem", &subject)),
+      net_rx: Some(get("net_rx", &subject)),
+      net_tx: Some(get("net_tx", &subject)),
       name,
       kind,
     })
     .collect();
-  out.sort_by(|a, b| b.mem.total_cmp(&a.mem));
+  let agent_value = |metric: &str| {
+    avg
+      .get(&(format!("agent.{metric}"), agent_subject.clone()))
+      .copied()
+  };
+  let cpu = agent_value("cpu");
+  let mem = agent_value("mem");
+  if cpu.is_some() || mem.is_some() {
+    out.push(Usage {
+      name: "wharf-agent".into(),
+      kind: "agent",
+      cpu,
+      mem,
+      net_rx: None,
+      net_tx: None,
+    });
+  }
+  out.sort_by(|a, b| {
+    b.mem.unwrap_or(-1.0).total_cmp(&a.mem.unwrap_or(-1.0))
+  });
   Ok(Json(out))
 }

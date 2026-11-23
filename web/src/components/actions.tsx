@@ -83,6 +83,7 @@ export function ActionsProvider({ children }: { children: ReactNode }) {
   const [removingTask, setRemovingTask] = useState<string | null>(null);
   const [moving, setMoving] = useState<ServiceView | null>(null);
   const [upgrading, setUpgrading] = useState(false);
+  const [pruning, setPruning] = useState<string | null>(null);
   const seq = useRef(0);
   // 正在执行的那次：关掉面板后继续在后台盯着，结束时弹提示。
   // 用 state 而不是 ref：apply 的返回可能晚于关面板，拿到 run_id 时也要能开始盯。
@@ -165,14 +166,7 @@ export function ActionsProvider({ children }: { children: ReactNode }) {
         toast.error(`重启 ${name} 失败`, { description: (e as Error).message });
       }
     },
-    prune: async (server) => {
-      try {
-        const { run_id } = await api.post<{ run_id: string }>(`/api/servers/${encodeURIComponent(server)}/prune`, {});
-        actions.watch(run_id, `清理 ${server} 上没在用的镜像`);
-      } catch (e) {
-        toast.error(`清理 ${server} 失败`, { description: (e as Error).message });
-      }
-    },
+    prune: setPruning,
     rollback: async (name, to) => {
       try {
         const q = to != null ? `to=${to}` : "";
@@ -192,6 +186,16 @@ export function ActionsProvider({ children }: { children: ReactNode }) {
       setRunning({ runId, title });
     },
     view: (runId, title) => setOpen({ key: ++seq.current, title, runId }),
+  };
+
+  const confirmPrune = async (server: string) => {
+    setPruning(null);
+    try {
+      const { run_id } = await api.post<{ run_id: string }>(`/api/servers/${encodeURIComponent(server)}/prune`, {});
+      actions.watch(run_id, `清理 ${server} 上没在用的镜像`);
+    } catch (e) {
+      toast.error(`清理 ${server} 失败`, { description: (e as Error).message });
+    }
   };
 
   const confirmMove = (svc: ServiceView, to: string) => {
@@ -244,6 +248,7 @@ export function ActionsProvider({ children }: { children: ReactNode }) {
         </SheetContent>
       </Sheet>
       <ConfirmDialog open={!!removingTask} title={`删除任务 ${removingTask}？`} onCancel={() => setRemovingTask(null)} onConfirm={async () => { const name = removingTask!; setRemovingTask(null); try { await api.del(`/api/tasks/${encodeURIComponent(name)}?data=${removeTaskData}`); toast.success(`已删除 ${name}`); window.dispatchEvent(new Event("wharf:tasks")); nav("/tasks"); } catch (e) { toast.error(`删除 ${name} 失败`, { description: (e as Error).message }); } }}>运行记录一起删除。<label className="mt-3 flex items-center gap-2"><Checkbox checked={removeTaskData} onCheckedChange={(v) => setRemoveTaskData(!!v)} />同时删除数据</label></ConfirmDialog>
+      <ConfirmDialog open={!!pruning} title={`清理 ${pruning} 上没在用的镜像？`} confirmText="清理" onCancel={() => setPruning(null)} onConfirm={() => pruning && confirmPrune(pruning)}>删除没有容器使用的镜像和构建缓存。</ConfirmDialog>
       <RemoveDialog name={removing} onCancel={() => setRemoving(null)} onConfirm={confirmRemove} />
       <MoveDialog svc={moving} onCancel={() => setMoving(null)} onConfirm={confirmMove} />
       <ConfirmDialog open={upgrading} title="升级 Wharf？" confirmText="升级" danger={false} onCancel={() => setUpgrading(false)} onConfirm={() => { setUpgrading(false); upgradeWharf(); }}>控制面会重启，页面断开一会儿。</ConfirmDialog>

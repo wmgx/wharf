@@ -40,11 +40,19 @@ pub fn server_view(
 ) -> Option<ServerView> {
   let row = snap.world.servers.get(name)?;
   let agent = snap.agent(name);
-  let report = agent.and_then(|a| a.report.clone());
+  let mut report = agent.and_then(|a| a.report.clone());
+  let agent_usage =
+    crate::resource_top::agent_usage(&row.settings, report.as_ref());
+  if let Some(report) = &mut report {
+    report.metrics = None;
+    report.agent_memory = None;
+    report.time_ms = None;
+  }
   Some(ServerView {
     note: snap.server_notes.get(name).cloned(),
     name: name.to_string(),
     settings: row.settings.clone(),
+    agent: agent_usage,
     joined: agent.is_some_and(|a| a.public_key.is_some()),
     online: state.hub.is_online(name),
     host_shell: state.hub.supports_host_shell(name),

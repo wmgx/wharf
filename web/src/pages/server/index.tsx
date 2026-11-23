@@ -10,6 +10,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { useStatus } from "@/status";
 import { ServerDetail } from "./detail";
+import { ResourceTop } from "./top";
 
 /** 旧地址 `/servers?tab=x` 指向的页面，现在是独立页面。 */
 const OLD_TABS: Record<string, string> = { entries: "/domains?tab=entries", network: "/network", topology: "/network", data: "/data" };
@@ -23,6 +24,7 @@ export function Servers() {
   const [adding, setAdding] = useState(searchParams.get("add") === "1");
   useEffect(() => { if (searchParams.get("add") === "1") setAdding(true); }, [searchParams]);
   const params = new URLSearchParams(search);
+  const top = !name && params.get("view") === "top";
   // 只有不带机器名的 `/servers?tab=x` 才是旧地址；`/servers/home?tab=network` 是服务器自己的标签。
   const old = name ? undefined : OLD_TABS[params.get("tab") ?? ""];
 
@@ -36,16 +38,18 @@ export function Servers() {
     return <Navigate to={q ? `${old}${old.includes("?") ? "&" : "?"}${q}` : old} replace />;
   }
   // 没选机器：默认打开第一台。
-  if (!name && status?.servers.length) {
+  if (!name && !top && status?.servers.length) {
     return <Navigate to={`/servers/${encodeURIComponent(status.servers[0].name)}${searchParams.get("add") === "1" ? "?add=1" : ""}`} replace />;
   }
 
   return (
     <div className="flex min-w-0 flex-1 flex-col md:flex-row">
-      <Side name={name} onAdd={() => setAdding(true)} />
+      <Side name={name} top={top} onAdd={() => setAdding(true)} />
       <div className="min-w-0 flex-1 px-4 py-5 md:px-8 md:py-8">
         <div className="mx-auto max-w-5xl">
-          {name ? (
+          {top ? (
+            <ResourceTop servers={status?.servers ?? []} />
+          ) : name ? (
             <ServerDetail key={name} />
           ) : !status ? (
             <Skeleton className="h-64 rounded-xl" />
@@ -61,7 +65,7 @@ export function Servers() {
 
 const item = "flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm transition-colors hover:bg-accent";
 
-function Side({ name, onAdd }: { name?: string; onAdd: () => void }) {
+function Side({ name, top, onAdd }: { name?: string; top: boolean; onAdd: () => void }) {
   const { status } = useStatus();
   const issues = useIssues();
   const today = Date.parse(`${new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Shanghai" })}T00:00:00+08:00`);
@@ -90,6 +94,7 @@ function Side({ name, onAdd }: { name?: string; onAdd: () => void }) {
               </Entry>
             );
           })}
+      <Entry to="/servers?view=top" on={top}>资源排行</Entry>
       <Button variant="outline" size="sm" className="shrink-0 justify-start md:mt-auto md:shrink" onClick={onAdd}>
         <PlusIcon />
         <span className="hidden md:inline">加服务器</span>

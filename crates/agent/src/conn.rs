@@ -5,7 +5,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use anyhow::{Context, anyhow, bail};
 use ed25519_dalek::{Signer, SigningKey, Verifier};
 use futures_util::{SinkExt, StreamExt};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, mpsc, watch};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
@@ -155,6 +155,14 @@ async fn session(
       cancel.cancel();
     })
   };
+  let (memory_tx, memory_rx) = watch::channel(None);
+  let (memory_status, memory_report) = watch::channel(None);
+  tokio::spawn(crate::agent_memory::configure(
+    ops.docker.clone(),
+    memory_rx,
+    memory_status,
+    session_cancel.clone(),
+  ));
   let reporter = {
     let tx = tx.clone();
     let ops = ops.clone();
@@ -163,21 +171,31 @@ async fn session(
       let mut refresh = true;
       // 每两次上报（一分钟）带一次资源采样。
       let mut sample = true;
+      let ctx = Ctx {
+        cancel: cancel.clone(),
+        progress: None,
+      };
+      let mut tick = tokio::time::interval(REPORT_EVERY);
+      tick.set_missed_tick_behavior(
+        tokio::time::MissedTickBehavior::Skip,
+      );
       loop {
+        tokio::select! {
+          _ = tick.tick() => {}
+          _ = cancel.cancelled() => break,
+        }
         let mut report = ops.reporter.report(refresh).await;
         refresh = false;
         if sample {
-          report.metrics = ops.reporter.metrics().await.map(Box::new);
+          report.metrics =
+            ops.reporter.metrics(&ctx).await.map(Box::new);
         }
         sample = !sample;
+        report.agent_memory = memory_report.borrow().clone();
         report.time_ms = Some(chrono::Utc::now().timestamp_millis());
         if tx.send(AgentMsg::Report(Box::new(report))).await.is_err()
         {
           break;
-        }
-        tokio::select! {
-          _ = tokio::time::sleep(REPORT_EVERY) => {}
-          _ = cancel.cancelled() => break,
         }
       }
     })
@@ -221,6 +239,9 @@ async fn session(
       }
     };
     match msg {
+      CoreMsg::AgentMemory { bytes } => {
+        memory_tx.send_replace(Some(bytes));
+      }
       CoreMsg::Request { id, timeout_ms, op } => {
         let cancel = session_cancel.child_token();
         running.lock().await.insert(id, cancel.clone());

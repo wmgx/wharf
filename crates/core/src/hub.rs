@@ -68,6 +68,25 @@ struct Conn {
   upgrade_only: bool,
 }
 
+struct InFlight<'a> {
+  conn: &'a Conn,
+  id: u64,
+}
+
+impl Drop for InFlight<'_> {
+  fn drop(&mut self) {
+    if lock(&self.conn.pending).remove(&self.id).is_some()
+      && self
+        .conn
+        .tx
+        .try_send(CoreMsg::Cancel { id: self.id })
+        .is_err()
+    {
+      self.conn.closed.cancel();
+    }
+  }
+}
+
 #[derive(Default)]
 pub struct Hub {
   conns: Mutex<HashMap<String, Conn>>,
@@ -197,6 +216,7 @@ impl Hub {
     }
     let (done, rx) = oneshot::channel();
     lock(&conn.pending).insert(id, Pending { done, progress });
+    let _in_flight = InFlight { conn: &conn, id };
     let sent = tokio::time::timeout(
       Duration::from_secs(5),
       conn.tx.send(CoreMsg::Request {
@@ -473,6 +493,12 @@ async fn handle_socket(
   let mut ping = tokio::time::interval(PING_EVERY);
   let mut last_recv = tokio::time::Instant::now();
   let mut ping_sent: Option<tokio::time::Instant> = None;
+  let mut agent_memory = None;
+  let alerts = crate::rules::resources::report_queue(
+    state.clone(),
+    server.clone(),
+    conn.closed.clone(),
+  );
   let result: anyhow::Result<()> = loop {
     tokio::select! {
       _ = conn.closed.cancelled() => break Ok(()),
@@ -519,15 +545,27 @@ async fn handle_socket(
         };
         match serde_json::from_slice::<AgentMsg>(&text) {
           Ok(AgentMsg::Report(mut report)) => {
-            let agent_ms = report.time_ms.take();
+            let received = now_ms();
+            let agent_ms = report.time_ms;
             crate::clock::record(&state, &server, agent_ms).await;
-            if let Some(mut m) = report.metrics.take() {
+            let settings = crate::rules::resources::settings(&state, &server).await;
+            if !conn.upgrade_only && let Some(bytes) = settings.as_ref().map(|s| s.0)
+              && agent_memory != Some(bytes)
+              && conn.tx.try_send(CoreMsg::AgentMemory { bytes }).is_ok()
+            {
+              agent_memory = Some(bytes);
+            }
+            if let Some(m) = report.metrics.as_mut() {
               let oom = m.oom.take();
               let hosts = std::mem::take(&mut m.hosts);
               if !hosts.is_empty() {
                 tokio::spawn(crate::http_stats::record(state.clone(), hosts));
               }
-              crate::metrics::record_report(&state, &server, *m).await;
+              crate::metrics::record_report(&state, &server, m).await;
+              if let Some((wanted, limits)) = settings {
+                let limit = report.agent_memory.as_ref().and_then(|m| m.limit).filter(|_| wanted > 0);
+                let _ = alerts.try_send((received, m.as_ref().clone(), limits, limit));
+              }
               let state = state.clone();
               let server = server.clone();
               tokio::spawn(async move {
@@ -553,6 +591,7 @@ async fn handle_socket(
       }
     }
   };
+  conn.closed.cancel();
   state.hub.unregister(&server, &conn);
   tracing::info!("服务器 {server} 离线");
   result
@@ -570,7 +609,16 @@ pub(crate) async fn touch(
     .db
     .call(move |c| {
       c.execute(
-        "UPDATE agents SET last_seen = ?1, report = COALESCE(?2, report) WHERE server = ?3",
+        "UPDATE agents SET last_seen = ?1,
+           report = CASE WHEN ?2 IS NULL THEN report ELSE
+             json_patch(?2, json_object(
+               'metrics', COALESCE(json_extract(?2, '$.metrics'),
+                 CASE WHEN json_extract(?2, '$.build') IS json_extract(report, '$.build')
+                   THEN json_extract(report, '$.metrics') END),
+               'agent_memory', COALESCE(json_extract(?2, '$.agent_memory'),
+                 CASE WHEN json_extract(?2, '$.time_ms') IS NULL THEN json_extract(report, '$.agent_memory') END)
+             )) END
+         WHERE server = ?3",
         params![now_ms(), report, server],
       )
       .map_err(sql_err)

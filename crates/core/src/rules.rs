@@ -34,6 +34,9 @@ use crate::{
   state::AppState,
 };
 
+#[path = "resource_alerts.rs"]
+pub(crate) mod resources;
+
 const CONFIG_KEY: &str = "alerts.config";
 /// 每个序列最多留多少个点，也是"连续次数"的上限。
 const KEEP: usize = 60;
@@ -150,6 +153,12 @@ fn expiry_ok(c: &Ctx) -> Event {
 }
 
 const RULES: &[Rule] = &[
+  resources::HOST_CPU,
+  resources::HOST_MEM,
+  resources::SERVICE_MEM,
+  resources::INODE,
+  resources::MEM_FORECAST,
+  resources::AGENT_MEM,
   Rule {
     id: "traffic_quota",
     name: "流量快用完",
@@ -652,7 +661,11 @@ fn judge(
       }
       let recovered = match rule.recover {
         Some(r) => !rule.op.hit(last, r) && last != r,
-        None => !bad(last),
+        None => {
+          !bad(last)
+            && (!resources::is_report_metric(rule.metric)
+              || last < threshold)
+        }
       };
       if recovered {
         Verdict::Recover
@@ -682,20 +695,37 @@ pub async fn observe(
   value: f64,
   detail: &str,
 ) {
-  let now = now_ms();
-  let points = with(|m| {
+  observe_at(state, now_ms(), metric, subject, value, detail).await;
+}
+
+async fn observe_at(
+  state: &AppState,
+  now: i64,
+  metric: &str,
+  subject: &str,
+  value: f64,
+  detail: &str,
+) {
+  let Some(points) = with(|m| {
     m.series.retain(|_, (_, at)| now - *at < STALE_MS);
     let (p, at) = m
       .series
       .entry((metric.to_string(), subject.to_string()))
       .or_default();
+    if resources::is_report_metric(metric)
+      && !resources::prepare_sample(p, *at, now)
+    {
+      return None;
+    }
     p.push_back(value);
     while p.len() > KEEP {
       p.pop_front();
     }
     *at = now;
-    p.clone()
-  });
+    Some(p.clone())
+  }) else {
+    return;
+  };
   let cfg = config(state).await;
   for rule in RULES.iter().filter(|r| r.metric == metric) {
     let o = cfg.get(rule.id).cloned().unwrap_or_default();

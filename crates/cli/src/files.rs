@@ -51,17 +51,20 @@ pub async fn list(
 }
 
 fn human_size(n: u64) -> String {
-  const UNITS: [&str; 4] = ["B", "K", "M", "G"];
+  format_size(n, &["B", "K", "M", "G"])
+}
+
+pub(crate) fn format_size(n: u64, units: &[&str]) -> String {
   let mut v = n as f64;
   let mut i = 0;
-  while v >= 1024.0 && i + 1 < UNITS.len() {
+  while v >= 1024.0 && i + 1 < units.len() {
     v /= 1024.0;
     i += 1;
   }
   if i == 0 {
-    format!("{n}B")
+    format!("{n}{}", units[0])
   } else {
-    format!("{v:.1}{}", UNITS[i])
+    format!("{v:.1}{}", units[i])
   }
 }
 

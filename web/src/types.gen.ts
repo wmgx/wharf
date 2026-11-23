@@ -34,10 +34,22 @@ export interface AdoptSpec {
   project?: string | null;
 }
 
+export interface AgentMemory {
+  error?: string | null;
+  /**
+   * Docker 实际上限，0 表示不限。
+   */
+  limit?: number | null;
+}
+
 /**
  * agent 定期上报的机器信息。
  */
 export interface AgentReport {
+  /**
+   * 最近一次检查 agent 容器内存上限的结果。
+   */
+  agent_memory?: AgentMemory | null;
   arch: string;
   /**
    * 构建号，见 [crate::BUILD]。旧版本 agent 没有。
@@ -64,7 +76,7 @@ export interface AgentReport {
    */
   lan_ips?: string[];
   /**
-   * 资源采样，每分钟一次（其余上报没有）。控制面存进曲线后不再保留。
+   * 资源采样，每分钟一次。
    */
   metrics?: Metrics | null;
   os: string;
@@ -81,6 +93,15 @@ export interface AgentReport {
    */
   time_ms?: number | null;
   version: string;
+}
+
+export interface AgentUsage {
+  configured_limit: number;
+  cpu: number | null;
+  limit_error: string | null;
+  mem: number | null;
+  memory_limit: number | null;
+  memory_pct: number | null;
 }
 
 export interface AlertHistoryView {
@@ -1092,6 +1113,20 @@ export interface ImageInfo {
   image: string;
 }
 
+export interface ImageRow {
+  id: string;
+  image: string;
+  server: string;
+  size: number;
+  used_by: string[];
+}
+
+export interface ImagesView {
+  errors: Record<string, string>;
+  rows: ImageRow[];
+  unused: Record<string, number>;
+}
+
 /**
  * 计划项会造成的影响，一项可以有多个。
  */
@@ -1318,6 +1353,8 @@ export type LoginWrite = {
  * 一次资源采样。速率是和上一次采样相比的平均值。
  */
 export interface Metrics {
+  agent_cpu?: number | null;
+  agent_mem?: number | null;
   /**
    * 整机 CPU 使用率，0 到 100。
    */
@@ -1328,6 +1365,8 @@ export interface Metrics {
    * 本机 Caddy 网关上一段时间各域名的请求统计。旧 agent 没有。
    */
   hosts?: Record<string, HostTraffic>;
+  inode_total?: number | null;
+  inode_used?: number | null;
   mem_total: number;
   mem_used: number;
   /**
@@ -1896,6 +1935,10 @@ export interface SecretView {
  */
 export interface ServerSettings {
   /**
+   * agent 内存上限，例如 256M、1G，none 为不限，缺省为 256 MiB。
+   */
+  agent_memory?: string | null;
+  /**
    * 机器基线：系统设置的期望值，agent 定时检查差异，apply 时纠正。
    */
   baseline?: Baseline;
@@ -1979,6 +2022,7 @@ export interface ServerSettings {
 }
 
 export interface ServerView {
+  agent: AgentUsage;
   /**
    * agent 的构建号和控制面不一致，可以 `wharf server upgrade`。
    */
@@ -2527,6 +2571,20 @@ export interface UpdatesView {
    * 服务 → 版本检查结果，只有 image 和 git 构建来源的服务。
    */
   services: Record<string, VersionCheck>;
+}
+
+export type UsageKind = "service" | "gateway" | "agent";
+
+export interface UsageRow {
+  cpu: number | null;
+  kind: UsageKind;
+  mem: number | null;
+  memory_limit: number | null;
+  memory_pct: number | null;
+  name: string;
+  net_rx: number | null;
+  net_tx: number | null;
+  server: string;
 }
 
 export interface VersionCheck {

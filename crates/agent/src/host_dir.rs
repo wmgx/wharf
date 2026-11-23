@@ -5,8 +5,13 @@
 use std::{path::Path, time::Duration};
 
 use sha2::{Digest, Sha256};
+use tokio::{
+  fs::File,
+  io::{AsyncReadExt, AsyncSeekExt, SeekFrom},
+};
+use tokio_util::io::ReaderStream;
 use wharf_api_types::{
-  ApiError,
+  ApiError, ErrorCode,
   agent::{HostPackJob, PackedUpload},
 };
 
@@ -15,6 +20,24 @@ use crate::{docker::Docker, exec::Ctx};
 const LIST_TIMEOUT: Duration = Duration::from_secs(30);
 const PACK_TIMEOUT: Duration = Duration::from_secs(600);
 const UPLOAD_TIMEOUT: Duration = Duration::from_secs(600);
+const PACK_CHUNK: usize = 64 * 1024;
+
+async fn hash_file(
+  file: &mut File,
+) -> std::io::Result<(String, u64)> {
+  let mut hasher = Sha256::new();
+  let mut buf = vec![0; PACK_CHUNK];
+  let mut size = 0;
+  loop {
+    let n = file.read(&mut buf).await?;
+    if n == 0 {
+      break;
+    }
+    hasher.update(&buf[..n]);
+    size += n as u64;
+  }
+  Ok((hex::encode(hasher.finalize()), size))
+}
 
 /// 只接受规范的绝对路径：不含 `..`、不含换行和 NUL。
 fn check_path(path: &str) -> Result<String, ApiError> {
@@ -114,7 +137,7 @@ pub async fn pack(
     .timeout(PACK_TIMEOUT)
     .run(ctx)
     .await;
-  let result = async {
+  let transfer = async {
     let out = out?;
     if !out.success {
       return Err(ApiError::invalid(format!(
@@ -123,11 +146,12 @@ pub async fn pack(
       )));
     }
     let files = out.stdout.trim().parse().unwrap_or(0);
-    let bytes = tokio::fs::read(&file).await.map_err(|e| {
-      ApiError::internal(format!("{}：{e}", file.display()))
-    })?;
-    let sha256 = hex::encode(Sha256::digest(&bytes));
-    let size = bytes.len() as u64;
+    let file_err =
+      |e| ApiError::internal(format!("{}：{e}", file.display()));
+    let mut archive = File::open(&file).await.map_err(file_err)?;
+    let (sha256, size) =
+      hash_file(&mut archive).await.map_err(file_err)?;
+    archive.seek(SeekFrom::Start(0)).await.map_err(file_err)?;
     ctx.say(format!(
       "上传代码包（{files} 个文件，{} KiB）",
       size / 1024
@@ -142,7 +166,10 @@ pub async fn pack(
       .map_err(|e| ApiError::internal(e.to_string()))?
       .put(&url)
       .bearer_auth(&job.token)
-      .body(bytes)
+      .header(reqwest::header::CONTENT_LENGTH, size)
+      .body(reqwest::Body::wrap_stream(ReaderStream::with_capacity(
+        archive, PACK_CHUNK,
+      )))
       .send()
       .await
       .map_err(|e| {
@@ -159,8 +186,11 @@ pub async fn pack(
       size,
       files,
     })
-  }
-  .await;
+  };
+  let result = tokio::select! {
+    result = transfer => result,
+    _ = ctx.cancel.cancelled() => Err(ApiError::new(ErrorCode::Cancelled, "上传代码包已取消")),
+  };
   let _ = tokio::fs::remove_file(&file).await;
   result
 }
@@ -172,4 +202,24 @@ pub fn pack_cli(dir: &Path, out: &Path) -> anyhow::Result<()> {
   std::fs::write(out, &packed.bytes)?;
   println!("{}", packed.files);
   Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[tokio::test]
+  async fn chunked_hash_matches_whole_file() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let data: Vec<u8> =
+      (0..PACK_CHUNK + 137).map(|i| (i % 251) as u8).collect();
+    std::fs::write(tmp.path(), &data).unwrap();
+    let mut file = File::open(tmp.path()).await.unwrap();
+    let (sha, size) = hash_file(&mut file).await.unwrap();
+    assert_eq!(size, data.len() as u64);
+    assert_eq!(
+      sha,
+      hex::encode(Sha256::digest(std::fs::read(tmp.path()).unwrap()))
+    );
+  }
 }

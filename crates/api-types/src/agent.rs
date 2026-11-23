@@ -17,7 +17,9 @@
 
 use std::collections::BTreeMap;
 
+pub use crate::resources::{AgentMemory, LocalImage};
 use schemars::JsonSchema;
+
 use serde::{Deserialize, Serialize};
 
 use crate::{ApiError, spec::PrivateAddr};
@@ -55,6 +57,9 @@ pub enum CoreMsg {
     /// 控制面的临时 X25519 公钥，hex。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     kx: Option<String>,
+  },
+  AgentMemory {
+    bytes: u64,
   },
   Request {
     id: u64,
@@ -155,7 +160,10 @@ pub struct AgentReport {
   /// Docker 镜像和容器所在磁盘的容量，和 `disk` 不是同一块盘时才有。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub docker_disk: Option<Disk>,
-  /// 资源采样，每分钟一次（其余上报没有）。控制面存进曲线后不再保留。
+  /// 最近一次检查 agent 容器内存上限的结果。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub agent_memory: Option<AgentMemory>,
+  /// 资源采样，每分钟一次。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub metrics: Option<Box<Metrics>>,
   /// agent 发送上报时的 Unix 毫秒时间，旧版本没有。
@@ -177,6 +185,14 @@ pub struct Metrics {
   pub net_tx: u64,
   pub disk_used: u64,
   pub disk_total: u64,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub inode_used: Option<u64>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub inode_total: Option<u64>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub agent_cpu: Option<f32>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub agent_mem: Option<u64>,
   /// compose project 名到它的容器合计。
   #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
   pub projects: BTreeMap<String, ProjectMetrics>,
@@ -232,6 +248,8 @@ pub struct Disk {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum AgentOp {
+  /// 结果是 Vec<LocalImage>。
+  ListImages,
   /// 立刻回一份最新的 [AgentReport]。
   Report,
   /// 结果是 `Vec<ResolvedImage>`。
