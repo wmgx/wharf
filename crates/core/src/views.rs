@@ -70,6 +70,10 @@ pub fn server_view(
       && crate::agent_upgrade::outdated(
         report.as_ref().map(|r| r.build.as_str()),
       ),
+    tailnet_key: crate::vendor_checks::key(
+      name,
+      crate::tailnet_probe::address(snap, name),
+    ),
     report,
     version: row.version,
     baseline_drift: crate::baseline::drift(name),
@@ -654,6 +658,7 @@ pub async fn status(
   issues.extend(crate::exposure::issues(state).await?);
   issues.extend(crate::sso_login::issues(&snap));
   issues.extend(crate::alerts::issues());
+  issues.extend(crate::external_checks::issues(&servers));
   issues.extend(crate::monitor::issues());
   issues.extend(crate::rdap::issues());
   issues.extend(crate::disk_forecast::issues());

@@ -46,7 +46,11 @@ pub async fn doctor(
   Query(q): Query<DoctorQuery>,
 ) -> ApiResult<DoctorReport> {
   auth.require(Perm::Read)?;
-  let report = run(&s, q.host.as_deref()).await?;
+  let (report, vendors) = tokio::try_join!(
+    run(&s, q.host.as_deref()),
+    crate::vendor_checks::checks(&s)
+  )?;
+  let report = DoctorReport { vendors, ..report };
   if q.host.is_none() {
     remember(report.clone());
   }
@@ -147,6 +151,7 @@ pub async fn run(
     checked_at: Utc::now(),
     servers: servers(s, &snap),
     routes,
+    vendors: vec![],
   })
 }
 

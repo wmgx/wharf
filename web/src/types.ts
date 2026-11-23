@@ -1,6 +1,7 @@
 // 和 crates/api-types 对应的类型，只写页面用到的字段。
 
 import type * as Gen from "./types.gen";
+export type { AclView, ExternalStatus } from "./types.gen";
 
 export type PrivateNetwork = "tailscale" | "overlay" | "lan";
 
@@ -32,7 +33,7 @@ export interface PrivateAddr {
   network: PrivateNetwork;
 }
 
-export interface AgentReport {
+export interface AgentReport extends Pick<Gen.AgentReport, "public_ip" | "egress_info" | "docker_quota"> {
   version: string;
   hostname: string;
   os: string;
@@ -55,6 +56,7 @@ export interface ServerView {
     via?: string;
     renew_at?: string;
     agent_memory?: string | null;
+    registry_mirrors?: Gen.ServerSettings["registry_mirrors"];
   };
   agent?: Gen.AgentUsage;
   joined: boolean;
@@ -522,12 +524,13 @@ export interface BackupsView {
 
 export type NetworkMode = "tailscale" | "lan" | "public";
 
-export interface NetworkView {
+export interface NetworkView extends Pick<Gen.NetworkView, "tailnet_reach" | "tailnet_relays"> {
   servers: {
     name: string;
     mode: NetworkMode;
     configured?: boolean;
     private_ip?: string;
+    tailnet_ip?: Gen.NetworkServer["tailnet_ip"];
     public_ip?: string;
     online: boolean;
   }[];

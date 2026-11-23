@@ -1,7 +1,7 @@
 import { CircleAlertIcon, InfoIcon, TriangleAlertIcon } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { useActions } from "@/components/actions";
-import { SectionTitle } from "@/components/common";
+import { CopyButton, SectionTitle } from "@/components/common";
 import { Row, Rows } from "@/components/kit";
 import { Button } from "@/components/ui/button";
 import { useStatus } from "@/status";
@@ -41,7 +41,10 @@ export function IssueRow({ issue }: { issue: Issue }) {
   return (
     <Row className="items-start">
       <Icon className={`mt-0.5 size-4 shrink-0 ${color}`} />
-      <span className="min-w-0 flex-1 break-all">{issue.title}</span>
+      <span className="min-w-0 flex-1 break-all">{issue.title}
+        {issue.code === "dns_not_effective" && issue.hint && <code className="mt-1.5 block font-mono text-xs text-foreground/70">{issue.hint}</code>}
+      </span>
+      {issue.code === "dns_not_effective" && issue.hint && <CopyButton text={issue.hint} />}
       {issue.code === "update_available" && subject ? (
         <Button variant="outline" size="xs" onClick={() => actions.plan({ title: `更新 ${subject.name}`, changes: [{ op: "refresh_images", name: subject.name }] })}>更新</Button>
       ) : issue.code === "tag_available" && subject && tag ? (

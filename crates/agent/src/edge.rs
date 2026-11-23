@@ -38,11 +38,12 @@ if [ -n "$BUILD_CMD" ]; then echo "> $BUILD_CMD"; sh -c "$BUILD_CMD"; fi
 if [ -x node_modules/.bin/wrangler ]; then W=node_modules/.bin/wrangler
 else W="npx --yes wrangler@$WRANGLER_VERSION"
 fi
+fail_cf() { echo "wrangler 发布失败" >&2; exit "$1"; }
 if [ "$KIND" = pages ]; then
   if [ ! -d "$OUTPUT" ]; then echo "发布目录 $OUTPUT 不存在" >&2; exit 1; fi
-  $W pages deploy "$OUTPUT" --project-name "$PROJECT" --branch "$BRANCH" --commit-dirty=true
+  $W pages deploy "$OUTPUT" --project-name "$PROJECT" --branch "$BRANCH" --commit-dirty=true || fail_cf $?
 else
-  $W deploy --name "$PROJECT" --keep-vars
+  $W deploy --name "$PROJECT" --keep-vars || fail_cf $?
 fi"#;
 
 pub async fn run(
@@ -167,12 +168,14 @@ async fn deploy_in(
     .env("WRANGLER_VERSION", WRANGLER_VERSION)
     .timeout(DEPLOY_TIMEOUT)
     .stream(true)
-    .run(ctx)
+    .run(&crate::external::wrangler_progress(ctx, &job.api_token.0))
     .await;
   if result.is_err() {
     remove_container(docker, &name).await;
   }
-  result?.check("发布")?;
+  result?.check("发布").map_err(|e| {
+    crate::external::wrangler_error(e, &job.api_token.0)
+  })?;
   ctx.say("已发布");
   Ok(EdgeBuildResult { commit })
 }

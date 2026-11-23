@@ -48,7 +48,10 @@ fn walk(
     .collect();
   if subs.is_empty()
     || !path.is_empty()
-      && cmd.get_arguments().any(|a| a.is_positional())
+      && cmd.get_arguments().any(|a| {
+        !a.is_global_set()
+          && (a.is_positional() || a.get_id() == "probe")
+      })
   {
     let args: Vec<Value> = cmd
       .get_arguments()

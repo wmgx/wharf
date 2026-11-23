@@ -26,6 +26,10 @@ pub struct NetworkView {
   /// 直连差、经第三台中转两段都好的方向。
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub relays: Vec<RelayHint>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub tailnet_reach: Vec<ReachView>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub tailnet_relays: Vec<crate::external::TailnetRelay>,
 }
 
 /// 一个方向的链路质量。历史曲线：`GET /api/metrics?subject=<from>><to>&names=link.ms,link.loss`。
@@ -63,6 +67,8 @@ pub struct NetworkServer {
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub private_ip: Option<String>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub tailnet_ip: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
   pub public_ip: Option<String>,
   pub online: bool,
 }
@@ -98,6 +104,8 @@ pub struct ServerView {
   /// agent 最近一次上报。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub report: Option<AgentReport>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub tailnet_key: Option<crate::external::TailnetKey>,
   /// 实际使用的公网 IP：设置里的覆盖值，否则是 agent 探测值。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub public_ip: Option<String>,
@@ -1029,6 +1037,8 @@ pub struct DoctorReport {
   pub checked_at: DateTime<Utc>,
   pub servers: Vec<DoctorCheck>,
   pub routes: Vec<RouteDiagnosis>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub vendors: Vec<DoctorCheck>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

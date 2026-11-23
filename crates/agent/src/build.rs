@@ -240,8 +240,12 @@ fn build_failed(stderr: &str) -> ApiError {
     0 => crate::exec::tail_lines(stderr, 5),
     n => errors[n.saturating_sub(3)..].join("\n"),
   };
-  ApiError::new(ErrorCode::AgentFailed, format!("构建失败：{detail}"))
-    .with_hint("完整的构建日志在这次执行的输出里")
+  let error = ApiError::new(
+    ErrorCode::AgentFailed,
+    format!("构建失败：{detail}"),
+  )
+  .with_hint("完整的构建日志在这次执行的输出里");
+  crate::external::build_error(error, &detail)
 }
 
 /// 用代码里的 Dockerfile，没有就按语言生成到构建目录外面（不混进代码）。
@@ -542,7 +546,7 @@ rm -rf .git"#;
     if let Some(m) = mirror {
       e.message = wharf_api_types::agent::redact_addr(&e.message, m);
     }
-    e
+    crate::external::github_error(e, repo, token)
   };
   let out = result.and_then(|o| o.check("拉取代码")).map_err(hide)?;
   let commit = out
@@ -660,7 +664,11 @@ fi"#;
   let out = result.and_then(|o| o.check("查询代码版本")).map_err(
     |mut e| {
       e.message = job.pull.redact(&e.message);
-      e
+      crate::external::github_error(
+        e,
+        repo,
+        token.as_ref().map(|t| t.0.as_str()),
+      )
     },
   )?;
   pick_commit(&out.stdout, reference).ok_or_else(|| {

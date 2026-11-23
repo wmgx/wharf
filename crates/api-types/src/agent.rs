@@ -149,6 +149,10 @@ pub struct AgentReport {
   /// 探测到的公网出口 IP。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub public_ip: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub egress_info: Option<crate::external::EgressInfo>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub docker_quota: Option<crate::external::DockerQuota>,
   /// agent 存放 compose 文件的目录。
   pub data_dir: String,
   /// 构建号，见 [crate::BUILD]。旧版本 agent 没有。

@@ -170,7 +170,7 @@ pub async fn ensure_image(
     )
     .await
     .map_err(|e| {
-      if e.code == ErrorCode::Timeout {
+      if e.code == ErrorCode::Timeout && e.hint.is_none() {
         e.with_hint("构建超过 60 分钟。国内机器可以给服务器配置 build_env（PIP_INDEX_URL、GOPROXY）")
       } else {
         e

@@ -184,6 +184,21 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route("/api/version", get(crate::agent_upgrade::version))
     .route("/api/version/check", post(crate::agent_upgrade::check))
     .route("/api/network", get(crate::network::show))
+    .route("/api/network/acl", get(crate::vendor_checks::acl))
+    .route(
+      "/api/routes/{host}/dns-check",
+      get(crate::dns_check::show),
+    )
+    .route(
+      "/api/external",
+      get(crate::external_status::list)
+        .post(crate::external_status::add),
+    )
+    .route(
+      "/api/external/{name}",
+      put(crate::external_status::set)
+        .delete(crate::external_status::rm),
+    )
     .route("/api/data", get(data_overview))
     .route("/api/network/probe", post(crate::network::probe))
     .route("/api/upgrade", post(crate::agent_upgrade::upgrade_core))

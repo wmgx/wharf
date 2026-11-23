@@ -93,6 +93,8 @@ pub async fn deploy_compose(
     &format!("wharf {server}"),
   )
   .await
-  .map_err(crate::snapshot::provider_error)?;
+  .map_err(|e| {
+    ApiError::new(wharf_api_types::ErrorCode::Provider, e.message)
+  })?;
   Ok(compose(server).replace(KEY, &key))
 }

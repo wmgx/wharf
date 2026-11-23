@@ -116,7 +116,7 @@ async fn read(
     .and_then(snapshot::edge_provider)
   {
     Ok(p) => p,
-    Err(e) => return failed(e.message),
+    Err(e) => return failed(e.to_string()),
   };
   let project = match with_timeout(
     &format!("读取 {name} 的状态"),
@@ -125,7 +125,7 @@ async fn read(
   .await
   {
     Ok(p) => p,
-    Err(e) => return failed(e.message),
+    Err(e) => return failed(e.to_string()),
   };
   let Some(p) = project else {
     return AppCache {
@@ -143,7 +143,7 @@ async fn read(
   };
   let (versions, error) = match edge::versions(snap, name).await {
     Ok(v) => (v, None),
-    Err(e) => (vec![], Some(format!("读取版本失败：{}", e.message))),
+    Err(e) => (vec![], Some(format!("读取版本失败：{e}"))),
   };
   AppCache {
     target,

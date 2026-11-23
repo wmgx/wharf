@@ -404,7 +404,7 @@ async fn commits(
     .await;
     out.insert(
       name.clone(),
-      r.map(|c| (c, pinned.clone())).map_err(|e| e.message),
+      r.map(|c| (c, pinned.clone())).map_err(|e| e.to_string()),
     );
   }
   out
