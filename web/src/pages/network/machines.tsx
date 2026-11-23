@@ -9,11 +9,15 @@ import { TailscaleDialog } from "@/components/tailscale-setup";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import type { NetworkView } from "@/types";
-import { pairs, type Pair } from "./model";
+import { AccessControl } from "./access-control";
+import { linkState, pairs, type Pair } from "./model";
 
 const order = { bad: 0, warn: 1, idle: 2, ok: 3 };
 
-export function PairTable({ items, server }: { items: Pair[]; server?: string }) {
+export function PairTable({ items, server, net }: { items: Pair[]; server?: string; net?: NetworkView }) {
+  const showTailnet = net?.servers.some((s) => s.tailnet_ip && s.tailnet_ip !== s.private_ip);
+  const tailnet = net && showTailnet ? { ...net, reach: net.tailnet_reach ?? [], links: [] } : null;
+  const tailnetNames = new Set(net?.servers.filter((s) => s.tailnet_ip).map((s) => s.name));
   const [params] = useSearchParams();
   const clickable = useClickable();
   return <Panel>
@@ -25,6 +29,7 @@ export function PairTable({ items, server }: { items: Pair[]; server?: string })
           </TableHead>
           <TableHead>去</TableHead>
           <TableHead>回</TableHead>
+          {tailnet && <><TableHead>组网去</TableHead><TableHead>组网回</TableHead></>}
           <TableHead>状态</TableHead>
           <TableHead />
         </TableRow>
@@ -38,6 +43,8 @@ export function PairTable({ items, server }: { items: Pair[]; server?: string })
           const back = reverse ? p.ab : p.ba;
           const worst = order[p.ab.tone] <= order[p.ba.tone] ? p.ab : p.ba;
           const next = new URLSearchParams(params); next.set("link", `${p.a}~${p.b}`);
+          const showPair = tailnet && tailnetNames.has(from) && tailnetNames.has(to);
+          const derp = net?.tailnet_relays?.find((r) => r.from === p.a && r.to === p.b);
           return <Fragment key={`${p.a}-${p.b}`}>
             <TableRow className="cursor-pointer" {...clickable({ to: `?${next}` })}>
               <TableCell>
@@ -57,6 +64,10 @@ export function PairTable({ items, server }: { items: Pair[]; server?: string })
                   </span>
                 </Tip>
               </TableCell>
+              {tailnet && <>
+                <TableCell>{showPair ? linkState(from, to, tailnet).text : "-"}</TableCell>
+                <TableCell>{showPair ? linkState(to, from, tailnet).text : "-"}</TableCell>
+              </>}
               <TableCell>
                 <StatusBadge tone={p.tone}>
                   {p.tone === "ok" ? "正常" : worst.text}
@@ -66,9 +77,10 @@ export function PairTable({ items, server }: { items: Pair[]; server?: string })
                 <ChevronRightIcon className="size-4" />
               </TableCell>
             </TableRow>
-            {p.relay && <TableRow>
-              <TableCell colSpan={5} className="text-xs text-muted-foreground">
-                {p.relay}
+            {(p.relay || derp) && <TableRow>
+              <TableCell colSpan={tailnet ? 7 : 5} className="text-xs text-muted-foreground">
+                {p.relay && <div>{p.relay}</div>}
+                {derp && <StatusBadge tone="warn">组网走中继 {derp.relay}</StatusBadge>}
               </TableCell>
             </TableRow>}
           </Fragment>;
@@ -144,10 +156,12 @@ export function Machines({ net, refresh }: { net: NetworkView; refresh: () => vo
         </TableBody>
       </Table>
     </Panel>
-    {all.length > 0 && <>
-      <SectionTitle count={all.length}>链路</SectionTitle>
-      <PairTable items={all} />
-    </>}
+    <AccessControl>
+      {all.length > 0 && <>
+        <SectionTitle count={all.length}>链路</SectionTitle>
+        <PairTable items={all} net={net} />
+      </>}
+    </AccessControl>
     <TailscaleDialog open={setup} onClose={() => setSetup(false)} />
   </>;
 }

@@ -57,7 +57,10 @@ pub async fn probe_all(
       (from.to_string(), to)
     })
     .collect();
-  link::probe_pairs(s, &net, pairs).await;
+  tokio::join!(
+    link::probe_pairs(s, &net, pairs),
+    crate::tailnet_probe::probe_extra(s, &snap, &net)
+  );
   Ok(snap)
 }
 
@@ -77,13 +80,15 @@ async fn view(
         .unwrap_or_else(|| NetworkMode::of(v.private_addr.as_ref())),
       configured: v.settings.network_mode.is_some(),
       private_ip: v.private_addr.map(|a| a.ip),
+      tailnet_ip: crate::tailnet_probe::address(snap, &v.name)
+        .map(str::to_string),
       public_ip: v.public_ip,
       online: v.online,
       name: v.name,
     })
     .collect();
   let known = snap.world.servers.clone();
-  let reach = state
+  let reach: Vec<_> = state
     .db
     .call(|c| db::reach_rows(c))
     .await?
@@ -107,6 +112,8 @@ async fn view(
   let (links, relays) = crate::quality::view(&names);
   Ok(NetworkView {
     servers,
+    tailnet_reach: crate::tailnet_probe::reach(snap, &reach),
+    tailnet_relays: crate::tailnet_probe::relays(snap),
     reach,
     links,
     relays,

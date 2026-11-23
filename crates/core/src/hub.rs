@@ -248,7 +248,9 @@ impl Hub {
         "已取消".to_string(),
       )),
     };
-    let value = result?;
+    let value = result.map_err(|e| {
+      crate::external_status::agent_failure(e, server)
+    })?;
     serde_json::from_value(value).map_err(|e| {
       ApiError::internal(format!("agent 返回的数据无法解析：{e}"))
     })

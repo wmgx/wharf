@@ -6,6 +6,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Accounts } from "./accounts";
 import { AppAccounts } from "./app-accounts";
 import { Core } from "./core";
+import { ExternalServices } from "./external-status";
 import { Secrets } from "./secrets";
 import { Security } from "./security";
 import { ShareDomains } from "./share-domains";
@@ -30,6 +31,7 @@ export function Settings() {
       </TabsList>
       <TabsContent value="accounts" className="mt-4">
         <Accounts />
+        <ExternalServices />
         <ShareDomains />
       </TabsContent>
       <TabsContent value="secrets" className="mt-4">

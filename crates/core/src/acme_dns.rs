@@ -162,11 +162,20 @@ pub async fn update(
       );
       Json(json!({"txt": txt})).into_response()
     }
-    Ok(Err(e)) => error(
-      StatusCode::BAD_GATEWAY,
-      format!("写 DNS 记录失败：{}", e.message),
+    Ok(Err(e)) => {
+      error(StatusCode::BAD_GATEWAY, format!("写 DNS 记录失败：{e}"))
+    }
+    Err(_) => error(
+      StatusCode::GATEWAY_TIMEOUT,
+      crate::external_status::failure(
+        wharf_api_types::ApiError::new(
+          wharf_api_types::ErrorCode::Timeout,
+          "写 DNS 记录超时",
+        ),
+        "Cloudflare",
+      )
+      .to_string(),
     ),
-    Err(_) => error(StatusCode::GATEWAY_TIMEOUT, "写 DNS 记录超时"),
   }
 }
 

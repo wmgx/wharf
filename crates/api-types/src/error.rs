@@ -103,6 +103,8 @@ pub struct ApiError {
   /// 可以直接执行的下一步命令。
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub suggest: Vec<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub upstream: Option<crate::external::Upstream>,
 }
 
 impl ApiError {
@@ -112,6 +114,7 @@ impl ApiError {
       message: message.into(),
       hint: None,
       suggest: Vec::new(),
+      upstream: None,
     }
   }
 

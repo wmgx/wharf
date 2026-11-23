@@ -117,7 +117,7 @@ pub async fn upgrade_each(
     match upgrade(state, server, progress.clone(), cancel).await {
       Ok(()) => progress(format!("✓ {server}")),
       Err(e) => {
-        progress(format!("✗ {server}：{}", e.message));
+        progress(format!("✗ {server}：{e}"));
         failed.push(server.as_str());
       }
     }

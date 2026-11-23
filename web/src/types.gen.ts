@@ -16,6 +16,17 @@ export interface AccountView {
   zones: string[];
 }
 
+export interface AclView {
+  acls: number;
+  grants: number;
+  groups: Record<string, string[]>;
+  hint?: string | null;
+  modified_at?: string | null;
+  raw?: string | null;
+  status: string;
+  tagOwners: Record<string, string[]>;
+}
+
 export type Action = "create" | "update" | "delete" | "adopt";
 
 export type Actual = "running" | "stopped" | "partial" | "missing" | "offline" | "unknown";
@@ -68,7 +79,9 @@ export interface AgentReport {
    * Docker 镜像和容器所在磁盘的容量，和 `disk` 不是同一块盘时才有。
    */
   docker_disk?: Disk | null;
+  docker_quota?: DockerQuota | null;
   docker_version?: string | null;
+  egress_info?: EgressInfo | null;
   hostname: string;
   /**
    * 其余网卡的 IPv4 地址（不含回环和 docker 网桥），
@@ -203,6 +216,7 @@ export interface ApiError {
    * 可以直接执行的下一步命令。
    */
   suggest?: string[];
+  upstream?: Upstream | null;
 }
 
 export interface AppAccountDomain {
@@ -638,6 +652,30 @@ export interface Disk {
   total: number;
 }
 
+export interface DnsCheck {
+  effective: boolean;
+  expected: string;
+  hostname: string;
+  resolvers: DnsResolver[];
+}
+
+export interface DnsResolver {
+  a: string[] | null;
+  aaaa: string[] | null;
+  elapsed_ms: number;
+  resolver: string;
+  verdict: DnsVerdict;
+}
+
+export type DnsVerdict = "matches" | "mismatch" | "unavailable";
+
+export interface DockerQuota {
+  checked_at: string;
+  limit: number;
+  remaining: number;
+  window_secs: number;
+}
+
 /**
  * `POST /api/convert/docker-run` 的请求：一条 `docker run` 命令。
  */
@@ -681,6 +719,7 @@ export interface DoctorReport {
   checked_at: string;
   routes: RouteDiagnosis[];
   servers: DoctorCheck[];
+  vendors?: DoctorCheck[];
 }
 
 /**
@@ -817,6 +856,15 @@ export interface EdgeVersionView {
   url?: string | null;
 }
 
+export interface EgressInfo {
+  asn: string | null;
+  city: string | null;
+  country: string | null;
+  ipv4: string | null;
+  ipv6: string | null;
+  operator: string | null;
+}
+
 /**
  * 服务器设置 `egress`：这台提供出口，以及经它出去的规则。
  */
@@ -845,6 +893,21 @@ export interface ExposureView {
   outdated: boolean;
   ports: PortRow[];
   risks: RiskRow[];
+}
+
+export interface ExternalIncident {
+  name: string;
+  url: string;
+}
+
+export interface ExternalStatus {
+  checked_at: string | null;
+  description: string;
+  enabled: boolean;
+  incidents: ExternalIncident[];
+  indicator: string | null;
+  name: string;
+  url: string;
 }
 
 export type Extract = {
@@ -1439,6 +1502,7 @@ export interface NetworkServer {
   online: boolean;
   private_ip?: string | null;
   public_ip?: string | null;
+  tailnet_ip?: string | null;
 }
 
 /**
@@ -1458,6 +1522,8 @@ export interface NetworkView {
    */
   relays?: RelayHint[];
   servers: NetworkServer[];
+  tailnet_reach?: ReachView[];
+  tailnet_relays?: TailnetRelay[];
 }
 
 export interface NewerTag {
@@ -2068,6 +2134,7 @@ export interface ServerView {
    */
   rtt_ms?: number | null;
   settings: ServerSettings;
+  tailnet_key?: TailnetKey | null;
   version: number;
 }
 
@@ -2383,6 +2450,17 @@ export interface Status {
 
 export type StepStatus = "pending" | "running" | "done" | "failed" | "skipped";
 
+export interface TailnetKey {
+  expires: string | null;
+  never_expires: boolean;
+}
+
+export interface TailnetRelay {
+  from: string;
+  relay: string;
+  to: string;
+}
+
 export type TaskKind = {
   command: string;
   /**
@@ -2572,6 +2650,8 @@ export interface UpdatesView {
    */
   services: Record<string, VersionCheck>;
 }
+
+export type Upstream = "docker_hub" | "git_hub" | "cloudflare";
 
 export type UsageKind = "service" | "gateway" | "agent";
 

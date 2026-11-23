@@ -261,10 +261,11 @@ impl Docker {
   async fn pull_once(
     &self,
     candidate: &str,
+    policy: &PullPolicy,
     timeout: Duration,
     ctx: &Ctx,
   ) -> Result<crate::exec::Output, ApiError> {
-    let pull_ctx = layer_progress(ctx);
+    let pull_ctx = layer_progress(ctx, policy);
     let ticker = {
       let ctx = ctx.clone();
       let done = CancellationToken::new();
@@ -318,9 +319,11 @@ impl Docker {
       candidates.push(format!("{name}@{digest}"));
     }
     let mut errors = Vec::new();
+    let mut rate = crate::external::RateLimit::None;
     for candidate in candidates {
       ctx.say(policy.redact(&format!("拉取 {candidate}")));
-      let result = self.pull_once(&candidate, timeout, ctx).await;
+      let result =
+        self.pull_once(&candidate, policy, timeout, ctx).await;
       match result {
         Ok(_) => {
           self
@@ -334,10 +337,14 @@ impl Docker {
           return Ok(());
         }
         Err(e) if e.code == ErrorCode::Cancelled => return Err(e),
-        Err(e) => errors.push(policy.redact(&e.message)),
+        Err(e) => {
+          rate = rate
+            .max(crate::external::rate_limit(&candidate, &e.message));
+          errors.push(policy.redact(&e.message));
+        }
       }
     }
-    Err(
+    Err(crate::external::image_error(
       ApiError::new(
         ErrorCode::AgentFailed,
         format!("拉取 {image}@{digest} 失败：{}", errors.join("；")),
@@ -345,7 +352,9 @@ impl Docker {
       .with_hint(
         "计划里固定的版本可能已经从仓库删除，重新 plan 会查最新版本",
       ),
-    )
+      image,
+      rate,
+    ))
   }
 
   /// 按镜像源顺序拉取，每次尝试都有超时。全部失败但本地已有镜像时只警告。
@@ -359,9 +368,11 @@ impl Docker {
     let timeout =
       Duration::from_secs(policy.attempt_timeout_secs.max(10));
     let mut errors = Vec::new();
+    let mut rate = crate::external::RateLimit::None;
     for candidate in pull_candidates(image, policy) {
       ctx.say(policy.redact(&format!("拉取 {candidate}")));
-      let result = self.pull_once(&candidate, timeout, ctx).await;
+      let result =
+        self.pull_once(&candidate, policy, timeout, ctx).await;
       match result {
         Ok(_) => {
           if candidate != image {
@@ -385,6 +396,8 @@ impl Docker {
         }
         Err(e) if e.code == ErrorCode::Cancelled => return Err(e),
         Err(e) => {
+          rate = rate
+            .max(crate::external::rate_limit(&candidate, &e.message));
           let message = policy.redact(&e.message);
           ctx.say(format!("失败：{message}"));
           errors
@@ -398,7 +411,7 @@ impl Docker {
       warnings.push(warning);
       return Ok(());
     }
-    Err(
+    Err(crate::external::image_error(
       ApiError::new(
         ErrorCode::AgentFailed,
         format!("镜像 {image} 拉取失败：\n{}", errors.join("\n")),
@@ -406,7 +419,8 @@ impl Docker {
       .with_hint(
         "检查服务器的 registry_mirrors 设置，例如 wharf server set <server> --mirror docker.io=docker.1ms.run",
       ),
-    )
+      image, rate,
+    ))
   }
 
   pub async fn up(
@@ -878,17 +892,18 @@ impl Layers {
   }
 }
 
-fn layer_progress(ctx: &Ctx) -> Ctx {
+fn layer_progress(ctx: &Ctx, policy: &PullPolicy) -> Ctx {
   let Some(outer) = ctx.progress.clone() else {
     return ctx.clone();
   };
   let layers = Arc::new(Mutex::new(Layers::default()));
+  let policy = policy.clone();
   Ctx {
     cancel: ctx.cancel.clone(),
     progress: Some(Arc::new(move |line: String| {
       let msg = layers.lock().ok().and_then(|mut l| l.feed(&line));
       if let Some(msg) = msg {
-        outer(msg);
+        outer(policy.redact(&msg));
       }
     })),
   }

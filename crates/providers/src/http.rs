@@ -23,14 +23,14 @@ pub fn set_route(route: Option<Route>) {
   }
 }
 
-pub(crate) struct Http {
+pub struct Http {
   direct: Client,
   /// 经出口的客户端和规则。
   exit: Option<(Client, Route)>,
 }
 
 impl Http {
-  pub(crate) fn new(timeout: Duration) -> reqwest::Result<Http> {
+  pub fn new(timeout: Duration) -> reqwest::Result<Http> {
     let builder = || {
       Client::builder()
         .timeout(timeout)
@@ -50,7 +50,7 @@ impl Http {
   }
 
   /// `req` 拼出请求；命中出口规则的经出口发，出口连不上时换直连再发。
-  pub(crate) async fn send(
+  pub async fn send(
     &self,
     req: impl Fn(&Client) -> RequestBuilder,
   ) -> reqwest::Result<Response> {

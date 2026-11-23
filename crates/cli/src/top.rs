@@ -63,6 +63,7 @@ fn pct(v: Option<f64>) -> String {
 
 pub fn show_server(view: &ServerView) {
   pretty(view);
+  crate::external::server(view);
   let agent = &view.agent;
   let limit = |v| if v == 0 { "不限".into() } else { size(v) };
   println!(

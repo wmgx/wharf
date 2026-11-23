@@ -29,6 +29,7 @@ pub struct Reporter {
   public_ip: Option<String>,
   cache: Arc<Mutex<Option<CachedIp>>>,
   sampler: Arc<Mutex<crate::metrics::Sampler>>,
+  egress: Arc<Mutex<crate::external::EgressCache>>,
 }
 
 impl Reporter {
@@ -38,6 +39,7 @@ impl Reporter {
       public_ip,
       cache: Default::default(),
       sampler: Default::default(),
+      egress: Default::default(),
     }
   }
 
@@ -56,8 +58,14 @@ impl Reporter {
   }
 
   pub async fn report(&self, refresh: bool) -> AgentReport {
-    let (docker_version, compose_version) =
-      self.docker.versions().await;
+    let ((docker_version, compose_version), egress, quota) = tokio::join!(
+      self.docker.versions(),
+      async {
+        let ipv4 = self.public_ip(refresh).await;
+        self.egress.lock().await.get(ipv4).await
+      },
+      crate::external::quota(),
+    );
     AgentReport {
       version: wharf_api_types::VERSION.to_string(),
       hostname: hostname(),
@@ -67,7 +75,12 @@ impl Reporter {
       compose_version,
       private_addr: detect_private(),
       lan_ips: lan_ips(),
-      public_ip: self.public_ip(refresh).await,
+      public_ip: self
+        .public_ip
+        .clone()
+        .or_else(|| egress.ipv4.clone()),
+      egress_info: Some(egress),
+      docker_quota: quota,
       data_dir: self.docker.data_dir.display().to_string(),
       build: wharf_api_types::BUILD.to_string(),
       disk: disk(&self.docker.data_dir),
@@ -79,9 +92,6 @@ impl Reporter {
   }
 
   async fn public_ip(&self, refresh: bool) -> Option<String> {
-    if let Some(ip) = &self.public_ip {
-      return Some(ip.clone());
-    }
     let mut cache = self.cache.lock().await;
     if let Some((at, ip)) = &*cache
       && !refresh
@@ -177,6 +187,8 @@ fn is_cgnat(ip: Ipv4Addr) -> bool {
 async fn detect_public_ip() -> Option<String> {
   let client = reqwest::Client::builder()
     .timeout(Duration::from_secs(5))
+    .redirect(reqwest::redirect::Policy::none())
+    .no_proxy()
     .build()
     .ok()?;
   for url in PUBLIC_IP_URLS {

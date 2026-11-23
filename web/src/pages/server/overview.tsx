@@ -13,6 +13,9 @@ export function Overview({ server, status, info, traffic, loading }: { server: S
   const name = server.name;
   const r = server.report;
   const disk = r?.disk;
+  const egress = r?.egress_info;
+  const quota = r?.docker_quota;
+  const mirror = !!server.settings.registry_mirrors?.["docker.io"]?.length;
   const agent = server.agent;
   const limit = (v: number) => v === 0 ? "不限" : size(v);
   const offset = server.clock_offset_ms;
@@ -52,9 +55,14 @@ export function Overview({ server, status, info, traffic, loading }: { server: S
     <SectionTitle>基本信息</SectionTitle>
     <Panel className="p-4">
       <Facts items={[
-        ["公网 IP", server.public_ip && <span className="font-mono text-xs">
+        ["公网 IP", server.public_ip !== (egress?.ipv4 ?? r?.public_ip) && server.public_ip && <span className="font-mono text-xs">
           {server.public_ip}
         </span>],
+        ["出口 IPv4", <span className="font-mono text-xs">{egress?.ipv4 ?? r?.public_ip ?? "-"}</span>],
+        ["出口 IPv6", <span className="font-mono text-xs">{egress?.ipv6 ?? (egress ? "无" : "-")}</span>],
+        ["运营商", [egress?.asn, egress?.operator].filter(Boolean).join(" ") || "-"],
+        ["地区", [egress?.country, egress?.city].filter(Boolean).join(" ") || "-"],
+        ["Docker Hub 剩余额度", `${quota ? `${quota.remaining} / ${quota.limit}（${quota.window_secs / 3600} 小时窗口，查于 ${quota.checked_at}）` : "查不到"}${mirror ? " · 已设镜像源" : ""}`],
         ["内网地址", server.private_addr?.ip && <span className="font-mono text-xs">
           {server.private_addr.ip}
         </span>],

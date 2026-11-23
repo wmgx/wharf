@@ -184,7 +184,10 @@ async fn session(
           _ = tick.tick() => {}
           _ = cancel.cancelled() => break,
         }
-        let mut report = ops.reporter.report(refresh).await;
+        let mut report = tokio::select! {
+          _ = cancel.cancelled() => break,
+          report = ops.reporter.report(refresh) => report,
+        };
         refresh = false;
         if sample {
           report.metrics =

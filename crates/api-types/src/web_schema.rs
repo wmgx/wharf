@@ -85,6 +85,10 @@ pub fn web_schema() -> Value {
   let _ = generator.subschema_for::<view::BackupsView>();
   let _ = generator.subschema_for::<spec::NetworkMode>();
   let _ = generator.subschema_for::<view::NetworkView>();
+  let _ = generator.subschema_for::<crate::external::AclView>();
+  let _ =
+    generator.subschema_for::<crate::external::ExternalStatus>();
+  let _ = generator.subschema_for::<crate::external::DnsCheck>();
   let _ = generator.subschema_for::<view::SecretView>();
   let _ = generator.subschema_for::<view::Perm>();
   let _ = generator.subschema_for::<view::TotpView>();

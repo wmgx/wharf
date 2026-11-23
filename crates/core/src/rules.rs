@@ -34,6 +34,8 @@ use crate::{
   state::AppState,
 };
 
+#[path = "external_alerts.rs"]
+pub(crate) mod external;
 #[path = "resource_alerts.rs"]
 pub(crate) mod resources;
 
@@ -159,6 +161,10 @@ const RULES: &[Rule] = &[
   resources::INODE,
   resources::MEM_FORECAST,
   resources::AGENT_MEM,
+  external::KEY,
+  external::RELAY,
+  external::INCIDENT,
+  external::VENDOR,
   Rule {
     id: "traffic_quota",
     name: "流量快用完",

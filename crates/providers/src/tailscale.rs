@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use crate::error::{ProviderError, code, redact};
+use crate::error::{ProviderError, code};
 
 const API: &str = "https://api.tailscale.com/api/v2";
 const KEY_TTL_SECS: u64 = 3600;
@@ -19,50 +19,26 @@ pub async fn auth_key(
   tag: &str,
   description: &str,
 ) -> Result<String, ProviderError> {
-  let (id, secret) = credential.split_once(':').ok_or_else(|| {
-    ProviderError::invalid(
-      "Tailscale 凭据格式不对，应为 client_id:client_secret",
-    )
-  })?;
   let client = crate::http::Http::new(Duration::from_secs(25))
-    .map_err(|e| {
-      ProviderError::internal(redact(&e.to_string(), secret))
+    .map_err(|_| {
+      ProviderError::internal("无法初始化 Tailscale HTTP 客户端")
     })?;
-  let fail = |e: reqwest::Error| {
+  let fail = |_: reqwest::Error| {
     ProviderError::new(
       code::PROVIDER_UNAVAILABLE,
       "连不上 Tailscale API",
     )
     .retryable()
-    .with_detail(redact(&e.to_string(), secret))
   };
 
-  let resp = client
-    .send(|c| {
-      c.post(format!("{API}/oauth/token"))
-        .header("content-type", "application/x-www-form-urlencoded")
-        .body(format!(
-          "client_id={}&client_secret={}",
-          urlencoding::encode(id),
-          urlencoding::encode(secret)
-        ))
-    })
-    .await
-    .map_err(fail)?;
-  if !resp.status().is_success() {
-    return Err(ProviderError::new(
-      code::AUTH_FAILED,
-      format!(
-        "Tailscale OAuth 客户端认证失败（HTTP {}）",
-        resp.status().as_u16()
-      ),
-    ));
-  }
-  let body: Value = resp.json().await.map_err(fail)?;
-  let token = body["access_token"].as_str().ok_or_else(|| {
+  let token = access_token(credential).await.map_err(|e| {
     ProviderError::new(
-      code::PROVIDER_RESPONSE,
-      "Tailscale 没有返回 access_token",
+      if e.denied() {
+        code::AUTH_FAILED
+      } else {
+        code::PROVIDER_UNAVAILABLE
+      },
+      e.message(),
     )
   })?;
 
@@ -79,22 +55,17 @@ pub async fn auth_key(
   let resp = client
     .send(|c| {
       c.post(format!("{API}/tailnet/-/keys"))
-        .bearer_auth(token)
+        .bearer_auth(&token)
         .json(&body)
     })
     .await
     .map_err(fail)?;
   let status = resp.status();
   if !status.is_success() {
-    let text = resp.text().await.unwrap_or_default();
-    let reason = serde_json::from_str::<Value>(&text)
-      .ok()
-      .and_then(|v| v["message"].as_str().map(str::to_string))
-      .unwrap_or_default();
     return Err(ProviderError::new(
       code::PROVIDER_REJECTED,
       format!(
-        "Tailscale 拒绝创建加入密钥（HTTP {}）{reason}",
+        "Tailscale 拒绝创建加入密钥（HTTP {}）",
         status.as_u16()
       ),
     ));
@@ -106,4 +77,120 @@ pub async fn auth_key(
       "Tailscale 没有返回密钥",
     )
   })
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum ReadError {
+  InvalidCredential,
+  Http(reqwest::StatusCode),
+  Unavailable,
+}
+
+impl ReadError {
+  pub fn denied(self) -> bool {
+    matches!(
+      self,
+      Self::InvalidCredential
+        | Self::Http(
+          reqwest::StatusCode::BAD_REQUEST
+            | reqwest::StatusCode::UNAUTHORIZED
+            | reqwest::StatusCode::FORBIDDEN
+        )
+    )
+  }
+
+  pub fn message(self) -> String {
+    match self {
+      Self::InvalidCredential => {
+        "Tailscale 凭据格式应为 client_id:client_secret".into()
+      }
+      Self::Http(status) => {
+        format!("Tailscale API 返回 HTTP {}", status.as_u16())
+      }
+      Self::Unavailable => "Tailscale API 查不到".into(),
+    }
+  }
+}
+
+fn read_client() -> Result<crate::http::Http, ReadError> {
+  crate::http::Http::new(Duration::from_secs(10))
+    .map_err(|_| ReadError::Unavailable)
+}
+
+fn checked(
+  resp: reqwest::Response,
+) -> Result<reqwest::Response, ReadError> {
+  if resp.status().is_success() {
+    Ok(resp)
+  } else {
+    Err(ReadError::Http(resp.status()))
+  }
+}
+
+pub async fn access_token(
+  credential: &str,
+) -> Result<String, ReadError> {
+  let (id, secret) = credential
+    .split_once(':')
+    .filter(|(id, secret)| !id.is_empty() && !secret.is_empty())
+    .ok_or(ReadError::InvalidCredential)?;
+  let client = read_client()?;
+  let resp = client
+    .send(|c| {
+      c.post(format!("{API}/oauth/token"))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(format!(
+          "client_id={}&client_secret={}",
+          urlencoding::encode(id),
+          urlencoding::encode(secret)
+        ))
+    })
+    .await
+    .map_err(|_| ReadError::Unavailable)?;
+  let body: Value = checked(resp)?
+    .json()
+    .await
+    .map_err(|_| ReadError::Unavailable)?;
+  body["access_token"]
+    .as_str()
+    .map(str::to_string)
+    .ok_or(ReadError::Unavailable)
+}
+
+pub async fn devices(token: &str) -> Result<Value, ReadError> {
+  let resp = read_client()?
+    .send(|c| {
+      c.get(format!("{API}/tailnet/-/devices")).bearer_auth(token)
+    })
+    .await
+    .map_err(|_| ReadError::Unavailable)?;
+  let data: Value = checked(resp)?
+    .json()
+    .await
+    .map_err(|_| ReadError::Unavailable)?;
+  if !data["devices"].is_array() {
+    return Err(ReadError::Unavailable);
+  }
+  Ok(data)
+}
+
+pub async fn policy(
+  token: &str,
+) -> Result<(String, Option<String>), ReadError> {
+  let resp = read_client()?
+    .send(|c| {
+      c.get(format!("{API}/tailnet/-/acl"))
+        .bearer_auth(token)
+        .header("accept", "application/hujson")
+    })
+    .await
+    .map_err(|_| ReadError::Unavailable)?;
+  let resp = checked(resp)?;
+  let modified = resp
+    .headers()
+    .get("last-modified")
+    .and_then(|v| v.to_str().ok())
+    .map(str::to_string);
+  let raw = resp.text().await.map_err(|_| ReadError::Unavailable)?;
+  Ok((raw, modified))
 }

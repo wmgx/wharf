@@ -525,6 +525,7 @@ async fn dispatch(
       let bad = v
         .servers
         .iter()
+        .chain(&v.vendors)
         .chain(v.routes.iter().flat_map(|r| &r.checks))
         .filter(|c| c.status == CheckStatus::Bad)
         .count();
@@ -533,7 +534,17 @@ async fn dispatch(
       }
       Ok(())
     }
-    Command::Network { probe } => {
+    Command::External(cmd) => {
+      crate::external::command(c, cmd, j).await
+    }
+    Command::Network {
+      action: Some(action),
+      ..
+    } => crate::external::acl(c, action, j).await,
+    Command::Network {
+      probe,
+      action: None,
+    } => {
       let v: NetworkView = if probe {
         c.post("/api/network/probe", &json!({})).await?
       } else {
@@ -3098,6 +3109,9 @@ async fn gateway(
 
 async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
   match cmd {
+    RouteCmd::DnsCheck { hostname } => {
+      crate::external::dns(c, &hostname, j).await
+    }
     RouteCmd::Note { host, args } => {
       let host =
         host.trim().trim_end_matches('.').to_ascii_lowercase();

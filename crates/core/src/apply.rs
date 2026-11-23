@@ -696,6 +696,11 @@ async fn execute(
   }
   lock(&state.runs.active).remove(&run_id);
   tracing::info!("[{run_id}] 结束：{:?}", final_run.status);
+  crate::dns_check::after_apply(
+    state.clone(),
+    &steps,
+    &final_run.steps[offset..],
+  );
   if deployed {
     tokio::spawn(
       async move { crate::updates::versions(&state).await },

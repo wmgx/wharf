@@ -2155,7 +2155,7 @@ fn gateway_sites_same(
 }
 
 /// 路由期望的 DNS 记录。
-fn desired_record(
+pub(crate) fn desired_record(
   snap: &Snapshot,
   desired: &World,
   net: &Net,

@@ -461,6 +461,10 @@ pub fn doctor(v: &wharf_api_types::view::DoctorReport) {
   };
   println!("服务器");
   v.servers.iter().for_each(line);
+  if !v.vendors.is_empty() {
+    println!("\n厂商账号");
+    v.vendors.iter().for_each(line);
+  }
   for r in &v.routes {
     let first_bad =
       r.checks.iter().find(|c| c.status == CheckStatus::Bad);
@@ -702,6 +706,7 @@ pub fn network(v: &NetworkView) {
   }
   if v.reach.is_empty() {
     println!("\n还没有探测过，wharf network --probe");
+    crate::external::network(v);
     return;
   }
   println!("\n谁能连谁的内网地址：");
@@ -735,6 +740,7 @@ pub fn network(v: &NetworkView) {
       h.from, h.to, h.direct_loss, h.via, h.via_loss
     );
   }
+  crate::external::network(v);
 }
 
 #[cfg(test)]

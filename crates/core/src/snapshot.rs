@@ -643,7 +643,7 @@ pub fn provider_error(e: ProviderError) -> ApiError {
   if let Some(hint) = hint {
     err = err.with_hint(hint);
   }
-  err
+  crate::external_status::failure(err, "Cloudflare")
 }
 
 pub fn dns_provider(
@@ -713,9 +713,12 @@ pub async fn with_timeout<T>(
 ) -> Result<T, ApiError> {
   match tokio::time::timeout(Duration::from_secs(90), fut).await {
     Ok(result) => result.map_err(provider_error),
-    Err(_) => Err(ApiError::new(
-      ErrorCode::Timeout,
-      format!("{what} 超过 90 秒没有完成"),
+    Err(_) => Err(crate::external_status::failure(
+      ApiError::new(
+        ErrorCode::Timeout,
+        format!("{what} 超过 90 秒没有完成"),
+      ),
+      "Cloudflare",
     )),
   }
 }

@@ -370,7 +370,7 @@ pub async fn backup(
     )
     .await;
   if let Err(e) = pruned {
-    progress(format!("提醒：清理旧快照失败：{}", e.message));
+    progress(format!("提醒：清理旧快照失败：{e}"));
   }
   Ok(())
 }
@@ -451,16 +451,17 @@ pub(crate) async fn record(
       },
       body: match result {
         Ok(_) => format!("备份到 {}", w.target),
-        Err(e) => format!("备份到 {}：{}", w.target, e.message),
+        Err(e) => format!("备份到 {}：{e}", w.target),
       },
     },
   )
   .await;
   let (ok, body) = match result {
     Ok(s) => (true, serde_json::to_string(s).map_err(json_err)?),
-    Err(e) => {
-      (false, serde_json::to_string(&e.message).map_err(json_err)?)
-    }
+    Err(e) => (
+      false,
+      serde_json::to_string(&e.to_string()).map_err(json_err)?,
+    ),
   };
   let values = (
     service.to_string(),
@@ -578,7 +579,7 @@ pub async fn list(
       .await;
     match listed {
       Ok(list) => snapshots = list,
-      Err(e) => snapshots_error = Some(e.message),
+      Err(e) => snapshots_error = Some(e.to_string()),
     }
   }
   Ok(Json(BackupsView {

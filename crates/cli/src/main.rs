@@ -15,6 +15,7 @@ mod connect;
 mod deploy;
 mod describe;
 mod edge;
+mod external;
 mod files;
 mod fleet;
 mod gh;
@@ -287,7 +288,12 @@ pub enum Command {
     /// 先让每台在线服务器探测其余服务器，再显示结果。
     #[arg(long)]
     probe: bool,
+    #[command(subcommand)]
+    action: Option<external::NetworkCmd>,
   },
+  /// 外部服务状态。
+  #[command(subcommand)]
+  External(external::ExternalCmd),
   /// 告警规则和事件通知：开关、阈值、连续次数、静默。
   #[command(subcommand)]
   Alert(AlertCmd),
@@ -1183,6 +1189,10 @@ pub enum GatewayCmd {
 #[derive(Subcommand)]
 pub enum RouteCmd {
   List,
+  /// 向三个公共 DNS 检查 A 和 AAAA 是否生效。
+  DnsCheck {
+    hostname: String,
+  },
   /// 设置域名备注，直接生效。
   Note {
     host: String,
