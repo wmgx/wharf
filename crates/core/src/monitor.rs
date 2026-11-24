@@ -31,15 +31,21 @@ pub fn issues() -> Vec<Issue> {
   let Ok(m) = LAST.lock() else { return vec![] };
   m.iter()
     .filter(|(_, v)| v.fails >= FAILS)
-    .map(|(s, v)| Issue {
-      code: "monitor_down".into(),
-      level: IssueLevel::Fault,
-      subject: Some(IssueSubject {
-        kind: "service".into(),
-        name: s.clone(),
-      }),
-      title: format!("服务 {s} 的监控不正常：{}", v.detail),
-      hint: None,
+    .map(|(s, v)| {
+      let (ack, alert) =
+        crate::rules::issue_alert("monitor_failed", s);
+      Issue {
+        code: "monitor_down".into(),
+        level: IssueLevel::Fault,
+        subject: Some(IssueSubject {
+          kind: "service".into(),
+          name: s.clone(),
+        }),
+        title: format!("服务 {s} 的监控不正常：{}", v.detail),
+        hint: None,
+        ack,
+        alert,
+      }
     })
     .collect()
 }

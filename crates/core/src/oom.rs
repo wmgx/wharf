@@ -41,17 +41,22 @@ pub async fn record(
 pub fn issues() -> Vec<Issue> {
   rules::firing_subjects("oom_killed")
     .into_iter()
-    .map(|(name, title)| Issue {
-      code: "oom_killed".into(),
-      level: IssueLevel::Warn,
-      subject: Some(IssueSubject {
-        kind: "service".into(),
-        name: name.clone(),
-      }),
-      title,
-      hint: Some(format!(
-        "看时间线和内存曲线；内存确实不够就调大上限：wharf service limits {name} --memory <MB> --apply"
-      )),
+    .map(|(name, title)| {
+      let (ack, alert) = rules::issue_alert("oom_killed", &name);
+      Issue {
+        code: "oom_killed".into(),
+        level: IssueLevel::Warn,
+        subject: Some(IssueSubject {
+          kind: "service".into(),
+          name: name.clone(),
+        }),
+        title,
+        hint: Some(format!(
+          "看时间线和内存曲线；内存确实不够就调大上限：wharf service limits {name} --memory <MB> --apply"
+        )),
+        ack,
+        alert,
+      }
     })
     .collect()
 }

@@ -118,6 +118,12 @@ export interface AgentUsage {
   memory_pct: number | null;
 }
 
+export interface AlertAck {
+  at: number;
+  by: string;
+  note?: string | null;
+}
+
 export interface AlertHistoryView {
   at: number;
   /**
@@ -135,18 +141,26 @@ export interface AlertHistoryView {
   title: string;
 }
 
+export type AlertLevel = "urgent" | "digest";
+
 /**
  * `PUT /api/alerts/{id}`：只改给了的字段。`reset` 恢复默认值。
  */
 export interface AlertPatch {
   enabled?: boolean | null;
   for_n?: number | null;
+  level?: AlertLevel | null;
   /**
    * 静默多少分钟，0 取消静默。
    */
   mute_minutes?: number | null;
   reset: boolean;
   threshold?: number | null;
+}
+
+export interface AlertRef {
+  rule: string;
+  subject: string;
 }
 
 /**
@@ -164,6 +178,7 @@ export interface AlertRuleView {
   enabled: boolean;
   for_n: number;
   id: string;
+  level: AlertLevel;
   /**
    * 指标名，例如 `server.online`。
    */
@@ -188,6 +203,8 @@ export interface AlertRuleView {
  * `GET /api/alerts`：告警规则、事件通知的开关，正在触发的告警和最近的推送。
  */
 export interface AlertsView {
+  builtin_suppressions: BuiltinSuppressionView[];
+  custom_suppressions: CustomSuppressionView[];
   firing: FiringView[];
   /**
    * 最近的推送（新的在前，保留 7 天）。
@@ -428,6 +445,12 @@ export interface BuildSource {
   upload?: string | null;
 }
 
+export interface BuiltinSuppressionView {
+  enabled: boolean;
+  id: string;
+  name: string;
+}
+
 /**
  * 证书申请状态，从网关最近的日志里读出来。
  */
@@ -592,6 +615,14 @@ export interface CreatedToken {
    * 只返回这一次。
    */
   token: string;
+}
+
+export interface CustomSuppressionView {
+  id: number;
+  source_rule: string;
+  source_subject?: string | null;
+  target_rule: string;
+  target_subject?: string | null;
 }
 
 /**
@@ -983,6 +1014,7 @@ export interface FileSpec {
 }
 
 export interface FiringView {
+  ack?: AlertAck | null;
   rule: string;
   /**
    * 开始触发的时间（毫秒）。
@@ -1247,6 +1279,8 @@ export interface ImportRecord {
 }
 
 export interface Issue {
+  ack?: AlertAck | null;
+  alert?: AlertRef | null;
   /**
    * 这是哪一类问题，页面按它决定给什么按钮。取值见下表。
    * oom_killed：服务的容器因内存超限被杀。
@@ -1586,8 +1620,10 @@ export interface NewerTag {
  * 一类事件通知：发生就推，没有阈值。
  */
 export interface NoticeView {
+  customized: boolean;
   enabled: boolean;
   id: string;
+  level: AlertLevel;
   muted_until?: number | null;
   name: string;
 }

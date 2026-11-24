@@ -62,6 +62,7 @@ pub(super) const RULES: &[Rule] = &[
     mode: Mode::Consecutive,
     recover: None,
     every: "每 5 分钟一次，按本期用量",
+    level: AlertLevel::Digest,
     key: |s| format!("traffic.{s}"),
     fire: |c| {
       ev(
@@ -90,6 +91,7 @@ pub(super) const RULES: &[Rule] = &[
     mode: Mode::Consecutive,
     recover: Some(2.0),
     every: "每 30 秒一次",
+    level: AlertLevel::Urgent,
     key: |s| format!("clock.{s}"),
     fire: |c| {
       let n = c.value as i64;
@@ -118,6 +120,7 @@ pub(super) const RULES: &[Rule] = &[
     mode: Mode::Consecutive,
     recover: Some(21.0),
     every: "每小时一次，按近 7 天趋势",
+    level: AlertLevel::Digest,
     key: |s| format!("diskfc.{s}"),
     fire: |c| {
       let n = if c.value < 1.0 {
@@ -155,6 +158,7 @@ pub(super) const RULES: &[Rule] = &[
     mode: Mode::Consecutive,
     recover: None,
     every: "每小时一次",
+    level: AlertLevel::Digest,
     key: |s| format!("expiry.soon.{s}"),
     fire: expiry_fire,
     ok: expiry_ok,
@@ -170,6 +174,7 @@ pub(super) const RULES: &[Rule] = &[
     mode: Mode::Consecutive,
     recover: None,
     every: "每小时一次",
+    level: AlertLevel::Urgent,
     key: |s| format!("expiry.urgent.{s}"),
     fire: expiry_fire,
     ok: expiry_ok,
@@ -185,6 +190,7 @@ pub(super) const RULES: &[Rule] = &[
     mode: Mode::Consecutive,
     recover: None,
     every: "每分钟一次",
+    level: AlertLevel::Urgent,
     key: |s| format!("agent.{s}"),
     fire: |c| {
       ev(
@@ -213,6 +219,7 @@ pub(super) const RULES: &[Rule] = &[
     mode: Mode::Window(10),
     recover: None,
     every: "每分钟一次",
+    level: AlertLevel::Urgent,
     key: |s| format!("restart.{s}"),
     fire: |c| {
       ev(
@@ -241,6 +248,7 @@ pub(super) const RULES: &[Rule] = &[
     mode: Mode::Window(30),
     recover: None,
     every: "每分钟一次",
+    level: AlertLevel::Urgent,
     key: |s| format!("oom.{s}"),
     fire: |c| {
       ev(
@@ -269,6 +277,7 @@ pub(super) const RULES: &[Rule] = &[
     mode: Mode::Consecutive,
     recover: None,
     every: "每分钟一次",
+    level: AlertLevel::Urgent,
     key: |s| format!("monitor.{s}"),
     fire: |c| {
       ev(
@@ -297,6 +306,7 @@ pub(super) const RULES: &[Rule] = &[
     mode: Mode::Consecutive,
     recover: None,
     every: "每 2 分钟一次",
+    level: AlertLevel::Urgent,
     key: |s| format!("probe.{s}"),
     fire: |c| {
       ev(
@@ -322,6 +332,7 @@ pub(super) const RULES: &[Rule] = &[
     mode: Mode::Consecutive,
     recover: None,
     every: "每 2 分钟一次",
+    level: AlertLevel::Digest,
     key: |s| format!("cert.{s}"),
     fire: |c| {
       ev(
@@ -347,6 +358,7 @@ pub(super) const RULES: &[Rule] = &[
     mode: Mode::Consecutive,
     recover: None,
     every: "每 5 分钟一次",
+    level: AlertLevel::Urgent,
     key: |s| format!("link.{s}"),
     fire: |c| {
       let (from, to) =
@@ -379,6 +391,7 @@ pub(super) const RULES: &[Rule] = &[
     mode: Mode::Consecutive,
     recover: Some(2.0),
     every: "每分钟一次，最近 5 分钟合计",
+    level: AlertLevel::Urgent,
     key: |s| format!("http5xx.{s}"),
     fire: |c| {
       ev(
@@ -407,6 +420,7 @@ pub(super) const RULES: &[Rule] = &[
     mode: Mode::Consecutive,
     recover: None,
     every: "每分钟一次",
+    level: AlertLevel::Urgent,
     key: |s| {
       let (server, unit) = split_unit(s);
       format!("hostunit.{server}.{unit}")

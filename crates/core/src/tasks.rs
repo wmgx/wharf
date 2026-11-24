@@ -529,6 +529,8 @@ pub async fn issues(state: &AppState) -> Vec<Issue> {
         name: n,
       }),
       hint: None,
+      ack: None,
+      alert: None,
     })
     .collect()
 }

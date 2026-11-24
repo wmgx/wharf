@@ -3,16 +3,22 @@ import { Fragment } from "react";
 import { usePoll } from "@/api";
 import { useActions } from "@/components/actions";
 import { ago, Empty, SectionTitle, StatusBadge } from "@/components/common";
-import { IssueRow, useIssues } from "@/components/issues";
+import { AckControl, ackText, IssueRow, useIssues } from "@/components/issues";
 import { Panel, Rows } from "@/components/kit";
 import { Button } from "@/components/ui/button";
+import { useStatus } from "@/status";
 import type { AlertsView, IssueLevel } from "@/types";
 
 export function Open() {
   const nav = useNavigate();
   const issues = useIssues();
   const actions = useActions();
-  const { data: alerts } = usePoll<AlertsView>("/api/alerts", 30000);
+  const { refresh: refreshStatus } = useStatus();
+  const { data: alerts, refresh: refreshAlerts } = usePoll<AlertsView>("/api/alerts", 30000);
+  const refreshAll = () => {
+    refreshAlerts();
+    refreshStatus();
+  };
   const updates = issues.filter((i) => i.code === "update_available" && i.subject);
   const groups: [IssueLevel, string][] = [["fault", "故障"], ["warn", "要看一眼"], ["info", "可以做的"]];
   if (!issues.length && !alerts?.firing.length) return <Empty>现在没有要处理的</Empty>;
@@ -23,7 +29,12 @@ export function Open() {
         <Panel className="grid gap-1.5 p-4 text-sm">
           {alerts.firing.map((f) => <div key={`${f.rule}/${f.subject}`} className="flex flex-wrap items-center gap-2">
             <StatusBadge tone="bad">{alerts.rules.find((r) => r.id === f.rule)?.name ?? alerts.notices.find((n) => n.id === f.rule)?.name ?? f.rule}</StatusBadge>
-            <span className="min-w-0 flex-1 break-words">{f.title}</span><span className="text-xs text-muted-foreground">{ago(new Date(f.since).toISOString())}起</span>
+            <span className="min-w-0 flex-1 break-words">
+              {f.title}
+              {f.ack && <span className="ml-2 text-xs text-muted-foreground">{ackText(f.ack)}</span>}
+            </span>
+            <span className="text-xs text-muted-foreground">{ago(new Date(f.since).toISOString())}起</span>
+            <AckControl rule={f.rule} subject={f.subject} ack={f.ack} onDone={refreshAll} />
             <Button variant="outline" size="xs" onClick={() => nav(alertPath(f.rule, f.subject))}>查看</Button>
           </div>)}
         </Panel>

@@ -80,15 +80,16 @@ pub fn issues() -> Vec<Issue> {
     [("expiry_soon", false), ("expiry_urgent", true)]
   {
     for (subject, title) in rules::firing_subjects(rule) {
-      firing.insert(subject, (urgent, title));
+      firing.insert(subject, (rule, urgent, title));
     }
   }
   let days = DAYS.lock().unwrap_or_else(|e| e.into_inner());
   firing
     .into_iter()
-    .filter_map(|(s, (urgent, title))| {
+    .filter_map(|(s, (rule, urgent, title))| {
       let (kind, name) = s.split_once(':')?;
       let domain = kind == "domain";
+      let (ack, alert) = rules::issue_alert(rule, &s);
       let title =
         days.get(&s).map_or(title, |n| match (domain, *n < 0) {
           (true, true) => format!("域名 {name} 已经到期"),
@@ -114,6 +115,8 @@ pub fn issues() -> Vec<Issue> {
         }),
         title,
         hint: None,
+        ack,
+        alert,
       })
     })
     .collect()

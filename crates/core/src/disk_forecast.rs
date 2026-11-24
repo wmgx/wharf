@@ -62,15 +62,20 @@ pub fn days_left(server: &str) -> Option<f64> {
 pub fn issues() -> Vec<Issue> {
   rules::firing_subjects("disk_forecast")
     .into_iter()
-    .map(|(name, title)| Issue {
-      code: "disk_forecast".into(),
-      level: IssueLevel::Warn,
-      subject: Some(IssueSubject {
-        kind: "server".into(),
-        name,
-      }),
-      title,
-      hint: None,
+    .map(|(name, title)| {
+      let (ack, alert) = rules::issue_alert("disk_forecast", &name);
+      Issue {
+        code: "disk_forecast".into(),
+        level: IssueLevel::Warn,
+        subject: Some(IssueSubject {
+          kind: "server".into(),
+          name,
+        }),
+        title,
+        hint: None,
+        ack,
+        alert,
+      }
     })
     .collect()
 }

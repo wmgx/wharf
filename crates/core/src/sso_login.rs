@@ -1112,6 +1112,8 @@ pub fn issues(
           "{}；用 wharf sso test {host} 查看",
           result.error.as_deref().unwrap_or("登录失败")
         )),
+        ack: None,
+        alert: None,
       })
     })
     .collect()

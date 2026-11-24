@@ -557,6 +557,8 @@ pub fn issues() -> Vec<Issue> {
         watch.lagging.join("、")
       ),
       hint: Some(format!("wharf route dns-check {host}")),
+      ack: None,
+      alert: None,
     })
     .collect()
 }

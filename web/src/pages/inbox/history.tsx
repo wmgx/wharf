@@ -8,7 +8,7 @@ const clock = (ms: number) => new Date(ms).toLocaleString("zh-CN", { month: "2-d
 export function History() {
   const { data: v } = usePoll<AlertsView>("/api/alerts", 30000);
   if (!v) return null;
-  const nameOf = (id: string) => v.rules.find((r) => r.id === id)?.name ?? v.notices.find((n) => n.id === id)?.name ?? id;
+  const nameOf = (id: string) => (id === "digest" ? "每日汇总" : v.rules.find((r) => r.id === id)?.name ?? v.notices.find((n) => n.id === id)?.name ?? id);
   return (
     <>
       <SectionTitle count={v.history.length}>最近推送</SectionTitle>

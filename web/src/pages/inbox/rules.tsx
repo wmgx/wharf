@@ -9,7 +9,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import type { AlertPatch, AlertsView } from "@/types";
+import type { AlertLevel, AlertPatch, AlertsView } from "@/types";
 
 const MUTES: [number, string][] = [
   [60, "1 小时"],
@@ -17,11 +17,25 @@ const MUTES: [number, string][] = [
   [7 * 24 * 60, "7 天"],
 ];
 
+const LEVELS: [AlertLevel, string][] = [
+  ["urgent", "立即"],
+  ["digest", "每日汇总"],
+];
+
 const clock = (ms: number) => new Date(ms).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+
+function splitRuleSubject(raw: string): { rule: string; subject?: string } {
+  const i = raw.indexOf(":");
+  if (i < 0) return { rule: raw.trim() };
+  const subject = raw.slice(i + 1).trim();
+  return { rule: raw.slice(0, i).trim(), subject: subject || undefined };
+}
 
 export function Rules() {
   const { data, refresh } = usePoll<AlertsView>("/api/alerts", 30000);
   const [view, setView] = useState<AlertsView | null>(null);
+  const [srcInput, setSrcInput] = useState("");
+  const [dstInput, setDstInput] = useState("");
   const v = view ?? data;
 
   const patch = async (id: string, p: AlertPatch) => {
@@ -42,6 +56,36 @@ export function Rules() {
     }
   };
 
+  const addSuppress = async () => {
+    const src = splitRuleSubject(srcInput);
+    const dst = splitRuleSubject(dstInput);
+    if (!src.rule || !dst.rule) return;
+    try {
+      setView(
+        await api.post<AlertsView>("/api/alerts/suppress", {
+          source_rule: src.rule,
+          source_subject: src.subject,
+          target_rule: dst.rule,
+          target_subject: dst.subject,
+        }),
+      );
+      setSrcInput("");
+      setDstInput("");
+      refresh();
+    } catch (e) {
+      toast.error("保存失败", { description: (e as Error).message });
+    }
+  };
+
+  const removeSuppress = async (id: number) => {
+    try {
+      setView(await api.del<AlertsView>(`/api/alerts/suppress/${id}`));
+      refresh();
+    } catch (e) {
+      toast.error("删除失败", { description: (e as Error).message });
+    }
+  };
+
   if (!v) return null;
   return (
     <>
@@ -52,6 +96,7 @@ export function Rules() {
             <TableRow>
               <TableHead className="w-10">开</TableHead>
               <TableHead>规则</TableHead>
+              <TableHead className="w-28">级别</TableHead>
               <TableHead className="w-28">阈值</TableHead>
               <TableHead className="w-24">连续次数</TableHead>
               <TableHead className="w-40" />
@@ -66,6 +111,9 @@ export function Rules() {
                 <TableCell>
                   <div className="font-medium">{r.name}</div>
                   <div className="font-mono text-xs break-all text-muted-foreground">{r.condition}</div>
+                </TableCell>
+                <TableCell>
+                  <LevelMenu level={r.level} onChange={(level) => patch(r.id, { level })} />
                 </TableCell>
                 <TableCell>
                   {r.threshold_editable ? (
@@ -91,14 +139,54 @@ export function Rules() {
       <SectionTitle>事件通知</SectionTitle>
       <Panel className="grid gap-2 p-4">
         {v.notices.map((n) => (
-          <div key={n.id} className="flex items-center gap-2.5 text-sm">
+          <div key={n.id} className="flex flex-wrap items-center gap-2.5 text-sm">
             <Checkbox checked={n.enabled} aria-label={`开关 ${n.name}`} onCheckedChange={(c) => patch(n.id, { enabled: c === true })} />
             <span>{n.name}</span>
-            <span className="ml-auto">
-              <Controls muted={n.muted_until} onPatch={(p) => patch(n.id, p)} />
+            <span className="ml-auto inline-flex items-center gap-1">
+              <LevelMenu level={n.level} onChange={(level) => patch(n.id, { level })} />
+              <Controls muted={n.muted_until} customized={n.customized} onPatch={(p) => patch(n.id, p)} />
             </span>
           </div>
         ))}
+      </Panel>
+
+      <SectionTitle>告警抑制</SectionTitle>
+      <Panel className="grid gap-2 p-4 text-sm">
+        {(v.builtin_suppressions ?? []).map((s) => (
+          <div key={s.id} className="flex items-center gap-2.5">
+            <Checkbox checked={s.enabled} aria-label={`开关 ${s.name}`} onCheckedChange={(c) => patch(s.id, { enabled: c === true })} />
+            <span>{s.name}</span>
+          </div>
+        ))}
+        {(v.custom_suppressions ?? []).map((s) => (
+          <div key={s.id} className="flex flex-wrap items-center gap-2 border-t pt-2">
+            <span className="font-mono text-xs text-muted-foreground">#{s.id}</span>
+            <span className="font-mono text-xs">
+              {s.source_rule}{s.source_subject ? `:${s.source_subject}` : ""} → {s.target_rule}{s.target_subject ? `:${s.target_subject}` : ""}
+            </span>
+            <Button variant="ghost" size="xs" className="ml-auto" onClick={() => removeSuppress(s.id)}>
+              删除
+            </Button>
+          </div>
+        ))}
+        <div className="flex flex-wrap items-center gap-2 border-t pt-2">
+          <Input
+            className="h-8 w-44 font-mono text-xs"
+            placeholder="源规则[:对象]"
+            value={srcInput}
+            onChange={(e) => setSrcInput(e.target.value)}
+          />
+          <span className="text-muted-foreground">→</span>
+          <Input
+            className="h-8 w-44 font-mono text-xs"
+            placeholder="忽略规则[:对象]"
+            value={dstInput}
+            onChange={(e) => setDstInput(e.target.value)}
+          />
+          <Button variant="outline" size="sm" disabled={!srcInput.trim() || !dstInput.trim()} onClick={addSuppress}>
+            添加
+          </Button>
+        </div>
       </Panel>
 
       <label className="mt-6 flex w-fit cursor-pointer items-center gap-2.5 text-sm">
@@ -109,7 +197,27 @@ export function Rules() {
   );
 }
 
-function Controls({ muted, customized, onPatch }: { muted?: number; customized?: boolean; onPatch: (p: AlertPatch) => void }) {
+function LevelMenu({ level, onChange }: { level: AlertLevel; onChange: (l: AlertLevel) => void }) {
+  const label = LEVELS.find(([k]) => k === level)?.[1] ?? level;
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="ghost" size="sm">
+          {label}
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        {LEVELS.map(([k, text]) => (
+          <DropdownMenuItem key={k} onSelect={() => k !== level && onChange(k)}>
+            {text}
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+function Controls({ muted, customized, onPatch }: { muted?: number | null; customized?: boolean; onPatch: (p: AlertPatch) => void }) {
   return (
     <span className="inline-flex items-center gap-1">
       {muted ? (

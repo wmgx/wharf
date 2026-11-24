@@ -280,6 +280,8 @@ pub fn issues() -> Vec<Issue> {
       }),
       title: format!("服务 {name} 自动更新失败，还在运行旧版本"),
       hint: None,
+      ack: None,
+      alert: None,
     })
     .collect()
 }

@@ -26,9 +26,9 @@ use wharf_api_types::{
 };
 
 use crate::{
-  AccountCmd, AlertCmd, AppAccountCmd, ApplyFlags, BackupCmd,
-  BuildArgs, Cli, Command, EgressCmd, GatewayCmd, NotifyCmd,
-  RouteCmd, RunCmd, SecretCmd, ServerCmd, ServiceCmd,
+  AccountCmd, AlertCmd, AlertSuppressCmd, AppAccountCmd, ApplyFlags,
+  BackupCmd, BuildArgs, Cli, Command, EgressCmd, GatewayCmd,
+  NotifyCmd, RouteCmd, RunCmd, SecretCmd, ServerCmd, ServiceCmd,
   client::{CliError, CliResult, Client, Config, read_secret, seg},
   fleet, print,
 };
@@ -2733,7 +2733,7 @@ async fn pick_server(c: &Client) -> CliResult<String> {
 
 // GATEWAYS / ROUTES
 
-/// `alert set --dry-run`：规则或事件通知改前改后。恢复默认值要控制面算，只标出来。
+/// `alert set --dry-run`：规则、事件通知或内置抑制改前改后。恢复默认值要控制面算，只标出来。
 fn alert_preview(
   now: &wharf_api_types::view::AlertsView,
   id: &str,
@@ -2744,17 +2744,28 @@ fn alert_preview(
   {
     json!({
       "enabled": r.enabled,
+      "level": r.level.as_str(),
       "threshold": r.threshold,
       "for": r.for_n,
       "muted_until": r.muted_until.map(fmt_ms),
     })
   } else if let Some(n) = now.notices.iter().find(|n| n.id == id) {
-    json!({ "enabled": n.enabled, "muted_until": n.muted_until.map(fmt_ms) })
+    json!({
+      "enabled": n.enabled,
+      "level": n.level.as_str(),
+      "muted_until": n.muted_until.map(fmt_ms),
+    })
+  } else if let Some(s) =
+    now.builtin_suppressions.iter().find(|s| s.id == id)
+  {
+    json!({ "enabled": s.enabled })
   } else {
     return Err(
-      ApiError::not_found(format!("没有告警规则或事件通知 {id}"))
-        .suggest("wharf alert list")
-        .into(),
+      ApiError::not_found(format!(
+        "没有告警规则、事件通知或抑制 {id}"
+      ))
+      .suggest("wharf alert list")
+      .into(),
     );
   };
   let mut after = before.clone();
@@ -2763,6 +2774,9 @@ fn alert_preview(
   }
   if let Some(v) = patch.enabled {
     after["enabled"] = json!(v);
+  }
+  if let Some(v) = patch.level {
+    after["level"] = json!(v.as_str());
   }
   if let Some(v) = patch.threshold {
     after["threshold"] = json!(v);
@@ -2782,79 +2796,273 @@ fn alert_preview(
   crate::preview::show(j, &format!("alert/{id}"), &before, &after)
 }
 
+fn split_rule_subject(raw: &str) -> (String, Option<String>) {
+  match raw.split_once(':') {
+    Some((r, s)) if !s.is_empty() => {
+      (r.to_string(), Some(s.to_string()))
+    }
+    Some((r, _)) => (r.to_string(), None),
+    None => (raw.to_string(), None),
+  }
+}
+
+fn fmt_ack(a: &wharf_api_types::view::AlertAck) -> String {
+  match &a.note {
+    Some(note) => {
+      format!("已确认 · {} · {} · {note}", a.by, fmt_ms(a.at))
+    }
+    None => format!("已确认 · {} · {}", a.by, fmt_ms(a.at)),
+  }
+}
+
+fn fmt_suppress_endpoint(
+  rule: &str,
+  subject: Option<&str>,
+) -> String {
+  match subject {
+    Some(s) => format!("{rule}:{s}"),
+    None => rule.to_string(),
+  }
+}
+
 async fn alert(c: &Client, cmd: AlertCmd, j: bool) -> CliResult<()> {
-  use wharf_api_types::view::{AlertOptions, AlertPatch, AlertsView};
-  let v: AlertsView = match cmd {
-    AlertCmd::List => c.get("/api/alerts").await?,
-    AlertCmd::Options { include_logs } => {
-      c.put(
-        "/api/alerts/options",
-        &AlertOptions {
-          include_logs: include_logs == "on",
-        },
-      )
-      .await?
-    }
-    AlertCmd::Set {
-      id,
-      on,
-      off,
-      threshold,
-      for_n,
-      mute,
-      reset,
-      dry_run,
-    } => {
-      let patch = AlertPatch {
-        enabled: (on || off).then_some(on),
-        threshold,
-        for_n,
-        mute_minutes: mute,
-        reset,
-      };
-      if dry_run {
-        let now: AlertsView = c.get("/api/alerts").await?;
-        return alert_preview(&now, &id, &patch, j);
-      }
-      c.put(&format!("/api/alerts/{}", seg(&id)), &patch).await?
-    }
+  use wharf_api_types::view::{
+    AlertAckRequest, AlertDigestPreview, AlertLevel, AlertOptions,
+    AlertPatch, AlertSuppressRequest, AlertUnackRequest, AlertsView,
+    CustomSuppressionView,
   };
-  out(j, &v, |v| {
-    let state = |on: bool, muted: Option<i64>| match (on, muted) {
-      (false, _) => "关".to_string(),
-      (true, Some(t)) => format!("静默到 {}", fmt_ms(t)),
-      (true, None) => "开".to_string(),
-    };
-    println!("告警规则：");
-    for r in &v.rules {
-      println!(
-        "  {:<22} {:<8} {}  {}",
-        r.id,
-        state(r.enabled, r.muted_until),
-        r.name,
-        r.condition
-      );
+  match cmd {
+    AlertCmd::Firing => {
+      let v: AlertsView = c.get("/api/alerts").await?;
+      out(j, &v.firing, |firing| {
+        if firing.is_empty() {
+          println!("现在没有正在触发的告警");
+          return;
+        }
+        for f in firing {
+          let ack = f
+            .ack
+            .as_ref()
+            .map(|a| format!("  [{}]", fmt_ack(a)))
+            .unwrap_or_default();
+          println!(
+            "  {:<22} {:<20} {}（{} 起）{ack}",
+            f.rule,
+            f.subject,
+            f.title,
+            fmt_ms(f.since)
+          );
+        }
+      });
+      return Ok(());
     }
-    println!("事件通知：");
-    for n in &v.notices {
-      println!(
-        "  {:<22} {:<8} {}",
-        n.id,
-        state(n.enabled, n.muted_until),
-        n.name
-      );
+    AlertCmd::Digest { .. } => {
+      let v: AlertDigestPreview =
+        c.get("/api/alerts/digest/preview").await?;
+      out(j, &v, |v| {
+        if v.empty {
+          println!("{} 当前没有待汇总内容", v.title);
+        } else {
+          println!("{}\n\n{}", v.title, v.body);
+        }
+      });
+      return Ok(());
     }
-    if !v.firing.is_empty() {
-      println!("正在触发：");
-      for f in &v.firing {
-        println!("  {}（{} 起）", f.title, fmt_ms(f.since));
-      }
+    AlertCmd::Suppress {
+      cmd: AlertSuppressCmd::List,
+    } => {
+      let list: Vec<CustomSuppressionView> =
+        c.get("/api/alerts/suppress").await?;
+      out(j, &list, |list| {
+        if list.is_empty() {
+          println!("没有自定义抑制规则");
+          return;
+        }
+        for s in list {
+          println!(
+            "  #{:<3} {} -> 忽略 {}",
+            s.id,
+            fmt_suppress_endpoint(
+              &s.source_rule,
+              s.source_subject.as_deref()
+            ),
+            fmt_suppress_endpoint(
+              &s.target_rule,
+              s.target_subject.as_deref()
+            ),
+          );
+        }
+      });
+      return Ok(());
     }
-    println!(
-      "告警附带日志：{}",
-      if v.include_logs { "开" } else { "关" }
-    );
-  });
+    cmd => {
+      let v: AlertsView = match cmd {
+        AlertCmd::List => c.get("/api/alerts").await?,
+        AlertCmd::Options { include_logs } => {
+          c.put(
+            "/api/alerts/options",
+            &AlertOptions {
+              include_logs: include_logs == "on",
+            },
+          )
+          .await?
+        }
+        AlertCmd::Ack {
+          rule,
+          subject,
+          note,
+        } => {
+          c.post(
+            "/api/alerts/ack",
+            &AlertAckRequest {
+              rule,
+              subject,
+              note,
+            },
+          )
+          .await?
+        }
+        AlertCmd::Unack { rule, subject } => {
+          c.post(
+            "/api/alerts/unack",
+            &AlertUnackRequest { rule, subject },
+          )
+          .await?
+        }
+        AlertCmd::Suppress {
+          cmd: AlertSuppressCmd::Add { source, ignore },
+        } => {
+          let (source_rule, source_subject) =
+            split_rule_subject(&source);
+          let (target_rule, target_subject) =
+            split_rule_subject(&ignore);
+          c.post(
+            "/api/alerts/suppress",
+            &AlertSuppressRequest {
+              source_rule,
+              source_subject,
+              target_rule,
+              target_subject,
+            },
+          )
+          .await?
+        }
+        AlertCmd::Suppress {
+          cmd: AlertSuppressCmd::Rm { id },
+        } => c.delete(&format!("/api/alerts/suppress/{id}")).await?,
+        AlertCmd::Set {
+          id,
+          on,
+          off,
+          level,
+          threshold,
+          for_n,
+          mute,
+          reset,
+          dry_run,
+        } => {
+          let patch = AlertPatch {
+            enabled: (on || off).then_some(on),
+            level: level.and_then(|l| AlertLevel::parse(&l)),
+            threshold,
+            for_n,
+            mute_minutes: mute,
+            reset,
+          };
+          if dry_run {
+            let now: AlertsView = c.get("/api/alerts").await?;
+            return alert_preview(&now, &id, &patch, j);
+          }
+          c.put(&format!("/api/alerts/{}", seg(&id)), &patch).await?
+        }
+        AlertCmd::Firing
+        | AlertCmd::Digest { .. }
+        | AlertCmd::Suppress {
+          cmd: AlertSuppressCmd::List,
+        } => unreachable!(),
+      };
+      out(j, &v, |v| {
+        let state = |on: bool, muted: Option<i64>| match (on, muted) {
+          (false, _) => "关".to_string(),
+          (true, Some(t)) => format!("静默到 {}", fmt_ms(t)),
+          (true, None) => "开".to_string(),
+        };
+        let lvl = |l: AlertLevel| match l {
+          AlertLevel::Urgent => "立即",
+          AlertLevel::Digest => "汇总",
+        };
+        println!("告警规则：");
+        for r in &v.rules {
+          println!(
+            "  {:<22} {:<8} {:<4} {}  {}",
+            r.id,
+            state(r.enabled, r.muted_until),
+            lvl(r.level),
+            r.name,
+            r.condition
+          );
+        }
+        println!("事件通知：");
+        for n in &v.notices {
+          println!(
+            "  {:<22} {:<8} {:<4} {}",
+            n.id,
+            state(n.enabled, n.muted_until),
+            lvl(n.level),
+            n.name
+          );
+        }
+        if !v.builtin_suppressions.is_empty()
+          || !v.custom_suppressions.is_empty()
+        {
+          println!("告警抑制：");
+          for s in &v.builtin_suppressions {
+            println!(
+              "  {:<22} {:<8} {}",
+              s.id,
+              if s.enabled { "开" } else { "关" },
+              s.name
+            );
+          }
+          for s in &v.custom_suppressions {
+            println!(
+              "  #{:<3} {} -> 忽略 {}",
+              s.id,
+              fmt_suppress_endpoint(
+                &s.source_rule,
+                s.source_subject.as_deref()
+              ),
+              fmt_suppress_endpoint(
+                &s.target_rule,
+                s.target_subject.as_deref()
+              ),
+            );
+          }
+        }
+        if !v.firing.is_empty() {
+          println!("正在触发：");
+          for f in &v.firing {
+            let ack = f
+              .ack
+              .as_ref()
+              .map(|a| format!("  [{}]", fmt_ack(a)))
+              .unwrap_or_default();
+            println!(
+              "  {}:{} {}（{} 起）{ack}",
+              f.rule,
+              f.subject,
+              f.title,
+              fmt_ms(f.since)
+            );
+          }
+        }
+        println!(
+          "告警附带日志：{}",
+          if v.include_logs { "开" } else { "关" }
+        );
+      });
+    }
+  }
   Ok(())
 }
 

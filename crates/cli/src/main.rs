@@ -1097,15 +1097,57 @@ pub enum ServiceCmd {
 }
 
 #[derive(Subcommand)]
+pub enum AlertSuppressCmd {
+  /// 添加自定义抑制规则：A 触发时忽略 B 的推送。
+  Add {
+    /// 触发源，格式 `<规则>` 或 `<规则>:<对象>`。
+    source: String,
+    /// 被忽略的目标，格式 `<规则>` 或 `<规则>:<对象>`。
+    #[arg(long)]
+    ignore: String,
+  },
+  /// 列出自定义抑制规则。
+  List,
+  /// 删除一条自定义抑制规则。
+  Rm {
+    /// 抑制规则序号（见 suppress list）。
+    id: i64,
+  },
+}
+
+#[derive(Subcommand)]
 pub enum AlertCmd {
   /// 告警里附带服务最近的日志：`wharf alert options --include-logs on`。
   Options {
     #[arg(long, value_parser = ["on", "off"])]
     include_logs: String,
   },
-  /// 规则、事件通知、正在触发的告警、最近的推送。
+  /// 规则、事件通知、抑制规则、正在触发的告警、最近的推送。
   List,
-  /// 改一条规则或事件通知（id 见 list）。只改给了的选项。
+  /// 列出正在触发的告警（含确认状态）。
+  Firing,
+  /// 确认一条正在触发的告警，连续 1 小时不再触发后自动失效。
+  Ack {
+    rule: String,
+    subject: String,
+    /// 备注，最多 200 字。
+    #[arg(long)]
+    note: Option<String>,
+  },
+  /// 取消一条告警的确认。
+  Unack { rule: String, subject: String },
+  /// 每日汇总相关操作。
+  Digest {
+    /// 预览现在发送时的汇总内容，不实际发送。
+    #[arg(long)]
+    preview: bool,
+  },
+  /// 自定义告警抑制规则。
+  Suppress {
+    #[command(subcommand)]
+    cmd: AlertSuppressCmd,
+  },
+  /// 改一条规则、事件通知或内置抑制（id 见 list）。只改给了的选项。
   Set {
     id: String,
     /// 打开
@@ -1114,6 +1156,9 @@ pub enum AlertCmd {
     /// 关闭
     #[arg(long)]
     off: bool,
+    /// 通知级别：urgent（立即）或 digest（每日汇总）。
+    #[arg(long, value_parser = ["urgent", "digest"])]
+    level: Option<String>,
     #[arg(long)]
     threshold: Option<f64>,
     /// 连续多少次（窗口规则是窗口里多少次）才触发。

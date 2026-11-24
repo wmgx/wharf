@@ -12,15 +12,21 @@ const EVERY: Duration = Duration::from_secs(60);
 pub fn issues() -> Vec<Issue> {
   crate::rules::firing_subjects("container_restarting")
     .into_iter()
-    .map(|(name, title)| Issue {
-      code: "container_restarting".into(),
-      level: IssueLevel::Fault,
-      subject: Some(IssueSubject {
-        kind: "service".into(),
-        name,
-      }),
-      title,
-      hint: None,
+    .map(|(name, title)| {
+      let (ack, alert) =
+        crate::rules::issue_alert("container_restarting", &name);
+      Issue {
+        code: "container_restarting".into(),
+        level: IssueLevel::Fault,
+        subject: Some(IssueSubject {
+          kind: "service".into(),
+          name,
+        }),
+        title,
+        hint: None,
+        ack,
+        alert,
+      }
     })
     .collect()
 }

@@ -469,6 +469,8 @@ pub fn stopped_issue(
     hint: Some(format!(
       "wharf service rm {service}；wharf service start {service}"
     )),
+    ack: None,
+    alert: None,
   })
 }
 
@@ -493,15 +495,20 @@ pub fn issues(world: &World) -> Vec<Issue> {
               }
               _ => row.spec.heartbeat.is_some(),
             };
-          active.then(|| Issue {
-            code: rule.into(),
-            level: IssueLevel::Fault,
-            subject: Some(IssueSubject {
-              kind: "service".into(),
-              name: name.into(),
-            }),
-            title,
-            hint: None,
+          active.then(|| {
+            let (ack, alert) = rules::issue_alert(rule, &subject);
+            Issue {
+              code: rule.into(),
+              level: IssueLevel::Fault,
+              subject: Some(IssueSubject {
+                kind: "service".into(),
+                name: name.into(),
+              }),
+              title,
+              hint: None,
+              ack,
+              alert,
+            }
           })
         },
       )
