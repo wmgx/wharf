@@ -79,7 +79,7 @@ const KEEP: usize = 60;
 /// 这么久没有新点的序列（服务器删了、服务停了监控）就丢掉。
 const STALE_MS: i64 = 2 * 60 * 60 * 1000;
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum Op {
   Lt,
   Gt,

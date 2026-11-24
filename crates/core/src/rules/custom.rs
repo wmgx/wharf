@@ -195,10 +195,10 @@ pub(super) fn validate_custom_name(
           || c == b'-'
           || c == b'_'
       })
-      && name.bytes().next().is_some_and(|c| {
+      && name.as_bytes().first().is_some_and(|c| {
         c.is_ascii_lowercase() || c.is_ascii_digit()
       })
-      && name.bytes().last().is_some_and(|c| {
+      && name.as_bytes().last().is_some_and(|c| {
         c.is_ascii_lowercase() || c.is_ascii_digit()
       });
   if ok {

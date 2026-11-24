@@ -19,7 +19,7 @@ fn parse_days(s: &str) -> Result<u32, String> {
 #[derive(Args)]
 pub struct ReportArgs {
   /// 统计天数（1 或 7，默认 7）。
-  #[arg(long, default_value_t = 7, value_parser = parse_days)]
+  #[arg(long, default_value = "7", value_parser = parse_days)]
   days: u32,
   /// 只看这台服务器及其上的服务。
   #[arg(long)]
