@@ -235,7 +235,7 @@ async fn ack_suppresses_flapping_and_expires_after_one_hour() {
     rows.iter().map(|r| r.3.as_deref()).collect();
   assert_eq!(
     skipped,
-    vec![
+    [
       Some("没有配置通知渠道"),
       Some("已确认"),
       Some("已确认"),

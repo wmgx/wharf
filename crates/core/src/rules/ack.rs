@@ -37,14 +37,17 @@ pub(super) async fn on_fire(
     ClearTimer,
   }
   let action = with(|m| {
-    let Some(entry) = m.acks.get_mut(key) else {
+    let Some(cleared_at) = m.acks.get(key).map(|e| e.cleared_at)
+    else {
       return Action::None;
     };
-    if is_expired(entry.cleared_at, now) {
+    if is_expired(cleared_at, now) {
       m.acks.remove(key);
       Action::Expire
-    } else if entry.cleared_at.is_some() {
-      entry.cleared_at = None;
+    } else if cleared_at.is_some() {
+      if let Some(entry) = m.acks.get_mut(key) {
+        entry.cleared_at = None;
+      }
       Action::ClearTimer
     } else {
       Action::None
@@ -130,13 +133,17 @@ pub(super) async fn is_acked(
   now: i64,
 ) -> bool {
   let key = (rule.to_string(), subject.to_string());
-  let (active, expired) = with(|m| match m.acks.get(&key) {
-    Some(e) if is_expired(e.cleared_at, now) => {
+  let (active, expired) = with(|m| {
+    let Some(cleared_at) = m.acks.get(&key).map(|e| e.cleared_at)
+    else {
+      return (false, false);
+    };
+    if is_expired(cleared_at, now) {
       m.acks.remove(&key);
       (false, true)
+    } else {
+      (true, false)
     }
-    Some(_) => (true, false),
-    None => (false, false),
   });
   if expired {
     let (r, s) = key;

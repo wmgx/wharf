@@ -2854,7 +2854,6 @@ async fn alert(c: &Client, cmd: AlertCmd, j: bool) -> CliResult<()> {
           );
         }
       });
-      return Ok(());
     }
     AlertCmd::Digest { .. } => {
       let v: AlertDigestPreview =
@@ -2866,7 +2865,6 @@ async fn alert(c: &Client, cmd: AlertCmd, j: bool) -> CliResult<()> {
           println!("{}\n\n{}", v.title, v.body);
         }
       });
-      return Ok(());
     }
     AlertCmd::Suppress {
       cmd: AlertSuppressCmd::List,
@@ -2893,7 +2891,6 @@ async fn alert(c: &Client, cmd: AlertCmd, j: bool) -> CliResult<()> {
           );
         }
       });
-      return Ok(());
     }
     cmd => {
       let v: AlertsView = match cmd {

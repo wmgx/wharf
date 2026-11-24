@@ -170,7 +170,7 @@ pub fn unavailable_gateways(
       down.insert(name.clone());
       continue;
     }
-    if let Some((_, ref live)) = cached
+    if let Some((_, live)) = &cached
       && let Some(Ok(projects)) = live.get(&gw.spec.server)
     {
       let running = projects

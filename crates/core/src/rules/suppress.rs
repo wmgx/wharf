@@ -118,8 +118,8 @@ pub(super) fn servers_of(
         {
           out.push(gw.spec.server.clone());
         }
-        if let Some(svc_name) = route.spec.service.as_deref()
-          && let Some(svc) = world.services.get(svc_name)
+        if !route.spec.service.is_empty()
+          && let Some(svc) = world.services.get(&route.spec.service)
           && !out.contains(&svc.spec.server)
         {
           out.push(svc.spec.server.clone());
@@ -265,9 +265,9 @@ pub(super) async fn recheck_suppressed(state: &AppState, now: i64) {
       continue;
     }
     let still_suppressed = with(|m| {
-      !m.firing
+      m.firing
         .get(&(rule.clone(), subject.clone()))
-        .is_some_and(|e| !e.pushed)
+        .is_none_or(|e| e.pushed)
         || match_suppression(
           &rule,
           &subject,

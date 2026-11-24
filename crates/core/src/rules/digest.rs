@@ -204,10 +204,9 @@ pub(super) async fn tick_at(
   let items = load_pending(state).await?;
   let Some((title, body)) = format_digest(&today, &items) else {
     // 09:00 时没有待汇总内容：记下今天日期，避免今天后续事件被当成补发立刻推出。
-    let d = today;
     state
       .db
-      .call(move |c| db::set_setting(c, LAST_DATE_KEY, Some(&d)))
+      .call(move |c| db::set_setting(c, LAST_DATE_KEY, Some(&today)))
       .await?;
     return Ok(false);
   };
@@ -216,13 +215,12 @@ pub(super) async fn tick_at(
   let skipped = notify::deliver(state, &event).await;
   record_at(state, now, ("digest", None), &event, true, skipped)
     .await;
-  let d = today;
   state
     .db
     .call(move |c| {
       c.execute("DELETE FROM alert_digest WHERE id <= ?1", [max_id])
         .map_err(db::sql_err)?;
-      db::set_setting(c, LAST_DATE_KEY, Some(&d))
+      db::set_setting(c, LAST_DATE_KEY, Some(&today))
     })
     .await?;
   Ok(true)
