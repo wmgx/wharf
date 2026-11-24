@@ -58,7 +58,16 @@ impl Job<'_> {
     let mut cmd = self
       .docker
       .cmd()
-      .args(["run", "--rm", "--name", &name, "--network", "host"])
+      .args([
+        "run",
+        "--rm",
+        "--label",
+        "wharf.temp=1",
+        "--name",
+        &name,
+        "--network",
+        "host",
+      ])
       .args(["-e", "RESTIC_REPOSITORY", "-e", "RESTIC_PASSWORD"]);
     for m in &self.mounts {
       cmd = cmd.args(["-v", m.as_str()]);
@@ -298,6 +307,8 @@ async fn core_root(
     .args([
       "run",
       "--rm",
+      "--label",
+      "wharf.temp=1",
       "--network",
       "none",
       "--entrypoint",

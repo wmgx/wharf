@@ -34,8 +34,18 @@ pub async fn run_forever(
   ops: Arc<Ops>,
 ) -> ! {
   let mut backoff = 1u64;
+  let cursors = crate::log_watches::Cursors::default();
+  let hits = crate::log_watches::Hits::default();
   loop {
-    match session(&joined, &key, ops.clone()).await {
+    match session(
+      &joined,
+      &key,
+      ops.clone(),
+      cursors.clone(),
+      hits.clone(),
+    )
+    .await
+    {
       Ok(()) => {
         tracing::warn!("与控制面的连接断开");
         backoff = 1;
@@ -58,6 +68,8 @@ async fn session(
   joined: &Joined,
   key: &SigningKey,
   ops: Arc<Ops>,
+  cursors: crate::log_watches::Cursors,
+  hits: crate::log_watches::Hits,
 ) -> anyhow::Result<()> {
   let url = joined.ws_url();
   let (ws, _) = tokio::time::timeout(
@@ -96,6 +108,7 @@ async fn session(
     protocol: wharf_api_types::PROTOCOL,
     host_shell: true,
     forward: true,
+    service_checks: true,
   };
   tokio::time::timeout(
     SOCKET_WRITE_TIMEOUT,
@@ -163,6 +176,12 @@ async fn session(
     memory_status,
     session_cancel.clone(),
   ));
+  let mut watches = crate::log_watches::Watches::new(
+    ops.docker.clone(),
+    session_cancel.clone(),
+    hits.clone(),
+    cursors,
+  );
   let reporter = {
     let tx = tx.clone();
     let ops = ops.clone();
@@ -194,6 +213,9 @@ async fn session(
             ops.reporter.metrics(&ctx).await.map(Box::new);
         }
         sample = !sample;
+        report.log_hits = std::mem::take(&mut *hits.lock().unwrap())
+          .into_values()
+          .collect();
         report.agent_memory = memory_report.borrow().clone();
         report.time_ms = Some(chrono::Utc::now().timestamp_millis());
         if tx.send(AgentMsg::Report(Box::new(report))).await.is_err()
@@ -242,6 +264,7 @@ async fn session(
       }
     };
     match msg {
+      CoreMsg::LogWatches { watches: full } => watches.replace(full),
       CoreMsg::AgentMemory { bytes } => {
         memory_tx.send_replace(Some(bytes));
       }

@@ -31,14 +31,14 @@ cleanup() {
     docker ps -aq --filter "label=com.docker.compose.project=$p" | xargs -r docker rm -f >/dev/null
   done
   docker volume rm -f wharf-e2e-core >/dev/null 2>&1 || true
-  docker run --rm -v /srv:/srv -v /var/lib:/hostlib debian:bookworm-slim \
+  docker run --rm --label wharf.temp=1 -v /srv:/srv -v /var/lib:/hostlib debian:bookworm-slim \
     rm -rf /srv/wharf-gw-edge /srv/whoami /srv/app /hostlib/wharf-e2e >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 cleanup
 
 step "启动控制面"
-docker run -d --name "$CORE" --network host \
+docker run -d --label wharf.system=core --name "$CORE" --network host \
   -v wharf-e2e-core:/var/lib/wharf-core \
   -e WHARF_LISTEN=127.0.0.1:$PORT -e WHARF_AGENT_IMAGE="$AGENT_IMAGE" \
   "$CORE_IMAGE" >/dev/null
@@ -60,7 +60,7 @@ step "登记服务器 e2e，用 server add 给出的 docker 命令加入"
 JOIN=$(wharf server add e2e --json)
 JOIN_TOKEN=$(echo "$JOIN" | jget 'd["join_token"]')
 echo "$JOIN" | jget 'd["commands"]["docker"]' | grep -q "docker run" || fail "没有 docker 加入命令"
-docker run -d --name "$AGENT" --network host \
+docker run -d --label wharf.system=agent --name "$AGENT" --network host \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v "$AGENT_DATA:$AGENT_DATA" -v /srv:/srv \
   -e WHARF_DATA_DIR="$AGENT_DATA" \
@@ -177,7 +177,7 @@ wharf service deploy whoami --image traefik/whoami --apply >/dev/null
 echo "试跑失败后旧容器未动，服务正常"
 
 step "自动更新：有新版本就更新"
-docker run -d --name wharf-e2e-registry -p 127.0.0.1:5005:5000 registry:2 >/dev/null
+docker run -d --label wharf.temp=1 --name wharf-e2e-registry -p 127.0.0.1:5005:5000 registry:2 >/dev/null
 for _ in $(seq 20); do
   curl -sf --max-time 2 --noproxy '*' http://127.0.0.1:5005/v2/ >/dev/null && break
   sleep 1

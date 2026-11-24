@@ -228,7 +228,7 @@ RESTIC_REST_PASSWORD={http}\n",
     text.push_str(&format!(
       "\n# 控制面备份在 {to}（{target}）的仓库 {REPO}；服务备份的仓库名是服务名。\n\
 # 恢复控制面（新机器先加入同一个内网，把本文件存成 wharf-recovery.env）：\n\
-docker run --rm --network host --env-file wharf-recovery.env -v /var/lib/wharf-core:/restore \\\n  \
+docker run --rm --label wharf.temp=1 --network host --env-file wharf-recovery.env -v /var/lib/wharf-core:/restore \\\n  \
 {image} -r rest:http://{target}/{REPO} restore latest:{CORE_BACKUP_DIR} --target /restore\n",
       to = to.unwrap_or_default(),
     ));
@@ -523,7 +523,7 @@ async fn stage(state: &AppState) -> Result<String, ApiError> {
 fn restore_command(ip: &str, user: &str) -> String {
   let image = wharf_api_types::agent::RESTIC_IMAGE;
   format!(
-    "read -rsp '登录密码：' P && echo && docker run --rm --network host -v /var/lib/wharf-core:/restore \
+    "read -rsp '登录密码：' P && echo && docker run --rm --label wharf.temp=1 --network host -v /var/lib/wharf-core:/restore \
 -e RESTIC_REST_USERNAME={user} -e RESTIC_REST_PASSWORD=\"$P\" -e RESTIC_PASSWORD=\"$P\" \
 {image} -r rest:http://{ip}:{REST_SERVER_PORT}/{REPO} restore latest:{CORE_BACKUP_DIR} --target /restore"
   )

@@ -152,11 +152,7 @@ impl Cmd {
     parts.join(" ")
   }
 
-  pub async fn run(self, ctx: &Ctx) -> Result<Output, ApiError> {
-    let what = self.describe();
-    if ctx.cancel.is_cancelled() {
-      return Err(cancelled(&what));
-    }
+  fn command(&self) -> Command {
     let mut command = Command::new(&self.program);
     command
       .args(&self.args)
@@ -169,6 +165,50 @@ impl Cmd {
       command.current_dir(cwd);
     }
     command.envs(self.env.iter().map(|(k, v)| (k, v)));
+    command
+  }
+
+  pub async fn stream_bounded(
+    self,
+    ctx: &Ctx,
+    line: &(impl Fn(&str) + Sync),
+  ) {
+    if ctx.cancel.is_cancelled() {
+      return;
+    }
+    let Ok(mut child) = self.command().spawn() else {
+      return;
+    };
+    let pid = child.id();
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let streams = async {
+      tokio::join!(
+        bounded_lines(stdout, line),
+        bounded_lines(stderr, line)
+      );
+      let _ = child.wait().await;
+    };
+    tokio::select! {
+      _ = streams => {}
+      _ = tokio::time::sleep(self.timeout) => {}
+      _ = ctx.cancel.cancelled() => {}
+    }
+    // Compose can leave its CLI plugin alive even after the parent exits.
+    if let Some(pid) = pid {
+      unsafe {
+        libc::kill(-(pid as i32), libc::SIGKILL);
+      }
+    }
+    let _ = child.wait().await;
+  }
+
+  pub async fn run(self, ctx: &Ctx) -> Result<Output, ApiError> {
+    let what = self.describe();
+    if ctx.cancel.is_cancelled() {
+      return Err(cancelled(&what));
+    }
+    let mut command = self.command();
     let mut child = command.spawn().map_err(|e| {
       ApiError::new(
         ErrorCode::AgentFailed,
@@ -253,6 +293,30 @@ async fn capture(
   out
 }
 
+async fn bounded_lines(
+  stream: impl AsyncRead + Unpin,
+  emit: &impl Fn(&str),
+) {
+  let mut stream = BufReader::new(stream);
+  let mut line = Vec::with_capacity(4096);
+  while let Ok(chunk) = stream.fill_buf().await {
+    if chunk.is_empty() {
+      break;
+    }
+    let end = chunk.iter().position(|b| *b == b'\n');
+    let len = end.unwrap_or(chunk.len());
+    line.extend_from_slice(&chunk[..len.min(4096 - line.len())]);
+    if end.is_some() {
+      emit(String::from_utf8_lossy(&line).trim_end_matches('\r'));
+      line.clear();
+    }
+    stream.consume(len + usize::from(end.is_some()));
+  }
+  if !line.is_empty() {
+    emit(&String::from_utf8_lossy(&line));
+  }
+}
+
 /// 先 SIGTERM 整个进程组，5 秒后还在就 SIGKILL。
 async fn kill_group(
   pid: Option<u32>,
@@ -279,6 +343,17 @@ async fn kill_group(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn watch_lines_discard_bytes_past_four_kib() {
+    let input = format!("{}\nnext\n", "x".repeat(100_000));
+    let lines = std::cell::RefCell::new(Vec::new());
+    bounded_lines(input.as_bytes(), &|line| {
+      lines.borrow_mut().push(line.len())
+    })
+    .await;
+    assert_eq!(*lines.borrow(), [4096, 4]);
+  }
 
   #[tokio::test]
   async fn timeout_kills_the_whole_group() {

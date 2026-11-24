@@ -500,6 +500,7 @@ pub async fn start(
       guard,
     ));
   }
+  crate::service_monitor::sync_watches(&state, None).await;
   Ok(ApplyResponse { run_id })
 }
 

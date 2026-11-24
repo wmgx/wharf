@@ -181,6 +181,9 @@ impl Ops {
       AgentOp::HttpCheck(job) => {
         to_value(crate::probe::http(job).await)
       }
+      AgentOp::PortChecks { checks } => {
+        to_value(crate::port_checks::run(checks, ctx).await)
+      }
       AgentOp::Discover => {
         to_value(crate::adopt::discover(&self.docker, ctx).await?)
       }
@@ -622,7 +625,15 @@ impl Ops {
     write_private(&next, &apply.caddyfile)?;
     ctx.say("校验 Caddy 配置");
     let validated = Cmd::new(&self.docker.bin)
-      .args(["run", "--rm", "--network", "none", "-v"])
+      .args([
+        "run",
+        "--rm",
+        "--label",
+        "wharf.temp=1",
+        "--network",
+        "none",
+        "-v",
+      ])
       .arg(format!("{}:/etc/caddy:ro", conf.display()))
       .args([
         apply.image.as_str(),

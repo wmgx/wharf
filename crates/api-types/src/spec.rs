@@ -336,6 +336,13 @@ pub struct ServiceSpec {
   /// 自定义监控：服务所在机器的 agent 每分钟从本机请求一次，连续 3 次不正常推送。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub monitor: Option<MonitorSpec>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub log_alerts: Vec<crate::service_checks::LogAlertSpec>,
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub port_checks:
+    BTreeMap<String, crate::service_checks::PortCheckSpec>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub heartbeat: Option<crate::service_checks::HeartbeatSpec>,
   /// 资源上限，不填不限。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub limits: Option<Limits>,

@@ -517,7 +517,16 @@ git rev-parse HEAD
 rm -rf .git"#;
   let result = docker
     .cmd()
-    .args(["run", "--rm", "--name", &name, "--network", "host"])
+    .args([
+      "run",
+      "--rm",
+      "--label",
+      "wharf.temp=1",
+      "--name",
+      &name,
+      "--network",
+      "host",
+    ])
     .args(["-v", &format!("{}:/git", src.display()), "-w", "/git"])
     .args(["-e", "REPO", "-e", "REF", "-e", "GIT_TOKEN"])
     .args([
@@ -634,7 +643,16 @@ else
 fi"#;
   let result = docker
     .cmd()
-    .args(["run", "--rm", "--name", &name, "--network", "host"])
+    .args([
+      "run",
+      "--rm",
+      "--label",
+      "wharf.temp=1",
+      "--name",
+      &name,
+      "--network",
+      "host",
+    ])
     .args(["-e", "REPO", "-e", "REF", "-e", "GIT_TOKEN"])
     .args([
       "-e",

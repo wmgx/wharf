@@ -175,12 +175,23 @@ Wharf 以外的机器上的脚本要用地址时才加 `--show` 打印出来，�
 - **服务异常、域名不通**：按上面“域名打不开”的流程查。
 - **agent 版本落后**：`wharf upgrade` 会升级控制面和所有 agent，先问用户。
 
+### 服务监控
+
+用 `wharf describe service` 查询服务命令和参数。
+
+- `wharf service log-alert <服务>` 查看规则、最近命中和触发状态。用 `add <pattern> [--regex] [--window 5m] [--count 1] [--container <Compose 服务名>]` 添加，用 `rm <序号或pattern>` 删除一条，或用 `--off` 关闭全部。
+- `wharf service port-check <服务> <端口名>` 启用 TCP 检查。已发布的 TCP 端口默认启用。UDP 用 `--udp-dns <域名>` 或 `--udp-send <hex> --udp-expect <hex>` 配置，用 `--off` 关闭检查。
+- `wharf service heartbeat <服务> --every 10m [--grace 5m]` 开启心跳，用 `--off` 关闭。心跳已开启时可单独调整 `--every` 或 `--grace`。容器重新部署后通过 `WHARF_HEARTBEAT_URL` 获得报到地址，失败时请求该地址的 `/fail`。控制面需设置 `WHARF_PUBLIC_URL`。用 `wharf service show <服务>` 看状态，显式加 `--reveal` 查看完整地址。
+- 以上配置变更默认生成计划。确认后用 `--apply` 执行。日志和端口检查、心跳间隔和宽限调整仅写配置。开启或关闭心跳会触发部署。用 `wharf alert list` 看告警规则和通知开关。
+
 ### 已有容器纳管
 
 ```bash
 wharf service discover <服务器> --json   # 还没纳管的容器
 wharf service import <服务器> --project <compose 项目名> --json   # 或 --container <容器名>
 ```
+
+用 `wharf service unmanaged-ignore <服务器> --project <项目>` 忽略提示和通知。独立容器用 `--container <容器名>`，加 `--undo` 取消忽略。
 
 导入同样先出计划，按守则 2 处理。
 

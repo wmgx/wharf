@@ -78,7 +78,7 @@ export function UnmanagedList({ items, reload }: { items: Unmanaged[]; reload: (
           </DialogHeader>
           <div className="grid max-h-[60vh] gap-1.5 overflow-y-auto">
             {list.map((u) => (
-              <UnmanagedRow key={target(u)} item={u} onImport={() => setImporting(u)} onRemove={() => setRemoving(u)} />
+              <UnmanagedRow key={`${u.server}:${u.project ? "project" : "container"}:${target(u)}`} item={u} onChange={reload} onImport={() => setImporting(u)} onRemove={() => setRemoving(u)} />
             ))}
           </div>
         </DialogContent>
@@ -98,7 +98,19 @@ export function UnmanagedList({ items, reload }: { items: Unmanaged[]; reload: (
   );
 }
 
-function UnmanagedRow({ item, onImport, onRemove }: { item: Unmanaged; onImport: () => void; onRemove: () => void }) {
+function UnmanagedRow({ item, onImport, onRemove, onChange }: { item: Unmanaged; onImport: () => void; onRemove: () => void; onChange: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const ignore = async () => {
+    setBusy(true);
+    try {
+      await api.post(`/api/servers/${encodeURIComponent(item.server)}/unmanaged/ignore`, { project: item.project, container: item.container, undo: !!item.ignored });
+      onChange();
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
   const total = item.containers.length;
   const running = item.containers.filter((c) => c.state === "running").length;
   const ports = item.containers.flatMap((c) => c.ports ?? []);
@@ -121,6 +133,9 @@ function UnmanagedRow({ item, onImport, onRemove }: { item: Unmanaged; onImport:
       <Button variant="outline" size="xs" onClick={onImport}>
         <DownloadIcon />
         导入
+      </Button>
+      <Button variant="outline" size="xs" disabled={busy} onClick={ignore}>
+        {item.ignored ? "取消忽略" : "忽略"}
       </Button>
       <Tip text="删除"><Button aria-label="删除" variant="ghost" size="icon-xs" className="text-destructive" onClick={onRemove}>
         <Trash2Icon />

@@ -38,6 +38,7 @@ FROM debian:bookworm-slim AS base
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 
 FROM base AS agent
+LABEL wharf.system=agent
 # rsync：迁移服务时在两台 agent 之间同步数据。
 RUN apt-get update \
  && apt-get install -y --no-install-recommends rsync \
@@ -52,6 +53,7 @@ ENTRYPOINT ["wharf-agent"]
 CMD ["run"]
 
 FROM base AS core
+LABEL wharf.system=core
 COPY --from=build /out/wharf-core /out/wharf /usr/local/bin/
 ENV WHARF_DATA_DIR=/var/lib/wharf-core
 EXPOSE 7700

@@ -8,10 +8,7 @@ use std::{collections::BTreeMap, path::Path, time::Duration};
 use serde::Deserialize;
 use wharf_api_types::{
   ApiError, ErrorCode,
-  agent::{
-    FoundContainer, ImportRaw, ImportTarget, Retire, Retired,
-    TRIAL_PROJECT_PREFIX,
-  },
+  agent::{FoundContainer, ImportRaw, ImportTarget, Retire, Retired},
 };
 
 use crate::{docker::Docker, exec::Ctx};
@@ -115,6 +112,23 @@ fn labels(raw: &str) -> BTreeMap<&str, &str> {
   raw.split(',').filter_map(|kv| kv.split_once('=')).collect()
 }
 
+fn wharf_owned(labels: &BTreeMap<&str, &str>) -> bool {
+  [
+    "wharf.temp",
+    "wharf.system",
+    "wharf.service",
+    "wharf.gateway",
+    "wharf.link",
+    "wharf.backup",
+    "wharf.trial",
+    "wharf.task",
+    "wharf.sso-runner",
+    "com.wharf.host-shell",
+  ]
+  .iter()
+  .any(|key| labels.contains_key(key))
+}
+
 /// 本机的全部容器，不含 agent 自己。
 pub async fn discover(
   docker: &Docker,
@@ -132,19 +146,14 @@ pub async fn discover(
       .stdout
       .lines()
       .filter_map(|l| serde_json::from_str::<PsLine>(l).ok())
-      // Wharf 自己的 agent 和控制面不算。
-      .filter(|ps| {
-        !ps.image.contains("wharf-agent")
-          && !ps.image.contains("wharf-core")
-          && !labels(&ps.labels)
-            .get(PROJECT_LABEL)
-            .is_some_and(|p| p.starts_with(TRIAL_PROJECT_PREFIX))
-      })
-      .map(|ps| {
-        let project = labels(&ps.labels)
-          .get(PROJECT_LABEL)
-          .map(|p| p.to_string());
-        FoundContainer {
+      .filter_map(|ps| {
+        let labels = labels(&ps.labels);
+        if wharf_owned(&labels) {
+          return None;
+        }
+        let project =
+          labels.get(PROJECT_LABEL).map(|p| p.to_string());
+        Some(FoundContainer {
           name: ps.names,
           image: ps.image,
           state: ps.state,
@@ -157,7 +166,7 @@ pub async fn discover(
             .collect(),
           project,
           volumes: named_volumes(&ps.mounts),
-        }
+        })
       })
       .collect(),
   )
@@ -288,6 +297,8 @@ async fn read_project(
     let mut c = docker.cmd().args([
       "run",
       "--rm",
+      "--label",
+      "wharf.temp=1",
       "--network",
       "none",
       "-w",
@@ -520,5 +531,19 @@ mod tests {
     );
     assert_eq!(container_id(&m), Some(id));
     assert_eq!(container_id("1 2 0:1 / / rw\n"), None);
+  }
+}
+
+#[cfg(test)]
+mod observation_tests {
+  use super::*;
+
+  #[test]
+  fn skips_labelled_temporary_containers() {
+    assert!(wharf_owned(&labels("foo=bar,wharf.temp=1")));
+    assert!(wharf_owned(&labels("com.wharf.host-shell=1")));
+    assert!(!wharf_owned(&labels(
+      "com.docker.compose.project=wharf-test"
+    )));
   }
 }

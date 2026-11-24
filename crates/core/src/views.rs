@@ -355,7 +355,7 @@ pub fn service_view(
       crate::exposure::service_risks(&row.spec.server, name)
     },
     name: name.to_string(),
-    spec: row.spec.clone(),
+    spec: crate::service_monitor::heartbeat::redact(&row.spec),
     host_ports: row.host_ports.clone(),
     addresses,
     lan_addresses,
@@ -366,6 +366,11 @@ pub fn service_view(
     import: import_record(snap, name),
     status,
     monitor: crate::monitor::last(name),
+    log_alerts: crate::service_monitor::log_views(name, &row.spec),
+    port_checks: crate::service_monitor::port_views(name, row),
+    heartbeat: crate::service_monitor::heartbeat::view(
+      snap, name, false,
+    ),
     uses: crate::refs::uses(&row.spec),
     used_by: snap
       .world
@@ -660,6 +665,16 @@ pub async fn status(
   issues.extend(crate::alerts::issues());
   issues.extend(crate::external_checks::issues(&servers));
   issues.extend(crate::monitor::issues());
+  issues.extend(crate::service_monitor::issues(&snap.world));
+  issues
+    .extend(crate::service_monitor::unmanaged::issues(state).await?);
+  issues.extend(services.iter().filter_map(|s| {
+    crate::service_monitor::stopped_issue(
+      &s.name,
+      &s.containers,
+      crate::db::now_ms(),
+    )
+  }));
   issues.extend(crate::rdap::issues());
   issues.extend(crate::disk_forecast::issues());
   issues.extend(crate::clock::issues());
@@ -817,7 +832,12 @@ pub fn export(world: &World) -> Fleet {
     services: world
       .services
       .iter()
-      .map(|(n, r)| (n.clone(), r.spec.clone()))
+      .map(|(n, r)| {
+        (
+          n.clone(),
+          crate::service_monitor::heartbeat::redact(&r.spec),
+        )
+      })
       .collect(),
     gateways: world
       .gateways

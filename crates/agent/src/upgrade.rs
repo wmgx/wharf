@@ -206,7 +206,7 @@ pub async fn start(
   docker
     .cmd()
     // 不加 --rm：失败时留着日志给控制面看；成功时接班容器自己删掉。
-    .args(["run", "-d", "--name", HELPER])
+    .args(["run", "-d", "--label", "wharf.temp=1", "--name", HELPER])
     .args(["-v", &sock])
     .args(["--entrypoint", "wharf-agent", &helper_image])
     .args(["replace", &id, &current, &old_id])
@@ -375,7 +375,8 @@ pub async fn replace(
     .to_string();
   anyhow::ensure!(!name.is_empty(), "读不到旧容器的名字");
   let backup = format!("{name}-old");
-  let args = run_args(&old, &name);
+  let mut args = run_args(&old, &name);
+  args.extend(["--label".into(), "wharf.system=1".into()]);
   let cmd: Vec<String> = strs_at(&old, &["Config", "Cmd"]);
 
   docker_ok(&ctx, &["rm", "-f", &backup]).await;

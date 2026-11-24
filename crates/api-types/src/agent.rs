@@ -61,6 +61,9 @@ pub enum CoreMsg {
   AgentMemory {
     bytes: u64,
   },
+  LogWatches {
+    watches: Vec<crate::service_checks::LogWatch>,
+  },
   Request {
     id: u64,
     timeout_ms: u64,
@@ -114,6 +117,8 @@ pub enum AgentMsg {
     /// 是否支持 [AgentOp::Forward]。旧 agent 缺省为不支持。
     #[serde(default)]
     forward: bool,
+    #[serde(default)]
+    service_checks: bool,
   },
   Report(Box<AgentReport>),
   Progress {
@@ -173,6 +178,8 @@ pub struct AgentReport {
   /// agent 发送上报时的 Unix 毫秒时间，旧版本没有。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub time_ms: Option<i64>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub log_hits: Vec<crate::service_checks::LogHit>,
 }
 
 /// 一次资源采样。速率是和上一次采样相比的平均值。
@@ -357,6 +364,9 @@ pub enum AgentOp {
   },
   /// 从本机发一次 HTTP GET（自定义监控），结果是 [HttpCheckResult]。
   HttpCheck(HttpCheck),
+  PortChecks {
+    checks: Vec<crate::service_checks::PortCheck>,
+  },
   /// 代登录请求，不记录请求和应答内容。
   HttpFetch(HttpFetch),
   /// 链路质量：对每个目标连 `count` 次，结果是 `Vec<LinkSample>`（和 `targets` 一一对应）。
@@ -1092,6 +1102,8 @@ pub struct ContainerInfo {
   /// compose 的工作目录，只在 agent 内部用来判断 `foreign`。
   #[serde(skip)]
   pub working_dir: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(

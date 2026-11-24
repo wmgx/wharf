@@ -107,6 +107,7 @@ export interface FoundContainer {
 
 /** 服务器上没纳管的一个 compose 项目或单个容器。 */
 export interface Unmanaged {
+  ignored?: boolean;
   server: string;
   project?: string;
   container?: string;
@@ -156,6 +157,9 @@ export interface LiveState {
 export interface ServiceView {
   risks?: string[];
   monitor?: MonitorView;
+  log_alerts?: Gen.LogAlertView[];
+  port_checks?: Record<string, boolean>;
+  heartbeat?: Gen.HeartbeatView;
   uses?: string[];
   used_by?: string[];
   name: string;

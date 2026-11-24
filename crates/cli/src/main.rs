@@ -25,6 +25,7 @@ mod preview;
 mod print;
 mod selfcmd;
 mod server;
+mod service_checks;
 mod task;
 mod token;
 mod top;
@@ -380,6 +381,7 @@ pub enum Command {
   #[command(subcommand)]
   Wait(WaitCmd),
   /// 全部命令和参数的机器可读说明（JSON），不需要连接控制面。给了前缀只列这一组，例如 `wharf commands service`。
+  #[command(visible_alias = "describe")]
   Commands {
     prefix: Vec<String>,
     /// 只看这一版和本机上次用的版本相比，命令和参数有哪些增删改。
@@ -775,6 +777,48 @@ pub enum ServiceCmd {
     volumes: bool,
   },
 
+  /// 忽略未纳管容器的通知和待处理提示，用 --undo 取消忽略。
+  UnmanagedIgnore {
+    server: String,
+    #[arg(
+      long,
+      required_unless_present = "container",
+      conflicts_with = "container"
+    )]
+    project: Option<String>,
+    #[arg(long)]
+    container: Option<String>,
+    #[arg(long)]
+    undo: bool,
+  },
+  /// 列出、添加或删除日志关键字告警。--off 关闭全部。
+  LogAlert {
+    name: String,
+    #[arg(long)]
+    off: bool,
+    #[command(flatten)]
+    apply: ApplyFlags,
+    #[command(subcommand)]
+    action: Option<service_checks::LogAlertCmd>,
+  },
+  /// 设置宿主机端口探测。默认检查 TCP，UDP 需要提供 DNS 或自定义报文。
+  PortCheck(service_checks::PortArgs),
+  /// 设置服务心跳。启停时重新部署以添加或移除 WHARF_HEARTBEAT_URL。
+  Heartbeat {
+    name: String,
+    /// 报到间隔，例如 10m。
+    #[arg(long, required_unless_present_any = ["off", "grace"], conflicts_with = "off", value_parser = service_checks::minutes)]
+    every: Option<u32>,
+    /// 宽限，默认 5 分钟。心跳已开启时可以单独调整。
+    #[arg(long, conflicts_with = "off", value_parser = service_checks::minutes)]
+    grace: Option<u32>,
+    /// 关闭心跳。
+    #[arg(long)]
+    off: bool,
+    #[command(flatten)]
+    apply: ApplyFlags,
+  },
+
   /// 服务的时间线：部署、备份、任务、自动重启、告警、操作记录。
   Timeline {
     name: String,
@@ -787,6 +831,9 @@ pub enum ServiceCmd {
   List,
   Show {
     name: String,
+    /// 显示完整的心跳报到地址。
+    #[arg(long)]
+    reveal: bool,
   },
   /// 看日志。可以按时间、关键字筛，`--errors` 只看报错并把同一种报错合成一条带次数。
   /// 例：`wharf service logs blog --since 2h --errors`、`wharf service logs blog --grep timeout --tail 50`。

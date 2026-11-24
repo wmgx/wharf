@@ -49,6 +49,8 @@ pub struct Snapshot {
   pub imports: BTreeMap<String, wharf_api_types::view::ImportRecord>,
   /// 每个服务最近一次操作。
   pub ops: BTreeMap<String, wharf_api_types::view::LastOp>,
+  pub heartbeats:
+    BTreeMap<String, crate::service_monitor::heartbeat::Reading>,
   /// 服务备注。
   pub notes: BTreeMap<String, String>,
   pub server_notes: BTreeMap<String, String>,
@@ -129,6 +131,7 @@ async fn load_inner(db: &Db) -> Result<Snapshot, ApiError> {
         deployed: db::deployed_servers(c)?,
         applied: db::applied(c)?,
         ops: db::service_ops(c)?,
+        heartbeats: crate::service_monitor::heartbeat::load(c)?,
         notes: db::service_notes(c)?,
         server_notes: crate::notes::resource_notes(
           c,
@@ -166,6 +169,7 @@ impl Snapshot {
     Net {
       gate_public,
       gate_login,
+      heartbeat_url: crate::gate::public_url().map(str::to_string),
       basic_auth: self
         .secrets
         .iter()
@@ -240,6 +244,12 @@ pub fn service_resolved(
     &net.bind_ips(&row.spec.server),
     Some(&secrets),
   )?;
+  let resolved = crate::service_monitor::heartbeat::compose(
+    &resolved,
+    &row.spec,
+    net.heartbeat_url.as_deref(),
+    true,
+  )?;
   let resolved = crate::refs::resolve(&resolved, name, world, net)?;
   let resolved =
     with_files(world, net, name, &resolved, Some(&secrets))?;
@@ -297,6 +307,12 @@ pub fn service_template(
     &row.host_ports,
     &net.bind_ips(&row.spec.server),
     None,
+  )?;
+  let text = crate::service_monitor::heartbeat::compose(
+    &text,
+    &row.spec,
+    net.heartbeat_url.as_deref(),
+    false,
   )?;
   let text = crate::refs::resolve(&text, name, world, net)?;
   with_files(world, net, name, &text, None)

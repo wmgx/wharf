@@ -66,6 +66,8 @@ pub async fn info(
     .args([
       "run",
       "--rm",
+      "--label",
+      "wharf.temp=1",
       "--network",
       "none",
       "--entrypoint",
@@ -316,6 +318,8 @@ pub async fn disk_usage(
     .args([
       "run",
       "--rm",
+      "--label",
+      "wharf.temp=1",
       "--network",
       "none",
       "--entrypoint",

@@ -15,6 +15,7 @@ pub mod external;
 pub mod plan;
 pub mod resources;
 pub mod seal;
+pub mod service_checks;
 pub mod spec;
 pub mod token;
 pub mod tunnel;
