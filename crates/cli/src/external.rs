@@ -1,7 +1,9 @@
 use clap::Subcommand;
 use serde_json::json;
 use wharf_api_types::{
-  external::{AclView, DnsCheck, DnsVerdict, ExternalStatus},
+  external::{
+    AclView, DnsCheck, DnsVerdict, DockerQuota, ExternalStatus,
+  },
   view::ServerView,
 };
 
@@ -111,16 +113,20 @@ pub async fn dns(c: &Client, host: &str, j: bool) -> CliResult<()> {
   Ok(())
 }
 
-fn show_status(r: &ExternalStatus) {
+fn format_status_line(r: &ExternalStatus) -> String {
   let at = r.checked_at.map_or("-".into(), |t| {
     t.format("%Y-%m-%d %H:%M UTC").to_string()
   });
-  println!(
+  format!(
     "{}  {}  {}  {at}",
     r.name,
     r.indicator.as_deref().unwrap_or("-"),
     r.description
-  );
+  )
+}
+
+fn show_status(r: &ExternalStatus) {
+  println!("{}", format_status_line(r));
   for i in &r.incidents {
     println!("  {}  {}", i.name, i.url);
   }
@@ -245,14 +251,83 @@ pub fn server(view: &ServerView) {
   } else {
     ""
   };
-  match report.and_then(|r| r.docker_quota) {
-    Some(q) => println!(
-      "  Docker Hub 剩余额度  {} / {}（{} 小时窗口，查于 {}）{mirror}",
-      q.remaining,
-      q.limit,
-      f64::from(q.window_secs) / 3600.0,
-      q.checked_at.format("%Y-%m-%d %H:%M UTC")
-    ),
-    None => println!("  Docker Hub 剩余额度  查不到{mirror}"),
+  let quota =
+    format_docker_quota(report.and_then(|r| r.docker_quota.as_ref()));
+  println!("  Docker Hub 剩余额度  {quota}{mirror}");
+}
+
+fn format_docker_quota(q: Option<&DockerQuota>) -> String {
+  match q {
+    Some(q) => match (q.remaining, q.limit, q.window_secs) {
+      (Some(remaining), Some(limit), Some(window_secs)) => format!(
+        "{remaining} / {limit}（{} 小时窗口，查于 {}）",
+        f64::from(window_secs) / 3600.0,
+        q.checked_at.format("%Y-%m-%d %H:%M UTC")
+      ),
+      _ => match q.error.as_deref().filter(|s| !s.is_empty()) {
+        Some(reason) => format!(
+          "查不到（{reason}，查于 {}）",
+          q.checked_at.format("%Y-%m-%d %H:%M UTC")
+        ),
+        None => "查不到".into(),
+      },
+    },
+    None => "查不到".into(),
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use chrono::TimeZone;
+
+  #[test]
+  fn external_status_line_includes_failure_reason() {
+    let at = chrono::Utc
+      .with_ymd_and_hms(2026, 11, 25, 1, 20, 0)
+      .unwrap();
+    let line = format_status_line(&ExternalStatus {
+      name: "Docker Hub".into(),
+      url: "https://www.dockerstatus.com".into(),
+      enabled: true,
+      indicator: None,
+      description: "状态页查不到（超时）".into(),
+      incidents: vec![],
+      checked_at: Some(at),
+    });
+    assert_eq!(
+      line,
+      "Docker Hub  -  状态页查不到（超时）  2026-11-25 01:20 UTC"
+    );
+  }
+
+  #[test]
+  fn docker_quota_formats_reason_and_numbers() {
+    let at = chrono::Utc
+      .with_ymd_and_hms(2026, 11, 25, 1, 20, 0)
+      .unwrap();
+    let failed = DockerQuota {
+      remaining: None,
+      limit: None,
+      window_secs: None,
+      error: Some("认证超时".into()),
+      checked_at: at,
+    };
+    assert_eq!(
+      format_docker_quota(Some(&failed)),
+      "查不到（认证超时，查于 2026-11-25 01:20 UTC）"
+    );
+    let ok = DockerQuota {
+      remaining: Some(95),
+      limit: Some(100),
+      window_secs: Some(21600),
+      error: None,
+      checked_at: at,
+    };
+    assert_eq!(
+      format_docker_quota(Some(&ok)),
+      "95 / 100（6 小时窗口，查于 2026-11-25 01:20 UTC）"
+    );
+    assert_eq!(format_docker_quota(None), "查不到");
   }
 }

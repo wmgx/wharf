@@ -673,9 +673,13 @@ export type DnsVerdict = "matches" | "mismatch" | "unavailable";
 
 export interface DockerQuota {
   checked_at: string;
-  limit: number;
-  remaining: number;
-  window_secs: number;
+  /**
+   * 查询失败时的简短原因；查到额度时为空。
+   */
+  error?: string | null;
+  limit?: number | null;
+  remaining?: number | null;
+  window_secs?: number | null;
 }
 
 /**

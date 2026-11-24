@@ -35,6 +35,7 @@ pub const PRESETS: &[(&str, &str, &[&str])] = &[
       "*.githubusercontent.com",
       "ghcr.io",
       "*.ghcr.io",
+      "www.githubstatus.com",
     ],
   ),
   (
@@ -45,9 +46,15 @@ pub const PRESETS: &[(&str, &str, &[&str])] = &[
       "*.docker.io",
       "*.docker.com",
       "production.cloudflare.docker.com",
+      "dockerstatus.com",
+      "*.dockerstatus.com",
     ],
   ),
-  ("cloudflare", "Cloudflare API", &["api.cloudflare.com"]),
+  (
+    "cloudflare",
+    "Cloudflare API",
+    &["api.cloudflare.com", "www.cloudflarestatus.com"],
+  ),
   ("tailscale", "Tailscale", &["*.tailscale.com"]),
   (
     "go",
@@ -150,11 +157,19 @@ mod tests {
   fn routes_by_rules() {
     let spec = EgressSpec {
       all: false,
-      presets: vec!["github".into()],
+      presets: vec![
+        "github".into(),
+        "dockerhub".into(),
+        "cloudflare".into(),
+      ],
       domains: vec!["*.example.com".into()],
     };
     let d = spec.domains();
     assert!(via_exit("github.com", false, &d));
+    assert!(via_exit("www.githubstatus.com", false, &d));
+    assert!(via_exit("www.dockerstatus.com", false, &d));
+    assert!(via_exit("dockerstatus.com", false, &d));
+    assert!(via_exit("www.cloudflarestatus.com", false, &d));
     assert!(via_exit("objects.githubusercontent.com", false, &d));
     assert!(via_exit("a.example.com", false, &d));
     assert!(!via_exit("example.com", false, &d));

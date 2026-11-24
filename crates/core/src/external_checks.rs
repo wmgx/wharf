@@ -48,10 +48,11 @@ pub fn spawn(state: Arc<AppState>) {
 pub fn issues(servers: &[ServerView]) -> Vec<Issue> {
   let mut issues = dns_check::issues();
   issues.extend(servers.iter().filter_map(|server| {
-    let quota = server.report.as_ref()?.docker_quota?;
+    let quota = server.report.as_ref()?.docker_quota.as_ref()?;
+    let (remaining, limit) = (quota.remaining?, quota.limit?);
     if chrono::Utc::now() - quota.checked_at
       >= chrono::TimeDelta::days(1)
-      || u64::from(quota.remaining) * 10 >= u64::from(quota.limit)
+      || u64::from(remaining) * 10 >= u64::from(limit)
     {
       return None;
     }
@@ -63,8 +64,8 @@ pub fn issues(servers: &[ServerView]) -> Vec<Issue> {
         name: server.name.clone(),
       }),
       title: format!(
-        "{} 的 Docker Hub 拉取额度剩 {} / {}",
-        server.name, quota.remaining, quota.limit
+        "{} 的 Docker Hub 拉取额度剩 {remaining} / {limit}",
+        server.name
       ),
       hint: Some(format!("wharf server show {}", server.name)),
     })

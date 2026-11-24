@@ -99,6 +99,18 @@ impl ReadError {
     )
   }
 
+  /// Tailscale OAuth 对缺 scope 的只读接口可能返回 404，和 401/403 一样按缺权限处理。
+  pub fn missing_scope(self) -> bool {
+    matches!(
+      self,
+      Self::Http(
+        reqwest::StatusCode::UNAUTHORIZED
+          | reqwest::StatusCode::FORBIDDEN
+          | reqwest::StatusCode::NOT_FOUND
+      )
+    )
+  }
+
   pub fn message(self) -> String {
     match self {
       Self::InvalidCredential => {

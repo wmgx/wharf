@@ -67,19 +67,60 @@ fn acl_status(status: &str, hint: Option<&str>) -> AclView {
 }
 
 fn policy_error(error: ReadError) -> AclView {
-  if matches!(
-    error,
-    ReadError::Http(
-      reqwest::StatusCode::FORBIDDEN
-        | reqwest::StatusCode::UNAUTHORIZED
-    )
-  ) {
+  if error.missing_scope() {
     acl_status(
       "OAuth 客户端缺少读取策略文件的权限",
       Some(POLICY_SCOPE),
     )
   } else {
     acl_status(&error.message(), None)
+  }
+}
+
+fn devices_check(
+  name: &str,
+  result: Result<Value, ReadError>,
+) -> DoctorCheck {
+  match result {
+    Ok(_) => item("设备", name, CheckStatus::Ok, "能列设备"),
+    Err(e) if e.missing_scope() => item(
+      "设备",
+      name,
+      CheckStatus::Bad,
+      format!("OAuth 客户端缺少读取设备的权限。{DEVICE_SCOPE}"),
+    ),
+    Err(e) => item(
+      "设备",
+      name,
+      if e.denied() {
+        CheckStatus::Bad
+      } else {
+        CheckStatus::Warn
+      },
+      e.message(),
+    ),
+  }
+}
+
+fn policy_check(
+  name: &str,
+  result: Result<(String, Option<String>), ReadError>,
+) -> DoctorCheck {
+  match result {
+    Ok(_) => item("策略", name, CheckStatus::Ok, "能读策略文件"),
+    Err(e) => {
+      let v = policy_error(e);
+      let status = if v.hint.is_some() {
+        CheckStatus::Skip
+      } else {
+        CheckStatus::Warn
+      };
+      let detail = match v.hint {
+        Some(hint) => format!("{}。{hint}", v.status),
+        None => v.status,
+      };
+      item("策略", name, status, detail)
+    }
   }
 }
 
@@ -506,36 +547,8 @@ async fn oauth(secret: Option<&str>) -> Vec<DoctorCheck> {
     tailscale::devices(&token),
     tailscale::policy(&token)
   );
-  out.push(match devices {
-    Ok(_) => item("设备", name, CheckStatus::Ok, "能列设备"),
-    Err(e) => item(
-      "设备",
-      name,
-      if e.denied() {
-        CheckStatus::Bad
-      } else {
-        CheckStatus::Warn
-      },
-      format!("{}。{DEVICE_SCOPE}", e.message()),
-    ),
-  });
-  out.push(match policy {
-    Ok(_) => item("策略", name, CheckStatus::Ok, "能读策略文件"),
-    Err(e) => {
-      let v = policy_error(e);
-      let status = if v.hint.is_some() {
-        CheckStatus::Skip
-      } else {
-        CheckStatus::Warn
-      };
-      item(
-        "策略",
-        name,
-        status,
-        format!("{}。{}", v.status, v.hint.unwrap_or_default()),
-      )
-    }
-  });
+  out.push(devices_check(name, devices));
+  out.push(policy_check(name, policy));
   out
 }
 
@@ -614,5 +627,50 @@ mod tests {
     let value = parse_policy(raw).unwrap();
     assert_eq!(value["groups"]["group:test"][0], "a@example.com");
     assert_eq!(value["grants"][0]["src"][0], "https://example.com");
+  }
+
+  #[test]
+  fn tailscale_404_treated_as_missing_scope() {
+    for code in [
+      reqwest::StatusCode::UNAUTHORIZED,
+      reqwest::StatusCode::FORBIDDEN,
+      reqwest::StatusCode::NOT_FOUND,
+    ] {
+      let acl = policy_error(ReadError::Http(code));
+      assert_eq!(acl.status, "OAuth 客户端缺少读取策略文件的权限");
+      assert_eq!(acl.hint.as_deref(), Some(POLICY_SCOPE));
+
+      let policy =
+        policy_check("Tailscale OAuth", Err(ReadError::Http(code)));
+      assert_eq!(policy.status, CheckStatus::Skip);
+      assert!(policy.detail.contains("缺少读取策略文件的权限"));
+      assert!(policy.detail.contains(POLICY_SCOPE));
+
+      let devices =
+        devices_check("Tailscale OAuth", Err(ReadError::Http(code)));
+      assert_eq!(devices.status, CheckStatus::Bad);
+      assert!(devices.detail.contains("缺少读取设备的权限"));
+      assert!(devices.detail.contains(DEVICE_SCOPE));
+    }
+
+    let acl_500 = policy_error(ReadError::Http(
+      reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+    ));
+    assert_eq!(acl_500.status, "Tailscale API 返回 HTTP 500");
+    assert!(acl_500.hint.is_none());
+
+    let policy_500 = policy_check(
+      "Tailscale OAuth",
+      Err(ReadError::Http(
+        reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+      )),
+    );
+    assert_eq!(policy_500.status, CheckStatus::Warn);
+    assert_eq!(policy_500.detail, "Tailscale API 返回 HTTP 500");
+
+    let devices_down =
+      devices_check("Tailscale OAuth", Err(ReadError::Unavailable));
+    assert_eq!(devices_down.status, CheckStatus::Warn);
+    assert_eq!(devices_down.detail, "Tailscale API 查不到");
   }
 }

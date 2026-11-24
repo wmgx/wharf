@@ -128,7 +128,7 @@ fn shell(name: &str, page: &Page) -> ExternalStatus {
 struct Summary {
   status: Status,
   #[serde(default)]
-  incidents: Vec<Incident>,
+  incidents: Option<Vec<Incident>>,
 }
 
 #[derive(Deserialize)]
@@ -141,10 +141,59 @@ struct Status {
 struct Incident {
   name: String,
   #[serde(default)]
-  shortlink: String,
+  shortlink: Option<String>,
   #[serde(default)]
-  id: String,
+  id: Option<String>,
   status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FetchError {
+  Client,
+  Timeout,
+  Connect,
+  Request,
+  Http(u16),
+  TooLarge,
+  Parse,
+  UnknownIndicator(String),
+}
+
+impl FetchError {
+  fn reason(&self) -> String {
+    match self {
+      Self::Client => "客户端不可用".into(),
+      Self::Timeout => "超时".into(),
+      Self::Connect => "连接失败".into(),
+      Self::Request => "请求失败".into(),
+      Self::Http(code) => format!("HTTP {code}"),
+      Self::TooLarge => "响应过大".into(),
+      Self::Parse => "解析失败".into(),
+      Self::UnknownIndicator(s) => format!("未知状态 {s}"),
+    }
+  }
+
+  fn from_reqwest(error: &reqwest::Error) -> Self {
+    if error.is_timeout() {
+      Self::Timeout
+    } else if error.is_connect() {
+      Self::Connect
+    } else {
+      Self::Request
+    }
+  }
+}
+
+fn unavailable(
+  name: &str,
+  page: &Page,
+  error: &FetchError,
+) -> ExternalStatus {
+  ExternalStatus {
+    description: format!("状态页查不到（{}）", error.reason()),
+    checked_at: Some(Utc::now()),
+    ..shell(name, page)
+  }
 }
 
 fn severity(indicator: &str) -> Option<bool> {
@@ -159,61 +208,67 @@ fn severity(indicator: &str) -> Option<bool> {
 async fn get<T: serde::de::DeserializeOwned>(
   http: &Http,
   url: &str,
-) -> Result<T, ApiError> {
-  let unavailable = || {
-    ApiError::invalid("状态页查不到或返回的内容不是 Statuspage 格式")
-  };
+) -> Result<T, FetchError> {
   let mut response = http
-    .send(|c| c.get(url))
+    .send(|c| {
+      c.get(url)
+        .header("user-agent", "wharf")
+        .header("accept", "application/json")
+    })
     .await
-    .map_err(|_| unavailable())?
-    .error_for_status()
-    .map_err(|_| unavailable())?;
+    .map_err(|e| FetchError::from_reqwest(&e))?;
+  if !response.status().is_success() {
+    return Err(FetchError::Http(response.status().as_u16()));
+  }
   let mut bytes = Vec::new();
-  while let Some(chunk) =
-    response.chunk().await.map_err(|_| unavailable())?
+  while let Some(chunk) = response
+    .chunk()
+    .await
+    .map_err(|e| FetchError::from_reqwest(&e))?
   {
     if bytes.len() + chunk.len() > 2 * 1024 * 1024 {
-      return Err(unavailable());
+      return Err(FetchError::TooLarge);
     }
     bytes.extend_from_slice(&chunk);
   }
-  serde_json::from_slice(&bytes).map_err(|_| unavailable())
+  serde_json::from_slice(&bytes).map_err(|_| FetchError::Parse)
 }
 
-async fn check(
+async fn check_with(
+  http: &Http,
   name: &str,
   page: &Page,
-) -> Result<ExternalStatus, ApiError> {
-  let http = Http::new(Duration::from_secs(10))
-    .map_err(|_| ApiError::internal("状态页客户端不可用"))?;
+) -> Result<ExternalStatus, FetchError> {
   let mut summary: Summary =
-    get(&http, &format!("{}/api/v2/summary.json", page.url)).await?;
+    get(http, &format!("{}/api/v2/summary.json", page.url)).await?;
   if severity(&summary.status.indicator).is_none()
     && summary.status.indicator != "maintenance"
   {
-    return Err(ApiError::invalid("状态页返回了未知状态"));
+    return Err(FetchError::UnknownIndicator(
+      summary.status.indicator,
+    ));
   }
+  let mut incidents = summary.incidents.take().unwrap_or_default();
   // Docker 的新版状态页把事件放在独立接口。
   if page.url == DEFAULTS[2].1 && summary.status.indicator != "none" {
     #[derive(Deserialize)]
     struct Incidents {
-      incidents: Vec<Incident>,
+      #[serde(default)]
+      incidents: Option<Vec<Incident>>,
     }
     if let Ok(data) = get::<Incidents>(
-      &http,
+      http,
       &format!("{}/api/v2/incidents.json", page.url),
     )
     .await
     {
-      summary.incidents = data.incidents;
+      incidents = data.incidents.unwrap_or_default();
     }
   }
   Ok(ExternalStatus {
     indicator: Some(summary.status.indicator),
     description: summary.status.description,
-    incidents: summary
-      .incidents
+    incidents: incidents
       .into_iter()
       .filter(|i| {
         !matches!(
@@ -221,27 +276,38 @@ async fn check(
           "resolved" | "postmortem" | "completed" | "scheduled"
         )
       })
-      .filter_map(|mut i| {
-        if i.shortlink.is_empty()
-          && i.id.len() == 26
-          && i.id.bytes().all(|b| b.is_ascii_alphanumeric())
+      .filter_map(|i| {
+        let mut shortlink = i.shortlink.unwrap_or_default();
+        let id = i.id.unwrap_or_default();
+        if shortlink.is_empty()
+          && id.len() == 26
+          && id.bytes().all(|b| b.is_ascii_alphanumeric())
           && page.url == DEFAULTS[2].1
         {
-          i.shortlink = format!("{}/incidents/{}", page.url, i.id);
+          shortlink = format!("{}/incidents/{id}", page.url);
         }
-        let url = reqwest::Url::parse(&i.shortlink).ok()?;
+        let url = reqwest::Url::parse(&shortlink).ok()?;
         (matches!(url.scheme(), "https" | "http")
           && url.username().is_empty()
           && url.password().is_none())
         .then_some(ExternalIncident {
           name: i.name,
-          url: i.shortlink,
+          url: shortlink,
         })
       })
       .collect(),
     checked_at: Some(Utc::now()),
     ..shell(name, page)
   })
+}
+
+async fn check(
+  name: &str,
+  page: &Page,
+) -> Result<ExternalStatus, FetchError> {
+  let http = Http::new(Duration::from_secs(15))
+    .map_err(|_| FetchError::Client)?;
+  check_with(&http, name, page).await
 }
 
 async fn record(s: &AppState, result: ExternalStatus) {
@@ -277,13 +343,9 @@ pub async fn refresh(s: &AppState) -> Result<(), ApiError> {
   futures_util::future::join_all(
     pages.iter().filter(|(_, p)| p.enabled).map(
       |(name, page)| async move {
-        let result = check(name, page).await.unwrap_or_else(|_| {
-          ExternalStatus {
-            description: "状态页查不到".into(),
-            checked_at: Some(Utc::now()),
-            ..shell(name, page)
-          }
-        });
+        let result = check(name, page)
+          .await
+          .unwrap_or_else(|e| unavailable(name, page, &e));
         record(s, result).await;
       },
     ),
@@ -343,7 +405,13 @@ pub async fn add(
     return Err(ApiError::invalid("已经有同名状态页").into());
   }
   crate::snapshot::load(&s.db).await?;
-  let result = check(name, &page).await?;
+  let result = check(name, &page).await.map_err(|e| {
+    if e == FetchError::Client {
+      ApiError::internal("状态页客户端不可用")
+    } else {
+      ApiError::invalid(format!("状态页查不到（{}）", e.reason()))
+    }
+  })?;
   pages.insert(name.to_string(), page);
   save(&s, &pages).await?;
   record(&s, result.clone()).await;
@@ -402,23 +470,38 @@ async fn clear(s: &AppState, name: &str) {
   rules::external::clear_incident(s, name).await;
 }
 
-pub fn incident_hint(service: &str) -> Option<String> {
-  let cache = CACHE.read().ok()?;
-  let status = cache.get(service)?;
-  if status.indicator.as_deref().is_none_or(|i| i == "none") {
+const MAX_HINT_INCIDENTS: usize = 3;
+
+fn format_incident_hint(
+  service: &str,
+  status: &ExternalStatus,
+) -> Option<String> {
+  if status.indicator.as_deref().and_then(severity) != Some(true) {
     return None;
   }
   let title = if status.incidents.is_empty() {
     status.description.clone()
   } else {
-    status
+    let shown = status
       .incidents
       .iter()
+      .take(MAX_HINT_INCIDENTS)
       .map(|i| i.name.as_str())
       .collect::<Vec<_>>()
-      .join("、")
+      .join("、");
+    if status.incidents.len() > MAX_HINT_INCIDENTS {
+      format!("{shown} 等 {} 条", status.incidents.len())
+    } else {
+      shown
+    }
   };
   Some(format!("{service} 正在故障：{title}"))
+}
+
+pub fn incident_hint(service: &str) -> Option<String> {
+  let cache = CACHE.read().ok()?;
+  let status = cache.get(service)?;
+  format_incident_hint(service, status)
 }
 
 pub fn failure(mut error: ApiError, service: &str) -> ApiError {
@@ -464,5 +547,158 @@ mod tests {
       .unwrap();
       assert_eq!(severity(&data.status.indicator), Some(bad));
     }
+  }
+
+  fn sample_status(
+    indicator: Option<&str>,
+    incidents: &[&str],
+  ) -> ExternalStatus {
+    ExternalStatus {
+      name: "Cloudflare".into(),
+      url: "https://www.cloudflarestatus.com".into(),
+      enabled: true,
+      indicator: indicator.map(str::to_string),
+      description: "Partial System Outage".into(),
+      incidents: incidents
+        .iter()
+        .enumerate()
+        .map(|(idx, title)| ExternalIncident {
+          name: (*title).into(),
+          url: format!("https://example.com/incidents/{idx}"),
+        })
+        .collect(),
+      checked_at: Some(Utc::now()),
+    }
+  }
+
+  #[test]
+  fn incident_hint_filters_by_severity_and_truncates() {
+    assert_eq!(
+      format_incident_hint(
+        "Cloudflare",
+        &sample_status(Some("none"), &["无关事件"])
+      ),
+      None
+    );
+    assert_eq!(
+      format_incident_hint(
+        "Cloudflare",
+        &sample_status(
+          Some("minor"),
+          &["法国邮件路由", "Magic Transit"]
+        )
+      ),
+      None
+    );
+    assert_eq!(
+      format_incident_hint(
+        "Cloudflare",
+        &sample_status(Some("maintenance"), &["例行维护"])
+      ),
+      None
+    );
+    assert_eq!(
+      format_incident_hint(
+        "Cloudflare",
+        &sample_status(None, &["状态页查不到"])
+      ),
+      None
+    );
+    assert_eq!(
+      format_incident_hint(
+        "Cloudflare",
+        &sample_status(Some("major"), &["DNS 故障", "API 异常"])
+      )
+      .as_deref(),
+      Some("Cloudflare 正在故障：DNS 故障、API 异常")
+    );
+    assert_eq!(
+      format_incident_hint(
+        "Cloudflare",
+        &sample_status(Some("critical"), &["A", "B", "C"])
+      )
+      .as_deref(),
+      Some("Cloudflare 正在故障：A、B、C")
+    );
+    assert_eq!(
+      format_incident_hint(
+        "Cloudflare",
+        &sample_status(Some("major"), &["A", "B", "C", "D", "E"])
+      )
+      .as_deref(),
+      Some("Cloudflare 正在故障：A、B、C 等 5 条")
+    );
+  }
+
+  #[tokio::test]
+  async fn check_reports_failure_reasons() {
+    use tokio::{
+      io::{AsyncReadExt, AsyncWriteExt},
+      net::TcpListener,
+    };
+
+    async fn serve_once(
+      reply: &'static str,
+      delay: Duration,
+    ) -> String {
+      let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+      let addr = listener.local_addr().unwrap();
+      tokio::spawn(async move {
+        if let Ok((mut conn, _)) = listener.accept().await {
+          let mut buf = [0u8; 1024];
+          let _ = conn.read(&mut buf).await;
+          if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+          }
+          if !reply.is_empty() {
+            let _ = conn.write_all(reply.as_bytes()).await;
+          }
+        }
+      });
+      format!("http://{addr}")
+    }
+
+    let http = Http::new(Duration::from_millis(200)).unwrap();
+
+    // HTTP 状态码失败
+    let url = serve_once(
+      "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n",
+      Duration::ZERO,
+    )
+    .await;
+    let page = Page { url, enabled: true };
+    let err =
+      check_with(&http, "Docker Hub", &page).await.unwrap_err();
+    assert_eq!(err, FetchError::Http(503));
+    assert_eq!(
+      unavailable("Docker Hub", &page, &err).description,
+      "状态页查不到（HTTP 503）"
+    );
+
+    // 解析失败
+    let url = serve_once(
+      "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nnot a json",
+      Duration::ZERO,
+    )
+    .await;
+    let page = Page { url, enabled: true };
+    let err =
+      check_with(&http, "Docker Hub", &page).await.unwrap_err();
+    assert_eq!(err, FetchError::Parse);
+    assert_eq!(
+      unavailable("Docker Hub", &page, &err).description,
+      "状态页查不到（解析失败）"
+    );
+
+    // 超时
+    let url = serve_once("", Duration::from_secs(2)).await;
+    let page = Page { url, enabled: true };
+    let err =
+      check_with(&http, "Docker Hub", &page).await.unwrap_err();
+    assert_eq!(err, FetchError::Timeout);
+    assert_eq!(
+      unavailable("Docker Hub", &page, &err).description,
+      "状态页查不到（超时）"
+    );
   }
 }
