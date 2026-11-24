@@ -611,3 +611,6 @@ async fn digest_keeps_rows_on_failure_and_preserves_inflight_inserts()
   let body = pv.body.unwrap();
   assert!(!body.contains("s1") && body.contains("s2"));
 }
+
+#[path = "custom_tests.rs"]
+mod custom_tests;

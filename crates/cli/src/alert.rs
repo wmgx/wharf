@@ -6,6 +6,7 @@ use wharf_api_types::{
     AlertAckRequest, AlertAckView, AlertDigestPreview, AlertLevel,
     AlertOptions, AlertPatch, AlertSuppressionRequest,
     AlertSuppressionView, AlertUnackRequest, AlertsView,
+    CustomAlertRuleRequest, CustomAlertRuleView,
   },
 };
 
@@ -23,9 +24,12 @@ pub enum AlertCmd {
   },
   /// 规则、事件通知、内置抑制、正在触发的告警、最近的推送。
   List,
-  /// 改一条规则、事件通知或内置抑制（id 见 list）。只改给了的选项。
+  /// 改一条规则、事件通知或内置抑制（id 见 list）。加 `--service` 只覆盖单个服务。只改给了的选项。
   Set {
     id: String,
+    /// 只覆盖指定服务（仅对对象是服务的内置规则有效）。
+    #[arg(long)]
+    service: Option<String>,
     /// 打开
     #[arg(long, conflicts_with = "off")]
     on: bool,
@@ -50,6 +54,31 @@ pub enum AlertCmd {
     #[arg(long)]
     dry_run: bool,
   },
+  /// 新增按服务的自定义告警规则（名称全局唯一，最多 50 条）。
+  Add {
+    /// 规则名称（全局唯一，小写字母、数字、-、_）。
+    name: String,
+    /// 目标服务名。
+    #[arg(long)]
+    service: String,
+    /// 指标：cpu（%）、mem（MB，与 wharf top 一致）、mem_pct（%）、err（%）、p95（ms）。
+    #[arg(long, value_parser = ["cpu", "mem", "mem_pct", "err", "p95"])]
+    metric: String,
+    /// 比较符：> 或 <。
+    #[arg(long, value_parser = [">", "<"])]
+    op: String,
+    /// 阈值（cpu/mem_pct/err 为 %，mem 为 MB，p95 为 ms）。
+    #[arg(long)]
+    threshold: f64,
+    /// 连续触发次数（按该指标每分钟一次的上报频率计算）。
+    #[arg(long = "for")]
+    for_n: u32,
+    /// 通知级别：urgent（立即推，默认）或 digest（并入每日汇总）。
+    #[arg(long, default_value = "urgent", value_parser = ["urgent", "digest"])]
+    level: String,
+  },
+  /// 删除一条自定义告警规则。
+  Rm { name: String },
   /// 列出正在触发的告警和确认状态。
   Firing,
   /// 确认一条正在触发的告警（连续 1 小时不触发后自动失效）。
@@ -136,28 +165,69 @@ fn fmt_target(rule: &str, subject: Option<&str>) -> String {
 fn preview(
   now: &AlertsView,
   id: &str,
+  service: Option<&str>,
   patch: &AlertPatch,
   j: bool,
 ) -> CliResult<()> {
-  let before = if let Some(r) = now.rules.iter().find(|r| r.id == id)
+  let (label, before) = if let Some(svc) = service {
+    let Some(r) = now.rules.iter().find(|r| r.id == id) else {
+      return Err(
+        ApiError::not_found(format!("没有告警规则 {id}"))
+          .suggest("wharf alert list")
+          .into(),
+      );
+    };
+    let o = now
+      .service_overrides
+      .iter()
+      .find(|o| o.rule == id && o.service == svc);
+    (
+      format!("alert/{id}/service/{svc}"),
+      json!({
+        "enabled": o.and_then(|o| o.enabled).unwrap_or(r.enabled),
+        "level": level_text(o.and_then(|o| o.level).unwrap_or(r.level)),
+        "threshold": o.and_then(|o| o.threshold).unwrap_or(r.threshold),
+        "for": o.and_then(|o| o.for_n).unwrap_or(r.for_n),
+        "muted_until": o.and_then(|o| o.muted_until).or(r.muted_until).map(fmt_ms),
+      }),
+    )
+  } else if let Some(r) = now.rules.iter().find(|r| r.id == id) {
+    (
+      format!("alert/{id}"),
+      json!({
+        "enabled": r.enabled,
+        "level": level_text(r.level),
+        "threshold": r.threshold,
+        "for": r.for_n,
+        "muted_until": r.muted_until.map(fmt_ms),
+      }),
+    )
+  } else if let Some(c) =
+    now.custom_rules.iter().find(|c| c.name == id)
   {
-    json!({
-      "enabled": r.enabled,
-      "level": level_text(r.level),
-      "threshold": r.threshold,
-      "for": r.for_n,
-      "muted_until": r.muted_until.map(fmt_ms),
-    })
+    (
+      format!("alert/{id}"),
+      json!({
+        "enabled": c.enabled,
+        "level": level_text(c.level),
+        "threshold": c.threshold,
+        "for": c.for_n,
+        "muted_until": c.muted_until.map(fmt_ms),
+      }),
+    )
   } else if let Some(n) = now.notices.iter().find(|n| n.id == id) {
-    json!({
-      "enabled": n.enabled,
-      "level": level_text(n.level),
-      "muted_until": n.muted_until.map(fmt_ms),
-    })
+    (
+      format!("alert/{id}"),
+      json!({
+        "enabled": n.enabled,
+        "level": level_text(n.level),
+        "muted_until": n.muted_until.map(fmt_ms),
+      }),
+    )
   } else if let Some(s) =
     now.builtin_suppressions.iter().find(|s| s.id == id)
   {
-    json!({ "enabled": s.enabled })
+    (format!("alert/{id}"), json!({ "enabled": s.enabled }))
   } else {
     return Err(
       ApiError::not_found(format!("没有告警规则或事件通知 {id}"))
@@ -190,7 +260,7 @@ fn preview(
     }
     None => {}
   }
-  crate::preview::show(j, &format!("alert/{id}"), &before, &after)
+  crate::preview::show(j, &label, &before, &after)
 }
 
 fn print_view(v: &AlertsView) {
@@ -209,6 +279,38 @@ fn print_view(v: &AlertsView) {
       r.name,
       r.condition
     );
+    for o in v.service_overrides.iter().filter(|o| o.rule == r.id) {
+      let mut parts = Vec::new();
+      if let Some(en) = o.enabled {
+        parts.push(if en { "开".into() } else { "关".into() });
+      }
+      if let Some(lvl) = o.level {
+        parts.push(format!("level={}", level_text(lvl)));
+      }
+      if let Some(t) = o.threshold {
+        parts.push(format!("threshold={t}"));
+      }
+      if let Some(n) = o.for_n {
+        parts.push(format!("for={n}"));
+      }
+      if let Some(m) = o.muted_until {
+        parts.push(format!("静默到 {}", fmt_ms(m)));
+      }
+      println!("    └ 服务 {:<16} {}", o.service, parts.join("  "));
+    }
+  }
+  if !v.custom_rules.is_empty() {
+    println!("自定义规则：");
+    for c in &v.custom_rules {
+      println!(
+        "  {:<22} {:<8} {:<7} 服务 {}  {}",
+        c.name,
+        state(c.enabled, c.muted_until),
+        level_text(c.level),
+        c.service,
+        c.condition
+      );
+    }
   }
   println!("事件通知：");
   for n in &v.notices {
@@ -420,6 +522,7 @@ pub async fn run(
     }
     AlertCmd::Set {
       id,
+      service,
       on,
       off,
       threshold,
@@ -443,11 +546,61 @@ pub async fn run(
       };
       if dry_run {
         let now: AlertsView = c.get("/api/alerts").await?;
-        return preview(&now, &id, &patch, j);
+        return preview(&now, &id, service.as_deref(), &patch, j);
       }
-      let v: AlertsView =
-        c.put(&format!("/api/alerts/{}", seg(&id)), &patch).await?;
+      let path = match &service {
+        Some(svc) => {
+          format!("/api/alerts/{}/services/{}", seg(&id), seg(svc))
+        }
+        None => format!("/api/alerts/{}", seg(&id)),
+      };
+      let v: AlertsView = c.put(&path, &patch).await?;
       out(j, &v, print_view);
+    }
+    AlertCmd::Add {
+      name,
+      service,
+      metric,
+      op,
+      threshold,
+      for_n,
+      level,
+    } => {
+      let level = match level.as_str() {
+        "digest" => AlertLevel::Digest,
+        _ => AlertLevel::Urgent,
+      };
+      let row: CustomAlertRuleView = c
+        .post(
+          "/api/alerts/custom",
+          &CustomAlertRuleRequest {
+            name,
+            service,
+            metric,
+            op,
+            threshold,
+            for_n,
+            level,
+          },
+        )
+        .await?;
+      out(j, &row, |r| {
+        println!(
+          "已添加自定义规则 {}（服务 {}，{}，{}）",
+          r.name,
+          r.service,
+          level_text(r.level),
+          r.condition
+        );
+      });
+    }
+    AlertCmd::Rm { name } => {
+      let v: AlertsView = c
+        .delete(&format!("/api/alerts/custom/{}", seg(&name)))
+        .await?;
+      out(j, &v, |_| {
+        println!("已删除自定义规则 {name}");
+      });
     }
   }
   Ok(())

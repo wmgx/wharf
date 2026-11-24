@@ -1,6 +1,6 @@
 import { Panel, Tip } from "@/components/kit";
 import { BellOffIcon, ChevronDownIcon, RotateCcwIcon, Trash2Icon } from "lucide-react";
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import { toast } from "sonner";
 import { api, usePoll } from "@/api";
 import { SectionTitle } from "@/components/common";
@@ -58,9 +58,30 @@ export function Rules() {
     }
   };
 
+  const removeServiceOverride = async (rule: string, service: string) => {
+    try {
+      setView(await api.put<AlertsView>(`/api/alerts/${encodeURIComponent(rule)}/services/${encodeURIComponent(service)}`, { reset: true }));
+      refresh();
+    } catch (e) {
+      toast.error("删除失败", { description: (e as Error).message });
+    }
+  };
+
+  const removeCustomRule = async (name: string) => {
+    try {
+      setView(await api.del<AlertsView>(`/api/alerts/custom/${encodeURIComponent(name)}`));
+      refresh();
+    } catch (e) {
+      toast.error("删除失败", { description: (e as Error).message });
+    }
+  };
+
   if (!v) return null;
   const builtins = v.builtin_suppressions ?? [];
   const custom = v.suppressions ?? [];
+  const serviceOverrides = v.service_overrides ?? [];
+  const customRules = v.custom_rules ?? [];
+  const levelText = (level: AlertLevel) => LEVELS.find(([val]) => val === level)?.[1] ?? "立即";
   return (
     <>
       <SectionTitle>告警规则</SectionTitle>
@@ -78,37 +99,91 @@ export function Rules() {
           </TableHeader>
           <TableBody>
             {v.rules.map((r) => (
-              <TableRow key={r.id}>
-                <TableCell>
-                  <Checkbox checked={r.enabled} aria-label={`开关 ${r.name}`} onCheckedChange={(c) => patch(r.id, { enabled: c === true })} />
-                </TableCell>
-                <TableCell>
-                  <div className="font-medium">{r.name}</div>
-                  <div className="font-mono text-xs break-all text-muted-foreground">{r.condition}</div>
-                </TableCell>
-                <TableCell>
-                  {r.threshold_editable ? (
-                    <NumberInput value={r.threshold} onSave={(n) => patch(r.id, { threshold: n })} />
-                  ) : (
-                    <span className="font-mono text-xs text-muted-foreground">
-                      {r.op} {r.threshold}
-                    </span>
-                  )}
-                </TableCell>
-                <TableCell>
-                  <NumberInput value={r.for_n} integer onSave={(n) => patch(r.id, { for_n: n })} />
-                </TableCell>
-                <TableCell>
-                  <LevelSelect level={r.level} onChange={(level) => patch(r.id, { level })} />
-                </TableCell>
-                <TableCell className="text-right">
-                  <Controls muted={r.muted_until} customized={r.customized} onPatch={(p) => patch(r.id, p)} />
-                </TableCell>
-              </TableRow>
+              <Fragment key={r.id}>
+                <TableRow>
+                  <TableCell>
+                    <Checkbox checked={r.enabled} aria-label={`开关 ${r.name}`} onCheckedChange={(c) => patch(r.id, { enabled: c === true })} />
+                  </TableCell>
+                  <TableCell>
+                    <div className="font-medium">{r.name}</div>
+                    <div className="font-mono text-xs break-all text-muted-foreground">{r.condition}</div>
+                  </TableCell>
+                  <TableCell>
+                    {r.threshold_editable ? (
+                      <NumberInput value={r.threshold} onSave={(n) => patch(r.id, { threshold: n })} />
+                    ) : (
+                      <span className="font-mono text-xs text-muted-foreground">
+                        {r.op} {r.threshold}
+                      </span>
+                    )}
+                  </TableCell>
+                  <TableCell>
+                    <NumberInput value={r.for_n} integer onSave={(n) => patch(r.id, { for_n: n })} />
+                  </TableCell>
+                  <TableCell>
+                    <LevelSelect level={r.level} onChange={(level) => patch(r.id, { level })} />
+                  </TableCell>
+                  <TableCell className="text-right">
+                    <Controls muted={r.muted_until} customized={r.customized} onPatch={(p) => patch(r.id, p)} />
+                  </TableCell>
+                </TableRow>
+                {serviceOverrides.filter((o) => o.rule === r.id).map((o) => (
+                  <TableRow key={`${o.rule}/${o.service}`} className="bg-muted/20">
+                    <TableCell className="text-xs text-muted-foreground">
+                      {o.enabled === false ? "关" : o.enabled === true ? "开" : ""}
+                    </TableCell>
+                    <TableCell className="pl-6 text-sm">
+                      <span className="font-mono text-xs">服务 {o.service}</span>
+                      {o.muted_until && <span className="ml-2 text-xs text-muted-foreground">静默到 {clock(o.muted_until)}</span>}
+                    </TableCell>
+                    <TableCell className="font-mono text-xs text-muted-foreground">
+                      {o.threshold != null ? o.threshold : "-"}
+                    </TableCell>
+                    <TableCell className="font-mono text-xs text-muted-foreground">
+                      {o.for_n != null ? o.for_n : "-"}
+                    </TableCell>
+                    <TableCell className="text-xs text-muted-foreground">
+                      {o.level ? levelText(o.level) : "-"}
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <Tip text="删除">
+                        <Button variant="ghost" size="icon-xs" aria-label={`删除服务覆盖 ${o.rule}/${o.service}`} onClick={() => removeServiceOverride(o.rule, o.service)}>
+                          <Trash2Icon />
+                        </Button>
+                      </Tip>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </Fragment>
             ))}
           </TableBody>
         </Table>
       </Panel>
+
+      {customRules.length > 0 && (
+        <>
+          <SectionTitle>自定义规则</SectionTitle>
+          <Panel className="grid gap-2 p-4">
+            {customRules.map((c) => (
+              <div key={c.name} className="flex flex-wrap items-center gap-2.5 text-sm">
+                <span className="font-mono text-xs font-medium">{c.name}</span>
+                <span className="text-xs text-muted-foreground">服务 {c.service}</span>
+                <span className="font-mono text-xs text-muted-foreground">{c.condition}</span>
+                <span className="text-xs text-muted-foreground">{levelText(c.level)}</span>
+                {!c.enabled && <span className="text-xs text-muted-foreground">已关闭</span>}
+                {c.muted_until && <span className="text-xs text-muted-foreground">静默到 {clock(c.muted_until)}</span>}
+                <span className="ml-auto">
+                  <Tip text="删除">
+                    <Button variant="ghost" size="icon-xs" aria-label={`删除自定义规则 ${c.name}`} onClick={() => removeCustomRule(c.name)}>
+                      <Trash2Icon />
+                    </Button>
+                  </Tip>
+                </span>
+              </div>
+            ))}
+          </Panel>
+        </>
+      )}
 
       <SectionTitle>事件通知</SectionTitle>
       <Panel className="grid gap-2 p-4">

@@ -212,6 +212,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route("/api/metrics/usage", get(crate::metrics::usage))
     .route("/api/metrics/top", get(crate::resource_top::usage))
     .route("/api/metrics/images", get(crate::resource_top::images))
+    .route("/api/report", get(crate::report::show))
     .route(
       "/api/core-backup/recovery-key",
       post(crate::core_backup::recovery_key),
@@ -424,6 +425,15 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route(
       "/api/alerts/suppress/{id}",
       axum::routing::delete(crate::rules::suppress_rm_api),
+    )
+    .route("/api/alerts/custom", post(crate::rules::custom_add_api))
+    .route(
+      "/api/alerts/custom/{name}",
+      axum::routing::delete(crate::rules::custom_rm_api),
+    )
+    .route(
+      "/api/alerts/{id}/services/{service}",
+      axum::routing::put(crate::rules::patch_service),
     )
     .route(
       "/api/alerts/{id}",

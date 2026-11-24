@@ -29,7 +29,7 @@ export function Open() {
             </span>
             <span className="text-xs text-muted-foreground">{ago(new Date(f.since).toISOString())}起</span>
             <AckButton target={{ rule: f.rule, subject: f.subject }} ack={f.ack} onDone={refresh} />
-            <Button variant="outline" size="xs" onClick={() => nav(alertPath(f.rule, f.subject))}>查看</Button>
+            <Button variant="outline" size="xs" onClick={() => nav(alertPath(f.rule, f.subject, alerts.custom_rules?.some((c) => c.name === f.rule)))}>查看</Button>
           </div>)}
         </Panel>
       </>}
@@ -45,11 +45,12 @@ export function Open() {
   );
 }
 
-function alertPath(rule: string, subject: string): string {
+function alertPath(rule: string, subject: string, isCustom?: boolean): string {
+  if (isCustom) return `/services/${encodeURIComponent(subject)}?tab=metrics`;
   if (rule === "expiry_soon" || rule === "expiry_urgent") { const [kind, ...parts] = subject.split(":"); const name = encodeURIComponent(parts.join(":")); return kind === "domain" ? `/domains?q=${name}` : `/servers/${name}?tab=settings`; }
   const name = encodeURIComponent(subject);
   if (["domain_down", "cert_expiring"].includes(rule)) return `/domains?open=${name}`;
-  if (["container_restarting", "monitor_failed", "http_5xx", "oom_killed"].includes(rule)) return `/services/${name}?tab=${rule === "monitor_failed" ? "metrics" : "logs"}`;
+  if (["container_restarting", "monitor_failed", "http_5xx", "oom_killed", "svc_mem_near_limit"].includes(rule)) return `/services/${name}?tab=${rule === "monitor_failed" || rule === "svc_mem_near_limit" ? "metrics" : "logs"}`;
   if (rule === "link_loss") return "/network";
   if (rule === "host_unit_down") return `/servers/${encodeURIComponent(subject.split(":")[0])}?tab=host`;
   return `/servers/${name}${rule === "disk_forecast" ? "?tab=disk" : ""}`;

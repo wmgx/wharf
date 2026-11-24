@@ -213,9 +213,10 @@ export interface AlertTarget {
  */
 export interface AlertsView {
   builtin_suppressions: BuiltinSuppressionView[];
+  custom_rules: CustomAlertRuleView[];
   firing: FiringView[];
   /**
-   * 最近的推送（新的在前，保留 7 天）。
+   * 最近的推送（新的在前，保留 14 天）。
    */
   history: AlertHistoryView[];
   /**
@@ -224,6 +225,7 @@ export interface AlertsView {
   include_logs: boolean;
   notices: NoticeView[];
   rules: AlertRuleView[];
+  service_overrides: ServiceAlertOverrideView[];
   suppressions: AlertSuppressionView[];
 }
 
@@ -624,6 +626,32 @@ export interface CreatedToken {
    * 只返回这一次。
    */
   token: string;
+}
+
+/**
+ * 用户自定义的按服务告警规则。
+ */
+export interface CustomAlertRuleView {
+  /**
+   * 人能读的条件，例如 `req.p95 > 500 ms 连续 3 次（每分钟一次）`。
+   */
+  condition: string;
+  created_at: number;
+  enabled: boolean;
+  for_n: number;
+  level: AlertLevel;
+  /**
+   * 指标名：`svc.cpu`、`svc.mem`（MB）、`svc.mem_pct`、`req.err`、`req.p95`。
+   */
+  metric: string;
+  muted_until?: number | null;
+  name: string;
+  /**
+   * `>` 或 `<`。
+   */
+  op: string;
+  service: string;
+  threshold: number;
 }
 
 /**
@@ -2225,6 +2253,19 @@ export interface ServerView {
   settings: ServerSettings;
   tailnet_key?: TailnetKey | null;
   version: number;
+}
+
+/**
+ * 按服务的内置告警规则覆盖。
+ */
+export interface ServiceAlertOverrideView {
+  enabled?: boolean | null;
+  for_n?: number | null;
+  level?: AlertLevel | null;
+  muted_until?: number | null;
+  rule: string;
+  service: string;
+  threshold?: number | null;
 }
 
 export interface ServiceData {

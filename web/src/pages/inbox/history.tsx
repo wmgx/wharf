@@ -28,7 +28,7 @@ export function History() {
           ))}
         </Panel>
       ) : (
-        <Empty>最近 7 天没有推送</Empty>
+        <Empty>最近 14 天没有推送</Empty>
       )}
     </>
   );

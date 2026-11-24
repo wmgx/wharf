@@ -272,7 +272,7 @@ CREATE TABLE task_runs (
 );
 CREATE INDEX task_runs_task ON task_runs (task, id);
 "#,
-  // 告警：正在触发的和推送记录（保留 7 天），见 rules.rs。
+  // 告警：正在触发的和推送记录（保留 14 天），见 rules.rs。
   r#"
 CREATE TABLE alert_firing (
   rule TEXT NOT NULL,
@@ -368,6 +368,7 @@ ALTER TABLE alert_history ADD COLUMN subject TEXT;
   crate::service_monitor::heartbeat::MIGRATION,
   crate::service_monitor::unmanaged::MIGRATION,
   crate::rules::MIGRATION,
+  crate::rules::CUSTOM_MIGRATION,
 ];
 
 /// git 构建来源固定到上次部署构建的 commit（仓库和分支没换过的）。当时没记下 commit 的留给 plan 提醒。
@@ -746,6 +747,9 @@ pub fn apply_write(
           params![kind, name],
         )
         .map_err(sql_err)?;
+      if kind == crate::world::KIND_SERVICE {
+        crate::rules::delete_service_rows(conn, name)?;
+      }
       if kind == crate::world::KIND_EDGE {
         conn
           .execute(

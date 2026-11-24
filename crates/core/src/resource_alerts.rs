@@ -154,6 +154,8 @@ pub(super) fn is_report_metric(metric: &str) -> bool {
     metric,
     "host.cpu"
       | "host.mem_pct"
+      | "svc.cpu"
+      | "svc.mem"
       | "svc.mem_pct"
       | "host.inode_pct"
       | "agent.mem_pct"
@@ -311,6 +313,24 @@ async fn observe_report(
       &top_projects(m, false),
     )
     .await;
+  }
+  for (name, v) in m.projects.iter().filter(|(name, _)| {
+    !name.starts_with(crate::world::GATEWAY_PROJECT_PREFIX)
+  }) {
+    let server_detail = format!("服务器 {server}");
+    observe_at(
+      state,
+      at,
+      "svc.cpu",
+      name,
+      f64::from(v.cpu),
+      &server_detail,
+    )
+    .await;
+    // 单位为 MB（MiB，1 MB = 1024*1024 字节），与 wharf top / service limits 一致。
+    let mem_mb = v.mem as f64 / f64::from(1 << 20);
+    observe_at(state, at, "svc.mem", name, mem_mb, &server_detail)
+      .await;
   }
   for (name, used, total) in
     limits.iter().filter_map(|(name, total)| {

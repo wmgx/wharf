@@ -13,7 +13,7 @@ import { affected, linkState, pairs } from "./model";
 interface MetricsView { from: number; to: number; step_ms: number; series: Record<string, [number, number][]> }
 
 export function LinkSheet({ a, b, net, status, onClose }: { a: string; b: string; net: NetworkView; status: Status; onClose: () => void }) {
-  const [range, setRange] = useState<"24h" | "7d">("24h");
+  const [range, setRange] = useState<"24h" | "7d" | "14d">("24h");
   const path = (from: string, to: string) => `/api/metrics?subject=${encodeURIComponent(`${from}>${to}`)}&names=link.ms,link.loss&range=${range}`;
   const { data: ab } = usePoll<MetricsView>(path(a, b), 60000);
   const { data: ba } = usePoll<MetricsView>(path(b, a), 60000);
@@ -55,7 +55,7 @@ export function LinkSheet({ a, b, net, status, onClose }: { a: string; b: string
         {pair?.relay && <Notice kind="info" className="mt-3">
           {pair.relay}
         </Notice>}
-        <SectionTitle action={<Segmented value={range} options={[["24h", "24 小时"], ["7d", "7 天"]]} onChange={setRange} />}>历史</SectionTitle>
+        <SectionTitle action={<Segmented value={range} options={[["24h", "24 小时"], ["7d", "7 天"], ["14d", "14 天"]]} onChange={setRange} />}>历史</SectionTitle>
         {empty ? <Empty>还没有历史数据，每 5 分钟测一次</Empty> : <div className="grid gap-3">
           <Chart title="延迟" span={span} gap={gap} format={(n) => `${n.toFixed(0)} ms`} lines={series("link.ms")} />
           <Chart title="丢包" span={span} gap={gap} max={100} format={(n) => `${n.toFixed(0)}%`} lines={series("link.loss")} />

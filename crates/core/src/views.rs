@@ -682,6 +682,7 @@ pub async fn status(
   issues.extend(crate::exposure::issues(state).await?);
   issues.extend(crate::sso_login::issues(&snap));
   issues.extend(crate::alerts::issues());
+  issues.extend(crate::rules::custom_issues(&snap.world));
   issues.extend(crate::external_checks::issues(&servers));
   issues.extend(crate::monitor::issues());
   issues.extend(crate::service_monitor::issues(&snap.world));

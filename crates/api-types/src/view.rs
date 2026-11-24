@@ -1350,13 +1350,51 @@ pub struct AlertSuppressionView {
   pub created_at: i64,
 }
 
+/// 按服务的内置告警规则覆盖。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ServiceAlertOverrideView {
+  pub rule: String,
+  pub service: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub enabled: Option<bool>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub threshold: Option<f64>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub for_n: Option<u32>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub level: Option<AlertLevel>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub muted_until: Option<i64>,
+}
+
+/// 用户自定义的按服务告警规则。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CustomAlertRuleView {
+  pub name: String,
+  pub service: String,
+  /// 指标名：`svc.cpu`、`svc.mem`（MB）、`svc.mem_pct`、`req.err`、`req.p95`。
+  pub metric: String,
+  /// `>` 或 `<`。
+  pub op: String,
+  pub threshold: f64,
+  pub for_n: u32,
+  /// 人能读的条件，例如 `req.p95 > 500 ms 连续 3 次（每分钟一次）`。
+  pub condition: String,
+  pub enabled: bool,
+  #[serde(default)]
+  pub level: AlertLevel,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub muted_until: Option<i64>,
+  pub created_at: i64,
+}
+
 /// `GET /api/alerts`：告警规则、事件通知的开关，正在触发的告警和最近的推送。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AlertsView {
   pub rules: Vec<AlertRuleView>,
   pub notices: Vec<NoticeView>,
   pub firing: Vec<FiringView>,
-  /// 最近的推送（新的在前，保留 7 天）。
+  /// 最近的推送（新的在前，保留 14 天）。
   pub history: Vec<AlertHistoryView>,
   /// 触发的告警里附带服务最近的日志。
   #[serde(default)]
@@ -1365,6 +1403,10 @@ pub struct AlertsView {
   pub builtin_suppressions: Vec<BuiltinSuppressionView>,
   #[serde(default)]
   pub suppressions: Vec<AlertSuppressionView>,
+  #[serde(default)]
+  pub service_overrides: Vec<ServiceAlertOverrideView>,
+  #[serde(default)]
+  pub custom_rules: Vec<CustomAlertRuleView>,
 }
 
 /// 一条告警规则：对一个指标的每个对象，最近 `for_n` 个点都满足 `比较 阈值` 时触发。
@@ -1477,6 +1519,20 @@ pub struct AlertSuppressionRequest {
   pub target_rule: String,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub target_subject: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CustomAlertRuleRequest {
+  pub name: String,
+  pub service: String,
+  /// `cpu`、`mem`（MB）、`mem_pct`、`err`、`p95`（也接受完整指标名）。
+  pub metric: String,
+  /// `>` 或 `<`。
+  pub op: String,
+  pub threshold: f64,
+  pub for_n: u32,
+  #[serde(default)]
+  pub level: AlertLevel,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

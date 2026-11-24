@@ -79,6 +79,7 @@ mod quality;
 mod rdap;
 mod refs;
 mod render;
+mod report;
 mod resource_top;
 mod rollback;
 mod rules;
