@@ -30,6 +30,9 @@ pub struct ReportCoverage {
   pub latest_at: Option<i64>,
   pub has_current: bool,
   pub has_previous: bool,
+  /// 上期实际覆盖的时间比例（0.0～1.0），按 `earliest_at` 到 `previous_end` 计算。
+  #[serde(default)]
+  pub previous_ratio: f64,
 }
 
 /// 单台服务器的周期指标。
