@@ -122,6 +122,11 @@ pub fn issues() -> Vec<Issue> {
       d.iter()
         .flat_map(|(s, v)| {
           v.iter().map(move |(u, st)| Issue {
+            alert: crate::rules::issue_target(
+              "host_unit_down",
+              &format!("{s}:{u}"),
+            ),
+            ack: None,
             code: "host_unit_down".into(),
             level: IssueLevel::Fault,
             subject: Some(IssueSubject {

@@ -117,6 +117,7 @@ pub fn web_schema() -> Value {
   let _ = generator.subschema_for::<view::NoticeView>();
   let _ = generator.subschema_for::<view::AlertsView>();
   let _ = generator.subschema_for::<view::AlertPatch>();
+  let _ = generator.subschema_for::<view::AlertAckRequest>();
   let _ = generator.subschema_for::<view::AuditEntry>();
   let _ = generator.subschema_for::<view::TimelineItem>();
   let _ = generator.subschema_for::<view::Timeline>();

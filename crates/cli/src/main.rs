@@ -7,6 +7,7 @@
 
 use clap::{Args, Parser, Subcommand};
 
+mod alert;
 mod audit;
 mod bookmark;
 mod client;
@@ -297,7 +298,7 @@ pub enum Command {
   External(external::ExternalCmd),
   /// 告警规则和事件通知：开关、阈值、连续次数、静默。
   #[command(subcommand)]
-  Alert(AlertCmd),
+  Alert(alert::AlertCmd),
   /// 服务器。
   #[command(subcommand)]
   Server(ServerCmd),
@@ -1093,41 +1094,6 @@ pub enum ServiceCmd {
     rm: bool,
     #[command(flatten)]
     apply: ApplyFlags,
-  },
-}
-
-#[derive(Subcommand)]
-pub enum AlertCmd {
-  /// 告警里附带服务最近的日志：`wharf alert options --include-logs on`。
-  Options {
-    #[arg(long, value_parser = ["on", "off"])]
-    include_logs: String,
-  },
-  /// 规则、事件通知、正在触发的告警、最近的推送。
-  List,
-  /// 改一条规则或事件通知（id 见 list）。只改给了的选项。
-  Set {
-    id: String,
-    /// 打开
-    #[arg(long, conflicts_with = "off")]
-    on: bool,
-    /// 关闭
-    #[arg(long)]
-    off: bool,
-    #[arg(long)]
-    threshold: Option<f64>,
-    /// 连续多少次（窗口规则是窗口里多少次）才触发。
-    #[arg(long = "for")]
-    for_n: Option<u32>,
-    /// 静默多少分钟，0 取消。
-    #[arg(long)]
-    mute: Option<u32>,
-    /// 恢复默认值。
-    #[arg(long)]
-    reset: bool,
-    /// 只预览会改什么，不执行。
-    #[arg(long)]
-    dry_run: bool,
   },
 }
 

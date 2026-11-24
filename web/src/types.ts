@@ -730,6 +730,8 @@ export type EgressSpec = {
 };
 export type EgressPreset = { name: string; label: string; domains: string[] };
 
+export type { AlertAck, AlertAckRequest, AlertLevel, AlertTarget } from "./types.gen";
+
 export interface AlertRuleView {
   id: string;
   name: string;
@@ -740,6 +742,7 @@ export interface AlertRuleView {
   for_n: number;
   threshold_editable: boolean;
   enabled: boolean;
+  level: Gen.AlertLevel;
   muted_until?: number;
   customized: boolean;
 }
@@ -748,6 +751,7 @@ export interface NoticeView {
   id: string;
   name: string;
   enabled: boolean;
+  level: Gen.AlertLevel;
   muted_until?: number;
 }
 
@@ -755,7 +759,8 @@ export interface AlertsView {
   include_logs?: boolean;
   rules: AlertRuleView[];
   notices: NoticeView[];
-  firing: { rule: string; subject: string; title: string; since: number }[];
+  firing: Gen.FiringView[];
+  suppressions: Record<string, boolean>;
   history: { at: number; source: string; title: string; ok: boolean; skipped?: string }[];
 }
 
@@ -765,6 +770,7 @@ export interface AlertPatch {
   for_n?: number;
   mute_minutes?: number;
   reset?: boolean;
+  level?: Gen.AlertLevel;
 }
 
 export interface AuditEntry {

@@ -13,6 +13,11 @@ pub fn issues() -> Vec<Issue> {
   crate::rules::firing_subjects("container_restarting")
     .into_iter()
     .map(|(name, title)| Issue {
+      alert: crate::rules::issue_target(
+        "container_restarting",
+        &name,
+      ),
+      ack: None,
       code: "container_restarting".into(),
       level: IssueLevel::Fault,
       subject: Some(IssueSubject {
@@ -67,15 +72,67 @@ async fn round(
     })
     .collect();
 
-  for (name, online) in &servers {
+  let keep = servers.iter().map(|(name, _)| name.clone()).collect();
+  crate::rules::retain_subjects(state, "server_offline", &keep).await;
+  crate::rules::retain_subjects(state, "disk_full", &keep).await;
+  let keep = snap.world.gateways.keys().cloned().collect();
+  crate::rules::retain_subjects(state, "gateway_down", &keep).await;
+  for (name, _) in servers.iter().filter(|(_, online)| !online) {
+    crate::rules::observe(state, "server.online", name, 0.0, "")
+      .await;
+  }
+  for (name, row) in &snap.world.gateways {
+    if !state.hub.is_online(&row.spec.server) {
+      continue;
+    }
+    let Some(Ok(projects)) = live.get(&row.spec.server) else {
+      continue;
+    };
+    let running = projects
+      .get(&crate::world::gateway_project(name))
+      .is_some_and(|p| p.all_running());
     crate::rules::observe(
       state,
-      "server.online",
+      "gateway.running",
       name,
-      f64::from(u8::from(*online)),
-      "",
+      if running { 1.0 } else { 0.0 },
+      &format!("服务器 {}", row.spec.server),
     )
     .await;
+  }
+  for (name, _) in servers.iter().filter(|(_, online)| *online) {
+    crate::rules::observe(state, "server.online", name, 1.0, "")
+      .await;
+  }
+  for (name, _) in servers.iter().filter(|(_, online)| *online) {
+    if let Some(report) =
+      snap.agent(name).and_then(|a| a.report.as_ref())
+    {
+      let disks = [
+        ("磁盘", report.disk),
+        ("Docker 所在磁盘", report.docker_disk),
+      ]
+      .into_iter()
+      .filter_map(|(label, disk)| {
+        disk.filter(|d| d.total > 0).map(|d| (label, d))
+      })
+      .collect::<Vec<_>>();
+      if !disks.is_empty() {
+        let full = disks
+          .iter()
+          .filter(|(_, disk)| disk.free == 0)
+          .map(|(label, _)| *label)
+          .collect::<Vec<_>>();
+        crate::rules::observe(
+          state,
+          "disk.available",
+          name,
+          if full.is_empty() { 1.0 } else { 0.0 },
+          &full.join("、"),
+        )
+        .await;
+      }
+    }
   }
   for (name, seen) in &restarting {
     crate::rules::observe(

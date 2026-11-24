@@ -9,7 +9,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import type { AlertPatch, AlertsView } from "@/types";
+import type { AlertLevel, AlertPatch, AlertsView } from "@/types";
 
 const MUTES: [number, string][] = [
   [60, "1 小时"],
@@ -54,6 +54,7 @@ export function Rules() {
               <TableHead>规则</TableHead>
               <TableHead className="w-28">阈值</TableHead>
               <TableHead className="w-24">连续次数</TableHead>
+              <TableHead>通知级别</TableHead>
               <TableHead className="w-40" />
             </TableRow>
           </TableHeader>
@@ -79,6 +80,7 @@ export function Rules() {
                 <TableCell>
                   <NumberInput value={r.for_n} integer onSave={(n) => patch(r.id, { for_n: n })} />
                 </TableCell>
+                <TableCell><Level level={r.level} onChange={(level) => patch(r.id, { level })} /></TableCell>
                 <TableCell className="text-right">
                   <Controls muted={r.muted_until} customized={r.customized} onPatch={(p) => patch(r.id, p)} />
                 </TableCell>
@@ -94,10 +96,24 @@ export function Rules() {
           <div key={n.id} className="flex items-center gap-2.5 text-sm">
             <Checkbox checked={n.enabled} aria-label={`开关 ${n.name}`} onCheckedChange={(c) => patch(n.id, { enabled: c === true })} />
             <span>{n.name}</span>
-            <span className="ml-auto">
+            <span className="ml-auto inline-flex items-center gap-1">
+              <Level level={n.level} onChange={(level) => patch(n.id, { level })} />
               <Controls muted={n.muted_until} onPatch={(p) => patch(n.id, p)} />
             </span>
           </div>
+        ))}
+      </Panel>
+
+      <SectionTitle>内置抑制</SectionTitle>
+      <Panel className="grid gap-2 p-4">
+        {[
+          ["suppress_offline", "机器离线时抑制其上的告警"],
+          ["suppress_gateway", "网关不可用时抑制经过它的域名告警"],
+        ].map(([id, label]) => (
+          <label key={id} className="flex items-center gap-2.5 text-sm">
+            <Checkbox checked={v.suppressions?.[id] ?? true} onCheckedChange={(c) => patch(id, { enabled: c === true })} />
+            {label}
+          </label>
         ))}
       </Panel>
 
@@ -106,6 +122,20 @@ export function Rules() {
         告警附带日志
       </label>
     </>
+  );
+}
+
+function Level({ level, onChange }: { level: AlertLevel; onChange: (level: AlertLevel) => void }) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="outline" size="sm" aria-label="通知级别">{level === "digest" ? "每日汇总" : "立即推送"}</Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        <DropdownMenuItem onSelect={() => onChange("urgent")}>立即推送</DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => onChange("digest")}>每日汇总</DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 

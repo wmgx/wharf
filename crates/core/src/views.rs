@@ -506,6 +506,8 @@ pub async fn status(
   for s in &servers {
     if !s.joined {
       issues.push(Issue {
+        alert: None,
+        ack: None,
         code: "server_not_joined".into(),
         level: IssueLevel::Warn,
         subject: Some(IssueSubject {
@@ -517,6 +519,8 @@ pub async fn status(
       });
     } else if !s.online {
       issues.push(Issue {
+        alert: crate::rules::issue_target("server_offline", &s.name),
+        ack: None,
         code: "server_offline".into(),
         level: IssueLevel::Fault,
         subject: Some(IssueSubject {
@@ -550,8 +554,16 @@ pub async fn status(
           )
         };
         issues.push(Issue {
+          alert: (d.free == 0)
+            .then(|| crate::rules::issue_target("disk_full", &s.name))
+            .flatten(),
+          ack: None,
           code: "disk_low".into(),
-          level: IssueLevel::Warn,
+          level: if d.free == 0 {
+            IssueLevel::Fault
+          } else {
+            IssueLevel::Warn
+          },
           subject: Some(IssueSubject {
             kind: "server".into(),
             name: s.name.clone(),
@@ -583,6 +595,8 @@ pub async fn status(
       && matches!(st.tone, Tone::Warn | Tone::Bad)
     {
       issues.push(Issue {
+        alert: None,
+        ack: None,
         code: "service_unhealthy".into(),
         level: if st.tone == Tone::Bad {
           IssueLevel::Fault
@@ -604,6 +618,8 @@ pub async fn status(
     let Some(live) = live else { continue };
     if live.state != "running" && live.state != "unknown" {
       issues.push(Issue {
+        alert: crate::rules::issue_target("gateway_down", name),
+        ack: None,
         code: "gateway_state".into(),
         level: IssueLevel::Fault,
         subject: Some(IssueSubject {
@@ -615,6 +631,8 @@ pub async fn status(
       });
     } else if live.in_sync == Some(false) {
       issues.push(Issue {
+        alert: None,
+        ack: None,
         code: "gateway_drift".into(),
         level: IssueLevel::Warn,
         subject: Some(IssueSubject {
@@ -635,6 +653,8 @@ pub async fn status(
   for app in &edge_apps {
     if let Some(d) = &app.drift {
       issues.push(Issue {
+        alert: None,
+        ack: None,
         code: "edge_drift".into(),
         level: IssueLevel::Warn,
         subject: Some(IssueSubject {
@@ -646,6 +666,8 @@ pub async fn status(
       });
     } else if let Some(EdgeLive { error: Some(e), .. }) = &app.live {
       issues.push(Issue {
+        alert: None,
+        ack: None,
         code: "edge_sync".into(),
         level: IssueLevel::Warn,
         subject: Some(IssueSubject {
@@ -687,6 +709,8 @@ pub async fn status(
     for (name, check) in &updates.services {
       if check.newer && services.iter().any(|s| &s.name == name) {
         issues.push(Issue {
+          alert: None,
+          ack: None,
           code: "update_available".into(),
           level: IssueLevel::Info,
           subject: Some(IssueSubject {
@@ -710,6 +734,8 @@ pub async fn status(
           .collect::<Vec<_>>()
           .join("、");
         issues.push(Issue {
+          alert: None,
+          ack: None,
           code: "tag_available".into(),
           level: IssueLevel::Info,
           subject: Some(IssueSubject {
@@ -729,6 +755,8 @@ pub async fn status(
     {
       let items = &pending.items;
       issues.push(Issue {
+        alert: None,
+        ack: None,
         code: "pending_changes".into(),
         level: IssueLevel::Info,
         subject: None,
@@ -752,11 +780,24 @@ pub async fn status(
     &snap.world,
     Utc::now().timestamp_millis(),
   ));
+  let acks = crate::rules::policy::acks(state).await?;
+  for issue in &mut issues {
+    issue.ack = issue.alert.as_ref().and_then(|target| {
+      acks
+        .get(&(target.rule.clone(), target.subject.clone()))
+        .cloned()
+    });
+  }
   let problems = problems_text(&issues);
-  issues.sort_by_key(|i| match i.level {
-    IssueLevel::Fault => 0,
-    IssueLevel::Warn => 1,
-    IssueLevel::Info => 2,
+  issues.sort_by_key(|i| {
+    (
+      match i.level {
+        IssueLevel::Fault => 0,
+        IssueLevel::Warn => 1,
+        IssueLevel::Info => 2,
+      },
+      i.ack.is_some(),
+    )
   });
   let mut edge_unmanaged: Vec<EdgeProjectView> =
     snap.edge_accounts.values().flatten().cloned().collect();
@@ -870,6 +911,8 @@ mod tests {
   fn problems_text_keeps_hint_and_omits_info() {
     let issues = vec![
       Issue {
+        alert: None,
+        ack: None,
         code: "gateway_drift".into(),
         level: IssueLevel::Warn,
         subject: None,
@@ -877,6 +920,8 @@ mod tests {
         hint: Some("，执行 wharf plan 查看".into()),
       },
       Issue {
+        alert: None,
+        ack: None,
         code: "update_available".into(),
         level: IssueLevel::Info,
         subject: None,

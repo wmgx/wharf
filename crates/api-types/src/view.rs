@@ -697,6 +697,29 @@ pub struct IssueSubject {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AlertTarget {
+  pub rule: String,
+  pub subject: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AlertAck {
+  pub by: String,
+  pub at: i64,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AlertAckRequest {
+  pub rule: String,
+  pub subject: String,
+  pub acked: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Issue {
   /// 这是哪一类问题，页面按它决定给什么按钮。取值见下表。
   /// oom_killed：服务的容器因内存超限被杀。
@@ -713,6 +736,10 @@ pub struct Issue {
   /// 只给命令行看的补充（怎么用命令处理）。页面不显示。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub hint: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub alert: Option<AlertTarget>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub ack: Option<AlertAck>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1291,6 +1318,46 @@ pub struct TaskView {
   pub updated_at: DateTime<Utc>,
 }
 
+#[derive(
+  Debug,
+  Clone,
+  Copy,
+  Default,
+  PartialEq,
+  Eq,
+  Serialize,
+  Deserialize,
+  JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum AlertLevel {
+  #[default]
+  Urgent,
+  Digest,
+}
+
+impl AlertLevel {
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::Urgent => "urgent",
+      Self::Digest => "digest",
+    }
+  }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AlertSuppression {
+  pub id: i64,
+  pub source: String,
+  pub ignore: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AlertSuppressRequest {
+  pub source: String,
+  pub ignore: String,
+}
+
 /// `GET /api/alerts`：告警规则、事件通知的开关，正在触发的告警和最近的推送。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AlertsView {
@@ -1302,6 +1369,8 @@ pub struct AlertsView {
   /// 触发的告警里附带服务最近的日志。
   #[serde(default)]
   pub include_logs: bool,
+  #[serde(default)]
+  pub suppressions: std::collections::BTreeMap<String, bool>,
 }
 
 /// 一条告警规则：对一个指标的每个对象，最近 `for_n` 个点都满足 `比较 阈值` 时触发。
@@ -1319,6 +1388,8 @@ pub struct AlertRuleView {
   pub for_n: u32,
   /// 阈值是不是有意义可改（`online < 1` 这种就不让改）。
   pub threshold_editable: bool,
+  #[serde(default)]
+  pub level: AlertLevel,
   pub enabled: bool,
   /// 静默到这个时间（毫秒），期间照常判断但不推送。
   #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1332,6 +1403,8 @@ pub struct AlertRuleView {
 pub struct NoticeView {
   pub id: String,
   pub name: String,
+  #[serde(default)]
+  pub level: AlertLevel,
   pub enabled: bool,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub muted_until: Option<i64>,
@@ -1344,6 +1417,8 @@ pub struct FiringView {
   pub title: String,
   /// 开始触发的时间（毫秒）。
   pub since: i64,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub ack: Option<AlertAck>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1375,6 +1450,8 @@ pub struct AlertPatch {
   pub mute_minutes: Option<u32>,
   #[serde(default)]
   pub reset: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub level: Option<AlertLevel>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

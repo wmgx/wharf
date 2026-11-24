@@ -1,18 +1,21 @@
 import { useNavigate } from "react-router-dom";
 import { Fragment } from "react";
 import { usePoll } from "@/api";
+import { AlertConfirmation } from "@/components/alert-confirmation";
 import { useActions } from "@/components/actions";
 import { ago, Empty, SectionTitle, StatusBadge } from "@/components/common";
 import { IssueRow, useIssues } from "@/components/issues";
 import { Panel, Rows } from "@/components/kit";
 import { Button } from "@/components/ui/button";
+import { useStatus } from "@/status";
 import type { AlertsView, IssueLevel } from "@/types";
 
 export function Open() {
   const nav = useNavigate();
   const issues = useIssues();
   const actions = useActions();
-  const { data: alerts } = usePoll<AlertsView>("/api/alerts", 30000);
+  const { refresh: refreshStatus } = useStatus();
+  const { data: alerts, refresh } = usePoll<AlertsView>("/api/alerts", 30000);
   const updates = issues.filter((i) => i.code === "update_available" && i.subject);
   const groups: [IssueLevel, string][] = [["fault", "故障"], ["warn", "要看一眼"], ["info", "可以做的"]];
   if (!issues.length && !alerts?.firing.length) return <Empty>现在没有要处理的</Empty>;
@@ -21,9 +24,10 @@ export function Open() {
       {!!alerts?.firing.length && <>
         <SectionTitle count={alerts.firing.length}>正在告警</SectionTitle>
         <Panel className="grid gap-1.5 p-4 text-sm">
-          {alerts.firing.map((f) => <div key={`${f.rule}/${f.subject}`} className="flex flex-wrap items-center gap-2">
+          {alerts.firing.slice().sort((a, b) => Number(!!a.ack) - Number(!!b.ack)).map((f) => <div key={`${f.rule}/${f.subject}`} className="flex flex-wrap items-center gap-2">
             <StatusBadge tone="bad">{alerts.rules.find((r) => r.id === f.rule)?.name ?? alerts.notices.find((n) => n.id === f.rule)?.name ?? f.rule}</StatusBadge>
             <span className="min-w-0 flex-1 break-words">{f.title}</span><span className="text-xs text-muted-foreground">{ago(new Date(f.since).toISOString())}起</span>
+            <AlertConfirmation target={f} ack={f.ack} refresh={() => { refresh(); refreshStatus(); }} />
             <Button variant="outline" size="xs" onClick={() => nav(alertPath(f.rule, f.subject))}>查看</Button>
           </div>)}
         </Panel>
@@ -43,9 +47,12 @@ export function Open() {
 function alertPath(rule: string, subject: string): string {
   if (rule === "expiry_soon" || rule === "expiry_urgent") { const [kind, ...parts] = subject.split(":"); const name = encodeURIComponent(parts.join(":")); return kind === "domain" ? `/domains?q=${name}` : `/servers/${name}?tab=settings`; }
   const name = encodeURIComponent(subject);
-  if (["domain_down", "cert_expiring"].includes(rule)) return `/domains?open=${name}`;
+  if (["domain_down", "cert_expiring", "cert_expired"].includes(rule)) return `/domains?open=${name}`;
   if (["container_restarting", "monitor_failed", "http_5xx", "oom_killed"].includes(rule)) return `/services/${name}?tab=${rule === "monitor_failed" ? "metrics" : "logs"}`;
+  if (rule === "gateway_down") return `/domains?tab=entries&entry=${name}`;
+  if (rule === "task") return `/tasks/${name}?tab=runs`;
+  if (rule === "backup") return `/services/${name}`;
   if (rule === "link_loss") return "/network";
   if (rule === "host_unit_down") return `/servers/${encodeURIComponent(subject.split(":")[0])}?tab=host`;
-  return `/servers/${name}${rule === "disk_forecast" ? "?tab=disk" : ""}`;
+  return `/servers/${name}${["disk_forecast", "disk_full"].includes(rule) ? "?tab=disk" : ""}`;
 }

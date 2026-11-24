@@ -333,6 +333,7 @@ pub async fn refresh(
     crate::rules::notice(
       state,
       "exposure",
+      Some(server),
       None,
       false,
       crate::notify::Event {
@@ -441,6 +442,8 @@ pub async fn issues(
       .collect();
     if let Some(title) = exposed_title(server, &open) {
       issues.push(Issue {
+        alert: None,
+        ack: None,
         code: "exposed_port".into(),
         level: IssueLevel::Warn,
         subject: Some(IssueSubject {

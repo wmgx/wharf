@@ -22,7 +22,7 @@ use crate::{
   api::ApiResult,
   auth::{Auth, hash_token, new_token},
   db::{now_ms, sql_err},
-  notify::{self, Event},
+  notify::Event,
   state::AppState,
 };
 
@@ -239,12 +239,27 @@ pub async fn send(
       .map_err(sql_err)
     })
     .await;
-  match notify::send(&s, &event).await {
-    Ok(()) => (StatusCode::OK, Json(json!({ "ok": true }))),
-    Err(e) => (
-      StatusCode::BAD_GATEWAY,
-      Json(json!({ "ok": false, "error": e.message })),
-    ),
+  let skipped = crate::rules::notice(
+    &s,
+    "notify_hook",
+    Some(&name),
+    None,
+    false,
+    event,
+  )
+  .await;
+  match skipped.as_deref() {
+    Some(reason)
+      if reason == "没有配置通知渠道"
+        || reason.starts_with("发送失败：")
+        || reason.starts_with("处理失败：") =>
+    {
+      (
+        StatusCode::BAD_GATEWAY,
+        Json(json!({ "ok": false, "error": reason })),
+      )
+    }
+    _ => (StatusCode::OK, Json(json!({ "ok": true }))),
   }
 }
 

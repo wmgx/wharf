@@ -63,6 +63,8 @@ pub fn issues() -> Vec<Issue> {
   rules::firing_subjects("disk_forecast")
     .into_iter()
     .map(|(name, title)| Issue {
+      alert: crate::rules::issue_target("disk_forecast", &name),
+      ack: None,
       code: "disk_forecast".into(),
       level: IssueLevel::Warn,
       subject: Some(IssueSubject {

@@ -42,6 +42,8 @@ pub fn issues() -> Vec<Issue> {
   rules::firing_subjects("oom_killed")
     .into_iter()
     .map(|(name, title)| Issue {
+      alert: crate::rules::issue_target("oom_killed", &name),
+      ack: None,
       code: "oom_killed".into(),
       level: IssueLevel::Warn,
       subject: Some(IssueSubject {

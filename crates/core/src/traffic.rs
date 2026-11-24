@@ -227,6 +227,8 @@ pub fn issues() -> Vec<Issue> {
   rules::firing_subjects("traffic_quota")
     .into_iter()
     .map(|(name, title)| Issue {
+      alert: crate::rules::issue_target("traffic_quota", &name),
+      ack: None,
       code: "traffic_quota".into(),
       level: IssueLevel::Warn,
       subject: Some(IssueSubject {

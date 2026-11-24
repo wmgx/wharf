@@ -94,3 +94,14 @@ fn log_rule_holds_below_threshold_until_window_is_empty() {
     Verdict::Recover
   ));
 }
+
+pub(super) fn notification_db() -> rusqlite::Connection {
+  let c = rusqlite::Connection::open_in_memory().unwrap();
+  c.execute_batch(
+    "CREATE TABLE alert_firing (rule TEXT, subject TEXT, since INTEGER, title TEXT, PRIMARY KEY (rule, subject));
+     CREATE TABLE alert_history (id INTEGER PRIMARY KEY, at INTEGER, source TEXT, subject TEXT, title TEXT, ok INTEGER, skipped TEXT);
+     CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+  ).unwrap();
+  c.execute_batch(MIGRATION).unwrap();
+  c
+}

@@ -29,6 +29,8 @@ pub fn issues() -> Vec<Issue> {
   m.iter()
     .filter(|(_, p)| p.fails >= FAILS)
     .map(|(h, p)| Issue {
+      alert: crate::rules::issue_target("domain_down", h),
+      ack: None,
       code: "route_down".into(),
       level: IssueLevel::Fault,
       subject: Some(IssueSubject {
@@ -38,10 +40,28 @@ pub fn issues() -> Vec<Issue> {
       title: format!("域名 {h} 打不开：{}", p.detail),
       hint: None,
     })
+    .chain(
+      crate::rules::firing_subjects("cert_expired")
+        .into_iter()
+        .map(|(host, title)| Issue {
+          alert: crate::rules::issue_target("cert_expired", &host),
+          ack: None,
+          code: "cert_expired".into(),
+          level: IssueLevel::Fault,
+          subject: Some(IssueSubject {
+            kind: "route".into(),
+            name: host,
+          }),
+          title,
+          hint: None,
+        }),
+    )
     .chain(m.iter().filter_map(|(h, p)| {
       p.cert_days
         .filter(|d| *d < crate::cert::WARN_DAYS)
         .map(|d| Issue {
+          alert: crate::rules::issue_target("cert_expiring", h),
+          ack: None,
           code: "cert_expiring".into(),
           level: IssueLevel::Warn,
           subject: Some(IssueSubject {
@@ -60,6 +80,11 @@ pub async fn observe(state: &AppState, report: &DoctorReport) {
   if let Ok(mut m) = LAST.lock() {
     m.retain(|h, _| report.routes.iter().any(|r| &r.hostname == h));
   }
+  let keep =
+    report.routes.iter().map(|r| r.hostname.clone()).collect();
+  for id in ["domain_down", "cert_expiring", "cert_expired"] {
+    crate::rules::retain_subjects(state, id, &keep).await;
+  }
   for r in &report.routes {
     let Some(web) = r
       .checks
@@ -70,8 +95,18 @@ pub async fn observe(state: &AppState, report: &DoctorReport) {
     };
     let ok = web.status != CheckStatus::Bad;
     let host = r.hostname.clone();
-    let cert_days =
-      r.cert_expires.map(|t| (t - chrono::Utc::now()).num_days());
+    let remaining = r.cert_expires.map(|t| t - chrono::Utc::now());
+    let cert_days = remaining.map(|left| left.num_days());
+    if let Some(valid) = cert_valid(remaining, web) {
+      crate::rules::observe(
+        state,
+        "cert.valid",
+        &host,
+        if valid { 1.0 } else { 0.0 },
+        &r.url,
+      )
+      .await;
+    }
     if let Some(days) = cert_days {
       cert_notify(state, &host, days).await;
     }
@@ -119,4 +154,22 @@ pub async fn observe(state: &AppState, report: &DoctorReport) {
 async fn cert_notify(state: &AppState, host: &str, days: i64) {
   crate::rules::observe(state, "cert.days", host, days as f64, "")
     .await;
+}
+
+// shortcut: 证书验证拒绝时只能读体检保留的 rustls 错误文本，改用结构化 TLS 错误时替换。
+fn cert_valid(
+  remaining: Option<chrono::TimeDelta>,
+  web: &wharf_api_types::view::DoctorCheck,
+) -> Option<bool> {
+  remaining
+    .map(|left| left > chrono::TimeDelta::zero())
+    .or_else(|| {
+      (web.layer == "https"
+        && web.status == CheckStatus::Bad
+        && (web.detail.contains("certificate expired:")
+          || web
+            .detail
+            .contains("invalid peer certificate: Expired")))
+      .then_some(false)
+    })
 }

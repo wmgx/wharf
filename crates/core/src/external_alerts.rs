@@ -76,8 +76,14 @@ pub(crate) async fn clear_incident(
   state: &crate::state::AppState,
   name: &str,
 ) {
-  super::config(state).await;
-  super::set_firing(state, (INCIDENT.id.into(), name.into()), None)
-    .await;
-  crate::notify::transition(state, &(INCIDENT.key)(name), true).await;
+  let _guard = super::UPDATE.lock().await;
+  let cfg = super::config(state).await;
+  super::forget_subject(
+    state,
+    INCIDENT.id,
+    name,
+    &(INCIDENT.key)(name),
+  )
+  .await;
+  super::release(state, &cfg).await;
 }

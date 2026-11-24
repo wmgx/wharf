@@ -1,5 +1,6 @@
 import { CircleAlertIcon, InfoIcon, TriangleAlertIcon } from "lucide-react";
 import { useNavigate } from "react-router-dom";
+import { AlertConfirmation } from "@/components/alert-confirmation";
 import { useActions } from "@/components/actions";
 import { CopyButton, SectionTitle } from "@/components/common";
 import { Row, Rows } from "@/components/kit";
@@ -33,7 +34,7 @@ export function subjectPath(s: IssueSubject): string {
 export function IssueRow({ issue }: { issue: Issue }) {
   const actions = useActions();
   const nav = useNavigate();
-  const { status } = useStatus();
+  const { status, refresh } = useStatus();
   const Icon = issue.level === "fault" ? CircleAlertIcon : issue.level === "warn" ? TriangleAlertIcon : InfoIcon;
   const color = issue.level === "fault" ? "text-destructive" : issue.level === "warn" ? "text-warning" : "text-muted-foreground";
   const subject = issue.subject;
@@ -44,6 +45,7 @@ export function IssueRow({ issue }: { issue: Issue }) {
       <span className="min-w-0 flex-1 break-all">{issue.title}
         {issue.code === "dns_not_effective" && issue.hint && <code className="mt-1.5 block font-mono text-xs text-foreground/70">{issue.hint}</code>}
       </span>
+      {issue.alert && <AlertConfirmation target={issue.alert} ack={issue.ack} refresh={refresh} />}
       {issue.code === "dns_not_effective" && issue.hint && <CopyButton text={issue.hint} />}
       {issue.code === "update_available" && subject ? (
         <Button variant="outline" size="xs" onClick={() => actions.plan({ title: `更新 ${subject.name}`, changes: [{ op: "refresh_images", name: subject.name }] })}>更新</Button>

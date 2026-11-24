@@ -218,7 +218,15 @@ async fn notify_tags(
       first.image, first.tag, first.tag
     ),
   };
-  crate::rules::notice(state, "update", None, true, event).await;
+  crate::rules::notice(
+    state,
+    "update",
+    Some(name),
+    None,
+    true,
+    event,
+  )
+  .await;
 }
 
 /// 记下这次推送的内容，和上次一样就返回 true。
@@ -256,7 +264,15 @@ async fn notify_newer(state: &AppState, name: &str, latest: &str) {
       "最新版本 {short}。看改动：wharf plan，要更新：wharf service update {name}（或在页面上点\u{201c}更新\u{201d}）"
     ),
   };
-  crate::rules::notice(state, "update", None, true, event).await;
+  crate::rules::notice(
+    state,
+    "update",
+    Some(name),
+    None,
+    true,
+    event,
+  )
+  .await;
 }
 
 /// (服务, 镜像, 固定的版本)。

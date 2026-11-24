@@ -442,6 +442,7 @@ pub(crate) async fn record(
   crate::rules::notice(
     state,
     "backup",
+    Some(service),
     Some(&format!("backup.{service}")),
     result.is_ok(),
     crate::notify::Event {

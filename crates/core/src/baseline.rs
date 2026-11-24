@@ -55,6 +55,8 @@ pub fn issues() -> Vec<Issue> {
     .map(|d| {
       d.iter()
         .map(|(s, diffs)| Issue {
+          alert: None,
+          ack: None,
           code: "baseline_drift".into(),
           level: IssueLevel::Warn,
           subject: Some(IssueSubject {

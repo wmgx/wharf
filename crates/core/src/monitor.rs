@@ -32,6 +32,8 @@ pub fn issues() -> Vec<Issue> {
   m.iter()
     .filter(|(_, v)| v.fails >= FAILS)
     .map(|(s, v)| Issue {
+      alert: crate::rules::issue_target("monitor_failed", s),
+      ack: None,
       code: "monitor_down".into(),
       level: IssueLevel::Fault,
       subject: Some(IssueSubject {

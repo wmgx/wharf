@@ -38,6 +38,9 @@ fn expiry_ok(c: &Ctx) -> Event {
 }
 
 pub(super) const RULES: &[Rule] = &[
+  availability::GATEWAY,
+  availability::DISK,
+  availability::CERT,
   resources::HOST_CPU,
   resources::HOST_MEM,
   resources::SERVICE_MEM,

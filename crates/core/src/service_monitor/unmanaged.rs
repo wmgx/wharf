@@ -136,6 +136,8 @@ impl Seen {
     let kind = &self.kind;
     let name = format!("'{}'", self.name.replace('\'', "'\\''"));
     Issue {
+      alert: None,
+      ack: None,
       code: "unmanaged_container".into(),
       level: IssueLevel::Info,
       subject: Some(IssueSubject {
@@ -201,6 +203,7 @@ async fn round(state: &AppState) {
     crate::rules::notice(
       state,
       "unmanaged_container",
+      Some(&seen.server),
       None,
       false,
       Event {

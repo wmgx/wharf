@@ -215,7 +215,8 @@ fn page_path(rule: &str, subject: Option<&str>) -> String {
     | "oom_killed" => {
       format!("/services/{subject}")
     }
-    "domain_down" | "cert_expiring" => "/entries".into(),
+    "domain_down" | "cert_expiring" | "cert_expired"
+    | "gateway_down" => "/entries".into(),
     "link_loss" => "/network".into(),
     "host_unit_down" => {
       let server = subject.split_once(':').map_or(subject, |s| s.0);

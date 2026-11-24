@@ -182,6 +182,7 @@ pub async fn used(state: &AppState, actor: &str, source: String) {
     crate::rules::notice(
       state,
       "recovery",
+      Some(&source),
       None,
       false,
       crate::notify::Event {
@@ -199,6 +200,8 @@ pub async fn issues(db: &Db) -> Result<Vec<Issue>, ApiError> {
   let v = view(db).await?;
   Ok(if v.enabled && v.recovery_left < 3 {
     vec![Issue {
+      alert: None,
+      ack: None,
       code: "recovery_low".into(),
       level: IssueLevel::Warn,
       subject: None,

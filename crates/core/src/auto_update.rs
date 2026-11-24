@@ -183,8 +183,15 @@ pub async fn run(state: &Arc<AppState>) -> Vec<AutoUpdateResult> {
           ),
         }
       };
-      crate::rules::notice(state, "auto_update", None, ok, event)
-        .await;
+      crate::rules::notice(
+        state,
+        "auto_update",
+        Some(&name),
+        None,
+        ok,
+        event,
+      )
+      .await;
     }
     results.push(AutoUpdateResult {
       service: name,
@@ -272,6 +279,8 @@ pub fn issues() -> Vec<Issue> {
     .unwrap()
     .keys()
     .map(|name| Issue {
+      alert: None,
+      ack: None,
       code: "auto_update_failed".into(),
       level: IssueLevel::Warn,
       subject: Some(IssueSubject {

@@ -18,6 +18,8 @@ pub fn issues(world: &World, now_ms: i64) -> Vec<Issue> {
   expired(world, now_ms)
     .into_iter()
     .map(|host| Issue {
+      alert: None,
+      ack: None,
       code: "share_expired".into(),
       level: IssueLevel::Warn,
       subject: Some(IssueSubject {

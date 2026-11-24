@@ -216,6 +216,7 @@ pub(crate) async fn notify_result(
   crate::rules::notice(
     state,
     "task",
+    Some(name),
     Some(&format!("task.{name}")),
     ok,
     crate::notify::Event {
@@ -521,6 +522,8 @@ pub async fn issues(state: &AppState) -> Vec<Issue> {
   rows
     .into_iter()
     .map(|(n, s)| Issue {
+      alert: crate::rules::issue_target("task", &n),
+      ack: None,
       code: "task_failed".into(),
       level: IssueLevel::Warn,
       title: format!("定时任务 {n} {}", status_text(dec(&s))),

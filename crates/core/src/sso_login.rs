@@ -1101,6 +1101,8 @@ pub fn issues(
       let result: SsoLoginState =
         serde_json::from_str(snap.sso_login.get(host)?).ok()?;
       (!result.ok).then(|| Issue {
+        alert: None,
+        ack: None,
         code: "sso_login_failed".into(),
         level: IssueLevel::Warn,
         subject: Some(IssueSubject {

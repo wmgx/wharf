@@ -118,6 +118,19 @@ export interface AgentUsage {
   memory_pct: number | null;
 }
 
+export interface AlertAck {
+  at: number;
+  by: string;
+  note?: string | null;
+}
+
+export interface AlertAckRequest {
+  acked: boolean;
+  note?: string | null;
+  rule: string;
+  subject: string;
+}
+
 export interface AlertHistoryView {
   at: number;
   /**
@@ -135,12 +148,15 @@ export interface AlertHistoryView {
   title: string;
 }
 
+export type AlertLevel = "urgent" | "digest";
+
 /**
  * `PUT /api/alerts/{id}`：只改给了的字段。`reset` 恢复默认值。
  */
 export interface AlertPatch {
   enabled?: boolean | null;
   for_n?: number | null;
+  level?: AlertLevel | null;
   /**
    * 静默多少分钟，0 取消静默。
    */
@@ -164,6 +180,7 @@ export interface AlertRuleView {
   enabled: boolean;
   for_n: number;
   id: string;
+  level: AlertLevel;
   /**
    * 指标名，例如 `server.online`。
    */
@@ -184,6 +201,11 @@ export interface AlertRuleView {
   threshold_editable: boolean;
 }
 
+export interface AlertTarget {
+  rule: string;
+  subject: string;
+}
+
 /**
  * `GET /api/alerts`：告警规则、事件通知的开关，正在触发的告警和最近的推送。
  */
@@ -199,6 +221,7 @@ export interface AlertsView {
   include_logs: boolean;
   notices: NoticeView[];
   rules: AlertRuleView[];
+  suppressions: Record<string, boolean>;
 }
 
 export type AllCookies = "all";
@@ -983,6 +1006,7 @@ export interface FileSpec {
 }
 
 export interface FiringView {
+  ack?: AlertAck | null;
   rule: string;
   /**
    * 开始触发的时间（毫秒）。
@@ -1247,6 +1271,8 @@ export interface ImportRecord {
 }
 
 export interface Issue {
+  ack?: AlertAck | null;
+  alert?: AlertTarget | null;
   /**
    * 这是哪一类问题，页面按它决定给什么按钮。取值见下表。
    * oom_killed：服务的容器因内存超限被杀。
@@ -1588,6 +1614,7 @@ export interface NewerTag {
 export interface NoticeView {
   enabled: boolean;
   id: string;
+  level: AlertLevel;
   muted_until?: number | null;
   name: string;
 }

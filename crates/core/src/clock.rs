@@ -49,6 +49,8 @@ pub fn issues() -> Vec<Issue> {
   rules::firing_subjects("clock_skew")
     .into_iter()
     .map(|(name, title)| Issue {
+      alert: crate::rules::issue_target("clock_skew", &name),
+      ack: None,
       code: "clock_skew".into(),
       level: IssueLevel::Warn,
       subject: Some(IssueSubject {

@@ -50,7 +50,7 @@ async fn channels(
 }
 
 /// 发给所有已配置的渠道。没有配置渠道时返回错误，带上怎么配。
-pub async fn send(
+async fn send(
   state: &AppState,
   event: &Event,
 ) -> Result<(), ApiError> {
@@ -76,28 +76,20 @@ pub async fn send(
   Ok(())
 }
 
-/// 记下 `key` 这次的结果（存在设置 `notify.state.<key>`），返回状态是不是变了。
-/// 第一次就成功不算变化；读写失败也不算。
-pub async fn transition(
-  state: &AppState,
+/// 记下 `key` 这次的结果。第一次就成功不算变化。
+pub fn transition(
+  c: &rusqlite::Connection,
   key: &str,
   ok: bool,
-) -> bool {
+) -> Result<bool, ApiError> {
   let setting = format!("notify.state.{key}");
   let now = if ok { "ok" } else { "fail" };
-  let prev = state
-    .db
-    .call(move |c| {
-      let prev = db::setting(c, &setting)?;
-      db::set_setting(c, &setting, Some(now))?;
-      Ok(prev)
-    })
-    .await;
-  match prev.as_ref().map(|p| p.as_deref()) {
-    Ok(Some(p)) => p != now,
-    Ok(None) => !ok,
-    Err(_) => false,
+  let prev = db::setting(c, &setting)?;
+  if prev.as_deref() == Some(now) {
+    return Ok(false);
   }
+  db::set_setting(c, &setting, Some(now))?;
+  Ok(prev.is_some() || !ok)
 }
 
 /// 发出去，失败只记日志；返回没发出去的原因。

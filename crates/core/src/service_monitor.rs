@@ -459,6 +459,8 @@ pub fn stopped_issue(
   }
   let elapsed = now.checked_sub(latest)?;
   (elapsed > 7 * DAY).then(|| Issue {
+    alert: None,
+    ack: None,
     code: "service_stopped_long".into(),
     level: IssueLevel::Info,
     subject: Some(IssueSubject {
@@ -494,6 +496,8 @@ pub fn issues(world: &World) -> Vec<Issue> {
               _ => row.spec.heartbeat.is_some(),
             };
           active.then(|| Issue {
+            alert: rules::issue_target(rule, &subject),
+            ack: None,
             code: rule.into(),
             level: IssueLevel::Fault,
             subject: Some(IssueSubject {

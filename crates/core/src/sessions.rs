@@ -166,6 +166,7 @@ pub async fn notify_new(
       crate::rules::notice(
         s,
         "login",
+        Some(addr),
         None,
         false,
         crate::notify::Event {

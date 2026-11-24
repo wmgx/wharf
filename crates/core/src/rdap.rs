@@ -97,6 +97,15 @@ pub fn issues() -> Vec<Issue> {
           (false, false) => format!("服务器 {name} 还有 {n} 天到期"),
         });
       Some(Issue {
+        alert: rules::issue_target(
+          if urgent {
+            "expiry_urgent"
+          } else {
+            "expiry_soon"
+          },
+          &s,
+        ),
+        ack: None,
         code: if domain {
           "domain_expiring"
         } else {

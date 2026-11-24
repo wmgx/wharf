@@ -1,38 +1,41 @@
 //! 告警和事件通知的统一入口。
 //!
-//! - 告警 = 指标 + 规则：各模块每轮检查只上报数值（[observe]），这里按内置规则判断，
-//!   "规则 + 对象"的状态变化（触发 → 恢复）时推送；
-//! - 事件通知（定时任务、备份结果、切换入口、新版本）发生就推，只有开关和静默（[notice]）。
-//!
-//! 规则内置，页面上能改开关、阈值、连续次数、静默，改动存在设置 `alerts.config`。
-//! 状态沿用 `notify.state.<key>`（跨重启不重复推）；正在触发的存在 `alert_firing`，
-//! 推送记录存在 `alert_history`（保留 7 天）；指标序列只在内存里。
+//! 规则通过 [observe] 接收采样，有状态及单次事件通过 [notice] 进入通知策略。
+//! 开关、阈值、静默及通知级别存在 `alerts.config`，告警起止沿用 `notify.state.<key>`。
+//! 正在触发的告警存在 `alert_firing`，推送尝试及跳过原因存在 `alert_history`（保留 7 天）。
 
 use std::{
   collections::{BTreeMap, VecDeque},
   sync::{Arc, Mutex},
 };
 
-use axum::{
-  Json,
-  extract::{Path, State},
-};
 use serde::{Deserialize, Serialize};
 use wharf_api_types::{
   ApiError,
-  view::{
-    AlertHistoryView, AlertOptions, AlertPatch, AlertRuleView,
-    AlertsView, FiringView, NoticeView, Perm,
-  },
+  view::{AlertHistoryView, AlertLevel, AlertTarget},
 };
 
 use crate::{
-  api::ApiResult,
-  auth::Auth,
   db::{self, now_ms},
   notify::{self, Event},
   state::AppState,
 };
+
+#[path = "rules/api.rs"]
+pub(crate) mod api;
+#[path = "rules/availability.rs"]
+mod availability;
+#[path = "rules/digest.rs"]
+pub(crate) mod digest;
+#[path = "rules/policy.rs"]
+pub(crate) mod policy;
+#[path = "rules/suppression.rs"]
+mod suppression;
+pub(crate) use policy::MIGRATION;
+use policy::{Delivery, push};
+
+static UPDATE: tokio::sync::Mutex<()> =
+  tokio::sync::Mutex::const_new(());
 
 #[path = "external_alerts.rs"]
 pub(crate) mod external;
@@ -137,6 +140,7 @@ const NOTICES: &[(&str, &str)] = &[
   ("update", "服务有新版本"),
   ("auto_update", "服务自动更新的结果"),
   ("unmanaged_container", "出现未纳管容器"),
+  ("notify_hook", "服务和脚本发来的通知"),
 ];
 
 /// 页面上改过的值，没改的字段用默认。
@@ -150,9 +154,15 @@ struct Override {
   for_n: Option<u32>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   muted_until: Option<i64>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  level: Option<AlertLevel>,
 }
 
 impl Override {
+  fn level(&self, id: &str) -> AlertLevel {
+    self.level.unwrap_or_else(|| policy::default_level(id))
+  }
+
   fn enabled(&self) -> bool {
     self.enabled.unwrap_or(true)
   }
@@ -312,6 +322,7 @@ async fn observe_at(
   value: f64,
   detail: &str,
 ) {
+  let _guard = UPDATE.lock().await;
   let Some(points) = with(|m| {
     m.series.retain(|_, (_, at)| now - *at < STALE_MS);
     let (p, at) = m
@@ -336,10 +347,6 @@ async fn observe_at(
   for rule in RULES.iter().filter(|r| r.metric == metric) {
     let o = cfg.get(rule.id).cloned().unwrap_or_default();
     let fkey = (rule.id.to_string(), subject.to_string());
-    if !o.enabled() {
-      set_firing(state, fkey, None).await;
-      continue;
-    }
     let threshold = o.threshold.unwrap_or(rule.threshold);
     let for_n = o.for_n.unwrap_or(rule.for_n);
     let ctx = Ctx {
@@ -349,82 +356,118 @@ async fn observe_at(
       threshold,
       for_n,
     };
-    let mut since = None;
+    let since = firing_since(rule.id, subject);
     let (ok, event) = match judge(rule, threshold, for_n, &points) {
-      Verdict::Hold => continue,
-      Verdict::Fire => {
-        let e = (rule.fire)(&ctx);
-        set_firing(state, fkey, Some((now, e.title.clone()))).await;
-        (false, e)
+      Verdict::Hold if o.enabled() => continue,
+      Verdict::Hold => {
+        match set_firing(state, fkey, None, now, None).await {
+          Ok((true, _)) => release(state, &cfg).await,
+          Ok((false, _)) => {}
+          Err(e) => {
+            tracing::warn!("清理已关闭的告警失败：{}", e.message)
+          }
+        }
+        continue;
       }
-      Verdict::Recover => {
-        since = with(|m| m.firing.get(&fkey).map(|(at, _)| *at));
-        set_firing(state, fkey, None).await;
-        (true, (rule.ok)(&ctx))
+      Verdict::Fire => (false, (rule.fire)(&ctx)),
+      Verdict::Recover => (true, (rule.ok)(&ctx)),
+    };
+    let (changed, transition) = match set_firing(
+      state,
+      fkey,
+      (!ok && o.enabled()).then(|| (now, event.title.clone())),
+      now,
+      Some(((rule.key)(subject), ok)),
+    )
+    .await
+    {
+      Ok(result) => result,
+      Err(e) => {
+        tracing::warn!("记录告警状态失败：{}", e.message);
+        continue;
       }
     };
-    if notify::transition(state, &(rule.key)(subject), ok).await {
-      let event = if ok && rule.id == "server_offline" {
-        // 开始触发前已经连续离线了 for_n 分钟。
-        let since = since.map(|at| at - i64::from(for_n) * 60_000);
-        crate::alert_context::back_online(
-          state, subject, since, event,
-        )
-        .await
-      } else {
-        event
-      };
-      push(state, rule.id, Some(subject), &o, ok, event).await;
+    if transition || (changed && !ok && o.enabled()) {
+      // 开始触发前已经连续离线了 for_n 分钟。
+      let offline_since =
+        since.map(|at| at - i64::from(for_n) * 60_000);
+      push(
+        state,
+        Delivery {
+          id: rule.id,
+          subject: Some(subject),
+          paired: true,
+          ok,
+          now,
+          replay: false,
+        },
+        &cfg,
+        event,
+        offline_since,
+      )
+      .await;
+    }
+    if changed && (ok || !o.enabled()) {
+      release(state, &cfg).await;
     }
   }
 }
 
-/// 事件通知。`key` 有值时只在状态变化时发（失败 → 恢复），没有就每次都发。
+/// 有状态的事件只有在失败或恢复时通知，普通事件每次都处理。
 pub async fn notice(
   state: &AppState,
   id: &'static str,
+  subject: Option<&str>,
   key: Option<&str>,
   ok: bool,
   event: Event,
-) {
-  if let Some(k) = key
-    && !notify::transition(state, k, ok).await
-  {
-    return;
-  }
-  let o = config(state).await.get(id).cloned().unwrap_or_default();
-  if !o.enabled() {
-    record(state, id, None, &event, ok, Some("已关闭".into())).await;
-    return;
-  }
-  push(state, id, None, &o, ok, event).await;
-}
-
-async fn push(
-  state: &AppState,
-  id: &str,
-  subject: Option<&str>,
-  o: &Override,
-  ok: bool,
-  event: Event,
-) {
-  let skipped = if !o.enabled() {
-    Some("已关闭".to_string())
-  } else if o.muted(now_ms()) {
-    Some("静默中".to_string())
+) -> Option<String> {
+  let _guard = UPDATE.lock().await;
+  let cfg = config(state).await;
+  let now = now_ms();
+  let paired = key.is_some();
+  let changed = if let (Some(k), Some(subject)) = (key, subject) {
+    let enabled = cfg.get(id).is_none_or(Override::enabled);
+    match set_firing(
+      state,
+      (id.into(), subject.into()),
+      (!ok && enabled).then(|| (now, event.title.clone())),
+      now,
+      Some((k.to_string(), ok)),
+    )
+    .await
+    {
+      Ok((changed, transition)) if transition || (changed && !ok) => {
+        changed
+      }
+      Ok(_) => return None,
+      Err(e) => {
+        tracing::warn!("记录事件状态失败：{}", e.message);
+        return Some(format!("处理失败：{}", e.message));
+      }
+    }
   } else {
-    None
+    false
   };
-  let event = if skipped.is_none() && !ok {
-    crate::alert_context::enrich(state, id, subject, event).await
-  } else {
-    event
-  };
-  let skipped = match skipped {
-    Some(s) => Some(s),
-    None => notify::deliver(state, &event).await,
-  };
-  record(state, id, subject, &event, ok, skipped).await;
+  let skipped = push(
+    state,
+    Delivery {
+      id,
+      subject,
+      paired,
+      ok,
+      now,
+      replay: false,
+    },
+    &cfg,
+    event,
+    None,
+  )
+  .await;
+  if changed && ok {
+    release(state, &cfg).await;
+  }
+  skipped
 }
 
 /// 开始触发（已经在触发就保留原来的开始时间）或结束触发，内存和库一起改。
@@ -432,72 +475,53 @@ async fn set_firing(
   state: &AppState,
   key: (String, String),
   fire: Option<(i64, String)>,
-) {
-  let changed = with(|m| match &fire {
-    Some(v) if !m.firing.contains_key(&key) => {
-      m.firing.insert(key.clone(), v.clone());
-      true
-    }
-    Some(_) => false,
-    None => m.firing.remove(&key).is_some(),
-  });
-  if !changed {
-    return;
+  now: i64,
+  transition: Option<(String, bool)>,
+) -> Result<(bool, bool), ApiError> {
+  let changed =
+    with(|m| m.firing.contains_key(&key)) != fire.is_some();
+  if !changed && transition.is_none() {
+    return Ok((false, false));
   }
-  let result = state
-    .db
-    .call(move |c| {
+  let transitioned = state.db.call({
+    let key = key.clone();
+    let fire = fire.clone();
+    move |c| {
+      let tx = c.transaction().map_err(db::sql_err)?;
       let (rule, subject) = key;
-      match fire {
-        Some((since, title)) => c.execute(
-          "INSERT OR REPLACE INTO alert_firing (rule, subject, since, title) VALUES (?1, ?2, ?3, ?4)",
-          rusqlite::params![rule, subject, since, title],
-        ),
-        None => c.execute(
-          "DELETE FROM alert_firing WHERE rule = ?1 AND subject = ?2",
-          rusqlite::params![rule, subject],
-        ),
+      if changed {
+        match &fire {
+          Some((since, title)) => tx.execute(
+            "INSERT OR REPLACE INTO alert_firing (rule, subject, since, title) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![rule, subject, since, title],
+          ),
+          None => tx.execute(
+            "DELETE FROM alert_firing WHERE rule = ?1 AND subject = ?2",
+            rusqlite::params![rule, subject],
+          ),
+        }.map_err(db::sql_err)?;
+        policy::update_ack(&tx, &rule, &subject, fire.is_some(), now).map_err(db::sql_err)?;
       }
-      .map(|_| ())
-      .map_err(db::sql_err)
-    })
-    .await;
-  if let Err(e) = result {
-    tracing::warn!("记录正在触发的告警失败：{}", e.message);
+      let transitioned = match transition {
+        Some((key, ok)) => notify::transition(&tx, &key, ok)?,
+        None => false,
+      };
+      tx.commit().map_err(db::sql_err)?;
+      Ok(transitioned)
+    }
+  }).await?;
+  if changed {
+    with(|m| match fire {
+      Some(fire) => m.firing.insert(key, fire),
+      None => m.firing.remove(&key),
+    });
   }
+  Ok((changed, transitioned))
 }
 
-/// 记一条推送，顺手删掉 7 天前的。
-async fn record(
-  state: &AppState,
-  id: &str,
-  subject: Option<&str>,
-  event: &Event,
-  ok: bool,
-  skipped: Option<String>,
-) {
-  let (id, title) = (id.to_string(), event.title.clone());
-  let subject = subject.map(str::to_string);
-  let now = now_ms();
-  let result = state
-    .db
-    .call(move |c| {
-      c.execute(
-        "INSERT INTO alert_history (at, source, subject, title, ok, skipped) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        rusqlite::params![now, id, subject, title, ok, skipped],
-      )
-      .and_then(|_| {
-        c.execute(
-          "DELETE FROM alert_history WHERE at < ?1",
-          [now - KEEP_HISTORY_MS],
-        )
-      })
-      .map(|_| ())
-      .map_err(db::sql_err)
-    })
-    .await;
-  if let Err(e) = result {
-    tracing::warn!("记录推送失败：{}", e.message);
+async fn release(state: &AppState, cfg: &BTreeMap<String, Override>) {
+  if let Err(e) = suppression::release(state, cfg).await {
+    tracing::warn!("检查告警抑制失败：{}", e.message);
   }
 }
 
@@ -541,7 +565,8 @@ pub async fn retain_subjects(
   let Some(rule) = RULES.iter().find(|r| r.id == id) else {
     return;
   };
-  let _ = config(state).await;
+  let _guard = UPDATE.lock().await;
+  let cfg = config(state).await;
   let removed = with(|m| {
     let mut removed = std::collections::BTreeSet::new();
     m.series.retain(|(metric, subject), _| {
@@ -559,12 +584,55 @@ pub async fn retain_subjects(
     );
     removed
   });
-  for subject in removed {
-    set_firing(state, (id.to_string(), subject.clone()), None).await;
-    let key = format!("notify.state.{}", (rule.key)(&subject));
-    let _ =
-      state.db.call(move |c| db::set_setting(c, &key, None)).await;
+  if !removed.is_empty() {
+    for subject in removed {
+      forget_subject(state, id, &subject, &(rule.key)(&subject))
+        .await;
+    }
+    release(state, &cfg).await;
   }
+}
+
+async fn forget_subject(
+  state: &AppState,
+  id: &str,
+  subject: &str,
+  key: &str,
+) {
+  let now = now_ms();
+  if let Err(e) =
+    set_firing(state, (id.into(), subject.into()), None, now, None)
+      .await
+  {
+    tracing::warn!("清理正在触发的告警失败：{}", e.message);
+    return;
+  }
+  let key = format!("notify.state.{key}");
+  let id = id.to_string();
+  let subject = subject.to_string();
+  if let Err(e) = state
+    .db
+    .call(move |c| {
+      let tx = c.transaction().map_err(db::sql_err)?;
+      policy::forget_episode(&tx, &id, &subject, now)
+        .map_err(db::sql_err)?;
+      db::set_setting(&tx, &key, None)?;
+      tx.commit().map_err(db::sql_err)
+    })
+    .await
+  {
+    tracing::warn!("清理告警状态失败：{}", e.message);
+  }
+}
+
+pub(crate) fn issue_target(
+  rule: &str,
+  subject: &str,
+) -> Option<AlertTarget> {
+  firing_since(rule, subject).map(|_| AlertTarget {
+    rule: rule.into(),
+    subject: subject.into(),
+  })
 }
 
 pub fn firing_since(rule: &str, subject: &str) -> Option<i64> {
@@ -583,187 +651,6 @@ pub fn firing_subjects(rule: &str) -> Vec<(String, String)> {
       .map(|((_, s), (_, t))| (s.clone(), t.clone()))
       .collect()
   })
-}
-
-async fn view(state: &AppState) -> Result<AlertsView, ApiError> {
-  let include_logs = state
-    .db
-    .call(|c| db::setting(c, "alerts.include_logs"))
-    .await?
-    .is_some();
-  let cfg = config(state).await;
-  let now = now_ms();
-  let muted = |o: &Override| o.muted_until.filter(|t| *t > now);
-  let rules = RULES
-    .iter()
-    .map(|r| {
-      let o = cfg.get(r.id).cloned().unwrap_or_default();
-      let threshold = o.threshold.unwrap_or(r.threshold);
-      let for_n = o.for_n.unwrap_or(r.for_n);
-      let times = match r.mode {
-        Mode::Consecutive | Mode::ServiceLog | Mode::Heartbeat => {
-          format!("连续 {for_n} 次")
-        }
-        Mode::Window(w) => format!("最近 {w} 次里有 {for_n} 次"),
-      };
-      AlertRuleView {
-        id: r.id.into(),
-        name: r.name.into(),
-        metric: r.metric.into(),
-        condition: format!(
-          "{} {} {threshold} {times}（{}）",
-          r.metric,
-          r.op.text(),
-          r.every
-        ),
-        op: r.op.text().into(),
-        threshold,
-        for_n,
-        threshold_editable: r.threshold_editable,
-        enabled: o.enabled(),
-        muted_until: muted(&o),
-        customized: o.threshold.is_some()
-          || o.for_n.is_some()
-          || o.enabled == Some(false),
-      }
-    })
-    .collect();
-  let notices = NOTICES
-    .iter()
-    .map(|(id, name)| {
-      let o = cfg.get(*id).cloned().unwrap_or_default();
-      NoticeView {
-        id: (*id).into(),
-        name: (*name).into(),
-        enabled: o.enabled(),
-        muted_until: muted(&o),
-      }
-    })
-    .collect();
-  let history = history(state).await;
-  Ok(with(|m| AlertsView {
-    include_logs,
-    rules,
-    notices,
-    firing: m
-      .firing
-      .iter()
-      .map(|((rule, subject), (since, title))| FiringView {
-        rule: rule.clone(),
-        subject: subject.clone(),
-        title: title.clone(),
-        since: *since,
-      })
-      .collect(),
-    history,
-  }))
-}
-
-/// `GET /api/alerts`
-pub async fn list(
-  State(s): State<Arc<AppState>>,
-  auth: Auth,
-) -> ApiResult<AlertsView> {
-  auth.require(Perm::Read)?;
-  Ok(Json(view(&s).await?))
-}
-
-/// `PUT /api/alerts/{id}`：规则或事件通知的开关、阈值、连续次数、静默。
-pub async fn patch(
-  State(s): State<Arc<AppState>>,
-  auth: Auth,
-  Path(id): Path<String>,
-  Json(p): Json<AlertPatch>,
-) -> ApiResult<AlertsView> {
-  auth.require(Perm::Admin)?;
-  let rule = RULES.iter().find(|r| r.id == id);
-  if rule.is_none() && !NOTICES.iter().any(|(n, _)| *n == id) {
-    let ids: Vec<&str> = RULES
-      .iter()
-      .map(|r| r.id)
-      .chain(NOTICES.iter().map(|n| n.0))
-      .collect();
-    return Err(
-      ApiError::not_found(format!("没有告警 {id}"))
-        .with_hint(format!("可选：{}", ids.join("、")))
-        .into(),
-    );
-  }
-  if rule.is_none() && (p.threshold.is_some() || p.for_n.is_some()) {
-    return Err(
-      ApiError::invalid("事件通知没有阈值和连续次数，只能开关和静默")
-        .into(),
-    );
-  }
-  if let Some(r) = rule {
-    if p.threshold.is_some() && !r.threshold_editable {
-      return Err(
-        ApiError::invalid(format!(
-          "{} 的阈值固定，改连续次数",
-          r.name
-        ))
-        .into(),
-      );
-    }
-    if p.threshold.is_some_and(|t| !t.is_finite()) {
-      return Err(ApiError::invalid("阈值要是数字").into());
-    }
-    if p.for_n.is_some_and(|n| n == 0 || n as usize > KEEP) {
-      return Err(
-        ApiError::invalid(format!("连续次数在 1 到 {KEEP} 之间"))
-          .into(),
-      );
-    }
-  }
-  let mut cfg = config(&s).await;
-  let o = cfg.entry(id.clone()).or_default();
-  if p.reset {
-    *o = Override::default();
-  }
-  if let Some(v) = p.enabled {
-    o.enabled = (!v).then_some(false);
-  }
-  if let Some(t) = p.threshold {
-    o.threshold = rule.filter(|r| r.threshold != t).map(|_| t);
-  }
-  if let Some(n) = p.for_n {
-    o.for_n = rule.filter(|r| r.for_n != n).map(|_| n);
-  }
-  if let Some(m) = p.mute_minutes {
-    o.muted_until = (m > 0).then(|| now_ms() + i64::from(m) * 60_000);
-  }
-  cfg.retain(|_, o| {
-    o.enabled.is_some()
-      || o.threshold.is_some()
-      || o.for_n.is_some()
-      || o.muted_until.is_some()
-  });
-  let json = serde_json::to_string(&cfg)
-    .map_err(|e| ApiError::internal(e.to_string()))?;
-  s.db
-    .call(move |c| db::set_setting(c, CONFIG_KEY, Some(&json)))
-    .await?;
-  with(|m| m.config = Some(cfg));
-  Ok(Json(view(&s).await?))
-}
-
-/// `PUT /api/alerts/options`：触发的告警是否附带服务日志。
-pub async fn set_options(
-  State(s): State<Arc<AppState>>,
-  auth: Auth,
-  Json(o): Json<AlertOptions>,
-) -> ApiResult<AlertsView> {
-  auth.require(Perm::Admin)?;
-  s.db
-    .call(move |c| {
-      db::set_setting(
-        c,
-        "alerts.include_logs",
-        o.include_logs.then_some("1"),
-      )
-    })
-    .await?;
-  Ok(Json(view(&s).await?))
 }
 
 #[cfg(test)]

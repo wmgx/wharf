@@ -57,6 +57,8 @@ pub fn issues(servers: &[ServerView]) -> Vec<Issue> {
       return None;
     }
     Some(Issue {
+      alert: None,
+      ack: None,
       code: "docker_hub_quota_low".into(),
       level: IssueLevel::Warn,
       subject: Some(IssueSubject {

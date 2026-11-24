@@ -546,6 +546,8 @@ pub fn issues() -> Vec<Issue> {
     .iter()
     .filter(|(_, watch)| !watch.lagging.is_empty())
     .map(|(host, watch)| Issue {
+      alert: None,
+      ack: None,
       code: "dns_not_effective".into(),
       level: IssueLevel::Warn,
       subject: Some(IssueSubject {
