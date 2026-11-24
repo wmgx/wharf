@@ -146,6 +146,7 @@ fn bad(msg: impl Into<String>) -> ApiError {
 }
 
 /// 按 shell 的规则拆词：单引号、双引号、反斜杠续行。
+/// 单行输入框或聊天记录里换行被去掉后，续行符会变成 `\` 后跟空格，也按续行跳过。
 fn split_words(s: &str) -> Result<Vec<String>, ApiError> {
   let mut words = Vec::new();
   let mut cur = String::new();
@@ -153,14 +154,40 @@ fn split_words(s: &str) -> Result<Vec<String>, ApiError> {
   let mut chars = s.chars().peekable();
   while let Some(c) = chars.next() {
     match c {
-      '\\' => match chars.next() {
-        Some('\n') | Some('\r') => {}
-        Some(n) => {
-          cur.push(n);
-          has = true;
+      '\\' => {
+        let mut ahead = chars.clone();
+        let mut spaces = 0usize;
+        while let Some(&n) = ahead.peek() {
+          if n.is_whitespace() && !matches!(n, '\n' | '\r') {
+            ahead.next();
+            spaces += 1;
+          } else {
+            break;
+          }
         }
-        None => {}
-      },
+        match ahead.peek() {
+          // 续行：反斜杠后只有空白到换行或结尾（兼容行尾多余空格和 CRLF）。
+          Some('\n' | '\r') | None => {
+            for _ in 0..spaces {
+              chars.next();
+            }
+            if matches!(chars.next(), Some('\r'))
+              && chars.peek() == Some(&'\n')
+            {
+              chars.next();
+            }
+          }
+          // 换行被去掉后的续行：独立的 `\` 后跟空格，或 `\` 后跟多个空格；
+          // 单个 `\ ` 紧接字符（如 `-e A=foo\ bar`）仍保留为空格。
+          Some(_) if spaces > 0 && (!has || spaces >= 2) => {}
+          Some(_) => {
+            if let Some(n) = chars.next() {
+              cur.push(n);
+              has = true;
+            }
+          }
+        }
+      }
       '\'' => {
         has = true;
         loop {
@@ -179,6 +206,11 @@ fn split_words(s: &str) -> Result<Vec<String>, ApiError> {
             Some('\\') => match chars.next() {
               Some(n @ ('"' | '\\' | '$' | '`')) => cur.push(n),
               Some('\n') => {}
+              Some('\r') => {
+                if chars.peek() == Some(&'\n') {
+                  chars.next();
+                }
+              }
               Some(n) => {
                 cur.push('\\');
                 cur.push(n);
@@ -274,7 +306,7 @@ fn parse(words: &[String]) -> Result<Parsed, ApiError> {
     };
     flag_value(&mut p, &flag, &value)?;
   }
-  if p.image.is_empty() {
+  if p.image.trim().is_empty() {
     return Err(bad("命令里没有镜像名"));
   }
   Ok(p)
@@ -684,6 +716,31 @@ mod tests {
     );
     let w = d.warnings.join("\n");
     assert!(w.contains("--env-file .env") && w.contains("--weird"));
+  }
+
+  #[test]
+  fn handles_flattened_and_crlf_continuations() {
+    let d = from_docker_run(
+      "docker run -d \\   --restart always \\   --name anisette-v3 \\   -e HOME=/home/Alcoholic -e NOTE=a\\ b \\  \r\n  -p 6969:6969 \\   -v anisette-v3_data:/home/Alcoholic/.config/anisette-v3/lib/ \\   dadoum/anisette-v3-server",
+      None,
+    )
+    .unwrap();
+    assert_eq!(d.name, "anisette-v3");
+    assert_eq!(
+      d.source,
+      Source::Image("dadoum/anisette-v3-server".into())
+    );
+    assert_eq!(d.ports.len(), 1);
+    assert_eq!(d.ports[0].container, Some(6969));
+    assert_eq!(d.ports[0].host, Some(6969));
+    assert_eq!(d.env["HOME"], "/home/Alcoholic");
+    assert_eq!(d.env["NOTE"], "a b");
+    assert_eq!(d.volumes.len(), 1);
+    assert_eq!(d.volumes[0].name, "anisette-v3-data");
+    assert_eq!(
+      d.volumes[0].target,
+      "/home/Alcoholic/.config/anisette-v3/lib/"
+    );
   }
 
   #[test]

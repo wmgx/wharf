@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { api } from "@/api";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import type { ServiceDraft } from "@/types";
 
 export type Imported = { kind: "run"; draft: ServiceDraft } | { kind: "url"; compose: string };
@@ -65,12 +65,19 @@ export function ImportSource({ name, onImported }: { name?: string; onImported: 
 
   return (
     <div className="grid gap-2">
-      <div className="flex gap-2">
-        <Input
+      <div className="flex items-start gap-2">
+        <Textarea
+          rows={1}
+          className="min-h-9 max-h-40 resize-none"
           placeholder="docker run … 或 compose 文件网址"
           value={text}
           onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && run()}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+              e.preventDefault();
+              run();
+            }
+          }}
         />
         <Button variant="outline" disabled={!text.trim() || busy} onClick={run}>
           {busy ? "识别中" : "识别"}
