@@ -493,6 +493,7 @@ fn problems_text(issues: &[Issue]) -> Vec<String> {
 pub async fn status(
   state: &AppState,
 ) -> Result<Status, wharf_api_types::ApiError> {
+  crate::rules::ensure_loaded(state).await;
   let snap = snapshot::load(&state.db).await?;
   let net = snap.net(&snap.world);
   let live = cached_live(state, &snap.world).await;
@@ -514,8 +515,12 @@ pub async fn status(
         }),
         title: format!("服务器 {} 还没有完成 agent 加入", s.name),
         hint: None,
+        ack: None,
+        alert: None,
       });
     } else if !s.online {
+      let (alert, ack) =
+        crate::rules::issue_alert("server_offline", &s.name);
       issues.push(Issue {
         code: "server_offline".into(),
         level: IssueLevel::Fault,
@@ -525,6 +530,8 @@ pub async fn status(
         }),
         title: format!("服务器 {} 离线", s.name),
         hint: None,
+        ack,
+        alert,
       });
     }
     let disks = s
@@ -562,6 +569,8 @@ pub async fn status(
             d.free as f64 / GB
           ),
           hint: Some(hint),
+          ack: None,
+          alert: None,
         });
       }
     }
@@ -595,6 +604,8 @@ pub async fn status(
         }),
         title: format!("服务 {}：{}", s.name, st.summary),
         hint: None,
+        ack: None,
+        alert: None,
       });
     }
   }
@@ -612,6 +623,8 @@ pub async fn status(
         }),
         title: format!("{kind} {name} 状态是 {}", live.state),
         hint: None,
+        ack: None,
+        alert: None,
       });
     } else if live.in_sync == Some(false) {
       issues.push(Issue {
@@ -623,6 +636,8 @@ pub async fn status(
         }),
         title: format!("{kind} {name} 和配置不一致"),
         hint: Some("，执行 wharf plan 查看".into()),
+        ack: None,
+        alert: None,
       });
     }
   }
@@ -643,6 +658,8 @@ pub async fn status(
         }),
         title: format!("边缘应用 {}：{d}", app.name),
         hint: None,
+        ack: None,
+        alert: None,
       });
     } else if let Some(EdgeLive { error: Some(e), .. }) = &app.live {
       issues.push(Issue {
@@ -654,6 +671,8 @@ pub async fn status(
         }),
         title: format!("边缘应用 {} 同步失败：{e}", app.name),
         hint: None,
+        ack: None,
+        alert: None,
       });
     }
   }
@@ -695,6 +714,8 @@ pub async fn status(
           }),
           title: format!("{name} 有新版本"),
           hint: None,
+          ack: None,
+          alert: None,
         });
       }
       if let Some(t) = check.tags.first()
@@ -721,6 +742,8 @@ pub async fn status(
             "换标签要改配置：wharf service retag {name} {} {}",
             t.image, t.tag
           )),
+          ack: None,
+          alert: None,
         });
       }
     }
@@ -744,6 +767,8 @@ pub async fn status(
           if items.len() > 3 { " 等" } else { "" }
         ),
         hint: None,
+        ack: None,
+        alert: None,
       });
     }
   }
@@ -753,10 +778,13 @@ pub async fn status(
     Utc::now().timestamp_millis(),
   ));
   let problems = problems_text(&issues);
-  issues.sort_by_key(|i| match i.level {
-    IssueLevel::Fault => 0,
-    IssueLevel::Warn => 1,
-    IssueLevel::Info => 2,
+  issues.sort_by_key(|i| {
+    let rank = match i.level {
+      IssueLevel::Fault => 0,
+      IssueLevel::Warn => 1,
+      IssueLevel::Info => 2,
+    };
+    (rank, i.ack.is_some())
   });
   let mut edge_unmanaged: Vec<EdgeProjectView> =
     snap.edge_accounts.values().flatten().cloned().collect();
@@ -875,6 +903,8 @@ mod tests {
         subject: None,
         title: "网关 s1 和配置不一致".into(),
         hint: Some("，执行 wharf plan 查看".into()),
+        ack: None,
+        alert: None,
       },
       Issue {
         code: "update_available".into(),
@@ -882,6 +912,8 @@ mod tests {
         subject: None,
         title: "s1 有新版本".into(),
         hint: None,
+        ack: None,
+        alert: None,
       },
     ];
     assert_eq!(

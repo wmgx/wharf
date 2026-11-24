@@ -449,6 +449,8 @@ pub async fn issues(
         }),
         title,
         hint: Some("确认没问题就在服务器详情里点“我知道”".into()),
+        ack: None,
+        alert: None,
       });
     }
   }

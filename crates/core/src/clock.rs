@@ -48,15 +48,20 @@ pub fn offset_of(server: &str) -> Option<i64> {
 pub fn issues() -> Vec<Issue> {
   rules::firing_subjects("clock_skew")
     .into_iter()
-    .map(|(name, title)| Issue {
-      code: "clock_skew".into(),
-      level: IssueLevel::Warn,
-      subject: Some(IssueSubject {
-        kind: "server".into(),
-        name,
-      }),
-      title,
-      hint: None,
+    .map(|(name, title)| {
+      let (alert, ack) = rules::issue_alert("clock_skew", &name);
+      Issue {
+        code: "clock_skew".into(),
+        level: IssueLevel::Warn,
+        subject: Some(IssueSubject {
+          kind: "server".into(),
+          name,
+        }),
+        title,
+        hint: None,
+        ack,
+        alert,
+      }
     })
     .collect()
 }

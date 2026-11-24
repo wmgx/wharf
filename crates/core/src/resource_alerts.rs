@@ -10,6 +10,7 @@ use wharf_api_types::{
   agent::Metrics,
   resources::percent,
   spec::{ServerSettings, ServiceSpec},
+  view::AlertLevel,
 };
 
 use super::{Ctx, Mode, Op, Rule, ev, observe_at};
@@ -50,6 +51,7 @@ const REPORT_RULE: Rule = Rule {
   mode: Mode::Consecutive,
   recover: None,
   every: "每分钟一次",
+  default_level: AlertLevel::Urgent,
   key: |_| String::new(),
   fire: |_| unreachable!(),
   ok: |_| unreachable!(),
@@ -108,6 +110,7 @@ pub(super) const MEM_FORECAST: Rule = Rule {
   mode: Mode::Consecutive,
   recover: Some(5.0),
   every: "每小时一次，按近 3 天趋势",
+  default_level: AlertLevel::Digest,
   key: |s| format!("mem.forecast.{s}"),
   fire: |c| {
     ev(

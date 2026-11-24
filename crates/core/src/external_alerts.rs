@@ -1,3 +1,5 @@
+use wharf_api_types::view::AlertLevel;
+
 use super::{Mode, Op, Rule, ev};
 
 const BINARY: Rule = Rule {
@@ -11,6 +13,7 @@ const BINARY: Rule = Rule {
   mode: Mode::Consecutive,
   recover: None,
   every: "每 5 分钟一次",
+  default_level: AlertLevel::Digest,
   key: |_| unreachable!(),
   fire: |_| unreachable!(),
   ok: |_| unreachable!(),
@@ -62,6 +65,7 @@ pub(super) const VENDOR: Rule = Rule {
   name: "厂商账号不可用",
   metric: "vendor.invalid",
   every: "每天一次",
+  default_level: AlertLevel::Urgent,
   key: |s| format!("vendor.invalid.{s}"),
   fire: |c| {
     ev(format!("{} 厂商账号不可用", c.subject), c.detail.into())
@@ -76,8 +80,9 @@ pub(crate) async fn clear_incident(
   state: &crate::state::AppState,
   name: &str,
 ) {
-  super::config(state).await;
+  super::ensure_loaded(state).await;
   super::set_firing(state, (INCIDENT.id.into(), name.into()), None)
     .await;
+  super::ack::delete_key(state, INCIDENT.id, name).await;
   crate::notify::transition(state, &(INCIDENT.key)(name), true).await;
 }

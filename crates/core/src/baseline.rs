@@ -65,6 +65,8 @@ pub fn issues() -> Vec<Issue> {
           hint: Some(format!(
             "（wharf server baseline {s} --apply 纠正）"
           )),
+          ack: None,
+          alert: None,
         })
         .collect()
     })

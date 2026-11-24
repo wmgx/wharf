@@ -1,3 +1,5 @@
+use wharf_api_types::view::AlertLevel;
+
 use super::{Mode, Op, Rule, ev, split_unit};
 
 pub(super) const LOG: Rule = Rule {
@@ -11,6 +13,7 @@ pub(super) const LOG: Rule = Rule {
   mode: Mode::ServiceLog,
   recover: None,
   every: "窗口内次数减去配置的最少次数",
+  default_level: AlertLevel::Urgent,
   key: |s| format!("log_keyword.{s}"),
   fire: |c| {
     ev(
@@ -40,6 +43,7 @@ pub(super) const PORT: Rule = Rule {
   mode: Mode::Consecutive,
   recover: None,
   every: "每分钟一次",
+  default_level: AlertLevel::Urgent,
   key: |s| format!("port_down.{s}"),
   fire: |c| {
     ev(
@@ -74,6 +78,7 @@ pub(super) const HEARTBEAT: Rule = Rule {
   mode: Mode::Heartbeat,
   recover: None,
   every: "超过服务心跳间隔及宽限的分钟数",
+  default_level: AlertLevel::Urgent,
   key: |s| format!("heartbeat_late.{s}"),
   fire: |c| {
     ev(format!("服务 {} 的心跳异常", c.subject), c.detail.into())

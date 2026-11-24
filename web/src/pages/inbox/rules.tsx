@@ -1,5 +1,5 @@
 import { Panel, Tip } from "@/components/kit";
-import { BellOffIcon, RotateCcwIcon } from "lucide-react";
+import { BellOffIcon, ChevronDownIcon, RotateCcwIcon, Trash2Icon } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { api, usePoll } from "@/api";
@@ -9,7 +9,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import type { AlertPatch, AlertsView } from "@/types";
+import type { AlertLevel, AlertPatch, AlertsView } from "@/types";
 
 const MUTES: [number, string][] = [
   [60, "1 小时"],
@@ -17,7 +17,14 @@ const MUTES: [number, string][] = [
   [7 * 24 * 60, "7 天"],
 ];
 
+const LEVELS: [AlertLevel, string][] = [
+  ["urgent", "立即"],
+  ["digest", "每日汇总"],
+];
+
 const clock = (ms: number) => new Date(ms).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+
+const fmtTarget = (rule: string, subject?: string | null) => (subject ? `${rule}:${subject}` : rule);
 
 export function Rules() {
   const { data, refresh } = usePoll<AlertsView>("/api/alerts", 30000);
@@ -42,7 +49,18 @@ export function Rules() {
     }
   };
 
+  const removeSuppression = async (id: number) => {
+    try {
+      setView(await api.del<AlertsView>(`/api/alerts/suppress/${id}`));
+      refresh();
+    } catch (e) {
+      toast.error("删除失败", { description: (e as Error).message });
+    }
+  };
+
   if (!v) return null;
+  const builtins = v.builtin_suppressions ?? [];
+  const custom = v.suppressions ?? [];
   return (
     <>
       <SectionTitle>告警规则</SectionTitle>
@@ -54,6 +72,7 @@ export function Rules() {
               <TableHead>规则</TableHead>
               <TableHead className="w-28">阈值</TableHead>
               <TableHead className="w-24">连续次数</TableHead>
+              <TableHead className="w-28">级别</TableHead>
               <TableHead className="w-40" />
             </TableRow>
           </TableHeader>
@@ -79,6 +98,9 @@ export function Rules() {
                 <TableCell>
                   <NumberInput value={r.for_n} integer onSave={(n) => patch(r.id, { for_n: n })} />
                 </TableCell>
+                <TableCell>
+                  <LevelSelect level={r.level} onChange={(level) => patch(r.id, { level })} />
+                </TableCell>
                 <TableCell className="text-right">
                   <Controls muted={r.muted_until} customized={r.customized} onPatch={(p) => patch(r.id, p)} />
                 </TableCell>
@@ -94,12 +116,42 @@ export function Rules() {
           <div key={n.id} className="flex items-center gap-2.5 text-sm">
             <Checkbox checked={n.enabled} aria-label={`开关 ${n.name}`} onCheckedChange={(c) => patch(n.id, { enabled: c === true })} />
             <span>{n.name}</span>
-            <span className="ml-auto">
-              <Controls muted={n.muted_until} onPatch={(p) => patch(n.id, p)} />
+            <span className="ml-auto inline-flex items-center gap-1">
+              <LevelSelect level={n.level} onChange={(level) => patch(n.id, { level })} />
+              <Controls muted={n.muted_until} customized={n.customized} onPatch={(p) => patch(n.id, p)} />
             </span>
           </div>
         ))}
       </Panel>
+
+      {(builtins.length > 0 || custom.length > 0) && (
+        <>
+          <SectionTitle>告警抑制</SectionTitle>
+          <Panel className="grid gap-2 p-4">
+            {builtins.map((s) => (
+              <div key={s.id} className="flex items-center gap-2.5 text-sm">
+                <Checkbox checked={s.enabled} aria-label={`开关 ${s.name}`} onCheckedChange={(c) => patch(s.id, { enabled: c === true })} />
+                <span>{s.name}</span>
+              </div>
+            ))}
+            {custom.map((s) => (
+              <div key={s.id} className="flex items-center gap-2.5 text-sm">
+                <span className="font-mono text-xs text-muted-foreground">#{s.id}</span>
+                <span className="font-mono text-xs">
+                  {fmtTarget(s.source_rule, s.source_subject)} → 忽略 {fmtTarget(s.target_rule, s.target_subject)}
+                </span>
+                <span className="ml-auto">
+                  <Tip text="删除">
+                    <Button variant="ghost" size="icon-xs" aria-label={`删除抑制 #${s.id}`} onClick={() => removeSuppression(s.id)}>
+                      <Trash2Icon />
+                    </Button>
+                  </Tip>
+                </span>
+              </div>
+            ))}
+          </Panel>
+        </>
+      )}
 
       <label className="mt-6 flex w-fit cursor-pointer items-center gap-2.5 text-sm">
         <Checkbox checked={!!v.include_logs} onCheckedChange={(c) => setOptions(c === true)} />
@@ -109,7 +161,28 @@ export function Rules() {
   );
 }
 
-function Controls({ muted, customized, onPatch }: { muted?: number; customized?: boolean; onPatch: (p: AlertPatch) => void }) {
+function LevelSelect({ level, onChange }: { level: AlertLevel; onChange: (level: AlertLevel) => void }) {
+  const label = LEVELS.find(([v]) => v === level)?.[1] ?? "立即";
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="ghost" size="sm">
+          {label}
+          <ChevronDownIcon className="size-3.5 opacity-60" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        {LEVELS.map(([val, text]) => (
+          <DropdownMenuItem key={val} onSelect={() => val !== level && onChange(val)}>
+            {text}
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+function Controls({ muted, customized, onPatch }: { muted?: number | null; customized?: boolean; onPatch: (p: AlertPatch) => void }) {
   return (
     <span className="inline-flex items-center gap-1">
       {muted ? (

@@ -28,28 +28,39 @@ pub fn issues() -> Vec<Issue> {
   let Ok(m) = LAST.lock() else { return vec![] };
   m.iter()
     .filter(|(_, p)| p.fails >= FAILS)
-    .map(|(h, p)| Issue {
-      code: "route_down".into(),
-      level: IssueLevel::Fault,
-      subject: Some(IssueSubject {
-        kind: "route".into(),
-        name: h.clone(),
-      }),
-      title: format!("域名 {h} 打不开：{}", p.detail),
-      hint: None,
+    .map(|(h, p)| {
+      let (alert, ack) = crate::rules::issue_alert("domain_down", h);
+      Issue {
+        code: "route_down".into(),
+        level: IssueLevel::Fault,
+        subject: Some(IssueSubject {
+          kind: "route".into(),
+          name: h.clone(),
+        }),
+        title: format!("域名 {h} 打不开：{}", p.detail),
+        hint: None,
+        ack,
+        alert,
+      }
     })
     .chain(m.iter().filter_map(|(h, p)| {
       p.cert_days
         .filter(|d| *d < crate::cert::WARN_DAYS)
-        .map(|d| Issue {
-          code: "cert_expiring".into(),
-          level: IssueLevel::Warn,
-          subject: Some(IssueSubject {
-            kind: "route".into(),
-            name: h.clone(),
-          }),
-          title: format!("域名 {h} 的证书 {d} 天后到期"),
-          hint: None,
+        .map(|d| {
+          let (alert, ack) =
+            crate::rules::issue_alert("cert_expiring", h);
+          Issue {
+            code: "cert_expiring".into(),
+            level: IssueLevel::Warn,
+            subject: Some(IssueSubject {
+              kind: "route".into(),
+              name: h.clone(),
+            }),
+            title: format!("域名 {h} 的证书 {d} 天后到期"),
+            hint: None,
+            ack,
+            alert,
+          }
         })
     }))
     .collect()

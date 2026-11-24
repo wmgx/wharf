@@ -730,6 +730,12 @@ export type EgressSpec = {
 };
 export type EgressPreset = { name: string; label: string; domains: string[] };
 
+export type AlertLevel = Gen.AlertLevel;
+export type AlertAckView = Gen.AlertAckView;
+export type AlertTarget = Gen.AlertTarget;
+export type BuiltinSuppressionView = Gen.BuiltinSuppressionView;
+export type AlertSuppressionView = Gen.AlertSuppressionView;
+
 export interface AlertRuleView {
   id: string;
   name: string;
@@ -740,7 +746,8 @@ export interface AlertRuleView {
   for_n: number;
   threshold_editable: boolean;
   enabled: boolean;
-  muted_until?: number;
+  level: AlertLevel;
+  muted_until?: number | null;
   customized: boolean;
 }
 
@@ -748,21 +755,26 @@ export interface NoticeView {
   id: string;
   name: string;
   enabled: boolean;
-  muted_until?: number;
+  level: AlertLevel;
+  muted_until?: number | null;
+  customized?: boolean;
 }
 
 export interface AlertsView {
   include_logs?: boolean;
   rules: AlertRuleView[];
   notices: NoticeView[];
-  firing: { rule: string; subject: string; title: string; since: number }[];
-  history: { at: number; source: string; title: string; ok: boolean; skipped?: string }[];
+  firing: { rule: string; subject: string; title: string; since: number; ack?: AlertAckView | null }[];
+  history: { at: number; source: string; title: string; ok: boolean; skipped?: string | null }[];
+  builtin_suppressions?: BuiltinSuppressionView[];
+  suppressions?: AlertSuppressionView[];
 }
 
 export interface AlertPatch {
   enabled?: boolean;
   threshold?: number;
   for_n?: number;
+  level?: AlertLevel;
   mute_minutes?: number;
   reset?: boolean;
 }

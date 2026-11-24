@@ -26,6 +26,8 @@ pub fn issues(world: &World, now_ms: i64) -> Vec<Issue> {
       }),
       title: format!("临时分享 {host} 已失效"),
       hint: Some(format!("wharf route rm {host} --apply")),
+      ack: None,
+      alert: None,
     })
     .collect()
 }

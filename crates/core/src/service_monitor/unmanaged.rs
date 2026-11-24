@@ -149,6 +149,8 @@ impl Seen {
       hint: Some(format!(
         "wharf service discover {server}；wharf service unmanaged-remove {server} --{kind} {name}；wharf service unmanaged-ignore {server} --{kind} {name}"
       )),
+      ack: None,
+      alert: None,
     }
   }
 }

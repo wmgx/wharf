@@ -410,6 +410,21 @@ pub fn router(state: Arc<AppState>) -> Router {
     )
     .route("/api/alerts", get(crate::rules::list))
     .route("/api/alerts/options", put(crate::rules::set_options))
+    .route("/api/alerts/ack", post(crate::rules::ack_api))
+    .route("/api/alerts/unack", post(crate::rules::unack_api))
+    .route(
+      "/api/alerts/digest",
+      get(crate::rules::digest_preview_api),
+    )
+    .route(
+      "/api/alerts/suppress",
+      get(crate::rules::suppress_list_api)
+        .post(crate::rules::suppress_add_api),
+    )
+    .route(
+      "/api/alerts/suppress/{id}",
+      axum::routing::delete(crate::rules::suppress_rm_api),
+    )
     .route(
       "/api/alerts/{id}",
       axum::routing::put(crate::rules::patch),
