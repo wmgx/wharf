@@ -14,7 +14,8 @@ use wharf_api_types::{
 
 use super::{
   CONFIG_KEY, KEEP, Mode, NOTICES, Override, RULES, SuppressionRule,
-  ack, config, default_level, store, suppress, with,
+  ack, config, custom, default_level, ensure_loaded,
+  service_overrides, store, suppress, with,
 };
 use crate::{
   api::ApiResult,
@@ -122,6 +123,10 @@ pub(super) async fn view(
       .iter()
       .map(SuppressionRule::to_view)
       .collect();
+    let service_overrides =
+      service_overrides::views(&m.service_overrides, now);
+    let custom_rules =
+      m.custom_rules.values().map(|r| r.to_view(now)).collect();
     AlertsView {
       include_logs,
       rules,
@@ -130,6 +135,8 @@ pub(super) async fn view(
       history,
       builtin_suppressions,
       suppressions,
+      service_overrides,
+      custom_rules,
     }
   }))
 }
@@ -155,6 +162,11 @@ pub async fn patch(
   let notice = NOTICES.iter().find(|(n, _, _)| *n == id);
   let builtin_sup = suppress::is_builtin(&id);
   if rule.is_none() && notice.is_none() && !builtin_sup {
+    ensure_loaded(&s).await;
+    if with(|m| m.custom_rules.contains_key(&id)) {
+      custom::patch_custom(&s, &id, p, now_ms()).await?;
+      return Ok(Json(view(&s).await?));
+    }
     let ids: Vec<&str> = RULES
       .iter()
       .map(|r| r.id)

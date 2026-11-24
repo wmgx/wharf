@@ -17,8 +17,8 @@ use wharf_api_types::{
 
 use super::{
   Delivery, FiringEntry, NOTICES, Override, PushArgs, RULES,
-  SuppressionRule, config, ensure_loaded, push_with_world,
-  set_firing_suppressed, split_unit, view, with,
+  SuppressionRule, config, custom, ensure_loaded, push_with_world,
+  service_overrides, set_firing_suppressed, split_unit, view, with,
 };
 use crate::{
   api::ApiResult,
@@ -47,7 +47,15 @@ pub(super) fn related_servers(
   rule: &str,
   subject: &str,
   world: &World,
+  custom_rules: &BTreeMap<String, custom::CustomRule>,
 ) -> Vec<String> {
+  if custom_rules.contains_key(rule) {
+    return world
+      .services
+      .get(subject)
+      .map(|s| vec![s.spec.server.clone()])
+      .unwrap_or_default();
+  }
   match rule {
     "server_offline" => vec![],
     "host_cpu_high"
@@ -118,6 +126,7 @@ pub(super) fn related_servers(
 }
 
 /// 纯函数判断是否命中内置或自定义抑制，返回抑制原因（上游告警的标题）。
+#[allow(clippy::too_many_arguments)]
 pub(super) fn match_reason(
   id: &str,
   subject: Option<&str>,
@@ -126,11 +135,12 @@ pub(super) fn match_reason(
   unavailable_gateways: &BTreeSet<String>,
   cfg: &BTreeMap<String, Override>,
   custom: &[SuppressionRule],
+  custom_rules: &BTreeMap<String, custom::CustomRule>,
 ) -> Option<String> {
   let offline_on =
     cfg.get(BUILTIN_OFFLINE).is_none_or(Override::enabled);
   if offline_on && let (Some(subj), Some(world)) = (subject, world) {
-    for srv in related_servers(id, subj, world) {
+    for srv in related_servers(id, subj, world, custom_rules) {
       if let Some(entry) =
         firing.get(&(String::from("server_offline"), srv))
       {
@@ -218,6 +228,7 @@ pub(super) async fn check(
       &m.unavailable_gateways,
       cfg,
       &m.suppressions,
+      &m.custom_rules,
     )
   })
 }
@@ -244,6 +255,8 @@ pub(super) async fn flush_unsuppressed(state: &AppState, now: i64) {
     return;
   }
   let cfg = config(state).await;
+  let (svc_overrides, custom_rules) =
+    with(|m| (m.service_overrides.clone(), m.custom_rules.clone()));
   let world = load_world(state).await;
   for (rule_id, subject, event) in pending {
     if check(state, &rule_id, Some(&subject), &cfg, world.as_ref())
@@ -258,7 +271,13 @@ pub(super) async fn flush_unsuppressed(state: &AppState, now: i64) {
       false,
     )
     .await;
-    let o = cfg.get(&rule_id).cloned().unwrap_or_default();
+    let o = service_overrides::override_for_firing(
+      &cfg,
+      &svc_overrides,
+      &custom_rules,
+      &rule_id,
+      &subject,
+    );
     push_with_world(
       state,
       PushArgs {
@@ -315,19 +334,22 @@ pub(super) async fn add_rule(
   now: i64,
 ) -> Result<AlertSuppressionView, ApiError> {
   ensure_loaded(state).await;
-  if !RULES.iter().any(|r| r.id == req.source_rule) {
+  let source_valid = RULES.iter().any(|r| r.id == req.source_rule)
+    || with(|m| m.custom_rules.contains_key(&req.source_rule));
+  if !source_valid {
     return Err(
       ApiError::not_found(format!(
         "没有告警规则 {}",
         req.source_rule
       ))
       .with_hint(
-        "抑制来源必须是内置告警规则，用 wharf alert list 查看",
+        "抑制来源必须是内置或自定义告警规则，用 wharf alert list 查看",
       ),
     );
   }
   let target_valid = RULES.iter().any(|r| r.id == req.target_rule)
-    || NOTICES.iter().any(|(n, _, _)| *n == req.target_rule);
+    || NOTICES.iter().any(|(n, _, _)| *n == req.target_rule)
+    || with(|m| m.custom_rules.contains_key(&req.target_rule));
   if !target_valid {
     return Err(
       ApiError::not_found(format!("没有告警 {}", req.target_rule))

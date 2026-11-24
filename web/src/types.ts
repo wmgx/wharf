@@ -735,6 +735,8 @@ export type AlertAckView = Gen.AlertAckView;
 export type AlertTarget = Gen.AlertTarget;
 export type BuiltinSuppressionView = Gen.BuiltinSuppressionView;
 export type AlertSuppressionView = Gen.AlertSuppressionView;
+export type ServiceAlertOverrideView = Gen.ServiceAlertOverrideView;
+export type CustomAlertRuleView = Gen.CustomAlertRuleView;
 
 export interface AlertRuleView {
   id: string;
@@ -768,6 +770,8 @@ export interface AlertsView {
   history: { at: number; source: string; title: string; ok: boolean; skipped?: string | null }[];
   builtin_suppressions?: BuiltinSuppressionView[];
   suppressions?: AlertSuppressionView[];
+  service_overrides?: ServiceAlertOverrideView[];
+  custom_rules?: CustomAlertRuleView[];
 }
 
 export interface AlertPatch {

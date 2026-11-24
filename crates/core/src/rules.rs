@@ -7,7 +7,7 @@
 //! 规则内置，页面上能改开关、阈值、连续次数、级别、静默，改动存在设置 `alerts.config`。
 //! 状态沿用 `notify.state.<key>`（跨重启不重复推）；正在触发的存在 `alert_firing`，
 //! 确认记录存在 `alert_acks`，待汇总条目存在 `alert_digest`，自定义抑制存在 `alert_suppressions`，
-//! 推送记录存在 `alert_history`（保留 7 天）；指标序列只在内存里。
+//! 推送记录存在 `alert_history`（保留 14 天）；指标序列只在内存里。
 
 use std::{
   collections::{BTreeMap, BTreeSet, VecDeque},
@@ -35,10 +35,14 @@ mod ack;
 mod api;
 #[path = "rules/catalog.rs"]
 mod catalog;
+#[path = "rules/custom.rs"]
+mod custom;
 #[path = "rules/digest.rs"]
 mod digest;
 #[path = "rules/service_checks.rs"]
 mod service_checks;
+#[path = "rules/service_overrides.rs"]
+mod service_overrides;
 #[path = "rules/store.rs"]
 mod store;
 #[path = "rules/suppress.rs"]
@@ -53,7 +57,15 @@ use store::{
 
 pub use ack::{ack_api, unack_api};
 pub use api::{list, patch, set_options};
+pub(crate) use custom::{
+  MIGRATION as CUSTOM_MIGRATION, delete_service_rows,
+};
+pub use custom::{
+  add_api as custom_add_api, issues as custom_issues,
+  on_service_deleted, rm_api as custom_rm_api,
+};
 pub use digest::{preview_api as digest_preview_api, spawn};
+pub use service_overrides::patch_service;
 pub(crate) use store::MIGRATION;
 pub use store::ensure_loaded;
 pub use suppress::{
@@ -67,7 +79,7 @@ const KEEP: usize = 60;
 /// 这么久没有新点的序列（服务器删了、服务停了监控）就丢掉。
 const STALE_MS: i64 = 2 * 60 * 60 * 1000;
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum Op {
   Lt,
   Gt,
@@ -158,17 +170,30 @@ const NOTICES: &[(&str, &str, AlertLevel)] = &[
 
 fn is_rule(id: &str) -> bool {
   RULES.iter().any(|r| r.id == id)
+    || with(|m| m.custom_rules.contains_key(id))
 }
 
 pub(crate) fn default_level(id: &str) -> AlertLevel {
   if let Some(r) = RULES.iter().find(|r| r.id == id) {
     return r.default_level;
   }
+  if let Some(lvl) = with(|m| m.custom_rules.get(id).map(|r| r.level))
+  {
+    return lvl;
+  }
   if let Some((_, _, lvl)) = NOTICES.iter().find(|(n, _, _)| *n == id)
   {
     return *lvl;
   }
   AlertLevel::Urgent
+}
+
+pub(crate) fn rule_display_name(id: &str) -> String {
+  display_name(id).to_string()
+}
+
+pub(crate) fn is_custom_rule(id: &str) -> bool {
+  with(|m| m.custom_rules.contains_key(id))
 }
 
 fn display_name(id: &str) -> &str {
@@ -225,6 +250,10 @@ struct Memory {
   suppressions: Vec<SuppressionRule>,
   /// 当前容器不在运行的网关名，用于内置网关抑制。
   unavailable_gateways: BTreeSet<String>,
+  /// （规则，服务）→ 按服务覆盖，和表 `alert_service_overrides` 一致。
+  service_overrides: BTreeMap<(String, String), Override>,
+  /// 自定义规则名称 → 规则定义，和表 `alert_custom_rules` 一致。
+  custom_rules: BTreeMap<String, custom::CustomRule>,
 }
 
 static MEMORY: Mutex<Option<Memory>> = Mutex::new(None);
@@ -245,6 +274,34 @@ enum Verdict {
   Hold,
 }
 
+fn judge_consecutive(
+  op: Op,
+  threshold: f64,
+  for_n: u32,
+  recover: Option<f64>,
+  strict_report: bool,
+  points: &VecDeque<f64>,
+) -> Verdict {
+  let Some(&last) = points.back() else {
+    return Verdict::Hold;
+  };
+  let bad = |v: f64| op.hit(v, threshold);
+  let n = (for_n.max(1) as usize).min(KEEP);
+  if points.len() >= n && points.iter().rev().take(n).all(|v| bad(*v))
+  {
+    return Verdict::Fire;
+  }
+  let recovered = match recover {
+    Some(r) => !op.hit(last, r) && last != r,
+    None => !bad(last) && (!strict_report || last != threshold),
+  };
+  if recovered {
+    Verdict::Recover
+  } else {
+    Verdict::Hold
+  }
+}
+
 fn judge(
   rule: &Rule,
   threshold: f64,
@@ -257,26 +314,14 @@ fn judge(
   let bad = |v: f64| rule.op.hit(v, threshold);
   let n = (for_n.max(1) as usize).min(KEEP);
   match rule.mode {
-    Mode::Consecutive => {
-      if points.len() >= n
-        && points.iter().rev().take(n).all(|v| bad(*v))
-      {
-        return Verdict::Fire;
-      }
-      let recovered = match rule.recover {
-        Some(r) => !rule.op.hit(last, r) && last != r,
-        None => {
-          !bad(last)
-            && (!resources::is_report_metric(rule.metric)
-              || last < threshold)
-        }
-      };
-      if recovered {
-        Verdict::Recover
-      } else {
-        Verdict::Hold
-      }
-    }
+    Mode::Consecutive => judge_consecutive(
+      rule.op,
+      threshold,
+      for_n,
+      rule.recover,
+      resources::is_report_metric(rule.metric),
+      points,
+    ),
     Mode::ServiceLog if last == -f64::MAX => Verdict::Recover,
     Mode::ServiceLog
       if points.len() >= n
@@ -331,6 +376,16 @@ async fn observe_at(
   value: f64,
   detail: &str,
 ) {
+  ensure_loaded(state).await;
+  let has_builtin = RULES.iter().any(|r| r.metric == metric);
+  let has_custom = with(|m| {
+    m.custom_rules
+      .values()
+      .any(|r| r.metric == metric && r.service == subject)
+  });
+  if !has_builtin && !has_custom {
+    return;
+  }
   let Some(points) = with(|m| {
     m.series.retain(|_, (_, at)| now - *at < STALE_MS);
     let (p, at) = m
@@ -351,9 +406,18 @@ async fn observe_at(
   }) else {
     return;
   };
-  let cfg = config(state).await;
+  let (cfg, svc_overrides) =
+    with(|m| (m.config.clone(), m.service_overrides.clone()));
   for rule in RULES.iter().filter(|r| r.metric == metric) {
-    let o = cfg.get(rule.id).cloned().unwrap_or_default();
+    let svc_override =
+      service_overrides::service_of_subject(rule.id, subject)
+        .and_then(|svc| {
+          svc_overrides.get(&(rule.id.to_string(), svc.to_string()))
+        });
+    let o = service_overrides::effective_override(
+      cfg.get(rule.id),
+      svc_override,
+    );
     let fkey = (rule.id.to_string(), subject.to_string());
     if !o.enabled() {
       set_firing(state, fkey, None).await;
@@ -425,6 +489,12 @@ async fn observe_at(
         suppress::flush_unsuppressed(state, now).await;
       }
     }
+  }
+  if has_custom {
+    custom::evaluate_at(
+      state, now, metric, subject, value, detail, &points,
+    )
+    .await;
   }
 }
 
@@ -726,4 +796,4 @@ pub fn issue_alert(
 
 #[cfg(test)]
 #[path = "rules/tests.rs"]
-mod tests;
+pub(crate) mod tests;

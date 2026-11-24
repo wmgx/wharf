@@ -7,7 +7,7 @@ use crate::{db, notify::Event, state::AppState};
 
 /// 页面和 CLI 一次最多看多少条推送。
 const HISTORY: usize = 200;
-const KEEP_HISTORY_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+const KEEP_HISTORY_MS: i64 = 14 * 24 * 60 * 60 * 1000;
 
 pub(crate) const MIGRATION: &str = r#"
 ALTER TABLE alert_firing ADD COLUMN body TEXT NOT NULL DEFAULT '';
@@ -177,17 +177,43 @@ pub async fn ensure_loaded(state: &AppState) {
         })
         .and_then(Iterator::collect::<Result<Vec<_>, _>>)
         .map_err(db::sql_err)?;
-      Ok((cfg, firing, acks, suppressions))
+      let service_overrides =
+        super::service_overrides::load_from_db(c)?;
+      let custom_rules = super::custom::load_from_db(c)?;
+      Ok((
+        cfg,
+        firing,
+        acks,
+        suppressions,
+        service_overrides,
+        custom_rules,
+      ))
     })
     .await;
-  let (cfg, firing, acks, suppressions) = match loaded {
-    Ok((cfg, firing, acks, suppressions)) => (
+  let (
+    cfg,
+    firing,
+    acks,
+    suppressions,
+    service_overrides,
+    custom_rules,
+  ) = match loaded {
+    Ok((
+      cfg,
+      firing,
+      acks,
+      suppressions,
+      service_overrides,
+      custom_rules,
+    )) => (
       cfg
         .and_then(|v| serde_json::from_str(&v).ok())
         .unwrap_or_default(),
       firing,
       acks,
       suppressions,
+      service_overrides,
+      custom_rules,
     ),
     Err(e) => {
       tracing::warn!("读告警配置失败：{}", e.message);
@@ -200,6 +226,8 @@ pub async fn ensure_loaded(state: &AppState) {
       m.firing = firing;
       m.acks = acks;
       m.suppressions = suppressions;
+      m.service_overrides = service_overrides;
+      m.custom_rules = custom_rules;
       m.loaded = true;
     }
   });
@@ -321,7 +349,7 @@ pub(super) async fn set_firing_suppressed(
   }
 }
 
-/// 记一条推送，顺手删掉 7 天前的。
+/// 记一条推送，顺手删掉 14 天前的。
 pub(super) async fn record_at(
   state: &AppState,
   now: i64,

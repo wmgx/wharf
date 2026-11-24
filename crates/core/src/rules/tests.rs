@@ -6,7 +6,7 @@ use wharf_api_types::view::AlertSuppressionRequest;
 
 use super::*;
 
-static TEST_LOCK: tokio::sync::Mutex<()> =
+pub(crate) static TEST_LOCK: tokio::sync::Mutex<()> =
   tokio::sync::Mutex::const_new(());
 
 fn rule(id: &str) -> &'static Rule {
@@ -17,7 +17,7 @@ fn v(points: &[f64]) -> VecDeque<f64> {
   points.iter().copied().collect()
 }
 
-fn reset_memory() {
+pub(crate) fn reset_memory() {
   with(|m| *m = Memory::default());
 }
 
@@ -611,3 +611,6 @@ async fn digest_keeps_rows_on_failure_and_preserves_inflight_inserts()
   let body = pv.body.unwrap();
   assert!(!body.contains("s1") && body.contains("s2"));
 }
+
+#[path = "custom_tests.rs"]
+mod custom_tests;

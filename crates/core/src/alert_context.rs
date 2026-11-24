@@ -212,7 +212,8 @@ fn page_path(rule: &str, subject: Option<&str>) -> String {
     "container_restarting"
     | "monitor_failed"
     | "http_5xx"
-    | "oom_killed" => {
+    | "oom_killed"
+    | "svc_mem_near_limit" => {
       format!("/services/{subject}")
     }
     "domain_down" | "cert_expiring" => "/entries".into(),
@@ -220,6 +221,9 @@ fn page_path(rule: &str, subject: Option<&str>) -> String {
     "host_unit_down" => {
       let server = subject.split_once(':').map_or(subject, |s| s.0);
       format!("/servers/{server}")
+    }
+    _ if crate::rules::is_custom_rule(rule) => {
+      format!("/services/{subject}")
     }
     _ => "/alerts".into(),
   }

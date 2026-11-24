@@ -24,6 +24,7 @@ mod note;
 mod pack;
 mod preview;
 mod print;
+mod report;
 mod selfcmd;
 mod server;
 mod service_checks;
@@ -159,6 +160,8 @@ pub enum Command {
   Status,
   /// 全局资源或镜像排行。server usage 看单台用量均值，server disk 看目录和卷，server host 看整机概况。
   Top(top::TopArgs),
+  /// 周期指标和告警摘要报告（默认对比近 7 天与上一个 7 天）。
+  Report(report::ReportArgs),
   /// 部署本机代码目录：打包上传，在服务器上构建并运行。
   /// Python、Node、Go、静态站点自动识别，有 Dockerfile 就用。再次执行就是发布新版本。
   Deploy {
@@ -212,7 +215,7 @@ pub enum Command {
     /// 只看这些，逗号分隔，例如 host.cpu,host.mem。
     #[arg(long)]
     names: Option<String>,
-    #[arg(long, default_value = "24h", value_parser = ["1h", "24h", "7d", "30d"])]
+    #[arg(long, default_value = "24h", value_parser = ["1h", "24h", "7d", "14d", "30d"])]
     range: String,
   },
   /// 数据：每个服务的挂载和备份情况。

@@ -4,11 +4,12 @@ import { ErrorNote, SectionTitle } from "@/components/common";
 import { Segmented } from "@/components/fields";
 import { Card, CardContent } from "@/components/ui/card";
 
-type Range = "1h" | "24h" | "7d";
+type Range = "1h" | "24h" | "7d" | "14d";
 const RANGES: [Range, string][] = [
   ["1h", "1 小时"],
   ["24h", "24 小时"],
   ["7d", "7 天"],
+  ["14d", "14 天"],
 ];
 
 type Point = [number, number];

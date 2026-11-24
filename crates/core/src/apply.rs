@@ -500,6 +500,13 @@ pub async fn start(
       guard,
     ));
   }
+  for write in &stored.writes {
+    if let db::Write::Delete { kind, name } = write
+      && kind == crate::world::KIND_SERVICE
+    {
+      crate::rules::on_service_deleted(&state, name).await;
+    }
+  }
   crate::service_monitor::sync_watches(&state, None).await;
   Ok(ApplyResponse { run_id })
 }

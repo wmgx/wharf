@@ -556,6 +556,7 @@ async fn dispatch(
     Command::Alert(cmd) => crate::alert::run(c, cmd, j).await,
     Command::Server(cmd) => server(c, cmd, j).await,
     Command::Top(args) => crate::top::run(c, args, j).await,
+    Command::Report(args) => crate::report::run(c, args, j).await,
     Command::Service(cmd) => service(c, cmd, j).await,
     Command::Gateway(cmd) => gateway(c, cmd, j).await,
     Command::Route(cmd) => route(c, cmd, j).await,

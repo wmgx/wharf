@@ -5,7 +5,7 @@
 //! - `req.*`：经网关的请求，对象是服务名，见 http_stats.rs；
 //! - 其余是事件：部署、备份的耗时和结果，自动重启，对象是服务名。
 //!
-//! 资源点 24 小时后合成 10 分钟一个，保留 7 天；事件保留 90 天。
+//! 资源点 24 小时后合成 10 分钟一个，7 天后合成每小时一个，保留 14 天；事件保留 90 天。
 
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
@@ -27,8 +27,10 @@ use crate::{
 
 const MINUTE_MS: i64 = 60 * 1000;
 const COARSE_MS: i64 = 10 * MINUTE_MS;
-const DAY_MS: i64 = 24 * 60 * MINUTE_MS;
-const KEEP_RESOURCE_MS: i64 = 7 * DAY_MS;
+const HOUR_MS: i64 = 60 * MINUTE_MS;
+const DAY_MS: i64 = 24 * HOUR_MS;
+const COARSE_KEEP_MS: i64 = 7 * DAY_MS;
+const KEEP_RESOURCE_MS: i64 = 14 * DAY_MS;
 const KEEP_EVENT_MS: i64 = 90 * DAY_MS;
 
 /// 合成和按时间段平均的只有资源点，事件点原样保留。
@@ -213,31 +215,53 @@ pub async fn step_done(
   }
 }
 
-/// 定时任务调用：旧的资源点合成 10 分钟一个，删掉过期的点。
+/// 定时任务调用：旧的资源点先合成 10 分钟均值，超过 7 天再合成每小时均值，删掉过期的点。
 pub async fn compact(state: &AppState) -> Result<(), ApiError> {
   state.db.call(|c| compact_at(c, now_ms())).await
 }
 
 fn compact_at(c: &mut Connection, now: i64) -> Result<(), ApiError> {
-  // 对齐到 10 分钟，保证每个时间段一次合成完。合成后的点时间正好对齐，
-  // 原始点几乎不会对齐，用这个区分。
-  let cutoff = (now - DAY_MS) / COARSE_MS * COARSE_MS;
+  // 对齐到 10 分钟和整点，保证每个时间段一次合成完。合成后的点时间正好对齐，
+  // 通过 `at % bucket != 0` 判断该桶里是否还有更细粒度的点需要合成并清理。
+  let coarse_cutoff = (now - DAY_MS) / COARSE_MS * COARSE_MS;
+  let hourly_cutoff = (now - COARSE_KEEP_MS) / HOUR_MS * HOUR_MS;
   let tx = c.transaction().map_err(sql_err)?;
+  // 1～7 天：原始点合成 10 分钟均值。
   tx.execute(
     &format!(
       "INSERT OR REPLACE INTO points (name, subject, at, value)
        SELECT name, subject, at / ?2 * ?2, AVG(value) FROM points
-       WHERE at < ?1 AND at % ?2 != 0 AND {RESOURCE}
-       GROUP BY name, subject, at / ?2"
+       WHERE at < ?1 AND {RESOURCE}
+       GROUP BY name, subject, at / ?2
+       HAVING SUM(CASE WHEN at % ?2 != 0 THEN 1 ELSE 0 END) > 0"
     ),
-    params![cutoff, COARSE_MS],
+    params![coarse_cutoff, COARSE_MS],
   )
   .map_err(sql_err)?;
   tx.execute(
     &format!(
       "DELETE FROM points WHERE at < ?1 AND at % ?2 != 0 AND {RESOURCE}"
     ),
-    params![cutoff, COARSE_MS],
+    params![coarse_cutoff, COARSE_MS],
+  )
+  .map_err(sql_err)?;
+  // 7～14 天：10 分钟均值合成每小时均值（时间对齐到整点）。
+  tx.execute(
+    &format!(
+      "INSERT OR REPLACE INTO points (name, subject, at, value)
+       SELECT name, subject, at / ?2 * ?2, AVG(value) FROM points
+       WHERE at < ?1 AND {RESOURCE}
+       GROUP BY name, subject, at / ?2
+       HAVING SUM(CASE WHEN at % ?2 != 0 THEN 1 ELSE 0 END) > 0"
+    ),
+    params![hourly_cutoff, HOUR_MS],
+  )
+  .map_err(sql_err)?;
+  tx.execute(
+    &format!(
+      "DELETE FROM points WHERE at < ?1 AND at % ?2 != 0 AND {RESOURCE}"
+    ),
+    params![hourly_cutoff, HOUR_MS],
   )
   .map_err(sql_err)?;
   tx.execute(
@@ -259,7 +283,7 @@ pub struct MetricsQuery {
   pub subject: String,
   /// 逗号分隔；不给时按对象类型给资源点（`host.*` 或 `svc.*`）和事件。
   pub names: Option<String>,
-  /// `1h`、`24h`（默认）、`7d`、`30d`。
+  /// `1h`、`24h`（默认）、`7d`、`14d`、`30d`。
   pub range: Option<String>,
 }
 
@@ -275,15 +299,16 @@ pub struct MetricsView {
 }
 
 fn range_ms(range: &str) -> Result<(i64, i64), ApiError> {
-  // 每个范围大约 150 到 300 个点。
+  // 每个范围大约 150 到 336 个点。
   Ok(match range {
     "1h" => (3600 * 1000, MINUTE_MS),
     "24h" => (DAY_MS, 5 * MINUTE_MS),
     "7d" => (7 * DAY_MS, 30 * MINUTE_MS),
-    "30d" => (30 * DAY_MS, 3 * 60 * MINUTE_MS),
+    "14d" => (14 * DAY_MS, HOUR_MS),
+    "30d" => (30 * DAY_MS, 3 * HOUR_MS),
     other => {
       return Err(ApiError::invalid(format!(
-        "范围 {other} 不认识，可以是 1h、24h、7d、30d"
+        "范围 {other} 不认识，可以是 1h、24h、7d、14d、30d"
       )));
     }
   })
@@ -403,7 +428,7 @@ mod tests {
           old + 2,
           &[("host.cpu", "a", 30.0), ("deploy.secs", "a", 7.0)],
         )?;
-        insert(c, now - 8 * DAY_MS, &[("host.cpu", "a", 99.0)])?;
+        insert(c, now - 15 * DAY_MS, &[("host.cpu", "a", 99.0)])?;
         insert(c, now, &[("host.cpu", "a", 50.0)])?;
         compact_at(c, now)?;
         Ok((old, now, read(c, "a", &[], 0, 1)?))
@@ -413,6 +438,125 @@ mod tests {
     let (old, now, series) = s;
     assert_eq!(series["host.cpu"], vec![(old, 20.0), (now, 50.0)]);
     assert_eq!(series["deploy.secs"].len(), 2);
+  }
+
+  #[tokio::test]
+  async fn compact_tiered_15_days() {
+    let db = crate::db::Db::memory();
+    let now = 1_700_000_000_000 / HOUR_MS * HOUR_MS + 123_456;
+    let coarse_cutoff = (now - DAY_MS) / COARSE_MS * COARSE_MS;
+    let hourly_cutoff = (now - COARSE_KEEP_MS) / HOUR_MS * HOUR_MS;
+    let keep_cutoff = now - KEEP_RESOURCE_MS;
+    let target_hour = (now - 10 * DAY_MS) / HOUR_MS * HOUR_MS;
+
+    let points = db
+      .call(move |c| {
+        // 15 天前（超出 14 天保留期，应被删除）
+        insert(c, now - 15 * DAY_MS, &[("host.cpu", "s1", 99.0)])?;
+        insert(
+          c,
+          now - 14 * DAY_MS - HOUR_MS,
+          &[("host.cpu", "s1", 88.0)],
+        )?;
+        // 7～14 天：在 target_hour 造 6 个 10 分钟桶（每个桶有 1～2 个原始点），
+        // 10 分钟均值依次为 15, 30, 45, 60, 75, 90，整点均值应为 52.5。
+        insert(c, target_hour + 1_000, &[("host.cpu", "s1", 10.0)])?;
+        insert(c, target_hour + 2_000, &[("host.cpu", "s1", 20.0)])?;
+        insert(
+          c,
+          target_hour + COARSE_MS + 1_000,
+          &[("host.cpu", "s1", 25.0)],
+        )?;
+        insert(
+          c,
+          target_hour + COARSE_MS + 2_000,
+          &[("host.cpu", "s1", 35.0)],
+        )?;
+        for (slot, val) in
+          [(2, 45.0), (3, 60.0), (4, 75.0), (5, 90.0)]
+        {
+          insert(
+            c,
+            target_hour + slot * COARSE_MS + 1_000,
+            &[("host.cpu", "s1", val)],
+          )?;
+        }
+        // 8 天前与 13 天前再各补一点，验证整段 7～14 天全部对齐到整点。
+        for d in [8, 13] {
+          let h = (now - d * DAY_MS) / HOUR_MS * HOUR_MS;
+          insert(c, h + 1_000, &[("host.cpu", "s1", 20.0)])?;
+          insert(
+            c,
+            h + 2 * COARSE_MS + 1_000,
+            &[("host.cpu", "s1", 40.0)],
+          )?;
+        }
+        // 1～7 天：2 天前与 5 天前的原始点，应合成 10 分钟点。
+        let t_mid = (now - 3 * DAY_MS) / COARSE_MS * COARSE_MS;
+        insert(c, t_mid + 1_000, &[("host.cpu", "s1", 10.0)])?;
+        insert(c, t_mid + 2_000, &[("host.cpu", "s1", 30.0)])?;
+        insert(
+          c,
+          t_mid + COARSE_MS + 1_000,
+          &[("host.cpu", "s1", 50.0)],
+        )?;
+        // 1 天内：原始点原样保留。
+        let t_recent1 = now - 6 * HOUR_MS + 111;
+        let t_recent2 = now - 6 * HOUR_MS + 222;
+        insert(c, t_recent1, &[("host.cpu", "s1", 12.0)])?;
+        insert(c, t_recent2, &[("host.cpu", "s1", 34.0)])?;
+
+        // 连续压缩两次验证幂等性。
+        compact_at(c, now)?;
+        compact_at(c, now)?;
+        let mut stmt = c
+          .prepare(
+            "SELECT at, value FROM points
+             WHERE subject = 's1' AND name = 'host.cpu' ORDER BY at",
+          )
+          .map_err(sql_err)?;
+        let rows = stmt
+          .query_map([], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?))
+          })
+          .and_then(Iterator::collect::<Result<Vec<_>, _>>)
+          .map_err(sql_err)?;
+        Ok(rows)
+      })
+      .await
+      .unwrap();
+
+    // 14 天前没有任何点。
+    assert!(points.iter().all(|(at, _)| *at >= keep_cutoff));
+    // 7～14 天全是整点，且 target_hour 均值为 52.5。
+    let hourly: Vec<_> = points
+      .iter()
+      .copied()
+      .filter(|(at, _)| *at < hourly_cutoff)
+      .collect();
+    assert_eq!(hourly.len(), 3);
+    assert!(hourly.iter().all(|(at, _)| at % HOUR_MS == 0));
+    let target_val =
+      hourly.iter().find(|(at, _)| *at == target_hour).unwrap().1;
+    assert!((target_val - 52.5).abs() < 1e-9);
+    // 1～7 天全是 10 分钟点。
+    let coarse: Vec<_> = points
+      .iter()
+      .copied()
+      .filter(|(at, _)| *at >= hourly_cutoff && *at < coarse_cutoff)
+      .collect();
+    assert_eq!(coarse.len(), 2);
+    assert!(coarse.iter().all(|(at, _)| at % COARSE_MS == 0));
+    assert!((coarse[0].1 - 20.0).abs() < 1e-9);
+    assert!((coarse[1].1 - 50.0).abs() < 1e-9);
+    // 1 天内仍是原始点（未对齐）。
+    let recent: Vec<_> = points
+      .iter()
+      .copied()
+      .filter(|(at, _)| *at >= coarse_cutoff)
+      .collect();
+    assert_eq!(recent.len(), 2);
+    assert!(recent.iter().all(|(at, _)| at % COARSE_MS != 0));
   }
 }
 

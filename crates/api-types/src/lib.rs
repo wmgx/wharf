@@ -13,6 +13,7 @@ pub mod egress;
 pub mod error;
 pub mod external;
 pub mod plan;
+pub mod report;
 pub mod resources;
 pub mod seal;
 pub mod service_checks;

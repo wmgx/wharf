@@ -117,6 +117,16 @@ pub async fn record(
     crate::rules::observe(&state, "req.err_pct_5m", &svc, pct, "")
       .await;
   }
+  for (svc, s) in &sums {
+    if s.reqs > 0 {
+      let err_pct = 100.0 * s.errors as f64 / s.reqs as f64;
+      let detail = format!("最近 1 分钟共 {} 次请求", s.reqs);
+      crate::rules::observe(&state, "req.err", svc, err_pct, &detail)
+        .await;
+      crate::rules::observe(&state, "req.p95", svc, s.p95, &detail)
+        .await;
+    }
+  }
 }
 
 #[cfg(test)]
