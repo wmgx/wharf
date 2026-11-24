@@ -22,6 +22,7 @@ const LAST_DATE_KEY: &str = "alerts.digest.last_date";
 
 #[derive(Debug, Clone)]
 pub(super) struct DigestRow {
+  pub id: i64,
   pub source: String,
   pub subject: Option<String>,
   pub title: String,
@@ -167,19 +168,20 @@ async fn load_rows(
       let last = db::setting(c, LAST_DATE_KEY)?;
       let mut stmt = c
         .prepare(
-          "SELECT source, subject, title, fired_at, recovered_at, is_notice
+          "SELECT id, source, subject, title, fired_at, recovered_at, is_notice
            FROM alert_digest ORDER BY id ASC",
         )
         .map_err(db::sql_err)?;
       let rows = stmt
         .query_map([], |r| {
           Ok(DigestRow {
-            source: r.get(0)?,
-            subject: r.get(1)?,
-            title: r.get(2)?,
-            fired_at: r.get(3)?,
-            recovered_at: r.get(4)?,
-            is_notice: r.get::<_, i64>(5)? != 0,
+            id: r.get(0)?,
+            source: r.get(1)?,
+            subject: r.get(2)?,
+            title: r.get(3)?,
+            fired_at: r.get(4)?,
+            recovered_at: r.get(5)?,
+            is_notice: r.get::<_, i64>(6)? != 0,
           })
         })
         .and_then(Iterator::collect)
@@ -206,8 +208,28 @@ pub(super) async fn preview(
   })
 }
 
+/// 投递成功或未配置通知渠道时清理已读条目；真正发送失败时保留到次日一起发。
+fn should_clear(skipped: Option<&str>) -> bool {
+  matches!(skipped, None | Some("没有配置通知渠道"))
+}
+
 /// 检查东八区 09:00 是否该发每日汇总。真正发了返回 true。
 pub(super) async fn tick_at(state: &AppState, now: i64) -> bool {
+  tick_at_with(state, now, |event| async move {
+    notify::deliver(state, &event).await
+  })
+  .await
+}
+
+pub(super) async fn tick_at_with<F, Fut>(
+  state: &AppState,
+  now: i64,
+  deliver: F,
+) -> bool
+where
+  F: FnOnce(Event) -> Fut,
+  Fut: std::future::Future<Output = Option<String>>,
+{
   let Ok((rows, last_date)) = load_rows(state).await else {
     return false;
   };
@@ -223,15 +245,26 @@ pub(super) async fn tick_at(state: &AppState, now: i64) -> bool {
       .await;
     return false;
   };
+  let max_id = rows.iter().map(|r| r.id).max();
   let event = Event { title, body };
-  let skipped = notify::deliver(state, &event).await;
+  let deliver_event = Event {
+    title: event.title.clone(),
+    body: event.body.clone(),
+  };
+  let skipped = deliver(deliver_event).await;
+  let clear = should_clear(skipped.as_deref());
   record_at(state, now, SOURCE_ID, None, &event, true, skipped).await;
   let res = state
     .db
     .call(move |c| {
       let tx = c.unchecked_transaction().map_err(db::sql_err)?;
-      tx.execute("DELETE FROM alert_digest", [])
+      if clear && let Some(max_id) = max_id {
+        tx.execute(
+          "DELETE FROM alert_digest WHERE id <= ?1",
+          [max_id],
+        )
         .map_err(db::sql_err)?;
+      }
       db::set_setting(&tx, LAST_DATE_KEY, Some(&today))?;
       tx.commit().map_err(db::sql_err)
     })

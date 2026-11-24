@@ -558,3 +558,56 @@ async fn muted_beats_digest_priority() {
   assert_eq!(pv.count, 0);
   assert!(pv.body.is_none());
 }
+
+#[tokio::test]
+async fn digest_keeps_rows_on_failure_and_preserves_inflight_inserts()
+{
+  let _g = TEST_LOCK.lock().await;
+  reset_memory();
+  let s = test_state();
+
+  observe_at(
+    &s,
+    beijing_ms(2026, 6, 1, 8, 0),
+    "disk.days_left",
+    "s1",
+    5.0,
+    "",
+  )
+  .await;
+  assert!(
+    digest::tick_at_with(
+      &s,
+      beijing_ms(2026, 6, 1, 9, 0),
+      |_| async { Some("发送失败：超时".into()) }
+    )
+    .await
+  );
+  assert_eq!(digest::preview(&s).await.unwrap().count, 1);
+  assert!(!digest::tick_at(&s, beijing_ms(2026, 6, 1, 9, 1)).await);
+
+  let s_inflight = s.clone();
+  assert!(
+    digest::tick_at_with(
+      &s,
+      beijing_ms(2026, 6, 2, 9, 0),
+      move |_| async move {
+        observe_at(
+          &s_inflight,
+          beijing_ms(2026, 6, 2, 9, 0),
+          "disk.days_left",
+          "s2",
+          5.0,
+          "",
+        )
+        .await;
+        None
+      },
+    )
+    .await
+  );
+  let pv = digest::preview(&s).await.unwrap();
+  assert_eq!(pv.count, 1);
+  let body = pv.body.unwrap();
+  assert!(!body.contains("s1") && body.contains("s2"));
+}
