@@ -69,7 +69,7 @@ wharf route add app.example.com --service my-app --apply   # 建 DNS、签证书
 在一台有 Docker 的机器上：
 
 ```bash
-docker run -d --name wharf-core --restart unless-stopped --network host \
+docker run -d --label wharf.system=core --name wharf-core --restart unless-stopped --network host \
   -v /var/lib/wharf-core:/var/lib/wharf-core \
   ghcr.io/wmgx/wharf-core:0.1
 ```

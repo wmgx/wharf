@@ -1883,6 +1883,45 @@ async fn service(
       out(j, &value, pretty);
       Ok(())
     }
+    ServiceCmd::LogAlert {
+      name,
+      action,
+      off,
+      apply,
+    } => {
+      if off && action.is_some() {
+        return Err(
+          ApiError::invalid("--off 和 add/rm 二选一").into(),
+        );
+      }
+      crate::service_checks::log(c, name, action, off, apply, j).await
+    }
+    ServiceCmd::PortCheck(args) => {
+      crate::service_checks::port(c, args, j).await
+    }
+    ServiceCmd::Heartbeat {
+      name,
+      every,
+      grace,
+      off,
+      apply,
+    } => {
+      crate::service_checks::heartbeat(
+        c, name, every, grace, off, apply, j,
+      )
+      .await
+    }
+    ServiceCmd::UnmanagedIgnore {
+      server,
+      project,
+      container,
+      undo,
+    } => {
+      crate::service_checks::ignore(
+        c, &server, project, container, undo, j,
+      )
+      .await
+    }
     ServiceCmd::UnmanagedRemove {
       server,
       project,
@@ -1913,9 +1952,12 @@ async fn service(
     ServiceCmd::Note { name, args } => {
       crate::note::run(c, "service", &name, args, j).await
     }
-    ServiceCmd::Show { name } => {
-      let v: ServiceView =
-        c.get(&format!("/api/services/{}", seg(&name))).await?;
+    ServiceCmd::Show { name, reveal } => {
+      let mut path = format!("/api/services/{}", seg(&name));
+      if reveal {
+        path.push_str("?reveal=true");
+      }
+      let v: ServiceView = c.get(&path).await?;
       out(j, &v, |v| {
         pretty(v);
         if !v.risks.is_empty() {
@@ -1960,7 +2002,9 @@ async fn service(
             (_, Some(c)) => ("--container", c.as_str()),
             _ => continue,
           };
-          println!("{kind} {what}");
+          let ignored =
+            if u.ignored { "（已忽略）" } else { "" };
+          println!("{kind} {what}{ignored}");
           for c in &u.containers {
             println!(
               "    {:<24} {:<10} {}",
@@ -2337,6 +2381,9 @@ async fn service(
             backup: None,
             stopped: false,
             monitor: None,
+            log_alerts: vec![],
+            port_checks: Default::default(),
+            heartbeat: None,
             limits: None,
             auto_update: false,
             container: None,

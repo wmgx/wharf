@@ -132,6 +132,27 @@ export function ServiceDetail() {
             {monitor.path}{monitor.expect ? ` → ${monitor.expect}` : ""}{monitor.keyword ? ` 含“${monitor.keyword}”` : ""}
           </span>
         </Panel> : null}
+        <Panel className="grid gap-2 p-4 text-sm">
+          <div className="flex flex-wrap items-center gap-2">
+            <span>日志关键字</span><span className="text-muted-foreground">{svc.spec.log_alerts?.length ?? 0} 条</span>
+            {svc.log_alerts?.filter((rule) => rule.firing).map((rule, i) => <StatusBadge key={i} tone="bad">{rule.pattern}</StatusBadge>)}
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <span>端口</span>
+            {Object.entries(svc.host_ports).filter(([port]) => {
+              const check = svc.spec.port_checks?.[port];
+              return check?.kind !== "off" && (!!check || !svc.spec.ports?.find((p) => p.name === port)?.udp);
+            }).map(([port]) => {
+              const ok = svc.port_checks?.[port];
+              return <StatusBadge key={port} tone={ok === undefined ? "idle" : ok ? "ok" : "bad"}>{port} · {ok === undefined ? "未检查" : ok ? "正常" : "失败"}</StatusBadge>;
+            })}
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <span>心跳</span>
+            <span className="text-muted-foreground">{svc.heartbeat?.status ?? "未开启"}</span>
+            {svc.heartbeat?.last_at != null && <span className="text-xs text-muted-foreground">{ago(new Date(svc.heartbeat.last_at).toISOString())}报到</span>}
+          </div>
+        </Panel>
       </TabsContent>
       <TabsContent value="history" className="mt-4">
         <HistoryTab name={name} />

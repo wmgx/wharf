@@ -88,6 +88,7 @@ export interface AgentReport {
    * 没有组网工具时作为内网地址的候选。
    */
   lan_ips?: string[];
+  log_hits?: LogHit[];
   /**
    * 资源采样，每分钟一次。
    */
@@ -531,6 +532,7 @@ export type Change = {
 export type CheckStatus = "ok" | "warn" | "bad" | "skip";
 
 export interface ContainerInfo {
+  finished_at?: string | null;
   /**
    * 同名 compose 项目里不是 Wharf 部署的容器（compose 工作目录不是 Wharf 的项目目录）。
    */
@@ -1106,6 +1108,18 @@ export interface GitSource {
 
 export type Health = "healthy" | "unhealthy" | "starting" | "none";
 
+export interface HeartbeatSpec {
+  every_mins: number;
+  grace_mins: number;
+  token?: string;
+}
+
+export interface HeartbeatView {
+  last_at: number | null;
+  status: string;
+  url: string;
+}
+
 /**
  * 服务器详情页的宿主机信息，打开页面时现查。
  */
@@ -1234,6 +1248,8 @@ export interface Issue {
    * oom_killed：服务的容器因内存超限被杀。
    * recovery_low：恢复码少于 3 个。
    * exposed_port：未确认的对公网监听端口。
+   * log_keyword、port_down、heartbeat_late：服务监控触发（Fault）。
+   * service_stopped_long、unmanaged_container：长期停止和未纳管容器（Info）。
    */
   code: string;
   /**
@@ -1349,6 +1365,27 @@ export interface LiveState {
    * `running`、`partial`、`stopped`、`missing`、`unknown`。
    */
   state: string;
+}
+
+export interface LogAlertSpec {
+  container?: string | null;
+  min_count: number;
+  pattern: string;
+  regex: boolean;
+  window_mins: number;
+}
+
+export interface LogAlertView {
+  firing: boolean;
+  last_hit: number | null;
+  pattern: string;
+}
+
+export interface LogHit {
+  at: number;
+  count: number;
+  id: string;
+  lines: string[];
 }
 
 export interface LoginScript {
@@ -1705,6 +1742,17 @@ export interface PlanItem {
 }
 
 export type PlanStatus = "pending" | "applied";
+
+export type PortCheckSpec = {
+  kind: "off";
+} | {
+  domain: string;
+  kind: "dns";
+} | {
+  expect: string;
+  kind: "custom";
+  send: string;
+};
 
 export interface PortRow {
   acked: boolean;
@@ -2199,14 +2247,17 @@ export interface ServiceSpec {
    * 应用自己改写的内容下次部署会被覆盖。
    */
   files?: FileSpec[];
+  heartbeat?: HeartbeatSpec | null;
   /**
    * 资源上限，不填不限。
    */
   limits?: Limits | null;
+  log_alerts?: LogAlertSpec[];
   /**
    * 自定义监控：服务所在机器的 agent 每分钟从本机请求一次，连续 3 次不正常推送。
    */
   monitor?: MonitorSpec | null;
+  port_checks?: Record<string, PortCheckSpec>;
   ports?: PortSpec[];
   /**
    * 运行在哪台服务器上。
@@ -2277,6 +2328,7 @@ export interface ServiceView {
    * 服务挂载的数据和归属，从配置里算出来。
    */
   data?: DataMount[];
+  heartbeat?: HeartbeatView | null;
   /**
    * 端口名到宿主机端口。
    */
@@ -2289,6 +2341,7 @@ export interface ServiceView {
    * 局域网地址：端口名 → 各个局域网地址:宿主机端口（服务器设置了 lan_addrs 时才有）。
    */
   lan_addresses?: Record<string, string[]>;
+  log_alerts?: LogAlertView[];
   /**
    * 自定义监控的最近一次结果；没配监控或还没检查过时为空。
    */
@@ -2298,6 +2351,7 @@ export interface ServiceView {
    * 备注：给人看的说明，不影响部署。
    */
   note?: string | null;
+  port_checks?: Record<string, boolean>;
   risks?: string[];
   spec: ServiceSpec;
   /**
@@ -2631,6 +2685,7 @@ export interface TotpView {
 export interface Unmanaged {
   container?: string | null;
   containers: FoundContainer[];
+  ignored: boolean;
   /**
    * 导入时默认的服务名。
    */

@@ -120,7 +120,13 @@ async fn handle(
     matches!(&spec.how, TaskKind::Ping { token: t, .. } if !t.is_empty() && t == token)
   });
   let Some((name, spec, _)) = found else {
-    return (StatusCode::NOT_FOUND, "没有这个报到地址\n");
+    return crate::service_monitor::heartbeat::ping(
+      s,
+      token,
+      status == TaskStatus::Succeeded,
+      &body,
+    )
+    .await;
   };
   let mut output = body;
   if output.len() > MAX_OUTPUT {

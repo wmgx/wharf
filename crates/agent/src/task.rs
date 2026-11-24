@@ -124,7 +124,14 @@ pub async fn run(
         crate::build::remove_container(docker, &install_name).await;
         let mut cmd = docker
           .cmd()
-          .args(["run", "--rm", "--name", &install_name])
+          .args([
+            "run",
+            "--rm",
+            "--label",
+            "wharf.temp=1",
+            "--name",
+            &install_name,
+          ])
           .args(["-v", &format!("{}:/deps", deps_dir.display())])
           .args(["-v", &format!("{}:/wharf:ro", dir.display())]);
         cmd = match runtime {

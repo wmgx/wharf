@@ -64,6 +64,7 @@ struct Conn {
   rtt_ms: Arc<AtomicU64>,
   host_shell: bool,
   forward: bool,
+  service_checks: bool,
   /// 协议版本不一致：连接放行，但只接受升级相关的请求，好让它升上来。
   upgrade_only: bool,
 }
@@ -116,6 +117,25 @@ impl Hub {
     lock(&self.conns)
       .get(server)
       .is_some_and(|conn| conn.host_shell)
+  }
+
+  pub fn supports_service_checks(&self, server: &str) -> bool {
+    lock(&self.conns)
+      .get(server)
+      .is_some_and(|c| !c.upgrade_only && c.service_checks)
+  }
+
+  pub fn log_watches(
+    &self,
+    server: &str,
+    watches: Vec<wharf_api_types::service_checks::LogWatch>,
+  ) {
+    if let Some(conn) = lock(&self.conns).get(server)
+      && !conn.upgrade_only
+      && conn.tx.try_send(CoreMsg::LogWatches { watches }).is_err()
+    {
+      conn.closed.cancel();
+    }
   }
 
   /// 当前连接的编号，每次重连都会变。不在线时是 `None`。
@@ -390,6 +410,7 @@ async fn handle_socket(
     protocol,
     host_shell,
     forward,
+    service_checks,
   } = hello
   else {
     anyhow::bail!("agent 没有先发 hello");
@@ -485,11 +506,13 @@ async fn handle_socket(
     rtt_ms: Arc::new(AtomicU64::new(u64::MAX)),
     host_shell,
     forward,
+    service_checks,
     upgrade_only,
   };
   state.hub.register(&server, conn.clone());
   tracing::info!("服务器 {server} 上线（agent {version}）");
   touch(&state, &server, None).await;
+  crate::service_monitor::sync_watches(&state, Some(&server)).await;
 
   let (mut sink, mut stream) = socket.split();
   let mut ping = tokio::time::interval(PING_EVERY);
@@ -547,6 +570,7 @@ async fn handle_socket(
         };
         match serde_json::from_slice::<AgentMsg>(&text) {
           Ok(AgentMsg::Report(mut report)) => {
+            crate::service_monitor::report(&server, std::mem::take(&mut report.log_hits));
             let received = now_ms();
             let agent_ms = report.time_ms;
             crate::clock::record(&state, &server, agent_ms).await;
@@ -690,6 +714,7 @@ mod tests {
       protocol: PROTOCOL,
       host_shell: true,
       forward: true,
+      service_checks: true,
     };
     let json = serde_json::to_string(&hello).unwrap();
     let old = serde_json::from_str::<OldAgentMsg>(&json);

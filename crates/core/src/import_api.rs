@@ -41,10 +41,21 @@ pub async fn unmanaged(
   if !snap.world.servers.contains_key(&server) {
     return Err(server_not_found(&server).into());
   }
+  let mut out = discover(&s, &snap.world, &server).await?;
+  crate::service_monitor::unmanaged::flags(&s, &server, &mut out)
+    .await?;
+  Ok(Json(out))
+}
+
+pub(crate) async fn discover(
+  s: &AppState,
+  world: &World,
+  server: &str,
+) -> Result<Vec<Unmanaged>, ApiError> {
   let found: Vec<FoundContainer> = s
     .hub
     .call(
-      &server,
+      server,
       AgentOp::Discover,
       Duration::from_secs(40),
       None,
@@ -56,10 +67,11 @@ pub async fn unmanaged(
   let mut out = Vec::new();
   for c in found {
     match c.project.clone() {
-      Some(p) if managed(&snap.world, &p) => {}
+      Some(p) if managed(world, &p) => {}
       Some(p) => projects.entry(p).or_default().push(c),
       None => out.push(Unmanaged {
-        server: server.clone(),
+        server: server.to_string(),
+        ignored: false,
         project: None,
         container: Some(c.name.clone()),
         name: import::service_name(&c.name),
@@ -69,7 +81,8 @@ pub async fn unmanaged(
   }
   for (p, containers) in projects {
     out.push(Unmanaged {
-      server: server.clone(),
+      server: server.to_string(),
+      ignored: false,
       name: import::service_name(&p),
       project: Some(p),
       container: None,
@@ -77,7 +90,7 @@ pub async fn unmanaged(
     });
   }
   out.sort_by(|a, b| a.name.cmp(&b.name));
-  Ok(Json(out))
+  Ok(out)
 }
 
 pub async fn preview(
@@ -158,6 +171,9 @@ pub async fn preview(
       backup: None,
       stopped: false,
       monitor: None,
+      log_alerts: vec![],
+      port_checks: Default::default(),
+      heartbeat: None,
       limits: None,
       auto_update: false,
       container: None,
@@ -193,52 +209,29 @@ pub async fn remove(
   if !snap.world.servers.contains_key(&server) {
     return Err(server_not_found(&server).into());
   }
-  let found: Vec<FoundContainer> = s
-    .hub
-    .call(
-      &server,
-      AgentOp::Discover,
-      Duration::from_secs(40),
-      None,
-      &CancellationToken::new(),
-    )
-    .await?;
-  let names: Vec<String> = match (&req.project, &req.container) {
-    (Some(p), None) => {
-      if managed(&snap.world, p) {
-        return Err(
-          ApiError::invalid(format!(
-            "{p} 是 Wharf 管理的，不能在这里删"
-          ))
-          .into(),
-        );
-      }
-      found
-        .iter()
-        .filter(|c| c.project.as_deref() == Some(p.as_str()))
-        .map(|c| c.name.clone())
-        .collect()
-    }
-    (None, Some(name)) => found
-      .iter()
-      .filter(|c| &c.name == name && c.project.is_none())
-      .map(|c| c.name.clone())
-      .collect(),
-    _ => {
-      return Err(
-        ApiError::invalid("project 和 container 二选一").into(),
-      );
-    }
-  };
-  if names.is_empty() {
+  let (kind, name) = target(&req.project, &req.container)?;
+  if kind == "project" && managed(&snap.world, name) {
     return Err(
-      ApiError::new(
-        ErrorCode::NotFound,
-        "没找到这个容器，可能已经删掉了",
-      )
+      ApiError::invalid(format!(
+        "{name} 是 Wharf 管理的，不能在这里删"
+      ))
       .into(),
     );
   }
+
+  let found = discover(&s, &snap.world, &server).await?;
+  let names = found
+    .into_iter()
+    .find(|item| {
+      crate::service_monitor::unmanaged::target(item) == (kind, name)
+    })
+    .ok_or_else(|| {
+      ApiError::not_found("没找到这个未纳管容器，可能已经删掉了")
+    })?
+    .containers
+    .into_iter()
+    .map(|c| c.name)
+    .collect();
   let removed = s
     .hub
     .call(
@@ -262,4 +255,57 @@ pub async fn remove(
     req.volumes
   );
   Ok(Json(removed))
+}
+
+fn target<'a>(
+  project: &'a Option<String>,
+  container: &'a Option<String>,
+) -> Result<(&'static str, &'a str), ApiError> {
+  match (project.as_deref(), container.as_deref()) {
+    (Some(p), None) if !p.is_empty() => Ok(("project", p)),
+    (None, Some(c)) if !c.is_empty() => Ok(("container", c)),
+    _ => Err(ApiError::invalid("project 和 container 二选一")),
+  }
+}
+
+#[derive(serde::Deserialize)]
+pub struct IgnoreRequest {
+  project: Option<String>,
+  container: Option<String>,
+  #[serde(default)]
+  undo: bool,
+}
+
+pub async fn ignore(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Path(server): Path<String>,
+  Json(req): Json<IgnoreRequest>,
+) -> ApiResult<serde_json::Value> {
+  auth.require(Perm::Apply)?;
+  let (kind, name) = target(&req.project, &req.container)?;
+  let snap = snapshot::load(&s.db).await?;
+  if !snap.world.servers.contains_key(&server) {
+    return Err(server_not_found(&server).into());
+  }
+  if !req.undo
+    && !discover(&s, &snap.world, &server)
+      .await?
+      .iter()
+      .any(|item| {
+        crate::service_monitor::unmanaged::target(item)
+          == (kind, name)
+      })
+  {
+    return Err(ApiError::not_found("没找到这个未纳管容器").into());
+  }
+  crate::service_monitor::unmanaged::set_ignored(
+    &s,
+    server,
+    kind,
+    name.to_string(),
+    req.undo,
+  )
+  .await?;
+  Ok(Json(serde_json::json!({ "ignored": !req.undo })))
 }

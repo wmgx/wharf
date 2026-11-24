@@ -45,6 +45,7 @@ pub fn hash(content: &str) -> String {
 pub struct Net {
   pub gate_public: Option<String>,
   pub gate_login: Option<String>,
+  pub heartbeat_url: Option<String>,
   /// 实际使用的内网地址：服务器设置的覆盖值，否则是 agent 检测到的组网地址。
   pub private: BTreeMap<String, PrivateAddr>,
   /// agent 上报的其他网卡地址，用来在缺内网地址时给出建议命令。
@@ -1413,6 +1414,9 @@ mod tests {
       backup: None,
       stopped: false,
       monitor: None,
+      log_alerts: vec![],
+      port_checks: Default::default(),
+      heartbeat: None,
       limits: None,
       auto_update: false,
       container: None,

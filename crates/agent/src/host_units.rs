@@ -76,6 +76,8 @@ async fn run(
     .args([
       "run",
       "--rm",
+      "--label",
+      "wharf.temp=1",
       "--pid",
       "host",
       "--network",

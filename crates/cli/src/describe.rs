@@ -112,6 +112,18 @@ mod tests {
       .filter_map(|c| c["command"].as_str())
       .collect();
     assert!(names.contains(&"wharf service deploy"));
+    for name in [
+      "log-alert",
+      "log-alert add",
+      "log-alert rm",
+      "port-check",
+      "heartbeat",
+      "unmanaged-ignore",
+    ] {
+      assert!(
+        names.contains(&format!("wharf service {name}").as_str())
+      );
+    }
     assert!(names.contains(&"wharf wait service"));
     assert!(!names.iter().any(|n| n.ends_with(" help")));
   }

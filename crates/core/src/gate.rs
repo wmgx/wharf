@@ -74,6 +74,10 @@ pub async fn init(s: &AppState) -> Result<(), ApiError> {
     .set((public, s.listen_port, s.public_url.clone()))
     .map_err(|_| ApiError::internal("门禁重复初始化"))
 }
+pub(crate) fn public_url() -> Option<&'static str> {
+  RENDER.get()?.2.as_deref()
+}
+
 pub fn render_context(
   world: &crate::world::World,
   net: &crate::render::Net,

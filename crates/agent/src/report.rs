@@ -88,6 +88,7 @@ impl Reporter {
       agent_memory: None,
       metrics: None,
       time_ms: None,
+      log_hits: vec![],
     }
   }
 

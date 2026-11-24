@@ -356,8 +356,44 @@ pub async fn make_plan(
       svc.host_ports.clear();
     }
   }
+  crate::service_monitor::heartbeat::prepare(
+    state,
+    &current,
+    &mut desired,
+  )?;
   desired.allocate_ports()?;
   desired.validate()?;
+  // 只改日志、端口监控或心跳时间时，计划只写配置，离线和现存漂移都不触发部署。
+  if req.changes.iter().all(|c| {
+    matches!(c, wharf_api_types::spec::Change::UpsertService { .. })
+  }) {
+    let writes = desired.writes_from(&current);
+    if !writes.is_empty()
+      && writes.iter().all(|write| match write {
+        Write::Upsert { kind, name, .. } if kind == KIND_SERVICE => {
+          current
+            .services
+            .get(name)
+            .zip(desired.services.get(name))
+            .is_some_and(|(old, new)| {
+              crate::service_monitor::config_only(old, new)
+            })
+        }
+        _ => false,
+      })
+    {
+      let mut b = Builder::default();
+      config_items(&mut b, &current, &desired, &writes);
+      return Ok(finish_plan(
+        &snap,
+        &current,
+        b,
+        writes,
+        crate::render::service_account_refs(&desired),
+        req.note.as_deref(),
+      ));
+    }
+  }
   let refresh: BTreeSet<String> = req
     .changes
     .iter()
@@ -532,6 +568,7 @@ pub async fn make_plan(
     }
   }
   let mut net = snap.net(&desired);
+  net.heartbeat_url.clone_from(&state.public_url);
   for (host, route) in &desired.routes {
     let Some(sso) = route
       .spec
@@ -652,6 +689,24 @@ pub async fn make_plan(
     timing.join("，")
   );
 
+  Ok(finish_plan(
+    &snap,
+    &current,
+    b,
+    writes,
+    account_refs,
+    req.note.as_deref(),
+  ))
+}
+
+fn finish_plan(
+  snap: &Snapshot,
+  current: &World,
+  mut b: Builder,
+  writes: Vec<Write>,
+  account_refs: BTreeSet<String>,
+  note: Option<&str>,
+) -> Planned {
   b.steps.sort_by_key(|s| s.step.order());
   // 同一次执行里要起 Tailscale：起来后机器地址会变，后面的服务和网关按新地址渲染，
   // 和计划时的指纹对不上是正常的，不校验。
@@ -702,20 +757,18 @@ pub async fn make_plan(
     warnings: b.warnings,
     needs_confirm,
     suggest,
-    note: req
-      .note
-      .as_deref()
+    note: note
       .map(str::trim)
       .filter(|n| !n.is_empty())
       .map(|n| n.chars().take(500).collect()),
   };
-  Ok(Planned {
+  Planned {
     plan,
     account_refs,
     route_effects: b.route_effects,
     steps: b.steps,
     writes,
-  })
+  }
 }
 
 /// 服务实际在哪台服务器上：最近一次成功部署的位置，没部署过就看配置。
@@ -751,7 +804,8 @@ fn spec_json(world: &World, kind: &str, name: &str) -> Option<Value> {
       world.servers.get(name).map(|r| to_json(&r.settings))
     }
     KIND_SERVICE => world.services.get(name).map(|r| {
-      let mut v = to_json(&r.spec);
+      let mut v =
+        to_json(&crate::service_monitor::heartbeat::redact(&r.spec));
       v["host_ports"] = json!(r.host_ports);
       v
     }),
@@ -1066,6 +1120,11 @@ fn service_items(
   writes: &[Write],
 ) -> Result<(), ApiError> {
   for (name, svc) in &desired.services {
+    if current.services.get(name).is_some_and(|old| {
+      crate::service_monitor::config_only(old, svc)
+    }) {
+      continue;
+    }
     let address = format!("{KIND_SERVICE}/{name}");
     let server = &svc.spec.server;
     let moved = moved_from(snap, current, name, server);
@@ -2655,6 +2714,7 @@ mod tests {
       image: String::new(),
       foreign: false,
       working_dir: None,
+      finished_at: None,
     }
   }
 

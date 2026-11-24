@@ -42,6 +42,8 @@ async fn collect_inner(
     .args([
       "run",
       "--rm",
+      "--label",
+      "wharf.temp=1",
       "--name",
       &helper,
       "--pid",

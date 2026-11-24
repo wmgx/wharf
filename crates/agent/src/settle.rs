@@ -142,6 +142,7 @@ mod tests {
       image: String::new(),
       foreign: false,
       working_dir: None,
+      finished_at: None,
     }
   }
 

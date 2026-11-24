@@ -453,7 +453,16 @@ async fn prepare(
   let image = crate::adopt::self_image(docker, &ctx).await?;
   let check = docker
     .cmd()
-    .args(["run", "--rm", "--entrypoint", "sh", &image, "-c"])
+    .args([
+      "run",
+      "--rm",
+      "--label",
+      "wharf.temp=1",
+      "--entrypoint",
+      "sh",
+      &image,
+      "-c",
+    ])
     .arg(
       "command -v nsenter >/dev/null && nsenter --version >/dev/null",
     )

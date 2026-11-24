@@ -126,7 +126,16 @@ async fn deploy_in(
   });
   let mut cmd = docker
     .cmd()
-    .args(["run", "--rm", "--name", &name, "--network", "host"])
+    .args([
+      "run",
+      "--rm",
+      "--label",
+      "wharf.temp=1",
+      "--name",
+      &name,
+      "--network",
+      "host",
+    ])
     .args([
       "-v",
       &format!("{}:/app", context.display()),

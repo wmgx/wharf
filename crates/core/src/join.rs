@@ -380,12 +380,12 @@ if ! run 900 $DOCKER pull "$IMAGE"; then
 fi
 
 step "加入 $CORE_URL"
-run 60 $DOCKER run --rm --network host -v "$DATA:$DATA" "$IMAGE" join "$CORE_URL" "$TOKEN" ${CORE_KEY:+--core-key "$CORE_KEY"} \
+run 60 $DOCKER run --rm --label wharf.temp=1 --network host -v "$DATA:$DATA" "$IMAGE" join "$CORE_URL" "$TOKEN" ${CORE_KEY:+--core-key "$CORE_KEY"} \
   || fail "加入失败，确认这台机器能访问 $CORE_URL"
 
 step "启动 agent"
 $DOCKER rm -f wharf-agent >/dev/null 2>&1 || true
-$DOCKER run -d --name wharf-agent --restart unless-stopped --network host \
+$DOCKER run -d --label wharf.system=agent --name wharf-agent --restart unless-stopped --network host \
   -v /var/run/docker.sock:/var/run/docker.sock -v "$DATA:$DATA" -v /srv:/srv \
   -e WHARF_SELF_IMAGE="$IMAGE" "$IMAGE" >/dev/null
 

@@ -106,6 +106,16 @@ impl Docker {
       .await?
       .check("docker ps")?;
     let mut by_project = parse_ps(&out.stdout);
+    let stopped: Vec<_> = projects
+      .iter()
+      .filter_map(|p| by_project.get(p))
+      .flatten()
+      .filter(|c| c.state != "running")
+      .map(|c| c.name.as_str())
+      .collect();
+    let finished =
+      crate::docker_observation::finished_at(self, &stopped, ctx)
+        .await;
     Ok(
       projects
         .iter()
@@ -126,6 +136,7 @@ impl Docker {
                   .working_dir
                   .as_deref()
                   .is_some_and(|w| Path::new(w) != dir),
+                finished_at: finished.get(&c.name).copied(),
                 ..c
               })
               .collect(),
@@ -767,6 +778,7 @@ pub fn parse_ps(
         health,
         image: ps.image,
         foreign: false,
+        finished_at: None,
         working_dir: labels
           .get("com.docker.compose.project.working_dir")
           .map(|w| w.to_string()),

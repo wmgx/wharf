@@ -82,6 +82,7 @@ mod render;
 mod resource_top;
 mod rollback;
 mod rules;
+mod service_monitor;
 mod sessions;
 mod share;
 mod shell;
@@ -217,6 +218,8 @@ async fn main() -> anyhow::Result<()> {
   external_checks::spawn(state.clone());
   agent_upgrade::spawn_check();
   monitor::spawn(state.clone());
+  service_monitor::spawn(state.clone());
+  service_monitor::unmanaged::spawn(state.clone());
   quality::spawn(state.clone());
   baseline::spawn(state.clone());
   disk::spawn(state.clone());

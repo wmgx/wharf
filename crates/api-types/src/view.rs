@@ -190,6 +190,12 @@ pub struct ServiceView {
   /// 自定义监控的最近一次结果；没配监控或还没检查过时为空。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub monitor: Option<MonitorView>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub log_alerts: Vec<crate::service_checks::LogAlertView>,
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub port_checks: BTreeMap<String, bool>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub heartbeat: Option<crate::service_checks::HeartbeatView>,
   /// 用 `[[@服务]]` 引用了哪些服务。
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub uses: Vec<String>,
@@ -696,6 +702,8 @@ pub struct Issue {
   /// oom_killed：服务的容器因内存超限被杀。
   /// recovery_low：恢复码少于 3 个。
   /// exposed_port：未确认的对公网监听端口。
+  /// log_keyword、port_down、heartbeat_late：服务监控触发（Fault）。
+  /// service_stopped_long、unmanaged_container：长期停止和未纳管容器（Info）。
   pub code: String,
   pub level: IssueLevel,
   #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -968,6 +976,8 @@ pub struct RestoreRequest {
 /// 是一个 compose 项目或一个 `docker run` 起的容器。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Unmanaged {
+  #[serde(default)]
+  pub ignored: bool,
   pub server: String,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub project: Option<String>,

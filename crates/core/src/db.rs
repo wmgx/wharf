@@ -365,6 +365,8 @@ ALTER TABLE alert_history ADD COLUMN subject TEXT;
     PRIMARY KEY (kind, name),
     FOREIGN KEY (kind, name) REFERENCES resources(kind, name) ON DELETE CASCADE
   );",
+  crate::service_monitor::heartbeat::MIGRATION,
+  crate::service_monitor::unmanaged::MIGRATION,
 ];
 
 /// git 构建来源固定到上次部署构建的 commit（仓库和分支没换过的）。当时没记下 commit 的留给 plan 提醒。

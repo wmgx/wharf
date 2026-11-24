@@ -1652,6 +1652,7 @@ fn validate_service(
   spec: &ServiceSpec,
 ) -> Result<(), ApiError> {
   validate_name("服务", name)?;
+  crate::service_monitor::validate(spec)?;
   if name.starts_with(GATEWAY_PROJECT_PREFIX) {
     return Err(ApiError::invalid(format!(
       "服务名不能以 {GATEWAY_PROJECT_PREFIX} 开头，它留给网关用"
@@ -2292,6 +2293,9 @@ mod tests {
       backup: None,
       stopped: false,
       monitor: None,
+      log_alerts: vec![],
+      port_checks: Default::default(),
+      heartbeat: None,
       limits: None,
       auto_update: false,
       container: None,

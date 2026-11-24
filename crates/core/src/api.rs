@@ -294,6 +294,10 @@ pub fn router(state: Arc<AppState>) -> Router {
       get(crate::import_api::unmanaged),
     )
     .route(
+      "/api/servers/{name}/unmanaged/ignore",
+      post(crate::import_api::ignore),
+    )
+    .route(
       "/api/servers/{name}/unmanaged/remove",
       post(crate::import_api::remove),
     )
@@ -703,7 +707,7 @@ async fn add_server(
     (
       "docker".to_string(),
       format!(
-        "docker run -d --name wharf-agent --restart unless-stopped --network host \
+        "docker run -d --label wharf.system=agent --name wharf-agent --restart unless-stopped --network host \
          -v /var/run/docker.sock:/var/run/docker.sock -v /var/lib/wharf:/var/lib/wharf -v /srv:/srv \
          -e WHARF_CORE_URL={core_url} -e WHARF_JOIN_TOKEN={token} -e WHARF_CORE_KEY={core_key} {}",
         image.as_deref().unwrap_or(&s.agent_image)
@@ -887,19 +891,29 @@ async fn set_vault(
   Ok(Json(json!({ "ok": true })))
 }
 
+#[derive(Default, Deserialize)]
+struct ServiceQuery {
+  #[serde(default)]
+  reveal: bool,
+}
+
 async fn show_service(
   State(s): State<Arc<AppState>>,
   auth: Auth,
   Path(name): Path<String>,
+  Query(query): Query<ServiceQuery>,
 ) -> ApiResult<ServiceView> {
   auth.require(Perm::Read)?;
   let snap = snapshot::load(&s.db).await?;
   let net = snap.net(&snap.world);
   let live = views::cached_live(&s, &snap.world).await;
-  Ok(Json(
-    views::service_view(&snap, &net, &name, Some(&live))
-      .ok_or_else(|| service_not_found(&name))?,
-  ))
+  let mut view = views::service_view(&snap, &net, &name, Some(&live))
+    .ok_or_else(|| service_not_found(&name))?;
+  if query.reveal {
+    view.heartbeat =
+      crate::service_monitor::heartbeat::view(&snap, &name, true);
+  }
+  Ok(Json(view))
 }
 
 #[derive(Deserialize)]
@@ -1127,7 +1141,9 @@ async fn deployments(
       run_id,
       compose,
       images: serde_json::from_str(&images).map_err(json_err)?,
-      spec: spec.and_then(|s| serde_json::from_str(&s).ok()),
+      spec: spec
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .map(|spec| crate::service_monitor::heartbeat::redact(&spec)),
       hash,
       created_at: to_time(created),
       commit,

@@ -69,6 +69,8 @@ pub async fn list(
     .args([
       "run",
       "--rm",
+      "--label",
+      "wharf.temp=1",
       "--network",
       "none",
       "--entrypoint",
@@ -121,6 +123,8 @@ pub async fn pack(
     .args([
       "run",
       "--rm",
+      "--label",
+      "wharf.temp=1",
       "--network",
       "none",
       "--entrypoint",
