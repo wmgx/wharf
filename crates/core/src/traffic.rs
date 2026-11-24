@@ -226,15 +226,20 @@ pub fn spawn(state: Arc<AppState>) {
 pub fn issues() -> Vec<Issue> {
   rules::firing_subjects("traffic_quota")
     .into_iter()
-    .map(|(name, title)| Issue {
-      code: "traffic_quota".into(),
-      level: IssueLevel::Warn,
-      subject: Some(IssueSubject {
-        kind: "server".into(),
-        name,
-      }),
-      title,
-      hint: None,
+    .map(|(name, title)| {
+      let (alert, ack) = rules::issue_alert("traffic_quota", &name);
+      Issue {
+        code: "traffic_quota".into(),
+        level: IssueLevel::Warn,
+        subject: Some(IssueSubject {
+          kind: "server".into(),
+          name,
+        }),
+        title,
+        hint: None,
+        ack,
+        alert,
+      }
     })
     .collect()
 }

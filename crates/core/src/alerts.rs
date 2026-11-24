@@ -12,15 +12,21 @@ const EVERY: Duration = Duration::from_secs(60);
 pub fn issues() -> Vec<Issue> {
   crate::rules::firing_subjects("container_restarting")
     .into_iter()
-    .map(|(name, title)| Issue {
-      code: "container_restarting".into(),
-      level: IssueLevel::Fault,
-      subject: Some(IssueSubject {
-        kind: "service".into(),
-        name,
-      }),
-      title,
-      hint: None,
+    .map(|(name, title)| {
+      let (alert, ack) =
+        crate::rules::issue_alert("container_restarting", &name);
+      Issue {
+        code: "container_restarting".into(),
+        level: IssueLevel::Fault,
+        subject: Some(IssueSubject {
+          kind: "service".into(),
+          name,
+        }),
+        title,
+        hint: None,
+        ack,
+        alert,
+      }
     })
     .collect()
 }
@@ -67,6 +73,26 @@ async fn round(
     })
     .collect();
 
+  let down_gateways: std::collections::BTreeSet<String> = snap
+    .world
+    .gateways
+    .iter()
+    .filter_map(|(name, row)| {
+      let project = crate::world::gateway_project(name);
+      match live.get(&row.spec.server) {
+        Some(Ok(projects)) => {
+          let running =
+            projects.get(&project).is_some_and(|p| p.all_running());
+          (!running).then(|| name.clone())
+        }
+        Some(Err(_)) | None => {
+          (!state.hub.is_online(&row.spec.server))
+            .then(|| name.clone())
+        }
+      }
+    })
+    .collect();
+  crate::rules::sync_unavailable_gateways(state, down_gateways).await;
   for (name, online) in &servers {
     crate::rules::observe(
       state,

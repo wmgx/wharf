@@ -118,6 +118,12 @@ export interface AgentUsage {
   memory_pct: number | null;
 }
 
+export interface AlertAckView {
+  at: number;
+  by: string;
+  note?: string | null;
+}
+
 export interface AlertHistoryView {
   at: number;
   /**
@@ -135,12 +141,15 @@ export interface AlertHistoryView {
   title: string;
 }
 
+export type AlertLevel = "urgent" | "digest";
+
 /**
  * `PUT /api/alerts/{id}`：只改给了的字段。`reset` 恢复默认值。
  */
 export interface AlertPatch {
   enabled?: boolean | null;
   for_n?: number | null;
+  level?: AlertLevel | null;
   /**
    * 静默多少分钟，0 取消静默。
    */
@@ -164,6 +173,7 @@ export interface AlertRuleView {
   enabled: boolean;
   for_n: number;
   id: string;
+  level: AlertLevel;
   /**
    * 指标名，例如 `server.online`。
    */
@@ -184,10 +194,25 @@ export interface AlertRuleView {
   threshold_editable: boolean;
 }
 
+export interface AlertSuppressionView {
+  created_at: number;
+  id: number;
+  source_rule: string;
+  source_subject?: string | null;
+  target_rule: string;
+  target_subject?: string | null;
+}
+
+export interface AlertTarget {
+  rule: string;
+  subject: string;
+}
+
 /**
  * `GET /api/alerts`：告警规则、事件通知的开关，正在触发的告警和最近的推送。
  */
 export interface AlertsView {
+  builtin_suppressions: BuiltinSuppressionView[];
   firing: FiringView[];
   /**
    * 最近的推送（新的在前，保留 7 天）。
@@ -199,6 +224,7 @@ export interface AlertsView {
   include_logs: boolean;
   notices: NoticeView[];
   rules: AlertRuleView[];
+  suppressions: AlertSuppressionView[];
 }
 
 export type AllCookies = "all";
@@ -426,6 +452,12 @@ export interface BuildSource {
    * CLI 上传到控制面的代码包（tar.gz）的 sha256。
    */
   upload?: string | null;
+}
+
+export interface BuiltinSuppressionView {
+  enabled: boolean;
+  id: string;
+  name: string;
 }
 
 /**
@@ -983,6 +1015,7 @@ export interface FileSpec {
 }
 
 export interface FiringView {
+  ack?: AlertAckView | null;
   rule: string;
   /**
    * 开始触发的时间（毫秒）。
@@ -1247,6 +1280,8 @@ export interface ImportRecord {
 }
 
 export interface Issue {
+  ack?: AlertAckView | null;
+  alert?: AlertTarget | null;
   /**
    * 这是哪一类问题，页面按它决定给什么按钮。取值见下表。
    * oom_killed：服务的容器因内存超限被杀。
@@ -1586,8 +1621,10 @@ export interface NewerTag {
  * 一类事件通知：发生就推，没有阈值。
  */
 export interface NoticeView {
+  customized: boolean;
   enabled: boolean;
   id: string;
+  level: AlertLevel;
   muted_until?: number | null;
   name: string;
 }

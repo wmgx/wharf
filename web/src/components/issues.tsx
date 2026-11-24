@@ -1,11 +1,87 @@
+import { useState } from "react";
 import { CircleAlertIcon, InfoIcon, TriangleAlertIcon } from "lucide-react";
 import { useNavigate } from "react-router-dom";
+import { toast } from "sonner";
+import { api } from "@/api";
 import { useActions } from "@/components/actions";
 import { CopyButton, SectionTitle } from "@/components/common";
 import { Row, Rows } from "@/components/kit";
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import { useStatus } from "@/status";
-import type { Issue, IssueSubject } from "@/types";
+import type { AlertAckView, AlertTarget, Issue, IssueSubject } from "@/types";
+
+const clock = (ms: number) => new Date(ms).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+
+export function ackSummary(ack: AlertAckView): string {
+  return `已确认 · ${ack.by} · ${clock(ack.at)}${ack.note ? ` · ${ack.note}` : ""}`;
+}
+
+export function AckButton({ target, ack, onDone }: { target: AlertTarget; ack?: AlertAckView | null; onDone?: () => void }) {
+  const { refresh } = useStatus();
+  const [open, setOpen] = useState(false);
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const submit = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await api.post("/api/alerts/ack", { rule: target.rule, subject: target.subject, note: note.trim() || undefined });
+      setOpen(false);
+      setNote("");
+      refresh();
+      onDone?.();
+    } catch (e) {
+      toast.error("确认失败", { description: (e as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const unack = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await api.post("/api/alerts/unack", { rule: target.rule, subject: target.subject });
+      refresh();
+      onDone?.();
+    } catch (e) {
+      toast.error("取消确认失败", { description: (e as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (ack) {
+    return <Button variant="ghost" size="xs" disabled={busy} onClick={unack}>取消确认</Button>;
+  }
+  return (
+    <>
+      <Button variant="outline" size="xs" onClick={() => setOpen(true)}>确认</Button>
+      <Dialog open={open} onOpenChange={(o) => { setOpen(o); if (!o) setNote(""); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>确认告警</DialogTitle>
+          </DialogHeader>
+          <Input
+            autoFocus
+            maxLength={200}
+            placeholder="备注（可选）"
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && submit()}
+          />
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setOpen(false)}>取消</Button>
+            <Button disabled={busy} onClick={submit}>{busy ? "处理中…" : "确认"}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
 
 export function useIssues(): Issue[] {
   const status = useStatus().status;
@@ -41,10 +117,13 @@ export function IssueRow({ issue }: { issue: Issue }) {
   return (
     <Row className="items-start">
       <Icon className={`mt-0.5 size-4 shrink-0 ${color}`} />
-      <span className="min-w-0 flex-1 break-all">{issue.title}
+      <span className="min-w-0 flex-1 break-all">
+        {issue.title}
+        {issue.ack && <span className="mt-0.5 block text-xs text-muted-foreground">{ackSummary(issue.ack)}</span>}
         {issue.code === "dns_not_effective" && issue.hint && <code className="mt-1.5 block font-mono text-xs text-foreground/70">{issue.hint}</code>}
       </span>
       {issue.code === "dns_not_effective" && issue.hint && <CopyButton text={issue.hint} />}
+      {issue.alert && <AckButton target={issue.alert} ack={issue.ack} />}
       {issue.code === "update_available" && subject ? (
         <Button variant="outline" size="xs" onClick={() => actions.plan({ title: `更新 ${subject.name}`, changes: [{ op: "refresh_images", name: subject.name }] })}>更新</Button>
       ) : issue.code === "tag_available" && subject && tag ? (

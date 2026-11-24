@@ -68,6 +68,8 @@ pub fn issues(servers: &[ServerView]) -> Vec<Issue> {
         server.name
       ),
       hint: Some(format!("wharf server show {}", server.name)),
+      ack: None,
+      alert: None,
     })
   }));
   issues

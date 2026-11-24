@@ -204,6 +204,8 @@ pub async fn issues(db: &Db) -> Result<Vec<Issue>, ApiError> {
       subject: None,
       title: format!("恢复码只剩 {} 个", v.recovery_left),
       hint: Some("在“设置 → 登录与安全”重新生成".into()),
+      ack: None,
+      alert: None,
     }]
   } else {
     vec![]

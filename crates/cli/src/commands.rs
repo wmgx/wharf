@@ -26,9 +26,9 @@ use wharf_api_types::{
 };
 
 use crate::{
-  AccountCmd, AlertCmd, AppAccountCmd, ApplyFlags, BackupCmd,
-  BuildArgs, Cli, Command, EgressCmd, GatewayCmd, NotifyCmd,
-  RouteCmd, RunCmd, SecretCmd, ServerCmd, ServiceCmd,
+  AccountCmd, AppAccountCmd, ApplyFlags, BackupCmd, BuildArgs, Cli,
+  Command, EgressCmd, GatewayCmd, NotifyCmd, RouteCmd, RunCmd,
+  SecretCmd, ServerCmd, ServiceCmd,
   client::{CliError, CliResult, Client, Config, read_secret, seg},
   fleet, print,
 };
@@ -553,7 +553,7 @@ async fn dispatch(
       out(j, &v, print::network);
       Ok(())
     }
-    Command::Alert(cmd) => alert(c, cmd, j).await,
+    Command::Alert(cmd) => crate::alert::run(c, cmd, j).await,
     Command::Server(cmd) => server(c, cmd, j).await,
     Command::Top(args) => crate::top::run(c, args, j).await,
     Command::Service(cmd) => service(c, cmd, j).await,
@@ -2733,132 +2733,7 @@ async fn pick_server(c: &Client) -> CliResult<String> {
 
 // GATEWAYS / ROUTES
 
-/// `alert set --dry-run`：规则或事件通知改前改后。恢复默认值要控制面算，只标出来。
-fn alert_preview(
-  now: &wharf_api_types::view::AlertsView,
-  id: &str,
-  patch: &wharf_api_types::view::AlertPatch,
-  j: bool,
-) -> CliResult<()> {
-  let before = if let Some(r) = now.rules.iter().find(|r| r.id == id)
-  {
-    json!({
-      "enabled": r.enabled,
-      "threshold": r.threshold,
-      "for": r.for_n,
-      "muted_until": r.muted_until.map(fmt_ms),
-    })
-  } else if let Some(n) = now.notices.iter().find(|n| n.id == id) {
-    json!({ "enabled": n.enabled, "muted_until": n.muted_until.map(fmt_ms) })
-  } else {
-    return Err(
-      ApiError::not_found(format!("没有告警规则或事件通知 {id}"))
-        .suggest("wharf alert list")
-        .into(),
-    );
-  };
-  let mut after = before.clone();
-  if patch.reset {
-    after["reset"] = json!("恢复默认值");
-  }
-  if let Some(v) = patch.enabled {
-    after["enabled"] = json!(v);
-  }
-  if let Some(v) = patch.threshold {
-    after["threshold"] = json!(v);
-  }
-  if let Some(v) = patch.for_n {
-    after["for"] = json!(v);
-  }
-  match patch.mute_minutes {
-    Some(0) => after["muted_until"] = Value::Null,
-    Some(m) => {
-      after["muted_until"] = json!(fmt_ms(
-        chrono::Utc::now().timestamp_millis() + i64::from(m) * 60_000
-      ))
-    }
-    None => {}
-  }
-  crate::preview::show(j, &format!("alert/{id}"), &before, &after)
-}
-
-async fn alert(c: &Client, cmd: AlertCmd, j: bool) -> CliResult<()> {
-  use wharf_api_types::view::{AlertOptions, AlertPatch, AlertsView};
-  let v: AlertsView = match cmd {
-    AlertCmd::List => c.get("/api/alerts").await?,
-    AlertCmd::Options { include_logs } => {
-      c.put(
-        "/api/alerts/options",
-        &AlertOptions {
-          include_logs: include_logs == "on",
-        },
-      )
-      .await?
-    }
-    AlertCmd::Set {
-      id,
-      on,
-      off,
-      threshold,
-      for_n,
-      mute,
-      reset,
-      dry_run,
-    } => {
-      let patch = AlertPatch {
-        enabled: (on || off).then_some(on),
-        threshold,
-        for_n,
-        mute_minutes: mute,
-        reset,
-      };
-      if dry_run {
-        let now: AlertsView = c.get("/api/alerts").await?;
-        return alert_preview(&now, &id, &patch, j);
-      }
-      c.put(&format!("/api/alerts/{}", seg(&id)), &patch).await?
-    }
-  };
-  out(j, &v, |v| {
-    let state = |on: bool, muted: Option<i64>| match (on, muted) {
-      (false, _) => "关".to_string(),
-      (true, Some(t)) => format!("静默到 {}", fmt_ms(t)),
-      (true, None) => "开".to_string(),
-    };
-    println!("告警规则：");
-    for r in &v.rules {
-      println!(
-        "  {:<22} {:<8} {}  {}",
-        r.id,
-        state(r.enabled, r.muted_until),
-        r.name,
-        r.condition
-      );
-    }
-    println!("事件通知：");
-    for n in &v.notices {
-      println!(
-        "  {:<22} {:<8} {}",
-        n.id,
-        state(n.enabled, n.muted_until),
-        n.name
-      );
-    }
-    if !v.firing.is_empty() {
-      println!("正在触发：");
-      for f in &v.firing {
-        println!("  {}（{} 起）", f.title, fmt_ms(f.since));
-      }
-    }
-    println!(
-      "告警附带日志：{}",
-      if v.include_logs { "开" } else { "关" }
-    );
-  });
-  Ok(())
-}
-
-fn fmt_ms(ms: i64) -> String {
+pub(crate) fn fmt_ms(ms: i64) -> String {
   chrono::DateTime::from_timestamp_millis(ms)
     .map(|t| {
       t.with_timezone(&chrono::Local)
