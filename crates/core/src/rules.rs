@@ -6,7 +6,7 @@
 
 use std::{
   collections::{BTreeMap, VecDeque},
-  sync::{Arc, Mutex},
+  sync::Mutex,
 };
 
 use serde::{Deserialize, Serialize};

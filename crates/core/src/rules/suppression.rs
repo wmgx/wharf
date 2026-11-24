@@ -221,12 +221,12 @@ pub(super) async fn reason(
     let snap = crate::snapshot::load(&state.db).await?;
     cause = built_in(&snap.world, cfg, &firing, id, subject);
     if id == "task" && enabled(cfg, OFFLINE) {
-      let tasks = crate::tasks::load(&state.db).await?;
+      let tasks = crate::tasks::load(state).await?;
       if let Some((_, spec, _)) =
-        tasks.iter().find(|(name, _, _)| name == subject)
+        tasks.into_iter().find(|(name, _, _)| name == subject)
       {
         cause = firing
-          .get(&("server_offline".into(), spec.server.clone()))
+          .get(&("server_offline".into(), spec.server))
           .map(|(_, t)| t.clone());
       }
     }

@@ -345,9 +345,9 @@ async fn push_inner(
   if replay && matches!(decision, Decision::Suppress(_)) {
     return Ok(None);
   }
-  let skipped = match &decision {
+  let skipped = match decision {
     Decision::Skip(reason) | Decision::Suppress(reason) => {
-      Some(reason.clone())
+      Some(reason)
     }
     Decision::Digest => Some(DIGEST_SKIP.into()),
     Decision::Send => {
