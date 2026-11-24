@@ -38,6 +38,8 @@ const HOUR_MS: i64 = 60 * 60 * 1000;
 const DAY_MS: i64 = 24 * HOUR_MS;
 /// 单次报告最多扫描的数据点数，防止全量扫表拖慢控制面。
 pub const MAX_SCAN_POINTS: usize = 500_000;
+/// 上期至少覆盖周期长度的 80% 才参与同比，避免旧数据不足时算出假暴涨。
+pub const MIN_PREVIOUS_RATIO: f64 = 0.8;
 
 #[derive(Deserialize)]
 pub struct ReportQuery {
@@ -170,6 +172,27 @@ fn make_delta(
     previous,
     change_pct: calc_change_pct(current, previous),
   }
+}
+
+fn clear_previous(d: &mut MetricDelta) {
+  d.previous = None;
+  d.change_pct = None;
+}
+
+fn previous_coverage_ratio(
+  earliest_at: Option<i64>,
+  previous_start: i64,
+  previous_end: i64,
+) -> f64 {
+  let Some(earliest) = earliest_at else {
+    return 0.0;
+  };
+  let span = previous_end - previous_start;
+  if span <= 0 || earliest >= previous_end {
+    return 0.0;
+  }
+  let covered = (previous_end - earliest.max(previous_start)) as f64;
+  (covered / span as f64).clamp(0.0, 1.0)
 }
 
 fn update_bounds(
@@ -483,10 +506,36 @@ fn compute_at(
   }
 
   let has_current = latest_at.is_some_and(|t| t >= period_start);
-  let has_previous = earliest_at.is_some_and(|t| t < period_start);
+  let previous_ratio = previous_coverage_ratio(
+    earliest_at,
+    previous_start,
+    previous_end,
+  );
+  let has_previous = previous_ratio >= MIN_PREVIOUS_RATIO;
+
+  if !has_previous {
+    for s in &mut servers {
+      clear_previous(&mut s.cpu_avg);
+      clear_previous(&mut s.cpu_peak);
+      clear_previous(&mut s.mem_avg);
+      clear_previous(&mut s.mem_peak);
+      clear_previous(&mut s.disk_change);
+      clear_previous(&mut s.net_rx_bytes);
+      clear_previous(&mut s.net_tx_bytes);
+    }
+    for svc in &mut services {
+      clear_previous(&mut svc.cpu_avg);
+      clear_previous(&mut svc.mem_avg);
+      clear_previous(&mut svc.mem_peak);
+      clear_previous(&mut svc.requests);
+      clear_previous(&mut svc.err_pct);
+      clear_previous(&mut svc.p95_ms);
+    }
+  }
 
   let mut alerts: Vec<AlertReport> = alert_counts
     .into_iter()
+    .filter(|(_, (_, curr))| has_previous || *curr > 0)
     .map(|(rule, (prev, curr))| {
       let previous = has_previous.then_some(prev);
       let change_pct = calc_change_pct(
@@ -516,6 +565,7 @@ fn compute_at(
     latest_at,
     has_current,
     has_previous,
+    previous_ratio,
   };
   Ok(ReportView {
     days,

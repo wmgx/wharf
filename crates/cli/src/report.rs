@@ -94,8 +94,9 @@ fn print_report(v: &ReportView) {
   if !cov.has_previous {
     match (cov.earliest_at, cov.latest_at) {
       (Some(a), Some(b)) => {
+        let pct = (cov.previous_ratio * 100.0).floor() as u32;
         println!(
-          "数据范围：{} ～ {}（上期数据不足，同比标为无对比）",
+          "数据范围：{} ～ {}（上期数据只覆盖 {pct}%，不做对比）",
           fmt_ms(a),
           fmt_ms(b)
         );

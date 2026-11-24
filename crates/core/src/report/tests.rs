@@ -173,3 +173,94 @@ async fn scan_limit_returns_error_with_hint() {
     err.hint
   );
 }
+
+#[tokio::test]
+async fn partial_previous_ten_minutes_disables_comparison() {
+  let db = Db::memory();
+  let now = 1_700_000_000_000 / HOUR_MS * HOUR_MS;
+  let period_start = now - 7 * DAY_MS;
+  let prev_point = period_start - 10 * 60_000;
+
+  let report = db
+    .call(move |c| {
+      let world = seed_world(c);
+      // 上期只在边界前 10 分钟有极少数据，覆盖率远低于 80%。
+      insert_point(c, "host.cpu", "s1", prev_point, 10.0);
+      insert_point(c, "host.mem", "s1", prev_point, 100.0);
+      insert_point(c, "host.net_rx", "s1", prev_point, 10.0);
+      insert_point(c, "host.net_tx", "s1", prev_point, 5.0);
+      insert_point(c, "svc.cpu", "web", prev_point, 5.0);
+      insert_point(c, "svc.mem", "web", prev_point, 50.0);
+      insert_point(c, "req.qps", "web", prev_point, 0.01);
+      insert_point(c, "req.err", "web", prev_point, 0.1);
+      insert_point(c, "req.p95", "web", prev_point, 20.0);
+      c.execute(
+        "INSERT INTO alert_history (at, source, subject, title, ok, skipped)
+         VALUES (?1, 'http_5xx', 'web', '5xx', 0, NULL)",
+        params![prev_point],
+      )
+      .unwrap();
+
+      // 本期 7 天完整数据，且数值远高于上期 10 分钟样本。
+      for h in 0..(7 * 24) {
+        let at = period_start + h * HOUR_MS;
+        insert_point(c, "host.cpu", "s1", at, 30.0);
+        insert_point(c, "host.mem", "s1", at, 200.0);
+        insert_point(c, "host.net_rx", "s1", at, 10_000.0);
+        insert_point(c, "host.net_tx", "s1", at, 5_000.0);
+        insert_point(c, "svc.cpu", "web", at, 25.0);
+        insert_point(c, "svc.mem", "web", at, 100.0);
+        insert_point(c, "req.qps", "web", at, 20.0);
+        insert_point(c, "req.err", "web", at, 1.0);
+        insert_point(c, "req.p95", "web", at, 120.0);
+      }
+      for i in 0..2 {
+        c.execute(
+          "INSERT INTO alert_history (at, source, subject, title, ok, skipped)
+           VALUES (?1, 'http_5xx', 'web', '5xx', 0, NULL)",
+          params![period_start + (i + 1) * HOUR_MS],
+        )
+        .unwrap();
+      }
+      compute_at(c, &world, now, 7, None, None, MAX_SCAN_POINTS)
+    })
+    .await
+    .unwrap();
+
+  assert!(report.coverage.has_current);
+  assert!(!report.coverage.has_previous);
+  assert!(report.coverage.previous_ratio > 0.0);
+  assert!(report.coverage.previous_ratio < 0.01);
+
+  let s1 = &report.servers[0];
+  for d in [
+    &s1.cpu_avg,
+    &s1.cpu_peak,
+    &s1.mem_avg,
+    &s1.mem_peak,
+    &s1.disk_change,
+    &s1.net_rx_bytes,
+    &s1.net_tx_bytes,
+  ] {
+    assert_eq!(d.previous, None);
+    assert_eq!(d.change_pct, None);
+  }
+  let web = &report.services[0];
+  for d in [
+    &web.cpu_avg,
+    &web.mem_avg,
+    &web.mem_peak,
+    &web.requests,
+    &web.err_pct,
+    &web.p95_ms,
+  ] {
+    assert_eq!(d.previous, None);
+    assert_eq!(d.change_pct, None);
+  }
+  assert_eq!(report.alerts.len(), 1);
+  assert_eq!(report.alerts[0].current, 2);
+  assert_eq!(report.alerts[0].previous, None);
+  assert_eq!(report.alerts[0].change_pct, None);
+  assert!(report.summary.iter().all(|line| !line.contains('%')));
+  assert_eq!(report.summary, vec!["和上期相比没有明显变化"]);
+}
