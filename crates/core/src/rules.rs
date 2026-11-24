@@ -274,7 +274,7 @@ enum Verdict {
   Hold,
 }
 
-pub(super) fn judge_consecutive(
+fn judge_consecutive(
   op: Op,
   threshold: f64,
   for_n: u32,
