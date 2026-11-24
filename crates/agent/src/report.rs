@@ -14,10 +14,17 @@ use wharf_api_types::{
 
 use crate::docker::Docker;
 
-/// 公网 IP 探测地址，国内的放前面。
-const PUBLIC_IP_URLS: &[&str] =
-  &["https://4.ipw.cn", "https://api.ipify.org"];
+/// 公网 IPv4 探测地址：国内能直连的放前面，海外兜底放后面。
+const PUBLIC_IP_URLS: &[&str] = &[
+  "https://4.ipw.cn",
+  "https://ip.3322.net",
+  "https://ddns.oray.com/checkip",
+  "https://myip.ipip.net",
+  "https://api4.ipify.org",
+  "https://api.ipify.org",
+];
 const PUBLIC_IP_TTL: Duration = Duration::from_secs(30 * 60);
+const PUBLIC_IP_RETRY_TTL: Duration = Duration::from_secs(5 * 60);
 
 /// 探测时间和结果。
 type CachedIp = (Instant, Option<String>);
@@ -80,7 +87,7 @@ impl Reporter {
         .clone()
         .or_else(|| egress.ipv4.clone()),
       egress_info: Some(egress),
-      docker_quota: quota,
+      docker_quota: Some(quota),
       data_dir: self.docker.data_dir.display().to_string(),
       build: wharf_api_types::BUILD.to_string(),
       disk: disk(&self.docker.data_dir),
@@ -96,7 +103,12 @@ impl Reporter {
     let mut cache = self.cache.lock().await;
     if let Some((at, ip)) = &*cache
       && !refresh
-      && at.elapsed() < PUBLIC_IP_TTL
+      && at.elapsed()
+        < if ip.is_some() {
+          PUBLIC_IP_TTL
+        } else {
+          PUBLIC_IP_RETRY_TTL
+        }
     {
       return ip.clone();
     }
@@ -185,25 +197,63 @@ fn is_cgnat(ip: Ipv4Addr) -> bool {
   a == 100 && (64..128).contains(&b)
 }
 
-async fn detect_public_ip() -> Option<String> {
-  let client = reqwest::Client::builder()
-    .timeout(Duration::from_secs(5))
-    .redirect(reqwest::redirect::Policy::none())
-    .no_proxy()
-    .build()
-    .ok()?;
-  for url in PUBLIC_IP_URLS {
-    let Ok(resp) = client.get(*url).send().await else {
-      continue;
+fn extract_ipv4(text: &str) -> Option<Ipv4Addr> {
+  let usable = |ip: Ipv4Addr| {
+    !ip.is_private()
+      && !ip.is_loopback()
+      && !ip.is_link_local()
+      && !ip.is_unspecified()
+      && !ip.is_broadcast()
+  };
+  if let Ok(ip) = text.trim().parse::<Ipv4Addr>()
+    && usable(ip)
+  {
+    return Some(ip);
+  }
+  text
+    .split(|c: char| !c.is_ascii_digit() && c != '.')
+    .filter_map(|token| token.parse::<Ipv4Addr>().ok())
+    .find(|&ip| usable(ip))
+}
+
+async fn detect_public_ip_from(
+  client: &reqwest::Client,
+  urls: &[&str],
+) -> Option<String> {
+  for url in urls {
+    let resp = match client.get(*url).send().await {
+      Ok(r) if r.status().is_success() => r,
+      Ok(r) => {
+        tracing::debug!(
+          "公网 IP 探测 {url} 返回 HTTP {}",
+          r.status().as_u16()
+        );
+        continue;
+      }
+      Err(e) => {
+        tracing::debug!("公网 IP 探测 {url} 失败：{e}");
+        continue;
+      }
     };
     let Ok(text) = resp.text().await else {
       continue;
     };
-    if let Ok(ip) = text.trim().parse::<Ipv4Addr>() {
+    if let Some(ip) = extract_ipv4(&text) {
       return Some(ip.to_string());
     }
   }
   None
+}
+
+async fn detect_public_ip() -> Option<String> {
+  let client = reqwest::Client::builder()
+    .timeout(Duration::from_secs(6))
+    .redirect(reqwest::redirect::Policy::none())
+    .no_proxy()
+    .user_agent("wharf-agent")
+    .build()
+    .ok()?;
+  detect_public_ip_from(&client, PUBLIC_IP_URLS).await
 }
 
 /// agent 容器的根目录是 overlay，statvfs 看到的是 Docker 存储目录所在的磁盘。
@@ -249,5 +299,67 @@ mod tests {
     assert!(is_cgnat("100.101.102.103".parse().unwrap()));
     assert!(!is_cgnat("100.128.0.1".parse().unwrap()));
     assert!(!is_cgnat("192.168.1.10".parse().unwrap()));
+  }
+
+  #[test]
+  fn extract_ipv4_parses_plain_and_text_responses() {
+    assert_eq!(
+      extract_ipv4("203.0.113.8\n"),
+      Some("203.0.113.8".parse().unwrap())
+    );
+    assert_eq!(
+      extract_ipv4(
+        "<html><body>Current IP Address: 198.51.100.24</body></html>"
+      ),
+      Some("198.51.100.24".parse().unwrap())
+    );
+    assert_eq!(
+      extract_ipv4("当前 IP：198.51.100.9  来自于：中国 北京 电信"),
+      Some("198.51.100.9".parse().unwrap())
+    );
+    assert_eq!(extract_ipv4("127.0.0.1"), None);
+    assert_eq!(extract_ipv4("192.168.1.1"), None);
+  }
+
+  #[tokio::test]
+  async fn detect_public_ip_falls_back_to_second_url() {
+    use tokio::{
+      io::{AsyncReadExt, AsyncWriteExt},
+      net::TcpListener,
+    };
+
+    async fn serve(reply: &'static str) -> String {
+      let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+      let addr = listener.local_addr().unwrap();
+      tokio::spawn(async move {
+        if let Ok((mut conn, _)) = listener.accept().await {
+          let mut buf = [0u8; 1024];
+          let _ = conn.read(&mut buf).await;
+          let _ = conn.write_all(reply.as_bytes()).await;
+        }
+      });
+      format!("http://{addr}")
+    }
+
+    let first = serve(
+      "HTTP/1.1 403 Forbidden\r\nContent-Length: 11\r\n\r\n203.0.113.1",
+    )
+    .await;
+    let second = serve(
+      "HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\n203.0.113.42",
+    )
+    .await;
+    let client = reqwest::Client::builder()
+      .timeout(Duration::from_secs(2))
+      .redirect(reqwest::redirect::Policy::none())
+      .no_proxy()
+      .user_agent("wharf-agent")
+      .build()
+      .unwrap();
+    let urls = [first.as_str(), second.as_str()];
+    assert_eq!(
+      detect_public_ip_from(&client, &urls).await.as_deref(),
+      Some("203.0.113.42")
+    );
   }
 }

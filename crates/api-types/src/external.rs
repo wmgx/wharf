@@ -74,12 +74,18 @@ pub struct EgressInfo {
 }
 
 #[derive(
-  Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema,
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
 )]
 pub struct DockerQuota {
-  pub remaining: u32,
-  pub limit: u32,
-  pub window_secs: u32,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub remaining: Option<u32>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub limit: Option<u32>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub window_secs: Option<u32>,
+  /// 查询失败时的简短原因；查到额度时为空。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub error: Option<String>,
   pub checked_at: DateTime<Utc>,
 }
 

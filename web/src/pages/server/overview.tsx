@@ -15,6 +15,11 @@ export function Overview({ server, status, info, traffic, loading }: { server: S
   const disk = r?.disk;
   const egress = r?.egress_info;
   const quota = r?.docker_quota;
+  const quotaText = quota?.remaining != null && quota.limit != null && quota.window_secs != null
+    ? `${quota.remaining} / ${quota.limit}（${quota.window_secs / 3600} 小时窗口，查于 ${quota.checked_at}）`
+    : quota?.error
+      ? `查不到（${quota.error}，查于 ${quota.checked_at}）`
+      : "查不到";
   const mirror = !!server.settings.registry_mirrors?.["docker.io"]?.length;
   const agent = server.agent;
   const limit = (v: number) => v === 0 ? "不限" : size(v);
@@ -62,7 +67,7 @@ export function Overview({ server, status, info, traffic, loading }: { server: S
         ["出口 IPv6", <span className="font-mono text-xs">{egress?.ipv6 ?? (egress ? "无" : "-")}</span>],
         ["运营商", [egress?.asn, egress?.operator].filter(Boolean).join(" ") || "-"],
         ["地区", [egress?.country, egress?.city].filter(Boolean).join(" ") || "-"],
-        ["Docker Hub 剩余额度", `${quota ? `${quota.remaining} / ${quota.limit}（${quota.window_secs / 3600} 小时窗口，查于 ${quota.checked_at}）` : "查不到"}${mirror ? " · 已设镜像源" : ""}`],
+        ["Docker Hub 剩余额度", `${quotaText}${mirror ? " · 已设镜像源" : ""}`],
         ["内网地址", server.private_addr?.ip && <span className="font-mono text-xs">
           {server.private_addr.ip}
         </span>],
