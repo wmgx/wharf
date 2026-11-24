@@ -796,4 +796,4 @@ pub fn issue_alert(
 
 #[cfg(test)]
 #[path = "rules/tests.rs"]
-mod tests;
+pub(crate) mod tests;

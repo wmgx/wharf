@@ -385,6 +385,8 @@ mod tests {
   #[tokio::test]
   async fn heartbeat_route_fails_recovers_and_keeps_task_runs_unchanged()
    {
+    let _g = crate::rules::tests::TEST_LOCK.lock().await;
+    crate::rules::tests::reset_memory();
     let state = super::super::tests::state();
     state.db.call(|c| {
       let spec = json!({
