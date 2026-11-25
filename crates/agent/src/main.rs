@@ -12,6 +12,7 @@ use std::{path::PathBuf, sync::Arc};
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
 
+mod access_logs;
 mod adopt;
 mod agent_memory;
 mod build;

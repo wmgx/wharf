@@ -6,6 +6,7 @@ use anyhow::Context;
 use clap::Parser;
 use ed25519_dalek::SigningKey;
 
+mod access_logs;
 mod acme_dns;
 mod agent_upgrade;
 mod alert_context;

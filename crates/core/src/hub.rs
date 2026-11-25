@@ -66,6 +66,7 @@ struct Conn {
   forward: bool,
   service_checks: bool,
   container_diagnosis: bool,
+  access_logs: bool,
   net_probe: bool,
   /// 协议版本不一致：连接放行，但只接受升级相关的请求，好让它升上来。
   upgrade_only: bool,
@@ -229,6 +230,17 @@ impl Hub {
       .ok_or_else(|| offline(server))?;
     if matches!(&op, AgentOp::NetProbe(_)) {
       conn.check_net_probe(server)?;
+    }
+    if matches!(&op, AgentOp::AccessLogs(_))
+      && (conn.upgrade_only || !conn.access_logs)
+    {
+      return Err(
+        ApiError::new(
+          ErrorCode::Conflict,
+          "网关所在机器的 agent 版本旧，不支持访问日志",
+        )
+        .with_hint("运行 wharf upgrade"),
+      );
     }
     if conn.upgrade_only
       && !matches!(&op, AgentOp::Upgrade(_) | AgentOp::UpgradeLog)
@@ -449,6 +461,7 @@ async fn handle_socket(
     forward,
     service_checks,
     container_diagnosis,
+    access_logs,
     net_probe,
   } = hello
   else {
@@ -547,6 +560,7 @@ async fn handle_socket(
     forward,
     service_checks,
     container_diagnosis,
+    access_logs,
     net_probe,
     upgrade_only,
   };
@@ -757,6 +771,7 @@ mod tests {
       forward: true,
       service_checks: true,
       container_diagnosis: true,
+      access_logs: true,
       net_probe: true,
     };
     let json = serde_json::to_string(&hello).unwrap();

@@ -369,6 +369,10 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route("/api/gateways/{name}", get(show_gateway))
     .route("/api/gateways/{name}/config", get(gateway_config))
     .route("/api/gateways/{name}/logs", get(gateway_logs))
+    .route(
+      "/api/gateways/{name}/access-logs",
+      get(crate::access_logs::gateway),
+    )
     .route("/api/servers/{name}/agent-logs", get(agent_logs))
     .route("/api/core/logs", get(core_logs))
     .route("/api/whoami", get(crate::tokens::whoami))
@@ -377,6 +381,10 @@ pub fn router(state: Arc<AppState>) -> Router {
       get(crate::logs_stream::gateway),
     )
     .route("/api/routes", get(list_routes))
+    .route(
+      "/api/routes/{host}/access-logs",
+      get(crate::access_logs::route),
+    )
     .route("/api/routes/{hostname}/note", put(crate::notes::route))
     .route("/api/accounts", get(list_accounts).post(add_account))
     .route(

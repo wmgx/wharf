@@ -1785,7 +1785,10 @@ async fn upgrade(c: &Client, j: bool) -> CliResult<()> {
 }
 
 /// 取日志并打印：服务、agent、控制面共用。
-async fn follow_logs(c: &Client, path: &str) -> CliResult<()> {
+pub(crate) async fn follow_logs(
+  c: &Client,
+  path: &str,
+) -> CliResult<()> {
   use std::io::Write;
   let mut stdout = std::io::stdout();
   c.follow(path, |chunk| {
@@ -1795,7 +1798,7 @@ async fn follow_logs(c: &Client, path: &str) -> CliResult<()> {
   .await
 }
 
-async fn show_logs(
+pub(crate) async fn show_logs(
   c: &Client,
   path: &str,
   args: &crate::LogArgs,
@@ -2821,35 +2824,8 @@ async fn gateway(
       });
       Ok(())
     }
-    GatewayCmd::Logs {
-      name,
-      tail,
-      follow: true,
-    } => {
-      follow_logs(
-        c,
-        &format!(
-          "/api/gateways/{}/logs/stream?tail={tail}",
-          seg(&name)
-        ),
-      )
-      .await
-    }
-    GatewayCmd::Logs {
-      name,
-      tail,
-      follow: false,
-    } => {
-      let v: Value = c
-        .get(&format!(
-          "/api/gateways/{}/logs?tail={tail}",
-          seg(&name)
-        ))
-        .await?;
-      out(j, &v, |v| {
-        print!("{}", v["logs"].as_str().unwrap_or_default())
-      });
-      Ok(())
+    GatewayCmd::Logs(args) => {
+      crate::access_logs::gateway(c, args, j).await
     }
     GatewayCmd::ErrorPage {
       name, file, apply, ..
@@ -3065,6 +3041,9 @@ async fn gateway(
 
 async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
   match cmd {
+    RouteCmd::Logs(args) => {
+      crate::access_logs::route(c, args, j).await
+    }
     RouteCmd::DnsCheck { hostname } => {
       crate::external::dns(c, &hostname, j).await
     }

@@ -1172,6 +1172,47 @@ fn dns_tls(gateway: &str, subdomain: &str) -> String {
   )
 }
 
+const ACCESS_LOG_SNIPPET: &str = r#"
+(wharf_access) {
+	log {
+		output file /data/access.log {
+			roll_size 5MiB
+			roll_keep 3
+			roll_keep_for 168h
+			roll_uncompressed
+		}
+		format filter {
+			request>headers delete
+			resp_headers delete
+			request>tls delete
+			request>uri query {
+				replace token REDACTED
+				replace access_token REDACTED
+				replace refresh_token REDACTED
+				replace id_token REDACTED
+				replace key REDACTED
+				replace api_key REDACTED
+				replace apikey REDACTED
+				replace secret REDACTED
+				replace password REDACTED
+				replace passwd REDACTED
+				replace pwd REDACTED
+				replace auth REDACTED
+				replace code REDACTED
+				replace sign REDACTED
+				replace signature REDACTED
+				replace sig REDACTED
+				replace session REDACTED
+				replace ticket REDACTED
+				replace jwt REDACTED
+				replace rd REDACTED
+				replace state REDACTED
+			}
+		}
+	}
+}
+"#;
+
 pub fn caddyfile(
   name: &str,
   spec: &GatewaySpec,
@@ -1220,6 +1261,7 @@ pub fn caddyfile(
     out.push_str("\t}\n");
   }
   out.push_str("}\n");
+  out.push_str(ACCESS_LOG_SNIPPET);
   out.push_str(&error_snippet(spec));
   out.push_str(&format!(
     "\n(wharf_upstream) {{\n\tlb_try_duration {UPSTREAM_TRY_DURATION}\n\tlb_try_interval {UPSTREAM_TRY_INTERVAL}\n}}\n"
@@ -1244,6 +1286,9 @@ pub fn caddyfile(
       }
       out.push_str("\tabort\n}\n");
       continue;
+    }
+    if !site.internal {
+      out.push_str("\timport wharf_access\n");
     }
     if let Some(target) = &site.redirect {
       out.push_str(&format!(
@@ -1486,6 +1531,7 @@ mod tests {
     let out =
       caddyfile("edge", &gw, &[site.clone()], &[], false, None);
     assert!(out.contains("dns acmedns {"));
+    assert!(!out.contains("import wharf_access"));
     assert!(out.contains("@wharf_outside not remote_ip private_ranges 100.64.0.0/10 fd7a:115c:a1e0::/48\n\tabort @wharf_outside"));
     assert!(
       out.find("import wharf_errors").unwrap()
@@ -1572,6 +1618,31 @@ mod tests {
     assert!(compose.contains("100.64.0.1:20006:27015/udp"));
     assert!(compose.contains("127.0.0.1:20005:80"));
     assert!(!compose.contains("20005:80/"));
+  }
+
+  #[test]
+  fn caddyfile_access_logs_skip_wildcard() {
+    let gw =
+      serde_json::from_str(r#"{"kind":"caddy","server":"s1"}"#)
+        .unwrap();
+    let sites = [
+      Site {
+        hostname: "a.example.com".into(),
+        upstream: "127.0.0.1:21000".into(),
+        ..Default::default()
+      },
+      Site {
+        hostname: "*.example.com".into(),
+        wildcard: true,
+        ..Default::default()
+      },
+    ];
+    let out = caddyfile("edge", &gw, &sites, &[], false, None);
+    assert_eq!(out.matches("(wharf_access) {").count(), 1);
+    assert!(out.contains("output file /data/access.log {"));
+    assert!(out.contains("a.example.com {\n\timport wharf_access\n"));
+    assert!(out.contains("*.example.com {\n\tabort\n}"));
+    assert_eq!(out.matches("import wharf_access").count(), 1);
   }
 
   #[test]
@@ -1941,7 +2012,7 @@ mod tests {
     assert!(z.contains("basic_auth {\n\t\tadmin $2b$12$abc\n\t}"));
     assert_eq!(out.matches("basic_auth").count(), 1);
     assert!(out.contains(
-      "a.example.com {\n\timport wharf_errors\n\treverse_proxy /ws 127.0.0.1:17891 {\n\t\timport wharf_upstream\n\t}\n\treverse_proxy 100.1.1.1:2 {\n\t\timport wharf_upstream\n\t}\n}"
+      "a.example.com {\n\timport wharf_access\n\timport wharf_errors\n\treverse_proxy /ws 127.0.0.1:17891 {\n\t\timport wharf_upstream\n\t}\n\treverse_proxy 100.1.1.1:2 {\n\t\timport wharf_upstream\n\t}\n}"
     ));
     assert!(out.contains("http_port 8080"));
     assert!(!out.contains("https_port"));
@@ -2044,7 +2115,7 @@ mod tests {
     assert!(a.contains("zone wharf_a_example_com {"));
     assert!(a.contains("events 600"));
     assert!(a.contains("window 1m"));
-    assert!(out.contains("b.example.com {\n\timport wharf_errors\n\treverse_proxy 127.0.0.1:2 {\n\t\timport wharf_upstream\n\t}\n}"));
+    assert!(out.contains("b.example.com {\n\timport wharf_access\n\timport wharf_errors\n\treverse_proxy 127.0.0.1:2 {\n\t\timport wharf_upstream\n\t}\n}"));
     assert!(!SCANNER_PATHS.contains(" / "));
     assert!(!SCANNER_UA.contains("curl"));
     assert!(!SCANNER_UA.contains("reqwest"));
@@ -2163,7 +2234,7 @@ mod tests {
       false,
       None,
     );
-    assert!(out.contains("\tredir https://a.com{uri} permanent\n"));
+    assert!(out.contains("www.a.com {\n\timport wharf_access\n\tredir https://a.com{uri} permanent\n"));
     assert!(!out.contains("reverse_proxy"));
   }
 

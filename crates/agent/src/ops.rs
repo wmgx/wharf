@@ -68,6 +68,9 @@ impl Ops {
     ctx: &Ctx,
   ) -> Result<Value, ApiError> {
     match op {
+      AgentOp::AccessLogs(job) => {
+        to_value(crate::access_logs::read(job, ctx).await?)
+      }
       AgentOp::Report => to_value(self.reporter.report(true).await),
       AgentOp::ListImages => {
         to_value(crate::images::list(&self.docker, ctx).await?)

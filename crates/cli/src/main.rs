@@ -7,6 +7,7 @@
 
 use clap::{Args, Parser, Subcommand};
 
+mod access_logs;
 mod alert;
 mod audit;
 mod bookmark;
@@ -1115,14 +1116,14 @@ pub enum GatewayCmd {
   Config {
     name: String,
   },
-  Logs {
-    name: String,
-    #[arg(long, default_value_t = 200)]
-    tail: u32,
-    /// 持续跟随新日志。
-    #[arg(long, short)]
-    follow: bool,
-  },
+  /// 查看网关容器日志，或加 --access 查看 HTTP 访问日志。
+  #[command(group(
+    clap::ArgGroup::new("access_filters")
+      .args(["host", "status", "path", "method"])
+      .multiple(true)
+      .requires("access")
+  ))]
+  Logs(access_logs::GatewayArgs),
   /// 在某台服务器上新建网关。修改已有网关时只改给出的参数。
   Add {
     name: String,
@@ -1210,6 +1211,8 @@ pub enum GatewayCmd {
 #[derive(Subcommand)]
 pub enum RouteCmd {
   List,
+  /// 按域名看访问日志。例：wharf route logs blog.example.com --status 5xx --since 1h。
+  Logs(access_logs::RouteArgs),
   /// 向三个公共 DNS 检查 A 和 AAAA 是否生效。
   DnsCheck {
     hostname: String,
