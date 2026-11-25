@@ -6,10 +6,7 @@ use std::{
 };
 
 use base64::{Engine, engine::general_purpose::STANDARD};
-use reqwest::{
-  Client, Proxy, Response, Url,
-  header::{HeaderMap, HeaderValue},
-};
+use reqwest::{Client, Proxy, Response, Url};
 use tokio::net::{TcpStream, lookup_host};
 use wharf_api_types::{
   agent::{NetProbeJob, NetProbeResult},
@@ -22,8 +19,6 @@ use wharf_api_types::{
 };
 
 use crate::exec::Ctx;
-
-pub(crate) const PROXY_PROBE: &str = "x-wharf-net-probe";
 
 pub async fn run(job: &NetProbeJob, ctx: &Ctx) -> NetProbeResult {
   let start = Instant::now();
@@ -165,11 +160,9 @@ async fn http(
       .tls_info(true)
       .tls_danger_accept_invalid_certs(insecure);
     if egress {
-      let mut headers = HeaderMap::new();
-      headers.insert(PROXY_PROBE, HeaderValue::from_static("1"));
       let proxy = Proxy::all(crate::egress::local_url())
         .map_err(|e| http_error(e, https, egress))?;
-      builder = builder.proxy(proxy.headers(headers));
+      builder = builder.proxy(proxy);
     } else if let Some(host) = url.host_str() {
       builder = builder.resolve_to_addrs(host, addresses);
     }

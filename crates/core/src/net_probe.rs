@@ -379,8 +379,9 @@ mod tests {
       }),
       ..Default::default()
     };
-    let http =
-      |r| conclude(NetProbeKind::Http, true, r, None, "a.com", false);
+    let http = |r: &NetProbeResult| {
+      conclude(NetProbeKind::Http, true, r, None, "a.com", false)
+    };
     assert_eq!(http(&result), (true, true, None));
     result.tls.as_mut().unwrap().verified = false;
     assert_eq!(http(&result), (false, true, None));
