@@ -164,6 +164,11 @@ fn apply(
       Listening::Ready if !target.same_host && target.link_unreachable => {
         Some("应用在监听，问题在两台机器之间的网络（wharf network --probe）".into())
       }
+      // 网关连得上、应用也在监听，502/504 是应用自己返回的（例如它反代的上游不通）。
+      Listening::Ready if target.http_failed && !target.link_unreachable => Some(format!(
+        "应用在监听 {port}、网关也连得上，错误是应用自己返回的（例如它反代的上游不通或响应太慢）；看 wharf service logs {}",
+        target.service
+      )),
       Listening::Ready => None,
     };
     if let Some(cause) = cause {

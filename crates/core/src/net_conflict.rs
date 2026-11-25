@@ -28,16 +28,8 @@ pub fn conflicts(snap: &Snapshot) -> Vec<(&str, String)> {
         peers.insert((name.as_str(), ip));
       }
     }
-    for ip in server
-      .settings
-      .lan_addrs
-      .iter()
-      .chain(report.into_iter().flat_map(|r| &r.lan_ips))
-    {
-      if let Ok(ip) = ip.parse::<Ipv4Addr>() {
-        peers.insert((name.as_str(), ip));
-      }
-    }
+    // 只比 Wharf 跨机连接实际用的地址。对方的局域网地址（例如云厂商 VPC）别的机器连不到，
+    // 和它重叠不影响；同一个局域网的情况已经由“本机网段”覆盖。
   }
 
   let tailscale: Ipv4Net = "100.64.0.0/10".parse().unwrap();
@@ -77,7 +69,7 @@ pub fn conflicts(snap: &Snapshot) -> Vec<(&str, String)> {
         conflicts.push((
           name.as_str(),
           format!(
-            "Docker 网络 {}（{net}）与{}冲突",
+            "Docker 网络 {}（{net}）与 {} 冲突",
             bridge.name,
             overlaps_with.join("、")
           ),
@@ -101,7 +93,7 @@ pub fn issues(snap: &Snapshot) -> impl Iterator<Item = Issue> {
       name: server.into(),
     }),
     title: format!("{server} 上的 {detail}"),
-    hint: Some(format!("。{FIX}")),
+    hint: Some(FIX.into()),
     ack: None,
     alert: None,
   })
@@ -139,7 +131,20 @@ mod tests {
       .get_mut("peer")
       .unwrap()
       .settings
-      .lan_addrs = vec!["192.168.31.250".into()];
+      .private_addr = Some(PrivateAddr {
+      ip: "192.168.31.250".into(),
+      network: PrivateNetwork::Lan,
+    });
+    // 对方上报的局域网地址（例如另一个 VPC）连不到，不算冲突。
+    snap.agents.push(crate::db::AgentRow {
+      server: "peer".into(),
+      public_key: None,
+      report: Some(AgentReport {
+        lan_ips: vec!["192.168.20.5".into()],
+        ..Default::default()
+      }),
+      last_seen: None,
+    });
     snap.agents.push(crate::db::AgentRow {
       server: "docker-host".into(),
       public_key: None,
@@ -156,5 +161,6 @@ mod tests {
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].0, "docker-host");
     assert!(found[0].1.contains("peer 的内网地址 192.168.31.250"));
+    assert!(!found[0].1.contains("192.168.20.5"));
   }
 }
