@@ -69,6 +69,8 @@ pub struct NetProbeDns {
   pub elapsed_ms: u64,
   pub nameservers: Vec<String>,
   pub search: Vec<String>,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub resolved_by_egress: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]

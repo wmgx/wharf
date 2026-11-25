@@ -1610,6 +1610,7 @@ export interface NetProbeDns {
   elapsed_ms: number;
   ips: string[];
   nameservers: string[];
+  resolved_by_egress?: boolean;
   search: string[];
 }
 

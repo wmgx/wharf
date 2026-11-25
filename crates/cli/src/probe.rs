@@ -55,7 +55,9 @@ fn print(report: &NetProbeReport) {
     "{} → {}  {mark}（{}ms）",
     report.server, report.target, r.elapsed_ms
   );
-  if let Some(dns) = &r.dns {
+  if r.dns.as_ref().is_some_and(|dns| dns.resolved_by_egress) {
+    println!("    dns   由出口代理解析");
+  } else if let Some(dns) = &r.dns {
     let ips = dns
       .ips
       .iter()
@@ -124,5 +126,10 @@ fn print(report: &NetProbeReport) {
       cert.not_after.format("%Y-%m-%d"),
       cert.days_left,
     );
+  }
+  if r.error.is_none()
+    && let Some(hint) = &report.hint
+  {
+    println!("  提示   {}", hint.escape_debug());
   }
 }
