@@ -151,7 +151,8 @@ pub async fn probe(
     &result,
     certificate.as_ref(),
     host,
-    has_egress && !egress,
+    egress,
+    has_egress,
   );
   Ok(Json(NetProbeReport {
     server,
@@ -264,13 +265,27 @@ fn http_url(target: &str, egress: bool) -> Result<Url, ApiError> {
   Ok(url)
 }
 
+fn suspicious_dns_ip(ips: &[IpAddr]) -> Option<IpAddr> {
+  if !ips.iter().copied().any(is_public) {
+    return None;
+  }
+  let has_public_v4 = ips
+    .iter()
+    .any(|&ip| ip.to_canonical().is_ipv4() && is_public(ip));
+  ips.iter().copied().find(|&ip| {
+    matches!(ip.to_canonical(), IpAddr::V6(v6)
+      if (!v6.is_loopback() || has_public_v4) && !is_public(ip))
+  })
+}
+
 fn conclude(
   kind: NetProbeKind,
   https: bool,
   result: &NetProbeResult,
   certificate: Option<&(NetProbeCertificate, bool)>,
   host: &str,
-  can_try_egress: bool,
+  egress: bool,
+  has_egress: bool,
 ) -> (bool, bool, Option<String>) {
   let reachable = match kind {
     NetProbeKind::Dns => {
@@ -287,11 +302,25 @@ fn conclude(
     }),
     _ => reachable && result.error.is_none(),
   };
-  let hint = result.error.as_ref().and_then(|error| match error.kind {
+  let suspicious_ip = result
+    .dns
+    .as_ref()
+    .filter(|_| !egress)
+    .and_then(|dns| suspicious_dns_ip(&dns.ips));
+  let can_try_egress = has_egress && !egress;
+  let mut hint = result.error.as_ref().and_then(|error| match error.kind {
     NetProbeErrorKind::Blocked if error.message == "出口代理只用来测外网" => {
       Some(error.message.clone())
     }
     NetProbeErrorKind::Blocked => Some("目标属于云厂商元数据或链路本地地址，不允许探测".into()),
+    NetProbeErrorKind::Tls if certificate.is_none() && result.http.is_none() => {
+      let message = if host.parse::<IpAddr>().is_ok() {
+        "对方拒绝了 TLS 握手：用 IP 访问时网关没有对应证书，改用域名再测"
+      } else {
+        "对方拒绝了 TLS 握手，证书没拿到"
+      };
+      Some(message.into())
+    }
     NetProbeErrorKind::Tls => certificate.map(|(cert, matches_host)| {
       let mut hint = format!(
         "证书校验未通过（{}）；对方证书 CN={}，SAN={}，到期 {}（剩 {} 天）",
@@ -303,7 +332,7 @@ fn conclude(
       }
       hint
     }),
-    NetProbeErrorKind::Timeout if can_try_egress && kind == NetProbeKind::Http => {
+    NetProbeErrorKind::Timeout if can_try_egress && kind == NetProbeKind::Http && suspicious_ip.is_none() => {
       Some("直连超时；这台机器配了外网出口，可加 --egress 再测".into())
     }
     NetProbeErrorKind::Refused if !error.message.starts_with("这台机器没有开外网出口") => {
@@ -311,6 +340,18 @@ fn conclude(
     }
     _ => None,
   });
+  if let Some(ip) = suspicious_ip {
+    let hint = hint.get_or_insert_with(String::new);
+    if !hint.is_empty() {
+      hint.push('。');
+    }
+    hint.push_str(&format!(
+      "解析结果里有疑似被污染的地址（{ip}），这台机器的 DNS 可能被干扰"
+    ));
+    if can_try_egress {
+      hint.push_str("；海外站点可加 --egress 再测");
+    }
+  }
   (ok, reachable, hint)
 }
 
@@ -365,6 +406,44 @@ mod tests {
   }
 
   #[test]
+  fn detects_suspicious_dns_answers() {
+    let mixed = ["142.251.157.119", "2001::1"]
+      .map(|ip| ip.parse::<IpAddr>().unwrap());
+    assert_eq!(suspicious_dns_ip(&mixed), Some(mixed[1]));
+    let public = ["20.205.243.168".parse::<IpAddr>().unwrap()];
+    assert_eq!(suspicious_dns_ip(&public), None);
+  }
+
+  #[test]
+  fn explains_rejected_tls_handshake_without_certificate() {
+    let result = NetProbeResult {
+      error: Some(NetProbeError {
+        kind: NetProbeErrorKind::Tls,
+        message: "received fatal alert: HandshakeFailure".into(),
+      }),
+      ..Default::default()
+    };
+    for (host, expected) in [
+      (
+        "192.168.31.1",
+        "对方拒绝了 TLS 握手：用 IP 访问时网关没有对应证书，改用域名再测",
+      ),
+      ("a.com", "对方拒绝了 TLS 握手，证书没拿到"),
+    ] {
+      let (_, _, hint) = conclude(
+        NetProbeKind::Http,
+        true,
+        &result,
+        None,
+        host,
+        false,
+        false,
+      );
+      assert_eq!(hint.as_deref(), Some(expected));
+    }
+  }
+
+  #[test]
   fn distinguishes_success_from_reachability() {
     let mut result = NetProbeResult {
       http: Some(NetProbeHttp {
@@ -380,7 +459,15 @@ mod tests {
       ..Default::default()
     };
     let http = |r: &NetProbeResult| {
-      conclude(NetProbeKind::Http, true, r, None, "a.com", false)
+      conclude(
+        NetProbeKind::Http,
+        true,
+        r,
+        None,
+        "a.com",
+        false,
+        false,
+      )
     };
     assert_eq!(http(&result), (true, true, None));
     result.tls.as_mut().unwrap().verified = false;
@@ -401,6 +488,7 @@ mod tests {
       &refused,
       None,
       "a.com",
+      false,
       false,
     );
     assert!(!ok && !reachable);

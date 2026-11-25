@@ -96,11 +96,18 @@ async fn probe(
   {
     (dns.nameservers, dns.search) = resolv_conf(&text);
   }
+  let ip = host.parse::<IpAddr>().ok();
+  dns.resolved_by_egress = resolve_at_egress(job.egress, ip);
+  if dns.resolved_by_egress {
+    result.dns = Some(dns);
+    return http(url.ok_or_else(invalid)?, &[], true, result).await;
+  }
+
   let started = Instant::now();
   result.dns = Some(dns);
-  let addresses = match host.parse::<IpAddr>() {
-    Ok(ip) => Ok(vec![SocketAddr::new(ip, port)]),
-    Err(_) => lookup_host((host, port)).await.map(Iterator::collect),
+  let addresses = match ip {
+    Some(ip) => Ok(vec![SocketAddr::new(ip, port)]),
+    None => lookup_host((host, port)).await.map(Iterator::collect),
   };
   let dns = result.dns.as_mut().expect("DNS 结果已初始化");
   dns.elapsed_ms = elapsed(started);
@@ -294,6 +301,10 @@ fn elapsed(start: Instant) -> u64 {
   start.elapsed().as_millis() as u64
 }
 
+fn resolve_at_egress(egress: bool, ip: Option<IpAddr>) -> bool {
+  egress && ip.is_none()
+}
+
 fn blocked(ip: IpAddr) -> bool {
   match ip.to_canonical() {
     IpAddr::V4(ip) => matches!(
@@ -351,9 +362,31 @@ mod tests {
       "192.168.31.105",
       "172.17.232.122",
       "8.8.8.8",
+      "2001::1",
     ] {
       assert!(!blocked(ip.parse().unwrap()), "{ip}");
     }
+  }
+
+  #[test]
+  fn egress_domains_skip_local_dns_checks() {
+    let target = "www.google.com".parse::<IpAddr>().ok();
+    assert!(resolve_at_egress(true, target));
+    assert!(!resolve_at_egress(false, target));
+  }
+
+  #[tokio::test]
+  async fn egress_rejects_private_ip_literals() {
+    let job = NetProbeJob {
+      kind: NetProbeKind::Http,
+      target: "https://192.168.31.1".into(),
+      timeout_secs: 10,
+      egress: true,
+    };
+    let result = probe(&job, &mut NetProbeResult::default()).await;
+    let error = result.unwrap_err();
+    assert_eq!(error.kind, Blocked);
+    assert_eq!(error.message, "出口代理只用来测外网");
   }
 
   #[test]
