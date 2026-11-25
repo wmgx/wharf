@@ -366,10 +366,14 @@ fn flag_value(
     },
     "-v" | "--volume" => volume(p, value),
     "-m" | "--memory" => {
-      p.limits.memory_mb =
-        Some(memory_mb(value).ok_or_else(|| {
-          bad(format!("内存上限 {value} 看不懂，写成 512m 或 1g"))
-        })?)
+      p.limits.memory_mb = Some(
+        memory_mb(value)
+          .filter(|&mb| mb >= 1.0)
+          .map(|mb| mb.round() as u32)
+          .ok_or_else(|| {
+            bad(format!("内存上限 {value} 看不懂，写成 512m 或 1g"))
+          })?,
+      )
     }
     "--cpus" => {
       let cpus: f64 = value.parse().map_err(|_| {
@@ -485,9 +489,12 @@ fn volume(p: &mut Parsed, value: &str) {
   p.volumes.push((name, dst.to_string(), ro));
 }
 
-fn memory_mb(v: &str) -> Option<u32> {
+pub(crate) fn memory_mb(v: &str) -> Option<f64> {
   let v = v.trim().to_ascii_lowercase();
-  let v = v.strip_suffix('b').unwrap_or(&v);
+  let v = v
+    .strip_suffix("ib")
+    .or_else(|| v.strip_suffix('b'))
+    .unwrap_or(&v);
   let (num, unit) = match v.char_indices().last()? {
     (i, c) if c.is_ascii_alphabetic() => (&v[..i], c),
     _ => (v, 'b'),
@@ -500,7 +507,7 @@ fn memory_mb(v: &str) -> Option<u32> {
     'b' => n / 1024.0 / 1024.0,
     _ => return None,
   };
-  (mb >= 1.0).then_some(mb.round() as u32)
+  (mb.is_finite() && mb > 0.0).then_some(mb)
 }
 
 /// 镜像名的最后一段，去掉标签和 digest：`ghcr.io/owner/app:1.0` → `app`。

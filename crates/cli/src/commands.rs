@@ -526,6 +526,7 @@ async fn dispatch(
         .servers
         .iter()
         .chain(&v.vendors)
+        .chain(&v.config)
         .chain(v.routes.iter().flat_map(|r| &r.checks))
         .filter(|c| c.status == CheckStatus::Bad)
         .count();

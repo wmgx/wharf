@@ -153,6 +153,12 @@ pub async fn run(
     servers: servers(s, &snap),
     routes,
     vendors: vec![],
+    config: crate::lint::doctor_warnings(&snap)
+      .into_iter()
+      .map(|(subject, detail)| {
+        check("config", subject, CheckStatus::Warn, detail)
+      })
+      .collect(),
   })
 }
 

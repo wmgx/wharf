@@ -465,6 +465,10 @@ pub fn doctor(v: &wharf_api_types::view::DoctorReport) {
     println!("\n厂商账号");
     v.vendors.iter().for_each(line);
   }
+  if !v.config.is_empty() {
+    println!("\n配置自查");
+    v.config.iter().for_each(line);
+  }
   for r in &v.routes {
     let first_bad =
       r.checks.iter().find(|c| c.status == CheckStatus::Bad);
