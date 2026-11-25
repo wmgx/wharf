@@ -21,6 +21,8 @@ pub fn web_schema() -> Value {
   let _ = generator.subschema_for::<view::JoinInfo>();
   let _ = generator.subschema_for::<spec::PrivateAddr>();
   let _ = generator.subschema_for::<agent::AgentReport>();
+  let _ =
+    generator.subschema_for::<crate::access_logs::AccessLogsResult>();
   let _ = generator.subschema_for::<agent::ResolvedImage>();
   let _ = generator.subschema_for::<view::ServerView>();
   let _ = generator.subschema_for::<crate::resources::UsageRow>();

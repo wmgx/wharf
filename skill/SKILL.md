@@ -126,7 +126,9 @@ wharf doctor blog.example.com --json
 它会逐层检查：解析 → HTTPS → 网关 → 网关连上游 → 容器，并指出第一个不通的层。按那一层继续查：
 
 - 容器：`wharf service show <服务> --json`、`wharf service logs <服务>`；
-- 网关：`wharf gateway logs <网关>`、`wharf gateway config <网关>`；
+- 域名访问日志：`wharf route logs blog.example.com --status 5xx --since 1h`，可加 `--path /api/`、`--method POST`、`--tail`、`--json`；
+- 网关访问日志：`wharf gateway logs <网关> --access --host blog.example.com --since 30m`，也支持 `--status`、`--path` 和 `--method`；
+- 网关容器日志和配置：`wharf gateway logs <网关> --since 1h --errors`、`wharf gateway config <网关>`。也可用 `--grep` 和 `--max-line` 筛选容器日志；
 - 解析和证书：一般是 Cloudflare 账号权限或 DNS 还没生效，把 `hint` 告诉用户。
 
 要从指定机器检查单个目标，用 `wharf server probe <服务器> <域名|主机:端口|HTTP(S) URL> --json`。

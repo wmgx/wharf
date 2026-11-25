@@ -64,7 +64,7 @@ fn service_names(raw: &str) -> Result<Vec<&str>, ApiError> {
   Ok(names)
 }
 
-fn anchor_since(value: &str) -> Option<String> {
+pub(super) fn anchor_since(value: &str) -> Option<String> {
   let since = log_search::since_arg(value)?;
   if DateTime::parse_from_rfc3339(&since).is_ok() {
     return Some(since);

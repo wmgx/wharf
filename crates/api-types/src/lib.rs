@@ -7,6 +7,7 @@
 //! - [seal]：agent 通道的消息加密；
 //! - [error]：统一错误格式 `{ code, message, hint, suggest }`。
 
+pub mod access_logs;
 pub mod agent;
 pub mod build;
 pub mod egress;

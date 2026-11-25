@@ -116,7 +116,8 @@ pub fn check_service_scope(
       | ["", "api", "services", name, "files", "download"] => {
         contains_service(services, name)
       }
-      ["", "api", "servers", _, "terminal"] => false,
+      ["", "api", "servers", _, "terminal"]
+      | ["", "api", "gateways" | "routes", _, "access-logs"] => false,
       _ => true,
     },
     _ => match path.as_slice() {
@@ -275,6 +276,17 @@ mod tests {
       &Method::GET,
       "/api/servers/s1/terminal"
     ));
+  }
+
+  #[test]
+  fn scoped_token_cannot_read_access_logs() {
+    let services = BTreeSet::from(["blog".into()]);
+    for path in [
+      "/api/gateways/edge/access-logs",
+      "/api/routes/blog.example.com/access-logs",
+    ] {
+      assert!(!check_service_scope(&services, &Method::GET, path));
+    }
   }
 
   #[test]

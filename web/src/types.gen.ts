@@ -1,6 +1,29 @@
 // 自动生成，不要手改。
 // 重新生成：cargo run -q -p wharf-cli -- schema web | node web/scripts/gen-types.mjs > web/src/types.gen.ts
 
+export interface AccessLogEntry {
+  client_ip: string;
+  duration_ms: number;
+  host: string;
+  method: string;
+  path: string;
+  query: string;
+  size: number;
+  status: number;
+  ts: string;
+}
+
+export interface AccessLogsResult {
+  entries: AccessLogEntry[];
+  matched: number;
+  missing: boolean;
+  scanned_files: number;
+  scanned_lines: number;
+  skipped: number;
+  truncated: boolean;
+  warnings?: string[];
+}
+
 export interface AccountView {
   kind: string;
   name: string;

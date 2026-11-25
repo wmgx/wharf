@@ -124,6 +124,8 @@ pub enum AgentMsg {
     #[serde(default)]
     container_diagnosis: bool,
     #[serde(default)]
+    access_logs: bool,
+    #[serde(default)]
     net_probe: bool,
   },
   Report(Box<AgentReport>),
@@ -369,6 +371,8 @@ pub enum AgentOp {
   },
   /// 校验并应用网关配置，失败自动回滚。结果是 [ProjectUpResult]。
   GatewayApply(GatewayApply),
+  /// 结果是 [crate::access_logs::AccessLogsResult]。
+  AccessLogs(crate::access_logs::AccessLogsRequest),
   /// 配置不变，强制热重载网关（`caddy reload --force`），让还没签下来的证书立刻重新申请。
   /// 旧 agent 不认识，会忽略，调用方等到超时。
   GatewayReload {
