@@ -59,16 +59,16 @@ export function Data() {
       {!rows.length ? <Empty>
         {services.length ? "没有符合条件的服务" : "还没有服务"}
       </Empty> : <Panel>
-        <Table>
+        <Table className="max-md:table-fixed">
           <TableHeader>
             <TableRow>
               <TableHead>服务</TableHead>
-              <TableHead>所在</TableHead>
-              <TableHead>数据</TableHead>
-              <TableHead>备份</TableHead>
-              <TableHead>备份到</TableHead>
-              <TableHead>上次</TableHead>
-              <TableHead />
+              <TableHead className="hidden md:table-cell">所在</TableHead>
+              <TableHead className="hidden md:table-cell">数据</TableHead>
+              <TableHead className="max-md:w-28">备份</TableHead>
+              <TableHead className="hidden md:table-cell">备份到</TableHead>
+              <TableHead className="hidden md:table-cell">上次</TableHead>
+              <TableHead className="max-md:w-24" />
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -76,13 +76,13 @@ export function Data() {
               const outside = s.mounts.filter((m) => m.kind !== "managed").length;
               const summary = !s.mounts.length ? "没有数据卷" : outside ? `${s.mounts.length} 处挂载，${outside} 处不在备份范围` : `${s.mounts.length} 处挂载`;
               return <TableRow key={s.name} className="cursor-pointer" {...clickable({ to: `/services/${encodeURIComponent(s.name)}?tab=data` })}>
-                <TableCell className="font-medium">
+                <TableCell className="font-medium max-md:break-all max-md:whitespace-normal">
                   {s.name}
                 </TableCell>
-                <TableCell>
+                <TableCell className="hidden md:table-cell">
                   <ServerTag name={s.server} />
                 </TableCell>
-                <TableCell>
+                <TableCell className="hidden md:table-cell">
                   {summary}
                 </TableCell>
                 <TableCell>
@@ -90,10 +90,10 @@ export function Data() {
                     {TEXT[s.status]}
                   </StatusBadge>
                 </TableCell>
-                <TableCell>
+                <TableCell className="hidden md:table-cell">
                   {s.target ?? "-"}
                 </TableCell>
-                <TableCell>
+                <TableCell className="hidden md:table-cell">
                   {s.last_ok ? ago(s.last_ok) : "-"}
                 </TableCell>
                 <TableCell onClick={(e) => e.stopPropagation()}>

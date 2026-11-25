@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { ArrowLeftIcon, ArrowUpRightIcon, CheckIcon, CopyIcon } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
 import { toast } from "sonner";
-import { ApiError } from "@/api";
+import { api, ApiError } from "@/api";
 import { Tip } from "@/components/kit";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -117,10 +117,20 @@ export function sourceLabel(source: Source, compose = "compose 文件"): string 
   return `本机代码 ${upload?.slice(0, 12) ?? ""}${sub}`;
 }
 
-/** 服务图标：先试站点的 favicon，失败就用首字母。 */
+/** 先显示首字母，控制面取到图标后再替换。 */
 export function Mark({ name, url, className }: { name: string; url?: string; className?: string }) {
-  const [failed, setFailed] = useState(false);
-  useEffect(() => setFailed(false), [url]);
+  const [icon, setIcon] = useState<{ url: string; src: string } | null>(null);
+  useEffect(() => {
+    if (!url) return;
+    let origin: string;
+    try { origin = new URL(url).origin; } catch { return; }
+    if (origin === "null") return;
+    let active = true;
+    api.get<string | null>(`/api/home/favicon?origin=${encodeURIComponent(origin)}`).then((src) => {
+      if (active && src) setIcon({ url, src });
+    }).catch(() => {});
+    return () => { active = false; };
+  }, [url]);
   const letter = name.replace(/[^a-z0-9]/gi, "").slice(0, 1).toUpperCase() || "?";
   return (
     <span
@@ -129,8 +139,8 @@ export function Mark({ name, url, className }: { name: string; url?: string; cla
         className,
       )}
     >
-      {url && !failed ? (
-        <img className="size-5 object-contain" src={new URL("/favicon.ico", url).toString()} alt="" onError={() => setFailed(true)} />
+      {icon && icon.url === url ? (
+        <img className="size-5 object-contain" src={icon.src} alt="" onError={() => setIcon(null)} />
       ) : (
         letter
       )}

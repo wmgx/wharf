@@ -1,9 +1,9 @@
 import { ConfirmDialog } from "@/components/kit";
 import { Panel } from "@/components/kit";
 import { CopyIcon, PencilIcon, PlusIcon, TerminalIcon, Trash2Icon } from "lucide-react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { toast } from "sonner";
-import { api, type Session, usePoll } from "@/api";
+import { api, ApiError, type Session, usePoll } from "@/api";
 import { ago, CodeBlock, Empty, ErrorNote, Notice, SectionTitle } from "@/components/common";
 import { Field, Segmented, toName } from "@/components/fields";
 import { Badge } from "@/components/ui/badge";
@@ -82,7 +82,7 @@ export function Tokens() {
 
   return (
     <>
-      <SectionTitle count={data?.length} action={<div className="flex gap-2">
+      <SectionTitle count={data?.length} action={<div className="flex flex-wrap justify-end gap-2">
           <Button variant="outline" size="sm" onClick={() => setGuide(true)}>
             <TerminalIcon />
             接入 CLI / AI
@@ -135,22 +135,22 @@ export function Tokens() {
       ) : (
         data && (
           <Panel>
-            <Table>
+            <Table className="max-md:table-fixed">
               <TableHeader>
                 <TableRow>
-                  <TableHead>名称</TableHead>
-                  <TableHead>权限</TableHead>
+                  <TableHead className="max-md:w-[18%]">名称</TableHead>
+                  <TableHead className="max-md:w-22">权限</TableHead>
                   <TableHead>限制</TableHead>
-                  <TableHead>最近使用</TableHead>
-                  <TableHead>创建</TableHead>
-                  <TableHead className="w-10" />
+                  <TableHead className="hidden md:table-cell">最近使用</TableHead>
+                  <TableHead className="hidden md:table-cell">创建</TableHead>
+                  <TableHead className="w-10 max-md:w-16" />
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {data.map((t) => (
                   <TableRow key={t.name}>
-                    <TableCell className="font-medium">{t.name}</TableCell>
-                    <TableCell>
+                    <TableCell className="font-medium max-md:break-all max-md:whitespace-normal">{t.name}</TableCell>
+                    <TableCell className="max-md:px-1">
                       <span className="flex flex-wrap gap-1">
                         {t.perms.map((p) => (
                           <Badge key={p} variant={p === "admin" || p === "confirm" ? "default" : "secondary"} className="font-normal">
@@ -159,9 +159,9 @@ export function Tokens() {
                         ))}
                       </span>
                     </TableCell>
-                    <TableCell><Limits token={t} /></TableCell>
-                    <TableCell className="text-muted-foreground">{t.last_used_at ? ago(t.last_used_at) : "没用过"}</TableCell>
-                    <TableCell className="text-muted-foreground">{ago(t.created_at)}</TableCell>
+                    <TableCell className="max-md:px-1"><Limits token={t} /></TableCell>
+                    <TableCell className="hidden text-muted-foreground md:table-cell">{t.last_used_at ? ago(t.last_used_at) : "没用过"}</TableCell>
+                    <TableCell className="hidden text-muted-foreground md:table-cell">{ago(t.created_at)}</TableCell>
                     <TableCell className="whitespace-nowrap">
                       <Button variant="ghost" size="xs" aria-label={`编辑 ${t.name}`} onClick={() => setEditing(t)}>
                         <PencilIcon />
@@ -213,13 +213,18 @@ function Limits({ token }: { token: TokenView }) {
   const { expires_at, allowed_from = [], services = [] } = token;
   const expiry = expiryLabel(expires_at);
   if (!expires_at && !allowed_from.length && !services.length) return <span className="text-muted-foreground">不限</span>;
+  const allowed = allowed_from.length ? `来源 ${allowed_from.join(", ")}` : "";
+  const scoped = services.length ? `服务 ${services.join(", ")}` : "";
   return <span className="flex flex-wrap gap-1">
-    {expires_at && <Badge variant={expiry === "已过期" ? "destructive" : "secondary"} className="font-normal">{expiry}</Badge>}
-    {!!allowed_from.length && <Badge variant="secondary" className="font-normal" title={allowed_from.join("、")}>限来源</Badge>}
-    {!!services.length && <Badge variant="secondary" className="font-normal" title={services.join("、")}>
-      {services.length > 3 ? `限 ${services.length} 个服务` : `限 ${services.join("、")}`}
-    </Badge>}
+    {expires_at && <Badge variant={expiry === "已过期" ? "destructive" : "secondary"} className="max-w-full font-normal max-md:whitespace-normal">{expiry}</Badge>}
+    {[allowed, scoped].filter(Boolean).map((limit) => <Badge key={limit} variant="secondary" className="max-w-full font-normal md:max-w-48" title={limit}>
+      <span className="truncate">{limit}</span>
+    </Badge>)}
   </span>;
+}
+
+function isSourceError(error: unknown): error is ApiError {
+  return error instanceof ApiError && error.body.code === "InvalidInput" && error.body.message.startsWith("来源地址 ");
 }
 
 function TokenDialog({ token, taken, onCreated, onClose }: { token: TokenView | null; taken: string[]; onCreated: (t: CreatedToken) => void; onClose: () => void }) {
@@ -233,6 +238,13 @@ function TokenDialog({ token, taken, onCreated, onClose }: { token: TokenView | 
   const serviceNames = [...new Set([...(serviceList.data ?? []).map((s) => s.name), ...services])].sort();
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<unknown>(null);
+  const fromRevision = useRef(0);
+  const sourceError = isSourceError(error) ? error : null;
+  const changeFrom = (value: string) => {
+    fromRevision.current++;
+    setFrom(value);
+    setError((current: unknown) => isSourceError(current) ? null : current);
+  };
   const perms = preset === "custom" ? custom : PRESETS[preset];
   const expiryOptions: [string, string][] = [
     ...(token ? [[ "keep", `不改（${expiryLabel(token.expires_at)}）`] as [string, string]] : []),
@@ -240,6 +252,7 @@ function TokenDialog({ token, taken, onCreated, onClose }: { token: TokenView | 
   ];
 
   const save = async () => {
+    const submittedFrom = fromRevision.current;
     setSaving(true);
     setError(null);
     try {
@@ -253,7 +266,7 @@ function TokenDialog({ token, taken, onCreated, onClose }: { token: TokenView | 
       }
       onClose();
     } catch (e) {
-      setError(e);
+      if (!isSourceError(e) || submittedFrom === fromRevision.current) setError(e);
     } finally {
       setSaving(false);
     }
@@ -303,8 +316,9 @@ function TokenDialog({ token, taken, onCreated, onClose }: { token: TokenView | 
             </div>
           </Field>
           <Field label="只允许从这些地址使用" htmlFor="token-from" help="留空表示不限。填组网网段就只能在组网内用">
-            <Input id="token-from" value={from} onChange={(e) => setFrom(e.target.value)} placeholder={MESH_RANGES} />
-            <Button className="w-fit" variant="outline" size="xs" onClick={() => setFrom(MESH_RANGES)}>只允许组网内</Button>
+            <Input id="token-from" value={from} onChange={(e) => changeFrom(e.target.value)} placeholder={MESH_RANGES} aria-invalid={!!sourceError} aria-describedby={sourceError ? "token-from-error" : undefined} />
+            {sourceError && <div id="token-from-error" role="alert" className="break-all"><ErrorNote error={sourceError} /></div>}
+            <Button className="w-fit" variant="outline" size="xs" onClick={() => changeFrom(MESH_RANGES)}>只允许组网内</Button>
           </Field>
           <Field label="只能操作这些服务" help="不勾表示不限。勾了以后这个令牌只能改这些服务，其他改动会被拒绝">
             <div className="grid max-h-48 gap-1.5 overflow-auto">
@@ -318,7 +332,7 @@ function TokenDialog({ token, taken, onCreated, onClose }: { token: TokenView | 
           </Field>
           {preset === "ai" && <Notice>AI 能预览和执行普通改动、在宿主机执行命令；删数据、公开到外网这类高风险项要你在页面上确认。</Notice>}
           {!token && name && taken.includes(name) && <Notice kind="warn">已有同名访问令牌</Notice>}
-          <ErrorNote error={error} />
+          <ErrorNote error={sourceError ? null : error} />
         </div>
         <DialogFooter>
           <Button variant="ghost" onClick={onClose}>取消</Button>

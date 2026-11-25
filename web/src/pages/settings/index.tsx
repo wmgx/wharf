@@ -21,7 +21,7 @@ export function Settings() {
   return <>
     <PageHeader title="设置" />
     <Tabs value={tab} onValueChange={(v) => setTab(v as typeof TABS[number])}>
-      <TabsList className="max-w-full overflow-x-auto">
+      <TabsList className="max-sm:grid max-sm:h-auto! max-sm:w-full max-sm:grid-cols-3 max-sm:overflow-visible max-sm:[&>button]:h-auto">
         <TabsTrigger value="accounts">厂商账号</TabsTrigger>
         <TabsTrigger value="secrets">密钥</TabsTrigger>
         <TabsTrigger value="app-accounts">应用账号</TabsTrigger>
