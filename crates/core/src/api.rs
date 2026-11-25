@@ -231,6 +231,7 @@ pub fn router(state: Arc<AppState>) -> Router {
       "/api/servers/{name}/upgrade",
       post(crate::agent_upgrade::upgrade_now),
     )
+    .route("/api/servers/{name}/probe", post(crate::net_probe::probe))
     .route("/api/servers/{name}/prune", post(crate::prune::prune_now))
     .route("/api/servers/{name}/note", put(crate::notes::server))
     .route("/api/servers/{name}/disk", get(crate::disk::show))

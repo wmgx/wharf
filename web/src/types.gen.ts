@@ -1598,6 +1598,69 @@ export interface MonitorView {
   ok: boolean;
 }
 
+export interface NetProbeCertificate {
+  days_left: number;
+  issuer: string | null;
+  not_after: string;
+  san: string[];
+  subject_cn: string | null;
+}
+
+export interface NetProbeDns {
+  elapsed_ms: number;
+  ips: string[];
+  nameservers: string[];
+  search: string[];
+}
+
+export interface NetProbeError {
+  kind: NetProbeErrorKind;
+  message: string;
+}
+
+export type NetProbeErrorKind = "dns_failed" | "blocked" | "refused" | "timeout" | "unreachable" | "tls" | "other" | "cancelled";
+
+export interface NetProbeHttp {
+  egress: boolean;
+  headers: Record<string, string>;
+  status: number;
+}
+
+export type NetProbeKind = "tcp" | "http" | "dns";
+
+export interface NetProbeReport {
+  certificate: NetProbeCertificate | null;
+  dns: NetProbeDns | null;
+  elapsed_ms: number;
+  error: NetProbeError | null;
+  hint: string | null;
+  http: NetProbeHttp | null;
+  kind: NetProbeKind;
+  ok: boolean;
+  reachable: boolean;
+  server: string;
+  target: string;
+  tcp: NetProbeTcp | null;
+  tls: NetProbeTls | null;
+}
+
+export interface NetProbeRequest {
+  egress?: boolean | null;
+  kind?: NetProbeKind | null;
+  target: string;
+  timeout_secs?: number | null;
+}
+
+export interface NetProbeTcp {
+  elapsed_ms: number;
+  remote_addr: string;
+}
+
+export interface NetProbeTls {
+  verified: boolean;
+  verify_error: string | null;
+}
+
 /**
  * 机器的接入方式（design 2.10）。不指定时按检测到的地址推断：有 Tailscale 地址是 `tailscale`，
  * 有别的内网地址是 `lan`，都没有是 `public`（只能经公网和反向隧道）。

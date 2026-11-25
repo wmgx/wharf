@@ -18,14 +18,21 @@ use std::{
 use base64::Engine;
 use tokio::{
   io::{AsyncReadExt, AsyncWriteExt},
-  net::{TcpListener, TcpStream},
+  net::{TcpListener, TcpStream, lookup_host},
 };
 use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
   ApiError,
   agent::{EgressConfig, EgressRoute},
   egress::{LOCAL_PORT, SERVE_PORT, via_exit},
+  net_probe::{is_public, tcp_target},
 };
+
+use crate::net_probe::PROXY_PROBE;
+
+pub fn local_url() -> String {
+  format!("http://127.0.0.1:{LOCAL_PORT}")
+}
 
 const FILE: &str = "egress.json";
 const HEAD_LIMIT: usize = 16 * 1024;
@@ -229,47 +236,29 @@ async fn handle(
   let Some(req) = parse(&head.text) else {
     return reply(&mut client, "400 Bad Request").await;
   };
-  let tunneled = match mode {
-    Mode::Serve { expected } => {
-      if !same(req.auth.unwrap_or_default(), expected) {
-        return client
-          .write_all(
-            b"HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"wharf\"\r\nContent-Length: 0\r\n\r\n",
-          )
-          .await;
-      }
-      None
+  if let Mode::Serve { expected } = mode
+    && !same(req.auth.unwrap_or_default(), expected)
+  {
+    return client
+      .write_all(
+        b"HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"wharf\"\r\nContent-Length: 0\r\n\r\n",
+      )
+      .await;
+  }
+  let upstream = if req.probe {
+    // 探测取消时，客户端在等待响应头或 CONNECT 应答，关闭连接即停止代理拨号。
+    let mut byte = [0];
+    tokio::select! {
+      biased;
+      _ = client.peek(&mut byte) => return Ok(()),
+      result = connect_upstream(mode, &req.target, true) => result,
     }
-    Mode::Route(r)
-      if via_exit(host_of(&req.target), r.all, &r.domains) =>
-    {
-      match through_exit(r, &req.target).await {
-        Ok(Ok(t)) => Some(t),
-        // 出口连上了但它连不上目标：照实告诉客户端。
-        Ok(Err(status)) => return reply(&mut client, &status).await,
-        Err(e) => {
-          tracing::debug!(
-            "出口 {} 连不上（{e}），{} 改用直连",
-            r.exit,
-            req.target
-          );
-          None
-        }
-      }
-    }
-    Mode::Route(_) => None,
+  } else {
+    connect_upstream(mode, &req.target, false).await
   };
-  let (mut upstream, early) = match tunneled {
-    Some(t) => t,
-    None => match tokio::time::timeout(
-      CONNECT_TIMEOUT,
-      TcpStream::connect(&req.target),
-    )
-    .await
-    {
-      Ok(Ok(s)) => (s, Vec::new()),
-      _ => return reply(&mut client, "502 Bad Gateway").await,
-    },
+  let (mut upstream, early) = match upstream {
+    Ok(upstream) => upstream,
+    Err(status) => return reply(&mut client, &status).await,
   };
   match req.forward {
     None => {
@@ -286,6 +275,60 @@ async fn handle(
   }
   tokio::io::copy_bidirectional(&mut client, &mut upstream).await?;
   Ok(())
+}
+
+async fn connect_upstream(
+  mode: &Mode,
+  target: &str,
+  probe: bool,
+) -> Result<(TcpStream, Vec<u8>), String> {
+  // 探测沿用分流规则，但出口拨号使用本机代理已校验的 IP。
+  let pinned = if probe {
+    let (host, port) = tcp_target(target).ok_or("400 Bad Request")?;
+    let addresses: Vec<_> = tokio::time::timeout(
+      CONNECT_TIMEOUT,
+      lookup_host((host, port)),
+    )
+    .await
+    .map_err(|_| "504 Gateway Timeout")?
+    .map_err(|_| "502 Bad Gateway")?
+    .collect();
+    if addresses.is_empty() {
+      return Err("502 Bad Gateway".into());
+    }
+    if addresses.iter().any(|a| !is_public(a.ip())) {
+      return Err("502 Bad Gateway".into());
+    }
+    Some(addresses)
+  } else {
+    None
+  };
+  if let Mode::Route(route) = mode
+    && via_exit(host_of(target), route.all, &route.domains)
+  {
+    let attempt = if let Some(addresses) = &pinned {
+      probe_through_exit(route, addresses).await
+    } else {
+      through_exit(route, target).await
+    };
+    match attempt {
+      Ok(outcome) => return outcome,
+      Err(e) => tracing::debug!(
+        "出口 {} 连不上（{e}），{target} 改用直连",
+        route.exit
+      ),
+    }
+  }
+  let stream = tokio::time::timeout(CONNECT_TIMEOUT, async {
+    match &pinned {
+      Some(addrs) => TcpStream::connect(addrs.as_slice()).await,
+      None => TcpStream::connect(target).await,
+    }
+  })
+  .await
+  .map_err(|_| "502 Bad Gateway")?
+  .map_err(|_| "502 Bad Gateway")?;
+  Ok((stream, Vec::new()))
 }
 
 /// `host:port` 或 `[v6]:port` 里的主机部分。
@@ -330,6 +373,20 @@ async fn through_exit(
         .map_or("502 Bad Gateway".into(), |(_, s)| s.to_string()),
     ),
   })
+}
+
+async fn probe_through_exit(
+  route: &EgressRoute,
+  addresses: &[SocketAddr],
+) -> std::io::Result<Result<(TcpStream, Vec<u8>), String>> {
+  let mut last = "502 Bad Gateway".to_string();
+  for addr in addresses {
+    match through_exit(route, &addr.to_string()).await? {
+      Err(status) if status.starts_with("502 ") => last = status,
+      outcome => return Ok(outcome),
+    }
+  }
+  Ok(Err(last))
 }
 
 async fn reply(
@@ -377,6 +434,7 @@ struct Request<'a> {
   /// `host:port`
   target: String,
   auth: Option<&'a str>,
+  probe: bool,
   /// 普通 HTTP：改写成相对路径后发给上游的请求头。CONNECT 时为 `None`。
   forward: Option<String>,
 }
@@ -397,6 +455,9 @@ fn parse(head: &str) -> Option<Request<'_>> {
     .iter()
     .find(|(k, _)| k.eq_ignore_ascii_case("proxy-authorization"))
     .map(|(_, v)| *v);
+  let probe = headers
+    .iter()
+    .any(|(k, v)| k.eq_ignore_ascii_case(PROXY_PROBE) && *v == "1");
   if method.eq_ignore_ascii_case("CONNECT") {
     if !uri.contains(':') {
       return None;
@@ -404,6 +465,7 @@ fn parse(head: &str) -> Option<Request<'_>> {
     return Some(Request {
       target: uri.to_string(),
       auth,
+      probe,
       forward: None,
     });
   }
@@ -415,18 +477,23 @@ fn parse(head: &str) -> Option<Request<'_>> {
   if host.is_empty() {
     return None;
   }
-  let target = if host.contains(':') {
-    host.to_string()
-  } else {
-    format!("{host}:80")
-  };
+  let target =
+    if host.contains(':') && (!probe || !host.ends_with(']')) {
+      host.to_string()
+    } else {
+      format!("{host}:80")
+    };
   // 每个连接只转发一次，强制 `Connection: close`，不支持复用到别的主机。
   let mut out = format!("{method} {path} {version}\r\n");
   for (k, v) in &headers {
-    let skip =
-      ["proxy-authorization", "proxy-connection", "connection"]
-        .iter()
-        .any(|s| k.eq_ignore_ascii_case(s));
+    let skip = [
+      "proxy-authorization",
+      "proxy-connection",
+      "connection",
+      PROXY_PROBE,
+    ]
+    .iter()
+    .any(|s| k.eq_ignore_ascii_case(s));
     if !skip {
       out.push_str(&format!("{k}: {v}\r\n"));
     }
@@ -435,6 +502,7 @@ fn parse(head: &str) -> Option<Request<'_>> {
   Some(Request {
     target,
     auth,
+    probe,
     forward: Some(out),
   })
 }

@@ -86,6 +86,10 @@ pub fn web_schema() -> Value {
   let _ = generator.subschema_for::<view::BackupsView>();
   let _ = generator.subschema_for::<spec::NetworkMode>();
   let _ = generator.subschema_for::<view::NetworkView>();
+  let _ =
+    generator.subschema_for::<crate::net_probe::NetProbeRequest>();
+  let _ =
+    generator.subschema_for::<crate::net_probe::NetProbeReport>();
   let _ = generator.subschema_for::<crate::external::AclView>();
   let _ =
     generator.subschema_for::<crate::external::ExternalStatus>();

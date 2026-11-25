@@ -129,6 +129,8 @@ wharf doctor blog.example.com --json
 - 网关：`wharf gateway logs <网关>`、`wharf gateway config <网关>`；
 - 解析和证书：一般是 Cloudflare 账号权限或 DNS 还没生效，把 `hint` 告诉用户。
 
+要从指定机器检查单个目标，用 `wharf server probe <服务器> <域名|主机:端口|HTTP(S) URL> --json`。
+
 ### 看日志和资源
 
 ```bash

@@ -66,8 +66,18 @@ struct Conn {
   forward: bool,
   service_checks: bool,
   container_diagnosis: bool,
+  net_probe: bool,
   /// 协议版本不一致：连接放行，但只接受升级相关的请求，好让它升上来。
   upgrade_only: bool,
+}
+
+impl Conn {
+  fn check_net_probe(&self, server: &str) -> Result<(), ApiError> {
+    if self.upgrade_only || !self.net_probe {
+      return Err(crate::net_probe::unsupported(server));
+    }
+    Ok(())
+  }
 }
 
 struct InFlight<'a> {
@@ -130,6 +140,15 @@ impl Hub {
     lock(&self.conns)
       .get(server)
       .is_some_and(|c| !c.upgrade_only && c.container_diagnosis)
+  }
+
+  pub fn supports_net_probe(
+    &self,
+    server: &str,
+  ) -> Result<(), ApiError> {
+    let conns = lock(&self.conns);
+    let conn = conns.get(server).ok_or_else(|| offline(server))?;
+    conn.check_net_probe(server)
   }
 
   pub fn log_watches(
@@ -208,6 +227,9 @@ impl Hub {
       .get(server)
       .cloned()
       .ok_or_else(|| offline(server))?;
+    if matches!(&op, AgentOp::NetProbe(_)) {
+      conn.check_net_probe(server)?;
+    }
     if conn.upgrade_only
       && !matches!(&op, AgentOp::Upgrade(_) | AgentOp::UpgradeLog)
     {
@@ -427,6 +449,7 @@ async fn handle_socket(
     forward,
     service_checks,
     container_diagnosis,
+    net_probe,
   } = hello
   else {
     anyhow::bail!("agent 没有先发 hello");
@@ -524,6 +547,7 @@ async fn handle_socket(
     forward,
     service_checks,
     container_diagnosis,
+    net_probe,
     upgrade_only,
   };
   state.hub.register(&server, conn.clone());
@@ -733,6 +757,7 @@ mod tests {
       forward: true,
       service_checks: true,
       container_diagnosis: true,
+      net_probe: true,
     };
     let json = serde_json::to_string(&hello).unwrap();
     let old = serde_json::from_str::<OldAgentMsg>(&json);
