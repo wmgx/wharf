@@ -25,7 +25,7 @@ export function ResourceNote({ path, value }: { path: string; value?: string }) 
 
   if (!note) {
     return (
-      <button type="button" onClick={() => setEditing(true)} className="mt-1.5 inline-flex items-center gap-1 text-xs text-muted-foreground/70 hover:text-foreground">
+      <button type="button" onClick={() => setEditing(true)} className="mt-1.5 inline-flex items-center gap-1 text-xs text-muted-foreground/70 hover:text-foreground dark:text-muted-foreground dark:hover:text-foreground">
         <PlusIcon className="size-3" />
         备注
       </button>

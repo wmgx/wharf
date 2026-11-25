@@ -26,28 +26,28 @@ export function Entries() {
       {gateways.length > 0 && add}
     </div>
     {!status ? <CardsSkeleton count={2} /> : !gateways.length ? <Empty action={add}>还没有入口</Empty> : <Panel>
-      <Table>
+      <Table className="max-md:table-fixed">
         <TableHeader>
           <TableRow>
             <TableHead>入口</TableHead>
-            <TableHead>类型</TableHead>
-            <TableHead>所在</TableHead>
-            <TableHead>状态</TableHead>
-            <TableHead>域名</TableHead>
-            <TableHead>泛域名证书</TableHead>
-            <TableHead>四层转发</TableHead>
+            <TableHead className="hidden md:table-cell">类型</TableHead>
+            <TableHead className="hidden md:table-cell">所在</TableHead>
+            <TableHead className="max-md:w-28">状态</TableHead>
+            <TableHead className="max-md:w-16">域名</TableHead>
+            <TableHead className="hidden md:table-cell">泛域名证书</TableHead>
+            <TableHead className="hidden md:table-cell">四层转发</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
           {gateways.map((g) => {
             const { tone, text } = liveTone(g.live); return <TableRow key={g.name} className="cursor-pointer" {...clickable({ to: `?tab=entries&entry=${encodeURIComponent(g.name)}` })}>
-              <TableCell>
+              <TableCell className="max-md:break-all max-md:whitespace-normal">
                 {g.name} {g.spec.default && <Badge variant="secondary">默认</Badge>}
               </TableCell>
-              <TableCell>
+              <TableCell className="hidden md:table-cell">
                 {g.spec.kind === "cloudflare_tunnel" ? "Cloudflare 隧道" : `Caddy · ${tlsText[g.spec.tls ?? "auto"]}`}
               </TableCell>
-              <TableCell>
+              <TableCell className="hidden md:table-cell">
                 <ServerTag name={g.spec.server} />
               </TableCell>
               <TableCell>
@@ -60,8 +60,8 @@ export function Entries() {
                   {g.routes.length}
                 </Button>
               </TableCell>
-              <TableCell>{g.spec.kind === "caddy" ? g.spec.wildcard?.length ? g.spec.wildcard.map((z) => `*.${z}`).join("、") : "没开" : "不支持"}</TableCell>
-              <TableCell>{g.spec.kind === "caddy" ? `${g.spec.layer4?.length ?? 0} 条` : "不支持"}</TableCell>
+              <TableCell className="hidden md:table-cell">{g.spec.kind === "caddy" ? g.spec.wildcard?.length ? g.spec.wildcard.map((z) => `*.${z}`).join("、") : "没开" : "不支持"}</TableCell>
+              <TableCell className="hidden md:table-cell">{g.spec.kind === "caddy" ? `${g.spec.layer4?.length ?? 0} 条` : "不支持"}</TableCell>
             </TableRow>;
           })}
         </TableBody>

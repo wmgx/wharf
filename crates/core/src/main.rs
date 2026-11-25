@@ -45,6 +45,7 @@ mod exposure;
 mod external_checks;
 mod external_status;
 mod failover;
+mod favicon;
 mod files_api;
 mod gate;
 mod heal;
@@ -244,7 +245,15 @@ async fn main() -> anyhow::Result<()> {
   );
   axum::serve(
     listener,
-    api::router(state)
+    api::router(state.clone())
+      .merge(
+        axum::Router::new()
+          .route(
+            "/api/home/favicon",
+            axum::routing::get(favicon::get),
+          )
+          .with_state(state),
+      )
       .into_make_service_with_connect_info::<SocketAddr>(),
   )
   .with_graceful_shutdown(async {

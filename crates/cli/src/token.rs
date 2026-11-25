@@ -113,11 +113,14 @@ pub async fn run(
             limits.push(expiry_label(expires - Utc::now()));
           }
           if !token.allowed_from.is_empty() {
-            limits
-              .push(format!("来源 {}", token.allowed_from.join(",")));
+            limits.push(format!(
+              "来源 {}",
+              token.allowed_from.join(", ")
+            ));
           }
           if !token.services.is_empty() {
-            limits.push(format!("服务 {}", token.services.join(",")));
+            limits
+              .push(format!("服务 {}", token.services.join(", ")));
           }
           println!(
             "{:<14} {:<22} {}",
