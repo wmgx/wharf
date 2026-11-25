@@ -58,54 +58,85 @@ export function Data() {
       </div>
       {!rows.length ? <Empty>
         {services.length ? "没有符合条件的服务" : "还没有服务"}
-      </Empty> : <Panel>
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>服务</TableHead>
-              <TableHead>所在</TableHead>
-              <TableHead>数据</TableHead>
-              <TableHead>备份</TableHead>
-              <TableHead>备份到</TableHead>
-              <TableHead>上次</TableHead>
-              <TableHead />
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {rows.map((s) => {
-              const outside = s.mounts.filter((m) => m.kind !== "managed").length;
-              const summary = !s.mounts.length ? "没有数据卷" : outside ? `${s.mounts.length} 处挂载，${outside} 处不在备份范围` : `${s.mounts.length} 处挂载`;
-              return <TableRow key={s.name} className="cursor-pointer" {...clickable({ to: `/services/${encodeURIComponent(s.name)}?tab=data` })}>
-                <TableCell className="font-medium">
-                  {s.name}
-                </TableCell>
-                <TableCell>
-                  <ServerTag name={s.server} />
-                </TableCell>
-                <TableCell>
-                  {summary}
-                </TableCell>
-                <TableCell>
-                  <StatusBadge tone={TONE[s.status]}>
-                    {TEXT[s.status]}
-                  </StatusBadge>
-                </TableCell>
-                <TableCell>
-                  {s.target ?? "-"}
-                </TableCell>
-                <TableCell>
-                  {s.last_ok ? ago(s.last_ok) : "-"}
-                </TableCell>
-                <TableCell onClick={(e) => e.stopPropagation()}>
+      </Empty> : <>
+        <Panel className="hidden md:block">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>服务</TableHead>
+                <TableHead>所在</TableHead>
+                <TableHead>数据</TableHead>
+                <TableHead>备份</TableHead>
+                <TableHead>备份到</TableHead>
+                <TableHead>上次</TableHead>
+                <TableHead />
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {rows.map((s) => {
+                const outside = s.mounts.filter((m) => m.kind !== "managed").length;
+                const summary = !s.mounts.length ? "没有数据卷" : outside ? `${s.mounts.length} 处挂载，${outside} 处不在备份范围` : `${s.mounts.length} 处挂载`;
+                return <TableRow key={s.name} className="cursor-pointer" {...clickable({ to: `/services/${encodeURIComponent(s.name)}?tab=data` })}>
+                  <TableCell className="font-medium">
+                    {s.name}
+                  </TableCell>
+                  <TableCell>
+                    <ServerTag name={s.server} />
+                  </TableCell>
+                  <TableCell>
+                    {summary}
+                  </TableCell>
+                  <TableCell>
+                    <StatusBadge tone={TONE[s.status]}>
+                      {TEXT[s.status]}
+                    </StatusBadge>
+                  </TableCell>
+                  <TableCell>
+                    {s.target ?? "-"}
+                  </TableCell>
+                  <TableCell>
+                    {s.last_ok ? ago(s.last_ok) : "-"}
+                  </TableCell>
+                  <TableCell onClick={(e) => e.stopPropagation()}>
+                    {s.status === "off" ? <Button variant="ghost" size="xs" asChild>
+                      <Link to={`/services/${encodeURIComponent(s.name)}?tab=settings#backup`}>去开启</Link>
+                    </Button> : (s.status === "ok" || s.status === "stale") && <Button variant="ghost" size="xs" onClick={() => run(s.name)}>立即备份</Button>}
+                  </TableCell>
+                </TableRow>;
+              })}
+            </TableBody>
+          </Table>
+        </Panel>
+        <div className="grid gap-2 md:hidden">
+          {rows.map((s) => {
+            const outside = s.mounts.filter((m) => m.kind !== "managed").length;
+            const summary = !s.mounts.length ? "没有数据卷" : outside ? `${s.mounts.length} 处挂载，${outside} 处不在备份范围` : `${s.mounts.length} 处挂载`;
+            return <div key={s.name} className="cursor-pointer" {...clickable({ to: `/services/${encodeURIComponent(s.name)}?tab=data` })}>
+              <Panel className="flex items-start gap-2 p-3">
+                <div className="grid min-w-0 flex-1 gap-1.5">
+                  <div className="flex flex-wrap items-center gap-1.5 font-medium">
+                    <span className="truncate">{s.name}</span>
+                    <ServerTag name={s.server} />
+                  </div>
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+                    <StatusBadge tone={TONE[s.status]}>{TEXT[s.status]}</StatusBadge>
+                    <span>{summary}</span>
+                  </div>
+                  {(s.target || s.last_ok) && <div className="flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
+                    {s.target && <span>备份到 {s.target}</span>}
+                    {s.last_ok && <span>上次 {ago(s.last_ok)}</span>}
+                  </div>}
+                </div>
+                <div className="shrink-0" onClick={(e) => e.stopPropagation()}>
                   {s.status === "off" ? <Button variant="ghost" size="xs" asChild>
                     <Link to={`/services/${encodeURIComponent(s.name)}?tab=settings#backup`}>去开启</Link>
                   </Button> : (s.status === "ok" || s.status === "stale") && <Button variant="ghost" size="xs" onClick={() => run(s.name)}>立即备份</Button>}
-                </TableCell>
-              </TableRow>;
-            })}
-          </TableBody>
-        </Table>
-      </Panel>}
+                </div>
+              </Panel>
+            </div>;
+          })}
+        </div>
+      </>}
       <p className="mt-4 text-sm text-muted-foreground">
         <Link className="hover:underline" to="/settings?tab=core">控制面自己的备份在 设置 → 控制面</Link>
       </p>

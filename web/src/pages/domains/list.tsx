@@ -43,72 +43,120 @@ export function DomainList({ status, add }: { status: Status; add: React.ReactNo
       </div>
       {problemCount > 0 && <Button size="sm" variant={problems ? "secondary" : "outline"} onClick={() => setProblems(!problems)}>只看有问题的</Button>}
     </div>
-    {!filtered.length ? <Empty>没有符合条件的域名</Empty> : <Panel>
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>域名</TableHead>
-            <TableHead>检查</TableHead>
-            <TableHead>指向</TableHead>
-            <TableHead>入口</TableHead>
-            <TableHead>保护</TableHead>
-            <TableHead>证书</TableHead>
-            <TableHead>到期</TableHead>
-            <TableHead />
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {filtered.map(({ hostname, route, edge: app }) => {
-            const d = diagnosisOf(status, hostname);
-            const days = d?.domain_expires ? Math.floor((Date.parse(d.domain_expires) - Date.now()) / 86400000) : undefined;
-            const hop = route && hopOf(route, status);
-            return <TableRow key={`${hostname}-${app ?? "route"}`} className="cursor-pointer" {...clickable({ to: app ? `/edge/${encodeURIComponent(app)}` : `?open=${encodeURIComponent(hostname)}` })}>
-              <TableCell className="font-mono text-xs">
-                <OpenLink value={hostname} />
-                {route?.spec.expires_at != null && <div className={`font-sans text-xs ${route.spec.expires_at <= Date.now() ? "text-warning" : "text-muted-foreground"}`}>{route.spec.expires_at <= Date.now() ? "已失效" : `临时分享，${new Date(route.spec.expires_at).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })} 到期`}</div>}
-                {route?.on_backup && <Badge variant="destructive">正走备用</Badge>}
+    {!filtered.length ? <Empty>没有符合条件的域名</Empty> : <>
+      <Panel className="hidden md:block">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>域名</TableHead>
+              <TableHead>检查</TableHead>
+              <TableHead>指向</TableHead>
+              <TableHead>入口</TableHead>
+              <TableHead>保护</TableHead>
+              <TableHead>证书</TableHead>
+              <TableHead>到期</TableHead>
+              <TableHead />
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {filtered.map(({ hostname, route, edge: app }) => {
+              const d = diagnosisOf(status, hostname);
+              const days = d?.domain_expires ? Math.floor((Date.parse(d.domain_expires) - Date.now()) / 86400000) : undefined;
+              const hop = route && hopOf(route, status);
+              return <TableRow key={`${hostname}-${app ?? "route"}`} className="cursor-pointer" {...clickable({ to: app ? `/edge/${encodeURIComponent(app)}` : `?open=${encodeURIComponent(hostname)}` })}>
+                <TableCell className="font-mono text-xs">
+                  <OpenLink value={hostname} />
+                  {route?.spec.expires_at != null && <div className={`font-sans text-xs ${route.spec.expires_at <= Date.now() ? "text-warning" : "text-muted-foreground"}`}>{route.spec.expires_at <= Date.now() ? "已失效" : `临时分享，${new Date(route.spec.expires_at).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })} 到期`}</div>}
+                  {route?.on_backup && <Badge variant="destructive">正走备用</Badge>}
+                  {route && <div className="font-sans" onClick={(e) => e.stopPropagation()}>
+                    <ResourceNote path={`/api/routes/${encodeURIComponent(hostname)}/note`} value={route.note} />
+                  </div>}
+                </TableCell>
+                <TableCell>
+                  {route?.probe ? <Probe probe={route.probe} /> : route ? <Lamps d={d} /> : "-"}
+                </TableCell>
+                <TableCell>
+                  {app ? <Link to={`/edge/${encodeURIComponent(app)}`} className="inline-flex items-center gap-1 hover:underline" onClick={(e) => e.stopPropagation()}>
+                    <CloudIcon className="size-3.5" />
+                    {app}
+                  </Link> : route?.spec.service ? <Link to={`/services/${encodeURIComponent(route.spec.service)}`} onClick={(e) => e.stopPropagation()} className="hover:underline">
+                    {route.spec.service}
+                  </Link> : <span className="block max-w-40 truncate font-mono text-xs text-muted-foreground">
+                    {route?.spec.redirect ? `→ ${route.spec.redirect}` : route?.spec.upstream}
+                  </span>}
+                </TableCell>
+                <TableCell>
+                  {app ? "Cloudflare" : <>
+                    {route?.gateway ?? "-"}{hop && hop.kind !== "redirect" && hop.kind !== "none" && <div className={`text-xs ${hop.kind === "direct" && hop.plain ? "text-warning" : "text-muted-foreground"}`}>
+                      {hop.text}
+                    </div>}
+                  </>}
+                </TableCell>
+                <TableCell>
+                  {route ? <Button variant="outline" size="xs" onClick={(e) => { e.stopPropagation(); setParams({ protection: hostname }); }}>{route.spec.sso?.mode === "oidc" ? "OIDC" : route.spec.sso?.public ? "公开" : route.spec.sso ? "门禁" : route.spec.auth ? "账号密码" : "不保护"}</Button> : "-"}
+                </TableCell>
+                <TableCell>
+                  {d?.cert_expires ? <CertDays d={d} /> : "-"}
+                </TableCell>
+                <TableCell onClick={(e) => e.stopPropagation()}>
+                  {app ? "-" : days != null ? <Tip text={new Date(d!.domain_expires!).toLocaleDateString("zh-CN", { timeZone: "Asia/Shanghai" })}>
+                    <span className={days < 3 ? "text-destructive" : days < 14 ? "text-warning" : "text-muted-foreground"}>{days < 0 ? "已到期" : `剩 ${days} 天`}</span>
+                  </Tip> : <span className="text-muted-foreground">未知</span>}
+                </TableCell>
+                <TableCell onClick={(e) => e.stopPropagation()}>
+                  {route && <OpMenu ops={routeOps} target={route} label={`${hostname} 的操作`} size="icon-sm" />}
+                </TableCell>
+              </TableRow>;
+            })}
+          </TableBody>
+        </Table>
+      </Panel>
+      <div className="grid gap-2 md:hidden">
+        {filtered.map(({ hostname, route, edge: app }) => {
+          const d = diagnosisOf(status, hostname);
+          const days = d?.domain_expires ? Math.floor((Date.parse(d.domain_expires) - Date.now()) / 86400000) : undefined;
+          const hop = route && hopOf(route, status);
+          return <div key={`${hostname}-${app ?? "route"}`} className="cursor-pointer" {...clickable({ to: app ? `/edge/${encodeURIComponent(app)}` : `?open=${encodeURIComponent(hostname)}` })}>
+            <Panel className="flex items-start gap-2 p-3">
+              <div className="grid min-w-0 flex-1 gap-1.5">
+                <div className="flex min-w-0 flex-wrap items-center gap-1.5 font-mono text-xs">
+                  <OpenLink value={hostname} className="max-w-full" />
+                  {route?.on_backup && <Badge variant="destructive">正走备用</Badge>}
+                </div>
+                {route?.spec.expires_at != null && <div className={`text-xs ${route.spec.expires_at <= Date.now() ? "text-warning" : "text-muted-foreground"}`}>{route.spec.expires_at <= Date.now() ? "已失效" : `临时分享，${new Date(route.spec.expires_at).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })} 到期`}</div>}
+                <div className="flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1 text-xs">
+                  {route?.probe ? <Probe probe={route.probe} /> : route ? <Lamps d={d} /> : null}
+                  <span className="min-w-0 truncate">
+                    {app ? <Link to={`/edge/${encodeURIComponent(app)}`} className="inline-flex items-center gap-1 hover:underline" onClick={(e) => e.stopPropagation()}>
+                      <CloudIcon className="size-3.5 shrink-0" />
+                      <span className="truncate">{app}</span>
+                    </Link> : route?.spec.service ? <Link to={`/services/${encodeURIComponent(route.spec.service)}`} onClick={(e) => e.stopPropagation()} className="hover:underline">
+                      {route.spec.service}
+                    </Link> : <span className="font-mono text-muted-foreground">
+                      {route?.spec.redirect ? `→ ${route.spec.redirect}` : route?.spec.upstream}
+                    </span>}
+                  </span>
+                  <span className="text-muted-foreground">
+                    {app ? "Cloudflare" : route?.gateway ?? "-"}
+                    {hop && hop.kind !== "redirect" && hop.kind !== "none" && <span className={hop.kind === "direct" && hop.plain ? " text-warning" : ""}> · {hop.text}</span>}
+                  </span>
+                </div>
+                <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs" onClick={(e) => e.stopPropagation()}>
+                  {route && <Button variant="outline" size="xs" onClick={() => setParams({ protection: hostname })}>{route.spec.sso?.mode === "oidc" ? "OIDC" : route.spec.sso?.public ? "公开" : route.spec.sso ? "门禁" : route.spec.auth ? "账号密码" : "不保护"}</Button>}
+                  {d?.cert_expires && <span className="inline-flex items-center gap-1 text-muted-foreground">证书 <CertDays d={d} /></span>}
+                  {!app && days != null && <span className={days < 3 ? "text-destructive" : days < 14 ? "text-warning" : "text-muted-foreground"}>域名{days < 0 ? "已到期" : `剩 ${days} 天`}</span>}
+                </div>
                 {route && <div className="font-sans" onClick={(e) => e.stopPropagation()}>
                   <ResourceNote path={`/api/routes/${encodeURIComponent(hostname)}/note`} value={route.note} />
                 </div>}
-              </TableCell>
-              <TableCell>
-                {route?.probe ? <Probe probe={route.probe} /> : route ? <Lamps d={d} /> : "-"}
-              </TableCell>
-              <TableCell>
-                {app ? <Link to={`/edge/${encodeURIComponent(app)}`} className="inline-flex items-center gap-1 hover:underline" onClick={(e) => e.stopPropagation()}>
-                  <CloudIcon className="size-3.5" />
-                  {app}
-                </Link> : route?.spec.service ? <Link to={`/services/${encodeURIComponent(route.spec.service)}`} onClick={(e) => e.stopPropagation()} className="hover:underline">
-                  {route.spec.service}
-                </Link> : <span className="block max-w-40 truncate font-mono text-xs text-muted-foreground">
-                  {route?.spec.redirect ? `→ ${route.spec.redirect}` : route?.spec.upstream}
-                </span>}
-              </TableCell>
-              <TableCell>
-                {app ? "Cloudflare" : <>
-                  {route?.gateway ?? "-"}{hop && hop.kind !== "redirect" && hop.kind !== "none" && <div className={`text-xs ${hop.kind === "direct" && hop.plain ? "text-warning" : "text-muted-foreground"}`}>
-                    {hop.text}
-                  </div>}
-                </>}
-              </TableCell>
-              <TableCell>
-                {route ? <Button variant="outline" size="xs" onClick={(e) => { e.stopPropagation(); setParams({ protection: hostname }); }}>{route.spec.sso?.mode === "oidc" ? "OIDC" : route.spec.sso?.public ? "公开" : route.spec.sso ? "门禁" : route.spec.auth ? "账号密码" : "不保护"}</Button> : "-"}
-              </TableCell>
-              <TableCell>
-                {d?.cert_expires ? <CertDays d={d} /> : "-"}
-              </TableCell>
-              <TableCell onClick={(e) => e.stopPropagation()}>
-                {app ? "-" : days != null ? <Tip text={new Date(d!.domain_expires!).toLocaleDateString("zh-CN", { timeZone: "Asia/Shanghai" })}>
-                  <span className={days < 3 ? "text-destructive" : days < 14 ? "text-warning" : "text-muted-foreground"}>{days < 0 ? "已到期" : `剩 ${days} 天`}</span>
-                </Tip> : <span className="text-muted-foreground">未知</span>}
-              </TableCell>
-              <TableCell onClick={(e) => e.stopPropagation()}>
+              </div>
+              <div className="shrink-0" onClick={(e) => e.stopPropagation()}>
                 {route && <OpMenu ops={routeOps} target={route} label={`${hostname} 的操作`} size="icon-sm" />}
-              </TableCell>
-            </TableRow>;
-          })}
-        </TableBody>
-      </Table>
-    </Panel>}
+              </div>
+            </Panel>
+          </div>;
+        })}
+      </div>
+    </>}
   </>;
 }

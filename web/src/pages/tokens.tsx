@@ -3,7 +3,7 @@ import { Panel } from "@/components/kit";
 import { CopyIcon, PencilIcon, PlusIcon, TerminalIcon, Trash2Icon } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
-import { api, type Session, usePoll } from "@/api";
+import { ApiError, api, type Session, usePoll } from "@/api";
 import { ago, CodeBlock, Empty, ErrorNote, Notice, SectionTitle } from "@/components/common";
 import { Field, Segmented, toName } from "@/components/fields";
 import { Badge } from "@/components/ui/badge";
@@ -82,7 +82,7 @@ export function Tokens() {
 
   return (
     <>
-      <SectionTitle count={data?.length} action={<div className="flex gap-2">
+      <SectionTitle count={data?.length} action={<div className="flex flex-wrap gap-2">
           <Button variant="outline" size="sm" onClick={() => setGuide(true)}>
             <TerminalIcon />
             接入 CLI / AI
@@ -134,47 +134,77 @@ export function Tokens() {
         <Empty>还没有访问令牌</Empty>
       ) : (
         data && (
-          <Panel>
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>名称</TableHead>
-                  <TableHead>权限</TableHead>
-                  <TableHead>限制</TableHead>
-                  <TableHead>最近使用</TableHead>
-                  <TableHead>创建</TableHead>
-                  <TableHead className="w-10" />
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {data.map((t) => (
-                  <TableRow key={t.name}>
-                    <TableCell className="font-medium">{t.name}</TableCell>
-                    <TableCell>
-                      <span className="flex flex-wrap gap-1">
-                        {t.perms.map((p) => (
-                          <Badge key={p} variant={p === "admin" || p === "confirm" ? "default" : "secondary"} className="font-normal">
-                            {PERM_LABEL[p] ?? p}
-                          </Badge>
-                        ))}
-                      </span>
-                    </TableCell>
-                    <TableCell><Limits token={t} /></TableCell>
-                    <TableCell className="text-muted-foreground">{t.last_used_at ? ago(t.last_used_at) : "没用过"}</TableCell>
-                    <TableCell className="text-muted-foreground">{ago(t.created_at)}</TableCell>
-                    <TableCell className="whitespace-nowrap">
-                      <Button variant="ghost" size="xs" aria-label={`编辑 ${t.name}`} onClick={() => setEditing(t)}>
-                        <PencilIcon />
-                      </Button>
-                      <Button variant="ghost" size="xs" aria-label={`删除 ${t.name}`} onClick={() => setRemoving(t.name)}>
-                        <Trash2Icon />
-                      </Button>
-                    </TableCell>
+          <>
+            <Panel className="hidden md:block">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>名称</TableHead>
+                    <TableHead>权限</TableHead>
+                    <TableHead>限制</TableHead>
+                    <TableHead>最近使用</TableHead>
+                    <TableHead>创建</TableHead>
+                    <TableHead className="w-10" />
                   </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </Panel>
+                </TableHeader>
+                <TableBody>
+                  {data.map((t) => (
+                    <TableRow key={t.name}>
+                      <TableCell className="font-medium">{t.name}</TableCell>
+                      <TableCell>
+                        <span className="flex flex-wrap gap-1">
+                          {t.perms.map((p) => (
+                            <Badge key={p} variant={p === "admin" || p === "confirm" ? "default" : "secondary"} className="font-normal">
+                              {PERM_LABEL[p] ?? p}
+                            </Badge>
+                          ))}
+                        </span>
+                      </TableCell>
+                      <TableCell><Limits token={t} /></TableCell>
+                      <TableCell className="text-muted-foreground">{t.last_used_at ? ago(t.last_used_at) : "没用过"}</TableCell>
+                      <TableCell className="text-muted-foreground">{ago(t.created_at)}</TableCell>
+                      <TableCell className="whitespace-nowrap">
+                        <Button variant="ghost" size="xs" aria-label={`编辑 ${t.name}`} onClick={() => setEditing(t)}>
+                          <PencilIcon />
+                        </Button>
+                        <Button variant="ghost" size="xs" aria-label={`删除 ${t.name}`} onClick={() => setRemoving(t.name)}>
+                          <Trash2Icon />
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </Panel>
+            <div className="grid gap-2 md:hidden">
+              {data.map((t) => (
+                <Panel key={t.name} className="flex items-start gap-2 p-3">
+                  <div className="grid min-w-0 flex-1 gap-1.5">
+                    <div className="flex items-baseline justify-between gap-2">
+                      <span className="truncate font-medium">{t.name}</span>
+                      <span className="shrink-0 text-xs text-muted-foreground">{t.last_used_at ? ago(t.last_used_at) : "没用过"}</span>
+                    </div>
+                    <div className="flex flex-wrap gap-1">
+                      {t.perms.map((p) => (
+                        <Badge key={p} variant={p === "admin" || p === "confirm" ? "default" : "secondary"} className="font-normal">
+                          {PERM_LABEL[p] ?? p}
+                        </Badge>
+                      ))}
+                    </div>
+                    <div className="min-w-0 text-xs"><Limits token={t} /></div>
+                  </div>
+                  <div className="flex shrink-0 items-center">
+                    <Button variant="ghost" size="xs" aria-label={`编辑 ${t.name}`} onClick={() => setEditing(t)}>
+                      <PencilIcon />
+                    </Button>
+                    <Button variant="ghost" size="xs" aria-label={`删除 ${t.name}`} onClick={() => setRemoving(t.name)}>
+                      <Trash2Icon />
+                    </Button>
+                  </div>
+                </Panel>
+              ))}
+            </div>
+          </>
         )
       )}
       {(creating || editing) && (
@@ -213,13 +243,21 @@ function Limits({ token }: { token: TokenView }) {
   const { expires_at, allowed_from = [], services = [] } = token;
   const expiry = expiryLabel(expires_at);
   if (!expires_at && !allowed_from.length && !services.length) return <span className="text-muted-foreground">不限</span>;
-  return <span className="flex flex-wrap gap-1">
+  const fromText = `来源 ${allowed_from.join(",")}`;
+  const servicesText = `服务 ${services.join(",")}`;
+  return <span className="flex min-w-0 flex-wrap gap-1">
     {expires_at && <Badge variant={expiry === "已过期" ? "destructive" : "secondary"} className="font-normal">{expiry}</Badge>}
-    {!!allowed_from.length && <Badge variant="secondary" className="font-normal" title={allowed_from.join("、")}>限来源</Badge>}
-    {!!services.length && <Badge variant="secondary" className="font-normal" title={services.join("、")}>
-      {services.length > 3 ? `限 ${services.length} 个服务` : `限 ${services.join("、")}`}
+    {!!allowed_from.length && <Badge variant="secondary" className="max-w-52 max-md:max-w-full font-normal" title={fromText}>
+      <span className="truncate">{fromText}</span>
+    </Badge>}
+    {!!services.length && <Badge variant="secondary" className="max-w-52 max-md:max-w-full font-normal" title={servicesText}>
+      <span className="truncate">{servicesText}</span>
     </Badge>}
   </span>;
+}
+
+function isFromError(error: unknown): boolean {
+  return error instanceof ApiError && error.body.code === "InvalidInput" && error.body.message.startsWith("来源地址");
 }
 
 function TokenDialog({ token, taken, onCreated, onClose }: { token: TokenView | null; taken: string[]; onCreated: (t: CreatedToken) => void; onClose: () => void }) {
@@ -232,6 +270,7 @@ function TokenDialog({ token, taken, onCreated, onClose }: { token: TokenView | 
   const serviceList = usePoll<ServiceView[]>("/api/services", 30000);
   const serviceNames = [...new Set([...(serviceList.data ?? []).map((s) => s.name), ...services])].sort();
   const [saving, setSaving] = useState(false);
+  const [fromError, setFromError] = useState<unknown>(null);
   const [error, setError] = useState<unknown>(null);
   const perms = preset === "custom" ? custom : PRESETS[preset];
   const expiryOptions: [string, string][] = [
@@ -239,8 +278,14 @@ function TokenDialog({ token, taken, onCreated, onClose }: { token: TokenView | 
     ["never", "永不过期"], ["1", "1 天"], ["7", "7 天"], ["30", "30 天"], ["90", "90 天"],
   ];
 
+  const updateFrom = (value: string) => {
+    setFrom(value);
+    if (fromError) setFromError(null);
+  };
+
   const save = async () => {
     setSaving(true);
+    setFromError(null);
     setError(null);
     try {
       const expires_at = expiry === "keep" ? token?.expires_at ?? null : expiry === "never" ? null : new Date(Date.now() + Number(expiry) * DAY).toISOString();
@@ -253,7 +298,8 @@ function TokenDialog({ token, taken, onCreated, onClose }: { token: TokenView | 
       }
       onClose();
     } catch (e) {
-      setError(e);
+      if (isFromError(e)) setFromError(e);
+      else setError(e);
     } finally {
       setSaving(false);
     }
@@ -303,8 +349,9 @@ function TokenDialog({ token, taken, onCreated, onClose }: { token: TokenView | 
             </div>
           </Field>
           <Field label="只允许从这些地址使用" htmlFor="token-from" help="留空表示不限。填组网网段就只能在组网内用">
-            <Input id="token-from" value={from} onChange={(e) => setFrom(e.target.value)} placeholder={MESH_RANGES} />
-            <Button className="w-fit" variant="outline" size="xs" onClick={() => setFrom(MESH_RANGES)}>只允许组网内</Button>
+            <Input id="token-from" value={from} aria-invalid={!!fromError} onChange={(e) => updateFrom(e.target.value)} placeholder={MESH_RANGES} />
+            <Button className="w-fit" variant="outline" size="xs" onClick={() => updateFrom(MESH_RANGES)}>只允许组网内</Button>
+            <ErrorNote error={fromError} />
           </Field>
           <Field label="只能操作这些服务" help="不勾表示不限。勾了以后这个令牌只能改这些服务，其他改动会被拒绝">
             <div className="grid max-h-48 gap-1.5 overflow-auto">

@@ -25,48 +25,70 @@ export function Entries() {
     <div className="mb-4 flex justify-end">
       {gateways.length > 0 && add}
     </div>
-    {!status ? <CardsSkeleton count={2} /> : !gateways.length ? <Empty action={add}>还没有入口</Empty> : <Panel>
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>入口</TableHead>
-            <TableHead>类型</TableHead>
-            <TableHead>所在</TableHead>
-            <TableHead>状态</TableHead>
-            <TableHead>域名</TableHead>
-            <TableHead>泛域名证书</TableHead>
-            <TableHead>四层转发</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {gateways.map((g) => {
-            const { tone, text } = liveTone(g.live); return <TableRow key={g.name} className="cursor-pointer" {...clickable({ to: `?tab=entries&entry=${encodeURIComponent(g.name)}` })}>
-              <TableCell>
-                {g.name} {g.spec.default && <Badge variant="secondary">默认</Badge>}
-              </TableCell>
-              <TableCell>
-                {g.spec.kind === "cloudflare_tunnel" ? "Cloudflare 隧道" : `Caddy · ${tlsText[g.spec.tls ?? "auto"]}`}
-              </TableCell>
-              <TableCell>
+    {!status ? <CardsSkeleton count={2} /> : !gateways.length ? <Empty action={add}>还没有入口</Empty> : <>
+      <Panel className="hidden md:block">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>入口</TableHead>
+              <TableHead>类型</TableHead>
+              <TableHead>所在</TableHead>
+              <TableHead>状态</TableHead>
+              <TableHead>域名</TableHead>
+              <TableHead>泛域名证书</TableHead>
+              <TableHead>四层转发</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {gateways.map((g) => {
+              const { tone, text } = liveTone(g.live); return <TableRow key={g.name} className="cursor-pointer" {...clickable({ to: `?tab=entries&entry=${encodeURIComponent(g.name)}` })}>
+                <TableCell>
+                  {g.name} {g.spec.default && <Badge variant="secondary">默认</Badge>}
+                </TableCell>
+                <TableCell>
+                  {g.spec.kind === "cloudflare_tunnel" ? "Cloudflare 隧道" : `Caddy · ${tlsText[g.spec.tls ?? "auto"]}`}
+                </TableCell>
+                <TableCell>
+                  <ServerTag name={g.spec.server} />
+                </TableCell>
+                <TableCell>
+                  <StatusBadge tone={tone}>
+                    {text}
+                  </StatusBadge>
+                </TableCell>
+                <TableCell>
+                  <Button variant="ghost" size="xs" onClick={(e) => { e.stopPropagation(); setParams({ gateway: g.name }); }}>
+                    {g.routes.length}
+                  </Button>
+                </TableCell>
+                <TableCell>{g.spec.kind === "caddy" ? g.spec.wildcard?.length ? g.spec.wildcard.map((z) => `*.${z}`).join("、") : "没开" : "不支持"}</TableCell>
+                <TableCell>{g.spec.kind === "caddy" ? `${g.spec.layer4?.length ?? 0} 条` : "不支持"}</TableCell>
+              </TableRow>;
+            })}
+          </TableBody>
+        </Table>
+      </Panel>
+      <div className="grid gap-2 md:hidden">
+        {gateways.map((g) => {
+          const { tone, text } = liveTone(g.live);
+          return <div key={g.name} className="cursor-pointer" {...clickable({ to: `?tab=entries&entry=${encodeURIComponent(g.name)}` })}>
+            <Panel className="grid gap-1.5 p-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="inline-flex items-center gap-1.5 font-medium">{g.name}{g.spec.default && <Badge variant="secondary">默认</Badge>}</span>
+                <StatusBadge tone={tone}>{text}</StatusBadge>
+              </div>
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
                 <ServerTag name={g.spec.server} />
-              </TableCell>
-              <TableCell>
-                <StatusBadge tone={tone}>
-                  {text}
-                </StatusBadge>
-              </TableCell>
-              <TableCell>
+                <span>{g.spec.kind === "cloudflare_tunnel" ? "Cloudflare 隧道" : `Caddy · ${tlsText[g.spec.tls ?? "auto"]}`}</span>
                 <Button variant="ghost" size="xs" onClick={(e) => { e.stopPropagation(); setParams({ gateway: g.name }); }}>
-                  {g.routes.length}
+                  {g.routes.length} 个域名
                 </Button>
-              </TableCell>
-              <TableCell>{g.spec.kind === "caddy" ? g.spec.wildcard?.length ? g.spec.wildcard.map((z) => `*.${z}`).join("、") : "没开" : "不支持"}</TableCell>
-              <TableCell>{g.spec.kind === "caddy" ? `${g.spec.layer4?.length ?? 0} 条` : "不支持"}</TableCell>
-            </TableRow>;
-          })}
-        </TableBody>
-      </Table>
-    </Panel>}
+              </div>
+            </Panel>
+          </div>;
+        })}
+      </div>
+    </>}
     <Sheet open={!!selected} onOpenChange={(open) => !open && setParams({ tab: "entries" })}>
       <SheetContent className="w-full gap-0 sm:max-w-xl" onOpenAutoFocus={(e) => e.preventDefault()}>
         {selected && <GatewayDetail g={selected} onDone={() => setParams({ tab: "entries" })} onDomain={(hostname) => setParams({ open: hostname })} />}

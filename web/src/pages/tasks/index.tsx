@@ -40,61 +40,92 @@ export function TasksPage() {
       {failures.length > 0 && <Button variant={failed ? "secondary" : "outline"} size="sm" onClick={() => setFailed(!failed)}>只看失败的</Button>}
     </div>
     <ErrorNote error={error} />
-    {!data ? <Skeleton className="h-40 rounded-xl" /> : data.length === 0 ? <Empty action={add}>还没有任务</Empty> : rows.length === 0 ? <Empty>没有符合条件的任务</Empty> : <Panel>
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>任务</TableHead>
-            <TableHead>形式</TableHead>
-            <TableHead>在哪</TableHead>
-            <TableHead>时间</TableHead>
-            <TableHead>上次</TableHead>
-            <TableHead>下次</TableHead>
-            <TableHead />
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {rows.map((t) => {
-            const friendly = cronText(t.spec.schedule);
-            return <TableRow key={t.name} className="cursor-pointer" {...clickable({ to: `/tasks/${encodeURIComponent(t.name)}` })}>
-              <TableCell className="font-medium">
-                {t.name} {!t.spec.enabled && <Badge variant="outline">已停用</Badge>}
-              </TableCell>
-              <TableCell>
-                {KIND[t.spec.kind]}
-              </TableCell>
-              <TableCell>
-                {where(t.spec)}
-              </TableCell>
-              <TableCell>
-                <div>
+    {!data ? <Skeleton className="h-40 rounded-xl" /> : data.length === 0 ? <Empty action={add}>还没有任务</Empty> : rows.length === 0 ? <Empty>没有符合条件的任务</Empty> : <>
+      <Panel className="hidden md:block">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>任务</TableHead>
+              <TableHead>形式</TableHead>
+              <TableHead>在哪</TableHead>
+              <TableHead>时间</TableHead>
+              <TableHead>上次</TableHead>
+              <TableHead>下次</TableHead>
+              <TableHead />
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {rows.map((t) => {
+              const friendly = cronText(t.spec.schedule);
+              return <TableRow key={t.name} className="cursor-pointer" {...clickable({ to: `/tasks/${encodeURIComponent(t.name)}` })}>
+                <TableCell className="font-medium">
+                  {t.name} {!t.spec.enabled && <Badge variant="outline">已停用</Badge>}
+                </TableCell>
+                <TableCell>
+                  {KIND[t.spec.kind]}
+                </TableCell>
+                <TableCell>
+                  {where(t.spec)}
+                </TableCell>
+                <TableCell>
+                  <div>
+                    {t.spec.kind === "ping" && "预期 "}{friendly ?? t.spec.schedule}
+                  </div>
+                  {friendly && <div className="font-mono text-xs text-muted-foreground">
+                    {t.spec.schedule}
+                  </div>}
+                </TableCell>
+                <TableCell>
+                  {t.last ? <>
+                    <StatusBadge tone={STATUS[t.last.status][0]}>
+                      {STATUS[t.last.status][1]}
+                    </StatusBadge>
+                    <div className="text-xs text-muted-foreground">
+                      {ago(t.last.started_at)}
+                    </div>
+                  </> : "没运行过"}
+                </TableCell>
+                <TableCell>
+                  {!t.spec.enabled ? "-" : t.next_at ? new Date(t.next_at).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }) : "-"}
+                </TableCell>
+                <TableCell onClick={(e) => e.stopPropagation()}>
+                  <OpMenu ops={taskOps} target={t} label={`${t.name} 的操作`} size="icon-sm" />
+                </TableCell>
+              </TableRow>;
+            })}
+          </TableBody>
+        </Table>
+      </Panel>
+      <div className="grid gap-2 md:hidden">
+        {rows.map((t) => {
+          const friendly = cronText(t.spec.schedule);
+          return <div key={t.name} className="cursor-pointer" {...clickable({ to: `/tasks/${encodeURIComponent(t.name)}` })}>
+            <Panel className="flex items-start gap-2 p-3">
+              <div className="grid min-w-0 flex-1 gap-1.5">
+                <div className="flex flex-wrap items-center gap-1.5 font-medium">
+                  <span className="truncate">{t.name}</span>
+                  {!t.spec.enabled && <Badge variant="outline">已停用</Badge>}
+                </div>
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+                  {t.last ? <>
+                    <StatusBadge tone={STATUS[t.last.status][0]}>{STATUS[t.last.status][1]}</StatusBadge>
+                    <span>{ago(t.last.started_at)}</span>
+                  </> : <span>没运行过</span>}
+                  <span>{KIND[t.spec.kind]}</span>
+                  <span className="truncate">{where(t.spec)}</span>
+                </div>
+                <div className="text-xs text-muted-foreground">
                   {t.spec.kind === "ping" && "预期 "}{friendly ?? t.spec.schedule}
                 </div>
-                {friendly && <div className="font-mono text-xs text-muted-foreground">
-                  {t.spec.schedule}
-                </div>}
-              </TableCell>
-              <TableCell>
-                {t.last ? <>
-                  <StatusBadge tone={STATUS[t.last.status][0]}>
-                    {STATUS[t.last.status][1]}
-                  </StatusBadge>
-                  <div className="text-xs text-muted-foreground">
-                    {ago(t.last.started_at)}
-                  </div>
-                </> : "没运行过"}
-              </TableCell>
-              <TableCell>
-                {!t.spec.enabled ? "-" : t.next_at ? new Date(t.next_at).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }) : "-"}
-              </TableCell>
-              <TableCell onClick={(e) => e.stopPropagation()}>
+              </div>
+              <div className="shrink-0" onClick={(e) => e.stopPropagation()}>
                 <OpMenu ops={taskOps} target={t} label={`${t.name} 的操作`} size="icon-sm" />
-              </TableCell>
-            </TableRow>;
-          })}
-        </TableBody>
-      </Table>
-    </Panel>}
+              </div>
+            </Panel>
+          </div>;
+        })}
+      </div>
+    </>}
     <Sheet open={params.get("new") === "1"} onOpenChange={(open) => !open && close()}>
       <SheetContent className="w-full gap-0 sm:max-w-xl" aria-describedby={undefined}>
         <SheetHeader className="border-b">

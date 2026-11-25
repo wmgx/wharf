@@ -46,7 +46,7 @@ function OAuthDialog({ current, onClose, onSaved }: { current?: SecretView; onCl
         </DialogHeader>
         <div className="grid gap-4">
           <div className="flex items-center gap-2 text-sm"><Dot tone={current ? "ok" : "idle"} />{current ? `Tailscale 凭据已保存，${ago(current.updated_at)}更新` : "还没设置。没装 Tailscale 的机器加入时要用它。"}</div>
-          <Field label="Client ID" htmlFor="ts-id" help="在 Tailscale 后台新建 OAuth 客户端，权限选 Auth Keys（写），标签填 tag:wharf。保存后不能再查看，只能替换。">
+          <Field label="Client ID" htmlFor="ts-id" help="在 Tailscale 后台新建 OAuth 客户端，勾选：Auth Keys（写，标签 tag:wharf，给新机器开加入密钥）、devices:core:read（查设备和密钥到期）、policy_file:read 与 devices:posture_attributes:read（读组网策略）。保存后不能再查看，只能替换。">
             <Input id="ts-id" autoComplete="off" value={id} onChange={(e) => setId(e.target.value)} className="font-mono" />
           </Field>
           <Field label="Client secret" htmlFor="ts-secret">

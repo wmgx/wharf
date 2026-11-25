@@ -181,6 +181,7 @@ pub fn router(state: Arc<AppState>) -> Router {
       ),
     )
     .route("/api/status", get(status))
+    .route("/api/favicon", get(crate::favicon::get))
     .route("/api/version", get(crate::agent_upgrade::version))
     .route("/api/version/check", post(crate::agent_upgrade::check))
     .route("/api/network", get(crate::network::show))

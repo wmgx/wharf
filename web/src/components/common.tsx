@@ -117,10 +117,49 @@ export function sourceLabel(source: Source, compose = "compose 文件"): string 
   return `本机代码 ${upload?.slice(0, 12) ?? ""}${sub}`;
 }
 
-/** 服务图标：先试站点的 favicon，失败就用首字母。 */
+const faviconCache = new Map<string, Promise<string | null>>();
+
+function loadFavicon(origin: string): Promise<string | null> {
+  const cached = faviconCache.get(origin);
+  if (cached) return cached;
+  const req = fetch(`/api/favicon?url=${encodeURIComponent(origin)}`)
+    .then(async (resp) => {
+      if (resp.status === 200 && resp.headers.get("content-type")?.startsWith("image/")) {
+        return URL.createObjectURL(await resp.blob());
+      }
+      if (resp.status !== 204) faviconCache.delete(origin);
+      return null;
+    })
+    .catch(() => {
+      faviconCache.delete(origin);
+      return null;
+    });
+  faviconCache.set(origin, req);
+  return req;
+}
+
+/** 服务图标：通过控制面代取站点 favicon（找不到返回 204，不产生控制台报错），没有就显示首字母。 */
 export function Mark({ name, url, className }: { name: string; url?: string; className?: string }) {
-  const [failed, setFailed] = useState(false);
-  useEffect(() => setFailed(false), [url]);
+  const [src, setSrc] = useState<string | null>(null);
+  useEffect(() => {
+    setSrc(null);
+    if (!url) return;
+    let origin: string;
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return;
+      origin = parsed.origin;
+    } catch {
+      return;
+    }
+    let active = true;
+    loadFavicon(origin).then((next) => {
+      if (active) setSrc(next);
+    });
+    return () => {
+      active = false;
+    };
+  }, [url]);
   const letter = name.replace(/[^a-z0-9]/gi, "").slice(0, 1).toUpperCase() || "?";
   return (
     <span
@@ -129,8 +168,8 @@ export function Mark({ name, url, className }: { name: string; url?: string; cla
         className,
       )}
     >
-      {url && !failed ? (
-        <img className="size-5 object-contain" src={new URL("/favicon.ico", url).toString()} alt="" onError={() => setFailed(true)} />
+      {src ? (
+        <img className="size-5 object-contain" src={src} alt="" onError={() => setSrc(null)} />
       ) : (
         letter
       )}

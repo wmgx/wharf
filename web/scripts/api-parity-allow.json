@@ -1,5 +1,6 @@
 {
   "/api/core-backup/recovery-key": "页面重新验证登录密码后下载恢复密钥。",
+  "/api/favicon": "页面展示服务与书签图标，由控制面代取并缓存，CLI 不需要图标。",
   "/api/login": "建立浏览器会话。CLI 登录使用访问令牌。",
   "/api/logout": "退出浏览器会话。",
   "/api/oidc/clients/{}/secret": "控制面仅允许页面会话查看客户端密钥。",

@@ -45,6 +45,7 @@ mod exposure;
 mod external_checks;
 mod external_status;
 mod failover;
+mod favicon;
 mod files_api;
 mod gate;
 mod heal;
