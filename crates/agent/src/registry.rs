@@ -1,9 +1,11 @@
-//! 查镜像标签当前对应的 digest：只发 HEAD 读清单，不拉镜像。
+//! 查镜像标签当前对应的 digest 和平台，只读清单和镜像配置，不拉镜像层。
 //! 按镜像源顺序尝试（和拉取一样），匿名 token；要登录的私有仓库查不到。
 
 use std::time::Duration;
 
 use reqwest::{StatusCode, header};
+use serde_json::Value;
+use tokio::time::Instant;
 use wharf_api_types::{
   ApiError, ErrorCode,
   agent::{PullPolicy, ResolveImages, ResolvedImage},
@@ -11,8 +13,10 @@ use wharf_api_types::{
 
 use crate::{docker::split_image, exec::Ctx};
 
-/// 查一次清单的上限：只是一个 HEAD 请求，比拉镜像短得多。
+/// 每次 registry 请求的超时。
 const ATTEMPT: Duration = Duration::from_secs(20);
+const MAX_METADATA_BYTES: usize = 4 * 1024 * 1024;
+const MAX_CONFIG_BYTES: usize = 256 * 1024;
 
 /// 多架构镜像返回索引的 digest，和 `docker pull` 记下的一致。
 const ACCEPT: &str = "application/vnd.oci.image.index.v1+json, \
@@ -72,7 +76,9 @@ async fn one(
   image: &str,
   job: &ResolveImages,
 ) -> ResolvedImage {
-  let result = resolve_one(clients, image, &job.pull).await;
+  let host_platform = format!("{}/{}", std::env::consts::OS, arch());
+  let result =
+    resolve_one(clients, image, &job.pull, &host_platform).await;
   let newer_tags = if job.tags {
     tokio::time::timeout(
       TAGS_LIMIT,
@@ -84,10 +90,12 @@ async fn one(
     vec![]
   };
   match result {
-    Ok((digest, config)) => ResolvedImage {
+    Ok((digest, config, platforms)) => ResolvedImage {
       image: image.to_string(),
       digest: Some(digest),
       config,
+      platforms,
+      host_platform: Some(host_platform),
       error: None,
       newer_tags,
     },
@@ -95,20 +103,25 @@ async fn one(
       image: image.to_string(),
       digest: None,
       config: None,
+      platforms: None,
+      host_platform: Some(host_platform),
       error: Some(e),
       newer_tags,
     },
   }
 }
 
-/// (清单 digest, 本机平台的镜像 ID)。镜像 ID 用来和本地已有的镜像比，读不到时为空。
-type Found = (String, Option<String>);
+/// (清单 digest, 本机平台的镜像 ID, 镜像支持的平台)。
+type Found = (String, Option<String>, Option<Vec<String>>);
 
 async fn resolve_one(
   clients: &Clients,
   image: &str,
   policy: &PullPolicy,
+  host_platform: &str,
 ) -> Result<Found, String> {
+  // 元数据是补充信息，给控制面的 60 秒调用上限留出余量。
+  let metadata_deadline = Instant::now() + ATTEMPT * 2;
   let (registry, path, suffix) = split_image(image);
   let reference = suffix
     .strip_prefix('@')
@@ -120,8 +133,10 @@ async fn resolve_one(
     let mut repo = Repo::new(clients.pick(mirror), &host, &path);
     match repo.head(&reference).await {
       Ok(digest) => {
-        let config = repo.config(&digest).await.ok();
-        return Ok((digest, config));
+        let (config, platforms) = repo
+          .details(&digest, host_platform, metadata_deadline)
+          .await;
+        return Ok((digest, config, platforms));
       }
       Err(e) => errors.push(format!("{host}：{e}")),
     }
@@ -285,8 +300,7 @@ impl<'a> Repo<'a> {
         .filter(|l| l.contains("rel=\"next\""))
         .and_then(|l| l.split_once('<')?.1.split_once('>'))
         .map(|(u, _)| u.to_string());
-      let body: serde_json::Value =
-        resp.json().await.map_err(|e| e.without_url().to_string())?;
+      let body = read_json(resp, MAX_METADATA_BYTES).await?;
       out.extend(
         body["tags"]
           .as_array()
@@ -305,16 +319,7 @@ impl<'a> Repo<'a> {
     Ok(out)
   }
 
-  /// 请求清单；遇到 401 匿名换 token 再试一次。
-  async fn manifest(
-    &mut self,
-    reference: &str,
-    head: bool,
-  ) -> Result<reqwest::Response, String> {
-    let url = format!("{}/manifests/{reference}", self.base);
-    self.send(&url, head).await
-  }
-
+  /// 请求仓库；遇到 401 匿名换 token 再试一次。
   async fn send(
     &mut self,
     url: &str,
@@ -354,8 +359,9 @@ impl<'a> Repo<'a> {
     &mut self,
     reference: &str,
   ) -> Result<String, String> {
+    let url = format!("{}/manifests/{reference}", self.base);
     self
-      .manifest(reference, true)
+      .send(&url, true)
       .await?
       .headers()
       .get("docker-content-digest")
@@ -365,34 +371,131 @@ impl<'a> Repo<'a> {
       .ok_or_else(|| "仓库没有返回 digest".to_string())
   }
 
-  /// 本机平台的镜像 ID（清单里 config 的 digest），和 `docker image inspect` 的 Id 相同。
-  async fn config(&mut self, digest: &str) -> Result<String, String> {
-    let mut reference = digest.to_string();
-    // 多架构：索引 → 本机平台的清单 → config。最多两层。
-    for _ in 0..2 {
-      let body: serde_json::Value = self
-        .manifest(&reference, false)
-        .await?
-        .json()
-        .await
-        .map_err(|e| e.without_url().to_string())?;
-      if let Some(config) = body["config"]["digest"].as_str() {
-        return Ok(config.to_string());
-      }
-      reference = body["manifests"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|m| {
-          m["platform"]["os"] == "linux"
-            && m["platform"]["architecture"] == arch()
-        })
-        .and_then(|m| m["digest"].as_str())
-        .ok_or_else(|| "清单里没有本机平台".to_string())?
-        .to_string();
-    }
-    Err("清单层数不对".into())
+  async fn metadata(
+    &mut self,
+    path: &str,
+    max_bytes: usize,
+    deadline: Instant,
+  ) -> Option<Value> {
+    let url = format!("{}/{path}", self.base);
+    tokio::time::timeout_at(deadline, async {
+      read_json(self.send(&url, false).await?, max_bytes).await
+    })
+    .await
+    .map_err(|_| "读取镜像元数据超时".to_string())
+    .flatten()
+    .inspect_err(
+      |error| tracing::debug!(%error, "读取镜像元数据失败"),
+    )
+    .ok()
   }
+
+  /// 保留 HEAD 返回的 digest。索引已有平台信息，只读本机清单来取镜像 ID。
+  async fn details(
+    &mut self,
+    digest: &str,
+    host: &str,
+    deadline: Instant,
+  ) -> (Option<String>, Option<Vec<String>>) {
+    let Some(body) = self
+      .metadata(
+        &format!("manifests/{digest}"),
+        MAX_METADATA_BYTES,
+        deadline,
+      )
+      .await
+    else {
+      return (None, None);
+    };
+    if let Some(config) = body["config"]["digest"].as_str() {
+      // reqwest 默认在跨主机、端口或协议重定向时移除 Authorization。
+      let supported = self
+        .metadata(
+          &format!("blobs/{config}"),
+          MAX_CONFIG_BYTES,
+          deadline,
+        )
+        .await
+        .and_then(|body| platforms(&body));
+      let config = supported
+        .as_ref()
+        .is_none_or(|list| list.iter().any(|p| p == host))
+        .then(|| config.to_string());
+      return (config, supported);
+    }
+    let supported = platforms(&body);
+    let Some(child) = body["manifests"]
+      .as_array()
+      .into_iter()
+      .flatten()
+      .filter(|m| platform(&m["platform"]).as_deref() == Some(host))
+      .find_map(|m| m["digest"].as_str())
+    else {
+      return (None, supported);
+    };
+    let config = self
+      .metadata(
+        &format!("manifests/{child}"),
+        MAX_METADATA_BYTES,
+        deadline,
+      )
+      .await
+      .and_then(|body| {
+        body["config"]["digest"].as_str().map(str::to_string)
+      });
+    (config, supported)
+  }
+}
+
+fn platform(body: &Value) -> Option<String> {
+  let os = body["os"].as_str()?;
+  let arch = body["architecture"].as_str()?;
+  if [os, arch].iter().any(|s| s.is_empty() || *s == "unknown") {
+    return None;
+  }
+  match body["variant"].as_str() {
+    None | Some("") => Some(format!("{os}/{arch}")),
+    Some("v8") if arch == "arm64" => Some(format!("{os}/{arch}")),
+    Some(variant) => Some(format!("{os}/{arch}/{variant}")),
+  }
+}
+
+fn platforms(body: &Value) -> Option<Vec<String>> {
+  if let Some(manifests) = body["manifests"].as_array() {
+    let mut platforms: Vec<_> = manifests
+      .iter()
+      .filter_map(|m| platform(&m["platform"]))
+      .collect();
+    platforms.sort_unstable();
+    platforms.dedup();
+    return Some(platforms);
+  }
+  platform(body).map(|p| vec![p])
+}
+
+async fn read_json(
+  mut response: reqwest::Response,
+  max_bytes: usize,
+) -> Result<Value, String> {
+  let too_large = || format!("仓库响应超过 {max_bytes} 字节");
+  if response
+    .content_length()
+    .is_some_and(|n| n > max_bytes as u64)
+  {
+    return Err(too_large());
+  }
+  let mut body = Vec::new();
+  while let Some(chunk) = response
+    .chunk()
+    .await
+    .map_err(|e| e.without_url().to_string())?
+  {
+    if chunk.len() > max_bytes - body.len() {
+      return Err(too_large());
+    }
+    body.extend_from_slice(&chunk);
+  }
+  serde_json::from_slice(&body).map_err(|e| e.to_string())
 }
 
 fn arch() -> &'static str {
@@ -426,16 +529,14 @@ pub(crate) async fn token(
   }
   let realm =
     realm.ok_or_else(|| "仓库的认证信息不完整".to_string())?;
-  let body: serde_json::Value = client
+  let response = client
     .get(&realm)
     .query(&query)
     .send()
     .await
     .and_then(|r| r.error_for_status())
-    .map_err(|e| format!("取 token 失败：{}", e.without_url()))?
-    .json()
-    .await
-    .map_err(|e| e.without_url().to_string())?;
+    .map_err(|e| format!("取 token 失败：{}", e.without_url()))?;
+  let body = read_json(response, MAX_CONFIG_BYTES).await?;
   body["token"]
     .as_str()
     .or_else(|| body["access_token"].as_str())
@@ -446,6 +547,27 @@ pub(crate) async fn token(
 #[cfg(test)]
 mod tests {
   use super::*;
+  use serde_json::json;
+
+  #[test]
+  fn parses_index_and_config_platforms() {
+    let index = json!({
+      "manifests": [
+        {"platform": {"os": "linux", "architecture": "amd64"}},
+        {"platform": {"os": "linux", "architecture": "arm64", "variant": "v8"}},
+        {"platform": {"os": "unknown", "architecture": "unknown"}}
+      ]
+    });
+    assert_eq!(
+      platforms(&index),
+      Some(["linux/amd64", "linux/arm64"].map(String::from).to_vec())
+    );
+    let config = json!({"os": "linux", "architecture": "amd64"});
+    assert_eq!(
+      platforms(&config),
+      Some(vec!["linux/amd64".to_string()])
+    );
+  }
 
   #[test]
   fn origin_registry_is_not_a_mirror() {

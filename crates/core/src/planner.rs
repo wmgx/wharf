@@ -328,6 +328,20 @@ pub async fn make_plan(
   state: &AppState,
   req: PlanRequest,
 ) -> Result<Planned, ApiError> {
+  make_plan_inner(state, req, true).await
+}
+
+pub(crate) async fn pending_plan(
+  state: &AppState,
+) -> Result<Planned, ApiError> {
+  make_plan_inner(state, PlanRequest::default(), false).await
+}
+
+async fn make_plan_inner(
+  state: &AppState,
+  req: PlanRequest,
+  check_migrated_images: bool,
+) -> Result<Planned, ApiError> {
   let mut snap = snapshot::load(&state.db).await?;
   let current = snap.world.clone();
   let mut desired = current.clone();
@@ -414,9 +428,10 @@ pub async fn make_plan(
   };
   let resolved = crate::pins::resolve(
     state,
-    &snap.applied,
+    &snap,
     &mut desired,
     &refresh,
+    check_migrated_images,
   )
   .await?;
   let mut warnings = resolved.warnings;

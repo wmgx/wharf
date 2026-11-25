@@ -17,7 +17,6 @@ use chrono::Utc;
 use wharf_api_types::{
   ApiError,
   agent::{AgentOp, ResolveCommit, ResolveImages, ResolvedImage},
-  plan::PlanRequest,
   spec::Source,
   view::{NewerTag, PendingCheck, Perm, UpdatesView, VersionCheck},
 };
@@ -98,10 +97,9 @@ pub async fn check_now(
   Ok(Json(last().unwrap_or_default()))
 }
 
-/// 算一次计划，不保存。
+/// 算一次计划，不保存，也不为已有 pin 补查迁移平台。
 async fn pending(state: &AppState) {
-  let result =
-    crate::planner::make_plan(state, PlanRequest::default()).await;
+  let result = crate::planner::pending_plan(state).await;
   let check = match result {
     Ok(p) => PendingCheck {
       at: Utc::now(),
