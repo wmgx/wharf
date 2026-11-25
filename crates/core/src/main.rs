@@ -245,15 +245,7 @@ async fn main() -> anyhow::Result<()> {
   );
   axum::serve(
     listener,
-    api::router(state.clone())
-      .merge(
-        axum::Router::new()
-          .route(
-            "/api/home/favicon",
-            axum::routing::get(favicon::get),
-          )
-          .with_state(state),
-      )
+    api::router(state)
       .into_make_service_with_connect_info::<SocketAddr>(),
   )
   .with_graceful_shutdown(async {
