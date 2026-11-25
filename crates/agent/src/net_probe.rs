@@ -382,6 +382,7 @@ mod tests {
       target: "https://192.168.31.1".into(),
       timeout_secs: 10,
       egress: true,
+      container: None,
     };
     let result = probe(&job, &mut NetProbeResult::default()).await;
     let error = result.unwrap_err();
