@@ -53,7 +53,7 @@ pub struct Found {
 }
 
 /// `web-1  | 2026-11-22T02:00:00.123Z 消息` → (`web-1`, 时间, 消息)。没有前缀时整行都是消息。
-fn split(line: &str) -> (&str, Option<&str>, &str) {
+pub(crate) fn split(line: &str) -> (&str, Option<&str>, &str) {
   let (container, rest) = match line.split_once(" | ") {
     Some((c, r)) => (c.trim(), r),
     None => ("", line),
@@ -172,11 +172,11 @@ pub fn since_arg(s: &str) -> Option<String> {
   if let Some(n) =
     s.strip_suffix('d').and_then(|n| n.parse::<u32>().ok())
   {
-    return Some(format!("{}h", n * 24));
+    return Some(format!("{}h", n.checked_mul(24)?));
   }
   let relative = s.len() > 1
-    && s[..s.len() - 1].bytes().all(|b| b.is_ascii_digit())
-    && matches!(s.as_bytes()[s.len() - 1], b's' | b'm' | b'h');
+    && matches!(s.as_bytes()[s.len() - 1], b's' | b'm' | b'h')
+    && s[..s.len() - 1].bytes().all(|b| b.is_ascii_digit());
   if relative || chrono::DateTime::parse_from_rfc3339(s).is_ok() {
     Some(s.to_string())
   } else {

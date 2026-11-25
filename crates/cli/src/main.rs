@@ -5,7 +5,7 @@
 //! - 错误统一为 `{ code, message, hint, suggest }`；
 //! - 退出码：0 成功，1 出错，2 需要确认，3 计划已过期，4 执行部分失败。
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand};
 
 mod alert;
 mod audit;
@@ -839,20 +839,22 @@ pub enum ServiceCmd {
     #[arg(long)]
     reveal: bool,
   },
-  /// 看日志。可以按时间、关键字筛，`--errors` 只看报错并把同一种报错合成一条带次数。
+  /// 看日志。可以给多个服务，按时间合在一起看。支持按时间、关键字筛和用 `--errors` 合并同类报错。
   /// 例：`wharf service logs blog --since 2h --errors`、`wharf service logs blog --grep timeout --tail 50`。
   Logs {
-    name: String,
+    /// 服务名，可给 1～10 个。
+    #[arg(required = true, num_args = 1..=10)]
+    names: Vec<String>,
     /// 最多输出多少行（`--errors` 时是多少种报错）。
     #[arg(long, default_value_t = 200)]
     tail: u32,
-    /// 持续输出新日志，Ctrl-C 结束。
-    #[arg(short, long, conflicts_with_all = ["since", "grep", "errors", "max_line"])]
+    /// 持续输出单个服务的新日志，Ctrl-C 结束。不能与时间范围、关键字、报错筛选或行长限制同用。
+    #[arg(short, long)]
     follow: bool,
     /// 只看这段时间内的：30m、2h、3d，或 RFC 3339 时间。
     #[arg(long)]
     since: Option<String>,
-    /// 只看含这个关键字的行，不分大小写。筛选时在最近 5000 行里找。
+    /// 只看含这个关键字的行，不分大小写。单服务筛选时在最近 5000 行里找。
     #[arg(long)]
     grep: Option<String>,
     /// 只看报错（error、exception、panic、failed 等），同一种报错只是 id、耗时不同的合成一条，带次数和首末时间。
@@ -1503,6 +1505,41 @@ pub enum TokenCmd {
 #[tokio::main]
 async fn main() {
   let mut cli = Cli::parse();
+  if let Command::Service(ServiceCmd::Logs {
+    names,
+    follow: true,
+    since,
+    grep,
+    errors,
+    max_line,
+    ..
+  }) = &cli.command
+    && names.len() == 1
+    && (since.is_some()
+      || grep.is_some()
+      || *errors
+      || max_line.is_some())
+  {
+    // 单服务继续用 Clap 报参数冲突，多服务由命令入口提示 -f 用法。
+    Cli::command()
+      .mut_subcommand("service", |cmd| {
+        cmd.mut_subcommand("logs", |cmd| {
+          cmd
+            .mut_arg("names", |arg| {
+              arg
+                .num_args(1)
+                .action(clap::ArgAction::Set)
+                .value_name("NAME")
+            })
+            .mut_arg("follow", |arg| {
+              arg.conflicts_with_all([
+                "since", "grep", "errors", "max_line",
+              ])
+            })
+        })
+      })
+      .get_matches();
+  }
   if let Some(fields) = &cli.fields {
     print::set_fields(fields);
     cli.json = true;

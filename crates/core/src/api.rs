@@ -311,6 +311,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route("/api/services", get(list_services))
     .route("/api/services/{name}", get(show_service))
     .route("/api/services/{name}/logs", get(service_logs))
+    .route("/api/logs/services", get(multi_service_logs))
     .route(
       "/api/services/{name}/logs/stream",
       get(crate::logs_stream::service),
@@ -943,21 +944,21 @@ async fn show_service(
 }
 
 #[derive(Deserialize)]
-struct LogsQuery {
+pub(super) struct LogsQuery {
   #[serde(default = "default_tail")]
-  tail: u32,
+  pub(super) tail: u32,
   /// 只看这个时间之后的：`30m`、`2h`、`3d` 或 RFC 3339 时间。
   #[serde(default)]
-  since: Option<String>,
+  pub(super) since: Option<String>,
   /// 关键字，不分大小写。
   #[serde(default)]
-  grep: Option<String>,
+  pub(super) grep: Option<String>,
   /// 只看报错，按内容去重计数。
   #[serde(default)]
-  errors: bool,
+  pub(super) errors: bool,
   /// 每行最多多少字符。
   #[serde(default)]
-  max_line: Option<usize>,
+  pub(super) max_line: Option<usize>,
 }
 
 fn default_tail() -> u32 {
@@ -1104,12 +1105,19 @@ async fn service_logs(
 ) -> ApiResult<Value> {
   auth.require(Perm::Read)?;
   let snap = snapshot::load(&s.db).await?;
-  let row = snap
-    .world
-    .services
-    .get(&name)
-    .ok_or_else(|| service_not_found(&name))?;
-  project_logs(&s, &row.spec.server, name.clone(), &q).await
+  let (server, project) =
+    crate::multi_logs::service_target(&snap.world, &name)?;
+  project_logs(&s, server, project, &q).await
+}
+
+async fn multi_service_logs(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Query(services): Query<crate::multi_logs::Services>,
+  Query(q): Query<LogsQuery>,
+) -> ApiResult<Value> {
+  auth.require(Perm::Read)?;
+  Ok(Json(crate::multi_logs::fetch(&s, services, q).await?))
 }
 
 async fn deployments(
