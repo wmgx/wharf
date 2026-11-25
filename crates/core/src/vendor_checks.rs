@@ -569,9 +569,15 @@ pub async fn checks(
 
 pub async fn refresh(s: &AppState) -> Result<(), ApiError> {
   let checks = checks(s).await?;
+  record(s, &checks).await;
+  Ok(())
+}
+
+/// 按检查结果更新“厂商账号不可用”告警：有失败就触发，全部通过就恢复。
+pub async fn record(s: &AppState, checks: &[DoctorCheck]) {
   let mut grouped: BTreeMap<&str, Vec<&DoctorCheck>> =
     BTreeMap::new();
-  for check in &checks {
+  for check in checks {
     grouped.entry(&check.subject).or_default().push(check);
   }
   for (name, checks) in grouped {
@@ -594,7 +600,6 @@ pub async fn refresh(s: &AppState) -> Result<(), ApiError> {
       .await;
     }
   }
-  Ok(())
 }
 
 #[cfg(test)]

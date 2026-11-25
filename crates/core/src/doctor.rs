@@ -52,6 +52,7 @@ pub async fn doctor(
   )?;
   let report = DoctorReport { vendors, ..report };
   if q.host.is_none() {
+    crate::vendor_checks::record(&s, &report.vendors).await;
     remember(report.clone());
   }
   Ok(Json(report))
