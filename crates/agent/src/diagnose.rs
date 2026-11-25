@@ -10,7 +10,7 @@ use std::{
 
 use serde::Deserialize;
 use wharf_api_types::{
-  ApiError,
+  ApiError, ErrorCode,
   agent::{
     BindMountDiagnosis, ContainerDiagnosis, ContainerLogKeyword,
     ContainerUser, DirectoryPermissions,
@@ -23,42 +23,43 @@ const QUICK: Duration = Duration::from_secs(5);
 
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
-struct Container {
-  id: String,
-  name: String,
-  state: State,
+pub(crate) struct Container {
+  pub(crate) id: String,
+  pub(crate) name: String,
+  pub(crate) state: State,
   restart_count: u64,
-  config: Config,
-  host_config: HostConfig,
+  pub(crate) config: Config,
+  pub(crate) host_config: HostConfig,
   network_settings: NetworkSettings,
   mounts: Option<Vec<Mount>>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
-struct State {
-  running: bool,
-  restarting: bool,
+pub(crate) struct State {
+  pub(crate) running: bool,
+  pub(crate) restarting: bool,
   exit_code: i32,
   #[serde(rename = "OOMKilled")]
   oom_killed: bool,
   started_at: String,
-  status: String,
+  pub(crate) status: String,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
-struct Config {
+pub(crate) struct Config {
   user: String,
-  labels: BTreeMap<String, String>,
+  pub(crate) labels: BTreeMap<String, String>,
+  pub(crate) env: Option<Vec<String>>,
 }
 
 type Bindings = BTreeMap<String, Option<Vec<Binding>>>;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
-struct HostConfig {
-  network_mode: String,
+pub(crate) struct HostConfig {
+  pub(crate) network_mode: String,
   port_bindings: Option<Bindings>,
 }
 
@@ -90,6 +91,27 @@ pub async fn run(
   ports: &[u16],
   ctx: &Ctx,
 ) -> Result<Vec<ContainerDiagnosis>, ApiError> {
+  let containers = project_containers(docker, project, ctx).await?;
+  let mut selected: BTreeMap<usize, BTreeMap<u16, u16>> =
+    BTreeMap::new();
+  for &host in ports {
+    if let Some((index, port)) = select_container(&containers, host) {
+      selected.entry(index).or_default().insert(host, port);
+    }
+  }
+  let mut results = Vec::new();
+  for (index, ports) in selected {
+    results
+      .push(diagnose(docker, &containers[index], ports, ctx).await);
+  }
+  Ok(results)
+}
+
+pub(crate) async fn project_containers(
+  docker: &Docker,
+  project: &str,
+  ctx: &Ctx,
+) -> Result<Vec<Container>, ApiError> {
   let listed = docker
     .cmd()
     .args(["ps", "-aq", "--no-trunc", "--filter"])
@@ -108,8 +130,14 @@ pub async fn run(
     .args(ids)
     .timeout(QUICK)
     .run(ctx)
-    .await?
-    .check("docker inspect")?;
+    .await?;
+  // 部分 inspect 失败时，stdout 仍可能包含其它容器的环境变量。
+  if !inspected.success {
+    return Err(ApiError::new(
+      ErrorCode::AgentFailed,
+      "docker inspect 读取容器状态失败",
+    ));
+  }
   let mut containers: Vec<Container> =
     serde_json::from_str(&inspected.stdout).map_err(|_| {
       ApiError::internal("无法读取 docker inspect 的容器状态")
@@ -127,19 +155,7 @@ pub async fn run(
         .is_none_or(|dir| Path::new(dir) == project_dir.as_path())
   });
 
-  let mut selected: BTreeMap<usize, BTreeMap<u16, u16>> =
-    BTreeMap::new();
-  for &host in ports {
-    if let Some((index, port)) = select_container(&containers, host) {
-      selected.entry(index).or_default().insert(host, port);
-    }
-  }
-  let mut results = Vec::new();
-  for (index, ports) in selected {
-    results
-      .push(diagnose(docker, &containers[index], ports, ctx).await);
-  }
-  Ok(results)
+  Ok(containers)
 }
 
 fn select_container(

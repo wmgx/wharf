@@ -252,6 +252,21 @@ mod tests {
   use serde_json::json;
 
   #[test]
+  fn service_probe_respects_service_scope() {
+    let services = BTreeSet::from(["blog".into()]);
+    assert!(check_service_scope(
+      &services,
+      &Method::POST,
+      "/api/services/blog/probe"
+    ));
+    assert!(!check_service_scope(
+      &services,
+      &Method::POST,
+      "/api/services/other/probe"
+    ));
+  }
+
+  #[test]
   fn matches_both_address_families() {
     for (range, inside, outside) in [
       ("100.64.0.0/10", "100.64.0.7", "203.0.113.7"),

@@ -523,7 +523,7 @@ pub struct ApplyFlags {
 #[allow(clippy::large_enum_variant)] // 命令行参数，只解析一次
 pub enum ServerCmd {
   /// 从指定服务器探测一个目标。只返回响应头和诊断结果，禁止探测云元数据地址。
-  Probe(probe::ProbeArgs),
+  Probe(probe::ServerProbeArgs),
   /// 查看最近一次系统更新的状态，或开始安装更新。
   Apt {
     name: String,
@@ -765,6 +765,8 @@ pub enum ServerCmd {
 // 只在启动时解析一次，变体大小无所谓。
 #[allow(clippy::large_enum_variant)]
 pub enum ServiceCmd {
+  /// 从服务容器的网络探测一个目标。
+  Probe(probe::ServiceProbeArgs),
   /// 查看服务的代码包来自哪台服务器的哪个目录。
   Origin {
     name: String,

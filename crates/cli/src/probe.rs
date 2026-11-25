@@ -8,9 +8,29 @@ use crate::{
 };
 
 #[derive(Args)]
-pub struct ProbeArgs {
+pub struct ServerProbeArgs {
   /// 发起探测的服务器。
   server: String,
+  #[command(flatten)]
+  probe: ProbeArgs,
+  /// 使用本机外网出口代理（仅 HTTP(S)）。
+  #[arg(long)]
+  egress: bool,
+}
+
+#[derive(Args)]
+pub struct ServiceProbeArgs {
+  /// 发起探测的服务。
+  service: String,
+  #[command(flatten)]
+  probe: ProbeArgs,
+  /// Compose 组件名，多容器服务必须指定。
+  #[arg(long)]
+  component: Option<String>,
+}
+
+#[derive(Args)]
+struct ProbeArgs {
   /// 域名、裸 IP、主机:端口或 HTTP(S) URL。
   target: String,
   /// 覆盖自动判定的探测类型。
@@ -19,28 +39,64 @@ pub struct ProbeArgs {
   /// 总超时（秒），TCP/DNS 默认 5 秒，HTTP 默认 10 秒，上限 30 秒。
   #[arg(long)]
   timeout: Option<u32>,
-  /// 使用本机外网出口代理（仅 HTTP(S)）。
-  #[arg(long)]
-  egress: bool,
 }
 
-pub async fn run(
+pub async fn server(
   c: &Client,
+  args: ServerProbeArgs,
+  json: bool,
+) -> CliResult<()> {
+  run(
+    c,
+    &format!("/api/servers/{}/probe", seg(&args.server)),
+    &args.server,
+    args.probe,
+    args.egress,
+    None,
+    json,
+  )
+  .await
+}
+
+pub async fn service(
+  c: &Client,
+  args: ServiceProbeArgs,
+  json: bool,
+) -> CliResult<()> {
+  run(
+    c,
+    &format!("/api/services/{}/probe", seg(&args.service)),
+    &args.service,
+    args.probe,
+    false,
+    args.component,
+    json,
+  )
+  .await
+}
+
+async fn run(
+  c: &Client,
+  path: &str,
+  source: &str,
   args: ProbeArgs,
+  egress: bool,
+  component: Option<String>,
   json: bool,
 ) -> CliResult<()> {
   let result: NetProbeReport = c
     .post(
-      &format!("/api/servers/{}/probe", seg(&args.server)),
+      path,
       &json!({
         "target": args.target,
         "kind": args.kind,
         "timeout_secs": args.timeout,
-        "egress": args.egress,
+        "egress": egress,
+        "component": component,
       }),
     )
     .await?;
-  out(json, &result, print);
+  out(json, &result, |report| print(report, source));
   if result.ok {
     Ok(())
   } else {
@@ -48,13 +104,29 @@ pub async fn run(
   }
 }
 
-fn print(report: &NetProbeReport) {
+fn print(report: &NetProbeReport, source: &str) {
   let mark = if report.ok { '✓' } else { '✗' };
   let r = &report.result;
-  println!(
-    "{} → {}  {mark}（{}ms）",
-    report.server, report.target, r.elapsed_ms
-  );
+  if let Some(container) = &r.container {
+    println!(
+      "{}（容器 {}，网络 {}）→ {}  {mark}",
+      source,
+      container.name.escape_debug(),
+      container.network_mode.escape_debug(),
+      report.target,
+    );
+    if !container.proxy_env.is_empty() {
+      println!(
+        "  容器代理：{}",
+        container.proxy_env.join("、").escape_debug()
+      );
+    }
+  } else {
+    println!(
+      "{} → {}  {mark}（{}ms）",
+      report.server, report.target, r.elapsed_ms
+    );
+  }
   if r.dns.as_ref().is_some_and(|dns| dns.resolved_by_egress) {
     println!("    dns   由出口代理解析");
   } else if let Some(dns) = &r.dns {
@@ -105,7 +177,8 @@ fn print(report: &NetProbeReport) {
     };
     match &report.hint {
       Some(hint)
-        if error.kind == NetProbeErrorKind::Tls
+        if (error.kind == NetProbeErrorKind::Tls
+          && report.certificate.is_some())
           || hint == &error.message =>
       {
         println!("  ✗ {layer:<5} {}", hint.escape_debug());

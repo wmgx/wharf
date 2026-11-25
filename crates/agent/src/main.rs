@@ -17,6 +17,7 @@ mod adopt;
 mod agent_memory;
 mod build;
 mod conn;
+mod container_probe;
 mod diagnose;
 mod docker;
 mod docker_observation;
@@ -111,6 +112,9 @@ enum Command {
     #[arg(long)]
     out: PathBuf,
   },
+  /// 在临时容器里执行网络探测。
+  #[command(hide = true)]
+  NetProbe { job: String },
   /// 镜像仓库和 GitHub 的反向代理（见 mirror 模块），口令从环境变量 `MIRROR_TOKEN` 读。
   Mirror {
     #[arg(long, default_value = "0.0.0.0:8080")]
@@ -128,15 +132,22 @@ enum Command {
   },
 }
 
+fn main() -> anyhow::Result<()> {
+  let cli = Cli::parse();
+  if let Some(Command::NetProbe { job }) = &cli.command {
+    return container_probe::probe_cli(job);
+  }
+  run(cli)
+}
+
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn run(cli: Cli) -> anyhow::Result<()> {
   tracing_subscriber::fmt()
     .with_env_filter(
       tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| "info".into()),
     )
     .init();
-  let cli = Cli::parse();
   if let Some(Command::Pack { dir, out }) = &cli.command {
     return host_dir::pack_cli(dir, out);
   }
@@ -152,7 +163,9 @@ async fn main() -> anyhow::Result<()> {
     core_key: std::env::var("WHARF_CORE_KEY").ok(),
   });
   let joined = match command {
-    Command::Pack { .. } | Command::Mirror { .. } => {
+    Command::Pack { .. }
+    | Command::Mirror { .. }
+    | Command::NetProbe { .. } => {
       unreachable!("前面已经处理")
     }
     Command::Replace {

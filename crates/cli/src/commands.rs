@@ -1092,7 +1092,7 @@ async fn server(
   j: bool,
 ) -> CliResult<()> {
   match cmd {
-    ServerCmd::Probe(args) => crate::probe::run(c, args, j).await,
+    ServerCmd::Probe(args) => crate::probe::server(c, args, j).await,
     ServerCmd::Apt { name, apply } => {
       crate::server::apt(c, &name, apply, j).await
     }
@@ -1906,6 +1906,9 @@ async fn service(
   j: bool,
 ) -> CliResult<()> {
   match cmd {
+    ServiceCmd::Probe(args) => {
+      crate::probe::service(c, args, j).await
+    }
     ServiceCmd::Origin { name } => {
       let value: Value = c
         .get(&format!("/api/services/{}/origin", seg(&name)))

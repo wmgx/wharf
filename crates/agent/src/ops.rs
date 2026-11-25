@@ -182,7 +182,19 @@ impl Ops {
       AgentOp::Quality { targets, count } => {
         to_value(crate::probe::quality(targets, count).await)
       }
-      AgentOp::NetProbe(job) => {
+      AgentOp::NetProbe(mut job) => {
+        if let Some(scope) = job.container.take() {
+          check_project(&scope.project)?;
+          return to_value(
+            crate::container_probe::run(
+              &self.docker,
+              scope,
+              &job,
+              ctx,
+            )
+            .await?,
+          );
+        }
         to_value(crate::net_probe::run(&job, ctx).await)
       }
       AgentOp::HttpFetch(job) => {

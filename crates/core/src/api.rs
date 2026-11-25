@@ -312,6 +312,10 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route("/api/services", get(list_services))
     .route("/api/services/{name}", get(show_service))
     .route("/api/services/{name}/logs", get(service_logs))
+    .route(
+      "/api/services/{name}/probe",
+      post(crate::net_probe::service_probe),
+    )
     .route("/api/logs/services", get(multi_service_logs))
     .route(
       "/api/services/{name}/logs/stream",

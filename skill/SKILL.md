@@ -132,6 +132,7 @@ wharf doctor blog.example.com --json
 - 解析和证书：一般是 Cloudflare 账号权限或 DNS 还没生效，把 `hint` 告诉用户。
 
 要从指定机器检查单个目标，用 `wharf server probe <服务器> <域名|主机:端口|HTTP(S) URL> --json`。
+要从服务容器的网络检查单个目标，用 `wharf service probe <服务> <目标> --json`，多容器服务用 `--component <组件名>` 指定容器。
 
 ### 看日志和资源
 
