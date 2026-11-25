@@ -92,13 +92,6 @@ pub async fn run(cli: Cli) -> CliResult<()> {
     Command::Token(cmd) => {
       crate::token::run(cmd, cli.url, cli.token, j).await
     }
-    Command::Service(ServiceCmd::Logs { names, .. })
-      if names.len() > 10 =>
-    {
-      Err(ApiError::invalid("服务数超过 10 个")
-        .with_hint("一次最多合看 10 个服务，按调用链挑关键的几个")
-        .into())
-    }
     Command::Service(ServiceCmd::Logs { names, follow: true, .. })
       if names.len() > 1 =>
     {

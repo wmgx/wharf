@@ -5,7 +5,7 @@
 //! - 错误统一为 `{ code, message, hint, suggest }`；
 //! - 退出码：0 成功，1 出错，2 需要确认，3 计划已过期，4 执行部分失败。
 
-use clap::{Args, CommandFactory, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 
 mod alert;
 mod audit;
@@ -849,7 +849,7 @@ pub enum ServiceCmd {
     #[arg(long, default_value_t = 200)]
     tail: u32,
     /// 持续输出单个服务的新日志，Ctrl-C 结束。不能与时间范围、关键字、报错筛选或行长限制同用。
-    #[arg(short, long)]
+    #[arg(short, long, conflicts_with_all = ["since", "grep", "errors", "max_line"])]
     follow: bool,
     /// 只看这段时间内的：30m、2h、3d，或 RFC 3339 时间。
     #[arg(long)]
@@ -1505,41 +1505,6 @@ pub enum TokenCmd {
 #[tokio::main]
 async fn main() {
   let mut cli = Cli::parse();
-  if let Command::Service(ServiceCmd::Logs {
-    names,
-    follow: true,
-    since,
-    grep,
-    errors,
-    max_line,
-    ..
-  }) = &cli.command
-    && names.len() == 1
-    && (since.is_some()
-      || grep.is_some()
-      || *errors
-      || max_line.is_some())
-  {
-    // 单服务继续用 Clap 报参数冲突，多服务由命令入口提示 -f 用法。
-    Cli::command()
-      .mut_subcommand("service", |cmd| {
-        cmd.mut_subcommand("logs", |cmd| {
-          cmd
-            .mut_arg("names", |arg| {
-              arg
-                .num_args(1)
-                .action(clap::ArgAction::Set)
-                .value_name("NAME")
-            })
-            .mut_arg("follow", |arg| {
-              arg.conflicts_with_all([
-                "since", "grep", "errors", "max_line",
-              ])
-            })
-        })
-      })
-      .get_matches();
-  }
   if let Some(fields) = &cli.fields {
     print::set_fields(fields);
     cli.json = true;
