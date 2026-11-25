@@ -610,6 +610,14 @@ export interface ContainerInfo {
   status: string;
 }
 
+export interface ContainerProbeInfo {
+  component: string | null;
+  helper: boolean;
+  name: string;
+  network_mode: string;
+  proxy_env: string[];
+}
+
 /**
  * 控制面的一个候选地址，加服务器时选一个给 agent 连。
  */
@@ -1654,6 +1662,7 @@ export type NetProbeKind = "tcp" | "http" | "dns";
 
 export interface NetProbeReport {
   certificate: NetProbeCertificate | null;
+  container?: ContainerProbeInfo | null;
   dns: NetProbeDns | null;
   elapsed_ms: number;
   error: NetProbeError | null;
@@ -1669,6 +1678,7 @@ export interface NetProbeReport {
 }
 
 export interface NetProbeRequest {
+  component?: string | null;
   egress?: boolean | null;
   kind?: NetProbeKind | null;
   target: string;

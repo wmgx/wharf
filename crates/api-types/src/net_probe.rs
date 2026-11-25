@@ -34,12 +34,29 @@ impl NetProbeKind {
   }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NetProbeJob {
   pub kind: NetProbeKind,
   pub target: String,
   pub timeout_secs: u32,
   pub egress: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub container: Option<ContainerProbeScope>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContainerProbeScope {
+  pub project: String,
+  pub component: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ContainerProbeInfo {
+  pub name: String,
+  pub component: Option<String>,
+  pub network_mode: String,
+  pub helper: bool,
+  pub proxy_env: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -51,6 +68,8 @@ pub struct NetProbeRequest {
   pub timeout_secs: Option<u32>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub egress: Option<bool>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub component: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
@@ -61,6 +80,8 @@ pub struct NetProbeResult {
   pub http: Option<NetProbeHttp>,
   pub tls: Option<NetProbeTls>,
   pub error: Option<NetProbeError>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub container: Option<ContainerProbeInfo>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]

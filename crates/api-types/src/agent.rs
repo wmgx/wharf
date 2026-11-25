@@ -127,6 +127,8 @@ pub enum AgentMsg {
     access_logs: bool,
     #[serde(default)]
     net_probe: bool,
+    #[serde(default)]
+    container_probe: bool,
   },
   Report(Box<AgentReport>),
   Progress {

@@ -68,14 +68,22 @@ struct Conn {
   container_diagnosis: bool,
   access_logs: bool,
   net_probe: bool,
+  container_probe: bool,
   /// 协议版本不一致：连接放行，但只接受升级相关的请求，好让它升上来。
   upgrade_only: bool,
 }
 
 impl Conn {
-  fn check_net_probe(&self, server: &str) -> Result<(), ApiError> {
-    if self.upgrade_only || !self.net_probe {
-      return Err(crate::net_probe::unsupported(server));
+  fn check_net_probe(
+    &self,
+    server: &str,
+    container: bool,
+  ) -> Result<(), ApiError> {
+    if self.upgrade_only
+      || !self.net_probe
+      || (container && !self.container_probe)
+    {
+      return Err(crate::net_probe::unsupported(server, container));
     }
     Ok(())
   }
@@ -146,10 +154,11 @@ impl Hub {
   pub fn supports_net_probe(
     &self,
     server: &str,
+    container: bool,
   ) -> Result<(), ApiError> {
     let conns = lock(&self.conns);
     let conn = conns.get(server).ok_or_else(|| offline(server))?;
-    conn.check_net_probe(server)
+    conn.check_net_probe(server, container)
   }
 
   pub fn log_watches(
@@ -228,8 +237,8 @@ impl Hub {
       .get(server)
       .cloned()
       .ok_or_else(|| offline(server))?;
-    if matches!(&op, AgentOp::NetProbe(_)) {
-      conn.check_net_probe(server)?;
+    if let AgentOp::NetProbe(job) = &op {
+      conn.check_net_probe(server, job.container.is_some())?;
     }
     if matches!(&op, AgentOp::AccessLogs(_))
       && (conn.upgrade_only || !conn.access_logs)
@@ -463,6 +472,7 @@ async fn handle_socket(
     container_diagnosis,
     access_logs,
     net_probe,
+    container_probe,
   } = hello
   else {
     anyhow::bail!("agent 没有先发 hello");
@@ -562,6 +572,7 @@ async fn handle_socket(
     container_diagnosis,
     access_logs,
     net_probe,
+    container_probe,
     upgrade_only,
   };
   state.hub.register(&server, conn.clone());
@@ -773,6 +784,7 @@ mod tests {
       container_diagnosis: true,
       access_logs: true,
       net_probe: true,
+      container_probe: true,
     };
     let json = serde_json::to_string(&hello).unwrap();
     let old = serde_json::from_str::<OldAgentMsg>(&json);

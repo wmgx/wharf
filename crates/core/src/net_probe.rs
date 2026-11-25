@@ -18,9 +18,9 @@ use wharf_api_types::{
   ApiError, ErrorCode,
   agent::{AgentOp, NetProbeJob, NetProbeResult},
   net_probe::{
-    NetProbeCertificate, NetProbeErrorKind, NetProbeKind,
-    NetProbeReport, NetProbeRequest, dns_target, is_public,
-    tcp_target,
+    ContainerProbeScope, NetProbeCertificate, NetProbeErrorKind,
+    NetProbeKind, NetProbeReport, NetProbeRequest, dns_target,
+    is_public, tcp_target,
   },
   view::Perm,
 };
@@ -83,10 +83,11 @@ fn reserve(server: &str) -> Result<OwnedSemaphorePermit, ApiError> {
   Ok(permit)
 }
 
-pub(crate) fn unsupported(server: &str) -> ApiError {
+pub(crate) fn unsupported(server: &str, container: bool) -> ApiError {
+  let scope = if container { "从容器里" } else { "" };
   ApiError::new(
     ErrorCode::Conflict,
-    format!("服务器 {server} 的 agent 版本旧，不支持探测"),
+    format!("服务器 {server} 的 agent 版本旧，不支持{scope}探测"),
   )
   .with_hint("运行 wharf upgrade")
 }
@@ -100,16 +101,8 @@ pub async fn probe(
 ) -> ApiResult<NetProbeReport> {
   auth.require(Perm::Plan)?;
   let (job, url) = prepare(request)?;
-  let target = match &url {
-    Some(url) => {
-      let mut url = url.clone();
-      url.set_query(None);
-      url.to_string()
-    }
-    None => job.target.clone(),
-  };
-  let kind = job.kind;
-  audit.set_detail(format!("{} {target}", kind.as_str()));
+  let target = display_target(&job, url.as_ref());
+  audit.set_detail(format!("{} {target}", job.kind.as_str()));
 
   let snapshot = snapshot::load(&state.db).await?;
   let row = snapshot
@@ -118,14 +111,86 @@ pub async fn probe(
     .get(&server)
     .ok_or_else(|| crate::world::server_not_found(&server))?;
   let has_egress = crate::egress::via(&row.settings).is_some();
-  state.hub.supports_net_probe(&server)?;
-  let _permit = reserve(&server)?;
-  let timeout = Duration::from_secs(u64::from(job.timeout_secs) + 5);
+  Ok(Json(
+    run_probe(&state, &server, job, url, target, has_egress).await?,
+  ))
+}
+
+pub async fn service_probe(
+  State(state): State<Arc<AppState>>,
+  auth: Auth,
+  Path(name): Path<String>,
+  Extension(audit): Extension<AuditSlot>,
+  Json(mut request): Json<NetProbeRequest>,
+) -> ApiResult<NetProbeReport> {
+  auth.require(Perm::Plan)?;
+  if request.egress == Some(true) {
+    return Err(
+      ApiError::invalid("从容器里探测不支持 --egress").into(),
+    );
+  }
+  let component = request.component.take();
+  let (mut job, url) = prepare(request)?;
+  let target = display_target(&job, url.as_ref());
+  let kind = job.kind;
+  let detail = |target: &str, component: &str| {
+    format!(
+      "{} {target} component={}",
+      kind.as_str(),
+      component.escape_debug()
+    )
+  };
+  audit.set_detail(detail(
+    &target,
+    component.as_deref().unwrap_or("自动"),
+  ));
+  let snapshot = snapshot::load(&state.db).await?;
+  let (server, project) =
+    crate::multi_logs::service_target(&snapshot.world, &name)?;
+  let infer_component = component.is_none();
+  job.container = Some(ContainerProbeScope { project, component });
+  let report =
+    run_probe(&state, server, job, url, target, false).await?;
+  if infer_component
+    && let Some(info) = &report.result.container
+    && let Some(component) = &info.component
+  {
+    audit.set_detail(detail(&report.target, component));
+  }
+  Ok(Json(report))
+}
+
+fn display_target(job: &NetProbeJob, url: Option<&Url>) -> String {
+  if let Some(url) = url {
+    let mut url = url.clone();
+    url.set_query(None);
+    url.to_string()
+  } else {
+    job.target.clone()
+  }
+}
+
+async fn run_probe(
+  state: &AppState,
+  server: &str,
+  job: NetProbeJob,
+  url: Option<Url>,
+  target: String,
+  has_egress: bool,
+) -> Result<NetProbeReport, ApiError> {
+  let container = job.container.is_some();
+  state.hub.supports_net_probe(server, container)?;
+  let _permit = reserve(server)?;
+  // 容器探测还有 ps、inspect、查镜像、启动与失败清理的开销。
+  let overhead = if container { 35 } else { 5 };
+  let timeout =
+    Duration::from_secs(u64::from(job.timeout_secs) + overhead);
+  let kind = job.kind;
   let egress = job.egress;
   let mut result: NetProbeResult = state
     .hub
     .call(
-      &server,
+      server,
       AgentOp::NetProbe(job),
       timeout,
       None,
@@ -154,8 +219,8 @@ pub async fn probe(
     egress,
     has_egress,
   );
-  Ok(Json(NetProbeReport {
-    server,
+  Ok(NetProbeReport {
+    server: server.into(),
     kind,
     target,
     ok,
@@ -163,7 +228,7 @@ pub async fn probe(
     hint,
     certificate: certificate.map(|(info, _)| info),
     result,
-  }))
+  })
 }
 
 fn prepare(
@@ -221,6 +286,7 @@ fn prepare(
       target,
       timeout_secs,
       egress,
+      container: None,
     },
     url,
   ))
@@ -352,7 +418,27 @@ fn conclude(
       hint.push_str("；海外站点可加 --egress 再测");
     }
   }
-  (ok, reachable, hint)
+  let Some(container) = &result.container else {
+    return (ok, reachable, hint);
+  };
+  let mut hints: Vec<_> = hint.into_iter().collect();
+  if !container.proxy_env.is_empty() {
+    let proxy = container.proxy_env.join("、");
+    hints.push(format!(
+      "容器设置了代理（{proxy}），这次是直连探测，应用实际可能走代理"
+    ));
+  }
+  if let Some(dns) = &result.dns
+    && dns.nameservers.iter().any(|ns| ns == "127.0.0.11")
+    && result.error.as_ref().is_some_and(|error| {
+      error.kind == NetProbeErrorKind::DnsFailed
+        || (error.kind == NetProbeErrorKind::Timeout
+          && dns.ips.is_empty())
+    })
+  {
+    hints.push("容器用 Docker 内置 DNS，同 compose 的服务名才能解析；别的服务用它的域名或内网地址".into());
+  }
+  (ok, reachable, (!hints.is_empty()).then(|| hints.join("。")))
 }
 
 #[cfg(test)]
@@ -368,6 +454,7 @@ mod tests {
       kind: None,
       timeout_secs: None,
       egress: Some(egress),
+      component: None,
     }
   }
 
