@@ -119,6 +119,8 @@ pub enum AgentMsg {
     forward: bool,
     #[serde(default)]
     service_checks: bool,
+    #[serde(default)]
+    container_diagnosis: bool,
   },
   Report(Box<AgentReport>),
   Progress {
@@ -180,6 +182,68 @@ pub struct AgentReport {
   pub time_ms: Option<i64>,
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub log_hits: Vec<crate::service_checks::LogHit>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub host_subnets: Vec<String>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub docker_subnets: Vec<DockerSubnet>,
+}
+
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct DockerSubnet {
+  pub name: String,
+  pub subnet: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ContainerDiagnosis {
+  pub name: String,
+  pub running: bool,
+  pub restarting: bool,
+  pub exit_code: i32,
+  pub oom_killed: bool,
+  pub started_at: String,
+  pub restart_count: u64,
+  pub network_mode: String,
+  /// 本次查询命中的宿主机端口到容器 TCP 端口的映射。
+  pub ports: BTreeMap<u16, u16>,
+  /// None 表示读取失败或容器未运行。
+  pub listeners: Option<Vec<std::net::SocketAddr>>,
+  pub user: Option<ContainerUser>,
+  pub mounts: Vec<BindMountDiagnosis>,
+  pub log_keywords: Vec<ContainerLogKeyword>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct ContainerUser {
+  pub uid: u32,
+  /// 退出容器只配了数字 UID 时，镜像内的主组可能未知。
+  pub gid: Option<u32>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BindMountDiagnosis {
+  pub source: String,
+  /// None 表示未检查。
+  pub permissions: Option<DirectoryPermissions>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DirectoryPermissions {
+  pub uid: u32,
+  pub gid: u32,
+  pub mode: u32,
+  pub writable: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContainerLogKeyword {
+  PermissionDenied,
+  Eacces,
+  ReadOnlyFileSystem,
+  ExecFormatError,
 }
 
 /// 一次资源采样。速率是和上一次采样相比的平均值。
@@ -270,6 +334,11 @@ pub enum AgentOp {
   /// 读取若干 compose project 的现状，结果是 `Vec<ProjectState>`。
   ProjectStatus {
     projects: Vec<String>,
+  },
+  /// 只读诊断指定宿主机端口，结果是 Vec<ContainerDiagnosis>。
+  DiagnoseContainer {
+    project: String,
+    ports: Vec<u16>,
   },
   /// 创建目录（数据卷）。已存在不报错。
   EnsureDirs {

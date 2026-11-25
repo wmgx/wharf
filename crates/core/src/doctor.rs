@@ -22,10 +22,11 @@ use wharf_api_types::{
 use crate::{
   api::ApiResult,
   auth::Auth,
+  doctor_diagnose::{self, Target},
   render::Net,
   snapshot::{self, Snapshot},
   state::AppState,
-  views::{LiveMap, live_states, route_view},
+  views::{LiveMap, live_states, route_view_with_upstream_error},
   world::gateway_project,
 };
 
@@ -47,7 +48,7 @@ pub async fn doctor(
 ) -> ApiResult<DoctorReport> {
   auth.require(Perm::Read)?;
   let (report, vendors) = tokio::try_join!(
-    run(&s, q.host.as_deref()),
+    run(&s, q.host.as_deref(), true),
     crate::vendor_checks::checks(&s)
   )?;
   let report = DoctorReport { vendors, ..report };
@@ -81,7 +82,7 @@ pub fn spawn(state: Arc<AppState>) {
   tokio::spawn(async move {
     tokio::time::sleep(FIRST_TICK).await;
     loop {
-      match run(&state, None).await {
+      match run(&state, None, false).await {
         Ok(report) => {
           crate::probe::observe(&state, &report).await;
           remember(report)
@@ -97,6 +98,7 @@ pub fn spawn(state: Arc<AppState>) {
 pub async fn run(
   s: &AppState,
   host: Option<&str>,
+  manual: bool,
 ) -> Result<DoctorReport, wharf_api_types::ApiError> {
   let snap = snapshot::load(&s.db).await?;
   if let Some(host) = host
@@ -139,19 +141,22 @@ pub async fn run(
       host.is_none_or(|q| q == h.as_str()) && !expired.contains(h)
     })
     .collect();
-  let routes = futures_util::future::join_all(
+  let mut routes: Vec<_> = futures_util::future::join_all(
     hosts
       .into_iter()
-      .map(|h| route(s, &snap, &net, &live, &client, h)),
+      .map(|h| route(s, &snap, &net, &live, &client, h, manual)),
   )
   .await
   .into_iter()
   .flatten()
   .collect();
+  if manual {
+    doctor_diagnose::enrich(s, &mut routes).await;
+  }
   Ok(DoctorReport {
     checked_at: Utc::now(),
     servers: servers(s, &snap),
-    routes,
+    routes: routes.into_iter().map(|(route, _)| route).collect(),
     vendors: vec![],
     config: crate::lint::doctor_warnings(&snap)
       .into_iter()
@@ -164,7 +169,7 @@ pub async fn run(
   })
 }
 
-fn check(
+pub(crate) fn check(
   layer: &str,
   subject: impl Into<String>,
   status: CheckStatus,
@@ -180,7 +185,7 @@ fn check(
 }
 
 fn servers(s: &AppState, snap: &Snapshot) -> Vec<DoctorCheck> {
-  snap
+  let mut checks: Vec<_> = snap
     .world
     .servers
     .keys()
@@ -193,7 +198,20 @@ fn servers(s: &AppState, snap: &Snapshot) -> Vec<DoctorCheck> {
         check("agent", name, CheckStatus::Bad, "离线")
       }
     })
-    .collect()
+    .collect();
+  checks.extend(
+    crate::net_conflict::conflicts(snap).into_iter().map(
+      |(server, detail)| {
+        check(
+          "network",
+          server,
+          CheckStatus::Bad,
+          format!("{detail}。{}", crate::net_conflict::FIX),
+        )
+      },
+    ),
+  );
+  checks
 }
 
 async fn route(
@@ -203,8 +221,10 @@ async fn route(
   live: &LiveMap,
   client: &reqwest::Client,
   host: &str,
-) -> Option<RouteDiagnosis> {
-  let view = route_view(snap, net, host)?;
+  manual: bool,
+) -> Option<(RouteDiagnosis, Option<Target>)> {
+  let (view, upstream_error) =
+    route_view_with_upstream_error(snap, net, host)?;
   let world = &snap.world;
   let gateway = view
     .gateway
@@ -213,7 +233,7 @@ async fn route(
   let mut checks = vec![
     dns(host, gateway.map(|g| g.1), net, view.spec.internal).await,
   ];
-  let (mut https, cert_expires) =
+  let (mut https, cert_expires, bad_gateway) =
     https(client, &view.url, view.spec.auth).await;
   let auto_tls = gateway.is_some_and(|(_, g)| {
     g.kind == wharf_api_types::spec::GatewayKind::Caddy
@@ -229,36 +249,82 @@ async fn route(
     );
   }
   checks.push(https);
-  let Some((gw_name, gw)) =
-    gateway.filter(|_| view.spec.redirect.is_none())
-  else {
-    // 边缘应用的域名不经过网关；跳转的域名没有上游和容器。都只查到 HTTPS 这一层。
-    return Some(RouteDiagnosis {
-      hostname: host.into(),
-      url: view.url,
-      checks,
-      cert_expires,
-      domain_expires: crate::rdap::expires_of(host),
-    });
-  };
-  checks.push(gateway_check(live, gw_name, &gw.server));
-  checks.push(match &view.upstream {
-    Some(up) => link(s, &gw.server, up).await,
-    None => check(
-      "link",
-      format!("{} → 上游", gw.server),
-      CheckStatus::Bad,
-      "算不出上游地址，执行 wharf plan 看原因",
-    ),
-  });
-  checks.push(container(world, live, &view.spec));
-  Some(RouteDiagnosis {
+  let mut diagnosis = RouteDiagnosis {
     hostname: host.into(),
     url: view.url,
     checks,
     cert_expires,
     domain_expires: crate::rdap::expires_of(host),
-  })
+  };
+  let Some((gw_name, gw)) =
+    gateway.filter(|_| view.spec.redirect.is_none())
+  else {
+    // 边缘应用和跳转路由只查到 HTTPS 这一层。
+    return Some((diagnosis, None));
+  };
+  let gateway = gateway_check(live, gw_name, &gw.server);
+  let service = if view.spec.upstream.is_none() {
+    world.services.get(&view.spec.service)
+  } else {
+    None
+  };
+  let cross_host =
+    service.is_some_and(|row| row.spec.server != gw.server);
+  let (link_check, link_unreachable) = match &view.upstream {
+    Some(up) => link(s, &gw.server, up, cross_host).await,
+    None => (
+      check(
+        "link",
+        format!("{} → 上游", gw.server),
+        CheckStatus::Bad,
+        upstream_error.map_or_else(
+          || "算不出上游地址，执行 wharf plan 看原因".into(),
+          |e| match e.hint {
+            Some(hint) => format!("{}（{hint}）", e.message),
+            None => e.message,
+          },
+        ),
+      ),
+      false,
+    ),
+  };
+  let target = service.and_then(|row| {
+    let active = live
+      .get(&row.spec.server)
+      .and_then(|states| states.as_ref().ok())
+      .and_then(|states| states.get(&view.spec.service))
+      .is_some_and(|p| {
+        p.containers.iter().any(|c| {
+          !c.foreign
+            && matches!(c.state.as_str(), "running" | "restarting")
+        })
+      });
+    if !doctor_diagnose::should_diagnose(
+      manual,
+      view.upstream.is_some()
+        && link_check.status == CheckStatus::Bad,
+      bad_gateway,
+      gateway.status == CheckStatus::Ok,
+      active,
+    ) {
+      return None;
+    }
+    let port = *row.host_ports.get(world.route_port(&view.spec)?)?;
+    Some(Target {
+      service: view.spec.service.clone(),
+      server: row.spec.server.clone(),
+      port,
+      same_host: !cross_host,
+      http_failed: bad_gateway && gateway.status == CheckStatus::Ok,
+      link_unreachable,
+    })
+  });
+  diagnosis.checks.extend([
+    gateway,
+    link_check,
+    container(world, live, &view.spec),
+  ]);
+  Some((diagnosis, target))
 }
 
 /// caddy 网关的域名应该解析到网关机器的公网 IP；经 CDN 代理或隧道时是厂商的 IP。
@@ -337,16 +403,18 @@ async fn https(
   client: &reqwest::Client,
   url: &str,
   auth: bool,
-) -> (DoctorCheck, Option<DateTime<Utc>>) {
+) -> (DoctorCheck, Option<DateTime<Utc>>, bool) {
   let layer = if url.starts_with("https") {
     "https"
   } else {
     "http"
   };
   match client.get(url).send().await {
-    Err(e) => {
-      (check(layer, url, CheckStatus::Bad, error_chain(&e)), None)
-    }
+    Err(e) => (
+      check(layer, url, CheckStatus::Bad, error_chain(&e)),
+      None,
+      false,
+    ),
     Ok(r) => {
       let expires = r
         .extensions()
@@ -366,7 +434,8 @@ async fn https(
         CheckStatus::Ok
       };
       let mut detail = format!("HTTP {}", code.as_u16());
-      if matches!(code.as_u16(), 502 | 504) {
+      let bad_gateway = matches!(code.as_u16(), 502 | 504);
+      if bad_gateway {
         detail.push_str("：网关连不上上游");
       }
       if let Some(to) =
@@ -383,7 +452,7 @@ async fn https(
           status = CheckStatus::Warn;
         }
       }
-      (check(layer, url, status, detail), expires)
+      (check(layer, url, status, detail), expires, bad_gateway)
     }
   }
 }
@@ -443,14 +512,13 @@ async fn link(
   s: &AppState,
   server: &str,
   upstream: &str,
-) -> DoctorCheck {
+  cross_host: bool,
+) -> (DoctorCheck, bool) {
   let subject = format!("{server} → {upstream}");
   if !s.hub.is_online(server) {
-    return check(
-      "link",
-      subject,
-      CheckStatus::Skip,
-      "agent 离线，测不了",
+    return (
+      check("link", subject, CheckStatus::Skip, "agent 离线，测不了"),
+      false,
     );
   }
   let result: Result<Vec<bool>, _> = s
@@ -471,15 +539,24 @@ async fn link(
     .await;
   match result {
     Ok(r) if r.first() == Some(&true) => {
-      check("link", subject, CheckStatus::Ok, "能连上")
+      (check("link", subject, CheckStatus::Ok, "能连上"), false)
     }
-    Ok(_) => check(
-      "link",
-      subject,
-      CheckStatus::Bad,
-      "连不上：上游没在监听，或者两台机器之间不通（wharf network --probe）",
+    Ok(_) => (
+      check(
+        "link",
+        subject,
+        CheckStatus::Bad,
+        if cross_host {
+          "连不上：上游没在监听，或者两台机器之间不通（wharf network --probe）"
+        } else {
+          "连不上上游，检查应用的监听地址和端口"
+        },
+      ),
+      true,
     ),
-    Err(e) => check("link", subject, CheckStatus::Bad, e.message),
+    Err(e) => {
+      (check("link", subject, CheckStatus::Bad, e.message), false)
+    }
   }
 }
 

@@ -438,6 +438,15 @@ pub fn route_view(
   net: &Net,
   hostname: &str,
 ) -> Option<RouteView> {
+  route_view_with_upstream_error(snap, net, hostname)
+    .map(|(view, _)| view)
+}
+
+pub(crate) fn route_view_with_upstream_error(
+  snap: &Snapshot,
+  net: &Net,
+  hostname: &str,
+) -> Option<(RouteView, Option<ApiError>)> {
   let world = &snap.world;
   let row = world.routes.get(hostname)?;
   let gateway =
@@ -445,9 +454,13 @@ pub fn route_view(
   let on_backup = row.spec.backup_gateway.is_some()
     && crate::failover::active(hostname);
   let gw_spec = gateway.as_ref().and_then(|g| world.gateways.get(g));
-  let upstream = gw_spec.and_then(|g| {
-    world.route_upstream(net, &g.spec, hostname, &row.spec).ok()
-  });
+  let (upstream, upstream_error) = match gw_spec
+    .map(|g| world.route_upstream(net, &g.spec, hostname, &row.spec))
+  {
+    Some(Ok(upstream)) => (Some(upstream), None),
+    Some(Err(error)) => (None, Some(error)),
+    None => (None, None),
+  };
   let url = match gw_spec.map(|g| &g.spec) {
     Some(g) if g.tls == GatewayTls::Off => {
       match g.http_port.filter(|p| *p != 80) {
@@ -460,24 +473,27 @@ pub fn route_view(
       None => format!("https://{hostname}"),
     },
   };
-  Some(RouteView {
-    note: snap.route_notes.get(hostname).cloned(),
-    sso_login: row
-      .spec
-      .sso
-      .as_ref()
-      .filter(|s| s.mode == wharf_api_types::spec::SsoMode::Login)
-      .and_then(|_| snap.sso_login.get(hostname))
-      .and_then(|s| serde_json::from_str(s).ok()),
-    id: row.id.clone(),
-    spec: row.spec.clone(),
-    gateway,
-    upstream,
-    probe: crate::probe::last(hostname),
-    url,
-    version: row.version,
-    on_backup,
-  })
+  Some((
+    RouteView {
+      note: snap.route_notes.get(hostname).cloned(),
+      sso_login: row
+        .spec
+        .sso
+        .as_ref()
+        .filter(|s| s.mode == wharf_api_types::spec::SsoMode::Login)
+        .and_then(|_| snap.sso_login.get(hostname))
+        .and_then(|s| serde_json::from_str(s).ok()),
+      id: row.id.clone(),
+      spec: row.spec.clone(),
+      gateway,
+      upstream,
+      probe: crate::probe::last(hostname),
+      url,
+      version: row.version,
+      on_backup,
+    },
+    upstream_error,
+  ))
 }
 
 fn problems_text(issues: &[Issue]) -> Vec<String> {
@@ -702,6 +718,7 @@ pub async fn status(
   issues.extend(crate::traffic::issues());
   issues.extend(crate::baseline::issues());
   issues.extend(crate::host_units::issues());
+  issues.extend(crate::net_conflict::issues(&snap));
   let updates = crate::updates::current(&snap);
   if let Some(updates) = &updates {
     for (name, check) in &updates.services {

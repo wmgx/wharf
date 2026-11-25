@@ -80,8 +80,10 @@ export interface AgentReport {
    */
   docker_disk?: Disk | null;
   docker_quota?: DockerQuota | null;
+  docker_subnets?: DockerSubnet[];
   docker_version?: string | null;
   egress_info?: EgressInfo | null;
+  host_subnets?: string[];
   hostname: string;
   /**
    * 其余网卡的 IPv4 地址（不含回环和 docker 网桥），
@@ -751,6 +753,11 @@ export interface DockerRunRequest {
    * 服务名，不填时取命令里的 `--name` 或镜像名。compose 来源里的数据目录按它写。
    */
   name?: string | null;
+}
+
+export interface DockerSubnet {
+  name: string;
+  subnet: string;
 }
 
 export interface DockerUsage {

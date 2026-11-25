@@ -12,7 +12,10 @@ use wharf_api_types::{
   spec::{PrivateAddr, PrivateNetwork},
 };
 
-use crate::docker::Docker;
+use crate::{
+  docker::Docker,
+  network_subnets::{self, is_bridge},
+};
 
 /// 公网 IPv4 探测地址：国内能直连的放前面，海外兜底放后面。
 const PUBLIC_IP_URLS: &[&str] = &[
@@ -37,6 +40,7 @@ pub struct Reporter {
   cache: Arc<Mutex<Option<CachedIp>>>,
   sampler: Arc<Mutex<crate::metrics::Sampler>>,
   egress: Arc<Mutex<crate::external::EgressCache>>,
+  subnets: Arc<Mutex<network_subnets::Cache>>,
 }
 
 impl Reporter {
@@ -47,6 +51,7 @@ impl Reporter {
       cache: Default::default(),
       sampler: Default::default(),
       egress: Default::default(),
+      subnets: Default::default(),
     }
   }
 
@@ -65,13 +70,19 @@ impl Reporter {
   }
 
   pub async fn report(&self, refresh: bool) -> AgentReport {
-    let ((docker_version, compose_version), egress, quota) = tokio::join!(
+    let (
+      (docker_version, compose_version),
+      egress,
+      quota,
+      (host_subnets, docker_subnets),
+    ) = tokio::join!(
       self.docker.versions(),
       async {
         let ipv4 = self.public_ip(refresh).await;
         self.egress.lock().await.get(ipv4).await
       },
       crate::external::quota(),
+      async { self.subnets.lock().await.collect(&self.docker).await },
     );
     AgentReport {
       version: wharf_api_types::VERSION.to_string(),
@@ -96,6 +107,8 @@ impl Reporter {
       metrics: None,
       time_ms: None,
       log_hits: vec![],
+      host_subnets,
+      docker_subnets,
     }
   }
 
@@ -181,15 +194,9 @@ fn lan_ips() -> Vec<String> {
     .collect()
 }
 
-fn is_bridge(name: &str) -> bool {
-  name == "docker0"
-    || name.starts_with("br-")
-    || name.starts_with("veth")
-}
-
 /// Tailscale 的地址段是 100.64.0.0/10。
 fn is_tailscale(iface: &Iface) -> bool {
-  is_cgnat(iface.ip)
+  !is_bridge(&iface.name) && is_cgnat(iface.ip)
 }
 
 fn is_cgnat(ip: Ipv4Addr) -> bool {

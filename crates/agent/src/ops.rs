@@ -84,6 +84,13 @@ impl Ops {
         }
         to_value(self.docker.status(&projects, ctx).await?)
       }
+      AgentOp::DiagnoseContainer { project, ports } => {
+        check_project(&project)?;
+        to_value(
+          crate::diagnose::run(&self.docker, &project, &ports, ctx)
+            .await?,
+        )
+      }
       AgentOp::EnsureDirs { dirs } => {
         for dir in &dirs {
           ensure_dir(dir)?;

@@ -65,6 +65,7 @@ struct Conn {
   host_shell: bool,
   forward: bool,
   service_checks: bool,
+  container_diagnosis: bool,
   /// 协议版本不一致：连接放行，但只接受升级相关的请求，好让它升上来。
   upgrade_only: bool,
 }
@@ -123,6 +124,12 @@ impl Hub {
     lock(&self.conns)
       .get(server)
       .is_some_and(|c| !c.upgrade_only && c.service_checks)
+  }
+
+  pub fn supports_container_diagnosis(&self, server: &str) -> bool {
+    lock(&self.conns)
+      .get(server)
+      .is_some_and(|c| !c.upgrade_only && c.container_diagnosis)
   }
 
   pub fn log_watches(
@@ -233,6 +240,14 @@ impl Hub {
         )
         .with_hint("请先运行 wharf upgrade"),
       );
+    }
+    if matches!(&op, AgentOp::DiagnoseContainer { .. })
+      && !conn.container_diagnosis
+    {
+      return Err(ApiError::new(
+        ErrorCode::Conflict,
+        "agent 版本旧，升级后能看到原因（wharf upgrade）",
+      ));
     }
     let (done, rx) = oneshot::channel();
     lock(&conn.pending).insert(id, Pending { done, progress });
@@ -411,6 +426,7 @@ async fn handle_socket(
     host_shell,
     forward,
     service_checks,
+    container_diagnosis,
   } = hello
   else {
     anyhow::bail!("agent 没有先发 hello");
@@ -507,6 +523,7 @@ async fn handle_socket(
     host_shell,
     forward,
     service_checks,
+    container_diagnosis,
     upgrade_only,
   };
   state.hub.register(&server, conn.clone());
@@ -715,6 +732,7 @@ mod tests {
       host_shell: true,
       forward: true,
       service_checks: true,
+      container_diagnosis: true,
     };
     let json = serde_json::to_string(&hello).unwrap();
     let old = serde_json::from_str::<OldAgentMsg>(&json);
