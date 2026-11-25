@@ -135,6 +135,7 @@ wharf doctor blog.example.com --json
 wharf service logs <服务> --tail 200
 wharf service logs <服务> --since 2h --errors --json      # 只看报错，同一种合成一条带次数，先用这个
 wharf service logs <服务> --grep timeout --tail 50       # 按关键字筛，--max-line 限制每行长度
+wharf service logs <服务A> <服务B> --since 30m            # 给多个服务名，按时间合看
 wharf server logs <服务器> --errors --json   # Wharf 自己：这台机器上 agent 的日志
 wharf core logs --since 1h --errors --json   # Wharf 自己：控制面的日志
 wharf service files <服务> [目录] --json     # 服务数据目录（/srv/<服务>/）里的文件；download 下载，upload 上传（覆盖，要用户同意）

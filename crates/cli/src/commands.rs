@@ -92,6 +92,13 @@ pub async fn run(cli: Cli) -> CliResult<()> {
     Command::Token(cmd) => {
       crate::token::run(cmd, cli.url, cli.token, j).await
     }
+    Command::Service(ServiceCmd::Logs { names, follow: true, .. })
+      if names.len() > 1 =>
+    {
+      Err(ApiError::invalid(
+        "多服务合看不支持 -f，用 --since 看最近的日志，或单个服务用 -f",
+      ).into())
+    }
     command => {
       let c = Client::new(cli.url, cli.token)?;
       dispatch(&c, command, j).await
@@ -1793,7 +1800,8 @@ async fn show_logs(
   args: &crate::LogArgs,
   j: bool,
 ) -> CliResult<()> {
-  let mut path = format!("{path}?tail={}", args.tail);
+  let sep = if path.contains('?') { '&' } else { '?' };
+  let mut path = format!("{path}{sep}tail={}", args.tail);
   if let Some(v) = &args.since {
     path.push_str(&format!("&since={}", seg(v)));
   }
@@ -1825,6 +1833,22 @@ async fn show_logs(
       print!("{}", v["logs"].as_str().unwrap_or_default());
       if let Some(n) = v["matched"].as_u64() {
         eprintln!("命中 {n} 行（看了 {} 行）", v["scanned"]);
+      }
+    }
+    if let Some(warnings) = v["warnings"].as_array() {
+      for warning in warnings.iter().filter_map(Value::as_str) {
+        eprintln!("注意：{warning}");
+      }
+    }
+    if let Some(errors) = v["errors"].as_array() {
+      for error in errors {
+        let service = error["service"].as_str().unwrap_or_default();
+        let server = error["server"].as_str().unwrap_or_default();
+        let message = error["message"]
+          .as_str()
+          .unwrap_or_default()
+          .replace(['\r', '\n'], " ");
+        eprintln!("没拿到 {service}（{server}）：{message}");
       }
     }
   });
@@ -1976,7 +2000,7 @@ async fn service(
       Ok(())
     }
     ServiceCmd::Logs {
-      name,
+      names,
       tail,
       follow: true,
       ..
@@ -1985,7 +2009,7 @@ async fn service(
         c,
         &format!(
           "/api/services/{}/logs/stream?tail={tail}",
-          seg(&name)
+          seg(&names[0])
         ),
       )
       .await
@@ -2196,7 +2220,7 @@ async fn service(
       Ok(())
     }
     ServiceCmd::Logs {
-      name,
+      names,
       tail,
       follow: false,
       since,
@@ -2211,7 +2235,14 @@ async fn service(
         errors,
         max_line,
       };
-      let path = format!("/api/services/{}/logs", seg(&name));
+      let path = if let [name] = names.as_slice() {
+        format!("/api/services/{}/logs", seg(name))
+      } else {
+        format!(
+          "/api/logs/services?services={}",
+          seg(&names.join(","))
+        )
+      };
       show_logs(c, &path, &args, j).await
     }
     ServiceCmd::Files { name, path } => {

@@ -67,6 +67,7 @@ mod mem_forecast;
 mod metrics;
 mod migrate;
 mod monitor;
+mod multi_logs;
 mod net_conflict;
 mod network;
 mod notes;
