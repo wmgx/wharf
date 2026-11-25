@@ -1938,6 +1938,31 @@ export interface RelayHint {
   via_loss: number;
 }
 
+export interface ResolvedImage {
+  /**
+   * 这台机器平台对应的镜像 ID（`sha256:…`），和 `docker image inspect` 的 Id 相同。
+   */
+  config?: string | null;
+  /**
+   * `sha256:…`。
+   */
+  digest?: string | null;
+  error?: string | null;
+  /**
+   * 目标 agent 的平台，例如 `linux/arm64`。
+   */
+  host_platform?: string | null;
+  image: string;
+  /**
+   * `tags` 时：同一大版本里最高的标签，和跨大版本最高的标签（没有就不列）。
+   */
+  newer_tags?: string[];
+  /**
+   * 镜像支持的平台，例如 `linux/amd64`。
+   */
+  platforms?: string[] | null;
+}
+
 export interface RiskRow {
   container: string;
   own: boolean;

@@ -28,6 +28,12 @@ pub struct Resolved {
   pub warnings: Vec<String>,
 }
 
+struct ImageLookup {
+  service: String,
+  image: String,
+  reference: String,
+}
+
 /// 服务里能固定版本、能检查更新的镜像（compose 里写的名字）：image 来源就是那个镜像；
 /// compose 来源是各组件的 `image`，跳过写了 digest、用了 `${变量}`、或者本地构建（有 `build`）的。
 pub fn images(source: &Source) -> Vec<String> {
@@ -103,86 +109,204 @@ fn running(
   )
 }
 
+fn needs_migration_check<'a>(
+  previous: Option<&str>,
+  target: &str,
+  arch: impl Fn(&str) -> Option<&'a str>,
+) -> bool {
+  previous.is_some_and(|old| {
+    old != target
+      && arch(old)
+        .zip(arch(target))
+        .is_none_or(|(old, new)| old != new)
+  })
+}
+
+fn pinned_reference(image: &str, digest: &str) -> String {
+  let name = image.split_once('@').map_or(image, |(name, _)| name);
+  let tag_start = name.rfind('/').map_or(0, |i| i + 1);
+  let name = name
+    .rfind(':')
+    .filter(|i| *i >= tag_start)
+    .map_or(name, |i| &name[..i]);
+  format!("{name}@{digest}")
+}
+
+fn platform_warning(
+  name: &str,
+  image: &str,
+  server: &str,
+  found: &ResolvedImage,
+) -> Option<String> {
+  let platforms = found.platforms.as_ref()?;
+  let host = found.host_platform.as_deref()?;
+  if platforms.is_empty() || platforms.iter().any(|p| p == host) {
+    return None;
+  }
+  Some(format!(
+    "服务 {name} 的镜像 {image} 只有 {}，服务器 {server} 是 {host}，部署后可能拉取失败或起不来",
+    platforms.join("、")
+  ))
+}
+
+fn registry_hint(why: &str) -> Option<&'static str> {
+  // agent 按镜像源和原仓库的尝试顺序返回错误，优先采用末尾可分类的原因。
+  why.rsplit('；').find_map(|error| {
+    let status = error
+      .split_once("HTTP status client error (")
+      .or_else(|| error.split_once("HTTP "))
+      .and_then(|(_, rest)| rest.split([' ', ')']).next())
+      .or_else(|| {
+        (error.contains("仓库要求登录")
+          || error.contains("仓库的认证信息不完整"))
+        .then_some("401")
+      });
+    match status {
+      Some("401" | "403") => {
+        Some("私有仓库需要登录，请在目标服务器登录镜像仓库")
+      }
+      Some("404") => Some("镜像或标签不存在，请检查镜像名和标签"),
+      Some("429") => {
+        Some("Docker Hub 可能触发限流，请更换镜像源或登录")
+      }
+      _ => None,
+    }
+  })
+}
+
 /// 给还没固定版本的镜像定版本。`refresh` 是这次要检查更新的服务。
 /// 部署过、镜像没换的：固定到正在跑的版本，不会因为补查版本而升级；
 /// 正在跑的版本查不清又不是最新的，不固定，提醒用户检查更新。
 /// compose 来源查不到时（例如要登录的私有仓库）只提醒，照旧按标签拉取。
 pub async fn resolve(
   state: &AppState,
-  applied: &BTreeMap<String, Applied>,
+  snap: &Snapshot,
   desired: &mut World,
   refresh: &BTreeSet<String>,
+  check_migrated_images: bool,
 ) -> Result<Resolved, ApiError> {
   let mut out = Resolved {
     image_ids: BTreeMap::new(),
     warnings: Vec::new(),
   };
-  // 服务器 → [(服务, 镜像)]
-  let mut todo: BTreeMap<String, Vec<(String, String)>> =
+  let applied = &snap.applied;
+  let arch = |server: &str| {
+    snap
+      .agent(server)
+      .and_then(|agent| agent.report.as_ref())
+      .map(|report| report.arch.trim())
+      .filter(|arch| !arch.is_empty() && *arch != "unknown")
+  };
+  // 平台补查和定版本分开调用，补查超时不影响同一台机器上的定版本。
+  let mut todo: BTreeMap<(String, bool), Vec<ImageLookup>> =
     BTreeMap::new();
   for (name, row) in desired.services.iter_mut() {
     // 导入时按本机已有的镜像启动，不查仓库里的最新版本；部署后记下实际的版本。
     if row.import.is_some() && !applied.contains_key(name) {
       continue;
     }
+    let check_platform = check_migrated_images
+      && needs_migration_check(
+        snap.deployed.get(name).map(String::as_str),
+        &row.spec.server,
+        arch,
+      );
     for image in images(&row.spec.source) {
-      if row.pins.contains_key(&image) {
-        continue;
-      }
-      let digest =
-        applied.get(name).and_then(|a| running(a, &image).0);
-      if !refreshing(refresh, name, &image)
-        && let Some(digest) = digest
-      {
-        row.pins.insert(image, digest);
-        continue;
-      }
+      let pinned = if refreshing(refresh, name, &image) {
+        None
+      } else {
+        if !row.pins.contains_key(&image)
+          && let Some(digest) =
+            applied.get(name).and_then(|a| running(a, &image).0)
+        {
+          row.pins.insert(image.clone(), digest);
+        }
+        match row.pins.get(&image) {
+          Some(digest) if check_platform => {
+            Some(pinned_reference(&image, digest))
+          }
+          Some(_) => continue,
+          None => None,
+        }
+      };
       todo
-        .entry(row.spec.server.clone())
+        .entry((row.spec.server.clone(), pinned.is_some()))
         .or_default()
-        .push((name.clone(), image));
+        .push(ImageLookup {
+          service: name.clone(),
+          reference: pinned.unwrap_or_else(|| image.clone()),
+          image,
+        });
     }
   }
   // 各台机器同时查，一台慢不拖累别的。
-  let calls = todo.into_iter().map(|(server, items)| {
-    let pull = snapshot::pull_policy(&desired.servers[&server]);
-    async move {
-      let images = items.iter().map(|(_, i)| i.clone()).collect();
-      let resolved: Result<Vec<ResolvedImage>, ApiError> = state
-        .hub
-        .call(
-          &server,
-          AgentOp::ResolveImages(ResolveImages {
-            images,
-            pull,
-            tags: false,
-          }),
-          RESOLVE_TIMEOUT,
-          None,
-          &Default::default(),
-        )
-        .await;
-      (items, resolved)
-    }
-  });
-  for (items, resolved) in futures_util::future::join_all(calls).await
+  let calls =
+    todo.into_iter().map(|((server, platform_only), items)| {
+      let pull = snapshot::pull_policy(&desired.servers[&server]);
+      async move {
+        let images = items
+          .iter()
+          .map(|item| item.reference.clone())
+          .collect::<BTreeSet<_>>()
+          .into_iter()
+          .collect();
+        let resolved: Result<Vec<ResolvedImage>, ApiError> = state
+          .hub
+          .call(
+            &server,
+            AgentOp::ResolveImages(ResolveImages {
+              images,
+              pull,
+              tags: false,
+            }),
+            RESOLVE_TIMEOUT,
+            None,
+            &Default::default(),
+          )
+          .await;
+        (server, platform_only, items, resolved)
+      }
+    });
+  for (server, platform_only, items, resolved) in
+    futures_util::future::join_all(calls).await
   {
+    if platform_only && resolved.is_err() {
+      continue;
+    }
     let resolved = resolved.map_err(|e| {
       e.with_hint("确认这台机器的 agent 在线并已升级；查不到镜像版本就没法固定要部署的版本")
     })?;
-    for (name, image) in items {
+    for ImageLookup {
+      service: name,
+      image,
+      reference,
+    } in items
+    {
+      let found = resolved.iter().find(|r| r.image == reference);
+      if let Some(warning) = found
+        .and_then(|f| platform_warning(&name, &image, &server, f))
+      {
+        out.warnings.push(warning);
+      }
+      if platform_only {
+        continue;
+      }
       let compose = matches!(
         desired.services.get(&name).map(|r| &r.spec.source),
         Some(Source::Compose { .. })
       );
-      let found = resolved.iter().find(|r| r.image == image);
       let digest = match found.and_then(|r| r.digest.clone()) {
         Some(d) => d,
         None => {
           let why = found
             .and_then(|r| r.error.clone())
             .unwrap_or_else(|| "agent 没有返回结果".into());
+          let hint = registry_hint(&why);
           if compose {
+            let why = match hint {
+              Some(hint) => format!("{why}（{hint}）"),
+              None => why,
+            };
             out.warnings.push(format!(
               "查不到服务 {name} 的镜像 {image} 现在的版本，这次不固定、照旧按标签拉取：{why}"
             ));
@@ -192,9 +316,9 @@ pub async fn resolve(
             ApiError::invalid(format!(
               "查不到服务 {name} 的镜像 {image} 现在的版本：{why}"
             ))
-            .with_hint(
+            .with_hint(hint.unwrap_or(
               "镜像名写错了，或者仓库暂时连不上；稍后重新 plan",
-            ),
+            )),
           );
         }
       };
@@ -441,6 +565,66 @@ pub fn short(digest: &str) -> &str {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn warns_only_for_known_platform_mismatch() {
+    let mut found: ResolvedImage = serde_json::from_value(
+      serde_json::json!({ "image": "nginx:1" }),
+    )
+    .unwrap();
+    found.host_platform = Some("linux/arm64".into());
+    found.platforms = Some(vec!["linux/amd64".into()]);
+    let warning = |found: &ResolvedImage| {
+      platform_warning("web", "nginx:1", "edge", found)
+    };
+    assert_eq!(
+      warning(&found).as_deref(),
+      Some(
+        "服务 web 的镜像 nginx:1 只有 linux/amd64，服务器 edge 是 linux/arm64，部署后可能拉取失败或起不来"
+      )
+    );
+    found.platforms.as_mut().unwrap().push("linux/arm64".into());
+    assert_eq!(warning(&found), None);
+    found.platforms = None;
+    assert_eq!(warning(&found), None);
+  }
+
+  #[test]
+  fn checks_pinned_images_only_for_possible_cross_arch_migration() {
+    let arch = |server: &str| match server {
+      "old" | "same-arch" => Some("x86_64"),
+      "new" => Some("aarch64"),
+      _ => None,
+    };
+    assert!(needs_migration_check(Some("old"), "new", arch));
+    assert!(needs_migration_check(Some("old"), "unknown", arch));
+    assert!(!needs_migration_check(Some("old"), "old", arch));
+    assert!(!needs_migration_check(Some("old"), "same-arch", arch));
+    assert_eq!(
+      pinned_reference("registry:5000/team/app:v1", "sha256:abc"),
+      "registry:5000/team/app@sha256:abc"
+    );
+  }
+
+  #[test]
+  fn classifies_registry_lookup_errors() {
+    assert_eq!(
+      registry_hint(
+        "registry.example：取 token 失败：HTTP status client error (401 Unauthorized)"
+      ),
+      Some("私有仓库需要登录，请在目标服务器登录镜像仓库")
+    );
+    assert_eq!(
+      registry_hint("registry.example：HTTP 404 Not Found"),
+      Some("镜像或标签不存在，请检查镜像名和标签")
+    );
+    assert_eq!(
+      registry_hint(
+        "mirror.example：连接失败；registry-1.docker.io：HTTP 429 Too Many Requests"
+      ),
+      Some("Docker Hub 可能触发限流，请更换镜像源或登录")
+    );
+  }
 
   #[test]
   fn compares_digest_or_image_id() {

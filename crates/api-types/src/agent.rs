@@ -1045,7 +1045,7 @@ pub struct ResolveCommit {
   pub pull: PullPolicy,
 }
 
-/// 查镜像标签当前对应的 digest：只读 registry 的清单，不拉镜像。
+/// 查镜像标签当前对应的 digest 和平台，不拉镜像层。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolveImages {
   pub images: Vec<String>,
@@ -1055,7 +1055,9 @@ pub struct ResolveImages {
   pub tags: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
 pub struct ResolvedImage {
   pub image: String,
   /// `sha256:…`。
@@ -1064,6 +1066,12 @@ pub struct ResolvedImage {
   /// 这台机器平台对应的镜像 ID（`sha256:…`），和 `docker image inspect` 的 Id 相同。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub config: Option<String>,
+  /// 镜像支持的平台，例如 `linux/amd64`。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub platforms: Option<Vec<String>>,
+  /// 目标 agent 的平台，例如 `linux/arm64`。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub host_platform: Option<String>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub error: Option<String>,
   /// `tags` 时：同一大版本里最高的标签，和跨大版本最高的标签（没有就不列）。
