@@ -386,7 +386,7 @@ pub async fn make_plan(
       config_items(&mut b, &current, &desired, &writes);
       return Ok(finish_plan(
         &snap,
-        &current,
+        &desired,
         b,
         writes,
         crate::render::service_account_refs(&desired),
@@ -597,26 +597,7 @@ pub async fn make_plan(
             .map_err(|e| {
               ApiError::invalid(format!("compose 内容解析失败：{e}"))
             })?;
-          compose["services"].as_mapping().is_some_and(|services| {
-            services.values().any(|svc| {
-              svc["network_mode"].as_str() == Some("host")
-                || svc["ports"].as_sequence().is_some_and(|ports| {
-                  ports.iter().any(|p| {
-                    if let Some(raw) = p.as_str() {
-                      raw.contains(':')
-                        && !raw.starts_with("127.0.0.1:")
-                        && !raw.starts_with("[::1]:")
-                    } else {
-                      p.get("published").is_some()
-                        && !matches!(
-                          p["host_ip"].as_str(),
-                          Some("127.0.0.1" | "::1")
-                        )
-                    }
-                  })
-                })
-            })
-          })
+          crate::lint::compose_allows_direct_access(&compose)
         }
         _ => true,
       }
@@ -691,7 +672,7 @@ pub async fn make_plan(
 
   Ok(finish_plan(
     &snap,
-    &current,
+    &desired,
     b,
     writes,
     account_refs,
@@ -701,12 +682,15 @@ pub async fn make_plan(
 
 fn finish_plan(
   snap: &Snapshot,
-  current: &World,
+  desired: &World,
   mut b: Builder,
   writes: Vec<Write>,
   account_refs: BTreeSet<String>,
   note: Option<&str>,
 ) -> Planned {
+  b.warnings.extend(crate::lint::plan_warnings(
+    snap, desired, &b.items, &b.steps,
+  ));
   b.steps.sort_by_key(|s| s.step.order());
   // 同一次执行里要起 Tailscale：起来后机器地址会变，后面的服务和网关按新地址渲染，
   // 和计划时的指纹对不上是正常的，不校验。
@@ -747,7 +731,7 @@ fn finish_plan(
     status: PlanStatus::Pending,
     created_at: now,
     expires_at: now + chrono::Duration::minutes(PLAN_TTL_MINUTES),
-    base_versions: current.versions(),
+    base_versions: snap.world.versions(),
     inputs: Some(crate::db::inputs_fingerprint(
       &snap.reach,
       &snap.service_values,
@@ -2817,6 +2801,68 @@ mod tests {
     assert_eq!(b.items[0].action, Action::Update);
     assert_eq!(b.items[0].impacts, vec![Impact::Restart]);
     assert!(b.items[0].reason.contains("配置变化"));
+  }
+
+  #[test]
+  fn plan_warns_only_for_service_being_redeployed() {
+    let mut current = world();
+    let changed_password = concat!("fixture", "-changed");
+    let idle_password = concat!("fixture", "-idle");
+    let app = current.services.get_mut("app").unwrap();
+    app
+      .spec
+      .env
+      .insert("DB_PASSWORD".into(), changed_password.into());
+    let mut idle = app.clone();
+    idle.host_ports.insert("http".into(), 21001);
+    idle
+      .spec
+      .env
+      .insert("DB_PASSWORD".into(), idle_password.into());
+    current.services.insert("idle".into(), idle);
+
+    let mut desired = current.clone();
+    desired
+      .services
+      .get_mut("app")
+      .unwrap()
+      .spec
+      .env
+      .insert("MODE".into(), "new".into());
+    let mut status =
+      live(Some(hash_of(&current)), vec![container("running")]);
+    let (_, idle_hash) = snapshot::service_resolved(
+      &current,
+      &Net::default(),
+      "idle",
+      &BTreeMap::new(),
+    )
+    .unwrap();
+    status.get_mut("s1").unwrap().as_mut().unwrap().insert(
+      "idle".into(),
+      ProjectState {
+        project: "idle".into(),
+        hash: Some(idle_hash),
+        config_hash: None,
+        containers: vec![container("running")],
+      },
+    );
+    let b = plan(&current, &desired, &status);
+    let snap = Snapshot {
+      world: current,
+      ..Snapshot::default()
+    };
+    let planned =
+      finish_plan(&snap, &desired, b, vec![], BTreeSet::new(), None);
+    assert_eq!(planned.plan.items.len(), 1);
+    assert_eq!(planned.plan.warnings.len(), 1);
+    let warning = &planned.plan.warnings[0];
+    assert!(warning.contains("服务 app 的 env 变量 DB_PASSWORD"));
+    assert!(!warning.contains("服务 idle"));
+    assert!(
+      !warning.contains(changed_password)
+        && !warning.contains(idle_password)
+    );
   }
 
   #[test]

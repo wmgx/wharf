@@ -1053,6 +1053,8 @@ pub struct DoctorReport {
   pub routes: Vec<RouteDiagnosis>,
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub vendors: Vec<DoctorCheck>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub config: Vec<DoctorCheck>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

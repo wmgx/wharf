@@ -783,6 +783,7 @@ export interface DoctorCheck {
  */
 export interface DoctorReport {
   checked_at: string;
+  config?: DoctorCheck[];
   routes: RouteDiagnosis[];
   servers: DoctorCheck[];
   vendors?: DoctorCheck[];

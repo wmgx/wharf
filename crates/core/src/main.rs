@@ -58,6 +58,7 @@ mod import_api;
 mod jobs;
 mod join;
 mod link;
+mod lint;
 mod log_search;
 mod login;
 mod logs_stream;
