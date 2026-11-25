@@ -110,6 +110,7 @@ async fn session(
     forward: true,
     service_checks: true,
     container_diagnosis: true,
+    net_probe: true,
   };
   tokio::time::timeout(
     SOCKET_WRITE_TIMEOUT,

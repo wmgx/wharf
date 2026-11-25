@@ -179,6 +179,9 @@ impl Ops {
       AgentOp::Quality { targets, count } => {
         to_value(crate::probe::quality(targets, count).await)
       }
+      AgentOp::NetProbe(job) => {
+        to_value(crate::net_probe::run(&job, ctx).await)
+      }
       AgentOp::HttpFetch(job) => {
         tokio::select! {
           result = crate::probe::fetch(job) => to_value(result),

@@ -36,6 +36,7 @@ mod images;
 mod log_watches;
 mod metrics;
 mod mirror;
+mod net_probe;
 mod network_subnets;
 mod ops;
 mod port_checks;

@@ -1092,6 +1092,7 @@ async fn server(
   j: bool,
 ) -> CliResult<()> {
   match cmd {
+    ServerCmd::Probe(args) => crate::probe::run(c, args, j).await,
     ServerCmd::Apt { name, apply } => {
       crate::server::apt(c, &name, apply, j).await
     }

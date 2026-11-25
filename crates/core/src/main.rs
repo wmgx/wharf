@@ -69,6 +69,7 @@ mod migrate;
 mod monitor;
 mod multi_logs;
 mod net_conflict;
+mod net_probe;
 mod network;
 mod notes;
 mod notify;

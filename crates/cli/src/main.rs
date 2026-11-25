@@ -24,6 +24,7 @@ mod note;
 mod pack;
 mod preview;
 mod print;
+mod probe;
 mod report;
 mod selfcmd;
 mod server;
@@ -520,6 +521,8 @@ pub struct ApplyFlags {
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)] // 命令行参数，只解析一次
 pub enum ServerCmd {
+  /// 从指定服务器探测一个目标。只返回响应头和诊断结果，禁止探测云元数据地址。
+  Probe(probe::ProbeArgs),
   /// 查看最近一次系统更新的状态，或开始安装更新。
   Apt {
     name: String,

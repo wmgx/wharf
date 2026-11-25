@@ -24,6 +24,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{ApiError, spec::PrivateAddr};
 
+pub use crate::net_probe::{NetProbeJob, NetProbeResult};
+
 /// 被签名的内容。`role` 是 `agent` 或 `core`，防止把一方的签名拿去冒充另一方。
 pub fn auth_payload(
   role: &str,
@@ -121,6 +123,8 @@ pub enum AgentMsg {
     service_checks: bool,
     #[serde(default)]
     container_diagnosis: bool,
+    #[serde(default)]
+    net_probe: bool,
   },
   Report(Box<AgentReport>),
   Progress {
@@ -438,6 +442,7 @@ pub enum AgentOp {
   },
   /// 代登录请求，不记录请求和应答内容。
   HttpFetch(HttpFetch),
+  NetProbe(NetProbeJob),
   /// 链路质量：对每个目标连 `count` 次，结果是 `Vec<LinkSample>`（和 `targets` 一一对应）。
   Quality {
     targets: Vec<ProbeTarget>,

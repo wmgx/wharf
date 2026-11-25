@@ -12,6 +12,7 @@ pub mod build;
 pub mod egress;
 pub mod error;
 pub mod external;
+pub mod net_probe;
 pub mod plan;
 pub mod report;
 pub mod resources;

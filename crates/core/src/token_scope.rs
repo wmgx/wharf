@@ -278,6 +278,15 @@ mod tests {
   }
 
   #[test]
+  fn scoped_token_cannot_probe_server() {
+    assert!(!check_service_scope(
+      &BTreeSet::from(["blog".into()]),
+      &Method::POST,
+      "/api/servers/aliyun/probe",
+    ));
+  }
+
+  #[test]
   fn checks_route_targets_and_associated_dns() {
     let services = BTreeSet::from(["blog".into()]);
     let mut plan: Plan = serde_json::from_value(json!({

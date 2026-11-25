@@ -27,6 +27,10 @@ use wharf_api_types::{
   egress::{LOCAL_PORT, SERVE_PORT, via_exit},
 };
 
+pub fn local_url() -> String {
+  format!("http://127.0.0.1:{LOCAL_PORT}")
+}
+
 const FILE: &str = "egress.json";
 const HEAD_LIMIT: usize = 16 * 1024;
 const HEAD_TIMEOUT: Duration = Duration::from_secs(10);
