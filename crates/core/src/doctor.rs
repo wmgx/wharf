@@ -156,6 +156,8 @@ pub async fn run(
     config: crate::lint::doctor_warnings(&snap)
       .into_iter()
       .map(|(subject, detail)| {
+        // plan 里是“服务 X 的…”连着读；doctor 主语单独一列，去掉开头的“的”。
+        let detail = detail.trim_start_matches('的').trim_start();
         check("config", subject, CheckStatus::Warn, detail)
       })
       .collect(),

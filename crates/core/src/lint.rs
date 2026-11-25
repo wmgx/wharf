@@ -222,7 +222,7 @@ fn service_warnings(
           let port = if !port.is_empty()
             && port.bytes().all(|c| c.is_ascii_digit() || c == b'-')
           {
-            format!("端口 {port}")
+            format!("端口 {port} ")
           } else {
             "发布的端口".to_string()
           };
