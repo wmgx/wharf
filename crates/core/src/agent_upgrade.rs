@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
   ApiError, BUILD, ErrorCode, VERSION,
-  agent::{AgentOp, UpgradeJob, UpgradeResult, container_id},
+  agent::{AgentOp, UpgradeJob, UpgradeResult},
   plan::ApplyResponse,
   view::Perm,
 };
@@ -257,70 +257,57 @@ pub async fn upgrade_core(
 ) -> ApiResult<UpgradeResult> {
   auth.require(Perm::Admin)?;
   let then_agents = body.is_some_and(|b| b.then_agents);
-  let id = std::fs::read_to_string("/proc/self/mountinfo")
-    .ok()
-    .and_then(|m| container_id(&m))
-    .ok_or_else(|| {
+  let id =
+    crate::core_node::self_container_id().ok_or_else(|| {
       ApiError::invalid("控制面不在容器里运行，不能自动升级")
     })?;
-  let snap = snapshot::load(&s.db).await?;
   let cancel = CancellationToken::new();
-  for (name, row) in &snap.world.servers {
-    // 旧 agent 不认识 container，会去升级它自己。
-    if !s.hub.is_online(name)
-      || outdated(reported_build(&s, name).await?.as_deref())
-    {
-      continue;
-    }
-    let job = UpgradeJob {
-      tag: None,
-      pull: snapshot::pull_policy(row),
-      container: Some(id.clone()),
-      ready: Some(CORE_READY.into()),
-    };
-    match s
-      .hub
-      .call::<UpgradeResult>(
-        name,
-        AgentOp::Upgrade(job),
-        CORE_PULL_TIMEOUT,
-        None,
-        &cancel,
+  let core = crate::core_node::require_verified(&s, &cancel).await?;
+  let server = core.server;
+  if outdated(reported_build(&s, &server).await?.as_deref()) {
+    return Err(
+      ApiError::new(
+        ErrorCode::Conflict,
+        format!(
+          "控制面所在机器 {server} 的 agent 版本落后，请先升级 agent"
+        ),
       )
-      .await
-    {
-      Ok(r) => {
-        // 记下旧构建号：新控制面起来后据此判断是不是真的换了。
-        if then_agents && r.started {
-          let from = BUILD.to_string();
-          s.db
-            .call(move |c| {
-              crate::db::set_setting(c, AGENTS_AFTER_KEY, Some(&from))
-            })
-            .await?;
-        }
-        return Ok(Json(r));
-      }
-      // 不在这台机器上，或者这台刚好掉线：问下一台。
-      Err(e)
-        if matches!(
-          e.code,
-          ErrorCode::NotFound | ErrorCode::AgentOffline
-        ) =>
-      {
-        continue;
-      }
-      Err(e) => return Err(e.into()),
-    }
+      .with_hint("先升级 agent：wharf server upgrade --all")
+      .into(),
+    );
   }
-  Err(
-    ApiError::new(
-      ErrorCode::AgentFailed,
-      "找不到和控制面在同一台机器上、在线且是最新版本的 agent",
+  let snap = snapshot::load(&s.db).await?;
+  let row = snap
+    .world
+    .servers
+    .get(&server)
+    .ok_or_else(|| crate::world::server_not_found(&server))?;
+  let job = UpgradeJob {
+    tag: None,
+    pull: snapshot::pull_policy(row),
+    container: Some(id),
+    ready: Some(CORE_READY.into()),
+  };
+  let r: UpgradeResult = s
+    .hub
+    .call(
+      &server,
+      AgentOp::Upgrade(job),
+      CORE_PULL_TIMEOUT,
+      None,
+      &cancel,
     )
-    .with_hint("先升级 agent：wharf server upgrade --all")
-    .into(),
-  )
+    .await?;
+  // 记下旧构建号：新控制面起来后据此判断是不是真的换了。
+  if then_agents && r.started {
+    let from = BUILD.to_string();
+    s.db
+      .call(move |c| {
+        crate::db::set_setting(c, AGENTS_AFTER_KEY, Some(&from))
+      })
+      .await?;
+  }
+  Ok(Json(r))
 }
 
 pub async fn upgrade(
@@ -467,5 +454,73 @@ async fn helper_log(
     String::new()
   } else {
     format!("。接班容器的日志：\n{log}")
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use serde_json::json;
+
+  #[tokio::test]
+  async fn agent_upgrade_path_does_not_depend_on_core_server() {
+    let state = crate::rules::tests::test_state();
+    state
+      .db
+      .call(|c| {
+        crate::db::apply_write(
+          c,
+          &crate::db::Write::Upsert {
+            kind: "server".into(),
+            name: "s1".into(),
+            spec: json!({}),
+            meta: json!({}),
+          },
+        )?;
+        c.execute(
+          "INSERT INTO agents (server, public_key, report) VALUES (?1, ?2, ?3)",
+          rusqlite::params![
+            "s1",
+            "11".repeat(32),
+            serde_json::to_string(&wharf_api_types::agent::AgentReport {
+              build: "563eaa6".into(),
+              ..Default::default()
+            })
+            .unwrap()
+          ],
+        )
+        .map_err(crate::db::sql_err)?;
+        Ok(())
+      })
+      .await
+      .unwrap();
+
+    // 模拟 563eaa6 旧 agent 在线（不支持 core_probe）且 core.server 尚未持久化。
+    let _rx = state.hub.register_test_conn("s1", false);
+    assert!(
+      state
+        .db
+        .call(crate::core_node::load_persisted)
+        .await
+        .unwrap()
+        .is_none()
+    );
+
+    // 1) require_verified 返回 Conflict，提示先升级 agent，绝不猜机。
+    let err = crate::core_node::require_verified(
+      &state,
+      &CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Conflict);
+
+    // 2) upgrade_now（POST /api/servers/{name}/upgrade）不依赖 core.server，可直接发起升级任务。
+    let auth = crate::host_access::tests::auth([Perm::Admin], true);
+    let resp =
+      upgrade_now(State(state.clone()), auth, Path("s1".to_string()))
+        .await
+        .unwrap();
+    assert!(!resp.0.run_id.is_empty());
   }
 }

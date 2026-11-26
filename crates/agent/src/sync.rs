@@ -18,6 +18,7 @@ use wharf_api_types::{
 };
 
 use crate::{
+  dirfd::{DirFd, cstring},
   docker::{io_err, write_private},
   exec::{Cmd, Ctx},
 };
@@ -60,7 +61,17 @@ pub async fn serve(
   let root = data_root(&s.service)?;
   let bind = parse_ip("监听地址", &s.bind)?;
   let allow = parse_ip("发送端地址", &s.allow)?;
-  std::fs::create_dir_all(&root).map_err(io_err(&root))?;
+  let srv_fd = DirFd::open_dir(Path::new("/srv"))
+    .map_err(io_err(Path::new("/srv")))?;
+  let svc_cstr = cstring(&s.service)?;
+  srv_fd.ensure_subdir(&svc_cstr, 0o755).map_err(|e| {
+    match e.raw_os_error() {
+      Some(libc::ELOOP | libc::ENOTDIR) => ApiError::invalid(
+        format!("{} 是符号链接或非目录，已拒绝同步", root.display()),
+      ),
+      _ => io_err(&root)(e),
+    }
+  })?;
 
   // 先占一个空闲端口再交给 rsync。中间有极短的空窗，冲突时 rsync 会直接报错。
   let port = std::net::TcpListener::bind((bind, 0))
@@ -159,9 +170,18 @@ pub async fn push(
 ) -> Result<Value, ApiError> {
   let root = data_root(&p.service)?;
   let host = parse_ip("接收端地址", &p.host)?;
-  if !root.exists() {
-    ctx.say(format!("{} 不存在，没有数据要迁移", root.display()));
-    return Ok(serde_json::json!({ "synced": false }));
+  match DirFd::open_service_root(Path::new("/srv"), &p.service) {
+    Ok(_) => {}
+    Err(e) if e.code == ErrorCode::NotFound => {
+      ctx.say(format!("{} 不存在，没有数据要迁移", root.display()));
+      return Ok(serde_json::json!({ "synced": false }));
+    }
+    Err(_) => {
+      return Err(ApiError::invalid(format!(
+        "{} 是符号链接或非目录，已拒绝同步",
+        root.display()
+      )));
+    }
   }
   let host = match host {
     IpAddr::V6(v6) => format!("[{v6}]"),

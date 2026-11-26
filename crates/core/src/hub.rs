@@ -19,7 +19,7 @@ use axum::{
   },
   response::Response,
 };
-use ed25519_dalek::{Signature, Signer, Verifier, VerifyingKey};
+use ed25519_dalek::{Signer, Verifier};
 use futures_util::{SinkExt, StreamExt};
 use rusqlite::params;
 use serde::de::DeserializeOwned;
@@ -32,7 +32,7 @@ use wharf_api_types::{
     AgentMsg, AgentOp, CoreMsg, TerminalInput, auth_payload,
     auth_payload_v2,
   },
-  seal::{KeyShare, Opener, Role, Sealer},
+  seal::{KeyShare, Role},
 };
 
 use crate::{
@@ -40,8 +40,12 @@ use crate::{
   state::AppState,
 };
 
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
-const SOCKET_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+mod wire;
+use wire::{
+  SOCKET_WRITE_TIMEOUT, Wire, decode_key, decode_sig, protocol_ok,
+  random_nonce, recv_text, send_msg,
+};
+
 const PING_EVERY: Duration = Duration::from_secs(30);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 /// 控制面在 agent 超时之后再多等一会儿，让 agent 有机会报告超时原因。
@@ -70,6 +74,7 @@ struct Conn {
   net_probe: bool,
   container_probe: bool,
   ssh_logins: bool,
+  core_probe: bool,
   /// 协议版本不一致：连接放行，但只接受升级相关的请求，好让它升上来。
   upgrade_only: bool,
 }
@@ -114,6 +119,7 @@ pub struct Hub {
   conns: Mutex<HashMap<String, Conn>>,
   next_id: AtomicU64,
   next_conn: AtomicU64,
+  verified_core: Mutex<Option<crate::core_node::VerifiedCore>>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -132,6 +138,47 @@ pub fn offline(server: &str) -> ApiError {
 impl Hub {
   pub fn is_online(&self, server: &str) -> bool {
     lock(&self.conns).contains_key(server)
+  }
+
+  pub fn supports_core_probe(&self, server: &str) -> bool {
+    lock(&self.conns)
+      .get(server)
+      .is_some_and(|conn| !conn.upgrade_only && conn.core_probe)
+  }
+
+  pub fn core_probe_servers(&self) -> Vec<String> {
+    lock(&self.conns)
+      .iter()
+      .filter(|(_, conn)| !conn.upgrade_only && conn.core_probe)
+      .map(|(server, _)| server.clone())
+      .collect()
+  }
+
+  /// 断开指定服务器当前在线的 agent 连接（如 `--rejoin` 换公钥或删除服务器时）。
+  pub fn disconnect(&self, server: &str) {
+    if let Some(conn) = lock(&self.conns).remove(server) {
+      conn.closed.cancel();
+    }
+  }
+
+  pub(crate) fn verified_core(
+    &self,
+  ) -> Option<crate::core_node::VerifiedCore> {
+    lock(&self.verified_core).clone()
+  }
+
+  pub(crate) fn set_verified_core(
+    &self,
+    verified: Option<crate::core_node::VerifiedCore>,
+  ) {
+    *lock(&self.verified_core) = verified;
+  }
+
+  pub(crate) fn clear_verified_core_if(&self, server: &str) {
+    let mut guard = lock(&self.verified_core);
+    if guard.as_ref().is_some_and(|v| v.server == server) {
+      *guard = None;
+    }
   }
 
   pub fn ssh_login_servers(&self) -> Vec<String> {
@@ -246,6 +293,19 @@ impl Hub {
       .get(server)
       .cloned()
       .ok_or_else(|| offline(server))?;
+    if matches!(&op, AgentOp::ProbeCoreHost(_))
+      && (conn.upgrade_only || !conn.core_probe)
+    {
+      return Err(
+        ApiError::new(
+          ErrorCode::Conflict,
+          format!(
+            "服务器 {server} 的 agent 版本旧，不支持控制面同机校验"
+          ),
+        )
+        .with_hint("请先运行 wharf upgrade"),
+      );
+    }
     if matches!(&op, AgentOp::SshLogins) && !conn.ssh_logins {
       return Err(ApiError::new(
         ErrorCode::Conflict,
@@ -374,89 +434,12 @@ pub async fn agent_ws(
   State(state): State<Arc<AppState>>,
   ws: WebSocketUpgrade,
 ) -> Response {
-  ws.on_upgrade(move |socket| async move {
-    if let Err(e) = handle_socket(state, socket).await {
-      tracing::warn!("agent 连接结束：{e}");
-    }
-  })
-}
-
-fn random_nonce() -> String {
-  let mut bytes = [0u8; 24];
-  getrandom::fill(&mut bytes).expect("随机数不可用");
-  hex::encode(bytes)
-}
-
-fn decode_key(hex_key: &str) -> Option<VerifyingKey> {
-  let bytes: [u8; 32] = hex::decode(hex_key).ok()?.try_into().ok()?;
-  VerifyingKey::from_bytes(&bytes).ok()
-}
-
-fn decode_sig(hex_sig: &str) -> Option<Signature> {
-  let bytes: [u8; 64] = hex::decode(hex_sig).ok()?.try_into().ok()?;
-  Some(Signature::from_bytes(&bytes))
-}
-
-async fn recv_text(socket: &mut WebSocket) -> anyhow::Result<String> {
-  loop {
-    let msg = tokio::time::timeout(HANDSHAKE_TIMEOUT, socket.recv())
-      .await
-      .map_err(|_| anyhow::anyhow!("握手超时"))?
-      .ok_or_else(|| anyhow::anyhow!("连接关闭"))??;
-    match msg {
-      Message::Text(text) => return Ok(text.to_string()),
-      Message::Close(_) => anyhow::bail!("连接关闭"),
-      _ => continue,
-    }
-  }
-}
-
-async fn send_msg(
-  socket: &mut WebSocket,
-  msg: &CoreMsg,
-) -> anyhow::Result<()> {
-  tokio::time::timeout(
-    SOCKET_WRITE_TIMEOUT,
-    socket.send(Message::text(serde_json::to_string(msg)?)),
-  )
-  .await
-  .map_err(|_| anyhow::anyhow!("发送 WebSocket 消息超时"))??;
-  Ok(())
-}
-
-/// 协议版本是否兼容。旧 agent（含不发这个字段的 0）只能明文连接，只接受升级请求。
-fn protocol_ok(agent: u32) -> bool {
-  agent == PROTOCOL
-}
-
-/// 握手之后的收发：新 agent 全部加密；旧 agent 明文，只用于下发升级。
-enum Wire {
-  Plain,
-  Sealed(Sealer, Opener),
-}
-
-impl Wire {
-  fn encode(&mut self, msg: &CoreMsg) -> anyhow::Result<Message> {
-    let text = serde_json::to_string(msg)?;
-    Ok(match self {
-      Wire::Plain => Message::text(text),
-      Wire::Sealed(tx, _) => {
-        Message::binary(tx.seal(text.as_bytes()))
+  ws.max_message_size(crate::report_guard::MAX_WS_MESSAGE_BYTES)
+    .on_upgrade(move |socket| async move {
+      if let Err(e) = handle_socket(state, socket).await {
+        tracing::warn!("agent 连接结束：{e}");
       }
     })
-  }
-
-  /// `Ok(None)`：不是这种通道该收的帧，忽略。解密失败返回错误，调用方断开。
-  fn decode(
-    &mut self,
-    msg: Message,
-  ) -> anyhow::Result<Option<Vec<u8>>> {
-    Ok(match (self, msg) {
-      (Wire::Plain, Message::Text(t)) => Some(t.as_bytes().to_vec()),
-      (Wire::Sealed(_, rx), Message::Binary(b)) => Some(rx.open(&b)?),
-      _ => None,
-    })
-  }
 }
 
 async fn handle_socket(
@@ -489,6 +472,7 @@ async fn handle_socket(
     net_probe,
     container_probe,
     ssh_logins,
+    core_probe,
   } = hello
   else {
     anyhow::bail!("agent 没有先发 hello");
@@ -590,12 +574,17 @@ async fn handle_socket(
     net_probe,
     container_probe,
     ssh_logins,
+    core_probe,
     upgrade_only,
   };
   state.hub.register(&server, conn.clone());
   tracing::info!("服务器 {server} 上线（agent {version}）");
   touch(&state, &server, None).await;
   crate::service_monitor::sync_watches(&state, Some(&server)).await;
+  crate::core_node::spawn_probe_on_connect(
+    state.clone(),
+    server.clone(),
+  );
 
   let (mut sink, mut stream) = socket.split();
   let mut ping = tokio::time::interval(PING_EVERY);
@@ -653,6 +642,16 @@ async fn handle_socket(
         };
         match serde_json::from_slice::<AgentMsg>(&text) {
           Ok(AgentMsg::Report(mut report)) => {
+            if !crate::report_guard::prepare_report(
+              &state,
+              &server,
+              conn.conn_id,
+              &mut report,
+            )
+            .await
+            {
+              continue;
+            }
             crate::service_monitor::report(&server, std::mem::take(&mut report.log_hits));
             let received = now_ms();
             let agent_ms = report.time_ms;
@@ -668,7 +667,11 @@ async fn handle_socket(
               let oom = m.oom.take();
               let hosts = std::mem::take(&mut m.hosts);
               if !hosts.is_empty() {
-                tokio::spawn(crate::http_stats::record(state.clone(), hosts));
+                tokio::spawn(crate::http_stats::record(
+                  state.clone(),
+                  server.clone(),
+                  hosts,
+                ));
               }
               crate::metrics::record_report(&state, &server, m).await;
               if let Some((wanted, limits)) = settings {

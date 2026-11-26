@@ -18,7 +18,8 @@ use wharf_api_types::{
 
 use crate::{
   build::{
-    fetch_code, random_suffix, relative, remove_container, to_value,
+    checked_file_in, checked_subdir, fetch_code, random_suffix,
+    relative, remove_container, to_value,
   },
   docker::{Docker, io_err},
   exec::Ctx,
@@ -78,16 +79,7 @@ async fn deploy_in(
   )
   .await?;
   let src = work.join("src");
-  let context = match &job.path {
-    Some(p) => src.join(relative(p)?),
-    None => src.clone(),
-  };
-  if !context.is_dir() {
-    return Err(ApiError::invalid(format!(
-      "代码里没有目录 {}",
-      job.path.as_deref().unwrap_or_default()
-    )));
-  }
+  let context = checked_subdir(&src, job.path.as_deref())?;
   let output = match (&job.output, &job.build) {
     (Some(o), _) => {
       relative(o)?;
@@ -97,7 +89,9 @@ async fn deploy_in(
     (None, None) => ".".to_string(),
   };
   if job.kind == EdgeKind::Worker
-    && !WRANGLER_CONFIGS.iter().any(|f| context.join(f).is_file())
+    && !WRANGLER_CONFIGS.iter().any(|f| {
+      checked_file_in(&context, f).is_ok_and(|p| p.is_some())
+    })
   {
     return Err(
       ApiError::invalid("代码里没有 wrangler.toml / wrangler.json(c)")

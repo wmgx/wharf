@@ -59,18 +59,18 @@ fn by_service(
 
 pub async fn record(
   state: Arc<AppState>,
+  server: String,
   hosts: BTreeMap<String, HostTraffic>,
 ) {
   let Ok(snap) = crate::snapshot::load(&state.db).await else {
     return;
   };
   let sums = by_service(&hosts, |h| {
-    snap
-      .world
-      .routes
-      .get(h)
-      .map(|r| r.spec.service.clone())
-      .filter(|s| !s.is_empty())
+    crate::report_guard::route_owned_by_server(
+      &snap.world,
+      &server,
+      h,
+    )
   });
   let mut points: Vec<(String, String, f64)> = Vec::new();
   for (svc, s) in &sums {

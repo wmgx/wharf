@@ -479,7 +479,10 @@ impl Docker {
     }
     if purge {
       let data = std::path::Path::new("/srv").join(project);
-      if data.exists() {
+      if crate::ops::validation::check_removable_service_dir(
+        std::path::Path::new("/srv"),
+        project,
+      )? {
         ctx.say(format!("删除数据目录 {}", data.display()));
         std::fs::remove_dir_all(&data).map_err(io_err(&data))?;
       }

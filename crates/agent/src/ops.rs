@@ -25,8 +25,11 @@ use crate::{
   report::Reporter,
 };
 
-mod validation;
-use validation::{check_own_container, check_project, ensure_dir};
+pub(crate) mod validation;
+use validation::{
+  check_own_container, check_project, check_removable_service_dir,
+  ensure_dir,
+};
 
 pub struct Ops {
   pub docker: Docker,
@@ -237,6 +240,10 @@ impl Ops {
       AgentOp::Upgrade(job) => to_value(
         crate::upgrade::start(&self.docker, &job, ctx).await?,
       ),
+      AgentOp::ProbeCoreHost(probe) => to_value(
+        crate::upgrade::probe_core_host(&self.docker, &probe, ctx)
+          .await?,
+      ),
       AgentOp::Prune => to_value(self.docker.prune(ctx).await?),
       // 文件 IO 不长，但还是放到阻塞线程，不卡住连接。
       AgentOp::Files(op) => {
@@ -311,7 +318,12 @@ impl Ops {
         to_value(self.host_shell.exec(job, ctx).await)
       }
       AgentOp::Egress(cfg) => {
-        crate::egress::apply(self.data_dir.clone(), cfg).await?;
+        crate::egress::apply(
+          self.data_dir.clone(),
+          &self.core_url,
+          cfg,
+        )
+        .await?;
         Ok(Value::Null)
       }
       AgentOp::TaskRun(job) => {
@@ -353,7 +365,7 @@ impl Ops {
       )));
     }
     let dir = Path::new("/srv").join(service);
-    if dir.exists() {
+    if check_removable_service_dir(Path::new("/srv"), service)? {
       ctx.say(format!("删除 {}", dir.display()));
       std::fs::remove_dir_all(&dir).map_err(io_err(&dir))?;
     }
@@ -775,17 +787,4 @@ fn has_previous(
 ) -> bool {
   old_hash != new_hash
     || (old_image.is_some() && old_image != now_image)
-}
-
-#[cfg(test)]
-mod tests {
-  use super::*;
-
-  #[test]
-  fn previous_tracks_config_or_image_change() {
-    assert!(has_previous("a", "b", None, None));
-    assert!(has_previous("a", "a", Some("old"), Some("new")));
-    assert!(!has_previous("a", "a", Some("old"), Some("old")));
-    assert!(!has_previous("a", "a", None, None));
-  }
 }

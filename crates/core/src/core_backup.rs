@@ -360,6 +360,14 @@ pub async fn backup(
     },
   )?;
   let snap = snapshot::load(&state.db).await?;
+  let core =
+    crate::core_node::require_verified(state, cancel).await?;
+  if core.server == to {
+    return Err(ApiError::invalid(format!(
+      "控制面所在机器 {} 不能同时作为控制面备份目标",
+      core.server
+    )));
+  }
   let target_ip = snap
     .net(&snap.world)
     .private
@@ -369,8 +377,8 @@ pub async fn backup(
       ApiError::invalid(format!("备份服务器 {to} 没有内网地址"))
     })?;
   let creds = backup::credentials(state).await?;
-  let mut w = Where {
-    server: String::new(),
+  let w = Where {
+    server: core.server,
     target: to.clone(),
     target_ip,
   };
@@ -379,48 +387,26 @@ pub async fn backup(
   let marker = stage(state).await?;
   progress("已生成数据库快照".into());
 
-  // 不知道控制面在哪台机器上：问每台在线的 agent，目录里的标记对得上的就是。
-  let mut result: Result<BackupSummary, ApiError> = Err(
-    ApiError::new(
-      ErrorCode::NotFound,
-      format!(
-        "找不到控制面所在的机器（控制面不能和备份服务器 {to} 是同一台）"
-      ),
-    ),
+  let job = core_job(
+    &snap,
+    &w.server,
+    &w,
+    &creds,
+    &marker,
+    ResticAction::Backup {
+      host: w.server.clone(),
+    },
   );
-  for server in snap.world.servers.keys() {
-    if *server == to || !state.hub.is_online(server) {
-      continue;
-    }
-    let job = core_job(
-      &snap,
-      server,
-      &w,
-      &creds,
-      &marker,
-      ResticAction::Backup {
-        host: server.clone(),
-      },
-    );
-    match state
-      .hub
-      .call(
-        server,
-        job,
-        backup::RESTIC_TIMEOUT,
-        Some(progress.clone()),
-        cancel,
-      )
-      .await
-    {
-      Err(e) if e.code == ErrorCode::NotFound => continue,
-      r => {
-        w.server = server.clone();
-        result = r;
-        break;
-      }
-    }
-  }
+  let result: Result<BackupSummary, ApiError> = state
+    .hub
+    .call(
+      &w.server,
+      job,
+      backup::RESTIC_TIMEOUT,
+      Some(progress.clone()),
+      cancel,
+    )
+    .await;
   let _ = std::fs::remove_dir_all(CORE_BACKUP_DIR);
   backup::record(state, run_id, REPO, &w, &result).await?;
   result?;

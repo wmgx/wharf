@@ -140,52 +140,15 @@ pub(crate) fn own_ipv4s() -> BTreeSet<String> {
 pub(crate) fn core_server_of(
   snap: &snapshot::Snapshot,
 ) -> Option<String> {
-  core_server_with_report(snap, &own_ipv4s())
+  crate::core_node::server_of(snap)
 }
 
-fn core_server_with_report(
-  snap: &snapshot::Snapshot,
-  own: &BTreeSet<String>,
-) -> Option<String> {
-  let candidate = core_server(&snap.net(&snap.world), own)?;
-  // 服务器设置可覆盖网络地址，授权时还要核对唯一的 agent 网卡上报。
-  let mut matches = snap.agents.iter().filter(|agent| {
-    snap.world.servers.contains_key(&agent.server)
-      && agent.report.as_ref().is_some_and(|report| {
-        report.lan_ips.iter().any(|ip| own.contains(ip))
-          || report
-            .private_addr
-            .as_ref()
-            .is_some_and(|addr| own.contains(&addr.ip))
-      })
-  });
-  let agent = matches.next()?;
-  (agent.server == candidate && matches.next().is_none())
-    .then_some(candidate)
-}
-
-/// 控制面所在的服务器：哪台的 agent 上报了控制面网卡上的地址。
+/// 控制面所在的服务器：仅返回已通过同机挑战并校验公钥的持久化绑定，绝不按上报 IP 猜想。
 pub(crate) fn core_server(
   net: &Net,
-  own: &BTreeSet<String>,
+  _own: &BTreeSet<String>,
 ) -> Option<String> {
-  let hit = |ip: &String| own.contains(ip);
-  net
-    .private
-    .iter()
-    .find(|(_, a)| hit(&a.ip))
-    .map(|(s, _)| s)
-    .or_else(|| {
-      net
-        .lan_ips
-        .iter()
-        .find(|(_, ips)| ips.iter().any(hit))
-        .map(|(s, _)| s)
-    })
-    .or_else(|| {
-      net.public_ip.iter().find(|(_, ip)| hit(ip)).map(|(s, _)| s)
-    })
-    .cloned()
+  net.core_server.clone()
 }
 
 pub(crate) fn is_core_route(
@@ -359,6 +322,22 @@ pub fn check_image(image: &str) -> Result<String, ApiError> {
   }
 }
 
+/// 仅 https 或本机回环地址允许生成 `curl | sh` 脚本命令；所有非回环明文 http 一律禁用。
+pub fn allows_script_install(core_url: &str) -> bool {
+  let url = core_url.trim();
+  if url.starts_with("https://") {
+    return true;
+  }
+  let Some(rest) = url.strip_prefix("http://") else {
+    return false;
+  };
+  let host = host_of(rest);
+  host.eq_ignore_ascii_case("localhost")
+    || host
+      .parse::<IpAddr>()
+      .is_ok_and(|ip| ip.to_canonical().is_loopback())
+}
+
 /// `image` 和控制面默认镜像不同时，通过环境变量交给脚本。
 pub fn script_command(
   core_url: &str,
@@ -386,6 +365,8 @@ pub async fn script(State(s): State<Arc<AppState>>) -> Response {
 const SCRIPT: &str = r#"#!/bin/sh
 # Wharf agent 安装：curl -fsSL <控制面>/join.sh | sh -s -- <控制面> <加入凭据> [控制面公钥]
 set -eu
+
+main() {
 CORE_URL="${1:?缺少控制面地址}"
 TOKEN="${2:?缺少加入凭据}"
 CORE_KEY="${3:-}"
@@ -446,7 +427,7 @@ if ! run 900 $DOCKER pull "$IMAGE"; then
 fi
 
 step "加入 $CORE_URL"
-run 60 $DOCKER run --rm --label wharf.temp=1 --network host -v "$DATA:$DATA" "$IMAGE" join "$CORE_URL" "$TOKEN" ${CORE_KEY:+--core-key "$CORE_KEY"} \
+run 60 $DOCKER run --rm --label wharf.temp=1 --network host -v "$DATA:$DATA" -e WHARF_JOIN_TOKEN="$TOKEN" "$IMAGE" join "$CORE_URL" ${CORE_KEY:+--core-key "$CORE_KEY"} \
   || fail "加入失败，确认这台机器能访问 $CORE_URL"
 
 step "启动 agent"
@@ -456,6 +437,9 @@ $DOCKER run -d --label wharf.system=agent --name wharf-agent --restart unless-st
   -e WHARF_SELF_IMAGE="$IMAGE" "$IMAGE" >/dev/null
 
 printf '\n完成，回到页面查看连接状态。\n'
+}
+
+main "$@"
 "#;
 
 #[cfg(test)]
@@ -463,12 +447,10 @@ mod tests {
   use super::*;
 
   #[test]
-  fn host_policy_core_identity_requires_unique_agent_interface_match()
-  {
-    let ip = "10.20.0.1";
-    let own = BTreeSet::from([ip.into()]);
+  fn host_policy_core_identity_uses_verified_binding_only() {
+    let key = "aa".repeat(32);
     let mut snap = snapshot::Snapshot::default();
-    for server in ["core", "s1"] {
+    for server in ["s1", "s2"] {
       snap.world.servers.insert(
         server.into(),
         crate::world::ServerRow {
@@ -477,26 +459,39 @@ mod tests {
         },
       );
     }
-    let agent = |server: &str| crate::db::AgentRow {
-      server: server.into(),
-      public_key: None,
+    snap.agents.push(crate::db::AgentRow {
+      server: "s1".into(),
+      public_key: Some("bb".repeat(32)),
       report: Some(wharf_api_types::agent::AgentReport {
-        lan_ips: vec![ip.into()],
+        lan_ips: vec!["100.64.0.1".into()],
         ..Default::default()
       }),
       last_seen: None,
-    };
-    snap.agents.push(agent("core"));
-    assert_eq!(
-      core_server_with_report(&snap, &own).as_deref(),
-      Some("core")
-    );
-    snap.agents.push(agent("s1"));
-    assert!(core_server_with_report(&snap, &own).is_none());
-    snap.agents.clear();
-    snap.world.servers.get_mut("s1").unwrap().settings.public_ip =
-      Some(ip.into());
-    assert!(core_server_with_report(&snap, &own).is_none());
+    });
+    snap.agents.push(crate::db::AgentRow {
+      server: "s2".into(),
+      public_key: Some(key.clone()),
+      report: None,
+      last_seen: None,
+    });
+    assert!(core_server_of(&snap).is_none());
+
+    snap.core_binding = Some(("s2".into(), key));
+    assert_eq!(core_server_of(&snap).as_deref(), Some("s2"));
+
+    snap.agents[1].public_key = Some("cc".repeat(32));
+    assert!(core_server_of(&snap).is_none());
+  }
+
+  #[test]
+  fn plaintext_http_omits_script_join_command() {
+    assert!(allows_script_install("https://wharf.example.com"));
+    assert!(allows_script_install("http://127.0.0.1:7700"));
+    assert!(allows_script_install("http://[::1]:7700"));
+    assert!(allows_script_install("http://localhost:7700"));
+    assert!(!allows_script_install("http://172.16.1.2:7700"));
+    assert!(!allows_script_install("http://100.64.0.2:7700"));
+    assert!(!allows_script_install("http://10.0.0.2:7700"));
   }
 
   #[test]
@@ -513,5 +508,120 @@ mod tests {
     assert!(check_core_url("http://100.100.1.1:7700").is_ok());
     assert!(check_core_url("http://8.8.8.8:7700").is_err());
     assert!(check_core_url("http://w.example.com").is_err());
+  }
+
+  #[tokio::test]
+  async fn agent_join_rejects_plaintext_non_local_and_accepts_sealed()
+  {
+    use axum::{
+      body::Body,
+      extract::ConnectInfo,
+      http::{Request, StatusCode},
+    };
+    use std::net::SocketAddr;
+    use tower::ServiceExt;
+
+    let state = crate::rules::tests::test_state();
+    let token_a = "wj_token_alpha";
+    let token_b = "wj_token_beta";
+    let hash_a = crate::auth::hash_token(token_a);
+    let hash_b = crate::auth::hash_token(token_b);
+    let expires = crate::db::now_ms() + 600_000;
+    state
+      .db
+      .call(move |c| {
+        for (srv, h) in [("s1", hash_a), ("s2", hash_b)] {
+          crate::db::apply_write(
+            c,
+            &crate::db::Write::Upsert {
+              kind: "server".into(),
+              name: srv.into(),
+              spec: serde_json::json!({}),
+              meta: serde_json::json!({}),
+            },
+          )?;
+          c.execute(
+            "INSERT INTO agents (server, join_token_hash, join_expires_at) VALUES (?1, ?2, ?3)",
+            rusqlite::params![srv, h, expires],
+          )
+          .map_err(crate::db::sql_err)?;
+        }
+        Ok(())
+      })
+      .await
+      .unwrap();
+
+    let pub_hex = "ab".repeat(32);
+    let send =
+      |peer: &str, xff: Option<&str>, sealed: bool, tok: &str| {
+        let state = state.clone();
+        let pub_hex = pub_hex.clone();
+        let tok = tok.to_string();
+        let peer: SocketAddr = peer.parse().unwrap();
+        let xff = xff.map(str::to_string);
+        async move {
+          let mut builder = Request::post("/agent/join")
+            .header("content-type", "application/json");
+          if let Some(xff) = xff {
+            builder = builder.header("x-forwarded-for", xff);
+          }
+          let body = serde_json::json!({
+            "join_token": tok,
+            "public_key": pub_hex,
+          })
+          .to_string();
+          let mut req = builder.body(Body::from(body)).unwrap();
+          req.extensions_mut().insert(ConnectInfo(peer));
+          if sealed {
+            req.extensions_mut().insert(crate::cli_tunnel::Sealed);
+          }
+          crate::api::router(state).oneshot(req).await.unwrap()
+        }
+      };
+
+    // 1. 非本机明文请求被 401 拒绝，且 join_token_hash 未被核销。
+    let r1 = send("203.0.113.5:50000", None, false, token_a).await;
+    assert_eq!(r1.status(), StatusCode::UNAUTHORIZED);
+
+    // 2. 127.0.0.1 但带 X-Forwarded-For 的明文请求同样被 401 拒绝。
+    let r2 =
+      send("127.0.0.1:50001", Some("203.0.113.5"), false, token_a)
+        .await;
+    assert_eq!(r2.status(), StatusCode::UNAUTHORIZED);
+
+    let still_present: Option<String> = state
+      .db
+      .call(|c| {
+        c.query_row(
+          "SELECT join_token_hash FROM agents WHERE server = 's1'",
+          [],
+          |r| r.get(0),
+        )
+        .map_err(crate::db::sql_err)
+      })
+      .await
+      .unwrap();
+    assert!(still_present.is_some());
+
+    // 3. 经加密通道（Sealed）提交 s1：成功并核销 join_token。
+    let r3 = send("203.0.113.5:50002", None, true, token_a).await;
+    assert_eq!(r3.status(), StatusCode::OK);
+    let cleared: Option<String> = state
+      .db
+      .call(|c| {
+        c.query_row(
+          "SELECT join_token_hash FROM agents WHERE server = 's1'",
+          [],
+          |r| r.get(0),
+        )
+        .map_err(crate::db::sql_err)
+      })
+      .await
+      .unwrap();
+    assert!(cleared.is_none());
+
+    // 4. 直连本机回环（无转发头）提交 s2：放行成功并核销 join_token。
+    let r4 = send("127.0.0.1:50003", None, false, token_b).await;
+    assert_eq!(r4.status(), StatusCode::OK);
   }
 }

@@ -47,6 +47,8 @@ pub struct Net {
   pub gate_public: Option<String>,
   pub gate_login: Option<String>,
   pub heartbeat_url: Option<String>,
+  /// 经同机校验并持久化绑定的控制面所在服务器；未验证时为 None。
+  pub core_server: Option<String>,
   /// 实际使用的内网地址：服务器设置的覆盖值，否则是 agent 检测到的组网地址。
   pub private: BTreeMap<String, PrivateAddr>,
   pub reported_private: BTreeMap<String, PrivateAddr>,
@@ -67,10 +69,84 @@ pub struct Net {
 
 impl Net {
   /// 由服务器设置和 agent 上报推导出网络信息。设置里的地址优先，其次是 agent 检测到的。
+  /// 纵深防御：仅采纳格式合法、未被他机配置占用且仅由单台 agent 上报的私网/公网 IP。
   pub fn derive(
     servers: &BTreeMap<String, ServerRow>,
     agents: &[crate::db::AgentRow],
   ) -> Self {
+    use std::collections::{HashMap, HashSet};
+
+    let mut claimed_private: HashMap<String, HashSet<String>> =
+      HashMap::new();
+    let mut claimed_public: HashMap<String, HashSet<String>> =
+      HashMap::new();
+    for (name, server) in servers {
+      let public = server.settings.network_mode
+        == Some(wharf_api_types::spec::NetworkMode::Public);
+      if !public
+        && let Some(addr) = &server.settings.private_addr
+        && let Some(clean) =
+          crate::report_guard::is_valid_private_ip(&addr.ip)
+      {
+        claimed_private
+          .entry(clean)
+          .or_default()
+          .insert(name.clone());
+      }
+      for lan in &server.settings.lan_addrs {
+        if let Some(clean) =
+          crate::report_guard::is_valid_private_ip(lan)
+        {
+          claimed_private
+            .entry(clean)
+            .or_default()
+            .insert(name.clone());
+        }
+      }
+      if let Some(ip) = &server.settings.public_ip
+        && let Some(clean) =
+          crate::report_guard::is_valid_public_ip(ip)
+      {
+        claimed_public
+          .entry(clean)
+          .or_default()
+          .insert(name.clone());
+      }
+    }
+
+    let mut reported_private_counts: HashMap<String, usize> =
+      HashMap::new();
+    let mut reported_public_counts: HashMap<String, usize> =
+      HashMap::new();
+    for (name, _) in servers {
+      let Some(r) = agents
+        .iter()
+        .find(|a| &a.server == name)
+        .and_then(|a| a.report.as_ref())
+      else {
+        continue;
+      };
+      if let Some(addr) = &r.private_addr
+        && let Some(clean) =
+          crate::report_guard::is_valid_private_ip(&addr.ip)
+      {
+        *reported_private_counts.entry(clean).or_default() += 1;
+      }
+      if let Some(ip) = &r.public_ip
+        && let Some(clean) =
+          crate::report_guard::is_valid_public_ip(ip)
+      {
+        *reported_public_counts.entry(clean).or_default() += 1;
+      }
+    }
+
+    let claimed_by_other =
+      |map: &HashMap<String, HashSet<String>>, ip: &str, me: &str| {
+        map
+          .get(ip)
+          .is_some_and(|owners| owners.iter().any(|o| o != me))
+      };
+
     let mut net = Net::default();
     for (name, server) in servers {
       let report = agents
@@ -80,11 +156,27 @@ impl Net {
       // 接入方式是 public 时不用内网地址：端口只绑 127.0.0.1，网关一律走反向隧道。
       let public = server.settings.network_mode
         == Some(wharf_api_types::spec::NetworkMode::Public);
+      let safe_reported_private = report
+        .and_then(|r| r.private_addr.as_ref())
+        .and_then(|addr| {
+          let clean =
+            crate::report_guard::is_valid_private_ip(&addr.ip)?;
+          if claimed_by_other(&claimed_private, &clean, name)
+            || claimed_by_other(&claimed_public, &clean, name)
+            || reported_private_counts.get(&clean) != Some(&1)
+          {
+            return None;
+          }
+          Some(PrivateAddr {
+            ip: clean,
+            network: addr.network,
+          })
+        });
       if let Some(addr) = server
         .settings
         .private_addr
         .clone()
-        .or_else(|| report.and_then(|r| r.private_addr.clone()))
+        .or_else(|| safe_reported_private.clone())
         .filter(|_| !public)
       {
         net.private.insert(name.clone(), addr);
@@ -94,12 +186,17 @@ impl Net {
           name.clone(),
           crate::source_trust::private_ipv4s(&r.lan_ips),
         );
-        if !public && let Some(addr) = &r.private_addr {
-          net.reported_private.insert(name.clone(), addr.clone());
+        if !public && let Some(addr) = safe_reported_private {
+          net.reported_private.insert(name.clone(), addr);
         }
         net.docker_subnets.insert(
           name.clone(),
-          r.docker_subnets.iter().map(|d| d.subnet.clone()).collect(),
+          r.docker_subnets
+            .iter()
+            .filter_map(|d| {
+              crate::report_guard::is_valid_private_subnet(&d.subnet)
+            })
+            .collect(),
         );
       }
       if !server.settings.lan_addrs.is_empty() {
@@ -107,11 +204,18 @@ impl Net {
           .lan_addrs
           .insert(name.clone(), server.settings.lan_addrs.clone());
       }
-      if let Some(ip) = server
-        .settings
-        .public_ip
-        .clone()
-        .or_else(|| report.and_then(|r| r.public_ip.clone()))
+      let safe_reported_public =
+        report.and_then(|r| r.public_ip.as_deref()).and_then(|ip| {
+          let clean = crate::report_guard::is_valid_public_ip(ip)?;
+          if claimed_by_other(&claimed_public, &clean, name)
+            || reported_public_counts.get(&clean) != Some(&1)
+          {
+            return None;
+          }
+          Some(clean)
+        });
+      if let Some(ip) =
+        server.settings.public_ip.clone().or(safe_reported_public)
       {
         net.public_ip.insert(name.clone(), ip);
       }

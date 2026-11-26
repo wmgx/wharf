@@ -1,5 +1,34 @@
 use super::*;
 
+impl Hub {
+  pub(crate) fn register_test_conn(
+    &self,
+    server: &str,
+    core_probe: bool,
+  ) -> mpsc::Receiver<CoreMsg> {
+    let (tx, rx) = mpsc::channel(32);
+    let conn = Conn {
+      conn_id: self.next_conn.fetch_add(1, Ordering::Relaxed),
+      tx,
+      pending: Default::default(),
+      closed: CancellationToken::new(),
+      rtt_ms: Arc::new(AtomicU64::new(u64::MAX)),
+      host_shell: true,
+      forward: true,
+      service_checks: true,
+      container_diagnosis: true,
+      access_logs: true,
+      net_probe: true,
+      container_probe: true,
+      ssh_logins: true,
+      core_probe,
+      upgrade_only: false,
+    };
+    self.register(server, conn);
+    rx
+  }
+}
+
 #[test]
 fn protocol_gate() {
   // 旧 agent 只能升级
@@ -25,6 +54,7 @@ fn old_hello_has_no_host_shell_capability() {
   let AgentMsg::Hello {
     host_shell,
     ssh_logins,
+    core_probe,
     ..
   } = hello
   else {
@@ -32,6 +62,7 @@ fn old_hello_has_no_host_shell_capability() {
   };
   assert!(!host_shell);
   assert!(!ssh_logins);
+  assert!(!core_probe);
 }
 
 #[test]
@@ -67,6 +98,7 @@ fn old_core_ignores_new_hello_capability() {
     net_probe: true,
     container_probe: true,
     ssh_logins: true,
+    core_probe: true,
   };
   let json = serde_json::to_string(&hello).unwrap();
   let old = serde_json::from_str::<OldAgentMsg>(&json);

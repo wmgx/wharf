@@ -134,6 +134,8 @@ pub enum AgentMsg {
     container_probe: bool,
     #[serde(default)]
     ssh_logins: bool,
+    #[serde(default)]
+    core_probe: bool,
   },
   Report(Box<AgentReport>),
   Progress {
@@ -518,6 +520,8 @@ pub enum AgentOp {
   /// 把宿主机上的目录按 `.gitignore` 打成代码包，用一次性口令上传到控制面，
   /// 结果是 [PackedUpload]。
   HostPack(HostPackJob),
+  /// 同机身份校验：读回控制面数据目录 `.core-probe/<id>` 原文，证明与控制面共宿主机。
+  ProbeCoreHost(CoreHostProbe),
 }
 
 #[derive(

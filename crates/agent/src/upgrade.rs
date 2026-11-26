@@ -5,15 +5,18 @@
 //! 2. 接班容器按旧容器的参数起新 agent：旧容器改名、停止，新容器启动，
 //!    日志里出现"已连接控制面"才删旧容器；否则删掉新容器、恢复旧容器。
 
-use std::time::Duration;
+use std::{io::Read, path::Path, time::Duration};
 
 use serde_json::Value;
 use wharf_api_types::{
   ApiError, ErrorCode,
-  agent::{UpgradeJob, UpgradeResult},
+  agent::{
+    CoreHostProbe, CoreHostProbeResult, UpgradeJob, UpgradeResult,
+  },
 };
 
 use crate::{
+  dirfd::{DirFd, NOFOLLOW, cstring},
   docker::Docker,
   exec::{Cmd, Ctx},
 };
@@ -233,6 +236,136 @@ pub async fn helper_log(ctx: &Ctx) -> String {
     Ok(o) if o.success => format!("{}{}", o.stdout, o.stderr),
     _ => String::new(),
   }
+}
+
+/// 同机身份校验：安全读回 `<host_dir>/.core-probe/<challenge_id>` 原文，证明与控制面同宿主机。
+pub async fn probe_core_host(
+  docker: &Docker,
+  probe: &CoreHostProbe,
+  ctx: &Ctx,
+) -> Result<CoreHostProbeResult, ApiError> {
+  if !(32..=64).contains(&probe.challenge_id.len())
+    || !probe
+      .challenge_id
+      .bytes()
+      .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+  {
+    return Err(ApiError::invalid("挑战标识不合法"));
+  }
+  let data_dir = Path::new(&probe.data_dir);
+  if !data_dir.is_absolute()
+    || probe.data_dir.contains('\0')
+    || probe.data_dir.contains('\n')
+    || probe.data_dir.contains('\r')
+    || data_dir
+      .components()
+      .any(|c| matches!(c, std::path::Component::ParentDir))
+  {
+    return Err(ApiError::invalid("数据目录路径不合法"));
+  }
+
+  let host_dir = match &probe.container_id {
+    Some(cid) => {
+      if cid.len() != 64
+        || !cid.bytes().all(|b| b.is_ascii_hexdigit())
+      {
+        return Err(ApiError::invalid("容器 ID 不合法"));
+      }
+      let info = inspect(docker, cid, ctx)
+        .await
+        .map_err(|_| ApiError::not_found("控制面不在这台机器上"))?;
+      let want = probe.data_dir.trim_end_matches('/');
+      info
+        .get("Mounts")
+        .and_then(Value::as_array)
+        .and_then(|mounts| {
+          mounts.iter().find_map(|m| {
+            let kind = m.get("Type")?.as_str()?;
+            let dst =
+              m.get("Destination")?.as_str()?.trim_end_matches('/');
+            let src = m.get("Source")?.as_str()?;
+            (kind == "bind" && dst == want).then(|| src.to_string())
+          })
+        })
+        .ok_or_else(|| {
+          ApiError::not_found("未找到控制面数据目录挂载")
+        })?
+    }
+    None => probe.data_dir.clone(),
+  };
+
+  if let Some(token) =
+    read_probe_direct(Path::new(&host_dir), &probe.challenge_id)?
+  {
+    return Ok(CoreHostProbeResult { token });
+  }
+
+  // agent 运行在容器内且未直接挂载控制面目录时，借 agent 镜像起一次性只读容器读取。
+  let image = crate::adopt::self_image(docker, ctx).await?;
+  let script = r#"set -e; [ -d /probe/.core-probe ] && [ ! -L /probe/.core-probe ] && [ -f "/probe/.core-probe/$1" ] && [ ! -L "/probe/.core-probe/$1" ] && head -c 128 "/probe/.core-probe/$1""#;
+  let out = docker
+    .cmd()
+    .args([
+      "run",
+      "--rm",
+      "--label",
+      "wharf.temp=1",
+      "--network",
+      "none",
+      "--entrypoint",
+      "sh",
+      "--mount",
+    ])
+    .arg(format!("type=bind,src={host_dir},dst=/probe,readonly"))
+    .args([image.as_str(), "-c", script, "_", &probe.challenge_id])
+    .timeout(Duration::from_secs(20))
+    .run(ctx)
+    .await?;
+  if !out.success {
+    return Err(ApiError::not_found("控制面不在这台机器上"));
+  }
+  Ok(CoreHostProbeResult {
+    token: out.stdout.trim().to_string(),
+  })
+}
+
+/// 尝试在本机进程命名空间内用 `DirFd`（不跟随软链）直接读取探测文件。
+/// 若 `host_dir` 本身不存在返回 `Ok(None)`（交由容器挂载兜底）；
+/// 若 `host_dir` 存在但 `.core-probe/<id>` 不存在或遇软链，直接返回错误。
+fn read_probe_direct(
+  host_dir: &Path,
+  challenge_id: &str,
+) -> Result<Option<String>, ApiError> {
+  let root = match DirFd::open_dir(host_dir) {
+    Ok(d) => d,
+    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+      return Ok(None);
+    }
+    Err(_) => {
+      return Err(ApiError::not_found("控制面不在这台机器上"));
+    }
+  };
+  let probe_dir = root
+    .open_subdir(c".core-probe")
+    .map_err(|_| ApiError::not_found("控制面不在这台机器上"))?;
+  let id_name = cstring(challenge_id)?;
+  let fd = probe_dir
+    .open_file(&id_name, libc::O_RDONLY | NOFOLLOW, 0)
+    .map_err(|_| ApiError::not_found("控制面不在这台机器上"))?;
+  let mut f = std::fs::File::from(fd);
+  let meta = f
+    .metadata()
+    .map_err(|_| ApiError::not_found("控制面不在这台机器上"))?;
+  if !meta.is_file() {
+    return Err(ApiError::not_found("控制面不在这台机器上"));
+  }
+  let mut buf = Vec::new();
+  f.take(128)
+    .read_to_end(&mut buf)
+    .map_err(|_| ApiError::not_found("控制面不在这台机器上"))?;
+  let token = String::from_utf8(buf)
+    .map_err(|_| ApiError::invalid("探测文件内容不是 UTF-8"))?;
+  Ok(Some(token.trim().to_string()))
 }
 
 /// 按旧容器的配置拼 `docker run` 参数（不含镜像）。

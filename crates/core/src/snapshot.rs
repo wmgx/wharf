@@ -62,6 +62,8 @@ pub struct Snapshot {
   pub edge_deployed: BTreeMap<String, String>,
   /// 连通性探测结果。
   pub reach: db::Reach,
+  /// 持久化且待校验的控制面节点绑定 `(server, agent_public_key)`。
+  pub core_binding: Option<(String, String)>,
 }
 
 impl Snapshot {
@@ -156,6 +158,7 @@ async fn load_inner(db: &Db) -> Result<Snapshot, ApiError> {
         edge_expected: db::edge_expected(c)?,
         edge_deployed: db::settings_with_prefix(c, "edge.deployed.")?,
         reach: db::reach(c)?,
+        core_binding: crate::core_node::load_persisted(c)?,
       }
       .with_edge_cache(db::edge_cache(c)?),
     )
@@ -201,7 +204,8 @@ impl Snapshot {
   }
 
   pub fn net(&self, world: &World) -> Net {
-    let base = Net::derive(&world.servers, &self.agents);
+    let mut base = Net::derive(&world.servers, &self.agents);
+    base.core_server = crate::core_node::server_of_in(self, world);
     let (gate_public, gate_login) =
       crate::gate::render_context(world, &base);
     Net {

@@ -746,16 +746,7 @@ async fn add_server(
     format!("http://{host}")
   });
   let core_key = hex::encode(s.key.verifying_key().to_bytes());
-  let commands = BTreeMap::from([
-    (
-      "script".to_string(),
-      crate::join::script_command(
-        &core_url,
-        &token,
-        &core_key,
-        image.as_deref(),
-      ),
-    ),
+  let mut commands = BTreeMap::from([
     (
       "docker".to_string(),
       format!(
@@ -772,6 +763,17 @@ async fn add_server(
       ),
     ),
   ]);
+  if crate::join::allows_script_install(&core_url) {
+    commands.insert(
+      "script".to_string(),
+      crate::join::script_command(
+        &core_url,
+        &token,
+        &core_key,
+        image.as_deref(),
+      ),
+    );
+  }
   Ok(Json(JoinInfo {
     server: req.name,
     join_token: token,
@@ -783,8 +785,28 @@ async fn add_server(
 
 async fn agent_join(
   State(s): State<Arc<AppState>>,
+  sealed: Option<axum::Extension<crate::cli_tunnel::Sealed>>,
+  axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<
+    std::net::SocketAddr,
+  >,
+  headers: HeaderMap,
   Json(req): Json<JoinRequest>,
 ) -> ApiResult<JoinResponse> {
+  let is_sealed = sealed.is_some();
+  let is_local =
+    crate::source_trust::is_direct_local(peer.ip(), &headers);
+  if !is_sealed && !is_local {
+    return Err(
+      ApiError::new(
+        ErrorCode::Unauthorized,
+        "agent 版本太旧，不支持加密加入，控制面已拒绝明文提交加入凭据",
+      )
+      .with_hint(
+        "先拉取最新的 wharf-agent 镜像，再用最新的加入命令重试",
+      )
+      .into(),
+    );
+  }
   let hash = auth::hash_token(req.join_token.trim());
   let key = req.public_key.clone();
   if hex::decode(&key).map(|b| b.len()).unwrap_or(0) != 32 {
@@ -819,9 +841,12 @@ async fn agent_join(
         params![key, server],
       )
       .map_err(sql_err)?;
+      crate::core_node::clear_if_server(c, &server)?;
       Ok(server)
     })
     .await?;
+  crate::core_node::clear_memory_if_server(&s.hub, &server);
+  s.hub.disconnect(&server);
   tracing::info!("服务器 {server} 完成加入");
   Ok(Json(JoinResponse {
     server,
@@ -864,6 +889,7 @@ async fn remove_server(
       .into(),
     );
   }
+  let removed_name = name.clone();
   s.db
     .call(move |c| {
       c.execute(
@@ -876,9 +902,12 @@ async fn remove_server(
         params![name],
       )
       .map_err(sql_err)?;
+      crate::core_node::clear_if_server(c, &name)?;
       Ok(())
     })
     .await?;
+  crate::core_node::clear_memory_if_server(&s.hub, &removed_name);
+  s.hub.disconnect(&removed_name);
   Ok(Json(json!({ "removed": true })))
 }
 

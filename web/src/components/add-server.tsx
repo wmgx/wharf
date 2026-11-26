@@ -104,9 +104,10 @@ export function AddServer({ open, onClose }: { open: boolean; onClose: () => voi
       setBusy(false);
     }
   };
+  const command = info ? (info.commands.script ?? info.commands.docker ?? info.commands.binary ?? "") : "";
   const copy = async () => {
-    if (!info) return;
-    await navigator.clipboard.writeText(info.commands.script);
+    if (!command) return;
+    await navigator.clipboard.writeText(command);
     setCopied(true);
   };
 
@@ -155,7 +156,7 @@ export function AddServer({ open, onClose }: { open: boolean; onClose: () => voi
         ) : (
           <>
             <div className="relative">
-              <pre className="overflow-x-auto rounded-lg border bg-muted/40 p-3 pr-11 font-mono text-xs leading-relaxed whitespace-pre-wrap break-all">{info.commands.script}</pre>
+              <pre className="overflow-x-auto rounded-lg border bg-muted/40 p-3 pr-11 font-mono text-xs leading-relaxed whitespace-pre-wrap break-all">{command}</pre>
               <Button variant="ghost" size="icon-xs" className="absolute top-2 right-2" aria-label="复制" onClick={copy}>
                 {copied ? <CheckIcon /> : <CopyIcon />}
               </Button>

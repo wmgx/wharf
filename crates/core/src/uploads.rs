@@ -6,7 +6,7 @@
 //! - 当前配置和近 30 天部署记录都没引用的包，由定时任务删除。
 
 use std::{
-  collections::HashMap,
+  collections::{BTreeMap, BTreeSet, HashMap},
   path::{Path as FsPath, PathBuf},
   sync::{Arc, Mutex},
   time::{Duration, Instant, SystemTime},
@@ -39,6 +39,7 @@ const UPLOAD: &str = "upload";
 
 /// 代码包大小上限，和 agent 下载的上限一致。
 pub const MAX_UPLOAD: usize = 512 * 1024 * 1024;
+const MAX_ARCHIVE_ENTRIES: usize = 100_000;
 const TOKEN_TTL: Duration = Duration::from_secs(30 * 60);
 /// 没被引用的包保留多久。
 const KEEP_UNUSED: Duration = Duration::from_secs(30 * 24 * 3600);
@@ -125,6 +126,11 @@ pub fn read_file(
     if name != want {
       continue;
     }
+    if !entry.header().entry_type().is_file() {
+      return Err(ApiError::invalid(format!(
+        "{want} 不是普通文件，已拒绝读取"
+      )));
+    }
     if entry.size() > MAX {
       return Err(ApiError::invalid(format!("{want} 超过 10 MiB")));
     }
@@ -176,6 +182,23 @@ async fn store(
   let part = dir
     .join(format!(".{sha256}.{}.part", crate::backup::random_hex()));
   let result = receive(body, &part, sha256).await;
+  let result = match result {
+    Ok(size) => {
+      let part_check = part.clone();
+      match tokio::task::spawn_blocking(move || {
+        validate_archive(&part_check)
+      })
+      .await
+      {
+        Ok(Ok(())) => Ok(size),
+        Ok(Err(e)) => Err(e),
+        Err(e) => {
+          Err(ApiError::internal(format!("校验代码包失败：{e}")))
+        }
+      }
+    }
+    Err(e) => Err(e),
+  };
   match result {
     Ok(size) => {
       std::fs::rename(&part, &target)
@@ -187,6 +210,89 @@ async fn store(
       Err(e)
     }
   }
+}
+
+/// 校验上传的 `.tar.gz` 代码包：拒绝越界路径、特殊设备节点、逃逸软链接与硬链接。
+fn validate_archive(path: &FsPath) -> Result<(), ApiError> {
+  use wharf_api_types::symlink::{
+    check_relative_entry, validate_symlinks,
+  };
+
+  let f = std::fs::File::open(path).map_err(|e| io_error(path, e))?;
+  let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(f));
+  let entries = tar
+    .entries()
+    .map_err(|e| ApiError::invalid(format!("代码包格式不对：{e}")))?;
+  let mut count = 0usize;
+  let mut links: BTreeMap<PathBuf, PathBuf> = BTreeMap::new();
+  let mut hardlinks: BTreeSet<PathBuf> = BTreeSet::new();
+
+  for entry in entries {
+    count += 1;
+    if count > MAX_ARCHIVE_ENTRIES {
+      return Err(ApiError::invalid(format!(
+        "代码包条目数超过上限（{MAX_ARCHIVE_ENTRIES}）"
+      )));
+    }
+    let entry = entry.map_err(|e| {
+      ApiError::invalid(format!("代码包格式不对：{e}"))
+    })?;
+    let raw = entry.path().map_err(|e| {
+      ApiError::invalid(format!("归档路径读取失败：{e}"))
+    })?;
+    let rel = check_relative_entry(&raw)?;
+    let kind = entry.header().entry_type();
+    if matches!(
+      kind,
+      tar::EntryType::Char
+        | tar::EntryType::Block
+        | tar::EntryType::Fifo
+    ) {
+      return Err(ApiError::invalid(format!(
+        "代码包包含不允许的特殊文件：{}",
+        rel.display()
+      )));
+    }
+    if kind == tar::EntryType::Symlink {
+      if rel.as_os_str().is_empty() {
+        return Err(ApiError::invalid("代码包包含空路径软链接"));
+      }
+      let target = entry
+        .link_name()
+        .map_err(|e| {
+          ApiError::invalid(format!("读取软链接失败：{e}"))
+        })?
+        .ok_or_else(|| ApiError::invalid("软链接缺少目标路径"))?
+        .into_owned();
+      links.insert(rel, target);
+    } else if kind == tar::EntryType::Link {
+      if rel.as_os_str().is_empty() {
+        return Err(ApiError::invalid("代码包包含空路径硬链接"));
+      }
+      let target = entry
+        .link_name()
+        .map_err(|e| {
+          ApiError::invalid(format!("读取硬链接失败：{e}"))
+        })?
+        .ok_or_else(|| ApiError::invalid("硬链接缺少目标路径"))?;
+      let norm = check_relative_entry(&target)?;
+      if norm.as_os_str().is_empty() {
+        return Err(ApiError::invalid("硬链接目标路径不能为空"));
+      }
+      hardlinks.insert(norm);
+    }
+  }
+
+  validate_symlinks(&links)?;
+  for target in &hardlinks {
+    if links.contains_key(target) {
+      return Err(ApiError::invalid(format!(
+        "代码包包含指向软链接的硬链接：{}",
+        target.display()
+      )));
+    }
+  }
+  Ok(())
 }
 
 async fn receive(
@@ -329,4 +435,44 @@ pub async fn cleanup(state: &AppState) -> Result<(), ApiError> {
     }
   }
   Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use flate2::{Compression, GzBuilder};
+
+  #[tokio::test]
+  async fn upload_rejects_tarball_with_escaping_symlink_and_cleans_part()
+   {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = crate::rules::tests::test_state();
+    Arc::get_mut(&mut state).unwrap().data_dir =
+      tmp.path().to_path_buf();
+
+    // 构造包含 sub -> /etc 软链的合法 sha256 tar.gz。
+    let bytes = {
+      let gz = GzBuilder::new()
+        .mtime(0)
+        .write(Vec::new(), Compression::default());
+      let mut builder = tar::Builder::new(gz);
+      let mut h = tar::Header::new_gnu();
+      h.set_entry_type(tar::EntryType::Symlink);
+      h.set_size(0);
+      h.set_mode(0o777);
+      builder.append_link(&mut h, "sub", "/etc").unwrap();
+      builder.into_inner().unwrap().finish().unwrap()
+    };
+    let sha = hex::encode(Sha256::digest(&bytes));
+
+    let err =
+      store(&state, &sha, Body::from(bytes)).await.unwrap_err();
+    assert_eq!(err.code, wharf_api_types::ErrorCode::InvalidInput);
+    assert!(!file(&state, &sha).exists());
+    let leftover: Vec<_> = std::fs::read_dir(dir(&state))
+      .unwrap()
+      .filter_map(Result::ok)
+      .collect();
+    assert!(leftover.is_empty(), "临时 .part 文件应已清理");
+  }
 }

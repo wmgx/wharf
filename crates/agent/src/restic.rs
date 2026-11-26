@@ -21,6 +21,7 @@ use wharf_api_types::{
 };
 
 use crate::{
+  dirfd::{DirFd, cstring, validate_tree_symlinks},
   docker::{Docker, io_err},
   exec::{Ctx, Output},
 };
@@ -144,17 +145,22 @@ pub async fn run(
     ),
     ResticRepo::Local => {
       let dir = Path::new(BACKUP_ROOT).join(&job.service);
-      if !dir.exists() {
-        ctx.say("这台机器上还没有这个服务的备份");
-        return match job.action {
-          ResticAction::Snapshots => to_value(Vec::<Snapshot>::new()),
-          _ => Ok(Value::Null),
-        };
+      match check_existing_dir(Path::new(BACKUP_ROOT), &job.service)?
+      {
+        false => {
+          ctx.say("这台机器上还没有这个服务的备份");
+          return match job.action {
+            ResticAction::Snapshots => {
+              to_value(Vec::<Snapshot>::new())
+            }
+            _ => Ok(Value::Null),
+          };
+        }
+        true => (
+          "/repo".to_string(),
+          vec![format!("{}:/repo", dir.display())],
+        ),
       }
-      (
-        "/repo".to_string(),
-        vec![format!("{}:/repo", dir.display())],
-      )
     }
   };
   if !docker.image_exists(RESTIC_IMAGE, ctx).await {
@@ -165,11 +171,25 @@ pub async fn run(
   match &job.action {
     ResticAction::Backup { host } => {
       // 控制面的目录不在 agent 容器里，上面已经在宿主机上确认过了。
-      if job.core_marker.is_none() && !root.exists() {
-        return Err(ApiError::invalid(format!(
-          "{} 不存在，没有数据可以备份",
-          root.display()
-        )));
+      if job.core_marker.is_none() {
+        match DirFd::open_service_root(
+          Path::new("/srv"),
+          &job.service,
+        ) {
+          Ok(_) => {}
+          Err(e) if e.code == ErrorCode::NotFound => {
+            return Err(ApiError::invalid(format!(
+              "{} 不存在，没有数据可以备份",
+              root.display()
+            )));
+          }
+          Err(_) => {
+            return Err(ApiError::invalid(format!(
+              "{} 是符号链接或非目录，拒绝备份",
+              root.display()
+            )));
+          }
+        }
       }
       mounts.push(format!(
         "{}:{}:ro",
@@ -416,6 +436,48 @@ fn check_snapshot(id: &str) -> Result<(), ApiError> {
   }
 }
 
+fn check_existing_dir(
+  base: &Path,
+  name: &str,
+) -> Result<bool, ApiError> {
+  validate_name("service", name)?;
+  let base_fd = match DirFd::open_dir(base) {
+    Ok(fd) => fd,
+    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+      return Ok(false);
+    }
+    Err(e)
+      if matches!(
+        e.raw_os_error(),
+        Some(libc::ELOOP | libc::ENOTDIR)
+      ) =>
+    {
+      return Err(ApiError::invalid(format!(
+        "{} 是符号链接或非目录，已拒绝",
+        base.display()
+      )));
+    }
+    Err(e) => return Err(io_err(base)(e)),
+  };
+  let cname = cstring(name)?;
+  match base_fd.open_subdir(&cname) {
+    Ok(_) => Ok(true),
+    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+    Err(e)
+      if matches!(
+        e.raw_os_error(),
+        Some(libc::ELOOP | libc::ENOTDIR)
+      ) =>
+    {
+      Err(ApiError::invalid(format!(
+        "{} 是符号链接或非目录，已拒绝",
+        base.join(name).display()
+      )))
+    }
+    Err(e) => Err(io_err(&base.join(name))(e)),
+  }
+}
+
 async fn restore(
   docker: &Docker,
   job: &ResticJob,
@@ -426,10 +488,28 @@ async fn restore(
   ctx: &Ctx,
 ) -> Result<Value, ApiError> {
   check_snapshot(snapshot)?;
+  validate_name("service", &job.service)?;
   let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
-  let work =
-    Path::new(RESTORE_DIR).join(format!("{}-{stamp}", job.service));
-  std::fs::create_dir_all(&work).map_err(io_err(&work))?;
+  let suffix = crate::build::random_suffix();
+  let work_name = format!("{}-{stamp}-{suffix}", job.service);
+  let kept_name = format!("{}-before-{stamp}-{suffix}", job.service);
+
+  let srv_base = Path::new("/srv");
+  let srv_fd = DirFd::open_dir(srv_base).map_err(io_err(srv_base))?;
+  let restore_fd = srv_fd
+    .ensure_subdir(c".wharf-restore", 0o700)
+    .map_err(|e| match e.raw_os_error() {
+      Some(libc::ELOOP | libc::ENOTDIR) => ApiError::invalid(
+        format!("{RESTORE_DIR} 是符号链接或非目录，已拒绝恢复"),
+      ),
+      _ => io_err(Path::new(RESTORE_DIR))(e),
+    })?;
+  let work_cstr = cstring(&work_name)?;
+  restore_fd
+    .mkdir(&work_cstr, 0o700)
+    .map_err(io_err(&Path::new(RESTORE_DIR).join(&work_name)))?;
+
+  let work = Path::new(RESTORE_DIR).join(&work_name);
   mounts.push(format!("{}:/restore", work.display()));
   let j = Job {
     docker,
@@ -456,37 +536,121 @@ async fn restore(
     )
     .await
     .and_then(|o| o.check("restic restore"));
-  let fresh = work.join(root.strip_prefix("/").unwrap_or(root));
   if let Err(e) = restored {
     let _ = std::fs::remove_dir_all(&work);
     return Err(e);
   }
-  if !fresh.exists() {
-    let _ = std::fs::remove_dir_all(&work);
-    return Err(ApiError::new(
-      ErrorCode::AgentFailed,
-      format!("快照 {snapshot} 里没有 {}", root.display()),
-    ));
-  }
-  // 原目录改名保留，再把恢复出来的目录放到原位。
-  let kept = Path::new(RESTORE_DIR)
-    .join(format!("{}-before-{stamp}", job.service));
-  if root.exists() {
-    std::fs::rename(root, &kept).map_err(io_err(root))?;
-  }
-  if let Err(e) = std::fs::rename(&fresh, root) {
-    if kept.exists() {
-      let _ = std::fs::rename(&kept, root);
-    }
-    return Err(io_err(root)(e));
-  }
+
+  let installed = install_restored_tree(
+    srv_base,
+    &job.service,
+    snapshot,
+    &work_name,
+    &kept_name,
+  );
   let _ = std::fs::remove_dir_all(&work);
-  if kept.exists() {
+  let had_old = installed?;
+  let kept = Path::new(RESTORE_DIR).join(&kept_name);
+  if had_old {
     ctx.say(format!("原来的数据保留在 {}", kept.display()));
     to_value(kept.display().to_string())
   } else {
     Ok(Value::Null)
   }
+}
+
+/// 全程使用 `openat(O_DIRECTORY | O_NOFOLLOW)` 与 `renameat` 校验并原子落位恢复树。
+fn install_restored_tree(
+  srv_base: &Path,
+  service: &str,
+  snapshot: &str,
+  work_name: &str,
+  kept_name: &str,
+) -> Result<bool, ApiError> {
+  validate_name("service", service)?;
+  let root_display = srv_base.join(service);
+  let srv_fd = DirFd::open_dir(srv_base).map_err(io_err(srv_base))?;
+  let restore_fd =
+    srv_fd.open_subdir(c".wharf-restore").map_err(|e| {
+      match e.raw_os_error() {
+        Some(libc::ELOOP | libc::ENOTDIR) => ApiError::invalid(
+          ".wharf-restore 是符号链接或非目录，已拒绝恢复",
+        ),
+        _ => io_err(&srv_base.join(".wharf-restore"))(e),
+      }
+    })?;
+  let work_cstr = cstring(work_name)?;
+  let work_fd = restore_fd.open_subdir(&work_cstr).map_err(
+    io_err(&srv_base.join(".wharf-restore").join(work_name)),
+  )?;
+  let restored_srv_fd = work_fd.open_subdir(c"srv").map_err(|e| {
+    match e.raw_os_error() {
+      Some(libc::ENOENT) => ApiError::new(
+        ErrorCode::AgentFailed,
+        format!("快照 {snapshot} 里没有 {}", root_display.display()),
+      ),
+      Some(libc::ELOOP | libc::ENOTDIR) => {
+        ApiError::invalid(format!(
+          "快照 {snapshot} 中的 /srv 是符号链接或非目录，已拒绝恢复"
+        ))
+        .with_hint("检查备份服务器是否异常，或换一份更早的快照")
+      }
+      _ => io_err(&root_display)(e),
+    }
+  })?;
+  let svc_cstr = cstring(service)?;
+  let fresh_fd =
+    restored_srv_fd.open_subdir(&svc_cstr).map_err(|e| {
+      match e.raw_os_error() {
+        Some(libc::ENOENT) => ApiError::new(
+          ErrorCode::AgentFailed,
+          format!(
+            "快照 {snapshot} 里没有 {}",
+            root_display.display()
+          ),
+        ),
+        Some(libc::ELOOP | libc::ENOTDIR) => {
+          ApiError::invalid(format!(
+            "快照 {snapshot} 中的 {} 是符号链接或非目录，已拒绝恢复",
+            root_display.display()
+          ))
+          .with_hint("检查备份服务器是否异常，或换一份更早的快照")
+        }
+        _ => io_err(&root_display)(e),
+      }
+    })?;
+
+  // 拒绝深度 1（默认卷挂载点）的任何软链，以及任意深度指向服务目录之外的软链。
+  validate_tree_symlinks(&fresh_fd, true).map_err(|e| {
+    ApiError::invalid(format!(
+      "快照 {snapshot} 包含不安全符号链接：{}",
+      e.message
+    ))
+    .with_hint("检查备份服务器是否异常，或换一份更早的快照")
+  })?;
+  drop(fresh_fd);
+
+  let kept_cstr = cstring(kept_name)?;
+  let had_old = match srv_fd.lstat(&svc_cstr) {
+    Ok(_) => {
+      srv_fd
+        .rename_to(&svc_cstr, &restore_fd, &kept_cstr)
+        .map_err(io_err(&root_display))?;
+      true
+    }
+    Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+    Err(e) => return Err(io_err(&root_display)(e)),
+  };
+
+  if let Err(e) =
+    restored_srv_fd.rename_to(&svc_cstr, &srv_fd, &svc_cstr)
+  {
+    if had_old {
+      let _ = restore_fd.rename_to(&kept_cstr, &srv_fd, &svc_cstr);
+    }
+    return Err(io_err(&root_display)(e));
+  }
+  Ok(had_old)
 }
 
 /// `restic backup --json` 最后一行是汇总。
@@ -548,5 +712,76 @@ mod tests {
     assert!(check_snapshot("4f2a9c1e").is_ok());
     assert!(check_snapshot("--target=/").is_err());
     assert!(check_snapshot("abc").is_err());
+  }
+
+  #[test]
+  fn restore_blocks_symlink_root_and_escaping_child_links() {
+    use std::{fs, os::unix::fs::symlink};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let srv = tmp.path().join("srv");
+    let outside = tmp.path().join("outside");
+    fs::create_dir_all(srv.join("app/data")).unwrap();
+    fs::write(srv.join("app/data/orig.txt"), "orig").unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(outside.join("secret"), "secret").unwrap();
+
+    // 1. <svc> 本身是指向 outside 的软链 -> 拒绝，原目录完好。
+    let work1 = srv.join(".wharf-restore/w1/srv");
+    fs::create_dir_all(&work1).unwrap();
+    symlink(&outside, work1.join("app")).unwrap();
+    assert!(
+      install_restored_tree(&srv, "app", "snap1", "w1", "k1")
+        .is_err()
+    );
+    assert_eq!(
+      fs::read_to_string(srv.join("app/data/orig.txt")).unwrap(),
+      "orig"
+    );
+
+    // 2. <svc> 是真实目录，但一级卷 <svc>/data 是指向 outside 的软链 -> 拒绝。
+    let work2 = srv.join(".wharf-restore/w2/srv/app");
+    fs::create_dir_all(&work2).unwrap();
+    symlink(&outside, work2.join("data")).unwrap();
+    assert!(
+      install_restored_tree(&srv, "app", "snap2", "w2", "k2")
+        .is_err()
+    );
+    assert_eq!(
+      fs::read_to_string(srv.join("app/data/orig.txt")).unwrap(),
+      "orig"
+    );
+
+    // 3. 深层相对软链逃出服务目录 -> 拒绝。
+    let work3 = srv.join(".wharf-restore/w3/srv/app/data/deep");
+    fs::create_dir_all(&work3).unwrap();
+    symlink("../../../../outside/secret", work3.join("x")).unwrap();
+    assert!(
+      install_restored_tree(&srv, "app", "snap3", "w3", "k3")
+        .is_err()
+    );
+    assert_eq!(
+      fs::read_to_string(srv.join("app/data/orig.txt")).unwrap(),
+      "orig"
+    );
+
+    // 4. 目录内合法相对软链 <svc>/data/cur -> v2 -> 恢复成功，旧目录移至 kept。
+    let work4 = srv.join(".wharf-restore/w4/srv/app/data");
+    fs::create_dir_all(&work4).unwrap();
+    fs::write(work4.join("v2"), "new-data").unwrap();
+    symlink("v2", work4.join("cur")).unwrap();
+    let had_old =
+      install_restored_tree(&srv, "app", "snap4", "w4", "k4")
+        .unwrap();
+    assert!(had_old);
+    assert_eq!(
+      fs::read_to_string(srv.join("app/data/cur")).unwrap(),
+      "new-data"
+    );
+    assert_eq!(
+      fs::read_to_string(srv.join(".wharf-restore/k4/data/orig.txt"))
+        .unwrap(),
+      "orig"
+    );
   }
 }

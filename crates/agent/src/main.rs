@@ -19,6 +19,7 @@ mod build;
 mod conn;
 mod container_probe;
 mod diagnose;
+mod dirfd;
 mod docker;
 mod docker_observation;
 mod edge;
@@ -90,6 +91,7 @@ enum Command {
   /// 用一次性凭据加入控制面（`wharf server add` 会给出完整命令）。
   Join {
     core_url: String,
+    #[arg(env = "WHARF_JOIN_TOKEN", hide_env_values = true)]
     join_token: String,
     /// 控制面公钥（加入命令里带着）。填了就核对控制面返回的公钥，防止加入时被中间人冒充。
     #[arg(long, env = "WHARF_CORE_KEY")]
@@ -223,7 +225,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
   task::cleanup(&cli.data_dir)?;
 
   let key = identity::load_or_create_key(&cli.data_dir)?;
-  egress::restore(&cli.data_dir);
+  egress::restore(&cli.data_dir, &joined.core_url);
   tokio::spawn(probe::serve(joined.server.clone(), cli.probe_port));
   let docker = docker::Docker {
     bin: cli.docker,

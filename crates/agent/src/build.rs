@@ -8,7 +8,7 @@
 //! - 上传的代码包带一次性口令从控制面下载，校验 sha256 后再解压。
 
 use std::{
-  path::{Component, Path, PathBuf},
+  path::{Path, PathBuf},
   time::Duration,
 };
 
@@ -21,14 +21,17 @@ use wharf_api_types::{
     BuildFetch, BuildJob, BuildResult, GIT_IMAGE, PullPolicy,
     ResolveCommit,
   },
-  build::{self, SourceTree},
-  validate_name,
+  build, validate_name,
 };
 
 use crate::{
   docker::{Docker, io_err},
   exec::{Cmd, Ctx},
 };
+
+mod tree;
+use tree::{FsTree, validate_src_tree};
+pub(crate) use tree::{checked_file_in, checked_subdir, relative};
 
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const CLONE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
@@ -88,16 +91,7 @@ async fn build_in(
   )
   .await?;
 
-  let context = match &job.path {
-    Some(p) => src.join(relative(p)?),
-    None => src.clone(),
-  };
-  if !context.is_dir() {
-    return Err(ApiError::invalid(format!(
-      "代码里没有目录 {}",
-      job.path.as_deref().unwrap_or_default()
-    )));
-  }
+  let context = checked_subdir(&src, job.path.as_deref())?;
   let (dockerfile, images) = dockerfile(job, &context, work, ctx)?;
 
   let mut warnings = Vec::new();
@@ -180,6 +174,14 @@ pub async fn fetch_code(
     BuildFetch::Upload { sha256, token } => {
       let archive = work.join("source.tar.gz");
       download(core_url, sha256, &token.0, &archive, ctx).await?;
+      let archive_check = archive.clone();
+      tokio::task::spawn_blocking(move || {
+        wharf_pack::validate_archive(&archive_check)
+      })
+      .await
+      .map_err(|e| {
+        ApiError::internal(format!("校验代码包失败：{e}"))
+      })??;
       ctx.say("解压代码");
       // 包里的修改时间都是 0（为了内容相同时 sha256 相同），解压时用当前时间：
       // BuildKit 按大小和修改时间判断构建上下文里的文件变没变，
@@ -224,6 +226,12 @@ pub async fn fetch_code(
       .await?
     }),
   };
+  let src_check = src.clone();
+  tokio::task::spawn_blocking(move || validate_src_tree(&src_check))
+    .await
+    .map_err(|e| {
+      ApiError::internal(format!("校验源码目录失败：{e}"))
+    })??;
   Ok(commit)
 }
 
@@ -264,15 +272,13 @@ fn dockerfile(
   }
   let own = match &job.dockerfile {
     Some(p) => {
-      let path = context.join(relative(p)?);
-      if !path.is_file() {
-        return Err(ApiError::invalid(format!("代码里没有 {p}")));
-      }
-      Some(path)
+      Some(checked_file_in(context, p)?.ok_or_else(|| {
+        ApiError::invalid(format!("代码里没有 {p}"))
+      })?)
     }
     // 指定了模板时不用代码里的 Dockerfile。
     None if job.template.is_some() => None,
-    None => Some(context.join("Dockerfile")).filter(|p| p.is_file()),
+    None => checked_file_in(context, "Dockerfile")?,
   };
   if let Some(path) = own {
     ctx.say(format!(
@@ -363,53 +369,6 @@ fn no_proxy(job: &BuildJob) -> String {
     }
   }
   hosts.join(",")
-}
-
-/// 只接受代码里的相对路径，不能跳出去。
-pub(crate) fn relative(p: &str) -> Result<PathBuf, ApiError> {
-  let path = PathBuf::from(p.trim_start_matches("./"));
-  let ok = !p.is_empty()
-    && path
-      .components()
-      .all(|c| matches!(c, Component::Normal(_) | Component::CurDir));
-  if ok {
-    Ok(path)
-  } else {
-    Err(ApiError::invalid(format!(
-      "路径 {p} 不合法：要写代码里的相对路径"
-    )))
-  }
-}
-
-struct FsTree<'a>(&'a Path);
-
-impl SourceTree for FsTree<'_> {
-  fn read(&self, path: &str) -> Option<String> {
-    let path = self.0.join(path);
-    // 只读小文件：判断语言用不到大文件。
-    let meta = std::fs::metadata(&path).ok()?;
-    if !meta.is_file() || meta.len() > 1024 * 1024 {
-      return None;
-    }
-    std::fs::read_to_string(path).ok()
-  }
-
-  fn list(&self, dir: &str) -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(self.0.join(dir)) else {
-      return vec![];
-    };
-    entries
-      .filter_map(Result::ok)
-      .map(|e| {
-        let name = e.file_name().to_string_lossy().to_string();
-        if e.file_type().is_ok_and(|t| t.is_dir()) {
-          format!("{name}/")
-        } else {
-          name
-        }
-      })
-      .collect()
-  }
 }
 
 async fn download(
@@ -806,26 +765,5 @@ mod tests {
       e.message,
       "构建失败：#8 1.5 ERROR: HTTP 403\n#8 ERROR: exit 1\nERROR: failed to solve"
     );
-  }
-
-  #[test]
-  fn paths_stay_inside_the_code() {
-    assert!(relative("app").is_ok());
-    assert!(relative("./svc/api").is_ok());
-    for bad in ["", "/etc", "../x", "a/../../b"] {
-      assert!(relative(bad).is_err(), "{bad}");
-    }
-  }
-
-  #[test]
-  fn tree_lists_dirs_with_slash() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::create_dir(dir.path().join("cmd")).unwrap();
-    std::fs::write(dir.path().join("go.mod"), "module x").unwrap();
-    let tree = FsTree(dir.path());
-    let mut names = tree.list("");
-    names.sort();
-    assert_eq!(names, vec!["cmd/", "go.mod"]);
-    assert_eq!(tree.read("go.mod").as_deref(), Some("module x"));
   }
 }

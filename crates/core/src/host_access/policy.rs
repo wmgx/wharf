@@ -113,7 +113,7 @@ fn require_core_admin(
   }
   match core_server {
     None => Err(ApiError::new(ErrorCode::Forbidden, format!("无法确认控制面所在服务器，为防止提权到控制面，触达宿主机的操作（{reason}）需要 admin 权限（当前 token 有：{}）", have(perms)))
-      .with_hint("确认控制面与本机 agent 已上报相同网卡地址，或换一个同时有 host 和 admin 权限的 token")),
+      .with_hint("确认控制面所在机器的 agent 已升级并完成同机校验，或换一个同时有 host 和 admin 权限的 token")),
     Some(core) if core == server => Err(ApiError::new(ErrorCode::Forbidden, format!("服务器 {server} 是控制面所在机器，触达宿主机（{reason}）还需要 admin 权限（当前 token 有：{}）", have(perms)))
       .with_hint("请用户在页面上操作，或换一个同时有 host 和 admin 权限的 token")),
     Some(_) => Ok(()),

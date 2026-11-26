@@ -780,3 +780,21 @@ pub struct HttpFetchResult {
   pub body: String,
   pub error: Option<String>,
 }
+
+/// 控制面同机身份校验请求。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoreHostProbe {
+  /// 32~64 位小写十六进制文件名（不含路径分隔符）。
+  pub challenge_id: String,
+  /// 控制面的数据目录路径（容器内与宿主机路径，默认 /var/lib/wharf-core）。
+  pub data_dir: String,
+  /// 控制面所在容器的 64 位十六进制 ID；非容器运行时为 None。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub container_id: Option<String>,
+}
+
+/// 控制面同机身份校验应答。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoreHostProbeResult {
+  pub token: String,
+}

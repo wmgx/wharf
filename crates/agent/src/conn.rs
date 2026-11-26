@@ -114,6 +114,7 @@ async fn session(
     access_logs: true,
     net_probe: true,
     container_probe: true,
+    core_probe: true,
   };
   tokio::time::timeout(
     SOCKET_WRITE_TIMEOUT,
