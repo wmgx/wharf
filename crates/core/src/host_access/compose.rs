@@ -305,10 +305,9 @@ pub fn compose_public_binds(content: &str) -> Vec<PublishedPort> {
         .and_then(|ip| ip.parse::<IpAddr>().ok())
         .is_none_or(|ip| match ip.to_canonical() {
           IpAddr::V4(ip) => {
-            !ip.is_loopback()
-              && !ip.is_private()
-              && !(ip.octets()[0] == 100
-                && ip.octets()[1] & 0xc0 == 64)
+            !(ip.is_loopback()
+              || ip.is_private()
+              || ip.octets()[0] == 100 && ip.octets()[1] & 0xc0 == 64)
           }
           IpAddr::V6(ip) => {
             !ip.is_loopback() && !ip.is_unique_local()
