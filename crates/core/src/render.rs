@@ -118,7 +118,7 @@ impl Net {
       HashMap::new();
     let mut reported_public_counts: HashMap<String, usize> =
       HashMap::new();
-    for (name, _) in servers {
+    for name in servers.keys() {
       let Some(r) = agents
         .iter()
         .find(|a| &a.server == name)
