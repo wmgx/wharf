@@ -482,6 +482,11 @@ impl Hub {
     let (done, rx) = oneshot::channel();
     lock(&conn.pending).insert(id, Pending { done, progress });
     let _in_flight = InFlight { conn: &conn, id };
+    let activating_key = matches!(
+      &op,
+      AgentOp::RotateAgentKey(job)
+        if matches!(job.phase, wharf_api_types::agent::KeyRotatePhase::Activate)
+    );
     let sent = tokio::time::timeout(
       Duration::from_secs(5),
       conn.tx.send(CoreMsg::Request {
@@ -515,6 +520,13 @@ impl Hub {
       )),
     };
     let value = result.map_err(|e| {
+      // 请求已发出，断线不能证明 agent 没有切换密钥。
+      if activating_key && e.code == ErrorCode::AgentOffline {
+        return ApiError::new(
+          ErrorCode::Timeout,
+          "未收到 agent 密钥切换确认",
+        );
+      }
       crate::external_status::agent_failure(e, server)
     })?;
     serde_json::from_value(value).map_err(|e| {
@@ -725,7 +737,7 @@ async fn handle_socket(
     .await;
     anyhow::bail!("服务器 {server} 认证失败");
   }
-  let keys = state.key.read();
+  let keys = state.core_keys();
   let (welcome, mut wire) = match &agent_kx {
     Some(akx) => {
       let share = KeyShare::generate();
@@ -770,30 +782,39 @@ async fn handle_socket(
   send_msg(&mut socket, &welcome).await?;
 
   // 第一个加密帧证明 agent 已验过 Welcome，之后才能提升注册公钥。
-  let authenticated_core = if key_rotation {
-    let public = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
-      while let Some(msg) = socket.recv().await.transpose()? {
-        if let Some(text) = wire.decode(msg)? {
-          if let AgentMsg::KeyReady { core_public_key } =
-            serde_json::from_slice(&text)?
-          {
-            return anyhow::Ok(core_public_key);
+  let (authenticated_core, trusted_primary, trusted_alt) =
+    if key_rotation {
+      let (public, primary, alt) =
+        tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
+          while let Some(msg) = socket.recv().await.transpose()? {
+            if let Some(text) = wire.decode(msg)? {
+              if let AgentMsg::KeyReady {
+                core_public_key,
+                trusted_primary,
+                trusted_alt,
+              } = serde_json::from_slice(&text)?
+              {
+                return anyhow::Ok((
+                  core_public_key,
+                  trusted_primary,
+                  trusted_alt,
+                ));
+              }
+              break;
+            }
           }
-          break;
-        }
-      }
-      anyhow::bail!("agent 未确认加密握手");
-    })
-    .await??;
-    anyhow::ensure!(
-      public == keys.public_key()
-        || keys.previous_public_key().as_deref() == Some(&public),
-      "agent 确认了未知的控制面公钥"
-    );
-    Some(public)
-  } else {
-    None
-  };
+          anyhow::bail!("agent 未确认加密握手");
+        })
+        .await??;
+      anyhow::ensure!(
+        public == keys.public_key()
+          || keys.previous_public_key().as_deref() == Some(&public),
+        "agent 确认了未知的控制面公钥"
+      );
+      (Some(public), primary, alt)
+    } else {
+      (None, None, None)
+    };
 
   let (tx, mut rx) = mpsc::channel(4096);
   let conn = Conn {
@@ -845,15 +866,13 @@ async fn handle_socket(
       state.hub.unregister(&server, &conn);
       anyhow::bail!("发送握手确认失败");
     }
-    if conn.authenticated_core.as_deref()
-      != Some(keys.public_key().as_str())
-    {
-      tokio::spawn(crate::key_rotation::sync_agent(
-        state.clone(),
-        server.clone(),
-        conn.conn_id,
-      ));
-    }
+    tokio::spawn(crate::key_rotation::sync_agent(
+      state.clone(),
+      server.clone(),
+      conn.conn_id,
+      trusted_primary,
+      trusted_alt,
+    ));
   }
   if conn.core_probe {
     crate::core_node::spawn_probe_on_connect(

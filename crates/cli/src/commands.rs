@@ -122,8 +122,8 @@ async fn rotate_core_key(
   let env_key = std::env::var_os("WHARF_CORE_KEY").is_some();
   let same_server =
     config.url.as_deref().is_some_and(|url| c.is_for(url));
-  if !commit {
-    if !same_server && !env_key {
+  if !commit && !env_key {
+    if !same_server {
       return Err(
         ApiError::invalid("当前 CLI 配置不属于目标控制面")
           .with_hint("先执行 wharf login 保存目标控制面的配置")
@@ -158,6 +158,12 @@ async fn rotate_core_key(
       })?;
       eprintln!("已更新本机控制面公钥");
     }
+  }
+  if !view.pending_agents.is_empty() {
+    eprintln!(
+      "警告：以下 agent 尚未用新公钥上线：{}",
+      view.pending_agents.join("、"),
+    );
   }
   out(j, &view, pretty);
   Ok(())

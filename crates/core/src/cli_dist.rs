@@ -75,7 +75,7 @@ pub async fn script(
   script_response(
     local,
     crate::source_trust::request_proto(&req),
-    &hex::encode(s.key.verifying_key().to_bytes()),
+    &s.core_keys().public_key(),
     &sha256_map(),
   )
 }

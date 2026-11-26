@@ -5,7 +5,10 @@ use std::{
   io::Write,
   os::unix::fs::OpenOptionsExt,
   path::Path,
-  sync::{Arc, RwLock},
+  sync::{
+    Arc, RwLock,
+    atomic::{AtomicBool, Ordering},
+  },
   time::Duration,
 };
 
@@ -53,6 +56,11 @@ impl CoreKeys {
     public_key(&self.current)
   }
 
+  #[cfg(test)]
+  pub fn verifying_key(&self) -> VerifyingKey {
+    self.current.verifying_key()
+  }
+
   pub fn previous_public_key(&self) -> Option<String> {
     self.previous.as_ref().map(|(key, _)| public_key(key))
   }
@@ -75,12 +83,14 @@ impl CoreKeys {
         .previous
         .as_ref()
         .map(|(_, at)| to_time(*at)),
+      pending_agents: Vec::new(),
     }
   }
 }
 
 pub struct CoreKeyRing {
   keys: RwLock<CoreKeys>,
+  expiring: AtomicBool,
   pub operation: tokio::sync::Mutex<()>,
 }
 
@@ -91,6 +101,7 @@ impl From<SigningKey> for CoreKeyRing {
         current,
         previous: None,
       }),
+      expiring: AtomicBool::new(false),
       operation: Default::default(),
     }
   }
@@ -114,6 +125,7 @@ impl CoreKeyRing {
       None => None,
     };
     if previous.is_none() {
+      // 启动时没有在线 agent，重连后按当前公钥集合同步。
       remove_file(&dir.join(PREVIOUS))?;
       if stored.is_some() {
         db.call(|c| db::set_setting(c, EXPIRES, None)).await?;
@@ -122,33 +134,13 @@ impl CoreKeyRing {
     remove_file(&dir.join(NEXT))?;
     Ok(Self {
       keys: RwLock::new(CoreKeys { current, previous }),
+      expiring: AtomicBool::new(false),
       operation: Default::default(),
     })
   }
 
   fn raw(&self) -> CoreKeys {
     self.keys.read().unwrap_or_else(|e| e.into_inner()).clone()
-  }
-
-  pub fn read(&self) -> CoreKeys {
-    let mut keys = self.raw();
-    if keys
-      .previous
-      .as_ref()
-      .is_some_and(|(_, expires)| *expires <= now_ms())
-    {
-      keys.previous = None;
-    }
-    keys
-  }
-
-  pub fn verifying_key(&self) -> VerifyingKey {
-    self
-      .keys
-      .read()
-      .unwrap_or_else(|e| e.into_inner())
-      .current
-      .verifying_key()
   }
 
   fn replace(
@@ -158,6 +150,30 @@ impl CoreKeyRing {
   ) {
     *self.keys.write().unwrap_or_else(|e| e.into_inner()) =
       CoreKeys { current, previous };
+  }
+}
+
+impl AppState {
+  pub fn core_keys(self: &Arc<Self>) -> CoreKeys {
+    let mut keys = self.key.raw();
+    if keys
+      .previous
+      .as_ref()
+      .is_some_and(|(_, at)| *at <= now_ms())
+    {
+      keys.previous = None;
+      if !self.key.expiring.swap(true, Ordering::Relaxed) {
+        let s = self.clone();
+        tokio::spawn(async move {
+          let _lock = s.key.operation.lock().await;
+          if let Err(error) = expire(&s).await {
+            tracing::warn!("清理过期控制面公钥失败：{error}");
+          }
+          s.key.expiring.store(false, Ordering::Relaxed);
+        });
+      }
+    }
+    keys
   }
 }
 
@@ -392,6 +408,20 @@ async fn rotate_agent_inner(
     expected_public_key: Some(public.clone()),
   });
   let ack: Result<(), _> = agent_op(s, server, conn, activate).await;
+  if let Err(error) = &ack
+    && error.code != ErrorCode::Timeout
+  {
+    let name = server.to_string();
+    let next = public.clone();
+    s.db.call(move |c| {
+      c.execute(
+        "UPDATE agents SET next_public_key = NULL, next_key_expires_at = NULL WHERE server = ?1 AND next_public_key = ?2",
+        params![name, next],
+      ).map_err(sql_err)?;
+      Ok(())
+    }).await?;
+    return Err(error.clone());
+  }
   // 回复可能在断线时丢失。以新连接的公钥为准。
   let confirmed = tokio::time::timeout(CONNECT_TIMEOUT, async {
     loop {
@@ -435,7 +465,7 @@ pub async fn show(
   auth: Auth,
 ) -> ApiResult<CoreKeyView> {
   auth.require(Perm::Read)?;
-  Ok(Json(s.key.read().view()))
+  Ok(Json(s.core_keys().view()))
 }
 
 pub async fn rotate(
@@ -462,8 +492,9 @@ pub async fn rotate(
   let source = crate::login::source(peer.ip(), &headers);
   let view = tokio::spawn(async move {
     let lock = s.key.operation.lock().await;
-    rotate_core(&s, hours, req.force).await?;
-    let view = s.key.read().view();
+    let pending_agents = rotate_core(&s, hours, req.force).await?;
+    let mut view = s.core_keys().view();
+    view.pending_agents = pending_agents;
     drop(lock);
     crate::security_receipt::send(
       &s,
@@ -564,15 +595,16 @@ async fn rotate_core(
   s: &AppState,
   hours: u16,
   force: bool,
-) -> Result<(), ApiError> {
-  if s.key.read().previous.is_some() {
+) -> Result<Vec<String>, ApiError> {
+  expire(s).await?;
+  if s.key.raw().previous.is_some() {
     return Err(
       conflict("当前已有控制面公钥过渡窗口")
         .suggest("wharf core key"),
     );
   }
   let agents = preflight(s, force).await?;
-  let old = s.key.read().current;
+  let old = s.key.raw().current;
   let old_public = public_key(&old);
   let mut seed = [0; 32];
   getrandom::fill(&mut seed)
@@ -621,25 +653,22 @@ async fn rotate_core(
   let _ =
     push_trust(s, &agents, &next_public, Some(&old_public), true)
       .await;
-  let pending = tokio::time::timeout(CONNECT_TIMEOUT, async {
-    loop {
-      if agents.iter().all(|(server, conn)| {
-        s.hub.uses_core_key(server, Some(*conn), &next_public)
-      }) {
-        break;
-      }
+  let waiting = |server: &str, conn| {
+    !s.hub.uses_core_key(server, Some(conn), &next_public)
+  };
+  let _ = tokio::time::timeout(CONNECT_TIMEOUT, async {
+    while agents.iter().any(|(server, conn)| waiting(server, *conn)) {
       tokio::time::sleep(Duration::from_millis(100)).await;
     }
   })
   .await;
-  if pending.is_err() {
-    return Err(
-      conflict("部分 agent 尚未用新公钥上线，旧公钥仍在过渡期内有效")
-        .suggest("wharf core key")
-        .suggest("wharf core rotate-key --rollback"),
-    );
-  }
-  Ok(())
+  Ok(
+    agents
+      .into_iter()
+      .filter(|(server, conn)| waiting(server, *conn))
+      .map(|(server, _)| server)
+      .collect(),
+  )
 }
 
 async fn finish(
@@ -647,8 +676,10 @@ async fn finish(
   rollback: bool,
   expired: bool,
 ) -> Result<CoreKeyView, ApiError> {
-  let keys = if expired { s.key.raw() } else { s.key.read() };
-  let Some((old, _)) = keys.previous else {
+  let keys = s.key.raw();
+  let Some((old, _)) =
+    keys.previous.filter(|(_, at)| expired || *at > now_ms())
+  else {
     return Err(
       conflict("当前没有正在进行的控制面公钥过渡窗口")
         .suggest("wharf core key"),
@@ -676,7 +707,7 @@ async fn finish(
   )
   .await;
   cleanup?;
-  Ok(s.key.read().view())
+  Ok(s.key.raw().view())
 }
 
 async fn finish_request(
@@ -687,6 +718,7 @@ async fn finish_request(
   auth.require(Perm::Admin)?;
   let view = tokio::spawn(async move {
     let _lock = s.key.operation.lock().await;
+    expire(&s).await?;
     finish(&s, rollback, false).await
   })
   .await
@@ -715,17 +747,115 @@ pub async fn cleanup(s: &AppState) -> Result<(), ApiError> {
     Ok(())
   }).await?;
   let _lock = s.key.operation.lock().await;
+  expire(s).await
+}
+
+async fn expire(s: &AppState) -> Result<(), ApiError> {
   if s.key.raw().previous.is_some_and(|(_, at)| at <= now_ms()) {
     finish(s, false, true).await?;
   }
   Ok(())
 }
 
-pub async fn sync_agent(s: Arc<AppState>, server: String, conn: u64) {
+pub async fn sync_agent(
+  s: Arc<AppState>,
+  server: String,
+  conn: u64,
+  trusted_primary: Option<String>,
+  trusted_alt: Option<String>,
+) {
   let _lock = s.key.operation.lock().await;
-  let keys = s.key.read();
+  let keys = s.core_keys();
   let current = keys.public_key();
   let alt = keys.previous_public_key();
-  let _ =
-    trust(&s, &server, conn, &current, alt.as_deref(), false).await;
+  if trusted_primary.as_deref() != Some(&current)
+    || trusted_alt != alt
+  {
+    let _ =
+      trust(&s, &server, conn, &current, alt.as_deref(), false).await;
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[tokio::test]
+  async fn reconnect_repairs_last_trusted_keys_after_window_closes() {
+    let old = SigningKey::from_bytes(&[1; 32]);
+    let new = SigningKey::from_bytes(&[2; 32]);
+    let stale_primary = public_key(&new);
+    let stale_alt = Some(public_key(&old));
+
+    for end in ["commit", "expire", "rollback", "restart"] {
+      let dir = tempfile::tempdir().unwrap();
+      let mut s = crate::rules::tests::test_state();
+      Arc::get_mut(&mut s).unwrap().data_dir = dir.path().into();
+      let expires = if matches!(end, "expire" | "restart") {
+        now_ms() - 1
+      } else {
+        now_ms() + 60_000
+      };
+      write_key(&dir.path().join(PREVIOUS), &old).unwrap();
+      s.db
+        .call(move |c| {
+          db::set_setting(c, EXPIRES, Some(&expires.to_string()))
+        })
+        .await
+        .unwrap();
+      s.key.replace(new.clone(), Some((old.clone(), expires)));
+
+      let (sent, mut pushed) = tokio::sync::mpsc::unbounded_channel();
+      if end == "expire" {
+        let sent = sent.clone();
+        s.hub.mock_rotation_agent("s2", move |op| {
+          sent.send(op).unwrap();
+          Ok(serde_json::Value::Null)
+        });
+        assert!(s.core_keys().previous_public_key().is_none());
+        let op =
+          tokio::time::timeout(Duration::from_secs(5), pushed.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(op, AgentOp::TrustCoreKey(job)
+          if job.current == stale_primary && job.alt.is_none()));
+      } else if end == "restart" {
+        let key = CoreKeyRing::load(&s.db, dir.path(), new.clone())
+          .await
+          .unwrap();
+        Arc::get_mut(&mut s).unwrap().key = key;
+      } else {
+        finish(&s, end == "rollback", false).await.unwrap();
+      }
+      assert!(!dir.path().join(PREVIOUS).exists());
+      assert_eq!(
+        s.db.call(|c| db::setting(c, EXPIRES)).await.unwrap(),
+        None
+      );
+
+      s.hub.mock_rotation_agent("s1", move |op| {
+        sent.send(op).unwrap();
+        Ok(serde_json::Value::Null)
+      });
+      let (conn, _) = s.hub.key_connection("s1").unwrap();
+      sync_agent(
+        s.clone(),
+        "s1".into(),
+        conn,
+        Some(stale_primary.clone()),
+        stale_alt.clone(),
+      )
+      .await;
+      let AgentOp::TrustCoreKey(job) = pushed.try_recv().unwrap()
+      else {
+        panic!("重连后应纠正 agent 的信任集合");
+      };
+      let active = if end == "rollback" { &old } else { &new };
+      assert_eq!(job.current, public_key(active), "{end}");
+      assert!(job.alt.is_none(), "{end}");
+      sync_agent(s, "s1".into(), conn, Some(job.current), None).await;
+      assert!(pushed.try_recv().is_err(), "{end}");
+    }
+  }
 }

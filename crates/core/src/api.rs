@@ -782,7 +782,7 @@ async fn add_server(
       .unwrap_or("127.0.0.1:7700");
     format!("http://{host}")
   });
-  let core_key = hex::encode(s.key.verifying_key().to_bytes());
+  let core_key = s.core_keys().public_key();
   let mut commands = BTreeMap::from([
     (
       "docker".to_string(),
@@ -891,7 +891,7 @@ async fn agent_join(
     })
     .await?;
   tracing::info!("服务器 {server} 完成加入");
-  let keys = s.key.read();
+  let keys = s.core_keys();
   Ok(Json(JoinResponse {
     server,
     core_public_key: keys.public_key(),
@@ -2299,7 +2299,7 @@ mod tests {
     let dir = tempfile::tempdir().unwrap();
     let mut s = crate::rules::tests::test_state();
     Arc::get_mut(&mut s).unwrap().data_dir = dir.path().into();
-    let old = s.key.verifying_key();
+    let old = s.core_keys().verifying_key();
     let old_public = hex::encode(old.to_bytes());
     s.db
       .call(|c| {
@@ -2334,7 +2334,7 @@ mod tests {
     );
     assert!(!dir.path().join("core.key.next").exists());
     let payload = b"fixture-handshake";
-    let (signature, alt) = s.key.read().sign(payload);
+    let (signature, alt) = s.core_keys().sign(payload);
     assert!(alt.is_none());
     let bytes: [u8; 64] =
       hex::decode(signature).unwrap().try_into().unwrap();
@@ -2347,6 +2347,45 @@ mod tests {
     assert!(s.hub.is_online("s1") && s.hub.is_online("s2"));
   }
 
+  #[tokio::test(start_paused = true)]
+  async fn core_rotation_reports_reconnect_timeout_after_switch_and_sends_receipt()
+   {
+    use crate::rules::tests::{
+      TEST_LOCK, notice_titles, reset_memory,
+    };
+
+    let _guard = TEST_LOCK.lock().await;
+    reset_memory();
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = crate::rules::tests::test_state();
+    Arc::get_mut(&mut s).unwrap().data_dir = dir.path().into();
+    let old = s.core_keys().verifying_key();
+    s.db.call(|c| {
+      c.execute(
+        "INSERT INTO agents (server, public_key, key_rotation) VALUES ('s1', 'fixture-public', 1)",
+        [],
+      ).map_err(sql_err)?;
+      Ok(())
+    }).await.unwrap();
+    s.hub.mock_rotation_agent("s1", |op| {
+      assert!(matches!(op, AgentOp::TrustCoreKey(_)));
+      Ok(Value::Null)
+    });
+
+    let Json(view) = rotate_core_for_test(&s, true)
+      .await
+      .map_err(|e| e.0)
+      .unwrap();
+    assert_eq!(view.pending_agents, ["s1"]);
+    assert_ne!(s.core_keys().verifying_key(), old);
+    assert_eq!(view.public_key, s.core_keys().public_key());
+    assert!(view.previous_expires_at.is_some());
+    assert_eq!(
+      notice_titles(&s, "security_receipt").await,
+      ["在线轮换控制面公钥"]
+    );
+  }
+
   #[tokio::test]
   async fn core_rotation_dual_signatures_then_rollback_and_commit() {
     use ed25519_dalek::{Signature, Verifier, VerifyingKey};
@@ -2354,12 +2393,12 @@ mod tests {
     let dir = tempfile::tempdir().unwrap();
     let mut s = crate::rules::tests::test_state();
     Arc::get_mut(&mut s).unwrap().data_dir = dir.path().into();
-    let old = s.key.verifying_key();
+    let old = s.core_keys().verifying_key();
     let verify = |key: VerifyingKey| {
       let payload = wharf_api_types::tunnel::tunnel_payload(
         "nonce", "core-kx", "peer-kx",
       );
-      let (signature, alt) = s.key.read().sign(&payload);
+      let (signature, alt) = s.core_keys().sign(&payload);
       [signature].into_iter().chain(alt).any(|signature| {
         let bytes: [u8; 64] =
           hex::decode(signature).unwrap().try_into().unwrap();
@@ -2370,7 +2409,7 @@ mod tests {
       .await
       .map_err(|e| e.0)
       .unwrap();
-    let new = s.key.verifying_key();
+    let new = s.core_keys().verifying_key();
     assert!(first.previous_expires_at.is_some());
     assert!(verify(old) && verify(new));
     let Json(rolled_back) = crate::key_rotation::rollback(
@@ -2386,7 +2425,7 @@ mod tests {
       .await
       .map_err(|e| e.0)
       .unwrap();
-    let new = s.key.verifying_key();
+    let new = s.core_keys().verifying_key();
     assert!(second.previous_expires_at.is_some());
     assert!(verify(old) && verify(new));
     let Json(committed) = crate::key_rotation::commit(
@@ -2506,7 +2545,7 @@ mod tests {
         headers
           .insert("x-forwarded-for", "203.0.113.5".parse().unwrap());
       }
-      let key = hex::encode(state.key.verifying_key().to_bytes());
+      let key = state.core_keys().public_key();
       let result = agent_join(
         State(state.clone()),
         sealed.then_some(Extension(crate::cli_tunnel::Sealed)),

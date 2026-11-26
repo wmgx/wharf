@@ -319,7 +319,7 @@ pub async fn show(
     setup_needed,
     totp_required: false,
     setup_open: setup_needed,
-    core_key: Some(hex::encode(s.key.verifying_key().to_bytes())),
+    core_key: Some(s.core_keys().public_key()),
   }))
 }
 

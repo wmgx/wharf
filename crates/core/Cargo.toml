@@ -60,3 +60,4 @@ tracing-subscriber.workspace = true
 rustls-pki-types = "1"
 rustls-webpki = { version = "0.103", features = ["aws-lc-rs"] }
 tempfile = "3"
+tokio = { workspace = true, features = ["test-util"] }

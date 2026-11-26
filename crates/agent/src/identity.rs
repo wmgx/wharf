@@ -394,6 +394,58 @@ mod tests {
   }
 
   #[test]
+  fn persisted_core_trust_rejects_welcome_from_removed_key() {
+    use ed25519_dalek::Signer;
+    use wharf_api_types::agent::auth_payload_v2;
+
+    let old = SigningKey::from_bytes(&[1; 32]);
+    let new = SigningKey::from_bytes(&[2; 32]);
+    let public =
+      |key: &SigningKey| hex::encode(key.verifying_key().to_bytes());
+    let payload =
+      auth_payload_v2("core", "s1", "nonce", "core-kx,agent-kx");
+    let signature =
+      |key: &SigningKey| hex::encode(key.sign(&payload).to_bytes());
+
+    for (active, removed) in [(&new, &old), (&old, &new)] {
+      let dir = tempfile::tempdir().unwrap();
+      let joined = Joined {
+        core_url: "http://127.0.0.1:7700".into(),
+        server: "s1".into(),
+        core_public_key: public(&new),
+        core_public_key_alt: Some(public(&old)),
+      };
+      joined.save(dir.path()).unwrap();
+      assert_eq!(
+        joined.verify_core(&payload, &signature(removed), None),
+        Some(public(removed))
+      );
+
+      trust_core_key(
+        dir.path(),
+        TrustCoreKeyJob {
+          current: public(active),
+          alt: None,
+          reconnect: false,
+        },
+      )
+      .unwrap();
+      let joined = Joined::load(dir.path()).unwrap().unwrap();
+      assert!(joined.core_public_key_alt.is_none());
+      assert_eq!(joined.core_public_key, public(active));
+      assert!(
+        joined
+          .verify_core(&payload, &signature(removed), None)
+          .is_none()
+      );
+      assert_eq!(
+        joined.verify_core(&payload, &signature(active), None),
+        Some(public(active))
+      );
+    }
+  }
+
+  #[test]
   fn key_is_stable() {
     let dir = tempfile::tempdir().unwrap();
     let a = load_or_create_key(dir.path()).unwrap();

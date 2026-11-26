@@ -651,6 +651,7 @@ export interface CoreAddresses {
 
 export interface CoreKeyView {
   fingerprint: string;
+  pending_agents?: string[];
   previous_expires_at?: string | null;
   public_key: string;
 }

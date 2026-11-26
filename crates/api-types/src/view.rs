@@ -1876,6 +1876,8 @@ pub struct CoreKeyView {
   pub fingerprint: String,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub previous_expires_at: Option<DateTime<Utc>>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub pending_agents: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

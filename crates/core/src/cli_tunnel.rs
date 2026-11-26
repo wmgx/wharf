@@ -61,7 +61,7 @@ pub async fn open(
 }
 
 async fn handshake(
-  s: &AppState,
+  s: &Arc<AppState>,
   socket: &mut WebSocket,
 ) -> anyhow::Result<(
   wharf_api_types::seal::Sealer,
@@ -79,8 +79,7 @@ async fn handshake(
   let share = KeyShare::generate();
   let kx = share.public.clone();
   let (signature, alt_signature) = s
-    .key
-    .read()
+    .core_keys()
     .sign(&tunnel_payload(&hello.nonce, &kx, &hello.kx));
   let welcome = TunnelWelcome {
     kx,

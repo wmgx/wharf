@@ -219,8 +219,11 @@ async fn handshake(
     .finish(&core_kx, &format!("{nonce}{my_nonce}"), Role::Agent)
     .map_err(|_| AuthenticationFailed)?;
   if confirm_key {
-    let ready =
-      serde_json::to_vec(&AgentMsg::KeyReady { core_public_key })?;
+    let ready = serde_json::to_vec(&AgentMsg::KeyReady {
+      core_public_key,
+      trusted_primary: Some(joined.core_public_key.clone()),
+      trusted_alt: joined.core_public_key_alt.clone(),
+    })?;
     tokio::time::timeout(
       SOCKET_WRITE_TIMEOUT,
       ws.send(Message::binary(sealer.seal(&ready))),

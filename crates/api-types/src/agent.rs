@@ -150,6 +150,10 @@ pub enum AgentMsg {
   },
   KeyReady {
     core_public_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    trusted_primary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    trusted_alt: Option<String>,
   },
   Report(Box<AgentReport>),
   Progress {
