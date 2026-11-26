@@ -4,6 +4,7 @@ use std::{
   sync::{Arc, RwLock},
 };
 
+use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_yaml_ng::Value;
 use wharf_api_types::{
   ApiError,
@@ -22,8 +23,17 @@ static VALUES: RwLock<Option<Arc<Vec<String>>>> = RwLock::new(None);
 
 fn prepare(values: &mut Vec<String>) {
   values.retain(|value| value.len() >= 6);
+  add_encoded_values(values);
+  values.sort_unstable_by(|a, b| {
+    (Reverse(a.len()), a).cmp(&(Reverse(b.len()), b))
+  });
+  values.dedup();
+}
+
+pub(crate) fn add_encoded_values(values: &mut Vec<String>) {
   let mut escaped = Vec::new();
   for value in values.iter() {
+    escaped.push(STANDARD.encode(value));
     if let std::borrow::Cow::Owned(encoded) =
       urlencoding::encode(value)
     {
@@ -45,10 +55,6 @@ fn prepare(values: &mut Vec<String>) {
     }
   }
   values.extend(escaped);
-  values.sort_unstable_by(|a, b| {
-    (Reverse(a.len()), a).cmp(&(Reverse(b.len()), b))
-  });
-  values.dedup();
 }
 
 fn value(out: &mut Vec<String>, text: &str, sensitive: bool) {
@@ -296,6 +302,16 @@ mod tests {
         &values,
       ),
       "*** *** %3C%26%3E"
+    );
+  }
+
+  #[test]
+  fn masks_base64_url_and_json_secret_encodings() {
+    let value = "p@s#1\n\"\\";
+    let input = r#"cEBzIzEKIlw= p%40s%231%0A%22%5C p@s#1\n\"\\"#;
+    assert_eq!(
+      redact_text_with(input, &[value.into()]),
+      "*** *** ***"
     );
   }
 

@@ -157,6 +157,12 @@ pub enum Command {
     /// 控制面公钥（页面“设置 → CLI 与 AI 接入”里的登录命令带着）。之后只认这个公钥，防中间人。
     #[arg(long, env = "WHARF_CORE_KEY")]
     core_key: String,
+    /// 从文件读取 token。
+    #[arg(long, conflicts_with = "token_cmd")]
+    token_file: Option<String>,
+    /// 执行命令，从标准输出首行读取 token。
+    #[arg(long, conflicts_with = "token_file")]
+    token_cmd: Option<String>,
   },
   /// 总览：服务器、服务、网关、路由的状态。
   Status,

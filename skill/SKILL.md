@@ -25,7 +25,7 @@ Wharf 是一个人用的多服务器管理系统。你通过 `wharf` 命令行�
    反复查同一件事时加 `--changed`，只输出和上次相比变了的地方。
    `wharf whoami --json` 看当前 token 的权限；提示本机 wharf 和控制面版本不同时运行 `wharf self-update`，再用 `wharf commands --changes` 看新版本多了哪些命令和参数。
    要等部署完成、服务恢复、告警解除时用 `wharf wait`，不要自己循环查：`wharf wait service <服务>`、`wharf wait route <域名>`、`wharf wait clear --subject <服务>`，默认最多等 10 分钟（`--timeout`）。
-6. **不打印、不写入 token 和密钥。** 服务要用的密码放进密钥（`wharf secret`），环境变量里用 `[[NAME]]` 引用。
+6. **不打印、不写入 token 和密钥。** 服务要用的密码放进密钥（`wharf secret`），环境变量里用 `[[NAME]]` 引用。`[[url:NAME]]`、`[[b64:NAME]]`、`[[json:NAME]]` 用于编码，`[[FILE:NAME]]` 用于服务里的只读文件挂载，引用会替换为容器内路径。
 7. **直接生效的命令先预览。** `wharf task add/rm`、`wharf secret set/rm`、`wharf alert set`、`wharf token set`、`wharf service note`、`wharf server note`、`wharf route note` 不走计划，先加 `--dry-run` 看会改什么。
    修改时加 `--reason "<为什么>"`，生成计划时可以加 `--note "<备注>"`，都会记进操作记录。
 8. **宿主机命令要用户同意。** `wharf exec <服务器> -- '<命令>'`、`wharf server prune`、`wharf server baseline --apply` 这类直接动机器的操作，先说明要做什么。

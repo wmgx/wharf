@@ -121,24 +121,17 @@ pub fn secret_refs(login: &LoginSpec) -> BTreeSet<String> {
   names
 }
 
-fn env_refs(value: &str) -> Result<Vec<&str>, ApiError> {
-  let mut rest = value;
-  let mut names = Vec::new();
-  while let Some((_, after)) = rest.split_once("[[") {
-    let (name, next) = after
-      .split_once("]]")
-      .ok_or_else(|| ApiError::invalid("密钥引用缺少 ]]"))?;
-    if name.is_empty()
-      || !name
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-    {
-      return Err(ApiError::invalid("密钥引用的名称无效"));
-    }
-    names.push(name);
-    rest = next;
-  }
-  Ok(names)
+pub(crate) fn env_refs(value: &str) -> Result<Vec<&str>, ApiError> {
+  crate::render::placeholders(value)
+    .filter_map(|inner| {
+      crate::render::parse_placeholder(inner, false).transpose()
+    })
+    .map(|p| {
+      let p = p?;
+      crate::render::reject_file(&p)?;
+      Ok(p.name)
+    })
+    .collect()
 }
 pub(crate) fn takeover_matches(path: &str, paths: &[String]) -> bool {
   let path = path.trim_end_matches('/');
@@ -257,7 +250,10 @@ pub fn validate(host: &str, sso: &SsoSpec) -> Result<(), ApiError> {
       if value.contains(['\n', '\r', '\0']) {
         return Err(fail("脚本环境变量的值含换行或空字符"));
       }
-      env_refs(value).map_err(|e| fail(&e.message))?;
+      env_refs(value).map_err(|mut error| {
+        error.message = format!("域名 {host}：{}", error.message);
+        error
+      })?;
     }
   } else if login.steps.len() > 5
     || !(1..=8).contains(&login.write.len())
@@ -794,6 +790,7 @@ async fn execute(
     .cloned()
     .collect();
   if let Some(script) = &login.script {
+    crate::log_redact::add_encoded_values(&mut hidden);
     let env = script_env(
       script,
       &secrets,
@@ -1277,6 +1274,30 @@ mod tests {
     .unwrap();
     assert_eq!(env["WHARF_USERNAME"], "fixture-user");
     assert_eq!(env["WHARF_PASSWORD"], "fixture-value");
+  }
+
+  #[test]
+  fn script_environment_renders_and_tracks_encoded_secrets() {
+    let script = serde_json::from_value(json!({
+      "runtime": "shell", "code": "true",
+      "env": {"URL": "[[url:K]]", "BASE64": "[[b64:K]]", "JSON": "[[json:K]]"}
+    })).unwrap();
+    let secrets = Values::from([("K".into(), "p@s#1\n\"\\".into())]);
+    let env = script_env(
+      &script,
+      &secrets,
+      &Values::new(),
+      "a.example.test",
+      "100.64.0.10:80",
+    )
+    .unwrap();
+    assert_eq!(env["URL"], "p%40s%231%0A%22%5C");
+    assert_eq!(env["BASE64"], "cEBzIzEKIlw=");
+    assert_eq!(env["JSON"], r#"p@s#1\n\"\\"#);
+    assert_eq!(
+      env_refs("[[url:K]] [[b64:K]] [[json:K]]").unwrap(),
+      ["K"; 3]
+    );
   }
 
   #[test]

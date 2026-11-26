@@ -124,7 +124,7 @@ pub async fn run(
   {
     return Err(ApiError::invalid("--path 必须以 /api/ 开头").into());
   }
-  let c = Client::new(url, token)?;
+  let c = Client::new(url, token).await?;
   match cmd {
     TokenCmd::Explain {
       name,

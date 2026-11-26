@@ -38,7 +38,7 @@ pub(crate) mod entry_protection;
 pub async fn run(cli: Cli) -> CliResult<()> {
   let j = cli.json;
   match cli.command {
-    Command::Login { url, core_key } => login(url, core_key, j).await,
+    Command::Login { url, core_key, token_file, token_cmd } => login(url, core_key, token_file, token_cmd, j).await,
     Command::Schema { resource } => schema(resource.as_deref()),
     Command::Validate { file } => {
       let v = fleet::validate(&file);
@@ -102,7 +102,7 @@ pub async fn run(cli: Cli) -> CliResult<()> {
       ).into())
     }
     command => {
-      let c = Client::new(cli.url, cli.token)?;
+      let c = Client::new(cli.url, cli.token).await?;
       dispatch(&c, command, j).await
     }
   }
@@ -700,29 +700,48 @@ async fn dispatch(
 async fn login(
   url: String,
   core_key: String,
+  token_file: Option<String>,
+  token_cmd: Option<String>,
   j: bool,
 ) -> CliResult<()> {
   crate::tunnel::parse_core_key(&core_key)?;
-  let token = read_secret("API token：")?;
-  let c = Client::with_key(
-    Some(url.clone()),
-    Some(token.clone()),
-    Some(core_key.clone()),
-  )?;
-  // 验证一下能用。
+  let (config, token) =
+    login_credentials(&url, &core_key, token_file, token_cmd).await?;
+  let c =
+    Client::with_key(Some(url), Some(token), Some(core_key)).await?;
   let _: Vec<ServerView> = c.get("/api/servers").await?;
-  let path = Config {
-    url: Some(url.trim_end_matches('/').to_string()),
-    token: Some(token),
-    core_key: Some(core_key.trim().to_string()),
-  }
-  .save()?;
+  let path = config.save()?;
   if j {
     print::json(&json!({ "saved": path }));
   } else {
     println!("已保存到 {}", path.display());
   }
   Ok(())
+}
+
+async fn login_credentials(
+  url: &str,
+  core_key: &str,
+  token_file: Option<String>,
+  token_cmd: Option<String>,
+) -> CliResult<(Config, String)> {
+  let mut config = Config {
+    url: Some(url.trim_end_matches('/').to_string()),
+    core_key: Some(core_key.trim().to_string()),
+    token_file,
+    token_cmd,
+    ..Default::default()
+  };
+  let token =
+    match crate::client::resolve_token(None, &config).await? {
+      Some(token) => token,
+      None => {
+        let token = read_secret("API token：")?;
+        config.token = Some(token.clone());
+        token
+      }
+    };
+  Ok((config, token))
 }
 
 fn schema(resource: Option<&str>) -> CliResult<()> {
@@ -4318,6 +4337,52 @@ fn share_ttl(s: &str) -> Result<Duration, String> {
 mod tests {
   use super::*;
   use clap::Parser;
+
+  #[tokio::test]
+  async fn login_token_file_saves_only_the_credential_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("t.tok");
+    let saved = dir.path().join("config.toml");
+    let fixture = format!("fixture-{}", std::process::id());
+    std::fs::write(&file, &fixture).unwrap();
+    let key = "11".repeat(32);
+    let args = [
+      "wharf",
+      "login",
+      "--url",
+      "https://core.example.test",
+      "--core-key",
+      &key,
+      "--token-file",
+      file.to_str().unwrap(),
+    ];
+    let cli = Cli::try_parse_from(args).unwrap();
+    let Command::Login {
+      url,
+      core_key,
+      token_file,
+      token_cmd,
+    } = cli.command
+    else {
+      panic!("应解析为 login");
+    };
+    let (config, token) =
+      login_credentials(&url, &core_key, token_file, token_cmd)
+        .await
+        .unwrap();
+    assert!(token == fixture);
+    config.save_to(&saved).unwrap();
+    let text = std::fs::read_to_string(saved).unwrap();
+    assert!(text.contains("token_file = "));
+    assert!(!text.contains("token = "));
+    assert!(!text.contains(&fixture));
+    assert!(
+      Cli::try_parse_from(
+        args.into_iter().chain(["--token-cmd", "false"])
+      )
+      .is_err()
+    );
+  }
 
   #[test]
   fn rotate_link_yes_help_preserves_per_item_confirmation() {

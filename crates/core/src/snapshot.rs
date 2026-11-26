@@ -1,6 +1,10 @@
 //! plan、apply、status 共用的数据快照和小工具。
 
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{
+  collections::{BTreeMap, BTreeSet},
+  sync::Arc,
+  time::Duration,
+};
 
 use wharf_api_types::{
   ApiError, ErrorCode,
@@ -130,9 +134,11 @@ async fn snapshot_masks_legacy_errors_without_rewriting_rows() {
 static SECRETS: std::sync::RwLock<BTreeMap<String, String>> =
   std::sync::RwLock::new(BTreeMap::new());
 
-fn with_secrets(text: &str) -> String {
-  let secrets = SECRETS.read().unwrap_or_else(|e| e.into_inner());
-  crate::render::substitute(text, Some(&secrets))
+fn with_secrets(
+  text: &str,
+  secrets: &BTreeMap<String, String>,
+) -> String {
+  crate::render::substitute(text, Some(secrets))
     .unwrap_or_else(|_| text.to_string())
 }
 
@@ -349,13 +355,24 @@ pub fn committed_pull_policy(
 }
 
 pub fn pull_policy(server: &ServerRow) -> PullPolicy {
+  let secrets = SECRETS.read().unwrap_or_else(|e| e.into_inner());
+  pull_policy_with_secrets(server, &secrets)
+}
+
+fn pull_policy_with_secrets(
+  server: &ServerRow,
+  secrets: &BTreeMap<String, String>,
+) -> PullPolicy {
   PullPolicy {
     mirrors: server
       .settings
       .registry_mirrors
       .iter()
       .map(|(k, v)| {
-        (k.clone(), v.iter().map(|m| with_secrets(m)).collect())
+        (
+          k.clone(),
+          v.iter().map(|m| with_secrets(m, secrets)).collect(),
+        )
       })
       .collect(),
     mirrors_only: server.settings.mirrors_only,
@@ -369,7 +386,7 @@ pub fn pull_policy(server: &ServerRow) -> PullPolicy {
       .settings
       .github_mirror
       .as_deref()
-      .map(with_secrets),
+      .map(|m| with_secrets(m, secrets)),
     registry_proxy: crate::docker_proxy::wanted(&server.settings)
       .map(|(proxy, _)| proxy),
   }
@@ -385,7 +402,7 @@ pub fn service_resolved(
   let row = world.services.get(name).ok_or_else(|| {
     ApiError::not_found(format!("服务 {name} 不存在"))
   })?;
-  let resolved = render::service_compose(
+  let (resolved, mounts) = render::service_compose(
     name,
     &row.spec,
     &row.host_ports,
@@ -400,7 +417,7 @@ pub fn service_resolved(
   )?;
   let resolved = crate::refs::resolve(&resolved, name, world, net)?;
   let resolved =
-    with_files(world, net, name, &resolved, Some(secrets))?;
+    with_files(world, net, name, &resolved, mounts, Some(secrets))?;
   let hash = render::hash(&resolved);
   Ok((resolved, hash))
 }
@@ -414,9 +431,10 @@ pub fn service_trial(
   let row = world.services.get(name).ok_or_else(|| {
     ApiError::not_found(format!("服务 {name} 不存在"))
   })?;
-  let trial = render::trial_compose(name, &row.spec, Some(secrets))?;
+  let (trial, mounts) =
+    render::trial_compose(name, &row.spec, Some(secrets))?;
   let trial = crate::refs::resolve(&trial, name, world, net)?;
-  with_files(world, net, name, &trial, Some(secrets))
+  with_files(world, net, name, &trial, mounts, Some(secrets))
 }
 
 /// 加上服务的配置文件，内容里的密钥和 `[[@服务]]` 先替换好。
@@ -425,21 +443,32 @@ fn with_files(
   net: &Net,
   name: &str,
   compose: &str,
+  mounts: render::SecretMounts,
   secrets: Option<&BTreeMap<String, String>>,
 ) -> Result<String, ApiError> {
   let spec = &world.services[name].spec;
+  let mut file_secrets = BTreeSet::new();
   let files = spec
     .files
     .iter()
     .map(|f| {
-      let content = render::file_content(&f.content, secrets);
+      let content =
+        render::file_content(&f.content, secrets, &mut file_secrets)?;
       Ok((
         f.path.clone(),
         crate::refs::resolve(&content, name, world, net)?,
       ))
     })
     .collect::<Result<Vec<_>, ApiError>>()?;
-  render::add_files(name, spec, compose, &files)
+  render::add_files(
+    name,
+    spec,
+    compose,
+    &files,
+    file_secrets,
+    mounts,
+    secrets,
+  )
 }
 
 pub fn service_template(
@@ -448,7 +477,7 @@ pub fn service_template(
   name: &str,
 ) -> Result<String, ApiError> {
   let row = &world.services[name];
-  let text = render::service_compose(
+  let (text, mounts) = render::service_compose(
     name,
     &row.spec,
     &row.host_ports,
@@ -462,7 +491,7 @@ pub fn service_template(
     false,
   )?;
   let text = crate::refs::resolve(&text, name, world, net)?;
-  with_files(world, net, name, &text, None)
+  with_files(world, net, name, &text, mounts, None)
 }
 
 /// 网关的 compose、Caddyfile，以及它承载的站点。
@@ -989,6 +1018,256 @@ mod tests {
       },
     );
     world
+  }
+
+  #[test]
+  fn pull_policy_renders_encoded_mirror_credentials() {
+    let server = ServerRow {
+      settings: serde_json::from_value(serde_json::json!({
+        "registry_mirrors": {"docker.io": ["https://registry.example.test/[[url:K]]/[[b64:K]]"]},
+        "github_mirror": "https://git.example.test/[[json:K]]",
+      })).unwrap(),
+      version: 1,
+    };
+    let secrets =
+      BTreeMap::from([("K".into(), "p@s#1\n\"\\".into())]);
+    let pull = pull_policy_with_secrets(&server, &secrets);
+    assert_eq!(
+      pull.mirrors["docker.io"],
+      [
+        "https://registry.example.test/p%40s%231%0A%22%5C/cEBzIzEKIlw="
+      ]
+    );
+    assert_eq!(
+      pull.github_mirror.as_deref(),
+      Some(r#"https://git.example.test/p@s#1\n\"\\"#)
+    );
+  }
+
+  #[test]
+  fn legacy_image_and_compose_bytes_and_hash_are_unchanged() {
+    let mut w = world(21000);
+    let secrets = BTreeMap::from([("KEY".into(), "ok123".into())]);
+    let net = Net::default();
+    w.services
+      .get_mut("app")
+      .unwrap()
+      .spec
+      .env
+      .insert("KEY".into(), "[[KEY]]".into());
+    let legacy_image = concat!(
+      "# 由 Wharf 生成，不要手改。\n",
+      "name: app\nservices:\n  app:\n    image: nginx:1\n",
+      "    restart: unless-stopped\n    environment:\n      KEY: ok123\n",
+      "    ports:\n    - 127.0.0.1:21000:80\n",
+      "    labels:\n      wharf.service: app\n",
+    );
+    assert_eq!(
+      service_resolved(&w, &net, "app", &secrets).unwrap(),
+      (legacy_image.to_string(), render::hash(legacy_image)),
+    );
+
+    let raw = "# 注释\nservices:\n  app:\n    image: nginx:1\n    environment:\n      KEY: [[KEY]] # 保留格式\n";
+    let spec = &mut w.services.get_mut("app").unwrap().spec;
+    spec.env.clear();
+    spec.source = serde_json::from_value(
+      serde_json::json!({"compose": {"content": raw}}),
+    )
+    .unwrap();
+    let legacy_compose = raw.replace("[[KEY]]", "ok123");
+    let legacy_hash = render::hash(&legacy_compose);
+    assert_eq!(
+      service_resolved(&w, &net, "app", &secrets).unwrap(),
+      (legacy_compose, legacy_hash),
+    );
+  }
+
+  #[test]
+  fn image_secret_file_is_private_to_resolved_compose_and_trial() {
+    let mut w = world(21000);
+    let spec = &mut w.services.get_mut("app").unwrap().spec;
+    spec.source =
+      wharf_api_types::spec::Source::Image("postgres:16".into());
+    spec.env.insert(
+      "POSTGRES_PASSWORD_FILE".into(),
+      "[[FILE:PG_PASS]]".into(),
+    );
+    let secrets =
+      BTreeMap::from([("PG_PASS".into(), "p$ss\"1[[@app]]".into())]);
+    let net = Net::default();
+    let (out, _) =
+      service_resolved(&w, &net, "app", &secrets).unwrap();
+    let trial = service_trial(&w, &net, "app", &secrets).unwrap();
+    for out in [out, trial] {
+      let doc: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&out).unwrap();
+      let app = &doc["services"]["app"];
+      let mount = &app["configs"][0];
+      let id = mount["source"].as_str().unwrap();
+      let suffix = id.strip_prefix("wharf-secret-PG_PASS-").unwrap();
+      assert_eq!(suffix.len(), 12);
+      assert!(suffix.bytes().all(|b| b.is_ascii_hexdigit()));
+      assert_eq!(doc["configs"][id]["content"], "p$$ss\"1[[@app]]");
+      assert_eq!(mount["target"], "/run/wharf-secrets/PG_PASS");
+      assert!(mount.get("mode").is_none());
+      assert_eq!(
+        app["environment"]["POSTGRES_PASSWORD_FILE"],
+        "/run/wharf-secrets/PG_PASS"
+      );
+    }
+    let template = service_template(&w, &net, "app").unwrap();
+    assert!(template.contains("[[FILE:PG_PASS]]"));
+    assert!(!template.contains("configs:"));
+    assert!(!template.contains("p$ss"));
+  }
+
+  #[test]
+  fn compose_secret_file_mounts_and_hash_follow_each_container() {
+    let mut w = world(21000);
+    let spec = &mut w.services.get_mut("app").unwrap().spec;
+    let raw = concat!(
+      "services:\n",
+      "  db:\n    image: postgres:16\n    environment:\n      PASS_FILE: [[FILE:PG_PASS]]\n",
+      "  app:\n    image: nginx:1\n    environment:\n      KEY_FILE: \"[[FILE:API_KEY]]\"\n",
+    );
+    spec.source = serde_json::from_value(
+      serde_json::json!({"compose": {"content": raw}}),
+    )
+    .unwrap();
+    let net = Net::default();
+    let resolved = |db_key: &str| {
+      let secrets = BTreeMap::from([
+        ("PG_PASS".into(), db_key.into()),
+        ("API_KEY".into(), "fixture-app".into()),
+      ]);
+      let (out, hash) =
+        service_resolved(&w, &net, "app", &secrets).unwrap();
+      (
+        serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&out)
+          .unwrap(),
+        hash,
+      )
+    };
+    let (before, hash) = resolved("fixture-before");
+    let (after, new_hash) = resolved("fixture-after");
+    assert_ne!(hash, new_hash);
+    for (container, secret) in [("db", "PG_PASS"), ("app", "API_KEY")]
+    {
+      let body = &before["services"][container];
+      let mounts = body["configs"].as_sequence().unwrap();
+      assert_eq!(mounts.len(), 1);
+      assert_eq!(
+        mounts[0]["target"].as_str().unwrap(),
+        format!("/run/wharf-secrets/{secret}")
+      );
+    }
+    assert_ne!(
+      before["services"]["db"]["configs"][0]["source"],
+      after["services"]["db"]["configs"][0]["source"],
+    );
+    assert_eq!(before["services"]["app"], after["services"]["app"]);
+  }
+
+  #[test]
+  fn compose_secret_file_checks_inherited_configs_and_each_reference()
+  {
+    let mut w = world(21000);
+    let net = Net::default();
+    let secrets =
+      BTreeMap::from([("PG_PASS".into(), "fixture-value".into())]);
+    let raw = concat!(
+      "x-base: &base\n",
+      "  environment:\n    PASS_FILE: [[FILE:PG_PASS]]\n",
+      "  configs:\n    - source: fixture\n      target: /etc/fixture\n",
+      "x-derived: &derived\n  <<: *base\n",
+      "services:\n  app:\n    <<: *derived\n    image: nginx:1\n",
+      "configs:\n  fixture:\n    content: fixture\n",
+    );
+    let mut resolve = |raw: &str| {
+      w.services.get_mut("app").unwrap().spec.source =
+        serde_json::from_value(
+          serde_json::json!({"compose": {"content": raw}}),
+        )
+        .unwrap();
+      service_resolved(&w, &net, "app", &secrets)
+    };
+    let (out, _) = resolve(raw).unwrap();
+    let doc: serde_yaml_ng::Value =
+      serde_yaml_ng::from_str(&out).unwrap();
+    let mounts =
+      doc["services"]["app"]["configs"].as_sequence().unwrap();
+    assert_eq!(mounts.len(), 2);
+    assert_eq!(mounts[0]["target"], "/etc/fixture");
+    assert_eq!(mounts[1]["target"], "/run/wharf-secrets/PG_PASS");
+
+    for alias in [
+      "/run/wharf-secrets//PG_PASS",
+      "/run/wharf-secrets/./PG_PASS",
+      "/run/wharf-secrets/../wharf-secrets/PG_PASS",
+    ] {
+      let error =
+        resolve(&raw.replace("/etc/fixture", alias)).unwrap_err();
+      assert_eq!(
+        error.message,
+        "服务 app 的容器 app 已有重复的挂载目标 /run/wharf-secrets/PG_PASS",
+      );
+    }
+    let orphan = format!("{raw}x-extra: [[FILE:PG_PASS]]\n");
+    assert_eq!(
+      resolve(&orphan).unwrap_err().message,
+      "[[FILE:...]] 只能写在 services 下的容器配置里",
+    );
+  }
+
+  #[test]
+  fn service_volume_rejects_normalized_secret_directory() {
+    let mut w = world(21000);
+    w.services.get_mut("app").unwrap().spec.volumes.push(
+      wharf_api_types::spec::VolumeSpec {
+        name: "data".into(),
+        target: "/run/fixture/../wharf-secrets//PG_PASS".into(),
+      },
+    );
+    assert!(
+      w.validate()
+        .unwrap_err()
+        .message
+        .contains(render::SECRET_FILE_DIR)
+    );
+  }
+
+  #[test]
+  fn config_file_secret_is_mounted_once_and_reserves_its_directory() {
+    let mut w = world(21000);
+    let spec = &mut w.services.get_mut("app").unwrap().spec;
+    spec
+      .env
+      .insert("PASSWORD_FILE".into(), "[[FILE:DB_PASS]]".into());
+    spec.files.push(wharf_api_types::spec::FileSpec {
+      path: "/etc/app/conf.toml".into(),
+      content: "pass_file = \"[[FILE:DB_PASS]]\"\n".into(),
+    });
+    let net = Net::default();
+    let secrets =
+      BTreeMap::from([("DB_PASS".into(), "fixture-db".into())]);
+    let (out, _) =
+      service_resolved(&w, &net, "app", &secrets).unwrap();
+    let doc: serde_yaml_ng::Value =
+      serde_yaml_ng::from_str(&out).unwrap();
+    let mounts =
+      doc["services"]["app"]["configs"].as_sequence().unwrap();
+    assert_eq!(mounts.len(), 2);
+    assert_eq!(mounts[1]["target"], "/run/wharf-secrets/DB_PASS");
+    let id = mounts[0]["source"].as_str().unwrap();
+    assert_eq!(
+      doc["configs"][id]["content"],
+      "pass_file = \"/run/wharf-secrets/DB_PASS\"\n"
+    );
+    w.services.get_mut("app").unwrap().spec.files[0].path =
+      "/run/wharf-secrets/DB_PASS".into();
+    let error = w.validate().unwrap_err();
+    assert!(error.message.contains("/run/wharf-secrets/"));
+    assert!(error.hint.unwrap().contains("换其他路径"));
   }
 
   fn fingerprint(compose: &str, config: &str) -> String {
