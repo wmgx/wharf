@@ -18,7 +18,7 @@ use wharf_api_types::{
 
 use crate::{
   docker::{Docker, Previous, io_err},
-  exec::{Cmd, Ctx},
+  exec::Ctx,
   host_shell::HostShell,
   report::Reporter,
 };

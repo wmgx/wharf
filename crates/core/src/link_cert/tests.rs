@@ -561,7 +561,23 @@ async fn first_tunnel_plan_writes_no_secrets_and_applies_in_order_without_drift(
     })
     .collect();
   assert_eq!(order, [3, 4, 5]);
-  apply_steps(&state, &plan).await;
+  for step in &plan.steps {
+    apply::run_step(
+      &state,
+      "r1",
+      &step.step,
+      Arc::new(|_| {}),
+      &Default::default(),
+    )
+    .await
+    .unwrap();
+    if matches!(&step.step, Step::LinkUp { project, .. } if project == link::SERVER_PROJECT)
+    {
+      let secrets = snapshot::load(&state.db).await.unwrap().secrets;
+      assert_eq!(secrets.len(), 1);
+      assert!(secrets.contains_key("WHARF_LINK_TOKEN_gw-a"));
+    }
+  }
   let snap = snapshot::load(&state.db).await.unwrap();
   assert_eq!(snap.secrets.len(), 5);
   assert!(make_plan(&state).await.unwrap().plan.items.is_empty());

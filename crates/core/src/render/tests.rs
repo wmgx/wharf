@@ -629,7 +629,7 @@ fn caddyfile_lists_sites_sorted() {
     None,
   );
   assert!(out.contains(
-      "link.wharf.internal {\n\ttls internal\n\treverse_proxy /~!frp 127.0.0.1:7000\n}"
+      "link.wharf.internal {\n\ttls /etc/caddy/link.crt /etc/caddy/link.key\n\treverse_proxy /~!frp 127.0.0.1:7000\n}"
     ));
   // 只有开了 auth 的站点带 basic_auth。
   let z = &out[out.find("z.example.com").unwrap()..];
