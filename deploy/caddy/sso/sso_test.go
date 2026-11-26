@@ -547,15 +547,28 @@ func TestPublicStripsCredentials(t *testing.T) {
 func TestRejectsNoncanonicalRequestPath(t *testing.T) {
 	s := plugin(t, "http://127.0.0.1:1")
 	s.UserHeader = "Remote-User"
-	s.Skip = []string{"/catalog"}
-	r := httptest.NewRequest("GET", "https://a.example.test/catalog/./index", nil)
-	w := httptest.NewRecorder()
-	err := s.ServeHTTP(w, r, caddyhttp.HandlerFunc(func(http.ResponseWriter, *http.Request) error {
-		t.Fatal("非规范路径被转发")
-		return nil
-	}))
-	if err != nil || w.Code != http.StatusBadRequest {
-		t.Fatal("非规范路径应返回 400")
+	s.Skip = []string{"/api"}
+	s.Takeover = &Takeover{Paths: []string{"/login"}, Entry: "/console"}
+	for _, encoded := range []string{
+		"/catalog/%2e/index",
+		"/catalog/%2E/index",
+		"/_wharf/%2e%2e/admin",
+		"/_wharf/%2E%2E/admin",
+		"/api/%2e%2e/admin",
+		"//_wharf/login",
+	} {
+		t.Run(encoded, func(t *testing.T) {
+			r := httptest.NewRequest("GET", "https://a.example.test"+encoded, nil)
+			r.Header.Set("Remote-User", "fixture-user")
+			w := httptest.NewRecorder()
+			err := s.ServeHTTP(w, r, caddyhttp.HandlerFunc(func(http.ResponseWriter, *http.Request) error {
+				t.Fatal("非规范路径被转发")
+				return nil
+			}))
+			if err != nil || w.Code != http.StatusBadRequest {
+				t.Fatalf("应拒绝编码的点路径段，状态码 %d，错误 %v", w.Code, err)
+			}
+		})
 	}
 	if matchesPath("/catalog", []string{"/"}, "") {
 		t.Fatal("全站排除配置生效")

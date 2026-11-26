@@ -1,4 +1,4 @@
-use super::{cookie, gate_cookie, session};
+use super::{cookie, gate_cookie, rt_key, session};
 use crate::db::{Db, now_ms};
 use axum::http::HeaderMap;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
