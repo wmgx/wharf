@@ -200,7 +200,7 @@ pub fn check_plan_scope(
         return true;
       };
       let allowed = match kind {
-        "service" => services.contains(name),
+        "service" => services.contains(name) && !item.needs_admin(),
         "route" if item.layer == Layer::Config => {
           routes.contains(item.address.as_str())
         }

@@ -653,8 +653,17 @@ fn need_perm(
   auth: &Auth,
   spec: &TaskSpec,
 ) -> Result<(), crate::api::AppError> {
+  let target = crate::host_access::HostTarget::Task(spec);
+  if crate::host_access::assess(target).required {
+    return crate::host_access::require(auth, target);
+  }
   auth.require(Perm::Apply)?;
-  if matches!(spec.how, TaskKind::Host { .. }) {
+  if matches!(
+    spec.how,
+    TaskKind::Script { .. }
+      | TaskKind::Exec { .. }
+      | TaskKind::Container { .. }
+  ) {
     auth.require(Perm::Exec)?;
   }
   Ok(())
@@ -818,6 +827,28 @@ pub struct RemoveQuery {
   data: bool,
 }
 
+fn require_confirm_task_data(
+  auth: &Auth,
+  name: &str,
+  spec: &TaskSpec,
+  data: bool,
+) -> Result<(), crate::api::AppError> {
+  if data
+    && matches!(spec.how, TaskKind::Script { .. })
+    && !auth.has(Perm::Confirm)
+  {
+    let have = auth
+      .perms
+      .iter()
+      .map(|p| p.as_str())
+      .collect::<Vec<_>>()
+      .join(",");
+    return Err(ApiError::new(ErrorCode::Forbidden, format!("永久删除定时任务 {name} 的持久数据需要 confirm 权限（当前 token 有：{have}）"))
+      .with_hint("请用户在页面上操作，或在页面“设置 → CLI 与 AI 接入”换一个有 confirm 权限的 token").into());
+  }
+  Ok(())
+}
+
 /// `DELETE /api/tasks/{name}`：连运行记录一起删。
 pub async fn remove(
   State(s): State<Arc<AppState>>,
@@ -827,6 +858,7 @@ pub async fn remove(
 ) -> ApiResult<serde_json::Value> {
   let spec = load_one(&s, &name).await?;
   need_perm(&auth, &spec)?;
+  require_confirm_task_data(&auth, &name, &spec, q.data)?;
   let task_name = name.clone();
   s.db
     .call(move |c| {
@@ -1012,5 +1044,87 @@ mod tests {
       Some(token)
     );
     assert_eq!(next_hook(Some("old".into()), None), None);
+  }
+  fn task(fields: serde_json::Value) -> TaskSpec {
+    let mut spec =
+      serde_json::json!({"server":"s1","schedule":"* * * * *"});
+    spec
+      .as_object_mut()
+      .unwrap()
+      .extend(fields.as_object().unwrap().clone());
+    serde_json::from_value(spec).unwrap()
+  }
+
+  #[test]
+  fn host_and_mount_tasks_require_admin() {
+    use crate::host_access::tests::auth;
+    let perms = [Perm::Read, Perm::Plan, Perm::Apply, Perm::Exec];
+    for (fields, reason) in [
+      (
+        serde_json::json!({"kind":"host","command":"true"}),
+        "在宿主机上执行命令",
+      ),
+      (
+        serde_json::json!({"kind":"container","image":"alpine","mounts":["/:/host"]}),
+        "/:/host",
+      ),
+    ] {
+      let spec = task(fields);
+      let err = need_perm(&auth(perms, false), &spec).unwrap_err().0;
+      assert_eq!(err.code, ErrorCode::Forbidden);
+      assert!(err.message.contains(reason));
+      assert!(
+        need_perm(
+          &auth(perms.into_iter().chain([Perm::Admin]), false),
+          &spec
+        )
+        .is_ok()
+      );
+    }
+  }
+
+  #[test]
+  fn script_exec_and_plain_container_tasks_require_exec() {
+    use crate::host_access::tests::auth;
+    let apply = auth([Perm::Read, Perm::Apply], false);
+    let exec = auth([Perm::Read, Perm::Apply, Perm::Exec], false);
+    for fields in [
+      serde_json::json!({"kind":"script","runtime":"shell","code":"true"}),
+      serde_json::json!({"kind":"exec","service":"app","command":"true"}),
+      serde_json::json!({"kind":"container","image":"alpine"}),
+    ] {
+      let spec = task(fields);
+      assert_eq!(
+        need_perm(&apply, &spec).unwrap_err().0.code,
+        ErrorCode::Forbidden
+      );
+      assert!(need_perm(&exec, &spec).is_ok());
+    }
+    assert!(
+      need_perm(&apply, &task(serde_json::json!({"kind":"ping"})))
+        .is_ok()
+    );
+  }
+
+  #[test]
+  fn delete_task_with_data_requires_confirm() {
+    use crate::host_access::tests::auth;
+    let apply = auth([Perm::Apply, Perm::Exec], false);
+    let confirm =
+      auth([Perm::Apply, Perm::Exec, Perm::Confirm], false);
+    let spec = task(
+      serde_json::json!({"kind":"script","runtime":"shell","code":"true"}),
+    );
+    let check = |auth, data| {
+      need_perm(auth, &spec).and_then(|()| {
+        require_confirm_task_data(auth, "script", &spec, data)
+      })
+    };
+    assert_eq!(
+      check(&apply, true).unwrap_err().0.code,
+      ErrorCode::Forbidden
+    );
+    assert!(check(&confirm, true).is_ok());
+    assert!(check(&apply, false).is_ok());
   }
 }

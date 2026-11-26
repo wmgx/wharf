@@ -1,5 +1,5 @@
 //! 部署"服务器上的目录"：浏览宿主机目录、把目录打成代码包。
-//! 和宿主机终端共用一个开关（服务器设置里的"允许打开宿主机终端"），要 exec 权限，打包记审计。
+//! 要 admin 权限。页面检查宿主机终端开关，API 令牌检查宿主机命令执行开关。
 //! 打出的包和 CLI 上传的一样，填进 `BuildSource.upload`；来源目录记在设置 `pack.origin.<服务>`，
 //! 服务详情据此提供"重新打包并发布"。
 
@@ -12,7 +12,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
-  ApiError, ErrorCode,
+  ApiError,
   agent::{AgentOp, HostPackJob, HostSession, PackedUpload},
   view::Perm,
 };
@@ -31,6 +31,7 @@ const PACK_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 pub async fn check_server(
   s: &AppState,
+  auth: &Auth,
   name: &str,
 ) -> Result<(), ApiError> {
   let snap = snapshot::load(&s.db).await?;
@@ -39,12 +40,11 @@ pub async fn check_server(
     .servers
     .get(name)
     .ok_or_else(|| crate::world::server_not_found(name))?;
-  if !row.settings.host_terminal {
-    return Err(ApiError::new(
-      ErrorCode::Forbidden,
-      "没有开启宿主机访问，请到\u{201c}服务器详情 → 设置\u{201d}打开\u{201c}允许从页面打开宿主机终端\u{201d}。",
-    ));
-  }
+  crate::host_access::check_host_dir_settings(
+    auth,
+    name,
+    &row.settings,
+  )?;
   if !s.hub.is_online(name) {
     return Err(crate::hub::offline(name));
   }
@@ -68,8 +68,14 @@ pub async fn list(
   Path(name): Path<String>,
   Query(q): Query<DirQuery>,
 ) -> ApiResult<Vec<String>> {
-  auth.require(Perm::Exec)?;
-  check_server(&s, &name).await?;
+  crate::host_access::require(
+    &auth,
+    crate::host_access::HostTarget::HostDir {
+      server: &name,
+      action: "浏览宿主机目录",
+    },
+  )?;
+  check_server(&s, &auth, &name).await?;
   Ok(Json(
     s.hub
       .call(
@@ -98,9 +104,14 @@ pub async fn pack(
   Path(name): Path<String>,
   Json(req): Json<PackRequest>,
 ) -> ApiResult<PackedUpload> {
-  auth.require(Perm::Exec)?;
-  auth.require(Perm::Apply)?;
-  check_server(&s, &name).await?;
+  crate::host_access::require(
+    &auth,
+    crate::host_access::HostTarget::HostDir {
+      server: &name,
+      action: "打包宿主机目录",
+    },
+  )?;
+  check_server(&s, &auth, &name).await?;
   let audit =
     start(&s.db, &auth.name, &name, "pack", Some(&req.path)).await?;
   let started = std::time::Instant::now();
@@ -181,8 +192,14 @@ pub async fn sessions(
   auth: Auth,
   Path(name): Path<String>,
 ) -> ApiResult<Vec<HostSession>> {
-  auth.require(Perm::Exec)?;
-  check_server(&s, &name).await?;
+  crate::host_access::require(
+    &auth,
+    crate::host_access::HostTarget::HostDir {
+      server: &name,
+      action: "查看宿主机终端会话",
+    },
+  )?;
+  check_server(&s, &auth, &name).await?;
   Ok(Json(
     s.hub
       .call(
@@ -202,8 +219,14 @@ pub async fn kill_session(
   auth: Auth,
   Path((name, session)): Path<(String, String)>,
 ) -> ApiResult<()> {
-  auth.require(Perm::Exec)?;
-  check_server(&s, &name).await?;
+  crate::host_access::require(
+    &auth,
+    crate::host_access::HostTarget::HostDir {
+      server: &name,
+      action: "结束宿主机终端会话",
+    },
+  )?;
+  check_server(&s, &auth, &name).await?;
   let audit =
     start(&s.db, &auth.name, &name, "terminal.kill", Some(&session))
       .await?;
@@ -242,8 +265,14 @@ pub async fn rename_session(
   Path((name, session)): Path<(String, String)>,
   Json(req): Json<RenameRequest>,
 ) -> ApiResult<()> {
-  auth.require(Perm::Exec)?;
-  check_server(&s, &name).await?;
+  crate::host_access::require(
+    &auth,
+    crate::host_access::HostTarget::HostDir {
+      server: &name,
+      action: "重命名宿主机终端会话",
+    },
+  )?;
+  check_server(&s, &auth, &name).await?;
   Ok(Json(
     s.hub
       .call(

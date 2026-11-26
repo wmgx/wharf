@@ -46,6 +46,9 @@ fn safe_plan(plan: &Plan, name: &str) -> Result<(), String> {
       other.into_iter().collect::<Vec<_>>().join("、")
     ));
   }
+  if !plan.needs_admin.is_empty() {
+    return Err("计划里有触达宿主机的项，需要管理员手动更新".into());
+  }
   if !plan.needs_confirm.is_empty() {
     return Err("计划里有要确认的高风险项".into());
   }

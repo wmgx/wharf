@@ -137,6 +137,9 @@ pub fn plan_with(p: &Plan, next_step: bool) {
       if item.needs_confirm() {
         risk.push_str("[需确认]");
       }
+      if item.needs_admin() {
+        risk.push_str("[需 admin]");
+      }
       if !risk.is_empty() {
         risk.insert_str(0, "  ");
       }

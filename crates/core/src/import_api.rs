@@ -24,11 +24,15 @@ use crate::{
 };
 
 /// Wharf 自己的 compose 项目：服务、网关、备份。
-fn managed(world: &World, project: &str) -> bool {
+pub(crate) fn managed(world: &World, project: &str) -> bool {
   world.services.contains_key(project)
     || world.gateways.keys().any(|g| gateway_project(g) == project)
     || project == render::BACKUP_PROJECT
+    || project == crate::tailscale::PROJECT
     || crate::link::is_link_project(project)
+    || project
+      .starts_with(wharf_api_types::agent::TRIAL_PROJECT_PREFIX)
+    || project.starts_with(wharf_api_types::agent::TASK_DATA_PREFIX)
 }
 
 pub async fn unmanaged(
@@ -196,6 +200,21 @@ pub struct RemoveRequest {
   volumes: bool,
 }
 
+fn require_remove(
+  auth: &Auth,
+  server: &str,
+  target: &str,
+) -> Result<(), crate::api::AppError> {
+  crate::host_access::require(
+    auth,
+    crate::host_access::HostTarget::RemoveUnmanaged {
+      server,
+      target,
+    },
+  )?;
+  auth.require(Perm::Confirm)
+}
+
 /// `POST /api/servers/{name}/unmanaged/remove`：删掉一个没纳管的容器或 compose 项目的全部容器。
 /// 只认现在仍然没纳管的，Wharf 自己的服务、网关不会被删。
 pub async fn remove(
@@ -204,12 +223,12 @@ pub async fn remove(
   Path(server): Path<String>,
   Json(req): Json<RemoveRequest>,
 ) -> ApiResult<wharf_api_types::agent::RemovedContainers> {
-  auth.require(Perm::Apply)?;
+  let (kind, name) = target(&req.project, &req.container)?;
+  require_remove(&auth, &server, name)?;
   let snap = snapshot::load(&s.db).await?;
   if !snap.world.servers.contains_key(&server) {
     return Err(server_not_found(&server).into());
   }
-  let (kind, name) = target(&req.project, &req.container)?;
   if kind == "project" && managed(&snap.world, name) {
     return Err(
       ApiError::invalid(format!(
@@ -308,4 +327,32 @@ pub async fn ignore(
   )
   .await?;
   Ok(Json(serde_json::json!({ "ignored": !req.undo })))
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::host_access::tests::auth;
+  use wharf_api_types::ErrorCode;
+
+  #[test]
+  fn remove_unmanaged_requires_admin_confirm_and_protects_tailscale()
+  {
+    for perms in [Perm::Apply, Perm::Admin, Perm::Confirm] {
+      let err =
+        require_remove(&auth([perms], false), "s1", "foreign")
+          .unwrap_err()
+          .0;
+      assert_eq!(err.code, ErrorCode::Forbidden);
+    }
+    assert!(
+      require_remove(
+        &auth([Perm::Admin, Perm::Confirm], false),
+        "s1",
+        "foreign"
+      )
+      .is_ok()
+    );
+    assert!(managed(&World::default(), "wharf-tailscale"));
+  }
 }

@@ -59,17 +59,30 @@ pub async fn remove(
   volumes: bool,
   ctx: &Ctx,
 ) -> Result<wharf_api_types::agent::RemovedContainers, ApiError> {
+  let mut targets = Vec::new();
+  for c in containers {
+    check_container_name(c)?;
+    if let Some(i) = info(docker, c, ctx).await? {
+      if i.owned {
+        return Err(ApiError::invalid(format!(
+          "容器 {} 属于 Wharf 管理，不能作为未纳管容器删除",
+          i.name
+        )));
+      }
+      targets.push(i);
+    }
+  }
   let mut out = wharf_api_types::agent::RemovedContainers::default();
   let mut vols: Vec<String> = Vec::new();
   if volumes {
-    for c in containers {
+    for i in &targets {
       let r = docker
         .cmd()
         .args([
           "inspect",
           "-f",
           "{{range .Mounts}}{{if eq .Type \"volume\"}}{{.Name}},{{end}}{{end}}",
-          c,
+          &i.id,
         ])
         .timeout(QUICK)
         .run(ctx)
@@ -82,15 +95,15 @@ pub async fn remove(
       }
     }
   }
-  for c in containers {
+  for i in &targets {
     docker
       .cmd()
-      .args(["rm", "-f", c])
+      .args(["rm", "-f", &i.id])
       .timeout(QUICK)
       .run(ctx)
       .await?
       .check("docker rm")?;
-    out.containers.push(c.clone());
+    out.containers.push(i.name.clone());
   }
   for v in vols {
     let r = docker
@@ -119,6 +132,7 @@ fn wharf_owned(labels: &BTreeMap<&str, &str>) -> bool {
     "wharf.service",
     "wharf.gateway",
     "wharf.link",
+    "wharf.network",
     "wharf.backup",
     "wharf.trial",
     "wharf.task",
@@ -127,6 +141,22 @@ fn wharf_owned(labels: &BTreeMap<&str, &str>) -> bool {
   ]
   .iter()
   .any(|key| labels.contains_key(key))
+}
+
+fn is_wharf_container(
+  name: &str,
+  labels: &BTreeMap<&str, &str>,
+) -> bool {
+  wharf_owned(labels)
+    || matches!(
+      name.trim_start_matches('/'),
+      "wharf-core" | "wharf-agent"
+    )
+    || labels.get(PROJECT_LABEL).is_some_and(|p| {
+      matches!(*p, "wharf-tailscale" | "wharf-backup" | "wharf-link")
+        || p.starts_with("wharf-link-")
+        || p.starts_with("wharf-gw-")
+    })
 }
 
 /// 本机的全部容器，不含 agent 自己。
@@ -148,7 +178,7 @@ pub async fn discover(
       .filter_map(|l| serde_json::from_str::<PsLine>(l).ok())
       .filter_map(|ps| {
         let labels = labels(&ps.labels);
-        if wharf_owned(&labels) {
+        if is_wharf_container(&ps.names, &labels) {
           return None;
         }
         let project =
@@ -378,6 +408,7 @@ struct Info {
   project: String,
   restart: String,
   running: bool,
+  owned: bool,
 }
 
 async fn info(
@@ -389,26 +420,63 @@ async fn info(
     .cmd()
     .args([
       "inspect",
+      "--type",
+      "container",
       "--format",
-      "{{.Id}}|{{.Name}}|{{index .Config.Labels \"com.docker.compose.project\"}}|{{.HostConfig.RestartPolicy.Name}}|{{.State.Running}}",
+      "{{json .}}",
+      "--",
       name,
     ])
     .timeout(QUICK)
     .run(ctx)
     .await?;
-  if !out.success {
+  if !out.success && out.stderr.contains("No such container:") {
     return Ok(None);
   }
-  let parts: Vec<&str> = out.stdout.trim().split('|').collect();
-  let [id, name, project, restart, running] = parts[..] else {
-    return Ok(None);
+  let out = out.check("docker inspect")?;
+  let doc: serde_json::Value = serde_json::from_str(&out.stdout)
+    .map_err(|e| {
+      ApiError::new(
+        ErrorCode::AgentFailed,
+        format!("无法读取容器 {name} 的检查结果：{e}"),
+      )
+    })?;
+  let invalid = || {
+    ApiError::new(
+      ErrorCode::AgentFailed,
+      format!("容器 {name} 的检查结果不完整"),
+    )
   };
+  let labels = match doc.pointer("/Config/Labels") {
+    Some(serde_json::Value::Null) => BTreeMap::new(),
+    Some(serde_json::Value::Object(map)) => map
+      .iter()
+      .map(|(k, v)| Ok((k.as_str(), v.as_str().ok_or_else(invalid)?)))
+      .collect::<Result<_, ApiError>>()?,
+    _ => return Err(invalid()),
+  };
+  let name = doc["Name"]
+    .as_str()
+    .ok_or_else(invalid)?
+    .trim_start_matches('/');
   Ok(Some(Info {
-    id: id.into(),
-    name: name.trim_start_matches('/').into(),
-    project: project.replace("<no value>", ""),
-    restart: restart.into(),
-    running: running == "true",
+    id: doc["Id"].as_str().ok_or_else(invalid)?.into(),
+    name: name.into(),
+    project: labels
+      .get(PROJECT_LABEL)
+      .copied()
+      .unwrap_or_default()
+      .into(),
+    restart: doc
+      .pointer("/HostConfig/RestartPolicy/Name")
+      .and_then(serde_json::Value::as_str)
+      .ok_or_else(invalid)?
+      .into(),
+    running: doc
+      .pointer("/State/Running")
+      .and_then(serde_json::Value::as_bool)
+      .ok_or_else(invalid)?,
+    owned: is_wharf_container(name, &labels),
   }))
 }
 
@@ -455,9 +523,17 @@ pub async fn retire(
     check_container_name(name)?;
     match info(docker, name, ctx).await? {
       // 已经是新服务的容器：之前接管过了。
-      Some(i) if i.project != r.service => targets.push((i, true)),
+      Some(i) if i.owned || i.project != r.service => {
+        targets.push((i, true))
+      }
       _ => {}
     }
+  }
+  if let Some((i, _)) = targets.iter().find(|(i, _)| i.owned) {
+    return Err(ApiError::invalid(format!(
+      "容器 {} 属于 Wharf 管理，不能接管",
+      i.name
+    )));
   }
   let mut done = Vec::new();
   for (i, rename) in targets {
@@ -540,6 +616,11 @@ mod observation_tests {
 
   #[test]
   fn skips_labelled_temporary_containers() {
+    assert!(is_wharf_container(
+      "tailscale",
+      &labels("wharf.network=tailscale")
+    ));
+    assert!(is_wharf_container("/wharf-core", &BTreeMap::new()));
     assert!(wharf_owned(&labels("foo=bar,wharf.temp=1")));
     assert!(wharf_owned(&labels("com.wharf.host-shell=1")));
     assert!(!wharf_owned(&labels(

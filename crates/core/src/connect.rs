@@ -60,6 +60,18 @@ pub async fn open(
     .services
     .get(&name)
     .ok_or_else(|| service_not_found(&name))?;
+  // 升级前保存的端口声明也会走宿主机转发，连接时复用计划校验。
+  if row
+    .spec
+    .find_port(q.port.as_deref())
+    .is_some_and(|p| p.host.is_some())
+  {
+    crate::host_access::validate_service_ports(
+      &snap.world,
+      &name,
+      &row.spec,
+    )?;
+  }
   let job = target(
     &name,
     &row.spec,
