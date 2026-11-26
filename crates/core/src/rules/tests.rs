@@ -37,8 +37,20 @@ fn state_with_db(db: db::Db) -> Arc<AppState> {
   })
 }
 
-fn test_state() -> Arc<AppState> {
+pub(crate) fn test_state() -> Arc<AppState> {
   state_with_db(db::Db::memory())
+}
+
+pub(crate) async fn notice_titles(
+  state: &AppState,
+  source: &'static str,
+) -> Vec<String> {
+  state.db.call(move |c| {
+    let mut stmt = c.prepare("SELECT title FROM alert_history WHERE source = ?1 ORDER BY id").map_err(db::sql_err)?;
+    stmt.query_map([source], |row| row.get(0))
+      .and_then(Iterator::collect)
+      .map_err(db::sql_err)
+  }).await.unwrap()
 }
 
 async fn seed_server_service(

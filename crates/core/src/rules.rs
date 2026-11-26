@@ -150,11 +150,12 @@ fn ev(title: String, body: String) -> Event {
 fn split_unit(s: &str) -> (&str, &str) {
   s.split_once(':').unwrap_or((s, ""))
 }
-
 /// 事件通知：id、名称和默认级别。
 const NOTICES: &[(&str, &str, AlertLevel)] = &[
   ("exposure", "机器上新开了对公网的端口", AlertLevel::Urgent),
   ("login", "从新的地址登录控制面", AlertLevel::Urgent),
+  ("ssh_login", "从陌生地址登录 SSH", AlertLevel::Urgent),
+  ("security_receipt", "高危操作回执", AlertLevel::Urgent),
   ("recovery", "用掉了一个恢复码", AlertLevel::Urgent),
   (
     "task",

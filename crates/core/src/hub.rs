@@ -69,6 +69,7 @@ struct Conn {
   access_logs: bool,
   net_probe: bool,
   container_probe: bool,
+  ssh_logins: bool,
   /// 协议版本不一致：连接放行，但只接受升级相关的请求，好让它升上来。
   upgrade_only: bool,
 }
@@ -131,6 +132,14 @@ pub fn offline(server: &str) -> ApiError {
 impl Hub {
   pub fn is_online(&self, server: &str) -> bool {
     lock(&self.conns).contains_key(server)
+  }
+
+  pub fn ssh_login_servers(&self) -> Vec<String> {
+    lock(&self.conns)
+      .iter()
+      .filter(|(_, conn)| !conn.upgrade_only && conn.ssh_logins)
+      .map(|(server, _)| server.clone())
+      .collect()
   }
 
   pub fn supports_host_shell(&self, server: &str) -> bool {
@@ -237,6 +246,12 @@ impl Hub {
       .get(server)
       .cloned()
       .ok_or_else(|| offline(server))?;
+    if matches!(&op, AgentOp::SshLogins) && !conn.ssh_logins {
+      return Err(ApiError::new(
+        ErrorCode::Conflict,
+        "agent 不支持采集 SSH 登录",
+      ));
+    }
     if let AgentOp::NetProbe(job) = &op {
       conn.check_net_probe(server, job.container.is_some())?;
     }
@@ -473,6 +488,7 @@ async fn handle_socket(
     access_logs,
     net_probe,
     container_probe,
+    ssh_logins,
   } = hello
   else {
     anyhow::bail!("agent 没有先发 hello");
@@ -573,6 +589,7 @@ async fn handle_socket(
     access_logs,
     net_probe,
     container_probe,
+    ssh_logins,
     upgrade_only,
   };
   state.hub.register(&server, conn.clone());
@@ -722,72 +739,4 @@ pub(crate) async fn touch(
 }
 
 #[cfg(test)]
-mod tests {
-  use super::*;
-
-  #[test]
-  fn protocol_gate() {
-    // 旧 agent 只能升级
-    assert!(!protocol_ok(0));
-    assert!(!protocol_ok(1));
-    assert!(protocol_ok(PROTOCOL));
-    assert!(!protocol_ok(PROTOCOL + 1));
-    assert!(!protocol_ok(u32::MAX));
-  }
-
-  #[test]
-  fn old_hello_has_no_host_shell_capability() {
-    let hello: AgentMsg = serde_json::from_value(serde_json::json!({
-      "type": "hello",
-      "server": "s1",
-      "public_key": "k",
-      "signature": "s",
-      "nonce": "n",
-      "version": "0.1.0",
-      "protocol": 1
-    }))
-    .unwrap();
-    let AgentMsg::Hello { host_shell, .. } = hello else {
-      panic!("不是 hello");
-    };
-    assert!(!host_shell);
-  }
-
-  #[test]
-  fn old_core_ignores_new_hello_capability() {
-    #[allow(dead_code)]
-    #[derive(serde::Deserialize)]
-    #[serde(tag = "type", rename_all = "snake_case")]
-    enum OldAgentMsg {
-      Hello {
-        server: String,
-        public_key: String,
-        signature: String,
-        nonce: String,
-        version: String,
-        #[serde(default)]
-        protocol: u32,
-      },
-    }
-
-    let hello = AgentMsg::Hello {
-      server: "s1".into(),
-      public_key: "k".into(),
-      signature: "s".into(),
-      nonce: "n".into(),
-      kx: Some("k".into()),
-      version: "0.1.0".into(),
-      protocol: PROTOCOL,
-      host_shell: true,
-      forward: true,
-      service_checks: true,
-      container_diagnosis: true,
-      access_logs: true,
-      net_probe: true,
-      container_probe: true,
-    };
-    let json = serde_json::to_string(&hello).unwrap();
-    let old = serde_json::from_str::<OldAgentMsg>(&json);
-    assert!(old.is_ok());
-  }
-}
+mod tests;

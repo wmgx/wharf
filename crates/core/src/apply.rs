@@ -234,8 +234,9 @@ pub async fn start(
   state: Arc<AppState>,
   req: ApplyRequest,
   perms: &std::collections::BTreeSet<Perm>,
-  auth: Option<&crate::auth::Auth>,
+  caller: Option<(&crate::auth::Auth, String)>,
 ) -> Result<ApplyResponse, ApiError> {
+  let auth = caller.as_ref().map(|(auth, _)| *auth);
   let guard = state
     .apply_lock
     .clone()
@@ -459,6 +460,8 @@ pub async fn start(
       .await?;
   }
 
+  let actor =
+    caller.map(crate::security_receipt::Actor::from_request);
   if run.status == RunStatus::Running {
     let first_pending = run.steps.len() - stored.steps.len();
     let cancel = CancellationToken::new();
@@ -476,9 +479,18 @@ pub async fn start(
       shared,
       stored.steps,
       first_pending,
+      actor.clone(),
       cancel,
       guard,
     ));
+  }
+  if !stored.writes.is_empty() {
+    crate::security_receipt::committed_config(
+      &state,
+      actor.as_ref(),
+      &plan.items,
+    )
+    .await;
   }
   for write in &stored.writes {
     if let db::Write::Delete { kind, name } = write
@@ -603,6 +615,7 @@ pub async fn start_task(
     shared,
     steps,
     0,
+    None,
     cancel,
     guard,
   ));
@@ -614,6 +627,7 @@ async fn execute(
   run: Arc<Mutex<Run>>,
   steps: Vec<StepPlan>,
   offset: usize,
+  actor: Option<crate::security_receipt::Actor>,
   cancel: CancellationToken,
   _guard: OwnedMutexGuard<()>,
 ) {
@@ -667,6 +681,13 @@ async fn execute(
     }
     let result =
       run_step(&state, &run_id, &step.step, progress, &cancel).await;
+    crate::security_receipt::completed_step(
+      &state,
+      actor.as_ref(),
+      &step.step,
+      &result,
+    )
+    .await;
     if let Some((service, action)) = op {
       let (status, error) = match &result {
         Ok(()) => (OpStatus::Succeeded, None),

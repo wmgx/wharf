@@ -339,6 +339,13 @@ pub async fn enable(
     login::source(peer.ip(), &headers),
   )
   .await;
+  crate::security_receipt::send(
+    &s,
+    &auth.name,
+    &key,
+    "启用或重设两步验证".into(),
+  )
+  .await;
   Ok(Json(json!({ "recovery_codes": codes })))
 }
 async fn change(
@@ -384,6 +391,18 @@ async fn change(
     login::source(peer.ip(), &headers),
   )
   .await;
+  crate::security_receipt::send(
+    &s,
+    &auth.name,
+    &key,
+    if disable {
+      "关闭两步验证"
+    } else {
+      "重生成两步验证恢复码"
+    }
+    .into(),
+  )
+  .await;
   Ok(Json(json!({ "recovery_codes": codes })))
 }
 pub async fn disable(
@@ -408,6 +427,102 @@ pub async fn recovery(
 #[cfg(test)]
 mod tests {
   use super::*;
+  #[tokio::test]
+  async fn changing_totp_has_receipts() {
+    use crate::{
+      rules::tests::{
+        TEST_LOCK, notice_titles, reset_memory, test_state,
+      },
+      security_receipt::tests::auth,
+    };
+
+    let _lock = TEST_LOCK.lock().await;
+    reset_memory();
+    let state = test_state();
+    let secret = b"12345678901234567890";
+    let password = "fixture-password";
+    state
+      .db
+      .call(move |c| {
+        login::set_admin(
+          c,
+          "operator",
+          &login::hash_password(password)?,
+        )?;
+        c.execute(
+          "UPDATE admin SET totp_pending = ?1",
+          [base32_encode(secret)],
+        )
+        .map_err(sql_err)?;
+        Ok(())
+      })
+      .await
+      .unwrap();
+    let peer = "203.0.113.8:1234".parse().unwrap();
+    let proof = || Proof {
+      password: password.into(),
+      code: format!(
+        "{:06}",
+        code_at(secret, now_ms() as u64 / 1000 / 30)
+      ),
+    };
+    assert!(
+      enable(
+        State(state.clone()),
+        auth(true),
+        ConnectInfo(peer),
+        HeaderMap::new(),
+        Json(proof())
+      )
+      .await
+      .is_ok()
+    );
+    state
+      .db
+      .call(|c| {
+        c.execute("UPDATE admin SET totp_last_step = NULL", [])
+          .map_err(sql_err)?;
+        Ok(())
+      })
+      .await
+      .unwrap();
+    assert!(
+      recovery(
+        State(state.clone()),
+        auth(true),
+        ConnectInfo(peer),
+        HeaderMap::new(),
+        Json(proof())
+      )
+      .await
+      .is_ok()
+    );
+    state
+      .db
+      .call(|c| {
+        c.execute("UPDATE admin SET totp_last_step = NULL", [])
+          .map_err(sql_err)?;
+        Ok(())
+      })
+      .await
+      .unwrap();
+    assert!(
+      disable(
+        State(state.clone()),
+        auth(true),
+        ConnectInfo(peer),
+        HeaderMap::new(),
+        Json(proof())
+      )
+      .await
+      .is_ok()
+    );
+    assert_eq!(
+      notice_titles(&state, "security_receipt").await,
+      ["启用或重设两步验证", "重生成两步验证恢复码", "关闭两步验证",]
+    );
+  }
+
   #[test]
   fn rfc6238_sha1() {
     assert_eq!(code_at(b"12345678901234567890", 59 / 30), 287082);
