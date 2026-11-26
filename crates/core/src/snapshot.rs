@@ -1169,6 +1169,73 @@ mod tests {
   }
 
   #[test]
+  fn compose_secret_file_checks_inherited_configs_and_each_reference()
+  {
+    let mut w = world(21000);
+    let net = Net::default();
+    let secrets =
+      BTreeMap::from([("PG_PASS".into(), "fixture-value".into())]);
+    let raw = concat!(
+      "x-base: &base\n",
+      "  environment:\n    PASS_FILE: [[FILE:PG_PASS]]\n",
+      "  configs:\n    - source: fixture\n      target: /etc/fixture\n",
+      "services:\n  app:\n    <<: *base\n    image: nginx:1\n",
+      "configs:\n  fixture:\n    content: fixture\n",
+    );
+    let mut resolve = |raw: &str| {
+      w.services.get_mut("app").unwrap().spec.source =
+        serde_json::from_value(
+          serde_json::json!({"compose": {"content": raw}}),
+        )
+        .unwrap();
+      service_resolved(&w, &net, "app", &secrets)
+    };
+    let (out, _) = resolve(raw).unwrap();
+    let doc: serde_yaml_ng::Value =
+      serde_yaml_ng::from_str(&out).unwrap();
+    let mounts =
+      doc["services"]["app"]["configs"].as_sequence().unwrap();
+    assert_eq!(mounts.len(), 2);
+    assert_eq!(mounts[0]["target"], "/etc/fixture");
+    assert_eq!(mounts[1]["target"], "/run/wharf-secrets/PG_PASS");
+
+    for alias in [
+      "/run/wharf-secrets//PG_PASS",
+      "/run/wharf-secrets/./PG_PASS",
+      "/run/wharf-secrets/../wharf-secrets/PG_PASS",
+    ] {
+      let error =
+        resolve(&raw.replace("/etc/fixture", alias)).unwrap_err();
+      assert_eq!(
+        error.message,
+        "服务 app 的容器 app 已有重复的挂载目标 /run/wharf-secrets/PG_PASS",
+      );
+    }
+    let orphan = format!("{raw}x-extra: [[FILE:PG_PASS]]\n");
+    assert_eq!(
+      resolve(&orphan).unwrap_err().message,
+      "[[FILE:...]] 只能写在 services 下的容器配置里",
+    );
+  }
+
+  #[test]
+  fn service_volume_rejects_normalized_secret_directory() {
+    let mut w = world(21000);
+    w.services.get_mut("app").unwrap().spec.volumes.push(
+      wharf_api_types::spec::VolumeSpec {
+        name: "data".into(),
+        target: "/run/fixture/../wharf-secrets//PG_PASS".into(),
+      },
+    );
+    assert!(
+      w.validate()
+        .unwrap_err()
+        .message
+        .contains(render::SECRET_FILE_DIR)
+    );
+  }
+
+  #[test]
   fn config_file_secret_is_mounted_once_and_reserves_its_directory() {
     let mut w = world(21000);
     let spec = &mut w.services.get_mut("app").unwrap().spec;

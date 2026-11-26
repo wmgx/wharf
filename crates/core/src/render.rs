@@ -1,6 +1,9 @@
 //! 由期望状态渲染出 compose 文件和 Caddyfile。纯函数，不碰网络和数据库。
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+  collections::{BTreeMap, BTreeSet},
+  path::{Component, Path, PathBuf},
+};
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::Serialize;
@@ -497,28 +500,37 @@ fn substitute_values(
 
 pub(crate) type SecretMounts = BTreeMap<String, BTreeSet<String>>;
 
-// 只记录映射键及其位置，允许未加引号的 [[X]] 从 YAML 序列变为标量。
-fn mapping_keys(value: &Value) -> Value {
+fn compose_shape(value: &Value) -> Value {
   match value {
     Value::Mapping(map) => Value::Mapping(
       map
         .iter()
-        .map(|(k, v)| (k.clone(), mapping_keys(v)))
+        .map(|(k, v)| (k.clone(), compose_shape(v)))
         .collect(),
     ),
     Value::Sequence(seq) => {
-      let mut keys: Vec<_> = seq.iter().map(mapping_keys).collect();
-      while keys.last() == Some(&Value::Null) {
-        keys.pop();
-      }
-      if keys.is_empty() {
-        Value::Null
-      } else {
-        Value::Sequence(keys)
-      }
+      Value::Sequence(seq.iter().map(compose_shape).collect())
     }
-    Value::Tagged(tag) => mapping_keys(&tag.value),
+    Value::Tagged(tag) => {
+      let mut tag = tag.clone();
+      tag.value = compose_shape(&tag.value);
+      Value::Tagged(tag)
+    }
     _ => Value::Null,
+  }
+}
+
+fn yaml_contains(value: &Value, text: &str) -> bool {
+  match value {
+    Value::String(value) => value.contains(text),
+    Value::Sequence(values) => {
+      values.iter().any(|value| yaml_contains(value, text))
+    }
+    Value::Mapping(values) => values.iter().any(|(key, value)| {
+      yaml_contains(key, text) || yaml_contains(value, text)
+    }),
+    Value::Tagged(tag) => yaml_contains(&tag.value, text),
+    _ => false,
   }
 }
 
@@ -527,87 +539,86 @@ fn substitute_compose(
   content: &str,
   secrets: Option<&BTreeMap<String, String>>,
 ) -> Result<(String, SecretMounts), ApiError> {
-  let mut files = BTreeSet::new();
   let out = substitute_values(
     content,
     secrets,
     SecretContext::Compose,
-    &mut files,
+    &mut BTreeSet::new(),
   )?;
   if out == content {
     return Ok((out, BTreeMap::new()));
   }
-  let names: BTreeSet<_> = placeholders(content)
-    .filter_map(|inner| parse_placeholder(inner, true).ok().flatten())
-    .map(|p| p.name)
-    .collect();
   let bad = || {
-    let names = names.iter().copied().collect::<Vec<_>>();
+    let names: BTreeSet<_> = placeholders(content)
+      .filter_map(|inner| {
+        parse_placeholder(inner, true).ok().flatten()
+      })
+      .map(|p| p.name)
+      .collect();
+    let names = names.into_iter().collect::<Vec<_>>();
     let name = names.first().copied().unwrap_or_default();
     ApiError::invalid(format!("服务 {service} 的 compose 填入密钥 {} 后不是合法的 YAML", names.join("、")))
       .with_hint(format!("密钥值里有引号或换行：在双引号里改用 [[json:{name}]]，或改用 [[FILE:{name}]]"))
   };
-  let before: Value =
-    serde_yaml_ng::from_str(content).map_err(|_| bad())?;
-  let after: Value =
+  let mut after: Value =
     serde_yaml_ng::from_str(&out).map_err(|_| bad())?;
-  if mapping_keys(&before) != mapping_keys(&after) {
+  // 未加引号的 [[X]] 会被 YAML 读成两层列表，先用标量代替占位符。
+  let mut prefix = "wharf_secret_ref_".to_string();
+  while content.contains(&prefix) || yaml_contains(&after, &prefix) {
+    prefix.push('_');
+  }
+  let mut markers = Vec::new();
+  let marked = rewrite_placeholders(content, true, |p| {
+    let marker = match p.mode {
+      SecretMode::File => {
+        let marker = format!("{prefix}{}_end", markers.len());
+        markers.push((p.name.to_string(), marker.clone()));
+        marker
+      }
+      _ => prefix.clone(),
+    };
+    Ok(Some(marker))
+  })?;
+  let before: Value =
+    serde_yaml_ng::from_str(&marked).map_err(|_| bad())?;
+  if compose_shape(&before) != compose_shape(&after) {
     return Err(bad());
   }
-  Ok((out, collect_compose_file_secrets(content, &files)?))
+  after.apply_merge().map_err(|_| bad())?;
+  check_compose_secret_volumes(service, &after)?;
+  Ok((out, collect_compose_file_secrets(before, &markers)?))
 }
 
 fn collect_compose_file_secrets(
-  content: &str,
-  files: &BTreeSet<String>,
+  mut doc: Value,
+  markers: &[(String, String)],
 ) -> Result<SecretMounts, ApiError> {
-  if files.is_empty() {
+  if markers.is_empty() {
     return Ok(BTreeMap::new());
   }
-  // 用模板标记定位挂载，密钥内容和用户写死的路径不会被当成引用。
-  let mut prefix = "wharf_file_ref_".to_string();
-  while content.contains(&prefix) {
-    prefix.push('_');
-  }
-  let markers: BTreeMap<_, _> = files
-    .iter()
-    .enumerate()
-    .map(|(i, name)| (name.as_str(), format!("{prefix}{i}_end")))
-    .collect();
-  let marked = rewrite_placeholders(content, true, |p| {
-    Ok(if p.mode == SecretMode::File {
-      markers.get(p.name).cloned()
-    } else {
-      None
-    })
-  })?;
   let bad = || {
-    ApiError::invalid("无法定位 compose 中文件密钥的目标容器")
-      .with_hint("在引用密钥的容器配置中使用 [[FILE:密钥名]]")
+    ApiError::invalid("[[FILE:...]] 只能写在 services 下的容器配置里")
   };
-  let parsed: Value =
-    serde_yaml_ng::from_str(&marked).map_err(|_| bad())?;
-  let services = parsed
+  doc.apply_merge().map_err(|_| bad())?;
+  let services = doc
     .get("services")
     .and_then(Value::as_mapping)
     .ok_or_else(bad)?;
-  let mut mounts = BTreeMap::new();
+  let mut found = BTreeSet::new();
+  let mut mounts = SecretMounts::new();
   for (container, body) in services {
     let container = container.as_str().ok_or_else(bad)?;
-    let body = serde_yaml_ng::to_string(body).map_err(|_| bad())?;
-    let used: BTreeSet<_> = markers
-      .iter()
-      .filter(|(_, marker)| body.contains(marker.as_str()))
-      .map(|(name, _)| (*name).to_string())
-      .collect();
-    if !used.is_empty() {
-      mounts.insert(container.to_string(), used);
+    for (name, marker) in markers {
+      if yaml_contains(body, marker) {
+        found.insert(marker);
+        mounts
+          .entry(container.to_string())
+          .or_default()
+          .insert(name.clone());
+      }
     }
   }
-  if files
-    .iter()
-    .any(|name| !mounts.values().any(|used| used.contains(name)))
-  {
+  if found.len() != markers.len() {
     return Err(bad());
   }
   Ok(mounts)
@@ -1048,6 +1059,65 @@ pub fn file_content(
   )
 }
 
+// 容器内路径按组件比较，不能在控制面上做文件系统解析。
+fn normalized_mount_target(target: &str) -> Option<PathBuf> {
+  let target = Path::new(target);
+  if !target.is_absolute() {
+    return None;
+  }
+  let mut normalized = PathBuf::from("/");
+  for component in target.components() {
+    match component {
+      Component::Normal(part) => normalized.push(part),
+      Component::ParentDir => {
+        normalized.pop();
+      }
+      _ => {}
+    }
+  }
+  Some(normalized)
+}
+
+pub(crate) fn reserved_secret_mount(target: &str) -> bool {
+  normalized_mount_target(target)
+    .is_some_and(|path| path.starts_with(SECRET_FILE_DIR))
+}
+
+fn check_compose_secret_volumes(
+  name: &str,
+  doc: &Value,
+) -> Result<(), ApiError> {
+  let volumes =
+    doc["services"]
+      .as_mapping()
+      .into_iter()
+      .flat_map(|services| {
+        services.values().flat_map(|service| {
+          service["volumes"].as_sequence().into_iter().flatten()
+        })
+      });
+  for volume in volumes {
+    let target = if let Some(short) = volume.as_str() {
+      // 从右往左拆，源路径可带 Compose 变量及其默认值。
+      let (head, tail) =
+        short.rsplit_once(':').unwrap_or(("", short));
+      if tail.starts_with('/') {
+        Some(tail)
+      } else {
+        head.rsplit_once(':').map(|(_, target)| target)
+      }
+    } else {
+      volume.get("target").and_then(Value::as_str)
+    };
+    if target.is_some_and(reserved_secret_mount) {
+      return Err(ApiError::invalid(format!(
+        "服务 {name} 的 compose 卷不能挂载到 {SECRET_FILE_DIR} 或其子路径"
+      )));
+    }
+  }
+  Ok(())
+}
+
 /// 把配置文件放进 compose：顶层 `configs` 用 `content` 写内容，容器的 `configs` 引用它。
 /// compose 判断要不要重建容器时不看内容，所以名字里带内容的哈希，内容一变名字就变，容器跟着重建。
 /// `files` 是（容器内路径，已替换好的内容）。没有配置文件时原样返回，不重新生成 YAML。
@@ -1073,6 +1143,11 @@ pub fn add_files(
   };
   let mut doc: Value =
     serde_yaml_ng::from_str(compose).map_err(|_| bad())?;
+  // 普通配置文件沿用原序列化结果，文件密钥挂载才需要展开继承的 configs。
+  if !mounts.is_empty() || !file_secrets.is_empty() {
+    doc.apply_merge().map_err(|_| bad())?;
+    check_compose_secret_volumes(name, &doc)?;
+  }
   let mut defs = Mapping::new();
   let mut refs = BTreeMap::<String, Vec<ComposeConfigRef>>::new();
   let mut add =
@@ -1147,13 +1222,25 @@ pub fn add_files(
       .or_insert_with(|| Value::Sequence(vec![]));
     let list = list.as_sequence_mut().ok_or_else(bad)?;
     for entry in additions {
-      if entry.target.starts_with(SECRET_FILE_DIR)
-        && list.iter().any(|v| {
-          v.get("target").and_then(Value::as_str)
-            == Some(entry.target.as_str())
-        })
-      {
-        return Err(bad());
+      if reserved_secret_mount(&entry.target) {
+        let mount = normalized_mount_target(&entry.target);
+        if list.iter().any(|v| {
+          let existing = match v.as_str() {
+            Some(source) => {
+              normalized_mount_target(&format!("/{source}"))
+            }
+            None => v
+              .get("target")
+              .and_then(Value::as_str)
+              .and_then(normalized_mount_target),
+          };
+          existing.is_some() && existing == mount
+        }) {
+          return Err(ApiError::invalid(format!(
+            "服务 {name} 的容器 {target} 已有重复的挂载目标 {}",
+            entry.target
+          )));
+        }
       }
       list.push(serde_yaml_ng::to_value(entry).map_err(|_| bad())?);
     }
@@ -1178,8 +1265,8 @@ pub fn check_compose(
   name: &str,
   content: &str,
 ) -> Result<(), ApiError> {
-  let value: serde_yaml_ng::Value = serde_yaml_ng::from_str(content)
-    .map_err(|e| {
+  let mut value: Value =
+    serde_yaml_ng::from_str(content).map_err(|e| {
       ApiError::invalid(format!(
         "服务 {name} 的 compose 不是合法的 YAML：{e}"
       ))
@@ -1204,7 +1291,12 @@ pub fn check_compose(
       );
     }
   }
-  Ok(())
+  value.apply_merge().map_err(|_| {
+    ApiError::invalid(format!(
+      "服务 {name} 的 compose YAML 合并不合法"
+    ))
+  })?;
+  check_compose_secret_volumes(name, &value)
 }
 
 pub fn gateway_image(spec: &GatewaySpec) -> String {
@@ -2490,6 +2582,74 @@ mod tests {
     let error =
       fill(&unquoted, "ok\n      INJECTED: fixture").unwrap_err();
     assert!(!error.message.contains("INJECTED"));
+  }
+
+  #[test]
+  fn compose_rejects_list_injection_without_echoing_secret() {
+    for (field, template, injected) in [
+      (
+        "environment",
+        "FOO=[[KEY]]",
+        "ok\n      - BAR=fixture-injected",
+      ),
+      (
+        "volumes",
+        "fixture/[[KEY]]:/data",
+        "ok:/data\n      - fixture-injected",
+      ),
+      ("command", "[[KEY]]", "ok\n      - fixture-injected"),
+      ("command", "[[KEY]]", "[fixture-injected]"),
+    ] {
+      let raw = format!(
+        "services:\n  app:\n    image: nginx:1\n    {field}:\n      - {template}\n"
+      );
+      let substituted = raw.replace("[[KEY]]", injected);
+      assert!(serde_yaml_ng::from_str::<Value>(&substituted).is_ok());
+      let fill = |value: &str| {
+        substitute_compose(
+          "app",
+          &raw,
+          Some(&BTreeMap::from([("KEY".into(), value.into())])),
+        )
+      };
+      assert_eq!(
+        fill("fixture").unwrap().0,
+        raw.replace("[[KEY]]", "fixture")
+      );
+      let error = fill(injected).unwrap_err();
+      assert!(error.message.contains("填入密钥 KEY"));
+      assert!(
+        !serde_json::to_string(&error)
+          .unwrap()
+          .contains("fixture-injected")
+      );
+    }
+  }
+
+  #[test]
+  fn compose_rejects_normalized_secret_volume_targets() {
+    for volume in [
+      "./fixture:/run/wharf-secrets//PG_PASS:ro",
+      "/run/./wharf-secrets",
+      "'${SOURCE:-./fixture}:/run/wharf-secrets/PG_PASS'",
+      "{type: volume, source: fixture, target: /run/other/../wharf-secrets/PG_PASS}",
+    ] {
+      let raw = format!(
+        "x-base: &base\n  volumes:\n    - {volume}\nservices:\n  app:\n    <<: *base\n    image: nginx:1\n"
+      );
+      let error = check_compose("app", &raw).unwrap_err();
+      assert!(error.message.contains(SECRET_FILE_DIR));
+    }
+    let raw = "services:\n  app:\n    image: nginx:1\n    volumes:\n      - ./fixture:/run/[[KEY]]/PG_PASS\n";
+    check_compose("app", raw).unwrap();
+    let secrets = BTreeMap::from([(
+      "KEY".into(),
+      "other/../wharf-secrets".into(),
+    )]);
+    let error =
+      substitute_compose("app", raw, Some(&secrets)).unwrap_err();
+    assert!(error.message.contains(SECRET_FILE_DIR));
+    assert!(!error.message.contains("other/.."));
   }
 
   #[test]

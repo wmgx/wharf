@@ -1833,6 +1833,13 @@ fn validate_service(
         volume.name
       )));
     }
+    if crate::render::reserved_secret_mount(&volume.target) {
+      return Err(ApiError::invalid(format!(
+        "服务 {name} 的数据卷 {} 不能挂载到 {} 或其子路径",
+        volume.name,
+        crate::render::SECRET_FILE_DIR
+      )));
+    }
   }
   check_files(name, &spec.files)?;
   for key in spec.env.keys() {
@@ -1861,7 +1868,7 @@ fn check_files(
   let mut paths = BTreeSet::new();
   for f in files {
     let dir = crate::render::SECRET_FILE_DIR;
-    if std::path::Path::new(&f.path).starts_with(dir) {
+    if crate::render::reserved_secret_mount(&f.path) {
       return Err(
         ApiError::invalid(format!(
           "服务 {name} 的配置文件路径 {} 不能放在 {dir}/ 下",
