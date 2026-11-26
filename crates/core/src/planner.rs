@@ -218,7 +218,7 @@ impl Step {
   /// 删除 DNS → 建目录 → 迁移数据 → 起服务 → 网关 → 写 DNS → 下线网关 → 下线服务。
   ///
   /// 迁移时旧服务器上的容器在"下线服务"这一步才删除，网关切到新地址之前旧容器一直在。
-  fn order(&self) -> u8 {
+  pub(crate) fn order(&self) -> u8 {
     match self {
       Self::DnsDelete { .. } | Self::EdgeDetach { .. } => 0,
       // 先换好拉镜像的路，后面起服务时就用上。
@@ -229,13 +229,18 @@ impl Step {
       Self::VolumeSync { .. } => 2,
       Self::ServiceUp { .. }
       | Self::EdgeDeploy { .. }
-      | Self::LinkUp { .. }
       | Self::TailscaleUp { .. }
       | Self::ServiceStop { .. } => 3,
+      Self::LinkUp { project, .. }
+        if project == crate::link::SERVER_PROJECT =>
+      {
+        3
+      }
       Self::GatewaySync { .. } => 4,
-      Self::DnsUpsert { .. } | Self::EdgeAttach { .. } => 5,
-      Self::GatewayDown { .. } | Self::LinkDown { .. } => 6,
-      Self::ServiceDown { .. } => 7,
+      Self::LinkUp { .. } => 5,
+      Self::DnsUpsert { .. } | Self::EdgeAttach { .. } => 6,
+      Self::GatewayDown { .. } | Self::LinkDown { .. } => 7,
+      Self::ServiceDown { .. } => 8,
       Self::Backup { .. }
       | Self::Restore { .. }
       | Self::Rebuild { .. }
@@ -244,7 +249,7 @@ impl Step {
       | Self::Prune { .. }
       | Self::CoreBackup { .. }
       | Self::ServiceRestart { .. }
-      | Self::EdgeRollback { .. } => 8,
+      | Self::EdgeRollback { .. } => 9,
     }
   }
 }
@@ -701,12 +706,14 @@ pub(crate) async fn make_plan_inner(
     &mut b, &snap, &current, &desired, &net, &status, &writes,
   )?;
   leftover_items(&mut b, &snap.deployed, &current, &desired, &status);
-  link_items(&mut b, &current, &desired, &net, &status)?;
+  link_items(&mut b, &snap, &current, &desired, &net, &status)?;
   tailscale_items(&mut b, &snap, &desired, &status);
   egress_items(&mut b, &current, &desired);
   docker_proxy_items(&mut b, &current, &desired);
   baseline_items(&mut b, &current, &desired);
-  gateway_items(&mut b, &snap, &current, &desired, &net, &status)?;
+  gateway_items(
+    &mut b, &snap, &current, &desired, &net, &status, &state.hub,
+  )?;
   // 带改动的计划只看受影响的域名；只检查漂移（没有改动）时看全部。
   let scope = (req.fleet.is_none()
     && (!req.changes.is_empty() || req.partial.is_some()))
@@ -1629,12 +1636,14 @@ fn applied_config<'a>(
 /// 反向隧道的 frps / frpc：按路由算出该有哪些，和现状比对。
 fn link_items(
   b: &mut Builder,
+  snap: &Snapshot,
   current: &World,
   desired: &World,
   net: &Net,
   status: &StatusMap,
 ) -> Result<(), ApiError> {
-  let want = crate::link::projects(desired, net)?;
+  let want =
+    crate::link::projects_with_secrets(desired, net, &snap.secrets)?;
   for p in &want {
     // 查不到现状的服务器已经单独提醒过。
     let Some(Some(projects)) = status.get(&p.server) else {
@@ -1981,6 +1990,7 @@ fn gateway_items(
   desired: &World,
   net: &Net,
   status: &StatusMap,
+  hub: &crate::hub::Hub,
 ) -> Result<(), ApiError> {
   for name in desired.gateways.keys() {
     let gw = &desired.gateways[name];
@@ -2022,6 +2032,10 @@ fn gateway_items(
     let server = &gw.spec.server;
     let project = gateway_project(name);
     let r = snapshot::gateway_render(desired, net, name)?;
+    let online = hub.is_online(server);
+    if r.needs_link_cert && online {
+      crate::link_cert::require_gateway_agent(hub, server, name)?;
+    }
     let after = Some(json!({
       "server": server,
       "sites": r.sites.iter().map(|s| json!({ "hostname": s.hostname, "upstream": s.upstream })).collect::<Vec<_>>(),
@@ -2073,18 +2087,51 @@ fn gateway_items(
             Action::Update,
             vec![],
             match gw.spec.kind {
-              GatewayKind::Caddy => "路由变化，热重载配置",
-              GatewayKind::CloudflareTunnel => {
-                "路由变化，更新隧道入口规则"
+              GatewayKind::Caddy if r.needs_link_cert => {
+                let now = chrono::Utc::now();
+                match net
+                  .link_certs
+                  .get(name)
+                  .and_then(|cert| cert.expires_at)
+                {
+                  Some(at)
+                    if crate::link_cert::needs_renew(
+                      Some(at),
+                      now,
+                    ) =>
+                  {
+                    let days = crate::link_cert::days_left(at, now);
+                    if days <= 0 {
+                      "隧道叶证书已过期，续签并热重载配置".into()
+                    } else {
+                      format!(
+                        "隧道叶证书将于 {days} 天后到期，续签并热重载配置"
+                      )
+                    }
+                  }
+                  _ if gateway_sites_same(
+                    current, desired, net, name,
+                  ) =>
+                  {
+                    "隧道证书变化，热重载配置".into()
+                  }
+                  _ => "路由变化，热重载配置".into(),
+                }
               }
-            }
-            .to_string(),
+              GatewayKind::Caddy => "路由变化，热重载配置".into(),
+              GatewayKind::CloudflareTunnel => {
+                "路由变化，更新隧道入口规则".into()
+              }
+            },
           ))
         }
         Some(_) => None,
       },
     };
     if let Some((action, mut risk, reason)) = decision {
+      if r.needs_link_cert && !online {
+        b.warnings.push(format!("服务器 {server} 离线，无法确认网关 {name} 的 agent 能下发隧道证书"));
+      }
       if gw.spec.kind == GatewayKind::Caddy {
         for f in &gw.spec.layer4 {
           if current

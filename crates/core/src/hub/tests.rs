@@ -25,6 +25,8 @@ fn old_hello_has_no_host_shell_capability() {
   let AgentMsg::Hello {
     host_shell,
     ssh_logins,
+    core_probe,
+    gateway_extra_files,
     ..
   } = hello
   else {
@@ -32,6 +34,8 @@ fn old_hello_has_no_host_shell_capability() {
   };
   assert!(!host_shell);
   assert!(!ssh_logins);
+  assert!(!core_probe);
+  assert!(!gateway_extra_files);
 }
 
 #[test]
@@ -67,11 +71,66 @@ fn old_core_ignores_new_hello_capability() {
     net_probe: true,
     container_probe: true,
     ssh_logins: true,
+    gateway_extra_files: true,
     core_probe: true,
   };
   let json = serde_json::to_string(&hello).unwrap();
   let old = serde_json::from_str::<OldAgentMsg>(&json);
   assert!(old.is_ok());
+}
+
+impl Hub {
+  pub(crate) fn mock_agent(
+    &self,
+    server: &str,
+    gateway_extra_files: bool,
+    mut handle: impl FnMut(AgentOp) -> Result<Value, ApiError>
+    + Send
+    + 'static,
+  ) {
+    let (tx, mut rx) = mpsc::channel(16);
+    let pending =
+      Arc::new(Mutex::new(HashMap::<u64, Pending>::new()));
+    let closed = CancellationToken::new();
+    self.register(
+      server,
+      Conn {
+        conn_id: self.next_conn.fetch_add(1, Ordering::Relaxed),
+        public_key: String::new(),
+        core_probe: false,
+        tx,
+        pending: pending.clone(),
+        closed: closed.clone(),
+        rtt_ms: Default::default(),
+        host_shell: false,
+        forward: false,
+        service_checks: false,
+        container_diagnosis: false,
+        access_logs: false,
+        net_probe: false,
+        container_probe: false,
+        ssh_logins: false,
+        gateway_extra_files,
+        upgrade_only: false,
+      },
+    );
+    tokio::spawn(async move {
+      loop {
+        let msg = tokio::select! {
+          () = closed.cancelled() => break,
+          msg = rx.recv() => msg,
+        };
+        let Some(msg) = msg else {
+          break;
+        };
+        if let CoreMsg::Request { id, op, .. } = msg
+          && let Some(p) = lock(&pending).remove(&id)
+        {
+          let _ = p.done.send(handle(op));
+        }
+      }
+    });
+  }
 }
 
 #[tokio::test]
@@ -120,6 +179,7 @@ async fn agent_upgrade_needs_no_bound_core_server_or_probe_support() {
     net_probe: false,
     container_probe: false,
     ssh_logins: false,
+    gateway_extra_files: false,
     upgrade_only: true,
   };
   state.hub.register("s1", conn.clone());
@@ -173,6 +233,7 @@ fn probe_connection(
     net_probe: false,
     container_probe: false,
     ssh_logins: false,
+    gateway_extra_files: false,
     upgrade_only: false,
   };
   (conn, rx)

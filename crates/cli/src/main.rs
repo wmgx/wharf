@@ -1124,6 +1124,21 @@ pub enum GatewayCmd {
   Config {
     name: String,
   },
+  /// 轮换网关反向隧道的凭据。省略 --link-token 和 --cert 时同时轮换两者。
+  RotateLink {
+    name: String,
+    /// 轮换反向隧道的认证密钥。
+    #[arg(long)]
+    link_token: bool,
+    /// 轮换反向隧道的叶证书。
+    #[arg(long)]
+    cert: bool,
+    /// 兼容旧调用。高风险项仍需逐项传入 --confirm <地址>。
+    #[arg(long = "yes", requires = "apply")]
+    _yes: bool,
+    #[command(flatten)]
+    apply: ApplyFlags,
+  },
   /// 查看网关容器日志，或加 --access 查看 HTTP 访问日志。
   #[command(group(
     clap::ArgGroup::new("access_filters")

@@ -372,6 +372,53 @@ pub(super) const RULES: &[Rule] = &[
     },
   },
   Rule {
+    id: "link_cert_expiring",
+    name: "隧道证书快到期",
+    metric: "link_cert.days",
+    op: Op::Lt,
+    threshold: crate::link_cert::LEAF_ALERT_DAYS as f64,
+    threshold_editable: true,
+    for_n: 1,
+    mode: Mode::Consecutive,
+    recover: None,
+    every: "每分钟一次",
+    default_level: AlertLevel::Digest,
+    key: |s| format!("link_cert.{s}"),
+    fire: |c| {
+      ev(
+        format!("网关 {} 的隧道证书快到期", c.subject),
+        format!("证书还剩 {:.0} 天", c.value),
+      )
+    },
+    ok: |c| {
+      ev(
+        format!("网关 {} 的隧道证书已续期", c.subject),
+        String::new(),
+      )
+    },
+  },
+  Rule {
+    id: "link_ca_expiring",
+    name: "隧道 CA 证书快到期",
+    metric: "link_ca.days",
+    op: Op::Lt,
+    threshold: crate::link_cert::CA_WARN_DAYS as f64,
+    threshold_editable: true,
+    for_n: 1,
+    mode: Mode::Consecutive,
+    recover: None,
+    every: "每分钟一次",
+    default_level: AlertLevel::Digest,
+    key: |_| "link_ca".into(),
+    fire: |c| {
+      ev(
+        "集群隧道 CA 证书快到期".into(),
+        format!("证书还剩 {:.0} 天", c.value),
+      )
+    },
+    ok: |_| ev("集群隧道 CA 证书已续期".into(), String::new()),
+  },
+  Rule {
     id: "link_loss",
     name: "内网链路丢包",
     metric: "link.loss",

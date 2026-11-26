@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
   ApiError,
   agent::{AgentOp, PROBE_PORT, ProbeTarget},
-  spec::{GatewayKind, GatewaySpec, LinkMode, RouteSpec},
+  spec::{GatewayKind, GatewaySpec, GatewayTls, LinkMode, RouteSpec},
 };
 
 use crate::{
@@ -26,8 +26,14 @@ use crate::{
 
 /// 网关所在机器上的 frps。
 pub const SERVER_PROJECT: &str = "wharf-link";
-/// frps 和 frpc 之间的认证密钥，第一次部署隧道时自动生成。
-pub const TOKEN_SECRET: &str = "WHARF_LINK_TOKEN";
+pub const SECRET_PREFIX: &str = "WHARF_LINK_";
+pub const TOKEN_PREFIX: &str = "WHARF_LINK_TOKEN_";
+pub const CERT_PREFIX: &str = "WHARF_LINK_CERT_";
+pub const KEY_PREFIX: &str = "WHARF_LINK_KEY_";
+pub const CA_CERT_SECRET: &str = "WHARF_LINK_CA_CERT";
+pub const CA_KEY_SECRET: &str = "WHARF_LINK_CA_KEY";
+pub const GATEWAY_SECRET_PREFIXES: &[&str] =
+  &[TOKEN_PREFIX, CERT_PREFIX, KEY_PREFIX];
 /// frps 只监听 127.0.0.1，Caddy 把 `FRP_PATH` 转发过来。
 pub const FRPS_PORT: u16 = 7000;
 /// frp 的 websocket 路径，frps 认这个路径。
@@ -91,6 +97,27 @@ pub fn choose(
     .with_hint(format!(
       "在 {server} 上建一个 cloudflare_tunnel 网关，路由改用它，不需要开端口"
     )));
+  }
+  if choice == Choice::Tunnel {
+    let carrier = link_gateway(world, gateway_server);
+    let disabled = if gateway.tls == GatewayTls::Off {
+      world.gateways.iter().find_map(|(name, row)| {
+        (&row.spec == gateway).then_some(name.as_str())
+      })
+    } else {
+      carrier
+        .filter(|(_, spec)| spec.tls == GatewayTls::Off)
+        .map(|(name, _)| name)
+    };
+    if gateway.tls == GatewayTls::Off || disabled.is_some() {
+      let name = disabled.unwrap_or(gateway_server);
+      return Err(ApiError::invalid(format!(
+        "服务 {service} 在 {server} 上，网关 {name} 关闭了 TLS（tls=off），无法建立加密反向隧道"
+      ))
+      .with_hint(format!(
+        "把网关 {name} 的 TLS 改为 auto 或 internal，或让两台机器加入同一个组网直连"
+      )));
+    }
   }
   Ok(choice)
 }
@@ -225,9 +252,9 @@ pub fn tunnel_upstream(
     })
 }
 
-/// 一台机器上要部署的隧道项目（frps 或 frpc）。compose 里密钥是占位，部署时才替换。
-#[derive(Debug, Clone)]
+/// 一台机器上要部署的隧道项目。compose 可能包含明文，只用于计算指纹和下发。
 pub struct LinkProject {
+  pub gateway: String,
   pub server: String,
   pub project: String,
   pub compose: String,
@@ -240,6 +267,33 @@ pub fn projects(
   world: &World,
   net: &Net,
 ) -> Result<Vec<LinkProject>, ApiError> {
+  projects_with_secrets(world, net, &BTreeMap::new())
+}
+
+pub fn projects_with_secrets(
+  world: &World,
+  net: &Net,
+  secrets: &BTreeMap<String, String>,
+) -> Result<Vec<LinkProject>, ApiError> {
+  let token = |gateway: &str| {
+    secrets
+      .get(&format!("{TOKEN_PREFIX}{gateway}"))
+      .or_else(|| net.link_token_hashes.get(gateway))
+      .map(String::as_str)
+      .unwrap_or("pending")
+  };
+  let ca = secrets
+    .get(CA_CERT_SECRET)
+    .or(net.link_ca_cert.as_ref())
+    .map(String::as_str)
+    .unwrap_or("pending");
+  let carrier = |server: &str| {
+    link_gateway(world, server).ok_or_else(|| {
+      ApiError::internal(format!(
+        "服务器 {server} 没有承载反向隧道的网关"
+      ))
+    })
+  };
   let tunnels = tunnels(world, net)?;
   let mut clients: BTreeMap<(String, String), Vec<&Tunnel>> =
     BTreeMap::new();
@@ -253,8 +307,11 @@ pub fn projects(
     tunnels.iter().map(|t| t.gateway_server.as_str()).collect();
   let mut out = Vec::new();
   for server in servers {
-    let compose = render::frps_compose(SERVER_PROJECT);
+    let (gateway, _) = carrier(server)?;
+    let compose =
+      render::frps_compose(SERVER_PROJECT, token(gateway));
     out.push(LinkProject {
+      gateway: gateway.to_string(),
       server: server.to_string(),
       project: SERVER_PROJECT.to_string(),
       hash: render::hash(&compose),
@@ -265,9 +322,8 @@ pub fn projects(
   }
   for ((service_server, gateway_server), list) in clients {
     let addr = frps_addr(net, &gateway_server)?;
-    let port = link_gateway(world, &gateway_server)
-      .and_then(|(_, g)| g.https_port)
-      .unwrap_or(443);
+    let (gateway, spec) = carrier(&gateway_server)?;
+    let port = spec.https_port.unwrap_or(443);
     let project = client_project(&gateway_server);
     let proxies: Vec<(String, u16, u16)> = list
       .iter()
@@ -279,13 +335,20 @@ pub fn projects(
         )
       })
       .collect();
-    let compose =
-      render::frpc_compose(&project, &addr, port, &proxies);
+    let compose = render::frpc_compose(
+      &project,
+      &addr,
+      port,
+      &proxies,
+      token(gateway),
+      ca,
+    );
     let names: Vec<String> = list
       .iter()
       .map(|t| format!("{}:{}", t.service, t.port))
       .collect();
     out.push(LinkProject {
+      gateway: gateway.to_string(),
       server: service_server.clone(),
       hash: render::hash(&compose),
       compose,
@@ -300,7 +363,7 @@ pub fn projects(
 }
 
 /// 一台机器上给 frps 做转发的 Caddy 网关：按名字排第一个。
-fn link_gateway<'a>(
+pub fn link_gateway<'a>(
   world: &'a World,
   server: &str,
 ) -> Option<(&'a str, &'a GatewaySpec)> {
@@ -616,7 +679,7 @@ mod tests {
     let frpc = &ps[1].compose;
     assert!(frpc.contains(r#"serverAddr = "203.0.113.5""#), "{frpc}");
     assert!(frpc.contains("localPort = 20000"));
-    assert!(frpc.contains("[[WHARF_LINK_TOKEN]]"));
+    assert!(frpc.contains("/etc/frp/ca.pem"));
     assert!(frpc.contains("network_mode: host"));
     assert!(frpc.contains("serverPort = 443"));
     assert!(frpc.contains(r#"transport.protocol = "wss""#));

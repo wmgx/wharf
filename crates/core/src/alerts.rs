@@ -1,6 +1,6 @@
 //! 每分钟采一次服务器在线、容器是否在重启，交给 [crate::rules] 按规则判断推送。
 
-use std::{sync::Arc, time::Duration};
+use std::{collections::BTreeSet, sync::Arc, time::Duration};
 
 use wharf_api_types::view::{Issue, IssueLevel, IssueSubject};
 
@@ -93,6 +93,7 @@ async fn round(
     })
     .collect();
   crate::rules::sync_unavailable_gateways(state, down_gateways).await;
+  observe_link_certificates(state, &snap).await;
   for (name, online) in &servers {
     crate::rules::observe(
       state,
@@ -114,4 +115,26 @@ async fn round(
     .await;
   }
   Ok(())
+}
+
+pub(crate) async fn observe_link_certificates(
+  state: &AppState,
+  snap: &crate::snapshot::Snapshot,
+) {
+  let net = snap.net(&snap.world);
+  let now = chrono::Utc::now();
+  let mut active = BTreeSet::new();
+  for (name, expires) in crate::link_cert::leaf_expiries(snap, &net) {
+    active.insert(name.to_string());
+    let days = (expires - now).num_seconds() as f64 / 86_400.0;
+    crate::rules::observe(state, "link_cert.days", name, days, "")
+      .await;
+  }
+  crate::rules::retain_subjects(state, "link_cert_expiring", &active)
+    .await;
+  if let Some(expires) = crate::link_cert::ca_expiry(snap) {
+    let days = (expires - now).num_seconds() as f64 / 86_400.0;
+    crate::rules::observe(state, "link_ca.days", "ca", days, "")
+      .await;
+  }
 }

@@ -395,6 +395,9 @@ pub struct GatewayApply {
   /// 写到 project 目录下 `conf/Caddyfile`。
   pub caddyfile: String,
   pub caddyfile_hash: String,
+  /// 随 Caddyfile 下发的受控文件。旧控制面缺省为空。
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub extra_files: BTreeMap<String, String>,
   /// 用来跑 `caddy validate` 的镜像，和 compose 里的一致。
   pub image: String,
 }

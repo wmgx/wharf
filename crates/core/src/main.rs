@@ -65,6 +65,7 @@ mod import_api;
 mod jobs;
 mod join;
 mod link;
+mod link_cert;
 mod lint;
 mod lockout;
 mod log_search;

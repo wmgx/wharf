@@ -2839,6 +2839,28 @@ async fn gateway(
       });
       Ok(())
     }
+    GatewayCmd::RotateLink {
+      name,
+      link_token,
+      cert,
+      apply,
+      ..
+    } => {
+      let both = !link_token && !cert;
+      let response = c
+        .rotate_link(&name, link_token || both, cert || both)
+        .await?;
+      if apply.apply {
+        if !j {
+          print::rotate_link(&response);
+        }
+        plan_and_maybe_apply(c, PlanRequest::default(), apply, j)
+          .await
+      } else {
+        out(j, &response, print::rotate_link);
+        Ok(())
+      }
+    }
     GatewayCmd::Logs(args) => {
       crate::access_logs::gateway(c, args, j).await
     }
@@ -4248,6 +4270,57 @@ fn share_ttl(s: &str) -> Result<Duration, String> {
 mod tests {
   use super::*;
   use clap::Parser;
+
+  #[test]
+  fn rotate_link_yes_help_preserves_per_item_confirmation() {
+    let credential = format!("fixture-{}", std::process::id());
+    let cli = Cli::try_parse_from([
+      "wharf",
+      "gateway",
+      "rotate-link",
+      "gw-a",
+      "--token",
+      &credential,
+      "--link-token",
+      "--apply",
+      "--yes",
+    ])
+    .unwrap();
+    assert!(cli.token.as_deref() == Some(credential.as_str()));
+    assert!(matches!(
+      cli.command,
+      Command::Gateway(GatewayCmd::RotateLink { link_token: true, cert: false, apply, .. })
+        if apply.apply && apply.confirm.is_empty()
+    ));
+    let default = Cli::try_parse_from([
+      "wharf",
+      "gateway",
+      "rotate-link",
+      "gw-a",
+    ])
+    .unwrap();
+    assert!(matches!(
+      default.command,
+      Command::Gateway(GatewayCmd::RotateLink {
+        link_token: false,
+        cert: false,
+        ..
+      })
+    ));
+    let Err(help) = Cli::try_parse_from([
+      "wharf",
+      "gateway",
+      "rotate-link",
+      "--help",
+    ]) else {
+      panic!("预期返回命令帮助");
+    };
+    assert_eq!(help.kind(), clap::error::ErrorKind::DisplayHelp);
+    let help = help.to_string();
+    assert!(help.contains("高风险项仍需逐项传入 --confirm"));
+    assert!(help.contains("--link-token"));
+    assert!(!help.contains("--api-token"));
+  }
 
   #[test]
   fn route_add_keeps_unspecified_fields() {

@@ -41,8 +41,7 @@ use crate::{
 const KEY_SECRET: &str = "WHARF_BACKUP_KEY";
 const HTTP_SECRET: &str = "WHARF_BACKUP_HTTP";
 const HTTP_HASH_SECRET: &str = "WHARF_BACKUP_HTTP_HASH";
-pub const MANAGED_SECRETS: [&str; 3] =
-  [KEY_SECRET, HTTP_SECRET, HTTP_HASH_SECRET];
+pub const SECRET_PREFIX: &str = "WHARF_BACKUP_";
 pub(crate) const HTTP_USER: &str = "wharf";
 
 const STOP_TIMEOUT: Duration = Duration::from_secs(5 * 60);

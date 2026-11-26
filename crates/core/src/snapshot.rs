@@ -230,6 +230,23 @@ impl Snapshot {
           Some((k.clone(), render::BasicAuth::parse(v)?))
         })
         .collect(),
+      link_ca_cert: self
+        .secrets
+        .get(crate::link::CA_CERT_SECRET)
+        .map(|cert| render::hash(cert)),
+      link_token_hashes: self
+        .secrets
+        .iter()
+        .filter_map(|(name, token)| {
+          Some((
+            name.strip_prefix(crate::link::TOKEN_PREFIX)?.to_string(),
+            render::hash(token),
+          ))
+        })
+        .collect(),
+      link_certs: crate::link_cert::LinkCertState::from_secrets(
+        &self.secrets,
+      ),
       reach: self.reach.clone(),
       cloudflare_ips: crate::cloudflare_ips::cached_cidrs(),
       tailnet_ips: self
@@ -401,6 +418,8 @@ pub struct GatewayRender {
   pub config_hash: String,
   pub sites: Vec<render::Site>,
   pub needs_acme_dns: bool,
+  pub needs_link_cert: bool,
+  pub extra_files: BTreeMap<String, String>,
 }
 
 impl GatewayRender {
@@ -639,6 +658,8 @@ pub fn gateway_render_with_fill(
   }
   sites.sort_by(|a, b| a.hostname.cmp(&b.hostname));
   let mut needs_acme_dns = false;
+  let needs_link_cert = gateway.spec.kind == GatewayKind::Caddy
+    && crate::link::caddy_site(world, net, name, &gateway.spec)?;
   let (compose, config) = match gateway.spec.kind {
     GatewayKind::Caddy => {
       let mut forwards = Vec::new();
@@ -694,7 +715,7 @@ pub fn gateway_render_with_fill(
           &gateway.spec,
           &caddy_sites,
           &forwards,
-          crate::link::caddy_site(world, net, name, &gateway.spec)?,
+          needs_link_cert,
           net.gate_public.as_deref(),
           &crate::source_trust::gateway_trusted_proxies(
             world,
@@ -722,13 +743,32 @@ pub fn gateway_render_with_fill(
       )
     }
   };
+  let config_hash = if needs_link_cert {
+    let tag = match net.link_certs.get(name) {
+      Some(cert)
+        if !crate::link_cert::needs_renew(
+          cert.expires_at,
+          chrono::Utc::now(),
+        ) =>
+      {
+        cert.fingerprint.as_str()
+      }
+      Some(_) => "renew",
+      None => "pending",
+    };
+    crate::link_cert::config_hash(&config, tag)
+  } else {
+    render::hash(&config)
+  };
   Ok(GatewayRender {
     compose_hash: render::hash(&compose),
-    config_hash: render::hash(&config),
+    config_hash,
     compose,
     config,
     sites,
     needs_acme_dns,
+    needs_link_cert,
+    extra_files: BTreeMap::new(),
   })
 }
 
@@ -902,6 +942,8 @@ mod tests {
       config_hash: render::hash(config),
       sites: Vec::new(),
       needs_acme_dns: false,
+      needs_link_cert: false,
+      extra_files: BTreeMap::new(),
     }
     .fingerprint()
   }

@@ -135,6 +135,8 @@ pub enum AgentMsg {
     #[serde(default)]
     ssh_logins: bool,
     #[serde(default)]
+    gateway_extra_files: bool,
+    #[serde(default)]
     core_probe: bool,
   },
   Report(Box<AgentReport>),

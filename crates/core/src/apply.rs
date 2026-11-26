@@ -750,7 +750,7 @@ fn service_op(step: &Step) -> Option<(&str, &'static str)> {
 
 /// 计划时的产物指纹和现在渲染的不一致：说明计划之后有东西变了，
 /// 现在下发的和用户看过的不一样，重新 plan 再确认。
-fn check_expect(
+pub(crate) fn check_expect(
   expect: Option<&str>,
   current: &str,
   what: &str,
@@ -800,7 +800,7 @@ async fn record_op(
   }
 }
 
-async fn run_step(
+pub(crate) async fn run_step(
   state: &AppState,
   run_id: &str,
   step: &Step,
@@ -1029,6 +1029,7 @@ async fn run_step(
             },
             caddyfile: r.config,
             caddyfile_hash: r.config_hash,
+            extra_files: r.extra_files,
             image: render::gateway_image(&gw.spec),
           }),
           GATEWAY_TIMEOUT,
@@ -1053,24 +1054,57 @@ async fn run_step(
           )
           .suggest("wharf plan")
         })?;
-      let now = Utc::now().timestamp_millis();
-      let token = state
+      let client = project != crate::link::SERVER_PROJECT;
+      if !client {
+        crate::link_cert::require_gateway_agent(
+          &state.hub, server, &p.gateway,
+        )?;
+      }
+      let gateway = p.gateway;
+      let (token, ca) = state
         .db
-        .call_credentials(move |c, key| {
-          db::ensure_secret(c, key, crate::link::TOKEN_SECRET, now)
+        .call_credentials({
+          let gateway = gateway.clone();
+          move |c, key| {
+            let now = db::now_ms();
+            let tx = c.transaction().map_err(db::sql_err)?;
+            let token = db::ensure_scoped_secret(
+              &tx,
+              key,
+              crate::link::TOKEN_PREFIX,
+              &gateway,
+              now,
+            )?;
+            let ca = if client {
+              Some(crate::link_cert::ensure_ca(&tx, key, now)?.cert)
+            } else {
+              None
+            };
+            tx.commit().map_err(db::sql_err)?;
+            Ok((token, ca))
+          }
         })
         .await?;
-      let compose = p.compose.replace(
-        &format!("[[{}]]", crate::link::TOKEN_SECRET),
-        &token,
+      let mut secrets = snap.secrets.clone();
+      secrets.insert(
+        format!("{}{gateway}", crate::link::TOKEN_PREFIX),
+        token,
       );
+      if let Some(ca) = ca {
+        secrets.insert(crate::link::CA_CERT_SECRET.into(), ca);
+      }
+      let p =
+        crate::link::projects_with_secrets(world, &net, &secrets)?
+          .into_iter()
+          .find(|p| &p.server == server && &p.project == project)
+          .ok_or_else(|| ApiError::internal("反向隧道配置丢失"))?;
       let result: ProjectUpResult = state
         .hub
         .call(
           server,
           AgentOp::ProjectUp(ProjectUp {
             project: project.clone(),
-            compose,
+            compose: p.compose,
             hash: p.hash,
             pull: snapshot::pull_policy(&world.servers[server]),
             pull_missing_only: false,
