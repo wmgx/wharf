@@ -21,6 +21,7 @@ mod auto_update;
 mod backup;
 mod baseline;
 mod build;
+mod caddy_validate;
 mod cert;
 mod cert_status;
 mod cli_dist;
@@ -206,6 +207,13 @@ async fn main() -> anyhow::Result<()> {
   }
   source_trust::init_extra_proxies(&cli.trusted_proxies)
     .map_err(|e| anyhow::anyhow!(e.message))?;
+  let public_url =
+    cli.public_url.map(|u| u.trim_end_matches('/').to_string());
+  if let Some(url) = &public_url
+    && !caddy_validate::valid_public_url(url)
+  {
+    anyhow::bail!("--public-url / WHARF_PUBLIC_URL 不合法：{url}");
+  }
   let key = load_or_create_key(&cli.data_dir.join("core.key"))?;
   auth::bootstrap(&db, &cli.data_dir).await?;
   login::bootstrap_setup_code(&db, &cli.data_dir).await?;
@@ -216,9 +224,7 @@ async fn main() -> anyhow::Result<()> {
     key,
     runs: Default::default(),
     apply_lock: Default::default(),
-    public_url: cli
-      .public_url
-      .map(|u| u.trim_end_matches('/').to_string()),
+    public_url,
     agent_image: cli.agent_image,
     listen_port: cli.listen.port(),
     data_dir: cli.data_dir.clone(),

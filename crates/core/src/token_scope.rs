@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use axum::http::Method;
 use wharf_api_types::{
   ApiError, ErrorCode,
-  plan::{Layer, Plan, PlanItem, PlanRequest},
+  plan::{Action, Layer, Plan, PlanItem, PlanRequest},
   spec::{Change, RouteSpec},
 };
 
@@ -235,16 +235,32 @@ fn route_in_scope(
   host: &str,
   item: &PlanItem,
 ) -> bool {
-  let specs = [item.before.as_ref(), item.after.as_ref()];
-  specs.iter().any(Option::is_some)
-    && specs.into_iter().flatten().all(|value| {
-      serde_json::from_value::<RouteSpec>(value.clone()).is_ok_and(
-        |route| {
-          route.hostname == host
-            && route_spec_in_scope(services, &route)
-        },
-      )
-    })
+  let parse = |value: Option<&serde_json::Value>| {
+    value.map(|v| serde_json::from_value::<RouteSpec>(v.clone()))
+  };
+  let (before, after) = match (
+    parse(item.before.as_ref()).transpose(),
+    parse(item.after.as_ref()).transpose(),
+  ) {
+    (Ok(before), Ok(after)) => (before, after),
+    _ => return false,
+  };
+  if before.is_none() && after.is_none() {
+    return false;
+  }
+  if item.action != Action::Delete
+    && crate::caddy_validate::route_caddy_changed(
+      before.as_ref(),
+      after.as_ref(),
+    )
+  {
+    return false;
+  }
+  [before.as_ref(), after.as_ref()].into_iter().flatten().all(
+    |route| {
+      route.hostname == host && route_spec_in_scope(services, route)
+    },
+  )
 }
 
 pub fn check_plan_scope(
@@ -327,12 +343,14 @@ pub fn require_plan_request(
   let upsert_route =
     |route: &RouteSpec| -> Result<Option<String>, ApiError> {
       let host = crate::world::normalize_hostname(&route.hostname)?;
+      let existing = current.routes.get(&host).map(|r| &r.spec);
       Ok(
         (!route_allowed(route)
-          || current
-            .routes
-            .get(&host)
-            .is_some_and(|r| !route_allowed(&r.spec)))
+          || existing.is_some_and(|spec| !route_allowed(spec))
+          || crate::caddy_validate::route_caddy_changed(
+            existing,
+            Some(route),
+          ))
         .then(|| format!("route/{host}")),
       )
     };
@@ -610,6 +628,31 @@ mod tests {
         "gateway/edge".into(),
         "route/blog.example.com".into()
       ])
+    );
+  }
+
+  #[test]
+  fn scoped_token_blocks_route_caddy_change_only() {
+    let services = BTreeSet::from(["blog".into()]);
+    let mut plan: Plan = serde_json::from_value(json!({
+      "plan_id": "p", "status": "pending",
+      "created_at": "2026-01-01T00:00:00Z", "expires_at": "2026-01-01T00:01:00Z",
+      "base_versions": {},
+      "items": [
+        {"id": 1, "address": "route/blog.example.com", "layer": "config", "action": "update", "reason": "",
+         "before": {"hostname": "blog.example.com", "service": "blog", "caddy": "header X-A 1"},
+         "after": {"hostname": "blog.example.com", "service": "blog", "caddy": "header X-A 1", "rate_limit": 60}}
+      ]
+    })).unwrap();
+    assert_eq!(
+      check_plan_scope(&services, &plan, &RouteEffects::new()),
+      Ok(())
+    );
+    plan.items[0].after.as_mut().unwrap()["caddy"] =
+      json!("header X-A 2");
+    assert_eq!(
+      check_plan_scope(&services, &plan, &RouteEffects::new()),
+      Err(vec!["route/blog.example.com".into()])
     );
   }
 }

@@ -181,9 +181,11 @@ impl BasicAuth {
   /// 解析保存的值 `用户名 bcrypt哈希`。
   pub fn parse(stored: &str) -> Option<Self> {
     let (user, hash) = stored.split_once(' ')?;
-    (!user.is_empty() && hash.starts_with("$2")).then(|| Self {
-      user: user.into(),
-      hash: hash.into(),
+    crate::caddy_validate::valid_basic_auth(user, hash).then(|| {
+      Self {
+        user: user.into(),
+        hash: hash.into(),
+      }
     })
   }
 
@@ -194,13 +196,9 @@ impl BasicAuth {
       input.split_once(':').ok_or_else(|| {
         ApiError::invalid("登录保护账号要写成 用户名:密码")
       })?;
-    let user_ok = !user.is_empty()
-      && user
-        .bytes()
-        .all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c));
-    if !user_ok {
+    if !crate::caddy_validate::valid_basic_auth_user(user) {
       return Err(ApiError::invalid(
-        "登录保护的用户名只能用字母、数字、. _ -",
+        "登录保护的用户名只能用字母、数字、. _ -，最长 64 个字符",
       ));
     }
     if password.len() < 8 {
@@ -1291,14 +1289,20 @@ pub fn caddyfile_with_acme(
     GatewayTls::Internal => out.push_str("\tlocal_certs\n"),
     GatewayTls::Off => out.push_str("\tauto_https off\n"),
   }
+  if sites.iter().any(|s| s.internal || s.expires_at.is_some()) {
+    out.push_str("\torder abort before basic_auth\n");
+  }
+  if sites
+    .iter()
+    .any(|s| s.redirect.is_none() && s.block_scanners)
+  {
+    out.push_str("\torder respond before basic_auth\n");
+  }
   if sites
     .iter()
     .any(|s| s.redirect.is_none() && s.rate_limit.is_some())
   {
     out.push_str("\torder rate_limit before basic_auth\n");
-  }
-  if sites.iter().any(|s| s.internal || s.expires_at.is_some()) {
-    out.push_str("\torder abort before basic_auth\n");
   }
   if sites.iter().any(|s| s.gate.is_some()) {
     out.push_str("\torder wharf_sso before basic_auth\n");
@@ -2181,8 +2185,16 @@ mod tests {
       None,
     );
     assert_eq!(
+      out.matches("order respond before basic_auth").count(),
+      1
+    );
+    assert_eq!(
       out.matches("order rate_limit before basic_auth").count(),
       1
+    );
+    assert!(
+      out.find("order respond before basic_auth").unwrap()
+        < out.find("order rate_limit before basic_auth").unwrap()
     );
     assert_eq!(out.matches("(wharf_scanners) {").count(), 1);
     assert_eq!(out.matches("import wharf_scanners").count(), 1);

@@ -317,6 +317,10 @@ pub async fn start(
     ));
   }
   require_login_account(plan, perms.contains(&Perm::Admin))?;
+  crate::caddy_validate::require_route_caddy(
+    plan,
+    perms.contains(&Perm::Admin),
+  )?;
   confirm::require(
     &plan.plan_id,
     &plan.needs_confirm,
@@ -519,6 +523,7 @@ fn apply_writes(
   let desired =
     crate::world::World::from_rows(db::all_resources(tx)?)?;
   crate::secret_policy::validate_world(&desired)?;
+  desired.validate()?;
   crate::secret_policy::validate_accounts(
     &desired,
     &crate::app_accounts::account_links(tx)?,
@@ -1041,14 +1046,22 @@ async fn run_step(
             db::ensure_secret(c, key, &name, db::now_ms())
           })
           .await?;
+        let url = url.trim_end_matches('/');
+        if !crate::caddy_validate::valid_acme_dns_key(&key) {
+          return Err(ApiError::internal(format!(
+            "入口 {gateway} 的 acme-dns 密钥格式不合法"
+          )));
+        }
+        if !crate::caddy_validate::valid_public_url(url) {
+          return Err(ApiError::invalid(format!(
+            "控制面对外地址不合法：{url}"
+          )));
+        }
         snapshot::gateway_render_with_acme(
           world,
           &net,
           gateway,
-          Some(render::AcmeDnsFill {
-            key: &key,
-            url: &url,
-          }),
+          Some(render::AcmeDnsFill { key: &key, url }),
         )?
         .config
       } else {

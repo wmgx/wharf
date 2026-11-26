@@ -14,7 +14,13 @@ use wharf_api_types::{
   validate_name,
 };
 
-use crate::db::{ResourceRow, Write, json_err};
+use crate::{
+  caddy_validate::{
+    check_custom_caddy, check_error_page, redirect_host,
+    valid_upstream,
+  },
+  db::{ResourceRow, Write, json_err},
+};
 
 pub const KIND_SERVER: &str = "server";
 pub const KIND_SERVICE: &str = "service";
@@ -772,15 +778,10 @@ impl World {
     }
     let mut seen = BTreeSet::new();
     for p in &route.paths {
-      let ok = p.path.starts_with('/')
-        && !p.path.chars().any(|c| {
-          c.is_whitespace() || matches!(c, '{' | '}' | '"' | '#')
-        });
-      if !ok {
-        return bad(format!(
-          "路径 {} 要以 / 开头，不能有空格和 {{}}\"#",
-          p.path
-        ));
+      if let Err(msg) =
+        crate::caddy_validate::validate_route_path(&p.path)
+      {
+        return bad(format!("路径 {} {msg}", p.path));
       }
       if !seen.insert(p.path.as_str()) {
         return bad(format!("路径 {} 重复", p.path));
@@ -930,6 +931,12 @@ impl World {
   pub fn validate(&self) -> Result<(), ApiError> {
     crate::oidc::validate_names(self)?;
     crate::secret_policy::validate_world(self)?;
+    for (name, server) in &self.servers {
+      crate::link::validate_private_addr(
+        name,
+        server.settings.private_addr.as_ref(),
+      )?;
+    }
     for (name, service) in &self.services {
       validate_service(self, name, &service.spec)?;
     }
@@ -954,6 +961,7 @@ impl World {
     }
     let mut forwards = BTreeSet::new();
     for (name, gateway) in &self.gateways {
+      validate_name("网关", name)?;
       if !self.servers.contains_key(&gateway.spec.server) {
         return Err(server_not_found(&gateway.spec.server));
       }
@@ -995,6 +1003,13 @@ impl World {
           )));
         }
         continue;
+      }
+      if let Some(email) = &gateway.spec.email
+        && let Err(msg) = crate::caddy_validate::validate_email(email)
+      {
+        return Err(ApiError::invalid(format!(
+          "网关 {name} 的邮箱 {email} {msg}"
+        )));
       }
       if gateway.spec.tls == GatewayTls::Off
         && !gateway.spec.wildcard.is_empty()
@@ -1090,6 +1105,13 @@ impl World {
       }
     }
     for (host, route) in &self.routes {
+      if normalize_hostname(host)? != *host
+        || route.spec.hostname != *host
+      {
+        return Err(ApiError::invalid(format!(
+          "路由 {host} 的域名不合法或与配置不一致"
+        )));
+      }
       if self.edge_apps.contains_key(&route.spec.service) {
         return Err(
           ApiError::invalid(format!(
@@ -1866,64 +1888,6 @@ fn check_files(
   Ok(())
 }
 
-/// 自定义错误页能不能放进 Caddyfile。
-fn check_error_page(name: &str, page: &str) -> Result<(), ApiError> {
-  if page.len() > 64 * 1024 {
-    return Err(
-      ApiError::invalid(format!("网关 {name} 的错误页超过 64 KB"))
-        .with_hint("图片用外链，或压缩后再放"),
-    );
-  }
-  if page.contains(crate::render::ERROR_PAGE_END) {
-    return Err(ApiError::invalid(format!(
-      "网关 {name} 的错误页里不能出现 {}",
-      crate::render::ERROR_PAGE_END
-    )));
-  }
-  if page.contains("{$") {
-    return Err(
-      ApiError::invalid(format!(
-        "网关 {name} 的错误页里不能出现 {{$"
-      ))
-      .with_hint("Caddy 会把 {$名字} 换成环境变量；改写成别的写法"),
-    );
-  }
-  Ok(())
-}
-
-/// `主机:端口`，主机里不能有空白和 `/`。
-fn valid_upstream(up: &str) -> bool {
-  up.rsplit_once(':').is_some_and(|(h, port)| {
-    !h.is_empty()
-      && port.parse::<u16>().is_ok()
-      && !h.chars().any(|c| c.is_whitespace() || c == '/')
-  })
-}
-
-/// 跳转目标里的主机名；格式不对返回 `None`。
-/// 只允许 `http(s)://主机[:端口][/路径]`，字符用白名单，防止往 Caddyfile 里注入内容。
-fn redirect_host(target: &str) -> Option<&str> {
-  let rest = target
-    .strip_prefix("https://")
-    .or_else(|| target.strip_prefix("http://"))?;
-  let (authority, path) =
-    rest.split_at(rest.find('/').unwrap_or(rest.len()));
-  let (host, port) = match authority.split_once(':') {
-    Some((h, p)) => (h, Some(p)),
-    None => (authority, None),
-  };
-  let host_ok = !host.is_empty()
-    && host
-      .bytes()
-      .all(|c| c.is_ascii_alphanumeric() || c == b'.' || c == b'-');
-  let port_ok = port.is_none_or(|p| p.parse::<u16>().is_ok());
-  let path_ok = !path.ends_with('/')
-    && path
-      .bytes()
-      .all(|c| c.is_ascii_alphanumeric() || b"/._~-".contains(&c));
-  (host_ok && port_ok && path_ok).then_some(host)
-}
-
 /// 额外绑定的地址只能是私有网段，否则服务端口会暴露到公网。
 /// 基线的值会写进宿主机的配置文件，只允许安全的字符。
 fn validate_baseline(
@@ -1995,41 +1959,6 @@ fn validate_lan_addrs(addrs: &[String]) -> Result<(), ApiError> {
         .with_hint("公网地址不能绑定，否则服务端口会直接暴露到公网"),
       );
     }
-  }
-  Ok(())
-}
-
-/// 自定义 Caddy 配置只能留在自己的站点块里：括号要配平，不能先出现 `}`。
-/// 引号和反引号里的括号不算。语法由网关下发前的 caddy validate 检查。
-fn check_custom_caddy(text: &str) -> Result<(), &'static str> {
-  if text.len() > 8000 {
-    return Err("太长，最多 8000 个字符");
-  }
-  let mut depth = 0i32;
-  let mut quote: Option<char> = None;
-  let mut escaped = false;
-  for c in text.chars() {
-    if escaped {
-      escaped = false;
-      continue;
-    }
-    match (quote, c) {
-      (_, '\\') => escaped = true,
-      (Some(q), c) if c == q => quote = None,
-      (Some(_), _) => {}
-      (None, '"' | '`') => quote = Some(c),
-      (None, '{') => depth += 1,
-      (None, '}') => {
-        depth -= 1;
-        if depth < 0 {
-          return Err("里的 } 多了，不能跳出这个域名的站点块");
-        }
-      }
-      _ => {}
-    }
-  }
-  if depth != 0 || quote.is_some() {
-    return Err("里的括号或引号没有配对");
   }
   Ok(())
 }
