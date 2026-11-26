@@ -242,7 +242,22 @@ fn is_bridge(name: &str) -> bool {
 fn host_of(rest: &str) -> &str {
   let hostport = rest.split('/').next().unwrap_or("");
   match hostport.strip_prefix('[') {
-    Some(v6) => v6.split(']').next().unwrap_or(""),
+    Some(v6) => {
+      let Some((host, suffix)) = v6.split_once(']') else {
+        return "";
+      };
+      if host.parse::<std::net::Ipv6Addr>().is_ok()
+        && (suffix.is_empty()
+          || suffix.strip_prefix(':').is_some_and(|port| {
+            port.bytes().all(|b| b.is_ascii_digit())
+              && port.parse::<u16>().is_ok()
+          }))
+      {
+        host
+      } else {
+        ""
+      }
+    }
     None => hostport.rsplit_once(':').map_or(hostport, |(h, _)| h),
   }
 }
@@ -265,7 +280,9 @@ fn private_host(host: &str) -> bool {
 
 /// http 且不走组网时是明文（组网本身加密）。
 pub fn allows_script_install(url: &str) -> bool {
-  url.starts_with("https://")
+  url
+    .strip_prefix("https://")
+    .is_some_and(|rest| !host_of(rest).is_empty())
     || url.strip_prefix("http://").is_some_and(|rest| {
       matches!(host_of(rest), "127.0.0.1" | "::1" | "localhost")
     })
@@ -426,6 +443,23 @@ main "$@"
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn ipv6_url_rejects_suffix_after_brackets() {
+    for url in [
+      "http://[::1].example.test:7700",
+      "http://[::1]:",
+      "http://[::1]:bad",
+      "http://[::1",
+    ] {
+      assert!(check_core_url(url).is_err());
+      assert!(!allows_script_install(url));
+    }
+    for url in ["http://[::1]", "http://[::1]:7700/path"] {
+      assert!(check_core_url(url).is_ok());
+      assert!(allows_script_install(url));
+    }
+  }
 
   #[test]
   fn plaintext_http_omits_script_join_command() {

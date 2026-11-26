@@ -8,7 +8,7 @@ use std::{
 };
 
 use wharf_api_types::{
-  ApiError,
+  ApiError, ErrorCode,
   agent::{CoreHostProbe, CoreHostProbeResult},
 };
 
@@ -53,15 +53,20 @@ pub(crate) async fn run(
     if !hex_name(cid, 64) {
       return Err(ApiError::invalid("控制面容器 ID 不合法"));
     }
-    let inspection = match crate::upgrade::inspect(docker, cid, ctx)
-      .await
-    {
-      Ok(info) => info,
-      Err(e) if e.code == wharf_api_types::ErrorCode::AgentFailed => {
-        return Err(not_found());
-      }
-      Err(e) => return Err(e),
-    };
+    let out = docker
+      .cmd()
+      .args(["container", "inspect", cid])
+      .timeout(crate::upgrade::QUICK)
+      .run(ctx)
+      .await?;
+    if !out.success && out.stderr.contains("No such container:") {
+      return Err(not_found());
+    }
+    let out = out.check("docker container inspect")?;
+    let containers: Vec<serde_json::Value> =
+      serde_json::from_str(&out.stdout)
+        .map_err(|_| ApiError::internal("无法解析控制面容器信息"))?;
+    let inspection = containers.first().ok_or_else(not_found)?;
     let source = inspection["Mounts"]
       .as_array()
       .and_then(|mounts| {
@@ -81,13 +86,38 @@ pub(crate) async fn run(
   if !safe_path(&host) {
     return Err(ApiError::invalid("控制面宿主机数据目录不合法"));
   }
-  if let Ok(token) = read_local(&host, &probe.challenge_id) {
-    return result(token);
-  }
-
-  let image = crate::adopt::self_image(docker, ctx)
+  let in_container = Path::new("/.dockerenv").exists()
+    || crate::upgrade::self_container().is_ok();
+  let image = if in_container {
+    Some(crate::adopt::self_image(docker, ctx).await?)
+  } else {
+    None
+  };
+  read_host(docker, &host, &probe.challenge_id, image.as_deref(), ctx)
     .await
-    .map_err(|_| not_found())?;
+}
+
+async fn read_host(
+  docker: &Docker,
+  host: &str,
+  challenge: &str,
+  image: Option<&str>,
+  ctx: &Ctx,
+) -> Result<CoreHostProbeResult, ApiError> {
+  // 容器内的同名路径可能属于自己的文件系统，必须从宿主机只读挂载读取。
+  let Some(image) = image else {
+    let raw = read_local(host, challenge).map_err(|e| {
+      if e.kind() == std::io::ErrorKind::NotFound {
+        not_found()
+      } else {
+        ApiError::new(
+          ErrorCode::AgentFailed,
+          "无法读取控制面挑战文件",
+        )
+      }
+    })?;
+    return result(raw);
+  };
   let name =
     format!("wharf-core-probe-{}", crate::build::random_suffix());
   let out = docker
@@ -107,21 +137,32 @@ pub(crate) async fn run(
       "sh",
       "--mount",
       &format!("type=bind,src={host},dst=/probe,readonly"),
-      &image,
+      image,
       "-c",
       r#"set -e
-[ -d /probe/.core-probe ] && [ ! -L /probe/.core-probe ]
+[ -d /probe/.core-probe ] && [ ! -L /probe/.core-probe ] || exit 73
 f="/probe/.core-probe/$1"
-[ -f "$f" ] && [ ! -L "$f" ] && head -c 128 "$f""#,
+[ -f "$f" ] && [ ! -L "$f" ] || exit 73
+head -c 128 "$f""#,
       "_",
-      &probe.challenge_id,
+      challenge,
     ])
     .timeout(Duration::from_secs(20))
     .run(ctx)
     .await;
   match out {
     Ok(out) if out.success => result(out.stdout),
-    Ok(_) => Err(not_found()),
+    Ok(out)
+      if out.code == Some(73)
+        || out.stderr.contains("bind source path does not exist") =>
+    {
+      Err(not_found())
+    }
+    Ok(_) => Err(ApiError::new(
+      ErrorCode::AgentFailed,
+      "无法在宿主机读取控制面挑战",
+    )),
+
     Err(e) => {
       crate::build::remove_container(docker, &name).await;
       Err(e)
@@ -149,4 +190,51 @@ fn read_local(dir: &str, challenge: &str) -> std::io::Result<String> {
   let mut token = String::new();
   file.take(128).read_to_string(&mut token)?;
   Ok(token)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use std::{fs, os::unix::fs::PermissionsExt};
+
+  #[tokio::test]
+  async fn container_probe_uses_readonly_host_mount_over_same_name() {
+    let temp = tempfile::tempdir().unwrap();
+    let local = temp.path().join(".core-probe");
+    fs::create_dir(&local).unwrap();
+    let name = "a".repeat(64);
+    let local_value = format!("{:064x}", 1);
+    let host_value = format!("{:064x}", 2);
+    fs::write(local.join(&name), &local_value).unwrap();
+    let fake = temp.path().join("docker");
+    let host_path = temp.path().canonicalize().unwrap();
+    let host = host_path.to_str().unwrap();
+    fs::write(&fake, format!(
+      "#!/bin/sh\nfor arg do\n  if [ \"$arg\" = 'type=bind,src={host},dst=/probe,readonly' ]; then\n    printf '%s' '{host_value}'\n    exit 0\n  fi\ndone\nexit 125\n"
+    )).unwrap();
+    fs::set_permissions(&fake, fs::Permissions::from_mode(0o700))
+      .unwrap();
+    let docker = Docker {
+      bin: fake.to_string_lossy().into_owned(),
+      data_dir: host_path.clone(),
+    };
+    let ctx = Ctx::detached();
+    let result = read_host(
+      &docker,
+      host,
+      &name,
+      Some("example.test/agent"),
+      &ctx,
+    )
+    .await
+    .unwrap();
+    assert!(result.token == host_value);
+    assert!(
+      read_host(&docker, host, &name, None, &ctx)
+        .await
+        .unwrap()
+        .token
+        == local_value
+    );
+  }
 }

@@ -151,3 +151,120 @@ async fn agent_upgrade_needs_no_bound_core_server_or_probe_support() {
     .unwrap();
   result.unwrap();
 }
+
+fn probe_connection(
+  id: u64,
+  key: &str,
+) -> (Conn, mpsc::Receiver<CoreMsg>) {
+  let (tx, rx) = mpsc::channel(8);
+  let conn = Conn {
+    conn_id: id,
+    public_key: key.into(),
+    core_probe: true,
+    tx,
+    pending: Default::default(),
+    closed: CancellationToken::new(),
+    rtt_ms: Arc::new(AtomicU64::new(u64::MAX)),
+    host_shell: false,
+    forward: false,
+    service_checks: false,
+    container_diagnosis: false,
+    access_logs: false,
+    net_probe: false,
+    container_probe: false,
+    ssh_logins: false,
+    upgrade_only: false,
+  };
+  (conn, rx)
+}
+
+#[tokio::test]
+async fn probe_reconnects_do_not_queue_or_block_foreground_verification()
+ {
+  let dir = tempfile::tempdir().unwrap();
+  let mut state = crate::rules::tests::test_state();
+  Arc::get_mut(&mut state).unwrap().data_dir =
+    dir.path().to_path_buf();
+  state
+    .db
+    .call(|c| {
+      c.execute(
+        "INSERT INTO agents (server, public_key) VALUES ('s2', 's2')",
+        [],
+      )
+      .map_err(sql_err)?;
+      crate::db::set_setting(
+        c,
+        crate::core_node::SERVER_KEY,
+        Some("s2"),
+      )?;
+      crate::db::set_setting(
+        c,
+        crate::core_node::PUBKEY_KEY,
+        Some("s2"),
+      )
+    })
+    .await
+    .unwrap();
+  tokio::time::timeout(Duration::from_secs(3), async {
+    let mut previous = None;
+    for id in 1..=5 {
+      let (conn, mut rx) = probe_connection(id, "s1");
+      state.hub.register("s1", conn.clone());
+      let task = crate::core_node::spawn_probe_on_connect(
+        state.clone(),
+        "s1".into(),
+        id,
+        conn.closed.clone(),
+      );
+      if let Some((old_task, old_conn, _old_rx)) = previous.take() {
+        let old_conn: Conn = old_conn;
+        let old_task: tokio::task::JoinHandle<()> = old_task;
+        old_task.await.unwrap();
+        assert!(lock(&old_conn.pending).is_empty());
+      }
+      assert!(matches!(
+        rx.recv().await.unwrap(),
+        CoreMsg::Request {
+          op: AgentOp::ProbeCoreHost(_),
+          ..
+        }
+      ));
+      previous = Some((task, conn, rx));
+    }
+    let (conn, mut rx) = probe_connection(6, "s2");
+    state.hub.register("s2", conn.clone());
+    let reply = async {
+      let CoreMsg::Request {
+        id,
+        op: AgentOp::ProbeCoreHost(probe),
+        ..
+      } = rx.recv().await.unwrap()
+      else {
+        panic!("前台没有向绑定节点发起挑战");
+      };
+      let token = std::fs::read_to_string(
+        state.data_dir.join(".core-probe").join(probe.challenge_id),
+      )
+      .unwrap();
+      lock(&conn.pending)
+        .remove(&id)
+        .unwrap()
+        .done
+        .send(Ok(serde_json::json!({"token":token})))
+        .unwrap();
+    };
+    let cancel = CancellationToken::new();
+    let (verified, ()) = tokio::join!(
+      crate::core_node::require_verified(&state, &cancel),
+      reply
+    );
+    assert_eq!(verified.unwrap().server, "s2");
+    let (task, conn, _rx) = previous.unwrap();
+    conn.closed.cancel();
+    task.await.unwrap();
+    assert!(lock(&conn.pending).is_empty());
+  })
+  .await
+  .unwrap();
+}

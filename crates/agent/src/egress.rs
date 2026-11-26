@@ -309,33 +309,43 @@ async fn handle(
       }
     }
   };
-  match req.forward {
+  let (to_upstream, to_client) = match req.forward {
     None => {
-      client
-        .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-        .await?;
-      client.write_all(&early).await?;
-      upstream.write_all(&head.rest).await?;
+      let mut response =
+        b"HTTP/1.1 200 Connection Established\r\n\r\n".to_vec();
+      response.extend_from_slice(&early);
+      (head.rest, response)
     }
     Some(first) => {
-      upstream.write_all(first.as_bytes()).await?;
-      upstream.write_all(&head.rest).await?;
+      let mut request = first.into_bytes();
+      request.extend_from_slice(&head.rest);
+      (request, early)
     }
-  }
-  forward(&mut client, &mut upstream).await
+  };
+  forward(
+    &mut client,
+    &mut upstream,
+    &to_upstream,
+    &to_client,
+    IDLE_TIMEOUT,
+  )
+  .await
 }
 
 async fn forward(
-  client: &mut TcpStream,
-  upstream: &mut TcpStream,
+  client: impl AsyncRead + AsyncWrite + Unpin,
+  upstream: impl AsyncRead + AsyncWrite + Unpin,
+  to_upstream: &[u8],
+  to_client: &[u8],
+  idle_timeout: Duration,
 ) -> std::io::Result<()> {
-  let (client_read, client_write) = client.split();
-  let (upstream_read, upstream_write) = upstream.split();
+  let (client_read, client_write) = tokio::io::split(client);
+  let (upstream_read, upstream_write) = tokio::io::split(upstream);
   let activity = Mutex::new(Instant::now());
   let transfer = async {
     tokio::try_join!(
-      copy(client_read, upstream_write, &activity),
-      copy(upstream_read, client_write, &activity),
+      copy(to_upstream.chain(client_read), upstream_write, &activity),
+      copy(to_client.chain(upstream_read), client_write, &activity),
     )?;
     Ok(())
   };
@@ -343,10 +353,10 @@ async fn forward(
     loop {
       let deadline =
         *activity.lock().unwrap_or_else(|p| p.into_inner())
-          + IDLE_TIMEOUT;
+          + idle_timeout;
       tokio::time::sleep_until(deadline).await;
       if activity.lock().unwrap_or_else(|p| p.into_inner()).elapsed()
-        >= IDLE_TIMEOUT
+        >= idle_timeout
       {
         return Ok(());
       }
@@ -371,9 +381,16 @@ async fn copy(
     }
     *activity.lock().unwrap_or_else(|p| p.into_inner()) =
       Instant::now();
-    write.write_all(&buf[..n]).await?;
-    *activity.lock().unwrap_or_else(|p| p.into_inner()) =
-      Instant::now();
+    let mut remaining = &buf[..n];
+    while !remaining.is_empty() {
+      let n = write.write(remaining).await?;
+      if n == 0 {
+        return Err(std::io::ErrorKind::WriteZero.into());
+      }
+      remaining = &remaining[n..];
+      *activity.lock().unwrap_or_else(|p| p.into_inner()) =
+        Instant::now();
+    }
   }
 }
 
@@ -531,7 +548,7 @@ fn parse(head: &str) -> Option<Request<'_>> {
   }
   out.push_str(&format!(
     "Host: {}\r\nConnection: close\r\n\r\n",
-    target.authority()
+    target.http_host()
   ));
   Some(Request {
     target,
@@ -567,6 +584,107 @@ mod tests {
     assert!(!f.contains("Proxy-"));
     assert!(f.ends_with("Connection: close\r\n\r\n"));
     assert!(parse("GET /local HTTP/1.1\r\n\r\n").is_none());
+  }
+
+  #[tokio::test]
+  async fn route_rejects_legacy_numeric_hosts_before_exit() {
+    let proxy = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let exit = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mode = Mode::Route(Arc::new(EgressRoute {
+      exit: exit.local_addr().unwrap().to_string(),
+      token: String::new(),
+      all: true,
+      domains: vec![],
+    }));
+    for host in ["0177.0.0.1", "2130706433", "0x7f000001", "127.1"] {
+      let mut client =
+        TcpStream::connect(proxy.local_addr().unwrap())
+          .await
+          .unwrap();
+      let (incoming, _) = proxy.accept().await.unwrap();
+      client
+        .write_all(
+          format!("CONNECT {host}:80 HTTP/1.1\r\n\r\n").as_bytes(),
+        )
+        .await
+        .unwrap();
+      tokio::select! {
+        result = handle(incoming, &mode, None, Policy::PublicOnly) => result.unwrap(),
+        _ = exit.accept() => panic!("非法地址被转发到出口"),
+        _ = tokio::time::sleep(Duration::from_secs(2)) => panic!("代理未结束"),
+      }
+      assert!(
+        read_head(&mut client)
+          .await
+          .unwrap()
+          .text
+          .starts_with("HTTP/1.1 403 ")
+      );
+    }
+  }
+
+  #[test]
+  fn http_host_omits_default_port() {
+    for (authority, expected) in [
+      ("example.test", "example.test"),
+      ("example.test:80", "example.test"),
+      ("example.test:8080", "example.test:8080"),
+      ("[2001:db9::1]:80", "[2001:db9::1]"),
+    ] {
+      let request = format!(
+        "GET http://{authority}/ HTTP/1.1\r\nHost: other.test\r\n\r\n"
+      );
+      let forwarded = parse(&request).unwrap().forward.unwrap();
+      assert!(
+        forwarded.contains(&format!("\r\nHost: {expected}\r\n"))
+      );
+    }
+  }
+
+  #[tokio::test]
+  async fn forward_drains_both_directions_under_backpressure() {
+    let (a, client) = tokio::io::duplex(8);
+    let (upstream, b) = tokio::io::duplex(8);
+    let (mut ar, mut aw) = tokio::io::split(a);
+    let (mut br, mut bw) = tokio::io::split(b);
+    let first = [b'a'; 32];
+    let second = [b'b'; 32];
+    let transfer = async {
+      let ((), (), (), (), ()) = tokio::try_join!(
+        forward(
+          client,
+          upstream,
+          &first,
+          &second,
+          Duration::from_secs(2)
+        ),
+        async {
+          aw.write_all(b"left").await?;
+          aw.shutdown().await
+        },
+        async {
+          bw.write_all(b"right").await?;
+          bw.shutdown().await
+        },
+        async {
+          let mut got = Vec::new();
+          ar.read_to_end(&mut got).await?;
+          assert_eq!(got, [&second[..], b"right"].concat());
+          std::io::Result::Ok(())
+        },
+        async {
+          let mut got = Vec::new();
+          br.read_to_end(&mut got).await?;
+          assert_eq!(got, [&first[..], b"left"].concat());
+          std::io::Result::Ok(())
+        },
+      )?;
+      std::io::Result::Ok(())
+    };
+    tokio::time::timeout(Duration::from_secs(3), transfer)
+      .await
+      .unwrap()
+      .unwrap();
   }
 
   #[tokio::test]

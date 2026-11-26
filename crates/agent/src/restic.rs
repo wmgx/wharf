@@ -490,18 +490,23 @@ async fn restore(
   )
   .await?
   .check("restic restore")?;
-  if install_restored_tree(srv, &job.service, &work_name, &kept_name)
-    .map_err(|e| {
-      if e.code == ErrorCode::NotFound {
-        ApiError::new(
-          ErrorCode::AgentFailed,
-          format!("快照 {snapshot} 里没有 {}", root.display()),
-        )
-      } else {
-        e
-      }
-    })?
-  {
+  if install_restored_tree(
+    srv,
+    &job.service,
+    &work_name,
+    &kept_name,
+    snapshot,
+  )
+  .map_err(|e| {
+    if e.code == ErrorCode::NotFound {
+      ApiError::new(
+        ErrorCode::AgentFailed,
+        format!("快照 {snapshot} 里没有 {}", root.display()),
+      )
+    } else {
+      e
+    }
+  })? {
     let kept = restore_dir.join(kept_name);
     ctx.say(format!("原来的数据保留在 {}", kept.display()));
     to_value(kept.display().to_string())
@@ -522,6 +527,7 @@ fn install_restored_tree(
   service: &str,
   work_name: &str,
   kept_name: &str,
+  snapshot: &str,
 ) -> Result<bool, ApiError> {
   let srv_fd = DirFd::open_dir(srv).map_err(|e| dir_error(srv, e))?;
   let restore = srv.join(".wharf-restore");
@@ -537,31 +543,105 @@ fn install_restored_tree(
     .map_err(|e| dir_error(&work, e))?;
   let root = srv.join(service);
   let service = component(service.as_ref()).map_err(io_err(&root))?;
-  let fresh = fresh_parent
-    .open_subdir(&service)
-    .map_err(|e| dir_error(&root, e))?;
-  validate_tree(&fresh, true)?;
-  let kept_path = restore.join(kept_name);
+  let staged = StagedRestore::new(
+    &restore_fd,
+    &restore,
+    &fresh_parent,
+    &service,
+  )
+  .map_err(|e| dir_error(&root, e))?;
+  staged.validate(&root, snapshot)?;
+  install_checked_tree(
+    &staged,
+    &srv_fd,
+    &restore_fd,
+    &service,
+    &restore.join(kept_name),
+    &root,
+  )
+}
+
+struct StagedRestore {
+  dir: DirFd,
+  _cleanup: RestoreWork,
+}
+
+const RESTORE_HINT: &str =
+  "检查备份服务器是否异常，或换一份更早的快照";
+
+impl StagedRestore {
+  fn new(
+    restore: &DirFd,
+    path: &Path,
+    fresh_parent: &DirFd,
+    service: &std::ffi::CStr,
+  ) -> std::io::Result<Self> {
+    // 先把目录项移出 restic 的挂载范围，再扫描最终要落位的目录项。
+    let name = format!(".install-{}", crate::build::random_suffix());
+    let name_fd = component(name.as_ref())?;
+    restore.mkdir(&name_fd, 0o700)?;
+    let cleanup = RestoreWork(path.join(name));
+    let dir = restore.open_subdir(&name_fd)?;
+    fresh_parent.rename_to(service, &dir, c"tree")?;
+    Ok(Self {
+      dir,
+      _cleanup: cleanup,
+    })
+  }
+
+  fn validate(
+    &self,
+    root: &Path,
+    snapshot: &str,
+  ) -> Result<(), ApiError> {
+    let fresh = self.dir.open_subdir(c"tree").map_err(|e| {
+      if matches!(e.raw_os_error(), Some(libc::ELOOP | libc::ENOTDIR)) {
+        let link = self.dir.readlink(c"tree").ok()
+          .map(|target| format!("（{} -> {}）", root.display(), target.display()))
+          .unwrap_or_default();
+        ApiError::invalid(format!("快照 {snapshot} 中的 {} 是符号链接或非目录，已拒绝恢复{link}", root.display()))
+          .with_hint(RESTORE_HINT)
+      } else {
+        dir_error(root, e)
+      }
+    })?;
+    validate_tree(&fresh, true).map_err(|e| {
+      if e.code == ErrorCode::InvalidInput {
+        ApiError::invalid(format!("快照 {snapshot} 包含指向服务目录之外的符号链接（{}），已拒绝恢复", e.message))
+          .with_hint(RESTORE_HINT)
+      } else { e }
+    })
+  }
+}
+
+fn install_checked_tree(
+  staged: &StagedRestore,
+  srv_fd: &DirFd,
+  restore_fd: &DirFd,
+  service: &std::ffi::CStr,
+  kept_path: &Path,
+  root: &Path,
+) -> Result<bool, ApiError> {
   let kept_name =
-    component(kept_name.as_ref()).map_err(io_err(&kept_path))?;
-  let had_old = match srv_fd.lstat(&service) {
+    component(kept_path.file_name().expect("保留目录有文件名"))
+      .map_err(io_err(kept_path))?;
+  let had_old = match srv_fd.lstat(service) {
     Ok(_) => {
       srv_fd
-        .rename_to(&service, &restore_fd, &kept_name)
-        .map_err(io_err(&root))?;
+        .rename_to(service, restore_fd, &kept_name)
+        .map_err(io_err(root))?;
       true
     }
     Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-    Err(e) => return Err(io_err(&root)(e)),
+    Err(e) => return Err(io_err(root)(e)),
   };
-  if let Err(e) = fresh_parent.rename_to(&service, &srv_fd, &service)
-  {
+  if let Err(e) = staged.dir.rename_to(c"tree", srv_fd, service) {
     if had_old {
-      restore_fd.rename_to(&kept_name, &srv_fd, &service).map_err(|rollback| {
+      restore_fd.rename_to(&kept_name, srv_fd, service).map_err(|rollback| {
         ApiError::internal(format!("恢复落位失败：{e}。无法还原原目录：{rollback}。原数据保留在 {}", kept_path.display()))
       })?;
     }
-    return Err(io_err(&root)(e));
+    return Err(io_err(root)(e));
   }
   Ok(had_old)
 }

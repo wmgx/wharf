@@ -705,6 +705,8 @@ async fn handle_socket(
     crate::core_node::spawn_probe_on_connect(
       state.clone(),
       server.clone(),
+      conn.conn_id,
+      conn.closed.clone(),
     );
   }
   tracing::info!("服务器 {server} 上线（agent {version}）");

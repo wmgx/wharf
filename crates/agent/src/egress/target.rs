@@ -56,10 +56,22 @@ impl Target {
   }
 
   pub fn authority(&self) -> String {
-    if self.host.contains(':') {
-      format!("[{}]:{}", self.host, self.port)
+    self.format_authority(Some(self.port))
+  }
+
+  pub fn http_host(&self) -> String {
+    self.format_authority((self.port != 80).then_some(self.port))
+  }
+
+  fn format_authority(&self, port: Option<u16>) -> String {
+    let host = if self.host.contains(':') {
+      format!("[{}]", self.host)
     } else {
-      format!("{}:{}", self.host, self.port)
+      self.host.clone()
+    };
+    match port {
+      Some(port) => format!("{host}:{port}"),
+      None => host,
     }
   }
 
@@ -68,7 +80,8 @@ impl Target {
     if let Ok(ip) = host.parse::<IpAddr>() {
       return !self.allowed(ip, core, policy);
     }
-    host == "localhost"
+    legacy_numeric_host(host)
+      || host == "localhost"
       || host.ends_with(".localhost")
       || matches!(host, "metadata" | "metadata.google.internal")
       || core.is_some_and(|core| {
@@ -129,4 +142,14 @@ impl Target {
     }
     Ok(addresses)
   }
+}
+
+// 系统解析器还接受省略分量、八进制、十六进制和单整数形式。
+fn legacy_numeric_host(host: &str) -> bool {
+  host.split('.').all(|part| {
+    (!part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+      || part.strip_prefix("0x").is_some_and(|hex| {
+        !hex.is_empty() && hex.bytes().all(|b| b.is_ascii_hexdigit())
+      })
+  })
 }

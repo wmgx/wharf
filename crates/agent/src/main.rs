@@ -115,6 +115,9 @@ enum Command {
     #[arg(long)]
     out: PathBuf,
   },
+  /// 在可终止的子进程中校验并解包。
+  #[command(hide = true)]
+  Unpack { archive: PathBuf, to: PathBuf },
   /// 在临时容器里执行网络探测。
   #[command(hide = true)]
   NetProbe { job: String },
@@ -139,6 +142,11 @@ fn main() -> anyhow::Result<()> {
   let cli = Cli::parse();
   if let Some(Command::NetProbe { job }) = &cli.command {
     return container_probe::probe_cli(job);
+  }
+  if let Some(Command::Unpack { archive, to }) = &cli.command {
+    let result = wharf_pack::unpack_validated(archive, to);
+    println!("{}", serde_json::to_string(&result)?);
+    return Ok(());
   }
   run(cli)
 }
@@ -168,7 +176,8 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
   let joined = match command {
     Command::Pack { .. }
     | Command::Mirror { .. }
-    | Command::NetProbe { .. } => {
+    | Command::NetProbe { .. }
+    | Command::Unpack { .. } => {
       unreachable!("前面已经处理")
     }
     Command::Replace {

@@ -27,7 +27,7 @@ use wharf_api_types::{
 
 use crate::{
   docker::{Docker, io_err},
-  exec::Ctx,
+  exec::{Cmd, Ctx},
 };
 
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
@@ -172,12 +172,17 @@ pub async fn fetch_code(
       let archive = work.join("source.tar.gz");
       download(core_url, sha256, &token.0, &archive, ctx).await?;
       ctx.say("解压代码");
-      let dest = src.clone();
-      tokio::task::spawn_blocking(move || {
-        wharf_pack::unpack_validated(&archive, &dest)
-      })
-      .await
-      .map_err(|e| ApiError::internal(e.to_string()))??;
+      let executable = std::env::current_exe().map_err(|e| {
+        ApiError::internal(format!("找不到当前 agent 程序：{e}"))
+      })?;
+      unpack_upload(
+        &executable,
+        &archive,
+        &src,
+        Duration::from_secs(300),
+        ctx,
+      )
+      .await?;
       None
     }
     BuildFetch::Git {
@@ -209,6 +214,25 @@ pub async fn fetch_code(
     .await
     .map_err(|e| ApiError::internal(e.to_string()))??;
   Ok(commit)
+}
+
+async fn unpack_upload(
+  executable: &Path,
+  archive: &Path,
+  to: &Path,
+  timeout: Duration,
+  ctx: &Ctx,
+) -> Result<(), ApiError> {
+  let out = Cmd::new(&executable.to_string_lossy())
+    .arg("unpack")
+    .arg(archive.to_string_lossy())
+    .arg(to.to_string_lossy())
+    .timeout(timeout)
+    .run(ctx)
+    .await?
+    .check("解压代码包")?;
+  serde_json::from_str::<Result<(), ApiError>>(&out.stdout)
+    .map_err(|_| ApiError::internal("不能解析解压进程的结果"))?
 }
 
 /// 构建日志已经实时打出来了，错误里只留 BuildKit 报的 ERROR 行。
@@ -841,6 +865,62 @@ mod tests {
     for bad in ["", "/etc", "../x", "a/../../b"] {
       assert!(relative(bad).is_err(), "{bad}");
     }
+  }
+
+  #[tokio::test]
+  async fn upload_unpack_stops_on_timeout_and_cancel() {
+    use std::{fs, os::unix::fs::PermissionsExt};
+    let temp = tempfile::tempdir().unwrap();
+    let executable = temp.path().join("worker");
+    fs::write(
+      &executable,
+      "#!/bin/sh\nprintf started > \"$3\"\nexec sleep 30\n",
+    )
+    .unwrap();
+    fs::set_permissions(
+      &executable,
+      fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    let archive = temp.path().join("source");
+    let started = temp.path().join("started");
+    let ctx = Ctx::detached();
+    assert_eq!(
+      unpack_upload(
+        &executable,
+        &archive,
+        &started,
+        Duration::from_millis(500),
+        &ctx
+      )
+      .await
+      .unwrap_err()
+      .code,
+      ErrorCode::Timeout
+    );
+    fs::remove_file(&started).unwrap();
+    let cancel = async {
+      while !started.exists() {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+      }
+      ctx.cancel.cancel();
+    };
+    let (result, ()) =
+      tokio::time::timeout(Duration::from_secs(3), async {
+        tokio::join!(
+          unpack_upload(
+            &executable,
+            &archive,
+            &started,
+            Duration::from_secs(30),
+            &ctx
+          ),
+          cancel
+        )
+      })
+      .await
+      .unwrap();
+    assert_eq!(result.unwrap_err().code, ErrorCode::Cancelled);
   }
 
   #[test]

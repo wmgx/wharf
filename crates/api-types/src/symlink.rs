@@ -34,7 +34,7 @@ pub fn check_relative_entry(
 }
 
 fn link_error(rel: &Path, target: &Path) -> ApiError {
-  ApiError::invalid(format!("软链接 {} 的目标 {} 越界或存在循环", rel.display(), target.display()))
+  ApiError::invalid(format!("软链接 {} -> {} 越界或存在循环", rel.display(), target.display()))
     .with_hint("删掉这个软链接、把它加入 .dockerignore / .gitignore，或改用目录内相对链接")
 }
 
@@ -62,9 +62,33 @@ pub fn check_single_link(
 pub fn validate_symlinks(
   links: &BTreeMap<PathBuf, PathBuf>,
 ) -> Result<(), ApiError> {
+  let mut normalized = BTreeMap::new();
   for (rel, target) in links {
+    if normalized
+      .insert(check_relative_entry(rel)?, target.clone())
+      .is_some()
+    {
+      return Err(ApiError::invalid(format!(
+        "软链接路径重复：{}",
+        rel.display()
+      )));
+    }
+  }
+  let links = normalized;
+  for (rel, target) in &links {
+    if rel
+      .ancestors()
+      .skip(1)
+      .any(|parent| links.contains_key(parent))
+    {
+      return Err(ApiError::invalid(format!(
+        "软链接 {} -> {} 的父路径也是软链接",
+        rel.display(),
+        target.display()
+      )));
+    }
     check_single_link(rel, target)?;
-    resolve(rel, target, links)?;
+    resolve(rel, target, &links)?;
   }
   Ok(())
 }
@@ -103,4 +127,37 @@ fn resolve(
     }
   }
   Ok(resolved)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn link_map_normalizes_keys_and_rejects_symlink_parents() {
+    let links = |pairs: &[(&str, &str)]| {
+      pairs
+        .iter()
+        .map(|(a, b)| (PathBuf::from(a), PathBuf::from(b)))
+        .collect()
+    };
+    assert!(
+      validate_symlinks(&links(&[
+        ("./sub/l1", ".."),
+        ("./sub/l2", "l1/..")
+      ]))
+      .is_err()
+    );
+    assert!(
+      validate_symlinks(&links(&[("./a", "dir"), ("./a/b", ".")]))
+        .is_err()
+    );
+    assert!(
+      validate_symlinks(&links(&[
+        ("./sub/l1", ".."),
+        ("./sub/l2", "l1/inside")
+      ]))
+      .is_ok()
+    );
+  }
 }

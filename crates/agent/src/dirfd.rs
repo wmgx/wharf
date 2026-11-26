@@ -117,7 +117,7 @@ impl DirFd {
     self.open_subdir(name)
   }
 
-  fn readlink(&self, name: &CStr) -> io::Result<PathBuf> {
+  pub(crate) fn readlink(&self, name: &CStr) -> io::Result<PathBuf> {
     let mut buf = [0; 4096];
     let n = unsafe {
       libc::readlinkat(
@@ -383,14 +383,15 @@ pub(crate) fn validate_tree(
             fd.open_subdir(&name).map_err(|e| dir_error(&path, e))?;
           scan(&sub, &path, links, depth + 1, reject_root_links)?;
         }
-        libc::S_IFLNK if depth == 0 && reject_root_links => {
-          return Err(ApiError::invalid(format!(
-            "一级卷 {} 是符号链接，拒绝恢复",
-            path.display()
-          )));
-        }
         libc::S_IFLNK => {
           let target = fd.readlink(&name).map_err(io_err(&path))?;
+          if depth == 0 && reject_root_links {
+            return Err(ApiError::invalid(format!(
+              "一级卷 {} -> {} 是符号链接",
+              path.display(),
+              target.display()
+            )));
+          }
           links.insert(path, target);
         }
         _ => {}
