@@ -376,7 +376,8 @@ func TestAppLoginBypass(t *testing.T) {
 			case "key":
 				r.Header.Set("X-Wharf-Key", "lab-key")
 			case "skip":
-				s.Skip = []string{"/"}
+				s.Skip = []string{"/api"}
+				r.URL.Path = "/api/items"
 			case "trust":
 				s.trusted = []netip.Prefix{netip.MustParsePrefix("203.0.113.0/24")}
 				r.RemoteAddr = "203.0.113.1:1234"
