@@ -342,8 +342,9 @@ impl Docker {
             .args(["tag", &candidate, image])
             .timeout(Duration::from_secs(15))
             .run(ctx)
-            .await?
-            .check("docker tag")?;
+            .await
+            .and_then(|out| out.check("docker tag"))
+            .map_err(|error| redact_pull_error(policy, error))?;
           if candidate != format!("{name}@{digest}") {
             let _ = self
               .cmd()
@@ -355,7 +356,9 @@ impl Docker {
           ctx.say(format!("已拉取 {image}（{digest}）"));
           return Ok(());
         }
-        Err(e) if e.code == ErrorCode::Cancelled => return Err(e),
+        Err(e) if e.code == ErrorCode::Cancelled => {
+          return Err(redact_pull_error(policy, e));
+        }
         Err(e) => {
           rate = rate
             .max(crate::external::rate_limit(&candidate, &e.message));
@@ -400,8 +403,9 @@ impl Docker {
               .args(["tag", &candidate, image])
               .timeout(Duration::from_secs(15))
               .run(ctx)
-              .await?
-              .check("docker tag")?;
+              .await
+              .and_then(|out| out.check("docker tag"))
+              .map_err(|error| redact_pull_error(policy, error))?;
             // 只删掉镜像源的标签，镜像本身保留。
             let _ = self
               .cmd()
@@ -413,7 +417,9 @@ impl Docker {
           ctx.say(format!("已拉取 {image}"));
           return Ok(());
         }
-        Err(e) if e.code == ErrorCode::Cancelled => return Err(e),
+        Err(e) if e.code == ErrorCode::Cancelled => {
+          return Err(redact_pull_error(policy, e));
+        }
         Err(e) => {
           rate = rate
             .max(crate::external::rate_limit(&candidate, &e.message));
@@ -851,6 +857,15 @@ pub fn pull_candidates(
     out.push(image.to_string());
   }
   out
+}
+
+fn redact_pull_error(
+  policy: &PullPolicy,
+  mut error: ApiError,
+) -> ApiError {
+  error.message = policy.redact(&error.message);
+  error.hint = error.hint.map(|hint| policy.redact(&hint));
+  error
 }
 
 fn pick_digest(image: &str, digests: &str) -> Option<String> {

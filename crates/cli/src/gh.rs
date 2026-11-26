@@ -64,7 +64,14 @@ pub async fn private_token(
   }
   let private =
     gh(&["api", &format!("repos/{slug}"), "--jq", ".private"]).await;
-  if private.as_deref() == Some("true") {
+  missing_token(&slug, private.as_deref() == Some("true"))
+}
+
+fn missing_token(
+  slug: &str,
+  private: bool,
+) -> CliResult<Option<String>> {
+  if private {
     return Err(ApiError::invalid(format!("仓库 {slug} 是 GitHub 私有仓库，但控制面还没有密钥 {SECRET}"))
       .with_hint("先用 wharf secret set GITHUB_TOKEN 保存最小只读权限 PAT，或加 --sync-gh-token 用本机 gh 登录同步").into());
   }
@@ -142,4 +149,20 @@ async fn github_token_is_reused_without_writing() {
     Some(SECRET)
   );
   server.await.unwrap();
+}
+
+#[test]
+fn private_github_repo_requires_existing_token_or_explicit_sync() {
+  let crate::client::CliError::Api(error) =
+    missing_token("o/priv", true).unwrap_err()
+  else {
+    panic!("缺少密钥应返回 API 错误");
+  };
+  assert!(
+    error
+      .hint
+      .as_deref()
+      .is_some_and(|hint| hint.contains("--sync-gh-token"))
+  );
+  assert_eq!(missing_token("o/pub", false).unwrap(), None);
 }

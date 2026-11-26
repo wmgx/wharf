@@ -111,6 +111,10 @@ fn collect(
 ) -> Vec<String> {
   let mut out = secret_policy::redact_values(secrets);
   for (name, text) in secrets {
+    if secret_policy::describe(name).is_some_and(|meta| !meta.redact)
+    {
+      continue;
+    }
     let token = if name.starts_with(crate::notify_keys::SECRET_PREFIX)
     {
       text.split_once("/notify/").map(|(_, token)| token)

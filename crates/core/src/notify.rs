@@ -188,9 +188,15 @@ async fn feishu(
     let remaining = MAX - bytes.len();
     bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
   }
-  let raw = String::from_utf8_lossy(&bytes);
+  feishu_reply(status, &String::from_utf8_lossy(&bytes))
+}
+
+fn feishu_reply(
+  status: reqwest::StatusCode,
+  raw: &str,
+) -> Result<(), ApiError> {
   let v: serde_json::Value =
-    serde_json::from_str(&raw).unwrap_or_default();
+    serde_json::from_str(raw).unwrap_or_default();
   let code = v["code"]
     .as_i64()
     .or(v["StatusCode"].as_i64())
@@ -205,7 +211,7 @@ async fn feishu(
             v["msg"]
               .as_str()
               .filter(|s| !s.is_empty())
-              .unwrap_or(&raw)
+              .unwrap_or(raw)
           )
           .chars()
           .take(200)
@@ -261,4 +267,17 @@ mod tests {
       "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
     );
   }
+}
+
+#[test]
+fn feishu_keeps_only_first_200_chars_of_html_error() {
+  let html = format!("<html>{}尾</html>", "字".repeat(200));
+  let error = feishu_reply(reqwest::StatusCode::BAD_GATEWAY, &html)
+    .unwrap_err();
+  assert!(
+    error
+      .message
+      .ends_with(&format!("<html>{}", "字".repeat(194)))
+  );
+  assert!(!error.message.contains('尾'));
 }

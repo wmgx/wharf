@@ -94,10 +94,7 @@ pub async fn layer(
   let status = resp.status().as_u16();
   let rejected = matches!(status, 401 | 403)
     && path.starts_with("/api/")
-    && !matches!(
-      path.as_str(),
-      "/api/login" | "/api/setup" | "/api/logout"
-    );
+    && !matches!(path.as_str(), "/api/login" | "/api/setup");
   if rejected || (actor.is_some() && should_record(&method, &path)) {
     let (actor, detail) = rejection.map_or_else(
       || (actor.unwrap_or_else(|| "anonymous".into()), detail),
@@ -504,6 +501,81 @@ async fn audit_cleanup_keeps_seven_and_ninety_day_windows() {
     let actors = stmt.query_map([], |row| row.get::<_, String>(0)).map_err(sql_err)?
       .collect::<Result<Vec<_>, _>>().map_err(sql_err)?;
     assert_eq!(actors, ["anonymous", "s1"]);
+    Ok(())
+  }).await.unwrap();
+}
+
+#[tokio::test]
+async fn requests_audit_anonymous_expired_and_service_scope_rejections()
+ {
+  use axum::{
+    Router, body::Body, middleware::from_fn_with_state, routing::get,
+  };
+  use tower::ServiceExt;
+  let state = crate::rules::tests::test_state();
+  state
+    .db
+    .call(|c| {
+      crate::auth::insert_token(
+        c,
+        "expired",
+        &[Perm::Read],
+        "fixture-expired",
+      )?;
+      crate::auth::insert_token(
+        c,
+        "scoped",
+        &[Perm::Read],
+        "fixture-scoped",
+      )?;
+      c.execute_batch(
+        "UPDATE api_tokens SET expires_at = 1 WHERE name = 'expired';
+      UPDATE api_tokens SET services = 'app1' WHERE name = 'scoped'",
+      )
+      .map_err(sql_err)
+    })
+    .await
+    .unwrap();
+  let app = Router::new()
+    .route("/api/services", get(|_: Auth| async { "ok" }))
+    .route("/api/services/app2/logs", get(|_: Auth| async { "ok" }))
+    .layer(from_fn_with_state(state.clone(), layer))
+    .with_state(state.clone());
+  for (path, token, expected) in [
+    ("/api/services", None, 401),
+    ("/api/services", Some("fixture-expired"), 401),
+    ("/api/services/app2/logs", Some("fixture-scoped"), 403),
+  ] {
+    let mut request = axum::http::Request::builder()
+      .uri(path)
+      .extension(ConnectInfo(
+        "203.0.113.16:12345"
+          .parse::<std::net::SocketAddr>()
+          .unwrap(),
+      ))
+      .extension(crate::cli_tunnel::Sealed);
+    if let Some(token) = token {
+      request =
+        request.header("authorization", format!("Bearer {token}"));
+    }
+    let response = app
+      .clone()
+      .oneshot(request.body(Body::empty()).unwrap())
+      .await
+      .unwrap();
+    assert_eq!(response.status().as_u16(), expected);
+  }
+  state.db.call(|c| {
+    let mut stmt = c.prepare("SELECT actor, source, status, detail FROM audit_log ORDER BY id").map_err(sql_err)?;
+    let entries = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, u16>(2)?, row.get::<_, String>(3)?)))
+      .map_err(sql_err)?.collect::<Result<Vec<_>, _>>().map_err(sql_err)?;
+    assert_eq!(entries.len(), 3);
+    for ((actor, source, status, detail), (expected_actor, expected_status)) in entries.iter().zip([("anonymous", 401), ("expired", 401), ("scoped", 403)]) {
+      assert_eq!(actor, expected_actor);
+      assert_eq!(source, "203.0.113.16");
+      assert_eq!(*status, expected_status);
+      assert!(!detail.is_empty() && !detail.contains("fixture-"));
+    }
     Ok(())
   }).await.unwrap();
 }
