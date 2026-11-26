@@ -4,6 +4,8 @@
 
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
+
 use wharf_api_types::{
   ApiError,
   agent::{DockerUsage, HostInfo, PackageUpdate, SshLogin},
@@ -84,6 +86,54 @@ pub async fn info(
     .check("读取宿主机信息")?;
   parse_script(&out.stdout, &mut info);
   Ok(info)
+}
+
+// 只取 SSH 登录；脚本成功标记同时区分 journal 读取失败和输出截断。
+const SSH_SCRIPT: &str = r#"
+{ chroot /host timeout -k 5 20 journalctl _COMM=sshd _COMM=sshd-session --since "31 days ago" --quiet --no-pager -o short-iso-precise &&
+  echo '@end'; } | LC_ALL=C awk '
+    /: Accepted / { bytes += length($0) + 1; if (bytes <= 4194304) print }
+    /^@end$/ && bytes <= 4194304 { print }
+  '
+"#;
+
+pub async fn ssh_logins(
+  docker: &Docker,
+  ctx: &Ctx,
+) -> Result<(DateTime<Utc>, Vec<SshLogin>), ApiError> {
+  let image = crate::adopt::self_image(docker, ctx).await?;
+  let at = Utc::now();
+  let out = docker
+    .cmd()
+    .args([
+      "run",
+      "--rm",
+      "--pull",
+      "never",
+      "--label",
+      "wharf.temp=1",
+      "--network",
+      "none",
+      "--entrypoint",
+      "sh",
+      "--mount",
+      "type=bind,src=/,dst=/host,readonly",
+      image.as_str(),
+      "-c",
+      SSH_SCRIPT,
+    ])
+    .timeout(Duration::from_secs(30))
+    .run(ctx)
+    .await?
+    .check("读取 SSH 登录")?;
+  let logins =
+    out.stdout.strip_suffix("@end\n").ok_or_else(|| {
+      ApiError::new(
+        wharf_api_types::ErrorCode::AgentFailed,
+        "SSH 登录记录读取失败或输出过大",
+      )
+    })?;
+  Ok((at, logins.lines().filter_map(ssh_login).collect()))
 }
 
 fn read(path: &str) -> String {
@@ -175,11 +225,11 @@ fn ssh_login(s: &str) -> Option<SshLogin> {
   let (time, rest) = s.split_once(' ')?;
   let at = chrono::DateTime::parse_from_rfc3339(time)
     .or_else(|_| {
-      chrono::DateTime::parse_from_str(time, "%Y-%m-%dT%H:%M:%S%z")
+      chrono::DateTime::parse_from_str(time, "%Y-%m-%dT%H:%M:%S%.f%z")
     })
     .ok()?
     .to_utc();
-  let rest = rest.split_once("Accepted ")?.1;
+  let rest = rest.split_once(": ")?.1.strip_prefix("Accepted ")?;
   let (method, rest) = rest.split_once(" for ")?;
   let (user, rest) = rest.rsplit_once(" from ")?;
   let from = rest.split_whitespace().next()?;
@@ -221,7 +271,7 @@ mod tests {
     parse_script(
       "os Debian GNU/Linux 12 (bookworm)\n\
        container_logs 67194769\njournal \nvar_log 159206470\n\
-       ssh 2026-11-07T16:29:15+08:00 s1 sshd[1]: Accepted publickey for gx from 203.0.113.1 port 52761 ssh2: ED25519 SHA256:x\n\
+       ssh 2026-11-07T16:29:15.123456+0800 s1 sshd[1]: Accepted publickey for gx from 203.0.113.1 port 52761 ssh2: ED25519 SHA256:x\n\
        ssh 2026-11-07T16:30:00+08:00 s1 sshd-session[2]: Accepted password for root from 203.0.113.2 port 22 ssh2\n\
        ssh garbage\napt\n\
        Inst docker-ce [5:29.4.2-2] (5:29.9.2-1 Docker CE:bookworm [amd64])\n\
@@ -248,7 +298,10 @@ mod tests {
       ("root", "password")
     );
     assert_eq!(l[1].from, "203.0.113.1");
-    assert_eq!(l[1].at.to_rfc3339(), "2026-11-07T08:29:15+00:00");
+    assert_eq!(
+      l[1].at.to_rfc3339(),
+      "2026-11-07T08:29:15.123456+00:00"
+    );
   }
 }
 

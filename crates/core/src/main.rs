@@ -96,11 +96,13 @@ mod scope_filter;
 mod secret_policy;
 #[cfg(test)]
 mod secret_policy_tests;
+mod security_receipt;
 mod service_monitor;
 mod sessions;
 mod share;
 mod shell;
 mod snapshot;
+mod ssh_login;
 mod sso_login;
 mod state;
 mod status;
@@ -243,6 +245,7 @@ async fn main() -> anyhow::Result<()> {
   mem_forecast::spawn(state.clone());
   traffic::spawn(state.clone());
   host_units::spawn(state.clone());
+  ssh_login::spawn(state.clone());
   exposure::spawn(state.clone());
   failover::spawn(state.clone());
   tasks::spawn(state.clone());

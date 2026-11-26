@@ -1761,6 +1761,10 @@ async fn apply_plan(
   State(s): State<Arc<AppState>>,
   auth: Auth,
   axum::Extension(audit): axum::Extension<crate::audit::AuditSlot>,
+  axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<
+    std::net::SocketAddr,
+  >,
+  headers: HeaderMap,
   Json(req): Json<ApplyRequest>,
 ) -> ApiResult<ApplyResponse> {
   auth.require(Perm::Apply)?;
@@ -1772,8 +1776,10 @@ async fn apply_plan(
     .and_then(|p| p.note)
     .map(|n| format!(" 备注：{n}"))
     .unwrap_or_default();
+  let source = crate::login::client_key(peer.ip(), &headers);
   let resp =
-    apply::start(s.clone(), req, &auth.perms, Some(&auth)).await?;
+    apply::start(s.clone(), req, &auth.perms, Some((&auth, source)))
+      .await?;
   audit
     .set_detail(format!("plan={plan_id} run={}{note}", resp.run_id));
   Ok(Json(resp))

@@ -110,6 +110,7 @@ async fn session(
     forward: true,
     service_checks: true,
     container_diagnosis: true,
+    ssh_logins: true,
     access_logs: true,
     net_probe: true,
     container_probe: true,

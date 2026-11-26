@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use axum::{
   Json,
-  extract::{Path, State},
+  extract::{ConnectInfo, Path, State},
+  http::HeaderMap,
 };
 use chrono::{DateTime, Utc};
 use rusqlite::{OptionalExtension, params};
@@ -94,6 +95,8 @@ pub struct CreateToken {
 pub async fn create(
   State(s): State<Arc<AppState>>,
   auth: Auth,
+  ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
+  headers: HeaderMap,
   Json(req): Json<CreateToken>,
 ) -> ApiResult<CreatedToken> {
   auth.require(Perm::Admin)?;
@@ -126,6 +129,14 @@ pub async fn create(
       tx.commit().map_err(sql_err)
     })
     .await?;
+  crate::security_receipt::token_created(
+    &s,
+    &auth.name,
+    &crate::login::client_key(peer.ip(), &headers),
+    &req.name,
+    &settings.perms,
+  )
+  .await;
   Ok(Json(CreatedToken {
     name: req.name,
     token,
@@ -224,6 +235,44 @@ pub async fn whoami(auth: Auth) -> ApiResult<Value> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn creating_high_privilege_token_has_receipt() {
+    use crate::{
+      rules::tests::{
+        TEST_LOCK, notice_titles, reset_memory, test_state,
+      },
+      security_receipt::tests::auth,
+    };
+
+    let _lock = TEST_LOCK.lock().await;
+    reset_memory();
+    let state = test_state();
+    for (name, perm) in
+      [("host-access", Perm::Host), ("admin-access", Perm::Admin)]
+    {
+      let result = create(
+        State(state.clone()),
+        auth(false),
+        ConnectInfo("203.0.113.8:1234".parse().unwrap()),
+        HeaderMap::new(),
+        Json(CreateToken {
+          name: name.into(),
+          scope: None,
+          perms: Some(vec![perm]),
+          expires_at: None,
+          allowed_from: vec![],
+          services: vec![],
+        }),
+      )
+      .await;
+      assert!(result.is_ok());
+    }
+    assert_eq!(
+      notice_titles(&state, "security_receipt").await,
+      ["新建高权限令牌 host-access", "新建高权限令牌 admin-access"]
+    );
+  }
 
   #[test]
   fn normalizes_settings_and_rejects_invalid_range() {
