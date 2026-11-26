@@ -71,11 +71,7 @@ fn has_disallowed_control_chars(text: &str) -> bool {
   for (i, &b) in bytes.iter().enumerate() {
     match b {
       b'\t' | b'\n' => {}
-      b'\r' => {
-        if bytes.get(i + 1) != Some(&b'\n') {
-          return true;
-        }
-      }
+      b'\r' if bytes.get(i + 1) == Some(&b'\n') => {}
       0x00..=0x1f | 0x7f => return true,
       _ => {}
     }
@@ -129,10 +125,8 @@ pub(crate) fn check_custom_caddy(
         let mut closed = false;
         while let Some(c) = chars.next() {
           match c {
-            '\\' => {
-              if chars.next().is_none() {
-                return Err("里的引号或转义没有闭合");
-              }
+            '\\' if chars.next().is_none() => {
+              return Err("里的引号或转义没有闭合");
             }
             '"' => {
               closed = true;
