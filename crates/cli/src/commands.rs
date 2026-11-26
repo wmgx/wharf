@@ -2839,16 +2839,17 @@ async fn gateway(
       });
       Ok(())
     }
-    GatewayCmd::RotateLink(crate::RotateLinkArgs {
+    GatewayCmd::RotateLink {
       name,
-      token,
+      link_token,
       cert,
       apply,
       ..
-    }) => {
-      let both = !token && !cert;
-      let response =
-        c.rotate_link(&name, token || both, cert || both).await?;
+    } => {
+      let both = !link_token && !cert;
+      let response = c
+        .rotate_link(&name, link_token || both, cert || both)
+        .await?;
       if apply.apply {
         if !j {
           print::rotate_link(&response);
@@ -4275,12 +4276,12 @@ mod tests {
     let credential = format!("fixture-{}", std::process::id());
     let cli = Cli::try_parse_from([
       "wharf",
-      "--token",
-      &credential,
       "gateway",
       "rotate-link",
       "gw-a",
       "--token",
+      &credential,
+      "--link-token",
       "--apply",
       "--yes",
     ])
@@ -4288,8 +4289,23 @@ mod tests {
     assert!(cli.token.as_deref() == Some(credential.as_str()));
     assert!(matches!(
       cli.command,
-      Command::Gateway(GatewayCmd::RotateLink(crate::RotateLinkArgs { token: true, apply, .. }))
+      Command::Gateway(GatewayCmd::RotateLink { link_token: true, cert: false, apply, .. })
         if apply.apply && apply.confirm.is_empty()
+    ));
+    let default = Cli::try_parse_from([
+      "wharf",
+      "gateway",
+      "rotate-link",
+      "gw-a",
+    ])
+    .unwrap();
+    assert!(matches!(
+      default.command,
+      Command::Gateway(GatewayCmd::RotateLink {
+        link_token: false,
+        cert: false,
+        ..
+      })
     ));
     let Err(help) = Cli::try_parse_from([
       "wharf",
@@ -4300,9 +4316,10 @@ mod tests {
       panic!("预期返回命令帮助");
     };
     assert_eq!(help.kind(), clap::error::ErrorKind::DisplayHelp);
-    assert!(
-      help.to_string().contains("高风险项仍需逐项传入 --confirm")
-    );
+    let help = help.to_string();
+    assert!(help.contains("高风险项仍需逐项传入 --confirm"));
+    assert!(help.contains("--link-token"));
+    assert!(!help.contains("--api-token"));
   }
 
   #[test]

@@ -12,4 +12,7 @@ pub fn rotate_link(v: &serde_json::Value) {
     println!("证书到期 {expires}");
   }
   println!("执行 wharf plan 查看变更");
+  println!(
+    "仅轮换密钥：wharf gateway rotate-link {gateway} --link-token"
+  );
 }
