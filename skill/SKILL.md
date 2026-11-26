@@ -42,6 +42,7 @@ wharf status --json        # 服务器、服务、网关、路由；problems 和
 
 给 AI 签发访问令牌时，建议用 `--expires 30d` 设置有效期，用 `--from <地址或网段>` 限制来源；`--services blog,halo` 可以限定可操作的服务。
 管理员用 `wharf token set <名称>` 修改这些限制或 `--perms`。用 `--expires never`、`--from any`、`--services all` 分别清除三项限制。
+管理员可用 `wharf token explain <名称> [--service 服务] [--from IP]` 只读推演常用操作的令牌判定，也可同时传 `--method` 和 `--path` 推演指定请求的令牌层。
 
 服务器和域名的备注分别用 `wharf server note <服务器> "<文本>"`、`wharf route note <域名> "<文本>"` 保存，`--clear` 清除。
 

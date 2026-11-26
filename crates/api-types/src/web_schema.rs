@@ -103,6 +103,7 @@ pub fn web_schema() -> Value {
   let _ = generator.subschema_for::<view::TokenView>();
   let _ = generator.subschema_for::<view::CreatedToken>();
   let _ = generator.subschema_for::<view::TokenSettings>();
+  let _ = generator.subschema_for::<view::TokenExplain>();
   let _ = generator.subschema_for::<agent::PackageUpdate>();
   let _ = generator.subschema_for::<agent::DockerUsage>();
   let _ = generator.subschema_for::<agent::HostInfo>();

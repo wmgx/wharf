@@ -1463,6 +1463,22 @@ pub enum RunCmd {
 #[derive(Subcommand)]
 pub enum TokenCmd {
   List,
+  /// 只读推演，不会真的发出被推演的请求或修改数据。
+  Explain {
+    name: String,
+    /// 要推演的服务。
+    #[arg(long)]
+    service: Option<String>,
+    /// 假设请求来自这个 IP 地址。
+    #[arg(long)]
+    from: Option<String>,
+    /// 要推演的 HTTP 方法，例如 GET。
+    #[arg(long, requires = "path")]
+    method: Option<String>,
+    /// 要推演的请求路径，以 /api/ 开头。
+    #[arg(long, requires = "method")]
+    path: Option<String>,
+  },
   /// 新建 token（只显示这一次）。给 AI 常用 `--perms plan,apply,exec`。
   Create {
     name: String,

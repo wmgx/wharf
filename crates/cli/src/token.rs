@@ -4,7 +4,10 @@ use chrono::{DateTime, Local, NaiveDate, TimeDelta, TimeZone, Utc};
 use serde_json::{Value, json};
 use wharf_api_types::{
   ApiError,
-  view::{CreatedToken, Perm, TokenSettings, TokenView},
+  view::{
+    CreatedToken, ExplainVerdict, Perm, TokenExplain, TokenSettings,
+    TokenView,
+  },
 };
 
 use crate::{
@@ -114,8 +117,43 @@ pub async fn run(
   ) {
     return Err(ApiError::invalid("没有要改的").into());
   }
+  if let TokenCmd::Explain {
+    path: Some(path), ..
+  } = &cmd
+    && !path.starts_with("/api/")
+  {
+    return Err(ApiError::invalid("--path 必须以 /api/ 开头").into());
+  }
   let c = Client::new(url, token)?;
   match cmd {
+    TokenCmd::Explain {
+      name,
+      service,
+      from,
+      method,
+      path,
+    } => {
+      let query = [
+        ("service", service),
+        ("from", from),
+        ("method", method),
+        ("path", path),
+      ]
+      .into_iter()
+      .filter_map(|(key, value)| {
+        value.map(|value| format!("{key}={}", seg(&value)))
+      })
+      .collect::<Vec<_>>()
+      .join("&");
+      let mut endpoint =
+        format!("/api/tokens/{}/explain", seg(&name));
+      if !query.is_empty() {
+        endpoint.push('?');
+        endpoint.push_str(&query);
+      }
+      let response: TokenExplain = c.get(&endpoint).await?;
+      out(j, &response, print_explanation);
+    }
     TokenCmd::List => {
       let tokens: Vec<TokenView> = c.get("/api/tokens").await?;
       out(j, &tokens, |tokens| {
@@ -265,6 +303,53 @@ pub async fn run(
     }
   }
   Ok(())
+}
+
+fn print_explanation(result: &TokenExplain) {
+  print!("令牌 {}", result.token);
+  if let Some(service) = &result.service {
+    print!(" · 服务 {service}");
+  }
+  if let Some(from) = &result.from {
+    print!(" · 来源 {from}");
+  }
+  println!();
+  let width = |s: &str| {
+    s.chars()
+      .map(|c| if c.is_ascii() { 1 } else { 2 })
+      .sum::<usize>()
+  };
+  let request_width = result
+    .items
+    .iter()
+    .map(|item| item.method.len() + 1 + width(&item.path))
+    .max()
+    .unwrap_or(0)
+    .max(width("请求"));
+  println!(
+    "结果    操作                请求{:>pad$}  原因",
+    "",
+    pad = request_width - width("请求"),
+  );
+  for item in &result.items {
+    let verdict = match item.verdict {
+      ExplainVerdict::Allow => "放行",
+      ExplainVerdict::Deny => "拦截",
+      ExplainVerdict::Depends => "看情况",
+    };
+    let request = format!("{} {}", item.method, item.path);
+    println!(
+      "{verdict}{:>verdict_pad$}{op}{:>op_pad$}{request}{:>request_pad$}  {reason}",
+      "",
+      "",
+      "",
+      verdict_pad = 8 - width(verdict),
+      op = item.op,
+      op_pad = 20_usize.saturating_sub(width(&item.op)),
+      request_pad = request_width - width(&request),
+      reason = item.reason.as_deref().unwrap_or(""),
+    );
+  }
 }
 
 #[cfg(test)]
