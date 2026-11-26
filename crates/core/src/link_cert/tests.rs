@@ -285,7 +285,7 @@ fn secret_registry_preserves_notify_templates_and_redacts_private_material()
     .insert("CREDENTIAL".into(), "[[WHARF_LINK_TOKEN_gw-a]]".into());
   assert!(validate_world(&world).is_err());
   let (cert, key) = generate_ca(OffsetDateTime::now_utc()).unwrap();
-  let secrets = BTreeMap::from([
+  let secrets = BTreeMap::<String, String>::from([
     ("WHARF_LINK_TOKEN_gw-a".into(), auth::new_token()),
     (CA_CERT_SECRET.into(), cert.pem()),
     (CA_KEY_SECRET.into(), key.serialize_pem()),
@@ -363,6 +363,7 @@ async fn scoped_credentials_are_idempotent_rotatable_and_deleted_with_gateway()
         "gw-b",
         now,
       )?;
+      db::ensure_secret(&tx, key, "WHARF_LINK_TOKEN", now)?;
       let before = db::secrets(&tx, key)?;
       for write in world(true).writes_from(&World::default()) {
         db::apply_write(&tx, &write)?;
