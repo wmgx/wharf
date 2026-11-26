@@ -751,6 +751,9 @@ pub fn apply_write(
       if kind == crate::world::KIND_SERVICE {
         crate::rules::delete_service_rows(conn, name)?;
       }
+      if kind == crate::world::KIND_GATEWAY {
+        delete_scoped_secrets(conn, crate::link::GATEWAY_SECRET_PREFIXES, name)?;
+      }
       if kind == crate::world::KIND_EDGE {
         conn
           .execute(
@@ -1280,14 +1283,99 @@ pub fn ensure_secret(
   name: &str,
   now: i64,
 ) -> Result<String, ApiError> {
-  if let Some(v) = key.secret(conn, name)? {
-    return Ok(v);
-  }
+  ensure_secret_with(conn, key, name, now, random_secret)
+}
+
+fn random_secret() -> Result<String, ApiError> {
   let mut bytes = [0u8; 24];
-  getrandom::fill(&mut bytes).expect("随机数不可用");
-  let value = hex::encode(bytes);
-  key.put_secret(conn, name, &value, now, false)?;
+  getrandom::fill(&mut bytes)
+    .map_err(|_| ApiError::internal("随机数不可用"))?;
+  Ok(hex::encode(bytes))
+}
+
+fn ensure_secret_with(
+  conn: &Connection,
+  key: &CredentialsKey,
+  name: &str,
+  now: i64,
+  generate: impl FnOnce() -> Result<String, ApiError>,
+) -> Result<String, ApiError> {
+  if let Some(value) = key.secret(conn, name)? {
+    return Ok(value);
+  }
+  key.put_secret(conn, name, &generate()?, now, false)?;
+  key
+    .secret(conn, name)?
+    .ok_or_else(|| ApiError::internal("密钥写入后不存在"))
+}
+
+pub fn scoped_secret_name(
+  prefix: &str,
+  entity: &str,
+) -> Result<String, ApiError> {
+  if !prefix.starts_with("WHARF_") || !prefix.ends_with('_') {
+    return Err(ApiError::invalid(
+      "实体密钥前缀必须以 WHARF_ 开头并以下划线结尾",
+    ));
+  }
+  wharf_api_types::validate_name("密钥所属实体", entity)?;
+  Ok(format!("{prefix}{entity}"))
+}
+
+pub fn ensure_scoped_secret(
+  conn: &Connection,
+  key: &CredentialsKey,
+  prefix: &str,
+  entity: &str,
+  now: i64,
+) -> Result<String, ApiError> {
+  ensure_scoped_secret_with(
+    conn,
+    key,
+    prefix,
+    entity,
+    now,
+    random_secret,
+  )
+}
+
+pub fn ensure_scoped_secret_with(
+  conn: &Connection,
+  key: &CredentialsKey,
+  prefix: &str,
+  entity: &str,
+  now: i64,
+  generate: impl FnOnce() -> Result<String, ApiError>,
+) -> Result<String, ApiError> {
+  let name = scoped_secret_name(prefix, entity)?;
+  ensure_secret_with(conn, key, &name, now, generate)
+}
+
+pub fn rotate_scoped_secret(
+  conn: &Connection,
+  key: &CredentialsKey,
+  prefix: &str,
+  entity: &str,
+  now: i64,
+) -> Result<String, ApiError> {
+  let name = scoped_secret_name(prefix, entity)?;
+  let value = random_secret()?;
+  key.put_secret(conn, &name, &value, now, true)?;
   Ok(value)
+}
+
+pub fn delete_scoped_secrets(
+  conn: &Connection,
+  prefixes: &[&str],
+  entity: &str,
+) -> Result<usize, ApiError> {
+  prefixes.iter().try_fold(0, |count, prefix| {
+    let name = scoped_secret_name(prefix, entity)?;
+    let deleted = conn
+      .execute("DELETE FROM secrets WHERE name = ?1", [name])
+      .map_err(sql_err)?;
+    Ok(count + deleted)
+  })
 }
 
 // ACCOUNTS

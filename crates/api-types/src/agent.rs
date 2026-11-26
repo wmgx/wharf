@@ -134,6 +134,8 @@ pub enum AgentMsg {
     container_probe: bool,
     #[serde(default)]
     ssh_logins: bool,
+    #[serde(default)]
+    gateway_extra_files: bool,
   },
   Report(Box<AgentReport>),
   Progress {

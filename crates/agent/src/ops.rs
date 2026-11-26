@@ -11,20 +11,19 @@ use serde_json::Value;
 use wharf_api_types::{
   ApiError, ErrorCode,
   agent::{
-    AgentOp, BUILD_IMAGE_PREFIX, GatewayApply, ProjectUp,
-    ProjectUpResult, TRIAL_PROJECT_PREFIX,
+    AgentOp, BUILD_IMAGE_PREFIX, ProjectUp, ProjectUpResult,
+    TRIAL_PROJECT_PREFIX,
   },
 };
 
 use crate::{
-  docker::{
-    CONFIG_HASH_FILE, Docker, Previous, io_err, write_private,
-  },
+  docker::{Docker, Previous, io_err},
   exec::{Cmd, Ctx},
   host_shell::HostShell,
   report::Reporter,
 };
 
+mod gateway;
 mod validation;
 use validation::{check_own_container, check_project, ensure_dir};
 
@@ -620,144 +619,6 @@ impl Ops {
         )
       }
     }
-  }
-
-  /// 先校验新配置，通过后再替换；容器在运行时热重载，失败就恢复旧配置。
-  async fn gateway_apply(
-    &self,
-    apply: &GatewayApply,
-    ctx: &Ctx,
-  ) -> Result<ProjectUpResult, ApiError> {
-    let up = &apply.up;
-    let dir = self.docker.project_dir(&up.project);
-    let conf = dir.join("conf");
-    std::fs::create_dir_all(&conf).map_err(io_err(&conf))?;
-    let current = conf.join("Caddyfile");
-    let next = conf.join("Caddyfile.next");
-    let prev = conf.join("Caddyfile.prev");
-
-    let before = self.docker.one_status(&up.project, ctx).await?;
-    let compose_changed =
-      before.hash.as_deref() != Some(up.hash.as_str());
-    let running = before.all_running();
-
-    // 网关 compose 只有 caddy 一个镜像。校验通过之前不动现有 compose 文件。
-    let mut warnings = Vec::new();
-    let images = vec![apply.image.clone()];
-    // 只改路由时容器在跑、镜像就在本地，不必再拉。
-    if !running || compose_changed {
-      self
-        .docker
-        .pull(&apply.image, &up.pull, ctx, &mut warnings)
-        .await?;
-    }
-
-    write_private(&next, &apply.caddyfile)?;
-    ctx.say("校验 Caddy 配置");
-    let validated = Cmd::new(&self.docker.bin)
-      .args([
-        "run",
-        "--rm",
-        "--label",
-        "wharf.temp=1",
-        "--network",
-        "none",
-        "-v",
-      ])
-      .arg(format!("{}:/etc/caddy:ro", conf.display()))
-      .args([
-        apply.image.as_str(),
-        "caddy",
-        "validate",
-        "--config",
-        "/etc/caddy/Caddyfile.next",
-        "--adapter",
-        "caddyfile",
-      ])
-      .timeout(Duration::from_secs(60))
-      .run(ctx)
-      .await?
-      .check("caddy validate");
-    if let Err(e) = validated {
-      let _ = std::fs::remove_file(&next);
-      return Err(e);
-    }
-
-    let had_config = current.exists();
-    if had_config {
-      std::fs::copy(&current, &prev).map_err(io_err(&prev))?;
-    }
-    std::fs::rename(&next, &current).map_err(io_err(&current))?;
-    self.docker.write_compose(&up.project, &up.compose)?;
-
-    let result = if running && !compose_changed {
-      ctx.say("热重载 Caddy");
-      match self.caddy_reload(&up.project, false, ctx).await {
-        Ok(()) => {
-          let state =
-            self.docker.one_status(&up.project, ctx).await?;
-          Ok(ProjectUpResult {
-            containers: state.containers,
-            images: self.docker.image_info(&images, ctx).await,
-            warnings,
-            retired: vec![],
-          })
-        }
-        Err(e) => Err(e),
-      }
-    } else {
-      self.finish_up(up, &images, warnings, None, ctx).await
-    };
-
-    match result {
-      Ok(result) => {
-        let hash = conf.join(CONFIG_HASH_FILE);
-        std::fs::write(&hash, &apply.caddyfile_hash)
-          .map_err(io_err(&hash))?;
-        Ok(result)
-      }
-      Err(e) => {
-        if had_config {
-          ctx.say("失败，恢复旧配置");
-          let _ = std::fs::rename(&prev, &current);
-          if running {
-            let _ = self.caddy_reload(&up.project, false, ctx).await;
-          }
-        }
-        Err(e)
-      }
-    }
-  }
-
-  /// `force`：配置没变也重载（Caddy 默认会跳过），证书管理随之重新开始。
-  async fn caddy_reload(
-    &self,
-    project: &str,
-    force: bool,
-    ctx: &Ctx,
-  ) -> Result<(), ApiError> {
-    self
-      .docker
-      .compose(project)
-      .args([
-        "exec",
-        "-T",
-        "caddy",
-        "caddy",
-        "reload",
-        "--config",
-        "/etc/caddy/Caddyfile",
-        "--adapter",
-        "caddyfile",
-        "--address",
-        CADDY_ADMIN,
-      ])
-      .args(force.then_some("--force"))
-      .timeout(Duration::from_secs(60))
-      .run(ctx)
-      .await?
-      .check("caddy reload")?;
-    Ok(())
   }
 }
 

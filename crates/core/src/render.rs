@@ -15,7 +15,10 @@ use wharf_api_types::{
 
 use crate::world::{ServerRow, World, gateway_project};
 
+mod frp;
 mod gate;
+
+pub use frp::{frpc_compose, frps_compose};
 
 /// 网关默认镜像：官方 Caddy 加 layer4、限速、Cloudflare DNS 插件（deploy/caddy/Dockerfile）。
 /// 标签只在 Caddy 或插件版本变化时改，改了会重建所有没指定镜像的 caddy 网关。
@@ -63,6 +66,9 @@ pub struct Net {
   /// 登录保护的账号，按密钥名（每个域名的 [route_auth_secret]）。
   /// 不是网络信息，但渲染网关时要用，放在这里不必到处传。
   pub basic_auth: BTreeMap<String, BasicAuth>,
+  pub link_ca_cert: Option<String>,
+  pub link_token_hashes: BTreeMap<String, String>,
+  pub link_certs: BTreeMap<String, crate::link_cert::LinkCertState>,
 }
 
 impl Net {
@@ -229,6 +235,19 @@ pub fn service_dirs(name: &str, spec: &ServiceSpec) -> Vec<String> {
 struct ComposeFile {
   name: String,
   services: BTreeMap<String, ComposeService>,
+  #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+  configs: BTreeMap<String, ComposeConfigDef>,
+}
+
+#[derive(Serialize)]
+struct ComposeConfigDef {
+  content: String,
+}
+
+#[derive(Serialize)]
+struct ComposeConfigRef {
+  source: String,
+  target: String,
 }
 
 #[derive(Serialize)]
@@ -251,6 +270,8 @@ struct ComposeService {
   ports: Vec<String>,
   #[serde(skip_serializing_if = "Vec::is_empty")]
   volumes: Vec<String>,
+  #[serde(skip_serializing_if = "Vec::is_empty")]
+  configs: Vec<ComposeConfigRef>,
   labels: BTreeMap<String, String>,
 }
 
@@ -659,6 +680,7 @@ pub fn service_compose(
         })
         .collect();
       let file = ComposeFile {
+        configs: BTreeMap::new(),
         name: name.to_string(),
         services: BTreeMap::from([(name.to_string(), service)]),
       };
@@ -684,6 +706,7 @@ fn image_service(
     environment.insert(key.clone(), value.replace('$', "$$"));
   }
   Ok(ComposeService {
+    configs: vec![],
     image,
     restart: "unless-stopped",
     mem_limit: spec
@@ -721,6 +744,7 @@ pub fn trial_compose(
   service.labels =
     BTreeMap::from([("wharf.trial".into(), name.into())]);
   Ok(to_yaml(&ComposeFile {
+    configs: BTreeMap::new(),
     name: format!("{TRIAL_PROJECT_PREFIX}{name}"),
     services: BTreeMap::from([(name.to_string(), service)]),
   }))
@@ -878,10 +902,12 @@ pub fn tunnel_compose(
 ) -> String {
   let project = gateway_project(name);
   let file = ComposeFile {
+    configs: BTreeMap::new(),
     name: project,
     services: BTreeMap::from([(
       "cloudflared".to_string(),
       ComposeService {
+        configs: vec![],
         image: gateway_image(spec),
         restart: "unless-stopped",
         mem_limit: None,
@@ -916,10 +942,12 @@ pub fn tunnel_compose(
 pub fn gateway_compose(name: &str, spec: &GatewaySpec) -> String {
   let project = gateway_project(name);
   let file = ComposeFile {
+    configs: BTreeMap::new(),
     name: project.clone(),
     services: BTreeMap::from([(
       "caddy".to_string(),
       ComposeService {
+        configs: vec![],
         image: gateway_image(spec),
         restart: "unless-stopped",
         mem_limit: None,
@@ -974,10 +1002,12 @@ pub fn backup_server_compose(
     "printf '%s\\n' \"$$HTPASSWD\" > /tmp/htpasswd && exec rest-server --path /data --htpasswd-file /tmp/htpasswd --listen {host}:{REST_SERVER_PORT} --append-only"
   );
   let file = ComposeFile {
+    configs: BTreeMap::new(),
     name: BACKUP_PROJECT.to_string(),
     services: BTreeMap::from([(
       "rest-server".to_string(),
       ComposeService {
+        configs: vec![],
         image: REST_SERVER_IMAGE.to_string(),
         restart: "unless-stopped",
         mem_limit: None,
@@ -1033,79 +1063,6 @@ pub fn upstream(
 
 pub const FRPS_IMAGE: &str = "snowdreamtech/frps:0.61.1";
 pub const FRPC_IMAGE: &str = "snowdreamtech/frpc:0.61.1";
-
-/// frp 容器：配置放在环境变量里，启动时写成文件；密钥是占位，部署时替换。
-fn frp_service(
-  image: &str,
-  bin: &str,
-  config: String,
-) -> ComposeService {
-  ComposeService {
-    image: image.to_string(),
-    restart: "unless-stopped",
-    mem_limit: None,
-    cpus: None,
-    network_mode: Some("host"),
-    entrypoint: Some(vec!["sh".into(), "-c".into()]),
-    command: Some(vec![format!(
-      "printf '%s\\n' \"$$FRP_CONFIG\" > /tmp/frp.toml && exec {bin} -c /tmp/frp.toml"
-    )]),
-    environment: BTreeMap::from([
-      ("FRP_CONFIG".to_string(), config),
-      (
-        "FRP_TOKEN".to_string(),
-        format!("[[{}]]", crate::link::TOKEN_SECRET),
-      ),
-    ]),
-    ports: vec![],
-    volumes: vec![],
-    labels: BTreeMap::from([(
-      "wharf.link".to_string(),
-      bin.to_string(),
-    )]),
-  }
-}
-
-/// 网关所在机器上的 frps：只监听 127.0.0.1，由 Caddy 转发 websocket 进来；
-/// 隧道端口也只绑 127.0.0.1，只允许 Wharf 的隧道端口范围。
-pub fn frps_compose(project: &str) -> String {
-  let config = format!(
-    "bindAddr = \"127.0.0.1\"\nbindPort = {}\nproxyBindAddr = \"127.0.0.1\"\nallowPorts = [{{ start = 30000, end = 39999 }}]\nauth.token = \"{{{{ .Envs.FRP_TOKEN }}}}\"\n",
-    crate::link::FRPS_PORT
-  );
-  to_yaml(&ComposeFile {
-    name: project.to_string(),
-    services: BTreeMap::from([(
-      "frps".to_string(),
-      frp_service(FRPS_IMAGE, "frps", config),
-    )]),
-  })
-}
-
-/// 服务所在机器上的 frpc：经网关的 Caddy 用 wss 连 frps。`proxies` 是 (名字, 本机端口, 隧道端口)。
-pub fn frpc_compose(
-  project: &str,
-  server_addr: &str,
-  server_port: u16,
-  proxies: &[(String, u16, u16)],
-) -> String {
-  let mut config = format!(
-    "serverAddr = \"{server_addr}\"\nserverPort = {server_port}\nloginFailExit = false\nauth.token = \"{{{{ .Envs.FRP_TOKEN }}}}\"\ntransport.protocol = \"wss\"\ntransport.tls.serverName = \"{}\"\n",
-    crate::link::LINK_HOST
-  );
-  for (name, local, remote) in proxies {
-    config.push_str(&format!(
-      "\n[[proxies]]\nname = \"{name}\"\ntype = \"tcp\"\nlocalIP = \"127.0.0.1\"\nlocalPort = {local}\nremotePort = {remote}\n"
-    ));
-  }
-  to_yaml(&ComposeFile {
-    name: project.to_string(),
-    services: BTreeMap::from([(
-      "frpc".to_string(),
-      frp_service(FRPC_IMAGE, "frpc", config),
-    )]),
-  })
-}
 
 /// 一条 Caddy 站点：hostname → 上游。
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -1444,14 +1401,10 @@ pub fn caddyfile_with_fill(
     ));
   }
   crate::entry_protection::render_http_fallback(&mut out, spec);
-  // 反向隧道：frpc 按 IP 连进来，握手带固定名字，用 Caddy 自己签的证书。
+  // frpc 按 IP 连进来，用固定 SNI 校验集群 CA 签发的证书。
   if link {
-    let tls = match spec.tls {
-      GatewayTls::Auto => "\ttls internal\n",
-      _ => "",
-    };
     out.push_str(&format!(
-      "\n{scheme}{} {{\n{tls}\treverse_proxy {} 127.0.0.1:{}\n}}\n",
+      "\n{} {{\n\ttls /etc/caddy/link.crt /etc/caddy/link.key\n\treverse_proxy {} 127.0.0.1:{}\n}}\n",
       crate::link::LINK_HOST,
       crate::link::FRP_PATH,
       crate::link::FRPS_PORT

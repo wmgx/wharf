@@ -70,6 +70,7 @@ struct Conn {
   net_probe: bool,
   container_probe: bool,
   ssh_logins: bool,
+  gateway_extra_files: bool,
   /// 协议版本不一致：连接放行，但只接受升级相关的请求，好让它升上来。
   upgrade_only: bool,
 }
@@ -158,6 +159,12 @@ impl Hub {
     lock(&self.conns)
       .get(server)
       .is_some_and(|c| !c.upgrade_only && c.container_diagnosis)
+  }
+
+  pub fn supports_gateway_extra_files(&self, server: &str) -> bool {
+    lock(&self.conns)
+      .get(server)
+      .is_some_and(|c| !c.upgrade_only && c.gateway_extra_files)
   }
 
   pub fn supports_net_probe(
@@ -489,6 +496,7 @@ async fn handle_socket(
     net_probe,
     container_probe,
     ssh_logins,
+    gateway_extra_files,
   } = hello
   else {
     anyhow::bail!("agent 没有先发 hello");
@@ -590,6 +598,7 @@ async fn handle_socket(
     net_probe,
     container_probe,
     ssh_logins,
+    gateway_extra_files,
     upgrade_only,
   };
   state.hub.register(&server, conn.clone());

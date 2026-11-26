@@ -605,6 +605,9 @@ fn metric_value(name: &str, x: f64) -> String {
   }
 }
 
+mod link;
+pub use link::rotate_link;
+
 pub fn core_backup(v: &serde_json::Value) {
   let Some(to) = v["to"].as_str() else {
     println!("控制面备份没有开启：wharf backup core --to <server>");
