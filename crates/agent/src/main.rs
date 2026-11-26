@@ -18,7 +18,9 @@ mod agent_memory;
 mod build;
 mod conn;
 mod container_probe;
+mod core_probe;
 mod diagnose;
+mod dirfd;
 mod docker;
 mod docker_observation;
 mod edge;
@@ -90,7 +92,8 @@ enum Command {
   /// 用一次性凭据加入控制面（`wharf server add` 会给出完整命令）。
   Join {
     core_url: String,
-    join_token: String,
+    #[arg(env = "WHARF_JOIN_TOKEN", hide_env_values = true)]
+    join_token: Option<String>,
     /// 控制面公钥（加入命令里带着）。填了就核对控制面返回的公钥，防止加入时被中间人冒充。
     #[arg(long, env = "WHARF_CORE_KEY")]
     core_key: Option<String>,
@@ -112,6 +115,9 @@ enum Command {
     #[arg(long)]
     out: PathBuf,
   },
+  /// 在可终止的子进程中校验并解包。
+  #[command(hide = true)]
+  Unpack { archive: PathBuf, to: PathBuf },
   /// 在临时容器里执行网络探测。
   #[command(hide = true)]
   NetProbe { job: String },
@@ -136,6 +142,11 @@ fn main() -> anyhow::Result<()> {
   let cli = Cli::parse();
   if let Some(Command::NetProbe { job }) = &cli.command {
     return container_probe::probe_cli(job);
+  }
+  if let Some(Command::Unpack { archive, to }) = &cli.command {
+    let result = wharf_pack::unpack_validated(archive, to);
+    println!("{}", serde_json::to_string(&result)?);
+    return Ok(());
   }
   run(cli)
 }
@@ -165,7 +176,8 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
   let joined = match command {
     Command::Pack { .. }
     | Command::Mirror { .. }
-    | Command::NetProbe { .. } => {
+    | Command::NetProbe { .. }
+    | Command::Unpack { .. } => {
       unreachable!("前面已经处理")
     }
     Command::Replace {
@@ -187,7 +199,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
       let joined = identity::join(
         &cli.data_dir,
         &core_url,
-        &join_token,
+        join_token
+          .as_deref()
+          .filter(|t| !t.is_empty())
+          .ok_or_else(|| anyhow::anyhow!("缺少加入凭据"))?,
         core_key.as_deref(),
       )
       .await?;
@@ -223,7 +238,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
   task::cleanup(&cli.data_dir)?;
 
   let key = identity::load_or_create_key(&cli.data_dir)?;
-  egress::restore(&cli.data_dir);
+  egress::restore(&cli.data_dir, &joined.core_url);
   tokio::spawn(probe::serve(joined.server.clone(), cli.probe_port));
   let docker = docker::Docker {
     bin: cli.docker,

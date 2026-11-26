@@ -59,19 +59,29 @@ pub async fn prune(
     )
     .await?;
   progress(freed);
-  // 让页面马上看到新的磁盘余量。
-  if let Ok(report) = state
-    .hub
-    .call(
-      server,
-      AgentOp::Report,
-      Duration::from_secs(15),
-      None,
-      cancel,
-    )
-    .await
+  // 这里只刷新磁盘字段，避免把主动请求的完整上报当作普通报告入库。
+  if let Some((conn, key)) = state.hub.connected_identity(server)
+    && let Ok(report) = state
+      .hub
+      .call_bound::<wharf_api_types::agent::AgentReport>(
+        (server, conn),
+        AgentOp::Report,
+        Duration::from_secs(15),
+        None,
+        cancel,
+      )
+      .await
+    && state.hub.conn_id(server) == Some(conn)
   {
-    crate::hub::touch(state, server, Some(report)).await;
+    let server = server.to_string();
+    let values = serde_json::json!({ "disk": report.disk, "docker_disk": report.docker_disk });
+    let _ = state.db.call(move |c| {
+      c.execute(
+        "UPDATE agents SET report = json_patch(report, ?1)
+         WHERE server = ?2 AND public_key = ?3 AND report IS NOT NULL",
+        rusqlite::params![values.to_string(), server, key],
+      ).map_err(crate::db::sql_err)
+    }).await;
   }
   Ok(())
 }

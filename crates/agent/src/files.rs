@@ -4,11 +4,7 @@ use std::{
   ffi::{CStr, CString},
   fs::File,
   io::{self, Read, Seek, SeekFrom, Write},
-  mem::MaybeUninit,
-  os::{
-    fd::{AsRawFd, FromRawFd, OwnedFd},
-    unix::ffi::OsStrExt,
-  },
+  os::fd::AsRawFd,
   path::Path,
 };
 
@@ -16,197 +12,15 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::Value;
 use wharf_api_types::{
   ApiError,
-  agent::{FILE_CHUNK, FileChunk, FileEntry, FilesOp},
-  validate_name,
+  agent::{FILE_CHUNK, FileChunk, FilesOp},
 };
 
-use crate::docker::io_err;
+use crate::{
+  dirfd::{DirFd, NOFOLLOW, check, stat},
+  docker::io_err,
+};
 
 const UPLOAD_SUFFIX: &str = ".wharf-upload";
-const NOFOLLOW: libc::c_int =
-  libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK;
-const DIRECTORY: libc::c_int =
-  libc::O_RDONLY | libc::O_DIRECTORY | NOFOLLOW;
-
-struct DirFd(OwnedFd);
-
-fn owned(fd: libc::c_int) -> io::Result<OwnedFd> {
-  if fd < 0 {
-    Err(io::Error::last_os_error())
-  } else {
-    // 成功的 open/openat 返回一个由调用者独占的新 fd。
-    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
-  }
-}
-
-fn check(rc: libc::c_int) -> io::Result<()> {
-  if rc < 0 {
-    Err(io::Error::last_os_error())
-  } else {
-    Ok(())
-  }
-}
-
-fn stat(fd: libc::c_int) -> io::Result<libc::stat> {
-  let mut st = MaybeUninit::uninit();
-  unsafe {
-    check(libc::fstat(fd, st.as_mut_ptr()))?;
-    Ok(st.assume_init())
-  }
-}
-
-impl DirFd {
-  fn open_service_root(
-    base: &Path,
-    service: &str,
-  ) -> Result<Self, ApiError> {
-    validate_name("服务", service)?;
-    let base_name = CString::new(base.as_os_str().as_bytes())
-      .map_err(|_| ApiError::invalid("路径不对"))?;
-    // base 是 agent 固定使用的数据根目录，不来自请求。
-    let base_fd = Self(
-      owned(unsafe { libc::open(base_name.as_ptr(), DIRECTORY) })
-        .map_err(io_err(base))?,
-    );
-    let name = CString::new(service)
-      .map_err(|_| ApiError::invalid("路径不对"))?;
-    base_fd
-      .open_subdir(&name)
-      .map_err(|e| match e.raw_os_error() {
-        Some(libc::ENOENT) => ApiError::not_found(format!(
-          "这台机器上没有 {service} 的数据目录"
-        )),
-        Some(libc::ELOOP | libc::ENOTDIR) => {
-          ApiError::invalid("不能访问数据目录以外的文件")
-        }
-        _ => io_err(base)(e),
-      })
-  }
-
-  fn open_subdir(&self, name: &CStr) -> io::Result<Self> {
-    self.open_file(name, DIRECTORY, 0).map(Self)
-  }
-
-  fn walk_dirs(self, segs: &[CString]) -> io::Result<Self> {
-    segs
-      .iter()
-      .try_fold(self, |dir, name| dir.open_subdir(name))
-  }
-
-  fn lstat(&self, name: &CStr) -> io::Result<libc::stat> {
-    let mut st = MaybeUninit::uninit();
-    // fstatat 仅在成功时初始化整个 stat。
-    unsafe {
-      check(libc::fstatat(
-        self.0.as_raw_fd(),
-        name.as_ptr(),
-        st.as_mut_ptr(),
-        libc::AT_SYMLINK_NOFOLLOW,
-      ))?;
-      Ok(st.assume_init())
-    }
-  }
-
-  fn stat_self(&self) -> io::Result<libc::stat> {
-    stat(self.0.as_raw_fd())
-  }
-
-  fn open_file(
-    &self,
-    name: &CStr,
-    flags: libc::c_int,
-    mode: libc::c_uint,
-  ) -> io::Result<OwnedFd> {
-    owned(unsafe {
-      libc::openat(self.0.as_raw_fd(), name.as_ptr(), flags, mode)
-    })
-  }
-
-  fn unlink(&self, name: &CStr) -> io::Result<()> {
-    check(unsafe {
-      libc::unlinkat(self.0.as_raw_fd(), name.as_ptr(), 0)
-    })
-  }
-
-  fn rename(&self, from: &CStr, to: &CStr) -> io::Result<()> {
-    let fd = self.0.as_raw_fd();
-    check(unsafe {
-      libc::renameat(fd, from.as_ptr(), fd, to.as_ptr())
-    })
-  }
-
-  fn read_entries(
-    &self,
-    path: &Path,
-  ) -> Result<Vec<FileEntry>, ApiError> {
-    let fd = unsafe {
-      libc::fcntl(self.0.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0)
-    };
-    if fd < 0 {
-      return Err(io_err(path)(io::Error::last_os_error()));
-    }
-    // fdopendir 成功后接管 fd，失败时仍由调用方关闭。
-    let dir = unsafe { libc::fdopendir(fd) };
-    if dir.is_null() {
-      let error = io::Error::last_os_error();
-      unsafe { libc::close(fd) };
-      return Err(io_err(path)(error));
-    }
-    let dir = DirGuard(dir);
-    let mut out = Vec::new();
-    loop {
-      let entry = unsafe {
-        *errno() = 0;
-        libc::readdir(dir.0)
-      };
-      if entry.is_null() {
-        let error = io::Error::last_os_error();
-        if error.raw_os_error() != Some(0) {
-          return Err(io_err(path)(error));
-        }
-        break;
-      }
-      // d_name 在下一次 readdir 前有效。
-      let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
-      if matches!(name.to_bytes(), b"." | b"..")
-        || name.to_bytes().ends_with(UPLOAD_SUFFIX.as_bytes())
-      {
-        continue;
-      }
-      let Ok(st) = self.lstat(name) else { continue };
-      let mode = st.st_mode & libc::S_IFMT;
-      out.push(FileEntry {
-        name: name.to_string_lossy().into_owned(),
-        dir: mode == libc::S_IFDIR,
-        link: mode == libc::S_IFLNK,
-        size: st.st_size.max(0) as u64,
-        modified: st.st_mtime.saturating_mul(1000),
-      });
-    }
-    out.sort_by(|a, b| b.dir.cmp(&a.dir).then(a.name.cmp(&b.name)));
-    Ok(out)
-  }
-}
-
-struct DirGuard(*mut libc::DIR);
-
-impl Drop for DirGuard {
-  fn drop(&mut self) {
-    unsafe { libc::closedir(self.0) };
-  }
-}
-
-fn errno() -> *mut libc::c_int {
-  #[cfg(target_os = "linux")]
-  unsafe {
-    libc::__errno_location()
-  }
-  #[cfg(target_os = "macos")]
-  unsafe {
-    libc::__error()
-  }
-}
-
 fn parse_rel(rel: &str) -> Result<Vec<CString>, ApiError> {
   let trimmed = rel.trim_start_matches('/');
   if trimmed.contains('\0') {

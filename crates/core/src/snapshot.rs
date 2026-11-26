@@ -23,6 +23,7 @@ pub const PULL_ATTEMPT_SECS: u64 = 30 * 60;
 #[derive(Default)]
 pub struct Snapshot {
   pub world: World,
+  pub core_server: Option<String>,
   pub sso_login: BTreeMap<String, String>,
   pub agents: Vec<AgentRow>,
   pub accounts: Vec<AccountRow>,
@@ -112,9 +113,20 @@ pub async fn load(db: &Db) -> Result<Snapshot, ApiError> {
   Ok(snap)
 }
 
-async fn load_inner(db: &Db) -> Result<Snapshot, ApiError> {
+pub(crate) async fn load_inner(
+  db: &Db,
+) -> Result<Snapshot, ApiError> {
   db.call_credentials(|c, key| {
     let world = World::from_rows(db::all_resources(c)?)?;
+    let agents = db::agents(c)?;
+    let core_server = crate::core_node::load_persisted(c)?
+      .filter(|(server, key)| {
+        world.servers.contains_key(server)
+          && agents.iter().any(|a| {
+            &a.server == server && a.public_key.as_ref() == Some(key)
+          })
+      })
+      .map(|(server, _)| server);
     let secrets =
       crate::oidc::with_client_secrets(&world, &db::secrets(c, key)?);
     let service_values = db::service_values(
@@ -126,7 +138,8 @@ async fn load_inner(db: &Db) -> Result<Snapshot, ApiError> {
     Ok(
       Snapshot {
         world,
-        agents: db::agents(c)?,
+        agents,
+        core_server,
         accounts: db::accounts(c)?,
         app_account_defaults: crate::app_accounts::defaults(c)?,
         sso_login: db::settings_with_prefix(c, "sso.login.")?,
@@ -201,7 +214,8 @@ impl Snapshot {
   }
 
   pub fn net(&self, world: &World) -> Net {
-    let base = Net::derive(&world.servers, &self.agents);
+    let mut base = Net::derive(&world.servers, &self.agents);
+    base.core_server = crate::core_node::server_of(self);
     let (gate_public, gate_login) =
       crate::gate::render_context(world, &base);
     Net {

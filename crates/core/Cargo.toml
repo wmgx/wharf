@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 bcrypt.workspace = true
 wharf-api-types.workspace = true
+wharf-pack.workspace = true
 wharf-providers.workspace = true
 
 anyhow.workspace = true

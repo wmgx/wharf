@@ -112,6 +112,7 @@ async fn session(
     container_diagnosis: true,
     ssh_logins: true,
     gateway_extra_files: true,
+    core_probe: true,
     access_logs: true,
     net_probe: true,
     container_probe: true,
