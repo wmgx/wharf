@@ -23,6 +23,14 @@ static VALUES: RwLock<Option<Arc<Vec<String>>>> = RwLock::new(None);
 
 fn prepare(values: &mut Vec<String>) {
   values.retain(|value| value.len() >= 6);
+  add_encoded_values(values);
+  values.sort_unstable_by(|a, b| {
+    (Reverse(a.len()), a).cmp(&(Reverse(b.len()), b))
+  });
+  values.dedup();
+}
+
+pub(crate) fn add_encoded_values(values: &mut Vec<String>) {
   let mut escaped = Vec::new();
   for value in values.iter() {
     escaped.push(STANDARD.encode(value));
@@ -47,10 +55,6 @@ fn prepare(values: &mut Vec<String>) {
     }
   }
   values.extend(escaped);
-  values.sort_unstable_by(|a, b| {
-    (Reverse(a.len()), a).cmp(&(Reverse(b.len()), b))
-  });
-  values.dedup();
 }
 
 fn value(out: &mut Vec<String>, text: &str, sensitive: bool) {

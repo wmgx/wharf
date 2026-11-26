@@ -134,9 +134,11 @@ async fn snapshot_masks_legacy_errors_without_rewriting_rows() {
 static SECRETS: std::sync::RwLock<BTreeMap<String, String>> =
   std::sync::RwLock::new(BTreeMap::new());
 
-fn with_secrets(text: &str) -> String {
-  let secrets = SECRETS.read().unwrap_or_else(|e| e.into_inner());
-  crate::render::substitute(text, Some(&secrets))
+fn with_secrets(
+  text: &str,
+  secrets: &BTreeMap<String, String>,
+) -> String {
+  crate::render::substitute(text, Some(secrets))
     .unwrap_or_else(|_| text.to_string())
 }
 
@@ -353,13 +355,24 @@ pub fn committed_pull_policy(
 }
 
 pub fn pull_policy(server: &ServerRow) -> PullPolicy {
+  let secrets = SECRETS.read().unwrap_or_else(|e| e.into_inner());
+  pull_policy_with_secrets(server, &secrets)
+}
+
+fn pull_policy_with_secrets(
+  server: &ServerRow,
+  secrets: &BTreeMap<String, String>,
+) -> PullPolicy {
   PullPolicy {
     mirrors: server
       .settings
       .registry_mirrors
       .iter()
       .map(|(k, v)| {
-        (k.clone(), v.iter().map(|m| with_secrets(m)).collect())
+        (
+          k.clone(),
+          v.iter().map(|m| with_secrets(m, secrets)).collect(),
+        )
       })
       .collect(),
     mirrors_only: server.settings.mirrors_only,
@@ -373,7 +386,7 @@ pub fn pull_policy(server: &ServerRow) -> PullPolicy {
       .settings
       .github_mirror
       .as_deref()
-      .map(with_secrets),
+      .map(|m| with_secrets(m, secrets)),
     registry_proxy: crate::docker_proxy::wanted(&server.settings)
       .map(|(proxy, _)| proxy),
   }
@@ -1005,6 +1018,30 @@ mod tests {
       },
     );
     world
+  }
+
+  #[test]
+  fn pull_policy_renders_encoded_mirror_credentials() {
+    let server = ServerRow {
+      settings: serde_json::from_value(serde_json::json!({
+        "registry_mirrors": {"docker.io": ["https://registry.example.test/[[url:K]]/[[b64:K]]"]},
+        "github_mirror": "https://git.example.test/[[json:K]]",
+      })).unwrap(),
+      version: 1,
+    };
+    let secrets =
+      BTreeMap::from([("K".into(), "p@s#1\n\"\\".into())]);
+    let pull = pull_policy_with_secrets(&server, &secrets);
+    assert_eq!(
+      pull.mirrors["docker.io"],
+      [
+        "https://registry.example.test/p%40s%231%0A%22%5C/cEBzIzEKIlw="
+      ]
+    );
+    assert_eq!(
+      pull.github_mirror.as_deref(),
+      Some(r#"https://git.example.test/p@s#1\n\"\\"#)
+    );
   }
 
   #[test]

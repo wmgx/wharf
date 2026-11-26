@@ -232,7 +232,7 @@ fn service_secrets_only_contains_own_refs() {
   add_service(
     &mut world,
     "a",
-    service(json!({"ACCOUNT": "[[account.operator.password]]"})),
+    service(json!({"ACCOUNT": "[[FILE:account.operator.password]]"})),
   );
   add_route(
     &mut world,
@@ -342,6 +342,15 @@ fn file_secret_is_rejected_in_non_service_contexts() {
     }),
   );
   check(policy::validate_world(&world).unwrap_err());
+}
+
+#[test]
+fn task_accepts_encoding_modifiers() {
+  let task: TaskKind = serde_json::from_value(json!({
+    "kind": "container", "image": "nginx:1",
+    "env": {"URL": "[[url:K]]", "B64": "[[b64:K]]", "JSON": "[[json:K]]"}
+  })).unwrap();
+  policy::validate_task("task", &task).unwrap();
 }
 
 #[test]

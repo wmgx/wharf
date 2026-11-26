@@ -790,6 +790,7 @@ async fn execute(
     .cloned()
     .collect();
   if let Some(script) = &login.script {
+    crate::log_redact::add_encoded_values(&mut hidden);
     let env = script_env(
       script,
       &secrets,

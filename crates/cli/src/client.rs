@@ -263,7 +263,7 @@ async fn run_token_cmd(cmd: &str) -> Result<String, ApiError> {
   .await;
   let (status, line) = match result {
     Ok(Ok(output)) => {
-      process.finished = true;
+      process.finished = output.0.success();
       output
     }
     other => {
@@ -283,7 +283,11 @@ async fn run_token_cmd(cmd: &str) -> Result<String, ApiError> {
     }
   };
   if !status.success() {
-    return Err(failed(&format!("（{status}）")));
+    let reason = status.code().map_or_else(
+      || "（进程被信号终止）".to_string(),
+      |code| format!("（退出码 {code}）"),
+    );
+    return Err(failed(&reason));
   }
   if line.len() as u64 > LINE_LIMIT {
     return Err(failed("：首行过长"));
@@ -717,15 +721,24 @@ async fn resolves_token_sources_and_reports_bad_configuration() {
   let temp = tempfile::tempdir().unwrap();
   let path = temp.path().join("config.toml");
   let expected = format!("fixture-{}", std::process::id());
-  if std::env::var_os("WHARF_TEST_TOKEN_FILE_HOME").is_some() {
+  if let Some(home_config) =
+    std::env::var_os("WHARF_TEST_TOKEN_FILE_HOME")
+  {
+    use clap::Parser;
+    let config = Config::load_from(Path::new(&home_config)).unwrap();
+    let token = resolve_token(None, &config).await.unwrap().unwrap();
+    let expected = std::env::var("WHARF_TOKEN").unwrap();
+    assert!(token == expected);
+    let cli =
+      crate::Cli::try_parse_from(["wharf", "status"]).unwrap();
     let config = Config {
-      token_file: Some("~/t.tok".into()),
+      token_cmd: Some("exit 42".into()),
       ..Default::default()
     };
-    let token = resolve_token(None, &config).await.unwrap().unwrap();
-    let expected =
-      std::env::var("WHARF_TEST_TOKEN_FILE_HOME").unwrap();
-    assert!(token == expected);
+    assert!(
+      resolve_token(cli.token, &config).await.unwrap()
+        == Some(expected)
+    );
     return;
   }
   let file = temp.path().join("t.tok");
