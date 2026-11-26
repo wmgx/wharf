@@ -2835,6 +2835,161 @@ mod tests {
     assert!(b.items[0].reason.contains("部署新服务"));
   }
 
+  #[tokio::test]
+  async fn rotating_file_and_encoded_secret_only_restarts_its_service()
+   {
+    let db = crate::db::Db::memory();
+    let (old, new) = db
+      .call_credentials(|c, key| {
+        key.put_secret(c, "K1", "fixture-initial", 1, false)?;
+        let old = crate::db::secrets(c, key)?;
+        key.rotate_secret(
+          c,
+          "K1",
+          "fixture-changed",
+          2,
+          Some(3),
+          false,
+        )?;
+        Ok((old, crate::db::secrets(c, key)?))
+      })
+      .await
+      .unwrap();
+    let mut w = world();
+    let idle = w.services["app"].clone();
+    w.services.insert("idle".into(), idle);
+    w.services.get_mut("app").unwrap().spec.env.extend([
+      ("TOKEN".into(), "[[url:K1]]".into()),
+      ("TOKEN_FILE".into(), "[[FILE:K1]]".into()),
+    ]);
+    let net = Net::default();
+    let hash = |name| {
+      snapshot::service_resolved(&w, &net, name, &old).unwrap().1
+    };
+    let mut status =
+      live(Some(hash("app")), vec![container("running")]);
+    status.get_mut("s1").unwrap().as_mut().unwrap().insert(
+      "idle".into(),
+      ProjectState {
+        project: "idle".into(),
+        hash: Some(hash("idle")),
+        config_hash: None,
+        containers: vec![container("running")],
+      },
+    );
+    for (secrets, expected) in
+      [(old, vec![]), (new, vec!["service/app"])]
+    {
+      let mut builder = Builder::default();
+      service_items(
+        &mut builder,
+        &Snapshot {
+          world: w.clone(),
+          secrets,
+          ..Snapshot::default()
+        },
+        &w,
+        &w,
+        &net,
+        &status,
+        &[],
+      )
+      .unwrap();
+      assert_eq!(
+        builder
+          .items
+          .iter()
+          .map(|item| item.address.as_str())
+          .collect::<Vec<_>>(),
+        expected
+      );
+    }
+  }
+
+  #[tokio::test]
+  async fn basic_auth_rotation_and_rollback_restore_gateway_fingerprint()
+   {
+    let mut w = world();
+    w.gateways.insert(
+      "edge".into(),
+      crate::world::GatewayRow {
+        spec: serde_json::from_value(
+          json!({"kind":"caddy","server":"s1","tls":"off"}),
+        )
+        .unwrap(),
+        version: 1,
+      },
+    );
+    w.routes.insert("a.example.test".into(), RouteRow {
+      id: "r1".into(),
+      spec: serde_json::from_value(json!({"hostname":"a.example.test","service":"app","gateway":"edge","auth":true})).unwrap(),
+      version: 1,
+    });
+    let name = crate::render::route_auth_secret("a.example.test");
+    let db = crate::db::Db::memory();
+    let values = db
+      .call_credentials(move |c, key| {
+        let old = crate::render::BasicAuth::hash_input(
+          "u1:fixture-original",
+        )?;
+        let new =
+          crate::render::BasicAuth::hash_input("u1:fixture-changed")?;
+        key.put_secret(c, &name, &old, 1, false)?;
+        key.rotate_secret(c, &name, &new, 2, Some(10), false)?;
+        key.rollback_secret(c, &name, 3)?;
+        let actual = key.secret(c, &name)?.unwrap();
+        assert!(actual == old);
+        assert!(crate::db::previous_secrets(c, key, 3)?.is_empty());
+        Ok((name, old, new, actual))
+      })
+      .await
+      .unwrap();
+    let net = |value: &str| {
+      let mut net = Net::default();
+      net.public_ip.insert("s1".into(), "203.0.113.1".into());
+      net.basic_auth.insert(
+        values.0.clone(),
+        crate::render::BasicAuth::parse(value).unwrap(),
+      );
+      net
+    };
+    let before =
+      snapshot::gateway_render(&w, &net(&values.1), "edge").unwrap();
+    let project = gateway_project("edge");
+    let status = StatusMap::from([(
+      "s1".into(),
+      Some(BTreeMap::from([(
+        project.clone(),
+        ProjectState {
+          project,
+          hash: Some(before.compose_hash),
+          config_hash: Some(before.config_hash),
+          containers: vec![container("running")],
+        },
+      )])),
+    )]);
+    for (value, expected_steps) in [(&values.2, 1), (&values.3, 0)] {
+      let mut builder = Builder::default();
+      gateway_items(
+        &mut builder,
+        &Snapshot::default(),
+        &w,
+        &w,
+        &net(value),
+        &status,
+        &crate::hub::Hub::default(),
+      )
+      .unwrap();
+      assert_eq!(builder.steps.len(), expected_steps);
+      for step in &builder.steps {
+        assert!(
+          matches!(&step.step, Step::GatewaySync { gateway, .. } if gateway == "edge")
+        );
+        assert!(builder.items[0].impacts.is_empty());
+      }
+    }
+  }
+
   #[test]
   fn config_change_restarts() {
     let current = world();

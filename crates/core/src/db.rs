@@ -20,6 +20,7 @@ use chacha20poly1305::{
 use chrono::{DateTime, TimeZone, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use wharf_api_types::{
   ApiError,
   spec::AdoptSpec,
@@ -370,6 +371,8 @@ ALTER TABLE alert_history ADD COLUMN subject TEXT;
   crate::rules::MIGRATION,
   crate::rules::CUSTOM_MIGRATION,
   crate::host_access::MIGRATION,
+  "ALTER TABLE secrets ADD COLUMN prev_value TEXT;
+   ALTER TABLE secrets ADD COLUMN prev_expires_at INTEGER;",
 ];
 
 /// git 构建来源固定到上次部署构建的 commit（仓库和分支没换过的）。当时没记下 commit 的留给 plan 提醒。
@@ -1074,6 +1077,70 @@ impl CredentialsKey {
       .transpose()
   }
 
+  pub fn rotate_secret(
+    &self,
+    conn: &Connection,
+    name: &str,
+    value: &str,
+    now: i64,
+    keep_until: Option<i64>,
+    create: bool,
+  ) -> Result<(), ApiError> {
+    let tx = conn.unchecked_transaction().map_err(sql_err)?;
+    match self.secret(&tx, name)? {
+      None if create => {
+        self.put_secret(&tx, name, value, now, false)?
+      }
+      None => return Err(secret_not_found(name)),
+      Some(old) if old != value => {
+        let previous = keep_until
+          .map(|_| self.encrypt("secrets:prev", name, &old))
+          .transpose()?;
+        tx.execute(
+          "UPDATE secrets SET value = ?2, updated_at = ?3, prev_value = ?4,
+           prev_expires_at = ?5 WHERE name = ?1",
+          params![name, self.encrypt("secrets", name, value)?, now, previous, keep_until],
+        ).map_err(sql_err)?;
+      }
+      Some(_) if keep_until.is_none() => {
+        clear_secret_prev(&tx, name)?;
+      }
+      Some(_) => {}
+    }
+    tx.commit().map_err(sql_err)
+  }
+
+  pub fn rollback_secret(
+    &self,
+    conn: &Connection,
+    name: &str,
+    now: i64,
+  ) -> Result<(), ApiError> {
+    let tx = conn.unchecked_transaction().map_err(sql_err)?;
+    let previous: Option<String> = tx
+      .query_row(
+        "SELECT CASE WHEN prev_expires_at > ?2 THEN prev_value END FROM secrets WHERE name = ?1",
+        params![name, now],
+        |row| row.get(0),
+      )
+      .optional()
+      .map_err(sql_err)?
+      .ok_or_else(|| secret_not_found(name))?;
+    clear_secret_prev(&tx, name)?;
+    if let Some(previous) = previous {
+      let value = self.decrypt("secrets:prev", name, &previous)?;
+      self.put_secret(&tx, name, &value, now, true)?;
+      return tx.commit().map_err(sql_err);
+    }
+    tx.commit().map_err(sql_err)?;
+    Err(
+      ApiError::invalid(format!(
+        "密钥 {name} 没有可回退的旧值（未保留或已过期）"
+      ))
+      .with_hint("用 wharf secret set 重新写入需要的值"),
+    )
+  }
+
   pub fn put_secret(
     &self,
     conn: &Connection,
@@ -1127,6 +1194,72 @@ impl CredentialsKey {
     ).map_err(sql_err)?;
     Ok(())
   }
+}
+
+pub const DEFAULT_SECRET_KEEP_DAYS: u16 = 7;
+
+fn secret_not_found(name: &str) -> ApiError {
+  ApiError::not_found(format!("密钥 {name} 不存在"))
+    .suggest(format!("wharf secret set {name}"))
+}
+
+pub fn secret_fingerprint(value: &str) -> String {
+  hex::encode(&Sha256::digest(value.as_bytes())[..4])
+}
+
+pub fn clear_secret_prev(
+  conn: &Connection,
+  name: &str,
+) -> Result<bool, ApiError> {
+  let changed = conn.execute(
+    "UPDATE secrets SET prev_value = NULL, prev_expires_at = NULL
+     WHERE name = ?1 AND (prev_value IS NOT NULL OR prev_expires_at IS NOT NULL)",
+    [name],
+  ).map_err(sql_err)?;
+  if changed == 0 {
+    conn
+      .query_row(
+        "SELECT 1 FROM secrets WHERE name = ?1",
+        [name],
+        |_| Ok(()),
+      )
+      .optional()
+      .map_err(sql_err)?
+      .ok_or_else(|| secret_not_found(name))?;
+  }
+  Ok(changed > 0)
+}
+
+pub fn cleanup_expired_secret_prevs(
+  conn: &Connection,
+  now: i64,
+) -> Result<usize, ApiError> {
+  conn.execute(
+    "UPDATE secrets SET prev_value = NULL, prev_expires_at = NULL WHERE prev_expires_at <= ?1",
+    [now],
+  ).map_err(sql_err)
+}
+
+pub fn previous_secrets(
+  conn: &Connection,
+  key: &CredentialsKey,
+  now: i64,
+) -> Result<std::collections::BTreeMap<String, String>, ApiError> {
+  let mut stmt = conn.prepare(
+    "SELECT name, prev_value FROM secrets WHERE prev_value IS NOT NULL AND prev_expires_at > ?1",
+  ).map_err(sql_err)?;
+  let rows = stmt
+    .query_map([now], |r| {
+      Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    })
+    .map_err(sql_err)?;
+  rows
+    .map(|row| {
+      let (name, value) = row.map_err(sql_err)?;
+      let value = key.decrypt("secrets:prev", &name, &value)?;
+      Ok((name, value))
+    })
+    .collect()
 }
 
 pub fn secrets(
@@ -2155,7 +2288,7 @@ mod tests {
     let db = Db::open(&path).unwrap();
     db.call(|c| {
       c.execute_batch(
-        "INSERT INTO secrets VALUES ('example', 'fixture-secret', 0);
+        "INSERT INTO secrets (name, value, updated_at) VALUES ('example', 'fixture-secret', 0);
        INSERT INTO app_accounts (name, username, password, updated_at)
        VALUES ('example', 'fixture-user', 'fixture-value', 0);",
       )

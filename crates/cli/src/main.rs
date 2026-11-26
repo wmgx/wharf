@@ -1435,7 +1435,26 @@ pub enum AccountCmd {
 
 #[derive(Subcommand)]
 pub enum SecretCmd {
-  List,
+  List {
+    #[arg(long)]
+    detail: bool,
+  },
+  /// 从标准输入读入新值并保留旧值。
+  Rotate {
+    name: String,
+    #[arg(long)]
+    keep_days: Option<u16>,
+    #[command(flatten)]
+    apply: ApplyFlags,
+  },
+  Rollback {
+    name: String,
+    #[command(flatten)]
+    apply: ApplyFlags,
+  },
+  ClearOld {
+    name: String,
+  },
   /// 设置密钥，值从标准输入读取。
   /// `BASIC_AUTH_<域名，. 换成 _>` 是这个域名的登录保护账号，值写成 `用户名:密码`，只保存哈希。
   Set {

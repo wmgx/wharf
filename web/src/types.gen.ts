@@ -2263,17 +2263,31 @@ export type ScriptRuntime = "python" | "node" | "shell";
 
 export interface SecretView {
   /**
+   * 当前值的 8 位 SHA-256 指纹。
+   */
+  fingerprint?: string | null;
+  /**
+   * 是否保留了可回退的旧值。
+   */
+  has_previous?: boolean;
+  /**
    * Wharf 自己生成的，不能改也不能删。
    */
   managed?: boolean;
   name: string;
+  /**
+   * 非服务引用方。
+   */
+  other_refs?: string[];
+  prev_expires_at?: string | null;
+  prev_fingerprint?: string | null;
   /**
    * 系统功能用的（网关登录、组网、通知等）：在对应功能里改，不算应用密钥。
    */
   system?: string | null;
   updated_at: string;
   /**
-   * 用到它的服务和系统功能。
+   * 用到它的服务。
    */
   used_by?: string[];
 }

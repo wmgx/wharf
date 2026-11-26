@@ -630,9 +630,22 @@ pub struct AccountView {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SecretView {
+  /// 当前值的 8 位 SHA-256 指纹。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub fingerprint: Option<String>,
+  /// 是否保留了可回退的旧值。
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub has_previous: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub prev_expires_at: Option<DateTime<Utc>>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub prev_fingerprint: Option<String>,
+  /// 非服务引用方。
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub other_refs: Vec<String>,
   pub name: String,
   pub updated_at: DateTime<Utc>,
-  /// 用到它的服务和系统功能。
+  /// 用到它的服务。
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub used_by: Vec<String>,
   /// Wharf 自己生成的，不能改也不能删。
@@ -641,6 +654,16 @@ pub struct SecretView {
   /// 系统功能用的（网关登录、组网、通知等）：在对应功能里改，不算应用密钥。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub system: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RotateSecretResponse {
+  pub secret: SecretView,
+  pub needs_plan: bool,
+  pub affected_services: Vec<String>,
+  pub affected_gateways: Vec<String>,
+  pub other_refs: Vec<String>,
+  pub suggest: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

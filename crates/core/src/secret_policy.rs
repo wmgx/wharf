@@ -118,7 +118,7 @@ pub fn pem_body(value: &str) -> impl Iterator<Item = &str> {
 pub fn refuse_managed(name: &str) -> Result<(), ApiError> {
   if is_managed_secret(name) {
     return Err(ApiError::new(ErrorCode::Forbidden, format!("{name} 是 Wharf 内部保留密钥，不能直接修改或删除"))
-      .with_hint("业务密钥请换一个不以 WHARF_、OIDC_、ACME_DNS_、NOTIFY_URL_ 开头的名字"));
+      .with_hint("业务密钥请换一个不以 WHARF_、OIDC_、ACME_DNS_、NOTIFY_URL_ 开头的名字；隧道密钥用 wharf gateway rotate-link"));
   }
   Ok(())
 }
@@ -209,6 +209,76 @@ pub fn service_uses_secret(spec: &ServiceSpec, name: &str) -> bool {
   template_refs(spec)
     .chain(git_token(spec))
     .any(|secret| secret == name)
+}
+
+pub fn service_renders_secret(
+  spec: &ServiceSpec,
+  name: &str,
+) -> bool {
+  template_refs(spec).any(|secret| secret == name)
+}
+
+pub fn other_secret_refs<'a>(
+  world: &World,
+  tasks: impl IntoIterator<Item = (&'a str, &'a TaskKind)>,
+  name: &str,
+) -> Vec<String> {
+  let uses = |text: &str| {
+    placeholders_checked(text, false, false)
+      .filter_map(Result::ok)
+      .any(|p| p.name == name)
+  };
+  let mut refs = Vec::new();
+  for (server, row) in &world.servers {
+    if row
+      .settings
+      .registry_mirrors
+      .values()
+      .flatten()
+      .chain(&row.settings.github_mirror)
+      .any(|text| uses(text))
+    {
+      refs.push(format!("server:{server}"));
+    }
+  }
+  for (host, row) in &world.routes {
+    if route_login(&row.spec).is_some_and(|login| {
+      crate::sso_login::secret_refs(login).contains(name)
+    }) {
+      refs.push(format!("sso:{host}"));
+    }
+  }
+  for (app, row) in &world.edge_apps {
+    if row
+      .spec
+      .source
+      .as_ref()
+      .and_then(|s| s.git.as_ref())
+      .and_then(|git| git.token_secret.as_deref())
+      == Some(name)
+    {
+      refs.push(format!("edge:{app}"));
+    }
+  }
+  for (task, how) in tasks {
+    let used = match how {
+      TaskKind::Exec { command, .. } | TaskKind::Host { command } => {
+        uses(command)
+      }
+      TaskKind::Container { command, env, .. } => {
+        command.iter().chain(env.values()).any(|text| uses(text))
+      }
+      TaskKind::Script { env, .. } => {
+        env.values().any(|text| uses(text))
+      }
+      TaskKind::Ping { .. } => false,
+    };
+    if used {
+      refs.push(format!("task:{task}"));
+    }
+  }
+  refs.sort_unstable();
+  refs
 }
 
 fn direct_refs<'a>(

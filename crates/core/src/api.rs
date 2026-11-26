@@ -25,8 +25,8 @@ use wharf_api_types::{
   validate_name,
   view::{
     AccountView, DataView, DeploymentView, GatewayView, JoinInfo,
-    JoinRequest, JoinResponse, Perm, RouteView, SecretView,
-    ServerView, ServiceView, Status,
+    JoinRequest, JoinResponse, Perm, RotateSecretResponse, RouteView,
+    SecretView, ServerView, ServiceView, Status,
   },
 };
 
@@ -486,6 +486,12 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route(
       "/api/secrets/{name}",
       put(set_secret).delete(remove_secret),
+    )
+    .route("/api/secrets/{name}/rotate", post(rotate_secret))
+    .route("/api/secrets/{name}/rollback", post(rollback_secret))
+    .route(
+      "/api/secrets/{name}/previous",
+      axum::routing::delete(clear_secret_previous),
     )
     .route("/api/plan", post(make_plan))
     .route("/api/plans/{id}", get(show_plan))
@@ -1570,58 +1576,65 @@ async fn list_secrets(
   auth: Auth,
 ) -> ApiResult<Vec<SecretView>> {
   auth.require(Perm::Read)?;
-  let snap = snapshot::load(&s.db).await?;
-  let rows: Vec<(String, i64)> = s
-    .db
-    .call(|c| {
-      let mut stmt = c
-        .prepare("SELECT name, updated_at FROM secrets ORDER BY name")
-        .map_err(sql_err)?;
-      let rows = stmt
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
-        .map_err(sql_err)?;
-      rows.collect::<Result<_, _>>().map_err(sql_err)
-    })
-    .await?;
-  let mut list = rows
-    .into_iter()
-    .map(|(name, at)| SecretView {
-      used_by: secret_users(&snap.world, &name),
-      managed: managed_secret(&name),
-      system: system_secret(&name).map(str::to_string),
-      name,
-      updated_at: to_time(at),
-    })
-    .collect();
+  let mut list = read_secret_views(&s).await?;
   if let Some(allowed) = &auth.services {
     crate::scope_filter::filter_secrets(allowed, &mut list);
   }
   Ok(Json(list))
 }
 
+async fn read_secret_views(
+  s: &AppState,
+) -> Result<Vec<SecretView>, ApiError> {
+  s.db.call_credentials(|c, key| {
+    let world = crate::world::World::from_rows(db::all_resources(c)?)?;
+    let tasks = crate::tasks::load_rows(c)?;
+    let previous = db::previous_secrets(c, key, now_ms())?;
+    let values = db::secrets(c, key)?;
+    let mut stmt = c.prepare("SELECT name, updated_at, prev_expires_at FROM secrets ORDER BY name")
+      .map_err(sql_err)?;
+    let rows = stmt.query_map([], |r| {
+      Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, Option<i64>>(2)?))
+    }).map_err(sql_err)?;
+    rows.map(|row| {
+      let (name, updated_at, prev_expires_at) = row.map_err(sql_err)?;
+      let old = previous.get(&name);
+      Ok(SecretView {
+        fingerprint: values.get(&name).map(|value| db::secret_fingerprint(value)),
+        has_previous: old.is_some(),
+        prev_expires_at: old.and(prev_expires_at).map(to_time),
+        prev_fingerprint: old.map(|value| db::secret_fingerprint(value)),
+        other_refs: crate::secret_policy::other_secret_refs(
+          &world, tasks.iter().map(|(name, spec, _)| (name.as_str(), &spec.how)), &name,
+        ),
+        used_by: secret_users(&world, &name),
+        managed: managed_secret(&name),
+        system: system_secret(&name).map(str::to_string),
+        name,
+        updated_at: to_time(updated_at),
+      })
+    }).collect::<Result<Vec<_>, ApiError>>()
+  }).await
+}
+
 fn secret_users(
   world: &crate::world::World,
   name: &str,
 ) -> Vec<String> {
-  let system = system_secret(name);
-  system
-    .map(str::to_string)
-    .into_iter()
-    .chain(
-      world
-        .services
-        .iter()
-        .filter(|(_, row)| {
-          crate::secret_policy::service_uses_secret(&row.spec, name)
-        })
-        .map(|(service, _)| service.clone()),
-    )
+  world
+    .services
+    .iter()
+    .filter(|(_, row)| {
+      crate::secret_policy::service_uses_secret(&row.spec, name)
+    })
+    .map(|(service, _)| service.clone())
     .collect()
 }
 
 #[derive(Deserialize)]
 struct SetSecret {
   value: String,
+  keep_days: Option<u16>,
 }
 
 fn check_secret_name(name: &str) -> Result<(), ApiError> {
@@ -1646,28 +1659,131 @@ async fn set_secret(
   Json(req): Json<SetSecret>,
 ) -> ApiResult<SecretView> {
   auth.require(Perm::Admin)?;
+  let response = write_secret(&s, name, req, true).await?;
+  Ok(Json(response.secret))
+}
+
+async fn rotate_secret(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Path(name): Path<String>,
+  Json(req): Json<SetSecret>,
+) -> ApiResult<RotateSecretResponse> {
+  auth.require(Perm::Admin)?;
+  Ok(Json(write_secret(&s, name, req, false).await?))
+}
+
+async fn write_secret(
+  s: &AppState,
+  name: String,
+  req: SetSecret,
+  create: bool,
+) -> Result<RotateSecretResponse, AppError> {
   check_secret_name(&name)?;
   refuse_managed(&name)?;
+  let keep_days =
+    req.keep_days.unwrap_or(db::DEFAULT_SECRET_KEEP_DAYS);
+  if keep_days > 30 {
+    return Err(
+      ApiError::invalid("保留天数须在 0 到 30 之间")
+        .with_hint("0 表示不保留旧值，默认保留 7 天")
+        .into(),
+    );
+  }
   let value = if crate::render::is_auth_secret(&name) {
     crate::login::hash_basic_auth(req.value).await?
   } else {
     req.value
   };
-  let now = now_ms();
   let n = name.clone();
   s.db
     .call_credentials(move |c, key| {
-      key.put_secret(c, &n, &value, now, true)
+      let now = now_ms();
+      let until = (keep_days > 0)
+        .then(|| now + i64::from(keep_days) * 86_400_000);
+      key.rotate_secret(c, &n, &value, now, until, create)
     })
     .await?;
   crate::log_redact::refresh(&s.db).await;
-  Ok(Json(SecretView {
-    used_by: vec![],
-    managed: false,
-    system: system_secret(&name).map(str::to_string),
-    name,
-    updated_at: to_time(now),
-  }))
+  secret_rotation_response(s, name).await
+}
+
+async fn rollback_secret(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Path(name): Path<String>,
+) -> ApiResult<RotateSecretResponse> {
+  auth.require(Perm::Admin)?;
+  refuse_managed(&name)?;
+  let n = name.clone();
+  let result = s
+    .db
+    .call_credentials(move |c, key| {
+      key.rollback_secret(c, &n, now_ms())
+    })
+    .await;
+  crate::log_redact::refresh(&s.db).await;
+  result?;
+  Ok(Json(secret_rotation_response(&s, name).await?))
+}
+
+async fn clear_secret_previous(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Path(name): Path<String>,
+) -> ApiResult<Value> {
+  auth.require(Perm::Admin)?;
+  refuse_managed(&name)?;
+  let cleared =
+    s.db.call(move |c| db::clear_secret_prev(c, &name)).await?;
+  crate::log_redact::refresh(&s.db).await;
+  Ok(Json(json!({ "cleared": cleared })))
+}
+
+async fn secret_rotation_response(
+  s: &AppState,
+  name: String,
+) -> Result<RotateSecretResponse, AppError> {
+  let list = read_secret_views(s).await?;
+  let secret =
+    list.into_iter().find(|v| v.name == name).ok_or_else(|| {
+      ApiError::not_found(format!("密钥 {name} 不存在"))
+    })?;
+  let snap = snapshot::load(&s.db).await?;
+  let affected_services: Vec<_> = snap
+    .world
+    .services
+    .iter()
+    .filter(|(_, row)| {
+      crate::secret_policy::service_renders_secret(&row.spec, &name)
+    })
+    .map(|(service, _)| service.clone())
+    .collect();
+  let affected_gateways: Vec<_> = snap
+    .world
+    .routes
+    .iter()
+    .filter(|(host, row)| {
+      row.spec.auth && crate::render::route_auth_secret(host) == name
+    })
+    .flat_map(|(_, row)| snap.world.route_gateways(&row.spec))
+    .map(str::to_string)
+    .collect::<std::collections::BTreeSet<_>>()
+    .into_iter()
+    .collect();
+  let needs_plan =
+    !affected_services.is_empty() || !affected_gateways.is_empty();
+  Ok(RotateSecretResponse {
+    other_refs: secret.other_refs.clone(),
+    secret,
+    needs_plan,
+    affected_services,
+    affected_gateways,
+    suggest: needs_plan
+      .then(|| "wharf plan".into())
+      .into_iter()
+      .collect(),
+  })
 }
 
 async fn remove_secret(
@@ -1905,6 +2021,73 @@ async fn export(
 mod tests {
   use super::*;
 
+  #[tokio::test]
+  async fn rotate_and_list_secret_views_show_only_allowed_references()
+  {
+    let s = crate::rules::tests::test_state();
+    s.db.call_credentials(|c, key| {
+      for (kind, name, spec) in [
+        ("server", "s1", json!({"github_mirror":"https://example.test/[[b64:K1]]"})),
+        ("service", "app-a", json!({
+          "server": "s1", "source": {"image": "nginx:1"},
+          "env": {"TOKEN_FILE": "[[FILE:K1]]", "TOKEN_URL": "[[url:K1]]"}
+        })),
+        ("service", "app-b", json!({"server": "s1", "source": {"image": "nginx:1"}, "env": {"TOKEN": "[[K2]]"}})),
+      ] {
+        db::apply_write(c, &db::Write::Upsert {
+          kind: kind.into(), name: name.into(), spec, meta: json!({}),
+        })?;
+      }
+      let task = json!({"server":"s1","schedule":"","kind":"host","command":"echo [[json:K1]]"});
+      c.execute("INSERT INTO tasks (name, spec, created_at, updated_at) VALUES ('t1', ?1, 0, 0)", [task.to_string()]).map_err(sql_err)?;
+      key.put_secret(c, "K1", "fixture-before", 1, false)?;
+      key.put_secret(c, "K2", "fixture-unrelated", 1, false)
+    }).await.unwrap();
+    let auth =
+      |services: Option<std::collections::BTreeSet<String>>| Auth {
+        name: "fixture".into(),
+        perms: [Perm::Read, Perm::Admin].into(),
+        expires_at: None,
+        allowed_from: vec![],
+        services,
+        human: false,
+      };
+    let Json(rotated) = rotate_secret(
+      State(s.clone()),
+      auth(None),
+      Path("K1".into()),
+      Json(SetSecret {
+        value: "fixture-after".into(),
+        keep_days: None,
+      }),
+    )
+    .await
+    .map_err(|e| e.0)
+    .unwrap();
+    assert!(rotated.needs_plan && rotated.secret.has_previous);
+    assert_eq!(rotated.affected_services, ["app-a"]);
+    let view = serde_json::to_string(&rotated).unwrap();
+    assert!(
+      !view.contains("fixture-before")
+        && !view.contains("fixture-after")
+    );
+    let Json(all) = list_secrets(State(s.clone()), auth(None))
+      .await
+      .map_err(|e| e.0)
+      .unwrap();
+    assert_eq!(all[0].used_by, ["app-a"]);
+    assert_eq!(all[0].other_refs, ["server:s1", "task:t1"]);
+    let Json(filtered) =
+      list_secrets(State(s), auth(Some(["app-a".into()].into())))
+        .await
+        .map_err(|e| e.0)
+        .unwrap();
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].name, "K1");
+    assert_eq!(filtered[0].used_by, ["app-a"]);
+    assert!(filtered[0].other_refs.is_empty());
+  }
+
   #[test]
   fn encoded_and_file_secret_users_follow_service_scope() {
     let mut world = crate::world::World::default();
@@ -1924,6 +2107,11 @@ mod tests {
     let used_by = secret_users(&world, "S");
     assert_eq!(used_by, ["a", "b"]);
     let mut rows = vec![SecretView {
+      fingerprint: None,
+      has_previous: false,
+      prev_expires_at: None,
+      prev_fingerprint: None,
+      other_refs: vec!["task:t1".into()],
       name: "S".into(),
       used_by,
       managed: false,
@@ -1935,6 +2123,7 @@ mod tests {
       &mut rows,
     );
     assert_eq!(rows[0].used_by, ["b"]);
+    assert!(rows[0].other_refs.is_empty());
   }
 
   #[tokio::test]

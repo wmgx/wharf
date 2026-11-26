@@ -123,13 +123,15 @@ pub fn service_values(spec: &ServiceSpec) -> Vec<String> {
 
 fn collect(
   secrets: &BTreeMap<String, String>,
+  previous: &BTreeMap<String, String>,
   passwords: impl Iterator<Item = String>,
   accounts: &[db::AccountRow],
   world: &World,
   tasks: impl Iterator<Item = TaskSpec>,
 ) -> Vec<String> {
   let mut out = secret_policy::redact_values(secrets);
-  for (name, text) in secrets {
+  out.extend(secret_policy::redact_values(previous));
+  for (name, text) in secrets.iter().chain(previous) {
     if secret_policy::describe(name).is_some_and(|meta| !meta.redact)
     {
       continue;
@@ -215,8 +217,10 @@ pub fn update(
         name.ends_with(".password").then_some(value)
       });
   let tasks = crate::tasks::load_rows(conn)?;
+  let previous = db::previous_secrets(conn, key, db::now_ms())?;
   let values = Arc::new(collect(
     secrets,
+    &previous,
     passwords,
     accounts,
     world,
@@ -291,6 +295,47 @@ pub fn redact_run(run: &mut Run) {
 mod tests {
   use super::*;
 
+  #[tokio::test]
+  async fn expired_previous_secret_is_removed_from_redaction_and_cannot_rollback()
+   {
+    let db = Db::memory();
+    db.call_credentials(|c, key| {
+      let old = "fixture@old\n\"";
+      let new = "fixture@new";
+      let now = db::now_ms();
+      let expires = now + 60_000;
+      key.put_secret(c, "K1", old, now, false)?;
+      key.rotate_secret(c, "K1", new, now, Some(expires), false)?;
+      key.rotate_secret(c, "K1", new, now, Some(expires), false)?;
+      let secrets = db::secrets(c, key)?;
+      let masks = update(c, key, &World::default(), &secrets, &[])?;
+      let json = serde_json::to_string(old).unwrap();
+      let line = format!(
+        "{old} {new} {} {} {}",
+        STANDARD.encode(old),
+        urlencoding::encode(old),
+        &json[1..json.len() - 1]
+      );
+      assert_eq!(
+        wharf_api_types::mask_values(&line, &masks),
+        "*** *** *** *** ***"
+      );
+      assert_eq!(db::cleanup_expired_secret_prevs(c, expires)?, 1);
+      assert_eq!(
+        key.rollback_secret(c, "K1", expires).unwrap_err().code,
+        wharf_api_types::ErrorCode::InvalidInput
+      );
+      assert!(
+        !update(c, key, &World::default(), &secrets, &[])?
+          .iter()
+          .any(|value| value == old)
+      );
+      Ok(())
+    })
+    .await
+    .unwrap();
+  }
+
   #[test]
   fn masks_url_and_go_json_secret_encodings() {
     let mut values =
@@ -356,6 +401,7 @@ mod tests {
     };
     let values = collect(
       &secrets,
+      &BTreeMap::new(),
       ["fixture-password".to_string()].into_iter(),
       &[account],
       &world,

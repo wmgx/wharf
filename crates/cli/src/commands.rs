@@ -4107,9 +4107,47 @@ async fn secret(
   j: bool,
 ) -> CliResult<()> {
   match cmd {
-    SecretCmd::List => {
+    SecretCmd::List { detail } => {
       let v: Vec<SecretView> = c.get("/api/secrets").await?;
-      out(j, &v, |v| v.iter().for_each(|s| println!("{}", s.name)));
+      out(j || detail, &v, |v| {
+        v.iter().for_each(|s| println!("{}", s.name))
+      });
+      Ok(())
+    }
+    SecretCmd::Rotate {
+      name,
+      keep_days,
+      apply,
+    } => {
+      let value = read_secret(&format!("{name} 的新值："))?;
+      let response = c
+        .post(
+          &format!("/api/secrets/{}/rotate", seg(&name)),
+          &json!({ "value": value, "keep_days": keep_days }),
+        )
+        .await?;
+      finish_secret_rotation(c, response, apply, j).await
+    }
+    SecretCmd::Rollback { name, apply } => {
+      let response = c
+        .post(
+          &format!("/api/secrets/{}/rollback", seg(&name)),
+          &json!({}),
+        )
+        .await?;
+      finish_secret_rotation(c, response, apply, j).await
+    }
+    SecretCmd::ClearOld { name } => {
+      let v: Value = c
+        .delete(&format!("/api/secrets/{}/previous", seg(&name)))
+        .await?;
+      out(j, &v, |v| {
+        if v["cleared"] == true {
+          println!("已清除 {name} 的旧值");
+        } else {
+          println!("{name} 没有保留的旧值");
+        }
+      });
       Ok(())
     }
     SecretCmd::Set {
@@ -4143,6 +4181,23 @@ async fn secret(
       Ok(())
     }
   }
+}
+
+async fn finish_secret_rotation(
+  c: &Client,
+  response: wharf_api_types::view::RotateSecretResponse,
+  flags: ApplyFlags,
+  j: bool,
+) -> CliResult<()> {
+  if flags.apply && response.needs_plan {
+    if !j {
+      pretty(&response);
+    }
+    return plan_and_maybe_apply(c, PlanRequest::default(), flags, j)
+      .await;
+  }
+  pretty(&response);
+  Ok(())
 }
 
 async fn backup(

@@ -122,6 +122,11 @@ fn scope_filter_trims_status_export_secrets_and_alerts() {
   ]
   .into_iter()
   .map(|(name, managed, users)| SecretView {
+    fingerprint: None,
+    has_previous: false,
+    prev_expires_at: None,
+    prev_fingerprint: None,
+    other_refs: vec![],
     name: name.into(),
     updated_at: chrono::Utc::now(),
     managed,
