@@ -112,7 +112,7 @@ async fn build_in(
     .args(["-t", &job.image, "-f", &dockerfile.to_string_lossy()])
     .args(["--label", &format!("wharf.service={}", job.service)]);
   for (key, value) in &job.build_env {
-    cmd = cmd.args(["--build-arg", &format!("{key}={value}")]);
+    cmd = cmd.args(["--build-arg", key]).env(key, value);
   }
   // 构建时下载依赖也走出口；镜像源、内网直连。代理参数是预定义的，不会写进镜像历史。
   if let Some(p) =
@@ -135,7 +135,7 @@ async fn build_in(
       ("NO_PROXY", &direct),
       ("no_proxy", &direct),
     ] {
-      cmd = cmd.args(["--build-arg", &format!("{k}={v}")]);
+      cmd = cmd.args(["--build-arg", k]).env(k, v);
     }
   }
   let out = cmd
@@ -365,10 +365,10 @@ fn no_proxy(job: &BuildJob) -> String {
     .flatten()
     .chain(job.build_env.values());
   for u in urls {
-    let rest = u.split_once("://").map_or(u.as_str(), |(_, r)| r);
-    let host = rest.split(['/', ':']).next().unwrap_or("");
-    if host.contains('.') && !hosts.iter().any(|h| h == host) {
-      hosts.push(host.to_string());
+    if let Some(host) = extract_no_proxy_host(u)
+      && !hosts.contains(&host)
+    {
+      hosts.push(host);
     }
   }
   hosts.join(",")
@@ -962,4 +962,29 @@ mod tests {
     assert_eq!(names, vec!["cmd/", "go.mod"]);
     assert_eq!(tree.read("go.mod").as_deref(), Some("module x"));
   }
+}
+
+fn extract_no_proxy_host(raw: &str) -> Option<String> {
+  let url = if raw.contains("://") {
+    reqwest::Url::parse(raw)
+  } else {
+    reqwest::Url::parse(&format!("http://{raw}"))
+  }
+  .ok()?;
+  let host = url.host_str()?;
+  (host.contains('.') || host.contains(':'))
+    .then(|| host.trim_matches(['[', ']']).to_string())
+}
+
+#[test]
+fn build_no_proxy_omits_url_credentials() {
+  assert_eq!(
+    extract_no_proxy_host("https://u:p@pypi.example.test/simple")
+      .as_deref(),
+    Some("pypi.example.test")
+  );
+  assert_eq!(
+    extract_no_proxy_host("[::1]:8000").as_deref(),
+    Some("::1")
+  );
 }

@@ -252,12 +252,12 @@ pub(super) async fn fetch(
           ));
         }
         services.push(json!({ "service": service, "server": server, "lines": lines, "truncated": truncated }));
-        logs.push((service, raw));
+        logs.push((service, crate::log_redact::redact_text(&raw)));
       }
       Err(e) => errors.push(Failure {
         service,
         server,
-        message: e.message,
+        message: crate::log_redact::redact_text(&e.message),
       }),
     }
   }

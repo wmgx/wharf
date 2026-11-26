@@ -123,6 +123,7 @@ impl Client {
       })?;
     Ok(Self {
       http: reqwest::Client::builder()
+        .no_proxy()
         .connect_timeout(Duration::from_secs(15))
         .timeout(Duration::from_secs(180))
         .default_headers(default_headers())

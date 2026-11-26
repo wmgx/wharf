@@ -120,7 +120,9 @@ fn rest_url(
     IpAddr::V4(v4) => v4.to_string(),
   };
   Ok(format!(
-    "rest:http://{user}:{password}@{host}:{port}/{service}"
+    "rest:http://{}:{}@{host}:{port}/{service}",
+    encode_userinfo(user),
+    encode_userinfo(password)
   ))
 }
 
@@ -363,9 +365,13 @@ async fn add_key(
   ctx: &Ctx,
 ) -> Result<Value, ApiError> {
   let before = key_ids(&j, ctx).await?;
+  let mut random = [0u8; 16];
+  getrandom::fill(&mut random)
+    .map_err(|_| ApiError::internal("随机数不可用"))?;
   let file = docker
     .data_dir
-    .join(format!(".restic-newkey-{}", std::process::id()));
+    .join(format!(".restic-newkey-{}", hex::encode(random)));
+  let guard = TempSecretFile(file.clone());
   crate::docker::write_private(&file, new_password)?;
   j.mounts.push(format!("{}:/newkey:ro", file.display()));
   ctx.say("给备份仓库加一把口令");
@@ -378,7 +384,7 @@ async fn add_key(
     )
     .await
     .and_then(|o| o.check("restic key add"));
-  let _ = std::fs::remove_file(&file);
+  drop(guard);
   added?;
   j.mounts.pop();
   let after = key_ids(&j, ctx).await?;
@@ -722,3 +728,47 @@ mod tests {
 
 #[cfg(test)]
 mod restore_tests;
+
+fn encode_userinfo(value: &str) -> String {
+  use std::fmt::Write;
+  let mut encoded = String::new();
+  for b in value.bytes() {
+    if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
+      encoded.push(char::from(b));
+    } else {
+      let _ = write!(encoded, "%{b:02X}");
+    }
+  }
+  encoded
+}
+
+struct TempSecretFile(PathBuf);
+
+impl Drop for TempSecretFile {
+  fn drop(&mut self) {
+    let _ = std::fs::remove_file(&self.0);
+  }
+}
+
+pub fn cleanup_temp_keys(dir: &Path) {
+  for entry in std::fs::read_dir(dir).into_iter().flatten().flatten()
+  {
+    if entry
+      .file_name()
+      .to_string_lossy()
+      .starts_with(".restic-newkey-")
+      && entry.file_type().is_ok_and(|kind| kind.is_file())
+      && std::fs::remove_file(entry.path()).is_err()
+    {
+      tracing::warn!("清理备份临时口令文件失败");
+    }
+  }
+}
+
+#[test]
+fn rest_url_escapes_userinfo() {
+  assert_eq!(
+    rest_url("100.64.0.2", 8000, "u@1", "p@ss/w#1?", "app").unwrap(),
+    "rest:http://u%401:p%40ss%2Fw%231%3F@100.64.0.2:8000/app"
+  );
+}

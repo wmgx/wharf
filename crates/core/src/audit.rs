@@ -1,13 +1,14 @@
 //! 通过鉴权的操作和页面登录记录。
 
 use std::{
-  sync::{Arc, Mutex},
-  time::Instant,
+  collections::HashMap,
+  sync::{Arc, LazyLock, Mutex},
+  time::{Duration, Instant},
 };
 
 use axum::{
   Json,
-  extract::{Query, Request, State},
+  extract::{ConnectInfo, Query, Request, State},
   http::Method,
   middleware::Next,
   response::{IntoResponse, Response},
@@ -35,12 +36,18 @@ struct Slot {
   actor: Option<String>,
   detail: Option<String>,
   required: bool,
+  rejection: Option<(String, String)>,
 }
 
 impl AuditSlot {
   pub fn set_actor(&self, actor: &str) {
     self.0.lock().unwrap_or_else(|e| e.into_inner()).actor =
       Some(actor.to_string());
+  }
+
+  pub fn set_rejected(&self, actor: &str, reason: &str) {
+    self.0.lock().unwrap_or_else(|e| e.into_inner()).rejection =
+      Some((actor.to_string(), reason.to_string()));
   }
 
   pub fn skip_record(&self) {
@@ -68,36 +75,76 @@ pub async fn layer(
   let path = req.uri().path().to_string();
   let started = Instant::now();
   let reason = reason(&req);
+  let source = req
+    .extensions()
+    .get::<ConnectInfo<std::net::SocketAddr>>()
+    .map(|peer| crate::login::client_key(peer.0.ip(), req.headers()));
   let slot = AuditSlot::default();
   req.extensions_mut().insert(slot.clone());
   let resp = next.run(req).await;
-  let (actor, detail, required) = {
+  let (actor, detail, required, rejection) = {
     let mut slot = slot.0.lock().unwrap_or_else(|e| e.into_inner());
-    (slot.actor.take(), slot.detail.take(), slot.required)
-  };
-  if let Some(actor) = actor
-    && should_record(&method, &path)
-  {
-    let result = insert(
-      &state,
-      AuditEntry {
-        id: 0,
-        at: now_ms(),
-        kind: "api".into(),
-        actor,
-        method: method.to_string(),
-        path,
-        status: Some(resp.status().as_u16()),
-        duration_ms: Some(started.elapsed().as_millis() as i64),
-        detail: match (detail, reason) {
-          (Some(d), Some(r)) => Some(format!("{d} 原因：{r}")),
-          (None, Some(r)) => Some(format!("原因：{r}")),
-          (d, None) => d,
-        },
-        source: None,
-      },
+    (
+      slot.actor.take(),
+      slot.detail.take(),
+      slot.required,
+      slot.rejection.take(),
     )
-    .await;
+  };
+  let status = resp.status().as_u16();
+  let rejected = matches!(status, 401 | 403)
+    && path.starts_with("/api/")
+    && !matches!(
+      path.as_str(),
+      "/api/login" | "/api/setup" | "/api/logout"
+    );
+  if rejected || (actor.is_some() && should_record(&method, &path)) {
+    let (actor, detail) = rejection.map_or_else(
+      || (actor.unwrap_or_else(|| "anonymous".into()), detail),
+      |(actor, detail)| (actor, Some(detail)),
+    );
+    let detail = if rejected {
+      detail.or_else(|| Some("权限校验拒绝".into()))
+    } else {
+      match (detail, reason) {
+        (Some(d), Some(r)) => Some(format!("{d} 原因：{r}")),
+        (None, Some(r)) => Some(format!("原因：{r}")),
+        (d, None) => d,
+      }
+    };
+    let row = AuditEntry {
+      id: 0,
+      at: now_ms(),
+      kind: "api".into(),
+      actor,
+      method: method.to_string(),
+      path,
+      status: Some(status),
+      duration_ms: Some(started.elapsed().as_millis() as i64),
+      detail,
+      source,
+    };
+    if rejected {
+      let (record, summary) =
+        REJECTS.lock().unwrap_or_else(|e| e.into_inner()).record(
+          (
+            &row.actor,
+            row.source.as_deref().unwrap_or_default(),
+            status,
+          ),
+          Instant::now(),
+        );
+      if summary > 0 {
+        let mut summary_row = row.clone();
+        summary_row.detail =
+          Some(format!("同类拒绝已折叠 {summary} 次"));
+        let _ = insert(&state, summary_row).await;
+      }
+      if !record {
+        return resp;
+      }
+    }
+    let result = insert(&state, row).await;
     if required && let Err(error) = result {
       return AppError(error).into_response();
     }
@@ -161,10 +208,96 @@ pub fn should_record(method: &Method, path: &str) -> bool {
       || path.ends_with("/connect"))
 }
 
+const WINDOW: Duration = Duration::from_secs(60);
+
+struct Bucket {
+  at: Instant,
+  details: usize,
+  folded: usize,
+}
+
+#[derive(Default)]
+struct RejectLimiter {
+  global: Option<(Instant, usize)>,
+  buckets: HashMap<(String, String, u16), Bucket>,
+}
+
+static REJECTS: LazyLock<Mutex<RejectLimiter>> =
+  LazyLock::new(Default::default);
+
+impl RejectLimiter {
+  fn record(
+    &mut self,
+    key: (&str, &str, u16),
+    now: Instant,
+  ) -> (bool, usize) {
+    let global = self.global.get_or_insert((now, 0));
+    if now.duration_since(global.0) >= WINDOW {
+      *global = (now, 0);
+      self.buckets.retain(|_, bucket| {
+        bucket.folded > 0 || now.duration_since(bucket.at) < WINDOW
+      });
+    }
+    let key = (key.0.to_string(), key.1.to_string(), key.2);
+    if self.buckets.len() >= 4096
+      && !self.buckets.contains_key(&key)
+      && let Some(oldest) = self
+        .buckets
+        .iter()
+        .min_by_key(|(_, bucket)| bucket.at)
+        .map(|(key, _)| key.clone())
+    {
+      self.buckets.remove(&oldest);
+    }
+    let limit = if key.0 == "anonymous" { 5 } else { 30 };
+    let bucket = self.buckets.entry(key).or_insert(Bucket {
+      at: now,
+      details: 0,
+      folded: 0,
+    });
+    let expired = now.duration_since(bucket.at) >= WINDOW;
+    let mut summary = 0;
+    if (expired || bucket.folded >= 99)
+      && bucket.folded > 0
+      && global.1 < 120
+    {
+      summary = std::mem::take(&mut bucket.folded);
+      global.1 += 1;
+    }
+    if expired {
+      bucket.at = now;
+      bucket.details = 0;
+    }
+    if bucket.details < limit && global.1 < 120 {
+      bucket.details += 1;
+      global.1 += 1;
+      (true, summary)
+    } else if summary > 0 && !expired {
+      (false, summary + 1)
+    } else {
+      bucket.folded = bucket.folded.saturating_add(1);
+      (false, summary)
+    }
+  }
+}
+
+fn redact_row(row: &mut AuditEntry) {
+  row.path = crate::log_redact::redact_text(&row.path);
+  row.detail = row
+    .detail
+    .take()
+    .map(|s| crate::log_redact::redact_text(&s));
+  row.source = row
+    .source
+    .take()
+    .map(|s| crate::log_redact::redact_text(&s));
+}
+
 async fn insert(
   state: &AppState,
-  row: AuditEntry,
+  mut row: AuditEntry,
 ) -> Result<(), ApiError> {
+  redact_row(&mut row);
   let result = state
     .db
     .call(move |c| {
@@ -174,12 +307,6 @@ async fn insert(
         params![row.at, row.kind, row.actor, row.method, row.path,
           row.status, row.duration_ms, row.detail, row.source],
       )
-      .and_then(|_| {
-        c.execute(
-          "DELETE FROM audit_log WHERE at < ?1 OR (method IN ('login_failed', 'gate_key_failed') AND at < ?2)",
-          params![row.at - 90 * 24 * 3600 * 1000, row.at - 7 * 24 * 3600 * 1000],
-        )
-      })
       .map(|_| ())
       .map_err(sql_err)
     })
@@ -188,6 +315,35 @@ async fn insert(
     tracing::warn!("记录操作失败：{}", e.message);
   }
   result
+}
+
+pub async fn cleanup(state: &AppState) -> Result<(), ApiError> {
+  static LAST_CLEANUP: Mutex<Option<Instant>> = Mutex::new(None);
+  {
+    let mut last =
+      LAST_CLEANUP.lock().unwrap_or_else(|e| e.into_inner());
+    if last.is_some_and(|at| at.elapsed() < Duration::from_secs(3600))
+    {
+      return Ok(());
+    }
+    *last = Some(Instant::now());
+  }
+  state.db.call(|c| cleanup_rows(c, now_ms())).await
+}
+
+fn cleanup_rows(
+  c: &rusqlite::Connection,
+  now: i64,
+) -> Result<(), ApiError> {
+  const DAY: i64 = 24 * 3600 * 1000;
+  c.execute(
+    "DELETE FROM audit_log WHERE at < ?1
+       OR (method IN ('login_failed', 'gate_key_failed') AND at < ?2)
+       OR (actor = 'anonymous' AND status IN (401, 403) AND at < ?2)",
+    params![now - 90 * DAY, now - 7 * DAY],
+  )
+  .map(|_| ())
+  .map_err(sql_err)
 }
 
 /// 记一条登录类的记录。`action` 是 login / login_failed / gate_key_failed / logout / setup。
@@ -230,7 +386,7 @@ pub async fn list(
   Query(q): Query<AuditQuery>,
 ) -> ApiResult<Vec<AuditEntry>> {
   auth.require(Perm::Admin)?;
-  let rows = state
+  let mut rows: Vec<AuditEntry> = state
     .db
     .call(move |c| {
       let mut stmt = c
@@ -262,6 +418,7 @@ pub async fn list(
         .map_err(sql_err)
     })
     .await?;
+  rows.iter_mut().for_each(redact_row);
   Ok(Json(rows))
 }
 
@@ -314,4 +471,15 @@ fn shell_log_redacts_commands_and_audit_records_sensitive_reads() {
   ] {
     assert!(should_record(&Method::GET, path), "{path}");
   }
+}
+
+#[test]
+fn folds_anonymous_rejections_into_one_summary() {
+  let mut limiter = RejectLimiter::default();
+  let now = Instant::now();
+  let source = ("anonymous", "203.0.113.1", 401);
+  for i in 0..20 {
+    assert_eq!(limiter.record(source, now), (i < 5, 0));
+  }
+  assert_eq!(limiter.record(source, now + WINDOW), (true, 15));
 }

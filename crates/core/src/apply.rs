@@ -437,6 +437,7 @@ pub async fn start(
         tx.commit().map_err(sql_err)
       })
       .await?;
+    crate::log_redact::refresh(&state.db).await;
   }
 
   let actor =
@@ -637,7 +638,7 @@ async fn execute(
       Arc::new(move |line: String| {
         let mut r = lock(&run);
         let log = &mut r.steps[index].log;
-        log.push(line);
+        log.push(crate::log_redact::redact_text(&line));
         if log.len() > MAX_LOG_LINES {
           let drop = log.len() - MAX_LOG_LINES;
           log.drain(..drop);
@@ -670,7 +671,10 @@ async fn execute(
     if let Some((service, action)) = op {
       let (status, error) = match &result {
         Ok(()) => (OpStatus::Succeeded, None),
-        Err(e) => (OpStatus::Failed, Some(e.message.clone())),
+        Err(e) => (
+          OpStatus::Failed,
+          Some(crate::log_redact::redact_text(&e.message)),
+        ),
       };
       deployed |= result.is_ok()
         && matches!(
@@ -694,6 +698,7 @@ async fn execute(
       match result {
         Ok(()) => s.status = StepStatus::Done,
         Err(e) => {
+          let e = crate::log_redact::redact_error(e);
           tracing::warn!("[{run_id}] {} 失败：{e}", step.title);
           s.status = StepStatus::Failed;
           s.error = Some(e);
@@ -1668,14 +1673,15 @@ async fn record_deployment(
   d: Deployed<'_>,
   result: &ProjectUpResult,
 ) -> Result<(), ApiError> {
-  let images =
-    serde_json::to_string(&result.images).map_err(json_err)?;
+  let mut images = result.images.clone();
+  wharf_api_types::agent::normalize_image_digests(&mut images);
+  let encoded_images =
+    serde_json::to_string(&images).map_err(json_err)?;
   let spec = serde_json::to_string(d.spec).map_err(json_err)?;
   let commit = d.commit.map(str::to_string);
   // 记下实际跑起来的版本：导入（按本机已有的镜像启动）和每次部署之后，固定的版本都和正在跑的一致。
   let pinnable = crate::pins::images(&d.spec.source);
-  let pins: std::collections::BTreeMap<&str, &str> = result
-    .images
+  let pins: std::collections::BTreeMap<&str, &str> = images
     .iter()
     .filter(|i| pinnable.contains(&i.image))
     .filter_map(|i| {
@@ -1692,7 +1698,7 @@ async fn record_deployment(
     d.server.to_string(),
     d.run_id.to_string(),
     d.hash.to_string(),
-    d.template.to_string(),
+    crate::log_redact::redact_text(d.template),
   );
   state
     .db
@@ -1701,7 +1707,7 @@ async fn record_deployment(
       c.execute(
         "INSERT INTO deployments (service, server, run_id, hash, compose, images, created_at, spec, commit_sha)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-        params![service, server, run_id, hash, compose, images, now_ms(), spec, commit],
+        params![service, server, run_id, hash, compose, encoded_images, now_ms(), spec, commit],
       )
       .map_err(sql_err)?;
       if let Some(pins) = pins {

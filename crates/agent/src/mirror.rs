@@ -26,6 +26,7 @@ use axum::{
 
 /// git 的请求体（要的对象列表）通常很小；给足余量。
 const MAX_BODY: usize = 64 << 20;
+const MAX_CACHED_TOKENS: usize = 1024;
 const TOKEN_TTL: Duration = Duration::from_secs(50);
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -139,6 +140,11 @@ async fn handle(
   let Some(rest) = strip_token(path, kind, &m.token) else {
     return not_found();
   };
+  if kind == Kind::Git
+    && !is_allowed_git_request(&method, rest, uri.query())
+  {
+    return StatusCode::METHOD_NOT_ALLOWED.into_response();
+  }
   let query =
     uri.query().map(|q| format!("?{q}")).unwrap_or_default();
   let url = match kind {
@@ -227,11 +233,22 @@ async fn registry(
     .and_then(|v| v.to_str().ok())
     .unwrap_or_default()
     .to_string();
-  let token = crate::registry::token(&m.client, &challenge).await?;
-  m.tokens
-    .lock()
-    .unwrap_or_else(|e| e.into_inner())
-    .insert(key, (token.clone(), Instant::now()));
+  let token = crate::registry::token(base, &challenge).await?;
+  {
+    let mut tokens =
+      m.tokens.lock().unwrap_or_else(|e| e.into_inner());
+    tokens.retain(|_, (_, at)| at.elapsed() < TOKEN_TTL);
+    if tokens.len() >= MAX_CACHED_TOKENS
+      && !tokens.contains_key(&key)
+      && let Some(oldest) = tokens
+        .iter()
+        .min_by_key(|(_, (_, at))| *at)
+        .map(|(k, _)| k.clone())
+    {
+      tokens.remove(&oldest);
+    }
+    tokens.insert(key, (token.clone(), Instant::now()));
+  }
   send(Some(&token))
     .await
     .map_err(|e| e.without_url().to_string())
@@ -268,7 +285,8 @@ async fn git(
 
 /// 上游的回复原样流回去，只带客户端用得到的头。
 fn relay(resp: reqwest::Response) -> Response {
-  const KEEP: [&str; 8] = [
+  const KEEP: [&str; 9] = [
+    "link",
     "content-type",
     "content-length",
     "content-encoding",
@@ -348,4 +366,58 @@ mod tests {
       "library/nginx"
     );
   }
+}
+
+fn is_allowed_git_request(
+  method: &Method,
+  rest: &str,
+  query: Option<&str>,
+) -> bool {
+  let Some((owner, rest)) = rest.split_once('/') else {
+    return false;
+  };
+  let Some((repo, action)) = rest.split_once('/') else {
+    return false;
+  };
+  let component = |s: &str| {
+    !s.is_empty()
+      && !matches!(s, "." | "..")
+      && s
+        .bytes()
+        .all(|c| c.is_ascii_alphanumeric() || b"-_.".contains(&c))
+  };
+  component(owner)
+    && component(repo)
+    && matches!(
+      (method, action, query),
+      (
+        &Method::GET,
+        "info/refs",
+        None | Some("" | "service=git-upload-pack")
+      ) | (&Method::POST, "git-upload-pack", None | Some(""))
+    )
+}
+
+#[test]
+fn mirror_only_allows_git_reads() {
+  assert!(!is_allowed_git_request(
+    &Method::POST,
+    "o/r.git/git-receive-pack",
+    None
+  ));
+  assert!(!is_allowed_git_request(
+    &Method::GET,
+    "o/../info/refs",
+    None
+  ));
+  assert!(is_allowed_git_request(
+    &Method::GET,
+    "o/r.git/info/refs",
+    Some("service=git-upload-pack")
+  ));
+  assert!(is_allowed_git_request(
+    &Method::POST,
+    "o/r.git/git-upload-pack",
+    None
+  ));
 }

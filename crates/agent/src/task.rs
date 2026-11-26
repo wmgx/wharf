@@ -300,9 +300,16 @@ pub async fn run(
         .cmd()
         .args(["run", "--rm", "--name", &name])
         .args(["--label", &format!("wharf.task={}", job.name)]);
-      for (k, v) in env {
-        cmd = cmd.args(["-e", &format!("{k}={v}")]);
-      }
+      let work = if env.is_empty() {
+        None
+      } else {
+        let work =
+          work_dir(&docker.data_dir.join("tasks"), &job.name)?;
+        let file = work.0.join("env");
+        write_env(&file, env)?;
+        cmd = cmd.args(["--env-file", &file.to_string_lossy()]);
+        Some(work)
+      };
       for m in mounts {
         cmd = cmd.args(["-v", m]);
       }
@@ -311,6 +318,7 @@ pub async fn run(
         None => cmd.arg(image),
       };
       let out = cmd.timeout(timeout).run(ctx).await;
+      drop(work);
       if out.is_err() {
         crate::build::remove_container(docker, &name).await;
       }

@@ -161,10 +161,13 @@ fn pin_image(spec: ServiceSpec, images: &[ImageInfo]) -> ServiceSpec {
   let Source::Image(image) = &spec.source else {
     return spec;
   };
-  let digest = images
-    .iter()
-    .find(|i| &i.image == image)
-    .and_then(|i| i.digest.clone());
+  let digest =
+    images.iter().find(|i| &i.image == image).and_then(|i| {
+      wharf_api_types::agent::normalize_image_digest(
+        image,
+        i.digest.as_deref()?,
+      )
+    });
   match digest {
     Some(digest) => ServiceSpec {
       source: Source::Image(digest),
@@ -202,4 +205,23 @@ mod tests {
     let rows = vec![with(3, "app@sha256:b"), with(2, "app@sha256:a")];
     assert_eq!(pick(&rows, None).map(|r| r.0), Some(2));
   }
+}
+
+#[test]
+fn rollback_pins_old_mirror_digest_without_path() {
+  let hash = "a".repeat(64);
+  let spec: ServiceSpec = serde_json::from_value(serde_json::json!({
+    "server":"s1", "source":{"image":"nginx:1.27"}
+  }))
+  .unwrap();
+  let mut images: Vec<ImageInfo> = serde_json::from_value(serde_json::json!([{
+    "image":"nginx:1.27", "digest":format!("docker.example.test/tok_secret_123456/library/nginx@sha256:{hash}")
+  }])).unwrap();
+  let expected = format!("nginx@sha256:{hash}");
+  assert_eq!(
+    pin_image(spec, &images).source,
+    Source::Image(expected.clone())
+  );
+  wharf_api_types::agent::normalize_image_digests(&mut images);
+  assert_eq!(images[0].digest.as_deref(), Some(expected.as_str()));
 }

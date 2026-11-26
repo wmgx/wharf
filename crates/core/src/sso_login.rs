@@ -1060,7 +1060,7 @@ pub async fn record(
   let result = wharf_api_types::view::SsoLoginState {
     at: crate::db::now_ms(),
     ok,
-    error,
+    error: error.map(|error| crate::log_redact::redact_text(&error)),
   };
   state.db.call(move |c| {
     let value = serde_json::to_string(&result).map_err(|_| ApiError::internal("代登录结果格式不对"))?;

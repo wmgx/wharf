@@ -95,7 +95,9 @@ pub async fn load_run(
   state: &AppState,
   id: &str,
 ) -> Result<Run, ApiError> {
-  Ok(load_stored_run(state, id).await?.run)
+  let mut run = load_stored_run(state, id).await?.run;
+  crate::log_redact::redact_run(&mut run);
+  Ok(run)
 }
 
 pub async fn load_run_for(
@@ -122,7 +124,9 @@ pub async fn load_run_for(
   {
     return Err(token_scope::forbidden(&auth.name, allowed, ""));
   }
-  Ok(stored.run)
+  let mut run = stored.run;
+  crate::log_redact::redact_run(&mut run);
+  Ok(run)
 }
 
 pub(super) async fn persist(
@@ -224,6 +228,7 @@ pub async fn list_runs(
     for step in &mut run.steps {
       step.log.clear();
     }
+    crate::log_redact::redact_run(&mut run);
     runs.push(run);
   }
   Ok(runs)

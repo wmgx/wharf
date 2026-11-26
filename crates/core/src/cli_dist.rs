@@ -3,13 +3,44 @@
 //! 在终端里运行时，装完直接 `wharf login`（从 /dev/tty 读 token，token 不进命令行）；
 //! 顺手把 `/skill.md` 装到 `~/.agents/skills/wharf`，本机有 `~/.claude` 时软链到 `~/.claude/skills/wharf`。
 
-use std::sync::Arc;
+use std::{collections::BTreeMap, net::SocketAddr, sync::Arc};
 
 use axum::{
-  extract::State,
-  http::header,
+  extract::{ConnectInfo, Request, State},
+  http::{StatusCode, header},
   response::{IntoResponse, Response},
 };
+
+const SHA256SUMS_PATH: &str = "/usr/local/share/wharf/cli-sha256sums";
+const PLATFORMS: [&str; 4] =
+  ["linux-amd64", "linux-arm64", "macos-amd64", "macos-arm64"];
+
+pub fn parse_sha256sums(text: &str) -> BTreeMap<String, String> {
+  text
+    .lines()
+    .filter_map(|line| {
+      let mut fields = line.split_ascii_whitespace();
+      let hash = fields.next()?;
+      let platform = fields
+        .next()?
+        .trim_start_matches('*')
+        .strip_prefix("wharf-")?;
+      (fields.next().is_none()
+        && PLATFORMS.contains(&platform)
+        && hash.len() == 64
+        && hash
+          .bytes()
+          .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+      .then(|| (platform.to_string(), hash.to_string()))
+    })
+    .collect()
+}
+
+pub fn sha256_map() -> BTreeMap<String, String> {
+  let path = std::env::var_os("WHARF_CLI_SHA256SUMS_FILE")
+    .unwrap_or_else(|| SHA256SUMS_PATH.into());
+  parse_sha256sums(&std::fs::read_to_string(path).unwrap_or_default())
+}
 
 /// 公开仓库的 Release 地址；可以用 `WHARF_CLI_RELEASES` 换成镜像。
 const RELEASES: &str =
@@ -33,17 +64,43 @@ pub async fn skill() -> Response {
 /// `GET /cli.sh`：不需要登录。
 pub async fn script(
   State(s): State<Arc<crate::state::AppState>>,
+  req: Request,
 ) -> Response {
-  let base = releases();
+  script_response(
+    &req,
+    &hex::encode(s.key.verifying_key().to_bytes()),
+    &sha256_map(),
+  )
+}
+
+fn script_response(
+  req: &Request,
+  core_key: &str,
+  hashes: &BTreeMap<String, String>,
+) -> Response {
+  let local = req
+    .extensions()
+    .get::<ConnectInfo<SocketAddr>>()
+    .is_some_and(|peer| {
+      crate::source_trust::is_direct_local(peer.0.ip(), req.headers())
+    });
+  if crate::source_trust::request_proto(req) != "https" && !local {
+    return (StatusCode::BAD_REQUEST, "拒绝通过明文 HTTP 提供安装脚本；请经 HTTPS 访问控制面，或从 GitHub Releases 下载 wharf 并核对 SHA256SUMS").into_response();
+  }
+  let mut script = SCRIPT
+    .replace("{build}", wharf_api_types::BUILD)
+    .replace("{core_key}", core_key);
+  for platform in PLATFORMS {
+    script = script.replace(
+      &format!("{{sha_{platform}}}"),
+      hashes.get(platform).map_or("", String::as_str),
+    );
+  }
+  let script = script
+    .replace("{releases}", &releases().replace('\'', "'\"'\"'"));
   (
     [(header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8")],
-    SCRIPT
-      .replace("{build}", wharf_api_types::BUILD)
-      .replace("{releases}", &base)
-      .replace(
-        "{core_key}",
-        &hex::encode(s.key.verifying_key().to_bytes()),
-      ),
+    script,
   )
     .into_response()
 }
@@ -73,13 +130,30 @@ case "$(uname -m)" in
   *) fail "不支持的架构：$(uname -m)" ;;
 esac
 
-URL="{releases}/build-$BUILD/wharf-$os-$arch"
+case "$os-$arch" in
+  linux-amd64) EXPECTED="{sha_linux-amd64}" ;;
+  linux-arm64) EXPECTED="{sha_linux-arm64}" ;;
+  macos-amd64) EXPECTED="{sha_macos-amd64}" ;;
+  macos-arm64) EXPECTED="{sha_macos-arm64}" ;;
+esac
+[ -n "$EXPECTED" ] || fail "缺少当前平台的 SHA-256 校验和，拒绝安装"
+
+RELEASES='{releases}'
+URL="$RELEASES/build-$BUILD/wharf-$os-$arch"
 printf '==> 下载 wharf（构建 %s，%s-%s）\n' "$BUILD" "$os" "$arch"
 mkdir -p "$DEST"
-TMP="$(mktemp)"
+TMP="$(mktemp "$DEST/.wharf.tmp.XXXXXX")"
 trap 'rm -f "$TMP"' EXIT
 curl -fL --connect-timeout 15 --max-time 300 -o "$TMP" "$URL" \
   || fail "下载失败：${URL}（这个构建的 CLI 可能还在 CI 里打包，过几分钟再试）"
+if command -v sha256sum >/dev/null 2>&1; then
+  SUM="$(sha256sum < "$TMP")"
+elif command -v shasum >/dev/null 2>&1; then
+  SUM="$(shasum -a 256 < "$TMP")"
+else
+  fail "缺少 sha256sum 或 shasum，无法校验安装包"
+fi
+[ "$EXPECTED" = "${SUM%% *}" ] || fail "校验和不匹配，已中止安装"
 chmod +x "$TMP"
 mv "$TMP" "$DEST/wharf"
 trap - EXIT
@@ -99,7 +173,8 @@ esac
 
 # Skill：正本放在 ~/.agents/skills/wharf（Codex 等读这里），其他 agent 的 skills 目录软链过去，
 # 以后更新只换正本。只给本机已经装了的 agent 建链接。
-if [ -n "$CORE_URL" ]; then
+case "$CORE_URL/" in
+  https://* | http://localhost/* | http://localhost:* | http://127.0.0.1/* | http://127.0.0.1:* | http://\[::1\]/* | http://\[::1\]:*)
   SKILL_DIR="$HOME/.agents/skills/wharf"
   mkdir -p "$SKILL_DIR"
   if curl -fsSL --connect-timeout 15 --max-time 60 -o "$SKILL_DIR/SKILL.md.tmp" "$CORE_URL/skill.md"; then
@@ -121,7 +196,9 @@ if [ -n "$CORE_URL" ]; then
     rm -f "$SKILL_DIR/SKILL.md.tmp"
     printf '==> Skill 下载失败，跳过：%s/skill.md\n' "$CORE_URL"
   fi
-fi
+  ;;
+  http://*) printf '==> 登录后用 wharf self-update 同步 Skill\n' ;;
+esac
 
 LOGIN="$WHARF login --url ${CORE_URL:-<控制面地址>} --core-key {core_key}"
 # 已经登录过（比如这次是更新）就不再登录。
@@ -132,7 +209,7 @@ fi
 # 有终端就直接登录；管道运行时标准输入是脚本本身，所以从 /dev/tty 读。
 if [ -n "$CORE_URL" ] && { : </dev/tty; } 2>/dev/null; then
   printf '\n==> 登录：粘贴页面上新建的访问令牌\n'
-  if $LOGIN </dev/tty; then
+  if "$WHARF" login --url "$CORE_URL" --core-key "{core_key}" </dev/tty; then
     "$WHARF" status || true
     return 0
   fi
@@ -147,3 +224,42 @@ printf '  %s status\n' "$WHARF"
 
 main "$@"
 "#;
+
+#[tokio::test]
+async fn install_script_refuses_remote_plaintext() {
+  fn request(uri: &str, peer: &str) -> Request {
+    Request::builder()
+      .uri(uri)
+      .extension(ConnectInfo(peer.parse::<SocketAddr>().unwrap()))
+      .body(axum::body::Body::empty())
+      .unwrap()
+  }
+  let hash = "a".repeat(64);
+  let hashes =
+    parse_sha256sums(&format!("{hash}  wharf-linux-amd64"));
+  let denied =
+    request("http://core.example.test/cli.sh", "203.0.113.5:7700");
+  assert_eq!(
+    script_response(&denied, "", &hashes).status(),
+    StatusCode::BAD_REQUEST
+  );
+  let mut https = request("/cli.sh", "127.0.0.1:7700");
+  https
+    .headers_mut()
+    .insert("x-forwarded-proto", "https".parse().unwrap());
+  for req in
+    [request("http://127.0.0.1/cli.sh", "127.0.0.1:7700"), https]
+  {
+    let response = script_response(&req, "", &hashes);
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 16 * 1024)
+      .await
+      .unwrap();
+    let text = std::str::from_utf8(&bytes).unwrap();
+    assert!(
+      text.contains(&hash)
+        && text.contains("sha256sum")
+        && text.contains("mktemp \"$DEST/")
+    );
+  }
+}

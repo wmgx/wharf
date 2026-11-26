@@ -236,6 +236,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
   };
   upgrade::sweep_helper();
   task::cleanup(&cli.data_dir)?;
+  restic::cleanup_temp_keys(&cli.data_dir);
 
   let key = identity::load_or_create_key(&cli.data_dir)?;
   egress::restore(&cli.data_dir, &joined.core_url);

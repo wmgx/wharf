@@ -135,12 +135,14 @@ pub(crate) async fn load_inner(
       secrets.clone(),
       Some(&render::service_account_refs(&world)),
     )?;
+    let accounts = db::accounts(c)?;
+    crate::log_redact::update(c, key, &world, &secrets, &accounts)?;
     Ok(
       Snapshot {
         world,
         agents,
         core_server,
-        accounts: db::accounts(c)?,
+        accounts,
         app_account_defaults: crate::app_accounts::defaults(c)?,
         sso_login: db::settings_with_prefix(c, "sso.login.")?,
         owned: db::owned_records(c)?,

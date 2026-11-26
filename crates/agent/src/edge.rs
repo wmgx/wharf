@@ -158,7 +158,7 @@ async fn deploy_in(
     ])
     .args(["-e", "CI=true", "-e", "WRANGLER_SEND_METRICS=false"]);
   for (key, value) in &job.build_env {
-    cmd = cmd.args(["-e", &format!("{key}={value}")]);
+    cmd = cmd.args(["-e", key]).env(key, value);
   }
   let result = cmd
     .args(["--entrypoint", "sh", NODE_IMAGE, "-c", SCRIPT])

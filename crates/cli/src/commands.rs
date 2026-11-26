@@ -2709,14 +2709,20 @@ async fn service(
       )
       .await
     }
-    ServiceCmd::Rebuild { name, no_wait } => {
-      // 用 gh token 的服务先刷新密钥，gh 重新登录后旧 token 会失效。
-      let v: ServiceView =
-        c.get(&format!("/api/services/{}", seg(&name))).await?;
-      if let Source::Build(b) = &v.spec.source
-        && b.git.as_ref().and_then(|g| g.token_secret.as_deref())
-          == Some(crate::gh::SECRET)
-      {
+    ServiceCmd::Rebuild {
+      name,
+      no_wait,
+      sync_gh_token,
+    } => {
+      if sync_gh_token {
+        let v: ServiceView =
+          c.get(&format!("/api/services/{}", seg(&name))).await?;
+        if !matches!(&v.spec.source, Source::Build(b) if b.git.as_ref().and_then(|g| g.token_secret.as_deref()) == Some(crate::gh::SECRET))
+        {
+          return Err(
+            ApiError::invalid("该服务没有使用 GITHUB_TOKEN").into(),
+          );
+        }
         crate::gh::refresh(c).await?;
       }
       let r: ApplyResponse = c

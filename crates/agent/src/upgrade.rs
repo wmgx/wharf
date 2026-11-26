@@ -236,7 +236,11 @@ pub async fn helper_log(ctx: &Ctx) -> String {
 }
 
 /// 按旧容器的配置拼 `docker run` 参数（不含镜像）。
-fn run_args(old: &Value, name: &str) -> Vec<String> {
+fn run_args(
+  old: &Value,
+  name: &str,
+) -> (Vec<String>, Vec<(String, String)>) {
+  let mut env = Vec::new();
   let mut args =
     vec!["run".into(), "-d".into(), "--name".into(), name.into()];
   if old.pointer("/HostConfig/Privileged") == Some(&Value::Bool(true))
@@ -258,7 +262,12 @@ fn run_args(old: &Value, name: &str) -> Vec<String> {
     }
   }
   for e in strs_at(old, &["Config", "Env"]) {
-    flag("-e", e);
+    if let Some((key, value)) = e.split_once('=') {
+      flag("-e", key.to_string());
+      env.push((key.to_string(), value.to_string()));
+    } else {
+      flag("-e", e);
+    }
   }
   for b in strs_at(old, &["HostConfig", "Binds"]) {
     flag("-v", b);
@@ -320,7 +329,7 @@ fn run_args(old: &Value, name: &str) -> Vec<String> {
       }
     }
   }
-  args
+  (args, env)
 }
 
 async fn docker_ok(ctx: &Ctx, args: &[&str]) -> bool {
@@ -375,7 +384,7 @@ pub async fn replace(
     .to_string();
   anyhow::ensure!(!name.is_empty(), "读不到旧容器的名字");
   let backup = format!("{name}-old");
-  let mut args = run_args(&old, &name);
+  let (mut args, env) = run_args(&old, &name);
   args.extend(["--label".into(), "wharf.system=1".into()]);
   let cmd: Vec<String> = strs_at(&old, &["Config", "Cmd"]);
 
@@ -388,7 +397,13 @@ pub async fn replace(
   let mut run: Vec<&str> = args.iter().map(String::as_str).collect();
   run.push(image);
   run.extend(cmd.iter().map(String::as_str));
-  let started = docker_ok(&ctx, &run).await;
+  let started = Cmd::new("docker")
+    .args(run)
+    .envs(env)
+    .timeout(QUICK)
+    .run(&ctx)
+    .await
+    .is_ok_and(|out| out.success);
   if started && ready_in_time(&ctx, &name, ready).await {
     docker_ok(&ctx, &["rm", "-f", &backup]).await;
     // 旧镜像没有别的容器在用时删掉；在用就删不掉，不影响。
@@ -428,7 +443,7 @@ mod tests {
   fn carries_memory_limits() {
     for bytes in [268435456, 0] {
       let old = serde_json::json!({"HostConfig":{"Memory":bytes,"MemorySwap":bytes}});
-      let args = run_args(&old, "wharf-agent");
+      let (args, _) = run_args(&old, "wharf-agent");
       for flag in ["--memory", "--memory-swap"] {
         let value = args
           .windows(2)
@@ -451,10 +466,12 @@ mod tests {
         "LogConfig": {"Type": "json-file", "Config": {}},
       },
     });
-    let args = run_args(&old, "wharf-agent").join(" ");
+    let (args, env) = run_args(&old, "wharf-agent");
+    let args = args.join(" ");
+    assert_eq!(env, vec![("A".to_string(), "1".to_string())]);
     assert_eq!(
       args,
-      "run -d --name wharf-agent -e A=1 -v /srv:/srv \
+      "run -d --name wharf-agent -e A -v /srv:/srv \
        -v /run/d.sock:/var/run/docker.sock --network host \
        --restart unless-stopped --log-driver json-file"
     );

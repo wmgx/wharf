@@ -3,6 +3,7 @@
 use std::{path::PathBuf, time::Duration};
 
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use wharf_api_types::{ApiError, ErrorCode};
 
 use crate::{
@@ -241,11 +242,13 @@ pub async fn self_update(c: &Client, j: bool) -> CliResult<()> {
   let releases =
     v["cli_releases"].as_str().unwrap_or(DEFAULT_RELEASES);
   let (os, arch) = platform()?;
+  let expected = required_sha256(&v, &target, os, arch)?;
   let url = format!("{releases}/build-{target}/wharf-{os}-{arch}");
   if !j {
     println!("下载 wharf 构建 {target}（{os}-{arch}）");
   }
   let bytes = fetch_binary(&url).await?;
+  verify_sha256(&bytes, expected)?;
   let exe = replace_exe(&bytes)?;
   let skill = update_skill(c).await;
   let changes = new_changes(&exe).await;
@@ -493,4 +496,38 @@ mod tests {
     assert!(super::executable(b"\x7fELF\x02\x01"));
     assert!(!super::executable(b"<html>Not Found"));
   }
+}
+
+fn required_sha256<'a>(
+  version: &'a Value,
+  target: &str,
+  os: &str,
+  arch: &str,
+) -> CliResult<&'a str> {
+  version["cli_sha256"][format!("{os}-{arch}")].as_str()
+    .filter(|hash| hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+    .ok_or_else(|| ApiError::invalid(format!("控制面没有提供构建 {target}（{os}-{arch}）的 SHA-256 校验和，已取消自动更新"))
+      .with_hint("先升级控制面到支持校验和的版本，或从 GitHub Releases 手动下载并核对 SHA256SUMS").into())
+}
+
+fn verify_sha256(bytes: &[u8], expected: &str) -> CliResult<()> {
+  let actual = hex::encode(Sha256::digest(bytes));
+  if actual != expected {
+    return Err(ApiError::internal(format!("下载到的 wharf 校验和不匹配（期望 {expected}，实际 {actual}），已拒绝替换"))
+      .with_hint("下载文件可能损坏或镜像源被篡改；检查 WHARF_CLI_RELEASES 后重试").into());
+  }
+  Ok(())
+}
+
+#[test]
+fn update_requires_hash_and_rejects_tampered_executable() {
+  assert!(
+    required_sha256(&json!({}), "fixture", "linux", "amd64").is_err()
+  );
+  let original = b"\x7fELFfixture";
+  let changed = b"\x7fELFfixturE";
+  let hash = hex::encode(Sha256::digest(original));
+  assert!(executable(changed));
+  assert!(verify_sha256(original, &hash).is_ok());
+  assert!(verify_sha256(changed, &hash).is_err());
 }

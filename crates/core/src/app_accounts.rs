@@ -172,6 +172,7 @@ pub async fn set(
     tx.commit().map_err(sql_err)?;
     Ok(view)
   }).await?;
+  crate::log_redact::refresh(&s.db).await;
   Ok(Json(view))
 }
 
@@ -206,6 +207,7 @@ pub async fn remove(
 ) -> ApiResult<Value> {
   auth.require(Perm::Admin)?;
   s.db.call(move |c| delete_account(c, &name)).await?;
+  crate::log_redact::refresh(&s.db).await;
   Ok(Json(json!({"removed": true})))
 }
 

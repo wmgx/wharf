@@ -3,7 +3,7 @@
 //! 渠道从密钥里读，有哪个就用哪个；以后加渠道就是 [Channel] 多一种。
 //! - 飞书群自定义机器人：`NOTIFY_FEISHU_WEBHOOK`，开了签名校验时再设 `NOTIFY_FEISHU_SECRET`。
 
-use std::time::Duration;
+use std::{sync::LazyLock, time::Duration};
 
 use base64::Engine;
 use sha2::{Digest, Sha256};
@@ -14,6 +14,14 @@ use crate::{db, state::AppState};
 pub const FEISHU_WEBHOOK: &str = "NOTIFY_FEISHU_WEBHOOK";
 pub const FEISHU_SECRET: &str = "NOTIFY_FEISHU_SECRET";
 const TIMEOUT: Duration = Duration::from_secs(10);
+static HTTP_CLIENT: LazyLock<
+  Result<reqwest::Client, reqwest::Error>,
+> = LazyLock::new(|| {
+  reqwest::Client::builder()
+    .connect_timeout(Duration::from_secs(5))
+    .timeout(TIMEOUT)
+    .build()
+});
 
 pub struct Event {
   /// 例如"定时任务 sign 失败"。
@@ -56,20 +64,24 @@ pub async fn send(
 ) -> Result<(), ApiError> {
   let channels = channels(state).await?;
   if channels.is_empty() {
-    return Err(ApiError::invalid("没有配置通知渠道").with_hint(
-      format!(
-        "设置密钥 {FEISHU_WEBHOOK}（飞书群机器人的 Webhook 地址）"
-      ),
-    ));
+    return Err(
+      ApiError::new(ErrorCode::NotFound, "没有配置通知渠道")
+        .with_hint(format!(
+          "设置密钥 {FEISHU_WEBHOOK}（飞书群机器人的 Webhook 地址）"
+        )),
+    );
   }
-  let client = reqwest::Client::builder()
-    .timeout(TIMEOUT)
-    .build()
+  let client = HTTP_CLIENT
+    .as_ref()
     .map_err(|e| ApiError::internal(format!("HTTP 客户端：{e}")))?;
+  let event = Event {
+    title: crate::log_redact::redact_text(&event.title),
+    body: crate::log_redact::redact_text(&event.body),
+  };
   for ch in &channels {
     match ch {
       Channel::Feishu { url, secret } => {
-        feishu(&client, url, secret.as_deref(), event).await?
+        feishu(client, url, secret.as_deref(), &event).await?
       }
     }
   }
@@ -107,7 +119,7 @@ pub async fn deliver(
 ) -> Option<String> {
   match send(state, event).await {
     Ok(()) => None,
-    Err(e) if channels(state).await.is_ok_and(|c| c.is_empty()) => {
+    Err(e) if e.code == ErrorCode::NotFound => {
       tracing::debug!("没有通知渠道，跳过：{}", e.message);
       Some("没有配置通知渠道".into())
     }
@@ -153,7 +165,7 @@ async fn feishu(
     body["timestamp"] = ts.to_string().into();
     body["sign"] = feishu_sign(ts, secret).into();
   }
-  let resp =
+  let mut resp =
     client.post(url).json(&body).send().await.map_err(|e| {
       ApiError::new(
         ErrorCode::Provider,
@@ -161,7 +173,24 @@ async fn feishu(
       )
     })?;
   let status = resp.status();
-  let v: serde_json::Value = resp.json().await.unwrap_or_default();
+  const MAX: usize = 16 * 1024;
+  let mut bytes = Vec::new();
+  while bytes.len() < MAX {
+    let Some(chunk) = resp.chunk().await.map_err(|e| {
+      ApiError::new(
+        ErrorCode::Provider,
+        format!("读取飞书响应失败：{}", e.without_url()),
+      )
+    })?
+    else {
+      break;
+    };
+    let remaining = MAX - bytes.len();
+    bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+  }
+  let raw = String::from_utf8_lossy(&bytes);
+  let v: serde_json::Value =
+    serde_json::from_str(&raw).unwrap_or_default();
   let code = v["code"]
     .as_i64()
     .or(v["StatusCode"].as_i64())
@@ -172,7 +201,15 @@ async fn feishu(
         ErrorCode::Provider,
         format!(
           "飞书返回 {status}：{}",
-          v["msg"].as_str().unwrap_or("")
+          crate::log_redact::redact_text(
+            v["msg"]
+              .as_str()
+              .filter(|s| !s.is_empty())
+              .unwrap_or(&raw)
+          )
+          .chars()
+          .take(200)
+          .collect::<String>()
         ),
       )
       .with_hint(

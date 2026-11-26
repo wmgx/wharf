@@ -3,7 +3,7 @@
 use std::{process::Stdio, time::Duration};
 
 use serde_json::json;
-use wharf_api_types::view::SecretView;
+use wharf_api_types::{ApiError, view::SecretView};
 
 use crate::client::{CliResult, Client, seg};
 
@@ -36,30 +36,54 @@ async fn gh(args: &[&str]) -> Option<String> {
   (out.status.success() && !text.is_empty()).then_some(text)
 }
 
-/// 没指定 token 密钥的 git 来源：是 GitHub 私有仓库且本机 gh 已登录时，
-/// 把 gh 的 token 存进 [`SECRET`] 并返回密钥名。
+/// 没指定密钥的 GitHub 来源沿用已有密钥，首次同步需要显式选择。
 pub async fn private_token(
   c: &Client,
   repo: &str,
+  sync: bool,
 ) -> CliResult<Option<String>> {
   let Some(slug) = github_repo(repo) else {
+    if sync {
+      return Err(
+        ApiError::invalid("--sync-gh-token 只适用于 GitHub 仓库")
+          .into(),
+      );
+    }
     return Ok(None);
   };
+  if sync {
+    refresh(c).await?;
+    return Ok(Some(SECRET.into()));
+  }
+  let existing: Vec<SecretView> = c.get("/api/secrets").await?;
+  if existing.iter().any(|entry| entry.name == SECRET) {
+    eprintln!(
+      "沿用控制面已有密钥 {SECRET}（如需用本机 gh 覆盖，加 --sync-gh-token）"
+    );
+    return Ok(Some(SECRET.into()));
+  }
   let private =
     gh(&["api", &format!("repos/{slug}"), "--jq", ".private"]).await;
-  if private.as_deref() != Some("true") {
-    return Ok(None);
+  if private.as_deref() == Some("true") {
+    return Err(ApiError::invalid(format!("仓库 {slug} 是 GitHub 私有仓库，但控制面还没有密钥 {SECRET}"))
+      .with_hint("先用 wharf secret set GITHUB_TOKEN 保存最小只读权限 PAT，或加 --sync-gh-token 用本机 gh 登录同步").into());
   }
-  Ok(refresh(c).await?.then(|| SECRET.to_string()))
+  Ok(None)
 }
 
-/// 用本机 gh 的 token 更新 [`SECRET`]；gh 不可用时返回 `false`，不改密钥。
-pub async fn refresh(c: &Client) -> CliResult<bool> {
-  let Some(token) =
-    gh(&["auth", "token", "--hostname", "github.com"]).await
-  else {
-    return Ok(false);
-  };
+/// 由显式选择同步本机 gh 凭据。
+pub async fn refresh(c: &Client) -> CliResult<()> {
+  let token = gh(&["auth", "token", "--hostname", "github.com"])
+    .await
+    .ok_or_else(|| {
+      ApiError::invalid("本机 gh 没有可用的 GitHub 登录")
+        .with_hint("执行 gh auth login 后重试")
+    })?;
+  if token.starts_with("ghu_") {
+    eprintln!(
+      "本机 gh 返回的短效 OAuth token（ghu_）约 8 小时后过期，长期构建建议使用细粒度只读 PAT"
+    );
+  }
   let _: SecretView = c
     .put(
       &format!("/api/secrets/{}", seg(SECRET)),
@@ -67,7 +91,7 @@ pub async fn refresh(c: &Client) -> CliResult<bool> {
     )
     .await?;
   eprintln!("已用本机 gh 的登录更新密钥 {SECRET}");
-  Ok(true)
+  Ok(())
 }
 
 #[cfg(test)]

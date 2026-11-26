@@ -344,6 +344,14 @@ impl Docker {
             .run(ctx)
             .await?
             .check("docker tag")?;
+          if candidate != format!("{name}@{digest}") {
+            let _ = self
+              .cmd()
+              .args(["image", "rm", &candidate])
+              .timeout(Duration::from_secs(15))
+              .run(ctx)
+              .await;
+          }
           ctx.say(format!("已拉取 {image}（{digest}）"));
           return Ok(());
         }
@@ -857,7 +865,9 @@ fn pick_digest(image: &str, digests: &str) -> Option<String> {
       r == registry && p == path
     })
     .or(digests.first())
-    .map(|d| d.to_string())
+    .and_then(|d| {
+      wharf_api_types::agent::normalize_image_digest(image, d)
+    })
 }
 
 /// `docker pull` 非终端输出是逐层状态行，如 `0a1b2c3d4e5f: Download complete`。
@@ -1056,13 +1066,16 @@ mod tests {
 
   #[test]
   fn digest_matches_repo() {
+    let a = "a".repeat(64);
+    let b = "b".repeat(64);
     assert_eq!(
       pick_digest(
         "traefik/whoami:latest",
-        "docker.1ms.run/traefik/whoami@sha256:1,traefik/whoami@sha256:2"
-      )
-      .as_deref(),
-      Some("traefik/whoami@sha256:2")
+        &format!(
+          "docker.example.test/traefik/whoami@sha256:{a},traefik/whoami@sha256:{b}"
+        )
+      ),
+      Some(format!("traefik/whoami@sha256:{b}"))
     );
   }
 
@@ -1079,4 +1092,16 @@ not json"#;
     assert_eq!(who.working_dir.as_deref(), Some("/opt/whoami"));
     assert_eq!(grouped["other"][0].state, "exited");
   }
+}
+
+#[test]
+fn digest_uses_original_repository() {
+  let hash = "a".repeat(64);
+  let raw = format!(
+    "docker.example.test/tok_secret_123456/library/nginx@sha256:{hash}"
+  );
+  assert_eq!(
+    pick_digest("nginx:1.27", &raw),
+    Some(format!("nginx@sha256:{hash}"))
+  );
 }

@@ -213,17 +213,21 @@ fn is_cgnat(ip: Ipv4Addr) -> bool {
 }
 
 fn extract_ipv4(text: &str) -> Option<Ipv4Addr> {
-  let usable = |ip: Ipv4Addr| {
-    !ip.is_private()
-      && !ip.is_loopback()
-      && !ip.is_link_local()
-      && !ip.is_unspecified()
-      && !ip.is_broadcast()
-  };
-  if let Ok(ip) = text.trim().parse::<Ipv4Addr>()
-    && usable(ip)
-  {
-    return Some(ip);
+  extract_ipv4_with(text, |ip| {
+    wharf_api_types::net_probe::is_public(ip.into())
+  })
+}
+
+fn extract_ipv4_with(
+  text: &str,
+  usable: impl Fn(Ipv4Addr) -> bool,
+) -> Option<Ipv4Addr> {
+  if let Ok(ip) = text.trim().parse::<Ipv4Addr>() {
+    return usable(ip).then_some(ip);
+  }
+  let lower = text.to_ascii_lowercase();
+  if lower.contains("<html") || lower.contains("<!doctype") {
+    return None;
   }
   text
     .split(|c: char| !c.is_ascii_digit() && c != '.')
@@ -234,6 +238,7 @@ fn extract_ipv4(text: &str) -> Option<Ipv4Addr> {
 async fn detect_public_ip_from(
   client: &reqwest::Client,
   urls: &[&str],
+  extract: impl Fn(&str) -> Option<Ipv4Addr>,
 ) -> Option<String> {
   for url in urls {
     let resp = match client.get(*url).send().await {
@@ -250,10 +255,12 @@ async fn detect_public_ip_from(
         continue;
       }
     };
-    let Ok(text) = resp.text().await else {
+    let Some(bytes) =
+      crate::external::read_body_limited(resp, 4 * 1024).await
+    else {
       continue;
     };
-    if let Some(ip) = extract_ipv4(&text) {
+    if let Some(ip) = extract(&String::from_utf8_lossy(&bytes)) {
       return Some(ip.to_string());
     }
   }
@@ -268,7 +275,7 @@ async fn detect_public_ip() -> Option<String> {
     .user_agent("wharf-agent")
     .build()
     .ok()?;
-  detect_public_ip_from(&client, PUBLIC_IP_URLS).await
+  detect_public_ip_from(&client, PUBLIC_IP_URLS, extract_ipv4).await
 }
 
 /// agent 容器的根目录是 overlay，statvfs 看到的是 Docker 存储目录所在的磁盘。
@@ -329,27 +336,23 @@ mod tests {
     assert!(is_cgnat("100.64.0.1".parse().unwrap()));
     assert!(is_cgnat("100.101.102.103".parse().unwrap()));
     assert!(!is_cgnat("100.128.0.1".parse().unwrap()));
-    assert!(!is_cgnat("192.168.1.10".parse().unwrap()));
+    assert!(!is_cgnat("10.0.0.2".parse().unwrap()));
   }
 
   #[test]
   fn extract_ipv4_parses_plain_and_text_responses() {
+    assert_eq!(extract_ipv4("203.0.113.8\n"), None);
+    assert_eq!(extract_ipv4("100.64.0.8"), None);
     assert_eq!(
-      extract_ipv4("203.0.113.8\n"),
-      Some("203.0.113.8".parse().unwrap())
+      extract_ipv4_with("<html>198.51.100.24</html>", |_| true),
+      None
     );
     assert_eq!(
-      extract_ipv4(
-        "<html><body>Current IP Address: 198.51.100.24</body></html>"
-      ),
-      Some("198.51.100.24".parse().unwrap())
-    );
-    assert_eq!(
-      extract_ipv4("当前 IP：198.51.100.9  来自于：中国 北京 电信"),
+      extract_ipv4_with("当前 IP：198.51.100.9", |ip| ip
+        .is_documentation()),
       Some("198.51.100.9".parse().unwrap())
     );
     assert_eq!(extract_ipv4("127.0.0.1"), None);
-    assert_eq!(extract_ipv4("192.168.1.1"), None);
   }
 
   #[tokio::test]
@@ -389,7 +392,13 @@ mod tests {
       .unwrap();
     let urls = [first.as_str(), second.as_str()];
     assert_eq!(
-      detect_public_ip_from(&client, &urls).await.as_deref(),
+      detect_public_ip_from(
+        &client,
+        &urls,
+        |text| extract_ipv4_with(text, |ip| ip.is_documentation())
+      )
+      .await
+      .as_deref(),
       Some("203.0.113.42")
     );
   }

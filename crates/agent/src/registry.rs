@@ -41,7 +41,21 @@ pub async fn resolve(
   ctx: &Ctx,
 ) -> Result<Vec<ResolvedImage>, ApiError> {
   let build = |proxy: Option<&str>| {
-    let mut b = reqwest::Client::builder().timeout(ATTEMPT);
+    let mut b = reqwest::Client::builder().timeout(ATTEMPT).redirect(
+      reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() >= 10 {
+          return attempt.error("仓库重定向次数过多");
+        }
+        if attempt
+          .previous()
+          .first()
+          .is_some_and(|url| url.path().ends_with("/tags/list"))
+        {
+          return attempt.stop();
+        }
+        attempt.follow()
+      }),
+    );
     if let Some(p) = proxy {
       b = b.proxy(
         reqwest::Proxy::all(p)
@@ -262,6 +276,7 @@ struct Repo<'a> {
   /// `https://host`
   origin: String,
   base: String,
+  path: String,
   token: Option<String>,
 }
 
@@ -278,10 +293,19 @@ impl<'a> Repo<'a> {
     } else {
       "https"
     };
-    let origin = format!("{scheme}://{}", host.trim_end_matches('/'));
+    let host = host.trim_end_matches('/');
+    let (authority, prefix) =
+      host.split_once('/').unwrap_or((host, ""));
+    let origin = format!("{scheme}://{authority}");
+    let base = if prefix.is_empty() {
+      format!("{origin}/v2/{path}")
+    } else {
+      format!("{origin}/v2/{prefix}/{path}")
+    };
     Self {
       client,
-      base: format!("{origin}/v2/{path}"),
+      base,
+      path: path.to_string(),
       origin,
       token: None,
     }
@@ -308,15 +332,41 @@ impl<'a> Repo<'a> {
           .flatten()
           .filter_map(|t| t.as_str().map(str::to_string)),
       );
-      match next {
-        Some(n) if n.starts_with('/') => {
-          url = format!("{}{n}", self.origin)
-        }
-        Some(n) if n.starts_with("http") => url = n,
-        _ => break,
-      }
+      let Some(next) = next else { break };
+      url = self.next_page(&next)?;
     }
     Ok(out)
+  }
+
+  fn next_page(&self, next: &str) -> Result<String, String> {
+    let denied = || "仓库分页地址不合法，已拒绝访问".to_string();
+    let origin =
+      reqwest::Url::parse(&self.origin).map_err(|_| denied())?;
+    if next.starts_with("//") {
+      return Err(denied());
+    }
+    let mut page = if next.starts_with('/') {
+      origin.join(next)
+    } else {
+      reqwest::Url::parse(next)
+    }
+    .map_err(|_| denied())?;
+    if page.origin() != origin.origin()
+      || !page.username().is_empty()
+      || page.password().is_some()
+    {
+      return Err(denied());
+    }
+    let tags =
+      reqwest::Url::parse(&format!("{}/tags/list", self.base))
+        .map_err(|_| denied())?;
+    if page.path() == format!("/v2/{}/tags/list", self.path) {
+      page.set_path(tags.path());
+    }
+    if page.path() != tags.path() {
+      return Err(denied());
+    }
+    Ok(page.into())
   }
 
   /// 请求仓库；遇到 401 匿名换 token 再试一次。
@@ -344,7 +394,7 @@ impl<'a> Repo<'a> {
           .and_then(|v| v.to_str().ok())
           .unwrap_or_default()
           .to_string();
-        self.token = Some(token(self.client, &challenge).await?);
+        self.token = Some(token(&self.origin, &challenge).await?);
         continue;
       }
       if !resp.status().is_success() {
@@ -384,9 +434,7 @@ impl<'a> Repo<'a> {
     .await
     .map_err(|_| "读取镜像元数据超时".to_string())
     .flatten()
-    .inspect_err(
-      |error| tracing::debug!(%error, "读取镜像元数据失败"),
-    )
+    .inspect_err(|_| tracing::debug!("读取镜像元数据失败"))
     .ok()
   }
 
@@ -508,7 +556,7 @@ fn arch() -> &'static str {
 
 /// 按 `WWW-Authenticate: Bearer realm=…,service=…,scope=…` 匿名换 token。
 pub(crate) async fn token(
-  client: &reqwest::Client,
+  origin: &str,
   challenge: &str,
 ) -> Result<String, String> {
   let params = challenge
@@ -529,13 +577,49 @@ pub(crate) async fn token(
   }
   let realm =
     realm.ok_or_else(|| "仓库的认证信息不完整".to_string())?;
-  let response = client
-    .get(&realm)
-    .query(&query)
-    .send()
-    .await
-    .and_then(|r| r.error_for_status())
-    .map_err(|e| format!("取 token 失败：{}", e.without_url()))?;
+  let response = tokio::time::timeout(ATTEMPT, async {
+    let url = validate_realm_url(&realm, Some(origin))?;
+    let host = url.host_str().ok_or_else(realm_denied)?;
+    let port =
+      url.port_or_known_default().ok_or_else(realm_denied)?;
+    let mut client = reqwest::Client::builder()
+      .timeout(ATTEMPT)
+      .no_proxy()
+      .redirect(reqwest::redirect::Policy::none());
+    if host
+      .trim_matches(['[', ']'])
+      .parse::<std::net::IpAddr>()
+      .is_err()
+    {
+      let addresses: Vec<_> = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|_| realm_denied())?
+        .collect();
+      if addresses.is_empty()
+        || addresses.iter().any(|a| {
+          if local_realm(&url, origin) {
+            !a.ip().is_loopback()
+          } else {
+            !wharf_api_types::net_probe::is_public(a.ip())
+          }
+        })
+      {
+        return Err(realm_denied());
+      }
+      client = client.resolve_to_addrs(host, &addresses);
+    }
+    client
+      .build()
+      .map_err(|_| realm_denied())?
+      .get(url)
+      .query(&query)
+      .send()
+      .await
+      .and_then(|r| r.error_for_status())
+      .map_err(|e| format!("取 token 失败：{}", e.without_url()))
+  })
+  .await
+  .map_err(|_| "仓库认证请求超时".to_string())??;
   let body = read_json(response, MAX_CONFIG_BYTES).await?;
   body["token"]
     .as_str()
@@ -606,4 +690,72 @@ mod tests {
     let cur = Version::parse("1.27-alpine").unwrap();
     assert_eq!(pick(&cur, &tags), vec!["1.28-alpine"]);
   }
+}
+
+fn realm_denied() -> String {
+  "仓库认证地址不合法，已拒绝访问".into()
+}
+
+fn local_realm(url: &reqwest::Url, origin: &str) -> bool {
+  url.scheme() == "http"
+    && matches!(url.host_str(), Some("127.0.0.1" | "localhost"))
+    && reqwest::Url::parse(origin)
+      .is_ok_and(|origin| url.origin() == origin.origin())
+}
+
+fn validate_realm_url(
+  raw: &str,
+  origin: Option<&str>,
+) -> Result<reqwest::Url, String> {
+  let url = reqwest::Url::parse(raw).map_err(|_| realm_denied())?;
+  if !url.username().is_empty() || url.password().is_some() {
+    return Err(realm_denied());
+  }
+  if origin.is_some_and(|origin| local_realm(&url, origin)) {
+    return Ok(url);
+  }
+  let host = url
+    .host_str()
+    .ok_or_else(realm_denied)?
+    .trim_end_matches('.');
+  if url.scheme() != "https"
+    || matches!(
+      host,
+      "localhost" | "metadata" | "metadata.google.internal"
+    )
+    || host.ends_with(".localhost")
+    || host
+      .trim_matches(['[', ']'])
+      .parse::<std::net::IpAddr>()
+      .is_ok_and(|ip| !wharf_api_types::net_probe::is_public(ip))
+  {
+    return Err(realm_denied());
+  }
+  Ok(url)
+}
+
+#[test]
+fn registry_prefix_and_pagination_are_origin_bound() {
+  let client = reqwest::Client::new();
+  let repo = Repo::new(
+    &client,
+    "ghcr.example.test/tok_secret_123456",
+    "org/app",
+  );
+  assert_eq!(
+    repo.base,
+    "https://ghcr.example.test/v2/tok_secret_123456/org/app"
+  );
+  assert_eq!(
+    repo.next_page("/v2/org/app/tags/list?last=1").unwrap(),
+    format!("{}/tags/list?last=1", repo.base)
+  );
+  assert!(repo.next_page("https://evil.example.test/next").is_err());
+  assert!(
+    validate_realm_url("http://127.0.0.1:7700/token", None).is_err()
+  );
+  assert!(
+    validate_realm_url("https://169.254.169.254/latest", None)
+      .is_err()
+  );
 }

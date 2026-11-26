@@ -165,7 +165,10 @@ pub async fn apply(
       progress(if proxy.is_empty() {
         "dockerd 已去掉拉镜像代理".into()
       } else {
-        format!("dockerd 已经通过 {proxy} 拉海外镜像")
+        format!(
+          "dockerd 已经通过 {} 拉海外镜像",
+          wharf_api_types::agent::mask_url(&proxy)
+        )
       });
       return Ok(());
     }

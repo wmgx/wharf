@@ -296,5 +296,5 @@ pub async fn logs(
       &CancellationToken::new(),
     )
     .await?;
-  Ok(Json(text))
+  Ok(Json(crate::log_redact::redact_text(&text)))
 }
