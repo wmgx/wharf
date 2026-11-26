@@ -1,4 +1,5 @@
 //! 按域名配置代登录，测试接口只返回遮盖后的摘要和脚本日志。
+use crate::gate::takeover_path;
 use crate::{
   api::ApiResult, auth::Auth, render as config, snapshot,
   state::AppState, tasks,
@@ -139,33 +140,15 @@ fn env_refs(value: &str) -> Result<Vec<&str>, ApiError> {
   }
   Ok(names)
 }
-pub(crate) fn takeover_path(raw: &str) -> Option<String> {
-  if !raw.starts_with('/')
-    || raw.starts_with("//")
-    || raw.contains('\\')
-    || raw.chars().any(char::is_control)
-  {
-    return None;
-  }
-  let url =
-    reqwest::Url::parse(&format!("https://example.test{raw}"))
-      .ok()?;
-  let path = urlencoding::decode(url.path()).ok()?;
-  if path.starts_with("//")
-    || path == "/_wharf"
-    || path.starts_with("/_wharf/")
-  {
-    return None;
-  }
-  Some(path.into_owned())
-}
-
 pub(crate) fn takeover_matches(path: &str, paths: &[String]) -> bool {
+  let path = path.trim_end_matches('/');
   paths.iter().any(|prefix| {
-    path == prefix
-      || path
-        .strip_prefix(prefix.trim_end_matches('/'))
-        .is_some_and(|rest| rest.starts_with('/'))
+    let prefix = prefix.trim_end_matches('/');
+    !prefix.is_empty()
+      && (path == prefix
+        || path
+          .strip_prefix(prefix)
+          .is_some_and(|rest| rest.starts_with('/')))
   })
 }
 
@@ -215,18 +198,19 @@ pub fn validate(host: &str, sso: &SsoSpec) -> Result<(), ApiError> {
     }
     Ok(matches!(name, "account.username" | "account.password"))
   };
-  if login.entry.as_deref().is_some_and(|e| {
-    !e.starts_with('/')
-      || e.starts_with("//")
-      || e.starts_with("/_wharf/")
-      || e.contains(['\\', '\r', '\n'])
-  }) {
+  if login
+    .entry
+    .as_deref()
+    .is_some_and(|e| takeover_path(e).is_none())
+  {
     return Err(fail("entry 要写成站内路径，例如 /admin/"));
   }
   if let Some(t) = &login.takeover {
     if t.paths.is_empty()
       || t.paths.iter().any(|p| {
-        p.contains(['?', '#']) || takeover_path(p).as_ref() != Some(p)
+        p == "/"
+          || p.contains(['?', '#'])
+          || takeover_path(p).as_ref() != Some(p)
       })
     {
       return Err(fail(
@@ -1342,6 +1326,7 @@ mod tests {
     ] {
       assert!(validate("a.example.test", &spec(bad)).is_err());
     }
+    assert!(takeover_matches("/login", &["/login/".into()]));
     let sso = spec("/login");
     assert!(validate("a.example.test", &sso).is_ok());
     let login = sso.login.as_ref().unwrap();

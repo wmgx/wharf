@@ -2,7 +2,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use wharf_api_types::{
@@ -16,10 +15,12 @@ use wharf_api_types::{
 
 use crate::world::{ServerRow, World, gateway_project};
 
+mod gate;
+
 /// 网关默认镜像：官方 Caddy 加 layer4、限速、Cloudflare DNS 插件（deploy/caddy/Dockerfile）。
 /// 标签只在 Caddy 或插件版本变化时改，改了会重建所有没指定镜像的 caddy 网关。
 pub const DEFAULT_CADDY_IMAGE: &str =
-  "ghcr.io/wmgx/wharf-caddy:2.11.9-7";
+  "ghcr.io/wmgx/wharf-caddy:2.11.9-8";
 
 /// Caddyfile 里 acme-dns 密码的占位，执行时换成入口的密钥。
 pub const ACME_DNS_KEY: &str = "[[WHARF_ACME_DNS_KEY]]";
@@ -1126,6 +1127,7 @@ pub struct Site {
 pub struct Gate {
   /// 公开站点只处理代登录入口和配置了接管的路径。
   pub public: bool,
+  pub site_endpoints: bool,
   pub app_login: bool,
   pub user_header: Option<String>,
   pub trusted: Vec<String>,
@@ -1362,58 +1364,7 @@ pub fn caddyfile_with_acme(
       }
     }
     if let Some(gate) = &site.gate {
-      let host_header = if gate.core.starts_with("https://") {
-        "\n\t\t\theader_up Host {upstream_hostport}"
-      } else {
-        ""
-      };
-      out.push_str(&format!("\t@wharf_site path /_wharf/*\n\thandle @wharf_site {{\n\t\turi replace /_wharf/ /gate/site/\n\t\treverse_proxy {} {{{host_header}\n\t\t}}\n\t}}\n",gate.core));
-    }
-    if let Some(gate) = site
-      .gate
-      .as_ref()
-      .filter(|g| !g.public || g.takeover.is_some())
-    {
-      out.push_str(&format!("\twharf_sso {{\n\t\tpublic_key {}\n\t\tcore {}\n\t\tlogin {}\n",gate_public.unwrap_or(""),gate.core,gate.login));
-      if gate.public {
-        out.push_str("\t\tpublic\n");
-      }
-      if let Some((takeover, entry)) = &gate.takeover {
-        #[derive(Serialize)]
-        struct Takeover<'a> {
-          #[serde(flatten)]
-          config: &'a LoginTakeover,
-          entry: &'a str,
-        }
-        let config = serde_json::to_vec(&Takeover {
-          config: takeover,
-          entry,
-        })
-        .unwrap();
-        out.push_str(&format!(
-          "\t\ttakeover {}\n",
-          URL_SAFE_NO_PAD.encode(config)
-        ));
-      }
-      if gate.app_login {
-        out.push_str("\t\tapp_login on\n");
-      }
-      if !gate.skip_paths.is_empty() {
-        out.push_str(&format!(
-          "\t\tskip {}\n",
-          gate.skip_paths.join(" ")
-        ));
-      }
-      if let Some(header) = &gate.user_header {
-        out.push_str(&format!("\t\tuser_header {header}\n"));
-      }
-      if !gate.trusted.is_empty() {
-        out.push_str(&format!(
-          "\t\ttrust {}\n",
-          gate.trusted.join(" ")
-        ));
-      }
-      out.push_str("\t}\n");
+      gate::render_gate(&mut out, gate, gate_public);
     }
     if let Some(a) = &site.auth {
       out.push_str(&format!(
@@ -2427,11 +2378,23 @@ mod tests {
     )
     .unwrap();
     let mut site = gate_site();
-    site.gate.as_mut().unwrap().public = true;
-    let out =
-      caddyfile("edge", &gw, &[site], &[], false, Some("public"));
-    assert!(out.contains("uri replace /_wharf/ /gate/site/"));
-    assert!(!out.contains("\twharf_sso {"));
+    for app_login in [true, false] {
+      let gate = site.gate.as_mut().unwrap();
+      gate.public = true;
+      gate.site_endpoints = app_login;
+      gate.app_login = app_login;
+      let out = caddyfile(
+        "edge",
+        &gw,
+        std::slice::from_ref(&site),
+        &[],
+        false,
+        Some("public"),
+      );
+      assert_eq!(out.contains("@wharf_site"), app_login);
+      assert!(out.contains("\twharf_sso {"));
+      assert!(out.contains("\t\tpublic\n"));
+    }
   }
   fn gate_site() -> Site {
     Site {
@@ -2439,6 +2402,7 @@ mod tests {
       upstream: "127.0.0.1:8080".into(),
       gate: Some(Gate {
         public: false,
+        site_endpoints: true,
         app_login: false,
         user_header: None,
         trusted: vec![],

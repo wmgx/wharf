@@ -10,16 +10,11 @@ use axum::{
   http::{HeaderMap, header},
   response::{IntoResponse, Response},
 };
-use base64::{
-  Engine,
-  engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
-};
-use ed25519_dalek::{Signer, SigningKey};
-use hmac::{Hmac, Mac};
+use base64::{Engine, engine::general_purpose::STANDARD};
+use ed25519_dalek::SigningKey;
 use rusqlite::{OptionalExtension, params};
 use serde::Deserialize;
 use serde_json::json;
-use sha2::Sha256;
 use std::{
   collections::BTreeMap,
   sync::{Arc, LazyLock, Mutex, OnceLock},
@@ -29,7 +24,16 @@ use wharf_api_types::{
   view::{GateKeyRequest, GateKeyView, Perm},
 };
 
-const ACCESS_TTL: i64 = 600;
+mod credentials;
+mod paths;
+use credentials::{
+  access_cookie, credential_host, rt_parse, rt_sign, rt_user, verify,
+};
+use paths::{login_rd, rd_url, site_gate_rd};
+pub(crate) use paths::{
+  normalize_skip_path, site_endpoints, takeover_path,
+};
+
 // 同步渲染只读的启动参数和公钥，不保存私钥。
 static RENDER: OnceLock<(String, u16, Option<String>)> =
   OnceLock::new();
@@ -109,53 +113,8 @@ pub fn is_core_host(
       })
   })
 }
-fn sign(key: &SigningKey, username: &str, now: i64) -> String {
-  sign_ttl(key, username, now, ACCESS_TTL)
-}
-fn sign_ttl(
-  key: &SigningKey,
-  username: &str,
-  now: i64,
-  ttl: i64,
-) -> String {
-  let header =
-    URL_SAFE_NO_PAD.encode(br#"{"alg":"EdDSA","typ":"JWT"}"#);
-  let claims = URL_SAFE_NO_PAD.encode(
-    json!({"iss":"wharf","sub":username,"iat":now,"exp":now+ttl})
-      .to_string(),
-  );
-  let raw = format!("{header}.{claims}");
-  format!(
-    "{raw}.{}",
-    URL_SAFE_NO_PAD.encode(key.sign(raw.as_bytes()).to_bytes())
-  )
-}
 fn public_b64(key: &SigningKey) -> String {
   STANDARD.encode(key.verifying_key().to_bytes())
-}
-fn rt_sign(key: &[u8], hash: &str, exp: i64) -> String {
-  let raw = format!("{hash}.{exp}");
-  let mut mac = Hmac::<Sha256>::new_from_slice(key)
-    .expect("HMAC 接受任意长度密钥");
-  mac.update(raw.as_bytes());
-  format!(
-    "{raw}.{}",
-    URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
-  )
-}
-fn rt_parse(key: &[u8], text: &str, now: i64) -> Option<String> {
-  let (raw, sig) = text.rsplit_once('.')?;
-  let (hash, exp) = raw.split_once('.')?;
-  if hash.len() != 64
-    || !hash.bytes().all(|b| b.is_ascii_hexdigit())
-    || exp.parse::<i64>().ok()? <= now
-  {
-    return None;
-  }
-  let mut mac = Hmac::<Sha256>::new_from_slice(key).ok()?;
-  mac.update(raw.as_bytes());
-  mac.verify_slice(&URL_SAFE_NO_PAD.decode(sig).ok()?).ok()?;
-  Some(hash.into())
 }
 pub(crate) async fn session(
   db: &Db,
@@ -205,38 +164,6 @@ fn gate_cookie(name: &str, value: &str, age: i64) -> String {
     "{name}={value}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age={age}"
   )
 }
-fn access_cookie(key: &SigningKey, user: &str, now: i64) -> String {
-  // 只给隔离 lab 缩短凭据，不改变正式的十分钟有效期。
-  let ttl = std::env::var("WHARF_GATE_ACCESS_SECS")
-    .ok()
-    .and_then(|v| v.parse::<i64>().ok())
-    .filter(|n| *n > 0 && *n <= ACCESS_TTL)
-    .unwrap_or(ACCESS_TTL);
-  let token = if ttl == ACCESS_TTL {
-    sign(key, user, now)
-  } else {
-    sign_ttl(key, user, now, ttl)
-  };
-  gate_cookie("wharf_gate", &token, ttl)
-}
-fn rd_url(
-  world: &crate::world::World,
-  rd: &str,
-) -> Option<reqwest::Url> {
-  let url = reqwest::Url::parse(rd).ok()?;
-  if url.scheme() != "https"
-    || !url.username().is_empty()
-    || url.password().is_some()
-    || url.port().is_some()
-  {
-    return None;
-  }
-  world
-    .routes
-    .get(url.host_str()?)
-    .filter(|r| r.spec.sso.is_some())?;
-  Some(url)
-}
 fn take_ticket(
   tickets: &mut BTreeMap<String, Ticket>,
   code: &str,
@@ -272,7 +199,7 @@ fn silent_native(
   url: &reqwest::Url,
   rd: &str,
 ) -> Option<reqwest::Url> {
-  use crate::sso_login::{takeover_matches, takeover_path};
+  use crate::sso_login::takeover_matches;
   use wharf_api_types::spec::SsoMode;
   let config =
     world.routes.get(url.host_str()?)?.spec.sso.as_ref()?;
@@ -409,16 +336,6 @@ fn forwarded_host(headers: &HeaderMap) -> &str {
     .next()
     .unwrap_or("")
 }
-fn safe_path(rd: &str) -> &str {
-  if rd.starts_with('/')
-    && !rd.starts_with("//")
-    && !rd.contains(['\\', '\r', '\n'])
-  {
-    rd
-  } else {
-    "/"
-  }
-}
 pub async fn site_gate(
   State(s): State<Arc<AppState>>,
   Query(q): Query<SiteQuery>,
@@ -428,7 +345,7 @@ pub async fn site_gate(
   let ticket = take_ticket(
     &mut TICKETS.lock().unwrap_or_else(|e| e.into_inner()),
     &q.code,
-    forwarded_host(&headers),
+    credential_host(&headers).as_deref().unwrap_or(""),
     now,
   );
   let expired =
@@ -442,16 +359,21 @@ pub async fn site_gate(
     return Ok(expired());
   };
   let cookies = vec![
-    access_cookie(&key(&s.db).await?, &user, now),
+    access_cookie(&key(&s.db).await?, &user, &ticket.host, now),
     gate_cookie(
       "wharf_gate_rt",
-      &rt_sign(&rt_key(&s.db).await?, &ticket.session_hash, exp),
+      &rt_sign(
+        &rt_key(&s.db).await?,
+        &ticket.session_hash,
+        &ticket.host,
+        exp,
+      ),
       exp - now,
     ),
   ];
   Ok(response(
     302,
-    Some(safe_path(q.rd.as_deref().unwrap_or("/"))),
+    Some(site_gate_rd(q.rd.as_deref().unwrap_or("/"))),
     "",
     &cookies,
   ))
@@ -460,17 +382,20 @@ pub async fn refresh(
   State(s): State<Arc<AppState>>,
   headers: HeaderMap,
 ) -> Result<Response, AppError> {
+  let Some(host) = credential_host(&headers) else {
+    return Ok(response(401, None, "{\"error\":\"需要登录\"}", &[]));
+  };
   let now = now_ms() / 1000;
   let rt_key = rt_key(&s.db).await?;
   if let Some(hash) = cookie(&headers, "wharf_gate_rt")
-    .and_then(|t| rt_parse(&rt_key, t, now))
+    .and_then(|t| rt_parse(&rt_key, t, &host, now))
     && let Some((user, _)) = session(&s.db, hash).await?
   {
     let mut r = response(
       200,
       None,
       "",
-      &[access_cookie(&key(&s.db).await?, &user, now)],
+      &[access_cookie(&key(&s.db).await?, &user, &host, now)],
     );
     if let Ok(value) = user.parse() {
       r.headers_mut().insert("X-Wharf-User", value);
@@ -511,53 +436,6 @@ pub async fn refresh(
     Ok(response(401, None, "{\"error\":\"需要登录\"}", &cookies))
   }
 }
-async fn rt_user(
-  db: &Db,
-  headers: &HeaderMap,
-) -> Result<Option<String>, ApiError> {
-  let key = rt_key(db).await?;
-  let Some(hash) = cookie(headers, "wharf_gate_rt")
-    .and_then(|t| rt_parse(&key, t, now_ms() / 1000))
-  else {
-    return Ok(None);
-  };
-  Ok(session(db, hash).await?.map(|(user, _)| user))
-}
-fn verify(key: &SigningKey, token: &str, now: i64) -> Option<String> {
-  let parts: Vec<_> = token.split('.').collect();
-  if parts.len() != 3 {
-    return None;
-  }
-  let head: serde_json::Value =
-    serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[0]).ok()?)
-      .ok()?;
-  if head["alg"] != "EdDSA" {
-    return None;
-  }
-  let signature = ed25519_dalek::Signature::from_slice(
-    &URL_SAFE_NO_PAD.decode(parts[2]).ok()?,
-  )
-  .ok()?;
-  key
-    .verifying_key()
-    .verify_strict(
-      format!("{}.{}", parts[0], parts[1]).as_bytes(),
-      &signature,
-    )
-    .ok()?;
-  let claims: serde_json::Value =
-    serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[1]).ok()?)
-      .ok()?;
-  if claims["iss"] != "wharf" || claims["exp"].as_i64()? <= now {
-    return None;
-  }
-  let user = claims["sub"].as_str()?;
-  (!user.is_empty()).then(|| user.to_string())
-}
-fn login_rd(rd: &str) -> &str {
-  let rd = safe_path(rd);
-  if rd.starts_with("/_wharf/") { "/" } else { rd }
-}
 fn storage_page(
   values: &[(bool, String, String)],
   rd: &str,
@@ -589,9 +467,9 @@ pub async fn site_login(
   headers: HeaderMap,
 ) -> Result<Response, AppError> {
   use wharf_api_types::spec::{LoginWrite, SsoMode};
-  let host = forwarded_host(&headers);
+  let host = credential_host(&headers).unwrap_or_default();
   let snap = crate::snapshot::load(&s.db).await?;
-  let Some(route) = snap.world.routes.get(host) else {
+  let Some(route) = snap.world.routes.get(&host) else {
     return Ok(response(404, None, "域名没有配置代登录", &[]));
   };
   let Some(login) = route
@@ -612,9 +490,9 @@ pub async fn site_login(
   };
   let signing = key(&s.db).await?;
   let authenticated = cookie(&headers, "wharf_gate")
-    .and_then(|t| verify(&signing, t, now_ms() / 1000))
+    .and_then(|t| verify(&signing, t, &host, now_ms() / 1000))
     .is_some()
-    || rt_user(&s.db, &headers).await?.is_some();
+    || rt_user(&s.db, &headers, &host).await?.is_some();
   if !authenticated {
     let target = format!(
       "https://{host}/_wharf/login?rd={}",
@@ -633,7 +511,7 @@ pub async fn site_login(
     &route.spec,
     &snap.secrets,
   );
-  let outcome = crate::sso_login::run(&s, host).await;
+  let outcome = crate::sso_login::run(&s, &host).await;
   let mut cookies = Vec::new();
   let mut storage = Vec::new();
   let result = (|| -> Result<bool, ApiError> {
@@ -691,7 +569,7 @@ pub async fn site_login(
   if let Err(e) = result
     && outcome.is_ok()
   {
-    crate::sso_login::record(&s, host, false, Some(e.message))
+    crate::sso_login::record(&s, &host, false, Some(e.message))
       .await?;
   }
   if !ok {
@@ -886,28 +764,15 @@ pub async fn check_key(
 mod tests {
   #[test]
   fn login_redirect_path() {
-    for bad in ["//evil", "/\\evil", "/_wharf/login"] {
+    for bad in
+      ["//evil", "/\\evil", "/_wharf/login", "/docs/../index"]
+    {
       assert_eq!(super::login_rd(bad), "/");
     }
     assert_eq!(super::login_rd("/a?x=1&y=2"), "/a?x=1&y=2");
-  }
-  #[test]
-  fn access_verify() {
-    let key = ed25519_dalek::SigningKey::from_bytes(&[1; 32]);
-    let token = super::sign_ttl(&key, "admin", 100, 10);
-    assert_eq!(
-      super::verify(&key, &token, 101).as_deref(),
-      Some("admin")
-    );
-    assert!(super::verify(&key, &token, 110).is_none());
-    assert!(
-      super::verify(
-        &ed25519_dalek::SigningKey::from_bytes(&[2; 32]),
-        &token,
-        101
-      )
-      .is_none()
-    );
+    let login = "/_wharf/login?rd=%2Fa";
+    assert_eq!(super::site_gate_rd(login), login);
+    assert_eq!(super::site_gate_rd("/_wharf/logout"), "/");
   }
   #[test]
   fn storage_script_escape() {
@@ -1027,53 +892,21 @@ mod tests {
       rd_url(&world(), rd).unwrap().query(),
       Some("a=1&b=2")
     );
-    assert_eq!(safe_path("//evil.example"), "/");
-    assert_eq!(safe_path("/\\evil.example"), "/");
+    assert_eq!(login_rd("//evil.example"), "/");
+    assert_eq!(login_rd("/\\evil.example"), "/");
   }
   #[test]
   fn rd_requires_gate() {
     let mut w = world();
     assert!(rd_url(&w, "https://evil.example/").is_none());
     assert!(rd_url(&w, "http://a.example.test/").is_none());
+    let spec = &mut w.routes.get_mut("a.example.test").unwrap().spec;
+    let sso = spec.sso.as_mut().unwrap();
+    sso.mode = wharf_api_types::spec::SsoMode::Oidc;
+    sso.public = true;
+    assert!(rd_url(&w, "https://a.example.test/").is_none());
     w.routes.get_mut("a.example.test").unwrap().spec.sso = None;
     assert!(rd_url(&w, "https://a.example.test/").is_none());
-  }
-  #[test]
-  fn refresh_signature_and_expiry() {
-    let hash = "a".repeat(64);
-    let key = [7; 32];
-    let good = rt_sign(&key, &hash, 2000);
-    assert_eq!(rt_parse(&key, &good, 1000), Some(hash));
-    assert!(rt_parse(&[8; 32], &good, 1000).is_none());
-    assert!(rt_parse(&key, &good, 2000).is_none());
-    assert!(
-      rt_parse(&key, &good.replace(".2000.", ".3000."), 1000)
-        .is_none()
-    );
-  }
-  #[test]
-  fn credential_formats_and_fixture() {
-    let key = SigningKey::from_bytes(&[0; 32]);
-    let token = sign(&key, "admin", 1700000000);
-    assert!(rt_parse(&[0; 32], &token, 1700000000).is_none());
-    let rt = rt_sign(&[0; 32], &"a".repeat(64), 1700000600);
-    assert!(
-      URL_SAFE_NO_PAD
-        .decode(rt.split('.').next().unwrap())
-        .is_ok()
-    );
-    assert!(
-      serde_json::from_slice::<serde_json::Value>(
-        &URL_SAFE_NO_PAD
-          .decode(rt.split('.').next().unwrap())
-          .unwrap()
-      )
-      .is_err()
-    );
-    assert_eq!(
-      token,
-      "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3MDAwMDA2MDAsImlhdCI6MTcwMDAwMDAwMCwiaXNzIjoid2hhcmYiLCJzdWIiOiJhZG1pbiJ9.J-x_gW3JdQqN7lpvfll72TH40DsjtJCgW3TDzgM20dlmY78RWQESgnYWBtD2X4Pki4WpS-F6s0poysRCdKrGAg"
-    );
   }
   #[test]
   fn ticket_once_and_host_bound() {

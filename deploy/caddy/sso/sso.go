@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
@@ -168,7 +169,7 @@ func stripCookies(r *http.Request) (string, string) {
 	}
 	return access, refresh
 }
-func verify(key ed25519.PublicKey, token string, now int64) (string, bool) {
+func verify(key ed25519.PublicKey, token, host string, now int64) (string, bool) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
 		return "", false
@@ -194,9 +195,10 @@ func verify(key ed25519.PublicKey, token string, now int64) (string, bool) {
 	var claims struct {
 		Iss string `json:"iss"`
 		Sub string `json:"sub"`
+		Aud string `json:"aud"`
 		Exp int64  `json:"exp"`
 	}
-	if json.Unmarshal(data, &claims) != nil || claims.Iss != "wharf" || claims.Sub == "" || claims.Exp <= now-CLOCK_SKEW {
+	if json.Unmarshal(data, &claims) != nil || claims.Iss != "wharf" || claims.Sub == "" || claims.Aud == "" || claims.Aud != host || claims.Exp <= now-CLOCK_SKEW {
 		return "", false
 	}
 	return claims.Sub, true
@@ -307,9 +309,55 @@ func (s *SSO) checkKey(w http.ResponseWriter, r *http.Request, key string) (bool
 	http.Error(w, "登录服务暂时连不上", http.StatusBadGateway)
 	return false, nil
 }
-func matchesPath(request string, prefixes []string) bool {
+func requestHost(r *http.Request) string {
+	host := strings.TrimSpace(r.Host)
+	if name, _, err := net.SplitHostPort(host); err == nil {
+		host = name
+	}
+	return strings.ToLower(host)
+}
+
+func hasDotSegment(request string) bool {
+	for _, segment := range strings.Split(request, "/") {
+		if segment == "." || segment == ".." {
+			return true
+		}
+	}
+	return false
+}
+
+func isWharfPath(request string) bool {
+	return request == "/_wharf" || strings.HasPrefix(request, "/_wharf/")
+}
+
+var rawPathSeparators = strings.NewReplacer("%2e", ".", "%2f", "/")
+
+func normalizeRequestPath(r *http.Request) (clean string, rawHasEncodedSlash bool, ok bool) {
+	request := r.URL.Path
+	if !strings.HasPrefix(request, "/") || strings.ContainsFunc(request, func(c rune) bool {
+		return c == '\\' || c < 0x20 || c == 0x7f
+	}) || hasDotSegment(request) {
+		return "", false, false
+	}
+	raw := strings.ToLower(r.URL.RawPath)
+	if strings.Contains(raw, "%5c") ||
+		(raw != "" && hasDotSegment(rawPathSeparators.Replace(raw))) {
+		return "", false, false
+	}
+	clean = path.Clean(request)
+	if isWharfPath(clean) && (request != clean || raw != "") {
+		return "", false, false
+	}
+	return clean, strings.Contains(raw, "%2f"), true
+}
+
+func matchesPath(request string, prefixes []string, encodedPath string) bool {
 	for _, prefix := range prefixes {
-		if request == prefix || strings.HasPrefix(request, strings.TrimRight(prefix, "/")+"/") {
+		p := path.Clean(prefix)
+		if p == "/" || (encodedPath != "" && !strings.HasPrefix(encodedPath, p+"/")) {
+			continue
+		}
+		if request == p || strings.HasPrefix(request, p+"/") {
 			return true
 		}
 	}
@@ -321,7 +369,11 @@ func localPath(raw string) (*url.URL, bool) {
 		return nil, false
 	}
 	u, err := url.Parse(raw)
-	if err != nil || strings.HasPrefix(u.Path, "//") || strings.HasPrefix(path.Clean(u.Path)+"/", "/_wharf/") {
+	if err != nil {
+		return nil, false
+	}
+	clean, _, ok := normalizeRequestPath(&http.Request{URL: u})
+	if !ok || strings.HasPrefix(u.Path, "//") || isWharfPath(clean) {
 		return nil, false
 	}
 	return u, true
@@ -340,7 +392,7 @@ func (t *Takeover) loginPath(r *http.Request) string {
 	}
 	if t.RDParam != "" {
 		if candidate := query.Get(t.RDParam); candidate != "" {
-			if parsed, ok := localPath(candidate); ok && !matchesPath(path.Clean(parsed.Path), t.Paths) {
+			if parsed, ok := localPath(candidate); ok && !matchesPath(path.Clean(parsed.Path), t.Paths, "") {
 				rd = candidate
 			}
 		}
@@ -351,7 +403,7 @@ func (t *Takeover) loginPath(r *http.Request) string {
 func (s *SSO) native(w http.ResponseWriter, r *http.Request) {
 	rd := r.URL.Query().Get("rd")
 	parsed, ok := localPath(rd)
-	if r.Method != http.MethodGet || !ok || !matchesPath(parsed.Path, s.Takeover.Paths) {
+	if r.Method != http.MethodGet || !ok || !matchesPath(path.Clean(parsed.Path), s.Takeover.Paths, "") {
 		http.Error(w, "跳转地址不对", http.StatusBadRequest)
 		return
 	}
@@ -388,22 +440,29 @@ func redirectAppLogin(w http.ResponseWriter, r *http.Request, target string, tak
 }
 
 func (s *SSO) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
-	if strings.HasPrefix(r.URL.Path, "/_wharf/") {
-		if s.Public && s.Takeover != nil && r.URL.Path == "/_wharf/native" {
+	clean, encodedSlash, ok := normalizeRequestPath(r)
+	if !ok {
+		http.Error(w, "请求路径无效", http.StatusBadRequest)
+		return nil
+	}
+	if s.UserHeader != "" {
+		r.Header.Del(s.UserHeader)
+	}
+	keyValues, hasKey := r.Header["X-Wharf-Key"]
+	r.Header.Del("X-Wharf-Key")
+	if strings.HasPrefix(clean, "/_wharf/") && (!s.Public || s.AppLogin || s.Takeover != nil) {
+		if s.Public && s.Takeover != nil && clean == "/_wharf/native" {
 			s.native(w, r)
 			return nil
 		}
 		return next.ServeHTTP(w, r)
-	}
-	if s.UserHeader != "" {
-		r.Header.Del(s.UserHeader)
 	}
 	marker, markerError := r.Cookie("wharf_sso")
 	native, _ := r.Cookie("wharf_native")
 	recentTakeover, _ := r.Cookie(takeoverCookie)
 	html := r.Method == http.MethodGet && strings.Contains(r.Header.Get("Accept"), "text/html")
 	takeoverPath := ""
-	if s.Takeover != nil && html && matchesPath(r.URL.Path, s.Takeover.Paths) &&
+	if s.Takeover != nil && html && matchesPath(clean, s.Takeover.Paths, "") &&
 		(recentTakeover == nil || recentTakeover.Value != "1") &&
 		(marker == nil || marker.Value != "fail") && (!s.Public || native == nil || native.Value != "1") {
 		takeoverPath = s.Takeover.loginPath(r)
@@ -416,11 +475,12 @@ func (s *SSO) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.H
 	if s.Public && takeoverPath == "" {
 		return next.ServeHTTP(w, r)
 	}
-	keyValues, hasKey := r.Header["X-Wharf-Key"]
-	key := strings.Join(keyValues, ",")
-	r.Header.Del("X-Wharf-Key")
 	s.setUser(r, "")
-	if matchesPath(r.URL.Path, s.Skip) {
+	var encodedPath string
+	if encodedSlash {
+		encodedPath = r.URL.RawPath
+	}
+	if matchesPath(clean, s.Skip, encodedPath) {
 		return next.ServeHTTP(w, r)
 	}
 	if peer, err := netip.ParseAddrPort(r.RemoteAddr); err == nil {
@@ -431,13 +491,13 @@ func (s *SSO) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.H
 		}
 	}
 	if hasKey {
-		ok, err := s.checkKey(w, r, key)
+		ok, err := s.checkKey(w, r, strings.Join(keyValues, ","))
 		if ok {
 			return next.ServeHTTP(w, r)
 		}
 		return err
 	}
-	if user, ok := verify(s.key, access, time.Now().Unix()); ok {
+	if user, ok := verify(s.key, access, requestHost(r), time.Now().Unix()); ok {
 		s.setUser(r, user)
 		if appLogin != "" {
 			redirectAppLogin(w, r, appLogin, takeoverPath != "")

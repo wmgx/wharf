@@ -1142,11 +1142,7 @@ impl World {
         }
         for path in &sso.skip_paths {
           if sso.skip_paths.len() > 20
-            || path.len() > 100
-            || !path.starts_with('/')
-            || !path.bytes().all(|b| {
-              b.is_ascii_alphanumeric() || b"/_-.".contains(&b)
-            })
+            || crate::gate::normalize_skip_path(path).is_err()
           {
             return Err(ApiError::invalid(format!(
               "域名 {host}：排除的路径 {path} 写得不对"
@@ -2930,15 +2926,23 @@ services:
     w.routes.get_mut("a.example.com").unwrap().spec.auth = true;
     assert!(w.validate().unwrap_err().message.contains("只能开一个"));
     w.routes.get_mut("a.example.com").unwrap().spec.auth = false;
-    w.routes
-      .get_mut("a.example.com")
-      .unwrap()
-      .spec
-      .sso
-      .as_mut()
-      .unwrap()
-      .skip_paths = vec!["/api*".into()];
-    assert!(w.validate().unwrap_err().message.contains("写得不对"));
+    for path in [
+      "/api*", "/", "//", "/.", "/./", "/a/..", "/api/../",
+      "/api//v1", "/_wharf",
+    ] {
+      w.routes
+        .get_mut("a.example.com")
+        .unwrap()
+        .spec
+        .sso
+        .as_mut()
+        .unwrap()
+        .skip_paths = vec![path.into()];
+      assert!(
+        w.validate().unwrap_err().message.contains("写得不对"),
+        "{path}"
+      );
+    }
   }
   #[test]
   fn custom_caddy_stays_in_site() {

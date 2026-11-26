@@ -19,9 +19,9 @@ import (
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 )
 
-func token(key ed25519.PrivateKey, alg, iss string, exp int64) string {
+func token(key ed25519.PrivateKey, alg, iss, aud string, exp int64) string {
 	h := base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(`{"alg":%q,"typ":"JWT"}`, alg)))
-	p := base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(`{"exp":%d,"iat":1700000000,"iss":%q,"sub":"admin"}`, exp, iss)))
+	p := base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(`{"aud":%q,"exp":%d,"iat":1700000000,"iss":%q,"sub":"admin"}`, aud, exp, iss)))
 	raw := h + "." + p
 	return raw + "." + base64.RawURLEncoding.EncodeToString(ed25519.Sign(key, []byte(raw)))
 }
@@ -60,22 +60,29 @@ func TestStripCookies(t *testing.T) {
 func TestVerify(t *testing.T) {
 	key := ed25519.NewKeyFromSeed(make([]byte, 32))
 	pub := key.Public().(ed25519.PublicKey)
-	good := token(key, "EdDSA", "wharf", 1700000600)
-	for _, bad := range []string{good[:len(good)-2] + "xx", token(key, "EdDSA", "wharf", 1699999900), token(key, "none", "wharf", 1700000600), token(key, "HS256", "wharf", 1700000600), token(key, "EdDSA", "other", 1700000600), "hash.1700000600.signature"} {
-		if _, ok := verify(pub, bad, 1700000000); ok {
+	good := token(key, "EdDSA", "wharf", "a.example.test", 1700000600)
+	for _, bad := range []string{good[:len(good)-2] + "xx", token(key, "EdDSA", "wharf", "a.example.test", 1699999900), token(key, "none", "wharf", "a.example.test", 1700000600), token(key, "HS256", "wharf", "a.example.test", 1700000600), token(key, "EdDSA", "other", "a.example.test", 1700000600), "hash.1700000600.signature"} {
+		if _, ok := verify(pub, bad, "a.example.test", 1700000000); ok {
 			t.Fatal("无效凭据被接受")
 		}
 	}
-	if user, ok := verify(pub, good, 1700000000); !ok || user != "admin" {
+	if user, ok := verify(pub, good, "a.example.test", 1700000000); !ok || user != "admin" {
 		t.Fatal("有效凭据被拒")
 	}
-	if _, ok := verify(pub, token(key, "EdDSA", "wharf", 1699999980), 1700000000); !ok {
+	if _, ok := verify(pub, token(key, "EdDSA", "wharf", "a.example.test", 1699999980), "a.example.test", 1700000000); !ok {
 		t.Fatal("20 秒时钟差被拒")
 	}
 	// Rust 与 Go 共用固定种子、内容及凭据。
-	const fixture = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3MDAwMDA2MDAsImlhdCI6MTcwMDAwMDAwMCwiaXNzIjoid2hhcmYiLCJzdWIiOiJhZG1pbiJ9.J-x_gW3JdQqN7lpvfll72TH40DsjtJCgW3TDzgM20dlmY78RWQESgnYWBtD2X4Pki4WpS-F6s0poysRCdKrGAg"
+	const fixture = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJhLmV4YW1wbGUudGVzdCIsImV4cCI6MTcwMDAwMDYwMCwiaWF0IjoxNzAwMDAwMDAwLCJpc3MiOiJ3aGFyZiIsInN1YiI6ImFkbWluIn0.mA9nTq0irJFh-Gxp7BiJFOSovAJbyyicFL_a5cl1FOH-8FbuBVqAHoZJnLqLNxiiYBckxNthjjFNUc8gi6NDBQ"
 	if good != fixture {
 		t.Fatal("跨语言凭据不一致")
+	}
+	const legacy = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3MDAwMDA2MDAsImlhdCI6MTcwMDAwMDAwMCwiaXNzIjoid2hhcmYiLCJzdWIiOiJhZG1pbiJ9.J-x_gW3JdQqN7lpvfll72TH40DsjtJCgW3TDzgM20dlmY78RWQESgnYWBtD2X4Pki4WpS-F6s0poysRCdKrGAg"
+	if _, ok := verify(pub, legacy, "a.example.test", 1700000000); ok {
+		t.Fatal("缺少受众的旧凭据被接受")
+	}
+	if _, ok := verify(pub, good, "b.example.test", 1700000000); ok {
+		t.Fatal("凭据受众与站点不匹配")
 	}
 }
 func TestRefreshPostAndConcurrent(t *testing.T) {
@@ -131,7 +138,7 @@ func TestFailuresAndSkip(t *testing.T) {
 	})
 	s := plugin(t, "http://127.0.0.1:1")
 	s.Skip = []string{"/api"}
-	for _, path := range []string{"/api", "/api/x"} {
+	for _, path := range []string{"/api", "/api/x", "/api/projects/team%2Frepo"} {
 		r := httptest.NewRequest("GET", "https://a.example.test"+path, nil)
 		r.Header.Set("Cookie", "wharf_gate=a;wharf_gate_rt=b;other=1")
 		w := httptest.NewRecorder()
@@ -246,7 +253,7 @@ func TestInvalidKeyDoesNotFallback(t *testing.T) {
 	s := plugin(t, core.URL)
 	r := httptest.NewRequest("GET", "https://a.example.test/", nil)
 	r.Header.Set("X-Wharf-Key", "wrong")
-	r.Header.Set("Cookie", "wharf_gate="+token(ed25519.NewKeyFromSeed(make([]byte, 32)), "EdDSA", "wharf", time.Now().Unix()+600))
+	r.Header.Set("Cookie", "wharf_gate="+token(ed25519.NewKeyFromSeed(make([]byte, 32)), "EdDSA", "wharf", "a.example.test", time.Now().Unix()+600))
 	w := httptest.NewRecorder()
 	if err := s.ServeHTTP(w, r, caddyhttp.HandlerFunc(func(http.ResponseWriter, *http.Request) error { t.Fatal("无效凭证回退cookie"); return nil })); err != nil {
 		t.Fatal(err)
@@ -259,9 +266,9 @@ func TestInvalidKeyDoesNotFallback(t *testing.T) {
 func TestUserHeaderAccess(t *testing.T) {
 	s := plugin(t, "http://127.0.0.1:1")
 	s.UserHeader = "Remote-User"
-	r := httptest.NewRequest("GET", "https://a.example.test/", nil)
+	r := httptest.NewRequest("GET", "https://A.example.test:443/", nil)
 	r.Header["Remote-User"] = []string{"someone-else", "another"}
-	r.AddCookie(&http.Cookie{Name: "wharf_gate", Value: token(ed25519.NewKeyFromSeed(make([]byte, 32)), "EdDSA", "wharf", time.Now().Unix()+60)})
+	r.AddCookie(&http.Cookie{Name: "wharf_gate", Value: token(ed25519.NewKeyFromSeed(make([]byte, 32)), "EdDSA", "wharf", "a.example.test", time.Now().Unix()+60)})
 	called := false
 	s.ServeHTTP(httptest.NewRecorder(), r, caddyhttp.HandlerFunc(func(w http.ResponseWriter, r *http.Request) error {
 		called = true
@@ -332,7 +339,7 @@ func TestAppLoginRedirect(t *testing.T) {
 		w.Header().Set("X-Wharf-User", "admin")
 	}))
 	defer core.Close()
-	for _, credential := range []string{"wharf_gate=" + token(key, "EdDSA", "wharf", time.Now().Unix()+600), "wharf_gate_rt=refresh"} {
+	for _, credential := range []string{"wharf_gate=" + token(key, "EdDSA", "wharf", "a.example.test", time.Now().Unix()+600), "wharf_gate_rt=refresh"} {
 		s := plugin(t, core.URL)
 		s.AppLogin = true
 		r := httptest.NewRequest("GET", "https://a.example.test/a?x=1&y=2", nil)
@@ -358,7 +365,7 @@ func TestAppLoginBypass(t *testing.T) {
 			s.AppLogin = true
 			r := httptest.NewRequest("GET", "https://a.example.test/", nil)
 			r.Header.Set("Accept", "text/html")
-			r.Header.Set("Cookie", "wharf_gate="+token(key, "EdDSA", "wharf", time.Now().Unix()+600)+"; wharf_gate_rt=refresh; app=1")
+			r.Header.Set("Cookie", "wharf_gate="+token(key, "EdDSA", "wharf", "a.example.test", time.Now().Unix()+600)+"; wharf_gate_rt=refresh; app=1")
 			switch mode {
 			case "marker":
 				r.Header.Add("Cookie", "wharf_sso=fail")
@@ -396,7 +403,7 @@ func TestTakeover(t *testing.T) {
 	for _, test := range []struct {
 		name, target, cookie string
 	}{
-		{"有凭证", login, "wharf_gate=" + token(key, "EdDSA", "wharf", time.Now().Unix()+60)},
+		{"有凭证", login, "wharf_gate=" + token(key, "EdDSA", "wharf", "app.example.test", time.Now().Unix()+60)},
 		{"无凭证", login, ""},
 		{"原生登录", login, "wharf_native=1"},
 		{"退出登录", login + "&logout", ""},
@@ -459,7 +466,7 @@ func TestTakeover(t *testing.T) {
 
 func TestTakeoverLoopGuard(t *testing.T) {
 	key := ed25519.NewKeyFromSeed(make([]byte, 32))
-	gate := &http.Cookie{Name: "wharf_gate", Value: token(key, "EdDSA", "wharf", time.Now().Unix()+60)}
+	gate := &http.Cookie{Name: "wharf_gate", Value: token(key, "EdDSA", "wharf", "app.example.test", time.Now().Unix()+60)}
 	for _, mode := range []struct {
 		name   string
 		public bool
@@ -512,5 +519,45 @@ func TestTakeoverLoopGuard(t *testing.T) {
 				t.Fatal("非公开站点应继续要求门禁登录")
 			}
 		})
+	}
+}
+
+func TestPublicStripsCredentials(t *testing.T) {
+	for _, path := range []string{"/", "/_wharf/status"} {
+		s := plugin(t, "http://127.0.0.1:1")
+		s.Public = true
+		s.AppLogin = path == "/"
+		r := httptest.NewRequest("GET", "https://a.example.test"+path, nil)
+		r.Header.Set("Cookie", "wharf_gate=access; wharf_gate_rt=refresh; wharf_sso=1; app=1")
+		r.Header.Set("X-Wharf-Key", "fixture")
+		w := httptest.NewRecorder()
+		err := s.ServeHTTP(w, r, caddyhttp.HandlerFunc(func(w http.ResponseWriter, r *http.Request) error {
+			if r.Header.Get("Cookie") != "app=1" || r.Header.Get("X-Wharf-Key") != "" {
+				t.Fatal("应用收到 Wharf 凭据")
+			}
+			w.WriteHeader(http.StatusNoContent)
+			return nil
+		}))
+		if err != nil || w.Code != http.StatusNoContent {
+			t.Fatal("公开站点请求未到达应用")
+		}
+	}
+}
+
+func TestRejectsNoncanonicalRequestPath(t *testing.T) {
+	s := plugin(t, "http://127.0.0.1:1")
+	s.UserHeader = "Remote-User"
+	s.Skip = []string{"/catalog"}
+	r := httptest.NewRequest("GET", "https://a.example.test/catalog/./index", nil)
+	w := httptest.NewRecorder()
+	err := s.ServeHTTP(w, r, caddyhttp.HandlerFunc(func(http.ResponseWriter, *http.Request) error {
+		t.Fatal("非规范路径被转发")
+		return nil
+	}))
+	if err != nil || w.Code != http.StatusBadRequest {
+		t.Fatal("非规范路径应返回 400")
+	}
+	if matchesPath("/catalog", []string{"/"}, "") {
+		t.Fatal("全站排除配置生效")
 	}
 }
