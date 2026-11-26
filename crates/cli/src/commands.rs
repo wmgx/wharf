@@ -4271,6 +4271,36 @@ mod tests {
   use clap::Parser;
 
   #[test]
+  fn rotate_link_yes_help_preserves_per_item_confirmation() {
+    let args = [
+      "wharf",
+      "gateway",
+      "rotate-link",
+      "gw-a",
+      "--apply",
+      "--yes",
+    ];
+    let cli = Cli::try_parse_from(args).unwrap();
+    assert!(matches!(
+      cli.command,
+      Command::Gateway(GatewayCmd::RotateLink { apply, .. })
+        if apply.apply && apply.confirm.is_empty()
+    ));
+    let Err(help) = Cli::try_parse_from([
+      "wharf",
+      "gateway",
+      "rotate-link",
+      "--help",
+    ]) else {
+      panic!("预期返回命令帮助");
+    };
+    assert_eq!(help.kind(), clap::error::ErrorKind::DisplayHelp);
+    assert!(
+      help.to_string().contains("高风险项仍需逐项传入 --confirm")
+    );
+  }
+
+  #[test]
   fn route_add_keeps_unspecified_fields() {
     let old: RouteSpec = serde_json::from_value(serde_json::json!({
       "hostname": "a.example.com",

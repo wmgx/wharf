@@ -1054,14 +1054,13 @@ pub(crate) async fn run_step(
           )
           .suggest("wharf plan")
         })?;
-      let gateway_server = &world.gateways[&p.gateway].spec.server;
-      crate::link_cert::require_gateway_agent(
-        &state.hub,
-        gateway_server,
-        &p.gateway,
-      )?;
-      let gateway = p.gateway;
       let client = project != crate::link::SERVER_PROJECT;
+      if !client {
+        crate::link_cert::require_gateway_agent(
+          &state.hub, server, &p.gateway,
+        )?;
+      }
+      let gateway = p.gateway;
       let (token, ca) = state
         .db
         .call_credentials({

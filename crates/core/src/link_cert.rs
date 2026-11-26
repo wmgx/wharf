@@ -224,7 +224,10 @@ pub fn require_gateway_agent(
   server: &str,
   gateway: &str,
 ) -> Result<(), ApiError> {
-  if hub.supports_gateway_extra_files(server) {
+  if hub
+    .gateway_extra_files(server)
+    .ok_or_else(|| crate::hub::offline(server))?
+  {
     return Ok(());
   }
   Err(ApiError::new(

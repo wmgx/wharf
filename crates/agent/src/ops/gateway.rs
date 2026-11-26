@@ -80,8 +80,14 @@ impl GatewayFiles {
       }
       files.backups.push((path, backup));
     }
-    for (name, content) in extra {
-      write_private(&conf.join(name), content)?;
+    // 校验看到的文件必须与应用成功后留在磁盘上的一致。
+    for name in MANAGED_GATEWAY_FILES {
+      let path = conf.join(name);
+      if let Some(content) = extra.get(name) {
+        write_private(&path, content)?;
+      } else {
+        remove(&path)?;
+      }
     }
     write_private(&conf.join("Caddyfile.next"), caddyfile)?;
     Ok(files)
@@ -93,16 +99,7 @@ impl GatewayFiles {
       .map_err(io_err(&current))
   }
 
-  fn commit(
-    mut self,
-    extra: &BTreeMap<String, String>,
-    hash: &str,
-  ) -> Result<(), ApiError> {
-    for name in MANAGED_GATEWAY_FILES {
-      if !extra.contains_key(name) {
-        remove(&self.conf.join(name))?;
-      }
-    }
+  fn commit(mut self, hash: &str) -> Result<(), ApiError> {
     write_private(&self.conf.join(CONFIG_HASH_FILE), hash)?;
     self.committed = true;
     Ok(())
@@ -205,7 +202,7 @@ impl Ops {
       } else {
         self.finish_up(up, &images, warnings, None, ctx).await?
       };
-      files.commit(&apply.extra_files, &apply.caddyfile_hash)?;
+      files.commit(&apply.caddyfile_hash)?;
       Ok(result)
     }
     .await;
@@ -255,6 +252,31 @@ mod tests {
   use super::*;
 
   #[test]
+  fn gateway_validation_cannot_reuse_omitted_certificate_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let conf = dir.path();
+    let config = "tls /etc/caddy/link.crt /etc/caddy/link.key";
+    write_private(&conf.join("Caddyfile"), config).unwrap();
+    write_private(&conf.join("link.crt"), "旧证书").unwrap();
+    write_private(&conf.join("link.key"), "旧文件").unwrap();
+
+    let extra =
+      BTreeMap::from([("link.crt".into(), "替换证书".into())]);
+    let files = GatewayFiles::stage(conf, config, &extra).unwrap();
+    assert!(!conf.join("link.key").exists());
+    // 校验缺文件失败时，下一次启动仍能读取原来的证书和私钥。
+    drop(files);
+    assert_eq!(
+      fs::read_to_string(conf.join("link.crt")).unwrap(),
+      "旧证书"
+    );
+    assert_eq!(
+      fs::read_to_string(conf.join("link.key")).unwrap(),
+      "旧文件"
+    );
+  }
+
+  #[test]
   fn gateway_extra_files_reject_unsafe_names_restore_and_clean_up() {
     use std::os::unix::fs::PermissionsExt;
 
@@ -284,7 +306,7 @@ mod tests {
     assert_eq!(fs::read_dir(conf).unwrap().count(), 0);
     let files = GatewayFiles::stage(conf, "旧配置", &old).unwrap();
     files.activate().unwrap();
-    files.commit(&old, "old").unwrap();
+    files.commit("old").unwrap();
     let files = GatewayFiles::stage(conf, "新配置", &new).unwrap();
     for name in MANAGED_GATEWAY_FILES {
       assert_eq!(
@@ -317,7 +339,7 @@ mod tests {
     let files =
       GatewayFiles::stage(conf, "没有隧道", &empty).unwrap();
     files.activate().unwrap();
-    files.commit(&empty, "new").unwrap();
+    files.commit("new").unwrap();
     assert!(
       MANAGED_GATEWAY_FILES
         .iter()

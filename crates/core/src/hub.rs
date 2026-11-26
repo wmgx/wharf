@@ -161,10 +161,10 @@ impl Hub {
       .is_some_and(|c| !c.upgrade_only && c.container_diagnosis)
   }
 
-  pub fn supports_gateway_extra_files(&self, server: &str) -> bool {
+  pub fn gateway_extra_files(&self, server: &str) -> Option<bool> {
     lock(&self.conns)
       .get(server)
-      .is_some_and(|c| !c.upgrade_only && c.gateway_extra_files)
+      .map(|c| !c.upgrade_only && c.gateway_extra_files)
   }
 
   pub fn supports_net_probe(

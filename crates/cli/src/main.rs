@@ -1131,7 +1131,7 @@ pub enum GatewayCmd {
     token: bool,
     #[arg(long)]
     cert: bool,
-    /// 确认执行 --apply 请求的操作。
+    /// 兼容旧调用。高风险项仍需逐项传入 --confirm <地址>。
     #[arg(long = "yes", requires = "apply")]
     _yes: bool,
     #[command(flatten)]
