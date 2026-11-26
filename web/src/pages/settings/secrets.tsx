@@ -19,6 +19,7 @@ export function Secrets() {
   const { data, error, refresh } = usePoll<SecretView[]>("/api/secrets", 30000);
   const [editing, setEditing] = useState<{ name: string; fresh: boolean } | null>(null);
   const [removing, setRemoving] = useState<SecretView | null>(null);
+  const [previous, setPrevious] = useState<{ secret: SecretView; rollback: boolean } | null>(null);
   const apps = (data ?? []).filter((x) => !x.system && !x.managed);
 
   const remove = async (s: SecretView) => {
@@ -29,6 +30,24 @@ export function Secrets() {
       refresh();
     } catch (e) {
       toast.error(`删除 ${s.name} 失败`, { description: (e as Error).message });
+    }
+  };
+
+  const changePrevious = async () => {
+    if (!previous) return;
+    const { secret, rollback } = previous;
+    setPrevious(null);
+    try {
+      if (rollback) {
+        const result = await api.post<{ needs_plan: boolean }>(`/api/secrets/${encodeURIComponent(secret.name)}/rollback`, {});
+        toast.success(result.needs_plan ? "密钥已回退，待应用变更" : "密钥已回退");
+      } else {
+        await api.del(`/api/secrets/${encodeURIComponent(secret.name)}/previous`);
+        toast.success("已清除旧值");
+      }
+      refresh();
+    } catch (e) {
+      toast.error((e as Error).message);
     }
   };
 
@@ -61,11 +80,26 @@ export function Secrets() {
                     <span className="text-xs text-muted-foreground">没有服务在用</span>
                   )}
                 </span>
+                {x.other_refs?.map((ref) => <span className="text-xs text-muted-foreground" key={ref}>{ref}</span>)}
+                {x.fingerprint && <span className="font-mono text-xs text-muted-foreground">{x.fingerprint}</span>}
+                {x.has_previous && x.prev_expires_at && (
+                  <span className="rounded-md bg-muted px-1.5 py-0.5 text-xs">
+                    已留旧值（至 {new Date(x.prev_expires_at).toLocaleString("zh-CN", {
+                      month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
+                    })}）
+                  </span>
+                )}
                 <span className="text-xs text-muted-foreground">{ago(x.updated_at)}</span>
                 <DropdownMenu>
                   <Tip text="密钥操作"><DropdownMenuTrigger asChild><Button aria-label={`${x.name} 的操作`} variant="ghost" size="icon-xs"><EllipsisIcon /></Button></DropdownMenuTrigger></Tip>
                   <DropdownMenuContent align="end">
                     <DropdownMenuItem onSelect={() => setEditing({ name: x.name, fresh: false })}><PencilIcon />替换</DropdownMenuItem>
+                    {x.has_previous && (
+                      <>
+                        <DropdownMenuItem onSelect={() => setPrevious({ secret: x, rollback: true })}>回退到旧值</DropdownMenuItem>
+                        <DropdownMenuItem onSelect={() => setPrevious({ secret: x, rollback: false })}>清除旧值</DropdownMenuItem>
+                      </>
+                    )}
                     <DropdownMenuSeparator />
                     <DropdownMenuItem variant="destructive" onSelect={() => setRemoving(x)}><Trash2Icon />删除</DropdownMenuItem>
                   </DropdownMenuContent>
@@ -78,6 +112,7 @@ export function Secrets() {
         <SetSecret
           initial={editing.name}
           fresh={editing.fresh}
+          rotate={!editing.fresh}
           onClose={() => setEditing(null)}
           onSaved={() => {
             setEditing(null);
@@ -85,15 +120,17 @@ export function Secrets() {
           }}
         />
       )}
+      <ConfirmDialog open={!!previous} title={previous?.rollback ? "回退到旧值？" : "清除旧值？"} confirmText={previous?.rollback ? "回退" : "清除"} onCancel={() => setPrevious(null)} onConfirm={changePrevious} />
       <ConfirmDialog open={!!removing} title={`删除密钥 ${removing?.name}？`} onCancel={() => setRemoving(null)} onConfirm={() => removing && remove(removing)}>{removing?.used_by?.length ? `还在用：${removing.used_by.join("、")}` : null}</ConfirmDialog>
     </>
   );
 }
 
 /** 只在打开时挂载，关掉就丢弃输入的值。 */
-export function SetSecret({ initial, fresh, onClose, onSaved }: { initial: string; fresh: boolean; onClose: () => void; onSaved: () => void }) {
+export function SetSecret({ initial, fresh, rotate = false, onClose, onSaved }: { initial: string; fresh: boolean; rotate?: boolean; onClose: () => void; onSaved: () => void }) {
   const [name, setName] = useState(initial);
   const [value, setValue] = useState("");
+  const [keep, setKeep] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<unknown>(null);
 
@@ -101,9 +138,12 @@ export function SetSecret({ initial, fresh, onClose, onSaved }: { initial: strin
     setSaving(true);
     setError(null);
     try {
-      await api.put(`/api/secrets/${encodeURIComponent(name)}`, { value });
+      const body = { value, keep_days: keep ? 7 : 0 };
+      const result = rotate
+        ? await api.post<{ needs_plan: boolean }>(`/api/secrets/${encodeURIComponent(name)}/rotate`, body)
+        : await api.put<SecretView>(`/api/secrets/${encodeURIComponent(name)}`, body);
       setValue("");
-      toast.success(`已保存 ${name}`);
+      toast.success("needs_plan" in result && result.needs_plan ? "密钥已更新，待应用变更" : `已保存 ${name}`);
       onSaved();
     } catch (e) {
       setError(e);
@@ -127,6 +167,12 @@ export function SetSecret({ initial, fresh, onClose, onSaved }: { initial: strin
           <Field label="值" htmlFor="secret-value">
             <Textarea id="secret-value" autoComplete="off" spellCheck={false} value={value} onChange={(e) => setValue(e.target.value)} className="min-h-20 font-mono text-xs" />
           </Field>
+          {!fresh && (
+            <label className="flex items-center gap-2 text-sm">
+              <input type="checkbox" checked={keep} onChange={(e) => setKeep(e.target.checked)} />
+              保留旧值 7 天
+            </label>
+          )}
           <ErrorNote error={error} />
         </div>
         <DialogFooter>

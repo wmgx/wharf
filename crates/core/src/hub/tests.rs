@@ -19,7 +19,7 @@ fn old_hello_has_no_host_shell_capability() {
     "signature": "s",
     "nonce": "n",
     "version": "0.1.0",
-    "protocol": 1
+    "protocol": 2
   }))
   .unwrap();
   let AgentMsg::Hello {
@@ -28,6 +28,7 @@ fn old_hello_has_no_host_shell_capability() {
     core_probe,
     gateway_extra_files,
     backup_isolation,
+    key_rotation,
     ..
   } = hello
   else {
@@ -38,6 +39,7 @@ fn old_hello_has_no_host_shell_capability() {
   assert!(!core_probe);
   assert!(!gateway_extra_files);
   assert!(!backup_isolation);
+  assert!(!key_rotation);
 }
 
 #[test]
@@ -76,6 +78,7 @@ fn old_core_ignores_new_hello_capability() {
     gateway_extra_files: true,
     core_probe: true,
     backup_isolation: true,
+    key_rotation: true,
   };
   let json = serde_json::to_string(&hello).unwrap();
   let old = serde_json::from_str::<OldAgentMsg>(&json);
@@ -106,6 +109,38 @@ impl Hub {
     gateway_extra_files: bool,
     backup_isolation: bool,
     core_probe: bool,
+    handle: impl FnMut(AgentOp) -> Result<Value, ApiError>
+    + Send
+    + 'static,
+  ) {
+    self.mock_agent_options(
+      server,
+      gateway_extra_files,
+      backup_isolation,
+      core_probe,
+      false,
+      handle,
+    );
+  }
+
+  pub(crate) fn mock_rotation_agent(
+    &self,
+    server: &str,
+    handle: impl FnMut(AgentOp) -> Result<Value, ApiError>
+    + Send
+    + 'static,
+  ) {
+    self
+      .mock_agent_options(server, false, false, false, true, handle);
+  }
+
+  fn mock_agent_options(
+    &self,
+    server: &str,
+    gateway_extra_files: bool,
+    backup_isolation: bool,
+    core_probe: bool,
+    key_rotation: bool,
     mut handle: impl FnMut(AgentOp) -> Result<Value, ApiError>
     + Send
     + 'static,
@@ -124,6 +159,8 @@ impl Hub {
           String::new()
         },
         core_probe,
+        key_rotation,
+        authenticated_core: None,
         tx,
         pending: pending.clone(),
         closed: closed.clone(),
@@ -194,6 +231,8 @@ async fn agent_upgrade_needs_no_bound_core_server_or_probe_support() {
     conn_id: 1,
     public_key: String::new(),
     core_probe: false,
+    key_rotation: false,
+    authenticated_core: None,
     tx,
     pending: Default::default(),
     closed: CancellationToken::new(),
@@ -249,6 +288,8 @@ fn probe_connection(
     conn_id: id,
     public_key: key.into(),
     core_probe: true,
+    key_rotation: false,
+    authenticated_core: None,
     tx,
     pending: Default::default(),
     closed: CancellationToken::new(),
@@ -357,4 +398,32 @@ async fn probe_reconnects_do_not_queue_or_block_foreground_verification()
   })
   .await
   .unwrap();
+}
+
+#[tokio::test]
+async fn rotated_agent_promotes_only_on_registration_and_updates_core_binding()
+ {
+  use crate::{core_node, db, key_rotation};
+  let state = crate::rules::tests::test_state();
+  state.db.call(|c| {
+    c.execute(
+      "INSERT INTO agents (server, public_key, next_public_key, next_key_expires_at)
+       VALUES ('s1', 'old', 'new', ?1)", params![now_ms() + 60_000],
+    ).map_err(sql_err)?;
+    db::set_setting(c, core_node::SERVER_KEY, Some("s1"))?;
+    db::set_setting(c, core_node::PUBKEY_KEY, Some("old"))?;
+    assert!(key_rotation::accepts_agent(c, "s1", "old", true)?);
+    assert!(key_rotation::accepts_agent(c, "s1", "new", true)?);
+    assert!(!key_rotation::accepts_agent(c, "s1", "new", false)?);
+    assert_eq!(core_node::load_persisted(c)?, Some(("s1".into(), "old".into())));
+    key_rotation::register_agent_key(c, "s1", "new", true)?;
+    assert!(key_rotation::accepts_agent(c, "s1", "new", true)?);
+    assert!(!key_rotation::accepts_agent(c, "s1", "old", true)?);
+    assert_eq!(core_node::load_persisted(c)?, Some(("s1".into(), "new".into())));
+    assert!(c.query_row(
+      "SELECT next_public_key IS NULL AND next_key_expires_at IS NULL FROM agents WHERE server = 's1'",
+      [], |r| r.get::<_, bool>(0),
+    ).map_err(sql_err)?);
+    Ok(())
+  }).await.unwrap();
 }

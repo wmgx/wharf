@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import type { SessionRow, TotpView } from "@/types.gen";
+import type { CoreKeyView, SessionRow, TotpView } from "@/types.gen";
 import type { GateKeyView, RouteView } from "@/types";
 import { Oidc } from "./oidc";
 
@@ -30,6 +30,8 @@ export function Security() {
     </Panel>}
     <Sessions />
     <GateKeys />
+    <CoreKey />
+    <RevokeAllCredentials />
     <Oidc />
     {mode && data && <TotpDialog mode={mode} enabled={data.enabled} onClose={() => { setMode(null); refresh(); }} onChanged={refresh} />}
   </>;
@@ -127,6 +129,69 @@ function Sessions() {
   </>;
 }
 
+
+function CoreKey() {
+  const { data, error, refresh } = usePoll<CoreKeyView>("/api/core/key", 30000);
+  const [action, setAction] = useState<"rotate" | "commit" | "rollback" | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [failure, setFailure] = useState<unknown>(null);
+  const labels = { rotate: "轮换控制面公钥", commit: "结束过渡期", rollback: "回退旧公钥" };
+  const paths = { rotate: "/api/core/key/rotate", commit: "/api/core/key/commit", rollback: "/api/core/key/rollback" };
+  const submit = async () => {
+    if (!action) return;
+    setBusy(true);
+    setFailure(null);
+    try {
+      await api.post(paths[action], {});
+    } catch (e) {
+      setFailure(e);
+    } finally {
+      setAction(null);
+      setBusy(false);
+      refresh();
+    }
+  };
+  return <>
+    <SectionTitle>控制面公钥</SectionTitle>
+    <ErrorNote error={error || failure} />
+    {data && <Panel className="flex flex-wrap items-center gap-3 p-4">
+      <code className="flex-1 text-sm" title={data.public_key}>{data.fingerprint}</code>
+      {data.previous_expires_at ? <>
+        <span className="text-sm">过渡期至 {new Date(data.previous_expires_at).toLocaleString("zh-CN")}</span>
+        <Button variant="outline" size="sm" onClick={() => setAction("commit")}>{labels.commit}</Button>
+        <Button variant="outline" size="sm" onClick={() => setAction("rollback")}>{labels.rollback}</Button>
+      </> : <Button variant="outline" size="sm" onClick={() => setAction("rotate")}>{labels.rotate}</Button>}
+    </Panel>}
+    <ConfirmDialog open={action !== null} title={action ? `${labels[action]}？` : ""} confirmText={action ? labels[action] : ""} busy={busy} onCancel={() => setAction(null)} onConfirm={submit} />
+  </>;
+}
+
+function RevokeAllCredentials() {
+  const [confirm, setConfirm] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const revoke = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.post("/api/credentials/revoke-all", { confirm: "revoke-all" });
+      window.location.replace("/login");
+    } catch (e) {
+      setError(e);
+      setBusy(false);
+    }
+  };
+  return <>
+    <SectionTitle>全部凭证</SectionTitle>
+    <Panel className="p-4">
+      <Button variant="destructive" size="sm" onClick={() => setConfirm(true)}>作废全部登录凭证</Button>
+      <ErrorNote error={error} />
+    </Panel>
+    <ConfirmDialog open={confirm} title="作废全部登录凭证？" confirmText="作废全部" typed="作废全部" busy={busy} onCancel={() => setConfirm(false)} onConfirm={revoke}>
+      所有网页会话、API 令牌和门禁凭证都将失效。
+    </ConfirmDialog>
+  </>;
+}
 
 function GateKeys() {
   const { data, error, refresh } = usePoll<GateKeyView[]>("/api/gate/keys", 30000);

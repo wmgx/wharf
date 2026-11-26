@@ -46,7 +46,7 @@ export interface AgentReport extends Pick<Gen.AgentReport, "public_ip" | "egress
   docker_disk?: { total: number; free: number };
 }
 
-export interface ServerView {
+export interface ServerView extends Pick<Gen.ServerView, "key_fingerprint" | "key_rotation"> {
   note?: string;
   name: string;
   settings: Record<string, unknown> & {
@@ -560,14 +560,7 @@ export interface NetworkView extends Pick<Gen.NetworkView, "tailnet_reach" | "ta
   relays?: { from: string; to: string; via: string; direct_loss: number; via_loss: number }[];
 }
 
-export interface SecretView {
-  name: string;
-  updated_at: string;
-  used_by?: string[];
-  managed?: boolean;
-  /** 系统功能用的，在对应功能里改。 */
-  system?: string;
-}
+export type SecretView = Gen.SecretView;
 
 export type Perm = Gen.Perm;
 export type TokenView = Gen.TokenView;

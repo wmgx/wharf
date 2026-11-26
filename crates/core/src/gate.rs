@@ -46,6 +46,38 @@ struct Ticket {
   expires: i64,
 }
 
+const RT_SEED: &str = "gate.rt_key";
+
+#[cfg(test)]
+pub(crate) fn fixture_ticket(insert: bool) -> bool {
+  let mut tickets = TICKETS.lock().unwrap_or_else(|e| e.into_inner());
+  if insert {
+    tickets.insert(
+      "revoke-all-fixture".into(),
+      Ticket {
+        host: "a.example.test".into(),
+        session_hash: "fixture-session".into(),
+        expires: i64::MAX,
+      },
+    );
+  }
+  tickets.contains_key("revoke-all-fixture")
+}
+
+pub(crate) fn clear_tickets() {
+  TICKETS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+}
+
+pub(crate) fn rotate_seed(
+  c: &rusqlite::Connection,
+  name: &str,
+) -> Result<(), ApiError> {
+  let mut seed = [0; 32];
+  getrandom::fill(&mut seed)
+    .map_err(|_| ApiError::internal("随机数不可用"))?;
+  db::set_setting(c, name, Some(&hex::encode(seed)))
+}
+
 pub(crate) fn seed(
   c: &rusqlite::Connection,
   name: &str,
@@ -53,12 +85,9 @@ pub(crate) fn seed(
   let text = match db::setting(c, name)? {
     Some(text) => text,
     None => {
-      let mut seed = [0; 32];
-      getrandom::fill(&mut seed)
-        .map_err(|_| ApiError::internal("随机数不可用"))?;
-      let text = hex::encode(seed);
-      db::set_setting(c, name, Some(&text))?;
-      text
+      rotate_seed(c, name)?;
+      db::setting(c, name)?
+        .ok_or_else(|| ApiError::internal("门禁密钥未保存"))?
     }
   };
   hex::decode(text)
@@ -71,7 +100,7 @@ async fn key(db: &Db) -> Result<SigningKey, ApiError> {
     .await
 }
 async fn rt_key(db: &Db) -> Result<[u8; 32], ApiError> {
-  db.call(|c| seed(c, "gate.rt_key")).await
+  db.call(|c| seed(c, RT_SEED)).await
 }
 pub async fn init(s: &AppState) -> Result<(), ApiError> {
   let public = public_b64(&key(&s.db).await?);

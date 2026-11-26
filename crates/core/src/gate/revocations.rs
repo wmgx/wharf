@@ -26,6 +26,7 @@ use super::{
 };
 
 const SETTING: &str = "gate.revocations";
+const SEED: &str = "gate.revocation_seed";
 const CALLBACK_CONTEXT: &[u8] = b"wharf gate revocation callback v1";
 type Cutoffs = BTreeMap<String, i64>;
 
@@ -36,9 +37,26 @@ fn callback_mac(seed: &[u8]) -> Hmac<Sha256> {
   mac
 }
 
+fn callback_seed(c: &Connection) -> Result<[u8; 32], ApiError> {
+  if db::setting(c, SEED)?.is_some() {
+    super::seed(c, SEED)
+  } else {
+    super::seed(c, super::RT_SEED)
+  }
+}
+
+pub(crate) fn rotate_refresh_seed(
+  c: &Connection,
+) -> Result<(), ApiError> {
+  if db::setting(c, SEED)?.is_none() {
+    db::set_setting(c, SEED, Some(&hex::encode(callback_seed(c)?)))?;
+  }
+  super::rotate_seed(c, super::RT_SEED)
+}
+
 pub(crate) async fn config_key(db: &Db) -> Result<String, ApiError> {
   Ok(hex::encode(
-    callback_mac(&super::rt_key(db).await?)
+    callback_mac(&db.call(|c| callback_seed(c)).await?)
       .finalize()
       .into_bytes(),
   ))
@@ -92,14 +110,19 @@ fn record(c: &Connection, user: String) -> Result<(), ApiError> {
   save(c, &values)
 }
 
+pub(crate) fn record_all(c: &Connection) -> Result<(), ApiError> {
+  if let Some(user) = admin_name(c)? {
+    record(c, user)?;
+  }
+  Ok(())
+}
+
 pub(crate) fn sessions_removed(
   c: &Connection,
   removed: usize,
 ) -> Result<(), ApiError> {
-  if removed > 0
-    && let Some(user) = admin_name(c)?
-  {
-    record(c, user)?;
+  if removed > 0 {
+    record_all(c)?;
   }
   Ok(())
 }
@@ -148,7 +171,7 @@ pub(crate) async fn list(
     &mut key,
   )
   .map_err(|_| unauthorized())?;
-  callback_mac(&super::rt_key(&s.db).await?)
+  callback_mac(&s.db.call(|c| callback_seed(c)).await?)
     .verify_slice(&key)
     .map_err(|_| unauthorized())?;
   let values = s

@@ -108,6 +108,67 @@ pub async fn run(cli: Cli) -> CliResult<()> {
   }
 }
 
+async fn rotate_core_key(
+  c: &Client,
+  window_hours: Option<u16>,
+  force: bool,
+  commit: bool,
+  rollback: bool,
+  j: bool,
+) -> CliResult<()> {
+  use wharf_api_types::view::CoreKeyView;
+
+  let mut config = crate::client::Config::load_checked()?;
+  let env_key = std::env::var_os("WHARF_CORE_KEY").is_some();
+  let same_server =
+    config.url.as_deref().is_some_and(|url| c.is_for(url));
+  if !commit && !env_key {
+    if !same_server {
+      return Err(
+        ApiError::invalid("当前 CLI 配置不属于目标控制面")
+          .with_hint("先执行 wharf login 保存目标控制面的配置")
+          .into(),
+      );
+    }
+    config.check_writable().map_err(|_| {
+      ApiError::invalid("无法写入本机 config.toml")
+        .with_hint("检查配置文件及目录权限后重试")
+    })?;
+  }
+  let view: CoreKeyView = if commit {
+    c.post("/api/core/key/commit", &json!({})).await?
+  } else if rollback {
+    c.post("/api/core/key/rollback", &json!({})).await?
+  } else {
+    c.post("/api/core/key/rotate", &json!({
+      "window_hours": window_hours, "force": force, "client_ready": true,
+    })).await?
+  };
+  if !commit {
+    if env_key {
+      eprintln!("请把 WHARF_CORE_KEY 更新为 {}", view.public_key);
+    } else {
+      config.core_key = Some(view.public_key.clone());
+      config.save().map_err(|_| {
+        ApiError::internal("控制面已切换公钥，本机配置保存失败")
+          .with_hint(format!(
+            "把 config.toml 的 core_key 更新为 {}",
+            view.public_key
+          ))
+      })?;
+      eprintln!("已更新本机控制面公钥");
+    }
+  }
+  if !view.pending_agents.is_empty() {
+    eprintln!(
+      "警告：以下 agent 尚未用新公钥上线：{}",
+      view.pending_agents.join("、"),
+    );
+  }
+  out(j, &view, pretty);
+  Ok(())
+}
+
 /// 输出：JSON 模式原样输出，否则用 `human`。
 pub(crate) fn out<T: serde::Serialize>(
   j: bool,
@@ -406,6 +467,21 @@ async fn dispatch(
     }
     Command::SelfUpdate => crate::selfcmd::self_update(c, j).await,
     Command::Whoami => crate::selfcmd::whoami(c, j).await,
+    Command::Core(crate::CoreCmd::Key) => {
+      let view: wharf_api_types::view::CoreKeyView =
+        c.get("/api/core/key").await?;
+      out(j, &view, pretty);
+      Ok(())
+    }
+    Command::Core(crate::CoreCmd::RotateKey {
+      window_hours,
+      force,
+      commit,
+      rollback,
+    }) => {
+      rotate_core_key(c, window_hours, force, commit, rollback, j)
+        .await
+    }
     Command::Core(crate::CoreCmd::Addresses) => {
       let view: wharf_api_types::view::CoreAddresses =
         c.get("/api/core/addresses").await?;
@@ -1214,6 +1290,16 @@ async fn server(
           );
         }
       });
+      Ok(())
+    }
+    ServerCmd::RotateKey { name } => {
+      let view: wharf_api_types::view::AgentKeyRotation = c
+        .post(
+          &format!("/api/servers/{}/rotate-key", seg(&name)),
+          &json!({}),
+        )
+        .await?;
+      out(j, &view, pretty);
       Ok(())
     }
     ServerCmd::List => {
@@ -4107,9 +4193,47 @@ async fn secret(
   j: bool,
 ) -> CliResult<()> {
   match cmd {
-    SecretCmd::List => {
+    SecretCmd::List { detail } => {
       let v: Vec<SecretView> = c.get("/api/secrets").await?;
-      out(j, &v, |v| v.iter().for_each(|s| println!("{}", s.name)));
+      out(j || detail, &v, |v| {
+        v.iter().for_each(|s| println!("{}", s.name))
+      });
+      Ok(())
+    }
+    SecretCmd::Rotate {
+      name,
+      keep_days,
+      apply,
+    } => {
+      let value = read_secret(&format!("{name} 的新值："))?;
+      let response = c
+        .post(
+          &format!("/api/secrets/{}/rotate", seg(&name)),
+          &json!({ "value": value, "keep_days": keep_days }),
+        )
+        .await?;
+      finish_secret_rotation(c, response, apply, j).await
+    }
+    SecretCmd::Rollback { name, apply } => {
+      let response = c
+        .post(
+          &format!("/api/secrets/{}/rollback", seg(&name)),
+          &json!({}),
+        )
+        .await?;
+      finish_secret_rotation(c, response, apply, j).await
+    }
+    SecretCmd::ClearOld { name } => {
+      let v: Value = c
+        .delete(&format!("/api/secrets/{}/previous", seg(&name)))
+        .await?;
+      out(j, &v, |v| {
+        if v["cleared"] == true {
+          println!("已清除 {name} 的旧值");
+        } else {
+          println!("{name} 没有保留的旧值");
+        }
+      });
       Ok(())
     }
     SecretCmd::Set {
@@ -4143,6 +4267,23 @@ async fn secret(
       Ok(())
     }
   }
+}
+
+async fn finish_secret_rotation(
+  c: &Client,
+  response: wharf_api_types::view::RotateSecretResponse,
+  flags: ApplyFlags,
+  j: bool,
+) -> CliResult<()> {
+  if flags.apply && response.needs_plan {
+    if !j {
+      pretty(&response);
+    }
+    return plan_and_maybe_apply(c, PlanRequest::default(), flags, j)
+      .await;
+  }
+  pretty(&response);
+  Ok(())
 }
 
 async fn backup(

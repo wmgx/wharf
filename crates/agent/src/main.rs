@@ -238,7 +238,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
   task::cleanup(&cli.data_dir)?;
   restic::cleanup_temp_keys(&cli.data_dir);
 
-  let key = identity::load_or_create_key(&cli.data_dir)?;
+  identity::load_or_create_key(&cli.data_dir)?;
   egress::restore(&cli.data_dir, &joined.core_url);
   tokio::spawn(probe::serve(joined.server.clone(), cli.probe_port));
   let docker = docker::Docker {
@@ -258,5 +258,5 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     host_shell,
     cli.data_dir.clone(),
   ));
-  conn::run_forever(joined, key, ops).await
+  conn::run_forever(ops).await
 }

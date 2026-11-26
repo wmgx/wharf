@@ -299,20 +299,31 @@ async fn handshake(
   })
   .await
   .context("握手超时")??;
-  let sig: [u8; 64] = hex::decode(&welcome.signature)
-    .ok()
-    .and_then(|b| b.try_into().ok())
-    .context("控制面签名格式不对")?;
-  core_key
-    .verify(
-      &tunnel_payload(&hello.nonce, &welcome.kx, &hello.kx),
-      &Signature::from_bytes(&sig),
-    )
-    .map_err(|_| {
-      anyhow!(
+  let payload = tunnel_payload(&hello.nonce, &welcome.kx, &hello.kx);
+  let verifies = |signature: &str| {
+    hex::decode(signature)
+      .ok()
+      .and_then(|bytes| <[u8; 64]>::try_from(bytes).ok())
+      .is_some_and(|bytes| {
+        core_key
+          .verify(&payload, &Signature::from_bytes(&bytes))
+          .is_ok()
+      })
+  };
+  if !verifies(&welcome.signature) {
+    if !welcome.alt_signature.as_deref().is_some_and(verifies) {
+      bail!(
         "控制面签名和记下的公钥对不上：可能连到了假的控制面（中间人），或者控制面换过密钥"
-      )
-    })?;
+      );
+    }
+    static WARNED: std::sync::atomic::AtomicBool =
+      std::sync::atomic::AtomicBool::new(false);
+    if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+      eprintln!(
+        "控制面公钥正在轮换过渡期，请用 wharf core key 查看新公钥并更新本机配置"
+      );
+    }
+  }
   let (sealer, opener) = share
     .finish(&welcome.kx, &hello.nonce, Role::Agent)
     .map_err(|e| anyhow!("{e}"))?;
@@ -388,4 +399,50 @@ fn websocket_proxy_uses_https_and_honors_no_proxy() {
     .as_deref(),
     Some("http://127.0.0.1:8118")
   );
+}
+
+#[tokio::test]
+async fn cli_tunnel_accepts_old_and_new_core_keys_in_window() {
+  use ed25519_dalek::{Signer, SigningKey};
+  let old = SigningKey::from_bytes(&[27; 32]);
+  let current = SigningKey::from_bytes(&[28; 32]);
+  let old_public = old.verifying_key();
+  let new_public = current.verifying_key();
+  let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let url = format!("ws://{}", listener.local_addr().unwrap());
+  let server = tokio::spawn(async move {
+    for _ in 0..2 {
+      let (socket, _) = listener.accept().await.unwrap();
+      let mut ws =
+        tokio_tungstenite::accept_async(socket).await.unwrap();
+      let hello = ws.next().await.unwrap().unwrap();
+      let hello: TunnelHello =
+        serde_json::from_str(hello.to_text().unwrap()).unwrap();
+      let share = KeyShare::generate();
+      let payload =
+        tunnel_payload(&hello.nonce, &share.public, &hello.kx);
+      let welcome = TunnelWelcome {
+        signature: hex::encode(current.sign(&payload).to_bytes()),
+        alt_signature: Some(hex::encode(
+          old.sign(&payload).to_bytes(),
+        )),
+        kx: share.public.clone(),
+      };
+      let (mut tx, _) =
+        share.finish(&hello.kx, &hello.nonce, Role::Core).unwrap();
+      ws.send(Message::text(
+        serde_json::to_string(&welcome).unwrap(),
+      ))
+      .await
+      .unwrap();
+      ws.send(Message::binary(tx.seal(b"fixture"))).await.unwrap();
+    }
+  });
+  for key in [old_public, new_public] {
+    let (mut ws, _, mut opener) =
+      handshake(&url, &key).await.unwrap();
+    let message = ws.next().await.unwrap().unwrap().into_data();
+    assert_eq!(opener.open(&message).unwrap(), b"fixture");
+  }
+  server.await.unwrap();
 }

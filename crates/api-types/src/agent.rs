@@ -59,10 +59,15 @@ pub enum CoreMsg {
   /// 旧 agent 收到的是对 `auth_payload("core", server, agent_nonce)` 的签名，没有 `kx`。
   Welcome {
     signature: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    alt_signature: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    confirm_key: bool,
     /// 控制面的临时 X25519 公钥，hex。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     kx: Option<String>,
   },
+  KeyAccepted,
   AgentMemory {
     bytes: u64,
   },
@@ -140,6 +145,15 @@ pub enum AgentMsg {
     core_probe: bool,
     #[serde(default)]
     backup_isolation: bool,
+    #[serde(default)]
+    key_rotation: bool,
+  },
+  KeyReady {
+    core_public_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    trusted_primary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    trusted_alt: Option<String>,
   },
   Report(Box<AgentReport>),
   Progress {
@@ -342,6 +356,8 @@ pub struct Disk {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum AgentOp {
+  RotateAgentKey(RotateAgentKeyJob),
+  TrustCoreKey(TrustCoreKeyJob),
   /// 结果是 Vec<LocalImage>。
   ListImages,
   /// 立刻回一份最新的 [AgentReport]。
@@ -788,3 +804,32 @@ pub struct LinkSample {
 
 /// agent 的探测端口：连上后回一行 `wharf <服务器名>`。
 pub const PROBE_PORT: u16 = 7701;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyRotatePhase {
+  Prepare,
+  Activate,
+  Abort,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RotateAgentKeyJob {
+  pub phase: KeyRotatePhase,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub expected_public_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RotateAgentKeyResult {
+  pub public_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrustCoreKeyJob {
+  pub current: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub alt: Option<String>,
+  #[serde(default)]
+  pub reconnect: bool,
+}

@@ -25,7 +25,7 @@ fn state_with_db(db: db::Db) -> Arc<AppState> {
   Arc::new(AppState {
     db,
     hub: Default::default(),
-    key: ed25519_dalek::SigningKey::from_bytes(&[0; 32]),
+    key: ed25519_dalek::SigningKey::from_bytes(&[0; 32]).into(),
     runs: Default::default(),
     apply_lock: Default::default(),
     public_url: None,

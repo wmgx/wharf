@@ -25,8 +25,8 @@ use wharf_api_types::{
   validate_name,
   view::{
     AccountView, DataView, DeploymentView, GatewayView, JoinInfo,
-    JoinRequest, JoinResponse, Perm, RouteView, SecretView,
-    ServerView, ServiceView, Status,
+    JoinRequest, JoinResponse, Perm, RotateSecretResponse, RouteView,
+    SecretView, ServerView, ServiceView, Status,
   },
 };
 
@@ -487,6 +487,23 @@ pub fn router(state: Arc<AppState>) -> Router {
       "/api/secrets/{name}",
       put(set_secret).delete(remove_secret),
     )
+    .route("/api/secrets/{name}/rotate", post(rotate_secret))
+    .route("/api/secrets/{name}/rollback", post(rollback_secret))
+    .route(
+      "/api/secrets/{name}/previous",
+      axum::routing::delete(clear_secret_previous),
+    )
+    .route(
+      "/api/servers/{name}/rotate-key",
+      post(crate::key_rotation::rotate_agent),
+    )
+    .route("/api/core/key", get(crate::key_rotation::show))
+    .route("/api/core/key/rotate", post(crate::key_rotation::rotate))
+    .route("/api/core/key/commit", post(crate::key_rotation::commit))
+    .route(
+      "/api/core/key/rollback",
+      post(crate::key_rotation::rollback),
+    )
     .route("/api/plan", post(make_plan))
     .route("/api/plans/{id}", get(show_plan))
     .route("/api/apply", post(apply_plan))
@@ -495,6 +512,10 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route("/api/runs/{id}/cancel", post(cancel_run))
     .route("/api/export", get(export))
     .route("/api/audit", get(crate::audit::list))
+    .route(
+      "/api/credentials/revoke-all",
+      post(revoke_all_credentials),
+    )
     .route(
       "/api/tokens",
       get(crate::tokens::list).post(crate::tokens::create),
@@ -761,7 +782,7 @@ async fn add_server(
       .unwrap_or("127.0.0.1:7700");
     format!("http://{host}")
   });
-  let core_key = hex::encode(s.key.verifying_key().to_bytes());
+  let core_key = s.core_keys().public_key();
   let mut commands = BTreeMap::from([
     (
       "docker".to_string(),
@@ -825,6 +846,12 @@ async fn agent_join(
   if hex::decode(&key).map(|b| b.len()).unwrap_or(0) != 32 {
     return Err(ApiError::invalid("公钥格式不对").into());
   }
+  let _rotation = s.key.operation.try_lock().map_err(|_| {
+    ApiError::new(
+      ErrorCode::Conflict,
+      "通信密钥正在切换，稍后可用原加入命令重试",
+    )
+  })?;
   let hub = s.clone();
   let server = s
     .db
@@ -851,7 +878,8 @@ async fn agent_join(
         );
       }
       tx.execute(
-        "UPDATE agents SET public_key = ?1, join_token_hash = NULL, join_expires_at = NULL, report = NULL, last_seen = NULL
+        "UPDATE agents SET public_key = ?1, join_token_hash = NULL, join_expires_at = NULL,
+           report = NULL, last_seen = NULL, next_public_key = NULL, next_key_expires_at = NULL, key_rotation = 0
          WHERE server = ?2",
         params![key, server],
       )
@@ -863,9 +891,11 @@ async fn agent_join(
     })
     .await?;
   tracing::info!("服务器 {server} 完成加入");
+  let keys = s.core_keys();
   Ok(Json(JoinResponse {
     server,
-    core_public_key: hex::encode(s.key.verifying_key().to_bytes()),
+    core_public_key: keys.public_key(),
+    previous_core_public_key: keys.previous_public_key(),
   }))
 }
 
@@ -1570,58 +1600,65 @@ async fn list_secrets(
   auth: Auth,
 ) -> ApiResult<Vec<SecretView>> {
   auth.require(Perm::Read)?;
-  let snap = snapshot::load(&s.db).await?;
-  let rows: Vec<(String, i64)> = s
-    .db
-    .call(|c| {
-      let mut stmt = c
-        .prepare("SELECT name, updated_at FROM secrets ORDER BY name")
-        .map_err(sql_err)?;
-      let rows = stmt
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
-        .map_err(sql_err)?;
-      rows.collect::<Result<_, _>>().map_err(sql_err)
-    })
-    .await?;
-  let mut list = rows
-    .into_iter()
-    .map(|(name, at)| SecretView {
-      used_by: secret_users(&snap.world, &name),
-      managed: managed_secret(&name),
-      system: system_secret(&name).map(str::to_string),
-      name,
-      updated_at: to_time(at),
-    })
-    .collect();
+  let mut list = read_secret_views(&s).await?;
   if let Some(allowed) = &auth.services {
     crate::scope_filter::filter_secrets(allowed, &mut list);
   }
   Ok(Json(list))
 }
 
+async fn read_secret_views(
+  s: &AppState,
+) -> Result<Vec<SecretView>, ApiError> {
+  s.db.call_credentials(|c, key| {
+    let world = crate::world::World::from_rows(db::all_resources(c)?)?;
+    let tasks = crate::tasks::load_rows(c)?;
+    let previous = db::previous_secrets(c, key, now_ms())?;
+    let values = db::secrets(c, key)?;
+    let mut stmt = c.prepare("SELECT name, updated_at, prev_expires_at FROM secrets ORDER BY name")
+      .map_err(sql_err)?;
+    let rows = stmt.query_map([], |r| {
+      Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, Option<i64>>(2)?))
+    }).map_err(sql_err)?;
+    rows.map(|row| {
+      let (name, updated_at, prev_expires_at) = row.map_err(sql_err)?;
+      let old = previous.get(&name);
+      Ok(SecretView {
+        fingerprint: values.get(&name).map(|value| db::secret_fingerprint(value)),
+        has_previous: old.is_some(),
+        prev_expires_at: old.and(prev_expires_at).map(to_time),
+        prev_fingerprint: old.map(|value| db::secret_fingerprint(value)),
+        other_refs: crate::secret_policy::other_secret_refs(
+          &world, tasks.iter().map(|(name, spec, _)| (name.as_str(), &spec.how)), &name,
+        ),
+        used_by: secret_users(&world, &name),
+        managed: managed_secret(&name),
+        system: system_secret(&name).map(str::to_string),
+        name,
+        updated_at: to_time(updated_at),
+      })
+    }).collect::<Result<Vec<_>, ApiError>>()
+  }).await
+}
+
 fn secret_users(
   world: &crate::world::World,
   name: &str,
 ) -> Vec<String> {
-  let system = system_secret(name);
-  system
-    .map(str::to_string)
-    .into_iter()
-    .chain(
-      world
-        .services
-        .iter()
-        .filter(|(_, row)| {
-          crate::secret_policy::service_uses_secret(&row.spec, name)
-        })
-        .map(|(service, _)| service.clone()),
-    )
+  world
+    .services
+    .iter()
+    .filter(|(_, row)| {
+      crate::secret_policy::service_uses_secret(&row.spec, name)
+    })
+    .map(|(service, _)| service.clone())
     .collect()
 }
 
 #[derive(Deserialize)]
 struct SetSecret {
   value: String,
+  keep_days: Option<u16>,
 }
 
 fn check_secret_name(name: &str) -> Result<(), ApiError> {
@@ -1646,28 +1683,131 @@ async fn set_secret(
   Json(req): Json<SetSecret>,
 ) -> ApiResult<SecretView> {
   auth.require(Perm::Admin)?;
+  let response = write_secret(&s, name, req, true).await?;
+  Ok(Json(response.secret))
+}
+
+async fn rotate_secret(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Path(name): Path<String>,
+  Json(req): Json<SetSecret>,
+) -> ApiResult<RotateSecretResponse> {
+  auth.require(Perm::Admin)?;
+  Ok(Json(write_secret(&s, name, req, false).await?))
+}
+
+async fn write_secret(
+  s: &AppState,
+  name: String,
+  req: SetSecret,
+  create: bool,
+) -> Result<RotateSecretResponse, AppError> {
   check_secret_name(&name)?;
   refuse_managed(&name)?;
+  let keep_days =
+    req.keep_days.unwrap_or(db::DEFAULT_SECRET_KEEP_DAYS);
+  if keep_days > 30 {
+    return Err(
+      ApiError::invalid("保留天数须在 0 到 30 之间")
+        .with_hint("0 表示不保留旧值，默认保留 7 天")
+        .into(),
+    );
+  }
   let value = if crate::render::is_auth_secret(&name) {
     crate::login::hash_basic_auth(req.value).await?
   } else {
     req.value
   };
-  let now = now_ms();
   let n = name.clone();
   s.db
     .call_credentials(move |c, key| {
-      key.put_secret(c, &n, &value, now, true)
+      let now = now_ms();
+      let until = (keep_days > 0)
+        .then(|| now + i64::from(keep_days) * 86_400_000);
+      key.rotate_secret(c, &n, &value, now, until, create)
     })
     .await?;
   crate::log_redact::refresh(&s.db).await;
-  Ok(Json(SecretView {
-    used_by: vec![],
-    managed: false,
-    system: system_secret(&name).map(str::to_string),
-    name,
-    updated_at: to_time(now),
-  }))
+  secret_rotation_response(s, name).await
+}
+
+async fn rollback_secret(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Path(name): Path<String>,
+) -> ApiResult<RotateSecretResponse> {
+  auth.require(Perm::Admin)?;
+  refuse_managed(&name)?;
+  let n = name.clone();
+  let result = s
+    .db
+    .call_credentials(move |c, key| {
+      key.rollback_secret(c, &n, now_ms())
+    })
+    .await;
+  crate::log_redact::refresh(&s.db).await;
+  result?;
+  Ok(Json(secret_rotation_response(&s, name).await?))
+}
+
+async fn clear_secret_previous(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Path(name): Path<String>,
+) -> ApiResult<Value> {
+  auth.require(Perm::Admin)?;
+  refuse_managed(&name)?;
+  let cleared =
+    s.db.call(move |c| db::clear_secret_prev(c, &name)).await?;
+  crate::log_redact::refresh(&s.db).await;
+  Ok(Json(json!({ "cleared": cleared })))
+}
+
+async fn secret_rotation_response(
+  s: &AppState,
+  name: String,
+) -> Result<RotateSecretResponse, AppError> {
+  let list = read_secret_views(s).await?;
+  let secret =
+    list.into_iter().find(|v| v.name == name).ok_or_else(|| {
+      ApiError::not_found(format!("密钥 {name} 不存在"))
+    })?;
+  let snap = snapshot::load(&s.db).await?;
+  let affected_services: Vec<_> = snap
+    .world
+    .services
+    .iter()
+    .filter(|(_, row)| {
+      crate::secret_policy::service_renders_secret(&row.spec, &name)
+    })
+    .map(|(service, _)| service.clone())
+    .collect();
+  let affected_gateways: Vec<_> = snap
+    .world
+    .routes
+    .iter()
+    .filter(|(host, row)| {
+      row.spec.auth && crate::render::route_auth_secret(host) == name
+    })
+    .flat_map(|(_, row)| snap.world.route_gateways(&row.spec))
+    .map(str::to_string)
+    .collect::<std::collections::BTreeSet<_>>()
+    .into_iter()
+    .collect();
+  let needs_plan =
+    !affected_services.is_empty() || !affected_gateways.is_empty();
+  Ok(RotateSecretResponse {
+    other_refs: secret.other_refs.clone(),
+    secret,
+    needs_plan,
+    affected_services,
+    affected_gateways,
+    suggest: needs_plan
+      .then(|| "wharf plan".into())
+      .into_iter()
+      .collect(),
+  })
 }
 
 async fn remove_secret(
@@ -1686,6 +1826,80 @@ async fn remove_secret(
     .await?;
   crate::log_redact::refresh(&s.db).await;
   Ok(Json(json!({ "removed": removed > 0 })))
+}
+
+#[derive(Deserialize)]
+struct RevokeAllRequest {
+  confirm: Option<String>,
+}
+
+async fn revoke_all_credentials(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  ConnectInfo(peer): ConnectInfo<SocketAddr>,
+  headers: HeaderMap,
+  Json(req): Json<RevokeAllRequest>,
+) -> Result<Response, AppError> {
+  auth.require(Perm::Admin)?;
+  if req.confirm.as_deref() != Some("revoke-all") {
+    return Err(
+      ApiError::invalid(
+        r#"必须传入 confirm = "revoke-all" 以确认作废全部登录凭证"#,
+      )
+      .with_hint(
+        "该操作会退出所有网页会话并作废全部 API 令牌和门禁凭证",
+      )
+      .into(),
+    );
+  }
+  let revoked = s.db.call(revoke_credentials).await?;
+  let source = crate::login::source(peer.ip(), &headers);
+  crate::audit::login_event(
+    &s,
+    "credentials_revoke_all",
+    &auth.name,
+    source.clone(),
+  )
+  .await;
+  crate::security_receipt::send(
+    &s,
+    &auth.name,
+    &source,
+    "已作废全部登录凭证（会话、令牌、门禁密钥）".into(),
+  )
+  .await;
+  Ok((
+    [(axum::http::header::SET_COOKIE, crate::login::expired_session_cookie(peer.ip(), &headers))],
+    Json(json!({
+      "revoked": revoked,
+      "next": "网页请用管理员密码重新登录；CLI 请在页面重新生成令牌后执行 wharf login",
+    })),
+  ).into_response())
+}
+
+fn revoke_credentials(
+  c: &mut rusqlite::Connection,
+) -> Result<Value, ApiError> {
+  let tx = c.transaction().map_err(sql_err)?;
+  let sessions =
+    tx.execute("DELETE FROM sessions", []).map_err(sql_err)?;
+  let api_tokens =
+    tx.execute("DELETE FROM api_tokens", []).map_err(sql_err)?;
+  let gate_keys =
+    tx.execute("DELETE FROM gate_keys", []).map_err(sql_err)?;
+  let join_tokens = tx.execute(
+    "UPDATE agents SET join_token_hash = NULL, join_expires_at = NULL WHERE join_token_hash IS NOT NULL",
+    [],
+  ).map_err(sql_err)?;
+  crate::gate::revocations::record_all(&tx)?;
+  crate::gate::revocations::rotate_refresh_seed(&tx)?;
+  crate::oidc::rotate_refresh_seed(&tx)?;
+  tx.commit().map_err(sql_err)?;
+  crate::gate::clear_tickets();
+  crate::oidc::clear_codes();
+  Ok(
+    json!({ "sessions": sessions, "api_tokens": api_tokens, "gate_keys": gate_keys, "join_tokens": join_tokens }),
+  )
 }
 
 // PLAN / APPLY / RUNS
@@ -1905,6 +2119,73 @@ async fn export(
 mod tests {
   use super::*;
 
+  #[tokio::test]
+  async fn rotate_and_list_secret_views_show_only_allowed_references()
+  {
+    let s = crate::rules::tests::test_state();
+    s.db.call_credentials(|c, key| {
+      for (kind, name, spec) in [
+        ("server", "s1", json!({"github_mirror":"https://example.test/[[b64:K1]]"})),
+        ("service", "app-a", json!({
+          "server": "s1", "source": {"image": "nginx:1"},
+          "env": {"TOKEN_FILE": "[[FILE:K1]]", "TOKEN_URL": "[[url:K1]]"}
+        })),
+        ("service", "app-b", json!({"server": "s1", "source": {"image": "nginx:1"}, "env": {"TOKEN": "[[K2]]"}})),
+      ] {
+        db::apply_write(c, &db::Write::Upsert {
+          kind: kind.into(), name: name.into(), spec, meta: json!({}),
+        })?;
+      }
+      let task = json!({"server":"s1","schedule":"","kind":"host","command":"echo [[json:K1]]"});
+      c.execute("INSERT INTO tasks (name, spec, created_at, updated_at) VALUES ('t1', ?1, 0, 0)", [task.to_string()]).map_err(sql_err)?;
+      key.put_secret(c, "K1", "fixture-before", 1, false)?;
+      key.put_secret(c, "K2", "fixture-unrelated", 1, false)
+    }).await.unwrap();
+    let auth =
+      |services: Option<std::collections::BTreeSet<String>>| Auth {
+        name: "fixture".into(),
+        perms: [Perm::Read, Perm::Admin].into(),
+        expires_at: None,
+        allowed_from: vec![],
+        services,
+        human: false,
+      };
+    let Json(rotated) = rotate_secret(
+      State(s.clone()),
+      auth(None),
+      Path("K1".into()),
+      Json(SetSecret {
+        value: "fixture-after".into(),
+        keep_days: None,
+      }),
+    )
+    .await
+    .map_err(|e| e.0)
+    .unwrap();
+    assert!(rotated.needs_plan && rotated.secret.has_previous);
+    assert_eq!(rotated.affected_services, ["app-a"]);
+    let view = serde_json::to_string(&rotated).unwrap();
+    assert!(
+      !view.contains("fixture-before")
+        && !view.contains("fixture-after")
+    );
+    let Json(all) = list_secrets(State(s.clone()), auth(None))
+      .await
+      .map_err(|e| e.0)
+      .unwrap();
+    assert_eq!(all[0].used_by, ["app-a"]);
+    assert_eq!(all[0].other_refs, ["server:s1", "task:t1"]);
+    let Json(filtered) =
+      list_secrets(State(s), auth(Some(["app-a".into()].into())))
+        .await
+        .map_err(|e| e.0)
+        .unwrap();
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].name, "K1");
+    assert_eq!(filtered[0].used_by, ["app-a"]);
+    assert!(filtered[0].other_refs.is_empty());
+  }
+
   #[test]
   fn encoded_and_file_secret_users_follow_service_scope() {
     let mut world = crate::world::World::default();
@@ -1924,6 +2205,11 @@ mod tests {
     let used_by = secret_users(&world, "S");
     assert_eq!(used_by, ["a", "b"]);
     let mut rows = vec![SecretView {
+      fingerprint: None,
+      has_previous: false,
+      prev_expires_at: None,
+      prev_fingerprint: None,
+      other_refs: vec!["task:t1".into()],
       name: "S".into(),
       used_by,
       managed: false,
@@ -1935,6 +2221,306 @@ mod tests {
       &mut rows,
     );
     assert_eq!(rows[0].used_by, ["b"]);
+    assert!(rows[0].other_refs.is_empty());
+  }
+
+  fn rotation_admin(human: bool) -> Auth {
+    Auth {
+      name: "admin".into(),
+      perms: [Perm::Admin].into(),
+      expires_at: None,
+      allowed_from: vec![],
+      services: None,
+      human,
+    }
+  }
+
+  async fn rotate_core_for_test(
+    s: &Arc<AppState>,
+    human: bool,
+  ) -> ApiResult<wharf_api_types::view::CoreKeyView> {
+    crate::key_rotation::rotate(
+      State(s.clone()),
+      rotation_admin(human),
+      ConnectInfo("203.0.113.1:3000".parse().unwrap()),
+      HeaderMap::new(),
+      Json(serde_json::from_value(json!({})).unwrap()),
+    )
+    .await
+  }
+
+  #[tokio::test]
+  async fn legacy_agent_is_online_but_key_rotation_requires_capability()
+   {
+    let s = crate::rules::tests::test_state();
+    s.db.call(|c| {
+      c.execute("INSERT INTO agents (server, public_key) VALUES ('s1', 'fixture-public')", []).map_err(sql_err)?;
+      Ok(())
+    }).await.unwrap();
+    s.hub.mock_agent("s1", false, |_| {
+      panic!("不应向旧 agent 下发密钥操作")
+    });
+    assert!(s.hub.is_online("s1"));
+    let error = crate::key_rotation::rotate_agent(
+      State(s.clone()),
+      rotation_admin(true),
+      ConnectInfo("203.0.113.1:3000".parse().unwrap()),
+      HeaderMap::new(),
+      Path("s1".into()),
+    )
+    .await
+    .err()
+    .unwrap()
+    .0;
+    assert_eq!(error.code, ErrorCode::Conflict);
+    assert!(error.hint.unwrap().contains("upgrade"));
+    assert_eq!(
+      rotate_core_for_test(&s, true).await.err().unwrap().0.code,
+      ErrorCode::Conflict
+    );
+    assert!(s.hub.is_online("s1"));
+  }
+
+  #[tokio::test]
+  async fn core_rotation_requires_current_cli_to_confirm_config_writable()
+   {
+    let s = crate::rules::tests::test_state();
+    let error =
+      rotate_core_for_test(&s, false).await.err().unwrap().0;
+    assert_eq!(error.code, ErrorCode::Conflict);
+    assert!(error.hint.unwrap().contains("config.toml"));
+  }
+
+  #[tokio::test]
+  async fn core_rotation_aborts_on_prepare_failure_and_all_agents_keep_trusting_old_key()
+   {
+    use ed25519_dalek::{Signature, Verifier};
+    use std::sync::Mutex;
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = crate::rules::tests::test_state();
+    Arc::get_mut(&mut s).unwrap().data_dir = dir.path().into();
+    let old = s.core_keys().verifying_key();
+    let old_public = hex::encode(old.to_bytes());
+    s.db
+      .call(|c| {
+        c.execute_batch(
+          "INSERT INTO agents (server, public_key, key_rotation)
+        VALUES ('s1', 'fixture-one', 1), ('s2', 'fixture-two', 1);",
+        )
+        .map_err(sql_err)
+      })
+      .await
+      .unwrap();
+    let configurations = ["s1", "s2"].map(|name| {
+      let config = Arc::new(Mutex::new((old_public.clone(), None)));
+      let persisted = config.clone();
+      s.hub.mock_rotation_agent(name, move |op| {
+        let AgentOp::TrustCoreKey(job) = op else {
+          panic!("应下发控制面公钥")
+        };
+        assert!(!job.reconnect);
+        let fail = name == "s2" && job.alt.is_some();
+        *persisted.lock().unwrap() = (job.current, job.alt);
+        if fail {
+          return Err(ApiError::internal("测试：推送应答丢失"));
+        }
+        Ok(Value::Null)
+      });
+      config
+    });
+    assert_eq!(
+      rotate_core_for_test(&s, true).await.err().unwrap().0.code,
+      ErrorCode::Conflict
+    );
+    assert!(!dir.path().join("core.key.next").exists());
+    let payload = b"fixture-handshake";
+    let (signature, alt) = s.core_keys().sign(payload);
+    assert!(alt.is_none());
+    let bytes: [u8; 64] =
+      hex::decode(signature).unwrap().try_into().unwrap();
+    for config in &configurations {
+      assert_eq!(*config.lock().unwrap(), (old_public.clone(), None));
+      assert!(
+        old.verify(payload, &Signature::from_bytes(&bytes)).is_ok()
+      );
+    }
+    assert!(s.hub.is_online("s1") && s.hub.is_online("s2"));
+  }
+
+  #[tokio::test(start_paused = true)]
+  async fn core_rotation_reports_reconnect_timeout_after_switch_and_sends_receipt()
+   {
+    use crate::rules::tests::{
+      TEST_LOCK, notice_titles, reset_memory,
+    };
+
+    let _guard = TEST_LOCK.lock().await;
+    reset_memory();
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = crate::rules::tests::test_state();
+    Arc::get_mut(&mut s).unwrap().data_dir = dir.path().into();
+    let old = s.core_keys().verifying_key();
+    s.db.call(|c| {
+      c.execute(
+        "INSERT INTO agents (server, public_key, key_rotation) VALUES ('s1', 'fixture-public', 1)",
+        [],
+      ).map_err(sql_err)?;
+      Ok(())
+    }).await.unwrap();
+    s.hub.mock_rotation_agent("s1", |op| {
+      assert!(matches!(op, AgentOp::TrustCoreKey(_)));
+      Ok(Value::Null)
+    });
+
+    let Json(view) = rotate_core_for_test(&s, true)
+      .await
+      .map_err(|e| e.0)
+      .unwrap();
+    assert_eq!(view.pending_agents, ["s1"]);
+    assert_ne!(s.core_keys().verifying_key(), old);
+    assert_eq!(view.public_key, s.core_keys().public_key());
+    assert!(view.previous_expires_at.is_some());
+    assert_eq!(
+      notice_titles(&s, "security_receipt").await,
+      ["在线轮换控制面公钥"]
+    );
+  }
+
+  #[tokio::test]
+  async fn core_rotation_dual_signatures_then_rollback_and_commit() {
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+    let _guard = crate::rules::tests::TEST_LOCK.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = crate::rules::tests::test_state();
+    Arc::get_mut(&mut s).unwrap().data_dir = dir.path().into();
+    let old = s.core_keys().verifying_key();
+    let verify = |key: VerifyingKey| {
+      let payload = wharf_api_types::tunnel::tunnel_payload(
+        "nonce", "core-kx", "peer-kx",
+      );
+      let (signature, alt) = s.core_keys().sign(&payload);
+      [signature].into_iter().chain(alt).any(|signature| {
+        let bytes: [u8; 64] =
+          hex::decode(signature).unwrap().try_into().unwrap();
+        key.verify(&payload, &Signature::from_bytes(&bytes)).is_ok()
+      })
+    };
+    let Json(first) = rotate_core_for_test(&s, true)
+      .await
+      .map_err(|e| e.0)
+      .unwrap();
+    let new = s.core_keys().verifying_key();
+    assert!(first.previous_expires_at.is_some());
+    assert!(verify(old) && verify(new));
+    let Json(rolled_back) = crate::key_rotation::rollback(
+      State(s.clone()),
+      rotation_admin(true),
+    )
+    .await
+    .map_err(|e| e.0)
+    .unwrap();
+    assert!(rolled_back.previous_expires_at.is_none());
+    assert!(verify(old) && !verify(new));
+    let Json(second) = rotate_core_for_test(&s, true)
+      .await
+      .map_err(|e| e.0)
+      .unwrap();
+    let new = s.core_keys().verifying_key();
+    assert!(second.previous_expires_at.is_some());
+    assert!(verify(old) && verify(new));
+    let Json(committed) = crate::key_rotation::commit(
+      State(s.clone()),
+      rotation_admin(true),
+    )
+    .await
+    .map_err(|e| e.0)
+    .unwrap();
+    assert!(committed.previous_expires_at.is_none());
+    assert!(!verify(old) && verify(new));
+    assert!(!dir.path().join("core.key.prev").exists());
+  }
+
+  #[tokio::test]
+  async fn revoke_all_revokes_login_only_and_preserves_gateway_callback()
+   {
+    let _guard = crate::rules::tests::TEST_LOCK.lock().await;
+    crate::rules::tests::reset_memory();
+    let s = crate::rules::tests::test_state();
+    let (refresh_before, oidc_before) = s.db.call_credentials(|c, key| {
+      crate::login::set_admin(c, "admin", "fixture-hash")?;
+      c.execute_batch(
+        "INSERT INTO sessions (hash, created_at, expires_at) VALUES ('h1', 0, 1), ('h2', 0, 1);
+         INSERT INTO api_tokens (name, hash, scope, created_at) VALUES ('t1', 'h1', 'read', 0), ('t2', 'h2', 'read', 0);
+         INSERT INTO gate_keys (name, hash, hosts, created_at) VALUES ('g1', 'h1', '[]', 0);
+         INSERT INTO agents (server, public_key, join_token_hash, join_expires_at) VALUES ('s1', NULL, 'h1', 1), ('s2', 'joined', NULL, NULL);
+         INSERT INTO notify_keys (name, hash, created_at) VALUES ('n1', 'h1', 0);"
+      ).map_err(sql_err)?;
+      key.put_secret(c, "K1", "fixture-value", 0, false)?;
+      key.put_secret(c, "NOTIFY_URL_n1", "fixture-url", 0, false)?;
+      Ok((db::setting(c, "gate.rt_key")?, hex::encode(crate::gate::seed(c, "oidc.refresh_key")?)))
+    }).await.unwrap();
+    assert!(refresh_before.is_none());
+    let callback =
+      crate::gate::revocations::config_key(&s.db).await.unwrap();
+    let seed =
+      s.db.call(|c| db::setting(c, "gate.rt_key")).await.unwrap();
+    assert!(crate::gate::fixture_ticket(true));
+    assert!(crate::oidc::fixture_code(true));
+    let response = revoke_all_credentials(
+      State(s.clone()),
+      Auth {
+        name: "admin".into(),
+        perms: [Perm::Admin].into(),
+        expires_at: None,
+        allowed_from: vec![],
+        services: None,
+        human: true,
+      },
+      ConnectInfo("203.0.113.1:3000".parse().unwrap()),
+      HeaderMap::new(),
+      Json(RevokeAllRequest {
+        confirm: Some("revoke-all".into()),
+      }),
+    )
+    .await
+    .map_err(|e| e.0)
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 4096)
+      .await
+      .unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+      value["revoked"],
+      json!({"sessions": 2, "api_tokens": 2, "gate_keys": 1, "join_tokens": 1})
+    );
+    assert!(!crate::gate::fixture_ticket(false));
+    assert!(!crate::oidc::fixture_code(false));
+    assert!(
+      callback
+        == crate::gate::revocations::config_key(&s.db).await.unwrap()
+    );
+    s.db.call(move |c| {
+      assert!(db::setting(c, "gate.revocation_seed")? == seed);
+      assert!(db::setting(c, "gate.rt_key")? != seed);
+      assert!(db::setting(c, "oidc.refresh_key")? != Some(oidc_before));
+      let cutoff: Value = serde_json::from_str(&db::setting(c, "gate.revocations")?.unwrap()).unwrap();
+      assert!((now_ms() / 1000 - 5..=now_ms() / 1000).contains(&cutoff["admin"].as_i64().unwrap()));
+      let still_present: (i64, i64, i64, i64) = c.query_row(
+        "SELECT (SELECT COUNT(*) FROM agents WHERE public_key IS NOT NULL),
+                (SELECT COUNT(*) FROM secrets), (SELECT COUNT(*) FROM notify_keys),
+                (SELECT COUNT(*) FROM agents WHERE join_token_hash IS NOT NULL OR join_expires_at IS NOT NULL)", [],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+      ).map_err(sql_err)?;
+      assert_eq!(still_present, (1, 2, 1, 0));
+      Ok(())
+    }).await.unwrap();
+    assert_eq!(
+      crate::rules::tests::notice_titles(&s, "security_receipt")
+        .await
+        .len(),
+      1
+    );
   }
 
   #[tokio::test]
@@ -1959,7 +2545,7 @@ mod tests {
         headers
           .insert("x-forwarded-for", "203.0.113.5".parse().unwrap());
       }
-      let key = hex::encode(state.key.verifying_key().to_bytes());
+      let key = state.core_keys().public_key();
       let result = agent_join(
         State(state.clone()),
         sealed.then_some(Extension(crate::cli_tunnel::Sealed)),
