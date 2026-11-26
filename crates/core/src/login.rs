@@ -4,14 +4,9 @@
 //!   页面设置管理员时必须填它，用掉即删（防止能访问页面的人抢先占走账号）；
 //! - 忘记密码：`docker exec -it wharf-core wharf-core reset-password`；
 //! - 密码用 argon2 存，会话只存 SHA-256，30 天过期；
-//! - 同一来源连续输错 5 次锁 15 分钟；所有来源合计输错 20 次全部锁 15 分钟
-//!   （防止伪造 `X-Forwarded-For` 换来源绕过，控制面可以经网关挂在公网上）。
+//! - 管理员登录按来源 IP 和公网/内网区域分别限制失败次数。
 
-use std::{
-  collections::HashMap,
-  sync::{Arc, LazyLock, Mutex},
-  time::{Duration, Instant},
-};
+use std::{sync::Arc, time::Duration};
 
 use argon2::{
   Argon2,
@@ -30,54 +25,18 @@ use crate::{
   api::AppError,
   auth::{hash_token, new_token},
   db::{Db, now_ms, sql_err},
+  lockout::{self, LockScope},
   state::AppState,
 };
 
 pub const COOKIE: &str = "wharf_session";
 const SETUP_CODE: &str = "setup.code";
 const SESSION_TTL: Duration = Duration::from_secs(30 * 24 * 3600);
-const MAX_FAILURES: u32 = 5;
-/// 所有来源合计的上限：来源可以伪造，账号只有一个。
-const MAX_TOTAL_FAILURES: u32 = 20;
-const ALL: &str = "*";
-const LOCKOUT: Duration = Duration::from_secs(15 * 60);
-
-/// 来源 → (连续失败次数, 最后一次失败的时间)。
-static FAILURES: LazyLock<Mutex<HashMap<String, (u32, Instant)>>> =
-  LazyLock::new(Default::default);
-
-/// 登录请求默认用 TCP 对端地址。对端是本机、内网或组网地址时，
-/// 取网关追加在 `X-Forwarded-For` 末尾的客户端地址。
 pub(crate) fn client_key(
   peer: std::net::IpAddr,
   headers: &HeaderMap,
 ) -> String {
-  let peer = peer.to_canonical();
-  let trusted = match peer {
-    std::net::IpAddr::V4(ip) => {
-      ip.is_loopback()
-        || ip.is_private()
-        // Tailscale / CGNAT 100.64.0.0/10
-        || (ip.octets()[0] == 100 && ip.octets()[1] & 0xc0 == 64)
-    }
-    std::net::IpAddr::V6(ip) => {
-      ip.is_loopback()
-        || ip.segments()[..3] == [0xfd7a, 0x115c, 0xa1e0]
-    }
-  };
-  trusted
-    .then(|| {
-      headers
-        .get_all("x-forwarded-for")
-        .iter()
-        .next_back()
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.rsplit(',').next())
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-    })
-    .flatten()
-    .unwrap_or_else(|| peer.to_string())
+  crate::source_trust::client_key(peer, headers)
 }
 
 pub(crate) fn source(
@@ -97,36 +56,6 @@ pub(crate) fn source(
     }
     None => addr,
   }
-}
-
-/// 还在锁定期时返回剩余分钟数：这个来源或全部来源超过上限都算。
-pub(crate) fn locked(key: &str) -> Option<u64> {
-  let map = FAILURES.lock().unwrap_or_else(|e| e.into_inner());
-  [(key, MAX_FAILURES), (ALL, MAX_TOTAL_FAILURES)]
-    .into_iter()
-    .filter_map(|(k, max)| {
-      let (count, at) = map.get(k)?;
-      let left = LOCKOUT.checked_sub(at.elapsed())?;
-      (*count >= max).then(|| left.as_secs().div_ceil(60))
-    })
-    .max()
-}
-
-pub(crate) fn record_failure(key: &str) {
-  let mut map = FAILURES.lock().unwrap_or_else(|e| e.into_inner());
-  map.retain(|_, (_, at)| at.elapsed() < LOCKOUT);
-  for k in [key, ALL] {
-    let entry =
-      map.entry(k.to_string()).or_insert((0, Instant::now()));
-    *entry = (entry.0 + 1, Instant::now());
-  }
-}
-
-pub(crate) fn clear_failures(key: &str) {
-  FAILURES
-    .lock()
-    .unwrap_or_else(|e| e.into_inner())
-    .remove(key);
 }
 
 /// 经网关走 HTTPS 时 cookie 加 `Secure`；直连 http 时加了浏览器会丢掉 cookie。
@@ -455,7 +384,8 @@ pub async fn login(
   Json(req): Json<Credentials>,
 ) -> Result<Response, AppError> {
   let key = client_key(peer.ip(), &headers);
-  if let Some(minutes) = locked(&key) {
+  if let Some(minutes) = lockout::locked(LockScope::AdminLogin, &key)
+  {
     return Err(
       ApiError::new(
         ErrorCode::Unauthorized,
@@ -470,7 +400,8 @@ pub async fn login(
     name == &username && verify_password(&req.password, hash)
   });
   if !ok {
-    record_failure(&key);
+    lockout::record_and_notify(&s, LockScope::AdminLogin, &key, None)
+      .await;
     let actor = account
       .as_ref()
       .filter(|(name, _)| name == &username)
@@ -516,7 +447,13 @@ pub async fn login(
         }
       }
       None => {
-        record_failure(&key);
+        lockout::record_and_notify(
+          &s,
+          LockScope::AdminLogin,
+          &key,
+          None,
+        )
+        .await;
         crate::audit::login_event(
           &s,
           "login_failed",
@@ -531,7 +468,7 @@ pub async fn login(
       }
     }
   }
-  clear_failures(&key);
+  lockout::clear(LockScope::AdminLogin, &key);
   crate::sessions::notify_new(&s, &key, &headers).await;
   crate::audit::login_event(
     &s,
@@ -653,33 +590,5 @@ mod tests {
       "theme=dark; wharf_session=abc".parse().unwrap(),
     );
     assert_eq!(cookie_value(&h), Some("abc"));
-  }
-
-  #[test]
-  fn locks_after_repeated_failures_per_client() {
-    let mut h = HeaderMap::new();
-    h.insert("x-forwarded-for", "1.2.3.4".parse().unwrap());
-    h.append(
-      "x-forwarded-for",
-      "1.2.3.4, 203.0.113.9".parse().unwrap(),
-    );
-    // 公网直连伪造的头不认，经本机网关时认。
-    assert_eq!(
-      client_key("198.51.100.7".parse().unwrap(), &h),
-      "198.51.100.7"
-    );
-    let key = client_key("127.0.0.1".parse().unwrap(), &h);
-    assert_eq!(key, "203.0.113.9");
-    assert_eq!(
-      client_key("fd7a:115c:a1e0::7".parse().unwrap(), &h),
-      key
-    );
-    for _ in 0..MAX_FAILURES - 1 {
-      record_failure(&key);
-    }
-    assert_eq!(locked(&key), None);
-    record_failure(&key);
-    assert_eq!(locked(&key), Some(15));
-    assert_eq!(locked("198.51.100.8"), None);
   }
 }

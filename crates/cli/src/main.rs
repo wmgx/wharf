@@ -1190,6 +1190,27 @@ pub enum GatewayCmd {
     #[command(flatten)]
     apply: ApplyFlags,
   },
+  /// 配置可信上游代理。不带修改参数时查看当前配置。
+  TrustedProxies {
+    name: String,
+    /// 信任 Cloudflare 官方回源网段。
+    #[arg(long)]
+    cloudflare: Option<bool>,
+    /// 信任集群网关和组网服务器的实际地址。
+    #[arg(long)]
+    cluster: Option<bool>,
+    /// 追加自定义 IP 或 CIDR，可多次使用。
+    #[arg(long)]
+    add: Vec<String>,
+    /// 移除自定义 IP 或 CIDR，可多次使用。
+    #[arg(long)]
+    rm: Vec<String>,
+    /// 清空可信代理配置。
+    #[arg(long, conflicts_with_all = ["cloudflare", "cluster", "add", "rm"])]
+    off: bool,
+    #[command(flatten)]
+    apply: ApplyFlags,
+  },
   /// 四层转发：入口监听公网 TCP 或 UDP 端口，转给服务。--rm 删除。
   Forward {
     name: String,

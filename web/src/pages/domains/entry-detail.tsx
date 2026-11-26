@@ -13,6 +13,7 @@ import { SheetDescription, SheetFooter, SheetHeader, SheetTitle } from "@/compon
 import { useStatus } from "@/status";
 import type { AccountView, GatewayTls, GatewayView } from "@/types";
 import { GatewayErrorPage } from "../gateway-error-page";
+import { GatewayTrustedProxies } from "../gateway-trusted-proxies";
 
 const TLS_TEXT: Record<GatewayTls, string> = { auto: "自动签证书", internal: "自签证书", off: "只走 HTTP" };
 
@@ -62,6 +63,7 @@ export function GatewayDetail({ g, onDone, onDomain }: { g: GatewayView; onDone:
         ["端口", g.spec.kind === "caddy" && <span className="font-mono text-xs">HTTP {g.spec.http_port ?? 80} · HTTPS {g.spec.https_port ?? 443}
         </span>],
         ["错误页", g.spec.kind === "caddy" && <GatewayErrorPage g={g} />],
+        ["可信代理", g.spec.kind === "caddy" && <GatewayTrustedProxies g={g} />],
         ["泛域名证书", g.spec.kind === "caddy" && g.spec.tls !== "off" && <div className="flex flex-wrap items-center gap-2">
           {wildcard.length ? wildcard.map((z) => <span key={z} className="inline-flex min-w-0 max-w-full items-center gap-1">
             <span className="break-all font-mono text-xs">*.{z}</span>

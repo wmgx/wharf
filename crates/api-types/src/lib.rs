@@ -21,6 +21,7 @@ pub mod seal;
 pub mod service_checks;
 pub mod spec;
 pub mod token;
+pub mod trusted_proxies;
 pub mod tunnel;
 pub mod view;
 pub mod web_schema;

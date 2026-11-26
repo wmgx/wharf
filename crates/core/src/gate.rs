@@ -618,19 +618,7 @@ pub fn trusted_ranges(
   net: &crate::render::Net,
   server: &str,
 ) -> Vec<String> {
-  let mut ranges = std::collections::BTreeSet::from([
-    "127.0.0.0/8".to_string(),
-    "100.64.0.0/10".to_string(),
-    "fd7a:115c:a1e0::/48".to_string(),
-    "::1/128".to_string(),
-  ]);
-  for ip in net.lan_ips.get(server).into_iter().flatten() {
-    if let Ok(ip) = ip.parse::<std::net::Ipv4Addr>() {
-      let [a, b, c, _] = ip.octets();
-      ranges.insert(format!("{a}.{b}.{c}.0/24"));
-    }
-  }
-  ranges.into_iter().collect()
+  crate::source_trust::gate_trusted_ranges(net, server)
 }
 
 pub async fn list_keys(
@@ -732,8 +720,10 @@ pub async fn check_key(
   ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
   headers: HeaderMap,
 ) -> Result<Response, AppError> {
+  use crate::lockout::{self, LockScope};
+
   let source = crate::login::client_key(peer.ip(), &headers);
-  if crate::login::locked(&source).is_some() {
+  if lockout::locked(LockScope::GateKey, &source).is_some() {
     tracing::warn!(source = %source, "门禁访问凭证来源已锁定");
     return Ok(response(
       401,
@@ -748,14 +738,24 @@ pub async fn check_key(
     .unwrap_or_default()
     .to_string();
   let host = forwarded_host(&headers).to_string();
+  let key_host = host.clone();
   if s
     .db
-    .call(move |c| key_allowed(c, &key, &host, now_ms()))
+    .call(move |c| key_allowed(c, &key, &key_host, now_ms()))
     .await?
   {
+    lockout::clear(LockScope::GateKey, &source);
     return Ok(response(200, None, "", &[]));
   }
-  crate::login::record_failure(&source);
+  lockout::record_and_notify(
+    &s,
+    LockScope::GateKey,
+    &source,
+    Some(&host),
+  )
+  .await;
+  crate::audit::login_event(&s, "gate_key_failed", &host, source)
+    .await;
   tokio::time::sleep(std::time::Duration::from_millis(200)).await;
   Ok(response(401, None, "{\"error\":\"访问凭证无效\"}", &[]))
 }
@@ -804,28 +804,23 @@ mod tests {
     let net = crate::render::Net {
       lan_ips: BTreeMap::from([(
         "s1".into(),
-        vec!["203.0.113.7".into(), "203.0.113.9".into()],
+        ["203.0.113.7", "10.20.0.5", "172.20.0.1"]
+          .map(str::to_string)
+          .to_vec(),
+      )]),
+      docker_subnets: BTreeMap::from([(
+        "s1".into(),
+        vec!["172.20.0.0/16".into()],
       )]),
       ..Default::default()
     };
     assert_eq!(
       trusted_ranges(&net, "s1"),
-      vec![
-        "100.64.0.0/10",
-        "127.0.0.0/8",
-        "203.0.113.0/24",
-        "::1/128",
-        "fd7a:115c:a1e0::/48"
-      ]
+      ["10.20.0.0/24", "127.0.0.0/8", "::1/128"]
     );
     assert_eq!(
       trusted_ranges(&net, "s2"),
-      vec![
-        "100.64.0.0/10",
-        "127.0.0.0/8",
-        "::1/128",
-        "fd7a:115c:a1e0::/48"
-      ]
+      ["127.0.0.0/8", "::1/128"]
     );
   }
   fn key_db() -> rusqlite::Connection {

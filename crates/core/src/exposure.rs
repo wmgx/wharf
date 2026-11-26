@@ -66,12 +66,18 @@ fn classify(
   services: &BTreeMap<String, Vec<(String, u16)>>,
 ) -> Option<PortRow> {
   let wildcard = matches!(l.addr.as_str(), "0.0.0.0" | "::" | "*");
-  if !wildcard
-    && (report.private_addr.as_ref().is_some_and(|a| a.ip == l.addr)
-      || report.lan_ips.contains(&l.addr)
-      || report.public_ip.as_deref() != Some(l.addr.as_str()))
-  {
-    return None;
+  let is_public_bind =
+    report.public_ip.as_deref() == Some(l.addr.as_str());
+  if !wildcard && !is_public_bind {
+    let other_public =
+      l.addr.parse::<std::net::IpAddr>().is_ok_and(|ip| {
+        crate::source_trust::is_global_unicast(ip.to_canonical())
+      });
+    if report.private_addr.as_ref().is_some_and(|a| a.ip == l.addr)
+      || !other_public
+    {
+      return None;
+    }
   }
   let project = l.project.as_deref().unwrap_or("");
   let gateway = gateways.iter().find(|(name, proto, port)| {
@@ -583,6 +589,30 @@ mod tests {
       exposed_title("s", &[row(1), row(2), row(3), row(4)]).unwrap(),
       "s 有 4 个未确认的公网端口：tcp/1、tcp/2、tcp/3 等"
     );
+  }
+
+  #[test]
+  fn public_bind_is_detected_with_legacy_lan_report() {
+    let report = AgentReport {
+      public_ip: Some("203.0.113.7".into()),
+      lan_ips: vec!["203.0.113.7".into(), "10.20.0.5".into()],
+      ..Default::default()
+    };
+    for (addr, public) in [
+      ("203.0.113.7", true),
+      ("198.51.100.7", true),
+      ("10.20.0.5", false),
+    ] {
+      let listen = Listen {
+        addr: addr.into(),
+        port: 5432,
+        ..Default::default()
+      };
+      assert_eq!(
+        classify(&listen, &report, &[], &BTreeMap::new()).is_some(),
+        public
+      );
+    }
   }
 
   #[test]

@@ -3,6 +3,7 @@ use crate::{
   api::{ApiResult, AppError},
   auth::{Auth, hash_token},
   db::{Db, now_ms, sql_err},
+  lockout::{self, LockScope},
   login,
   state::AppState,
 };
@@ -225,7 +226,8 @@ fn guard(
 ) -> Result<String, AppError> {
   login::require_human(auth)?;
   let key = login::client_key(peer.ip(), headers);
-  if let Some(minutes) = login::locked(&key) {
+  if let Some(minutes) = lockout::locked(LockScope::AdminLogin, &key)
+  {
     return Err(
       ApiError::new(
         ErrorCode::Unauthorized,
@@ -255,7 +257,13 @@ async fn failure(
   key: &str,
   source: String,
 ) -> AppError {
-  login::record_failure(key);
+  lockout::record_and_notify(
+    s,
+    LockScope::AdminLogin,
+    key,
+    Some("两步验证"),
+  )
+  .await;
   crate::audit::login_event(s, "login_failed", &auth.name, source)
     .await;
   tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -329,7 +337,13 @@ pub async fn enable(
     Ok(Some(codes))
   }).await?;
   let Some(codes) = codes else {
-    login::record_failure(&key);
+    lockout::record_and_notify(
+      &s,
+      LockScope::AdminLogin,
+      &key,
+      Some("两步验证"),
+    )
+    .await;
     return Err(ApiError::invalid("验证码不对").into());
   };
   crate::audit::login_event(
