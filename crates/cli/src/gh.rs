@@ -36,11 +36,26 @@ async fn gh(args: &[&str]) -> Option<String> {
   (out.status.success() && !text.is_empty()).then_some(text)
 }
 
-/// 没指定密钥的 GitHub 来源沿用已有密钥，首次同步需要显式选择。
+/// 没指定密钥的 GitHub 私有仓库沿用已有密钥，同步需要显式选择。
 pub async fn private_token(
   c: &Client,
   repo: &str,
   sync: bool,
+) -> CliResult<Option<String>> {
+  token_by_visibility(c, repo, sync, async |slug: &str| {
+    let private =
+      gh(&["api", &format!("repos/{slug}"), "--jq", ".private"])
+        .await;
+    private.as_deref() == Some("true")
+  })
+  .await
+}
+
+async fn token_by_visibility(
+  c: &Client,
+  repo: &str,
+  sync: bool,
+  is_private: impl AsyncFnOnce(&str) -> bool,
 ) -> CliResult<Option<String>> {
   let Some(slug) = github_repo(repo) else {
     if sync {
@@ -51,6 +66,9 @@ pub async fn private_token(
     }
     return Ok(None);
   };
+  if !is_private(&slug).await {
+    return Ok(None);
+  }
   if sync {
     refresh(c).await?;
     return Ok(Some(SECRET.into()));
@@ -62,20 +80,12 @@ pub async fn private_token(
     );
     return Ok(Some(SECRET.into()));
   }
-  let private =
-    gh(&["api", &format!("repos/{slug}"), "--jq", ".private"]).await;
-  missing_token(&slug, private.as_deref() == Some("true"))
+  Err(missing_token(&slug).into())
 }
 
-fn missing_token(
-  slug: &str,
-  private: bool,
-) -> CliResult<Option<String>> {
-  if private {
-    return Err(ApiError::invalid(format!("仓库 {slug} 是 GitHub 私有仓库，但控制面还没有密钥 {SECRET}"))
-      .with_hint("先用 wharf secret set GITHUB_TOKEN 保存最小只读权限 PAT，或加 --sync-gh-token 用本机 gh 登录同步").into());
-  }
-  Ok(None)
+fn missing_token(slug: &str) -> ApiError {
+  ApiError::invalid(format!("仓库 {slug} 是 GitHub 私有仓库，但控制面还没有密钥 {SECRET}"))
+    .with_hint("先用 wharf secret set GITHUB_TOKEN 保存最小只读权限 PAT，或加 --sync-gh-token 用本机 gh 登录同步")
 }
 
 /// 由显式选择同步本机 gh 凭据。
@@ -121,7 +131,7 @@ mod tests {
 }
 
 #[tokio::test]
-async fn github_token_is_reused_without_writing() {
+async fn existing_github_token_is_only_reused_for_private_repos() {
   use tokio::io::{AsyncReadExt, AsyncWriteExt};
   let listener =
     tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -141,11 +151,35 @@ async fn github_token_is_reused_without_writing() {
     socket.write_all(response.as_bytes()).await.unwrap();
   });
   let client = Client::test_endpoint(endpoint);
-  assert_eq!(
-    private_token(&client, "https://github.com/o/priv", false)
+  for sync in [false, true] {
+    assert_eq!(
+      token_by_visibility(
+        &client,
+        "https://github.com/o/pub",
+        sync,
+        async |slug: &str| {
+          assert_eq!(slug, "o/pub");
+          false
+        }
+      )
       .await
-      .unwrap()
-      .as_deref(),
+      .unwrap(),
+      None
+    );
+  }
+  assert_eq!(
+    token_by_visibility(
+      &client,
+      "https://github.com/o/priv",
+      false,
+      async |slug: &str| {
+        assert_eq!(slug, "o/priv");
+        true
+      }
+    )
+    .await
+    .unwrap()
+    .as_deref(),
     Some(SECRET)
   );
   server.await.unwrap();
@@ -153,16 +187,11 @@ async fn github_token_is_reused_without_writing() {
 
 #[test]
 fn private_github_repo_requires_existing_token_or_explicit_sync() {
-  let crate::client::CliError::Api(error) =
-    missing_token("o/priv", true).unwrap_err()
-  else {
-    panic!("缺少密钥应返回 API 错误");
-  };
+  let error = missing_token("o/priv");
   assert!(
     error
       .hint
       .as_deref()
       .is_some_and(|hint| hint.contains("--sync-gh-token"))
   );
-  assert_eq!(missing_token("o/pub", false).unwrap(), None);
 }

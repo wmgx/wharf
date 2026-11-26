@@ -27,51 +27,67 @@ const ACCEPT: &str = "application/vnd.oci.image.index.v1+json, \
 /// 镜像源直连；原仓库和 dockerd 拉镜像一样走代理（经出口时是本机的分流代理）。
 struct Clients {
   direct: reqwest::Client,
-  origin: reqwest::Client,
+  proxy: Option<reqwest::Client>,
 }
 
 impl Clients {
-  fn pick(&self, mirror: bool) -> &reqwest::Client {
-    if mirror { &self.direct } else { &self.origin }
+  fn repo(&self, mirror: bool, host: &str, path: &str) -> Repo<'_> {
+    let proxy = self.proxy.as_ref().filter(|_| !mirror);
+    Repo::new(
+      proxy.unwrap_or(&self.direct),
+      proxy.is_some(),
+      host,
+      path,
+    )
   }
+}
+
+fn client(proxy: Option<&str>) -> Result<reqwest::Client, ApiError> {
+  let proxied = proxy.is_some();
+  let mut b = reqwest::Client::builder().timeout(ATTEMPT).redirect(
+    reqwest::redirect::Policy::custom(move |attempt| {
+      if attempt.previous().len() >= 10 {
+        return attempt.error("仓库重定向次数过多");
+      }
+      if attempt
+        .previous()
+        .first()
+        .is_some_and(|url| url.path().ends_with("/tags/list"))
+      {
+        return attempt.stop();
+      }
+      if proxied
+        && validate_realm_url(attempt.url().as_str(), None).is_err()
+      {
+        return attempt.error(realm_denied());
+      }
+      attempt.follow()
+    }),
+  );
+  if let Some(p) = proxy {
+    b = b.proxy(
+      reqwest::Proxy::all(p)
+        .map_err(|e| ApiError::invalid(e.to_string()))?,
+    );
+  }
+  b.build().map_err(|e| ApiError::internal(e.to_string()))
 }
 
 pub async fn resolve(
   job: &ResolveImages,
   ctx: &Ctx,
 ) -> Result<Vec<ResolvedImage>, ApiError> {
-  let build = |proxy: Option<&str>| {
-    let mut b = reqwest::Client::builder().timeout(ATTEMPT).redirect(
-      reqwest::redirect::Policy::custom(|attempt| {
-        if attempt.previous().len() >= 10 {
-          return attempt.error("仓库重定向次数过多");
-        }
-        if attempt
-          .previous()
-          .first()
-          .is_some_and(|url| url.path().ends_with("/tags/list"))
-        {
-          return attempt.stop();
-        }
-        attempt.follow()
-      }),
-    );
-    if let Some(p) = proxy {
-      b = b.proxy(
-        reqwest::Proxy::all(p)
-          .map_err(|e| ApiError::invalid(e.to_string()))?,
-      );
-    }
-    b.build().map_err(|e| ApiError::internal(e.to_string()))
-  };
   let proxy = crate::build::usable_proxy(
     job.pull.registry_proxy.as_deref(),
     ctx,
   )
   .await;
   let clients = Clients {
-    direct: build(None)?,
-    origin: build(proxy.as_deref())?,
+    direct: client(None)?,
+    proxy: proxy
+      .as_deref()
+      .map(|proxy| client(Some(proxy)))
+      .transpose()?,
   };
   // 各镜像同时查，一台机器镜像多、出口慢时不会排队超时。
   let all = futures_util::future::join_all(
@@ -144,7 +160,7 @@ async fn resolve_one(
     .to_string();
   let mut errors = Vec::new();
   for (host, mirror) in hosts(&registry, policy) {
-    let mut repo = Repo::new(clients.pick(mirror), &host, &path);
+    let mut repo = clients.repo(mirror, &host, &path);
     match repo.head(&reference).await {
       Ok(digest) => {
         let (config, platforms) = repo
@@ -193,7 +209,7 @@ async fn newer_tags(
     return vec![];
   };
   for (host, mirror) in hosts(&registry, policy) {
-    let mut repo = Repo::new(clients.pick(mirror), &host, &path);
+    let mut repo = clients.repo(mirror, &host, &path);
     if let Ok(tags) = repo.tags().await {
       return pick(&current, &tags);
     }
@@ -273,6 +289,7 @@ fn registry_host(registry: &str) -> &str {
 
 struct Repo<'a> {
   client: &'a reqwest::Client,
+  proxied: bool,
   /// `https://host`
   origin: String,
   base: String,
@@ -283,6 +300,7 @@ struct Repo<'a> {
 impl<'a> Repo<'a> {
   fn new(
     client: &'a reqwest::Client,
+    proxied: bool,
     host: &str,
     path: &str,
   ) -> Self {
@@ -304,6 +322,7 @@ impl<'a> Repo<'a> {
     };
     Self {
       client,
+      proxied,
       base,
       path: path.to_string(),
       origin,
@@ -394,7 +413,14 @@ impl<'a> Repo<'a> {
           .and_then(|v| v.to_str().ok())
           .unwrap_or_default()
           .to_string();
-        self.token = Some(token(&self.origin, &challenge).await?);
+        self.token = Some(
+          token(
+            &self.origin,
+            &challenge,
+            self.proxied.then_some(self.client),
+          )
+          .await?,
+        );
         continue;
       }
       if !resp.status().is_success() {
@@ -558,6 +584,7 @@ fn arch() -> &'static str {
 pub(crate) async fn token(
   origin: &str,
   challenge: &str,
+  proxy: Option<&reqwest::Client>,
 ) -> Result<String, String> {
   let params = challenge
     .strip_prefix("Bearer ")
@@ -578,39 +605,16 @@ pub(crate) async fn token(
   let realm =
     realm.ok_or_else(|| "仓库的认证信息不完整".to_string())?;
   let response = tokio::time::timeout(ATTEMPT, async {
-    let url = validate_realm_url(&realm, Some(origin))?;
-    let host = url.host_str().ok_or_else(realm_denied)?;
-    let port =
-      url.port_or_known_default().ok_or_else(realm_denied)?;
-    let mut client = reqwest::Client::builder()
-      .timeout(ATTEMPT)
-      .no_proxy()
-      .redirect(reqwest::redirect::Policy::none());
-    if host
-      .trim_matches(['[', ']'])
-      .parse::<std::net::IpAddr>()
-      .is_err()
-    {
-      let addresses: Vec<_> = tokio::net::lookup_host((host, port))
-        .await
-        .map_err(|_| realm_denied())?
-        .collect();
-      if addresses.is_empty()
-        || addresses.iter().any(|a| {
-          if local_realm(&url, origin) {
-            !a.ip().is_loopback()
-          } else {
-            !wharf_api_types::net_probe::is_public(a.ip())
-          }
-        })
-      {
-        return Err(realm_denied());
-      }
-      client = client.resolve_to_addrs(host, &addresses);
-    }
+    let url =
+      validate_realm_url(&realm, proxy.is_none().then_some(origin))?;
+    let direct;
+    let client = if let Some(proxy) = proxy {
+      proxy
+    } else {
+      direct = pinned_client(&url, origin).await?;
+      &direct
+    };
     client
-      .build()
-      .map_err(|_| realm_denied())?
       .get(url)
       .query(&query)
       .send()
@@ -626,6 +630,41 @@ pub(crate) async fn token(
     .or_else(|| body["access_token"].as_str())
     .map(str::to_string)
     .ok_or_else(|| "仓库要求登录".to_string())
+}
+
+async fn pinned_client(
+  url: &reqwest::Url,
+  origin: &str,
+) -> Result<reqwest::Client, String> {
+  let host = url.host_str().ok_or_else(realm_denied)?;
+  let port = url.port_or_known_default().ok_or_else(realm_denied)?;
+  let mut client = reqwest::Client::builder()
+    .timeout(ATTEMPT)
+    .no_proxy()
+    .redirect(reqwest::redirect::Policy::none());
+  if host
+    .trim_matches(['[', ']'])
+    .parse::<std::net::IpAddr>()
+    .is_err()
+  {
+    let addresses: Vec<_> = tokio::net::lookup_host((host, port))
+      .await
+      .map_err(|_| realm_denied())?
+      .collect();
+    if addresses.is_empty()
+      || addresses.iter().any(|a| {
+        if local_realm(url, origin) {
+          !a.ip().is_loopback()
+        } else {
+          !wharf_api_types::net_probe::is_public(a.ip())
+        }
+      })
+    {
+      return Err(realm_denied());
+    }
+    client = client.resolve_to_addrs(host, &addresses);
+  }
+  client.build().map_err(|_| realm_denied())
 }
 
 fn realm_denied() -> String {
@@ -644,7 +683,10 @@ fn validate_realm_url(
   origin: Option<&str>,
 ) -> Result<reqwest::Url, String> {
   let url = reqwest::Url::parse(raw).map_err(|_| realm_denied())?;
-  if !url.username().is_empty() || url.password().is_some() {
+  if !url.username().is_empty()
+    || url.password().is_some()
+    || url.port_or_known_default().is_none_or(|port| port == 0)
+  {
     return Err(realm_denied());
   }
   if origin.is_some_and(|origin| local_realm(&url, origin)) {
@@ -674,6 +716,63 @@ fn validate_realm_url(
 mod tests {
   use super::*;
   use serde_json::json;
+
+  #[tokio::test]
+  async fn registry_proxy_receives_manifest_and_token_requests() {
+    use tokio::{
+      io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+      net::TcpListener,
+    };
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy = format!("http://{}", listener.local_addr().unwrap());
+    let clients = Clients {
+      direct: client(None).unwrap(),
+      proxy: Some(client(Some(&proxy)).unwrap()),
+    };
+    let mut repo = clients.repo(false, "127.0.0.1:1", "org/app");
+    let serve = async {
+      for (expected, response) in [
+        (
+          "HEAD http://127.0.0.1:1/v2/org/app/manifests/latest HTTP/1.1",
+          concat!(
+            "HTTP/1.1 401 Unauthorized\r\n",
+            "WWW-Authenticate: Bearer realm=\"https://auth.example.test/token\"\r\n",
+            "Content-Length: 0\r\nConnection: close\r\n\r\n",
+          ),
+        ),
+        (
+          "CONNECT auth.example.test:443 HTTP/1.1",
+          "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        ),
+      ] {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut socket = BufReader::new(socket);
+        let mut line = String::new();
+        socket.read_line(&mut line).await.unwrap();
+        assert_eq!(line.trim_end(), expected);
+        loop {
+          line.clear();
+          assert_ne!(socket.read_line(&mut line).await.unwrap(), 0);
+          if line == "\r\n" {
+            break;
+          }
+        }
+        socket
+          .get_mut()
+          .write_all(response.as_bytes())
+          .await
+          .unwrap();
+      }
+    };
+    let (_, result) =
+      tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(serve, repo.head("latest"))
+      })
+      .await
+      .expect("token 请求应到达代理");
+    assert!(result.unwrap_err().starts_with("取 token 失败"));
+  }
 
   #[test]
   fn parses_index_and_config_platforms() {
@@ -739,6 +838,7 @@ fn registry_prefix_and_pagination_are_origin_bound() {
   let client = reqwest::Client::new();
   let repo = Repo::new(
     &client,
+    false,
     "ghcr.example.test/tok_secret_123456",
     "org/app",
   );

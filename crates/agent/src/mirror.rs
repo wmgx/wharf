@@ -233,7 +233,7 @@ async fn registry(
     .and_then(|v| v.to_str().ok())
     .unwrap_or_default()
     .to_string();
-  let token = crate::registry::token(base, &challenge).await?;
+  let token = crate::registry::token(base, &challenge, None).await?;
   {
     let mut tokens =
       m.tokens.lock().unwrap_or_else(|e| e.into_inner());
