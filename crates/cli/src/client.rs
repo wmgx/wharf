@@ -743,6 +743,12 @@ async fn resolves_token_sources_and_reports_bad_configuration() {
   }
   let file = temp.path().join("t.tok");
   std::fs::write(&file, format!(" \t{expected}\r\n")).unwrap();
+  Config {
+    token_file: Some("~/t.tok".into()),
+    ..Default::default()
+  }
+  .save_to(&path)
+  .unwrap();
   let child = std::process::Command::new(
     std::env::current_exe().unwrap(),
   )
@@ -751,7 +757,8 @@ async fn resolves_token_sources_and_reports_bad_configuration() {
     "client::resolves_token_sources_and_reports_bad_configuration",
   ])
   .env("HOME", temp.path())
-  .env("WHARF_TEST_TOKEN_FILE_HOME", &expected)
+  .env("WHARF_TEST_TOKEN_FILE_HOME", &path)
+  .env("WHARF_TOKEN", &expected)
   .output()
   .unwrap();
   assert!(child.status.success());
