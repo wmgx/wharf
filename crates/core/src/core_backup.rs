@@ -23,7 +23,7 @@ use wharf_api_types::{
   ApiError, ErrorCode,
   agent::{
     AgentOp, BackupSummary, CORE_BACKUP_DIR, CORE_REST_SERVER_PORT,
-    OneTimeSecret, ResticAction, ResticKeyInfo, ResticRepo,
+    OneTimeSecret, ResticAction, ResticKeyInfo,
   },
   plan::ApplyResponse,
   view::{BackupRecord, Perm},
@@ -682,12 +682,12 @@ async fn run_repo<T: serde::de::DeserializeOwned>(
     snap,
     &core.server,
     REPO,
-    ResticRepo::Rest {
-      host: w.target_ip.clone(),
-      port: CORE_REST_SERVER_PORT,
-      user: HTTP_USER.into(),
-      password: OneTimeSecret(creds.http.clone()),
-    },
+    backup::rest_repo(
+      &w.target_ip,
+      CORE_REST_SERVER_PORT,
+      HTTP_USER,
+      &creds.http,
+    ),
     &creds.key,
     action,
   );
@@ -864,7 +864,7 @@ mod tests {
       rules::tests::{TEST_LOCK, test_state},
     };
     use serde_json::json;
-    use wharf_api_types::agent::CoreHostProbeResult;
+    use wharf_api_types::agent::{CoreHostProbeResult, ResticRepo};
 
     let _lock = TEST_LOCK.lock().await;
     let dir = tempfile::tempdir().unwrap();
@@ -878,6 +878,7 @@ mod tests {
     state
       .db
       .call_credentials(move |c, key| {
+      c.execute("INSERT INTO agents (server, public_key) VALUES ('s1', 's1')", []).map_err(sql_err)?;
         login::set_admin(
           c,
           "operator",

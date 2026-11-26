@@ -118,7 +118,11 @@ impl Hub {
       server,
       Conn {
         conn_id: self.next_conn.fetch_add(1, Ordering::Relaxed),
-        public_key: String::new(),
+        public_key: if core_probe {
+          server.into()
+        } else {
+          String::new()
+        },
         core_probe,
         tx,
         pending: pending.clone(),

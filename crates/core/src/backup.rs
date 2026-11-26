@@ -229,16 +229,17 @@ pub(crate) fn job(
   })
 }
 
-fn rest_repo(
-  w: &Where,
-  service: &str,
-  creds: &ServiceCreds,
+pub(crate) fn rest_repo(
+  target_ip: &str,
+  port: u16,
+  user: &str,
+  http: &str,
 ) -> ResticRepo {
   ResticRepo::Rest {
-    host: w.target_ip.clone(),
-    port: REST_SERVER_PORT,
-    user: service.to_string(),
-    password: OneTimeSecret(creds.http.clone()),
+    host: target_ip.into(),
+    port,
+    user: user.into(),
+    password: OneTimeSecret(http.into()),
   }
 }
 
@@ -452,7 +453,12 @@ pub async fn backup(
           &snap,
           &w.server,
           service,
-          rest_repo(&w, service, &creds),
+          rest_repo(
+            &w.target_ip,
+            REST_SERVER_PORT,
+            service,
+            &creds.http,
+          ),
           &creds.key,
           ResticAction::Backup {
             host: w.server.clone(),
@@ -537,7 +543,12 @@ pub async fn restore(
         &snap,
         &w.server,
         service,
-        rest_repo(&w, service, &creds),
+        rest_repo(
+          &w.target_ip,
+          REST_SERVER_PORT,
+          service,
+          &creds.http,
+        ),
         &creds.key,
         ResticAction::Restore {
           snapshot: snapshot_id.to_string(),

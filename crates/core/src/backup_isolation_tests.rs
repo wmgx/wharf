@@ -104,7 +104,7 @@ async fn service_credentials_are_isolated_per_service() {
     &snap,
     &w.server,
     "svc-a",
-    rest_repo(&w, "svc-a", &a),
+    rest_repo(&w.target_ip, REST_SERVER_PORT, "svc-a", &a.http),
     &a.key,
     ResticAction::Snapshots,
   );

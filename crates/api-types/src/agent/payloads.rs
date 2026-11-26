@@ -238,13 +238,13 @@ pub enum ResticAction {
   Prune,
   /// 给仓库加一把口令，结果是新钥匙的 id。
   AddKey { new_password: OneTimeSecret },
-  /// 列出仓库钥匙。结果是 `Vec<ResticKeyInfo>`。
+  /// 列出仓库钥匙。仓库不存在时返回空的 `Vec<ResticKeyInfo>`。
   ListKeys,
   /// 删掉一把口令。业务备份只能在备份服务器本机执行。
   RemoveKey { id: String },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResticKeyInfo {
   pub id: String,
   #[serde(default)]
