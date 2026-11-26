@@ -14,10 +14,12 @@ use serde_json::json;
 use wharf_api_types::spec::GatewayKind;
 use wharf_providers::Owner;
 
-use crate::{render, snapshot, state::AppState, world::World};
+use crate::{snapshot, state::AppState, world::World};
+
+pub const SECRET_PREFIX: &str = "WHARF_ACME_DNS_";
 
 pub fn secret_name(gateway: &str) -> String {
-  format!("WHARF_ACME_DNS_{gateway}")
+  format!("{SECRET_PREFIX}{gateway}")
 }
 
 pub fn allowed(world: &World, gateway: &str) -> Vec<String> {
@@ -44,13 +46,6 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     return false;
   }
   a.iter().zip(b).fold(0, |diff, (a, b)| diff | (a ^ b)) == 0
-}
-
-pub fn fill(config: &str, key: &str, url: &str) -> String {
-  config.replace(render::ACME_DNS_KEY, key).replace(
-    render::ACME_DNS_URL,
-    &format!("{}/agent/acme-dns", url.trim_end_matches('/')),
-  )
 }
 
 #[derive(Deserialize)]
@@ -228,18 +223,38 @@ mod tests {
 
   #[test]
   fn fill_points_at_update_route() {
-    let config = fill(
-      "server_url [[WHARF_ACME_DNS_URL]]\npassword [[WHARF_ACME_DNS_KEY]]",
-      "k",
-      "https://core.example.com",
-    );
+    use crate::render::{AcmeDnsFill, Site, caddyfile_with_acme};
+
+    let spec = serde_json::from_value(json!({
+      "kind": "caddy", "server": "s1", "error_page": "unchanged"
+    }))
+    .unwrap();
+    let site = Site {
+      hostname: "*.example.com".into(),
+      wildcard: true,
+      dns: Some("example.com".into()),
+      ..Default::default()
+    };
+    let fill = Some(AcmeDnsFill {
+      key: "k",
+      url: "https://core.example.com",
+    });
+    let render = |sites: &[Site], fill| {
+      caddyfile_with_acme(
+        "edge",
+        &spec,
+        sites,
+        &[],
+        false,
+        None,
+        fill,
+      )
+    };
+    let config = render(&[site], fill);
     assert!(config.contains(
       "server_url https://core.example.com/agent/acme-dns"
     ));
     assert!(config.contains("password k"));
-    assert_eq!(
-      fill("unchanged", "k", "https://core.example.com"),
-      "unchanged"
-    );
+    assert_eq!(render(&[], fill), render(&[], None));
   }
 }

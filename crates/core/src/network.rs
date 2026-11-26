@@ -58,7 +58,7 @@ pub async fn probe_all(
     })
     .collect();
   tokio::join!(
-    link::probe_pairs(s, &net, pairs),
+    link::probe_pairs(s, &net, pairs, link::ProbeMode::Persist),
     crate::tailnet_probe::probe_extra(s, &snap, &net)
   );
   Ok(snap)

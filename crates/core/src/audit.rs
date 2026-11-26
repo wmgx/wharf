@@ -43,6 +43,10 @@ impl AuditSlot {
       Some(actor.to_string());
   }
 
+  pub fn skip_record(&self) {
+    self.0.lock().unwrap_or_else(|e| e.into_inner()).actor = None;
+  }
+
   pub fn set_detail(&self, detail: String) {
     self.0.lock().unwrap_or_else(|e| e.into_inner()).detail =
       Some(detail);

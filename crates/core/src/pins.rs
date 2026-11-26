@@ -242,7 +242,8 @@ pub async fn resolve(
   // 各台机器同时查，一台慢不拖累别的。
   let calls =
     todo.into_iter().map(|((server, platform_only), items)| {
-      let pull = snapshot::pull_policy(&desired.servers[&server]);
+      let pull =
+        snapshot::committed_pull_policy(&snap.world, &server);
       async move {
         let images = items
           .iter()
@@ -396,7 +397,11 @@ pub async fn resolve_commits(
     let server = row.spec.server.clone();
     let fetch = crate::build::code_fetch(
       state,
-      snap,
+      &crate::secret_policy::service_secrets(
+        desired,
+        &name,
+        &snap.secrets,
+      ),
       &format!("服务 {name}"),
       None,
       build.git.as_ref(),
@@ -409,7 +414,7 @@ pub async fn resolve_commits(
         AgentOp::ResolveCommit(ResolveCommit {
           service: name.clone(),
           fetch,
-          pull: snapshot::pull_policy(&desired.servers[&server]),
+          pull: snapshot::committed_pull_policy(&snap.world, &server),
         }),
         COMMIT_TIMEOUT,
         None,

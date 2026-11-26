@@ -329,21 +329,48 @@ pub async fn make_plan(
   state: &AppState,
   req: PlanRequest,
 ) -> Result<Planned, ApiError> {
-  make_plan_inner(state, req, true).await
+  make_plan_inner(
+    state,
+    req,
+    snapshot::load(&state.db).await?,
+    true,
+    true,
+  )
+  .await
 }
 
 pub(crate) async fn pending_plan(
   state: &AppState,
 ) -> Result<Planned, ApiError> {
-  make_plan_inner(state, PlanRequest::default(), false).await
+  make_plan_inner(
+    state,
+    PlanRequest::default(),
+    snapshot::load(&state.db).await?,
+    false,
+    true,
+  )
+  .await
 }
 
-async fn make_plan_inner(
+pub(crate) async fn require_plan_request(
+  state: &AppState,
+  auth: &crate::auth::Auth,
+  req: &PlanRequest,
+) -> Result<(), ApiError> {
+  let current = state
+    .db
+    .call(|c| World::from_rows(db::all_resources(c)?))
+    .await?;
+  crate::token_scope::require_plan_request(auth, &current, req)
+}
+
+pub(crate) async fn make_plan_inner(
   state: &AppState,
   req: PlanRequest,
+  mut snap: Snapshot,
   check_migrated_images: bool,
+  admin: bool,
 ) -> Result<Planned, ApiError> {
-  let mut snap = snapshot::load(&state.db).await?;
   let current = snap.world.clone();
   let mut desired = current.clone();
   let given = usize::from(!req.changes.is_empty())
@@ -378,6 +405,13 @@ async fn make_plan_inner(
   )?;
   desired.allocate_ports()?;
   desired.validate()?;
+  crate::secret_policy::validate_accounts(
+    &desired,
+    &snap.account_links,
+  )?;
+  crate::secret_policy::require_plan_git_secrets(
+    &current, &desired, admin,
+  )?;
   // 只改日志、端口监控或心跳时间时，计划只写配置，离线和现存漂移都不触发部署。
   if req.changes.iter().all(|c| {
     matches!(c, wharf_api_types::spec::Change::UpsertService { .. })
@@ -636,8 +670,15 @@ async fn make_plan_inner(
   for (name, svc) in &desired.services {
     let to = &svc.spec.server;
     if let Some(from) = moved_from(&snap, &current, name, to) {
-      crate::link::require_reach(state, &net, from, to, "迁移数据")
-        .await?;
+      crate::link::require_reach(
+        state,
+        &net,
+        from,
+        to,
+        "迁移数据",
+        crate::link::ProbeMode::Plan,
+      )
+      .await?;
     }
   }
   let status =
@@ -1179,7 +1220,7 @@ fn service_items(
       desired,
       net,
       name,
-      &snap.service_values,
+      &snap.render_values(desired, name),
     )?;
     let template = snapshot::service_template(desired, net, name)?;
     let after =

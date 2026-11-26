@@ -69,10 +69,12 @@ struct Code {
   expires: i64,
 }
 
+pub const SECRET_PREFIX: &str = "OIDC_";
+
 /// 服务环境变量里引用 client 密钥用的名字。
 pub fn secret_name(host: &str) -> String {
   format!(
-    "OIDC_{}",
+    "{SECRET_PREFIX}{}",
     host.to_ascii_uppercase().replace(['.', '-'], "_")
   )
 }
@@ -124,6 +126,12 @@ pub fn with_client_secrets(
 
 fn is_oidc(sso: &SsoSpec) -> bool {
   sso.mode == SsoMode::Oidc
+}
+
+pub(crate) fn route_is_oidc(
+  route: &wharf_api_types::spec::RouteSpec,
+) -> bool {
+  route.sso.as_ref().is_some_and(is_oidc)
 }
 
 pub async fn init(s: &AppState) -> Result<(), ApiError> {

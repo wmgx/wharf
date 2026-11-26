@@ -62,7 +62,7 @@ async fn tick(
       &snap.world,
       &net,
       name,
-      &snap.service_values,
+      &snap.render_values(&snap.world, name),
     )
     .ok()
     .map(|(_, h)| h);

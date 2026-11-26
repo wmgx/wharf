@@ -591,11 +591,13 @@ pub async fn site_login(
   use wharf_api_types::spec::{LoginWrite, SsoMode};
   let host = forwarded_host(&headers);
   let snap = crate::snapshot::load(&s.db).await?;
-  let Some(login) = snap
-    .world
-    .routes
-    .get(host)
-    .and_then(|r| r.spec.sso.as_ref())
+  let Some(route) = snap.world.routes.get(host) else {
+    return Ok(response(404, None, "域名没有配置代登录", &[]));
+  };
+  let Some(login) = route
+    .spec
+    .sso
+    .as_ref()
     .filter(|s| s.mode == SsoMode::Login)
     .and_then(|s| s.login.as_ref())
   else {
@@ -626,6 +628,11 @@ pub async fn site_login(
       &[],
     ));
   }
+  let secrets = crate::secret_policy::login_secrets(
+    &snap.world,
+    &route.spec,
+    &snap.secrets,
+  );
   let outcome = crate::sso_login::run(&s, host).await;
   let mut cookies = Vec::new();
   let mut storage = Vec::new();
@@ -655,11 +662,8 @@ pub async fn site_login(
           value,
           http_only,
         } => {
-          let value = crate::sso_login::render(
-            value,
-            &outcome.vars,
-            &snap.secrets,
-          )?;
+          let value =
+            crate::sso_login::render(value, &outcome.vars, &secrets)?;
           cookies.push(crate::sso_login::cookie_header(
             name, &value, *http_only,
           )?);
@@ -669,11 +673,7 @@ pub async fn site_login(
           storage.push((
             matches!(write, LoginWrite::LocalStorage { .. }),
             key.clone(),
-            crate::sso_login::render(
-              value,
-              &outcome.vars,
-              &snap.secrets,
-            )?,
+            crate::sso_login::render(value, &outcome.vars, &secrets)?,
           ))
         }
       }

@@ -378,7 +378,11 @@ async fn commits(
     let r = async {
       let fetch = crate::build::code_fetch(
         state,
-        snap,
+        &crate::secret_policy::service_secrets(
+          &snap.world,
+          name,
+          &snap.secrets,
+        ),
         &format!("服务 {name}"),
         None,
         Some(git),

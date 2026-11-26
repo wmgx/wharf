@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use axum::http::Method;
 use wharf_api_types::{
   ApiError, ErrorCode,
-  plan::{Layer, Plan, PlanItem},
-  spec::RouteSpec,
+  plan::{Layer, Plan, PlanItem, PlanRequest},
+  spec::{Change, RouteSpec},
 };
 
 use crate::{
@@ -226,6 +226,114 @@ pub fn check_plan_scope(
     Ok(())
   } else {
     Err(blocked.into_iter().collect())
+  }
+}
+
+pub fn require_plan_request(
+  auth: &Auth,
+  current: &World,
+  req: &PlanRequest,
+) -> Result<(), ApiError> {
+  let Some(services) = &auth.services else {
+    return Ok(());
+  };
+  if req.fleet.is_some() {
+    return Err(forbidden(
+      &auth.name,
+      services,
+      "；请求包含范围外的改动：fleet",
+    ));
+  }
+  let mut blocked = BTreeSet::new();
+  let route_allowed = |route: &RouteSpec| {
+    route.upstream.is_none()
+      && route.redirect.is_none()
+      && services.contains(&route.service)
+      && route.paths.iter().all(|p| {
+        p.upstream.is_none()
+          && p.service.as_ref().is_some_and(|s| services.contains(s))
+      })
+  };
+  let upsert_route =
+    |route: &RouteSpec| -> Result<Option<String>, ApiError> {
+      let host = crate::world::normalize_hostname(&route.hostname)?;
+      Ok(
+        (!route_allowed(route)
+          || current
+            .routes
+            .get(&host)
+            .is_some_and(|r| !route_allowed(&r.spec)))
+        .then(|| format!("route/{host}")),
+      )
+    };
+  if let Some(partial) = &req.partial {
+    blocked
+      .extend(partial.servers.keys().map(|n| format!("server/{n}")));
+    blocked.extend(
+      partial.gateways.keys().map(|n| format!("gateway/{n}")),
+    );
+    blocked
+      .extend(partial.edge_apps.keys().map(|n| format!("edge/{n}")));
+    blocked.extend(
+      partial.bookmarks.keys().map(|n| format!("bookmark/{n}")),
+    );
+    blocked.extend(
+      partial
+        .services
+        .keys()
+        .filter(|n| !services.contains(*n))
+        .map(|n| format!("service/{n}")),
+    );
+    for route in &partial.routes {
+      blocked.extend(upsert_route(route)?);
+    }
+  }
+  for change in &req.changes {
+    let address = match change {
+      Change::UpsertService { name, .. }
+      | Change::RemoveService { name, .. }
+      | Change::RefreshImages { name, .. }
+      | Change::RetagImage { name, .. } => {
+        (!services.contains(name)).then(|| format!("service/{name}"))
+      }
+      Change::UpdateServer { name, .. } => {
+        Some(format!("server/{name}"))
+      }
+      Change::UpsertGateway { name, .. }
+      | Change::RemoveGateway { name } => {
+        Some(format!("gateway/{name}"))
+      }
+      Change::UpsertEdgeApp { name, .. }
+      | Change::RemoveEdgeApp { name } => {
+        Some(format!("edge/{name}"))
+      }
+      Change::UpsertBookmark { id, .. } => {
+        Some(format!("bookmark/{}", id.as_deref().unwrap_or("new")))
+      }
+      Change::RemoveBookmark { id } => Some(format!("bookmark/{id}")),
+      Change::UpsertRoute { spec } => upsert_route(spec)?,
+      Change::RemoveRoute { hostname } => {
+        let host = crate::world::normalize_hostname(hostname)?;
+        current
+          .routes
+          .get(&host)
+          .is_none_or(|r| !route_allowed(&r.spec))
+          .then(|| format!("route/{host}"))
+      }
+    };
+    blocked.extend(address);
+  }
+  if blocked.is_empty() {
+    Ok(())
+  } else {
+    Err(forbidden(
+      &auth.name,
+      services,
+      &format!(
+        "；请求包含范围外的改动：{}",
+        blocked.into_iter().collect::<Vec<_>>().join("、")
+      ),
+    ))
   }
 }
 
