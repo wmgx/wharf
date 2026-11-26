@@ -16,7 +16,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
-  ApiError,
+  ApiError, ErrorCode,
   agent::{AgentOp, HostUnit},
   view::{Issue, IssueLevel, IssueSubject},
 };
@@ -266,8 +266,16 @@ pub async fn logs(
   if !watched(&s, &server).await.contains(&unit)
     && !fetch(&s, &server).await?.iter().any(|u| u.unit == unit)
   {
-    return Err(ApiError::new(ErrorCode::Forbidden, format!("unit {unit} 不在宿主机程序列表或已接管名单中，不能读取其日志"))
-      .with_hint("仅支持查看“宿主机程序”里列出的非系统服务日志，或先接管该程序").into());
+    let message = format!(
+      "unit {unit} 不在宿主机程序列表或已接管名单中，不能读取其日志"
+    );
+    let hint =
+      "仅支持查看“宿主机程序”里列出的非系统服务日志，或先接管该程序";
+    return Err(
+      ApiError::new(ErrorCode::Forbidden, message)
+        .with_hint(hint)
+        .into(),
+    );
   }
   let text: String = s
     .hub

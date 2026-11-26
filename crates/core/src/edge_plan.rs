@@ -352,8 +352,8 @@ pub async fn pages_record(
 mod tests {
   use super::*;
 
-  #[test]
-  fn redeploys_after_unfinished_deploy() {
+  #[tokio::test]
+  async fn redeploys_after_unfinished_deploy() {
     let spec: EdgeAppSpec = serde_json::from_value(json!({
       "account": "cf",
       "kind": "worker",
@@ -368,20 +368,23 @@ mod tests {
         version: 1,
       },
     );
-    let plan = |deployed: &[(&str, &str)]| {
-      let deployed = deployed
-        .iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
-        .collect();
+    let plan = async |deployed: &[(&str, &str)]| {
+      let snap = Snapshot {
+        edge_deployed: deployed
+          .iter()
+          .map(|(k, v)| (k.to_string(), v.to_string()))
+          .collect(),
+        ..Snapshot::default()
+      };
       let mut b = Builder::default();
-      deploy_items(&mut b, &deployed, &world, &world);
+      deploy_items(&mut b, &snap, &world, &world).await.unwrap();
       b.items.len()
     };
     // 没有记录：沿用旧判断，配置没变就不发布。
-    assert_eq!(plan(&[]), 0);
-    assert_eq!(plan(&[("w", &fingerprint("w", &spec))]), 0);
+    assert_eq!(plan(&[]).await, 0);
+    assert_eq!(plan(&[("w", &fingerprint("w", &spec))]).await, 0);
     // 上次发布中途失败。
-    assert_eq!(plan(&[("w", DEPLOYING)]), 1);
+    assert_eq!(plan(&[("w", DEPLOYING)]).await, 1);
   }
 }
 
