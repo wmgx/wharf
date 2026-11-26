@@ -2548,8 +2548,16 @@ async fn dns_items(
           Action::Create,
           None,
           after,
-          vec![],
-          format!("新建 {} 记录", spec.record_type),
+          if edge.is_some() {
+            vec![Impact::Public]
+          } else {
+            vec![]
+          },
+          if edge.is_some() {
+            "新增边缘应用自定义域名的公网 DNS 记录".into()
+          } else {
+            format!("新建 {} 记录", spec.record_type)
+          },
         );
         b.step(vec![id], title, upsert(None, vec![]));
       }

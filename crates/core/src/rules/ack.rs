@@ -10,7 +10,7 @@ use wharf_api_types::{
   },
 };
 
-use super::{AckEntry, ensure_loaded, view, with};
+use super::{AckEntry, ensure_loaded, with};
 use crate::{
   api::ApiResult,
   auth::Auth,
@@ -262,9 +262,10 @@ pub async fn ack_api(
   Json(req): Json<AlertAckRequest>,
 ) -> ApiResult<AlertsView> {
   auth.require(Perm::Apply)?;
+  require_alert_scope(&s, &auth, &req.rule, &req.subject).await?;
   ack_at(&s, &req.rule, &req.subject, &auth.name, req.note, now_ms())
     .await?;
-  Ok(Json(view(&s).await?))
+  Ok(Json(super::api::view_for(&s, &auth).await?))
 }
 
 /// `POST /api/alerts/unack`
@@ -274,6 +275,37 @@ pub async fn unack_api(
   Json(req): Json<AlertUnackRequest>,
 ) -> ApiResult<AlertsView> {
   auth.require(Perm::Apply)?;
+  require_alert_scope(&s, &auth, &req.rule, &req.subject).await?;
   unack(&s, &req.rule, &req.subject).await?;
-  Ok(Json(view(&s).await?))
+  Ok(Json(super::api::view_for(&s, &auth).await?))
+}
+
+async fn require_alert_scope(
+  state: &AppState,
+  auth: &Auth,
+  rule: &str,
+  subject: &str,
+) -> Result<(), ApiError> {
+  if let Some(allowed) = &auth.services {
+    ensure_loaded(state).await;
+    let snap = crate::snapshot::load(&state.db).await?;
+    let custom =
+      with(|m| m.custom_rules.get(rule).map(|r| r.service.clone()));
+    if custom.as_deref().is_some_and(|service| service != subject)
+      || !crate::scope_filter::alert_in_scope(
+        allowed,
+        &snap.world,
+        custom.as_deref(),
+        rule,
+        Some(subject),
+      )
+    {
+      return Err(crate::token_scope::forbidden(
+        &auth.name,
+        allowed,
+        "；这条告警不属于名单里的服务或域名",
+      ));
+    }
+  }
+  Ok(())
 }

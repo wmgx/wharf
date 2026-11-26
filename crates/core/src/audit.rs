@@ -144,6 +144,16 @@ pub fn should_record(method: &Method, path: &str) -> bool {
   }
   *method == Method::GET
     && (path == "/api/export"
+      || path == "/api/shell-log"
+      || (path.starts_with("/api/oidc/clients/")
+        && path.ends_with("/secret"))
+      || (path.starts_with("/api/servers/")
+        && (path.ends_with("/dirs")
+          || path.ends_with("/host-units")
+          || (path.contains("/host-units/")
+            && path.ends_with("/logs"))))
+      || (path.starts_with("/api/edge/")
+        && path.ends_with("/script"))
       || path == "/api/sso/accounts"
       || path.starts_with("/api/sso/accounts/")
       || path.ends_with("/terminal")
@@ -219,7 +229,7 @@ pub async fn list(
   auth: Auth,
   Query(q): Query<AuditQuery>,
 ) -> ApiResult<Vec<AuditEntry>> {
-  auth.require(Perm::Read)?;
+  auth.require(Perm::Admin)?;
   let rows = state
     .db
     .call(move |c| {
@@ -282,5 +292,26 @@ mod tests {
     assert!(!should_record(&Method::POST, "/ping/abc"));
     assert!(!should_record(&Method::POST, "/agent/join"));
     assert!(!should_record(&Method::POST, "/api/login"));
+  }
+}
+
+#[cfg(test)]
+#[test]
+fn shell_log_redacts_commands_and_audit_records_sensitive_reads() {
+  assert_eq!(
+    crate::redact::redact_command(
+      "curl -H 'Authorization: Bearer tok123' -e API_KEY=xyz https://example.com"
+    ),
+    "curl -H 'Authorization: Bearer ***' -e API_KEY=*** https://example.com",
+  );
+  for path in [
+    "/api/shell-log",
+    "/api/oidc/clients/a.com/secret",
+    "/api/servers/s1/dirs",
+    "/api/edge/w/script",
+    "/api/servers/s1/host-units",
+    "/api/servers/s1/host-units/app.service/logs",
+  ] {
+    assert!(should_record(&Method::GET, path), "{path}");
   }
 }

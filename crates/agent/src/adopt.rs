@@ -152,11 +152,18 @@ fn is_wharf_container(
       name.trim_start_matches('/'),
       "wharf-core" | "wharf-agent"
     )
-    || labels.get(PROJECT_LABEL).is_some_and(|p| {
-      matches!(*p, "wharf-tailscale" | "wharf-backup" | "wharf-link")
-        || p.starts_with("wharf-link-")
-        || p.starts_with("wharf-gw-")
-    })
+    || labels
+      .get(PROJECT_LABEL)
+      .is_some_and(|p| reserved_project(p))
+}
+
+fn reserved_project(project: &str) -> bool {
+  matches!(project, "wharf-tailscale" | "wharf-backup" | "wharf-link")
+    || project.starts_with("wharf-gw-")
+    || project.starts_with("wharf-link-")
+    || project
+      .starts_with(wharf_api_types::agent::TRIAL_PROJECT_PREFIX)
+    || project.starts_with(wharf_api_types::agent::TASK_DATA_PREFIX)
 }
 
 /// 本机的全部容器，不含 agent 自己。
@@ -248,6 +255,19 @@ async fn read_container(
   let container = inspect(docker, "container", name, ctx)
     .await?
     .ok_or_else(|| ApiError::not_found(format!("没有容器 {name}")))?;
+  let labels = container["Config"]["Labels"]
+    .as_object()
+    .into_iter()
+    .flatten()
+    .filter_map(|(key, value)| Some((key.as_str(), value.as_str()?)))
+    .collect();
+  let actual_name = container["Name"].as_str().unwrap_or(name);
+  if is_wharf_container(actual_name, &labels) {
+    return Err(ApiError::new(
+      ErrorCode::Forbidden,
+      format!("容器 {name} 属于 Wharf 管理或系统组件，不能读取导入"),
+    ));
+  }
   let image =
     container["Config"]["Image"].as_str().unwrap_or_default();
   let image_inspect = inspect(docker, "image", image, ctx).await?;
@@ -272,13 +292,30 @@ async fn read_project(
     .run(ctx)
     .await?
     .check("docker ps")?;
-  let first = out
-    .stdout
-    .lines()
-    .find_map(|l| serde_json::from_str::<PsLine>(l).ok())
-    .ok_or_else(|| {
-      ApiError::not_found(format!("没有 compose 项目 {project}"))
+  let forbidden = || {
+    ApiError::new(
+      ErrorCode::Forbidden,
+      format!(
+        "compose 项目 {project} 属于 Wharf 管理或系统组件，不能读取导入"
+      ),
+    )
+  };
+  if reserved_project(project) {
+    return Err(forbidden());
+  }
+  let mut first = None;
+  for line in out.stdout.lines() {
+    let ps: PsLine = serde_json::from_str(line).map_err(|_| {
+      ApiError::new(ErrorCode::AgentFailed, "无法核验项目的容器归属")
     })?;
+    if is_wharf_container(&ps.names, &labels(&ps.labels)) {
+      return Err(forbidden());
+    }
+    first.get_or_insert(ps);
+  }
+  let first = first.ok_or_else(|| {
+    ApiError::not_found(format!("没有 compose 项目 {project}"))
+  })?;
   let labels = labels(&first.labels);
   let dir = labels
     .get("com.docker.compose.project.working_dir")
@@ -626,5 +663,22 @@ mod observation_tests {
     assert!(!wharf_owned(&labels(
       "com.docker.compose.project=wharf-test"
     )));
+  }
+}
+
+#[cfg(test)]
+#[test]
+fn adopt_rejects_wharf_owned_container_and_project() {
+  for (name, raw, owned) in [
+    ("wharf-core", "", true),
+    ("system", "wharf.system=agent", true),
+    ("gateway", "com.docker.compose.project=wharf-gw-edge", true),
+    ("app", "com.docker.compose.project=custom", false),
+  ] {
+    assert_eq!(
+      is_wharf_container(name, &labels(raw)),
+      owned,
+      "{name}"
+    );
   }
 }

@@ -6,8 +6,6 @@
 //!   别人的记录要确认接管；
 //! - Pages 的域名走常规 DNS（CNAME 到 `<项目>.pages.dev`），再在项目上绑定。
 
-use std::collections::BTreeMap;
-
 use serde_json::json;
 use wharf_api_types::{
   ApiError,
@@ -30,7 +28,7 @@ pub async fn edge_items(
   current: &World,
   desired: &World,
 ) -> Result<(), ApiError> {
-  deploy_items(b, &snap.edge_deployed, current, desired);
+  deploy_items(b, snap, current, desired).await?;
   domain_items(b, snap, desired).await
 }
 
@@ -55,48 +53,64 @@ pub fn fingerprint(name: &str, spec: &EdgeAppSpec) -> String {
   )
 }
 
-fn deploy_items(
+async fn deploy_items(
   b: &mut Builder,
-  deployed: &BTreeMap<String, String>,
+  snap: &Snapshot,
   current: &World,
   desired: &World,
-) {
+) -> Result<(), ApiError> {
   for (name, app) in &desired.edge_apps {
     let Some(source) = &app.spec.source else {
       continue;
     };
     let before = current.edge_apps.get(name);
-    let last = deployed.get(name).map(String::as_str);
+    let last = snap.edge_deployed.get(name).map(String::as_str);
+    let project = app.spec.project_name(name);
+    let target_changed = before.is_none_or(|old| {
+      old.spec.account != app.spec.account
+        || old.spec.kind != app.spec.kind
+        || old.spec.project_name(name) != project
+    });
     let up_to_date = match last {
       Some(fp) => fp == fingerprint(name, &app.spec),
-      // 记录指纹之前发布的：沿用原来的判断，只看代码来源变没变。
       None => {
-        before.is_some_and(|r| r.spec.source.as_ref() == Some(source))
+        !target_changed
+          && before
+            .is_some_and(|r| r.spec.source.as_ref() == Some(source))
       }
     };
     if up_to_date {
       continue;
     }
-    let what = match app.spec.kind {
-      EdgeKind::Worker => "Worker",
-      EdgeKind::Pages => "Pages",
+    let remote_exists = if target_changed {
+      let provider =
+        snapshot::edge_provider(account(snap, &app.spec.account)?)?;
+      snapshot::with_timeout(
+        &format!("检查 Cloudflare 项目 {project}"),
+        provider.get(provider_kind(app.spec.kind), project),
+      )
+      .await?
+      .is_some()
+    } else {
+      false
     };
+    let (action, impacts, reason) = deploy_decision(
+      app.spec.kind,
+      &app.spec.account,
+      project,
+      before.is_some(),
+      target_changed,
+      remote_exists,
+      last == Some(DEPLOYING),
+    );
     let id = b.item(
       format!("{KIND_EDGE}/{name}"),
       Layer::Edge,
-      if before.is_some() {
-        Action::Update
-      } else {
-        Action::Create
-      },
+      action,
       None,
-      Some(json!({ "project": app.spec.project_name(name) })),
-      vec![],
-      if last == Some(DEPLOYING) {
-        format!("上次发布没有完成，重新发布到 Cloudflare {what}")
-      } else {
-        format!("发布到 Cloudflare {what}")
-      },
+      Some(json!({ "project": project })),
+      impacts,
+      reason,
     );
     b.step(
       vec![id],
@@ -104,6 +118,54 @@ fn deploy_items(
       Step::EdgeDeploy { app: name.clone() },
     );
   }
+  Ok(())
+}
+
+pub(crate) fn deploy_decision(
+  kind: EdgeKind,
+  account: &str,
+  project: &str,
+  before_exists: bool,
+  target_changed: bool,
+  remote_exists: bool,
+  unfinished: bool,
+) -> (Action, Vec<Impact>, String) {
+  let what = match kind {
+    EdgeKind::Worker => "Worker",
+    EdgeKind::Pages => "Pages",
+  };
+  let action = if before_exists {
+    Action::Update
+  } else {
+    Action::Create
+  };
+  if target_changed && remote_exists {
+    let impacts = if before_exists {
+      vec![Impact::Overwrite]
+    } else {
+      vec![Impact::Public, Impact::Overwrite]
+    };
+    return (
+      Action::Adopt,
+      impacts,
+      format!(
+        "Cloudflare 账号 {account} 里已有未纳管的 {what} 项目 {project}，发布将覆盖其代码并继承现有绑定"
+      ),
+    );
+  }
+  if target_changed {
+    return (
+      action,
+      vec![Impact::Public],
+      format!("新建并发布到 Cloudflare {what}（将获得公网访问地址）"),
+    );
+  }
+  let reason = if unfinished {
+    format!("上次发布没有完成，重新发布到 Cloudflare {what}")
+  } else {
+    format!("发布到 Cloudflare {what}")
+  };
+  (action, vec![], reason)
 }
 
 /// 想要的绑定：域名 → 边缘应用的厂商项目。
@@ -173,9 +235,9 @@ async fn domain_items(
       None,
       Some(json!({ "project": want.project, "kind": want.kind })),
       if takeover {
-        vec![Impact::Overwrite]
+        vec![Impact::Public, Impact::Overwrite]
       } else {
-        vec![]
+        vec![Impact::Public]
       },
       if takeover {
         format!(
@@ -183,7 +245,7 @@ async fn domain_items(
           want.hostname
         )
       } else {
-        format!("绑定到 {}", want.project)
+        format!("绑定公网自定义域名到 {}", want.project)
       },
     );
     b.step(
@@ -290,8 +352,8 @@ pub async fn pages_record(
 mod tests {
   use super::*;
 
-  #[test]
-  fn redeploys_after_unfinished_deploy() {
+  #[tokio::test]
+  async fn redeploys_after_unfinished_deploy() {
     let spec: EdgeAppSpec = serde_json::from_value(json!({
       "account": "cf",
       "kind": "worker",
@@ -306,19 +368,67 @@ mod tests {
         version: 1,
       },
     );
-    let plan = |deployed: &[(&str, &str)]| {
-      let deployed = deployed
-        .iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
-        .collect();
+    let plan = async |deployed: &[(&str, &str)]| {
+      let snap = Snapshot {
+        edge_deployed: deployed
+          .iter()
+          .map(|(k, v)| (k.to_string(), v.to_string()))
+          .collect(),
+        ..Snapshot::default()
+      };
       let mut b = Builder::default();
-      deploy_items(&mut b, &deployed, &world, &world);
+      deploy_items(&mut b, &snap, &world, &world).await.unwrap();
       b.items.len()
     };
     // 没有记录：沿用旧判断，配置没变就不发布。
-    assert_eq!(plan(&[]), 0);
-    assert_eq!(plan(&[("w", &fingerprint("w", &spec))]), 0);
+    assert_eq!(plan(&[]).await, 0);
+    assert_eq!(plan(&[("w", &fingerprint("w", &spec))]).await, 0);
     // 上次发布中途失败。
-    assert_eq!(plan(&[("w", DEPLOYING)]), 1);
+    assert_eq!(plan(&[("w", DEPLOYING)]).await, 1);
   }
+}
+
+#[cfg(test)]
+#[test]
+fn edge_deploy_marks_unmanaged_overwrite_and_public() {
+  for (before, changed, remote, expected, expected_impacts) in [
+    (
+      false,
+      true,
+      true,
+      Action::Adopt,
+      vec![Impact::Public, Impact::Overwrite],
+    ),
+    (false, true, false, Action::Create, vec![Impact::Public]),
+    (true, false, true, Action::Update, vec![]),
+  ] {
+    let (action, impacts, _) = deploy_decision(
+      EdgeKind::Worker,
+      "cf",
+      "prod-api",
+      before,
+      changed,
+      remote,
+      false,
+    );
+    assert_eq!((action, impacts), (expected, expected_impacts));
+  }
+  let mut world = World::default();
+  let spec: EdgeAppSpec = serde_json::from_value(
+    json!({"kind":"worker","account":"cf","project":"prod-api"}),
+  )
+  .unwrap();
+  world.edge_apps.insert(
+    "existing".into(),
+    crate::world::EdgeRow {
+      spec: spec.clone(),
+      version: 1,
+    },
+  );
+  assert_eq!(
+    crate::edge::validate_app(&world, "new", &spec)
+      .unwrap_err()
+      .code,
+    wharf_api_types::ErrorCode::InvalidInput
+  );
 }

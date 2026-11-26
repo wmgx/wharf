@@ -42,7 +42,7 @@ mod digest;
 #[path = "rules/service_checks.rs"]
 mod service_checks;
 #[path = "rules/service_overrides.rs"]
-mod service_overrides;
+pub(crate) mod service_overrides;
 #[path = "rules/store.rs"]
 mod store;
 #[path = "rules/suppress.rs"]
