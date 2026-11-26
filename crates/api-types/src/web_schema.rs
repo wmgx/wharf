@@ -97,6 +97,7 @@ pub fn web_schema() -> Value {
     generator.subschema_for::<crate::external::ExternalStatus>();
   let _ = generator.subschema_for::<crate::external::DnsCheck>();
   let _ = generator.subschema_for::<view::SecretView>();
+  let _ = generator.subschema_for::<view::CoreKeyView>();
   let _ = generator.subschema_for::<view::Perm>();
   let _ = generator.subschema_for::<view::TotpView>();
   let _ = generator.subschema_for::<view::SessionRow>();

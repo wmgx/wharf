@@ -46,7 +46,7 @@ export interface AgentReport extends Pick<Gen.AgentReport, "public_ip" | "egress
   docker_disk?: { total: number; free: number };
 }
 
-export interface ServerView {
+export interface ServerView extends Pick<Gen.ServerView, "key_fingerprint" | "key_rotation"> {
   note?: string;
   name: string;
   settings: Record<string, unknown> & {

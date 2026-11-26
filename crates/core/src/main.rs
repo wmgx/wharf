@@ -64,6 +64,7 @@ mod import;
 mod import_api;
 mod jobs;
 mod join;
+mod key_rotation;
 mod link;
 mod link_cert;
 mod lint;
@@ -213,7 +214,13 @@ async fn main() -> anyhow::Result<()> {
   }
   source_trust::init_extra_proxies(&cli.trusted_proxies)
     .map_err(|e| anyhow::anyhow!(e.message))?;
-  let key = load_or_create_key(&cli.data_dir.join("core.key"))?;
+  let key = key_rotation::CoreKeyRing::load(
+    &db,
+    &cli.data_dir,
+    load_or_create_key(&cli.data_dir.join("core.key"))?,
+  )
+  .await
+  .map_err(|e| anyhow::anyhow!(e.message))?;
   auth::bootstrap(&db, &cli.data_dir).await?;
   login::bootstrap_setup_code(&db, &cli.data_dir).await?;
 

@@ -649,6 +649,12 @@ export interface CoreAddresses {
   server?: string | null;
 }
 
+export interface CoreKeyView {
+  fingerprint: string;
+  previous_expires_at?: string | null;
+  public_key: string;
+}
+
 export interface CreatedToken {
   allowed_from: string[];
   expires_at: string | null;
@@ -2417,6 +2423,11 @@ export interface ServerView {
    * agent 是否已经加入（完成过 join）。
    */
   joined: boolean;
+  /**
+   * 当前已注册 agent 公钥的 12 位指纹。
+   */
+  key_fingerprint?: string | null;
+  key_rotation?: boolean;
   last_seen?: string | null;
   name: string;
   note?: string | null;

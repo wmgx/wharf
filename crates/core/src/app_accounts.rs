@@ -388,7 +388,7 @@ mod tests {
     let state = Arc::new(AppState {
       db: crate::db::Db::memory(),
       hub: Default::default(),
-      key: ed25519_dalek::SigningKey::from_bytes(&[0; 32]),
+      key: ed25519_dalek::SigningKey::from_bytes(&[0; 32]).into(),
       runs: Default::default(),
       apply_lock: Default::default(),
       public_url: None,

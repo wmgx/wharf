@@ -493,6 +493,17 @@ pub fn router(state: Arc<AppState>) -> Router {
       "/api/secrets/{name}/previous",
       axum::routing::delete(clear_secret_previous),
     )
+    .route(
+      "/api/servers/{name}/rotate-key",
+      post(crate::key_rotation::rotate_agent),
+    )
+    .route("/api/core/key", get(crate::key_rotation::show))
+    .route("/api/core/key/rotate", post(crate::key_rotation::rotate))
+    .route("/api/core/key/commit", post(crate::key_rotation::commit))
+    .route(
+      "/api/core/key/rollback",
+      post(crate::key_rotation::rollback),
+    )
     .route("/api/plan", post(make_plan))
     .route("/api/plans/{id}", get(show_plan))
     .route("/api/apply", post(apply_plan))
@@ -835,6 +846,12 @@ async fn agent_join(
   if hex::decode(&key).map(|b| b.len()).unwrap_or(0) != 32 {
     return Err(ApiError::invalid("公钥格式不对").into());
   }
+  let _rotation = s.key.operation.try_lock().map_err(|_| {
+    ApiError::new(
+      ErrorCode::Conflict,
+      "通信密钥正在切换，稍后可用原加入命令重试",
+    )
+  })?;
   let hub = s.clone();
   let server = s
     .db
@@ -861,7 +878,8 @@ async fn agent_join(
         );
       }
       tx.execute(
-        "UPDATE agents SET public_key = ?1, join_token_hash = NULL, join_expires_at = NULL, report = NULL, last_seen = NULL
+        "UPDATE agents SET public_key = ?1, join_token_hash = NULL, join_expires_at = NULL,
+           report = NULL, last_seen = NULL, next_public_key = NULL, next_key_expires_at = NULL, key_rotation = 0
          WHERE server = ?2",
         params![key, server],
       )
@@ -873,9 +891,11 @@ async fn agent_join(
     })
     .await?;
   tracing::info!("服务器 {server} 完成加入");
+  let keys = s.key.read();
   Ok(Json(JoinResponse {
     server,
-    core_public_key: hex::encode(s.key.verifying_key().to_bytes()),
+    core_public_key: keys.public_key(),
+    previous_core_public_key: keys.previous_public_key(),
   }))
 }
 
@@ -2202,6 +2222,183 @@ mod tests {
     );
     assert_eq!(rows[0].used_by, ["b"]);
     assert!(rows[0].other_refs.is_empty());
+  }
+
+  fn rotation_admin(human: bool) -> Auth {
+    Auth {
+      name: "admin".into(),
+      perms: [Perm::Admin].into(),
+      expires_at: None,
+      allowed_from: vec![],
+      services: None,
+      human,
+    }
+  }
+
+  async fn rotate_core_for_test(
+    s: &Arc<AppState>,
+    human: bool,
+  ) -> ApiResult<wharf_api_types::view::CoreKeyView> {
+    crate::key_rotation::rotate(
+      State(s.clone()),
+      rotation_admin(human),
+      ConnectInfo("203.0.113.1:3000".parse().unwrap()),
+      HeaderMap::new(),
+      Json(serde_json::from_value(json!({})).unwrap()),
+    )
+    .await
+  }
+
+  #[tokio::test]
+  async fn legacy_agent_is_online_but_key_rotation_requires_capability()
+   {
+    let s = crate::rules::tests::test_state();
+    s.db.call(|c| {
+      c.execute("INSERT INTO agents (server, public_key) VALUES ('s1', 'fixture-public')", []).map_err(sql_err)?;
+      Ok(())
+    }).await.unwrap();
+    s.hub.mock_agent("s1", false, |_| {
+      panic!("不应向旧 agent 下发密钥操作")
+    });
+    assert!(s.hub.is_online("s1"));
+    let error = crate::key_rotation::rotate_agent(
+      State(s.clone()),
+      rotation_admin(true),
+      ConnectInfo("203.0.113.1:3000".parse().unwrap()),
+      HeaderMap::new(),
+      Path("s1".into()),
+    )
+    .await
+    .err()
+    .unwrap()
+    .0;
+    assert_eq!(error.code, ErrorCode::Conflict);
+    assert!(error.hint.unwrap().contains("upgrade"));
+    assert_eq!(
+      rotate_core_for_test(&s, true).await.err().unwrap().0.code,
+      ErrorCode::Conflict
+    );
+    assert!(s.hub.is_online("s1"));
+  }
+
+  #[tokio::test]
+  async fn core_rotation_requires_current_cli_to_confirm_config_writable()
+   {
+    let s = crate::rules::tests::test_state();
+    let error =
+      rotate_core_for_test(&s, false).await.err().unwrap().0;
+    assert_eq!(error.code, ErrorCode::Conflict);
+    assert!(error.hint.unwrap().contains("config.toml"));
+  }
+
+  #[tokio::test]
+  async fn core_rotation_aborts_on_prepare_failure_and_all_agents_keep_trusting_old_key()
+   {
+    use ed25519_dalek::{Signature, Verifier};
+    use std::sync::Mutex;
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = crate::rules::tests::test_state();
+    Arc::get_mut(&mut s).unwrap().data_dir = dir.path().into();
+    let old = s.key.verifying_key();
+    let old_public = hex::encode(old.to_bytes());
+    s.db
+      .call(|c| {
+        c.execute_batch(
+          "INSERT INTO agents (server, public_key, key_rotation)
+        VALUES ('s1', 'fixture-one', 1), ('s2', 'fixture-two', 1);",
+        )
+        .map_err(sql_err)
+      })
+      .await
+      .unwrap();
+    let configurations = ["s1", "s2"].map(|name| {
+      let config = Arc::new(Mutex::new((old_public.clone(), None)));
+      let persisted = config.clone();
+      s.hub.mock_rotation_agent(name, move |op| {
+        let AgentOp::TrustCoreKey(job) = op else {
+          panic!("应下发控制面公钥")
+        };
+        assert!(!job.reconnect);
+        let fail = name == "s2" && job.alt.is_some();
+        *persisted.lock().unwrap() = (job.current, job.alt);
+        if fail {
+          return Err(ApiError::internal("测试：推送应答丢失"));
+        }
+        Ok(Value::Null)
+      });
+      config
+    });
+    assert_eq!(
+      rotate_core_for_test(&s, true).await.err().unwrap().0.code,
+      ErrorCode::Conflict
+    );
+    assert!(!dir.path().join("core.key.next").exists());
+    let payload = b"fixture-handshake";
+    let (signature, alt) = s.key.read().sign(payload);
+    assert!(alt.is_none());
+    let bytes: [u8; 64] =
+      hex::decode(signature).unwrap().try_into().unwrap();
+    for config in &configurations {
+      assert_eq!(*config.lock().unwrap(), (old_public.clone(), None));
+      assert!(
+        old.verify(payload, &Signature::from_bytes(&bytes)).is_ok()
+      );
+    }
+    assert!(s.hub.is_online("s1") && s.hub.is_online("s2"));
+  }
+
+  #[tokio::test]
+  async fn core_rotation_dual_signatures_then_rollback_and_commit() {
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+    let _guard = crate::rules::tests::TEST_LOCK.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = crate::rules::tests::test_state();
+    Arc::get_mut(&mut s).unwrap().data_dir = dir.path().into();
+    let old = s.key.verifying_key();
+    let verify = |key: VerifyingKey| {
+      let payload = wharf_api_types::tunnel::tunnel_payload(
+        "nonce", "core-kx", "peer-kx",
+      );
+      let (signature, alt) = s.key.read().sign(&payload);
+      [signature].into_iter().chain(alt).any(|signature| {
+        let bytes: [u8; 64] =
+          hex::decode(signature).unwrap().try_into().unwrap();
+        key.verify(&payload, &Signature::from_bytes(&bytes)).is_ok()
+      })
+    };
+    let Json(first) = rotate_core_for_test(&s, true)
+      .await
+      .map_err(|e| e.0)
+      .unwrap();
+    let new = s.key.verifying_key();
+    assert!(first.previous_expires_at.is_some());
+    assert!(verify(old) && verify(new));
+    let Json(rolled_back) = crate::key_rotation::rollback(
+      State(s.clone()),
+      rotation_admin(true),
+    )
+    .await
+    .map_err(|e| e.0)
+    .unwrap();
+    assert!(rolled_back.previous_expires_at.is_none());
+    assert!(verify(old) && !verify(new));
+    let Json(second) = rotate_core_for_test(&s, true)
+      .await
+      .map_err(|e| e.0)
+      .unwrap();
+    let new = s.key.verifying_key();
+    assert!(second.previous_expires_at.is_some());
+    assert!(verify(old) && verify(new));
+    let Json(committed) = crate::key_rotation::commit(
+      State(s.clone()),
+      rotation_admin(true),
+    )
+    .await
+    .map_err(|e| e.0)
+    .unwrap();
+    assert!(committed.previous_expires_at.is_none());
+    assert!(!verify(old) && verify(new));
+    assert!(!dir.path().join("core.key.prev").exists());
   }
 
   #[tokio::test]

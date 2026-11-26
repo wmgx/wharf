@@ -87,6 +87,11 @@ pub struct ReachView {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ServerView {
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub key_rotation: bool,
+  /// 当前已注册 agent 公钥的 12 位指纹。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub key_fingerprint: Option<String>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub note: Option<String>,
   pub name: String,
@@ -824,6 +829,8 @@ pub struct JoinRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct JoinResponse {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub previous_core_public_key: Option<String>,
   pub server: String,
   /// 控制面的 ed25519 公钥，hex。agent 用它确认连上的是真的控制面。
   pub core_public_key: String,
@@ -1861,4 +1868,19 @@ pub struct SsoLoginState {
   pub at: i64,
   pub ok: bool,
   pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CoreKeyView {
+  pub public_key: String,
+  pub fingerprint: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub previous_expires_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentKeyRotation {
+  pub server: String,
+  pub key_fingerprint: String,
+  pub rotated_at: DateTime<Utc>,
 }

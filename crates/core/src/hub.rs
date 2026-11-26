@@ -19,7 +19,7 @@ use axum::{
   },
   response::Response,
 };
-use ed25519_dalek::{Signature, Signer, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use futures_util::{SinkExt, StreamExt};
 use rusqlite::params;
 use serde::de::DeserializeOwned;
@@ -59,6 +59,8 @@ struct Conn {
   conn_id: u64,
   public_key: String,
   core_probe: bool,
+  key_rotation: bool,
+  authenticated_core: Option<String>,
   tx: mpsc::Sender<CoreMsg>,
   pending: Arc<Mutex<HashMap<u64, Pending>>>,
   closed: CancellationToken,
@@ -156,6 +158,35 @@ impl Hub {
       .get(server)
       .filter(|c| !c.closed.is_cancelled())
       .map(|c| (c.conn_id, c.public_key.clone()))
+  }
+
+  pub fn key_connection(&self, server: &str) -> Option<(u64, bool)> {
+    lock(&self.conns)
+      .get(server)
+      .filter(|c| !c.closed.is_cancelled())
+      .map(|c| (c.conn_id, c.key_rotation))
+  }
+
+  pub fn rotation_agents(&self) -> Vec<(String, u64)> {
+    lock(&self.conns)
+      .iter()
+      .filter(|(_, c)| c.key_rotation && !c.closed.is_cancelled())
+      .map(|(server, c)| (server.clone(), c.conn_id))
+      .collect()
+  }
+
+  pub fn uses_core_key(
+    &self,
+    server: &str,
+    previous_conn: Option<u64>,
+    public: &str,
+  ) -> bool {
+    lock(&self.conns).get(server).is_some_and(|c| {
+      c.key_rotation
+        && !c.closed.is_cancelled()
+        && Some(c.conn_id) != previous_conn
+        && c.authenticated_core.as_deref() == Some(public)
+    })
   }
 
   pub fn core_probe_identity(
@@ -340,6 +371,16 @@ impl Hub {
     progress: Option<ProgressFn>,
     cancel: &CancellationToken,
   ) -> Result<T, ApiError> {
+    if matches!(
+      &op,
+      AgentOp::RotateAgentKey(_) | AgentOp::TrustCoreKey(_)
+    ) && !conn.key_rotation
+    {
+      return Err(ApiError::new(
+        ErrorCode::Conflict,
+        "agent 不支持在线轮换密钥",
+      ));
+    }
     if matches!(&op, AgentOp::ProbeCoreHost(_)) && !conn.core_probe {
       return Err(ApiError::new(
         ErrorCode::Conflict,
@@ -625,6 +666,7 @@ async fn handle_socket(
     gateway_extra_files,
     core_probe,
     backup_isolation,
+    key_rotation,
   } = hello
   else {
     anyhow::bail!("agent 没有先发 hello");
@@ -635,6 +677,7 @@ async fn handle_socket(
     anyhow::bail!("服务器 {server} 的 agent 没有交换会话密钥");
   }
   let upgrade_only = !protocol_ok(protocol) || agent_kx.is_none();
+  let key_rotation = key_rotation && !upgrade_only;
   if upgrade_only {
     tracing::warn!(
       "服务器 {server} 的 agent 协议版本 {protocol}，控制面要求 {PROTOCOL}：只接受升级请求，请运行 wharf upgrade"
@@ -642,14 +685,20 @@ async fn handle_socket(
   }
   let registered = {
     let server = server.clone();
+    let public = public_key.clone();
     state
       .db
-      .call(move |c| crate::db::agent(c, &server))
-      .await
-      .map_err(|e| anyhow::anyhow!("{e}"))?
-      .and_then(|a| a.public_key)
+      .call(move |c| {
+        crate::key_rotation::accepts_agent(
+          c,
+          &server,
+          &public,
+          key_rotation,
+        )
+      })
+      .await?
   };
-  let verified = registered.as_deref() == Some(public_key.as_str())
+  let verified = registered
     && decode_key(&public_key)
       .zip(decode_sig(&signature))
       .is_some_and(|(key, sig)| {
@@ -676,11 +725,12 @@ async fn handle_socket(
     .await;
     anyhow::bail!("服务器 {server} 认证失败");
   }
+  let keys = state.key.read();
   let (welcome, mut wire) = match &agent_kx {
     Some(akx) => {
       let share = KeyShare::generate();
       let kx = share.public.clone();
-      let sig = state.key.sign(&auth_payload_v2(
+      let (signature, alt_signature) = keys.sign(&auth_payload_v2(
         "core",
         &server,
         &agent_nonce,
@@ -691,18 +741,26 @@ async fn handle_socket(
         .map_err(|e| anyhow::anyhow!("{e}"))?;
       (
         CoreMsg::Welcome {
-          signature: hex::encode(sig.to_bytes()),
+          signature,
+          alt_signature: if key_rotation {
+            alt_signature
+          } else {
+            None
+          },
+          confirm_key: key_rotation,
           kx: Some(kx),
         },
         Wire::Sealed(tx, rx),
       )
     }
     None => {
-      let sig =
-        state.key.sign(&auth_payload("core", &server, &agent_nonce));
+      let (signature, _) =
+        keys.sign(&auth_payload("core", &server, &agent_nonce));
       (
         CoreMsg::Welcome {
-          signature: hex::encode(sig.to_bytes()),
+          signature,
+          alt_signature: None,
+          confirm_key: false,
           kx: None,
         },
         Wire::Plain,
@@ -711,11 +769,39 @@ async fn handle_socket(
   };
   send_msg(&mut socket, &welcome).await?;
 
+  // 第一个加密帧证明 agent 已验过 Welcome，之后才能提升注册公钥。
+  let authenticated_core = if key_rotation {
+    let public = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
+      while let Some(msg) = socket.recv().await.transpose()? {
+        if let Some(text) = wire.decode(msg)? {
+          if let AgentMsg::KeyReady { core_public_key } =
+            serde_json::from_slice(&text)?
+          {
+            return anyhow::Ok(core_public_key);
+          }
+          break;
+        }
+      }
+      anyhow::bail!("agent 未确认加密握手");
+    })
+    .await??;
+    anyhow::ensure!(
+      public == keys.public_key()
+        || keys.previous_public_key().as_deref() == Some(&public),
+      "agent 确认了未知的控制面公钥"
+    );
+    Some(public)
+  } else {
+    None
+  };
+
   let (tx, mut rx) = mpsc::channel(4096);
   let conn = Conn {
     conn_id: state.hub.next_conn.fetch_add(1, Ordering::Relaxed),
     public_key,
     core_probe: core_probe && !upgrade_only,
+    key_rotation,
+    authenticated_core,
     tx,
     pending: Default::default(),
     closed: CancellationToken::new(),
@@ -738,18 +824,37 @@ async fn handle_socket(
   state
     .db
     .call(move |c| {
-      if !crate::db::agent(c, &socket_server)?.is_some_and(|a| {
-        a.public_key.as_ref() == Some(&socket_conn.public_key)
-      }) {
-        return Err(ApiError::new(
-          ErrorCode::Unauthorized,
-          "agent 注册公钥已变更",
-        ));
-      }
+      crate::key_rotation::register_agent_key(
+        c,
+        &socket_server,
+        &socket_conn.public_key,
+        key_rotation,
+      )?;
       state_on_db.hub.register(&socket_server, socket_conn);
       Ok(())
     })
     .await?;
+  if key_rotation {
+    let ack = wire.encode(&CoreMsg::KeyAccepted)?;
+    if !matches!(
+      tokio::time::timeout(SOCKET_WRITE_TIMEOUT, socket.send(ack))
+        .await,
+      Ok(Ok(()))
+    ) {
+      conn.closed.cancel();
+      state.hub.unregister(&server, &conn);
+      anyhow::bail!("发送握手确认失败");
+    }
+    if conn.authenticated_core.as_deref()
+      != Some(keys.public_key().as_str())
+    {
+      tokio::spawn(crate::key_rotation::sync_agent(
+        state.clone(),
+        server.clone(),
+        conn.conn_id,
+      ));
+    }
+  }
   if conn.core_probe {
     crate::core_node::spawn_probe_on_connect(
       state.clone(),
@@ -884,7 +989,7 @@ async fn handle_socket(
               let _ = pending.done.send(result);
             }
           }
-          Ok(AgentMsg::Hello { .. }) => {}
+          Ok(AgentMsg::Hello { .. } | AgentMsg::KeyReady { .. }) => {}
           Err(e) => tracing::debug!("无法解析 {server} 的消息：{:?}", e.classify()),
         }
       }

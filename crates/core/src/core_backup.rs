@@ -722,6 +722,7 @@ async fn stage(
       std::fs::Permissions::from_mode(0o700),
     );
   }
+  let _rotation = state.key.operation.lock().await;
   let db_copy = dir.join("wharf.db").display().to_string();
   state
     .db
@@ -731,7 +732,7 @@ async fn stage(
       Ok(())
     })
     .await?;
-  for name in ["core.key", "admin.token"] {
+  for name in ["core.key", "core.key.prev", "admin.token"] {
     let from = state.data_dir.join(name);
     if from.exists() {
       std::fs::copy(&from, dir.join(name)).map_err(|e| {

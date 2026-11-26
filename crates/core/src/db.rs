@@ -373,6 +373,9 @@ ALTER TABLE alert_history ADD COLUMN subject TEXT;
   crate::host_access::MIGRATION,
   "ALTER TABLE secrets ADD COLUMN prev_value TEXT;
    ALTER TABLE secrets ADD COLUMN prev_expires_at INTEGER;",
+  "ALTER TABLE agents ADD COLUMN next_public_key TEXT;
+   ALTER TABLE agents ADD COLUMN next_key_expires_at INTEGER;
+   ALTER TABLE agents ADD COLUMN key_rotation INTEGER NOT NULL DEFAULT 0;",
 ];
 
 /// git 构建来源固定到上次部署构建的 commit（仓库和分支没换过的）。当时没记下 commit 的留给 plan 提醒。

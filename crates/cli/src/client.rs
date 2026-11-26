@@ -95,20 +95,48 @@ impl Config {
     Ok(path)
   }
 
-  pub(crate) fn save_to(&self, path: &Path) -> anyhow::Result<()> {
-    use std::io::Write;
+  pub(crate) fn check_writable(&self) -> anyhow::Result<()> {
+    let path = config_path();
+    if path.try_exists()? {
+      std::fs::OpenOptions::new().write(true).open(&path)?;
+    }
+    let (file, temp) = Self::open_temp(&path)?;
+    drop(file);
+    std::fs::remove_file(temp)?;
+    Ok(())
+  }
+
+  fn open_temp(
+    path: &Path,
+  ) -> anyhow::Result<(std::fs::File, PathBuf)> {
     if let Some(dir) = path.parent() {
       std::fs::create_dir_all(dir)?;
     }
-    let mut file = std::fs::OpenOptions::new()
+    let mut nonce = [0u8; 12];
+    getrandom::fill(&mut nonce)
+      .map_err(|_| anyhow::anyhow!("随机数不可用"))?;
+    let temp =
+      path.with_extension(format!("{}.tmp", hex::encode(nonce)));
+    let file = std::fs::OpenOptions::new()
       .write(true)
-      .create(true)
-      .truncate(true)
+      .create_new(true)
       .mode(0o600)
-      .open(path)?;
-    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    file.write_all(toml::to_string(self)?.as_bytes())?;
-    Ok(())
+      .open(&temp)?;
+    Ok((file, temp))
+  }
+
+  pub(crate) fn save_to(&self, path: &Path) -> anyhow::Result<()> {
+    use std::io::Write;
+    let raw = toml::to_string(self)?;
+    let (mut file, temp) = Self::open_temp(path)?;
+    let result = file
+      .write_all(raw.as_bytes())
+      .and_then(|()| file.sync_all())
+      .and_then(|()| std::fs::rename(&temp, path));
+    if result.is_err() {
+      let _ = std::fs::remove_file(temp);
+    }
+    result.map_err(Into::into)
   }
 }
 
@@ -376,6 +404,10 @@ impl Client {
       tunnel_error: tunnel.last_error,
       token,
     })
+  }
+
+  pub(crate) fn is_for(&self, url: &str) -> bool {
+    self.base == url.trim_end_matches('/')
   }
 
   /// 控制面和本机 CLI 的构建号不一致时提醒一次（写 stderr，不影响 `--json`）。

@@ -404,6 +404,19 @@ pub enum Command {
 
 #[derive(Subcommand)]
 pub enum CoreCmd {
+  /// 查看控制面的签名公钥与过渡期限。
+  Key,
+  /// 在线轮换控制面签名公钥。
+  RotateKey {
+    #[arg(long, conflicts_with_all = ["commit", "rollback"])]
+    window_hours: Option<u16>,
+    #[arg(long, conflicts_with_all = ["commit", "rollback"])]
+    force: bool,
+    #[arg(long, conflicts_with = "rollback")]
+    commit: bool,
+    #[arg(long)]
+    rollback: bool,
+  },
   /// 查看控制面的候选地址。
   Addresses,
   /// 立即检查控制面有没有新构建。
@@ -531,6 +544,10 @@ pub struct ApplyFlags {
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)] // 命令行参数，只解析一次
 pub enum ServerCmd {
+  /// 在线轮换服务器的 agent 通信密钥。
+  RotateKey {
+    name: String,
+  },
   /// 从指定服务器探测一个目标。只返回响应头和诊断结果，禁止探测云元数据地址。
   Probe(probe::ServerProbeArgs),
   /// 查看最近一次系统更新的状态，或开始安装更新。

@@ -85,6 +85,9 @@ pub fn spawn(state: Arc<AppState>) {
         Ok(_) => crate::log_redact::refresh(&state.db).await,
         Err(e) => tracing::warn!("清理过期密钥旧值失败：{e}"),
       }
+      if let Err(e) = crate::key_rotation::cleanup(&state).await {
+        tracing::warn!("清理过期通信密钥失败：{e}");
+      }
       tokio::time::sleep(TICK).await;
     }
   });

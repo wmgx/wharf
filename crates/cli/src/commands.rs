@@ -108,6 +108,61 @@ pub async fn run(cli: Cli) -> CliResult<()> {
   }
 }
 
+async fn rotate_core_key(
+  c: &Client,
+  window_hours: Option<u16>,
+  force: bool,
+  commit: bool,
+  rollback: bool,
+  j: bool,
+) -> CliResult<()> {
+  use wharf_api_types::view::CoreKeyView;
+
+  let mut config = crate::client::Config::load_checked()?;
+  let env_key = std::env::var_os("WHARF_CORE_KEY").is_some();
+  let same_server =
+    config.url.as_deref().is_some_and(|url| c.is_for(url));
+  if !commit {
+    if !same_server && !env_key {
+      return Err(
+        ApiError::invalid("当前 CLI 配置不属于目标控制面")
+          .with_hint("先执行 wharf login 保存目标控制面的配置")
+          .into(),
+      );
+    }
+    config.check_writable().map_err(|_| {
+      ApiError::invalid("无法写入本机 config.toml")
+        .with_hint("检查配置文件及目录权限后重试")
+    })?;
+  }
+  let view: CoreKeyView = if commit {
+    c.post("/api/core/key/commit", &json!({})).await?
+  } else if rollback {
+    c.post("/api/core/key/rollback", &json!({})).await?
+  } else {
+    c.post("/api/core/key/rotate", &json!({
+      "window_hours": window_hours, "force": force, "client_ready": true,
+    })).await?
+  };
+  if !commit {
+    if env_key {
+      eprintln!("请把 WHARF_CORE_KEY 更新为 {}", view.public_key);
+    } else {
+      config.core_key = Some(view.public_key.clone());
+      config.save().map_err(|_| {
+        ApiError::internal("控制面已切换公钥，本机配置保存失败")
+          .with_hint(format!(
+            "把 config.toml 的 core_key 更新为 {}",
+            view.public_key
+          ))
+      })?;
+      eprintln!("已更新本机控制面公钥");
+    }
+  }
+  out(j, &view, pretty);
+  Ok(())
+}
+
 /// 输出：JSON 模式原样输出，否则用 `human`。
 pub(crate) fn out<T: serde::Serialize>(
   j: bool,
@@ -406,6 +461,21 @@ async fn dispatch(
     }
     Command::SelfUpdate => crate::selfcmd::self_update(c, j).await,
     Command::Whoami => crate::selfcmd::whoami(c, j).await,
+    Command::Core(crate::CoreCmd::Key) => {
+      let view: wharf_api_types::view::CoreKeyView =
+        c.get("/api/core/key").await?;
+      out(j, &view, pretty);
+      Ok(())
+    }
+    Command::Core(crate::CoreCmd::RotateKey {
+      window_hours,
+      force,
+      commit,
+      rollback,
+    }) => {
+      rotate_core_key(c, window_hours, force, commit, rollback, j)
+        .await
+    }
     Command::Core(crate::CoreCmd::Addresses) => {
       let view: wharf_api_types::view::CoreAddresses =
         c.get("/api/core/addresses").await?;
@@ -1214,6 +1284,16 @@ async fn server(
           );
         }
       });
+      Ok(())
+    }
+    ServerCmd::RotateKey { name } => {
+      let view: wharf_api_types::view::AgentKeyRotation = c
+        .post(
+          &format!("/api/servers/{}/rotate-key", seg(&name)),
+          &json!({}),
+        )
+        .await?;
+      out(j, &view, pretty);
       Ok(())
     }
     ServerCmd::List => {

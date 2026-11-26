@@ -1,14 +1,12 @@
 use std::sync::Arc;
 
-use ed25519_dalek::SigningKey;
-
 use crate::{apply::Runs, db::Db, hub::Hub};
 
 pub struct AppState {
   pub db: Db,
   pub hub: Hub,
   /// 控制面的签名密钥，agent 用它确认连上的是真的控制面。
-  pub key: SigningKey,
+  pub key: crate::key_rotation::CoreKeyRing,
   pub runs: Runs,
   /// 同一时间只有一个 apply 在执行。
   pub apply_lock: Arc<tokio::sync::Mutex<()>>,

@@ -55,6 +55,9 @@ function SettingsFields({ server, canRemove, draft, set, changed, onReset, onSub
   const [buildEnv, setBuildEnv] = useState(formatEnv(draft.build_env));
   const [quota, setQuota] = useState(draft.traffic_quota_gb?.toString() ?? "");
   const [resetDay, setResetDay] = useState(draft.traffic_reset_day?.toString() ?? "");
+  const [rotatingKey, setRotatingKey] = useState(false);
+  const [rotatingBusy, setRotatingBusy] = useState(false);
+  const [fingerprint, setFingerprint] = useState<string | null>(null);
   const [removing, setRemoving] = useState(false);
   const [textEdited, setTextEdited] = useState(false);
   useEffect(() => {
@@ -70,6 +73,19 @@ function SettingsFields({ server, canRemove, draft, set, changed, onReset, onSub
   const quotaNum = Number(quota.trim() || 0);
   const resetNum = Number(resetDay.trim() || 0);
   const trafficValid = Number.isInteger(quotaNum) && quotaNum >= 0 && Number.isInteger(resetNum) && resetNum >= 0 && resetNum <= 28;
+  const rotateKey = async () => {
+    setRotatingBusy(true);
+    try {
+      const result = await api.post<{ key_fingerprint: string }>(`/api/servers/${encodeURIComponent(server.name)}/rotate-key`, {});
+      setFingerprint(result.key_fingerprint);
+      toast.success("通信密钥已轮换");
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setRotatingKey(false);
+      setRotatingBusy(false);
+    }
+  };
   const remove = async () => {
     setRemoving(false);
     try { await api.del(`/api/servers/${encodeURIComponent(server.name)}`); toast.success(`已删除服务器 ${server.name}`); nav("/servers"); }
@@ -145,6 +161,12 @@ function SettingsFields({ server, canRemove, draft, set, changed, onReset, onSub
         <Input id="agent-memory" value={draft.agent_memory ?? ""} placeholder="256M" onChange={(e) => set({ agent_memory: e.target.value || undefined })} />
       </Field>
     </Panel>
+    {server.joined && <Panel className="mt-3 flex flex-wrap items-center gap-3 p-4">
+      <div className="flex-1 text-sm">agent 公钥指纹 <code>{fingerprint ?? server.key_fingerprint}</code></div>
+      <Button variant="outline" size="sm" disabled={!server.key_rotation || !server.online} onClick={() => setRotatingKey(true)}>轮换通信密钥</Button>
+      {!server.key_rotation && <span className="text-xs text-muted-foreground">{server.online ? "请先升级 agent" : "agent 离线"}</span>}
+    </Panel>}
+    <ConfirmDialog open={rotatingKey} title="轮换 agent 通信密钥？" confirmText="轮换" busy={rotatingBusy} onCancel={() => setRotatingKey(false)} onConfirm={rotateKey} />
     <div id="access" className="mt-8">
       <SectionTitle>权限</SectionTitle>
     </div>

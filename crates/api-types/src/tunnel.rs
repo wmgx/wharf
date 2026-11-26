@@ -20,6 +20,8 @@ pub struct TunnelHello {
 pub struct TunnelWelcome {
   pub kx: String,
   pub signature: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub alt_signature: Option<String>,
 }
 
 /// 控制面签名的内容。角色和 agent 握手不同，签名不能互相挪用。

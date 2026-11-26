@@ -63,12 +63,31 @@ impl Ops {
       self.locks.lock().unwrap_or_else(|p| p.into_inner());
     locks.entry(project.to_string()).or_default().clone()
   }
+  pub(crate) fn rotate_identity(
+    &self,
+    op: AgentOp,
+  ) -> Result<(Value, bool), ApiError> {
+    match op {
+      AgentOp::RotateAgentKey(job) => {
+        crate::identity::rotate_key(&self.data_dir, job)
+      }
+      AgentOp::TrustCoreKey(job) => {
+        crate::identity::trust_core_key(&self.data_dir, job)
+      }
+      _ => return Err(ApiError::invalid("不是密钥轮换请求")),
+    }
+    .map_err(|e| ApiError::internal(format!("更新通信身份失败：{e}")))
+  }
+
   pub async fn handle(
     &self,
     op: AgentOp,
     ctx: &Ctx,
   ) -> Result<Value, ApiError> {
     match op {
+      AgentOp::RotateAgentKey(_) | AgentOp::TrustCoreKey(_) => {
+        Err(ApiError::invalid("密钥轮换须通过当前连接处理"))
+      }
       AgentOp::AccessLogs(job) => {
         to_value(crate::access_logs::read(job, ctx).await?)
       }

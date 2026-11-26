@@ -49,6 +49,13 @@ pub fn server_view(
     report.time_ms = None;
   }
   Some(ServerView {
+    key_rotation: state
+      .hub
+      .key_connection(name)
+      .is_some_and(|(_, capable)| capable),
+    key_fingerprint: agent
+      .and_then(|a| a.public_key.as_deref())
+      .map(crate::key_rotation::fingerprint),
     note: snap.server_notes.get(name).cloned(),
     name: name.to_string(),
     settings: row.settings.clone(),
