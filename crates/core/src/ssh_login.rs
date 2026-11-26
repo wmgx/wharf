@@ -202,7 +202,10 @@ mod tests {
     let detected = save_sample(&state.db, "s1", now, batch.clone())
       .await
       .unwrap();
-    assert_eq!(detected, [unfamiliar.clone()]);
+    assert_eq!(
+      detected.as_slice(),
+      std::slice::from_ref(&unfamiliar)
+    );
     let message = event("s1", unfamiliar.clone());
     assert_eq!(
       message.body,
