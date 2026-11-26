@@ -138,6 +138,8 @@ pub enum AgentMsg {
     gateway_extra_files: bool,
     #[serde(default)]
     core_probe: bool,
+    #[serde(default)]
+    backup_isolation: bool,
   },
   Report(Box<AgentReport>),
   Progress {

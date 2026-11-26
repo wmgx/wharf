@@ -65,7 +65,7 @@ export function CoreBackup() {
               </Button>
             </div>
           </div>
-          {data.to && !data.user_key_current && <Notice kind="warn">登录密码改过，恢复口令还是旧密码</Notice>}
+          {data.to && !data.user_key_current && <Notice kind="warn">登录密码恢复口令未同步，请点设置重新输入</Notice>}
           {data.restore_command && (
             <details className="text-sm">
               <summary className="cursor-pointer text-muted-foreground">恢复命令</summary>
@@ -173,7 +173,7 @@ function RecoveryKey({ onClose }: { onClose: () => void }) {
           <DialogTitle>下载恢复密钥</DialogTitle>
         </DialogHeader>
         <div className="grid gap-4">
-          <Notice kind="warn">能打开所有备份，别放在被备份的机器上</Notice>
+          <Notice kind="warn">能打开控制面备份，别放在被备份的机器上</Notice>
           <Field label="登录密码" htmlFor="rk-password">
             <Input id="rk-password" type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} />
           </Field>

@@ -1448,6 +1448,13 @@ pub enum SecretCmd {
 
 #[derive(Subcommand)]
 pub enum BackupCmd {
+  /// 给历史业务仓库加上服务专属口令。
+  Migrate,
+  /// 验证业务仓库的新口令后，摘除并清理旧全局口令。
+  CleanupLegacy {
+    #[arg(long)]
+    confirm: Option<String>,
+  },
   /// 开启每天自动备份（先停服务、备份、再启动，通常几秒）。
   Enable {
     service: String,

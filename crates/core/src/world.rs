@@ -1691,6 +1691,7 @@ pub(crate) fn is_reserved_host_port(port: u16) -> bool {
     7700,
     wharf_api_types::agent::PROBE_PORT,
     wharf_api_types::agent::REST_SERVER_PORT,
+    wharf_api_types::agent::CORE_REST_SERVER_PORT,
     wharf_api_types::egress::SERVE_PORT,
     wharf_api_types::egress::LOCAL_PORT,
   ]
@@ -1713,6 +1714,14 @@ fn validate_service(
   if name == crate::render::BACKUP_PROJECT {
     return Err(ApiError::invalid(format!(
       "服务名 {name} 留给备份服务用，换一个名字"
+    )));
+  }
+  if matches!(
+    name,
+    crate::render::CORE_BACKUP_PROJECT | crate::core_backup::REPO
+  ) {
+    return Err(ApiError::invalid(format!(
+      "服务名 {name} 留给控制面备份用，换一个名字"
     )));
   }
   if !world.servers.contains_key(&spec.server) {

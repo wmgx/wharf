@@ -7,20 +7,21 @@
 //! - 旧快照在备份服务器本机清理：保留最近 7 天、4 周、6 个月各一份；
 //! - 仓库口令和 rest-server 账号由控制面生成，存在密钥里，不经过对话、不打印。
 
-use std::{sync::Arc, time::Duration};
+use std::{collections::BTreeSet, sync::Arc, time::Duration};
 
 use axum::{
   Json,
   extract::{Path, State},
 };
 use rusqlite::params;
+use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
   ApiError, ErrorCode,
   agent::{
     AgentOp, BackupSummary, OneTimeSecret, ProjectUp,
     ProjectUpResult, REST_SERVER_PORT, ResticAction, ResticJob,
-    ResticRepo, Snapshot,
+    ResticKeyInfo, ResticRepo, Snapshot,
   },
   plan::ApplyResponse,
   view::{BackupRecord, BackupsView, Perm, RestoreRequest},
@@ -30,7 +31,7 @@ use crate::{
   api::{ApiResult, service_not_found},
   apply,
   auth::Auth,
-  db::{json_err, now_ms, sql_err, to_time},
+  db::{self, json_err, now_ms, sql_err, to_time},
   hub::ProgressFn,
   planner::Step,
   render::{self, BACKUP_PROJECT},
@@ -38,11 +39,13 @@ use crate::{
   state::AppState,
 };
 
-const KEY_SECRET: &str = "WHARF_BACKUP_KEY";
-const HTTP_SECRET: &str = "WHARF_BACKUP_HTTP";
-const HTTP_HASH_SECRET: &str = "WHARF_BACKUP_HTTP_HASH";
+const LEGACY_KEY_SECRET: &str = "WHARF_BACKUP_KEY";
+const LEGACY_HTTP_SECRET: &str = "WHARF_BACKUP_HTTP";
+const LEGACY_HTTP_HASH_SECRET: &str = "WHARF_BACKUP_HTTP_HASH";
 pub const SECRET_PREFIX: &str = "WHARF_BACKUP_";
-pub(crate) const HTTP_USER: &str = "wharf";
+const KEY_PREFIX: &str = "WHARF_BACKUP_KEY_";
+pub const HTTP_PREFIX: &str = "WHARF_BACKUP_HTTP_";
+pub const HTTP_HASH_PREFIX: &str = "WHARF_BACKUP_HTTP_HASH_";
 
 const STOP_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 pub(crate) const RESTIC_TIMEOUT: Duration =
@@ -50,12 +53,9 @@ pub(crate) const RESTIC_TIMEOUT: Duration =
 const SERVER_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const LIST_TIMEOUT: Duration = Duration::from_secs(3 * 60);
 
-pub(crate) struct Creds {
-  pub(crate) key: String,
-  pub(crate) http: String,
-  http_hash: String,
-  /// 控制面自身备份开启后，管理员也能用登录密码访问备份服务器（`用户名:bcrypt`）。
-  owner: Option<String>,
+struct ServiceCreds {
+  key: String,
+  http: String,
 }
 
 pub(crate) fn random_hex() -> String {
@@ -64,35 +64,93 @@ pub(crate) fn random_hex() -> String {
   hex::encode(bytes)
 }
 
-/// 取备份口令，没有就生成。已有的不覆盖（INSERT OR IGNORE），并发时也只有一份。
-pub(crate) async fn credentials(
+async fn ensure_service_creds(
   state: &AppState,
-) -> Result<Creds, ApiError> {
-  let key = random_hex();
-  let http = random_hex();
-  let http_hash = bcrypt::hash(&http, bcrypt::DEFAULT_COST)
-    .map_err(|e| ApiError::internal(format!("计算哈希失败：{e}")))?;
-  state
+  service: &str,
+) -> Result<ServiceCreds, ApiError> {
+  let (http, _) = service_http_pair(state, service).await?;
+  let service = service.to_string();
+  let key = state
     .db
-    .call_credentials(move |c, credentials| {
-      let now = now_ms();
-      for (name, value) in [
-        (KEY_SECRET, key),
-        (HTTP_SECRET, http),
-        (HTTP_HASH_SECRET, http_hash),
-      ] {
-        credentials.put_secret(c, name, &value, now, false)?;
-      }
-      let secrets = crate::db::secrets(c, credentials)?;
-      let get = |n: &str| secrets.get(n).cloned().unwrap_or_default();
-      Ok(Creds {
-        key: get(KEY_SECRET),
-        http: get(HTTP_SECRET),
-        http_hash: get(HTTP_HASH_SECRET),
-        owner: secrets.get(crate::core_backup::OWNER_SECRET).cloned(),
-      })
+    .call_credentials(move |c, master| {
+      db::ensure_scoped_secret(
+        c,
+        master,
+        KEY_PREFIX,
+        &service,
+        now_ms(),
+      )
     })
-    .await
+    .await?;
+  Ok(ServiceCreds { key, http })
+}
+
+async fn service_http_pair(
+  state: &AppState,
+  service: &str,
+) -> Result<(String, String), ApiError> {
+  ensure_http_pair(
+    state,
+    db::scoped_secret_name(HTTP_PREFIX, service)?,
+    db::scoped_secret_name(HTTP_HASH_PREFIX, service)?,
+  )
+  .await
+}
+
+pub(crate) async fn ensure_http_pair(
+  state: &AppState,
+  http_name: String,
+  hash_name: String,
+) -> Result<(String, String), ApiError> {
+  loop {
+    let (http, hash) = {
+      let (http_name, hash_name) =
+        (http_name.clone(), hash_name.clone());
+      state
+        .db
+        .call_credentials(move |c, key| {
+          Ok((key.secret(c, &http_name)?, key.secret(c, &hash_name)?))
+        })
+        .await?
+    };
+    if let (Some(http), Some(hash)) = (&http, hash) {
+      return Ok((http.clone(), hash));
+    }
+    let candidate = http.clone().unwrap_or_else(random_hex);
+    let hash = {
+      let candidate = candidate.clone();
+      tokio::task::spawn_blocking(move || {
+        bcrypt::hash(candidate, bcrypt::DEFAULT_COST)
+      })
+      .await
+      .map_err(|_| ApiError::internal("计算哈希失败"))?
+      .map_err(|e| ApiError::internal(format!("计算哈希失败：{e}")))?
+    };
+    let (http_name, hash_name) =
+      (http_name.clone(), hash_name.clone());
+    let pair = state
+      .db
+      .call_credentials(move |c, key| {
+        let tx = c.transaction().map_err(sql_err)?;
+        if key.secret(&tx, &http_name)? != http {
+          return Ok(None);
+        }
+        if http.is_some()
+          && let Some(existing) = key.secret(&tx, &hash_name)?
+        {
+          return Ok(Some((candidate, existing)));
+        }
+        let now = now_ms();
+        key.put_secret(&tx, &http_name, &candidate, now, false)?;
+        key.put_secret(&tx, &hash_name, &hash, now, true)?;
+        tx.commit().map_err(sql_err)?;
+        Ok(Some((candidate, hash)))
+      })
+      .await?;
+    if let Some(pair) = pair {
+      return Ok(pair);
+    }
+  }
 }
 
 /// 一次备份或恢复要用到的位置信息。
@@ -151,13 +209,13 @@ pub(crate) fn job(
   server: &str,
   service: &str,
   repo: ResticRepo,
-  creds: &Creds,
+  key: &str,
   action: ResticAction,
 ) -> AgentOp {
   AgentOp::Restic(ResticJob {
     service: service.to_string(),
     repo,
-    password: OneTimeSecret(creds.key.clone()),
+    password: OneTimeSecret(key.to_string()),
     action,
     pull: snap
       .world
@@ -176,40 +234,104 @@ pub(crate) fn job(
   })
 }
 
-pub(crate) fn rest_repo(w: &Where, creds: &Creds) -> ResticRepo {
+pub(crate) fn rest_repo(
+  target_ip: &str,
+  port: u16,
+  user: &str,
+  http: &str,
+) -> ResticRepo {
   ResticRepo::Rest {
-    host: w.target_ip.clone(),
-    port: REST_SERVER_PORT,
-    user: HTTP_USER.to_string(),
-    password: OneTimeSecret(creds.http.clone()),
+    host: target_ip.into(),
+    port,
+    user: user.into(),
+    password: OneTimeSecret(http.into()),
   }
 }
 
-/// 备份服务器上的 rest-server 配置没变且在运行时什么也不做。
-pub(crate) async fn ensure_server(
+pub(crate) fn require_isolation(
+  state: &AppState,
+  server: &str,
+) -> Result<(), ApiError> {
+  if !state.hub.is_online(server) {
+    return Err(crate::hub::offline(server));
+  }
+  if !state.hub.supports_backup_isolation(server) {
+    return Err(ApiError::new(
+      ErrorCode::Conflict,
+      format!("服务器 {server} 的 agent 版本旧，请先升级 agent 再执行隔离备份"),
+    ).with_hint(format!("运行 wharf server upgrade {server}")));
+  }
+  Ok(())
+}
+
+async fn target_htpasswd(
+  state: &AppState,
+  snap: &Snap,
+  target: &str,
+) -> Result<String, ApiError> {
+  let mut htpasswd = String::new();
+  for (service, row) in &snap.world.services {
+    if row
+      .spec
+      .backup
+      .as_ref()
+      .is_some_and(|backup| backup.to == target)
+    {
+      let (_, hash) = service_http_pair(state, service).await?;
+      htpasswd.push_str(&format!("{service}:{hash}\n"));
+    }
+  }
+  Ok(htpasswd)
+}
+
+async fn ensure_server(
   state: &AppState,
   snap: &Snap,
   w: &Where,
-  creds: &Creds,
   progress: &ProgressFn,
   cancel: &CancellationToken,
 ) -> Result<(), ApiError> {
-  let mut htpasswd = format!("{HTTP_USER}:{}", creds.http_hash);
-  if let Some(owner) = &creds.owner {
-    htpasswd = format!("{htpasswd}\n{owner}");
-  }
+  require_isolation(state, &w.target)?;
+  let htpasswd = target_htpasswd(state, snap, &w.target).await?;
   let compose =
     render::backup_server_compose(&w.target_ip, &htpasswd);
-  let hash = render::hash(&compose);
-  let states = snapshot::project_status(
-    &state.hub,
-    &w.target,
-    vec![BACKUP_PROJECT.to_string()],
-    LIST_TIMEOUT,
+  deploy_server(
+    state,
+    snap,
+    w,
+    (BACKUP_PROJECT, compose),
+    progress,
+    cancel,
   )
-  .await?;
-  if states.get(BACKUP_PROJECT).is_some_and(|s| {
-    s.hash.as_deref() == Some(hash.as_str()) && s.all_running()
+  .await
+}
+
+/// 备份服务器上的 rest-server 配置没变且在运行时什么也不做。
+pub(crate) async fn deploy_server(
+  state: &AppState,
+  snap: &Snap,
+  w: &Where,
+  (project, compose): (&str, String),
+  progress: &ProgressFn,
+  cancel: &CancellationToken,
+) -> Result<(), ApiError> {
+  let hash = render::hash(&compose);
+  let states: Vec<wharf_api_types::agent::ProjectState> = state
+    .hub
+    .call(
+      &w.target,
+      AgentOp::ProjectStatus {
+        projects: vec![project.into()],
+      },
+      LIST_TIMEOUT,
+      None,
+      cancel,
+    )
+    .await?;
+  if states.iter().any(|s| {
+    s.project == project
+      && s.hash.as_deref() == Some(hash.as_str())
+      && s.all_running()
   }) {
     return Ok(());
   }
@@ -219,7 +341,7 @@ pub(crate) async fn ensure_server(
     .call(
       &w.target,
       AgentOp::ProjectUp(ProjectUp {
-        project: BACKUP_PROJECT.to_string(),
+        project: project.to_string(),
         compose,
         hash,
         pull: snapshot::pull_policy(&snap.world.servers[&w.target]),
@@ -241,8 +363,10 @@ pub(crate) async fn ensure_server(
     ));
   }
   // rest-server 刚起来时端口可能还没开始监听。
-  tokio::time::sleep(Duration::from_secs(2)).await;
-  Ok(())
+  tokio::select! {
+    () = cancel.cancelled() => Err(ApiError::new(ErrorCode::Cancelled, "已取消")),
+    () = tokio::time::sleep(Duration::from_secs(2)) => Ok(()),
+  }
 }
 
 /// 停止服务；返回是否真的停了（没部署过就不用停，也不用再启动）。
@@ -314,10 +438,17 @@ pub async fn backup(
     crate::link::ProbeMode::Persist,
   )
   .await?;
-  let creds = credentials(state).await?;
+  let creds = ensure_service_creds(state, service).await?;
   let result = async {
-    ensure_server(state, &snap, &w, &creds, &progress, cancel)
-      .await?;
+    ensure_server(state, &snap, &w, &progress, cancel).await?;
+    ensure_repo_has_service_key(
+      state,
+      &snap,
+      (&w.target, service),
+      &creds.key,
+      cancel,
+    )
+    .await?;
     let stopped = stop(state, &w, service, &progress, cancel).await?;
     let backed: Result<BackupSummary, ApiError> = state
       .hub
@@ -327,8 +458,13 @@ pub async fn backup(
           &snap,
           &w.server,
           service,
-          rest_repo(&w, &creds),
-          &creds,
+          rest_repo(
+            &w.target_ip,
+            REST_SERVER_PORT,
+            service,
+            &creds.http,
+          ),
+          &creds.key,
           ResticAction::Backup {
             host: w.server.clone(),
           },
@@ -361,7 +497,7 @@ pub async fn backup(
         &w.target,
         service,
         ResticRepo::Local,
-        &creds,
+        &creds.key,
         ResticAction::Prune,
       ),
       RESTIC_TIMEOUT,
@@ -393,8 +529,16 @@ pub async fn restore(
     crate::link::ProbeMode::Persist,
   )
   .await?;
-  let creds = credentials(state).await?;
-  ensure_server(state, &snap, &w, &creds, &progress, cancel).await?;
+  let creds = ensure_service_creds(state, service).await?;
+  ensure_server(state, &snap, &w, &progress, cancel).await?;
+  ensure_repo_has_service_key(
+    state,
+    &snap,
+    (&w.target, service),
+    &creds.key,
+    cancel,
+  )
+  .await?;
   let stopped = stop(state, &w, service, &progress, cancel).await?;
   let restored = state
     .hub
@@ -404,8 +548,13 @@ pub async fn restore(
         &snap,
         &w.server,
         service,
-        rest_repo(&w, &creds),
-        &creds,
+        rest_repo(
+          &w.target_ip,
+          REST_SERVER_PORT,
+          service,
+          &creds.http,
+        ),
+        &creds.key,
         ResticAction::Restore {
           snapshot: snapshot_id.to_string(),
         },
@@ -566,27 +715,43 @@ pub async fn list(
   if let Some(target) =
     target.as_ref().or(records.first().map(|r| &r.target))
   {
-    let creds = credentials(&s).await?;
-    let listed = s
-      .hub
-      .call::<Vec<Snapshot>>(
-        target,
-        job(
-          &snap,
-          target,
-          &name,
-          ResticRepo::Local,
-          &creds,
-          ResticAction::Snapshots,
-        ),
-        LIST_TIMEOUT,
-        None,
-        &CancellationToken::new(),
+    let (key, legacy) = repository_secrets(&s, &name).await?;
+    let cancel = CancellationToken::new();
+    let _cancel = cancel.clone().drop_guard();
+    let has_key = key.is_some();
+    let mut listed: Result<Vec<Snapshot>, ApiError> = Ok(vec![]);
+    if let Some(key) = key {
+      listed = local_call(
+        &s,
+        &snap,
+        (target, &name),
+        &key,
+        ResticAction::Snapshots,
+        &cancel,
       )
       .await;
+    }
+    if let Some(legacy) = legacy
+      && (!has_key
+        || matches!(&listed, Err(e) if e.code == ErrorCode::Forbidden
+        || (e.code == ErrorCode::AgentFailed && !s.hub.supports_backup_isolation(target))))
+    {
+      listed = local_call(
+        &s,
+        &snap,
+        (target, &name),
+        &legacy,
+        ResticAction::Snapshots,
+        &cancel,
+      )
+      .await;
+    }
     match listed {
       Ok(list) => snapshots = list,
-      Err(e) => snapshots_error = Some(e.to_string()),
+      Err(e) => {
+        snapshots_error =
+          Some(crate::log_redact::redact_text(&e.to_string()));
+      }
     }
   }
   Ok(Json(BackupsView {
@@ -596,6 +761,343 @@ pub async fn list(
     snapshots,
     snapshots_error,
   }))
+}
+
+async fn repository_secrets(
+  state: &AppState,
+  service: &str,
+) -> Result<(Option<String>, Option<String>), ApiError> {
+  let name = db::scoped_secret_name(KEY_PREFIX, service)?;
+  state
+    .db
+    .call_credentials(move |c, key| {
+      Ok((key.secret(c, &name)?, key.secret(c, LEGACY_KEY_SECRET)?))
+    })
+    .await
+}
+
+async fn local_call<T: serde::de::DeserializeOwned>(
+  state: &AppState,
+  snap: &Snap,
+  (target, service): (&str, &str),
+  key: &str,
+  action: ResticAction,
+  cancel: &CancellationToken,
+) -> Result<T, ApiError> {
+  state
+    .hub
+    .call(
+      target,
+      job(snap, target, service, ResticRepo::Local, key, action),
+      LIST_TIMEOUT,
+      None,
+      cancel,
+    )
+    .await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+enum MigrationStatus {
+  Migrated,
+  AlreadyOk,
+  NoRepo,
+  SkippedOffline,
+  Failed,
+}
+
+async fn ensure_repo_has_service_key(
+  state: &AppState,
+  snap: &Snap,
+  repo: (&str, &str),
+  service_key: &str,
+  cancel: &CancellationToken,
+) -> Result<MigrationStatus, ApiError> {
+  let (_, legacy) = repository_secrets(state, repo.1).await?;
+  let list = |key: &str| {
+    let op = job(
+      snap,
+      repo.0,
+      repo.1,
+      ResticRepo::Local,
+      key,
+      ResticAction::ListKeys,
+    );
+    state.hub.call::<Vec<ResticKeyInfo>>(
+      repo.0,
+      op,
+      LIST_TIMEOUT,
+      None,
+      cancel,
+    )
+  };
+  match list(service_key).await {
+    Ok(keys) => {
+      return Ok(if keys.is_empty() {
+        MigrationStatus::NoRepo
+      } else {
+        MigrationStatus::AlreadyOk
+      });
+    }
+    Err(e) if e.code == ErrorCode::Forbidden && legacy.is_some() => {}
+    Err(e) => return Err(e),
+  }
+  let legacy = legacy.expect("已确认存在旧备份口令");
+  if list(&legacy).await?.is_empty() {
+    return Ok(MigrationStatus::NoRepo);
+  }
+  local_call::<String>(
+    state,
+    snap,
+    repo,
+    &legacy,
+    ResticAction::AddKey {
+      new_password: OneTimeSecret(service_key.to_string()),
+    },
+    cancel,
+  )
+  .await?;
+  if list(service_key).await?.is_empty() {
+    return Err(ApiError::new(
+      ErrorCode::AgentFailed,
+      "加钥匙后找不到备份仓库",
+    ));
+  }
+  Ok(MigrationStatus::Migrated)
+}
+
+/// 历史目标也可能还有仓库，清理前必须逐个确认。
+async fn repositories(
+  state: &AppState,
+  snap: &Snap,
+) -> Result<BTreeSet<(String, String)>, ApiError> {
+  let mut repos = state.db.call(|c| {
+    let mut stmt = c.prepare("SELECT DISTINCT target, service FROM backups WHERE service <> ?1")
+      .map_err(sql_err)?;
+    let rows = stmt.query_map([crate::core_backup::REPO], |r| Ok((r.get(0)?, r.get(1)?)))
+      .map_err(sql_err)?;
+    rows.collect::<Result<BTreeSet<_>, _>>().map_err(sql_err)
+  }).await?;
+  for (service, row) in &snap.world.services {
+    if let Some(backup) = &row.spec.backup
+      && service != crate::core_backup::REPO
+    {
+      repos.insert((backup.to.clone(), service.clone()));
+    }
+  }
+  Ok(repos)
+}
+
+#[derive(Serialize)]
+pub struct MigrateReport {
+  repositories: Vec<MigrationResult>,
+}
+
+#[derive(Serialize)]
+struct MigrationResult {
+  target: String,
+  service: String,
+  status: MigrationStatus,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  error: Option<ApiError>,
+}
+
+pub async fn migrate_all(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+) -> ApiResult<MigrateReport> {
+  auth.require(Perm::Admin)?;
+  let _lock =
+    s.apply_lock.try_lock().map_err(|_| s.runs.busy_error())?;
+  let cancel = CancellationToken::new();
+  let _cancel = cancel.clone().drop_guard();
+  let snap = snapshot::load(&s.db).await?;
+  let mut results = Vec::new();
+  for (target, service) in repositories(&s, &snap).await? {
+    let outcome = async {
+      require_isolation(&s, &target)?;
+      let creds = ensure_service_creds(&s, &service).await?;
+      ensure_repo_has_service_key(
+        &s,
+        &snap,
+        (&target, &service),
+        &creds.key,
+        &cancel,
+      )
+      .await
+    }
+    .await;
+    let (status, error) = match outcome {
+      Ok(status) => (status, None),
+      Err(e) if e.code == ErrorCode::AgentOffline => {
+        (MigrationStatus::SkippedOffline, Some(e))
+      }
+      Err(e) => (MigrationStatus::Failed, Some(e)),
+    };
+    results.push(MigrationResult {
+      target,
+      service,
+      status,
+      error: error.map(crate::log_redact::redact_error),
+    });
+  }
+  Ok(Json(MigrateReport {
+    repositories: results,
+  }))
+}
+
+#[derive(Deserialize)]
+pub struct CleanupRequest {
+  #[serde(default)]
+  confirm: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct CleanupReport {
+  removed_keys: usize,
+  deleted_secrets: usize,
+}
+
+pub async fn cleanup_legacy(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Json(req): Json<CleanupRequest>,
+) -> ApiResult<CleanupReport> {
+  auth.require(Perm::Admin)?;
+  auth.require(Perm::Confirm)?;
+  if req.confirm.as_deref() != Some("backup/legacy") {
+    return Err(ApiError::new(
+      ErrorCode::ConfirmRequired,
+      "清理旧全局备份口令后无法再回退用 WHARF_BACKUP_KEY 解密旧仓库，需要确认 backup/legacy",
+    ).with_hint("先确认 wharf backup core 和各服务的历史快照均已验证可读")
+      .suggest("wharf backup cleanup-legacy --confirm backup/legacy")
+      .into());
+  }
+  let _lock =
+    s.apply_lock.try_lock().map_err(|_| s.runs.busy_error())?;
+  let cancel = CancellationToken::new();
+  let _cancel = cancel.clone().drop_guard();
+  let legacy = s
+    .db
+    .call_credentials(|c, key| key.secret(c, LEGACY_KEY_SECRET))
+    .await?;
+  let mut removals = Vec::new();
+  if let Some(legacy) = &legacy {
+    crate::core_backup::require_recovery_ready(&s).await?;
+    let snap = snapshot::load(&s.db).await?;
+    for (target, service) in repositories(&s, &snap).await? {
+      require_isolation(&s, &target)?;
+      let repo = (target.as_str(), service.as_str());
+      let key = repository_secrets(&s, &service).await?.0;
+      // 尚无新口令时仍要用旧口令确认该机器是否真的没有仓库。
+      let keys: Vec<ResticKeyInfo> = local_call(
+        &s,
+        &snap,
+        repo,
+        key.as_deref().unwrap_or(legacy),
+        ResticAction::ListKeys,
+        &cancel,
+      )
+      .await?;
+      if keys.is_empty() {
+        continue;
+      }
+      let key = key.ok_or_else(|| {
+        ApiError::new(
+          ErrorCode::Conflict,
+          format!(
+            "服务器 {target} 上的 {service} 仓库还没有服务专属口令"
+          ),
+        )
+        .with_hint("运行 wharf backup migrate")
+      })?;
+      let current = current_key(&keys)?;
+      let old_keys: Vec<ResticKeyInfo> = match local_call(
+        &s,
+        &snap,
+        repo,
+        legacy,
+        ResticAction::ListKeys,
+        &cancel,
+      )
+      .await
+      {
+        Ok(keys) => keys,
+        Err(e) if e.code == ErrorCode::Forbidden => continue,
+        Err(e) => return Err(e.into()),
+      };
+      let old = current_key(&old_keys)?;
+      if old == current {
+        return Err(
+          ApiError::new(
+            ErrorCode::Conflict,
+            format!("{service} 的旧钥匙仍在使用"),
+          )
+          .into(),
+        );
+      }
+      removals.push((target, service, key, old.to_string()));
+    }
+    for (target, service, key, id) in &removals {
+      let repo = (target.as_str(), service.as_str());
+      local_call::<serde_json::Value>(
+        &s,
+        &snap,
+        repo,
+        key,
+        ResticAction::RemoveKey { id: id.clone() },
+        &cancel,
+      )
+      .await?;
+      let checked: Result<Vec<ResticKeyInfo>, _> = local_call(
+        &s,
+        &snap,
+        repo,
+        legacy,
+        ResticAction::ListKeys,
+        &cancel,
+      )
+      .await;
+      match checked {
+        Err(e) if e.code == ErrorCode::Forbidden => {}
+        Err(e) => return Err(e.into()),
+        Ok(_) => return Err(ApiError::new(
+          ErrorCode::Conflict, format!("服务器 {target} 上的 {service} 仓库尚未确认移除旧口令，请重试"),
+        ).into()),
+      }
+    }
+  }
+  let deleted_secrets = s
+    .db
+    .call(|c| {
+      c.execute(
+        "DELETE FROM secrets WHERE name IN (?1, ?2, ?3)",
+        [
+          LEGACY_KEY_SECRET,
+          LEGACY_HTTP_SECRET,
+          LEGACY_HTTP_HASH_SECRET,
+        ],
+      )
+      .map_err(sql_err)
+    })
+    .await?;
+  Ok(Json(CleanupReport {
+    removed_keys: removals.len(),
+    deleted_secrets,
+  }))
+}
+
+fn current_key(keys: &[ResticKeyInfo]) -> Result<&str, ApiError> {
+  keys
+    .iter()
+    .find(|k| k.current)
+    .map(|k| k.id.as_str())
+    .ok_or_else(|| {
+      ApiError::new(
+        ErrorCode::AgentFailed,
+        "找不到仓库当前使用的钥匙",
+      )
+    })
 }
 
 pub async fn run_now(
@@ -652,3 +1154,7 @@ pub async fn restore_now(
     .await?,
   ))
 }
+
+#[cfg(test)]
+#[path = "backup_isolation_tests.rs"]
+pub(crate) mod tests;

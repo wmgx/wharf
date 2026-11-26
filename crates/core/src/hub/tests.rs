@@ -27,6 +27,7 @@ fn old_hello_has_no_host_shell_capability() {
     ssh_logins,
     core_probe,
     gateway_extra_files,
+    backup_isolation,
     ..
   } = hello
   else {
@@ -36,6 +37,7 @@ fn old_hello_has_no_host_shell_capability() {
   assert!(!ssh_logins);
   assert!(!core_probe);
   assert!(!gateway_extra_files);
+  assert!(!backup_isolation);
 }
 
 #[test]
@@ -73,6 +75,7 @@ fn old_core_ignores_new_hello_capability() {
     ssh_logins: true,
     gateway_extra_files: true,
     core_probe: true,
+    backup_isolation: true,
   };
   let json = serde_json::to_string(&hello).unwrap();
   let old = serde_json::from_str::<OldAgentMsg>(&json);
@@ -84,6 +87,25 @@ impl Hub {
     &self,
     server: &str,
     gateway_extra_files: bool,
+    handle: impl FnMut(AgentOp) -> Result<Value, ApiError>
+    + Send
+    + 'static,
+  ) {
+    self.mock_agent_with_backup(
+      server,
+      gateway_extra_files,
+      false,
+      false,
+      handle,
+    );
+  }
+
+  pub(crate) fn mock_agent_with_backup(
+    &self,
+    server: &str,
+    gateway_extra_files: bool,
+    backup_isolation: bool,
+    core_probe: bool,
     mut handle: impl FnMut(AgentOp) -> Result<Value, ApiError>
     + Send
     + 'static,
@@ -96,8 +118,12 @@ impl Hub {
       server,
       Conn {
         conn_id: self.next_conn.fetch_add(1, Ordering::Relaxed),
-        public_key: String::new(),
-        core_probe: false,
+        public_key: if core_probe {
+          server.into()
+        } else {
+          String::new()
+        },
+        core_probe,
         tx,
         pending: pending.clone(),
         closed: closed.clone(),
@@ -111,6 +137,7 @@ impl Hub {
         container_probe: false,
         ssh_logins: false,
         gateway_extra_files,
+        backup_isolation,
         upgrade_only: false,
       },
     );
@@ -180,6 +207,7 @@ async fn agent_upgrade_needs_no_bound_core_server_or_probe_support() {
     container_probe: false,
     ssh_logins: false,
     gateway_extra_files: false,
+    backup_isolation: false,
     upgrade_only: true,
   };
   state.hub.register("s1", conn.clone());
@@ -234,6 +262,7 @@ fn probe_connection(
     container_probe: false,
     ssh_logins: false,
     gateway_extra_files: false,
+    backup_isolation: false,
     upgrade_only: false,
   };
   (conn, rx)

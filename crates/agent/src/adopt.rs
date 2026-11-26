@@ -158,8 +158,13 @@ fn is_wharf_container(
 }
 
 fn reserved_project(project: &str) -> bool {
-  matches!(project, "wharf-tailscale" | "wharf-backup" | "wharf-link")
-    || project.starts_with("wharf-gw-")
+  matches!(
+    project,
+    "wharf-tailscale"
+      | "wharf-backup"
+      | "wharf-backup-core"
+      | "wharf-link"
+  ) || project.starts_with("wharf-gw-")
     || project.starts_with("wharf-link-")
     || project
       .starts_with(wharf_api_types::agent::TRIAL_PROJECT_PREFIX)

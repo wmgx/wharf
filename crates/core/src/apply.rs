@@ -542,6 +542,15 @@ pub async fn start_task(
     .clone()
     .try_lock_owned()
     .map_err(|_| state.runs.busy_error())?;
+  start_task_locked(state, title, step, guard).await
+}
+
+pub(crate) async fn start_task_locked(
+  state: Arc<AppState>,
+  title: String,
+  step: Step,
+  guard: OwnedMutexGuard<()>,
+) -> Result<ApplyResponse, ApiError> {
   let run_id = crate::world::new_id("r");
   let run = Run {
     run_id: run_id.clone(),

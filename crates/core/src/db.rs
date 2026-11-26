@@ -750,6 +750,7 @@ pub fn apply_write(
         .map_err(sql_err)?;
       if kind == crate::world::KIND_SERVICE {
         crate::rules::delete_service_rows(conn, name)?;
+        delete_scoped_secrets(conn, &[crate::backup::HTTP_PREFIX, crate::backup::HTTP_HASH_PREFIX], name)?;
       }
       if kind == crate::world::KIND_GATEWAY {
         delete_scoped_secrets(conn, crate::link::GATEWAY_SECRET_PREFIXES, name)?;

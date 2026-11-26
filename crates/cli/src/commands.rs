@@ -4143,7 +4143,49 @@ async fn backup(
       adopt: None,
     })
   };
+  let repo_timeout = Duration::from_secs(30 * 60);
   match cmd {
+    BackupCmd::Migrate => {
+      let v: Value = c
+        .post_timeout(
+          "/api/backups/migrate",
+          &json!({}),
+          repo_timeout,
+        )
+        .await?;
+      out(j, &v, |v| {
+        if let Some(repos) = v["repositories"].as_array() {
+          for r in repos {
+            println!(
+              "{} / {}：{}",
+              r["target"].as_str().unwrap_or_default(),
+              r["service"].as_str().unwrap_or_default(),
+              r["status"].as_str().unwrap_or_default()
+            );
+            if let Some(message) = r["error"]["message"].as_str() {
+              println!("  {message}");
+            }
+          }
+        }
+      });
+      Ok(())
+    }
+    BackupCmd::CleanupLegacy { confirm } => {
+      let v: Value = c
+        .post_timeout(
+          "/api/backups/cleanup-legacy",
+          &json!({ "confirm": confirm }),
+          repo_timeout,
+        )
+        .await?;
+      out(j, &v, |v| {
+        println!(
+          "已摘除 {} 把旧钥匙，清理 {} 条旧凭据",
+          v["removed_keys"], v["deleted_secrets"]
+        );
+      });
+      Ok(())
+    }
     BackupCmd::Enable { service, to, apply } => {
       let change =
         set_backup(service, Some(BackupSpec { to })).await?;

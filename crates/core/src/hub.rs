@@ -73,6 +73,7 @@ struct Conn {
   container_probe: bool,
   ssh_logins: bool,
   gateway_extra_files: bool,
+  backup_isolation: bool,
   /// 协议版本不一致：连接放行，但只接受升级相关的请求，好让它升上来。
   upgrade_only: bool,
 }
@@ -201,6 +202,12 @@ impl Hub {
     lock(&self.conns)
       .get(server)
       .is_some_and(|c| !c.upgrade_only && c.container_diagnosis)
+  }
+
+  pub fn supports_backup_isolation(&self, server: &str) -> bool {
+    lock(&self.conns)
+      .get(server)
+      .is_some_and(|c| !c.upgrade_only && c.backup_isolation)
   }
 
   pub fn gateway_extra_files(&self, server: &str) -> Option<bool> {
@@ -355,6 +362,37 @@ impl Hub {
         ApiError::new(
           ErrorCode::Conflict,
           "网关所在机器的 agent 版本旧，不支持访问日志",
+        )
+        .with_hint("运行 wharf upgrade"),
+      );
+    }
+    if matches!(
+      &op,
+      AgentOp::Restic(job) if matches!(job.action, wharf_api_types::agent::ResticAction::ListKeys)
+    ) && (conn.upgrade_only || !conn.backup_isolation)
+    {
+      return Err(
+        ApiError::new(
+          ErrorCode::Conflict,
+          format!(
+            "服务器 {server} 的 agent 版本旧，不支持备份密钥管理"
+          ),
+        )
+        .with_hint("运行 wharf upgrade"),
+      );
+    }
+    if let AgentOp::ProjectUp(job) = &op
+      && matches!(
+        job.project.as_str(),
+        crate::render::BACKUP_PROJECT
+          | crate::render::CORE_BACKUP_PROJECT
+      )
+      && (conn.upgrade_only || !conn.backup_isolation)
+    {
+      return Err(
+        ApiError::new(
+          ErrorCode::Conflict,
+          format!("服务器 {server} 的 agent 版本旧，不支持隔离备份"),
         )
         .with_hint("运行 wharf upgrade"),
       );
@@ -586,6 +624,7 @@ async fn handle_socket(
     ssh_logins,
     gateway_extra_files,
     core_probe,
+    backup_isolation,
   } = hello
   else {
     anyhow::bail!("agent 没有先发 hello");
@@ -690,6 +729,7 @@ async fn handle_socket(
     container_probe,
     ssh_logins,
     gateway_extra_files,
+    backup_isolation,
     upgrade_only,
   };
   let state_on_db = state.clone();
