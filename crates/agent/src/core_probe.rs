@@ -31,7 +31,7 @@ fn safe_path(s: &str) -> bool {
     && path
       .components()
       .all(|c| matches!(c, Component::RootDir | Component::Normal(_)))
-    && !s.contains(['\0', '\n', '\r', ','])
+    && !s.contains(['\0', '\n', '\r', ',', '"'])
 }
 
 fn not_found() -> ApiError {
@@ -97,6 +97,8 @@ pub(crate) async fn run(
       "--rm",
       "--label",
       "wharf.temp=1",
+      "--log-driver",
+      "none",
       "--network",
       "none",
       "--name",

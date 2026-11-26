@@ -211,7 +211,7 @@ pub(super) async fn agent_join(
         );
       }
       tx.execute(
-        "UPDATE agents SET public_key = ?1, join_token_hash = NULL, join_expires_at = NULL
+        "UPDATE agents SET public_key = ?1, join_token_hash = NULL, join_expires_at = NULL, report = NULL, last_seen = NULL
          WHERE server = ?2",
         params![key, server],
       )

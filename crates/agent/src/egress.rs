@@ -569,8 +569,9 @@ mod tests {
     assert!(parse("GET /local HTTP/1.1\r\n\r\n").is_none());
   }
 
-  #[test]
-  fn egress_blocks_loopback_metadata_private_mesh_and_core_url() {
+  #[tokio::test]
+  async fn egress_blocks_loopback_metadata_private_mesh_and_core_url()
+  {
     let core = Target::core("https://core.example.test").unwrap();
     for host in [
       "127.0.0.1:7700",
@@ -610,6 +611,43 @@ mod tests {
     assert!(
       parse("CONNECT host.test\n:80 HTTP/1.1\r\n\r\n").is_none()
     );
+    let proxy = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target = upstream.local_addr().unwrap();
+    let auth = basic("test-fixture");
+    let request = format!(
+      "CONNECT {target} HTTP/1.1\r\nProxy-Authorization: {auth}\r\n\r\n"
+    );
+    let route = EgressRoute {
+      exit: target.to_string(),
+      token: "test-fixture".into(),
+      all: true,
+      domains: Vec::new(),
+    };
+    for mode in
+      [Mode::Serve { expected: auth }, Mode::Route(Arc::new(route))]
+    {
+      let mut client =
+        TcpStream::connect(proxy.local_addr().unwrap())
+          .await
+          .unwrap();
+      client.write_all(request.as_bytes()).await.unwrap();
+      let (conn, _) = proxy.accept().await.unwrap();
+      tokio::time::timeout(
+        Duration::from_secs(2),
+        handle(conn, &mode, Some(&core), Policy::PublicOnly),
+      )
+      .await
+      .unwrap()
+      .unwrap();
+      assert!(
+        read_head(&mut client)
+          .await
+          .unwrap()
+          .text
+          .starts_with("HTTP/1.1 403 ")
+      );
+    }
   }
 
   #[tokio::test]
@@ -702,8 +740,11 @@ mod tests {
         .await
         .is_err()
     );
-    assert_eq!(host_of("[::1]:443"), "::1");
-    assert_eq!(host_of("github.com:443"), "github.com");
+    assert_eq!(Target::parse("[::1]:443", None).unwrap().host, "::1");
+    assert_eq!(
+      Target::parse("github.com:443", None).unwrap().host,
+      "github.com"
+    );
     assert!(local_peer("172.17.0.2:1".parse().unwrap()));
     assert!(!local_peer("100.64.0.2:1".parse().unwrap()));
   }

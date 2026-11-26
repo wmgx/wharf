@@ -1,3 +1,4 @@
+use super::socket::protocol_ok;
 use super::*;
 
 #[test]
@@ -72,4 +73,82 @@ fn old_core_ignores_new_hello_capability() {
   let json = serde_json::to_string(&hello).unwrap();
   let old = serde_json::from_str::<OldAgentMsg>(&json);
   assert!(old.is_ok());
+}
+
+#[tokio::test]
+async fn agent_upgrade_needs_no_bound_core_server_or_probe_support() {
+  let state = crate::rules::tests::test_state();
+  state
+    .db
+    .call(|c| {
+      let db = crate::db::Write::Upsert {
+        kind: "server".into(),
+        name: "s1".into(),
+        spec: serde_json::json!({}),
+        meta: serde_json::json!({}),
+      };
+      crate::db::apply_write(c, &db)?;
+      let report =
+        serde_json::to_string(&wharf_api_types::agent::AgentReport {
+          build: "old".into(),
+          ..Default::default()
+        })
+        .map_err(crate::db::json_err)?;
+      c.execute(
+        "INSERT INTO agents (server, report) VALUES ('s1', ?1)",
+        [report],
+      )
+      .map_err(sql_err)?;
+      assert!(crate::core_node::load_persisted(c)?.is_none());
+      Ok(())
+    })
+    .await
+    .unwrap();
+  let (tx, mut rx) = mpsc::channel(1);
+  let conn = Conn {
+    conn_id: 1,
+    public_key: String::new(),
+    core_probe: false,
+    tx,
+    pending: Default::default(),
+    closed: CancellationToken::new(),
+    rtt_ms: Arc::new(AtomicU64::new(u64::MAX)),
+    host_shell: false,
+    forward: false,
+    service_checks: false,
+    container_diagnosis: false,
+    access_logs: false,
+    net_probe: false,
+    container_probe: false,
+    ssh_logins: false,
+    upgrade_only: true,
+  };
+  state.hub.register("s1", conn.clone());
+  let handle = async {
+    let CoreMsg::Request {
+      id,
+      op: AgentOp::Upgrade(job),
+      ..
+    } = rx.recv().await.unwrap()
+    else {
+      panic!("没有收到 agent 自升级请求");
+    };
+    assert!(job.container.is_none());
+    let pending = lock(&conn.pending).remove(&id).unwrap();
+    pending.done.send(Ok(serde_json::json!({"image":"example.test/agent:latest", "started":false}))).unwrap();
+  };
+  let cancel = CancellationToken::new();
+  let progress: ProgressFn = Arc::new(|_| {});
+  let (result, ()) =
+    tokio::time::timeout(Duration::from_secs(5), async {
+      tokio::join!(
+        crate::agent_upgrade::upgrade(
+          &state, "s1", progress, &cancel
+        ),
+        handle
+      )
+    })
+    .await
+    .unwrap();
+  result.unwrap();
 }

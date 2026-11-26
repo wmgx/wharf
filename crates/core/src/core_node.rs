@@ -129,7 +129,7 @@ async fn find_verified(
     .and_then(|m| container_id(&m));
   let (mut candidates, legacy) = state.hub.core_probe_servers();
   candidates.sort_unstable_by_key(|name| {
-    !persisted.as_ref().is_some_and(|p| &p.0 == name)
+    persisted.as_ref().is_none_or(|p| &p.0 != name)
   });
   for server in candidates {
     if cancel.is_cancelled() {

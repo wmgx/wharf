@@ -29,7 +29,7 @@ fn owned(fd: libc::c_int) -> io::Result<OwnedFd> {
   }
 }
 
-fn check(rc: libc::c_int) -> io::Result<()> {
+pub(crate) fn check(rc: libc::c_int) -> io::Result<()> {
   if rc < 0 {
     Err(io::Error::last_os_error())
   } else {

@@ -276,7 +276,14 @@ pub fn safe_reports(
       if !servers.contains_key(&agent.server) {
         return None;
       }
-      let mut report = agent.report.clone()?;
+      let report = agent.report.as_ref()?;
+      let mut report = AgentReport {
+        private_addr: report.private_addr.clone(),
+        public_ip: report.public_ip.clone(),
+        lan_ips: report.lan_ips.clone(),
+        docker_subnets: report.docker_subnets.clone(),
+        ..Default::default()
+      };
       sanitize_report(&mut report);
       strip_conflicting_ips(
         &agent.server,
@@ -344,15 +351,22 @@ pub fn route_owned_by_server(
   .then(|| route.service.clone())
 }
 
-pub async fn filter_report(
+pub async fn record_report(
   db: &crate::db::Db,
   server: &str,
+  public_key: &str,
   report: AgentReport,
 ) -> Result<AgentReport, wharf_api_types::ApiError> {
   let server = server.to_string();
+  let public_key = public_key.to_string();
   db.call(move |c| {
     let mut report = report;
     let world = World::from_rows(crate::db::all_resources(c)?)?;
+    let agents = crate::db::agents(c)?;
+    let registered = agents.iter().find(|a| a.server == server);
+    if !registered.is_some_and(|a| a.public_key.as_ref() == Some(&public_key)) {
+      return Err(wharf_api_types::ApiError::not_found("agent 已取消注册"));
+    }
     let before =
       (report.private_addr.clone(), report.public_ip.clone());
     sanitize_report(&mut report);
@@ -360,21 +374,37 @@ pub async fn filter_report(
       &server,
       &mut report,
       &world.servers,
-      &crate::db::agents(c)?,
+      &agents,
     );
     if (before.0.is_some() && report.private_addr.is_none())
       || (before.1.is_some() && report.public_ip.is_none())
     {
       tracing::warn!("已忽略服务器 {server} 上报的无效或冲突地址");
     }
+    let deployed = crate::db::deployed_servers(c)?;
     if let Some(m) = &mut report.metrics {
-      filter_owned_metrics(
-        &server,
-        m,
-        &world,
-        &crate::db::deployed_servers(c)?,
-      );
+      filter_owned_metrics(&server, m, &world, &deployed);
     }
+    let mut stored = report.clone();
+    let previous = registered.and_then(|a| a.report.as_ref());
+    if stored.metrics.is_none() {
+      stored.metrics = previous.filter(|r| r.build == stored.build)
+        .and_then(|r| r.metrics.clone());
+      if let Some(m) = &mut stored.metrics {
+        filter_owned_metrics(&server, m, &world, &deployed);
+      }
+    }
+    if let Some(m) = &mut stored.metrics {
+      m.oom = None;
+      m.hosts.clear();
+    }
+    if stored.agent_memory.is_none() && stored.time_ms.is_none() {
+      stored.agent_memory = previous.and_then(|r| r.agent_memory.clone());
+    }
+    stored.log_hits.clear();
+    let encoded = serde_json::to_string(&stored).map_err(crate::db::json_err)?;
+    c.execute("UPDATE agents SET last_seen = ?1, report = ?2 WHERE server = ?3",
+      rusqlite::params![crate::db::now_ms(), encoded, server]).map_err(crate::db::sql_err)?;
     Ok(report)
   })
   .await

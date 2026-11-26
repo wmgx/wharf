@@ -16,7 +16,7 @@ use wharf_api_types::{
 };
 
 use crate::{
-  dirfd::{DirFd, NOFOLLOW, stat},
+  dirfd::{DirFd, NOFOLLOW, check, stat},
   docker::io_err,
 };
 
