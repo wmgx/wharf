@@ -85,7 +85,13 @@ fn link_ca_signs_server_certificate_with_expected_lifetime() {
 fn link_ca_rejects_untrusted_issuer() {
   let now = OffsetDateTime::now_utc();
   let (trusted, _) = generate_ca(now).unwrap();
-  let (other, other_key) = generate_ca(now).unwrap();
+  let other_key =
+    KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+  let mut other = ca_params(now);
+  other
+    .distinguished_name
+    .push(DnType::CommonName, "Untrusted Link CA");
+  let other = other.self_signed(&other_key).unwrap();
   let (leaf, _) =
     issue_gateway_cert(&other, &other_key, "gw-a", now).unwrap();
   assert_eq!(
@@ -125,6 +131,10 @@ fn world(second_gateway: bool) -> World {
     .collect();
   world.apply_changes(&changes).unwrap();
   world.allocate_ports().unwrap();
+  world.services.get_mut("app").unwrap().pins.insert(
+    "traefik/whoami:1.11.0".into(),
+    format!("sha256:{}", "a".repeat(64)),
+  );
   world
 }
 
@@ -410,7 +420,6 @@ fn fake_agent(
             .collect::<Vec<_>>()
         ));
       }
-      AgentOp::ResolveImages(_) => return Ok(json!([])),
       AgentOp::EnsureDirs { .. } => return Ok(Value::Null),
       AgentOp::ProjectUp(up) => (up, None),
       AgentOp::GatewayApply(apply) => {
@@ -677,6 +686,7 @@ async fn link_rotation_requires_admin_and_updates_only_selected_projects()
     assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), 4096).await.unwrap();
     let text = std::str::from_utf8(&body).unwrap();
+    assert!(!text.contains("-----BEGIN"));
     let snap = snapshot::load(&state.db).await.unwrap();
     assert!(snap.secrets.values().all(|value| !text.contains(value)));
     let plan = make_plan(&state).await.unwrap();
