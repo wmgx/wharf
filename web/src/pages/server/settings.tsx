@@ -43,7 +43,7 @@ export function SettingsForm({ server, canRemove, active }: { server: ServerView
     ["流量", ["traffic_quota_gb", "traffic_reset_day"]],
     ["续费", ["renew_at"]],
     ["agent", ["agent_memory"]],
-    ["权限", ["host_terminal", "host_exec"]],
+    ["权限", ["host_terminal", "host_exec", "host_docker", "host_system"]],
   ];
   const changed = groups.filter(([, keys]) => dirty(keys)).map(([label]) => label);
   return <SettingsFields key={version} server={server} canRemove={canRemove} draft={draft} set={set} changed={changed} onReset={() => { reset(); setVersion((v) => v + 1); }} onSubmit={() => actions.plan({ title: `设置 ${server.name}`, changes: [{ op: "update_server", name: server.name, settings: { ...draft, network_mode: server.settings.network_mode } }] })} />;
@@ -151,12 +151,22 @@ function SettingsFields({ server, canRemove, draft, set, changed, onReset, onSub
     <Panel className="grid gap-3 p-4">
       <label className="flex items-start gap-2 text-sm">
         <Checkbox checked={draft.host_terminal} onCheckedChange={(v) => set({ host_terminal: v === true })} />
-        <span>宿主机终端<span className="block text-xs text-muted-foreground">允许从页面打开这台机器的终端，以及浏览它的目录。</span>
+        <span>宿主机终端<span className="block text-xs text-muted-foreground">允许从页面打开这台机器的终端。</span>
         </span>
       </label>
       <label className="flex items-start gap-2 text-sm">
         <Checkbox checked={draft.host_exec} onCheckedChange={(v) => set({ host_exec: v === true })} />
-        <span>命令执行<span className="block text-xs text-muted-foreground">允许 CLI 和 AI 在这台机器上执行命令。</span>
+        <span>宿主机命令<span className="block text-xs text-muted-foreground">允许带 host 权限的令牌执行宿主机命令、浏览打包目录、安装 apt 更新、管理终端会话和运行宿主机命令任务。</span>
+        </span>
+      </label>
+      <label className="flex items-start gap-2 text-sm">
+        <Checkbox checked={!!draft.host_docker} onCheckedChange={(v) => set({ host_docker: v === true })} />
+        <span>特权与未纳管容器<span className="block text-xs text-muted-foreground">允许带 host 权限的令牌部署特权/host 网络/越界挂载容器、操作未纳管容器，以及修改网关镜像和本地四层转发。</span>
+        </span>
+      </label>
+      <label className="flex items-start gap-2 text-sm">
+        <Checkbox checked={!!draft.host_system} onCheckedChange={(v) => set({ host_system: v === true })} />
+        <span>宿主机系统配置<span className="block text-xs text-muted-foreground">允许带 host 权限的令牌修改服务器设置、基线、代理、Tailscale，以及查看监视宿主机程序。</span>
         </span>
       </label>
     </Panel>

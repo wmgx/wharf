@@ -113,16 +113,16 @@ pub async fn open_host(
   Query(q): Query<OpenQuery>,
   ws: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
-  crate::host_access::require(
+  let snap = snapshot::load(&s.db).await?;
+  let row = snap.world.servers.get(&name);
+  crate::host_access::require_with(
     &auth,
     crate::host_access::HostTarget::HostTerminal { server: &name },
+    row.map(|r| &r.settings),
+    None,
   )?;
-  let snap = snapshot::load(&s.db).await?;
-  let row = snap
-    .world
-    .servers
-    .get(&name)
-    .ok_or_else(|| crate::world::server_not_found(&name))?;
+  let row =
+    row.ok_or_else(|| crate::world::server_not_found(&name))?;
   let audit_id =
     start(&s.db, &auth.name, &name, "terminal", None).await?;
   if !row.settings.host_terminal {

@@ -264,16 +264,18 @@ mod tests {
   use wharf_api_types::{ErrorCode, spec::ServiceSpec, view::Perm};
 
   #[test]
-  fn import_preview_requires_admin_and_redacts_sensitive_env() {
-    use crate::host_access::{HostTarget, require, tests::auth};
+  fn import_preview_requires_host_and_redacts_sensitive_env() {
+    use crate::host_access::{HostTarget, require_with, tests::auth};
     let auth = auth([Perm::Plan, Perm::Apply], false);
     assert_eq!(
-      require(
+      require_with(
         &auth,
         HostTarget::ImportPreview {
           server: "s1",
           target: "app"
-        }
+        },
+        None,
+        Some("core"),
       )
       .unwrap_err()
       .0
@@ -327,7 +329,15 @@ mod tests {
       (&script, "/hook/", "wh_secret_hook"),
     ] {
       assert_eq!(
-        crate::tasks::need_perm(&auth, spec).unwrap_err().0.code,
+        crate::tasks::need_perm(
+          &auth,
+          spec,
+          &Default::default(),
+          Some("core")
+        )
+        .unwrap_err()
+        .0
+        .code,
         ErrorCode::Forbidden
       );
       assert_eq!(

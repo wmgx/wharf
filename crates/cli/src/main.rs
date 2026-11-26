@@ -682,6 +682,12 @@ pub enum ServerCmd {
     /// 是否允许通过 API 在宿主机执行命令。用 token 只能关（false），打开要在页面上操作。
     #[arg(long)]
     host_exec: Option<bool>,
+    /// 是否允许通过 API 操作特权与未纳管容器。用 token 只能关（false），打开要在页面上操作。
+    #[arg(long)]
+    host_docker: Option<bool>,
+    /// 是否允许通过 API 操作宿主机系统配置。用 token 只能关（false），打开要在页面上操作。
+    #[arg(long)]
+    host_system: Option<bool>,
     /// 每月流量额度（GB），只用于显示用了多少；0 清除。
     #[arg(long)]
     traffic_quota_gb: Option<u32>,
@@ -1482,7 +1488,7 @@ pub enum TokenCmd {
   /// 新建 token（只显示这一次）。给 AI 常用 `--perms plan,apply,exec`。
   Create {
     name: String,
-    /// 权限点，逗号分隔：read、plan、apply、confirm、exec、admin（read 总是带上）。
+    /// 权限点，逗号分隔：read、plan、apply、confirm、exec、host、admin（read 总是带上）。
     #[arg(
       long,
       conflicts_with = "scope",

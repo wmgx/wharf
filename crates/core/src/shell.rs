@@ -81,9 +81,12 @@ pub async fn exec(
   AxumPath(name): AxumPath<String>,
   Json(req): Json<ExecRequest>,
 ) -> ApiResult<HostExecResponse> {
-  crate::host_access::require(
+  let snap = snapshot::load(&state.db).await?;
+  crate::host_access::require_with(
     &auth,
     crate::host_access::HostTarget::HostExec { server: &name },
+    snap.world.servers.get(&name).map(|r| &r.settings),
+    crate::join::core_server_of(&snap).as_deref(),
   )?;
   let job = req.job()?;
   Ok(Json(run_host(state, &auth.name, name, job).await?))

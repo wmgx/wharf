@@ -86,11 +86,13 @@ pub async fn status(
   auth: Auth,
   Path(name): Path<String>,
 ) -> ApiResult<AptStatus> {
-  crate::host_access::require(
+  check_server(
+    &s,
     &auth,
+    &name,
     crate::host_access::HostTarget::HostApt { server: &name },
-  )?;
-  check_server(&s, &auth, &name).await?;
+  )
+  .await?;
   let (_, out) = run(&s, &name, STATUS).await?;
   let (head, log) = out.split_once('\n').unwrap_or((&out, ""));
   Ok(Json(AptStatus {
@@ -117,11 +119,13 @@ pub async fn upgrade(
   auth: Auth,
   Path(name): Path<String>,
 ) -> ApiResult<String> {
-  crate::host_access::require(
+  check_server(
+    &s,
     &auth,
+    &name,
     crate::host_access::HostTarget::HostApt { server: &name },
-  )?;
-  check_server(&s, &auth, &name).await?;
+  )
+  .await?;
   let audit =
     start(&s.db, &auth.name, &name, "apt.upgrade", None).await?;
   let result = run(&s, &name, START).await;

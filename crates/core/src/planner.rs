@@ -260,6 +260,7 @@ pub struct StepPlan {
 pub struct Planned {
   pub plan: Plan,
   pub account_refs: BTreeSet<String>,
+  pub host_requirements: Vec<crate::host_access::HostRequirement>,
   pub route_effects: crate::token_scope::RouteEffects,
   pub steps: Vec<StepPlan>,
   pub writes: Vec<Write>,
@@ -764,7 +765,7 @@ fn finish_plan(
       }
     }
   }
-  let needs_admin = crate::host_access::mark_plan(
+  let (needs_host, host_requirements) = crate::host_access::mark_plan(
     &snap.world,
     desired,
     &mut b.items,
@@ -802,7 +803,7 @@ fn finish_plan(
     )),
     items: b.items,
     warnings: b.warnings,
-    needs_admin,
+    needs_host,
     needs_confirm,
     suggest,
     note: note
@@ -813,6 +814,7 @@ fn finish_plan(
   Planned {
     plan,
     account_refs,
+    host_requirements,
     route_effects: b.route_effects,
     steps: b.steps,
     writes,
@@ -2594,6 +2596,7 @@ pub async fn save(
     serde_json::to_value(&planned.plan).map_err(db::json_err)?;
   body["account_refs"] = json!(&planned.account_refs);
   body["host_access_checked"] = json!(true);
+  body["host_requirements"] = json!(&planned.host_requirements);
   if !planned.route_effects.is_empty() {
     body["route_effects"] = json!(&planned.route_effects);
   }

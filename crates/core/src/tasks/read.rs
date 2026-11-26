@@ -11,10 +11,13 @@ pub(super) async fn build_views(
   reveal: bool,
 ) -> Result<Vec<TaskView>, crate::api::AppError> {
   let tasks = load(s).await?;
-  let base = if reveal {
-    crate::join::default_url(s).await
+  let (context, base) = if reveal {
+    let snap = crate::snapshot::load(&s.db).await?;
+    let base = crate::join::default_url_from(s, &snap);
+    let core_server = crate::join::core_server_of(&snap);
+    (Some((snap.world, core_server)), base)
   } else {
-    None
+    (None, None)
   };
   let mut out = Vec::new();
   let now = Utc::now();
@@ -27,13 +30,15 @@ pub(super) async fn build_views(
     {
       continue;
     }
-    if reveal {
-      need_perm(auth, &spec).map_err(|_| {
-        ApiError::new(
-          ErrorCode::Forbidden,
-          "查看完整触发/报到地址需要对应执行权限",
-        )
-      })?;
+    if let Some((world, core_server)) = &context {
+      need_perm(auth, &spec, world, core_server.as_deref()).map_err(
+        |_| {
+          ApiError::new(
+            ErrorCode::Forbidden,
+            "查看完整触发/报到地址需要对应执行权限",
+          )
+        },
+      )?;
     }
     let n = name.clone();
     let last = s

@@ -103,14 +103,16 @@ pub async fn preview(
   Json(req): Json<ImportRequest>,
 ) -> ApiResult<ImportPreview> {
   let (kind, raw_name) = target(&req.project, &req.container)?;
-  crate::host_access::require(
+  let snap = snapshot::load(&s.db).await?;
+  crate::host_access::require_with(
     &auth,
     crate::host_access::HostTarget::ImportPreview {
       server: &req.server,
       target: raw_name,
     },
+    snap.world.servers.get(&req.server).map(|r| &r.settings),
+    crate::join::core_server_of(&snap).as_deref(),
   )?;
-  let snap = snapshot::load(&s.db).await?;
   if !snap.world.servers.contains_key(&req.server) {
     return Err(server_not_found(&req.server).into());
   }
@@ -237,13 +239,17 @@ fn require_remove(
   auth: &Auth,
   server: &str,
   target: &str,
+  settings: Option<&wharf_api_types::spec::ServerSettings>,
+  core_server: Option<&str>,
 ) -> Result<(), crate::api::AppError> {
-  crate::host_access::require(
+  crate::host_access::require_with(
     auth,
     crate::host_access::HostTarget::RemoveUnmanaged {
       server,
       target,
     },
+    settings,
+    core_server,
   )?;
   auth.require(Perm::Confirm)
 }
@@ -257,8 +263,14 @@ pub async fn remove(
   Json(req): Json<RemoveRequest>,
 ) -> ApiResult<wharf_api_types::agent::RemovedContainers> {
   let (kind, name) = target(&req.project, &req.container)?;
-  require_remove(&auth, &server, name)?;
   let snap = snapshot::load(&s.db).await?;
+  require_remove(
+    &auth,
+    &server,
+    name,
+    snap.world.servers.get(&server).map(|r| &r.settings),
+    crate::join::core_server_of(&snap).as_deref(),
+  )?;
   if !snap.world.servers.contains_key(&server) {
     return Err(server_not_found(&server).into());
   }
@@ -369,23 +381,31 @@ mod tests {
   use wharf_api_types::ErrorCode;
 
   #[test]
-  fn remove_unmanaged_requires_admin_confirm_and_protects_tailscale()
-  {
-    for perms in [Perm::Apply, Perm::Admin, Perm::Confirm] {
-      let err =
-        require_remove(&auth([perms], false), "s1", "foreign")
-          .unwrap_err()
-          .0;
-      assert_eq!(err.code, ErrorCode::Forbidden);
-    }
-    assert!(
+  fn remove_unmanaged_requires_host_confirm_and_docker_switch() {
+    use wharf_api_types::spec::ServerSettings;
+
+    let check = |perms: &[Perm], host_docker| {
       require_remove(
-        &auth([Perm::Admin, Perm::Confirm], false),
+        &auth(perms.iter().copied(), false),
         "s1",
-        "foreign"
+        "foreign",
+        Some(&ServerSettings {
+          host_docker,
+          ..Default::default()
+        }),
+        Some("core"),
       )
-      .is_ok()
-    );
+    };
+    for (perms, enabled, reason) in [
+      (&[Perm::Confirm][..], true, "host 权限"),
+      (&[Perm::Host][..], true, "confirm 权限"),
+      (&[Perm::Host, Perm::Confirm][..], false, "host_docker"),
+    ] {
+      let err = check(perms, enabled).unwrap_err().0;
+      assert_eq!(err.code, ErrorCode::Forbidden);
+      assert!(err.message.contains(reason));
+    }
+    assert!(check(&[Perm::Host, Perm::Confirm], true).is_ok());
     assert!(managed(&World::default(), "wharf-tailscale"));
   }
 }

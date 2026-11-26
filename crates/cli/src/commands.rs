@@ -1279,6 +1279,8 @@ async fn server(
       github_mirror,
       host_terminal,
       host_exec,
+      host_docker,
+      host_system,
       traffic_quota_gb,
       traffic_reset_day,
       renew_at,
@@ -1436,6 +1438,12 @@ async fn server(
       }
       if let Some(enabled) = host_exec {
         settings.host_exec = enabled;
+      }
+      if let Some(enabled) = host_docker {
+        settings.host_docker = enabled;
+      }
+      if let Some(enabled) = host_system {
+        settings.host_system = enabled;
       }
       changes(
         c,

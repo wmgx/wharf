@@ -46,7 +46,9 @@ impl TokenSettings {
     if self.perms.is_empty() {
       return Err(
         ApiError::invalid("perms 不能为空，至少要指定一个权限点")
-          .with_hint("可选：read、plan、apply、confirm、exec、admin"),
+          .with_hint(
+            "可选：read、plan、apply、confirm、exec、host、admin",
+          ),
       );
     }
     self.perms.push(Perm::Read);

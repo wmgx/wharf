@@ -657,10 +657,17 @@ fn validate(
 pub(crate) fn need_perm(
   auth: &Auth,
   spec: &TaskSpec,
+  world: &crate::world::World,
+  core_server: Option<&str>,
 ) -> Result<(), crate::api::AppError> {
   let target = crate::host_access::HostTarget::Task(spec);
   if crate::host_access::assess(target).required {
-    return crate::host_access::require(auth, target);
+    return crate::host_access::require_with(
+      auth,
+      target,
+      world.servers.get(&spec.server).map(|row| &row.settings),
+      core_server,
+    );
   }
   auth.require(Perm::Apply)?;
   if matches!(
@@ -753,11 +760,12 @@ pub async fn put(
   Path(name): Path<String>,
   Json(spec): Json<TaskSpec>,
 ) -> ApiResult<TaskSpec> {
-  need_perm(&auth, &spec)?;
-  if let Ok(old) = load_one(&s, &name).await {
-    need_perm(&auth, &old)?;
-  }
   let snap = snapshot::load(&s.db).await?;
+  let core_server = crate::join::core_server_of(&snap);
+  need_perm(&auth, &spec, &snap.world, core_server.as_deref())?;
+  if let Ok(old) = load_one(&s, &name).await {
+    need_perm(&auth, &old, &snap.world, core_server.as_deref())?;
+  }
   validate(&name, &spec, &snap)?;
   let mut spec = spec;
   if let TaskKind::Ping { token, .. } = &mut spec.how
@@ -828,7 +836,13 @@ pub async fn remove(
   Query(q): Query<RemoveQuery>,
 ) -> ApiResult<serde_json::Value> {
   let spec = load_one(&s, &name).await?;
-  need_perm(&auth, &spec)?;
+  let snap = snapshot::load(&s.db).await?;
+  need_perm(
+    &auth,
+    &spec,
+    &snap.world,
+    crate::join::core_server_of(&snap).as_deref(),
+  )?;
   require_confirm_task_data(&auth, &name, &spec, q.data)?;
   let task_name = name.clone();
   s.db
@@ -866,7 +880,13 @@ pub async fn run_now(
   Path(name): Path<String>,
 ) -> ApiResult<serde_json::Value> {
   let spec = load_one(&s, &name).await?;
-  need_perm(&auth, &spec)?;
+  let snap = snapshot::load(&s.db).await?;
+  need_perm(
+    &auth,
+    &spec,
+    &snap.world,
+    crate::join::core_server_of(&snap).as_deref(),
+  )?;
   if matches!(spec.how, TaskKind::Ping { .. }) {
     return Err(
       ApiError::invalid(format!(
@@ -1042,30 +1062,40 @@ mod tests {
   }
 
   #[test]
-  fn host_and_mount_tasks_require_admin() {
+  fn host_and_mount_tasks_require_host_and_their_switch() {
     use crate::host_access::tests::auth;
-    let perms = [Perm::Read, Perm::Plan, Perm::Apply, Perm::Exec];
-    for (fields, reason) in [
+    let host = auth([Perm::Host], false);
+    for (fields, field, other) in [
       (
         serde_json::json!({"kind":"host","command":"true"}),
-        "在宿主机上执行命令",
+        "host_exec",
+        "host_docker",
       ),
       (
         serde_json::json!({"kind":"container","image":"alpine","mounts":["/:/host"]}),
-        "/:/host",
+        "host_docker",
+        "host_exec",
       ),
     ] {
       let spec = task(fields);
-      let err = need_perm(&auth(perms, false), &spec).unwrap_err().0;
-      assert_eq!(err.code, ErrorCode::Forbidden);
-      assert!(err.message.contains(reason));
-      assert!(
-        need_perm(
-          &auth(perms.into_iter().chain([Perm::Admin]), false),
-          &spec
-        )
-        .is_ok()
+      let mut world = crate::world::World::default();
+      let settings = |key: &str| {
+        serde_json::from_value(serde_json::json!({(key): true}))
+          .unwrap()
+      };
+      world.servers.insert(
+        "s1".into(),
+        crate::world::ServerRow {
+          settings: settings(other),
+          version: 1,
+        },
       );
+      let err =
+        need_perm(&host, &spec, &world, Some("core")).unwrap_err().0;
+      assert_eq!(err.code, ErrorCode::Forbidden);
+      assert!(err.message.contains(field));
+      world.servers.get_mut("s1").unwrap().settings = settings(field);
+      assert!(need_perm(&host, &spec, &world, Some("core")).is_ok());
     }
   }
 
@@ -1081,14 +1111,24 @@ mod tests {
     ] {
       let spec = task(fields);
       assert_eq!(
-        need_perm(&apply, &spec).unwrap_err().0.code,
+        need_perm(&apply, &spec, &Default::default(), None)
+          .unwrap_err()
+          .0
+          .code,
         ErrorCode::Forbidden
       );
-      assert!(need_perm(&exec, &spec).is_ok());
+      assert!(
+        need_perm(&exec, &spec, &Default::default(), None).is_ok()
+      );
     }
     assert!(
-      need_perm(&apply, &task(serde_json::json!({"kind":"ping"})))
-        .is_ok()
+      need_perm(
+        &apply,
+        &task(serde_json::json!({"kind":"ping"})),
+        &Default::default(),
+        None
+      )
+      .is_ok()
     );
   }
 
@@ -1102,9 +1142,9 @@ mod tests {
       serde_json::json!({"kind":"script","runtime":"shell","code":"true"}),
     );
     let check = |auth, data| {
-      need_perm(auth, &spec).and_then(|()| {
-        require_confirm_task_data(auth, "script", &spec, data)
-      })
+      need_perm(auth, &spec, &Default::default(), None).and_then(
+        |()| require_confirm_task_data(auth, "script", &spec, data),
+      )
     };
     assert_eq!(
       check(&apply, true).unwrap_err().0.code,

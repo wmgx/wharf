@@ -853,17 +853,20 @@ pub enum Perm {
   Confirm,
   /// 容器内操作：容器终端、端口转发、改服务文件、创建或运行容器/脚本定时任务（不含宿主机访问）。
   Exec,
-  /// 管理服务器、账号、密钥、token，升级 Wharf，以及所有触达宿主机的操作（宿主机终端另需页面登录）。
+  /// 宿主机级操作：执行宿主机命令/目录/apt/任务、部署特权或 host 网络容器、操作未纳管容器、修改宿主机系统配置（需目标服务器开启对应开关；控制面所在机另需 admin）。
+  Host,
+  /// 控制面管理：服务器增删、厂商账号、密钥、访问令牌、审计、升级 Wharf、SSO 与应用账号（以及控制面所在机的宿主机操作）。
   Admin,
 }
 
 impl Perm {
-  pub const ALL: [Perm; 6] = [
+  pub const ALL: [Perm; 7] = [
     Perm::Read,
     Perm::Plan,
     Perm::Apply,
     Perm::Confirm,
     Perm::Exec,
+    Perm::Host,
     Perm::Admin,
   ];
 
@@ -874,6 +877,7 @@ impl Perm {
       Perm::Apply => "apply",
       Perm::Confirm => "confirm",
       Perm::Exec => "exec",
+      Perm::Host => "host",
       Perm::Admin => "admin",
     }
   }
@@ -884,13 +888,14 @@ impl Perm {
 
   /// 旧档位对应的一组权限点。
   pub fn of_scope(scope: TokenScope) -> Vec<Perm> {
-    let n = match scope {
-      TokenScope::Read => 1,
-      TokenScope::Plan => 2,
-      TokenScope::ApplySafe => 3,
-      TokenScope::ApplyAll => 6,
-    };
-    Perm::ALL[..n].to_vec()
+    match scope {
+      TokenScope::Read => vec![Perm::Read],
+      TokenScope::Plan => vec![Perm::Read, Perm::Plan],
+      TokenScope::ApplySafe => {
+        vec![Perm::Read, Perm::Plan, Perm::Apply]
+      }
+      TokenScope::ApplyAll => Perm::ALL.to_vec(),
+    }
   }
 }
 
