@@ -32,6 +32,13 @@ fn restore_blocks_symlink_root_and_escaping_child_links() {
     );
     assert!(!staging.join("kept").exists());
   };
+  let restored_srv = fresh.parent().unwrap();
+  fs::remove_dir(restored_srv).unwrap();
+  symlink(&outside, restored_srv).unwrap();
+  rejected(outside.to_str().unwrap());
+  fs::remove_file(restored_srv).unwrap();
+  fs::create_dir(restored_srv).unwrap();
+
   symlink(&outside, &fresh).unwrap();
   rejected(outside.to_str().unwrap());
   fs::create_dir(&fresh).unwrap();

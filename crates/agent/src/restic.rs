@@ -537,10 +537,11 @@ fn install_restored_tree(
   let work = restore.join(work_name);
   let work_name =
     component(work_name.as_ref()).map_err(io_err(&work))?;
-  let fresh_parent = restore_fd
+  let work_fd = restore_fd
     .open_subdir(&work_name)
-    .and_then(|fd| fd.open_subdir(c"srv"))
     .map_err(|e| dir_error(&work, e))?;
+  let fresh_parent =
+    open_restored_dir(&work_fd, c"srv", srv, snapshot)?;
   let root = srv.join(service);
   let service = component(service.as_ref()).map_err(io_err(&root))?;
   let staged = StagedRestore::new(
@@ -594,17 +595,8 @@ impl StagedRestore {
     root: &Path,
     snapshot: &str,
   ) -> Result<(), ApiError> {
-    let fresh = self.dir.open_subdir(c"tree").map_err(|e| {
-      if matches!(e.raw_os_error(), Some(libc::ELOOP | libc::ENOTDIR)) {
-        let link = self.dir.readlink(c"tree").ok()
-          .map(|target| format!("（{} -> {}）", root.display(), target.display()))
-          .unwrap_or_default();
-        ApiError::invalid(format!("快照 {snapshot} 中的 {} 是符号链接或非目录，已拒绝恢复{link}", root.display()))
-          .with_hint(RESTORE_HINT)
-      } else {
-        dir_error(root, e)
-      }
-    })?;
+    let fresh =
+      open_restored_dir(&self.dir, c"tree", root, snapshot)?;
     validate_tree(&fresh, true).map_err(|e| {
       if e.code == ErrorCode::InvalidInput {
         ApiError::invalid(format!("快照 {snapshot} 包含指向服务目录之外的符号链接（{}），已拒绝恢复", e.message))
@@ -612,6 +604,26 @@ impl StagedRestore {
       } else { e }
     })
   }
+}
+
+fn open_restored_dir(
+  parent: &DirFd,
+  name: &std::ffi::CStr,
+  path: &Path,
+  snapshot: &str,
+) -> Result<DirFd, ApiError> {
+  parent.open_subdir(name).map_err(|e| {
+    if matches!(e.raw_os_error(), Some(libc::ELOOP | libc::ENOTDIR)) {
+      let link = parent.readlink(name).ok()
+        .map(|target| format!("（{} -> {}）", path.display(), target.display()))
+        .unwrap_or_default();
+      ApiError::invalid(format!(
+        "快照 {snapshot} 中的 {} 是符号链接或非目录，已拒绝恢复{link}", path.display()
+      )).with_hint(RESTORE_HINT)
+    } else {
+      dir_error(path, e)
+    }
+  })
 }
 
 fn install_checked_tree(

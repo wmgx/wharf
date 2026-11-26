@@ -240,9 +240,9 @@ async fn finish_probe(
   expected: &str,
   response: Result<CoreHostProbeResult, ApiError>,
 ) -> Result<Option<VerifiedCore>, ApiError> {
-  let candidate = node.clone();
   match response {
     Ok(result) if valid_response(expected, result.token.trim()) => {
+      let candidate = node.clone();
       if !state
         .db
         .call(move |c| store_verified(c, &candidate))
