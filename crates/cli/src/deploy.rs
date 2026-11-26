@@ -45,9 +45,11 @@ pub async fn source(
     Some(Source::Build(old)) => Some(old),
     _ => None,
   };
-  // GitHub 私有仓库没指定 token 密钥时，借本机 gh 的登录。
+  // GitHub 私有仓库优先使用控制面已有的密钥。
   let token_secret = match (&args.git, &args.git_token_secret) {
-    (Some(repo), None) => crate::gh::private_token(c, repo).await?,
+    (Some(repo), None) => {
+      crate::gh::private_token(c, repo, args.sync_gh_token).await?
+    }
     (_, t) => t.clone(),
   };
   // 重新给出 --dir / --git 时，没给的选项沿用现有配置。

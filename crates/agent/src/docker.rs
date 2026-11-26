@@ -342,12 +342,23 @@ impl Docker {
             .args(["tag", &candidate, image])
             .timeout(Duration::from_secs(15))
             .run(ctx)
-            .await?
-            .check("docker tag")?;
+            .await
+            .and_then(|out| out.check("docker tag"))
+            .map_err(|error| redact_pull_error(policy, error))?;
+          if candidate != format!("{name}@{digest}") {
+            let _ = self
+              .cmd()
+              .args(["image", "rm", &candidate])
+              .timeout(Duration::from_secs(15))
+              .run(ctx)
+              .await;
+          }
           ctx.say(format!("已拉取 {image}（{digest}）"));
           return Ok(());
         }
-        Err(e) if e.code == ErrorCode::Cancelled => return Err(e),
+        Err(e) if e.code == ErrorCode::Cancelled => {
+          return Err(redact_pull_error(policy, e));
+        }
         Err(e) => {
           rate = rate
             .max(crate::external::rate_limit(&candidate, &e.message));
@@ -392,8 +403,9 @@ impl Docker {
               .args(["tag", &candidate, image])
               .timeout(Duration::from_secs(15))
               .run(ctx)
-              .await?
-              .check("docker tag")?;
+              .await
+              .and_then(|out| out.check("docker tag"))
+              .map_err(|error| redact_pull_error(policy, error))?;
             // 只删掉镜像源的标签，镜像本身保留。
             let _ = self
               .cmd()
@@ -405,7 +417,9 @@ impl Docker {
           ctx.say(format!("已拉取 {image}"));
           return Ok(());
         }
-        Err(e) if e.code == ErrorCode::Cancelled => return Err(e),
+        Err(e) if e.code == ErrorCode::Cancelled => {
+          return Err(redact_pull_error(policy, e));
+        }
         Err(e) => {
           rate = rate
             .max(crate::external::rate_limit(&candidate, &e.message));
@@ -845,6 +859,15 @@ pub fn pull_candidates(
   out
 }
 
+fn redact_pull_error(
+  policy: &PullPolicy,
+  mut error: ApiError,
+) -> ApiError {
+  error.message = policy.redact(&error.message);
+  error.hint = error.hint.map(|hint| policy.redact(&hint));
+  error
+}
+
 fn pick_digest(image: &str, digests: &str) -> Option<String> {
   let (registry, path, _) = split_image(image);
   let digests: Vec<&str> =
@@ -857,7 +880,9 @@ fn pick_digest(image: &str, digests: &str) -> Option<String> {
       r == registry && p == path
     })
     .or(digests.first())
-    .map(|d| d.to_string())
+    .and_then(|d| {
+      wharf_api_types::agent::normalize_image_digest(image, d)
+    })
 }
 
 /// `docker pull` 非终端输出是逐层状态行，如 `0a1b2c3d4e5f: Download complete`。
@@ -1056,13 +1081,16 @@ mod tests {
 
   #[test]
   fn digest_matches_repo() {
+    let a = "a".repeat(64);
+    let b = "b".repeat(64);
     assert_eq!(
       pick_digest(
         "traefik/whoami:latest",
-        "docker.1ms.run/traefik/whoami@sha256:1,traefik/whoami@sha256:2"
-      )
-      .as_deref(),
-      Some("traefik/whoami@sha256:2")
+        &format!(
+          "docker.example.test/traefik/whoami@sha256:{a},traefik/whoami@sha256:{b}"
+        )
+      ),
+      Some(format!("traefik/whoami@sha256:{b}"))
     );
   }
 
@@ -1079,4 +1107,16 @@ not json"#;
     assert_eq!(who.working_dir.as_deref(), Some("/opt/whoami"));
     assert_eq!(grouped["other"][0].state, "exited");
   }
+}
+
+#[test]
+fn digest_uses_original_repository() {
+  let hash = "a".repeat(64);
+  let raw = format!(
+    "docker.example.test/tok_secret_123456/library/nginx@sha256:{hash}"
+  );
+  assert_eq!(
+    pick_digest("nginx:1.27", &raw),
+    Some(format!("nginx@sha256:{hash}"))
+  );
 }

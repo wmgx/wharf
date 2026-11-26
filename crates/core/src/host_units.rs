@@ -154,6 +154,36 @@ pub struct HostUnitView {
   watched: bool,
 }
 
+impl HostUnitView {
+  fn new(
+    mut unit: HostUnit,
+    watch: &BTreeSet<String>,
+    log_values: &[String],
+  ) -> Self {
+    unit.command = crate::redact::redact_command(
+      &wharf_api_types::mask_values(&unit.command, log_values),
+    );
+    Self {
+      watched: watch.contains(&unit.unit),
+      unit,
+    }
+  }
+}
+
+#[test]
+fn host_unit_masks_registered_positional_secret() {
+  let view = HostUnitView::new(
+    HostUnit {
+      command:
+        "/usr/bin/example fixture-unit-key --token other-token".into(),
+      ..Default::default()
+    },
+    &BTreeSet::new(),
+    &["fixture-unit-key".into()],
+  );
+  assert_eq!(view.unit.command, "/usr/bin/example *** --token ***");
+}
+
 /// `GET /api/servers/{name}/host-units`：现场读一次（要几秒）。
 pub async fn list(
   State(s): State<Arc<AppState>>,
@@ -174,13 +204,7 @@ pub async fn list(
   let units = fetch(&s, &server).await?;
   let mut out: Vec<HostUnitView> = units
     .into_iter()
-    .map(|mut unit| {
-      unit.command = crate::redact::redact_command(&unit.command);
-      HostUnitView {
-        watched: watch.contains(&unit.unit),
-        unit,
-      }
-    })
+    .map(|unit| HostUnitView::new(unit, &watch, &snap.log_values))
     .collect();
   // 接管了但现在没列出来的（停了、被删了），也要能看到。
   for w in &watch {
@@ -296,5 +320,5 @@ pub async fn logs(
       &CancellationToken::new(),
     )
     .await?;
-  Ok(Json(text))
+  Ok(Json(crate::log_redact::redact_text(&text)))
 }

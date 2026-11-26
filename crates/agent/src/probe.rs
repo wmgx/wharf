@@ -1,10 +1,10 @@
 //! 连通性探测：每个 agent 在探测端口回一行 `wharf <服务器名>`；
 //! 控制面让网关所在机器的 agent 去连服务所在机器，判断网关能不能直连服务。
 
-use std::time::Duration;
+use std::{net::IpAddr, sync::Arc, time::Duration};
 
 use tokio::{
-  io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+  io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
   net::{TcpListener, TcpStream},
 };
 use wharf_api_types::agent::ProbeTarget;
@@ -28,13 +28,21 @@ pub async fn serve(server: String, port: u16) {
       return;
     }
   };
+  let permits = Arc::new(tokio::sync::Semaphore::new(32));
   let line = banner(&server);
   loop {
-    let Ok((mut stream, _)) = listener.accept().await else {
+    let Ok((mut stream, peer)) = listener.accept().await else {
+      continue;
+    };
+    if !is_probe_peer_allowed(peer.ip()) {
+      continue;
+    }
+    let Ok(permit) = permits.clone().try_acquire_owned() else {
       continue;
     };
     let line = line.clone();
     tokio::spawn(async move {
+      let _permit = permit;
       let _ = tokio::time::timeout(
         CONNECT_TIMEOUT,
         stream.write_all(line.as_bytes()),
@@ -56,7 +64,10 @@ async fn one(target: &ProbeTarget) -> bool {
       return Some(true);
     }
     let mut line = String::new();
-    BufReader::new(stream).read_line(&mut line).await.ok()?;
+    BufReader::new(stream.take(256))
+      .read_line(&mut line)
+      .await
+      .ok()?;
     Some(line == banner(&target.server))
   };
   tokio::time::timeout(CONNECT_TIMEOUT, attempt)
@@ -103,7 +114,10 @@ async fn timed(target: &ProbeTarget) -> Option<f64> {
     let stream = TcpStream::connect(&target.addr).await.ok()?;
     let ms = start.elapsed().as_secs_f64() * 1000.0;
     let mut line = String::new();
-    BufReader::new(stream).read_line(&mut line).await.ok()?;
+    BufReader::new(stream.take(256))
+      .read_line(&mut line)
+      .await
+      .ok()?;
     (line == banner(&target.server)).then_some(ms)
   };
   tokio::time::timeout(CONNECT_TIMEOUT, attempt)
@@ -245,6 +259,22 @@ pub async fn fetch(
   })
 }
 
+fn is_probe_peer_allowed(ip: IpAddr) -> bool {
+  match ip.to_canonical() {
+    IpAddr::V4(ip) => {
+      ip.is_loopback()
+        || ip.is_private()
+        || ip.is_link_local()
+        || matches!(ip.octets(), [100, 64..=127, ..])
+    }
+    IpAddr::V6(ip) => {
+      ip.is_loopback()
+        || ip.is_unique_local()
+        || ip.is_unicast_link_local()
+    }
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -256,7 +286,7 @@ mod tests {
     tokio::spawn(async move {
       loop {
         let (mut s, _) = listener.accept().await.unwrap();
-        s.write_all(banner("home1").as_bytes()).await.unwrap();
+        s.write_all(banner("s1").as_bytes()).await.unwrap();
       }
     });
     let target = |server: &str| ProbeTarget {
@@ -265,13 +295,43 @@ mod tests {
       plain: false,
     };
     let unused = ProbeTarget {
-      server: "home1".into(),
+      server: "s1".into(),
       addr: "127.0.0.1:1".into(),
       plain: false,
     };
     assert_eq!(
-      check(vec![target("home1"), target("edge1"), unused]).await,
+      check(vec![target("s1"), target("s2"), unused]).await,
       vec![true, false, false]
     );
   }
+}
+
+#[test]
+fn probe_allows_only_local_peers() {
+  assert!(!is_probe_peer_allowed("203.0.113.10".parse().unwrap()));
+  for ip in ["100.64.0.5", "10.0.0.2", "127.0.0.1", "::1", "fd00::1"]
+  {
+    assert!(is_probe_peer_allowed(ip.parse().unwrap()));
+  }
+}
+
+#[tokio::test]
+async fn probe_bounds_unterminated_banner() {
+  let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let target = ProbeTarget {
+    server: "s1".into(),
+    addr: listener.local_addr().unwrap().to_string(),
+    plain: false,
+  };
+  let writer = tokio::spawn(async move {
+    let (mut socket, _) = listener.accept().await.unwrap();
+    let _ = socket.write_all(&[b'x'; 1024]).await;
+    std::future::pending::<()>().await;
+  });
+  assert!(
+    !tokio::time::timeout(Duration::from_secs(1), one(&target))
+      .await
+      .unwrap()
+  );
+  writer.abort();
 }

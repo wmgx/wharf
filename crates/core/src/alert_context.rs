@@ -1,6 +1,6 @@
 //! 触发告警的页面入口、最近部署和日志。
 
-use std::{cmp::Reverse, time::Duration};
+use std::time::Duration;
 
 use rusqlite::OptionalExtension;
 use tokio_util::sync::CancellationToken;
@@ -57,21 +57,8 @@ pub async fn enrich(
       match snapshot::load(&state.db).await {
         Ok(snap) => {
           if let Some(row) = snap.world.services.get(service) {
-            let mut secrets: Vec<String> =
-              crate::secret_policy::redact_values(&snap.secrets);
-            secrets.extend(
-              row
-                .spec
-                .env
-                .iter()
-                .filter(|(k, _)| {
-                  let key = k.to_uppercase();
-                  ["KEY", "TOKEN", "SECRET", "PASS"]
-                    .iter()
-                    .any(|part| key.contains(*part))
-                })
-                .map(|(_, v)| v.clone()),
-            );
+            let secrets =
+              crate::log_redact::service_values(&row.spec);
             let logs = tokio::time::timeout(
               Duration::from_secs(8),
               state.hub.call::<String>(
@@ -242,15 +229,7 @@ fn ago(at_ms: i64) -> String {
 }
 
 fn redact_and_trim(logs: &str, secrets: &[String]) -> String {
-  let mut secrets: Vec<_> =
-    secrets.iter().filter(|s| s.len() >= 6).collect();
-  secrets.sort_unstable();
-  secrets.dedup();
-  secrets.sort_unstable_by_key(|s| Reverse(s.len()));
-  let mut logs = logs.to_string();
-  for secret in secrets {
-    logs = logs.replace(secret.as_str(), "***");
-  }
+  let logs = crate::log_redact::redact_text_with(logs, secrets);
   let lines: Vec<String> = logs
     .lines()
     .map(|line| line.chars().take(200).collect())

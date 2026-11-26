@@ -58,8 +58,9 @@ jobs:
           V: ${{ steps.v.outputs.version }}
         run: |
           mkdir dist
-          gh release download "build-$BUILD" --repo "$GITHUB_REPOSITORY" --dir dist --pattern 'wharf-*' \
+          gh release download "build-$BUILD" --repo "$GITHUB_REPOSITORY" --dir dist --pattern 'wharf-*' --pattern 'SHA256SUMS' \
             || { echo "::error::没有 Release build-$BUILD，先等 main 上的 images 构建完成"; exit 1; }
+          (cd dist && sha256sum --check SHA256SUMS)
           cat > notes.md <<EOF
           镜像：\`ghcr.io/$OWNER/wharf-core:$V\`、\`ghcr.io/$OWNER/wharf-agent:$V\`（构建 $BUILD）。
           CLI 推荐用控制面的 \`/cli.sh\` 安装，版本会和控制面一致；下面的文件也可以直接下载。

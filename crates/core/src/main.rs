@@ -68,6 +68,7 @@ mod link;
 mod link_cert;
 mod lint;
 mod lockout;
+mod log_redact;
 mod log_search;
 mod login;
 mod logs_stream;
@@ -239,6 +240,9 @@ async fn main() -> anyhow::Result<()> {
     .map_err(|e| anyhow::anyhow!(e.message))?;
   cloudflare_ips::init(&state.db).await;
   tailnet_ips::init(&state.db).await;
+  tasks::load_hooks(&state.db)
+    .await
+    .map_err(|e| anyhow::anyhow!(e.message))?;
   snapshot::load(&state.db)
     .await
     .map_err(|e| anyhow::anyhow!(e.message))?;

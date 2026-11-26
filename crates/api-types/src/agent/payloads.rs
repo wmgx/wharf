@@ -796,3 +796,35 @@ pub struct CoreHostProbe {
 pub struct CoreHostProbeResult {
   pub token: String,
 }
+
+/// 用原镜像仓库名和校验后的摘要消除镜像源路径。
+pub fn normalize_image_digest(
+  image: &str,
+  raw: &str,
+) -> Option<String> {
+  let (_, digest) = raw.rsplit_once('@')?;
+  let hex = digest.strip_prefix("sha256:")?;
+  if hex.len() != 64
+    || !hex
+      .bytes()
+      .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+  {
+    return None;
+  }
+  let name = image.split_once('@').map_or(image, |(name, _)| name);
+  let tag_start = name.rfind('/').map_or(0, |i| i + 1);
+  let name = name
+    .rfind(':')
+    .filter(|i| *i >= tag_start)
+    .map_or(name, |i| &name[..i]);
+  (!name.is_empty()).then(|| format!("{name}@{digest}"))
+}
+
+pub fn normalize_image_digests(images: &mut [ImageInfo]) {
+  for image in images {
+    image.digest = image
+      .digest
+      .as_deref()
+      .and_then(|d| normalize_image_digest(&image.image, d));
+  }
+}

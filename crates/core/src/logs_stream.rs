@@ -89,7 +89,7 @@ fn follow(
   let guard = cancel.clone().drop_guard();
   let line_tx = tx.clone();
   let progress: ProgressFn = Arc::new(move |line| {
-    let _ = line_tx.try_send(line);
+    let _ = line_tx.try_send(crate::log_redact::redact_text(&line));
   });
   tokio::spawn(async move {
     let result = state
@@ -110,8 +110,12 @@ fn follow(
     if let Err(e) = result
       && !cancel.is_cancelled()
     {
-      let _ =
-        tx.send(format!("[wharf] 日志流中断：{}", e.message)).await;
+      let _ = tx
+        .send(format!(
+          "[wharf] 日志流中断：{}",
+          crate::log_redact::redact_text(&e.message)
+        ))
+        .await;
     }
   });
   // guard 跟着响应体走：浏览器断开 → 流被丢弃 → 取消。

@@ -120,7 +120,9 @@ fn rest_url(
     IpAddr::V4(v4) => v4.to_string(),
   };
   Ok(format!(
-    "rest:http://{user}:{password}@{host}:{port}/{service}"
+    "rest:http://{}:{}@{host}:{port}/{service}",
+    encode_userinfo(user),
+    encode_userinfo(password)
   ))
 }
 
@@ -363,10 +365,13 @@ async fn add_key(
   ctx: &Ctx,
 ) -> Result<Value, ApiError> {
   let before = key_ids(&j, ctx).await?;
+  let mut random = [0u8; 16];
+  getrandom::fill(&mut random)
+    .map_err(|_| ApiError::internal("随机数不可用"))?;
   let file = docker
     .data_dir
-    .join(format!(".restic-newkey-{}", std::process::id()));
-  crate::docker::write_private(&file, new_password)?;
+    .join(format!(".restic-newkey-{}", hex::encode(random)));
+  let guard = TempSecretFile::create(&file, new_password)?;
   j.mounts.push(format!("{}:/newkey:ro", file.display()));
   ctx.say("给备份仓库加一把口令");
   let added = j
@@ -378,7 +383,7 @@ async fn add_key(
     )
     .await
     .and_then(|o| o.check("restic key add"));
-  let _ = std::fs::remove_file(&file);
+  drop(guard);
   added?;
   j.mounts.pop();
   let after = key_ids(&j, ctx).await?;
@@ -697,6 +702,57 @@ fn to_value<T: serde::Serialize>(v: T) -> Result<Value, ApiError> {
     .map_err(|e| ApiError::internal(e.to_string()))
 }
 
+fn encode_userinfo(value: &str) -> String {
+  use std::fmt::Write;
+  let mut encoded = String::new();
+  for b in value.bytes() {
+    if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
+      encoded.push(char::from(b));
+    } else {
+      let _ = write!(encoded, "%{b:02X}");
+    }
+  }
+  encoded
+}
+
+struct TempSecretFile(PathBuf);
+
+impl TempSecretFile {
+  fn create(path: &Path, content: &str) -> Result<Self, ApiError> {
+    use std::{io::Write, os::unix::fs::OpenOptionsExt};
+    let mut file = std::fs::OpenOptions::new()
+      .write(true)
+      .create_new(true)
+      .mode(0o600)
+      .open(path)
+      .map_err(io_err(path))?;
+    let guard = Self(path.to_path_buf());
+    file.write_all(content.as_bytes()).map_err(io_err(path))?;
+    Ok(guard)
+  }
+}
+
+impl Drop for TempSecretFile {
+  fn drop(&mut self) {
+    let _ = std::fs::remove_file(&self.0);
+  }
+}
+
+pub fn cleanup_temp_keys(dir: &Path) {
+  for entry in std::fs::read_dir(dir).into_iter().flatten().flatten()
+  {
+    if entry
+      .file_name()
+      .to_string_lossy()
+      .starts_with(".restic-newkey-")
+      && entry.file_type().is_ok_and(|kind| kind.is_file())
+      && std::fs::remove_file(entry.path()).is_err()
+    {
+      tracing::warn!("清理备份临时口令文件失败");
+    }
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -722,3 +778,30 @@ mod tests {
 
 #[cfg(test)]
 mod restore_tests;
+
+#[test]
+fn rest_url_escapes_userinfo() {
+  assert_eq!(
+    rest_url("100.64.0.2", 8000, "u@1", "p@ss/w#1?", "app").unwrap(),
+    "rest:http://u%401:p%40ss%2Fw%231%3F@100.64.0.2:8000/app"
+  );
+}
+
+#[test]
+fn restic_temporary_key_is_removed_on_drop_or_startup() {
+  use std::os::unix::fs::PermissionsExt;
+  let data = tempfile::tempdir().unwrap();
+  let path = data.path().join(".restic-newkey-fixture");
+  {
+    let _guard =
+      TempSecretFile::create(&path, "fixture-secret").unwrap();
+    assert_eq!(
+      std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+      0o600
+    );
+  }
+  assert!(!path.exists());
+  std::fs::write(&path, b"fixture-old").unwrap();
+  cleanup_temp_keys(data.path());
+  assert!(!path.exists());
+}

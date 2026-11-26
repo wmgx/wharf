@@ -1060,7 +1060,7 @@ pub async fn record(
   let result = wharf_api_types::view::SsoLoginState {
     at: crate::db::now_ms(),
     ok,
-    error,
+    error: error.map(|error| crate::log_redact::redact_text(&error)),
   };
   state.db.call(move |c| {
     let value = serde_json::to_string(&result).map_err(|_| ApiError::internal("代登录结果格式不对"))?;
@@ -1073,9 +1073,7 @@ pub async fn record(
 pub fn issues(
   snap: &snapshot::Snapshot,
 ) -> Vec<wharf_api_types::view::Issue> {
-  use wharf_api_types::view::{
-    Issue, IssueLevel, IssueSubject, SsoLoginState,
-  };
+  use wharf_api_types::view::{Issue, IssueLevel, IssueSubject};
   snap
     .world
     .routes
@@ -1087,8 +1085,7 @@ pub fn issues(
         .is_some_and(|s| s.mode == SsoMode::Login)
     })
     .filter_map(|(host, _)| {
-      let result: SsoLoginState =
-        serde_json::from_str(snap.sso_login.get(host)?).ok()?;
+      let result = snap.sso_login.get(host)?;
       (!result.ok).then(|| Issue {
         code: "sso_login_failed".into(),
         level: IssueLevel::Warn,

@@ -300,9 +300,9 @@ pub async fn run(
         .cmd()
         .args(["run", "--rm", "--name", &name])
         .args(["--label", &format!("wharf.task={}", job.name)]);
-      for (k, v) in env {
-        cmd = cmd.args(["-e", &format!("{k}={v}")]);
-      }
+      let (with_env, work) =
+        container_env(cmd, &docker.data_dir, &job.name, env)?;
+      cmd = with_env;
       for m in mounts {
         cmd = cmd.args(["-v", m]);
       }
@@ -311,6 +311,7 @@ pub async fn run(
         None => cmd.arg(image),
       };
       let out = cmd.timeout(timeout).run(ctx).await;
+      drop(work);
       if out.is_err() {
         crate::build::remove_container(docker, &name).await;
       }
@@ -781,6 +782,26 @@ pub async fn cleanup_sso(
   Ok(())
 }
 
+fn container_env(
+  cmd: crate::exec::Cmd,
+  data_dir: &Path,
+  name: &str,
+  env: &BTreeMap<String, String>,
+) -> Result<(crate::exec::Cmd, Option<WorkDir>), ApiError> {
+  if env.is_empty() {
+    return Ok((cmd, None));
+  }
+  let root = data_dir.join("tasks");
+  fs::create_dir_all(&root).map_err(io_err(&root))?;
+  let work = work_dir(&root, name)?;
+  let file = work.0.join("env");
+  write_env(&file, env)?;
+  Ok((
+    cmd.args(["--env-file", &file.to_string_lossy()]),
+    Some(work),
+  ))
+}
+
 fn write_env(
   path: &Path,
   vars: &BTreeMap<String, String>,
@@ -1032,4 +1053,36 @@ mod tests {
       ("main.sh", "sh")
     );
   }
+}
+
+#[tokio::test]
+async fn container_env_file_is_private_and_removed() {
+  use std::os::unix::fs::PermissionsExt;
+  let data = tempfile::tempdir().unwrap();
+  let env =
+    BTreeMap::from([("DB_PASS".into(), "fixture-secret".into())]);
+  let cmd = crate::exec::Cmd::new("sh").args([
+    "-c",
+    "printf '%s\n' \"$@\"",
+    "sh",
+  ]);
+  let (cmd, work) =
+    container_env(cmd, data.path(), "t1", &env).unwrap();
+  let work = work.unwrap();
+  let file = work.0.join("env");
+  assert_eq!(
+    fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+    0o600
+  );
+  assert_eq!(
+    fs::read_to_string(&file).unwrap(),
+    "DB_PASS=fixture-secret\n"
+  );
+  let output = cmd.run(&crate::exec::Ctx::detached()).await.unwrap();
+  assert_eq!(
+    output.stdout.lines().collect::<Vec<_>>(),
+    ["--env-file", file.to_str().unwrap()]
+  );
+  drop(work);
+  assert!(!file.exists());
 }

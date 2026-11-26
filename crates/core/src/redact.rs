@@ -47,7 +47,7 @@ pub fn is_sensitive_env_key(key: &str) -> bool {
     || key.ends_with("_PASS"))
 }
 
-fn url_credentials(
+pub(crate) fn url_credentials(
   text: &str,
 ) -> impl Iterator<Item = (usize, usize)> + '_ {
   text.match_indices("://").filter_map(|(index, _)| {

@@ -76,6 +76,16 @@ impl Config {
   }
 }
 
+fn local_http() -> CliResult<reqwest::Client> {
+  reqwest::Client::builder()
+    .no_proxy()
+    .connect_timeout(Duration::from_secs(15))
+    .timeout(Duration::from_secs(180))
+    .default_headers(default_headers())
+    .build()
+    .map_err(|e| ApiError::internal(e.to_string()).into())
+}
+
 pub struct Client {
   http: reqwest::Client,
   /// 控制面地址，只用于提示。
@@ -87,6 +97,17 @@ pub struct Client {
 }
 
 impl Client {
+  #[cfg(test)]
+  pub(crate) fn test_endpoint(endpoint: String) -> Self {
+    Self {
+      http: local_http().expect("本地客户端可用"),
+      base: endpoint.clone(),
+      endpoint,
+      tunnel_error: Default::default(),
+      token: Some("fixture-token".into()),
+    }
+  }
+
   pub fn new(
     url: Option<String>,
     token: Option<String>,
@@ -122,12 +143,7 @@ impl Client {
         ApiError::internal(format!("启动加密通道失败：{e:#}"))
       })?;
     Ok(Self {
-      http: reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(15))
-        .timeout(Duration::from_secs(180))
-        .default_headers(default_headers())
-        .build()
-        .map_err(|e| ApiError::internal(e.to_string()))?,
+      http: local_http()?,
       base,
       endpoint: tunnel.local,
       tunnel_error: tunnel.last_error,
@@ -471,4 +487,63 @@ pub fn read_secret(prompt: &str) -> anyhow::Result<String> {
     anyhow::bail!("没有读到内容");
   }
   Ok(value)
+}
+
+#[tokio::test]
+async fn local_bearer_bypasses_environment_proxy() {
+  use tokio::io::{AsyncReadExt, AsyncWriteExt};
+  const ENDPOINT: &str = "WHARF_FIXTURE_LOOPBACK_HTTP";
+  if let Ok(endpoint) = std::env::var(ENDPOINT) {
+    let value: serde_json::Value = Client::test_endpoint(endpoint)
+      .get("/api/version")
+      .await
+      .unwrap();
+    assert_eq!(value, serde_json::json!({}));
+    return;
+  }
+  let local =
+    tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let proxy =
+    tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let proxy_url = format!("http://{}", proxy.local_addr().unwrap());
+  let endpoint = format!("http://{}", local.local_addr().unwrap());
+  let serving = tokio::spawn(async move {
+    let (mut socket, _) = local.accept().await.unwrap();
+    let mut line = Vec::new();
+    while !line.ends_with(b"\r\n\r\n") && line.len() < 8192 {
+      line.push(socket.read_u8().await.unwrap());
+    }
+    let request =
+      String::from_utf8(line).unwrap().to_ascii_lowercase();
+    assert!(request.contains("authorization: bearer fixture-token"));
+    socket
+      .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
+      .await
+      .unwrap();
+  });
+  let mut child =
+    tokio::process::Command::new(std::env::current_exe().unwrap());
+  child
+    .args([
+      "--exact",
+      "client::local_bearer_bypasses_environment_proxy",
+    ])
+    .env(ENDPOINT, endpoint)
+    .env("HTTP_PROXY", &proxy_url)
+    .env("http_proxy", &proxy_url)
+    .env_remove("NO_PROXY")
+    .env_remove("no_proxy")
+    .kill_on_drop(true);
+  let result =
+    tokio::time::timeout(Duration::from_secs(10), child.output())
+      .await
+      .unwrap()
+      .unwrap();
+  assert!(result.status.success());
+  serving.await.unwrap();
+  assert!(
+    tokio::time::timeout(Duration::from_millis(50), proxy.accept())
+      .await
+      .is_err()
+  );
 }

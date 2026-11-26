@@ -3,14 +3,14 @@
 
 use std::{
   collections::{BTreeMap, BTreeSet, HashMap},
-  sync::{Arc, LazyLock, Mutex},
-  time::{Duration, Instant},
+  sync::{Arc, LazyLock, Mutex, RwLock},
+  time::Duration,
 };
 
 use axum::{
   Json,
   body::{Body, to_bytes},
-  extract::{Path, Query, State},
+  extract::{ConnectInfo, Path, Query, State},
   http::{Request, StatusCode},
   response::{IntoResponse, Response},
 };
@@ -49,8 +49,87 @@ const OTHER_MAX: u64 = 6 * 3600;
 
 /// 正在跑的任务，同一个任务不并发。
 static RUNNING: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
-static HOOKS: LazyLock<Mutex<HashMap<String, (u32, Instant)>>> =
+static HOOKS: LazyLock<Mutex<crate::notify_keys::RequestLimit>> =
   LazyLock::new(Default::default);
+static HOOK_FAILS: LazyLock<Mutex<crate::notify_keys::RequestLimit>> =
+  LazyLock::new(Default::default);
+static HOOK_INDEX: LazyLock<RwLock<HashMap<String, String>>> =
+  LazyLock::new(Default::default);
+
+fn task_token(spec: &TaskSpec) -> Option<&str> {
+  match &spec.how {
+    TaskKind::Ping { token, .. }
+    | TaskKind::Script {
+      hook: Some(token), ..
+    } if !token.is_empty() => Some(token),
+    _ => None,
+  }
+}
+
+fn index_hooks(rows: &[(String, TaskSpec, i64)]) {
+  let mut index = HashMap::new();
+  for (name, spec, _) in rows {
+    if spec.enabled
+      && matches!(spec.how, TaskKind::Script { .. })
+      && let Some(token) = task_token(spec)
+    {
+      index
+        .entry(crate::auth::hash_token(token))
+        .or_insert_with(|| name.clone());
+    }
+  }
+  *HOOK_INDEX.write().unwrap_or_else(|e| e.into_inner()) = index;
+}
+
+pub async fn load_hooks(db: &crate::db::Db) -> Result<(), ApiError> {
+  db.call(|c| {
+    index_hooks(&load_rows(c)?);
+    Ok(())
+  })
+  .await
+}
+
+fn validate_task_token(
+  token: &str,
+  old: Option<&str>,
+  used: bool,
+) -> Result<(), ApiError> {
+  if old == Some(token) {
+    return Ok(());
+  }
+  if token.len() < 24
+    || used
+    || !token
+      .bytes()
+      .all(|b| b.is_ascii_graphic() && !b"/?#".contains(&b))
+  {
+    return Err(
+      ApiError::invalid(
+        "口令至少需要 24 个字符，且不能和其他任务重复",
+      )
+      .with_hint("留空即可由 Wharf 自动生成随机口令"),
+    );
+  }
+  Ok(())
+}
+
+struct RunGuard(String);
+
+impl RunGuard {
+  fn acquire(name: &str) -> Option<Self> {
+    RUNNING
+      .lock()
+      .unwrap_or_else(|e| e.into_inner())
+      .insert(name.to_string())
+      .then(|| Self(name.to_string()))
+  }
+}
+
+impl Drop for RunGuard {
+  fn drop(&mut self) {
+    release(&self.0);
+  }
+}
 
 pub fn spawn(state: Arc<AppState>) {
   tokio::spawn(async move {
@@ -99,35 +178,30 @@ async fn tick(
 pub(crate) async fn load(
   state: &AppState,
 ) -> Result<Vec<(String, TaskSpec, i64)>, ApiError> {
-  state
-    .db
-    .call(|c| {
-      let mut stmt = c
-        .prepare(
-          "SELECT name, spec, updated_at FROM tasks ORDER BY name",
-        )
-        .map_err(sql_err)?;
-      let rows = stmt
-        .query_map([], |r| {
-          Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, String>(1)?,
-            r.get(2)?,
-          ))
-        })
-        .map_err(sql_err)?;
-      let rows: Vec<(String, String, i64)> =
-        rows.collect::<Result<_, _>>().map_err(sql_err)?;
-      Ok(
-        rows
-          .into_iter()
-          .filter_map(|(n, s, u)| {
-            serde_json::from_str(&s).ok().map(|s| (n, s, u))
-          })
-          .collect(),
-      )
+  state.db.call(|c| load_rows(c)).await
+}
+
+pub(crate) fn load_rows(
+  c: &rusqlite::Connection,
+) -> Result<Vec<(String, TaskSpec, i64)>, ApiError> {
+  let mut stmt = c
+    .prepare("SELECT name, spec, updated_at FROM tasks ORDER BY name")
+    .map_err(sql_err)?;
+  let rows = stmt
+    .query_map([], |r| {
+      Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get(2)?))
     })
-    .await
+    .map_err(sql_err)?;
+  let rows: Vec<(String, String, i64)> =
+    rows.collect::<Result<_, _>>().map_err(sql_err)?;
+  Ok(
+    rows
+      .into_iter()
+      .filter_map(|(n, s, u)| {
+        serde_json::from_str(&s).ok().map(|s| (n, s, u))
+      })
+      .collect(),
+  )
 }
 
 async fn load_one(
@@ -153,25 +227,32 @@ async fn start(
   trigger: &str,
   input: Option<TaskInput>,
 ) -> Result<(i64, bool), ApiError> {
-  let busy = !RUNNING
-    .lock()
-    .map(|mut r| r.insert(name.to_string()))
-    .unwrap_or(false);
+  start_with_guard(
+    state,
+    name,
+    spec,
+    trigger,
+    input,
+    RunGuard::acquire(name),
+  )
+  .await
+}
+
+async fn start_with_guard(
+  state: &Arc<AppState>,
+  name: &str,
+  spec: TaskSpec,
+  trigger: &str,
+  input: Option<TaskInput>,
+  guard: Option<RunGuard>,
+) -> Result<(i64, bool), ApiError> {
+  let busy = guard.is_none();
   let status = if busy {
     TaskStatus::Skipped
   } else {
     TaskStatus::Running
   };
-  let id = insert_run(state, name, status, trigger).await;
-  let id = match id {
-    Ok(id) => id,
-    Err(e) => {
-      if !busy {
-        release(name);
-      }
-      return Err(e);
-    }
-  };
+  let id = insert_run(state, name, status, trigger).await?;
   if busy {
     finish(
       state,
@@ -190,7 +271,7 @@ async fn start(
     let (status, code, output, mem_peak) =
       execute(&state, &name, &spec, input).await;
     finish(&state, id, status, code, &output, mem_peak).await;
-    release(&name);
+    drop(guard);
     notify_result(&state, &name, &spec, status, &output).await;
   });
   Ok((id, false))
@@ -264,14 +345,9 @@ async fn execute(
   };
   let secrets =
     crate::secret_policy::non_system_secrets(&snap.secrets);
-  let mut used: Vec<&String> = secrets
-    .values()
-    .filter(|v| !v.is_empty() && spec_mentions(spec, &secrets, v))
-    .collect();
-  used.sort_unstable_by_key(|v| std::cmp::Reverse(v.len()));
-  let redact = |s: String| {
-    used.iter().fold(s, |acc, v| acc.replace(v.as_str(), "***"))
-  };
+  let used = crate::secret_policy::redact_values(&secrets);
+  let redact =
+    |s: String| crate::log_redact::redact_text_with(&s, &used);
   let result =
     run_on_agent(state, name, spec, &snap, &secrets, input).await;
   match result {
@@ -294,18 +370,6 @@ async fn execute(
       (status, None, redact(e.message), None)
     }
   }
-}
-
-/// 任务里引用了这个密钥（按值判断，免得再解析一遍）。
-fn spec_mentions(
-  spec: &TaskSpec,
-  secrets: &std::collections::BTreeMap<String, String>,
-  value: &str,
-) -> bool {
-  let text = serde_json::to_string(&spec.how).unwrap_or_default();
-  secrets
-    .iter()
-    .any(|(k, v)| v == value && text.contains(&format!("[[{k}]]")))
 }
 
 async fn run_on_agent(
@@ -332,11 +396,12 @@ async fn run_on_agent(
         timeout_secs: spec.timeout_secs,
         cwd: "/root".into(),
       };
-      let r = crate::shell::run_host(
+      let r = crate::shell::run_host_with_audit(
         state.clone(),
         &format!("task:{name}"),
         spec.server.clone(),
         job,
+        Some(command),
       )
       .await?;
       return Ok(TaskRunResult {
@@ -690,7 +755,7 @@ fn run_view(r: &rusqlite::Row) -> rusqlite::Result<TaskRunView> {
     started_at: to_time(r.get(4)?),
     ended_at: r.get::<_, Option<i64>>(5)?.map(to_time),
     exit_code: r.get(6)?,
-    output: r.get(7)?,
+    output: crate::log_redact::redact_text(&r.get::<_, String>(7)?),
     mem_peak: r.get(8)?,
   })
 }
@@ -767,36 +832,33 @@ pub async fn put(
     need_perm(&auth, &old, &snap.world, core_server.as_deref())?;
   }
   validate(&name, &spec, &snap)?;
-  let mut spec = spec;
-  if let TaskKind::Ping { token, .. } = &mut spec.how
-    && token.is_empty()
-  {
-    // 修改时沿用原来的口令，脚本里的地址不用改。
-    *token = match load_one(&s, &name).await.map(|o| o.how) {
-      Ok(TaskKind::Ping { token: old, .. }) if !old.is_empty() => old,
-      _ => crate::auth::new_token(),
-    };
-  }
-  if let TaskKind::Script { hook, .. } = &mut spec.how {
-    let old = match load_one(&s, &name).await.map(|o| o.how) {
-      Ok(TaskKind::Script { hook, .. }) => hook,
-      _ => None,
-    };
-    *hook = next_hook(old, hook.take());
-  }
-  let text = serde_json::to_string(&spec)
-    .map_err(|e| ApiError::internal(e.to_string()))?;
-  s.db
-    .call(move |c| {
-      let now = now_ms();
-      c.execute(
-        "INSERT INTO tasks (name, spec, created_at, updated_at) VALUES (?1, ?2, ?3, ?3)
-         ON CONFLICT (name) DO UPDATE SET spec = excluded.spec, updated_at = excluded.updated_at",
-        params![name, text, now],
-      )
-      .map_err(sql_err)
-    })
-    .await?;
+  let spec = s.db.call(move |c| {
+    let mut spec = spec;
+    let rows = load_rows(c)?;
+    let old = rows.iter().find(|(n, _, _)| n == &name).map(|(_, spec, _)| spec);
+    if let TaskKind::Ping { token, .. } = &mut spec.how && token.is_empty() {
+      *token = old.filter(|s| matches!(s.how, TaskKind::Ping { .. }))
+        .and_then(task_token).map(str::to_string).unwrap_or_else(crate::auth::new_token);
+    }
+    if let TaskKind::Script { hook, .. } = &mut spec.how {
+      let prior = old.filter(|s| matches!(s.how, TaskKind::Script { .. }))
+        .and_then(task_token).map(str::to_string);
+      *hook = next_hook(prior, hook.take());
+    }
+    if let Some(token) = task_token(&spec) {
+      let used = rows.iter().any(|(n, other, _)| n != &name && task_token(other) == Some(token));
+      validate_task_token(token, old.and_then(task_token), used)?;
+    }
+    let text = serde_json::to_string(&spec).map_err(crate::db::json_err)?;
+    c.execute(
+      "INSERT INTO tasks (name, spec, created_at, updated_at) VALUES (?1, ?2, ?3, ?3)
+       ON CONFLICT (name) DO UPDATE SET spec = excluded.spec, updated_at = excluded.updated_at",
+      params![name, text, now_ms()],
+    ).map_err(sql_err)?;
+    index_hooks(&load_rows(c)?);
+    Ok(spec)
+  }).await?;
+  crate::log_redact::refresh(&s.db).await;
   Ok(Json(spec))
 }
 
@@ -847,15 +909,20 @@ pub async fn remove(
   let task_name = name.clone();
   s.db
     .call(move |c| {
-      c.execute("DELETE FROM tasks WHERE name = ?1", params![name])
+      let tx = c.transaction().map_err(sql_err)?;
+      tx.execute("DELETE FROM tasks WHERE name = ?1", params![name])
         .map_err(sql_err)?;
-      c.execute(
+      tx.execute(
         "DELETE FROM task_runs WHERE task = ?1",
         params![name],
       )
-      .map_err(sql_err)
+      .map_err(sql_err)?;
+      tx.commit().map_err(sql_err)?;
+      index_hooks(&load_rows(c)?);
+      Ok(())
     })
     .await?;
+  crate::log_redact::refresh(&s.db).await;
   if q.data && matches!(spec.how, TaskKind::Script { .. }) {
     let _: serde_json::Value = s
       .hub
@@ -979,24 +1046,61 @@ fn next_hook(
 pub async fn hook(
   State(s): State<Arc<AppState>>,
   Path(token): Path<String>,
+  ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
   request: Request<Body>,
 ) -> Result<Response, crate::api::AppError> {
-  let found = load(&s).await?.into_iter().find(|(_, spec, _)| {
-    spec.enabled && matches!(&spec.how, TaskKind::Script { hook: Some(t), .. } if !t.is_empty() && t == &token)
-  });
-  let Some((name, spec, _)) = found else {
-    return Ok(StatusCode::NOT_FOUND.into_response());
-  };
+  let source = crate::login::client_key(peer.ip(), request.headers());
+  if HOOK_FAILS
+    .lock()
+    .unwrap_or_else(|e| e.into_inner())
+    .blocked(&source, 30)
   {
-    let mut counts = HOOKS.lock().unwrap_or_else(|e| e.into_inner());
-    counts
-      .retain(|_, (_, at)| at.elapsed() < Duration::from_secs(60));
-    let (count, _) =
-      counts.entry(token).or_insert((0, Instant::now()));
-    if *count >= 30 {
-      return Ok(StatusCode::TOO_MANY_REQUESTS.into_response());
-    }
-    *count += 1;
+    return Ok(StatusCode::TOO_MANY_REQUESTS.into_response());
+  }
+  let hash = crate::auth::hash_token(&token);
+  let name = HOOK_INDEX
+    .read()
+    .unwrap_or_else(|e| e.into_inner())
+    .get(&hash)
+    .cloned();
+  let found = if let Some(name) = name {
+    s.db
+      .call(move |c| {
+        let row: Option<String> = c
+          .query_row(
+            "SELECT spec FROM tasks WHERE name = ?1",
+            [&name],
+            |r| r.get(0),
+          )
+          .optional()
+          .map_err(sql_err)?;
+        Ok(
+          row
+            .and_then(|row| {
+              serde_json::from_str::<TaskSpec>(&row).ok()
+            })
+            .map(|spec| (name, spec)),
+        )
+      })
+      .await?
+  } else {
+    None
+  };
+  let Some((name, spec)) = found.filter(|(_, spec)| {
+    spec.enabled && matches!(&spec.how, TaskKind::Script { hook: Some(t), .. } if !t.is_empty() && constant_time_eq(t, &token))
+  }) else {
+    let allowed = HOOK_FAILS.lock().unwrap_or_else(|e| e.into_inner()).record(&source, 30);
+    return Ok(if allowed { StatusCode::NOT_FOUND } else { StatusCode::TOO_MANY_REQUESTS }.into_response());
+  };
+  let Some(guard) = RunGuard::acquire(&name) else {
+    return Ok(StatusCode::CONFLICT.into_response());
+  };
+  if !HOOKS
+    .lock()
+    .unwrap_or_else(|e| e.into_inner())
+    .record(&hash, 30)
+  {
+    return Ok(StatusCode::TOO_MANY_REQUESTS.into_response());
   }
   let method = request.method().to_string();
   let query = request.uri().query().unwrap_or_default().to_string();
@@ -1011,18 +1115,28 @@ pub async fn hook(
     query,
     body: STANDARD.encode(body),
   };
-  let (id, skipped) =
-    start(&s, &name, spec, "hook", Some(input)).await?;
-  Ok(if skipped {
-    (
-      StatusCode::CONFLICT,
-      Json(serde_json::json!({ "error": "上一次还没跑完" })),
-    )
-      .into_response()
-  } else {
+  let (id, _) = start_with_guard(
+    &s,
+    &name,
+    spec,
+    "hook",
+    Some(input),
+    Some(guard),
+  )
+  .await?;
+  Ok(
     (StatusCode::ACCEPTED, Json(serde_json::json!({ "run": id })))
-      .into_response()
-  })
+      .into_response(),
+  )
+}
+
+fn constant_time_eq(a: &str, b: &str) -> bool {
+  let mut diff = a.len() ^ b.len();
+  for (i, byte) in a.bytes().enumerate() {
+    diff |=
+      usize::from(byte ^ b.as_bytes().get(i).copied().unwrap_or(0));
+  }
+  diff == 0
 }
 
 #[cfg(test)]
@@ -1153,4 +1267,88 @@ mod tests {
     assert!(check(&confirm, true).is_ok());
     assert!(check(&apply, false).is_ok());
   }
+}
+
+#[test]
+fn rejects_weak_and_reused_task_tokens() {
+  assert!(validate_task_token("abc", None, false).is_err());
+  assert!(validate_task_token("abc", Some("abc"), false).is_ok());
+  assert!(validate_task_token(&"a".repeat(24), None, true).is_err());
+  assert!(validate_task_token(&"a".repeat(24), None, false).is_ok());
+  let mut limit = crate::notify_keys::RequestLimit::default();
+  for _ in 0..30 {
+    assert!(limit.record("203.0.113.1", 30));
+  }
+  assert!(limit.blocked("203.0.113.1", 30));
+}
+
+#[tokio::test]
+async fn hook_rejects_unknown_tokens_before_reading_body() {
+  let state = crate::rules::tests::test_state();
+  let peer = ConnectInfo("203.0.113.15:12345".parse().unwrap());
+  for index in 0..35 {
+    let result = hook(
+      State(state.clone()),
+      Path("fixture-unknown".into()),
+      peer,
+      Request::new(Body::empty()),
+    )
+    .await;
+    assert_eq!(
+      result.ok().unwrap().status(),
+      if index < 30 {
+        StatusCode::NOT_FOUND
+      } else {
+        StatusCode::TOO_MANY_REQUESTS
+      }
+    );
+  }
+}
+
+#[tokio::test]
+async fn host_task_keeps_command_template_in_shell_log() {
+  let state = crate::rules::tests::test_state();
+  state
+    .db
+    .call(|c| {
+      crate::db::apply_write(
+        c,
+        &crate::db::Write::Upsert {
+          kind: "server".into(),
+          name: "s1".into(),
+          spec: serde_json::json!({}),
+          meta: serde_json::json!({}),
+        },
+      )
+    })
+    .await
+    .unwrap();
+  let job = HostExecJob {
+    command: "curl https://api.example.test/fixture-secret".into(),
+    timeout_secs: 1,
+    cwd: "/".into(),
+  };
+  let template = "curl https://api.example.test/[[API_KEY]]";
+  assert!(
+    crate::shell::run_host_with_audit(
+      state.clone(),
+      "task:t1",
+      "s1".into(),
+      job,
+      Some(template)
+    )
+    .await
+    .is_err()
+  );
+  let command = state
+    .db
+    .call(|c| {
+      c.query_row("SELECT command FROM shell_log", [], |row| {
+        row.get::<_, String>(0)
+      })
+      .map_err(sql_err)
+    })
+    .await
+    .unwrap();
+  assert_eq!(command, template);
 }

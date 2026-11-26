@@ -166,6 +166,13 @@ async fn fetch(
       "网关还没开访问日志或还没有请求；刚升级的话先 wharf plan && wharf apply 让网关热重载".into(),
     );
   }
+  for entry in &mut result.entries {
+    entry.path = crate::log_redact::redact_text(&entry.path);
+    entry.query = crate::log_redact::redact_text(&entry.query);
+  }
+  for warning in &mut result.warnings {
+    *warning = crate::log_redact::redact_text(warning);
+  }
   Ok(result)
 }
 

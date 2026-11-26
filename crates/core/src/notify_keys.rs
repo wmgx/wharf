@@ -11,7 +11,7 @@ use std::{
 
 use axum::{
   Json,
-  extract::{Path, State},
+  extract::{ConnectInfo, Path, State},
   http::{HeaderMap, StatusCode},
 };
 use rusqlite::{OptionalExtension, params};
@@ -97,6 +97,7 @@ pub async fn create(
       tx.commit().map_err(sql_err)
     })
     .await?;
+  crate::log_redact::refresh(&s.db).await;
   Ok(Json(json!({ "name": name, "secret": secret, "url": url })))
 }
 
@@ -120,6 +121,7 @@ pub async fn remove(
       Ok(n)
     })
     .await?;
+  crate::log_redact::refresh(&s.db).await;
   Ok(Json(json!({ "removed": removed > 0 })))
 }
 
@@ -143,7 +145,7 @@ fn message(
     ),
     _ => (None, body.to_string()),
   };
-  let mut text = text.trim().to_string();
+  let mut text = crate::log_redact::redact_text(text.trim());
   if text.len() > MAX_BODY {
     let mut end = MAX_BODY;
     while !text.is_char_boundary(end) {
@@ -155,28 +157,81 @@ fn message(
   (title.filter(|t| !t.trim().is_empty()), text)
 }
 
-fn rate_ok(hash: &str) -> bool {
-  static SEEN: Mutex<Option<HashMap<String, Vec<Instant>>>> =
-    Mutex::new(None);
-  let mut guard = SEEN.lock().unwrap_or_else(|e| e.into_inner());
-  let seen = guard.get_or_insert_with(HashMap::new);
-  let now = Instant::now();
-  let list = seen.entry(hash.to_string()).or_default();
-  list.retain(|t| now.duration_since(*t) < Duration::from_secs(60));
-  if list.len() >= PER_MINUTE {
-    return false;
+#[derive(Default)]
+pub(crate) struct RequestLimit {
+  seen: HashMap<String, Vec<Instant>>,
+  pruned_at: Option<Instant>,
+}
+
+impl RequestLimit {
+  pub fn blocked(&mut self, key: &str, limit: usize) -> bool {
+    let now = Instant::now();
+    let active = |time: &Instant| {
+      now.duration_since(*time) < Duration::from_secs(60)
+    };
+    if self.pruned_at.is_none_or(|last| !active(&last)) {
+      self
+        .seen
+        .retain(|_, times| times.last().is_some_and(active));
+      self.pruned_at = Some(now);
+    }
+    self.seen.get_mut(key).is_some_and(|times| {
+      times.retain(active);
+      times.len() >= limit
+    })
   }
-  list.push(now);
-  true
+
+  pub fn record(&mut self, key: &str, limit: usize) -> bool {
+    if self.blocked(key, limit) {
+      return false;
+    }
+    if self.seen.len() >= 4096
+      && !self.seen.contains_key(key)
+      && let Some(oldest) = self
+        .seen
+        .iter()
+        .min_by_key(|(_, times)| times.last())
+        .map(|(key, _)| key.clone())
+    {
+      self.seen.remove(&oldest);
+    }
+    self
+      .seen
+      .entry(key.to_string())
+      .or_default()
+      .push(Instant::now());
+    true
+  }
+}
+
+static INVALID_SEEN: std::sync::LazyLock<Mutex<RequestLimit>> =
+  std::sync::LazyLock::new(Default::default);
+static SEEN: std::sync::LazyLock<Mutex<RequestLimit>> =
+  std::sync::LazyLock::new(Default::default);
+
+fn limited() -> (StatusCode, Json<Value>) {
+  (
+    StatusCode::TOO_MANY_REQUESTS,
+    Json(json!({ "ok": false, "error": "请求过于频繁" })),
+  )
 }
 
 /// `POST /notify/{token}`：不用登录，口令就是凭证。
 pub async fn send(
   State(s): State<Arc<AppState>>,
   Path(token): Path<String>,
+  ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
   headers: HeaderMap,
   body: String,
 ) -> (StatusCode, Json<Value>) {
+  let source = crate::login::client_key(peer.ip(), &headers);
+  if INVALID_SEEN
+    .lock()
+    .unwrap_or_else(|e| e.into_inner())
+    .blocked(&source, PER_MINUTE)
+  {
+    return limited();
+  }
   let hash = hash_token(&token);
   let h = hash.clone();
   let found = s
@@ -194,6 +249,13 @@ pub async fn send(
   let name = match found {
     Ok(Some(name)) => name,
     Ok(None) => {
+      if !INVALID_SEEN
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .record(&source, PER_MINUTE)
+      {
+        return limited();
+      }
       return (
         StatusCode::NOT_FOUND,
         Json(json!({ "ok": false, "error": "地址不对或已失效" })),
@@ -206,7 +268,11 @@ pub async fn send(
       );
     }
   };
-  if !rate_ok(&hash) {
+  if !SEEN
+    .lock()
+    .unwrap_or_else(|e| e.into_inner())
+    .record(&hash, PER_MINUTE)
+  {
     return (
       StatusCode::TOO_MANY_REQUESTS,
       Json(
@@ -228,23 +294,29 @@ pub async fn send(
     },
     body: text,
   };
-  let now = now_ms();
-  let _ = s
-    .db
-    .call(move |c| {
-      c.execute(
-        "UPDATE notify_keys SET last_used_at = ?2 WHERE hash = ?1",
-        params![hash, now],
-      )
-      .map_err(sql_err)
-    })
-    .await;
   match notify::send(&s, &event).await {
-    Ok(()) => (StatusCode::OK, Json(json!({ "ok": true }))),
-    Err(e) => (
-      StatusCode::BAD_GATEWAY,
-      Json(json!({ "ok": false, "error": e.message })),
-    ),
+    Ok(()) => {
+      let now = now_ms();
+      let _ = s.db.call(move |c| {
+        c.execute(
+          "UPDATE notify_keys SET last_used_at = MAX(COALESCE(last_used_at, 0), ?2) WHERE hash = ?1",
+          params![hash, now],
+        ).map_err(sql_err)
+      }).await;
+      (StatusCode::OK, Json(json!({ "ok": true })))
+    }
+    Err(e) => {
+      tracing::warn!(
+        "通知出口 {name} 发送失败：{}",
+        crate::log_redact::redact_text(&e.message)
+      );
+      (
+        StatusCode::BAD_GATEWAY,
+        Json(
+          json!({ "ok": false, "error": "通知发送失败，请检查控制面通知渠道配置" }),
+        ),
+      )
+    }
   }
 }
 
@@ -268,4 +340,69 @@ mod tests {
     );
     assert_eq!(secret_name("nas-backup"), "NOTIFY_URL_NAS_BACKUP");
   }
+}
+
+#[test]
+fn limits_invalid_notification_sources() {
+  let mut seen = RequestLimit::default();
+  for _ in 0..20 {
+    assert!(seen.record("203.0.113.1", PER_MINUTE));
+  }
+  assert!(seen.blocked("203.0.113.1", PER_MINUTE));
+  assert!(!seen.blocked("203.0.113.2", PER_MINUTE));
+}
+
+#[tokio::test]
+async fn notify_limits_unknown_tokens_and_only_marks_successful_delivery()
+ {
+  let state = crate::rules::tests::test_state();
+  let peer = ConnectInfo("203.0.113.13:12345".parse().unwrap());
+  let send_to = |token: &str, peer| {
+    send(
+      State(state.clone()),
+      Path(token.to_string()),
+      peer,
+      HeaderMap::new(),
+      "fixture message".into(),
+    )
+  };
+  for index in 0..25 {
+    let (status, _) = send_to("invalid-fixture", peer).await;
+    assert_eq!(
+      status,
+      if index < 20 {
+        StatusCode::NOT_FOUND
+      } else {
+        StatusCode::TOO_MANY_REQUESTS
+      }
+    );
+  }
+  state.db.call(|c| {
+    c.execute("INSERT INTO notify_keys (name, hash, created_at) VALUES ('fixture', ?1, 0)", [hash_token("fixture-valid")])
+      .map_err(sql_err)?;
+    Ok(())
+  }).await.unwrap();
+  let (status, body) = send_to(
+    "fixture-valid",
+    ConnectInfo("203.0.113.14:12345".parse().unwrap()),
+  )
+  .await;
+  assert_eq!(status, StatusCode::BAD_GATEWAY);
+  assert_eq!(
+    body.0["error"],
+    "通知发送失败，请检查控制面通知渠道配置"
+  );
+  let last = state
+    .db
+    .call(|c| {
+      c.query_row(
+        "SELECT last_used_at FROM notify_keys WHERE name = 'fixture'",
+        [],
+        |row| row.get::<_, Option<i64>>(0),
+      )
+      .map_err(sql_err)
+    })
+    .await
+    .unwrap();
+  assert!(last.is_none());
 }

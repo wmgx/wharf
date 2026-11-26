@@ -54,6 +54,16 @@ CMD ["run"]
 
 FROM base AS core
 LABEL wharf.system=core
+ARG WHARF_BUILD=
+ARG WHARF_REQUIRE_CLI_SHA256SUMS=0
+RUN --mount=type=secret,id=cli_sha256sums \
+    mkdir -p /usr/local/share/wharf \
+ && if [ "$WHARF_REQUIRE_CLI_SHA256SUMS" = 1 ]; then \
+      test -n "$WHARF_BUILD" && test -s /run/secrets/cli_sha256sums \
+        && cp /run/secrets/cli_sha256sums /usr/local/share/wharf/cli-sha256sums; \
+    else \
+      touch /usr/local/share/wharf/cli-sha256sums; \
+    fi
 COPY --from=build /out/wharf-core /out/wharf /usr/local/bin/
 ENV WHARF_DATA_DIR=/var/lib/wharf-core
 EXPOSE 7700

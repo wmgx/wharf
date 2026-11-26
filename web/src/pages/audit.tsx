@@ -63,7 +63,7 @@ export function AuditLog() {
                 <TableCell className="whitespace-nowrap">{new Date(row.at).toLocaleString()}</TableCell>
                 <TableCell>{row.actor}</TableCell>
                 <TableCell>{row.kind === "api" ? `${row.method} ${row.path}` : LOGIN_ACTIONS[row.method]}</TableCell>
-                <TableCell className="max-w-md whitespace-normal break-all">{row.kind === "login" ? row.source : row.detail}</TableCell>
+                <TableCell className="max-w-md whitespace-normal break-all">{row.kind === "login" ? row.source : [row.detail, row.source && "(" + row.source + ")"].filter(Boolean).join(" ")}</TableCell>
                 <TableCell>{row.kind === "api" ? row.status : ""}</TableCell>
               </TableRow>
             ))}

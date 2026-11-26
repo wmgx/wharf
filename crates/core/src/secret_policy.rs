@@ -95,20 +95,21 @@ pub fn redact_values(all: &BTreeMap<String, String>) -> Vec<String> {
       continue;
     }
     values.insert(value.clone());
-    if value.lines().next().is_some_and(|line| {
-      line.starts_with("-----BEGIN ")
-        && line.ends_with("PRIVATE KEY-----")
-    }) {
-      values.extend(value.lines().filter_map(|line| {
-        let body = line.trim();
-        (body.len() >= 6 && !body.starts_with("-----"))
-          .then(|| body.to_string())
-      }));
-    }
+    values.extend(pem_body(value).map(str::to_string));
   }
   let mut values: Vec<_> = values.into_iter().collect();
   values.sort_by_key(|value| std::cmp::Reverse(value.len()));
   values
+}
+
+pub fn pem_body(value: &str) -> impl Iterator<Item = &str> {
+  let pem = value.trim_start().lines().next().is_some_and(|line| {
+    line.starts_with("-----BEGIN ")
+      && line.trim_end().ends_with("PRIVATE KEY-----")
+  });
+  value.lines().map(str::trim).filter(move |line| {
+    pem && line.len() >= 6 && !line.starts_with("-----")
+  })
 }
 
 pub fn refuse_managed(name: &str) -> Result<(), ApiError> {

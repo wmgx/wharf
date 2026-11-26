@@ -56,7 +56,8 @@ impl IntoResponse for AppError {
   fn into_response(self) -> Response {
     let status = StatusCode::from_u16(self.0.code.http_status())
       .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    (status, Json(self.0)).into_response()
+    (status, Json(crate::log_redact::redact_error(self.0)))
+      .into_response()
   }
 }
 
@@ -538,6 +539,13 @@ async fn check_cli(
       .unwrap_or("<控制面地址>");
     let scheme = crate::source_trust::request_proto(&req);
     let base = format!("{scheme}://{host}");
+    let hint = if crate::join::allows_script_install(&base) {
+      format!(
+        "更新后再试：curl -fsSL {base}/cli.sh | sh -s -- {base}"
+      )
+    } else {
+      "请经 HTTPS 访问控制面，或从 GitHub Releases 下载最新 wharf 并核对 SHA256SUMS 后替换".into()
+    };
     return AppError(
       ApiError::new(
         ErrorCode::InvalidInput,
@@ -546,9 +554,7 @@ async fn check_cli(
           wharf_api_types::MIN_CLI_API
         ),
       )
-      .with_hint(format!(
-        "更新后再试：curl -fsSL {base}/cli.sh | sh -s -- {base}"
-      )),
+      .with_hint(hint),
     )
     .into_response();
   }
@@ -1081,6 +1087,7 @@ async fn fetch_logs(
       &tokio_util::sync::CancellationToken::new(),
     )
     .await?;
+  let logs = crate::log_redact::redact_text(&logs);
   if !filtering && q.max_line.is_none() {
     return Ok(json!({ "server": server, "logs": logs }));
   }
@@ -1238,13 +1245,16 @@ async fn deployments(
     commit,
   ) in rows
   {
+    let mut images: Vec<wharf_api_types::agent::ImageInfo> =
+      serde_json::from_str(&images).map_err(json_err)?;
+    wharf_api_types::agent::normalize_image_digests(&mut images);
     out.push(DeploymentView {
       id,
       service,
       server,
       run_id,
-      compose,
-      images: serde_json::from_str(&images).map_err(json_err)?,
+      compose: crate::log_redact::redact_text(&compose),
+      images,
       spec: spec
         .and_then(|s| serde_json::from_str(&s).ok())
         .map(|spec| crate::service_monitor::heartbeat::redact(&spec)),
@@ -1459,6 +1469,7 @@ async fn save_account(
       Ok(())
     })
     .await?;
+  crate::log_redact::refresh(&s.db).await;
   Ok(view)
 }
 
@@ -1543,6 +1554,7 @@ async fn remove_account(
         .map_err(sql_err)
     })
     .await?;
+  crate::log_redact::refresh(&s.db).await;
   Ok(Json(json!({ "removed": removed > 0 })))
 }
 
@@ -1641,6 +1653,7 @@ async fn set_secret(
       key.put_secret(c, &n, &value, now, true)
     })
     .await?;
+  crate::log_redact::refresh(&s.db).await;
   Ok(Json(SecretView {
     used_by: vec![],
     managed: false,
@@ -1664,6 +1677,7 @@ async fn remove_secret(
         .map_err(sql_err)
     })
     .await?;
+  crate::log_redact::refresh(&s.db).await;
   Ok(Json(json!({ "removed": removed > 0 })))
 }
 

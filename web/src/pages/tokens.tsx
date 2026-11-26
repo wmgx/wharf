@@ -63,6 +63,7 @@ export function Tokens() {
   const { data, error, refresh } = usePoll<TokenView[]>("/api/tokens", 30000);
   const coreKey = usePoll<Session>("/api/session", 600000).data?.core_key ?? "<控制面公钥>";
   const origin = window.location.origin;
+  const safeScriptOrigin = origin.startsWith("https://") || ["localhost", "127.0.0.1", "[::1]"].includes(window.location.hostname);
   const [creating, setCreating] = useState(false);
   const [editing, setEditing] = useState<TokenView | null>(null);
   // 刚建的 token 留在页面上，复制完登录命令还能回来复制它；刷新页面就没了。
@@ -117,8 +118,9 @@ export function Tokens() {
               </li>
               <li className="grid gap-1.5">
                 <span className="text-sm font-medium">2. 在你的电脑上安装并登录（macOS、Linux）：提示输入访问令牌时粘贴上一步的令牌</span>
-                <Command>{`curl -fsSL ${origin}/cli.sh | sh -s -- ${origin}`}</Command>
-                <span className="text-xs text-muted-foreground">会同时把 wharf Skill 装到 ~/.agents/skills/wharf（Codex 等直接读），装了 Claude Code 的话再软链到 ~/.claude/skills/wharf。没有终端时脚本只打印登录命令：</span>
+                {safeScriptOrigin
+                  ? <Command>{`curl -fsSL ${origin}/cli.sh | sh -s -- ${origin}`}</Command>
+                  : <span className="text-xs text-warning">当前为明文 HTTP，请通过 HTTPS 或从 Release 核对 SHA256SUMS 后安装 CLI。</span>}
                 <Command>{`wharf login --url ${origin} --core-key ${coreKey}`}</Command>
               </li>
               <li className="grid gap-1.5">

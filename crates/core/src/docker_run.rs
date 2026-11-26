@@ -394,7 +394,7 @@ fn flag_value(
         .iter()
         .find(|(fs, ..)| fs.contains(&f))
         .expect("takes_value 和这里的列表一致");
-      let v = Value::String(value.to_string());
+      let v = literal(value);
       if *list {
         let entry = p
           .extra
@@ -430,7 +430,20 @@ fn port(p: &mut Parsed, value: &str) {
   match (container, host, proto) {
     (Some(c), Some(h), "tcp" | "udp") => {
       p.ports.push((h, c, proto == "udp"));
-      p.port_texts.push(value.to_string());
+      let binding = match parts.as_slice() {
+        [_] => format!("127.0.0.1::{value}"),
+        [_, _] => format!("127.0.0.1:{value}"),
+        _ => {
+          if matches!(parts[2], "0.0.0.0" | "[::]") {
+            p.warnings.push(format!(
+              "端口 {value} 显式绑定到所有网卡，会直接暴露到公网；如只需经网关访问请去掉 {host} 或改为 127.0.0.1",
+              host = parts[2],
+            ));
+          }
+          value.to_string()
+        }
+      };
+      p.port_texts.push(binding);
     }
     _ => p.unsupported.push(format!("-p {value}")),
   }
@@ -754,5 +767,55 @@ mod tests {
   fn rejects_non_run_command() {
     assert!(from_docker_run("docker ps -a", None).is_err());
     assert!(from_docker_run("docker run -d -p 80:80", None).is_err());
+  }
+}
+
+#[test]
+fn compose_defaults_to_loopback_and_escapes_label() {
+  let result = from_docker_run(
+    "docker run -p 8080:80 --init -l foo=$bar nginx",
+    None,
+  )
+  .unwrap();
+  let Source::Compose {
+    content: Some(content),
+    ..
+  } = result.source
+  else {
+    panic!("应该是 compose 来源");
+  };
+  let yaml: Value = serde_yaml_ng::from_str(&content).unwrap();
+  let service = &yaml["services"]["nginx"];
+  assert_eq!(service["ports"][0].as_str(), Some("127.0.0.1:8080:80"));
+  assert_eq!(service["labels"][0].as_str(), Some("foo=$$bar"));
+}
+
+#[test]
+fn explicit_wildcard_ports_keep_binding_and_warn_about_public_access()
+{
+  let result = from_docker_run(
+    "docker run --init -p 0.0.0.0:8080:80 -p '[::]:8081:81' nginx",
+    None,
+  )
+  .unwrap();
+  let Source::Compose {
+    content: Some(content),
+    ..
+  } = result.source
+  else {
+    panic!("应该是 compose 来源");
+  };
+  let yaml: Value = serde_yaml_ng::from_str(&content).unwrap();
+  let ports = &yaml["services"]["nginx"]["ports"];
+  for (i, (host, port)) in
+    [("0.0.0.0", "8080:80"), ("[::]", "8081:81")]
+      .into_iter()
+      .enumerate()
+  {
+    let binding = format!("{host}:{port}");
+    assert_eq!(ports[i].as_str(), Some(binding.as_str()));
+    assert!(result.warnings.contains(&format!(
+      "端口 {binding} 显式绑定到所有网卡，会直接暴露到公网；如只需经网关访问请去掉 {host} 或改为 127.0.0.1"
+    )));
   }
 }

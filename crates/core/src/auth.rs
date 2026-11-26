@@ -183,6 +183,13 @@ async fn authenticate(
   parts: &mut Parts,
   state: &Arc<AppState>,
 ) -> Result<Auth, AppError> {
+  let rejected = |actor: &str, detail: &str| {
+    if let Some(slot) =
+      parts.extensions.get::<crate::audit::AuditSlot>()
+    {
+      slot.set_rejected(actor, detail);
+    }
+  };
   let unauthorized = || AppError::from(invalid_token());
   let track_activity =
     parts.extensions.get::<SkipAuthActivity>().is_none();
@@ -200,17 +207,29 @@ async fn authenticate(
   let Some(token) = token else {
     // 页面：账号密码登录后的会话 cookie，权限和管理员 token 一样。
     if crate::login::cookie_value(&parts.headers).is_none() {
+      rejected("anonymous", "未登录");
       return Err(unauthorized());
     }
-    require_same_origin(&parts.method, peer, &parts.headers)?;
+    let origin =
+      require_same_origin(&parts.method, peer, &parts.headers);
     let user = crate::login::session_user_with_activity(
       state,
       &parts.headers,
-      track_activity,
+      track_activity && origin.is_ok(),
     )
-    .await
-    .map_err(AppError::from)?
-    .ok_or_else(unauthorized)?;
+    .await;
+    if let Err(error) = origin {
+      let actor = match user {
+        Ok(Some(user)) => format!("页面:{user}"),
+        _ => "anonymous".into(),
+      };
+      rejected(&actor, "请求来源不一致");
+      return Err(error);
+    }
+    let user = user.map_err(AppError::from)?.ok_or_else(|| {
+      rejected("anonymous", "会话无效或已过期");
+      unauthorized()
+    })?;
     return Ok(Auth {
       name: format!("页面:{user}"),
       perms: Perm::ALL.into_iter().collect(),
@@ -229,6 +248,7 @@ async fn authenticate(
     source_trust::is_direct_local(ip, &parts.headers)
   });
   if !sealed && !local {
+    rejected("anonymous", "明文令牌被拒绝");
     return Err(AppError::from(
       ApiError::new(
         ErrorCode::Unauthorized,
@@ -243,7 +263,10 @@ async fn authenticate(
     .call(move |c| db::token_scope(c, &hash, track_activity))
     .await
     .map_err(AppError::from)?;
-  let row = found.ok_or_else(unauthorized)?;
+  let row = found.ok_or_else(|| {
+    rejected("anonymous", "无效访问令牌");
+    unauthorized()
+  })?;
   let address = peer
     .filter(|_| row.allowed_from.is_some())
     .map(|ip| crate::login::client_key(ip, &parts.headers));
@@ -256,7 +279,8 @@ async fn authenticate(
     },
     &parts.method,
     parts.uri.path(),
-  )?;
+  )
+  .inspect_err(|e| rejected(&row.name, &e.message))?;
   Ok(Auth {
     name: row.name,
     perms: decode_perms(&row.perms).ok_or_else(unauthorized)?,

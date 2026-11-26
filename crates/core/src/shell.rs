@@ -99,15 +99,30 @@ pub async fn run_host(
   name: String,
   job: HostExecJob,
 ) -> Result<HostExecResponse, ApiError> {
+  run_host_with_audit(state, actor, name, job, None).await
+}
+
+pub async fn run_host_with_audit(
+  state: Arc<AppState>,
+  actor: &str,
+  name: String,
+  job: HostExecJob,
+  audit_command: Option<&str>,
+) -> Result<HostExecResponse, ApiError> {
   let snap = snapshot::load(&state.db).await?;
   let server = snap
     .world
     .servers
     .get(&name)
     .ok_or_else(|| server_not_found(&name))?;
-  let audit_id =
-    start(&state.db, actor, &name, "exec", Some(&job.command))
-      .await?;
+  let audit_id = start(
+    &state.db,
+    actor,
+    &name,
+    "exec",
+    audit_command.or(Some(&job.command)),
+  )
+  .await?;
   if !server.settings.host_exec {
     let error = ApiError::new(
       ErrorCode::Forbidden,
@@ -206,10 +221,15 @@ pub async fn list(
     })
     .await?;
   for row in &mut rows {
-    row.command = row
-      .command
+    row.command = row.command.take().map(|c| {
+      crate::log_redact::redact_text(&crate::redact::redact_command(
+        &c,
+      ))
+    });
+    row.error = row
+      .error
       .take()
-      .map(|c| crate::redact::redact_command(&c));
+      .map(|error| crate::log_redact::redact_text(&error));
   }
   Ok(Json(rows))
 }
@@ -224,7 +244,11 @@ pub(crate) async fn start(
   let actor = actor.to_string();
   let server = server.to_string();
   let kind = kind.to_string();
-  let command = command.map(str::to_string);
+  let command = command.map(|command| {
+    crate::log_redact::redact_text(&crate::redact::redact_command(
+      command,
+    ))
+  });
   db.call(move |c| {
     let now = now_ms();
     c.execute("DELETE FROM shell_log WHERE at < ?1", params![now - 90 * 24 * 3600 * 1000_i64]).map_err(sql_err)?;
@@ -256,7 +280,10 @@ impl End {
   }
 }
 
-pub(crate) async fn finish(db: &Db, id: i64, end: End) {
+pub(crate) async fn finish(db: &Db, id: i64, mut end: End) {
+  end.error = end
+    .error
+    .map(|error| crate::log_redact::redact_text(&error));
   let end = Arc::new(end);
   for attempt in 0..2 {
     let end = end.clone();

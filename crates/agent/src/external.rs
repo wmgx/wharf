@@ -233,10 +233,12 @@ async fn detect_ipv6_from(
     if !resp.status().is_success() {
       continue;
     }
-    let Ok(text) = resp.text().await else {
+    let Some(bytes) = read_body_limited(resp, 4 * 1024).await else {
       continue;
     };
-    if let Ok(address) = text.trim().parse::<Ipv6Addr>() {
+    if let Ok(address) =
+      String::from_utf8_lossy(&bytes).trim().parse::<Ipv6Addr>()
+    {
       return Some(address.to_string());
     }
   }
@@ -254,7 +256,7 @@ async fn geo_lookup_from(
     if !resp.status().is_success() {
       continue;
     }
-    let Ok(bytes) = resp.bytes().await else {
+    let Some(bytes) = read_body_limited(resp, 64 * 1024).await else {
       continue;
     };
     if let Some(geo) = parse_geo(*provider, &bytes) {
@@ -556,6 +558,26 @@ pub fn build_error(error: ApiError, detail: &str) -> ApiError {
   } else {
     error
   }
+}
+
+pub(crate) async fn read_body_limited(
+  mut resp: reqwest::Response,
+  max_bytes: usize,
+) -> Option<Vec<u8>> {
+  if resp
+    .content_length()
+    .is_some_and(|len| len > max_bytes as u64)
+  {
+    return None;
+  }
+  let mut body = Vec::new();
+  while let Some(chunk) = resp.chunk().await.ok()? {
+    if chunk.len() > max_bytes - body.len() {
+      return None;
+    }
+    body.extend_from_slice(&chunk);
+  }
+  Some(body)
 }
 
 #[cfg(test)]

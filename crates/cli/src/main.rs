@@ -465,9 +465,12 @@ pub struct BuildArgs {
   #[arg(long = "ref")]
   pub git_ref: Option<String>,
   /// 私有仓库：保存访问 token 的密钥名（先 `wharf secret set`）。
-  /// GitHub 私有仓库不给时，用本机 gh 的登录存进密钥 GITHUB_TOKEN。
+  /// GitHub 私有仓库不给时，沿用控制面已有的 GITHUB_TOKEN。
   #[arg(long)]
   pub git_token_secret: Option<String>,
+  /// 用本机 gh 的登录写入或覆盖控制面 GITHUB_TOKEN。
+  #[arg(long, requires = "git", conflicts_with = "git_token_secret")]
+  pub sync_gh_token: bool,
   #[command(flatten)]
   pub opts: BuildOpts,
 }
@@ -1037,6 +1040,9 @@ pub enum ServiceCmd {
   /// 要换成最新代码用 `wharf service update`。
   Rebuild {
     name: String,
+    /// 用本机 gh 的登录写入或覆盖控制面 GITHUB_TOKEN。
+    #[arg(long)]
+    sync_gh_token: bool,
     /// 只发起，不等结束。
     #[arg(long)]
     no_wait: bool,

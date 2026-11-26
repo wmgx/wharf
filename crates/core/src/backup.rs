@@ -461,7 +461,10 @@ pub(crate) async fn record(
     Ok(s) => (true, serde_json::to_string(s).map_err(json_err)?),
     Err(e) => (
       false,
-      serde_json::to_string(&e.to_string()).map_err(json_err)?,
+      serde_json::to_string(&crate::log_redact::redact_text(
+        &e.to_string(),
+      ))
+      .map_err(json_err)?,
     ),
   };
   let values = (
@@ -529,8 +532,11 @@ pub async fn records(
           summary: ok
             .then(|| serde_json::from_str(&body).ok())
             .flatten(),
-          error: (!ok)
-            .then(|| serde_json::from_str(&body).unwrap_or(body)),
+          error: (!ok).then(|| {
+            let error: String =
+              serde_json::from_str(&body).unwrap_or(body);
+            crate::log_redact::redact_text(&error)
+          }),
           created_at: to_time(at),
         }
       })
