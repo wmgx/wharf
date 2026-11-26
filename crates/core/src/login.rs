@@ -6,7 +6,7 @@
 //! - 密码用 argon2 存，会话只存 SHA-256，30 天过期；
 //! - 管理员登录按来源 IP 和公网/内网区域分别限制失败次数。
 
-use std::{sync::Arc, time::Duration};
+use std::{net::IpAddr, sync::Arc, time::Duration};
 
 use argon2::{
   Argon2,
@@ -14,7 +14,7 @@ use argon2::{
 };
 use axum::{
   Json,
-  http::{HeaderMap, header},
+  http::{HeaderMap, Method, header},
   response::{AppendHeaders, IntoResponse, Response},
 };
 use rusqlite::{OptionalExtension, params};
@@ -59,12 +59,14 @@ pub(crate) fn source(
 }
 
 /// 经网关走 HTTPS 时 cookie 加 `Secure`；直连 http 时加了浏览器会丢掉 cookie。
-fn secure_attr(headers: &HeaderMap) -> &'static str {
-  let https = headers
-    .get("x-forwarded-proto")
-    .and_then(|v| v.to_str().ok())
-    .is_some_and(|v| v.trim().eq_ignore_ascii_case("https"));
-  if https { "; Secure" } else { "" }
+fn secure_attr(peer: IpAddr, headers: &HeaderMap) -> &'static str {
+  if crate::source_trust::forwarded_proto(peer, headers)
+    == Some("https")
+  {
+    "; Secure"
+  } else {
+    ""
+  }
 }
 
 #[derive(Serialize)]
@@ -154,6 +156,52 @@ pub(crate) fn verify_password(password: &str, hash: &str) -> bool {
   Argon2::default()
     .verify_password(password.as_bytes(), hash)
     .is_ok()
+}
+
+static ARGON2_LIMIT: tokio::sync::Semaphore =
+  tokio::sync::Semaphore::const_new(2);
+
+async fn run_argon2<T: Send + 'static>(
+  work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, ApiError> {
+  let permit = tokio::time::timeout(
+    Duration::from_secs(3),
+    ARGON2_LIMIT.acquire(),
+  )
+  .await
+  .map_err(|_| {
+    ApiError::new(ErrorCode::Busy, "登录验证繁忙，稍后再试")
+  })?
+  .map_err(|_| ApiError::internal("登录验证不可用"))?;
+  tokio::task::spawn_blocking(move || {
+    let _permit = permit;
+    work()
+  })
+  .await
+  .map_err(|_| ApiError::internal("登录验证失败"))
+}
+
+pub(crate) async fn verify_password_async(
+  password: String,
+  hash: String,
+) -> Result<bool, ApiError> {
+  run_argon2(move || verify_password(&password, &hash)).await
+}
+
+pub(crate) async fn hash_password_async(
+  password: String,
+) -> Result<String, ApiError> {
+  run_argon2(move || hash_password(&password)).await?
+}
+
+pub(crate) async fn hash_basic_auth(
+  value: String,
+) -> Result<String, ApiError> {
+  tokio::task::spawn_blocking(move || {
+    crate::render::BasicAuth::hash_input(&value)
+  })
+  .await
+  .map_err(|_| ApiError::internal("计算 Basic Auth 哈希失败"))?
 }
 
 pub fn check_credentials(
@@ -278,6 +326,7 @@ pub async fn show(
 /// 新建会话，返回带 Set-Cookie 的响应。
 async fn start_session(
   state: &AppState,
+  peer: IpAddr,
   headers: &HeaderMap,
   username: String,
   source: String,
@@ -301,7 +350,7 @@ async fn start_session(
   let cookie = format!(
     "{COOKIE}={id}; Path=/; HttpOnly; SameSite=Strict; Max-Age={}{}",
     SESSION_TTL.as_secs(),
-    secure_attr(headers),
+    secure_attr(peer, headers),
   );
   Ok(
     (
@@ -327,6 +376,11 @@ pub async fn setup(
   headers: HeaderMap,
   Json(req): Json<SetupRequest>,
 ) -> Result<Response, AppError> {
+  crate::auth::require_same_origin(
+    &Method::POST,
+    Some(peer.ip()),
+    &headers,
+  )?;
   let username = req.username.trim().to_lowercase();
   check_credentials(&username, &req.password)?;
   if admin(&s.db).await?.is_some() {
@@ -338,8 +392,32 @@ pub async fn setup(
       .into(),
     );
   }
+  let key = client_key(peer.ip(), &headers);
+  if let Some(minutes) = lockout::locked(LockScope::AdminLogin, &key)
+  {
+    return Err(
+      ApiError::new(
+        ErrorCode::Forbidden,
+        format!("输错次数太多，{minutes} 分钟后再试"),
+      )
+      .into(),
+    );
+  }
   if !setup_code_ok(&s.data_dir, &req.code) {
-    // 拖慢猜测（初始化码 192 位随机，本来也猜不中）。
+    lockout::record_and_notify(
+      &s,
+      LockScope::AdminLogin,
+      &key,
+      Some("初始化管理员"),
+    )
+    .await;
+    crate::audit::login_event(
+      &s,
+      "setup_failed",
+      "未知用户",
+      source(peer.ip(), &headers),
+    )
+    .await;
     tokio::time::sleep(Duration::from_secs(1)).await;
     return Err(
       ApiError::new(ErrorCode::Forbidden, "初始化码不对")
@@ -347,7 +425,7 @@ pub async fn setup(
       .into(),
     );
   }
-  let hash = hash_password(&req.password)?;
+  let hash = hash_password_async(req.password).await?;
   let name = username.clone();
   s.db
     .call(move |c| {
@@ -361,6 +439,7 @@ pub async fn setup(
       })
     })
     .await?;
+  lockout::clear(LockScope::AdminLogin, &key);
   let _ = std::fs::remove_file(s.data_dir.join(SETUP_CODE));
   tracing::info!("已在页面上设置管理员账号 {username}");
   crate::audit::login_event(
@@ -370,8 +449,14 @@ pub async fn setup(
     source(peer.ip(), &headers),
   )
   .await;
-  start_session(&s, &headers, username, source(peer.ip(), &headers))
-    .await
+  start_session(
+    &s,
+    peer.ip(),
+    &headers,
+    username,
+    source(peer.ip(), &headers),
+  )
+  .await
 }
 
 /// `POST /api/login`。
@@ -383,6 +468,11 @@ pub async fn login(
   headers: HeaderMap,
   Json(req): Json<Credentials>,
 ) -> Result<Response, AppError> {
+  crate::auth::require_same_origin(
+    &Method::POST,
+    Some(peer.ip()),
+    &headers,
+  )?;
   let key = client_key(peer.ip(), &headers);
   if let Some(minutes) = lockout::locked(LockScope::AdminLogin, &key)
   {
@@ -395,17 +485,22 @@ pub async fn login(
     );
   }
   let username = req.username.trim().to_lowercase();
-  let account = admin(&s.db).await?;
-  let ok = account.as_ref().is_some_and(|(name, hash)| {
-    name == &username && verify_password(&req.password, hash)
-  });
+  let account =
+    admin(&s.db).await?.filter(|(name, _)| name == &username);
+  let actor = if account.is_some() {
+    username.as_str()
+  } else {
+    "未知用户"
+  };
+  let ok = match account {
+    Some((_, hash)) => {
+      verify_password_async(req.password, hash).await?
+    }
+    None => false,
+  };
   if !ok {
     lockout::record_and_notify(&s, LockScope::AdminLogin, &key, None)
       .await;
-    let actor = account
-      .as_ref()
-      .filter(|(name, _)| name == &username)
-      .map_or("未知用户", |(name, _)| name.as_str());
     crate::audit::login_event(
       &s,
       "login_failed",
@@ -477,8 +572,14 @@ pub async fn login(
     source(peer.ip(), &headers),
   )
   .await;
-  start_session(&s, &headers, username, source(peer.ip(), &headers))
-    .await
+  start_session(
+    &s,
+    peer.ip(),
+    &headers,
+    username,
+    source(peer.ip(), &headers),
+  )
+  .await
 }
 
 /// `POST /api/logout`：删掉这个浏览器的会话。
@@ -489,6 +590,11 @@ pub async fn logout(
   >,
   headers: HeaderMap,
 ) -> Result<Response, AppError> {
+  crate::auth::require_same_origin(
+    &Method::POST,
+    Some(peer.ip()),
+    &headers,
+  )?;
   if let Ok(Some(user)) = session_user(&s, &headers).await {
     crate::audit::login_event(
       &s,
@@ -512,7 +618,7 @@ pub async fn logout(
   }
   let cookie = format!(
     "{COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0{}",
-    secure_attr(&headers)
+    secure_attr(peer.ip(), &headers)
   );
   Ok(
     (
@@ -573,6 +679,19 @@ pub fn require_human(
 
 #[cfg(test)]
 mod tests {
+  #[tokio::test]
+  async fn argon2_returns_busy_when_both_slots_are_taken() {
+    let _lock = crate::rules::tests::TEST_LOCK.lock().await;
+    let _permits = ARGON2_LIMIT.acquire_many(2).await.unwrap();
+    let result = tokio::time::timeout(
+      Duration::from_secs(5),
+      verify_password_async("fixture-password".into(), String::new()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.unwrap_err().code, ErrorCode::Busy);
+  }
+
   use super::*;
 
   #[test]

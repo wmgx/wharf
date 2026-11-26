@@ -213,5 +213,12 @@ async fn notify(
 }
 
 #[cfg(test)]
+pub(crate) fn clear_public_admin_failures_for_test() {
+  table().entries.retain(|(scope, zone, _), _| {
+    (*scope, *zone) != (LockScope::AdminLogin, OriginZone::Public)
+  });
+}
+
+#[cfg(test)]
 #[path = "lockout_tests.rs"]
 mod tests;

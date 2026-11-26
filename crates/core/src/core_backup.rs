@@ -8,9 +8,14 @@
 //!   用登录密码就能从备份服务器恢复；
 //! - 备份服务器的 htpasswd 也加上管理员账号（bcrypt），恢复时用登录密码访问。
 
-use std::{path::Path, sync::Arc};
+use std::{net::SocketAddr, path::Path, sync::Arc, time::Duration};
 
-use axum::{Json, extract::State};
+use axum::{
+  Extension, Json,
+  extract::{ConnectInfo, State},
+  http::{HeaderMap, header},
+  response::{AppendHeaders, IntoResponse, Response},
+};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
@@ -25,12 +30,15 @@ use wharf_api_types::{
 };
 
 use crate::{
-  api::ApiResult,
+  api::{ApiResult, AppError},
   apply,
+  audit::{self, AuditSlot},
   auth::Auth,
   backup::{self, Where},
   db::{self, now_ms, sql_err},
   hub::ProgressFn,
+  lockout::{self, LockScope},
+  login,
   planner::Step,
   snapshot,
   state::AppState,
@@ -111,13 +119,58 @@ pub async fn show(
   }))
 }
 
+fn password_source(
+  peer: SocketAddr,
+  headers: &HeaderMap,
+) -> Result<String, ApiError> {
+  let key = login::client_key(peer.ip(), headers);
+  if let Some(minutes) = lockout::locked(LockScope::AdminLogin, &key)
+  {
+    return Err(ApiError::new(
+      ErrorCode::Forbidden,
+      format!("输错次数太多，{minutes} 分钟后再试"),
+    ));
+  }
+  Ok(key)
+}
+
+async fn verify_backup_password(
+  s: &AppState,
+  auth: &Auth,
+  audit: &AuditSlot,
+  key: &str,
+  source: String,
+  password: String,
+  hash: String,
+) -> Result<(), ApiError> {
+  if login::verify_password_async(password, hash).await? {
+    lockout::clear(LockScope::AdminLogin, key);
+    return Ok(());
+  }
+  lockout::record_and_notify(
+    s,
+    LockScope::AdminLogin,
+    key,
+    Some("控制面备份"),
+  )
+  .await;
+  audit::login_event(s, "login_failed", &auth.name, source).await;
+  audit.set_detail("控制面备份登录密码校验失败".into());
+  tokio::time::sleep(Duration::from_secs(1)).await;
+  Err(ApiError::new(ErrorCode::Forbidden, "登录密码不对"))
+}
+
 /// `POST /api/core-backup`：开启（或换备份服务器、改过密码后重新输入），并立刻备份一次。
 pub async fn enable(
   State(s): State<Arc<AppState>>,
   auth: Auth,
+  ConnectInfo(peer): ConnectInfo<SocketAddr>,
+  headers: HeaderMap,
+  Extension(audit): Extension<AuditSlot>,
   Json(req): Json<EnableRequest>,
 ) -> ApiResult<ApplyResponse> {
   auth.require(Perm::Admin)?;
+  let key = password_source(peer, &headers)?;
   check_data_dir(&s)?;
   let snap = snapshot::load(&s.db).await?;
   if !snap.world.servers.contains_key(&req.to) {
@@ -132,17 +185,9 @@ pub async fn enable(
       .into(),
     );
   }
-  let (username, hash): (String, String) = s
-    .db
-    .call(|c| {
-      c.query_row(
-        "SELECT username, password_hash FROM admin WHERE id = 1",
-        [],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-      )
-      .map_err(sql_err)
-    })
-    .await?;
+  let (username, hash) = login::admin(&s.db)
+    .await?
+    .ok_or_else(|| sql_err(rusqlite::Error::QueryReturnedNoRows))?;
   // 备份服务器上 wharf 这个账号已经给控制面用了。
   if username == "wharf" {
     return Err(
@@ -152,13 +197,23 @@ pub async fn enable(
       .into(),
     );
   }
-  if !crate::login::verify_password(&req.password, &hash) {
-    return Err(
-      ApiError::new(ErrorCode::Unauthorized, "登录密码不对").into(),
-    );
-  }
-  let owner = bcrypt::hash(&req.password, bcrypt::DEFAULT_COST)
-    .map_err(|e| ApiError::internal(format!("计算哈希失败：{e}")))?;
+  verify_backup_password(
+    &s,
+    &auth,
+    &audit,
+    &key,
+    login::source(peer.ip(), &headers),
+    req.password.clone(),
+    hash,
+  )
+  .await?;
+  let password = req.password.clone();
+  let owner = tokio::task::spawn_blocking(move || {
+    bcrypt::hash(password, bcrypt::DEFAULT_COST)
+  })
+  .await
+  .map_err(|_| ApiError::internal("计算哈希失败"))?
+  .map_err(|e| ApiError::internal(format!("计算哈希失败：{e}")))?;
   let owner = format!("{username}:{owner}");
   let to = req.to.clone();
   s.db
@@ -186,25 +241,27 @@ pub async fn enable(
 pub async fn recovery_key(
   State(s): State<Arc<AppState>>,
   auth: Auth,
+  ConnectInfo(peer): ConnectInfo<SocketAddr>,
+  headers: HeaderMap,
+  Extension(audit): Extension<AuditSlot>,
   Json(req): Json<PasswordRequest>,
-) -> ApiResult<RecoveryKey> {
+) -> Result<Response, AppError> {
   auth.require(Perm::Admin)?;
-  let hash: String = s
-    .db
-    .call(|c| {
-      c.query_row(
-        "SELECT password_hash FROM admin WHERE id = 1",
-        [],
-        |r| r.get(0),
-      )
-      .map_err(sql_err)
-    })
-    .await?;
-  if !crate::login::verify_password(&req.password, &hash) {
-    return Err(
-      ApiError::new(ErrorCode::Unauthorized, "登录密码不对").into(),
-    );
-  }
+  login::require_human(&auth)?;
+  let key = password_source(peer, &headers)?;
+  let (_, hash) = login::admin(&s.db)
+    .await?
+    .ok_or_else(|| sql_err(rusqlite::Error::QueryReturnedNoRows))?;
+  verify_backup_password(
+    &s,
+    &auth,
+    &audit,
+    &key,
+    login::source(peer.ip(), &headers),
+    req.password,
+    hash,
+  )
+  .await?;
   let snap = snapshot::load(&s.db).await?;
   let to = s.db.call(|c| db::setting(c, TO)).await?;
   let net = snap.net(&snap.world);
@@ -233,10 +290,24 @@ docker run --rm --label wharf.temp=1 --network host --env-file wharf-recovery.en
       to = to.unwrap_or_default(),
     ));
   }
-  Ok(Json(RecoveryKey {
-    filename: "wharf-recovery.env".into(),
-    text,
-  }))
+  audit.require_record("下载了控制面恢复密钥".into());
+  crate::security_receipt::send(
+    &s,
+    &auth.name,
+    &key,
+    "下载控制面恢复密钥".into(),
+  )
+  .await;
+  Ok(
+    (
+      AppendHeaders([(header::CACHE_CONTROL, "no-store")]),
+      Json(RecoveryKey {
+        filename: "wharf-recovery.env".into(),
+        text,
+      }),
+    )
+      .into_response(),
+  )
 }
 
 /// `POST /api/core-backup/run`
@@ -539,4 +610,86 @@ pub fn last_ok(
     |r| r.get(0),
   )
   .map_err(sql_err)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[tokio::test]
+  async fn recovery_requires_human_and_enable_password_failures_lock()
+  {
+    use crate::{
+      rules::tests::{TEST_LOCK, test_state},
+      security_receipt::tests::auth,
+    };
+
+    let _lock = TEST_LOCK.lock().await;
+    let mut state = test_state();
+    Arc::get_mut(&mut state).unwrap().data_dir =
+      Path::new(CORE_BACKUP_DIR).parent().unwrap().into();
+    let password = "fixture-password";
+    state.db.call(move |c| {
+      login::set_admin(c, "operator", &login::hash_password(password)?)?;
+      db::apply_write(c, &db::Write::Upsert {
+        kind: "server".into(), name: "backup-fixture".into(),
+        spec: serde_json::json!({"private_addr": {"ip": "192.168.25.5", "network": "lan"}}),
+        meta: serde_json::json!({}),
+      })
+    }).await.unwrap();
+    let peer: SocketAddr = "127.0.0.24:12345".parse().unwrap();
+    let token_peer: SocketAddr = "127.0.0.25:12345".parse().unwrap();
+    let recover = |human, password: &str| {
+      recovery_key(
+        State(state.clone()),
+        auth(human),
+        ConnectInfo(peer),
+        HeaderMap::new(),
+        Extension(AuditSlot::default()),
+        Json(PasswordRequest {
+          password: password.into(),
+        }),
+      )
+    };
+    let enable_backup = |human, peer| {
+      enable(
+        State(state.clone()),
+        auth(human),
+        ConnectInfo(peer),
+        HeaderMap::new(),
+        Extension(AuditSlot::default()),
+        Json(EnableRequest {
+          to: "backup-fixture".into(),
+          password: "fixture-wrong".into(),
+        }),
+      )
+    };
+    assert_eq!(
+      recover(false, password).await.err().unwrap().0.code,
+      ErrorCode::Forbidden
+    );
+    let error =
+      enable_backup(false, token_peer).await.err().unwrap().0;
+    assert_eq!(error.code, ErrorCode::Forbidden);
+    assert_eq!(error.message, "登录密码不对");
+    for _ in 0..5 {
+      let error = enable_backup(true, peer).await.err().unwrap().0;
+      assert_eq!(error.code, ErrorCode::Forbidden);
+      assert_eq!(error.message, "登录密码不对");
+    }
+
+    let error = recover(true, password).await.err().unwrap().0;
+    assert_eq!(error.code, ErrorCode::Forbidden);
+    assert!(error.message.contains("分钟后再试"));
+    let count: u32 = state.db.call(move |c| c.query_row(
+      "SELECT count(*) FROM audit_log WHERE method = 'login_failed' AND source = ?1",
+      [peer.ip().to_string()], |r| r.get(0),
+    ).map_err(sql_err)).await.unwrap();
+    assert_eq!(count, 5);
+    lockout::clear(LockScope::AdminLogin, &peer.ip().to_string());
+    lockout::clear(
+      LockScope::AdminLogin,
+      &token_peer.ip().to_string(),
+    );
+  }
 }

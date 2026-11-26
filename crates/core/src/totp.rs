@@ -17,7 +17,11 @@ use rusqlite::{Connection, params};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha1::Sha1;
-use std::{net::SocketAddr, sync::Arc};
+use std::{
+  net::SocketAddr,
+  sync::{Arc, LazyLock, Mutex},
+  time::{Duration, Instant},
+};
 use wharf_api_types::{
   ApiError, ErrorCode,
   view::{Issue, IssueLevel, TotpView},
@@ -230,7 +234,7 @@ fn guard(
   {
     return Err(
       ApiError::new(
-        ErrorCode::Unauthorized,
+        ErrorCode::Forbidden,
         format!("输错次数太多，{minutes} 分钟后再试"),
       )
       .into(),
@@ -238,18 +242,39 @@ fn guard(
   }
   Ok(key)
 }
-fn password_ok(
+struct PendingSetup {
+  secret: String,
+  session_hash: String,
+  rebind_verified: bool,
+  expires: Instant,
+}
+
+static PENDING_REBIND: LazyLock<Mutex<Option<PendingSetup>>> =
+  LazyLock::new(Default::default);
+
+async fn verify_admin_password(
+  db: &Db,
+  password: String,
+) -> Result<Option<String>, ApiError> {
+  let Some((_, hash)) = login::admin(db).await? else {
+    return Ok(None);
+  };
+  Ok(
+    login::verify_password_async(password, hash.clone())
+      .await?
+      .then_some(hash),
+  )
+}
+
+fn password_current(
   c: &Connection,
-  password: &str,
+  verified_hash: &str,
 ) -> Result<bool, ApiError> {
-  let hash: String = c
-    .query_row(
-      "SELECT password_hash FROM admin WHERE id = 1",
-      [],
-      |r| r.get(0),
-    )
-    .map_err(sql_err)?;
-  Ok(login::verify_password(password, &hash))
+  c.query_row(
+    "SELECT EXISTS(SELECT 1 FROM admin WHERE id = 1 AND password_hash = ?1)",
+    [verified_hash],
+    |r| r.get(0),
+  ).map_err(sql_err)
 }
 async fn failure(
   s: &AppState,
@@ -266,16 +291,14 @@ async fn failure(
   .await;
   crate::audit::login_event(s, "login_failed", &auth.name, source)
     .await;
-  tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-  ApiError::new(ErrorCode::Unauthorized, "密码或验证码不对").into()
+  tokio::time::sleep(Duration::from_secs(1)).await;
+  ApiError::new(ErrorCode::Forbidden, "密码或验证码不对").into()
 }
 pub async fn show(
   State(s): State<Arc<AppState>>,
   auth: Auth,
-  ConnectInfo(peer): ConnectInfo<SocketAddr>,
-  headers: HeaderMap,
 ) -> ApiResult<TotpView> {
-  guard(&auth, peer, &headers)?;
+  login::require_human(&auth)?;
   Ok(Json(view(&s.db).await?))
 }
 pub async fn begin(
@@ -286,6 +309,18 @@ pub async fn begin(
   Json(req): Json<Proof>,
 ) -> ApiResult<Value> {
   let key = guard(&auth, peer, &headers)?;
+  let source = login::source(peer.ip(), &headers);
+  let Some(session_hash) =
+    login::cookie_value(&headers).map(hash_token)
+  else {
+    return Err(
+      ApiError::new(ErrorCode::Forbidden, "需要页面登录").into(),
+    );
+  };
+  let Some(hash) = verify_admin_password(&s.db, req.password).await?
+  else {
+    return Err(failure(&s, &auth, &key, source).await);
+  };
   let secret = base32_encode(&random::<20>()?);
   let username =
     auth.name.strip_prefix("页面:").unwrap_or(&auth.name);
@@ -295,25 +330,51 @@ pub async fn begin(
     .render::<qrcode::render::svg::Color>()
     .build();
   let pending = secret.clone();
-  let ok = s
+  let result = s
     .db
     .call(move |c| {
-      if !password_ok(c, &req.password)? {
-        return Ok(false);
+      let tx = c.transaction().map_err(sql_err)?;
+      if !password_current(&tx, &hash)? {
+        return Ok(None);
       }
-      c.execute(
+      let enabled: bool = tx
+        .query_row(
+          "SELECT totp_secret IS NOT NULL FROM admin WHERE id = 1",
+          [],
+          |r| r.get(0),
+        )
+        .map_err(sql_err)?;
+      let recovery = if enabled {
+        let Some(recovery) = verify(&tx, &req.code)? else {
+          return Ok(None);
+        };
+        recovery
+      } else {
+        false
+      };
+      tx.execute(
         "UPDATE admin SET totp_pending = ?1 WHERE id = 1",
-        [pending],
+        [&pending],
       )
       .map_err(sql_err)?;
-      Ok(true)
+      tx.commit().map_err(sql_err)?;
+      // Db::call 串行更新数据库和内存，避免并发覆盖新绑定。
+      *PENDING_REBIND.lock().unwrap_or_else(|e| e.into_inner()) =
+        Some(PendingSetup {
+          secret: pending,
+          session_hash,
+          rebind_verified: enabled,
+          expires: Instant::now() + Duration::from_secs(600),
+        });
+      Ok(Some(recovery))
     })
     .await?;
-  if !ok {
-    return Err(
-      failure(&s, &auth, &key, login::source(peer.ip(), &headers))
-        .await,
-    );
+  let Some(recovery) = result else {
+    return Err(failure(&s, &auth, &key, source).await);
+  };
+  lockout::clear(LockScope::AdminLogin, &key);
+  if recovery {
+    used(&s, &auth.name, source).await;
   }
   Ok(Json(
     json!({ "secret": secret, "uri": uri, "qr_svg": qr_svg }),
@@ -327,25 +388,35 @@ pub async fn enable(
   Json(req): Json<Proof>,
 ) -> ApiResult<Value> {
   let key = guard(&auth, peer, &headers)?;
+  let session_hash = login::cookie_value(&headers).map(hash_token);
   let codes = s.db.call(move |c| {
     let tx = c.transaction().map_err(sql_err)?;
-    let secret: Option<String> = tx.query_row("SELECT totp_pending FROM admin WHERE id = 1", [], |r| r.get(0)).map_err(sql_err)?;
-    let Some(step) = secret.as_deref().and_then(|v| check(v, &req.code, now_ms() as u64 / 1000, None)) else { return Ok(None); };
+    let (secret, enabled): (Option<String>, bool) = tx.query_row(
+      "SELECT totp_pending, totp_secret IS NOT NULL FROM admin WHERE id = 1",
+      [], |r| Ok((r.get(0)?, r.get(1)?)),
+    ).map_err(sql_err)?;
+    let Some(secret) = secret else { return Ok(None); };
+    let mut pending = PENDING_REBIND.lock().unwrap_or_else(|e| e.into_inner());
+    match pending.as_ref().filter(|p| p.secret == secret) {
+      Some(p) if Some(p.session_hash.as_str()) == session_hash.as_deref()
+        && p.expires > Instant::now() && p.rebind_verified == enabled => {}
+      None if !enabled => {}
+      _ => return Ok(None),
+    }
+    let Some(step) = check(&secret, &req.code, now_ms() as u64 / 1000, None) else { return Ok(None); };
     tx.execute("UPDATE admin SET totp_secret = totp_pending, totp_pending = NULL, totp_last_step = ?1 WHERE id = 1", [step]).map_err(sql_err)?;
     let codes = new_codes(&tx)?;
     tx.commit().map_err(sql_err)?;
+    *pending = None;
     Ok(Some(codes))
   }).await?;
   let Some(codes) = codes else {
-    lockout::record_and_notify(
-      &s,
-      LockScope::AdminLogin,
-      &key,
-      Some("两步验证"),
-    )
-    .await;
-    return Err(ApiError::invalid("验证码不对").into());
+    return Err(
+      failure(&s, &auth, &key, login::source(peer.ip(), &headers))
+        .await,
+    );
   };
+  lockout::clear(LockScope::AdminLogin, &key);
   crate::audit::login_event(
     &s,
     "totp_enable",
@@ -371,9 +442,16 @@ async fn change(
   disable: bool,
 ) -> ApiResult<Value> {
   let key = guard(&auth, peer, &headers)?;
+  let Some(hash) = verify_admin_password(&s.db, req.password).await?
+  else {
+    return Err(
+      failure(&s, &auth, &key, login::source(peer.ip(), &headers))
+        .await,
+    );
+  };
   let result = s.db.call(move |c| {
     let tx = c.transaction().map_err(sql_err)?;
-    if !password_ok(&tx, &req.password)? { return Ok(None); }
+    if !password_current(&tx, &hash)? { return Ok(None); }
     let Some(recovery) = verify(&tx, &req.code)? else { return Ok(None); };
     // 重新生成只接受认证器验证码；关闭也允许一次性恢复码。
     if recovery && !disable { return Ok(None); }
@@ -383,6 +461,9 @@ async fn change(
       Vec::new()
     } else { new_codes(&tx)? };
     tx.commit().map_err(sql_err)?;
+    if disable {
+      *PENDING_REBIND.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
     Ok(Some((codes, recovery)))
   }).await?;
   let Some((codes, recovery)) = result else {
@@ -391,6 +472,7 @@ async fn change(
         .await,
     );
   };
+  lockout::clear(LockScope::AdminLogin, &key);
   if recovery {
     used(&s, &auth.name, login::source(peer.ip(), &headers)).await;
   }
@@ -535,6 +617,134 @@ mod tests {
       notice_titles(&state, "security_receipt").await,
       ["启用或重设两步验证", "重生成两步验证恢复码", "关闭两步验证",]
     );
+  }
+
+  #[tokio::test]
+  async fn totp_status_stays_available_during_public_lockout() {
+    use crate::{
+      rules::tests::{TEST_LOCK, test_state},
+      security_receipt::tests::auth,
+    };
+
+    let _lock = TEST_LOCK.lock().await;
+    lockout::clear_public_admin_failures_for_test();
+    let state = test_state();
+    state
+      .db
+      .call(|c| {
+        login::set_admin(
+          c,
+          "operator",
+          &login::hash_password("fixture-password")?,
+        )
+      })
+      .await
+      .unwrap();
+    for _ in 0..20 {
+      lockout::record_and_notify(
+        &state,
+        LockScope::AdminLogin,
+        "203.0.113.21",
+        None,
+      )
+      .await;
+    }
+    let peer = "203.0.113.22:12345".parse::<SocketAddr>().unwrap();
+    assert!(
+      lockout::locked(LockScope::AdminLogin, &peer.ip().to_string())
+        .is_some()
+    );
+    assert!(show(State(state.clone()), auth(true)).await.is_ok());
+    let attempt = || {
+      disable(
+        State(state.clone()),
+        auth(true),
+        ConnectInfo(peer),
+        HeaderMap::new(),
+        Json(Proof {
+          password: "fixture-wrong".into(),
+          code: String::new(),
+        }),
+      )
+    };
+    let locked = attempt().await;
+    lockout::clear_public_admin_failures_for_test();
+    let failure = attempt().await;
+    lockout::clear_public_admin_failures_for_test();
+    let locked = locked.err().unwrap().0;
+    assert_eq!(locked.code, ErrorCode::Forbidden);
+    assert!(locked.message.contains("分钟后再试"));
+    let failure = failure.err().unwrap().0;
+    assert_eq!(failure.code, ErrorCode::Forbidden);
+    assert_eq!(failure.message, "密码或验证码不对");
+  }
+
+  #[tokio::test]
+  async fn rebind_rejects_missing_old_code_and_legacy_pending_secret()
+  {
+    use crate::{
+      rules::tests::{TEST_LOCK, test_state},
+      security_receipt::tests::auth,
+    };
+
+    let _lock = TEST_LOCK.lock().await;
+    let state = test_state();
+    let password = "fixture-password";
+    let old = "MZXW6";
+    let pending = b"12345678901234567890";
+    state.db.call(move |c| {
+      login::set_admin(c, "operator", &login::hash_password(password)?)?;
+      c.execute("UPDATE admin SET totp_secret = ?1, totp_pending = ?2", params![old, base32_encode(pending)]).map_err(sql_err)?;
+      c.execute("INSERT INTO recovery_codes (hash) VALUES ('fixture-recovery')", []).map_err(sql_err)?;
+      Ok(())
+    }).await.unwrap();
+    let peer = "203.0.113.23:12345".parse().unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert(
+      "cookie",
+      "wharf_session=fixture-session".parse().unwrap(),
+    );
+    let begin_error = begin(
+      State(state.clone()),
+      auth(true),
+      ConnectInfo(peer),
+      headers.clone(),
+      Json(Proof {
+        password: password.into(),
+        code: String::new(),
+      }),
+    )
+    .await
+    .err()
+    .unwrap();
+    assert_eq!(begin_error.0.code, ErrorCode::Forbidden);
+    let enable_error = enable(
+      State(state.clone()),
+      auth(true),
+      ConnectInfo(peer),
+      headers,
+      Json(Proof {
+        password: String::new(),
+        code: format!(
+          "{:06}",
+          code_at(pending, now_ms() as u64 / 1000 / 30)
+        ),
+      }),
+    )
+    .await
+    .err()
+    .unwrap();
+    assert_eq!(enable_error.0.code, ErrorCode::Forbidden);
+    state.db.call(move |c| {
+      let (secret, pending_secret): (String, String) = c.query_row("SELECT totp_secret, totp_pending FROM admin WHERE id = 1", [], |r| Ok((r.get(0)?, r.get(1)?))).map_err(sql_err)?;
+      assert_eq!(secret, old);
+      assert_eq!(pending_secret, base32_encode(pending));
+      assert_eq!(left(c)?, 1);
+      let recovery: String = c.query_row("SELECT hash FROM recovery_codes", [], |r| r.get(0)).map_err(sql_err)?;
+      assert_eq!(recovery, "fixture-recovery");
+      Ok(())
+    }).await.unwrap();
+    lockout::clear(LockScope::AdminLogin, &peer.ip().to_string());
   }
 
   #[test]

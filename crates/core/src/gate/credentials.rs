@@ -10,24 +10,32 @@ use wharf_api_types::ApiError;
 
 const ACCESS_TTL: i64 = 600;
 
-pub(super) fn credential_host(headers: &HeaderMap) -> Option<String> {
-  normalize_host(headers.get("x-forwarded-host")?.to_str().ok()?)
+pub(super) fn credential_host(
+  peer: std::net::IpAddr,
+  headers: &HeaderMap,
+) -> Option<String> {
+  crate::source_trust::forwarded_host(peer, headers)
 }
 
-fn normalize_host(raw: &str) -> Option<String> {
-  let raw = raw.trim();
-  if raw.is_empty()
-    || raw.chars().any(|c| c.is_whitespace() || c.is_control())
+pub(super) fn refresh_return_url(
+  peer: std::net::IpAddr,
+  headers: &HeaderMap,
+  host: &str,
+) -> Option<String> {
+  use crate::source_trust::{forwarded_proto, single_header};
+  if single_header(headers, "x-forwarded-method") != Some("GET")
+    || !headers
+      .get(axum::http::header::ACCEPT)
+      .and_then(|v| v.to_str().ok())
+      .is_some_and(|v| v.contains("text/html"))
   {
     return None;
   }
-  let host = if let Some((host, port)) = raw.rsplit_once(':') {
-    port.parse::<u16>().ok()?;
-    host
-  } else {
-    raw
-  };
-  (!host.is_empty()).then(|| host.to_ascii_lowercase())
+  let proto = forwarded_proto(peer, headers)?;
+  let uri = single_header(headers, "x-forwarded-uri")?;
+  (uri.starts_with('/')
+    && !uri.chars().any(|ch| ch.is_control() || ch == '\\'))
+  .then(|| format!("{proto}://{host}{uri}"))
 }
 
 fn sign(
@@ -226,12 +234,60 @@ mod tests {
     assert!(rt_parse(&key, &legacy, HOST, 1000).is_none());
   }
 
+  #[tokio::test]
+  async fn untrusted_peer_cannot_redeem_site_ticket() {
+    use super::super::{SiteQuery, TICKETS, Ticket, site_gate};
+    use axum::extract::{ConnectInfo, Query, State};
+    let state = crate::rules::tests::test_state();
+    let code = "untrusted-peer-fixture".to_string();
+    TICKETS.lock().unwrap().insert(
+      code.clone(),
+      Ticket {
+        host: HOST.into(),
+        session_hash: "session-fixture".into(),
+        expires: now_ms() / 1000 + 60,
+      },
+    );
+    let mut headers = HeaderMap::new();
+    headers.insert("x-forwarded-host", HOST.parse().unwrap());
+    let response = site_gate(
+      State(state),
+      Query(SiteQuery {
+        code: code.clone(),
+        rd: None,
+      }),
+      ConnectInfo("203.0.113.19:12345".parse().unwrap()),
+      headers,
+    )
+    .await
+    .ok()
+    .unwrap();
+    let ticket = TICKETS.lock().unwrap().remove(&code);
+    assert_eq!(response.status(), 403);
+    assert!(!response.headers().contains_key("set-cookie"));
+    assert!(ticket.is_some());
+  }
+
   #[test]
   fn host_normalization() {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+      "x-forwarded-host",
+      "A.example.test:443".parse().unwrap(),
+    );
     assert_eq!(
-      normalize_host(" A.example.test:443 ").as_deref(),
+      crate::source_trust::forwarded_host_with(true, &headers)
+        .map(|v| v.host().to_ascii_lowercase())
+        .as_deref(),
       Some(HOST)
     );
-    assert_eq!(normalize_host("a.example.test :443"), None);
+    headers.append(
+      "x-forwarded-host",
+      "other.example.test".parse().unwrap(),
+    );
+    assert!(
+      crate::source_trust::forwarded_host_with(true, &headers)
+        .is_none()
+    );
   }
 }
