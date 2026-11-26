@@ -125,6 +125,9 @@ pub fn read_file(
     if name != want {
       continue;
     }
+    if !entry.header().entry_type().is_file() {
+      return Err(ApiError::invalid(format!("{want} 不是普通文件")));
+    }
     if entry.size() > MAX {
       return Err(ApiError::invalid(format!("{want} 超过 10 MiB")));
     }
@@ -175,17 +178,23 @@ async fn store(
   std::fs::create_dir_all(&dir).map_err(|e| io_error(&dir, e))?;
   let part = dir
     .join(format!(".{sha256}.{}.part", crate::backup::random_hex()));
-  let result = receive(body, &part, sha256).await;
-  match result {
-    Ok(size) => {
-      std::fs::rename(&part, &target)
-        .map_err(|e| io_error(&target, e))?;
-      Ok(json!({ "sha256": sha256, "size": size, "existed": false }))
-    }
-    Err(e) => {
-      let _ = std::fs::remove_file(&part);
-      Err(e)
-    }
+  let part = Part(part);
+  let size = receive(body, &part.0, sha256).await?;
+  let validate = part.0.clone();
+  tokio::task::spawn_blocking(move || {
+    wharf_pack::validate_archive(&validate)
+  })
+  .await
+  .map_err(|e| ApiError::internal(e.to_string()))??;
+  std::fs::rename(&part.0, &target)
+    .map_err(|e| io_error(&target, e))?;
+  Ok(json!({ "sha256": sha256, "size": size, "existed": false }))
+}
+
+struct Part(PathBuf);
+impl Drop for Part {
+  fn drop(&mut self) {
+    let _ = std::fs::remove_file(&self.0);
   }
 }
 
@@ -329,4 +338,40 @@ pub async fn cleanup(state: &AppState) -> Result<(), ApiError> {
     }
   }
   Ok(())
+}
+
+#[cfg(test)]
+mod security_tests {
+  use super::*;
+
+  #[tokio::test]
+  async fn upload_rejects_tarball_with_escaping_symlink_and_cleans_part()
+   {
+    let temp = tempfile::tempdir().unwrap();
+    let mut state = crate::rules::tests::test_state();
+    Arc::get_mut(&mut state).unwrap().data_dir =
+      temp.path().to_path_buf();
+    let sample = |link: &str| {
+      let gz = flate2::write::GzEncoder::new(
+        Vec::new(),
+        flate2::Compression::default(),
+      );
+      let mut builder = tar::Builder::new(gz);
+      let mut header = tar::Header::new_gnu();
+      header.set_entry_type(tar::EntryType::Symlink);
+      header.set_size(0);
+      builder.append_link(&mut header, "sub", link).unwrap();
+      builder.into_inner().unwrap().finish().unwrap()
+    };
+    let bad = sample("../outside");
+    let sha = hex::encode(Sha256::digest(&bad));
+    let err = store(&state, &sha, Body::from(bad)).await.unwrap_err();
+    assert_eq!(err.code, wharf_api_types::ErrorCode::InvalidInput);
+    assert!(!file(&state, &sha).exists());
+    assert_eq!(std::fs::read_dir(dir(&state)).unwrap().count(), 0);
+    let good = sample("inside");
+    let sha = hex::encode(Sha256::digest(&good));
+    assert!(store(&state, &sha, Body::from(good)).await.is_ok());
+    assert!(file(&state, &sha).is_file());
+  }
 }

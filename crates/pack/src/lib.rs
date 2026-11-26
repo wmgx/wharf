@@ -5,6 +5,7 @@
 //!   代码没变时 sha256 不变，控制面不用重新接收，服务也不用重新构建。
 
 use std::{
+  collections::BTreeMap,
   io::Write,
   path::{Path, PathBuf},
 };
@@ -12,6 +13,9 @@ use std::{
 use flate2::{Compression, GzBuilder};
 use sha2::{Digest, Sha256};
 use wharf_api_types::ApiError;
+
+mod archive;
+pub use archive::{unpack_validated, validate_archive};
 
 /// 和控制面接收上传的上限一致。
 pub const MAX_ARCHIVE: usize = 512 * 1024 * 1024;
@@ -71,6 +75,26 @@ pub fn pack(dir: &Path) -> Result<Packed, ApiError> {
       dir.display()
     )));
   }
+  let root = dir.canonicalize().map_err(|e| io_err(dir, e))?;
+  let mut links = BTreeMap::new();
+  for rel in &files {
+    let path = root.join(rel);
+    if path
+      .symlink_metadata()
+      .map_err(|e| io_err(&path, e))?
+      .is_symlink()
+    {
+      let target = path.read_link().map_err(|e| io_err(&path, e))?;
+      if path.canonicalize().is_ok_and(|p| !p.starts_with(&root)) {
+        return Err(ApiError::invalid(format!(
+          "软链接 {} 指向打包目录之外",
+          rel.display()
+        )));
+      }
+      links.insert(rel.clone(), target);
+    }
+  }
+  wharf_api_types::symlink::validate_symlinks(&links)?;
   let gz = GzBuilder::new()
     .mtime(0)
     .write(Vec::new(), Compression::default());
@@ -83,24 +107,28 @@ pub fn pack(dir: &Path) -> Result<Packed, ApiError> {
     header.set_mtime(0);
     header.set_uid(0);
     header.set_gid(0);
-    let name = rel.to_string_lossy().replace('\\', "/");
-    if meta.file_type().is_symlink() {
-      let target =
-        std::fs::read_link(&path).map_err(|e| io_err(&path, e))?;
+    let name = rel;
+    if let Some(target) = links.get(rel) {
       header.set_entry_type(tar::EntryType::Symlink);
       header.set_size(0);
       header.set_mode(0o777);
       tar
-        .append_link(&mut header, &name, &target)
+        .append_link(&mut header, name, target)
         .map_err(|e| io_err(&path, e))?;
       continue;
+    }
+    if !meta.is_file() {
+      return Err(ApiError::invalid(format!(
+        "打包条目 {} 已变化",
+        rel.display()
+      )));
     }
     header.set_size(meta.len());
     header.set_mode(if executable(&meta) { 0o755 } else { 0o644 });
     let file =
       std::fs::File::open(&path).map_err(|e| io_err(&path, e))?;
     tar
-      .append_data(&mut header, &name, file)
+      .append_data(&mut header, name, file)
       .map_err(|e| io_err(&path, e))?;
     if tar.get_ref().get_ref().len() > MAX_ARCHIVE {
       return Err(too_big());
@@ -140,6 +168,58 @@ fn executable(_: &std::fs::Metadata) -> bool {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[cfg(unix)]
+  #[test]
+  fn pack_and_archive_reject_escaping_and_chained_symlinks() {
+    use std::{fs, os::unix::fs::symlink};
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("src");
+    fs::create_dir_all(root.join("sub")).unwrap();
+    for target in
+      [temp.path().join("outside"), PathBuf::from("../../outside")]
+    {
+      symlink(target, root.join("sub/link")).unwrap();
+      assert!(pack(&root).is_err());
+      fs::remove_file(root.join("sub/link")).unwrap();
+    }
+    symlink("..", root.join("sub/parent")).unwrap();
+    symlink("parent/..", root.join("sub/link")).unwrap();
+    assert!(pack(&root).is_err());
+    fs::remove_file(root.join("sub/link")).unwrap();
+    fs::remove_file(root.join("sub/parent")).unwrap();
+
+    fs::create_dir(root.join("dist")).unwrap();
+    fs::write(root.join("dist/main"), "hello").unwrap();
+    symlink("../dist/main", root.join("sub/link")).unwrap();
+    let archive = temp.path().join("source.tar.gz");
+    fs::write(&archive, pack(&root).unwrap().bytes).unwrap();
+    assert!(validate_archive(&archive).is_ok());
+    let dest = temp.path().join("unpacked");
+    unpack_validated(&archive, &dest).unwrap();
+    assert_eq!(
+      fs::read_to_string(dest.join("sub/link")).unwrap(),
+      "hello"
+    );
+
+    let gz = flate2::write::GzEncoder::new(
+      fs::File::create(&archive).unwrap(),
+      Compression::default(),
+    );
+    let mut tar = tar::Builder::new(gz);
+    let mut header = tar::Header::new_gnu();
+    header.set_entry_type(tar::EntryType::Link);
+    header.set_size(0);
+    tar.append_link(&mut header, "link", "../outside").unwrap();
+    tar.into_inner().unwrap().finish().unwrap();
+    assert!(validate_archive(&archive).is_err());
+    assert!(
+      wharf_api_types::symlink::check_relative_entry(Path::new(
+        "../outside"
+      ))
+      .is_err()
+    );
+  }
 
   #[test]
   fn respects_gitignore_and_is_reproducible() {

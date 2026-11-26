@@ -73,6 +73,9 @@ impl Ops {
       AgentOp::AccessLogs(job) => {
         to_value(crate::access_logs::read(job, ctx).await?)
       }
+      AgentOp::ProbeCoreHost(probe) => to_value(
+        crate::core_probe::run(&self.docker, &probe, ctx).await?,
+      ),
       AgentOp::Report => to_value(self.reporter.report(true).await),
       AgentOp::ListImages => {
         to_value(crate::images::list(&self.docker, ctx).await?)
@@ -311,7 +314,12 @@ impl Ops {
         to_value(self.host_shell.exec(job, ctx).await)
       }
       AgentOp::Egress(cfg) => {
-        crate::egress::apply(self.data_dir.clone(), cfg).await?;
+        crate::egress::apply(
+          self.data_dir.clone(),
+          &self.core_url,
+          cfg,
+        )
+        .await?;
         Ok(Value::Null)
       }
       AgentOp::TaskRun(job) => {
@@ -352,11 +360,8 @@ impl Ops {
         "服务 {service} 还部署在这台机器上，不删除它的数据"
       )));
     }
-    let dir = Path::new("/srv").join(service);
-    if dir.exists() {
-      ctx.say(format!("删除 {}", dir.display()));
-      std::fs::remove_dir_all(&dir).map_err(io_err(&dir))?;
-    }
+    crate::dirfd::remove_service(Path::new("/srv"), service)?;
+    ctx.say(format!("清理 /srv/{service}"));
     Ok(Value::Null)
   }
 

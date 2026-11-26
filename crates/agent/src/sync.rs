@@ -60,7 +60,10 @@ pub async fn serve(
   let root = data_root(&s.service)?;
   let bind = parse_ip("监听地址", &s.bind)?;
   let allow = parse_ip("发送端地址", &s.allow)?;
-  std::fs::create_dir_all(&root).map_err(io_err(&root))?;
+  crate::dirfd::ensure_beneath(
+    Path::new("/srv"),
+    Path::new(&s.service),
+  )?;
 
   // 先占一个空闲端口再交给 rsync。中间有极短的空窗，冲突时 rsync 会直接报错。
   let port = std::net::TcpListener::bind((bind, 0))
@@ -159,9 +162,16 @@ pub async fn push(
 ) -> Result<Value, ApiError> {
   let root = data_root(&p.service)?;
   let host = parse_ip("接收端地址", &p.host)?;
-  if !root.exists() {
-    ctx.say(format!("{} 不存在，没有数据要迁移", root.display()));
-    return Ok(serde_json::json!({ "synced": false }));
+  match crate::dirfd::DirFd::open_service_root(
+    Path::new("/srv"),
+    &p.service,
+  ) {
+    Err(e) if e.code == ErrorCode::NotFound => {
+      ctx.say(format!("{} 不存在，没有数据要迁移", root.display()));
+      return Ok(serde_json::json!({ "synced": false }));
+    }
+    Err(e) => return Err(e),
+    Ok(_) => {}
   }
   let host = match host {
     IpAddr::V6(v6) => format!("[{v6}]"),

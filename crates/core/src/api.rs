@@ -1,10 +1,12 @@
 //! HTTP API。错误统一为 `{ code, message, hint, suggest }`。
 
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{
+  collections::BTreeMap, net::SocketAddr, sync::Arc, time::Duration,
+};
 
 use axum::{
-  Json, Router,
-  extract::{Path, Query, State},
+  Extension, Json, Router,
+  extract::{ConnectInfo, Path, Query, State},
   http::{HeaderMap, StatusCode},
   response::{IntoResponse, Response},
   routing::{get, post, put},
@@ -746,16 +748,7 @@ async fn add_server(
     format!("http://{host}")
   });
   let core_key = hex::encode(s.key.verifying_key().to_bytes());
-  let commands = BTreeMap::from([
-    (
-      "script".to_string(),
-      crate::join::script_command(
-        &core_url,
-        &token,
-        &core_key,
-        image.as_deref(),
-      ),
-    ),
+  let mut commands = BTreeMap::from([
     (
       "docker".to_string(),
       format!(
@@ -772,6 +765,17 @@ async fn add_server(
       ),
     ),
   ]);
+  if crate::join::allows_script_install(&core_url) {
+    commands.insert(
+      "script".into(),
+      crate::join::script_command(
+        &core_url,
+        &token,
+        &core_key,
+        image.as_deref(),
+      ),
+    );
+  }
   Ok(Json(JoinInfo {
     server: req.name,
     join_token: token,
@@ -783,17 +787,36 @@ async fn add_server(
 
 async fn agent_join(
   State(s): State<Arc<AppState>>,
+  sealed: Option<Extension<crate::cli_tunnel::Sealed>>,
+  ConnectInfo(peer): ConnectInfo<SocketAddr>,
+  headers: HeaderMap,
   Json(req): Json<JoinRequest>,
 ) -> ApiResult<JoinResponse> {
+  if sealed.is_none()
+    && !crate::source_trust::is_direct_local(peer.ip(), &headers)
+  {
+    return Err(
+      ApiError::new(
+        ErrorCode::Unauthorized,
+        "控制面已拒绝明文提交加入凭据",
+      )
+      .with_hint(
+        "先拉取最新的 wharf-agent 镜像，再用最新的加入命令重试",
+      )
+      .into(),
+    );
+  }
   let hash = auth::hash_token(req.join_token.trim());
   let key = req.public_key.clone();
   if hex::decode(&key).map(|b| b.len()).unwrap_or(0) != 32 {
     return Err(ApiError::invalid("公钥格式不对").into());
   }
+  let hub = s.clone();
   let server = s
     .db
     .call(move |c| {
-      let found: Option<(String, i64)> = c
+      let tx = c.transaction().map_err(sql_err)?;
+      let found: Option<(String, i64)> = tx
         .query_row(
           "SELECT server, join_expires_at FROM agents WHERE join_token_hash = ?1",
           params![hash],
@@ -813,12 +836,15 @@ async fn agent_join(
             .suggest(format!("wharf server add {server} --rejoin")),
         );
       }
-      c.execute(
-        "UPDATE agents SET public_key = ?1, join_token_hash = NULL, join_expires_at = NULL
+      tx.execute(
+        "UPDATE agents SET public_key = ?1, join_token_hash = NULL, join_expires_at = NULL, report = NULL, last_seen = NULL
          WHERE server = ?2",
         params![key, server],
       )
       .map_err(sql_err)?;
+      crate::core_node::clear_if_server(&tx, &server)?;
+      tx.commit().map_err(sql_err)?;
+      hub.hub.disconnect(&server);
       Ok(server)
     })
     .await?;
@@ -864,18 +890,23 @@ async fn remove_server(
       .into(),
     );
   }
+  let state = s.clone();
   s.db
     .call(move |c| {
-      c.execute(
+      let tx = c.transaction().map_err(sql_err)?;
+      tx.execute(
         "DELETE FROM resources WHERE kind = ?1 AND name = ?2",
         params![KIND_SERVER, name],
       )
       .map_err(sql_err)?;
-      c.execute(
+      tx.execute(
         "DELETE FROM agents WHERE server = ?1",
         params![name],
       )
       .map_err(sql_err)?;
+      crate::core_node::clear_if_server(&tx, &name)?;
+      tx.commit().map_err(sql_err)?;
+      state.hub.disconnect(&name);
       Ok(())
     })
     .await?;
@@ -1844,4 +1875,57 @@ async fn export(
     crate::scope_filter::filter_export(allowed, &mut fleet);
   }
   Ok(Json(fleet))
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[tokio::test]
+  async fn agent_join_rejects_plaintext_non_local_and_accepts_sealed()
+  {
+    let state = crate::rules::tests::test_state();
+    for (peer, forwarded, sealed, allowed) in [
+      ("203.0.113.5:4000", false, false, false),
+      ("127.0.0.1:4000", true, false, false),
+      ("203.0.113.5:4000", false, true, true),
+      ("127.0.0.1:4000", false, false, true),
+    ] {
+      let token = auth::new_token();
+      let hash = auth::hash_token(&token);
+      state.db.call(move |c| {
+        c.execute("INSERT OR REPLACE INTO agents (server, join_token_hash, join_expires_at) VALUES ('s1', ?1, ?2)", params![hash, now_ms() + 60_000])
+          .map_err(sql_err)?;
+        Ok(())
+      }).await.unwrap();
+      let mut headers = HeaderMap::new();
+      if forwarded {
+        headers
+          .insert("x-forwarded-for", "203.0.113.5".parse().unwrap());
+      }
+      let key = hex::encode(state.key.verifying_key().to_bytes());
+      let result = agent_join(
+        State(state.clone()),
+        sealed.then_some(Extension(crate::cli_tunnel::Sealed)),
+        ConnectInfo(peer.parse().unwrap()),
+        headers,
+        Json(JoinRequest {
+          join_token: token,
+          public_key: key,
+        }),
+      )
+      .await;
+      if allowed {
+        assert!(result.is_ok());
+      } else {
+        let Err(error) = result else {
+          panic!("明文加入被放行")
+        };
+        assert_eq!(error.0.code, ErrorCode::Unauthorized);
+      }
+      let consumed = state.db.call(|c| c.query_row("SELECT join_token_hash IS NULL FROM agents WHERE server = 's1'",
+        [], |r| r.get::<_, bool>(0)).map_err(sql_err)).await.unwrap();
+      assert_eq!(consumed, allowed);
+    }
+  }
 }

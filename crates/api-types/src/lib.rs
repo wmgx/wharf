@@ -20,6 +20,7 @@ pub mod resources;
 pub mod seal;
 pub mod service_checks;
 pub mod spec;
+pub mod symlink;
 pub mod token;
 pub mod trusted_proxies;
 pub mod tunnel;

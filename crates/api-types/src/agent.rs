@@ -134,6 +134,8 @@ pub enum AgentMsg {
     container_probe: bool,
     #[serde(default)]
     ssh_logins: bool,
+    #[serde(default)]
+    core_probe: bool,
   },
   Report(Box<AgentReport>),
   Progress {
@@ -403,6 +405,7 @@ pub enum AgentOp {
     service: String,
   },
   Restic(ResticJob),
+  ProbeCoreHost(CoreHostProbe),
   /// 取代码、`docker build`，结果是 [BuildResult]。镜像已存在且不是 `force` 时跳过。
   Build(Box<BuildJob>),
   /// 取代码，在 node 容器里执行 wrangler 发布 Worker / Pages，结果是 [EdgeBuildResult]。

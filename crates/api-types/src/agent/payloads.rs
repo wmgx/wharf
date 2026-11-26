@@ -780,3 +780,16 @@ pub struct HttpFetchResult {
   pub body: String,
   pub error: Option<String>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoreHostProbe {
+  pub challenge_id: String,
+  pub data_dir: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub container_id: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct CoreHostProbeResult {
+  pub token: String,
+}

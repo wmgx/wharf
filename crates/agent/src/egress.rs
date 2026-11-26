@@ -17,8 +17,10 @@ use std::{
 
 use base64::Engine;
 use tokio::{
-  io::{AsyncReadExt, AsyncWriteExt},
+  io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
   net::{TcpListener, TcpStream},
+  sync::Semaphore,
+  time::Instant,
 };
 use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
@@ -26,6 +28,9 @@ use wharf_api_types::{
   agent::{EgressConfig, EgressRoute},
   egress::{LOCAL_PORT, SERVE_PORT, via_exit},
 };
+
+mod target;
+use target::Target;
 
 pub fn local_url() -> String {
   format!("http://127.0.0.1:{LOCAL_PORT}")
@@ -37,13 +42,22 @@ const HEAD_TIMEOUT: Duration = Duration::from_secs(10);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// 连出口的超时：超过就当出口不通，改用直连。
 const EXIT_TIMEOUT: Duration = Duration::from_secs(3);
+const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+const MAX_CONNS: usize = 128;
+
+#[derive(Clone, Copy)]
+enum Policy {
+  PublicOnly,
+  #[cfg(test)]
+  AllowLoopbackForTest,
+}
 
 /// 正在运行的配置和停止它用的 token。
 static RUNNING: Mutex<Option<(EgressConfig, CancellationToken)>> =
   Mutex::new(None);
 
 /// agent 启动时按上次保存的配置恢复。
-pub fn restore(data_dir: &Path) {
+pub fn restore(data_dir: &Path, core_url: &str) {
   let Ok(text) = std::fs::read_to_string(data_dir.join(FILE)) else {
     return;
   };
@@ -55,13 +69,14 @@ pub fn restore(data_dir: &Path) {
     }
   };
   // 开机时组网可能还没起来，内网地址绑不上：每 10 秒重试，最多 10 分钟。
+  let core = Arc::new(Target::core(core_url));
   tokio::spawn(async move {
     for attempt in 1..=60 {
       // 控制面已经下发过新配置，不用再恢复旧的。
       if RUNNING.lock().map(|r| r.is_some()).unwrap_or(true) {
         return;
       }
-      match start(cfg.clone()) {
+      match start(cfg.clone(), core.clone()) {
         Ok(()) => return,
         Err(e) if attempt == 1 || attempt == 60 => {
           tracing::warn!(
@@ -79,6 +94,7 @@ pub fn restore(data_dir: &Path) {
 /// 设置出口。配置没变时什么都不做。
 pub async fn apply(
   data_dir: PathBuf,
+  core_url: &str,
   cfg: EgressConfig,
 ) -> Result<(), ApiError> {
   let same = RUNNING
@@ -94,7 +110,7 @@ pub async fn apply(
     let _ = std::fs::remove_file(&path);
     return Ok(());
   }
-  start(cfg.clone())?;
+  start(cfg.clone(), Arc::new(Target::core(core_url)))?;
   write_private(
     &path,
     &serde_json::to_string(&cfg).unwrap_or_default(),
@@ -153,7 +169,10 @@ fn listen(addr: (&str, u16)) -> Result<TcpListener, ApiError> {
     .map_err(|e| ApiError::internal(e.to_string()))
 }
 
-fn start(cfg: EgressConfig) -> Result<(), ApiError> {
+fn start(
+  cfg: EgressConfig,
+  core: Arc<Option<Target>>,
+) -> Result<(), ApiError> {
   // 先把要监听的都绑上，有一个失败就都不起。
   let mut listeners = Vec::new();
   if let Some(s) = &cfg.serve {
@@ -175,6 +194,8 @@ fn start(cfg: EgressConfig) -> Result<(), ApiError> {
   let cancel = CancellationToken::new();
   for (listener, mode) in listeners {
     let stop = cancel.clone();
+    let core = core.clone();
+    let permits = Arc::new(Semaphore::new(MAX_CONNS));
     tokio::spawn(async move {
       loop {
         let accepted = tokio::select! {
@@ -185,11 +206,16 @@ fn start(cfg: EgressConfig) -> Result<(), ApiError> {
         if matches!(mode, Mode::Route(_)) && !local_peer(peer) {
           continue;
         }
+        let Ok(permit) = permits.clone().try_acquire_owned() else {
+          continue;
+        };
         let mode = mode.clone();
         let stop = stop.clone();
+        let core = core.clone();
         tokio::spawn(async move {
+          let _permit = permit;
           tokio::select! {
-            r = handle(conn, &mode) => {
+            r = handle(conn, &mode, core.as_ref().as_ref(), Policy::PublicOnly) => {
               if let Err(e) = r {
                 tracing::debug!("出口连接结束：{e}");
               }
@@ -225,6 +251,8 @@ fn local_peer(peer: SocketAddr) -> bool {
 async fn handle(
   mut client: TcpStream,
   mode: &Mode,
+  core: Option<&Target>,
+  policy: Policy,
 ) -> std::io::Result<()> {
   let head =
     tokio::time::timeout(HEAD_TIMEOUT, read_head(&mut client))
@@ -233,21 +261,21 @@ async fn handle(
   let Some(req) = parse(&head.text) else {
     return reply(&mut client, "400 Bad Request").await;
   };
+  if let Mode::Serve { expected } = mode
+    && !same(req.auth.unwrap_or_default(), expected)
+  {
+    return client.write_all(
+      b"HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"wharf\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+    ).await;
+  }
+  if req.target.blocked(core, policy) {
+    return reply(&mut client, "403 Forbidden").await;
+  }
   let tunneled = match mode {
-    Mode::Serve { expected } => {
-      if !same(req.auth.unwrap_or_default(), expected) {
-        return client
-          .write_all(
-            b"HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"wharf\"\r\nContent-Length: 0\r\n\r\n",
-          )
-          .await;
-      }
-      None
-    }
     Mode::Route(r)
-      if via_exit(host_of(&req.target), r.all, &r.domains) =>
+      if via_exit(&req.target.host, r.all, &r.domains) =>
     {
-      match through_exit(r, &req.target).await {
+      match through_exit(r, &req.target.authority()).await {
         Ok(Ok(t)) => Some(t),
         // 出口连上了但它连不上目标：照实告诉客户端。
         Ok(Err(status)) => return reply(&mut client, &status).await,
@@ -255,48 +283,114 @@ async fn handle(
           tracing::debug!(
             "出口 {} 连不上（{e}），{} 改用直连",
             r.exit,
-            req.target
+            req.target.authority()
           );
           None
         }
       }
     }
-    Mode::Route(_) => None,
+    Mode::Route(_) | Mode::Serve { .. } => None,
   };
   let (mut upstream, early) = match tunneled {
     Some(t) => t,
-    None => match tokio::time::timeout(
-      CONNECT_TIMEOUT,
-      TcpStream::connect(&req.target),
-    )
-    .await
-    {
-      Ok(Ok(s)) => (s, Vec::new()),
-      _ => return reply(&mut client, "502 Bad Gateway").await,
-    },
-  };
-  match req.forward {
     None => {
-      client
-        .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-        .await?;
-      client.write_all(&early).await?;
-      upstream.write_all(&head.rest).await?;
+      let addrs = match req.target.resolve(core, policy).await {
+        Ok(addrs) => addrs,
+        Err(status) => return reply(&mut client, status).await,
+      };
+      match tokio::time::timeout(
+        CONNECT_TIMEOUT,
+        TcpStream::connect(addrs.as_slice()),
+      )
+      .await
+      {
+        Ok(Ok(s)) => (s, Vec::new()),
+        _ => return reply(&mut client, "502 Bad Gateway").await,
+      }
+    }
+  };
+  let (to_upstream, to_client) = match req.forward {
+    None => {
+      let mut response =
+        b"HTTP/1.1 200 Connection Established\r\n\r\n".to_vec();
+      response.extend_from_slice(&early);
+      (head.rest, response)
     }
     Some(first) => {
-      upstream.write_all(first.as_bytes()).await?;
-      upstream.write_all(&head.rest).await?;
+      let mut request = first.into_bytes();
+      request.extend_from_slice(&head.rest);
+      (request, early)
     }
-  }
-  tokio::io::copy_bidirectional(&mut client, &mut upstream).await?;
-  Ok(())
+  };
+  forward(
+    &mut client,
+    &mut upstream,
+    &to_upstream,
+    &to_client,
+    IDLE_TIMEOUT,
+  )
+  .await
 }
 
-/// `host:port` 或 `[v6]:port` 里的主机部分。
-fn host_of(target: &str) -> &str {
-  match target.rsplit_once(':') {
-    Some((h, _)) => h.trim_matches(['[', ']']),
-    None => target,
+async fn forward(
+  client: impl AsyncRead + AsyncWrite + Unpin,
+  upstream: impl AsyncRead + AsyncWrite + Unpin,
+  to_upstream: &[u8],
+  to_client: &[u8],
+  idle_timeout: Duration,
+) -> std::io::Result<()> {
+  let (client_read, client_write) = tokio::io::split(client);
+  let (upstream_read, upstream_write) = tokio::io::split(upstream);
+  let activity = Mutex::new(Instant::now());
+  let transfer = async {
+    tokio::try_join!(
+      copy(to_upstream.chain(client_read), upstream_write, &activity),
+      copy(to_client.chain(upstream_read), client_write, &activity),
+    )?;
+    Ok(())
+  };
+  let idle = async {
+    loop {
+      let deadline =
+        *activity.lock().unwrap_or_else(|p| p.into_inner())
+          + idle_timeout;
+      tokio::time::sleep_until(deadline).await;
+      if activity.lock().unwrap_or_else(|p| p.into_inner()).elapsed()
+        >= idle_timeout
+      {
+        return Ok(());
+      }
+    }
+  };
+  tokio::select! {
+    result = transfer => result,
+    result = idle => result,
+  }
+}
+
+async fn copy(
+  mut read: impl AsyncRead + Unpin,
+  mut write: impl AsyncWrite + Unpin,
+  activity: &Mutex<Instant>,
+) -> std::io::Result<()> {
+  let mut buf = [0; 8192];
+  loop {
+    let n = read.read(&mut buf).await?;
+    if n == 0 {
+      return write.shutdown().await;
+    }
+    *activity.lock().unwrap_or_else(|p| p.into_inner()) =
+      Instant::now();
+    let mut remaining = &buf[..n];
+    while !remaining.is_empty() {
+      let n = write.write(remaining).await?;
+      if n == 0 {
+        return Err(std::io::ErrorKind::WriteZero.into());
+      }
+      remaining = &remaining[n..];
+      *activity.lock().unwrap_or_else(|p| p.into_inner()) =
+        Instant::now();
+    }
   }
 }
 
@@ -327,6 +421,7 @@ async fn through_exit(
   let code = status.split(' ').nth(1).unwrap_or("");
   Ok(match code {
     "200" => Ok((exit, head.rest)),
+    "403" => Err("403 Forbidden".into()),
     "" => Err("502 Bad Gateway".into()),
     _ => Err(
       status
@@ -364,6 +459,9 @@ async fn read_head(c: &mut TcpStream) -> std::io::Result<Head> {
     }
     buf.extend_from_slice(&chunk[..n]);
     if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+      if i + 4 > HEAD_LIMIT {
+        return Err(std::io::Error::other("请求头太长"));
+      }
       let rest = buf.split_off(i + 4);
       return Ok(Head {
         text: String::from_utf8_lossy(&buf).into_owned(),
@@ -378,8 +476,7 @@ async fn read_head(c: &mut TcpStream) -> std::io::Result<Head> {
 
 #[derive(Debug, PartialEq)]
 struct Request<'a> {
-  /// `host:port`
-  target: String,
+  target: Target,
   auth: Option<&'a str>,
   /// 普通 HTTP：改写成相对路径后发给上游的请求头。CONNECT 时为 `None`。
   forward: Option<String>,
@@ -391,51 +488,68 @@ fn parse(head: &str) -> Option<Request<'_>> {
   let mut parts = first.split(' ');
   let (method, uri, version) =
     (parts.next()?, parts.next()?, parts.next()?);
-  let headers: Vec<(&str, &str)> = lines
-    .filter(|l| !l.is_empty())
-    .filter_map(|l| {
-      l.split_once(':').map(|(k, v)| (k.trim(), v.trim()))
+  if parts.next().is_some()
+    || !matches!(version, "HTTP/1.0" | "HTTP/1.1")
+    || !method.bytes().all(|b| b.is_ascii_alphabetic())
+    || method.is_empty()
+    || uri.bytes().any(|b| {
+      b.is_ascii_control() || b.is_ascii_whitespace() || b == b'#'
     })
-    .collect();
+  {
+    return None;
+  }
+  let mut headers = Vec::new();
+  for line in lines.take_while(|l| !l.is_empty()) {
+    let (key, value) = line.split_once(':')?;
+    if key.is_empty()
+      || !key.bytes().all(|b| {
+        b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)
+      })
+      || value.bytes().any(|b| b.is_ascii_control() && b != b'\t')
+    {
+      return None;
+    }
+    headers.push((key, value.trim()));
+  }
   let auth = headers
     .iter()
     .find(|(k, _)| k.eq_ignore_ascii_case("proxy-authorization"))
     .map(|(_, v)| *v);
   if method.eq_ignore_ascii_case("CONNECT") {
-    if !uri.contains(':') {
-      return None;
-    }
     return Some(Request {
-      target: uri.to_string(),
+      target: Target::parse(uri, None)?,
       auth,
       forward: None,
     });
   }
   let rest = uri.strip_prefix("http://")?;
-  let (host, path) = match rest.find('/') {
-    Some(i) => (&rest[..i], &rest[i..]),
-    None => (rest, "/"),
-  };
-  if host.is_empty() {
-    return None;
-  }
-  let target = if host.contains(':') {
-    host.to_string()
+  let end = rest.find(['/', '?']).unwrap_or(rest.len());
+  let (authority, suffix) = rest.split_at(end);
+  let target = Target::parse(authority, Some(80))?;
+  let path = if suffix.starts_with('/') {
+    suffix.to_owned()
   } else {
-    format!("{host}:80")
+    format!("/{suffix}")
   };
   // 每个连接只转发一次，强制 `Connection: close`，不支持复用到别的主机。
   let mut out = format!("{method} {path} {version}\r\n");
   for (k, v) in &headers {
-    let skip =
-      ["proxy-authorization", "proxy-connection", "connection"]
-        .iter()
-        .any(|s| k.eq_ignore_ascii_case(s));
+    let skip = [
+      "host",
+      "proxy-authorization",
+      "proxy-connection",
+      "connection",
+    ]
+    .iter()
+    .any(|s| k.eq_ignore_ascii_case(s));
     if !skip {
       out.push_str(&format!("{k}: {v}\r\n"));
     }
   }
-  out.push_str("Connection: close\r\n\r\n");
+  out.push_str(&format!(
+    "Host: {}\r\nConnection: close\r\n\r\n",
+    target.http_host()
+  ));
   Some(Request {
     target,
     auth,
@@ -460,16 +574,243 @@ mod tests {
   #[test]
   fn parses_connect_and_http() {
     let c = parse("CONNECT api.example.com:443 HTTP/1.1\r\nHost: api.example.com:443\r\nProxy-Authorization: Basic abc\r\n\r\n").unwrap();
-    assert_eq!(c.target, "api.example.com:443");
+    assert_eq!(c.target.authority(), "api.example.com:443");
     assert_eq!(c.auth, Some("Basic abc"));
     assert!(c.forward.is_none());
     let h = parse("GET http://deb.example.org/dists/x HTTP/1.1\r\nHost: deb.example.org\r\nProxy-Authorization: Basic abc\r\nProxy-Connection: keep-alive\r\n\r\n").unwrap();
-    assert_eq!(h.target, "deb.example.org:80");
+    assert_eq!(h.target.authority(), "deb.example.org:80");
     let f = h.forward.unwrap();
     assert!(f.starts_with("GET /dists/x HTTP/1.1\r\n"));
     assert!(!f.contains("Proxy-"));
     assert!(f.ends_with("Connection: close\r\n\r\n"));
     assert!(parse("GET /local HTTP/1.1\r\n\r\n").is_none());
+  }
+
+  #[tokio::test]
+  async fn route_rejects_legacy_numeric_hosts_before_exit() {
+    let proxy = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let exit = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mode = Mode::Route(Arc::new(EgressRoute {
+      exit: exit.local_addr().unwrap().to_string(),
+      token: String::new(),
+      all: true,
+      domains: vec![],
+    }));
+    for host in ["0177.0.0.1", "2130706433", "0x7f000001", "127.1"] {
+      let mut client =
+        TcpStream::connect(proxy.local_addr().unwrap())
+          .await
+          .unwrap();
+      let (incoming, _) = proxy.accept().await.unwrap();
+      client
+        .write_all(
+          format!("CONNECT {host}:80 HTTP/1.1\r\n\r\n").as_bytes(),
+        )
+        .await
+        .unwrap();
+      tokio::select! {
+        result = handle(incoming, &mode, None, Policy::PublicOnly) => result.unwrap(),
+        _ = exit.accept() => panic!("非法地址被转发到出口"),
+        _ = tokio::time::sleep(Duration::from_secs(2)) => panic!("代理未结束"),
+      }
+      assert!(
+        read_head(&mut client)
+          .await
+          .unwrap()
+          .text
+          .starts_with("HTTP/1.1 403 ")
+      );
+    }
+  }
+
+  #[test]
+  fn http_host_omits_default_port() {
+    for (authority, expected) in [
+      ("example.test", "example.test"),
+      ("example.test:80", "example.test"),
+      ("example.test:8080", "example.test:8080"),
+      ("[2001:db9::1]:80", "[2001:db9::1]"),
+    ] {
+      let request = format!(
+        "GET http://{authority}/ HTTP/1.1\r\nHost: other.test\r\n\r\n"
+      );
+      let forwarded = parse(&request).unwrap().forward.unwrap();
+      assert!(
+        forwarded.contains(&format!("\r\nHost: {expected}\r\n"))
+      );
+    }
+  }
+
+  #[tokio::test]
+  async fn forward_drains_both_directions_under_backpressure() {
+    let (a, client) = tokio::io::duplex(8);
+    let (upstream, b) = tokio::io::duplex(8);
+    let (mut ar, mut aw) = tokio::io::split(a);
+    let (mut br, mut bw) = tokio::io::split(b);
+    let first = [b'a'; 32];
+    let second = [b'b'; 32];
+    let transfer = async {
+      let ((), (), (), (), ()) = tokio::try_join!(
+        forward(
+          client,
+          upstream,
+          &first,
+          &second,
+          Duration::from_secs(2)
+        ),
+        async {
+          aw.write_all(b"left").await?;
+          aw.shutdown().await
+        },
+        async {
+          bw.write_all(b"right").await?;
+          bw.shutdown().await
+        },
+        async {
+          let mut got = Vec::new();
+          ar.read_to_end(&mut got).await?;
+          assert_eq!(got, [&second[..], b"right"].concat());
+          std::io::Result::Ok(())
+        },
+        async {
+          let mut got = Vec::new();
+          br.read_to_end(&mut got).await?;
+          assert_eq!(got, [&first[..], b"left"].concat());
+          std::io::Result::Ok(())
+        },
+      )?;
+      std::io::Result::Ok(())
+    };
+    tokio::time::timeout(Duration::from_secs(3), transfer)
+      .await
+      .unwrap()
+      .unwrap();
+  }
+
+  #[tokio::test]
+  async fn egress_blocks_loopback_metadata_private_mesh_and_core_url()
+  {
+    let core = Target::core("https://core.example.test").unwrap();
+    for host in [
+      "127.0.0.1:7700",
+      "[::1]:7700",
+      "[::ffff:127.0.0.1]:7700",
+      "0.0.0.0:7700",
+      "169.254.169.254:80",
+      "100.100.100.200:80",
+      "[fd00:ec2::254]:80",
+      "10.0.0.1:80",
+      "172.17.0.1:7700",
+      "100.64.0.2:7700",
+      "core.example.test:443",
+      "localhost:7700",
+    ] {
+      let request = format!("CONNECT {host} HTTP/1.1\r\n\r\n");
+      assert!(
+        parse(&request)
+          .unwrap()
+          .target
+          .blocked(Some(&core), Policy::PublicOnly)
+      );
+    }
+    let private = std::net::Ipv4Addr::new(192, 168, 1, 2);
+    assert!(
+      Target::parse(&format!("{private}:7700"), None)
+        .unwrap()
+        .blocked(Some(&core), Policy::PublicOnly)
+    );
+    let req =
+      parse("GET http://[2001:db9::1]/ HTTP/1.1\r\n\r\n").unwrap();
+    assert_eq!(req.target.authority(), "[2001:db9::1]:80");
+    assert!(!req.target.blocked(Some(&core), Policy::PublicOnly));
+    assert!(
+      parse("GET http://user@host.test/ HTTP/1.1\r\n\r\n").is_none()
+    );
+    assert!(
+      parse("CONNECT host.test\n:80 HTTP/1.1\r\n\r\n").is_none()
+    );
+    let proxy = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target = upstream.local_addr().unwrap();
+    let mut fixture = [0; 16];
+    getrandom::fill(&mut fixture).unwrap();
+    let fixture = hex::encode(fixture);
+    let auth = basic(&fixture);
+    let request = format!(
+      "CONNECT {target} HTTP/1.1\r\nProxy-Authorization: {auth}\r\n\r\n"
+    );
+    let route = EgressRoute {
+      exit: target.to_string(),
+      token: fixture.clone(),
+      all: true,
+      domains: Vec::new(),
+    };
+    for mode in
+      [Mode::Serve { expected: auth }, Mode::Route(Arc::new(route))]
+    {
+      let mut client =
+        TcpStream::connect(proxy.local_addr().unwrap())
+          .await
+          .unwrap();
+      client.write_all(request.as_bytes()).await.unwrap();
+      let (conn, _) = proxy.accept().await.unwrap();
+      tokio::time::timeout(
+        Duration::from_secs(2),
+        handle(conn, &mode, Some(&core), Policy::PublicOnly),
+      )
+      .await
+      .unwrap()
+      .unwrap();
+      assert!(
+        read_head(&mut client)
+          .await
+          .unwrap()
+          .text
+          .starts_with("HTTP/1.1 403 ")
+      );
+    }
+    let exit_addr = upstream.local_addr().unwrap();
+    let exit = async {
+      let (mut conn, _) = upstream.accept().await.unwrap();
+      assert!(
+        read_head(&mut conn)
+          .await
+          .unwrap()
+          .text
+          .starts_with("CONNECT a.example.test:443 ")
+      );
+      reply(&mut conn, "403 Forbidden").await.unwrap();
+    };
+    let client = async {
+      let mut client =
+        TcpStream::connect(proxy.local_addr().unwrap())
+          .await
+          .unwrap();
+      client
+        .write_all(b"CONNECT a.example.test:443 HTTP/1.1\r\n\r\n")
+        .await
+        .unwrap();
+      read_head(&mut client).await.unwrap()
+    };
+    let route = Mode::Route(Arc::new(EgressRoute {
+      exit: exit_addr.to_string(),
+      token: fixture,
+      all: true,
+      domains: vec![],
+    }));
+    let server = async {
+      let (conn, _) = proxy.accept().await.unwrap();
+      handle(conn, &route, Some(&core), Policy::PublicOnly)
+        .await
+        .unwrap();
+    };
+    let (head, (), ()) =
+      tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::join!(client, exit, server)
+      })
+      .await
+      .unwrap();
+    assert!(head.text.starts_with("HTTP/1.1 403 "));
   }
 
   #[tokio::test]
@@ -489,7 +830,9 @@ mod tests {
     tokio::spawn(async move {
       while let Ok((c, _)) = proxy.accept().await {
         let m = mode.clone();
-        tokio::spawn(async move { handle(c, &m).await });
+        tokio::spawn(async move {
+          handle(c, &m, None, Policy::AllowLoopbackForTest).await
+        });
       }
     });
     let ask = |auth: &'static str| async move {
@@ -531,7 +874,9 @@ mod tests {
     tokio::spawn(async move {
       while let Ok((c, _)) = exit.accept().await {
         let m = mode.clone();
-        tokio::spawn(async move { handle(c, &m).await });
+        tokio::spawn(async move {
+          handle(c, &m, None, Policy::AllowLoopbackForTest).await
+        });
       }
     });
     let route = |token: &str, exit: &str| EgressRoute {
@@ -558,8 +903,11 @@ mod tests {
         .await
         .is_err()
     );
-    assert_eq!(host_of("[::1]:443"), "::1");
-    assert_eq!(host_of("github.com:443"), "github.com");
+    assert_eq!(Target::parse("[::1]:443", None).unwrap().host, "::1");
+    assert_eq!(
+      Target::parse("github.com:443", None).unwrap().host,
+      "github.com"
+    );
     assert!(local_peer("172.17.0.2:1".parse().unwrap()));
     assert!(!local_peer("100.64.0.2:1".parse().unwrap()));
   }

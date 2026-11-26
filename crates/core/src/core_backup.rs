@@ -368,66 +368,55 @@ pub async fn backup(
     .ok_or_else(|| {
       ApiError::invalid(format!("备份服务器 {to} 没有内网地址"))
     })?;
+  let core =
+    crate::core_node::require_verified(state, cancel).await?;
+  if core.server == to {
+    return Err(ApiError::invalid(format!(
+      "控制面所在机器 {to} 不能同时作为控制面备份目标"
+    )));
+  }
   let creds = backup::credentials(state).await?;
-  let mut w = Where {
-    server: String::new(),
-    target: to.clone(),
+  let w = Where {
+    server: core.server.clone(),
+    target: to,
     target_ip,
   };
   backup::ensure_server(state, &snap, &w, &creds, &progress, cancel)
     .await?;
   let marker = stage(state).await?;
   progress("已生成数据库快照".into());
-
-  // 不知道控制面在哪台机器上：问每台在线的 agent，目录里的标记对得上的就是。
-  let mut result: Result<BackupSummary, ApiError> = Err(
-    ApiError::new(
-      ErrorCode::NotFound,
-      format!(
-        "找不到控制面所在的机器（控制面不能和备份服务器 {to} 是同一台）"
-      ),
-    ),
+  let job = core_job(
+    &snap,
+    &w.server,
+    &w,
+    &creds,
+    &marker,
+    ResticAction::Backup {
+      host: w.server.clone(),
+    },
   );
-  for server in snap.world.servers.keys() {
-    if *server == to || !state.hub.is_online(server) {
-      continue;
-    }
-    let job = core_job(
-      &snap,
-      server,
-      &w,
-      &creds,
-      &marker,
-      ResticAction::Backup {
-        host: server.clone(),
-      },
-    );
-    match state
-      .hub
-      .call(
-        server,
-        job,
-        backup::RESTIC_TIMEOUT,
-        Some(progress.clone()),
-        cancel,
-      )
-      .await
-    {
-      Err(e) if e.code == ErrorCode::NotFound => continue,
-      r => {
-        w.server = server.clone();
-        result = r;
-        break;
-      }
-    }
-  }
+  let result: Result<BackupSummary, ApiError> = core
+    .call(
+      state,
+      job,
+      backup::RESTIC_TIMEOUT,
+      Some(progress.clone()),
+      cancel,
+    )
+    .await;
   let _ = std::fs::remove_dir_all(CORE_BACKUP_DIR);
   backup::record(state, run_id, REPO, &w, &result).await?;
   result?;
 
   if let Some(password) = user_key {
     add_user_key(
-      state, &snap, &w, &creds, password, &progress, cancel,
+      state,
+      &snap,
+      &w,
+      &creds,
+      password,
+      (&core, &progress),
+      cancel,
     )
     .await?;
   }
@@ -455,7 +444,7 @@ async fn add_user_key(
   w: &Where,
   creds: &backup::Creds,
   password: &OneTimeSecret,
-  progress: &ProgressFn,
+  (core, progress): (&crate::core_node::VerifiedCore, &ProgressFn),
   cancel: &CancellationToken,
 ) -> Result<(), ApiError> {
   let job = backup::job(
@@ -468,10 +457,9 @@ async fn add_user_key(
       new_password: password.clone(),
     },
   );
-  let id: String = state
-    .hub
+  let id: String = core
     .call(
-      &w.server,
+      state,
       job,
       backup::RESTIC_TIMEOUT,
       Some(progress.clone()),

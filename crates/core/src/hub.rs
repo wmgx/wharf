@@ -57,6 +57,8 @@ struct Pending {
 #[derive(Clone)]
 struct Conn {
   conn_id: u64,
+  public_key: String,
+  core_probe: bool,
   tx: mpsc::Sender<CoreMsg>,
   pending: Arc<Mutex<HashMap<u64, Pending>>>,
   closed: CancellationToken,
@@ -111,6 +113,7 @@ impl Drop for InFlight<'_> {
 
 #[derive(Default)]
 pub struct Hub {
+  report_rate: crate::report_guard::RateGate,
   conns: Mutex<HashMap<String, Conn>>,
   next_id: AtomicU64,
   next_conn: AtomicU64,
@@ -130,6 +133,45 @@ pub fn offline(server: &str) -> ApiError {
 }
 
 impl Hub {
+  pub fn core_probe_servers(&self) -> (Vec<String>, bool) {
+    let conns = lock(&self.conns);
+    let capable = conns
+      .iter()
+      .filter(|(_, c)| c.core_probe && !c.closed.is_cancelled())
+      .map(|(name, _)| name.clone())
+      .collect();
+    let legacy = conns
+      .values()
+      .any(|c| !c.core_probe && !c.closed.is_cancelled());
+    (capable, legacy)
+  }
+
+  pub fn connected_identity(
+    &self,
+    server: &str,
+  ) -> Option<(u64, String)> {
+    lock(&self.conns)
+      .get(server)
+      .filter(|c| !c.closed.is_cancelled())
+      .map(|c| (c.conn_id, c.public_key.clone()))
+  }
+
+  pub fn core_probe_identity(
+    &self,
+    server: &str,
+  ) -> Option<(u64, String)> {
+    lock(&self.conns)
+      .get(server)
+      .filter(|c| c.core_probe && !c.closed.is_cancelled())
+      .map(|c| (c.conn_id, c.public_key.clone()))
+  }
+
+  pub fn disconnect(&self, server: &str) {
+    if let Some(conn) = lock(&self.conns).remove(server) {
+      conn.closed.cancel();
+    }
+  }
+
   pub fn is_online(&self, server: &str) -> bool {
     lock(&self.conns).contains_key(server)
   }
@@ -246,6 +288,50 @@ impl Hub {
       .get(server)
       .cloned()
       .ok_or_else(|| offline(server))?;
+    Self::call_conn(id, server, conn, op, timeout, progress, cancel)
+      .await
+  }
+
+  pub async fn call_bound<T: DeserializeOwned>(
+    &self,
+    (server, conn_id): (&str, u64),
+    op: AgentOp,
+    timeout: Duration,
+    progress: Option<ProgressFn>,
+    cancel: &CancellationToken,
+  ) -> Result<T, ApiError> {
+    let conn = lock(&self.conns)
+      .get(server)
+      .filter(|c| c.conn_id == conn_id && !c.closed.is_cancelled())
+      .cloned()
+      .ok_or_else(|| offline(server))?;
+    Self::call_conn(
+      self.new_id(),
+      server,
+      conn,
+      op,
+      timeout,
+      progress,
+      cancel,
+    )
+    .await
+  }
+
+  async fn call_conn<T: DeserializeOwned>(
+    id: u64,
+    server: &str,
+    conn: Conn,
+    op: AgentOp,
+    timeout: Duration,
+    progress: Option<ProgressFn>,
+    cancel: &CancellationToken,
+  ) -> Result<T, ApiError> {
+    if matches!(&op, AgentOp::ProbeCoreHost(_)) && !conn.core_probe {
+      return Err(ApiError::new(
+        ErrorCode::Conflict,
+        "agent 不支持控制面同机校验",
+      ));
+    }
     if matches!(&op, AgentOp::SshLogins) && !conn.ssh_logins {
       return Err(ApiError::new(
         ErrorCode::Conflict,
@@ -332,6 +418,7 @@ impl Hub {
     };
     let result = tokio::select! {
       result = rx => result.unwrap_or_else(|_| Err(offline(server))),
+      _ = conn.closed.cancelled() => Err(offline(server)),
       _ = tokio::time::sleep(timeout + GRACE) => Err(abort(
         ErrorCode::Timeout,
         format!("服务器 {server} 超过 {} 秒没有响应", timeout.as_secs()),
@@ -374,11 +461,12 @@ pub async fn agent_ws(
   State(state): State<Arc<AppState>>,
   ws: WebSocketUpgrade,
 ) -> Response {
-  ws.on_upgrade(move |socket| async move {
-    if let Err(e) = handle_socket(state, socket).await {
-      tracing::warn!("agent 连接结束：{e}");
-    }
-  })
+  ws.max_message_size(crate::report_guard::MAX_WS_MESSAGE_BYTES)
+    .on_upgrade(move |socket| async move {
+      if let Err(e) = handle_socket(state, socket).await {
+        tracing::warn!("agent 连接结束：{e}");
+      }
+    })
 }
 
 fn random_nonce() -> String {
@@ -489,6 +577,7 @@ async fn handle_socket(
     net_probe,
     container_probe,
     ssh_logins,
+    core_probe,
   } = hello
   else {
     anyhow::bail!("agent 没有先发 hello");
@@ -578,6 +667,8 @@ async fn handle_socket(
   let (tx, mut rx) = mpsc::channel(4096);
   let conn = Conn {
     conn_id: state.hub.next_conn.fetch_add(1, Ordering::Relaxed),
+    public_key,
+    core_probe: core_probe && !upgrade_only,
     tx,
     pending: Default::default(),
     closed: CancellationToken::new(),
@@ -592,9 +683,45 @@ async fn handle_socket(
     ssh_logins,
     upgrade_only,
   };
-  state.hub.register(&server, conn.clone());
+  let state_on_db = state.clone();
+  let socket_server = server.clone();
+  let socket_conn = conn.clone();
+  state
+    .db
+    .call(move |c| {
+      if !crate::db::agent(c, &socket_server)?.is_some_and(|a| {
+        a.public_key.as_ref() == Some(&socket_conn.public_key)
+      }) {
+        return Err(ApiError::new(
+          ErrorCode::Unauthorized,
+          "agent 注册公钥已变更",
+        ));
+      }
+      state_on_db.hub.register(&socket_server, socket_conn);
+      Ok(())
+    })
+    .await?;
+  if conn.core_probe {
+    crate::core_node::spawn_probe_on_connect(
+      state.clone(),
+      server.clone(),
+      conn.conn_id,
+      conn.closed.clone(),
+    );
+  }
   tracing::info!("服务器 {server} 上线（agent {version}）");
-  touch(&state, &server, None).await;
+  let seen = server.clone();
+  state
+    .db
+    .call(move |c| {
+      c.execute(
+        "UPDATE agents SET last_seen = ?1 WHERE server = ?2",
+        params![now_ms(), seen],
+      )
+      .map_err(sql_err)?;
+      Ok(())
+    })
+    .await?;
   crate::service_monitor::sync_watches(&state, Some(&server)).await;
 
   let (mut sink, mut stream) = socket.split();
@@ -609,6 +736,7 @@ async fn handle_socket(
   );
   let result: anyhow::Result<()> = loop {
     tokio::select! {
+      biased;
       _ = conn.closed.cancelled() => break Ok(()),
       out = rx.recv() => {
         let Some(out) = out else { break Ok(()) };
@@ -653,6 +781,20 @@ async fn handle_socket(
         };
         match serde_json::from_slice::<AgentMsg>(&text) {
           Ok(AgentMsg::Report(mut report)) => {
+            use crate::report_guard::RateDecision::*;
+            match state.hub.report_rate.check(&server, conn.conn_id, report.metrics.is_some(), std::time::Instant::now()) {
+              DropAll => continue,
+              AcceptNoMetrics => report.metrics = None,
+              AcceptAll => {}
+            }
+            let mut report = match crate::report_guard::record_report(&state.db, &server, &conn.public_key, *report).await {
+              Ok(report) if !conn.closed.is_cancelled() => report,
+              Ok(_) => continue,
+              Err(e) => {
+                tracing::warn!("校验服务器 {server} 上报失败：{e}");
+                continue;
+              }
+            };
             crate::service_monitor::report(&server, std::mem::take(&mut report.log_hits));
             let received = now_ms();
             let agent_ms = report.time_ms;
@@ -668,7 +810,7 @@ async fn handle_socket(
               let oom = m.oom.take();
               let hosts = std::mem::take(&mut m.hosts);
               if !hosts.is_empty() {
-                tokio::spawn(crate::http_stats::record(state.clone(), hosts));
+                tokio::spawn(crate::http_stats::record(state.clone(), server.clone(), hosts));
               }
               crate::metrics::record_report(&state, &server, m).await;
               if let Some((wanted, limits)) = settings {
@@ -681,7 +823,6 @@ async fn handle_socket(
                 crate::oom::record(&state, &server, oom).await;
               });
             }
-            touch(&state, &server, Some(*report)).await
           }
           Ok(AgentMsg::Progress { id, line }) => {
             let progress = lock(&conn.pending).get(&id).and_then(|p| p.progress.clone());
@@ -695,7 +836,7 @@ async fn handle_socket(
             }
           }
           Ok(AgentMsg::Hello { .. }) => {}
-          Err(e) => tracing::warn!("无法解析 {server} 的消息：{e}"),
+          Err(e) => tracing::debug!("无法解析 {server} 的消息：{:?}", e.classify()),
         }
       }
     }
@@ -704,38 +845,6 @@ async fn handle_socket(
   state.hub.unregister(&server, &conn);
   tracing::info!("服务器 {server} 离线");
   result
-}
-
-/// 记录最后在线时间和上报内容。
-pub(crate) async fn touch(
-  state: &AppState,
-  server: &str,
-  report: Option<wharf_api_types::agent::AgentReport>,
-) {
-  let server = server.to_string();
-  let report = report.and_then(|r| serde_json::to_string(&r).ok());
-  let result = state
-    .db
-    .call(move |c| {
-      c.execute(
-        "UPDATE agents SET last_seen = ?1,
-           report = CASE WHEN ?2 IS NULL THEN report ELSE
-             json_patch(?2, json_object(
-               'metrics', COALESCE(json_extract(?2, '$.metrics'),
-                 CASE WHEN json_extract(?2, '$.build') IS json_extract(report, '$.build')
-                   THEN json_extract(report, '$.metrics') END),
-               'agent_memory', COALESCE(json_extract(?2, '$.agent_memory'),
-                 CASE WHEN json_extract(?2, '$.time_ms') IS NULL THEN json_extract(report, '$.agent_memory') END)
-             )) END
-         WHERE server = ?3",
-        params![now_ms(), report, server],
-      )
-      .map_err(sql_err)
-    })
-    .await;
-  if let Err(e) = result {
-    tracing::warn!("记录 agent 状态失败：{e}");
-  }
 }
 
 #[cfg(test)]
