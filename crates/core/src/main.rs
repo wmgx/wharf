@@ -91,6 +91,9 @@ mod report;
 mod resource_top;
 mod rollback;
 mod rules;
+mod secret_policy;
+#[cfg(test)]
+mod secret_policy_tests;
 mod service_monitor;
 mod sessions;
 mod share;

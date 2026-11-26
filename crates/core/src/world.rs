@@ -258,6 +258,10 @@ impl World {
           }
         }
         Change::UpdateServer { name, settings } => {
+          crate::link::validate_private_addr(
+            name,
+            settings.private_addr.as_ref(),
+          )?;
           crate::egress::validate(name, settings, &self.servers)?;
           let server = self
             .servers
@@ -922,6 +926,7 @@ impl World {
   /// 整体校验。`joined` 是已经完成 join 的服务器。
   pub fn validate(&self) -> Result<(), ApiError> {
     crate::oidc::validate_names(self)?;
+    crate::secret_policy::validate_world(self)?;
     for (name, service) in &self.services {
       validate_service(self, name, &service.spec)?;
     }

@@ -256,7 +256,7 @@ pub async fn deploy(
         .await?;
     let fetch = crate::build::code_fetch(
       state,
-      snap,
+      &crate::secret_policy::non_system_secrets(&snap.secrets),
       &format!("边缘应用 {name}"),
       src.upload.as_ref(),
       src.git.as_ref(),

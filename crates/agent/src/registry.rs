@@ -138,7 +138,7 @@ async fn resolve_one(
           .await;
         return Ok((digest, config, platforms));
       }
-      Err(e) => errors.push(format!("{host}：{e}")),
+      Err(e) => errors.push(policy.redact(&format!("{host}：{e}"))),
     }
   }
   Err(errors.join("；"))

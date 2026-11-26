@@ -309,34 +309,24 @@ fn substitute_values(
   Ok(out)
 }
 
-fn next_placeholder(text: &str) -> Option<(usize, &str)> {
+pub(crate) fn next_placeholder(text: &str) -> Option<(usize, &str)> {
   let start = text.find("[[")?;
   let rest = &text[start + 2..];
   Some((start, &rest[..rest.find("]]")?]))
 }
 
 pub fn service_account_refs(world: &World) -> BTreeSet<String> {
-  let mut refs = BTreeSet::new();
-  for row in world.services.values() {
-    let content = match &row.spec.source {
-      Source::Compose { content, .. } => content.as_deref(),
-      _ => None,
-    };
-    for mut text in
-      row.spec.env.values().map(String::as_str).chain(content)
-    {
-      while let Some((start, name)) = next_placeholder(text) {
-        if account_ref(name).is_some() {
-          refs.insert(name.to_string());
-        }
-        text = &text[start + name.len() + 4..];
-      }
-    }
-  }
-  refs
+  world
+    .services
+    .values()
+    .flat_map(|row| {
+      crate::secret_policy::service_account_refs(&row.spec)
+    })
+    .map(|(name, _)| name.to_string())
+    .collect()
 }
 
-fn account_ref(name: &str) -> Option<&str> {
+pub(crate) fn account_ref(name: &str) -> Option<&str> {
   let (account, field) =
     name.strip_prefix("account.")?.split_once('.')?;
   (matches!(field, "username" | "password")
@@ -868,7 +858,11 @@ pub fn gateway_image(spec: &GatewaySpec) -> String {
 }
 
 /// cloudflare_tunnel 网关的连接器：host 网络，上游用 127.0.0.1 和内网地址都能访问。
-pub fn tunnel_compose(name: &str, spec: &GatewaySpec) -> String {
+pub fn tunnel_compose(
+  name: &str,
+  spec: &GatewaySpec,
+  token: Option<&str>,
+) -> String {
   let project = gateway_project(name);
   let file = ComposeFile {
     name: project,
@@ -888,7 +882,10 @@ pub fn tunnel_compose(name: &str, spec: &GatewaySpec) -> String {
         ),
         environment: BTreeMap::from([(
           "TUNNEL_TOKEN".to_string(),
-          format!("[[{TUNNEL_TOKEN_SECRET}]]"),
+          token.map_or_else(
+            || format!("[[{TUNNEL_TOKEN_SECRET}]]"),
+            str::to_string,
+          ),
         )]),
         ports: vec![],
         volumes: vec![],
@@ -1166,9 +1163,24 @@ fn error_snippet(spec: &GatewaySpec) -> String {
   out
 }
 
-fn dns_tls(gateway: &str, subdomain: &str) -> String {
+#[derive(Clone, Copy)]
+pub struct AcmeDnsFill<'a> {
+  pub key: &'a str,
+  pub url: &'a str,
+}
+
+fn dns_tls(
+  gateway: &str,
+  subdomain: &str,
+  fill: Option<AcmeDnsFill<'_>>,
+) -> String {
+  let url = fill.map(|f| {
+    format!("{}/agent/acme-dns", f.url.trim_end_matches('/'))
+  });
+  let url = url.as_deref().unwrap_or(ACME_DNS_URL);
+  let key = fill.map_or(ACME_DNS_KEY, |f| f.key);
   format!(
-    "\ttls {{\n\t\tdns acmedns {{\n\t\t\tusername {gateway}\n\t\t\tpassword {ACME_DNS_KEY}\n\t\t\tsubdomain {subdomain}\n\t\t\tserver_url {ACME_DNS_URL}\n\t\t}}\n\t}}\n"
+    "\ttls {{\n\t\tdns acmedns {{\n\t\t\tusername {gateway}\n\t\t\tpassword {key}\n\t\t\tsubdomain {subdomain}\n\t\t\tserver_url {url}\n\t\t}}\n\t}}\n"
   )
 }
 
@@ -1213,13 +1225,34 @@ const ACCESS_LOG_SNIPPET: &str = r#"
 }
 "#;
 
-pub fn caddyfile(
+#[cfg(test)]
+fn caddyfile(
   name: &str,
   spec: &GatewaySpec,
   sites: &[Site],
   forwards: &[(bool, u16, String)],
   link: bool,
   gate_public: Option<&str>,
+) -> String {
+  caddyfile_with_acme(
+    name,
+    spec,
+    sites,
+    forwards,
+    link,
+    gate_public,
+    None,
+  )
+}
+
+pub fn caddyfile_with_acme(
+  name: &str,
+  spec: &GatewaySpec,
+  sites: &[Site],
+  forwards: &[(bool, u16, String)],
+  link: bool,
+  gate_public: Option<&str>,
+  fill: Option<AcmeDnsFill<'_>>,
 ) -> String {
   let mut out = format!(
     "# 由 Wharf 生成，不要手改。网关：{name}\n# 手写的站点放到 conf/extra.d/*.caddy\n{{\n\tadmin {CADDY_ADMIN}\n\tmetrics {{\n\t\tper_host\n\t}}\n"
@@ -1282,7 +1315,7 @@ pub fn caddyfile(
     out.push_str(&format!("\n{scheme}{} {{\n", site.hostname));
     if site.wildcard {
       if let Some(subdomain) = &site.dns {
-        out.push_str(&dns_tls(name, subdomain));
+        out.push_str(&dns_tls(name, subdomain, fill));
       }
       out.push_str("\tabort\n}\n");
       continue;
@@ -1304,7 +1337,7 @@ pub fn caddyfile(
       ));
     }
     if let Some(subdomain) = &site.dns {
-      out.push_str(&dns_tls(name, subdomain));
+      out.push_str(&dns_tls(name, subdomain, fill));
     }
     if site.internal {
       out.push_str("\t@wharf_outside not remote_ip private_ranges 100.64.0.0/10 fd7a:115c:a1e0::/48\n\tabort @wharf_outside\n");
@@ -2254,7 +2287,7 @@ mod tests {
       wildcard: vec![],
       layer4: vec![],
     };
-    let out = tunnel_compose("cf", &spec);
+    let out = tunnel_compose("cf", &spec, None);
     assert!(
       out.contains("TUNNEL_TOKEN: '[[WHARF_TUNNEL_TOKEN]]'"),
       "{out}"

@@ -29,6 +29,7 @@ pub struct Snapshot {
   pub app_account_defaults: BTreeMap<String, String>,
   pub owned: Vec<OwnedRecord>,
   pub secrets: BTreeMap<String, String>,
+  pub account_links: crate::app_accounts::AccountLinks,
   pub service_values: BTreeMap<String, String>,
   /// 每个服务最近一次成功部署在哪台服务器上。和配置里的服务器不同，说明迁移还没完成。
   pub deployed: BTreeMap<String, String>,
@@ -99,7 +100,7 @@ fn with_secrets(text: &str) -> String {
 pub async fn load(db: &Db) -> Result<Snapshot, ApiError> {
   let snap = load_inner(db).await?;
   *SECRETS.write().unwrap_or_else(|e| e.into_inner()) =
-    snap.secrets.clone();
+    crate::secret_policy::non_system_secrets(&snap.secrets);
   let api = db
     .call(|c| crate::db::setting(c, crate::egress::API_VIA))
     .await?;
@@ -128,6 +129,7 @@ async fn load_inner(db: &Db) -> Result<Snapshot, ApiError> {
         owned: db::owned_records(c)?,
         secrets,
         service_values,
+        account_links: crate::app_accounts::account_links(c)?,
         deployed: db::deployed_servers(c)?,
         applied: db::applied(c)?,
         ops: db::service_ops(c)?,
@@ -158,6 +160,38 @@ async fn load_inner(db: &Db) -> Result<Snapshot, ApiError> {
 }
 
 impl Snapshot {
+  pub fn render_values(
+    &self,
+    world: &World,
+    service: &str,
+  ) -> BTreeMap<String, String> {
+    let mut values = crate::secret_policy::service_secrets(
+      world,
+      service,
+      &crate::oidc::with_client_secrets(world, &self.secrets),
+    );
+    if let Some(row) = world.services.get(service) {
+      values.extend(
+        crate::secret_policy::service_account_refs(&row.spec)
+          .filter(|(_, account)| {
+            crate::app_accounts::linked_account(
+              world,
+              service,
+              account,
+              &self.account_links,
+            )
+          })
+          .filter_map(|(name, _)| {
+            Some((
+              name.to_string(),
+              self.service_values.get(name)?.clone(),
+            ))
+          }),
+      );
+    }
+    values
+  }
+
   pub fn agent(&self, server: &str) -> Option<&AgentRow> {
     self.agents.iter().find(|a| a.server == server)
   }
@@ -199,6 +233,21 @@ impl Snapshot {
   }
 }
 
+pub fn committed_pull_policy(
+  current: &World,
+  server: &str,
+) -> PullPolicy {
+  current.servers.get(server).map_or_else(
+    || {
+      pull_policy(&ServerRow {
+        settings: Default::default(),
+        version: 0,
+      })
+    },
+    pull_policy,
+  )
+}
+
 pub fn pull_policy(server: &ServerRow) -> PullPolicy {
   PullPolicy {
     mirrors: server
@@ -236,13 +285,12 @@ pub fn service_resolved(
   let row = world.services.get(name).ok_or_else(|| {
     ApiError::not_found(format!("服务 {name} 不存在"))
   })?;
-  let secrets = crate::oidc::with_client_secrets(world, secrets);
   let resolved = render::service_compose(
     name,
     &row.spec,
     &row.host_ports,
     &net.bind_ips(&row.spec.server),
-    Some(&secrets),
+    Some(secrets),
   )?;
   let resolved = crate::service_monitor::heartbeat::compose(
     &resolved,
@@ -252,7 +300,7 @@ pub fn service_resolved(
   )?;
   let resolved = crate::refs::resolve(&resolved, name, world, net)?;
   let resolved =
-    with_files(world, net, name, &resolved, Some(&secrets))?;
+    with_files(world, net, name, &resolved, Some(secrets))?;
   let hash = render::hash(&resolved);
   Ok((resolved, hash))
 }
@@ -266,10 +314,9 @@ pub fn service_trial(
   let row = world.services.get(name).ok_or_else(|| {
     ApiError::not_found(format!("服务 {name} 不存在"))
   })?;
-  let secrets = crate::oidc::with_client_secrets(world, secrets);
-  let trial = render::trial_compose(name, &row.spec, Some(&secrets))?;
+  let trial = render::trial_compose(name, &row.spec, Some(secrets))?;
   let trial = crate::refs::resolve(&trial, name, world, net)?;
-  with_files(world, net, name, &trial, Some(&secrets))
+  with_files(world, net, name, &trial, Some(secrets))
 }
 
 /// 加上服务的配置文件，内容里的密钥和 `[[@服务]]` 先替换好。
@@ -327,6 +374,7 @@ pub struct GatewayRender {
   pub config: String,
   pub config_hash: String,
   pub sites: Vec<render::Site>,
+  pub needs_acme_dns: bool,
 }
 
 impl GatewayRender {
@@ -360,6 +408,15 @@ pub fn gateway_render(
   world: &World,
   net: &Net,
   name: &str,
+) -> Result<GatewayRender, ApiError> {
+  gateway_render_with_acme(world, net, name, None)
+}
+
+pub fn gateway_render_with_acme(
+  world: &World,
+  net: &Net,
+  name: &str,
+  fill: Option<render::AcmeDnsFill<'_>>,
 ) -> Result<GatewayRender, ApiError> {
   let gateway = world.gateways.get(name).ok_or_else(|| {
     ApiError::not_found(format!("网关 {name} 不存在"))
@@ -532,6 +589,7 @@ pub fn gateway_render(
     });
   }
   sites.sort_by(|a, b| a.hostname.cmp(&b.hostname));
+  let mut needs_acme_dns = false;
   let (compose, config) = match gateway.spec.kind {
     GatewayKind::Caddy => {
       let mut forwards = Vec::new();
@@ -579,15 +637,17 @@ pub fn gateway_render(
           ..Default::default()
         });
       }
+      needs_acme_dns = caddy_sites.iter().any(|s| s.dns.is_some());
       (
         render::gateway_compose(name, &gateway.spec),
-        render::caddyfile(
+        render::caddyfile_with_acme(
           name,
           &gateway.spec,
           &caddy_sites,
           &forwards,
           crate::link::caddy_site(world, net, name, &gateway.spec)?,
           net.gate_public.as_deref(),
+          fill,
         ),
       )
     }
@@ -602,7 +662,7 @@ pub fn gateway_render(
         })
         .collect();
       (
-        render::tunnel_compose(name, &gateway.spec),
+        render::tunnel_compose(name, &gateway.spec, None),
         serde_json::to_string_pretty(&rules).unwrap_or_default(),
       )
     }
@@ -613,6 +673,7 @@ pub fn gateway_render(
     compose,
     config,
     sites,
+    needs_acme_dns,
   })
 }
 
@@ -785,6 +846,7 @@ mod tests {
       config: config.to_string(),
       config_hash: render::hash(config),
       sites: Vec::new(),
+      needs_acme_dns: false,
     }
     .fingerprint()
   }

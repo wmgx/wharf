@@ -32,6 +32,35 @@ const REVEAL_TTL: Duration = Duration::from_secs(5 * 60);
 static VERIFIED: LazyLock<Mutex<BTreeMap<String, Instant>>> =
   LazyLock::new(Default::default);
 
+pub type AccountLinks = std::collections::BTreeSet<(String, String)>;
+
+pub fn account_links(
+  c: &rusqlite::Connection,
+) -> Result<AccountLinks, ApiError> {
+  let mut stmt = c
+    .prepare("SELECT account, hostname FROM app_account_domains")
+    .map_err(sql_err)?;
+  stmt
+    .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+    .and_then(Iterator::collect)
+    .map_err(sql_err)
+}
+
+pub fn linked_account(
+  world: &crate::world::World,
+  service: &str,
+  account: &str,
+  links: &AccountLinks,
+) -> bool {
+  links.iter().any(|(name, host)| {
+    name == account
+      && world
+        .routes
+        .get(host)
+        .is_some_and(|r| r.spec.service == service)
+  })
+}
+
 pub fn defaults(
   conn: &Connection,
 ) -> Result<BTreeMap<String, String>, ApiError> {

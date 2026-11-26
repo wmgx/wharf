@@ -332,6 +332,7 @@ pub async fn start(
       "配置脚本代登录需要 admin 权限",
     ));
   }
+  require_login_account(plan, perms.contains(&Perm::Admin))?;
   let missing: Vec<&String> = plan
     .needs_confirm
     .iter()
@@ -417,6 +418,8 @@ pub async fn start(
     let account_refs = stored.body.account_refs;
     let replan_inputs = replan.clone();
     let writes = stored.writes.clone();
+    let policy_plan = plan.clone();
+    let admin = perms.contains(&Perm::Admin);
     let plan_id = plan.plan_id.clone();
     let run_body = serde_json::to_string(&run).map_err(json_err)?;
     let run_status = if run.status == RunStatus::Running {
@@ -459,9 +462,7 @@ pub async fn start(
             .suggest("wharf plan"),
           );
         }
-        for write in &writes {
-          db::apply_write(&tx, write)?;
-        }
+        apply_writes(&tx, &policy_plan, &writes, admin)?;
         tx.execute(
           "UPDATE plans SET status = 'applied' WHERE id = ?1",
           params![plan_id],
@@ -506,6 +507,54 @@ pub async fn start(
   }
   crate::service_monitor::sync_watches(&state, None).await;
   Ok(ApplyResponse { run_id })
+}
+
+fn enables_login_account(plan: &Plan) -> bool {
+  let enabled = |v: Option<&serde_json::Value>| {
+    v.and_then(|v| v.pointer("/sso/login/use_account"))
+      .and_then(serde_json::Value::as_bool)
+      == Some(true)
+  };
+  plan.items.iter().any(|item| {
+    item.layer == Layer::Config
+      && item.address.starts_with("route/")
+      && !enabled(item.before.as_ref())
+      && enabled(item.after.as_ref())
+  })
+}
+
+pub(crate) fn require_login_account(
+  plan: &Plan,
+  admin: bool,
+) -> Result<(), ApiError> {
+  if !admin && enables_login_account(plan) {
+    return Err(ApiError::new(
+      ErrorCode::Forbidden,
+      "开启代登录使用应用账号需要 admin 权限",
+    ));
+  }
+  Ok(())
+}
+
+fn apply_writes(
+  tx: &rusqlite::Transaction<'_>,
+  plan: &Plan,
+  writes: &[crate::db::Write],
+  admin: bool,
+) -> Result<(), ApiError> {
+  let current =
+    crate::world::World::from_rows(db::all_resources(tx)?)?;
+  crate::secret_policy::require_apply(plan, &current, admin)?;
+  for write in writes {
+    db::apply_write(tx, write)?;
+  }
+  let desired =
+    crate::world::World::from_rows(db::all_resources(tx)?)?;
+  crate::secret_policy::validate_world(&desired)?;
+  crate::secret_policy::validate_accounts(
+    &desired,
+    &crate::app_accounts::account_links(tx)?,
+  )
 }
 
 /// 不来自计划的执行（备份、恢复）：同样占用 apply 锁、有执行记录、可以取消。
@@ -770,7 +819,12 @@ async fn run_step(
   progress: ProgressFn,
   cancel: &CancellationToken,
 ) -> Result<(), ApiError> {
-  let snap = snapshot::load(&state.db).await?;
+  let mut snap = snapshot::load(&state.db).await?;
+  if matches!(step, Step::LinkUp { .. } | Step::GatewaySync { .. }) {
+    snap.reach =
+      crate::link::probe(state, &snap.net(&snap.world), &snap.world)
+        .await;
+  }
   let world = &snap.world;
   let net = snap.net(world);
   match step {
@@ -966,30 +1020,14 @@ async fn run_step(
         &r.fingerprint(),
         &format!("网关 {gateway}"),
       )?;
-      let needs_key = r.config.contains(render::ACME_DNS_KEY);
-      let needs_url = r.config.contains(render::ACME_DNS_URL);
-      let config = if needs_key || needs_url {
-        let key = if needs_key {
-          let name = crate::acme_dns::secret_name(gateway);
-          state
-            .db
-            .call_credentials(move |c, key| {
-              db::ensure_secret(c, key, &name, db::now_ms())
-            })
-            .await?
-        } else {
-          String::new()
-        };
-        let url = if needs_url {
-          crate::join::default_url(state).await.ok_or_else(|| {
-            ApiError::invalid(format!(
-              "控制面没有对外地址，入口 {gateway} 做 DNS 验证时要连回控制面"
-            ))
-            .with_hint("用 --public-url 启动控制面，或者给控制面加一个域名")
-          })?
-        } else {
-          String::new()
-        };
+      let config = if r.needs_acme_dns {
+        let name = crate::acme_dns::secret_name(gateway);
+        let url = crate::join::default_url(state).await.ok_or_else(|| {
+          ApiError::invalid(format!(
+            "控制面没有对外地址，入口 {gateway} 做 DNS 验证时要连回控制面"
+          ))
+          .with_hint("用 --public-url 启动控制面，或者给控制面加一个域名")
+        })?;
         if let Ok(parsed) = reqwest::Url::parse(&url)
           && let Some(host) = parsed.host_str()
           && world.routes.get(host).is_some_and(|route| {
@@ -1014,7 +1052,22 @@ async fn run_step(
         {
           return Err(ApiError::invalid(format!("控制面的域名 {host} 是内网域名，证书要用 DNS 验证签，签的时候连不回控制面")).with_hint("用 --public-url 给控制面指定一个不经过这个入口的地址，或者把控制面的域名换到别的 zone"));
         }
-        crate::acme_dns::fill(&r.config, &key, &url)
+        let key = state
+          .db
+          .call_credentials(move |c, key| {
+            db::ensure_secret(c, key, &name, db::now_ms())
+          })
+          .await?;
+        snapshot::gateway_render_with_acme(
+          world,
+          &net,
+          gateway,
+          Some(render::AcmeDnsFill {
+            key: &key,
+            url: &url,
+          }),
+        )?
+        .config
       } else {
         r.config
       };
@@ -1392,7 +1445,7 @@ async fn service_up(
     world,
     &net,
     service,
-    &snap.service_values,
+    &snap.render_values(world, service),
   )?;
   // 先比对指纹再构建：计划过期时不用白构建一次。
   check_expect(expect, &hash, &format!("服务 {service}"))?;
@@ -1431,7 +1484,7 @@ async fn service_up(
       world,
       &net,
       service,
-      &snap.service_values,
+      &snap.render_values(world, service),
     )?)
   } else {
     None

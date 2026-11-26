@@ -4,7 +4,7 @@
 //! 同步顺序：找到或创建隧道 → 写入入口规则 → 部署连接器 → 等隧道变成 healthy。
 //! 连接器的 token 只在执行时取，写进 0600 的 compose，不进计划、不算进哈希。
 
-use std::{collections::BTreeMap, time::Duration};
+use std::time::Duration;
 
 use rusqlite::params;
 use tokio_util::sync::CancellationToken;
@@ -166,13 +166,7 @@ pub async fn sync(
   let token =
     call(cancel, "读取隧道连接器 token", provider.token(&tunnel))
       .await?;
-  let compose = render::substitute(
-    &r.compose,
-    Some(&BTreeMap::from([(
-      render::TUNNEL_TOKEN_SECRET.to_string(),
-      token,
-    )])),
-  )?;
+  let compose = render::tunnel_compose(gateway, gw, Some(&token));
   let server = &gw.server;
   let result: ProjectUpResult = state
     .hub

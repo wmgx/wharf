@@ -312,6 +312,7 @@ pub async fn backup(
     &w.server,
     &w.target,
     "备份到这台机器",
+    crate::link::ProbeMode::Persist,
   )
   .await?;
   let creds = credentials(state).await?;
@@ -390,6 +391,7 @@ pub async fn restore(
     &w.server,
     &w.target,
     "备份到这台机器",
+    crate::link::ProbeMode::Persist,
   )
   .await?;
   let creds = credentials(state).await?;

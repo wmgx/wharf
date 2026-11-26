@@ -91,10 +91,12 @@ fn warnings<'a>(
 ) -> Vec<(String, String)> {
   let net = Net::derive(&world.servers, &snap.agents);
   let mut warnings = Vec::new();
+  let secrets =
+    crate::secret_policy::non_system_secrets(&snap.secrets);
   for (name, row) in services {
     let public = net.public_ip.contains_key(&row.spec.server);
     warnings.extend(
-      service_warnings(&row.spec, public, &snap.secrets)
+      service_warnings(&row.spec, public, &secrets)
         .into_iter()
         .map(|detail| (format!("服务 {name}"), detail)),
     );

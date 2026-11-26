@@ -60,7 +60,7 @@ async fn last_commit(
 /// `reference`：覆盖 git 的 ref（固定到某个 commit）。
 pub fn code_fetch(
   state: &AppState,
-  snap: &Snapshot,
+  allowed_secrets: &std::collections::BTreeMap<String, String>,
   what: &str,
   upload: Option<&String>,
   git: Option<&GitSource>,
@@ -86,12 +86,15 @@ pub fn code_fetch(
     }
     (None, Some(git)) => {
       let token = match &git.token_secret {
-        Some(name) => Some(OneTimeSecret(
-          snap.secrets.get(name).cloned().ok_or_else(|| {
-            ApiError::invalid(format!("密钥 {name} 不存在"))
-              .suggest(format!("wharf secret set {name}"))
-          })?,
-        )),
+        Some(name) => {
+          crate::secret_policy::reject_system_secret(name, what)?;
+          Some(OneTimeSecret(
+            allowed_secrets.get(name).cloned().ok_or_else(|| {
+              ApiError::invalid(format!("密钥 {name} 不存在"))
+                .suggest(format!("wharf secret set {name}"))
+            })?,
+          ))
+        }
         None => None,
       };
       Ok(BuildFetch::Git {
@@ -137,7 +140,11 @@ pub async fn ensure_image(
   }
   let fetch = code_fetch(
     state,
-    snap,
+    &crate::secret_policy::service_secrets(
+      &snap.world,
+      service,
+      &snap.secrets,
+    ),
     &format!("服务 {service}"),
     build.upload.as_ref(),
     build.git.as_ref(),

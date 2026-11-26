@@ -14,10 +14,12 @@ use serde_json::json;
 use wharf_api_types::spec::GatewayKind;
 use wharf_providers::Owner;
 
-use crate::{render, snapshot, state::AppState, world::World};
+use crate::{snapshot, state::AppState, world::World};
+
+pub const SECRET_PREFIX: &str = "WHARF_ACME_DNS_";
 
 pub fn secret_name(gateway: &str) -> String {
-  format!("WHARF_ACME_DNS_{gateway}")
+  format!("{SECRET_PREFIX}{gateway}")
 }
 
 pub fn allowed(world: &World, gateway: &str) -> Vec<String> {
@@ -44,13 +46,6 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     return false;
   }
   a.iter().zip(b).fold(0, |diff, (a, b)| diff | (a ^ b)) == 0
-}
-
-pub fn fill(config: &str, key: &str, url: &str) -> String {
-  config.replace(render::ACME_DNS_KEY, key).replace(
-    render::ACME_DNS_URL,
-    &format!("{}/agent/acme-dns", url.trim_end_matches('/')),
-  )
 }
 
 #[derive(Deserialize)]

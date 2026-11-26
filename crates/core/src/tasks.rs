@@ -2,7 +2,7 @@
 //! 任务定义直接改，不走计划（定义本身不改机器）。控制面停机期间错过的不补跑。
 
 use std::{
-  collections::{BTreeSet, HashMap},
+  collections::{BTreeMap, BTreeSet, HashMap},
   sync::{Arc, LazyLock, Mutex},
   time::{Duration, Instant},
 };
@@ -262,15 +262,18 @@ async fn execute(
     Ok(s) => s,
     Err(e) => return (TaskStatus::Failed, None, e.message, None),
   };
-  let secrets = &snap.secrets;
-  let used: Vec<&String> = secrets
+  let secrets =
+    crate::secret_policy::non_system_secrets(&snap.secrets);
+  let mut used: Vec<&String> = secrets
     .values()
-    .filter(|v| v.len() >= 4 && spec_mentions(spec, secrets, v))
+    .filter(|v| !v.is_empty() && spec_mentions(spec, &secrets, v))
     .collect();
+  used.sort_unstable_by_key(|v| std::cmp::Reverse(v.len()));
   let redact = |s: String| {
     used.iter().fold(s, |acc, v| acc.replace(v.as_str(), "***"))
   };
-  let result = run_on_agent(state, name, spec, &snap, input).await;
+  let result =
+    run_on_agent(state, name, spec, &snap, &secrets, input).await;
   match result {
     Ok(r) => {
       let status = if r.timed_out {
@@ -310,9 +313,10 @@ async fn run_on_agent(
   name: &str,
   spec: &TaskSpec,
   snap: &snapshot::Snapshot,
+  secrets: &BTreeMap<String, String>,
   input: Option<TaskInput>,
 ) -> Result<TaskRunResult, ApiError> {
-  let sub = |t: &str| render::substitute(t, Some(&snap.secrets));
+  let sub = |t: &str| render::substitute(t, Some(secrets));
   let server = snap
     .world
     .servers
@@ -580,6 +584,7 @@ fn validate(
   snap: &snapshot::Snapshot,
 ) -> Result<(), ApiError> {
   validate_name("task", name)?;
+  crate::secret_policy::validate_task(name, &spec.how)?;
   if !snap.world.servers.contains_key(&spec.server) {
     return Err(crate::world::server_not_found(&spec.server));
   }

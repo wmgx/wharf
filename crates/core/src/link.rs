@@ -352,6 +352,45 @@ pub type Pairs = BTreeMap<String, BTreeSet<String>>;
 
 /// 做计划前探测：网关所在机器能不能连到服务所在机器的内网地址。结果写进数据库并返回合并后的结果。
 /// agent 离线或版本太旧时跳过，保留原来的结果。
+pub fn validate_private_addr(
+  name: &str,
+  addr: Option<&wharf_api_types::spec::PrivateAddr>,
+) -> Result<(), ApiError> {
+  let Some(addr) = addr else {
+    return Ok(());
+  };
+  use std::net::IpAddr;
+  let ip = &addr.ip;
+  let private = match ip.parse::<IpAddr>() {
+    Ok(IpAddr::V4(ip)) => {
+      ip.is_private()
+        || (ip.octets()[0] == 100
+          && (64..128).contains(&ip.octets()[1]))
+    }
+    Ok(IpAddr::V6(ip)) => ip.is_unique_local(),
+    Err(_) => false,
+  };
+  if !private {
+    return Err(ApiError::invalid(format!("服务器 {name} 的内网地址 {ip} 不合法，必须是私网或组网 IP"))
+      .with_hint("填写 10/8、172.16/12、192.168/16、100.64/10 或私有 IPv6 地址，不能填 127.0.0.1 或公网地址"));
+  }
+  Ok(())
+}
+
+#[derive(Clone, Copy)]
+pub enum ProbeMode {
+  Plan,
+  Persist,
+}
+
+impl ProbeMode {
+  async fn record(self, write: impl AsyncFnOnce()) {
+    if matches!(self, Self::Persist) {
+      write().await;
+    }
+  }
+}
+
 pub async fn probe(
   state: &AppState,
   net: &Net,
@@ -373,7 +412,7 @@ pub async fn probe(
       }
     }
   }
-  probe_pairs(state, net, pairs).await
+  probe_pairs(state, net, pairs, ProbeMode::Plan).await
 }
 
 /// 两台机器之间要直接传数据（迁移、备份）时先探测，连不上就报错（design 2.10）。
@@ -383,12 +422,13 @@ pub async fn require_reach(
   from: &str,
   to: &str,
   what: &str,
+  mode: ProbeMode,
 ) -> Result<(), ApiError> {
   let pairs = Pairs::from([(
     from.to_string(),
     BTreeSet::from([to.to_string()]),
   )]);
-  let reach = probe_pairs(state, net, pairs).await;
+  let reach = probe_pairs(state, net, pairs, mode).await;
   if reach.get(&(from.to_string(), to.to_string())) == Some(&false) {
     return Err(
       ApiError::invalid(format!(
@@ -402,11 +442,12 @@ pub async fn require_reach(
   Ok(())
 }
 
-/// 探测 `pairs` 里每个方向，`to` 没有内网地址的跳过。结果写进数据库并返回合并后的结果。
+/// 探测 `pairs` 里每个方向，跳过没有内网地址的目标，返回合并后的结果。
 pub async fn probe_pairs(
   state: &AppState,
   net: &Net,
   pairs: Pairs,
+  mode: ProbeMode,
 ) -> db::Reach {
   let calls = pairs.into_iter().map(|(from, to)| async move {
     let to: Vec<String> = to
@@ -461,13 +502,17 @@ pub async fn probe_pairs(
   for (from, to, ok) in &results {
     reach.insert((from.clone(), to.clone()), *ok);
   }
-  if !results.is_empty() {
-    let now = chrono::Utc::now().timestamp_millis();
-    let _ = state
-      .db
-      .call(move |c| db::set_reach(c, &results, now))
-      .await;
-  }
+  mode
+    .record(async || {
+      if !results.is_empty() {
+        let now = chrono::Utc::now().timestamp_millis();
+        let _ = state
+          .db
+          .call(move |c| db::set_reach(c, &results, now))
+          .await;
+      }
+    })
+    .await;
   reach
 }
 
@@ -475,6 +520,19 @@ pub async fn probe_pairs(
 mod tests {
   use serde_json::json;
   use wharf_api_types::spec::{Change, PrivateAddr, PrivateNetwork};
+
+  #[tokio::test]
+  async fn plan_probe_does_not_persist_reach() {
+    let writes = std::cell::Cell::new(0);
+    super::ProbeMode::Plan
+      .record(async || writes.set(writes.get() + 1))
+      .await;
+    assert_eq!(writes.get(), 0);
+    super::ProbeMode::Persist
+      .record(async || writes.set(writes.get() + 1))
+      .await;
+    assert_eq!(writes.get(), 1);
+  }
 
   use super::*;
 

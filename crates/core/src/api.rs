@@ -26,6 +26,10 @@ use wharf_api_types::{
   },
 };
 
+use crate::secret_policy::{
+  is_managed_secret as managed_secret, refuse_managed,
+  system_label as system_secret,
+};
 use crate::{
   apply,
   auth::{self, Auth},
@@ -1515,38 +1519,6 @@ async fn list_secrets(
   ))
 }
 
-/// Wharf 自己生成、自己用的密钥。改了或删了，旧备份就打不开了。
-fn managed_secret(name: &str) -> bool {
-  crate::backup::MANAGED_SECRETS.contains(&name)
-    || name == crate::core_backup::OWNER_SECRET
-    || name == crate::link::TOKEN_SECRET
-    || name == crate::egress::TOKEN_SECRET
-}
-
-/// 系统功能用的密钥对应的功能名。
-fn system_secret(name: &str) -> Option<&'static str> {
-  match name {
-    n if crate::backup::MANAGED_SECRETS.contains(&n) => Some("备份"),
-    n if n == crate::core_backup::OWNER_SECRET => Some("控制面备份"),
-    n if n == crate::link::TOKEN_SECRET => Some("机器互联"),
-    n if n == crate::egress::TOKEN_SECRET => Some("外网代理"),
-    n if n == crate::tailscale::OAUTH_SECRET => {
-      Some("Tailscale 组网")
-    }
-    n if crate::render::is_auth_secret(n) => Some("登录保护"),
-    n if n == crate::render::TUNNEL_TOKEN_SECRET => Some("隧道"),
-    n if n == crate::notify::FEISHU_WEBHOOK
-      || n == crate::notify::FEISHU_SECRET =>
-    {
-      Some("通知")
-    }
-    n if n.starts_with(crate::notify_keys::SECRET_PREFIX) => {
-      Some("通知地址")
-    }
-    _ => None,
-  }
-}
-
 fn secret_users(
   world: &crate::world::World,
   name: &str,
@@ -1563,18 +1535,6 @@ fn secret_users(
         .then(|| service.clone())
     }))
     .collect()
-}
-
-fn refuse_managed(name: &str) -> Result<(), ApiError> {
-  if managed_secret(name) {
-    return Err(ApiError::new(
-      ErrorCode::Forbidden,
-      format!(
-        "{name} 是 Wharf 自己生成的，改了或删了旧备份就打不开了"
-      ),
-    ));
-  }
-  Ok(())
 }
 
 #[derive(Deserialize)]
@@ -1661,10 +1621,30 @@ async fn make_plan(
   Json(req): Json<PlanRequest>,
 ) -> ApiResult<Plan> {
   auth.require(Perm::Plan)?;
+  if let Err(error) =
+    planner::require_plan_request(&s, &auth, &req).await
+  {
+    audit.skip_record();
+    return Err(error.into());
+  }
   if !auth.human {
     guard_dangerous(&s, &req).await?;
   }
-  let planned = planner::make_plan(&s, req).await?;
+  let snap = snapshot::load(&s.db).await?;
+  if let Err(error) =
+    crate::token_scope::require_plan_request(&auth, &snap.world, &req)
+  {
+    audit.skip_record();
+    return Err(error.into());
+  }
+  let planned = planner::make_plan_inner(
+    &s,
+    req,
+    snap,
+    true,
+    auth.has(Perm::Admin),
+  )
+  .await?;
   crate::token_scope::require_plan(
     &auth,
     &planned.plan,

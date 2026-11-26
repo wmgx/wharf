@@ -1,0 +1,496 @@
+//! 模板可引用的密钥与应用账号。
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use wharf_api_types::{
+  ApiError, ErrorCode,
+  plan::{Layer, Plan},
+  spec::{BuildSource, LoginSpec, RouteSpec, ServiceSpec, Source},
+  view::TaskKind,
+};
+
+use crate::{render, world::World};
+
+const WHARF_PREFIX: &str = "WHARF_";
+const ACME_PREFIX: &str = "ACME_DNS_";
+
+pub enum SecretClass {
+  System(&'static str),
+  User,
+}
+
+pub fn classify(name: &str) -> SecretClass {
+  use SecretClass::{System, User};
+  match name {
+    crate::core_backup::OWNER_SECRET => System("控制面备份"),
+    crate::link::TOKEN_SECRET => System("机器互联"),
+    crate::egress::TOKEN_SECRET => System("外网代理"),
+    crate::tailscale::OAUTH_SECRET => System("Tailscale 组网"),
+    crate::render::TUNNEL_TOKEN_SECRET => System("隧道"),
+    crate::notify::FEISHU_WEBHOOK | crate::notify::FEISHU_SECRET => {
+      System("通知")
+    }
+    n if crate::backup::MANAGED_SECRETS.contains(&n) => {
+      System("备份")
+    }
+    n if render::is_auth_secret(n) => System("登录保护"),
+    n if n.starts_with(crate::oidc::SECRET_PREFIX) => System("OIDC"),
+    n if n.starts_with(crate::acme_dns::SECRET_PREFIX)
+      || n.starts_with(ACME_PREFIX) =>
+    {
+      System("DNS 证书验证")
+    }
+    n if n.starts_with(WHARF_PREFIX) => System("Wharf 内部"),
+    _ => User,
+  }
+}
+
+pub fn system_label(name: &str) -> Option<&'static str> {
+  match classify(name) {
+    SecretClass::System(label) => Some(label),
+    SecretClass::User => None,
+  }
+}
+
+pub fn is_system_secret(name: &str) -> bool {
+  system_label(name).is_some()
+}
+
+pub fn is_managed_secret(name: &str) -> bool {
+  name == crate::egress::TOKEN_SECRET
+    || [
+      WHARF_PREFIX,
+      ACME_PREFIX,
+      crate::oidc::SECRET_PREFIX,
+      crate::notify_keys::SECRET_PREFIX,
+    ]
+    .into_iter()
+    .any(|prefix| name.starts_with(prefix))
+}
+
+pub fn refuse_managed(name: &str) -> Result<(), ApiError> {
+  if is_managed_secret(name) {
+    return Err(ApiError::new(ErrorCode::Forbidden, format!("{name} 是 Wharf 内部保留密钥，不能直接修改或删除"))
+      .with_hint("业务密钥请换一个不以 WHARF_、OIDC_、ACME_DNS_、NOTIFY_URL_ 开头的名字"));
+  }
+  Ok(())
+}
+
+pub fn reject_system_secret(
+  name: &str,
+  context: &str,
+) -> Result<(), ApiError> {
+  if let Some(label) = system_label(name) {
+    return Err(ApiError::invalid(format!("{context} 不能引用系统密钥 {name}（属于{label}）"))
+      .with_hint("WHARF_*、OIDC_*、ACME_DNS_* 等系统密钥只由 Wharf 内部使用；业务配置请单独创建普通密钥"));
+  }
+  Ok(())
+}
+
+pub fn non_system_secrets(
+  all: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+  all
+    .iter()
+    .filter(|(name, _)| !is_system_secret(name))
+    .map(|(name, value)| (name.clone(), value.clone()))
+    .collect()
+}
+
+fn placeholders(mut text: &str) -> impl Iterator<Item = &str> {
+  std::iter::from_fn(move || {
+    let (start, name) = render::next_placeholder(text)?;
+    text = &text[start + name.len() + 4..];
+    Some(name)
+  })
+}
+
+fn service_templates(
+  spec: &ServiceSpec,
+) -> impl Iterator<Item = &str> {
+  let compose = match &spec.source {
+    Source::Compose { content, .. } => content.as_deref(),
+    _ => None,
+  };
+  spec
+    .env
+    .values()
+    .map(String::as_str)
+    .chain(compose)
+    .chain(spec.files.iter().map(|f| f.content.as_str()))
+}
+
+pub fn service_account_refs(
+  spec: &ServiceSpec,
+) -> impl Iterator<Item = (&str, &str)> {
+  service_templates(spec)
+    .flat_map(placeholders)
+    .filter_map(|name| Some((name, render::account_ref(name)?)))
+}
+
+fn git_token(spec: &ServiceSpec) -> Option<&str> {
+  match &spec.source {
+    Source::Build(BuildSource { git: Some(git), .. }) => {
+      git.token_secret.as_deref()
+    }
+    _ => None,
+  }
+}
+
+fn template_refs(spec: &ServiceSpec) -> impl Iterator<Item = &str> {
+  service_templates(spec)
+    .flat_map(placeholders)
+    .filter(|name| {
+      !name.is_empty()
+        && name.bytes().all(|b| {
+          b.is_ascii_alphanumeric() || b == b'_' || b == b'-'
+        })
+    })
+}
+
+fn direct_refs<'a>(
+  world: &'a World,
+  service: &str,
+) -> impl Iterator<Item = &'a str> {
+  world
+    .services
+    .get(service)
+    .into_iter()
+    .flat_map(|r| template_refs(&r.spec).chain(git_token(&r.spec)))
+}
+
+fn owned_refs(world: &World, service: &str) -> BTreeSet<String> {
+  direct_refs(world, service)
+    .map(str::to_string)
+    .chain(
+      world
+        .routes
+        .values()
+        .filter(|r| r.spec.service == service)
+        .filter_map(|r| route_login(&r.spec))
+        .flat_map(crate::sso_login::secret_refs),
+    )
+    .filter(|n| !is_system_secret(n))
+    .collect()
+}
+
+fn route_login(route: &RouteSpec) -> Option<&LoginSpec> {
+  route.sso.as_ref()?.login.as_ref()
+}
+
+fn oidc_names(world: &World, service: &str) -> BTreeSet<String> {
+  world
+    .routes
+    .iter()
+    .filter(|(_, row)| {
+      row.spec.service == service
+        && crate::oidc::route_is_oidc(&row.spec)
+    })
+    .map(|(host, _)| crate::oidc::secret_name(host))
+    .collect()
+}
+
+pub fn service_secrets(
+  world: &World,
+  service: &str,
+  all: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+  let mut names = owned_refs(world, service);
+  names.extend(oidc_names(world, service));
+  names
+    .into_iter()
+    .filter_map(|name| {
+      let value = all.get(&name)?.clone();
+      Some((name, value))
+    })
+    .collect()
+}
+
+pub fn login_secrets(
+  world: &World,
+  route: &RouteSpec,
+  all: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+  let mut secrets = service_secrets(world, &route.service, all);
+  secrets.retain(|name, _| {
+    !is_system_secret(name) && login_owns(world, &route.service, name)
+  });
+  secrets
+}
+
+fn validate_login(
+  world: &World,
+  host: &str,
+  route: &RouteSpec,
+  login: &LoginSpec,
+) -> Result<(), ApiError> {
+  let context = format!("域名 {host} 的代登录");
+  let service = &route.service;
+  for name in crate::sso_login::secret_refs(login) {
+    reject_system_secret(&name, &context)?;
+    if !login_owns(world, service, &name) {
+      return Err(
+        ApiError::invalid(format!(
+          "{context}引用了服务 {service} 未声明的密钥：{name}"
+        ))
+        .with_hint(format!(
+          "先在服务 {service} 的配置中引用这个密钥，再配置代登录"
+        )),
+      );
+    }
+  }
+  Ok(())
+}
+
+pub fn validate_world(world: &World) -> Result<(), ApiError> {
+  for (name, row) in &world.services {
+    let context = format!("服务 {name}");
+    let oidc = oidc_names(world, name);
+    for secret in template_refs(&row.spec) {
+      if !oidc.contains(secret) {
+        reject_system_secret(secret, &context)?;
+      }
+    }
+    if let Some(secret) = git_token(&row.spec) {
+      reject_system_secret(secret, &context)?;
+    }
+  }
+  for (name, app) in &world.edge_apps {
+    if let Some(secret) = app
+      .spec
+      .source
+      .as_ref()
+      .and_then(|s| s.git.as_ref())
+      .and_then(|g| g.token_secret.as_deref())
+    {
+      reject_system_secret(secret, &format!("边缘应用 {name}"))?;
+    }
+  }
+  for (name, server) in &world.servers {
+    let settings = &server.settings;
+    for text in settings
+      .registry_mirrors
+      .values()
+      .flatten()
+      .chain(&settings.github_mirror)
+    {
+      reject_templates(text, &format!("服务器 {name} 的镜像源"))?;
+    }
+  }
+  for (name, row) in &world.gateways {
+    if let Some(page) = &row.spec.error_page {
+      validate_gateway_text(page, &format!("网关 {name} 的错误页"))?;
+    }
+    for upstream in
+      row.spec.layer4.iter().filter_map(|f| f.upstream.as_deref())
+    {
+      validate_gateway_text(
+        upstream,
+        &format!("入口 {name} 的四层转发上游"),
+      )?;
+    }
+  }
+  for (host, row) in &world.routes {
+    let spec = &row.spec;
+    if let Some(login) = route_login(spec) {
+      validate_login(world, host, spec, login)?;
+    }
+    if let Some(caddy) = &spec.caddy {
+      validate_gateway_text(
+        caddy,
+        &format!("路由 {host}：自定义 Caddy 配置"),
+      )?;
+    }
+    for upstream in spec
+      .upstream
+      .iter()
+      .chain(spec.paths.iter().filter_map(|p| p.upstream.as_ref()))
+    {
+      validate_gateway_text(
+        upstream,
+        &format!("路由 {host} 的上游"),
+      )?;
+    }
+  }
+  Ok(())
+}
+
+fn validate_gateway_text(
+  text: &str,
+  context: &str,
+) -> Result<(), ApiError> {
+  if [
+    render::ACME_DNS_KEY,
+    render::ACME_DNS_URL,
+    "[[WHARF_",
+    "[[ACME_DNS_",
+  ]
+  .into_iter()
+  .any(|pattern| text.contains(pattern))
+  {
+    return Err(
+      ApiError::invalid(format!(
+        "{context}里不能出现 Wharf 内部占位符"
+      ))
+      .with_hint("去掉 [[WHARF_*]] 和 [[ACME_DNS_*]] 后重试"),
+    );
+  }
+  reject_templates(text, context)
+}
+
+fn reject_templates(
+  text: &str,
+  context: &str,
+) -> Result<(), ApiError> {
+  placeholders(text)
+    .try_for_each(|name| reject_system_secret(name, context))
+}
+
+pub fn validate_task(
+  name: &str,
+  how: &TaskKind,
+) -> Result<(), ApiError> {
+  let context = format!("任务 {name}");
+  match how {
+    TaskKind::Exec { command, .. } | TaskKind::Host { command } => {
+      reject_templates(command, &context)
+    }
+    TaskKind::Container { command, env, .. } => command
+      .iter()
+      .chain(env.values())
+      .try_for_each(|t| reject_templates(t, &context)),
+    TaskKind::Script { env, .. } => {
+      env.values().try_for_each(|t| reject_templates(t, &context))
+    }
+    TaskKind::Ping { .. } => Ok(()),
+  }
+}
+
+pub fn validate_accounts(
+  world: &World,
+  links: &crate::app_accounts::AccountLinks,
+) -> Result<(), ApiError> {
+  for (service, row) in &world.services {
+    for (_, account) in service_account_refs(&row.spec) {
+      if !crate::app_accounts::linked_account(
+        world, service, account, links,
+      ) {
+        return Err(ApiError::invalid(format!("服务 {service} 不能引用应用账号 {account}"))
+          .with_hint(format!("只能引用已关联到该服务域名的应用账号；先用 wharf sso account link {account} <域名> 关联")));
+      }
+    }
+  }
+  Ok(())
+}
+
+fn other_users<'a>(
+  world: &'a World,
+  service: &'a str,
+  name: &'a str,
+) -> impl Iterator<Item = &'a String> {
+  world.services.keys().filter(move |n| {
+    n.as_str() != service && owned_refs(world, n).contains(name)
+  })
+}
+
+fn login_owns(world: &World, service: &str, name: &str) -> bool {
+  direct_refs(world, service).any(|r| r == name)
+    || other_users(world, service, name).next().is_none()
+}
+
+fn borrowing(
+  world: &World,
+  service: &str,
+  name: &str,
+) -> Option<String> {
+  if owned_refs(world, service).contains(name) {
+    return None;
+  }
+  let others = other_users(world, service, name)
+    .map(String::as_str)
+    .collect::<Vec<_>>();
+  (!others.is_empty()).then(|| others.join("、"))
+}
+
+fn borrowing_error(
+  service: &str,
+  name: &str,
+  others: &str,
+) -> ApiError {
+  ApiError::new(ErrorCode::Forbidden, format!("服务 {service} 要引用的密钥 {name} 已经被服务 {others} 使用；跨服务共用密钥需要 admin 权限"))
+    .with_hint("请用户在页面上执行，或给这个服务单独建一个密钥")
+}
+
+pub fn require_plan_git_secrets(
+  current: &World,
+  desired: &World,
+  admin: bool,
+) -> Result<(), ApiError> {
+  if !admin {
+    for (service, row) in &desired.services {
+      if let Some(name) = git_token(&row.spec)
+        && let Some(others) = borrowing(current, service, name)
+      {
+        return Err(borrowing_error(service, name, &others));
+      }
+    }
+  }
+  Ok(())
+}
+
+/// 返回新增引用已有他服密钥的 (服务, 密钥)。
+pub fn borrows_other_service_secret(
+  plan: &Plan,
+  current_world: &World,
+) -> Vec<(String, String)> {
+  let mut borrowed = BTreeSet::new();
+  for item in &plan.items {
+    if item.layer != Layer::Config {
+      continue;
+    }
+    let Some(after) = &item.after else {
+      continue;
+    };
+    if let Some(service) = item.address.strip_prefix("service/")
+      && let Ok(spec) =
+        serde_json::from_value::<ServiceSpec>(after.clone())
+    {
+      for name in template_refs(&spec).chain(git_token(&spec)) {
+        if !is_system_secret(name)
+          && borrowing(current_world, service, name).is_some()
+        {
+          borrowed.insert((service.to_string(), name.to_string()));
+        }
+      }
+    }
+    if item.address.starts_with("route/")
+      && let Ok(route) =
+        serde_json::from_value::<RouteSpec>(after.clone())
+      && let Some(login) = route_login(&route)
+    {
+      for name in crate::sso_login::secret_refs(login) {
+        if !is_system_secret(&name)
+          && borrowing(current_world, &route.service, &name).is_some()
+        {
+          borrowed.insert((route.service.clone(), name));
+        }
+      }
+    }
+  }
+  borrowed.into_iter().collect()
+}
+
+pub fn require_apply(
+  plan: &Plan,
+  world: &World,
+  admin: bool,
+) -> Result<(), ApiError> {
+  if !admin
+    && let Some((service, name)) =
+      borrows_other_service_secret(plan, world).into_iter().next()
+    && let Some(others) = borrowing(world, &service, &name)
+  {
+    return Err(borrowing_error(&service, &name, &others));
+  }
+  Ok(())
+}

@@ -99,8 +99,8 @@ fn strings(value: &serde_json::Value) -> Vec<&str> {
   }
 }
 pub fn secret_refs(login: &LoginSpec) -> BTreeSet<String> {
-  let mut value = serde_json::to_value(login).unwrap();
-  value.as_object_mut().unwrap().remove("script");
+  let value =
+    serde_json::json!([login.steps, login.check, login.write]);
   let mut names: BTreeSet<String> = strings(&value)
     .into_iter()
     .filter_map(|s| references(s).ok())
@@ -743,6 +743,11 @@ async fn execute(
     .filter(|s| s.mode == SsoMode::Login)
     .and_then(|s| s.login.as_ref())
     .ok_or_else(|| ApiError::invalid("域名没有配置代登录"))?;
+  let secrets = crate::secret_policy::login_secrets(
+    &snap.world,
+    &route.spec,
+    &snap.secrets,
+  );
   let vars =
     account_vars(&state.db, hostname, login.use_account).await?;
   if !snap.world.services.contains_key(&route.spec.service) {
@@ -807,7 +812,7 @@ async fn execute(
   if let Some(script) = &login.script {
     let env = script_env(
       script,
-      &snap.secrets,
+      &secrets,
       &outcome.vars,
       hostname,
       upstream,
@@ -909,7 +914,7 @@ async fn execute(
     let mut response = HttpFetchResult::default();
     let result = async {
       let request =
-        job(upstream, step, &outcome.vars, &snap.secrets, &jar)?;
+        job(upstream, step, &outcome.vars, &secrets, &jar)?;
       response = tokio::time::timeout_at(
         deadline,
         state.hub.call(
@@ -1164,8 +1169,17 @@ pub async fn test(
   let mut would_write = Vec::new();
   if outcome.ok {
     let snap = snapshot::load(&state.db).await?;
-    let hidden: Vec<_> = snap
-      .secrets
+    let route = snap
+      .world
+      .routes
+      .get(&hostname)
+      .ok_or_else(|| ApiError::invalid("代登录配置已改变"))?;
+    let secrets = crate::secret_policy::login_secrets(
+      &snap.world,
+      &route.spec,
+      &snap.secrets,
+    );
+    let hidden: Vec<_> = secrets
       .values()
       .chain(outcome.vars.values())
       .cloned()
@@ -1216,21 +1230,15 @@ pub async fn test(
           ),
           LoginWrite::Cookie { name, value, .. } => format!(
             "cookie {name}（{} 个字符）",
-            render(value, &outcome.vars, &snap.secrets)?
-              .chars()
-              .count()
+            render(value, &outcome.vars, &secrets)?.chars().count()
           ),
           LoginWrite::LocalStorage { key, value } => format!(
             "localStorage {key}（{} 个字符）",
-            render(value, &outcome.vars, &snap.secrets)?
-              .chars()
-              .count()
+            render(value, &outcome.vars, &secrets)?.chars().count()
           ),
           LoginWrite::SessionStorage { key, value } => format!(
             "sessionStorage {key}（{} 个字符）",
-            render(value, &outcome.vars, &snap.secrets)?
-              .chars()
-              .count()
+            render(value, &outcome.vars, &secrets)?.chars().count()
           ),
         };
         would_write.push(mask(&summary, &hidden));
