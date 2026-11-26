@@ -42,20 +42,24 @@ type Takeover struct {
 }
 
 type SSO struct {
-	Public     bool      `json:"public,omitempty"`
-	Takeover   *Takeover `json:"takeover,omitempty"`
-	AppLogin   bool      `json:"app_login,omitempty"`
-	PublicKey  string    `json:"public_key"`
-	Core       string    `json:"core"`
-	Login      string    `json:"login"`
-	Skip       []string  `json:"skip,omitempty"`
-	Trust      []string  `json:"trust,omitempty"`
-	UserHeader string    `json:"user_header,omitempty"`
-	trusted    []netip.Prefix
-	key        ed25519.PublicKey
-	client     *http.Client
-	mu         sync.Mutex
-	cache      map[[32]byte]*refreshResult
+	Public             bool           `json:"public,omitempty"`
+	Takeover           *Takeover      `json:"takeover,omitempty"`
+	AppLogin           bool           `json:"app_login,omitempty"`
+	PublicKey          string         `json:"public_key"`
+	Core               string         `json:"core"`
+	Login              string         `json:"login"`
+	Skip               []string       `json:"skip,omitempty"`
+	Trust              []string       `json:"trust,omitempty"`
+	UserHeader         string         `json:"user_header,omitempty"`
+	RevocationKey      string         `json:"revocation_key,omitempty"`
+	RevocationInterval caddy.Duration `json:"revocation_interval,omitempty"`
+	revocationSource   revocationSource
+	revocations        *revocationPoll
+	trusted            []netip.Prefix
+	key                ed25519.PublicKey
+	client             *http.Client
+	mu                 sync.Mutex
+	cache              map[[32]byte]*refreshResult
 }
 
 type refreshResult struct {
@@ -85,6 +89,20 @@ func (s *SSO) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				if !d.Args(&s.Login) {
 					return d.ArgErr()
 				}
+			case "revocation_key":
+				if !d.AllArgs(&s.RevocationKey) {
+					return d.ArgErr()
+				}
+			case "revocation_interval":
+				var value string
+				if !d.AllArgs(&value) {
+					return d.ArgErr()
+				}
+				interval, err := caddy.ParseDuration(value)
+				if err != nil || interval < time.Second {
+					return d.Err("门禁吊销拉取间隔至少为 1 秒")
+				}
+				s.RevocationInterval = caddy.Duration(interval)
 			case "public":
 				s.Public = true
 			case "takeover":
@@ -138,7 +156,7 @@ func (s *SSO) Provision(ctx caddy.Context) error {
 	s.key = key
 	s.client = &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	s.cache = make(map[[32]byte]*refreshResult)
-	return nil
+	return s.provisionRevocations()
 }
 
 // 所有 Cookie 头合并处理，保留应用自己的 cookie。
@@ -169,39 +187,40 @@ func stripCookies(r *http.Request) (string, string) {
 	}
 	return access, refresh
 }
-func verify(key ed25519.PublicKey, token, host string, now int64) (string, bool) {
+func verify(key ed25519.PublicKey, token, host string, now int64) (string, int64, bool) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
-		return "", false
+		return "", 0, false
 	}
 	header, err := base64.RawURLEncoding.DecodeString(parts[0])
 	if err != nil {
-		return "", false
+		return "", 0, false
 	}
 	var h struct {
 		Alg string `json:"alg"`
 	}
 	if json.Unmarshal(header, &h) != nil || h.Alg != "EdDSA" {
-		return "", false
+		return "", 0, false
 	}
 	sig, err := base64.RawURLEncoding.DecodeString(parts[2])
 	if err != nil || !ed25519.Verify(key, []byte(parts[0]+"."+parts[1]), sig) {
-		return "", false
+		return "", 0, false
 	}
 	data, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
-		return "", false
+		return "", 0, false
 	}
 	var claims struct {
 		Iss string `json:"iss"`
 		Sub string `json:"sub"`
 		Aud string `json:"aud"`
+		Iat int64  `json:"iat"`
 		Exp int64  `json:"exp"`
 	}
-	if json.Unmarshal(data, &claims) != nil || claims.Iss != "wharf" || claims.Sub == "" || claims.Aud == "" || claims.Aud != host || claims.Exp <= now-CLOCK_SKEW {
-		return "", false
+	if json.Unmarshal(data, &claims) != nil || claims.Iss != "wharf" || claims.Sub == "" || claims.Aud == "" || claims.Aud != host || claims.Iat <= 0 || claims.Exp <= now-CLOCK_SKEW {
+		return "", 0, false
 	}
-	return claims.Sub, true
+	return claims.Sub, claims.Iat, true
 }
 func originalURL(r *http.Request) string {
 	scheme := "http"
@@ -218,9 +237,13 @@ func (s *SSO) setUser(r *http.Request, user string) {
 		repl.Set("http.wharf_sso.user", user)
 	}
 }
-func (s *SSO) refresh(r *http.Request, token string) *refreshResult {
+func refreshCacheKey(r *http.Request, token string) [32]byte {
 	// 按目标域名隔离结果，避免不同站点共享跳转响应；缓存不保存原始凭据。
-	key := sha256.Sum256([]byte(token + "\x00" + r.Host))
+	return sha256.Sum256([]byte(token + "\x00" + r.Host))
+}
+
+func (s *SSO) refresh(r *http.Request, token string) *refreshResult {
+	key := refreshCacheKey(r, token)
 	s.mu.Lock()
 	if old := s.cache[key]; old != nil && (old.until.IsZero() || time.Now().Before(old.until)) {
 		s.mu.Unlock()
@@ -497,7 +520,7 @@ func (s *SSO) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.H
 		}
 		return err
 	}
-	if user, ok := verify(s.key, access, requestHost(r), time.Now().Unix()); ok {
+	if user, ok := s.verifyAccess(access, requestHost(r), time.Now().Unix()); ok {
 		s.setUser(r, user)
 		if appLogin != "" {
 			redirectAppLogin(w, r, appLogin, takeoverPath != "")
@@ -507,6 +530,15 @@ func (s *SSO) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.H
 	}
 	if refresh != "" {
 		result := s.refresh(r, refresh)
+		if result.status == http.StatusOK && !s.refreshAllowed(result, requestHost(r), time.Now().Unix()) {
+			key := refreshCacheKey(r, refresh)
+			s.mu.Lock()
+			if s.cache[key] == result {
+				delete(s.cache, key)
+			}
+			s.mu.Unlock()
+			result = &refreshResult{status: http.StatusUnauthorized, body: []byte("需要登录")}
+		}
 		for _, cookie := range result.header.Values("Set-Cookie") {
 			w.Header().Add("Set-Cookie", cookie)
 		}

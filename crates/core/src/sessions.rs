@@ -79,11 +79,13 @@ pub async fn revoke(
       if hash.starts_with(&id) {
         return Err(ApiError::invalid("当前设备请用右上角的退出"));
       }
-      tx.execute(
-        "DELETE FROM sessions WHERE hash LIKE ?1",
-        [&pattern],
-      )
-      .map_err(sql_err)?;
+      let removed = tx
+        .execute(
+          "DELETE FROM sessions WHERE hash LIKE ?1",
+          [&pattern],
+        )
+        .map_err(sql_err)?;
+      crate::gate::revocations::sessions_removed(&tx, removed)?;
       tx.commit().map_err(sql_err)
     })
     .await?;
@@ -108,11 +110,16 @@ pub async fn revoke_others(
   let removed = s
     .db
     .call(move |c| {
-      c.execute(
-        "DELETE FROM sessions WHERE hash != ?1",
-        params![hash],
-      )
-      .map_err(sql_err)
+      let tx = c.unchecked_transaction().map_err(sql_err)?;
+      let removed = tx
+        .execute(
+          "DELETE FROM sessions WHERE hash != ?1",
+          params![hash],
+        )
+        .map_err(sql_err)?;
+      crate::gate::revocations::sessions_removed(&tx, removed)?;
+      tx.commit().map_err(sql_err)?;
+      Ok(removed)
     })
     .await?;
   crate::audit::login_event(

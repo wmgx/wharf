@@ -87,6 +87,14 @@ fn custom_caddy_requires_admin_to_change() {
     }
     assert!(require_route_caddy(&plan, true).is_ok());
   }
+  plan.items[0].action = Action::Update;
+  plan.items[0].before = Some(json!({}));
+  plan.items[0].after = Some(json!({"core_mesh_only": true}));
+  assert_eq!(
+    require_route_caddy(&plan, false).unwrap_err().code,
+    ErrorCode::Forbidden
+  );
+  assert!(require_route_caddy(&plan, true).is_ok());
 }
 
 #[test]
@@ -357,7 +365,7 @@ fn global_caddy_directive_order() {
     ..Default::default()
   };
   let orders = |site: &Site| {
-    render::caddyfile_with_acme(
+    render::caddyfile_with_fill(
       "edge",
       &gateway,
       std::slice::from_ref(site),
@@ -365,7 +373,7 @@ fn global_caddy_directive_order() {
       false,
       Some("public"),
       &[],
-      None,
+      Default::default(),
     )
     .lines()
     .filter_map(|line| {

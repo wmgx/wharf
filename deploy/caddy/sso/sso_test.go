@@ -20,8 +20,12 @@ import (
 )
 
 func token(key ed25519.PrivateKey, alg, iss, aud string, exp int64) string {
+	return tokenAt(key, alg, iss, aud, 1700000000, exp)
+}
+
+func tokenAt(key ed25519.PrivateKey, alg, iss, aud string, iat, exp int64) string {
 	h := base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(`{"alg":%q,"typ":"JWT"}`, alg)))
-	p := base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(`{"aud":%q,"exp":%d,"iat":1700000000,"iss":%q,"sub":"admin"}`, aud, exp, iss)))
+	p := base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(`{"aud":%q,"exp":%d,"iat":%d,"iss":%q,"sub":"admin"}`, aud, exp, iat, iss)))
 	raw := h + "." + p
 	return raw + "." + base64.RawURLEncoding.EncodeToString(ed25519.Sign(key, []byte(raw)))
 }
@@ -62,14 +66,14 @@ func TestVerify(t *testing.T) {
 	pub := key.Public().(ed25519.PublicKey)
 	good := token(key, "EdDSA", "wharf", "a.example.test", 1700000600)
 	for _, bad := range []string{good[:len(good)-2] + "xx", token(key, "EdDSA", "wharf", "a.example.test", 1699999900), token(key, "none", "wharf", "a.example.test", 1700000600), token(key, "HS256", "wharf", "a.example.test", 1700000600), token(key, "EdDSA", "other", "a.example.test", 1700000600), "hash.1700000600.signature"} {
-		if _, ok := verify(pub, bad, "a.example.test", 1700000000); ok {
+		if _, _, ok := verify(pub, bad, "a.example.test", 1700000000); ok {
 			t.Fatal("无效凭据被接受")
 		}
 	}
-	if user, ok := verify(pub, good, "a.example.test", 1700000000); !ok || user != "admin" {
+	if user, _, ok := verify(pub, good, "a.example.test", 1700000000); !ok || user != "admin" {
 		t.Fatal("有效凭据被拒")
 	}
-	if _, ok := verify(pub, token(key, "EdDSA", "wharf", "a.example.test", 1699999980), "a.example.test", 1700000000); !ok {
+	if _, _, ok := verify(pub, token(key, "EdDSA", "wharf", "a.example.test", 1699999980), "a.example.test", 1700000000); !ok {
 		t.Fatal("20 秒时钟差被拒")
 	}
 	// Rust 与 Go 共用固定种子、内容及凭据。
@@ -78,10 +82,10 @@ func TestVerify(t *testing.T) {
 		t.Fatal("跨语言凭据不一致")
 	}
 	const legacy = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3MDAwMDA2MDAsImlhdCI6MTcwMDAwMDAwMCwiaXNzIjoid2hhcmYiLCJzdWIiOiJhZG1pbiJ9.J-x_gW3JdQqN7lpvfll72TH40DsjtJCgW3TDzgM20dlmY78RWQESgnYWBtD2X4Pki4WpS-F6s0poysRCdKrGAg"
-	if _, ok := verify(pub, legacy, "a.example.test", 1700000000); ok {
+	if _, _, ok := verify(pub, legacy, "a.example.test", 1700000000); ok {
 		t.Fatal("缺少受众的旧凭据被接受")
 	}
-	if _, ok := verify(pub, good, "b.example.test", 1700000000); ok {
+	if _, _, ok := verify(pub, good, "b.example.test", 1700000000); ok {
 		t.Fatal("凭据受众与站点不匹配")
 	}
 }

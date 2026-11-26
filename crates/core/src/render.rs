@@ -20,7 +20,7 @@ mod gate;
 /// 网关默认镜像：官方 Caddy 加 layer4、限速、Cloudflare DNS 插件（deploy/caddy/Dockerfile）。
 /// 标签只在 Caddy 或插件版本变化时改，改了会重建所有没指定镜像的 caddy 网关。
 pub const DEFAULT_CADDY_IMAGE: &str =
-  "ghcr.io/wmgx/wharf-caddy:2.11.9-8";
+  "ghcr.io/wmgx/wharf-caddy:2.11.9-9";
 
 /// Caddyfile 里 acme-dns 密码的占位，执行时换成入口的密钥。
 pub const ACME_DNS_KEY: &str = "[[WHARF_ACME_DNS_KEY]]";
@@ -1128,6 +1128,7 @@ pub struct Site {
   /// 只放行内网来源。
   pub internal: bool,
   pub internal_ranges: Vec<String>,
+  pub protection: crate::entry_protection::SiteProtection,
   /// 临时分享的到期时间（毫秒），过了就断开。
   pub expires_at: Option<i64>,
   /// 泛域名站点：只签证书，未匹配具体域名的请求直接断开。
@@ -1182,6 +1183,12 @@ fn error_snippet(spec: &GatewaySpec) -> String {
 pub struct AcmeDnsFill<'a> {
   pub key: &'a str,
   pub url: &'a str,
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct CaddyFill<'a> {
+  pub acme_dns: Option<AcmeDnsFill<'a>>,
+  pub gate_revocation_key: Option<&'a str>,
 }
 
 fn dns_tls(
@@ -1249,7 +1256,7 @@ fn caddyfile(
   link: bool,
   gate_public: Option<&str>,
 ) -> String {
-  caddyfile_with_acme(
+  caddyfile_with_fill(
     name,
     spec,
     sites,
@@ -1257,12 +1264,12 @@ fn caddyfile(
     link,
     gate_public,
     &[],
-    None,
+    CaddyFill::default(),
   )
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn caddyfile_with_acme(
+pub fn caddyfile_with_fill(
   name: &str,
   spec: &GatewaySpec,
   sites: &[Site],
@@ -1270,7 +1277,7 @@ pub fn caddyfile_with_acme(
   link: bool,
   gate_public: Option<&str>,
   trusted_proxies: &[String],
-  fill: Option<AcmeDnsFill<'_>>,
+  fill: CaddyFill<'_>,
 ) -> String {
   let mut out = format!(
     "# 由 Wharf 生成，不要手改。网关：{name}\n# 手写的站点放到 conf/extra.d/*.caddy\n{{\n\tadmin {CADDY_ADMIN}\n\tmetrics {{\n\t\tper_host\n\t}}\n"
@@ -1289,9 +1296,7 @@ pub fn caddyfile_with_acme(
     GatewayTls::Internal => out.push_str("\tlocal_certs\n"),
     GatewayTls::Off => out.push_str("\tauto_https off\n"),
   }
-  if sites.iter().any(|s| s.internal || s.expires_at.is_some()) {
-    out.push_str("\torder abort before basic_auth\n");
-  }
+  crate::entry_protection::render_abort_order(&mut out, sites);
   if sites
     .iter()
     .any(|s| s.redirect.is_none() && s.block_scanners)
@@ -1307,8 +1312,9 @@ pub fn caddyfile_with_acme(
   if sites.iter().any(|s| s.gate.is_some()) {
     out.push_str("\torder wharf_sso before basic_auth\n");
   }
-  crate::source_trust::render_proxy_options(
+  crate::entry_protection::render_servers(
     &mut out,
+    spec,
     trusted_proxies,
   );
   if !forwards.is_empty() {
@@ -1344,10 +1350,16 @@ pub fn caddyfile_with_acme(
   let mut sites = sites.to_vec();
   sites.sort_by(|a, b| a.hostname.cmp(&b.hostname));
   for site in sites {
+    site.protection.render_http_redirect(
+      &mut out,
+      spec,
+      &site.hostname,
+    );
     out.push_str(&format!("\n{scheme}{} {{\n", site.hostname));
+    site.protection.render_matchers(&mut out);
     if site.wildcard {
       if let Some(subdomain) = &site.dns {
-        out.push_str(&dns_tls(name, subdomain, fill));
+        out.push_str(&dns_tls(name, subdomain, fill.acme_dns));
       }
       out.push_str("\tabort\n}\n");
       continue;
@@ -1372,7 +1384,7 @@ pub fn caddyfile_with_acme(
       ));
     }
     if let Some(subdomain) = &site.dns {
-      out.push_str(&dns_tls(name, subdomain, fill));
+      out.push_str(&dns_tls(name, subdomain, fill.acme_dns));
     }
     if site.internal {
       let ranges = if site.internal_ranges.is_empty() {
@@ -1407,7 +1419,12 @@ pub fn caddyfile_with_acme(
       }
     }
     if let Some(gate) = &site.gate {
-      gate::render_gate(&mut out, gate, gate_public);
+      gate::render_gate(
+        &mut out,
+        gate,
+        gate_public,
+        fill.gate_revocation_key,
+      );
     }
     if let Some(a) = &site.auth {
       out.push_str(&format!(
@@ -1426,6 +1443,7 @@ pub fn caddyfile_with_acme(
       site.upstream
     ));
   }
+  crate::entry_protection::render_http_fallback(&mut out, spec);
   // 反向隧道：frpc 按 IP 连进来，握手带固定名字，用 Caddy 自己签的证书。
   if link {
     let tls = match spec.tls {
@@ -1612,7 +1630,7 @@ mod tests {
       rate_limit: Some(42),
       ..Default::default()
     }];
-    let out = caddyfile_with_acme(
+    let out = caddyfile_with_fill(
       "edge",
       &spec,
       &sites,
@@ -1620,7 +1638,7 @@ mod tests {
       false,
       None,
       &ranges,
-      None,
+      CaddyFill::default(),
     );
     assert!(out.contains("trusted_proxies static 127.0.0.1/32 173.245.48.0/20 203.0.113.0/24 ::1/128\n\t\ttrusted_proxies_strict"));
     assert!(out.contains("(wharf_strip_forwarded)"));
@@ -1635,9 +1653,15 @@ mod tests {
     assert!(!legacy.contains("trusted_proxies"));
     assert!(!legacy.contains("wharf_strip_forwarded"));
     assert!(legacy.contains("key {remote_host}"));
-    // 基准来自加入可信代理选项前的同一份配置。
+    assert_eq!(out.matches("\n\tservers {").count(), 1);
+    assert!(out.contains("\tgrace_period 10s\n\tservers {"));
+    assert!(out.contains("\t\t\tread_header 10s\n\t\t\tidle 2m"));
+    assert_eq!(legacy.matches("\n\tservers {").count(), 1);
+    let before_edge_protection = legacy
+      .replace("\tgrace_period 10s\n\tservers {\n\t\ttimeouts {\n\t\t\tread_header 10s\n\t\t\tidle 2m\n\t\t}\n\t}\n", "")
+      .replace("\nhttp://:80 {\n\tabort\n}\n", "");
     assert_eq!(
-      hash(&legacy),
+      hash(&before_edge_protection),
       "3304837aead9414fe3d3192bbabc2f263fc2817e5ee805cabeac7885c01b2cdf"
     );
   }
@@ -2064,6 +2088,9 @@ mod tests {
       wildcard: vec![],
       layer4: vec![],
       trusted_proxies: None,
+      read_header_timeout: None,
+      idle_timeout: None,
+      grace_period: None,
     };
     let out = caddyfile(
       "edge",
@@ -2305,6 +2332,9 @@ mod tests {
       wildcard: vec![],
       layer4: vec![],
       trusted_proxies: None,
+      read_header_timeout: None,
+      idle_timeout: None,
+      grace_period: None,
     };
     let out = caddyfile(
       "edge",
@@ -2341,6 +2371,9 @@ mod tests {
       wildcard: vec![],
       layer4: vec![],
       trusted_proxies: None,
+      read_header_timeout: None,
+      idle_timeout: None,
+      grace_period: None,
     };
     let out = tunnel_compose("cf", &spec, None);
     assert!(

@@ -45,6 +45,7 @@ mod edge_api;
 mod edge_plan;
 mod edge_sync;
 mod egress;
+mod entry_protection;
 mod exposure;
 mod external_checks;
 mod external_status;

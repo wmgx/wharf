@@ -223,7 +223,9 @@ mod tests {
 
   #[test]
   fn fill_points_at_update_route() {
-    use crate::render::{AcmeDnsFill, Site, caddyfile_with_acme};
+    use crate::render::{
+      AcmeDnsFill, CaddyFill, Site, caddyfile_with_fill,
+    };
 
     let spec = serde_json::from_value(json!({
       "kind": "caddy", "server": "s1", "error_page": "unchanged"
@@ -240,7 +242,7 @@ mod tests {
       url: "https://core.example.com",
     });
     let render = |sites: &[Site], fill| {
-      caddyfile_with_acme(
+      caddyfile_with_fill(
         "edge",
         &spec,
         sites,
@@ -248,7 +250,10 @@ mod tests {
         false,
         None,
         &[],
-        fill,
+        CaddyFill {
+          acme_dns: fill,
+          ..Default::default()
+        },
       )
     };
     let config = render(&[site], fill);

@@ -18,6 +18,7 @@ use axum::{
 };
 use wharf_api_types::{
   ApiError,
+  spec::RouteSpec,
   view::{CoreAddress, CoreAddresses, Perm},
 };
 
@@ -187,6 +188,25 @@ pub(crate) fn core_server(
     .cloned()
 }
 
+pub(crate) fn is_core_route(
+  world: &World,
+  net: &Net,
+  route: &RouteSpec,
+  port: u16,
+) -> bool {
+  core_upstream(route, port).is_some_and(|host| {
+    let own = own_ipv4s();
+    is_core_upstream(
+      world,
+      net,
+      route,
+      core_server(net, &own).as_deref(),
+      &own,
+      host,
+    )
+  })
+}
+
 /// 上游指向控制面的路由。
 fn core_routes(
   world: &World,
@@ -199,30 +219,39 @@ fn core_routes(
     .routes
     .iter()
     .filter(|(_, r)| {
-      let Some((host, p)) =
-        r.spec.upstream.as_deref().and_then(|u| u.rsplit_once(':'))
-      else {
-        return false;
-      };
-      if p.parse() != Ok(port) {
-        return false;
-      }
-      let local = host == "127.0.0.1" || host == "localhost";
-      let gw_server = world
-        .route_gateway(&r.spec)
-        .and_then(|g| world.gateways.get(g))
-        .map(|g| g.spec.server.as_str());
-      if local {
-        server.is_some() && gw_server == server
-      } else {
-        own.contains(host)
-          || server
-            .and_then(|s| net.private.get(s))
-            .is_some_and(|a| a.ip == host)
-      }
+      core_upstream(&r.spec, port).is_some_and(|host| {
+        is_core_upstream(world, net, &r.spec, server, own, host)
+      })
     })
     .map(|(h, _)| h.clone())
     .collect()
+}
+
+fn core_upstream(route: &RouteSpec, port: u16) -> Option<&str> {
+  let (host, p) = route.upstream.as_deref()?.rsplit_once(':')?;
+  (p.parse() == Ok(port)).then_some(host)
+}
+
+fn is_core_upstream(
+  world: &World,
+  net: &Net,
+  route: &RouteSpec,
+  server: Option<&str>,
+  own: &BTreeSet<String>,
+  host: &str,
+) -> bool {
+  if host == "127.0.0.1" || host == "localhost" {
+    let gw_server = world
+      .route_gateway(route)
+      .and_then(|g| world.gateways.get(g))
+      .map(|g| g.spec.server.as_str());
+    server.is_some() && gw_server == server
+  } else {
+    own.contains(host)
+      || server
+        .and_then(|s| net.private.get(s))
+        .is_some_and(|a| a.ip == host)
+  }
 }
 
 fn rank(ip: Ipv4Addr) -> u8 {

@@ -26,8 +26,9 @@ use wharf_api_types::{
 
 mod credentials;
 mod paths;
+pub(crate) mod revocations;
 use credentials::{
-  access_cookie, credential_host, rt_parse, rt_sign, rt_user, verify,
+  access_cookie, credential_host, rt_parse, rt_sign, rt_user,
 };
 use paths::{login_rd, rd_url, site_gate_rd};
 pub(crate) use paths::{
@@ -104,13 +105,9 @@ pub fn is_core_host(
   host: &str,
 ) -> bool {
   RENDER.get().is_some_and(|(_, port, _)| {
-    crate::join::route_urls(world, net, *port)
-      .iter()
-      .any(|url| {
-        reqwest::Url::parse(url)
-          .ok()
-          .is_some_and(|u| u.host_str() == Some(host))
-      })
+    world.routes.get(host).is_some_and(|route| {
+      crate::join::is_core_route(world, net, &route.spec, *port)
+    })
   })
 }
 fn public_b64(key: &SigningKey) -> String {
@@ -470,10 +467,11 @@ pub async fn site_login(
     )
   };
   let signing = key(&s.db).await?;
-  let authenticated = cookie(&headers, "wharf_gate")
-    .and_then(|t| verify(&signing, t, &host, now_ms() / 1000))
-    .is_some()
-    || rt_user(&s.db, &headers, &host).await?.is_some();
+  let authenticated =
+    revocations::access_user(&s.db, &signing, &headers, &host)
+      .await?
+      .is_some()
+      || rt_user(&s.db, &headers, &host).await?.is_some();
   if !authenticated {
     let target = format!(
       "https://{host}/_wharf/login?rd={}",

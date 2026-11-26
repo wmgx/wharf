@@ -1211,6 +1211,8 @@ pub enum GatewayCmd {
     #[command(flatten)]
     apply: ApplyFlags,
   },
+  /// 查看或修改 Caddy 的连接超时和热重载宽限。
+  Timeouts(commands::entry_protection::TimeoutsArgs),
   /// 四层转发：入口监听公网 TCP 或 UDP 端口，转给服务。--rm 删除。
   Forward {
     name: String,
@@ -1253,6 +1255,7 @@ pub enum RouteCmd {
     args: note::NoteArgs,
   },
   /// 新增或修改路由。修改已有域名时只改给出的参数。
+  #[command(visible_alias = "set")]
   Add {
     hostname: String,
     /// 服务或边缘应用（Workers / Pages）的名字。
@@ -1303,6 +1306,8 @@ pub enum RouteCmd {
     /// 恢复公网访问。
     #[arg(long)]
     no_internal: bool,
+    #[command(flatten)]
+    protection: commands::entry_protection::RouteProtectionArgs,
     #[command(flatten)]
     apply: ApplyFlags,
   },

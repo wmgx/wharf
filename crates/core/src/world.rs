@@ -961,6 +961,7 @@ impl World {
     let mut forwards = BTreeSet::new();
     for (name, gateway) in &self.gateways {
       validate_gateway(name, &gateway.spec)?;
+      crate::entry_protection::validate_gateway(name, &gateway.spec)?;
       if !self.servers.contains_key(&gateway.spec.server) {
         return Err(server_not_found(&gateway.spec.server));
       }
@@ -1111,6 +1112,11 @@ impl World {
         );
       }
       self.check_route_gateway(host, &route.spec)?;
+      crate::entry_protection::validate_route(
+        self,
+        host,
+        &route.spec,
+      )?;
       if let Some(sso) = &route.spec.sso {
         crate::sso_login::validate(host, sso)?;
         if let Some(header) = &sso.header {
@@ -2680,6 +2686,8 @@ services:
           rate_limit: None,
           block_scanners: false,
           internal: false,
+          core_mesh_only: false,
+          cf_origin_only: false,
           expires_at: None,
         },
       },
@@ -2704,6 +2712,9 @@ services:
         wildcard: vec![],
         layer4: vec![],
         trusted_proxies: None,
+        read_header_timeout: None,
+        idle_timeout: None,
+        grace_period: None,
       },
     }])
     .unwrap();
@@ -2747,6 +2758,9 @@ services:
       wildcard: vec![],
       layer4: vec![],
       trusted_proxies: None,
+      read_header_timeout: None,
+      idle_timeout: None,
+      grace_period: None,
     };
     let route = |backup: &str| RouteSpec {
       sso: None,
@@ -2764,6 +2778,8 @@ services:
       rate_limit: None,
       block_scanners: false,
       internal: false,
+      core_mesh_only: false,
+      cf_origin_only: false,
       expires_at: None,
     };
     w.apply_changes(&[

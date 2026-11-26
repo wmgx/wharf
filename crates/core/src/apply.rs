@@ -49,6 +49,7 @@ const SHORT_TIMEOUT: Duration = Duration::from_secs(3 * 60);
 /// 每个步骤最多保留的日志行数。
 const MAX_LOG_LINES: usize = 400;
 
+mod gateway;
 #[path = "apply/run_scope.rs"]
 mod run_scope;
 
@@ -1007,58 +1008,9 @@ async fn run_step(
         &r.fingerprint(),
         &format!("网关 {gateway}"),
       )?;
-      let config = if r.needs_acme_dns {
-        let name = crate::acme_dns::secret_name(gateway);
-        let url = crate::join::default_url(state).await.ok_or_else(|| {
-          ApiError::invalid(format!(
-            "控制面没有对外地址，入口 {gateway} 做 DNS 验证时要连回控制面"
-          ))
-          .with_hint("用 --public-url 启动控制面，或者给控制面加一个域名")
-        })?;
-        if let Ok(parsed) = reqwest::Url::parse(&url)
-          && let Some(host) = parsed.host_str()
-          && world.routes.get(host).is_some_and(|route| {
-            world.route_gateway(&route.spec) == Some(gateway.as_str())
-          })
-          && let Some((_, zone)) = host.split_once('.')
-          && gw.spec.wildcard.iter().any(|z| z == zone)
-        {
-          return Err(ApiError::invalid(format!("控制面的域名 {host} 在入口 {gateway} 的泛域名证书 *.{zone} 下，开了以后签证书时连不回控制面")).with_hint("用 --public-url 给控制面指定一个不经过这个入口的地址，或者把控制面的域名换到别的 zone"));
-        }
-        if let Ok(parsed) = reqwest::Url::parse(&url)
-          && let Some(host) = parsed.host_str()
-          && world.routes.get(host).is_some_and(|route| {
-            route.spec.internal
-              && world.route_gateway(&route.spec)
-                == Some(gateway.as_str())
-          })
-          && r
-            .sites
-            .iter()
-            .any(|site| site.hostname == host && site.dns.is_some())
-        {
-          return Err(ApiError::invalid(format!("控制面的域名 {host} 是内网域名，证书要用 DNS 验证签，签的时候连不回控制面")).with_hint("用 --public-url 给控制面指定一个不经过这个入口的地址，或者把控制面的域名换到别的 zone"));
-        }
-        let key = state
-          .db
-          .call_credentials(move |c, key| {
-            db::ensure_secret(c, key, &name, db::now_ms())
-          })
+      let r =
+        gateway::caddyfile_for_apply(state, world, &net, gateway, r)
           .await?;
-        crate::caddy_validate::validate_acme_dns_fill(&key, &url)?;
-        snapshot::gateway_render_with_acme(
-          world,
-          &net,
-          gateway,
-          Some(render::AcmeDnsFill {
-            key: &key,
-            url: &url,
-          }),
-        )?
-        .config
-      } else {
-        r.config
-      };
       let result: ProjectUpResult = state
         .hub
         .call(
@@ -1075,7 +1027,7 @@ async fn run_step(
               pins: Default::default(),
               trial: None,
             },
-            caddyfile: config,
+            caddyfile: r.config,
             caddyfile_hash: r.config_hash,
             image: render::gateway_image(&gw.spec),
           }),

@@ -404,14 +404,17 @@ fn acme_dns_key_only_in_dns_block() {
   let net = render::Net::default();
   let placeholder =
     snapshot::gateway_render(&world, &net, "edge").unwrap();
-  let filled = snapshot::gateway_render_with_acme(
+  let filled = snapshot::gateway_render_with_fill(
     &world,
     &net,
     "edge",
-    Some(render::AcmeDnsFill {
-      key: "test-dns-secret",
-      url: "https://core.example.test/",
-    }),
+    render::CaddyFill {
+      acme_dns: Some(render::AcmeDnsFill {
+        key: "test-dns-secret",
+        url: "https://core.example.test/",
+      }),
+      ..Default::default()
+    },
   )
   .unwrap();
   let old_block = "\ttls {\n\t\tdns acmedns {\n\t\t\tusername edge\n\t\t\tpassword [[WHARF_ACME_DNS_KEY]]\n\t\t\tsubdomain example.test\n\t\t\tserver_url [[WHARF_ACME_DNS_URL]]\n\t\t}\n\t}\n";

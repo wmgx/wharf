@@ -67,6 +67,10 @@ pub fn spawn(state: Arc<AppState>) {
       if let Err(e) = crate::sso_login::cleanup(&state).await {
         tracing::warn!("读取待清理的代登录配置失败：{e}");
       }
+      if let Err(e) = crate::gate::revocations::cleanup(&state).await
+      {
+        tracing::warn!("清理门禁吊销名单失败：{e}");
+      }
       tokio::time::sleep(TICK).await;
     }
   });

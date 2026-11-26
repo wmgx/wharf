@@ -487,6 +487,8 @@ pub struct GatewayView {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RouteView {
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub core: bool,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub note: Option<String>,
   #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -1151,6 +1151,10 @@ export interface GatewaySpec {
    */
   error_page?: string | null;
   /**
+   * caddy：重载时等待正在处理的请求（秒），默认 10。
+   */
+  grace_period?: number | null;
+  /**
    * caddy：HTTP 端口，默认 80。改端口只用于测试，签证书需要 80。
    */
   http_port?: number | null;
@@ -1158,6 +1162,10 @@ export interface GatewaySpec {
    * caddy：HTTPS 端口，默认 443。
    */
   https_port?: number | null;
+  /**
+   * caddy：连接空闲超时（秒），默认 120。
+   */
+  idle_timeout?: number | null;
   /**
    * caddy：镜像，默认 Wharf 自建的 wharf-caddy。
    */
@@ -1167,6 +1175,10 @@ export interface GatewaySpec {
    * caddy：四层转发，只经过入口所在机器，服务自己的端口不对公网开放。
    */
   layer4?: Layer4Forward[];
+  /**
+   * caddy：读取请求头的超时（秒），默认 10。
+   */
+  read_header_timeout?: number | null;
   /**
    * 网关跑在哪台服务器上。
    */
@@ -2136,6 +2148,14 @@ export interface RouteSpec {
    */
   caddy?: string | null;
   /**
+   * 只接受 Cloudflare 官方网段的直连请求。
+   */
+  cf_origin_only?: boolean;
+  /**
+   * 仅向组网内来源开放控制面页面。
+   */
+  core_mesh_only?: boolean;
+  /**
    * 临时分享：到这个时间（毫秒时间戳）以后，网关直接断开这个域名的请求；路由和 DNS 记录留着，等人删除。
    */
   expires_at?: number | null;
@@ -2187,6 +2207,7 @@ export interface RouteSpec {
 }
 
 export interface RouteView {
+  core?: boolean;
   /**
    * 实际使用的网关（spec 里没填时是默认网关）。
    */
