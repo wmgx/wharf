@@ -871,6 +871,8 @@ fn spec_json(world: &World, kind: &str, name: &str) -> Option<Value> {
   }
 }
 
+mod route_impact;
+
 fn config_items(
   b: &mut Builder,
   current: &World,
@@ -952,43 +954,11 @@ fn config_items(
       (KIND_EDGE, Action::Delete) => {
         (vec![], "不再纳管（厂商那边的项目保留）".to_string())
       }
-      (KIND_ROUTE, Action::Delete) => (
-        vec![Impact::Downtime],
-        "删除路由，域名将无法访问".to_string(),
+      (KIND_ROUTE, action) => route_impact::route_impact(
+        current.routes.get(name).map(|r| &r.spec),
+        desired.routes.get(name).map(|r| &r.spec),
+        action,
       ),
-      (KIND_ROUTE, Action::Create) => {
-        let route = desired.routes.get(name);
-        let auth = route.is_some_and(|r| {
-          r.spec.auth
-            || r.spec.sso.as_ref().is_some_and(|s| s.gated())
-        });
-        if route.is_some_and(|r| r.spec.redirect.is_some()) {
-          (vec![], "新增跳转".to_string())
-        } else if let Some(ms) = route.and_then(|r| r.spec.expires_at)
-        {
-          let time = chrono::DateTime::from_timestamp_millis(ms)
-            .unwrap()
-            .with_timezone(
-              &chrono::FixedOffset::east_opt(8 * 3600).unwrap(),
-            );
-          (
-            vec![],
-            format!(
-              "新增临时分享，{} 到期失效",
-              time.format("%m-%d %H:%M")
-            ),
-          )
-        } else if route.is_some_and(|r| r.spec.internal) {
-          (vec![], "新增内网域名".to_string())
-        } else if auth {
-          (vec![], "新增路由".to_string())
-        } else {
-          (
-            vec![Impact::Public],
-            "新增公网路由，未开启 auth".to_string(),
-          )
-        }
-      }
       (_, Action::Create) => (vec![], "新增".to_string()),
       // 配置没变，只是记下固定的镜像版本（存在 meta 里）。
       (KIND_SERVICE, Action::Update) if before == after => {
@@ -1001,51 +971,6 @@ fn config_items(
           Some(d) => (vec![], format!("固定镜像版本 {d}，不重建")),
           None => (vec![], "更新内部记录，不重建".to_string()),
         }
-      }
-      (KIND_ROUTE, Action::Update)
-        if current.routes.get(name).is_some_and(|r| {
-          r.spec.sso.as_ref().is_some_and(|s| s.gated())
-        }) && desired.routes.get(name).is_some_and(|r| {
-          !r.spec.sso.as_ref().is_some_and(|s| s.gated())
-            && !r.spec.auth
-        }) =>
-      {
-        (
-          vec![Impact::Public],
-          "去掉门禁后这个域名对公网开放".to_string(),
-        )
-      }
-      (KIND_ROUTE, Action::Update)
-        if current
-          .routes
-          .get(name)
-          .is_some_and(|r| r.spec.internal)
-          && desired.routes.get(name).is_some_and(|r| {
-            !r.spec.internal
-              && !r.spec.auth
-              && r.spec.redirect.is_none()
-          }) =>
-      {
-        (
-          vec![Impact::Public],
-          "内网域名改成公网域名，未开启 auth".to_string(),
-        )
-      }
-      (KIND_ROUTE, Action::Update)
-        if current
-          .routes
-          .get(name)
-          .is_some_and(|r| r.spec.expires_at.is_some())
-          && desired.routes.get(name).is_some_and(|r| {
-            r.spec.expires_at.is_none()
-              && !r.spec.auth
-              && !r.spec.internal
-          }) =>
-      {
-        (
-          vec![Impact::Public],
-          "临时分享改成长期公网路由，未开启 auth".to_string(),
-        )
       }
       _ => (vec![], "修改配置".to_string()),
     };

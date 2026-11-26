@@ -528,6 +528,7 @@ pub fn gateway_render_with_acme(
           .unwrap_or_else(|| login.clone());
         Ok(render::Gate {
           public: sso.public,
+          site_endpoints: crate::gate::site_endpoints(sso),
           app_login: sso.mode
             == wharf_api_types::spec::SsoMode::Login,
           user_header: (sso.mode

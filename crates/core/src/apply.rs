@@ -230,6 +230,8 @@ async fn stored_plan(
   })
 }
 
+mod confirm;
+
 pub async fn start(
   state: Arc<AppState>,
   req: ApplyRequest,
@@ -315,40 +317,12 @@ pub async fn start(
     ));
   }
   require_login_account(plan, perms.contains(&Perm::Admin))?;
-  let missing: Vec<&String> = plan
-    .needs_confirm
-    .iter()
-    .filter(|a| !req.confirm.contains(a))
-    .collect();
-  if !missing.is_empty() {
-    let flags: String =
-      missing.iter().map(|a| format!(" --confirm {a}")).collect();
-    let addresses: Vec<&str> =
-      missing.iter().map(|s| s.as_str()).collect();
-    return Err(
-      ApiError::new(
-        ErrorCode::ConfirmRequired,
-        format!(
-          "计划里有高风险项，需要确认：{}",
-          addresses.join("、")
-        ),
-      )
-      .with_hint("先看清楚 plan 里这些项的 reason，再确认")
-      .suggest(format!("wharf apply {}{flags}", plan.plan_id)),
-    );
-  }
-  if !plan.needs_confirm.is_empty() && !perms.contains(&Perm::Confirm)
-  {
-    return Err(
-      ApiError::new(
-        ErrorCode::Forbidden,
-        "计划里有高风险项，当前 token 只能执行安全的计划",
-      )
-      .with_hint(
-        "请用户在页面上确认执行，或用有 confirm 权限的 token",
-      ),
-    );
-  }
+  confirm::require(
+    &plan.plan_id,
+    &plan.needs_confirm,
+    &req.confirm,
+    perms.contains(&Perm::Confirm),
+  )?;
 
   // 检查版本并写入配置，在一个事务里完成。
   let run_id = crate::world::new_id("r");
