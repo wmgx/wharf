@@ -45,7 +45,7 @@ pub struct Gate {
 }
 
 /// 内置的错误页。
-const DEFAULT_ERROR_PAGE: &str = include_str!("error_page.html");
+const DEFAULT_ERROR_PAGE: &str = include_str!("../error_page.html");
 /// 错误页在 Caddyfile 里的结束标记；内容里不能出现它。
 pub const ERROR_PAGE_END: &str = "WHARF_ERROR_PAGE";
 

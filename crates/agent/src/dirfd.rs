@@ -331,15 +331,31 @@ pub(crate) fn remove_service(
   base: &Path,
   service: &str,
 ) -> Result<(), ApiError> {
-  match DirFd::open_service_root(base, service) {
-    Ok(_) => {
-      let dir = base.join(service);
+  validate_name(
+    "服务",
+    service
+      .strip_prefix(wharf_api_types::agent::TASK_DATA_PREFIX)
+      .unwrap_or(service),
+  )?;
+  let dir = base.join(service);
+  let fd = match DirFd::open_dir(base).map_err(|e| dir_error(base, e))
+  {
+    Err(e) if e.code == wharf_api_types::ErrorCode::NotFound => {
+      return Ok(());
+    }
+    result => result?,
+  };
+  let name = component(service.as_ref()).map_err(io_err(&dir))?;
+  match fd.lstat(&name) {
+    Ok(stat) if stat.st_mode & libc::S_IFMT == libc::S_IFDIR => {
       std::fs::remove_dir_all(&dir).map_err(io_err(&dir))
     }
-    Err(e) if e.code == wharf_api_types::ErrorCode::NotFound => {
-      Ok(())
-    }
-    Err(e) => Err(e),
+    Ok(_) => Err(ApiError::invalid(format!(
+      "{} 是软链接或非目录，已拒绝删除",
+      dir.display()
+    ))),
+    Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+    Err(e) => Err(io_err(&dir)(e)),
   }
 }
 

@@ -44,7 +44,9 @@ mod resources;
 use administration::*;
 use agent_join::{add_server, agent_join};
 use resources::*;
-pub(crate) use resources::{gateway_not_found, service_not_found};
+pub(crate) use resources::{
+  LogsQuery, gateway_not_found, service_not_found,
+};
 
 pub struct AppError(pub ApiError);
 

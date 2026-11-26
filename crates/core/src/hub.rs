@@ -146,6 +146,16 @@ impl Hub {
     (capable, legacy)
   }
 
+  pub fn connected_identity(
+    &self,
+    server: &str,
+  ) -> Option<(u64, String)> {
+    lock(&self.conns)
+      .get(server)
+      .filter(|c| !c.closed.is_cancelled())
+      .map(|c| (c.conn_id, c.public_key.clone()))
+  }
+
   pub fn core_probe_identity(
     &self,
     server: &str,

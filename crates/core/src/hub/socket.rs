@@ -377,7 +377,7 @@ async fn handle_socket(
             }
           }
           Ok(AgentMsg::Hello { .. }) => {}
-          Err(e) => tracing::warn!("无法解析 {server} 的消息：{e}"),
+          Err(e) => tracing::debug!("无法解析 {server} 的消息：{:?}", e.classify()),
         }
       }
     }

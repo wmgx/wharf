@@ -96,21 +96,21 @@ pub(super) async fn show_service(
 }
 
 #[derive(Deserialize)]
-pub(super) struct LogsQuery {
+pub(crate) struct LogsQuery {
   #[serde(default = "default_tail")]
-  pub(super) tail: u32,
+  pub(crate) tail: u32,
   /// 只看这个时间之后的：`30m`、`2h`、`3d` 或 RFC 3339 时间。
   #[serde(default)]
-  pub(super) since: Option<String>,
+  pub(crate) since: Option<String>,
   /// 关键字，不分大小写。
   #[serde(default)]
-  pub(super) grep: Option<String>,
+  pub(crate) grep: Option<String>,
   /// 只看报错，按内容去重计数。
   #[serde(default)]
-  pub(super) errors: bool,
+  pub(crate) errors: bool,
   /// 每行最多多少字符。
   #[serde(default)]
-  pub(super) max_line: Option<usize>,
+  pub(crate) max_line: Option<usize>,
 }
 
 fn default_tail() -> u32 {
