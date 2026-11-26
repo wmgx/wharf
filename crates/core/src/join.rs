@@ -436,7 +436,7 @@ mod tests {
   #[test]
   fn host_policy_core_identity_requires_unique_agent_interface_match()
   {
-    let ip = "100.64.0.1";
+    let ip = "10.20.0.1";
     let own = BTreeSet::from([ip.into()]);
     let mut snap = snapshot::Snapshot::default();
     for server in ["core", "s1"] {

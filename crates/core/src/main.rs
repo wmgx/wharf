@@ -26,6 +26,7 @@ mod cert_status;
 mod cli_dist;
 mod cli_tunnel;
 mod clock;
+mod cloudflare_ips;
 mod connect;
 mod core_backup;
 mod cron;
@@ -62,6 +63,7 @@ mod jobs;
 mod join;
 mod link;
 mod lint;
+mod lockout;
 mod log_search;
 mod login;
 mod logs_stream;
@@ -102,10 +104,12 @@ mod sessions;
 mod share;
 mod shell;
 mod snapshot;
+mod source_trust;
 mod ssh_login;
 mod sso_login;
 mod state;
 mod status;
+mod tailnet_ips;
 mod tailnet_probe;
 mod tailscale;
 mod tasks;
@@ -143,6 +147,9 @@ struct Cli {
     default_value = "ghcr.io/wmgx/wharf-agent:latest"
   )]
   agent_image: String,
+  /// 控制面前置自建反代的可信 IP 或 CIDR，逗号分隔。
+  #[arg(long, env = "WHARF_TRUSTED_PROXIES", value_delimiter = ',')]
+  trusted_proxies: Vec<String>,
   #[command(subcommand)]
   command: Option<Command>,
 }
@@ -197,6 +204,8 @@ async fn main() -> anyhow::Result<()> {
     drop(db);
     return login::reset_password(&cli.data_dir, username);
   }
+  source_trust::init_extra_proxies(&cli.trusted_proxies)
+    .map_err(|e| anyhow::anyhow!(e.message))?;
   let key = load_or_create_key(&cli.data_dir.join("core.key"))?;
   auth::bootstrap(&db, &cli.data_dir).await?;
   login::bootstrap_setup_code(&db, &cli.data_dir).await?;
@@ -222,6 +231,13 @@ async fn main() -> anyhow::Result<()> {
   oidc::init(&state)
     .await
     .map_err(|e| anyhow::anyhow!(e.message))?;
+  cloudflare_ips::init(&state.db).await;
+  tailnet_ips::init(&state.db).await;
+  snapshot::load(&state.db)
+    .await
+    .map_err(|e| anyhow::anyhow!(e.message))?;
+  cloudflare_ips::spawn(state.db.clone());
+  tailnet_ips::spawn(state.db.clone());
   apply::recover(&state).await?;
   shell::recover(&state).await?;
   tasks::recover(&state).await?;

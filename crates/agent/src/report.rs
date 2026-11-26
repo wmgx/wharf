@@ -184,14 +184,22 @@ fn detect_private() -> Option<PrivateAddr> {
   })
 }
 
-/// 不属于任何组网、也不是 docker 网桥的地址。
 fn lan_ips() -> Vec<String> {
-  ifaces()
-    .into_iter()
+  filter_lan_ips(&ifaces())
+}
+
+/// 仅保留 RFC 1918 私网地址，排除组网和 Docker 网桥。
+fn filter_lan_ips(ifaces: &[Iface]) -> Vec<String> {
+  let mut ips: Vec<_> = ifaces
+    .iter()
+    .filter(|i| i.ip.is_private())
     .filter(|i| !DETECTORS.iter().any(|(_, m)| m(i)))
     .filter(|i| !is_bridge(&i.name))
     .map(|i| i.ip.to_string())
-    .collect()
+    .collect();
+  ips.sort();
+  ips.dedup();
+  ips
 }
 
 /// Tailscale 的地址段是 100.64.0.0/10。
@@ -299,6 +307,22 @@ fn disk_stat(path: &std::path::Path) -> Option<DiskSample> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn lan_ips_only_reports_private_interfaces() {
+    let ifaces = [
+      ("eth0", "10.20.0.5"),
+      ("eth1", "203.0.113.7"),
+      ("eth2", "169.254.1.2"),
+      ("tailscale0", "100.64.0.2"),
+      ("docker0", "172.20.0.1"),
+    ]
+    .map(|(name, ip)| Iface {
+      name: name.into(),
+      ip: ip.parse().unwrap(),
+    });
+    assert_eq!(filter_lan_ips(&ifaces), ["10.20.0.5"]);
+  }
 
   #[test]
   fn cgnat_range() {

@@ -247,6 +247,7 @@ mod tests {
         &[],
         false,
         None,
+        &[],
         fill,
       )
     };

@@ -71,6 +71,23 @@ impl Http {
   }
 }
 
+/// 流式读取响应，拒绝超过限制的内容。
+pub async fn limited_body(
+  mut response: Response,
+  max_bytes: usize,
+) -> Result<Vec<u8>, &'static str> {
+  let mut body = Vec::new();
+  while let Some(chunk) =
+    response.chunk().await.map_err(|_| "读取响应失败")?
+  {
+    if chunk.len() > max_bytes - body.len() {
+      return Err("响应超过大小限制");
+    }
+    body.extend_from_slice(&chunk);
+  }
+  Ok(body)
+}
+
 /// 查 GitHub 上最新发布的 Wharf 构建（`build-<短提交号>`），和 `current` 比。
 /// 返回 `Some(短提交号)` 表示有更新的构建，`None` 表示已经是最新。
 pub async fn newer_build(

@@ -195,6 +195,7 @@ export interface GatewaySpec {
   error_page?: string;
   wildcard?: string[];
   layer4?: Gen.Layer4Forward[];
+  trusted_proxies?: Gen.TrustedProxiesSpec;
 }
 
 export interface GatewayView {

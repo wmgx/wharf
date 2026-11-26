@@ -49,7 +49,7 @@ mod store;
 mod suppress;
 
 use api::view;
-use catalog::RULES;
+use catalog::{NOTICES, RULES};
 use store::{
   AckEntry, Delivery, FiringEntry, SuppressionRule, record_at,
   set_firing, set_firing_delivery, set_firing_suppressed,
@@ -150,24 +150,6 @@ fn ev(title: String, body: String) -> Event {
 fn split_unit(s: &str) -> (&str, &str) {
   s.split_once(':').unwrap_or((s, ""))
 }
-/// 事件通知：id、名称和默认级别。
-const NOTICES: &[(&str, &str, AlertLevel)] = &[
-  ("exposure", "机器上新开了对公网的端口", AlertLevel::Urgent),
-  ("login", "从新的地址登录控制面", AlertLevel::Urgent),
-  ("ssh_login", "从陌生地址登录 SSH", AlertLevel::Urgent),
-  ("security_receipt", "高危操作回执", AlertLevel::Urgent),
-  ("recovery", "用掉了一个恢复码", AlertLevel::Urgent),
-  (
-    "task",
-    "定时任务失败和恢复（任务自己也要开通知）",
-    AlertLevel::Urgent,
-  ),
-  ("backup", "服务备份失败和恢复", AlertLevel::Urgent),
-  ("failover", "网关切到备用入口、切回", AlertLevel::Urgent),
-  ("update", "服务有新版本", AlertLevel::Digest),
-  ("auto_update", "服务自动更新的结果", AlertLevel::Digest),
-  ("unmanaged_container", "出现未纳管容器", AlertLevel::Digest),
-];
 
 fn is_rule(id: &str) -> bool {
   RULES.iter().any(|r| r.id == id)
