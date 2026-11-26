@@ -319,6 +319,36 @@ fn relay(resp: reqwest::Response) -> Response {
     .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response())
 }
 
+fn is_allowed_git_request(
+  method: &Method,
+  rest: &str,
+  query: Option<&str>,
+) -> bool {
+  let Some((owner, rest)) = rest.split_once('/') else {
+    return false;
+  };
+  let Some((repo, action)) = rest.split_once('/') else {
+    return false;
+  };
+  let component = |s: &str| {
+    !s.is_empty()
+      && !matches!(s, "." | "..")
+      && s
+        .bytes()
+        .all(|c| c.is_ascii_alphanumeric() || b"-_.".contains(&c))
+  };
+  component(owner)
+    && component(repo)
+    && matches!(
+      (method, action, query),
+      (
+        &Method::GET,
+        "info/refs",
+        None | Some("" | "service=git-upload-pack")
+      ) | (&Method::POST, "git-upload-pack", None | Some(""))
+    )
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -366,36 +396,6 @@ mod tests {
       "library/nginx"
     );
   }
-}
-
-fn is_allowed_git_request(
-  method: &Method,
-  rest: &str,
-  query: Option<&str>,
-) -> bool {
-  let Some((owner, rest)) = rest.split_once('/') else {
-    return false;
-  };
-  let Some((repo, action)) = rest.split_once('/') else {
-    return false;
-  };
-  let component = |s: &str| {
-    !s.is_empty()
-      && !matches!(s, "." | "..")
-      && s
-        .bytes()
-        .all(|c| c.is_ascii_alphanumeric() || b"-_.".contains(&c))
-  };
-  component(owner)
-    && component(repo)
-    && matches!(
-      (method, action, query),
-      (
-        &Method::GET,
-        "info/refs",
-        None | Some("" | "service=git-upload-pack")
-      ) | (&Method::POST, "git-upload-pack", None | Some(""))
-    )
 }
 
 #[test]

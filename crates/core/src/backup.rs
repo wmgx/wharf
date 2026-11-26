@@ -532,8 +532,11 @@ pub async fn records(
           summary: ok
             .then(|| serde_json::from_str(&body).ok())
             .flatten(),
-          error: (!ok)
-            .then(|| serde_json::from_str(&body).unwrap_or(body)),
+          error: (!ok).then(|| {
+            let error: String =
+              serde_json::from_str(&body).unwrap_or(body);
+            crate::log_redact::redact_text(&error)
+          }),
           created_at: to_time(at),
         }
       })

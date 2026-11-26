@@ -397,9 +397,12 @@ pub async fn replace(
   let mut run: Vec<&str> = args.iter().map(String::as_str).collect();
   run.push(image);
   run.extend(cmd.iter().map(String::as_str));
-  let started = Cmd::new("docker")
-    .args(run)
-    .envs(env)
+  let command = env
+    .iter()
+    .fold(Cmd::new("docker").args(run), |cmd, (key, value)| {
+      cmd.env(key, value)
+    });
+  let started = command
     .timeout(QUICK)
     .run(&ctx)
     .await

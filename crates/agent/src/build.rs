@@ -830,6 +830,18 @@ pub(crate) fn to_value<T: serde::Serialize>(
     .map_err(|e| ApiError::internal(e.to_string()))
 }
 
+fn extract_no_proxy_host(raw: &str) -> Option<String> {
+  let url = if raw.contains("://") {
+    reqwest::Url::parse(raw)
+  } else {
+    reqwest::Url::parse(&format!("http://{raw}"))
+  }
+  .ok()?;
+  let host = url.host_str()?;
+  (host.contains('.') || host.contains(':'))
+    .then(|| host.trim_matches(['[', ']']).to_string())
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -962,18 +974,6 @@ mod tests {
     assert_eq!(names, vec!["cmd/", "go.mod"]);
     assert_eq!(tree.read("go.mod").as_deref(), Some("module x"));
   }
-}
-
-fn extract_no_proxy_host(raw: &str) -> Option<String> {
-  let url = if raw.contains("://") {
-    reqwest::Url::parse(raw)
-  } else {
-    reqwest::Url::parse(&format!("http://{raw}"))
-  }
-  .ok()?;
-  let host = url.host_str()?;
-  (host.contains('.') || host.contains(':'))
-    .then(|| host.trim_matches(['[', ']']).to_string())
 }
 
 #[test]

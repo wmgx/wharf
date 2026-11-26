@@ -145,7 +145,7 @@ fn message(
     ),
     _ => (None, body.to_string()),
   };
-  let mut text = text.trim().to_string();
+  let mut text = crate::log_redact::redact_text(text.trim());
   if text.len() > MAX_BODY {
     let mut end = MAX_BODY;
     while !text.is_char_boundary(end) {
@@ -344,4 +344,59 @@ fn limits_invalid_notification_sources() {
   }
   assert!(seen.blocked("203.0.113.1", PER_MINUTE));
   assert!(!seen.blocked("203.0.113.2", PER_MINUTE));
+}
+
+#[tokio::test]
+async fn notify_limits_unknown_tokens_and_only_marks_successful_delivery()
+ {
+  let state = crate::rules::tests::test_state();
+  let peer = ConnectInfo("203.0.113.13:12345".parse().unwrap());
+  let send_to = |token: &str, peer| {
+    send(
+      State(state.clone()),
+      Path(token.to_string()),
+      peer,
+      HeaderMap::new(),
+      "fixture message".into(),
+    )
+  };
+  for index in 0..25 {
+    let (status, _) = send_to("invalid-fixture", peer).await;
+    assert_eq!(
+      status,
+      if index < 20 {
+        StatusCode::NOT_FOUND
+      } else {
+        StatusCode::TOO_MANY_REQUESTS
+      }
+    );
+  }
+  state.db.call(|c| {
+    c.execute("INSERT INTO notify_keys (name, hash, created_at) VALUES ('fixture', ?1, 0)", [hash_token("fixture-valid")])
+      .map_err(sql_err)?;
+    Ok(())
+  }).await.unwrap();
+  let (status, body) = send_to(
+    "fixture-valid",
+    ConnectInfo("203.0.113.14:12345".parse().unwrap()),
+  )
+  .await;
+  assert_eq!(status, StatusCode::BAD_GATEWAY);
+  assert_eq!(
+    body.0["error"],
+    "通知发送失败，请检查控制面通知渠道配置"
+  );
+  let last = state
+    .db
+    .call(|c| {
+      c.query_row(
+        "SELECT last_used_at FROM notify_keys WHERE name = 'fixture'",
+        [],
+        |row| row.get::<_, Option<i64>>(0),
+      )
+      .map_err(sql_err)
+    })
+    .await
+    .unwrap();
+  assert!(last.is_none());
 }

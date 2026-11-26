@@ -560,6 +560,26 @@ pub fn build_error(error: ApiError, detail: &str) -> ApiError {
   }
 }
 
+pub(crate) async fn read_body_limited(
+  mut resp: reqwest::Response,
+  max_bytes: usize,
+) -> Option<Vec<u8>> {
+  if resp
+    .content_length()
+    .is_some_and(|len| len > max_bytes as u64)
+  {
+    return None;
+  }
+  let mut body = Vec::new();
+  while let Some(chunk) = resp.chunk().await.ok()? {
+    if chunk.len() > max_bytes - body.len() {
+      return None;
+    }
+    body.extend_from_slice(&chunk);
+  }
+  Some(body)
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -759,24 +779,4 @@ mod tests {
     assert_eq!(q.window_secs, Some(21600));
     assert_eq!(q.error, None);
   }
-}
-
-pub(crate) async fn read_body_limited(
-  mut resp: reqwest::Response,
-  max_bytes: usize,
-) -> Option<Vec<u8>> {
-  if resp
-    .content_length()
-    .is_some_and(|len| len > max_bytes as u64)
-  {
-    return None;
-  }
-  let mut body = Vec::new();
-  while let Some(chunk) = resp.chunk().await.ok()? {
-    if chunk.len() > max_bytes - body.len() {
-      return None;
-    }
-    body.extend_from_slice(&chunk);
-  }
-  Some(body)
 }

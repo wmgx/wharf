@@ -628,6 +628,48 @@ pub(crate) async fn token(
     .ok_or_else(|| "仓库要求登录".to_string())
 }
 
+fn realm_denied() -> String {
+  "仓库认证地址不合法，已拒绝访问".into()
+}
+
+fn local_realm(url: &reqwest::Url, origin: &str) -> bool {
+  url.scheme() == "http"
+    && matches!(url.host_str(), Some("127.0.0.1" | "localhost"))
+    && reqwest::Url::parse(origin)
+      .is_ok_and(|origin| url.origin() == origin.origin())
+}
+
+fn validate_realm_url(
+  raw: &str,
+  origin: Option<&str>,
+) -> Result<reqwest::Url, String> {
+  let url = reqwest::Url::parse(raw).map_err(|_| realm_denied())?;
+  if !url.username().is_empty() || url.password().is_some() {
+    return Err(realm_denied());
+  }
+  if origin.is_some_and(|origin| local_realm(&url, origin)) {
+    return Ok(url);
+  }
+  let host = url
+    .host_str()
+    .ok_or_else(realm_denied)?
+    .trim_end_matches('.');
+  if url.scheme() != "https"
+    || matches!(
+      host,
+      "localhost" | "metadata" | "metadata.google.internal"
+    )
+    || host.ends_with(".localhost")
+    || host
+      .trim_matches(['[', ']'])
+      .parse::<std::net::IpAddr>()
+      .is_ok_and(|ip| !wharf_api_types::net_probe::is_public(ip))
+  {
+    return Err(realm_denied());
+  }
+  Ok(url)
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -690,48 +732,6 @@ mod tests {
     let cur = Version::parse("1.27-alpine").unwrap();
     assert_eq!(pick(&cur, &tags), vec!["1.28-alpine"]);
   }
-}
-
-fn realm_denied() -> String {
-  "仓库认证地址不合法，已拒绝访问".into()
-}
-
-fn local_realm(url: &reqwest::Url, origin: &str) -> bool {
-  url.scheme() == "http"
-    && matches!(url.host_str(), Some("127.0.0.1" | "localhost"))
-    && reqwest::Url::parse(origin)
-      .is_ok_and(|origin| url.origin() == origin.origin())
-}
-
-fn validate_realm_url(
-  raw: &str,
-  origin: Option<&str>,
-) -> Result<reqwest::Url, String> {
-  let url = reqwest::Url::parse(raw).map_err(|_| realm_denied())?;
-  if !url.username().is_empty() || url.password().is_some() {
-    return Err(realm_denied());
-  }
-  if origin.is_some_and(|origin| local_realm(&url, origin)) {
-    return Ok(url);
-  }
-  let host = url
-    .host_str()
-    .ok_or_else(realm_denied)?
-    .trim_end_matches('.');
-  if url.scheme() != "https"
-    || matches!(
-      host,
-      "localhost" | "metadata" | "metadata.google.internal"
-    )
-    || host.ends_with(".localhost")
-    || host
-      .trim_matches(['[', ']'])
-      .parse::<std::net::IpAddr>()
-      .is_ok_and(|ip| !wharf_api_types::net_probe::is_public(ip))
-  {
-    return Err(realm_denied());
-  }
-  Ok(url)
 }
 
 #[test]

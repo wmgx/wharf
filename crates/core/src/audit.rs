@@ -483,3 +483,27 @@ fn folds_anonymous_rejections_into_one_summary() {
   }
   assert_eq!(limiter.record(source, now + WINDOW), (true, 15));
 }
+
+#[tokio::test]
+async fn audit_cleanup_keeps_seven_and_ninety_day_windows() {
+  const DAY: i64 = 24 * 3600 * 1000;
+  let db = crate::db::Db::memory();
+  db.call(|c| {
+    for (actor, method, status, days) in [
+      ("anonymous", "GET", Some(401), 8),
+      ("anonymous", "GET", Some(403), 6),
+      ("s1", "GET", Some(403), 8),
+      ("s1", "GET", Some(403), 91),
+      ("s1", "login_failed", None, 8),
+    ] {
+      c.execute("INSERT INTO audit_log (at, kind, actor, method, path, status) VALUES (?1, 'api', ?2, ?3, '/api/services', ?4)",
+        params![(100 - days) * DAY, actor, method, status]).map_err(sql_err)?;
+    }
+    cleanup_rows(c, 100 * DAY)?;
+    let mut stmt = c.prepare("SELECT actor FROM audit_log ORDER BY id").map_err(sql_err)?;
+    let actors = stmt.query_map([], |row| row.get::<_, String>(0)).map_err(sql_err)?
+      .collect::<Result<Vec<_>, _>>().map_err(sql_err)?;
+    assert_eq!(actors, ["anonymous", "s1"]);
+    Ok(())
+  }).await.unwrap();
+}

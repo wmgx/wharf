@@ -276,7 +276,7 @@ mod tests {
       (crate::link::CA_CERT_SECRET.into(), "fixture-public-cert".into()),
       ("SHORT".into(), "short".into()),
     ]);
-    let raw = "fixture-app-key YWJjZGVmZw== fixture-public-cert short fixture-password fixture-inline fixture-heartbeat fixture-hook";
+    let raw = "fixture-app-key YWJjZGVmZw== fixture-public-cert short fixture-password fixture-inline fixture-heartbeat fixture-hook fixture-vendor";
     let mut world = World::default();
     let spec = serde_json::from_value(serde_json::json!({
       "server": "s1",
@@ -297,17 +297,25 @@ mod tests {
     let task = serde_json::from_value(serde_json::json!({
       "server":"s1","schedule":"","kind":"script","runtime":"shell","code":"echo ok","hook":"fixture-hook"
     })).unwrap();
+    let account = db::AccountRow {
+      name: "fixture".into(),
+      kind: "cloudflare".into(),
+      token: "fixture-vendor".into(),
+      zones: vec![],
+      warnings: vec![],
+      updated_at: 0,
+    };
     let values = collect(
       &secrets,
       ["fixture-password".to_string()].into_iter(),
-      &[],
+      &[account],
       &world,
       [task].into_iter(),
     );
     let output = wharf_api_types::mask_values(raw, &values);
     assert_eq!(
       output,
-      "*** *** fixture-public-cert short *** *** *** ***"
+      "*** *** fixture-public-cert short *** *** *** *** ***"
     );
     let found = crate::log_search::search(
       &output,

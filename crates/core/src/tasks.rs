@@ -755,7 +755,7 @@ fn run_view(r: &rusqlite::Row) -> rusqlite::Result<TaskRunView> {
     started_at: to_time(r.get(4)?),
     ended_at: r.get::<_, Option<i64>>(5)?.map(to_time),
     exit_code: r.get(6)?,
-    output: r.get(7)?,
+    output: crate::log_redact::redact_text(&r.get::<_, String>(7)?),
     mem_peak: r.get(8)?,
   })
 }
@@ -1001,7 +1001,7 @@ pub async fn runs(
     }
   }
   let limit = q.limit.clamp(1, KEEP_RUNS);
-  let mut rows = s
+  let rows = s
     .db
     .call(move |c| {
       let mut stmt = c
@@ -1015,9 +1015,6 @@ pub async fn runs(
       rows.collect::<Result<Vec<_>, _>>().map_err(sql_err)
     })
     .await?;
-  for run in &mut rows {
-    run.output = crate::log_redact::redact_text(&run.output);
-  }
   Ok(Json(rows))
 }
 
@@ -1283,4 +1280,75 @@ fn rejects_weak_and_reused_task_tokens() {
     assert!(limit.record("203.0.113.1", 30));
   }
   assert!(limit.blocked("203.0.113.1", 30));
+}
+
+#[tokio::test]
+async fn hook_rejects_unknown_tokens_before_reading_body() {
+  let state = crate::rules::tests::test_state();
+  let peer = ConnectInfo("203.0.113.15:12345".parse().unwrap());
+  for index in 0..35 {
+    let result = hook(
+      State(state.clone()),
+      Path("fixture-unknown".into()),
+      peer,
+      Request::new(Body::empty()),
+    )
+    .await;
+    assert_eq!(
+      result.ok().unwrap().status(),
+      if index < 30 {
+        StatusCode::NOT_FOUND
+      } else {
+        StatusCode::TOO_MANY_REQUESTS
+      }
+    );
+  }
+}
+
+#[tokio::test]
+async fn host_task_keeps_command_template_in_shell_log() {
+  let state = crate::rules::tests::test_state();
+  state
+    .db
+    .call(|c| {
+      crate::db::apply_write(
+        c,
+        &crate::db::Write::Upsert {
+          kind: "server".into(),
+          name: "s1".into(),
+          spec: serde_json::json!({}),
+          meta: serde_json::json!({}),
+        },
+      )
+    })
+    .await
+    .unwrap();
+  let job = HostExecJob {
+    command: "curl https://api.example.test/fixture-secret".into(),
+    timeout_secs: 1,
+    cwd: "/".into(),
+  };
+  let template = "curl https://api.example.test/[[API_KEY]]";
+  assert!(
+    crate::shell::run_host_with_audit(
+      state.clone(),
+      "task:t1",
+      "s1".into(),
+      job,
+      Some(template)
+    )
+    .await
+    .is_err()
+  );
+  let command = state
+    .db
+    .call(|c| {
+      c.query_row("SELECT command FROM shell_log", [], |row| {
+        row.get::<_, String>(0)
+      })
+      .map_err(sql_err)
+    })
+    .await
+    .unwrap();
+  assert_eq!(command, template);
 }

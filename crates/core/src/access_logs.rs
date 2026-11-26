@@ -168,6 +168,7 @@ async fn fetch(
   }
   for entry in &mut result.entries {
     entry.path = crate::log_redact::redact_text(&entry.path);
+    entry.query = crate::log_redact::redact_text(&entry.query);
   }
   for warning in &mut result.warnings {
     *warning = crate::log_redact::redact_text(warning);

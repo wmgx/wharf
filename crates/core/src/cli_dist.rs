@@ -66,25 +66,27 @@ pub async fn script(
   State(s): State<Arc<crate::state::AppState>>,
   req: Request,
 ) -> Response {
-  script_response(
-    &req,
-    &hex::encode(s.key.verifying_key().to_bytes()),
-    &sha256_map(),
-  )
-}
-
-fn script_response(
-  req: &Request,
-  core_key: &str,
-  hashes: &BTreeMap<String, String>,
-) -> Response {
   let local = req
     .extensions()
     .get::<ConnectInfo<SocketAddr>>()
     .is_some_and(|peer| {
       crate::source_trust::is_direct_local(peer.0.ip(), req.headers())
     });
-  if crate::source_trust::request_proto(req) != "https" && !local {
+  script_response(
+    local,
+    crate::source_trust::request_proto(&req),
+    &hex::encode(s.key.verifying_key().to_bytes()),
+    &sha256_map(),
+  )
+}
+
+fn script_response(
+  local: bool,
+  proto: &str,
+  core_key: &str,
+  hashes: &BTreeMap<String, String>,
+) -> Response {
+  if proto != "https" && !local {
     return (StatusCode::BAD_REQUEST, "拒绝通过明文 HTTP 提供安装脚本；请经 HTTPS 访问控制面，或从 GitHub Releases 下载 wharf 并核对 SHA256SUMS").into_response();
   }
   let mut script = SCRIPT
@@ -173,11 +175,22 @@ esac
 
 # Skill：正本放在 ~/.agents/skills/wharf（Codex 等读这里），其他 agent 的 skills 目录软链过去，
 # 以后更新只换正本。只给本机已经装了的 agent 建链接。
-case "$CORE_URL/" in
-  https://* | http://localhost/* | http://localhost:* | http://127.0.0.1/* | http://127.0.0.1:* | http://\[::1\]/* | http://\[::1\]:*)
+CORE_AUTHORITY="${CORE_URL#http://}"
+CORE_AUTHORITY="${CORE_AUTHORITY%%/*}"
+SKILL_OK=0
+case "$CORE_URL" in
+  https://*) SKILL_OK=1 ;;
+  http://*)
+    case "$CORE_AUTHORITY" in
+      *@*) ;;
+      localhost | localhost:* | 127.0.0.1 | 127.0.0.1:* | \[::1\] | \[::1\]:*) SKILL_OK=1 ;;
+    esac
+    ;;
+esac
+if [ "$SKILL_OK" = 1 ]; then
   SKILL_DIR="$HOME/.agents/skills/wharf"
   mkdir -p "$SKILL_DIR"
-  if curl -fsSL --connect-timeout 15 --max-time 60 -o "$SKILL_DIR/SKILL.md.tmp" "$CORE_URL/skill.md"; then
+  if curl -fsSL --proto "=http,https" --proto-redir "=https" --noproxy "localhost,127.0.0.1,::1" --connect-timeout 15 --max-time 60 -o "$SKILL_DIR/SKILL.md.tmp" "$CORE_URL/skill.md"; then
     mv "$SKILL_DIR/SKILL.md.tmp" "$SKILL_DIR/SKILL.md"
     printf '==> 已安装 Skill：%s/SKILL.md\n' "$SKILL_DIR"
     for AGENT_HOME in "$HOME/.claude"; do
@@ -196,9 +209,9 @@ case "$CORE_URL/" in
     rm -f "$SKILL_DIR/SKILL.md.tmp"
     printf '==> Skill 下载失败，跳过：%s/skill.md\n' "$CORE_URL"
   fi
-  ;;
-  http://*) printf '==> 登录后用 wharf self-update 同步 Skill\n' ;;
-esac
+elif [ -n "$CORE_URL" ]; then
+  printf '==> 登录后用 wharf self-update 同步 Skill\n'
+fi
 
 LOGIN="$WHARF login --url ${CORE_URL:-<控制面地址>} --core-key {core_key}"
 # 已经登录过（比如这次是更新）就不再登录。
@@ -227,30 +240,15 @@ main "$@"
 
 #[tokio::test]
 async fn install_script_refuses_remote_plaintext() {
-  fn request(uri: &str, peer: &str) -> Request {
-    Request::builder()
-      .uri(uri)
-      .extension(ConnectInfo(peer.parse::<SocketAddr>().unwrap()))
-      .body(axum::body::Body::empty())
-      .unwrap()
-  }
   let hash = "a".repeat(64);
   let hashes =
     parse_sha256sums(&format!("{hash}  wharf-linux-amd64"));
-  let denied =
-    request("http://core.example.test/cli.sh", "203.0.113.5:7700");
   assert_eq!(
-    script_response(&denied, "", &hashes).status(),
+    script_response(false, "http", "", &hashes).status(),
     StatusCode::BAD_REQUEST
   );
-  let mut https = request("/cli.sh", "127.0.0.1:7700");
-  https
-    .headers_mut()
-    .insert("x-forwarded-proto", "https".parse().unwrap());
-  for req in
-    [request("http://127.0.0.1/cli.sh", "127.0.0.1:7700"), https]
-  {
-    let response = script_response(&req, "", &hashes);
+  for (local, proto) in [(true, "http"), (false, "https")] {
+    let response = script_response(local, proto, "", &hashes);
     assert_eq!(response.status(), StatusCode::OK);
     let bytes = axum::body::to_bytes(response.into_body(), 16 * 1024)
       .await

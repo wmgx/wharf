@@ -259,37 +259,6 @@ pub async fn fetch(
   })
 }
 
-#[cfg(test)]
-mod tests {
-  use super::*;
-
-  #[tokio::test]
-  async fn checks_server_name() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap().to_string();
-    tokio::spawn(async move {
-      loop {
-        let (mut s, _) = listener.accept().await.unwrap();
-        s.write_all(banner("home1").as_bytes()).await.unwrap();
-      }
-    });
-    let target = |server: &str| ProbeTarget {
-      server: server.into(),
-      addr: addr.clone(),
-      plain: false,
-    };
-    let unused = ProbeTarget {
-      server: "home1".into(),
-      addr: "127.0.0.1:1".into(),
-      plain: false,
-    };
-    assert_eq!(
-      check(vec![target("home1"), target("edge1"), unused]).await,
-      vec![true, false, false]
-    );
-  }
-}
-
 fn is_probe_peer_allowed(ip: IpAddr) -> bool {
   match ip.to_canonical() {
     IpAddr::V4(ip) => {
@@ -306,6 +275,37 @@ fn is_probe_peer_allowed(ip: IpAddr) -> bool {
   }
 }
 
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[tokio::test]
+  async fn checks_server_name() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    tokio::spawn(async move {
+      loop {
+        let (mut s, _) = listener.accept().await.unwrap();
+        s.write_all(banner("s1").as_bytes()).await.unwrap();
+      }
+    });
+    let target = |server: &str| ProbeTarget {
+      server: server.into(),
+      addr: addr.clone(),
+      plain: false,
+    };
+    let unused = ProbeTarget {
+      server: "s1".into(),
+      addr: "127.0.0.1:1".into(),
+      plain: false,
+    };
+    assert_eq!(
+      check(vec![target("s1"), target("s2"), unused]).await,
+      vec![true, false, false]
+    );
+  }
+}
+
 #[test]
 fn probe_allows_only_local_peers() {
   assert!(!is_probe_peer_allowed("203.0.113.10".parse().unwrap()));
@@ -313,4 +313,25 @@ fn probe_allows_only_local_peers() {
   {
     assert!(is_probe_peer_allowed(ip.parse().unwrap()));
   }
+}
+
+#[tokio::test]
+async fn probe_bounds_unterminated_banner() {
+  let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let target = ProbeTarget {
+    server: "s1".into(),
+    addr: listener.local_addr().unwrap().to_string(),
+    plain: false,
+  };
+  let writer = tokio::spawn(async move {
+    let (mut socket, _) = listener.accept().await.unwrap();
+    let _ = socket.write_all(&[b'x'; 1024]).await;
+    std::future::pending::<()>().await;
+  });
+  assert!(
+    !tokio::time::timeout(Duration::from_secs(1), one(&target))
+      .await
+      .unwrap()
+  );
+  writer.abort();
 }
