@@ -421,3 +421,35 @@ fn mirror_only_allows_git_reads() {
     None
   ));
 }
+
+#[tokio::test]
+async fn mirror_rejects_git_writes_and_preserves_registry_links() {
+  let state = Arc::new(Mirror {
+    token: "fixture-mirror".into(),
+    client: reqwest::Client::new(),
+    tokens: Default::default(),
+  });
+  let mut headers = HeaderMap::new();
+  headers.insert(
+    header::HOST,
+    HeaderValue::from_static("github.example.test"),
+  );
+  let response = handle(
+    State(state),
+    Method::POST,
+    "/fixture-mirror/o/r.git/git-receive-pack".parse().unwrap(),
+    headers,
+    Body::empty(),
+  )
+  .await;
+  assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+  let link = "</v2/o/r/tags/list?last=tag>; rel=\"next\"";
+  let upstream = axum::http::Response::builder()
+    .header(header::LINK, link)
+    .body("fixture")
+    .unwrap();
+  assert_eq!(
+    relay(reqwest::Response::from(upstream)).headers()[header::LINK],
+    link
+  );
+}

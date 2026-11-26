@@ -124,6 +124,10 @@ impl Cmd {
     self
   }
 
+  pub fn env_arg(self, flag: &str, key: &str, value: &str) -> Self {
+    self.args([flag, key]).env(key, value)
+  }
+
   pub fn envs(
     mut self,
     vars: impl IntoIterator<Item = (&'static str, String)>,
@@ -409,5 +413,23 @@ mod tests {
       .check("测试命令")
       .unwrap_err();
     assert!(err.message.contains("boom"), "{}", err.message);
+  }
+}
+
+#[test]
+fn child_env_argument_contains_only_key() {
+  for flag in ["--build-arg", "-e"] {
+    let command = Cmd::new("docker")
+      .env_arg(flag, "FIXTURE_KEY", "fixture-value")
+      .command();
+    let command = command.as_std();
+    assert_eq!(
+      command.get_args().collect::<Vec<_>>(),
+      [flag, "FIXTURE_KEY"]
+    );
+    assert!(
+      command.get_envs().any(|(key, value)| key == "FIXTURE_KEY"
+        && value.is_some_and(|value| value == "fixture-value"))
+    );
   }
 }

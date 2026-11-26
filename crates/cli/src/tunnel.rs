@@ -78,7 +78,7 @@ type Ws = tokio_tungstenite::WebSocketStream<
 >;
 
 fn resolve_proxy_for(url: &reqwest::Url) -> Option<String> {
-  let get = |key| std::env::var(key).ok();
+  let get = |key: &str| std::env::var(key).ok();
   proxy_from(url, get)
 }
 
@@ -363,7 +363,7 @@ async fn pipe(
 
 #[test]
 fn websocket_proxy_uses_https_and_honors_no_proxy() {
-  let env = |key| match key {
+  let env = |key: &str| match key {
     "HTTPS_PROXY" => Some("http://127.0.0.1:8118".into()),
     "NO_PROXY" => {
       Some(".example.test,100.64.0.0/10,203.0.113.3:8443".into())

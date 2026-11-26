@@ -112,7 +112,7 @@ async fn build_in(
     .args(["-t", &job.image, "-f", &dockerfile.to_string_lossy()])
     .args(["--label", &format!("wharf.service={}", job.service)]);
   for (key, value) in &job.build_env {
-    cmd = cmd.args(["--build-arg", key]).env(key, value);
+    cmd = cmd.env_arg("--build-arg", key, value);
   }
   // 构建时下载依赖也走出口；镜像源、内网直连。代理参数是预定义的，不会写进镜像历史。
   if let Some(p) =
@@ -135,7 +135,7 @@ async fn build_in(
       ("NO_PROXY", &direct),
       ("no_proxy", &direct),
     ] {
-      cmd = cmd.args(["--build-arg", k]).env(k, v);
+      cmd = cmd.env_arg("--build-arg", k, v);
     }
   }
   let out = cmd

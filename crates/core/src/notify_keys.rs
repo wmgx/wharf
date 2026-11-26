@@ -158,39 +158,45 @@ fn message(
 }
 
 #[derive(Default)]
-pub(crate) struct RequestLimit(HashMap<String, Vec<Instant>>);
+pub(crate) struct RequestLimit {
+  seen: HashMap<String, Vec<Instant>>,
+  pruned_at: Option<Instant>,
+}
 
 impl RequestLimit {
-  fn prune(&mut self, now: Instant) {
-    self.0.retain(|_, times| {
-      times.retain(|time| {
-        now.duration_since(*time) < Duration::from_secs(60)
-      });
-      !times.is_empty()
-    });
-  }
-
   pub fn blocked(&mut self, key: &str, limit: usize) -> bool {
-    self.prune(Instant::now());
-    self.0.get(key).is_some_and(|times| times.len() >= limit)
+    let now = Instant::now();
+    let active = |time: &Instant| {
+      now.duration_since(*time) < Duration::from_secs(60)
+    };
+    if self.pruned_at.is_none_or(|last| !active(&last)) {
+      self
+        .seen
+        .retain(|_, times| times.last().is_some_and(active));
+      self.pruned_at = Some(now);
+    }
+    self.seen.get_mut(key).is_some_and(|times| {
+      times.retain(active);
+      times.len() >= limit
+    })
   }
 
   pub fn record(&mut self, key: &str, limit: usize) -> bool {
     if self.blocked(key, limit) {
       return false;
     }
-    if self.0.len() >= 4096
-      && !self.0.contains_key(key)
+    if self.seen.len() >= 4096
+      && !self.seen.contains_key(key)
       && let Some(oldest) = self
-        .0
+        .seen
         .iter()
         .min_by_key(|(_, times)| times.last())
         .map(|(key, _)| key.clone())
     {
-      self.0.remove(&oldest);
+      self.seen.remove(&oldest);
     }
     self
-      .0
+      .seen
       .entry(key.to_string())
       .or_default()
       .push(Instant::now());

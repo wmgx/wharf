@@ -112,3 +112,34 @@ mod tests {
     assert_eq!(github_repo("https://github.com/o"), None);
   }
 }
+
+#[tokio::test]
+async fn github_token_is_reused_without_writing() {
+  use tokio::io::{AsyncReadExt, AsyncWriteExt};
+  let listener =
+    tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let endpoint = format!("http://{}", listener.local_addr().unwrap());
+  let server = tokio::spawn(async move {
+    let (mut socket, _) = listener.accept().await.unwrap();
+    let mut request = Vec::new();
+    while !request.ends_with(b"\r\n\r\n") && request.len() < 8192 {
+      request.push(socket.read_u8().await.unwrap());
+    }
+    assert!(request.starts_with(b"GET /api/secrets "));
+    let body = r#"[{"name":"GITHUB_TOKEN","updated_at":"2026-11-26T00:00:00Z","used_by":[]}]"#;
+    let response = format!(
+      "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+      body.len()
+    );
+    socket.write_all(response.as_bytes()).await.unwrap();
+  });
+  let client = Client::test_endpoint(endpoint);
+  assert_eq!(
+    private_token(&client, "https://github.com/o/priv", false)
+      .await
+      .unwrap()
+      .as_deref(),
+    Some(SECRET)
+  );
+  server.await.unwrap();
+}
