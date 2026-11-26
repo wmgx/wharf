@@ -19,6 +19,7 @@ ed25519-dalek.workspace = true
 futures-util.workspace = true
 getrandom.workspace = true
 hex.workspace = true
+libc = "0.2"
 wharf-pack.workspace = true
 reqwest.workspace = true
 rpassword = "7"

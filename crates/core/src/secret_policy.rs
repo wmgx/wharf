@@ -9,7 +9,10 @@ use wharf_api_types::{
   view::TaskKind,
 };
 
-use crate::{render, world::World};
+use crate::{
+  render::{self, Placeholder, SecretMode},
+  world::World,
+};
 
 const WHARF_PREFIX: &str = "WHARF_";
 const ACME_PREFIX: &str = "ACME_DNS_";
@@ -141,11 +144,20 @@ pub fn non_system_secrets(
     .collect()
 }
 
-fn placeholders(mut text: &str) -> impl Iterator<Item = &str> {
-  std::iter::from_fn(move || {
-    let (start, name) = render::next_placeholder(text)?;
-    text = &text[start + name.len() + 4..];
-    Some(name)
+fn placeholders_checked(
+  text: &str,
+  allow_account: bool,
+  allow_file: bool,
+) -> impl Iterator<Item = Result<Placeholder<'_>, ApiError>> {
+  render::placeholders(text).filter_map(move |inner| {
+    render::parse_placeholder(inner, allow_account)
+      .and_then(|p| {
+        if !allow_file && let Some(p) = &p {
+          render::reject_file(p)?;
+        }
+        Ok(p)
+      })
+      .transpose()
   })
 }
 
@@ -168,7 +180,10 @@ pub fn service_account_refs(
   spec: &ServiceSpec,
 ) -> impl Iterator<Item = (&str, &str)> {
   service_templates(spec)
-    .flat_map(placeholders)
+    .flat_map(|text| {
+      placeholders_checked(text, true, true).filter_map(Result::ok)
+    })
+    .map(|p| p.name)
     .filter_map(|name| Some((name, render::account_ref(name)?)))
 }
 
@@ -183,13 +198,17 @@ fn git_token(spec: &ServiceSpec) -> Option<&str> {
 
 fn template_refs(spec: &ServiceSpec) -> impl Iterator<Item = &str> {
   service_templates(spec)
-    .flat_map(placeholders)
-    .filter(|name| {
-      !name.is_empty()
-        && name.bytes().all(|b| {
-          b.is_ascii_alphanumeric() || b == b'_' || b == b'-'
-        })
+    .flat_map(|text| {
+      placeholders_checked(text, true, true).filter_map(Result::ok)
     })
+    .map(|p| p.name)
+    .filter(|name| render::account_ref(name).is_none())
+}
+
+pub fn service_uses_secret(spec: &ServiceSpec, name: &str) -> bool {
+  template_refs(spec)
+    .chain(git_token(spec))
+    .any(|secret| secret == name)
 }
 
 fn direct_refs<'a>(
@@ -270,6 +289,11 @@ fn validate_login(
 ) -> Result<(), ApiError> {
   let context = format!("域名 {host} 的代登录");
   let service = &route.service;
+  if let Some(script) = &login.script {
+    for value in script.env.values() {
+      crate::sso_login::env_refs(value)?;
+    }
+  }
   for name in crate::sso_login::secret_refs(login) {
     reject_system_secret(&name, &context)?;
     if !login_owns(world, service, &name) {
@@ -290,9 +314,12 @@ pub fn validate_world(world: &World) -> Result<(), ApiError> {
   for (name, row) in &world.services {
     let context = format!("服务 {name}");
     let oidc = oidc_names(world, name);
-    for secret in template_refs(&row.spec) {
-      if !oidc.contains(secret) {
-        reject_system_secret(secret, &context)?;
+    for p in service_templates(&row.spec)
+      .flat_map(|text| placeholders_checked(text, true, true))
+    {
+      let p = p?;
+      if p.mode != SecretMode::Plain || !oidc.contains(p.name) {
+        reject_system_secret(p.name, &context)?;
       }
     }
     if let Some(secret) = git_token(&row.spec) {
@@ -379,15 +406,23 @@ fn validate_gateway_text(
       .with_hint("去掉 [[WHARF_*]] 和 [[ACME_DNS_*]] 后重试"),
     );
   }
-  reject_templates(text, context)
+  if let Some(p) = placeholders_checked(text, true, false).next() {
+    let p = p?;
+    reject_system_secret(p.name, context)?;
+    return Err(
+      ApiError::invalid(format!("{context}不能引用密钥 {}", p.name))
+        .with_hint("在目标服务的配置中引用密钥"),
+    );
+  }
+  Ok(())
 }
 
 fn reject_templates(
   text: &str,
   context: &str,
 ) -> Result<(), ApiError> {
-  placeholders(text)
-    .try_for_each(|name| reject_system_secret(name, context))
+  placeholders_checked(text, false, false)
+    .try_for_each(|p| reject_system_secret(p?.name, context))
 }
 
 pub fn validate_task(

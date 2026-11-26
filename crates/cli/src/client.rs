@@ -1,6 +1,15 @@
 //! 控制面 HTTP 客户端和本地配置（`~/.config/wharf/config.toml`）。
 
-use std::{path::PathBuf, time::Duration};
+use std::{
+  fs::OpenOptions,
+  io::{self, Read},
+  os::unix::fs::{OpenOptionsExt, PermissionsExt},
+  path::{Path, PathBuf},
+  process::Stdio,
+  time::Duration,
+};
+
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use wharf_api_types::{ApiError, ErrorCode};
@@ -30,10 +39,16 @@ impl From<anyhow::Error> for CliError {
 
 pub type CliResult<T> = Result<T, CliError>;
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Default, Serialize, Deserialize)]
 pub struct Config {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
   pub url: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
   pub token: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub token_file: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub token_cmd: Option<String>,
   /// 控制面 ed25519 公钥（hex），建加密通道时验证控制面身份。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub core_key: Option<String>,
@@ -51,17 +66,37 @@ pub fn config_path() -> PathBuf {
 }
 
 impl Config {
-  pub fn load() -> Config {
-    std::fs::read_to_string(config_path())
-      .ok()
-      .and_then(|t| toml::from_str(&t).ok())
-      .unwrap_or_default()
+  pub fn load_checked() -> Result<Self, ApiError> {
+    Self::load_from(&config_path())
   }
 
-  /// 以 0600 保存，里面有 token。
+  fn load_from(path: &Path) -> Result<Self, ApiError> {
+    let failed = |reason: &str| {
+      ApiError::invalid(format!(
+        "读取配置文件 {} 失败：{reason}",
+        path.display()
+      ))
+      .with_hint("检查 config.toml 格式，或重新执行 wharf login")
+    };
+    match std::fs::read_to_string(path) {
+      Ok(text) => toml::from_str(&text)
+        .map_err(|_| failed("TOML 语法或字段类型错误")),
+      Err(e) if e.kind() == io::ErrorKind::NotFound => {
+        Ok(Self::default())
+      }
+      Err(e) => Err(failed(&e.to_string())),
+    }
+  }
+
+  /// 以 0600 保存配置，可能含明文 token。
   pub fn save(&self) -> anyhow::Result<PathBuf> {
-    use std::{io::Write, os::unix::fs::OpenOptionsExt};
     let path = config_path();
+    self.save_to(&path)?;
+    Ok(path)
+  }
+
+  pub(crate) fn save_to(&self, path: &Path) -> anyhow::Result<()> {
+    use std::io::Write;
     if let Some(dir) = path.parent() {
       std::fs::create_dir_all(dir)?;
     }
@@ -70,10 +105,192 @@ impl Config {
       .create(true)
       .truncate(true)
       .mode(0o600)
-      .open(&path)?;
+      .open(path)?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     file.write_all(toml::to_string(self)?.as_bytes())?;
-    Ok(path)
+    Ok(())
   }
+}
+
+pub async fn resolve_token(
+  override_token: Option<String>,
+  config: &Config,
+) -> Result<Option<String>, ApiError> {
+  if let Some(token) = override_token.filter(|t| !t.is_empty()) {
+    return Ok(Some(token));
+  }
+  let token = match (&config.token, &config.token_file, &config.token_cmd) {
+    (Some(token), None, None) => validate_token_text(token, "config.toml 的 token")?,
+    (None, Some(path), None) => read_token_file(path)?,
+    (None, None, Some(cmd)) => run_token_cmd(cmd).await?,
+    (None, None, None) => return Ok(None),
+    _ => return Err(ApiError::invalid("config.toml 中 token、token_file、token_cmd 只能配置其中一项")
+      .with_hint("只保留一种凭据来源，或重新执行 wharf login")),
+  };
+  Ok(Some(token))
+}
+
+fn validate_token_text(
+  text: &str,
+  source: &str,
+) -> Result<String, ApiError> {
+  let token = text.trim();
+  if token.is_empty() || token.contains(['\r', '\n']) {
+    return Err(ApiError::invalid(format!(
+      "{source} 必须提供非空的单行 token"
+    )));
+  }
+  Ok(token.to_string())
+}
+
+fn read_token_file(path: &str) -> Result<String, ApiError> {
+  let expanded = match path.strip_prefix("~/") {
+    Some(relative) => std::env::var_os("HOME")
+      .map(|home| {
+        PathBuf::from(home).join(relative.trim_start_matches('/'))
+      })
+      .ok_or_else(|| {
+        ApiError::invalid("无法展开 token_file 路径：未设置 HOME")
+      })?,
+    None => PathBuf::from(path),
+  };
+  let failed = |e: io::Error| {
+    ApiError::invalid(format!("读取 token_file {path} 失败：{e}"))
+      .with_hint("检查 token_file 路径和权限，或重新执行 wharf login")
+  };
+  let mut file = OpenOptions::new()
+    .read(true)
+    .custom_flags(libc::O_NONBLOCK)
+    .open(expanded)
+    .map_err(failed)?;
+  let meta = file.metadata().map_err(failed)?;
+  if !meta.is_file() {
+    return Err(ApiError::invalid("token_file 必须指向普通文件"));
+  }
+  if meta.permissions().mode() & 0o077 != 0 {
+    eprintln!("提醒：token 文件 {path} 权限过宽，建议改为 0600");
+  }
+  let mut text = String::new();
+  file.read_to_string(&mut text).map_err(failed)?;
+  validate_token_text(&text, "token_file")
+}
+
+struct TokenProcess {
+  group: i32,
+  tty_group: Option<i32>,
+  finished: bool,
+}
+
+impl Drop for TokenProcess {
+  fn drop(&mut self) {
+    if !self.finished {
+      // 终止整个命令组，管道里的进程也可能仍在运行。
+      unsafe { libc::kill(-self.group, libc::SIGKILL) };
+    }
+    if let Some(group) = self.tty_group {
+      foreground_tty(group);
+    }
+  }
+}
+
+fn foreground_tty(group: i32) -> bool {
+  // 从后台恢复前台时屏蔽 SIGTTOU，避免 CLI 自己被终端挂起。
+  unsafe {
+    let mut signals = std::mem::zeroed();
+    let mut old = std::mem::zeroed();
+    libc::sigemptyset(&mut signals);
+    libc::sigaddset(&mut signals, libc::SIGTTOU);
+    if libc::pthread_sigmask(libc::SIG_BLOCK, &signals, &mut old) != 0
+    {
+      return false;
+    }
+    let ok = libc::tcsetpgrp(libc::STDIN_FILENO, group) == 0;
+    libc::pthread_sigmask(
+      libc::SIG_SETMASK,
+      &old,
+      std::ptr::null_mut(),
+    );
+    ok
+  }
+}
+
+async fn run_token_cmd(cmd: &str) -> Result<String, ApiError> {
+  const TIMEOUT: Duration = Duration::from_secs(15);
+  const LINE_LIMIT: u64 = 64 * 1024;
+  let failed = |reason: &str| {
+    ApiError::invalid(format!("执行 token_cmd 失败{reason}"))
+      .with_hint(
+        "检查 config.toml 中的 token_cmd，确认凭据工具已解锁",
+      )
+  };
+  let mut child = tokio::process::Command::new("sh")
+    .args(["-c", cmd])
+    .stdin(Stdio::inherit())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null())
+    .process_group(0)
+    .kill_on_drop(true)
+    .spawn()
+    .map_err(|_| failed("：无法启动命令"))?;
+  let group = child.id().expect("命令已启动") as i32;
+  let tty_group = unsafe { libc::tcgetpgrp(libc::STDIN_FILENO) };
+  let mut process = TokenProcess {
+    group,
+    tty_group: (tty_group > 0
+      && tty_group == unsafe { libc::getpgrp() }
+      && foreground_tty(group))
+    .then_some(tty_group),
+    finished: false,
+  };
+  // 子进程也可能在前台切换前先尝试读终端，从 SIGTTIN 恢复。
+  if process.tty_group.is_some() {
+    unsafe { libc::kill(-group, libc::SIGCONT) };
+  }
+  let mut stdout =
+    BufReader::new(child.stdout.take().expect("已接入命令标准输出"));
+  let read_output = async {
+    let mut line = Vec::new();
+    (&mut stdout)
+      .take(LINE_LIMIT + 1)
+      .read_until(b'\n', &mut line)
+      .await?;
+    tokio::io::copy(&mut stdout, &mut tokio::io::sink()).await?;
+    Ok::<_, io::Error>(line)
+  };
+  let result = tokio::time::timeout(TIMEOUT, async {
+    tokio::try_join!(child.wait(), read_output)
+  })
+  .await;
+  let (status, line) = match result {
+    Ok(Ok(output)) => {
+      process.finished = true;
+      output
+    }
+    other => {
+      drop(process);
+      let _ = child.start_kill();
+      let _ = child.wait().await;
+      return Err(match other {
+        Err(_) => ApiError::new(
+          ErrorCode::Timeout,
+          "执行 token_cmd 超时（15 秒）",
+        )
+        .with_hint(
+          "先解锁凭据工具（如 1Password / Keychain），再重试",
+        ),
+        _ => failed("：无法读取命令结果"),
+      });
+    }
+  };
+  if !status.success() {
+    return Err(failed(&format!("（{status}）")));
+  }
+  if line.len() as u64 > LINE_LIMIT {
+    return Err(failed("：首行过长"));
+  }
+  let line = std::str::from_utf8(&line)
+    .map_err(|_| failed("：首行不是 UTF-8"))?;
+  validate_token_text(line, "token_cmd")
 }
 
 fn local_http() -> CliResult<reqwest::Client> {
@@ -108,20 +325,26 @@ impl Client {
     }
   }
 
-  pub fn new(
+  pub async fn new(
     url: Option<String>,
     token: Option<String>,
   ) -> CliResult<Self> {
-    Self::with_key(url, token, None)
+    Self::with_key(url, token, None).await
   }
 
   /// 所有请求都经加密通道（[crate::tunnel]），`core_key` 不填时用 WHARF_CORE_KEY 或配置里的。
-  pub fn with_key(
+  pub async fn with_key(
     url: Option<String>,
     token: Option<String>,
     core_key: Option<String>,
   ) -> CliResult<Self> {
-    let config = Config::load();
+    let config =
+      if url.is_some() && token.is_some() && core_key.is_some() {
+        Config::default()
+      } else {
+        Config::load_checked()?
+      };
+    let token = resolve_token(token, &config).await?;
     let base = url.or(config.url).ok_or_else(|| {
       ApiError::new(ErrorCode::InvalidInput, "不知道控制面地址")
         .with_hint(
@@ -147,7 +370,7 @@ impl Client {
       base,
       endpoint: tunnel.local,
       tunnel_error: tunnel.last_error,
-      token: token.or(config.token),
+      token,
     })
   }
 
@@ -487,6 +710,112 @@ pub fn read_secret(prompt: &str) -> anyhow::Result<String> {
     anyhow::bail!("没有读到内容");
   }
   Ok(value)
+}
+
+#[tokio::test]
+async fn resolves_token_sources_and_reports_bad_configuration() {
+  let temp = tempfile::tempdir().unwrap();
+  let path = temp.path().join("config.toml");
+  let expected = format!("fixture-{}", std::process::id());
+  if std::env::var_os("WHARF_TEST_TOKEN_FILE_HOME").is_some() {
+    let config = Config {
+      token_file: Some("~/t.tok".into()),
+      ..Default::default()
+    };
+    let token = resolve_token(None, &config).await.unwrap().unwrap();
+    let expected =
+      std::env::var("WHARF_TEST_TOKEN_FILE_HOME").unwrap();
+    assert!(token == expected);
+    return;
+  }
+  let file = temp.path().join("t.tok");
+  std::fs::write(&file, format!(" \t{expected}\r\n")).unwrap();
+  let child = std::process::Command::new(
+    std::env::current_exe().unwrap(),
+  )
+  .args([
+    "--exact",
+    "client::resolves_token_sources_and_reports_bad_configuration",
+  ])
+  .env("HOME", temp.path())
+  .env("WHARF_TEST_TOKEN_FILE_HOME", &expected)
+  .output()
+  .unwrap();
+  assert!(child.status.success());
+  assert!(
+    String::from_utf8_lossy(&child.stdout).contains("1 passed")
+  );
+  let config = Config {
+    token_cmd: Some(
+      "printf '  fixture-command\\r\\nignored\\n'".into(),
+    ),
+    ..Default::default()
+  };
+  config.save_to(&path).unwrap();
+  let config = Config::load_from(&path).unwrap();
+  assert!(
+    resolve_token(None, &config).await.unwrap().as_deref()
+      == Some("fixture-command")
+  );
+  assert!(
+    !std::fs::read_to_string(&path)
+      .unwrap()
+      .lines()
+      .any(|line| line.starts_with("token ="))
+  );
+  let config = Config {
+    token: Some(expected.clone()),
+    token_file: Some("unreadable".into()),
+    ..Default::default()
+  };
+  assert!(
+    resolve_token(None, &config)
+      .await
+      .unwrap_err()
+      .message
+      .contains("只能配置其中一项")
+  );
+  let config = Config {
+    token_cmd: Some("exit 42".into()),
+    ..Default::default()
+  };
+  assert!(
+    resolve_token(Some(expected.clone()), &config)
+      .await
+      .unwrap()
+      == Some(expected.clone())
+  );
+  std::fs::write(&path, format!("token = '{expected}")).unwrap();
+  let bad = Config::load_from(&path).err().unwrap();
+  assert!(bad.message.contains("TOML 语法"));
+  assert!(!bad.message.contains(&expected));
+}
+
+#[tokio::test]
+async fn token_command_times_out_and_reaps_shell() {
+  let dir = tempfile::tempdir().unwrap();
+  let pid = dir.path().join("pid");
+  let command = format!(
+    "printf '%s' \"$$\" > '{}'; sleep 30 | cat",
+    pid.display()
+  );
+  let err = run_token_cmd(&command).await.unwrap_err();
+  assert_eq!(err.code, ErrorCode::Timeout);
+  let pid: i32 =
+    std::fs::read_to_string(pid).unwrap().parse().unwrap();
+  assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+  assert_eq!(
+    io::Error::last_os_error().raw_os_error(),
+    Some(libc::ESRCH)
+  );
+  let output = format!("fixture-{}", std::process::id());
+  let err = run_token_cmd(&format!(
+    "printf %s '{output}'; printf %s '{output}' >&2; exit 42"
+  ))
+  .await
+  .unwrap_err();
+  assert!(err.message.contains("42"));
+  assert!(!err.message.contains(&output));
 }
 
 #[tokio::test]

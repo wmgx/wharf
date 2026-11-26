@@ -4,6 +4,7 @@ use std::{
   sync::{Arc, RwLock},
 };
 
+use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_yaml_ng::Value;
 use wharf_api_types::{
   ApiError,
@@ -24,6 +25,7 @@ fn prepare(values: &mut Vec<String>) {
   values.retain(|value| value.len() >= 6);
   let mut escaped = Vec::new();
   for value in values.iter() {
+    escaped.push(STANDARD.encode(value));
     if let std::borrow::Cow::Owned(encoded) =
       urlencoding::encode(value)
     {
@@ -296,6 +298,16 @@ mod tests {
         &values,
       ),
       "*** *** %3C%26%3E"
+    );
+  }
+
+  #[test]
+  fn masks_base64_url_and_json_secret_encodings() {
+    let value = "p@s#1\n\"\\";
+    let input = r#"cEBzIzEKIlw= p%40s%231%0A%22%5C p@s#1\n\"\\"#;
+    assert_eq!(
+      redact_text_with(input, &[value.into()]),
+      "*** *** ***"
     );
   }
 

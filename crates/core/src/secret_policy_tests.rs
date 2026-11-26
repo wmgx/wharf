@@ -300,6 +300,77 @@ fn borrowing_other_service_secret_requires_admin() {
 }
 
 #[test]
+fn file_secret_is_rejected_in_non_service_contexts() {
+  let mut world = World::default();
+  let task: TaskKind = serde_json::from_value(json!({
+    "kind": "container", "image": "nginx:1", "env": {"X": "[[FILE:X]]"}
+  })).unwrap();
+  let check = |err: wharf_api_types::ApiError| {
+    assert_eq!(err.code, ErrorCode::InvalidInput);
+    assert!(err.hint.unwrap().contains("[[json:X]]"));
+  };
+  check(policy::validate_task("task", &task).unwrap_err());
+  world.servers.insert("s1".into(), ServerRow {
+    settings: serde_json::from_value(json!({
+      "registry_mirrors": {"docker.io": ["https://registry.example.test/[[FILE:X]]"]}
+    })).unwrap(),
+    version: 1,
+  });
+  check(policy::validate_world(&world).unwrap_err());
+  world.servers.clear();
+  let route = add_route(
+    &mut world,
+    json!({
+      "hostname": "a.example.test", "service": "a", "sso": {"mode": "login", "login": {
+        "script": {"runtime": "shell", "code": "true", "env": {"X": "[[FILE:X]]"}}
+      }}
+    }),
+  );
+  check(
+    crate::sso_login::validate(
+      "a.example.test",
+      route.sso.as_ref().unwrap(),
+    )
+    .unwrap_err(),
+  );
+  check(policy::validate_world(&world).unwrap_err());
+  world.routes.clear();
+  add_route(
+    &mut world,
+    json!({
+      "hostname": "a.example.test", "service": "a", "caddy": "[[FILE:X]]"
+    }),
+  );
+  check(policy::validate_world(&world).unwrap_err());
+}
+
+#[test]
+fn secret_modifiers_preserve_system_and_cross_service_checks() {
+  let mut world = World::default();
+  for reference in
+    ["[[FILE:WHARF_BACKUP_KEY]]", "[[b64:TAILSCALE_OAUTH]]"]
+  {
+    add_service(&mut world, "a", service(json!({"KEY": reference})));
+    assert_eq!(
+      policy::validate_world(&world).unwrap_err().code,
+      ErrorCode::InvalidInput
+    );
+  }
+  let before = service(json!({}));
+  add_service(&mut world, "a", before.clone());
+  add_service(&mut world, "b", service(json!({"KEY": "[[url:S]]"})));
+  let change =
+    plan("service/a", before, service(json!({"KEY": "[[FILE:S]]"})));
+  assert_eq!(
+    policy::require_apply(&change, &world, false)
+      .unwrap_err()
+      .code,
+    ErrorCode::Forbidden
+  );
+  policy::require_apply(&change, &world, true).unwrap();
+}
+
+#[test]
 fn task_rejects_system_secret() {
   let key = "[[TAILSCALE_OAUTH]]";
   for task in [

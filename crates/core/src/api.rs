@@ -1604,16 +1604,18 @@ fn secret_users(
   name: &str,
 ) -> Vec<String> {
   let system = system_secret(name);
-  let reference = format!("[[{name}]]");
-  let token = format!("\"token_secret\":\"{name}\"");
   system
     .map(str::to_string)
     .into_iter()
-    .chain(world.services.iter().filter_map(|(service, row)| {
-      let spec = serde_json::to_string(&row.spec).ok()?;
-      (spec.contains(&reference) || spec.contains(&token))
-        .then(|| service.clone())
-    }))
+    .chain(
+      world
+        .services
+        .iter()
+        .filter(|(_, row)| {
+          crate::secret_policy::service_uses_secret(&row.spec, name)
+        })
+        .map(|(service, _)| service.clone()),
+    )
     .collect()
 }
 
@@ -1902,6 +1904,38 @@ async fn export(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn encoded_and_file_secret_users_follow_service_scope() {
+    let mut world = crate::world::World::default();
+    for (name, reference) in [("a", "[[url:S]]"), ("b", "[[FILE:S]]")]
+    {
+      world.services.insert(name.into(), crate::world::ServiceRow {
+        spec: serde_json::from_value(json!({
+          "server": "s1", "source": {"image": "nginx:1"}, "env": {"KEY": reference}
+        })).unwrap(),
+        host_ports: Default::default(),
+        import: None,
+        pins: Default::default(),
+        commit: None,
+        version: 1,
+      });
+    }
+    let used_by = secret_users(&world, "S");
+    assert_eq!(used_by, ["a", "b"]);
+    let mut rows = vec![SecretView {
+      name: "S".into(),
+      used_by,
+      managed: false,
+      system: None,
+      updated_at: to_time(0),
+    }];
+    crate::scope_filter::filter_secrets(
+      &["b".into()].into(),
+      &mut rows,
+    );
+    assert_eq!(rows[0].used_by, ["b"]);
+  }
 
   #[tokio::test]
   async fn agent_join_rejects_plaintext_non_local_and_accepts_sealed()

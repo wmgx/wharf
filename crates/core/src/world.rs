@@ -1860,6 +1860,30 @@ fn check_files(
   }
   let mut paths = BTreeSet::new();
   for f in files {
+    let dir = crate::render::SECRET_FILE_DIR;
+    // 多个连续的斜杠在容器里也会指向同一个目录。
+    let path = f
+      .path
+      .split('/')
+      .filter(|p| !p.is_empty())
+      .collect::<Vec<_>>()
+      .join("/");
+    if f.path.starts_with('/')
+      && (path == &dir[1..]
+        || path
+          .strip_prefix(&dir[1..])
+          .is_some_and(|tail| tail.starts_with('/')))
+    {
+      return Err(
+        ApiError::invalid(format!(
+          "服务 {name} 的配置文件路径 {} 不能放在 {dir}/ 下",
+          f.path
+        ))
+        .with_hint(
+          "该目录保留给 [[FILE:SECRET]]，普通配置文件请换其他路径",
+        ),
+      );
+    }
     let ok = f.path.starts_with('/')
       && !f.path.ends_with('/')
       && !f.path.split('/').any(|p| p == ".." || p == ".")

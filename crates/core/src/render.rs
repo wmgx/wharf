@@ -2,7 +2,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::Serialize;
+use serde_yaml_ng::{Mapping, Value};
 use sha2::{Digest, Sha256};
 use wharf_api_types::{
   ApiError,
@@ -279,37 +281,194 @@ fn to_yaml(file: &ComposeFile) -> String {
   format!("# 由 Wharf 生成，不要手改。\n{body}")
 }
 
-/// 把 `[[NAME]]` 换成密钥。`secrets` 为空时原样保留（用于展示和部署历史）。
+pub const SECRET_FILE_DIR: &str = "/run/wharf-secrets";
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SecretMode {
+  Plain,
+  Url,
+  B64,
+  Json,
+  File,
+}
+
+pub(crate) struct Placeholder<'a> {
+  pub mode: SecretMode,
+  pub name: &'a str,
+}
+
+fn bare_secret(name: &str) -> bool {
+  !name.is_empty()
+    && name
+      .bytes()
+      .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+}
+
+pub(crate) fn parse_placeholder(
+  inner: &str,
+  allow_account: bool,
+) -> Result<Option<Placeholder<'_>>, ApiError> {
+  if inner.starts_with('@') {
+    return Ok(None);
+  }
+  let valid = |name| {
+    bare_secret(name)
+      || (allow_account && account_ref(name).is_some())
+  };
+  let (mode, name) = match inner.split_once(':') {
+    None if valid(inner) => (SecretMode::Plain, inner),
+    None => return Ok(None),
+    Some((prefix, name)) => {
+      let mode = match prefix {
+        "url" => SecretMode::Url,
+        "b64" => SecretMode::B64,
+        "json" => SecretMode::Json,
+        "FILE" => SecretMode::File,
+        _ if bare_secret(prefix) && valid(name) => {
+          return Err(ApiError::invalid(format!("不支持的密钥修饰符：{prefix}"))
+            .with_hint("可用修饰符：[[SECRET]]、[[url:SECRET]]、[[b64:SECRET]]、[[json:SECRET]]、[[FILE:SECRET]]"));
+        }
+        _ => return Ok(None),
+      };
+      if !valid(name) {
+        return Err(ApiError::invalid(format!("密钥引用 [[{inner}]] 格式不对"))
+          .with_hint("写成 [[url:密钥名]]、[[b64:密钥名]]、[[json:密钥名]] 或 [[FILE:密钥名]]，密钥名只能用字母、数字、_ 和 -"));
+      }
+      (mode, name)
+    }
+  };
+  Ok(Some(Placeholder { mode, name }))
+}
+
+pub(crate) fn reject_file(
+  placeholder: &Placeholder<'_>,
+) -> Result<(), ApiError> {
+  let name = placeholder.name;
+  if placeholder.mode == SecretMode::File {
+    return Err(ApiError::invalid(format!("此处不支持 [[FILE:{name}]]，文件形式密钥仅用于服务的环境变量、compose 和配置文件"))
+      .with_hint(format!("改用 [[{name}]] 或编码修饰符 [[url:{name}]]、[[b64:{name}]]、[[json:{name}]]")));
+  }
+  Ok(())
+}
+
+fn encode_secret(
+  mode: SecretMode,
+  value: &str,
+) -> Result<String, ApiError> {
+  Ok(match mode {
+    SecretMode::Plain => value.to_string(),
+    SecretMode::Url => urlencoding::encode(value).into_owned(),
+    SecretMode::B64 => STANDARD.encode(value),
+    SecretMode::Json => {
+      let json = serde_json::to_string(value)
+        .map_err(|_| ApiError::internal("密钥 JSON 编码失败"))?;
+      json[1..json.len() - 1].to_string()
+    }
+    SecretMode::File => unreachable!(),
+  })
+}
+
+pub(crate) fn next_placeholder(text: &str) -> Option<(usize, &str)> {
+  let start = text.find("[[")?;
+  let end = start + 2 + text[start + 2..].find("]]")?;
+  let start = text[start + 2..end]
+    .rfind("[[")
+    .map_or(start, |inner| start + 2 + inner);
+  Some((start, &text[start + 2..end]))
+}
+
+pub(crate) fn placeholders(
+  mut text: &str,
+) -> impl Iterator<Item = &str> {
+  std::iter::from_fn(move || {
+    let (start, inner) = next_placeholder(text)?;
+    text = &text[start + inner.len() + 4..];
+    Some(inner)
+  })
+}
+
+fn rewrite_placeholders(
+  text: &str,
+  service: bool,
+  mut replace: impl FnMut(
+    Placeholder<'_>,
+  ) -> Result<Option<String>, ApiError>,
+) -> Result<String, ApiError> {
+  let mut out = String::with_capacity(text.len());
+  let mut rest = text;
+  while let Some((start, inner)) = next_placeholder(rest) {
+    let end = start + inner.len() + 4;
+    out.push_str(&rest[..start]);
+    let value = match parse_placeholder(inner, service)? {
+      Some(p) => replace(p)?,
+      None => None,
+    };
+    out.push_str(value.as_deref().unwrap_or(&rest[start..end]));
+    rest = &rest[end..];
+  }
+  out.push_str(rest);
+  Ok(out)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SecretContext {
+  Text,
+  Env,
+  Compose,
+  ConfigFile,
+}
+
 pub fn substitute(
   text: &str,
   secrets: Option<&BTreeMap<String, String>>,
 ) -> Result<String, ApiError> {
-  substitute_values(text, secrets, false)
+  substitute_values(
+    text,
+    secrets,
+    SecretContext::Text,
+    &mut BTreeSet::new(),
+  )
 }
 
 fn substitute_values(
   text: &str,
   secrets: Option<&BTreeMap<String, String>>,
-  service_config: bool,
+  context: SecretContext,
+  files: &mut BTreeSet<String>,
 ) -> Result<String, ApiError> {
-  let Some(secrets) = secrets else {
-    return Ok(text.to_string());
-  };
-  let mut out = String::with_capacity(text.len());
-  let mut rest = text;
-  let mut missing = Vec::new();
-  while let Some((start, name)) = next_placeholder(rest) {
-    let len = name.len();
-    let is_name = !name.is_empty()
-      && name
-        .bytes()
-        .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-');
-    out.push_str(&rest[..start]);
-    let account = service_config.then(|| account_ref(name)).flatten();
-    if is_name || account.is_some() {
-      match secrets.get(name) {
-        Some(value) => out.push_str(value),
-        None if let Some(account) = account => {
+  let service = context != SecretContext::Text;
+  let mut missing = BTreeSet::new();
+  let out = rewrite_placeholders(text, service, |p| {
+    if !service {
+      reject_file(&p)?;
+    }
+    let Some(secrets) = secrets else {
+      return Ok(None);
+    };
+    let name = p.name;
+    match secrets.get(name) {
+      Some(_) if p.mode == SecretMode::File => {
+        files.insert(name.to_string());
+        Ok(Some(format!("{SECRET_FILE_DIR}/{name}")))
+      }
+      Some(value) => {
+        let value = encode_secret(p.mode, value)?;
+        Ok(Some(if context == SecretContext::Compose {
+          value.replace('$', "$$")
+        } else {
+          value
+        }))
+      }
+      None
+        if context == SecretContext::ConfigFile
+          && p.mode == SecretMode::Plain =>
+      {
+        Ok(None)
+      }
+      None => {
+        if let Some(account) =
+          service.then(|| account_ref(name)).flatten()
+        {
           return Err(
             ApiError::invalid(format!("应用账号 {account} 不存在"))
               .with_hint("先设置应用账号，密码从标准输入读取")
@@ -318,22 +477,16 @@ fn substitute_values(
               )),
           );
         }
-        None => missing.push(name.to_string()),
+        missing.insert(name.to_string());
+        Ok(None)
       }
-    } else {
-      out.push_str(&rest[start..start + 4 + len]);
     }
-    rest = &rest[start + 4 + len..];
-  }
-  out.push_str(rest);
-  if !missing.is_empty() {
-    missing.sort();
-    missing.dedup();
-    let first = missing[0].clone();
+  })?;
+  if let Some(first) = missing.first() {
     return Err(
       ApiError::invalid(format!(
         "密钥不存在：{}",
-        missing.join("、")
+        missing.iter().cloned().collect::<Vec<_>>().join("、")
       ))
       .with_hint("先设置密钥，值从标准输入读取，不会出现在命令行里")
       .suggest(format!("wharf secret set {first}")),
@@ -342,10 +495,122 @@ fn substitute_values(
   Ok(out)
 }
 
-pub(crate) fn next_placeholder(text: &str) -> Option<(usize, &str)> {
-  let start = text.find("[[")?;
-  let rest = &text[start + 2..];
-  Some((start, &rest[..rest.find("]]")?]))
+pub(crate) type SecretMounts = BTreeMap<String, BTreeSet<String>>;
+
+// 只记录映射键及其位置，允许未加引号的 [[X]] 从 YAML 序列变为标量。
+fn mapping_keys(value: &Value) -> Value {
+  match value {
+    Value::Mapping(map) => Value::Mapping(
+      map
+        .iter()
+        .map(|(k, v)| (k.clone(), mapping_keys(v)))
+        .collect(),
+    ),
+    Value::Sequence(seq) => {
+      let mut keys: Vec<_> = seq.iter().map(mapping_keys).collect();
+      while keys.last() == Some(&Value::Null) {
+        keys.pop();
+      }
+      if keys.is_empty() {
+        Value::Null
+      } else {
+        Value::Sequence(keys)
+      }
+    }
+    Value::Tagged(tag) => mapping_keys(&tag.value),
+    _ => Value::Null,
+  }
+}
+
+fn substitute_compose(
+  service: &str,
+  content: &str,
+  secrets: Option<&BTreeMap<String, String>>,
+) -> Result<(String, SecretMounts), ApiError> {
+  let mut files = BTreeSet::new();
+  let out = substitute_values(
+    content,
+    secrets,
+    SecretContext::Compose,
+    &mut files,
+  )?;
+  if out == content {
+    return Ok((out, BTreeMap::new()));
+  }
+  let names: BTreeSet<_> = placeholders(content)
+    .filter_map(|inner| parse_placeholder(inner, true).ok().flatten())
+    .map(|p| p.name)
+    .collect();
+  let bad = || {
+    let names = names.iter().copied().collect::<Vec<_>>();
+    let name = names.first().copied().unwrap_or_default();
+    ApiError::invalid(format!("服务 {service} 的 compose 填入密钥 {} 后不是合法的 YAML", names.join("、")))
+      .with_hint(format!("密钥值里有引号或换行：在双引号里改用 [[json:{name}]]，或改用 [[FILE:{name}]]"))
+  };
+  let before: Value =
+    serde_yaml_ng::from_str(content).map_err(|_| bad())?;
+  let after: Value =
+    serde_yaml_ng::from_str(&out).map_err(|_| bad())?;
+  if mapping_keys(&before) != mapping_keys(&after) {
+    return Err(bad());
+  }
+  Ok((out, collect_compose_file_secrets(content, &files)?))
+}
+
+fn collect_compose_file_secrets(
+  content: &str,
+  files: &BTreeSet<String>,
+) -> Result<SecretMounts, ApiError> {
+  if files.is_empty() {
+    return Ok(BTreeMap::new());
+  }
+  // 用模板标记定位挂载，密钥内容和用户写死的路径不会被当成引用。
+  let mut prefix = "wharf_file_ref_".to_string();
+  while content.contains(&prefix) {
+    prefix.push('_');
+  }
+  let markers: BTreeMap<_, _> = files
+    .iter()
+    .enumerate()
+    .map(|(i, name)| (name.as_str(), format!("{prefix}{i}_end")))
+    .collect();
+  let marked = rewrite_placeholders(content, true, |p| {
+    Ok(if p.mode == SecretMode::File {
+      markers.get(p.name).cloned()
+    } else {
+      None
+    })
+  })?;
+  let bad = || {
+    ApiError::invalid("无法定位 compose 中文件密钥的目标容器")
+      .with_hint("在引用密钥的容器配置中使用 [[FILE:密钥名]]")
+  };
+  let parsed: Value =
+    serde_yaml_ng::from_str(&marked).map_err(|_| bad())?;
+  let services = parsed
+    .get("services")
+    .and_then(Value::as_mapping)
+    .ok_or_else(bad)?;
+  let mut mounts = BTreeMap::new();
+  for (container, body) in services {
+    let container = container.as_str().ok_or_else(bad)?;
+    let body = serde_yaml_ng::to_string(body).map_err(|_| bad())?;
+    let used: BTreeSet<_> = markers
+      .iter()
+      .filter(|(_, marker)| body.contains(marker.as_str()))
+      .map(|(name, _)| (*name).to_string())
+      .collect();
+    if !used.is_empty() {
+      mounts.insert(container.to_string(), used);
+    }
+  }
+  if files
+    .iter()
+    .any(|name| !mounts.values().any(|used| used.contains(name)))
+  {
+    return Err(bad());
+  }
+  Ok(mounts)
 }
 
 pub fn service_account_refs(world: &World) -> BTreeSet<String> {
@@ -643,18 +908,18 @@ pub fn service_compose(
   host_ports: &BTreeMap<String, u16>,
   bind_ips: &[String],
   secrets: Option<&BTreeMap<String, String>>,
-) -> Result<String, ApiError> {
+) -> Result<(String, SecretMounts), ApiError> {
   match &spec.source {
     Source::Compose { content, .. } => {
       let content = content.as_deref().unwrap_or_default();
-      substitute_values(
+      substitute_compose(
+        name,
         &compose_with_settings(name, content, spec)?,
         secrets,
-        true,
       )
     }
     Source::Image(_) | Source::Build(_) => {
-      let mut service = image_service(name, spec, secrets)?;
+      let (mut service, files) = image_service(name, spec, secrets)?;
       for port in &spec.ports {
         let (Some(host), Some(container)) =
           (host_ports.get(&port.name), port.container)
@@ -683,7 +948,7 @@ pub fn service_compose(
         name: name.to_string(),
         services: BTreeMap::from([(name.to_string(), service)]),
       };
-      Ok(to_yaml(&file))
+      Ok((to_yaml(&file), image_mounts(name, files)))
     }
   }
 }
@@ -692,61 +957,80 @@ fn image_service(
   name: &str,
   spec: &ServiceSpec,
   secrets: Option<&BTreeMap<String, String>>,
-) -> Result<ComposeService, ApiError> {
+) -> Result<(ComposeService, BTreeSet<String>), ApiError> {
   let image = match &spec.source {
     Source::Build(b) => build_image(name, b, &spec.ports),
     Source::Image(image) => image.clone(),
     Source::Compose { .. } => unreachable!(),
   };
+  let mut files = BTreeSet::new();
   let mut environment = BTreeMap::new();
   for (key, value) in &spec.env {
     // compose 会对 `$` 做变量插值，原样传给容器要写成 `$$`。
-    let value = substitute_values(value, secrets, true)?;
+    let value = substitute_values(
+      value,
+      secrets,
+      SecretContext::Env,
+      &mut files,
+    )?;
     environment.insert(key.clone(), value.replace('$', "$$"));
   }
-  Ok(ComposeService {
-    configs: vec![],
-    image,
-    restart: "unless-stopped",
-    mem_limit: spec
-      .limits
-      .as_ref()
-      .and_then(|l| l.memory_mb)
-      .map(|mb| format!("{mb}m")),
-    cpus: spec
-      .limits
-      .as_ref()
-      .and_then(|l| l.cpu_milli)
-      .map(cpus_text),
-    network_mode: None,
-    entrypoint: None,
-    command: None,
-    environment,
-    ports: Vec::new(),
-    volumes: Vec::new(),
-    labels: BTreeMap::from([(
-      "wharf.service".to_string(),
-      name.to_string(),
-    )]),
-  })
+  Ok((
+    ComposeService {
+      configs: vec![],
+      image,
+      restart: "unless-stopped",
+      mem_limit: spec
+        .limits
+        .as_ref()
+        .and_then(|l| l.memory_mb)
+        .map(|mb| format!("{mb}m")),
+      cpus: spec
+        .limits
+        .as_ref()
+        .and_then(|l| l.cpu_milli)
+        .map(cpus_text),
+      network_mode: None,
+      entrypoint: None,
+      command: None,
+      environment,
+      ports: Vec::new(),
+      volumes: Vec::new(),
+      labels: BTreeMap::from([(
+        "wharf.service".to_string(),
+        name.to_string(),
+      )]),
+    },
+    files,
+  ))
 }
 
 /// 试跑用的 compose：同一个镜像和环境变量，不发布端口、不自动重启。
 /// 只用于 image、build 来源且没有数据卷的服务。
+fn image_mounts(name: &str, files: BTreeSet<String>) -> SecretMounts {
+  if files.is_empty() {
+    return BTreeMap::new();
+  }
+  BTreeMap::from([(name.to_string(), files)])
+}
+
 pub fn trial_compose(
   name: &str,
   spec: &ServiceSpec,
   secrets: Option<&BTreeMap<String, String>>,
-) -> Result<String, ApiError> {
-  let mut service = image_service(name, spec, secrets)?;
+) -> Result<(String, SecretMounts), ApiError> {
+  let (mut service, files) = image_service(name, spec, secrets)?;
   service.restart = "no";
   service.labels =
     BTreeMap::from([("wharf.trial".into(), name.into())]);
-  Ok(to_yaml(&ComposeFile {
-    configs: BTreeMap::new(),
-    name: format!("{TRIAL_PROJECT_PREFIX}{name}"),
-    services: BTreeMap::from([(name.to_string(), service)]),
-  }))
+  Ok((
+    to_yaml(&ComposeFile {
+      configs: BTreeMap::new(),
+      name: format!("{TRIAL_PROJECT_PREFIX}{name}"),
+      services: BTreeMap::from([(name.to_string(), service)]),
+    }),
+    image_mounts(name, files),
+  ))
 }
 
 /// 配置文件内容里的 `[[密钥名]]` 只替换确实存在的密钥，别的原样保留
@@ -754,23 +1038,14 @@ pub fn trial_compose(
 pub fn file_content(
   content: &str,
   secrets: Option<&BTreeMap<String, String>>,
-) -> String {
-  let Some(secrets) = secrets else {
-    return content.to_string();
-  };
-  let mut out = String::with_capacity(content.len());
-  let mut rest = content;
-  while let Some((start, name)) = next_placeholder(rest) {
-    let end = start + 4 + name.len();
-    out.push_str(&rest[..start]);
-    match secrets.get(name) {
-      Some(value) => out.push_str(value),
-      None => out.push_str(&rest[start..end]),
-    }
-    rest = &rest[end..];
-  }
-  out.push_str(rest);
-  out
+  files: &mut BTreeSet<String>,
+) -> Result<String, ApiError> {
+  substitute_values(
+    content,
+    secrets,
+    SecretContext::ConfigFile,
+    files,
+  )
 }
 
 /// 把配置文件放进 compose：顶层 `configs` 用 `content` 写内容，容器的 `configs` 引用它。
@@ -781,58 +1056,107 @@ pub fn add_files(
   spec: &ServiceSpec,
   compose: &str,
   files: &[(String, String)],
+  file_secrets: BTreeSet<String>,
+  mut mounts: SecretMounts,
+  secrets: Option<&BTreeMap<String, String>>,
 ) -> Result<String, ApiError> {
-  if files.is_empty() {
+  if files.is_empty() && mounts.is_empty() {
     return Ok(compose.to_string());
   }
-  let target = match &spec.source {
-    Source::Compose { .. } => {
-      compose_target(name, compose, spec.container.as_deref())?
-    }
-    _ => name.to_string(),
-  };
   let bad = || {
     ApiError::invalid(format!(
       "服务 {name} 的 compose 写法没法自动加上配置文件"
     ))
     .with_hint(
-      "直接写在 compose 文件的 configs 里，然后去掉设置里的配置文件",
+      "检查容器和顶层 configs 的写法，以及是否重复使用 /run/wharf-secrets 下的路径",
     )
   };
-  let mut doc: serde_yaml_ng::Value =
+  let mut doc: Value =
     serde_yaml_ng::from_str(compose).map_err(|_| bad())?;
-  let key = |s: &str| serde_yaml_ng::Value::String(s.to_string());
-  let mut defs = serde_yaml_ng::Mapping::new();
-  let mut refs = Vec::new();
-  for (i, (path, content)) in files.iter().enumerate() {
-    let content = content.replace('$', "$$");
-    let id = format!("wharf-file-{i}-{}", &hash(&content)[..12]);
-    let mut def = serde_yaml_ng::Mapping::new();
-    def.insert(key("content"), key(&content));
-    defs.insert(key(&id), serde_yaml_ng::Value::Mapping(def));
-    let mut r = serde_yaml_ng::Mapping::new();
-    r.insert(key("source"), key(&id));
-    r.insert(key("target"), key(path));
-    refs.push(serde_yaml_ng::Value::Mapping(r));
+  let mut defs = Mapping::new();
+  let mut refs = BTreeMap::<String, Vec<ComposeConfigRef>>::new();
+  let mut add =
+    |target: &str, id: String, path: String, content: String| {
+      let def = serde_yaml_ng::to_value(ComposeConfigDef { content })
+        .map_err(|_| bad())?;
+      defs.insert(Value::String(id.clone()), def);
+      refs.entry(target.to_string()).or_default().push(
+        ComposeConfigRef {
+          source: id,
+          target: path,
+        },
+      );
+      Ok::<_, ApiError>(())
+    };
+  if !files.is_empty() {
+    let target = match &spec.source {
+      Source::Compose { .. } => {
+        compose_target(name, compose, spec.container.as_deref())?
+      }
+      _ => name.to_string(),
+    };
+    for (i, (path, content)) in files.iter().enumerate() {
+      let content = content.replace('$', "$$");
+      let id = format!("wharf-file-{i}-{}", &hash(&content)[..12]);
+      add(&target, id, path.clone(), content)?;
+    }
+    if !file_secrets.is_empty() {
+      mounts.entry(target).or_default().extend(file_secrets);
+    }
   }
+  for (container, names) in mounts {
+    for secret in names {
+      let content = secrets
+        .and_then(|s| s.get(&secret))
+        .ok_or_else(bad)?
+        .replace('$', "$$");
+      let id =
+        format!("wharf-secret-{secret}-{}", &hash(&content)[..12]);
+      add(
+        &container,
+        id,
+        format!("{SECRET_FILE_DIR}/{secret}"),
+        content,
+      )?;
+    }
+  }
+  let key = |s: &str| Value::String(s.to_string());
   let root = doc.as_mapping_mut().ok_or_else(bad)?;
-  match root.entry(key("configs")).or_insert_with(|| {
-    serde_yaml_ng::Value::Mapping(Default::default())
-  }) {
-    serde_yaml_ng::Value::Mapping(m) => m.extend(defs),
-    _ => return Err(bad()),
-  }
-  let svc = root
-    .get_mut("services")
-    .and_then(|s| s.get_mut(target.as_str()))
-    .and_then(|s| s.as_mapping_mut())
-    .ok_or_else(bad)?;
-  match svc
+  let configs = root
     .entry(key("configs"))
-    .or_insert_with(|| serde_yaml_ng::Value::Sequence(vec![]))
-  {
-    serde_yaml_ng::Value::Sequence(list) => list.extend(refs),
-    _ => return Err(bad()),
+    .or_insert_with(|| Value::Mapping(Mapping::new()));
+  let configs = configs.as_mapping_mut().ok_or_else(bad)?;
+  for (id, def) in defs {
+    if id
+      .as_str()
+      .is_some_and(|id| id.starts_with("wharf-secret-"))
+      && configs.contains_key(&id)
+    {
+      return Err(bad());
+    }
+    configs.insert(id, def);
+  }
+  for (target, additions) in refs {
+    let svc = root
+      .get_mut("services")
+      .and_then(|s| s.get_mut(target.as_str()))
+      .and_then(Value::as_mapping_mut)
+      .ok_or_else(bad)?;
+    let list = svc
+      .entry(key("configs"))
+      .or_insert_with(|| Value::Sequence(vec![]));
+    let list = list.as_sequence_mut().ok_or_else(bad)?;
+    for entry in additions {
+      if entry.target.starts_with(SECRET_FILE_DIR)
+        && list.iter().any(|v| {
+          v.get("target").and_then(Value::as_str)
+            == Some(entry.target.as_str())
+        })
+      {
+        return Err(bad());
+      }
+      list.push(serde_yaml_ng::to_value(entry).map_err(|_| bad())?);
+    }
   }
   let head = if compose.starts_with('#') {
     compose
@@ -1464,16 +1788,28 @@ mod tests {
   fn files_become_configs_named_by_content() {
     let base =
       service_compose("whoami", &spec(), &BTreeMap::new(), &[], None)
-        .unwrap();
+        .unwrap()
+        .0;
     let secrets =
       BTreeMap::from([("PASS".to_string(), "p$w".to_string())]);
     let content = file_content(
       "[[servers]]\npass = \"[[PASS]]\"\n",
       Some(&secrets),
-    );
+      &mut BTreeSet::new(),
+    )
+    .unwrap();
     assert_eq!(content, "[[servers]]\npass = \"p$w\"\n");
     let files = vec![("/etc/app.toml".to_string(), content)];
-    let out = add_files("whoami", &spec(), &base, &files).unwrap();
+    let out = add_files(
+      "whoami",
+      &spec(),
+      &base,
+      &files,
+      BTreeSet::new(),
+      BTreeMap::new(),
+      None,
+    )
+    .unwrap();
     let v: serde_yaml_ng::Value =
       serde_yaml_ng::from_str(&out).unwrap();
     let r = &v["services"]["whoami"]["configs"][0];
@@ -1485,10 +1821,28 @@ mod tests {
     );
     let changed =
       vec![("/etc/app.toml".to_string(), "x".to_string())];
-    let out2 = add_files("whoami", &spec(), &base, &changed).unwrap();
+    let out2 = add_files(
+      "whoami",
+      &spec(),
+      &base,
+      &changed,
+      BTreeSet::new(),
+      BTreeMap::new(),
+      None,
+    )
+    .unwrap();
     assert!(!out2.contains(id));
     assert_eq!(
-      add_files("whoami", &spec(), &base, &[]).unwrap(),
+      add_files(
+        "whoami",
+        &spec(),
+        &base,
+        &[],
+        BTreeSet::new(),
+        BTreeMap::new(),
+        None
+      )
+      .unwrap(),
       base
     );
   }
@@ -1716,7 +2070,8 @@ mod tests {
       &["100.64.0.1".into()],
       None,
     )
-    .unwrap();
+    .unwrap()
+    .0;
     assert!(compose.contains("127.0.0.1:20006:27015/udp"));
     assert!(compose.contains("100.64.0.1:20006:27015/udp"));
     assert!(compose.contains("127.0.0.1:20005:80"));
@@ -1824,7 +2179,8 @@ mod tests {
       &["100.1.2.3".to_string(), "192.168.1.5".to_string()],
       Some(&secrets),
     )
-    .unwrap();
+    .unwrap()
+    .0;
     let yaml: serde_yaml_ng::Value =
       serde_yaml_ng::from_str(&out).unwrap();
     let svc = &yaml["services"]["whoami"];
@@ -1837,7 +2193,9 @@ mod tests {
     assert!(!out.contains("0.0.0.0"));
     // 不带密钥渲染时保留占位符，用于展示。
     let template =
-      service_compose("whoami", &spec(), &ports, &[], None).unwrap();
+      service_compose("whoami", &spec(), &ports, &[], None)
+        .unwrap()
+        .0;
     assert!(template.contains("[[WHO_TOKEN]]"));
     assert!(!template.contains("s3"));
   }
@@ -1846,7 +2204,7 @@ mod tests {
   fn trial_compose_does_not_publish_ports() {
     let mut spec = spec();
     spec.volumes.clear();
-    let out = trial_compose("s1", &spec, None).unwrap();
+    let out = trial_compose("s1", &spec, None).unwrap().0;
     let yaml: serde_yaml_ng::Value =
       serde_yaml_ng::from_str(&out).unwrap();
     let service = &yaml["services"]["s1"];
@@ -1863,7 +2221,8 @@ mod tests {
     let mut spec = spec();
     let out =
       service_compose("s1", &spec, &BTreeMap::new(), &[], None)
-        .unwrap();
+        .unwrap()
+        .0;
     assert!(!out.contains("mem_limit"));
     assert!(!out.contains("cpus"));
     spec.limits = Some(wharf_api_types::spec::Limits {
@@ -1872,7 +2231,8 @@ mod tests {
     });
     let out =
       service_compose("s1", &spec, &BTreeMap::new(), &[], None)
-        .unwrap();
+        .unwrap()
+        .0;
     let yaml: serde_yaml_ng::Value =
       serde_yaml_ng::from_str(&out).unwrap();
     let svc = &yaml["services"]["s1"];
@@ -2019,6 +2379,120 @@ mod tests {
   }
 
   #[test]
+  fn modifiers_encode_environment_compose_and_configuration_files() {
+    let value = "p@s#1\n\"\\";
+    let secrets = BTreeMap::from([("K".into(), value.into())]);
+    let name = "app";
+    let source = "services:\n  app:\n    image: nginx:1\n    environment:\n      RAW: \"[[json:K]]\"\n";
+    let env = [
+      ("URL", "[[url:K]]"),
+      ("B64", "[[b64:K]]"),
+      ("JSON", "[[json:K]]"),
+    ];
+    let rendered = |spec: &ServiceSpec| {
+      let (yaml, _) = service_compose(
+        name,
+        spec,
+        &BTreeMap::new(),
+        &[],
+        Some(&secrets),
+      )
+      .unwrap();
+      serde_yaml_ng::from_str::<Value>(&yaml).unwrap()
+    };
+    let mut compose =
+      compose_spec(source, None, None, &env[..2], None);
+    let doc = rendered(&compose);
+    let env_yaml = &doc["services"][name]["environment"];
+    assert_eq!(env_yaml["RAW"], value);
+    assert_eq!(env_yaml["URL"], "p%40s%231%0A%22%5C");
+    assert_eq!(env_yaml["B64"], "cEBzIzEKIlw=");
+    compose.source = Source::Image("nginx:1".into());
+    compose.env.extend(env.map(|(k, v)| (k.into(), v.into())));
+    let doc = rendered(&compose);
+    let env_yaml = &doc["services"][name]["environment"];
+    for (key, reference, expected) in [
+      ("URL", "[[url:K]]", "p%40s%231%0A%22%5C"),
+      ("B64", "[[b64:K]]", "cEBzIzEKIlw="),
+      ("JSON", "[[json:K]]", r#"p@s#1\n\"\\"#),
+    ] {
+      assert_eq!(env_yaml[key], expected);
+      assert_eq!(
+        substitute(reference, Some(&secrets)).unwrap(),
+        expected
+      );
+      assert_eq!(
+        file_content(reference, Some(&secrets), &mut BTreeSet::new())
+          .unwrap(),
+        expected
+      );
+    }
+    let json = file_content(
+      r#""[[json:K]]""#,
+      Some(&secrets),
+      &mut BTreeSet::new(),
+    )
+    .unwrap();
+    assert_eq!(serde_json::from_str::<String>(&json).unwrap(), value);
+  }
+
+  #[test]
+  fn malformed_modifiers_and_unclosed_brackets() {
+    let secrets =
+      BTreeMap::from([("X".into(), "fixture-value".into())]);
+    for text in [
+      "[[file:X]]",
+      "[[URL:X]]",
+      "[[hex:X]]",
+      "[[b64:]]",
+      "[[FILE:b64:X]]",
+    ] {
+      assert!(
+        substitute(text, Some(&secrets)).unwrap_err().hint.is_some()
+      );
+    }
+    assert_eq!(
+      substitute("a [[oops [[X]] b", Some(&secrets)).unwrap(),
+      "a [[oops fixture-value b"
+    );
+    let mut files = BTreeSet::new();
+    let raw = "[[a b]]\n[[servers]]";
+    assert_eq!(
+      file_content(raw, Some(&secrets), &mut files).unwrap(),
+      raw
+    );
+    assert!(
+      file_content("[[url:NOPE]]", Some(&secrets), &mut files)
+        .unwrap_err()
+        .message
+        .contains("密钥不存在")
+    );
+  }
+
+  #[test]
+  fn compose_doubles_secret_dollars_and_rejects_yaml_damage() {
+    let raw = "services:\n  app:\n    image: nginx:1\n    environment:\n      KEY: \"[[KEY]]\"\n";
+    let fill = |raw: &str, value: &str| {
+      substitute_compose(
+        "app",
+        raw,
+        Some(&BTreeMap::from([("KEY".into(), value.into())])),
+      )
+    };
+    let (out, _) = fill(raw, "a$b").unwrap();
+    assert_eq!(out, raw.replace("[[KEY]]", "a$$b"));
+    let damaged = "fixture\"quote";
+    let error = fill(raw, damaged).unwrap_err();
+    assert!(error.message.contains("填入密钥 KEY"));
+    assert!(!error.message.contains(damaged));
+    assert!(error.hint.unwrap().contains("[[json:KEY]]"));
+    let unquoted = raw.replace("\"[[KEY]]\"", "[[KEY]]");
+    let error =
+      fill(&unquoted, "ok\n      INJECTED: fixture").unwrap_err();
+    assert!(!error.message.contains("INJECTED"));
+  }
+
+  #[test]
   fn missing_secret_suggests_command() {
     let err =
       substitute("a [[NOPE]] b", Some(&BTreeMap::new())).unwrap_err();
@@ -2044,6 +2518,7 @@ mod tests {
     let render = |values| {
       service_compose("app", &spec, &BTreeMap::new(), &[], values)
         .unwrap()
+        .0
     };
     assert!(
       render(Some(&credentials))
