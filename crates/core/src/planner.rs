@@ -306,6 +306,7 @@ impl Builder {
       impacts,
       reason: reason.into(),
       changes,
+      host_access: vec![],
     });
     id
   }
@@ -723,6 +724,12 @@ fn finish_plan(
     }
   }
   let plan_id = new_id("p");
+  let needs_admin = crate::host_access::mark_plan(
+    &snap.world,
+    desired,
+    &mut b.items,
+    &b.steps,
+  );
   let mut needs_confirm: Vec<String> = b
     .items
     .iter()
@@ -754,6 +761,7 @@ fn finish_plan(
     )),
     items: b.items,
     warnings: b.warnings,
+    needs_admin,
     needs_confirm,
     suggest,
     note: note
@@ -1339,7 +1347,30 @@ fn service_items(
       }
       d => d,
     };
-    if let Some((action, risk, reason, before)) = decision {
+    if let Some((action, mut risk, reason, before)) = decision {
+      if let Source::Compose {
+        content: Some(content),
+        ..
+      } = &svc.spec.source
+      {
+        let prev_public = current
+          .services
+          .get(name)
+          .and_then(|s| match &s.spec.source {
+            Source::Compose {
+              content: Some(c), ..
+            } => Some(crate::host_access::compose_public_binds(c)),
+            _ => None,
+          })
+          .unwrap_or_default();
+        if crate::host_access::compose_public_binds(content)
+          .into_iter()
+          .any(|p| !prev_public.contains(&p))
+          && !risk.contains(&Impact::Public)
+        {
+          risk.push(Impact::Public);
+        }
+      }
       let reason = if matches!(svc.spec.source, Source::Build(_)) {
         format!("{reason}（镜像不在 {server} 上时先构建）")
       } else {
@@ -2104,12 +2135,10 @@ fn gateway_items(
     if let Some((action, mut risk, reason)) = decision {
       if gw.spec.kind == GatewayKind::Caddy {
         for f in &gw.spec.layer4 {
-          if current.gateways.get(name).is_some_and(|g| {
-            g.spec
-              .layer4
-              .iter()
-              .any(|old| old.udp == f.udp && old.listen == f.listen)
-          }) {
+          if !crate::host_access::layer4_changed(
+            current.gateways.get(name).map(|g| &g.spec),
+            f,
+          ) {
             continue;
           }
           if !risk.contains(&Impact::Public) {

@@ -1875,6 +1875,10 @@ export interface Plan {
   inputs?: string | null;
   items: PlanItem[];
   /**
+   * 触达宿主机、apply 时需要 `admin` 权限的地址。
+   */
+  needs_admin?: string[];
+  /**
    * 需要 `--confirm` 的地址。
    */
   needs_confirm?: string[];
@@ -1906,6 +1910,10 @@ export interface PlanItem {
    * 修改时具体改了哪些字段，由 `before`、`after` 算出。旧计划里没有。
    */
   changes?: FieldChange[];
+  /**
+   * 触达宿主机的原因；非空时 apply 阶段需要 `admin` 权限。旧计划里没有。
+   */
+  host_access?: string[];
   id: number;
   /**
    * 旧计划里没有这个字段（当时是单个 `risk`），读出来为空。

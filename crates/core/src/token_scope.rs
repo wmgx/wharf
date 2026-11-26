@@ -196,6 +196,9 @@ pub fn check_plan_scope(
     .items
     .iter()
     .filter(|item| {
+      if !item.host_access.is_empty() {
+        return true;
+      }
       let Some((kind, name)) = item.address.split_once('/') else {
         return true;
       };

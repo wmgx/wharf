@@ -28,6 +28,22 @@ pub const GATEWAY_PROJECT_PREFIX: &str = "wharf-gw-";
 /// 自动分配的宿主机端口范围。
 pub const HOST_PORTS: std::ops::RangeInclusive<u16> = 20000..=29999;
 
+/// Wharf 保留的宿主机端口，服务端口和四层转发监听均不能占用。
+pub(crate) fn is_reserved_host_port(port: u16) -> bool {
+  [
+    0,
+    22,
+    crate::link::FRPS_PORT,
+    7700,
+    wharf_api_types::agent::PROBE_PORT,
+    wharf_api_types::agent::REST_SERVER_PORT,
+    wharf_api_types::egress::SERVE_PORT,
+    wharf_api_types::egress::LOCAL_PORT,
+  ]
+  .contains(&port)
+    || (30000..=39999).contains(&port)
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ServerRow {
   pub settings: ServerSettings,
@@ -324,6 +340,12 @@ impl World {
             }
           }
           let old = self.services.get(name);
+          crate::host_access::validate_adopt(
+            self,
+            name,
+            old,
+            adopt.as_ref(),
+          )?;
           let host_ports =
             old.map(|s| s.host_ports.clone()).unwrap_or_default();
           let version = old.map(|s| s.version).unwrap_or(0);
@@ -1024,6 +1046,11 @@ impl World {
                 "入口 {name} 的四层转发 {listen} 的上游 {up} 要写成 主机:端口"
               )));
             }
+            if crate::host_access::is_metadata_upstream(up) {
+              return Err(ApiError::invalid(format!(
+                "入口 {name} 的四层转发 {listen} 不能指向云元数据或链路本地地址 {up}"
+              )));
+            }
           }
           _ => {
             return Err(ApiError::invalid(format!(
@@ -1031,20 +1058,8 @@ impl World {
             )));
           }
         }
-        if [
-          0,
-          22,
-          80,
-          443,
-          crate::link::FRPS_PORT,
-          7700,
-          wharf_api_types::agent::PROBE_PORT,
-          wharf_api_types::agent::REST_SERVER_PORT,
-          wharf_api_types::egress::SERVE_PORT,
-          wharf_api_types::egress::LOCAL_PORT,
-        ]
-        .contains(&listen)
-          || (30000..=39999).contains(&listen)
+        if is_reserved_host_port(listen)
+          || [80, 443].contains(&listen)
           || self.gateways.values().any(|g| {
             g.spec.kind == GatewayKind::Caddy
               && g.spec.server == *server
@@ -1718,6 +1733,16 @@ fn validate_service(
       }
     }
   }
+  let compose_ports = match &spec.source {
+    Source::Compose {
+      content: Some(content),
+      ..
+    } => Some((
+      crate::host_access::compose_published_ports(content)?,
+      crate::host_access::compose_has_host_network(content),
+    )),
+    _ => None,
+  };
   let mut port_names = BTreeSet::new();
   for port in &spec.ports {
     validate_name("端口", &port.name)?;
@@ -1733,6 +1758,24 @@ fn validate_service(
         "服务 {name} 的端口 {p} 不能是 0"
       )));
     }
+    if let Some(host) = port.host {
+      if is_reserved_host_port(host) {
+        return Err(ApiError::invalid(format!(
+          "服务 {name} 的端口 {p}（宿主机端口 {host}）是 Wharf 保留端口，不能使用"
+        )));
+      }
+      if world.gateways.values().any(|g| {
+        g.spec.kind == GatewayKind::Caddy
+          && g.spec.server == spec.server
+          && !port.udp
+          && (host == g.spec.http_port.unwrap_or(80)
+            || host == g.spec.https_port.unwrap_or(443))
+      }) {
+        return Err(ApiError::invalid(format!(
+          "服务 {name} 的端口 {p}（宿主机端口 {host}）与同机网关端口冲突"
+        )));
+      }
+    }
     match spec.source {
       Source::Compose { .. } => {
         if port.container.is_some() {
@@ -1744,6 +1787,21 @@ fn validate_service(
           return Err(ApiError::invalid(format!(
             "服务 {name} 的端口 {p}：compose 来源要填 compose 里发布的宿主机端口 host"
           )));
+        }
+        if let (Some(host), Some((published, false))) =
+          (port.host, &compose_ports)
+          && !published
+            .iter()
+            .any(|x| x.host_port == host && x.udp == port.udp)
+        {
+          return Err(
+            ApiError::invalid(format!(
+              "服务 {name} 的端口 {p}（宿主机端口 {host}）没有在 compose 的 ports 里发布"
+            ))
+            .with_hint(
+              "先在 compose 的 ports 里映射这个端口，或删掉这条端口声明",
+            ),
+          );
         }
       }
       Source::Image(_) | Source::Build(_) => {
@@ -2901,5 +2959,83 @@ mod tests {
     assert!(
       w.validate().unwrap_err().message.contains("只有 header")
     );
+  }
+
+  #[test]
+  fn compose_ports_must_match_published_and_reject_reserved() {
+    let mut w = sample();
+    let compose_spec = |content: &str, host: u16| ServiceSpec {
+      server: "node1".into(),
+      source: Source::Compose {
+        content: Some(content.into()),
+        file: None,
+      },
+      ports: vec![PortSpec {
+        name: "http".into(),
+        container: None,
+        host: Some(host),
+        udp: false,
+      }],
+      ..image_service("node1")
+    };
+    let no_ports = "services:\n  web:\n    image: nginx\n";
+    for host in [7700u16, 18080] {
+      w.services.insert(
+        "app".into(),
+        ServiceRow {
+          spec: compose_spec(no_ports, host),
+          host_ports: Default::default(),
+          import: None,
+          pins: Default::default(),
+          commit: None,
+          version: 1,
+        },
+      );
+      assert_eq!(
+        w.validate().unwrap_err().code,
+        wharf_api_types::ErrorCode::InvalidInput
+      );
+    }
+
+    let mut img = image_service("node1");
+    img.ports[0].host = Some(8119);
+    w.services.insert(
+      "app".into(),
+      ServiceRow {
+        spec: img,
+        host_ports: Default::default(),
+        import: None,
+        pins: Default::default(),
+        commit: None,
+        version: 1,
+      },
+    );
+    assert_eq!(
+      w.validate().unwrap_err().code,
+      wharf_api_types::ErrorCode::InvalidInput
+    );
+
+    let local_bind = "services:\n  web:\n    image: nginx\n    ports:\n      - \"127.0.0.1:8080:80\"\n";
+    w.services.insert(
+      "app".into(),
+      ServiceRow {
+        spec: compose_spec(local_bind, 8080),
+        host_ports: Default::default(),
+        import: None,
+        pins: Default::default(),
+        commit: None,
+        version: 1,
+      },
+    );
+    w.validate().unwrap();
+    assert!(
+      crate::host_access::compose_public_binds(local_bind).is_empty()
+    );
+
+    let public_bind = "services:\n  web:\n    image: nginx\n    ports:\n      - \"0.0.0.0:8080:80\"\n";
+    let pub_ports =
+      crate::host_access::compose_public_binds(public_bind);
+    assert_eq!(pub_ports.len(), 1);
+    assert_eq!(pub_ports[0].host_port, 8080);
   }
 }

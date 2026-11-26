@@ -15,7 +15,6 @@ use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
   ApiError,
   agent::{AgentOp, HostExecJob, HostExecOutcome},
-  view::Perm,
 };
 
 use crate::{
@@ -87,8 +86,11 @@ pub async fn status(
   auth: Auth,
   Path(name): Path<String>,
 ) -> ApiResult<AptStatus> {
-  auth.require(Perm::Exec)?;
-  check_server(&s, &name).await?;
+  crate::host_access::require(
+    &auth,
+    crate::host_access::HostTarget::HostApt { server: &name },
+  )?;
+  check_server(&s, &auth, &name).await?;
   let (_, out) = run(&s, &name, STATUS).await?;
   let (head, log) = out.split_once('\n').unwrap_or((&out, ""));
   Ok(Json(AptStatus {
@@ -115,9 +117,11 @@ pub async fn upgrade(
   auth: Auth,
   Path(name): Path<String>,
 ) -> ApiResult<String> {
-  auth.require(Perm::Exec)?;
-  auth.require(Perm::Apply)?;
-  check_server(&s, &name).await?;
+  crate::host_access::require(
+    &auth,
+    crate::host_access::HostTarget::HostApt { server: &name },
+  )?;
+  check_server(&s, &auth, &name).await?;
   let audit =
     start(&s.db, &auth.name, &name, "apt.upgrade", None).await?;
   let result = run(&s, &name, START).await;

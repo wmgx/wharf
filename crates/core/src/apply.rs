@@ -306,15 +306,7 @@ pub async fn start(
       .suggest(replan),
     );
   }
-  if !perms.contains(&Perm::Admin) && changes_host_access(plan) {
-    return Err(
-      ApiError::new(
-        ErrorCode::Forbidden,
-        "宿主机终端和命令执行开关要 admin 权限才能修改",
-      )
-      .with_hint("请用户在页面上执行，或用有 admin 权限的 token"),
-    );
-  }
+  crate::host_access::require_plan_admin(plan, &stored.steps, perms)?;
   if !perms.contains(&Perm::Admin)
     && plan.items.iter().any(|item| {
       if item.layer != Layer::Config
@@ -509,22 +501,6 @@ pub async fn start(
   }
   crate::service_monitor::sync_watches(&state, None).await;
   Ok(ApplyResponse { run_id })
-}
-
-fn changes_host_access(plan: &Plan) -> bool {
-  fn flags(value: Option<&serde_json::Value>) -> (bool, bool) {
-    let get = |name| {
-      value
-        .and_then(|v| v.get(name))
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
-    };
-    (get("host_terminal"), get("host_exec"))
-  }
-  plan.items.iter().any(|item| {
-    item.address.starts_with("server/")
-      && flags(item.before.as_ref()) != flags(item.after.as_ref())
-  })
 }
 
 /// 不来自计划的执行（备份、恢复）：同样占用 apply 锁、有执行记录、可以取消。
@@ -1808,12 +1784,29 @@ mod tests {
         impacts: vec![],
         reason: "修改配置".into(),
         changes: vec![],
+        host_access: vec![],
       }],
       warnings: vec![],
+      needs_admin: vec![],
       needs_confirm: vec![],
       suggest: vec![],
       note: None,
     };
-    assert!(changes_host_access(&plan));
+    let non_admin = std::collections::BTreeSet::from([
+      Perm::Read,
+      Perm::Plan,
+      Perm::Apply,
+    ]);
+    assert_eq!(
+      crate::host_access::require_plan_admin(&plan, &[], &non_admin)
+        .unwrap_err()
+        .code,
+      ErrorCode::Forbidden
+    );
+    let admin = std::collections::BTreeSet::from([Perm::Admin]);
+    assert!(
+      crate::host_access::require_plan_admin(&plan, &[], &admin)
+        .is_ok()
+    );
   }
 }

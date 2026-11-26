@@ -653,11 +653,52 @@ fn need_perm(
   auth: &Auth,
   spec: &TaskSpec,
 ) -> Result<(), crate::api::AppError> {
+  let access = crate::host_access::assess(
+    crate::host_access::HostTarget::Task(spec),
+  );
+  if access.required {
+    return crate::host_access::require(
+      auth,
+      crate::host_access::HostTarget::Task(spec),
+    );
+  }
   auth.require(Perm::Apply)?;
-  if matches!(spec.how, TaskKind::Host { .. }) {
+  if matches!(
+    spec.how,
+    TaskKind::Script { .. }
+      | TaskKind::Exec { .. }
+      | TaskKind::Container { .. }
+  ) {
     auth.require(Perm::Exec)?;
   }
   Ok(())
+}
+
+fn require_confirm_task_data(
+  auth: &Auth,
+  name: &str,
+) -> Result<(), crate::api::AppError> {
+  if auth.has(Perm::Confirm) {
+    return Ok(());
+  }
+  let have = auth
+    .perms
+    .iter()
+    .map(|p| p.as_str())
+    .collect::<Vec<_>>()
+    .join(",");
+  Err(
+    ApiError::new(
+      ErrorCode::Forbidden,
+      format!(
+        "永久删除定时任务 {name} 的持久数据需要 confirm 权限（当前 token 有：{have}）"
+      ),
+    )
+    .with_hint(
+      "请用户在页面上操作，或在页面\u{201c}设置 → CLI 与 AI 接入\u{201d}换一个有 confirm 权限的 token",
+    )
+    .into(),
+  )
 }
 
 fn run_view(r: &rusqlite::Row) -> rusqlite::Result<TaskRunView> {
@@ -827,6 +868,9 @@ pub async fn remove(
 ) -> ApiResult<serde_json::Value> {
   let spec = load_one(&s, &name).await?;
   need_perm(&auth, &spec)?;
+  if q.data && matches!(spec.how, TaskKind::Script { .. }) {
+    require_confirm_task_data(&auth, &name)?;
+  }
   let task_name = name.clone();
   s.db
     .call(move |c| {
@@ -1012,5 +1056,117 @@ mod tests {
       Some(token)
     );
     assert_eq!(next_hook(Some("old".into()), None), None);
+  }
+
+  fn auth_with(perms: &[Perm]) -> Auth {
+    Auth {
+      name: "tok".into(),
+      perms: perms.iter().copied().collect(),
+      expires_at: None,
+      allowed_from: vec![],
+      services: None,
+      human: false,
+    }
+  }
+
+  fn task_spec(how: TaskKind) -> TaskSpec {
+    TaskSpec {
+      server: "s1".into(),
+      schedule: "0 * * * *".into(),
+      timeout_secs: 60,
+      enabled: true,
+      notify: false,
+      how,
+    }
+  }
+
+  #[test]
+  fn host_and_mount_tasks_require_admin() {
+    let non_admin =
+      auth_with(&[Perm::Read, Perm::Plan, Perm::Apply, Perm::Exec]);
+    let admin = auth_with(&[
+      Perm::Read,
+      Perm::Plan,
+      Perm::Apply,
+      Perm::Exec,
+      Perm::Admin,
+    ]);
+    let host = task_spec(TaskKind::Host {
+      command: "id".into(),
+    });
+    let err = need_perm(&non_admin, &host).err().unwrap().0;
+    assert_eq!(err.code, ErrorCode::Forbidden);
+    assert!(err.message.contains("在宿主机上执行命令"));
+    assert!(need_perm(&admin, &host).is_ok());
+
+    let mounted = task_spec(TaskKind::Container {
+      image: "alpine".into(),
+      command: None,
+      env: Default::default(),
+      mounts: vec!["/:/host".into()],
+    });
+    let err = need_perm(&non_admin, &mounted).err().unwrap().0;
+    assert_eq!(err.code, ErrorCode::Forbidden);
+    assert!(err.message.contains("容器任务挂载了宿主机路径 /:/host"));
+    assert!(need_perm(&admin, &mounted).is_ok());
+  }
+
+  #[test]
+  fn script_exec_and_plain_container_tasks_require_exec() {
+    let apply_only = auth_with(&[Perm::Read, Perm::Apply]);
+    let with_exec = auth_with(&[Perm::Read, Perm::Apply, Perm::Exec]);
+    let cases = [
+      task_spec(TaskKind::Script {
+        runtime: ScriptRuntime::Shell,
+        code: "echo ok".into(),
+        deps: String::new(),
+        image: None,
+        env: Default::default(),
+        hook: None,
+      }),
+      task_spec(TaskKind::Exec {
+        service: "app".into(),
+        container: None,
+        command: "ls".into(),
+      }),
+      task_spec(TaskKind::Container {
+        image: "alpine".into(),
+        command: None,
+        env: Default::default(),
+        mounts: vec![],
+      }),
+    ];
+    for spec in &cases {
+      let err = need_perm(&apply_only, spec).err().unwrap().0;
+      assert_eq!(err.code, ErrorCode::Forbidden);
+      assert!(need_perm(&with_exec, spec).is_ok());
+    }
+    let ping = task_spec(TaskKind::Ping {
+      token: String::new(),
+      grace_mins: 60,
+    });
+    assert!(need_perm(&apply_only, &ping).is_ok());
+  }
+
+  #[test]
+  fn delete_task_with_data_requires_confirm() {
+    let no_confirm = auth_with(&[Perm::Apply, Perm::Exec]);
+    let with_confirm =
+      auth_with(&[Perm::Apply, Perm::Exec, Perm::Confirm]);
+    let script = task_spec(TaskKind::Script {
+      runtime: ScriptRuntime::Shell,
+      code: "echo ok".into(),
+      deps: String::new(),
+      image: None,
+      env: Default::default(),
+      hook: None,
+    });
+    assert!(need_perm(&no_confirm, &script).is_ok());
+    let err = require_confirm_task_data(&no_confirm, "job")
+      .err()
+      .unwrap()
+      .0;
+    assert_eq!(err.code, ErrorCode::Forbidden);
+    assert!(require_confirm_task_data(&with_confirm, "job").is_ok());
   }
 }

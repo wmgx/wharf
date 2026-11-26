@@ -23,12 +23,16 @@ use crate::{
   world::{World, gateway_project, server_not_found},
 };
 
-/// Wharf 自己的 compose 项目：服务、网关、备份。
-fn managed(world: &World, project: &str) -> bool {
+/// Wharf 自己的 compose 项目：服务、网关、备份、网络与临时任务。
+pub(crate) fn managed(world: &World, project: &str) -> bool {
   world.services.contains_key(project)
     || world.gateways.keys().any(|g| gateway_project(g) == project)
     || project == render::BACKUP_PROJECT
+    || project == crate::tailscale::PROJECT
     || crate::link::is_link_project(project)
+    || project
+      .starts_with(wharf_api_types::agent::TRIAL_PROJECT_PREFIX)
+    || project.starts_with(wharf_api_types::agent::TASK_DATA_PREFIX)
 }
 
 pub async fn unmanaged(
@@ -204,12 +208,19 @@ pub async fn remove(
   Path(server): Path<String>,
   Json(req): Json<RemoveRequest>,
 ) -> ApiResult<wharf_api_types::agent::RemovedContainers> {
-  auth.require(Perm::Apply)?;
+  let (kind, name) = target(&req.project, &req.container)?;
+  crate::host_access::require(
+    &auth,
+    crate::host_access::HostTarget::RemoveUnmanaged {
+      server: &server,
+      target: name,
+    },
+  )?;
+  auth.require(Perm::Confirm)?;
   let snap = snapshot::load(&s.db).await?;
   if !snap.world.servers.contains_key(&server) {
     return Err(server_not_found(&server).into());
   }
-  let (kind, name) = target(&req.project, &req.container)?;
   if kind == "project" && managed(&snap.world, name) {
     return Err(
       ApiError::invalid(format!(
@@ -308,4 +319,48 @@ pub async fn ignore(
   )
   .await?;
   Ok(Json(serde_json::json!({ "ignored": !req.undo })))
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn remove_unmanaged_requires_admin_confirm_and_protects_tailscale()
+  {
+    let make_auth = |perms: &[Perm]| Auth {
+      name: "tok".into(),
+      perms: perms.iter().copied().collect(),
+      expires_at: None,
+      allowed_from: vec![],
+      services: None,
+      human: false,
+    };
+    let check = |auth: &Auth| -> Result<(), crate::api::AppError> {
+      crate::host_access::require(
+        auth,
+        crate::host_access::HostTarget::RemoveUnmanaged {
+          server: "s1",
+          target: "orphan",
+        },
+      )?;
+      auth.require(Perm::Confirm)
+    };
+    let no_admin = make_auth(&[Perm::Apply, Perm::Confirm]);
+    assert_eq!(
+      check(&no_admin).err().unwrap().0.code,
+      ErrorCode::Forbidden
+    );
+    let no_confirm = make_auth(&[Perm::Apply, Perm::Admin]);
+    assert_eq!(
+      check(&no_confirm).err().unwrap().0.code,
+      ErrorCode::Forbidden
+    );
+    let ok = make_auth(&[Perm::Admin, Perm::Confirm]);
+    assert!(check(&ok).is_ok());
+
+    let world = World::default();
+    assert!(managed(&world, crate::tailscale::PROJECT));
+    assert!(managed(&world, render::BACKUP_PROJECT));
+  }
 }

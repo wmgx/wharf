@@ -113,7 +113,10 @@ pub async fn open_host(
   Query(q): Query<OpenQuery>,
   ws: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
-  auth.require(Perm::Exec)?;
+  crate::host_access::require(
+    &auth,
+    crate::host_access::HostTarget::HostTerminal { server: &name },
+  )?;
   let snap = snapshot::load(&s.db).await?;
   let row = snap
     .world
