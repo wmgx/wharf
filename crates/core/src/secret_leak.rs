@@ -532,6 +532,8 @@ mod tests {
     std::fs::write(dir.join("history.txt"), "replaced").unwrap();
     git(dir, "", &["add", "."]).await.unwrap();
     git(dir, "", &commit("second")).await.unwrap();
+    let tip = git(dir, "", &["rev-parse", "HEAD"]).await.unwrap();
+    let tip = std::str::from_utf8(&tip).unwrap().trim();
 
     let mut hits = BTreeSet::new();
     scan_history(
@@ -546,9 +548,9 @@ mod tests {
     assert!(hits.iter().any(
       |hit| hit.file == "***.txt" && hit.secret == "CURRENT_KEY"
     ));
-    assert!(hits.iter().any(
-      |hit| hit.file == "history.txt" && hit.secret == "PAST_KEY"
-    ));
+    assert!(hits.iter().any(|hit| hit.file == "history.txt"
+      && hit.secret == "PAST_KEY"
+      && hit.commit == tip));
     let report = serde_json::to_string(&hits).unwrap();
     for value in [history, current, encoded, "SHORT_KEY"] {
       assert!(!report.contains(value));

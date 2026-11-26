@@ -80,7 +80,7 @@ async fn service_allowlist_persists_and_can_be_cleared() {
     .await
     .unwrap();
   let allowed = ["app".into()].into();
-  crate::secret_restrictions::put(
+  let Json(saved) = crate::secret_restrictions::put(
     State(state.clone()),
     admin(),
     Path("APP_KEY".into()),
@@ -89,6 +89,7 @@ async fn service_allowlist_persists_and_can_be_cleared() {
   .await
   .map_err(|error| error.0)
   .unwrap();
+  assert!(saved.unwrap().contains("app"));
   state
     .db
     .call(|c| {
@@ -99,7 +100,7 @@ async fn service_allowlist_persists_and_can_be_cleared() {
     })
     .await
     .unwrap();
-  crate::secret_restrictions::put(
+  let Json(cleared) = crate::secret_restrictions::put(
     State(state.clone()),
     admin(),
     Path("APP_KEY".into()),
@@ -108,6 +109,7 @@ async fn service_allowlist_persists_and_can_be_cleared() {
   .await
   .map_err(|error| error.0)
   .unwrap();
+  assert!(cleared.is_none());
   assert!(
     state
       .db
@@ -138,7 +140,7 @@ fn restricted_secret_rejects_outside_service_and_nonservice_users() {
     &mut world,
     json!({
       "hostname": "app.example.test", "gateway": "g1", "service": "app",
-      "sso": {"login": {"script": {
+      "sso": {"mode": "login", "login": {"script": {
         "runtime": "shell", "code": "true", "env": {"KEY": "[[b64:APP_KEY]]"}
       }}}
     }),
