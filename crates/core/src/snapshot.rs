@@ -1179,7 +1179,8 @@ mod tests {
       "x-base: &base\n",
       "  environment:\n    PASS_FILE: [[FILE:PG_PASS]]\n",
       "  configs:\n    - source: fixture\n      target: /etc/fixture\n",
-      "services:\n  app:\n    <<: *base\n    image: nginx:1\n",
+      "x-derived: &derived\n  <<: *base\n",
+      "services:\n  app:\n    <<: *derived\n    image: nginx:1\n",
       "configs:\n  fixture:\n    content: fixture\n",
     );
     let mut resolve = |raw: &str| {

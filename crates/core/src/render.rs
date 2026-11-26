@@ -534,6 +534,30 @@ fn yaml_contains(value: &Value, text: &str) -> bool {
   }
 }
 
+fn merge_compose(
+  value: &mut Value,
+) -> Result<(), serde_yaml_ng::Error> {
+  // 先展开被继承的映射，避免一层合并漏掉链式继承或改变优先级。
+  match value {
+    Value::Mapping(map) => {
+      for child in map.values_mut() {
+        merge_compose(child)?;
+      }
+      if map.contains_key("<<") {
+        value.apply_merge()?;
+      }
+    }
+    Value::Sequence(seq) => {
+      for child in seq {
+        merge_compose(child)?;
+      }
+    }
+    Value::Tagged(tag) => merge_compose(&mut tag.value)?,
+    _ => {}
+  }
+  Ok(())
+}
+
 fn substitute_compose(
   service: &str,
   content: &str,
@@ -584,7 +608,7 @@ fn substitute_compose(
   if compose_shape(&before) != compose_shape(&after) {
     return Err(bad());
   }
-  after.apply_merge().map_err(|_| bad())?;
+  merge_compose(&mut after).map_err(|_| bad())?;
   check_compose_secret_volumes(service, &after)?;
   Ok((out, collect_compose_file_secrets(before, &markers)?))
 }
@@ -599,7 +623,7 @@ fn collect_compose_file_secrets(
   let bad = || {
     ApiError::invalid("[[FILE:...]] 只能写在 services 下的容器配置里")
   };
-  doc.apply_merge().map_err(|_| bad())?;
+  merge_compose(&mut doc).map_err(|_| bad())?;
   let services = doc
     .get("services")
     .and_then(Value::as_mapping)
@@ -1145,7 +1169,7 @@ pub fn add_files(
     serde_yaml_ng::from_str(compose).map_err(|_| bad())?;
   // 普通配置文件沿用原序列化结果，文件密钥挂载才需要展开继承的 configs。
   if !mounts.is_empty() || !file_secrets.is_empty() {
-    doc.apply_merge().map_err(|_| bad())?;
+    merge_compose(&mut doc).map_err(|_| bad())?;
     check_compose_secret_volumes(name, &doc)?;
   }
   let mut defs = Mapping::new();
@@ -1291,7 +1315,7 @@ pub fn check_compose(
       );
     }
   }
-  value.apply_merge().map_err(|_| {
+  merge_compose(&mut value).map_err(|_| {
     ApiError::invalid(format!(
       "服务 {name} 的 compose YAML 合并不合法"
     ))
@@ -2635,7 +2659,7 @@ mod tests {
       "{type: volume, source: fixture, target: /run/other/../wharf-secrets/PG_PASS}",
     ] {
       let raw = format!(
-        "x-base: &base\n  volumes:\n    - {volume}\nservices:\n  app:\n    <<: *base\n    image: nginx:1\n"
+        "x-base: &base\n  volumes:\n    - {volume}\nx-derived: &derived\n  <<: *base\nservices:\n  app:\n    <<: *derived\n    image: nginx:1\n"
       );
       let error = check_compose("app", &raw).unwrap_err();
       assert!(error.message.contains(SECRET_FILE_DIR));
