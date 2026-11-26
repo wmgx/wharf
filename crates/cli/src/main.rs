@@ -1125,9 +1125,13 @@ pub enum GatewayCmd {
     name: String,
   },
   /// 轮换网关的反向隧道密钥或证书。
+  // 子命令收到继承的全局参数后，给认证参数换个名字，保留 --token 用于轮换。
+  #[command(defer = |cmd| cmd.mut_args(|arg| {
+    if arg.get_id() == "token" { arg.long("api-token") } else { arg }
+  }))]
   RotateLink {
     name: String,
-    #[arg(long)]
+    #[arg(long, id = "rotate_token")]
     token: bool,
     #[arg(long)]
     cert: bool,

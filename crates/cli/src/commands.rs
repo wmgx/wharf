@@ -4272,18 +4272,23 @@ mod tests {
 
   #[test]
   fn rotate_link_yes_help_preserves_per_item_confirmation() {
-    let args = [
+    let credential = format!("fixture-{}", std::process::id());
+    let cli = Cli::try_parse_from([
       "wharf",
+      "--token",
+      &credential,
       "gateway",
       "rotate-link",
       "gw-a",
+      "--token",
       "--apply",
       "--yes",
-    ];
-    let cli = Cli::try_parse_from(args).unwrap();
+    ])
+    .unwrap();
+    assert!(cli.token.as_deref() == Some(credential.as_str()));
     assert!(matches!(
       cli.command,
-      Command::Gateway(GatewayCmd::RotateLink { apply, .. })
+      Command::Gateway(GatewayCmd::RotateLink { token: true, apply, .. })
         if apply.apply && apply.confirm.is_empty()
     ));
     let Err(help) = Cli::try_parse_from([
