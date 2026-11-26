@@ -27,7 +27,7 @@ use crate::{
 };
 
 pub use compose::{
-  PublishedPort, compose_has_host_network, compose_host_reasons,
+  compose_has_host_network, compose_host_reasons,
   compose_public_binds, compose_published_ports,
 };
 
@@ -184,7 +184,7 @@ fn assess_plan_item(
             reasons.extend(compose_host_reasons(name, content));
           }
           if row.import.is_some()
-            && (current.services.get(name).is_none()
+            && (!current.services.contains_key(name)
               || current
                 .services
                 .get(name)
