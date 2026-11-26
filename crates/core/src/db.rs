@@ -1424,6 +1424,7 @@ impl TokenRow {
 pub fn token_scope(
   conn: &Connection,
   hash: &str,
+  track_activity: bool,
 ) -> Result<Option<TokenRow>, ApiError> {
   let found = conn
     .query_row(
@@ -1433,7 +1434,7 @@ pub fn token_scope(
     )
     .optional()
     .map_err(sql_err)?;
-  if let Some(row) = &found {
+  if track_activity && let Some(row) = &found {
     conn
       .execute(
         // 每个请求都要过这里；一分钟内用过就不再写，磁盘忙时不拖慢请求。

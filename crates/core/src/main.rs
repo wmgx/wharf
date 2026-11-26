@@ -109,6 +109,7 @@ mod tailscale;
 mod tasks;
 mod terminal;
 mod timeline;
+mod token_explain;
 mod token_scope;
 mod tokens;
 mod totp;

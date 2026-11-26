@@ -299,6 +299,14 @@ pub async fn session_user(
   state: &AppState,
   headers: &HeaderMap,
 ) -> Result<Option<String>, ApiError> {
+  session_user_with_activity(state, headers, true).await
+}
+
+pub(crate) async fn session_user_with_activity(
+  state: &AppState,
+  headers: &HeaderMap,
+  track_activity: bool,
+) -> Result<Option<String>, ApiError> {
   let Some(id) = cookie_value(headers) else {
     return Ok(None);
   };
@@ -315,7 +323,7 @@ pub async fn session_user(
       )
       .optional()
       .map_err(sql_err)?;
-      if user.is_some() {
+      if track_activity && user.is_some() {
         let _ = c.execute("UPDATE sessions SET last_seen_at = ?2 WHERE hash = ?1 AND (last_seen_at IS NULL OR last_seen_at < ?2 - 60000)", params![hash, now]);
       }
       Ok(user)

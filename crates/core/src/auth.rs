@@ -1,10 +1,12 @@
 //! API token：`Authorization: Bearer <token>`。数据库里只存 SHA-256。
 
-use std::{collections::BTreeSet, path::Path, sync::Arc};
+use std::{
+  collections::BTreeSet, net::IpAddr, path::Path, sync::Arc,
+};
 
 use axum::{
   extract::{ConnectInfo, FromRequestParts},
-  http::request::Parts,
+  http::{Method, request::Parts},
 };
 use chrono::{DateTime, Utc};
 use rusqlite::params;
@@ -16,7 +18,7 @@ use wharf_api_types::{
 
 use crate::{
   api::AppError,
-  db::{self, Db, now_ms, sql_err},
+  db::{self, Db, TokenRow, now_ms, sql_err},
   state::AppState,
 };
 
@@ -121,24 +123,42 @@ impl Auth {
   }
 
   pub fn require(&self, perm: Perm) -> Result<(), AppError> {
-    if self.has(perm) {
-      return Ok(());
-    }
-    let have: Vec<&str> =
-      self.perms.iter().map(|p| p.as_str()).collect();
-    Err(
-      ApiError::new(
-        ErrorCode::Forbidden,
-        format!(
-          "当前 token 没有 {} 权限（有：{}）",
-          perm.as_str(),
-          have.join(",")
-        ),
-      )
-      .with_hint("请用户在页面\u{201c}设置 → CLI 与 AI 接入\u{201d}换一个有这个权限的 token")
-      .into(),
-    )
+    require_perm(&self.perms, perm).map_err(AppError::from)
   }
+}
+
+pub(crate) fn require_perm(
+  perms: &BTreeSet<Perm>,
+  perm: Perm,
+) -> Result<(), ApiError> {
+  if perms.contains(&perm) {
+    return Ok(());
+  }
+  let have: Vec<&str> = perms.iter().map(|p| p.as_str()).collect();
+  Err(
+    ApiError::new(
+      ErrorCode::Forbidden,
+      format!(
+        "当前 token 没有 {} 权限（有：{}）",
+        perm.as_str(),
+        have.join(",")
+      ),
+    )
+    .with_hint("请用户在页面\u{201c}设置 → CLI 与 AI 接入\u{201d}换一个有这个权限的 token"),
+  )
+}
+
+/// 推演接口校验调用者身份时也跳过使用时间的写入。
+#[derive(Clone, Copy)]
+pub(crate) struct SkipAuthActivity;
+
+pub(crate) fn invalid_token() -> ApiError {
+  ApiError::new(
+    ErrorCode::Unauthorized,
+    "没有登录，或 API token 无效",
+  )
+  .with_hint("设置环境变量 WHARF_TOKEN，或执行 wharf login")
+  .suggest("wharf login --url <控制面地址>")
 }
 
 impl FromRequestParts<Arc<AppState>> for Auth {
@@ -162,16 +182,9 @@ async fn authenticate(
   parts: &mut Parts,
   state: &Arc<AppState>,
 ) -> Result<Auth, AppError> {
-  let unauthorized = || {
-    AppError::from(
-      ApiError::new(
-        ErrorCode::Unauthorized,
-        "没有登录，或 API token 无效",
-      )
-      .with_hint("设置环境变量 WHARF_TOKEN，或执行 wharf login")
-      .suggest("wharf login --url <控制面地址>"),
-    )
-  };
+  let unauthorized = || AppError::from(invalid_token());
+  let track_activity =
+    parts.extensions.get::<SkipAuthActivity>().is_none();
   let token = parts
     .headers
     .get(axum::http::header::AUTHORIZATION)
@@ -188,10 +201,14 @@ async fn authenticate(
         "请求来源和控制面地址不一致",
       )));
     }
-    let user = crate::login::session_user(state, &parts.headers)
-      .await
-      .map_err(AppError::from)?
-      .ok_or_else(unauthorized)?;
+    let user = crate::login::session_user_with_activity(
+      state,
+      &parts.headers,
+      track_activity,
+    )
+    .await
+    .map_err(AppError::from)?
+    .ok_or_else(unauthorized)?;
     return Ok(Auth {
       name: format!("页面:{user}"),
       perms: Perm::ALL.into_iter().collect(),
@@ -223,75 +240,100 @@ async fn authenticate(
   let hash = hash_token(token);
   let found = state
     .db
-    .call(move |c| db::token_scope(c, &hash))
+    .call(move |c| db::token_scope(c, &hash, track_activity))
     .await
     .map_err(AppError::from)?;
   let row = found.ok_or_else(unauthorized)?;
-  let name = row.name;
-  let expires_at = row.expires_at.map(db::to_time);
-  if let Some(time) = expires_at.filter(|time| *time <= Utc::now()) {
+  let address = peer
+    .filter(|_| row.allowed_from.is_some())
+    .map(|ip| crate::login::client_key(ip, &parts.headers));
+  check_token(
+    &row,
+    Utc::now(),
+    TokenPeer::Address {
+      ip: address.as_deref().and_then(|raw| raw.parse().ok()),
+      label: address.as_deref().unwrap_or("未知地址"),
+    },
+    &parts.method,
+    parts.uri.path(),
+  )?;
+  Ok(Auth {
+    name: row.name,
+    perms: decode_perms(&row.perms).ok_or_else(unauthorized)?,
+    human: false,
+    expires_at: row.expires_at.map(db::to_time),
+    allowed_from: scope_values(
+      row.allowed_from.as_deref().unwrap_or_default(),
+    )
+    .collect(),
+    services: row
+      .services
+      .as_deref()
+      .map(|raw| scope_values(raw).collect()),
+  })
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum TokenPeer<'a> {
+  // 保留 client_key 的原始文本，错误消息需要显示原地址。
+  Address { ip: Option<IpAddr>, label: &'a str },
+  AssumeAllowed,
+}
+
+/// 按顺序检查令牌的有效期、来源和服务范围。接口权限点由调用方检查。
+pub(crate) fn check_token(
+  row: &TokenRow,
+  now: DateTime<Utc>,
+  peer: TokenPeer<'_>,
+  method: &Method,
+  path: &str,
+) -> Result<(), ApiError> {
+  let name = &row.name;
+  if let Some(time) =
+    row.expires_at.map(db::to_time).filter(|time| *time <= now)
+  {
     return Err(ApiError::new(
       ErrorCode::Unauthorized,
       format!("访问令牌 {name} 已在 {} 过期", time.format("%Y-%m-%d %H:%M UTC")),
-    ).with_hint(format!("在页面\u{201c}设置 → CLI 与 AI 接入\u{201d}续期，或用有 admin 权限的令牌执行 wharf token set {name} --expires 30d")).into());
+    ).with_hint(format!("在页面\u{201c}设置 → CLI 与 AI 接入\u{201d}续期，或用有 admin 权限的令牌执行 wharf token set {name} --expires 30d")));
   }
-  let has_source_limit = row.allowed_from.is_some();
-  let allowed_from: Vec<_> =
-    scope_values(row.allowed_from.as_deref().unwrap_or_default())
-      .collect();
-  if has_source_limit {
+  if let Some(raw) = &row.allowed_from {
+    let allowed_from: Vec<_> = scope_values(raw).collect();
     if allowed_from.is_empty() {
       return Err(
         ApiError::new(
           ErrorCode::Forbidden,
           format!("访问令牌 {name} 的来源限制配置为空，已拒绝访问"),
         )
-        .with_hint("请用管理员账号重新设置该令牌的来源限制")
-        .into(),
+        .with_hint("请用管理员账号重新设置该令牌的来源限制"),
       );
     }
-    let address =
-      peer.map(|peer| crate::login::client_key(peer, &parts.headers));
-    if !address
-      .as_deref()
-      .and_then(|raw| raw.parse().ok())
-      .is_some_and(|ip| {
+    if let TokenPeer::Address { ip, label } = peer
+      && !ip.is_some_and(|ip| {
         crate::token_scope::ip_in_ranges(ip, &allowed_from)
       })
     {
-      return Err(
-        ApiError::new(
-          ErrorCode::Forbidden,
-          format!(
-            "访问令牌 {name} 只允许从 {} 使用，这次请求来自 {}",
-            allowed_from.join("、"),
-            address.as_deref().unwrap_or("未知地址")
-          ),
-        )
-        .into(),
-      );
+      return Err(ApiError::new(
+        ErrorCode::Forbidden,
+        format!(
+          "访问令牌 {name} 只允许从 {} 使用，这次请求来自 {}",
+          allowed_from.join("、"),
+          label
+        ),
+      ));
     }
   }
-  let services = row.services.map(|raw| scope_values(&raw).collect());
-  if let Some(services) = &services
+  if let Some(services) = row
+    .services
+    .as_deref()
+    .map(|raw| scope_values(raw).collect())
     && !crate::token_scope::check_service_scope(
-      services,
-      &parts.method,
-      parts.uri.path(),
+      &services, method, path,
     )
   {
-    return Err(
-      crate::token_scope::forbidden(&name, services, "").into(),
-    );
+    return Err(crate::token_scope::forbidden(name, &services, ""));
   }
-  Ok(Auth {
-    name,
-    perms: decode_perms(&row.perms).ok_or_else(unauthorized)?,
-    human: false,
-    expires_at,
-    allowed_from,
-    services,
-  })
+  Ok(())
 }
 
 /// 浏览器带的 `Origin` 的 host[:port] 必须等于请求的 Host（经网关时网关会保留原 Host）。
@@ -312,7 +354,9 @@ fn same_origin(headers: &axum::http::HeaderMap) -> bool {
   matches!((origin_host, host), (Some(o), Some(h)) if o.eq_ignore_ascii_case(h.trim()))
 }
 
-fn scope_values(raw: &str) -> impl Iterator<Item = String> + '_ {
+pub(crate) fn scope_values(
+  raw: &str,
+) -> impl Iterator<Item = String> + '_ {
   raw
     .split(',')
     .map(str::trim)

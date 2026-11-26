@@ -993,6 +993,8 @@ export interface EgressSpec {
  */
 export type ErrorCode = "InvalidInput" | "NotFound" | "AlreadyExists" | "Conflict" | "Unauthorized" | "Forbidden" | "PasswordRequired" | "AgentOffline" | "Timeout" | "Cancelled" | "NotImplemented" | "Internal" | "PlanStale" | "ConfirmRequired" | "Busy" | "AgentFailed" | "Provider";
 
+export type ExplainVerdict = "allow" | "deny" | "depends";
+
 export interface ExposureView {
   checked_at: number | null;
   outdated: boolean;
@@ -2869,6 +2871,22 @@ export interface TimelineItem {
    */
   ok: boolean | null;
   title: string;
+}
+
+export interface TokenExplain {
+  from: string | null;
+  items: TokenExplainItem[];
+  service: string | null;
+  token: string;
+}
+
+export interface TokenExplainItem {
+  method: string;
+  op: string;
+  path: string;
+  perm: Perm | null;
+  reason: string | null;
+  verdict: ExplainVerdict;
 }
 
 export interface TokenSettings {

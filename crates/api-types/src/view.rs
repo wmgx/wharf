@@ -934,6 +934,41 @@ pub struct TokenSettings {
   pub services: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TokenExplain {
+  pub token: String,
+  pub service: Option<String>,
+  pub from: Option<String>,
+  pub items: Vec<TokenExplainItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TokenExplainItem {
+  pub op: String,
+  pub method: String,
+  pub path: String,
+  pub perm: Option<Perm>,
+  pub verdict: ExplainVerdict,
+  pub reason: Option<String>,
+}
+
+#[derive(
+  Debug,
+  Clone,
+  Copy,
+  PartialEq,
+  Eq,
+  Serialize,
+  Deserialize,
+  JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum ExplainVerdict {
+  Allow,
+  Deny,
+  Depends,
+}
+
 /// 一次备份的记录（成功或失败）。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct BackupRecord {

@@ -491,6 +491,11 @@ pub fn router(state: Arc<AppState>) -> Router {
       "/api/tokens/{name}",
       put(crate::tokens::set).delete(crate::tokens::remove),
     )
+    .route(
+      "/api/tokens/{name}/explain",
+      get(crate::token_explain::get)
+        .layer(axum::Extension(crate::auth::SkipAuthActivity)),
+    )
     .fallback(|uri: axum::http::Uri| async move {
       let path = uri.path();
       if path.starts_with("/api/") || path.starts_with("/agent/") {
