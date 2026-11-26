@@ -13,7 +13,6 @@ use wharf_api_types::{
 };
 
 use crate::{
-  api::AppError,
   auth::Auth,
   planner::{Step, StepPlan},
   world::{
