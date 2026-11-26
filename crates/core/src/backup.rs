@@ -135,6 +135,11 @@ pub(crate) async fn ensure_http_pair(
         if key.secret(&tx, &http_name)? != http {
           return Ok(None);
         }
+        if http.is_some()
+          && let Some(existing) = key.secret(&tx, &hash_name)?
+        {
+          return Ok(Some((candidate, existing)));
+        }
         let now = now_ms();
         key.put_secret(&tx, &http_name, &candidate, now, false)?;
         key.put_secret(&tx, &hash_name, &hash, now, true)?;
