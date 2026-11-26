@@ -215,8 +215,11 @@ async fn legacy_repo_adds_service_key_before_cleanup() {
       _ => panic!("意外任务"),
     }
   });
-  let show =
-    || list(State(state.clone()), auth(true), Path("svc-a".into()));
+  let show = || {
+    let mut read_only = auth(false);
+    read_only.perms = [Perm::Read].into_iter().collect();
+    list(State(state.clone()), read_only, Path("svc-a".into()))
+  };
   let before = secret_count(&state).await;
   assert_eq!(
     show().await.map_err(|e| e.0).unwrap().0.snapshots.len(),

@@ -703,7 +703,7 @@ pub async fn list(
     let cancel = CancellationToken::new();
     let _cancel = cancel.clone().drop_guard();
     let has_key = key.is_some();
-    let mut listed = Ok(vec![]);
+    let mut listed: Result<Vec<Snapshot>, ApiError> = Ok(vec![]);
     if let Some(key) = key {
       listed = local_call(
         &s,
@@ -716,8 +716,9 @@ pub async fn list(
       .await;
     }
     if let Some(legacy) = legacy
-      && (matches!(&listed, Err(e) if e.code == ErrorCode::AgentFailed || e.code == ErrorCode::Forbidden)
-        || !has_key)
+      && (!has_key
+        || matches!(&listed, Err(e) if e.code == ErrorCode::Forbidden
+        || (e.code == ErrorCode::AgentFailed && !s.hub.supports_backup_isolation(target))))
     {
       listed = local_call(
         &s,

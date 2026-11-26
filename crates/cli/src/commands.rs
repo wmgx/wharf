@@ -4143,10 +4143,16 @@ async fn backup(
       adopt: None,
     })
   };
+  let repo_timeout = Duration::from_secs(30 * 60);
   match cmd {
     BackupCmd::Migrate => {
-      let v: Value =
-        c.post("/api/backups/migrate", &json!({})).await?;
+      let v: Value = c
+        .post_timeout(
+          "/api/backups/migrate",
+          &json!({}),
+          repo_timeout,
+        )
+        .await?;
       out(j, &v, |v| {
         if let Some(repos) = v["repositories"].as_array() {
           for r in repos {
@@ -4166,9 +4172,10 @@ async fn backup(
     }
     BackupCmd::CleanupLegacy { confirm } => {
       let v: Value = c
-        .post(
+        .post_timeout(
           "/api/backups/cleanup-legacy",
           &json!({ "confirm": confirm }),
+          repo_timeout,
         )
         .await?;
       out(j, &v, |v| {

@@ -257,6 +257,12 @@ pub async fn run(
       if out.code == Some(NO_REPO) {
         return to_value(Vec::<Snapshot>::new());
       }
+      if out.code == Some(WRONG_PASSWORD) {
+        return Err(ApiError::new(
+          ErrorCode::Forbidden,
+          "备份仓库口令不匹配",
+        ));
+      }
       let out = out.check("restic snapshots")?;
       let mut list: Vec<Snapshot> = serde_json::from_str(&out.stdout)
         .map_err(|e| {

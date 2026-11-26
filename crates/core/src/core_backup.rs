@@ -475,7 +475,7 @@ async fn backup_impl(
   );
   let marker = stage(state, &dir).await?;
   progress("已生成数据库快照".into());
-  let result = run_repo(
+  let result: Result<BackupSummary, ApiError> = run_repo(
     state,
     &snap,
     &w,
@@ -543,9 +543,9 @@ async fn ensure_core_server(
   backup::require_isolation(state, &w.target)?;
   let mut htpasswd = format!("{HTTP_USER}:{}\n", creds.http_hash);
   if let Some(owner) = &creds.owner
-    && !owner
+    && owner
       .split_once(':')
-      .is_some_and(|(user, _)| user == HTTP_USER)
+      .is_some_and(|(user, _)| user != HTTP_USER)
   {
     htpasswd.push_str(owner);
     htpasswd.push('\n');
