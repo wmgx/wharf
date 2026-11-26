@@ -520,6 +520,15 @@ pub struct GatewaySpec {
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub trusted_proxies:
     Option<crate::trusted_proxies::TrustedProxiesSpec>,
+  /// caddy：读取请求头的超时（秒），默认 10。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub read_header_timeout: Option<u32>,
+  /// caddy：连接空闲超时（秒），默认 120。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub idle_timeout: Option<u32>,
+  /// caddy：重载时等待正在处理的请求（秒），默认 10。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub grace_period: Option<u32>,
 }
 
 /// 在入口机器上监听 TCP 或 UDP，原样转给服务。服务和上游二选一。
@@ -618,6 +627,12 @@ pub struct RouteSpec {
   /// 只在内网访问：DNS 指向入口所在机器的内网地址，证书用 DNS 验证签，入口只放行内网来源。只支持 caddy 网关。
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub internal: bool,
+  /// 仅向组网内来源开放控制面页面。
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub core_mesh_only: bool,
+  /// 只接受 Cloudflare 官方网段的直连请求。
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub cf_origin_only: bool,
   /// 临时分享：到这个时间（毫秒时间戳）以后，网关直接断开这个域名的请求；路由和 DNS 记录留着，等人删除。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub expires_at: Option<i64>,

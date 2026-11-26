@@ -7,6 +7,7 @@ pub(super) fn render_gate(
   out: &mut String,
   gate: &Gate,
   gate_public: Option<&str>,
+  revocation_key: Option<&str>,
 ) {
   if gate.site_endpoints {
     let host_header = if gate.core.starts_with("https://") {
@@ -22,6 +23,12 @@ pub(super) fn render_gate(
     gate.core,
     gate.login
   ));
+  if let Some(key) = revocation_key {
+    out.push_str(&format!("\t\trevocation_key {key}\n"));
+  }
+  if let Some(interval) = crate::gate::revocations::poll_interval() {
+    out.push_str(&format!("\t\trevocation_interval {interval}s\n"));
+  }
   if gate.public {
     out.push_str("\t\tpublic\n");
   }

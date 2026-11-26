@@ -33,6 +33,8 @@ use crate::{
   fleet, print,
 };
 
+pub(crate) mod entry_protection;
+
 pub async fn run(cli: Cli) -> CliResult<()> {
   let j = cli.json;
   match cli.command {
@@ -381,6 +383,8 @@ async fn dispatch(
         rate_limit: None,
         block_scanners: false,
         internal: false,
+        core_mesh_only: false,
+        cf_origin_only: false,
       };
       changes(c, vec![Change::UpsertRoute { spec }], apply, j).await
     }
@@ -2884,6 +2888,9 @@ async fn gateway(
       changes(c, vec![Change::UpsertGateway { name, spec }], apply, j)
         .await
     }
+    GatewayCmd::Timeouts(args) => {
+      entry_protection::timeouts(c, args, j).await
+    }
     GatewayCmd::TrustedProxies {
       name,
       cloudflare,
@@ -3073,6 +3080,9 @@ async fn gateway(
             wildcard: vec![],
             layer4: vec![],
             trusted_proxies: None,
+            read_header_timeout: None,
+            idle_timeout: None,
+            grace_period: None,
           }
         }
       };
@@ -3196,6 +3206,7 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
       no_tunnel,
       internal,
       no_internal,
+      protection,
       apply,
     } => {
       let host = hostname.trim().to_ascii_lowercase();
@@ -3229,7 +3240,8 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
         tunnel: flag(tunnel, no_tunnel),
         internal: flag(internal, no_internal),
       };
-      let spec = route_add_spec(old, args)?;
+      let mut spec = route_add_spec(old, args)?;
+      protection.set(&mut spec);
       changes(c, vec![Change::UpsertRoute { spec }], apply, j).await
     }
     RouteCmd::Sso {
@@ -3646,6 +3658,8 @@ fn route_add_spec(
       rate_limit: None,
       block_scanners: false,
       internal: false,
+      core_mesh_only: false,
+      cf_origin_only: false,
       expires_at: None,
     },
   };

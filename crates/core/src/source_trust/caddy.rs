@@ -4,7 +4,7 @@ pub fn render_proxy_options(
 ) {
   if !trusted_proxies.is_empty() {
     let cidrs = trusted_proxies.join(" ");
-    out.push_str(&format!("\tservers {{\n\t\ttrusted_proxies static {cidrs}\n\t\ttrusted_proxies_strict\n\t}}\n"));
+    out.push_str(&format!("\t\ttrusted_proxies static {cidrs}\n\t\ttrusted_proxies_strict\n"));
   }
 }
 

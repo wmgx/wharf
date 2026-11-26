@@ -653,7 +653,7 @@ pub fn reset_password(
     .map_err(|e| anyhow::anyhow!(e.message))?;
   let hash = hash_password(&password)
     .map_err(|e| anyhow::anyhow!(e.message))?;
-  set_admin(&conn, &username, &hash)
+  crate::gate::revocations::reset_admin(&conn, &username, &hash)
     .map_err(|e| anyhow::anyhow!(e.message))?;
   println!(
     "已重置管理员 {username} 的密码，两步验证已关闭，所有页面会话已退出"

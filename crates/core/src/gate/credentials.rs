@@ -8,7 +8,7 @@ use serde_json::json;
 use sha2::Sha256;
 use wharf_api_types::ApiError;
 
-const ACCESS_TTL: i64 = 600;
+pub(super) const ACCESS_TTL: i64 = 600;
 
 pub(super) fn credential_host(
   peer: std::net::IpAddr,

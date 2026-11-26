@@ -421,14 +421,19 @@ pub fn gateway_render(
   net: &Net,
   name: &str,
 ) -> Result<GatewayRender, ApiError> {
-  gateway_render_with_acme(world, net, name, None)
+  gateway_render_with_fill(
+    world,
+    net,
+    name,
+    render::CaddyFill::default(),
+  )
 }
 
-pub fn gateway_render_with_acme(
+pub fn gateway_render_with_fill(
   world: &World,
   net: &Net,
   name: &str,
-  fill: Option<render::AcmeDnsFill<'_>>,
+  fill: render::CaddyFill<'_>,
 ) -> Result<GatewayRender, ApiError> {
   let gateway = world.gateways.get(name).ok_or_else(|| {
     ApiError::not_found(format!("网关 {name} 不存在"))
@@ -438,8 +443,16 @@ pub fn gateway_render_with_acme(
     if !world.route_gateways(&route.spec).contains(&name) {
       continue;
     }
+    let protection = crate::entry_protection::SiteProtection::new(
+      world,
+      net,
+      &gateway.spec,
+      host,
+      &route.spec,
+    )?;
     if let Some(target) = &route.spec.redirect {
       sites.push(render::Site {
+        protection,
         hostname: host.clone(),
         upstream: String::new(),
         auth: None,
@@ -568,6 +581,7 @@ pub fn gateway_render_with_acme(
       })
       .transpose()?;
     sites.push(render::Site {
+      protection,
       gate,
       wildcard: false,
       internal: route.spec.internal,
@@ -661,7 +675,7 @@ pub fn gateway_render_with_acme(
       needs_acme_dns = caddy_sites.iter().any(|s| s.dns.is_some());
       (
         render::gateway_compose(name, &gateway.spec),
-        render::caddyfile_with_acme(
+        render::caddyfile_with_fill(
           name,
           &gateway.spec,
           &caddy_sites,

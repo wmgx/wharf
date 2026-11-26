@@ -19,10 +19,19 @@ pub(crate) fn route_caddy_changed(
 ) -> bool {
   normalized_caddy(before.and_then(|r| r.caddy.as_deref()))
     != normalized_caddy(after.and_then(|r| r.caddy.as_deref()))
+    || before.is_some_and(|r| r.core_mesh_only)
+      != after.is_some_and(|r| r.core_mesh_only)
 }
 
 fn caddy_field(spec: Option<&Value>) -> Option<&str> {
   normalized_caddy(spec?.get("caddy")?.as_str())
+}
+
+fn core_mesh_field(spec: Option<&Value>) -> bool {
+  spec
+    .and_then(|spec| spec.get("core_mesh_only"))
+    .and_then(Value::as_bool)
+    == Some(true)
 }
 
 pub(crate) fn require_route_caddy(
@@ -34,13 +43,15 @@ pub(crate) fn require_route_caddy(
       item.layer == Layer::Config
         && item.address.starts_with("route/")
         && item.action != Action::Delete
-        && caddy_field(item.before.as_ref())
+        && (caddy_field(item.before.as_ref())
           != caddy_field(item.after.as_ref())
+          || core_mesh_field(item.before.as_ref())
+            != core_mesh_field(item.after.as_ref()))
     })
   {
     return Err(ApiError::new(
       ErrorCode::Forbidden,
-      "新增或修改路由的自定义 Caddy 配置需要 admin 权限",
+      "修改路由的自定义 Caddy 配置或控制面组网限制需要 admin 权限",
     ));
   }
   Ok(())

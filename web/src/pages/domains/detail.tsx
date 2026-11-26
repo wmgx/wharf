@@ -58,6 +58,8 @@ function DomainDetail({ route, status, onClose, onDirty }: { route: RouteView; s
   const [forwards, setForwards] = useState<PathRoute[]>(route.spec.paths ?? []);
   const [gw, setGw] = useState(route.gateway ?? "");
   const [internal, setInternal] = useState(!!route.spec.internal);
+  const [coreMeshOnly, setCoreMeshOnly] = useState(!!route.spec.core_mesh_only);
+  const [cfOriginOnly, setCfOriginOnly] = useState(!!route.spec.cf_origin_only);
   const [caddy, setCaddy] = useState(route.spec.caddy ?? "");
   const [dialog, setDialog] = useState<"target" | "path" | "caddy" | null>(null);
   const saved = status.gateways.find((g) => g.name === route.gateway);
@@ -71,6 +73,8 @@ function DomainDetail({ route, status, onClose, onDirty }: { route: RouteView; s
     rate !== null && "限速",
     block && "拦截常见扫描",
     internal && "只在内网访问",
+    coreMeshOnly && "控制面页面只在组网内打开",
+    cfOriginOnly && "仅允许 Cloudflare 回源",
     forwards.length > 0 && "按路径转发",
     caddy.trim() && "Caddy 配置",
     isRedirect && "跳转",
@@ -84,6 +88,8 @@ function DomainDetail({ route, status, onClose, onDirty }: { route: RouteView; s
     ["路径", JSON.stringify(forwards) !== JSON.stringify(route.spec.paths ?? [])],
     ["入口", gw !== (route.gateway ?? "")],
     ["只在内网访问", internal !== !!route.spec.internal],
+    ["控制面页面只在组网内打开", coreMeshOnly !== !!route.spec.core_mesh_only],
+    ["仅允许 Cloudflare 回源", cfOriginOnly !== !!route.spec.cf_origin_only],
     ["走法", link !== route.spec.link],
     ["备用入口", backupNow !== (route.spec.backup_gateway ?? "")],
     ["限速", rate !== (route.spec.rate_limit ?? null)],
@@ -99,6 +105,8 @@ function DomainDetail({ route, status, onClose, onDirty }: { route: RouteView; s
     paths: forwards.length ? forwards : undefined,
     gateway: gw === (route.gateway ?? "") ? route.spec.gateway : gw,
     internal: internal || undefined,
+    core_mesh_only: coreMeshOnly || undefined,
+    cf_origin_only: cfOriginOnly || undefined,
     link,
     backup_gateway: backupNow || undefined,
     rate_limit: rate ?? undefined,
@@ -179,10 +187,16 @@ function DomainDetail({ route, status, onClose, onDirty }: { route: RouteView; s
           <Checkbox checked={internal} disabled={tunnel} onCheckedChange={(v) => setInternal(v === true)} />只在内网访问
           {tunnel && <span className="text-xs text-muted-foreground">隧道入口不支持</span>}
         </label>}
+        {(route.core || coreMeshOnly) && <label className={`flex items-center gap-2 text-sm ${tunnel ? "text-muted-foreground" : ""}`}>
+          <Checkbox checked={coreMeshOnly} disabled={tunnel && !coreMeshOnly} onCheckedChange={(v) => setCoreMeshOnly(v === true)} />控制面页面只在组网内打开
+        </label>}
+        <label className={`flex items-center gap-2 text-sm ${tunnel ? "text-muted-foreground" : ""}`}>
+          <Checkbox checked={cfOriginOnly} disabled={tunnel && !cfOriginOnly} onCheckedChange={(v) => setCfOriginOnly(v === true)} />仅允许 Cloudflare 回源
+        </label>
         {target.kind === "service" && !isRedirect && !tunnel && <label className="flex items-center gap-2 text-sm">
           <Checkbox checked={link === "tunnel"} onCheckedChange={(v) => setLink(v === true ? "tunnel" : undefined)} />总是走反向隧道</label>}
         {(choices.length > 0 || route.spec.backup_gateway) && <Field label="备用入口" htmlFor="backup-gateway" help="入口所在的机器离线 5 分钟后，DNS 自动切到备用入口，恢复 5 分钟后切回。">
-          <Picker id="backup-gateway" value={backupNow} onChange={setBackup} options={[{ value: "", label: "无" }, ...choices.map((g) => ({ value: g.name, label: `${g.name}（${g.spec.server}）` }))]} />
+          <Picker id="backup-gateway" value={backupNow} onChange={setBackup} options={[{ value: "", label: "无" }, ...choices.map((g) => ({ value: g.name, label: `${g.name}（${g.spec.server}）`, disabled: g.spec.kind === "cloudflare_tunnel" && (coreMeshOnly || cfOriginOnly) }))]} />
         </Field>}
       </Panel>
       <SectionTitle>访问保护</SectionTitle>

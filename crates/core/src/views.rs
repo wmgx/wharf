@@ -475,6 +475,7 @@ pub(crate) fn route_view_with_upstream_error(
   };
   Some((
     RouteView {
+      core: crate::gate::is_core_host(world, net, hostname),
       note: snap.route_notes.get(hostname).cloned(),
       sso_login: row
         .spec

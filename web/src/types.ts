@@ -196,6 +196,9 @@ export interface GatewaySpec {
   wildcard?: string[];
   layer4?: Gen.Layer4Forward[];
   trusted_proxies?: Gen.TrustedProxiesSpec;
+  read_header_timeout?: number;
+  idle_timeout?: number;
+  grace_period?: number;
 }
 
 export interface GatewayView {
@@ -210,6 +213,8 @@ export interface RouteSpec {
   sso?: Gen.SsoSpec;
   rate_limit?: number;
   block_scanners?: boolean;
+  core_mesh_only?: boolean;
+  cf_origin_only?: boolean;
   internal?: boolean;
   expires_at?: number;
   hostname: string;
@@ -238,6 +243,7 @@ export interface RouteSpec {
 }
 
 export interface RouteView {
+  core?: boolean;
   note?: string;
   sso_login?: Gen.SsoLoginState;
   id: string;
