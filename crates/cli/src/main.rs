@@ -1133,7 +1133,7 @@ pub struct RotateLinkArgs {
 }
 
 #[derive(Subcommand)]
-#[command(defer)]
+#[command(defer = true)]
 pub enum GatewayCmd {
   List,
   Show {
