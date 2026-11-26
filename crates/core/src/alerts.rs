@@ -93,6 +93,7 @@ async fn round(
     })
     .collect();
   crate::rules::sync_unavailable_gateways(state, down_gateways).await;
+  observe_link_certificates(state, &snap).await;
   for (name, online) in &servers {
     crate::rules::observe(
       state,
@@ -114,4 +115,22 @@ async fn round(
     .await;
   }
   Ok(())
+}
+
+pub(crate) async fn observe_link_certificates(
+  state: &AppState,
+  snap: &crate::snapshot::Snapshot,
+) {
+  let net = snap.net(&snap.world);
+  let now = chrono::Utc::now();
+  for (name, expires) in crate::link_cert::leaf_expiries(snap, &net) {
+    let days = (expires - now).num_seconds() as f64 / 86_400.0;
+    crate::rules::observe(state, "link_cert.days", name, days, "")
+      .await;
+  }
+  if let Some(expires) = crate::link_cert::ca_expiry(snap) {
+    let days = (expires - now).num_seconds() as f64 / 86_400.0;
+    crate::rules::observe(state, "link_ca.days", "ca", days, "")
+      .await;
+  }
 }

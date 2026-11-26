@@ -16,6 +16,14 @@ pub(super) async fn caddyfile_for_apply(
   gateway: &str,
   mut rendered: GatewayRender,
 ) -> Result<GatewayRender, ApiError> {
+  if rendered.needs_link_cert {
+    let server = &world.gateways[gateway].spec.server;
+    crate::link_cert::require_gateway_agent(
+      &state.hub, server, gateway,
+    )?;
+    let pair = ensure_link_certificate(state, gateway).await?;
+    fill_link_certificate(&mut rendered, pair);
+  }
   let acme = if rendered.needs_acme_dns {
     Some(
       acme_credentials(
@@ -48,6 +56,40 @@ pub(super) async fn caddyfile_for_apply(
         .config;
   }
   Ok(rendered)
+}
+
+async fn ensure_link_certificate(
+  state: &AppState,
+  gateway: &str,
+) -> Result<crate::link_cert::CertPair, ApiError> {
+  let gateway = gateway.to_string();
+  state
+    .db
+    .call_credentials(move |c, key| {
+      let tx = c.transaction().map_err(db::sql_err)?;
+      let pair = crate::link_cert::ensure_gateway_cert(
+        &tx,
+        key,
+        &gateway,
+        db::now_ms(),
+        false,
+      )?;
+      tx.commit().map_err(db::sql_err)?;
+      Ok(pair)
+    })
+    .await
+}
+
+pub(super) fn fill_link_certificate(
+  r: &mut GatewayRender,
+  pair: crate::link_cert::CertPair,
+) {
+  let fingerprint =
+    crate::link_cert::fingerprint(&pair.cert, &pair.key);
+  r.config_hash =
+    crate::link_cert::config_hash(&r.config, &fingerprint);
+  r.extra_files.insert("link.crt".into(), pair.cert);
+  r.extra_files.insert("link.key".into(), pair.key);
 }
 
 async fn acme_credentials(

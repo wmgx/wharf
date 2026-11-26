@@ -2839,6 +2839,27 @@ async fn gateway(
       });
       Ok(())
     }
+    GatewayCmd::RotateLink {
+      name,
+      token,
+      cert,
+      apply,
+      ..
+    } => {
+      let both = !token && !cert;
+      let response =
+        c.rotate_link(&name, token || both, cert || both).await?;
+      if apply.apply {
+        if !j {
+          print::rotate_link(&response);
+        }
+        plan_and_maybe_apply(c, PlanRequest::default(), apply, j)
+          .await
+      } else {
+        out(j, &response, print::rotate_link);
+        Ok(())
+      }
+    }
     GatewayCmd::Logs(args) => {
       crate::access_logs::gateway(c, args, j).await
     }

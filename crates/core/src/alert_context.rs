@@ -58,7 +58,7 @@ pub async fn enrich(
         Ok(snap) => {
           if let Some(row) = snap.world.services.get(service) {
             let mut secrets: Vec<String> =
-              snap.secrets.values().cloned().collect();
+              crate::secret_policy::redact_values(&snap.secrets);
             secrets.extend(
               row
                 .spec
@@ -216,7 +216,8 @@ fn page_path(rule: &str, subject: Option<&str>) -> String {
     | "svc_mem_near_limit" => {
       format!("/services/{subject}")
     }
-    "domain_down" | "cert_expiring" => "/entries".into(),
+    "domain_down" | "cert_expiring" | "link_cert_expiring"
+    | "link_ca_expiring" => "/entries".into(),
     "link_loss" => "/network".into(),
     "host_unit_down" => {
       let server = subject.split_once(':').map_or(subject, |s| s.0);

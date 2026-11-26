@@ -14,42 +14,68 @@ use crate::{render, world::World};
 const WHARF_PREFIX: &str = "WHARF_";
 const ACME_PREFIX: &str = "ACME_DNS_";
 
-pub enum SecretClass {
-  System(&'static str),
-  User,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SecretMeta {
+  pub label: &'static str,
+  pub managed: bool,
+  pub redact: bool,
 }
 
-pub fn classify(name: &str) -> SecretClass {
-  use SecretClass::{System, User};
-  match name {
-    crate::core_backup::OWNER_SECRET => System("控制面备份"),
-    crate::link::TOKEN_SECRET => System("机器互联"),
-    crate::egress::TOKEN_SECRET => System("外网代理"),
-    crate::tailscale::OAUTH_SECRET => System("Tailscale 组网"),
-    crate::render::TUNNEL_TOKEN_SECRET => System("隧道"),
-    crate::notify::FEISHU_WEBHOOK | crate::notify::FEISHU_SECRET => {
-      System("通知")
+pub fn describe(name: &str) -> Option<SecretMeta> {
+  let (label, managed, redact) = match name {
+    crate::link::CA_CERT_SECRET => ("机器互联", true, false),
+    n if n.starts_with(crate::link::CERT_PREFIX) => {
+      ("机器互联", true, false)
     }
-    n if crate::backup::MANAGED_SECRETS.contains(&n) => {
-      System("备份")
+    n if n.starts_with(crate::link::SECRET_PREFIX) => {
+      ("机器互联", true, true)
     }
-    n if render::is_auth_secret(n) => System("登录保护"),
-    n if n.starts_with(crate::oidc::SECRET_PREFIX) => System("OIDC"),
+    crate::core_backup::OWNER_SECRET
+    | "WHARF_CORE_BACKUP_HTTP_HASH" => ("控制面备份", true, false),
+    n if n.starts_with("WHARF_CORE_BACKUP_") => {
+      ("控制面备份", true, true)
+    }
+    "WHARF_BACKUP_HTTP_HASH" => ("备份", true, false),
+    n if n.starts_with("WHARF_BACKUP_HTTP_HASH_") => {
+      ("备份", true, false)
+    }
+    n if n.starts_with(crate::backup::SECRET_PREFIX) => {
+      ("备份", true, true)
+    }
+    crate::render::TUNNEL_TOKEN_SECRET => ("隧道", true, true),
     n if n.starts_with(crate::acme_dns::SECRET_PREFIX)
       || n.starts_with(ACME_PREFIX) =>
     {
-      System("DNS 证书验证")
+      ("DNS 证书验证", true, true)
     }
-    n if n.starts_with(WHARF_PREFIX) => System("Wharf 内部"),
-    _ => User,
-  }
+    n if n.starts_with(WHARF_PREFIX) => ("Wharf 内部", true, true),
+    n if n.starts_with(crate::oidc::SECRET_PREFIX) => {
+      ("OIDC", true, true)
+    }
+    n if n.starts_with(crate::notify_keys::SECRET_PREFIX) => {
+      ("通知", true, true)
+    }
+    crate::egress::TOKEN_SECRET => ("外网代理", true, true),
+    crate::tailscale::OAUTH_SECRET => ("Tailscale 组网", false, true),
+    crate::notify::FEISHU_WEBHOOK | crate::notify::FEISHU_SECRET => {
+      ("通知", false, true)
+    }
+    n if render::is_auth_secret(n) => ("登录保护", false, false),
+    _ => return None,
+  };
+  Some(SecretMeta {
+    label,
+    managed,
+    redact,
+  })
 }
 
 pub fn system_label(name: &str) -> Option<&'static str> {
-  match classify(name) {
-    SecretClass::System(label) => Some(label),
-    SecretClass::User => None,
+  // 通知 URL 由控制面管理，但业务服务仍可引用。
+  if name.starts_with(crate::notify_keys::SECRET_PREFIX) {
+    return None;
   }
+  describe(name).map(|meta| meta.label)
 }
 
 pub fn is_system_secret(name: &str) -> bool {
@@ -57,15 +83,32 @@ pub fn is_system_secret(name: &str) -> bool {
 }
 
 pub fn is_managed_secret(name: &str) -> bool {
-  name == crate::egress::TOKEN_SECRET
-    || [
-      WHARF_PREFIX,
-      ACME_PREFIX,
-      crate::oidc::SECRET_PREFIX,
-      crate::notify_keys::SECRET_PREFIX,
-    ]
-    .into_iter()
-    .any(|prefix| name.starts_with(prefix))
+  describe(name).is_some_and(|meta| meta.managed)
+}
+
+pub fn redact_values(all: &BTreeMap<String, String>) -> Vec<String> {
+  let mut values = BTreeSet::new();
+  for (name, value) in all {
+    if value.len() < 6
+      || describe(name).is_some_and(|meta| !meta.redact)
+    {
+      continue;
+    }
+    values.insert(value.clone());
+    if value.lines().next().is_some_and(|line| {
+      line.starts_with("-----BEGIN ")
+        && line.ends_with("PRIVATE KEY-----")
+    }) {
+      values.extend(value.lines().filter_map(|line| {
+        let body = line.trim();
+        (body.len() >= 6 && !body.starts_with("-----"))
+          .then(|| body.to_string())
+      }));
+    }
+  }
+  let mut values: Vec<_> = values.into_iter().collect();
+  values.sort_by_key(|value| std::cmp::Reverse(value.len()));
+  values
 }
 
 pub fn refuse_managed(name: &str) -> Result<(), ApiError> {

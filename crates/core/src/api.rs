@@ -2,6 +2,8 @@
 
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
+mod link;
+
 use axum::{
   Json, Router,
   extract::{Path, Query, State},
@@ -377,6 +379,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route("/api/gateways", get(list_gateways))
     .route("/api/gateways/{name}", get(show_gateway))
     .route("/api/gateways/{name}/config", get(gateway_config))
+    .route("/api/gateways/{name}/link/rotate", post(link::rotate))
     .route("/api/gateways/{name}/logs", get(gateway_logs))
     .route(
       "/api/gateways/{name}/access-logs",

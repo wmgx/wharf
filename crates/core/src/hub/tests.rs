@@ -67,8 +67,61 @@ fn old_core_ignores_new_hello_capability() {
     net_probe: true,
     container_probe: true,
     ssh_logins: true,
+    gateway_extra_files: true,
   };
   let json = serde_json::to_string(&hello).unwrap();
   let old = serde_json::from_str::<OldAgentMsg>(&json);
   assert!(old.is_ok());
+}
+
+impl Hub {
+  pub(crate) fn mock_agent(
+    &self,
+    server: &str,
+    gateway_extra_files: bool,
+    mut handle: impl FnMut(AgentOp) -> Result<Value, ApiError>
+    + Send
+    + 'static,
+  ) {
+    let (tx, mut rx) = mpsc::channel(16);
+    let pending =
+      Arc::new(Mutex::new(HashMap::<u64, Pending>::new()));
+    let closed = CancellationToken::new();
+    self.register(
+      server,
+      Conn {
+        conn_id: self.next_conn.fetch_add(1, Ordering::Relaxed),
+        tx,
+        pending: pending.clone(),
+        closed: closed.clone(),
+        rtt_ms: Default::default(),
+        host_shell: false,
+        forward: false,
+        service_checks: false,
+        container_diagnosis: false,
+        access_logs: false,
+        net_probe: false,
+        container_probe: false,
+        ssh_logins: false,
+        gateway_extra_files,
+        upgrade_only: false,
+      },
+    );
+    tokio::spawn(async move {
+      loop {
+        let msg = tokio::select! {
+          () = closed.cancelled() => break,
+          msg = rx.recv() => msg,
+        };
+        let Some(msg) = msg else {
+          break;
+        };
+        if let CoreMsg::Request { id, op, .. } = msg
+          && let Some(p) = lock(&pending).remove(&id)
+        {
+          let _ = p.done.send(handle(op));
+        }
+      }
+    });
+  }
 }

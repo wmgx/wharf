@@ -207,6 +207,28 @@ pub async fn run(
       })
       .collect(),
   };
+  let now = Utc::now();
+  report.config.extend(
+    crate::link_cert::leaf_expiries(&snap, &net).map(
+      |(gateway, expires)| {
+        let days = crate::link_cert::days_left(expires, now);
+        let (status, detail) = if days <= 0 {
+          (CheckStatus::Bad, "隧道证书已过期".into())
+        } else {
+          let status = if expires - now
+            < chrono::Duration::days(
+              crate::link_cert::LEAF_ALERT_DAYS,
+            ) {
+            CheckStatus::Warn
+          } else {
+            CheckStatus::Ok
+          };
+          (status, format!("隧道证书 {days} 天后到期"))
+        };
+        check("gateway", format!("网关 {gateway}"), status, detail)
+      },
+    ),
+  );
   if let Some(allowed) = allowed {
     crate::scope_filter::filter_doctor(
       allowed,

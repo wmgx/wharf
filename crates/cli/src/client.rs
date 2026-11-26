@@ -349,6 +349,20 @@ impl Client {
       .await
   }
 
+  pub async fn rotate_link(
+    &self,
+    gateway: &str,
+    token: bool,
+    cert: bool,
+  ) -> CliResult<serde_json::Value> {
+    self
+      .post(
+        &format!("/api/gateways/{}/link/rotate", seg(gateway)),
+        &serde_json::json!({"token": token, "cert": cert}),
+      )
+      .await
+  }
+
   pub async fn post_timeout<B: Serialize, T: DeserializeOwned>(
     &self,
     path: &str,

@@ -45,6 +45,18 @@ fn issuer_and_rest(der: &[u8]) -> Option<(&[u8], &[u8])> {
   Some((issuer, rest))
 }
 
+pub fn pem_not_after(pem: &str) -> Option<DateTime<Utc>> {
+  use base64::{Engine, engine::general_purpose::STANDARD};
+  let base64: String = pem
+    .trim()
+    .strip_prefix("-----BEGIN CERTIFICATE-----")?
+    .strip_suffix("-----END CERTIFICATE-----")?
+    .lines()
+    .map(str::trim)
+    .collect();
+  not_after(&STANDARD.decode(base64).ok()?)
+}
+
 pub fn not_after(der: &[u8]) -> Option<DateTime<Utc>> {
   let (_, rest) = issuer_and_rest(der)?;
   let (0x30, validity, _) = tlv(rest)? else {
