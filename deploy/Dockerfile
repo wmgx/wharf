@@ -54,6 +54,9 @@ CMD ["run"]
 
 FROM base AS core
 LABEL wharf.system=core
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git \
+ && rm -rf /var/lib/apt/lists/*
 ARG WHARF_BUILD=
 ARG WHARF_REQUIRE_CLI_SHA256SUMS=0
 RUN --mount=type=secret,id=cli_sha256sums \

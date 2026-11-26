@@ -89,6 +89,9 @@ export function Secrets() {
                     })}）
                   </span>
                 )}
+                {x.allowed_services && (
+                  <span className="text-xs text-muted-foreground">仅限 {x.allowed_services.join("、")}</span>
+                )}
                 <span className="text-xs text-muted-foreground">{ago(x.updated_at)}</span>
                 <DropdownMenu>
                   <Tip text="密钥操作"><DropdownMenuTrigger asChild><Button aria-label={`${x.name} 的操作`} variant="ghost" size="icon-xs"><EllipsisIcon /></Button></DropdownMenuTrigger></Tip>

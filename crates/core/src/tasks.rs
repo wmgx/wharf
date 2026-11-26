@@ -343,6 +343,13 @@ async fn execute(
     Ok(s) => s,
     Err(e) => return (TaskStatus::Failed, None, e.message, None),
   };
+  if let Err(e) = crate::secret_policy::validate_task_restrictions(
+    name,
+    &spec.how,
+    &snap.secret_restrictions,
+  ) {
+    return (TaskStatus::Failed, None, e.message, None);
+  }
   let secrets =
     crate::secret_policy::non_system_secrets(&snap.secrets);
   let used = crate::secret_policy::redact_values(&secrets);
@@ -834,6 +841,9 @@ pub async fn put(
   validate(&name, &spec, &snap)?;
   let spec = s.db.call(move |c| {
     let mut spec = spec;
+    crate::secret_policy::validate_task_restrictions(
+      &name, &spec.how, &crate::secret_restrictions::load(c)?,
+    )?;
     let rows = load_rows(c)?;
     let old = rows.iter().find(|(n, _, _)| n == &name).map(|(_, spec, _)| spec);
     if let TaskKind::Ping { token, .. } = &mut spec.how && token.is_empty() {

@@ -410,6 +410,10 @@ pub(crate) async fn make_plan_inner(
     &mut desired,
   )?;
   desired.allocate_ports()?;
+  crate::secret_policy::validate_restrictions(
+    &desired,
+    &snap.secret_restrictions,
+  )?;
   desired.validate()?;
   crate::secret_policy::validate_accounts(
     &desired,

@@ -5,12 +5,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use wharf_api_types::{
   ApiError, ErrorCode,
   plan::{Layer, Plan},
-  spec::{BuildSource, LoginSpec, RouteSpec, ServiceSpec, Source},
+  spec::{
+    BuildSource, LoginSpec, RouteSpec, ServerSettings, ServiceSpec,
+    Source,
+  },
   view::TaskKind,
 };
 
 use crate::{
   render::{self, Placeholder, SecretMode},
+  secret_restrictions::Restrictions,
   world::World,
 };
 
@@ -230,14 +234,7 @@ pub fn other_secret_refs<'a>(
   };
   let mut refs = Vec::new();
   for (server, row) in &world.servers {
-    if row
-      .settings
-      .registry_mirrors
-      .values()
-      .flatten()
-      .chain(&row.settings.github_mirror)
-      .any(|text| uses(text))
-    {
+    if mirror_templates(&row.settings).any(uses) {
       refs.push(format!("server:{server}"));
     }
   }
@@ -279,6 +276,91 @@ pub fn other_secret_refs<'a>(
   }
   refs.sort_unstable();
   refs
+}
+
+fn mirror_templates(
+  settings: &ServerSettings,
+) -> impl Iterator<Item = &str> {
+  settings
+    .registry_mirrors
+    .values()
+    .flatten()
+    .chain(&settings.github_mirror)
+    .map(String::as_str)
+}
+
+pub fn validate_restrictions(
+  world: &World,
+  restrictions: &Restrictions,
+) -> Result<(), ApiError> {
+  for (name, allowed) in restrictions {
+    if let Some((service, _)) =
+      world.services.iter().find(|(service, row)| {
+        !allowed.contains(*service)
+          && service_uses_secret(&row.spec, name)
+      })
+    {
+      return Err(restricted_error(
+        name,
+        allowed,
+        &format!("服务 {service}"),
+      ));
+    }
+    for (host, route) in &world.routes {
+      if route_login(&route.spec).is_some_and(|login| {
+        crate::sso_login::secret_refs(login).contains(name)
+      }) {
+        return Err(restricted_error(
+          name,
+          allowed,
+          &format!("域名 {host} 的代登录"),
+        ));
+      }
+    }
+    for (app, row) in &world.edge_apps {
+      if edge_git_token(&row.spec) == Some(name) {
+        return Err(restricted_error(
+          name,
+          allowed,
+          &format!("边缘应用 {app}"),
+        ));
+      }
+    }
+    for (server, row) in &world.servers {
+      if mirror_templates(&row.settings)
+        .flat_map(|text| placeholders_checked(text, false, true))
+        .any(|p| matches!(p, Ok(p) if p.name == name))
+      {
+        return Err(restricted_error(
+          name,
+          allowed,
+          &format!("服务器 {server} 的镜像源"),
+        ));
+      }
+    }
+  }
+  Ok(())
+}
+
+fn restricted_error(
+  name: &str,
+  allowed: &BTreeSet<String>,
+  context: &str,
+) -> ApiError {
+  let services = allowed
+    .iter()
+    .map(String::as_str)
+    .collect::<Vec<_>>()
+    .join("、");
+  ApiError::invalid(format!(
+    "{context}不能引用密钥 {name}，仅允许服务 {services} 引用"
+  ))
+}
+
+fn edge_git_token(
+  spec: &wharf_api_types::spec::EdgeAppSpec,
+) -> Option<&str> {
+  spec.source.as_ref()?.git.as_ref()?.token_secret.as_deref()
 }
 
 fn direct_refs<'a>(
@@ -397,24 +479,12 @@ pub fn validate_world(world: &World) -> Result<(), ApiError> {
     }
   }
   for (name, app) in &world.edge_apps {
-    if let Some(secret) = app
-      .spec
-      .source
-      .as_ref()
-      .and_then(|s| s.git.as_ref())
-      .and_then(|g| g.token_secret.as_deref())
-    {
+    if let Some(secret) = edge_git_token(&app.spec) {
       reject_system_secret(secret, &format!("边缘应用 {name}"))?;
     }
   }
   for (name, server) in &world.servers {
-    let settings = &server.settings;
-    for text in settings
-      .registry_mirrors
-      .values()
-      .flatten()
-      .chain(&settings.github_mirror)
-    {
+    for text in mirror_templates(&server.settings) {
       reject_templates(text, &format!("服务器 {name} 的镜像源"))?;
     }
   }
@@ -500,18 +570,50 @@ pub fn validate_task(
   how: &TaskKind,
 ) -> Result<(), ApiError> {
   let context = format!("任务 {name}");
+  task_templates(how)
+    .into_iter()
+    .try_for_each(|text| reject_templates(text, &context))
+}
+
+pub fn validate_task_restrictions(
+  task: &str,
+  how: &TaskKind,
+  restrictions: &Restrictions,
+) -> Result<(), ApiError> {
+  if restrictions.is_empty() {
+    return Ok(());
+  }
+  for p in task_templates(how)
+    .into_iter()
+    .flat_map(|text| placeholders_checked(text, false, true))
+    .filter_map(Result::ok)
+  {
+    let name = p.name;
+    if let Some(allowed) = restrictions.get(name) {
+      return Err(restricted_error(
+        name,
+        allowed,
+        &format!("任务 {task}"),
+      ));
+    }
+  }
+  Ok(())
+}
+
+fn task_templates(how: &TaskKind) -> Vec<&str> {
   match how {
     TaskKind::Exec { command, .. } | TaskKind::Host { command } => {
-      reject_templates(command, &context)
+      vec![command]
     }
     TaskKind::Container { command, env, .. } => command
       .iter()
       .chain(env.values())
-      .try_for_each(|t| reject_templates(t, &context)),
+      .map(String::as_str)
+      .collect(),
     TaskKind::Script { env, .. } => {
-      env.values().try_for_each(|t| reject_templates(t, &context))
+      env.values().map(String::as_str).collect()
     }
-    TaskKind::Ping { .. } => Ok(()),
+    TaskKind::Ping { .. } => Vec::new(),
   }
 }
 

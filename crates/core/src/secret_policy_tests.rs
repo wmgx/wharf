@@ -47,6 +47,116 @@ fn add_route(world: &mut World, value: Value) -> RouteSpec {
   spec
 }
 
+#[tokio::test]
+async fn service_allowlist_persists_and_can_be_cleared() {
+  use axum::{
+    Json,
+    extract::{Path, State},
+  };
+  let state = crate::rules::tests::test_state();
+  let admin = || Auth {
+    name: "operator".into(),
+    perms: [Perm::Admin].into(),
+    expires_at: None,
+    allowed_from: vec![],
+    services: None,
+    human: false,
+  };
+  state
+    .db
+    .call_credentials(|c, key| {
+      key.put_secret(c, "APP_KEY", "fixture-original", 1, true)?;
+      let mut world = World::default();
+      add_service(
+        &mut world,
+        "app",
+        service(json!({"KEY": "[[url:APP_KEY]]"})),
+      );
+      for write in world.writes_from(&World::default()) {
+        crate::db::apply_write(c, &write)?;
+      }
+      Ok(())
+    })
+    .await
+    .unwrap();
+  let allowed = ["app".into()].into();
+  let Json(saved) = crate::secret_restrictions::put(
+    State(state.clone()),
+    admin(),
+    Path("APP_KEY".into()),
+    Json(Some(allowed)),
+  )
+  .await
+  .map_err(|error| error.0)
+  .unwrap();
+  assert!(saved.unwrap().contains("app"));
+  state
+    .db
+    .call(|c| {
+      let allowed = crate::secret_restrictions::load(c)?;
+      assert!(allowed["APP_KEY"].contains("app"));
+      let world = World::from_rows(crate::db::all_resources(c)?)?;
+      policy::validate_restrictions(&world, &allowed)
+    })
+    .await
+    .unwrap();
+  let Json(cleared) = crate::secret_restrictions::put(
+    State(state.clone()),
+    admin(),
+    Path("APP_KEY".into()),
+    Json(None),
+  )
+  .await
+  .map_err(|error| error.0)
+  .unwrap();
+  assert!(cleared.is_none());
+  assert!(
+    state
+      .db
+      .call(|c| crate::secret_restrictions::load(c))
+      .await
+      .unwrap()
+      .is_empty()
+  );
+}
+
+#[test]
+fn restricted_secret_rejects_outside_service_and_nonservice_users() {
+  let restrictions =
+    [("APP_KEY".into(), ["app".into()].into())].into();
+  let mut world = World::default();
+  add_service(
+    &mut world,
+    "other",
+    service(json!({"KEY": "[[FILE:APP_KEY]]"})),
+  );
+  let err =
+    policy::validate_restrictions(&world, &restrictions).unwrap_err();
+  assert_eq!(err.code, ErrorCode::InvalidInput);
+  assert!(err.message.contains("密钥 APP_KEY，仅允许服务 app"));
+
+  world.services.clear();
+  add_route(
+    &mut world,
+    json!({
+      "hostname": "app.example.test", "gateway": "g1", "service": "app",
+      "sso": {"mode": "login", "login": {"script": {
+        "runtime": "shell", "code": "true", "env": {"KEY": "[[b64:APP_KEY]]"}
+      }}}
+    }),
+  );
+  let err =
+    policy::validate_restrictions(&world, &restrictions).unwrap_err();
+  assert_eq!(err.code, ErrorCode::InvalidInput);
+  let task = TaskKind::Host {
+    command: "[[json:APP_KEY]]".into(),
+  };
+  let err =
+    policy::validate_task_restrictions("job", &task, &restrictions)
+      .unwrap_err();
+  assert_eq!(err.code, ErrorCode::InvalidInput);
+}
+
 fn plan(address: &str, before: Value, after: Value) -> Plan {
   serde_json::from_value(json!({
     "plan_id": "p-test", "status": "pending",
@@ -297,6 +407,35 @@ fn borrowing_other_service_secret_requires_admin() {
       .code,
     ErrorCode::Forbidden
   );
+}
+
+#[test]
+fn restricted_secret_rejects_server_mirrors() {
+  let restrictions =
+    [("APP_KEY".into(), ["app".into()].into())].into();
+  let mut world = World::default();
+  for settings in [
+    json!({"github_mirror": "https://git.example.test/[[url:APP_KEY]]"}),
+    json!({"registry_mirrors": {
+      "docker.io": ["https://registry.example.test/[[b64:APP_KEY]]"]
+    }}),
+  ] {
+    world.servers.insert(
+      "s1".into(),
+      ServerRow {
+        settings: serde_json::from_value(settings).unwrap(),
+        version: 1,
+      },
+    );
+    policy::validate_world(&world).unwrap();
+    let err = policy::validate_restrictions(&world, &restrictions)
+      .unwrap_err();
+    assert_eq!(err.code, ErrorCode::InvalidInput);
+    assert_eq!(
+      err.message,
+      "服务器 s1 的镜像源不能引用密钥 APP_KEY，仅允许服务 app 引用"
+    );
+  }
 }
 
 #[test]

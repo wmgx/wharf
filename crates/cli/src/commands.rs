@@ -4195,9 +4195,7 @@ async fn secret(
   match cmd {
     SecretCmd::List { detail } => {
       let v: Vec<SecretView> = c.get("/api/secrets").await?;
-      out(j || detail, &v, |v| {
-        v.iter().for_each(|s| println!("{}", s.name))
-      });
+      out(j || detail, &v, |v| v.iter().for_each(print_secret));
       Ok(())
     }
     SecretCmd::Rotate {
@@ -4236,9 +4234,64 @@ async fn secret(
       });
       Ok(())
     }
+    SecretCmd::Show { name } => {
+      let v: Vec<SecretView> = c.get("/api/secrets").await?;
+      let row =
+        v.into_iter().find(|s| s.name == name).ok_or_else(|| {
+          ApiError::not_found(format!("密钥 {name} 不存在"))
+        })?;
+      out(j, &row, print_secret);
+      Ok(())
+    }
+    SecretCmd::Restrict {
+      name,
+      services,
+      clear,
+    } => {
+      let allowed = (!clear).then_some(services);
+      let v: Option<Vec<String>> = c
+        .put(
+          &format!("/api/secrets/{}/restriction", seg(&name)),
+          &allowed,
+        )
+        .await?;
+      out(j, &v, |v| match v {
+        Some(services) => {
+          println!("{name}：仅限 {}", services.join("、"))
+        }
+        None => println!("已清除 {name} 的服务名单"),
+      });
+      Ok(())
+    }
+    SecretCmd::LeakCheck { repo } => {
+      let v: Value = c
+        .post_timeout(
+          "/api/secret-leak-check",
+          &json!({ "repo": repo }),
+          Duration::from_secs(180),
+        )
+        .await?;
+      pretty(&v);
+      Ok(())
+    }
+    SecretCmd::Set {
+      name,
+      generate: true,
+      ..
+    } => {
+      let v: SecretView = c
+        .post(
+          &format!("/api/secrets/{}/generate", seg(&name)),
+          &json!({}),
+        )
+        .await?;
+      out(j, &v, |v| println!("已生成密钥 {}", v.name));
+      Ok(())
+    }
     SecretCmd::Set {
       name,
       dry_run: true,
+      ..
     } => secret_preview(c, &name, false, j).await,
     SecretCmd::Rm {
       name,
@@ -4284,6 +4337,15 @@ async fn finish_secret_rotation(
   }
   pretty(&response);
   Ok(())
+}
+
+fn print_secret(secret: &SecretView) {
+  match &secret.allowed_services {
+    Some(services) => {
+      println!("{}\t仅限 {}", secret.name, services.join("、"))
+    }
+    None => println!("{}", secret.name),
+  }
 }
 
 async fn backup(
