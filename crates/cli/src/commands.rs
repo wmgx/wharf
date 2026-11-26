@@ -2839,13 +2839,13 @@ async fn gateway(
       });
       Ok(())
     }
-    GatewayCmd::RotateLink {
+    GatewayCmd::RotateLink(crate::RotateLinkArgs {
       name,
       token,
       cert,
       apply,
       ..
-    } => {
+    }) => {
       let both = !token && !cert;
       let response =
         c.rotate_link(&name, token || both, cert || both).await?;
@@ -4288,7 +4288,7 @@ mod tests {
     assert!(cli.token.as_deref() == Some(credential.as_str()));
     assert!(matches!(
       cli.command,
-      Command::Gateway(GatewayCmd::RotateLink { token: true, apply, .. })
+      Command::Gateway(GatewayCmd::RotateLink(crate::RotateLinkArgs { token: true, apply, .. }))
         if apply.apply && apply.confirm.is_empty()
     ));
     let Err(help) = Cli::try_parse_from([
