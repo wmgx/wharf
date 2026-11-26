@@ -126,6 +126,9 @@ pub fn filter_secrets(
   list.retain_mut(|s| {
     s.other_refs.clear();
     s.used_by.retain(|name| services.contains(name));
+    if let Some(allowed) = &mut s.allowed_services {
+      allowed.retain(|name| services.contains(name));
+    }
     !s.managed && s.system.is_none() && !s.used_by.is_empty()
   });
 }

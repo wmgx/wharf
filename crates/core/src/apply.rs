@@ -524,6 +524,10 @@ fn apply_writes(
   }
   let desired =
     crate::world::World::from_rows(db::all_resources(tx)?)?;
+  crate::secret_policy::validate_restrictions(
+    &desired,
+    &crate::secret_restrictions::load(tx)?,
+  )?;
   desired.validate()?;
   crate::secret_policy::validate_accounts(
     &desired,

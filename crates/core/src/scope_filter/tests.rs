@@ -127,6 +127,7 @@ fn scope_filter_trims_status_export_secrets_and_alerts() {
     prev_expires_at: None,
     prev_fingerprint: None,
     other_refs: vec![],
+    allowed_services: None,
     name: name.into(),
     updated_at: chrono::Utc::now(),
     managed,

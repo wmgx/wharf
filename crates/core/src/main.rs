@@ -102,9 +102,11 @@ mod resource_top;
 mod rollback;
 mod rules;
 mod scope_filter;
+mod secret_leak;
 mod secret_policy;
 #[cfg(test)]
 mod secret_policy_tests;
+mod secret_restrictions;
 mod security_receipt;
 mod service_monitor;
 mod sessions;

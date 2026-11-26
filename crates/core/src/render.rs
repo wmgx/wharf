@@ -491,7 +491,8 @@ fn substitute_values(
         "密钥不存在：{}",
         missing.iter().cloned().collect::<Vec<_>>().join("、")
       ))
-      .with_hint("先设置密钥，值从标准输入读取，不会出现在命令行里")
+      .with_hint("可以随机生成业务密钥，或从标准输入设置已有的值")
+      .suggest(format!("wharf secret set {first} --generate"))
       .suggest(format!("wharf secret set {first}")),
     );
   }
@@ -2680,7 +2681,10 @@ mod tests {
   fn missing_secret_suggests_command() {
     let err =
       substitute("a [[NOPE]] b", Some(&BTreeMap::new())).unwrap_err();
-    assert_eq!(err.suggest, vec!["wharf secret set NOPE"]);
+    assert_eq!(
+      err.suggest,
+      ["wharf secret set NOPE --generate", "wharf secret set NOPE"]
+    );
     // 不像名字的 [[...]] 原样保留。
     assert_eq!(
       substitute("[[a b]] [x]", Some(&BTreeMap::new())).unwrap(),

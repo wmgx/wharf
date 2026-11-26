@@ -650,6 +650,9 @@ pub struct SecretView {
   pub other_refs: Vec<String>,
   pub name: String,
   pub updated_at: DateTime<Utc>,
+  /// 允许引用的服务。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub allowed_services: Option<Vec<String>>,
   /// 用到它的服务。
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub used_by: Vec<String>,

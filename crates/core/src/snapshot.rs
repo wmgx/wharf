@@ -36,6 +36,7 @@ pub struct Snapshot {
   pub app_account_defaults: BTreeMap<String, String>,
   pub owned: Vec<OwnedRecord>,
   pub secrets: BTreeMap<String, String>,
+  pub secret_restrictions: crate::secret_restrictions::Restrictions,
   pub account_links: crate::app_accounts::AccountLinks,
   pub service_values: BTreeMap<String, String>,
   /// 每个服务最近一次成功部署在哪台服务器上。和配置里的服务器不同，说明迁移还没完成。
@@ -208,6 +209,7 @@ pub(crate) async fn load_inner(
         log_values,
         owned: db::owned_records(c)?,
         secrets,
+        secret_restrictions: crate::secret_restrictions::load(c)?,
         service_values,
         account_links: crate::app_accounts::account_links(c)?,
         deployed: db::deployed_servers(c)?,

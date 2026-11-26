@@ -1472,13 +1472,35 @@ pub enum SecretCmd {
   ClearOld {
     name: String,
   },
+  Show {
+    name: String,
+  },
   /// 设置密钥，值从标准输入读取。
   /// `BASIC_AUTH_<域名，. 换成 _>` 是这个域名的登录保护账号，值写成 `用户名:密码`，只保存哈希。
   Set {
     name: String,
+    /// 随机生成业务密钥，已有值时拒绝覆盖。
+    #[arg(long, conflicts_with = "dry_run")]
+    generate: bool,
     /// 只预览会改什么，不执行。
     #[arg(long)]
     dry_run: bool,
+  },
+  Restrict {
+    name: String,
+    #[arg(
+      long,
+      value_delimiter = ',',
+      required_unless_present = "clear"
+    )]
+    services: Vec<String>,
+    #[arg(long, conflicts_with = "services")]
+    clear: bool,
+  },
+  /// 检查服务引用的公开 GitHub 仓库。
+  LeakCheck {
+    #[arg(long)]
+    repo: Option<String>,
   },
   Rm {
     name: String,

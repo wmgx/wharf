@@ -504,6 +504,12 @@ pub fn router(state: Arc<AppState>) -> Router {
       "/api/core/key/rollback",
       post(crate::key_rotation::rollback),
     )
+    .route("/api/secrets/{name}/generate", post(generate_secret))
+    .route("/api/secret-leak-check", post(crate::secret_leak::check))
+    .route(
+      "/api/secrets/{name}/restriction",
+      put(crate::secret_restrictions::put),
+    )
     .route("/api/plan", post(make_plan))
     .route("/api/plans/{id}", get(show_plan))
     .route("/api/apply", post(apply_plan))
@@ -1615,6 +1621,7 @@ async fn read_secret_views(
     let tasks = crate::tasks::load_rows(c)?;
     let previous = db::previous_secrets(c, key, now_ms())?;
     let values = db::secrets(c, key)?;
+    let restrictions = crate::secret_restrictions::load(c)?;
     let mut stmt = c.prepare("SELECT name, updated_at, prev_expires_at FROM secrets ORDER BY name")
       .map_err(sql_err)?;
     let rows = stmt.query_map([], |r| {
@@ -1624,6 +1631,8 @@ async fn read_secret_views(
       let (name, updated_at, prev_expires_at) = row.map_err(sql_err)?;
       let old = previous.get(&name);
       Ok(SecretView {
+        allowed_services: restrictions.get(&name)
+          .map(|allowed| allowed.iter().cloned().collect()),
         fingerprint: values.get(&name).map(|value| db::secret_fingerprint(value)),
         has_previous: old.is_some(),
         prev_expires_at: old.and(prev_expires_at).map(to_time),
@@ -1661,7 +1670,7 @@ struct SetSecret {
   keep_days: Option<u16>,
 }
 
-fn check_secret_name(name: &str) -> Result<(), ApiError> {
+pub(crate) fn check_secret_name(name: &str) -> Result<(), ApiError> {
   let ok = !name.is_empty()
     && name.len() <= 64
     && name
@@ -1768,11 +1777,7 @@ async fn secret_rotation_response(
   s: &AppState,
   name: String,
 ) -> Result<RotateSecretResponse, AppError> {
-  let list = read_secret_views(s).await?;
-  let secret =
-    list.into_iter().find(|v| v.name == name).ok_or_else(|| {
-      ApiError::not_found(format!("密钥 {name} 不存在"))
-    })?;
+  let secret = read_secret_view(s, &name).await?;
   let snap = snapshot::load(&s.db).await?;
   let affected_services: Vec<_> = snap
     .world
@@ -1808,6 +1813,61 @@ async fn secret_rotation_response(
       .into_iter()
       .collect(),
   })
+}
+
+async fn read_secret_view(
+  s: &AppState,
+  name: &str,
+) -> Result<SecretView, ApiError> {
+  read_secret_views(s)
+    .await?
+    .into_iter()
+    .find(|v| v.name == name)
+    .ok_or_else(|| ApiError::not_found(format!("密钥 {name} 不存在")))
+}
+
+async fn generate_secret(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Path(name): Path<String>,
+) -> ApiResult<SecretView> {
+  auth.require(Perm::Admin)?;
+  check_secret_name(&name)?;
+  refuse_managed(&name)?;
+  crate::secret_policy::reject_system_secret(&name, "随机生成")?;
+  let now = now_ms();
+  let n = name.clone();
+  s.db
+    .call_credentials(move |c, key| {
+      store_generated_secret(c, key, &n, now)
+    })
+    .await?;
+  crate::log_redact::refresh(&s.db).await;
+  Ok(Json(read_secret_view(&s, &name).await?))
+}
+
+fn store_generated_secret(
+  c: &mut rusqlite::Connection,
+  key: &db::CredentialsKey,
+  name: &str,
+  now: i64,
+) -> Result<(), ApiError> {
+  let tx = c.transaction().map_err(sql_err)?;
+  let exists: bool = tx
+    .query_row(
+      "SELECT EXISTS(SELECT 1 FROM secrets WHERE name = ?1)",
+      [name],
+      |r| r.get(0),
+    )
+    .map_err(sql_err)?;
+  if exists {
+    return Err(ApiError::invalid(format!("密钥 {name} 已存在")));
+  }
+  let mut bytes = [0; 32];
+  getrandom::fill(&mut bytes)
+    .map_err(|_| ApiError::internal("无法生成随机密钥"))?;
+  key.put_secret(&tx, name, &hex::encode(bytes), now, false)?;
+  tx.commit().map_err(sql_err)
 }
 
 async fn remove_secret(
@@ -2210,6 +2270,7 @@ mod tests {
       prev_expires_at: None,
       prev_fingerprint: None,
       other_refs: vec!["task:t1".into()],
+      allowed_services: Some(vec!["a".into(), "b".into()]),
       name: "S".into(),
       used_by,
       managed: false,
@@ -2221,6 +2282,7 @@ mod tests {
       &mut rows,
     );
     assert_eq!(rows[0].used_by, ["b"]);
+    assert_eq!(rows[0].allowed_services.as_ref().unwrap(), &["b"]);
     assert!(rows[0].other_refs.is_empty());
   }
 
@@ -2521,6 +2583,45 @@ mod tests {
         .len(),
       1
     );
+  }
+
+  #[tokio::test]
+  async fn generates_and_stores_encrypted_secret() {
+    db::Db::memory()
+      .call_credentials(|c, key| {
+        store_generated_secret(c, key, "APP_KEY", 1)?;
+        let value = key.secret(c, "APP_KEY")?.unwrap();
+        let stored: String = c
+          .query_row(
+            "SELECT value FROM secrets WHERE name = 'APP_KEY'",
+            [],
+            |row| row.get(0),
+          )
+          .map_err(sql_err)?;
+        assert!(stored != value);
+        assert_eq!(hex::decode(value).unwrap().len(), 32);
+        Ok(())
+      })
+      .await
+      .unwrap();
+  }
+
+  #[tokio::test]
+  async fn generating_an_existing_secret_preserves_its_value() {
+    db::Db::memory()
+      .call_credentials(|c, key| {
+        key.put_secret(c, "APP_KEY", "fixture-original", 1, true)?;
+        assert!(
+          store_generated_secret(c, key, "APP_KEY", 2).is_err()
+        );
+        assert_eq!(
+          key.secret(c, "APP_KEY")?.as_deref(),
+          Some("fixture-original")
+        );
+        Ok(())
+      })
+      .await
+      .unwrap();
   }
 
   #[tokio::test]

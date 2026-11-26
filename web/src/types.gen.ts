@@ -2270,6 +2270,10 @@ export type ScriptRuntime = "python" | "node" | "shell";
 
 export interface SecretView {
   /**
+   * 允许引用的服务。
+   */
+  allowed_services?: string[] | null;
+  /**
    * 当前值的 8 位 SHA-256 指纹。
    */
   fingerprint?: string | null;
