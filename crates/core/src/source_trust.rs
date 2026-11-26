@@ -80,6 +80,7 @@ fn server_hosts<'a>(
     .map(|ip| ip.to_canonical())
     .filter(move |ip| {
       is_private_or_mesh(*ip)
+        && !ip.is_loopback()
         && match ip {
           IpAddr::V4(ip) => outside_docker(net, server, *ip),
           IpAddr::V6(_) => true,
@@ -270,12 +271,11 @@ fn compute_core_proxies(
 }
 
 pub fn refresh_core_proxies(world: &World, net: &Net) {
-  let core = crate::join::core_server(net, &crate::join::own_ipv4s());
   let cache = compute_core_proxies(
     world,
     net,
     EXTRA_PROXIES.get().map(Vec::as_slice).unwrap_or_default(),
-    core.as_deref(),
+    net.core_server.as_deref(),
   );
   *CORE_PROXIES.write().unwrap_or_else(|e| e.into_inner()) = cache;
 }

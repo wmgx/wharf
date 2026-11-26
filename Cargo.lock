@@ -3175,6 +3175,7 @@ dependencies = [
  "tracing-subscriber",
  "urlencoding",
  "wharf-api-types",
+ "wharf-pack",
  "wharf-providers",
 ]
 

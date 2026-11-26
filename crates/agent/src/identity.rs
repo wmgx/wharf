@@ -7,6 +7,8 @@ use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use wharf_api_types::view::{JoinRequest, JoinResponse};
 
+mod join_tunnel;
+
 const KEY_FILE: &str = "agent.key";
 const JOIN_FILE: &str = "agent.json";
 
@@ -125,38 +127,42 @@ pub async fn join(
   join_token: &str,
   core_key: Option<&str>,
 ) -> anyhow::Result<Joined> {
-  let key = load_or_create_key(data_dir)?;
   let core_url = core_url.trim_end_matches('/').to_string();
-  let client = reqwest::Client::builder()
-    .timeout(std::time::Duration::from_secs(20))
-    .build()?;
-  let resp = client
-    .post(format!("{core_url}/agent/join"))
-    .json(&JoinRequest {
-      join_token: join_token.to_string(),
-      public_key: hex::encode(key.verifying_key().to_bytes()),
-    })
-    .send()
-    .await
-    .with_context(|| format!("连接控制面 {core_url} 失败"))?;
-  if !resp.status().is_success() {
-    let status = resp.status();
-    let body: serde_json::Value =
-      resp.json().await.unwrap_or_default();
+  let mut url =
+    reqwest::Url::parse(&core_url).context("控制面地址不合法")?;
+  let host = url.host_str().context("控制面地址缺少主机")?;
+  if !matches!(url.scheme(), "http" | "https")
+    || !url.username().is_empty()
+    || url.password().is_some()
+    || url.query().is_some()
+    || url.fragment().is_some()
+  {
+    bail!("控制面地址不合法");
+  }
+  let local = matches!(host, "127.0.0.1" | "[::1]" | "localhost");
+  let expected = core_key.map(parse_public_key).transpose()?;
+  if !local && expected.is_none() {
     bail!(
-      "加入失败（HTTP {status}）：{}",
-      body["message"].as_str().unwrap_or("未知错误")
+      "加入非本机控制面必须提供 --core-key，防止中间人窃取加入凭据。直接复制 wharf server add 或页面生成的完整加入命令"
     );
   }
-  let joined: JoinResponse = resp.json().await?;
-  parse_public_key(&joined.core_public_key)?;
-  if let Some(expected) =
-    core_key.map(str::trim).filter(|k| !k.is_empty())
-    && !expected.eq_ignore_ascii_case(&joined.core_public_key)
-  {
-    bail!(
-      "控制面返回的公钥和加入命令里的不一致：可能连到了假的控制面（中间人）。没有加入"
-    );
+  let key = load_or_create_key(data_dir)?;
+  let request = JoinRequest {
+    join_token: join_token.to_string(),
+    public_key: hex::encode(key.verifying_key().to_bytes()),
+  };
+  let joined = if let Some(expected) = &expected {
+    join_tunnel::join(&url, expected, &request).await?
+  } else {
+    url.set_path(&format!(
+      "{}/agent/join",
+      url.path().trim_end_matches('/')
+    ));
+    join_local(url, &request).await?
+  };
+  let actual = parse_public_key(&joined.core_public_key)?;
+  if expected.is_some_and(|expected| expected != actual) {
+    bail!("加入响应的公钥和 --core-key 不一致");
   }
   let joined = Joined {
     core_url,
@@ -165,6 +171,52 @@ pub async fn join(
   };
   joined.save(data_dir)?;
   Ok(joined)
+}
+
+async fn join_local(
+  url: reqwest::Url,
+  req: &JoinRequest,
+) -> anyhow::Result<JoinResponse> {
+  let client = reqwest::Client::builder()
+    .timeout(std::time::Duration::from_secs(20))
+    .no_proxy()
+    .redirect(reqwest::redirect::Policy::none())
+    .resolve_to_addrs(
+      "localhost",
+      &["127.0.0.1:0".parse()?, "[::1]:0".parse()?],
+    )
+    .build()?;
+  let mut resp = client
+    .post(url)
+    .json(req)
+    .send()
+    .await
+    .map_err(|e| e.without_url())
+    .context("连接本机控制面失败")?;
+  let status = resp.status().as_u16();
+  let mut body = Vec::new();
+  while let Some(chunk) = resp.chunk().await? {
+    if body.len() + chunk.len() > join_tunnel::MAX_RESPONSE {
+      bail!("加入响应太大");
+    }
+    body.extend_from_slice(&chunk);
+  }
+  decode_response(status, &body)
+}
+
+fn decode_response(
+  status: u16,
+  body: &[u8],
+) -> anyhow::Result<JoinResponse> {
+  if !(200..300).contains(&status) {
+    let body =
+      serde_json::from_slice::<wharf_api_types::ApiError>(body).ok();
+    bail!(
+      "加入失败（HTTP {status}）：{}",
+      body.map(|e| e.message).unwrap_or_default()
+    );
+  }
+  Ok(serde_json::from_slice(body)?)
 }
 
 #[cfg(test)]

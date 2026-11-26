@@ -9,8 +9,7 @@ use axum::{
   response::{IntoResponse, Response},
   routing::{get, post, put},
 };
-use chrono::Utc;
-use rusqlite::{OptionalExtension, params};
+use rusqlite::params;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use wharf_api_types::{
@@ -20,9 +19,8 @@ use wharf_api_types::{
   spec::Fleet,
   validate_name,
   view::{
-    AccountView, DataView, DeploymentView, GatewayView, JoinInfo,
-    JoinRequest, JoinResponse, Perm, RouteView, SecretView,
-    ServerView, ServiceView, Status,
+    AccountView, DataView, DeploymentView, GatewayView, Perm,
+    RouteView, SecretView, ServerView, ServiceView, Status,
   },
 };
 
@@ -32,13 +30,16 @@ use crate::secret_policy::{
 };
 use crate::{
   apply,
-  auth::{self, Auth},
+  auth::Auth,
   db::{self, json_err, now_ms, sql_err, to_time},
   hub, planner, snapshot,
   state::AppState,
   views,
   world::{KIND_SERVER, gateway_project, server_not_found},
 };
+
+mod agent_join;
+use agent_join::{add_server, agent_join};
 
 pub struct AppError(pub ApiError);
 
@@ -645,190 +646,6 @@ async fn host_info(
   ))
 }
 
-#[derive(Deserialize)]
-struct AddServer {
-  name: String,
-  #[serde(default)]
-  rejoin: bool,
-  /// agent 连接控制面用的地址，不给时用启动配置或请求的 Host。
-  #[serde(default)]
-  core_url: Option<String>,
-  /// agent 镜像，不给时用控制面的默认镜像。国内机器可以换成镜像站地址。
-  #[serde(default)]
-  agent_image: Option<String>,
-}
-
-const JOIN_TTL_HOURS: i64 = 24;
-
-async fn add_server(
-  State(s): State<Arc<AppState>>,
-  auth: Auth,
-  headers: HeaderMap,
-  Json(req): Json<AddServer>,
-) -> ApiResult<JoinInfo> {
-  auth.require(Perm::Admin)?;
-  validate_name("服务器", &req.name)?;
-  let image = match req.agent_image.as_deref().map(str::trim) {
-    Some(i) if !i.is_empty() && i != s.agent_image => {
-      Some(crate::join::check_image(i)?)
-    }
-    _ => None,
-  };
-  let core_url =
-    match req.core_url.as_deref().filter(|u| !u.trim().is_empty()) {
-      Some(u) => Some(crate::join::check_core_url(u)?),
-      None => None,
-    };
-  let token = auth::new_token().replacen("wh_", "wj_", 1);
-  let hash = auth::hash_token(&token);
-  let expires = Utc::now() + chrono::Duration::hours(JOIN_TTL_HOURS);
-  let name = req.name.clone();
-  let rejoin = req.rejoin;
-  let expires_ms = expires.timestamp_millis();
-  s.db
-    .call(move |c| {
-      let tx = c.transaction().map_err(sql_err)?;
-      let joined: Option<Option<String>> = tx
-        .query_row(
-          "SELECT public_key FROM agents WHERE server = ?1",
-          params![name],
-          |r| r.get(0),
-        )
-        .optional()
-        .map_err(sql_err)?;
-      if matches!(joined, Some(Some(_))) && !rejoin {
-        return Err(
-          ApiError::new(ErrorCode::AlreadyExists, format!("服务器 {name} 已经加入"))
-            .with_hint("换机器或重装 agent 时用 --rejoin 生成新的加入命令，旧密钥会失效")
-            .suggest(format!("wharf server add {name} --rejoin")),
-        );
-      }
-      let exists: bool = tx
-        .query_row(
-          "SELECT 1 FROM resources WHERE kind = ?1 AND name = ?2",
-          params![KIND_SERVER, name],
-          |_| Ok(()),
-        )
-        .optional()
-        .map_err(sql_err)?
-        .is_some();
-      if !exists {
-        db::apply_write(
-          &tx,
-          &db::Write::Upsert {
-            kind: KIND_SERVER.into(),
-            name: name.clone(),
-            spec: json!({}),
-            meta: json!({}),
-          },
-        )?;
-      }
-      tx.execute(
-        "INSERT INTO agents (server, join_token_hash, join_expires_at) VALUES (?1, ?2, ?3)
-         ON CONFLICT (server) DO UPDATE SET join_token_hash = excluded.join_token_hash,
-           join_expires_at = excluded.join_expires_at",
-        params![name, hash, expires_ms],
-      )
-      .map_err(sql_err)?;
-      tx.commit().map_err(sql_err)
-    })
-    .await?;
-
-  let core_url = match core_url {
-    Some(u) => Some(u),
-    None => crate::join::default_url(&s).await,
-  };
-  let core_url = core_url.unwrap_or_else(|| {
-    let host = headers
-      .get(axum::http::header::HOST)
-      .and_then(|h| h.to_str().ok())
-      .unwrap_or("127.0.0.1:7700");
-    format!("http://{host}")
-  });
-  let core_key = hex::encode(s.key.verifying_key().to_bytes());
-  let commands = BTreeMap::from([
-    (
-      "script".to_string(),
-      crate::join::script_command(
-        &core_url,
-        &token,
-        &core_key,
-        image.as_deref(),
-      ),
-    ),
-    (
-      "docker".to_string(),
-      format!(
-        "docker run -d --label wharf.system=agent --name wharf-agent --restart unless-stopped --network host \
-         -v /var/run/docker.sock:/var/run/docker.sock -v /var/lib/wharf:/var/lib/wharf -v /srv:/srv \
-         -e WHARF_CORE_URL={core_url} -e WHARF_JOIN_TOKEN={token} -e WHARF_CORE_KEY={core_key} {}",
-        image.as_deref().unwrap_or(&s.agent_image)
-      ),
-    ),
-    (
-      "binary".to_string(),
-      format!(
-        "wharf-agent join {core_url} {token} --core-key {core_key} && wharf-agent run"
-      ),
-    ),
-  ]);
-  Ok(Json(JoinInfo {
-    server: req.name,
-    join_token: token,
-    expires_at: expires,
-    commands,
-    core_url,
-  }))
-}
-
-async fn agent_join(
-  State(s): State<Arc<AppState>>,
-  Json(req): Json<JoinRequest>,
-) -> ApiResult<JoinResponse> {
-  let hash = auth::hash_token(req.join_token.trim());
-  let key = req.public_key.clone();
-  if hex::decode(&key).map(|b| b.len()).unwrap_or(0) != 32 {
-    return Err(ApiError::invalid("公钥格式不对").into());
-  }
-  let server = s
-    .db
-    .call(move |c| {
-      let found: Option<(String, i64)> = c
-        .query_row(
-          "SELECT server, join_expires_at FROM agents WHERE join_token_hash = ?1",
-          params![hash],
-          |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()
-        .map_err(sql_err)?;
-      let Some((server, expires)) = found else {
-        return Err(
-          ApiError::new(ErrorCode::Unauthorized, "加入凭据无效或已经用过")
-            .with_hint("在控制面重新执行 wharf server add <name> --rejoin"),
-        );
-      };
-      if expires < now_ms() {
-        return Err(
-          ApiError::new(ErrorCode::Unauthorized, "加入凭据已过期")
-            .suggest(format!("wharf server add {server} --rejoin")),
-        );
-      }
-      c.execute(
-        "UPDATE agents SET public_key = ?1, join_token_hash = NULL, join_expires_at = NULL
-         WHERE server = ?2",
-        params![key, server],
-      )
-      .map_err(sql_err)?;
-      Ok(server)
-    })
-    .await?;
-  tracing::info!("服务器 {server} 完成加入");
-  Ok(Json(JoinResponse {
-    server,
-    core_public_key: hex::encode(s.key.verifying_key().to_bytes()),
-  }))
-}
-
 async fn remove_server(
   State(s): State<Arc<AppState>>,
   auth: Auth,
@@ -864,18 +681,23 @@ async fn remove_server(
       .into(),
     );
   }
+  let state = s.clone();
   s.db
     .call(move |c| {
-      c.execute(
+      let tx = c.transaction().map_err(sql_err)?;
+      tx.execute(
         "DELETE FROM resources WHERE kind = ?1 AND name = ?2",
         params![KIND_SERVER, name],
       )
       .map_err(sql_err)?;
-      c.execute(
+      tx.execute(
         "DELETE FROM agents WHERE server = ?1",
         params![name],
       )
       .map_err(sql_err)?;
+      crate::core_node::clear_if_server(&tx, &name)?;
+      tx.commit().map_err(sql_err)?;
+      state.hub.disconnect(&name);
       Ok(())
     })
     .await?;

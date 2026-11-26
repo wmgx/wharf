@@ -88,16 +88,7 @@ async fn build_in(
   )
   .await?;
 
-  let context = match &job.path {
-    Some(p) => src.join(relative(p)?),
-    None => src.clone(),
-  };
-  if !context.is_dir() {
-    return Err(ApiError::invalid(format!(
-      "代码里没有目录 {}",
-      job.path.as_deref().unwrap_or_default()
-    )));
-  }
+  let context = checked_subdir(&src, job.path.as_deref())?;
   let (dockerfile, images) = dockerfile(job, &context, work, ctx)?;
 
   let mut warnings = Vec::new();
@@ -181,22 +172,12 @@ pub async fn fetch_code(
       let archive = work.join("source.tar.gz");
       download(core_url, sha256, &token.0, &archive, ctx).await?;
       ctx.say("解压代码");
-      // 包里的修改时间都是 0（为了内容相同时 sha256 相同），解压时用当前时间：
-      // BuildKit 按大小和修改时间判断构建上下文里的文件变没变，
-      // 改了内容但大小没变的文件会被当成没变。
-      Cmd::new("tar")
-        .args([
-          "-xzf",
-          &archive.to_string_lossy(),
-          "--no-same-owner",
-          "-m",
-        ])
-        .arg("-C")
-        .arg(src.to_string_lossy().to_string())
-        .timeout(Duration::from_secs(300))
-        .run(ctx)
-        .await?
-        .check("解压代码包")?;
+      let dest = src.clone();
+      tokio::task::spawn_blocking(move || {
+        wharf_pack::unpack_validated(&archive, &dest)
+      })
+      .await
+      .map_err(|e| ApiError::internal(e.to_string()))??;
       None
     }
     BuildFetch::Git {
@@ -224,6 +205,9 @@ pub async fn fetch_code(
       .await?
     }),
   };
+  tokio::task::spawn_blocking(move || check_tree(&src))
+    .await
+    .map_err(|e| ApiError::internal(e.to_string()))??;
   Ok(commit)
 }
 
@@ -279,6 +263,7 @@ fn dockerfile(
       "使用代码里的 {}",
       path.strip_prefix(context).unwrap_or(&path).display()
     ));
+    let path = checked_path(context, &path)?;
     let content =
       std::fs::read_to_string(&path).map_err(io_err(&path))?;
     return Ok((path, build::from_images(&content)));
@@ -381,11 +366,49 @@ pub(crate) fn relative(p: &str) -> Result<PathBuf, ApiError> {
   }
 }
 
+fn check_tree(root: &Path) -> Result<(), ApiError> {
+  let fd = crate::dirfd::DirFd::open_dir(root)
+    .map_err(|e| crate::dirfd::dir_error(root, e))?;
+  crate::dirfd::validate_tree(&fd, false)
+}
+
+pub(crate) fn checked_path(
+  root: &Path,
+  path: &Path,
+) -> Result<PathBuf, ApiError> {
+  let base = root.canonicalize().map_err(io_err(root))?;
+  let candidate = path.canonicalize().map_err(io_err(path))?;
+  if candidate.starts_with(base) {
+    Ok(candidate)
+  } else {
+    Err(ApiError::invalid(format!(
+      "路径 {} 指向构建目录之外",
+      path.display()
+    )))
+  }
+}
+
+pub(crate) fn checked_subdir(
+  root: &Path,
+  rel: Option<&str>,
+) -> Result<PathBuf, ApiError> {
+  let path =
+    root.join(rel.map(relative).transpose()?.unwrap_or_default());
+  let path = checked_path(root, &path)?;
+  if !path.is_dir() {
+    return Err(ApiError::invalid(format!(
+      "代码里没有目录 {}",
+      rel.unwrap_or_default()
+    )));
+  }
+  Ok(path)
+}
+
 struct FsTree<'a>(&'a Path);
 
 impl SourceTree for FsTree<'_> {
   fn read(&self, path: &str) -> Option<String> {
-    let path = self.0.join(path);
+    let path = checked_path(self.0, &self.0.join(path)).ok()?;
     // 只读小文件：判断语言用不到大文件。
     let meta = std::fs::metadata(&path).ok()?;
     if !meta.is_file() || meta.len() > 1024 * 1024 {
@@ -395,7 +418,10 @@ impl SourceTree for FsTree<'_> {
   }
 
   fn list(&self, dir: &str) -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(self.0.join(dir)) else {
+    let Ok(path) = checked_path(self.0, &self.0.join(dir)) else {
+      return vec![];
+    };
+    let Ok(entries) = std::fs::read_dir(path) else {
       return vec![];
     };
     entries
@@ -815,6 +841,34 @@ mod tests {
     for bad in ["", "/etc", "../x", "a/../../b"] {
       assert!(relative(bad).is_err(), "{bad}");
     }
+  }
+
+  #[test]
+  fn build_tree_check_rejects_git_or_unpacked_escaping_symlinks() {
+    use std::{fs, os::unix::fs::symlink};
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("src");
+    let outside = dir.path().join("outside");
+    fs::create_dir_all(&root).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    symlink(&outside, root.join("sub")).unwrap();
+    assert_eq!(
+      check_tree(&root).unwrap_err().code,
+      ErrorCode::InvalidInput
+    );
+    assert_eq!(
+      checked_subdir(&root, Some("sub")).unwrap_err().code,
+      ErrorCode::InvalidInput
+    );
+    fs::remove_file(root.join("sub")).unwrap();
+    fs::create_dir(root.join("sub")).unwrap();
+    fs::create_dir(root.join("app")).unwrap();
+    symlink("../app", root.join("sub/inside")).unwrap();
+    assert!(check_tree(&root).is_ok());
+    assert_eq!(
+      checked_subdir(&root, Some("sub/inside")).unwrap(),
+      root.join("app").canonicalize().unwrap()
+    );
   }
 
   #[test]

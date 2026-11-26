@@ -44,6 +44,7 @@ pub fn hash(content: &str) -> String {
 /// 每台服务器的网络信息，来自 agent 上报和服务器设置。
 #[derive(Debug, Clone, Default)]
 pub struct Net {
+  pub core_server: Option<String>,
   pub gate_public: Option<String>,
   pub gate_login: Option<String>,
   pub heartbeat_url: Option<String>,
@@ -72,11 +73,9 @@ impl Net {
     agents: &[crate::db::AgentRow],
   ) -> Self {
     let mut net = Net::default();
+    let reports = crate::report_guard::safe_reports(servers, agents);
     for (name, server) in servers {
-      let report = agents
-        .iter()
-        .find(|a| &a.server == name)
-        .and_then(|a| a.report.as_ref());
+      let report = reports.get(name);
       // 接入方式是 public 时不用内网地址：端口只绑 127.0.0.1，网关一律走反向隧道。
       let public = server.settings.network_mode
         == Some(wharf_api_types::spec::NetworkMode::Public);

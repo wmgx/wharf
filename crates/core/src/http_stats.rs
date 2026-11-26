@@ -42,8 +42,8 @@ fn by_service(
     };
     let s = out.entry(svc).or_default();
     let w = t.reqs as f64;
-    s.reqs += t.reqs;
-    s.errors += t.errors;
+    s.reqs = s.reqs.saturating_add(t.reqs);
+    s.errors = s.errors.saturating_add(t.errors);
     s.secs = s.secs.max(t.secs as f64);
     s.p50 += t.p50_ms as f64 * w;
     s.p95 += t.p95_ms as f64 * w;
@@ -59,18 +59,18 @@ fn by_service(
 
 pub async fn record(
   state: Arc<AppState>,
+  server: String,
   hosts: BTreeMap<String, HostTraffic>,
 ) {
   let Ok(snap) = crate::snapshot::load(&state.db).await else {
     return;
   };
   let sums = by_service(&hosts, |h| {
-    snap
-      .world
-      .routes
-      .get(h)
-      .map(|r| r.spec.service.clone())
-      .filter(|s| !s.is_empty())
+    crate::report_guard::route_owned_by_server(
+      &snap.world,
+      &server,
+      h,
+    )
   });
   let mut points: Vec<(String, String, f64)> = Vec::new();
   for (svc, s) in &sums {
@@ -100,8 +100,9 @@ pub async fn record(
       while q.len() > WINDOW {
         q.pop_front();
       }
-      let (reqs, errors) =
-        q.iter().fold((0, 0), |a, b| (a.0 + b.0, a.1 + b.1));
+      let (reqs, errors) = q.iter().fold((0_u64, 0_u64), |a, b| {
+        (a.0.saturating_add(b.0), a.1.saturating_add(b.1))
+      });
       let pct = if reqs == 0 {
         0.0
       } else {

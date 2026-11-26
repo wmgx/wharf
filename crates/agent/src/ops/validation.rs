@@ -4,7 +4,7 @@ use std::path::Path;
 
 use wharf_api_types::{ApiError, ErrorCode, validate_name};
 
-use crate::docker::io_err;
+use crate::dirfd;
 
 /// project 名会拼进路径，必须先校验。网关 project 是 `wharf-gw-<name>`。
 pub(super) fn check_project(project: &str) -> Result<(), ApiError> {
@@ -48,12 +48,46 @@ pub(super) fn ensure_dir(dir: &str) -> Result<(), ApiError> {
       format!("数据目录必须在 /srv/ 下：{dir}"),
     ));
   }
-  std::fs::create_dir_all(path).map_err(io_err(path))
+  let base = Path::new("/srv");
+  dirfd::ensure_beneath(
+    base,
+    path.strip_prefix(base).expect("已校验前缀"),
+  )?;
+  Ok(())
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn srv_dir_ops_reject_symlink_service_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = dir.path().join("srv");
+    let outside = dir.path().join("outside");
+    std::fs::create_dir(&srv).unwrap();
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(outside.join("data"), "untouched").unwrap();
+    std::os::unix::fs::symlink(&outside, srv.join("s1")).unwrap();
+    assert!(
+      matches!(dirfd::ensure_beneath(&srv, Path::new("s1/new")), Err(e) if e.code == ErrorCode::InvalidInput)
+    );
+    assert!(
+      matches!(dirfd::DirFd::open_service_root(&srv, "s1"), Err(e) if e.code == ErrorCode::InvalidInput)
+    );
+    assert_eq!(
+      dirfd::remove_service(&srv, "s1").unwrap_err().code,
+      ErrorCode::InvalidInput
+    );
+    assert!(!outside.join("new").exists());
+    assert_eq!(
+      std::fs::read_to_string(outside.join("data")).unwrap(),
+      "untouched"
+    );
+    assert!(dirfd::ensure_beneath(&srv, Path::new("s2/new")).is_ok());
+    assert!(dirfd::DirFd::open_service_root(&srv, "s2").is_ok());
+    assert!(dirfd::remove_service(&srv, "s2").is_ok());
+  }
 
   #[test]
   fn dirs_stay_under_srv() {

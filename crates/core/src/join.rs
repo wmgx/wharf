@@ -67,7 +67,7 @@ fn candidates(
   let mut ips: Vec<Ipv4Addr> =
     own.iter().filter_map(|ip| ip.parse().ok()).collect();
   ips.sort_by_key(|ip| rank(*ip));
-  let server = core_server(&net, &own);
+  let server = net.core_server.clone();
 
   let mut out: Vec<CoreAddress> = Vec::new();
   let mut push = |url: String, kind: &str| {
@@ -108,7 +108,7 @@ pub fn route_urls(
   port: u16,
 ) -> Vec<String> {
   let own = own_ipv4s();
-  let server = core_server(net, &own);
+  let server = &net.core_server;
   core_routes(world, net, server.as_deref(), &own, port)
     .into_iter()
     .map(|h| {
@@ -140,52 +140,7 @@ pub(crate) fn own_ipv4s() -> BTreeSet<String> {
 pub(crate) fn core_server_of(
   snap: &snapshot::Snapshot,
 ) -> Option<String> {
-  core_server_with_report(snap, &own_ipv4s())
-}
-
-fn core_server_with_report(
-  snap: &snapshot::Snapshot,
-  own: &BTreeSet<String>,
-) -> Option<String> {
-  let candidate = core_server(&snap.net(&snap.world), own)?;
-  // 服务器设置可覆盖网络地址，授权时还要核对唯一的 agent 网卡上报。
-  let mut matches = snap.agents.iter().filter(|agent| {
-    snap.world.servers.contains_key(&agent.server)
-      && agent.report.as_ref().is_some_and(|report| {
-        report.lan_ips.iter().any(|ip| own.contains(ip))
-          || report
-            .private_addr
-            .as_ref()
-            .is_some_and(|addr| own.contains(&addr.ip))
-      })
-  });
-  let agent = matches.next()?;
-  (agent.server == candidate && matches.next().is_none())
-    .then_some(candidate)
-}
-
-/// 控制面所在的服务器：哪台的 agent 上报了控制面网卡上的地址。
-pub(crate) fn core_server(
-  net: &Net,
-  own: &BTreeSet<String>,
-) -> Option<String> {
-  let hit = |ip: &String| own.contains(ip);
-  net
-    .private
-    .iter()
-    .find(|(_, a)| hit(&a.ip))
-    .map(|(s, _)| s)
-    .or_else(|| {
-      net
-        .lan_ips
-        .iter()
-        .find(|(_, ips)| ips.iter().any(hit))
-        .map(|(s, _)| s)
-    })
-    .or_else(|| {
-      net.public_ip.iter().find(|(_, ip)| hit(ip)).map(|(s, _)| s)
-    })
-    .cloned()
+  crate::core_node::server_of(snap)
 }
 
 pub(crate) fn is_core_route(
@@ -200,7 +155,7 @@ pub(crate) fn is_core_route(
       world,
       net,
       route,
-      core_server(net, &own).as_deref(),
+      net.core_server.as_deref(),
       &own,
       host,
     )
@@ -309,6 +264,13 @@ fn private_host(host: &str) -> bool {
 }
 
 /// http 且不走组网时是明文（组网本身加密）。
+pub fn allows_script_install(url: &str) -> bool {
+  url.starts_with("https://")
+    || url.strip_prefix("http://").is_some_and(|rest| {
+      matches!(host_of(rest), "127.0.0.1" | "::1" | "localhost")
+    })
+}
+
 fn plaintext(url: &str) -> bool {
   url.strip_prefix("http://").is_some_and(|rest| {
     let host = host_of(rest);
@@ -386,6 +348,7 @@ pub async fn script(State(s): State<Arc<AppState>>) -> Response {
 const SCRIPT: &str = r#"#!/bin/sh
 # Wharf agent 安装：curl -fsSL <控制面>/join.sh | sh -s -- <控制面> <加入凭据> [控制面公钥]
 set -eu
+main() {
 CORE_URL="${1:?缺少控制面地址}"
 TOKEN="${2:?缺少加入凭据}"
 CORE_KEY="${3:-}"
@@ -446,7 +409,7 @@ if ! run 900 $DOCKER pull "$IMAGE"; then
 fi
 
 step "加入 $CORE_URL"
-run 60 $DOCKER run --rm --label wharf.temp=1 --network host -v "$DATA:$DATA" "$IMAGE" join "$CORE_URL" "$TOKEN" ${CORE_KEY:+--core-key "$CORE_KEY"} \
+run 60 $DOCKER run --rm --label wharf.temp=1 --network host -v "$DATA:$DATA" -e WHARF_JOIN_TOKEN="$TOKEN" "$IMAGE" join "$CORE_URL" ${CORE_KEY:+--core-key "$CORE_KEY"} \
   || fail "加入失败，确认这台机器能访问 $CORE_URL"
 
 step "启动 agent"
@@ -456,6 +419,8 @@ $DOCKER run -d --label wharf.system=agent --name wharf-agent --restart unless-st
   -e WHARF_SELF_IMAGE="$IMAGE" "$IMAGE" >/dev/null
 
 printf '\n完成，回到页面查看连接状态。\n'
+}
+main "$@"
 "#;
 
 #[cfg(test)]
@@ -463,40 +428,12 @@ mod tests {
   use super::*;
 
   #[test]
-  fn host_policy_core_identity_requires_unique_agent_interface_match()
-  {
-    let ip = "10.20.0.1";
-    let own = BTreeSet::from([ip.into()]);
-    let mut snap = snapshot::Snapshot::default();
-    for server in ["core", "s1"] {
-      snap.world.servers.insert(
-        server.into(),
-        crate::world::ServerRow {
-          settings: Default::default(),
-          version: 1,
-        },
-      );
-    }
-    let agent = |server: &str| crate::db::AgentRow {
-      server: server.into(),
-      public_key: None,
-      report: Some(wharf_api_types::agent::AgentReport {
-        lan_ips: vec![ip.into()],
-        ..Default::default()
-      }),
-      last_seen: None,
-    };
-    snap.agents.push(agent("core"));
-    assert_eq!(
-      core_server_with_report(&snap, &own).as_deref(),
-      Some("core")
-    );
-    snap.agents.push(agent("s1"));
-    assert!(core_server_with_report(&snap, &own).is_none());
-    snap.agents.clear();
-    snap.world.servers.get_mut("s1").unwrap().settings.public_ip =
-      Some(ip.into());
-    assert!(core_server_with_report(&snap, &own).is_none());
+  fn plaintext_http_omits_script_join_command() {
+    assert!(allows_script_install("https://core.example.test"));
+    assert!(allows_script_install("http://127.0.0.1:7700"));
+    assert!(allows_script_install("http://[::1]:7700"));
+    assert!(!allows_script_install("http://100.64.0.2:7700"));
+    assert!(!allows_script_install("http://192.0.2.2:7700"));
   }
 
   #[test]

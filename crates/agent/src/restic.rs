@@ -21,6 +21,7 @@ use wharf_api_types::{
 };
 
 use crate::{
+  dirfd::{DirFd, component, dir_error, validate_tree},
   docker::{Docker, io_err},
   exec::{Ctx, Output},
 };
@@ -144,12 +145,21 @@ pub async fn run(
     ),
     ResticRepo::Local => {
       let dir = Path::new(BACKUP_ROOT).join(&job.service);
-      if !dir.exists() {
-        ctx.say("这台机器上还没有这个服务的备份");
-        return match job.action {
-          ResticAction::Snapshots => to_value(Vec::<Snapshot>::new()),
-          _ => Ok(Value::Null),
-        };
+      match DirFd::open_service_root(
+        Path::new(BACKUP_ROOT),
+        &job.service,
+      ) {
+        Ok(_) => {}
+        Err(e) if e.code == ErrorCode::NotFound => {
+          ctx.say("这台机器上还没有这个服务的备份");
+          return match job.action {
+            ResticAction::Snapshots => {
+              to_value(Vec::<Snapshot>::new())
+            }
+            _ => Ok(Value::Null),
+          };
+        }
+        Err(e) => return Err(e),
       }
       (
         "/repo".to_string(),
@@ -165,11 +175,18 @@ pub async fn run(
   match &job.action {
     ResticAction::Backup { host } => {
       // 控制面的目录不在 agent 容器里，上面已经在宿主机上确认过了。
-      if job.core_marker.is_none() && !root.exists() {
-        return Err(ApiError::invalid(format!(
-          "{} 不存在，没有数据可以备份",
-          root.display()
-        )));
+      if job.core_marker.is_none() {
+        DirFd::open_service_root(Path::new("/srv"), &job.service)
+          .map_err(|e| {
+            if e.code == ErrorCode::NotFound {
+              ApiError::invalid(format!(
+                "{} 不存在，没有数据可以备份",
+                root.display()
+              ))
+            } else {
+              e
+            }
+          })?;
       }
       mounts.push(format!(
         "{}:{}:ro",
@@ -231,6 +248,11 @@ pub async fn run(
       to_value(list)
     }
     ResticAction::Restore { snapshot } => {
+      if job.core_marker.is_some() {
+        return Err(ApiError::invalid(
+          "控制面备份请在宿主机上手动恢复",
+        ));
+      }
       restore(docker, job, repo, mounts, &root, snapshot, ctx).await
     }
     ResticAction::AddKey { new_password } => {
@@ -426,10 +448,23 @@ async fn restore(
   ctx: &Ctx,
 ) -> Result<Value, ApiError> {
   check_snapshot(snapshot)?;
-  let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
-  let work =
-    Path::new(RESTORE_DIR).join(format!("{}-{stamp}", job.service));
-  std::fs::create_dir_all(&work).map_err(io_err(&work))?;
+  let nonce = crate::build::random_suffix();
+  let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+  let work_name = format!("{}-{stamp}-{nonce}", job.service);
+  let kept_name = format!("{}-before-{stamp}-{nonce}", job.service);
+  let srv = Path::new("/srv");
+  let srv_fd = DirFd::open_dir(srv).map_err(|e| dir_error(srv, e))?;
+  let restore_dir = Path::new(RESTORE_DIR);
+  let restore_fd = srv_fd
+    .ensure_subdir(c".wharf-restore", 0o700)
+    .map_err(|e| dir_error(restore_dir, e))?;
+  let work = restore_dir.join(&work_name);
+  let work_name_fd =
+    component(work_name.as_ref()).map_err(io_err(&work))?;
+  restore_fd
+    .mkdir(&work_name_fd, 0o700)
+    .map_err(io_err(&work))?;
+  let _work = RestoreWork(work.clone());
   mounts.push(format!("{}:/restore", work.display()));
   let j = Job {
     docker,
@@ -440,53 +475,95 @@ async fn restore(
   };
   ctx.say(format!("恢复快照 {snapshot}"));
   let include = root.display().to_string();
-  let restored = j
-    .restic(
-      &[
-        "restore",
-        snapshot,
-        "--target",
-        "/restore",
-        "--include",
-        &include,
-      ],
-      LONG_TIMEOUT,
-      true,
-      ctx,
-    )
-    .await
-    .and_then(|o| o.check("restic restore"));
-  let fresh = work.join(root.strip_prefix("/").unwrap_or(root));
-  if let Err(e) = restored {
-    let _ = std::fs::remove_dir_all(&work);
-    return Err(e);
-  }
-  if !fresh.exists() {
-    let _ = std::fs::remove_dir_all(&work);
-    return Err(ApiError::new(
-      ErrorCode::AgentFailed,
-      format!("快照 {snapshot} 里没有 {}", root.display()),
-    ));
-  }
-  // 原目录改名保留，再把恢复出来的目录放到原位。
-  let kept = Path::new(RESTORE_DIR)
-    .join(format!("{}-before-{stamp}", job.service));
-  if root.exists() {
-    std::fs::rename(root, &kept).map_err(io_err(root))?;
-  }
-  if let Err(e) = std::fs::rename(&fresh, root) {
-    if kept.exists() {
-      let _ = std::fs::rename(&kept, root);
-    }
-    return Err(io_err(root)(e));
-  }
-  let _ = std::fs::remove_dir_all(&work);
-  if kept.exists() {
+  j.restic(
+    &[
+      "restore",
+      snapshot,
+      "--target",
+      "/restore",
+      "--include",
+      &include,
+    ],
+    LONG_TIMEOUT,
+    true,
+    ctx,
+  )
+  .await?
+  .check("restic restore")?;
+  if install_restored_tree(srv, &job.service, &work_name, &kept_name)
+    .map_err(|e| {
+      if e.code == ErrorCode::NotFound {
+        ApiError::new(
+          ErrorCode::AgentFailed,
+          format!("快照 {snapshot} 里没有 {}", root.display()),
+        )
+      } else {
+        e
+      }
+    })?
+  {
+    let kept = restore_dir.join(kept_name);
     ctx.say(format!("原来的数据保留在 {}", kept.display()));
     to_value(kept.display().to_string())
   } else {
     Ok(Value::Null)
   }
+}
+
+struct RestoreWork(PathBuf);
+impl Drop for RestoreWork {
+  fn drop(&mut self) {
+    let _ = std::fs::remove_dir_all(&self.0);
+  }
+}
+
+fn install_restored_tree(
+  srv: &Path,
+  service: &str,
+  work_name: &str,
+  kept_name: &str,
+) -> Result<bool, ApiError> {
+  let srv_fd = DirFd::open_dir(srv).map_err(|e| dir_error(srv, e))?;
+  let restore = srv.join(".wharf-restore");
+  let restore_fd = srv_fd
+    .open_subdir(c".wharf-restore")
+    .map_err(|e| dir_error(&restore, e))?;
+  let work = restore.join(work_name);
+  let work_name =
+    component(work_name.as_ref()).map_err(io_err(&work))?;
+  let fresh_parent = restore_fd
+    .open_subdir(&work_name)
+    .and_then(|fd| fd.open_subdir(c"srv"))
+    .map_err(|e| dir_error(&work, e))?;
+  let root = srv.join(service);
+  let service = component(service.as_ref()).map_err(io_err(&root))?;
+  let fresh = fresh_parent
+    .open_subdir(&service)
+    .map_err(|e| dir_error(&root, e))?;
+  validate_tree(&fresh, true)?;
+  let kept_path = restore.join(kept_name);
+  let kept_name =
+    component(kept_name.as_ref()).map_err(io_err(&kept_path))?;
+  let had_old = match srv_fd.lstat(&service) {
+    Ok(_) => {
+      srv_fd
+        .rename_to(&service, &restore_fd, &kept_name)
+        .map_err(io_err(&root))?;
+      true
+    }
+    Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+    Err(e) => return Err(io_err(&root)(e)),
+  };
+  if let Err(e) = fresh_parent.rename_to(&service, &srv_fd, &service)
+  {
+    if had_old {
+      restore_fd.rename_to(&kept_name, &srv_fd, &service).map_err(|rollback| {
+        ApiError::internal(format!("恢复落位失败：{e}。无法还原原目录：{rollback}。原数据保留在 {}", kept_path.display()))
+      })?;
+    }
+    return Err(io_err(&root)(e));
+  }
+  Ok(had_old)
 }
 
 /// `restic backup --json` 最后一行是汇总。
@@ -550,3 +627,6 @@ mod tests {
     assert!(check_snapshot("abc").is_err());
   }
 }
+
+#[cfg(test)]
+mod restore_tests;

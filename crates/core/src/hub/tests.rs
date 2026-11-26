@@ -67,6 +67,7 @@ fn old_core_ignores_new_hello_capability() {
     net_probe: true,
     container_probe: true,
     ssh_logins: true,
+    core_probe: true,
   };
   let json = serde_json::to_string(&hello).unwrap();
   let old = serde_json::from_str::<OldAgentMsg>(&json);
