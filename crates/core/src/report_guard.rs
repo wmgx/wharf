@@ -364,7 +364,7 @@ pub async fn record_report(
     let world = World::from_rows(crate::db::all_resources(c)?)?;
     let agents = crate::db::agents(c)?;
     let registered = agents.iter().find(|a| a.server == server);
-    if !registered.is_some_and(|a| a.public_key.as_ref() == Some(&public_key)) {
+    if registered.is_none_or(|a| a.public_key.as_ref() != Some(&public_key)) {
       return Err(wharf_api_types::ApiError::not_found("agent 已取消注册"));
     }
     let before =

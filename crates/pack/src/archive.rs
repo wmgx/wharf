@@ -70,6 +70,9 @@ pub fn validate_archive(path: &Path) -> Result<(), ApiError> {
       )));
     }
   }
+  if archive.into_inner().limit() == 0 {
+    return Err(ApiError::invalid("代码包解压后过大"));
+  }
   for rel in types.keys().chain(&hardlinks) {
     if rel
       .ancestors()
