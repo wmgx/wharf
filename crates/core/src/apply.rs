@@ -317,6 +317,10 @@ pub async fn start(
     ));
   }
   require_login_account(plan, perms.contains(&Perm::Admin))?;
+  crate::caddy_validate::require_route_caddy(
+    plan,
+    perms.contains(&Perm::Admin),
+  )?;
   confirm::require(
     &plan.plan_id,
     &plan.needs_confirm,
@@ -518,7 +522,7 @@ fn apply_writes(
   }
   let desired =
     crate::world::World::from_rows(db::all_resources(tx)?)?;
-  crate::secret_policy::validate_world(&desired)?;
+  desired.validate()?;
   crate::secret_policy::validate_accounts(
     &desired,
     &crate::app_accounts::account_links(tx)?,
@@ -1041,6 +1045,7 @@ async fn run_step(
             db::ensure_secret(c, key, &name, db::now_ms())
           })
           .await?;
+        crate::caddy_validate::validate_acme_dns_fill(&key, &url)?;
         snapshot::gateway_render_with_acme(
           world,
           &net,
