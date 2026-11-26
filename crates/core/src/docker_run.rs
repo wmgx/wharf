@@ -435,8 +435,10 @@ fn port(p: &mut Parsed, value: &str) {
         [_, _] => format!("127.0.0.1:{value}"),
         _ => {
           if matches!(parts[2], "0.0.0.0" | "[::]") {
-            p.warnings
-              .push(format!("端口 {value} 显式绑定到所有网卡"));
+            p.warnings.push(format!(
+              "端口 {value} 显式绑定到所有网卡，会直接暴露到公网；如只需经网关访问请去掉 {host} 或改为 127.0.0.1",
+              host = parts[2],
+            ));
           }
           value.to_string()
         }
@@ -786,4 +788,34 @@ fn compose_defaults_to_loopback_and_escapes_label() {
   let service = &yaml["services"]["nginx"];
   assert_eq!(service["ports"][0].as_str(), Some("127.0.0.1:8080:80"));
   assert_eq!(service["labels"][0].as_str(), Some("foo=$$bar"));
+}
+
+#[test]
+fn explicit_wildcard_ports_keep_binding_and_warn_about_public_access()
+{
+  let result = from_docker_run(
+    "docker run --init -p 0.0.0.0:8080:80 -p '[::]:8081:81' nginx",
+    None,
+  )
+  .unwrap();
+  let Source::Compose {
+    content: Some(content),
+    ..
+  } = result.source
+  else {
+    panic!("应该是 compose 来源");
+  };
+  let yaml: Value = serde_yaml_ng::from_str(&content).unwrap();
+  let ports = &yaml["services"]["nginx"]["ports"];
+  for (i, (host, port)) in
+    [("0.0.0.0", "8080:80"), ("[::]", "8081:81")]
+      .into_iter()
+      .enumerate()
+  {
+    let binding = format!("{host}:{port}");
+    assert_eq!(ports[i].as_str(), Some(binding.as_str()));
+    assert!(result.warnings.contains(&format!(
+      "端口 {binding} 显式绑定到所有网卡，会直接暴露到公网；如只需经网关访问请去掉 {host} 或改为 127.0.0.1"
+    )));
+  }
 }

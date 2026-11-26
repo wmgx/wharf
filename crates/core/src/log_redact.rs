@@ -21,18 +21,30 @@ use crate::{
 static VALUES: RwLock<Option<Arc<Vec<String>>>> = RwLock::new(None);
 
 fn prepare(values: &mut Vec<String>) {
-  let escaped = values
-    .iter()
-    .filter_map(|value| {
-      if !value.contains(['"', '\\', '\n', '\r', '\t']) {
-        return None;
-      }
-      let encoded = serde_json::to_string(value).ok()?;
-      Some(encoded[1..encoded.len() - 1].to_string())
-    })
-    .collect::<Vec<_>>();
-  values.extend(escaped);
   values.retain(|value| value.len() >= 6);
+  let mut escaped = Vec::new();
+  for value in values.iter() {
+    if let std::borrow::Cow::Owned(encoded) =
+      urlencoding::encode(value)
+    {
+      escaped.push(encoded);
+    }
+    if let Ok(json) = serde_json::to_string(value) {
+      let json = &json[1..json.len() - 1];
+      if json != value {
+        escaped.push(json.to_string());
+      }
+      if json.contains(['<', '>', '&']) {
+        escaped.push(
+          json
+            .replace('<', r"\u003c")
+            .replace('>', r"\u003e")
+            .replace('&', r"\u0026"),
+        );
+      }
+    }
+  }
+  values.extend(escaped);
   values.sort_unstable_by(|a, b| {
     (Reverse(a.len()), a).cmp(&(Reverse(b.len()), b))
   });
@@ -54,6 +66,7 @@ fn value(out: &mut Vec<String>, text: &str, sensitive: bool) {
   }
   if sensitive || credentials {
     out.push(text.into());
+    out.extend(secret_policy::pem_body(text).map(str::to_string));
   }
 }
 
@@ -188,7 +201,7 @@ pub fn update(
   world: &World,
   secrets: &BTreeMap<String, String>,
   accounts: &[db::AccountRow],
-) -> Result<(), ApiError> {
+) -> Result<Arc<Vec<String>>, ApiError> {
   let passwords =
     db::service_values(conn, key, BTreeMap::new(), None)?
       .into_iter()
@@ -196,16 +209,16 @@ pub fn update(
         name.ends_with(".password").then_some(value)
       });
   let tasks = crate::tasks::load_rows(conn)?;
-  let values = collect(
+  let values = Arc::new(collect(
     secrets,
     passwords,
     accounts,
     world,
     tasks.into_iter().map(|(_, spec, _)| spec),
-  );
+  ));
   *VALUES.write().unwrap_or_else(|e| e.into_inner()) =
-    Some(Arc::new(values));
-  Ok(())
+    Some(Arc::clone(&values));
+  Ok(values)
 }
 
 pub async fn refresh(db: &Db) {
@@ -273,18 +286,33 @@ mod tests {
   use super::*;
 
   #[test]
+  fn masks_url_and_go_json_secret_encodings() {
+    let mut values =
+      vec!["p@ss/w#1?".into(), "a<&>\nbcd".into(), "<&>".into()];
+    prepare(&mut values);
+    assert_eq!(
+      wharf_api_types::mask_values(
+        r"p%40ss%2Fw%231%3F a\u003c\u0026\u003e\nbcd %3C%26%3E",
+        &values,
+      ),
+      "*** *** %3C%26%3E"
+    );
+  }
+
+  #[test]
   fn redacts_registered_sources_and_preserves_public_values() {
     let secrets = BTreeMap::from([
       ("APP_KEY".into(), "fixture-app-key".into()),
-      ("PEM".into(), "-----BEGIN PRIVATE KEY-----\nYWJjZGVmZw==\n-----END PRIVATE KEY-----".into()),
+      ("PEM".into(), "\n-----BEGIN PRIVATE KEY----- \nYWJjZGVmZw==\n-----END PRIVATE KEY-----".into()),
       (crate::link::CA_CERT_SECRET.into(), "fixture-public-cert".into()),
       ("SHORT".into(), "short".into()),
     ]);
-    let raw = "fixture-app-key YWJjZGVmZw== fixture-public-cert short fixture-password fixture-inline fixture-heartbeat fixture-hook fixture-vendor";
+    let raw = "fixture-app-key   YWJjZGVmZw== fixture-public-cert short fixture-password fixture-inline fixture-heartbeat fixture-hook fixture-vendor   c2VydmljZQ==   dGFzay1rZXk=";
     let mut world = World::default();
     let spec = serde_json::from_value(serde_json::json!({
       "server": "s1",
       "source": {"compose": {"content": "services: {app: {environment: {DB_PASSWORD: fixture-inline}}}"}},
+      "env": {"APP_PRIVATE_KEY": "-----BEGIN PRIVATE KEY-----\nc2VydmljZQ==\n-----END PRIVATE KEY-----"},
       "heartbeat": {"every_mins": 10, "token":"fixture-heartbeat"}
     })).unwrap();
     world.services.insert(
@@ -299,7 +327,8 @@ mod tests {
       },
     );
     let task = serde_json::from_value(serde_json::json!({
-      "server":"s1","schedule":"","kind":"script","runtime":"shell","code":"echo ok","hook":"fixture-hook"
+      "server":"s1","schedule":"","kind":"script","runtime":"shell","code":"echo ok","hook":"fixture-hook",
+      "env":{"TASK_PRIVATE_KEY":"-----BEGIN PRIVATE KEY-----\ndGFzay1rZXk=\n-----END PRIVATE KEY-----"}
     })).unwrap();
     let account = db::AccountRow {
       name: "fixture".into(),
@@ -319,7 +348,7 @@ mod tests {
     let output = wharf_api_types::mask_values(raw, &values);
     assert_eq!(
       output,
-      "*** *** fixture-public-cert short *** *** *** *** ***"
+      "***   *** fixture-public-cert short *** *** *** *** ***   ***   ***"
     );
     let found = crate::log_search::search(
       &output,

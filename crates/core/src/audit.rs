@@ -36,6 +36,7 @@ struct Slot {
   actor: Option<String>,
   detail: Option<String>,
   required: bool,
+  skipped: bool,
   rejection: Option<(String, String)>,
 }
 
@@ -51,7 +52,7 @@ impl AuditSlot {
   }
 
   pub fn skip_record(&self) {
-    self.0.lock().unwrap_or_else(|e| e.into_inner()).actor = None;
+    self.0.lock().unwrap_or_else(|e| e.into_inner()).skipped = true;
   }
 
   pub fn set_detail(&self, detail: String) {
@@ -82,12 +83,13 @@ pub async fn layer(
   let slot = AuditSlot::default();
   req.extensions_mut().insert(slot.clone());
   let resp = next.run(req).await;
-  let (actor, detail, required, rejection) = {
+  let (actor, detail, required, skipped, rejection) = {
     let mut slot = slot.0.lock().unwrap_or_else(|e| e.into_inner());
     (
       slot.actor.take(),
       slot.detail.take(),
       slot.required,
+      slot.skipped,
       slot.rejection.take(),
     )
   };
@@ -95,7 +97,9 @@ pub async fn layer(
   let rejected = matches!(status, 401 | 403)
     && path.starts_with("/api/")
     && !matches!(path.as_str(), "/api/login" | "/api/setup");
-  if rejected || (actor.is_some() && should_record(&method, &path)) {
+  if rejected
+    || (!skipped && actor.is_some() && should_record(&method, &path))
+  {
     let (actor, detail) = rejection.map_or_else(
       || (actor.unwrap_or_else(|| "anonymous".into()), detail),
       |(actor, detail)| (actor, Some(detail)),
@@ -503,6 +507,109 @@ async fn audit_cleanup_keeps_seven_and_ninety_day_windows() {
     assert_eq!(actors, ["anonymous", "s1"]);
     Ok(())
   }).await.unwrap();
+}
+
+#[tokio::test]
+async fn invalid_session_cookie_uses_anonymous_audit_limits() {
+  use axum::body::Body;
+  use tower::ServiceExt;
+
+  let state = crate::rules::tests::test_state();
+  let app = crate::api::router(state.clone());
+  for (origin, status) in
+    [(None, 401), (Some("https://other.test"), 403)]
+  {
+    for _ in 0..6 {
+      let mut request = axum::http::Request::builder()
+        .uri("/api/services")
+        .header("host", "wharf.test")
+        .header("cookie", "wharf_session=fixture-invalid")
+        .extension(ConnectInfo(
+          "203.0.113.17:12345"
+            .parse::<std::net::SocketAddr>()
+            .unwrap(),
+        ));
+      if let Some(origin) = origin {
+        request = request.header("origin", origin);
+      }
+      let response = app
+        .clone()
+        .oneshot(request.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+      assert_eq!(response.status().as_u16(), status);
+    }
+  }
+  state
+    .db
+    .call(|c| {
+      let (all, anonymous): (i64, i64) = c
+        .query_row(
+          "SELECT count(*), sum(actor = 'anonymous') FROM audit_log",
+          [],
+          |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(sql_err)?;
+      assert_eq!((all, anonymous), (10, 10));
+      let now = now_ms();
+      c.execute(
+        "UPDATE audit_log SET at = ?1",
+        [now - 8 * 86_400_000],
+      )
+      .map_err(sql_err)?;
+      cleanup_rows(c, now)?;
+      let remaining: i64 = c
+        .query_row("SELECT count(*) FROM audit_log", [], |r| r.get(0))
+        .map_err(sql_err)?;
+      assert_eq!(remaining, 0);
+      Ok(())
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn out_of_scope_plan_audits_the_authenticated_actor() {
+  use axum::body::Body;
+  use tower::ServiceExt;
+
+  let state = crate::rules::tests::test_state();
+  state
+    .db
+    .call(|c| {
+      crate::auth::insert_token(
+        c,
+        "ci",
+        &[Perm::Plan],
+        "fixture-plan",
+      )?;
+      c.execute(
+        "UPDATE api_tokens SET services = 'svc-a' WHERE name = 'ci'",
+        [],
+      )
+      .map_err(sql_err)?;
+      Ok(())
+    })
+    .await
+    .unwrap();
+  let request = axum::http::Request::post("/api/plan")
+    .header("authorization", "Bearer fixture-plan")
+    .header("content-type", "application/json")
+    .extension(crate::cli_tunnel::Sealed)
+    .body(Body::from(
+      r#"{"changes":[{"op":"remove_service","name":"svc-b"}]}"#,
+    ))
+    .unwrap();
+  let response = crate::api::router(state.clone())
+    .oneshot(request)
+    .await
+    .unwrap();
+  assert_eq!(response.status().as_u16(), 403);
+  let actor = state.db.call(|c| {
+    c.query_row("SELECT actor FROM audit_log WHERE path = '/api/plan' AND status = 403", [], |r| r.get::<_, String>(0))
+      .map_err(sql_err)
+  }).await.unwrap();
+  assert_eq!(actor, "ci");
 }
 
 #[tokio::test]

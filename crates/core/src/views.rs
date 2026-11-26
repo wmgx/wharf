@@ -483,7 +483,7 @@ pub(crate) fn route_view_with_upstream_error(
         .as_ref()
         .filter(|s| s.mode == wharf_api_types::spec::SsoMode::Login)
         .and_then(|_| snap.sso_login.get(hostname))
-        .and_then(|s| serde_json::from_str(s).ok()),
+        .cloned(),
       id: row.id.clone(),
       spec: row.spec.clone(),
       gateway,

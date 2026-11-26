@@ -210,19 +210,24 @@ async fn authenticate(
       rejected("anonymous", "未登录");
       return Err(unauthorized());
     }
-    require_same_origin(&parts.method, peer, &parts.headers)
-      .inspect_err(|_| {
-        rejected("session", "请求来源不一致");
-      })?;
+    let origin =
+      require_same_origin(&parts.method, peer, &parts.headers);
     let user = crate::login::session_user_with_activity(
       state,
       &parts.headers,
-      track_activity,
+      track_activity && origin.is_ok(),
     )
-    .await
-    .map_err(AppError::from)?
-    .ok_or_else(|| {
-      rejected("session", "会话无效或已过期");
+    .await;
+    if let Err(error) = origin {
+      let actor = match user {
+        Ok(Some(user)) => format!("页面:{user}"),
+        _ => "anonymous".into(),
+      };
+      rejected(&actor, "请求来源不一致");
+      return Err(error);
+    }
+    let user = user.map_err(AppError::from)?.ok_or_else(|| {
+      rejected("anonymous", "会话无效或已过期");
       unauthorized()
     })?;
     return Ok(Auth {

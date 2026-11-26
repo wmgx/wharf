@@ -1,11 +1,12 @@
 //! plan、apply、status 共用的数据快照和小工具。
 
-use std::{collections::BTreeMap, time::Duration};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use wharf_api_types::{
   ApiError, ErrorCode,
   agent::{ProjectState, PullPolicy},
   spec::{GatewayKind, GatewayTls},
+  view::SsoLoginState,
 };
 use wharf_providers::{
   Credentials, DnsProvider, ProviderError, error::code,
@@ -24,7 +25,8 @@ pub const PULL_ATTEMPT_SECS: u64 = 30 * 60;
 pub struct Snapshot {
   pub world: World,
   pub core_server: Option<String>,
-  pub sso_login: BTreeMap<String, String>,
+  pub sso_login: BTreeMap<String, SsoLoginState>,
+  pub log_values: Arc<Vec<String>>,
   pub agents: Vec<AgentRow>,
   pub accounts: Vec<AccountRow>,
   pub app_account_defaults: BTreeMap<String, String>,
@@ -87,6 +89,42 @@ impl Snapshot {
   }
 }
 
+#[tokio::test]
+async fn snapshot_masks_legacy_errors_without_rewriting_rows() {
+  let db = Db::memory();
+  let sso =
+    r#"{"at":1,"ok":false,"error":"login: fixture-legacy-key"}"#;
+  db.call_credentials(move |c, key| {
+    key.put_secret(c, "LEGACY_KEY", "fixture-legacy-key", 1, true)?;
+    c.execute(
+      "INSERT INTO service_ops (service, action, run_id, status, at, error)
+       VALUES ('app', '部署', 'r1', 'failed', 1, 'pull: fixture-legacy-key')",
+      [],
+    )
+    .map_err(db::sql_err)?;
+    db::set_setting(c, "sso.login.app.example.test", Some(sso))
+  })
+  .await
+  .unwrap();
+  let snap = load_inner(&db).await.unwrap();
+  assert_eq!(snap.ops["app"].error.as_deref(), Some("pull: ***"));
+  assert_eq!(
+    snap.sso_login["app.example.test"].error.as_deref(),
+    Some("login: ***")
+  );
+  db.call(move |c| {
+    assert_eq!(
+      db::service_ops(c)?["app"].error.as_deref(),
+      Some("pull: fixture-legacy-key")
+    );
+    let raw = db::setting(c, "sso.login.app.example.test")?;
+    assert_eq!(raw.as_deref(), Some(sso));
+    Ok(())
+  })
+  .await
+  .unwrap();
+}
+
 /// 最近一次加载的密钥：拉镜像策略里的 `[[NAME]]`（例如镜像源地址里的访问口令）用它替换。
 /// 每个调用 [pull_policy] 的地方都是刚加载完快照，所以是新的。
 static SECRETS: std::sync::RwLock<BTreeMap<String, String>> =
@@ -136,7 +174,23 @@ pub(crate) async fn load_inner(
       Some(&render::service_account_refs(&world)),
     )?;
     let accounts = db::accounts(c)?;
-    crate::log_redact::update(c, key, &world, &secrets, &accounts)?;
+    let log_values =
+      crate::log_redact::update(c, key, &world, &secrets, &accounts)?;
+    let redact =
+      |text: &str| wharf_api_types::mask_values(text, &log_values);
+    let sso_login = db::settings_with_prefix(c, "sso.login.")?
+      .into_iter()
+      .filter_map(|(host, value)| {
+        let mut result: SsoLoginState =
+          serde_json::from_str(&value).ok()?;
+        result.error = result.error.as_deref().map(redact);
+        Some((host, result))
+      })
+      .collect();
+    let mut ops = db::service_ops(c)?;
+    for op in ops.values_mut() {
+      op.error = op.error.as_deref().map(redact);
+    }
     Ok(
       Snapshot {
         world,
@@ -144,14 +198,15 @@ pub(crate) async fn load_inner(
         core_server,
         accounts,
         app_account_defaults: crate::app_accounts::defaults(c)?,
-        sso_login: db::settings_with_prefix(c, "sso.login.")?,
+        sso_login,
+        log_values,
         owned: db::owned_records(c)?,
         secrets,
         service_values,
         account_links: crate::app_accounts::account_links(c)?,
         deployed: db::deployed_servers(c)?,
         applied: db::applied(c)?,
-        ops: db::service_ops(c)?,
+        ops,
         heartbeats: crate::service_monitor::heartbeat::load(c)?,
         notes: db::service_notes(c)?,
         server_notes: crate::notes::resource_notes(
