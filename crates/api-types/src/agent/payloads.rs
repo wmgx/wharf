@@ -206,6 +206,8 @@ pub const WRANGLER_VERSION: &str = "4.148.0";
 pub const REST_SERVER_IMAGE: &str = "restic/rest-server:0.14.0";
 /// rest-server 在备份服务器内网地址上监听的端口。
 pub const REST_SERVER_PORT: u16 = 7710;
+pub const CORE_REST_SERVER_PORT: u16 = 7711;
+pub const CORE_BACKUP_ROOT: &str = "/srv/wharf-backup-core";
 /// rest-server 的数据目录，每个服务一个仓库 `<目录>/<服务>`。
 pub const BACKUP_ROOT: &str = "/srv/wharf-backup";
 
@@ -236,8 +238,17 @@ pub enum ResticAction {
   Prune,
   /// 给仓库加一把口令，结果是新钥匙的 id。
   AddKey { new_password: OneTimeSecret },
-  /// 删掉一把口令。rest-server 只能追加，要在备份服务器本机（`Local`）做。
+  /// 列出仓库钥匙。结果是 `Vec<ResticKeyInfo>`。
+  ListKeys,
+  /// 删掉一把口令。业务备份只能在备份服务器本机执行。
   RemoveKey { id: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResticKeyInfo {
+  pub id: String,
+  #[serde(default)]
+  pub current: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

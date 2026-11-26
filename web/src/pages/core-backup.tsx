@@ -65,7 +65,7 @@ export function CoreBackup() {
               </Button>
             </div>
           </div>
-          {data.to && !data.user_key_current && <Notice kind="warn">登录密码改过，恢复口令还是旧密码</Notice>}
+          {data.to && !data.user_key_current && <Notice kind="warn">登录密码恢复口令未同步，请点设置重新输入</Notice>}
           {data.restore_command && (
             <details className="text-sm">
               <summary className="cursor-pointer text-muted-foreground">恢复命令</summary>

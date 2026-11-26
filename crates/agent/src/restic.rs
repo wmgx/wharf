@@ -7,6 +7,7 @@
 use std::{
   net::IpAddr,
   path::{Path, PathBuf},
+  sync::atomic::{AtomicU64, Ordering},
   time::Duration,
 };
 
@@ -15,7 +16,7 @@ use wharf_api_types::{
   ApiError, ErrorCode,
   agent::{
     BACKUP_ROOT, BackupSummary, CORE_BACKUP_DIR, RESTIC_IMAGE,
-    ResticAction, ResticJob, ResticRepo, Snapshot,
+    ResticAction, ResticJob, ResticKeyInfo, ResticRepo, Snapshot,
   },
   validate_name,
 };
@@ -30,6 +31,8 @@ const LONG_TIMEOUT: Duration = Duration::from_secs(6 * 3600);
 const SHORT_TIMEOUT: Duration = Duration::from_secs(120);
 /// restic 的退出码：仓库不存在。
 const NO_REPO: i32 = 10;
+const WRONG_PASSWORD: i32 = 12;
+static READ_RUN: AtomicU64 = AtomicU64::new(0);
 /// 恢复时的临时目录和原目录的保留位置，和 `/srv/<service>` 在同一个文件系统上，改名是原子的。
 const RESTORE_DIR: &str = "/srv/.wharf-restore";
 
@@ -38,13 +41,20 @@ struct Job<'a> {
   service: &'a str,
   repo: String,
   password: &'a str,
+  http_auth: Option<(&'a str, &'a str)>,
+  read_run: Option<u64>,
   /// 额外的 `-v`。
   mounts: Vec<String>,
 }
 
 impl Job<'_> {
   fn container(&self) -> String {
-    format!("wharf-restic-{}", self.service)
+    match self.read_run {
+      Some(id) => {
+        format!("wharf-restic-read-{}-{id}", std::process::id())
+      }
+      None => format!("wharf-restic-{}", self.service),
+    }
   }
 
   async fn restic(
@@ -70,6 +80,17 @@ impl Job<'_> {
         "host",
       ])
       .args(["-e", "RESTIC_REPOSITORY", "-e", "RESTIC_PASSWORD"]);
+    if let Some((user, password)) = self.http_auth {
+      cmd = cmd
+        .args([
+          "-e",
+          "RESTIC_REST_USERNAME",
+          "-e",
+          "RESTIC_REST_PASSWORD",
+        ])
+        .env("RESTIC_REST_USERNAME", user)
+        .env("RESTIC_REST_PASSWORD", password);
+    }
     for m in &self.mounts {
       cmd = cmd.args(["-v", m.as_str()]);
     }
@@ -108,8 +129,6 @@ fn data_root(service: &str) -> Result<PathBuf, ApiError> {
 fn rest_url(
   host: &str,
   port: u16,
-  user: &str,
-  password: &str,
   service: &str,
 ) -> Result<String, ApiError> {
   let ip: IpAddr = host.parse().map_err(|_| {
@@ -119,11 +138,7 @@ fn rest_url(
     IpAddr::V6(v6) => format!("[{v6}]"),
     IpAddr::V4(v4) => v4.to_string(),
   };
-  Ok(format!(
-    "rest:http://{}:{}@{host}:{port}/{service}",
-    encode_userinfo(user),
-    encode_userinfo(password)
-  ))
+  Ok(format!("rest:http://{host}:{port}/{service}"))
 }
 
 pub async fn run(
@@ -135,15 +150,16 @@ pub async fn run(
     Some(marker) => core_root(docker, marker, ctx).await?,
     None => data_root(&job.service)?,
   };
-  let (repo, mut mounts) = match &job.repo {
+  let (repo, mounts, http_auth) = match &job.repo {
     ResticRepo::Rest {
       host,
       port,
       user,
       password,
     } => (
-      rest_url(host, *port, user, &password.0, &job.service)?,
+      rest_url(host, *port, &job.service)?,
       vec![],
+      Some((user.as_str(), password.0.as_str())),
     ),
     ResticRepo::Local => {
       let dir = Path::new(BACKUP_ROOT).join(&job.service);
@@ -158,6 +174,9 @@ pub async fn run(
             ResticAction::Snapshots => {
               to_value(Vec::<Snapshot>::new())
             }
+            ResticAction::ListKeys => {
+              to_value(Vec::<ResticKeyInfo>::new())
+            }
             _ => Ok(Value::Null),
           };
         }
@@ -166,6 +185,7 @@ pub async fn run(
       (
         "/repo".to_string(),
         vec![format!("{}:/repo", dir.display())],
+        None,
       )
     }
   };
@@ -174,6 +194,16 @@ pub async fn run(
       .pull(RESTIC_IMAGE, &job.pull, ctx, &mut vec![])
       .await?;
   }
+  let mut j = Job {
+    docker,
+    service: &job.service,
+    repo,
+    password: &job.password.0,
+    http_auth,
+    read_run: matches!(job.action, ResticAction::Snapshots)
+      .then(|| READ_RUN.fetch_add(1, Ordering::Relaxed)),
+    mounts,
+  };
   match &job.action {
     ResticAction::Backup { host } => {
       // 控制面的目录不在 agent 容器里，上面已经在宿主机上确认过了。
@@ -190,18 +220,11 @@ pub async fn run(
             }
           })?;
       }
-      mounts.push(format!(
+      j.mounts.push(format!(
         "{}:{}:ro",
         root.display(),
         root.display()
       ));
-      let j = Job {
-        docker,
-        service: &job.service,
-        repo,
-        password: &job.password.0,
-        mounts,
-      };
       ensure_repo(&j, ctx).await?;
       ctx.say(format!("备份 {}", root.display()));
       let path = root.display().to_string();
@@ -228,13 +251,6 @@ pub async fn run(
       to_value(summary)
     }
     ResticAction::Snapshots => {
-      let j = Job {
-        docker,
-        service: &job.service,
-        repo,
-        password: &job.password.0,
-        mounts,
-      };
       let out = j
         .restic(&["snapshots", "--json"], SHORT_TIMEOUT, false, ctx)
         .await?;
@@ -249,23 +265,17 @@ pub async fn run(
       list.sort_by_key(|s| std::cmp::Reverse(s.time));
       to_value(list)
     }
+    ResticAction::ListKeys => to_value(list_keys(&j, ctx).await?),
     ResticAction::Restore { snapshot } => {
       if job.core_marker.is_some() {
         return Err(ApiError::invalid(
           "控制面备份请在宿主机上手动恢复",
         ));
       }
-      restore(docker, job, repo, mounts, &root, snapshot, ctx).await
+      restore(j, &root, snapshot, ctx).await
     }
     ResticAction::AddKey { new_password } => {
-      let j = Job {
-        docker,
-        service: &job.service,
-        repo,
-        password: &job.password.0,
-        mounts,
-      };
-      add_key(docker, j, &new_password.0, ctx).await
+      add_key(j, &new_password.0, ctx).await
     }
     ResticAction::RemoveKey { id } => {
       if !id.bytes().all(|c| c.is_ascii_hexdigit()) || id.is_empty() {
@@ -273,13 +283,6 @@ pub async fn run(
           "钥匙 id 不合法：{id}"
         )));
       }
-      let j = Job {
-        docker,
-        service: &job.service,
-        repo,
-        password: &job.password.0,
-        mounts,
-      };
       ctx.say("删除旧口令");
       j.restic(&["key", "remove", id], SHORT_TIMEOUT, true, ctx)
         .await?
@@ -287,13 +290,6 @@ pub async fn run(
       Ok(Value::Null)
     }
     ResticAction::Prune => {
-      let j = Job {
-        docker,
-        service: &job.service,
-        repo,
-        password: &job.password.0,
-        mounts,
-      };
       ctx.say("清理旧快照：保留最近 7 天、4 周、6 个月各一份");
       j.restic(
         &[
@@ -359,7 +355,6 @@ async fn core_root(
 
 /// 新口令写进 agent 数据目录下的临时文件（宿主机路径相同）挂给 restic，用完删掉。
 async fn add_key(
-  docker: &Docker,
   mut j: Job<'_>,
   new_password: &str,
   ctx: &Ctx,
@@ -368,7 +363,8 @@ async fn add_key(
   let mut random = [0u8; 16];
   getrandom::fill(&mut random)
     .map_err(|_| ApiError::internal("随机数不可用"))?;
-  let file = docker
+  let file = j
+    .docker
     .data_dir
     .join(format!(".restic-newkey-{}", hex::encode(random)));
   let guard = TempSecretFile::create(&file, new_password)?;
@@ -398,19 +394,36 @@ async fn key_ids(
   j: &Job<'_>,
   ctx: &Ctx,
 ) -> Result<Vec<String>, ApiError> {
-  #[derive(serde::Deserialize)]
-  struct Key {
-    id: String,
-  }
+  Ok(
+    list_keys(j, ctx)
+      .await?
+      .into_iter()
+      .map(|key| key.id)
+      .collect(),
+  )
+}
+
+async fn list_keys(
+  j: &Job<'_>,
+  ctx: &Ctx,
+) -> Result<Vec<ResticKeyInfo>, ApiError> {
   let out = j
     .restic(&["key", "list", "--json"], SHORT_TIMEOUT, false, ctx)
-    .await?
-    .check("restic key list")?;
-  let keys: Vec<Key> =
-    serde_json::from_str(&out.stdout).map_err(|e| {
-      ApiError::internal(format!("解析 restic 钥匙列表失败：{e}"))
-    })?;
-  Ok(keys.into_iter().map(|k| k.id).collect())
+    .await?;
+  match out.code {
+    Some(NO_REPO) => return Ok(vec![]),
+    Some(WRONG_PASSWORD) => {
+      return Err(ApiError::new(
+        ErrorCode::Forbidden,
+        "备份仓库口令不匹配",
+      ));
+    }
+    _ => {}
+  }
+  let out = out.check("restic key list")?;
+  serde_json::from_str(&out.stdout).map_err(|e| {
+    ApiError::internal(format!("解析 restic 钥匙列表失败：{e}"))
+  })
 }
 
 async fn ensure_repo(j: &Job<'_>, ctx: &Ctx) -> Result<(), ApiError> {
@@ -444,10 +457,7 @@ fn check_snapshot(id: &str) -> Result<(), ApiError> {
 }
 
 async fn restore(
-  docker: &Docker,
-  job: &ResticJob,
-  repo: String,
-  mut mounts: Vec<String>,
+  mut j: Job<'_>,
   root: &Path,
   snapshot: &str,
   ctx: &Ctx,
@@ -455,8 +465,8 @@ async fn restore(
   check_snapshot(snapshot)?;
   let nonce = crate::build::random_suffix();
   let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
-  let work_name = format!("{}-{stamp}-{nonce}", job.service);
-  let kept_name = format!("{}-before-{stamp}-{nonce}", job.service);
+  let work_name = format!("{}-{stamp}-{nonce}", j.service);
+  let kept_name = format!("{}-before-{stamp}-{nonce}", j.service);
   let srv = Path::new("/srv");
   let srv_fd = DirFd::open_dir(srv).map_err(|e| dir_error(srv, e))?;
   let restore_dir = Path::new(RESTORE_DIR);
@@ -470,14 +480,7 @@ async fn restore(
     .mkdir(&work_name_fd, 0o700)
     .map_err(io_err(&work))?;
   let _work = RestoreWork(work.clone());
-  mounts.push(format!("{}:/restore", work.display()));
-  let j = Job {
-    docker,
-    service: &job.service,
-    repo,
-    password: &job.password.0,
-    mounts,
-  };
+  j.mounts.push(format!("{}:/restore", work.display()));
   ctx.say(format!("恢复快照 {snapshot}"));
   let include = root.display().to_string();
   j.restic(
@@ -496,11 +499,7 @@ async fn restore(
   .await?
   .check("restic restore")?;
   if install_restored_tree(
-    srv,
-    &job.service,
-    &work_name,
-    &kept_name,
-    snapshot,
+    srv, j.service, &work_name, &kept_name, snapshot,
   )
   .map_err(|e| {
     if e.code == ErrorCode::NotFound {
@@ -702,19 +701,6 @@ fn to_value<T: serde::Serialize>(v: T) -> Result<Value, ApiError> {
     .map_err(|e| ApiError::internal(e.to_string()))
 }
 
-fn encode_userinfo(value: &str) -> String {
-  use std::fmt::Write;
-  let mut encoded = String::new();
-  for b in value.bytes() {
-    if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
-      encoded.push(char::from(b));
-    } else {
-      let _ = write!(encoded, "%{b:02X}");
-    }
-  }
-  encoded
-}
-
 struct TempSecretFile(PathBuf);
 
 impl TempSecretFile {
@@ -780,10 +766,10 @@ mod tests {
 mod restore_tests;
 
 #[test]
-fn rest_url_escapes_userinfo() {
+fn rest_url_formats_ipv6() {
   assert_eq!(
-    rest_url("100.64.0.2", 8000, "u@1", "p@ss/w#1?", "app").unwrap(),
-    "rest:http://u%401:p%40ss%2Fw%231%3F@100.64.0.2:8000/app"
+    rest_url("fd00::2", 8000, "app").unwrap(),
+    "rest:http://[fd00::2]:8000/app"
   );
 }
 

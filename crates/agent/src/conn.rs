@@ -113,6 +113,7 @@ async fn session(
     ssh_logins: true,
     gateway_extra_files: true,
     core_probe: true,
+    backup_isolation: true,
     access_logs: true,
     net_probe: true,
     container_probe: true,

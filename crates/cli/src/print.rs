@@ -616,7 +616,7 @@ pub fn core_backup(v: &serde_json::Value) {
   println!("控制面每天备份到 {to}");
   if !v["user_key_current"].as_bool().unwrap_or(false) {
     println!(
-      "登录密码改过了，恢复口令还是旧密码：wharf backup core --to {to} 重新输入一次"
+      "恢复口令尚未设置或登录密码已变更：wharf backup core --to {to} 重新输入一次"
     );
   }
   for r in v["records"].as_array().into_iter().flatten().take(5) {

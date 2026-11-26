@@ -982,56 +982,98 @@ pub fn gateway_compose(name: &str, spec: &GatewaySpec) -> String {
   to_yaml(&file)
 }
 
-/// 备份服务器上的 rest-server：只监听内网地址，要账号，只能追加
-/// （备份来源的机器被攻破也删不掉备份，清理旧快照在备份服务器本机做）。
-/// `htpasswd` 是 `用户名:bcrypt哈希`。
+/// 业务备份只能追加，清理旧快照在备份服务器本机做。
 pub fn backup_server_compose(
   listen_ip: &str,
   htpasswd: &str,
 ) -> String {
-  use wharf_api_types::agent::{
-    BACKUP_ROOT, REST_SERVER_IMAGE, REST_SERVER_PORT,
-  };
+  backup_compose(
+    BACKUP_PROJECT,
+    listen_ip,
+    htpasswd,
+    wharf_api_types::agent::REST_SERVER_PORT,
+    wharf_api_types::agent::BACKUP_ROOT,
+  )
+}
+
+pub fn core_backup_server_compose(
+  listen_ip: &str,
+  htpasswd: &str,
+) -> String {
+  backup_compose(
+    CORE_BACKUP_PROJECT,
+    listen_ip,
+    htpasswd,
+    wharf_api_types::agent::CORE_REST_SERVER_PORT,
+    wharf_api_types::agent::CORE_BACKUP_ROOT,
+  )
+}
+
+fn backup_compose(
+  project: &str,
+  listen_ip: &str,
+  htpasswd: &str,
+  port: u16,
+  root: &str,
+) -> String {
   let host = if listen_ip.contains(':') {
     format!("[{listen_ip}]")
   } else {
     listen_ip.to_string()
   };
-  let script = format!(
-    "printf '%s\\n' \"$$HTPASSWD\" > /tmp/htpasswd && exec rest-server --path /data --htpasswd-file /tmp/htpasswd --listen {host}:{REST_SERVER_PORT} --append-only"
-  );
-  let file = ComposeFile {
-    configs: BTreeMap::new(),
-    name: BACKUP_PROJECT.to_string(),
+  let target = "/etc/rest-server/htpasswd";
+  let source = format!("wharf-htpasswd-{}", &hash(htpasswd)[..12]);
+  let mut command = vec![
+    "--path".into(),
+    "/data".into(),
+    "--htpasswd-file".into(),
+    target.into(),
+    "--listen".into(),
+    format!("{host}:{port}"),
+  ];
+  let label = if project == BACKUP_PROJECT {
+    command
+      .extend(["--private-repos".into(), "--append-only".into()]);
+    "rest-server"
+  } else {
+    "rest-server-core"
+  };
+  to_yaml(&ComposeFile {
+    configs: BTreeMap::from([(
+      source.clone(),
+      ComposeConfigDef {
+        content: htpasswd.replace('$', "$$"),
+      },
+    )]),
+    name: project.to_string(),
     services: BTreeMap::from([(
       "rest-server".to_string(),
       ComposeService {
-        configs: vec![],
-        image: REST_SERVER_IMAGE.to_string(),
+        configs: vec![ComposeConfigRef {
+          source,
+          target: target.into(),
+        }],
+        image: wharf_api_types::agent::REST_SERVER_IMAGE.to_string(),
         restart: "unless-stopped",
         mem_limit: None,
         cpus: None,
         network_mode: Some("host"),
-        entrypoint: None,
-        command: Some(vec!["sh".into(), "-c".into(), script]),
-        environment: BTreeMap::from([(
-          "HTPASSWD".to_string(),
-          htpasswd.replace('$', "$$"),
-        )]),
+        entrypoint: Some(vec!["rest-server".into()]),
+        command: Some(command),
+        environment: BTreeMap::new(),
         ports: vec![],
-        volumes: vec![format!("{BACKUP_ROOT}:/data")],
+        volumes: vec![format!("{root}:/data")],
         labels: BTreeMap::from([(
           "wharf.backup".to_string(),
-          "rest-server".to_string(),
+          label.into(),
         )]),
       },
     )]),
-  };
-  to_yaml(&file)
+  })
 }
 
-/// 备份服务器上 rest-server 的 project 名。
 pub const BACKUP_PROJECT: &str = "wharf-backup";
+pub const CORE_BACKUP_PROJECT: &str = "wharf-backup-core";
 
 /// 路由的上游地址：同机用 127.0.0.1，能直连用服务所在机器的内网地址，否则走反向隧道。
 pub fn upstream(

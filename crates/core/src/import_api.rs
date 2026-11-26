@@ -27,7 +27,10 @@ use crate::{
 pub(crate) fn managed(world: &World, project: &str) -> bool {
   world.services.contains_key(project)
     || world.gateways.keys().any(|g| gateway_project(g) == project)
-    || project == render::BACKUP_PROJECT
+    || matches!(
+      project,
+      render::BACKUP_PROJECT | render::CORE_BACKUP_PROJECT
+    )
     || project == crate::tailscale::PROJECT
     || crate::link::is_link_project(project)
     || project

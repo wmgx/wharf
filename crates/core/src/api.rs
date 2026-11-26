@@ -358,6 +358,11 @@ pub fn router(state: Arc<AppState>) -> Router {
       "/api/services/{name}/files/download",
       get(crate::files_api::download),
     )
+    .route("/api/backups/migrate", post(crate::backup::migrate_all))
+    .route(
+      "/api/backups/cleanup-legacy",
+      post(crate::backup::cleanup_legacy),
+    )
     .route(
       "/api/services/{name}/backups",
       get(crate::backup::list).post(crate::backup::run_now),
