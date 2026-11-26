@@ -223,18 +223,38 @@ mod tests {
 
   #[test]
   fn fill_points_at_update_route() {
-    let config = fill(
-      "server_url [[WHARF_ACME_DNS_URL]]\npassword [[WHARF_ACME_DNS_KEY]]",
-      "k",
-      "https://core.example.com",
-    );
+    use crate::render::{AcmeDnsFill, Site, caddyfile_with_acme};
+
+    let spec = serde_json::from_value(json!({
+      "kind": "caddy", "server": "s1", "error_page": "unchanged"
+    }))
+    .unwrap();
+    let site = Site {
+      hostname: "*.example.com".into(),
+      wildcard: true,
+      dns: Some("example.com".into()),
+      ..Default::default()
+    };
+    let fill = Some(AcmeDnsFill {
+      key: "k",
+      url: "https://core.example.com",
+    });
+    let render = |sites: &[Site], fill| {
+      caddyfile_with_acme(
+        "edge",
+        &spec,
+        sites,
+        &[],
+        false,
+        None,
+        fill,
+      )
+    };
+    let config = render(&[site], fill);
     assert!(config.contains(
       "server_url https://core.example.com/agent/acme-dns"
     ));
     assert!(config.contains("password k"));
-    assert_eq!(
-      fill("unchanged", "k", "https://core.example.com"),
-      "unchanged"
-    );
+    assert_eq!(render(&[], fill), render(&[], None));
   }
 }
