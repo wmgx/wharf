@@ -500,7 +500,7 @@ mod tests {
     assert!(
       state
         .db
-        .call(crate::core_node::load_persisted)
+        .call(|c| crate::core_node::load_persisted(c))
         .await
         .unwrap()
         .is_none()
@@ -520,7 +520,7 @@ mod tests {
     let resp =
       upgrade_now(State(state.clone()), auth, Path("s1".to_string()))
         .await
-        .unwrap();
+        .unwrap_or_else(|e| panic!("upgrade_now 失败: {}", e.0));
     assert!(!resp.0.run_id.is_empty());
   }
 }

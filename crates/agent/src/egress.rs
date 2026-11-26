@@ -84,7 +84,7 @@ fn parse_core_url(core_url: &str) -> Option<CoreTarget> {
     return None;
   }
   let port = parsed.port_or_known_default()?;
-  let ip = bare.parse::<IpAddr>().ok().map(IpAddr::to_canonical);
+  let ip = bare.parse::<IpAddr>().ok().map(|ip| ip.to_canonical());
   Some(CoreTarget {
     host: bare,
     port,

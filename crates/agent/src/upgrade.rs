@@ -352,7 +352,7 @@ fn read_probe_direct(
   let fd = probe_dir
     .open_file(&id_name, libc::O_RDONLY | NOFOLLOW, 0)
     .map_err(|_| ApiError::not_found("控制面不在这台机器上"))?;
-  let mut f = std::fs::File::from(fd);
+  let f = std::fs::File::from(fd);
   let meta = f
     .metadata()
     .map_err(|_| ApiError::not_found("控制面不在这台机器上"))?;

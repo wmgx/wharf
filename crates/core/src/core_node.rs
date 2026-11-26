@@ -265,7 +265,7 @@ pub fn spawn_probe_on_connect(state: Arc<AppState>, server: String) {
   }
   tokio::spawn(async move {
     let persisted =
-      state.db.call(load_persisted).await.ok().flatten();
+      state.db.call(|c| load_persisted(c)).await.ok().flatten();
     if let Some(verified) = state.hub.verified_core()
       && verified.server != server
     {
@@ -288,7 +288,7 @@ pub fn spawn_probe_on_connect(state: Arc<AppState>, server: String) {
       Ok(None) => {
         if persisted.as_ref().is_some_and(|(s, _)| s == &server) {
           // 持久化节点验证未通过（如控制面已迁移）：清除旧绑定并探测其余在线节点。
-          let _ = state.db.call(clear_persisted).await;
+          let _ = state.db.call(|c| clear_persisted(c)).await;
           state.hub.clear_verified_core_if(&server);
           for other in state.hub.core_probe_servers() {
             if other == server {
@@ -321,7 +321,7 @@ pub async fn require_verified(
   cancel: &CancellationToken,
 ) -> Result<VerifiedCore, ApiError> {
   let snap = crate::snapshot::load(&state.db).await?;
-  let persisted = state.db.call(load_persisted).await?;
+  let persisted = state.db.call(|c| load_persisted(c)).await?;
   let cid = self_container_id();
   let mut saw_legacy = false;
   let mut tried_persisted: Option<String> = None;
@@ -449,7 +449,14 @@ mod tests {
           token: "wrong".into(),
         },
       ));
-      assert!(state.db.call(load_persisted).await.unwrap().is_none());
+      assert!(
+        state
+          .db
+          .call(|c| load_persisted(c))
+          .await
+          .unwrap()
+          .is_none()
+      );
 
       // 2. 读回真实随机文件内容，验证通过并持久化绑定到 s2。
       let actual = std::fs::read_to_string(&probe_path).unwrap();
