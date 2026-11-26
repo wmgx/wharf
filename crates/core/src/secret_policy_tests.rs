@@ -410,6 +410,35 @@ fn borrowing_other_service_secret_requires_admin() {
 }
 
 #[test]
+fn restricted_secret_rejects_server_mirrors() {
+  let restrictions =
+    [("APP_KEY".into(), ["app".into()].into())].into();
+  let mut world = World::default();
+  for settings in [
+    json!({"github_mirror": "https://git.example.test/[[url:APP_KEY]]"}),
+    json!({"registry_mirrors": {
+      "docker.io": ["https://registry.example.test/[[b64:APP_KEY]]"]
+    }}),
+  ] {
+    world.servers.insert(
+      "s1".into(),
+      ServerRow {
+        settings: serde_json::from_value(settings).unwrap(),
+        version: 1,
+      },
+    );
+    policy::validate_world(&world).unwrap();
+    let err = policy::validate_restrictions(&world, &restrictions)
+      .unwrap_err();
+    assert_eq!(err.code, ErrorCode::InvalidInput);
+    assert_eq!(
+      err.message,
+      "服务器 s1 的镜像源不能引用密钥 APP_KEY，仅允许服务 app 引用"
+    );
+  }
+}
+
+#[test]
 fn file_secret_is_rejected_in_non_service_contexts() {
   let mut world = World::default();
   let task: TaskKind = serde_json::from_value(json!({

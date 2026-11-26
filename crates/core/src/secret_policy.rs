@@ -5,7 +5,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use wharf_api_types::{
   ApiError, ErrorCode,
   plan::{Layer, Plan},
-  spec::{BuildSource, LoginSpec, RouteSpec, ServiceSpec, Source},
+  spec::{
+    BuildSource, LoginSpec, RouteSpec, ServerSettings, ServiceSpec,
+    Source,
+  },
   view::TaskKind,
 };
 
@@ -231,14 +234,7 @@ pub fn other_secret_refs<'a>(
   };
   let mut refs = Vec::new();
   for (server, row) in &world.servers {
-    if row
-      .settings
-      .registry_mirrors
-      .values()
-      .flatten()
-      .chain(&row.settings.github_mirror)
-      .any(|text| uses(text))
-    {
+    if mirror_templates(&row.settings).any(uses) {
       refs.push(format!("server:{server}"));
     }
   }
@@ -282,6 +278,17 @@ pub fn other_secret_refs<'a>(
   refs
 }
 
+fn mirror_templates(
+  settings: &ServerSettings,
+) -> impl Iterator<Item = &str> {
+  settings
+    .registry_mirrors
+    .values()
+    .flatten()
+    .chain(&settings.github_mirror)
+    .map(String::as_str)
+}
+
 pub fn validate_restrictions(
   world: &World,
   restrictions: &Restrictions,
@@ -316,6 +323,18 @@ pub fn validate_restrictions(
           name,
           allowed,
           &format!("边缘应用 {app}"),
+        ));
+      }
+    }
+    for (server, row) in &world.servers {
+      if mirror_templates(&row.settings)
+        .flat_map(|text| placeholders_checked(text, false, true))
+        .any(|p| matches!(p, Ok(p) if p.name == name))
+      {
+        return Err(restricted_error(
+          name,
+          allowed,
+          &format!("服务器 {server} 的镜像源"),
         ));
       }
     }
@@ -465,13 +484,7 @@ pub fn validate_world(world: &World) -> Result<(), ApiError> {
     }
   }
   for (name, server) in &world.servers {
-    let settings = &server.settings;
-    for text in settings
-      .registry_mirrors
-      .values()
-      .flatten()
-      .chain(&settings.github_mirror)
-    {
+    for text in mirror_templates(&server.settings) {
       reject_templates(text, &format!("服务器 {name} 的镜像源"))?;
     }
   }

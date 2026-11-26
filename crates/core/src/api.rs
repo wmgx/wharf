@@ -2611,12 +2611,24 @@ mod tests {
     db::Db::memory()
       .call_credentials(|c, key| {
         key.put_secret(c, "APP_KEY", "fixture-original", 1, true)?;
-        assert!(
-          store_generated_secret(c, key, "APP_KEY", 2).is_err()
-        );
+        key.rotate_secret(
+          c,
+          "APP_KEY",
+          "fixture-current",
+          2,
+          Some(100),
+          false,
+        )?;
+        let err =
+          store_generated_secret(c, key, "APP_KEY", 3).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidInput);
         assert_eq!(
           key.secret(c, "APP_KEY")?.as_deref(),
-          Some("fixture-original")
+          Some("fixture-current")
+        );
+        assert_eq!(
+          db::previous_secrets(c, key, 3)?["APP_KEY"],
+          "fixture-original"
         );
         Ok(())
       })
