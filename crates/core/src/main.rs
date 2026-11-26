@@ -51,6 +51,7 @@ mod favicon;
 mod files_api;
 mod gate;
 mod heal;
+mod host_access;
 mod host_dir;
 mod host_units;
 mod http_stats;

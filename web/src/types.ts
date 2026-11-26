@@ -417,6 +417,7 @@ export interface PlanItem {
   impacts?: Impact[];
   reason: string;
   changes?: Gen.FieldChange[];
+  host_access?: string[];
 }
 
 export interface Plan {
@@ -424,6 +425,7 @@ export interface Plan {
   expires_at: string;
   items: PlanItem[];
   warnings?: string[];
+  needs_admin?: string[];
   needs_confirm?: string[];
   suggest?: string[];
 }

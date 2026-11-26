@@ -324,6 +324,12 @@ impl World {
             }
           }
           let old = self.services.get(name);
+          crate::host_access::validate_adopt(
+            self,
+            name,
+            old,
+            adopt.as_ref(),
+          )?;
           let host_ports =
             old.map(|s| s.host_ports.clone()).unwrap_or_default();
           let version = old.map(|s| s.version).unwrap_or(0);
@@ -1024,6 +1030,11 @@ impl World {
                 "入口 {name} 的四层转发 {listen} 的上游 {up} 要写成 主机:端口"
               )));
             }
+            if crate::host_access::is_metadata_upstream(up) {
+              return Err(ApiError::invalid(format!(
+                "入口 {name} 的四层转发 {listen} 不能指向云元数据或链路本地地址 {up}"
+              )));
+            }
           }
           _ => {
             return Err(ApiError::invalid(format!(
@@ -1031,20 +1042,8 @@ impl World {
             )));
           }
         }
-        if [
-          0,
-          22,
-          80,
-          443,
-          crate::link::FRPS_PORT,
-          7700,
-          wharf_api_types::agent::PROBE_PORT,
-          wharf_api_types::agent::REST_SERVER_PORT,
-          wharf_api_types::egress::SERVE_PORT,
-          wharf_api_types::egress::LOCAL_PORT,
-        ]
-        .contains(&listen)
-          || (30000..=39999).contains(&listen)
+        if is_reserved_host_port(listen)
+          || matches!(listen, 80 | 443)
           || self.gateways.values().any(|g| {
             g.spec.kind == GatewayKind::Caddy
               && g.spec.server == *server
@@ -1646,6 +1645,21 @@ pub fn normalize_hostname(
     .map_err(|e| ApiError::invalid(e.message))
 }
 
+pub(crate) fn is_reserved_host_port(port: u16) -> bool {
+  [
+    0,
+    22,
+    crate::link::FRPS_PORT,
+    7700,
+    wharf_api_types::agent::PROBE_PORT,
+    wharf_api_types::agent::REST_SERVER_PORT,
+    wharf_api_types::egress::SERVE_PORT,
+    wharf_api_types::egress::LOCAL_PORT,
+  ]
+  .contains(&port)
+    || (30000..=39999).contains(&port)
+}
+
 fn validate_service(
   world: &World,
   name: &str,
@@ -1718,6 +1732,7 @@ fn validate_service(
       }
     }
   }
+  crate::host_access::validate_service_ports(world, name, spec)?;
   let mut port_names = BTreeSet::new();
   for port in &spec.ports {
     validate_name("端口", &port.name)?;
@@ -2311,6 +2326,87 @@ mod tests {
       env: Default::default(),
       volumes: vec![],
     }
+  }
+
+  #[test]
+  fn compose_ports_must_match_published_and_reject_reserved() {
+    use wharf_api_types::ErrorCode;
+    let mut w = sample();
+    w.apply_changes(&[Change::UpsertService {
+      name: "app".into(),
+      spec: image_service("node1"),
+      adopt: None,
+    }])
+    .unwrap();
+    let set_ports = |w: &mut World, host, udp, source| {
+      let spec = &mut w.services.get_mut("app").unwrap().spec;
+      spec.ports[0].host = Some(host);
+      spec.ports[0].container =
+        matches!(source, Source::Image(_)).then_some(80);
+      spec.ports[0].udp = udp;
+      spec.source = source;
+    };
+    let compose = |content: &str| Source::Compose {
+      content: Some(content.into()),
+      file: None,
+    };
+    for (host, message) in
+      [(7700, "保留端口"), (18080, "没有在 compose")]
+    {
+      set_ports(
+        &mut w,
+        host,
+        false,
+        compose("services: {app: {image: nginx}}"),
+      );
+      let err = w.validate().unwrap_err();
+      assert_eq!(err.code, ErrorCode::InvalidInput);
+      assert!(err.message.contains(message));
+    }
+    set_ports(&mut w, 8119, false, Source::Image("nginx".into()));
+    assert_eq!(
+      w.validate().unwrap_err().code,
+      ErrorCode::InvalidInput
+    );
+    let local =
+      "services: {app: {image: nginx, ports: ['127.0.0.1:8080:80']}}";
+    set_ports(&mut w, 8080, false, compose(local));
+    assert!(w.validate().is_ok());
+    set_ports(&mut w, 8080, true, compose(local));
+    assert_eq!(
+      w.validate().unwrap_err().code,
+      ErrorCode::InvalidInput
+    );
+    let public = local.replace("127.0.0.1", "0.0.0.0");
+    let binds = crate::host_access::compose_public_binds(&public);
+    assert_eq!(binds.len(), 1);
+    assert_eq!(binds[0].host_port, 8080);
+    let ranges = r#"
+x-ports: &ports
+  ports:
+    - '[::1]:8080-8082:80-82/udp'
+    - {host_ip: '0.0.0.0', published: 8083, target: 83}
+services:
+  app:
+    <<: *ports
+    image: nginx
+"#;
+    set_ports(&mut w, 8082, true, compose(ranges));
+    assert!(w.validate().is_ok());
+    assert_eq!(
+      crate::host_access::compose_public_binds(ranges).len(),
+      1
+    );
+    set_ports(
+      &mut w,
+      8082,
+      true,
+      compose(&ranges.replace("[::1]", "[invalid]")),
+    );
+    assert_eq!(
+      w.validate().unwrap_err().code,
+      ErrorCode::InvalidInput
+    );
   }
 
   #[test]

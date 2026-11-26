@@ -306,6 +306,7 @@ impl Builder {
       impacts,
       reason: reason.into(),
       changes,
+      host_access: vec![],
     });
     id
   }
@@ -722,6 +723,12 @@ fn finish_plan(
       }
     }
   }
+  let needs_admin = crate::host_access::mark_plan(
+    &snap.world,
+    desired,
+    &mut b.items,
+    &b.steps,
+  );
   let plan_id = new_id("p");
   let mut needs_confirm: Vec<String> = b
     .items
@@ -754,6 +761,7 @@ fn finish_plan(
     )),
     items: b.items,
     warnings: b.warnings,
+    needs_admin,
     needs_confirm,
     suggest,
     note: note
@@ -1339,7 +1347,14 @@ fn service_items(
       }
       d => d,
     };
-    if let Some((action, risk, reason, before)) = decision {
+    if let Some((action, mut risk, reason, before)) = decision {
+      if !risk.contains(&Impact::Public)
+        && crate::host_access::has_new_public_bind(
+          current, name, &svc.spec,
+        )
+      {
+        risk.push(Impact::Public);
+      }
       let reason = if matches!(svc.spec.source, Source::Build(_)) {
         format!("{reason}（镜像不在 {server} 上时先构建）")
       } else {
@@ -2104,12 +2119,11 @@ fn gateway_items(
     if let Some((action, mut risk, reason)) = decision {
       if gw.spec.kind == GatewayKind::Caddy {
         for f in &gw.spec.layer4 {
-          if current.gateways.get(name).is_some_and(|g| {
-            g.spec
-              .layer4
-              .iter()
-              .any(|old| old.udp == f.udp && old.listen == f.listen)
-          }) {
+          if current
+            .gateways
+            .get(name)
+            .is_some_and(|g| g.spec.layer4.contains(f))
+          {
             continue;
           }
           if !risk.contains(&Impact::Public) {
@@ -2530,6 +2544,7 @@ pub async fn save(
   let mut body =
     serde_json::to_value(&planned.plan).map_err(db::json_err)?;
   body["account_refs"] = json!(&planned.account_refs);
+  body["host_access_checked"] = json!(true);
   if !planned.route_effects.is_empty() {
     body["route_effects"] = json!(&planned.route_effects);
   }

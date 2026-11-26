@@ -81,7 +81,10 @@ pub async fn exec(
   AxumPath(name): AxumPath<String>,
   Json(req): Json<ExecRequest>,
 ) -> ApiResult<HostExecResponse> {
-  auth.require(Perm::Exec)?;
+  crate::host_access::require(
+    &auth,
+    crate::host_access::HostTarget::HostExec { server: &name },
+  )?;
   let job = req.job()?;
   Ok(Json(run_host(state, &auth.name, name, job).await?))
 }

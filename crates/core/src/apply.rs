@@ -218,6 +218,8 @@ struct StoredPlanBody {
   account_refs: Option<BTreeSet<String>>,
   #[serde(default)]
   route_effects: crate::token_scope::RouteEffects,
+  #[serde(default)]
+  host_access_checked: bool,
 }
 
 struct StoredPlan {
@@ -306,14 +308,9 @@ pub async fn start(
       .suggest(replan),
     );
   }
-  if !perms.contains(&Perm::Admin) && changes_host_access(plan) {
-    return Err(
-      ApiError::new(
-        ErrorCode::Forbidden,
-        "宿主机终端和命令执行开关要 admin 权限才能修改",
-      )
-      .with_hint("请用户在页面上执行，或用有 admin 权限的 token"),
-    );
+  crate::host_access::require_plan_admin(plan, &stored.steps, perms)?;
+  if !stored.body.host_access_checked {
+    crate::host_access::require_legacy_replan(plan, &stored.steps)?;
   }
   if !perms.contains(&Perm::Admin)
     && plan.items.iter().any(|item| {
@@ -509,22 +506,6 @@ pub async fn start(
   }
   crate::service_monitor::sync_watches(&state, None).await;
   Ok(ApplyResponse { run_id })
-}
-
-fn changes_host_access(plan: &Plan) -> bool {
-  fn flags(value: Option<&serde_json::Value>) -> (bool, bool) {
-    let get = |name| {
-      value
-        .and_then(|v| v.get(name))
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
-    };
-    (get("host_terminal"), get("host_exec"))
-  }
-  plan.items.iter().any(|item| {
-    item.address.starts_with("server/")
-      && flags(item.before.as_ref()) != flags(item.after.as_ref())
-  })
 }
 
 /// 不来自计划的执行（备份、恢复）：同样占用 apply 锁、有执行记录、可以取消。
@@ -1808,12 +1789,23 @@ mod tests {
         impacts: vec![],
         reason: "修改配置".into(),
         changes: vec![],
+        host_access: vec![],
       }],
       warnings: vec![],
+      needs_admin: vec![],
       needs_confirm: vec![],
       suggest: vec![],
       note: None,
     };
-    assert!(changes_host_access(&plan));
+    assert_eq!(
+      crate::host_access::require_plan_admin(
+        &plan,
+        &[],
+        &Default::default()
+      )
+      .unwrap_err()
+      .code,
+      ErrorCode::Forbidden
+    );
   }
 }

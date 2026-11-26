@@ -19,8 +19,8 @@ const PERMS: [Perm, string, string][] = [
   ["plan", "预览改动", "预览改动、探测网络"],
   ["apply", "执行改动", "执行不含高风险项的计划、上传代码、触发备份"],
   ["confirm", "确认高风险", "删数据、覆盖、公开到外网、从备份恢复"],
-  ["exec", "宿主机", "在宿主机执行命令、打开终端、改服务文件"],
-  ["admin", "管理", "服务器、账号、密钥、访问令牌，升级 Wharf"],
+  ["exec", "容器执行", "容器终端、端口转发、改服务文件、容器/脚本任务"],
+  ["admin", "管理", "服务器、账号、密钥、访问令牌、升级，以及所有触达宿主机的操作"],
 ];
 const PERM_LABEL = Object.fromEntries(PERMS.map(([p, l]) => [p, l])) as Record<Perm, string>;
 
