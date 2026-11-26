@@ -47,8 +47,13 @@ pub async fn doctor(
   Query(q): Query<DoctorQuery>,
 ) -> ApiResult<DoctorReport> {
   auth.require(Perm::Read)?;
+  if auth.services.is_some() {
+    let report =
+      run(&s, q.host.as_deref(), true, Some(&auth)).await?;
+    return Ok(Json(report));
+  }
   let (report, vendors) = tokio::try_join!(
-    run(&s, q.host.as_deref(), true),
+    run(&s, q.host.as_deref(), true, None),
     crate::vendor_checks::checks(&s)
   )?;
   let report = DoctorReport { vendors, ..report };
@@ -82,7 +87,7 @@ pub fn spawn(state: Arc<AppState>) {
   tokio::spawn(async move {
     tokio::time::sleep(FIRST_TICK).await;
     loop {
-      match run(&state, None, false).await {
+      match run(&state, None, false, None).await {
         Ok(report) => {
           crate::probe::observe(&state, &report).await;
           remember(report)
@@ -99,8 +104,17 @@ pub async fn run(
   s: &AppState,
   host: Option<&str>,
   manual: bool,
+  scoped: Option<&Auth>,
 ) -> Result<DoctorReport, wharf_api_types::ApiError> {
   let snap = snapshot::load(&s.db).await?;
+  let allowed = scoped.and_then(|auth| auth.services.as_ref());
+  if let (Some(host), Some(auth)) = (host, scoped) {
+    crate::token_scope::require_route_by_host(
+      auth,
+      &snap.world,
+      host,
+    )?;
+  }
   if let Some(host) = host
     && !snap.world.routes.contains_key(host)
   {
@@ -124,7 +138,6 @@ pub async fn run(
     );
   }
   let net = snap.net(&snap.world);
-  let live = live_states(s, &snap.world).await;
   let client = reqwest::Client::builder()
     .redirect(reqwest::redirect::Policy::none())
     .timeout(HTTP_TIMEOUT)
@@ -138,9 +151,32 @@ pub async fn run(
     .routes
     .keys()
     .filter(|h| {
-      host.is_none_or(|q| q == h.as_str()) && !expired.contains(h)
+      host.is_none_or(|q| q == h.as_str())
+        && !expired.contains(h)
+        && allowed.is_none_or(|allowed| {
+          crate::token_scope::route_spec_in_scope(
+            allowed,
+            &snap.world.routes[*h].spec,
+          )
+        })
     })
     .collect();
+  let live = if let Some(allowed) = allowed {
+    let mut world = snap.world.clone();
+    world.services.retain(|name, _| allowed.contains(name));
+    let gateways: std::collections::BTreeSet<_> = hosts
+      .iter()
+      .flat_map(|host| {
+        snap.world.route_gateways(&snap.world.routes[*host].spec)
+      })
+      .collect();
+    world
+      .gateways
+      .retain(|name, _| gateways.contains(name.as_str()));
+    live_states(s, &world).await
+  } else {
+    live_states(s, &snap.world).await
+  };
   let mut routes: Vec<_> = futures_util::future::join_all(
     hosts
       .into_iter()
@@ -153,9 +189,13 @@ pub async fn run(
   if manual {
     doctor_diagnose::enrich(s, &mut routes).await;
   }
-  Ok(DoctorReport {
+  let mut report = DoctorReport {
     checked_at: Utc::now(),
-    servers: servers(s, &snap),
+    servers: if scoped.is_some() {
+      vec![]
+    } else {
+      servers(s, &snap)
+    },
     routes: routes.into_iter().map(|(route, _)| route).collect(),
     vendors: vec![],
     config: crate::lint::doctor_warnings(&snap)
@@ -166,7 +206,15 @@ pub async fn run(
         check("config", subject, CheckStatus::Warn, detail)
       })
       .collect(),
-  })
+  };
+  if let Some(allowed) = allowed {
+    crate::scope_filter::filter_doctor(
+      allowed,
+      &snap.world,
+      &mut report,
+    );
+  }
+  Ok(report)
 }
 
 pub(crate) fn check(

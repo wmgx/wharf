@@ -63,6 +63,13 @@ pub enum HostTarget<'a> {
   HostApt {
     server: &'a str,
   },
+  ImportPreview {
+    server: &'a str,
+    target: &'a str,
+  },
+  HostUnits {
+    server: &'a str,
+  },
   RemoveUnmanaged {
     server: &'a str,
     target: &'a str,
@@ -83,6 +90,14 @@ pub fn assess(target: HostTarget<'_>) -> HostAccess {
     }
     HostTarget::HostApt { server } => {
       vec![format!("在服务器 {server} 上操作宿主机 apt 更新")]
+    }
+    HostTarget::ImportPreview { server, target } => {
+      vec![format!("读取服务器 {server} 上的容器配置 {target}")]
+    }
+    HostTarget::HostUnits { server } => {
+      vec![format!(
+        "查看或管理服务器 {server} 上的宿主机 systemd 程序"
+      )]
     }
     HostTarget::RemoveUnmanaged { server, target } => {
       vec![format!("删除服务器 {server} 上的未纳管容器 {target}")]

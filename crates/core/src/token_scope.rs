@@ -109,26 +109,54 @@ pub fn check_service_scope(
   method: &Method,
   path: &str,
 ) -> bool {
+  if services.is_empty() {
+    return false;
+  }
   let path: Vec<_> = path.split('/').collect();
   match *method {
     Method::GET | Method::HEAD => match path.as_slice() {
-      ["", "api", "services", name, "terminal" | "connect"]
-      | ["", "api", "services", name, "files", "download"] => {
+      ["", "api", "whoami" | "version"]
+      | ["", "api", "uploads", _] => true,
+      ["", "api", "services", name, ..] => {
         contains_service(services, name)
       }
-      ["", "api", "servers", _, "terminal"]
-      | ["", "api", "gateways" | "routes", _, "access-logs"] => false,
-      _ => true,
+      [
+        "",
+        "api",
+        "status" | "services" | "routes" | "data" | "alerts"
+        | "doctor" | "report" | "export" | "runs" | "secrets"
+        | "tasks",
+      ]
+      | ["", "api", "logs", "services"]
+      | ["", "api", "metrics"]
+      | ["", "api", "routes", _, "cert" | "dns-check"]
+      | ["", "api", "tasks", _]
+      | ["", "api", "tasks", _, "runs"]
+      | ["", "api", "plans" | "runs", _] => true,
+      _ => false,
     },
     _ => match path.as_slice() {
       ["", "api", "services", name, ..] => {
         contains_service(services, name)
       }
-      ["", "api", "plan" | "apply"]
+      ["", "api", "alerts", _, "services", name] => {
+        *method == Method::PUT && contains_service(services, name)
+      }
+      ["", "api", "alerts", "ack" | "unack" | "custom"] => {
+        *method == Method::POST
+      }
+      ["", "api", "alerts", "custom", _] => *method == Method::DELETE,
+      ["", "api", "alerts", id] if *id != "options" => {
+        *method == Method::PUT
+      }
+      ["", "api", "routes", _, "cert", "retry"]
+      | ["", "api", "routes", _, "sso", "test"]
+      | ["", "api", "plan" | "apply"]
       | ["", "api", "runs", _, "cancel"]
       | ["", "api", "convert", "docker-run"] => {
         *method == Method::POST
       }
+      ["", "api", "routes", _, "note"] => *method == Method::PUT,
       ["", "api", "uploads", _] => {
         matches!(*method, Method::PUT | Method::POST)
       }
@@ -142,13 +170,64 @@ pub fn forbidden(
   services: &BTreeSet<String>,
   extra: &str,
 ) -> ApiError {
-  let names = services
-    .iter()
-    .map(String::as_str)
-    .collect::<Vec<_>>()
-    .join("、");
-  ApiError::new(ErrorCode::Forbidden, format!("访问令牌 {name} 只能操作这些服务：{names}{extra}"))
+  let message = if services.is_empty() {
+    format!(
+      "访问令牌 {name} 的服务范围为空，不能执行任何服务操作{extra}"
+    )
+  } else {
+    let names = services
+      .iter()
+      .map(String::as_str)
+      .collect::<Vec<_>>()
+      .join("、");
+    format!("访问令牌 {name} 只能操作这些服务：{names}{extra}")
+  };
+  ApiError::new(ErrorCode::Forbidden, message)
     .with_hint("这个操作不属于名单里的服务；换一个不限服务的令牌，或在页面上操作")
+}
+
+pub fn require_service(
+  auth: &Auth,
+  service: &str,
+) -> Result<(), ApiError> {
+  if let Some(services) = &auth.services
+    && !services.contains(service)
+  {
+    return Err(forbidden(&auth.name, services, ""));
+  }
+  Ok(())
+}
+
+pub fn require_route_by_host(
+  auth: &Auth,
+  world: &World,
+  host: &str,
+) -> Result<(), ApiError> {
+  if let Some(services) = &auth.services
+    && !world
+      .routes
+      .get(host)
+      .is_some_and(|route| route_spec_in_scope(services, &route.spec))
+  {
+    return Err(forbidden(&auth.name, services, ""));
+  }
+  Ok(())
+}
+
+pub fn route_spec_in_scope(
+  services: &BTreeSet<String>,
+  route: &RouteSpec,
+) -> bool {
+  route.upstream.is_none()
+    && route.redirect.is_none()
+    && services.contains(&route.service)
+    && route.paths.iter().all(|path| {
+      path.upstream.is_none()
+        && path
+          .service
+          .as_ref()
+          .is_some_and(|name| services.contains(name))
+    })
 }
 
 fn route_in_scope(
@@ -162,16 +241,7 @@ fn route_in_scope(
       serde_json::from_value::<RouteSpec>(value.clone()).is_ok_and(
         |route| {
           route.hostname == host
-            && route.upstream.is_none()
-            && route.redirect.is_none()
-            && services.contains(&route.service)
-            && route.paths.iter().all(|path| {
-              path.upstream.is_none()
-                && path
-                  .service
-                  .as_ref()
-                  .is_some_and(|name| services.contains(name))
-            })
+            && route_spec_in_scope(services, &route)
         },
       )
     })
@@ -358,6 +428,97 @@ pub fn require_plan(
 mod tests {
   use super::*;
   use serde_json::json;
+
+  #[test]
+  fn scoped_token_get_rejects_other_services_and_cluster_endpoints() {
+    let scope = BTreeSet::from(["blog".into()]);
+    for path in [
+      "/api/services/other/logs",
+      "/api/services/other/files",
+      "/api/core/logs",
+      "/api/gateways/edge/config",
+      "/api/servers/s1/agent-logs",
+      "/api/audit",
+      "/api/shell-log",
+    ] {
+      assert!(
+        !check_service_scope(&scope, &Method::GET, path),
+        "{path}"
+      );
+    }
+  }
+
+  #[test]
+  fn empty_perms_and_empty_scope_fail_closed() {
+    let mut settings = wharf_api_types::view::TokenSettings {
+      perms: vec![],
+      expires_at: None,
+      allowed_from: vec![],
+      services: vec![],
+    };
+    assert_eq!(
+      settings.normalize().unwrap_err().code,
+      ErrorCode::InvalidInput
+    );
+    for path in ["/api/services/blog", "/api/whoami"] {
+      assert!(!check_service_scope(
+        &BTreeSet::new(),
+        &Method::GET,
+        path
+      ));
+    }
+  }
+
+  #[test]
+  fn scoped_token_rejects_other_service_alerts_and_foreign_routes() {
+    let scope = BTreeSet::from(["blog".into()]);
+    for path in
+      ["/api/alerts/http_5xx/services/other", "/api/alerts/options"]
+    {
+      assert!(!check_service_scope(&scope, &Method::PUT, path));
+    }
+    crate::scope_filter::tests::rejects_foreign_alerts_and_routes();
+  }
+
+  #[test]
+  fn scoped_token_allows_own_service_and_route_reads() {
+    let scope = BTreeSet::from(["blog".into()]);
+    for path in [
+      "/api/status",
+      "/api/services/blog",
+      "/api/services/blog/logs",
+      "/api/services/blog/files/download",
+      "/api/routes/blog.example.com/cert",
+      "/api/routes/blog.example.com/dns-check",
+      "/api/metrics",
+      "/api/alerts",
+      "/api/export",
+      "/api/whoami",
+    ] {
+      assert!(
+        check_service_scope(&scope, &Method::GET, path),
+        "{path}"
+      );
+    }
+    crate::scope_filter::tests::allows_own_route();
+  }
+
+  #[test]
+  fn scoped_token_allows_own_service_alerts_and_route_writes() {
+    let scope = BTreeSet::from(["blog".into()]);
+    for (method, path) in [
+      (Method::PUT, "/api/alerts/http_5xx/services/blog"),
+      (Method::POST, "/api/alerts/ack"),
+      (Method::POST, "/api/alerts/unack"),
+      (Method::POST, "/api/alerts/custom"),
+      (Method::DELETE, "/api/alerts/custom/slow"),
+      (Method::POST, "/api/routes/blog.example.com/cert/retry"),
+      (Method::PUT, "/api/routes/blog.example.com/note"),
+    ] {
+      assert!(check_service_scope(&scope, &method, path), "{path}");
+    }
+    crate::scope_filter::tests::allows_own_alerts();
+  }
 
   #[test]
   fn service_probe_respects_service_scope() {

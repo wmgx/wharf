@@ -229,6 +229,11 @@ pub async fn status(
   auth.require(Perm::Read)?;
   let host = hostname.trim().to_ascii_lowercase();
   let snap = snapshot::load(&s.db).await?;
+  crate::token_scope::require_route_by_host(
+    &auth,
+    &snap.world,
+    &host,
+  )?;
   let (gateway, server, wildcard) = gateway_of(&snap, &host)?;
   let logs: String = s
     .hub
@@ -272,6 +277,11 @@ pub async fn retry(
   auth.require(Perm::Apply)?;
   let host = hostname.trim().to_ascii_lowercase();
   let snap = snapshot::load(&s.db).await?;
+  crate::token_scope::require_route_by_host(
+    &auth,
+    &snap.world,
+    &host,
+  )?;
   let (gateway, server, _) = gateway_of(&snap, &host)?;
   {
     let mut last = LAST_RETRY.lock().unwrap();

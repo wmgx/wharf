@@ -496,7 +496,7 @@ pub(crate) fn route_view_with_upstream_error(
   ))
 }
 
-fn problems_text(issues: &[Issue]) -> Vec<String> {
+pub(crate) fn problems_text(issues: &[Issue]) -> Vec<String> {
   issues
     .iter()
     .filter(|i| i.level != IssueLevel::Info)
@@ -508,6 +508,7 @@ fn problems_text(issues: &[Issue]) -> Vec<String> {
 
 pub async fn status(
   state: &AppState,
+  allowed: Option<&std::collections::BTreeSet<String>>,
 ) -> Result<Status, wharf_api_types::ApiError> {
   crate::rules::ensure_loaded(state).await;
   let snap = snapshot::load(&state.db).await?;
@@ -830,7 +831,7 @@ pub async fn status(
       .cmp(&b.spec.order)
       .then_with(|| a.spec.title.cmp(&b.spec.title))
   });
-  Ok(Status {
+  let mut status = Status {
     bookmarks,
     servers,
     services,
@@ -842,7 +843,15 @@ pub async fn status(
     issues,
     health: crate::doctor::last(),
     updates,
-  })
+  };
+  if let Some(allowed) = allowed {
+    crate::scope_filter::filter_status(
+      allowed,
+      &snap.world,
+      &mut status,
+    );
+  }
+  Ok(status)
 }
 
 pub fn edge_view(snap: &Snapshot, name: &str) -> Option<EdgeAppView> {

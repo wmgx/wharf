@@ -422,3 +422,21 @@ fn update_server_requires_admin() {
   );
   assert_admin(&marked, &[], "修改服务器宿主机设置");
 }
+
+#[test]
+fn host_units_require_admin_and_redact_exec_start() {
+  let auth = auth([Perm::Read, Perm::Apply], false);
+  assert_eq!(
+    require(&auth, HostTarget::HostUnits { server: "s1" })
+      .unwrap_err()
+      .0
+      .code,
+    ErrorCode::Forbidden
+  );
+  assert_eq!(
+    crate::redact::redact_command(
+      "cloudflared tunnel run --token eyJhbGci --url https://u:p@a.com"
+    ),
+    "cloudflared tunnel run --token *** --url https://***:***@a.com",
+  );
+}

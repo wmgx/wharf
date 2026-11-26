@@ -58,6 +58,22 @@ pub async fn show(
   Query(q): Query<ReportQuery>,
 ) -> ApiResult<ReportView> {
   auth.require(Perm::Read)?;
+  if let Some(allowed) = &auth.services {
+    if q.server.is_some() {
+      return Err(
+        crate::token_scope::forbidden(
+          &auth.name,
+          allowed,
+          "；不能按服务器查报告",
+        )
+        .into(),
+      );
+    }
+    if let Some(service) = &q.service {
+      crate::token_scope::require_service(&auth, service)?;
+    }
+  }
+  let allowed = auth.services;
   let days = q.days.unwrap_or(7);
   if days != 1 && days != 7 {
     return Err(
@@ -82,6 +98,7 @@ pub async fn show(
         server_filter.as_deref(),
         service_filter.as_deref(),
         MAX_SCAN_POINTS,
+        allowed.as_ref(),
       )
     })
     .await?;
@@ -241,6 +258,7 @@ fn alert_matches_filter(
   true
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compute_at(
   c: &Connection,
   world: &World,
@@ -249,6 +267,7 @@ fn compute_at(
   server_filter: Option<&str>,
   service_filter: Option<&str>,
   max_points: usize,
+  allowed_services: Option<&BTreeSet<String>>,
 ) -> Result<ReportView, ApiError> {
   if let Some(srv) = server_filter
     && !world.servers.contains_key(srv)
@@ -270,12 +289,12 @@ fn compute_at(
   }
 
   let selected_servers: Vec<String> =
-    match (server_filter, service_filter) {
-      (Some(srv), _) => vec![srv.to_string()],
-      (None, Some(_)) => vec![],
-      (None, None) => world.servers.keys().cloned().collect(),
+    match (server_filter, service_filter, allowed_services) {
+      (Some(srv), _, None) => vec![srv.to_string()],
+      (None, None, None) => world.servers.keys().cloned().collect(),
+      _ => vec![],
     };
-  let selected_services: Vec<(String, String, Option<u64>)> =
+  let mut selected_services: Vec<(String, String, Option<u64>)> =
     if let Some(svc) = service_filter {
       let row = &world.services[svc];
       vec![(
@@ -296,6 +315,9 @@ fn compute_at(
         .collect()
     };
 
+  if let Some(allowed) = allowed_services {
+    selected_services.retain(|(name, _, _)| allowed.contains(name));
+  }
   let span = i64::from(days) * DAY_MS;
   let period_end = now;
   let period_start = now - span;
@@ -473,7 +495,9 @@ fn compute_at(
     BTreeMap::new();
   let mut alert_stmt = c
     .prepare_cached(
-      "SELECT at, source, subject FROM alert_history
+      "SELECT at, source, subject,
+              (SELECT service FROM alert_custom_rules WHERE name = alert_history.source AND service = alert_history.subject)
+       FROM alert_history
        WHERE at >= ?1 AND at < ?2 AND ok = 0 AND source != 'daily_digest'",
     )
     .map_err(sql_err)?;
@@ -483,17 +507,30 @@ fn compute_at(
         r.get::<_, i64>(0)?,
         r.get::<_, String>(1)?,
         r.get::<_, Option<String>>(2)?,
+        r.get::<_, Option<String>>(3)?,
       ))
     })
     .map_err(sql_err)?;
   for row in alert_rows {
-    let (at, source, subject) = row.map_err(sql_err)?;
-    if !alert_matches_filter(
-      subject.as_deref(),
-      server_filter,
-      service_filter,
-      &server_services,
-    ) {
+    let (at, source, subject, custom_service) =
+      row.map_err(sql_err)?;
+    let matches = if allowed_services.is_some() {
+      crate::scope_filter::alert_in_scope(
+        &server_services,
+        world,
+        custom_service.as_deref(),
+        &source,
+        subject.as_deref(),
+      )
+    } else {
+      alert_matches_filter(
+        subject.as_deref(),
+        server_filter,
+        service_filter,
+        &server_services,
+      )
+    };
+    if !matches {
       continue;
     }
     update_bounds(&mut earliest_at, &mut latest_at, at);

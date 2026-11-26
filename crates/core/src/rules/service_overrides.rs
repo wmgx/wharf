@@ -15,7 +15,7 @@ use wharf_api_types::{
 use super::{
   KEEP, NOTICES, Override, RULES,
   custom::{CustomRule, level_str, parse_level, service_exists},
-  ensure_loaded, set_firing, split_unit, suppress, view, with,
+  ensure_loaded, set_firing, split_unit, suppress, with,
 };
 use crate::{
   api::ApiResult,
@@ -37,12 +37,12 @@ pub(super) const SERVICE_RULES: &[&str] = &[
   "mem_forecast",
 ];
 
-pub(super) fn is_service_rule(id: &str) -> bool {
+pub(crate) fn is_service_rule(id: &str) -> bool {
   SERVICE_RULES.contains(&id)
 }
 
 /// 从一条内置规则的 subject 提取对应的服务名；非服务对象返回 `None`。
-pub(super) fn service_of_subject<'a>(
+pub(crate) fn service_of_subject<'a>(
   rule_id: &str,
   subject: &'a str,
 ) -> Option<&'a str> {
@@ -293,7 +293,8 @@ pub async fn patch_service(
   Path((id, service)): Path<(String, String)>,
   Json(p): Json<AlertPatch>,
 ) -> ApiResult<AlertsView> {
-  auth.require(Perm::Admin)?;
+  auth.require(Perm::Apply)?;
+  crate::token_scope::require_service(&auth, &service)?;
   set_override(&s, &id, &service, p, now_ms()).await?;
-  Ok(Json(view(&s).await?))
+  Ok(Json(super::api::view_for(&s, &auth).await?))
 }

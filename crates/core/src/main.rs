@@ -85,12 +85,14 @@ mod probe;
 mod prune;
 mod quality;
 mod rdap;
+mod redact;
 mod refs;
 mod render;
 mod report;
 mod resource_top;
 mod rollback;
 mod rules;
+mod scope_filter;
 mod secret_policy;
 #[cfg(test)]
 mod secret_policy_tests;

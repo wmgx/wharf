@@ -654,7 +654,7 @@ fn validate(
   Ok(())
 }
 
-fn need_perm(
+pub(crate) fn need_perm(
   auth: &Auth,
   spec: &TaskSpec,
 ) -> Result<(), crate::api::AppError> {
@@ -696,70 +696,36 @@ pub async fn list(
   auth: Auth,
 ) -> ApiResult<Vec<TaskView>> {
   auth.require(Perm::Read)?;
-  let tasks = load(&s).await?;
-  let base = crate::join::default_url(&s).await;
-  let mut out = Vec::new();
-  let now = Utc::now();
-  for (name, spec, updated) in tasks {
-    let n = name.clone();
-    let last = s
-      .db
-      .call(move |c| {
-        c.query_row(
-          &format!("SELECT {RUN_COLS} FROM task_runs WHERE task = ?1 ORDER BY id DESC LIMIT 1"),
-          params![n],
-          run_view,
-        )
-        .optional()
-        .map_err(sql_err)
-      })
-      .await?;
-    let next_at = spec
-      .enabled
-      .then(|| Cron::parse(&spec.schedule).ok()?.next_after(now))
-      .flatten();
-    let ping_url = match (&spec.how, &base) {
-      (TaskKind::Ping { token, .. }, Some(b)) => {
-        Some(format!("{}/ping/{token}", b.trim_end_matches('/')))
-      }
-      _ => None,
-    };
-    let hook_url = match (&spec.how, &base) {
-      (
-        TaskKind::Script {
-          hook: Some(token), ..
-        },
-        Some(b),
-      ) => Some(format!("{}/hook/{token}", b.trim_end_matches('/'))),
-      _ => None,
-    };
-    out.push(TaskView {
-      data_bytes: None,
-      name,
-      spec,
-      last,
-      next_at,
-      ping_url,
-      hook_url,
-      updated_at: to_time(updated),
-    });
-  }
-  Ok(Json(out))
+  Ok(Json(build_views(&s, &auth, None, false).await?))
 }
+
+#[derive(Default, Deserialize)]
+pub struct TaskQuery {
+  #[serde(default)]
+  reveal: bool,
+}
+
+#[path = "tasks/read.rs"]
+mod read;
+use read::build_views;
 
 /// 单任务详情才测持久目录，失败不影响读取配置。
 pub async fn get(
   State(s): State<Arc<AppState>>,
   auth: Auth,
   Path(name): Path<String>,
+  Query(q): Query<TaskQuery>,
 ) -> ApiResult<TaskView> {
-  let mut task = list(State(s.clone()), auth)
+  auth.require(Perm::Read)?;
+  let mut task = build_views(&s, &auth, Some(&name), q.reveal)
     .await?
-    .0
-    .into_iter()
-    .find(|t| t.name == name)
+    .pop()
     .ok_or_else(|| {
-      ApiError::not_found(format!("没有定时任务 {name}"))
+      if let Some(allowed) = &auth.services {
+        crate::token_scope::forbidden(&auth.name, allowed, "")
+      } else {
+        ApiError::not_found(format!("没有定时任务 {name}"))
+      }
     })?;
   if matches!(task.spec.how, TaskKind::Script { .. }) {
     let disks: Result<Vec<ServiceDisk>, _> = s
@@ -932,6 +898,21 @@ pub async fn runs(
   Query(q): Query<RunsQuery>,
 ) -> ApiResult<Vec<TaskRunView>> {
   auth.require(Perm::Read)?;
+  if let Some(allowed) = &auth.services {
+    match load_one(&s, &name).await {
+      Ok(spec) if matches!(&spec.how, TaskKind::Exec { service, .. } if allowed.contains(service)) =>
+        {}
+      Err(error) if error.code != ErrorCode::NotFound => {
+        return Err(error.into());
+      }
+      _ => {
+        return Err(
+          crate::token_scope::forbidden(&auth.name, allowed, "")
+            .into(),
+        );
+      }
+    }
+  }
   let limit = q.limit.clamp(1, KEEP_RUNS);
   let rows = s
     .db

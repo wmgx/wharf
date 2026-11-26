@@ -321,6 +321,7 @@ pub async fn query(
   Query(q): Query<MetricsQuery>,
 ) -> ApiResult<MetricsView> {
   auth.require(Perm::Read)?;
+  crate::token_scope::require_service(&auth, &q.subject)?;
   let (span, step) = range_ms(q.range.as_deref().unwrap_or("24h"))?;
   let names: Vec<String> = q
     .names
@@ -336,10 +337,17 @@ pub async fn query(
   let to = now_ms();
   let from = to - span;
   let subject = q.subject.clone();
-  let series = s
+  let mut series = s
     .db
     .call(move |c| read(c, &subject, &names, from, step))
     .await?;
+  if auth.services.is_some() {
+    series.retain(|name, _| {
+      !name.starts_with("host.")
+        && !name.starts_with("agent.")
+        && !name.starts_with("link.")
+    });
+  }
   Ok(Json(MetricsView {
     subject: q.subject,
     from,

@@ -63,7 +63,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route("/gate/key", get(crate::gate::check_key))
     .route(
       "/api/routes/{hostname}/sso/test",
-      post(crate::sso_login::test),
+      post(crate::scope_filter::test_route_sso),
     )
     .route(
       "/api/routes/{hostname}/cert",
@@ -560,9 +560,11 @@ async fn status(
   auth: Auth,
 ) -> ApiResult<Status> {
   auth.require(Perm::Read)?;
-  let status = views::status(&s).await?;
+  let status = views::status(&s, auth.services.as_ref()).await?;
   // 刚导入、还没同步过的在后台同步，下一次轮询就有了。
-  if let Ok(snap) = snapshot::load(&s.db).await {
+  if !status.edge_apps.is_empty()
+    && let Ok(snap) = snapshot::load(&s.db).await
+  {
     for a in status.edge_apps.iter().filter(|a| a.live.is_none()) {
       crate::edge_sync::sync_if_stale(&s, &snap, &a.name);
     }
@@ -576,7 +578,11 @@ async fn data_overview(
   auth: Auth,
 ) -> ApiResult<DataView> {
   auth.require(Perm::Read)?;
-  Ok(Json(crate::data::overview(&s).await?))
+  let mut data = crate::data::overview(&s).await?;
+  if let Some(allowed) = &auth.services {
+    crate::scope_filter::filter_data(allowed, &mut data);
+  }
+  Ok(Json(data))
 }
 
 // SERVERS
@@ -889,6 +895,12 @@ async fn list_services(
       .world
       .services
       .keys()
+      .filter(|n| {
+        auth
+          .services
+          .as_ref()
+          .is_none_or(|allowed| allowed.contains(*n))
+      })
       .filter_map(|n| {
         views::service_view(&snap, &net, n, Some(&live))
       })
@@ -948,6 +960,9 @@ async fn show_service(
   Query(query): Query<ServiceQuery>,
 ) -> ApiResult<ServiceView> {
   auth.require(Perm::Read)?;
+  if query.reveal {
+    auth.require(Perm::Apply)?;
+  }
   let snap = snapshot::load(&s.db).await?;
   let net = snap.net(&snap.world);
   let live = views::cached_live(&s, &snap.world).await;
@@ -1134,7 +1149,9 @@ async fn multi_service_logs(
   Query(q): Query<LogsQuery>,
 ) -> ApiResult<Value> {
   auth.require(Perm::Read)?;
-  Ok(Json(crate::multi_logs::fetch(&s, services, q).await?))
+  Ok(Json(
+    crate::multi_logs::fetch(&s, &auth, services, q).await?,
+  ))
 }
 
 async fn deployments(
@@ -1295,8 +1312,16 @@ async fn list_routes(
     snap
       .world
       .routes
-      .keys()
-      .filter_map(|h| views::route_view(&snap, &net, h))
+      .iter()
+      .filter(|(_, route)| {
+        auth.services.as_ref().is_none_or(|allowed| {
+          crate::token_scope::route_spec_in_scope(
+            allowed,
+            &route.spec,
+          )
+        })
+      })
+      .filter_map(|(h, _)| views::route_view(&snap, &net, h))
       .collect(),
   ))
 }
@@ -1505,18 +1530,20 @@ async fn list_secrets(
       rows.collect::<Result<_, _>>().map_err(sql_err)
     })
     .await?;
-  Ok(Json(
-    rows
-      .into_iter()
-      .map(|(name, at)| SecretView {
-        used_by: secret_users(&snap.world, &name),
-        managed: managed_secret(&name),
-        system: system_secret(&name).map(str::to_string),
-        name,
-        updated_at: to_time(at),
-      })
-      .collect(),
-  ))
+  let mut list = rows
+    .into_iter()
+    .map(|(name, at)| SecretView {
+      used_by: secret_users(&snap.world, &name),
+      managed: managed_secret(&name),
+      system: system_secret(&name).map(str::to_string),
+      name,
+      updated_at: to_time(at),
+    })
+    .collect();
+  if let Some(allowed) = &auth.services {
+    crate::scope_filter::filter_secrets(allowed, &mut list);
+  }
+  Ok(Json(list))
 }
 
 fn secret_users(
@@ -1731,7 +1758,7 @@ async fn show_plan(
   Path(id): Path<String>,
 ) -> ApiResult<Plan> {
   auth.require(Perm::Read)?;
-  Ok(Json(apply::load_plan(&s, &id).await?))
+  Ok(Json(apply::load_plan_for(&s, &auth, &id).await?))
 }
 
 async fn apply_plan(
@@ -1772,7 +1799,7 @@ async fn list_runs(
   Query(q): Query<RunsQuery>,
 ) -> ApiResult<Vec<Run>> {
   auth.require(Perm::Read)?;
-  Ok(Json(apply::list_runs(&s, q.limit.min(200)).await?))
+  Ok(Json(apply::list_runs(&s, &auth, q.limit.min(200)).await?))
 }
 
 async fn show_run(
@@ -1781,7 +1808,7 @@ async fn show_run(
   Path(id): Path<String>,
 ) -> ApiResult<Run> {
   auth.require(Perm::Read)?;
-  Ok(Json(apply::load_run(&s, &id).await?))
+  Ok(Json(apply::load_run_for(&s, &auth, &id).await?))
 }
 
 async fn cancel_run(
@@ -1790,6 +1817,9 @@ async fn cancel_run(
   Path(id): Path<String>,
 ) -> ApiResult<Value> {
   auth.require(Perm::Apply)?;
+  if auth.services.is_some() {
+    apply::load_run_for(&s, &auth, &id).await?;
+  }
   if s.runs.cancel(&id) {
     Ok(Json(json!({ "cancelling": true })))
   } else {
@@ -1810,5 +1840,9 @@ async fn export(
 ) -> ApiResult<Fleet> {
   auth.require(Perm::Read)?;
   let snap = snapshot::load(&s.db).await?;
-  Ok(Json(views::export(&snap.world)))
+  let mut fleet = views::export(&snap.world);
+  if let Some(allowed) = &auth.services {
+    crate::scope_filter::filter_export(allowed, &mut fleet);
+  }
+  Ok(Json(fleet))
 }

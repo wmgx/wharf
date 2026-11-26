@@ -22,7 +22,7 @@ use super::{
   Delivery, FiringEntry, KEEP, NOTICES, Op, Override, PushArgs,
   RULES, Verdict, ack, digest, ensure_loaded, ev, issue_alert,
   judge_consecutive, push_with_world, resources, set_firing,
-  suppress, view, with,
+  suppress, with,
 };
 use crate::{
   api::ApiResult,
@@ -357,15 +357,31 @@ pub(super) async fn add_rule(
   Ok(v)
 }
 
+fn require_custom_scope(
+  auth: &Auth,
+  rule: Option<&CustomRule>,
+) -> Result<(), ApiError> {
+  if let Some(allowed) = &auth.services
+    && !rule.is_some_and(|rule| allowed.contains(&rule.service))
+  {
+    return Err(crate::token_scope::forbidden(
+      &auth.name, allowed, "",
+    ));
+  }
+  Ok(())
+}
+
 pub(super) async fn patch_custom(
   state: &AppState,
+  auth: &Auth,
   name: &str,
   p: AlertPatch,
   now: i64,
 ) -> Result<(), ApiError> {
   ensure_loaded(state).await;
-  let Some(mut cr) = with(|m| m.custom_rules.get(name).cloned())
-  else {
+  let rule = with(|m| m.custom_rules.get(name).cloned());
+  require_custom_scope(auth, rule.as_ref())?;
+  let Some(mut cr) = rule else {
     return Err(ApiError::not_found(format!(
       "没有自定义规则 {name}"
     )));
@@ -398,13 +414,13 @@ pub(super) async fn patch_custom(
     cr.muted_until = (m > 0).then(|| now + i64::from(m) * 60_000);
   }
   let db_cr = cr.clone();
-  state
+  let changed = state
     .db
     .call(move |c| {
       c.execute(
         "UPDATE alert_custom_rules
          SET enabled = ?2, threshold = ?3, for_n = ?4, level = ?5, muted_until = ?6
-         WHERE name = ?1",
+         WHERE name = ?1 AND service = ?7 AND created_at = ?8",
         params![
           db_cr.name,
           i64::from(db_cr.enabled),
@@ -412,16 +428,27 @@ pub(super) async fn patch_custom(
           db_cr.for_n,
           level_str(db_cr.level),
           db_cr.muted_until,
+          db_cr.service,
+          db_cr.created_at,
         ],
       )
-      .map(|_| ())
       .map_err(db::sql_err)
     })
     .await?;
+  if changed == 0 {
+    require_custom_scope(auth, None)?;
+    return Err(ApiError::not_found(format!(
+      "没有自定义规则 {name}"
+    )));
+  }
   let svc = cr.service.clone();
   let disabled = !cr.enabled;
   with(|m| {
-    m.custom_rules.insert(cr.name.clone(), cr);
+    if m.custom_rules.get(name).is_some_and(|r| {
+      r.service == cr.service && r.created_at == cr.created_at
+    }) {
+      m.custom_rules.insert(cr.name.clone(), cr);
+    }
   });
   if disabled {
     set_firing(state, (name.to_string(), svc), None).await;
@@ -431,28 +458,38 @@ pub(super) async fn patch_custom(
 
 pub(super) async fn remove_rule(
   state: &AppState,
+  auth: &Auth,
   name: &str,
   now: i64,
 ) -> Result<(), ApiError> {
   ensure_loaded(state).await;
-  let Some(cr) = with(|m| m.custom_rules.get(name).cloned()) else {
+  let rule = with(|m| m.custom_rules.get(name).cloned());
+  require_custom_scope(auth, rule.as_ref())?;
+  let Some(cr) = rule else {
     return Err(
       ApiError::not_found(format!("没有自定义规则 {name}"))
         .with_hint("用 wharf alert list 查看自定义规则")
         .suggest("wharf alert list"),
     );
   };
-  let n = name.to_string();
-  state
-    .db
-    .call(move |c| {
-      c.execute("DELETE FROM alert_custom_rules WHERE name = ?1", [n])
-        .map(|_| ())
-        .map_err(db::sql_err)
-    })
-    .await?;
+  let (n, service, created_at) =
+    (name.to_string(), cr.service.clone(), cr.created_at);
+  let changed = state.db.call(move |c| {
+    c.execute("DELETE FROM alert_custom_rules WHERE name = ?1 AND service = ?2 AND created_at = ?3",
+      params![n, service, created_at]).map_err(db::sql_err)
+  }).await?;
+  if changed == 0 {
+    require_custom_scope(auth, None)?;
+    return Err(ApiError::not_found(format!(
+      "没有自定义规则 {name}"
+    )));
+  }
   with(|m| {
-    m.custom_rules.remove(name);
+    if m.custom_rules.get(name).is_some_and(|r| {
+      r.service == cr.service && r.created_at == cr.created_at
+    }) {
+      m.custom_rules.remove(name);
+    }
   });
   set_firing(state, (cr.name.clone(), cr.service.clone()), None)
     .await;
@@ -667,7 +704,8 @@ pub async fn add_api(
   auth: Auth,
   Json(req): Json<CustomAlertRuleRequest>,
 ) -> ApiResult<CustomAlertRuleView> {
-  auth.require(Perm::Admin)?;
+  auth.require(Perm::Apply)?;
+  crate::token_scope::require_service(&auth, &req.service)?;
   Ok(Json(add_rule(&s, req, now_ms()).await?))
 }
 
@@ -677,7 +715,7 @@ pub async fn rm_api(
   auth: Auth,
   Path(name): Path<String>,
 ) -> ApiResult<AlertsView> {
-  auth.require(Perm::Admin)?;
-  remove_rule(&s, &name, now_ms()).await?;
-  Ok(Json(view(&s).await?))
+  auth.require(Perm::Apply)?;
+  remove_rule(&s, &auth, &name, now_ms()).await?;
+  Ok(Json(super::api::view_for(&s, &auth).await?))
 }

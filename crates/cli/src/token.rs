@@ -13,16 +13,34 @@ use crate::{
   commands::out,
 };
 
-fn csv(value: &str) -> impl Iterator<Item = &str> {
-  value.split(',').map(str::trim).filter(|v| !v.is_empty())
-}
-
-fn restriction(value: &str, clear: &str) -> Vec<String> {
-  if value.trim() == clear {
-    vec![]
-  } else {
-    csv(value).map(str::to_string).collect()
+fn parse_non_empty_csv(
+  flag: &str,
+  raw: &str,
+  clear_keyword: Option<&str>,
+) -> Result<Vec<String>, ApiError> {
+  let trimmed = raw.trim();
+  if clear_keyword == Some(trimmed) {
+    return Ok(vec![]);
   }
+  let values: Vec<_> = trimmed.split(',').map(str::trim).collect();
+  if values.iter().any(|value| value.is_empty()) {
+    return Err(
+      ApiError::invalid(format!("{flag} 不能为空或包含空项"))
+        .with_hint(match clear_keyword {
+          Some(kw) => format!(
+            "填入逗号分隔的值；要清除限制请显式传 {flag} {kw}"
+          ),
+          None if flag == "--perms" => {
+            "可选权限点：read、plan、apply、confirm、exec、admin"
+              .into()
+          }
+          None => {
+            format!("填入逗号分隔的值；如果不限制请不要传 {flag}")
+          }
+        }),
+    );
+  }
+  Ok(values.into_iter().map(str::to_string).collect())
 }
 
 fn expiry(
@@ -146,11 +164,12 @@ pub async fn run(
       let mut body = json!({
         "name": name,
         "expires_at": expires.as_deref().map(|v| expiry(v, false)).transpose()?.flatten(),
-        "allowed_from": from.as_deref().map(|v| restriction(v, "any")).unwrap_or_default(),
-        "services": services.as_deref().map(|v| restriction(v, "all")).unwrap_or_default(),
+        "allowed_from": from.as_deref().map(|v| parse_non_empty_csv("--from", v, None)).transpose()?.unwrap_or_default(),
+        "services": services.as_deref().map(|v| parse_non_empty_csv("--services", v, None)).transpose()?.unwrap_or_default(),
       });
       if let Some(perms) = perms {
-        body["perms"] = json!(csv(&perms).collect::<Vec<_>>());
+        body["perms"] =
+          json!(parse_non_empty_csv("--perms", &perms, None)?);
       } else {
         body["scope"] = json!(scope);
       }
@@ -175,6 +194,20 @@ pub async fn run(
       services,
       dry_run,
     } => {
+      let from = from
+        .as_deref()
+        .map(|raw| parse_non_empty_csv("--from", raw, Some("any")))
+        .transpose()?;
+      let services = services
+        .as_deref()
+        .map(|raw| {
+          parse_non_empty_csv("--services", raw, Some("all"))
+        })
+        .transpose()?;
+      let perms = perms
+        .as_deref()
+        .map(|raw| parse_non_empty_csv("--perms", raw, None))
+        .transpose()?;
       let tokens: Vec<TokenView> = c.get("/api/tokens").await?;
       let token = tokens
         .into_iter()
@@ -191,9 +224,10 @@ pub async fn run(
       };
       let mut after = before.clone();
       if let Some(perms) = perms {
-        after.perms = csv(&perms)
+        after.perms = perms
+          .into_iter()
           .map(|p| {
-            Perm::parse(p).ok_or_else(|| {
+            Perm::parse(&p).ok_or_else(|| {
               ApiError::invalid(format!("未知权限 {p}")).with_hint(
                 "权限点：read、plan、apply、confirm、exec、admin",
               )
@@ -205,10 +239,10 @@ pub async fn run(
         after.expires_at = expiry(&expires, true)?;
       }
       if let Some(from) = from {
-        after.allowed_from = restriction(&from, "any");
+        after.allowed_from = from;
       }
       if let Some(services) = services {
-        after.services = restriction(&services, "all");
+        after.services = services;
       }
       after.normalize()?;
       if dry_run {
@@ -244,4 +278,25 @@ mod tests {
     assert_eq!(expiry_label(TimeDelta::days(2)), "剩 2 天");
     assert_eq!(expiry_label(TimeDelta::seconds(-1)), "已过期");
   }
+}
+
+#[cfg(test)]
+#[test]
+fn cli_token_rejects_empty_services_from_and_perms() {
+  for (flag, raw, clear) in [
+    ("--services", "", None),
+    ("--services", ",", Some("all")),
+    ("--from", "  ", Some("any")),
+    ("--perms", "", None),
+  ] {
+    assert_eq!(
+      parse_non_empty_csv(flag, raw, clear).unwrap_err().code,
+      wharf_api_types::ErrorCode::InvalidInput
+    );
+  }
+  assert!(
+    parse_non_empty_csv("--services", "all", Some("all"))
+      .unwrap()
+      .is_empty()
+  );
 }

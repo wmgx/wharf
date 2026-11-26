@@ -6,7 +6,7 @@ use axum::{
   Json,
   extract::{Path, State},
 };
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use wharf_api_types::{ApiError, view::Perm};
@@ -83,6 +83,16 @@ async fn save(
     );
   }
   s.db.call(move |c| {
+    if kind == KIND_ROUTE && let Some(allowed) = &auth.services {
+      let spec: Option<String> = c.query_row(
+        "SELECT spec FROM resources WHERE kind = ?1 AND name = ?2",
+        params![kind, name], |r| r.get(0),
+      ).optional().map_err(sql_err)?;
+      let spec = spec.as_deref().and_then(|spec| serde_json::from_str(spec).ok());
+      if !spec.is_some_and(|route| crate::token_scope::route_spec_in_scope(allowed, &route)) {
+        return Err(crate::token_scope::forbidden(&auth.name, allowed, ""));
+      }
+    }
     let exists: bool = c.query_row(
       "SELECT EXISTS(SELECT 1 FROM resources WHERE kind = ?1 AND name = ?2)",
       params![kind, name], |r| r.get(0),

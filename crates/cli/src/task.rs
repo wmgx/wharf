@@ -29,11 +29,11 @@ pub enum TaskCmd {
   Ls,
   Show {
     name: String,
+    #[arg(long)]
+    reveal: bool,
   },
   /// 立即运行并等待结果；失败时退出码为 4。
-  Run {
-    name: String,
-  },
+  Run { name: String },
   /// 最近的运行记录，最新一条带完整输出。
   Logs {
     name: String,
@@ -156,9 +156,10 @@ pub async fn task(
       });
       Ok(())
     }
-    TaskCmd::Show { name } => {
+    TaskCmd::Show { name, reveal } => {
+      let query = if reveal { "?reveal=true" } else { "" };
       let t: TaskView =
-        c.get(&format!("/api/tasks/{}", seg(&name))).await?;
+        c.get(&format!("/api/tasks/{}{query}", seg(&name))).await?;
       out(j, &t, |t| {
         println!(
           "{}",
@@ -172,8 +173,15 @@ pub async fn task(
           print!("\n{code}");
         }
         if let Some(url) = &t.ping_url {
-          println!("\n报到：脚本成功后 curl -fsS -m 10 {url}");
-          println!("失败时：curl -fsS -m 10 {url}/fail");
+          if reveal {
+            println!("\n报到：脚本成功后 curl -fsS -m 10 {url}");
+            println!("失败时：curl -fsS -m 10 {url}/fail");
+          } else {
+            println!("\n报到地址：{url}");
+          }
+        }
+        if !reveal && (t.ping_url.is_some() || t.hook_url.is_some()) {
+          println!("完整地址含口令，加上 --reveal 查看（需写权限）");
         }
       });
       Ok(())

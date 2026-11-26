@@ -49,7 +49,16 @@ const SHORT_TIMEOUT: Duration = Duration::from_secs(3 * 60);
 /// 每个步骤最多保留的日志行数。
 const MAX_LOG_LINES: usize = 400;
 
+#[path = "apply/run_scope.rs"]
+mod run_scope;
+
+use run_scope::{StoredRun, persist};
+pub use run_scope::{
+  list_runs, load_plan_for, load_run, load_run_for,
+};
+
 struct ActiveRun {
+  scope_services: Option<Vec<String>>,
   run: Arc<Mutex<Run>>,
   cancel: CancellationToken,
 }
@@ -134,8 +143,9 @@ pub async fn recover(state: &AppState) -> Result<(), ApiError> {
     })
     .await?;
   for (id, body) in rows {
-    let mut run: Run =
+    let mut stored: StoredRun =
       serde_json::from_str(&body).map_err(json_err)?;
+    let run = &mut stored.run;
     for step in &mut run.steps {
       if matches!(
         step.status,
@@ -150,63 +160,11 @@ pub async fn recover(state: &AppState) -> Result<(), ApiError> {
     }
     run.status = RunStatus::Failed;
     run.finished_at = Some(Utc::now());
-    persist(state, &run).await?;
+    persist(state, &stored.run, stored.scope_services.as_deref())
+      .await?;
     tracing::warn!("执行记录 {id} 因控制面重启而中断");
   }
   Ok(())
-}
-
-async fn persist(
-  state: &AppState,
-  run: &Run,
-) -> Result<(), ApiError> {
-  let id = run.run_id.clone();
-  let status = serde_json::to_value(run.status)
-    .ok()
-    .and_then(|v| v.as_str().map(str::to_string))
-    .unwrap_or_default();
-  let body = serde_json::to_string(run).map_err(json_err)?;
-  state
-    .db
-    .call(move |c| {
-      c.execute(
-        "UPDATE runs SET status = ?1, body = ?2 WHERE id = ?3",
-        params![status, body, id],
-      )
-      .map_err(sql_err)?;
-      Ok(())
-    })
-    .await
-}
-
-pub async fn load_run(
-  state: &AppState,
-  id: &str,
-) -> Result<Run, ApiError> {
-  if let Some(run) = state.runs.get(id) {
-    return Ok(run);
-  }
-  let id = id.to_string();
-  let body: Option<String> = state
-    .db
-    .call({
-      let id = id.clone();
-      move |c| {
-        c.query_row(
-          "SELECT body FROM runs WHERE id = ?1",
-          params![id],
-          |r| r.get(0),
-        )
-        .optional()
-        .map_err(sql_err)
-      }
-    })
-    .await?;
-  let body = body.ok_or_else(|| {
-    ApiError::not_found(format!("执行记录 {id} 不存在"))
-      .suggest("wharf run list")
-  })?;
-  serde_json::from_str(&body).map_err(json_err)
 }
 
 #[derive(serde::Deserialize)]
@@ -485,6 +443,7 @@ pub async fn start(
     lock(&state.runs.active).insert(
       run_id.clone(),
       ActiveRun {
+        scope_services: None,
         run: shared.clone(),
         cancel: cancel.clone(),
       },
@@ -585,7 +544,8 @@ pub async fn start_task(
       finished_at: None,
     }],
   };
-  let body = serde_json::to_string(&run).map_err(json_err)?;
+  let scope_services = Some(run_scope::step_services(&step));
+  let body = run_scope::encode(&run, scope_services.as_deref())?;
   {
     let run_id = run_id.clone();
     state
@@ -605,6 +565,7 @@ pub async fn start_task(
   lock(&state.runs.active).insert(
     run_id.clone(),
     ActiveRun {
+      scope_services,
       run: shared.clone(),
       cancel: cancel.clone(),
     },
@@ -635,6 +596,10 @@ async fn execute(
 ) {
   let run_id = lock(&run).run_id.clone();
   let mut failed = false;
+  let scope_services = lock(&state.runs.active)
+    .get(&run_id)
+    .and_then(|a| a.scope_services.clone());
+  let scope_services = scope_services.as_deref();
   // 部署过服务就重新查一次版本，免得页面还按旧镜像提示升级。
   let mut deployed = false;
   for (i, step) in steps.iter().enumerate() {
@@ -650,7 +615,7 @@ async fn execute(
       r.steps[index].started_at = Some(Utc::now());
     }
     let snapshot_run = lock(&run).clone();
-    let _ = persist(&state, &snapshot_run).await;
+    let _ = persist(&state, &snapshot_run, scope_services).await;
     let progress: ProgressFn = {
       let run = run.clone();
       Arc::new(move |line: String| {
@@ -714,7 +679,7 @@ async fn execute(
       }
     }
     let snapshot_run = lock(&run).clone();
-    let _ = persist(&state, &snapshot_run).await;
+    let _ = persist(&state, &snapshot_run, scope_services).await;
     crate::views::refresh_live_soon(state.clone());
   }
   let final_run = {
@@ -729,7 +694,7 @@ async fn execute(
     r.finished_at = Some(Utc::now());
     r.clone()
   };
-  if let Err(e) = persist(&state, &final_run).await {
+  if let Err(e) = persist(&state, &final_run, scope_services).await {
     tracing::error!("保存执行记录 {run_id} 失败：{e}");
   }
   lock(&state.runs.active).remove(&run_id);
@@ -1741,40 +1706,6 @@ async fn record_deployment(
       Ok(())
     })
     .await
-}
-
-/// 最近的执行记录（不含日志）。
-pub async fn list_runs(
-  state: &AppState,
-  limit: u32,
-) -> Result<Vec<Run>, ApiError> {
-  let bodies: Vec<String> = state
-    .db
-    .call(move |c| {
-      let mut stmt = c
-        .prepare(
-          "SELECT body FROM runs ORDER BY started_at DESC LIMIT ?1",
-        )
-        .map_err(sql_err)?;
-      let rows = stmt
-        .query_map(params![limit], |r| r.get(0))
-        .map_err(sql_err)?;
-      rows.collect::<Result<_, _>>().map_err(sql_err)
-    })
-    .await?;
-  let mut runs = Vec::new();
-  for body in bodies {
-    let mut run: Run =
-      serde_json::from_str(&body).map_err(json_err)?;
-    if let Some(live) = state.runs.get(&run.run_id) {
-      run = live;
-    }
-    for step in &mut run.steps {
-      step.log.clear();
-    }
-    runs.push(run);
-  }
-  Ok(runs)
 }
 
 #[cfg(test)]
