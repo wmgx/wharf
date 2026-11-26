@@ -33,6 +33,7 @@ fn test_world() -> World {
     host_ports: Default::default(),
     import: None,
     pins: Default::default(),
+    commit: None,
   };
   world.services.insert("blog".into(), svc());
   world.services.insert("other".into(), svc());
@@ -315,7 +316,10 @@ async fn scoped_token_cannot_view_or_cancel_foreign_run() {
     scope_services: Some(scope),
   };
   let r_other = make("r_other", vec!["other".into()]);
-  let r_core = make("r_core", step_scope_services(&Step::CoreBackup));
+  let r_core = make(
+    "r_core",
+    step_scope_services(&Step::CoreBackup { user_key: None }),
+  );
   let r_blog = make(
     "r_blog",
     step_scope_services(&Step::Rebuild {

@@ -171,10 +171,10 @@ pub fn redact_compose_secrets(yaml: &str) -> (String, Vec<String>) {
             continue;
           }
           if is_sensitive_env_key(key) || has_url_credentials(val) {
-            *item = Value::String(format!(
-              "{key}={REDACTED_SECRET_PLACEHOLDER}"
-            ));
+            let replaced =
+              format!("{key}={REDACTED_SECRET_PLACEHOLDER}");
             push_unique(&mut redacted, key);
+            *item = Value::String(replaced);
           }
         }
       }
@@ -379,7 +379,7 @@ fn redact_cmd_tokens(input: &str) -> String {
       && !is_env_assignment(tok)
     {
       let base = tok
-        .trim_matches(|c| c == '\'' || c == '"')
+        .trim_matches(['\'', '"'])
         .rsplit('/')
         .next()
         .unwrap_or(tok);

@@ -330,17 +330,14 @@ pub async fn load_run_for(
   auth: &Auth,
   id: &str,
 ) -> Result<Run, ApiError> {
-  let (run, scope) = match load_run_with_scope(state, id).await {
-    Ok(pair) => pair,
-    Err(_) if auth.services.is_some() => {
-      return Err(token_scope::forbidden(
-        &auth.name,
-        auth.services.as_ref().unwrap(),
-        "",
-      ));
-    }
-    Err(e) => return Err(e),
-  };
+  let (run, scope) =
+    match (load_run_with_scope(state, id).await, &auth.services) {
+      (Ok(pair), _) => pair,
+      (Err(_), Some(allowed)) => {
+        return Err(token_scope::forbidden(&auth.name, allowed, ""));
+      }
+      (Err(e), None) => return Err(e),
+    };
   if let Some(allowed) = &auth.services
     && !run_in_scope(state, allowed, &run, scope.as_deref()).await
   {
