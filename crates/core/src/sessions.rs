@@ -126,7 +126,7 @@ pub async fn revoke_others(
 }
 
 fn net_key(addr: &str) -> String {
-  match addr.parse::<IpAddr>() {
+  match addr.parse::<IpAddr>().map(|ip| ip.to_canonical()) {
     Ok(IpAddr::V4(ip)) => {
       let b = ip.octets();
       format!("{}.{}.{}", b[0], b[1], b[2])

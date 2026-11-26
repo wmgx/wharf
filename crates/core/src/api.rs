@@ -530,11 +530,7 @@ async fn check_cli(
       .get("host")
       .and_then(|v| v.to_str().ok())
       .unwrap_or("<控制面地址>");
-    let scheme = req
-      .headers()
-      .get("x-forwarded-proto")
-      .and_then(|v| v.to_str().ok())
-      .unwrap_or("http");
+    let scheme = crate::source_trust::request_proto(&req);
     let base = format!("{scheme}://{host}");
     return AppError(
       ApiError::new(
@@ -1599,7 +1595,7 @@ async fn set_secret(
   check_secret_name(&name)?;
   refuse_managed(&name)?;
   let value = if crate::render::is_auth_secret(&name) {
-    crate::render::BasicAuth::hash_input(&req.value)?
+    crate::login::hash_basic_auth(req.value).await?
   } else {
     req.value
   };

@@ -6,7 +6,7 @@ use std::{
 
 use axum::{
   extract::{ConnectInfo, FromRequestParts},
-  http::{Method, request::Parts},
+  http::{HeaderMap, Method, request::Parts},
 };
 use chrono::{DateTime, Utc};
 use rusqlite::params;
@@ -19,6 +19,7 @@ use wharf_api_types::{
 use crate::{
   api::AppError,
   db::{self, Db, TokenRow, now_ms, sql_err},
+  source_trust,
   state::AppState,
 };
 
@@ -192,15 +193,16 @@ async fn authenticate(
     .and_then(|v| v.strip_prefix("Bearer "))
     .map(str::trim)
     .filter(|t| !t.is_empty());
+  let peer = parts
+    .extensions
+    .get::<ConnectInfo<std::net::SocketAddr>>()
+    .map(|c| c.0.ip());
   let Some(token) = token else {
     // 页面：账号密码登录后的会话 cookie，权限和管理员 token 一样。
-    // WebSocket 不受 CORS 保护，SameSite 也挡不住同站子域，所以带 Origin 时必须同源。
-    if !same_origin(&parts.headers) {
-      return Err(AppError::from(ApiError::new(
-        ErrorCode::Forbidden,
-        "请求来源和控制面地址不一致",
-      )));
+    if crate::login::cookie_value(&parts.headers).is_none() {
+      return Err(unauthorized());
     }
+    require_same_origin(&parts.method, peer, &parts.headers)?;
     let user = crate::login::session_user_with_activity(
       state,
       &parts.headers,
@@ -223,11 +225,9 @@ async fn authenticate(
     .extensions
     .get::<crate::cli_tunnel::Sealed>()
     .is_some();
-  let peer = parts
-    .extensions
-    .get::<ConnectInfo<std::net::SocketAddr>>()
-    .map(|c| c.0.ip());
-  let local = peer.is_some_and(|ip| ip.to_canonical().is_loopback());
+  let local = peer.is_some_and(|ip| {
+    source_trust::is_direct_local(ip, &parts.headers)
+  });
   if !sealed && !local {
     return Err(AppError::from(
       ApiError::new(
@@ -336,22 +336,97 @@ pub(crate) fn check_token(
   Ok(())
 }
 
-/// 浏览器带的 `Origin` 的 host[:port] 必须等于请求的 Host（经网关时网关会保留原 Host）。
-/// 没有 `Origin`（非浏览器、同源普通导航）放行。
-fn same_origin(headers: &axum::http::HeaderMap) -> bool {
-  let Some(origin) = headers.get(axum::http::header::ORIGIN) else {
-    return true;
+pub(crate) fn require_same_origin(
+  method: &Method,
+  peer: Option<IpAddr>,
+  headers: &HeaderMap,
+) -> Result<(), AppError> {
+  if same_origin(method, peer, headers) {
+    Ok(())
+  } else {
+    Err(
+      ApiError::new(
+        ErrorCode::Forbidden,
+        "请求来源和控制面地址不一致",
+      )
+      .into(),
+    )
+  }
+}
+
+pub(crate) fn same_origin(
+  method: &Method,
+  peer: Option<IpAddr>,
+  headers: &HeaderMap,
+) -> bool {
+  same_origin_with(
+    method,
+    peer.is_some_and(source_trust::is_direct_proxy),
+    headers,
+  )
+}
+
+fn same_origin_with(
+  method: &Method,
+  trusted_proxy: bool,
+  headers: &HeaderMap,
+) -> bool {
+  use source_trust::{
+    authority, forwarded_host_with, forwarded_proto_with,
+    single_header,
   };
-  let host = headers
-    .get("x-forwarded-host")
-    .or_else(|| headers.get(axum::http::header::HOST))
-    .and_then(|v| v.to_str().ok());
-  let origin_host = origin
-    .to_str()
-    .ok()
-    .and_then(|o| o.split_once("://"))
-    .map(|(_, rest)| rest.trim_end_matches('/'));
-  matches!((origin_host, host), (Some(o), Some(h)) if o.eq_ignore_ascii_case(h.trim()))
+
+  if !headers.contains_key("origin") {
+    let websocket = headers.contains_key("sec-websocket-key")
+      || headers
+        .get_all("upgrade")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .any(|v| v.trim().eq_ignore_ascii_case("websocket"));
+    return matches!(
+      *method,
+      Method::GET | Method::HEAD | Method::OPTIONS
+    ) && !websocket
+      && (!headers.contains_key("sec-fetch-site")
+        || matches!(
+          single_header(headers, "sec-fetch-site"),
+          Some("same-origin" | "none")
+        ));
+  }
+
+  let scheme =
+    if trusted_proxy && headers.contains_key("x-forwarded-proto") {
+      let Some(scheme) = forwarded_proto_with(true, headers) else {
+        return false;
+      };
+      scheme
+    } else {
+      "http"
+    };
+  let expected =
+    if trusted_proxy && headers.contains_key("x-forwarded-host") {
+      forwarded_host_with(true, headers)
+    } else {
+      single_header(headers, "host").and_then(authority)
+    };
+  let Some(expected) = expected else {
+    return false;
+  };
+  let Some((origin_scheme, origin)) =
+    single_header(headers, "origin")
+      .and_then(|raw| raw.split_once("://"))
+  else {
+    return false;
+  };
+  let Some(origin) = authority(origin) else {
+    return false;
+  };
+  let default_port = if scheme == "https" { 443 } else { 80 };
+  origin_scheme.eq_ignore_ascii_case(scheme)
+    && origin.host().eq_ignore_ascii_case(expected.host())
+    && origin.port_u16().unwrap_or(default_port)
+      == expected.port_u16().unwrap_or(default_port)
 }
 
 pub(crate) fn scope_values(
@@ -369,14 +444,59 @@ mod tests {
   use super::*;
 
   #[test]
-  fn origin_must_match_host() {
-    let mut h = axum::http::HeaderMap::new();
-    h.insert("host", "wharf.example.com".parse().unwrap());
-    assert!(same_origin(&h));
-    h.insert("origin", "https://wharf.example.com".parse().unwrap());
-    assert!(same_origin(&h));
-    h.insert("origin", "https://evil.example.com".parse().unwrap());
-    assert!(!same_origin(&h));
+  fn origin_checks_scheme_proxy_and_required_headers() {
+    let mut h = HeaderMap::new();
+    h.insert("host", "wharf.example.test".parse().unwrap());
+    h.insert(
+      "x-forwarded-host",
+      "evil.example.test".parse().unwrap(),
+    );
+    h.insert("origin", "https://evil.example.test".parse().unwrap());
+    assert!(!same_origin_with(&Method::POST, false, &h));
+    h.remove("x-forwarded-host");
+    h.insert("x-forwarded-proto", "https".parse().unwrap());
+    h.insert("origin", "http://wharf.example.test".parse().unwrap());
+    assert!(!same_origin_with(&Method::POST, true, &h));
+    h.insert(
+      "origin",
+      "https://WHARF.example.test:443".parse().unwrap(),
+    );
+    assert!(same_origin_with(&Method::POST, true, &h));
+    h.remove("origin");
+    assert!(!same_origin_with(&Method::POST, true, &h));
+    assert!(same_origin_with(&Method::GET, true, &h));
+    h.insert("upgrade", "WebSocket".parse().unwrap());
+    assert!(!same_origin_with(&Method::GET, true, &h));
+  }
+
+  #[tokio::test]
+  async fn forwarded_loopback_bearer_requires_sealed_channel() {
+    let state = crate::rules::tests::test_state();
+    state
+      .db
+      .call(|c| {
+        insert_token(c, "fixture", &[Perm::Read], "fixture-token")
+      })
+      .await
+      .unwrap();
+    let (mut parts, ()) = axum::http::Request::get("/api/status")
+      .header("authorization", "Bearer fixture-token")
+      .header("x-forwarded-for", "malformed")
+      .extension(ConnectInfo(
+        "127.0.0.1:12345".parse::<std::net::SocketAddr>().unwrap(),
+      ))
+      .body(())
+      .unwrap()
+      .into_parts();
+    assert_eq!(
+      authenticate(&mut parts, &state).await.err().unwrap().0.code,
+      ErrorCode::Unauthorized
+    );
+    parts.extensions.insert(crate::cli_tunnel::Sealed);
+    assert!(authenticate(&mut parts, &state).await.is_ok());
+    parts.extensions.remove::<crate::cli_tunnel::Sealed>();
+    parts.headers.remove("x-forwarded-for");
+    assert!(authenticate(&mut parts, &state).await.is_ok());
   }
 
   #[test]

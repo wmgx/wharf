@@ -31,11 +31,11 @@ export function Security() {
     <Sessions />
     <GateKeys />
     <Oidc />
-    {mode && <TotpDialog mode={mode} onClose={() => { setMode(null); refresh(); }} onChanged={refresh} />}
+    {mode && data && <TotpDialog mode={mode} enabled={data.enabled} onClose={() => { setMode(null); refresh(); }} onChanged={refresh} />}
   </>;
 }
 
-function TotpDialog({ mode, onClose, onChanged }: { mode: Mode; onClose: () => void; onChanged: () => void }) {
+function TotpDialog({ mode, enabled, onClose, onChanged }: { mode: Mode; enabled: boolean; onClose: () => void; onChanged: () => void }) {
   const [password, setPassword] = useState("");
   const [code, setCode] = useState("");
   const [pending, setPending] = useState<Pending | null>(null);
@@ -43,12 +43,13 @@ function TotpDialog({ mode, onClose, onChanged }: { mode: Mode; onClose: () => v
   const [saved, setSaved] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
+  const needsCode = mode !== "begin" || enabled;
   const submit = async (e: React.FormEvent) => {
     e.preventDefault(); setBusy(true); setError(null);
     try {
       if (mode === "begin" && !pending) {
-        setPending(await api.post<Pending>("/api/totp/begin", { password }));
-        setPassword("");
+        setPending(await api.post<Pending>("/api/totp/begin", { password, code }));
+        setPassword(""); setCode("");
       } else {
         const path = { begin: "/api/totp/enable", recovery: "/api/totp/recovery", disable: "/api/totp/disable" }[mode];
         const result = await api.post<{ recovery_codes: string[] }>(path, { password, code });
@@ -67,7 +68,7 @@ function TotpDialog({ mode, onClose, onChanged }: { mode: Mode; onClose: () => v
   };
   return <Dialog open onOpenChange={(open) => { if (!open && !codes) onClose(); }}>
     <DialogContent showCloseButton={!codes} className="max-h-[90svh] overflow-y-auto" onEscapeKeyDown={(e) => { if (codes) e.preventDefault(); }} onPointerDownOutside={(e) => { if (codes) e.preventDefault(); }}>
-      <DialogHeader><DialogTitle>{codes ? "恢复码" : mode === "begin" ? "开启两步验证" : mode === "disable" ? "关闭两步验证" : "重新生成恢复码"}</DialogTitle></DialogHeader>
+      <DialogHeader><DialogTitle>{codes ? "恢复码" : mode === "begin" ? (enabled ? "更换认证器" : "开启两步验证") : mode === "disable" ? "关闭两步验证" : "重新生成恢复码"}</DialogTitle></DialogHeader>
       <form className="grid gap-4 min-w-0" onSubmit={submit}>
         {codes ? <>
           <div className="grid grid-cols-2 gap-2 font-mono text-sm" data-recovery-codes>{codes.map((c) => <span key={c}>{c}</span>)}</div>
@@ -80,11 +81,11 @@ function TotpDialog({ mode, onClose, onChanged }: { mode: Mode; onClose: () => v
           <Field label="验证码" htmlFor="totp-code"><Input id="totp-code" autoFocus inputMode="numeric" autoComplete="one-time-code" value={code} onChange={(e) => setCode(e.target.value)} /></Field>
         </> : <>
           <Field label="登录密码" htmlFor="totp-password"><Input id="totp-password" autoFocus type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} /></Field>
-          {mode !== "begin" && <Field label="验证码" htmlFor="totp-code"><Input id="totp-code" autoComplete="one-time-code" value={code} onChange={(e) => setCode(e.target.value)} /></Field>}
+          {needsCode && <Field label={mode === "begin" ? "当前验证码或恢复码" : mode === "disable" ? "验证码或恢复码" : "验证码"} htmlFor="totp-code"><Input id="totp-code" autoComplete="one-time-code" value={code} onChange={(e) => setCode(e.target.value)} /></Field>}
         </>}
         <ErrorNote error={error} />
         <DialogFooter>
-          {codes ? <Button type="button" disabled={!saved} onClick={onClose}>完成</Button> : <Button type="submit" disabled={busy || (pending ? !code.trim() : !password || (mode !== "begin" && !code.trim()))}>{busy ? "请稍候…" : pending ? "确认" : mode === "begin" ? "下一步" : "确认"}</Button>}
+          {codes ? <Button type="button" disabled={!saved} onClick={onClose}>完成</Button> : <Button type="submit" disabled={busy || (pending ? !code.trim() : !password || (needsCode && !code.trim()))}>{busy ? "请稍候…" : pending ? "确认" : mode === "begin" ? "下一步" : "确认"}</Button>}
         </DialogFooter>
       </form>
     </DialogContent>

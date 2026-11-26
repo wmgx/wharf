@@ -284,6 +284,124 @@ fn ip_in_nets(ip: IpAddr, nets: &[IpNet]) -> bool {
   nets.iter().any(|net| net.contains(&ip))
 }
 
+pub(crate) fn is_direct_proxy_with(
+  peer: IpAddr,
+  direct: &[IpNet],
+) -> bool {
+  ip_in_nets(peer.to_canonical(), direct)
+}
+
+pub(crate) fn is_direct_proxy(peer: IpAddr) -> bool {
+  let cache = CORE_PROXIES.read().unwrap_or_else(|e| e.into_inner());
+  is_direct_proxy_with(peer, &cache.direct_proxies)
+}
+
+fn has_forwarded_headers(headers: &HeaderMap) -> bool {
+  [
+    "x-forwarded-for",
+    "x-forwarded-host",
+    "x-forwarded-proto",
+    "forwarded",
+    "x-real-ip",
+    "cf-connecting-ip",
+    "true-client-ip",
+  ]
+  .iter()
+  .any(|name| headers.contains_key(*name))
+}
+
+pub(crate) fn is_direct_local(
+  peer: IpAddr,
+  headers: &HeaderMap,
+) -> bool {
+  peer.to_canonical().is_loopback() && !has_forwarded_headers(headers)
+}
+
+pub(crate) fn single_header<'a>(
+  headers: &'a HeaderMap,
+  name: &str,
+) -> Option<&'a str> {
+  let all = headers.get_all(name);
+  let mut values = all.iter();
+  let value = values.next()?.to_str().ok()?;
+  values.next().is_none().then_some(value)
+}
+
+pub(crate) fn authority(
+  raw: &str,
+) -> Option<axum::http::uri::Authority> {
+  let authority: axum::http::uri::Authority = raw.parse().ok()?;
+  let host = authority.host();
+  let valid_host = if let Some(ip) =
+    host.strip_prefix('[').and_then(|h| h.strip_suffix(']'))
+  {
+    ip.parse::<Ipv6Addr>().is_ok()
+  } else {
+    !host.is_empty()
+      && host
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b".-_".contains(&b))
+  };
+  let suffix = raw.strip_prefix(host)?;
+  let valid_port = suffix.is_empty()
+    || suffix.strip_prefix(':').is_some_and(|port| {
+      port.bytes().all(|b| b.is_ascii_digit())
+        && authority.port_u16().is_some()
+    });
+  (valid_host && valid_port).then_some(authority)
+}
+
+pub(crate) fn forwarded_host_with(
+  trusted: bool,
+  headers: &HeaderMap,
+) -> Option<axum::http::uri::Authority> {
+  if !trusted {
+    return None;
+  }
+  authority(single_header(headers, "x-forwarded-host")?)
+}
+
+pub(crate) fn forwarded_host(
+  peer: IpAddr,
+  headers: &HeaderMap,
+) -> Option<String> {
+  Some(
+    forwarded_host_with(is_direct_proxy(peer), headers)?
+      .host()
+      .to_ascii_lowercase(),
+  )
+}
+
+pub(crate) fn forwarded_proto_with(
+  trusted: bool,
+  headers: &HeaderMap,
+) -> Option<&'static str> {
+  if !trusted {
+    return None;
+  }
+  let raw = single_header(headers, "x-forwarded-proto")?;
+  ["http", "https"]
+    .into_iter()
+    .find(|scheme| raw.eq_ignore_ascii_case(scheme))
+}
+
+pub(crate) fn forwarded_proto(
+  peer: IpAddr,
+  headers: &HeaderMap,
+) -> Option<&'static str> {
+  forwarded_proto_with(is_direct_proxy(peer), headers)
+}
+
+pub(crate) fn request_proto(
+  req: &axum::extract::Request,
+) -> &'static str {
+  req
+    .extensions()
+    .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+    .and_then(|peer| forwarded_proto(peer.0.ip(), req.headers()))
+    .unwrap_or("http")
+}
+
 pub fn resolve_client_ip(
   peer: IpAddr,
   headers: &HeaderMap,
@@ -291,7 +409,7 @@ pub fn resolve_client_ip(
   chain: &[IpNet],
 ) -> IpAddr {
   let peer = peer.to_canonical();
-  if !ip_in_nets(peer, direct) {
+  if !is_direct_proxy_with(peer, direct) {
     return peer;
   }
   let mut last = peer;

@@ -327,25 +327,20 @@ pub struct SiteQuery {
   code: String,
   rd: Option<String>,
 }
-fn forwarded_host(headers: &HeaderMap) -> &str {
-  headers
-    .get("x-forwarded-host")
-    .and_then(|v| v.to_str().ok())
-    .unwrap_or("")
-    .split(':')
-    .next()
-    .unwrap_or("")
-}
 pub async fn site_gate(
   State(s): State<Arc<AppState>>,
   Query(q): Query<SiteQuery>,
+  ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
   headers: HeaderMap,
 ) -> Result<Response, AppError> {
+  let Some(host) = credential_host(peer.ip(), &headers) else {
+    return Ok(response(403, None, "请求未经过可信网关", &[]));
+  };
   let now = now_ms() / 1000;
   let ticket = take_ticket(
     &mut TICKETS.lock().unwrap_or_else(|e| e.into_inner()),
     &q.code,
-    credential_host(&headers).as_deref().unwrap_or(""),
+    &host,
     now,
   );
   let expired =
@@ -380,9 +375,10 @@ pub async fn site_gate(
 }
 pub async fn refresh(
   State(s): State<Arc<AppState>>,
+  ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
   headers: HeaderMap,
 ) -> Result<Response, AppError> {
-  let Some(host) = credential_host(&headers) else {
+  let Some(host) = credential_host(peer.ip(), &headers) else {
     return Ok(response(401, None, "{\"error\":\"需要登录\"}", &[]));
   };
   let now = now_ms() / 1000;
@@ -403,27 +399,9 @@ pub async fn refresh(
     return Ok(r);
   }
   let cookies = [gate_cookie("wharf_gate_rt", "", 0)];
-  if headers
-    .get("x-forwarded-method")
-    .and_then(|v| v.to_str().ok())
-    == Some("GET")
-    && headers
-      .get(header::ACCEPT)
-      .and_then(|v| v.to_str().ok())
-      .is_some_and(|v| v.contains("text/html"))
+  if let Some(rd) =
+    credentials::refresh_return_url(peer.ip(), &headers, &host)
   {
-    let field = |name| {
-      headers
-        .get(name)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-    };
-    let rd = format!(
-      "{}://{}{}",
-      field("x-forwarded-proto"),
-      field("x-forwarded-host"),
-      field("x-forwarded-uri")
-    );
     let login =
       crate::join::default_url(&s).await.unwrap_or_default();
     Ok(response(
@@ -464,10 +442,13 @@ pub struct SiteLoginQuery {
 pub async fn site_login(
   State(s): State<Arc<AppState>>,
   Query(q): Query<SiteLoginQuery>,
+  ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
   headers: HeaderMap,
 ) -> Result<Response, AppError> {
   use wharf_api_types::spec::{LoginWrite, SsoMode};
-  let host = credential_host(&headers).unwrap_or_default();
+  let Some(host) = credential_host(peer.ip(), &headers) else {
+    return Ok(response(403, None, "请求未经过可信网关", &[]));
+  };
   let snap = crate::snapshot::load(&s.db).await?;
   let Some(route) = snap.world.routes.get(&host) else {
     return Ok(response(404, None, "域名没有配置代登录", &[]));
@@ -722,6 +703,10 @@ pub async fn check_key(
 ) -> Result<Response, AppError> {
   use crate::lockout::{self, LockScope};
 
+  let Some(host) = credential_host(peer.ip(), &headers) else {
+    return Ok(response(403, None, "请求未经过可信网关", &[]));
+  };
+
   let source = crate::login::client_key(peer.ip(), &headers);
   if lockout::locked(LockScope::GateKey, &source).is_some() {
     tracing::warn!(source = %source, "门禁访问凭证来源已锁定");
@@ -737,7 +722,6 @@ pub async fn check_key(
     .and_then(|v| v.to_str().ok())
     .unwrap_or_default()
     .to_string();
-  let host = forwarded_host(&headers).to_string();
   let key_host = host.clone();
   if s
     .db

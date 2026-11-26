@@ -302,12 +302,7 @@ async fn verify_reveal(
       format!("输错次数太多，{minutes} 分钟后再试"),
     ));
   }
-  if !tokio::task::spawn_blocking(move || {
-    login::verify_password(&password, &hash)
-  })
-  .await
-  .map_err(|_| ApiError::internal("验证登录密码失败"))?
-  {
+  if !login::verify_password_async(password, hash).await? {
     lockout::record_and_notify(
       state,
       LockScope::AdminLogin,
@@ -387,6 +382,7 @@ mod tests {
     };
     use tower::ServiceExt;
 
+    let _lock = crate::rules::tests::TEST_LOCK.lock().await;
     let state = Arc::new(AppState {
       db: crate::db::Db::memory(),
       hub: Default::default(),
