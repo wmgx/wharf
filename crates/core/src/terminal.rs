@@ -214,10 +214,14 @@ async fn session(
     })
   };
   tokio::pin!(call);
+  let mut out_open = true;
   let end = loop {
     tokio::select! {
-      chunk = out_rx.recv() => {
-        let Some(chunk) = chunk else { continue };
+      chunk = out_rx.recv(), if out_open => {
+        let Some(chunk) = chunk else {
+          out_open = false;
+          continue;
+        };
         let Ok(bytes) = STANDARD.decode(chunk) else { continue };
         if !send(&mut socket, Message::Binary(bytes.into())).await {
           break None;
