@@ -123,11 +123,11 @@ fn lan_ips<'a>(
 const LOCAL_RANGES: [&str; 2] = ["127.0.0.0/8", "::1/128"];
 const LOCAL_HOSTS: [&str; 2] = ["127.0.0.1/32", "::1/128"];
 
-fn lan_ranges(
-  net: &Net,
-  server: &str,
+fn lan_ranges<'a>(
+  net: &'a Net,
+  server: &'a str,
   include_reported: bool,
-) -> impl Iterator<Item = Ipv4Net> {
+) -> impl Iterator<Item = Ipv4Net> + 'a {
   lan_ips(net, server, include_reported)
     .map(|ip| Ipv4Net::new(ip, 24).expect("IPv4 /24").trunc())
 }
