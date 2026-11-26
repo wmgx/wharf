@@ -190,18 +190,24 @@ pub async fn list(
   auth: Auth,
   Query(query): Query<LogQuery>,
 ) -> ApiResult<Vec<ShellLog>> {
-  auth.require(Perm::Read)?;
+  auth.require(Perm::Admin)?;
   if !(1..=200).contains(&query.limit) {
     return Err(
       ApiError::invalid("limit 必须在 1 到 200 之间").into(),
     );
   }
-  let rows = state
+  let mut rows = state
     .db
     .call(move |c| {
       query_logs(c, query.server.as_deref(), query.limit)
     })
     .await?;
+  for row in &mut rows {
+    row.command = row
+      .command
+      .take()
+      .map(|c| crate::redact::redact_command(&c));
+  }
   Ok(Json(rows))
 }
 
@@ -217,12 +223,19 @@ pub(crate) async fn start(
   let kind = kind.to_string();
   let command = command.map(str::to_string);
   db.call(move |c| {
+    let now = now_ms();
     c.execute(
       "INSERT INTO shell_log (at, actor, server, kind, command) VALUES (?1, ?2, ?3, ?4, ?5)",
-      params![now_ms(), actor, server, kind, command],
+      params![now, actor, server, kind, command],
     )
     .map_err(sql_err)?;
-    Ok(c.last_insert_rowid())
+    let id = c.last_insert_rowid();
+    c.execute(
+      "DELETE FROM shell_log WHERE at < ?1",
+      params![now - 90 * 24 * 3600 * 1000],
+    )
+    .map_err(sql_err)?;
+    Ok(id)
   })
   .await
 }

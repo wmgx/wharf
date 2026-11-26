@@ -383,27 +383,30 @@ pub(super) async fn record_at(
   }
 }
 
-/// 最近的推送，新的在前。
-pub(super) async fn history(
+/// 最近的推送（含 subject，用于按服务范围过滤），新的在前。
+pub(super) async fn history_with_subjects(
   state: &AppState,
-) -> Vec<AlertHistoryView> {
+) -> Vec<(AlertHistoryView, Option<String>)> {
   state
     .db
     .call(|c| {
       let mut stmt = c
         .prepare(
-          "SELECT at, source, title, ok, skipped FROM alert_history ORDER BY id DESC LIMIT ?1",
+          "SELECT at, source, subject, title, ok, skipped FROM alert_history ORDER BY id DESC LIMIT ?1",
         )
         .map_err(db::sql_err)?;
       stmt
         .query_map([HISTORY as i64], |r| {
-          Ok(AlertHistoryView {
-            at: r.get(0)?,
-            source: r.get(1)?,
-            title: r.get(2)?,
-            ok: r.get(3)?,
-            skipped: r.get(4)?,
-          })
+          Ok((
+            AlertHistoryView {
+              at: r.get(0)?,
+              source: r.get(1)?,
+              title: r.get(3)?,
+              ok: r.get(4)?,
+              skipped: r.get(5)?,
+            },
+            r.get(2)?,
+          ))
         })
         .and_then(Iterator::collect)
         .map_err(db::sql_err)

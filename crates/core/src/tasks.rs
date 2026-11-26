@@ -654,7 +654,7 @@ fn validate(
   Ok(())
 }
 
-fn need_perm(
+pub(crate) fn need_perm(
   auth: &Auth,
   spec: &TaskSpec,
 ) -> Result<(), crate::api::AppError> {
@@ -690,17 +690,35 @@ fn run_view(r: &rusqlite::Row) -> rusqlite::Result<TaskRunView> {
 
 const RUN_COLS: &str = "id, task, status, trigger, started_at, ended_at, exit_code, output, mem_peak";
 
-/// `GET /api/tasks`
-pub async fn list(
-  State(s): State<Arc<AppState>>,
-  auth: Auth,
-) -> ApiResult<Vec<TaskView>> {
-  auth.require(Perm::Read)?;
-  let tasks = load(&s).await?;
-  let base = crate::join::default_url(&s).await;
+#[derive(Default, Deserialize)]
+pub struct TaskQuery {
+  #[serde(default)]
+  reveal: bool,
+}
+
+async fn build_views(
+  s: &AppState,
+  auth: &Auth,
+  only: Option<&str>,
+  reveal: bool,
+) -> Result<Vec<TaskView>, crate::api::AppError> {
+  let tasks = load(s).await?;
+  let base = if reveal {
+    crate::join::default_url(s).await
+  } else {
+    None
+  };
   let mut out = Vec::new();
   let now = Utc::now();
-  for (name, spec, updated) in tasks {
+  for (name, raw_spec, updated) in tasks {
+    if only.is_some_and(|want| want != name) {
+      continue;
+    }
+    if let Some(allowed) = &auth.services
+      && !crate::scope_filter::task_in_scope(allowed, &raw_spec)
+    {
+      continue;
+    }
     let n = name.clone();
     let last = s
       .db
@@ -714,29 +732,16 @@ pub async fn list(
         .map_err(sql_err)
       })
       .await?;
-    let next_at = spec
+    let next_at = raw_spec
       .enabled
-      .then(|| Cron::parse(&spec.schedule).ok()?.next_after(now))
+      .then(|| Cron::parse(&raw_spec.schedule).ok()?.next_after(now))
       .flatten();
-    let ping_url = match (&spec.how, &base) {
-      (TaskKind::Ping { token, .. }, Some(b)) => {
-        Some(format!("{}/ping/{token}", b.trim_end_matches('/')))
-      }
-      _ => None,
-    };
-    let hook_url = match (&spec.how, &base) {
-      (
-        TaskKind::Script {
-          hook: Some(token), ..
-        },
-        Some(b),
-      ) => Some(format!("{}/hook/{token}", b.trim_end_matches('/'))),
-      _ => None,
-    };
+    let (ping_url, hook_url) =
+      crate::redact::task_urls(&raw_spec, base.as_deref(), reveal);
     out.push(TaskView {
       data_bytes: None,
       name,
-      spec,
+      spec: crate::redact::redact_task_spec(&raw_spec),
       last,
       next_at,
       ping_url,
@@ -744,7 +749,16 @@ pub async fn list(
       updated_at: to_time(updated),
     });
   }
-  Ok(Json(out))
+  Ok(out)
+}
+
+/// `GET /api/tasks`
+pub async fn list(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+) -> ApiResult<Vec<TaskView>> {
+  auth.require(Perm::Read)?;
+  Ok(Json(build_views(&s, &auth, None, false).await?))
 }
 
 /// 单任务详情才测持久目录，失败不影响读取配置。
@@ -752,12 +766,18 @@ pub async fn get(
   State(s): State<Arc<AppState>>,
   auth: Auth,
   Path(name): Path<String>,
+  Query(q): Query<TaskQuery>,
 ) -> ApiResult<TaskView> {
-  let mut task = list(State(s.clone()), auth)
+  auth.require(Perm::Read)?;
+  let raw = crate::scope_filter::require_task_scope(
+    &auth,
+    load_one(&s, &name).await,
+  )?;
+  crate::scope_filter::check_task_reveal(&auth, &raw, q.reveal)?;
+  let mut task = build_views(&s, &auth, Some(&name), q.reveal)
     .await?
-    .0
     .into_iter()
-    .find(|t| t.name == name)
+    .next()
     .ok_or_else(|| {
       ApiError::not_found(format!("没有定时任务 {name}"))
     })?;
@@ -932,6 +952,12 @@ pub async fn runs(
   Query(q): Query<RunsQuery>,
 ) -> ApiResult<Vec<TaskRunView>> {
   auth.require(Perm::Read)?;
+  if auth.services.is_some() {
+    crate::scope_filter::require_task_scope(
+      &auth,
+      load_one(&s, &name).await,
+    )?;
+  }
   let limit = q.limit.clamp(1, KEEP_RUNS);
   let rows = s
     .db

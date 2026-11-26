@@ -104,26 +104,108 @@ fn contains_service(services: &BTreeSet<String>, raw: &str) -> bool {
     .is_ok_and(|name| services.contains(name.as_ref()))
 }
 
+pub fn route_spec_in_scope(
+  services: &BTreeSet<String>,
+  route: &RouteSpec,
+) -> bool {
+  route.upstream.is_none()
+    && route.redirect.is_none()
+    && services.contains(&route.service)
+    && route.paths.iter().all(|path| {
+      path.upstream.is_none()
+        && path
+          .service
+          .as_ref()
+          .is_some_and(|name| services.contains(name))
+    })
+}
+
+pub fn require_service(
+  auth: &Auth,
+  service: &str,
+) -> Result<(), ApiError> {
+  if let Some(services) = &auth.services
+    && !services.contains(service)
+  {
+    return Err(forbidden(&auth.name, services, ""));
+  }
+  Ok(())
+}
+
+pub fn require_route_by_host(
+  auth: &Auth,
+  world: &World,
+  host: &str,
+) -> Result<(), ApiError> {
+  if let Some(services) = &auth.services {
+    let ok = world
+      .routes
+      .get(host)
+      .is_some_and(|r| route_spec_in_scope(services, &r.spec));
+    if !ok {
+      return Err(forbidden(&auth.name, services, ""));
+    }
+  }
+  Ok(())
+}
+
 pub fn check_service_scope(
   services: &BTreeSet<String>,
   method: &Method,
   path: &str,
 ) -> bool {
+  if services.is_empty() {
+    return false;
+  }
   let path: Vec<_> = path.split('/').collect();
   match *method {
     Method::GET | Method::HEAD => match path.as_slice() {
-      ["", "api", "services", name, "terminal" | "connect"]
-      | ["", "api", "services", name, "files", "download"] => {
+      // 1. 全局无敏感元数据
+      ["", "api", "whoami" | "version"]
+      | ["", "api", "uploads", _] => true,
+      // 2. 单服务直达（全部 13 个子接口，统一校验服务名）
+      ["", "api", "services", name]
+      | ["", "api", "services", name, ..] => {
         contains_service(services, name)
       }
-      ["", "api", "servers", _, "terminal"]
-      | ["", "api", "gateways" | "routes", _, "access-logs"] => false,
-      _ => true,
+      // 3. 聚合过滤接口（handler 内按 auth.services 过滤）
+      [
+        "",
+        "api",
+        "status" | "services" | "routes" | "data" | "alerts"
+        | "doctor" | "report" | "export" | "runs" | "secrets"
+        | "tasks",
+      ] => true,
+      // 4. 单对象/参数校验接口（handler 内按归属校验，否则 403）
+      ["", "api", "logs", "services"]
+      | ["", "api", "metrics"]
+      | ["", "api", "routes", _, "cert" | "dns-check"]
+      | ["", "api", "tasks", _]
+      | ["", "api", "tasks", _, "runs"]
+      | ["", "api", "plans", _]
+      | ["", "api", "runs", _] => true,
+      // 5. 其余一切 GET/HEAD 一律拒绝
+      _ => false,
     },
     _ => match path.as_slice() {
       ["", "api", "services", name, ..] => {
         contains_service(services, name)
       }
+      ["", "api", "alerts", _, "services", name] => {
+        *method == Method::PUT && contains_service(services, name)
+      }
+      ["", "api", "alerts", "ack" | "unack" | "custom"] => {
+        *method == Method::POST
+      }
+      ["", "api", "alerts", "custom", _] => *method == Method::DELETE,
+      ["", "api", "alerts", id] if *id != "options" => {
+        *method == Method::PUT
+      }
+      ["", "api", "routes", _, "cert", "retry"]
+      | ["", "api", "routes", _, "sso", "test"] => {
+        *method == Method::POST
+      }
+      ["", "api", "routes", _, "note"] => *method == Method::PUT,
       ["", "api", "plan" | "apply"]
       | ["", "api", "runs", _, "cancel"]
       | ["", "api", "convert", "docker-run"] => {
@@ -142,6 +224,17 @@ pub fn forbidden(
   services: &BTreeSet<String>,
   extra: &str,
 ) -> ApiError {
+  if services.is_empty() {
+    return ApiError::new(
+      ErrorCode::Forbidden,
+      format!(
+        "访问令牌 {name} 的服务范围为空，不能执行任何服务操作{extra}"
+      ),
+    )
+    .with_hint(
+      "请用管理员账号重新设置该令牌的服务范围，或换一个不限服务的令牌",
+    );
+  }
   let names = services
     .iter()
     .map(String::as_str)
@@ -162,16 +255,7 @@ fn route_in_scope(
       serde_json::from_value::<RouteSpec>(value.clone()).is_ok_and(
         |route| {
           route.hostname == host
-            && route.upstream.is_none()
-            && route.redirect.is_none()
-            && services.contains(&route.service)
-            && route.paths.iter().all(|path| {
-              path.upstream.is_none()
-                && path
-                  .service
-                  .as_ref()
-                  .is_some_and(|name| services.contains(name))
-            })
+            && route_spec_in_scope(services, &route)
         },
       )
     })
@@ -450,5 +534,48 @@ mod tests {
         "route/blog.example.com".into()
       ])
     );
+  }
+
+  #[test]
+  fn scoped_token_get_rejects_other_services_and_cluster_endpoints() {
+    let services = BTreeSet::from(["blog".into()]);
+    for path in [
+      "/api/services/other/logs",
+      "/api/services/other/files",
+      "/api/core/logs",
+      "/api/gateways/edge/config",
+      "/api/servers/home/agent-logs",
+      "/api/audit",
+      "/api/shell-log",
+    ] {
+      assert!(
+        !check_service_scope(&services, &Method::GET, path),
+        "expected GET {path} to be rejected"
+      );
+    }
+  }
+
+  #[test]
+  fn empty_perms_and_empty_scope_fail_closed() {
+    let mut settings = wharf_api_types::view::TokenSettings {
+      perms: vec![],
+      expires_at: None,
+      allowed_from: vec![],
+      services: vec![],
+    };
+    let err = settings.normalize().unwrap_err();
+    assert_eq!(err.code, ErrorCode::InvalidInput);
+
+    let empty = BTreeSet::new();
+    assert!(!check_service_scope(
+      &empty,
+      &Method::GET,
+      "/api/services/blog"
+    ));
+    assert!(!check_service_scope(
+      &empty,
+      &Method::GET,
+      "/api/whoami"
+    ));
   }
 }

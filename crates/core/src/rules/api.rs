@@ -24,9 +24,9 @@ use crate::{
   state::AppState,
 };
 
-pub(super) async fn view(
+async fn view_raw(
   state: &AppState,
-) -> Result<AlertsView, ApiError> {
+) -> Result<(AlertsView, Vec<(String, Option<String>)>), ApiError> {
   let include_logs = state
     .db
     .call(|c| db::setting(c, "alerts.include_logs"))
@@ -97,8 +97,13 @@ pub(super) async fn view(
       }
     })
     .collect();
-  let history = store::history(state).await;
-  Ok(with(|m| {
+  let raw_history = store::history_with_subjects(state).await;
+  let history_subjects: Vec<(String, Option<String>)> = raw_history
+    .iter()
+    .map(|(h, subj)| (h.source.clone(), subj.clone()))
+    .collect();
+  let history = raw_history.into_iter().map(|(h, _)| h).collect();
+  let out = with(|m| {
     let firing = m
       .firing
       .iter()
@@ -138,7 +143,31 @@ pub(super) async fn view(
       service_overrides,
       custom_rules,
     }
-  }))
+  });
+  Ok((out, history_subjects))
+}
+
+pub(super) async fn view(
+  state: &AppState,
+) -> Result<AlertsView, ApiError> {
+  Ok(view_raw(state).await?.0)
+}
+
+pub(super) async fn view_for(
+  state: &AppState,
+  auth: &Auth,
+) -> Result<AlertsView, ApiError> {
+  let (mut out, history_subjects) = view_raw(state).await?;
+  if let Some(allowed) = &auth.services {
+    let snap = crate::snapshot::load(&state.db).await?;
+    crate::scope_filter::filter_alerts(
+      allowed,
+      &snap.world,
+      &mut out,
+      &history_subjects,
+    );
+  }
+  Ok(out)
 }
 
 /// `GET /api/alerts`
@@ -147,7 +176,7 @@ pub async fn list(
   auth: Auth,
 ) -> ApiResult<AlertsView> {
   auth.require(Perm::Read)?;
-  Ok(Json(view(&s).await?))
+  Ok(Json(view_for(&s, &auth).await?))
 }
 
 /// `PUT /api/alerts/{id}`：规则、事件通知或内置抑制的开关、阈值、连续次数、级别、静默。
@@ -157,16 +186,30 @@ pub async fn patch(
   Path(id): Path<String>,
   Json(p): Json<AlertPatch>,
 ) -> ApiResult<AlertsView> {
-  auth.require(Perm::Admin)?;
   let rule = RULES.iter().find(|r| r.id == id);
   let notice = NOTICES.iter().find(|(n, _, _)| *n == id);
   let builtin_sup = suppress::is_builtin(&id);
   if rule.is_none() && notice.is_none() && !builtin_sup {
     ensure_loaded(&s).await;
-    if with(|m| m.custom_rules.contains_key(&id)) {
+    let custom_svc =
+      with(|m| m.custom_rules.get(&id).map(|r| r.service.clone()));
+    if let Some(svc) = custom_svc {
+      auth.require(Perm::Apply)?;
+      crate::token_scope::require_service(&auth, &svc)?;
       custom::patch_custom(&s, &id, p, now_ms()).await?;
-      return Ok(Json(view(&s).await?));
+      return Ok(Json(view_for(&s, &auth).await?));
     }
+    if let Some(services) = &auth.services {
+      return Err(
+        crate::token_scope::forbidden(
+          &auth.name,
+          services,
+          "；修改全局告警规则需要不限服务的 admin 令牌",
+        )
+        .into(),
+      );
+    }
+    auth.require(Perm::Admin)?;
     let ids: Vec<&str> = RULES
       .iter()
       .map(|r| r.id)
@@ -179,6 +222,17 @@ pub async fn patch(
         .into(),
     );
   }
+  if let Some(services) = &auth.services {
+    return Err(
+      crate::token_scope::forbidden(
+        &auth.name,
+        services,
+        "；修改全局告警规则需要不限服务的 admin 令牌",
+      )
+      .into(),
+    );
+  }
+  auth.require(Perm::Admin)?;
   if builtin_sup
     && (p.threshold.is_some()
       || p.for_n.is_some()
@@ -256,7 +310,7 @@ pub async fn patch(
   if builtin_sup && p.enabled == Some(false) {
     suppress::flush_unsuppressed(&s, now_ms()).await;
   }
-  Ok(Json(view(&s).await?))
+  Ok(Json(view_for(&s, &auth).await?))
 }
 
 /// `PUT /api/alerts/options`：触发的告警是否附带服务日志。
@@ -275,5 +329,5 @@ pub async fn set_options(
       )
     })
     .await?;
-  Ok(Json(view(&s).await?))
+  Ok(Json(view_for(&s, &auth).await?))
 }

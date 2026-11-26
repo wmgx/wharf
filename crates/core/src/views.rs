@@ -496,7 +496,7 @@ pub(crate) fn route_view_with_upstream_error(
   ))
 }
 
-fn problems_text(issues: &[Issue]) -> Vec<String> {
+pub(crate) fn problems_text(issues: &[Issue]) -> Vec<String> {
   issues
     .iter()
     .filter(|i| i.level != IssueLevel::Info)

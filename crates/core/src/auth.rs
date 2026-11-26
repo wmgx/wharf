@@ -235,7 +235,28 @@ async fn authenticate(
       format!("访问令牌 {name} 已在 {} 过期", time.format("%Y-%m-%d %H:%M UTC")),
     ).with_hint(format!("在页面\u{201c}设置 → CLI 与 AI 接入\u{201d}续期，或用有 admin 权限的令牌执行 wharf token set {name} --expires 30d")).into());
   }
-  let allowed_from = crate::tokens::split_list(row.allowed_from);
+  let allowed_from = match row.allowed_from {
+    None => vec![],
+    Some(raw) => {
+      let list: Vec<String> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+      if list.is_empty() {
+        return Err(
+          ApiError::new(
+            ErrorCode::Forbidden,
+            format!("访问令牌 {name} 的来源限制配置为空，已拒绝访问"),
+          )
+          .with_hint("请用管理员账号重新设置该令牌的来源限制")
+          .into(),
+        );
+      }
+      list
+    }
+  };
   if !allowed_from.is_empty() {
     let address =
       peer.map(|peer| crate::login::client_key(peer, &parts.headers));
@@ -259,10 +280,14 @@ async fn authenticate(
       );
     }
   }
-  let services: BTreeSet<_> = crate::tokens::split_list(row.services)
-    .into_iter()
-    .collect();
-  let services = (!services.is_empty()).then_some(services);
+  let services: Option<BTreeSet<String>> = row.services.map(|raw| {
+    raw
+      .split(',')
+      .map(str::trim)
+      .filter(|s| !s.is_empty())
+      .map(str::to_string)
+      .collect()
+  });
   if let Some(services) = &services
     && !crate::token_scope::check_service_scope(
       services,

@@ -65,6 +65,14 @@ pub async fn route(
   Json(req): Json<NoteRequest>,
 ) -> ApiResult<Value> {
   let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+  if auth.services.is_some() {
+    let snap = crate::snapshot::load(&s.db).await?;
+    crate::token_scope::require_route_by_host(
+      &auth,
+      &snap.world,
+      &host,
+    )?;
+  }
   save(s, auth, KIND_ROUTE, host, req).await
 }
 

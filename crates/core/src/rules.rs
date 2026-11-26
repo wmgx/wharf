@@ -48,7 +48,7 @@ mod store;
 #[path = "rules/suppress.rs"]
 mod suppress;
 
-use api::view;
+use api::{view, view_for};
 use catalog::RULES;
 use store::{
   AckEntry, Delivery, FiringEntry, SuppressionRule, record_at,
@@ -66,6 +66,9 @@ pub use custom::{
 };
 pub use digest::{preview_api as digest_preview_api, spawn};
 pub use service_overrides::patch_service;
+pub(crate) use service_overrides::{
+  is_service_rule, service_of_subject,
+};
 pub(crate) use store::MIGRATION;
 pub use store::ensure_loaded;
 pub use suppress::{
@@ -74,9 +77,7 @@ pub use suppress::{
 };
 
 const CONFIG_KEY: &str = "alerts.config";
-/// 每个序列最多留多少个点，也是"连续次数"的上限。
 const KEEP: usize = 60;
-/// 这么久没有新点的序列（服务器删了、服务停了监控）就丢掉。
 const STALE_MS: i64 = 2 * 60 * 60 * 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq)]

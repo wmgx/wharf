@@ -67,6 +67,22 @@ pub fn validate_app(
       "边缘应用 {name} 的项目名 {project} 不合法：只能用小写字母、数字和 -"
     )));
   }
+  if let Some((other, _)) =
+    world.edge_apps.iter().find(|(other, row)| {
+      other.as_str() != name
+        && row.spec.account == spec.account
+        && row.spec.kind == spec.kind
+        && row.spec.project_name(other) == project
+    })
+  {
+    return Err(
+      ApiError::invalid(format!(
+        "边缘项目 {project}（{}）已经被边缘应用 {other} 纳管，不能重复指向",
+        spec.kind.as_str()
+      ))
+      .with_hint("换一个项目名，或直接修改已有的边缘应用"),
+    );
+  }
   for d in &spec.domains {
     if world.routes.contains_key(d) {
       return Err(ApiError::invalid(format!(

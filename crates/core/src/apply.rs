@@ -52,6 +52,7 @@ const MAX_LOG_LINES: usize = 400;
 struct ActiveRun {
   run: Arc<Mutex<Run>>,
   cancel: CancellationToken,
+  scope_services: Option<Vec<String>>,
 }
 
 /// 进行中的执行记录。结束后只在数据库里。
@@ -67,6 +68,15 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 impl Runs {
   pub fn get(&self, id: &str) -> Option<Run> {
     lock(&self.active).get(id).map(|a| lock(&a.run).clone())
+  }
+
+  pub fn get_with_scope(
+    &self,
+    id: &str,
+  ) -> Option<(Run, Option<Vec<String>>)> {
+    lock(&self.active)
+      .get(id)
+      .map(|a| (lock(&a.run).clone(), a.scope_services.clone()))
   }
 
   /// 正在执行的那个：报"已有执行"时说清楚是谁、在做哪一步。
@@ -134,9 +144,9 @@ pub async fn recover(state: &AppState) -> Result<(), ApiError> {
     })
     .await?;
   for (id, body) in rows {
-    let mut run: Run =
+    let mut stored: crate::scope_filter::StoredRun =
       serde_json::from_str(&body).map_err(json_err)?;
-    for step in &mut run.steps {
+    for step in &mut stored.run.steps {
       if matches!(
         step.status,
         StepStatus::Running | StepStatus::Pending
@@ -148,9 +158,10 @@ pub async fn recover(state: &AppState) -> Result<(), ApiError> {
         ));
       }
     }
-    run.status = RunStatus::Failed;
-    run.finished_at = Some(Utc::now());
-    persist(state, &run).await?;
+    stored.run.status = RunStatus::Failed;
+    stored.run.finished_at = Some(Utc::now());
+    persist(state, &stored.run, stored.scope_services.as_deref())
+      .await?;
     tracing::warn!("执行记录 {id} 因控制面重启而中断");
   }
   Ok(())
@@ -159,13 +170,18 @@ pub async fn recover(state: &AppState) -> Result<(), ApiError> {
 async fn persist(
   state: &AppState,
   run: &Run,
+  scope_services: Option<&[String]>,
 ) -> Result<(), ApiError> {
   let id = run.run_id.clone();
   let status = serde_json::to_value(run.status)
     .ok()
     .and_then(|v| v.as_str().map(str::to_string))
     .unwrap_or_default();
-  let body = serde_json::to_string(run).map_err(json_err)?;
+  let stored = crate::scope_filter::StoredRun {
+    run: run.clone(),
+    scope_services: scope_services.map(<[String]>::to_vec),
+  };
+  let body = serde_json::to_string(&stored).map_err(json_err)?;
   state
     .db
     .call(move |c| {
@@ -210,23 +226,25 @@ pub async fn load_run(
 }
 
 #[derive(serde::Deserialize)]
-struct StoredPlanBody {
+pub(crate) struct StoredPlanBody {
   #[serde(flatten)]
-  plan: Plan,
+  pub(crate) plan: Plan,
   // 旧计划没有引用清单，沿用生成时取所有账号的指纹。
   #[serde(default)]
   account_refs: Option<BTreeSet<String>>,
   #[serde(default)]
-  route_effects: crate::token_scope::RouteEffects,
+  pub(crate) route_effects: crate::token_scope::RouteEffects,
   #[serde(default)]
   host_access_checked: bool,
 }
 
-struct StoredPlan {
-  body: StoredPlanBody,
+pub(crate) struct StoredPlan {
+  pub(crate) body: StoredPlanBody,
   steps: Vec<StepPlan>,
   writes: Vec<Write>,
 }
+
+pub use crate::scope_filter::load_plan_for;
 
 pub async fn load_plan(
   state: &AppState,
@@ -235,7 +253,7 @@ pub async fn load_plan(
   Ok(stored_plan(state, id).await?.body.plan)
 }
 
-async fn stored_plan(
+pub(crate) async fn stored_plan(
   state: &AppState,
   id: &str,
 ) -> Result<StoredPlan, ApiError> {
@@ -487,6 +505,7 @@ pub async fn start(
       ActiveRun {
         run: shared.clone(),
         cancel: cancel.clone(),
+        scope_services: None,
       },
     );
     tokio::spawn(execute(
@@ -494,6 +513,7 @@ pub async fn start(
       shared,
       stored.steps,
       first_pending,
+      None,
       cancel,
       guard,
     ));
@@ -585,7 +605,13 @@ pub async fn start_task(
       finished_at: None,
     }],
   };
-  let body = serde_json::to_string(&run).map_err(json_err)?;
+  let scope_services =
+    Some(crate::scope_filter::step_scope_services(&step));
+  let body = serde_json::to_string(&crate::scope_filter::StoredRun {
+    run: run.clone(),
+    scope_services: scope_services.clone(),
+  })
+  .map_err(json_err)?;
   {
     let run_id = run_id.clone();
     state
@@ -607,6 +633,7 @@ pub async fn start_task(
     ActiveRun {
       run: shared.clone(),
       cancel: cancel.clone(),
+      scope_services: scope_services.clone(),
     },
   );
   let steps = vec![StepPlan {
@@ -619,6 +646,7 @@ pub async fn start_task(
     shared,
     steps,
     0,
+    scope_services,
     cancel,
     guard,
   ));
@@ -630,6 +658,7 @@ async fn execute(
   run: Arc<Mutex<Run>>,
   steps: Vec<StepPlan>,
   offset: usize,
+  scope_services: Option<Vec<String>>,
   cancel: CancellationToken,
   _guard: OwnedMutexGuard<()>,
 ) {
@@ -650,7 +679,8 @@ async fn execute(
       r.steps[index].started_at = Some(Utc::now());
     }
     let snapshot_run = lock(&run).clone();
-    let _ = persist(&state, &snapshot_run).await;
+    let _ =
+      persist(&state, &snapshot_run, scope_services.as_deref()).await;
     let progress: ProgressFn = {
       let run = run.clone();
       Arc::new(move |line: String| {
@@ -714,7 +744,8 @@ async fn execute(
       }
     }
     let snapshot_run = lock(&run).clone();
-    let _ = persist(&state, &snapshot_run).await;
+    let _ =
+      persist(&state, &snapshot_run, scope_services.as_deref()).await;
     crate::views::refresh_live_soon(state.clone());
   }
   let final_run = {
@@ -729,7 +760,9 @@ async fn execute(
     r.finished_at = Some(Utc::now());
     r.clone()
   };
-  if let Err(e) = persist(&state, &final_run).await {
+  if let Err(e) =
+    persist(&state, &final_run, scope_services.as_deref()).await
+  {
     tracing::error!("保存执行记录 {run_id} 失败：{e}");
   }
   lock(&state.runs.active).remove(&run_id);

@@ -2542,14 +2542,22 @@ async fn dns_items(
     }
     match ours.as_slice() {
       [] => {
+        let (impacts, reason) = if edge.is_some() {
+          (
+            vec![Impact::Public],
+            "新增边缘应用自定义域名的公网 DNS 记录".to_string(),
+          )
+        } else {
+          (vec![], format!("新建 {} 记录", spec.record_type))
+        };
         let id = b.item(
           address,
           Layer::Dns,
           Action::Create,
           None,
           after,
-          vec![],
-          format!("新建 {} 记录", spec.record_type),
+          impacts,
+          reason,
         );
         b.step(vec![id], title, upsert(None, vec![]));
       }

@@ -1158,6 +1158,15 @@ pub async fn test(
   Path(hostname): Path<String>,
 ) -> ApiResult<SsoTestResult> {
   auth.require(Perm::Admin)?;
+  if auth.services.is_some() {
+    let snap = snapshot::load(&state.db).await?;
+    let host = hostname.trim().to_ascii_lowercase();
+    crate::token_scope::require_route_by_host(
+      &auth,
+      &snap.world,
+      &host,
+    )?;
+  }
   let outcome = tokio::time::timeout(
     TEST_TIMEOUT,
     run_with_deps(&state, &hostname, true),

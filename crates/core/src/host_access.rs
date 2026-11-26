@@ -67,6 +67,13 @@ pub enum HostTarget<'a> {
     server: &'a str,
     target: &'a str,
   },
+  ImportPreview {
+    server: &'a str,
+    target: &'a str,
+  },
+  HostUnits {
+    server: &'a str,
+  },
 }
 
 pub fn assess(target: HostTarget<'_>) -> HostAccess {
@@ -86,6 +93,14 @@ pub fn assess(target: HostTarget<'_>) -> HostAccess {
     }
     HostTarget::RemoveUnmanaged { server, target } => {
       vec![format!("删除服务器 {server} 上的未纳管容器 {target}")]
+    }
+    HostTarget::ImportPreview { server, target } => {
+      vec![format!("读取服务器 {server} 上的容器配置 {target}")]
+    }
+    HostTarget::HostUnits { server } => {
+      vec![format!(
+        "查看或管理服务器 {server} 上的宿主机 systemd 程序"
+      )]
     }
     HostTarget::Task(spec) => match &spec.how {
       TaskKind::Host { .. } => vec!["在宿主机上执行命令".into()],

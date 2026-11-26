@@ -17,6 +17,9 @@ impl TokenSettings {
     });
     for value in &mut self.allowed_from {
       let raw = value.trim();
+      if raw.is_empty() {
+        return Err(ApiError::invalid("allowed_from 里不能有空项"));
+      }
       let range = raw
         .parse::<IpNet>()
         .or_else(|_| raw.parse::<IpAddr>().map(IpNet::from))
@@ -33,10 +36,19 @@ impl TokenSettings {
     self.allowed_from.sort_unstable();
     self.allowed_from.dedup();
     for name in &self.services {
+      if name.trim().is_empty() {
+        return Err(ApiError::invalid("services 里不能有空项"));
+      }
       validate_name("服务", name)?;
     }
     self.services.sort_unstable();
     self.services.dedup();
+    if self.perms.is_empty() {
+      return Err(
+        ApiError::invalid("perms 不能为空，至少要指定一个权限点")
+          .with_hint("可选：read、plan、apply、confirm、exec、admin"),
+      );
+    }
     self.perms.push(Perm::Read);
     self.perms.sort_unstable();
     self.perms.dedup();

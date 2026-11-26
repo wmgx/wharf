@@ -2,7 +2,9 @@
 //! 域名解析 → HTTPS（从控制面访问）→ 网关容器 → 网关所在机器连上游 → 服务容器。
 //! 每层独立检查，第一个不通的就是要先看的地方。
 
-use std::{net::IpAddr, sync::Arc, time::Duration};
+use std::{
+  collections::BTreeSet, net::IpAddr, sync::Arc, time::Duration,
+};
 
 use axum::{
   Json,
@@ -47,6 +49,24 @@ pub async fn doctor(
   Query(q): Query<DoctorQuery>,
 ) -> ApiResult<DoctorReport> {
   auth.require(Perm::Read)?;
+  if let Some(allowed) = &auth.services {
+    let snap = snapshot::load(&s.db).await?;
+    if let Some(host) = q.host.as_deref() {
+      crate::token_scope::require_route_by_host(
+        &auth,
+        &snap.world,
+        host,
+      )?;
+    }
+    let mut report =
+      run_scoped(&s, q.host.as_deref(), true, Some(allowed)).await?;
+    crate::scope_filter::filter_doctor(
+      allowed,
+      &snap.world,
+      &mut report,
+    );
+    return Ok(Json(report));
+  }
   let (report, vendors) = tokio::try_join!(
     run(&s, q.host.as_deref(), true),
     crate::vendor_checks::checks(&s)
@@ -100,6 +120,15 @@ pub async fn run(
   host: Option<&str>,
   manual: bool,
 ) -> Result<DoctorReport, wharf_api_types::ApiError> {
+  run_scoped(s, host, manual, None).await
+}
+
+async fn run_scoped(
+  s: &AppState,
+  host: Option<&str>,
+  manual: bool,
+  allowed: Option<&BTreeSet<String>>,
+) -> Result<DoctorReport, wharf_api_types::ApiError> {
   let snap = snapshot::load(&s.db).await?;
   if let Some(host) = host
     && !snap.world.routes.contains_key(host)
@@ -136,10 +165,15 @@ pub async fn run(
   let hosts: Vec<&String> = snap
     .world
     .routes
-    .keys()
-    .filter(|h| {
-      host.is_none_or(|q| q == h.as_str()) && !expired.contains(h)
+    .iter()
+    .filter(|(h, r)| {
+      host.is_none_or(|q| q == h.as_str())
+        && !expired.contains(h)
+        && allowed.is_none_or(|svcs| {
+          crate::token_scope::route_spec_in_scope(svcs, &r.spec)
+        })
     })
+    .map(|(h, _)| h)
     .collect();
   let mut routes: Vec<_> = futures_util::future::join_all(
     hosts
@@ -155,7 +189,11 @@ pub async fn run(
   }
   Ok(DoctorReport {
     checked_at: Utc::now(),
-    servers: servers(s, &snap),
+    servers: if allowed.is_some() {
+      vec![]
+    } else {
+      servers(s, &snap)
+    },
     routes: routes.into_iter().map(|(route, _)| route).collect(),
     vendors: vec![],
     config: crate::lint::doctor_warnings(&snap)

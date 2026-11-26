@@ -155,10 +155,18 @@ fn clock_warning<'a>(
 
 pub(super) async fn fetch(
   state: &AppState,
+  auth: &crate::auth::Auth,
   services: Services,
   q: LogsQuery,
 ) -> Result<Value, AppError> {
   let names = service_names(&services.services)?;
+  if let Some(allowed) = &auth.services
+    && !names.iter().all(|n| allowed.contains(*n))
+  {
+    return Err(
+      crate::token_scope::forbidden(&auth.name, allowed, "").into(),
+    );
+  }
   let snap = snapshot::load(&state.db).await?;
   let targets = names
     .iter()

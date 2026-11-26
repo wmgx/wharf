@@ -16,9 +16,9 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
-  ApiError,
+  ApiError, ErrorCode,
   agent::{AgentOp, HostUnit},
-  view::{Issue, IssueLevel, IssueSubject, Perm},
+  view::{Issue, IssueLevel, IssueSubject},
 };
 
 use crate::{
@@ -160,7 +160,10 @@ pub async fn list(
   auth: Auth,
   Path(server): Path<String>,
 ) -> ApiResult<Vec<HostUnitView>> {
-  auth.require(Perm::Read)?;
+  crate::host_access::require(
+    &auth,
+    crate::host_access::HostTarget::HostUnits { server: &server },
+  )?;
   let snap = snapshot::load(&s.db).await?;
   if !snap.world.servers.contains_key(&server) {
     return Err(server_not_found(&server).into());
@@ -169,9 +172,12 @@ pub async fn list(
   let units = fetch(&s, &server).await?;
   let mut out: Vec<HostUnitView> = units
     .into_iter()
-    .map(|u| HostUnitView {
-      watched: watch.contains(&u.unit),
-      unit: u,
+    .map(|mut u| {
+      u.command = crate::redact::redact_command(&u.command);
+      HostUnitView {
+        watched: watch.contains(&u.unit),
+        unit: u,
+      }
     })
     .collect();
   // 接管了但现在没列出来的（停了、被删了），也要能看到。
@@ -202,7 +208,10 @@ pub async fn set_watch(
   Path((server, unit)): Path<(String, String)>,
   Json(body): Json<WatchBody>,
 ) -> ApiResult<serde_json::Value> {
-  auth.require(Perm::Apply)?;
+  crate::host_access::require(
+    &auth,
+    crate::host_access::HostTarget::HostUnits { server: &server },
+  )?;
   let snap = snapshot::load(&s.db).await?;
   if !snap.world.servers.contains_key(&server) {
     return Err(server_not_found(&server).into());
@@ -246,7 +255,30 @@ pub async fn logs(
   Path((server, unit)): Path<(String, String)>,
   Query(q): Query<LogsQuery>,
 ) -> ApiResult<String> {
-  auth.require(Perm::Read)?;
+  crate::host_access::require(
+    &auth,
+    crate::host_access::HostTarget::HostUnits { server: &server },
+  )?;
+  let snap = snapshot::load(&s.db).await?;
+  if !snap.world.servers.contains_key(&server) {
+    return Err(server_not_found(&server).into());
+  }
+  if !watched(&s, &server).await.contains(&unit)
+    && !fetch(&s, &server).await?.iter().any(|u| u.unit == unit)
+  {
+    return Err(
+      ApiError::new(
+        ErrorCode::Forbidden,
+        format!(
+          "unit {unit} 不在宿主机程序列表或已接管名单中，不能读取其日志"
+        ),
+      )
+      .with_hint(
+        "仅支持查看“宿主机程序”里列出的非系统服务日志，或先接管该程序",
+      )
+      .into(),
+    );
+  }
   let text: String = s
     .hub
     .call(

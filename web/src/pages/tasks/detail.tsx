@@ -19,7 +19,7 @@ const TABS = ["overview", "runs", "settings"] as const;
 export function TaskDetail() {
   const { name = "" } = useParams();
   const actions = useActions();
-  const { data, error, refresh } = usePoll<TaskView>(`/api/tasks/${encodeURIComponent(name)}`, 10000);
+  const { data, error, refresh } = usePoll<TaskView>(`/api/tasks/${encodeURIComponent(name)}?reveal=true`, 10000);
   const [tab, setTab] = useTab(TABS, "overview");
   useEffect(() => { window.addEventListener("wharf:tasks", refresh); return () => window.removeEventListener("wharf:tasks", refresh); }, [refresh]);
   const task = data;

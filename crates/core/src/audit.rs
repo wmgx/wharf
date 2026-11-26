@@ -144,8 +144,18 @@ pub fn should_record(method: &Method, path: &str) -> bool {
   }
   *method == Method::GET
     && (path == "/api/export"
+      || path == "/api/shell-log"
       || path == "/api/sso/accounts"
       || path.starts_with("/api/sso/accounts/")
+      || (path.starts_with("/api/oidc/clients/")
+        && path.ends_with("/secret"))
+      || (path.starts_with("/api/servers/")
+        && (path.ends_with("/dirs")
+          || path.ends_with("/host-units")
+          || (path.contains("/host-units/")
+            && path.ends_with("/logs"))))
+      || (path.starts_with("/api/edge/")
+        && path.ends_with("/script"))
       || path.ends_with("/terminal")
       || path.ends_with("/files/download")
       || path.ends_with("/connect"))
@@ -219,7 +229,7 @@ pub async fn list(
   auth: Auth,
   Query(q): Query<AuditQuery>,
 ) -> ApiResult<Vec<AuditEntry>> {
-  auth.require(Perm::Read)?;
+  auth.require(Perm::Admin)?;
   let rows = state
     .db
     .call(move |c| {

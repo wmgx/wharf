@@ -22,7 +22,7 @@ use super::{
   Delivery, FiringEntry, KEEP, NOTICES, Op, Override, PushArgs,
   RULES, Verdict, ack, digest, ensure_loaded, ev, issue_alert,
   judge_consecutive, push_with_world, resources, set_firing,
-  suppress, view, with,
+  suppress, view_for, with,
 };
 use crate::{
   api::ApiResult,
@@ -667,7 +667,8 @@ pub async fn add_api(
   auth: Auth,
   Json(req): Json<CustomAlertRuleRequest>,
 ) -> ApiResult<CustomAlertRuleView> {
-  auth.require(Perm::Admin)?;
+  auth.require(Perm::Apply)?;
+  crate::token_scope::require_service(&auth, &req.service)?;
   Ok(Json(add_rule(&s, req, now_ms()).await?))
 }
 
@@ -677,7 +678,20 @@ pub async fn rm_api(
   auth: Auth,
   Path(name): Path<String>,
 ) -> ApiResult<AlertsView> {
-  auth.require(Perm::Admin)?;
+  auth.require(Perm::Apply)?;
+  if let Some(allowed) = &auth.services {
+    ensure_loaded(&s).await;
+    let ok = with(|m| {
+      m.custom_rules
+        .get(&name)
+        .is_some_and(|cr| allowed.contains(&cr.service))
+    });
+    if !ok {
+      return Err(
+        crate::token_scope::forbidden(&auth.name, allowed, "").into(),
+      );
+    }
+  }
   remove_rule(&s, &name, now_ms()).await?;
-  Ok(Json(view(&s).await?))
+  Ok(Json(view_for(&s, &auth).await?))
 }

@@ -29,11 +29,12 @@ pub enum TaskCmd {
   Ls,
   Show {
     name: String,
+    /// 查看完整触发/报到地址（含口令，需要写权限）。
+    #[arg(long)]
+    reveal: bool,
   },
   /// 立即运行并等待结果；失败时退出码为 4。
-  Run {
-    name: String,
-  },
+  Run { name: String },
   /// 最近的运行记录，最新一条带完整输出。
   Logs {
     name: String,
@@ -156,24 +157,34 @@ pub async fn task(
       });
       Ok(())
     }
-    TaskCmd::Show { name } => {
-      let t: TaskView =
-        c.get(&format!("/api/tasks/{}", seg(&name))).await?;
+    TaskCmd::Show { name, reveal } => {
+      let path = if reveal {
+        format!("/api/tasks/{}?reveal=true", seg(&name))
+      } else {
+        format!("/api/tasks/{}", seg(&name))
+      };
+      let t: TaskView = c.get(&path).await?;
       out(j, &t, |t| {
         println!(
           "{}",
           serde_json::to_string_pretty(&t.spec).unwrap_or_default()
         );
+        let mut masked = false;
         if let TaskKind::Script { runtime, code, .. } = &t.spec.how {
           println!("运行环境：{}", runtime_name(*runtime));
           if let Some(url) = &t.hook_url {
             println!("触发地址：{url}");
+            masked |= !reveal;
           }
           print!("\n{code}");
         }
         if let Some(url) = &t.ping_url {
           println!("\n报到：脚本成功后 curl -fsS -m 10 {url}");
           println!("失败时：curl -fsS -m 10 {url}/fail");
+          masked |= !reveal;
+        }
+        if masked {
+          println!("完整地址含口令，加上 --reveal 查看（需写权限）");
         }
       });
       Ok(())

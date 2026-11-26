@@ -102,20 +102,18 @@ pub async fn preview(
   auth: Auth,
   Json(req): Json<ImportRequest>,
 ) -> ApiResult<ImportPreview> {
-  auth.require(Perm::Plan)?;
+  let (kind, raw_name) = target(&req.project, &req.container)?;
+  crate::host_access::require(
+    &auth,
+    crate::host_access::HostTarget::ImportPreview {
+      server: &req.server,
+      target: raw_name,
+    },
+  )?;
   let snap = snapshot::load(&s.db).await?;
   if !snap.world.servers.contains_key(&req.server) {
     return Err(server_not_found(&req.server).into());
   }
-  let raw_name = match (&req.project, &req.container) {
-    (Some(p), None) => p,
-    (None, Some(c)) => c,
-    _ => {
-      return Err(
-        ApiError::invalid("compose 项目和容器二选一").into(),
-      );
-    }
-  };
   let name = req
     .name
     .clone()
@@ -130,6 +128,32 @@ pub async fn preview(
       )
       .with_hint("换一个服务名"),
     )?;
+  }
+  if kind == "project" && managed(&snap.world, raw_name) {
+    return Err(
+      ApiError::new(
+        ErrorCode::Forbidden,
+        format!(
+          "项目 {raw_name} 属于 Wharf 管理，不能作为未纳管容器导入"
+        ),
+      )
+      .into(),
+    );
+  }
+  let found = discover(&s, &snap.world, &req.server).await?;
+  if !found.iter().any(|item| {
+    crate::service_monitor::unmanaged::target(item)
+      == (kind, raw_name)
+  }) {
+    return Err(
+      ApiError::not_found(
+        "没找到这个未纳管容器或项目，可能已被 Wharf 纳管或已删除",
+      )
+      .with_hint(
+        "先执行 wharf server unmanaged <服务器> 查看可导入列表",
+      )
+      .into(),
+    );
   }
   let raw: ImportRaw = s
     .hub
@@ -160,13 +184,21 @@ pub async fn preview(
       )?;
     }
   };
+  let (compose, redacted_keys) =
+    crate::redact::redact_compose_secrets(&converted.compose);
   let mut warnings = raw.warnings;
   warnings.extend(converted.warnings);
+  if !redacted_keys.is_empty() {
+    warnings.push(format!(
+      "以下环境变量疑似包含口令，预览已脱敏：{}（导入前请在密钥管理中创建密钥并写成 [[密钥名]]）",
+      redacted_keys.join("、")
+    ));
+  }
   Ok(Json(ImportPreview {
     spec: ServiceSpec {
       server: req.server,
       source: Source::Compose {
-        content: Some(converted.compose),
+        content: Some(compose),
         file: None,
       },
       ports: converted.ports,

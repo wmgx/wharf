@@ -10,7 +10,7 @@ use wharf_api_types::{
   },
 };
 
-use super::{AckEntry, ensure_loaded, view, with};
+use super::{AckEntry, ensure_loaded, view_for, with};
 use crate::{
   api::ApiResult,
   auth::Auth,
@@ -255,6 +255,35 @@ pub(super) async fn unack(
   Ok(())
 }
 
+async fn check_ack_scope(
+  s: &AppState,
+  auth: &Auth,
+  rule: &str,
+  subject: &str,
+) -> Result<(), ApiError> {
+  let Some(allowed) = &auth.services else {
+    return Ok(());
+  };
+  ensure_loaded(s).await;
+  let custom_svc =
+    with(|m| m.custom_rules.get(rule).map(|r| r.service.clone()));
+  let snap = crate::snapshot::load(&s.db).await?;
+  if !crate::scope_filter::alert_in_scope(
+    allowed,
+    &snap.world,
+    custom_svc.as_deref(),
+    rule,
+    Some(subject),
+  ) {
+    return Err(crate::token_scope::forbidden(
+      &auth.name,
+      allowed,
+      "；这条告警不属于名单里的服务或域名",
+    ));
+  }
+  Ok(())
+}
+
 /// `POST /api/alerts/ack`
 pub async fn ack_api(
   State(s): State<Arc<AppState>>,
@@ -262,9 +291,10 @@ pub async fn ack_api(
   Json(req): Json<AlertAckRequest>,
 ) -> ApiResult<AlertsView> {
   auth.require(Perm::Apply)?;
+  check_ack_scope(&s, &auth, &req.rule, &req.subject).await?;
   ack_at(&s, &req.rule, &req.subject, &auth.name, req.note, now_ms())
     .await?;
-  Ok(Json(view(&s).await?))
+  Ok(Json(view_for(&s, &auth).await?))
 }
 
 /// `POST /api/alerts/unack`
@@ -274,6 +304,7 @@ pub async fn unack_api(
   Json(req): Json<AlertUnackRequest>,
 ) -> ApiResult<AlertsView> {
   auth.require(Perm::Apply)?;
+  check_ack_scope(&s, &auth, &req.rule, &req.subject).await?;
   unack(&s, &req.rule, &req.subject).await?;
-  Ok(Json(view(&s).await?))
+  Ok(Json(view_for(&s, &auth).await?))
 }

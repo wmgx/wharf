@@ -15,7 +15,7 @@ use wharf_api_types::{
 use super::{
   KEEP, NOTICES, Override, RULES,
   custom::{CustomRule, level_str, parse_level, service_exists},
-  ensure_loaded, set_firing, split_unit, suppress, view, with,
+  ensure_loaded, set_firing, split_unit, suppress, view_for, with,
 };
 use crate::{
   api::ApiResult,
@@ -293,7 +293,8 @@ pub async fn patch_service(
   Path((id, service)): Path<(String, String)>,
   Json(p): Json<AlertPatch>,
 ) -> ApiResult<AlertsView> {
-  auth.require(Perm::Admin)?;
+  auth.require(Perm::Apply)?;
+  crate::token_scope::require_service(&auth, &service)?;
   set_override(&s, &id, &service, p, now_ms()).await?;
-  Ok(Json(view(&s).await?))
+  Ok(Json(view_for(&s, &auth).await?))
 }

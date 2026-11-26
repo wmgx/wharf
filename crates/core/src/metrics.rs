@@ -321,6 +321,7 @@ pub async fn query(
   Query(q): Query<MetricsQuery>,
 ) -> ApiResult<MetricsView> {
   auth.require(Perm::Read)?;
+  crate::token_scope::require_service(&auth, &q.subject)?;
   let (span, step) = range_ms(q.range.as_deref().unwrap_or("24h"))?;
   let names: Vec<String> = q
     .names

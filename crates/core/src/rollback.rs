@@ -110,7 +110,7 @@ pub async fn target(
     service: name,
     deployment_id: *id,
     deployed_at: to_time(*created),
-    spec,
+    spec: crate::service_monitor::heartbeat::redact(&spec),
   }))
 }
 

@@ -58,6 +58,21 @@ pub async fn show(
   Query(q): Query<ReportQuery>,
 ) -> ApiResult<ReportView> {
   auth.require(Perm::Read)?;
+  if let Some(allowed) = &auth.services {
+    if q.server.is_some() {
+      return Err(
+        crate::token_scope::forbidden(
+          &auth.name,
+          allowed,
+          "；不能按服务器查报告",
+        )
+        .into(),
+      );
+    }
+    if let Some(svc) = q.service.as_deref() {
+      crate::token_scope::require_service(&auth, svc)?;
+    }
+  }
   let days = q.days.unwrap_or(7);
   if days != 1 && days != 7 {
     return Err(
@@ -69,6 +84,7 @@ pub async fn show(
   let snap = snapshot::load(&s.db).await?;
   let server_filter = q.server.clone();
   let service_filter = q.service.clone();
+  let allowed_services = auth.services.clone();
   let now = now_ms();
   let world = snap.world;
   let view = s
@@ -81,6 +97,7 @@ pub async fn show(
         days,
         server_filter.as_deref(),
         service_filter.as_deref(),
+        allowed_services.as_ref(),
         MAX_SCAN_POINTS,
       )
     })
@@ -209,9 +226,12 @@ fn update_bounds(
 }
 
 fn alert_matches_filter(
+  world: &World,
+  source: &str,
   subject: Option<&str>,
   server: Option<&str>,
   service: Option<&str>,
+  allowed_services: Option<&BTreeSet<String>>,
   server_services: &BTreeSet<String>,
 ) -> bool {
   let matches_svc = |s: &str, svc: &str| {
@@ -221,6 +241,18 @@ fn alert_matches_filter(
         .is_some_and(|rest| rest.starts_with(':'))
       || s.strip_prefix("服务 ").is_some_and(|rest| rest == svc)
   };
+  if let Some(allowed) = allowed_services {
+    let in_allowed = subject.is_some_and(|s| {
+      allowed.iter().any(|svc| matches_svc(s, svc))
+        || (matches!(source, "domain_down" | "cert_expiring")
+          && world.routes.get(s).is_some_and(|r| {
+            crate::token_scope::route_spec_in_scope(allowed, &r.spec)
+          }))
+    });
+    if !in_allowed {
+      return false;
+    }
+  }
   if let Some(svc) = service {
     return subject.is_some_and(|s| matches_svc(s, svc));
   }
@@ -241,6 +273,7 @@ fn alert_matches_filter(
   true
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compute_at(
   c: &Connection,
   world: &World,
@@ -248,6 +281,7 @@ fn compute_at(
   days: u32,
   server_filter: Option<&str>,
   service_filter: Option<&str>,
+  allowed_services: Option<&BTreeSet<String>>,
   max_points: usize,
 ) -> Result<ReportView, ApiError> {
   if let Some(srv) = server_filter
@@ -269,12 +303,15 @@ fn compute_at(
     }
   }
 
-  let selected_servers: Vec<String> =
+  let selected_servers: Vec<String> = if allowed_services.is_some() {
+    vec![]
+  } else {
     match (server_filter, service_filter) {
       (Some(srv), _) => vec![srv.to_string()],
       (None, Some(_)) => vec![],
       (None, None) => world.servers.keys().cloned().collect(),
-    };
+    }
+  };
   let selected_services: Vec<(String, String, Option<u64>)> =
     if let Some(svc) = service_filter {
       let row = &world.services[svc];
@@ -287,8 +324,9 @@ fn compute_at(
       world
         .services
         .iter()
-        .filter(|(_, r)| {
+        .filter(|(n, r)| {
           server_filter.is_none_or(|srv| r.spec.server == srv)
+            && allowed_services.is_none_or(|a| a.contains(*n))
         })
         .map(|(n, r)| {
           (n.clone(), r.spec.server.clone(), service_limit(&r.spec))
@@ -489,9 +527,12 @@ fn compute_at(
   for row in alert_rows {
     let (at, source, subject) = row.map_err(sql_err)?;
     if !alert_matches_filter(
+      world,
+      &source,
       subject.as_deref(),
       server_filter,
       service_filter,
+      allowed_services,
       &server_services,
     ) {
       continue;

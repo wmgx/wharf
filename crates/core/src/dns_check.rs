@@ -536,6 +536,11 @@ pub async fn show(
   let host = hostname(&host)?;
   let started = watches().get(&host).map(|w| w.started);
   let snap = snapshot::load(&s.db).await?;
+  crate::token_scope::require_route_by_host(
+    &auth,
+    &snap.world,
+    &host,
+  )?;
   let result = check(&host, expectation(&snap, &host).await?).await;
   update(&host, started, &result);
   Ok(Json(result))
