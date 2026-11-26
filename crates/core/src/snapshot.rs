@@ -105,6 +105,10 @@ pub async fn load(db: &Db) -> Result<Snapshot, ApiError> {
     .call(|c| crate::db::setting(c, crate::egress::API_VIA))
     .await?;
   crate::egress::apply_api_route(api.as_deref(), &snap);
+  crate::source_trust::refresh_core_proxies(
+    &snap.world,
+    &snap.net(&snap.world),
+  );
   Ok(snap)
 }
 
@@ -213,6 +217,14 @@ impl Snapshot {
         })
         .collect(),
       reach: self.reach.clone(),
+      cloudflare_ips: crate::cloudflare_ips::cached_cidrs(),
+      tailnet_ips: self
+        .secrets
+        .get(crate::tailscale::OAUTH_SECRET)
+        .map(|credential| {
+          crate::tailnet_ips::cached_cidrs(credential)
+        })
+        .unwrap_or_default(),
       ..base
     }
   }
@@ -558,6 +570,14 @@ pub fn gateway_render_with_acme(
       gate,
       wildcard: false,
       internal: route.spec.internal,
+      internal_ranges: if route.spec.internal {
+        crate::source_trust::internal_route_ranges(
+          net,
+          &gateway.spec.server,
+        )
+      } else {
+        vec![]
+      },
       expires_at: route.spec.expires_at,
       dns: (route.spec.internal
         && gateway.spec.tls == GatewayTls::Auto
@@ -647,6 +667,12 @@ pub fn gateway_render_with_acme(
           &forwards,
           crate::link::caddy_site(world, net, name, &gateway.spec)?,
           net.gate_public.as_deref(),
+          &crate::source_trust::gateway_trusted_proxies(
+            world,
+            net,
+            &gateway.spec,
+            &net.cloudflare_ips,
+          ),
           fill,
         ),
       )

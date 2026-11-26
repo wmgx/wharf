@@ -489,15 +489,18 @@ impl World {
         }
         Change::UpsertGateway { name, spec } => {
           validate_name("网关", name)?;
+          let mut spec = spec.clone();
+          if let Some(tp) = &mut spec.trusted_proxies {
+            validate_gateway_proxies(name, spec.kind, tp)?;
+            if tp.is_empty() {
+              spec.trusted_proxies = None;
+            }
+          }
           let version =
             self.gateways.get(name).map(|g| g.version).unwrap_or(0);
-          self.gateways.insert(
-            name.clone(),
-            GatewayRow {
-              spec: spec.clone(),
-              version,
-            },
-          );
+          self
+            .gateways
+            .insert(name.clone(), GatewayRow { spec, version });
         }
         Change::RemoveGateway { name } => {
           if self.gateways.remove(name).is_none() {
@@ -953,6 +956,13 @@ impl World {
     for (name, gateway) in &self.gateways {
       if !self.servers.contains_key(&gateway.spec.server) {
         return Err(server_not_found(&gateway.spec.server));
+      }
+      if let Some(tp) = &gateway.spec.trusted_proxies {
+        validate_gateway_proxies(
+          name,
+          gateway.spec.kind,
+          &mut tp.clone(),
+        )?;
       }
       if gateway.spec.kind == GatewayKind::CloudflareTunnel {
         let s = &gateway.spec;
@@ -1643,6 +1653,19 @@ fn route_hosts(fleet: &Fleet) -> Result<BTreeSet<String>, ApiError> {
   Ok(hosts)
 }
 
+fn validate_gateway_proxies(
+  name: &str,
+  kind: GatewayKind,
+  spec: &mut wharf_api_types::trusted_proxies::TrustedProxiesSpec,
+) -> Result<(), ApiError> {
+  if kind != GatewayKind::Caddy {
+    return Err(ApiError::invalid(format!(
+      "网关 {name}：可信代理只适用于 caddy 网关"
+    )));
+  }
+  spec.normalize()
+}
+
 pub fn normalize_hostname(
   hostname: &str,
 ) -> Result<String, ApiError> {
@@ -2019,6 +2042,33 @@ fn check_custom_caddy(text: &str) -> Result<(), &'static str> {
 mod tests {
   use super::*;
   use wharf_api_types::spec::PortSpec;
+
+  #[test]
+  fn tunnel_gateway_rejects_trusted_proxies() {
+    let mut world = World::default();
+    world.servers.insert(
+      "s1".into(),
+      ServerRow {
+        settings: Default::default(),
+        version: 1,
+      },
+    );
+    let spec = serde_json::from_value(json!({
+      "kind": "cloudflare_tunnel", "server": "s1", "account": "cf",
+      "trusted_proxies": {"cloudflare": true},
+    }))
+    .unwrap();
+    world
+      .gateways
+      .insert("edge".into(), GatewayRow { spec, version: 1 });
+    assert!(
+      world
+        .validate()
+        .unwrap_err()
+        .message
+        .contains("可信代理只适用于 caddy 网关")
+    );
+  }
 
   #[test]
   fn share_route_checks() {
@@ -2742,6 +2792,7 @@ services:
         error_page: None,
         wildcard: vec![],
         layer4: vec![],
+        trusted_proxies: None,
       },
     }])
     .unwrap();
@@ -2784,6 +2835,7 @@ services:
       error_page: None,
       wildcard: vec![],
       layer4: vec![],
+      trusted_proxies: None,
     };
     let route = |backup: &str| RouteSpec {
       sso: None,

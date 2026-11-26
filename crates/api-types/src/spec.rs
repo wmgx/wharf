@@ -516,6 +516,10 @@ pub struct GatewaySpec {
   /// caddy：四层转发，只经过入口所在机器，服务自己的端口不对公网开放。
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub layer4: Vec<Layer4Forward>,
+  /// caddy：可信上游代理（Cloudflare 官方网段、集群网关/组网地址、自定义 CIDR）。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub trusted_proxies:
+    Option<crate::trusted_proxies::TrustedProxiesSpec>,
 }
 
 /// 在入口机器上监听 TCP 或 UDP，原样转给服务。服务和上游二选一。

@@ -159,9 +159,10 @@ pub async fn access_token(
     })
     .await
     .map_err(|_| ReadError::Unavailable)?;
-  let body: Value = checked(resp)?
-    .json()
+  let body = crate::http::limited_body(checked(resp)?, 64 * 1024)
     .await
+    .map_err(|_| ReadError::Unavailable)?;
+  let body: Value = serde_json::from_slice(&body)
     .map_err(|_| ReadError::Unavailable)?;
   body["access_token"]
     .as_str()
@@ -176,9 +177,11 @@ pub async fn devices(token: &str) -> Result<Value, ReadError> {
     })
     .await
     .map_err(|_| ReadError::Unavailable)?;
-  let data: Value = checked(resp)?
-    .json()
-    .await
+  let body =
+    crate::http::limited_body(checked(resp)?, 4 * 1024 * 1024)
+      .await
+      .map_err(|_| ReadError::Unavailable)?;
+  let data: Value = serde_json::from_slice(&body)
     .map_err(|_| ReadError::Unavailable)?;
   if !data["devices"].is_array() {
     return Err(ReadError::Unavailable);

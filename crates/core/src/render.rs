@@ -48,6 +48,10 @@ pub struct Net {
   pub heartbeat_url: Option<String>,
   /// 实际使用的内网地址：服务器设置的覆盖值，否则是 agent 检测到的组网地址。
   pub private: BTreeMap<String, PrivateAddr>,
+  pub reported_private: BTreeMap<String, PrivateAddr>,
+  pub docker_subnets: BTreeMap<String, Vec<String>>,
+  pub cloudflare_ips: Vec<String>,
+  pub tailnet_ips: Vec<ipnet::IpNet>,
   /// agent 上报的其他网卡地址，用来在缺内网地址时给出建议命令。
   pub lan_ips: BTreeMap<String, Vec<String>>,
   /// 服务器设置里额外绑定的局域网地址。
@@ -85,7 +89,17 @@ impl Net {
         net.private.insert(name.clone(), addr);
       }
       if let Some(r) = report {
-        net.lan_ips.insert(name.clone(), r.lan_ips.clone());
+        net.lan_ips.insert(
+          name.clone(),
+          crate::source_trust::private_ipv4s(&r.lan_ips),
+        );
+        if !public && let Some(addr) = &r.private_addr {
+          net.reported_private.insert(name.clone(), addr.clone());
+        }
+        net.docker_subnets.insert(
+          name.clone(),
+          r.docker_subnets.iter().map(|d| d.subnet.clone()).collect(),
+        );
       }
       if !server.settings.lan_addrs.is_empty() {
         net
@@ -1114,6 +1128,7 @@ pub struct Site {
   pub custom: Option<String>,
   /// 只放行内网来源。
   pub internal: bool,
+  pub internal_ranges: Vec<String>,
   /// 临时分享的到期时间（毫秒），过了就断开。
   pub expires_at: Option<i64>,
   /// 泛域名站点：只签证书，未匹配具体域名的请求直接断开。
@@ -1241,10 +1256,12 @@ fn caddyfile(
     forwards,
     link,
     gate_public,
+    &[],
     None,
   )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn caddyfile_with_acme(
   name: &str,
   spec: &GatewaySpec,
@@ -1252,6 +1269,7 @@ pub fn caddyfile_with_acme(
   forwards: &[(bool, u16, String)],
   link: bool,
   gate_public: Option<&str>,
+  trusted_proxies: &[String],
   fill: Option<AcmeDnsFill<'_>>,
 ) -> String {
   let mut out = format!(
@@ -1283,6 +1301,10 @@ pub fn caddyfile_with_acme(
   if sites.iter().any(|s| s.gate.is_some()) {
     out.push_str("\torder wharf_sso before basic_auth\n");
   }
+  crate::source_trust::render_proxy_options(
+    &mut out,
+    trusted_proxies,
+  );
   if !forwards.is_empty() {
     out.push_str("\tlayer4 {\n");
     let mut forwards = forwards.to_vec();
@@ -1299,6 +1321,10 @@ pub fn caddyfile_with_acme(
   out.push_str(&format!(
     "\n(wharf_upstream) {{\n\tlb_try_duration {UPSTREAM_TRY_DURATION}\n\tlb_try_interval {UPSTREAM_TRY_INTERVAL}\n}}\n"
   ));
+  crate::source_trust::render_proxy_headers(
+    &mut out,
+    trusted_proxies,
+  );
   if sites.iter().any(|s| s.block_scanners) {
     out.push_str(&format!(
       "\n(wharf_scanners) {{\n\t@wharf_scanner_path path {SCANNER_PATHS}\n\t@wharf_scanner_ua header_regexp User-Agent \"{SCANNER_UA}\"\n\trespond @wharf_scanner_path 404\n\trespond @wharf_scanner_ua 404\n}}\n"
@@ -1330,6 +1356,9 @@ pub fn caddyfile_with_acme(
       continue;
     }
     out.push_str("\timport wharf_errors\n");
+    if !trusted_proxies.is_empty() {
+      out.push_str("\timport wharf_strip_forwarded\n");
+    }
     if let Some(ms) = site.expires_at {
       out.push_str(&format!(
         "\t@wharf_expired expression `int({{time.now.unix}}) >= {}`\n\tabort @wharf_expired\n",
@@ -1340,15 +1369,25 @@ pub fn caddyfile_with_acme(
       out.push_str(&dns_tls(name, subdomain, fill));
     }
     if site.internal {
-      out.push_str("\t@wharf_outside not remote_ip private_ranges 100.64.0.0/10 fd7a:115c:a1e0::/48\n\tabort @wharf_outside\n");
+      let ranges = if site.internal_ranges.is_empty() {
+        "127.0.0.0/8 ::1/128".to_string()
+      } else {
+        site.internal_ranges.join(" ")
+      };
+      out.push_str(&format!("\t@wharf_outside not remote_ip {ranges}\n\tabort @wharf_outside\n"));
     }
     if site.block_scanners {
       out.push_str("\timport wharf_scanners\n");
     }
     if let Some(n) = site.rate_limit {
       let zone = site.hostname.replace('.', "_");
+      let key = if trusted_proxies.is_empty() {
+        "{remote_host}"
+      } else {
+        "{client_ip}"
+      };
       out.push_str(&format!(
-        "\trate_limit {{\n\t\tzone wharf_{zone} {{\n\t\t\tkey {{remote_host}}\n\t\t\tevents {n}\n\t\t\twindow 1m\n\t\t}}\n\t}}\n"
+        "\trate_limit {{\n\t\tzone wharf_{zone} {{\n\t\t\tkey {key}\n\t\t\tevents {n}\n\t\t\twindow 1m\n\t\t}}\n\t}}\n"
       ));
     }
     if let Some(custom) = &site.custom {
@@ -1565,7 +1604,12 @@ mod tests {
       caddyfile("edge", &gw, &[site.clone()], &[], false, None);
     assert!(out.contains("dns acmedns {"));
     assert!(!out.contains("import wharf_access"));
-    assert!(out.contains("@wharf_outside not remote_ip private_ranges 100.64.0.0/10 fd7a:115c:a1e0::/48\n\tabort @wharf_outside"));
+    assert!(out.contains("@wharf_outside not remote_ip 127.0.0.0/8 ::1/128\n\tabort @wharf_outside"));
+    for broad in
+      ["private_ranges", "100.64.0.0/10", "fd7a:115c:a1e0::/48"]
+    {
+      assert!(!out.contains(broad));
+    }
     assert!(
       out.find("import wharf_errors").unwrap()
         < out.find("\ttls {").unwrap()
@@ -1579,15 +1623,68 @@ mod tests {
       1
     );
     site.dns = None;
+    site.internal_ranges =
+      ["10.20.0.0/24", "100.64.0.7/32", "127.0.0.0/8", "::1/128"]
+        .map(str::to_string)
+        .to_vec();
     let out =
       caddyfile("edge", &gw, &[site.clone()], &[], false, None);
-    assert!(out.contains("abort @wharf_outside"));
+    assert!(out.contains("@wharf_outside not remote_ip 10.20.0.0/24 100.64.0.7/32 127.0.0.0/8 ::1/128"));
     assert!(!out.contains("dns acmedns"));
     site.internal = false;
     let out = caddyfile("edge", &gw, &[site], &[], false, None);
     assert!(!out.contains("wharf_outside"));
     assert!(!out.contains("dns acmedns"));
     assert!(!out.contains("order abort"));
+  }
+
+  #[test]
+  fn caddyfile_trusted_proxies_controls_headers_and_rate_limit() {
+    let mut spec: GatewaySpec = serde_json::from_value(serde_json::json!({
+      "kind": "caddy", "server": "s1", "error_page": "fixture",
+      "trusted_proxies": {"cloudflare": true, "cluster": true, "cidrs": ["203.0.113.0/24"]}
+    })).unwrap();
+    let net = Net::default();
+    let ranges = crate::source_trust::gateway_trusted_proxies(
+      &crate::world::World::default(),
+      &net,
+      &spec,
+      &["173.245.48.0/20".into()],
+    );
+    let sites = [Site {
+      hostname: "example.com".into(),
+      upstream: "127.0.0.1:20005".into(),
+      rate_limit: Some(42),
+      ..Default::default()
+    }];
+    let out = caddyfile_with_acme(
+      "edge",
+      &spec,
+      &sites,
+      &[],
+      false,
+      None,
+      &ranges,
+      None,
+    );
+    assert!(out.contains("trusted_proxies static 127.0.0.1/32 173.245.48.0/20 203.0.113.0/24 ::1/128\n\t\ttrusted_proxies_strict"));
+    assert!(out.contains("(wharf_strip_forwarded)"));
+    assert!(out.contains("import wharf_strip_forwarded"));
+    assert!(out.contains(
+      "request_header @wharf_untrusted_proxy -CF-Connecting-IP"
+    ));
+    assert!(out.contains("request_header X-Real-IP {client_ip}"));
+    assert!(out.contains("key {client_ip}"));
+    spec.trusted_proxies = None;
+    let legacy = caddyfile("edge", &spec, &sites, &[], false, None);
+    assert!(!legacy.contains("trusted_proxies"));
+    assert!(!legacy.contains("wharf_strip_forwarded"));
+    assert!(legacy.contains("key {remote_host}"));
+    // 基准来自加入可信代理选项前的同一份配置。
+    assert_eq!(
+      hash(&legacy),
+      "3304837aead9414fe3d3192bbabc2f263fc2817e5ee805cabeac7885c01b2cdf"
+    );
   }
 
   #[test]
@@ -2011,6 +2108,7 @@ mod tests {
       error_page: None,
       wildcard: vec![],
       layer4: vec![],
+      trusted_proxies: None,
     };
     let out = caddyfile(
       "edge",
@@ -2251,6 +2349,7 @@ mod tests {
       error_page: None,
       wildcard: vec![],
       layer4: vec![],
+      trusted_proxies: None,
     };
     let out = caddyfile(
       "edge",
@@ -2286,6 +2385,7 @@ mod tests {
       error_page: None,
       wildcard: vec![],
       layer4: vec![],
+      trusted_proxies: None,
     };
     let out = tunnel_compose("cf", &spec, None);
     assert!(

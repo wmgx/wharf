@@ -23,6 +23,7 @@ use crate::{
   audit::AuditSlot,
   auth::{Auth, hash_token},
   db::{now_ms, sql_err, to_time},
+  lockout::{self, LockScope},
   login,
   state::AppState,
   world::normalize_hostname,
@@ -294,7 +295,8 @@ async fn verify_reveal(
     ));
   };
   let key = login::client_key(peer.ip(), headers);
-  if let Some(minutes) = login::locked(&key) {
+  if let Some(minutes) = lockout::locked(LockScope::AdminLogin, &key)
+  {
     return Err(ApiError::new(
       ErrorCode::Forbidden,
       format!("输错次数太多，{minutes} 分钟后再试"),
@@ -306,14 +308,20 @@ async fn verify_reveal(
   .await
   .map_err(|_| ApiError::internal("验证登录密码失败"))?
   {
-    login::record_failure(&key);
+    lockout::record_and_notify(
+      state,
+      LockScope::AdminLogin,
+      &key,
+      Some("查看应用账号密码"),
+    )
+    .await;
     tokio::time::sleep(Duration::from_secs(1)).await;
     return Err(ApiError::new(
       ErrorCode::Forbidden,
       "Wharf 登录密码不对",
     ));
   }
-  login::clear_failures(&key);
+  lockout::clear(LockScope::AdminLogin, &key);
   if let Some(session) = session {
     let mut verified =
       VERIFIED.lock().unwrap_or_else(|e| e.into_inner());

@@ -176,7 +176,7 @@ async fn insert(
       )
       .and_then(|_| {
         c.execute(
-          "DELETE FROM audit_log WHERE at < ?1 OR (method = 'login_failed' AND at < ?2)",
+          "DELETE FROM audit_log WHERE at < ?1 OR (method IN ('login_failed', 'gate_key_failed') AND at < ?2)",
           params![row.at - 90 * 24 * 3600 * 1000, row.at - 7 * 24 * 3600 * 1000],
         )
       })
@@ -190,7 +190,7 @@ async fn insert(
   result
 }
 
-/// 记一条登录类的记录。`action` 是 login / login_failed / logout / setup。
+/// 记一条登录类的记录。`action` 是 login / login_failed / gate_key_failed / logout / setup。
 pub async fn login_event(
   state: &AppState,
   action: &str,

@@ -1176,6 +1176,10 @@ export interface GatewaySpec {
    */
   tls?: GatewayTls;
   /**
+   * caddy：可信上游代理（Cloudflare 官方网段、集群网关/组网地址、自定义 CIDR）。
+   */
+  trusted_proxies?: TrustedProxiesSpec | null;
+  /**
    * caddy：签一张 *.<zone>，这个入口上 zone 下一级的域名都用它。
    */
   wildcard?: string[];
@@ -2922,6 +2926,24 @@ export type Tone = "ok" | "warn" | "bad" | "idle";
 export interface TotpView {
   enabled: boolean;
   recovery_left: number;
+}
+
+/**
+ * Caddy 网关的可信上游代理配置。
+ */
+export interface TrustedProxiesSpec {
+  /**
+   * 额外手动指定的可信代理 IP 或 CIDR（如前置 CDN 或局域网反代）。
+   */
+  cidrs?: string[];
+  /**
+   * 自动同步并信任 Cloudflare 官方回源网段（IPv4 + IPv6）。
+   */
+  cloudflare?: boolean;
+  /**
+   * 自动包含本集群所有网关和组网服务器的实际地址（精确 /32 或 /128）。
+   */
+  cluster?: boolean;
 }
 
 /**

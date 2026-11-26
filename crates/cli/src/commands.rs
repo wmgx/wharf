@@ -2884,6 +2884,55 @@ async fn gateway(
       changes(c, vec![Change::UpsertGateway { name, spec }], apply, j)
         .await
     }
+    GatewayCmd::TrustedProxies {
+      name,
+      cloudflare,
+      cluster,
+      add,
+      rm,
+      off,
+      apply,
+    } => {
+      use wharf_api_types::trusted_proxies::parse_cidr;
+
+      let mut spec = c
+        .get::<GatewayView>(&format!("/api/gateways/{}", seg(&name)))
+        .await?
+        .spec;
+      if cloudflare.is_none()
+        && cluster.is_none()
+        && add.is_empty()
+        && rm.is_empty()
+        && !off
+      {
+        out(j, &spec.trusted_proxies, pretty);
+        return Ok(());
+      }
+      if off {
+        spec.trusted_proxies = None;
+      } else {
+        let mut proxies =
+          spec.trusted_proxies.take().unwrap_or_default();
+        proxies.cloudflare = cloudflare.unwrap_or(proxies.cloudflare);
+        proxies.cluster = cluster.unwrap_or(proxies.cluster);
+        proxies.normalize()?;
+        for cidr in add {
+          let cidr = parse_cidr(&cidr)?.to_string();
+          if !proxies.cidrs.contains(&cidr) {
+            proxies.cidrs.push(cidr);
+          }
+        }
+        for cidr in rm {
+          let cidr = parse_cidr(&cidr)?.to_string();
+          proxies.cidrs.retain(|current| current != &cidr);
+        }
+        proxies.normalize()?;
+        spec.trusted_proxies =
+          (!proxies.is_empty()).then_some(proxies);
+      }
+      changes(c, vec![Change::UpsertGateway { name, spec }], apply, j)
+        .await
+    }
     GatewayCmd::Forward {
       name,
       listen,
@@ -3023,6 +3072,7 @@ async fn gateway(
             error_page: None,
             wildcard: vec![],
             layer4: vec![],
+            trusted_proxies: None,
           }
         }
       };
