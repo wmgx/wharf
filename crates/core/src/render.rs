@@ -211,12 +211,2483 @@ impl BasicAuth {
   }
 }
 
-mod caddy;
-mod compose;
-#[cfg(test)]
-use caddy::caddyfile;
-pub use caddy::*;
-pub use compose::*;
+/// 服务数据目录：`/srv/<service>/<volume>`。
+pub fn volume_dir(service: &str, volume: &str) -> String {
+  format!("/srv/{service}/{volume}")
+}
+
+pub fn service_dirs(name: &str, spec: &ServiceSpec) -> Vec<String> {
+  spec
+    .volumes
+    .iter()
+    .map(|v| volume_dir(name, &v.name))
+    .collect()
+}
+
+#[derive(Serialize)]
+struct ComposeFile {
+  name: String,
+  services: BTreeMap<String, ComposeService>,
+}
+
+#[derive(Serialize)]
+struct ComposeService {
+  image: String,
+  restart: &'static str,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  mem_limit: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  cpus: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  network_mode: Option<&'static str>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  entrypoint: Option<Vec<String>>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  command: Option<Vec<String>>,
+  #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+  environment: BTreeMap<String, String>,
+  #[serde(skip_serializing_if = "Vec::is_empty")]
+  ports: Vec<String>,
+  #[serde(skip_serializing_if = "Vec::is_empty")]
+  volumes: Vec<String>,
+  labels: BTreeMap<String, String>,
+}
+
+fn to_yaml(file: &ComposeFile) -> String {
+  let body = serde_yaml_ng::to_string(file).unwrap_or_default();
+  format!("# 由 Wharf 生成，不要手改。\n{body}")
+}
+
+/// 把 `[[NAME]]` 换成密钥。`secrets` 为空时原样保留（用于展示和部署历史）。
+pub fn substitute(
+  text: &str,
+  secrets: Option<&BTreeMap<String, String>>,
+) -> Result<String, ApiError> {
+  substitute_values(text, secrets, false)
+}
+
+fn substitute_values(
+  text: &str,
+  secrets: Option<&BTreeMap<String, String>>,
+  service_config: bool,
+) -> Result<String, ApiError> {
+  let Some(secrets) = secrets else {
+    return Ok(text.to_string());
+  };
+  let mut out = String::with_capacity(text.len());
+  let mut rest = text;
+  let mut missing = Vec::new();
+  while let Some((start, name)) = next_placeholder(rest) {
+    let len = name.len();
+    let is_name = !name.is_empty()
+      && name
+        .bytes()
+        .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-');
+    out.push_str(&rest[..start]);
+    let account = service_config.then(|| account_ref(name)).flatten();
+    if is_name || account.is_some() {
+      match secrets.get(name) {
+        Some(value) => out.push_str(value),
+        None if let Some(account) = account => {
+          return Err(
+            ApiError::invalid(format!("应用账号 {account} 不存在"))
+              .with_hint("先设置应用账号，密码从标准输入读取")
+              .suggest(format!(
+                "wharf sso account set {account} --user <用户名>"
+              )),
+          );
+        }
+        None => missing.push(name.to_string()),
+      }
+    } else {
+      out.push_str(&rest[start..start + 4 + len]);
+    }
+    rest = &rest[start + 4 + len..];
+  }
+  out.push_str(rest);
+  if !missing.is_empty() {
+    missing.sort();
+    missing.dedup();
+    let first = missing[0].clone();
+    return Err(
+      ApiError::invalid(format!(
+        "密钥不存在：{}",
+        missing.join("、")
+      ))
+      .with_hint("先设置密钥，值从标准输入读取，不会出现在命令行里")
+      .suggest(format!("wharf secret set {first}")),
+    );
+  }
+  Ok(out)
+}
+
+pub(crate) fn next_placeholder(text: &str) -> Option<(usize, &str)> {
+  let start = text.find("[[")?;
+  let rest = &text[start + 2..];
+  Some((start, &rest[..rest.find("]]")?]))
+}
+
+pub fn service_account_refs(world: &World) -> BTreeSet<String> {
+  world
+    .services
+    .values()
+    .flat_map(|row| {
+      crate::secret_policy::service_account_refs(&row.spec)
+    })
+    .map(|(name, _)| name.to_string())
+    .collect()
+}
+
+pub(crate) fn account_ref(name: &str) -> Option<&str> {
+  let (account, field) =
+    name.strip_prefix("account.")?.split_once('.')?;
+  (matches!(field, "username" | "password")
+    && wharf_api_types::validate_name("应用账号", account).is_ok())
+  .then_some(account)
+}
+
+/// 构建来源的镜像名：`wharf-build/<服务>:<指纹>`。指纹来自构建配置和端口
+/// （端口决定模板里的 `$PORT`），配置不变就不用重新构建。
+pub fn build_image(
+  name: &str,
+  build: &BuildSource,
+  ports: &[PortSpec],
+) -> String {
+  // 模板只用到容器端口（`$PORT`），宿主机端口变了不用重新构建。
+  let input =
+    serde_json::json!({ "build": build, "port": build_port(ports) });
+  let key = hash(&input.to_string());
+  format!("{BUILD_IMAGE_PREFIX}{name}:{}", &key[..12])
+}
+
+/// 构建来源模板里的 `$PORT`：第一个端口，没有端口时 8080。
+pub fn build_port(ports: &[PortSpec]) -> u16 {
+  ports.first().and_then(|p| p.container).unwrap_or(8080)
+}
+
+/// compose 里 cpus 的写法：500 → "0.5"，1000 → "1"，1250 → "1.25"。
+pub fn cpus_text(milli: u32) -> String {
+  let s = format!("{:.3}", f64::from(milli) / 1000.0);
+  s.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+/// 服务设置作用的容器：写了 `container` 就是它，否则 compose 里只能有一个容器。
+pub fn compose_target(
+  name: &str,
+  content: &str,
+  container: Option<&str>,
+) -> Result<String, ApiError> {
+  let value: serde_yaml_ng::Value = serde_yaml_ng::from_str(content)
+    .map_err(|e| {
+      ApiError::invalid(format!("compose 内容解析失败：{e}"))
+    })?;
+  let names: Vec<String> = value
+    .get("services")
+    .and_then(|s| s.as_mapping())
+    .into_iter()
+    .flat_map(|m| m.keys())
+    .filter_map(|k| k.as_str().map(str::to_string))
+    .collect();
+  match container {
+    Some(c) if names.iter().any(|n| n == c) => Ok(c.to_string()),
+    Some(c) => Err(ApiError::invalid(format!(
+      "服务 {name} 的 compose 里没有容器 {c}"
+    ))
+    .with_hint(format!("可选的容器：{}", names.join("、")))),
+    None if names.len() == 1 => Ok(names[0].clone()),
+    None => Err(ApiError::invalid(format!(
+      "服务 {name} 的 compose 里有 {} 个容器，要选环境变量和资源上限加在哪个容器上",
+      names.len()
+    ))
+    .with_hint(format!("在设置里选择容器（{}）", names.join("、")))),
+  }
+}
+
+/// 给 compose 里的一个容器加上服务设置里的资源上限和环境变量，其余文本保持原样
+/// （注释、`[[密钥]]` 引用都不动，所以不重新生成 YAML，只插入几行）。
+pub fn compose_with_settings(
+  name: &str,
+  content: &str,
+  spec: &ServiceSpec,
+) -> Result<String, ApiError> {
+  let limits = spec.limits.clone().unwrap_or_default();
+  if limits.memory_mb.is_none()
+    && limits.cpu_milli.is_none()
+    && spec.env.is_empty()
+  {
+    return Ok(content.to_string());
+  }
+  let target =
+    compose_target(name, content, spec.container.as_deref())?;
+  let unsupported = || {
+    ApiError::invalid(format!(
+      "服务 {name} 的 compose 写法没法自动加上环境变量或资源上限"
+    ))
+    .with_hint("直接写在 compose 文件里（environment、mem_limit、cpus），然后去掉设置里的")
+  };
+  let value: serde_yaml_ng::Value =
+    serde_yaml_ng::from_str(content).map_err(|_| unsupported())?;
+  let body = &value["services"][target.as_str()];
+  if (limits.memory_mb.is_some() || limits.cpu_milli.is_some())
+    && ["mem_limit", "cpus", "deploy"]
+      .iter()
+      .any(|key| body.get(*key).is_some())
+  {
+    return Err(ApiError::invalid(format!(
+      "服务 {name} 的 compose 里已经写了 mem_limit、cpus 或 deploy，不能再在这里设资源上限"
+    )).with_hint("两处留一处：去掉 compose 里的，或者去掉这里的资源上限"));
+  }
+  let existing: Vec<String> = match body.get("environment") {
+    Some(serde_yaml_ng::Value::Mapping(m)) => m
+      .keys()
+      .filter_map(|k| k.as_str().map(str::to_string))
+      .collect(),
+    Some(serde_yaml_ng::Value::Sequence(l)) => l
+      .iter()
+      .filter_map(|v| v.as_str())
+      .map(|v| v.split('=').next().unwrap_or(v).to_string())
+      .collect(),
+    _ => vec![],
+  };
+  if let Some(dup) = spec.env.keys().find(|k| existing.contains(k)) {
+    return Err(
+      ApiError::invalid(format!(
+        "环境变量 {dup} 在 compose 里已经写了"
+      ))
+      .with_hint("两处留一处：去掉 compose 里的，或者去掉设置里的"),
+    );
+  }
+
+  // 按行定位：services 下的容器、容器里的 environment。
+  let lines: Vec<(usize, &str)> = content
+    .split_inclusive('\n')
+    .scan(0, |offset, line| {
+      let start = *offset;
+      *offset += line.len();
+      Some((start, line))
+    })
+    .collect();
+  let code = |line: &str| {
+    !line.trim().is_empty() && !line.trim_start().starts_with('#')
+  };
+  let indent =
+    |line: &str| line.len() - line.trim_start_matches(' ').len();
+  let key = |line: &str| {
+    line
+      .split(" #")
+      .next()
+      .unwrap()
+      .trim()
+      .strip_suffix(':')
+      .map(|k| k.trim_matches(['"', '\'']).to_string())
+  };
+  if lines.iter().any(|(_, l)| l.contains('\t')) {
+    return Err(unsupported());
+  }
+  let services = lines
+    .iter()
+    .position(|(_, l)| {
+      code(l)
+        && indent(l) == 0
+        && key(l).as_deref() == Some("services")
+    })
+    .ok_or_else(unsupported)?;
+  let n = lines[services + 1..]
+    .iter()
+    .find(|(_, l)| code(l))
+    .map(|(_, l)| indent(l))
+    .filter(|n| *n > 0)
+    .ok_or_else(unsupported)?;
+  let header = (services + 1..lines.len())
+    .take_while(|i| !code(lines[*i].1) || indent(lines[*i].1) >= n)
+    .find(|i| {
+      let l = lines[*i].1;
+      code(l)
+        && indent(l) == n
+        && key(l).as_deref() == Some(target.as_str())
+    })
+    .ok_or_else(unsupported)?;
+  let body_end = (header + 1..lines.len())
+    .find(|i| code(lines[*i].1) && indent(lines[*i].1) <= n)
+    .unwrap_or(lines.len());
+  let m = lines[header + 1..body_end]
+    .iter()
+    .find(|(_, l)| code(l))
+    .map(|(_, l)| indent(l))
+    .filter(|m| *m > n)
+    .ok_or_else(unsupported)?;
+  let eol = if lines[header].1.ends_with("\r\n") {
+    "\r\n"
+  } else {
+    "\n"
+  };
+  let pad = " ".repeat(m);
+  let quote = |v: &str| {
+    serde_json::to_string(&v.replace('$', "$$")).unwrap_or_default()
+  };
+  let mut inserts: Vec<(usize, String)> = Vec::new();
+  let memory = limits.memory_mb.map(|mb| format!("{mb}m"));
+  let cpus = limits.cpu_milli.map(cpus_text);
+  let mut added = String::new();
+  if let Some(memory) = &memory {
+    added.push_str(&format!("{pad}mem_limit: {memory}{eol}"));
+  }
+  if let Some(cpus) = &cpus {
+    added.push_str(&format!("{pad}cpus: \"{cpus}\"{eol}"));
+  }
+  if !spec.env.is_empty() {
+    let env_line = (header + 1..body_end).find(|i| {
+      let l = lines[*i].1;
+      code(l)
+        && indent(l) == m
+        && l.trim_start().starts_with("environment:")
+    });
+    match env_line {
+      None => {
+        added.push_str(&format!("{pad}environment:{eol}"));
+        for (k, v) in &spec.env {
+          added.push_str(&format!("{pad}  {k}: {}{eol}", quote(v)));
+        }
+      }
+      Some(e) => {
+        if key(lines[e].1).as_deref() != Some("environment") {
+          return Err(unsupported());
+        }
+        let item = lines[e + 1..body_end]
+          .iter()
+          .find(|(_, l)| code(l))
+          .filter(|(_, l)| indent(l) > m)
+          .map(|(_, l)| *l)
+          .ok_or_else(unsupported)?;
+        let k_pad = " ".repeat(indent(item));
+        let list = item.trim_start().starts_with("- ");
+        let mut text = String::new();
+        for (k, v) in &spec.env {
+          if list {
+            text.push_str(&format!(
+              "{k_pad}- {}{eol}",
+              quote(&format!("{k}={v}"))
+            ));
+          } else {
+            text.push_str(&format!("{k_pad}{k}: {}{eol}", quote(v)));
+          }
+        }
+        inserts.push((lines[e].0 + lines[e].1.len(), text));
+      }
+    }
+  }
+  if !added.is_empty() {
+    inserts.push((lines[header].0 + lines[header].1.len(), added));
+  }
+  inserts.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
+  let mut out = content.to_string();
+  for (at, text) in inserts {
+    out.insert_str(at, &text);
+  }
+  // 插完再解析一遍，确认加到了对的容器上。
+  let parsed: serde_yaml_ng::Value =
+    serde_yaml_ng::from_str(&out).map_err(|_| unsupported())?;
+  let actual = &parsed["services"][target.as_str()];
+  for (key, expected) in [("mem_limit", memory), ("cpus", cpus)] {
+    if let Some(expected) = expected
+      && actual.get(key).and_then(|v| v.as_str())
+        != Some(expected.as_str())
+    {
+      return Err(unsupported());
+    }
+  }
+  for k in spec.env.keys() {
+    let found = match actual.get("environment") {
+      Some(serde_yaml_ng::Value::Mapping(map)) => {
+        map.get(k.as_str()).is_some()
+      }
+      Some(serde_yaml_ng::Value::Sequence(l)) => l
+        .iter()
+        .filter_map(|v| v.as_str())
+        .any(|v| v.split('=').next() == Some(k.as_str())),
+      _ => false,
+    };
+    if !found {
+      return Err(unsupported());
+    }
+  }
+  Ok(out)
+}
+
+/// 服务的 compose 文件。image 来源自动生成；compose 来源原样使用。
+/// 端口只绑定 127.0.0.1 和内网地址，不绑定 0.0.0.0。
+pub fn service_compose(
+  name: &str,
+  spec: &ServiceSpec,
+  host_ports: &BTreeMap<String, u16>,
+  bind_ips: &[String],
+  secrets: Option<&BTreeMap<String, String>>,
+) -> Result<String, ApiError> {
+  match &spec.source {
+    Source::Compose { content, .. } => {
+      let content = content.as_deref().unwrap_or_default();
+      substitute_values(
+        &compose_with_settings(name, content, spec)?,
+        secrets,
+        true,
+      )
+    }
+    Source::Image(_) | Source::Build(_) => {
+      let mut service = image_service(name, spec, secrets)?;
+      for port in &spec.ports {
+        let (Some(host), Some(container)) =
+          (host_ports.get(&port.name), port.container)
+        else {
+          continue;
+        };
+        let protocol = if port.udp { "/udp" } else { "" };
+        service
+          .ports
+          .push(format!("127.0.0.1:{host}:{container}{protocol}"));
+        for ip in bind_ips {
+          service
+            .ports
+            .push(format!("{ip}:{host}:{container}{protocol}"));
+        }
+      }
+      service.volumes = spec
+        .volumes
+        .iter()
+        .map(|v| {
+          format!("{}:{}", volume_dir(name, &v.name), v.target)
+        })
+        .collect();
+      let file = ComposeFile {
+        name: name.to_string(),
+        services: BTreeMap::from([(name.to_string(), service)]),
+      };
+      Ok(to_yaml(&file))
+    }
+  }
+}
+
+fn image_service(
+  name: &str,
+  spec: &ServiceSpec,
+  secrets: Option<&BTreeMap<String, String>>,
+) -> Result<ComposeService, ApiError> {
+  let image = match &spec.source {
+    Source::Build(b) => build_image(name, b, &spec.ports),
+    Source::Image(image) => image.clone(),
+    Source::Compose { .. } => unreachable!(),
+  };
+  let mut environment = BTreeMap::new();
+  for (key, value) in &spec.env {
+    // compose 会对 `$` 做变量插值，原样传给容器要写成 `$$`。
+    let value = substitute_values(value, secrets, true)?;
+    environment.insert(key.clone(), value.replace('$', "$$"));
+  }
+  Ok(ComposeService {
+    image,
+    restart: "unless-stopped",
+    mem_limit: spec
+      .limits
+      .as_ref()
+      .and_then(|l| l.memory_mb)
+      .map(|mb| format!("{mb}m")),
+    cpus: spec
+      .limits
+      .as_ref()
+      .and_then(|l| l.cpu_milli)
+      .map(cpus_text),
+    network_mode: None,
+    entrypoint: None,
+    command: None,
+    environment,
+    ports: Vec::new(),
+    volumes: Vec::new(),
+    labels: BTreeMap::from([(
+      "wharf.service".to_string(),
+      name.to_string(),
+    )]),
+  })
+}
+
+/// 试跑用的 compose：同一个镜像和环境变量，不发布端口、不自动重启。
+/// 只用于 image、build 来源且没有数据卷的服务。
+pub fn trial_compose(
+  name: &str,
+  spec: &ServiceSpec,
+  secrets: Option<&BTreeMap<String, String>>,
+) -> Result<String, ApiError> {
+  let mut service = image_service(name, spec, secrets)?;
+  service.restart = "no";
+  service.labels =
+    BTreeMap::from([("wharf.trial".into(), name.into())]);
+  Ok(to_yaml(&ComposeFile {
+    name: format!("{TRIAL_PROJECT_PREFIX}{name}"),
+    services: BTreeMap::from([(name.to_string(), service)]),
+  }))
+}
+
+/// 配置文件内容里的 `[[密钥名]]` 只替换确实存在的密钥，别的原样保留
+/// （TOML 的 `[[servers]]` 这类写法不能当成密钥引用）。`secrets` 为空时原样返回。
+pub fn file_content(
+  content: &str,
+  secrets: Option<&BTreeMap<String, String>>,
+) -> String {
+  let Some(secrets) = secrets else {
+    return content.to_string();
+  };
+  let mut out = String::with_capacity(content.len());
+  let mut rest = content;
+  while let Some((start, name)) = next_placeholder(rest) {
+    let end = start + 4 + name.len();
+    out.push_str(&rest[..start]);
+    match secrets.get(name) {
+      Some(value) => out.push_str(value),
+      None => out.push_str(&rest[start..end]),
+    }
+    rest = &rest[end..];
+  }
+  out.push_str(rest);
+  out
+}
+
+/// 把配置文件放进 compose：顶层 `configs` 用 `content` 写内容，容器的 `configs` 引用它。
+/// compose 判断要不要重建容器时不看内容，所以名字里带内容的哈希，内容一变名字就变，容器跟着重建。
+/// `files` 是（容器内路径，已替换好的内容）。没有配置文件时原样返回，不重新生成 YAML。
+pub fn add_files(
+  name: &str,
+  spec: &ServiceSpec,
+  compose: &str,
+  files: &[(String, String)],
+) -> Result<String, ApiError> {
+  if files.is_empty() {
+    return Ok(compose.to_string());
+  }
+  let target = match &spec.source {
+    Source::Compose { .. } => {
+      compose_target(name, compose, spec.container.as_deref())?
+    }
+    _ => name.to_string(),
+  };
+  let bad = || {
+    ApiError::invalid(format!(
+      "服务 {name} 的 compose 写法没法自动加上配置文件"
+    ))
+    .with_hint(
+      "直接写在 compose 文件的 configs 里，然后去掉设置里的配置文件",
+    )
+  };
+  let mut doc: serde_yaml_ng::Value =
+    serde_yaml_ng::from_str(compose).map_err(|_| bad())?;
+  let key = |s: &str| serde_yaml_ng::Value::String(s.to_string());
+  let mut defs = serde_yaml_ng::Mapping::new();
+  let mut refs = Vec::new();
+  for (i, (path, content)) in files.iter().enumerate() {
+    let content = content.replace('$', "$$");
+    let id = format!("wharf-file-{i}-{}", &hash(&content)[..12]);
+    let mut def = serde_yaml_ng::Mapping::new();
+    def.insert(key("content"), key(&content));
+    defs.insert(key(&id), serde_yaml_ng::Value::Mapping(def));
+    let mut r = serde_yaml_ng::Mapping::new();
+    r.insert(key("source"), key(&id));
+    r.insert(key("target"), key(path));
+    refs.push(serde_yaml_ng::Value::Mapping(r));
+  }
+  let root = doc.as_mapping_mut().ok_or_else(bad)?;
+  match root.entry(key("configs")).or_insert_with(|| {
+    serde_yaml_ng::Value::Mapping(Default::default())
+  }) {
+    serde_yaml_ng::Value::Mapping(m) => m.extend(defs),
+    _ => return Err(bad()),
+  }
+  let svc = root
+    .get_mut("services")
+    .and_then(|s| s.get_mut(target.as_str()))
+    .and_then(|s| s.as_mapping_mut())
+    .ok_or_else(bad)?;
+  match svc
+    .entry(key("configs"))
+    .or_insert_with(|| serde_yaml_ng::Value::Sequence(vec![]))
+  {
+    serde_yaml_ng::Value::Sequence(list) => list.extend(refs),
+    _ => return Err(bad()),
+  }
+  let head = if compose.starts_with('#') {
+    compose
+      .lines()
+      .next()
+      .map(|l| format!("{l}\n"))
+      .unwrap_or_default()
+  } else {
+    String::new()
+  };
+  Ok(format!(
+    "{head}{}",
+    serde_yaml_ng::to_string(&doc).map_err(|_| bad())?
+  ))
+}
+
+/// compose 来源的基本检查：必须有 services，P1 不支持 build。
+pub fn check_compose(
+  name: &str,
+  content: &str,
+) -> Result<(), ApiError> {
+  let value: serde_yaml_ng::Value = serde_yaml_ng::from_str(content)
+    .map_err(|e| {
+      ApiError::invalid(format!(
+        "服务 {name} 的 compose 不是合法的 YAML：{e}"
+      ))
+    })?;
+  let services = value
+    .get("services")
+    .and_then(|s| s.as_mapping())
+    .filter(|s| !s.is_empty())
+    .ok_or_else(|| {
+      ApiError::invalid(format!(
+        "服务 {name} 的 compose 里没有 services"
+      ))
+    })?;
+  for (svc, body) in services {
+    if body.get("build").is_some() {
+      return Err(
+        ApiError::invalid(format!(
+          "服务 {name} 的 compose 里 {} 用了 build，不在服务器上构建",
+          svc.as_str().unwrap_or("?")
+        ))
+        .with_hint("先构建并推送镜像，compose 里改用 image"),
+      );
+    }
+  }
+  Ok(())
+}
+
+pub fn gateway_image(spec: &GatewaySpec) -> String {
+  spec.image.clone().unwrap_or_else(|| {
+    match spec.kind {
+      GatewayKind::Caddy => DEFAULT_CADDY_IMAGE,
+      GatewayKind::CloudflareTunnel => DEFAULT_CLOUDFLARED_IMAGE,
+    }
+    .to_string()
+  })
+}
+
+/// cloudflare_tunnel 网关的连接器：host 网络，上游用 127.0.0.1 和内网地址都能访问。
+pub fn tunnel_compose(
+  name: &str,
+  spec: &GatewaySpec,
+  token: Option<&str>,
+) -> String {
+  let project = gateway_project(name);
+  let file = ComposeFile {
+    name: project,
+    services: BTreeMap::from([(
+      "cloudflared".to_string(),
+      ComposeService {
+        image: gateway_image(spec),
+        restart: "unless-stopped",
+        mem_limit: None,
+        cpus: None,
+        network_mode: Some("host"),
+        entrypoint: None,
+        command: Some(
+          ["tunnel", "--no-autoupdate", "run"]
+            .map(String::from)
+            .to_vec(),
+        ),
+        environment: BTreeMap::from([(
+          "TUNNEL_TOKEN".to_string(),
+          token.map_or_else(
+            || format!("[[{TUNNEL_TOKEN_SECRET}]]"),
+            str::to_string,
+          ),
+        )]),
+        ports: vec![],
+        volumes: vec![],
+        labels: BTreeMap::from([(
+          "wharf.gateway".to_string(),
+          name.to_string(),
+        )]),
+      },
+    )]),
+  };
+  to_yaml(&file)
+}
+
+/// caddy 网关的 compose：host 网络，这样上游用 127.0.0.1 和内网地址都能访问。
+pub fn gateway_compose(name: &str, spec: &GatewaySpec) -> String {
+  let project = gateway_project(name);
+  let file = ComposeFile {
+    name: project.clone(),
+    services: BTreeMap::from([(
+      "caddy".to_string(),
+      ComposeService {
+        image: gateway_image(spec),
+        restart: "unless-stopped",
+        mem_limit: None,
+        cpus: None,
+        network_mode: Some("host"),
+        entrypoint: None,
+        command: Some(
+          [
+            "caddy",
+            "run",
+            "--config",
+            "/etc/caddy/Caddyfile",
+            "--adapter",
+            "caddyfile",
+          ]
+          .map(String::from)
+          .to_vec(),
+        ),
+        environment: BTreeMap::new(),
+        ports: vec![],
+        volumes: vec![
+          "./conf:/etc/caddy:ro".to_string(),
+          format!("/srv/{project}/data:/data"),
+          format!("/srv/{project}/config:/config"),
+        ],
+        labels: BTreeMap::from([(
+          "wharf.gateway".to_string(),
+          name.to_string(),
+        )]),
+      },
+    )]),
+  };
+  to_yaml(&file)
+}
+
+/// 备份服务器上的 rest-server：只监听内网地址，要账号，只能追加
+/// （备份来源的机器被攻破也删不掉备份，清理旧快照在备份服务器本机做）。
+/// `htpasswd` 是 `用户名:bcrypt哈希`。
+pub fn backup_server_compose(
+  listen_ip: &str,
+  htpasswd: &str,
+) -> String {
+  use wharf_api_types::agent::{
+    BACKUP_ROOT, REST_SERVER_IMAGE, REST_SERVER_PORT,
+  };
+  let host = if listen_ip.contains(':') {
+    format!("[{listen_ip}]")
+  } else {
+    listen_ip.to_string()
+  };
+  let script = format!(
+    "printf '%s\\n' \"$$HTPASSWD\" > /tmp/htpasswd && exec rest-server --path /data --htpasswd-file /tmp/htpasswd --listen {host}:{REST_SERVER_PORT} --append-only"
+  );
+  let file = ComposeFile {
+    name: BACKUP_PROJECT.to_string(),
+    services: BTreeMap::from([(
+      "rest-server".to_string(),
+      ComposeService {
+        image: REST_SERVER_IMAGE.to_string(),
+        restart: "unless-stopped",
+        mem_limit: None,
+        cpus: None,
+        network_mode: Some("host"),
+        entrypoint: None,
+        command: Some(vec!["sh".into(), "-c".into(), script]),
+        environment: BTreeMap::from([(
+          "HTPASSWD".to_string(),
+          htpasswd.replace('$', "$$"),
+        )]),
+        ports: vec![],
+        volumes: vec![format!("{BACKUP_ROOT}:/data")],
+        labels: BTreeMap::from([(
+          "wharf.backup".to_string(),
+          "rest-server".to_string(),
+        )]),
+      },
+    )]),
+  };
+  to_yaml(&file)
+}
+
+/// 备份服务器上 rest-server 的 project 名。
+pub const BACKUP_PROJECT: &str = "wharf-backup";
+
+/// 路由的上游地址：同机用 127.0.0.1，能直连用服务所在机器的内网地址，否则走反向隧道。
+pub fn upstream(
+  world: &World,
+  net: &Net,
+  gateway: &GatewaySpec,
+  service: &str,
+  port: &str,
+  mode: wharf_api_types::spec::LinkMode,
+) -> Result<String, ApiError> {
+  let row = world.services.get(service).ok_or_else(|| {
+    ApiError::invalid(format!("服务 {service} 不存在"))
+  })?;
+  let host_port = row.host_ports.get(port).ok_or_else(|| {
+    ApiError::internal(format!(
+      "服务 {service} 的端口 {port} 没有分配"
+    ))
+  })?;
+  use crate::link::{Choice, choose, tunnel_upstream};
+  Ok(match choose(world, net, gateway, service, mode)? {
+    Choice::Local => format!("127.0.0.1:{host_port}"),
+    Choice::Direct(ip) => format!("{ip}:{host_port}"),
+    Choice::Tunnel => {
+      tunnel_upstream(world, net, &gateway.server, service, port)?
+    }
+  })
+}
+
+pub const FRPS_IMAGE: &str = "snowdreamtech/frps:0.61.1";
+pub const FRPC_IMAGE: &str = "snowdreamtech/frpc:0.61.1";
+
+/// frp 容器：配置放在环境变量里，启动时写成文件；密钥是占位，部署时替换。
+fn frp_service(
+  image: &str,
+  bin: &str,
+  config: String,
+) -> ComposeService {
+  ComposeService {
+    image: image.to_string(),
+    restart: "unless-stopped",
+    mem_limit: None,
+    cpus: None,
+    network_mode: Some("host"),
+    entrypoint: Some(vec!["sh".into(), "-c".into()]),
+    command: Some(vec![format!(
+      "printf '%s\\n' \"$$FRP_CONFIG\" > /tmp/frp.toml && exec {bin} -c /tmp/frp.toml"
+    )]),
+    environment: BTreeMap::from([
+      ("FRP_CONFIG".to_string(), config),
+      (
+        "FRP_TOKEN".to_string(),
+        format!("[[{}]]", crate::link::TOKEN_SECRET),
+      ),
+    ]),
+    ports: vec![],
+    volumes: vec![],
+    labels: BTreeMap::from([(
+      "wharf.link".to_string(),
+      bin.to_string(),
+    )]),
+  }
+}
+
+/// 网关所在机器上的 frps：只监听 127.0.0.1，由 Caddy 转发 websocket 进来；
+/// 隧道端口也只绑 127.0.0.1，只允许 Wharf 的隧道端口范围。
+pub fn frps_compose(project: &str) -> String {
+  let config = format!(
+    "bindAddr = \"127.0.0.1\"\nbindPort = {}\nproxyBindAddr = \"127.0.0.1\"\nallowPorts = [{{ start = 30000, end = 39999 }}]\nauth.token = \"{{{{ .Envs.FRP_TOKEN }}}}\"\n",
+    crate::link::FRPS_PORT
+  );
+  to_yaml(&ComposeFile {
+    name: project.to_string(),
+    services: BTreeMap::from([(
+      "frps".to_string(),
+      frp_service(FRPS_IMAGE, "frps", config),
+    )]),
+  })
+}
+
+/// 服务所在机器上的 frpc：经网关的 Caddy 用 wss 连 frps。`proxies` 是 (名字, 本机端口, 隧道端口)。
+pub fn frpc_compose(
+  project: &str,
+  server_addr: &str,
+  server_port: u16,
+  proxies: &[(String, u16, u16)],
+) -> String {
+  let mut config = format!(
+    "serverAddr = \"{server_addr}\"\nserverPort = {server_port}\nloginFailExit = false\nauth.token = \"{{{{ .Envs.FRP_TOKEN }}}}\"\ntransport.protocol = \"wss\"\ntransport.tls.serverName = \"{}\"\n",
+    crate::link::LINK_HOST
+  );
+  for (name, local, remote) in proxies {
+    config.push_str(&format!(
+      "\n[[proxies]]\nname = \"{name}\"\ntype = \"tcp\"\nlocalIP = \"127.0.0.1\"\nlocalPort = {local}\nremotePort = {remote}\n"
+    ));
+  }
+  to_yaml(&ComposeFile {
+    name: project.to_string(),
+    services: BTreeMap::from([(
+      "frpc".to_string(),
+      frp_service(FRPC_IMAGE, "frpc", config),
+    )]),
+  })
+}
+
+/// 一条 Caddy 站点：hostname → 上游。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Site {
+  pub gate: Option<Gate>,
+  pub hostname: String,
+  pub upstream: String,
+  /// 登录保护的账号，没开是 `None`。
+  pub auth: Option<BasicAuth>,
+  /// 按路径转发：（路径，上游）。
+  pub paths: Vec<(String, String)>,
+  /// 跳转目标。有值时这个站点只做跳转，`upstream`、`auth`、`paths` 不用。
+  pub redirect: Option<String>,
+  /// 每分钟限速次数，没开是 `None`。
+  pub rate_limit: Option<u32>,
+  /// 拦截常见扫描。
+  pub block_scanners: bool,
+  /// 自定义 Caddy 配置，原样插进站点块。
+  pub custom: Option<String>,
+  /// 只放行内网来源。
+  pub internal: bool,
+  pub internal_ranges: Vec<String>,
+  pub protection: crate::entry_protection::SiteProtection,
+  /// 临时分享的到期时间（毫秒），过了就断开。
+  pub expires_at: Option<i64>,
+  /// 泛域名站点：只签证书，未匹配具体域名的请求直接断开。
+  pub wildcard: bool,
+  /// DNS 验证的 subdomain（zone 或域名本身）。
+  pub dns: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Gate {
+  /// 公开站点只处理代登录入口和配置了接管的路径。
+  pub public: bool,
+  pub site_endpoints: bool,
+  pub app_login: bool,
+  pub user_header: Option<String>,
+  pub trusted: Vec<String>,
+  pub login: String,
+  pub core: String,
+  pub skip_paths: Vec<String>,
+  pub takeover: Option<(LoginTakeover, String)>,
+}
+
+/// 内置的错误页。
+const DEFAULT_ERROR_PAGE: &str = include_str!("error_page.html");
+/// 错误页在 Caddyfile 里的结束标记；内容里不能出现它。
+pub const ERROR_PAGE_END: &str = "WHARF_ERROR_PAGE";
+
+/// 错误页的 snippet：网关自己产生的 502、503、504 返回这张页面。没填或是空的用内置的默认页。
+fn error_snippet(spec: &GatewaySpec) -> String {
+  let page = spec
+    .error_page
+    .as_deref()
+    .filter(|p| !p.trim().is_empty())
+    .unwrap_or(DEFAULT_ERROR_PAGE);
+  let mut out = format!(
+    "\n(wharf_errors) {{\n\thandle_errors 502 503 504 {{\n\t\theader Content-Type \"text/html; charset=utf-8\"\n\t\trespond <<{ERROR_PAGE_END}\n"
+  );
+  for line in page.lines() {
+    if !line.is_empty() {
+      out.push_str("\t\t");
+      out.push_str(line);
+    }
+    out.push('\n');
+  }
+  out.push_str(&format!(
+    "\t\t{ERROR_PAGE_END} {{err.status_code}}\n\t}}\n}}\n"
+  ));
+  out
+}
+
+#[derive(Clone, Copy)]
+pub struct AcmeDnsFill<'a> {
+  pub key: &'a str,
+  pub url: &'a str,
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct CaddyFill<'a> {
+  pub acme_dns: Option<AcmeDnsFill<'a>>,
+  pub gate_revocation_key: Option<&'a str>,
+}
+
+fn dns_tls(
+  gateway: &str,
+  subdomain: &str,
+  fill: Option<AcmeDnsFill<'_>>,
+) -> String {
+  let url = fill.map(|f| {
+    format!("{}/agent/acme-dns", f.url.trim_end_matches('/'))
+  });
+  let url = url.as_deref().unwrap_or(ACME_DNS_URL);
+  let key = fill.map_or(ACME_DNS_KEY, |f| f.key);
+  format!(
+    "\ttls {{\n\t\tdns acmedns {{\n\t\t\tusername {gateway}\n\t\t\tpassword {key}\n\t\t\tsubdomain {subdomain}\n\t\t\tserver_url {url}\n\t\t}}\n\t}}\n"
+  )
+}
+
+const ACCESS_LOG_SNIPPET: &str = r#"
+(wharf_access) {
+	log {
+		output file /data/access.log {
+			roll_size 5MiB
+			roll_keep 3
+			roll_keep_for 168h
+			roll_uncompressed
+		}
+		format filter {
+			request>headers delete
+			resp_headers delete
+			request>tls delete
+			request>uri query {
+				replace token REDACTED
+				replace access_token REDACTED
+				replace refresh_token REDACTED
+				replace id_token REDACTED
+				replace key REDACTED
+				replace api_key REDACTED
+				replace apikey REDACTED
+				replace secret REDACTED
+				replace password REDACTED
+				replace passwd REDACTED
+				replace pwd REDACTED
+				replace auth REDACTED
+				replace code REDACTED
+				replace sign REDACTED
+				replace signature REDACTED
+				replace sig REDACTED
+				replace session REDACTED
+				replace ticket REDACTED
+				replace jwt REDACTED
+				replace rd REDACTED
+				replace state REDACTED
+			}
+		}
+	}
+}
+"#;
 
 #[cfg(test)]
-mod tests;
+fn caddyfile(
+  name: &str,
+  spec: &GatewaySpec,
+  sites: &[Site],
+  forwards: &[(bool, u16, String)],
+  link: bool,
+  gate_public: Option<&str>,
+) -> String {
+  caddyfile_with_fill(
+    name,
+    spec,
+    sites,
+    forwards,
+    link,
+    gate_public,
+    &[],
+    CaddyFill::default(),
+  )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn caddyfile_with_fill(
+  name: &str,
+  spec: &GatewaySpec,
+  sites: &[Site],
+  forwards: &[(bool, u16, String)],
+  link: bool,
+  gate_public: Option<&str>,
+  trusted_proxies: &[String],
+  fill: CaddyFill<'_>,
+) -> String {
+  let mut out = format!(
+    "# 由 Wharf 生成，不要手改。网关：{name}\n# 手写的站点放到 conf/extra.d/*.caddy\n{{\n\tadmin {CADDY_ADMIN}\n\tmetrics {{\n\t\tper_host\n\t}}\n"
+  );
+  if let Some(port) = spec.http_port.filter(|p| *p != 80) {
+    out.push_str(&format!("\thttp_port {port}\n"));
+  }
+  if let Some(port) = spec.https_port.filter(|p| *p != 443) {
+    out.push_str(&format!("\thttps_port {port}\n"));
+  }
+  if let Some(email) = &spec.email {
+    out.push_str(&format!("\temail {email}\n"));
+  }
+  match spec.tls {
+    GatewayTls::Auto => {}
+    GatewayTls::Internal => out.push_str("\tlocal_certs\n"),
+    GatewayTls::Off => out.push_str("\tauto_https off\n"),
+  }
+  crate::entry_protection::render_abort_order(&mut out, sites);
+  if sites
+    .iter()
+    .any(|s| s.redirect.is_none() && s.block_scanners)
+  {
+    out.push_str("\torder respond before basic_auth\n");
+  }
+  if sites
+    .iter()
+    .any(|s| s.redirect.is_none() && s.rate_limit.is_some())
+  {
+    out.push_str("\torder rate_limit before basic_auth\n");
+  }
+  if sites.iter().any(|s| s.gate.is_some()) {
+    out.push_str("\torder wharf_sso before basic_auth\n");
+  }
+  crate::entry_protection::render_servers(
+    &mut out,
+    spec,
+    trusted_proxies,
+  );
+  if !forwards.is_empty() {
+    out.push_str("\tlayer4 {\n");
+    let mut forwards = forwards.to_vec();
+    forwards.sort_by_key(|(udp, listen, _)| (*udp, *listen));
+    for (udp, listen, upstream) in forwards {
+      let protocol = if udp { "udp/" } else { "" };
+      out.push_str(&format!("\t\t{protocol}:{listen} {{\n\t\t\troute {{\n\t\t\t\tproxy {protocol}{upstream}\n\t\t\t}}\n\t\t}}\n"));
+    }
+    out.push_str("\t}\n");
+  }
+  out.push_str("}\n");
+  out.push_str(ACCESS_LOG_SNIPPET);
+  out.push_str(&error_snippet(spec));
+  out.push_str(&format!(
+    "\n(wharf_upstream) {{\n\tlb_try_duration {UPSTREAM_TRY_DURATION}\n\tlb_try_interval {UPSTREAM_TRY_INTERVAL}\n}}\n"
+  ));
+  crate::source_trust::render_proxy_headers(
+    &mut out,
+    trusted_proxies,
+  );
+  if sites.iter().any(|s| s.block_scanners) {
+    out.push_str(&format!(
+      "\n(wharf_scanners) {{\n\t@wharf_scanner_path path {SCANNER_PATHS}\n\t@wharf_scanner_ua header_regexp User-Agent \"{SCANNER_UA}\"\n\trespond @wharf_scanner_path 404\n\trespond @wharf_scanner_ua 404\n}}\n"
+    ));
+  }
+  out.push_str("\nimport /etc/caddy/extra.d/*.caddy\n");
+  let scheme = match spec.tls {
+    GatewayTls::Off => "http://",
+    _ => "",
+  };
+  let mut sites = sites.to_vec();
+  sites.sort_by(|a, b| a.hostname.cmp(&b.hostname));
+  for site in sites {
+    site.protection.render_http_redirect(
+      &mut out,
+      spec,
+      &site.hostname,
+    );
+    out.push_str(&format!("\n{scheme}{} {{\n", site.hostname));
+    site.protection.render_matchers(&mut out);
+    if site.wildcard {
+      if let Some(subdomain) = &site.dns {
+        out.push_str(&dns_tls(name, subdomain, fill.acme_dns));
+      }
+      out.push_str("\tabort\n}\n");
+      continue;
+    }
+    if !site.internal {
+      out.push_str("\timport wharf_access\n");
+    }
+    if let Some(target) = &site.redirect {
+      out.push_str(&format!(
+        "\tredir {target}{{uri}} permanent\n}}\n"
+      ));
+      continue;
+    }
+    out.push_str("\timport wharf_errors\n");
+    if !trusted_proxies.is_empty() {
+      out.push_str("\timport wharf_strip_forwarded\n");
+    }
+    if let Some(ms) = site.expires_at {
+      out.push_str(&format!(
+        "\t@wharf_expired expression `int({{time.now.unix}}) >= {}`\n\tabort @wharf_expired\n",
+        ms / 1000
+      ));
+    }
+    if let Some(subdomain) = &site.dns {
+      out.push_str(&dns_tls(name, subdomain, fill.acme_dns));
+    }
+    if site.internal {
+      let ranges = if site.internal_ranges.is_empty() {
+        "127.0.0.0/8 ::1/128".to_string()
+      } else {
+        site.internal_ranges.join(" ")
+      };
+      out.push_str(&format!("\t@wharf_outside not remote_ip {ranges}\n\tabort @wharf_outside\n"));
+    }
+    if site.block_scanners {
+      out.push_str("\timport wharf_scanners\n");
+    }
+    if let Some(n) = site.rate_limit {
+      let zone = site.hostname.replace('.', "_");
+      let key = if trusted_proxies.is_empty() {
+        "{remote_host}"
+      } else {
+        "{client_ip}"
+      };
+      out.push_str(&format!(
+        "\trate_limit {{\n\t\tzone wharf_{zone} {{\n\t\t\tkey {key}\n\t\t\tevents {n}\n\t\t\twindow 1m\n\t\t}}\n\t}}\n"
+      ));
+    }
+    if let Some(custom) = &site.custom {
+      for line in custom.lines() {
+        let line = line.trim_end();
+        if !line.is_empty() {
+          out.push('\t');
+          out.push_str(line);
+        }
+        out.push('\n');
+      }
+    }
+    if let Some(gate) = &site.gate {
+      gate::render_gate(
+        &mut out,
+        gate,
+        gate_public,
+        fill.gate_revocation_key,
+      );
+    }
+    if let Some(a) = &site.auth {
+      out.push_str(&format!(
+        "\tbasic_auth {{\n\t\t{} {}\n\t}}\n",
+        a.user, a.hash
+      ));
+    }
+    // 带路径的 reverse_proxy 由 Caddy 排在不带路径的前面。
+    for (path, upstream) in &site.paths {
+      out.push_str(&format!(
+        "\treverse_proxy {path} {upstream} {{\n\t\timport wharf_upstream\n\t}}\n"
+      ));
+    }
+    out.push_str(&format!(
+      "\treverse_proxy {} {{\n\t\timport wharf_upstream\n\t}}\n}}\n",
+      site.upstream
+    ));
+  }
+  crate::entry_protection::render_http_fallback(&mut out, spec);
+  // 反向隧道：frpc 按 IP 连进来，握手带固定名字，用 Caddy 自己签的证书。
+  if link {
+    let tls = match spec.tls {
+      GatewayTls::Auto => "\ttls internal\n",
+      _ => "",
+    };
+    out.push_str(&format!(
+      "\n{scheme}{} {{\n{tls}\treverse_proxy {} 127.0.0.1:{}\n}}\n",
+      crate::link::LINK_HOST,
+      crate::link::FRP_PATH,
+      crate::link::FRPS_PORT
+    ));
+  }
+  out
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use wharf_api_types::spec::Limits;
+  use wharf_api_types::spec::{GatewayKind, PortSpec, VolumeSpec};
+
+  #[test]
+  fn files_become_configs_named_by_content() {
+    let base =
+      service_compose("whoami", &spec(), &BTreeMap::new(), &[], None)
+        .unwrap();
+    let secrets =
+      BTreeMap::from([("PASS".to_string(), "p$w".to_string())]);
+    let content = file_content(
+      "[[servers]]\npass = \"[[PASS]]\"\n",
+      Some(&secrets),
+    );
+    assert_eq!(content, "[[servers]]\npass = \"p$w\"\n");
+    let files = vec![("/etc/app.toml".to_string(), content)];
+    let out = add_files("whoami", &spec(), &base, &files).unwrap();
+    let v: serde_yaml_ng::Value =
+      serde_yaml_ng::from_str(&out).unwrap();
+    let r = &v["services"]["whoami"]["configs"][0];
+    assert_eq!(r["target"].as_str(), Some("/etc/app.toml"));
+    let id = r["source"].as_str().unwrap();
+    assert_eq!(
+      v["configs"][id]["content"].as_str(),
+      Some("[[servers]]\npass = \"p$$w\"\n")
+    );
+    let changed =
+      vec![("/etc/app.toml".to_string(), "x".to_string())];
+    let out2 = add_files("whoami", &spec(), &base, &changed).unwrap();
+    assert!(!out2.contains(id));
+    assert_eq!(
+      add_files("whoami", &spec(), &base, &[]).unwrap(),
+      base
+    );
+  }
+
+  fn spec() -> ServiceSpec {
+    ServiceSpec {
+      backup: None,
+      stopped: false,
+      monitor: None,
+      log_alerts: vec![],
+      port_checks: Default::default(),
+      heartbeat: None,
+      limits: None,
+      auto_update: false,
+      container: None,
+      files: vec![],
+      server: "node1".into(),
+      source: Source::Image("traefik/whoami".into()),
+      ports: vec![PortSpec {
+        name: "http".into(),
+        container: Some(80),
+        host: None,
+        udp: false,
+      }],
+      env: BTreeMap::from([
+        ("A".to_string(), "x$y".to_string()),
+        ("TOKEN".to_string(), "[[WHO_TOKEN]]".to_string()),
+      ]),
+      volumes: vec![VolumeSpec {
+        name: "data".into(),
+        target: "/data".into(),
+      }],
+    }
+  }
+
+  #[test]
+  fn caddyfile_share_expires() {
+    let gw: GatewaySpec =
+      serde_json::from_str(r#"{"kind":"caddy","server":"s1"}"#)
+        .unwrap();
+    let mut site = Site {
+      hostname: "a.example.com".into(),
+      expires_at: Some(1_800_000_000_000),
+      ..Default::default()
+    };
+    let out =
+      caddyfile("edge", &gw, &[site.clone()], &[], false, None);
+    assert_eq!(
+      out.matches("order abort before basic_auth").count(),
+      1
+    );
+    assert!(out.contains(
+      "@wharf_expired expression `int({time.now.unix}) >= 1800000000`"
+    ));
+    assert!(out.contains("abort @wharf_expired"));
+    assert!(
+      out.find("import wharf_errors").unwrap()
+        < out.find("@wharf_expired").unwrap()
+    );
+    site.expires_at = None;
+    assert!(
+      !caddyfile("edge", &gw, &[site], &[], false, None)
+        .contains("wharf_expired")
+    );
+  }
+
+  #[test]
+  fn caddyfile_internal_site() {
+    let gw: GatewaySpec =
+      serde_json::from_str(r#"{"kind":"caddy","server":"s1"}"#)
+        .unwrap();
+    let mut site = Site {
+      hostname: "i.example.com".into(),
+      upstream: "127.0.0.1:21000".into(),
+      internal: true,
+      dns: Some("i.example.com".into()),
+      ..Default::default()
+    };
+    let out =
+      caddyfile("edge", &gw, &[site.clone()], &[], false, None);
+    assert!(out.contains("dns acmedns {"));
+    assert!(!out.contains("import wharf_access"));
+    assert!(out.contains("@wharf_outside not remote_ip 127.0.0.0/8 ::1/128\n\tabort @wharf_outside"));
+    for broad in
+      ["private_ranges", "100.64.0.0/10", "fd7a:115c:a1e0::/48"]
+    {
+      assert!(!out.contains(broad));
+    }
+    assert!(
+      out.find("import wharf_errors").unwrap()
+        < out.find("\ttls {").unwrap()
+    );
+    assert!(
+      out.find("\ttls {").unwrap()
+        < out.find("@wharf_outside").unwrap()
+    );
+    assert_eq!(
+      out.matches("order abort before basic_auth").count(),
+      1
+    );
+    site.dns = None;
+    site.internal_ranges =
+      ["10.20.0.0/24", "100.64.0.7/32", "127.0.0.0/8", "::1/128"]
+        .map(str::to_string)
+        .to_vec();
+    let out =
+      caddyfile("edge", &gw, &[site.clone()], &[], false, None);
+    assert!(out.contains("@wharf_outside not remote_ip 10.20.0.0/24 100.64.0.7/32 127.0.0.0/8 ::1/128"));
+    assert!(!out.contains("dns acmedns"));
+    site.internal = false;
+    let out = caddyfile("edge", &gw, &[site], &[], false, None);
+    assert!(!out.contains("wharf_outside"));
+    assert!(!out.contains("dns acmedns"));
+    assert!(!out.contains("order abort"));
+  }
+
+  #[test]
+  fn caddyfile_trusted_proxies_controls_headers_and_rate_limit() {
+    let mut spec: GatewaySpec = serde_json::from_value(serde_json::json!({
+      "kind": "caddy", "server": "s1", "error_page": "fixture",
+      "trusted_proxies": {"cloudflare": true, "cluster": true, "cidrs": ["203.0.113.0/24"]}
+    })).unwrap();
+    let net = Net::default();
+    let ranges = crate::source_trust::gateway_trusted_proxies(
+      &crate::world::World::default(),
+      &net,
+      &spec,
+      &["173.245.48.0/20".into()],
+    );
+    let sites = [Site {
+      hostname: "example.com".into(),
+      upstream: "127.0.0.1:20005".into(),
+      rate_limit: Some(42),
+      ..Default::default()
+    }];
+    let out = caddyfile_with_fill(
+      "edge",
+      &spec,
+      &sites,
+      &[],
+      false,
+      None,
+      &ranges,
+      CaddyFill::default(),
+    );
+    assert!(out.contains("trusted_proxies static 127.0.0.1/32 173.245.48.0/20 203.0.113.0/24 ::1/128\n\t\ttrusted_proxies_strict"));
+    assert!(out.contains("(wharf_strip_forwarded)"));
+    assert!(out.contains("import wharf_strip_forwarded"));
+    assert!(out.contains(
+      "request_header @wharf_untrusted_proxy -CF-Connecting-IP"
+    ));
+    assert!(out.contains("request_header X-Real-IP {client_ip}"));
+    assert!(out.contains("key {client_ip}"));
+    spec.trusted_proxies = None;
+    let legacy = caddyfile("edge", &spec, &sites, &[], false, None);
+    assert!(!legacy.contains("trusted_proxies"));
+    assert!(!legacy.contains("wharf_strip_forwarded"));
+    assert!(legacy.contains("key {remote_host}"));
+    assert_eq!(out.matches("\n\tservers {").count(), 1);
+    assert!(out.contains("\tgrace_period 10s\n\tservers {"));
+    assert!(out.contains("\t\t\tread_header 10s\n\t\t\tidle 2m"));
+    assert_eq!(legacy.matches("\n\tservers {").count(), 1);
+    let before_edge_protection = legacy
+      .replace("\tgrace_period 10s\n\tservers {\n\t\ttimeouts {\n\t\t\tread_header 10s\n\t\t\tidle 2m\n\t\t}\n\t}\n", "")
+      .replace("\nhttp://:80 {\n\tabort\n}\n", "");
+    assert_eq!(
+      hash(&before_edge_protection),
+      "3304837aead9414fe3d3192bbabc2f263fc2817e5ee805cabeac7885c01b2cdf"
+    );
+  }
+
+  #[test]
+  fn caddyfile_layer4_only_when_used() {
+    let gw: GatewaySpec = serde_json::from_value(
+      serde_json::json!({"kind":"caddy","server":"s1"}),
+    )
+    .unwrap();
+    let sites = vec![Site {
+      hostname: "example.com".into(),
+      upstream: "127.0.0.1:20005".into(),
+      ..Default::default()
+    }];
+    let empty = caddyfile("edge", &gw, &sites, &[], false, None);
+    assert!(!empty.contains("layer4"));
+    let out = caddyfile(
+      "edge",
+      &gw,
+      &sites,
+      &[
+        (false, 15432, "127.0.0.1:20005".into()),
+        (false, 2222, "127.0.0.1:20007".into()),
+        (true, 27015, "127.0.0.1:20006".into()),
+      ],
+      false,
+      None,
+    );
+    assert_eq!(out.matches("layer4 {").count(), 1);
+    assert!(
+      out.find(":2222 {").unwrap() < out.find(":15432 {").unwrap()
+    );
+    assert!(out.contains(
+      ":15432 {\n\t\t\troute {\n\t\t\t\tproxy 127.0.0.1:20005"
+    ));
+    assert!(out.contains("udp/:27015 {"));
+    assert!(out.contains("proxy udp/127.0.0.1:20006"));
+    assert_eq!(
+      &out[out.find("\nexample.com {").unwrap()..],
+      &empty[empty.find("\nexample.com {").unwrap()..]
+    );
+    let mut svc = spec();
+    svc.env.clear();
+    svc.ports.push(PortSpec {
+      name: "game".into(),
+      container: Some(27015),
+      host: None,
+      udp: true,
+    });
+    let compose = service_compose(
+      "app",
+      &svc,
+      &BTreeMap::from([
+        ("http".into(), 20005),
+        ("game".into(), 20006),
+      ]),
+      &["100.64.0.1".into()],
+      None,
+    )
+    .unwrap();
+    assert!(compose.contains("127.0.0.1:20006:27015/udp"));
+    assert!(compose.contains("100.64.0.1:20006:27015/udp"));
+    assert!(compose.contains("127.0.0.1:20005:80"));
+    assert!(!compose.contains("20005:80/"));
+  }
+
+  #[test]
+  fn caddyfile_access_logs_skip_wildcard() {
+    let gw =
+      serde_json::from_str(r#"{"kind":"caddy","server":"s1"}"#)
+        .unwrap();
+    let sites = [
+      Site {
+        hostname: "a.example.com".into(),
+        upstream: "127.0.0.1:21000".into(),
+        ..Default::default()
+      },
+      Site {
+        hostname: "*.example.com".into(),
+        wildcard: true,
+        ..Default::default()
+      },
+    ];
+    let out = caddyfile("edge", &gw, &sites, &[], false, None);
+    assert_eq!(out.matches("(wharf_access) {").count(), 1);
+    assert!(out.contains("output file /data/access.log {"));
+    assert!(out.contains("a.example.com {\n\timport wharf_access\n"));
+    assert!(out.contains("*.example.com {\n\tabort\n}"));
+    assert_eq!(out.matches("import wharf_access").count(), 1);
+  }
+
+  #[test]
+  fn caddyfile_wildcard_site() {
+    let mut gw: GatewaySpec =
+      serde_json::from_str(r#"{"kind":"caddy","server":"s1"}"#)
+        .unwrap();
+    let mut site = Site {
+      hostname: "*.example.com".into(),
+      wildcard: true,
+      dns: Some("example.com".into()),
+      ..Default::default()
+    };
+    let empty = caddyfile("edge", &gw, &[], &[], false, None);
+    let auto = caddyfile(
+      "edge",
+      &gw,
+      std::slice::from_ref(&site),
+      &[],
+      false,
+      None,
+    );
+    for text in [
+      "*.example.com {",
+      "dns acmedns {",
+      "username edge",
+      "password [[WHARF_ACME_DNS_KEY]]",
+      "subdomain example.com",
+      "server_url [[WHARF_ACME_DNS_URL]]",
+      "\tabort\n}",
+    ] {
+      assert!(auto.contains(text), "{text}");
+    }
+    assert!(auto.ends_with("\tabort\n}\n"));
+    gw.tls = GatewayTls::Internal;
+    site.dns = None;
+    let internal = caddyfile("edge", &gw, &[site], &[], false, None);
+    assert!(!internal.contains("acmedns"));
+    let global = |s: &str| {
+      s.split("\n(wharf_errors)").next().unwrap().to_string()
+    };
+    assert_eq!(global(&auto), global(&empty));
+    assert_eq!(
+      global(&internal),
+      global(&caddyfile("edge", &gw, &[], &[], false, None))
+    );
+    for out in [&empty, &auto, &internal] {
+      assert!(!out.contains("prefer_wildcard"));
+    }
+  }
+
+  #[test]
+  fn gateway_uses_fixed_default_image() {
+    let spec = serde_json::from_value(serde_json::json!({
+      "server": "s1", "kind": "caddy"
+    }))
+    .unwrap();
+    assert!(
+      gateway_compose("edge", &spec).contains(DEFAULT_CADDY_IMAGE)
+    );
+    assert!(!DEFAULT_CADDY_IMAGE.contains("latest"));
+    assert!(!DEFAULT_CADDY_IMAGE.contains("sha-"));
+  }
+
+  #[test]
+  fn image_compose_binds_loopback_and_private_only() {
+    let ports = BTreeMap::from([("http".to_string(), 20000)]);
+    let secrets = BTreeMap::from([(
+      "WHO_TOKEN".to_string(),
+      "s3$cret".to_string(),
+    )]);
+    let out = service_compose(
+      "whoami",
+      &spec(),
+      &ports,
+      &["100.1.2.3".to_string(), "192.168.1.5".to_string()],
+      Some(&secrets),
+    )
+    .unwrap();
+    let yaml: serde_yaml_ng::Value =
+      serde_yaml_ng::from_str(&out).unwrap();
+    let svc = &yaml["services"]["whoami"];
+    assert_eq!(svc["ports"][0], "127.0.0.1:20000:80");
+    assert_eq!(svc["ports"][1], "100.1.2.3:20000:80");
+    assert_eq!(svc["ports"][2], "192.168.1.5:20000:80");
+    assert_eq!(svc["environment"]["A"], "x$$y");
+    assert_eq!(svc["environment"]["TOKEN"], "s3$$cret");
+    assert_eq!(svc["volumes"][0], "/srv/whoami/data:/data");
+    assert!(!out.contains("0.0.0.0"));
+    // 不带密钥渲染时保留占位符，用于展示。
+    let template =
+      service_compose("whoami", &spec(), &ports, &[], None).unwrap();
+    assert!(template.contains("[[WHO_TOKEN]]"));
+    assert!(!template.contains("s3"));
+  }
+
+  #[test]
+  fn trial_compose_does_not_publish_ports() {
+    let mut spec = spec();
+    spec.volumes.clear();
+    let out = trial_compose("s1", &spec, None).unwrap();
+    let yaml: serde_yaml_ng::Value =
+      serde_yaml_ng::from_str(&out).unwrap();
+    let service = &yaml["services"]["s1"];
+    assert_eq!(yaml["name"], "wharf-try-s1");
+    assert_eq!(service["restart"], "no");
+    assert_eq!(service["environment"]["A"], "x$$y");
+    assert_eq!(service["labels"]["wharf.trial"], "s1");
+    assert!(service.get("ports").is_none());
+    assert!(!out.contains("wharf.service"));
+  }
+
+  #[test]
+  fn service_limits_are_optional() {
+    let mut spec = spec();
+    let out =
+      service_compose("s1", &spec, &BTreeMap::new(), &[], None)
+        .unwrap();
+    assert!(!out.contains("mem_limit"));
+    assert!(!out.contains("cpus"));
+    spec.limits = Some(wharf_api_types::spec::Limits {
+      memory_mb: Some(512),
+      cpu_milli: Some(500),
+    });
+    let out =
+      service_compose("s1", &spec, &BTreeMap::new(), &[], None)
+        .unwrap();
+    let yaml: serde_yaml_ng::Value =
+      serde_yaml_ng::from_str(&out).unwrap();
+    let svc = &yaml["services"]["s1"];
+    assert_eq!(svc["mem_limit"], "512m");
+    assert_eq!(svc["cpus"], "0.5");
+    assert_eq!(cpus_text(1000), "1");
+    assert_eq!(cpus_text(1250), "1.25");
+  }
+
+  fn compose_spec(
+    content: &str,
+    memory: Option<u32>,
+    cpu: Option<u32>,
+    env: &[(&str, &str)],
+    container: Option<&str>,
+  ) -> ServiceSpec {
+    let mut spec: ServiceSpec =
+      serde_json::from_value(serde_json::json!({
+        "server": "s1",
+        "source": { "compose": { "content": content } },
+      }))
+      .unwrap();
+    if memory.is_some() || cpu.is_some() {
+      spec.limits = Some(Limits {
+        memory_mb: memory,
+        cpu_milli: cpu,
+      });
+    }
+    spec.env = env
+      .iter()
+      .map(|(k, v)| (k.to_string(), v.to_string()))
+      .collect();
+    spec.container = container.map(str::to_string);
+    spec
+  }
+
+  #[test]
+  fn compose_limits_keep_original_text() {
+    let source = "# 原样保留\nservices: # 服务\n  # 注释\n  web: # 容器\n    image: nginx\n    environment:\n      KEY: [[SECRET]]\n    ports:\n      - \"127.0.0.1:8080:80\"\n";
+    let expected = "# 原样保留\nservices: # 服务\n  # 注释\n  web: # 容器\n    mem_limit: 512m\n    cpus: \"0.5\"\n    image: nginx\n    environment:\n      KEY: [[SECRET]]\n    ports:\n      - \"127.0.0.1:8080:80\"\n";
+    let with = |cpu| {
+      compose_with_settings(
+        "s1",
+        source,
+        &compose_spec(source, Some(512), cpu, &[], None),
+      )
+      .unwrap()
+    };
+    assert_eq!(with(Some(500)), expected);
+    assert_eq!(
+      with(None),
+      expected.replace("    cpus: \"0.5\"\n", "")
+    );
+  }
+
+  #[test]
+  fn compose_env_goes_to_chosen_container() {
+    let source = "services:\n  db:\n    image: mysql\n    environment:\n      - A=1\n  app:\n    image: halo # 主容器\n    environment:\n      KEY: [[SECRET]]\n  side:\n    image: x\n";
+    // 多个容器：没选容器时报错，提示可选的容器。
+    let error = compose_with_settings(
+      "s1",
+      source,
+      &compose_spec(source, None, None, &[("B", "2")], None),
+    )
+    .unwrap_err();
+    assert!(error.message.contains("3 个容器"));
+    // mapping 写法的 environment 里追加，`$` 转义。
+    let out = compose_with_settings(
+      "s1",
+      source,
+      &compose_spec(
+        source,
+        Some(256),
+        None,
+        &[("B", "a$b")],
+        Some("app"),
+      ),
+    )
+    .unwrap();
+    assert_eq!(
+      out,
+      "services:\n  db:\n    image: mysql\n    environment:\n      - A=1\n  app:\n    mem_limit: 256m\n    image: halo # 主容器\n    environment:\n      B: \"a$$b\"\n      KEY: [[SECRET]]\n  side:\n    image: x\n"
+    );
+    // 列表写法。
+    let out = compose_with_settings(
+      "s1",
+      source,
+      &compose_spec(source, None, None, &[("B", "2")], Some("db")),
+    )
+    .unwrap();
+    assert!(
+      out
+        .contains("    environment:\n      - \"B=2\"\n      - A=1\n")
+    );
+    // 没有 environment 的容器新加一段。
+    let out = compose_with_settings(
+      "s1",
+      source,
+      &compose_spec(source, None, None, &[("B", "2")], Some("side")),
+    )
+    .unwrap();
+    assert!(out.ends_with(
+      "  side:\n    environment:\n      B: \"2\"\n    image: x\n"
+    ));
+    // 和 compose 里重复的变量。
+    let error = compose_with_settings(
+      "s1",
+      source,
+      &compose_spec(source, None, None, &[("A", "2")], Some("db")),
+    )
+    .unwrap_err();
+    assert!(error.message.contains("已经写了"));
+    let error = compose_with_settings(
+      "s1",
+      source,
+      &compose_spec(source, None, None, &[("B", "2")], Some("nope")),
+    )
+    .unwrap_err();
+    assert!(error.message.contains("没有容器 nope"));
+  }
+
+  #[test]
+  fn compose_limits_reject_unsupported_forms() {
+    let check = |source: &str| {
+      compose_with_settings(
+        "s1",
+        source,
+        &compose_spec(source, Some(512), None, &[], None),
+      )
+      .unwrap_err()
+      .message
+    };
+    assert!(check("services:\n  web:\n    image: nginx\n  worker:\n    image: nginx\n").contains("2 个容器"));
+    assert!(
+      check(
+        "services:\n  web:\n    image: nginx\n    mem_limit: 64m\n"
+      )
+      .contains("已经写了 mem_limit")
+    );
+    assert!(
+      check("services: {web: {image: nginx}}")
+        .contains("写法没法自动加上")
+    );
+  }
+
+  #[test]
+  fn missing_secret_suggests_command() {
+    let err =
+      substitute("a [[NOPE]] b", Some(&BTreeMap::new())).unwrap_err();
+    assert_eq!(err.suggest, vec!["wharf secret set NOPE"]);
+    // 不像名字的 [[...]] 原样保留。
+    assert_eq!(
+      substitute("[[a b]] [x]", Some(&BTreeMap::new())).unwrap(),
+      "[[a b]] [x]"
+    );
+  }
+
+  #[test]
+  fn renders_account_password() {
+    let spec = serde_json::from_value(serde_json::json!({
+      "server": "s1", "source": {"image": "example/app"},
+      "env": {"APP_PASSWORD": "[[account.x.password]]"}
+    }))
+    .unwrap();
+    let credentials = BTreeMap::from([(
+      "account.x.password".into(),
+      "fixture-value".into(),
+    )]);
+    let render = |values| {
+      service_compose("app", &spec, &BTreeMap::new(), &[], values)
+        .unwrap()
+    };
+    assert!(
+      render(Some(&credentials))
+        .contains("APP_PASSWORD: fixture-value")
+    );
+    assert!(render(None).contains("[[account.x.password]]"));
+  }
+
+  #[test]
+  fn compose_checks() {
+    assert!(
+      check_compose("x", "services:\n  web:\n    image: nginx\n")
+        .is_ok()
+    );
+    assert!(check_compose("x", "services: {}\n").is_err());
+    assert!(
+      check_compose("x", "services:\n  web:\n    build: .\n")
+        .is_err()
+    );
+    assert!(check_compose("x", "::: nope").is_err());
+  }
+
+  #[test]
+  fn caddyfile_lists_sites_sorted() {
+    let gw = GatewaySpec {
+      kind: GatewayKind::Caddy,
+      server: "edge1".into(),
+      default: true,
+      http_port: Some(8080),
+      https_port: None,
+      email: None,
+      image: None,
+      tls: GatewayTls::Auto,
+      account: None,
+      error_page: None,
+      wildcard: vec![],
+      layer4: vec![],
+      trusted_proxies: None,
+      read_header_timeout: None,
+      idle_timeout: None,
+      grace_period: None,
+    };
+    let out = caddyfile(
+      "edge",
+      &gw,
+      &[
+        Site {
+          hostname: "z.example.com".into(),
+          upstream: "127.0.0.1:1".into(),
+          auth: BasicAuth::parse("admin $2b$12$abc"),
+          paths: vec![],
+          redirect: None,
+          ..Default::default()
+        },
+        Site {
+          hostname: "a.example.com".into(),
+          upstream: "100.1.1.1:2".into(),
+          auth: None,
+          paths: vec![("/ws".into(), "127.0.0.1:17891".into())],
+          redirect: None,
+          ..Default::default()
+        },
+      ],
+      &[],
+      true,
+      None,
+    );
+    assert!(out.contains(
+      "link.wharf.internal {\n\ttls internal\n\treverse_proxy /~!frp 127.0.0.1:7000\n}"
+    ));
+    // 只有开了 auth 的站点带 basic_auth。
+    let z = &out[out.find("z.example.com").unwrap()..];
+    assert!(z.contains("basic_auth {\n\t\tadmin $2b$12$abc\n\t}"));
+    assert_eq!(out.matches("basic_auth").count(), 1);
+    assert!(out.contains(
+      "a.example.com {\n\timport wharf_access\n\timport wharf_errors\n\treverse_proxy /ws 127.0.0.1:17891 {\n\t\timport wharf_upstream\n\t}\n\treverse_proxy 100.1.1.1:2 {\n\t\timport wharf_upstream\n\t}\n}"
+    ));
+    assert!(out.contains("http_port 8080"));
+    assert!(!out.contains("https_port"));
+    assert!(!out.contains("auto_https"));
+    assert!(
+      out.find("a.example.com").unwrap()
+        < out.find("z.example.com").unwrap()
+    );
+    let compose = gateway_compose("edge", &gw);
+    assert!(compose.contains("network_mode: host"));
+    assert!(compose.contains("name: wharf-gw-edge"));
+    let off = GatewaySpec {
+      tls: GatewayTls::Off,
+      ..gw
+    };
+    let out = caddyfile(
+      "edge",
+      &off,
+      &[Site {
+        hostname: "a.example.com".into(),
+        upstream: "127.0.0.1:1".into(),
+        auth: None,
+        paths: vec![],
+        redirect: None,
+        ..Default::default()
+      }],
+      &[],
+      false,
+      None,
+    );
+    assert!(out.contains("auto_https off"));
+    assert!(out.contains("\nhttp://a.example.com {"));
+  }
+
+  #[test]
+  fn caddyfile_custom_in_site() {
+    let spec = serde_json::from_value(serde_json::json!({
+      "kind": "caddy", "server": "s1"
+    }))
+    .unwrap();
+    let out = caddyfile(
+      "edge",
+      &spec,
+      &[Site {
+        hostname: "a.example.com".into(),
+        upstream: "127.0.0.1:1".into(),
+        custom: Some(
+          "@admin path /admin/*\n\nrespond @admin 403  ".into(),
+        ),
+        ..Default::default()
+      }],
+      &[],
+      false,
+      None,
+    );
+    assert!(out.contains("\timport wharf_errors\n\t@admin path /admin/*\n\n\trespond @admin 403\n\treverse_proxy 127.0.0.1:1 {"));
+  }
+
+  #[test]
+  fn caddyfile_guard_per_site() {
+    let spec = serde_json::from_value(serde_json::json!({
+      "kind": "caddy", "server": "s1"
+    }))
+    .unwrap();
+    let out = caddyfile(
+      "edge",
+      &spec,
+      &[
+        Site {
+          hostname: "a.example.com".into(),
+          upstream: "127.0.0.1:1".into(),
+          rate_limit: Some(600),
+          block_scanners: true,
+          ..Default::default()
+        },
+        Site {
+          hostname: "b.example.com".into(),
+          upstream: "127.0.0.1:2".into(),
+          ..Default::default()
+        },
+      ],
+      &[],
+      false,
+      None,
+    );
+    assert_eq!(
+      out.matches("order rate_limit before basic_auth").count(),
+      1
+    );
+    assert_eq!(out.matches("(wharf_scanners) {").count(), 1);
+    assert_eq!(out.matches("import wharf_scanners").count(), 1);
+    let a = out
+      .split("\na.example.com {\n")
+      .nth(1)
+      .unwrap()
+      .split("\nb.example.com {\n")
+      .next()
+      .unwrap();
+    assert!(a.contains("import wharf_scanners"));
+    assert!(a.contains("zone wharf_a_example_com {"));
+    assert!(a.contains("events 600"));
+    assert!(a.contains("window 1m"));
+    assert!(out.contains("b.example.com {\n\timport wharf_access\n\timport wharf_errors\n\treverse_proxy 127.0.0.1:2 {\n\t\timport wharf_upstream\n\t}\n}"));
+    assert!(!SCANNER_PATHS.contains(" / "));
+    assert!(!SCANNER_UA.contains("curl"));
+    assert!(!SCANNER_UA.contains("reqwest"));
+  }
+
+  #[test]
+  fn caddyfile_retries_only_service_upstreams() {
+    let spec = serde_json::from_value(serde_json::json!({
+      "kind": "caddy", "server": "s1"
+    }))
+    .unwrap();
+    let site = Site {
+      hostname: "a.example.com".into(),
+      upstream: "127.0.0.1:20000".into(),
+      auth: None,
+      paths: vec![("/api".into(), "100.64.0.1:20001".into())],
+      redirect: None,
+      ..Default::default()
+    };
+    let redirect = Site {
+      hostname: "b.example.com".into(),
+      redirect: Some("https://a.example.com".into()),
+      paths: vec![],
+      ..site.clone()
+    };
+    let out =
+      caddyfile("edge", &spec, &[site, redirect], &[], true, None);
+    assert_eq!(out.matches("import wharf_upstream").count(), 2);
+    assert_eq!(out.matches("(wharf_upstream) {").count(), 1);
+    assert!(out.contains("lb_try_duration 8s"));
+    assert!(out.contains("lb_try_interval 250ms"));
+    let excluded = &out[out.find("\nb.example.com {").unwrap()..];
+    assert!(excluded.contains("link.wharf.internal {"));
+    assert!(!excluded.contains("import wharf_upstream"));
+  }
+
+  #[test]
+  fn caddyfile_has_default_error_page() {
+    let spec = serde_json::from_value(serde_json::json!({
+      "kind": "caddy", "server": "s1"
+    }))
+    .unwrap();
+    let out = caddyfile(
+      "edge",
+      &spec,
+      &[
+        Site {
+          hostname: "a.example.com".into(),
+          upstream: "127.0.0.1:21000".into(),
+          auth: None,
+          paths: vec![],
+          redirect: None,
+          ..Default::default()
+        },
+        Site {
+          hostname: "b.example.com".into(),
+          upstream: String::new(),
+          auth: None,
+          paths: vec![],
+          redirect: Some("https://a.example.com".into()),
+          ..Default::default()
+        },
+      ],
+      &[],
+      false,
+      None,
+    );
+    assert!(out.contains("(wharf_errors) {"));
+    assert!(out.contains("handle_errors 502 503 504"));
+    assert!(out.contains("服务暂时不可用"));
+    assert_eq!(out.matches("import wharf_errors").count(), 1);
+  }
+
+  #[test]
+  fn caddyfile_has_custom_error_page() {
+    let spec = serde_json::from_value(serde_json::json!({
+      "kind": "caddy", "server": "s1",
+      "error_page": "<p>x</p>\n\n<p>y</p>"
+    }))
+    .unwrap();
+    let out = caddyfile("edge", &spec, &[], &[], false, None);
+    assert!(out.contains(
+      "\t\t<p>x</p>\n\n\t\t<p>y</p>\n\t\tWHARF_ERROR_PAGE {err.status_code}\n"
+    ));
+    assert!(!out.contains("服务暂时不可用"));
+  }
+
+  #[test]
+  fn caddyfile_redirect_keeps_uri() {
+    let gw = GatewaySpec {
+      kind: GatewayKind::Caddy,
+      server: "s1".into(),
+      default: true,
+      http_port: None,
+      https_port: None,
+      email: None,
+      image: None,
+      tls: GatewayTls::Auto,
+      account: None,
+      error_page: None,
+      wildcard: vec![],
+      layer4: vec![],
+      trusted_proxies: None,
+      read_header_timeout: None,
+      idle_timeout: None,
+      grace_period: None,
+    };
+    let out = caddyfile(
+      "edge",
+      &gw,
+      &[Site {
+        hostname: "www.a.com".into(),
+        upstream: String::new(),
+        auth: None,
+        paths: vec![],
+        redirect: Some("https://a.com".into()),
+        ..Default::default()
+      }],
+      &[],
+      false,
+      None,
+    );
+    assert!(out.contains("www.a.com {\n\timport wharf_access\n\tredir https://a.com{uri} permanent\n"));
+    assert!(!out.contains("reverse_proxy"));
+  }
+
+  #[test]
+  fn tunnel_compose_holds_only_a_token_placeholder() {
+    let spec = GatewaySpec {
+      kind: GatewayKind::CloudflareTunnel,
+      server: "edge1".into(),
+      default: false,
+      http_port: None,
+      https_port: None,
+      email: None,
+      image: None,
+      tls: GatewayTls::Auto,
+      account: Some("cf".into()),
+      error_page: None,
+      wildcard: vec![],
+      layer4: vec![],
+      trusted_proxies: None,
+      read_header_timeout: None,
+      idle_timeout: None,
+      grace_period: None,
+    };
+    let out = tunnel_compose("cf", &spec, None);
+    assert!(
+      out.contains("TUNNEL_TOKEN: '[[WHARF_TUNNEL_TOKEN]]'"),
+      "{out}"
+    );
+    assert!(out.contains("network_mode: host"));
+    assert!(out.contains(DEFAULT_CLOUDFLARED_IMAGE));
+  }
+
+  #[test]
+  fn auth_is_per_route() {
+    let mut net = Net::default();
+    net.basic_auth.insert(
+      route_auth_secret("a.example.com"),
+      BasicAuth::parse("mine $2b$12$x").unwrap(),
+    );
+    assert_eq!(net.auth_for("a.example.com").unwrap().user, "mine");
+    assert!(net.auth_for("b.example.com").is_none());
+    assert_eq!(
+      route_auth_secret("a.example.com"),
+      "BASIC_AUTH_a_example_com"
+    );
+  }
+
+  #[test]
+  fn basic_auth_input_is_checked() {
+    assert!(BasicAuth::hash_input("no-colon").is_err());
+    assert!(BasicAuth::hash_input("ad min:longenough").is_err());
+    assert!(BasicAuth::hash_input("admin:short").is_err());
+    assert!(BasicAuth::parse("admin plaintext").is_none());
+  }
+
+  #[test]
+  fn inputs_include_addresses_not_usage() {
+    use wharf_api_types::agent::{AgentReport, Disk};
+    use wharf_api_types::spec::{PrivateNetwork, ServerSettings};
+
+    let addr = |ip: &str| PrivateAddr {
+      ip: ip.into(),
+      network: PrivateNetwork::Tailscale,
+    };
+    let fingerprint = |settings: ServerSettings,
+                       report: AgentReport| {
+      let servers = BTreeMap::from([(
+        "home".to_string(),
+        ServerRow {
+          settings,
+          version: 1,
+        },
+      )]);
+      let agents = vec![crate::db::AgentRow {
+        server: "home".into(),
+        public_key: None,
+        report: Some(report),
+        last_seen: None,
+      }];
+      crate::db::inputs_fingerprint(
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        &Net::derive(&servers, &agents).addresses(),
+      )
+    };
+
+    let base = fingerprint(
+      ServerSettings::default(),
+      AgentReport {
+        private_addr: Some(addr("100.64.0.1")),
+        ..Default::default()
+      },
+    );
+    // 磁盘用量这类高频上报值变了，指纹不变
+    let usage = fingerprint(
+      ServerSettings::default(),
+      AgentReport {
+        private_addr: Some(addr("100.64.0.1")),
+        disk: Some(Disk {
+          total: 100,
+          free: 1,
+        }),
+        ..Default::default()
+      },
+    );
+    assert_eq!(base, usage);
+    // agent 上报的地址变了，指纹要变
+    let moved = fingerprint(
+      ServerSettings::default(),
+      AgentReport {
+        private_addr: Some(addr("100.64.0.2")),
+        ..Default::default()
+      },
+    );
+    assert_ne!(base, moved);
+    // 服务器设置里的地址覆盖变了，指纹也要变
+    let overridden = fingerprint(
+      ServerSettings {
+        private_addr: Some(addr("100.64.0.3")),
+        ..Default::default()
+      },
+      AgentReport::default(),
+    );
+    assert_ne!(base, overridden);
+  }
+  #[test]
+  fn caddyfile_app_login() {
+    let gw = serde_json::from_value(
+      serde_json::json!({"kind":"caddy","server":"s1"}),
+    )
+    .unwrap();
+    let mut site = gate_site();
+    site.gate.as_mut().unwrap().app_login = true;
+    assert!(
+      caddyfile("edge", &gw, &[site], &[], false, Some("public"))
+        .contains("\t\tapp_login on\n")
+    );
+  }
+  #[test]
+  fn caddyfile_gate_without_app_login() {
+    let gw = serde_json::from_value(
+      serde_json::json!({"kind":"caddy","server":"s1"}),
+    )
+    .unwrap();
+    assert!(
+      !caddyfile(
+        "edge",
+        &gw,
+        &[gate_site()],
+        &[],
+        false,
+        Some("public")
+      )
+      .contains("app_login")
+    );
+  }
+  #[test]
+  fn caddyfile_public_login_entry_only() {
+    let gw = serde_json::from_value(
+      serde_json::json!({"kind":"caddy","server":"s1"}),
+    )
+    .unwrap();
+    let mut site = gate_site();
+    for app_login in [true, false] {
+      let gate = site.gate.as_mut().unwrap();
+      gate.public = true;
+      gate.site_endpoints = app_login;
+      gate.app_login = app_login;
+      let out = caddyfile(
+        "edge",
+        &gw,
+        std::slice::from_ref(&site),
+        &[],
+        false,
+        Some("public"),
+      );
+      assert_eq!(out.contains("@wharf_site"), app_login);
+      assert!(out.contains("\twharf_sso {"));
+      assert!(out.contains("\t\tpublic\n"));
+    }
+  }
+  fn gate_site() -> Site {
+    Site {
+      hostname: "a.example.test".into(),
+      upstream: "127.0.0.1:8080".into(),
+      gate: Some(Gate {
+        public: false,
+        site_endpoints: true,
+        app_login: false,
+        user_header: None,
+        trusted: vec![],
+        login: "https://core.example.test".into(),
+        core: "http://127.0.0.1:7700".into(),
+        skip_paths: vec![],
+        takeover: None,
+      }),
+      ..Default::default()
+    }
+  }
+  #[test]
+  fn caddyfile_gate() {
+    let gw: GatewaySpec = serde_json::from_value(
+      serde_json::json!({"kind":"caddy","server":"s1"}),
+    )
+    .unwrap();
+    let out = caddyfile(
+      "edge",
+      &gw,
+      &[gate_site()],
+      &[],
+      false,
+      Some("public"),
+    );
+    assert!(out.contains("order wharf_sso before basic_auth"));
+    assert!(out.contains("handle @wharf_site"));
+    assert!(out.contains("uri replace /_wharf/ /gate/site/"));
+    assert!(out.contains("public_key public"));
+    assert!(out.contains("core http://127.0.0.1:7700"));
+    assert!(!out.contains("skip "));
+  }
+  #[test]
+  fn caddyfile_gate_trust() {
+    let gw: GatewaySpec = serde_json::from_value(
+      serde_json::json!({"kind":"caddy","server":"s1"}),
+    )
+    .unwrap();
+    let mut site = gate_site();
+    let before = caddyfile(
+      "edge",
+      &gw,
+      std::slice::from_ref(&site),
+      &[],
+      false,
+      Some("public"),
+    );
+    site.gate.as_mut().unwrap().trusted = vec![
+      "100.64.0.0/10".into(),
+      "127.0.0.0/8".into(),
+      "::1/128".into(),
+      "fd7a:115c:a1e0::/48".into(),
+    ];
+    let after =
+      caddyfile("edge", &gw, &[site], &[], false, Some("public"));
+    assert_eq!(
+      after.replace("\t\ttrust 100.64.0.0/10 127.0.0.0/8 ::1/128 fd7a:115c:a1e0::/48\n", ""),
+      before
+    );
+    assert!(after.contains("\t\ttrust 100.64.0.0/10 127.0.0.0/8 ::1/128 fd7a:115c:a1e0::/48\n"));
+  }
+  #[test]
+  fn caddyfile_gate_without_trust_unchanged() {
+    let gw: GatewaySpec = serde_json::from_value(
+      serde_json::json!({"kind":"caddy","server":"s1"}),
+    )
+    .unwrap();
+    let out = caddyfile(
+      "edge",
+      &gw,
+      &[gate_site()],
+      &[],
+      false,
+      Some("public"),
+    );
+    assert!(
+      out.contains("\t\tlogin https://core.example.test\n\t}\n")
+    );
+    assert!(!out.contains("\t\ttrust "));
+  }
+  #[test]
+  fn caddyfile_gate_header() {
+    let gw: GatewaySpec = serde_json::from_value(
+      serde_json::json!({"kind":"caddy","server":"s1"}),
+    )
+    .unwrap();
+    let mut site = gate_site();
+    let before = caddyfile(
+      "edge",
+      &gw,
+      std::slice::from_ref(&site),
+      &[],
+      false,
+      Some("public"),
+    );
+    site.gate.as_mut().unwrap().user_header =
+      Some("Remote-User".into());
+    let after =
+      caddyfile("edge", &gw, &[site], &[], false, Some("public"));
+    assert!(after.contains("\t\tuser_header Remote-User\n"));
+    assert_eq!(
+      after.replace("\t\tuser_header Remote-User\n", ""),
+      before
+    );
+  }
+  #[test]
+  fn caddyfile_gate_without_header() {
+    let gw: GatewaySpec = serde_json::from_value(
+      serde_json::json!({"kind":"caddy","server":"s1"}),
+    )
+    .unwrap();
+    let out = caddyfile(
+      "edge",
+      &gw,
+      &[gate_site()],
+      &[],
+      false,
+      Some("public"),
+    );
+    assert!(!out.contains("user_header"));
+  }
+  #[test]
+  fn caddyfile_gate_skip() {
+    let gw: GatewaySpec = serde_json::from_value(
+      serde_json::json!({"kind":"caddy","server":"s1"}),
+    )
+    .unwrap();
+    let mut site = gate_site();
+    let gate = site.gate.as_mut().unwrap();
+    gate.skip_paths = vec!["/api".into(), "/hooks".into()];
+    gate.core = gate.login.clone();
+    let out =
+      caddyfile("edge", &gw, &[site], &[], false, Some("public"));
+    assert!(out.contains("skip /api /hooks"));
+    assert!(out.contains("header_up Host {upstream_hostport}"));
+  }
+  #[test]
+  fn caddyfile_without_gate() {
+    let gw: GatewaySpec = serde_json::from_value(
+      serde_json::json!({"kind":"caddy","server":"s1"}),
+    )
+    .unwrap();
+    let mut site = gate_site();
+    site.gate = None;
+    let out = caddyfile("edge", &gw, &[site], &[], false, None);
+    assert!(!out.contains("wharf_sso"));
+    assert!(!out.contains("/_wharf/"));
+    assert!(out.contains(
+      "reverse_proxy 127.0.0.1:8080 {\n\t\timport wharf_upstream\n\t}"
+    ));
+  }
+}

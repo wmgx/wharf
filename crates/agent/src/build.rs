@@ -350,9 +350,93 @@ fn no_proxy(job: &BuildJob) -> String {
   hosts.join(",")
 }
 
-mod tree;
-use tree::{FsTree, check_tree};
-pub(crate) use tree::{checked_path, checked_subdir, relative};
+/// 只接受代码里的相对路径，不能跳出去。
+pub(crate) fn relative(p: &str) -> Result<PathBuf, ApiError> {
+  let path = PathBuf::from(p.trim_start_matches("./"));
+  let ok = !p.is_empty()
+    && path
+      .components()
+      .all(|c| matches!(c, Component::Normal(_) | Component::CurDir));
+  if ok {
+    Ok(path)
+  } else {
+    Err(ApiError::invalid(format!(
+      "路径 {p} 不合法：要写代码里的相对路径"
+    )))
+  }
+}
+
+fn check_tree(root: &Path) -> Result<(), ApiError> {
+  let fd = crate::dirfd::DirFd::open_dir(root)
+    .map_err(|e| crate::dirfd::dir_error(root, e))?;
+  crate::dirfd::validate_tree(&fd, false)
+}
+
+pub(crate) fn checked_path(
+  root: &Path,
+  path: &Path,
+) -> Result<PathBuf, ApiError> {
+  let base = root.canonicalize().map_err(io_err(root))?;
+  let candidate = path.canonicalize().map_err(io_err(path))?;
+  if candidate.starts_with(base) {
+    Ok(candidate)
+  } else {
+    Err(ApiError::invalid(format!(
+      "路径 {} 指向构建目录之外",
+      path.display()
+    )))
+  }
+}
+
+pub(crate) fn checked_subdir(
+  root: &Path,
+  rel: Option<&str>,
+) -> Result<PathBuf, ApiError> {
+  let path =
+    root.join(rel.map(relative).transpose()?.unwrap_or_default());
+  let path = checked_path(root, &path)?;
+  if !path.is_dir() {
+    return Err(ApiError::invalid(format!(
+      "代码里没有目录 {}",
+      rel.unwrap_or_default()
+    )));
+  }
+  Ok(path)
+}
+
+struct FsTree<'a>(&'a Path);
+
+impl SourceTree for FsTree<'_> {
+  fn read(&self, path: &str) -> Option<String> {
+    let path = checked_path(self.0, &self.0.join(path)).ok()?;
+    // 只读小文件：判断语言用不到大文件。
+    let meta = std::fs::metadata(&path).ok()?;
+    if !meta.is_file() || meta.len() > 1024 * 1024 {
+      return None;
+    }
+    std::fs::read_to_string(path).ok()
+  }
+
+  fn list(&self, dir: &str) -> Vec<String> {
+    let Ok(path) = checked_path(self.0, &self.0.join(dir)) else {
+      return vec![];
+    };
+    let Ok(entries) = std::fs::read_dir(path) else {
+      return vec![];
+    };
+    entries
+      .filter_map(Result::ok)
+      .map(|e| {
+        let name = e.file_name().to_string_lossy().to_string();
+        if e.file_type().is_ok_and(|t| t.is_dir()) {
+          format!("{name}/")
+        } else {
+          name
+        }
+      })
+      .collect()
+  }
+}
 
 async fn download(
   core_url: &str,
@@ -723,4 +807,79 @@ pub(crate) fn to_value<T: serde::Serialize>(
 }
 
 #[cfg(test)]
-mod tests;
+mod tests {
+  use super::*;
+
+  #[test]
+  fn picks_commit_from_ls_remote() {
+    let a = "a".repeat(40);
+    let b = "b".repeat(40);
+    let c = "c".repeat(40);
+    let out = format!(
+      "{a}\trefs/heads/main\n{b}\trefs/tags/v1\n{c}\trefs/tags/v1^{{}}\n"
+    );
+    assert_eq!(pick_commit(&out, "main"), Some(a));
+    // 附注标签取它指向的 commit。
+    assert_eq!(pick_commit(&out, "v1"), Some(c));
+    assert_eq!(pick_commit(&out, "dev"), None);
+  }
+
+  #[test]
+  fn build_error_keeps_only_error_lines() {
+    let log = "#8 RUN pip install\n#8 1.5 ERROR: HTTP 403\n#8 ERROR: exit 1\n------\n#8 1.5 ERROR: HTTP 403\nERROR: failed to solve";
+    let e = build_failed(log);
+    assert_eq!(
+      e.message,
+      "构建失败：#8 1.5 ERROR: HTTP 403\n#8 ERROR: exit 1\nERROR: failed to solve"
+    );
+  }
+
+  #[test]
+  fn paths_stay_inside_the_code() {
+    assert!(relative("app").is_ok());
+    assert!(relative("./svc/api").is_ok());
+    for bad in ["", "/etc", "../x", "a/../../b"] {
+      assert!(relative(bad).is_err(), "{bad}");
+    }
+  }
+
+  #[test]
+  fn build_tree_check_rejects_git_or_unpacked_escaping_symlinks() {
+    use std::{fs, os::unix::fs::symlink};
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("src");
+    let outside = dir.path().join("outside");
+    fs::create_dir_all(&root).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    symlink(&outside, root.join("sub")).unwrap();
+    assert_eq!(
+      check_tree(&root).unwrap_err().code,
+      ErrorCode::InvalidInput
+    );
+    assert_eq!(
+      checked_subdir(&root, Some("sub")).unwrap_err().code,
+      ErrorCode::InvalidInput
+    );
+    fs::remove_file(root.join("sub")).unwrap();
+    fs::create_dir(root.join("sub")).unwrap();
+    fs::create_dir(root.join("app")).unwrap();
+    symlink("../app", root.join("sub/inside")).unwrap();
+    assert!(check_tree(&root).is_ok());
+    assert_eq!(
+      checked_subdir(&root, Some("sub/inside")).unwrap(),
+      root.join("app").canonicalize().unwrap()
+    );
+  }
+
+  #[test]
+  fn tree_lists_dirs_with_slash() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("cmd")).unwrap();
+    std::fs::write(dir.path().join("go.mod"), "module x").unwrap();
+    let tree = FsTree(dir.path());
+    let mut names = tree.list("");
+    names.sort();
+    assert_eq!(names, vec!["cmd/", "go.mod"]);
+    assert_eq!(tree.read("go.mod").as_deref(), Some("module x"));
+  }
+}

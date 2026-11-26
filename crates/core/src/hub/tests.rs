@@ -1,4 +1,3 @@
-use super::socket::protocol_ok;
 use super::*;
 
 #[test]

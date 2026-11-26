@@ -1,15 +1,18 @@
 //! HTTP API。错误统一为 `{ code, message, hint, suggest }`。
 
-use std::{sync::Arc, time::Duration};
+use std::{
+  collections::BTreeMap, net::SocketAddr, sync::Arc, time::Duration,
+};
 
 use axum::{
-  Json, Router,
-  extract::{Path, Query, State},
+  Extension, Json, Router,
+  extract::{ConnectInfo, Path, Query, State},
   http::{HeaderMap, StatusCode},
   response::{IntoResponse, Response},
   routing::{get, post, put},
 };
-use rusqlite::params;
+use chrono::Utc;
+use rusqlite::{OptionalExtension, params};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use wharf_api_types::{
@@ -19,8 +22,9 @@ use wharf_api_types::{
   spec::Fleet,
   validate_name,
   view::{
-    AccountView, DataView, DeploymentView, GatewayView, Perm,
-    RouteView, SecretView, ServerView, ServiceView, Status,
+    AccountView, DataView, DeploymentView, GatewayView, JoinInfo,
+    JoinRequest, JoinResponse, Perm, RouteView, SecretView,
+    ServerView, ServiceView, Status,
   },
 };
 
@@ -30,22 +34,12 @@ use crate::secret_policy::{
 };
 use crate::{
   apply,
-  auth::Auth,
+  auth::{self, Auth},
   db::{self, json_err, now_ms, sql_err, to_time},
   hub, planner, snapshot,
   state::AppState,
   views,
   world::{KIND_SERVER, gateway_project, server_not_found},
-};
-
-mod administration;
-mod agent_join;
-mod resources;
-use administration::*;
-use agent_join::{add_server, agent_join};
-use resources::*;
-pub(crate) use resources::{
-  LogsQuery, gateway_not_found, service_not_found,
 };
 
 pub struct AppError(pub ApiError);
@@ -653,6 +647,214 @@ async fn host_info(
   ))
 }
 
+#[derive(Deserialize)]
+struct AddServer {
+  name: String,
+  #[serde(default)]
+  rejoin: bool,
+  /// agent 连接控制面用的地址，不给时用启动配置或请求的 Host。
+  #[serde(default)]
+  core_url: Option<String>,
+  /// agent 镜像，不给时用控制面的默认镜像。国内机器可以换成镜像站地址。
+  #[serde(default)]
+  agent_image: Option<String>,
+}
+
+const JOIN_TTL_HOURS: i64 = 24;
+
+async fn add_server(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  headers: HeaderMap,
+  Json(req): Json<AddServer>,
+) -> ApiResult<JoinInfo> {
+  auth.require(Perm::Admin)?;
+  validate_name("服务器", &req.name)?;
+  let image = match req.agent_image.as_deref().map(str::trim) {
+    Some(i) if !i.is_empty() && i != s.agent_image => {
+      Some(crate::join::check_image(i)?)
+    }
+    _ => None,
+  };
+  let core_url =
+    match req.core_url.as_deref().filter(|u| !u.trim().is_empty()) {
+      Some(u) => Some(crate::join::check_core_url(u)?),
+      None => None,
+    };
+  let token = auth::new_token().replacen("wh_", "wj_", 1);
+  let hash = auth::hash_token(&token);
+  let expires = Utc::now() + chrono::Duration::hours(JOIN_TTL_HOURS);
+  let name = req.name.clone();
+  let rejoin = req.rejoin;
+  let expires_ms = expires.timestamp_millis();
+  s.db
+    .call(move |c| {
+      let tx = c.transaction().map_err(sql_err)?;
+      let joined: Option<Option<String>> = tx
+        .query_row(
+          "SELECT public_key FROM agents WHERE server = ?1",
+          params![name],
+          |r| r.get(0),
+        )
+        .optional()
+        .map_err(sql_err)?;
+      if matches!(joined, Some(Some(_))) && !rejoin {
+        return Err(
+          ApiError::new(ErrorCode::AlreadyExists, format!("服务器 {name} 已经加入"))
+            .with_hint("换机器或重装 agent 时用 --rejoin 生成新的加入命令，旧密钥会失效")
+            .suggest(format!("wharf server add {name} --rejoin")),
+        );
+      }
+      let exists: bool = tx
+        .query_row(
+          "SELECT 1 FROM resources WHERE kind = ?1 AND name = ?2",
+          params![KIND_SERVER, name],
+          |_| Ok(()),
+        )
+        .optional()
+        .map_err(sql_err)?
+        .is_some();
+      if !exists {
+        db::apply_write(
+          &tx,
+          &db::Write::Upsert {
+            kind: KIND_SERVER.into(),
+            name: name.clone(),
+            spec: json!({}),
+            meta: json!({}),
+          },
+        )?;
+      }
+      tx.execute(
+        "INSERT INTO agents (server, join_token_hash, join_expires_at) VALUES (?1, ?2, ?3)
+         ON CONFLICT (server) DO UPDATE SET join_token_hash = excluded.join_token_hash,
+           join_expires_at = excluded.join_expires_at",
+        params![name, hash, expires_ms],
+      )
+      .map_err(sql_err)?;
+      tx.commit().map_err(sql_err)
+    })
+    .await?;
+
+  let core_url = match core_url {
+    Some(u) => Some(u),
+    None => crate::join::default_url(&s).await,
+  };
+  let core_url = core_url.unwrap_or_else(|| {
+    let host = headers
+      .get(axum::http::header::HOST)
+      .and_then(|h| h.to_str().ok())
+      .unwrap_or("127.0.0.1:7700");
+    format!("http://{host}")
+  });
+  let core_key = hex::encode(s.key.verifying_key().to_bytes());
+  let mut commands = BTreeMap::from([
+    (
+      "docker".to_string(),
+      format!(
+        "docker run -d --label wharf.system=agent --name wharf-agent --restart unless-stopped --network host \
+         -v /var/run/docker.sock:/var/run/docker.sock -v /var/lib/wharf:/var/lib/wharf -v /srv:/srv \
+         -e WHARF_CORE_URL={core_url} -e WHARF_JOIN_TOKEN={token} -e WHARF_CORE_KEY={core_key} {}",
+        image.as_deref().unwrap_or(&s.agent_image)
+      ),
+    ),
+    (
+      "binary".to_string(),
+      format!(
+        "wharf-agent join {core_url} {token} --core-key {core_key} && wharf-agent run"
+      ),
+    ),
+  ]);
+  if crate::join::allows_script_install(&core_url) {
+    commands.insert(
+      "script".into(),
+      crate::join::script_command(
+        &core_url,
+        &token,
+        &core_key,
+        image.as_deref(),
+      ),
+    );
+  }
+  Ok(Json(JoinInfo {
+    server: req.name,
+    join_token: token,
+    expires_at: expires,
+    commands,
+    core_url,
+  }))
+}
+
+async fn agent_join(
+  State(s): State<Arc<AppState>>,
+  sealed: Option<Extension<crate::cli_tunnel::Sealed>>,
+  ConnectInfo(peer): ConnectInfo<SocketAddr>,
+  headers: HeaderMap,
+  Json(req): Json<JoinRequest>,
+) -> ApiResult<JoinResponse> {
+  if sealed.is_none()
+    && !crate::source_trust::is_direct_local(peer.ip(), &headers)
+  {
+    return Err(
+      ApiError::new(
+        ErrorCode::Unauthorized,
+        "控制面已拒绝明文提交加入凭据",
+      )
+      .with_hint(
+        "先拉取最新的 wharf-agent 镜像，再用最新的加入命令重试",
+      )
+      .into(),
+    );
+  }
+  let hash = auth::hash_token(req.join_token.trim());
+  let key = req.public_key.clone();
+  if hex::decode(&key).map(|b| b.len()).unwrap_or(0) != 32 {
+    return Err(ApiError::invalid("公钥格式不对").into());
+  }
+  let hub = s.clone();
+  let server = s
+    .db
+    .call(move |c| {
+      let tx = c.transaction().map_err(sql_err)?;
+      let found: Option<(String, i64)> = tx
+        .query_row(
+          "SELECT server, join_expires_at FROM agents WHERE join_token_hash = ?1",
+          params![hash],
+          |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(sql_err)?;
+      let Some((server, expires)) = found else {
+        return Err(
+          ApiError::new(ErrorCode::Unauthorized, "加入凭据无效或已经用过")
+            .with_hint("在控制面重新执行 wharf server add <name> --rejoin"),
+        );
+      };
+      if expires < now_ms() {
+        return Err(
+          ApiError::new(ErrorCode::Unauthorized, "加入凭据已过期")
+            .suggest(format!("wharf server add {server} --rejoin")),
+        );
+      }
+      tx.execute(
+        "UPDATE agents SET public_key = ?1, join_token_hash = NULL, join_expires_at = NULL, report = NULL, last_seen = NULL
+         WHERE server = ?2",
+        params![key, server],
+      )
+      .map_err(sql_err)?;
+      crate::core_node::clear_if_server(&tx, &server)?;
+      tx.commit().map_err(sql_err)?;
+      hub.hub.disconnect(&server);
+      Ok(server)
+    })
+    .await?;
+  tracing::info!("服务器 {server} 完成加入");
+  Ok(Json(JoinResponse {
+    server,
+    core_public_key: hex::encode(s.key.verifying_key().to_bytes()),
+  }))
+}
+
 async fn remove_server(
   State(s): State<Arc<AppState>>,
   auth: Auth,
@@ -709,4 +911,1021 @@ async fn remove_server(
     })
     .await?;
   Ok(Json(json!({ "removed": true })))
+}
+
+// SERVICES
+
+async fn list_services(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+) -> ApiResult<Vec<ServiceView>> {
+  auth.require(Perm::Read)?;
+  let snap = snapshot::load(&s.db).await?;
+  let net = snap.net(&snap.world);
+  let live = views::cached_live(&s, &snap.world).await;
+  Ok(Json(
+    snap
+      .world
+      .services
+      .keys()
+      .filter(|n| {
+        auth
+          .services
+          .as_ref()
+          .is_none_or(|allowed| allowed.contains(*n))
+      })
+      .filter_map(|n| {
+        views::service_view(&snap, &net, n, Some(&live))
+      })
+      .collect(),
+  ))
+}
+
+pub(crate) fn service_not_found(name: &str) -> ApiError {
+  ApiError::not_found(format!("服务 {name} 不存在"))
+    .suggest("wharf service list")
+}
+
+/// 备注私密内容的数据密钥，由浏览器用登录密码包好后存在这里；控制面只存不解。
+const VAULT_KEY: &str = "note_vault";
+
+#[derive(Deserialize)]
+struct VaultRequest {
+  vault: String,
+}
+
+async fn show_vault(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+) -> ApiResult<Value> {
+  auth.require(Perm::Admin)?;
+  let vault = s.db.call(|c| crate::db::setting(c, VAULT_KEY)).await?;
+  Ok(Json(json!({ "vault": vault })))
+}
+
+async fn set_vault(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Json(req): Json<VaultRequest>,
+) -> ApiResult<Value> {
+  auth.require(Perm::Admin)?;
+  if req.vault.len() > 2000 || !req.vault.starts_with('{') {
+    return Err(ApiError::invalid("vault 格式不对").into());
+  }
+  s.db
+    .call(move |c| {
+      crate::db::set_setting(c, VAULT_KEY, Some(&req.vault))
+    })
+    .await?;
+  Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Default, Deserialize)]
+struct ServiceQuery {
+  #[serde(default)]
+  reveal: bool,
+}
+
+async fn show_service(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Path(name): Path<String>,
+  Query(query): Query<ServiceQuery>,
+) -> ApiResult<ServiceView> {
+  auth.require(Perm::Read)?;
+  if query.reveal {
+    auth.require(Perm::Apply)?;
+  }
+  let snap = snapshot::load(&s.db).await?;
+  let net = snap.net(&snap.world);
+  let live = views::cached_live(&s, &snap.world).await;
+  let mut view = views::service_view(&snap, &net, &name, Some(&live))
+    .ok_or_else(|| service_not_found(&name))?;
+  if query.reveal {
+    view.heartbeat =
+      crate::service_monitor::heartbeat::view(&snap, &name, true);
+  }
+  Ok(Json(view))
+}
+
+#[derive(Deserialize)]
+pub(super) struct LogsQuery {
+  #[serde(default = "default_tail")]
+  pub(super) tail: u32,
+  /// 只看这个时间之后的：`30m`、`2h`、`3d` 或 RFC 3339 时间。
+  #[serde(default)]
+  pub(super) since: Option<String>,
+  /// 关键字，不分大小写。
+  #[serde(default)]
+  pub(super) grep: Option<String>,
+  /// 只看报错，按内容去重计数。
+  #[serde(default)]
+  pub(super) errors: bool,
+  /// 每行最多多少字符。
+  #[serde(default)]
+  pub(super) max_line: Option<usize>,
+}
+
+fn default_tail() -> u32 {
+  200
+}
+
+async fn project_logs(
+  s: &AppState,
+  server: &str,
+  project: String,
+  q: &LogsQuery,
+) -> Result<Json<Value>, AppError> {
+  Ok(Json(
+    fetch_logs(s, server, q, |tail, since| AgentOp::Logs {
+      project: project.clone(),
+      tail,
+      follow: false,
+      since,
+    })
+    .await?,
+  ))
+}
+
+/// 取日志并按 `q` 筛选。`op` 由行数和时间范围生成 agent 操作。
+async fn fetch_logs(
+  s: &AppState,
+  server: &str,
+  q: &LogsQuery,
+  op: impl Fn(u32, Option<String>) -> AgentOp,
+) -> Result<Value, ApiError> {
+  let since =
+    match q.since.as_deref().filter(|v| !v.trim().is_empty()) {
+      Some(v) => {
+        Some(crate::log_search::since_arg(v).ok_or_else(|| {
+          ApiError::invalid(format!("时间范围 {v} 看不懂")).with_hint(
+            "写成 30m、2h、3d，或 2026-11-22T08:00:00+08:00",
+          )
+        })?)
+      }
+      None => None,
+    };
+  let grep = q.grep.as_deref().filter(|g| !g.trim().is_empty());
+  let filtering = grep.is_some() || q.errors;
+  let logs: String = s
+    .hub
+    .call(
+      server,
+      // 过滤时多拿一些再挑，最终条数由 tail 控制。
+      op(if filtering { 5000 } else { q.tail }, since),
+      Duration::from_secs(40),
+      None,
+      &tokio_util::sync::CancellationToken::new(),
+    )
+    .await?;
+  if !filtering && q.max_line.is_none() {
+    return Ok(json!({ "server": server, "logs": logs }));
+  }
+  let found = crate::log_search::search(
+    &logs,
+    &crate::log_search::Options {
+      grep,
+      errors: q.errors,
+      max_line: q.max_line.unwrap_or(500).max(20),
+      limit: q.tail.max(1) as usize,
+    },
+  );
+  let mut v = serde_json::to_value(found).unwrap_or_default();
+  v["server"] = json!(server);
+  Ok(v)
+}
+
+/// `GET /api/servers/{name}/agent-logs`：这台机器上 agent 自己的日志。
+async fn agent_logs(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Path(name): Path<String>,
+  Query(q): Query<LogsQuery>,
+) -> ApiResult<Value> {
+  auth.require(Perm::Read)?;
+  let snap = snapshot::load(&s.db).await?;
+  if !snap.world.servers.contains_key(&name) {
+    return Err(crate::world::server_not_found(&name).into());
+  }
+  Ok(Json(
+    fetch_logs(&s, &name, &q, |tail, since| AgentOp::ContainerLogs {
+      container: "wharf-agent".into(),
+      tail,
+      since,
+    })
+    .await?,
+  ))
+}
+
+/// `GET /api/core/logs`：控制面自己的日志。控制面按自己的容器 id 挨台问，
+/// 和它在同一台机器上的 agent 能读到。
+async fn core_logs(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Query(q): Query<LogsQuery>,
+) -> ApiResult<Value> {
+  auth.require(Perm::Read)?;
+  let id = std::fs::read_to_string("/proc/self/mountinfo")
+    .ok()
+    .and_then(|m| wharf_api_types::agent::container_id(&m))
+    .ok_or_else(|| {
+      ApiError::invalid("控制面不在容器里运行，看不了它的日志")
+        .with_hint("在控制面所在的机器上直接看进程的输出")
+    })?;
+  let snap = snapshot::load(&s.db).await?;
+  for name in snap.world.servers.keys() {
+    if !s.hub.is_online(name) {
+      continue;
+    }
+    let found = fetch_logs(&s, name, &q, |tail, since| {
+      AgentOp::ContainerLogs {
+        container: id.clone(),
+        tail,
+        since,
+      }
+    })
+    .await;
+    match found {
+      Ok(v) => return Ok(Json(v)),
+      // 不在这台机器上：问下一台。
+      Err(e) if matches!(e.code, ErrorCode::NotFound) => continue,
+      Err(e) => return Err(e.into()),
+    }
+  }
+  Err(
+    ApiError::new(
+      ErrorCode::AgentFailed,
+      "找不到和控制面在同一台机器上、在线的 agent",
+    )
+    .with_hint("控制面所在机器的 agent 要在线，并且是最新版本：wharf server upgrade --all")
+    .into(),
+  )
+}
+
+async fn service_logs(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Path(name): Path<String>,
+  Query(q): Query<LogsQuery>,
+) -> ApiResult<Value> {
+  auth.require(Perm::Read)?;
+  let snap = snapshot::load(&s.db).await?;
+  let (server, project) =
+    crate::multi_logs::service_target(&snap.world, &name)?;
+  project_logs(&s, server, project, &q).await
+}
+
+async fn multi_service_logs(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Query(services): Query<crate::multi_logs::Services>,
+  Query(q): Query<LogsQuery>,
+) -> ApiResult<Value> {
+  auth.require(Perm::Read)?;
+  Ok(Json(
+    crate::multi_logs::fetch(&s, &auth, services, q).await?,
+  ))
+}
+
+async fn deployments(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Path(name): Path<String>,
+) -> ApiResult<Vec<DeploymentView>> {
+  auth.require(Perm::Read)?;
+  let rows = s
+    .db
+    .call(move |c| {
+      let mut stmt = c
+        .prepare(
+          "SELECT id, service, server, run_id, compose, images, created_at, spec, hash, commit_sha FROM deployments
+           WHERE service = ?1 ORDER BY id DESC LIMIT 50",
+        )
+        .map_err(sql_err)?;
+      let rows = stmt
+        .query_map(params![name], |r| {
+          Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+            r.get::<_, String>(4)?,
+            r.get::<_, String>(5)?,
+            r.get::<_, i64>(6)?,
+            r.get::<_, Option<String>>(7)?,
+            r.get::<_, String>(8)?,
+            r.get::<_, Option<String>>(9)?,
+          ))
+        })
+        .map_err(sql_err)?;
+      rows.collect::<Result<Vec<_>, _>>().map_err(sql_err)
+    })
+    .await?;
+  let mut out = Vec::new();
+  for (
+    id,
+    service,
+    server,
+    run_id,
+    compose,
+    images,
+    created,
+    spec,
+    hash,
+    commit,
+  ) in rows
+  {
+    out.push(DeploymentView {
+      id,
+      service,
+      server,
+      run_id,
+      compose,
+      images: serde_json::from_str(&images).map_err(json_err)?,
+      spec: spec
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .map(|spec| crate::service_monitor::heartbeat::redact(&spec)),
+      hash,
+      created_at: to_time(created),
+      commit,
+    });
+  }
+  Ok(Json(out))
+}
+
+// GATEWAYS
+
+async fn list_gateways(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+) -> ApiResult<Vec<GatewayView>> {
+  auth.require(Perm::Read)?;
+  let snap = snapshot::load(&s.db).await?;
+  let net = snap.net(&snap.world);
+  let live = views::cached_live(&s, &snap.world).await;
+  Ok(Json(
+    snap
+      .world
+      .gateways
+      .keys()
+      .filter_map(|n| {
+        views::gateway_view(&snap, &net, n, Some(&live))
+      })
+      .collect(),
+  ))
+}
+
+pub(crate) fn gateway_not_found(name: &str) -> ApiError {
+  ApiError::not_found(format!("网关 {name} 不存在"))
+    .suggest("wharf gateway list")
+}
+
+async fn show_gateway(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Path(name): Path<String>,
+) -> ApiResult<GatewayView> {
+  auth.require(Perm::Read)?;
+  let snap = snapshot::load(&s.db).await?;
+  let net = snap.net(&snap.world);
+  let live = views::cached_live(&s, &snap.world).await;
+  Ok(Json(
+    views::gateway_view(&snap, &net, &name, Some(&live))
+      .ok_or_else(|| gateway_not_found(&name))?,
+  ))
+}
+
+async fn gateway_config(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Path(name): Path<String>,
+) -> ApiResult<Value> {
+  auth.require(Perm::Read)?;
+  let snap = snapshot::load(&s.db).await?;
+  if !snap.world.gateways.contains_key(&name) {
+    return Err(gateway_not_found(&name).into());
+  }
+  let net = snap.net(&snap.world);
+  let r = snapshot::gateway_render(&snap.world, &net, &name)?;
+  let kind = snap.world.gateways[&name].spec.kind;
+  Ok(Json(json!({
+    "gateway": name,
+    "kind": kind.as_str(),
+    "config": snapshot::redacted_config(&r.config, &net),
+    "compose": r.compose,
+  })))
+}
+
+async fn gateway_logs(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Path(name): Path<String>,
+  Query(q): Query<LogsQuery>,
+) -> ApiResult<Value> {
+  auth.require(Perm::Read)?;
+  let snap = snapshot::load(&s.db).await?;
+  let row = snap
+    .world
+    .gateways
+    .get(&name)
+    .ok_or_else(|| gateway_not_found(&name))?;
+  project_logs(&s, &row.spec.server, gateway_project(&name), &q).await
+}
+
+// ROUTES
+
+async fn list_routes(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+) -> ApiResult<Vec<RouteView>> {
+  auth.require(Perm::Read)?;
+  let snap = snapshot::load(&s.db).await?;
+  let net = snap.net(&snap.world);
+  Ok(Json(
+    snap
+      .world
+      .routes
+      .iter()
+      .filter(|(_, route)| {
+        auth.services.as_ref().is_none_or(|allowed| {
+          crate::token_scope::route_spec_in_scope(
+            allowed,
+            &route.spec,
+          )
+        })
+      })
+      .filter_map(|(h, _)| views::route_view(&snap, &net, h))
+      .collect(),
+  ))
+}
+
+// ACCOUNTS
+
+fn mask(token: &str) -> String {
+  let tail: String = token
+    .chars()
+    .rev()
+    .take(4)
+    .collect::<Vec<_>>()
+    .into_iter()
+    .rev()
+    .collect();
+  format!("…{tail}")
+}
+
+fn account_view(a: &db::AccountRow) -> AccountView {
+  AccountView {
+    name: a.name.clone(),
+    kind: a.kind.clone(),
+    token: mask(&a.token),
+    zones: a.zones.clone(),
+    warnings: a.warnings.clone(),
+    updated_at: to_time(a.updated_at),
+  }
+}
+
+async fn list_accounts(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+) -> ApiResult<Vec<AccountView>> {
+  auth.require(Perm::Read)?;
+  let accounts = s.db.call(|c| db::accounts(c)).await?;
+  Ok(Json(accounts.iter().map(account_view).collect()))
+}
+
+#[derive(Deserialize)]
+struct AddAccount {
+  name: String,
+  #[serde(default = "default_kind")]
+  kind: String,
+  token: String,
+}
+
+fn default_kind() -> String {
+  "cloudflare".into()
+}
+
+async fn discover(
+  kind: &str,
+  token: &str,
+) -> Result<wharf_providers::Discovery, ApiError> {
+  let factory = wharf_providers::factory(kind).ok_or_else(|| {
+    ApiError::invalid(format!("不支持的厂商类型 {kind}"))
+      .with_hint("P1 只支持 cloudflare")
+  })?;
+  snapshot::with_timeout(
+    "发现 zone",
+    (factory.discover)(token.to_string()),
+  )
+  .await
+}
+
+async fn save_account(
+  s: &AppState,
+  name: String,
+  kind: String,
+  token: String,
+) -> Result<AccountView, ApiError> {
+  let found = discover(&kind, &token).await?;
+  let row = db::AccountRow {
+    name,
+    kind,
+    token,
+    zones: found.zones,
+    warnings: found.warnings,
+    updated_at: now_ms(),
+  };
+  let view = account_view(&row);
+  s.db
+    .call(move |c| {
+      c.execute(
+        "INSERT INTO accounts (name, kind, token, zones, warnings, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT (name) DO UPDATE SET kind = excluded.kind, token = excluded.token,
+           zones = excluded.zones, warnings = excluded.warnings, updated_at = excluded.updated_at",
+        params![
+          row.name,
+          row.kind,
+          row.token,
+          serde_json::to_string(&row.zones).map_err(json_err)?,
+          serde_json::to_string(&row.warnings).map_err(json_err)?,
+          row.updated_at
+        ],
+      )
+      .map_err(sql_err)?;
+      Ok(())
+    })
+    .await?;
+  Ok(view)
+}
+
+async fn add_account(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Json(req): Json<AddAccount>,
+) -> ApiResult<AccountView> {
+  auth.require(Perm::Admin)?;
+  validate_name("账号", &req.name)?;
+  let token = req.token.trim().to_string();
+  if token.is_empty() {
+    return Err(ApiError::invalid("token 为空").into());
+  }
+  Ok(Json(save_account(&s, req.name, req.kind, token).await?))
+}
+
+async fn rediscover_account(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Path(name): Path<String>,
+) -> ApiResult<AccountView> {
+  auth.require(Perm::Admin)?;
+  let accounts = s.db.call(|c| db::accounts(c)).await?;
+  let account =
+    accounts.into_iter().find(|a| a.name == name).ok_or_else(
+      || ApiError::not_found(format!("账号 {name} 不存在")),
+    )?;
+  Ok(Json(
+    save_account(&s, account.name, account.kind, account.token)
+      .await?,
+  ))
+}
+
+async fn remove_account(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Path(name): Path<String>,
+) -> ApiResult<Value> {
+  auth.require(Perm::Admin)?;
+  // 还有网关、隧道或 DNS 记录靠这个账号管理时，删了就没法再改它们。
+  let snap = snapshot::load(&s.db).await?;
+  let mut users: Vec<String> = snap
+    .world
+    .gateways
+    .iter()
+    .filter(|(_, g)| g.spec.account.as_deref() == Some(name.as_str()))
+    .map(|(g, _)| format!("网关 {g}"))
+    .collect();
+  users.extend(
+    snap
+      .tunnels
+      .iter()
+      .filter(|(g, t)| {
+        t.account == name && !snap.world.gateways.contains_key(*g)
+      })
+      .map(|(g, _)| format!("网关 {g} 留下的隧道")),
+  );
+  users.extend(
+    snap
+      .owned
+      .iter()
+      .filter(|r| r.account == name)
+      .map(|r| format!("DNS 记录 {}", r.hostname)),
+  );
+  if !users.is_empty() {
+    users.sort();
+    users.dedup();
+    return Err(
+      ApiError::invalid(format!(
+        "账号 {name} 还在使用：{}",
+        users.join("、")
+      ))
+      .with_hint("先删除这些网关和域名（并执行计划），再删除账号")
+      .into(),
+    );
+  }
+  let removed = s
+    .db
+    .call(move |c| {
+      c.execute("DELETE FROM accounts WHERE name = ?1", params![name])
+        .map_err(sql_err)
+    })
+    .await?;
+  Ok(Json(json!({ "removed": removed > 0 })))
+}
+
+// SECRETS
+
+async fn list_secrets(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+) -> ApiResult<Vec<SecretView>> {
+  auth.require(Perm::Read)?;
+  let snap = snapshot::load(&s.db).await?;
+  let rows: Vec<(String, i64)> = s
+    .db
+    .call(|c| {
+      let mut stmt = c
+        .prepare("SELECT name, updated_at FROM secrets ORDER BY name")
+        .map_err(sql_err)?;
+      let rows = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .map_err(sql_err)?;
+      rows.collect::<Result<_, _>>().map_err(sql_err)
+    })
+    .await?;
+  let mut list = rows
+    .into_iter()
+    .map(|(name, at)| SecretView {
+      used_by: secret_users(&snap.world, &name),
+      managed: managed_secret(&name),
+      system: system_secret(&name).map(str::to_string),
+      name,
+      updated_at: to_time(at),
+    })
+    .collect();
+  if let Some(allowed) = &auth.services {
+    crate::scope_filter::filter_secrets(allowed, &mut list);
+  }
+  Ok(Json(list))
+}
+
+fn secret_users(
+  world: &crate::world::World,
+  name: &str,
+) -> Vec<String> {
+  let system = system_secret(name);
+  let reference = format!("[[{name}]]");
+  let token = format!("\"token_secret\":\"{name}\"");
+  system
+    .map(str::to_string)
+    .into_iter()
+    .chain(world.services.iter().filter_map(|(service, row)| {
+      let spec = serde_json::to_string(&row.spec).ok()?;
+      (spec.contains(&reference) || spec.contains(&token))
+        .then(|| service.clone())
+    }))
+    .collect()
+}
+
+#[derive(Deserialize)]
+struct SetSecret {
+  value: String,
+}
+
+fn check_secret_name(name: &str) -> Result<(), ApiError> {
+  let ok = !name.is_empty()
+    && name.len() <= 64
+    && name
+      .bytes()
+      .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-');
+  if ok {
+    Ok(())
+  } else {
+    Err(ApiError::invalid(format!(
+      "密钥名 {name} 不合法，只能用字母、数字、_ 和 -"
+    )))
+  }
+}
+
+async fn set_secret(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Path(name): Path<String>,
+  Json(req): Json<SetSecret>,
+) -> ApiResult<SecretView> {
+  auth.require(Perm::Admin)?;
+  check_secret_name(&name)?;
+  refuse_managed(&name)?;
+  let value = if crate::render::is_auth_secret(&name) {
+    crate::login::hash_basic_auth(req.value).await?
+  } else {
+    req.value
+  };
+  let now = now_ms();
+  let n = name.clone();
+  s.db
+    .call_credentials(move |c, key| {
+      key.put_secret(c, &n, &value, now, true)
+    })
+    .await?;
+  Ok(Json(SecretView {
+    used_by: vec![],
+    managed: false,
+    system: system_secret(&name).map(str::to_string),
+    name,
+    updated_at: to_time(now),
+  }))
+}
+
+async fn remove_secret(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Path(name): Path<String>,
+) -> ApiResult<Value> {
+  auth.require(Perm::Admin)?;
+  refuse_managed(&name)?;
+  let removed = s
+    .db
+    .call(move |c| {
+      c.execute("DELETE FROM secrets WHERE name = ?1", params![name])
+        .map_err(sql_err)
+    })
+    .await?;
+  Ok(Json(json!({ "removed": removed > 0 })))
+}
+
+// PLAN / APPLY / RUNS
+
+async fn auto_update_now(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+) -> ApiResult<Vec<wharf_api_types::view::AutoUpdateResult>> {
+  auth.require(Perm::Apply)?;
+  Ok(Json(crate::auto_update::run(&s).await))
+}
+
+async fn make_plan(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  axum::Extension(audit): axum::Extension<crate::audit::AuditSlot>,
+  Json(req): Json<PlanRequest>,
+) -> ApiResult<Plan> {
+  auth.require(Perm::Plan)?;
+  if let Err(error) =
+    planner::require_plan_request(&s, &auth, &req).await
+  {
+    audit.skip_record();
+    return Err(error.into());
+  }
+  if !auth.human {
+    guard_dangerous(&s, &req).await?;
+  }
+  let snap = snapshot::load(&s.db).await?;
+  if let Err(error) =
+    crate::token_scope::require_plan_request(&auth, &snap.world, &req)
+  {
+    audit.skip_record();
+    return Err(error.into());
+  }
+  let planned = planner::make_plan_inner(
+    &s,
+    req,
+    snap,
+    true,
+    auth.has(Perm::Admin),
+  )
+  .await?;
+  crate::token_scope::require_plan(
+    &auth,
+    &planned.plan,
+    &planned.route_effects,
+  )?;
+  planner::save(&s, &planned).await?;
+  let mut seen = std::collections::BTreeSet::new();
+  let addresses = planned
+    .plan
+    .items
+    .iter()
+    .map(|item| item.address.as_str())
+    .filter(|address| seen.insert(*address))
+    .take(20)
+    .collect::<Vec<_>>()
+    .join(",");
+  let note = planned
+    .plan
+    .note
+    .as_deref()
+    .map(|n| format!(" 备注：{n}"))
+    .unwrap_or_default();
+  audit.set_detail(format!(
+    "plan={} {addresses}{note}",
+    planned.plan.plan_id
+  ));
+  Ok(Json(planned.plan))
+}
+
+/// 宿主机终端、宿主机命令执行这类危险开关：API token（CLI、AI）只能关，打开要人在页面上操作。
+async fn guard_dangerous(
+  s: &AppState,
+  req: &PlanRequest,
+) -> Result<(), ApiError> {
+  let snap = crate::snapshot::load(&s.db).await?;
+  let wanted = req
+    .changes
+    .iter()
+    .filter_map(|c| match c {
+      wharf_api_types::spec::Change::UpdateServer {
+        name,
+        settings,
+      } => Some((name, settings)),
+      _ => None,
+    })
+    .chain(
+      req
+        .fleet
+        .iter()
+        .chain(&req.partial)
+        .flat_map(|f| f.servers.iter()),
+    );
+  for (name, after) in wanted {
+    let before = snap.world.servers.get(name).map(|r| &r.settings);
+    if let Some(what) =
+      crate::host_access::opened_switch(before, after)
+    {
+      return Err(
+        ApiError::new(
+          ErrorCode::Forbidden,
+          format!("不能用 API token 打开 {name} 的{what}，只能关"),
+        )
+        .with_hint(format!(
+          "请用户在页面\u{201c}服务器详情 → {name} → 设置\u{201d}里打开"
+        )),
+      );
+    }
+  }
+  Ok(())
+}
+
+async fn show_plan(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Path(id): Path<String>,
+) -> ApiResult<Plan> {
+  auth.require(Perm::Read)?;
+  Ok(Json(apply::load_plan_for(&s, &auth, &id).await?))
+}
+
+async fn apply_plan(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  axum::Extension(audit): axum::Extension<crate::audit::AuditSlot>,
+  axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<
+    std::net::SocketAddr,
+  >,
+  headers: HeaderMap,
+  Json(req): Json<ApplyRequest>,
+) -> ApiResult<ApplyResponse> {
+  auth.require(Perm::Apply)?;
+  let plan_id = req.plan_id.clone();
+  // 计划备注跟着执行记下来，操作记录里看得到为什么做。
+  let note = apply::load_plan(&s, &plan_id)
+    .await
+    .ok()
+    .and_then(|p| p.note)
+    .map(|n| format!(" 备注：{n}"))
+    .unwrap_or_default();
+  let source = crate::login::client_key(peer.ip(), &headers);
+  let resp =
+    apply::start(s.clone(), req, &auth.perms, Some((&auth, source)))
+      .await?;
+  audit
+    .set_detail(format!("plan={plan_id} run={}{note}", resp.run_id));
+  Ok(Json(resp))
+}
+
+#[derive(Deserialize)]
+struct RunsQuery {
+  #[serde(default = "default_limit")]
+  limit: u32,
+}
+
+fn default_limit() -> u32 {
+  20
+}
+
+async fn list_runs(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Query(q): Query<RunsQuery>,
+) -> ApiResult<Vec<Run>> {
+  auth.require(Perm::Read)?;
+  Ok(Json(apply::list_runs(&s, &auth, q.limit.min(200)).await?))
+}
+
+async fn show_run(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Path(id): Path<String>,
+) -> ApiResult<Run> {
+  auth.require(Perm::Read)?;
+  Ok(Json(apply::load_run_for(&s, &auth, &id).await?))
+}
+
+async fn cancel_run(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Path(id): Path<String>,
+) -> ApiResult<Value> {
+  auth.require(Perm::Apply)?;
+  if auth.services.is_some() {
+    apply::load_run_for(&s, &auth, &id).await?;
+  }
+  if s.runs.cancel(&id) {
+    Ok(Json(json!({ "cancelling": true })))
+  } else {
+    let run = apply::load_run(&s, &id).await?;
+    Err(
+      ApiError::new(
+        ErrorCode::Conflict,
+        format!("执行记录 {id} 已经结束（{:?}）", run.status),
+      )
+      .into(),
+    )
+  }
+}
+
+async fn export(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+) -> ApiResult<Fleet> {
+  auth.require(Perm::Read)?;
+  let snap = snapshot::load(&s.db).await?;
+  let mut fleet = views::export(&snap.world);
+  if let Some(allowed) = &auth.services {
+    crate::scope_filter::filter_export(allowed, &mut fleet);
+  }
+  Ok(Json(fleet))
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[tokio::test]
+  async fn agent_join_rejects_plaintext_non_local_and_accepts_sealed()
+  {
+    let state = crate::rules::tests::test_state();
+    for (peer, forwarded, sealed, allowed) in [
+      ("203.0.113.5:4000", false, false, false),
+      ("127.0.0.1:4000", true, false, false),
+      ("203.0.113.5:4000", false, true, true),
+      ("127.0.0.1:4000", false, false, true),
+    ] {
+      let token = auth::new_token();
+      let hash = auth::hash_token(&token);
+      state.db.call(move |c| {
+        c.execute("INSERT OR REPLACE INTO agents (server, join_token_hash, join_expires_at) VALUES ('s1', ?1, ?2)", params![hash, now_ms() + 60_000])
+          .map_err(sql_err)?;
+        Ok(())
+      }).await.unwrap();
+      let mut headers = HeaderMap::new();
+      if forwarded {
+        headers
+          .insert("x-forwarded-for", "203.0.113.5".parse().unwrap());
+      }
+      let key = hex::encode(state.key.verifying_key().to_bytes());
+      let result = agent_join(
+        State(state.clone()),
+        sealed.then_some(Extension(crate::cli_tunnel::Sealed)),
+        ConnectInfo(peer.parse().unwrap()),
+        headers,
+        Json(JoinRequest {
+          join_token: token,
+          public_key: key,
+        }),
+      )
+      .await;
+      if allowed {
+        assert!(result.is_ok());
+      } else {
+        let Err(error) = result else {
+          panic!("明文加入被放行")
+        };
+        assert_eq!(error.0.code, ErrorCode::Unauthorized);
+      }
+      let consumed = state.db.call(|c| c.query_row("SELECT join_token_hash IS NULL FROM agents WHERE server = 's1'",
+        [], |r| r.get::<_, bool>(0)).map_err(sql_err)).await.unwrap();
+      assert_eq!(consumed, allowed);
+    }
+  }
 }
