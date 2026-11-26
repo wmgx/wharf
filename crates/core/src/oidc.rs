@@ -57,6 +57,37 @@ static SIGNER: OnceLock<Signer> = OnceLock::new();
 static CODES: LazyLock<Mutex<BTreeMap<String, Code>>> =
   LazyLock::new(|| Mutex::new(BTreeMap::new()));
 
+pub(crate) fn rotate_refresh_seed(
+  c: &rusqlite::Connection,
+) -> Result<(), ApiError> {
+  crate::gate::rotate_seed(c, "oidc.refresh_key")
+}
+
+#[cfg(test)]
+pub(crate) fn fixture_code(insert: bool) -> bool {
+  let mut codes = CODES.lock().unwrap_or_else(|e| e.into_inner());
+  if insert {
+    codes.insert(
+      "revoke-all-fixture".into(),
+      Code {
+        client_id: "a.example.test".into(),
+        redirect_uri: String::new(),
+        nonce: None,
+        challenge: None,
+        scope: String::new(),
+        session_hash: "fixture-session".into(),
+        auth_time: 0,
+        expires: i64::MAX,
+      },
+    );
+  }
+  codes.contains_key("revoke-all-fixture")
+}
+
+pub(crate) fn clear_codes() {
+  CODES.lock().unwrap_or_else(|e| e.into_inner()).clear();
+}
+
 #[derive(Clone)]
 struct Code {
   client_id: String,

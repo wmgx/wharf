@@ -1547,6 +1547,11 @@ pub enum RunCmd {
 
 #[derive(Subcommand)]
 pub enum TokenCmd {
+  /// 作废所有网页会话、API 令牌和门禁凭证。
+  RevokeAll {
+    #[arg(long)]
+    confirm: Option<String>,
+  },
   List,
   /// 只读推演，不会真的发出被推演的请求或修改数据。
   Explain {

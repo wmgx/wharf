@@ -124,8 +124,24 @@ pub async fn run(
   {
     return Err(ApiError::invalid("--path 必须以 /api/ 开头").into());
   }
+  if let TokenCmd::RevokeAll { confirm } = &cmd
+    && confirm.as_deref() != Some("revoke-all")
+  {
+    return Err(
+      ApiError::invalid("请传入 --confirm revoke-all").into(),
+    );
+  }
   let c = Client::new(url, token).await?;
   match cmd {
+    TokenCmd::RevokeAll { confirm } => {
+      let response: Value = c
+        .post(
+          "/api/credentials/revoke-all",
+          &json!({ "confirm": confirm }),
+        )
+        .await?;
+      out(j, &response, crate::commands::pretty);
+    }
     TokenCmd::Explain {
       name,
       service,

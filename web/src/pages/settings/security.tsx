@@ -30,6 +30,7 @@ export function Security() {
     </Panel>}
     <Sessions />
     <GateKeys />
+    <RevokeAllCredentials />
     <Oidc />
     {mode && data && <TotpDialog mode={mode} enabled={data.enabled} onClose={() => { setMode(null); refresh(); }} onChanged={refresh} />}
   </>;
@@ -127,6 +128,33 @@ function Sessions() {
   </>;
 }
 
+
+function RevokeAllCredentials() {
+  const [confirm, setConfirm] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const revoke = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.post("/api/credentials/revoke-all", { confirm: "revoke-all" });
+      window.location.replace("/login");
+    } catch (e) {
+      setError(e);
+      setBusy(false);
+    }
+  };
+  return <>
+    <SectionTitle>全部凭证</SectionTitle>
+    <Panel className="p-4">
+      <Button variant="destructive" size="sm" onClick={() => setConfirm(true)}>作废全部登录凭证</Button>
+      <ErrorNote error={error} />
+    </Panel>
+    <ConfirmDialog open={confirm} title="作废全部登录凭证？" confirmText="作废全部" typed="作废全部" busy={busy} onCancel={() => setConfirm(false)} onConfirm={revoke}>
+      所有网页会话、API 令牌和门禁凭证都将失效。
+    </ConfirmDialog>
+  </>;
+}
 
 function GateKeys() {
   const { data, error, refresh } = usePoll<GateKeyView[]>("/api/gate/keys", 30000);

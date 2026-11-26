@@ -582,6 +582,16 @@ pub async fn login(
   .await
 }
 
+pub(crate) fn expired_session_cookie(
+  peer: IpAddr,
+  headers: &HeaderMap,
+) -> String {
+  format!(
+    "{COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0{}",
+    secure_attr(peer, headers)
+  )
+}
+
 /// `POST /api/logout`：删掉这个浏览器的会话。
 pub async fn logout(
   axum::extract::State(s): axum::extract::State<Arc<AppState>>,
@@ -616,10 +626,7 @@ pub async fn logout(
       })
       .await?;
   }
-  let cookie = format!(
-    "{COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0{}",
-    secure_attr(peer.ip(), &headers)
-  );
+  let cookie = expired_session_cookie(peer.ip(), &headers);
   Ok(
     (
       AppendHeaders([(header::SET_COOKIE, cookie)]),

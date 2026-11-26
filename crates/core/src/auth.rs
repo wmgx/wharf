@@ -158,7 +158,9 @@ pub(crate) fn invalid_token() -> ApiError {
     ErrorCode::Unauthorized,
     "没有登录，或 API token 无效",
   )
-  .with_hint("设置环境变量 WHARF_TOKEN，或执行 wharf login")
+  .with_hint(
+    "设置有效的 WHARF_TOKEN，或执行 wharf login 重新配置有效令牌",
+  )
   .suggest("wharf login --url <控制面地址>")
 }
 

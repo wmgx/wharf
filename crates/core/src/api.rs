@@ -502,6 +502,10 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route("/api/export", get(export))
     .route("/api/audit", get(crate::audit::list))
     .route(
+      "/api/credentials/revoke-all",
+      post(revoke_all_credentials),
+    )
+    .route(
       "/api/tokens",
       get(crate::tokens::list).post(crate::tokens::create),
     )
@@ -1804,6 +1808,80 @@ async fn remove_secret(
   Ok(Json(json!({ "removed": removed > 0 })))
 }
 
+#[derive(Deserialize)]
+struct RevokeAllRequest {
+  confirm: Option<String>,
+}
+
+async fn revoke_all_credentials(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  ConnectInfo(peer): ConnectInfo<SocketAddr>,
+  headers: HeaderMap,
+  Json(req): Json<RevokeAllRequest>,
+) -> Result<Response, AppError> {
+  auth.require(Perm::Admin)?;
+  if req.confirm.as_deref() != Some("revoke-all") {
+    return Err(
+      ApiError::invalid(
+        r#"必须传入 confirm = "revoke-all" 以确认作废全部登录凭证"#,
+      )
+      .with_hint(
+        "该操作会退出所有网页会话并作废全部 API 令牌和门禁凭证",
+      )
+      .into(),
+    );
+  }
+  let revoked = s.db.call(revoke_credentials).await?;
+  let source = crate::login::source(peer.ip(), &headers);
+  crate::audit::login_event(
+    &s,
+    "credentials_revoke_all",
+    &auth.name,
+    source.clone(),
+  )
+  .await;
+  crate::security_receipt::send(
+    &s,
+    &auth.name,
+    &source,
+    "已作废全部登录凭证（会话、令牌、门禁密钥）".into(),
+  )
+  .await;
+  Ok((
+    [(axum::http::header::SET_COOKIE, crate::login::expired_session_cookie(peer.ip(), &headers))],
+    Json(json!({
+      "revoked": revoked,
+      "next": "网页请用管理员密码重新登录；CLI 请在页面重新生成令牌后执行 wharf login",
+    })),
+  ).into_response())
+}
+
+fn revoke_credentials(
+  c: &mut rusqlite::Connection,
+) -> Result<Value, ApiError> {
+  let tx = c.transaction().map_err(sql_err)?;
+  let sessions =
+    tx.execute("DELETE FROM sessions", []).map_err(sql_err)?;
+  let api_tokens =
+    tx.execute("DELETE FROM api_tokens", []).map_err(sql_err)?;
+  let gate_keys =
+    tx.execute("DELETE FROM gate_keys", []).map_err(sql_err)?;
+  let join_tokens = tx.execute(
+    "UPDATE agents SET join_token_hash = NULL, join_expires_at = NULL WHERE join_token_hash IS NOT NULL",
+    [],
+  ).map_err(sql_err)?;
+  crate::gate::revocations::record_all(&tx)?;
+  crate::gate::revocations::rotate_refresh_seed(&tx)?;
+  crate::oidc::rotate_refresh_seed(&tx)?;
+  tx.commit().map_err(sql_err)?;
+  crate::gate::clear_tickets();
+  crate::oidc::clear_codes();
+  Ok(
+    json!({ "sessions": sessions, "api_tokens": api_tokens, "gate_keys": gate_keys, "join_tokens": join_tokens }),
+  )
+}
+
 // PLAN / APPLY / RUNS
 
 async fn auto_update_now(
@@ -2124,6 +2202,89 @@ mod tests {
     );
     assert_eq!(rows[0].used_by, ["b"]);
     assert!(rows[0].other_refs.is_empty());
+  }
+
+  #[tokio::test]
+  async fn revoke_all_revokes_login_only_and_preserves_gateway_callback()
+   {
+    let _guard = crate::rules::tests::TEST_LOCK.lock().await;
+    crate::rules::tests::reset_memory();
+    let s = crate::rules::tests::test_state();
+    let (refresh_before, oidc_before) = s.db.call_credentials(|c, key| {
+      crate::login::set_admin(c, "admin", "fixture-hash")?;
+      c.execute_batch(
+        "INSERT INTO sessions (hash, created_at, expires_at) VALUES ('h1', 0, 1), ('h2', 0, 1);
+         INSERT INTO api_tokens (name, hash, scope, created_at) VALUES ('t1', 'h1', 'read', 0), ('t2', 'h2', 'read', 0);
+         INSERT INTO gate_keys (name, hash, hosts, created_at) VALUES ('g1', 'h1', '[]', 0);
+         INSERT INTO agents (server, public_key, join_token_hash, join_expires_at) VALUES ('s1', NULL, 'h1', 1), ('s2', 'joined', NULL, NULL);
+         INSERT INTO notify_keys (name, hash, created_at) VALUES ('n1', 'h1', 0);"
+      ).map_err(sql_err)?;
+      key.put_secret(c, "K1", "fixture-value", 0, false)?;
+      key.put_secret(c, "NOTIFY_URL_n1", "fixture-url", 0, false)?;
+      Ok((db::setting(c, "gate.rt_key")?, hex::encode(crate::gate::seed(c, "oidc.refresh_key")?)))
+    }).await.unwrap();
+    assert!(refresh_before.is_none());
+    let callback =
+      crate::gate::revocations::config_key(&s.db).await.unwrap();
+    let seed =
+      s.db.call(|c| db::setting(c, "gate.rt_key")).await.unwrap();
+    assert!(crate::gate::fixture_ticket(true));
+    assert!(crate::oidc::fixture_code(true));
+    let response = revoke_all_credentials(
+      State(s.clone()),
+      Auth {
+        name: "admin".into(),
+        perms: [Perm::Admin].into(),
+        expires_at: None,
+        allowed_from: vec![],
+        services: None,
+        human: true,
+      },
+      ConnectInfo("203.0.113.1:3000".parse().unwrap()),
+      HeaderMap::new(),
+      Json(RevokeAllRequest {
+        confirm: Some("revoke-all".into()),
+      }),
+    )
+    .await
+    .map_err(|e| e.0)
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 4096)
+      .await
+      .unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+      value["revoked"],
+      json!({"sessions": 2, "api_tokens": 2, "gate_keys": 1, "join_tokens": 1})
+    );
+    assert!(!crate::gate::fixture_ticket(false));
+    assert!(!crate::oidc::fixture_code(false));
+    assert!(
+      callback
+        == crate::gate::revocations::config_key(&s.db).await.unwrap()
+    );
+    s.db.call(move |c| {
+      assert!(db::setting(c, "gate.revocation_seed")? == seed);
+      assert!(db::setting(c, "gate.rt_key")? != seed);
+      assert!(db::setting(c, "oidc.refresh_key")? != Some(oidc_before));
+      let cutoff: Value = serde_json::from_str(&db::setting(c, "gate.revocations")?.unwrap()).unwrap();
+      assert!((now_ms() / 1000 - 5..=now_ms() / 1000).contains(&cutoff["admin"].as_i64().unwrap()));
+      let still_present: (i64, i64, i64, i64) = c.query_row(
+        "SELECT (SELECT COUNT(*) FROM agents WHERE public_key IS NOT NULL),
+                (SELECT COUNT(*) FROM secrets), (SELECT COUNT(*) FROM notify_keys),
+                (SELECT COUNT(*) FROM agents WHERE join_token_hash IS NOT NULL OR join_expires_at IS NOT NULL)", [],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+      ).map_err(sql_err)?;
+      assert_eq!(still_present, (1, 2, 1, 0));
+      Ok(())
+    }).await.unwrap();
+    assert_eq!(
+      crate::rules::tests::notice_titles(&s, "security_receipt")
+        .await
+        .len(),
+      1
+    );
   }
 
   #[tokio::test]
