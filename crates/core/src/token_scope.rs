@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use axum::http::Method;
 use wharf_api_types::{
   ApiError, ErrorCode,
-  plan::{Layer, Plan, PlanItem, PlanRequest},
+  plan::{Action, Layer, Plan, PlanItem, PlanRequest},
   spec::{Change, RouteSpec},
 };
 
@@ -235,15 +235,28 @@ fn route_in_scope(
   host: &str,
   item: &PlanItem,
 ) -> bool {
-  let specs = [item.before.as_ref(), item.after.as_ref()];
-  specs.iter().any(Option::is_some)
-    && specs.into_iter().flatten().all(|value| {
-      serde_json::from_value::<RouteSpec>(value.clone()).is_ok_and(
-        |route| {
-          route.hostname == host
-            && route_spec_in_scope(services, &route)
-        },
-      )
+  let read_spec = |value: &Option<serde_json::Value>| {
+    value
+      .clone()
+      .map(serde_json::from_value::<RouteSpec>)
+      .transpose()
+  };
+  let (Ok(before), Ok(after)) =
+    (read_spec(&item.before), read_spec(&item.after))
+  else {
+    return false;
+  };
+  if item.action != Action::Delete
+    && crate::caddy_validate::route_caddy_changed(
+      before.as_ref(),
+      after.as_ref(),
+    )
+  {
+    return false;
+  }
+  (before.is_some() || after.is_some())
+    && [before, after].iter().flatten().all(|route| {
+      route.hostname == host && route_spec_in_scope(services, route)
     })
 }
 
@@ -315,24 +328,19 @@ pub fn require_plan_request(
     ));
   }
   let mut blocked = BTreeSet::new();
-  let route_allowed = |route: &RouteSpec| {
-    route.upstream.is_none()
-      && route.redirect.is_none()
-      && services.contains(&route.service)
-      && route.paths.iter().all(|p| {
-        p.upstream.is_none()
-          && p.service.as_ref().is_some_and(|s| services.contains(s))
-      })
-  };
+  let route_allowed =
+    |route: &RouteSpec| route_spec_in_scope(services, route);
   let upsert_route =
     |route: &RouteSpec| -> Result<Option<String>, ApiError> {
       let host = crate::world::normalize_hostname(&route.hostname)?;
+      let before = current.routes.get(&host).map(|r| &r.spec);
       Ok(
         (!route_allowed(route)
-          || current
-            .routes
-            .get(&host)
-            .is_some_and(|r| !route_allowed(&r.spec)))
+          || before.is_some_and(|r| !route_allowed(r))
+          || crate::caddy_validate::route_caddy_changed(
+            before,
+            Some(route),
+          ))
         .then(|| format!("route/{host}")),
       )
     };
@@ -602,6 +610,17 @@ mod tests {
       (4, vec!["route/blog.example.com".into()]),
     ]);
     assert_eq!(check_plan_scope(&services, &plan, &effects), Ok(()));
+    plan.items[1].action = Action::Update;
+    plan.items[1].before = plan.items[1].after.clone();
+    plan.items[1].before.as_mut().unwrap()["caddy"] =
+      json!("respond 403");
+    plan.items[1].after.as_mut().unwrap()["caddy"] =
+      json!("respond 404");
+    assert!(check_plan_scope(&services, &plan, &effects).is_err());
+    plan.items[1].after.as_mut().unwrap()["caddy"] =
+      json!("respond 403");
+    plan.items[1].after.as_mut().unwrap()["rate_limit"] = json!(60);
+    assert_eq!(check_plan_scope(&services, &plan, &effects), Ok(()));
     plan.items[1].after.as_mut().unwrap()["paths"] =
       json!([{"path": "/admin", "service": "halo"}]);
     assert_eq!(
@@ -611,5 +630,56 @@ mod tests {
         "route/blog.example.com".into()
       ])
     );
+  }
+
+  #[test]
+  fn scoped_route_request_cannot_change_custom_caddy() {
+    let host = "blog.example.com";
+    let mut current = World::default();
+    let spec: RouteSpec = serde_json::from_value(json!({
+      "hostname": host, "service": "blog", "caddy": "respond 403"
+    }))
+    .unwrap();
+    current.routes.insert(
+      host.into(),
+      crate::world::RouteRow {
+        id: "r".into(),
+        spec: spec.clone(),
+        version: 1,
+      },
+    );
+    let auth = Auth {
+      name: "scoped".into(),
+      perms: BTreeSet::from([wharf_api_types::view::Perm::Admin]),
+      expires_at: None,
+      allowed_from: vec![],
+      services: Some(BTreeSet::from(["blog".into()])),
+      human: false,
+    };
+    for caddy in [None, Some("respond 404"), Some("respond 403")] {
+      let mut spec = spec.clone();
+      spec.caddy = caddy.map(str::to_owned);
+      spec.rate_limit = Some(60);
+      for request in [
+        PlanRequest {
+          changes: vec![Change::UpsertRoute { spec: spec.clone() }],
+          ..Default::default()
+        },
+        PlanRequest {
+          partial: Some(wharf_api_types::spec::Fleet {
+            routes: vec![spec.clone()],
+            ..Default::default()
+          }),
+          ..Default::default()
+        },
+      ] {
+        let result = require_plan_request(&auth, &current, &request);
+        if caddy == Some("respond 403") {
+          assert!(result.is_ok());
+        } else {
+          assert_eq!(result.unwrap_err().code, ErrorCode::Forbidden);
+        }
+      }
+    }
   }
 }

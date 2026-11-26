@@ -21,6 +21,7 @@ mod auto_update;
 mod backup;
 mod baseline;
 mod build;
+mod caddy_validate;
 mod cert;
 mod cert_status;
 mod cli_dist;
@@ -197,6 +198,7 @@ async fn main() -> anyhow::Result<()> {
     )
     .init();
   let cli = Cli::parse();
+  caddy_validate::validate_public_url(cli.public_url.as_deref())?;
   std::fs::create_dir_all(&cli.data_dir)
     .with_context(|| format!("创建 {}", cli.data_dir.display()))?;
   let db = db::Db::open(&cli.data_dir.join("wharf.db"))?;
