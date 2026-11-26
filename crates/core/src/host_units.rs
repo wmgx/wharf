@@ -160,11 +160,13 @@ pub async fn list(
   auth: Auth,
   Path(server): Path<String>,
 ) -> ApiResult<Vec<HostUnitView>> {
-  crate::host_access::require(
+  let snap = snapshot::load(&s.db).await?;
+  crate::host_access::require_with(
     &auth,
     crate::host_access::HostTarget::HostUnits { server: &server },
+    snap.world.servers.get(&server).map(|r| &r.settings),
+    crate::join::core_server_of(&snap).as_deref(),
   )?;
-  let snap = snapshot::load(&s.db).await?;
   if !snap.world.servers.contains_key(&server) {
     return Err(server_not_found(&server).into());
   }
@@ -208,11 +210,13 @@ pub async fn set_watch(
   Path((server, unit)): Path<(String, String)>,
   Json(body): Json<WatchBody>,
 ) -> ApiResult<serde_json::Value> {
-  crate::host_access::require(
+  let snap = snapshot::load(&s.db).await?;
+  crate::host_access::require_with(
     &auth,
     crate::host_access::HostTarget::HostUnits { server: &server },
+    snap.world.servers.get(&server).map(|r| &r.settings),
+    crate::join::core_server_of(&snap).as_deref(),
   )?;
-  let snap = snapshot::load(&s.db).await?;
   if !snap.world.servers.contains_key(&server) {
     return Err(server_not_found(&server).into());
   }
@@ -255,11 +259,13 @@ pub async fn logs(
   Path((server, unit)): Path<(String, String)>,
   Query(q): Query<LogsQuery>,
 ) -> ApiResult<String> {
-  crate::host_access::require(
+  let snap = snapshot::load(&s.db).await?;
+  crate::host_access::require_with(
     &auth,
     crate::host_access::HostTarget::HostUnits { server: &server },
+    snap.world.servers.get(&server).map(|r| &r.settings),
+    crate::join::core_server_of(&snap).as_deref(),
   )?;
-  let snap = snapshot::load(&s.db).await?;
   if !snap.world.servers.contains_key(&server) {
     return Err(server_not_found(&server).into());
   }

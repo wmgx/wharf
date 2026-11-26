@@ -177,7 +177,7 @@ struct StoredPlanBody {
   #[serde(default)]
   route_effects: crate::token_scope::RouteEffects,
   #[serde(default)]
-  host_access_checked: bool,
+  host_requirements: Option<Vec<crate::host_access::HostRequirement>>,
 }
 
 struct StoredPlan {
@@ -266,9 +266,32 @@ pub async fn start(
       .suggest(replan),
     );
   }
-  crate::host_access::require_plan_admin(plan, &stored.steps, perms)?;
-  if !stored.body.host_access_checked {
-    crate::host_access::require_legacy_replan(plan, &stored.steps)?;
+  let human = auth.is_some_and(|auth| auth.human);
+  let requirements = stored.body.host_requirements.as_deref();
+  if requirements.is_none()
+    || !human
+      && (requirements.is_some_and(|reqs| !reqs.is_empty())
+        || !plan.needs_host.is_empty()
+        || plan.items.iter().any(|item| {
+          item.needs_host() || item.address.starts_with("server/")
+        }))
+  {
+    let snap = if requirements.is_some() {
+      snapshot::load(&state.db).await?
+    } else {
+      snapshot::Snapshot::default()
+    };
+    let core_server =
+      requirements.and_then(|_| crate::join::core_server_of(&snap));
+    crate::host_access::require_plan_host(
+      plan,
+      &stored.steps,
+      requirements,
+      perms,
+      human,
+      &snap.world,
+      core_server.as_deref(),
+    )?;
   }
   if !perms.contains(&Perm::Admin)
     && plan.items.iter().any(|item| {
@@ -1754,7 +1777,7 @@ mod tests {
   }
 
   #[test]
-  fn host_access_switch_requires_apply_all() {
+  fn api_token_cannot_apply_opening_host_exec() {
     let now = Utc::now();
     let plan = Plan {
       plan_id: "p1".into(),
@@ -1776,16 +1799,20 @@ mod tests {
         host_access: vec![],
       }],
       warnings: vec![],
-      needs_admin: vec![],
+      needs_host: vec![],
       needs_confirm: vec![],
       suggest: vec![],
       note: None,
     };
     assert_eq!(
-      crate::host_access::require_plan_admin(
+      crate::host_access::require_plan_host(
         &plan,
         &[],
-        &Default::default()
+        Some(&[]),
+        &Perm::ALL.into_iter().collect(),
+        false,
+        &Default::default(),
+        Some("core"),
       )
       .unwrap_err()
       .code,

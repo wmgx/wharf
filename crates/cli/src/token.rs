@@ -30,17 +30,17 @@ fn parse_non_empty_csv(
     return Err(
       ApiError::invalid(format!("{flag} 不能为空或包含空项"))
         .with_hint(match clear_keyword {
-          Some(kw) => format!(
-            "填入逗号分隔的值；要清除限制请显式传 {flag} {kw}"
-          ),
-          None if flag == "--perms" => {
-            "可选权限点：read、plan、apply、confirm、exec、admin"
-              .into()
-          }
-          None => {
-            format!("填入逗号分隔的值；如果不限制请不要传 {flag}")
-          }
-        }),
+        Some(kw) => {
+          format!("填入逗号分隔的值；要清除限制请显式传 {flag} {kw}")
+        }
+        None if flag == "--perms" => {
+          "可选权限点：read、plan、apply、confirm、exec、host、admin"
+            .into()
+        }
+        None => {
+          format!("填入逗号分隔的值；如果不限制请不要传 {flag}")
+        }
+      }),
     );
   }
   Ok(values.into_iter().map(str::to_string).collect())
@@ -267,7 +267,7 @@ pub async fn run(
           .map(|p| {
             Perm::parse(&p).ok_or_else(|| {
               ApiError::invalid(format!("未知权限 {p}")).with_hint(
-                "权限点：read、plan、apply、confirm、exec、admin",
+                "权限点：read、plan、apply、confirm、exec、host、admin",
               )
             })
           })

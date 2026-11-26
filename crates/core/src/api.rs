@@ -1731,18 +1731,9 @@ async fn guard_dangerous(
     );
   for (name, after) in wanted {
     let before = snap.world.servers.get(name).map(|r| &r.settings);
-    let was =
-      |f: fn(&wharf_api_types::spec::ServerSettings) -> bool| {
-        before.is_some_and(f)
-      };
-    let opened = [
-      (
-        "宿主机终端",
-        after.host_terminal && !was(|b| b.host_terminal),
-      ),
-      ("宿主机命令执行", after.host_exec && !was(|b| b.host_exec)),
-    ];
-    if let Some((what, _)) = opened.iter().find(|(_, o)| *o) {
+    if let Some(what) =
+      crate::host_access::opened_switch(before, after)
+    {
       return Err(
         ApiError::new(
           ErrorCode::Forbidden,

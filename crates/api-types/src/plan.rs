@@ -135,7 +135,7 @@ pub struct PlanItem {
   /// 修改时具体改了哪些字段，由 `before`、`after` 算出。旧计划里没有。
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub changes: Vec<FieldChange>,
-  /// 触达宿主机的原因；非空时 apply 阶段需要 `admin` 权限。旧计划里没有。
+  /// 触达宿主机的原因；非空时 apply 阶段需要 host 权限且目标服务器开启对应开关。旧计划里没有。
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub host_access: Vec<String>,
 }
@@ -275,8 +275,8 @@ fn line_diff(before: &str, after: &str) -> Vec<String> {
 }
 
 impl PlanItem {
-  /// 触达宿主机，apply 时需要 `admin` 权限。
-  pub fn needs_admin(&self) -> bool {
+  /// 触达宿主机，apply 时需要 `host` 权限且目标服务器开启对应开关。
+  pub fn needs_host(&self) -> bool {
     !self.host_access.is_empty()
   }
 
@@ -323,9 +323,13 @@ pub struct Plan {
   /// 不阻止 apply 的提醒，例如某台服务器离线，查不到现状。
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub warnings: Vec<String>,
-  /// 触达宿主机、apply 时需要 `admin` 权限的地址。
-  #[serde(default, skip_serializing_if = "Vec::is_empty")]
-  pub needs_admin: Vec<String>,
+  /// 触达宿主机、apply 时需要 `host` 权限且目标服务器开启对应开关的地址。
+  #[serde(
+    default,
+    alias = "needs_admin",
+    skip_serializing_if = "Vec::is_empty"
+  )]
+  pub needs_host: Vec<String>,
   /// 需要 `--confirm` 的地址。
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub needs_confirm: Vec<String>,

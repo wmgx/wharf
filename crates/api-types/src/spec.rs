@@ -81,6 +81,12 @@ pub struct ServerSettings {
   /// 允许通过 API 在宿主机执行命令。
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub host_exec: bool,
+  /// 允许通过 API 部署特权/host 网络/越界挂载容器、挂载宿主机路径的容器任务、操作未纳管容器，以及修改网关镜像和本地四层转发。
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub host_docker: bool,
+  /// 允许通过 API 修改服务器宿主机设置、纠正基线、配置 dockerd 代理/外网代理/Tailscale，以及查看监视宿主机 systemd 程序。
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub host_system: bool,
   /// 每月流量额度（GB），用于显示本期用了多少，用到 80% 时提醒（阈值在告警规则里改）。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub traffic_quota_gb: Option<u32>,

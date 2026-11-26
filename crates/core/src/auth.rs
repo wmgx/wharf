@@ -384,7 +384,10 @@ mod tests {
     let apply_safe = decode_perms("apply_safe").unwrap();
     assert!(apply_safe.contains(&Perm::Apply));
     assert!(!apply_safe.contains(&Perm::Confirm));
-    assert_eq!(decode_perms("apply_all").unwrap().len(), 6);
+    assert_eq!(
+      decode_perms("apply_all").unwrap(),
+      Perm::ALL.into_iter().collect::<BTreeSet<_>>()
+    );
     let ai = encode_perms(&[Perm::Plan, Perm::Exec]);
     assert_eq!(ai, "read,plan,exec");
     let back = decode_perms(&ai).unwrap();

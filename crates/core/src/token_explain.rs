@@ -215,7 +215,9 @@ fn fixed_items(
   explanation: &Explanation<'_>,
   service: Option<&str>,
 ) -> Vec<TokenExplainItem> {
-  use Perm::{Admin, Apply, Exec, Plan, Read};
+  use Perm::{Admin, Apply, Exec, Host, Plan, Read};
+
+  let scoped = explanation.row.services.is_some();
 
   let service_segment = service.map(urlencoding::encode);
   [
@@ -224,7 +226,7 @@ fn fixed_items(
       Method::GET,
       "/api/status",
       Read,
-      Some("受限令牌只看到名下的服务和域名"),
+      scoped.then_some("受限令牌只看到名下的服务和域名"),
     ),
     ("查看服务", Method::GET, "/api/services/{svc}", Read, None),
     (
@@ -239,16 +241,18 @@ fn fixed_items(
       Method::POST,
       "/api/plan",
       Plan,
-      Some("计划内容还要按服务范围核对"),
+      scoped.then_some("计划内容还要按服务范围核对"),
     ),
     (
       "执行计划",
       Method::POST,
       "/api/apply",
       Apply,
-      Some(
-        "需核对计划范围；高风险项还要 confirm，触达宿主机的要 admin",
-      ),
+      Some(if scoped {
+        "需核对计划范围；高风险项还要 confirm，触达宿主机的要 host 且目标机开对应开关（控制面所在机还需 admin）"
+      } else {
+        "高风险项还要 confirm，触达宿主机的要 host 且目标机开对应开关（控制面所在机还需 admin）"
+      }),
     ),
     (
       "重启服务",
@@ -276,23 +280,25 @@ fn fixed_items(
       Method::POST,
       "/api/alerts/ack",
       Apply,
-      Some("受限令牌只能确认名下服务和域名的告警"),
+      scoped.then_some("受限令牌只能确认名下服务和域名的告警"),
     ),
     (
       "看任务完整触发地址",
       Method::GET,
       "/api/tasks/<任务>?reveal=true",
       Read,
-      Some(
-        "还要核对任务归属和对应的执行权限，具体权限取决于任务类型",
-      ),
+      Some(if scoped {
+        "还要核对任务归属和对应的执行权限，具体权限取决于任务类型"
+      } else {
+        "还要核对对应的执行权限，具体权限取决于任务类型"
+      }),
     ),
     (
       "宿主机执行命令",
       Method::POST,
       "/api/servers/<服务器>/exec",
-      Admin,
-      Some("服务器还要开启 host_exec"),
+      Host,
+      Some("目标服务器还要开启 host_exec；若为控制面所在机还需 admin"),
     ),
     ("看操作审计", Method::GET, "/api/audit", Admin, None),
     ("管理密钥", Method::PUT, "/api/secrets/<密钥>", Admin, None),
@@ -399,6 +405,60 @@ mod tests {
           assert!(reason.contains("当前 token 没有 exec 权限"))
         }
         _ => assert!(item.reason.is_none()),
+      }
+    }
+  }
+
+  #[test]
+  fn fixed_items_explain_scope_and_host_requirements() {
+    use ExplainVerdict::{Allow, Deny, Depends};
+
+    for (services, perms, scope_verdict, host_verdict) in [
+      (None, "read,plan,apply,exec", Allow, Deny),
+      (Some("blog".into()), "read,plan,apply,exec", Depends, Deny),
+      (None, "read,host", Allow, Depends),
+    ] {
+      let scoped = services.is_some();
+      let row = TokenRow {
+        allowed_from: None,
+        services,
+        perms: perms.into(),
+        ..row()
+      };
+      let result =
+        explain(&row, Utc::now(), ExplainQuery::default()).unwrap();
+      assert_eq!(result.items.len(), 14);
+      let item = |op: &str| {
+        result.items.iter().find(|item| item.op == op).unwrap()
+      };
+      if perms != "read,host" {
+        for (op, note) in [
+          ("查看状态", "受限令牌只看到名下的服务和域名"),
+          ("生成计划", "计划内容还要按服务范围核对"),
+          ("确认告警", "受限令牌只能确认名下服务和域名的告警"),
+        ] {
+          assert_eq!(item(op).verdict, scope_verdict);
+          assert_eq!(
+            item(op).reason.as_deref(),
+            scoped.then_some(note)
+          );
+        }
+        let apply = item("执行计划").reason.as_deref().unwrap();
+        assert!(apply.contains("host") && apply.contains("admin"));
+        assert_eq!(apply.contains("需核对计划范围"), scoped);
+        let reveal =
+          item("看任务完整触发地址").reason.as_deref().unwrap();
+        assert_eq!(reveal.contains("任务归属"), scoped);
+      }
+      let host = item("宿主机执行命令");
+      assert_eq!(host.perm, Some(Perm::Host));
+      assert_eq!(host.verdict, host_verdict);
+      if host_verdict == Depends {
+        let reason = host.reason.as_deref().unwrap();
+        assert!(
+          reason.contains("host_exec")
+            && reason.contains("控制面所在机还需 admin")
+        );
       }
     }
   }

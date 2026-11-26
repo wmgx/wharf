@@ -1858,7 +1858,7 @@ export interface PendingCheck {
 /**
  * 权限点。token 持有一组；页面登录的会话有全部权限。
  */
-export type Perm = "read" | "plan" | "apply" | "confirm" | "exec" | "admin";
+export type Perm = "read" | "plan" | "apply" | "confirm" | "exec" | "host" | "admin";
 
 export interface Plan {
   /**
@@ -1877,13 +1877,13 @@ export interface Plan {
   inputs?: string | null;
   items: PlanItem[];
   /**
-   * 触达宿主机、apply 时需要 `admin` 权限的地址。
-   */
-  needs_admin?: string[];
-  /**
    * 需要 `--confirm` 的地址。
    */
   needs_confirm?: string[];
+  /**
+   * 触达宿主机、apply 时需要 `host` 权限且目标服务器开启对应开关的地址。
+   */
+  needs_host?: string[];
   /**
    * 生成计划时写的备注。
    */
@@ -1913,7 +1913,7 @@ export interface PlanItem {
    */
   changes?: FieldChange[];
   /**
-   * 触达宿主机的原因；非空时 apply 阶段需要 `admin` 权限。旧计划里没有。
+   * 触达宿主机的原因；非空时 apply 阶段需要 host 权限且目标服务器开启对应开关。旧计划里没有。
    */
   host_access?: string[];
   id: number;
@@ -2284,9 +2284,17 @@ export interface ServerSettings {
    */
   github_mirror?: string | null;
   /**
+   * 允许通过 API 部署特权/host 网络/越界挂载容器、挂载宿主机路径的容器任务、操作未纳管容器，以及修改网关镜像和本地四层转发。
+   */
+  host_docker?: boolean;
+  /**
    * 允许通过 API 在宿主机执行命令。
    */
   host_exec?: boolean;
+  /**
+   * 允许通过 API 修改服务器宿主机设置、纠正基线、配置 dockerd 代理/外网代理/Tailscale，以及查看监视宿主机 systemd 程序。
+   */
+  host_system?: boolean;
   /**
    * 允许从页面打开宿主机 root 终端。
    */

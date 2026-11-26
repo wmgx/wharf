@@ -20,7 +20,8 @@ const PERMS: [Perm, string, string][] = [
   ["apply", "执行改动", "执行不含高风险项的计划、上传代码、触发备份"],
   ["confirm", "确认高风险", "删数据、覆盖、公开到外网、从备份恢复"],
   ["exec", "容器执行", "容器终端、端口转发、改服务文件、容器/脚本任务"],
-  ["admin", "管理", "服务器、账号、密钥、访问令牌、升级，以及所有触达宿主机的操作"],
+  ["host", "宿主机操作", "宿主机命令/目录/apt、特权或 host 网络容器、未纳管容器、系统配置（需目标服务器开对应开关；控制面所在机还需管理权限）"],
+  ["admin", "管理", "服务器增删、厂商账号、密钥、访问令牌、审计、升级、SSO 与应用账号"],
 ];
 const PERM_LABEL = Object.fromEntries(PERMS.map(([p, l]) => [p, l])) as Record<Perm, string>;
 
@@ -153,7 +154,7 @@ export function Tokens() {
                     <TableCell className="max-md:px-1">
                       <span className="flex flex-wrap gap-1">
                         {t.perms.map((p) => (
-                          <Badge key={p} variant={p === "admin" || p === "confirm" ? "default" : "secondary"} className="font-normal">
+                          <Badge key={p} variant={p === "admin" || p === "host" || p === "confirm" ? "default" : "secondary"} className="font-normal">
                             {PERM_LABEL[p] ?? p}
                           </Badge>
                         ))}
@@ -330,7 +331,7 @@ function TokenDialog({ token, taken, onCreated, onClose }: { token: TokenView | 
             </div>
             <ErrorNote error={serviceList.error} />
           </Field>
-          {preset === "ai" && <Notice>AI 能预览和执行普通改动、在宿主机执行命令；删数据、公开到外网这类高风险项要你在页面上确认。</Notice>}
+          {preset === "ai" && <Notice>AI 能预览和执行普通改动、在容器里执行命令；触达宿主机需要 host 权限且服务器开对应开关，删数据、公开到外网等高风险项要确认。</Notice>}
           {!token && name && taken.includes(name) && <Notice kind="warn">已有同名访问令牌</Notice>}
           <ErrorNote error={sourceError ? null : error} />
         </div>

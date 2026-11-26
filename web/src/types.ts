@@ -52,6 +52,8 @@ export interface ServerView {
   settings: Record<string, unknown> & {
     host_terminal: boolean;
     host_exec: boolean;
+    host_docker?: boolean;
+    host_system?: boolean;
     egress?: EgressSpec;
     via?: string;
     renew_at?: string;
@@ -425,7 +427,7 @@ export interface Plan {
   expires_at: string;
   items: PlanItem[];
   warnings?: string[];
-  needs_admin?: string[];
+  needs_host?: string[];
   needs_confirm?: string[];
   suggest?: string[];
 }

@@ -32,13 +32,22 @@ pub async fn addresses(
   auth: Auth,
 ) -> ApiResult<CoreAddresses> {
   auth.require(Perm::Admin)?;
-  Ok(Json(candidates(&s).await?))
+  let snap = snapshot::load(&s.db).await?;
+  Ok(Json(candidates(&s, &snap)))
 }
 
 /// 加入命令默认用的地址：经网关开放的域名优先（新机器不用先装组网），
 /// 其次是启动配置的地址。
 pub async fn default_url(s: &AppState) -> Option<String> {
-  let found = candidates(s).await.ok()?;
+  let snap = snapshot::load(&s.db).await.ok()?;
+  default_url_from(s, &snap)
+}
+
+pub(crate) fn default_url_from(
+  s: &AppState,
+  snap: &snapshot::Snapshot,
+) -> Option<String> {
+  let found = candidates(s, snap);
   found
     .addresses
     .iter()
@@ -47,22 +56,16 @@ pub async fn default_url(s: &AppState) -> Option<String> {
     .or_else(|| s.public_url.clone())
 }
 
-async fn candidates(s: &AppState) -> Result<CoreAddresses, ApiError> {
-  let snap = snapshot::load(&s.db).await?;
+fn candidates(
+  s: &AppState,
+  snap: &snapshot::Snapshot,
+) -> CoreAddresses {
   let net = snap.net(&snap.world);
   let port = s.listen_port;
-  let mut ips: Vec<Ipv4Addr> = if_addrs::get_if_addrs()
-    .unwrap_or_default()
-    .into_iter()
-    .filter(|i| !is_bridge(&i.name))
-    .filter_map(|i| match i.ip() {
-      IpAddr::V4(ip) if !ip.is_loopback() => Some(ip),
-      _ => None,
-    })
-    .collect();
+  let own = own_ipv4s();
+  let mut ips: Vec<Ipv4Addr> =
+    own.iter().filter_map(|ip| ip.parse().ok()).collect();
   ips.sort_by_key(|ip| rank(*ip));
-  let own: BTreeSet<String> =
-    ips.iter().map(|ip| ip.to_string()).collect();
   let server = core_server(&net, &own);
 
   let mut out: Vec<CoreAddress> = Vec::new();
@@ -79,7 +82,7 @@ async fn candidates(s: &AppState) -> Result<CoreAddresses, ApiError> {
   for host in
     core_routes(&snap.world, &net, server.as_deref(), &own, port)
   {
-    if let Some(v) = views::route_view(&snap, &net, &host) {
+    if let Some(v) = views::route_view(snap, &net, &host) {
       push(v.url, "route");
     }
   }
@@ -89,12 +92,12 @@ async fn candidates(s: &AppState) -> Result<CoreAddresses, ApiError> {
   for ip in ips {
     push(format!("http://{ip}:{port}"), kind(ip));
   }
-  Ok(CoreAddresses {
+  CoreAddresses {
     server,
     port,
     agent_image: s.agent_image.clone(),
     addresses: out,
-  })
+  }
 }
 
 /// 同步入口渲染和加入地址共用控制面路由识别。
@@ -103,15 +106,7 @@ pub fn route_urls(
   net: &Net,
   port: u16,
 ) -> Vec<String> {
-  let own = if_addrs::get_if_addrs()
-    .unwrap_or_default()
-    .into_iter()
-    .filter(|i| !is_bridge(&i.name))
-    .filter_map(|i| match i.ip() {
-      IpAddr::V4(ip) if !ip.is_loopback() => Some(ip.to_string()),
-      _ => None,
-    })
-    .collect();
+  let own = own_ipv4s();
   let server = core_server(net, &own);
   core_routes(world, net, server.as_deref(), &own, port)
     .into_iter()
@@ -129,8 +124,50 @@ pub fn route_urls(
     .collect()
 }
 
+pub(crate) fn own_ipv4s() -> BTreeSet<String> {
+  if_addrs::get_if_addrs()
+    .unwrap_or_default()
+    .into_iter()
+    .filter(|i| !is_bridge(&i.name))
+    .filter_map(|i| match i.ip() {
+      IpAddr::V4(ip) if !ip.is_loopback() => Some(ip.to_string()),
+      _ => None,
+    })
+    .collect()
+}
+
+pub(crate) fn core_server_of(
+  snap: &snapshot::Snapshot,
+) -> Option<String> {
+  core_server_with_report(snap, &own_ipv4s())
+}
+
+fn core_server_with_report(
+  snap: &snapshot::Snapshot,
+  own: &BTreeSet<String>,
+) -> Option<String> {
+  let candidate = core_server(&snap.net(&snap.world), own)?;
+  // 服务器设置可覆盖网络地址，授权时还要核对唯一的 agent 网卡上报。
+  let mut matches = snap.agents.iter().filter(|agent| {
+    snap.world.servers.contains_key(&agent.server)
+      && agent.report.as_ref().is_some_and(|report| {
+        report.lan_ips.iter().any(|ip| own.contains(ip))
+          || report
+            .private_addr
+            .as_ref()
+            .is_some_and(|addr| own.contains(&addr.ip))
+      })
+  });
+  let agent = matches.next()?;
+  (agent.server == candidate && matches.next().is_none())
+    .then_some(candidate)
+}
+
 /// 控制面所在的服务器：哪台的 agent 上报了控制面网卡上的地址。
-fn core_server(net: &Net, own: &BTreeSet<String>) -> Option<String> {
+pub(crate) fn core_server(
+  net: &Net,
+  own: &BTreeSet<String>,
+) -> Option<String> {
   let hit = |ip: &String| own.contains(ip);
   net
     .private
@@ -395,6 +432,43 @@ printf '\n完成，回到页面查看连接状态。\n'
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn host_policy_core_identity_requires_unique_agent_interface_match()
+  {
+    let ip = "100.64.0.1";
+    let own = BTreeSet::from([ip.into()]);
+    let mut snap = snapshot::Snapshot::default();
+    for server in ["core", "s1"] {
+      snap.world.servers.insert(
+        server.into(),
+        crate::world::ServerRow {
+          settings: Default::default(),
+          version: 1,
+        },
+      );
+    }
+    let agent = |server: &str| crate::db::AgentRow {
+      server: server.into(),
+      public_key: None,
+      report: Some(wharf_api_types::agent::AgentReport {
+        lan_ips: vec![ip.into()],
+        ..Default::default()
+      }),
+      last_seen: None,
+    };
+    snap.agents.push(agent("core"));
+    assert_eq!(
+      core_server_with_report(&snap, &own).as_deref(),
+      Some("core")
+    );
+    snap.agents.push(agent("s1"));
+    assert!(core_server_with_report(&snap, &own).is_none());
+    snap.agents.clear();
+    snap.world.servers.get_mut("s1").unwrap().settings.public_ip =
+      Some(ip.into());
+    assert!(core_server_with_report(&snap, &own).is_none());
+  }
 
   #[test]
   fn core_url_rejects_shell_characters() {

@@ -102,7 +102,7 @@ pub async fn create(
     (Some(p), None) => p,
     (None, Some(scope)) => Perm::of_scope(scope),
     _ => return Err(ApiError::invalid("perms 和 scope 要给且只给一个")
-      .with_hint("perms 是权限点列表：read、plan、apply、confirm、exec、admin")
+      .with_hint("perms 是权限点列表：read、plan、apply、confirm、exec、host、admin")
       .into()),
   };
   let settings = normalize(

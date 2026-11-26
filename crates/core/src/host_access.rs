@@ -9,7 +9,7 @@ use wharf_api_types::{
     AdoptSpec, GatewayKind, GatewaySpec, ServerSettings, ServiceSpec,
     Source,
   },
-  view::{Perm, TaskKind, TaskSpec},
+  view::{TaskKind, TaskSpec},
 };
 
 use crate::{
@@ -23,6 +23,12 @@ use crate::{
 };
 
 mod compose;
+mod policy;
+
+pub use policy::{
+  HostCap, HostRequirement, MIGRATION, opened_switch,
+  require_plan_host, require_with,
+};
 
 use compose::compose_host_reasons;
 pub use compose::{has_new_public_bind, validate_service_ports};
@@ -34,6 +40,8 @@ pub(crate) use compose::compose_public_binds;
 pub struct HostAccess {
   pub required: bool,
   pub human_only: bool,
+  pub cap: Option<HostCap>,
+  pub server: Option<String>,
   pub reasons: Vec<String>,
 }
 
@@ -78,62 +86,114 @@ pub enum HostTarget<'a> {
 
 pub fn assess(target: HostTarget<'_>) -> HostAccess {
   let human_only = matches!(target, HostTarget::HostTerminal { .. });
-  let reasons = match target {
-    HostTarget::HostTerminal { server } => {
-      vec![format!("打开服务器 {server} 的宿主机终端")]
-    }
-    HostTarget::HostExec { server } => {
-      vec![format!("在服务器 {server} 上执行宿主机命令")]
-    }
-    HostTarget::HostDir { server, action } => {
-      vec![format!("在服务器 {server} 上{action}")]
-    }
-    HostTarget::HostApt { server } => {
-      vec![format!("在服务器 {server} 上操作宿主机 apt 更新")]
-    }
-    HostTarget::ImportPreview { server, target } => {
-      vec![format!("读取服务器 {server} 上的容器配置 {target}")]
-    }
-    HostTarget::HostUnits { server } => {
+  use HostCap::{HostDocker, HostExec, HostSystem, HostTerminal};
+
+  let (location, reasons) = match target {
+    HostTarget::HostTerminal { server } => (
+      Some((server, HostTerminal)),
+      vec![format!("打开服务器 {server} 的宿主机终端")],
+    ),
+    HostTarget::HostExec { server } => (
+      Some((server, HostExec)),
+      vec![format!("在服务器 {server} 上执行宿主机命令")],
+    ),
+    HostTarget::HostDir { server, action } => (
+      Some((server, HostExec)),
+      vec![format!("在服务器 {server} 上{action}")],
+    ),
+    HostTarget::HostApt { server } => (
+      Some((server, HostExec)),
+      vec![format!("在服务器 {server} 上操作宿主机 apt 更新")],
+    ),
+    HostTarget::ImportPreview { server, target } => (
+      Some((server, HostDocker)),
+      vec![format!("读取服务器 {server} 上的容器配置 {target}")],
+    ),
+    HostTarget::HostUnits { server } => (
+      Some((server, HostSystem)),
       vec![format!(
         "查看或管理服务器 {server} 上的宿主机 systemd 程序"
-      )]
-    }
-    HostTarget::RemoveUnmanaged { server, target } => {
-      vec![format!("删除服务器 {server} 上的未纳管容器 {target}")]
-    }
+      )],
+    ),
+    HostTarget::RemoveUnmanaged { server, target } => (
+      Some((server, HostDocker)),
+      vec![format!("删除服务器 {server} 上的未纳管容器 {target}")],
+    ),
     HostTarget::Task(spec) => match &spec.how {
-      TaskKind::Host { .. } => vec!["在宿主机上执行命令".into()],
-      TaskKind::Container { mounts, .. } => mounts
-        .iter()
-        .map(|m| format!("容器任务挂载了宿主机路径 {m}"))
-        .collect(),
-      _ => vec![],
+      TaskKind::Host { .. } => (
+        Some((spec.server.as_str(), HostExec)),
+        vec!["在宿主机上执行命令".into()],
+      ),
+      TaskKind::Container { mounts, .. } if !mounts.is_empty() => (
+        Some((spec.server.as_str(), HostDocker)),
+        mounts
+          .iter()
+          .map(|m| format!("容器任务挂载了宿主机路径 {m}"))
+          .collect(),
+      ),
+      _ => (None, vec![]),
     },
     HostTarget::PlanItem {
       item,
       current,
       desired,
-    } => item_reasons(item, current, desired),
+    } => (
+      item_location(item, desired),
+      item_reasons(item, current, desired),
+    ),
     HostTarget::PlanStep {
       step,
       current: _current,
       desired,
-    } => {
-      if let Step::ServiceUp { service, .. } = step {
-        desired.services.get(service).map_or_else(Vec::new, |row| {
-          service_reasons(service, row, row.import.is_some())
+    } => match step {
+      Step::ServiceUp { service, .. } => {
+        desired.services.get(service).map_or((None, vec![]), |row| {
+          (
+            Some((row.spec.server.as_str(), HostDocker)),
+            service_reasons(service, row, row.import.is_some()),
+          )
         })
-      } else {
-        step_reason(step).map(String::from).into_iter().collect()
       }
-    }
+      Step::Baseline { server }
+      | Step::DockerProxy { server }
+      | Step::Egress { server }
+      | Step::TailscaleUp { server }
+      | Step::LinkDown { server, .. } => (
+        Some((server.as_str(), HostSystem)),
+        step_reason(step).map(String::from).into_iter().collect(),
+      ),
+      _ => (None, vec![]),
+    },
   };
+  let location = location.filter(|_| !reasons.is_empty());
   HostAccess {
     required: !reasons.is_empty(),
     human_only,
+    cap: location.map(|(_, cap)| cap),
+    server: location.map(|(server, _)| server.to_owned()),
     reasons,
   }
+}
+
+fn item_location<'a>(
+  item: &'a PlanItem,
+  desired: &'a World,
+) -> Option<(&'a str, HostCap)> {
+  let (kind, name) = item.address.split_once('/')?;
+  if host_address_reason(&item.address).is_some() {
+    let server = if kind == "network" {
+      name.strip_suffix("/tailscale")?
+    } else {
+      name
+    };
+    return Some((server, HostCap::HostSystem));
+  }
+  let server = match kind {
+    KIND_SERVICE => &desired.services.get(name)?.spec.server,
+    KIND_GATEWAY => &desired.gateways.get(name)?.spec.server,
+    _ => return None,
+  };
+  Some((server, HostCap::HostDocker))
 }
 
 fn step_reason(step: &Step) -> Option<&'static str> {
@@ -170,12 +230,14 @@ fn item_reasons(
   current: &World,
   desired: &World,
 ) -> Vec<String> {
-  if let Some(reason) = host_address_reason(&item.address) {
-    return vec![reason.into()];
-  }
   let Some((kind, name)) = item.address.split_once('/') else {
     return vec![];
   };
+  if (kind != KIND_SERVER || item.layer == Layer::Config)
+    && let Some(reason) = host_address_reason(&item.address)
+  {
+    return vec![reason.into()];
+  }
   if item.action == Action::Delete {
     return vec![];
   }
@@ -270,38 +332,6 @@ fn custom_gateway_image(spec: &GatewaySpec) -> bool {
   })
 }
 
-fn have(perms: &BTreeSet<Perm>) -> String {
-  perms
-    .iter()
-    .map(|p| p.as_str())
-    .collect::<Vec<_>>()
-    .join(",")
-}
-
-pub fn require(
-  auth: &Auth,
-  target: HostTarget<'_>,
-) -> Result<(), AppError> {
-  let access = assess(target);
-  if access.human_only && !auth.human {
-    return Err(
-      ApiError::new(
-        ErrorCode::Forbidden,
-        "宿主机终端只能在页面上由人登录后打开，不能用 API token 访问",
-      )
-      .with_hint(
-        "请在浏览器登录 Wharf 页面，进入“服务器详情 → 终端”打开",
-      )
-      .into(),
-    );
-  }
-  if access.required && !auth.has(Perm::Admin) {
-    return Err(ApiError::new(ErrorCode::Forbidden, format!("这个操作会触达宿主机（{}），需要 admin 权限（当前 token 有：{}）", access.reasons.join("、"), have(&auth.perms)))
-      .with_hint("请用户在页面上操作，或在页面“设置 → CLI 与 AI 接入”换一个有 admin 权限的 token").into());
-  }
-  Ok(())
-}
-
 pub fn check_host_dir_settings(
   auth: &Auth,
   name: &str,
@@ -325,8 +355,9 @@ pub fn mark_plan(
   desired: &World,
   items: &mut [PlanItem],
   steps: &[StepPlan],
-) -> Vec<String> {
+) -> (Vec<String>, Vec<HostRequirement>) {
   let mut addresses = BTreeSet::new();
+  let mut requirements = Vec::new();
   for item in items {
     if item.layer == Layer::Config
       && let Some(name) = item.address.strip_prefix("gateway/")
@@ -340,67 +371,43 @@ pub fn mark_plan(
       current,
       desired,
     });
-    for reason in access.reasons.into_iter().chain(
+    let accesses = std::iter::once(access).chain(
       steps
         .iter()
         .filter(|s| s.items.contains(&item.id))
-        .flat_map(|s| {
+        .map(|s| {
           assess(HostTarget::PlanStep {
             step: &s.step,
             current,
             desired,
           })
-          .reasons
         }),
-    ) {
-      if !item.host_access.contains(&reason) {
-        item.host_access.push(reason);
+    );
+    for access in accesses {
+      for reason in access.reasons {
+        if !item.host_access.contains(&reason) {
+          item.host_access.push(reason.clone());
+        }
+        if let (Some(server), Some(cap)) =
+          (&access.server, access.cap)
+        {
+          let requirement = HostRequirement {
+            address: item.address.clone(),
+            server: server.clone(),
+            cap,
+            reason,
+          };
+          if !requirements.contains(&requirement) {
+            requirements.push(requirement);
+          }
+        }
       }
     }
-    if item.needs_admin() {
+    if item.needs_host() {
       addresses.insert(item.address.clone());
     }
   }
-  addresses.into_iter().collect()
-}
-
-pub fn require_plan_admin(
-  plan: &Plan,
-  steps: &[StepPlan],
-  perms: &BTreeSet<Perm>,
-) -> Result<(), ApiError> {
-  if perms.contains(&Perm::Admin) {
-    return Ok(());
-  }
-  let mut details: Vec<_> = plan
-    .items
-    .iter()
-    .filter(|i| i.needs_admin())
-    .map(|i| format!("{}：{}", i.address, i.host_access.join("、")))
-    .collect();
-  if details.is_empty() {
-    details.extend(plan.needs_admin.iter().cloned());
-    details.extend(plan.items.iter().filter_map(|i| {
-      host_address_reason(&i.address)
-        .map(|reason| format!("{}：{reason}", i.address))
-    }));
-    details.extend(
-      steps
-        .iter()
-        .filter_map(|s| step_reason(&s.step))
-        .map(String::from),
-    );
-  }
-  let total = details.len();
-  if total == 0 {
-    return Ok(());
-  }
-  details.truncate(5);
-  if total > 5 {
-    details.push(format!("等 {total} 项"));
-  }
-  Err(ApiError::new(ErrorCode::Forbidden, format!("计划里有触达宿主机的操作，需要 admin 权限（{}）；当前 token 有：{}", details.join("、"), have(perms)))
-    .with_hint("请用户在页面上执行，或在页面“设置 → CLI 与 AI 接入”换一个有 admin 权限的 token"))
+  (addresses.into_iter().collect(), requirements)
 }
 
 // 旧计划的 ServiceUp 只有服务名，计划视图也可能脱敏。重新 plan 才能校验实际 Compose 和四层变更。
