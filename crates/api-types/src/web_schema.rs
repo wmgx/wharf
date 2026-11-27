@@ -86,6 +86,9 @@ pub fn web_schema() -> Value {
   let _ = generator.subschema_for::<view::BackupRecord>();
   let _ = generator.subschema_for::<agent::Snapshot>();
   let _ = generator.subschema_for::<view::BackupsView>();
+  let _ = generator.subschema_for::<view::CoreSnapshotsView>();
+  let _ = generator.subschema_for::<view::RestoreRequest>();
+  let _ = generator.subschema_for::<plan::ApplyRequest>();
   let _ = generator.subschema_for::<spec::NetworkMode>();
   let _ = generator.subschema_for::<view::NetworkView>();
   let _ =

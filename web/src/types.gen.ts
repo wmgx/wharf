@@ -311,6 +311,15 @@ export interface Applied {
   image_ids?: Record<string, string>;
 }
 
+export interface ApplyRequest {
+  /**
+   * 确认高风险项的地址。
+   */
+  confirm?: string[];
+  plan_id: string;
+  skip_snapshot?: boolean;
+}
+
 /**
  * 一条操作记录或登录记录。
  */
@@ -660,6 +669,15 @@ export interface CoreKeyView {
   public_key: string;
 }
 
+export interface CoreSnapshotsView {
+  dir_bytes: number;
+  max_count: number;
+  max_total_bytes: number;
+  min_free_after_bytes: number;
+  restore_hint: string;
+  snapshots: DbSnapshotInfo[];
+}
+
 export interface CreatedToken {
   allowed_from: string[];
   expires_at: string | null;
@@ -729,6 +747,20 @@ export type DataStatus = "ok" | "stale" | "off" | "uncovered" | "none";
  */
 export interface DataView {
   services: ServiceData[];
+}
+
+export interface DbSnapshotInfo {
+  addresses?: string[];
+  build: string;
+  created_at: string;
+  id: string;
+  key_fingerprint: string;
+  plan_id?: string | null;
+  reason: string;
+  schema_version: number;
+  sha256: string;
+  size_bytes: number;
+  trigger: string;
 }
 
 export interface DeploymentView {
@@ -2102,6 +2134,21 @@ export interface ResolvedImage {
    * 镜像支持的平台，例如 `linux/amd64`。
    */
   platforms?: string[] | null;
+}
+
+/**
+ * `POST /api/services/{name}/restore`
+ */
+export interface RestoreRequest {
+  /**
+   * 必须是 `service/<名称>`：恢复会覆盖现有数据。
+   */
+  confirm: string;
+  skip_snapshot?: boolean;
+  /**
+   * 快照 id，或 `latest`。
+   */
+  snapshot: string;
 }
 
 export interface RiskRow {

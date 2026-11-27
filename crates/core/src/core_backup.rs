@@ -443,6 +443,7 @@ async fn backup_impl(
   let to = state.db.call(|c| db::setting(c, TO)).await?.ok_or_else(
     || {
       ApiError::invalid("还没有开启控制面备份")
+        .with_hint("本机快速回退用 wharf core snapshot，整机异地灾备用 wharf backup core")
         .suggest("wharf backup core --to <server>")
     },
   )?;
@@ -710,13 +711,13 @@ async fn stage(
   state: &AppState,
   dir: &Path,
 ) -> Result<String, ApiError> {
+  use std::os::unix::fs::PermissionsExt;
   let _ = std::fs::remove_dir_all(dir);
   std::fs::create_dir_all(dir).map_err(|e| {
     ApiError::internal(format!("创建 {}：{e}", dir.display()))
   })?;
   #[cfg(unix)]
   {
-    use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::set_permissions(
       dir,
       std::fs::Permissions::from_mode(0o700),
@@ -732,6 +733,16 @@ async fn stage(
       Ok(())
     })
     .await?;
+  std::fs::set_permissions(
+    dir.join("wharf.db"),
+    std::fs::Permissions::from_mode(0o600),
+  )
+  .map_err(|e| {
+    ApiError::internal(format!(
+      "收紧备份数据库权限失败：{}",
+      e.kind()
+    ))
+  })?;
   for name in ["core.key", "core.key.prev", "admin.token"] {
     let from = state.data_dir.join(name);
     if from.exists() {

@@ -354,6 +354,8 @@ pub struct ApplyRequest {
   /// 确认高风险项的地址。
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub confirm: Vec<String>,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub skip_snapshot: bool,
 }
 
 #[derive(

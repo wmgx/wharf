@@ -10,7 +10,7 @@ use std::time::Duration;
 use serde_json::Value;
 use wharf_api_types::{
   ApiError, ErrorCode,
-  agent::{UpgradeJob, UpgradeResult},
+  agent::{UpgradeJob, UpgradePreparation, UpgradeResult},
 };
 
 use crate::{
@@ -120,40 +120,85 @@ fn sock_bind(container: &Value) -> String {
     .unwrap_or_else(|| format!("{SOCK}:{SOCK}"))
 }
 
+async fn target(
+  docker: &Docker,
+  job: &UpgradeJob,
+  ctx: &Ctx,
+) -> Result<(String, Value), ApiError> {
+  match &job.container {
+    None => {
+      let id = self_container()?;
+      let me = inspect(docker, &id, ctx).await?;
+      Ok((id, me))
+    }
+    Some(id) => {
+      let me = inspect(docker, id, ctx).await.map_err(|_| {
+        ApiError::not_found(format!("这台机器上没有容器 {id}"))
+      })?;
+      Ok((id.clone(), me))
+    }
+  }
+}
+
+async fn resolve_image(
+  docker: &Docker,
+  job: &UpgradeJob,
+  current: &str,
+  ctx: &Ctx,
+) -> Result<(String, String), ApiError> {
+  let pulled = match &job.tag {
+    Some(tag) => format!("{}:{tag}", repository(current)),
+    None => current.to_string(),
+  };
+  if job.expected_image.is_none() {
+    docker
+      .pull(&pulled, &job.pull, ctx, &mut Vec::new())
+      .await?;
+  }
+  let new_id = str_at(&inspect(docker, &pulled, ctx).await?, &["Id"])
+    .ok_or_else(|| ApiError::internal("读不到目标镜像 ID"))?
+    .to_string();
+  Ok((pulled, new_id))
+}
+
+pub async fn prepare(
+  docker: &Docker,
+  job: &UpgradeJob,
+  ctx: &Ctx,
+) -> Result<UpgradePreparation, ApiError> {
+  let (_, me) = target(docker, job, ctx).await?;
+  let current = str_at(&me, &["Config", "Image"])
+    .ok_or_else(|| ApiError::internal("读不到容器的镜像名"))?;
+  let (image, new_id) =
+    resolve_image(docker, job, current, ctx).await?;
+  Ok(UpgradePreparation {
+    image,
+    image_id: (str_at(&me, &["Image"]) != Some(new_id.as_str()))
+      .then_some(new_id),
+  })
+}
+
 /// 第一段：拉镜像、起接班容器。
 pub async fn start(
   docker: &Docker,
   job: &UpgradeJob,
   ctx: &Ctx,
 ) -> Result<UpgradeResult, ApiError> {
-  let (id, me) = match &job.container {
-    None => {
-      let id = self_container()?;
-      let me = inspect(docker, &id, ctx).await?;
-      (id, me)
-    }
-    Some(id) => {
-      let me = inspect(docker, id, ctx).await.map_err(|_| {
-        ApiError::not_found(format!("这台机器上没有容器 {id}"))
-      })?;
-      (id.clone(), me)
-    }
-  };
+  let (id, me) = target(docker, job, ctx).await?;
   let current = str_at(&me, &["Config", "Image"])
-    .ok_or_else(|| ApiError::internal("读不到 agent 的镜像名"))?
-    .to_string();
-  let old_id =
-    str_at(&me, &["Image"]).unwrap_or_default().to_string();
-  let pulled = match &job.tag {
-    Some(tag) => format!("{}:{tag}", repository(&current)),
-    None => current.clone(),
-  };
-  docker
-    .pull(&pulled, &job.pull, ctx, &mut Vec::new())
-    .await?;
-  let new_id = str_at(&inspect(docker, &pulled, ctx).await?, &["Id"])
-    .unwrap_or_default()
-    .to_string();
+    .ok_or_else(|| ApiError::internal("读不到容器的镜像名"))?;
+  let old_id = str_at(&me, &["Image"])
+    .ok_or_else(|| ApiError::internal("读不到容器的镜像 ID"))?;
+  let (pulled, new_id) =
+    resolve_image(docker, job, current, ctx).await?;
+  if let Some(expected) = &job.expected_image
+    && (expected != &new_id || new_id == old_id)
+  {
+    return Err(
+      ApiError::new(ErrorCode::Conflict, "升级镜像已变化")
+        .with_hint("重新运行 wharf upgrade"),
+    );
+  }
   if new_id == old_id {
     ctx.say(format!("已经是 {pulled}，不用升级"));
     return Ok(UpgradeResult {
@@ -165,7 +210,7 @@ pub async fn start(
   if pulled != current {
     docker
       .cmd()
-      .args(["tag", &pulled, &current])
+      .args(["tag", &pulled, current])
       .timeout(QUICK)
       .run(ctx)
       .await?
@@ -209,7 +254,7 @@ pub async fn start(
     .args(["run", "-d", "--label", "wharf.temp=1", "--name", HELPER])
     .args(["-v", &sock])
     .args(["--entrypoint", "wharf-agent", &helper_image])
-    .args(["replace", &id, &current, &old_id])
+    .args(["replace", &id, current, old_id])
     .args(["--ready", job.ready.as_deref().unwrap_or(CONNECTED)])
     // 机器忙时（刚解压完新镜像、控制面正在重启）docker run 也可能要几十秒。
     .timeout(Duration::from_secs(120))

@@ -1049,6 +1049,49 @@ pub struct RestoreRequest {
   pub snapshot: String,
   /// 必须是 `service/<名称>`：恢复会覆盖现有数据。
   pub confirm: String,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub skip_snapshot: bool,
+}
+
+pub const SNAPSHOT_RESTORE_HINT: &str = "离线恢复（用当前容器的镜像和数据挂载，以下为默认容器和目录）：
+  IMAGE=$(docker inspect --format '{{.Image}}' wharf-core)
+  docker stop wharf-core
+  docker run --rm -v /var/lib/wharf-core:/var/lib/wharf-core \"$IMAGE\" snapshot restore <id> --yes
+  docker start wharf-core
+  启动后运行 wharf plan 检查漂移。整机灾备使用 wharf backup core";
+
+#[derive(
+  Debug, Clone, Default, Serialize, Deserialize, JsonSchema,
+)]
+pub struct DbSnapshotInfo {
+  pub id: String,
+  pub created_at: DateTime<Utc>,
+  pub trigger: String,
+  #[serde(default)]
+  pub reason: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub plan_id: Option<String>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub addresses: Vec<String>,
+  #[serde(default)]
+  pub build: String,
+  #[serde(default)]
+  pub schema_version: usize,
+  pub size_bytes: u64,
+  #[serde(default)]
+  pub sha256: String,
+  #[serde(default)]
+  pub key_fingerprint: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CoreSnapshotsView {
+  pub dir_bytes: u64,
+  pub max_count: usize,
+  pub max_total_bytes: u64,
+  pub min_free_after_bytes: u64,
+  pub snapshots: Vec<DbSnapshotInfo>,
+  pub restore_hint: String,
 }
 
 /// `GET /api/servers/{name}/unmanaged`：服务器上还没纳管的一组容器，

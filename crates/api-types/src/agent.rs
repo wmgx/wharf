@@ -488,6 +488,8 @@ pub enum AgentOp {
   /// 拉新镜像，起一个接班容器换掉当前容器，结果是 [UpgradeResult]。
   /// 回复之后连接会断开，新 agent 重新连上才算完成。
   Upgrade(UpgradeJob),
+  /// 只拉镜像并比较容器的镜像 ID。结果是 [UpgradePreparation]。
+  UpgradePrepare(UpgradeJob),
   /// 删除没有容器在用的镜像和构建缓存，结果是字符串（释放了多少）。
   Prune,
   /// 在 project 的容器里开一个 shell。输出作为进度推送（base64），
@@ -777,6 +779,16 @@ pub struct UpgradeJob {
   /// 新容器日志里出现这段文字才算起来了，不填是 agent 连上控制面的日志。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub ready: Option<String>,
+  /// 使用已经拉取的镜像，标签变化时拒绝执行。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub expected_image: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UpgradePreparation {
+  pub image: String,
+  /// 当前容器已经使用该镜像时为空。
+  pub image_id: Option<String>,
 }
 
 /// 从 `/proc/self/mountinfo` 认出当前所在的容器 id：
