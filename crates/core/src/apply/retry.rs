@@ -369,6 +369,9 @@ async fn run_retry_reruns_only_failed_and_skipped_and_rejects_stale()
 {
   let state = crate::migrate::tests::seed_service(false).await;
   let auth = crate::host_access::tests::auth([Perm::Apply], false);
+  let mut scoped =
+    crate::host_access::tests::auth([Perm::Apply], false);
+  scoped.services = Some(BTreeSet::from(["notes".into()]));
   let service = "notes".to_string();
   let restart = Step::ServiceRestart {
     service: service.clone(),
@@ -424,11 +427,18 @@ async fn run_retry_reruns_only_failed_and_skipped_and_rejects_stale()
       .call_credentials(move |c, key| {
         let meta =
           RetryMeta::capture(c, key, (plans, 0), None, vec![])?;
-        insert_task_run(c, &stored, None, Some(&meta))
+        insert_task_run(
+          c,
+          &stored,
+          Some(&["notes".into()]),
+          Some(&meta),
+        )
       })
       .await
       .unwrap();
-    persist(&state, &run, None).await.unwrap();
+    persist(&state, &run, Some(&["notes".into()]))
+      .await
+      .unwrap();
   }
   let calls = Arc::new(Mutex::new(vec![]));
   let recorded = calls.clone();
@@ -441,7 +451,7 @@ async fn run_retry_reruns_only_failed_and_skipped_and_rejects_stale()
     Ok(serde_json::json!(true))
   });
   let response =
-    retry_run(state.clone(), &auth, "r_first", "测试".into())
+    retry_run(state.clone(), &scoped, "r_first", "测试".into())
       .await
       .unwrap();
   let run = tokio::time::timeout(Duration::from_secs(5), async {
