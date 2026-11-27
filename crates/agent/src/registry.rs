@@ -796,6 +796,73 @@ mod tests {
     );
   }
 
+  #[tokio::test]
+  async fn manifest_fallback_keeps_single_arch_config() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let listener =
+      tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let host = listener.local_addr().unwrap().to_string();
+    let server = tokio::spawn(async move {
+      for _ in 0..5 {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut socket = BufReader::new(socket);
+        let mut request = String::new();
+        socket.read_line(&mut request).await.unwrap();
+        let mut header = String::new();
+        loop {
+          header.clear();
+          if socket.read_line(&mut header).await.unwrap() == 0
+            || header == "\r\n"
+          {
+            break;
+          }
+        }
+        let (status, digest, body) = if request.starts_with("HEAD ") {
+          ("200 OK", "Docker-Content-Digest: sha256:abc\r\n", "")
+        } else if request.contains("/mirror/") {
+          ("404 Not Found", "", "")
+        } else if request.contains("/manifests/") {
+          ("200 OK", "", r#"{"config":{"digest":"sha256:def"}}"#)
+        } else {
+          ("200 OK", "", r#"{"os":"linux","architecture":"amd64"}"#)
+        };
+        let response = format!(
+          "HTTP/1.1 {status}\r\n{digest}Connection: close\r\nContent-Length: {}\r\n\r\n{body}",
+          body.len()
+        );
+        socket
+          .get_mut()
+          .write_all(response.as_bytes())
+          .await
+          .unwrap();
+      }
+    });
+    let policy: PullPolicy = serde_json::from_value(serde_json::json!({
+      "mirrors": {(host.clone()): [format!("{host}/mirror")]}, "mirrors_only": false, "attempt_timeout_secs": 5,
+    })).unwrap();
+    let clients = Clients {
+      direct: reqwest::Client::builder().no_proxy().build().unwrap(),
+      proxy: None,
+    };
+    let result = resolve_one(
+      &clients,
+      &format!("{host}/app:latest"),
+      &policy,
+      "linux/arm64",
+    )
+    .await
+    .unwrap();
+    server.abort();
+    assert_eq!(
+      result,
+      (
+        "sha256:abc".into(),
+        Some("sha256:def".into()),
+        Some(vec!["linux/amd64".into()])
+      )
+    );
+  }
+
   #[test]
   fn origin_registry_is_not_a_mirror() {
     let policy: PullPolicy =
