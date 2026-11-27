@@ -5,6 +5,7 @@ use serde_json::json;
 use wharf_api_types::view::AlertSuppressionRequest;
 
 use super::*;
+use crate::db;
 
 pub(crate) static TEST_LOCK: tokio::sync::Mutex<()> =
   tokio::sync::Mutex::const_new(());
