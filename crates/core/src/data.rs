@@ -89,6 +89,7 @@ pub fn undeclared_mounts(
         && m.source.len() == 64
         && m.source.bytes().all(|b| b.is_ascii_hexdigit());
       Some(DataMount {
+        resolved: None,
         kind,
         source: if anonymous {
           String::new()
