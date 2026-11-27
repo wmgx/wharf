@@ -143,17 +143,14 @@ impl Ops {
       before.hash.as_deref() != Some(up.hash.as_str());
     let running = before.all_running();
 
-    let mut previous = if running && compose_changed {
-      self.docker.previous(&up.project)
+    let mut warnings = Vec::new();
+    let previous = if running && compose_changed {
+      self
+        .previous_for_rollback(&up.project, ctx, &mut warnings)
+        .await?
     } else {
       None
     };
-    if let Some(prev) = &mut previous {
-      let names = self.docker.images(&up.project, ctx).await?;
-      prev.images =
-        self.docker.running_images(&up.project, &names, ctx).await?;
-    }
-    let mut warnings = Vec::new();
     let images = vec![apply.image.clone()];
     let mut activated = false;
     let result = async {

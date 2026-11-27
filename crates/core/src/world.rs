@@ -2217,6 +2217,8 @@ mod tests {
       name: "app".into(),
       spec,
       adopt: None,
+      pins: None,
+      commit: None,
     }])
     .unwrap();
     w.allocate_ports().unwrap();
@@ -2249,7 +2251,9 @@ mod tests {
       w.apply_changes(&[Change::UpsertService {
         name: "app".into(),
         spec,
-        adopt: None
+        adopt: None,
+        pins: None,
+        commit: None,
       }])
       .unwrap_err()
       .message

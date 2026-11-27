@@ -755,6 +755,37 @@ impl Ops {
     })
   }
 
+  async fn previous_for_rollback(
+    &self,
+    project: &str,
+    ctx: &Ctx,
+    warnings: &mut Vec<String>,
+  ) -> Result<Option<Previous>, ApiError> {
+    let Some(mut previous) = self.docker.previous(project) else {
+      return Ok(None);
+    };
+    let images = async {
+      let names = self.docker.images(project, ctx).await?;
+      self.docker.running_images(project, &names, ctx).await
+    }
+    .await;
+    match images {
+      Ok(images) => previous.images = images,
+      Err(error) if error.code == ErrorCode::Cancelled => {
+        return Err(error);
+      }
+      Err(error) => {
+        let warning = format!(
+          "无法记录 {project} 的旧镜像，失败时可能无法恢复原镜像：{}",
+          error.message
+        );
+        ctx.say(warning.clone());
+        warnings.push(warning);
+      }
+    }
+    Ok(Some(previous))
+  }
+
   async fn project_up(
     &self,
     up: &ProjectUp,
@@ -771,18 +802,14 @@ impl Ops {
     {
       ctx.say(format!("清理上次试跑失败：{}", e.message));
     }
+    let mut warnings = Vec::new();
     let mut previous = if up.rollback {
-      self.docker.previous(&up.project)
+      self
+        .previous_for_rollback(&up.project, ctx, &mut warnings)
+        .await?
     } else {
       None
     };
-    if let Some(prev) = &mut previous {
-      let images = self.docker.images(&up.project, ctx).await?;
-      prev.images = self
-        .docker
-        .running_images(&up.project, &images, ctx)
-        .await?;
-    }
     let had_compose =
       self.docker.read_compose(&up.project).map_err(|e| {
         ApiError::internal(format!("读取原 compose 失败：{e}"))
@@ -810,7 +837,6 @@ impl Ops {
     } else {
       BTreeMap::new()
     };
-    let mut warnings = Vec::new();
     let prepared = async {
       let images = self.pull_all(up, ctx, &mut warnings).await?;
       if up.trial.is_some() {
@@ -1299,6 +1325,51 @@ esac
       ops.restic(&request, &ctx).await.unwrap_err().code,
       ErrorCode::Cancelled
     );
+  }
+
+  #[tokio::test]
+  async fn deploy_continues_when_previous_images_cannot_be_collected()
+  {
+    let (dir, docker) = crate::docker::fake_docker(
+      r#"
+case "$1:$2:$6" in
+  compose:-p:config)
+    if grep -q BROKEN "$5"; then echo 'invalid old compose' >&2; exit 1; fi
+    echo app:1;;
+  ps:-aq:*) echo gone-container;;
+  inspect:--format:*) echo 'no such container' >&2; exit 1;;
+  ps:-a:*) echo '{"Names":"app-1","Labels":"com.docker.compose.project=app","State":"created"}';;
+  compose:-p:up) grep -q NEW "$5";;
+  pull:*|compose:-p:logs) ;;
+  image:inspect:*) echo 'new-image|[]';;
+  *) exit 2;;
+esac
+"#,
+    );
+    let ops = Ops::new(
+      docker.clone(),
+      Reporter::new(docker.clone(), None),
+      String::new(),
+      HostShell::prepare(docker.clone(), "s1".into()).await,
+      dir.path().into(),
+    );
+    let up: ProjectUp = serde_json::from_value(serde_json::json!({
+      "project":"app", "compose":"NEW", "hash":"new",
+      "rollback":true, "no_start":true,
+      "pull":{"mirrors":{},"mirrors_only":false,"attempt_timeout_secs":1}
+    })).unwrap();
+    for (old, failure) in [
+      ("BROKEN", "invalid old compose"),
+      ("OLD", "no such container"),
+    ] {
+      docker.write_compose("app", old).unwrap();
+      docker.write_hash("app", "old").unwrap();
+      let result =
+        ops.project_up(&up, &Ctx::detached()).await.unwrap();
+      assert!(result.warnings.iter().any(|w| w.contains(failure)));
+      let current = docker.previous("app").unwrap();
+      assert_eq!((&*current.compose, &*current.hash), ("NEW", "new"));
+    }
   }
 
   #[tokio::test]

@@ -828,6 +828,7 @@ pub(crate) async fn make_plan_inner(
       (matches!(row.spec.source, Source::Compose { .. })
         && row.import.is_none()
         && crate::apply::can_rollback_service(&row.spec)
+        && state.hub.is_online(&row.spec.server)
         && !state.hub.supports_safe_rollback(&row.spec.server))
       .then_some(row.spec.server.as_str())
     })
@@ -1115,7 +1116,9 @@ fn config_items(
           && let Some(commit) = &new.commit
         {
           format!("切换代码版本到 {}", crate::pins::short(commit))
-        } else if !old.pins.is_empty() && old.pins != new.pins {
+        } else if old.pins != new.pins
+          && (b.explicit_pins.contains(name) || !old.pins.is_empty())
+        {
           "切换固定镜像版本".into()
         } else if let Some(digest) = new.pins.values().next() {
           format!(
@@ -2691,8 +2694,9 @@ fn gateway_items(
     };
     if let Some((action, mut risk, reason)) = decision {
       if gw.spec.kind == GatewayKind::Caddy
-        && (action == Action::Create
-          || risk.contains(&Impact::Restart))
+        && online
+        && action == Action::Update
+        && risk.contains(&Impact::Restart)
         && !hub.supports_safe_rollback(server)
       {
         let warning = crate::apply::safe_rollback_warning(server);
@@ -3200,6 +3204,139 @@ fn plaintext_hop(
 
 #[cfg(test)]
 mod tests {
+  #[tokio::test]
+  async fn rollback_warning_skips_offline_server_and_new_gateway() {
+    use wharf_api_types::spec::Change;
+
+    let state = crate::rules::tests::test_state();
+    let mut world = world();
+    let gateway = Change::UpsertGateway {
+      name: "edge".into(),
+      spec: serde_json::from_value(
+        json!({"kind":"caddy","server":"s1","tls":"off"}),
+      )
+      .unwrap(),
+    };
+    let spec = serde_json::from_value(json!({
+      "server": "s1",
+      "source": {"compose": {"content": format!(
+        "services: {{app: {{image: 'app@sha256:{}'}}}}", "a".repeat(64)
+      )}}
+    }))
+    .unwrap();
+    let service = Change::UpsertService {
+      name: "app".into(),
+      spec,
+      adopt: None,
+      pins: None,
+      commit: None,
+    };
+    let warning = crate::apply::safe_rollback_warning("s1");
+    let planned = make_plan_inner(
+      &state,
+      PlanRequest {
+        changes: vec![service, gateway.clone()],
+        ..Default::default()
+      },
+      Snapshot {
+        world: world.clone(),
+        ..Default::default()
+      },
+      false,
+      true,
+    )
+    .await
+    .unwrap();
+    assert!(
+      planned
+        .steps
+        .iter()
+        .any(|s| matches!(s.step, Step::ServiceUp { .. }))
+    );
+    assert!(
+      planned
+        .steps
+        .iter()
+        .any(|s| matches!(s.step, Step::GatewaySync { .. }))
+    );
+    assert!(!planned.plan.warnings.contains(&warning));
+
+    world.services.clear();
+    state.hub.mock_agent("s1", false, |op| match op {
+      wharf_api_types::agent::AgentOp::ProjectStatus { .. } => {
+        Ok(json!([]))
+      }
+      _ => panic!("意外的 agent 请求"),
+    });
+    let planned = make_plan_inner(
+      &state,
+      PlanRequest {
+        changes: vec![gateway],
+        ..Default::default()
+      },
+      Snapshot {
+        world,
+        ..Default::default()
+      },
+      false,
+      true,
+    )
+    .await
+    .unwrap();
+    assert!(planned.plan.items.iter().any(|i| i.layer
+      == Layer::Gateway
+      && i.action == Action::Create));
+    assert!(!planned.plan.warnings.contains(&warning));
+  }
+
+  #[test]
+  fn explicit_rollback_from_empty_pins_reports_version_switch() {
+    let current = world();
+    let mut desired = current.clone();
+    desired
+      .services
+      .get_mut("app")
+      .unwrap()
+      .pins
+      .insert("nginx:1".into(), format!("sha256:{}", "a".repeat(64)));
+    let writes = desired.writes_from(&current);
+    let hash = hash_of(&current);
+    let mut b = Builder {
+      explicit_pins: BTreeSet::from(["app".into()]),
+      ..Default::default()
+    };
+    config_items(&mut b, &current, &desired, &writes);
+    service_items(
+      &mut b,
+      &Snapshot {
+        world: current.clone(),
+        applied: BTreeMap::from([(
+          "app".into(),
+          serde_json::from_value(json!({
+            "hash": hash, "at": "2026-11-28T00:00:00Z",
+            "image": "nginx:1", "image_id": "old-image"
+          }))
+          .unwrap(),
+        )]),
+        ..Default::default()
+      },
+      &current,
+      &desired,
+      &Net::default(),
+      &live(Some(hash), vec![container("running")]),
+      &writes,
+    )
+    .unwrap();
+    assert!(
+      b.steps
+        .iter()
+        .any(|s| matches!(s.step, Step::ServiceUp { .. }))
+    );
+    let config =
+      b.items.iter().find(|i| i.layer == Layer::Config).unwrap();
+    assert_eq!(config.reason, "切换固定镜像版本");
+  }
+
   #[tokio::test]
   async fn plan_stops_and_updates_monitoring_with_legacy_jsonc() {
     let state = crate::rules::tests::test_state();
