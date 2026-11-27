@@ -117,7 +117,7 @@ impl OpLocks {
 
   pub(crate) fn suppress_alert(
     &self,
-    services: &[&str],
+    service: &str,
     rule: &str,
     subject: &str,
     healthy: bool,
@@ -128,7 +128,7 @@ impl OpLocks {
       .lock()
       .unwrap_or_else(|p| p.into_inner())
       .silence
-      .suppress(services, rule, subject, healthy, now)
+      .suppress(service, rule, subject, healthy, now)
   }
 
   pub fn is_service_busy(&self, service: &str) -> bool {

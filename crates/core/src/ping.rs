@@ -88,10 +88,10 @@ async fn record(
   let recorded =
     tasks::record_ping(state, name, token, status, trigger, output)
       .await?;
-  if recorded {
-    tasks::notify_result(state, name, status, output).await;
+  if let Some(id) = recorded {
+    tasks::notify_result(state, name, id, status, output).await;
   }
-  Ok(recorded)
+  Ok(recorded.is_some())
 }
 
 /// `GET/POST /ping/{token}`：报到成功。请求体（可选）记为输出。
@@ -163,10 +163,11 @@ mod tests {
   #[tokio::test]
   async fn disabled_task_ping_keeps_runs_and_notifications_untouched()
   {
-    let state = crate::rules::test_state();
+    let state = crate::rules::tests::test_state();
+    let token = crate::auth::new_token();
     let fixture = serde_json::json!({
       "server": "s1", "kind": "ping", "enabled": false,
-      "schedule": "0 4 * * *", "token": "fixture"
+      "schedule": "0 4 * * *", "token": token
     })
     .to_string();
     state.db.call(move |c| {
@@ -174,22 +175,23 @@ mod tests {
       Ok(())
     }).await.unwrap();
     assert_eq!(
-      handle(&state, "fixture", TaskStatus::Failed, String::new())
+      handle(&state, &token, TaskStatus::Failed, String::new())
         .await
         .0,
       StatusCode::FORBIDDEN
     );
     assert!(
-      !tasks::record_ping(
+      tasks::record_ping(
         &state,
         "daily",
-        "fixture",
+        &token,
         TaskStatus::Failed,
         "ping",
         ""
       )
       .await
       .unwrap()
+      .is_none()
     );
     state
       .db

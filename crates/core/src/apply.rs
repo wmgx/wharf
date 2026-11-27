@@ -471,7 +471,7 @@ pub(crate) async fn start_with_actor(
     };
     let run_id = run_id.clone();
     crate::rules::ensure_loaded(&state).await;
-    let alert_changes = state
+    state
       .db
       .call_credentials(move |c, key| {
         let tx = c.transaction().map_err(sql_err)?;
@@ -503,11 +503,12 @@ pub(crate) async fn start_with_actor(
           params![run_id, plan_id, run_status, run_body, now_ms(), actor_name, meta],
         )
         .map_err(sql_err)?;
+        alert_changes.clear_storage(&tx)?;
         tx.commit().map_err(sql_err)?;
-        Ok(alert_changes)
+        alert_changes.clear_after_commit();
+        Ok(())
       })
       .await?;
-    alert_changes.clear(&state).await;
     crate::log_redact::refresh(&state.db).await;
   }
 

@@ -963,26 +963,25 @@ async fn remove_server(
     );
   }
   let state = s.clone();
+  let db_name = name.clone();
   s.db
-    .call({
-      let name = name.clone();
-      move |c| {
-        let tx = c.transaction().map_err(sql_err)?;
-        tx.execute(
-          "DELETE FROM resources WHERE kind = ?1 AND name = ?2",
-          params![KIND_SERVER, name],
-        )
-        .map_err(sql_err)?;
-        tx.execute(
-          "DELETE FROM agents WHERE server = ?1",
-          params![name],
-        )
-        .map_err(sql_err)?;
-        crate::core_node::clear_if_server(&tx, &name)?;
-        tx.commit().map_err(sql_err)?;
-        state.hub.disconnect(&name);
-        Ok(())
-      }
+    .call(move |c| {
+      let name = db_name;
+      let tx = c.transaction().map_err(sql_err)?;
+      tx.execute(
+        "DELETE FROM resources WHERE kind = ?1 AND name = ?2",
+        params![KIND_SERVER, name],
+      )
+      .map_err(sql_err)?;
+      tx.execute(
+        "DELETE FROM agents WHERE server = ?1",
+        params![name],
+      )
+      .map_err(sql_err)?;
+      crate::core_node::clear_if_server(&tx, &name)?;
+      tx.commit().map_err(sql_err)?;
+      state.hub.disconnect(&name);
+      Ok(())
     })
     .await?;
   crate::rules::lifecycle::clear_matching(
@@ -1727,8 +1726,7 @@ async fn remove_account(
     })
     .await?;
   if removed > 0 {
-    crate::rules::lifecycle::clear(&s, "vendor_token_invalid", &name)
-      .await;
+    crate::vendor_checks::forget_cloudflare(&s, &name).await;
   }
   crate::log_redact::refresh(&s.db).await;
   Ok(Json(json!({ "removed": removed > 0 })))
