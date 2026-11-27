@@ -325,6 +325,16 @@ async fn hot_snapshot_captures_wal_and_restores_offline() {
     .call(|c| db::set_setting(c, "test", Some("after")))
     .await
     .unwrap();
+  let not_confirmed = offline(
+    path,
+    OfflineCommand::Restore {
+      id: saved.id.clone(),
+      yes: false,
+      no_pre_snapshot: false,
+    },
+  )
+  .unwrap_err();
+  assert_eq!(not_confirmed.code, ErrorCode::ConfirmRequired);
   let lock = process_lock(path, false).unwrap();
   assert_eq!(
     offline::restore(path, &saved.id, false).unwrap_err().code,

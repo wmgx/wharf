@@ -716,7 +716,6 @@ async fn stage(
   })?;
   #[cfg(unix)]
   {
-    use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::set_permissions(
       dir,
       std::fs::Permissions::from_mode(0o700),
@@ -878,6 +877,7 @@ mod tests {
     use wharf_api_types::agent::{CoreHostProbeResult, ResticRepo};
 
     let _lock = TEST_LOCK.lock().await;
+    use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let mut state = test_state();
     let inner = Arc::get_mut(&mut state).unwrap();
