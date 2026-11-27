@@ -2021,10 +2021,8 @@ async fn remove_secret(
       .map_err(sql_err)
     })
     .await?;
-  if removed > 0 {
-    if name == "TAILSCALE_OAUTH" {
-      crate::vendor_checks::forget_oauth(&s).await;
-    }
+  if removed > 0 && name == "TAILSCALE_OAUTH" {
+    crate::vendor_checks::forget_oauth(&s).await;
   }
   crate::log_redact::refresh(&s.db).await;
   Ok(Json(json!({ "removed": removed > 0 })))
