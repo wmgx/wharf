@@ -226,11 +226,32 @@ impl World {
     out
   }
 
+  fn check_edge_import_name(
+    &self,
+    name: &str,
+  ) -> Result<(), ApiError> {
+    if let Some(existing) = self.edge_apps.get(name) {
+      let target = crate::edge_sync::target(name, &existing.spec);
+      return Err(
+        ApiError::invalid(format!(
+          "边缘应用 {name} 已经纳管厂商项目 {target}"
+        ))
+        .with_hint("换一个导入名称"),
+      );
+    }
+    Ok(())
+  }
+
   /// 叠加局部修改。
   pub fn apply_changes(
     &mut self,
     changes: &[Change],
   ) -> Result<(), ApiError> {
+    for change in changes {
+      if let Change::ImportEdgeApp { name, .. } = change {
+        self.check_edge_import_name(name)?;
+      }
+    }
     for change in changes {
       match change {
         Change::UpsertBookmark { id, spec } => {
@@ -545,7 +566,11 @@ impl World {
             RouteRow { id, spec, version },
           );
         }
-        Change::UpsertEdgeApp { name, spec } => {
+        Change::UpsertEdgeApp { name, spec }
+        | Change::ImportEdgeApp { name, spec } => {
+          if matches!(change, Change::ImportEdgeApp { .. }) {
+            self.check_edge_import_name(name)?;
+          }
           validate_name("边缘应用", name)?;
           let version =
             self.edge_apps.get(name).map(|r| r.version).unwrap_or(0);
@@ -1987,6 +2012,56 @@ fn validate_lan_addrs(addrs: &[String]) -> Result<(), ApiError> {
 mod tests {
   use super::*;
   use wharf_api_types::spec::PortSpec;
+
+  #[test]
+  fn edge_import_accepts_free_name() {
+    let mut world = World::default();
+    let spec = serde_json::from_value(json!({
+      "account": "cf", "kind": "pages", "project": "demo"
+    }))
+    .unwrap();
+    world
+      .apply_changes(&[Change::ImportEdgeApp {
+        name: "new-app".into(),
+        spec,
+      }])
+      .unwrap();
+    world.validate().unwrap();
+    assert_eq!(
+      world.edge_apps["new-app"].spec.project_name("new-app"),
+      "demo"
+    );
+  }
+
+  #[test]
+  fn edge_import_rejects_existing_name() {
+    let mut world = World::default();
+    let name = "app".to_string();
+    let spec: EdgeAppSpec = serde_json::from_value(json!({
+      "account": "cf", "kind": "worker", "project": "current",
+      "domains": ["app.example.com"]
+    }))
+    .unwrap();
+    world
+      .apply_changes(&[Change::UpsertEdgeApp {
+        name: name.clone(),
+        spec: spec.clone(),
+      }])
+      .unwrap();
+    let err = world
+      .apply_changes(&[Change::ImportEdgeApp {
+        name: name.clone(),
+        spec: serde_json::from_value(json!({
+          "account": "cf", "kind": "worker", "project": "demo"
+        }))
+        .unwrap(),
+      }])
+      .unwrap_err();
+    assert_eq!(err.code, wharf_api_types::ErrorCode::InvalidInput);
+    assert!(err.message.contains("app"));
+    assert!(err.message.contains("cf/worker/current"));
+    assert_eq!(world.edge_apps[&name].spec, spec);
+  }
 
   #[test]
   fn tunnel_gateway_rejects_trusted_proxies() {

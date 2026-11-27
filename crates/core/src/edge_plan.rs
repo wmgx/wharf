@@ -352,6 +352,115 @@ pub async fn pages_record(
 mod tests {
   use super::*;
 
+  use wharf_api_types::{ErrorCode, plan::PlanRequest, spec::Change};
+
+  fn edge_app(name: &str, kind: EdgeKind) -> Change {
+    let spec = serde_json::from_value(json!({
+      "account": "cf", "kind": kind, "project": "demo"
+    }))
+    .unwrap();
+    Change::UpsertEdgeApp {
+      name: name.into(),
+      spec,
+    }
+  }
+
+  #[tokio::test]
+  async fn edge_plan_rejects_new_duplicate_owner() {
+    let state = crate::rules::tests::test_state();
+    let mut snap = Snapshot::default();
+    snap
+      .world
+      .apply_changes(&[edge_app("prod", EdgeKind::Worker)])
+      .unwrap();
+    let req = PlanRequest {
+      changes: vec![edge_app("test", EdgeKind::Worker)],
+      ..PlanRequest::default()
+    };
+    let Err(err) =
+      crate::planner::make_plan_inner(&state, req, snap, false, true)
+        .await
+    else {
+      panic!("计划接受了重复纳管");
+    };
+    assert_eq!(err.code, ErrorCode::InvalidInput);
+    assert!(
+      err.message.contains("prod") && err.message.contains("test")
+    );
+    assert!(err.hint.unwrap().contains("--project"));
+  }
+
+  #[test]
+  fn edge_owner_conflict_prefers_existing_app_in_batch() {
+    let mut current = crate::world::World::default();
+    current
+      .apply_changes(&[edge_app("prod", EdgeKind::Worker)])
+      .unwrap();
+    let mut desired = current.clone();
+    desired
+      .apply_changes(&[
+        edge_app("a", EdgeKind::Worker),
+        edge_app("b", EdgeKind::Worker),
+      ])
+      .unwrap();
+
+    let err =
+      crate::edge::validate_owners(&current, &desired).unwrap_err();
+    assert_eq!(err.code, ErrorCode::InvalidInput);
+    assert_eq!(
+      err.message,
+      "边缘应用 a 和 prod 都指向厂商项目 cf/worker/demo"
+    );
+    assert_eq!(
+      err.hint.as_deref(),
+      Some("换一个 --project，或改用已有的应用名 prod")
+    );
+  }
+
+  #[tokio::test]
+  async fn edge_plan_warns_legacy_duplicates_and_allows_other_kind() {
+    let state = crate::rules::tests::test_state();
+    let mut snap = Snapshot::default();
+    snap
+      .world
+      .apply_changes(&[
+        edge_app("prod", EdgeKind::Worker),
+        edge_app("legacy", EdgeKind::Worker),
+      ])
+      .unwrap();
+    let plan = crate::planner::make_plan_inner(
+      &state,
+      PlanRequest::default(),
+      Snapshot {
+        world: snap.world.clone(),
+        ..Snapshot::default()
+      },
+      false,
+      true,
+    )
+    .await
+    .unwrap();
+    assert!(
+      plan.writes.is_empty()
+        && plan.steps.is_empty()
+        && plan.plan.items.is_empty()
+    );
+    assert!(plan.plan.warnings.iter().any(|w| {
+      w.contains("已有 1 个厂商项目被多个边缘应用纳管")
+    }));
+
+    let req = PlanRequest {
+      changes: vec![edge_app("pages", EdgeKind::Pages)],
+      ..PlanRequest::default()
+    };
+    let plan =
+      crate::planner::make_plan_inner(&state, req, snap, false, true)
+        .await
+        .unwrap();
+    assert_eq!(plan.writes.len(), 1);
+    assert!(plan.steps.is_empty());
+  }
+
   #[tokio::test]
   async fn redeploys_after_unfinished_deploy() {
     let spec: EdgeAppSpec = serde_json::from_value(json!({
@@ -413,22 +522,4 @@ fn edge_deploy_marks_unmanaged_overwrite_and_public() {
     );
     assert_eq!((action, impacts), (expected, expected_impacts));
   }
-  let mut world = World::default();
-  let spec: EdgeAppSpec = serde_json::from_value(
-    json!({"kind":"worker","account":"cf","project":"prod-api"}),
-  )
-  .unwrap();
-  world.edge_apps.insert(
-    "existing".into(),
-    crate::world::EdgeRow {
-      spec: spec.clone(),
-      version: 1,
-    },
-  );
-  assert_eq!(
-    crate::edge::validate_app(&world, "new", &spec)
-      .unwrap_err()
-      .code,
-    wharf_api_types::ErrorCode::InvalidInput
-  );
 }

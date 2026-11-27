@@ -415,6 +415,8 @@ pub(crate) async fn make_plan_inner(
     &snap.secret_restrictions,
   )?;
   desired.validate()?;
+  let mut warnings =
+    crate::edge::validate_owners(&current, &desired)?;
   crate::secret_policy::validate_accounts(
     &desired,
     &snap.account_links,
@@ -441,7 +443,10 @@ pub(crate) async fn make_plan_inner(
         _ => false,
       })
     {
-      let mut b = Builder::default();
+      let mut b = Builder {
+        warnings,
+        ..Builder::default()
+      };
       config_items(&mut b, &current, &desired, &writes);
       return Ok(finish_plan(
         &snap,
@@ -479,7 +484,7 @@ pub(crate) async fn make_plan_inner(
     check_migrated_images,
   )
   .await?;
-  let mut warnings = resolved.warnings;
+  warnings.extend(resolved.warnings);
   for name in &refresh {
     if let Some(why) = desired
       .services

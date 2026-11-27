@@ -382,6 +382,7 @@ pub fn require_plan_request(
         Some(format!("gateway/{name}"))
       }
       Change::UpsertEdgeApp { name, .. }
+      | Change::ImportEdgeApp { name, .. }
       | Change::RemoveEdgeApp { name } => {
         Some(format!("edge/{name}"))
       }

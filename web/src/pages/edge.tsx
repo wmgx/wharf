@@ -55,7 +55,7 @@ export function EdgeList() {
   const account = params.get("edge") === "1" ? (unmanaged[0]?.account ?? null) : picked;
   if (unmanaged.length === 0) return null;
   const importOne = (p: EdgeProjectView) =>
-    actions.plan({ title: `导入 ${p.project}`, changes: [{ op: "upsert_edge_app", name: p.project, spec: { account: p.account, kind: p.kind } }] });
+    actions.plan({ title: `导入 ${p.project}`, changes: [{ op: "import_edge_app", name: p.project, spec: { account: p.account, kind: p.kind } }] });
   const byAccount = new Map<string, EdgeProjectView[]>();
   for (const p of unmanaged) byAccount.set(p.account, [...(byAccount.get(p.account) ?? []), p]);
   const list = account ? (byAccount.get(account) ?? []) : [];

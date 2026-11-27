@@ -5,7 +5,7 @@
 //! - 回滚用厂商自己的版本，不在 Wharf 里另存；
 //! - 不再纳管时不删除厂商那边的项目，只解绑 Wharf 绑定的域名。
 
-use std::time::Duration;
+use std::{collections::BTreeMap, time::Duration};
 
 use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
@@ -67,17 +67,6 @@ pub fn validate_app(
       "边缘应用 {name} 的项目名 {project} 不合法：只能用小写字母、数字和 -"
     )));
   }
-  if let Some((other, _)) =
-    world.edge_apps.iter().find(|(other, app)| {
-      other.as_str() != name
-        && app.spec.account == spec.account
-        && app.spec.kind == spec.kind
-        && app.spec.project_name(other) == project
-    })
-  {
-    return Err(ApiError::invalid(format!("边缘项目 {project}（{}）已经被边缘应用 {other} 纳管，不能重复指向", spec.kind.as_str()))
-      .with_hint("换一个项目名，或直接修改已有的边缘应用"));
-  }
   for d in &spec.domains {
     if world.routes.contains_key(d) {
       return Err(ApiError::invalid(format!(
@@ -135,6 +124,65 @@ pub fn validate_app(
     return Err(ApiError::invalid(format!("{what} 的构建命令为空")));
   }
   Ok(())
+}
+
+/// 同一目标的每个应用在原配置里就指向这里，才算存量冲突。
+pub fn validate_owners(
+  current: &World,
+  desired: &World,
+) -> Result<Vec<String>, ApiError> {
+  use crate::edge_sync::target;
+
+  let mut owners = BTreeMap::<_, Vec<_>>::new();
+  for (name, app) in &desired.edge_apps {
+    owners
+      .entry(target(name, &app.spec))
+      .or_default()
+      .push(name);
+  }
+  let mut legacy = 0;
+  for (project, names) in owners {
+    if names.len() < 2 {
+      continue;
+    }
+    let existing = |name: &str| {
+      current
+        .edge_apps
+        .get(name)
+        .is_some_and(|app| target(name, &app.spec) == project)
+    };
+    if let Some(name) =
+      names.iter().copied().find(|name| !existing(name))
+    {
+      if let Some(other) =
+        names.iter().copied().find(|name| existing(name))
+      {
+        return Err(
+          ApiError::invalid(format!(
+            "边缘应用 {name} 和 {other} 都指向厂商项目 {project}"
+          ))
+          .with_hint(format!(
+            "换一个 --project，或改用已有的应用名 {other}"
+          )),
+        );
+      }
+      return Err(
+        ApiError::invalid(format!(
+          "同一批里的 {name} 和 {} 都指向厂商项目 {project}",
+          names[1]
+        ))
+        .with_hint("换一个 --project"),
+      );
+    }
+    legacy += 1;
+  }
+  // 限定服务的令牌也能生成 plan，警告里不显示厂商和应用名。
+  let mut warnings = Vec::new();
+  if legacy != 0 {
+    warnings
+      .push(format!("已有 {legacy} 个厂商项目被多个边缘应用纳管"));
+  }
+  Ok(warnings)
 }
 
 // HELPERS
