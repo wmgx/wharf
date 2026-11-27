@@ -18,7 +18,7 @@ pub(crate) async fn seed_servers(state: &AppState) {
   }).await.unwrap();
 }
 
-async fn seed_service(
+pub(crate) async fn seed_service(
   state: &AppState,
   name: &'static str,
   enabled: bool,
@@ -579,4 +579,46 @@ async fn backup_records_ok_and_prunes_even_when_restart_fails() {
       && entry.summary.is_some()
       && pruned.load(Ordering::Relaxed)
   );
+}
+
+#[tokio::test]
+async fn unlock_service_runs_local_and_respects_backup_lock() {
+  let state = test_state();
+  seed_servers(&state).await;
+  seed_service(&state, "svc-a", false).await;
+  let legacy = seed_legacy(&state).await;
+  state.hub.mock_agent_with_backup(
+    "s2",
+    false,
+    true,
+    false,
+    move |op| {
+      let AgentOp::Restic(job) = op else {
+        panic!("需要本机仓库操作")
+      };
+      assert!(matches!(job.repo, ResticRepo::Local));
+      assert!(job.password.0 == legacy);
+      assert!(matches!(
+        job.action,
+        ResticAction::Unlock { remove_all: true }
+      ));
+      Ok(json!(null))
+    },
+  );
+  state.hub.mock_safe_backup_agent("s2");
+  let call = || {
+    unlock(
+      State(state.clone()),
+      auth(true),
+      Path("svc-a".into()),
+      None,
+    )
+  };
+  let guard = state
+    .locks
+    .acquire(crate::locks::LockSpec::Backup("svc-a".into()), "备份")
+    .unwrap();
+  assert_eq!(call().await.err().unwrap().0.code, ErrorCode::Busy);
+  drop(guard);
+  call().await.map_err(|e| e.0).unwrap();
 }

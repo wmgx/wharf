@@ -69,6 +69,8 @@ pub struct CoreBackupView {
   pub to: Option<String>,
   /// 登录密码那把钥匙是不是当前的密码。
   pub user_key_current: bool,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub repo_empty: bool,
   pub records: Vec<BackupRecord>,
   /// 控制面整个丢了时，在新机器上执行的恢复命令。
   #[serde(skip_serializing_if = "Option::is_none")]
@@ -130,8 +132,16 @@ pub async fn show(
     let user = admin.as_ref().map(|a| a.0.clone())?;
     Some(restore_command(&ip, &user))
   });
+  let history = crate::data::history(&s.db).await?;
+  let repo_empty = to.as_ref().is_some_and(|target| {
+    let last_ok = history
+      .get(&(REPO.into(), target.clone()))
+      .and_then(|h| h.ok);
+    crate::data::repo_verified_empty(&s, &snap, target, REPO, last_ok)
+  });
   Ok(Json(CoreBackupView {
     user_key_current,
+    repo_empty,
     to,
     records,
     restore_command,
@@ -618,6 +628,7 @@ pub async fn issues(db: &db::Db) -> Result<Vec<Issue>, ApiError> {
   }).await
 }
 
+#[derive(Clone)]
 struct CoreCreds {
   key: String,
   http: String,
@@ -737,55 +748,85 @@ async fn finish_backup(
       cancel,
     )
     .await?;
-    if old_owner != creds.owner {
-      ensure_core_server(state, snap, w, creds, progress, cancel)
-        .await?;
+    let owner_changed = old_owner != creds.owner;
+    let configure: Result<_, ApiError> = async {
+      if owner_changed {
+        ensure_core_server(state, snap, w, creds, progress, cancel)
+          .await?;
+      }
+      let target = w.target.clone();
+      let owner = creds.owner.clone();
+      let new_id = id.clone();
+      state
+        .db
+        .call_credentials(move |c, key| {
+          let tx = c.transaction().map_err(sql_err)?;
+          let matches = tx
+            .query_row(
+              "SELECT password_hash = ?1 FROM admin WHERE id = 1",
+              [&hash],
+              |r| r.get::<_, bool>(0),
+            )
+            .optional()
+            .map_err(sql_err)?
+            .unwrap_or(false);
+          if !matches {
+            return Err(changed());
+          }
+          let old = db::setting(&tx, USER_KEY)?;
+          db::set_setting(&tx, TO, Some(&target))?;
+          if let Some(owner) = owner {
+            key.put_secret(
+              &tx,
+              OWNER_SECRET,
+              &owner,
+              now_ms(),
+              true,
+            )?;
+          }
+          db::set_setting(&tx, REPO_SETTING, Some(REPO_VERSION))?;
+          db::set_setting(&tx, USER_KEY, Some(&new_id))?;
+          db::set_setting(&tx, KEY_FOR, Some(&hash))?;
+          db::set_setting(&tx, USER_KEY_TARGET, Some(&target))?;
+          tx.commit().map_err(sql_err)?;
+          Ok(old)
+        })
+        .await
     }
-    let target = w.target.clone();
-    let owner = creds.owner.clone();
-    let new_id = id.clone();
-    let old = state
-      .db
-      .call_credentials(move |c, key| {
-        let tx = c.transaction().map_err(sql_err)?;
-        let matches = tx
-          .query_row(
-            "SELECT password_hash = ?1 FROM admin WHERE id = 1",
-            [&hash],
-            |r| r.get::<_, bool>(0),
+    .await;
+    let old = match configure {
+      Ok(old) => old,
+      Err(error) => {
+        if owner_changed && same_target {
+          let previous = CoreCreds {
+            owner: old_owner,
+            ..creds.clone()
+          };
+          let rolled_back = ensure_core_server(
+            state,
+            snap,
+            w,
+            &previous,
+            progress,
+            &CancellationToken::new(),
           )
-          .optional()
-          .map_err(sql_err)?
-          .unwrap_or(false);
-        if !matches {
-          return Err(changed());
+          .await;
+          if let Err(rollback) = rolled_back {
+            return Err(error.with_hint(format!(
+              "恢复旧备份服务器配置失败：{}",
+              rollback.message
+            )));
+          }
         }
-        let old = db::setting(&tx, USER_KEY)?;
-        db::set_setting(&tx, TO, Some(&target))?;
-        if let Some(owner) = owner {
-          key.put_secret(
-            &tx,
-            OWNER_SECRET,
-            &owner,
-            now_ms(),
-            true,
-          )?;
-        }
-        db::set_setting(&tx, REPO_SETTING, Some(REPO_VERSION))?;
-        db::set_setting(&tx, USER_KEY, Some(&new_id))?;
-        db::set_setting(&tx, KEY_FOR, Some(&hash))?;
-        db::set_setting(&tx, USER_KEY_TARGET, Some(&target))?;
-        tx.commit().map_err(sql_err)?;
-        Ok(old)
-      })
-      .await?;
+        return Err(error);
+      }
+    };
     // 配置先提交，数据库写失败时旧钥匙仍可用。
     if same_target
       && let Some(old) = old
       && old != id
       && keys.iter().any(|k| !k.current && k.id == old)
-    {
-      if let Err(e) = run_repo::<serde_json::Value>(
+      && let Err(e) = run_repo::<serde_json::Value>(
         state,
         snap,
         w,
@@ -794,12 +835,11 @@ async fn finish_backup(
         ResticAction::RemoveKey { id: old },
         None,
         progress,
-        cancel,
+        &CancellationToken::new(),
       )
       .await
-      {
-        progress(format!("提醒：删除旧恢复口令失败：{}", e.message));
-      }
+    {
+      progress(format!("提醒：删除旧恢复口令失败：{}", e.message));
     }
     progress("已把登录密码设为恢复口令".into());
   } else {
@@ -1214,6 +1254,10 @@ mod tests {
               seen.push("remove");
               Ok(serde_json::Value::Null)
             }
+            ResticAction::Unlock { remove_all: true } => {
+              seen.push("unlock");
+              Ok(serde_json::Value::Null)
+            }
             ResticAction::Prune => {
               seen.push("prune");
               Ok(serde_json::Value::Null)
@@ -1241,6 +1285,15 @@ mod tests {
       *seen.lock().unwrap(),
       ["backup", "list", "add", "remove", "prune"]
     );
+    unlock(
+      State(state.clone()),
+      crate::security_receipt::tests::auth(true),
+      None,
+    )
+    .await
+    .map_err(|e| e.0)
+    .unwrap();
+    assert_eq!(seen.lock().unwrap().last(), Some(&"unlock"));
     require_recovery_ready(&state).await.unwrap();
   }
 

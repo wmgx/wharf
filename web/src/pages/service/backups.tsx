@@ -58,7 +58,7 @@ export function Backups({ svc }: { svc: ServiceView }) {
 
   if (!hasData) return <Empty>没有数据卷</Empty>;
 
-  const last = data?.records[0];
+  const last = data?.records.find((record) => record.target === target);
   const uncovered = svc.data?.filter((m) => m.kind !== "managed") ?? [];
   return (
     <div className="grid gap-3">

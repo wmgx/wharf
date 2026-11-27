@@ -23,6 +23,7 @@ pub enum LockSpec {
   Backup(String),
   CoreBackup,
   CoreMaintenance,
+  BackupTarget(String),
   Cleanup(String),
 }
 
@@ -45,6 +46,7 @@ impl LockSpec {
       (CoreBackup, CoreBackup | CoreMaintenance)
       | (CoreMaintenance, CoreBackup) => true,
       (Backup(_), Backup(_)) => true,
+      (BackupTarget(a), BackupTarget(b)) => a == b,
       (
         Apply {
           block_backups: true,

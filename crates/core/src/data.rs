@@ -566,3 +566,38 @@ fn escaped_mount_downgrades_status_to_uncovered() {
     DataStatus::Uncovered
   );
 }
+
+#[tokio::test]
+async fn switching_backup_target_and_empty_repo_show_stale() {
+  let state = crate::rules::tests::test_state();
+  crate::backup::tests::seed_servers(&state).await;
+  crate::backup::tests::seed_service(&state, "svc-a", true).await;
+  state
+    .hub
+    .mock_agent("s2", false, |_| panic!("数据状态只读"));
+  state.db.call(|c| {
+    let seen = crate::db::now_ms();
+    c.execute("INSERT INTO backups (service, server, target, run_id, ok, body, created_at)
+      VALUES ('svc-a', 's1', 's2', 'r1', 1, '{}', ?1)", [seen - 180_000]).map_err(sql_err)?;
+    let report = serde_json::to_string(&wharf_api_types::agent::AgentReport {
+      backup_repos: Some(BTreeMap::new()), ..Default::default()
+    }).map_err(crate::db::json_err)?;
+    c.execute("INSERT INTO agents (server, report, last_seen) VALUES ('s2', ?1, ?2)",
+      rusqlite::params![report, seen]).map_err(sql_err)?;
+    Ok(())
+  }).await.unwrap();
+  let view = overview(&state).await.unwrap();
+  assert!(view.services[0].repo_empty);
+  assert_eq!(view.services[0].status, DataStatus::Stale);
+  state.db.call(|c| {
+    c.execute("UPDATE resources SET spec = json_set(spec, '$.backup.to', 's3')
+      WHERE kind = 'service' AND name = 'svc-a'", []).map_err(sql_err)?;
+    Ok(())
+  }).await.unwrap();
+  let view = overview(&state).await.unwrap();
+  assert_eq!(view.services[0].status, DataStatus::Stale);
+  assert!(
+    view.services[0].last_ok.is_none()
+      && !view.services[0].repo_empty
+  );
+}

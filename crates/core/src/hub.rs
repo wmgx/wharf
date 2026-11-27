@@ -541,6 +541,22 @@ impl Hub {
     {
       job.force = true;
     }
+    let cancel_grace = match &op {
+      AgentOp::ServiceStopForData { .. } => {
+        Some(Duration::from_secs(250))
+      }
+      AgentOp::Restic(job)
+        if matches!(
+          job.action,
+          wharf_api_types::agent::ResticAction::Backup { .. }
+            | wharf_api_types::agent::ResticAction::Restore { .. }
+            | wharf_api_types::agent::ResticAction::Prune
+        ) =>
+      {
+        Some(Duration::from_secs(45))
+      }
+      _ => None,
+    };
     let needs_safe_backup = match &op {
       AgentOp::ServiceStopForData { .. }
       | AgentOp::PruneRestore { .. } => true,
@@ -681,7 +697,7 @@ impl Hub {
         "agent 版本旧，升级后能看到原因（wharf upgrade）",
       ));
     }
-    let (done, rx) = oneshot::channel();
+    let (done, mut rx) = oneshot::channel();
     lock(&conn.pending).insert(id, Pending { done, progress });
     let _in_flight = InFlight { conn: &conn, id };
     let activating_key = matches!(
@@ -719,16 +735,27 @@ impl Hub {
       ApiError::new(code, message)
     };
     let result = tokio::select! {
-      result = rx => result.unwrap_or_else(|_| Err(offline(server))),
+      result = &mut rx => result.unwrap_or_else(|_| Err(offline(server))),
       _ = conn.closed.cancelled() => Err(offline(server)),
-      _ = tokio::time::sleep(timeout + GRACE) => Err(abort(
+      _ = tokio::time::sleep(timeout + cancel_grace.unwrap_or(GRACE)) => Err(abort(
         ErrorCode::Timeout,
         format!("服务器 {server} 超过 {} 秒没有响应", timeout.as_secs()),
       )),
-      _ = cancel.cancelled() => Err(abort(
-        ErrorCode::Cancelled,
-        "已取消".to_string(),
-      )),
+      _ = cancel.cancelled() => {
+        if let Some(grace) = cancel_grace {
+          // 数据操作先等 agent 收尾。停服已成功时仍需返回原容器列表。
+          if conn.tx.try_send(CoreMsg::Cancel { id }).is_err() {
+            conn.closed.cancel();
+          }
+          tokio::select! {
+            result = &mut rx => result.unwrap_or_else(|_| Err(offline(server))),
+            _ = conn.closed.cancelled() => Err(offline(server)),
+            _ = tokio::time::sleep(grace) => Err(abort(ErrorCode::Timeout, "未收到 agent 数据操作收尾确认".into())),
+          }
+        } else {
+          Err(abort(ErrorCode::Cancelled, "已取消".into()))
+        }
+      },
     };
     let value = result.map_err(|e| {
       // 请求已发出，断线不能证明 agent 没有切换密钥。

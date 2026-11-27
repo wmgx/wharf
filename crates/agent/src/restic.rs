@@ -913,27 +913,27 @@ pub async fn cleanup_containers(docker: &Docker) {
   }
 }
 
-fn restore_dir_entries(
+fn restore_parents(
   srv: &Path,
-) -> Result<Vec<(PathBuf, wharf_api_types::agent::FileEntry)>, ApiError>
-{
-  let parent = srv.join(".wharf-restore");
+) -> Result<Vec<(PathBuf, DirFd)>, ApiError> {
   let root = DirFd::open_dir(srv).map_err(|e| dir_error(srv, e))?;
-  let dir = match root.open_subdir(c".wharf-restore") {
-    Ok(d) => d,
-    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-      return Ok(Vec::new());
+  let mut parents = Vec::new();
+  match root.open_subdir(c".wharf-restore") {
+    Ok(dir) => parents.push((srv.join(".wharf-restore"), dir)),
+    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+    Err(e) => return Err(dir_error(&srv.join(".wharf-restore"), e)),
+  }
+  for entry in root.read_entries(srv)? {
+    if entry.dir
+      && !entry.link
+      && validate_name("服务", &entry.name).is_ok()
+      && let Ok(name) = component(entry.name.as_ref())
+      && let Ok(dir) = root.open_subdir(&name)
+    {
+      parents.push((srv.join(&entry.name), dir));
     }
-    Err(e) => return Err(dir_error(&parent, e)),
-  };
-  Ok(
-    dir
-      .read_entries(&parent)?
-      .into_iter()
-      .filter(|e| e.dir && !e.link)
-      .map(|e| (parent.join(&e.name), e))
-      .collect(),
-  )
+  }
+  Ok(parents)
 }
 
 fn restore_dir_name(name: &str) -> Option<&str> {
@@ -958,38 +958,70 @@ fn restore_dir_name(name: &str) -> Option<&str> {
   Some(service)
 }
 
-fn remove_restore_dir(
-  path: &Path,
+fn restore_entry(
+  parent: &Path,
+  fd: &DirFd,
+  entry: &wharf_api_types::agent::FileEntry,
   mountinfo: &str,
-) -> Result<(), ApiError> {
-  if mountinfo
-    .lines()
-    .filter_map(|line| line.split_whitespace().nth(4))
-    .any(|mount| Path::new(mount).starts_with(path))
+) -> Result<PathBuf, ApiError> {
+  let path = parent.join(&entry.name);
+  let name = component(entry.name.as_ref()).map_err(io_err(&path))?;
+  let current = fd.lstat(&name).map_err(io_err(&path))?;
+  let parent_stat = fd.stat_self().map_err(io_err(parent))?;
+  if current.st_mode & libc::S_IFMT != libc::S_IFDIR
+    || current.st_dev != parent_stat.st_dev
+    || mountinfo
+      .lines()
+      .filter_map(|line| line.split_whitespace().nth(4))
+      .any(|mount| Path::new(mount).starts_with(&path))
   {
     return Err(ApiError::new(
       ErrorCode::Conflict,
-      format!("{} 含有挂载，跳过清理", path.display()),
+      format!("{} 不是可安全清理的普通目录", path.display()),
     ));
   }
-  std::fs::remove_dir_all(path).map_err(io_err(path))
+  Ok(fd.fd_path().join(&entry.name))
 }
 
 pub fn cleanup_stale_restore_work(srv: &Path) {
-  let Ok(entries) = restore_dir_entries(srv) else {
+  let Ok(parents) = restore_parents(srv) else {
     return;
   };
   let Ok(mountinfo) = std::fs::read_to_string("/proc/self/mountinfo")
   else {
     return;
   };
-  for (path, entry) in entries {
-    // 服务名可能含 -before，任何疑似保留目录都留给显式清理。
-    if restore_dir_name(&entry.name).is_some()
-      && !entry.name.contains("-before-")
-      && let Err(e) = remove_restore_dir(&path, &mountinfo)
+  for (parent, fd) in parents {
+    let Ok(entries) = fd.read_entries(&parent) else {
+      continue;
+    };
+    let central = parent
+      .file_name()
+      .is_some_and(|name| name == ".wharf-restore");
+    for entry in
+      entries.into_iter().filter(|entry| entry.dir && !entry.link)
     {
-      tracing::warn!("{}", e.message);
+      // 服务可能叫 foo-before，疑似留底只交给显式清理。
+      let work = if central {
+        restore_dir_name(&entry.name).is_some()
+          && !entry.name.contains("-before-")
+      } else {
+        entry.name.strip_prefix(".wharf-restore-work-").is_some_and(
+          |suffix| {
+            restore_dir_name(&format!("s1-{suffix}")).is_some()
+          },
+        )
+      };
+      if work {
+        let deleted = restore_entry(&parent, &fd, &entry, &mountinfo)
+          .and_then(|path| {
+            std::fs::remove_dir_all(path)
+              .map_err(io_err(&parent.join(&entry.name)))
+          });
+        if let Err(e) = deleted {
+          tracing::warn!("{}", e.message);
+        }
+      }
     }
   }
 }
@@ -1007,18 +1039,44 @@ pub fn prune_restore_kept(
   };
   let mountinfo = std::fs::read_to_string("/proc/self/mountinfo")
     .map_err(io_err(Path::new("/proc/self/mountinfo")))?;
-  for (path, entry) in restore_dir_entries(srv)? {
-    if ctx.cancel.is_cancelled() {
-      return Err(ApiError::new(ErrorCode::Cancelled, "已取消"));
-    }
-    if restore_dir_name(&entry.name)
-      .is_some_and(|p| p.ends_with("-before"))
-      && (older_than_days == 0 || entry.modified < cutoff)
+  for (parent, fd) in restore_parents(srv)? {
+    let central = parent
+      .file_name()
+      .is_some_and(|name| name == ".wharf-restore");
+    for entry in fd
+      .read_entries(&parent)?
+      .into_iter()
+      .filter(|entry| entry.dir && !entry.link)
     {
-      let bytes = restore_bytes(&path, ctx).map_err(io_err(&path))?;
-      remove_restore_dir(&path, &mountinfo)?;
-      result.removed += 1;
-      result.bytes = result.bytes.saturating_add(bytes);
+      if ctx.cancel.is_cancelled() {
+        return Err(ApiError::new(ErrorCode::Cancelled, "已取消"));
+      }
+      let kept = if central {
+        restore_dir_name(&entry.name).is_some_and(|prefix| {
+          prefix.strip_suffix("-before").is_some_and(|service| {
+            validate_name("服务", service).is_ok()
+          })
+        })
+      } else {
+        entry
+          .name
+          .strip_prefix(".wharf-restore-before-")
+          .is_some_and(|suffix| {
+            restore_dir_name(&format!("s1-{suffix}")).is_some()
+          })
+      };
+      if kept && (older_than_days == 0 || entry.modified < cutoff) {
+        let path = restore_entry(&parent, &fd, &entry, &mountinfo)?;
+        let display = parent.join(&entry.name);
+        let bytes =
+          restore_bytes(&path, ctx).map_err(io_err(&display))?;
+        if ctx.cancel.is_cancelled() {
+          return Err(ApiError::new(ErrorCode::Cancelled, "已取消"));
+        }
+        std::fs::remove_dir_all(path).map_err(io_err(&display))?;
+        result.removed += 1;
+        result.bytes = result.bytes.saturating_add(bytes);
+      }
     }
   }
   Ok(result)

@@ -500,3 +500,75 @@ fn scheduler_uses_target_and_empty_repo_state() {
   assert!(!due(Some(&failed), true, now));
   assert!(due(Some(&failed), true, now + RETRY_AFTER_MS));
 }
+
+#[tokio::test]
+async fn failed_core_backup_does_not_starve_service_backups() {
+  let state = crate::rules::tests::test_state();
+  crate::backup::tests::seed_servers(&state).await;
+  crate::backup::tests::seed_service(&state, "svc-a", true).await;
+  state
+    .db
+    .call(|c| {
+      crate::db::set_setting(c, crate::core_backup::TO, Some("s2"))
+    })
+    .await
+    .unwrap();
+  backups(&state).await.unwrap();
+  tokio::time::timeout(Duration::from_secs(2), async {
+    loop {
+      let history = crate::data::history(&state.db).await.unwrap();
+      if history.len() == 2 {
+        break;
+      }
+      tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+  })
+  .await
+  .unwrap();
+  let history = crate::data::history(&state.db).await.unwrap();
+  assert!(history.values().all(|record| !due(
+    Some(record),
+    true,
+    now_ms()
+  )));
+}
+
+#[tokio::test]
+async fn scheduler_picks_oldest_backup_first() {
+  let state = crate::rules::tests::test_state();
+  crate::backup::tests::seed_servers(&state).await;
+  for service in ["svc-a", "svc-m", "svc-z"] {
+    crate::backup::tests::seed_service(&state, service, true).await;
+  }
+  state.db.call(|c| {
+    let at = now_ms() - BACKUP_EVERY_MS;
+    for (name, age) in [("svc-a", 3600_000), ("svc-m", 16 * 3600_000)] {
+      c.execute("INSERT INTO backups (service, server, target, run_id, ok, body, created_at)
+        VALUES (?1, 's1', 's2', 'r1', 1, '{}', ?2)", params![name, at - age]).map_err(sql_err)?;
+    }
+    Ok(())
+  }).await.unwrap();
+  for expected in ["svc-z", "svc-m", "svc-a"] {
+    backups(&state).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+      loop {
+        let rows =
+          crate::backup::records(&state, expected, 1).await.unwrap();
+        if rows.first().is_some_and(|row| !row.ok)
+          && state
+            .locks
+            .acquire(
+              crate::locks::LockSpec::Backup(expected.into()),
+              "测试",
+            )
+            .is_ok()
+        {
+          break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+      }
+    })
+    .await
+    .unwrap();
+  }
+}

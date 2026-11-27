@@ -641,15 +641,18 @@ mod link;
 pub use link::rotate_link;
 
 pub fn core_backup(v: &serde_json::Value) {
-  let Some(to) = v["to"].as_str() else {
+  if let Some(to) = v["to"].as_str() {
+    println!("控制面每天备份到 {to}");
+    if v["repo_empty"].as_bool() == Some(true) {
+      println!("目标仓库无快照");
+    }
+    if !v["user_key_current"].as_bool().unwrap_or(false) {
+      println!(
+        "恢复口令尚未设置或登录密码已变更：wharf backup core --to {to} 重新输入一次"
+      );
+    }
+  } else {
     println!("控制面备份没有开启：wharf backup core --to <server>");
-    return;
-  };
-  println!("控制面每天备份到 {to}");
-  if !v["user_key_current"].as_bool().unwrap_or(false) {
-    println!(
-      "恢复口令尚未设置或登录密码已变更：wharf backup core --to {to} 重新输入一次"
-    );
   }
   for r in v["records"].as_array().into_iter().flatten().take(5) {
     let at = r["created_at"].as_str().unwrap_or("-");
@@ -658,7 +661,8 @@ pub fn core_backup(v: &serde_json::Value) {
     } else {
       format!("失败  {}", r["error"].as_str().unwrap_or(""))
     };
-    println!("  {at}  {detail}");
+    let target = r["target"].as_str().unwrap_or("-");
+    println!("  {at}  {target}  {detail}");
   }
   if let Some(cmd) = v["restore_command"].as_str() {
     println!(

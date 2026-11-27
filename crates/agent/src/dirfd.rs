@@ -46,6 +46,10 @@ pub(crate) fn stat(fd: libc::c_int) -> io::Result<libc::stat> {
 }
 
 impl DirFd {
+  pub(crate) fn fd_path(&self) -> PathBuf {
+    Path::new("/proc/self/fd").join(self.0.as_raw_fd().to_string())
+  }
+
   pub(crate) fn open_service_root(
     base: &Path,
     service: &str,

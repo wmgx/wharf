@@ -486,7 +486,6 @@ async fn stop(
     return Err(ApiError::new(ErrorCode::Cancelled, "已取消"));
   }
   progress(format!("停止 {} 上的 {service}", w.server));
-  // 等到 agent 返回停服结果，取消传输时仍能知道需要启动哪些容器。
   state
     .hub
     .call(
@@ -496,7 +495,7 @@ async fn stop(
       },
       STOP_TIMEOUT,
       Some(progress.clone()),
-      &CancellationToken::new(),
+      cancel,
     )
     .await
 }
@@ -628,6 +627,11 @@ pub async fn backup(
 ) -> Result<(), ApiError> {
   let snap = snapshot::load(&state.db).await?;
   let w = location(&snap, service, service_target(&snap, service)?);
+  let target_guard = state.locks.acquire(
+    crate::locks::LockSpec::BackupTarget(w.target.clone()),
+    "使用业务备份服务器",
+  )?;
+  target_guard.set_run(run_id);
   let mut started = Ok(());
   let result: Result<_, ApiError> = async {
     check_location(state, &snap, &w, service).await?;
@@ -773,6 +777,10 @@ pub async fn restore(
     .await?
     .ok_or_else(|| missing_target(service))?;
   let w = location(&snap, service, target);
+  let _target_guard = state.locks.acquire(
+    crate::locks::LockSpec::BackupTarget(w.target.clone()),
+    "使用业务备份服务器",
+  )?;
   check_location(state, &snap, &w, service).await?;
   let creds = ensure_service_creds(state, service).await?;
   ensure_server(state, &snap, &w, Some(service), &progress, cancel)
@@ -964,11 +972,16 @@ pub async fn list(
 ) -> ApiResult<BackupsView> {
   auth.require(Perm::Read)?;
   let snap = snapshot::load(&s.db).await?;
-  let target = resolve_target(&s, &snap, &name, None).await?;
+  let repo_target = resolve_target(&s, &snap, &name, None).await?;
+  let target = snap.world.services[&name]
+    .spec
+    .backup
+    .as_ref()
+    .map(|backup| backup.to.clone());
   let records = records(&s, &name, 20).await?;
   let mut snapshots = vec![];
   let mut snapshots_error = None;
-  if let Some(target) = target.as_ref() {
+  if let Some(target) = repo_target.as_ref() {
     let (key, legacy) = repository_secrets(&s, &name).await?;
     let cancel = CancellationToken::new();
     let _cancel = cancel.clone().drop_guard();
