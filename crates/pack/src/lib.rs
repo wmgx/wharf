@@ -17,6 +17,33 @@ use wharf_api_types::ApiError;
 mod archive;
 pub use archive::{unpack_validated, validate_archive};
 
+/// 流式压缩，完整写入后才替换目标。
+pub fn gzip_file(src: &Path, dst: &Path) -> std::io::Result<()> {
+  use std::{
+    fs::{self, File, OpenOptions},
+    os::unix::fs::OpenOptionsExt,
+  };
+  let mut input = File::open(src)?;
+  let tmp = dst.with_extension("gz.tmp");
+  let result = (|| {
+    let output = OpenOptions::new()
+      .write(true)
+      .create(true)
+      .truncate(true)
+      .mode(0o600)
+      .open(&tmp)?;
+    let mut gzip =
+      flate2::write::GzEncoder::new(output, Compression::fast());
+    std::io::copy(&mut input, &mut gzip)?;
+    gzip.finish()?.sync_all()?;
+    fs::rename(&tmp, dst)
+  })();
+  if result.is_err() {
+    let _ = fs::remove_file(&tmp);
+  }
+  result
+}
+
 /// 和控制面接收上传的上限一致。
 pub const MAX_ARCHIVE: usize = 512 * 1024 * 1024;
 

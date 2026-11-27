@@ -107,63 +107,218 @@ fn cut(line: &str, max: usize) -> String {
 }
 
 pub fn search(raw: &str, o: &Options) -> Found {
-  let grep = o.grep.map(str::to_lowercase);
-  let mut scanned = 0;
-  let hits: Vec<&str> = raw
-    .lines()
-    .inspect(|_| scanned += 1)
-    .filter(|l| !l.trim().is_empty())
-    .filter(|l| {
-      grep.as_ref().is_none_or(|g| l.to_lowercase().contains(g))
-    })
-    .filter(|l| !o.errors || is_error(l))
-    .collect();
-  let matched = hits.len();
-  if !o.errors {
-    let start = hits.len().saturating_sub(o.limit);
-    let logs = hits[start..]
-      .iter()
-      .map(|l| cut(l, o.max_line))
-      .collect::<Vec<_>>()
-      .join("\n");
-    return Found {
-      scanned,
-      matched,
-      logs: Some(if logs.is_empty() { logs } else { logs + "\n" }),
-      groups: None,
-    };
+  let mut search = RunSearch::new(o, usize::MAX, true);
+  for line in raw.lines() {
+    search.push(line);
   }
-  let mut groups: Vec<(String, Group)> = Vec::new();
-  for l in hits {
-    let (container, ts, msg) = split(l);
-    let key = shape(container, msg);
-    match groups.iter_mut().find(|(k, _)| *k == key) {
-      Some((_, g)) => {
-        g.count += 1;
-        g.last = ts.map(str::to_string);
-        g.line = cut(l, o.max_line);
-      }
-      None => groups.push((
-        key,
-        Group {
-          count: 1,
-          first: ts.map(str::to_string),
-          last: ts.map(str::to_string),
-          line: cut(l, o.max_line),
-        },
-      )),
+  search.finish(&[]).0
+}
+
+pub(crate) struct RunSearch {
+  grep: Option<String>,
+  errors: bool,
+  filter_blank: bool,
+  max_line: usize,
+  limit: usize,
+  budget: usize,
+  bytes: usize,
+  scanned: usize,
+  matched: usize,
+  truncated: bool,
+  lines: std::collections::VecDeque<(usize, String, usize)>,
+  groups: std::collections::HashMap<String, (usize, Group)>,
+}
+
+impl RunSearch {
+  pub(crate) fn new(
+    o: &Options<'_>,
+    budget: usize,
+    filter_blank: bool,
+  ) -> Self {
+    Self {
+      grep: o.grep.map(str::to_lowercase),
+      errors: o.errors,
+      filter_blank,
+      max_line: o.max_line,
+      limit: o.limit,
+      budget,
+      bytes: 0,
+      scanned: 0,
+      matched: 0,
+      truncated: false,
+      lines: Default::default(),
+      groups: Default::default(),
     }
   }
-  let mut groups: Vec<Group> =
-    groups.into_iter().map(|(_, g)| g).collect();
-  groups.sort_by_key(|g| std::cmp::Reverse(g.count));
-  groups.truncate(o.limit);
-  Found {
-    scanned,
-    matched,
-    logs: None,
-    groups: Some(groups),
+
+  pub(crate) fn scanned(&self) -> usize {
+    self.scanned
   }
+
+  pub(crate) fn push(&mut self, line: &str) {
+    self.scanned += 1;
+    if self.filter_blank && line.trim().is_empty()
+      || self
+        .grep
+        .as_ref()
+        .is_some_and(|grep| !line.to_lowercase().contains(grep))
+      || self.errors && !is_error(line)
+    {
+      return;
+    }
+    self.matched += 1;
+    let cut = cut(line, self.max_line);
+    if self.errors {
+      let (container, ts, msg) = split(line);
+      let key = shape(container, msg);
+      let (line, clipped) = fits(cut, self.budget / 2);
+      self.truncated |= clipped;
+      if let Some((_, group)) = self.groups.get_mut(&key) {
+        let bytes = self.bytes - group.line.len() + line.len();
+        group.count += 1;
+        group.last = ts.map(str::to_string);
+        if bytes <= self.budget.saturating_mul(4) {
+          self.bytes = bytes;
+          group.line = line;
+        } else {
+          self.truncated = true;
+        }
+      } else {
+        let bytes = key.len() + line.len() + 128;
+        if self.bytes.saturating_add(bytes)
+          > self.budget.saturating_mul(4)
+        {
+          self.truncated = true;
+          return;
+        }
+        self.bytes += bytes;
+        self.groups.insert(
+          key,
+          (
+            self.matched,
+            Group {
+              count: 1,
+              first: ts.map(str::to_string),
+              last: ts.map(str::to_string),
+              line,
+            },
+          ),
+        );
+      }
+    } else if self.limit > 0 {
+      let (line, clipped) = fits(cut, self.budget.saturating_sub(2));
+      let bytes = encoded_len(&line).saturating_add(2);
+      if self.lines.len() == self.limit
+        && let Some((_, _, old)) = self.lines.pop_front()
+      {
+        self.bytes -= old;
+      }
+      while self.bytes.saturating_add(bytes) > self.budget {
+        let Some((_, _, removed)) = self.lines.pop_front() else {
+          break;
+        };
+        self.bytes -= removed;
+        self.truncated = true;
+      }
+      self.truncated |= clipped;
+      self.bytes += bytes;
+      self.lines.push_back((self.scanned, line, bytes));
+    }
+  }
+
+  pub(crate) fn finish(
+    self,
+    headers: &[(usize, String)],
+  ) -> (Found, bool) {
+    let mut truncated = self.truncated;
+    let (logs, groups) = if self.errors {
+      let mut groups: Vec<_> = self.groups.into_values().collect();
+      groups.sort_unstable_by_key(|(first, group)| {
+        (std::cmp::Reverse(group.count), *first)
+      });
+      let mut bytes = 0;
+      let groups = groups
+        .into_iter()
+        .take(self.limit)
+        .map(|(_, group)| group)
+        .take_while(|group| {
+          if self.budget == usize::MAX {
+            return true;
+          }
+          bytes += serde_json::to_vec(group)
+            .map_or(self.budget, |v| v.len())
+            + 1;
+          truncated |= bytes > self.budget;
+          bytes <= self.budget
+        })
+        .collect();
+      (None, Some(groups))
+    } else {
+      let mut text = String::new();
+      let mut header = None;
+      let mut bytes = 0;
+      for (index, line, len) in self.lines {
+        let next = headers
+          .partition_point(|(start, _)| *start < index)
+          .checked_sub(1);
+        if next != header {
+          if let Some((_, title)) = next.and_then(|i| headers.get(i))
+          {
+            let cost = encoded_len(title) + 2;
+            if bytes + cost + len <= self.budget {
+              text.push_str(title);
+              text.push('\n');
+              bytes += cost;
+            } else {
+              truncated = true;
+            }
+          }
+          header = next;
+        }
+        if bytes + len > self.budget {
+          truncated = true;
+          break;
+        }
+        text.push_str(&line);
+        text.push('\n');
+        bytes += len;
+      }
+      (Some(text), None)
+    };
+    (
+      Found {
+        scanned: self.scanned,
+        matched: self.matched,
+        logs,
+        groups,
+      },
+      truncated,
+    )
+  }
+}
+
+fn encoded_len(text: &str) -> usize {
+  text.chars().map(json_char_len).sum()
+}
+
+fn json_char_len(c: char) -> usize {
+  match c {
+    '"' | '\\' | '\n' | '\r' | '\t' | '\x08' | '\x0c' => 2,
+    '\0'..='\x1f' => 6,
+    _ => c.len_utf8(),
+  }
+}
+
+fn fits(mut text: String, budget: usize) -> (String, bool) {
+  let mut bytes = 0;
+  for (index, c) in text.char_indices() {
+    bytes += json_char_len(c);
+    if bytes > budget {
+      text.truncate(index);
+      return (text, true);
+    }
+  }
+  (text, false)
 }
 
 /// `30m`、`2h`、`3d` 或 RFC 3339 时间，换成 docker 认的写法（天换成小时）。

@@ -464,6 +464,7 @@ pub(crate) async fn deploy_server(
         trial: None,
         start_timeout_secs: None,
         readiness: None,
+        init: None,
       }),
       SERVER_TIMEOUT,
       Some(progress.clone()),

@@ -19,8 +19,8 @@ use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
   ApiError, ErrorCode,
   agent::{
-    AgentOp, GatewayApply, ProjectUp, ProjectUpResult, Retire,
-    Retired, SettleProbe, TRIAL_PROJECT_PREFIX,
+    AgentOp, GatewayApply, InitRun, ProjectUp, ProjectUpResult,
+    Retire, Retired, SettleProbe, TRIAL_PROJECT_PREFIX,
   },
   plan::{
     ApplyRequest, ApplyResponse, Layer, Plan, PlanStatus, Run,
@@ -69,6 +69,12 @@ struct ActiveRun {
 #[derive(Default)]
 pub struct Runs {
   active: Mutex<HashMap<String, ActiveRun>>,
+}
+
+impl Runs {
+  pub(crate) fn is_active(&self, id: &str) -> bool {
+    lock(&self.active).contains_key(id)
+  }
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -126,6 +132,12 @@ pub async fn recover(state: &AppState) -> Result<(), ApiError> {
     run.finished_at = Some(Utc::now());
     persist(state, &stored.run, stored.scope_services.as_deref())
       .await?;
+    let data = state.data_dir.clone();
+    let interrupted = id.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+      crate::run_logs::seal_run_dir(&data, &interrupted)
+    })
+    .await;
     tracing::warn!("执行记录 {id} 因控制面重启而中断");
   }
   Ok(())
@@ -399,6 +411,8 @@ pub(crate) async fn start_with_actor(
       title: "写入配置".into(),
       status: StepStatus::Done,
       log: vec![],
+      log_lines: 0,
+      log_truncated: false,
       error: None,
       started_at: Some(now),
       finished_at: Some(now),
@@ -770,6 +784,8 @@ fn pending_run_step(step: &StepPlan) -> RunStep {
     title: step.title.clone(),
     status: StepStatus::Pending,
     log: vec![],
+    log_lines: 0,
+    log_truncated: false,
     error: None,
     started_at: None,
     finished_at: None,
@@ -851,15 +867,23 @@ async fn execute(
     }
     let snapshot_run = lock(&run).clone();
     let _ = persist(&state, &snapshot_run, scope_services).await;
+    let writer = Arc::new(Mutex::new(Some(
+      crate::run_logs::StepLogWriter::open(
+        &state.data_dir,
+        &run_id,
+        index,
+      ),
+    )));
     let progress: ProgressFn = {
       let run = run.clone();
+      let writer = writer.clone();
       Arc::new(move |line: String| {
-        let mut r = lock(&run);
-        let log = &mut r.steps[index].log;
-        log.push(crate::log_redact::redact_text(&line));
-        if log.len() > MAX_LOG_LINES {
-          let drop = log.len() - MAX_LOG_LINES;
-          log.drain(..drop);
+        if let Some(writer) = lock(&writer).as_mut() {
+          append_step_log(
+            &mut lock(&run).steps[index],
+            writer,
+            &line,
+          );
         }
       })
     };
@@ -898,6 +922,11 @@ async fn execute(
       Ok(()) => crate::pending::finish_step(&state, &step.step).await,
       Err(e) => Err(e),
     };
+    let finished_log = lock(&writer).take();
+    if let Some(writer) = finished_log {
+      let _ =
+        tokio::task::spawn_blocking(move || writer.finish()).await;
+    }
     crate::security_receipt::completed_step(
       &state,
       actor.as_ref(),
@@ -1056,6 +1085,21 @@ async fn recover_skipped_migrations(
 }
 
 /// 会改变服务现状的步骤，记进服务状态的"执行"一层。
+pub(crate) fn append_step_log(
+  step: &mut RunStep,
+  writer: &mut crate::run_logs::StepLogWriter,
+  line: &str,
+) {
+  let line = crate::log_redact::redact_text(line);
+  step.log_lines += line.lines().count().max(1) as u64;
+  writer.append(&line);
+  step.log.push(line);
+  if step.log.len() > MAX_LOG_LINES {
+    step.log.drain(..step.log.len() - MAX_LOG_LINES);
+    step.log_truncated = true;
+  }
+}
+
 fn service_op(step: &Step) -> Option<(&str, &'static str)> {
   match step {
     Step::ServiceUp { service, .. } => Some((service, "部署")),
@@ -1467,6 +1511,7 @@ pub(crate) async fn run_step(
               trial: None,
               start_timeout_secs: None,
               readiness: None,
+              init: None,
             },
             caddyfile: r.config,
             caddyfile_hash: r.config_hash,
@@ -1559,6 +1604,7 @@ pub(crate) async fn run_step(
             trial: None,
             start_timeout_secs: None,
             readiness: None,
+            init: None,
           }),
           GATEWAY_TIMEOUT,
           Some(progress),
@@ -1600,6 +1646,7 @@ pub(crate) async fn run_step(
             trial: None,
             start_timeout_secs: None,
             readiness: None,
+            init: None,
           }),
           GATEWAY_TIMEOUT,
           Some(progress),
@@ -1932,6 +1979,51 @@ async fn service_up(
     service,
     &snap.render_values(world, service),
   )?;
+  let init = if !row.spec.stopped && !no_start {
+    row
+      .spec
+      .init_cmd
+      .as_ref()
+      .map(|command| {
+        let target = match &row.spec.source {
+          Source::Compose { .. } => render::compose_target(
+            service,
+            &compose,
+            row.spec.container.as_deref(),
+          )?,
+          _ => service.to_string(),
+        };
+        Ok::<_, ApiError>(InitRun {
+          service: target,
+          command: command.clone(),
+          timeout_secs: row.spec.init_timeout_secs,
+        })
+      })
+      .transpose()?
+  } else {
+    None
+  };
+  let required = if init.is_some() {
+    Some("部署前初始化")
+  } else if wharf_api_types::compose::parse_compose_max_grace_secs(
+    &compose,
+  ) > 150
+    || project_grace(state, server, service)
+      .await?
+      .unwrap_or_default()
+      > 150
+  {
+    Some("超过 150 秒的优雅停机超时")
+  } else {
+    None
+  };
+  let values = crate::log_redact::service_values(&row.spec);
+  let progress = service_progress(values.clone(), progress);
+  if let Some(what) = required
+    && !state.hub.supports_deploy_v2(server)
+  {
+    state.hub.deploy_v2_conn_id(server, what)?;
+  }
   // 先比对指纹再构建：计划过期时不用白构建一次。
   check_expect(expect, &hash, &format!("服务 {service}"))?;
   let commit = crate::build::ensure_image(
@@ -1959,6 +2051,7 @@ async fn service_up(
   // 旧版本不一定认。compose 来源看不出有没有数据，不做。
   let rollback = row.spec.volumes.is_empty()
     && retire.is_none()
+    && row.spec.init_cmd.is_none()
     && !matches!(row.spec.source, Source::Compose { .. });
   // 先试跑再替换：和自动换回上一版的条件一样，另外要已经部署过、不是要保持停止的。
   let has_deployed = rollback
@@ -1982,8 +2075,6 @@ async fn service_up(
   } else {
     None
   };
-  let values = crate::log_redact::service_values(&row.spec);
-  let progress = service_progress(values.clone(), progress);
   let readiness = row
     .spec
     .monitor
@@ -2003,42 +2094,58 @@ async fn service_up(
       "提醒：服务器 {server} 的 agent 版本较旧，自定义启动上限和就绪探活暂未生效，请运行 wharf upgrade 升级"
     ));
   }
-  let result: ProjectUpResult = state
-    .hub
-    .call(
-      server,
-      AgentOp::ProjectUp(ProjectUp {
-        project: service.to_string(),
-        compose,
-        hash: hash.clone(),
-        pull: snapshot::pull_policy(&world.servers[server]),
-        pull_missing_only,
-        retire,
-        rollback: rollback && !row.spec.stopped,
-        pins: row.pins.clone(),
-        expected_images: row
-          .import
-          .as_ref()
-          .map(|a| a.expected_images.clone())
-          .unwrap_or_default(),
-        no_start,
-        trial,
-        start_timeout_secs: row.spec.start_timeout_secs,
-        readiness,
-      }),
-      SERVICE_UP_TIMEOUT,
-      Some(progress.clone()),
-      cancel,
-    )
-    .await
-    .map_err(|mut e| {
-      e.message =
-        crate::log_redact::redact_text_with(&e.message, &values);
-      e.hint = e.hint.map(|hint| {
-        crate::log_redact::redact_text_with(&hint, &values)
-      });
-      e
-    })?;
+  let op = AgentOp::ProjectUp(ProjectUp {
+    project: service.to_string(),
+    compose,
+    hash: hash.clone(),
+    pull: snapshot::pull_policy(&world.servers[server]),
+    pull_missing_only,
+    retire,
+    rollback: rollback && !row.spec.stopped,
+    pins: row.pins.clone(),
+    expected_images: row
+      .import
+      .as_ref()
+      .map(|a| a.expected_images.clone())
+      .unwrap_or_default(),
+    no_start,
+    trial,
+    init,
+    start_timeout_secs: row.spec.start_timeout_secs,
+    readiness,
+  });
+  let result: ProjectUpResult = if let Some(what) = required {
+    let conn = state.hub.deploy_v2_conn_id(server, what)?;
+    state
+      .hub
+      .call_bound(
+        (server, conn),
+        op,
+        SERVICE_UP_TIMEOUT,
+        Some(progress.clone()),
+        cancel,
+      )
+      .await
+  } else {
+    state
+      .hub
+      .call(
+        server,
+        op,
+        SERVICE_UP_TIMEOUT,
+        Some(progress.clone()),
+        cancel,
+      )
+      .await
+  }
+  .map_err(|mut e| {
+    e.message =
+      crate::log_redact::redact_text_with(&e.message, &values);
+    e.hint = e.hint.map(|hint| {
+      crate::log_redact::redact_text_with(&hint, &values)
+    });
+    e
+  })?;
   let retired = result.retired.clone();
   for warning in &result.warnings {
     progress(format!("提醒：{warning}"));
@@ -2125,16 +2232,27 @@ async fn project_stop_start(
       project: service.to_string(),
     }
   };
-  let done: bool = state
-    .hub
-    .call(
-      server,
-      op,
+  let done: bool = if start {
+    state
+      .hub
+      .call(
+        server,
+        op,
+        STOP_START_TIMEOUT,
+        Some(progress.clone()),
+        cancel,
+      )
+      .await?
+  } else {
+    call_project_stop(
+      state,
+      (server, service),
       STOP_START_TIMEOUT,
-      Some(progress.clone()),
+      progress,
       cancel,
     )
-    .await?;
+    .await?
+  };
   if !done {
     return Err(ApiError::new(
       ErrorCode::NotFound,
@@ -2142,6 +2260,85 @@ async fn project_stop_start(
     ));
   }
   Ok(())
+}
+
+pub(crate) fn stop_rpc_timeout(
+  base: Duration,
+  grace: Option<u32>,
+) -> Duration {
+  base.max(Duration::from_secs(u64::from(grace.unwrap_or(10)) + 120))
+}
+
+async fn project_grace(
+  state: &AppState,
+  server: &str,
+  service: &str,
+) -> Result<Option<u32>, ApiError> {
+  let (server, service) = (server.to_string(), service.to_string());
+  let (deployed, wanted): (Option<String>, Option<String>) = state.db.call(move |c| {
+    let deployed = c.query_row(
+      "SELECT compose FROM deployments WHERE server = ?1 AND service = ?2 ORDER BY id DESC LIMIT 1",
+      params![server, service], |r| r.get(0),
+    ).optional().map_err(sql_err)?;
+    let wanted = c.query_row(
+      "SELECT spec FROM resources WHERE kind = 'service' AND name = ?1",
+      [&service], |r| r.get(0),
+    ).optional().map_err(sql_err)?;
+    Ok((deployed, wanted))
+  }).await?;
+  let parse = |compose: &str| {
+    wharf_api_types::compose::parse_compose_max_grace_secs(compose)
+      as u32
+  };
+  let installed = deployed.as_deref().map(parse);
+  let desired = wanted
+    .as_deref()
+    .map(serde_json::from_str::<ServiceSpec>)
+    .transpose()
+    .map_err(json_err)?
+    .and_then(|spec| match spec.source {
+      Source::Compose { content, .. } => {
+        content.as_deref().map(parse)
+      }
+      _ => spec.stop_grace_secs,
+    });
+  Ok(installed.max(desired))
+}
+
+pub(crate) async fn call_project_stop<
+  T: serde::de::DeserializeOwned,
+>(
+  state: &AppState,
+  (server, service): (&str, &str),
+  base: Duration,
+  progress: &ProgressFn,
+  cancel: &CancellationToken,
+) -> Result<T, ApiError> {
+  let op = AgentOp::ProjectStop {
+    project: service.to_string(),
+  };
+  let grace = project_grace(state, server, service).await?;
+  let timeout = stop_rpc_timeout(base, grace);
+  if grace.is_some_and(|n| n > 150) {
+    let conn = state
+      .hub
+      .deploy_v2_conn_id(server, "超过 150 秒的优雅停机超时")?;
+    state
+      .hub
+      .call_bound(
+        (server, conn),
+        op,
+        timeout,
+        Some(progress.clone()),
+        cancel,
+      )
+      .await
+  } else {
+    state
+      .hub
+      .call(server, op, timeout, Some(progress.clone()), cancel)
+      .await
+  }
 }
 
 /// 接管失败：删掉新起的 project，恢复原来的容器。不受取消影响。
@@ -2298,23 +2495,35 @@ async fn project_down(
     project: service.to_string(),
     purge,
   };
-  let _: serde_json::Value = if require_safe_delete {
-    // 用同一条连接核对能力并发请求，防止重连时切到旧 agent。
+  let grace = project_grace(state, server, service).await?;
+  let timeout = stop_rpc_timeout(PROJECT_DOWN_TIMEOUT, grace);
+  let deploy = if grace.is_some_and(|n| n > 150) {
+    Some(
+      state
+        .hub
+        .deploy_v2_conn_id(server, "超过 150 秒的优雅停机超时")?,
+    )
+  } else {
+    None
+  };
+  let conn = if require_safe_delete {
     let conn = state.hub.safe_delete_conn_id(server)?;
+    if deploy.is_some_and(|id| id != conn) {
+      return Err(crate::hub::offline(server));
+    }
+    Some(conn)
+  } else {
+    deploy
+  };
+  let _: serde_json::Value = if let Some(conn) = conn {
     state
       .hub
-      .call_bound(
-        (server, conn),
-        op,
-        PROJECT_DOWN_TIMEOUT,
-        Some(progress),
-        cancel,
-      )
+      .call_bound((server, conn), op, timeout, Some(progress), cancel)
       .await?
   } else {
     state
       .hub
-      .call(server, op, PROJECT_DOWN_TIMEOUT, Some(progress), cancel)
+      .call(server, op, timeout, Some(progress), cancel)
       .await?
   };
   Ok(())

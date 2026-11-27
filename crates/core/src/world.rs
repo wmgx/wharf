@@ -411,6 +411,13 @@ impl World {
             .and_then(|o| o.commit.clone());
           // compose 来源没填端口时按 compose 里映射的端口补上，否则服务没有内网地址。
           let mut spec = spec.clone();
+          validate_deploy_options(name, &spec)?;
+          if let Some(signal) = &mut spec.stop_signal {
+            *signal =
+              wharf_api_types::compose::normalize_stop_signal(
+                signal,
+              )?;
+          }
           if spec.limits.as_ref().is_some_and(|l| {
             l.memory_mb.is_none() && l.cpu_milli.is_none()
           }) {
@@ -1790,6 +1797,81 @@ pub(crate) fn is_reserved_host_port(port: u16) -> bool {
     || (30000..=39999).contains(&port)
 }
 
+fn validate_deploy_options(
+  name: &str,
+  spec: &ServiceSpec,
+) -> Result<(), ApiError> {
+  if matches!(spec.source, Source::Compose { .. })
+    && (spec.stop_grace_secs.is_some() || spec.stop_signal.is_some())
+  {
+    return Err(
+      ApiError::invalid(format!(
+        "服务 {name} 的停机选项仅支持镜像和构建来源"
+      ))
+      .with_hint(
+        "在 compose 文件里设置 stop_grace_period 或 stop_signal",
+      ),
+    );
+  }
+  if spec
+    .stop_grace_secs
+    .is_some_and(|n| !(1..=600).contains(&n))
+  {
+    return Err(ApiError::invalid(format!(
+      "服务 {name} 的优雅停机等待时长需在 1 到 600 秒之间"
+    )));
+  }
+  if let Some(signal) = &spec.stop_signal {
+    wharf_api_types::compose::normalize_stop_signal(signal).map_err(
+      |mut err| {
+        err.message = format!("服务 {name} 的停机信号不支持");
+        err
+      },
+    )?;
+  }
+  if let Some(cmd) = &spec.init_cmd {
+    if cmd.trim().is_empty() {
+      return Err(ApiError::invalid(format!(
+        "服务 {name} 的初始化命令不能为空"
+      )));
+    }
+    if cmd.len() > 4096 {
+      return Err(ApiError::invalid(format!(
+        "服务 {name} 的初始化命令不能超过 4096 字节"
+      )));
+    }
+    if let Source::Compose {
+      content: Some(yaml),
+      ..
+    } = &spec.source
+    {
+      crate::render::compose_target(
+        name,
+        yaml,
+        spec.container.as_deref(),
+      )
+      .map_err(|error| {
+        error.with_hint(
+          "在 container 中指定执行初始化命令的 compose 服务",
+        )
+      })?;
+    }
+  }
+  if let Some(secs) = spec.init_timeout_secs {
+    if !(10..=1800).contains(&secs) {
+      return Err(ApiError::invalid(format!(
+        "服务 {name} 的初始化超时需在 10 到 1800 秒之间"
+      )));
+    }
+    if spec.init_cmd.is_none() {
+      return Err(ApiError::invalid(format!(
+        "服务 {name} 没有设置初始化命令，不能单独设置初始化超时"
+      )));
+    }
+  }
+  Ok(())
+}
+
 fn validate_service(
   world: &World,
   name: &str,
@@ -1805,6 +1887,7 @@ fn validate_service(
     ));
   }
   crate::service_monitor::validate(spec)?;
+  validate_deploy_options(name, spec)?;
   if name.starts_with(GATEWAY_PROJECT_PREFIX) {
     return Err(ApiError::invalid(format!(
       "服务名不能以 {GATEWAY_PROJECT_PREFIX} 开头，它留给网关用"
@@ -2521,6 +2604,10 @@ mod tests {
       auto_update: false,
       container: None,
       files: vec![],
+      stop_grace_secs: None,
+      stop_signal: None,
+      init_cmd: None,
+      init_timeout_secs: None,
       server: server.into(),
       source: Source::Image("traefik/whoami".into()),
       ports: vec![PortSpec {

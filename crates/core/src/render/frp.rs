@@ -39,6 +39,8 @@ fn compose(
     services: BTreeMap::from([(
       bin.to_string(),
       ComposeService {
+        stop_grace_period: None,
+        stop_signal: None,
         image: image.to_string(),
         restart: "unless-stopped",
         mem_limit: None,

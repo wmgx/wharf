@@ -211,18 +211,14 @@ pub async fn volume_sync(
       may_need_restart
         .store(true, std::sync::atomic::Ordering::Relaxed);
     }
-    let stopped = state
-      .hub
-      .call::<bool>(
-        from,
-        AgentOp::ProjectStop {
-          project: service.to_string(),
-        },
-        STOP_TIMEOUT,
-        Some(progress.clone()),
-        &work_cancel,
-      )
-      .await?;
+    let stopped: bool = crate::apply::call_project_stop(
+      state,
+      (from, service),
+      STOP_TIMEOUT,
+      &progress,
+      &work_cancel,
+    )
+    .await?;
     if !stopped && source_should_run {
       return Err(ApiError::new(
         ErrorCode::AgentFailed,

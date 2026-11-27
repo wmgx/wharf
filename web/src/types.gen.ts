@@ -2348,6 +2348,14 @@ export interface RunStep {
    */
   items: number[];
   log?: string[];
+  /**
+   * 本步骤收到的日志总行数。
+   */
+  log_lines?: number;
+  /**
+   * 摘要日志只保留尾部；完整日志可另行读取。
+   */
+  log_truncated?: boolean;
   started_at?: string | null;
   status: StepStatus;
   title: string;
@@ -2622,6 +2630,14 @@ export interface ServiceSpec {
   files?: FileSpec[];
   heartbeat?: HeartbeatSpec | null;
   /**
+   * 部署前在临时容器内执行的初始化命令。
+   */
+  init_cmd?: string | null;
+  /**
+   * 初始化超时秒数（10 到 1800），缺省 300 秒。
+   */
+  init_timeout_secs?: number | null;
+  /**
    * 资源上限，不填不限。
    */
   limits?: Limits | null;
@@ -2641,6 +2657,14 @@ export interface ServiceSpec {
    * 启动等待上限（秒），缺省 120。
    */
   start_timeout_secs?: number | null;
+  /**
+   * 容器优雅停机等待秒数（1 到 600），缺省用 Docker 默认。
+   */
+  stop_grace_secs?: number | null;
+  /**
+   * 容器停机信号，缺省用镜像默认。
+   */
+  stop_signal?: string | null;
   /**
    * 停止：容器保留但不运行，部署后也保持停止。不影响 compose，也就不会重建容器。
    */

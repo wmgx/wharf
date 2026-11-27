@@ -88,6 +88,9 @@ pub fn spawn(state: Arc<AppState>) {
       if let Err(e) = crate::db_snapshot::cleanup(&state).await {
         tracing::warn!("清理本机热快照失败：{}", e.message);
       }
+      if let Err(e) = crate::run_logs::cleanup(&state).await {
+        tracing::warn!("清理执行日志失败：{e}");
+      }
       if let Err(e) = crate::uploads::cleanup(&state).await {
         tracing::warn!("清理代码包失败：{e}");
       }

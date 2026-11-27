@@ -104,6 +104,7 @@ mod report_guard;
 mod resource_top;
 mod rollback;
 mod rules;
+mod run_logs;
 mod scope_filter;
 mod secret_leak;
 mod secret_policy;

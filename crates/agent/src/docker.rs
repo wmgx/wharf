@@ -14,12 +14,19 @@ use std::{
 use serde::Deserialize;
 use wharf_api_types::{
   ApiError, ErrorCode,
-  agent::{ContainerInfo, ImageInfo, ProjectState, PullPolicy},
+  agent::{
+    ContainerInfo, ImageInfo, InitRun, ProjectState, PullPolicy,
+  },
+  compose::parse_compose_max_grace_secs,
 };
 
 use tokio_util::sync::CancellationToken;
 
 use crate::exec::{Cmd, Ctx};
+
+fn stop_timeout(grace: u64) -> Duration {
+  Duration::from_secs(180.max(grace + 60))
+}
 
 pub const HASH_FILE: &str = ".wharf-hash";
 pub const CONFIG_HASH_FILE: &str = ".wharf-config-hash";
@@ -575,10 +582,108 @@ impl Docker {
     ))
   }
 
+  pub(crate) fn read_compose(
+    &self,
+    project: &str,
+  ) -> std::io::Result<Option<String>> {
+    let path = self.project_dir(project).join("compose.yaml");
+    match std::fs::read_to_string(path) {
+      Ok(text) => Ok(Some(text)),
+      Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+      Err(e) => Err(e),
+    }
+  }
+
+  fn grace_secs(&self, project: &str) -> u64 {
+    self
+      .read_compose(project)
+      .ok()
+      .flatten()
+      .as_deref()
+      .map_or(10, parse_compose_max_grace_secs)
+  }
+
+  pub async fn run_init(
+    &self,
+    project: &str,
+    init: &InitRun,
+    ctx: &Ctx,
+  ) -> Result<(), ApiError> {
+    let secs =
+      u64::from(init.timeout_secs.unwrap_or(300).clamp(10, 1800));
+    let suffix = format!(
+      "-{}-{}",
+      chrono::Utc::now().timestamp_millis(),
+      std::process::id()
+    );
+    let name: String = project
+      .chars()
+      .filter(|c| {
+        c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')
+      })
+      .take(63 - "wharf-init-".len() - suffix.len())
+      .collect();
+    let cname = format!("wharf-init-{name}{suffix}");
+    ctx.say("运行部署前初始化");
+    let result = self
+      .compose(project)
+      .args([
+        "run",
+        "--rm",
+        "--no-deps",
+        "-T",
+        "--pull",
+        "never",
+        "--name",
+        &cname,
+        "--label",
+        "wharf.temp=1",
+        "--label",
+        &format!("wharf.init={project}"),
+        "--entrypoint",
+        "sh",
+        "--",
+        &init.service,
+        "-c",
+        &init.command,
+      ])
+      .timeout(Duration::from_secs(secs))
+      .stream(true)
+      .run(ctx)
+      .await;
+    let error = match result {
+      Ok(output) if output.success => return Ok(()),
+      Ok(output) => {
+        let code = output.code.map_or_else(|| "未知".into(), |code| code.to_string());
+        let tail = crate::exec::tail_lines(
+          if output.stderr.trim().is_empty() { &output.stdout } else { &output.stderr }, 15);
+        ApiError::new(ErrorCode::AgentFailed, format!("部署前初始化命令失败（退出码 {code}），已中止部署，原容器未动：{tail}"))
+          .with_hint("修好初始化命令后重新部署；完整输出见 wharf run logs")
+      }
+      Err(e) if e.code == ErrorCode::Timeout => ApiError::new(ErrorCode::Timeout,
+        format!("部署前初始化命令超过 {secs} 秒未完成，原容器未动"))
+          .with_hint("排查命令是否卡住，或用 --init-timeout 调大上限；完整日志见 wharf run logs"),
+      Err(e) => e,
+    };
+    let cleanup = self
+      .cmd()
+      .args(["rm", "-f", &cname])
+      .timeout(Duration::from_secs(15))
+      .run(&Ctx::detached())
+      .await;
+    if !cleanup.is_ok_and(|out| {
+      out.success || out.stderr.contains("No such container")
+    }) {
+      ctx.say(format!("清理初始化容器 {cname} 失败，需要手动处理"));
+    }
+    Err(error)
+  }
+
   pub async fn up(
     &self,
     project: &str,
     no_start: bool,
+    previous_grace: u64,
     ctx: &Ctx,
   ) -> Result<(), ApiError> {
     let mode = if no_start { "--no-start" } else { "-d" };
@@ -590,7 +695,9 @@ impl Docker {
     self
       .compose(project)
       .args(["up", mode, "--remove-orphans", "--pull", "never"])
-      .timeout(Duration::from_secs(300))
+      .timeout(Duration::from_secs(
+        300.max(self.grace_secs(project).max(previous_grace) + 120),
+      ))
       .stream(true)
       .run(ctx)
       .await?
@@ -641,7 +748,7 @@ impl Docker {
     }
     cmd
       .args(args)
-      .timeout(Duration::from_secs(180))
+      .timeout(stop_timeout(self.grace_secs(project)))
       .stream(true)
       .run(ctx)
       .await?
@@ -926,7 +1033,11 @@ impl Docker {
     self
       .compose(project)
       .arg(action)
-      .timeout(Duration::from_secs(180))
+      .timeout(if start {
+        Duration::from_secs(180)
+      } else {
+        stop_timeout(self.grace_secs(project))
+      })
       .stream(true)
       .run(ctx)
       .await?
@@ -1969,4 +2080,15 @@ fn parse_project_mounts(
       })
     })
     .collect()
+}
+
+#[cfg(test)]
+#[test]
+fn parse_compose_max_grace_scales_timeout() {
+  let yaml = "services:\n  a: {stop_grace_period: '1m30s'}\n  b: {stop_grace_period: 5m}";
+  assert_eq!(parse_compose_max_grace_secs(yaml), 300);
+  assert_eq!(
+    stop_timeout(parse_compose_max_grace_secs(yaml)).as_secs(),
+    360
+  );
 }

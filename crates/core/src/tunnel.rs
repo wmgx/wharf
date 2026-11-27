@@ -186,6 +186,7 @@ pub async fn sync(
         trial: None,
         start_timeout_secs: None,
         readiness: None,
+        init: None,
       }),
       CONNECTOR_TIMEOUT,
       Some(progress.clone()),

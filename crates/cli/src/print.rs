@@ -304,10 +304,19 @@ pub fn run_line(run: &Run) {
 
 pub fn run(run: &Run) {
   run_summary(run);
-  for step in &run.steps {
+  for (index, step) in run.steps.iter().enumerate() {
     step_line(step);
     for line in &step.log {
       println!("    {line}");
+    }
+    if step.log_truncated {
+      println!(
+        "    … 共 {} 行，这里只显示最后 {} 行。查看完整日志运行 wharf run logs {} --step {}",
+        step.log_lines,
+        step.log.len(),
+        run.run_id,
+        index + 1
+      );
     }
   }
 }

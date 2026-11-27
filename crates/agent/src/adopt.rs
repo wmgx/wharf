@@ -1117,7 +1117,7 @@ esac
   async fn docker_up_creates_without_starting() {
     let (dir, docker) = fake_docker("echo \"$*\" >> log");
     docker.write_compose("s1", "services: {}").unwrap();
-    docker.up("s1", true, &Ctx::detached()).await.unwrap();
+    docker.up("s1", true, 10, &Ctx::detached()).await.unwrap();
     let log =
       std::fs::read_to_string(dir.path().join("log")).unwrap();
     assert!(

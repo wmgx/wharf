@@ -189,6 +189,8 @@ pub enum Command {
     #[command(flatten)]
     build: BuildOpts,
     #[command(flatten)]
+    ops: DeployOps,
+    #[command(flatten)]
     apply: ApplyFlags,
   },
   /// 升级 Wharf：控制面换成最新镜像，再把各服务器的 agent 升到同一版本，最后把本机 CLI 也换成同一版本。
@@ -447,6 +449,22 @@ pub enum CoreSnapshotCmd {
   },
   /// 删除指定的本机热快照。
   Rm { id: String },
+}
+
+#[derive(Args)]
+pub struct DeployOps {
+  /// 优雅停机等待秒数（1 到 600），0 恢复 Docker 默认。
+  #[arg(long)]
+  pub stop_grace: Option<u32>,
+  /// 停机信号，例如 SIGINT。空字符串恢复镜像默认。
+  #[arg(long)]
+  pub stop_signal: Option<String>,
+  /// 部署前执行的初始化命令。空字符串清除命令和超时。
+  #[arg(long)]
+  pub init_cmd: Option<String>,
+  /// 初始化超时秒数（10 到 1800），0 恢复默认 300 秒。
+  #[arg(long)]
+  pub init_timeout: Option<u32>,
 }
 
 /// 看日志的公共参数。
@@ -1101,6 +1119,8 @@ pub enum ServiceCmd {
     #[command(flatten)]
     build: Box<BuildArgs>,
     #[command(flatten)]
+    ops: DeployOps,
+    #[command(flatten)]
     apply: ApplyFlags,
   },
   /// 从代码构建的服务：按固定的 commit 重新构建并部署（本机目录用上次上传的）。
@@ -1656,6 +1676,28 @@ pub enum RunCmd {
   },
   Show {
     run_id: String,
+  },
+  /// 查看执行与构建日志，支持按步骤、关键字和报错筛选。
+  Logs {
+    run_id: String,
+    /// 只看第几步，从 1 开始。
+    #[arg(long)]
+    step: Option<usize>,
+    /// 最多输出多少行或多少种报错。
+    #[arg(long, default_value_t = 500, conflicts_with = "all")]
+    tail: u32,
+    /// 返回完整日志，单次最多 2 MiB。
+    #[arg(long)]
+    all: bool,
+    /// 只看含这个关键字的行，不分大小写。
+    #[arg(long)]
+    grep: Option<String>,
+    /// 只看报错并合并同类计数。
+    #[arg(long)]
+    errors: bool,
+    /// 每行最多多少字符。
+    #[arg(long)]
+    max_line: Option<usize>,
   },
   /// 等待执行结束。
   Wait {
