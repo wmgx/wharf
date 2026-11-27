@@ -882,7 +882,8 @@ fn running_on<'a>(
   name: &str,
 ) -> Option<&'a str> {
   crate::snapshot::service_runtime_server(snap, name).or_else(|| {
-    current.services.get(name).map(|s| s.spec.server.as_str())
+    let configured = &current.services.get(name)?.spec.server;
+    Some(snap.deployed.get(name).unwrap_or(configured))
   })
 }
 
@@ -3150,6 +3151,13 @@ mod tests {
       .volumes
       .clear();
     use wharf_api_types::{agent::AgentOp, spec::Change};
+    state.hub.mock_agent("s1", false, |op| {
+      Ok(match op {
+        AgentOp::ResolveImages(_) => json!([{"image": "fixture:1", "digest": format!("sha256:{}", "a".repeat(64))}]),
+        AgentOp::ProjectStatus { .. } => json!([]),
+        _ => panic!("计划期发了意外请求"),
+      })
+    });
     state.hub.mock_safe_migrate_agent("s2", |op, _| {
       Some(Ok(match op {
         AgentOp::ProjectStatus { .. } => json!([]),

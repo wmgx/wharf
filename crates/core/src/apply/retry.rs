@@ -393,6 +393,22 @@ async fn run_retry_reruns_only_failed_and_skipped_and_rejects_stale()
     )
   })
   .collect();
+  let calls = Arc::new(Mutex::new(vec![]));
+  let recorded = calls.clone();
+  state.hub.mock_agent("s2", false, move |op| {
+    if matches!(op, AgentOp::ResolveImages(_)) {
+      return Ok(serde_json::json!([{"image": "fixture:1", "digest": format!("sha256:{}", "a".repeat(64))}]));
+    }
+    if matches!(op, AgentOp::ProjectStatus { .. }) {
+      return Ok(serde_json::json!([]));
+    }
+    lock(&recorded).push(match op {
+      AgentOp::ProjectStop { .. } => "stop",
+      AgentOp::ProjectStart { .. } => "start",
+      _ => panic!("意外请求"),
+    });
+    Ok(serde_json::json!(true))
+  });
   let plan = crate::planner::make_plan(
     &state,
     wharf_api_types::plan::PlanRequest::default(),
@@ -440,16 +456,6 @@ async fn run_retry_reruns_only_failed_and_skipped_and_rejects_stale()
       .await
       .unwrap();
   }
-  let calls = Arc::new(Mutex::new(vec![]));
-  let recorded = calls.clone();
-  state.hub.mock_agent("s2", false, move |op| {
-    lock(&recorded).push(match op {
-      AgentOp::ProjectStop { .. } => "stop",
-      AgentOp::ProjectStart { .. } => "start",
-      _ => panic!("意外请求"),
-    });
-    Ok(serde_json::json!(true))
-  });
   let response =
     retry_run(state.clone(), &scoped, "r_first", "测试".into())
       .await
