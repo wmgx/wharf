@@ -12,7 +12,7 @@ use serde_json::json;
 use wharf_api_types::{
   ApiError, ErrorCode,
   plan::ApplyResponse,
-  spec::{Change, EdgeAppSpec, EdgeKind, EdgeSource, GitSource},
+  spec::{Change, EdgeAppSpec, EdgeKind, EdgeSource},
   view::{
     AccountView, EdgeAppView, EdgeProjectView, EdgeScript,
     EdgeVersionView,
@@ -23,7 +23,7 @@ use crate::{
   ApplyFlags,
   client::{CliError, CliResult, Client, seg},
   commands::{changes, finish_task, out, pretty},
-  deploy::upload,
+  deploy::{merge_git, upload, upload_file},
 };
 
 const WRANGLER_CONFIGS: [&str; 3] =
@@ -82,7 +82,7 @@ pub enum EdgeCmd {
   /// 否则找 worker.js / index.js 当单文件 Worker 上传。
   Deploy {
     name: String,
-    /// 单文件 Worker 的脚本。
+    /// 单文件 Worker 的脚本（.mjs 指定模块格式，.cjs 指定旧式格式）。
     #[arg(long, conflicts_with_all = ["dir", "git"])]
     script: Option<PathBuf>,
     /// 代码目录（wrangler 项目或 Pages）。
@@ -96,6 +96,8 @@ pub enum EdgeCmd {
     /// 私有仓库的 token 存成密钥后写密钥名。
     #[arg(long)]
     git_token_secret: Option<String>,
+    #[arg(long)]
+    git_user: Option<String>,
     /// 代码里的子目录。
     #[arg(long)]
     path: Option<String>,
@@ -287,6 +289,7 @@ pub async fn edge(
       git,
       git_ref,
       git_token_secret,
+      git_user,
       path,
       kind,
       build,
@@ -318,34 +321,84 @@ pub async fn edge(
         );
       }
       let old = existing.as_ref().and_then(|e| e.spec.source.clone());
+      let git_options = git_ref.is_some()
+        || git_token_secret.is_some()
+        || git_user.is_some();
+      let adjust = git_options
+        || path.is_some()
+        || build.is_some()
+        || output.is_some()
+        || server.is_some()
+        || account.is_some()
+        || project.is_some();
+      let effective_path = edge_path(path, old.as_ref());
+      let old_git = old.as_ref().and_then(|o| o.git.as_ref());
+      if git_options
+        && git.is_none()
+        && (old_git.is_none() || dir.is_some() || script.is_some())
+      {
+        return Err(ApiError::invalid("--ref / --git-token-secret / --git-user 只能用于 Git 来源的边缘应用").into());
+      }
       let mut source = match (script, dir, git) {
         (Some(file), _, _) => script_source(c, &file).await?,
         (None, _, Some(repo)) => EdgeSource {
-          git: Some(GitSource {
-            repo: repo.trim_end_matches('/').to_string(),
-            reference: git_ref.unwrap_or_else(|| "main".into()),
-            token_secret: git_token_secret,
-          }),
+          git: Some(merge_git(
+            old_git,
+            &repo,
+            git_ref,
+            git_token_secret,
+            git_user,
+          )),
+          path: effective_path,
           ..EdgeSource::default()
         },
         (None, Some(dir), None) => {
-          local_source(c, kind, &dir, old.as_ref(), path.as_deref())
-            .await?
+          local_source(
+            c,
+            kind,
+            &dir,
+            old.as_ref(),
+            effective_path.as_deref(),
+          )
+          .await?
         }
         (None, None, None) => {
-          let named = PathBuf::from(&name);
-          let dir = if named.is_dir() {
-            named
+          if let Some(mut source) =
+            reusable_edge_source(old.as_ref(), adjust)
+          {
+            if source.script.is_none() {
+              source.path = effective_path;
+            }
+            if let Some(git) = old_git
+              && git_options
+            {
+              source.git = Some(merge_git(
+                Some(git),
+                &git.repo,
+                git_ref,
+                git_token_secret,
+                git_user,
+              ));
+            }
+            source
           } else {
-            PathBuf::from(".")
-          };
-          local_source(c, kind, &dir, old.as_ref(), path.as_deref())
+            let named = PathBuf::from(&name);
+            let dir = if named.is_dir() {
+              named
+            } else {
+              PathBuf::from(".")
+            };
+            local_source(
+              c,
+              kind,
+              &dir,
+              old.as_ref(),
+              effective_path.as_deref(),
+            )
             .await?
+          }
         }
       };
-      if source.path.is_none() && source.script.is_none() {
-        source.path = path;
-      }
       // 没给的选项沿用现有配置。
       source.build =
         build.or_else(|| old.as_ref().and_then(|o| o.build.clone()));
@@ -562,7 +615,24 @@ async fn pull(
   Ok(file)
 }
 
-/// `--script 文件`：上传脚本所在目录，记下文件名。
+fn edge_path(
+  path: Option<String>,
+  old: Option<&EdgeSource>,
+) -> Option<String> {
+  match path {
+    Some(p) => (!matches!(p.as_str(), "" | "." | "./")).then_some(p),
+    None => old.and_then(|o| o.path.clone()),
+  }
+}
+
+fn reusable_edge_source(
+  old: Option<&EdgeSource>,
+  adjust: bool,
+) -> Option<EdgeSource> {
+  old.filter(|s| s.git.is_some() || adjust).cloned()
+}
+
+/// `--script 文件`：只上传脚本，记下文件名。
 async fn script_source(
   c: &Client,
   file: &Path,
@@ -572,17 +642,13 @@ async fn script_source(
       ApiError::invalid(format!("{} 不存在", file.display())).into(),
     );
   }
-  let dir = match file.parent() {
-    Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
-    _ => PathBuf::from("."),
-  };
   let filename = file
     .file_name()
     .map(|f| f.to_string_lossy().to_string())
     .unwrap_or_default();
   eprintln!("上传 {}（单文件 Worker）", file.display());
   Ok(EdgeSource {
-    upload: Some(upload(c, &dir).await?),
+    upload: Some(upload_file(c, file).await?),
     script: Some(filename),
     ..EdgeSource::default()
   })
@@ -598,13 +664,25 @@ async fn local_source(
   path: Option<&str>,
 ) -> CliResult<EdgeSource> {
   let root = match path {
-    Some(p) => dir.join(p),
+    Some(p) => dir.join(
+      wharf_api_types::symlink::check_relative_entry(Path::new(p))?,
+    ),
     None => dir.to_path_buf(),
   };
   if !root.is_dir() {
     return Err(
       ApiError::invalid(format!("目录 {} 不存在", root.display()))
         .into(),
+    );
+  }
+  if !root
+    .canonicalize()
+    .ok()
+    .zip(dir.canonicalize().ok())
+    .is_some_and(|(root, dir)| root.starts_with(dir))
+  {
+    return Err(
+      ApiError::invalid("构建子目录指向上传目录之外").into(),
     );
   }
   let wrangler =
@@ -639,9 +717,27 @@ async fn local_source(
     })?;
   eprintln!("上传 {}（单文件 Worker）", root.join(script).display());
   Ok(EdgeSource {
-    upload: Some(upload(c, dir).await?),
-    path: path.map(str::to_string),
+    upload: Some(upload_file(c, &root.join(script)).await?),
     script: Some(script.to_string()),
     ..EdgeSource::default()
   })
+}
+
+#[cfg(test)]
+mod source_tests {
+  use super::*;
+
+  #[test]
+  fn git_edge_settings_keep_source_and_inherit_path_until_cleared() {
+    let old: EdgeSource = serde_json::from_value(json!({
+      "git":{"repo":"https://example.test/site","ref":"prod","token_secret":"git-test"},
+      "path":"docs"
+    })).unwrap();
+    assert_eq!(
+      reusable_edge_source(Some(&old), true).unwrap().git,
+      old.git
+    );
+    assert_eq!(edge_path(None, Some(&old)).as_deref(), Some("docs"));
+    assert_eq!(edge_path(Some(".".into()), Some(&old)), None);
+  }
 }

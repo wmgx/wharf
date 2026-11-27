@@ -4,7 +4,7 @@
 //! - "重新构建"（`force`）拉 ref 的最新代码；
 //! - 不是 force 时，git 来源固定到上次部署的 commit（迁移到新机器时构建出同样的代码）。
 
-use std::time::Duration;
+use std::{path::Path, time::Duration};
 
 use rusqlite::{OptionalExtension, params};
 use tokio_util::sync::CancellationToken;
@@ -12,7 +12,9 @@ use wharf_api_types::{
   ApiError, ErrorCode,
   agent::{
     AgentOp, BuildFetch, BuildJob, BuildResult, OneTimeSecret,
+    ResolveCommit,
   },
+  build::{GIT_CREDENTIAL_HELPER, git_no_proxy},
   spec::{BuildSource, GitSource, ServiceSpec, Source},
 };
 
@@ -23,6 +25,174 @@ use crate::{
   snapshot::{self, Snapshot},
   state::AppState,
 };
+
+pub(crate) fn old_git_agent(server: &str) -> ApiError {
+  ApiError::new(
+    ErrorCode::Conflict,
+    format!(
+      "服务器 {server} 的 agent 版本旧，不支持自定义 Git 认证用户名"
+    ),
+  )
+  .suggest("wharf upgrade")
+}
+
+pub(crate) fn old_agent_warning(server: &str) -> String {
+  format!(
+    "服务器 {server} 的 agent 版本旧，不包含子模块拉取、大锁文件、新模板与旧镜像回收修复，建议先运行 wharf upgrade"
+  )
+}
+
+/// 计划只查 Git 引用。旧 agent 的查询可能拉镜像，因此在控制面做只读回退。
+pub(crate) async fn plan_commit(
+  state: &AppState,
+  server: &str,
+  job: ResolveCommit,
+) -> Result<String, ApiError> {
+  if let Some(conn) = state.hub.build_v2_conn_id(server) {
+    return state
+      .hub
+      .call_bound(
+        (server, conn),
+        AgentOp::ResolveCommit(job),
+        crate::pins::COMMIT_TIMEOUT,
+        None,
+        &Default::default(),
+      )
+      .await;
+  }
+  if !state.hub.is_online(server) {
+    return Err(crate::hub::offline(server));
+  }
+
+  let BuildFetch::Git {
+    repo,
+    reference,
+    token,
+    user,
+    ..
+  } = &job.fetch
+  else {
+    return Err(ApiError::invalid("只有 git 来源能查 commit"));
+  };
+  if user.is_some() {
+    return Err(old_git_agent(server));
+  }
+  if wharf_api_types::build::is_commit(reference) {
+    return Ok(reference.to_ascii_lowercase());
+  }
+  let url = reqwest::Url::parse(repo)
+    .map_err(|_| ApiError::invalid("Git 仓库地址不合法"))?;
+  let mut args = vec!["-c", "http.followRedirects=initial"];
+  let mut env = Vec::new();
+  let config;
+  let mirrored;
+  let repo = if let Some(token) = token {
+    let git_user = match url.host_str() {
+      Some("bitbucket.org") => "x-token-auth",
+      Some(host) if host.contains("gitlab") => "oauth2",
+      _ => "x-access-token",
+    };
+    config = format!(
+      "credential.{}/.helper={GIT_CREDENTIAL_HELPER}",
+      url.origin().ascii_serialization()
+    );
+    args.extend(["-c", config.as_str()]);
+    env.extend([
+      ("GIT_USER", git_user),
+      ("GIT_TOKEN", token.0.as_str()),
+    ]);
+    repo.as_str()
+  } else if let Some((path, mirror)) = repo
+    .strip_prefix("https://github.com/")
+    .zip(job.pull.github_mirror.as_deref())
+    && mirror.starts_with("https://")
+  {
+    mirrored = format!("{}/{path}", mirror.trim_end_matches('/'));
+    mirrored.as_str()
+  } else {
+    repo.as_str()
+  };
+  let peeled = format!("{reference}^{{}}");
+  args.extend(["ls-remote", "--", repo, reference, &peeled]);
+  let mirror = job
+    .pull
+    .github_mirror
+    .as_deref()
+    .and_then(|mirror| reqwest::Url::parse(mirror).ok());
+  let no_proxy =
+    git_no_proxy(mirror.as_ref().and_then(reqwest::Url::host_str));
+  env.extend([
+    ("NO_PROXY", no_proxy.as_str()),
+    ("no_proxy", no_proxy.as_str()),
+  ]);
+  let bytes =
+    tokio::time::timeout(crate::pins::COMMIT_TIMEOUT, async {
+      let proxy =
+        reachable_git_proxy(job.pull.git_proxy.as_deref()).await;
+      crate::secret_leak::git_with_env(
+        Path::new("/"),
+        proxy,
+        &args,
+        &env,
+      )
+      .await
+    })
+    .await
+    .map_err(|_| {
+      ApiError::new(ErrorCode::Timeout, "查询 Git 代码版本超时")
+    })?
+    .map_err(|e| {
+      ApiError::new(
+        ErrorCode::AgentFailed,
+        format!("控制面查询 Git 代码版本：{e}"),
+      )
+    })?;
+  wharf_api_types::build::pick_commit(
+    &String::from_utf8_lossy(&bytes),
+    reference,
+  )
+  .ok_or_else(|| {
+    ApiError::invalid(format!("仓库里没有分支或标签 {reference}"))
+  })
+}
+
+/// 目标机的环回代理只在目标机上有效。其他代理从控制面探测，连不上走直连。
+async fn reachable_git_proxy(proxy: Option<&str>) -> &str {
+  let Some(proxy) = proxy.map(str::trim) else {
+    return "";
+  };
+  let Ok(url) = reqwest::Url::parse(proxy) else {
+    return "";
+  };
+  let Some(host) = url.host_str() else {
+    return "";
+  };
+  let host = host.trim_matches(['[', ']']).trim_end_matches('.');
+  let ip = host
+    .parse::<std::net::IpAddr>()
+    .ok()
+    .map(|ip| ip.to_canonical());
+  if host.eq_ignore_ascii_case("localhost")
+    || host.to_ascii_lowercase().ends_with(".localhost")
+    || ip.is_some_and(|ip| ip.is_loopback() || ip.is_unspecified())
+  {
+    return "";
+  }
+  let Some(port) = url.port_or_known_default() else {
+    return "";
+  };
+  if tokio::time::timeout(
+    Duration::from_secs(3),
+    tokio::net::TcpStream::connect((host, port)),
+  )
+  .await
+  .is_ok_and(|result| result.is_ok())
+  {
+    proxy
+  } else {
+    ""
+  }
+}
 
 /// 拉代码、拉基础镜像、构建都算在内。
 const BUILD_TIMEOUT: Duration = Duration::from_secs(60 * 60);
@@ -101,7 +271,14 @@ pub fn code_fetch(
       };
       Ok(BuildFetch::Git {
         repo: git.repo.clone(),
+        fallback_ref: reference
+          .as_ref()
+          .filter(|r| {
+            r.len() == 40 && r.bytes().all(|b| b.is_ascii_hexdigit())
+          })
+          .map(|_| git.reference.clone()),
         reference: reference.unwrap_or_else(|| git.reference.clone()),
+        user: git.user.clone(),
         token,
       })
     }
@@ -294,4 +471,51 @@ pub async fn restart_now(
     )
     .await?,
   ))
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[tokio::test]
+  async fn legacy_plan_ignores_target_loopback_proxy_even_when_reachable()
+   {
+    let listener =
+      tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy = format!("http://{}", listener.local_addr().unwrap());
+    assert_eq!(reachable_git_proxy(Some(&proxy)).await, "");
+    assert_eq!(
+      reachable_git_proxy(Some("http://[::ffff:127.0.0.1]:8080"))
+        .await,
+      ""
+    );
+    assert_eq!(
+      reachable_git_proxy(Some("http://127.0.0.1:0")).await,
+      ""
+    );
+  }
+
+  #[tokio::test]
+  async fn plan_pin_on_legacy_agent_never_dispatches_docker_lookup() {
+    let state = crate::rules::tests::test_state();
+    state
+      .hub
+      .mock_agent("s1", false, |_| panic!("不应向旧 agent 发查询"));
+    let sha = "0123456789012345678901234567890123456789";
+    let job = ResolveCommit {
+      service: "site".into(),
+      fetch: BuildFetch::Git {
+        repo: "https://example.test/site".into(),
+        reference: sha.into(),
+        token: None,
+        user: None,
+        fallback_ref: None,
+      },
+      pull: snapshot::committed_pull_policy(
+        &Default::default(),
+        "s1",
+      ),
+    };
+    assert_eq!(plan_commit(&state, "s1", job).await.unwrap(), sha);
+  }
 }

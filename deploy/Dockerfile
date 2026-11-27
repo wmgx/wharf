@@ -41,7 +41,7 @@ FROM base AS agent
 LABEL wharf.system=agent
 # rsync：迁移服务时在两台 agent 之间同步数据。
 RUN apt-get update \
- && apt-get install -y --no-install-recommends rsync \
+ && apt-get install -y --no-install-recommends rsync git \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=dockercli /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=dockercli /usr/local/libexec/docker/cli-plugins/docker-compose /usr/local/libexec/docker/cli-plugins/docker-compose

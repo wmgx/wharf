@@ -5,7 +5,8 @@ import { useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { usePoll } from "@/api";
 import { useActions } from "@/components/actions";
-import { BuildEditor, type BuildHow, cleanHow, howReady } from "@/components/build-editor";
+import { BuildEditor } from "@/components/build-editor";
+import { type BuildHow, cleanHow, howReady } from "@/lib/build-how";
 import { EntryField, useEntry } from "@/components/entry";
 import { DomainChips, Field, Picker, PortsEditor, Segmented, formatEnv, portsFor, portsValid, nameFromImage, parseEnv, serverOptions, toName } from "@/components/fields";
 import { ImportSource, type Imported } from "@/components/import-source";
@@ -204,7 +205,7 @@ function Form({ onClose }: { onClose: () => void }) {
             onChange={(k) => {
               setKind(k);
               // 端口还是默认值时，换成这种来源常用的端口。
-              const untouched = ports.length === 1 && ports[0].name === "http" && !ports[0].host && [80, 8080].includes(ports[0].container ?? 0);
+              const untouched = ports.length === 1 && ports[0].name === "http" && !ports[0].udp && !ports[0].host && [80, 8080].includes(ports[0].container ?? 0);
               if (untouched && k !== "compose") setPorts([{ name: "http", container: k === "image" ? 80 : 8080 }]);
               if (untouched && k === "compose") setPorts([]);
             }}

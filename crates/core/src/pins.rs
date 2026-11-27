@@ -19,7 +19,7 @@ use crate::{
 const RESOLVE_TIMEOUT: std::time::Duration =
   std::time::Duration::from_secs(60);
 /// 比 agent 里 `git ls-remote` 的上限长，失败时带回 git 的报错而不是超时。
-const COMMIT_TIMEOUT: std::time::Duration =
+pub(crate) const COMMIT_TIMEOUT: std::time::Duration =
   std::time::Duration::from_secs(180);
 
 pub struct Resolved {
@@ -38,7 +38,12 @@ struct ImageLookup {
 /// compose 来源是各组件的 `image`，跳过写了 digest、用了 `${变量}`、或者本地构建（有 `build`）的。
 pub fn images(source: &Source) -> Vec<String> {
   let content = match source {
-    Source::Image(image) => return vec![image.clone()],
+    Source::Image(image) => {
+      return (!image.contains('@'))
+        .then(|| image.clone())
+        .into_iter()
+        .collect();
+    }
     Source::Compose { content, .. } => {
       content.as_deref().unwrap_or_default()
     }
@@ -73,9 +78,55 @@ fn compose_images(
   out
 }
 
+fn digest_images(source: &Source, arch: Option<&str>) -> Vec<String> {
+  let is_digest = |i: &str| i.contains('@') && !i.contains('$');
+  match source {
+    Source::Image(i) if is_digest(i) => vec![i.clone()],
+    Source::Compose {
+      content: Some(content),
+      ..
+    } => {
+      let Ok(doc) =
+        serde_yaml_ng::from_str::<serde_yaml_ng::Value>(content)
+      else {
+        return vec![];
+      };
+      doc["services"]
+        .as_mapping()
+        .into_iter()
+        .flat_map(|m| m.values())
+        .filter(|svc| svc.get("build").is_none())
+        .filter(|svc| {
+          let platform = svc["platform"]
+            .as_str()
+            .and_then(|p| p.strip_prefix("linux/"));
+          !platform.zip(arch).is_some_and(|(p, a)| {
+            let a = match a {
+              "x86_64" => "amd64",
+              "aarch64" => "arm64",
+              _ => a,
+            };
+            p.split('/').next() == Some(a)
+          })
+        })
+        .filter_map(|svc| svc["image"].as_str())
+        .map(str::trim)
+        .filter(|i| is_digest(i))
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+    }
+    _ => vec![],
+  }
+}
+
 /// 为什么这个服务没法检查更新；能检查时为空。
 pub fn unsupported(source: &Source) -> Option<&'static str> {
   match source {
+    Source::Image(i) if i.contains('@') => {
+      Some("镜像已写 digest，没有可以检查的标签")
+    }
     Source::Compose { .. } if images(source).is_empty() => Some(
       "compose 里的镜像都写了 digest、用了变量或在本地构建，没有可以检查的标签",
     ),
@@ -215,11 +266,26 @@ pub async fn resolve(
       continue;
     }
     let check_platform = check_migrated_images
-      && needs_migration_check(
-        snap.deployed.get(name).map(String::as_str),
-        &row.spec.server,
-        arch,
-      );
+      && (!snap.deployed.contains_key(name)
+        || needs_migration_check(
+          snap.deployed.get(name).map(String::as_str),
+          &row.spec.server,
+          arch,
+        ));
+    if check_platform {
+      for image in
+        digest_images(&row.spec.source, arch(&row.spec.server))
+      {
+        todo
+          .entry((row.spec.server.clone(), true))
+          .or_default()
+          .push(ImageLookup {
+            service: name.clone(),
+            reference: image.clone(),
+            image,
+          });
+      }
+    }
     // 单纯升级控制面时，保留历史上只按标签部署的锚点镜像。
     let images = match &row.spec.source {
       Source::Compose {
@@ -431,6 +497,12 @@ pub async fn resolve_commits(
       continue;
     };
     let server = row.spec.server.clone();
+    if build.git.as_ref().is_some_and(|g| g.user.is_some())
+      && state.hub.is_online(&server)
+      && !state.hub.supports_build_v2(&server)
+    {
+      return Err(crate::build::old_git_agent(&server));
+    }
     let fetch = crate::build::code_fetch(
       state,
       &crate::secret_policy::service_secrets(
@@ -443,29 +515,25 @@ pub async fn resolve_commits(
       build.git.as_ref(),
       None,
     )?;
-    let commit: String = state
-      .hub
-      .call(
-        &server,
-        AgentOp::ResolveCommit(ResolveCommit {
-          service: name.clone(),
-          fetch,
-          pull: snapshot::committed_pull_policy(&snap.world, &server),
-        }),
-        COMMIT_TIMEOUT,
-        None,
-        &Default::default(),
+    let commit = crate::build::plan_commit(
+      state,
+      &server,
+      ResolveCommit {
+        service: name.clone(),
+        fetch,
+        pull: snapshot::committed_pull_policy(&snap.world, &server),
+      },
+    )
+    .await
+    .map_err(|e| {
+      ApiError::new(
+        e.code,
+        format!("查不到服务 {name} 的代码版本：{}", e.message),
       )
-      .await
-      .map_err(|e| {
-        ApiError::new(
-          e.code,
-          format!("查不到服务 {name} 的代码版本：{}", e.message),
-        )
-        .with_hint(
-          "确认仓库地址、分支和 token；仓库暂时连不上时稍后重新 plan",
-        )
-      })?;
+      .with_hint(
+        "确认仓库地址、分支和 token；仓库暂时连不上时稍后重新 plan",
+      )
+    })?;
     if let Some(row) = desired.services.get_mut(&name) {
       row.commit = Some(commit);
     }
@@ -654,6 +722,16 @@ mod tests {
   }
 
   use super::*;
+
+  #[test]
+  fn digest_platform_checks_skip_explicit_matching_platform() {
+    let src = Source::Compose { content: Some("services:\n  one:\n    image: a@sha256:abc\n    platform: linux/arm64\n  two:\n    image: b@sha256:abc\n".into()), file: None };
+    assert_eq!(
+      digest_images(&src, Some("aarch64")),
+      ["b@sha256:abc"]
+    );
+    assert!(images(&src).is_empty());
+  }
 
   #[test]
   fn warns_only_for_known_platform_mismatch() {

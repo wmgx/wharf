@@ -159,19 +159,33 @@ async fn resolve_one(
     .unwrap_or("latest")
     .to_string();
   let mut errors = Vec::new();
-  for (host, mirror) in hosts(&registry, policy) {
+  let mut best: Option<Found> = None;
+  let candidates = hosts(&registry, policy);
+  let count = candidates.len();
+  for (index, (host, mirror)) in candidates.into_iter().enumerate() {
     let mut repo = clients.repo(mirror, &host, &path);
     match repo.head(&reference).await {
       Ok(digest) => {
-        let (config, platforms) = repo
-          .details(&digest, host_platform, metadata_deadline)
-          .await;
-        return Ok((digest, config, platforms));
+        // 给后续源留出时间，首源 blob 超时后还能查询平台。
+        let now = Instant::now();
+        let budget = metadata_deadline.saturating_duration_since(now);
+        let deadline = now + budget / (count - index) as u32;
+        let (config, platforms) =
+          repo.details(&digest, host_platform, deadline).await;
+        if platforms.is_some() {
+          return Ok((digest, config, platforms));
+        }
+        if best.is_none()
+          || (config.is_some()
+            && best.as_ref().is_some_and(|(_, old, _)| old.is_none()))
+        {
+          best = Some((digest, config, platforms));
+        }
       }
       Err(e) => errors.push(policy.redact(&format!("{host}：{e}"))),
     }
   }
-  Err(errors.join("；"))
+  best.ok_or_else(|| errors.join("；"))
 }
 
 /// 按镜像源顺序要试的仓库地址，和拉取一样：（地址，是不是镜像源）。
@@ -491,11 +505,7 @@ impl<'a> Repo<'a> {
         )
         .await
         .and_then(|body| platforms(&body));
-      let config = supported
-        .as_ref()
-        .is_none_or(|list| list.iter().any(|p| p == host))
-        .then(|| config.to_string());
-      return (config, supported);
+      return (Some(config.to_string()), supported);
     }
     let supported = platforms(&body);
     let Some(child) = body["manifests"]
@@ -791,6 +801,84 @@ mod tests {
     assert_eq!(
       platforms(&config),
       Some(vec!["linux/amd64".to_string()])
+    );
+  }
+
+  #[tokio::test]
+  async fn blob_fallback_finds_single_arch_platform() {
+    check_single_arch_fallback(false).await;
+  }
+
+  #[tokio::test]
+  async fn manifest_fallback_keeps_single_arch_config() {
+    check_single_arch_fallback(true).await;
+  }
+
+  async fn check_single_arch_fallback(fail_manifest: bool) {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let listener =
+      tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let host = listener.local_addr().unwrap().to_string();
+    let server = tokio::spawn(async move {
+      for _ in 0..if fail_manifest { 5 } else { 6 } {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut socket = BufReader::new(socket);
+        let mut request = String::new();
+        socket.read_line(&mut request).await.unwrap();
+        let mut header = String::new();
+        loop {
+          header.clear();
+          if socket.read_line(&mut header).await.unwrap() == 0
+            || header == "\r\n"
+          {
+            break;
+          }
+        }
+        let (status, digest, body) = if request.starts_with("HEAD ") {
+          ("200 OK", "Docker-Content-Digest: sha256:abc\r\n", "")
+        } else if request.contains("/mirror/")
+          && (fail_manifest || request.contains("/blobs/"))
+        {
+          ("404 Not Found", "", "")
+        } else if request.contains("/manifests/") {
+          ("200 OK", "", r#"{"config":{"digest":"sha256:def"}}"#)
+        } else {
+          ("200 OK", "", r#"{"os":"linux","architecture":"amd64"}"#)
+        };
+        let response = format!(
+          "HTTP/1.1 {status}\r\n{digest}Connection: close\r\nContent-Length: {}\r\n\r\n{body}",
+          body.len()
+        );
+        socket
+          .get_mut()
+          .write_all(response.as_bytes())
+          .await
+          .unwrap();
+      }
+    });
+    let policy: PullPolicy = serde_json::from_value(serde_json::json!({
+      "mirrors": {(host.clone()): [format!("{host}/mirror")]}, "mirrors_only": false, "attempt_timeout_secs": 5,
+    })).unwrap();
+    let clients = Clients {
+      direct: reqwest::Client::builder().no_proxy().build().unwrap(),
+      proxy: None,
+    };
+    let result = resolve_one(
+      &clients,
+      &format!("{host}/app:latest"),
+      &policy,
+      "linux/arm64",
+    )
+    .await
+    .unwrap();
+    server.abort();
+    assert_eq!(
+      result,
+      (
+        "sha256:abc".into(),
+        Some("sha256:def".into()),
+        Some(vec!["linux/amd64".into()])
+      )
     );
   }
 

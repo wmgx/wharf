@@ -2,7 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { useLocation, useSearchParams } from "react-router-dom";
 import { usePoll } from "@/api";
 import { useActions } from "@/components/actions";
-import { BuildEditor, cleanHow, howOf, howReady, type BuildHow } from "@/components/build-editor";
+import { BuildEditor } from "@/components/build-editor";
+import { cleanHow, howOf, howReady, type BuildHow } from "@/lib/build-how";
 import { CodeEditor } from "@/components/code-editor";
 import { CodeBlock, SectionTitle } from "@/components/common";
 import { ComposeField, MirrorHint, composePorts, parseCompose } from "@/components/compose";
@@ -50,7 +51,6 @@ function SettingsFields({ svc, draft, set, dirty, changed, onReset, onSubmit }: 
   const build = "build" in source ? source.build : null;
   const [env, setEnv] = useState(formatEnv(draft.env));
   const [ports, setPorts] = useState<PortSpec[]>(() => isCompose && !draft.ports?.length ? composePorts(parseCompose(source.compose.content ?? "")) : (draft.ports ?? []));
-  const [portsTouched, setPortsTouched] = useState(!!draft.ports?.length);
   const [how, setHow] = useState<BuildHow>(howOf(build));
   const [memory, setMemory] = useState(draft.limits?.memory_mb?.toString() ?? "");
   const [cpus, setCpus] = useState(draft.limits?.cpu_milli ? String(draft.limits.cpu_milli / 1000) : "");
@@ -80,7 +80,6 @@ function SettingsFields({ svc, draft, set, dirty, changed, onReset, onSubmit }: 
       setCpus(savedCpus);
     }
   }, [savedMemory, savedCpus]);
-  useEffect(() => { if (isCompose && changed.length && !portsTouched && !draft.ports?.length && ports.length) set({ ports: portsFor(ports, true) }); }, [isCompose, changed.length, portsTouched, draft.ports, ports, set]);
   const { data } = usePoll<{ series: Record<string, [number, number][]> }>(isCompose ? null : `/api/metrics?subject=${encodeURIComponent(svc.name)}&range=7d`, 60000);
   const points = data?.series["svc.mem"] ?? [];
   const peak = points.reduce((max, [, value]) => Math.max(max, value), 0);
@@ -98,7 +97,7 @@ function SettingsFields({ svc, draft, set, dirty, changed, onReset, onSubmit }: 
       {isImage ? <Field label="镜像" htmlFor="service-image">
         <Input id="service-image" value={source.image} onChange={(e) => set({ source: { image: e.target.value } })} />
       </Field> : isCompose ? <Field label="compose.yaml" htmlFor="service-compose">
-        <ComposeField id="service-compose" value={compose} onChange={(value) => { const next = !portsTouched ? composePorts(parseCompose(value)) : ports; if (!portsTouched) setPorts(next); set({ source: { compose: { ...source.compose, content: value } }, ...(!portsTouched ? { ports: portsFor(next, true) } : {}) }); }} info={composeInfo} />
+        <ComposeField id="service-compose" value={compose} onChange={(value) => set({ source: { compose: { ...source.compose, content: value } } })} info={composeInfo} />
       </Field> : build?.git ? <div className="grid grid-cols-[minmax(0,1fr)_8rem] gap-3">
         <Field label="仓库" htmlFor="service-repo">
           <Input id="service-repo" value={build.git.repo} onChange={(e) => set({ source: { build: { ...build, git: { ...build.git!, repo: e.target.value } } } })} />
@@ -123,7 +122,7 @@ function SettingsFields({ svc, draft, set, dirty, changed, onReset, onSubmit }: 
     </Panel>
     <SectionTitle>端口</SectionTitle>
     <Panel className="p-4">
-      <PortsEditor ports={ports} compose={isCompose} onChange={(value) => { setPortsTouched(true); setPorts(value); set({ ports: portsFor(value, isCompose) }); }} />
+      <PortsEditor ports={ports} compose={isCompose} onChange={(value) => { setPorts(value); set({ ports: portsFor(value, isCompose) }); }} />
     </Panel>
     {isCompose && composeInfo.services.length > 1 && <>
       <SectionTitle>设置作用的容器</SectionTitle>

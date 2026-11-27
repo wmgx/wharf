@@ -9,6 +9,7 @@
 use serde_json::json;
 use wharf_api_types::{
   ApiError,
+  agent::ResolveCommit,
   plan::{Action, Impact, Layer},
   spec::{EdgeAppSpec, EdgeKind},
 };
@@ -19,16 +20,18 @@ use crate::{
   edge::{account, provider_kind},
   planner::{Builder, DnsSpec, RemoteRef, Step},
   snapshot::{self, Snapshot},
+  state::AppState,
   world::{KIND_EDGE, KIND_ROUTE, World},
 };
 
 pub async fn edge_items(
+  state: &AppState,
   b: &mut Builder,
   snap: &Snapshot,
   current: &World,
   desired: &World,
 ) -> Result<(), ApiError> {
-  deploy_items(b, snap, current, desired).await?;
+  deploy_items(state, b, snap, current, desired).await?;
   domain_items(b, snap, desired).await
 }
 
@@ -54,6 +57,7 @@ pub fn fingerprint(name: &str, spec: &EdgeAppSpec) -> String {
 }
 
 async fn deploy_items(
+  state: &AppState,
   b: &mut Builder,
   snap: &Snapshot,
   current: &World,
@@ -83,6 +87,7 @@ async fn deploy_items(
     if up_to_date && !pending {
       continue;
     }
+    let commit = plan_build(state, b, snap, name, &app.spec).await?;
     let remote_exists = if target_changed {
       let provider =
         snapshot::edge_provider(account(snap, &app.spec.account)?)?;
@@ -104,22 +109,92 @@ async fn deploy_items(
       remote_exists,
       pending || last == Some(DEPLOYING),
     );
+    let mut after = json!({ "project": project });
+    let reason = if let Some(sha) = &commit {
+      after["commit"] = json!(&sha[..12]);
+      format!("{reason}（commit {}）", &sha[..12])
+    } else {
+      reason
+    };
     let id = b.item(
       format!("{KIND_EDGE}/{name}"),
       Layer::Edge,
       action,
       None,
-      Some(json!({ "project": project })),
+      Some(after),
       impacts,
       reason,
     );
     b.step(
       vec![id],
       format!("发布 {name}"),
-      Step::EdgeDeploy { app: name.clone() },
+      Step::EdgeDeploy {
+        app: name.clone(),
+        commit,
+      },
     );
   }
   Ok(())
+}
+
+async fn plan_build(
+  state: &AppState,
+  b: &mut Builder,
+  snap: &Snapshot,
+  name: &str,
+  spec: &EdgeAppSpec,
+) -> Result<Option<String>, ApiError> {
+  let Some(src) = &spec.source else {
+    return Ok(None);
+  };
+  if src.script.is_some()
+    && src.upload.is_some()
+    && spec.kind == EdgeKind::Worker
+  {
+    return Ok(None);
+  }
+  let git = src.git.as_ref();
+  let server = match crate::edge::builder(state, snap, spec) {
+    Ok(s) => s,
+    Err(e) if git.is_some() => return Err(e),
+    Err(_) => return Ok(None),
+  };
+  if state.hub.is_online(&server)
+    && !state.hub.supports_build_v2(&server)
+  {
+    if git.is_some_and(|g| g.user.is_some()) {
+      return Err(crate::build::old_git_agent(&server));
+    }
+    b.warnings.push(crate::build::old_agent_warning(&server));
+  }
+  let Some(git) = git else { return Ok(None) };
+  let fetch = crate::build::code_fetch(
+    state,
+    &crate::secret_policy::non_system_secrets(&snap.secrets),
+    &format!("边缘应用 {name}"),
+    None,
+    Some(git),
+    None,
+  )?;
+  let commit = crate::build::plan_commit(
+    state,
+    &server,
+    ResolveCommit {
+      service: name.into(),
+      fetch,
+      pull: snapshot::committed_pull_policy(&snap.world, &server),
+    },
+  )
+  .await
+  .map_err(|e| {
+    e.with_hint("检查 Git 仓库地址、分支名和私有仓库令牌")
+  })?;
+  if commit.len() != 40
+    || !commit.bytes().all(|b| b.is_ascii_hexdigit())
+  {
+    return Err(ApiError::invalid("Git 版本必须是 40 位 commit"));
+  }
+  Ok(Some(commit))
 }
 
 pub(crate) fn deploy_decision(
@@ -479,12 +554,47 @@ mod tests {
     );
     snap.pending.edge_deploys.insert("site".into());
     let mut b = Builder::default();
-    deploy_items(&mut b, &snap, &snap.world, &snap.world)
+    let state = crate::rules::tests::test_state();
+    deploy_items(&state, &mut b, &snap, &snap.world, &snap.world)
       .await
       .unwrap();
     assert_eq!(b.items.len(), 1);
     assert_eq!(b.items[0].address, "edge/site");
     assert!(b.items[0].reason.contains("上次发布没有完成"));
+  }
+
+  #[tokio::test]
+  async fn offline_builder_does_not_report_legacy_agent() {
+    let state = crate::rules::tests::test_state();
+    state.hub.mock_agent("s1", false, |_| unreachable!());
+    state.hub.enable_mock_build_v2("s1");
+    state.hub.disconnect("s1");
+    let spec = |source| {
+      serde_json::from_value::<EdgeAppSpec>(json!({
+      "account": "cf", "kind": "pages", "builder": "s1", "source": source,
+    })).unwrap()
+    };
+    let snap = Snapshot::default();
+    let mut b = Builder::default();
+    let upload = spec(json!({"upload": "abc"}));
+    assert!(
+      plan_build(&state, &mut b, &snap, "site", &upload)
+        .await
+        .unwrap()
+        .is_none()
+    );
+    assert!(b.warnings.is_empty());
+    let git = spec(
+      json!({"git": {"repo": "https://example.test/site", "ref": "main", "user": "ci"}}),
+    );
+    let err = plan_build(&state, &mut b, &snap, "site", &git)
+      .await
+      .unwrap_err();
+    assert_eq!(err.code, ErrorCode::AgentOffline);
+    assert_eq!(
+      state.hub.require_build_v2("s1").unwrap_err().code,
+      ErrorCode::AgentOffline
+    );
   }
 
   #[tokio::test]
@@ -512,7 +622,10 @@ mod tests {
         ..Snapshot::default()
       };
       let mut b = Builder::default();
-      deploy_items(&mut b, &snap, &world, &world).await.unwrap();
+      let state = crate::rules::tests::test_state();
+      deploy_items(&state, &mut b, &snap, &world, &world)
+        .await
+        .unwrap();
       b.items.len()
     };
     // 没有记录：沿用旧判断，配置没变就不发布。

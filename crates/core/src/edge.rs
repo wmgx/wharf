@@ -219,7 +219,7 @@ pub fn edge_not_found(name: &str) -> ApiError {
 }
 
 /// 执行 wrangler 的服务器：指定的，或在线的海外服务器，或任一在线服务器。
-fn builder(
+pub(crate) fn builder(
   state: &AppState,
   snap: &Snapshot,
   spec: &EdgeAppSpec,
@@ -246,18 +246,75 @@ fn builder(
     })
 }
 
-/// 单文件脚本是不是 ES Module 格式。
-fn is_module(content: &str) -> bool {
-  content.contains("export default") || content.contains("export {")
+/// .mjs / .cjs 显式选格式，.js 只识别明显的导出声明。
+fn is_module(
+  filename: &str,
+  content: &str,
+) -> Result<bool, ApiError> {
+  if filename.ends_with(".mjs") {
+    return Ok(true);
+  }
+  if filename.ends_with(".cjs") {
+    return Ok(false);
+  }
+  let content = content.trim_start_matches('\u{feff}');
+  let mut uncertain_context = false;
+  let mut ambiguous = false;
+  for line in content.split_inclusive('\n') {
+    let mut inline = "";
+    if line.trim_start().starts_with("//") {
+      continue;
+    }
+    for statement in line.split_inclusive(';') {
+      if let Some(after) =
+        statement.trim_start().strip_prefix("export")
+      {
+        let tail = after.trim_start();
+        let declaration = tail.starts_with(['{', '*'])
+          || (after.starts_with(char::is_whitespace)
+            && [
+              "default", "const", "let", "var", "function", "class",
+              "async",
+            ]
+            .iter()
+            .any(|&keyword| {
+              tail.strip_prefix(keyword).is_some_and(|rest| {
+                rest.is_empty()
+                  || rest.starts_with(char::is_whitespace)
+                  || rest.starts_with(['{', '(', '[', '\'', '"'])
+              })
+            }));
+        if declaration || tail.starts_with("/*") || tail.is_empty() {
+          // 行首也可能处在多行模板字符串或注释里。只有明显的导出才自动选模块。
+          if declaration
+            && !uncertain_context
+            && !inline.contains(['\'', '"', '/', '`', '\\'])
+          {
+            return Ok(true);
+          }
+          ambiguous = true;
+        }
+      }
+      inline = &line[..inline.len() + statement.len()];
+    }
+    uncertain_context |=
+      line.contains(['`', '\\']) || line.contains("/*");
+  }
+  if ambiguous {
+    return Err(ApiError::invalid("无法确定单文件 Worker 的脚本格式")
+      .with_hint("用 --script <文件.mjs> 指定 ES Module，或用 --script <文件.cjs> 指定旧式 Service Worker"));
+  }
+  Ok(false)
 }
 
 // DEPLOY
 
-/// 发布边缘应用的代码。`force`：git 来源也拉最新（发布本来就总是取最新）。
+/// 发布边缘应用的代码。有计划固定的 commit 就按它构建。
 pub async fn deploy(
   state: &AppState,
   snap: &Snapshot,
   name: &str,
+  commit: Option<String>,
   progress: &ProgressFn,
   cancel: &CancellationToken,
 ) -> Result<(), ApiError> {
@@ -288,7 +345,7 @@ pub async fn deploy(
     ));
     let script = WorkerScript {
       filename: filename.to_string(),
-      modules: is_module(&content),
+      modules: is_module(filename, &content)?,
       content,
     };
     with_timeout(
@@ -299,6 +356,9 @@ pub async fn deploy(
     progress(format!("已发布 Worker {project}"));
   } else {
     let server = builder(state, snap, spec)?;
+    if src.git.as_ref().is_some_and(|g| g.user.is_some()) {
+      state.hub.require_build_v2(&server)?;
+    }
     let branch = match spec.kind {
       EdgeKind::Pages => {
         let p = with_timeout(
@@ -319,7 +379,7 @@ pub async fn deploy(
       &format!("边缘应用 {name}"),
       src.upload.as_ref(),
       src.git.as_ref(),
-      None,
+      commit,
     )?;
     let server_row = &snap.world.servers[&server];
     progress(format!("在 {server} 上执行 wrangler"));
@@ -520,7 +580,51 @@ mod tests {
 
   #[test]
   fn detects_module_workers() {
-    assert!(is_module("export default { fetch() {} }"));
-    assert!(!is_module("addEventListener('fetch', e => {})"));
+    assert!(
+      is_module("worker.js", "export default { fetch() {} }")
+        .unwrap()
+    );
+    assert!(
+      !is_module("worker.js", "addEventListener('fetch', e => {})")
+        .unwrap()
+    );
+  }
+}
+
+#[cfg(test)]
+mod module_tests {
+  use super::is_module;
+
+  #[test]
+  fn recognizes_top_level_exports_only() {
+    for src in [
+      "export{h as default}",
+      "export const x=1",
+      "let x=1\nexport*from'./dep.js'",
+      "function h(){};export{h as default}",
+    ] {
+      assert!(is_module("worker.js", src).unwrap(), "{src}");
+    }
+    for src in [
+      "// export default\naddEventListener()",
+      "const s=\"export default\";addEventListener()",
+      "const s=/[;}export default]/",
+      "let x=`a ${{v:`b ${1}`}} export default`",
+    ] {
+      assert!(!is_module("worker.js", src).unwrap(), "{src}");
+    }
+  }
+
+  #[test]
+  fn detects_exports_after_postfix_division_or_requires_explicit_format()
+   {
+    let script = "let i = 1; const x = i++ / 2; export default { fetch() { return new Response(String(x)); } };";
+    let multiline = script.replace("; export", ";\nexport");
+    assert!(is_module("worker.js", &multiline).unwrap());
+    assert!(is_module("worker.js", script).is_err());
+    assert!(is_module("worker.mjs", script).unwrap());
+    let literal = "const text = `\nexport default {}\n`; addEventListener('fetch', f);";
+    assert!(is_module("worker.js", literal).is_err());
+    assert!(!is_module("worker.cjs", literal).unwrap());
   }
 }

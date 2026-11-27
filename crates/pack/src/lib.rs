@@ -56,7 +56,22 @@ fn io_err(path: &Path, e: impl std::fmt::Display) -> ApiError {
 
 /// 要打包的文件（相对路径，按路径排序）。
 pub fn list_files(dir: &Path) -> Result<Vec<PathBuf>, ApiError> {
+  list_files_with(dir, &[])
+}
+
+pub fn list_files_with(
+  dir: &Path,
+  keep: &[PathBuf],
+) -> Result<Vec<PathBuf>, ApiError> {
+  if !dir.is_dir() {
+    return Err(ApiError::invalid(format!(
+      "{} 不是目录",
+      dir.display()
+    )));
+  }
   let walker = ignore::WalkBuilder::new(dir)
+    .parents(false)
+    .ignore(false)
     .hidden(false)
     .git_ignore(true)
     .git_exclude(true)
@@ -81,18 +96,122 @@ pub fn list_files(dir: &Path) -> Result<Vec<PathBuf>, ApiError> {
       .to_path_buf();
     files.push(rel);
   }
+  let root = dir.canonicalize().map_err(|e| io_err(dir, e))?;
+  for rel in keep {
+    wharf_api_types::symlink::check_relative_entry(rel)?;
+    if rel.components().any(|c| c.as_os_str() == ".git") {
+      return Err(io_err(rel, "代码包不包含 .git"));
+    }
+    let path = root.join(rel);
+    if path.is_file() {
+      let resolved =
+        path.canonicalize().map_err(|e| io_err(&path, e))?;
+      if !resolved.starts_with(&root) {
+        return Err(ApiError::invalid(format!(
+          "{} 指向打包目录之外",
+          rel.display()
+        )));
+      }
+      files.push(rel.clone());
+      if resolved != path {
+        let target =
+          resolved.strip_prefix(&root).expect("已检查目录");
+        if target.components().any(|c| c.as_os_str() == ".git") {
+          return Err(io_err(rel, "代码包不包含 .git"));
+        }
+        files.push(target.to_path_buf());
+      }
+    }
+  }
   files.sort();
+  files.dedup();
   Ok(files)
 }
 
 pub fn pack(dir: &Path) -> Result<Packed, ApiError> {
-  if !dir.is_dir() {
-    return Err(ApiError::invalid(format!(
-      "{} 不是目录",
-      dir.display()
-    )));
+  pack_with(dir, &[])
+}
+
+pub fn pack_with(
+  dir: &Path,
+  keep: &[PathBuf],
+) -> Result<Packed, ApiError> {
+  pack_files(dir, list_files_with(dir, keep)?)
+}
+
+pub fn pack_file(file: &Path) -> Result<Packed, ApiError> {
+  let name =
+    file.file_name().ok_or_else(|| io_err(file, "缺少文件名"))?;
+  if !file.symlink_metadata().is_ok_and(|m| m.is_file()) {
+    return Err(io_err(file, "需要普通文件"));
   }
-  let files = list_files(dir)?;
+  pack_files(
+    file
+      .parent()
+      .filter(|p| !p.as_os_str().is_empty())
+      .unwrap_or(Path::new(".")),
+    vec![name.into()],
+  )
+}
+
+pub fn pack_files(
+  dir: &Path,
+  files: Vec<PathBuf>,
+) -> Result<Packed, ApiError> {
+  let (bytes, sha256, _) = write_archive(dir, &files, Vec::new())?;
+  Ok(Packed {
+    bytes,
+    sha256,
+    files: files.len(),
+  })
+}
+
+pub fn pack_to_file(
+  dir: &Path,
+  out: &Path,
+  keep: &[PathBuf],
+) -> Result<(String, usize, usize), ApiError> {
+  let files = list_files_with(dir, keep)?;
+  let file =
+    std::fs::File::create(out).map_err(|e| io_err(out, e))?;
+  match write_archive(dir, &files, std::io::BufWriter::new(file)) {
+    Ok((_, sha, len)) => Ok((sha, len, files.len())),
+    Err(e) => {
+      let _ = std::fs::remove_file(out);
+      Err(e)
+    }
+  }
+}
+
+struct LimitWriter<W> {
+  inner: W,
+  written: usize,
+  hash: Sha256,
+  exceeded: bool,
+}
+
+impl<W: Write> Write for LimitWriter<W> {
+  fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+    if self.exceeded || buf.len() > MAX_ARCHIVE - self.written {
+      self.exceeded = true;
+      return Err(std::io::Error::other("代码包压缩后超过 512 MiB"));
+    }
+    let n = self.inner.write(buf)?;
+    self.written += n;
+    self.hash.update(&buf[..n]);
+    Ok(n)
+  }
+
+  fn flush(&mut self) -> std::io::Result<()> {
+    self.inner.flush()
+  }
+}
+
+fn write_archive<W: Write>(
+  dir: &Path,
+  files: &[PathBuf],
+  out: W,
+) -> Result<(W, String, usize), ApiError> {
   if files.is_empty() {
     return Err(ApiError::invalid(format!(
       "{} 里没有要部署的文件",
@@ -101,29 +220,33 @@ pub fn pack(dir: &Path) -> Result<Packed, ApiError> {
   }
   let root = dir.canonicalize().map_err(|e| io_err(dir, e))?;
   let mut links = BTreeMap::new();
-  for rel in &files {
+  for rel in files {
+    wharf_api_types::symlink::check_relative_entry(rel)?;
     let path = root.join(rel);
+    if path.canonicalize().is_ok_and(|p| !p.starts_with(&root)) {
+      return Err(io_err(rel, "软链接指向打包目录之外"));
+    }
     if path
       .symlink_metadata()
       .map_err(|e| io_err(&path, e))?
       .is_symlink()
     {
       let target = path.read_link().map_err(|e| io_err(&path, e))?;
-      if path.canonicalize().is_ok_and(|p| !p.starts_with(&root)) {
-        return Err(ApiError::invalid(format!(
-          "软链接 {} 指向打包目录之外",
-          rel.display()
-        )));
-      }
       links.insert(rel.clone(), target);
     }
   }
   wharf_api_types::symlink::validate_symlinks(&links)?;
-  let gz = GzBuilder::new()
-    .mtime(0)
-    .write(Vec::new(), Compression::default());
+  let gz = GzBuilder::new().mtime(0).write(
+    LimitWriter {
+      inner: out,
+      written: 0,
+      hash: Sha256::new(),
+      exceeded: false,
+    },
+    Compression::default(),
+  );
   let mut tar = tar::Builder::new(gz);
-  for rel in &files {
+  for rel in files {
     let path = dir.join(rel);
     let meta = std::fs::symlink_metadata(&path)
       .map_err(|e| io_err(&path, e))?;
@@ -151,25 +274,18 @@ pub fn pack(dir: &Path) -> Result<Packed, ApiError> {
     header.set_mode(if executable(&meta) { 0o755 } else { 0o644 });
     let file =
       std::fs::File::open(&path).map_err(|e| io_err(&path, e))?;
-    tar
-      .append_data(&mut header, name, file)
-      .map_err(|e| io_err(&path, e))?;
-    if tar.get_ref().get_ref().len() > MAX_ARCHIVE {
-      return Err(too_big());
+    if let Err(e) = tar.append_data(&mut header, name, file) {
+      return Err(if tar.get_ref().get_ref().exceeded {
+        too_big()
+      } else {
+        io_err(&path, e)
+      });
     }
   }
-  let mut gz = tar.into_inner().map_err(|e| io_err(dir, e))?;
-  gz.flush().map_err(|e| io_err(dir, e))?;
-  let bytes = gz.finish().map_err(|e| io_err(dir, e))?;
-  if bytes.len() > MAX_ARCHIVE {
-    return Err(too_big());
-  }
-  let sha256 = hex::encode(Sha256::digest(&bytes));
-  Ok(Packed {
-    bytes,
-    sha256,
-    files: files.len(),
-  })
+  let gz = tar.into_inner().map_err(|e| io_err(dir, e))?;
+  let mut out = gz.finish().map_err(|e| io_err(dir, e))?;
+  out.flush().map_err(|e| io_err(dir, e))?;
+  Ok((out.inner, hex::encode(out.hash.finalize()), out.written))
 }
 
 fn too_big() -> ApiError {
@@ -192,6 +308,49 @@ fn executable(_: &std::fs::Metadata) -> bool {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn selected_dockerfile_survives_ignore_and_single_file_pack_stays_single()
+   {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("dist");
+    std::fs::create_dir(&src).unwrap();
+    std::fs::write(tmp.path().join(".gitignore"), "dist/\n").unwrap();
+    std::fs::write(
+      src.join(".dockerignore"),
+      "Dockerfile\n.dockerignore\n",
+    )
+    .unwrap();
+    std::fs::write(src.join("Dockerfile"), "FROM alpine").unwrap();
+    std::fs::write(src.join("app.js"), "console.log(1)").unwrap();
+    assert_eq!(list_files(&src).unwrap(), [PathBuf::from("app.js")]);
+    let files = list_files_with(
+      &src,
+      &["Dockerfile".into(), ".dockerignore".into()],
+    )
+    .unwrap();
+    assert_eq!(
+      files,
+      [
+        PathBuf::from(".dockerignore"),
+        "Dockerfile".into(),
+        "app.js".into()
+      ]
+    );
+    assert_eq!(pack_file(&src.join("app.js")).unwrap().files, 1);
+  }
+
+  #[test]
+  fn writer_rejects_over_limit_before_consuming_more_input() {
+    let mut writer = LimitWriter {
+      inner: Vec::new(),
+      written: MAX_ARCHIVE - 1,
+      hash: Sha256::new(),
+      exceeded: false,
+    };
+    assert!(writer.write_all(b"ab").is_err());
+    assert!(writer.inner.is_empty());
+  }
 
   #[cfg(unix)]
   #[test]

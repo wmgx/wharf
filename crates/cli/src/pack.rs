@@ -1,37 +1,56 @@
-//! `wharf deploy <目录>`：打包规则在 `wharf-pack` 里，和 agent 打包服务器目录一致。
+//! 预览只读即将进入包的文件。
 
-use std::path::PathBuf;
+use std::{
+  collections::BTreeSet,
+  path::{Path, PathBuf},
+};
 
-use wharf_api_types::build::SourceTree;
-pub use wharf_pack::pack;
+use wharf_api_types::{
+  build::SourceTree, symlink::check_relative_entry,
+};
 
-/// 部署前在本机预览：用和 agent 一样的逻辑判断语言和启动命令。
-pub struct LocalTree(pub PathBuf);
+pub struct PackedTree<'a> {
+  pub root: &'a Path,
+  pub allowed: BTreeSet<PathBuf>,
+}
 
-impl SourceTree for LocalTree {
+impl SourceTree for PackedTree<'_> {
+  fn exists(&self, path: &str) -> bool {
+    check_relative_entry(Path::new(path)).is_ok_and(|p| {
+      self.allowed.contains(&p) && self.root.join(p).is_file()
+    })
+  }
+
   fn read(&self, path: &str) -> Option<String> {
-    let path = self.0.join(path);
-    let meta = std::fs::metadata(&path).ok()?;
-    if !meta.is_file() || meta.len() > 1024 * 1024 {
+    if !self.exists(path) {
       return None;
     }
-    std::fs::read_to_string(path).ok()
+    let path = self.root.join(path);
+    let target = path.canonicalize().ok()?;
+    if !target.starts_with(self.root)
+      || target.metadata().ok()?.len() > 1024 * 1024
+    {
+      return None;
+    }
+    std::fs::read_to_string(target).ok()
   }
 
   fn list(&self, dir: &str) -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(self.0.join(dir)) else {
-      return vec![];
-    };
-    entries
-      .filter_map(Result::ok)
-      .map(|e| {
-        let name = e.file_name().to_string_lossy().to_string();
-        if e.file_type().is_ok_and(|t| t.is_dir()) {
+    self
+      .allowed
+      .iter()
+      .filter_map(|p| {
+        let rel = p.strip_prefix(dir).ok()?;
+        let mut parts = rel.iter();
+        let name = parts.next()?.to_str()?;
+        Some(if parts.next().is_some() {
           format!("{name}/")
         } else {
-          name
-        }
+          name.into()
+        })
       })
+      .collect::<BTreeSet<_>>()
+      .into_iter()
       .collect()
   }
 }

@@ -58,6 +58,69 @@ pub struct Generated {
   pub images: Vec<String>,
 }
 
+impl Generated {
+  pub fn default_port(&self) -> u16 {
+    match self.language {
+      "python" | "node_then_python" => 8000,
+      "node" => 3000,
+      _ => 8080,
+    }
+  }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ResolvedDockerfile {
+  Inline {
+    content: String,
+    images: Vec<String>,
+  },
+  File {
+    path: String,
+    content: String,
+    images: Vec<String>,
+  },
+  Template(Generated),
+}
+
+pub fn resolve_dockerfile(
+  tree: &dyn SourceTree,
+  inline: Option<&str>,
+  dockerfile: Option<&str>,
+  opts: &Options,
+) -> Result<ResolvedDockerfile, ApiError> {
+  if let Some(content) = inline {
+    return Ok(ResolvedDockerfile::Inline {
+      content: content.into(),
+      images: from_images(content),
+    });
+  }
+  let path = dockerfile.unwrap_or("Dockerfile");
+  if opts.template.is_none()
+    && (dockerfile.is_some()
+      || (opts.base.is_none()
+        && opts.install.is_none()
+        && opts.start.is_none()))
+  {
+    if tree.exists(path) {
+      let content = tree.read(path).ok_or_else(|| {
+        ApiError::invalid(format!(
+          "读取 {path} 失败：文件过大或不是 UTF-8 文本"
+        ))
+      })?;
+      return Ok(ResolvedDockerfile::File {
+        path: path.into(),
+        images: from_images(&content),
+        content,
+      });
+    }
+    if dockerfile.is_some() {
+      return Err(ApiError::invalid(format!("代码里没有 {path}"))
+        .with_hint("检查 --dockerfile 路径是否正确，或是否被 .gitignore/.dockerignore 排除了"));
+    }
+  }
+  generate(tree, opts).map(ResolvedDockerfile::Template)
+}
+
 pub fn generate(
   tree: &dyn SourceTree,
   opts: &Options,
@@ -92,10 +155,7 @@ pub fn detect(
   if tree.exists("package.json") {
     return Ok("node");
   }
-  let has_py = tree.exists("requirements.txt")
-    || tree.exists("pyproject.toml")
-    || tree.list("").iter().any(|f| f.ends_with(".py"));
-  if has_py {
+  if has_python_files(tree) {
     return Ok("python");
   }
   if tree.exists("index.html") {
@@ -107,6 +167,12 @@ pub fn detect(
     )
     .with_hint("用 --template 指定模板，或加一个 Dockerfile，或用 --path 指到项目所在的子目录"),
   )
+}
+
+fn has_python_files(tree: &dyn SourceTree) -> bool {
+  tree.exists("requirements.txt")
+    || tree.exists("pyproject.toml")
+    || tree.list("").iter().any(|f| f.ends_with(".py"))
 }
 
 fn has_main(tree: &dyn SourceTree, dir: &str) -> bool {
@@ -229,7 +295,8 @@ struct PyStart {
 
 fn python_start(
   tree: &dyn SourceTree,
-  deps: &str,
+  requirements: Option<&str>,
+  pyproject: Option<&str>,
 ) -> Result<PyStart, ApiError> {
   if let Some(web) = tree.read("Procfile").and_then(|p| {
     p.lines().find_map(|l| {
@@ -241,7 +308,9 @@ fn python_start(
       extra: None,
     });
   }
-  let need = |pkg: &'static str| (!deps.contains(pkg)).then_some(pkg);
+  let need = |pkg: &'static str| {
+    (!python_has_dep(requirements, pyproject, pkg)).then_some(pkg)
+  };
   for file in ["main.py", "app.py", "server.py", "asgi.py", "wsgi.py"]
   {
     let Some(src) = tree.read(file) else { continue };
@@ -295,42 +364,25 @@ fn python(
 ) -> Result<Generated, ApiError> {
   let requirements = tree.read("requirements.txt");
   let pyproject = tree.read("pyproject.toml");
-  let deps = format!(
-    "{}\n{}",
-    requirements.as_deref().unwrap_or_default(),
-    pyproject.as_deref().unwrap_or_default()
-  )
-  .to_lowercase();
   let start = match opts.start {
     Some(cmd) => PyStart {
       cmd: cmd.to_string(),
       extra: None,
     },
-    None => python_start(tree, &deps)?,
+    None => python_start(
+      tree,
+      requirements.as_deref(),
+      pyproject.as_deref(),
+    )?,
   };
   let base = opts.base.unwrap_or(PYTHON_BASE);
-  let mut steps = Vec::new();
-  if let Some(install) = opts.install {
-    steps.push("COPY . .".to_string());
-    steps.push(run_line(install));
-  } else if requirements.is_some() {
-    steps.push("COPY requirements.txt ./".to_string());
-    steps.push("RUN pip install -r requirements.txt".to_string());
-  }
-  if opts.install.is_none() {
-    steps.push("COPY . .".to_string());
-  }
-  if opts.install.is_none()
-    && requirements.is_none()
-    && pyproject
-      .as_deref()
-      .is_some_and(|p| p.contains("[project]"))
-  {
-    steps.push("RUN pip install .".to_string());
-  }
-  if let Some(extra) = start.extra {
-    steps.push(format!("RUN pip install {extra}"));
-  }
+  let steps = python_install(
+    requirements.as_deref(),
+    pyproject.as_deref(),
+    opts.install,
+    start.extra,
+    true,
+  );
   let dockerfile = format!(
     r#"# Wharf 按 Python 模板生成
 FROM {base}
@@ -354,6 +406,137 @@ EXPOSE {port}
   })
 }
 
+fn python_has_dep(
+  requirements: Option<&str>,
+  project: Option<&str>,
+  pkg: &str,
+) -> bool {
+  fn normalized(req: &str) -> String {
+    let name = req
+      .trim()
+      .split(|c: char| c.is_whitespace() || "=<>!~[;@".contains(c))
+      .next()
+      .unwrap_or_default();
+    name
+      .split(['-', '_', '.'])
+      .filter(|s| !s.is_empty())
+      .collect::<Vec<_>>()
+      .join("-")
+      .to_ascii_lowercase()
+  }
+  let pkg = normalized(pkg);
+  requirements
+    .unwrap_or_default()
+    .lines()
+    .map(|l| l.split('#').next().unwrap_or_default().trim())
+    .any(|l| !l.starts_with('-') && normalized(l) == pkg)
+    || project.is_some_and(|p| {
+      let mut lines = p.lines().skip_while(|l| {
+        l.split('#').next().unwrap_or_default().trim() != "[project]"
+      });
+      lines.next();
+      let Some(first) = lines
+        .by_ref()
+        .take_while(|l| !l.trim_start().starts_with('['))
+        .find_map(|l| {
+          let (key, value) = l.split_once('=')?;
+          (key.trim() == "dependencies").then_some(value)
+        })
+      else {
+        return false;
+      };
+      let deps = std::iter::once(first)
+        .chain(lines.take_while(|l| !l.trim_start().starts_with('[')))
+        .collect::<Vec<_>>()
+        .join("\n");
+      let mut tokens = deps
+        .trim_start()
+        .strip_prefix('[')
+        .unwrap_or_default()
+        .chars()
+        .peekable();
+      while let Some(c) = tokens.next() {
+        match c {
+          ']' => break,
+          '#' => while tokens.next_if(|c| *c != '\n').is_some() {},
+          '\'' | '"' => {
+            let mut value = String::new();
+            while let Some(ch) = tokens.next() {
+              if ch == c {
+                break;
+              }
+              if ch == '\\' && c == '"' {
+                if let Some(escaped) = tokens.next() {
+                  value.push(escaped);
+                }
+              } else {
+                value.push(ch);
+              }
+            }
+            if normalized(&value) == pkg {
+              return true;
+            }
+          }
+          _ => {}
+        }
+      }
+      false
+    })
+}
+
+fn requirements_needs_tree(req: &str) -> bool {
+  req.lines().any(|l| {
+    let l = l.split('#').next().unwrap_or_default().trim();
+    [
+      "-r",
+      "--requirement",
+      "-c",
+      "--constraint",
+      "-e",
+      "--editable",
+      ".",
+      "/",
+      "file:",
+    ]
+    .iter()
+    .any(|p| l.starts_with(p))
+      || l.contains("@ file:")
+  })
+}
+
+fn python_install(
+  requirements: Option<&str>,
+  pyproject: Option<&str>,
+  install: Option<&str>,
+  extra: Option<&str>,
+  copy: bool,
+) -> Vec<String> {
+  let mut steps = Vec::new();
+  let early_install = copy
+    && install.is_none()
+    && requirements.is_some_and(|r| !requirements_needs_tree(r));
+  if early_install {
+    steps.push("COPY requirements.txt ./".into());
+    steps.push("RUN pip install -r requirements.txt".into());
+  }
+  if copy {
+    steps.push("COPY . .".into());
+  }
+  if let Some(install) = install {
+    steps.push(run_line(install));
+  } else if requirements.is_some() && !early_install {
+    steps.push("RUN pip install -r requirements.txt".into());
+  } else if requirements.is_none()
+    && pyproject.is_some_and(|p| p.contains("[project]"))
+  {
+    steps.push("RUN pip install --no-cache-dir .".into());
+  }
+  if let Some(extra) = extra {
+    steps.push(format!("RUN pip install {extra}"));
+  }
+  steps
+}
+
 /// `RUN` 一段 shell（可以多行）。
 fn run_line(script: &str) -> String {
   let json = serde_json::to_string(&["sh", "-c", script])
@@ -361,27 +544,46 @@ fn run_line(script: &str) -> String {
   format!("RUN {json}")
 }
 
+struct NodeStart {
+  cmd: String,
+  verify: Option<String>,
+}
+
 fn node_start(
   tree: &dyn SourceTree,
   pkg: &serde_json::Value,
-) -> Result<String, ApiError> {
+  build: bool,
+) -> Option<NodeStart> {
   if pkg["scripts"]["start"].is_string() {
-    return Ok("npm start".into());
+    return Some(NodeStart {
+      cmd: "npm start".into(),
+      verify: None,
+    });
   }
-  if let Some(main) = pkg["main"].as_str()
-    && tree.exists(main)
+  if let Some(main) =
+    pkg["main"].as_str().map(|s| s.trim_start_matches("./"))
+    && !main.is_empty()
+    && !main.starts_with('-')
+    && main.split('/').all(|part| !part.is_empty() && part != "..")
+    && main
+      .bytes()
+      .all(|c| c.is_ascii_alphanumeric() || b"._-/".contains(&c))
   {
-    return Ok(format!("node {main}"));
-  }
-  for file in ["server.js", "index.js", "app.js", "main.js"] {
-    if tree.exists(file) {
-      return Ok(format!("node {file}"));
+    let exists = tree.exists(main);
+    if exists || build {
+      return Some(NodeStart {
+        cmd: format!("node ./{main}"),
+        verify: (!exists).then(|| main.to_string()),
+      });
     }
   }
-  Err(
-    ApiError::invalid("猜不出 Node 服务的启动命令")
-      .with_hint("在 package.json 里加 start 脚本，或用 --start 指定，监听端口用环境变量 $PORT"),
-  )
+  ["server.js", "index.js", "app.js", "main.js"]
+    .into_iter()
+    .find(|file| tree.exists(file))
+    .map(|file| NodeStart {
+      cmd: format!("node {file}"),
+      verify: None,
+    })
 }
 
 fn node(
@@ -392,9 +594,23 @@ fn node(
     .read("package.json")
     .and_then(|s| serde_json::from_str(&s).ok())
     .unwrap_or_default();
-  let start = match opts.start {
-    Some(cmd) => cmd.to_string(),
-    None => node_start(tree, &pkg)?,
+  let has_build = pkg["scripts"]["build"].is_string();
+  let req = tree.read("requirements.txt");
+  let project = tree.read("pyproject.toml");
+  let (start, verify, extra, mixed) = if let Some(cmd) = opts.start {
+    (cmd.to_string(), None, None, has_build && runs_python(cmd))
+  } else if let Some(start) = node_start(tree, &pkg, has_build) {
+    (start.cmd, start.verify, None, false)
+  } else if has_build
+    && opts.template.is_none()
+    && has_python_files(tree)
+  {
+    let start =
+      python_start(tree, req.as_deref(), project.as_deref())?;
+    (start.cmd, None, start.extra, true)
+  } else {
+    return Err(ApiError::invalid("猜不出 Node 服务的启动命令")
+      .with_hint("在 package.json 里加 start 脚本，或用 --start 指定，监听端口用环境变量 $PORT"));
   };
   let base = opts.base.unwrap_or(NODE_BASE);
   let mut steps = Vec::new();
@@ -424,13 +640,23 @@ fn node(
         );
       }
       steps.push("COPY . .".to_string());
-      if pkg["scripts"]["build"].is_string() {
-        steps.push("RUN npm run build".to_string());
-      }
     }
   }
-  if pkg["scripts"]["build"].is_string() && runs_python(&start) {
-    return Ok(node_then_python(tree, opts, base, steps, start));
+  if has_build {
+    steps.push("RUN npm run build".into());
+  }
+  if let Some(entry) = &verify {
+    steps.push(format!("RUN test -f '{entry}' || {{ echo '构建完成但找不到 package.json 声明的入口文件：{entry}' >&2; exit 1; }}"));
+  }
+  if mixed {
+    let pip = python_install(
+      req.as_deref(),
+      project.as_deref(),
+      None,
+      extra,
+      false,
+    );
+    return Ok(node_then_python(opts, base, steps, start, &pip));
   }
   let dockerfile = format!(
     r#"# Wharf 按 Node 模板生成
@@ -444,7 +670,11 @@ EXPOSE {port}
 "#,
     port = opts.port,
     steps = steps.join("\n"),
-    run = cmd_line(&start),
+    run = match verify {
+      Some(entry) =>
+        format!("CMD {}", serde_json::json!(["node", entry])),
+      None => cmd_line(&start),
+    },
   );
   Ok(Generated {
     language: "node",
@@ -455,26 +685,40 @@ EXPOSE {port}
 }
 
 fn runs_python(start: &str) -> bool {
-  matches!(
-    start.split_whitespace().next(),
-    Some("python" | "python3")
-  )
+  start
+    .lines()
+    .filter(|l| !l.trim_start().starts_with('#'))
+    .any(|l| {
+      let cmd = l
+        .split_whitespace()
+        .find(|w| !w.contains('=') && *w != "exec");
+      matches!(
+        cmd.and_then(|w| w.rsplit('/').next()),
+        Some(
+          "python"
+            | "python3"
+            | "uvicorn"
+            | "gunicorn"
+            | "hypercorn"
+            | "daphne"
+            | "flask"
+            | "celery"
+            | "uv"
+            | "poetry"
+        )
+      )
+    })
 }
 
 /// 前端用 Node 构建、后端用 Python 跑：Node 只留在构建阶段，
 /// 最终镜像是 Python 加上构建好的代码目录。
 fn node_then_python(
-  tree: &dyn SourceTree,
   opts: &Options,
   base: &str,
   steps: Vec<String>,
   start: String,
+  pip: &[String],
 ) -> Generated {
-  let pip = if tree.exists("requirements.txt") {
-    "\nARG PIP_INDEX_URL\nARG PIP_TRUSTED_HOST\nRUN pip install --no-cache-dir -r requirements.txt"
-  } else {
-    ""
-  };
   let dockerfile = format!(
     r#"# Wharf 按 Node 模板生成：Node 构建，Python 运行
 FROM {base} AS build
@@ -484,18 +728,22 @@ WORKDIR /app
 RUN rm -rf node_modules
 
 FROM {PYTHON_BASE}
-ENV PYTHONUNBUFFERED=1 PORT={port}
+ARG PIP_INDEX_URL
+ARG PIP_TRUSTED_HOST
+ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 PORT={port}
 WORKDIR /app
-COPY --from=build /app /app{pip}
+COPY --from=build /app /app
+{pip}
 EXPOSE {port}
 {run}
 "#,
     port = opts.port,
     steps = steps.join("\n"),
     run = cmd_line(&start),
+    pip = pip.join("\n"),
   );
   Generated {
-    language: "node",
+    language: "node_then_python",
     dockerfile,
     start,
     images: vec![base.to_string(), PYTHON_BASE.to_string()],
@@ -528,35 +776,78 @@ EXPOSE {port}
   }
 }
 
+/// 由 Git 按实际请求的 origin 调用，凭据只走环境变量。
+pub const GIT_CREDENTIAL_HELPER: &str = r#"!f() {
+  [ "$1" = get ] || return 0
+  case "$GIT_TOKEN" in
+    *"$(printf '\r')"*|*'
+'*) return 1 ;;
+  esac
+  printf 'username=%s\npassword=%s\n' "$GIT_USER" "$GIT_TOKEN"
+}; f"#;
+
+pub fn git_no_proxy(mirror_host: Option<&str>) -> String {
+  let mut hosts = "127.0.0.1,localhost,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10".to_string();
+  if let Some(host) = mirror_host {
+    hosts.push(',');
+    hosts.push_str(host);
+  }
+  hosts
+}
+
+pub fn is_commit(s: &str) -> bool {
+  s.len() == 40 && s.bytes().all(|c| c.is_ascii_hexdigit())
+}
+
+/// `ls-remote` 的输出里挑：附注标签取 `^{}` 那行，否则优先分支，再是标签。
+pub fn pick_commit(out: &str, reference: &str) -> Option<String> {
+  let lines: Vec<(&str, &str)> = out
+    .lines()
+    .filter_map(|l| l.split_once('\t'))
+    .filter(|(sha, _)| is_commit(sha))
+    .collect();
+  let find = |want: &str| {
+    lines
+      .iter()
+      .find(|(_, r)| *r == want)
+      .map(|(s, _)| s.to_string())
+  };
+  find(&format!("refs/tags/{reference}^{{}}"))
+    .or_else(|| find(&format!("refs/heads/{reference}")))
+    .or_else(|| find(&format!("refs/tags/{reference}")))
+    .or_else(|| find(reference))
+}
+
 /// Dockerfile 里 `FROM` 用到的镜像（跳过前面阶段的别名和 `scratch`），构建前先按镜像源拉好。
 pub fn from_images(dockerfile: &str) -> Vec<String> {
-  let mut stages = Vec::new();
+  let mut stages = std::collections::BTreeSet::new();
+  let mut seen = std::collections::BTreeSet::new();
   let mut images = Vec::new();
   for line in dockerfile.lines() {
-    let mut words = line.split_whitespace();
+    let mut words = line
+      .split('#')
+      .next()
+      .unwrap_or_default()
+      .split_whitespace();
     if !words.next().is_some_and(|w| w.eq_ignore_ascii_case("FROM")) {
       continue;
     }
-    let mut words: Vec<&str> =
-      words.filter(|w| !w.starts_with("--")).collect();
-    if words.is_empty() {
+    let Some(image) = words.find(|w| !w.starts_with("--")) else {
       continue;
-    }
-    let image = words.remove(0).to_string();
-    if let [as_kw, alias] = words.as_slice()
-      && as_kw.eq_ignore_ascii_case("as")
+    };
+    let key = image.to_ascii_lowercase();
+    if key != "scratch"
+      && !image.contains('$')
+      && !stages.contains(&key)
+      && seen.insert(key)
     {
-      stages.push(alias.to_lowercase());
+      images.push(image.to_string());
     }
-    if image == "scratch"
-      || image.contains('$')
-      || stages[..stages.len().saturating_sub(1)]
-        .contains(&image.to_lowercase())
-      || images.contains(&image)
+    if let (Some(kw), Some(alias)) = (words.next(), words.next())
+      && kw.eq_ignore_ascii_case("as")
     {
-      continue;
+      stages.insert(alias.to_ascii_lowercase());
     }
-    images.push(image);
   }
   images
 }
@@ -597,6 +888,105 @@ mod tests {
       template: None,
       install: None,
     }
+  }
+
+  #[test]
+  fn pyproject_ignores_commented_dependencies_before_the_real_array()
+  {
+    let project = r#"[project]
+# dependencies = [
+keywords = ["web"]
+dependencies = [
+  "uvicorn",
+]
+"#;
+    assert!(python_has_dep(None, Some(project), "uvicorn"));
+  }
+
+  #[test]
+  fn dockerfile_resolution_prefers_explicit_template() {
+    let tree = Mem(BTreeMap::from([
+      ("Dockerfile", "FROM alpine"),
+      ("index.html", ""),
+    ]));
+    let built = resolve_dockerfile(
+      &tree,
+      None,
+      Some("Dockerfile"),
+      &opts(None),
+    )
+    .unwrap();
+    assert!(matches!(built, ResolvedDockerfile::File { .. }));
+    let o = Options {
+      template: Some("static"),
+      ..opts(None)
+    };
+    assert!(matches!(
+      resolve_dockerfile(&tree, None, Some("Dockerfile"), &o)
+        .unwrap(),
+      ResolvedDockerfile::Template(_)
+    ));
+    let options = Options {
+      base: Some("caddy:2"),
+      ..opts(None)
+    };
+    assert!(matches!(
+      resolve_dockerfile(&tree, None, None, &options).unwrap(),
+      ResolvedDockerfile::Template(_)
+    ));
+  }
+
+  #[test]
+  fn node_main_can_be_generated_by_build() {
+    let tree = Mem(BTreeMap::from([(
+      "package.json",
+      r#"{"main":"dist/server.js","scripts":{"build":"tsc"}}"#,
+    )]));
+    let g = generate(&tree, &opts(None)).unwrap();
+    assert!(
+      g.dockerfile
+        .contains("RUN npm run build\nRUN test -f 'dist/server.js'")
+    );
+    assert!(
+      g.dockerfile.contains(r#"CMD ["node","dist/server.js"]"#)
+    );
+    let tree = Mem(BTreeMap::from([(
+      "package.json",
+      r#"{"main":"dist/server.js"}"#,
+    )]));
+    assert!(generate(&tree, &opts(None)).is_err());
+  }
+
+  #[test]
+  fn mixed_stack_uses_python_port_and_dependencies() {
+    let tree = Mem(BTreeMap::from([
+      ("package.json", r#"{"scripts":{"build":"vite build"}}"#),
+      (
+        "pyproject.toml",
+        "[project]\ndependencies = [\n  'fastapi', # 'uvicorn'\n]\n[project.optional-dependencies]\nextras = ['uvicorn']",
+      ),
+      ("main.py", "app = FastAPI()"),
+    ]));
+    let g = generate(&tree, &opts(None)).unwrap();
+    assert_eq!(g.default_port(), 8000);
+    assert_eq!(g.images, [NODE_BASE, PYTHON_BASE]);
+    assert!(g.dockerfile.contains(
+      "RUN pip install --no-cache-dir .\nRUN pip install uvicorn"
+    ));
+  }
+
+  #[test]
+  fn python_requirement_includes_need_source_and_package_names_match_exactly()
+   {
+    let tree = Mem(BTreeMap::from([
+      (
+        "requirements.txt",
+        "# uvicorn\nuvicorn-worker==1.0\n-r base.txt",
+      ),
+      ("main.py", "app = FastAPI()"),
+    ]));
+    let g = generate(&tree, &opts(None)).unwrap();
+    assert!(g.dockerfile.contains("COPY . .\nRUN pip install -r requirements.txt\nRUN pip install uvicorn"));
   }
 
   #[test]
@@ -716,7 +1106,7 @@ mod tests {
 
   #[test]
   fn from_images_skips_stages_and_scratch() {
-    let df = "FROM --platform=linux/amd64 golang:1.25 AS build\nFROM build AS again\nFROM scratch\nFROM alpine:3.22\n";
+    let df = "FROM --platform=linux/amd64 golang:1.25 AS build # 注释\nFROM build\nFROM SCRATCH\nFROM alpine:3.22\n";
     assert_eq!(from_images(df), vec!["golang:1.25", "alpine:3.22"]);
   }
 }

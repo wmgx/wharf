@@ -343,6 +343,22 @@ impl World {
           server.settings = settings.clone();
         }
         Change::UpsertService { name, spec, adopt } => {
+          if let Source::Build(b) = &spec.source
+            && b.dockerfile.is_some()
+            && b.template.is_some()
+            && !self
+              .services
+              .get(name)
+              .is_some_and(|old| old.spec.source == spec.source)
+          {
+            return Err(
+              ApiError::invalid(
+                "dockerfile 和 template 不能同时设置",
+              )
+              .with_hint("指定内置模板时请清空 dockerfile 路径"),
+            );
+          }
+
           validate_name("服务", name)?;
           if name
             .starts_with(wharf_api_types::agent::TASK_DATA_PREFIX)
@@ -358,23 +374,6 @@ impl World {
               ))
               .with_hint("这个前缀留给部署时的试跑容器"),
             );
-          }
-          if let Some(m) = &spec.monitor {
-            if !m.path.starts_with('/') {
-              return Err(ApiError::invalid("监控路径要以 / 开头"));
-            }
-            if spec.ports.is_empty() {
-              return Err(ApiError::invalid(format!(
-                "服务 {name} 没有端口，监控不了"
-              )));
-            }
-            if let Some(p) = &m.port
-              && !spec.ports.iter().any(|x| &x.name == p)
-            {
-              return Err(ApiError::invalid(format!(
-                "服务 {name} 没有端口 {p}"
-              )));
-            }
           }
           let old = self.services.get(name);
           crate::host_access::validate_adopt(
@@ -493,6 +492,23 @@ impl World {
             } = &spec.source
           {
             spec.ports = crate::import::compose_ports(content);
+          }
+          if let Some(m) = &spec.monitor {
+            if !m.path.starts_with('/') {
+              return Err(ApiError::invalid("监控路径要以 / 开头"));
+            }
+            if spec.ports.is_empty() {
+              return Err(ApiError::invalid(format!(
+                "服务 {name} 没有端口，监控不了"
+              )));
+            }
+            if let Some(p) = &m.port
+              && !spec.ports.iter().any(|x| &x.name == p)
+            {
+              return Err(ApiError::invalid(format!(
+                "服务 {name} 没有端口 {p}"
+              )));
+            }
           }
           self.services.insert(
             name.clone(),
@@ -1412,13 +1428,21 @@ impl World {
       let service = &self.services[name];
       let server = service.spec.server.clone();
       let mut assigned = BTreeMap::new();
+      let mut compose_bindings = BTreeSet::new();
       for port in &service.spec.ports {
         let fixed = port.host;
         let chosen = fixed
           .or_else(|| service.host_ports.get(&port.name).copied());
         match chosen {
           Some(p) => {
-            if !take(&server, p) {
+            let shared = fixed.is_some()
+              && matches!(
+                service.spec.source,
+                Source::Compose { .. }
+              )
+              && compose_bindings.contains(&(p, !port.udp))
+              && !compose_bindings.contains(&(p, port.udp));
+            if !shared && !take(&server, p) {
               if fixed.is_some() {
                 return Err(ApiError::invalid(format!(
                   "服务器 {server} 上宿主机端口 {p} 被多个服务使用（服务 {name}）"
@@ -1427,6 +1451,9 @@ impl World {
               pending.push((name.clone(), port.name.clone()));
             } else {
               assigned.insert(port.name.clone(), p);
+              if fixed.is_some() {
+                compose_bindings.insert((p, port.udp));
+              }
             }
           }
           None => pending.push((name.clone(), port.name.clone())),
@@ -1627,13 +1654,17 @@ pub fn check_code_source(
       {
         return bad("git ref 不合法");
       }
-      if let Some(secret) = &git.token_secret
-        && (secret.is_empty()
-          || !secret
-            .bytes()
-            .all(|c| c.is_ascii_alphanumeric() || c == b'_'))
-      {
-        return bad("token_secret 要写密钥名");
+      if let Some(secret) = &git.token_secret {
+        crate::api::check_secret_name(secret)?;
+      }
+      if git.user.as_deref().is_some_and(|user| {
+        user.trim().is_empty()
+          || user.len() > 64
+          || user.contains(|c: char| {
+            c.is_control() || matches!(c, ':' | '@')
+          })
+      }) {
+        return bad("git 认证用户名不合法");
       }
     }
     _ => {
@@ -1840,9 +1871,9 @@ fn validate_service(
         );
       };
       crate::render::check_compose_template(name, content)?;
-      if !spec.env.is_empty() || !spec.volumes.is_empty() {
+      if !spec.volumes.is_empty() {
         return Err(ApiError::invalid(format!(
-          "服务 {name}：compose 来源的环境变量和数据卷请直接写在 compose 文件里"
+          "服务 {name}：compose 来源的数据卷请直接写在 compose 文件里"
         )));
       }
     }
@@ -2054,6 +2085,62 @@ fn validate_lan_addrs(addrs: &[String]) -> Result<(), ApiError> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn compose_env_and_shared_tcp_udp_binding() {
+    let mut w = sample();
+    let mut spec = image_service("node1");
+    spec.env.insert("TZ".into(), "UTC".into());
+    let content = "services:\n  app:\n    image: alpine\n    ports:\n      - 11553:53/tcp\n      - 11553:53/udp";
+    spec.ports.clear();
+    spec.source = Source::Compose {
+      content: Some(content.into()),
+      file: None,
+    };
+    w.apply_changes(&[Change::UpsertService {
+      name: "app".into(),
+      spec,
+      adopt: None,
+    }])
+    .unwrap();
+    w.allocate_ports().unwrap();
+    w.validate().unwrap();
+    let spec = &w.services["app"].spec;
+    assert_eq!(
+      spec.ports.iter().map(|p| p.udp).collect::<Vec<_>>(),
+      [false, true]
+    );
+    assert!(
+      crate::render::compose_with_settings("app", content, spec)
+        .unwrap()
+        .contains("TZ")
+    );
+  }
+
+  #[test]
+  fn git_secret_names_allow_dash_but_new_dockerfile_template_conflicts_fail()
+   {
+    let mut w = sample();
+    let mut spec = image_service("node1");
+    let mut build: BuildSource = serde_json::from_value(json!({
+      "git": {"repo": "https://example.test/one", "ref": "prod", "token_secret": "git-test"},
+      "template": "node"
+    })).unwrap();
+    assert!(check_build("app", &build).is_ok());
+    build.dockerfile = Some("Dockerfile".into());
+    spec.source = Source::Build(build);
+    assert!(
+      w.apply_changes(&[Change::UpsertService {
+        name: "app".into(),
+        spec,
+        adopt: None
+      }])
+      .unwrap_err()
+      .message
+      .contains("不能同时")
+    );
+  }
+
   use wharf_api_types::spec::PortSpec;
 
   #[test]

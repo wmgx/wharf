@@ -187,6 +187,7 @@ async fn handshake(
     safe_adopt: true,
     safe_migrate: true,
     safe_backup: true,
+    build_v2: true,
     key_rotation: true,
     access_logs: true,
     net_probe: true,

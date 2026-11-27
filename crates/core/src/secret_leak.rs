@@ -439,6 +439,15 @@ async fn git(
   proxy: &str,
   args: &[&str],
 ) -> Result<Vec<u8>, &'static str> {
+  git_with_env(dir, proxy, args, &[]).await
+}
+
+pub(crate) async fn git_with_env(
+  dir: &Path,
+  proxy: &str,
+  args: &[&str],
+  env: &[(&str, &str)],
+) -> Result<Vec<u8>, &'static str> {
   let mut command = Command::new("git");
   command
     .current_dir(dir)
@@ -448,6 +457,7 @@ async fn git(
     .env("GIT_CONFIG_GLOBAL", "/dev/null")
     .env("GIT_TERMINAL_PROMPT", "0")
     .env("HTTPS_PROXY", proxy)
+    .envs(env.iter().copied())
     .args([
       "-c",
       "protocol.allow=never",
@@ -460,29 +470,62 @@ async fn git(
     ])
     .args(args)
     .stdin(Stdio::null())
-    .stderr(Stdio::null())
+    .stderr(Stdio::piped())
     .stdout(Stdio::piped())
     .kill_on_drop(true);
   #[cfg(unix)]
   command.process_group(0);
   let mut child = command.spawn().map_err(|_| "无法启动 Git")?;
   let mut group = GitGroup(child.id());
-  let mut out = Vec::new();
-  child
+  let mut stdout = child
     .stdout
     .take()
     .ok_or("无法读取 Git 输出")?
-    .take(MAX_OUTPUT + 1)
-    .read_to_end(&mut out)
-    .await
-    .map_err(|_| "无法读取 Git 输出")?;
+    .take(MAX_OUTPUT + 1);
+  let mut stderr = child
+    .stderr
+    .take()
+    .ok_or("无法读取 Git 错误输出")?
+    .take(16 * 1024);
+  let (out, err) = tokio::try_join!(
+    async move {
+      let mut buffer = Vec::new();
+      stdout.read_to_end(&mut buffer).await?;
+      Ok::<_, std::io::Error>(buffer)
+    },
+    async move {
+      let mut buffer = Vec::new();
+      stderr.read_to_end(&mut buffer).await?;
+      Ok::<_, std::io::Error>(buffer)
+    }
+  )
+  .map_err(|_| "无法读取 Git 输出")?;
   if out.len() as u64 > MAX_OUTPUT {
     return Err("Git 输出超过 32 MiB，未完成检查");
   }
   let status = child.wait().await.map_err(|_| "无法等待 Git")?;
   group.0 = None;
   if !status.success() {
-    return Err("Git 命令失败");
+    // 远端可以控制错误正文，只返回已知的原因。
+    let err = String::from_utf8_lossy(&err);
+    let reason = if err.contains("Could not resolve proxy")
+      || err.contains("Proxy CONNECT")
+    {
+      "Git 代理连接失败"
+    } else if err.contains("Could not resolve host") {
+      "无法解析 Git 仓库域名"
+    } else if err.contains("Failed to connect") {
+      "无法连接 Git 仓库或代理"
+    } else if err.contains("Authentication failed")
+      || err.contains("could not read Username")
+    {
+      "Git 仓库认证失败"
+    } else if err.contains("SSL certificate problem") {
+      "Git 仓库 TLS 证书验证失败"
+    } else {
+      "Git 命令失败"
+    };
+    return Err(reason);
   }
   Ok(out)
 }
@@ -490,6 +533,148 @@ async fn git(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn git_follows_repository_redirect_without_sharing_credentials()
+   {
+    use axum::{
+      Router,
+      http::{HeaderMap, StatusCode, header},
+      response::IntoResponse,
+      routing::get,
+    };
+    use wharf_api_types::build::GIT_CREDENTIAL_HELPER;
+
+    let listener =
+      tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let other =
+      tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target = format!(
+      "http://{}/repo/info/refs?service=git-upload-pack",
+      other.local_addr().unwrap()
+    );
+    let sha = "0123456789012345678901234567890123456789";
+    let app = Router::new()
+      .route(
+        "/old/info/refs",
+        get(|| async {
+          (
+            StatusCode::FOUND,
+            [(
+              header::LOCATION,
+              "/repo/info/refs?service=git-upload-pack",
+            )],
+          )
+        }),
+      )
+      .route(
+        "/cross/info/refs",
+        get(move |headers: HeaderMap| {
+          let target = target.clone();
+          async move {
+            if headers.contains_key(header::AUTHORIZATION) {
+              (StatusCode::FOUND, [(header::LOCATION, target)])
+                .into_response()
+            } else {
+              (
+                StatusCode::UNAUTHORIZED,
+                [(
+                  header::WWW_AUTHENTICATE,
+                  "Basic realm=\"fixture\"",
+                )],
+              )
+                .into_response()
+            }
+          }
+        }),
+      )
+      .route(
+        "/repo/info/refs",
+        get(move |headers: HeaderMap| async move {
+          if !headers.contains_key(header::AUTHORIZATION) {
+            return (
+              StatusCode::UNAUTHORIZED,
+              [(header::WWW_AUTHENTICATE, "Basic realm=\"fixture\"")],
+            )
+              .into_response();
+          }
+          let refs = format!("{sha} refs/heads/main\0\n");
+          let body = format!(
+            "001e# service=git-upload-pack\n0000{:04x}{refs}0000",
+            refs.len() + 4
+          );
+          (
+            [(
+              header::CONTENT_TYPE,
+              "application/x-git-upload-pack-advertisement",
+            )],
+            body,
+          )
+            .into_response()
+        }),
+      );
+    let (cross_tx, cross_rx) = tokio::sync::oneshot::channel();
+    let cross_tx = Arc::new(std::sync::Mutex::new(Some(cross_tx)));
+    let cross = Router::new().route(
+      "/repo/info/refs",
+      get(move |headers: HeaderMap| {
+        if let Some(tx) = cross_tx.lock().unwrap().take() {
+          let _ =
+            tx.send(headers.contains_key(header::AUTHORIZATION));
+        }
+        async {
+          (
+            StatusCode::UNAUTHORIZED,
+            [(header::WWW_AUTHENTICATE, "Basic realm=\"other\"")],
+          )
+        }
+      }),
+    );
+    let serve = tokio::spawn(async move {
+      let _ = tokio::join!(
+        async { axum::serve(listener, app).await },
+        async { axum::serve(other, cross).await }
+      );
+    });
+
+    let config =
+      format!("credential.{origin}/.helper={GIT_CREDENTIAL_HELPER}");
+    let dir = tempfile::tempdir().unwrap();
+    let lookup = async |path: &str| {
+      let repo = format!("{origin}/{path}");
+      tokio::time::timeout(
+        Duration::from_secs(5),
+        git_with_env(
+          dir.path(),
+          "",
+          &[
+            "-c",
+            "protocol.http.allow=always",
+            "-c",
+            "http.followRedirects=initial",
+            "-c",
+            &config,
+            "ls-remote",
+            "--",
+            &repo,
+            "main",
+          ],
+          &[("GIT_USER", "fixture"), ("GIT_TOKEN", "fixture")],
+        ),
+      )
+      .await
+      .unwrap()
+    };
+    let result = lookup("old").await.unwrap();
+    assert_eq!(
+      String::from_utf8(result).unwrap(),
+      format!("{sha}\trefs/heads/main\n")
+    );
+    assert!(lookup("cross").await.is_err());
+    assert!(!cross_rx.await.unwrap());
+    serve.abort();
+  }
 
   #[tokio::test]
   async fn scans_tree_and_deleted_history_without_reporting_values() {

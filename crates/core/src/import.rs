@@ -535,9 +535,6 @@ fn env_warning() -> String {
     .into()
 }
 
-/// compose 内容里映射到宿主机的 TCP 端口，短写法（`18880:8880`、`127.0.0.1:80:80`）
-/// 和长写法（`published`）都认。只写容器端口、端口范围、UDP 的跳过。
-/// compose 来源没填 ports 时用它补上，这样服务有内网地址、路由也能指过来。
 /// compose 里有没有容器挂载了目录或卷（解析不了的当作有）。
 pub fn compose_has_volumes(content: &str) -> bool {
   let Ok(value) = crate::render::parse_compose(content) else {
@@ -550,6 +547,7 @@ pub fn compose_has_volumes(content: &str) -> bool {
   })
 }
 
+/// compose 对外发布的 TCP 和 UDP 宿主机端口。
 pub fn compose_ports(content: &str) -> Vec<PortSpec> {
   let Ok(doc) = crate::render::parse_compose(content) else {
     return Vec::new();
@@ -559,59 +557,67 @@ pub fn compose_ports(content: &str) -> Vec<PortSpec> {
   for body in services.into_iter().flat_map(|m| m.values()) {
     let ports = body.get("ports").and_then(Value::as_sequence);
     for p in ports.into_iter().flatten() {
-      let port = match p {
-        Value::String(s) => short_port(s),
-        Value::Mapping(_) => {
-          let tcp = p
-            .get("protocol")
-            .and_then(Value::as_str)
-            .unwrap_or("tcp")
-            == "tcp";
-          match p.get("published") {
-            Some(Value::String(s)) if tcp => s.parse().ok(),
-            Some(Value::Number(n)) if tcp => {
-              n.as_u64().and_then(|n| u16::try_from(n).ok())
-            }
-            _ => None,
-          }
-        }
-        _ => None,
-      };
-      published.extend(port);
+      published.extend(published_port(p));
     }
   }
   port_specs(published)
 }
 
-fn short_port(s: &str) -> Option<u16> {
-  let s = s.trim();
-  let s = match s.split_once('/') {
-    Some((p, "tcp")) => p,
-    Some(_) => return None,
-    None => s,
-  };
-  let parts: Vec<&str> = s.split(':').collect();
-  if parts.len() < 2 {
-    return None;
+fn port_protocol(protocol: &str) -> Option<bool> {
+  if protocol.eq_ignore_ascii_case("tcp") {
+    Some(false)
+  } else if protocol.eq_ignore_ascii_case("udp") {
+    Some(true)
+  } else {
+    None
   }
-  parts[parts.len() - 2].parse().ok()
 }
 
-fn port_specs(mut ports: Vec<u16>) -> Vec<PortSpec> {
+fn published_port(value: &Value) -> Option<(u16, bool)> {
+  if let Some(short) = value.as_str() {
+    return short_port(short);
+  }
+  let udp = port_protocol(
+    value
+      .get("protocol")
+      .and_then(Value::as_str)
+      .unwrap_or("tcp"),
+  )?;
+  let port = match value.get("published")? {
+    Value::String(s) => s.parse().ok(),
+    Value::Number(n) => {
+      n.as_u64().and_then(|n| u16::try_from(n).ok())
+    }
+    _ => None,
+  }?;
+  (port != 0).then_some((port, udp))
+}
+
+fn short_port(s: &str) -> Option<(u16, bool)> {
+  let s = s.trim();
+  let (s, protocol) = s.split_once('/').unwrap_or((s, "tcp"));
+  let (host, _) = s.rsplit_once(':')?;
+  let port = host.rsplit(':').next()?.parse::<u16>().ok()?;
+  (port != 0).then_some((port, port_protocol(protocol)?))
+}
+
+fn port_specs(mut ports: Vec<(u16, bool)>) -> Vec<PortSpec> {
   ports.sort_unstable();
   ports.dedup();
-  let single = ports.len() == 1;
+  let single_tcp = ports.iter().filter(|(_, udp)| !udp).count() == 1;
   ports
     .into_iter()
-    .map(|port| PortSpec {
-      name: if single {
+    .map(|(port, udp)| PortSpec {
+      name: if udp {
+        format!("p{port}-udp")
+      } else if single_tcp {
         "http".into()
       } else {
         format!("p{port}")
       },
       container: None,
       host: Some(port),
-      udp: false,
+      udp,
     })
     .collect()
 }
@@ -1105,7 +1111,7 @@ fn format_host_ip(ip: &str) -> String {
 fn extract_container_ports(
   inspect: &Json,
   warnings: &mut Vec<String>,
-) -> (Vec<String>, Vec<u16>) {
+) -> (Vec<String>, Vec<(u16, bool)>) {
   let host = &inspect["HostConfig"];
   let running = inspect["State"]["Running"] == true;
   let actual = &inspect["NetworkSettings"]["Ports"];
@@ -1162,8 +1168,10 @@ fn extract_container_ports(
           String::new()
         };
         ports.insert(format!("{prefix}{port}{proto_suffix}"));
-        if proto == "tcp" {
-          published.extend(host_port.parse::<u16>().ok());
+        if let (Ok(host), Some(udp)) =
+          (host_port.parse::<u16>(), port_protocol(proto))
+        {
+          published.push((host, udp));
         }
       }
     }
@@ -1188,14 +1196,15 @@ mod tests {
     let c = "services:\n  a:\n    ports:\n      - \"18880:8880\"\n      - 127.0.0.1:9000:90\n      - 5000\n      - 53:53/udp\n  b:\n    ports:\n      - target: 80\n        published: 8081\n";
     let ports: Vec<_> = super::compose_ports(c)
       .into_iter()
-      .map(|p| (p.name, p.host))
+      .map(|p| (p.name, p.host, p.udp))
       .collect();
     assert_eq!(
       ports,
       vec![
-        ("p8081".to_string(), Some(8081)),
-        ("p9000".to_string(), Some(9000)),
-        ("p18880".to_string(), Some(18880)),
+        ("p53-udp".to_string(), Some(53), true),
+        ("p8081".to_string(), Some(8081), false),
+        ("p9000".to_string(), Some(9000), false),
+        ("p18880".to_string(), Some(18880), false),
       ]
     );
   }

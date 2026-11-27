@@ -33,6 +33,7 @@ fn old_hello_has_no_host_shell_capability() {
     safe_adopt,
     safe_migrate,
     safe_backup,
+    build_v2,
     key_rotation,
     ..
   } = hello
@@ -49,6 +50,7 @@ fn old_hello_has_no_host_shell_capability() {
   assert!(!safe_adopt);
   assert!(!safe_migrate);
   assert!(!safe_backup);
+  assert!(!build_v2);
   assert!(!key_rotation);
 }
 
@@ -93,6 +95,7 @@ fn old_core_ignores_new_hello_capability() {
     safe_adopt: false,
     safe_migrate: true,
     safe_backup: true,
+    build_v2: true,
     key_rotation: true,
   };
   let json = serde_json::to_string(&hello).unwrap();
@@ -120,6 +123,10 @@ impl Hub {
 
   pub(crate) fn mock_safe_backup_agent(&self, server: &str) {
     lock(&self.conns).get_mut(server).unwrap().safe_backup = true;
+  }
+
+  pub(crate) fn enable_mock_build_v2(&self, server: &str) {
+    lock(&self.conns).get_mut(server).unwrap().build_v2 = true;
   }
 
   pub(crate) fn mock_safe_delete_agent(
@@ -237,6 +244,7 @@ impl Hub {
         safe_adopt: false,
         safe_migrate: false,
         safe_backup: false,
+        build_v2: false,
         upgrade_only: false,
       },
     );
@@ -373,6 +381,7 @@ async fn agent_upgrade_needs_no_bound_core_server_or_probe_support() {
     safe_adopt: false,
     safe_migrate: false,
     safe_backup: false,
+    build_v2: false,
     upgrade_only: true,
   };
   state.hub.register("s1", conn.clone());
@@ -435,6 +444,7 @@ fn probe_connection(
     safe_adopt: false,
     safe_migrate: false,
     safe_backup: false,
+    build_v2: false,
     upgrade_only: false,
   };
   (conn, rx)

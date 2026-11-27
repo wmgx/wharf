@@ -314,11 +314,12 @@ async fn dispatch(
         start_timeout: None,
         health_path: None,
         volume: vec![],
-        build: BuildArgs {
+        unset_volume: vec![],
+        build: Box::new(BuildArgs {
           dir: Some(dir),
           opts: build,
           ..Default::default()
-        },
+        }),
         apply,
       };
       service(c, cmd, j).await
@@ -2081,8 +2082,12 @@ fn parse_port(s: &str) -> CliResult<PortSpec> {
       "--port {s} 格式不对，应为 http=80、http=80:20080，compose 来源写 http=:41773、UDP 写 game=27015/udp"
     ))
   };
-  let udp = value.ends_with("/udp");
-  let value = value.strip_suffix("/udp").unwrap_or(&value);
+  let (value, protocol) =
+    value.rsplit_once('/').unwrap_or((&value, "tcp"));
+  let udp = protocol.eq_ignore_ascii_case("udp");
+  if !udp && !protocol.eq_ignore_ascii_case("tcp") {
+    return Err(bad().into());
+  }
   let (port, host) = match value.split_once(':') {
     Some((p, h)) => (p, Some(h)),
     None => (value, None),
@@ -2101,6 +2106,26 @@ fn parse_port(s: &str) -> CliResult<PortSpec> {
       .transpose()
       .map_err(|_| bad())?,
   })
+}
+
+fn reconcile_source_switch(
+  spec: &mut ServiceSpec,
+  source: Source,
+  refresh_compose_ports: bool,
+) {
+  let was_compose = matches!(spec.source, Source::Compose { .. });
+  let is_compose = matches!(source, Source::Compose { .. });
+  if is_compose && !was_compose {
+    spec.volumes.clear();
+  }
+  if was_compose && !is_compose {
+    spec.container = None;
+    spec.ports.clear();
+  }
+  if is_compose && (!was_compose || refresh_compose_ports) {
+    spec.ports.clear();
+  }
+  spec.source = source;
 }
 
 async fn service(
@@ -2575,6 +2600,7 @@ async fn service(
       start_timeout,
       health_path,
       volume,
+      unset_volume,
       build,
       apply,
     } => {
@@ -2592,7 +2618,8 @@ async fn service(
         .first()
         .map(|p| parse_port(p))
         .transpose()?
-        .and_then(|p| p.container);
+        .and_then(|p| p.container)
+        .or_else(|| existing.as_ref()?.ports.first()?.container);
       let built = crate::deploy::source(
         c,
         &name,
@@ -2624,6 +2651,7 @@ async fn service(
         Some(url) => Some(crate::deploy::fetch_compose(url).await?),
         None => None,
       };
+      let refresh_ports = compose.is_some();
       let source = match (image, compose, built) {
         (_, _, Some(b)) => Some(b.source),
         _ if draft.is_some() => {
@@ -2679,8 +2707,13 @@ async fn service(
           }
         }
       };
+      let was_compose = matches!(spec.source, Source::Compose { .. });
       if let Some(source) = source {
-        spec.source = source;
+        reconcile_source_switch(
+          &mut spec,
+          source,
+          refresh_ports && port.is_empty(),
+        );
       }
       if let Some(seconds) = start_timeout {
         spec.start_timeout_secs = (seconds != 0).then_some(seconds);
@@ -2701,7 +2734,8 @@ async fn service(
       }
       if let Some(d) = draft {
         spec.ports = d.ports;
-        spec.env.extend(d.env);
+        spec.env = d.env;
+        spec.container = None;
         spec.volumes = d.volumes;
         spec.limits = d.limits;
       }
@@ -2710,12 +2744,18 @@ async fn service(
           .iter()
           .map(|p| parse_port(p))
           .collect::<CliResult<_>>()?;
-      } else if let (true, Some(p)) = (is_new, default_port) {
+      } else if (is_new && default_port.is_some() || was_compose)
+        && !matches!(spec.source, Source::Compose { .. })
+        && spec.ports.is_empty()
+        && from_run.is_none()
+      {
+        let p = default_port
+          .unwrap_or_else(|| crate::deploy::ExposedPort::tcp(8080));
         spec.ports = vec![PortSpec {
-          name: "http".into(),
-          container: Some(p),
+          name: if p.udp { "udp" } else { "http" }.into(),
+          container: Some(p.port),
           host: None,
-          udp: false,
+          udp: p.udp,
         }];
       }
       for e in &env {
@@ -2736,6 +2776,16 @@ async fn service(
           name: vname.to_string(),
           target: target.to_string(),
         });
+      }
+      for name in unset_volume {
+        let index = spec
+          .volumes
+          .iter()
+          .position(|v| v.name == name)
+          .ok_or_else(|| {
+            ApiError::invalid(format!("数据卷 {name} 不存在"))
+          })?;
+        spec.volumes.remove(index);
       }
       changes(
         c,
@@ -4761,6 +4811,42 @@ fn share_ttl(s: &str) -> Result<Duration, String> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn source_switch_refreshes_compose_ports_only_when_requested() {
+    let mut spec: ServiceSpec = serde_json::from_value(serde_json::json!({
+      "server":"s1", "source":{"compose":{"content":"services: {}"}},
+      "container":"app", "ports":[{"name":"http","host":8081}]
+    })).unwrap();
+    let new_compose = spec.source.clone();
+    reconcile_source_switch(&mut spec, new_compose.clone(), false);
+    assert_eq!(spec.ports[0].host, Some(8081));
+    reconcile_source_switch(&mut spec, new_compose, true);
+    assert!(spec.ports.is_empty());
+    reconcile_source_switch(
+      &mut spec,
+      Source::Image("nginx".into()),
+      false,
+    );
+    assert!(spec.container.is_none());
+  }
+
+  #[test]
+  fn switching_image_to_compose_url_clears_container_ports() {
+    let mut spec: ServiceSpec =
+      serde_json::from_value(serde_json::json!({
+        "server": "s1", "source": {"image": "nginx"},
+        "ports": [{"name": "http", "container": 80}]
+      }))
+      .unwrap();
+    let compose = Source::Compose {
+      content: Some("services: {app: {image: nginx}}".into()),
+      file: None,
+    };
+    reconcile_source_switch(&mut spec, compose, false);
+    assert!(spec.ports.is_empty());
+  }
+
   use clap::Parser;
 
   #[tokio::test]

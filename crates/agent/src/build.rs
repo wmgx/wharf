@@ -21,7 +21,9 @@ use wharf_api_types::{
     BuildFetch, BuildJob, BuildResult, GIT_IMAGE, PullPolicy,
     ResolveCommit,
   },
-  build::{self, SourceTree},
+  build::{
+    self, GIT_CREDENTIAL_HELPER, SourceTree, is_commit, pick_commit,
+  },
   validate_name,
 };
 
@@ -204,6 +206,8 @@ pub async fn fetch_code(
       repo,
       reference,
       token,
+      user,
+      fallback_ref,
     } => Some({
       // 先按服务器的镜像源拉 git 镜像，`docker run` 自己拉只认官方地址。
       if !docker.image_exists(GIT_IMAGE, ctx).await {
@@ -215,6 +219,8 @@ pub async fn fetch_code(
         repo,
         reference,
         token.as_ref().map(|t| t.0.as_str()),
+        user.as_deref(),
+        fallback_ref.as_deref(),
         usable_proxy(pull.git_proxy.as_deref(), ctx)
           .await
           .as_deref(),
@@ -279,36 +285,13 @@ fn dockerfile(
   work: &Path,
   ctx: &Ctx,
 ) -> Result<(PathBuf, Vec<String>), ApiError> {
-  if let Some(content) = &job.dockerfile_content {
-    ctx.say("使用 Wharf 里保存的 Dockerfile");
-    let path = work.join("Dockerfile.wharf");
-    std::fs::write(&path, content).map_err(io_err(&path))?;
-    return Ok((path, build::from_images(content)));
+  if let Some(path) = &job.dockerfile {
+    relative(path)?;
   }
-  let own = match &job.dockerfile {
-    Some(p) => {
-      let path = context.join(relative(p)?);
-      if !path.is_file() {
-        return Err(ApiError::invalid(format!("代码里没有 {p}")));
-      }
-      Some(path)
-    }
-    // 指定了模板时不用代码里的 Dockerfile。
-    None if job.template.is_some() => None,
-    None => Some(context.join("Dockerfile")).filter(|p| p.is_file()),
-  };
-  if let Some(path) = own {
-    ctx.say(format!(
-      "使用代码里的 {}",
-      path.strip_prefix(context).unwrap_or(&path).display()
-    ));
-    let path = checked_path(context, &path)?;
-    let content =
-      std::fs::read_to_string(&path).map_err(io_err(&path))?;
-    return Ok((path, build::from_images(&content)));
-  }
-  let generated = build::generate(
+  let resolved = build::resolve_dockerfile(
     &FsTree(context),
+    job.dockerfile_content.as_deref(),
+    job.dockerfile.as_deref(),
     &build::Options {
       service: &job.service,
       port: job.port,
@@ -318,18 +301,34 @@ fn dockerfile(
       install: job.install.as_deref(),
     },
   )?;
-  ctx.say(format!(
-    "按 {} 模板生成 Dockerfile（启动：{}）：",
-    generated.language,
-    generated.start.replace('\n', "; ")
-  ));
-  for line in generated.dockerfile.lines() {
-    ctx.say(format!("  {line}"));
-  }
+  use build::ResolvedDockerfile::*;
+  let (content, images) = match resolved {
+    File { path, images, .. } => {
+      ctx.say(format!("使用代码里的 {path}"));
+      return Ok((
+        checked_path(context, &context.join(path))?,
+        images,
+      ));
+    }
+    Inline { content, images } => {
+      ctx.say("使用 Wharf 里保存的 Dockerfile");
+      (content, images)
+    }
+    Template(g) => {
+      ctx.say(format!(
+        "按 {} 模板生成 Dockerfile（启动：{}）：",
+        g.language,
+        g.start.replace('\n', "; ")
+      ));
+      for line in g.dockerfile.lines() {
+        ctx.say(format!("  {line}"));
+      }
+      (g.dockerfile, g.images)
+    }
+  };
   let path = work.join("Dockerfile.wharf");
-  std::fs::write(&path, &generated.dockerfile)
-    .map_err(io_err(&path))?;
-  Ok((path, generated.images))
+  std::fs::write(&path, content).map_err(io_err(&path))?;
+  Ok((path, images))
 }
 
 /// 代理能连上才用；连不上（出口机器离线）时退回直连。
@@ -446,6 +445,11 @@ pub(crate) fn checked_subdir(
 struct FsTree<'a>(&'a Path);
 
 impl SourceTree for FsTree<'_> {
+  fn exists(&self, path: &str) -> bool {
+    checked_path(self.0, &self.0.join(path))
+      .is_ok_and(|p| p.is_file())
+  }
+
   fn read(&self, path: &str) -> Option<String> {
     let path = checked_path(self.0, &self.0.join(path)).ok()?;
     // 只读小文件：判断语言用不到大文件。
@@ -553,6 +557,8 @@ async fn clone(
   repo: &str,
   reference: &str,
   token: Option<&str>,
+  user: Option<&str>,
+  fallback_ref: Option<&str>,
   proxy: Option<&str>,
   mirror: Option<&str>,
   src: &Path,
@@ -565,21 +571,10 @@ async fn clone(
     )),
     None => ctx.say(format!("拉取代码 {repo} @ {reference}")),
   }
+  let mirror = mirror.filter(|_| token.is_none());
   let name = format!("wharf-git-{service}");
   remove_container(docker, &name).await;
-  // GitHub 等用 `x-access-token:<token>` 的 basic 认证。
-  let script = r#"set -e
-git init -q
-git remote add origin "$REPO"
-if [ -n "$GIT_TOKEN" ]; then
-  auth="Authorization: Basic $(printf 'x-access-token:%s' "$GIT_TOKEN" | base64 | tr -d '\n')"
-  git -c http.extraHeader="$auth" fetch -q --depth 1 origin "$REF"
-else
-  git fetch -q --depth 1 origin "$REF"
-fi
-git -c advice.detachedHead=false checkout -q FETCH_HEAD
-git rev-parse HEAD
-rm -rf .git"#;
+  let script = format!("{GIT_AUTH}\n{CLONE_SCRIPT}");
   let result = docker
     .cmd()
     .args([
@@ -593,22 +588,31 @@ rm -rf .git"#;
       "host",
     ])
     .args(["-v", &format!("{}:/git", src.display()), "-w", "/git"])
-    .args(["-e", "REPO", "-e", "REF", "-e", "GIT_TOKEN"])
-    .args([
-      "-e",
-      "GIT_TERMINAL_PROMPT=0",
-      "-e",
-      "HTTPS_PROXY",
-      "-e",
-      "HTTP_PROXY",
-    ])
+    .args(GIT_FETCH_ENV)
+    .args(["-e", "GIT_TERMINAL_PROMPT=0"])
     .args(GIT_MIRROR_ENV)
-    .args(["--entrypoint", "sh", GIT_IMAGE, "-c", script])
+    .args(["--entrypoint", "sh", GIT_IMAGE, "-c", &script])
     .env("REPO", repo)
     .env("REF", reference)
+    .env("WHARF_GIT_CREDENTIAL_HELPER", GIT_CREDENTIAL_HELPER)
+    .env("GIT_USER", git_auth_user(repo, user))
+    .env(
+      "GIT_AUTH_SCOPE",
+      &git_origin_scope(repo).unwrap_or_default(),
+    )
+    .env(
+      "FALLBACK_REF",
+      fallback_ref
+        .filter(|_| is_commit(reference))
+        .unwrap_or_default(),
+    )
     .env("GIT_TOKEN", token.unwrap_or_default())
     .env("HTTPS_PROXY", proxy.unwrap_or_default())
     .env("HTTP_PROXY", proxy.unwrap_or_default())
+    .env("https_proxy", proxy.unwrap_or_default())
+    .env("http_proxy", proxy.unwrap_or_default())
+    .env("NO_PROXY", &git_no_proxy(mirror))
+    .env("no_proxy", &git_no_proxy(mirror))
     .envs(github_mirror_env(mirror))
     .timeout(CLONE_TIMEOUT)
     .run(ctx)
@@ -636,6 +640,99 @@ rm -rf .git"#;
     .to_string();
   ctx.say(format!("commit {}", &commit[..12]));
   Ok(commit)
+}
+
+const GIT_FETCH_ENV: [&str; 26] = [
+  "-e",
+  "REPO",
+  "-e",
+  "REF",
+  "-e",
+  "GIT_TOKEN",
+  "-e",
+  "GIT_USER",
+  "-e",
+  "GIT_AUTH_SCOPE",
+  "-e",
+  "WHARF_GIT_CREDENTIAL_HELPER",
+  "-e",
+  "FALLBACK_REF",
+  "-e",
+  "HTTPS_PROXY",
+  "-e",
+  "HTTP_PROXY",
+  "-e",
+  "https_proxy",
+  "-e",
+  "http_proxy",
+  "-e",
+  "NO_PROXY",
+  "-e",
+  "no_proxy",
+];
+
+const GIT_AUTH: &str = r#"set -e
+export GIT_ALLOW_PROTOCOL=https:http:ssh:git
+export GIT_SSH_COMMAND="ssh -oBatchMode=yes"
+run_git() {
+  if [ -n "$GIT_TOKEN" ] && [ -n "$GIT_AUTH_SCOPE" ]; then
+    git -c protocol.file.allow=never -c http.followRedirects=initial -c credential.helper= -c "credential.$GIT_AUTH_SCOPE.helper=$WHARF_GIT_CREDENTIAL_HELPER" "$@"
+  else
+    git -c protocol.file.allow=never "$@"
+  fi
+}"#;
+
+const CLONE_SCRIPT: &str = r#"git init -q
+git remote add -- origin "$REPO"
+target=FETCH_HEAD
+if ! run_git fetch -q --depth 1 -- origin "$REF"; then
+  [ -n "$FALLBACK_REF" ] || exit 1
+  if [ "$(git rev-parse --is-shallow-repository)" = true ]; then
+    run_git fetch -q --unshallow -- origin "$FALLBACK_REF"
+  else
+    run_git fetch -q -- origin "$FALLBACK_REF"
+  fi
+  git cat-file -e "$REF^{commit}"
+  target="$REF"
+fi
+git -c advice.detachedHead=false checkout -q "$target"
+if [ -f .gitmodules ]; then
+  run_git submodule sync --recursive
+  run_git submodule update --init --recursive --depth 1 ||
+    run_git submodule update --init --recursive
+fi
+git rev-parse HEAD
+find . -name .git -prune -exec rm -rf {} +"#;
+
+fn git_origin_scope(repo: &str) -> Option<String> {
+  let url = reqwest::Url::parse(repo).ok()?;
+  match url.scheme() {
+    "http" | "https" if url.host().is_some() => {
+      Some(format!("{}/", url.origin().ascii_serialization()))
+    }
+    _ => None,
+  }
+}
+
+fn git_auth_user<'a>(repo: &str, user: Option<&'a str>) -> &'a str {
+  user.unwrap_or_else(|| {
+    let host = reqwest::Url::parse(repo)
+      .ok()
+      .and_then(|url| url.host_str().map(str::to_ascii_lowercase));
+    match host.as_deref() {
+      Some("bitbucket.org") => "x-token-auth",
+      Some(host) if host.contains("gitlab") => "oauth2",
+      _ => "x-access-token",
+    }
+  })
+}
+
+fn git_no_proxy(mirror: Option<&str>) -> String {
+  let mirror =
+    mirror.and_then(|m| reqwest::Url::parse(m.trim()).ok());
+  build::git_no_proxy(
+    mirror.as_ref().and_then(reqwest::Url::host_str),
+  )
 }
 
 /// 传给 git 容器的环境变量名：用 git 的 `GIT_CONFIG_*` 设 `url.<镜像>.insteadOf`。
@@ -671,7 +768,7 @@ fn github_mirror_env(
 
 /// 分支或标签现在指向的 commit。已经是 commit 的原样返回。
 pub async fn resolve_commit(
-  docker: &Docker,
+  _docker: &Docker,
   job: &ResolveCommit,
   ctx: &Ctx,
 ) -> Result<String, ApiError> {
@@ -680,6 +777,8 @@ pub async fn resolve_commit(
     repo,
     reference,
     token,
+    user,
+    ..
   } = &job.fetch
   else {
     return Err(ApiError::invalid("只有 git 来源能查 commit"));
@@ -687,63 +786,46 @@ pub async fn resolve_commit(
   if is_commit(reference) {
     return Ok(reference.to_lowercase());
   }
-  if !docker.image_exists(GIT_IMAGE, ctx).await {
-    docker
-      .pull(GIT_IMAGE, &job.pull, ctx, &mut Vec::new())
-      .await?;
-  }
+  let mirror = job
+    .pull
+    .github_mirror
+    .as_deref()
+    .filter(|_| token.is_none());
   let proxy = usable_proxy(job.pull.git_proxy.as_deref(), ctx)
     .await
     .unwrap_or_default();
-  let name = format!("wharf-git-ls-{}", job.service);
-  remove_container(docker, &name).await;
   // 带上 `^{}`：附注标签要取它指向的 commit，不是标签对象本身。
-  let script = r#"set -e
-if [ -n "$GIT_TOKEN" ]; then
-  auth="Authorization: Basic $(printf 'x-access-token:%s' "$GIT_TOKEN" | base64 | tr -d '
-')"
-  git -c http.extraHeader="$auth" ls-remote "$REPO" "$REF" "$REF^{}"
-else
-  git ls-remote "$REPO" "$REF" "$REF^{}"
-fi"#;
-  let result = docker
-    .cmd()
-    .args([
-      "run",
-      "--rm",
-      "--label",
-      "wharf.temp=1",
-      "--name",
-      &name,
-      "--network",
-      "host",
-    ])
-    .args(["-e", "REPO", "-e", "REF", "-e", "GIT_TOKEN"])
-    .args([
-      "-e",
-      "GIT_TERMINAL_PROMPT=0",
-      "-e",
-      "HTTPS_PROXY",
-      "-e",
-      "HTTP_PROXY",
-    ])
-    .args(GIT_MIRROR_ENV)
-    .args(["--entrypoint", "sh", GIT_IMAGE, "-c", script])
+  let script = format!(
+    r#"{GIT_AUTH}
+run_git ls-remote -- "$REPO" "$REF" "$REF^{{}}""#
+  );
+  let result = Cmd::new("sh")
+    .args(["-c", &script])
+    .env("GIT_TERMINAL_PROMPT", "0")
+    .env("GIT_CONFIG_NOSYSTEM", "1")
+    .env("GIT_CONFIG_GLOBAL", "/dev/null")
     .env("REPO", repo)
     .env("REF", reference)
+    .env("WHARF_GIT_CREDENTIAL_HELPER", GIT_CREDENTIAL_HELPER)
+    .env("GIT_USER", git_auth_user(repo, user.as_deref()))
+    .env(
+      "GIT_AUTH_SCOPE",
+      &git_origin_scope(repo).unwrap_or_default(),
+    )
     .env(
       "GIT_TOKEN",
       token.as_ref().map(|t| t.0.as_str()).unwrap_or_default(),
     )
     .env("HTTPS_PROXY", &proxy)
     .env("HTTP_PROXY", &proxy)
-    .envs(github_mirror_env(job.pull.github_mirror.as_deref()))
+    .env("https_proxy", &proxy)
+    .env("http_proxy", &proxy)
+    .env("NO_PROXY", &git_no_proxy(mirror))
+    .env("no_proxy", &git_no_proxy(mirror))
+    .envs(github_mirror_env(mirror))
     .timeout(LS_REMOTE_TIMEOUT)
     .run(ctx)
     .await;
-  if result.is_err() {
-    remove_container(docker, &name).await;
-  }
   let out = result.and_then(|o| o.check("查询代码版本")).map_err(
     |mut e| {
       e.message = job.pull.redact(&e.message);
@@ -757,29 +839,6 @@ fi"#;
   pick_commit(&out.stdout, reference).ok_or_else(|| {
     ApiError::invalid(format!("仓库里没有分支或标签 {reference}"))
   })
-}
-
-fn is_commit(s: &str) -> bool {
-  s.len() == 40 && s.bytes().all(|c| c.is_ascii_hexdigit())
-}
-
-/// `ls-remote` 的输出里挑：附注标签取 `^{}` 那行，否则优先分支，再是标签。
-fn pick_commit(out: &str, reference: &str) -> Option<String> {
-  let lines: Vec<(&str, &str)> = out
-    .lines()
-    .filter_map(|l| l.split_once('\t'))
-    .filter(|(sha, _)| is_commit(sha))
-    .collect();
-  let find = |want: &str| {
-    lines
-      .iter()
-      .find(|(_, r)| *r == want)
-      .map(|(s, _)| s.to_string())
-  };
-  find(&format!("refs/tags/{reference}^{{}}"))
-    .or_else(|| find(&format!("refs/heads/{reference}")))
-    .or_else(|| find(&format!("refs/tags/{reference}")))
-    .or_else(|| find(reference))
 }
 
 pub(crate) async fn remove_container(docker: &Docker, name: &str) {
@@ -802,10 +861,11 @@ async fn prune_old_images(
     .cmd()
     .args([
       "images",
+      "--no-trunc",
       "--filter",
       &format!("label=wharf.service={service}"),
       "--format",
-      "{{.Repository}}:{{.Tag}}",
+      "{{.ID}}\t{{.Repository}}:{{.Tag}}",
     ])
     .timeout(Duration::from_secs(30))
     .run(&ctx)
@@ -813,16 +873,9 @@ async fn prune_old_images(
   else {
     return;
   };
-  let old: Vec<&str> = out
-    .stdout
-    .lines()
-    .map(str::trim)
-    .filter(|l| {
-      !l.is_empty() && *l != current && !l.ends_with(":<none>")
-    })
-    .skip(KEEP_IMAGES - 1)
-    .collect();
-  for image in old {
+  for image in
+    select_stale_image_ids(&out.stdout, current, KEEP_IMAGES)
+  {
     let _ = docker
       .cmd()
       .args(["image", "rm", image])
@@ -830,6 +883,22 @@ async fn prune_old_images(
       .run(&ctx)
       .await;
   }
+}
+
+fn select_stale_image_ids<'a>(
+  lines: &'a str,
+  keep: &str,
+  count: usize,
+) -> Vec<&'a str> {
+  let rows = || lines.lines().filter_map(|l| l.split_once('\t'));
+  let current =
+    rows().find(|(_, tag)| *tag == keep).map(|(id, _)| id);
+  let mut seen = std::collections::BTreeSet::new();
+  rows()
+    .map(|(id, _)| id)
+    .filter(|id| Some(*id) != current && seen.insert(*id))
+    .skip(count.saturating_sub(usize::from(current.is_some())))
+    .collect()
 }
 
 pub(crate) fn random_suffix() -> String {
@@ -1018,4 +1087,53 @@ fn should_skip_build_requires_matching_commit_label() {
   assert!(!should_skip_build(false, true, Some("bbb"), Some("aaa")));
   assert!(!should_skip_build(false, true, Some("bbb"), None));
   assert!(should_skip_build(false, true, Some("bbb"), Some("bbb")));
+}
+
+#[cfg(test)]
+mod build_v2_tests {
+  use super::*;
+
+  #[test]
+  fn filesystem_tree_detects_large_binary_lock_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+      tmp.path().join("package-lock.json"),
+      vec![0xff; 1_200_000],
+    )
+    .unwrap();
+    let tree = FsTree(tmp.path());
+    assert!(tree.exists("package-lock.json"));
+    assert!(tree.read("package-lock.json").is_none());
+  }
+
+  #[test]
+  fn git_fetch_scopes_credentials_and_fetches_submodules() {
+    let repo = "https://gitlab.com/team/project";
+    assert_eq!(
+      git_origin_scope(repo).as_deref(),
+      Some("https://gitlab.com/")
+    );
+    assert_eq!(git_auth_user(repo, None), "oauth2");
+    assert_eq!(git_auth_user(repo, Some("ci")), "ci");
+    assert!(GIT_AUTH.contains("credential.$GIT_AUTH_SCOPE.helper"));
+    assert!(GIT_AUTH.contains("protocol.file.allow=never"));
+    assert!(
+      CLONE_SCRIPT.contains("submodule update --init --recursive")
+    );
+    assert!(CLONE_SCRIPT.contains("cat-file -e"));
+    assert!(CLONE_SCRIPT.contains("find . -name .git -prune"));
+    assert!(
+      git_no_proxy(Some("https://mirror.example.test"))
+        .ends_with(",mirror.example.test")
+    );
+  }
+
+  #[test]
+  fn pruning_keeps_current_image_and_counts_image_ids() {
+    let rows = "e\t<none>:<none>\nd\tapp:b\nd\tapp:c\nc\t<none>:<none>\nb\t<none>:<none>\na\tapp:current\n";
+    assert_eq!(
+      select_stale_image_ids(rows, "app:current", 3),
+      ["c", "b"]
+    );
+  }
 }
