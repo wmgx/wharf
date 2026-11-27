@@ -54,6 +54,8 @@ pub fn issues() -> Vec<Issue> {
     .iter()
     .map(|(name, why)| Issue {
       code: "heal_gave_up".into(),
+      ack: None,
+      alert: None,
       level: IssueLevel::Fault,
       subject: Some(IssueSubject {
         kind: "service".into(),
@@ -255,7 +257,7 @@ fn broken(p: &ProjectState) -> Option<String> {
   let bad: Vec<String> = p
     .containers
     .iter()
-    .filter(|c| !c.foreign && !(has_running && c.is_completed_init()))
+    .filter(|c| !(c.foreign || has_running && c.is_completed_init()))
     .filter_map(|c| {
       if c.health.as_deref() == Some("unhealthy") {
         Some(format!("{} 健康检查不通过", c.service))

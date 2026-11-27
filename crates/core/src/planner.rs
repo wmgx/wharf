@@ -3191,7 +3191,7 @@ mod tests {
     let spec = &mut world.services.get_mut("app").unwrap().spec;
     spec.ports.clear();
     spec.source = Source::Compose {
-      content: Some("services:\n  app: {image: fixture:1}\n  worker: {image: fixture:1}\n".into()),
+      content: Some("services:\n  app: {image: fixture:1}\n  worker: {image: fixture:1}\n  init: {image: fixture:1, restart: \"no\"}\n".into()),
       file: None,
     };
     let b = plan(
@@ -3201,6 +3201,13 @@ mod tests {
     );
     assert!(matches!(b.steps[0].step, Step::ServiceUp { .. }));
     assert!(b.items[0].reason.contains("缺少组件 worker"));
+    let worker = ContainerInfo {
+      service: "worker".into(),
+      ..container("running")
+    };
+    let complete =
+      live(Some(hash_of(&world)), vec![container("running"), worker]);
+    assert!(plan(&world, &world, &complete).items.is_empty());
   }
 
   #[test]

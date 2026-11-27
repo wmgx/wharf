@@ -207,11 +207,7 @@ pub async fn emit_crash_logs(
           } else {
             String::new()
           };
-          lines.extend(
-            crash_lines(&logs, per)
-              .into_iter()
-              .map(|line| format!("{prefix}{line}")),
-          );
+          lines.extend(crash_lines(&logs, per, &prefix));
         }
         if lines.len() >= 50 || detached.cancel.is_cancelled() {
           break;
@@ -235,7 +231,11 @@ pub async fn emit_crash_logs(
   }
 }
 
-fn crash_lines(logs: &str, limit: usize) -> Vec<String> {
+fn crash_lines(
+  logs: &str,
+  limit: usize,
+  prefix: &str,
+) -> Vec<String> {
   let logs = crate::docker::strip_ansi(logs);
   let lines: Vec<_> = logs
     .lines()
@@ -244,9 +244,10 @@ fn crash_lines(logs: &str, limit: usize) -> Vec<String> {
   lines[lines.len().saturating_sub(limit)..]
     .iter()
     .map(|line| {
-      let mut chars = line.chars();
+      let mut chars = prefix.chars().chain(line.chars());
       let mut text: String = chars.by_ref().take(500).collect();
       if chars.next().is_some() {
+        text.pop();
         text.push('…');
       }
       text
@@ -269,7 +270,7 @@ fn problem(state: &ProjectState) -> Option<String> {
   let bad: Vec<String> = state
     .containers
     .iter()
-    .filter(|c| !c.foreign && !(has_running && c.is_completed_init()))
+    .filter(|c| !(c.foreign || has_running && c.is_completed_init()))
     .filter_map(|c| {
       if c.health.as_deref() == Some("unhealthy") {
         Some(format!("{} 健康检查不通过", c.service))
@@ -365,11 +366,11 @@ mod tests {
     let logs = (0..80)
       .map(|i| format!("\x1b[31m{i} {}\x1b[0m\n", "文".repeat(500)))
       .collect::<String>();
-    let lines = crash_lines(&logs, 50);
+    let lines = crash_lines(&logs, 50, "[web] ");
     assert_eq!(lines.len(), 50);
-    assert!(lines[0].starts_with("30 "));
+    assert!(lines[0].starts_with("[web] 30 "));
     assert!(lines.iter().all(
-      |line| !line.contains('\x1b') && line.chars().count() == 501
+      |line| !line.contains('\x1b') && line.chars().count() == 500
     ));
   }
 
