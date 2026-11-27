@@ -187,10 +187,10 @@ pub fn validate(path: &Path) -> serde_json::Value {
           "服务 {name} 的 compose 不是合法的 YAML：{e}"
         )),
         Ok(doc)
-          if !doc
+          if doc
             .get("services")
             .and_then(serde_yaml_ng::Value::as_mapping)
-            .is_some_and(|m| !m.is_empty()) =>
+            .is_none_or(serde_yaml_ng::Mapping::is_empty) =>
         {
           errors
             .push(format!("服务 {name} 的 compose 缺少非空 services"))

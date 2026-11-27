@@ -99,6 +99,9 @@ pub fn list_files_with(
   let root = dir.canonicalize().map_err(|e| io_err(dir, e))?;
   for rel in keep {
     wharf_api_types::symlink::check_relative_entry(rel)?;
+    if rel.components().any(|c| c.as_os_str() == ".git") {
+      return Err(io_err(rel, "代码包不包含 .git"));
+    }
     let path = root.join(rel);
     if path.is_file() {
       let resolved =
@@ -113,7 +116,9 @@ pub fn list_files_with(
       if resolved != path {
         let target =
           resolved.strip_prefix(&root).expect("已检查目录");
-        wharf_api_types::symlink::check_relative_entry(target)?;
+        if target.components().any(|c| c.as_os_str() == ".git") {
+          return Err(io_err(rel, "代码包不包含 .git"));
+        }
         files.push(target.to_path_buf());
       }
     }

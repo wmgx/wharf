@@ -125,6 +125,10 @@ impl Hub {
     lock(&self.conns).get_mut(server).unwrap().safe_backup = true;
   }
 
+  pub(crate) fn enable_mock_build_v2(&self, server: &str) {
+    lock(&self.conns).get_mut(server).unwrap().build_v2 = true;
+  }
+
   pub(crate) fn mock_safe_delete_agent(
     &self,
     server: &str,

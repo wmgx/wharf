@@ -22,3 +22,9 @@ test("拒绝指向父目录的文件", async () => {
   const zip = zipSync({ "../evil.txt": strToU8("data") });
   await assert.rejects(packZip(new File([zip], "app.zip")), /不安全路径/);
 });
+
+test("虚报超大展开尺寸时在解压前拒绝", async () => {
+  const zip = zipSync({ "app.js": strToU8("0") });
+  new DataView(zip.buffer, zip.byteOffset, zip.byteLength).setUint32(22, 512 * 1024 * 1024 + 1, true);
+  await assert.rejects(packZip(new File([zip], "app.zip")), /代码超过 512 MiB/);
+});

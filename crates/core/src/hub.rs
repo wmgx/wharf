@@ -318,17 +318,16 @@ impl Hub {
   }
 
   pub fn supports_build_v2(&self, server: &str) -> bool {
-    self.build_v2_conn_id(server).is_ok()
+    self.build_v2_conn_id(server).is_some()
   }
 
-  fn build_v2_conn_id(&self, server: &str) -> Result<u64, ApiError> {
+  pub(crate) fn build_v2_conn_id(&self, server: &str) -> Option<u64> {
     lock(&self.conns)
       .get(server)
       .filter(|c| {
         !c.closed.is_cancelled() && !c.upgrade_only && c.build_v2
       })
       .map(|c| c.conn_id)
-      .ok_or_else(|| crate::build::old_git_agent(server))
   }
 
   pub fn supports_safe_delete(&self, server: &str) -> bool {

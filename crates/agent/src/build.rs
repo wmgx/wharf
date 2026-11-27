@@ -21,7 +21,7 @@ use wharf_api_types::{
     BuildFetch, BuildJob, BuildResult, GIT_IMAGE, PullPolicy,
     ResolveCommit,
   },
-  build::{self, SourceTree},
+  build::{self, SourceTree, is_commit, pick_commit},
   validate_name,
 };
 
@@ -569,6 +569,7 @@ async fn clone(
     )),
     None => ctx.say(format!("拉取代码 {repo} @ {reference}")),
   }
+  let mirror = mirror.filter(|_| token.is_none());
   let name = format!("wharf-git-{service}");
   remove_container(docker, &name).await;
   let script = format!("{GIT_AUTH}\n{CLONE_SCRIPT}");
@@ -666,7 +667,8 @@ const GIT_FETCH_ENV: [&str; 24] = [
 ];
 
 const GIT_AUTH: &str = r#"set -e
-export GIT_ALLOW_PROTOCOL=https:http
+export GIT_ALLOW_PROTOCOL=https:http:ssh:git
+export GIT_SSH_COMMAND="ssh -oBatchMode=yes"
 run_git() {
   if [ -n "$GIT_TOKEN" ] && [ -n "$GIT_AUTH_SCOPE" ]; then
     auth="Authorization: Basic $(printf '%s:%s' "$GIT_USER" "$GIT_TOKEN" | base64 | tr -d '\n')"
@@ -677,14 +679,14 @@ run_git() {
 }"#;
 
 const CLONE_SCRIPT: &str = r#"git init -q
-git remote add origin "$REPO"
+git remote add -- origin "$REPO"
 target=FETCH_HEAD
-if ! run_git fetch -q --depth 1 origin "$REF"; then
+if ! run_git fetch -q --depth 1 -- origin "$REF"; then
   [ -n "$FALLBACK_REF" ] || exit 1
   if [ "$(git rev-parse --is-shallow-repository)" = true ]; then
-    run_git fetch -q --unshallow origin "$FALLBACK_REF"
+    run_git fetch -q --unshallow -- origin "$FALLBACK_REF"
   else
-    run_git fetch -q origin "$FALLBACK_REF"
+    run_git fetch -q -- origin "$FALLBACK_REF"
   fi
   git cat-file -e "$REF^{commit}"
   target="$REF"
@@ -787,6 +789,11 @@ pub async fn resolve_commit(
   if is_commit(reference) {
     return Ok(reference.to_lowercase());
   }
+  let mirror = job
+    .pull
+    .github_mirror
+    .as_deref()
+    .filter(|_| token.is_none());
   let proxy = usable_proxy(job.pull.git_proxy.as_deref(), ctx)
     .await
     .unwrap_or_default();
@@ -815,9 +822,9 @@ run_git ls-remote -- "$REPO" "$REF" "$REF^{{}}""#
     .env("HTTP_PROXY", &proxy)
     .env("https_proxy", &proxy)
     .env("http_proxy", &proxy)
-    .env("NO_PROXY", &git_no_proxy(job.pull.github_mirror.as_deref()))
-    .env("no_proxy", &git_no_proxy(job.pull.github_mirror.as_deref()))
-    .envs(github_mirror_env(job.pull.github_mirror.as_deref()))
+    .env("NO_PROXY", &git_no_proxy(mirror))
+    .env("no_proxy", &git_no_proxy(mirror))
+    .envs(github_mirror_env(mirror))
     .timeout(LS_REMOTE_TIMEOUT)
     .run(ctx)
     .await;
@@ -834,29 +841,6 @@ run_git ls-remote -- "$REPO" "$REF" "$REF^{{}}""#
   pick_commit(&out.stdout, reference).ok_or_else(|| {
     ApiError::invalid(format!("仓库里没有分支或标签 {reference}"))
   })
-}
-
-fn is_commit(s: &str) -> bool {
-  s.len() == 40 && s.bytes().all(|c| c.is_ascii_hexdigit())
-}
-
-/// `ls-remote` 的输出里挑：附注标签取 `^{}` 那行，否则优先分支，再是标签。
-fn pick_commit(out: &str, reference: &str) -> Option<String> {
-  let lines: Vec<(&str, &str)> = out
-    .lines()
-    .filter_map(|l| l.split_once('\t'))
-    .filter(|(sha, _)| is_commit(sha))
-    .collect();
-  let find = |want: &str| {
-    lines
-      .iter()
-      .find(|(_, r)| *r == want)
-      .map(|(s, _)| s.to_string())
-  };
-  find(&format!("refs/tags/{reference}^{{}}"))
-    .or_else(|| find(&format!("refs/heads/{reference}")))
-    .or_else(|| find(&format!("refs/tags/{reference}")))
-    .or_else(|| find(reference))
 }
 
 pub(crate) async fn remove_container(docker: &Docker, name: &str) {

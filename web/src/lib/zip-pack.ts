@@ -73,7 +73,7 @@ export interface Packed {
 }
 
 function skip(path: string): boolean {
-  return path.endsWith("/") || /(^|\/)(\.git|__MACOSX)\//.test(path) || /(^|\/)\.DS_Store$/.test(path);
+  return path.endsWith("/") || /(^|\/)(\.git|__MACOSX)(\/|$)/.test(path) || /(^|\/)\.DS_Store$/.test(path);
 }
 
 function stripTop(paths: string[]): (p: string) => string {
@@ -138,6 +138,7 @@ export async function packZip(file: File): Promise<Packed> {
     if (++count > MAX_ENTRIES) throw new Error("zip 文件条目过多");
     const name = cleanPath(file.name);
     if (!name || skip(name)) return;
+    if ((file.originalSize ?? 0) > MAX_PACK - expanded) throw tooBig();
     if (!modes.has(name) || entries.has(name)) throw new Error(`zip 路径不一致：${name}`);
     const entry = { chunks: [] as Uint8Array[], size: 0, done: false };
     entries.set(name, entry);
