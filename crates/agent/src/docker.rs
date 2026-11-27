@@ -672,7 +672,12 @@ impl Docker {
       .run(&Ctx::detached())
       .await;
     if !cleanup.is_ok_and(|out| {
-      out.success || out.stderr.contains("No such container")
+      out.success
+        || out.stderr.contains("No such container")
+        || out.stderr.lines().any(|line| {
+          line.contains("removal of container ")
+            && line.trim_end().ends_with(" is already in progress")
+        })
     }) {
       ctx.say(format!("清理初始化容器 {cname} 失败，需要手动处理"));
     }
@@ -2080,6 +2085,41 @@ fn parse_project_mounts(
       })
     })
     .collect()
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn init_cleanup_accepts_removal_in_progress() {
+  let (_dir, docker) = fake_docker(
+    r#"
+case "$1:$6" in
+  compose:run) exit 42;;
+  rm:*)
+    printf 'Error response from daemon: removal of container %s is already in progress\n' "$3" >&2
+    exit 1;;
+  *) exit 2;;
+esac
+"#,
+  );
+  let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+  let ctx = Ctx {
+    progress: Some(std::sync::Arc::new(move |line| {
+      tx.send(line).unwrap();
+    })),
+    ..Ctx::detached()
+  };
+  let init = InitRun {
+    service: "app".into(),
+    command: "exit 42".into(),
+    timeout_secs: None,
+  };
+  docker
+    .write_compose("app", "services: {app: {image: fixture}}")
+    .unwrap();
+  let error = docker.run_init("app", &init, &ctx).await.unwrap_err();
+  assert!(error.message.contains("退出码 42"));
+  assert_eq!(rx.try_recv().unwrap(), "运行部署前初始化");
+  assert!(rx.try_recv().is_err());
 }
 
 #[cfg(test)]

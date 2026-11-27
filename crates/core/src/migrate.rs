@@ -211,9 +211,12 @@ pub async fn volume_sync(
       may_need_restart
         .store(true, std::sync::atomic::Ordering::Relaxed);
     }
-    let stopped: bool = crate::apply::call_project_stop(
+    let stopped: bool = crate::apply::call_with_stop_timeout(
       state,
       (from, service),
+      AgentOp::ProjectStop {
+        project: service.to_string(),
+      },
       STOP_TIMEOUT,
       &progress,
       &work_cancel,

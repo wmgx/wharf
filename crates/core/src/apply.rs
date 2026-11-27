@@ -2248,9 +2248,10 @@ async fn project_stop_start(
       )
       .await?
   } else {
-    call_project_stop(
+    call_with_stop_timeout(
       state,
       (server, service),
+      op,
       STOP_START_TIMEOUT,
       progress,
       cancel,
@@ -2266,10 +2267,7 @@ async fn project_stop_start(
   Ok(())
 }
 
-pub(crate) fn stop_rpc_timeout(
-  base: Duration,
-  grace: Option<u32>,
-) -> Duration {
+fn stop_rpc_timeout(base: Duration, grace: Option<u32>) -> Duration {
   base.max(Duration::from_secs(u64::from(grace.unwrap_or(10)) + 120))
 }
 
@@ -2278,11 +2276,12 @@ async fn project_grace(
   server: &str,
   service: &str,
 ) -> Result<Option<u32>, ApiError> {
-  let (server, service) = (server.to_string(), service.to_string());
+  let target = server.to_string();
+  let service = service.to_string();
   let (deployed, wanted): (Option<String>, Option<String>) = state.db.call(move |c| {
     let deployed = c.query_row(
       "SELECT compose FROM deployments WHERE server = ?1 AND service = ?2 ORDER BY id DESC LIMIT 1",
-      params![server, service], |r| r.get(0),
+      params![target, service], |r| r.get(0),
     ).optional().map_err(sql_err)?;
     let wanted = c.query_row(
       "SELECT spec FROM resources WHERE kind = 'service' AND name = ?1",
@@ -2300,6 +2299,7 @@ async fn project_grace(
     .map(serde_json::from_str::<ServiceSpec>)
     .transpose()
     .map_err(json_err)?
+    .filter(|spec| spec.server == server)
     .and_then(|spec| match spec.source {
       Source::Compose { content, .. } => {
         content.as_deref().map(parse)
@@ -2309,18 +2309,16 @@ async fn project_grace(
   Ok(installed.max(desired))
 }
 
-pub(crate) async fn call_project_stop<
+pub(crate) async fn call_with_stop_timeout<
   T: serde::de::DeserializeOwned,
 >(
   state: &AppState,
   (server, service): (&str, &str),
+  op: AgentOp,
   base: Duration,
   progress: &ProgressFn,
   cancel: &CancellationToken,
 ) -> Result<T, ApiError> {
-  let op = AgentOp::ProjectStop {
-    project: service.to_string(),
-  };
   let grace = project_grace(state, server, service).await?;
   let timeout = stop_rpc_timeout(base, grace);
   if grace.is_some_and(|n| n > 150) {
@@ -2639,6 +2637,46 @@ async fn record_deployment(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn migration_stop_uses_source_server_grace() {
+    let state = crate::migrate::tests::seed_service(false).await;
+    state.db.call(|c| {
+      c.execute(
+        "UPDATE resources SET spec = json_set(spec, '$.stop_grace_secs', 300) WHERE kind = 'service' AND name = 'notes'", [],
+      ).map_err(sql_err)?;
+      c.execute(
+        "INSERT INTO deployments (service, server, run_id, hash, compose, images, created_at) VALUES ('notes', 's1', 'r1', 'old', 'services: {notes: {image: fixture}}', '{}', 0)", [],
+      ).map_err(sql_err)?;
+      Ok(())
+    }).await.unwrap();
+    assert_eq!(
+      project_grace(&state, "s1", "notes").await.unwrap(),
+      Some(10)
+    );
+    assert_eq!(
+      project_grace(&state, "s2", "notes").await.unwrap(),
+      Some(300)
+    );
+    state.hub.mock_agent("s1", false, |op| {
+      assert!(matches!(op, AgentOp::ProjectStop { project } if project == "notes"));
+      Ok(serde_json::json!(true))
+    });
+    let progress: ProgressFn = Arc::new(|_| {});
+    let stopped: bool = call_with_stop_timeout(
+      &state,
+      ("s1", "notes"),
+      AgentOp::ProjectStop {
+        project: "notes".into(),
+      },
+      STOP_START_TIMEOUT,
+      &progress,
+      &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert!(stopped);
+  }
 
   #[test]
   fn crash_progress_redacts_inline_service_value() {

@@ -254,16 +254,44 @@ impl RunSearch {
         .collect();
       (None, Some(groups))
     } else {
+      let heading = |index| {
+        headers
+          .partition_point(|(start, _)| *start < index)
+          .checked_sub(1)
+      };
+      let mut keep = self.lines.len();
+      if !headers.is_empty() {
+        let mut bytes = 0;
+        let mut header = None;
+        keep = 0;
+        // 从尾部给日志行和所属步骤标题一起留空间。
+        for (index, _, len) in self.lines.iter().rev() {
+          let next = heading(*index);
+          let cost = if next != header {
+            next.map_or(0, |i| encoded_len(&headers[i].1) + 2)
+          } else {
+            0
+          };
+          if bytes + cost + len > self.budget {
+            // 单条日志占满预算时仍保留最新一行。
+            keep = keep.max(1);
+            truncated = true;
+            break;
+          }
+          bytes += cost + len;
+          header = next;
+          keep += 1;
+        }
+      }
       let mut text = String::new();
       let mut header = None;
       let mut bytes = 0;
-      for (index, line, len) in self.lines {
-        let next = headers
-          .partition_point(|(start, _)| *start < index)
-          .checked_sub(1);
+      let skip = self.lines.len() - keep;
+      for (index, line, len) in self.lines.into_iter().skip(skip) {
+        let next = heading(index);
         if next != header {
-          if let Some((_, title)) = next.and_then(|i| headers.get(i))
-          {
+          if let Some(i) = next {
+            let title = &headers[i].1;
             let cost = encoded_len(title) + 2;
             if bytes + cost + len <= self.budget {
               text.push_str(title);
@@ -274,10 +302,6 @@ impl RunSearch {
             }
           }
           header = next;
-        }
-        if bytes + len > self.budget {
-          truncated = true;
-          break;
         }
         text.push_str(&line);
         text.push('\n');
@@ -342,6 +366,32 @@ pub fn since_arg(s: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn multistep_budget_preserves_final_error_line() {
+    let options = Options {
+      grep: None,
+      errors: false,
+      max_line: usize::MAX,
+      limit: usize::MAX,
+    };
+    let mut search = RunSearch::new(&options, 32, false);
+    for line in [
+      "x".repeat(32),
+      "a".repeat(8),
+      "b".repeat(12),
+      "ERROR!".into(),
+    ] {
+      search.push(&line);
+    }
+    let headers = [(0, "step 1".into()), (2, "step 2".into())];
+    let (found, truncated) = search.finish(&headers);
+    assert!(truncated);
+    assert_eq!(
+      found.logs.as_deref(),
+      Some("step 2\nbbbbbbbbbbbb\nERROR!\n")
+    );
+  }
 
   #[test]
   fn groups_errors_that_differ_only_in_ids() {
