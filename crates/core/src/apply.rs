@@ -439,7 +439,8 @@ pub(crate) async fn start_with_actor(
       "succeeded"
     };
     let run_id = run_id.clone();
-    state
+    crate::rules::ensure_loaded(&state).await;
+    let alert_changes = state
       .db
       .call_credentials(move |c, key| {
         let tx = c.transaction().map_err(sql_err)?;
@@ -450,7 +451,7 @@ pub(crate) async fn start_with_actor(
           account_refs.as_ref(),
           base_instances.as_ref(),
         )?;
-        apply_writes(&tx, &policy_plan, &writes, admin)?;
+        let alert_changes = apply_writes(&tx, &policy_plan, &writes, admin)?;
         crate::pending::stage(&tx, &run_id, &policy_plan, &writes, &step_plans)?;
         tx.execute(
           "UPDATE plans SET status = 'applied' WHERE id = ?1",
@@ -464,12 +465,22 @@ pub(crate) async fn start_with_actor(
           params![run_id, plan_id, run_status, run_body, now_ms(), actor_name, meta],
         )
         .map_err(sql_err)?;
-        tx.commit().map_err(sql_err)
+        tx.commit().map_err(sql_err)?;
+        Ok(alert_changes)
       })
       .await?;
+    alert_changes.clear(&state).await;
     crate::log_redact::refresh(&state.db).await;
   }
 
+  for write in &stored.writes {
+    if let db::Write::Delete { kind, name } = write
+      && kind == crate::world::KIND_SERVICE
+    {
+      crate::heal::forget(name);
+      crate::rules::on_service_deleted(&state, name).await;
+    }
+  }
   let actor =
     caller.map(crate::security_receipt::Actor::from_request);
   if run.status == RunStatus::Running {
@@ -501,14 +512,6 @@ pub(crate) async fn start_with_actor(
       &plan.items,
     )
     .await;
-  }
-  for write in &stored.writes {
-    if let db::Write::Delete { kind, name } = write
-      && kind == crate::world::KIND_SERVICE
-    {
-      crate::heal::forget(name);
-      crate::rules::on_service_deleted(&state, name).await;
-    }
   }
   crate::service_monitor::sync_watches(&state, None).await;
   Ok(ApplyResponse { run_id })
@@ -606,7 +609,7 @@ fn apply_writes(
   plan: &Plan,
   writes: &[crate::db::Write],
   admin: bool,
-) -> Result<(), ApiError> {
+) -> Result<crate::rules::lifecycle::Changes, ApiError> {
   let current =
     crate::world::World::from_rows(db::all_resources(tx)?)?;
   crate::secret_policy::require_apply(plan, &current, admin)?;
@@ -650,7 +653,10 @@ fn apply_writes(
   crate::secret_policy::validate_accounts(
     &desired,
     &crate::app_accounts::account_links(tx)?,
-  )
+  )?;
+  Ok(crate::rules::lifecycle::Changes::between(
+    &current, &desired,
+  ))
 }
 
 /// 不来自计划的执行同样占用 apply 锁。
@@ -866,6 +872,13 @@ async fn execute(
     tracing::info!("[{run_id}] {}", step.title);
     let started = std::time::Instant::now();
     let op = service_op(&step.step);
+    if let Some(service) = crate::rules::op_silence::service(
+      &step.step,
+      op.map(|(service, _)| service),
+    ) && let Some(guard) = &guard
+    {
+      guard.silence_alerts(service);
+    }
     if let Some((service, action)) = op {
       record_op(
         &state,
@@ -978,6 +991,9 @@ async fn execute(
     r.finished_at = Some(Utc::now());
     r.clone()
   };
+  if let Some(guard) = &guard {
+    guard.finish_silence(final_run.status == RunStatus::Succeeded);
+  }
   if let Err(e) = persist(&state, &final_run, scope_services).await {
     tracing::error!("保存执行记录 {run_id} 失败：{e}");
   }

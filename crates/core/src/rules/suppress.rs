@@ -34,6 +34,7 @@ pub(super) const BUILTIN_GATEWAY: &str = "suppress_gateway";
 pub(super) const MAX_CUSTOM: usize = 50;
 
 pub(super) const BUILTINS: &[(&str, &str)] = &[
+  (super::op_silence::ID, "受控操作期间抑制服务告警"),
   (BUILTIN_OFFLINE, "机器离线时抑制其上告警"),
   (BUILTIN_GATEWAY, "网关不可用时抑制其下域名告警"),
 ];
@@ -107,12 +108,17 @@ pub(super) fn related_servers(
         {
           out.push(gw.spec.server.clone());
         }
-        if route.spec.upstream.is_none()
-          && route.spec.redirect.is_none()
-          && let Some(svc) = world.services.get(&route.spec.service)
-          && !out.contains(&svc.spec.server)
-        {
-          out.push(svc.spec.server.clone());
+        let primary = (route.spec.upstream.is_none()
+          && route.spec.redirect.is_none())
+        .then_some(route.spec.service.as_str());
+        for service in primary.into_iter().chain(
+          route.spec.paths.iter().map(|path| path.service.as_str()),
+        ) {
+          if let Some(svc) = world.services.get(service)
+            && !out.contains(&svc.spec.server)
+          {
+            out.push(svc.spec.server.clone());
+          }
         }
       }
       out

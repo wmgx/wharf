@@ -78,6 +78,9 @@ async fn round(state: &AppState) -> Result<(), ApiError> {
     subjects.push((name.clone(), name.clone(), "host.mem", None));
   }
   for (name, service) in &snap.world.services {
+    if service.spec.stopped {
+      continue;
+    }
     subjects.push((
       name.clone(),
       service.spec.server.clone(),

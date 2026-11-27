@@ -5,12 +5,15 @@ use std::{
 
 use wharf_api_types::{ApiError, ErrorCode};
 
+use crate::{db::now_ms, rules::op_silence::Windows};
+
 #[derive(Default)]
 pub struct OpLocks(Arc<Mutex<State>>);
 
 #[derive(Default)]
 struct State {
   next: u64,
+  silence: Windows,
   held: BTreeMap<u64, (Vec<LockSpec>, String, Option<String>)>,
 }
 
@@ -103,6 +106,31 @@ pub struct OpLockGuard {
 }
 
 impl OpLocks {
+  pub(crate) fn has_alert_windows(&self, now: i64) -> bool {
+    self
+      .0
+      .lock()
+      .unwrap_or_else(|p| p.into_inner())
+      .silence
+      .any(now)
+  }
+
+  pub(crate) fn suppress_alert(
+    &self,
+    services: &[&str],
+    rule: &str,
+    subject: &str,
+    healthy: bool,
+    now: i64,
+  ) -> bool {
+    self
+      .0
+      .lock()
+      .unwrap_or_else(|p| p.into_inner())
+      .silence
+      .suppress(services, rule, subject, healthy, now)
+  }
+
   pub fn is_service_busy(&self, service: &str) -> bool {
     // 数据清理与持有该服务的操作互斥，复用同一冲突判定。
     let service = LockSpec::Cleanup(service.into());
@@ -135,6 +163,24 @@ impl OpLocks {
 }
 
 impl OpLockGuard {
+  pub(crate) fn silence_alerts(&self, service: &str) {
+    self
+      .state
+      .lock()
+      .unwrap_or_else(|p| p.into_inner())
+      .silence
+      .start(self.id, service, now_ms());
+  }
+
+  pub(crate) fn finish_silence(&self, success: bool) {
+    self
+      .state
+      .lock()
+      .unwrap_or_else(|p| p.into_inner())
+      .silence
+      .finish(self.id, success, now_ms());
+  }
+
   pub fn reserve_backup_target(
     &self,
     target: String,
@@ -179,12 +225,10 @@ impl OpLockGuard {
 
 impl Drop for OpLockGuard {
   fn drop(&mut self) {
-    self
-      .state
-      .lock()
-      .unwrap_or_else(|p| p.into_inner())
-      .held
-      .remove(&self.id);
+    let mut state =
+      self.state.lock().unwrap_or_else(|p| p.into_inner());
+    state.silence.finish(self.id, false, now_ms());
+    state.held.remove(&self.id);
   }
 }
 

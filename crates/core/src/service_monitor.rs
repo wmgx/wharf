@@ -15,13 +15,12 @@ use wharf_api_types::{
     LogAlertView, LogHit, LogWatch, PortCheck, PortCheckSpec,
   },
   spec::ServiceSpec,
-  view::{Issue, IssueLevel, IssueSubject, OpStatus},
+  view::{Issue, IssueLevel, IssueSubject},
 };
 
 use crate::{
   db::now_ms,
   rules,
-  snapshot::Snapshot,
   state::AppState,
   world::{ServiceRow, World},
 };
@@ -330,7 +329,6 @@ async fn check_ports(state: &AppState) {
   let Ok(snap) = crate::snapshot::load(&state.db).await else {
     return;
   };
-  let now = now_ms();
   let mut active = BTreeSet::new();
   let mut batches = BTreeMap::<&str, Vec<(String, PortCheck)>>::new();
   for (name, row) in &snap.world.services {
@@ -338,8 +336,7 @@ async fn check_ports(state: &AppState) {
       continue;
     }
     let server = row.spec.server.as_str();
-    let skip =
-      !state.hub.is_online(server) || deploying(&snap, name, now);
+    let skip = !state.hub.is_online(server);
     for (port, check) in ports(row) {
       let id = format!("{name}:{port}");
       active.insert(id.clone());
@@ -388,7 +385,6 @@ async fn check_ports(state: &AppState) {
       let (name, _) = id.split_once(':').unwrap_or((&id, ""));
       if snap.world.services.get(name)
         != latest.world.services.get(name)
-        || deploying(&latest, name, now_ms())
         || !state
           .hub
           .is_online(&latest.world.services[name].spec.server)
@@ -408,16 +404,6 @@ async fn check_ports(state: &AppState) {
       .await;
     }
   }
-}
-
-fn deploying(snap: &Snapshot, name: &str, now: i64) -> bool {
-  snap.ops.get(name).is_some_and(|op| {
-    op.status == OpStatus::Running
-      || now - op.at.timestamp_millis() < 2 * MINUTE
-  }) || snap
-    .applied
-    .get(name)
-    .is_some_and(|a| now - a.at.timestamp_millis() < 2 * MINUTE)
 }
 
 pub fn spawn(state: Arc<AppState>) {

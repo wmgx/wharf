@@ -3,11 +3,7 @@
 //!
 //! 接管列表存在设置 `host_units.<服务器>`（JSON 数组），不走计划：只是盯着看。
 
-use std::{
-  collections::{BTreeMap, BTreeSet},
-  sync::{Arc, Mutex},
-  time::Duration,
-};
+use std::{collections::BTreeSet, sync::Arc, time::Duration};
 
 use axum::{
   Json,
@@ -28,10 +24,6 @@ use crate::{
 
 const EVERY: Duration = Duration::from_secs(300);
 const TIMEOUT: Duration = Duration::from_secs(90);
-
-/// 服务器 → 接管了但没在运行的 (unit, 状态)。
-static DOWN: Mutex<BTreeMap<String, Vec<(String, String)>>> =
-  Mutex::new(BTreeMap::new());
 
 fn key(server: &str) -> String {
   format!("host_units.{server}")
@@ -82,24 +74,18 @@ pub fn spawn(state: Arc<AppState>) {
 async fn check(state: &AppState, server: &str) {
   let watch = watched(state, server).await;
   if watch.is_empty() || !state.hub.is_online(server) {
-    if let Ok(mut d) = DOWN.lock() {
-      d.remove(server);
-    }
     return;
   }
   let Ok(units) = fetch(state, server).await else {
     return;
   };
-  let mut down = Vec::new();
-  for unit in &watch {
+  let current = watched(state, server).await;
+  for unit in watch.intersection(&current) {
     let st = units
       .iter()
       .find(|u| &u.unit == unit)
       .map_or("没有在运行".to_string(), |u| u.state.clone());
     let ok = st == "running";
-    if !ok {
-      down.push((unit.clone(), st.clone()));
-    }
     crate::rules::observe(
       state,
       "hostunit.running",
@@ -109,42 +95,31 @@ async fn check(state: &AppState, server: &str) {
     )
     .await;
   }
-  if let Ok(mut d) = DOWN.lock() {
-    d.insert(server.to_string(), down);
-  }
 }
 
-/// 给"需要注意"。
 pub fn issues() -> Vec<Issue> {
-  DOWN
-    .lock()
-    .map(|d| {
-      d.iter()
-        .flat_map(|(s, v)| {
-          v.iter().map(move |(u, st)| {
-            let (alert, ack) = crate::rules::issue_alert(
-              "host_unit_down",
-              &format!("{s}:{u}"),
-            );
-            Issue {
-              code: "host_unit_down".into(),
-              level: IssueLevel::Fault,
-              subject: Some(IssueSubject {
-                kind: "server".into(),
-                name: s.clone(),
-              }),
-              title: format!(
-                "{s} 上的宿主机程序 {u} 不在运行（{st}）"
-              ),
-              hint: None,
-              ack,
-              alert,
-            }
-          })
-        })
-        .collect()
+  crate::rules::firing_subjects("host_unit_down")
+    .into_iter()
+    .map(|(subject, title)| {
+      let (alert, ack) =
+        crate::rules::issue_alert("host_unit_down", &subject);
+      let server = subject
+        .split_once(':')
+        .map_or(subject.as_str(), |(server, _)| server);
+      Issue {
+        code: "host_unit_down".into(),
+        level: IssueLevel::Fault,
+        subject: Some(IssueSubject {
+          kind: "server".into(),
+          name: server.into(),
+        }),
+        title,
+        hint: None,
+        ack,
+        alert,
+      }
     })
-    .unwrap_or_default()
+    .collect()
 }
 
 #[derive(Serialize)]
@@ -262,6 +237,14 @@ pub async fn set_watch(
       )
     })
     .await?;
+  if !body.watch {
+    crate::rules::lifecycle::clear(
+      &s,
+      "host_unit_down",
+      &format!("{server}:{unit}"),
+    )
+    .await;
+  }
   check(&s, &server).await;
   Ok(Json(serde_json::json!({ "watched": watch })))
 }

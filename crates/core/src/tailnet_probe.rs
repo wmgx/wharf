@@ -253,6 +253,8 @@ pub async fn refresh(
   let snap = snapshot::load(&s.db).await?;
   let addresses = addresses(&snap);
   if addresses.len() < 2 {
+    rules::retain_subjects(s, "tailnet_relay", &Default::default())
+      .await;
     if let Ok(mut relays) = RELAYS.write() {
       relays.clear();
     }
@@ -263,7 +265,20 @@ pub async fn refresh(
       |server| async move { (server, status(s, server).await) },
     ))
     .await;
-  let names: Vec<_> = addresses.keys().collect();
+  let latest = snapshot::load(&s.db).await?;
+  let names: Vec<_> = addresses
+    .iter()
+    .filter(|(name, ip)| address(&latest, name) == Some(ip.as_str()))
+    .map(|(name, _)| name)
+    .collect();
+  let keep = names
+    .iter()
+    .enumerate()
+    .flat_map(|(i, from)| {
+      names[i + 1..].iter().map(move |to| format!("{from}>{to}"))
+    })
+    .collect();
+  rules::retain_subjects(s, "tailnet_relay", &keep).await;
   let now = Utc::now();
   let mut current = Vec::new();
   for (i, from) in names.iter().enumerate() {

@@ -1,9 +1,12 @@
 //! 域名告警：不自己发请求，用后台域名体检（[crate::doctor]，每 2 分钟一轮）的结果。
 //! HTTP(S) 那一层是坏的算不通（5xx、超时、连不上）。
-//! 连续 [FAILS] 轮不通进"需要注意"并推送，恢复时再推一次；证书剩不到 14 天也推送。
+//! 连续多轮不通进"需要注意"并推送，恢复时再推一次；证书剩不到 14 天也推送。
 //! 结果只存在内存里。
 
-use std::{collections::BTreeMap, sync::Mutex};
+use std::{
+  collections::{BTreeMap, BTreeSet},
+  sync::Mutex,
+};
 
 use wharf_api_types::view::{
   CheckStatus, DoctorReport, Issue, IssueLevel, IssueSubject,
@@ -11,9 +14,6 @@ use wharf_api_types::view::{
 };
 
 use crate::state::AppState;
-
-/// 连续失败几次才算挂了，避开偶发抖动。
-const FAILS: u32 = 3;
 
 static LAST: Mutex<BTreeMap<String, ProbeView>> =
   Mutex::new(BTreeMap::new());
@@ -25,53 +25,70 @@ pub fn last(host: &str) -> Option<ProbeView> {
 
 /// 连续失败够次数的域名。
 pub fn issues() -> Vec<Issue> {
-  let Ok(m) = LAST.lock() else { return vec![] };
-  m.iter()
-    .filter(|(_, p)| p.fails >= FAILS)
-    .map(|(h, p)| {
-      let (alert, ack) = crate::rules::issue_alert("domain_down", h);
-      Issue {
-        code: "route_down".into(),
-        level: IssueLevel::Fault,
-        subject: Some(IssueSubject {
-          kind: "route".into(),
-          name: h.clone(),
-        }),
-        title: format!("域名 {h} 打不开：{}", p.detail),
-        hint: None,
-        ack,
-        alert,
-      }
-    })
-    .chain(m.iter().filter_map(|(h, p)| {
-      p.cert_days
-        .filter(|d| *d < crate::cert::WARN_DAYS)
-        .map(|d| {
-          let (alert, ack) =
-            crate::rules::issue_alert("cert_expiring", h);
+  ["domain_down", "cert_expiring"]
+    .into_iter()
+    .flat_map(|rule| {
+      crate::rules::firing_subjects(rule).into_iter().map(
+        move |(name, title)| {
+          let (alert, ack) = crate::rules::issue_alert(rule, &name);
+          let down = rule == "domain_down";
           Issue {
-            code: "cert_expiring".into(),
-            level: IssueLevel::Warn,
+            code: if down { "route_down" } else { rule }.into(),
+            level: if down {
+              IssueLevel::Fault
+            } else {
+              IssueLevel::Warn
+            },
             subject: Some(IssueSubject {
               kind: "route".into(),
-              name: h.clone(),
+              name,
             }),
-            title: format!("域名 {h} 的证书 {d} 天后到期"),
+            title,
             hint: None,
-            ack,
             alert,
+            ack,
           }
-        })
-    }))
+        },
+      )
+    })
     .collect()
+}
+
+pub(crate) fn forget(hosts: &BTreeSet<String>) {
+  if let Ok(mut last) = LAST.lock() {
+    last.retain(|host, _| !hosts.contains(host));
+  }
 }
 
 /// 每轮完整体检后调用。
 pub async fn observe(state: &AppState, report: &DoctorReport) {
+  let Ok(snap) = crate::snapshot::load(&state.db).await else {
+    return;
+  };
+  let active = snap
+    .world
+    .routes
+    .iter()
+    .filter(|(_, row)| {
+      !crate::rules::lifecycle::stopped_route(&snap.world, &row.spec)
+        && row
+          .spec
+          .expires_at
+          .is_none_or(|end| end > crate::db::now_ms())
+    })
+    .map(|(host, _)| host.clone())
+    .collect::<BTreeSet<_>>();
   if let Ok(mut m) = LAST.lock() {
-    m.retain(|h, _| report.routes.iter().any(|r| &r.hostname == h));
+    m.retain(|h, _| active.contains(h));
   }
-  for r in &report.routes {
+  for rule in ["domain_down", "cert_expiring"] {
+    crate::rules::retain_subjects(state, rule, &active).await;
+  }
+  for r in report
+    .routes
+    .iter()
+    .filter(|r| active.contains(&r.hostname))
+  {
     let Some(web) = r
       .checks
       .iter()

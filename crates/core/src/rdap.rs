@@ -256,19 +256,19 @@ async fn round(
     rules::observe(state, "expiry.days", subject, *n as f64, "")
       .await;
   }
+  let active = all
+    .iter()
+    .map(|name| format!("domain:{name}"))
+    .chain(
+      snap
+        .world
+        .servers
+        .keys()
+        .map(|name| format!("server:{name}")),
+    )
+    .collect();
   for rule in ["expiry_soon", "expiry_urgent"] {
-    for (s, _) in rules::firing_subjects(rule) {
-      if let Some((kind, name)) = s.split_once(':')
-        && match kind {
-          "domain" => !all.contains(name),
-          "server" => !snap.world.servers.contains_key(name),
-          _ => false,
-        }
-      {
-        rules::observe(state, "expiry.days", &s, 9999.0, "").await;
-        days.insert(s, 9999);
-      }
-    }
+    rules::retain_subjects(state, rule, &active).await;
   }
   *DAYS.lock().unwrap_or_else(|e| e.into_inner()) = days;
   Ok(())

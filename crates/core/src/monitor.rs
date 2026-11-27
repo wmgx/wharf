@@ -1,9 +1,9 @@
 //! 按服务的自定义监控（服务配置 `monitor`）：每分钟让服务所在机器的 agent 从本机请求
-//! `http://127.0.0.1:<宿主机端口><path>`。连续 [FAILS] 次不正常进"需要注意"并推送，恢复再推。
+//! `http://127.0.0.1:<宿主机端口><path>`。连续多次不正常进"需要注意"并推送，恢复再推。
 //! 结果只存在内存里。
 
 use std::{
-  collections::BTreeMap,
+  collections::{BTreeMap, BTreeSet},
   sync::{Arc, Mutex},
   time::Duration,
 };
@@ -17,7 +17,6 @@ use wharf_api_types::{
 use crate::{state::AppState, world::ServiceRow};
 
 const EVERY: Duration = Duration::from_secs(60);
-const FAILS: u32 = 3;
 const TIMEOUT_SECS: u64 = 10;
 
 static LAST: Mutex<BTreeMap<String, MonitorView>> =
@@ -28,26 +27,36 @@ pub fn last(service: &str) -> Option<MonitorView> {
 }
 
 pub fn issues() -> Vec<Issue> {
-  let Ok(m) = LAST.lock() else { return vec![] };
-  m.iter()
-    .filter(|(_, v)| v.fails >= FAILS)
-    .map(|(s, v)| {
+  crate::rules::firing_subjects("monitor_failed")
+    .into_iter()
+    .map(|(s, title)| {
       let (alert, ack) =
-        crate::rules::issue_alert("monitor_failed", s);
+        crate::rules::issue_alert("monitor_failed", &s);
       Issue {
         code: "monitor_down".into(),
         level: IssueLevel::Fault,
         subject: Some(IssueSubject {
           kind: "service".into(),
-          name: s.clone(),
+          name: s,
         }),
-        title: format!("服务 {s} 的监控不正常：{}", v.detail),
+        title,
         hint: None,
         ack,
         alert,
       }
     })
     .collect()
+}
+
+pub(crate) fn forget(
+  services: &BTreeSet<String>,
+  monitors: &BTreeSet<String>,
+) {
+  if let Ok(mut last) = LAST.lock() {
+    last.retain(|svc, _| {
+      !services.contains(svc) && !monitors.contains(svc)
+    });
+  }
 }
 
 /// 监控的地址；端口找不到时返回原因。
@@ -127,6 +136,10 @@ async fn round(state: &AppState) {
       Some((n.clone(), r.spec.server.clone(), m.clone(), url(r, &m)))
     })
     .collect();
+  let active =
+    targets.iter().map(|(name, ..)| name.clone()).collect();
+  crate::rules::retain_subjects(state, "monitor_failed", &active)
+    .await;
   if let Ok(mut l) = LAST.lock() {
     l.retain(|n, _| targets.iter().any(|(t, ..)| t == n));
   }
@@ -165,8 +178,16 @@ async fn round(state: &AppState) {
         };
         (name, outcome)
       });
-  for (name, outcome) in futures_util::future::join_all(checks).await
-  {
+  let outcomes = futures_util::future::join_all(checks).await;
+  let Ok(current) = crate::snapshot::load(&state.db).await else {
+    return;
+  };
+  for (name, outcome) in outcomes {
+    if current.world.services.get(&name)
+      != snap.world.services.get(&name)
+    {
+      continue;
+    }
     let Some((ok, detail)) = outcome else {
       continue;
     };

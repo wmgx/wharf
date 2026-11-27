@@ -7,7 +7,6 @@ use wharf_api_types::{
   ApiError,
   service_checks::{HeartbeatSpec, HeartbeatView},
   spec::ServiceSpec,
-  view::OpStatus,
 };
 
 use crate::{
@@ -275,13 +274,6 @@ pub async fn round(state: &AppState) {
     let Some(r) = snap.heartbeats.get(&name) else {
       continue;
     };
-    if snap
-      .ops
-      .get(&name)
-      .is_some_and(|op| op.status == OpStatus::Running)
-    {
-      continue;
-    }
     let h =
       snap.world.services[&name].spec.heartbeat.as_ref().unwrap();
     let applied =

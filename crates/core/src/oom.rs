@@ -18,7 +18,7 @@ pub async fn record(
     }
   };
   for (name, row) in &snap.world.services {
-    if row.spec.server != server {
+    if row.spec.server != server || row.spec.stopped {
       continue;
     }
     if oom.contains(name) {
