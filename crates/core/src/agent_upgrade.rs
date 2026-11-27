@@ -169,10 +169,12 @@ pub fn spawn_agents_after(state: Arc<AppState>) {
   });
 }
 
-#[derive(serde::Deserialize, Default)]
+#[derive(serde::Deserialize, serde::Serialize, Default)]
 pub struct UpgradeCore {
   #[serde(default)]
   pub then_agents: bool,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub skip_snapshot: bool,
 }
 
 /// 发布 Wharf 的仓库，查有没有新构建用。
@@ -254,10 +256,16 @@ pub async fn check(auth: Auth) -> ApiResult<Value> {
 pub async fn upgrade_core(
   State(s): State<Arc<AppState>>,
   auth: Auth,
+  peer: Option<
+    axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+  >,
+  headers: axum::http::HeaderMap,
   body: Option<Json<UpgradeCore>>,
 ) -> ApiResult<UpgradeResult> {
   auth.require(Perm::Admin)?;
-  let then_agents = body.is_some_and(|b| b.then_agents);
+  let req = body.map(|b| b.0).unwrap_or_default();
+  let _guard =
+    s.apply_lock.try_lock().map_err(|_| s.runs.busy_error())?;
   let cancel = CancellationToken::new();
   let core = crate::core_node::require_verified(&s, &cancel).await?;
   let id = core.container_id.clone().ok_or_else(|| {
@@ -279,21 +287,28 @@ pub async fn upgrade_core(
     .servers
     .get(&core.server)
     .ok_or_else(|| ApiError::not_found("控制面所在服务器已删除"))?;
-  let r: UpgradeResult = core
-    .call(
-      &s,
-      AgentOp::Upgrade(UpgradeJob {
-        tag: None,
-        pull: snapshot::pull_policy(row),
-        container: Some(id),
-        ready: Some(CORE_READY.into()),
-      }),
-      CORE_PULL_TIMEOUT,
-      None,
-      &cancel,
-    )
-    .await?;
-  if then_agents && r.started {
+  let skip = req
+    .skip_snapshot
+    .then(|| crate::db_snapshot::api_actor(&auth, peer, &headers));
+  let r = upgrade_with_snapshot(&s, skip.as_ref(), || async {
+    let r: UpgradeResult = core
+      .call(
+        &s,
+        AgentOp::Upgrade(UpgradeJob {
+          tag: None,
+          pull: snapshot::pull_policy(row),
+          container: Some(id),
+          ready: Some(CORE_READY.into()),
+        }),
+        CORE_PULL_TIMEOUT,
+        None,
+        &cancel,
+      )
+      .await?;
+    Ok(r)
+  })
+  .await?;
+  if req.then_agents && r.started {
     let from = BUILD.to_string();
     s.db
       .call(move |c| {
@@ -302,6 +317,28 @@ pub async fn upgrade_core(
       .await?;
   }
   Ok(Json(r))
+}
+
+pub(crate) async fn upgrade_with_snapshot(
+  s: &AppState,
+  skip: Option<&crate::security_receipt::Actor>,
+  run: impl AsyncFnOnce() -> Result<UpgradeResult, ApiError>,
+) -> Result<UpgradeResult, ApiError> {
+  let saved = crate::db_snapshot::before(
+    s,
+    crate::db_snapshot::Trigger::Upgrade,
+    "升级控制面".into(),
+    None,
+    skip,
+  )
+  .await?;
+  let result = run().await;
+  if let Some(saved) = saved {
+    // 请求断开时仍可能已经启动了接班容器。
+    let started = result.as_ref().map_or(true, |r| r.started);
+    crate::db_snapshot::finish_upgrade(s, saved.id, started).await;
+  }
+  result
 }
 
 pub async fn upgrade(

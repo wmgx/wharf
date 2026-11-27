@@ -34,6 +34,7 @@ mod core_node;
 mod cron;
 mod data;
 mod db;
+mod db_snapshot;
 mod disk;
 mod disk_forecast;
 mod dns_check;
@@ -165,6 +166,9 @@ struct Cli {
 
 #[derive(clap::Subcommand)]
 enum Command {
+  /// 控制面已停止时查看或恢复本机数据库热快照。
+  #[command(subcommand)]
+  Snapshot(db_snapshot::OfflineCommand),
   /// 重置页面登录的管理员密码：`docker exec -it wharf-core wharf-core reset-password`。
   ResetPassword {
     /// 同时改账号名。不给时沿用现在的账号（没有账号时用 admin）。
@@ -206,9 +210,23 @@ async fn main() -> anyhow::Result<()> {
     )
     .init();
   let cli = Cli::parse();
+  if let Some(Command::Snapshot(cmd)) = cli.command {
+    match db_snapshot::offline(&cli.data_dir, cmd) {
+      Ok(()) => return Ok(()),
+      Err(e)
+        if e.code == wharf_api_types::ErrorCode::ConfirmRequired =>
+      {
+        eprintln!("{e}");
+        std::process::exit(2);
+      }
+      Err(e) => return Err(anyhow::anyhow!("{e}")),
+    }
+  }
   caddy_validate::validate_public_url(cli.public_url.as_deref())?;
   std::fs::create_dir_all(&cli.data_dir)
     .with_context(|| format!("创建 {}", cli.data_dir.display()))?;
+  let _restore_lock =
+    db_snapshot::process_lock(&cli.data_dir, false)?;
   let db = db::Db::open(&cli.data_dir.join("wharf.db"))?;
   if let Some(Command::ResetPassword { username }) = cli.command {
     drop(db);

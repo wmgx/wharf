@@ -260,8 +260,11 @@ async fn cleanup_legacy_requires_confirm_and_aborts_if_target_offline()
     cleanup_legacy(
       State(state.clone()),
       auth(true),
+      None,
+      Default::default(),
       Json(CleanupRequest {
         confirm: confirm.map(str::to_string),
+        skip_snapshot: false,
       }),
     )
   };

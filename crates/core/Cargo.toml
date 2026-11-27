@@ -38,7 +38,8 @@ ipnet = { version = "2", features = ["serde"] }
 rcgen = { version = "0.13", default-features = false, features = ["aws_lc_rs", "pem"] }
 rpassword = "=7.5.4"
 reqwest.workspace = true
-rusqlite.workspace = true
+rusqlite = { workspace = true, features = ["hooks"] }
+libc = "0.2"
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml_ng.workspace = true

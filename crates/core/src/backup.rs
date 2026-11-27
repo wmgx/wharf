@@ -946,10 +946,12 @@ pub async fn migrate_all(
   }))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct CleanupRequest {
   #[serde(default)]
   confirm: Option<String>,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  skip_snapshot: bool,
 }
 
 #[derive(Serialize)]
@@ -961,6 +963,10 @@ pub struct CleanupReport {
 pub async fn cleanup_legacy(
   State(s): State<Arc<AppState>>,
   auth: Auth,
+  peer: Option<
+    axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+  >,
+  headers: axum::http::HeaderMap,
   Json(req): Json<CleanupRequest>,
 ) -> ApiResult<CleanupReport> {
   auth.require(Perm::Admin)?;
@@ -981,8 +987,11 @@ pub async fn cleanup_legacy(
     .db
     .call_credentials(|c, key| key.secret(c, LEGACY_KEY_SECRET))
     .await?;
+  let skip = req
+    .skip_snapshot
+    .then(|| crate::db_snapshot::api_actor(&auth, peer, &headers));
   let mut removals = Vec::new();
-  if let Some(legacy) = &legacy {
+  let snap = if let Some(legacy) = &legacy {
     crate::core_backup::require_recovery_ready(&s).await?;
     let snap = snapshot::load(&s.db).await?;
     for (target, service) in repositories(&s, &snap).await? {
@@ -1038,6 +1047,19 @@ pub async fn cleanup_legacy(
       }
       removals.push((target, service, key, old.to_string()));
     }
+    Some(snap)
+  } else {
+    None
+  };
+  crate::db_snapshot::before(
+    &s,
+    crate::db_snapshot::Trigger::CleanupLegacy,
+    "清理旧全局备份口令".into(),
+    None,
+    skip.as_ref(),
+  )
+  .await?;
+  if let (Some(legacy), Some(snap)) = (&legacy, snap) {
     for (target, service, key, id) in &removals {
       let repo = (target.as_str(), service.as_str());
       local_call::<serde_json::Value>(
@@ -1122,9 +1144,16 @@ pub async fn restore_now(
   State(s): State<Arc<AppState>>,
   auth: Auth,
   Path(name): Path<String>,
+  peer: Option<
+    axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+  >,
+  headers: axum::http::HeaderMap,
   Json(req): Json<RestoreRequest>,
 ) -> ApiResult<ApplyResponse> {
   auth.require(Perm::Confirm)?;
+  if req.skip_snapshot {
+    auth.require(Perm::Admin)?;
+  }
   let address = format!("service/{name}");
   if req.confirm != address {
     return Err(
@@ -1140,16 +1169,33 @@ pub async fn restore_now(
       .into(),
     );
   }
+  let guard = s
+    .apply_lock
+    .clone()
+    .try_lock_owned()
+    .map_err(|_| s.runs.busy_error())?;
   let snap = snapshot::load(&s.db).await?;
   locate(&snap, &name)?;
+  let skip = req
+    .skip_snapshot
+    .then(|| crate::db_snapshot::api_actor(&auth, peer, &headers));
+  crate::db_snapshot::before(
+    &s,
+    crate::db_snapshot::Trigger::Restore,
+    format!("恢复 {address}"),
+    None,
+    skip.as_ref(),
+  )
+  .await?;
   Ok(Json(
-    apply::start_task(
+    apply::start_task_locked(
       s.clone(),
       format!("恢复 {name} 到快照 {}", req.snapshot),
       Step::Restore {
         service: name,
         snapshot: req.snapshot,
       },
+      guard,
     )
     .await?,
   ))

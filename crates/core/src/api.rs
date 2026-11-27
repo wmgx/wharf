@@ -156,6 +156,15 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route("/cli.sh", get(crate::cli_dist::script))
     .route("/skill.md", get(crate::cli_dist::skill))
     .route("/api/core/addresses", get(crate::join::addresses))
+    .route(
+      "/api/core/snapshots",
+      get(crate::db_snapshot::list_api)
+        .post(crate::db_snapshot::create_api),
+    )
+    .route(
+      "/api/core/snapshots/{id}",
+      axum::routing::delete(crate::db_snapshot::delete_api),
+    )
     .route("/api/session", get(crate::login::show))
     .route("/api/setup", post(crate::login::setup))
     .route("/api/login", post(crate::login::login))

@@ -254,11 +254,11 @@ pub async fn start(
       &stored.body.route_effects,
     )?;
   }
-  let replan = "wharf plan".to_string();
+
   if plan.status == PlanStatus::Applied {
     return Err(
       ApiError::new(ErrorCode::PlanStale, "这个计划已经执行过了")
-        .suggest(replan),
+        .suggest("wharf plan"),
     );
   }
   if plan.expires_at < Utc::now() {
@@ -267,7 +267,7 @@ pub async fn start(
         ErrorCode::PlanStale,
         "计划已过期，需要重新 plan",
       )
-      .suggest(replan),
+      .suggest("wharf plan"),
     );
   }
   let human = auth.is_some_and(|auth| auth.human);
@@ -329,6 +329,40 @@ pub async fn start(
     perms.contains(&Perm::Confirm),
   )?;
 
+  let skip = if req.skip_snapshot {
+    crate::auth::require_perm(perms, Perm::Admin)?;
+    Some(crate::security_receipt::Actor::from_request(
+      caller.clone().ok_or_else(|| {
+        ApiError::new(
+          ErrorCode::Forbidden,
+          "跳过热快照需要明确的管理员身份",
+        )
+      })?,
+    ))
+  } else {
+    None
+  };
+  let reason =
+    crate::db_snapshot::plan_trigger_reason(plan, &stored.steps);
+  if reason.is_some() || skip.is_some() {
+    let checked_plan = plan.clone();
+    let refs = stored.body.account_refs.clone();
+    state
+      .db
+      .call_credentials(move |c, key| {
+        require_fresh(c, key, &checked_plan, refs.as_ref())
+      })
+      .await?;
+    crate::db_snapshot::before(
+      &state,
+      crate::db_snapshot::Trigger::Apply,
+      reason.unwrap_or_else(|| "执行计划".into()),
+      Some(plan),
+      skip.as_ref(),
+    )
+    .await?;
+  }
+
   // 检查版本并写入配置，在一个事务里完成。
   let run_id = crate::world::new_id("r");
   let mut steps = Vec::new();
@@ -374,10 +408,7 @@ pub async fn start(
     steps,
   };
   {
-    let base = plan.base_versions.clone();
-    let inputs = plan.inputs.clone();
     let account_refs = stored.body.account_refs;
-    let replan_inputs = replan.clone();
     let writes = stored.writes.clone();
     let policy_plan = plan.clone();
     let admin = perms.contains(&Perm::Admin);
@@ -393,36 +424,7 @@ pub async fn start(
       .db
       .call_credentials(move |c, key| {
         let tx = c.transaction().map_err(sql_err)?;
-        if let Some(i) = inputs
-          && i != db::inputs(&tx, key, account_refs.as_ref())?
-        {
-          return Err(
-            ApiError::new(
-              ErrorCode::PlanStale,
-              "plan 之后机器之间的连通性、密钥或机器地址变了，直连还是走隧道、渲染出的配置可能和计划不一样",
-            )
-            .suggest(replan_inputs),
-          );
-        }
-        let now_versions = db::versions(&tx)?;
-        let stale: Vec<String> = base
-          .keys()
-          .chain(now_versions.keys())
-          .filter(|k| base.get(*k) != now_versions.get(*k))
-          .cloned()
-          .collect::<std::collections::BTreeSet<_>>()
-          .into_iter()
-          .collect();
-        if !stale.is_empty() {
-          return Err(
-            ApiError::new(
-              ErrorCode::PlanStale,
-              format!("plan 之后这些资源被修改过：{}", stale.join("、")),
-            )
-            .with_hint("重新 plan，确认新的差异后再 apply")
-            .suggest("wharf plan"),
-          );
-        }
+        require_fresh(&tx, key, &policy_plan, account_refs.as_ref())?;
         apply_writes(&tx, &policy_plan, &writes, admin)?;
         tx.execute(
           "UPDATE plans SET status = 'applied' WHERE id = ?1",
@@ -481,6 +483,42 @@ pub async fn start(
   }
   crate::service_monitor::sync_watches(&state, None).await;
   Ok(ApplyResponse { run_id })
+}
+
+fn require_fresh(
+  c: &rusqlite::Connection,
+  key: &db::CredentialsKey,
+  plan: &Plan,
+  account_refs: Option<&BTreeSet<String>>,
+) -> Result<(), ApiError> {
+  if let Some(i) = &plan.inputs
+    && *i != db::inputs(c, key, account_refs)?
+  {
+    return Err(ApiError::new(ErrorCode::PlanStale,
+      "plan 之后机器之间的连通性、密钥或机器地址变了，直连还是走隧道、渲染出的配置可能和计划不一样")
+      .suggest("wharf plan"));
+  }
+  let base = &plan.base_versions;
+  let now_versions = db::versions(c)?;
+  let stale = base
+    .keys()
+    .chain(now_versions.keys())
+    .filter(|k| base.get(*k) != now_versions.get(*k))
+    .cloned()
+    .collect::<BTreeSet<_>>()
+    .into_iter()
+    .collect::<Vec<_>>();
+  if !stale.is_empty() {
+    return Err(
+      ApiError::new(
+        ErrorCode::PlanStale,
+        format!("plan 之后这些资源被修改过：{}", stale.join("、")),
+      )
+      .with_hint("重新 plan，确认新的差异后再 apply")
+      .suggest("wharf plan"),
+    );
+  }
+  Ok(())
 }
 
 fn enables_login_account(plan: &Plan) -> bool {

@@ -192,7 +192,11 @@ pub enum Command {
     apply: ApplyFlags,
   },
   /// 升级 Wharf：控制面换成最新镜像，再把各服务器的 agent 升到同一版本，最后把本机 CLI 也换成同一版本。
-  Upgrade,
+  Upgrade {
+    /// 紧急跳过数据库热快照，需要 Admin。
+    #[arg(long)]
+    skip_snapshot: bool,
+  },
   /// 把本机 CLI 换成和控制面同一构建的版本，顺带更新已装的 Skill。
   SelfUpdate,
   /// 当前用的是哪个 token、有哪些权限、连的哪个控制面，以及 CLI 和控制面的版本。
@@ -359,6 +363,9 @@ pub enum Command {
   /// 执行计划。
   Apply {
     plan_id: String,
+    /// 紧急跳过数据库热快照，需要 Admin。
+    #[arg(long)]
+    skip_snapshot: bool,
     /// 确认高风险项，可以多次使用。
     #[arg(long)]
     confirm: Vec<String>,
@@ -404,6 +411,9 @@ pub enum Command {
 
 #[derive(Subcommand)]
 pub enum CoreCmd {
+  /// 本机数据库热快照。整机异地灾备用 `wharf backup core`。
+  #[command(subcommand)]
+  Snapshot(CoreSnapshotCmd),
   /// 查看控制面的签名公钥与过渡期限。
   Key,
   /// 在线轮换控制面签名公钥。
@@ -424,6 +434,19 @@ pub enum CoreCmd {
 
   /// 控制面自己的日志。例：`wharf core logs --since 1h --errors`。
   Logs(LogArgs),
+}
+
+#[derive(Subcommand)]
+pub enum CoreSnapshotCmd {
+  /// 列出本机热快照和离线恢复步骤。
+  List,
+  /// 立即创建一份本机热快照。
+  Create {
+    #[arg(long)]
+    reason: Option<String>,
+  },
+  /// 删除指定的本机热快照。
+  Rm { id: String },
 }
 
 /// 看日志的公共参数。
@@ -1516,6 +1539,9 @@ pub enum BackupCmd {
   Migrate,
   /// 验证业务仓库的新口令后，摘除并清理旧全局口令。
   CleanupLegacy {
+    /// 紧急跳过数据库热快照，需要 Admin。
+    #[arg(long)]
+    skip_snapshot: bool,
     #[arg(long)]
     confirm: Option<String>,
   },
@@ -1543,7 +1569,8 @@ pub enum BackupCmd {
   },
   /// 备份记录和快照。
   List { service: String },
-  /// 控制面自身备份（数据库和密钥）。不带参数时查看状态和恢复命令。
+  /// 控制面异地灾备（数据库和密钥）。本机快速回退用 `wharf core snapshot`。
+  /// 不带参数时查看状态和恢复命令。
   /// `--to` 开启或换备份服务器，会要求输入登录密码：它会成为恢复口令。
   Core {
     #[arg(long, conflicts_with = "run")]
@@ -1555,6 +1582,9 @@ pub enum BackupCmd {
   /// 恢复快照：停服务、恢复数据、启动。原来的数据改名保留在 /srv/.wharf-restore/ 下。
   Restore {
     service: String,
+    /// 紧急跳过数据库热快照，需要 Admin。
+    #[arg(long)]
+    skip_snapshot: bool,
     /// 快照 id（见 `wharf backup list`），默认最新的。
     #[arg(long, default_value = "latest")]
     snapshot: String,

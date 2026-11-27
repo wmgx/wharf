@@ -732,6 +732,16 @@ async fn stage(
       Ok(())
     })
     .await?;
+  std::fs::set_permissions(
+    dir.join("wharf.db"),
+    std::fs::Permissions::from_mode(0o600),
+  )
+  .map_err(|e| {
+    ApiError::internal(format!(
+      "收紧备份数据库权限失败：{}",
+      e.kind()
+    ))
+  })?;
   for name in ["core.key", "core.key.prev", "admin.token"] {
     let from = state.data_dir.join(name);
     if from.exists() {
