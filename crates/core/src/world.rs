@@ -418,6 +418,7 @@ impl World {
                 signal,
               )?;
           }
+          crate::shared_volumes::normalize(&mut spec)?;
           if spec.limits.as_ref().is_some_and(|l| {
             l.memory_mb.is_none() && l.cpu_milli.is_none()
           }) {
@@ -1022,6 +1023,7 @@ impl World {
     for (name, service) in &self.services {
       validate_service(self, name, &service.spec)?;
     }
+    crate::shared_volumes::validate_world(self)?;
     for (name, app) in &self.edge_apps {
       crate::edge::validate_app(self, name, &app.spec)?;
     }
@@ -1999,6 +2001,7 @@ fn validate_service(
       }
     }
   }
+  crate::shared_volumes::validate_service(name, spec)?;
   let mut volume_names = BTreeSet::new();
   for volume in &spec.volumes {
     validate_name("数据卷", &volume.name)?;
@@ -2622,6 +2625,70 @@ mod tests {
   }
 
   #[test]
+  fn shared_volume_validation_blocks_cross_server_delete_chain_and_backup()
+   {
+    let mut w = sample();
+    w.servers.insert(
+      "s2".into(),
+      ServerRow {
+        settings: Default::default(),
+        version: 1,
+      },
+    );
+    let mut owner = image_service("node1");
+    let mut reader = owner.clone();
+    owner.volumes = serde_json::from_value(
+      serde_json::json!([{"name":"data","target":"/data"}]),
+    )
+    .unwrap();
+    reader.volumes = serde_json::from_value(serde_json::json!([{"from_service":"photos:data","target":"/data"}])).unwrap();
+    w.apply_changes(&[
+      Change::UpsertService {
+        name: "photos".into(),
+        spec: owner,
+        adopt: None,
+      },
+      Change::UpsertService {
+        name: "reader".into(),
+        spec: reader,
+        adopt: None,
+      },
+    ])
+    .unwrap();
+    w.validate().unwrap();
+    assert_eq!(w.services["reader"].spec.volumes[0].name, "data");
+    for (service, server, reference, backup) in [
+      ("photos", "s2", None, false),
+      ("reader", "s2", None, false),
+      ("photos", "node1", Some("reader:data"), false),
+      ("reader", "node1", Some("photos:missing"), false),
+      ("reader", "node1", None, true),
+    ] {
+      let mut changed = w.clone();
+      let spec = &mut changed.services.get_mut(service).unwrap().spec;
+      spec.server = server.into();
+      if let Some(reference) = reference {
+        spec.volumes[0].from_service = Some(reference.into());
+      }
+      if backup {
+        spec.backup =
+          Some(wharf_api_types::spec::BackupSpec { to: "s2".into() });
+      }
+      let err = changed.validate().unwrap_err();
+      assert_eq!(err.code, wharf_api_types::ErrorCode::InvalidInput);
+      assert!(err.hint.is_some());
+    }
+    for service in w.services.values_mut() {
+      service.spec.server = "s2".into();
+    }
+    w.validate().unwrap();
+    w.services.remove("photos");
+    assert!(w.validate().is_err());
+    w.services.remove("reader");
+    w.validate().unwrap();
+  }
+
+  #[test]
   fn validates_start_timeout() {
     let mut spec = image_service("node1");
     spec.start_timeout_secs = Some(300);
@@ -2819,6 +2886,8 @@ services:
     }])
     .unwrap();
     spec.volumes.push(wharf_api_types::spec::VolumeSpec {
+      from_service: None,
+      read_only: false,
       name: "data".into(),
       target: "/data".into(),
     });

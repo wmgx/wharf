@@ -1202,13 +1202,18 @@ pub(crate) async fn run_step(
       from,
       to,
       instance_id,
+      shared_data,
     } => {
       check_step_instance(world, service, instance_id.as_deref())?;
+      let shared = *shared_data
+        || crate::shared_volumes::consumers_on(world, service, to)
+          .next()
+          .is_some();
       crate::migrate::volume_sync(
         state,
         &net,
         service,
-        (from, to),
+        (from, to, shared),
         !world.services[service].spec.stopped,
         progress,
         cancel,
@@ -2508,14 +2513,23 @@ async fn project_down(
   } else {
     None
   };
-  let conn = if require_safe_delete {
-    let conn = state.hub.safe_delete_conn_id(server)?;
-    if deploy.is_some_and(|id| id != conn) {
+  let safe_delete = if require_safe_delete {
+    let id = state.hub.safe_delete_conn_id(server)?;
+    if deploy.is_some_and(|conn| conn != id) {
       return Err(crate::hub::offline(server));
     }
-    Some(conn)
+    Some(id)
   } else {
     deploy
+  };
+  let conn = if purge {
+    let id = state.hub.shared_volumes_conn_id(server)?;
+    if safe_delete.is_some_and(|conn| conn != id) {
+      return Err(crate::hub::offline(server));
+    }
+    Some(id)
+  } else {
+    safe_delete
   };
   let _: serde_json::Value = if let Some(conn) = conn {
     state
@@ -3176,4 +3190,24 @@ mod tests {
       ErrorCode::Forbidden
     );
   }
+}
+
+#[tokio::test]
+async fn purge_delete_rejects_old_agent_without_shared_volumes() {
+  let state = crate::rules::tests::test_state();
+  state
+    .hub
+    .mock_safe_delete_agent("s1", |_| panic!("不能发送删数请求"));
+  let e = project_down(
+    &state,
+    ("s1", "photos"),
+    true,
+    false,
+    Arc::new(|_| {}),
+    &CancellationToken::new(),
+  )
+  .await
+  .unwrap_err();
+  assert_eq!(e.code, ErrorCode::Conflict);
+  assert_eq!(e.suggest, ["wharf upgrade"]);
 }

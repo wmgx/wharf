@@ -699,6 +699,7 @@ fn data_status(s: DataStatus) -> &'static str {
 fn mount_label(m: &DataMount) -> String {
   let kind = match m.kind {
     DataKind::Managed => "目录",
+    DataKind::Shared => "共享卷",
     DataKind::ExternalDir => "外部目录",
     DataKind::NamedVolume if m.source.is_empty() => "匿名卷",
     DataKind::NamedVolume => "卷",

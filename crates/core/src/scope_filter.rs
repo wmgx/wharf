@@ -69,6 +69,10 @@ pub fn filter_status(
   status.edge_unmanaged.clear();
   status.bookmarks.clear();
   status.services.retain(|s| services.contains(&s.name));
+  for service in &mut status.services {
+    service.uses.retain(|name| services.contains(name));
+    service.used_by.retain(|name| services.contains(name));
+  }
   status
     .routes
     .retain(|r| route_spec_in_scope(services, &r.spec));

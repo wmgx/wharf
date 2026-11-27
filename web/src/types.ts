@@ -628,10 +628,12 @@ export interface FileEntry {
 }
 
 /** 数据归属：只有 managed 会被迁移、备份。 */
-export type DataKind = "managed" | "external_dir" | "named_volume";
+export type DataKind = Gen.DataKind;
 
 export interface DataMount {
   kind: DataKind;
+  from_service?: string | null;
+  read_only?: boolean;
   resolved?: string;
   /** 宿主机路径或卷名；匿名卷为空。 */
   source: string;
