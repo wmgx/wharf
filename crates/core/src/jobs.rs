@@ -311,6 +311,7 @@ pub(crate) async fn cleanup_data(
   let snap = snapshot::load(&state.db).await?;
   let row = snap.world.services.get(service);
   if row.is_some_and(|r| r.spec.server == server)
+    || snap.deployed.get(service).is_some_and(|s| s == server)
     || snapshot::service_runtime_server(&snap, service)
       == Some(server)
   {
@@ -352,22 +353,26 @@ pub(crate) async fn cleanup_data(
 #[test]
 fn backups_skips_busy_core_offline_and_undeployed() {
   let mut snap = snapshot::Snapshot::default();
-  let row = crate::world::ServiceRow {
+  snap.world.services.insert("app".into(), crate::world::ServiceRow {
     instance_id: "svc_fixture".into(),
     spec: serde_json::from_value(serde_json::json!({
       "server":"s1", "source":{"image":"fixture:1"}, "backup":{"to":"s2"}, "stopped":true
     })).unwrap(),
     host_ports: Default::default(), import: None, pins: Default::default(),
     commit: None, version: 1,
-  };
+  });
+  let row = &snap.world.services["app"];
   assert!(
     core_backup_error(Err(ApiError::new(ErrorCode::Busy, "忙")))
       .is_none()
   );
-  assert!(!is_backup_candidate(&snap, "app", &row, |_| true));
-  snap.deployed.insert("app".into(), "hash".into());
-  assert!(!is_backup_candidate(&snap, "app", &row, |s| s == "s1"));
-  assert!(is_backup_candidate(&snap, "app", &row, |_| true));
+  assert!(!is_backup_candidate(&snap, "app", row, |_| true));
+  snap.deployed.insert("app".into(), "s1".into());
+  assert!(!is_backup_candidate(&snap, "app", row, |s| s == "s1"));
+  assert!(is_backup_candidate(&snap, "app", row, |s| matches!(
+    s,
+    "s1" | "s2"
+  )));
 }
 
 #[tokio::test]
