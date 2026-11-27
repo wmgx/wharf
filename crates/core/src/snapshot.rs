@@ -1560,5 +1560,69 @@ mod tests {
         .config
         .contains("core https://core.example.test")
     );
+    let mut direct = Net {
+      core_server: Some("s1".into()),
+      core_listener: Some((7700, false)),
+      ..net
+    };
+    direct.private.insert(
+      "s1".into(),
+      wharf_api_types::spec::PrivateAddr {
+        ip: "100.64.0.2".into(),
+        network: wharf_api_types::spec::PrivateNetwork::Tailscale,
+      },
+    );
+    direct.reach.insert(("s2".into(), "s1".into()), true);
+    let upstream = |n| {
+      gateway_render(&world, n, "other").unwrap().sites[0]
+        .gate
+        .as_ref()
+        .unwrap()
+        .core
+        .clone()
+    };
+    assert_eq!(upstream(&direct), "http://100.64.0.2:7700");
+    direct.core_listener = Some((7700, true));
+    assert_eq!(upstream(&direct), "https://core.example.test");
+    direct.core_listener = Some((7700, false));
+    direct.reach.clear();
+    assert_eq!(upstream(&direct), "https://core.example.test");
+  }
+
+  #[test]
+  fn acme_callback_updates_fingerprint_without_drifting_legacy_hash()
+  {
+    let mut w = World::default();
+    w.gateways.insert("edge".into(), crate::world::GatewayRow {
+      spec: serde_json::from_value(serde_json::json!({"kind":"caddy","server":"s1","wildcard":["example.com"]})).unwrap(),
+      version: 1,
+    });
+    let mut net = Net::default();
+    let legacy = gateway_render(&w, &net, "edge").unwrap();
+    net.acme_dns_url = Some("https://old.example.net".into());
+    let before = gateway_render(&w, &net, "edge").unwrap();
+    assert!(gateway_config_matches(
+      &w,
+      &net,
+      "edge",
+      &before,
+      Some(&legacy.config_hash)
+    ));
+    net.acme_dns_url = Some("https://new.example.net".into());
+    let after = gateway_render(&w, &net, "edge").unwrap();
+    assert!(
+      after
+        .config
+        .contains("https://new.example.net/agent/acme-dns")
+    );
+    assert!(after.config.contains(render::ACME_DNS_KEY));
+    assert!(!gateway_config_matches(
+      &w,
+      &net,
+      "edge",
+      &after,
+      Some(&before.config_hash)
+    ));
+    assert_eq!(before.compose_hash, after.compose_hash);
   }
 }

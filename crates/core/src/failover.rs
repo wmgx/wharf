@@ -392,3 +392,51 @@ fn schedule_caddy_reload(
       .remove(&name);
   });
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[tokio::test]
+  async fn removing_backup_persists_active_cleanup_and_retry() {
+    let state = crate::rules::tests::test_state();
+    let host = "removed-backup.example.test";
+    let mut memory = Memory {
+      active: BTreeSet::from([
+        host.into(),
+        "deleted.example.test".into(),
+      ]),
+      ..Memory::default()
+    };
+    let mut world = World::default();
+    world.gateways.insert(
+      "edge".into(),
+      crate::world::GatewayRow {
+        spec: serde_json::from_str(
+          r#"{"kind":"caddy","server":"s1"}"#,
+        )
+        .unwrap(),
+        version: 1,
+      },
+    );
+    world.routes.insert(host.into(), crate::world::RouteRow {
+      spec: serde_json::from_str(r#"{"hostname":"removed-backup.example.test","gateway":"edge","upstream":"127.0.0.1:8080"}"#).unwrap(),
+      id: "rt_fixture".into(), version: 1,
+    });
+    assert!(observe(&mut memory, &world, |_| true));
+    persist(&state, &memory).await.unwrap();
+    state
+      .db
+      .call(move |c| {
+        assert!(load_active_from_conn(c)?.is_empty());
+        let pending: BTreeMap<String, Pending> =
+          serde_json::from_str(&db::setting(c, PENDING)?.unwrap())
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(!pending[host].target_backup);
+        Ok(())
+      })
+      .await
+      .unwrap();
+  }
+}

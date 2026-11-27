@@ -189,16 +189,16 @@ impl Docker {
     if include_links {
       let discovered: Vec<_> = by_project
         .iter()
-        .filter_map(|(name, containers)| {
-          ((name == "wharf-link" || name.starts_with("wharf-link-"))
+        .filter(|&(name, containers)| {
+          (name == "wharf-link" || name.starts_with("wharf-link-"))
             && !projects.contains(name)
             && containers.iter().any(|c| {
               c.working_dir.as_deref().is_some_and(|dir| {
                 Path::new(dir) == self.project_dir(name)
               })
-            }))
-          .then(|| name.clone())
+            })
         })
+        .map(|(name, _)| name.clone())
         .collect();
       projects.extend(discovered);
     }

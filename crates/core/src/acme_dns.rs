@@ -212,6 +212,15 @@ mod tests {
     assert!(
       !allowed(&world, "other").contains(&"i.example.com".into())
     );
+    world
+      .routes
+      .get_mut("i.example.com")
+      .unwrap()
+      .spec
+      .backup_gateway = Some("other".into());
+    assert!(
+      allowed(&world, "other").contains(&"i.example.com".into())
+    );
   }
 
   #[test]

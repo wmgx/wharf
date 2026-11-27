@@ -3063,6 +3063,51 @@ fn remote_ref(r: &RemoteRecord) -> RemoteRef {
   }
 }
 
+type DnsRemovals<'a> =
+  BTreeMap<(String, String, String), &'a db::OwnedRecord>;
+
+fn classify_dns_records<'a>(
+  records: &'a [RemoteRecord],
+  account: &str,
+  owner_id: &str,
+  deleting_owned: &mut DnsRemovals<'_>,
+) -> (Vec<&'a RemoteRecord>, Vec<&'a RemoteRecord>, bool) {
+  let owner = wharf_providers::Owner {
+    id: owner_id.into(),
+  };
+  let marker = owner.marker();
+  let (mut ours, mut foreign) = (Vec::new(), Vec::new());
+  let mut handover = false;
+  for record in records {
+    if record.marker.as_deref() == Some(marker.as_str()) {
+      ours.push(record);
+      continue;
+    }
+    let key = (
+      account.to_string(),
+      record.scope.clone(),
+      record.remote_id.clone(),
+    );
+    if deleting_owned.get(&key).is_some_and(|old| {
+      record.marker.as_deref()
+        == Some(
+          wharf_providers::Owner {
+            id: old.route_id.clone(),
+          }
+          .marker()
+          .as_str(),
+        )
+    }) {
+      handover = true;
+      deleting_owned.remove(&key);
+      ours.push(record);
+    } else {
+      foreign.push(record);
+    }
+  }
+  (ours, foreign, handover)
+}
+
 /// 要写 DNS 的域名、记录所有者，Pages 域名还带上边缘应用。
 type DnsTarget<'a> =
   (String, String, Option<(&'a str, &'a EdgeAppSpec)>);
@@ -3190,17 +3235,23 @@ async fn dns_items(
     .map(|r| r.id.as_str())
     .chain(edge_ids.iter().map(String::as_str))
     .collect();
-  let deleting_owned: BTreeMap<_, _> = snap
+  let mut deleting_owned: DnsRemovals<'_> = snap
     .owned
     .iter()
     .filter(|owned| {
       include_cleanup && !live_ids.contains(owned.route_id.as_str())
     })
     .map(|owned| {
-      ((&owned.account, &owned.scope, &owned.remote_id), owned)
+      (
+        (
+          owned.account.clone(),
+          owned.scope.clone(),
+          owned.remote_id.clone(),
+        ),
+        owned,
+      )
     })
     .collect();
-  let mut handed_over = BTreeSet::new();
 
   for (host, route) in &desired.routes {
     if !in_scope(host) {
@@ -3282,30 +3333,12 @@ async fn dns_items(
         .await?
       }
     };
-    let owner = wharf_providers::Owner {
-      id: owner_id.clone(),
-    };
-    let (mut ours, mut foreign) = (Vec::new(), Vec::new());
-    let mut handover = false;
-    for record in &records {
-      let key = (&account.name, &record.scope, &record.remote_id);
-      if provider.is_owned(record, &owner) {
-        ours.push(record);
-      } else if deleting_owned.get(&key).is_some_and(|old| {
-        provider.is_owned(
-          record,
-          &wharf_providers::Owner {
-            id: old.route_id.clone(),
-          },
-        )
-      }) {
-        handover = true;
-        handed_over.insert(key);
-        ours.push(record);
-      } else {
-        foreign.push(record);
-      }
-    }
+    let (ours, foreign, handover) = classify_dns_records(
+      &records,
+      &account.name,
+      &owner_id,
+      &mut deleting_owned,
+    );
     let canonical = want.canonical();
     let address = format!("{KIND_ROUTE}/{host}");
     let after = Some(canonical.clone());
@@ -3401,13 +3434,6 @@ async fn dns_items(
   }
   // 已删除路由留下的记录。
   for owned in deleting_owned.values() {
-    if handed_over.contains(&(
-      &owned.account,
-      &owned.scope,
-      &owned.remote_id,
-    )) {
-      continue;
-    }
     let id = b.item(
       format!("{KIND_ROUTE}/{}", owned.hostname),
       Layer::Dns,
@@ -3947,6 +3973,321 @@ mod tests {
     };
     assert!(item.impacts.is_empty());
     assert!(item.reason.contains("沿用同名 compose 项目"));
+  }
+
+  fn gateway_fixture(
+    kind: &str,
+    server: &str,
+  ) -> crate::world::GatewayRow {
+    crate::world::GatewayRow {
+      spec: serde_json::from_value(json!({
+        "kind": kind, "server": server, "account": "cf1"
+      }))
+      .unwrap(),
+      version: 1,
+    }
+  }
+
+  fn route_fixture() -> RouteRow {
+    RouteRow {
+      id: "rt_fixture".into(),
+      spec: serde_json::from_value(json!({
+        "hostname": "a.example.com", "service": "app", "gateway": "edge"
+      })).unwrap(),
+      version: 1,
+    }
+  }
+
+  #[test]
+  fn server_ip_change_affects_dns_and_respects_ttl() {
+    let mut current = world();
+    current
+      .gateways
+      .insert("edge".into(), gateway_fixture("caddy", "s1"));
+    current
+      .routes
+      .insert("a.example.com".into(), route_fixture());
+    current.servers.get_mut("s1").unwrap().settings.public_ip =
+      Some("203.0.113.10".into());
+    let mut desired = current.clone();
+    desired.servers.get_mut("s1").unwrap().settings.public_ip =
+      Some("203.0.113.20".into());
+    let snap = Snapshot::default();
+    let before = snap.net(&current);
+    let after = snap.net(&desired);
+    let host = "a.example.com";
+    assert!(
+      affected_hosts(&snap, &current, &before, &desired, &after)
+        .contains(host)
+    );
+    let dns = |w| {
+      desired_record(&snap, w, &after, host)
+        .unwrap()
+        .to_provider()
+    };
+    assert_eq!(dns(&desired).content, "203.0.113.20");
+    assert_eq!(dns(&desired).ttl, 1);
+    desired.routes.get_mut(host).unwrap().spec.backup_gateway =
+      Some("backup".into());
+    assert_eq!(dns(&desired).ttl, 60);
+    desired.routes.get_mut(host).unwrap().spec.dns_ttl = Some(120);
+    assert_eq!(dns(&desired).canonical()["ttl"], 120);
+    desired.routes.get_mut(host).unwrap().spec.dns_ttl = Some(1);
+    assert_eq!(dns(&desired).ttl, 1);
+  }
+
+  #[test]
+  fn ownership_handover_consumes_old_dns_deletion_in_both_directions()
+  {
+    for (old, new) in [
+      ("rt_fixture", "edge:a.example.com"),
+      ("edge:a.example.com", "rt_fixture"),
+    ] {
+      let key =
+        ("cf".to_string(), "zone".to_string(), "R1".to_string());
+      let owned = db::OwnedRecord {
+        route_id: old.into(),
+        hostname: "a.example.com".into(),
+        account: key.0.clone(),
+        scope: key.1.clone(),
+        remote_id: key.2.clone(),
+      };
+      let records = [RemoteRecord {
+        remote_id: key.2.clone(),
+        scope: key.1.clone(),
+        canonical: json!({"type":"A"}),
+        marker: Some(format!("wharf:{old}")),
+      }];
+      let mut deleting = DnsRemovals::from([(key, &owned)]);
+      let (ours, foreign, handover) =
+        classify_dns_records(&records, "cf", new, &mut deleting);
+      assert_eq!(ours[0].remote_id, "R1");
+      assert!(handover && deleting.is_empty() && foreign.is_empty());
+    }
+  }
+
+  #[test]
+  fn gateway_move_and_account_change_cleanup_is_resumable() {
+    let mut current = world();
+    current.gateways.insert(
+      "edge".into(),
+      gateway_fixture("cloudflare_tunnel", "s1"),
+    );
+    current
+      .gateways
+      .insert("http".into(), gateway_fixture("caddy", "s1"));
+    current
+      .routes
+      .insert("a.example.com".into(), route_fixture());
+    let mut desired = current.clone();
+    for row in desired.gateways.values_mut() {
+      row.spec.server = "s2".into();
+    }
+    desired.services.get_mut("app").unwrap().spec.server =
+      "s2".into();
+    desired.gateways.get_mut("edge").unwrap().spec.account =
+      Some("cf2".into());
+    let mut snap = Snapshot::default();
+    snap.tunnels.insert(
+      "edge".into(),
+      db::TunnelRow {
+        account: "cf1".into(),
+        scope: "scope".into(),
+        tunnel_id: "old".into(),
+        config_hash: "old".into(),
+      },
+    );
+    let net = Net::default();
+    let before =
+      desired_record(&snap, &current, &net, "a.example.com").unwrap();
+    let after =
+      desired_record(&snap, &desired, &net, "a.example.com").unwrap();
+    assert_eq!(before.content, "old.cfargotunnel.com");
+    assert_eq!(after.content, TUNNEL_PENDING);
+    let status =
+      StatusMap::from([("s1".into(), Some(BTreeMap::new()))]);
+    let mut b = Builder::default();
+    gateway_items(
+      &mut b,
+      &snap,
+      (&current, &net),
+      (&desired, &net),
+      &status,
+      &crate::hub::Hub::default(),
+    )
+    .unwrap();
+    for name in ["edge", "http"] {
+      assert!(b.steps.iter().any(|s| matches!(&s.step,
+        Step::GatewayDown { server, gateway, keep_tunnel: true } if server == "s1" && gateway == name
+      ) && s.step.order() == 7));
+    }
+    assert!(b.steps.iter().any(|s| matches!(&s.step, Step::GatewaySync { gateway, .. } if gateway == "edge") && s.step.order() == 4));
+    assert!(b.steps.iter().any(|s| matches!(&s.step, Step::TunnelDelete { account, tunnel_id, .. } if account == "cf1" && tunnel_id == "old")));
+    snap.pending.gateway_downs.push(
+      crate::pending::GatewayDownPayload {
+        gateway: "edge".into(),
+        server: "s1".into(),
+        keep_tunnel: true,
+      },
+    );
+    let mut b = Builder::default();
+    gateway_cleanup_items(&mut b, &snap, &desired, &desired, &status);
+    assert!(b.steps.iter().any(|s| matches!(
+      s.step,
+      Step::GatewayDown {
+        keep_tunnel: true,
+        ..
+      }
+    )));
+  }
+
+  #[test]
+  fn stateless_migration_up_done_still_cleans_source_after_gateway() {
+    let mut snap = Snapshot {
+      world: world(),
+      ..Snapshot::default()
+    };
+    snap.world.services.get_mut("app").unwrap().spec.server =
+      "s2".into();
+    snap.deployed.insert("app".into(), "s2".into());
+    snap.pending.migrations.insert(
+      "app".into(),
+      crate::pending::Migration {
+        phase: crate::pending::MigratePhase::UpDone,
+        payload: serde_json::from_value(
+          json!({"service":"app","from":"s1","to":"s2"}),
+        )
+        .unwrap(),
+      },
+    );
+    let mut b = Builder::default();
+    service_items(
+      &mut b,
+      &snap,
+      &snap.world,
+      &snap.world,
+      &Net::default(),
+      &StatusMap::new(),
+      &[],
+    )
+    .unwrap();
+    let down = b.steps.iter().find(|s| matches!(&s.step,
+      Step::ServiceDown { server, purge_data: false, .. } if server == "s1"
+    )).unwrap();
+    assert!(
+      down.step.order()
+        > Step::GatewaySync {
+          gateway: "edge".into(),
+          expect: None
+        }
+        .order()
+    );
+  }
+
+  #[test]
+  fn live_status_finds_unused_link_projects() {
+    let world = world();
+    let old = |project: &str| ProjectState {
+      project: project.into(),
+      hash: Some("existing".into()),
+      config_hash: None,
+      containers: vec![],
+    };
+    let status = StatusMap::from([
+      (
+        "s1".into(),
+        Some(BTreeMap::from([(
+          "wharf-link".into(),
+          old("wharf-link"),
+        )])),
+      ),
+      (
+        "s2".into(),
+        Some(BTreeMap::from([(
+          "wharf-link-s1".into(),
+          old("wharf-link-s1"),
+        )])),
+      ),
+    ]);
+    let mut b = Builder::default();
+    link_items(
+      &mut b,
+      &Snapshot::default(),
+      &world,
+      &Net::default(),
+      &status,
+    )
+    .unwrap();
+    assert_eq!(
+      b.steps
+        .into_iter()
+        .map(|s| match s.step {
+          Step::LinkDown { server, project } => (server, project),
+          _ => panic!("应当清理旧隧道"),
+        })
+        .collect::<Vec<_>>(),
+      [
+        ("s1".into(), "wharf-link".into()),
+        ("s2".into(), "wharf-link-s1".into())
+      ]
+    );
+  }
+
+  #[test]
+  fn replacing_service_reserves_ports_until_the_old_one_stops() {
+    let snap = Snapshot::default();
+    let mut old = world();
+    old
+      .services
+      .get_mut("app")
+      .unwrap()
+      .host_ports
+      .insert("http".into(), 20000);
+    let mut new = old.clone();
+    let mut row = new.services.remove("app").unwrap();
+    row.host_ports.clear();
+    new.services.insert("next".into(), row);
+    let reserved = retiring_ports(&snap, &old, &new);
+    new.allocate_ports_with(&reserved).unwrap();
+    assert_eq!(new.services["next"].host_ports["http"], 20001);
+    new.services.get_mut("next").unwrap().spec.ports[0].host =
+      Some(20000);
+    assert!(
+      new
+        .allocate_ports_with(&reserved)
+        .unwrap_err()
+        .message
+        .contains("仍被")
+    );
+  }
+
+  #[test]
+  fn backup_gateway_validates_paths_and_ttl() {
+    let mut w = world();
+    w.servers.insert("s2".into(), w.servers["s1"].clone());
+    w.gateways
+      .insert("edge".into(), gateway_fixture("caddy", "s1"));
+    w.gateways.insert(
+      "backup".into(),
+      gateway_fixture("cloudflare_tunnel", "s2"),
+    );
+    let mut route = route_fixture();
+    route.spec.backup_gateway = Some("backup".into());
+    route.spec.paths = serde_json::from_value(
+      json!([{"path":"/api","upstream":"127.0.0.1:7701"}]),
+    )
+    .unwrap();
+    w.routes.insert("a.example.com".into(), route);
+    assert!(w.validate().unwrap_err().message.contains("按路径转发"));
+    let spec = &mut w.routes.get_mut("a.example.com").unwrap().spec;
+    spec.paths.clear();
+    spec.dns_ttl = Some(30);
+    assert!(w.validate().unwrap_err().message.contains("dns_ttl"));
+    let spec = &mut w.routes.get_mut("a.example.com").unwrap().spec;
+    spec.dns_ttl = Some(120);
+    spec.backup_gateway = None;
+    spec.gateway = Some("backup".into());
+    assert!(w.validate().unwrap_err().message.contains("TTL 固定"));
   }
 
   #[test]

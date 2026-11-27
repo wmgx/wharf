@@ -1890,7 +1890,7 @@ pub(crate) async fn run_step(
       if let Some(gateway) = expected_gateway {
         let active = state
           .db
-          .call(crate::failover::load_active_from_conn)
+          .call(|c| crate::failover::load_active_from_conn(c))
           .await?;
         check_dns_gateway(world, &active, hostname, gateway)?;
       } else if world.routes.contains_key(hostname) {
@@ -2067,6 +2067,7 @@ async fn service_restart(
       state, server, service, false, progress, cancel,
     )
     .await?;
+    progress("已停止，正在重新启动".into());
     let resume = CancellationToken::new();
     project_stop_start(
       state, server, service, true, progress, &resume,
@@ -3385,6 +3386,9 @@ mod tests {
         AgentOp::ProjectStop { project } if project == "notes" => {
           assert_eq!(starts, 1)
         }
+        AgentOp::ProjectStatus { .. } => return Ok(serde_json::json!([{
+          "project": "notes", "containers": [{"name": "notes-1", "service": "notes", "state": "running"}]
+        }])),
         _ => panic!("意外请求"),
       }
       Ok(serde_json::json!(true))
@@ -3471,6 +3475,93 @@ mod tests {
     .await
     .unwrap_err();
     assert_eq!(error.code, ErrorCode::Conflict);
+  }
+
+  #[test]
+  fn dns_replaces_record_types_before_creating_cname() {
+    let entry = |kind: &str| RemoteRef {
+      scope: "zone".into(),
+      remote_id: kind.into(),
+      record_type: Some(kind.into()),
+    };
+    let mut want = wharf_providers::DnsRecordSpec {
+      record_type: wharf_providers::DnsRecordType::CNAME,
+      content: "app.example.com".into(),
+      ttl: 1,
+      proxied: true,
+    };
+    assert_eq!(
+      dns_replace_order(&want, Some(&entry("A")), &[entry("AAAA")]),
+      (true, true)
+    );
+    want.record_type = wharf_providers::DnsRecordType::A;
+    assert_eq!(
+      dns_replace_order(&want, Some(&entry("A")), &[entry("A")]),
+      (false, false)
+    );
+  }
+
+  #[tokio::test]
+  async fn independent_dns_batch_keeps_running_after_stale_step() {
+    let state = crate::rules::tests::test_state();
+    state.hub.mock_agent("s1", false, |op| {
+      assert!(matches!(op, AgentOp::EnsureDirs { .. }));
+      Ok(serde_json::Value::Null)
+    });
+    let dns: Step = serde_json::from_value(serde_json::json!({
+      "kind":"dns_upsert","hostname":"a.example.com","account":"cf",
+      "expected_gateway":"edge","spec":{"record_type":"A","content":"203.0.113.1","proxied":false},
+      "existing":null,"extra":[]
+    })).unwrap();
+    let steps = [
+      dns,
+      Step::EnsureDirs {
+        server: "s1".into(),
+        dirs: vec![],
+        after_sync: false,
+      },
+    ]
+    .into_iter()
+    .map(|step| StepPlan {
+      step,
+      items: vec![],
+      title: "测试".into(),
+    })
+    .collect();
+    let guard = state.apply_lock.clone().try_lock_owned().unwrap();
+    let (results, _) =
+      run_batch_sync(state, steps, guard).await.unwrap();
+    assert_eq!(
+      results[0].error.as_ref().unwrap().code,
+      ErrorCode::PlanStale
+    );
+    assert_eq!(results[1].status, StepStatus::Done);
+  }
+
+  #[tokio::test]
+  async fn legacy_restart_starts_even_if_stop_cancels() {
+    let state = crate::rules::tests::test_state();
+    let cancel = CancellationToken::new();
+    state.hub.mock_agent("s1", false, |op| {
+      Ok(match op {
+        AgentOp::ProjectStop { .. } => serde_json::json!(true),
+        AgentOp::ProjectStart { .. } => serde_json::json!(true),
+        AgentOp::ProjectStatus { .. } => serde_json::json!([{
+          "project": "notes", "containers": [{"name": "notes-1", "service": "notes", "state": "running"}]
+        }]),
+        _ => panic!("意外请求"),
+      })
+    });
+    let during_stop = cancel.clone();
+    let progress: ProgressFn = Arc::new(move |line| {
+      if line == "已停止，正在重新启动" {
+        during_stop.cancel();
+      }
+    });
+    service_restart(&state, "s1", "notes", &progress, &cancel)
+      .await
+      .unwrap();
+    assert!(cancel.is_cancelled());
   }
 
   #[test]

@@ -842,6 +842,119 @@ mod tests {
   }
 
   #[test]
+  fn compose_loopback_selects_tunnel_per_port() {
+    let mut w = world();
+    let mut secure = w.gateways["edge"].clone();
+    secure.spec.default = false;
+    w.gateways.insert("z-https".into(), secure);
+    w.gateways.get_mut("edge").unwrap().spec.tls = GatewayTls::Off;
+    assert_eq!(link_gateway(&w, "edge1").unwrap().0, "z-https");
+    let row = w.services.get_mut("app").unwrap();
+    row.spec.source =
+      serde_json::from_value(json!({"compose":{"content": r#"
+services:
+  web:
+    image: fixture:1
+    ports:
+      - "127.0.0.1:18080:80"
+      - {published: 18081, host_ip: "100.64.0.2"}
+      - "[::1]:18082:82"
+"#}}))
+      .unwrap();
+    row.host_ports.extend([
+      ("http".into(), 18080),
+      ("direct".into(), 18081),
+      ("ipv6".into(), 18082),
+    ]);
+    let n = net(Some(true));
+    let choose = |port| {
+      choose(
+        &w,
+        &n,
+        &w.gateways["edge"].spec,
+        "app",
+        port,
+        LinkMode::Auto,
+      )
+    };
+    assert_eq!(choose("http").unwrap(), Choice::Tunnel);
+    assert_eq!(
+      choose("direct").unwrap(),
+      Choice::Direct("100.64.0.2".into())
+    );
+    assert!(choose("ipv6").unwrap_err().message.contains("[::1]"));
+    assert_eq!(
+      compose_port_bind(
+        "services: {web: {network_mode: host}}",
+        18080,
+        false
+      ),
+      PortBind::DirectableOrUnknown
+    );
+  }
+
+  #[tokio::test]
+  async fn layer4_backends_probe_and_cached_reach_does_not_authorize_copy()
+   {
+    let mut w = world();
+    w.routes.clear();
+    w.gateways.get_mut("edge").unwrap().spec.layer4 =
+      serde_json::from_value(json!([
+        {"listen":23456,"service":"app","port":"http"}
+      ]))
+      .unwrap();
+    let state = crate::rules::tests::test_state();
+    let mut n = net(Some(false));
+    assert!(
+      require_reach(
+        &state,
+        &n,
+        "edge1",
+        "home1",
+        "迁移",
+        ProbeMode::Plan
+      )
+      .await
+      .is_err()
+    );
+    let mut calls = 0;
+    state.hub.mock_agent("edge1", false, move |op| {
+      assert!(matches!(&op, AgentOp::Probe { targets } if targets[0].server == "home1"));
+      calls += 1;
+      if calls == 1 { Ok(json!([true])) } else { Err(ApiError::internal("探测超时")) }
+    });
+    n.reach = probe(&state, &n, &w).await;
+    assert_eq!(
+      n.reach.get(&("edge1".into(), "home1".into())),
+      Some(&true)
+    );
+    assert!(
+      require_reach(
+        &state,
+        &n,
+        "edge1",
+        "home1",
+        "迁移",
+        ProbeMode::Plan
+      )
+      .await
+      .is_err()
+    );
+    n.private.clear();
+    let err = require_reach(
+      &state,
+      &n,
+      "edge1",
+      "home1",
+      "迁移",
+      ProbeMode::Plan,
+    )
+    .await
+    .unwrap_err();
+    assert!(err.message.contains("没有内网地址"));
+  }
+
+  #[test]
   fn picks_direct_or_tunnel_by_reach() {
     let w = world();
     let route = &w.routes["app.example.com"].spec;
