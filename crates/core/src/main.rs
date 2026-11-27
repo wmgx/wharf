@@ -263,7 +263,7 @@ async fn main() -> anyhow::Result<()> {
     downloads: Default::default(),
     edge_syncing: Default::default(),
   });
-  gate::init(&state)
+  gate::init(&state, cli.listen.ip().is_loopback())
     .await
     .map_err(|e| anyhow::anyhow!(e.message))?;
   oidc::init(&state)

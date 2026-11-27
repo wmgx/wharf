@@ -93,11 +93,19 @@ async fn ensure_tunnel(
     tunnel.scope.clone(),
     tunnel.id.clone(),
   );
+  let previous = snap.tunnels.get(gateway).cloned();
   state
     .db
     .call(move |c| {
       let (gateway, account, scope, id) = values;
-      c.execute(
+      let tx = c.transaction().map_err(sql_err)?;
+      if let Some(old) = previous.filter(|p| p.account != account) {
+        crate::pending::put_tunnel_delete(&tx, ("", ""), &crate::pending::TunnelDeletePayload {
+          gateway: gateway.clone(), account: old.account, scope: old.scope, tunnel_id: old.tunnel_id,
+        })?;
+      }
+      crate::pending::clear(&tx, "tunnel_delete", &format!("{account}:{id}"))?;
+      tx.execute(
         "INSERT INTO tunnels (gateway, account, scope, tunnel_id, config_hash, created_at)
          VALUES (?1, ?2, ?3, ?4, '', ?5)
          ON CONFLICT (gateway) DO UPDATE SET account = excluded.account, scope = excluded.scope,
@@ -105,7 +113,7 @@ async fn ensure_tunnel(
         params![gateway, account, scope, id, now_ms()],
       )
       .map_err(sql_err)?;
-      Ok(())
+      tx.commit().map_err(sql_err)
     })
     .await?;
   Ok(tunnel)
@@ -225,6 +233,22 @@ pub async fn sync(
   Ok(())
 }
 
+pub async fn destroy_ref(
+  snap: &Snapshot,
+  account_name: &str,
+  scope: &str,
+  id: &str,
+  cancel: &CancellationToken,
+) -> Result<(), ApiError> {
+  let provider =
+    snapshot::tunnel_provider(account(snap, account_name)?)?;
+  let tunnel = TunnelRef {
+    scope: scope.into(),
+    id: id.into(),
+  };
+  call(cancel, "删除隧道", provider.delete(&tunnel)).await
+}
+
 /// 网关删除后删掉它的隧道。控制面没有记录时什么也不做。
 pub async fn destroy(
   state: &AppState,
@@ -236,14 +260,9 @@ pub async fn destroy(
   let Some(row) = snap.tunnels.get(gateway) else {
     return Ok(());
   };
-  let provider =
-    snapshot::tunnel_provider(account(snap, &row.account)?)?;
   progress(format!("删除隧道 {}", tunnel_name(gateway)));
-  let tunnel = TunnelRef {
-    scope: row.scope.clone(),
-    id: row.tunnel_id.clone(),
-  };
-  call(cancel, "删除隧道", provider.delete(&tunnel)).await?;
+  destroy_ref(snap, &row.account, &row.scope, &row.tunnel_id, cancel)
+    .await?;
   let g = gateway.to_string();
   state
     .db

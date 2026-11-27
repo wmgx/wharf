@@ -247,12 +247,7 @@ func (s *SSO) refresh(r *http.Request, token string) *refreshResult {
 	s.mu.Lock()
 	if old := s.cache[key]; old != nil && (old.until.IsZero() || time.Now().Before(old.until)) {
 		s.mu.Unlock()
-		select {
-		case <-old.done:
-			return old
-		case <-r.Context().Done():
-			return &refreshResult{status: 502, body: []byte("登录服务暂时连不上")}
-		}
+		return waitRefresh(r.Context(), old)
 	}
 	for k, v := range s.cache {
 		if !v.until.IsZero() && time.Now().After(v.until) {
@@ -265,7 +260,23 @@ func (s *SSO) refresh(r *http.Request, token string) *refreshResult {
 		s.cache[key] = result
 	}
 	s.mu.Unlock()
-	req, err := http.NewRequestWithContext(r.Context(), "GET", strings.TrimRight(s.Core, "/")+"/gate/refresh", nil)
+	go s.fetchRefresh(r.Clone(context.Background()), token, key, cached, result)
+	return waitRefresh(r.Context(), result)
+}
+
+func waitRefresh(ctx context.Context, result *refreshResult) *refreshResult {
+	select {
+	case <-result.done:
+		return result
+	case <-ctx.Done():
+		return &refreshResult{status: 502, body: []byte("登录服务暂时连不上")}
+	}
+}
+
+func (s *SSO) fetchRefresh(r *http.Request, token string, key [32]byte, cached bool, result *refreshResult) {
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "GET", strings.TrimRight(s.Core, "/")+"/gate/refresh", nil)
 	if err == nil {
 		req.AddCookie(&http.Cookie{Name: "wharf_gate_rt", Value: token})
 		req.Header.Set("X-Forwarded-Host", r.Host)
@@ -298,7 +309,6 @@ func (s *SSO) refresh(r *http.Request, token string) *refreshResult {
 	}
 	close(result.done)
 	s.mu.Unlock()
-	return result
 }
 func (s *SSO) checkKey(w http.ResponseWriter, r *http.Request, key string) (bool, error) {
 	req, err := http.NewRequestWithContext(r.Context(), "GET", strings.TrimRight(s.Core, "/")+"/gate/key", nil)

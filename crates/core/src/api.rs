@@ -1680,6 +1680,14 @@ async fn remove_account(
   );
   users.extend(
     snap
+      .pending
+      .tunnel_deletes
+      .iter()
+      .filter(|p| p.account == name)
+      .map(|p| format!("网关 {} 留下的待清理隧道", p.gateway)),
+  );
+  users.extend(
+    snap
       .owned
       .iter()
       .filter(|r| r.account == name)
@@ -1693,7 +1701,7 @@ async fn remove_account(
         "账号 {name} 还在使用：{}",
         users.join("、")
       ))
-      .with_hint("先删除这些网关和域名（并执行计划），再删除账号")
+      .with_hint("先移除相关网关和域名并执行 wharf plan --apply 清理，再删除账号")
       .into(),
     );
   }

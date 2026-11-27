@@ -412,7 +412,7 @@ fn fake_agent(
   state.hub.mock_agent(server, capable, move |op| {
     let mut live = live.lock().unwrap();
     let (up, config_hash) = match op {
-      AgentOp::ProjectStatus { projects } => {
+      AgentOp::ProjectStatus { projects, .. } => {
         return Ok(json!(
           projects
             .iter()

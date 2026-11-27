@@ -300,6 +300,18 @@ impl Snapshot {
   pub fn net(&self, world: &World) -> Net {
     let mut base = Net::derive(&world.servers, &self.agents);
     base.core_server = crate::core_node::server_of(self);
+    base.core_listener = crate::gate::core_listener();
+    base.acme_dns_url = base
+      .core_listener
+      .and_then(|(port, _)| {
+        crate::join::default_url_with(
+          world,
+          &base,
+          port,
+          crate::gate::public_url(),
+        )
+      })
+      .filter(|url| crate::caddy_validate::valid_public_url(url));
     let (gate_public, gate_login) =
       crate::gate::render_context(world, &base);
     Net {
@@ -594,6 +606,55 @@ pub fn gateway_render(
   )
 }
 
+fn gate_core_direct(
+  net: &Net,
+  gateway_server: &str,
+) -> Option<String> {
+  let (port, loopback_only) = net.core_listener?;
+  let core = net.core_server.as_ref()?;
+  if gateway_server == core {
+    return Some(format!("http://127.0.0.1:{port}"));
+  }
+  let ip = net
+    .private
+    .get(core)
+    .filter(|addr| addr.network.encrypted())?;
+  if loopback_only
+    || net.reach.get(&(gateway_server.into(), core.clone()))
+      != Some(&true)
+  {
+    return None;
+  }
+  let ip: std::net::IpAddr = ip.ip.parse().ok()?;
+  Some(format!("http://{}", std::net::SocketAddr::new(ip, port)))
+}
+
+pub(crate) fn gateway_config_matches(
+  world: &World,
+  net: &Net,
+  name: &str,
+  rendered: &GatewayRender,
+  applied: Option<&str>,
+) -> bool {
+  if applied == Some(rendered.config_hash.as_str()) {
+    return true;
+  }
+  // 旧指纹无法区分回调地址，同一次真正的网关配置变更会补写新指纹。
+  if world.gateways[name].spec.kind != GatewayKind::Caddy
+    || (!rendered.needs_acme_dns
+      && !rendered.sites.iter().any(|s| s.gate.is_some()))
+  {
+    return false;
+  }
+  let legacy = Net {
+    acme_dns_url: None,
+    core_listener: None,
+    ..net.clone()
+  };
+  gateway_render(world, &legacy, name)
+    .is_ok_and(|r| applied == Some(r.config_hash.as_str()))
+}
+
 pub fn gateway_render_with_fill(
   world: &World,
   net: &Net,
@@ -715,6 +776,7 @@ pub fn gateway_render_with_fill(
           })
           .transpose()?
           .map(|u| format!("http://{u}"))
+          .or_else(|| gate_core_direct(net, &gateway.spec.server))
           .unwrap_or_else(|| login.clone());
         Ok(render::Gate {
           public: sso.public,
@@ -815,7 +877,17 @@ pub fn gateway_render_with_fill(
                 "服务 {svc} 的端口 {port} 没有分配"
               ))
             })?;
-          match crate::link::choose(world, net, &gateway.spec, svc, wharf_api_types::spec::LinkMode::Auto)? {
+          if world.services[svc].spec.server != gateway.spec.server
+            && crate::link::service_port_bind(
+              &world.services[svc],
+              port,
+            ) == crate::link::PortBind::LoopbackV4Only
+          {
+            return Err(ApiError::invalid(
+              "四层转发不支持反向隧道，请把该端口绑定到内网地址",
+            ));
+          }
+          match crate::link::choose(world, net, &gateway.spec, svc, port, wharf_api_types::spec::LinkMode::Auto)? {
             crate::link::Choice::Local => format!("127.0.0.1:{host}"),
             crate::link::Choice::Direct(ip) => format!("{ip}:{host}"),
             crate::link::Choice::Tunnel => return Err(ApiError::invalid(format!("入口 {name} 的四层转发 {}：入口所在机器连不到 {svc} 所在机器的内网地址，四层转发不支持反向隧道", f.listen)).with_hint(format!("让两台机器在同一个组网里，或者在 {svc} 所在的机器上建入口"))),
@@ -855,7 +927,10 @@ pub fn gateway_render_with_fill(
             &gateway.spec,
             &net.cloudflare_ips,
           ),
-          fill,
+          render::CaddyFill {
+            acme_dns_url: net.acme_dns_url.as_deref(),
+            ..fill
+          },
         ),
       )
     }
@@ -911,10 +986,24 @@ pub async fn project_status(
   projects: Vec<String>,
   timeout: Duration,
 ) -> Result<BTreeMap<String, ProjectState>, ApiError> {
+  project_status_with_links(hub, server, projects, timeout, false)
+    .await
+}
+
+pub(crate) async fn project_status_with_links(
+  hub: &crate::hub::Hub,
+  server: &str,
+  projects: Vec<String>,
+  timeout: Duration,
+  include_links: bool,
+) -> Result<BTreeMap<String, ProjectState>, ApiError> {
   let states: Vec<ProjectState> = hub
     .call(
       server,
-      wharf_api_types::agent::AgentOp::ProjectStatus { projects },
+      wharf_api_types::agent::AgentOp::ProjectStatus {
+        projects,
+        include_links,
+      },
       timeout,
       None,
       &tokio_util::sync::CancellationToken::new(),

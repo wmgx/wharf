@@ -2,7 +2,7 @@
 //!
 //! 每分钟看一次主网关所在机器：连续 [SWITCH_MINUTES] 分钟离线（备用那台在线）就切到备用，
 //! 主网关连续 [SWITCH_MINUTES] 分钟在线再切回。切换 = 改 DNS 记录（从计划里取出这个域名的
-//! DNS 步骤单独执行）；切到 caddy 备用入口时顺带重启它，让它马上申请证书。
+//! DNS 步骤单独执行）；切到 caddy 备用入口时延迟热重载，促使它重新申请证书。
 //!
 //! 哪些域名在备用入口上存进设置 `failover.active`，控制面重启后接着用。
 
@@ -14,25 +14,61 @@ use std::{
 
 use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
-  agent::AgentOp, plan::PlanRequest, spec::GatewayKind,
+  ApiError, ErrorCode, agent::AgentOp, plan::StepStatus,
+  spec::GatewayKind,
 };
 
-use crate::{db, notify, planner::Step, state::AppState};
+use crate::{db, notify, state::AppState, world::World};
 
 const EVERY: Duration = Duration::from_secs(60);
 const SWITCH_MINUTES: u32 = 5;
 const SETTING: &str = "failover.active";
+const PENDING: &str = "failover.pending";
 
-#[derive(Default)]
+pub fn pending_view(
+  host: &str,
+) -> Option<wharf_api_types::view::FailoverPendingView> {
+  with(|m| {
+    m.pending.get(host).map(|p| {
+      wharf_api_types::view::FailoverPendingView {
+        target_backup: p.target_backup,
+        attempts: p.attempts,
+        last_error: p.last_error.clone(),
+      }
+    })
+  })
+}
+
+pub fn load_active_from_conn(
+  c: &rusqlite::Connection,
+) -> Result<BTreeSet<String>, wharf_api_types::ApiError> {
+  db::setting(c, SETTING)?.map_or_else(
+    || Ok(BTreeSet::new()),
+    |v| serde_json::from_str(&v).map_err(db::json_err),
+  )
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct Pending {
+  target_backup: bool,
+  primary_server: String,
+  backup_gateway: String,
+  attempts: u32,
+  last_error: Option<String>,
+  next_retry_ms: i64,
+}
+
+#[derive(Clone, Default)]
 struct Memory {
   /// 切到备用入口的域名。
   active: BTreeSet<String>,
   /// 域名 → 主网关所在机器连续离线（切回时是连续在线）的分钟数。
   streak: BTreeMap<String, u32>,
   /// 切换了但 DNS 还没改成功的域名，下一轮重试。
-  pending: BTreeSet<String>,
+  pending: BTreeMap<String, Pending>,
 }
 
+static RELOADS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 static MEMORY: Mutex<Option<Memory>> = Mutex::new(None);
 
 fn with<T>(f: impl FnOnce(&mut Memory) -> T) -> T {
@@ -47,11 +83,31 @@ pub fn active(host: &str) -> bool {
 
 pub fn spawn(state: Arc<AppState>) {
   tokio::spawn(async move {
-    if let Ok(Some(v)) =
-      state.db.call(|c| db::setting(c, SETTING)).await
-      && let Ok(hosts) = serde_json::from_str::<BTreeSet<String>>(&v)
-    {
-      with(|m| m.active = hosts);
+    loop {
+      match state
+        .db
+        .call(|c| {
+          Ok(Memory {
+            active: load_active_from_conn(c)?,
+            pending: db::setting(c, PENDING)?
+              .map(|v| serde_json::from_str(&v))
+              .transpose()
+              .map_err(db::json_err)?
+              .unwrap_or_default(),
+            ..Memory::default()
+          })
+        })
+        .await
+      {
+        Ok(memory) => {
+          with(|m| *m = memory);
+          break;
+        }
+        Err(e) => {
+          tracing::warn!("读取主备切换状态失败：{}", e.message)
+        }
+      }
+      tokio::time::sleep(EVERY).await;
     }
     // 刚启动时 agent 还在陆续连回来，别误判离线。
     tokio::time::sleep(Duration::from_secs(180)).await;
@@ -64,183 +120,275 @@ pub fn spawn(state: Arc<AppState>) {
   });
 }
 
-async fn round(
-  state: &Arc<AppState>,
-) -> Result<(), wharf_api_types::ApiError> {
-  let snap = crate::snapshot::load(&state.db).await?;
-  let world = &snap.world;
-  let mut switches = Vec::new();
-  with(|m| {
-    // 去掉了备用入口的路由：切回主网关。
-    let gone: Vec<String> = m
-      .active
-      .iter()
-      .filter(|h| {
-        world
-          .routes
-          .get(*h)
-          .is_none_or(|r| r.spec.backup_gateway.is_none())
-      })
-      .cloned()
-      .collect();
-    for h in gone {
-      m.active.remove(&h);
-      m.pending.insert(h);
-    }
-    m.streak.retain(|h, _| world.routes.contains_key(h));
-    for (host, route) in &world.routes {
-      let Some(backup) = route.spec.backup_gateway.as_deref() else {
-        continue;
+async fn persist(
+  state: &AppState,
+  memory: &Memory,
+) -> Result<(), ApiError> {
+  let active =
+    serde_json::to_string(&memory.active).map_err(db::json_err)?;
+  let pending =
+    serde_json::to_string(&memory.pending).map_err(db::json_err)?;
+  state
+    .db
+    .call(move |c| {
+      let tx = c.transaction().map_err(db::sql_err)?;
+      db::set_setting(&tx, SETTING, Some(&active))?;
+      db::set_setting(&tx, PENDING, Some(&pending))?;
+      tx.commit().map_err(db::sql_err)
+    })
+    .await?;
+  with(|m| *m = memory.clone());
+  Ok(())
+}
+
+fn observe(
+  memory: &mut Memory,
+  world: &World,
+  online: impl Fn(&str) -> bool,
+) -> bool {
+  let before = memory.active.clone();
+  let pending_count = memory.pending.len();
+  memory.streak.retain(|h, _| world.routes.contains_key(h));
+  memory.active.retain(|h| world.routes.contains_key(h));
+  memory.pending.retain(|h, _| world.routes.contains_key(h));
+  let mut changed = false;
+  for (host, route) in &world.routes {
+    let on_backup = memory.active.contains(host);
+    let Some(primary) = world
+      .route_gateway(&route.spec)
+      .and_then(|g| world.gateways.get(g))
+    else {
+      continue;
+    };
+    let primary_server = &primary.spec.server;
+    let backup =
+      route.spec.backup_gateway.as_deref().unwrap_or_default();
+    let target = if let Some(gw) = world.gateways.get(backup) {
+      let toward = if on_backup {
+        online(primary_server)
+      } else {
+        !online(primary_server)
       };
-      let (Some(primary), Some(backup)) = (
-        world
-          .route_gateway(&route.spec)
-          .and_then(|g| world.gateways.get(g)),
-        world.gateways.get(backup),
-      ) else {
-        continue;
-      };
-      let primary_up = state.hub.is_online(&primary.spec.server);
-      let on_backup = m.active.contains(host);
-      // 在主网关上看离线，在备用上看恢复。
-      let toward = if on_backup { primary_up } else { !primary_up };
-      let n = m.streak.entry(host.clone()).or_default();
-      *n = if toward { *n + 1 } else { 0 };
-      let backup_up = state.hub.is_online(&backup.spec.server);
-      if *n >= SWITCH_MINUTES && (on_backup || backup_up) {
+      let n = memory.streak.entry(host.clone()).or_default();
+      *n = if toward { n.saturating_add(1) } else { 0 };
+      if *n >= SWITCH_MINUTES
+        && (on_backup || online(&gw.spec.server))
+      {
         *n = 0;
-        if on_backup {
-          m.active.remove(host);
+        !on_backup
+      } else {
+        on_backup
+      }
+    } else {
+      memory.streak.remove(host);
+      false
+    };
+    let target_changed = memory.pending.get(host).is_some_and(|p| {
+      p.primary_server != *primary_server
+        || p.backup_gateway != backup
+    });
+    if target == on_backup && !target_changed {
+      continue;
+    }
+    if target {
+      memory.active.insert(host.clone());
+    } else {
+      memory.active.remove(host);
+    }
+    memory.pending.insert(
+      host.clone(),
+      Pending {
+        target_backup: target,
+        primary_server: primary_server.clone(),
+        backup_gateway: backup.into(),
+        attempts: 0,
+        last_error: None,
+        next_retry_ms: 0,
+      },
+    );
+    changed = true;
+  }
+  changed
+    || before != memory.active
+    || pending_count != memory.pending.len()
+}
+
+async fn round(state: &Arc<AppState>) -> Result<(), ApiError> {
+  let Ok(guard) = state
+    .locks
+    .acquire(crate::locks::LockSpec::apply([]), "主备切换")
+  else {
+    return Ok(());
+  };
+  let snap = crate::snapshot::load(&state.db).await?;
+  let mut memory = with(|m| m.clone());
+  if observe(&mut memory, &snap.world, |s| state.hub.is_online(s)) {
+    persist(state, &memory).await?;
+  } else {
+    with(|m| m.streak.clone_from(&memory.streak));
+  }
+  let now = db::now_ms();
+  let due = memory
+    .pending
+    .iter()
+    .filter(|(_, p)| p.next_retry_ms <= now)
+    .map(|(host, _)| host.clone())
+    .collect::<BTreeSet<_>>();
+  if due.is_empty() {
+    return Ok(());
+  }
+  let mut results = BTreeMap::new();
+  let mut hosts = Vec::new();
+  let mut steps = Vec::new();
+  for (host, planned) in
+    crate::planner::plan_dns_for_hosts(&snap, &due).await
+  {
+    match planned {
+      Ok(Some(step)) => {
+        hosts.push(host);
+        steps.push(step);
+      }
+      Ok(None) => {
+        results.insert(host, Ok(()));
+      }
+      Err(e) => {
+        results.insert(host, Err(e));
+      }
+    }
+  }
+  let guard = if steps.is_empty() {
+    guard
+  } else {
+    let (done, guard) =
+      crate::apply::run_batch_sync(state.clone(), steps, guard)
+        .await?;
+    for (host, step) in hosts.into_iter().zip(done) {
+      results.insert(
+        host,
+        if step.status == StepStatus::Done {
+          Ok(())
         } else {
-          m.active.insert(host.clone());
+          Err(step.error.unwrap_or_else(|| {
+            ApiError::new(ErrorCode::Cancelled, "DNS 切换未执行")
+          }))
+        },
+      );
+    }
+    guard
+  };
+  let mut notices = Vec::new();
+  let mut reloads: BTreeMap<String, u32> = BTreeMap::new();
+  for (host, result) in results {
+    let Some(p) = memory.pending.get_mut(&host) else {
+      continue;
+    };
+    match result {
+      Ok(()) => {
+        let p = memory.pending.remove(&host).expect("待切换域名");
+        if p.target_backup
+          && let Some(gw) = snap.world.gateways.get(&p.backup_gateway)
+          && gw.spec.kind == GatewayKind::Caddy
+        {
+          let ttl = crate::world::effective_dns_ttl(
+            &snap.world.routes[&host].spec,
+            false,
+          );
+          let wait =
+            reloads.entry(p.backup_gateway.clone()).or_default();
+          *wait = (*wait).max(ttl.saturating_add(5).clamp(30, 120));
         }
-        m.pending.insert(host.clone());
-        switches.push((
+        notices.push((
           host.clone(),
-          !on_backup,
-          primary.spec.server.clone(),
-          route.spec.backup_gateway.clone().unwrap_or_default(),
+          "failover",
+          !p.target_backup,
+          notify::Event {
+            title: if p.target_backup {
+              format!("{host} 已切到备用入口 {}", p.backup_gateway)
+            } else {
+              format!("{host} 已切回主网关")
+            },
+            body: format!(
+              "DNS 已更新，主网关所在服务器为 {}",
+              p.primary_server
+            ),
+          },
+        ));
+      }
+      Err(e) => {
+        let message = crate::log_redact::redact_text(&e.message);
+        p.attempts = p.attempts.saturating_add(1);
+        p.next_retry_ms = now
+          + match p.attempts {
+            1 => 60_000,
+            2 => 120_000,
+            _ => 300_000,
+          };
+        p.last_error = Some(message.clone());
+        notices.push((
+          host.clone(),
+          "failover_error",
+          false,
+          notify::Event {
+            title: format!("{host} 的主备入口切换失败"),
+            body: message,
+          },
         ));
       }
     }
-  });
-  if !switches.is_empty() {
-    let hosts = with(|m| m.active.clone());
-    let value = serde_json::to_string(&hosts).unwrap_or_default();
-    state
-      .db
-      .call(move |c| db::set_setting(c, SETTING, Some(&value)))
-      .await?;
   }
-  for (host, to_backup, primary_server, backup) in &switches {
-    let event = if *to_backup {
-      notify::Event {
-        title: format!("{host} 切到备用入口 {backup}"),
-        body: format!(
-          "主网关所在的 {primary_server} 已经 {SWITCH_MINUTES} 分钟离线，DNS 改指向备用入口 {backup}；{primary_server} 恢复后自动切回"
-        ),
-      }
-    } else {
-      notify::Event {
-        title: format!("{host} 切回主网关"),
-        body: format!(
-          "{primary_server} 已经恢复 {SWITCH_MINUTES} 分钟，DNS 改回主网关"
-        ),
-      }
-    };
-    crate::rules::notice(state, "failover", None, !*to_backup, event)
+  persist(state, &memory).await?;
+  drop(guard);
+  for (name, wait) in reloads {
+    schedule_caddy_reload(state, &snap.world, name, wait);
+  }
+  for (host, kind, resolved, event) in notices {
+    crate::rules::notice(state, kind, Some(&host), resolved, event)
       .await;
   }
-  let pending: Vec<String> =
-    with(|m| m.pending.iter().cloned().collect());
-  for host in pending {
-    match update_dns(state, &host).await {
-      Ok(()) => with(|m| {
-        m.pending.remove(&host);
-      }),
-      Err(e) => {
-        tracing::warn!(
-          "改 {host} 的 DNS 失败，下一轮重试：{}",
-          e.message
-        )
-      }
-    }
-  }
   Ok(())
 }
 
-/// 从完整计划里取出这个域名的 DNS 步骤单独执行；不用改时什么也不做。
-async fn update_dns(
+fn schedule_caddy_reload(
   state: &Arc<AppState>,
-  host: &str,
-) -> Result<(), wharf_api_types::ApiError> {
-  let planned =
-    crate::planner::make_plan(state, PlanRequest::default()).await?;
-  let step = planned.steps.into_iter().find_map(|s| match s.step {
-    Step::DnsUpsert { ref hostname, .. } if hostname == host => {
-      Some(s.step)
-    }
-    _ => None,
-  });
-  let Some(step) = step else {
-    return Ok(());
-  };
-  crate::apply::start_task_by(
-    state.clone(),
-    format!("切换 {host} 的入口"),
-    step,
-    Some("主备切换".into()),
-  )
-  .await?;
-  if active(host) {
-    restart_caddy_backup(state, host).await;
-  }
-  Ok(())
-}
-
-/// caddy 备用入口在 DNS 指过来之前拿不到证书，重启一下让它马上重新申请。
-async fn restart_caddy_backup(state: &Arc<AppState>, host: &str) {
-  let Ok(snap) = crate::snapshot::load(&state.db).await else {
+  world: &World,
+  name: String,
+  wait: u32,
+) {
+  let Some(gw) = world.gateways.get(&name) else {
     return;
   };
-  let Some(name) = snap
-    .world
-    .routes
-    .get(host)
-    .and_then(|r| r.spec.backup_gateway.clone())
-  else {
-    return;
-  };
-  let Some(gw) = snap.world.gateways.get(&name) else {
-    return;
-  };
-  if gw.spec.kind != GatewayKind::Caddy {
+  if !RELOADS
+    .lock()
+    .unwrap_or_else(|e| e.into_inner())
+    .insert(name.clone())
+  {
     return;
   }
-  // 等 DNS 生效（记录 TTL 一般 1 到 5 分钟）。
   let state = state.clone();
   let server = gw.spec.server.clone();
-  let project = crate::world::gateway_project(&name);
   tokio::spawn(async move {
-    tokio::time::sleep(Duration::from_secs(120)).await;
-    let cancel = CancellationToken::new();
-    for op in [
-      AgentOp::ProjectStop {
-        project: project.clone(),
-      },
-      AgentOp::ProjectStart {
-        project: project.clone(),
-        containers: Vec::new(),
-      },
-    ] {
-      let r: Result<serde_json::Value, _> = state
-        .hub
-        .call(&server, op, Duration::from_secs(60), None, &cancel)
-        .await;
-      if let Err(e) = r {
-        tracing::warn!("重启备用入口 {project} 失败：{}", e.message);
-        return;
-      }
+    tokio::time::sleep(Duration::from_secs(wait.into())).await;
+    let result = state
+      .hub
+      .call::<serde_json::Value>(
+        &server,
+        AgentOp::GatewayReload {
+          project: crate::world::gateway_project(&name),
+        },
+        Duration::from_secs(60),
+        None,
+        &CancellationToken::new(),
+      )
+      .await;
+    if let Err(e) = result {
+      tracing::warn!(
+        "热重载备用入口 {name} 失败：{}。检查 agent 版本，必要时运行 wharf upgrade",
+        e.message
+      );
     }
+    RELOADS
+      .lock()
+      .unwrap_or_else(|e| e.into_inner())
+      .remove(&name);
   });
 }

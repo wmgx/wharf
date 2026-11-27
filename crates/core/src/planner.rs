@@ -45,6 +45,8 @@ const STATUS_TIMEOUT: Duration = Duration::from_secs(20);
 pub struct RemoteRef {
   pub scope: String,
   pub remote_id: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub record_type: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -52,6 +54,8 @@ pub struct DnsSpec {
   pub record_type: String,
   pub content: String,
   pub proxied: bool,
+  #[serde(default = "default_dns_ttl")]
+  pub ttl: u32,
   /// 指向这个 cloudflare_tunnel 网关的隧道。隧道可能在同一次执行里才创建，
   /// 所以执行时按网关重新取隧道 id。
   #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -65,6 +69,10 @@ pub fn tunnel_target(id: &str) -> String {
   format!("{id}.cfargotunnel.com")
 }
 
+fn default_dns_ttl() -> u32 {
+  1
+}
+
 impl DnsSpec {
   pub fn to_provider(&self) -> DnsRecordSpec {
     DnsRecordSpec {
@@ -74,7 +82,7 @@ impl DnsSpec {
         _ => DnsRecordType::A,
       },
       content: self.content.clone(),
-      ttl: 1,
+      ttl: if self.proxied { 1 } else { self.ttl },
       proxied: self.proxied,
     }
   }
@@ -126,10 +134,20 @@ pub enum Step {
     existing: Option<RemoteRef>,
     /// 接管时要删掉的多余记录。
     extra: Vec<RemoteRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    expected_gateway: Option<String>,
   },
   GatewayDown {
     server: String,
     gateway: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    keep_tunnel: bool,
+  },
+  TunnelDelete {
+    gateway: String,
+    account: String,
+    scope: String,
+    tunnel_id: String,
   },
   /// 部署反向隧道的 frps 或 frpc（design 2.7.2）。
   LinkUp {
@@ -272,7 +290,9 @@ impl Step {
       Self::GatewaySync { .. } => 4,
       Self::LinkUp { .. } => 5,
       Self::DnsUpsert { .. } | Self::EdgeAttach { .. } => 6,
-      Self::GatewayDown { .. } | Self::LinkDown { .. } => 7,
+      Self::GatewayDown { .. }
+      | Self::LinkDown { .. }
+      | Self::TunnelDelete { .. } => 7,
       Self::ServiceDown { .. } => 8,
       Self::Backup { .. }
       | Self::Restore { .. }
@@ -476,7 +496,9 @@ pub(crate) async fn make_plan_inner(
     &current,
     &mut desired,
   )?;
-  desired.allocate_ports()?;
+  desired.allocate_ports_with(&retiring_ports(
+    &snap, &current, &desired,
+  ))?;
   crate::secret_policy::validate_restrictions(
     &desired,
     &snap.secret_restrictions,
@@ -738,6 +760,8 @@ pub(crate) async fn make_plan_inner(
       );
     }
   }
+  let mut before_net = snap.net(&current);
+  before_net.heartbeat_url.clone_from(&state.public_url);
   let mut net = snap.net(&desired);
   net.heartbeat_url.clone_from(&state.public_url);
   for (host, route) in &desired.routes {
@@ -786,7 +810,13 @@ pub(crate) async fn make_plan_inner(
   // 迁移要源机器把数据推到目标机器（design 2.10）。
   for (name, svc) in &desired.services {
     let to = &svc.spec.server;
-    if let Some(from) = moved_from(&snap, &current, name, to) {
+    if let Some(from) = moved_from(&snap, &current, name, to)
+      && current.services.get(name).is_some_and(|old| {
+        crate::data::mounts(name, &old.spec)
+          .iter()
+          .any(|m| m.kind == DataKind::Managed)
+      })
+    {
       crate::link::require_reach(
         state,
         &net,
@@ -798,9 +828,14 @@ pub(crate) async fn make_plan_inner(
       .await?;
     }
   }
-  let status =
-    gather_status(state, &snap, &current, &desired, &net, &mut b)
-      .await;
+  let status = gather_status(
+    state,
+    &snap,
+    (&current, &before_net),
+    (&desired, &net),
+    &mut b,
+  )
+  .await;
   mark("容器状态");
   let account_refs = crate::render::service_account_refs(&desired);
   if account_refs != crate::render::service_account_refs(&current) {
@@ -839,19 +874,28 @@ pub(crate) async fn make_plan_inner(
       .map(crate::apply::safe_rollback_warning),
   );
   leftover_items(&mut b, &snap, &current, &desired, &status);
-  link_items(&mut b, &snap, &current, &desired, &net, &status)?;
+  link_items(&mut b, &snap, &desired, &net, &status)?;
   tailscale_items(&mut b, &snap, &desired, &status);
   egress_items(&mut b, &snap, &current, &desired);
   docker_proxy_items(&mut b, &snap, &current, &desired);
   baseline_items(&mut b, &snap, &current, &desired);
   gateway_items(
-    &mut b, &snap, &current, &desired, &net, &status, &state.hub,
+    &mut b,
+    &snap,
+    (&current, &before_net),
+    (&desired, &net),
+    &status,
+    &state.hub,
   )?;
   // 带改动的计划只看受影响的域名；只检查漂移（没有改动）时看全部。
-  let scope = (req.fleet.is_none()
+  let scope = (snap.pending.tunnel_deletes.is_empty()
+    && req.fleet.is_none()
     && (!req.changes.is_empty() || req.partial.is_some()))
-  .then(|| affected_hosts(&snap, &current, &desired, &net));
-  dns_items(&mut b, &snap, &desired, &net, scope.as_ref()).await?;
+  .then(|| {
+    affected_hosts(&snap, &current, &before_net, &desired, &net)
+  });
+  dns_items(&mut b, &snap, &desired, &net, scope.as_ref(), true)
+    .await?;
   mark("DNS");
   crate::edge_plan::edge_items(
     state, &mut b, &snap, &current, &desired,
@@ -1151,14 +1195,13 @@ type StatusMap =
 async fn gather_status(
   state: &AppState,
   snap: &Snapshot,
-  current: &World,
-  desired: &World,
-  net: &Net,
+  (current, before_net): (&World, &Net),
+  (desired, net): (&World, &Net),
   b: &mut Builder,
 ) -> StatusMap {
   let mut projects: BTreeMap<String, BTreeSet<String>> =
     BTreeMap::new();
-  for world in [current, desired] {
+  for (world, net) in [(current, before_net), (desired, net)] {
     for (name, s) in &world.services {
       projects
         .entry(s.spec.server.clone())
@@ -1212,13 +1255,41 @@ async fn gather_status(
       .or_default()
       .insert(pending.service.clone());
   }
+  for p in &snap.pending.gateway_downs {
+    if state.hub.is_online(&p.server) {
+      projects
+        .entry(p.server.clone())
+        .or_default()
+        .insert(gateway_project(&p.gateway));
+    }
+  }
+  let gateway_servers: BTreeSet<_> = current
+    .gateways
+    .values()
+    .chain(desired.gateways.values())
+    .filter(|g| g.spec.kind == GatewayKind::Caddy)
+    .map(|g| &g.spec.server)
+    .collect();
+  for server in current.servers.keys().chain(desired.servers.keys()) {
+    if state.hub.is_online(server) || projects.contains_key(server) {
+      let candidates = projects.entry(server.clone()).or_default();
+      candidates.insert(crate::link::SERVER_PROJECT.into());
+      candidates.extend(
+        gateway_servers
+          .iter()
+          .filter(|s| **s != server)
+          .map(|s| crate::link::client_project(s)),
+      );
+    }
+  }
   let futures =
     projects.into_iter().map(|(server, projects)| async move {
-      let result = snapshot::project_status(
+      let result = snapshot::project_status_with_links(
         &state.hub,
         &server,
         projects.into_iter().collect(),
         STATUS_TIMEOUT,
+        state.hub.supports_safe_gateway(&server),
       )
       .await;
       (server, result)
@@ -2179,7 +2250,6 @@ fn applied_config<'a>(
 fn link_items(
   b: &mut Builder,
   snap: &Snapshot,
-  current: &World,
   desired: &World,
   net: &Net,
   status: &StatusMap,
@@ -2238,38 +2308,35 @@ fn link_items(
       },
     );
   }
-  for p in crate::link::projects(current, net).unwrap_or_default() {
-    if want
-      .iter()
-      .any(|w| w.server == p.server && w.project == p.project)
-    {
-      continue;
+  for (server, projects) in status {
+    for (project, state) in projects.iter().flatten() {
+      if !crate::link::is_link_project(project)
+        || (state.hash.is_none()
+          && state.containers.iter().all(|c| c.foreign))
+        || want
+          .iter()
+          .any(|p| p.server == *server && p.project == *project)
+      {
+        continue;
+      }
+      let id = b.item(
+        format!("link/{server}/{project}"),
+        Layer::Gateway,
+        Action::Delete,
+        Some(json!({ "server": server })),
+        None,
+        vec![Impact::Remove],
+        "没有路由再用这条隧道，停止并删除",
+      );
+      b.step(
+        vec![id],
+        format!("在 {server} 上删除 {project}"),
+        Step::LinkDown {
+          server: server.clone(),
+          project: project.clone(),
+        },
+      );
     }
-    let exists = status
-      .get(&p.server)
-      .and_then(|s| s.as_ref())
-      .and_then(|s| s.get(&p.project))
-      .is_some_and(|s| !s.containers.is_empty());
-    if !exists {
-      continue;
-    }
-    let id = b.item(
-      format!("link/{}/{}", p.server, p.project),
-      Layer::Gateway,
-      Action::Delete,
-      Some(json!({ "server": p.server, "summary": p.summary })),
-      None,
-      vec![Impact::Remove],
-      "没有路由再用这条隧道，停止并删除",
-    );
-    b.step(
-      vec![id],
-      format!("在 {} 上删除 {}", p.server, p.project),
-      Step::LinkDown {
-        server: p.server.clone(),
-        project: p.project,
-      },
-    );
   }
   Ok(())
 }
@@ -2550,9 +2617,8 @@ fn tailscale_items(
 fn gateway_items(
   b: &mut Builder,
   snap: &Snapshot,
-  current: &World,
-  desired: &World,
-  net: &Net,
+  (current, before_net): (&World, &Net),
+  (desired, net): (&World, &Net),
   status: &StatusMap,
   hub: &crate::hub::Hub,
 ) -> Result<(), ApiError> {
@@ -2582,7 +2648,9 @@ fn gateway_items(
       && gw.spec.tls == GatewayTls::Auto
     {
       for (host, route) in &desired.routes {
-        if desired.route_gateway(&route.spec) == Some(name.as_str())
+        if desired
+          .route_gateways(&route.spec)
+          .contains(&name.as_str())
           && route.spec.internal
           && !host.split_once('.').is_some_and(|(_, zone)| {
             gw.spec.wildcard.iter().any(|z| z == zone)
@@ -2605,12 +2673,24 @@ fn gateway_items(
       "sites": r.sites.iter().map(|s| json!({ "hostname": s.hostname, "upstream": s.upstream })).collect::<Vec<_>>(),
       "config": snapshot::redacted_config(&r.config, net),
     }));
+    let tunnel_mismatch = gw.spec.kind
+      == GatewayKind::CloudflareTunnel
+      && snap.tunnels.get(name).is_none_or(|t| {
+        Some(t.account.as_str()) != gw.spec.account.as_deref()
+      });
     let decision = match status.get(server).and_then(|s| s.as_ref()) {
+      _ if tunnel_mismatch => Some((
+        Action::Update,
+        vec![Impact::Restart],
+        "在当前厂商账号下创建隧道并部署连接器".into(),
+      )),
       // 查不到现状时，只有配置变了才计划（服务器离线已经单独提醒过）。
       None => {
         let same = current.gateways.get(name)
           == desired.gateways.get(name)
-          && gateway_sites_same(current, desired, net, name);
+          && gateway_sites_same(
+            current, before_net, desired, net, name,
+          );
         (!same).then(|| {
           (
             Action::Update,
@@ -2644,8 +2724,13 @@ fn gateway_items(
           ),
         )),
         Some(s)
-          if applied_config(snap, name, gw.spec.kind, s)
-            != Some(r.config_hash.as_str()) =>
+          if !snapshot::gateway_config_matches(
+            desired,
+            net,
+            name,
+            &r,
+            applied_config(snap, name, gw.spec.kind, s),
+          ) =>
         {
           Some((
             Action::Update,
@@ -2674,7 +2759,7 @@ fn gateway_items(
                     }
                   }
                   _ if gateway_sites_same(
-                    current, desired, net, name,
+                    current, before_net, desired, net, name,
                   ) =>
                   {
                     "隧道证书变化，热重载配置".into()
@@ -2682,7 +2767,9 @@ fn gateway_items(
                   _ => "路由变化，热重载配置".into(),
                 }
               }
-              GatewayKind::Caddy => "路由变化，热重载配置".into(),
+              GatewayKind::Caddy => {
+                "路由或验证地址变化，热重载配置".into()
+              }
               GatewayKind::CloudflareTunnel => {
                 "路由变化，更新隧道入口规则".into()
               }
@@ -2786,19 +2873,54 @@ fn gateway_items(
       );
     }
   }
-  for (name, gw) in &current.gateways {
-    if desired.gateways.contains_key(name) {
-      continue;
+  gateway_cleanup_items(b, snap, current, desired, status);
+  Ok(())
+}
+
+fn gateway_cleanup_items(
+  b: &mut Builder,
+  snap: &Snapshot,
+  current: &World,
+  desired: &World,
+  status: &StatusMap,
+) {
+  let mut downs = BTreeMap::new();
+  for p in &snap.pending.gateway_downs {
+    let current_server = desired
+      .gateways
+      .get(&p.gateway)
+      .map(|g| g.spec.server.as_str());
+    if current_server != Some(p.server.as_str())
+      && desired.servers.contains_key(&p.server)
+      && (!p.keep_tunnel
+        || status.get(&p.server).is_some_and(Option::is_some))
+    {
+      downs.insert((&p.gateway, &p.server), p.keep_tunnel);
     }
-    let server = &gw.spec.server;
+  }
+  for (name, gw) in &current.gateways {
+    let next = desired.gateways.get(name);
+    if next.is_none_or(|g| g.spec.server != gw.spec.server) {
+      downs.insert((name, &gw.spec.server), next.is_some());
+    }
+  }
+  for ((name, server), keep_tunnel) in downs {
+    let mut impacts = vec![Impact::Remove];
+    if !keep_tunnel {
+      impacts.push(Impact::Downtime);
+    }
     let id = b.item(
       format!("{KIND_GATEWAY}/{name}"),
       Layer::Gateway,
       Action::Delete,
       Some(json!({ "server": server })),
       None,
-      vec![Impact::Remove, Impact::Downtime],
-      "停止并删除网关容器",
+      impacts,
+      if keep_tunnel {
+        "停止并删除旧机网关容器"
+      } else {
+        "停止并删除网关容器"
+      },
     );
     b.step(
       vec![id],
@@ -2806,19 +2928,73 @@ fn gateway_items(
       Step::GatewayDown {
         server: server.clone(),
         gateway: name.clone(),
+        keep_tunnel,
       },
     );
   }
-  Ok(())
+
+  let mut old_tunnels: BTreeMap<_, _> = snap
+    .pending
+    .tunnel_deletes
+    .iter()
+    .map(|p| ((p.account.clone(), p.tunnel_id.clone()), p.clone()))
+    .collect();
+  for (name, gw) in &desired.gateways {
+    if gw.spec.kind == GatewayKind::CloudflareTunnel
+      && let Some(old) = snap.tunnels.get(name)
+      && Some(old.account.as_str()) != gw.spec.account.as_deref()
+    {
+      old_tunnels.insert(
+        (old.account.clone(), old.tunnel_id.clone()),
+        crate::pending::TunnelDeletePayload {
+          gateway: name.clone(),
+          account: old.account.clone(),
+          scope: old.scope.clone(),
+          tunnel_id: old.tunnel_id.clone(),
+        },
+      );
+    }
+  }
+  for p in old_tunnels.into_values() {
+    if desired.gateways.get(&p.gateway).is_some_and(|g| {
+      g.spec.account.as_deref() == Some(p.account.as_str())
+    }) && snap
+      .tunnels
+      .get(&p.gateway)
+      .is_some_and(|t| t.tunnel_id == p.tunnel_id)
+    {
+      continue;
+    }
+    let id = b.item(
+      format!("{KIND_GATEWAY}/{}", p.gateway),
+      Layer::Tunnel,
+      Action::Delete,
+      Some(json!({ "account": p.account, "tunnel_id": p.tunnel_id })),
+      None,
+      vec![Impact::Remove],
+      "在新隧道和 DNS 生效后清理旧隧道",
+    );
+    b.step(
+      vec![id],
+      format!("删除旧账号 {} 下的隧道", p.account),
+      Step::TunnelDelete {
+        gateway: p.gateway,
+        account: p.account,
+        scope: p.scope,
+        tunnel_id: p.tunnel_id,
+      },
+    );
+  }
 }
 
 fn gateway_sites_same(
   current: &World,
+  before_net: &Net,
   desired: &World,
   net: &Net,
   name: &str,
 ) -> bool {
-  let a = snapshot::gateway_render(current, net, name).ok();
+  let a = snapshot::gateway_render(current, before_net, name).ok();
   let b = snapshot::gateway_render(desired, net, name).ok();
   matches!((a, b), (Some(a), Some(b)) if a.config_hash == b.config_hash)
 }
@@ -2841,9 +3017,11 @@ pub(crate) fn desired_record(
       content: snap
         .tunnels
         .get(gateway)
+        .filter(|t| Some(t.account.as_str()) == gw.account.as_deref())
         .map(|t| tunnel_target(&t.tunnel_id))
         .unwrap_or_else(|| TUNNEL_PENDING.into()),
       proxied: true,
+      ttl: 1,
       tunnel: Some(gateway.to_string()),
     });
   }
@@ -2872,6 +3050,7 @@ pub(crate) fn desired_record(
     record_type: record_type.to_string(),
     content: ip.clone(),
     proxied: false,
+    ttl: crate::world::effective_dns_ttl(&route.spec, false),
     tunnel: None,
   })
 }
@@ -2880,6 +3059,7 @@ fn remote_ref(r: &RemoteRecord) -> RemoteRef {
   RemoteRef {
     scope: r.scope.clone(),
     remote_id: r.remote_id.clone(),
+    record_type: r.canonical["type"].as_str().map(str::to_string),
   }
 }
 
@@ -2887,10 +3067,37 @@ fn remote_ref(r: &RemoteRecord) -> RemoteRef {
 type DnsTarget<'a> =
   (String, String, Option<(&'a str, &'a EdgeAppSpec)>);
 
+fn retiring_ports(
+  snap: &Snapshot,
+  current: &World,
+  desired: &World,
+) -> BTreeMap<String, BTreeMap<u16, String>> {
+  let mut reserved = BTreeMap::<String, BTreeMap<u16, String>>::new();
+  for (name, old) in &current.services {
+    let server =
+      running_on(snap, current, name).unwrap_or(&old.spec.server);
+    for (port, host) in &old.host_ports {
+      if desired.services.get(name).is_none_or(|new| {
+        new.spec.server != server
+          || !new.spec.ports.iter().any(|p| {
+            p.name == *port && p.host.unwrap_or(*host) == *host
+          })
+      }) {
+        reserved
+          .entry(server.to_string())
+          .or_default()
+          .insert(*host, name.clone());
+      }
+    }
+  }
+  reserved
+}
+
 /// 这次改动会让 DNS 期望值变化的域名：新增或改了的路由、指向变了的路由、改了的 Pages。
 fn affected_hosts(
   snap: &Snapshot,
   current: &World,
+  before_net: &Net,
   desired: &World,
   net: &Net,
 ) -> BTreeSet<String> {
@@ -2899,7 +3106,7 @@ fn affected_hosts(
     .iter()
     .filter(|(host, r)| {
       current.routes.get(*host).is_none_or(|c| c != *r)
-        || desired_record(snap, current, net, host).ok()
+        || desired_record(snap, current, before_net, host).ok()
           != desired_record(snap, desired, net, host).ok()
     })
     .map(|(h, _)| h.clone())
@@ -2916,12 +3123,58 @@ fn affected_hosts(
   out
 }
 
+pub(crate) async fn plan_dns_for_hosts(
+  snap: &Snapshot,
+  hosts: &BTreeSet<String>,
+) -> Vec<(String, Result<Option<StepPlan>, ApiError>)> {
+  let net = snap.net(&snap.world);
+  futures_util::future::join_all(hosts.iter().map(|host| {
+    let net = &net;
+    async move {
+      let result = async {
+        if snap.account_for(host).is_none() {
+          return Err(ApiError::invalid(format!(
+            "没有厂商账号管理 {host} 的 DNS"
+          )));
+        }
+        let mut b = Builder::default();
+        let hosts = BTreeSet::from([host.clone()]);
+        dns_items(
+          &mut b,
+          snap,
+          &snap.world,
+          net,
+          Some(&hosts),
+          false,
+        )
+        .await?;
+        if b.items.iter().any(|item| item.action == Action::Adopt) {
+          return Err(
+            ApiError::invalid(format!(
+              "{host} 的 DNS 需要先确认接管"
+            ))
+            .suggest("wharf plan"),
+          );
+        }
+        Ok(b.steps.pop().map(|mut step| {
+          step.items.clear();
+          step
+        }))
+      }
+      .await;
+      (host.clone(), result)
+    }
+  }))
+  .await
+}
+
 async fn dns_items(
   b: &mut Builder,
   snap: &Snapshot,
   desired: &World,
   net: &Net,
   scope: Option<&BTreeSet<String>>,
+  include_cleanup: bool,
 ) -> Result<(), ApiError> {
   let in_scope = |h: &str| scope.is_none_or(|s| s.contains(h));
   let edge_ids: Vec<String> = desired
@@ -2937,40 +3190,23 @@ async fn dns_items(
     .map(|r| r.id.as_str())
     .chain(edge_ids.iter().map(String::as_str))
     .collect();
-  // 已删除路由留下的记录。
-  for owned in &snap.owned {
-    if live_ids.contains(owned.route_id.as_str()) {
-      continue;
-    }
-    let id = b.item(
-      format!("{KIND_ROUTE}/{}", owned.hostname),
-      Layer::Dns,
-      Action::Delete,
-      Some(json!({ "account": owned.account, "remote_id": owned.remote_id })),
-      None,
-      vec![Impact::Remove],
-      "删除路由留下的 DNS 记录",
-    );
-    b.step(
-      vec![id],
-      format!("删除 {} 的 DNS 记录", owned.hostname),
-      Step::DnsDelete {
-        hostname: owned.hostname.clone(),
-        account: owned.account.clone(),
-        remote: RemoteRef {
-          scope: owned.scope.clone(),
-          remote_id: owned.remote_id.clone(),
-        },
-        owner: Some(owned.route_id.clone()),
-      },
-    );
-  }
+  let deleting_owned: BTreeMap<_, _> = snap
+    .owned
+    .iter()
+    .filter(|owned| {
+      include_cleanup && !live_ids.contains(owned.route_id.as_str())
+    })
+    .map(|owned| {
+      ((&owned.account, &owned.scope, &owned.remote_id), owned)
+    })
+    .collect();
+  let mut handed_over = BTreeSet::new();
 
   for (host, route) in &desired.routes {
     if !in_scope(host) {
       continue;
     }
-    if let Some(warning) = plaintext_hop(desired, net, &route.spec) {
+    for warning in plaintext_hop(desired, net, &route.spec) {
       b.warnings.push(format!("路由 {host}：{warning}"));
     }
   }
@@ -3049,8 +3285,27 @@ async fn dns_items(
     let owner = wharf_providers::Owner {
       id: owner_id.clone(),
     };
-    let (ours, foreign): (Vec<&RemoteRecord>, Vec<&RemoteRecord>) =
-      records.iter().partition(|r| provider.is_owned(r, &owner));
+    let (mut ours, mut foreign) = (Vec::new(), Vec::new());
+    let mut handover = false;
+    for record in &records {
+      let key = (&account.name, &record.scope, &record.remote_id);
+      if provider.is_owned(record, &owner) {
+        ours.push(record);
+      } else if deleting_owned.get(&key).is_some_and(|old| {
+        provider.is_owned(
+          record,
+          &wharf_providers::Owner {
+            id: old.route_id.clone(),
+          },
+        )
+      }) {
+        handover = true;
+        handed_over.insert(key);
+        ours.push(record);
+      } else {
+        foreign.push(record);
+      }
+    }
     let canonical = want.canonical();
     let address = format!("{KIND_ROUTE}/{host}");
     let after = Some(canonical.clone());
@@ -3062,6 +3317,11 @@ async fn dns_items(
         spec: spec.clone(),
         existing: existing.map(remote_ref),
         extra,
+        expected_gateway: desired
+          .routes
+          .get(host)
+          .and_then(|r| desired.live_gateway(host, &r.spec))
+          .map(str::to_string),
       }
     };
     let title = format!("写入 {host} 的 DNS 记录");
@@ -3117,7 +3377,7 @@ async fn dns_items(
         );
         b.step(vec![id], title, upsert(None, vec![]));
       }
-      [only] if only.canonical == canonical => {}
+      [only] if !handover && only.canonical == canonical => {}
       [first, rest @ ..] => {
         let id = b.item(
           address,
@@ -3126,7 +3386,9 @@ async fn dns_items(
           Some(first.canonical.clone()),
           after,
           vec![Impact::Restart],
-          if first.canonical == canonical {
+          if handover {
+            "移交 DNS 记录归属并更新内容".to_string()
+          } else if first.canonical == canonical {
             "删除重复的记录".to_string()
           } else {
             "记录内容变化".to_string()
@@ -3137,6 +3399,40 @@ async fn dns_items(
       }
     }
   }
+  // 已删除路由留下的记录。
+  for owned in deleting_owned.values() {
+    if handed_over.contains(&(
+      &owned.account,
+      &owned.scope,
+      &owned.remote_id,
+    )) {
+      continue;
+    }
+    let id = b.item(
+      format!("{KIND_ROUTE}/{}", owned.hostname),
+      Layer::Dns,
+      Action::Delete,
+      Some(json!({ "account": owned.account, "remote_id": owned.remote_id })),
+      None,
+      vec![Impact::Remove],
+      "删除路由留下的 DNS 记录",
+    );
+    b.step(
+      vec![id],
+      format!("删除 {} 的 DNS 记录", owned.hostname),
+      Step::DnsDelete {
+        hostname: owned.hostname.clone(),
+        account: owned.account.clone(),
+        remote: RemoteRef {
+          scope: owned.scope.clone(),
+          remote_id: owned.remote_id.clone(),
+          record_type: None,
+        },
+        owner: Some(owned.route_id.clone()),
+      },
+    );
+  }
+
   Ok(())
 }
 
@@ -3149,6 +3445,19 @@ pub async fn save(
   let mut body =
     serde_json::to_value(&planned.plan).map_err(db::json_err)?;
   body["base_instances"] = json!(&planned.base_instances);
+  let dns_gateways: BTreeMap<_, _> = planned
+    .steps
+    .iter()
+    .filter_map(|s| match &s.step {
+      Step::DnsUpsert {
+        hostname,
+        expected_gateway: Some(gateway),
+        ..
+      } => Some((hostname, gateway)),
+      _ => None,
+    })
+    .collect();
+  body["dns_gateways"] = json!(dns_gateways);
   body["account_refs"] = json!(&planned.account_refs);
   body["host_access_checked"] = json!(true);
   body["host_requirements"] = json!(&planned.host_requirements);
@@ -3187,19 +3496,24 @@ fn plaintext_hop(
   world: &World,
   net: &Net,
   route: &RouteSpec,
-) -> Option<String> {
-  let gateway = world.gateways.get(world.route_gateway(route)?)?;
-  let server = &world.services.get(&route.service)?.spec.server;
-  if &gateway.spec.server == server {
-    return None;
-  }
-  let addr = net.private.get(server)?;
-  (!addr.network.encrypted()).then(|| {
-    format!(
-      "网关（{}）到服务（{server}）这一段走内网直连 {}，是明文",
-      gateway.spec.server, addr.ip
-    )
-  })
+) -> Vec<String> {
+  let Some(service) = world.services.get(&route.service) else {
+    return vec![];
+  };
+  let server = &service.spec.server;
+  let Some(addr) =
+    net.private.get(server).filter(|a| !a.network.encrypted())
+  else {
+    return vec![];
+  };
+  world.route_gateways(route).into_iter()
+    .filter_map(|name| {
+      let from = &world.gateways.get(name)?.spec.server;
+      (from != server && net.reach.get(&(from.clone(), server.clone())) == Some(&true)
+        && route.link != wharf_api_types::spec::LinkMode::Tunnel).then(|| format!(
+        "网关（{from}）到服务（{server}）这一段走内网直连 {}，是明文", addr.ip
+      ))
+    }).collect()
 }
 
 #[cfg(test)]
@@ -3940,7 +4254,10 @@ mod tests {
       .await
       .unwrap();
     state.hub.mock_agent("s1", false, |op| match op {
-      wharf_api_types::agent::AgentOp::ProjectStatus { projects } => {
+      wharf_api_types::agent::AgentOp::ProjectStatus {
+        projects,
+        ..
+      } => {
         assert_eq!(projects, ["s1"]);
         Ok(json!([{"project": "s1", "containers": []}]))
       }
@@ -4343,9 +4660,8 @@ mod tests {
       gateway_items(
         &mut builder,
         &Snapshot::default(),
-        &w,
-        &w,
-        &net(value),
+        (&w, &net(&values.1)),
+        (&w, &net(value)),
         &status,
         &crate::hub::Hub::default(),
       )

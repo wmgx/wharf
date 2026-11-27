@@ -737,10 +737,14 @@ async fn execute(
   }
   let gateway = snap
     .world
-    .route_gateways(&route.spec)
-    .first()
-    .copied()
+    .live_gateway(hostname, &route.spec)
     .ok_or_else(|| ApiError::invalid("域名没有入口"))?;
+  let gateway = std::iter::once(gateway)
+    .chain(snap.world.route_gateways(&route.spec))
+    .find(|name| {
+      state.hub.is_online(&snap.world.gateways[*name].spec.server)
+    })
+    .unwrap_or(gateway);
   let server = &snap.world.gateways[gateway].spec.server;
   if !state.hub.is_online(server) {
     return Err(ApiError::new(
@@ -1002,16 +1006,15 @@ pub async fn cleanup(state: &AppState) -> Result<(), ApiError> {
       .image
       .as_deref()
       .unwrap_or_else(|| tasks::script_image(script.runtime));
-    let Some(gateway) = snap.world.route_gateway(&route.spec) else {
-      continue;
-    };
-    let Some(gateway) = snap.world.gateways.get(gateway) else {
-      continue;
-    };
-    let (domains, runners) =
-      wanted.entry(&gateway.spec.server).or_default();
-    domains.insert(config::hash(host)[..32].into());
-    runners.insert(sso_runner_name(script.runtime, image));
+    for gateway in snap.world.route_gateways(&route.spec) {
+      let Some(gateway) = snap.world.gateways.get(gateway) else {
+        continue;
+      };
+      let (domains, runners) =
+        wanted.entry(&gateway.spec.server).or_default();
+      domains.insert(config::hash(host)[..32].into());
+      runners.insert(sso_runner_name(script.runtime, image));
+    }
   }
   let cancel = CancellationToken::new();
   for server in snap.world.servers.keys() {

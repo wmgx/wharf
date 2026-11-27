@@ -1103,6 +1103,12 @@ export type Extract = {
   name: string;
 };
 
+export interface FailoverPendingView {
+  attempts: number;
+  last_error?: string | null;
+  target_backup: boolean;
+}
+
 /**
  * 配置里改动的一个字段。
  */
@@ -1275,6 +1281,7 @@ export interface GatewaySpec {
 export type GatewayTls = "auto" | "internal" | "off";
 
 export interface GatewayView {
+  gate_core?: string | null;
   live?: LiveState | null;
   name: string;
   /**
@@ -2236,6 +2243,7 @@ export interface RouteSpec {
    * DNS 自动切到它，主网关恢复后切回。caddy 备用入口在切过去后才申请证书。
    */
   backup_gateway?: string | null;
+  dns_ttl?: number | null;
   /**
    * 拦截常见扫描：请求命中扫描路径或扫描器的 UA 时直接返回 404，不转给服务。只支持 caddy 网关。
    */
@@ -2306,6 +2314,7 @@ export interface RouteSpec {
 
 export interface RouteView {
   core?: boolean;
+  failover_pending?: FailoverPendingView | null;
   /**
    * 实际使用的网关（spec 里没填时是默认网关）。
    */

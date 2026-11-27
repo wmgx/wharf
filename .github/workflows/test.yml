@@ -37,6 +37,18 @@ jobs:
           name: types-gen
           path: /tmp/types.gen.ts
 
+  caddy-sso:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: deploy/caddy/sso/go.mod
+          cache-dependency-path: deploy/caddy/sso/go.sum
+      - run: go test ./...
+        working-directory: deploy/caddy/sso
+
   web:
     runs-on: ubuntu-latest
     timeout-minutes: 15
