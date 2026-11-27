@@ -396,8 +396,21 @@ fn valid_id(id: &str) -> bool {
   id.len() == 32 && id.bytes().all(|c| c.is_ascii_hexdigit())
 }
 
+fn cloudflare_subject(name: &str) -> String {
+  format!("Cloudflare {name}")
+}
+
+pub(crate) async fn forget_cloudflare(s: &AppState, name: &str) {
+  rules::lifecycle::clear(
+    s,
+    "vendor_token_invalid",
+    &cloudflare_subject(name),
+  )
+  .await;
+}
+
 async fn cloudflare(account: &AccountRow) -> Vec<DoctorCheck> {
-  let name = &format!("Cloudflare {}", account.name);
+  let name = &cloudflare_subject(&account.name);
   let Ok(http) = Http::new(Duration::from_secs(10)) else {
     return vec![item(
       "令牌",
@@ -608,7 +621,9 @@ pub async fn record(s: &AppState, checks: &[DoctorCheck]) {
     }
     if name != "Tailscale OAuth"
       && !snap.accounts.iter().any(|account| {
-        account.name == name && account.kind == "cloudflare"
+        account.kind == "cloudflare"
+          && name.strip_prefix("Cloudflare ")
+            == Some(account.name.as_str())
       })
     {
       continue;

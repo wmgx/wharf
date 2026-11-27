@@ -272,7 +272,7 @@ async fn start_with_guard(
       execute(&state, &name, &spec, input).await;
     finish(&state, id, status, code, &output, mem_peak).await;
     drop(guard);
-    notify_result(&state, &name, status, &output).await;
+    notify_result(&state, &name, id, status, &output).await;
   });
   Ok((id, false))
 }
@@ -281,6 +281,7 @@ async fn start_with_guard(
 pub(crate) async fn notify_result(
   state: &AppState,
   name: &str,
+  run_id: i64,
   status: TaskStatus,
   output: &str,
 ) {
@@ -290,8 +291,9 @@ pub(crate) async fn notify_result(
     let server = c.query_row(
       "SELECT json_extract(spec, '$.server') FROM tasks WHERE name = ?1
         AND COALESCE(json_extract(spec, '$.enabled'), 1) = 1
-        AND COALESCE(json_extract(spec, '$.notify'), 1) = 1",
-      [&task], |r| r.get::<_, String>(0),
+        AND COALESCE(json_extract(spec, '$.notify'), 1) = 1
+        AND EXISTS (SELECT 1 FROM task_runs WHERE id = ?2 AND task = ?1)",
+      params![task, run_id], |r| r.get::<_, String>(0),
     ).optional().map_err(sql_err)?;
     if server.is_some() && crate::notify::transition_row(c, &task_notice_key(&task), ok)? {
       Ok(server)
@@ -567,7 +569,7 @@ pub(crate) async fn record_ping(
   status: TaskStatus,
   trigger: &str,
   output: &str,
-) -> Result<bool, ApiError> {
+) -> Result<Option<i64>, ApiError> {
   let (name, token, trigger, output) = (
     name.to_string(),
     token.to_string(),
@@ -586,14 +588,15 @@ pub(crate) async fn record_ping(
          AND COALESCE(json_extract(spec, '$.enabled'), 1) = 1",
       params![name, token, status, trigger, at, output],
     ).map_err(sql_err)? == 0 {
-      return Ok(false);
+      return Ok(None);
     }
+    let id = tx.last_insert_rowid();
     tx.execute(
       "DELETE FROM task_runs WHERE task = ?1 AND id <= ?2 - ?3",
-      params![name, tx.last_insert_rowid(), KEEP_RUNS],
+      params![name, id, KEEP_RUNS],
     ).map_err(sql_err)?;
     tx.commit().map_err(sql_err)?;
-    Ok(true)
+    Ok(Some(id))
   }).await
 }
 

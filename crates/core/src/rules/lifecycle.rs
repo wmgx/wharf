@@ -31,26 +31,30 @@ pub(crate) async fn clear_matching(
       let tx = c.transaction().map_err(db::sql_err)?;
       clear_rows(&tx, &remove)?;
       tx.commit().map_err(db::sql_err)?;
-      with(|m| {
-        m.firing.retain(|(rule, subject), _| !remove(rule, subject));
-        m.acks.retain(|(rule, subject), _| !remove(rule, subject));
-        m.series.retain(|(metric, subject), _| {
-          !RULES
-            .iter()
-            .any(|r| r.metric == metric && remove(r.id, subject))
-            && !m.custom_rules.values().any(|r| {
-              r.service == *subject
-                && r.metric == *metric
-                && remove(&r.name, subject)
-            })
-        });
-      });
+      clear_cache(&remove);
       Ok(())
     })
     .await;
   if let Err(e) = result {
     tracing::warn!("清理告警状态失败：{}", e.message);
   }
+}
+
+fn clear_cache(remove: &impl Fn(&str, &str) -> bool) {
+  with(|m| {
+    m.firing.retain(|(rule, subject), _| !remove(rule, subject));
+    m.acks.retain(|(rule, subject), _| !remove(rule, subject));
+    m.series.retain(|(metric, subject), _| {
+      !RULES
+        .iter()
+        .any(|r| r.metric == metric && remove(r.id, subject))
+        && !m.custom_rules.values().any(|r| {
+          r.service == *subject
+            && r.metric == *metric
+            && remove(&r.name, subject)
+        })
+    });
+  });
 }
 
 pub(super) fn clear_rows(
@@ -229,42 +233,62 @@ impl Changes {
     changes
   }
 
-  pub(crate) async fn clear(self, state: &AppState) {
-    if self.services.is_empty()
+  fn is_empty(&self) -> bool {
+    self.services.is_empty()
       && self.limits.is_empty()
       && self.monitors.is_empty()
       && self.heartbeats.is_empty()
       && self.routes.is_empty()
       && self.servers.is_empty()
-    {
+  }
+
+  fn matches(&self, rule: &str, subject: &str) -> bool {
+    service_of_subject(rule, subject)
+      .is_some_and(|svc| self.services.contains(svc))
+      || (rule == "svc_mem_near_limit"
+        && self.limits.contains(subject))
+      || (rule == "monitor_failed" && self.monitors.contains(subject))
+      || (rule == "heartbeat_late"
+        && self.heartbeats.contains(subject))
+      || (matches!(rule, "domain_down" | "cert_expiring")
+        && self.routes.contains(subject))
+      || self
+        .servers
+        .iter()
+        .any(|name| server_alert(rule, subject, name))
+  }
+
+  pub(crate) fn clear_storage(
+    &self,
+    c: &Connection,
+  ) -> Result<(), ApiError> {
+    if self.is_empty() {
+      return Ok(());
+    }
+    let custom = super::custom::load_from_db(c)?;
+    clear_rows(c, &|rule, subject| {
+      self.matches(rule, subject)
+        || custom
+          .get(rule)
+          .is_some_and(|r| self.services.contains(&r.service))
+    })
+  }
+
+  pub(crate) fn clear_after_commit(&self) {
+    if self.is_empty() {
       return;
     }
     crate::probe::forget(&self.routes);
     crate::monitor::forget(&self.services, &self.monitors);
-    let custom_services = with(|m| {
+    let custom = with(|m| {
       m.custom_rules
         .iter()
         .filter(|(_, r)| self.services.contains(&r.service))
         .map(|(name, _)| name.clone())
         .collect::<BTreeSet<_>>()
     });
-    clear_matching(state, move |rule, subject| {
-      service_of_subject(rule, subject)
-        .is_some_and(|svc| self.services.contains(svc))
-        || custom_services.contains(rule)
-        || (rule == "svc_mem_near_limit"
-          && self.limits.contains(subject))
-        || (rule == "monitor_failed"
-          && self.monitors.contains(subject))
-        || (rule == "heartbeat_late"
-          && self.heartbeats.contains(subject))
-        || (matches!(rule, "domain_down" | "cert_expiring")
-          && self.routes.contains(subject))
-        || self
-          .servers
-          .iter()
-          .any(|name| server_alert(rule, subject, name))
-    })
-    .await;
+    clear_cache(&|rule, subject| {
+      self.matches(rule, subject) || custom.contains(rule)
+    });
   }
 }

@@ -12,14 +12,15 @@ pub(crate) struct Windows(BTreeMap<String, BTreeMap<u64, Window>>);
 
 #[derive(Default)]
 struct Window {
-  until: Option<i64>,
+  cooldown: Option<(i64, bool)>,
   healthy: BTreeSet<(String, String)>,
 }
 
 impl Windows {
   fn expire(&mut self, now: i64) {
     self.0.retain(|_, windows| {
-      windows.retain(|_, w| w.until.is_none_or(|end| end > now));
+      windows
+        .retain(|_, w| w.cooldown.is_none_or(|(end, _)| end > now));
       !windows.is_empty()
     });
   }
@@ -39,35 +40,36 @@ impl Windows {
     let duration = if success { SUCCESS_MS } else { FAILURE_MS };
     for windows in self.0.values_mut() {
       if let Some(w) = windows.get_mut(&id)
-        && w.until.is_none()
+        && w.cooldown.is_none()
       {
-        w.until = Some(now + duration);
+        w.cooldown = Some((now + duration, success));
       }
     }
   }
 
   pub(crate) fn suppress(
     &mut self,
-    services: &[&str],
+    service: &str,
     rule: &str,
     subject: &str,
     healthy: bool,
     now: i64,
   ) -> bool {
     self.expire(now);
+    let Some(windows) = self.0.get_mut(service) else {
+      return false;
+    };
     let key = (rule.into(), subject.into());
-    let mut held = false;
-    for service in services {
-      if let Some(windows) = self.0.get_mut(*service) {
-        for w in windows.values_mut() {
-          if healthy && w.until.is_some() {
-            w.healthy.insert(key.clone());
-          }
-          held |= !w.healthy.contains(&key);
-        }
+    if healthy {
+      for w in windows
+        .values_mut()
+        .filter(|w| w.cooldown.is_some_and(|(_, success)| success))
+      {
+        w.healthy.insert(key.clone());
       }
+      return false;
     }
-    held && !healthy
+    windows.values().any(|w| !w.healthy.contains(&key))
   }
 }
 
@@ -119,13 +121,9 @@ pub(super) async fn skip_sample(
   if rule.id != "domain_down" {
     return service_overrides::service_of_subject(rule.id, subject)
       .is_some_and(|service| {
-        state.locks.suppress_alert(
-          &[service],
-          rule.id,
-          subject,
-          healthy,
-          now,
-        )
+        state
+          .locks
+          .suppress_alert(service, rule.id, subject, healthy, now)
       });
   }
   let Some(world) = suppress::load_world(state).await else {
@@ -139,7 +137,7 @@ pub(super) async fn skip_sample(
     return false;
   }
   state.locks.suppress_alert(
-    &[&route.spec.service],
+    &route.spec.service,
     rule.id,
     subject,
     healthy,
@@ -163,28 +161,22 @@ mod tests {
     let mut w = Windows::default();
     w.start(1, "s1", 0);
     let sample = |w: &mut Windows, healthy, now| {
-      w.suppress(&["s1"], "port_down", "s1:web", healthy, now)
+      w.suppress("s1", "port_down", "s1:web", healthy, now)
     };
     assert!(sample(&mut w, false, 100_000));
-    assert!(!w.suppress(
-      &["s2"],
-      "port_down",
-      "s2:web",
-      false,
-      100_000
-    ));
+    assert!(!w.suppress("s2", "port_down", "s2:web", false, 100_000));
     w.finish(1, true, 100_000);
     assert!(!sample(&mut w, true, 100_010));
     assert!(!sample(&mut w, false, 100_020));
     assert!(w.suppress(
-      &["s1"],
+      "s1",
       "domain_down",
       "s1.example",
       false,
       189_999
     ));
     assert!(!w.suppress(
-      &["s1"],
+      "s1",
       "domain_down",
       "s1.example",
       false,
@@ -192,6 +184,7 @@ mod tests {
     ));
     w.start(2, "s1", 200_000);
     w.finish(2, false, 200_001);
+    assert!(!sample(&mut w, true, 214_999));
     assert!(sample(&mut w, false, 215_000));
     assert!(!sample(&mut w, false, 215_001));
   }

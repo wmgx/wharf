@@ -665,9 +665,18 @@ async fn stopping_service_clears_alert_state_and_keeps_history() {
     c.execute("INSERT INTO alert_acks (rule, subject, by_actor, at) VALUES ('cert_expiring', 'app.example.com', 'fixture', 10)", []).map_err(db::sql_err)?;
     db::set_setting(c, "notify.state.restart.web", Some("fail"))
   }).await.unwrap();
-  lifecycle::Changes::between(&before, &after)
-    .clear(&state)
-    .await;
+  let changes = lifecycle::Changes::between(&before, &after);
+  state
+    .db
+    .call(move |c| {
+      let tx = c.transaction().map_err(db::sql_err)?;
+      changes.clear_storage(&tx)?;
+      tx.commit().map_err(db::sql_err)?;
+      changes.clear_after_commit();
+      Ok(())
+    })
+    .await
+    .unwrap();
 
   reset_memory();
   ensure_loaded(&state).await;
