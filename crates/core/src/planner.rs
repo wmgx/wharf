@@ -2703,16 +2703,33 @@ fn gateway_items(
       && snap.tunnels.get(name).is_none_or(|t| {
         Some(t.account.as_str()) != gw.spec.account.as_deref()
       });
+    let pending_tunnel = snap
+      .pending
+      .tunnel_deletes
+      .iter()
+      .any(|p| p.gateway == *name);
+    let tunnel_not_ready = gw.spec.kind
+      == GatewayKind::CloudflareTunnel
+      && pending_tunnel
+      && snap
+        .tunnels
+        .get(name)
+        .is_some_and(|t| t.config_hash.is_empty());
     let decision = match status.get(server).and_then(|s| s.as_ref()) {
-      _ if tunnel_mismatch => Some((
+      _ if tunnel_mismatch || tunnel_not_ready => Some((
         Action::Update,
         vec![Impact::Restart],
         "在当前厂商账号下创建隧道并部署连接器".into(),
       )),
       // 查不到现状时，只有配置变了才计划（服务器离线已经单独提醒过）。
       None => {
-        let same = current.gateways.get(name)
-          == desired.gateways.get(name)
+        let migrating = snap
+          .pending
+          .gateway_downs
+          .iter()
+          .any(|p| p.gateway == *name && p.server != *server);
+        let same = !migrating
+          && current.gateways.get(name) == desired.gateways.get(name)
           && gateway_sites_same(
             current, before_net, desired, net, name,
           );
@@ -4193,8 +4210,28 @@ mod tests {
         keep_tunnel: true,
       },
     );
+    snap.pending.tunnel_deletes.push(
+      crate::pending::TunnelDeletePayload {
+        gateway: "edge".into(),
+        account: "cf1".into(),
+        scope: "scope".into(),
+        tunnel_id: "old".into(),
+      },
+    );
+    let tunnel = snap.tunnels.get_mut("edge").unwrap();
+    tunnel.account = "cf2".into();
+    tunnel.tunnel_id = "new".into();
+    tunnel.config_hash.clear();
     let mut b = Builder::default();
-    gateway_cleanup_items(&mut b, &snap, &desired, &desired, &status);
+    gateway_items(
+      &mut b,
+      &snap,
+      (&desired, &net),
+      (&desired, &net),
+      &status,
+      &crate::hub::Hub::default(),
+    )
+    .unwrap();
     assert!(b.steps.iter().any(|s| matches!(
       s.step,
       Step::GatewayDown {
@@ -4202,6 +4239,8 @@ mod tests {
         ..
       }
     )));
+    assert!(b.steps.iter().any(|s| matches!(&s.step, Step::GatewaySync { gateway, .. } if gateway == "edge")));
+    assert!(b.steps.iter().any(|s| matches!(&s.step, Step::TunnelDelete { tunnel_id, .. } if tunnel_id == "old")));
   }
 
   #[test]

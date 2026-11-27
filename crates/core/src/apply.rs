@@ -1798,13 +1798,32 @@ pub(crate) async fn run_step(
       scope,
       tunnel_id,
     } => {
-      if snap.tunnels.get(gateway).is_some_and(|t| {
-        t.account == *account && t.tunnel_id == *tunnel_id
+      if snap.tunnels.values().any(|t| {
+        t.account == *account
+          && t.scope == *scope
+          && t.tunnel_id == *tunnel_id
       }) {
         return Err(ApiError::new(
           ErrorCode::PlanStale,
           "旧隧道仍在使用，先重新规划",
         ));
+      }
+      if world
+        .gateways
+        .get(gateway)
+        .is_some_and(|g| g.spec.kind == GatewayKind::CloudflareTunnel)
+        && snap
+          .tunnels
+          .get(gateway)
+          .is_none_or(|t| t.config_hash.is_empty())
+      {
+        return Err(
+          ApiError::new(
+            ErrorCode::PlanStale,
+            "新隧道尚未就绪，暂缓删除旧隧道",
+          )
+          .suggest("wharf plan"),
+        );
       }
       crate::tunnel::destroy_ref(
         &snap, account, scope, tunnel_id, cancel,
@@ -1852,13 +1871,21 @@ pub(crate) async fn run_step(
       let owner = Owner { id: owner_id };
       let spec = match &spec.tunnel {
         Some(gateway) => {
-          let t = snap.tunnels.get(gateway).ok_or_else(|| {
-            ApiError::new(
-              ErrorCode::PlanStale,
-              format!("网关 {gateway} 的隧道还没有创建"),
-            )
-            .suggest("wharf plan")
-          })?;
+          let t = snap
+            .tunnels
+            .get(gateway)
+            .filter(|t| {
+              world.gateways.get(gateway).is_some_and(|g| {
+                g.spec.account.as_deref() == Some(t.account.as_str())
+              })
+            })
+            .ok_or_else(|| {
+              ApiError::new(
+                ErrorCode::PlanStale,
+                format!("网关 {gateway} 的隧道还没有创建"),
+              )
+              .suggest("wharf plan")
+            })?;
           crate::planner::DnsSpec {
             content: crate::planner::tunnel_target(&t.tunnel_id),
             ..spec.clone()
