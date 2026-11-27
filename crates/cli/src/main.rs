@@ -1096,7 +1096,7 @@ pub enum ServiceCmd {
     #[arg(long)]
     unset_volume: Vec<String>,
     #[command(flatten)]
-    build: BuildArgs,
+    build: Box<BuildArgs>,
     #[command(flatten)]
     apply: ApplyFlags,
   },

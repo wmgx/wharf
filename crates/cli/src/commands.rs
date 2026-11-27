@@ -315,11 +315,11 @@ async fn dispatch(
         health_path: None,
         volume: vec![],
         unset_volume: vec![],
-        build: BuildArgs {
+        build: Box::new(BuildArgs {
           dir: Some(dir),
           opts: build,
           ..Default::default()
-        },
+        }),
         apply,
       };
       service(c, cmd, j).await
