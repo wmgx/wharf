@@ -76,17 +76,24 @@ impl Outbound {
         self.streak = 0;
         return Some(msg);
       }
-      if self.ctrl.is_closed()
-        && self.progress.is_closed()
+      let ctrl_done = self.ctrl.is_closed() && self.ctrl.is_empty();
+      let logs_done =
+        self.progress.is_closed() && self.progress.is_empty();
+      if ctrl_done
+        && logs_done
         && self.data.state.lock().unwrap().slots.is_empty()
       {
         return None;
       }
       tokio::select! {
         biased;
-        Some(msg) = self.ctrl.recv() => return Some(msg),
-        Some(log) = self.progress.recv() => {
-          if let Some(msg) = log.message() {
+        msg = self.ctrl.recv(), if !ctrl_done => {
+          if msg.is_some() {
+            return msg;
+          }
+        },
+        log = self.progress.recv(), if !logs_done => {
+          if let Some(msg) = log.and_then(Log::message) {
             self.streak = self.streak.saturating_add(1);
             return Some(msg);
           }
@@ -384,7 +391,11 @@ mod tests {
     drop(ctrl);
     drop(stream);
     let finish = tokio::spawn(async move { log.finish().await });
-    while out.recv().await.is_some() {}
+    tokio::time::timeout(Duration::from_secs(1), async {
+      while out.recv().await.is_some() {}
+    })
+    .await
+    .expect("所有发送端关闭后写任务应退出");
     finish.await.unwrap();
   }
 }
