@@ -62,7 +62,6 @@ try:
 except FileNotFoundError:
     conf = {}
 before = json.dumps(conf, sort_keys=True)
-had_live_restore = conf.get('live-restore') is True
 conf['live-restore'] = True
 if proxy:
     conf['proxies'] = {'http-proxy': proxy, 'https-proxy': proxy, 'no-proxy': no_proxy}
@@ -82,21 +81,29 @@ if check.returncode != 0:
     print('invalid ' + (check.stderr or check.stdout).strip())
     sys.exit(0)
 os.replace(tmp, path)
-print('changed' if had_live_restore else 'changed-live-restore')
+print('changed')
 PY
 ) || exit 4
 echo "$result"
-case "$result" in
-  unchanged) exit 0 ;;
-  invalid*) exit 5 ;;
-  changed-live-restore) kill -HUP "$(pidof dockerd)"; sleep 2 ;;
-esac
-systemctl reset-failed wharf-docker-restart >/dev/null 2>&1
-systemd-run --unit=wharf-docker-restart --on-active=3 systemctl restart docker >/dev/null
+case "$result" in invalid*) exit 5 ;; esac
 "#;
 
 const CHECK: &str =
   r#"docker info -f '{{.HTTPSProxy}}|{{.LiveRestoreEnabled}}'"#;
+
+const RESTART: &str = r#"
+live_restore() { docker info -f '{{.LiveRestoreEnabled}}' 2>/dev/null; }
+if [ "$(live_restore)" != true ]; then
+  systemctl kill --kill-who=main --signal=HUP docker || exit 6
+  for attempt in 1 2 3 4 5; do
+    [ "$(live_restore)" = true ] && break
+    sleep 1
+  done
+  [ "$(live_restore)" = true ] || { echo "dockerd 未启用 live-restore，已取消重启"; exit 6; }
+fi
+systemctl reset-failed wharf-docker-restart >/dev/null 2>&1
+systemd-run --unit=wharf-docker-restart --on-active=3 systemctl restart docker >/dev/null
+"#;
 
 async fn exec(
   state: &AppState,
@@ -145,15 +152,27 @@ pub async fn apply(
         ErrorCode::AgentFailed,
         format!("改 {server} 的 dockerd 配置失败：{out}"),
       )
-      .with_hint("daemon.json 没有改动；修好后用 --pull-proxy \"\" 清掉再重新设置"),
+      .with_hint("daemon.json 没有改动；排查后可运行 wharf plan --apply 或 wharf run retry <run_id> 重试"),
     );
   }
-  if out.ends_with("unchanged") {
-    progress("dockerd 配置已经是这样，不用改".into());
-    return Ok(());
-  }
-  progress("已写入 daemon.json，重启 dockerd（容器不停）".into());
   let want = format!("{proxy}|true");
+  if out.ends_with("unchanged") {
+    let (code, active) =
+      exec(state, server, CHECK.to_string(), cancel).await?;
+    if code == 0 && active.trim() == want {
+      progress("dockerd 配置已经是这样，不用改".into());
+      return Ok(());
+    }
+  }
+  let (code, out) =
+    exec(state, server, RESTART.into(), cancel).await?;
+  if code != 0 {
+    return Err(ApiError::new(
+      ErrorCode::AgentFailed,
+      format!("安排重启 {server} 的 dockerd 失败：{out}"),
+    ));
+  }
+  progress("重启 dockerd 应用 daemon.json（容器不停）".into());
   let deadline =
     tokio::time::Instant::now() + Duration::from_secs(READY_SECS);
   tokio::time::sleep(Duration::from_secs(8)).await;
@@ -191,6 +210,28 @@ pub async fn apply(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn restart_reloads_live_restore_and_resets_failed_unit() {
+    let fake = r#"
+loaded=false
+reset=false
+docker() { echo "$loaded"; }
+systemctl() {
+  case "$*" in
+    'kill --kill-who=main --signal=HUP docker') loaded=true ;;
+    'reset-failed wharf-docker-restart') reset=true ;;
+    *) exit 8 ;;
+  esac
+}
+systemd-run() { [ "$loaded:$reset" = true:true ]; }
+"#;
+    let outcome = std::process::Command::new("bash")
+      .args(["-c", &format!("{fake}\n{RESTART}")])
+      .output()
+      .unwrap();
+    assert!(outcome.status.success(), "{outcome:?}");
+  }
 
   #[test]
   fn mirrors_go_direct() {

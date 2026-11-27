@@ -6,6 +6,7 @@
 
 use std::{
   net::{IpAddr, SocketAddr},
+  os::unix::fs::DirBuilderExt,
   path::{Path, PathBuf},
   time::Duration,
 };
@@ -13,7 +14,7 @@ use std::{
 use serde_json::Value;
 use wharf_api_types::{
   ApiError, ErrorCode,
-  agent::{SYNC_READY, SyncPush, SyncServe},
+  agent::{SYNC_BACKUP, SYNC_READY, SyncPass, SyncPush, SyncServe},
   validate_name,
 };
 
@@ -53,6 +54,42 @@ impl Drop for TempDir {
   }
 }
 
+fn preserve_nonempty_target(
+  root: &Path,
+  service: &str,
+  stamp: &str,
+) -> Result<Option<PathBuf>, ApiError> {
+  let path = root.join(service);
+  if std::fs::read_dir(&path)
+    .map_err(io_err(&path))?
+    .next()
+    .transpose()
+    .map_err(io_err(&path))?
+    .is_none()
+  {
+    return Ok(None);
+  }
+  let archive = root.join(".wharf-migrate");
+  match std::fs::DirBuilder::new().mode(0o700).create(&archive) {
+    Ok(()) => {}
+    Err(e)
+      if e.kind() == std::io::ErrorKind::AlreadyExists
+        && std::fs::symlink_metadata(&archive)
+          .is_ok_and(|m| m.is_dir()) => {}
+    Err(e) => return Err(io_err(&archive)(e)),
+  }
+  let backup = archive.join(format!("{service}-before-{stamp}"));
+  if std::fs::symlink_metadata(&backup).is_ok() {
+    return Err(ApiError::new(
+      ErrorCode::Conflict,
+      "迁移保留目录已存在，稍后重试",
+    ));
+  }
+  std::fs::rename(&path, &backup).map_err(io_err(&path))?;
+  std::fs::create_dir(&path).map_err(io_err(&path))?;
+  Ok(Some(backup))
+}
+
 pub async fn serve(
   s: &SyncServe,
   ctx: &Ctx,
@@ -64,6 +101,16 @@ pub async fn serve(
     Path::new("/srv"),
     Path::new(&s.service),
   )?;
+
+  if s.preserve_existing
+    && let Some(path) = preserve_nonempty_target(
+      Path::new("/srv"),
+      &s.service,
+      &chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string(),
+    )?
+  {
+    ctx.say(format!("{SYNC_BACKUP}{}", path.display()));
+  }
 
   // 先占一个空闲端口再交给 rsync。中间有极短的空窗，冲突时 rsync 会直接报错。
   let port = std::net::TcpListener::bind((bind, 0))
@@ -88,24 +135,7 @@ pub async fn serve(
   let conf = tmp.0.join("rsyncd.conf");
   write_private(
     &conf,
-    &format!(
-      "use chroot = no\n\
-       max connections = 4\n\
-       log file = {log}\n\
-       [{MODULE}]\n\
-       path = {root}\n\
-       read only = no\n\
-       uid = 0\n\
-       gid = 0\n\
-       auth users = {USER}\n\
-       secrets file = {secrets}\n\
-       strict modes = yes\n\
-       hosts allow = {allow}\n\
-       hosts deny = *\n",
-      log = tmp.0.join("rsyncd.log").display(),
-      root = root.display(),
-      secrets = secrets.display(),
-    ),
+    &rsyncd_config(&root, &tmp.0.join("rsyncd.log"), &secrets, allow),
   )?;
 
   let daemon = Cmd::new("rsync")
@@ -114,7 +144,11 @@ pub async fn serve(
     .arg(format!("--port={port}"))
     .arg(format!("--config={}", conf.display()))
     .timeout(SERVE_TIMEOUT);
-  let run_ctx = ctx.clone();
+  let daemon_cancel = ctx.cancel.child_token();
+  let run_ctx = Ctx {
+    cancel: daemon_cancel.clone(),
+    progress: ctx.progress.clone(),
+  };
   let mut task =
     tokio::spawn(async move { daemon.run(&run_ctx).await });
 
@@ -122,12 +156,34 @@ pub async fn serve(
   let addr = SocketAddr::new(bind, port);
   let deadline = tokio::time::Instant::now() + READY_TIMEOUT;
   loop {
-    if tokio::net::TcpStream::connect(addr).await.is_ok() {
+    if tokio::time::timeout(
+      Duration::from_millis(200),
+      tokio::net::TcpStream::connect(addr),
+    )
+    .await
+    .is_ok_and(|result| result.is_ok())
+    {
       break;
     }
-    if task.is_finished() || tokio::time::Instant::now() > deadline {
-      task.abort();
-      let detail = match task.await {
+    if task.is_finished()
+      || tokio::time::Instant::now() > deadline
+      || ctx.cancel.is_cancelled()
+    {
+      daemon_cancel.cancel();
+      let result =
+        match tokio::time::timeout(Duration::from_secs(5), &mut task)
+          .await
+        {
+          Ok(result) => result,
+          Err(_) => {
+            task.abort();
+            task.await
+          }
+        };
+      if ctx.cancel.is_cancelled() {
+        return Err(ApiError::new(ErrorCode::Cancelled, "已取消"));
+      }
+      let detail = match result {
         Ok(Ok(out)) => crate::exec::tail_lines(&out.stderr, 5),
         Ok(Err(e)) => e.message,
         Err(_) => "启动超时".into(),
@@ -167,8 +223,15 @@ pub async fn push(
     &p.service,
   ) {
     Err(e) if e.code == ErrorCode::NotFound => {
-      ctx.say(format!("{} 不存在，没有数据要迁移", root.display()));
-      return Ok(serde_json::json!({ "synced": false }));
+      return Err(
+        ApiError::not_found(format!(
+          "源服务器上的数据目录 {} 不存在，中止迁移",
+          root.display()
+        ))
+        .with_hint(
+          "检查源机 /srv 目录是否被改名或卸载；确认后再重试",
+        ),
+      );
     }
     Err(e) => return Err(e),
     Ok(_) => {}
@@ -182,15 +245,7 @@ pub async fn push(
   let mut attempt = 1;
   loop {
     let result = Cmd::new("rsync")
-      .args([
-        "-a",
-        "--numeric-ids",
-        "--delete",
-        "--stats",
-        "--human-readable",
-        "--contimeout=15",
-        "--timeout=300",
-      ])
+      .args(rsync_args(p.pass))
       .arg(format!("{}/", root.display()))
       .arg(format!("rsync://{USER}@{host}:{}/{MODULE}/", p.port))
       // 口令走环境变量，不出现在命令行里。
@@ -198,15 +253,21 @@ pub async fn push(
       .timeout(PUSH_TIMEOUT)
       .stream(true)
       .run(ctx)
-      .await?
-      .check("rsync");
-    match result {
-      Ok(_) => return Ok(serde_json::json!({ "synced": true })),
-      Err(e) if attempt < PUSH_ATTEMPTS => {
+      .await?;
+    let code = result.code;
+    match classify_rsync_exit(code, p.pass) {
+      RsyncOutcome::Ok => {
+        return Ok(serde_json::json!({ "synced": true }));
+      }
+      RsyncOutcome::VanishedOk => {
+        ctx.say("热同步期间部分源文件消失（退出码 24），将在停机后的第二遍同步补齐");
+        return Ok(serde_json::json!({ "synced": true }));
+      }
+      RsyncOutcome::Retryable if attempt < PUSH_ATTEMPTS => {
         ctx.say(format!(
           "第 {attempt} 次同步失败，{}秒后重试：{}",
           RETRY_DELAY.as_secs(),
-          e.message
+          rsync_error(result).message
         ));
         tokio::select! {
           _ = tokio::time::sleep(RETRY_DELAY) => {}
@@ -216,14 +277,169 @@ pub async fn push(
         }
         attempt += 1;
       }
-      Err(e) => return Err(e),
+      _ => return Err(rsync_error(result)),
     }
   }
+}
+
+fn rsyncd_config(
+  root: &Path,
+  log: &Path,
+  secrets: &Path,
+  allow: IpAddr,
+) -> String {
+  format!(
+    "use chroot = no\n\
+       munge symlinks = no\n\
+       max connections = 4\n\
+       log file = {log}\n\
+       [{MODULE}]\n\
+       path = {root}\n\
+       read only = no\n\
+       uid = 0\n\
+       gid = 0\n\
+       auth users = {USER}\n\
+       secrets file = {secrets}\n\
+       strict modes = yes\n\
+       hosts allow = {allow}\n\
+       hosts deny = *\n",
+    log = log.display(),
+    root = root.display(),
+    secrets = secrets.display(),
+  )
+}
+
+fn rsync_args(pass: SyncPass) -> Vec<&'static str> {
+  let mut args = vec!["-aH", "--numeric-ids"];
+  if pass == SyncPass::Final {
+    args.extend(["--delete", "--checksum"]);
+  }
+  args.extend([
+    "--stats",
+    "--human-readable",
+    "--contimeout=15",
+    "--timeout=300",
+  ]);
+  args
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum RsyncOutcome {
+  Ok,
+  VanishedOk,
+  Retryable,
+  Fatal,
+}
+
+fn classify_rsync_exit(
+  code: Option<i32>,
+  pass: SyncPass,
+) -> RsyncOutcome {
+  match code {
+    Some(0) => RsyncOutcome::Ok,
+    Some(24) if pass == SyncPass::Live => RsyncOutcome::VanishedOk,
+    Some(10 | 12 | 30 | 35) => RsyncOutcome::Retryable,
+    _ => RsyncOutcome::Fatal,
+  }
+}
+
+fn rsync_error(result: crate::exec::Output) -> ApiError {
+  let reason = match result.code {
+    Some(5) => "认证或协议错误",
+    Some(11) => "读写失败，请检查磁盘空间",
+    Some(24) => "停机后仍有文件变动，请检查占用进程",
+    _ => "同步失败",
+  };
+  let label = format!("rsync（退出码 {:?}，{reason}）", result.code);
+  result.check(&label).expect_err("rsync 没有成功退出")
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn rsync_args_live_omits_delete_and_final_enables_checksum_and_hardlinks()
+   {
+    let live = rsync_args(SyncPass::Live);
+    let final_pass = rsync_args(SyncPass::Final);
+    assert!(live.contains(&"-aH"));
+    assert!(final_pass.contains(&"-aH"));
+    for arg in ["--delete", "--checksum"] {
+      assert!(!live.contains(&arg));
+      assert!(final_pass.contains(&arg));
+    }
+  }
+
+  #[test]
+  fn preserve_nonempty_target_renames_existing_dir_without_loss() {
+    let tmp = tempfile::tempdir().unwrap();
+    let photos = tmp.path().join("photos");
+    std::fs::create_dir(&photos).unwrap();
+    std::fs::write(photos.join("old.jpg"), "old").unwrap();
+    let backup =
+      preserve_nonempty_target(tmp.path(), "photos", "test")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+      std::fs::read_to_string(backup.join("old.jpg")).unwrap(),
+      "old"
+    );
+    assert!(
+      preserve_nonempty_target(tmp.path(), "photos", "test")
+        .unwrap()
+        .is_none()
+    );
+  }
+
+  #[test]
+  fn rsyncd_conf_disables_munge_symlinks_and_exit_24_only_ok_in_live()
+  {
+    let p = Path::new("/srv/notes");
+    assert!(
+      rsyncd_config(p, p, p, "100.64.0.1".parse().unwrap())
+        .contains("munge symlinks = no\n")
+    );
+    assert_eq!(
+      classify_rsync_exit(Some(24), SyncPass::Live),
+      RsyncOutcome::VanishedOk
+    );
+    assert_eq!(
+      classify_rsync_exit(Some(24), SyncPass::Final),
+      RsyncOutcome::Fatal
+    );
+  }
+
+  #[test]
+  fn classify_rsync_exit_retries_only_transient_network_codes() {
+    for code in [5, 11, 23] {
+      assert_eq!(
+        classify_rsync_exit(Some(code), SyncPass::Final),
+        RsyncOutcome::Fatal
+      );
+    }
+    for code in [10, 12, 30, 35] {
+      assert_eq!(
+        classify_rsync_exit(Some(code), SyncPass::Final),
+        RsyncOutcome::Retryable
+      );
+    }
+  }
+
+  #[tokio::test]
+  async fn push_returns_not_found_when_source_dir_missing() {
+    let job = SyncPush {
+      service: "wharf-test-missing-70ca".into(),
+      host: "100.64.0.2".into(),
+      port: 1,
+      password: wharf_api_types::agent::OneTimeSecret(String::new()),
+      pass: SyncPass::Live,
+    };
+    assert_eq!(
+      push(&job, &Ctx::detached()).await.unwrap_err().code,
+      ErrorCode::NotFound
+    );
+  }
 
   #[test]
   fn only_service_dirs() {

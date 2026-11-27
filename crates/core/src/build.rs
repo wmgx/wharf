@@ -134,7 +134,11 @@ pub async fn ensure_image(
     .clone()
     .or_else(|| if force { None } else { last.clone() });
   // 镜像名只看构建配置，换了 commit 名字不变，要强制重新构建。
-  let force = force || (row.commit.is_some() && row.commit != last);
+  let force = force
+    || (row.commit.is_some() && row.commit != last)
+    || (build.git.is_some()
+      && pinned.is_some()
+      && !state.hub.supports_safe_migrate(server));
   if let (Some(commit), Some(_)) = (&pinned, &build.git) {
     progress(format!(
       "构建 commit {}",
@@ -159,6 +163,7 @@ pub async fn ensure_image(
     .call(
       server,
       AgentOp::Build(Box::new(BuildJob {
+        expected_commit: build.git.as_ref().and(pinned.clone()),
         service: service.to_string(),
         image: render::build_image(service, build, &row.spec.ports),
         fetch,
@@ -190,6 +195,40 @@ pub async fn ensure_image(
   Ok(result.commit.or(pinned))
 }
 
+pub fn require_not_migrating(
+  snap: &Snapshot,
+  service: &str,
+) -> Result<(), ApiError> {
+  let row = snap
+    .world
+    .services
+    .get(service)
+    .ok_or_else(|| crate::api::service_not_found(service))?;
+  let from = snapshot::service_runtime_server(snap, service)
+    .unwrap_or(&row.spec.server);
+  let to = &row.spec.server;
+  if from != to
+    || snap.pending.migrations.get(service).is_some_and(|m| {
+      m.phase != crate::pending::MigratePhase::UpDone
+    })
+  {
+    return Err(
+      ApiError::new(
+        ErrorCode::Conflict,
+        format!(
+          "服务 {service} 正在从 {from} 迁移到 {to}，不能直接重新构建"
+        ),
+      )
+      .with_hint("先运行 wharf plan 完成迁移，或取消迁移后再重新构建")
+      .suggest("wharf plan")
+      .suggest(format!(
+        "wharf service move {service} --abort --apply"
+      )),
+    );
+  }
+  Ok(())
+}
+
 /// `POST /api/services/{name}/rebuild`：按固定的 commit 重新构建并部署（没固定过的拉最新代码）。
 pub async fn rebuild_now(
   axum::extract::State(s): axum::extract::State<
@@ -200,6 +239,7 @@ pub async fn rebuild_now(
 ) -> crate::api::ApiResult<wharf_api_types::plan::ApplyResponse> {
   auth.require(wharf_api_types::view::Perm::Apply)?;
   let snap = snapshot::load(&s.db).await?;
+  require_not_migrating(&snap, &name)?;
   let row = snap
     .world
     .services
@@ -213,10 +253,11 @@ pub async fn rebuild_now(
     );
   }
   Ok(axum::Json(
-    crate::apply::start_task(
+    crate::apply::start_task_by(
       s.clone(),
       format!("重新构建 {name}"),
       crate::planner::Step::Rebuild { service: name },
+      Some(crate::apply::format_actor(&auth)),
     )
     .await?,
   ))
@@ -245,10 +286,11 @@ pub async fn restart_now(
     );
   }
   Ok(axum::Json(
-    crate::apply::start_task(
+    crate::apply::start_task_by(
       s.clone(),
       format!("重启 {name}"),
       crate::planner::Step::ServiceRestart { service: name },
+      Some(crate::apply::format_actor(&auth)),
     )
     .await?,
   ))

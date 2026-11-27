@@ -350,6 +350,13 @@ pub fn service_view(
     .map(|p| p.containers.clone())
     .unwrap_or_default();
   Some(ServiceView {
+    migration: snap.pending.migrations.get(name).map(|m| {
+      wharf_api_types::view::MigrationView {
+        from: m.payload.from.clone(),
+        to: m.payload.to.clone(),
+        phase: m.phase_name().into(),
+      }
+    }),
     risks: if crate::agent_upgrade::outdated(
       snap
         .agent(&row.spec.server)

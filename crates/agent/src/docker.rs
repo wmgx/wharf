@@ -235,6 +235,98 @@ impl Docker {
     Ok(images)
   }
 
+  pub async fn image_label(
+    &self,
+    image: &str,
+    ctx: &Ctx,
+  ) -> Option<String> {
+    let out = self
+      .cmd()
+      .args([
+        "image",
+        "inspect",
+        "--format",
+        r#"{{index .Config.Labels "wharf.commit"}}"#,
+        image,
+      ])
+      .timeout(Duration::from_secs(15))
+      .run(ctx)
+      .await
+      .ok()?;
+    let label = out.stdout.trim();
+    (out.success && !label.is_empty() && label != "<no value>")
+      .then(|| label.to_string())
+  }
+
+  pub async fn project_mounts(
+    &self,
+    projects: &[String],
+    ctx: &Ctx,
+  ) -> Result<
+    std::collections::BTreeMap<
+      String,
+      Vec<wharf_api_types::agent::ContainerMount>,
+    >,
+    ApiError,
+  > {
+    let mut mounts = std::collections::BTreeMap::new();
+    if projects.is_empty() {
+      return Ok(mounts);
+    }
+    let listed = self
+      .cmd()
+      .args([
+        "ps",
+        "-a",
+        "--no-trunc",
+        "--filter",
+        "label=com.docker.compose.project",
+        "--format",
+        r#"{{.ID}}	{{.Label "com.docker.compose.project"}}"#,
+      ])
+      .timeout(Duration::from_secs(15))
+      .run(ctx)
+      .await?
+      .check("docker ps")?;
+    let ids: Vec<_> = listed
+      .stdout
+      .lines()
+      .filter_map(|line| {
+        let (id, project) = line.split_once('\t')?;
+        projects.iter().any(|p| p == project).then_some(id)
+      })
+      .collect();
+    if ids.is_empty() {
+      return Ok(mounts);
+    }
+    let out = self
+      .cmd()
+      .arg("inspect")
+      .args(ids)
+      .timeout(Duration::from_secs(15))
+      .run(ctx)
+      .await?
+      .check("docker inspect")?;
+    let containers: Vec<serde_json::Value> =
+      serde_json::from_str(&out.stdout)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    for container in &containers {
+      let Some(project) = container
+        .pointer("/Config/Labels/com.docker.compose.project")
+        .and_then(serde_json::Value::as_str)
+      else {
+        continue;
+      };
+      if projects.iter().any(|p| p == project) {
+        mounts
+          .entry(project.to_string())
+          .or_insert_with(Vec::new)
+          .extend(parse_project_mounts(container));
+      }
+    }
+    Ok(mounts)
+  }
+
   pub async fn image_exists(&self, image: &str, ctx: &Ctx) -> bool {
     self
       .cmd()
@@ -1563,4 +1655,37 @@ fn digest_uses_original_repository() {
     pick_digest("nginx:1.27", &raw),
     Some(format!("nginx@sha256:{hash}"))
   );
+}
+
+fn parse_project_mounts(
+  container: &serde_json::Value,
+) -> Vec<wharf_api_types::agent::ContainerMount> {
+  let name = container["Name"]
+    .as_str()
+    .unwrap_or_default()
+    .trim_start_matches('/');
+  let service = container
+    .pointer("/Config/Labels/com.docker.compose.service")
+    .and_then(serde_json::Value::as_str)
+    .unwrap_or_default();
+  container["Mounts"]
+    .as_array()
+    .into_iter()
+    .flatten()
+    .filter_map(|mount| {
+      let kind = mount["Type"].as_str()?;
+      let source = match kind {
+        "volume" => mount["Name"].as_str()?,
+        "bind" => mount["Source"].as_str()?,
+        _ => return None,
+      };
+      Some(wharf_api_types::agent::ContainerMount {
+        container: name.into(),
+        service: service.into(),
+        kind: kind.into(),
+        source: source.into(),
+        target: mount["Destination"].as_str()?.into(),
+      })
+    })
+    .collect()
 }

@@ -19,7 +19,7 @@ use wharf_api_types::{
 
 use crate::{
   api::ApiResult,
-  apply::start_task,
+  apply::start_task_by,
   auth::Auth,
   edge::{self, edge_not_found},
   edge_sync,
@@ -207,10 +207,11 @@ pub async fn rollback(
   let list = edge::versions(&snap, &name).await?;
   let version = edge::rollback_target(&list, req.version.as_deref())?;
   Ok(Json(
-    start_task(
+    start_task_by(
       s.clone(),
       format!("回滚 {name} 到 {}", &version[..8.min(version.len())]),
       Step::EdgeRollback { app: name, version },
+      Some(crate::apply::format_actor(&auth)),
     )
     .await?,
   ))
@@ -239,10 +240,11 @@ pub async fn redeploy(
     );
   }
   Ok(Json(
-    start_task(
+    start_task_by(
       s.clone(),
       format!("重新发布 {name}"),
       Step::EdgeDeploy { app: name },
+      Some(crate::apply::format_actor(&auth)),
     )
     .await?,
   ))

@@ -31,6 +31,7 @@ fn old_hello_has_no_host_shell_capability() {
     backup_isolation,
     safe_delete,
     safe_adopt,
+    safe_migrate,
     key_rotation,
     ..
   } = hello
@@ -45,6 +46,7 @@ fn old_hello_has_no_host_shell_capability() {
   assert!(!backup_isolation);
   assert!(!safe_delete);
   assert!(!safe_adopt);
+  assert!(!safe_migrate);
   assert!(!key_rotation);
 }
 
@@ -87,6 +89,7 @@ fn old_core_ignores_new_hello_capability() {
     backup_isolation: true,
     safe_delete: true,
     safe_adopt: false,
+    safe_migrate: true,
     key_rotation: true,
   };
   let json = serde_json::to_string(&hello).unwrap();
@@ -123,13 +126,31 @@ impl Hub {
     lock(&self.conns).get_mut(server).unwrap().safe_delete = true;
   }
 
+  pub(crate) fn mock_safe_migrate_agent(
+    &self,
+    server: &str,
+    handle: impl FnMut(
+      AgentOp,
+      Option<ProgressFn>,
+    ) -> Option<Result<Value, ApiError>>
+    + Send
+    + 'static,
+  ) -> CancellationToken {
+    self
+      .mock_agent_options(server, false, false, false, false, handle);
+    let mut conns = lock(&self.conns);
+    let conn = conns.get_mut(server).unwrap();
+    conn.safe_migrate = true;
+    conn.closed.clone()
+  }
+
   pub(crate) fn mock_agent_with_backup(
     &self,
     server: &str,
     gateway_extra_files: bool,
     backup_isolation: bool,
     core_probe: bool,
-    handle: impl FnMut(AgentOp) -> Result<Value, ApiError>
+    mut handle: impl FnMut(AgentOp) -> Result<Value, ApiError>
     + Send
     + 'static,
   ) {
@@ -139,19 +160,25 @@ impl Hub {
       backup_isolation,
       core_probe,
       false,
-      handle,
+      move |op, _| Some(handle(op)),
     );
   }
 
   pub(crate) fn mock_rotation_agent(
     &self,
     server: &str,
-    handle: impl FnMut(AgentOp) -> Result<Value, ApiError>
+    mut handle: impl FnMut(AgentOp) -> Result<Value, ApiError>
     + Send
     + 'static,
   ) {
-    self
-      .mock_agent_options(server, false, false, false, true, handle);
+    self.mock_agent_options(
+      server,
+      false,
+      false,
+      false,
+      true,
+      move |op, _| Some(handle(op)),
+    );
   }
 
   fn mock_agent_options(
@@ -161,7 +188,10 @@ impl Hub {
     backup_isolation: bool,
     core_probe: bool,
     key_rotation: bool,
-    mut handle: impl FnMut(AgentOp) -> Result<Value, ApiError>
+    mut handle: impl FnMut(
+      AgentOp,
+      Option<ProgressFn>,
+    ) -> Option<Result<Value, ApiError>>
     + Send
     + 'static,
   ) {
@@ -198,6 +228,7 @@ impl Hub {
         backup_isolation,
         safe_delete: false,
         safe_adopt: false,
+        safe_migrate: false,
         upgrade_only: false,
       },
     );
@@ -210,10 +241,15 @@ impl Hub {
         let Some(msg) = msg else {
           break;
         };
-        if let CoreMsg::Request { id, op, .. } = msg
-          && let Some(p) = lock(&pending).remove(&id)
-        {
-          let _ = p.done.send(handle(op));
+        if let CoreMsg::Request { id, op, .. } = msg {
+          let progress =
+            lock(&pending).get(&id).map(|p| p.progress.clone());
+          if let Some(progress) = progress
+            && let Some(result) = handle(op, progress)
+            && let Some(p) = lock(&pending).remove(&id)
+          {
+            let _ = p.done.send(result);
+          }
         }
       }
     });
@@ -316,6 +352,7 @@ async fn agent_upgrade_needs_no_bound_core_server_or_probe_support() {
     backup_isolation: false,
     safe_delete: false,
     safe_adopt: false,
+    safe_migrate: false,
     upgrade_only: true,
   };
   state.hub.register("s1", conn.clone());
@@ -376,6 +413,7 @@ fn probe_connection(
     backup_isolation: false,
     safe_delete: false,
     safe_adopt: false,
+    safe_migrate: false,
     upgrade_only: false,
   };
   (conn, rx)

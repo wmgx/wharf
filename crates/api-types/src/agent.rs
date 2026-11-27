@@ -152,6 +152,8 @@ pub enum AgentMsg {
     #[serde(default)]
     safe_adopt: bool,
     #[serde(default)]
+    safe_migrate: bool,
+    #[serde(default)]
     key_rotation: bool,
   },
   KeyReady {
@@ -387,6 +389,9 @@ pub enum AgentOp {
   },
   /// 写入 compose、拉镜像、`up -d`。结果是 [ProjectUpResult]。
   ProjectUp(ProjectUp),
+  ProjectMounts {
+    projects: Vec<String>,
+  },
   /// `down` 并删除 project 目录。数据目录保留；`purge` 时连同 `/srv/<project>` 和 compose 声明的命名卷一起删。
   ProjectDown {
     project: String,

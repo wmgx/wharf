@@ -185,10 +185,11 @@ async fn update_dns(
   let Some(step) = step else {
     return Ok(());
   };
-  crate::apply::start_task(
+  crate::apply::start_task_by(
     state.clone(),
     format!("切换 {host} 的入口"),
     step,
+    Some("主备切换".into()),
   )
   .await?;
   if active(host) {

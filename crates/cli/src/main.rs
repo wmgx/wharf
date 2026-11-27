@@ -1109,8 +1109,10 @@ pub enum ServiceCmd {
   /// 网关改指新地址后删除旧容器，域名不变。旧服务器上的数据目录保留。
   Move {
     name: String,
-    #[arg(long)]
-    to: String,
+    #[arg(long, required_unless_present = "abort")]
+    to: Option<String>,
+    #[arg(long, conflicts_with = "to")]
+    abort: bool,
     #[command(flatten)]
     apply: ApplyFlags,
   },
@@ -1616,6 +1618,16 @@ pub enum RunCmd {
   List {
     #[arg(long, default_value_t = 20)]
     limit: u32,
+    #[arg(long)]
+    failed: bool,
+    #[arg(long, value_parser = ["running", "succeeded", "cancelled", "failed"])]
+    status: Option<String>,
+  },
+  /// 续跑一次失败或取消执行中未完成的步骤。
+  Retry {
+    run_id: String,
+    #[arg(long)]
+    no_wait: bool,
   },
   Show {
     run_id: String,

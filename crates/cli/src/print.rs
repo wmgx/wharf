@@ -232,7 +232,11 @@ pub fn run_summary(run: &Run) {
     // 备份、恢复这类执行不来自计划，没有写入配置。
     RunStatus::Failed if run.plan_id.is_empty() => "失败",
     RunStatus::Failed => {
-      "失败（配置已写入，执行 wharf plan 查看剩下的差异）"
+      println!(
+        "执行 {}：失败（配置已写入；修复原因后可 wharf run retry {} 续跑，或 wharf plan 查看剩余差异）",
+        run.run_id, run.run_id
+      );
+      return;
     }
     RunStatus::Cancelled => "已取消",
   };
@@ -259,7 +263,17 @@ pub fn run_line(run: &Run) {
     1 | 2 => titles.join("、"),
     n => format!("{} 等 {n} 步", titles[..2].join("、")),
   };
-  println!("{}  {status}  {at}  {what}", run.run_id);
+  let actor = run
+    .actor
+    .as_deref()
+    .map(|name| format!("[{name}]  "))
+    .unwrap_or_default();
+  let retry = run
+    .retry_of
+    .as_deref()
+    .map(|id| format!("（续跑 {id}）"))
+    .unwrap_or_default();
+  println!("{}  {status}  {at}  {actor}{what}{retry}", run.run_id);
   if run.status == RunStatus::Running {
     let done = run
       .steps
@@ -282,6 +296,9 @@ pub fn run_line(run: &Run) {
   }
   if let Some(e) = run.steps.iter().find_map(|s| s.error.as_ref()) {
     println!("    失败原因：{}", e.message);
+  }
+  if matches!(run.status, RunStatus::Failed | RunStatus::Cancelled) {
+    println!("    续跑：wharf run retry {}", run.run_id);
   }
 }
 

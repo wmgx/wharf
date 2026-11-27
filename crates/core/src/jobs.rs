@@ -148,10 +148,11 @@ async fn backups(state: &Arc<AppState>) -> Result<(), ApiError> {
     && core_ok.is_none_or(|t| now - t >= BACKUP_EVERY_MS)
     && !backoff
   {
-    let result = apply::start_task(
+    let result = apply::start_task_by(
       state.clone(),
       "备份控制面".into(),
       Step::CoreBackup { user_key: None },
+      Some("定时备份".into()),
     )
     .await;
     if let Some(error) = core_backup_error(result) {
@@ -188,12 +189,13 @@ async fn backups(state: &Arc<AppState>) -> Result<(), ApiError> {
   let Some((_, name)) = candidates.into_iter().min() else {
     return Ok(());
   };
-  match apply::start_task(
+  match apply::start_task_by(
     state.clone(),
     format!("定时备份 {name}"),
     Step::Backup {
       service: name.clone(),
     },
+    Some("定时备份".into()),
   )
   .await
   {
@@ -205,26 +207,19 @@ async fn backups(state: &Arc<AppState>) -> Result<(), ApiError> {
 }
 
 /// 迁移成功后记下旧服务器上要删除的数据。
-pub async fn schedule_cleanup(
-  state: &AppState,
+pub fn schedule_cleanup(
+  c: &rusqlite::Connection,
   service: &str,
   server: &str,
   instance_id: Option<&str>,
 ) -> Result<(), ApiError> {
-  let (service, server) = (service.to_string(), server.to_string());
-  let instance_id = instance_id.map(str::to_string);
-  state
-    .db
-    .call(move |c| {
-      c.execute(
-        "INSERT INTO cleanups (service, server, due_at, instance_id) VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT (service, server) DO UPDATE SET due_at = excluded.due_at, instance_id = excluded.instance_id",
-        params![service, server, now_ms() + KEEP_OLD_DATA_MS, instance_id],
-      )
-      .map_err(sql_err)?;
-      Ok(())
-    })
-    .await
+  c.execute(
+    "INSERT INTO cleanups (service, server, due_at, instance_id) VALUES (?1, ?2, ?3, ?4)
+     ON CONFLICT (service, server) DO UPDATE SET due_at = excluded.due_at, instance_id = excluded.instance_id",
+    params![service, server, now_ms() + KEEP_OLD_DATA_MS, instance_id],
+  )
+  .map_err(sql_err)?;
+  Ok(())
 }
 
 async fn cleanups(state: &Arc<AppState>) -> Result<(), ApiError> {
@@ -244,7 +239,7 @@ async fn cleanups(state: &Arc<AppState>) -> Result<(), ApiError> {
       );
       continue;
     }
-    let result = apply::start_task(
+    let result = apply::start_task_by(
       state.clone(),
       format!("清理 {server} 上 {service} 的旧数据"),
       Step::CleanupData {
@@ -252,6 +247,7 @@ async fn cleanups(state: &Arc<AppState>) -> Result<(), ApiError> {
         server,
         instance_id,
       },
+      Some("到期清理".into()),
     )
     .await;
     return match result {

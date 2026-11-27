@@ -17,10 +17,18 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
   ApiError, ErrorCode,
-  agent::{AgentOp, OneTimeSecret, SYNC_READY, SyncPush, SyncServe},
+  agent::{
+    AgentOp, OneTimeSecret, SYNC_BACKUP, SYNC_READY, SyncPass,
+    SyncPush, SyncServe,
+  },
 };
 
-use crate::{hub::ProgressFn, render::Net, state::AppState};
+use crate::{
+  hub::ProgressFn,
+  pending::{self, MigratePhase},
+  render::Net,
+  state::AppState,
+};
 
 const SERVE_TIMEOUT: Duration = Duration::from_secs(8 * 3600);
 const PUSH_TIMEOUT: Duration = Duration::from_secs(4 * 3600);
@@ -56,29 +64,56 @@ pub async fn volume_sync(
   net: &Net,
   service: &str,
   (from, to): (&str, &str),
-  instance_id: Option<&str>,
+  source_should_run: bool,
   progress: ProgressFn,
   cancel: &CancellationToken,
 ) -> Result<(), ApiError> {
+  for server in [from, to] {
+    state.hub.require_safe_migrate(server)?;
+  }
   let source_ip = private_ip(net, from)?;
   let target_ip = private_ip(net, to)?;
   let password = one_time_password();
+  let name = service.to_string();
+  let existing = state
+    .db
+    .call(move |c| Ok(pending::load(c)?.migrations.remove(&name)))
+    .await?;
+  if existing.as_ref().is_some_and(|m| {
+    m.payload.from == from
+      && m.payload.to == to
+      && m.phase != MigratePhase::Pending
+  }) {
+    return Ok(());
+  }
+  let preserve_existing = existing.as_ref().is_none_or(|m| {
+    !m.payload.target_prepared && m.payload.target_backup.is_none()
+  });
+  let already_stopped =
+    existing.is_some_and(|m| m.payload.source_stopped);
 
-  // 接收端跟着这个子令牌走：结束（成功或失败）时取消它，agent 就会关掉 rsync。
   let serve_cancel = cancel.child_token();
-  let (ready_tx, ready_rx) = oneshot::channel::<u16>();
-  let ready_tx = Arc::new(Mutex::new(Some(ready_tx)));
+  let work_cancel = cancel.child_token();
+  let (ready_tx, ready_rx) =
+    oneshot::channel::<(u16, Option<String>)>();
+  let ready = Arc::new(Mutex::new((Some(ready_tx), None)));
   let serve_progress: ProgressFn = {
     let progress = progress.clone();
     let to = to.to_string();
     Arc::new(move |line: String| {
-      if let Some(port) =
+      if let Some(backup) = line.strip_prefix(SYNC_BACKUP) {
+        ready.lock().unwrap_or_else(|p| p.into_inner()).1 =
+          Some(backup.to_string());
+        progress(format!(
+          "目标机原有 /srv 目录非空，已改名保留到 {backup}"
+        ));
+      } else if let Some(port) =
         line.strip_prefix(SYNC_READY).and_then(|p| p.parse().ok())
       {
-        if let Some(tx) =
-          ready_tx.lock().unwrap_or_else(|p| p.into_inner()).take()
-        {
-          let _ = tx.send(port);
+        let mut ready =
+          ready.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(tx) = ready.0.take() {
+          let _ = tx.send((port, ready.1.take()));
         }
         progress(format!("{to} 上的接收端已就绪"));
       } else {
@@ -86,22 +121,34 @@ pub async fn volume_sync(
       }
     })
   };
-  let serve = state.hub.call::<serde_json::Value>(
-    to,
-    AgentOp::SyncServe(SyncServe {
-      service: service.to_string(),
-      bind: target_ip.clone(),
-      allow: source_ip,
-      password: password.clone(),
-    }),
-    SERVE_TIMEOUT,
-    Some(serve_progress),
-    &serve_cancel,
-  );
+  let serve = async {
+    let result = state
+      .hub
+      .call::<serde_json::Value>(
+        to,
+        AgentOp::SyncServe(SyncServe {
+          service: service.to_string(),
+          bind: target_ip.clone(),
+          allow: source_ip,
+          password: password.clone(),
+          preserve_existing,
+        }),
+        SERVE_TIMEOUT,
+        Some(serve_progress),
+        &serve_cancel,
+      )
+      .await;
+    if !serve_cancel.is_cancelled() {
+      work_cancel.cancel();
+    }
+    result
+  };
 
+  let may_need_restart =
+    std::sync::atomic::AtomicBool::new(already_stopped);
   let work = async {
-    let port = tokio::select! {
-      port = ready_rx => port.map_err(|_| ApiError::new(
+    let (port, backup) = tokio::select! {
+      ready = ready_rx => ready.map_err(|_| ApiError::new(
         ErrorCode::AgentFailed,
         format!("{to} 上的 rsync 接收端没有启动"),
       ))?,
@@ -109,114 +156,454 @@ pub async fn volume_sync(
         ErrorCode::Timeout,
         format!("{to} 上的 rsync 接收端 {} 秒内没有就绪", READY_TIMEOUT.as_secs()),
       )),
-      _ = cancel.cancelled() => return Err(ApiError::new(ErrorCode::Cancelled, "已取消")),
+      _ = work_cancel.cancelled() => return Err(ApiError::new(ErrorCode::Cancelled, "已取消")),
     };
-    let push = || {
-      AgentOp::SyncPush(SyncPush {
-        service: service.to_string(),
-        host: target_ip.clone(),
-        port,
-        password: password.clone(),
-      })
-    };
-
-    progress("第一遍同步（服务继续运行）".into());
-    let first: Pushed = state
-      .hub
-      .call(
-        from,
-        push(),
-        PUSH_TIMEOUT,
-        Some(progress.clone()),
-        cancel,
-      )
-      .await?;
-    if !first.synced {
-      return Ok(());
-    }
-
-    progress(format!("停止 {from} 上的 {service}"));
+    let name = service.to_string();
     state
+      .db
+      .call(move |c| {
+        pending::update_migration(c, &name, |m| {
+          m.payload.target_prepared = true;
+          if backup.is_some() {
+            m.payload.target_backup = backup;
+          }
+        })
+      })
+      .await?;
+    let push = async |pass| {
+      let result: Pushed = state
+        .hub
+        .call(
+          from,
+          AgentOp::SyncPush(SyncPush {
+            service: service.to_string(),
+            host: target_ip.clone(),
+            port,
+            password: password.clone(),
+            pass,
+          }),
+          PUSH_TIMEOUT,
+          Some(progress.clone()),
+          &work_cancel,
+        )
+        .await?;
+      if !result.synced {
+        return Err(ApiError::new(
+          ErrorCode::AgentFailed,
+          "源数据没有同步，中止迁移",
+        ));
+      }
+      Ok(())
+    };
+    progress("第一遍同步（服务继续运行）".into());
+    push(SyncPass::Live).await?;
+    progress(format!("停止 {from} 上的 {service}"));
+    if source_should_run {
+      let name = service.to_string();
+      state
+        .db
+        .call(move |c| {
+          pending::update_migration(c, &name, |m| {
+            m.payload.source_stopped = true;
+          })
+        })
+        .await?;
+      may_need_restart
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    let stopped = state
       .hub
-      .call::<serde_json::Value>(
+      .call::<bool>(
         from,
         AgentOp::ProjectStop {
           project: service.to_string(),
         },
         STOP_TIMEOUT,
         Some(progress.clone()),
-        cancel,
+        &work_cancel,
       )
       .await?;
-
-    progress("增量同步（服务已停止）".into());
-    let second = state
-      .hub
-      .call::<Pushed>(
-        from,
-        push(),
-        PUSH_TIMEOUT,
-        Some(progress.clone()),
-        cancel,
-      )
-      .await;
-    if let Err(e) = second {
-      restart_source(state, from, service, &progress).await;
-      return Err(e);
+    if !stopped && source_should_run {
+      return Err(ApiError::new(
+        ErrorCode::AgentFailed,
+        format!("源服务器 {from} 上找不到 {service} 的容器配置"),
+      ));
     }
-    Ok(())
+    progress("增量同步（服务已停止）".into());
+    push(SyncPass::Final).await
   };
-  // 接收端和推送同时进行；推送结束（成功或失败）就关掉接收端。
   let work = async {
-    let r = work.await;
+    let result = work.await;
     serve_cancel.cancel();
-    r
+    result
   };
   let (result, served) = tokio::join!(work, serve);
-  match (result, served) {
-    // 接收端没起来时，就绪等待只会说"没有启动"，用接收端自己的错误更清楚。
-    (Err(_), Err(e)) if e.code != ErrorCode::Cancelled => Err(e),
-    (Err(e), _) => Err(e),
-    (Ok(()), _) => {
-      crate::jobs::schedule_cleanup(
-        state,
-        service,
-        from,
-        instance_id,
-      )
-      .await?;
-      progress(format!(
-        "{from} 上的 /srv/{service}/ 保留 7 天，之后自动删除"
-      ));
-      Ok(())
+  let result = match (result, served) {
+    (_, Err(e)) if e.code != ErrorCode::Cancelled => Err(e),
+    (result, _) => result,
+  };
+  if let Err(e) = result {
+    if may_need_restart.load(std::sync::atomic::Ordering::Relaxed)
+      && restart_source(state, from, service, &progress).await
+    {
+      reset_after_restart(state, service).await?;
     }
+    return Err(e);
   }
+  let name = service.to_string();
+  if let Err(e) = state
+    .db
+    .call(move |c| {
+      pending::update_migration(c, &name, |m| {
+        m.phase = MigratePhase::Synced;
+      })
+    })
+    .await
+  {
+    if may_need_restart.load(std::sync::atomic::Ordering::Relaxed)
+      && restart_source(state, from, service, &progress).await
+    {
+      reset_after_restart(state, service).await?;
+    }
+    return Err(e);
+  }
+  Ok(())
+}
+
+pub async fn reset_after_restart(
+  state: &AppState,
+  service: &str,
+) -> Result<(), ApiError> {
+  let name = service.to_string();
+  state
+    .db
+    .call(move |c| {
+      let tx = c.transaction().map_err(crate::db::sql_err)?;
+      if let Some(m) = pending::load(&tx)?.migrations.remove(&name) {
+        tx.execute("DELETE FROM cleanups WHERE service=?1 AND server=?2 AND instance_id IS ?3",
+          rusqlite::params![name, m.payload.from, m.payload.instance_id]).map_err(crate::db::sql_err)?;
+        pending::update_migration(&tx, &name, |m| {
+          m.phase = MigratePhase::Pending;
+          m.payload.source_stopped = false;
+        })?;
+      }
+      tx.commit().map_err(crate::db::sql_err)
+    })
+    .await
 }
 
 /// 增量同步失败时，把旧服务器上停掉的容器拉起来。用新的令牌，取消执行时也要做。
-async fn restart_source(
+pub async fn restart_source(
   state: &AppState,
   server: &str,
   service: &str,
   progress: &ProgressFn,
-) {
+) -> bool {
   progress(format!("迁移失败，重新启动 {server} 上的 {service}"));
-  let result = state
-    .hub
-    .call::<serde_json::Value>(
-      server,
-      AgentOp::ProjectStart {
-        project: service.to_string(),
-      },
-      STOP_TIMEOUT,
-      Some(progress.clone()),
+  let result = async {
+    pending::source_changed(state, service).await?;
+    state
+      .hub
+      .call::<bool>(
+        server,
+        AgentOp::ProjectStart {
+          project: service.to_string(),
+        },
+        STOP_TIMEOUT,
+        Some(progress.clone()),
+        &CancellationToken::new(),
+      )
+      .await
+  }
+  .await;
+  match result {
+    Ok(true) => true,
+    other => {
+      let detail = other
+        .err()
+        .map(|e| e.message)
+        .unwrap_or_else(|| "容器不存在".into());
+      progress(format!(
+        "重新启动失败：{detail}，需要手动处理：wharf service restart {service}"
+      ));
+      false
+    }
+  }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+  use super::*;
+  use serde_json::json;
+  use wharf_api_types::spec::{PrivateAddr, PrivateNetwork};
+
+  pub(crate) async fn seed_service(stopped: bool) -> Arc<AppState> {
+    let state = crate::rules::tests::test_state();
+    state.db.call(move |c| {
+      for server in ["s1", "s2"] {
+        crate::db::apply_write(c, &crate::db::Write::Upsert {
+          kind: "server".into(), name: server.into(), spec: json!({}), meta: json!({}),
+        })?;
+      }
+      crate::db::apply_write(c, &crate::db::Write::Upsert {
+        kind: "service".into(), name: "notes".into(),
+        spec: json!({"server": "s2", "source": {"image": "fixture:1"},
+          "stopped": stopped, "volumes": [{"name": "data", "target": "/data"}]}),
+        meta: json!({}),
+      })
+    }).await.unwrap();
+    state
+  }
+
+  pub(crate) async fn seed_migration(
+    state: &AppState,
+    phase: &'static str,
+    source_stopped: bool,
+  ) {
+    state.db.call(move |c| {
+      let instance = &crate::db::service_instances(c)?["service/notes"];
+      let payload = json!({"service": "notes", "from": "s1", "to": "s2",
+        "instance_id": instance, "has_managed_data": true, "source_stopped": source_stopped});
+      c.execute("INSERT INTO pending_steps (kind,target_key,run_id,instance_id,phase,payload,updated_at)
+        VALUES ('migrate','notes','r1',?1,?2,?3,0)",
+        rusqlite::params![instance, phase, payload.to_string()]).map_err(crate::db::sql_err)?;
+      Ok(())
+    }).await.unwrap();
+  }
+
+  fn migration_net() -> Net {
+    Net {
+      private: [("s1", "100.64.0.1"), ("s2", "100.64.0.2")]
+        .into_iter()
+        .map(|(s, ip)| {
+          (
+            s.into(),
+            PrivateAddr {
+              ip: ip.into(),
+              network: PrivateNetwork::Tailscale,
+            },
+          )
+        })
+        .collect(),
+      ..Net::default()
+    }
+  }
+
+  fn mock_receiver(state: &AppState) {
+    state.hub.mock_safe_migrate_agent("s2", |op, progress| {
+      let AgentOp::SyncServe(job) = op else {
+        panic!("应启动接收端")
+      };
+      assert!(job.preserve_existing);
+      progress.unwrap()(format!("{SYNC_READY}1000"));
+      None
+    });
+  }
+
+  #[tokio::test]
+  async fn volume_sync_sends_live_then_final_pass() {
+    let state = seed_service(false).await;
+    seed_migration(&state, "pending", false).await;
+    mock_receiver(&state);
+    let mut expected = [SyncPass::Live, SyncPass::Final].into_iter();
+    let mut stopped = false;
+    state.hub.mock_safe_migrate_agent("s1", move |op, _| {
+      Some(Ok(match op {
+        AgentOp::SyncPush(job) => {
+          assert_eq!(Some(job.pass), expected.next());
+          assert_eq!(stopped, job.pass == SyncPass::Final);
+          json!({"synced": true})
+        }
+        AgentOp::ProjectStop { .. } => {
+          stopped = true;
+          json!(true)
+        }
+        _ => panic!("意外请求"),
+      }))
+    });
+    volume_sync(
+      &state,
+      &migration_net(),
+      "notes",
+      ("s1", "s2"),
+      true,
+      Arc::new(|_| {}),
       &CancellationToken::new(),
     )
-    .await;
-  if let Err(e) = result {
-    progress(format!(
-      "重新启动失败：{}，需要手动处理：wharf service deploy {service}",
-      e.message
-    ));
+    .await
+    .unwrap();
+    state
+      .db
+      .call(|c| {
+        assert_eq!(
+          pending::load(c)?.migrations["notes"].phase,
+          MigratePhase::Synced
+        );
+        assert_eq!(
+          c.query_row("SELECT count(*) FROM cleanups", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+          0
+        );
+        Ok(())
+      })
+      .await
+      .unwrap();
+  }
+
+  #[tokio::test]
+  async fn offline_agent_is_reported_offline_for_safe_migrate_operations()
+   {
+    let state = seed_service(true).await;
+    let progress: ProgressFn = Arc::new(|_| {});
+    let cancel = CancellationToken::new();
+    let error = volume_sync(
+      &state,
+      &migration_net(),
+      "notes",
+      ("s1", "s2"),
+      false,
+      progress.clone(),
+      &cancel,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::AgentOffline);
+    assert!(error.message.contains("s1"));
+    let step = crate::planner::Step::ServiceUp {
+      service: "notes".into(),
+      instance_id: None,
+      expect: None,
+    };
+    let error =
+      crate::apply::run_step(&state, "r1", &step, progress, &cancel)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::AgentOffline);
+    assert!(error.message.contains("s2"));
+  }
+
+  #[tokio::test]
+  async fn stop_failure_restarts_source() {
+    let state = seed_service(false).await;
+    seed_migration(&state, "pending", false).await;
+    mock_receiver(&state);
+    let (sent, mut received) = oneshot::channel();
+    let mut sent = Some(sent);
+    state.hub.mock_safe_migrate_agent("s1", move |op, _| {
+      Some(match op {
+        AgentOp::SyncPush(job) if job.pass == SyncPass::Live => {
+          Ok(json!({"synced": true}))
+        }
+        AgentOp::ProjectStop { .. } => {
+          Err(ApiError::internal("无法停机"))
+        }
+        AgentOp::ProjectStart { .. } => {
+          sent.take().unwrap().send(()).unwrap();
+          Ok(json!(true))
+        }
+        _ => panic!("意外请求"),
+      })
+    });
+    assert!(
+      volume_sync(
+        &state,
+        &migration_net(),
+        "notes",
+        ("s1", "s2"),
+        true,
+        Arc::new(|_| {}),
+        &CancellationToken::new()
+      )
+      .await
+      .is_err()
+    );
+    received.try_recv().unwrap();
+    state
+      .db
+      .call(|c| {
+        assert!(
+          !pending::load(c)?.migrations["notes"]
+            .payload
+            .source_stopped
+        );
+        Ok(())
+      })
+      .await
+      .unwrap();
+  }
+
+  #[tokio::test]
+  async fn serve_crash_cancels_push() {
+    let state = seed_service(false).await;
+    seed_migration(&state, "pending", false).await;
+    let target =
+      state.hub.mock_safe_migrate_agent("s2", |op, progress| {
+        assert!(matches!(op, AgentOp::SyncServe(_)));
+        progress.unwrap()(format!("{SYNC_READY}1000"));
+        None
+      });
+    state.hub.mock_safe_migrate_agent("s1", move |op, _| {
+      assert!(
+        matches!(op, AgentOp::SyncPush(p) if p.pass == SyncPass::Live)
+      );
+      target.cancel();
+      None
+    });
+    let e = tokio::time::timeout(
+      Duration::from_secs(5),
+      volume_sync(
+        &state,
+        &migration_net(),
+        "notes",
+        ("s1", "s2"),
+        true,
+        Arc::new(|_| {}),
+        &CancellationToken::new(),
+      ),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(e.code, ErrorCode::AgentOffline);
+  }
+
+  #[tokio::test]
+  async fn volume_sync_fails_when_source_dir_missing_and_does_not_schedule_cleanup()
+   {
+    let state = seed_service(false).await;
+    seed_migration(&state, "pending", false).await;
+    mock_receiver(&state);
+    state.hub.mock_safe_migrate_agent("s1", |op, _| {
+      assert!(
+        matches!(op, AgentOp::SyncPush(p) if p.pass == SyncPass::Live)
+      );
+      Some(Err(ApiError::not_found("源目录不存在")))
+    });
+    let error = volume_sync(
+      &state,
+      &migration_net(),
+      "notes",
+      ("s1", "s2"),
+      true,
+      Arc::new(|_| {}),
+      &CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::NotFound);
+    state
+      .db
+      .call(|c| {
+        assert_eq!(
+          c.query_row("SELECT count(*) FROM cleanups", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+          0
+        );
+        Ok(())
+      })
+      .await
+      .unwrap();
   }
 }

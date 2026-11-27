@@ -152,7 +152,7 @@ pub fn check_service_scope(
       ["", "api", "routes", _, "cert", "retry"]
       | ["", "api", "routes", _, "sso", "test"]
       | ["", "api", "plan" | "apply"]
-      | ["", "api", "runs", _, "cancel"]
+      | ["", "api", "runs", _, "cancel" | "retry"]
       | ["", "api", "convert", "docker-run"] => {
         *method == Method::POST
       }
@@ -518,6 +518,7 @@ mod tests {
     for (method, path) in [
       (Method::PUT, "/api/alerts/http_5xx/services/blog"),
       (Method::POST, "/api/alerts/ack"),
+      (Method::POST, "/api/runs/r1/retry"),
       (Method::POST, "/api/alerts/unack"),
       (Method::POST, "/api/alerts/custom"),
       (Method::DELETE, "/api/alerts/custom/slow"),

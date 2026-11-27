@@ -79,7 +79,8 @@ async fn deploy_items(
             .is_some_and(|r| r.spec.source.as_ref() == Some(source))
       }
     };
-    if up_to_date {
+    let pending = snap.pending.edge_deploys.contains(name);
+    if up_to_date && !pending {
       continue;
     }
     let remote_exists = if target_changed {
@@ -101,7 +102,7 @@ async fn deploy_items(
       before.is_some(),
       target_changed,
       remote_exists,
-      last == Some(DEPLOYING),
+      pending || last == Some(DEPLOYING),
     );
     let id = b.item(
       format!("{KIND_EDGE}/{name}"),
@@ -459,6 +460,31 @@ mod tests {
         .unwrap();
     assert_eq!(plan.writes.len(), 1);
     assert!(plan.steps.is_empty());
+  }
+
+  #[tokio::test]
+  async fn skipped_initial_edge_deploy_is_replanned_from_pending_steps()
+   {
+    let mut snap = Snapshot::default();
+    snap.world.edge_apps.insert(
+      "site".into(),
+      crate::world::EdgeRow {
+        spec: serde_json::from_value(
+          json!({"account": "cf", "kind": "worker",
+        "source": {"upload": "abc", "script": "index.js"}}),
+        )
+        .unwrap(),
+        version: 1,
+      },
+    );
+    snap.pending.edge_deploys.insert("site".into());
+    let mut b = Builder::default();
+    deploy_items(&mut b, &snap, &snap.world, &snap.world)
+      .await
+      .unwrap();
+    assert_eq!(b.items.len(), 1);
+    assert_eq!(b.items[0].address, "edge/site");
+    assert!(b.items[0].reason.contains("上次发布没有完成"));
   }
 
   #[tokio::test]

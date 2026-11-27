@@ -146,7 +146,7 @@ pub async fn service_probe(
   ));
   let snapshot = snapshot::load(&state.db).await?;
   let (server, project) =
-    crate::multi_logs::service_target(&snapshot.world, &name)?;
+    crate::multi_logs::service_target(&snapshot, &name)?;
   let infer_component = component.is_none();
   job.container = Some(ContainerProbeScope { project, component });
   let report =

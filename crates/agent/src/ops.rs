@@ -250,6 +250,9 @@ impl Ops {
       AgentOp::ProjectStart { project } => {
         self.stop_start(&project, true, ctx).await
       }
+      AgentOp::ProjectMounts { projects } => {
+        to_value(self.docker.project_mounts(&projects, ctx).await?)
+      }
       AgentOp::SyncServe(s) => {
         check_project(&s.service)?;
         let _guard = self.lock_data(&s.service, ctx).await?;

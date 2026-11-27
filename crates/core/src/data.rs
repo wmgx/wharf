@@ -48,6 +48,64 @@ pub fn mounts(name: &str, spec: &ServiceSpec) -> Vec<DataMount> {
   }
 }
 
+pub fn undeclared_mounts(
+  service: &str,
+  declared: &[DataMount],
+  actual: &[wharf_api_types::agent::ContainerMount],
+) -> Vec<DataMount> {
+  let root = format!("/srv/{service}");
+  actual
+    .iter()
+    .filter_map(|m| {
+      let target = m.target.trim_end_matches('/');
+      if declared.iter().any(|d| {
+        d.target.trim_end_matches('/') == target
+          && d
+            .container
+            .as_ref()
+            .is_none_or(|name| *name == m.service)
+      }) || Path::new(&m.source).starts_with(&root)
+        || m.source.contains("/.wharf-secrets/")
+        || m.source.contains(&format!("/projects/{service}/secrets/"))
+      {
+        return None;
+      }
+      let kind = match m.kind.as_str() {
+        "volume" => DataKind::NamedVolume,
+        "bind" => DataKind::ExternalDir,
+        _ => return None,
+      };
+      let anonymous = kind == DataKind::NamedVolume
+        && m.source.len() == 64
+        && m.source.bytes().all(|b| b.is_ascii_hexdigit());
+      Some(DataMount {
+        kind,
+        source: if anonymous {
+          String::new()
+        } else {
+          m.source.clone()
+        },
+        target: target.into(),
+        container: Some(m.service.clone()),
+      })
+    })
+    .collect()
+}
+
+#[test]
+fn undeclared_mounts_detects_image_anonymous_volume() {
+  let m = wharf_api_types::agent::ContainerMount {
+    container: "notes-db-1".into(),
+    service: "db".into(),
+    kind: "volume".into(),
+    source: "a".repeat(64),
+    target: "/var/lib/db/".into(),
+  };
+  let mounts = undeclared_mounts("notes", &[], &[m]);
+  assert_eq!(mounts[0].target, "/var/lib/db");
+  assert!(mounts[0].source.is_empty());
+}
+
 /// 一个服务的数据现状：有没有开备份、有没有全部覆盖、最近成功过没有。
 pub fn status(
   backup: bool,

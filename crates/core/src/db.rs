@@ -381,7 +381,53 @@ ALTER TABLE alert_history ADD COLUMN subject TEXT;
   crate::secret_restrictions::MIGRATION,
   SERVICE_INSTANCE_ID_MIGRATION,
   "DELETE FROM plans WHERE status = 'pending';",
+  PENDING_STEPS_MIGRATION,
 ];
+
+const PENDING_STEPS_MIGRATION: &str = r#"
+-- 1. 统一未完成步骤进度表（服务迁移状态、E5 计划续做、合并 17-1 pending_deletes）
+CREATE TABLE pending_steps (
+  kind TEXT NOT NULL,           -- 'migrate' | 'service_delete' | 'edge_deploy' | 'docker_proxy' | 'egress' | 'baseline' | 'ensure_dirs'
+  target_key TEXT NOT NULL,     -- 'migrate': <svc>; 'service_delete': <svc>@<server>; 'edge_deploy': <app>; 'docker_proxy'|'egress'|'baseline': <server>; 'ensure_dirs': <svc>@<server>
+  run_id TEXT NOT NULL,
+  plan_id TEXT NOT NULL DEFAULT '',
+  instance_id TEXT,             -- 服务类步骤绑定实例 ID，同名重建自动隔离
+  phase TEXT NOT NULL DEFAULT 'pending', -- 常规步骤固定 'pending'；迁移为 'pending' | 'synced' | 'up_done'
+  payload TEXT NOT NULL,        -- JSON
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (kind, target_key)
+);
+CREATE INDEX pending_steps_run ON pending_steps (run_id);
+
+-- 2. 无损合并 17-1 的 pending_deletes 并下线旧表
+INSERT OR IGNORE INTO pending_steps (kind, target_key, run_id, plan_id, instance_id, phase, payload, updated_at)
+SELECT
+  'service_delete',
+  service || '@' || server,
+  '',
+  '',
+  instance_id,
+  'pending',
+  json_object(
+    'service', service,
+    'server', server,
+    'instance_id', instance_id,
+    'purge_data', CASE WHEN purge_data != 0 THEN json('true') ELSE json('false') END,
+    'has_relative_mounts', CASE WHEN has_relative_mounts != 0 THEN json('true') ELSE json('false') END
+  ),
+  created_at
+FROM pending_deletes;
+DROP TABLE pending_deletes;
+
+-- 3. 部署记录标明是否真正启动成功（对齐 17-5 回滚选源）
+ALTER TABLE deployments ADD COLUMN started INTEGER NOT NULL DEFAULT 1;
+
+-- 4. 执行记录补充发起人、续跑来源与续跑基线快照（8.56）
+ALTER TABLE runs ADD COLUMN actor TEXT;
+ALTER TABLE runs ADD COLUMN retry_of TEXT;
+ALTER TABLE runs ADD COLUMN retry_meta TEXT;
+CREATE INDEX runs_status_started ON runs (status, started_at DESC);
+"#;
 
 const SERVICE_INSTANCE_ID_MIGRATION: &str = r#"
 UPDATE resources
@@ -926,73 +972,6 @@ pub fn service_instances(
   let rows = stmt
     .query_map([], |r| {
       Ok((format!("service/{}", r.get::<_, String>(0)?), r.get(1)?))
-    })
-    .map_err(sql_err)?;
-  rows.collect::<Result<_, _>>().map_err(sql_err)
-}
-
-pub struct PendingDeleteRow {
-  pub service: String,
-  pub server: String,
-  pub instance_id: String,
-  pub purge_data: bool,
-  pub has_relative_mounts: bool,
-}
-
-pub fn put_pending_delete(
-  c: &Connection,
-  p: &PendingDeleteRow,
-) -> Result<(), ApiError> {
-  c.execute(
-    "INSERT INTO pending_deletes (service, server, instance_id, purge_data, has_relative_mounts, created_at)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-     ON CONFLICT (service, server) DO UPDATE SET instance_id = excluded.instance_id,
-       purge_data = excluded.purge_data, has_relative_mounts = excluded.has_relative_mounts, created_at = excluded.created_at",
-    params![p.service, p.server, p.instance_id, p.purge_data, p.has_relative_mounts, now_ms()],
-  ).map_err(sql_err)?;
-  Ok(())
-}
-
-pub fn clear_pending_delete(
-  c: &Connection,
-  service: &str,
-  server: &str,
-  instance_id: Option<&str>,
-) -> Result<(), ApiError> {
-  c.execute(
-    "DELETE FROM pending_deletes WHERE service = ?1 AND server = ?2 AND (?3 IS NULL OR instance_id = ?3)",
-    params![service, server, instance_id],
-  ).map_err(sql_err)?;
-  Ok(())
-}
-
-pub fn clear_pending_deletes_for_service(
-  c: &Connection,
-  service: &str,
-) -> Result<(), ApiError> {
-  c.execute(
-    "DELETE FROM pending_deletes WHERE service = ?1",
-    [service],
-  )
-  .map_err(sql_err)?;
-  Ok(())
-}
-
-pub fn all_pending_deletes(
-  c: &Connection,
-) -> Result<Vec<PendingDeleteRow>, ApiError> {
-  let mut stmt = c.prepare(
-    "SELECT service, server, instance_id, purge_data, has_relative_mounts FROM pending_deletes ORDER BY service, server"
-  ).map_err(sql_err)?;
-  let rows = stmt
-    .query_map([], |r| {
-      Ok(PendingDeleteRow {
-        service: r.get(0)?,
-        server: r.get(1)?,
-        instance_id: r.get(2)?,
-        purge_data: r.get(3)?,
-        has_relative_mounts: r.get(4)?,
-      })
     })
     .map_err(sql_err)?;
   rows.collect::<Result<_, _>>().map_err(sql_err)
@@ -1979,13 +1958,12 @@ pub fn deployed_servers(
 
 /// 导入后第一次部署成功：记进导入记录，清掉服务上的待办导入，之后部署不再接管。
 pub fn finish_import(
-  c: &Connection,
+  tx: &rusqlite::Transaction<'_>,
   service: &str,
   server: &str,
   adopt: &AdoptSpec,
   retired: &[String],
 ) -> Result<(), ApiError> {
-  let tx = c.unchecked_transaction().map_err(sql_err)?;
   tx.execute(
     "INSERT OR REPLACE INTO imports (service, server, project, containers, retired, done_at)
      VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -2005,7 +1983,7 @@ pub fn finish_import(
     params![service],
   )
   .map_err(sql_err)?;
-  tx.commit().map_err(sql_err)
+  Ok(())
 }
 
 pub fn imports(
@@ -2184,6 +2162,31 @@ pub fn interrupt_service_ops(c: &Connection) -> Result<(), ApiError> {
 
 #[cfg(test)]
 mod tests {
+  #[test]
+  fn migration_moves_pending_deletes_into_pending_steps() {
+    let c = Connection::open_in_memory().unwrap();
+    for sql in MIGRATIONS
+      .iter()
+      .take_while(|&&sql| sql != PENDING_STEPS_MIGRATION)
+    {
+      c.execute_batch(sql).unwrap();
+    }
+    c.execute_batch("INSERT INTO pending_deletes VALUES ('notes', 's1', 'svc_old', 1, 1, 1);
+      INSERT INTO deployments (service,server,run_id,hash,compose,images,created_at)
+      VALUES ('notes','s1','r1','v1','','[]',1);").unwrap();
+    c.execute_batch(PENDING_STEPS_MIGRATION).unwrap();
+    assert!(c.prepare("SELECT * FROM pending_deletes").is_err());
+    let pending = crate::pending::load(&c).unwrap();
+    let deletion = &pending.service_deletes[0];
+    assert_eq!(deletion.instance_id, "svc_old");
+    assert!(deletion.purge_data && deletion.has_relative_mounts);
+    assert!(
+      c.query_row("SELECT started FROM deployments", [], |r| r
+        .get::<_, bool>(0))
+        .unwrap()
+    );
+  }
+
   #[test]
   fn instance_id_migration_splits_pre_and_post_recreate_deployments()
   {

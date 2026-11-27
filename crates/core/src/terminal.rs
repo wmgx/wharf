@@ -83,15 +83,12 @@ pub async fn open(
   // 能在容器里执行任意命令，和执行全部操作同一权限。
   auth.require(Perm::Exec)?;
   let snap = snapshot::load(&s.db).await?;
-  let row = snap
-    .world
-    .services
-    .get(&name)
+  let server = snapshot::service_runtime_server(&snap, &name)
     .ok_or_else(|| service_not_found(&name))?;
-  if !s.hub.is_online(&row.spec.server) {
-    return Err(crate::hub::offline(&row.spec.server).into());
+  if !s.hub.is_online(server) {
+    return Err(crate::hub::offline(server).into());
   }
-  let server = row.spec.server.clone();
+  let server = server.to_string();
   let job = TerminalJob {
     project: name,
     service: q.service,

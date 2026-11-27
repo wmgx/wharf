@@ -42,12 +42,9 @@ async fn server_of(
   service: &str,
 ) -> Result<String, ApiError> {
   let snap = snapshot::load(&s.db).await?;
-  let row = snap
-    .world
-    .services
-    .get(service)
-    .ok_or_else(|| service_not_found(service))?;
-  Ok(row.spec.server.clone())
+  snapshot::service_runtime_server(&snap, service)
+    .map(str::to_string)
+    .ok_or_else(|| service_not_found(service))
 }
 
 async fn call<T: serde::de::DeserializeOwned>(
@@ -213,7 +210,10 @@ pub async fn upload(
   body: Bytes,
 ) -> ApiResult<serde_json::Value> {
   auth.require(Perm::Exec)?;
+  let _guard =
+    s.apply_lock.try_lock().map_err(|_| s.runs.busy_error())?;
   let server = server_of(&s, &name).await?;
+  crate::pending::source_changed(&s, &name).await?;
   let chunks: Vec<&[u8]> = if body.is_empty() {
     vec![&[]]
   } else {
@@ -255,4 +255,12 @@ mod tests {
     assert_eq!(super::encode("a b.txt"), "a%20b.txt");
     assert_eq!(super::encode("数据.db"), "%E6%95%B0%E6%8D%AE.db");
   }
+}
+
+#[tokio::test]
+async fn files_server_of_uses_migration_source_when_interrupted() {
+  let state = crate::migrate::tests::seed_service(false).await;
+  crate::migrate::tests::seed_migration(&state, "pending", false)
+    .await;
+  assert_eq!(server_of(&state, "notes").await.unwrap(), "s1");
 }

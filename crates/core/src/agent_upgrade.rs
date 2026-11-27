@@ -54,10 +54,11 @@ pub async fn upgrade_now(
     return Err(crate::hub::offline(&name).into());
   }
   Ok(Json(
-    crate::apply::start_task(
+    crate::apply::start_task_by(
       s.clone(),
       format!("升级 {name} 的 agent"),
       Step::AgentUpgrade { server: name },
+      Some(crate::apply::format_actor(&auth)),
     )
     .await?,
   ))
@@ -70,14 +71,19 @@ pub async fn upgrade_outdated(
   auth: Auth,
 ) -> ApiResult<Value> {
   auth.require(Perm::Admin)?;
-  Ok(Json(match start_outdated(&s).await? {
-    Some(r) => json!({ "run_id": r.run_id }),
-    None => json!({ "run_id": null }),
-  }))
+  Ok(Json(
+    match start_outdated(&s, crate::apply::format_actor(&auth))
+      .await?
+    {
+      Some(r) => json!({ "run_id": r.run_id }),
+      None => json!({ "run_id": null }),
+    },
+  ))
 }
 
 async fn start_outdated(
   s: &Arc<AppState>,
+  actor: String,
 ) -> Result<Option<ApplyResponse>, ApiError> {
   let snap = snapshot::load(&s.db).await?;
   let mut servers = Vec::new();
@@ -92,10 +98,11 @@ async fn start_outdated(
     return Ok(None);
   }
   let title = format!("升级 {} 的 agent", servers.join("、"));
-  crate::apply::start_task(
+  crate::apply::start_task_by(
     s.clone(),
     title,
     Step::AgentUpgrades { servers },
+    Some(actor),
   )
   .await
   .map(Some)
@@ -159,7 +166,9 @@ pub fn spawn_agents_after(state: Arc<AppState>) {
     match flagged {
       // 升级失败时接班容器恢复的是旧控制面，构建号对不上就不升 agent。
       Ok(Some(from)) if from != BUILD => {
-        if let Err(e) = start_outdated(&state).await {
+        if let Err(e) =
+          start_outdated(&state, "自动更新".into()).await
+        {
           tracing::warn!("升级控制面后接着升级 agent 失败：{e}");
         }
       }

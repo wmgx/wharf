@@ -17,7 +17,6 @@ use crate::{
   api::{AppError, LogsQuery, service_not_found},
   clock, log_search, snapshot,
   state::AppState,
-  world::World,
 };
 
 #[derive(Deserialize)]
@@ -34,14 +33,12 @@ struct Failure<'a> {
 }
 
 pub(super) fn service_target<'a>(
-  world: &'a World,
+  snap: &'a snapshot::Snapshot,
   name: &str,
 ) -> Result<(&'a str, String), ApiError> {
-  let row = world
-    .services
-    .get(name)
+  let server = snapshot::service_runtime_server(snap, name)
     .ok_or_else(|| service_not_found(name))?;
-  Ok((&row.spec.server, name.to_owned()))
+  Ok((server, name.to_owned()))
 }
 
 fn service_names(raw: &str) -> Result<Vec<&str>, ApiError> {
@@ -166,7 +163,7 @@ pub(super) async fn fetch(
   let snap = snapshot::load(&state.db).await?;
   let targets = names
     .iter()
-    .map(|name| service_target(&snap.world, name))
+    .map(|name| service_target(&snap, name))
     .collect::<Result<Vec<_>, _>>()?;
   let since = q
     .since

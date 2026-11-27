@@ -525,6 +525,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route("/api/runs", get(list_runs))
     .route("/api/runs/{id}", get(show_run))
     .route("/api/runs/{id}/cancel", post(cancel_run))
+    .route("/api/runs/{id}/retry", post(retry_run))
     .route("/api/export", get(export))
     .route("/api/audit", get(crate::audit::list))
     .route(
@@ -1243,7 +1244,7 @@ async fn service_logs(
   auth.require(Perm::Read)?;
   let snap = snapshot::load(&s.db).await?;
   let (server, project) =
-    crate::multi_logs::service_target(&snap.world, &name)?;
+    crate::multi_logs::service_target(&snap, &name)?;
   if q.previous_list || q.previous.is_some() {
     let values = crate::log_redact::service_values(
       &snap.world.services[&name].spec,
@@ -1339,7 +1340,7 @@ pub(crate) async fn deployments(
       ).optional().map_err(sql_err)?.ok_or_else(|| service_not_found(&name))?;
       let mut stmt = c
         .prepare(
-          "SELECT id, service, server, run_id, compose, images, created_at, spec, hash, commit_sha FROM deployments
+          "SELECT id, service, server, run_id, compose, images, created_at, spec, hash, commit_sha, started FROM deployments
            WHERE service = ?1 AND instance_id = ?2 ORDER BY id DESC LIMIT 50",
         )
         .map_err(sql_err)?;
@@ -1356,6 +1357,7 @@ pub(crate) async fn deployments(
             r.get::<_, Option<String>>(7)?,
             r.get::<_, String>(8)?,
             r.get::<_, Option<String>>(9)?,
+            r.get::<_, bool>(10)?,
           ))
         })
         .map_err(sql_err)?;
@@ -1374,12 +1376,14 @@ pub(crate) async fn deployments(
     spec,
     hash,
     commit,
+    started,
   ) in rows
   {
     let mut images: Vec<wharf_api_types::agent::ImageInfo> =
       serde_json::from_str(&images).map_err(json_err)?;
     wharf_api_types::agent::normalize_image_digests(&mut images);
     out.push(DeploymentView {
+      started,
       id,
       service,
       server,
@@ -2203,6 +2207,10 @@ async fn apply_plan(
 
 #[derive(Deserialize)]
 struct RunsQuery {
+  #[serde(default)]
+  failed: bool,
+  #[serde(default)]
+  status: Option<wharf_api_types::plan::RunStatus>,
   #[serde(default = "default_limit")]
   limit: u32,
 }
@@ -2217,7 +2225,12 @@ async fn list_runs(
   Query(q): Query<RunsQuery>,
 ) -> ApiResult<Vec<Run>> {
   auth.require(Perm::Read)?;
-  Ok(Json(apply::list_runs(&s, &auth, q.limit.min(200)).await?))
+  let status = q
+    .status
+    .or(q.failed.then_some(wharf_api_types::plan::RunStatus::Failed));
+  Ok(Json(
+    apply::list_runs(&s, &auth, q.limit.min(200), status).await?,
+  ))
 }
 
 async fn show_run(
@@ -2227,6 +2240,22 @@ async fn show_run(
 ) -> ApiResult<Run> {
   auth.require(Perm::Read)?;
   Ok(Json(apply::load_run_for(&s, &auth, &id).await?))
+}
+
+async fn retry_run(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Path(id): Path<String>,
+  axum::Extension(audit): axum::Extension<crate::audit::AuditSlot>,
+  axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<
+    std::net::SocketAddr,
+  >,
+  headers: HeaderMap,
+) -> ApiResult<ApplyResponse> {
+  let source = crate::login::client_key(peer.ip(), &headers);
+  let response = apply::retry_run(s, &auth, &id, source).await?;
+  audit.set_detail(format!("retry_of={id} run={}", response.run_id));
+  Ok(Json(response))
 }
 
 async fn cancel_run(

@@ -177,11 +177,9 @@ fn locate(snap: &Snap, service: &str) -> Result<Where, ApiError> {
           ))
       },
     )?;
-  let server = snap
-    .deployed
-    .get(service)
-    .cloned()
-    .unwrap_or_else(|| row.spec.server.clone());
+  let server = snapshot::service_runtime_server(snap, service)
+    .unwrap_or(&row.spec.server)
+    .to_string();
   if server == target {
     return Err(ApiError::invalid(format!(
       "服务 {service} 现在就在备份服务器 {target} 上，换一台备份服务器"
@@ -1135,10 +1133,11 @@ pub async fn run_now(
   let snap = snapshot::load(&s.db).await?;
   locate(&snap, &name)?;
   Ok(Json(
-    apply::start_task(
+    apply::start_task_by(
       s.clone(),
       format!("备份 {name}"),
       Step::Backup { service: name },
+      Some(crate::apply::format_actor(&auth)),
     )
     .await?,
   ))
@@ -1199,6 +1198,7 @@ pub async fn restore_now(
         service: name,
         snapshot: req.snapshot,
       },
+      Some(crate::apply::format_actor(&auth)),
       guard,
     )
     .await?,
