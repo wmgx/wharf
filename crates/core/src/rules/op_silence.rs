@@ -119,12 +119,18 @@ pub(super) async fn skip_sample(
     Verdict::Recover
   );
   if rule.id != "domain_down" {
-    return service_overrides::service_of_subject(rule.id, subject)
-      .is_some_and(|service| {
-        state
-          .locks
-          .suppress_alert(service, rule.id, subject, healthy, now)
-      });
+    let skip =
+      service_overrides::service_of_subject(rule.id, subject)
+        .is_some_and(|service| {
+          state
+            .locks
+            .suppress_alert(service, rule.id, subject, healthy, now)
+        });
+    if skip && rule.id == "http_5xx" {
+      // 受控操作期间的 5xx 不带进下一轮统计。
+      crate::http_stats::forget_sample(subject);
+    }
+    return skip;
   }
   let Some(world) = suppress::load_world(state).await else {
     return false;

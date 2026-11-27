@@ -698,3 +698,34 @@ async fn stopping_service_clears_alert_state_and_keeps_history() {
   }).await.unwrap();
   assert_eq!(history_rows(&state).await.len(), 2);
 }
+
+#[tokio::test]
+async fn controlled_operation_suppresses_only_matching_transient_samples()
+ {
+  let _guard = TEST_LOCK.lock().await;
+  reset_memory();
+  let state = test_state();
+  let guard = state
+    .locks
+    .acquire(crate::locks::LockSpec::apply(["web".into()]), "部署")
+    .unwrap();
+  guard.silence_alerts("web");
+  for subject in ["web", "other"] {
+    for _ in 0..3 {
+      observe(&state, "port.ok", subject, 0.0, "").await;
+    }
+  }
+  assert!(firing_since("port_down", "web").is_none());
+  assert!(firing_since("port_down", "other").is_some());
+  observe(&state, "container.oom", "web", 1.0, "").await;
+  assert!(firing_since("oom_killed", "web").is_some());
+
+  with(|m| {
+    m.config.entry(op_silence::ID.into()).or_default().enabled =
+      Some(false)
+  });
+  for _ in 0..3 {
+    observe(&state, "port.ok", "web", 0.0, "").await;
+  }
+  assert!(firing_since("port_down", "web").is_some());
+}
