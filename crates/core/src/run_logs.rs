@@ -206,22 +206,23 @@ fn cleanup_dirs(state: &AppState) -> io::Result<()> {
     }
     dirs.push((modified, id.to_string(), path, bytes));
   }
-  dirs.sort_unstable_by(|a, b| b.cmp(a));
+  dirs.sort_unstable();
   let now = SystemTime::now();
-  let mut count = 0;
-  let mut bytes = 0;
+  let mut count = dirs.len();
+  let mut bytes = dirs.iter().map(|entry| entry.3).sum::<u64>();
   for (mtime, id, path, len) in dirs {
     if state.runs.is_active(&id) {
       continue;
     }
     if now.duration_since(mtime).unwrap_or_default() > MAX_AGE
-      || count >= KEEP_RUNS
-      || bytes + len > MAX_TOTAL_BYTES
+      || count > KEEP_RUNS
+      || bytes > MAX_TOTAL_BYTES
     {
       fs::remove_dir_all(path)?;
+      count -= 1;
+      bytes -= len;
     } else {
-      count += 1;
-      bytes += len;
+      break;
     }
   }
   Ok(())
@@ -290,18 +291,20 @@ pub fn query(
         ApiError::internal(format!("读取执行日志失败：{e}"))
       })?;
     let raw = match archived {
-      Some((raw, from)) => {
+      Some((raw, from)) if !raw.is_empty() || step.log.is_empty() => {
         if from == "live" || source == "db" {
           source = from;
         }
         raw
       }
-      None => {
+      _ => {
         incomplete |= step.log_truncated;
         step.log.join("\n")
       }
     };
     if raw.is_empty() {
+      incomplete |= step.log_lines > 0;
+      total_lines = total_lines.saturating_add(step.log_lines);
       continue;
     }
     if n > 1 && query.step.is_none() && !query.errors {

@@ -130,14 +130,14 @@ pub async fn recover(state: &AppState) -> Result<(), ApiError> {
     }
     run.status = RunStatus::Failed;
     run.finished_at = Some(Utc::now());
-    persist(state, &stored.run, stored.scope_services.as_deref())
-      .await?;
     let data = state.data_dir.clone();
     let interrupted = id.clone();
     let _ = tokio::task::spawn_blocking(move || {
       crate::run_logs::seal_run_dir(&data, &interrupted)
     })
     .await;
+    persist(state, &stored.run, stored.scope_services.as_deref())
+      .await?;
     tracing::warn!("执行记录 {id} 因控制面重启而中断");
   }
   Ok(())

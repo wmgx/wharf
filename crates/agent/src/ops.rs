@@ -802,6 +802,12 @@ impl Ops {
     let prepared = async {
       let images = self.pull_all(up, ctx, &mut warnings).await?;
       if let Some(init) = &up.init {
+        crate::adopt::verify_expected_images(
+          &self.docker,
+          &up.expected_images,
+          ctx,
+        )
+        .await?;
         self.docker.run_init(&up.project, init, ctx).await?;
       }
       Ok(images)
@@ -1042,7 +1048,10 @@ case "$1:$6" in
   compose:run) touch init; exit 42;;
   compose:up) touch replaced;;
   rm:*) touch removed;;
-  image:*) echo 'sha256:old|[]';;
+  image:*) case "$4" in
+    '{{.Id}}') echo 'sha256:old';;
+    *) echo 'sha256:old|[]';;
+  esac;;
   ps:*) echo id;;
   inspect:*) echo 'sha256:old';;
   *) exit 2;;
