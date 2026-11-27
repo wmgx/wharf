@@ -27,7 +27,9 @@ pub async fn enrich(
       .db
       .call(move |c| {
         c.query_row(
-          "SELECT created_at FROM deployments WHERE service = ?1 ORDER BY id DESC LIMIT 1",
+          "SELECT d.created_at FROM deployments d JOIN resources r
+             ON r.kind = 'service' AND r.name = d.service AND d.instance_id = json_extract(r.meta, '$.instance_id')
+           WHERE d.service = ?1 ORDER BY d.id DESC LIMIT 1",
           [name],
           |r| r.get::<_, i64>(0),
         )

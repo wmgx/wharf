@@ -4,15 +4,15 @@ use std::{
   ffi::{CStr, CString},
   fs::File,
   io::{self, Read, Seek, SeekFrom, Write},
-  os::fd::AsRawFd,
+  os::{fd::AsRawFd, unix::fs::MetadataExt},
   path::Path,
 };
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::Value;
 use wharf_api_types::{
-  ApiError,
-  agent::{FILE_CHUNK, FileChunk, FilesOp},
+  ApiError, ErrorCode,
+  agent::{FILE_CHUNK, FileChunk, FileVersion, FilesOp},
 };
 
 use crate::{
@@ -84,8 +84,19 @@ fn handle_in(base: &Path, op: FilesOp) -> Result<Value, ApiError> {
     walk(root, dirs, path, matches!(op, FilesOp::Write { .. }))?;
   match op {
     FilesOp::Read {
-      path, offset, len, ..
-    } => to_value(read(&parent, name, &path, offset, len)?),
+      path,
+      offset,
+      len,
+      expect,
+      ..
+    } => to_value(read(
+      &parent,
+      name,
+      &path,
+      offset,
+      len,
+      expect.as_ref(),
+    )?),
     FilesOp::Write {
       path,
       offset,
@@ -105,12 +116,23 @@ fn to_value<T: serde::Serialize>(v: T) -> Result<Value, ApiError> {
     .map_err(|e| ApiError::internal(e.to_string()))
 }
 
+fn file_version(meta: &std::fs::Metadata) -> FileVersion {
+  FileVersion {
+    dev: meta.dev(),
+    ino: meta.ino(),
+    size: meta.len(),
+    mtime_secs: meta.mtime(),
+    mtime_nanos: meta.mtime_nsec() as u32,
+  }
+}
+
 fn read(
   parent: &DirFd,
   name: &CStr,
   path: &str,
   offset: u64,
   len: u32,
+  expect: Option<&FileVersion>,
 ) -> Result<FileChunk, ApiError> {
   let err = io_err(Path::new(path));
   let fd = parent
@@ -127,14 +149,31 @@ fn read(
   if !meta.is_file() {
     return Err(ApiError::invalid("只能读文件"));
   }
+  let changed = || {
+    ApiError::new(
+      ErrorCode::Conflict,
+      format!("下载期间文件 {path} 已变化，请重新下载"),
+    )
+    .with_hint("文件正在被写入或替换，稍后重试")
+  };
+  let before = file_version(&meta);
+  if expect.is_some_and(|version| version != &before) {
+    return Err(changed());
+  }
   f.seek(SeekFrom::Start(offset)).map_err(&err)?;
   let mut buf = Vec::new();
-  f.take(u64::from(len.min(FILE_CHUNK)))
+  (&mut f)
+    .take(u64::from(len.min(FILE_CHUNK)))
     .read_to_end(&mut buf)
-    .map_err(err)?;
+    .map_err(&err)?;
+  let after = file_version(&f.metadata().map_err(err)?);
+  if after != before {
+    return Err(changed());
+  }
   Ok(FileChunk {
     data: STANDARD.encode(&buf),
-    size: meta.len(),
+    size: after.size,
+    version: Some(after),
   })
 }
 
@@ -242,6 +281,34 @@ mod tests {
   };
 
   #[test]
+  fn read_rejects_file_replaced_between_chunks() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = tmp.path().join("app");
+    fs::create_dir(&app).unwrap();
+    let read = |offset, expect| {
+      handle_in(
+        tmp.path(),
+        FilesOp::Read {
+          service: "app".into(),
+          path: "idx.bin".into(),
+          offset,
+          len: 4,
+          expect,
+        },
+      )
+    };
+    fs::write(app.join("idx.bin"), b"old file").unwrap();
+    let first: FileChunk =
+      serde_json::from_value(read(0, None).unwrap()).unwrap();
+    fs::write(app.join("new"), b"new file").unwrap();
+    fs::rename(app.join("new"), app.join("idx.bin")).unwrap();
+    assert_eq!(
+      read(4, first.version).unwrap_err().code,
+      ErrorCode::Conflict
+    );
+  }
+
+  #[test]
   fn openat_blocks_symlink_escape_for_list_read_write() {
     let tmp = tempfile::tempdir().unwrap();
     let base = tmp.path().join("srv");
@@ -267,6 +334,7 @@ mod tests {
       handle_in(
         &base,
         FilesOp::Read {
+          expect: None,
           service: "app".into(),
           path: path.into(),
           offset: 0,

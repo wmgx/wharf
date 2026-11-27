@@ -1,6 +1,11 @@
 //! `wharf service files/download/upload`：服务数据目录里的文件，接口和页面上的文件浏览相同。
 
-use std::{io::Write, path::Path, time::Duration};
+use std::{
+  fs::{File, OpenOptions},
+  io::{self, Write},
+  path::{Path, PathBuf},
+  time::Duration,
+};
 
 use serde_json::{Value, json};
 use wharf_api_types::{ApiError, agent::FileEntry};
@@ -91,31 +96,70 @@ pub async fn download(
   let target = output.unwrap_or_else(|| {
     path.rsplit('/').next().unwrap_or("file").to_string()
   });
-  // 先写临时文件，下载完整了再改名，中途失败不留半截文件。
-  let tmp = format!("{target}.part");
-  let mut file = std::fs::File::create(&tmp).map_err(|e| {
-    ApiError::invalid(format!("不能写 {target}：{e}"))
-  })?;
-  let mut size = 0u64;
-  let result = c
-    .download(&url, DOWNLOAD_TIMEOUT, |b| {
-      size += b.len() as u64;
-      file.write_all(b)
-    })
-    .await;
-  let result = result.and_then(|()| {
-    std::fs::rename(&tmp, &target).map_err(|e| {
-      ApiError::internal(format!("保存 {target} 失败：{e}")).into()
-    })
-  });
-  if result.is_err() {
-    let _ = std::fs::remove_file(&tmp);
-  }
-  result?;
+  let size = download_to(c, &url, Path::new(&target)).await?;
   out(j, &json!({"path": target, "size": size}), |_| {
     println!("已下载到 {target}（{}）", human_size(size))
   });
   Ok(())
+}
+
+fn create_download_temp(
+  target: &Path,
+) -> io::Result<(File, PathBuf)> {
+  let name = target
+    .file_name()
+    .ok_or_else(|| io::Error::other("输出文件名无效"))?;
+  let mut bytes = [0; 8];
+  getrandom::fill(&mut bytes)
+    .map_err(|e| io::Error::other(e.to_string()))?;
+  let mut tmp = std::ffi::OsString::from(".");
+  tmp.push(name);
+  tmp.push(format!(".wharf-dl-{}.tmp", hex::encode(bytes)));
+  let tmp = target.with_file_name(tmp);
+  let file =
+    OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+  Ok((file, tmp))
+}
+
+async fn download_to(
+  c: &Client,
+  url: &str,
+  target: &Path,
+) -> CliResult<u64> {
+  let mut staged: Option<(File, PathBuf)> = None;
+  let mut size = 0;
+  let result = c
+    .download(url, DOWNLOAD_TIMEOUT, |chunk| {
+      if staged.is_none() {
+        staged = Some(create_download_temp(target)?);
+      }
+      let (file, _) = staged.as_mut().unwrap();
+      file.write_all(chunk)?;
+      size += chunk.len() as u64;
+      Ok(())
+    })
+    .await;
+  if let Err(e) = result {
+    if let Some((file, tmp)) = staged {
+      drop(file);
+      let _ = std::fs::remove_file(tmp);
+    }
+    return Err(e);
+  }
+  let save_error = |e| {
+    ApiError::internal(format!("保存 {} 失败：{e}", target.display()))
+  };
+  let (file, tmp) = staged
+    .map_or_else(|| create_download_temp(target), Ok)
+    .map_err(save_error)?;
+  let synced = file.sync_all();
+  drop(file);
+  if let Err(e) = synced.and_then(|()| std::fs::rename(&tmp, target))
+  {
+    let _ = std::fs::remove_file(tmp);
+    return Err(save_error(e).into());
+  }
+  Ok(size)
 }
 
 pub async fn upload(
@@ -158,4 +202,46 @@ pub async fn upload(
     println!("已上传到 {name}:{path}（{}）", human_size(size))
   });
   Ok(())
+}
+
+#[tokio::test]
+async fn download_failure_preserves_existing_part_file() {
+  use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpListener,
+  };
+
+  let root = tempfile::tempdir().unwrap();
+  let part = root.path().join("archive.tar.part");
+  std::fs::write(&part, "keep-me").unwrap();
+  let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let client = Client::test_endpoint(format!(
+    "http://{}",
+    listener.local_addr().unwrap()
+  ));
+  let server = tokio::spawn(async move {
+    let (mut socket, _) = listener.accept().await.unwrap();
+    let mut request = Vec::new();
+    while !request.ends_with(b"\r\n\r\n") && request.len() < 8192 {
+      request.push(socket.read_u8().await.unwrap());
+    }
+    socket
+      .write_all(
+        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n",
+      )
+      .await
+      .unwrap();
+  });
+  assert!(
+    tokio::time::timeout(
+      Duration::from_secs(5),
+      download_to(&client, "/", &root.path().join("archive.tar"))
+    )
+    .await
+    .unwrap()
+    .is_err()
+  );
+  server.await.unwrap();
+  assert_eq!(std::fs::read_to_string(&part).unwrap(), "keep-me");
+  assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
 }

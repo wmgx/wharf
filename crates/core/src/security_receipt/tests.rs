@@ -43,6 +43,8 @@ async fn purged_service_has_receipt() {
       server: "s1".into(),
       service: "example".into(),
       purge_data: true,
+      instance_id: None,
+      has_relative_mounts: false,
     },
     &Ok(()),
   )

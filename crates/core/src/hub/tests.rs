@@ -28,6 +28,7 @@ fn old_hello_has_no_host_shell_capability() {
     core_probe,
     gateway_extra_files,
     backup_isolation,
+    safe_delete,
     key_rotation,
     ..
   } = hello
@@ -39,6 +40,7 @@ fn old_hello_has_no_host_shell_capability() {
   assert!(!core_probe);
   assert!(!gateway_extra_files);
   assert!(!backup_isolation);
+  assert!(!safe_delete);
   assert!(!key_rotation);
 }
 
@@ -78,6 +80,7 @@ fn old_core_ignores_new_hello_capability() {
     gateway_extra_files: true,
     core_probe: true,
     backup_isolation: true,
+    safe_delete: true,
     key_rotation: true,
   };
   let json = serde_json::to_string(&hello).unwrap();
@@ -101,6 +104,17 @@ impl Hub {
       false,
       handle,
     );
+  }
+
+  pub(crate) fn mock_safe_delete_agent(
+    &self,
+    server: &str,
+    handle: impl FnMut(AgentOp) -> Result<Value, ApiError>
+    + Send
+    + 'static,
+  ) {
+    self.mock_agent(server, false, handle);
+    lock(&self.conns).get_mut(server).unwrap().safe_delete = true;
   }
 
   pub(crate) fn mock_agent_with_backup(
@@ -175,6 +189,7 @@ impl Hub {
         ssh_logins: false,
         gateway_extra_files,
         backup_isolation,
+        safe_delete: false,
         upgrade_only: false,
       },
     );
@@ -247,6 +262,7 @@ async fn agent_upgrade_needs_no_bound_core_server_or_probe_support() {
     ssh_logins: false,
     gateway_extra_files: false,
     backup_isolation: false,
+    safe_delete: false,
     upgrade_only: true,
   };
   state.hub.register("s1", conn.clone());
@@ -304,6 +320,7 @@ fn probe_connection(
     ssh_logins: false,
     gateway_extra_files: false,
     backup_isolation: false,
+    safe_delete: false,
     upgrade_only: false,
   };
   (conn, rx)

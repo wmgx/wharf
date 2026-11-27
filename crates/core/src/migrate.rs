@@ -55,8 +55,8 @@ pub async fn volume_sync(
   state: &AppState,
   net: &Net,
   service: &str,
-  from: &str,
-  to: &str,
+  (from, to): (&str, &str),
+  instance_id: Option<&str>,
   progress: ProgressFn,
   cancel: &CancellationToken,
 ) -> Result<(), ApiError> {
@@ -178,7 +178,13 @@ pub async fn volume_sync(
     (Err(_), Err(e)) if e.code != ErrorCode::Cancelled => Err(e),
     (Err(e), _) => Err(e),
     (Ok(()), _) => {
-      crate::jobs::schedule_cleanup(state, service, from).await?;
+      crate::jobs::schedule_cleanup(
+        state,
+        service,
+        from,
+        instance_id,
+      )
+      .await?;
       progress(format!(
         "{from} 上的 /srv/{service}/ 保留 7 天，之后自动删除"
       ));

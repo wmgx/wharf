@@ -178,7 +178,7 @@ impl Ops {
       AgentOp::SyncServe(s) => crate::sync::serve(&s, ctx).await,
       AgentOp::SyncPush(p) => crate::sync::push(&p, ctx).await,
       AgentOp::RemoveData { service } => {
-        self.remove_data(&service, ctx)
+        self.remove_data(&service, ctx).await
       }
       AgentOp::Restic(job) => {
         crate::restic::run(&self.docker, &job, ctx).await
@@ -362,12 +362,14 @@ impl Ops {
     }
   }
   /// 只删迁移留下的旧数据：这台机器上还部署着这个服务就拒绝。
-  fn remove_data(
+  async fn remove_data(
     &self,
     service: &str,
     ctx: &Ctx,
   ) -> Result<Value, ApiError> {
     check_project(service)?;
+    let lock = self.lock_for(service);
+    let _guard = lock.lock().await;
     if self
       .docker
       .project_dir(service)
@@ -378,9 +380,27 @@ impl Ops {
         "服务 {service} 还部署在这台机器上，不删除它的数据"
       )));
     }
-    crate::dirfd::remove_service(Path::new("/srv"), service)?;
-    ctx.say(format!("清理 /srv/{service}"));
-    Ok(Value::Null)
+    let root = Path::new("/srv");
+    let blocked_by = self
+      .docker
+      .bind_mount_users(&root.join(service), ctx)
+      .await?;
+    let removed = blocked_by.is_empty();
+    if removed {
+      crate::dirfd::remove_service(root, service)?;
+      ctx.say(format!("清理 /srv/{service}"));
+    } else {
+      ctx.say(format!(
+        "保留 /srv/{service}：仍有容器挂载该目录（{}）",
+        blocked_by.join("、")
+      ));
+    }
+    Ok(serde_json::json!(
+      wharf_api_types::agent::RemoveDataResult {
+        removed,
+        blocked_by
+      }
+    ))
   }
 
   async fn stop_start(

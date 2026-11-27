@@ -219,6 +219,7 @@ mod tests {
   #[test]
   fn url_skips_udp_ports() {
     let mut row: ServiceRow = ServiceRow {
+      instance_id: "svc_fixture".into(),
       spec: serde_json::from_value(serde_json::json!({
         "server": "s1",
         "source": { "image": "traefik/whoami" },

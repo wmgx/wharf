@@ -934,7 +934,7 @@ pub async fn remove(
     .await?;
   crate::log_redact::refresh(&s.db).await;
   if q.data && matches!(spec.how, TaskKind::Script { .. }) {
-    let _: serde_json::Value = s
+    let result: wharf_api_types::agent::RemoveDataResult = s
       .hub
       .call(
         &spec.server,
@@ -946,6 +946,9 @@ pub async fn remove(
         &CancellationToken::new(),
       )
       .await?;
+    if !result.removed {
+      return Err(ApiError::new(ErrorCode::Conflict, format!("未能删除任务数据 /srv/{TASK_DATA_PREFIX}{task_name}：仍有容器挂载（{}）", result.blocked_by.join("、"))).into());
+    }
   }
   Ok(Json(serde_json::json!({ "ok": true })))
 }

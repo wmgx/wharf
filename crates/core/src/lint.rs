@@ -49,7 +49,9 @@ pub(crate) fn plan_warnings(
       Step::ServiceUp { service, .. } => {
         services.insert(service.as_str());
       }
-      Step::VolumeSync { service, from, to } => {
+      Step::VolumeSync {
+        service, from, to, ..
+      } => {
         services.insert(service.as_str());
         servers.extend([from.as_str(), to.as_str()]);
       }

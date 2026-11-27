@@ -76,6 +76,7 @@ struct Conn {
   ssh_logins: bool,
   gateway_extra_files: bool,
   backup_isolation: bool,
+  safe_delete: bool,
   /// 协议版本不一致：连接放行，但只接受升级相关的请求，好让它升上来。
   upgrade_only: bool,
 }
@@ -235,6 +236,12 @@ impl Hub {
       .is_some_and(|c| !c.upgrade_only && c.container_diagnosis)
   }
 
+  pub fn supports_safe_delete(&self, server: &str) -> bool {
+    lock(&self.conns)
+      .get(server)
+      .is_some_and(|c| !c.upgrade_only && c.safe_delete)
+  }
+
   pub fn supports_backup_isolation(&self, server: &str) -> bool {
     lock(&self.conns)
       .get(server)
@@ -371,6 +378,20 @@ impl Hub {
     progress: Option<ProgressFn>,
     cancel: &CancellationToken,
   ) -> Result<T, ApiError> {
+    if matches!(&op, AgentOp::RemoveData { .. })
+      && (conn.upgrade_only || !conn.safe_delete)
+    {
+      return Err(
+        ApiError::new(
+          ErrorCode::Conflict,
+          format!(
+            "服务器 {server} 的 agent 版本旧，无法安全清理数据"
+          ),
+        )
+        .with_hint("先运行 wharf upgrade 升级 agent 后重试")
+        .suggest("wharf upgrade"),
+      );
+    }
     if matches!(
       &op,
       AgentOp::RotateAgentKey(_) | AgentOp::TrustCoreKey(_)
@@ -678,6 +699,7 @@ async fn handle_socket(
     gateway_extra_files,
     core_probe,
     backup_isolation,
+    safe_delete,
     key_rotation,
   } = hello
   else {
@@ -837,6 +859,7 @@ async fn handle_socket(
     ssh_logins,
     gateway_extra_files,
     backup_isolation,
+    safe_delete,
     upgrade_only,
   };
   let state_on_db = state.clone();

@@ -6,11 +6,15 @@ use std::{sync::Arc, time::Duration};
 
 use rusqlite::params;
 use tokio_util::sync::CancellationToken;
-use wharf_api_types::{ApiError, ErrorCode, agent::AgentOp};
+use wharf_api_types::{
+  ApiError, ErrorCode,
+  agent::{AgentOp, RemoveDataResult},
+};
 
 use crate::{
   apply,
   db::{now_ms, sql_err},
+  hub::ProgressFn,
   planner::Step,
   snapshot,
   state::AppState,
@@ -178,15 +182,17 @@ pub async fn schedule_cleanup(
   state: &AppState,
   service: &str,
   server: &str,
+  instance_id: Option<&str>,
 ) -> Result<(), ApiError> {
   let (service, server) = (service.to_string(), server.to_string());
+  let instance_id = instance_id.map(str::to_string);
   state
     .db
     .call(move |c| {
       c.execute(
-        "INSERT INTO cleanups (service, server, due_at) VALUES (?1, ?2, ?3)
-         ON CONFLICT (service, server) DO UPDATE SET due_at = excluded.due_at",
-        params![service, server, now_ms() + KEEP_OLD_DATA_MS],
+        "INSERT INTO cleanups (service, server, due_at, instance_id) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT (service, server) DO UPDATE SET due_at = excluded.due_at, instance_id = excluded.instance_id",
+        params![service, server, now_ms() + KEEP_OLD_DATA_MS, instance_id],
       )
       .map_err(sql_err)?;
       Ok(())
@@ -194,70 +200,154 @@ pub async fn schedule_cleanup(
     .await
 }
 
-async fn cleanups(state: &AppState) -> Result<(), ApiError> {
+async fn cleanups(state: &Arc<AppState>) -> Result<(), ApiError> {
   let now = now_ms();
-  let due: Vec<(String, String)> = state
-    .db
-    .call(move |c| {
-      let mut stmt = c
-        .prepare(
-          "SELECT service, server FROM cleanups WHERE due_at <= ?1",
-        )
-        .map_err(sql_err)?;
-      let rows = stmt
-        .query_map(params![now], |r| Ok((r.get(0)?, r.get(1)?)))
-        .map_err(sql_err)?;
-      rows.collect::<Result<_, _>>().map_err(sql_err)
-    })
-    .await?;
-  if due.is_empty() {
-    return Ok(());
-  }
-  let snap = snapshot::load(&state.db).await?;
-  for (service, server) in due {
-    // 服务又回到这台机器上了：数据在用，不删。
-    let back = snap
-      .world
-      .services
-      .get(&service)
-      .is_some_and(|s| s.spec.server == server)
-      || snap.deployed.get(&service) == Some(&server);
-    if !back {
-      if !state.hub.is_online(&server) {
-        continue;
-      }
-      let removed = state
-        .hub
-        .call::<serde_json::Value>(
-          &server,
-          AgentOp::RemoveData {
-            service: service.clone(),
-          },
-          Duration::from_secs(30 * 60),
-          None,
-          &CancellationToken::new(),
-        )
-        .await;
-      if let Err(e) = removed {
-        tracing::warn!(
-          "删除 {server} 上 {service} 的旧数据失败：{e}"
-        );
-        continue;
-      }
-      tracing::info!("已删除 {server} 上 {service} 迁移前的旧数据");
+  let due: Vec<(String, String, Option<String>)> = state.db.call(move |c| {
+    let mut stmt = c.prepare("SELECT service, server, instance_id FROM cleanups WHERE due_at <= ?1 ORDER BY due_at ASC").map_err(sql_err)?;
+    let rows = stmt.query_map([now], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).map_err(sql_err)?;
+    rows.collect::<Result<_, _>>().map_err(sql_err)
+  }).await?;
+  for (service, server, instance_id) in due {
+    if !state.hub.is_online(&server) {
+      continue;
     }
-    let (s, v) = (service.clone(), server.clone());
-    state
-      .db
-      .call(move |c| {
-        c.execute(
-          "DELETE FROM cleanups WHERE service = ?1 AND server = ?2",
-          params![s, v],
-        )
-        .map_err(sql_err)?;
-        Ok(())
-      })
-      .await?;
+    if !state.hub.supports_safe_delete(&server) {
+      tracing::warn!(
+        "服务器 {server} 的 agent 版本旧，升级后再清理 {service} 的旧数据"
+      );
+      continue;
+    }
+    let result = apply::start_task(
+      state.clone(),
+      format!("清理 {server} 上 {service} 的旧数据"),
+      Step::CleanupData {
+        service,
+        server,
+        instance_id,
+      },
+    )
+    .await;
+    return match result {
+      Err(e) if e.code == ErrorCode::Busy => Ok(()),
+      result => result.map(|_| ()),
+    };
   }
   Ok(())
+}
+
+pub(crate) async fn cleanup_data(
+  state: &AppState,
+  snap: &snapshot::Snapshot,
+  service: &str,
+  server: &str,
+  instance_id: Option<&str>,
+  progress: ProgressFn,
+  cancel: &CancellationToken,
+) -> Result<(), ApiError> {
+  let key = (
+    service.to_string(),
+    server.to_string(),
+    instance_id.map(str::to_string),
+  );
+  let query = key.clone();
+  let due = state.db.call(move |c| c.query_row(
+    "SELECT EXISTS(SELECT 1 FROM cleanups WHERE service = ?1 AND server = ?2 AND instance_id IS ?3 AND due_at <= ?4)",
+    params![query.0, query.1, query.2, now_ms()], |r| r.get::<_, bool>(0)
+  ).map_err(sql_err)).await?;
+  if !due {
+    return Ok(());
+  }
+  let row = snap.world.services.get(service);
+  if row.is_some_and(|r| r.spec.server == server)
+    || snap.deployed.get(service).is_some_and(|s| s == server)
+  {
+    progress(format!("服务已回到 {server}，取消清理"));
+  } else if row
+    .is_some_and(|r| Some(r.instance_id.as_str()) != instance_id)
+  {
+    progress(format!(
+      "服务 {service} 已同名重建，取消旧实例的数据清理"
+    ));
+  } else {
+    let result: RemoveDataResult = state
+      .hub
+      .call(
+        server,
+        AgentOp::RemoveData {
+          service: service.to_string(),
+        },
+        Duration::from_secs(30 * 60),
+        Some(progress.clone()),
+        cancel,
+      )
+      .await?;
+    if result.removed {
+      progress(format!("已删除 {server} 上 /srv/{service}"));
+    } else {
+      progress(format!(
+        "跳过删除 {server} 上 /srv/{service}：仍有容器挂载（{}）",
+        result.blocked_by.join("、")
+      ));
+    }
+  }
+  state.db.call(move |c| {
+    c.execute("DELETE FROM cleanups WHERE service = ?1 AND server = ?2 AND instance_id IS ?3", params![key.0, key.1, key.2]).map_err(sql_err)?;
+    Ok(())
+  }).await
+}
+
+#[tokio::test]
+async fn cleanup_skips_when_service_moved_back_or_rebuilt() {
+  let state = crate::rules::tests::test_state();
+  state
+    .hub
+    .mock_safe_delete_agent("s1", |_| panic!("不应发送清理请求"));
+  state
+    .db
+    .call(|c| {
+      c.execute_batch(
+        "INSERT INTO cleanups (service, server, due_at, instance_id)
+      VALUES ('app', 's1', 0, 'svc_old')",
+      )
+      .map_err(sql_err)
+    })
+    .await
+    .unwrap();
+  let locked = state.apply_lock.lock().await;
+  cleanups(&state).await.unwrap();
+  drop(locked);
+  for (server, instance) in [("s1", "svc_old"), ("s2", "svc_new")] {
+    state.db.call(move |c| {
+      c.execute("INSERT OR REPLACE INTO cleanups (service, server, due_at, instance_id)
+        VALUES ('app', 's1', 0, 'svc_old')", []).map_err(sql_err)?;
+      c.execute("INSERT OR REPLACE INTO resources (kind, name, spec, meta, version, created_at, updated_at)
+        VALUES ('service', 'app', json_object('server', ?1, 'source', json_object('image', 'fixture:1')),
+          json_object('instance_id', ?2), 1, 0, 0)", params![server, instance]).map_err(sql_err)
+    }).await.unwrap();
+    let lock = state.apply_lock.lock().await;
+    let snap = snapshot::load(&state.db).await.unwrap();
+    cleanup_data(
+      &state,
+      &snap,
+      "app",
+      "s1",
+      Some("svc_old"),
+      Arc::new(|_| {}),
+      &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let count = state
+      .db
+      .call(|c| {
+        c.query_row("SELECT COUNT(*) FROM cleanups", [], |r| {
+          r.get::<_, i64>(0)
+        })
+        .map_err(sql_err)
+      })
+      .await
+      .unwrap();
+    assert_eq!(count, 0);
+    drop(lock);
+  }
 }

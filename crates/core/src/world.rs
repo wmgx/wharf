@@ -43,6 +43,7 @@ pub struct ServerRow {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ServiceRow {
+  pub instance_id: String,
   pub spec: ServiceSpec,
   /// 端口名 → 宿主机端口。
   pub host_ports: BTreeMap<String, u16>,
@@ -115,6 +116,12 @@ pub fn new_id(prefix: &str) -> String {
   format!("{prefix}_{}", hex::encode(bytes))
 }
 
+pub fn new_service_instance_id() -> String {
+  let mut bytes = [0; 8];
+  getrandom::fill(&mut bytes).expect("随机数不可用");
+  format!("svc_{}", hex::encode(bytes))
+}
+
 impl World {
   pub fn from_rows(rows: Vec<ResourceRow>) -> Result<Self, ApiError> {
     let mut world = World::default();
@@ -135,6 +142,10 @@ impl World {
           world.services.insert(
             row.name,
             ServiceRow {
+              instance_id: row.meta["instance_id"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
               spec: serde_json::from_value(row.spec)
                 .map_err(json_err)?,
               host_ports: serde_json::from_value(
@@ -203,6 +214,16 @@ impl World {
   }
 
   /// 每个资源的版本，`kind/name` → version。
+  pub fn service_instances(&self) -> BTreeMap<String, String> {
+    self
+      .services
+      .iter()
+      .map(|(name, row)| {
+        (format!("{KIND_SERVICE}/{name}"), row.instance_id.clone())
+      })
+      .collect()
+  }
+
   pub fn versions(&self) -> BTreeMap<String, u64> {
     let mut out = BTreeMap::new();
     for (name, r) in &self.servers {
@@ -365,6 +386,10 @@ impl World {
           let host_ports =
             old.map(|s| s.host_ports.clone()).unwrap_or_default();
           let version = old.map(|s| s.version).unwrap_or(0);
+          let instance_id = old
+            .map_or_else(new_service_instance_id, |s| {
+              s.instance_id.clone()
+            });
           // 导入后、第一次部署前再改配置：导入还没做完，保留。
           let import = adopt
             .clone()
@@ -463,6 +488,7 @@ impl World {
           self.services.insert(
             name.clone(),
             ServiceRow {
+              instance_id,
               spec,
               host_ports,
               import,
@@ -1446,7 +1472,7 @@ impl World {
       &self.services,
       KIND_SERVICE,
       |r| {
-        let mut meta = json!({ "host_ports": r.host_ports });
+        let mut meta = json!({ "host_ports": r.host_ports, "instance_id": r.instance_id });
         if let Some(import) = &r.import {
           meta["import"] = to_json(import);
         }

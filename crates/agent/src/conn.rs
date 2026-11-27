@@ -182,6 +182,7 @@ async fn handshake(
     gateway_extra_files: true,
     core_probe: true,
     backup_isolation: true,
+    safe_delete: true,
     key_rotation: true,
     access_logs: true,
     net_probe: true,
