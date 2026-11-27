@@ -149,8 +149,10 @@ fn inject(
     let service = service.as_mapping_mut().ok_or_else(invalid)?;
     let environment = service
       .entry(Value::from("environment"))
-      .or_insert_with(|| inherited.cloned().unwrap_or(Value::Null));
-    if let Some(inherited) = inherited {
+      .or_insert(Value::Null);
+    if let Some(inherited) = inherited
+      && environment != inherited
+    {
       environment.clone_from(inherited);
     }
     if environment.is_null() {
@@ -446,11 +448,6 @@ mod tests {
     );
     assert!(rendered.contains("FOO=bar"));
   }
-}
-
-#[cfg(test)]
-mod tests {
-  use super::*;
 
   #[test]
   fn inject_preserves_environment_from_chained_anchors() {

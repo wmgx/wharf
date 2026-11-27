@@ -3,7 +3,6 @@
 use std::{collections::BTreeSet, mem::MaybeUninit, ops::Range};
 
 use serde_yaml_ng::Value;
-use unsafe_libyaml as yaml;
 use wharf_api_types::ApiError;
 
 use crate::render::{mark_compose_refs, parse_compose_template};
@@ -85,15 +84,16 @@ fn scalar_ranges(
 ) -> Option<Vec<Range<usize>>> {
   let input = content.strip_prefix('\u{feff}').unwrap_or(content);
   let bom = content.len() - input.len();
-  let mut parser = MaybeUninit::<yaml::yaml_parser_t>::uninit();
+  let mut parser =
+    MaybeUninit::<unsafe_libyaml::yaml_parser_t>::uninit();
   let parser = parser.as_mut_ptr();
   // SAFETY: libyaml initializes the parser and each successful token. Input
   // outlives scanning, and all tokens and the parser are released exactly once.
   unsafe {
-    if yaml::yaml_parser_initialize(parser).fail {
+    if unsafe_libyaml::yaml_parser_initialize(parser).fail {
       return None;
     }
-    yaml::yaml_parser_set_input_string(
+    unsafe_libyaml::yaml_parser_set_input_string(
       parser,
       input.as_ptr(),
       input.len() as u64,
@@ -101,12 +101,14 @@ fn scalar_ranges(
     let mut ranges = Vec::new();
     let result = loop {
       let mut token = MaybeUninit::uninit();
-      if yaml::yaml_parser_scan(parser, token.as_mut_ptr()).fail {
+      if unsafe_libyaml::yaml_parser_scan(parser, token.as_mut_ptr())
+        .fail
+      {
         break None;
       }
       let mut token = token.assume_init();
-      let end = token.type_ == yaml::YAML_STREAM_END_TOKEN;
-      if token.type_ == yaml::YAML_SCALAR_TOKEN {
+      let end = token.type_ == unsafe_libyaml::YAML_STREAM_END_TOKEN;
+      if token.type_ == unsafe_libyaml::YAML_SCALAR_TOKEN {
         let scalar = token.data.scalar;
         let value = std::slice::from_raw_parts(
           scalar.value,
@@ -125,12 +127,12 @@ fn scalar_ranges(
           }
         }
       }
-      yaml::yaml_token_delete(&mut token);
+      unsafe_libyaml::yaml_token_delete(&mut token);
       if end {
         break Some(ranges);
       }
     };
-    yaml::yaml_parser_delete(parser);
+    unsafe_libyaml::yaml_parser_delete(parser);
     result
   }
 }
