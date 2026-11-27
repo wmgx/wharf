@@ -25,7 +25,9 @@ use crate::{
 
 mod gateway;
 mod validation;
-use validation::{check_own_container, check_project, ensure_dir};
+use validation::{
+  check_own_container, check_project, data_dir_relative,
+};
 
 pub struct Ops {
   pub docker: Docker,
@@ -62,6 +64,31 @@ impl Ops {
     let mut locks =
       self.locks.lock().unwrap_or_else(|p| p.into_inner());
     locks.entry(project.to_string()).or_default().clone()
+  }
+
+  pub(crate) fn reserve_removal(
+    &self,
+    service: &str,
+  ) -> Result<tokio::sync::OwnedMutexGuard<()>, ApiError> {
+    check_project(service)?;
+    self.lock_for(service).try_lock_owned().map_err(|_| {
+      ApiError::new(
+        ErrorCode::Busy,
+        format!("服务 {service} 正在执行其他操作"),
+      )
+    })
+  }
+
+  async fn lock_data(
+    &self,
+    service: &str,
+    ctx: &Ctx,
+  ) -> Result<tokio::sync::OwnedMutexGuard<()>, ApiError> {
+    tokio::select! {
+      biased;
+      _ = ctx.cancel.cancelled() => Err(ApiError::new(ErrorCode::Cancelled, "已取消")),
+      guard = self.lock_for(service).lock_owned() => Ok(guard),
+    }
   }
   pub(crate) fn rotate_identity(
     &self,
@@ -119,7 +146,14 @@ impl Ops {
       }
       AgentOp::EnsureDirs { dirs } => {
         for dir in &dirs {
-          ensure_dir(dir)?;
+          let relative = data_dir_relative(dir)?;
+          let project = relative
+            .iter()
+            .next()
+            .and_then(|p| p.to_str())
+            .unwrap_or_default();
+          let _guard = self.lock_data(project, ctx).await?;
+          crate::dirfd::ensure_beneath(Path::new("/srv"), relative)?;
         }
         Ok(Value::Null)
       }
@@ -175,10 +209,14 @@ impl Ops {
       AgentOp::ProjectStart { project } => {
         self.stop_start(&project, true, ctx).await
       }
-      AgentOp::SyncServe(s) => crate::sync::serve(&s, ctx).await,
+      AgentOp::SyncServe(s) => {
+        check_project(&s.service)?;
+        let _guard = self.lock_data(&s.service, ctx).await?;
+        crate::sync::serve(&s, ctx).await
+      }
       AgentOp::SyncPush(p) => crate::sync::push(&p, ctx).await,
       AgentOp::RemoveData { service } => {
-        self.remove_data(&service, ctx)
+        self.remove_data(&service, ctx).await
       }
       AgentOp::Restic(job) => {
         crate::restic::run(&self.docker, &job, ctx).await
@@ -365,12 +403,11 @@ impl Ops {
     }
   }
   /// 只删迁移留下的旧数据：这台机器上还部署着这个服务就拒绝。
-  fn remove_data(
+  async fn remove_data(
     &self,
     service: &str,
     ctx: &Ctx,
   ) -> Result<Value, ApiError> {
-    check_project(service)?;
     if self
       .docker
       .project_dir(service)
@@ -381,9 +418,27 @@ impl Ops {
         "服务 {service} 还部署在这台机器上，不删除它的数据"
       )));
     }
-    crate::dirfd::remove_service(Path::new("/srv"), service)?;
-    ctx.say(format!("清理 /srv/{service}"));
-    Ok(Value::Null)
+    let root = Path::new("/srv");
+    let blocked_by = self
+      .docker
+      .bind_mount_users(&root.join(service), ctx)
+      .await?;
+    let removed = blocked_by.is_empty();
+    if removed {
+      crate::dirfd::remove_service(root, service, ctx).await?;
+      ctx.say(format!("清理 /srv/{service}"));
+    } else {
+      ctx.say(format!(
+        "保留 /srv/{service}：仍有容器挂载该目录（{}）",
+        blocked_by.join("、")
+      ));
+    }
+    Ok(serde_json::json!(
+      wharf_api_types::agent::RemoveDataResult {
+        removed,
+        blocked_by
+      }
+    ))
   }
 
   async fn stop_start(

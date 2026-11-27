@@ -115,6 +115,7 @@ pub(crate) async fn completed_step(
       server,
       service,
       purge_data: true,
+      ..
     },
     Ok(()),
   ) = (actor, step, result)

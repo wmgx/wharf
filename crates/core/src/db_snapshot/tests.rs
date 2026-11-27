@@ -69,11 +69,14 @@ fn high_risk_trigger() {
       service: "app".into(),
       from: "s1".into(),
       to: "s2".into(),
+      instance_id: None,
     },
     Step::ServiceDown {
       server: "s1".into(),
       service: "app".into(),
       purge_data: true,
+      instance_id: None,
+      has_relative_mounts: false,
     },
   ] {
     assert!(
@@ -122,6 +125,7 @@ async fn apply_snapshot_failure_is_atomic_and_admin_skip_is_audited()
     .unwrap();
   let mut planned = Planned {
     plan,
+    base_instances: Default::default(),
     account_refs: Default::default(),
     host_requirements: vec![],
     route_effects: Default::default(),

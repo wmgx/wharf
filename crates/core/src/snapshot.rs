@@ -41,6 +41,7 @@ pub struct Snapshot {
   pub service_values: BTreeMap<String, String>,
   /// 每个服务最近一次成功部署在哪台服务器上。和配置里的服务器不同，说明迁移还没完成。
   pub deployed: BTreeMap<String, String>,
+  pub pending_deletes: Vec<db::PendingDeleteRow>,
   /// cloudflare_tunnel 网关已经创建的隧道。
   pub tunnels: BTreeMap<String, db::TunnelRow>,
   /// 已绑定到边缘应用的自定义域名。
@@ -213,6 +214,7 @@ pub(crate) async fn load_inner(
         service_values,
         account_links: crate::app_accounts::account_links(c)?,
         deployed: db::deployed_servers(c)?,
+        pending_deletes: db::all_pending_deletes(c)?,
         applied: db::applied(c)?,
         ops,
         heartbeats: crate::service_monitor::heartbeat::load(c)?,
@@ -1011,6 +1013,7 @@ mod tests {
     world.services.insert(
       "app".to_string(),
       ServiceRow {
+        instance_id: "svc_fixture".into(),
         spec,
         host_ports: BTreeMap::from([("http".to_string(), host_port)]),
         import: None,

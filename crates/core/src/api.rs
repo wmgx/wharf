@@ -1247,7 +1247,7 @@ async fn multi_service_logs(
   ))
 }
 
-async fn deployments(
+pub(crate) async fn deployments(
   State(s): State<Arc<AppState>>,
   auth: Auth,
   Path(name): Path<String>,
@@ -1256,14 +1256,18 @@ async fn deployments(
   let rows = s
     .db
     .call(move |c| {
+      let instance_id: String = c.query_row(
+        "SELECT json_extract(meta, '$.instance_id') FROM resources WHERE kind = 'service' AND name = ?1",
+        [&name], |r| r.get(0),
+      ).optional().map_err(sql_err)?.ok_or_else(|| service_not_found(&name))?;
       let mut stmt = c
         .prepare(
           "SELECT id, service, server, run_id, compose, images, created_at, spec, hash, commit_sha FROM deployments
-           WHERE service = ?1 ORDER BY id DESC LIMIT 50",
+           WHERE service = ?1 AND instance_id = ?2 ORDER BY id DESC LIMIT 50",
         )
         .map_err(sql_err)?;
       let rows = stmt
-        .query_map(params![name], |r| {
+        .query_map(params![name, instance_id], |r| {
           Ok((
             r.get::<_, i64>(0)?,
             r.get::<_, String>(1)?,
@@ -2261,6 +2265,7 @@ mod tests {
     for (name, reference) in [("a", "[[url:S]]"), ("b", "[[FILE:S]]")]
     {
       world.services.insert(name.into(), crate::world::ServiceRow {
+        instance_id: "svc_fixture".into(),
         spec: serde_json::from_value(json!({
           "server": "s1", "source": {"image": "nginx:1"}, "env": {"KEY": reference}
         })).unwrap(),

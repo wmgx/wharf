@@ -31,16 +31,18 @@ const BUILD_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 async fn last_commit(
   state: &AppState,
   service: &str,
+  instance_id: &str,
   build: &BuildSource,
 ) -> Result<Option<String>, ApiError> {
   let s = service.to_string();
+  let instance_id = instance_id.to_string();
   let row: Option<(Option<String>, String)> = state
     .db
     .call(move |c| {
       c.query_row(
         "SELECT spec, commit_sha FROM deployments
-         WHERE service = ?1 AND commit_sha IS NOT NULL ORDER BY id DESC LIMIT 1",
-        params![s],
+         WHERE service = ?1 AND instance_id = ?2 AND commit_sha IS NOT NULL ORDER BY id DESC LIMIT 1",
+        params![s, instance_id],
         |r| Ok((r.get(0)?, r.get(1)?)),
       )
       .optional()
@@ -124,7 +126,8 @@ pub async fn ensure_image(
     return Ok(None);
   };
   let server = &row.spec.server;
-  let last = last_commit(state, service, build).await?;
+  let last =
+    last_commit(state, service, &row.instance_id, build).await?;
   // 计划时固定的 commit 优先；没固定的（旧数据）沿用上次部署的，重新构建时拉最新。
   let pinned = row
     .commit

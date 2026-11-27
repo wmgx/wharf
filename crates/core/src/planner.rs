@@ -100,9 +100,13 @@ pub enum Step {
     service: String,
     from: String,
     to: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    instance_id: Option<String>,
   },
   ServiceUp {
     service: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    instance_id: Option<String>,
     /// 计划时渲染出的 compose 指纹，执行前重算比对；没有这个字段的旧计划不校验。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     expect: Option<String>,
@@ -168,6 +172,16 @@ pub enum Step {
     /// 连同数据目录和命名卷一起删。
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     purge_data: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    instance_id: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    has_relative_mounts: bool,
+  },
+  CleanupData {
+    service: String,
+    server: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    instance_id: Option<String>,
   },
   /// 发布边缘应用的代码。
   EdgeDeploy {
@@ -249,6 +263,7 @@ impl Step {
       | Self::Prune { .. }
       | Self::CoreBackup { .. }
       | Self::ServiceRestart { .. }
+      | Self::CleanupData { .. }
       | Self::EdgeRollback { .. } => 9,
     }
   }
@@ -264,6 +279,7 @@ pub struct StepPlan {
 /// 存进数据库的完整计划。
 pub struct Planned {
   pub plan: Plan,
+  pub base_instances: BTreeMap<String, String>,
   pub account_refs: BTreeSet<String>,
   pub host_requirements: Vec<crate::host_access::HostRequirement>,
   pub route_effects: crate::token_scope::RouteEffects,
@@ -714,7 +730,7 @@ pub(crate) async fn make_plan_inner(
   service_items(
     &mut b, &snap, &current, &desired, &net, &status, &writes,
   )?;
-  leftover_items(&mut b, &snap.deployed, &current, &desired, &status);
+  leftover_items(&mut b, &snap, &current, &desired, &status);
   link_items(&mut b, &snap, &current, &desired, &net, &status)?;
   tailscale_items(&mut b, &snap, &desired, &status);
   egress_items(&mut b, &current, &desired);
@@ -829,6 +845,7 @@ fn finish_plan(
   };
   Planned {
     plan,
+    base_instances: snap.world.service_instances(),
     account_refs,
     host_requirements,
     route_effects: b.route_effects,
@@ -1047,6 +1064,20 @@ async fn gather_status(
           .insert(crate::tailscale::PROJECT.to_string());
       }
     }
+  }
+  for name in current.services.keys() {
+    if let Some(server) = snap.deployed.get(name) {
+      projects
+        .entry(server.clone())
+        .or_default()
+        .insert(name.clone());
+    }
+  }
+  for pending in &snap.pending_deletes {
+    projects
+      .entry(pending.server.clone())
+      .or_default()
+      .insert(pending.service.clone());
   }
   let futures =
     projects.into_iter().map(|(server, projects)| async move {
@@ -1364,6 +1395,7 @@ fn service_items(
         Step::ServiceUp {
           service: name.clone(),
           expect: Some(hash.clone()),
+          instance_id: Some(svc.instance_id.clone()),
         },
       );
     }
@@ -1378,6 +1410,13 @@ fn service_items(
     {
       continue;
     }
+    let has_relative_mounts =
+      crate::data::has_relative_bind(&svc.spec)
+        || snap
+          .applied
+          .get(name)
+          .and_then(|applied| applied.spec.as_ref())
+          .is_some_and(crate::data::has_relative_bind);
     // 迁移走的服务：旧服务器上的容器在网关切换之后删除，数据目录保留。
     if let Some(to) =
       desired.services.get(name).map(|d| &d.spec.server)
@@ -1401,11 +1440,14 @@ fn service_items(
           server: server.clone(),
           service: name.clone(),
           purge_data: false,
+          instance_id: Some(svc.instance_id.clone()),
+          has_relative_mounts,
         },
       );
       continue;
     }
-    let server = &svc.spec.server;
+    let server = old;
+    let purge = b.purge_data.contains(name);
     let id = b.item(
       format!("{KIND_SERVICE}/{name}"),
       Layer::Container,
@@ -1415,7 +1457,6 @@ fn service_items(
       vec![Impact::Remove],
       "停止并删除容器",
     );
-    let purge = b.purge_data.contains(name);
     for m in crate::data::mounts(name, &svc.spec) {
       let gone = purge
         && m.kind != wharf_api_types::view::DataKind::ExternalDir;
@@ -1439,11 +1480,52 @@ fn service_items(
         format!("在 {server} 上删除 {name}")
       },
       Step::ServiceDown {
-        server: server.clone(),
+        server: server.to_string(),
         service: name.clone(),
         purge_data: purge,
+        instance_id: Some(svc.instance_id.clone()),
+        has_relative_mounts,
       },
     );
+    let target = &svc.spec.server;
+    if target != server
+      && (purge
+        || status
+          .get(target)
+          .and_then(Option::as_ref)
+          .and_then(|projects| projects.get(name))
+          .is_some_and(|s| {
+            s.hash.is_some() || !s.containers.is_empty()
+          }))
+    {
+      let id = b.item(
+        format!("{KIND_SERVICE}/{name}"),
+        Layer::Container,
+        Action::Delete,
+        Some(json!({ "server": target })),
+        None,
+        if purge {
+          vec![Impact::Remove, Impact::DataLoss]
+        } else {
+          vec![Impact::Remove]
+        },
+        format!(
+          "清理迁移未完成留在 {target} 上的残留容器{}",
+          if purge { "和数据" } else { "" }
+        ),
+      );
+      b.step(
+        vec![id],
+        format!("清理 {target} 上残留的 {name}"),
+        Step::ServiceDown {
+          server: target.clone(),
+          service: name.clone(),
+          purge_data: purge,
+          instance_id: Some(svc.instance_id.clone()),
+          has_relative_mounts,
+        },
+      );
+    }
   }
   Ok(())
 }
@@ -1520,12 +1602,77 @@ fn leftovers<'a>(
 /// 上次删除没做完：项目目录（Wharf 的部署指纹）还在。别人同名的项目没有指纹，不碰。
 fn leftover_items(
   b: &mut Builder,
-  deployed: &BTreeMap<String, String>,
+  snap: &Snapshot,
   current: &World,
   desired: &World,
   status: &StatusMap,
 ) {
-  for (name, server) in leftovers(deployed, current, desired) {
+  for p in &snap.pending_deletes {
+    let (name, server) = (&p.service, &p.server);
+    if current.services.contains_key(name) {
+      continue;
+    }
+    let projects = status.get(server).and_then(Option::as_ref);
+    let project = projects.and_then(|projects| projects.get(name));
+    if !p.purge_data
+      && project
+        .is_some_and(|s| s.hash.is_none() && s.containers.is_empty())
+    {
+      continue;
+    }
+    if desired.services.contains_key(name) {
+      b.warnings.push(format!("服务 {name} 的旧实例在 {server} 上曾有未完成的删除，新建同名服务后不会再自动清理旧数据，请按需手动检查"));
+      continue;
+    }
+    if projects.is_none() {
+      b.warnings.push(format!("上次删除服务 {name} 未完成，待服务器 {server} 上线后重新 plan 继续清理"));
+      continue;
+    }
+    let (impacts, reason) = if p.purge_data {
+      b.warnings.push(format!("服务 {name} 的目录 /srv/{name} 和命名卷会被永久删除，不能恢复"));
+      (
+        vec![Impact::Remove, Impact::DataLoss],
+        "上次带清数据的删除未完成，继续删除残留容器及 /srv/ 下的服务目录和命名卷",
+      )
+    } else if project
+      .is_some_and(|s| s.hash.is_some() || !s.containers.is_empty())
+    {
+      (
+        vec![Impact::Remove],
+        "上次删除没有完成，停止并删除留下的容器（数据目录保留）",
+      )
+    } else {
+      continue;
+    };
+    let id = b.item(
+      format!("{KIND_SERVICE}/{name}"),
+      Layer::Container,
+      Action::Delete,
+      Some(json!({ "server": server })),
+      None,
+      impacts,
+      reason,
+    );
+    b.step(
+      vec![id],
+      format!("在 {server} 上继续删除 {name}"),
+      Step::ServiceDown {
+        server: server.clone(),
+        service: name.clone(),
+        purge_data: p.purge_data,
+        instance_id: Some(p.instance_id.clone()),
+        has_relative_mounts: p.has_relative_mounts,
+      },
+    );
+  }
+  for (name, server) in leftovers(&snap.deployed, current, desired) {
+    if snap
+      .pending_deletes
+      .iter()
+      .any(|p| p.service == name && p.server == server)
+    {
+      continue;
+    }
     let Some(Some(projects)) = status.get(server) else {
       continue;
     };
@@ -1551,6 +1698,9 @@ fn leftover_items(
         server: server.to_string(),
         service: name.to_string(),
         purge_data: false,
+        instance_id: None,
+        // 老记录没有原配置，按可能有相对挂载处理。
+        has_relative_mounts: true,
       },
     );
   }
@@ -1607,6 +1757,7 @@ fn move_items(
       service: name.to_string(),
       from: from.to_string(),
       to: to.to_string(),
+      instance_id: Some(old.instance_id.clone()),
     },
   );
   for (server, role) in [(from, "源"), (to, "目标")] {
@@ -2575,6 +2726,7 @@ pub async fn save(
   let id = planned.plan.plan_id.clone();
   let mut body =
     serde_json::to_value(&planned.plan).map_err(db::json_err)?;
+  body["base_instances"] = json!(&planned.base_instances);
   body["account_refs"] = json!(&planned.account_refs);
   body["host_access_checked"] = json!(true);
   body["host_requirements"] = json!(&planned.host_requirements);
@@ -2714,11 +2866,130 @@ mod tests {
     )]);
     let world = World::default();
     let mut b = Builder::default();
-    leftover_items(&mut b, &deployed, &world, &world, &status);
+    let snap = Snapshot {
+      deployed,
+      ..Default::default()
+    };
+    leftover_items(&mut b, &snap, &world, &world, &status);
     let found: Vec<&str> =
       b.items.iter().map(|i| i.address.as_str()).collect();
     assert_eq!(found, ["service/half"]);
     assert!(b.items[0].needs_confirm());
+  }
+
+  #[tokio::test]
+  async fn plan_keeps_confirmed_non_purge_delete() {
+    let state = crate::rules::tests::test_state();
+    state
+      .db
+      .call(|c| {
+        db::put_pending_delete(
+          c,
+          &db::PendingDeleteRow {
+            service: "s1".into(),
+            server: "s1".into(),
+            instance_id: "svc_old".into(),
+            purge_data: false,
+            has_relative_mounts: true,
+          },
+        )
+      })
+      .await
+      .unwrap();
+    state.hub.mock_agent("s1", false, |op| match op {
+      wharf_api_types::agent::AgentOp::ProjectStatus { projects } => {
+        assert_eq!(projects, ["s1"]);
+        Ok(json!([{"project": "s1", "containers": []}]))
+      }
+      _ => panic!("意外的 agent 请求"),
+    });
+    let planned =
+      make_plan(&state, PlanRequest::default()).await.unwrap();
+    assert!(planned.plan.items.is_empty());
+    assert!(planned.plan.warnings.is_empty());
+    assert_eq!(
+      state
+        .db
+        .call(|c| Ok(db::all_pending_deletes(c)?.len()))
+        .await
+        .unwrap(),
+      1
+    );
+  }
+
+  #[test]
+  fn delete_after_failed_move_targets_running_server() {
+    let mut current = world();
+    current.services.get_mut("app").unwrap().spec.server =
+      "s2".into();
+    let mut desired = current.clone();
+    desired.services.clear();
+    let snap = Snapshot {
+      deployed: BTreeMap::from([("app".into(), "s1".into())]),
+      ..Default::default()
+    };
+    let mut b = Builder {
+      purge_data: BTreeSet::from(["app".into()]),
+      ..Default::default()
+    };
+    service_items(
+      &mut b,
+      &snap,
+      &current,
+      &desired,
+      &Net::default(),
+      &StatusMap::new(),
+      &desired.writes_from(&current),
+    )
+    .unwrap();
+    let targets: Vec<_> = b
+      .steps
+      .iter()
+      .filter_map(|step| match &step.step {
+        Step::ServiceDown {
+          server,
+          purge_data: true,
+          ..
+        } => Some(server.as_str()),
+        _ => None,
+      })
+      .collect();
+    assert_eq!(targets, ["s1", "s2"]);
+  }
+
+  #[test]
+  fn leftover_plan_preserves_purge_data_and_drops_on_recreate() {
+    let snap = Snapshot {
+      pending_deletes: vec![db::PendingDeleteRow {
+        service: "app".into(),
+        server: "s1".into(),
+        instance_id: "svc_aaa".into(),
+        purge_data: true,
+        has_relative_mounts: true,
+      }],
+      ..Default::default()
+    };
+    let current = World::default();
+    let status =
+      StatusMap::from([("s1".into(), Some(BTreeMap::new()))]);
+    let mut b = Builder::default();
+    leftover_items(&mut b, &snap, &current, &current, &status);
+    let planned =
+      finish_plan(&snap, &current, b, vec![], BTreeSet::new(), None);
+    assert_eq!(planned.plan.needs_confirm, ["service/app"]);
+    assert!(matches!(&planned.steps[0].step, Step::ServiceDown {
+      instance_id: Some(id), purge_data: true, has_relative_mounts: true, ..
+    } if id == "svc_aaa"));
+    let mut recreated = Builder::default();
+    leftover_items(
+      &mut recreated,
+      &snap,
+      &current,
+      &world(),
+      &status,
+    );
+    assert!(recreated.steps.is_empty());
+    assert!(recreated.warnings[0].contains("新建同名服务"));
   }
 
   /// 一台 s1，一个 image 服务 app（nginx:1，端口 80）。
@@ -2740,6 +3011,7 @@ mod tests {
     world.services.insert(
       "app".to_string(),
       ServiceRow {
+        instance_id: "svc_fixture".into(),
         spec,
         host_ports: BTreeMap::from([("http".to_string(), 21000)]),
         import: None,

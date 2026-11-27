@@ -488,16 +488,55 @@ impl Docker {
       .run(ctx)
       .await?
       .check("docker compose down")?;
-    if dir.exists() {
-      std::fs::remove_dir_all(&dir).map_err(io_err(&dir))?;
-    }
     if purge {
-      crate::dirfd::remove_service(
-        std::path::Path::new("/srv"),
-        project,
-      )?;
+      crate::dirfd::remove_service(Path::new("/srv"), project, ctx)
+        .await?;
+    }
+    if !clean_project_dir(&dir)? {
+      ctx.say(format!(
+        "项目目录 {} 里还有非 Wharf 创建的文件，已保留",
+        dir.display()
+      ));
     }
     Ok(())
+  }
+
+  pub async fn bind_mount_users(
+    &self,
+    target: &Path,
+    ctx: &Ctx,
+  ) -> Result<Vec<String>, ApiError> {
+    let timeout = Duration::from_secs(30);
+    let out = self
+      .cmd()
+      .args(["ps", "-aq"])
+      .timeout(timeout)
+      .run(ctx)
+      .await?
+      .check("docker ps")?;
+    let ids: Vec<_> = out.stdout.split_whitespace().collect();
+    if ids.is_empty() {
+      return Ok(Vec::new());
+    }
+    let out = self
+      .cmd()
+      .args([
+        "inspect",
+        "--format",
+        r#"{{json .Name}} {{json (index .Config.Labels "wharf.system")}} {{json .Mounts}}"#,
+      ])
+      .args(ids.iter().copied())
+      .timeout(timeout)
+      .run(ctx)
+      .await?
+      .check("docker inspect")?;
+    let containers = parse_bind_mounts(&out.stdout)?;
+    if containers.len() != ids.len() {
+      return Err(ApiError::internal(
+        "Docker 返回的容器挂载信息不完整",
+      ));
+    }
+    Ok(containers_using_path(target, &containers))
   }
 
   /// 当前部署的 compose 和指纹，部署新版本前留着，起不来时换回去。
@@ -702,6 +741,189 @@ impl Docker {
     }
     out
   }
+}
+
+pub(crate) fn clean_project_dir(
+  dir: &Path,
+) -> Result<bool, ApiError> {
+  use std::{fs, io::ErrorKind};
+
+  fn remove_files(
+    dir: &Path,
+    names: &[&str],
+  ) -> Result<(), ApiError> {
+    for name in names {
+      let path = dir.join(name);
+      match fs::symlink_metadata(&path) {
+        Ok(meta) if meta.is_file() => {
+          fs::remove_file(&path).map_err(io_err(&path))?;
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => return Err(io_err(&path)(e)),
+      }
+    }
+    Ok(())
+  }
+
+  fn remove_empty(dir: &Path) -> Result<bool, ApiError> {
+    match fs::remove_dir(dir) {
+      Ok(()) => Ok(true),
+      Err(e) if e.kind() == ErrorKind::NotFound => Ok(true),
+      Err(e) if e.kind() == ErrorKind::DirectoryNotEmpty => Ok(false),
+      Err(e) => Err(io_err(dir)(e)),
+    }
+  }
+
+  match fs::symlink_metadata(dir) {
+    Ok(meta) if !meta.is_dir() => return Ok(false),
+    Ok(_) => {}
+    Err(e) if e.kind() == ErrorKind::NotFound => return Ok(true),
+    Err(e) => return Err(io_err(dir)(e)),
+  }
+  remove_files(
+    dir,
+    &[
+      "compose.yaml",
+      "compose.yaml.tmp",
+      HASH_FILE,
+      ".wharf-hash.tmp",
+      "compose.tmp",
+    ],
+  )?;
+  // 只有网关会生成 conf；服务里的同名配置文件可能是用户挂载。
+  if !dir
+    .file_name()
+    .and_then(|name| name.to_str())
+    .is_some_and(|name| name.starts_with("wharf-gw-"))
+  {
+    return remove_empty(dir);
+  }
+  let conf = dir.join("conf");
+  match fs::symlink_metadata(&conf) {
+    Ok(meta) if meta.is_dir() => {
+      remove_files(
+        &conf,
+        &[
+          "Caddyfile",
+          "Caddyfile.next",
+          "Caddyfile.prev",
+          "Caddyfile.tmp",
+          "link.crt",
+          "link.crt.prev",
+          "link.crt.tmp",
+          "link.key",
+          "link.key.prev",
+          "link.key.tmp",
+          "link.tmp",
+          CONFIG_HASH_FILE,
+          ".wharf-config-hash.tmp",
+        ],
+      )?;
+      remove_empty(&conf)?;
+    }
+    Ok(_) => {}
+    Err(e) if e.kind() == ErrorKind::NotFound => {}
+    Err(e) => return Err(io_err(&conf)(e)),
+  }
+  remove_empty(dir)
+}
+
+fn normalize_abs(path: &Path) -> Option<PathBuf> {
+  use std::path::Component;
+  if !path.is_absolute() {
+    return None;
+  }
+  let mut result = PathBuf::new();
+  for part in path.components() {
+    match part {
+      Component::ParentDir => {
+        result.pop();
+      }
+      Component::CurDir => {}
+      _ => result.push(part),
+    }
+  }
+  Some(result)
+}
+
+fn paths_overlap(target: &Path, mount: &Path) -> bool {
+  mount.starts_with(target) || target.starts_with(mount)
+}
+
+fn parse_bind_mounts(
+  output: &str,
+) -> Result<Vec<(String, Vec<PathBuf>)>, ApiError> {
+  #[derive(Deserialize)]
+  #[serde(rename_all = "PascalCase")]
+  struct Mount {
+    #[serde(rename = "Type")]
+    kind: String,
+    #[serde(default)]
+    source: PathBuf,
+    #[serde(default)]
+    destination: PathBuf,
+  }
+
+  output
+    .lines()
+    .map(|line| {
+      let invalid =
+        || ApiError::internal("Docker 返回的容器挂载信息无效");
+      let (name, rest) = line.split_once(' ').ok_or_else(invalid)?;
+      let mut fields = serde_json::Deserializer::from_str(rest)
+        .into_iter::<String>();
+      let role =
+        fields.next().ok_or_else(invalid)?.map_err(|_| invalid())?;
+      let mounts = &rest[fields.byte_offset()..];
+      let name: String =
+        serde_json::from_str(name).map_err(|_| invalid())?;
+      let system = matches!(role.as_str(), "agent" | "core" | "1");
+      let mounts: Option<Vec<Mount>> =
+        serde_json::from_str(mounts).map_err(|_| invalid())?;
+      let paths = mounts
+        .into_iter()
+        .flatten()
+        .filter(|m| {
+          m.kind == "bind"
+            && !(system
+              && m.source == Path::new("/srv")
+              && m.destination == Path::new("/srv"))
+        })
+        .map(|m| {
+          if m.source.is_absolute() {
+            Ok(m.source)
+          } else {
+            Err(invalid())
+          }
+        })
+        .collect::<Result<_, _>>()?;
+      Ok((name.trim_start_matches('/').to_string(), paths))
+    })
+    .collect()
+}
+
+fn containers_using_path(
+  target: &Path,
+  containers: &[(String, Vec<PathBuf>)],
+) -> Vec<String> {
+  fn paths(path: &Path) -> impl Iterator<Item = PathBuf> {
+    normalize_abs(path)
+      .into_iter()
+      .chain(std::fs::canonicalize(path).ok())
+  }
+  let targets: Vec<_> = paths(target).collect();
+  containers
+    .iter()
+    .filter(|(_, mounts)| {
+      mounts.iter().flat_map(|m| paths(m)).any(|mount| {
+        targets.iter().any(|target| paths_overlap(target, &mount))
+      })
+    })
+    .map(|(name, _)| name.clone())
+    .collect::<BTreeSet<_>>()
+    .into_iter()
+    .collect()
 }
 
 pub fn io_err(
@@ -980,6 +1202,84 @@ fn strip_ansi(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+  #[test]
+  fn clean_project_dir_preserves_relative_mount_data() {
+    use std::fs;
+    let root = tempfile::tempdir().unwrap();
+    let service = root.path().join("app");
+    fs::create_dir_all(service.join("data")).unwrap();
+    fs::write(service.join("data/note.txt"), "keep").unwrap();
+    for name in [
+      "compose.yaml",
+      ".wharf-hash",
+      "compose.yaml.tmp",
+      "compose.tmp",
+    ] {
+      fs::write(service.join(name), "").unwrap();
+    }
+    assert!(!super::clean_project_dir(&service).unwrap());
+    assert_eq!(fs::read_dir(&service).unwrap().count(), 1);
+    assert_eq!(
+      fs::read_to_string(service.join("data/note.txt")).unwrap(),
+      "keep"
+    );
+    let gateway = root.path().join("wharf-gw-test");
+    fs::create_dir_all(gateway.join("conf")).unwrap();
+    for name in ["Caddyfile", "link.crt"] {
+      fs::write(gateway.join("conf").join(name), "").unwrap();
+    }
+    assert!(super::clean_project_dir(&gateway).unwrap());
+    assert!(!gateway.exists());
+    let empty = root.path().join("empty");
+    fs::create_dir(&empty).unwrap();
+    assert!(super::clean_project_dir(&empty).unwrap());
+    assert!(!empty.exists());
+  }
+
+  #[test]
+  fn containers_using_path_catches_exact_child_and_parent_mounts() {
+    use std::path::Path;
+    let inspect = r#""/indexer" "" [{"Type":"bind","Source":"/srv/photos/originals"}]
+"/backup-tool" "" [{"Type":"bind","Source":"/srv","Destination":"/srv"}]
+"/other" "" [{"Type":"bind","Source":"/srv/photos2"}]
+"/exact" "" [{"Type":"bind","Source":"/srv/photos"}]"#;
+    let containers = super::parse_bind_mounts(inspect).unwrap();
+    assert_eq!(
+      super::containers_using_path(
+        Path::new("/srv/photos"),
+        &containers
+      ),
+      ["backup-tool", "exact", "indexer"]
+    );
+  }
+
+  #[test]
+  fn bind_mount_users_ignores_only_system_management_mounts() {
+    let inspect = r#""/wharf-agent" "agent" [{"Type":"bind","Source":"/srv","Destination":"/srv"}]
+"/wharf-agent-old" "1" [{"Type":"bind","Source":"/srv","Destination":"/srv"}]
+"/wharf-core" "core" [{"Type":"bind","Source":"/srv","Destination":"/srv"}]
+"/dedicated" "core" [{"Type":"bind","Source":"/srv/s1","Destination":"/data"}]"#;
+    let containers = super::parse_bind_mounts(inspect).unwrap();
+    assert_eq!(
+      super::containers_using_path(
+        std::path::Path::new("/srv/s1"),
+        &containers
+      ),
+      ["dedicated"]
+    );
+  }
+
+  #[test]
+  fn clean_project_dir_removes_interrupted_link_write() {
+    let root = tempfile::tempdir().unwrap();
+    let gateway = root.path().join("wharf-gw-s1");
+    let conf = gateway.join("conf");
+    std::fs::create_dir_all(&conf).unwrap();
+    std::fs::write(conf.join("link.tmp"), "interrupted").unwrap();
+    assert!(super::clean_project_dir(&gateway).unwrap());
+    assert!(!gateway.exists());
+  }
+
   #[test]
   fn strips_colors() {
     assert_eq!(

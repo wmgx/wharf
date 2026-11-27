@@ -379,6 +379,7 @@ mod tests {
     world.services.insert(
       "app".into(),
       crate::world::ServiceRow {
+        instance_id: "svc_fixture".into(),
         spec,
         host_ports: BTreeMap::new(),
         import: None,

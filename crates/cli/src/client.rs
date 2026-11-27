@@ -591,11 +591,23 @@ impl Client {
           .into(),
       );
     }
+    let expected = resp.content_length();
+    let mut received = 0;
     while let Some(chunk) = resp.chunk().await.map_err(|e| {
       ApiError::internal(format!("下载中断：{}", e.without_url()))
     })? {
+      received += chunk.len() as u64;
       on_chunk(&chunk)
         .map_err(|e| ApiError::internal(format!("写入失败：{e}")))?;
+    }
+    if expected.is_some_and(|n| received != n) {
+      return Err(
+        ApiError::internal(
+          "下载不完整：传输中断或远端文件在下载期间已变化",
+        )
+        .with_hint("重新执行下载命令")
+        .into(),
+      );
     }
     Ok(())
   }

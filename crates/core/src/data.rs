@@ -16,6 +16,20 @@ use crate::{db::sql_err, snapshot, state::AppState};
 /// 超过这个时间没有成功的备份就算过期。
 pub const STALE_AFTER_HOURS: i64 = 48;
 
+pub fn has_relative_bind(spec: &ServiceSpec) -> bool {
+  match &spec.source {
+    Source::Compose {
+      content: Some(content),
+      ..
+    } => compose_mounts("", content).iter().any(|mount| {
+      mount.kind == DataKind::ExternalDir
+        && !mount.source.is_empty()
+        && !Path::new(&mount.source).is_absolute()
+    }),
+    _ => false,
+  }
+}
+
 pub fn mounts(name: &str, spec: &ServiceSpec) -> Vec<DataMount> {
   match &spec.source {
     Source::Image(_) | Source::Build(_) => spec
@@ -242,6 +256,37 @@ fn volume_name(top: Option<&Value>, key: String) -> String {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn detects_relative_bind_in_compose() {
+    for (mount, expected) in [
+      ("./data:/data", true),
+      ("../shared:/s", true),
+      ("/srv/app/data:/data", false),
+      ("vol:/data", false),
+    ] {
+      let spec: ServiceSpec = serde_json::from_value(serde_json::json!({
+        "server": "s1", "source": {"compose": {"content": format!("services: {{ app: {{ volumes: ['{mount}'] }} }}")}}
+      })).unwrap();
+      assert_eq!(has_relative_bind(&spec), expected, "{mount}");
+    }
+  }
+
+  #[test]
+  fn detects_relative_bind_without_dot_in_long_syntax() {
+    for (mount, expected) in [
+      ("{type: bind, source: data, target: /data}", true),
+      ("{type: bind, source: config/app.yml, target: /data}", true),
+      ("{type: bind, source: '~data', target: /data}", true),
+      ("'sub/data:/data'", false),
+    ] {
+      let spec: ServiceSpec = serde_json::from_value(serde_json::json!({
+        "server": "s1",
+        "source": {"compose": {"content": format!("services: {{app: {{volumes: [{mount}]}}}}")}}
+      })).unwrap();
+      assert_eq!(has_relative_bind(&spec), expected, "{mount}");
+    }
+  }
 
   #[test]
   fn covers_five_states() {

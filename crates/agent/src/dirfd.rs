@@ -235,6 +235,18 @@ impl DirFd {
   }
 
   fn read_names(&self) -> io::Result<Vec<CString>> {
+    let mut out = Vec::new();
+    self.visit_names(|name| {
+      out.push(name.to_owned());
+      Ok(())
+    })?;
+    Ok(out)
+  }
+
+  fn visit_names(
+    &self,
+    mut visit: impl FnMut(&CStr) -> io::Result<()>,
+  ) -> io::Result<()> {
     let fd = unsafe {
       libc::openat(self.0.as_raw_fd(), c".".as_ptr(), DIRECTORY)
     };
@@ -249,7 +261,6 @@ impl DirFd {
       return Err(error);
     }
     let dir = DirGuard(dir);
-    let mut out = Vec::new();
     loop {
       let entry = unsafe {
         *errno() = 0;
@@ -265,10 +276,10 @@ impl DirFd {
       // d_name 在下一次 readdir 前有效。
       let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
       if !matches!(name.to_bytes(), b"." | b"..") {
-        out.push(name.to_owned());
+        visit(name)?;
       }
     }
-    Ok(out)
+    Ok(())
   }
 }
 
@@ -327,10 +338,51 @@ pub(crate) fn ensure_beneath(
   Ok(fd)
 }
 
-pub(crate) fn remove_service(
+pub(crate) async fn remove_service(
   base: &Path,
   service: &str,
+  ctx: &crate::exec::Ctx,
 ) -> Result<(), ApiError> {
+  let base = base.to_owned();
+  let service = service.to_owned();
+  let cancel = ctx.cancel.clone();
+  tokio::task::spawn_blocking(move || {
+    remove_service_tree(&base, &service, &cancel)
+  })
+  .await
+  .map_err(|e| ApiError::internal(format!("删除目录任务中断：{e}")))?
+}
+
+fn remove_service_tree(
+  base: &Path,
+  service: &str,
+  cancel: &tokio_util::sync::CancellationToken,
+) -> Result<(), ApiError> {
+  fn remove_dir(
+    parent: &DirFd,
+    name: &CStr,
+    cancelled: &impl Fn() -> io::Result<()>,
+  ) -> io::Result<()> {
+    cancelled()?;
+    let dir = parent.open_subdir(name)?;
+    dir.visit_names(|entry| {
+      cancelled()?;
+      if dir.lstat(entry)?.st_mode & libc::S_IFMT == libc::S_IFDIR {
+        remove_dir(&dir, entry, cancelled)
+      } else {
+        dir.unlink(entry)
+      }
+    })?;
+    cancelled()?;
+    check(unsafe {
+      libc::unlinkat(
+        parent.0.as_raw_fd(),
+        name.as_ptr(),
+        libc::AT_REMOVEDIR,
+      )
+    })
+  }
+
   validate_name(
     "服务",
     service
@@ -338,6 +390,22 @@ pub(crate) fn remove_service(
       .unwrap_or(service),
   )?;
   let dir = base.join(service);
+  let cancelled = || {
+    if cancel.is_cancelled() {
+      Err(io::Error::from(io::ErrorKind::Interrupted))
+    } else {
+      Ok(())
+    }
+  };
+  let error = |e: io::Error| {
+    if e.kind() == io::ErrorKind::Interrupted && cancel.is_cancelled()
+    {
+      ApiError::new(wharf_api_types::ErrorCode::Cancelled, "已取消")
+    } else {
+      io_err(&dir)(e)
+    }
+  };
+  cancelled().map_err(error)?;
   let fd = match DirFd::open_dir(base).map_err(|e| dir_error(base, e))
   {
     Err(e) if e.code == wharf_api_types::ErrorCode::NotFound => {
@@ -348,7 +416,7 @@ pub(crate) fn remove_service(
   let name = component(service.as_ref()).map_err(io_err(&dir))?;
   match fd.lstat(&name) {
     Ok(stat) if stat.st_mode & libc::S_IFMT == libc::S_IFDIR => {
-      std::fs::remove_dir_all(&dir).map_err(io_err(&dir))
+      remove_dir(&fd, &name, &cancelled).map_err(error)
     }
     Ok(_) => Err(ApiError::invalid(format!(
       "{} 是软链接或非目录，已拒绝删除",

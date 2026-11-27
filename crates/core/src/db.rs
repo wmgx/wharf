@@ -379,7 +379,44 @@ ALTER TABLE alert_history ADD COLUMN subject TEXT;
    ALTER TABLE agents ADD COLUMN next_key_expires_at INTEGER;
    ALTER TABLE agents ADD COLUMN key_rotation INTEGER NOT NULL DEFAULT 0;",
   crate::secret_restrictions::MIGRATION,
+  SERVICE_INSTANCE_ID_MIGRATION,
 ];
+
+const SERVICE_INSTANCE_ID_MIGRATION: &str = r#"
+UPDATE resources
+SET meta = json_set(COALESCE(meta, '{}'), '$.instance_id', 'svc_' || lower(hex(randomblob(8))))
+WHERE kind = 'service' AND COALESCE(json_extract(meta, '$.instance_id'), '') = '';
+
+ALTER TABLE deployments ADD COLUMN instance_id TEXT;
+UPDATE deployments
+SET instance_id = (
+  SELECT json_extract(r.meta, '$.instance_id') FROM resources r
+  WHERE r.kind = 'service' AND r.name = deployments.service
+    AND deployments.created_at >= r.created_at
+)
+WHERE instance_id IS NULL;
+CREATE INDEX deployments_service_instance ON deployments (service, instance_id, id);
+
+ALTER TABLE cleanups ADD COLUMN instance_id TEXT;
+UPDATE cleanups
+SET instance_id = (
+  SELECT json_extract(r.meta, '$.instance_id') FROM resources r
+  WHERE r.kind = 'service' AND r.name = cleanups.service
+)
+WHERE instance_id IS NULL;
+
+CREATE TABLE pending_deletes (
+  service TEXT NOT NULL,
+  server TEXT NOT NULL,
+  instance_id TEXT NOT NULL,
+  purge_data INTEGER NOT NULL DEFAULT 0,
+  has_relative_mounts INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (service, server)
+);
+
+DELETE FROM plans WHERE status = 'pending';
+"#;
 
 /// git 构建来源固定到上次部署构建的 commit（仓库和分支没换过的）。当时没记下 commit 的留给 plan 提醒。
 const COMMIT_MIGRATION: &str = r#"
@@ -762,9 +799,18 @@ pub fn apply_write(
     } => conn
       .execute(
         "INSERT INTO resources (kind, name, spec, meta, version, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, 1, ?5, ?5)
+         VALUES (?1, ?2, ?3,
+           CASE WHEN ?1 = 'service' AND COALESCE(json_extract(?4, '$.instance_id'), '') = ''
+             THEN json_set(?4, '$.instance_id', 'svc_' || lower(hex(randomblob(8)))) ELSE ?4 END,
+           1, ?5, ?5)
          ON CONFLICT (kind, name) DO UPDATE SET
-           spec = excluded.spec, meta = excluded.meta,
+           spec = excluded.spec, meta = CASE WHEN excluded.kind = 'service' THEN
+             json_set(excluded.meta, '$.instance_id', COALESCE(
+               NULLIF(json_extract(?4, '$.instance_id'), ''),
+               NULLIF(json_extract(resources.meta, '$.instance_id'), ''),
+               json_extract(excluded.meta, '$.instance_id')
+             ))
+             ELSE excluded.meta END,
            version = resources.version + 1, updated_at = excluded.updated_at",
         params![kind, name, spec.to_string(), meta.to_string(), now],
       )
@@ -868,6 +914,87 @@ pub fn put_edge_expected(
   )
   .map_err(sql_err)?;
   Ok(())
+}
+
+pub fn service_instances(
+  conn: &Connection,
+) -> Result<std::collections::BTreeMap<String, String>, ApiError> {
+  let mut stmt = conn.prepare(
+    "SELECT name, COALESCE(json_extract(meta, '$.instance_id'), '') FROM resources WHERE kind = 'service'"
+  ).map_err(sql_err)?;
+  let rows = stmt
+    .query_map([], |r| {
+      Ok((format!("service/{}", r.get::<_, String>(0)?), r.get(1)?))
+    })
+    .map_err(sql_err)?;
+  rows.collect::<Result<_, _>>().map_err(sql_err)
+}
+
+pub struct PendingDeleteRow {
+  pub service: String,
+  pub server: String,
+  pub instance_id: String,
+  pub purge_data: bool,
+  pub has_relative_mounts: bool,
+}
+
+pub fn put_pending_delete(
+  c: &Connection,
+  p: &PendingDeleteRow,
+) -> Result<(), ApiError> {
+  c.execute(
+    "INSERT INTO pending_deletes (service, server, instance_id, purge_data, has_relative_mounts, created_at)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+     ON CONFLICT (service, server) DO UPDATE SET instance_id = excluded.instance_id,
+       purge_data = excluded.purge_data, has_relative_mounts = excluded.has_relative_mounts, created_at = excluded.created_at",
+    params![p.service, p.server, p.instance_id, p.purge_data, p.has_relative_mounts, now_ms()],
+  ).map_err(sql_err)?;
+  Ok(())
+}
+
+pub fn clear_pending_delete(
+  c: &Connection,
+  service: &str,
+  server: &str,
+  instance_id: Option<&str>,
+) -> Result<(), ApiError> {
+  c.execute(
+    "DELETE FROM pending_deletes WHERE service = ?1 AND server = ?2 AND (?3 IS NULL OR instance_id = ?3)",
+    params![service, server, instance_id],
+  ).map_err(sql_err)?;
+  Ok(())
+}
+
+pub fn clear_pending_deletes_for_service(
+  c: &Connection,
+  service: &str,
+) -> Result<(), ApiError> {
+  c.execute(
+    "DELETE FROM pending_deletes WHERE service = ?1",
+    [service],
+  )
+  .map_err(sql_err)?;
+  Ok(())
+}
+
+pub fn all_pending_deletes(
+  c: &Connection,
+) -> Result<Vec<PendingDeleteRow>, ApiError> {
+  let mut stmt = c.prepare(
+    "SELECT service, server, instance_id, purge_data, has_relative_mounts FROM pending_deletes ORDER BY service, server"
+  ).map_err(sql_err)?;
+  let rows = stmt
+    .query_map([], |r| {
+      Ok(PendingDeleteRow {
+        service: r.get(0)?,
+        server: r.get(1)?,
+        instance_id: r.get(2)?,
+        purge_data: r.get(3)?,
+        has_relative_mounts: r.get(4)?,
+      })
+    })
+    .map_err(sql_err)?;
+  rows.collect::<Result<_, _>>().map_err(sql_err)
 }
 
 pub fn versions(
@@ -1837,7 +1964,10 @@ pub fn deployed_servers(
 ) -> Result<std::collections::BTreeMap<String, String>, ApiError> {
   let mut stmt = c
     .prepare(
-      "SELECT service, server, MAX(id) FROM deployments GROUP BY service",
+      "SELECT d.service, d.server, MAX(d.id) FROM deployments d
+       LEFT JOIN resources r ON r.kind = 'service' AND r.name = d.service
+       WHERE r.name IS NULL OR d.instance_id = json_extract(r.meta, '$.instance_id')
+       GROUP BY d.service",
     )
     .map_err(sql_err)?;
   let rows = stmt
@@ -1912,7 +2042,11 @@ pub fn applied(
   let mut stmt = c
     .prepare(
       "SELECT service, hash, created_at, images, commit_sha, json_extract(spec, '$.source.build.git.repo') || '#' || json_extract(spec, '$.source.build.git.ref'), spec FROM deployments
-       WHERE id IN (SELECT MAX(id) FROM deployments GROUP BY service)",
+       WHERE id IN (
+         SELECT MAX(d.id) FROM deployments d JOIN resources r
+           ON r.kind = 'service' AND r.name = d.service AND d.instance_id = json_extract(r.meta, '$.instance_id')
+         GROUP BY d.service
+       )",
     )
     .map_err(sql_err)?;
   let rows = stmt
@@ -2049,6 +2183,39 @@ pub fn interrupt_service_ops(c: &Connection) -> Result<(), ApiError> {
 
 #[cfg(test)]
 mod tests {
+  #[test]
+  fn instance_id_migration_splits_pre_and_post_recreate_deployments()
+  {
+    let c = Connection::open_in_memory().unwrap();
+    for sql in MIGRATIONS
+      .iter()
+      .take_while(|&&sql| sql != SERVICE_INSTANCE_ID_MIGRATION)
+    {
+      c.execute_batch(sql).unwrap();
+    }
+    c.execute_batch("INSERT INTO resources (kind, name, spec, version, created_at, updated_at)
+      VALUES ('service', 'reader', '{}', 1, 2000, 2000);
+      INSERT INTO deployments (service, server, run_id, hash, compose, images, created_at)
+      VALUES ('reader', 's1', 'r1', 'new', '', '[]', 2500), ('reader', 's2', 'r2', 'old', '', '[]', 1000);").unwrap();
+    c.execute_batch(SERVICE_INSTANCE_ID_MIGRATION).unwrap();
+    let instance = &service_instances(&c).unwrap()["service/reader"];
+    assert!(instance.starts_with("svc_"));
+    for (hash, expected) in
+      [("new", Some(instance.clone())), ("old", None)]
+    {
+      let actual: Option<String> = c
+        .query_row(
+          "SELECT instance_id FROM deployments WHERE hash = ?1",
+          [hash],
+          |r| r.get(0),
+        )
+        .unwrap();
+      assert_eq!(actual, expected);
+    }
+    assert_eq!(deployed_servers(&c).unwrap()["reader"], "s1");
+    assert_eq!(applied(&c).unwrap()["reader"].hash, "new");
+  }
+
   #[test]
   fn commit_migration() {
     let c = Connection::open_in_memory().unwrap();

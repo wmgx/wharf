@@ -192,6 +192,7 @@ fn privileged_service_env_update_still_requires_host() {
     items: vec![1],
     title: String::new(),
     step: Step::ServiceUp {
+      instance_id: None,
       service: "app".into(),
       expect: None,
     },
@@ -498,6 +499,7 @@ fn plans_check_current_switch_and_control_plane() {
   let mut desired = current.clone();
   desired.apply_changes(&[service(PRIVILEGED, None)]).unwrap();
   let compose = Step::ServiceUp {
+    instance_id: None,
     service: "app".into(),
     expect: None,
   };

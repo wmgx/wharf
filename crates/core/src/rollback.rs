@@ -50,17 +50,20 @@ pub async fn target(
     .get(&name)
     .ok_or_else(|| service_not_found(&name))?;
   let service = name.clone();
+  let instance_id = current.instance_id.clone();
+  let requested = q.to;
   let rows: Vec<Row> = s
     .db
     .call(move |c| {
       let mut stmt = c
         .prepare(
           "SELECT id, hash, spec, images, created_at, commit_sha FROM deployments
-           WHERE service = ?1 ORDER BY id DESC LIMIT 200",
+           WHERE service = ?1 AND instance_id = ?2 AND (?3 IS NULL OR id = ?3)
+           ORDER BY id DESC LIMIT 200",
         )
         .map_err(sql_err)?;
       let rows = stmt
-        .query_map(params![service], |r| {
+        .query_map(params![service, instance_id, requested], |r| {
           Ok((
             r.get(0)?,
             r.get(1)?,
@@ -71,7 +74,17 @@ pub async fn target(
           ))
         })
         .map_err(sql_err)?;
-      rows.collect::<Result<Vec<_>, _>>().map_err(sql_err)
+      let rows = rows.collect::<Result<Vec<_>, _>>().map_err(sql_err)?;
+      if let Some(id) = requested
+        && rows.is_empty()
+        && c.query_row("SELECT EXISTS(SELECT 1 FROM deployments WHERE service = ?1 AND id = ?2)",
+          params![service, id], |r| r.get::<_, bool>(0)).map_err(sql_err)?
+      {
+        let list = format!("wharf service deployments {service}");
+        return Err(ApiError::invalid(format!("部署 #{id} 属于已删除的旧服务实例，不能回滚到它"))
+          .with_hint(format!("运行 {list} 查看当前服务的可回滚版本")).suggest(list));
+      }
+      Ok(rows)
     })
     .await?;
   let row = pick(&rows, q.to).ok_or_else(|| match q.to {
@@ -180,6 +193,52 @@ fn pin_image(spec: ServiceSpec, images: &[ImageInfo]) -> ServiceSpec {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn rollback_ignores_deleted_instance_deployments() {
+    let state = crate::rules::tests::test_state();
+    state.db.call(|c| c.execute_batch(
+      "INSERT INTO resources (kind, name, spec, meta, version, created_at, updated_at)
+       VALUES ('service', 'reader', '{\"server\":\"s1\",\"source\":{\"image\":\"fixture:1\"}}',
+         '{\"instance_id\":\"svc_new\"}', 1, 2, 2);
+       INSERT INTO deployments (id, service, server, run_id, hash, compose, images, created_at, instance_id)
+       VALUES (1, 'reader', 's1', 'r1', 'h1', '', '[]', 1, 'svc_old'), (2, 'reader', 's1', 'r2', 'h2', '', '[]', 3, 'svc_new');"
+    ).map_err(sql_err)).await.unwrap();
+    let auth = || Auth {
+      name: "fixture".into(),
+      perms: [Perm::Read].into(),
+      expires_at: None,
+      allowed_from: vec![],
+      services: None,
+      human: true,
+    };
+    for (to, message) in [
+      (None, "没有可以回滚的旧版本"),
+      (Some(1), "属于已删除的旧服务实例"),
+    ] {
+      let err = target(
+        State(state.clone()),
+        auth(),
+        Path("reader".into()),
+        Query(RollbackQuery { to }),
+      )
+      .await
+      .err()
+      .unwrap()
+      .0;
+      assert_eq!(err.code, wharf_api_types::ErrorCode::InvalidInput);
+      assert!(err.message.contains(message));
+    }
+    let Json(history) = crate::api::deployments(
+      State(state),
+      auth(),
+      Path("reader".into()),
+    )
+    .await
+    .ok()
+    .unwrap();
+    assert_eq!(history.iter().map(|d| d.id).collect::<Vec<_>>(), [2]);
+  }
 
   fn row(id: i64, hash: &str) -> Row {
     (id, hash.into(), None, "[]".into(), 0, None)

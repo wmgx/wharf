@@ -15,7 +15,7 @@ use futures_util::StreamExt;
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
-  ApiError,
+  ApiError, ErrorCode,
   agent::{AgentOp, FILE_CHUNK, FileChunk, FileEntry, FilesOp},
   view::Perm,
 };
@@ -99,31 +99,44 @@ pub async fn download(
   auth.require(Perm::Read)?;
   let server = server_of(&s, &name).await?;
   let (svc, path) = (name.clone(), q.path.clone());
-  let read = move |offset: u64| FilesOp::Read {
+  let read = move |offset: u64, expect| FilesOp::Read {
     service: svc.clone(),
     path: path.clone(),
     offset,
     len: FILE_CHUNK,
+    expect,
   };
-  let first: FileChunk = call(&s, &server, read(0)).await?;
+  let first: FileChunk = call(&s, &server, read(0, None)).await?;
   let size = first.size;
+  let version = first.version;
   let first = decode(&first.data)?;
-  let state = (s.clone(), server, read, first.len() as u64);
+  let offset = checked_offset(0, first.len(), size)?;
+  let state = (s, server, read, offset, version);
   let rest =
     futures_util::stream::unfold(Some(state), move |st| async move {
-      let (s, server, read, offset) = st?;
+      let (s, server, read, offset, version) = st?;
       if offset >= size {
         return None;
       }
-      let chunk = call::<FileChunk>(&s, &server, read(offset))
-        .await
-        .and_then(|c| decode(&c.data));
+      let chunk =
+        call::<FileChunk>(&s, &server, read(offset, version.clone()))
+          .await
+          .and_then(|c| {
+            if version.is_some() && c.version != version {
+              return Err(ApiError::new(
+                ErrorCode::Conflict,
+                "下载期间文件已变化",
+              ));
+            }
+            let bytes = decode(&c.data)?;
+            let next = checked_offset(offset, bytes.len(), size)?;
+            Ok((bytes, next))
+          });
       match chunk {
-        Ok(b) if b.is_empty() => None,
-        Ok(b) => {
-          let next = offset + b.len() as u64;
-          Some((Ok(Bytes::from(b)), Some((s, server, read, next))))
-        }
+        Ok((b, next)) => Some((
+          Ok(Bytes::from(b)),
+          Some((s, server, read, next, version)),
+        )),
         // 中途出错只能断开，浏览器会显示下载失败。
         Err(e) => Some((Err(std::io::Error::other(e.message)), None)),
       }
@@ -154,6 +167,21 @@ pub async fn download(
     )
       .into_response(),
   )
+}
+
+fn checked_offset(
+  offset: u64,
+  len: usize,
+  size: u64,
+) -> Result<u64, ApiError> {
+  let next = offset.saturating_add(len as u64);
+  if next > size || (offset < size && len == 0) {
+    return Err(ApiError::new(
+      ErrorCode::Conflict,
+      "下载期间文件大小已变化",
+    ));
+  }
+  Ok(next)
 }
 
 fn decode(data: &str) -> Result<Vec<u8>, ApiError> {
@@ -213,6 +241,15 @@ pub async fn upload(
 
 #[cfg(test)]
 mod tests {
+  use super::checked_offset;
+
+  #[test]
+  fn rejects_short_and_oversized_download_chunks() {
+    assert!(checked_offset(4, 0, 8).is_err());
+    assert!(checked_offset(4, 5, 8).is_err());
+    assert_eq!(checked_offset(4, 4, 8).unwrap(), 8);
+  }
+
   #[test]
   fn encodes_filename() {
     assert_eq!(super::encode("a b.txt"), "a%20b.txt");

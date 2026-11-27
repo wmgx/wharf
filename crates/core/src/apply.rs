@@ -172,6 +172,8 @@ pub async fn recover(state: &AppState) -> Result<(), ApiError> {
 struct StoredPlanBody {
   #[serde(flatten)]
   plan: Plan,
+  #[serde(default)]
+  base_instances: Option<std::collections::BTreeMap<String, String>>,
   // 旧计划没有引用清单，沿用生成时取所有账号的指纹。
   #[serde(default)]
   account_refs: Option<BTreeSet<String>>,
@@ -347,10 +349,17 @@ pub async fn start(
   if reason.is_some() || skip.is_some() {
     let checked_plan = plan.clone();
     let refs = stored.body.account_refs.clone();
+    let base_instances = stored.body.base_instances.clone();
     state
       .db
       .call_credentials(move |c, key| {
-        require_fresh(c, key, &checked_plan, refs.as_ref())
+        require_fresh(
+          c,
+          key,
+          &checked_plan,
+          refs.as_ref(),
+          base_instances.as_ref(),
+        )
       })
       .await?;
     crate::db_snapshot::before(
@@ -409,7 +418,9 @@ pub async fn start(
   };
   {
     let account_refs = stored.body.account_refs;
+    let base_instances = stored.body.base_instances;
     let writes = stored.writes.clone();
+    let pending = deleted_service_steps(&writes, &stored.steps);
     let policy_plan = plan.clone();
     let admin = perms.contains(&Perm::Admin);
     let plan_id = plan.plan_id.clone();
@@ -424,8 +435,17 @@ pub async fn start(
       .db
       .call_credentials(move |c, key| {
         let tx = c.transaction().map_err(sql_err)?;
-        require_fresh(&tx, key, &policy_plan, account_refs.as_ref())?;
+        require_fresh(
+          &tx,
+          key,
+          &policy_plan,
+          account_refs.as_ref(),
+          base_instances.as_ref(),
+        )?;
         apply_writes(&tx, &policy_plan, &writes, admin)?;
+        for p in &pending {
+          db::put_pending_delete(&tx, p)?;
+        }
         tx.execute(
           "UPDATE plans SET status = 'applied' WHERE id = ?1",
           params![plan_id],
@@ -490,6 +510,7 @@ fn require_fresh(
   key: &db::CredentialsKey,
   plan: &Plan,
   account_refs: Option<&BTreeSet<String>>,
+  base_instances: Option<&std::collections::BTreeMap<String, String>>,
 ) -> Result<(), ApiError> {
   if let Some(i) = &plan.inputs
     && *i != db::inputs(c, key, account_refs)?
@@ -497,6 +518,9 @@ fn require_fresh(
     return Err(ApiError::new(ErrorCode::PlanStale,
       "plan 之后机器之间的连通性、密钥或机器地址变了，直连还是走隧道、渲染出的配置可能和计划不一样")
       .suggest("wharf plan"));
+  }
+  if let Some(expected) = base_instances {
+    check_base_instances(c, expected)?;
   }
   let base = &plan.base_versions;
   let now_versions = db::versions(c)?;
@@ -548,6 +572,43 @@ pub(crate) fn require_login_account(
   Ok(())
 }
 
+fn check_base_instances(
+  c: &rusqlite::Connection,
+  expected: &std::collections::BTreeMap<String, String>,
+) -> Result<(), ApiError> {
+  let actual = db::service_instances(c)?;
+  let rebuilt: Vec<_> = expected
+    .iter()
+    .filter(|(name, id)| {
+      actual.get(*name).is_some_and(|actual| actual != *id)
+    })
+    .map(|(name, _)| name.as_str())
+    .collect();
+  if !rebuilt.is_empty() {
+    return Err(ApiError::new(ErrorCode::PlanStale,
+      format!("plan 之后这些服务已被删除并重建：{}，旧计划不能作用到新服务", rebuilt.join("、")))
+      .with_hint("重新 plan，确认新的差异后再 apply").suggest("wharf plan"));
+  }
+  Ok(())
+}
+
+fn deleted_service_steps(
+  writes: &[Write],
+  steps: &[StepPlan],
+) -> Vec<db::PendingDeleteRow> {
+  steps.iter().filter_map(|s| {
+    let Step::ServiceDown { service, server, purge_data, instance_id: Some(instance_id), has_relative_mounts } = &s.step else {
+      return None;
+    };
+    writes.iter().any(|write| matches!(write,
+      Write::Delete { kind, name } if kind == crate::world::KIND_SERVICE && name == service
+    )).then(|| db::PendingDeleteRow {
+      service: service.clone(), server: server.clone(), instance_id: instance_id.clone(),
+      purge_data: *purge_data, has_relative_mounts: *has_relative_mounts,
+    })
+  }).collect()
+}
+
 fn apply_writes(
   tx: &rusqlite::Transaction<'_>,
   plan: &Plan,
@@ -559,6 +620,14 @@ fn apply_writes(
   crate::secret_policy::require_apply(plan, &current, admin)?;
   for write in writes {
     db::apply_write(tx, write)?;
+    if let Write::Upsert { kind, name, .. } = write
+      && kind == crate::world::KIND_SERVICE
+      && !current.services.contains_key(name)
+    {
+      db::clear_pending_deletes_for_service(tx, name)?;
+      tx.execute("DELETE FROM cleanups WHERE service = ?1", [name])
+        .map_err(sql_err)?;
+    }
   }
   let desired =
     crate::world::World::from_rows(db::all_resources(tx)?)?;
@@ -661,8 +730,9 @@ async fn execute(
   offset: usize,
   actor: Option<crate::security_receipt::Actor>,
   cancel: CancellationToken,
-  _guard: OwnedMutexGuard<()>,
+  guard: OwnedMutexGuard<()>,
 ) {
+  let mut guard = Some(guard);
   let run_id = lock(&run).run_id.clone();
   let mut failed = false;
   let scope_services = lock(&state.runs.active)
@@ -711,8 +781,23 @@ async fn execute(
       )
       .await;
     }
-    let result =
-      run_step(&state, &run_id, &step.step, progress, &cancel).await;
+    let result = if let Step::CleanupData {
+      service,
+      server,
+      instance_id,
+    } = &step.step
+    {
+      crate::jobs::cleanup_data(
+        &state,
+        (service, server, instance_id.as_deref()),
+        progress,
+        &cancel,
+        guard.take().expect("清理任务必须先持有 apply 锁"),
+      )
+      .await
+    } else {
+      run_step(&state, &run_id, &step.step, progress, &cancel).await
+    };
     crate::security_receipt::completed_step(
       &state,
       actor.as_ref(),
@@ -885,9 +970,21 @@ pub(crate) async fn run_step(
         )
         .await?;
     }
-    Step::VolumeSync { service, from, to } => {
+    Step::VolumeSync {
+      service,
+      from,
+      to,
+      instance_id,
+    } => {
+      check_step_instance(world, service, instance_id.as_deref())?;
       crate::migrate::volume_sync(
-        state, &net, service, from, to, progress, cancel,
+        state,
+        &net,
+        service,
+        (from, to),
+        instance_id.as_deref(),
+        progress,
+        cancel,
       )
       .await?;
     }
@@ -901,7 +998,12 @@ pub(crate) async fn run_step(
       )
       .await?;
     }
-    Step::ServiceUp { service, expect } => {
+    Step::ServiceUp {
+      service,
+      expect,
+      instance_id,
+    } => {
+      check_step_instance(world, service, instance_id.as_deref())?;
       service_up(
         state,
         run_id,
@@ -1030,20 +1132,21 @@ pub(crate) async fn run_step(
       server,
       service,
       purge_data,
+      instance_id,
+      has_relative_mounts,
     } => {
-      state
-        .hub
-        .call::<serde_json::Value>(
-          server,
-          AgentOp::ProjectDown {
-            project: service.clone(),
-            purge: *purge_data,
-          },
-          SHORT_TIMEOUT,
-          Some(progress),
-          cancel,
-        )
-        .await?;
+      service_down(
+        state,
+        &snap,
+        (server, service),
+        (*purge_data, instance_id.as_deref(), *has_relative_mounts),
+        progress,
+        cancel,
+      )
+      .await?;
+    }
+    Step::CleanupData { .. } => {
+      return Err(ApiError::internal("清理只能由定时任务执行"));
     }
     Step::GatewaySync { gateway, expect } => {
       let gw = world.gateways.get(gateway).ok_or_else(|| {
@@ -1496,8 +1599,8 @@ async fn service_up(
       containers: a.containers.clone(),
     });
   // 刚导入时本机已有的镜像不拉取，避免拉到新版本而重建容器。
-  let pull_missing_only =
-    row.import.is_some() && !has_deployment(state, service).await?;
+  let pull_missing_only = row.import.is_some()
+    && !has_deployment(state, service, &row.instance_id).await?;
   // 起不来时自动换回上一版：只对没有数据的服务做，新版本可能已经改了数据，
   // 旧版本不一定认。compose 来源看不出有没有数据，不做。
   let rollback = row.spec.volumes.is_empty()
@@ -1506,7 +1609,7 @@ async fn service_up(
   // 先试跑再替换：和自动换回上一版的条件一样，另外要已经部署过、不是要保持停止的。
   let trial = if rollback
     && !row.spec.stopped
-    && has_deployment(state, service).await?
+    && has_deployment(state, service, &row.instance_id).await?
     && !world
       .services
       .contains_key(&format!("{TRIAL_PROJECT_PREFIX}{service}"))
@@ -1548,6 +1651,7 @@ async fn service_up(
     state,
     Deployed {
       service,
+      instance_id: &row.instance_id,
       server,
       run_id,
       hash: &hash,
@@ -1654,19 +1758,15 @@ async fn restore(
 ) {
   progress("部署失败，恢复原来的容器".into());
   let cancel = CancellationToken::new();
-  let down: Result<serde_json::Value, ApiError> = state
-    .hub
-    .call(
-      server,
-      AgentOp::ProjectDown {
-        project: service.to_string(),
-        purge: false,
-      },
-      SHORT_TIMEOUT,
-      Some(progress.clone()),
-      &cancel,
-    )
-    .await;
+  let down = project_down(
+    state,
+    (server, service),
+    false,
+    true,
+    progress.clone(),
+    &cancel,
+  )
+  .await;
   if let Err(e) = down {
     progress(format!("删除新容器失败：{}", e.message));
   }
@@ -1689,17 +1789,142 @@ async fn restore(
   }
 }
 
+fn check_step_instance(
+  world: &crate::world::World,
+  service: &str,
+  expected: Option<&str>,
+) -> Result<(), ApiError> {
+  if let Some(expected) = expected
+    && world.services.get(service).map(|r| r.instance_id.as_str())
+      != Some(expected)
+  {
+    return Err(
+      ApiError::new(
+        ErrorCode::PlanStale,
+        format!("服务 {service} 已被重建，中止旧步骤"),
+      )
+      .with_hint("重新运行 wharf plan")
+      .suggest("wharf plan"),
+    );
+  }
+  Ok(())
+}
+
+async fn service_down(
+  state: &AppState,
+  snap: &snapshot::Snapshot,
+  (server, service): (&str, &str),
+  (purge_data, instance_id, has_relative_mounts): (
+    bool,
+    Option<&str>,
+    bool,
+  ),
+  progress: ProgressFn,
+  cancel: &CancellationToken,
+) -> Result<(), ApiError> {
+  let stale = |message| {
+    ApiError::new(ErrorCode::PlanStale, message)
+      .with_hint("运行 wharf plan 查看当前状态")
+      .suggest("wharf plan")
+  };
+  if let Some(row) = snap.world.services.get(service) {
+    if instance_id.is_some_and(|expected| row.instance_id != expected)
+    {
+      return Err(stale(format!(
+        "服务 {service} 已被重建为新实例，拒绝执行旧删除步骤"
+      )));
+    }
+    if row.spec.server == server {
+      return Err(stale(format!(
+        "服务 {service} 当前配置仍在 {server} 上，拒绝删除"
+      )));
+    }
+  } else if let Some(expected) = instance_id
+    && !snap.pending_deletes.iter().any(|p| {
+      p.service == service
+        && p.server == server
+        && p.instance_id == expected
+        && p.purge_data == purge_data
+    })
+  {
+    return Err(stale(format!(
+      "服务 {service} 在 {server} 上的删除已完成或取消"
+    )));
+  }
+  project_down(
+    state,
+    (server, service),
+    purge_data,
+    has_relative_mounts,
+    progress,
+    cancel,
+  )
+  .await?;
+  let (service, server, instance_id) = (
+    service.to_string(),
+    server.to_string(),
+    instance_id.map(str::to_string),
+  );
+  state
+    .db
+    .call(move |c| {
+      db::clear_pending_delete(
+        c,
+        &service,
+        &server,
+        instance_id.as_deref(),
+      )
+    })
+    .await
+}
+
+async fn project_down(
+  state: &AppState,
+  (server, service): (&str, &str),
+  purge: bool,
+  require_safe_delete: bool,
+  progress: ProgressFn,
+  cancel: &CancellationToken,
+) -> Result<(), ApiError> {
+  let op = AgentOp::ProjectDown {
+    project: service.to_string(),
+    purge,
+  };
+  let _: serde_json::Value = if require_safe_delete {
+    // 用同一条连接核对能力并发请求，防止重连时切到旧 agent。
+    let conn = state.hub.safe_delete_conn_id(server)?;
+    state
+      .hub
+      .call_bound(
+        (server, conn),
+        op,
+        SHORT_TIMEOUT,
+        Some(progress),
+        cancel,
+      )
+      .await?
+  } else {
+    state
+      .hub
+      .call(server, op, SHORT_TIMEOUT, Some(progress), cancel)
+      .await?
+  };
+  Ok(())
+}
+
 async fn has_deployment(
   state: &AppState,
   service: &str,
+  instance_id: &str,
 ) -> Result<bool, ApiError> {
-  let service = service.to_string();
+  let (service, instance_id) =
+    (service.to_string(), instance_id.to_string());
   state
     .db
     .call(move |c| {
       c.query_row(
-        "SELECT 1 FROM deployments WHERE service = ?1 LIMIT 1",
-        params![service],
+        "SELECT 1 FROM deployments WHERE service = ?1 AND instance_id = ?2 LIMIT 1",
+        params![service, instance_id],
         |_| Ok(()),
       )
       .optional()
@@ -1710,6 +1935,7 @@ async fn has_deployment(
 }
 
 struct Deployed<'a> {
+  instance_id: &'a str,
   service: &'a str,
   server: &'a str,
   run_id: &'a str,
@@ -1731,6 +1957,7 @@ async fn record_deployment(
     serde_json::to_string(&images).map_err(json_err)?;
   let spec = serde_json::to_string(d.spec).map_err(json_err)?;
   let commit = d.commit.map(str::to_string);
+  let instance_id = d.instance_id.to_string();
   // 记下实际跑起来的版本：导入（按本机已有的镜像启动）和每次部署之后，固定的版本都和正在跑的一致。
   let pinnable = crate::pins::images(&d.spec.source);
   let pins: std::collections::BTreeMap<&str, &str> = images
@@ -1757,9 +1984,9 @@ async fn record_deployment(
     .call(move |c| {
       let (service, server, run_id, hash, compose) = values;
       c.execute(
-        "INSERT INTO deployments (service, server, run_id, hash, compose, images, created_at, spec, commit_sha)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-        params![service, server, run_id, hash, compose, encoded_images, now_ms(), spec, commit],
+        "INSERT INTO deployments (service, server, run_id, hash, compose, images, created_at, spec, commit_sha, instance_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![service, server, run_id, hash, compose, encoded_images, now_ms(), spec, commit, instance_id],
       )
       .map_err(sql_err)?;
       if let Some(pins) = pins {
@@ -1779,6 +2006,157 @@ async fn record_deployment(
 mod tests {
   use super::*;
 
+  #[tokio::test]
+  async fn stale_delete_plan_rejected_after_recreate_same_version() {
+    use wharf_api_types::{plan::PlanRequest, spec::Change};
+    let state = crate::rules::tests::test_state();
+    let seed = |c: &rusqlite::Connection| {
+      db::apply_write(
+        c,
+        &Write::Upsert {
+          kind: "service".into(),
+          name: "blog".into(),
+          spec: serde_json::json!({"server":"s1","source":{"image":"fixture:1"}}),
+          meta: serde_json::json!({}),
+        },
+      )
+    };
+    state
+      .db
+      .call(move |c| {
+        db::apply_write(
+          c,
+          &Write::Upsert {
+            kind: "server".into(),
+            name: "s1".into(),
+            spec: serde_json::json!({}),
+            meta: serde_json::json!({}),
+          },
+        )?;
+        seed(c)
+      })
+      .await
+      .unwrap();
+    let plan = crate::planner::make_plan(
+      &state,
+      PlanRequest {
+        changes: vec![Change::RemoveService {
+          name: "blog".into(),
+          purge_data: true,
+        }],
+        ..Default::default()
+      },
+    )
+    .await
+    .unwrap();
+    crate::planner::save(&state, &plan).await.unwrap();
+    state
+      .db
+      .call(move |c| {
+        db::apply_write(
+          c,
+          &Write::Delete {
+            kind: "service".into(),
+            name: "blog".into(),
+          },
+        )?;
+        seed(c)
+      })
+      .await
+      .unwrap();
+    let result = start(
+      state.clone(),
+      ApplyRequest {
+        plan_id: plan.plan.plan_id,
+        confirm: vec!["service/blog".into()],
+        skip_snapshot: false,
+      },
+      &BTreeSet::from([Perm::Admin, Perm::Confirm]),
+      None,
+    )
+    .await;
+    let error = result.err().unwrap();
+    assert_eq!(error.code, ErrorCode::PlanStale);
+    assert!(error.message.contains("已被删除并重建"));
+    assert_eq!(
+      snapshot::load(&state.db).await.unwrap().world.services["blog"]
+        .version,
+      1
+    );
+  }
+
+  #[tokio::test]
+  async fn old_agent_cannot_delete_relative_bind() {
+    let state = crate::rules::tests::test_state();
+    state
+      .hub
+      .mock_agent("s1", false, |_| panic!("不应发送删除请求"));
+    let err = run_step(
+      &state,
+      "r1",
+      &Step::ServiceDown {
+        server: "s1".into(),
+        service: "app".into(),
+        purge_data: false,
+        instance_id: None,
+        has_relative_mounts: true,
+      },
+      Arc::new(|_| {}),
+      &CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Conflict);
+  }
+
+  #[tokio::test]
+  async fn offline_agent_is_reported_offline_for_relative_bind_delete()
+   {
+    let state = crate::rules::tests::test_state();
+    let err = service_down(
+      &state,
+      &snapshot::Snapshot::default(),
+      ("s1", "s1"),
+      (false, None, true),
+      Arc::new(|_| {}),
+      &CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code, ErrorCode::AgentOffline);
+  }
+
+  #[tokio::test]
+  async fn takeover_rollback_does_not_send_project_down_to_old_agent()
+  {
+    let state = crate::rules::tests::test_state();
+    let (sent, received) = tokio::sync::oneshot::channel();
+    let mut sent = Some(sent);
+    state.hub.mock_agent("s1", false, move |op| {
+      assert!(
+        matches!(op, AgentOp::Unretire { items } if items.len() == 1)
+      );
+      sent.take().unwrap().send(()).unwrap();
+      Ok(serde_json::Value::Null)
+    });
+    let progress: ProgressFn = Arc::new(|_| {});
+    restore(
+      &state,
+      "s1",
+      "s1",
+      vec![Retired {
+        id: "s1".into(),
+        name: "s1".into(),
+        renamed: None,
+        restart: "no".into(),
+        was_running: true,
+      }],
+      &progress,
+    )
+    .await;
+    received.await.unwrap();
+  }
+
   #[test]
   fn old_plan_without_fingerprint_still_runs() {
     let step: Step = serde_json::from_str(
@@ -1788,11 +2166,13 @@ mod tests {
     assert_eq!(
       step,
       Step::ServiceUp {
+        instance_id: None,
         service: "web".into(),
         expect: None,
       }
     );
     let with = serde_json::to_string(&Step::ServiceUp {
+      instance_id: None,
       service: "web".into(),
       expect: Some("h".into()),
     })

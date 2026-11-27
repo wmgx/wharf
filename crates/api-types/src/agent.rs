@@ -146,6 +146,8 @@ pub enum AgentMsg {
     #[serde(default)]
     backup_isolation: bool,
     #[serde(default)]
+    safe_delete: bool,
+    #[serde(default)]
     key_rotation: bool,
   },
   KeyReady {
@@ -576,6 +578,8 @@ pub enum FilesOp {
     path: String,
     offset: u64,
     len: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    expect: Option<FileVersion>,
   },
   /// 写进临时文件，`last` 时换成正式文件（保留原文件或所在目录的属主）。
   /// `offset` 为 0 时从头写。结果为空。
@@ -604,12 +608,31 @@ pub struct FileEntry {
   pub modified: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileVersion {
+  pub dev: u64,
+  pub ino: u64,
+  pub size: u64,
+  pub mtime_secs: i64,
+  pub mtime_nanos: u32,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RemoveDataResult {
+  #[serde(default)]
+  pub removed: bool,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub blocked_by: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileChunk {
   /// base64。
   pub data: String,
   /// 文件总大小。
   pub size: u64,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub version: Option<FileVersion>,
 }
 
 /// 服务器详情页的宿主机信息，打开页面时现查。
