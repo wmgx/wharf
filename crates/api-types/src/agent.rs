@@ -124,6 +124,8 @@ pub enum AgentMsg {
     /// 是否支持宿主机终端和命令执行。旧 agent 缺省为不支持。
     #[serde(default)]
     host_shell: bool,
+    #[serde(default)]
+    runtime_v2: bool,
     /// 是否支持 [AgentOp::Forward]。旧 agent 缺省为不支持。
     #[serde(default)]
     forward: bool,
@@ -149,8 +151,6 @@ pub enum AgentMsg {
     safe_delete: bool,
     #[serde(default)]
     safe_adopt: bool,
-    #[serde(default)]
-    runtime_v2: bool,
     #[serde(default)]
     key_rotation: bool,
   },

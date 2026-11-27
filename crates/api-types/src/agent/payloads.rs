@@ -359,6 +359,10 @@ pub struct ProjectUp {
   pub compose: String,
   /// 控制面算出的指纹，agent 原样保存，用于漂移判断。
   pub hash: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub start_timeout_secs: Option<u32>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub readiness: Option<SettleProbe>,
   pub pull: PullPolicy,
   /// 本机已有的镜像不再拉取（刚导入的服务，避免拉到新版本而重建容器）。
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -381,66 +385,6 @@ pub struct ProjectUp {
   pub expected_images: BTreeMap<String, String>,
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub no_start: bool,
-  #[serde(default, skip_serializing_if = "Option::is_none")]
-  pub start_timeout_secs: Option<u32>,
-  #[serde(default, skip_serializing_if = "Option::is_none")]
-  pub readiness: Option<SettleProbe>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PrevLogMeta {
-  pub index: u32,
-  pub at: i64,
-  pub reason: String,
-  pub size_bytes: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PrevLogOutput {
-  pub index: u32,
-  pub at: i64,
-  pub reason: String,
-  pub available: u32,
-  pub logs: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SettleProbe {
-  pub url: String,
-  #[serde(default, skip_serializing_if = "Option::is_none")]
-  pub expect: Option<u16>,
-  #[serde(default, skip_serializing_if = "Option::is_none")]
-  pub keyword: Option<String>,
-}
-
-pub fn judge_http_check(
-  expect: Option<u16>,
-  keyword: Option<&str>,
-  r: &HttpCheckResult,
-) -> (bool, String) {
-  let Some(code) = r.status else {
-    return (
-      false,
-      r.error.clone().unwrap_or_else(|| "没有应答".into()),
-    );
-  };
-  let code_ok = match expect {
-    Some(e) => code == e,
-    None => (200..400).contains(&code),
-  };
-  if !code_ok {
-    let want =
-      expect.map_or("2xx 或 3xx".to_string(), |e| e.to_string());
-    return (false, format!("HTTP {code}，期望 {want}"));
-  }
-  if r.found == Some(false) {
-    let k = keyword.unwrap_or_default();
-    return (
-      false,
-      format!("HTTP {code}，但应答里没有\u{201c}{k}\u{201d}"),
-    );
-  }
-  (true, format!("HTTP {code} · {} ms", r.ms))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -844,6 +788,62 @@ pub struct EgressRoute {
   pub all: bool,
   /// 已展开的域名清单。
   pub domains: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrevLogMeta {
+  pub index: u32,
+  pub at: i64,
+  pub reason: String,
+  pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrevLogOutput {
+  pub index: u32,
+  pub at: i64,
+  pub reason: String,
+  pub available: u32,
+  pub logs: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettleProbe {
+  pub url: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub expect: Option<u16>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub keyword: Option<String>,
+}
+
+pub fn judge_http_check(
+  expect: Option<u16>,
+  keyword: Option<&str>,
+  r: &HttpCheckResult,
+) -> (bool, String) {
+  let Some(code) = r.status else {
+    return (
+      false,
+      r.error.clone().unwrap_or_else(|| "没有应答".into()),
+    );
+  };
+  let code_ok = match expect {
+    Some(e) => code == e,
+    None => (200..400).contains(&code),
+  };
+  if !code_ok {
+    let want =
+      expect.map_or("2xx 或 3xx".to_string(), |e| e.to_string());
+    return (false, format!("HTTP {code}，期望 {want}"));
+  }
+  if r.found == Some(false) {
+    let k = keyword.unwrap_or_default();
+    return (
+      false,
+      format!("HTTP {code}，但应答里没有\u{201c}{k}\u{201d}"),
+    );
+  }
+  (true, format!("HTTP {code} · {} ms", r.ms))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -24,13 +24,13 @@ fn old_hello_has_no_host_shell_capability() {
   .unwrap();
   let AgentMsg::Hello {
     host_shell,
+    runtime_v2,
     ssh_logins,
     core_probe,
     gateway_extra_files,
     backup_isolation,
     safe_delete,
     safe_adopt,
-    runtime_v2,
     key_rotation,
     ..
   } = hello
@@ -38,13 +38,13 @@ fn old_hello_has_no_host_shell_capability() {
     panic!("不是 hello");
   };
   assert!(!host_shell);
+  assert!(!runtime_v2);
   assert!(!ssh_logins);
   assert!(!core_probe);
   assert!(!gateway_extra_files);
   assert!(!backup_isolation);
   assert!(!safe_delete);
   assert!(!safe_adopt);
-  assert!(!runtime_v2);
   assert!(!key_rotation);
 }
 
@@ -74,6 +74,7 @@ fn old_core_ignores_new_hello_capability() {
     version: "0.1.0".into(),
     protocol: PROTOCOL,
     host_shell: true,
+    runtime_v2: false,
     forward: true,
     service_checks: true,
     container_diagnosis: true,
@@ -86,7 +87,6 @@ fn old_core_ignores_new_hello_capability() {
     backup_isolation: true,
     safe_delete: true,
     safe_adopt: false,
-    runtime_v2: false,
     key_rotation: true,
   };
   let json = serde_json::to_string(&hello).unwrap();
@@ -186,6 +186,7 @@ impl Hub {
         closed: closed.clone(),
         rtt_ms: Default::default(),
         host_shell: false,
+        runtime_v2: false,
         forward: false,
         service_checks: false,
         container_diagnosis: false,
@@ -197,7 +198,6 @@ impl Hub {
         backup_isolation,
         safe_delete: false,
         safe_adopt: false,
-        runtime_v2: false,
         upgrade_only: false,
       },
     );
@@ -304,6 +304,7 @@ async fn agent_upgrade_needs_no_bound_core_server_or_probe_support() {
     closed: CancellationToken::new(),
     rtt_ms: Arc::new(AtomicU64::new(u64::MAX)),
     host_shell: false,
+    runtime_v2: false,
     forward: false,
     service_checks: false,
     container_diagnosis: false,
@@ -315,7 +316,6 @@ async fn agent_upgrade_needs_no_bound_core_server_or_probe_support() {
     backup_isolation: false,
     safe_delete: false,
     safe_adopt: false,
-    runtime_v2: false,
     upgrade_only: true,
   };
   state.hub.register("s1", conn.clone());
@@ -364,6 +364,7 @@ fn probe_connection(
     closed: CancellationToken::new(),
     rtt_ms: Arc::new(AtomicU64::new(u64::MAX)),
     host_shell: false,
+    runtime_v2: false,
     forward: false,
     service_checks: false,
     container_diagnosis: false,
@@ -375,7 +376,6 @@ fn probe_connection(
     backup_isolation: false,
     safe_delete: false,
     safe_adopt: false,
-    runtime_v2: false,
     upgrade_only: false,
   };
   (conn, rx)
