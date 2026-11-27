@@ -43,12 +43,25 @@ impl RetryMeta {
     &self,
     c: &rusqlite::Connection,
     key: &db::CredentialsKey,
+    from_plan: bool,
   ) -> Result<(), ApiError> {
-    if self.post_versions != db::versions(c)?
-      || self.post_instances != db::service_instances(c)?
-      || self.inputs
-        != db::inputs(c, key, self.account_refs.as_ref())?
-    {
+    let instances = db::service_instances(c)?;
+    let changed = if from_plan {
+      self.post_versions != db::versions(c)?
+        || self.post_instances != instances
+        || self.inputs
+          != db::inputs(c, key, self.account_refs.as_ref())?
+    } else {
+      self
+        .steps
+        .iter()
+        .flat_map(|step| run_scope::step_services(&step.step))
+        .any(|service| {
+          let key = format!("service/{service}");
+          self.post_instances.get(&key) != instances.get(&key)
+        })
+    };
+    if changed {
       return Err(
         ApiError::new(
           ErrorCode::PlanStale,
@@ -292,7 +305,7 @@ pub async fn retry_run(
   state
     .db
     .call_credentials(move |c, key| {
-      meta.require_fresh(c, key)?;
+      meta.require_fresh(c, key, !stored_run.plan_id.is_empty())?;
       let next = RetryMeta {
         steps: stored_steps,
         offset: 0,
@@ -377,10 +390,21 @@ async fn run_retry_reruns_only_failed_and_skipped_and_rejects_stale()
     )
   })
   .collect();
+  let plan = crate::planner::make_plan(
+    &state,
+    wharf_api_types::plan::PlanRequest::default(),
+  )
+  .await
+  .unwrap();
+  crate::planner::save(&state, &plan).await.unwrap();
   for id in ["r_first", "r_stale"] {
     let mut run = Run {
       run_id: id.into(),
-      plan_id: String::new(),
+      plan_id: if id == "r_stale" {
+        plan.plan.plan_id.clone()
+      } else {
+        String::new()
+      },
       actor: None,
       retry_of: None,
       status: RunStatus::Failed,

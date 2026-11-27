@@ -1349,22 +1349,7 @@ fn service_items(
                   "漂移：服务器上的部署和配置不一致",
                   "漂移：服务器上的部署和配置不一致，重新部署",
                 )
-              }
-              .or_else(|| {
-                let reason = if moved.is_some() {
-                  "在目标服务器部署服务"
-                } else if restarting_source {
-                  "取消迁移，恢复源机服务"
-                } else {
-                  return None;
-                };
-                Some((
-                  Action::Update,
-                  vec![Impact::Restart],
-                  reason.into(),
-                  None,
-                ))
-              });
+              };
             deployed_template(
               current,
               net,
@@ -1438,7 +1423,16 @@ fn service_items(
           }
         }
       },
-    };
+    }.or_else(|| {
+      let reason = if moved.is_some() {
+        "在目标服务器部署服务"
+      } else if restarting_source {
+        "取消迁移，恢复源机服务"
+      } else {
+        return None;
+      };
+      Some((Action::Update, vec![Impact::Restart], reason.into(), None))
+    });
     // 同名 compose 项目里混着别处起的容器：compose up 会把它们当成自己的删掉。导入时本来就要接管。
     let foreign: Vec<&str> = status
       .get(server)
