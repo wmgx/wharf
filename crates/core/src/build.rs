@@ -4,7 +4,9 @@
 //! - "重新构建"（`force`）拉 ref 的最新代码；
 //! - 不是 force 时，git 来源固定到上次部署的 commit（迁移到新机器时构建出同样的代码）。
 
-use std::time::Duration;
+use std::{path::Path, time::Duration};
+
+use base64::{Engine, engine::general_purpose::STANDARD};
 
 use rusqlite::{OptionalExtension, params};
 use tokio_util::sync::CancellationToken;
@@ -12,6 +14,7 @@ use wharf_api_types::{
   ApiError, ErrorCode,
   agent::{
     AgentOp, BuildFetch, BuildJob, BuildResult, OneTimeSecret,
+    ResolveCommit,
   },
   spec::{BuildSource, GitSource, ServiceSpec, Source},
 };
@@ -38,6 +41,109 @@ pub(crate) fn old_agent_warning(server: &str) -> String {
   format!(
     "服务器 {server} 的 agent 版本旧，不包含子模块拉取、大锁文件、新模板与旧镜像回收修复，建议先运行 wharf upgrade"
   )
+}
+
+/// 计划只查 Git 引用。旧 agent 的查询可能拉镜像，因此在控制面做只读回退。
+pub(crate) async fn plan_commit(
+  state: &AppState,
+  server: &str,
+  job: ResolveCommit,
+) -> Result<String, ApiError> {
+  if let Some(conn) = state.hub.build_v2_conn_id(server) {
+    return state
+      .hub
+      .call_bound(
+        (server, conn),
+        AgentOp::ResolveCommit(job),
+        crate::pins::COMMIT_TIMEOUT,
+        None,
+        &Default::default(),
+      )
+      .await;
+  }
+  if !state.hub.is_online(server) {
+    return Err(crate::hub::offline(server));
+  }
+
+  let BuildFetch::Git {
+    repo,
+    reference,
+    token,
+    user,
+    ..
+  } = &job.fetch
+  else {
+    return Err(ApiError::invalid("只有 git 来源能查 commit"));
+  };
+  if user.is_some() {
+    return Err(old_git_agent(server));
+  }
+  if wharf_api_types::build::is_commit(reference) {
+    return Ok(reference.to_ascii_lowercase());
+  }
+  let url = reqwest::Url::parse(repo)
+    .map_err(|_| ApiError::invalid("Git 仓库地址不合法"))?;
+  let mut args = Vec::new();
+  let mut env = Vec::new();
+  let auth;
+  let config;
+  let mirrored;
+  let repo = if let Some(token) = token {
+    let git_user = match url.host_str() {
+      Some("bitbucket.org") => "x-token-auth",
+      Some(host) if host.contains("gitlab") => "oauth2",
+      _ => "x-access-token",
+    };
+    config = format!(
+      "http.{}/.extraHeader=WHARF_GIT_AUTH",
+      url.origin().ascii_serialization()
+    );
+    auth = format!(
+      "Authorization: Basic {}",
+      STANDARD.encode(format!("{git_user}:{}", token.0))
+    );
+    args.extend(["--config-env", config.as_str()]);
+    env.push(("WHARF_GIT_AUTH", auth.as_str()));
+    repo.as_str()
+  } else if let Some((path, mirror)) = repo
+    .strip_prefix("https://github.com/")
+    .zip(job.pull.github_mirror.as_deref())
+    && mirror.starts_with("https://")
+  {
+    mirrored = format!("{}/{path}", mirror.trim_end_matches('/'));
+    mirrored.as_str()
+  } else {
+    repo.as_str()
+  };
+  let peeled = format!("{reference}^{{}}");
+  args.extend(["ls-remote", "--", repo, reference, &peeled]);
+  let proxy = job.pull.git_proxy.as_deref().unwrap_or_default();
+  let bytes = tokio::time::timeout(
+    crate::pins::COMMIT_TIMEOUT,
+    crate::secret_leak::git_with_env(
+      Path::new("/"),
+      proxy,
+      &args,
+      &env,
+    ),
+  )
+  .await
+  .map_err(|_| {
+    ApiError::new(ErrorCode::Timeout, "查询 Git 代码版本超时")
+  })?
+  .map_err(|e| {
+    ApiError::new(
+      ErrorCode::AgentFailed,
+      format!("控制面查询 Git 代码版本：{e}"),
+    )
+  })?;
+  wharf_api_types::build::pick_commit(
+    &String::from_utf8_lossy(&bytes),
+    reference,
+  )
+  .ok_or_else(|| {
+    ApiError::invalid(format!("仓库里没有分支或标签 {reference}"))
+  })
 }
 
 /// 拉代码、拉基础镜像、构建都算在内。
@@ -275,4 +381,33 @@ pub async fn restart_now(
     )
     .await?,
   ))
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[tokio::test]
+  async fn plan_pin_on_legacy_agent_never_dispatches_docker_lookup() {
+    let state = crate::rules::tests::test_state();
+    state
+      .hub
+      .mock_agent("s1", false, |_| panic!("不应向旧 agent 发查询"));
+    let sha = "0123456789012345678901234567890123456789";
+    let job = ResolveCommit {
+      service: "site".into(),
+      fetch: BuildFetch::Git {
+        repo: "https://example.test/site".into(),
+        reference: sha.into(),
+        token: None,
+        user: None,
+        fallback_ref: None,
+      },
+      pull: snapshot::committed_pull_policy(
+        &Default::default(),
+        "s1",
+      ),
+    };
+    assert_eq!(plan_commit(&state, "s1", job).await.unwrap(), sha);
+  }
 }

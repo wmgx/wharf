@@ -484,29 +484,25 @@ pub async fn resolve_commits(
       build.git.as_ref(),
       None,
     )?;
-    let commit: String = state
-      .hub
-      .call(
-        &server,
-        AgentOp::ResolveCommit(ResolveCommit {
-          service: name.clone(),
-          fetch,
-          pull: snapshot::committed_pull_policy(&snap.world, &server),
-        }),
-        COMMIT_TIMEOUT,
-        None,
-        &Default::default(),
+    let commit = crate::build::plan_commit(
+      state,
+      &server,
+      ResolveCommit {
+        service: name.clone(),
+        fetch,
+        pull: snapshot::committed_pull_policy(&snap.world, &server),
+      },
+    )
+    .await
+    .map_err(|e| {
+      ApiError::new(
+        e.code,
+        format!("查不到服务 {name} 的代码版本：{}", e.message),
       )
-      .await
-      .map_err(|e| {
-        ApiError::new(
-          e.code,
-          format!("查不到服务 {name} 的代码版本：{}", e.message),
-        )
-        .with_hint(
-          "确认仓库地址、分支和 token；仓库暂时连不上时稍后重新 plan",
-        )
-      })?;
+      .with_hint(
+        "确认仓库地址、分支和 token；仓库暂时连不上时稍后重新 plan",
+      )
+    })?;
     if let Some(row) = desired.services.get_mut(&name) {
       row.commit = Some(commit);
     }

@@ -439,6 +439,15 @@ async fn git(
   proxy: &str,
   args: &[&str],
 ) -> Result<Vec<u8>, &'static str> {
+  git_with_env(dir, proxy, args, &[]).await
+}
+
+pub(crate) async fn git_with_env(
+  dir: &Path,
+  proxy: &str,
+  args: &[&str],
+  env: &[(&str, &str)],
+) -> Result<Vec<u8>, &'static str> {
   let mut command = Command::new("git");
   command
     .current_dir(dir)
@@ -448,6 +457,7 @@ async fn git(
     .env("GIT_CONFIG_GLOBAL", "/dev/null")
     .env("GIT_TERMINAL_PROMPT", "0")
     .env("HTTPS_PROXY", proxy)
+    .envs(env.iter().copied())
     .args([
       "-c",
       "protocol.allow=never",

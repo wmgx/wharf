@@ -2870,6 +2870,7 @@ mod tests {
       assert!(matches!(job.fetch, wharf_api_types::agent::BuildFetch::Git { reference, .. } if reference == "prod"));
       Ok(json!(sha))
     });
+    state.hub.enable_mock_build_v2("s1");
     let mut current = world();
     let edge: EdgeAppSpec = serde_json::from_value(json!({
       "account":"edge", "kind":"pages", "builder":"s1",

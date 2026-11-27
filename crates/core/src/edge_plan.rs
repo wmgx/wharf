@@ -9,7 +9,7 @@
 use serde_json::json;
 use wharf_api_types::{
   ApiError,
-  agent::{AgentOp, ResolveCommit},
+  agent::ResolveCommit,
   plan::{Action, Impact, Layer},
   spec::{EdgeAppSpec, EdgeKind},
 };
@@ -173,23 +173,19 @@ async fn plan_build(
     Some(git),
     None,
   )?;
-  let commit: String = state
-    .hub
-    .call(
-      &server,
-      AgentOp::ResolveCommit(ResolveCommit {
-        service: name.into(),
-        fetch,
-        pull: snapshot::committed_pull_policy(&snap.world, &server),
-      }),
-      crate::pins::COMMIT_TIMEOUT,
-      None,
-      &Default::default(),
-    )
-    .await
-    .map_err(|e| {
-      e.with_hint("检查 Git 仓库地址、分支名和私有仓库令牌")
-    })?;
+  let commit = crate::build::plan_commit(
+    state,
+    &server,
+    ResolveCommit {
+      service: name.into(),
+      fetch,
+      pull: snapshot::committed_pull_policy(&snap.world, &server),
+    },
+  )
+  .await
+  .map_err(|e| {
+    e.with_hint("检查 Git 仓库地址、分支名和私有仓库令牌")
+  })?;
   if commit.len() != 40
     || !commit.bytes().all(|b| b.is_ascii_hexdigit())
   {

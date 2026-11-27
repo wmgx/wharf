@@ -770,6 +770,29 @@ EXPOSE {port}
   }
 }
 
+pub fn is_commit(s: &str) -> bool {
+  s.len() == 40 && s.bytes().all(|c| c.is_ascii_hexdigit())
+}
+
+/// `ls-remote` 的输出里挑：附注标签取 `^{}` 那行，否则优先分支，再是标签。
+pub fn pick_commit(out: &str, reference: &str) -> Option<String> {
+  let lines: Vec<(&str, &str)> = out
+    .lines()
+    .filter_map(|l| l.split_once('\t'))
+    .filter(|(sha, _)| is_commit(sha))
+    .collect();
+  let find = |want: &str| {
+    lines
+      .iter()
+      .find(|(_, r)| *r == want)
+      .map(|(s, _)| s.to_string())
+  };
+  find(&format!("refs/tags/{reference}^{{}}"))
+    .or_else(|| find(&format!("refs/heads/{reference}")))
+    .or_else(|| find(&format!("refs/tags/{reference}")))
+    .or_else(|| find(reference))
+}
+
 /// Dockerfile 里 `FROM` 用到的镜像（跳过前面阶段的别名和 `scratch`），构建前先按镜像源拉好。
 pub fn from_images(dockerfile: &str) -> Vec<String> {
   let mut stages = std::collections::BTreeSet::new();
