@@ -16,7 +16,7 @@ use wharf_api_types::{
 
 use crate::{
   caddy_validate::{
-    check_custom_caddy, check_error_page, redirect_host,
+    check_custom_caddy_boundaries, check_error_page, redirect_host,
     valid_upstream, validate_gateway, validate_route_hostname,
     validate_route_path,
   },
@@ -421,6 +421,12 @@ impl World {
             content: Some(content),
             ..
           } = &spec.source
+            && old.is_none_or(|old| {
+              old.spec.source != spec.source
+                || old.spec.container != spec.container
+                || old.spec.limits != spec.limits
+                || old.spec.env != spec.env
+            })
           {
             crate::render::compose_with_settings(
               name, content, &spec,
@@ -1242,7 +1248,7 @@ impl World {
         }) {
           return bad("只支持 caddy 网关");
         }
-        if let Err(m) = check_custom_caddy(custom) {
+        if let Err(m) = check_custom_caddy_boundaries(custom) {
           return bad(m);
         }
       }
@@ -1833,7 +1839,7 @@ fn validate_service(
           .with_hint("用 wharf CLI 提交，它会读取文件内容"),
         );
       };
-      crate::render::check_compose(name, content)?;
+      crate::render::check_compose_template(name, content)?;
       if !spec.env.is_empty() || !spec.volumes.is_empty() {
         return Err(ApiError::invalid(format!(
           "服务 {name}：compose 来源的环境变量和数据卷请直接写在 compose 文件里"
@@ -3083,9 +3089,12 @@ services:
   #[test]
   fn custom_caddy_stays_in_site() {
     assert!(
-      check_custom_caddy("@admin path /admin/*\nrespond @admin 403\nheader {\n\tX-A \"{host}\"\n}").is_ok()
+      check_custom_caddy_boundaries("@admin path /admin/*\nrespond @admin 403\nheader {\n\tX-A \"{host}\"\n}").is_ok()
     );
-    assert!(check_custom_caddy("}\nevil.example.com {\n").is_err());
+    assert!(
+      check_custom_caddy_boundaries("}\nevil.example.com {\n")
+        .is_err()
+    );
   }
   #[test]
   fn route_header_checks() {

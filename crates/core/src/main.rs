@@ -120,6 +120,7 @@ mod ssh_login;
 mod sso_login;
 mod state;
 mod status;
+mod syntax_check;
 mod tailnet_ips;
 mod tailnet_probe;
 mod tailscale;

@@ -90,13 +90,17 @@ fn scan(
     let Some(len) = rest[start + 2..].find("]]") else {
       break;
     };
-    let inner = &rest[start + 2..start + 2 + len];
+    let end = start + 2 + len;
+    let start = rest[start + 2..end]
+      .rfind("[[@")
+      .map_or(start, |i| start + 2 + i);
+    let inner = &rest[start + 2..end];
     out.push_str(&rest[..start]);
     match parse(inner) {
       Some(r) => out.push_str(&f(&r)?),
-      None => out.push_str(&rest[start..start + 4 + len]),
+      None => out.push_str(&rest[start..end + 2]),
     }
-    rest = &rest[start + 4 + len..];
+    rest = &rest[end + 2..];
   }
   out.push_str(rest);
   Ok(out)
@@ -188,6 +192,40 @@ pub fn resolve(
 
 #[cfg(test)]
 mod tests {
+  #[test]
+  fn unclosed_at_bracket_does_not_swallow_resolved_ref() {
+    let mut world = World::default();
+    world.servers.insert(
+      "s1".into(),
+      crate::world::ServerRow {
+        settings: Default::default(),
+        version: 1,
+      },
+    );
+    world.apply_changes(&[
+      serde_json::from_value(serde_json::json!({
+        "op": "upsert_service", "name": "db",
+        "spec": {"server": "s1", "source": {"image": "postgres:16"},
+          "ports": [{"name": "sql", "container": 5432, "host": 21000}]}
+      })).unwrap(),
+    ]).unwrap();
+    world.allocate_ports().unwrap();
+    let mut net = Net::default();
+    net.private.insert(
+      "s1".into(),
+      wharf_api_types::spec::PrivateAddr {
+        ip: "100.64.0.1".into(),
+        network: wharf_api_types::spec::PrivateNetwork::Tailscale,
+      },
+    );
+    let text = "URL=prefix[[@bad [[@db]]";
+    assert_eq!(used(text), ["db"]);
+    assert_eq!(
+      resolve(text, "db", &world, &net).unwrap(),
+      "URL=prefix[[@bad 100.64.0.1:21000"
+    );
+  }
+
   use super::*;
 
   #[test]

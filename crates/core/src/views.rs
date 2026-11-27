@@ -285,7 +285,10 @@ pub fn service_view(
         } else {
           ""
         };
-      (port.clone(), format!("{ip}:{host}{suffix}"))
+      (
+        port.clone(),
+        format!("{}{suffix}", crate::render::host_port(&ip, *host)),
+      )
     })
     .collect();
   let lan_addresses = net
@@ -309,7 +312,12 @@ pub fn service_view(
             port.clone(),
             ips
               .iter()
-              .map(|ip| format!("{ip}:{host}{suffix}"))
+              .map(|ip| {
+                format!(
+                  "{}{suffix}",
+                  crate::render::host_port(ip, *host)
+                )
+              })
               .collect(),
           )
         })

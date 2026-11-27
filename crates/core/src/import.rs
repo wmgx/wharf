@@ -540,7 +540,7 @@ fn env_warning() -> String {
 /// compose 来源没填 ports 时用它补上，这样服务有内网地址、路由也能指过来。
 /// compose 里有没有容器挂载了目录或卷（解析不了的当作有）。
 pub fn compose_has_volumes(content: &str) -> bool {
-  let Ok(value) = serde_yaml_ng::from_str::<Value>(content) else {
+  let Ok(value) = crate::render::parse_compose(content) else {
     return true;
   };
   value["services"].as_mapping().is_none_or(|m| {
@@ -551,7 +551,7 @@ pub fn compose_has_volumes(content: &str) -> bool {
 }
 
 pub fn compose_ports(content: &str) -> Vec<PortSpec> {
-  let Ok(doc) = serde_yaml_ng::from_str::<Value>(content) else {
+  let Ok(doc) = crate::render::parse_compose(content) else {
     return Vec::new();
   };
   let mut published = Vec::new();
@@ -1176,6 +1176,13 @@ fn extract_container_ports(
 
 #[cfg(test)]
 mod tests {
+  #[test]
+  fn compose_anchors_volumes_and_ports() {
+    let compose = "x-base: &b {volumes: ['./data:/data'], ports: ['18080:80']}\nservices: {app: {<<: *b}}";
+    assert!(compose_has_volumes(compose));
+    assert_eq!(compose_ports(compose)[0].host, Some(18080));
+  }
+
   #[test]
   fn compose_ports_reads_short_and_long_syntax() {
     let c = "services:\n  a:\n    ports:\n      - \"18880:8880\"\n      - 127.0.0.1:9000:90\n      - 5000\n      - 53:53/udp\n  b:\n    ports:\n      - target: 80\n        published: 8081\n";

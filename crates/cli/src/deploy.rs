@@ -332,7 +332,7 @@ pub async fn fetch_compose(url: &str) -> CliResult<String> {
   }
   let text = String::from_utf8(body)
     .map_err(|_| fail("内容不是文本".into()))?;
-  let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&text)
+  let doc = parse_compose(&text)
     .map_err(|e| fail(format!("不是 YAML：{e}")))?;
   if !doc.get("services").is_some_and(|s| s.is_mapping()) {
     return Err(fail(
@@ -345,4 +345,33 @@ pub async fn fetch_compose(url: &str) -> CliResult<String> {
     );
   }
   Ok(text)
+}
+
+pub(crate) fn parse_compose(
+  text: &str,
+) -> Result<serde_yaml_ng::Value, serde_yaml_ng::Error> {
+  use serde_yaml_ng::Value;
+  fn merge(value: &mut Value) -> Result<(), serde_yaml_ng::Error> {
+    match value {
+      Value::Mapping(map) => {
+        for value in map.values_mut() {
+          merge(value)?;
+        }
+        if map.contains_key("<<") {
+          value.apply_merge()?;
+        }
+      }
+      Value::Sequence(values) => {
+        for value in values {
+          merge(value)?;
+        }
+      }
+      Value::Tagged(tag) => merge(&mut tag.value)?,
+      _ => {}
+    }
+    Ok(())
+  }
+  let mut value = serde_yaml_ng::from_str(text)?;
+  merge(&mut value)?;
+  Ok(value)
 }

@@ -51,5 +51,7 @@ jobs:
         working-directory: web
       - run: npx tsc --noEmit
         working-directory: web
+      - run: node --experimental-strip-types --test scripts/settings-draft.test.mjs
+        working-directory: web
       - run: node scripts/api-parity.mjs
         working-directory: web

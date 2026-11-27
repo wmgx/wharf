@@ -376,6 +376,9 @@ pub struct FileSpec {
   pub path: String,
   /// 文本内容，最大 64 KB。可以用 `[[密钥名]]` 和 `[[@服务]]`，部署时替换。
   pub content: String,
+  /// 跳过 plan 阶段的配置文件语法预检。
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub raw: bool,
 }
 
 impl ServiceSpec {

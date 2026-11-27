@@ -43,6 +43,7 @@ libc = "0.2"
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml_ng.workspace = true
+unsafe-libyaml = "0.2.11"
 urlencoding.workspace = true
 hmac.workspace = true
 sha1.workspace = true
@@ -52,6 +53,7 @@ time = "0.3"
 tokio.workspace = true
 tar = "=0.4.46"
 tokio-util.workspace = true
+toml.workspace = true
 tower = { version = "0.5", features = ["util"] }
 rust-embed.workspace = true
 tracing.workspace = true

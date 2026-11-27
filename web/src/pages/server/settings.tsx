@@ -31,7 +31,7 @@ type Settings = ServerView["settings"] & {
 };
 
 export function SettingsForm({ server, canRemove, active }: { server: ServerView; canRemove: boolean; active: boolean }) {
-  const { draft, set, reset, dirty } = useDraft(server.settings as Settings);
+  const { draft, set, reset, dirty, mergeInto } = useDraft(server.settings as Settings);
   const [version, setVersion] = useState(0);
   const { hash } = useLocation();
   const actions = useActions();
@@ -46,10 +46,10 @@ export function SettingsForm({ server, canRemove, active }: { server: ServerView
     ["权限", ["host_terminal", "host_exec", "host_docker", "host_system"]],
   ];
   const changed = groups.filter(([, keys]) => dirty(keys)).map(([label]) => label);
-  return <SettingsFields key={version} server={server} canRemove={canRemove} draft={draft} set={set} changed={changed} onReset={() => { reset(); setVersion((v) => v + 1); }} onSubmit={() => actions.plan({ title: `设置 ${server.name}`, changes: [{ op: "update_server", name: server.name, settings: { ...draft, network_mode: server.settings.network_mode } }] })} />;
+  return <SettingsFields key={version} server={server} canRemove={canRemove} draft={draft} set={set} dirty={dirty} changed={changed} onReset={() => { reset(); setVersion((v) => v + 1); }} onSubmit={() => actions.plan({ title: `设置 ${server.name}`, changes: [{ op: "update_server", name: server.name, settings: mergeInto(server.settings as Settings) }] })} />;
 }
 
-function SettingsFields({ server, canRemove, draft, set, changed, onReset, onSubmit }: { server: ServerView; canRemove: boolean; draft: Settings; set: (patch: Partial<Settings>) => void; changed: string[]; onReset: () => void; onSubmit: () => void }) {
+function SettingsFields({ server, canRemove, draft, set, dirty, changed, onReset, onSubmit }: { server: ServerView; canRemove: boolean; draft: Settings; set: (patch: Partial<Settings>) => void; dirty: (keys: (keyof Settings)[]) => boolean; changed: string[]; onReset: () => void; onSubmit: () => void }) {
   const nav = useNavigate();
   const [mirrors, setMirrors] = useState(mirrorsText(draft.registry_mirrors));
   const [buildEnv, setBuildEnv] = useState(formatEnv(draft.build_env));
@@ -59,15 +59,19 @@ function SettingsFields({ server, canRemove, draft, set, changed, onReset, onSub
   const [rotatingBusy, setRotatingBusy] = useState(false);
   const [fingerprint, setFingerprint] = useState<string | null>(null);
   const [removing, setRemoving] = useState(false);
-  const [textEdited, setTextEdited] = useState(false);
-  useEffect(() => {
-    if (!changed.length && !textEdited) {
-      setMirrors(mirrorsText(draft.registry_mirrors));
-      setBuildEnv(formatEnv(draft.build_env));
-      setQuota(draft.traffic_quota_gb?.toString() ?? "");
-      setResetDay(draft.traffic_reset_day?.toString() ?? "");
-    }
-  }, [draft, changed.length, textEdited]);
+  const mirrorsDirty = dirty(["registry_mirrors"]);
+  const buildEnvDirty = dirty(["build_env"]);
+  const quotaDirty = dirty(["traffic_quota_gb"]);
+  const resetDayDirty = dirty(["traffic_reset_day"]);
+  const saved = server.settings as Settings;
+  const savedMirrors = mirrorsText(saved.registry_mirrors);
+  const savedBuildEnv = formatEnv(saved.build_env);
+  const savedQuota = saved.traffic_quota_gb?.toString() ?? "";
+  const savedResetDay = saved.traffic_reset_day?.toString() ?? "";
+  useEffect(() => { if (!mirrorsDirty) setMirrors(savedMirrors); }, [savedMirrors]);
+  useEffect(() => { if (!buildEnvDirty) setBuildEnv(savedBuildEnv); }, [savedBuildEnv]);
+  useEffect(() => { if (!quotaDirty) setQuota(savedQuota); }, [savedQuota]);
+  useEffect(() => { if (!resetDayDirty) setResetDay(savedResetDay); }, [savedResetDay]);
   const lanChoices = [...new Set([...(server.report?.lan_ips ?? []).filter(isPrivate), ...(draft.lan_addrs ?? [])])];
   const via = draft.via ?? "";
   const quotaNum = Number(quota.trim() || 0);
@@ -132,20 +136,20 @@ function SettingsFields({ server, canRemove, draft, set, changed, onReset, onSub
     <SectionTitle>部署</SectionTitle>
     <Panel className="grid gap-4 p-4">
       <Field label="镜像源" htmlFor="mirrors" help="每行一个仓库，例如 docker.io=docker.1ms.run,docker.m.daocloud.io，按顺序尝试。">
-        <Textarea id="mirrors" rows={3} className="font-mono text-xs" value={mirrors} onChange={(e) => { setTextEdited(true); setMirrors(e.target.value); set({ registry_mirrors: parseMirrors(e.target.value) }); }} />
+        <Textarea id="mirrors" rows={3} className="font-mono text-xs" value={mirrors} onChange={(e) => { setMirrors(e.target.value); set({ registry_mirrors: parseMirrors(e.target.value) }); }} />
       </Field>
       <label className="flex items-center gap-2 text-sm">
         <Checkbox checked={!!draft.mirrors_only} onCheckedChange={(v) => set({ mirrors_only: v === true })} />有镜像源时不再尝试原地址</label>
       <Field label="构建参数" htmlFor="build-env" help="每行 KEY=VALUE，传给内置模板。国内机器常配 PIP_INDEX_URL、GOPROXY。">
-        <CodeEditor id="build-env" lang="env" className="min-h-16" value={buildEnv} onChange={(value) => { setTextEdited(true); setBuildEnv(value); set({ build_env: parseEnv(value) }); }} />
+        <CodeEditor id="build-env" lang="env" className="min-h-16" value={buildEnv} onChange={(value) => { setBuildEnv(value); set({ build_env: parseEnv(value) }); }} />
       </Field>
     </Panel>
     <SectionTitle>流量</SectionTitle>
     <Panel className="p-4">
       <Field label="流量" help="每月额度（GB）和重置日（1 到 28，北京时间），用于显示本期用了多少，用到 80% 时提醒（阈值在告警规则里改）。都不填按每月 1 号算、不显示额度。">
         <div className="flex gap-2">
-          <Input aria-label="每月额度" inputMode="numeric" className="w-32" value={quota} placeholder="额度 GB" onChange={(e) => { const v = e.target.value; setTextEdited(true); setQuota(v); set({ traffic_quota_gb: v.trim() ? Number(v) : undefined }); }} />
-          <Input aria-label="重置日" inputMode="numeric" className="w-32" value={resetDay} placeholder="重置日" onChange={(e) => { const v = e.target.value; setTextEdited(true); setResetDay(v); set({ traffic_reset_day: v.trim() ? Number(v) : undefined }); }} />
+          <Input aria-label="每月额度" inputMode="numeric" className="w-32" value={quota} placeholder="额度 GB" onChange={(e) => { const v = e.target.value; setQuota(v); set({ traffic_quota_gb: v.trim() ? Number(v) : undefined }); }} />
+          <Input aria-label="重置日" inputMode="numeric" className="w-32" value={resetDay} placeholder="重置日" onChange={(e) => { const v = e.target.value; setResetDay(v); set({ traffic_reset_day: v.trim() ? Number(v) : undefined }); }} />
         </div>
       </Field>
     </Panel>

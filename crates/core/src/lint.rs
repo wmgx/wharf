@@ -132,8 +132,7 @@ fn compose_services(spec: &ServiceSpec) -> Option<Mapping> {
   else {
     return None;
   };
-  let mut compose: Value = serde_yaml_ng::from_str(content).ok()?;
-  compose.apply_merge().ok()?;
+  let mut compose = crate::render::parse_compose(content).ok()?;
   match std::mem::take(compose.get_mut("services")?) {
     Value::Mapping(services) => Some(services),
     _ => None,
@@ -336,10 +335,28 @@ fn service_memory(spec: &ServiceSpec) -> f64 {
 }
 
 fn has_reference(value: &str) -> bool {
+  has_reference_to(value, None)
+}
+
+fn has_reference_to(
+  value: &str,
+  known: Option<&BTreeMap<String, String>>,
+) -> bool {
   value.contains('$')
-    || value
-      .split_once("[[")
-      .is_some_and(|(_, tail)| tail.contains("]]"))
+    || crate::render::placeholders(value).any(|inner| {
+      crate::render::parse_placeholder(inner, true)
+        .ok()
+        .flatten()
+        .is_some_and(|p| {
+          p.mode != crate::render::SecretMode::Plain
+            || crate::render::account_ref(p.name).is_some()
+            || known.is_none_or(|known| {
+              known.contains_key(p.name)
+                || value.trim() == format!("[[{inner}]]")
+            })
+        })
+    })
+    || !crate::refs::used(value).is_empty()
 }
 
 fn env_secret(
@@ -349,7 +366,7 @@ fn env_secret(
 ) -> Option<String> {
   let trimmed = value.trim();
   let lower = trimmed.to_ascii_lowercase();
-  if has_reference(trimmed)
+  if has_reference_to(trimmed, Some(secrets))
     || trimmed.starts_with('/')
     || trimmed.bytes().all(|c| c.is_ascii_digit())
     || matches!(
@@ -545,7 +562,7 @@ fn file_secret(
   content: &str,
   secrets: &BTreeMap<String, String>,
 ) -> Option<String> {
-  if !has_reference(content)
+  if !has_reference_to(content, Some(secrets))
     && let Some(name) = stored_secret(content, secrets)
   {
     return Some(reuse_secret(name));
@@ -568,7 +585,7 @@ fn file_secret(
         .into_iter()
         .flatten()
     {
-      if has_reference(value) {
+      if has_reference_to(value, Some(secrets)) {
         continue;
       }
       if let Some(name) = stored_secret(value, secrets) {
@@ -584,6 +601,25 @@ fn file_secret(
 
 #[cfg(test)]
 mod tests {
+  #[test]
+  fn fake_brackets_do_not_bypass_secret_lint() {
+    assert!(
+      env_secret("API_TOKEN", "ab[[cd]]ef123456", &BTreeMap::new())
+        .is_some()
+    );
+  }
+
+  #[test]
+  fn fake_brackets_do_not_hide_stored_secret_in_file() {
+    let value = "ab[[cd]]ef123456";
+    let secrets =
+      BTreeMap::from([("API_TOKEN".into(), value.into())]);
+    assert_eq!(
+      file_secret(&format!("token={value}\n"), &secrets),
+      Some(reuse_secret("API_TOKEN"))
+    );
+  }
+
   use serde_json::json;
 
   use super::*;

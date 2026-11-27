@@ -2901,6 +2901,7 @@ async fn service(
       name,
       path,
       file,
+      raw,
       rm,
       apply,
     } => {
@@ -2953,11 +2954,14 @@ async fn service(
           ApiError::invalid(format!("读不了文件 {src}：{e}"))
             .with_hint("只支持文本文件；从标准输入读用 --file -")
         })?;
-        match spec.files.iter_mut().find(|f| f.path == path) {
-          Some(f) => f.content = content,
-          None => spec
-            .files
-            .push(wharf_api_types::spec::FileSpec { path, content }),
+        let next =
+          wharf_api_types::spec::FileSpec { path, content, raw };
+        if let Some(f) =
+          spec.files.iter_mut().find(|f| f.path == next.path)
+        {
+          *f = next;
+        } else {
+          spec.files.push(next);
         }
       } else {
         let f = spec

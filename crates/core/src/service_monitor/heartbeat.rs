@@ -132,6 +132,8 @@ fn inject(
   let mut yaml: Value =
     serde_yaml_ng::from_str(text).map_err(|_| invalid())?;
   yaml.apply_merge().map_err(|_| invalid())?;
+  let merged =
+    crate::render::parse_compose(text).map_err(|_| invalid())?;
   let services = yaml
     .get_mut("services")
     .and_then(Value::as_mapping_mut)
@@ -142,11 +144,17 @@ fn inject(
     "<heartbeat>"
   };
   let url = format!("{public}/ping/{token}").replace('$', "$$");
-  for service in services.values_mut() {
+  for (name, service) in services {
+    let inherited = merged["services"][name].get("environment");
     let service = service.as_mapping_mut().ok_or_else(invalid)?;
     let environment = service
       .entry(Value::from("environment"))
       .or_insert(Value::Null);
+    if let Some(inherited) = inherited
+      && environment != inherited
+    {
+      environment.clone_from(inherited);
+    }
     if environment.is_null() {
       *environment = Value::Mapping(Mapping::new());
     }
@@ -439,5 +447,25 @@ mod tests {
       2
     );
     assert!(rendered.contains("FOO=bar"));
+  }
+
+  #[test]
+  fn inject_preserves_environment_from_chained_anchors() {
+    let text = concat!(
+      "x-a: &a {environment: {A: '1'}}\n",
+      "x-b: &b {<<: *a}\n",
+      "services: {app: {<<: *b, image: nginx}}\n",
+    );
+    let heartbeat = HeartbeatSpec {
+      every_mins: 10,
+      grace_mins: 5,
+      token: "fixture".into(),
+    };
+    let out =
+      inject(text, &heartbeat, "https://example.test", true).unwrap();
+    let doc = crate::render::parse_compose(&out).unwrap();
+    let env = &doc["services"]["app"]["environment"];
+    assert_eq!(env["A"], "1");
+    assert_eq!(env[ENV], "https://example.test/ping/fixture");
   }
 }

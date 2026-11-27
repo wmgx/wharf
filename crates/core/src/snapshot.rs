@@ -439,6 +439,7 @@ pub fn service_resolved(
   let resolved = crate::refs::resolve(&resolved, name, world, net)?;
   let resolved =
     with_files(world, net, name, &resolved, mounts, Some(secrets))?;
+  crate::syntax_check::validate_rendered_compose(name, &resolved)?;
   let hash = render::hash(&resolved);
   Ok((resolved, hash))
 }
@@ -458,6 +459,18 @@ pub fn service_trial(
   with_files(world, net, name, &trial, mounts, Some(secrets))
 }
 
+pub(crate) fn render_config_file(
+  world: &World,
+  net: &Net,
+  name: &str,
+  file: &wharf_api_types::spec::FileSpec,
+  secrets: Option<&BTreeMap<String, String>>,
+  mounts: &mut BTreeSet<String>,
+) -> Result<String, ApiError> {
+  let content = render::file_content(&file.content, secrets, mounts)?;
+  crate::refs::resolve(&content, name, world, net)
+}
+
 /// 加上服务的配置文件，内容里的密钥和 `[[@服务]]` 先替换好。
 fn with_files(
   world: &World,
@@ -473,12 +486,15 @@ fn with_files(
     .files
     .iter()
     .map(|f| {
-      let content =
-        render::file_content(&f.content, secrets, &mut file_secrets)?;
-      Ok((
-        f.path.clone(),
-        crate::refs::resolve(&content, name, world, net)?,
-      ))
+      let content = render_config_file(
+        world,
+        net,
+        name,
+        f,
+        secrets,
+        &mut file_secrets,
+      )?;
+      Ok((f.path.clone(), content))
     })
     .collect::<Result<Vec<_>, ApiError>>()?;
   render::add_files(
@@ -1105,6 +1121,33 @@ mod tests {
   }
 
   #[test]
+  fn stored_flow_compose_with_anchors_keeps_resolved_bytes_and_hash()
+  {
+    let mut w = world(21000);
+    let raw = concat!(
+      "# 注释和流式写法\n",
+      "x-base: &b {image: nginx:1, environment: {PASS: \"[[json:K]]\"}}\n",
+      "services: {app: {<<: *b}}\n",
+    );
+    w.services.get_mut("app").unwrap().spec.source =
+      serde_json::from_value(
+        serde_json::json!({"compose": {"content": raw}}),
+      )
+      .unwrap();
+    let expected = raw.replace("[[json:K]]", r#"a\"b'c"#);
+    assert_eq!(
+      service_resolved(
+        &w,
+        &Net::default(),
+        "app",
+        &BTreeMap::from([("K".into(), "a\"b'c".into())])
+      )
+      .unwrap(),
+      (expected.clone(), render::hash(&expected)),
+    );
+  }
+
+  #[test]
   fn image_secret_file_is_private_to_resolved_compose_and_trial() {
     let mut w = world(21000);
     let spec = &mut w.services.get_mut("app").unwrap().spec;
@@ -1268,6 +1311,7 @@ mod tests {
     spec.files.push(wharf_api_types::spec::FileSpec {
       path: "/etc/app/conf.toml".into(),
       content: "pass_file = \"[[FILE:DB_PASS]]\"\n".into(),
+      raw: false,
     });
     let net = Net::default();
     let secrets =

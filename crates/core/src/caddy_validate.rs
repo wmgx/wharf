@@ -73,7 +73,7 @@ fn has_env_placeholder(text: &str) -> bool {
       .any(|s| s.eq_ignore_ascii_case(b"{env."))
 }
 
-pub(crate) fn check_custom_caddy(
+pub(crate) fn check_custom_caddy_boundaries(
   text: &str,
 ) -> Result<(), &'static str> {
   if text.len() > 8000 {
@@ -146,6 +146,187 @@ pub(crate) fn check_custom_caddy(
     return Err("里的括号没有配对");
   }
   Ok(())
+}
+
+pub(crate) fn check_custom_caddy(text: &str) -> Result<(), String> {
+  check_custom_caddy_boundaries(text).map_err(str::to_owned)?;
+  check_caddy_lines(text, true)
+}
+
+pub(crate) fn check_caddyfile(text: &str) -> Result<(), String> {
+  if has_control_chars(text) {
+    return Err("不能使用控制字符或孤立的回车".into());
+  }
+  check_caddy_lines(text, false)
+}
+
+fn check_caddy_lines(text: &str, route: bool) -> Result<(), String> {
+  let mut rest = text.trim_start_matches('\u{feff}');
+  let mut depth = 0;
+  let mut line = 1;
+  let mut first_file_line = true;
+  while !rest.is_empty() {
+    let start_line = line;
+    let bad = |reason: &str| format!("第 {start_line} 行：{reason}");
+    let mut tokens = Vec::new();
+    loop {
+      rest = rest
+        .trim_start_matches(|c: char| c != '\n' && c.is_whitespace());
+      if rest.starts_with('#') {
+        rest = &rest[rest.find('\n').unwrap_or(rest.len())..];
+      }
+      if let Some(tail) = rest.strip_prefix('\n') {
+        rest = tail;
+        line += 1;
+        break;
+      }
+      let Some(first) = rest.chars().next() else {
+        break;
+      };
+      if matches!(first, '"' | '`') {
+        let tail = after_quoted_token(rest, first).map_err(bad)?;
+        line += rest[..rest.len() - tail.len()]
+          .bytes()
+          .filter(|&b| b == b'\n')
+          .count();
+        rest = tail;
+        tokens.push("");
+        continue;
+      }
+      let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+      let (token, tail) = rest.split_at(end);
+      rest = tail;
+      let next_line = tail.starts_with(['\n', '\r']);
+      if !route
+        && let Some(marker) = token.strip_prefix("<<")
+        && next_line
+      {
+        if marker.is_empty() || !ascii_with(marker, b"_-") {
+          return Err(bad("heredoc 标记不合法"));
+        }
+        let (tail, skipped) = after_heredoc(tail, marker)
+          .ok_or_else(|| bad("heredoc 没有结束标记或缩进不一致"))?;
+        rest = tail;
+        line += skipped;
+        tokens.push("");
+      } else if !route && next_line && token.ends_with('\\') {
+        if token.len() > 1 {
+          tokens.push(&token[..token.len() - 1]);
+        }
+        rest = tail
+          .trim_start_matches('\r')
+          .strip_prefix('\n')
+          .unwrap_or(tail);
+        line += 1;
+      } else {
+        tokens.push(token);
+      }
+    }
+    let Some(&first) = tokens.first() else {
+      continue;
+    };
+    if tokens.contains(&"}") {
+      if tokens.len() != 1 || depth == 0 {
+        return Err(bad("} 必须单独成行并与 { 配对"));
+      }
+      depth -= 1;
+    } else {
+      let site_level = depth == 0;
+      if let Some(open) = tokens.iter().position(|&t| t == "{") {
+        if open + 1 != tokens.len()
+          || (open == 0 && (route || !first_file_line))
+        {
+          return Err(bad(
+            "{ 必须在行尾；只有文件开头的全局选项块可单独写 {",
+          ));
+        }
+        depth += 1;
+      }
+      if let Some(matcher) = first.strip_prefix('@')
+        && (matcher.is_empty()
+          || !ascii_with(matcher, b"_.-")
+          || tokens.len() == 1)
+      {
+        return Err(bad("命名匹配器需要名称和参数或配置块"));
+      }
+      if route
+        && site_level
+        && matches!(
+          first,
+          "auto_https"
+            | "admin"
+            | "local_certs"
+            | "order"
+            | "http_port"
+            | "https_port"
+            | "layer4"
+            | "servers"
+            | "email"
+        )
+      {
+        return Err(bad(&format!(
+          "不能把全局指令 `{first}` 写在单路由片段里"
+        )));
+      }
+      if route
+        && tokens.len() == 1
+        && matches!(
+          first,
+          "respond"
+            | "redir"
+            | "header"
+            | "reverse_proxy"
+            | "rewrite"
+            | "uri"
+            | "import"
+            | "root"
+            | "handle"
+            | "handle_path"
+            | "route"
+            | "encode"
+            | "basic_auth"
+            | "rate_limit"
+        )
+      {
+        return Err(bad(&format!("指令 `{first}` 缺少参数或配置块")));
+      }
+    }
+    first_file_line = false;
+  }
+  if depth != 0 {
+    return Err(format!("第 {line} 行：块括号没有配对"));
+  }
+  Ok(())
+}
+
+fn after_heredoc<'a>(
+  text: &'a str,
+  marker: &str,
+) -> Option<(&'a str, usize)> {
+  let mut lines = text.split_inclusive('\n');
+  lines.next()?;
+  let body = &text[text.find('\n')? + 1..];
+  let mut offset = 0;
+  for (i, raw) in lines.enumerate() {
+    let trimmed = raw.trim_start_matches([' ', '\t']);
+    if let Some(tail) = trimmed.strip_prefix(marker)
+      && (tail.is_empty() || tail.starts_with(char::is_whitespace))
+    {
+      let indent = &raw[..raw.len() - trimmed.len()];
+      if body[..offset]
+        .lines()
+        .all(|line| line.is_empty() || line.starts_with(indent))
+      {
+        return Some((
+          &body[offset + indent.len() + marker.len()..],
+          i + 1,
+        ));
+      }
+      return None;
+    }
+    offset += raw.len();
+  }
+  None
 }
 
 fn after_quoted_token(

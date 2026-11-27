@@ -12,13 +12,15 @@ import { bytes } from "@/components/metrics";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
+import { editableServiceSpec } from "@/lib/draft";
 import { useStatus } from "@/status";
 import type { PortSpec, ServiceSpec, ServiceView } from "@/types";
 import { ConfigFiles, filePathOk } from "./config-files";
 import { importText } from "./status-text";
 
 export function Settings({ svc, active }: { svc: ServiceView; active: boolean }) {
-  const { draft, set, reset, dirty } = useDraft(svc.spec);
+  const editable = useMemo(() => editableServiceSpec(svc.spec), [svc.spec]);
+  const { draft, set, reset, dirty, mergeInto } = useDraft(editable);
   const [key, setKey] = useState(0);
   const location = useLocation();
   const actions = useActions();
@@ -28,11 +30,17 @@ export function Settings({ svc, active }: { svc: ServiceView; active: boolean })
       if (location.hash === "#backup") document.getElementById("service-backup")?.focus();
     }
   }, [active, location.hash]);
-  const changed = ([['来源', 'source'], ['端口', 'ports'], ['环境变量', 'env'], ['配置文件', 'files'], ['资源上限', 'limits'], ['自动更新', 'auto_update']] as [string, keyof ServiceSpec][]).filter(([, field]) => dirty([field])).map(([label]) => label);
-  return <SettingsFields key={key} svc={svc} draft={draft} set={set} changed={changed} onReset={() => { reset(); setKey((n) => n + 1); }} onSubmit={() => actions.plan({ title: `修改 ${svc.name}`, changes: [{ op: "upsert_service", name: svc.name, spec: { ...draft, monitor: svc.spec.monitor, backup: svc.spec.backup } }] })} />;
+  const changed = ([['来源', 'source'], ['端口', 'ports'], ['目标容器', 'container'], ['环境变量', 'env'], ['配置文件', 'files'], ['资源上限', 'limits'], ['自动更新', 'auto_update']] as [string, keyof ServiceSpec][]).filter(([, field]) => dirty([field])).map(([label]) => label);
+  return <SettingsFields key={key} svc={svc} draft={draft} set={set} dirty={dirty} changed={changed} onReset={() => { reset(); setKey((n) => n + 1); }} onSubmit={() => {
+    const spec = mergeInto(svc.spec);
+    if ("build" in spec.source && "build" in svc.spec.source) {
+      spec.source = { build: { ...spec.source.build, upload: svc.spec.source.build.upload } };
+    }
+    actions.plan({ title: `修改 ${svc.name}`, changes: [{ op: "upsert_service", name: svc.name, spec }] });
+  }} />;
 }
 
-function SettingsFields({ svc, draft, set, changed, onReset, onSubmit }: { svc: ServiceView; draft: ServiceSpec; set: (p: Partial<ServiceSpec>) => void; changed: string[]; onReset: () => void; onSubmit: () => void }) {
+function SettingsFields({ svc, draft, set, dirty, changed, onReset, onSubmit }: { svc: ServiceView; draft: ServiceSpec; set: (p: Partial<ServiceSpec>) => void; dirty: (keys: (keyof ServiceSpec)[]) => boolean; changed: string[]; onReset: () => void; onSubmit: () => void }) {
   const actions = useActions();
   const { status } = useStatus();
   const [params, setParams] = useSearchParams();
@@ -41,16 +49,38 @@ function SettingsFields({ svc, draft, set, changed, onReset, onSubmit }: { svc: 
   const isCompose = "compose" in source;
   const build = "build" in source ? source.build : null;
   const [env, setEnv] = useState(formatEnv(draft.env));
-  const [envTouched, setEnvTouched] = useState(false);
   const [ports, setPorts] = useState<PortSpec[]>(() => isCompose && !draft.ports?.length ? composePorts(parseCompose(source.compose.content ?? "")) : (draft.ports ?? []));
   const [portsTouched, setPortsTouched] = useState(!!draft.ports?.length);
   const [how, setHow] = useState<BuildHow>(howOf(build));
   const [memory, setMemory] = useState(draft.limits?.memory_mb?.toString() ?? "");
   const [cpus, setCpus] = useState(draft.limits?.cpu_milli ? String(draft.limits.cpu_milli / 1000) : "");
-  useEffect(() => { if (!changed.length) { if (!envTouched) setEnv(formatEnv(draft.env)); setPorts(isCompose && !draft.ports?.length ? composePorts(parseCompose(source.compose.content ?? "")) : (draft.ports ?? [])); setHow(howOf("build" in draft.source ? draft.source.build : null)); setMemory(draft.limits?.memory_mb?.toString() ?? ""); setCpus(draft.limits?.cpu_milli ? String(draft.limits.cpu_milli / 1000) : ""); } }, [draft, changed.length, envTouched, isCompose, source]);
-  useEffect(() => { if (isCompose && changed.length && !portsTouched && !draft.ports?.length && ports.length) set({ ports: portsFor(ports, true) }); }, [isCompose, changed.length, portsTouched, draft.ports, ports, set]);
+  const envDirty = dirty(["env"]);
+  const portsDirty = dirty(["ports"]);
+  const sourceDirty = dirty(["source"]);
+  const limitsDirty = dirty(["limits"]);
   const compose = isCompose ? source.compose.content ?? "" : "";
   const composeInfo = useMemo(() => parseCompose(compose), [compose]);
+  const saved = svc.spec;
+  const savedEnv = formatEnv(saved.env);
+  const savedPorts = JSON.stringify(saved.ports ?? []);
+  const savedHow = JSON.stringify(howOf("build" in saved.source ? saved.source.build : null));
+  const savedMemory = saved.limits?.memory_mb?.toString() ?? "";
+  const savedCpus = saved.limits?.cpu_milli ? String(saved.limits.cpu_milli / 1000) : "";
+  useEffect(() => { if (!envDirty) setEnv(savedEnv); }, [savedEnv]);
+  useEffect(() => {
+    if (!portsDirty) {
+      const declared: PortSpec[] = JSON.parse(savedPorts);
+      setPorts(isCompose && !declared.length ? composePorts(composeInfo) : declared);
+    }
+  }, [portsDirty, savedPorts, isCompose, composeInfo]);
+  useEffect(() => { if (!sourceDirty) setHow(JSON.parse(savedHow)); }, [savedHow]);
+  useEffect(() => {
+    if (!limitsDirty) {
+      setMemory(savedMemory);
+      setCpus(savedCpus);
+    }
+  }, [savedMemory, savedCpus]);
+  useEffect(() => { if (isCompose && changed.length && !portsTouched && !draft.ports?.length && ports.length) set({ ports: portsFor(ports, true) }); }, [isCompose, changed.length, portsTouched, draft.ports, ports, set]);
   const { data } = usePoll<{ series: Record<string, [number, number][]> }>(isCompose ? null : `/api/metrics?subject=${encodeURIComponent(svc.name)}&range=7d`, 60000);
   const points = data?.series["svc.mem"] ?? [];
   const peak = points.reduce((max, [, value]) => Math.max(max, value), 0);
@@ -76,7 +106,7 @@ function SettingsFields({ svc, draft, set, changed, onReset, onSubmit }: { svc: 
         <Field label="分支 / 标签" htmlFor="service-ref">
           <Input id="service-ref" value={build.git.ref} onChange={(e) => set({ source: { build: { ...build, git: { ...build.git!, ref: e.target.value } } } })} />
         </Field>
-      </div> : build && <div className="flex items-center gap-2 text-sm">代码包 {build.upload?.slice(0, 12)}<Button variant="outline" size="sm" onClick={() => { const next = new URLSearchParams(params); next.set("repack", "1"); setParams(next); }}>更新代码包</Button>
+      </div> : build && <div className="flex items-center gap-2 text-sm">代码包 {"build" in svc.spec.source && svc.spec.source.build.upload?.slice(0, 12)}<Button variant="outline" size="sm" onClick={() => { const next = new URLSearchParams(params); next.set("repack", "1"); setParams(next); }}>更新代码包</Button>
       </div>}
       {(isImage || isCompose) && <MirrorHint server={status?.servers.find((s) => s.name === svc.spec.server)} images={isImage ? [source.image] : composeInfo.images} />}
       {isCompose && composeInfo.images.filter((i) => !i.includes("@") && !i.includes("$")).length > 1 && <div className="grid gap-1">
@@ -86,7 +116,7 @@ function SettingsFields({ svc, draft, set, changed, onReset, onSubmit }: { svc: 
           <Button variant="outline" size="xs" onClick={() => actions.plan({ title: `检查 ${svc.name} 的 ${image} 的更新`, changes: [{ op: "refresh_images", name: svc.name, image }] })}>检查更新</Button>
         </div>)}
       </div>}
-      {build && <BuildEditor value={how} onChange={(value) => { setHow(value); set({ source: { build: { ...build, ...cleanHow(value) } } }); }} />}
+      {build && <BuildEditor value={how} onChange={(value) => { setHow(value); set({ source: { build: { git: build.git, path: build.path, ...cleanHow(value) } } }); }} />}
       {svc.import && <div className="text-xs text-muted-foreground">
         {importText(svc.import)}
       </div>}
@@ -109,7 +139,7 @@ function SettingsFields({ svc, draft, set, changed, onReset, onSubmit }: { svc: 
       <SectionTitle>环境变量</SectionTitle>
       <Panel className="p-4">
         <Field label={isCompose ? "环境变量（部署时加到 compose 里，和 compose 里已有的不能重名）" : "环境变量"} htmlFor="service-env">
-          <CodeEditor id="service-env" lang="env" secrets className="min-h-32" placeholder={"KEY=value\nTOKEN=[[MY_SECRET]]"} value={env} onChange={(value) => { setEnvTouched(true); setEnv(value); set({ env: parseEnv(value) }); }} />
+          <CodeEditor id="service-env" lang="env" secrets className="min-h-32" placeholder={"KEY=value\nTOKEN=[[MY_SECRET]]"} value={env} onChange={(value) => { setEnv(value); set({ env: parseEnv(value) }); }} />
         </Field>
       </Panel>
     </>}

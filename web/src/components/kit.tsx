@@ -1,4 +1,5 @@
-import { Children, Fragment, useEffect, useRef, useState, type ReactElement, type ReactNode } from "react";
+import { draftPatch } from "@/lib/draft";
+import { Children, Fragment, useEffect, useState, type ReactElement, type ReactNode } from "react";
 import { useClickable } from "@/components/common";
 import { AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
@@ -117,25 +118,20 @@ export function SaveBar({ changed, onReset, onSubmit, submitText = "预览改动
   );
 }
 
-const norm = (v: unknown) => v === undefined || v === "" || (Array.isArray(v) && !v.length) || (v && typeof v === "object" && !Array.isArray(v) && !Object.keys(v).length) ? null : v;
-
-export function useDraft<T>(current: T): {
-  draft: T;
-  set: (patch: Partial<T>) => void;
-  reset: () => void;
-  dirty: (keys: (keyof T)[]) => boolean;
-} {
-  const [draft, setDraft] = useState(current);
-  const previous = useRef(current);
+export function useDraft<T extends object>(current: T) {
+  const [edits, setEdits] = useState<Partial<T>>({});
   useEffect(() => {
-    const prev = previous.current;
-    setDraft((d) => JSON.stringify(d) === JSON.stringify(prev) ? current : d);
-    previous.current = current;
+    setEdits((prev) => {
+      const next = draftPatch(current, prev);
+      return Object.keys(next).length === Object.keys(prev).length ? prev : next;
+    });
   }, [current]);
+  const patch = draftPatch(current, edits);
   return {
-    draft,
-    set: (patch) => setDraft((d) => ({ ...d, ...patch })),
-    reset: () => setDraft(current),
-    dirty: (keys) => keys.some((k) => JSON.stringify(norm(draft[k])) !== JSON.stringify(norm(current[k]))),
+    draft: { ...current, ...patch },
+    set: (next: Partial<T>) => setEdits((prev) => draftPatch(current, { ...prev, ...next })),
+    reset: () => setEdits({}),
+    dirty: (keys: (keyof T)[]) => keys.some((key) => Object.hasOwn(patch, key)),
+    mergeInto: (base: T): T => ({ ...base, ...patch }),
   };
 }
