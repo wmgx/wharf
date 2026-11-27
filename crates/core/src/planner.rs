@@ -955,7 +955,10 @@ fn config_items(
           .is_some() =>
       {
         let adopt = desired.services[name].import.as_ref();
-        match adopt.and_then(|a| a.project.as_deref()) {
+        match adopt
+          .and_then(|a| a.project.as_deref())
+          .filter(|project| *project != name)
+        {
           Some(project) => (
             vec![Impact::Restart],
             format!(
@@ -2785,6 +2788,42 @@ mod tests {
   use super::*;
   use crate::world::{RouteRow, ServerRow, ServiceRow};
   use wharf_api_types::{agent::ContainerInfo, spec::Limits};
+
+  #[test]
+  fn same_name_compose_import_has_no_config_restart_impact() {
+    let current = world();
+    let mut desired = current.clone();
+    desired.services.get_mut("app").unwrap().import =
+      crate::import::from_compose(
+        "services: {web: {image: nginx:1}}",
+        &[wharf_api_types::agent::ProjectContainerRaw {
+          inspect: json!({
+            "Config": {"Labels": {"com.docker.compose.service": "web"}},
+            "State": {"Running": true}
+          }),
+          image_inspect: None,
+          tag_image_id: None,
+        }],
+        "app",
+        "app",
+      )
+      .unwrap()
+      .adopt;
+    let mut before = current;
+    before.services.clear();
+    let mut b = Builder::default();
+    config_items(
+      &mut b,
+      &before,
+      &desired,
+      &desired.writes_from(&before),
+    );
+    let [item] = b.items.as_slice() else {
+      panic!("expected one config item");
+    };
+    assert!(item.impacts.is_empty());
+    assert!(item.reason.contains("沿用同名 compose 项目"));
+  }
 
   #[test]
   fn internal_route_points_to_private_ip() {

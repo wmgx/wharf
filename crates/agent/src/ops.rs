@@ -503,7 +503,15 @@ impl Ops {
   ) -> Result<ProjectUpResult, ApiError> {
     self.docker.up(&up.project, up.no_start, ctx).await?;
     let state = if up.no_start {
-      let state = self.docker.one_status(&up.project, ctx).await?;
+      let mut state =
+        self.docker.one_status(&up.project, ctx).await?;
+      // --no-start leaves unchanged containers running.
+      if !up.pull_missing_only
+        && state.containers.iter().any(|c| c.state == "running")
+      {
+        self.docker.stop_start(&up.project, false, ctx).await?;
+        state = self.docker.one_status(&up.project, ctx).await?;
+      }
       if state.containers.is_empty()
         || state.containers.iter().any(|c| c.state == "running")
       {
@@ -746,6 +754,59 @@ fn has_previous(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn stopped_update_stops_unchanged_running_container() {
+    let (dir, docker) = crate::docker::fake_docker(
+      r#"
+case "$1:$6" in
+  compose:up) [ "$7" = --no-start ] && touch updated;;
+  compose:stop) [ -f updated ] && touch stopped;;
+  ps:*)
+    [ -f updated ] || exit 2
+    state=running
+    [ ! -f stopped ] || state=exited
+    echo '{"Names":"app-web-1","Labels":"com.docker.compose.project=app","State":"created"}'
+    printf '{"Names":"app-db-1","Labels":"com.docker.compose.project=app","State":"%s"}\n' "$state";;
+  *) exit 2;;
+esac
+"#,
+    );
+    let ops = Ops::new(
+      docker.clone(),
+      Reporter::new(docker.clone(), None),
+      String::new(),
+      HostShell::prepare(docker.clone(), "s1".into()).await,
+      dir.path().into(),
+    );
+    let up: ProjectUp = serde_json::from_value(serde_json::json!({
+      "project": "app",
+      "compose": "services: {web: {image: web:2}, db: {image: db:1}}",
+      "hash": "new",
+      "pull": {"mirrors": {}, "mirrors_only": false, "attempt_timeout_secs": 1},
+      "no_start": true
+    })).unwrap();
+    docker.write_compose("app", &up.compose).unwrap();
+    let result = ops
+      .finish_up(&up, &[], vec![], None, &Ctx::detached())
+      .await
+      .unwrap();
+    assert_eq!(
+      result
+        .containers
+        .iter()
+        .map(|c| c.state.as_str())
+        .collect::<Vec<_>>(),
+      ["exited", "created"]
+    );
+    assert_eq!(
+      std::fs::read_to_string(
+        docker.project_dir("app").join(crate::docker::HASH_FILE)
+      )
+      .unwrap(),
+      "new"
+    );
+  }
 
   #[test]
   fn previous_tracks_config_or_image_change() {

@@ -87,9 +87,6 @@ pub fn from_compose(
       "原 compose 项目当前全部已停止，接管后将保持停止（不启动容器）"
         .into(),
     );
-  } else if !stopped_services.is_empty() {
-    warnings.push(format!("原 compose 项目有部分组件当前已停止（{}），接管后可能随项目一起启动",
-      service_list(stopped_services.iter().copied())));
   }
   let mut volumes = root.remove("volumes").unwrap_or(Value::Null);
   let mut has_env = false;
@@ -104,6 +101,12 @@ pub fn from_compose(
       return Err(ApiError::invalid(format!(
         "compose 项目 {project} 中正在运行的组件 {missing} 不在默认配置里（通常由 --profile 启动）"
       )).with_hint("先在原 compose 文件中启用这些组件的默认配置，或改用 --container 单独导入"));
+    }
+    let stopped_configured = service_list(
+      stopped_services.intersection(&configured).copied(),
+    );
+    if !stopped && !stopped_configured.is_empty() {
+      warnings.push(format!("原 compose 项目有部分组件当前已停止（{stopped_configured}），接管后可能随项目一起启动"));
     }
     let missing_stopped =
       service_list(stopped_services.difference(&configured).copied());
@@ -766,17 +769,29 @@ pub fn from_container(
   if !ports.is_empty() {
     svc.insert(key("ports"), seq(ports));
   }
+  let host_uts = host["UTSMode"] == "host";
+  if host_uts {
+    svc.insert(key("uts"), key("host"));
+  }
   let short_id = inspect["Id"].as_str().and_then(|id| id.get(..12));
-  for (field, out) in
-    [("Hostname", "hostname"), ("StopSignal", "stop_signal")]
+  if differs("Hostname")
+    && let Some(value) =
+      config["Hostname"].as_str().filter(|s| !s.is_empty())
+    && Some(value) != short_id
+    && !host_uts
+    && !mode.starts_with("container:")
   {
-    if differs(field)
-      && let Some(value) =
-        config[field].as_str().filter(|s| !s.is_empty())
-      && (field != "Hostname" || Some(value) != short_id)
-    {
-      svc.insert(key(out), key(&literal(value)));
+    if mode == "host" {
+      warnings.push("host 网络下无法区分宿主机名与显式设置的 hostname，已沿用 Docker 默认值；如有自定义 hostname 请手动补充".into());
+    } else {
+      svc.insert(key("hostname"), key(&literal(value)));
     }
+  }
+  if differs("StopSignal")
+    && let Some(value) =
+      config["StopSignal"].as_str().filter(|s| !s.is_empty())
+  {
+    svc.insert(key("stop_signal"), key(&literal(value)));
   }
   if let Some(timeout) = config["StopTimeout"].as_u64() {
     svc.insert(key("stop_grace_period"), key(&format!("{timeout}s")));
@@ -1358,7 +1373,7 @@ mod adoption_tests {
   }
 
   #[test]
-  fn rejects_running_profile_and_warns_for_stopped_components() {
+  fn rejects_running_profile_components() {
     let compose = "services:
   db:
     image: postgres:16
@@ -1373,6 +1388,11 @@ mod adoption_tests {
           && e.message.contains("--profile")
       );
     }
+  }
+
+  #[test]
+  fn stopped_profile_component_only_warns_it_will_not_be_recreated() {
+    let compose = "services: {db: {image: postgres:16}}";
     let containers = [
       old("db", true, Json::Null),
       old("worker", false, Json::Null),
@@ -1380,8 +1400,34 @@ mod adoption_tests {
     let result =
       from_compose(compose, &containers, "old", "old").unwrap();
     assert!(!result.stopped);
-    assert!(result.warnings.iter().any(|w| w.contains("worker")));
+    assert_eq!(
+      result.warnings,
+      ["原项目里已停止的组件 worker 不在默认配置中，接管后不会重建",]
+    );
     assert_eq!(result.adopt.unwrap().expected_services, ["db"]);
+  }
+
+  #[test]
+  fn host_network_import_does_not_pin_the_daemon_hostname() {
+    let mut inspect = json!({
+      "Name": "/web", "Id": "0123456789abcdef",
+      "Config": {"Image": "nginx", "Hostname": "s1"},
+      "HostConfig": {"NetworkMode": "host"}
+    });
+    for uts in ["", "host"] {
+      inspect["HostConfig"]["UTSMode"] = json!(uts);
+      let result =
+        from_container(&inspect, None, None, "web").unwrap();
+      let yaml: Value =
+        serde_yaml_ng::from_str(&result.compose).unwrap();
+      let svc = &yaml["services"]["web"];
+      assert_eq!(svc["network_mode"], key("host"));
+      assert!(svc.get("hostname").is_none());
+      assert_eq!(
+        svc["uts"].as_str(),
+        (uts == "host").then_some("host")
+      );
+    }
   }
 
   #[test]

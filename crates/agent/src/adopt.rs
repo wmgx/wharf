@@ -243,11 +243,31 @@ async fn inspect_many(
   let out = docker
     .cmd()
     .args(["container", "inspect", "--"])
-    .args(ids)
+    .args(ids.iter().copied())
     .timeout(QUICK)
     .run(ctx)
-    .await?
-    .check("docker container inspect")?;
+    .await?;
+  // docker inspect still prints the surviving containers before returning 1.
+  let missing_only = project.is_none()
+    && out.code == Some(1)
+    && !out.stderr.trim().is_empty()
+    && out
+      .stderr
+      .lines()
+      .map(str::trim)
+      .filter(|line| !line.is_empty())
+      .all(|line| {
+        line
+          .trim_start_matches("Error: ")
+          .trim_start_matches("Error response from daemon: ")
+          .strip_prefix("No such container: ")
+          .is_some_and(|id| ids.contains(&id))
+      });
+  let out = if missing_only {
+    out
+  } else {
+    out.check("docker container inspect")?
+  };
   serde_json::from_str(&out.stdout).map_err(|_| {
     ApiError::new(ErrorCode::AgentFailed, "无法解析容器检查结果")
   })
@@ -987,7 +1007,7 @@ fn adopt_rejects_wharf_owned_container_and_project() {
 #[cfg(test)]
 mod adoption_tests {
   use super::*;
-  use std::os::unix::fs::PermissionsExt;
+  use crate::docker::fake_docker;
 
   #[test]
   fn structured_labels_and_external_env_mounts() {
@@ -1015,20 +1035,23 @@ mod adoption_tests {
     );
   }
 
-  fn fake_docker(script: &str) -> (tempfile::TempDir, Docker) {
-    let dir = tempfile::tempdir().unwrap();
-    let bin = dir.path().join("docker");
-    std::fs::write(&bin, format!("#!/bin/sh\ncd -- \"$(dirname -- \"$0\")\" || exit 1\n{script}")).unwrap();
-    std::fs::set_permissions(
-      &bin,
-      std::fs::Permissions::from_mode(0o700),
-    )
-    .unwrap();
-    let docker = Docker {
-      bin: bin.display().to_string(),
-      data_dir: dir.path().into(),
-    };
-    (dir, docker)
+  #[tokio::test]
+  async fn discover_keeps_containers_when_one_disappears() {
+    let (_dir, docker) = fake_docker(
+      r#"
+case "$*" in
+  'ps -aq --no-trunc') printf 'kept\ngone\n';;
+  'container inspect -- kept gone')
+    echo '[{"Id":"kept","Name":"/web","State":{"Status":"running"}}]'
+    echo 'Error response from daemon: No such container: gone' >&2
+    exit 1;;
+  *) exit 2;;
+esac
+"#,
+    );
+    let found = discover(&docker, &Ctx::detached()).await.unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].name, "web");
   }
 
   #[tokio::test]
