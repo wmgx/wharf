@@ -1786,9 +1786,11 @@ pub(crate) async fn run_step(
         &snap,
         run_id,
         (server, gateway, *keep_tunnel),
-        progress,
+        &progress,
         cancel,
-        crate::tunnel::destroy,
+        crate::tunnel::destroy(
+          state, &snap, gateway, &progress, cancel,
+        ),
       )
       .await?;
     }
@@ -1959,15 +1961,9 @@ async fn gateway_down(
   snap: &snapshot::Snapshot,
   run_id: &str,
   (server, gateway, keep_tunnel): (&str, &str, bool),
-  progress: ProgressFn,
+  progress: &ProgressFn,
   cancel: &CancellationToken,
-  destroy: impl AsyncFnOnce(
-    &AppState,
-    &snapshot::Snapshot,
-    &str,
-    &ProgressFn,
-    &CancellationToken,
-  ) -> Result<(), ApiError>,
+  destroy: impl std::future::Future<Output = Result<(), ApiError>> + Send,
 ) -> Result<(), ApiError> {
   let world = &snap.world;
   let current_server =
@@ -2013,7 +2009,7 @@ async fn gateway_down(
       }
     }
     if !keep_tunnel {
-      destroy(state, snap, gateway, &progress, cancel).await?;
+      destroy.await?;
     }
   }
   let payload = crate::pending::GatewayDownPayload {
@@ -3683,10 +3679,9 @@ mod tests {
       &snap,
       "r1",
       ("s1", "edge", false),
-      Arc::new(|_| {}),
+      &(Arc::new(|_| {}) as ProgressFn),
       &CancellationToken::new(),
-      async |state, _, gateway, _, _| {
-        assert_eq!(gateway, "edge");
+      async {
         destroyed = true;
         state
           .db

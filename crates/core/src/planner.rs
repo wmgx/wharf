@@ -4444,7 +4444,7 @@ mod tests {
     .await
     .err()
     .unwrap();
-    assert_eq!(err.code, ErrorCode::PlanStale);
+    assert_eq!(err.code, wharf_api_types::ErrorCode::PlanStale);
     assert!(
       snapshot::load(&state.db).await.unwrap().world.routes[host]
         .spec
@@ -4460,7 +4460,7 @@ mod tests {
     )
     .await
     .unwrap_err();
-    assert_eq!(err.code, ErrorCode::PlanStale);
+    assert_eq!(err.code, wharf_api_types::ErrorCode::PlanStale);
   }
 
   #[test]
