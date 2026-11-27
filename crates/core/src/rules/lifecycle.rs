@@ -278,6 +278,7 @@ impl Changes {
     if self.is_empty() {
       return;
     }
+    crate::http_stats::forget(&self.services);
     crate::probe::forget(&self.routes);
     crate::monitor::forget(&self.services, &self.monitors);
     let custom = with(|m| {
