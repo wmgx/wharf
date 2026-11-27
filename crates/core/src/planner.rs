@@ -2755,6 +2755,7 @@ fn gateway_items(
             name,
             &r,
             applied_config(snap, name, gw.spec.kind, s),
+            s.acme_dns_url_hash.as_deref(),
           ) =>
         {
           Some((
@@ -4234,6 +4235,7 @@ mod tests {
       project: project.into(),
       hash: Some("existing".into()),
       config_hash: None,
+      acme_dns_url_hash: None,
       containers: vec![],
     };
     let status = StatusMap::from([
@@ -4302,6 +4304,128 @@ mod tests {
         .message
         .contains("仍被")
     );
+  }
+
+  #[tokio::test]
+  async fn stale_dns_after_failover_rolls_back_apply_transaction() {
+    let state = crate::rules::tests::test_state();
+    let mut w = world();
+    w.servers.insert("s2".into(), w.servers["s1"].clone());
+    w.gateways
+      .insert("edge".into(), gateway_fixture("caddy", "s1"));
+    w.gateways
+      .insert("backup".into(), gateway_fixture("caddy", "s2"));
+    let host = "dns-stale.example.test";
+    let mut route = route_fixture();
+    route.spec.hostname = host.into();
+    route.spec.backup_gateway = Some("backup".into());
+    w.routes.insert(host.into(), route);
+    let seed = w.writes_from(&World::default());
+    state
+      .db
+      .call(move |c| {
+        for write in seed {
+          db::apply_write(c, &write)?;
+        }
+        Ok(())
+      })
+      .await
+      .unwrap();
+    let snap = snapshot::load(&state.db).await.unwrap();
+    let mut desired = snap.world.clone();
+    desired.routes.get_mut(host).unwrap().spec.dns_ttl = Some(120);
+    let mut b = Builder::default();
+    b.step(
+      vec![],
+      "更新 DNS".into(),
+      Step::DnsUpsert {
+        hostname: host.into(),
+        account: "cf".into(),
+        spec: DnsSpec {
+          record_type: "A".into(),
+          content: "203.0.113.1".into(),
+          proxied: false,
+          ttl: 120,
+          tunnel: None,
+        },
+        existing: None,
+        extra: vec![],
+        expected_gateway: Some("edge".into()),
+      },
+    );
+    let p = finish_plan(
+      &snap,
+      &desired,
+      b,
+      desired.writes_from(&snap.world),
+      BTreeSet::new(),
+      None,
+    );
+    save(&state, &p).await.unwrap();
+    state
+      .db
+      .call(move |c| {
+        db::set_setting(
+          c,
+          "failover.active",
+          Some(&json!([host]).to_string()),
+        )
+      })
+      .await
+      .unwrap();
+    let err = crate::apply::start(
+      state.clone(),
+      wharf_api_types::plan::ApplyRequest {
+        plan_id: p.plan.plan_id,
+        confirm: vec![],
+        skip_snapshot: false,
+      },
+      &wharf_api_types::view::Perm::ALL.into_iter().collect(),
+      None,
+    )
+    .await
+    .err()
+    .unwrap();
+    assert_eq!(err.code, ErrorCode::PlanStale);
+    assert!(
+      snapshot::load(&state.db).await.unwrap().world.routes[host]
+        .spec
+        .dns_ttl
+        .is_none()
+    );
+    let err = crate::apply::run_step(
+      &state,
+      "r1",
+      &p.steps[0].step,
+      std::sync::Arc::new(|_| {}),
+      &tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code, ErrorCode::PlanStale);
+  }
+
+  #[test]
+  fn lan_warning_checks_backup_gateway() {
+    let mut w = world();
+    w.gateways
+      .insert("edge".into(), gateway_fixture("caddy", "s1"));
+    w.gateways
+      .insert("backup".into(), gateway_fixture("caddy", "s2"));
+    let mut route = route_fixture();
+    route.spec.backup_gateway = Some("backup".into());
+    let mut net = Net::default();
+    net.private.insert(
+      "s1".into(),
+      wharf_api_types::spec::PrivateAddr {
+        ip: "100.64.0.1".into(),
+        network: wharf_api_types::spec::PrivateNetwork::Lan,
+      },
+    );
+    net.reach.insert(("s2".into(), "s1".into()), true);
+    let warnings = plaintext_hop(&w, &net, &route.spec);
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains("s2"));
   }
 
   #[test]
@@ -4401,6 +4525,7 @@ mod tests {
       project: String::new(),
       hash: hash.map(str::to_string),
       config_hash: None,
+      acme_dns_url_hash: None,
       containers: vec![],
     };
     let status = StatusMap::from([(
@@ -4589,6 +4714,7 @@ mod tests {
           project: "notes".into(),
           hash: Some("partial".into()),
           config_hash: None,
+          acme_dns_url_hash: None,
           containers: vec![],
         },
       )])),
@@ -4799,6 +4925,7 @@ mod tests {
           project: "app".into(),
           hash,
           config_hash: None,
+          acme_dns_url_hash: None,
           containers,
         },
       )])),
@@ -4942,6 +5069,7 @@ mod tests {
         project: "idle".into(),
         hash: Some(hash("idle")),
         config_hash: None,
+        acme_dns_url_hash: None,
         containers: vec![ContainerInfo {
           service: "idle".into(),
           ..container("running")
@@ -5035,6 +5163,7 @@ mod tests {
           project,
           hash: Some(before.compose_hash),
           config_hash: Some(before.config_hash),
+          acme_dns_url_hash: None,
           containers: vec![container("running")],
         },
       )])),
@@ -5123,6 +5252,7 @@ mod tests {
         project: "idle".into(),
         hash: Some(idle_hash),
         config_hash: None,
+        acme_dns_url_hash: None,
         containers: vec![ContainerInfo {
           service: "idle".into(),
           ..container("running")

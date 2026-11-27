@@ -114,29 +114,7 @@ async fn acme_credentials(
     ))
     .with_hint("用 --public-url 启动控制面，或者给控制面加一个域名")
   })?;
-  if let Ok(parsed) = reqwest::Url::parse(url)
-    && let Some(host) = parsed.host_str()
-    && world.routes.get(host).is_some_and(|route| {
-      world.route_gateways(&route.spec).contains(&gateway)
-    })
-    && let Some((_, zone)) = host.split_once('.')
-    && spec.wildcard.iter().any(|z| z == zone)
-  {
-    return Err(ApiError::invalid(format!("控制面的域名 {host} 在入口 {gateway} 的泛域名证书 *.{zone} 下，开了以后签证书时连不回控制面")).with_hint("用 --public-url 给控制面指定一个不经过这个入口的地址，或者把控制面的域名换到别的 zone"));
-  }
-  if let Ok(parsed) = reqwest::Url::parse(url)
-    && let Some(host) = parsed.host_str()
-    && world.routes.get(host).is_some_and(|route| {
-      route.spec.internal
-        && world.route_gateways(&route.spec).contains(&gateway)
-    })
-    && r
-      .sites
-      .iter()
-      .any(|site| site.hostname == host && site.dns.is_some())
-  {
-    return Err(ApiError::invalid(format!("控制面的域名 {host} 是内网域名，证书要用 DNS 验证签，签的时候连不回控制面")).with_hint("用 --public-url 给控制面指定一个不经过这个入口的地址，或者把控制面的域名换到别的 zone"));
-  }
+  check_acme_bootstrap(world, gateway, spec, r, url)?;
   let run_id = run_id.to_string();
   let key = state
     .db
@@ -148,4 +126,85 @@ async fn acme_credentials(
     .await?;
   crate::caddy_validate::validate_acme_dns_fill(&key, url)?;
   Ok((key, url.to_string()))
+}
+
+fn check_acme_bootstrap(
+  world: &World,
+  gateway: &str,
+  spec: &GatewaySpec,
+  rendered: &GatewayRender,
+  url: &str,
+) -> Result<(), ApiError> {
+  let parsed = reqwest::Url::parse(url)
+    .map_err(|_| ApiError::invalid("控制面地址格式不合法"))?;
+  let Some(host) = parsed.host_str() else {
+    return Ok(());
+  };
+  let Some(route) = world
+    .routes
+    .get(host)
+    .filter(|r| world.route_gateways(&r.spec).contains(&gateway))
+  else {
+    return Ok(());
+  };
+  let hint = "用 --public-url 给控制面指定一个不经过这个入口的地址，或者把控制面的域名换到别的 zone";
+  if let Some((_, zone)) = host.split_once('.')
+    && spec.wildcard.iter().any(|z| z == zone)
+  {
+    return Err(ApiError::invalid(format!("控制面的域名 {host} 在入口 {gateway} 的泛域名证书 *.{zone} 下，开了以后签证书时连不回控制面")).with_hint(hint));
+  }
+  if route.spec.internal
+    && rendered
+      .sites
+      .iter()
+      .any(|s| s.hostname == host && s.dns.is_some())
+  {
+    return Err(ApiError::invalid(format!("控制面的域名 {host} 是内网域名，证书要用 DNS 验证签，签的时候连不回控制面")).with_hint(hint));
+  }
+  Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn acme_bootstrap_rejects_own_domain_on_backup_wildcard() {
+    let mut w = World::default();
+    let spec = serde_json::from_str(
+      r#"{"kind":"caddy","server":"s2","wildcard":["example.test"]}"#,
+    )
+    .unwrap();
+    w.gateways.insert(
+      "backup".into(),
+      crate::world::GatewayRow { spec, version: 1 },
+    );
+    let host = "core.example.test";
+    w.routes.insert(host.into(), crate::world::RouteRow {
+      id: "rt_core".into(), version: 1,
+      spec: serde_json::from_str(r#"{"hostname":"core.example.test","gateway":"edge","backup_gateway":"backup","upstream":"100.64.0.1:7700"}"#).unwrap(),
+    });
+    let r = snapshot::gateway_render(&w, &Net::default(), "backup")
+      .unwrap();
+    let spec = &w.gateways["backup"].spec;
+    let error = check_acme_bootstrap(
+      &w,
+      "backup",
+      spec,
+      &r,
+      "https://core.example.test",
+    )
+    .unwrap_err();
+    assert!(error.message.contains("泛域名证书"));
+    assert!(
+      check_acme_bootstrap(
+        &w,
+        "backup",
+        spec,
+        &r,
+        "https://core.example.net"
+      )
+      .is_ok()
+    );
+  }
 }

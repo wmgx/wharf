@@ -635,11 +635,23 @@ pub(crate) fn gateway_config_matches(
   name: &str,
   rendered: &GatewayRender,
   applied: Option<&str>,
+  observed_acme_dns: Option<&str>,
 ) -> bool {
   if applied == Some(rendered.config_hash.as_str()) {
     return true;
   }
-  // 旧指纹无法区分回调地址，同一次真正的网关配置变更会补写新指纹。
+  if let (Some(observed), Some(expected)) =
+    (observed_acme_dns, &net.acme_dns_url)
+    && rendered.needs_acme_dns
+    && observed
+      != render::hash(&format!(
+        "{}/agent/acme-dns",
+        expected.trim_end_matches('/')
+      ))
+  {
+    return false;
+  }
+  // 旧 agent 只有原配置指纹，下一次网关变更时补写新指纹。
   if world.gateways[name].spec.kind != GatewayKind::Caddy
     || (!rendered.needs_acme_dns
       && !rendered.sites.iter().any(|s| s.gate.is_some()))
@@ -1606,7 +1618,8 @@ mod tests {
       &net,
       "edge",
       &before,
-      Some(&legacy.config_hash)
+      Some(&legacy.config_hash),
+      Some(&render::hash("https://old.example.net/agent/acme-dns")),
     ));
     net.acme_dns_url = Some("https://new.example.net".into());
     let after = gateway_render(&w, &net, "edge").unwrap();
@@ -1621,7 +1634,16 @@ mod tests {
       &net,
       "edge",
       &after,
-      Some(&before.config_hash)
+      Some(&before.config_hash),
+      None,
+    ));
+    assert!(!gateway_config_matches(
+      &w,
+      &net,
+      "edge",
+      &after,
+      Some(&legacy.config_hash),
+      Some(&render::hash("https://old.example.net/agent/acme-dns"))
     ));
     assert_eq!(before.compose_hash, after.compose_hash);
   }

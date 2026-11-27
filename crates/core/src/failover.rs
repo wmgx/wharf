@@ -342,8 +342,13 @@ async fn round(state: &Arc<AppState>) -> Result<(), ApiError> {
     schedule_caddy_reload(state, &snap.world, name, wait);
   }
   for (host, kind, resolved, event) in notices {
-    crate::rules::notice(state, kind, Some(&host), resolved, event)
-      .await;
+    if kind == "failover" {
+      crate::notify::transition(state, &host, true).await;
+      crate::rules::notice(state, kind, None, resolved, event).await;
+    } else {
+      crate::rules::notice(state, kind, Some(&host), resolved, event)
+        .await;
+    }
   }
   Ok(())
 }
@@ -396,6 +401,36 @@ fn schedule_caddy_reload(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn backup_gateway_reload_is_deduplicated_without_stop_start()
+  {
+    let state = crate::rules::tests::test_state();
+    let (send, mut recv) = tokio::sync::mpsc::unbounded_channel();
+    state.hub.mock_agent("s2", false, move |op| {
+      assert!(matches!(op, AgentOp::GatewayReload { project } if project == "wharf-gw-reload-test"));
+      send.send(()).unwrap();
+      Ok(serde_json::Value::Null)
+    });
+    let mut w = World::default();
+    w.gateways.insert(
+      "reload-test".into(),
+      crate::world::GatewayRow {
+        spec: serde_json::from_str(
+          r#"{"kind":"caddy","server":"s2"}"#,
+        )
+        .unwrap(),
+        version: 1,
+      },
+    );
+    schedule_caddy_reload(&state, &w, "reload-test".into(), 0);
+    schedule_caddy_reload(&state, &w, "reload-test".into(), 0);
+    tokio::time::timeout(Duration::from_secs(1), recv.recv())
+      .await
+      .unwrap()
+      .unwrap();
+    assert!(recv.try_recv().is_err());
+  }
 
   #[tokio::test]
   async fn removing_backup_persists_active_cleanup_and_retry() {

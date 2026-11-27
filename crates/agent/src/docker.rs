@@ -224,6 +224,17 @@ impl Docker {
             config_hash: read_trimmed(
               &dir.join("conf").join(CONFIG_HASH_FILE),
             ),
+            acme_dns_url_hash: project
+              .starts_with("wharf-gw-")
+              .then(|| {
+                std::fs::read_to_string(
+                  dir.join("conf").join("Caddyfile"),
+                )
+                .ok()
+              })
+              .flatten()
+              .as_deref()
+              .and_then(acme_dns_url_hash),
             containers: by_project
               .remove(project)
               .unwrap_or_default()
@@ -1587,6 +1598,16 @@ pub fn write_private(
   file.write_all(content.as_bytes()).map_err(io_err(&tmp))?;
   file.sync_all().map_err(io_err(&tmp))?;
   std::fs::rename(&tmp, path).map_err(io_err(path))
+}
+
+fn acme_dns_url_hash(config: &str) -> Option<String> {
+  use sha2::{Digest, Sha256};
+  config.lines().find_map(|line| {
+    line
+      .strip_prefix("\t\t\tserver_url ")
+      .filter(|url| url.ends_with("/agent/acme-dns"))
+      .map(|url| hex::encode(Sha256::digest(url.as_bytes())))
+  })
 }
 
 fn read_trimmed(path: &Path) -> Option<String> {

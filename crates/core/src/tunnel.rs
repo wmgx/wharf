@@ -93,7 +93,15 @@ async fn ensure_tunnel(
     tunnel.scope.clone(),
     tunnel.id.clone(),
   );
-  let previous = snap.tunnels.get(gateway).cloned();
+  let previous = snap
+    .tunnels
+    .get(gateway)
+    .filter(|old| {
+      !snap.pending.tunnel_deletes.iter().any(|p| {
+        p.account == old.account && p.tunnel_id == old.tunnel_id
+      })
+    })
+    .cloned();
   state
     .db
     .call(move |c| {

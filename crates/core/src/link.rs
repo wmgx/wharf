@@ -115,9 +115,14 @@ pub fn choose(
   if choice == Choice::Tunnel
     && link_gateway(world, gateway_server).is_none()
   {
+    let name = world
+      .gateways
+      .iter()
+      .find(|(_, g)| &g.spec == gateway)
+      .map_or(gateway_server.as_str(), |(name, _)| name.as_str());
     return Err(ApiError::invalid(format!(
-      "服务 {service} 在 {server} 上，服务器 {gateway_server} 没有开启 TLS 的 Caddy 网关，无法建立加密反向隧道（tls=off）"
-    )).with_hint("把该机 Caddy 网关的 TLS 改为 auto 或 internal，或让两台机器加入同一个组网直连"));
+      "服务 {service} 在 {server} 上，服务器 {gateway_server} 没有开启 TLS 的 Caddy 网关，无法建立加密反向隧道"
+    )).with_hint(format!("把网关 {name} 的 TLS 改为 auto 或 internal，或让两台机器加入同一个组网直连")));
   }
   Ok(choice)
 }

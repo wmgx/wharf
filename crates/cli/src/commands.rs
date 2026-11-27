@@ -285,7 +285,15 @@ async fn dispatch(
     }
     Command::Status => {
       let s: Status = c.get("/api/status").await?;
-      out(j, &s, print::status);
+      out(j, &s, |s| {
+        print::status(s);
+        for route in &s.routes {
+          if route.failover_pending.is_some() {
+            println!("  {}", route.spec.hostname);
+            print_failover_pending(route);
+          }
+        }
+      });
       Ok(())
     }
     Command::Deploy {
@@ -3569,6 +3577,20 @@ async fn gateway(
   }
 }
 
+fn print_failover_pending(r: &RouteView) {
+  if let Some(p) = &r.failover_pending {
+    let target = if p.target_backup {
+      "备用入口"
+    } else {
+      "主网关"
+    };
+    println!("    待切换到{target}（已尝试 {} 次）", p.attempts);
+    if let Some(error) = &p.last_error {
+      println!("    {error}");
+    }
+  }
+}
+
 async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
   match cmd {
     RouteCmd::Logs(args) => {
@@ -3635,20 +3657,7 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
           if let Some(note) = &r.note {
             println!("    备注：{note}");
           }
-          if let Some(p) = &r.failover_pending {
-            let target = if p.target_backup {
-              "备用入口"
-            } else {
-              "主网关"
-            };
-            println!(
-              "    待切换到{target}（已尝试 {} 次）",
-              p.attempts
-            );
-            if let Some(error) = &p.last_error {
-              println!("    {error}");
-            }
-          }
+          print_failover_pending(r);
           if let Some(ttl) = r.spec.dns_ttl {
             println!("    DNS TTL：{ttl}");
           }

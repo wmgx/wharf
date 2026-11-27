@@ -259,6 +259,7 @@ fn empty_project(name: &str) -> ProjectState {
     project: name.to_string(),
     hash: None,
     config_hash: None,
+    acme_dns_url_hash: None,
     containers: Vec::new(),
   }
 }
@@ -445,7 +446,12 @@ pub fn gateway_view(
         };
         s.hash.as_deref() == Some(r.compose_hash.as_str())
           && snapshot::gateway_config_matches(
-            world, net, name, &r, applied,
+            world,
+            net,
+            name,
+            &r,
+            applied,
+            s.acme_dns_url_hash.as_deref(),
           )
           && s.all_running()
       });

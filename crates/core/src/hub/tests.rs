@@ -134,6 +134,17 @@ impl Hub {
     lock(&self.conns).get_mut(server).unwrap().build_v2 = true;
   }
 
+  pub(crate) fn mock_safe_gateway_agent(
+    &self,
+    server: &str,
+    handle: impl FnMut(AgentOp) -> Result<Value, ApiError>
+    + Send
+    + 'static,
+  ) {
+    self.mock_agent(server, false, handle);
+    lock(&self.conns).get_mut(server).unwrap().safe_gateway = true;
+  }
+
   pub(crate) fn mock_safe_delete_agent(
     &self,
     server: &str,

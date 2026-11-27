@@ -3528,7 +3528,10 @@ mod tests {
       title: "测试".into(),
     })
     .collect();
-    let guard = state.apply_lock.clone().try_lock_owned().unwrap();
+    let guard = state
+      .locks
+      .acquire(LockSpec::apply([]), "主备切换测试")
+      .unwrap();
     let (results, _) =
       run_batch_sync(state, steps, guard).await.unwrap();
     assert_eq!(
@@ -3536,6 +3539,27 @@ mod tests {
       ErrorCode::PlanStale
     );
     assert_eq!(results[1].status, StepStatus::Done);
+  }
+
+  #[tokio::test]
+  async fn capable_agent_restarts_in_one_operation_and_checks_running()
+   {
+    let state = crate::rules::tests::test_state();
+    state.hub.mock_safe_gateway_agent("s1", |op| {
+      assert!(matches!(op, AgentOp::ProjectRestart { project } if project == "notes"));
+      Ok(serde_json::json!({"containers":[{"name":"notes-1","service":"notes","state":"exited"}],"images":[]}))
+    });
+    let progress: ProgressFn = Arc::new(|_| {});
+    let err = service_restart(
+      &state,
+      "s1",
+      "notes",
+      &progress,
+      &CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code, ErrorCode::AgentFailed);
   }
 
   #[tokio::test]

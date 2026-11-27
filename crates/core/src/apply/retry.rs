@@ -523,7 +523,11 @@ async fn run_retry_reruns_only_failed_and_skipped_and_rejects_stale()
       return Ok(serde_json::json!([{"image": "fixture:1", "digest": format!("sha256:{}", "a".repeat(64))}]));
     }
     if matches!(op, AgentOp::ProjectStatus { .. }) {
-      return Ok(serde_json::json!([]));
+      return Ok(if lock(&recorded).contains(&"start") {
+        serde_json::json!([{"project":"notes","containers":[{"name":"notes-1","service":"notes","state":"running"}]}])
+      } else {
+        serde_json::json!([])
+      });
     }
     lock(&recorded).push(match op {
       AgentOp::ProjectStop { .. } => "stop",
