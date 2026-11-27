@@ -411,6 +411,7 @@ export type Change =
   | { op: "upsert_route"; spec: RouteSpec }
   | { op: "remove_route"; hostname: string }
   | { op: "upsert_edge_app"; name: string; spec: EdgeAppSpec }
+  | { op: "import_edge_app"; name: string; spec: EdgeAppSpec }
   | { op: "remove_edge_app"; name: string };
 
 export type Impact =

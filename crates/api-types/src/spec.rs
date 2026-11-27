@@ -914,6 +914,10 @@ pub enum Change {
     name: String,
     spec: EdgeAppSpec,
   },
+  ImportEdgeApp {
+    name: String,
+    spec: EdgeAppSpec,
+  },
   /// 只是不再纳管，不删除厂商那边的 Worker / Pages 项目。
   RemoveEdgeApp {
     name: String,

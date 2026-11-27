@@ -529,6 +529,7 @@ fn apply_writes(
     &crate::secret_restrictions::load(tx)?,
   )?;
   desired.validate()?;
+  crate::edge::validate_owners(&current, &desired)?;
   crate::secret_policy::validate_accounts(
     &desired,
     &crate::app_accounts::account_links(tx)?,

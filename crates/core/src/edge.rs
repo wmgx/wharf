@@ -5,7 +5,7 @@
 //! - 回滚用厂商自己的版本，不在 Wharf 里另存；
 //! - 不再纳管时不删除厂商那边的项目，只解绑 Wharf 绑定的域名。
 
-use std::time::Duration;
+use std::{collections::BTreeMap, time::Duration};
 
 use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
@@ -67,17 +67,6 @@ pub fn validate_app(
       "边缘应用 {name} 的项目名 {project} 不合法：只能用小写字母、数字和 -"
     )));
   }
-  if let Some((other, _)) =
-    world.edge_apps.iter().find(|(other, app)| {
-      other.as_str() != name
-        && app.spec.account == spec.account
-        && app.spec.kind == spec.kind
-        && app.spec.project_name(other) == project
-    })
-  {
-    return Err(ApiError::invalid(format!("边缘项目 {project}（{}）已经被边缘应用 {other} 纳管，不能重复指向", spec.kind.as_str()))
-      .with_hint("换一个项目名，或直接修改已有的边缘应用"));
-  }
   for d in &spec.domains {
     if world.routes.contains_key(d) {
       return Err(ApiError::invalid(format!(
@@ -135,6 +124,51 @@ pub fn validate_app(
     return Err(ApiError::invalid(format!("{what} 的构建命令为空")));
   }
   Ok(())
+}
+
+/// 同一目标的每个应用在原配置里就指向这里，才算存量冲突。
+pub fn validate_owners(
+  current: &World,
+  desired: &World,
+) -> Result<Vec<String>, ApiError> {
+  use crate::edge_sync::target;
+
+  let mut owners = BTreeMap::<_, Vec<_>>::new();
+  for (name, app) in &desired.edge_apps {
+    owners
+      .entry(target(name, &app.spec))
+      .or_default()
+      .push(name);
+  }
+  let mut warnings = Vec::new();
+  for (project, names) in owners {
+    if names.len() < 2 {
+      continue;
+    }
+    if let Some(&name) = names.iter().find(|&&name| {
+      current
+        .edge_apps
+        .get(name)
+        .is_none_or(|app| target(name, &app.spec) != project)
+    }) {
+      let other = if names[0] == name { names[1] } else { names[0] };
+      return Err(
+        ApiError::invalid(format!(
+          "边缘应用 {name} 和 {other} 都指向厂商项目 {project}"
+        ))
+        .with_hint(format!(
+          "换一个 --project，或改用已有的应用名 {other}"
+        )),
+      );
+    }
+    let names: Vec<_> =
+      names.iter().map(|name| name.as_str()).collect();
+    warnings.push(format!(
+      "厂商项目 {project} 已被多个边缘应用纳管：{}",
+      names.join("、")
+    ));
+  }
+  Ok(warnings)
 }
 
 // HELPERS

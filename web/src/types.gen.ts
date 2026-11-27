@@ -585,6 +585,10 @@ export type Change = {
   spec: EdgeAppSpec;
 } | {
   name: string;
+  op: "import_edge_app";
+  spec: EdgeAppSpec;
+} | {
+  name: string;
   op: "remove_edge_app";
 };
 

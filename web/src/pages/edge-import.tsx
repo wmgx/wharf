@@ -24,7 +24,7 @@ export function EdgeImport({ account, onClose }: { account: string; onClose: () 
       then: "/services",
       changes: fresh
         .filter((p) => picked.includes(p.project))
-        .map((p) => ({ op: "upsert_edge_app", name: p.project, spec: { account, kind: p.kind } })),
+        .map((p) => ({ op: "import_edge_app", name: p.project, spec: { account, kind: p.kind } })),
     });
   };
   return (

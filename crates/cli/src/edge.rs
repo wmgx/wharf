@@ -237,15 +237,6 @@ pub async fn edge(
           ))
           .suggest(format!("wharf edge discover --account {account}"))
         })?;
-      if let Some(n) = &found.managed_as {
-        return Err(
-          ApiError::new(
-            ErrorCode::AlreadyExists,
-            format!("{project} 已经导入为 {n}"),
-          )
-          .into(),
-        );
-      }
       let name = name.unwrap_or_else(|| project.clone());
       let spec = EdgeAppSpec {
         account,
@@ -258,7 +249,7 @@ pub async fn edge(
       let applied = apply.apply;
       changes(
         c,
-        vec![Change::UpsertEdgeApp {
+        vec![Change::ImportEdgeApp {
           name: name.clone(),
           spec,
         }],
