@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 use wharf_api_types::{agent::AgentOp, view::Perm};
 
 use crate::{
-  api::{AppError, gateway_not_found, service_not_found},
+  api::{AppError, gateway_not_found},
   auth::Auth,
   hub::ProgressFn,
   snapshot,
@@ -49,12 +49,9 @@ pub async fn service(
 ) -> Result<Response, AppError> {
   auth.require(Perm::Read)?;
   let snap = snapshot::load(&s.db).await?;
-  let row = snap
-    .world
-    .services
-    .get(&name)
-    .ok_or_else(|| service_not_found(&name))?;
-  Ok(follow(s.clone(), row.spec.server.clone(), name, q.tail))
+  let (server, project) =
+    crate::multi_logs::service_target(&snap, &name)?;
+  Ok(follow(s, server.to_string(), project, q.tail))
 }
 
 pub async fn gateway(
