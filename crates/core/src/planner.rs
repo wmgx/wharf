@@ -1518,8 +1518,9 @@ fn service_items(
           .get(&m.payload.to)
           .and_then(Option::as_ref)
           .and_then(|projects| projects.get(name))
-          .is_none_or(|s| {
-            s.hash.is_some() || !s.containers.is_empty()
+          .is_some_and(|s| {
+            (s.hash.is_some() || !s.containers.is_empty())
+              && s.containers.iter().all(|c| !c.foreign)
           });
         if exists {
           return Some((m.payload.to.as_str(), true));
@@ -3292,6 +3293,18 @@ mod tests {
     let mut desired = snap.world.clone();
     desired.services.get_mut("notes").unwrap().spec.server =
       "s1".into();
+    let status = StatusMap::from([(
+      "s2".into(),
+      Some(BTreeMap::from([(
+        "notes".into(),
+        ProjectState {
+          project: "notes".into(),
+          hash: Some("partial".into()),
+          config_hash: None,
+          containers: vec![],
+        },
+      )])),
+    )]);
     let mut b = Builder::default();
     service_items(
       &mut b,
@@ -3299,7 +3312,7 @@ mod tests {
       &snap.world,
       &desired,
       &Net::default(),
-      &StatusMap::new(),
+      &status,
       &[],
     )
     .unwrap();
