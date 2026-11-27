@@ -1349,7 +1349,7 @@ pub(crate) async fn run_step(
       )
       .await?;
     }
-    Step::EdgeDeploy { app } => {
+    Step::EdgeDeploy { app, commit } => {
       let key = crate::edge_plan::deployed_key(app);
       let fingerprint = world
         .edge_apps
@@ -1362,8 +1362,15 @@ pub(crate) async fn run_step(
           db::set_setting(c, &k, Some(crate::edge_plan::DEPLOYING))
         })
         .await?;
-      crate::edge::deploy(state, &snap, app, &progress, cancel)
-        .await?;
+      crate::edge::deploy(
+        state,
+        &snap,
+        app,
+        commit.clone(),
+        &progress,
+        cancel,
+      )
+      .await?;
       state
         .db
         .call(move |c| {

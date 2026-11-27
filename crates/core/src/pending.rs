@@ -245,7 +245,7 @@ pub async fn source_changed(
 
 pub fn simple_key(step: &Step) -> Option<(&'static str, &str)> {
   match step {
-    Step::EdgeDeploy { app } => Some(("edge_deploy", app)),
+    Step::EdgeDeploy { app, .. } => Some(("edge_deploy", app)),
     Step::DockerProxy { server } => Some(("docker_proxy", server)),
     Step::Egress { server } => Some(("egress", server)),
     Step::Baseline { server } => Some(("baseline", server)),

@@ -504,12 +504,15 @@ pub struct BuildArgs {
   #[arg(long)]
   pub git: Option<String>,
   /// git 的分支、标签或 commit，默认 main。
-  #[arg(long = "ref")]
+  #[arg(long = "ref", visible_alias = "git-ref")]
   pub git_ref: Option<String>,
   /// 私有仓库：保存访问 token 的密钥名（先 `wharf secret set`）。
   /// GitHub 私有仓库不给时，沿用控制面已有的 GITHUB_TOKEN。
   #[arg(long)]
   pub git_token_secret: Option<String>,
+  /// 私有 Git 仓库的 HTTP 认证用户名。
+  #[arg(long)]
+  pub git_user: Option<String>,
   /// 用本机 gh 的登录写入或覆盖控制面 GITHUB_TOKEN。
   #[arg(long, requires = "git", conflicts_with = "git_token_secret")]
   pub sync_gh_token: bool,
@@ -1092,6 +1095,9 @@ pub enum ServiceCmd {
     /// 数据卷 `名字:/容器内路径`，宿主机目录是 /srv/<服务>/<名字>。可以多次使用。
     #[arg(long)]
     volume: Vec<String>,
+    /// 删除数据卷配置。
+    #[arg(long)]
+    unset_volume: Vec<String>,
     #[command(flatten)]
     build: BuildArgs,
     #[command(flatten)]

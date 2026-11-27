@@ -314,6 +314,7 @@ async fn dispatch(
         start_timeout: None,
         health_path: None,
         volume: vec![],
+        unset_volume: vec![],
         build: BuildArgs {
           dir: Some(dir),
           opts: build,
@@ -2081,8 +2082,12 @@ fn parse_port(s: &str) -> CliResult<PortSpec> {
       "--port {s} 格式不对，应为 http=80、http=80:20080，compose 来源写 http=:41773、UDP 写 game=27015/udp"
     ))
   };
-  let udp = value.ends_with("/udp");
-  let value = value.strip_suffix("/udp").unwrap_or(&value);
+  let (value, protocol) =
+    value.rsplit_once('/').unwrap_or((&value, "tcp"));
+  let udp = protocol.eq_ignore_ascii_case("udp");
+  if !udp && !protocol.eq_ignore_ascii_case("tcp") {
+    return Err(bad().into());
+  }
   let (port, host) = match value.split_once(':') {
     Some((p, h)) => (p, Some(h)),
     None => (value, None),
@@ -2575,6 +2580,7 @@ async fn service(
       start_timeout,
       health_path,
       volume,
+      unset_volume,
       build,
       apply,
     } => {
@@ -2624,6 +2630,7 @@ async fn service(
         Some(url) => Some(crate::deploy::fetch_compose(url).await?),
         None => None,
       };
+      let refresh_ports = compose.is_some();
       let source = match (image, compose, built) {
         (_, _, Some(b)) => Some(b.source),
         _ if draft.is_some() => {
@@ -2679,7 +2686,20 @@ async fn service(
           }
         }
       };
+      let was_compose = matches!(spec.source, Source::Compose { .. });
       if let Some(source) = source {
+        let is_compose = matches!(source, Source::Compose { .. });
+        if is_compose && !was_compose {
+          spec.volumes.clear();
+          spec.backup = None;
+        }
+        if !is_compose && was_compose {
+          spec.container = None;
+          spec.ports.clear();
+        }
+        if is_compose && refresh_ports && port.is_empty() {
+          spec.ports.clear();
+        }
         spec.source = source;
       }
       if let Some(seconds) = start_timeout {
@@ -2701,7 +2721,8 @@ async fn service(
       }
       if let Some(d) = draft {
         spec.ports = d.ports;
-        spec.env.extend(d.env);
+        spec.env = d.env;
+        spec.container = None;
         spec.volumes = d.volumes;
         spec.limits = d.limits;
       }
@@ -2710,12 +2731,18 @@ async fn service(
           .iter()
           .map(|p| parse_port(p))
           .collect::<CliResult<_>>()?;
-      } else if let (true, Some(p)) = (is_new, default_port) {
+      } else if (is_new && default_port.is_some() || was_compose)
+        && !matches!(spec.source, Source::Compose { .. })
+        && spec.ports.is_empty()
+        && from_run.is_none()
+      {
+        let p = default_port
+          .unwrap_or_else(|| crate::deploy::ExposedPort::tcp(8080));
         spec.ports = vec![PortSpec {
-          name: "http".into(),
-          container: Some(p),
+          name: if p.udp { "udp" } else { "http" }.into(),
+          container: Some(p.port),
           host: None,
-          udp: false,
+          udp: p.udp,
         }];
       }
       for e in &env {
@@ -2736,6 +2763,16 @@ async fn service(
           name: vname.to_string(),
           target: target.to_string(),
         });
+      }
+      for name in unset_volume {
+        let index = spec
+          .volumes
+          .iter()
+          .position(|v| v.name == name)
+          .ok_or_else(|| {
+            ApiError::invalid(format!("数据卷 {name} 不存在"))
+          })?;
+        spec.volumes.remove(index);
       }
       changes(
         c,

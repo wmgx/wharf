@@ -343,6 +343,22 @@ impl World {
           server.settings = settings.clone();
         }
         Change::UpsertService { name, spec, adopt } => {
+          if let Source::Build(b) = &spec.source
+            && b.dockerfile.is_some()
+            && b.template.is_some()
+            && !self
+              .services
+              .get(name)
+              .is_some_and(|old| old.spec.source == spec.source)
+          {
+            return Err(
+              ApiError::invalid(
+                "dockerfile 和 template 不能同时设置",
+              )
+              .with_hint("指定内置模板时请清空 dockerfile 路径"),
+            );
+          }
+
           validate_name("服务", name)?;
           if name
             .starts_with(wharf_api_types::agent::TASK_DATA_PREFIX)
@@ -1627,13 +1643,17 @@ pub fn check_code_source(
       {
         return bad("git ref 不合法");
       }
-      if let Some(secret) = &git.token_secret
-        && (secret.is_empty()
-          || !secret
-            .bytes()
-            .all(|c| c.is_ascii_alphanumeric() || c == b'_'))
-      {
-        return bad("token_secret 要写密钥名");
+      if let Some(secret) = &git.token_secret {
+        crate::api::check_secret_name(secret)?;
+      }
+      if git.user.as_deref().is_some_and(|user| {
+        user.trim().is_empty()
+          || user.len() > 64
+          || user.contains(|c: char| {
+            c.is_control() || matches!(c, ':' | '@')
+          })
+      }) {
+        return bad("git 认证用户名不合法");
       }
     }
     _ => {
@@ -1840,9 +1860,9 @@ fn validate_service(
         );
       };
       crate::render::check_compose_template(name, content)?;
-      if !spec.env.is_empty() || !spec.volumes.is_empty() {
+      if !spec.volumes.is_empty() {
         return Err(ApiError::invalid(format!(
-          "服务 {name}：compose 来源的环境变量和数据卷请直接写在 compose 文件里"
+          "服务 {name}：compose 来源的数据卷请直接写在 compose 文件里"
         )));
       }
     }

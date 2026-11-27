@@ -190,6 +190,8 @@ pub enum Step {
   /// 发布边缘应用的代码。
   EdgeDeploy {
     app: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    commit: Option<String>,
   },
   /// 把自定义域名绑定到边缘应用。`takeover`：覆盖已有的 DNS 记录（Workers）。
   EdgeAttach {
@@ -316,6 +318,33 @@ pub(crate) struct Builder {
   image_ids: BTreeMap<String, BTreeMap<String, String>>,
   /// 删除时连同数据一起删的服务。
   purge_data: BTreeSet<String>,
+}
+
+fn build_agent_warnings(
+  state: &AppState,
+  desired: &World,
+  b: &mut Builder,
+) -> Result<(), ApiError> {
+  let mut warned = BTreeSet::new();
+  for step in &b.steps {
+    let Step::ServiceUp { service, .. } = &step.step else {
+      continue;
+    };
+    let row = &desired.services[service];
+    let Source::Build(build) = &row.spec.source else {
+      continue;
+    };
+    let server = &row.spec.server;
+    if !state.hub.supports_build_v2(server) {
+      if build.git.as_ref().is_some_and(|g| g.user.is_some()) {
+        return Err(crate::build::old_git_agent(server));
+      }
+      if warned.insert(server) {
+        b.warnings.push(crate::build::old_agent_warning(server));
+      }
+    }
+  }
+  Ok(())
 }
 
 impl Builder {
@@ -754,6 +783,7 @@ pub(crate) async fn make_plan_inner(
   service_items(
     &mut b, &snap, &current, &desired, &net, &status, &writes,
   )?;
+  build_agent_warnings(state, &desired, &mut b)?;
   leftover_items(&mut b, &snap, &current, &desired, &status);
   link_items(&mut b, &snap, &current, &desired, &net, &status)?;
   tailscale_items(&mut b, &snap, &desired, &status);
@@ -769,8 +799,10 @@ pub(crate) async fn make_plan_inner(
   .then(|| affected_hosts(&snap, &current, &desired, &net));
   dns_items(&mut b, &snap, &desired, &net, scope.as_ref()).await?;
   mark("DNS");
-  crate::edge_plan::edge_items(&mut b, &snap, &current, &desired)
-    .await?;
+  crate::edge_plan::edge_items(
+    state, &mut b, &snap, &current, &desired,
+  )
+  .await?;
   mark("边缘应用");
   crate::token_scope::record_dns_routes(
     &mut b.route_effects,

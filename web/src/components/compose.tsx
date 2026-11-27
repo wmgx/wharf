@@ -7,6 +7,7 @@ export interface ComposePort {
   service: string;
   host: number;
   container: number;
+  udp?: boolean;
 }
 
 export interface ComposeVolume {
@@ -27,11 +28,13 @@ const indentOf = (line: string) => line.length - line.trimStart().length;
 const unquote = (s: string) => s.trim().replace(/^["']|["']$/g, "");
 
 /** `127.0.0.1:8080:80`、`8080:80/tcp`、`80` → 宿主机端口和容器端口；只有容器端口时没有宿主机端口。 */
-function parsePort(text: string): { host?: number; container: number } | null {
-  const parts = unquote(text).replace(/\/(tcp|udp)$/, "").split(":");
+function parsePort(text: string): Omit<ComposePort, "service" | "host"> & { host?: number } | null {
+  const [address, protocol = "tcp", rest] = unquote(text).toLowerCase().split("/");
+  if (rest !== undefined || (protocol !== "tcp" && protocol !== "udp")) return null;
+  const parts = address.split(":");
   const nums = parts.slice(-2).map(Number);
   if (nums.some((n) => !Number.isInteger(n) || n <= 0 || n > 65535)) return null;
-  return parts.length === 1 ? { container: nums[0] } : { host: nums[0], container: nums[1] };
+  return parts.length === 1 ? { container: nums[0] } : { host: nums[0], container: nums[1], ...(protocol === "udp" ? { udp: true } : {}) };
 }
 
 /**
@@ -44,10 +47,13 @@ export function parseCompose(text: string): ComposeInfo {
   let service = "";
   let list: "ports" | "volumes" | null = null;
   let listIndent = -1;
-  let pending: { published?: number; target?: number; source?: string; mount?: string } | null = null;
+  let pending: { published?: number; target?: number; protocol?: string; source?: string; mount?: string } | null = null;
   const flush = () => {
     if (!pending) return;
-    if (list === "ports" && pending.published && pending.target) info.ports.push({ service, host: pending.published, container: pending.target });
+    const protocol = pending.protocol ?? "tcp";
+    if (list === "ports" && pending.published && pending.target && ["tcp", "udp"].includes(protocol)) {
+      info.ports.push({ service, host: pending.published, container: pending.target, ...(protocol === "udp" ? { udp: true } : {}) });
+    }
     if (list === "volumes" && pending.source && pending.mount) info.volumes.push({ service, source: pending.source, target: pending.mount });
     pending = null;
   };
@@ -94,6 +100,7 @@ export function parseCompose(text: string): ComposeInfo {
     if (kv) {
       pending ??= {};
       const v = unquote(kv[2]);
+      if (kv[1] === "protocol") pending.protocol = v.toLowerCase();
       if (kv[1] === "published") pending.published = Number(v);
       if (kv[1] === "target") (list === "ports" ? (pending.target = Number(v)) : (pending.mount = v));
       if (kv[1] === "source") pending.source = v;
@@ -102,7 +109,7 @@ export function parseCompose(text: string): ComposeInfo {
     if (item === null) continue;
     if (list === "ports") {
       const p = parsePort(item);
-      if (p?.host) info.ports.push({ service, host: p.host, container: p.container });
+      if (p?.host) info.ports.push({ service, host: p.host, container: p.container, ...(p.udp ? { udp: true } : {}) });
     } else {
       const parts = unquote(item).split(":");
       if (parts.length >= 2) info.volumes.push({ service, source: parts[0], target: parts[1] });
@@ -147,7 +154,22 @@ export function MirrorHint({ server, images }: { server?: ServerView; images: st
 export function composePorts(info: ComposeInfo): PortSpec[] {
   const count = new Map<string, number>();
   info.ports.forEach((p) => count.set(p.service, (count.get(p.service) ?? 0) + 1));
-  return info.ports.map((p) => ({ name: toName(count.get(p.service)! > 1 ? `${p.service}-${p.container}` : p.service), host: p.host }));
+  const used = new Set<string>();
+  const bindings = new Set<string>();
+  return info.ports.flatMap((p) => {
+    const binding = `${p.host}/${p.udp ? "udp" : "tcp"}`;
+    if (bindings.has(binding)) return [];
+    bindings.add(binding);
+    const suffix = `${count.get(p.service)! > 1 ? `-${p.container}` : ""}${p.udp ? "-udp" : ""}`;
+    const base = toName(p.service).slice(0, 48 - suffix.length) + suffix;
+    let name = base || `p${p.host}`;
+    for (let i = 2; used.has(name); i++) {
+      const serial = `-${i}`;
+      name = base.slice(0, 48 - serial.length) + serial;
+    }
+    used.add(name);
+    return [{ name, host: p.host, ...(p.udp ? { udp: true } : {}) }];
+  });
 }
 
 /** 新建和编辑共用：高亮编辑框 + 识别到的挂载。 */

@@ -219,7 +219,7 @@ pub fn edge_not_found(name: &str) -> ApiError {
 }
 
 /// 执行 wrangler 的服务器：指定的，或在线的海外服务器，或任一在线服务器。
-fn builder(
+pub(crate) fn builder(
   state: &AppState,
   snap: &Snapshot,
   spec: &EdgeAppSpec,
@@ -248,16 +248,206 @@ fn builder(
 
 /// 单文件脚本是不是 ES Module 格式。
 fn is_module(content: &str) -> bool {
-  content.contains("export default") || content.contains("export {")
+  let mut lexer =
+    JsTokens(content.trim_start_matches('\u{feff}').as_bytes());
+  let mut depth = 0usize;
+  let mut previous = &b";"[..];
+  while let Some((token, newline)) =
+    lexer.next(regex_allowed(previous))
+  {
+    match token {
+      b"{" | b"(" | b"[" => depth += 1,
+      b"}" | b")" | b"]" => depth = depth.saturating_sub(1),
+      b"export"
+        if depth == 0
+          && previous != b"."
+          && (newline || matches!(previous, b";" | b"}")) =>
+      {
+        return match lexer.next(false).map(|(t, _)| t) {
+          Some(
+            b"{" | b"*" | b"default" | b"const" | b"let" | b"var"
+            | b"function" | b"class",
+          ) => true,
+          Some(b"async") => {
+            lexer.next(false).is_some_and(|(t, _)| t == b"function")
+          }
+          _ => false,
+        };
+      }
+      _ => {}
+    }
+    previous = token;
+  }
+  false
+}
+
+fn regex_allowed(after: &[u8]) -> bool {
+  matches!(
+    after,
+    b"="
+      | b"("
+      | b"["
+      | b"{"
+      | b"}"
+      | b":"
+      | b";"
+      | b","
+      | b"!"
+      | b"?"
+      | b"&"
+      | b"|"
+      | b"~"
+      | b"+"
+      | b"-"
+      | b"*"
+      | b"%"
+      | b"^"
+      | b"<"
+      | b">"
+      | b"return"
+      | b"throw"
+      | b"case"
+      | b"typeof"
+      | b"void"
+      | b"delete"
+      | b"yield"
+      | b"await"
+  )
+}
+
+struct JsTokens<'a>(&'a [u8]);
+
+impl<'a> JsTokens<'a> {
+  fn next(&mut self, regex: bool) -> Option<(&'a [u8], bool)> {
+    self.token(regex, false)
+  }
+
+  fn next_inner(&mut self, regex: bool) -> Option<(&'a [u8], bool)> {
+    self.token(regex, true)
+  }
+
+  fn token(
+    &mut self,
+    regex: bool,
+    in_template: bool,
+  ) -> Option<(&'a [u8], bool)> {
+    let mut newline = false;
+    loop {
+      let start = self.0;
+      match *start.first()? {
+        b if b.is_ascii_whitespace() => {
+          newline |= matches!(b, b'\n' | b'\r');
+          self.0 = &start[1..];
+        }
+        b'/' if start.starts_with(b"//") => {
+          self.0 = &start[start
+            .iter()
+            .position(|&b| matches!(b, b'\n' | b'\r'))
+            .unwrap_or(start.len())..];
+        }
+        b'/' if start.starts_with(b"/*") => {
+          let len = start[2..]
+            .windows(2)
+            .position(|p| p == b"*/")
+            .map_or(start.len(), |i| i + 4);
+          newline |=
+            start[..len].iter().any(|b| matches!(b, b'\n' | b'\r'));
+          self.0 = &start[len..];
+        }
+        b => {
+          self.0 = &start[1..];
+          match b {
+            b'\'' | b'"' => self.quoted(b, false),
+            b'`' if !in_template => self.template(),
+            b'/' if regex => self.quoted(b'/', true),
+            b if js_word(b) => {
+              self.0 = &self.0[self
+                .0
+                .iter()
+                .position(|b| !js_word(*b))
+                .unwrap_or(self.0.len())..];
+            }
+            _ => {}
+          }
+          return Some((
+            &start[..start.len() - self.0.len()],
+            newline,
+          ));
+        }
+      }
+    }
+  }
+
+  fn quoted(&mut self, end: u8, regex: bool) {
+    let mut class = false;
+    while let [b, rest @ ..] = self.0 {
+      self.0 = rest;
+      match *b {
+        b'\\' => self.0 = rest.get(1..).unwrap_or_default(),
+        b'[' if regex => class = true,
+        b']' if regex => class = false,
+        b if b == end && !class => break,
+        _ => {}
+      }
+    }
+  }
+
+  fn template(&mut self) {
+    let mut templates = vec![0usize];
+    let mut previous = &b"="[..];
+    while let Some(depth) = templates.last_mut() {
+      if *depth != 0 {
+        if self.0.first() == Some(&b'`') {
+          self.0 = &self.0[1..];
+          templates.push(0);
+        } else {
+          let Some((token, _)) =
+            self.next_inner(regex_allowed(previous))
+          else {
+            return;
+          };
+          match token {
+            b"{" => *depth += 1,
+            b"}" => *depth -= 1,
+            b"`" => templates.push(0),
+            _ => {}
+          }
+          previous = token;
+        }
+      } else if let [b, rest @ ..] = self.0 {
+        self.0 = rest;
+        match *b {
+          b'`' => {
+            templates.pop();
+            previous = b"value";
+          }
+          b'\\' => self.0 = rest.get(1..).unwrap_or_default(),
+          b'$' if rest.starts_with(b"{") => {
+            self.0 = &rest[1..];
+            *depth = 1;
+            previous = b"=";
+          }
+          _ => {}
+        }
+      } else {
+        break;
+      }
+    }
+  }
+}
+
+fn js_word(b: u8) -> bool {
+  b.is_ascii_alphanumeric() || b == b'_' || b == b'$' || !b.is_ascii()
 }
 
 // DEPLOY
 
-/// 发布边缘应用的代码。`force`：git 来源也拉最新（发布本来就总是取最新）。
+/// 发布边缘应用的代码。有计划固定的 commit 就按它构建。
 pub async fn deploy(
   state: &AppState,
   snap: &Snapshot,
   name: &str,
+  commit: Option<String>,
   progress: &ProgressFn,
   cancel: &CancellationToken,
 ) -> Result<(), ApiError> {
@@ -299,6 +489,11 @@ pub async fn deploy(
     progress(format!("已发布 Worker {project}"));
   } else {
     let server = builder(state, snap, spec)?;
+    if src.git.as_ref().is_some_and(|g| g.user.is_some())
+      && !state.hub.supports_build_v2(&server)
+    {
+      return Err(crate::build::old_git_agent(&server));
+    }
     let branch = match spec.kind {
       EdgeKind::Pages => {
         let p = with_timeout(
@@ -319,7 +514,7 @@ pub async fn deploy(
       &format!("边缘应用 {name}"),
       src.upload.as_ref(),
       src.git.as_ref(),
-      None,
+      commit,
     )?;
     let server_row = &snap.world.servers[&server];
     progress(format!("在 {server} 上执行 wrangler"));

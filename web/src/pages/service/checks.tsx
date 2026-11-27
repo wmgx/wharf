@@ -14,7 +14,7 @@ export function ServiceChecks({ svc, kind }: { svc: ServiceView; kind: "monitor"
   const [expect, setExpect] = useState(draft.monitor?.expect?.toString() ?? "");
   useEffect(() => { setExpect(svc.spec.monitor?.expect?.toString() ?? ""); }, [svc.spec.monitor?.expect]);
   const monitor = draft.monitor;
-  const ports = draft.ports ?? [];
+  const ports = (draft.ports ?? []).filter((p) => !p.udp);
   const servers = serverOptions((status?.servers ?? []).filter((s) => s.joined && s.name !== svc.spec.server));
   const hasData = !!svc.spec.volumes?.length || "compose" in svc.spec.source;
   const updateMonitor = (patch: Partial<NonNullable<ServiceSpec['monitor']>>) => { if (monitor) set({ monitor: { ...monitor, ...patch } }); };
@@ -24,7 +24,7 @@ export function ServiceChecks({ svc, kind }: { svc: ServiceView; kind: "monitor"
     {kind === "monitor" ? (<Panel className="grid gap-3 p-4">
       <label className="flex items-center gap-2 text-sm">
         <Checkbox checked={!!monitor} disabled={!ports.length} onCheckedChange={(checked) => set({ monitor: checked ? { path: "/" } : undefined })} />每分钟检查一次，连续 3 次不正常就通知</label>
-      {!ports.length && <span className="text-xs text-muted-foreground">服务没有端口，检查不了</span>}{monitor && <div className="grid gap-3 sm:grid-cols-2">
+      {!ports.length && <span className="text-xs text-muted-foreground">服务没有 TCP 端口，检查不了</span>}{monitor && <div className="grid gap-3 sm:grid-cols-2">
         <Field label="路径" htmlFor="service-monitor-path">
           <Input id="service-monitor-path" placeholder="/health" value={monitor.path} onChange={(e) => updateMonitor({ path: e.target.value })} />
         </Field>

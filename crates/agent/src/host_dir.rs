@@ -201,10 +201,9 @@ pub async fn pack(
 
 /// 临时容器里执行的 `wharf-agent pack`：写代码包，标准输出打印文件数。
 pub fn pack_cli(dir: &Path, out: &Path) -> anyhow::Result<()> {
-  let packed = wharf_pack::pack(dir)
+  let (_, _, files) = wharf_pack::pack_to_file(dir, out, &[])
     .map_err(|e| anyhow::anyhow!("{}", e.message))?;
-  std::fs::write(out, &packed.bytes)?;
-  println!("{}", packed.files);
+  println!("{files}");
   Ok(())
 }
 

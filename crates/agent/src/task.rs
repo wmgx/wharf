@@ -81,14 +81,18 @@ pub async fn run(
       let install_name = format!("wharf-deps-{}", job.name);
       let data_dir = persistent.join("data");
       let deps_dir = persistent.join("deps");
-      for path in [&data_dir, &deps_dir] {
-        fs::create_dir_all(path).map_err(io_err(path))?;
+      let with_deps = has_effective_deps(deps);
+      fs::create_dir_all(&data_dir).map_err(io_err(&data_dir))?;
+      if with_deps {
+        fs::create_dir_all(&deps_dir).map_err(io_err(&deps_dir))?;
+      } else {
+        clear_deps(&deps_dir)?;
       }
       let mut vars = env.clone();
-      if *runtime == ScriptRuntime::Python {
+      if with_deps && *runtime == ScriptRuntime::Python {
         vars.insert("PYTHONPATH".into(), "/deps".into());
       }
-      if *runtime == ScriptRuntime::Node {
+      if with_deps && *runtime == ScriptRuntime::Node {
         fs::create_dir(dir.join("node_modules"))
           .map_err(io_err(dir))?;
       }
@@ -104,17 +108,27 @@ pub async fn run(
       write_env(&dir.join("env"), &vars)?;
       crate::build::remove_container(docker, &name).await;
       docker.pull(image, &job.pull, ctx, &mut Vec::new()).await?;
+      let ids = if with_deps {
+        docker.image_info(std::slice::from_ref(image), ctx).await
+      } else {
+        vec![]
+      };
+      let image_id = ids.first().map_or("", |i| i.id.as_str());
+      let runtime_image = if image_id.is_empty() {
+        image.as_str()
+      } else {
+        image_id
+      };
       let execution_started = Instant::now();
       let mut install_output = String::new();
-      if !deps.trim().is_empty()
-        && needs_install(
-          fs::read_to_string(deps_dir.join(".wharf-hash"))
-            .ok()
-            .as_deref(),
-          image,
-          deps,
-        )
-      {
+      if needs_install(
+        fs::read_to_string(deps_dir.join(".wharf-hash"))
+          .ok()
+          .as_deref(),
+        image,
+        image_id,
+        deps,
+      ) {
         fs::remove_dir_all(&deps_dir).map_err(io_err(&deps_dir))?;
         fs::create_dir_all(&deps_dir).map_err(io_err(&deps_dir))?;
         write_private(
@@ -139,7 +153,7 @@ pub async fn run(
             let mut c = cmd.args([
               "--entrypoint",
               "pip",
-              image,
+              runtime_image,
               "install",
               "--no-cache-dir",
               "--target",
@@ -156,7 +170,7 @@ pub async fn run(
             let mut c = cmd.args([
               "--entrypoint",
               "npm",
-              image,
+              runtime_image,
               "install",
               "--prefix",
               "/deps",
@@ -194,7 +208,7 @@ pub async fn run(
         }
         write_private(
           &deps_dir.join(".wharf-hash"),
-          deps_hash(image, deps).as_bytes(),
+          deps_hash(image, image_id, deps).as_bytes(),
         )?;
       }
       let remaining = timeout
@@ -214,13 +228,16 @@ pub async fn run(
           "/wharf",
         ])
         .args(["--env-file", &dir.join("env").to_string_lossy()])
-        .args(["-v", &format!("{}:/data", data_dir.display())])
-        .args(["-v", &format!("{}:/deps:ro", deps_dir.display())]);
+        .args(["-v", &format!("{}:/data", data_dir.display())]);
+      if with_deps {
+        cmd = cmd
+          .args(["-v", &format!("{}:/deps:ro", deps_dir.display())]);
+      }
       if job.network_host {
         cmd = cmd.args(["--network", "host"]);
       }
       if *runtime == ScriptRuntime::Node
-        && !deps.trim().is_empty()
+        && with_deps
         && deps_dir.join("node_modules").is_dir()
       {
         cmd = cmd.args([
@@ -235,7 +252,7 @@ pub async fn run(
         .args([
           "--entrypoint",
           entry,
-          image,
+          runtime_image,
           &format!("/wharf/{file}"),
         ])
         .timeout(remaining)
@@ -360,15 +377,7 @@ async fn run_sso(
   let dir = Path::new(SSO_ROOT).join(&job.name);
   fs::create_dir_all(&dir).map_err(io_err(&dir))?;
   let deps_dir = dir.join("deps");
-  let needs_deps = || {
-    needs_install(
-      fs::read_to_string(deps_dir.join(".wharf-hash"))
-        .ok()
-        .as_deref(),
-      image,
-      deps,
-    )
-  };
+  let with_deps = has_effective_deps(deps);
   let installing = || {
     ApiError::new(ErrorCode::Conflict, "代登录依赖正在安装，稍后重试")
   };
@@ -389,7 +398,7 @@ async fn run_sso(
         }
       }
       Err(std::fs::TryLockError::WouldBlock) => {
-        return Err(if needs_deps() {
+        return Err(if with_deps {
           installing()
         } else {
           ApiError::new(
@@ -405,51 +414,73 @@ async fn run_sso(
   }
   let name = sso_runner_name(*runtime, image);
   let mount = format!("{SSO_MOUNT}/{}", job.name);
-  if needs_deps() && !job.wait_for_deps {
-    let (docker, pull, image, runtime, deps, mirrors, ctx) = (
+  let runner =
+    ensure_sso_runner(docker, &name, image, &job.pull, ctx).await?;
+  let image_id = if with_deps {
+    docker
+      .cmd()
+      .args(["inspect", "--format", "{{.Image}}", &runner])
+      .timeout(QUICK)
+      .run(ctx)
+      .await?
+      .check("检查代登录镜像")?
+      .stdout
+      .trim()
+      .to_string()
+  } else {
+    clear_deps(&deps_dir)?;
+    String::new()
+  };
+  let needs_deps = needs_install(
+    fs::read_to_string(deps_dir.join(".wharf-hash"))
+      .ok()
+      .as_deref(),
+    image,
+    &image_id,
+    deps,
+  );
+  if needs_deps && !job.wait_for_deps {
+    let (docker, deps, mirrors, ctx, hash, runtime) = (
       docker.clone(),
-      job.pull.clone(),
-      image.clone(),
-      *runtime,
       deps.clone(),
       mirrors.clone(),
       Ctx {
         cancel: ctx.cancel.clone(),
         progress: None,
       },
+      deps_hash(image, &image_id, deps),
+      *runtime,
     );
     tokio::spawn(async move {
       let (_active, _lock) = (active, lock);
-      let result = async {
-        let runner =
-          ensure_sso_runner(&docker, &name, &image, &pull, &ctx)
-            .await?;
-        install_sso_deps(
-          &docker, &runner, &dir, &mount, runtime, &image, &deps,
-          &mirrors, &ctx,
-        )
-        .await
-      }
-      .await;
-      if let Err(error) = result {
+      if let Err(error) = install_sso_deps(
+        &docker, &runner, &dir, &mount, runtime, &hash, &deps,
+        &mirrors, &ctx,
+      )
+      .await
+      {
         tracing::warn!(code = ?error.code, "后台安装代登录依赖失败");
       }
     });
     return Err(installing());
   }
-  let runner =
-    ensure_sso_runner(docker, &name, image, &job.pull, ctx).await?;
-  if needs_deps() {
+  if needs_deps {
     install_sso_deps(
-      docker, &runner, &dir, &mount, *runtime, image, deps, mirrors,
+      docker,
+      &runner,
+      &dir,
+      &mount,
+      *runtime,
+      &deps_hash(image, &image_id, deps),
+      deps,
+      mirrors,
       ctx,
     )
     .await?;
   }
   let started = Instant::now();
   let (file, entry) = script_command(*runtime);
-  let node_deps =
-    *runtime == ScriptRuntime::Node && !deps.trim().is_empty();
+  let node_deps = *runtime == ScriptRuntime::Node && with_deps;
   let work = work_dir(&dir, "run")?;
   let script_dir = if node_deps { &deps_dir } else { &dir };
   let script = script_dir.join(file);
@@ -464,7 +495,7 @@ async fn run_sso(
     "WHARF_OUT".into(),
     format!("{mount}/{work_name}/result.json"),
   );
-  if *runtime == ScriptRuntime::Python && !deps.trim().is_empty() {
+  if *runtime == ScriptRuntime::Python && with_deps {
     vars.insert("PYTHONPATH".into(), format!("{mount}/deps"));
   }
   let env_file = work.0.join("env");
@@ -640,7 +671,7 @@ async fn install_sso_deps(
   dir: &Path,
   mount: &str,
   runtime: ScriptRuntime,
-  image: &str,
+  hash: &str,
   deps: &str,
   mirrors: &BTreeMap<String, String>,
   ctx: &Ctx,
@@ -709,10 +740,7 @@ async fn install_sso_deps(
       "安装代登录依赖失败",
     ));
   }
-  write_private(
-    &deps_dir.join(".wharf-hash"),
-    deps_hash(image, deps).as_bytes(),
-  )
+  write_private(&deps_dir.join(".wharf-hash"), hash.as_bytes())
 }
 
 pub async fn cleanup_sso(
@@ -838,17 +866,34 @@ fn read_result(out: &Path) -> Option<String> {
   String::from_utf8(bytes).ok()
 }
 
-fn deps_hash(image: &str, deps: &str) -> String {
-  hex::encode(Sha256::digest(format!("{image}\n{deps}")))
+fn clear_deps(path: &Path) -> Result<(), ApiError> {
+  match fs::remove_dir_all(path) {
+    Ok(()) => Ok(()),
+    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+    Err(e) => Err(io_err(path)(e)),
+  }
+}
+
+fn has_effective_deps(deps: &str) -> bool {
+  deps
+    .lines()
+    .map(str::trim)
+    .any(|l| !l.is_empty() && !l.starts_with('#'))
+}
+
+fn deps_hash(image: &str, image_id: &str, deps: &str) -> String {
+  let key = if image_id.is_empty() { image } else { image_id };
+  hex::encode(Sha256::digest(format!("{image}\n{key}\n{deps}")))
 }
 
 fn needs_install(
-  hash_on_disk: Option<&str>,
+  hash: Option<&str>,
   image: &str,
+  image_id: &str,
   deps: &str,
 ) -> bool {
-  !deps.trim().is_empty()
-    && hash_on_disk != Some(deps_hash(image, deps).as_str())
+  has_effective_deps(deps)
+    && hash != Some(deps_hash(image, image_id, deps).as_str())
 }
 
 fn node_packages(deps: &str) -> Vec<&str> {
@@ -1023,11 +1068,26 @@ mod tests {
 
   #[test]
   fn unchanged_deps_skip_install() {
-    let hash = deps_hash("python:3", "example==1");
-    assert!(!needs_install(Some(&hash), "python:3", "example==1"));
-    assert!(needs_install(Some(&hash), "python:4", "example==1"));
-    assert!(needs_install(Some(&hash), "python:3", "example==2"));
-    assert!(!needs_install(None, "python:3", "  "));
+    let hash = deps_hash("python:3", "sha256:aaa", "example==1");
+    assert!(!needs_install(
+      Some(&hash),
+      "python:3",
+      "sha256:aaa",
+      "example==1"
+    ));
+    assert!(needs_install(
+      Some(&hash),
+      "python:4",
+      "sha256:aaa",
+      "example==1"
+    ));
+    assert!(needs_install(
+      Some(&hash),
+      "python:3",
+      "sha256:aaa",
+      "example==2"
+    ));
+    assert!(!needs_install(None, "python:3", "sha256:aaa", "  "));
   }
 
   #[test]

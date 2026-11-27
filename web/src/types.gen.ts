@@ -1295,6 +1295,7 @@ export interface GitSource {
    * 私有仓库：保存访问 token 的密钥名（`wharf secret set`）。
    */
   token_secret?: string | null;
+  user?: string | null;
 }
 
 export type Health = "healthy" | "unhealthy" | "starting" | "none";
