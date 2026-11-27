@@ -68,10 +68,10 @@ function SettingsFields({ server, canRemove, draft, set, dirty, changed, onReset
   const savedBuildEnv = formatEnv(saved.build_env);
   const savedQuota = saved.traffic_quota_gb?.toString() ?? "";
   const savedResetDay = saved.traffic_reset_day?.toString() ?? "";
-  useEffect(() => { if (!mirrorsDirty) setMirrors(savedMirrors); }, [mirrorsDirty, savedMirrors]);
-  useEffect(() => { if (!buildEnvDirty) setBuildEnv(savedBuildEnv); }, [buildEnvDirty, savedBuildEnv]);
-  useEffect(() => { if (!quotaDirty) setQuota(savedQuota); }, [quotaDirty, savedQuota]);
-  useEffect(() => { if (!resetDayDirty) setResetDay(savedResetDay); }, [resetDayDirty, savedResetDay]);
+  useEffect(() => { if (!mirrorsDirty) setMirrors(savedMirrors); }, [savedMirrors]);
+  useEffect(() => { if (!buildEnvDirty) setBuildEnv(savedBuildEnv); }, [savedBuildEnv]);
+  useEffect(() => { if (!quotaDirty) setQuota(savedQuota); }, [savedQuota]);
+  useEffect(() => { if (!resetDayDirty) setResetDay(savedResetDay); }, [savedResetDay]);
   const lanChoices = [...new Set([...(server.report?.lan_ips ?? []).filter(isPrivate), ...(draft.lan_addrs ?? [])])];
   const via = draft.via ?? "";
   const quotaNum = Number(quota.trim() || 0);

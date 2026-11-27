@@ -474,18 +474,6 @@ pub(crate) async fn make_plan_inner(
         warnings,
         ..Builder::default()
       };
-      let net = snap.net(&desired);
-      for write in &writes {
-        if let Write::Upsert { name, .. } = write {
-          crate::syntax_check::validate_service_files(
-            &desired,
-            &net,
-            name,
-            &snap.render_values(&desired, name),
-            &snap.log_values,
-          )?;
-        }
-      }
       config_items(&mut b, &current, &desired, &writes);
       return Ok(finish_plan(
         &snap,
@@ -1221,12 +1209,18 @@ fn service_items(
   writes: &[Write],
 ) -> Result<(), ApiError> {
   for (name, svc) in &desired.services {
-    let service_changed = current
-      .services
-      .get(name)
-      .is_none_or(|old| old.spec != svc.spec);
+    let old = current.services.get(name);
+    if old.is_some_and(|old| {
+      crate::service_monitor::config_only(old, svc)
+    }) {
+      continue;
+    }
     let render_values = snap.render_values(desired, name);
-    if service_changed {
+    let service_changed = old.is_none_or(|old| old.spec != svc.spec);
+    if service_changed
+      && (!svc.spec.stopped
+        || old.is_none_or(|old| old.spec.files != svc.spec.files))
+    {
       crate::syntax_check::validate_service_files(
         desired,
         net,
@@ -1234,11 +1228,6 @@ fn service_items(
         &render_values,
         &snap.log_values,
       )?;
-    }
-    if current.services.get(name).is_some_and(|old| {
-      crate::service_monitor::config_only(old, svc)
-    }) {
-      continue;
     }
     let address = format!("{KIND_SERVICE}/{name}");
     let server = &svc.spec.server;
@@ -3079,6 +3068,70 @@ fn plaintext_hop(
 
 #[cfg(test)]
 mod tests {
+  #[tokio::test]
+  async fn plan_stops_and_updates_monitoring_with_legacy_jsonc() {
+    let state = crate::rules::tests::test_state();
+    let mut world = world();
+    let app = world.services.get_mut("app").unwrap();
+    app.pins.insert("nginx:1".into(), "sha256:fixture".into());
+    app.spec.files = serde_json::from_value(json!([
+      {"path":"/etc/app/config.json", "content":"{ // legacy\n\"value\": 1}"}
+    ])).unwrap();
+    let hash = hash_of(&world);
+    state.hub.mock_agent("s1", false, move |op| match op {
+      wharf_api_types::agent::AgentOp::ProjectStatus { .. } => Ok(json!([
+        {"project":"app", "hash":hash, "containers":[container("running")]}
+      ])),
+      _ => panic!("意外的 agent 请求"),
+    });
+    let current = world.services["app"].spec.clone();
+    let mut monitored = current.clone();
+    monitored.log_alerts =
+      serde_json::from_value(json!([{"pattern": "fixture-error"}]))
+        .unwrap();
+    for (spec, stop) in [
+      (monitored, false),
+      (
+        wharf_api_types::spec::ServiceSpec {
+          stopped: true,
+          ..current
+        },
+        true,
+      ),
+    ] {
+      let planned = make_plan_inner(
+        &state,
+        PlanRequest {
+          changes: vec![
+            wharf_api_types::spec::Change::UpsertService {
+              name: "app".into(),
+              spec,
+              adopt: None,
+            },
+          ],
+          ..Default::default()
+        },
+        Snapshot {
+          world: world.clone(),
+          ..Default::default()
+        },
+        false,
+        true,
+      )
+      .await
+      .unwrap();
+      if stop {
+        assert!(planned.steps.iter().any(|entry| matches!(
+          entry.step,
+          Step::ServiceStop { .. }
+        )));
+      } else {
+        assert!(planned.steps.is_empty());
+        assert_eq!(planned.plan.items[0].layer, Layer::Config);
+      }
+    }
+  }
+
   #[tokio::test]
   async fn plan_rejects_broken_config_file_with_zero_side_effects() {
     let state = crate::rules::tests::test_state();

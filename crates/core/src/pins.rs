@@ -538,8 +538,9 @@ pub fn with_tag(image: &str, tag: &str) -> Result<String, ApiError> {
   Ok(format!("{name}:{tag}"))
 }
 
-/// 服务换标签后的来源：image 来源直接换；compose 来源只改值和 `image` 一字不差的 `image:` 行，
-/// 其余内容（注释、引号、缩进）不动。
+mod retag_yaml;
+
+/// 换标签时只替换 Compose 中的镜像值，保留其余原文。
 pub fn retag(
   source: &Source,
   image: &str,
@@ -556,28 +557,8 @@ pub fn retag(
       content: Some(content),
       file,
     } => {
-      let mut doc = crate::render::parse_compose_template(content)?;
-      let mut hit = false;
-      if let Some(services) = doc
-        .get_mut("services")
-        .and_then(serde_yaml_ng::Value::as_mapping_mut)
-      {
-        for service in services.values_mut() {
-          if service.get("build").is_none()
-            && let Some(serde_yaml_ng::Value::String(value)) =
-              service.get_mut("image")
-            && value.trim() == image
-          {
-            value.clone_from(&new);
-            hit = true;
-          }
-        }
-      }
-      if !hit {
-        return Err(missing());
-      }
-      let out = serde_yaml_ng::to_string(&doc)
-        .map_err(|_| ApiError::invalid("无法生成 compose YAML"))?;
+      let out = retag_yaml::rewrite(content, image, &new)?
+        .ok_or_else(missing)?;
       Ok(Source::Compose {
         content: Some(out),
         file: file.clone(),
@@ -616,7 +597,7 @@ mod tests {
     else {
       panic!("应保留 Compose 来源")
     };
-    let doc = crate::render::parse_compose(&out).unwrap();
+    let doc = crate::render::parse_compose_template(&out).unwrap();
     assert_eq!(doc["services"]["runner"]["image"], "runner:1.5");
     assert_eq!(
       doc["services"]["runner"]["environment"]["PASS"],
@@ -627,6 +608,49 @@ mod tests {
       "image: runner:1.4\nimage: only-embedded:1.0\n"
     );
     assert!(retag(&source, "only-embedded:1.0", "2").is_err());
+  }
+
+  #[test]
+  fn retag_preserves_placeholder_bytes_and_rejects_shared_scalar() {
+    let content = concat!(
+      "# 注释\r\n",
+      "x-base: &b {image: 'runner:1.4'}\r\n",
+      "services: {app: {<<: *b, environment: {PASS: \"[[json:K]]\", RAW: '[[K]]'}}}\r\n",
+      "configs: {job: {content: 'runner:1.4'}}\r\n",
+    );
+    let source = Source::Compose {
+      content: Some(content.into()),
+      file: None,
+    };
+    let Source::Compose {
+      content: Some(out), ..
+    } = retag(&source, "runner:1.4", "1.5").unwrap()
+    else {
+      panic!("应保留 Compose 来源");
+    };
+    assert_eq!(out, content.replacen("runner:1.4", "runner:1.5", 1));
+    let spec = serde_json::from_value(serde_json::json!({
+      "server": "s1", "source": {"compose": {"content": out}}
+    }))
+    .unwrap();
+    let (resolved, _) = crate::render::service_compose(
+      "app",
+      &spec,
+      &BTreeMap::new(),
+      &[],
+      Some(&BTreeMap::from([("K".into(), "a\"b".into())])),
+    )
+    .unwrap();
+    assert_eq!(
+      crate::render::parse_compose(&resolved).unwrap()["services"]["app"]
+        ["environment"]["PASS"],
+      "a\"b"
+    );
+    let shared = Source::Compose {
+      content: Some("services: {app: {image: &i runner:1.4, environment: {IMAGE: *i}}}".into()),
+      file: None,
+    };
+    assert!(retag(&shared, "runner:1.4", "1.5").is_err());
   }
 
   use super::*;

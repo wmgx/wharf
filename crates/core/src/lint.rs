@@ -562,7 +562,7 @@ fn file_secret(
   content: &str,
   secrets: &BTreeMap<String, String>,
 ) -> Option<String> {
-  if !has_reference(content)
+  if !has_reference_to(content, Some(secrets))
     && let Some(name) = stored_secret(content, secrets)
   {
     return Some(reuse_secret(name));
@@ -585,7 +585,7 @@ fn file_secret(
         .into_iter()
         .flatten()
     {
-      if has_reference(value) {
+      if has_reference_to(value, Some(secrets)) {
         continue;
       }
       if let Some(name) = stored_secret(value, secrets) {
@@ -606,6 +606,17 @@ mod tests {
     assert!(
       env_secret("API_TOKEN", "ab[[cd]]ef123456", &BTreeMap::new())
         .is_some()
+    );
+  }
+
+  #[test]
+  fn fake_brackets_do_not_hide_stored_secret_in_file() {
+    let value = "ab[[cd]]ef123456";
+    let secrets =
+      BTreeMap::from([("API_TOKEN".into(), value.into())]);
+    assert_eq!(
+      file_secret(&format!("token={value}\n"), &secrets),
+      Some(reuse_secret("API_TOKEN"))
     );
   }
 

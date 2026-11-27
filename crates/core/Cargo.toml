@@ -43,6 +43,7 @@ libc = "0.2"
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml_ng.workspace = true
+unsafe-libyaml = "0.2.11"
 urlencoding.workspace = true
 hmac.workspace = true
 sha1.workspace = true

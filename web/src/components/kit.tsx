@@ -1,3 +1,4 @@
+import { draftPatch } from "@/lib/draft";
 import { Children, Fragment, useEffect, useState, type ReactElement, type ReactNode } from "react";
 import { useClickable } from "@/components/common";
 import { AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
@@ -115,18 +116,6 @@ export function SaveBar({ changed, onReset, onSubmit, submitText = "预览改动
       <Button disabled={!!disabled} onClick={onSubmit}>{submitText}</Button>
     </div>
   );
-}
-
-const norm = (v: unknown) => v === undefined || v === "" || (Array.isArray(v) && !v.length) || (v && typeof v === "object" && !Array.isArray(v) && !Object.keys(v).length) ? null : v;
-
-const sameField = (a: unknown, b: unknown) => JSON.stringify(norm(a)) === JSON.stringify(norm(b));
-
-function draftPatch<T extends object>(base: T, edits: Partial<T>): Partial<T> {
-  const patch = { ...edits };
-  for (const key of Object.keys(patch) as (keyof T)[]) {
-    if (sameField(patch[key], base[key])) delete patch[key];
-  }
-  return patch;
 }
 
 export function useDraft<T extends object>(current: T) {

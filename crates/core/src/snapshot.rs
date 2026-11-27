@@ -1121,6 +1121,33 @@ mod tests {
   }
 
   #[test]
+  fn stored_flow_compose_with_anchors_keeps_resolved_bytes_and_hash()
+  {
+    let mut w = world(21000);
+    let raw = concat!(
+      "# 注释和流式写法\n",
+      "x-base: &b {image: nginx:1, environment: {PASS: \"[[json:K]]\"}}\n",
+      "services: {app: {<<: *b}}\n",
+    );
+    w.services.get_mut("app").unwrap().spec.source =
+      serde_json::from_value(
+        serde_json::json!({"compose": {"content": raw}}),
+      )
+      .unwrap();
+    let expected = raw.replace("[[json:K]]", r#"a\"b'c"#);
+    assert_eq!(
+      service_resolved(
+        &w,
+        &Net::default(),
+        "app",
+        &BTreeMap::from([("K".into(), "a\"b'c".into())])
+      )
+      .unwrap(),
+      (expected.clone(), render::hash(&expected)),
+    );
+  }
+
+  #[test]
   fn image_secret_file_is_private_to_resolved_compose_and_trial() {
     let mut w = world(21000);
     let spec = &mut w.services.get_mut("app").unwrap().spec;

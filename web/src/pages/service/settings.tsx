@@ -12,13 +12,15 @@ import { bytes } from "@/components/metrics";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
+import { editableServiceSpec } from "@/lib/draft";
 import { useStatus } from "@/status";
 import type { PortSpec, ServiceSpec, ServiceView } from "@/types";
 import { ConfigFiles, filePathOk } from "./config-files";
 import { importText } from "./status-text";
 
 export function Settings({ svc, active }: { svc: ServiceView; active: boolean }) {
-  const { draft, set, reset, dirty, mergeInto } = useDraft(svc.spec);
+  const editable = useMemo(() => editableServiceSpec(svc.spec), [svc.spec]);
+  const { draft, set, reset, dirty, mergeInto } = useDraft(editable);
   const [key, setKey] = useState(0);
   const location = useLocation();
   const actions = useActions();
@@ -64,20 +66,20 @@ function SettingsFields({ svc, draft, set, dirty, changed, onReset, onSubmit }: 
   const savedHow = JSON.stringify(howOf("build" in saved.source ? saved.source.build : null));
   const savedMemory = saved.limits?.memory_mb?.toString() ?? "";
   const savedCpus = saved.limits?.cpu_milli ? String(saved.limits.cpu_milli / 1000) : "";
-  useEffect(() => { if (!envDirty) setEnv(savedEnv); }, [envDirty, savedEnv]);
+  useEffect(() => { if (!envDirty) setEnv(savedEnv); }, [savedEnv]);
   useEffect(() => {
     if (!portsDirty) {
       const declared: PortSpec[] = JSON.parse(savedPorts);
       setPorts(isCompose && !declared.length ? composePorts(composeInfo) : declared);
     }
   }, [portsDirty, savedPorts, isCompose, composeInfo]);
-  useEffect(() => { if (!sourceDirty) setHow(JSON.parse(savedHow)); }, [sourceDirty, savedHow]);
+  useEffect(() => { if (!sourceDirty) setHow(JSON.parse(savedHow)); }, [savedHow]);
   useEffect(() => {
     if (!limitsDirty) {
       setMemory(savedMemory);
       setCpus(savedCpus);
     }
-  }, [limitsDirty, savedMemory, savedCpus]);
+  }, [savedMemory, savedCpus]);
   useEffect(() => { if (isCompose && changed.length && !portsTouched && !draft.ports?.length && ports.length) set({ ports: portsFor(ports, true) }); }, [isCompose, changed.length, portsTouched, draft.ports, ports, set]);
   const { data } = usePoll<{ series: Record<string, [number, number][]> }>(isCompose ? null : `/api/metrics?subject=${encodeURIComponent(svc.name)}&range=7d`, 60000);
   const points = data?.series["svc.mem"] ?? [];
@@ -114,7 +116,7 @@ function SettingsFields({ svc, draft, set, dirty, changed, onReset, onSubmit }: 
           <Button variant="outline" size="xs" onClick={() => actions.plan({ title: `检查 ${svc.name} 的 ${image} 的更新`, changes: [{ op: "refresh_images", name: svc.name, image }] })}>检查更新</Button>
         </div>)}
       </div>}
-      {build && <BuildEditor value={how} onChange={(value) => { setHow(value); set({ source: { build: { git: build.git, upload: build.upload, path: build.path, ...cleanHow(value) } } }); }} />}
+      {build && <BuildEditor value={how} onChange={(value) => { setHow(value); set({ source: { build: { git: build.git, path: build.path, ...cleanHow(value) } } }); }} />}
       {svc.import && <div className="text-xs text-muted-foreground">
         {importText(svc.import)}
       </div>}

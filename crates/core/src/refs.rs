@@ -53,7 +53,7 @@ fn parse(inner: &str) -> Option<Ref<'_>> {
 /// 文本里引用到的服务（去重、按出现顺序）。
 pub fn used(text: &str) -> Vec<String> {
   let mut out: Vec<String> = Vec::new();
-  scan(text, true, |r| {
+  scan(text, |r| {
     if !out.iter().any(|s| s == r.service) {
       out.push(r.service.to_string());
     }
@@ -82,7 +82,6 @@ pub fn uses(
 /// 逐个替换 `[[@...]]`，其余内容原样保留。
 fn scan(
   text: &str,
-  recover_nested: bool,
   mut f: impl FnMut(&Ref) -> Result<String, ApiError>,
 ) -> Result<String, ApiError> {
   let mut out = String::with_capacity(text.len());
@@ -92,13 +91,9 @@ fn scan(
       break;
     };
     let end = start + 2 + len;
-    let start = if recover_nested {
-      rest[start + 2..end]
-        .rfind("[[@")
-        .map_or(start, |i| start + 2 + i)
-    } else {
-      start
-    };
+    let start = rest[start + 2..end]
+      .rfind("[[@")
+      .map_or(start, |i| start + 2 + i);
     let inner = &rest[start + 2..end];
     out.push_str(&rest[..start]);
     match parse(inner) {
@@ -122,7 +117,7 @@ pub fn resolve(
     return Ok(text.to_string());
   }
   let my_server = &world.services[me].spec.server;
-  scan(text, false, |r| {
+  scan(text, |r| {
     let row = world.services.get(r.service).ok_or_else(|| {
       ApiError::invalid(format!(
         "服务 {me} 引用的服务 {} 不存在",
@@ -198,8 +193,37 @@ pub fn resolve(
 #[cfg(test)]
 mod tests {
   #[test]
-  fn unclosed_at_bracket_does_not_swallow_scanned_ref() {
-    assert_eq!(used("[[@bad [[@db]]"), ["db"]);
+  fn unclosed_at_bracket_does_not_swallow_resolved_ref() {
+    let mut world = World::default();
+    world.servers.insert(
+      "s1".into(),
+      crate::world::ServerRow {
+        settings: Default::default(),
+        version: 1,
+      },
+    );
+    world.apply_changes(&[
+      serde_json::from_value(serde_json::json!({
+        "op": "upsert_service", "name": "db",
+        "spec": {"server": "s1", "source": {"image": "postgres:16"},
+          "ports": [{"name": "sql", "container": 5432, "host": 21000}]}
+      })).unwrap(),
+    ]).unwrap();
+    world.allocate_ports().unwrap();
+    let mut net = Net::default();
+    net.private.insert(
+      "s1".into(),
+      wharf_api_types::spec::PrivateAddr {
+        ip: "100.64.0.1".into(),
+        network: wharf_api_types::spec::PrivateNetwork::Tailscale,
+      },
+    );
+    let text = "URL=prefix[[@bad [[@db]]";
+    assert_eq!(used(text), ["db"]);
+    assert_eq!(
+      resolve(text, "db", &world, &net).unwrap(),
+      "URL=prefix[[@bad 100.64.0.1:21000"
+    );
   }
 
   use super::*;
@@ -231,8 +255,7 @@ mod tests {
     let text =
       "A=[[@db]] B=[[@cache.redis:host]] C=[[@db:port]] D=[[S]]";
     assert_eq!(used(text), vec!["db", "cache"]);
-    let out =
-      scan(text, true, |r| Ok(r.service.to_uppercase())).unwrap();
+    let out = scan(text, |r| Ok(r.service.to_uppercase())).unwrap();
     assert_eq!(out, "A=DB B=CACHE C=DB D=[[S]]");
   }
 }

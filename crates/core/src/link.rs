@@ -640,6 +640,36 @@ mod tests {
   }
 
   #[test]
+  fn ipv6_deploy_port_and_direct_upstream_use_brackets() {
+    let w = world();
+    let mut net = net(None);
+    let ip = "fd7a:115c:a1e0::1";
+    net.private.get_mut("home1").unwrap().ip = ip.into();
+    let (compose, _) = crate::snapshot::service_resolved(
+      &w,
+      &net,
+      "app",
+      &Default::default(),
+    )
+    .unwrap();
+    let doc = crate::render::parse_compose(&compose).unwrap();
+    assert_eq!(
+      doc["services"]["app"]["ports"][1],
+      "[fd7a:115c:a1e0::1]:20000:80"
+    );
+    assert_eq!(
+      w.route_upstream(
+        &net,
+        &w.gateways["edge"].spec,
+        "app.example.com",
+        &w.routes["app.example.com"].spec
+      )
+      .unwrap(),
+      "[fd7a:115c:a1e0::1]:20000"
+    );
+  }
+
+  #[test]
   fn picks_direct_or_tunnel_by_reach() {
     let w = world();
     let route = &w.routes["app.example.com"].spec;
