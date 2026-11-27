@@ -4862,6 +4862,46 @@ fn share_ttl(s: &str) -> Result<Duration, String> {
   Ok(Duration::from_secs(secs))
 }
 
+fn parse_volume_arg(raw: &str) -> Result<VolumeSpec, ApiError> {
+  let invalid = || {
+    ApiError::invalid(format!("--volume {raw} 格式不对"))
+      .with_hint("使用 name:/target[:ro|:rw] 或 [本地名=]服务:卷:/target[:ro|:rw]")
+  };
+  let (left, target) = raw.split_once(":/").ok_or_else(invalid)?;
+  let (target, read_only) = match target.strip_suffix(":ro") {
+    Some(target) => (target, true),
+    None => (target.strip_suffix(":rw").unwrap_or(target), false),
+  };
+  if target.contains(':') {
+    return Err(invalid());
+  }
+  let (alias, reference) = left
+    .split_once('=')
+    .map_or((None, left), |(alias, reference)| {
+      (Some(alias), reference)
+    });
+  let (name, from_service) =
+    if let Some((owner, volume)) = reference.split_once(':') {
+      wharf_api_types::validate_name("服务", owner)
+        .map_err(|_| invalid())?;
+      wharf_api_types::validate_name("数据卷", volume)
+        .map_err(|_| invalid())?;
+      (alias.unwrap_or(volume), Some(reference.to_string()))
+    } else if alias.is_none() {
+      (reference, None)
+    } else {
+      return Err(invalid());
+    };
+  wharf_api_types::validate_name("数据卷", name)
+    .map_err(|_| invalid())?;
+  Ok(VolumeSpec {
+    name: name.to_string(),
+    target: format!("/{target}"),
+    from_service,
+    read_only,
+  })
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -5067,46 +5107,6 @@ mod tests {
         .is_err()
     );
   }
-}
-
-fn parse_volume_arg(raw: &str) -> Result<VolumeSpec, ApiError> {
-  let invalid = || {
-    ApiError::invalid(format!("--volume {raw} 格式不对"))
-      .with_hint("使用 name:/target[:ro|:rw] 或 [本地名=]服务:卷:/target[:ro|:rw]")
-  };
-  let (left, target) = raw.split_once(":/").ok_or_else(invalid)?;
-  let (target, read_only) = match target.strip_suffix(":ro") {
-    Some(target) => (target, true),
-    None => (target.strip_suffix(":rw").unwrap_or(target), false),
-  };
-  if target.contains(':') {
-    return Err(invalid());
-  }
-  let (alias, reference) = left
-    .split_once('=')
-    .map_or((None, left), |(alias, reference)| {
-      (Some(alias), reference)
-    });
-  let (name, from_service) =
-    if let Some((owner, volume)) = reference.split_once(':') {
-      wharf_api_types::validate_name("服务", owner)
-        .map_err(|_| invalid())?;
-      wharf_api_types::validate_name("数据卷", volume)
-        .map_err(|_| invalid())?;
-      (alias.unwrap_or(volume), Some(reference.to_string()))
-    } else if alias.is_none() {
-      (reference, None)
-    } else {
-      return Err(invalid());
-    };
-  wharf_api_types::validate_name("数据卷", name)
-    .map_err(|_| invalid())?;
-  Ok(VolumeSpec {
-    name: name.to_string(),
-    target: format!("/{target}"),
-    from_service,
-    read_only,
-  })
 }
 
 #[test]
