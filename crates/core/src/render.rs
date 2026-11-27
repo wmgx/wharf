@@ -2450,7 +2450,7 @@ mod tests {
   #[test]
   fn shared_volume_renders_owner_path_and_ro_without_legacy_drift() {
     let mut spec = spec();
-    let render = |spec| {
+    let render = |spec: &ServiceSpec| {
       service_compose("app", spec, &BTreeMap::new(), &[], None)
         .unwrap()
         .0
