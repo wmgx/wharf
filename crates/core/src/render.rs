@@ -372,11 +372,19 @@ fn encode_secret(
 }
 
 pub(crate) fn next_placeholder(text: &str) -> Option<(usize, &str)> {
+  find_placeholder(text, 2)
+}
+
+fn find_placeholder(
+  text: &str,
+  nested_offset: usize,
+) -> Option<(usize, &str)> {
   let start = text.find("[[")?;
   let end = start + 2 + text[start + 2..].find("]]")?;
-  let start = text[start + 2..end]
+  let inner_start = start + nested_offset;
+  let start = text[inner_start..end]
     .rfind("[[")
-    .map_or(start, |inner| start + 2 + inner);
+    .map_or(start, |inner| inner_start + inner);
   Some((start, &text[start + 2..end]))
 }
 
@@ -647,6 +655,9 @@ pub(crate) fn parse_compose(
 pub(crate) fn parse_compose_template(
   content: &str,
 ) -> Result<Value, ApiError> {
+  if !content.contains("[[") {
+    return parse_compose(content);
+  }
   let mut prefix = "wharf_retag_ref_".to_string();
   let original = serde_yaml_ng::from_str::<Value>(content).ok();
   while content.contains(&prefix)
@@ -659,7 +670,7 @@ pub(crate) fn parse_compose_template(
   let mut markers = Vec::new();
   let mut marked = String::new();
   let mut rest = content;
-  while let Some((start, inner)) = next_placeholder(rest) {
+  while let Some((start, inner)) = find_placeholder(rest, 1) {
     let end = start + inner.len() + 4;
     marked.push_str(&rest[..start]);
     let raw = &rest[start..end];

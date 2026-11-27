@@ -293,6 +293,18 @@ pub fn redact_run(run: &mut Run) {
 
 #[cfg(test)]
 mod tests {
+  #[test]
+  fn redacts_anchor_env_secret() {
+    let spec = serde_json::from_value(serde_json::json!({
+      "server":"s1", "source":{"compose":{"content":
+        "x-base: &b {environment: {API_SECRET: fixture-anchor-value}}\nservices: {app: {<<: *b, image: nginx}}"
+      }}
+    })).unwrap();
+    assert!(
+      service_values(&spec).contains(&"fixture-anchor-value".into())
+    );
+  }
+
   use super::*;
 
   #[tokio::test]

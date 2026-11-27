@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use serde_yaml_ng::Value;
+use serde_yaml_ng::{Mapping, Value};
 use std::{collections::BTreeMap, path::Path};
 use wharf_api_types::{ApiError, spec::FileSpec};
 
@@ -35,10 +35,10 @@ pub(crate) fn validate_compose_structure(
         .with_hint("先构建并推送镜像，compose 里改用 image"),
       );
     }
-    if !body
+    if body
       .get("image")
       .and_then(Value::as_str)
-      .is_some_and(|s| !s.trim().is_empty())
+      .is_none_or(|s| s.trim().is_empty())
     {
       return Err(
         invalid(format!("容器 {component} 缺少 image 字段"))
@@ -80,10 +80,10 @@ pub(crate) fn validate_rendered_compose(
   };
   let doc =
     render::parse_compose(yaml).map_err(|e| bad(e.message))?;
-  if !doc
+  if doc
     .get("services")
     .and_then(Value::as_mapping)
-    .is_some_and(|s| !s.is_empty())
+    .is_none_or(Mapping::is_empty)
   {
     return Err(bad("compose 里没有 services".into()));
   }
@@ -95,6 +95,7 @@ pub(crate) fn validate_service_files(
   net: &Net,
   name: &str,
   secrets: &BTreeMap<String, String>,
+  log_values: &[String],
 ) -> Result<(), ApiError> {
   let mut mounts = Default::default();
   for file in &world.services[name].spec.files {
@@ -110,7 +111,16 @@ pub(crate) fn validate_service_files(
         Some(secrets),
         &mut mounts,
       )?;
-      validate_service_file(name, file, format, &rendered)?;
+      validate_service_file(name, file, format, &rendered).map_err(
+        |mut error| {
+          let mut masks: Vec<_> = secrets.values().cloned().collect();
+          crate::log_redact::add_encoded_values(&mut masks);
+          masks.extend_from_slice(log_values);
+          error.message =
+            wharf_api_types::mask_values(&error.message, &masks);
+          error
+        },
+      )?;
     }
   }
   Ok(())
@@ -217,8 +227,13 @@ mod tests {
     ] {
       let err = validate_service_file("app", &file, format, text)
         .unwrap_err();
-      assert_eq!(err.code, wharf_api_types::ErrorCode::Invalid);
-      assert!(!err.message.contains(secret));
+      assert_eq!(err.code, wharf_api_types::ErrorCode::InvalidInput);
+      let escaped = serde_json::to_string(secret).unwrap();
+      assert!(
+        !serde_json::to_string(&err)
+          .unwrap()
+          .contains(&escaped[1..escaped.len() - 1])
+      );
       assert!(err.message.contains("第 "));
     }
     assert!(

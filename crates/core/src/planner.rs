@@ -482,6 +482,7 @@ pub(crate) async fn make_plan_inner(
             &net,
             name,
             &snap.render_values(&desired, name),
+            &snap.log_values,
           )?;
         }
       }
@@ -1231,6 +1232,7 @@ fn service_items(
         net,
         name,
         &render_values,
+        &snap.log_values,
       )?;
     }
     if current.services.get(name).is_some_and(|old| {
@@ -1525,6 +1527,7 @@ fn service_items(
           net,
           name,
           &render_values,
+          &snap.log_values,
         )?;
       }
       if !risk.contains(&Impact::Public)
@@ -3085,19 +3088,21 @@ mod tests {
     app.spec.files = serde_json::from_value(json!([
       {"path":"/etc/app/config.json", "content":"{\"value\":\"[[S]]\"}"}
     ])).unwrap();
-    let snap = || Snapshot {
+    let mut other = app.clone();
+    other.instance_id = "svc_other".into();
+    other.spec.files.clear();
+    other.host_ports.insert("http".into(), 21001);
+    world.services.insert("other".into(), other);
+    let snap = |secret: &str| Snapshot {
       world: world.clone(),
-      secrets: BTreeMap::from([(
-        "S".into(),
-        "fixture\"value".into(),
-      )]),
+      secrets: BTreeMap::from([("S".into(), secret.into())]),
       ..Default::default()
     };
     let hash = snapshot::service_resolved(
       &world,
       &Net::default(),
       "app",
-      &snap().render_values(&world, "app"),
+      &snap("fixture\"value").render_values(&world, "app"),
     )
     .unwrap()
     .1;
@@ -3107,9 +3112,9 @@ mod tests {
       ])),
       _ => panic!("意外的 agent 请求"),
     });
-    let spec = |item| PlanRequest {
+    let spec = |name: &str, item| PlanRequest {
       changes: vec![wharf_api_types::spec::Change::UpsertService {
-        name: "app".into(),
+        name: name.into(),
         spec: item,
         adopt: None,
       }],
@@ -3119,36 +3124,57 @@ mod tests {
     changed.env.insert("MODE".into(), "changed".into());
     let err = make_plan_inner(
       &state,
-      spec(changed.clone()),
-      snap(),
+      spec("app", changed.clone()),
+      snap("fixture\"value"),
       false,
       true,
     )
     .await
     .err()
     .unwrap();
-    assert_eq!(err.code, wharf_api_types::ErrorCode::Invalid);
+    assert_eq!(err.code, wharf_api_types::ErrorCode::InvalidInput);
     assert!(err.message.contains("/etc/app/config.json"));
     assert!(!err.message.contains("fixture"));
+    let mut other = world.services["other"].spec.clone();
+    other.env.insert("MODE".into(), "changed".into());
+    let unrelated = make_plan_inner(
+      &state,
+      spec("other", other),
+      snap("fixture\"value"),
+      false,
+      true,
+    )
+    .await
+    .unwrap();
+    assert!(
+      unrelated
+        .plan
+        .items
+        .iter()
+        .all(|item| item.address != "service/app")
+    );
+    let drift = make_plan_inner(
+      &state,
+      PlanRequest::default(),
+      snap("rotated\"value"),
+      false,
+      true,
+    )
+    .await
+    .err()
+    .unwrap();
+    assert!(drift.message.contains("/etc/app/config.json"));
+    changed.files[0].raw = true;
     assert!(
       make_plan_inner(
         &state,
-        PlanRequest::default(),
-        snap(),
+        spec("app", changed),
+        snap("fixture\"value"),
         false,
         true
       )
       .await
-      .unwrap()
-      .plan
-      .items
-      .is_empty()
-    );
-    changed.files[0].raw = true;
-    assert!(
-      make_plan_inner(&state, spec(changed), snap(), false, true)
-        .await
-        .is_ok()
+      .is_ok()
     );
     let count = state
       .db
