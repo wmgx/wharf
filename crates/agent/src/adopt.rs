@@ -836,18 +836,25 @@ async fn retire_one(
   touched.push(Retired {
     id: i.id,
     name: i.name,
-    renamed,
-    restart: i.restart,
-    was_running: i.running,
+    renamed: None,
+    restart: String::new(),
+    was_running: false,
   });
-  let item = touched.last().expect("刚加入恢复记录");
+  let item = touched.last_mut().expect("刚加入恢复记录");
+  item.renamed = renamed;
   if let Some(to) = &item.renamed {
     ctx.say(format!("原来的容器 {} 改名为 {to}", item.name));
     docker_do(docker, &["rename", &item.id, to], ctx).await?;
   }
+  item.restart = if i.restart.is_empty() {
+    "no".into()
+  } else {
+    i.restart
+  };
   docker_do(docker, &["update", "--restart=no", &item.id], ctx)
     .await?;
-  if item.was_running {
+  if i.running {
+    item.was_running = true;
     ctx.say(format!("停止原来的容器 {}", item.name));
     docker_do(docker, &["stop", &item.id], ctx).await?;
   }
@@ -886,19 +893,14 @@ pub async fn unretire(
         errors.push(format!("{} 恢复原名：{}", item.name, e.message));
       }
     }
-    let policy = format!(
-      "--restart={}",
-      if item.restart.is_empty() {
-        "no"
-      } else {
-        &item.restart
+    if !item.restart.is_empty() {
+      let policy = format!("--restart={}", item.restart);
+      if let Err(e) =
+        docker_do(docker, &["update", &policy, &item.id], ctx).await
+      {
+        errors
+          .push(format!("{} 恢复重启策略：{}", item.name, e.message));
       }
-    );
-    if let Err(e) =
-      docker_do(docker, &["update", &policy, &item.id], ctx).await
-    {
-      errors
-        .push(format!("{} 恢复重启策略：{}", item.name, e.message));
     }
     if item.was_running {
       ctx.say(format!("启动原来的容器 {}", item.name));

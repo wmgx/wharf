@@ -182,12 +182,11 @@ fn split_words(s: &str) -> Result<Vec<String>, ApiError> {
           }
           // 换行被去掉后的续行：独立的 `\` 后跟空格，或 `\` 后跟多个空格；
           // 单个 `\ ` 紧接字符（如 `-e A=foo\ bar`）仍保留为空格。
-          Some(_)
+          Some(next)
             if spaces > 0
               && (!has
                 || spaces >= 2
-                || (!cur.contains('=')
-                  && ahead.peek() == Some(&'-'))) =>
+                || (!cur.contains('=') && *next == '-')) =>
           {
             if has {
               words.push(std::mem::take(&mut cur));

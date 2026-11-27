@@ -1596,6 +1596,13 @@ async fn service_up(
     )
   })?;
   let server = &row.spec.server;
+  // 刚导入时本机已有的镜像不拉取，避免拉到新版本而重建容器。
+  let pull_missing_only = row.import.is_some();
+  if pull_missing_only {
+    state.hub.require_safe_adopt(server)?;
+  }
+  let no_start =
+    row.spec.stopped && state.hub.supports_safe_adopt(server);
   let (compose, hash) = snapshot::service_resolved(
     world,
     &net,
@@ -1625,13 +1632,6 @@ async fn service_up(
       rename_containers: a.rename_containers.clone(),
       expected_services: a.expected_services.clone(),
     });
-  // 刚导入时本机已有的镜像不拉取，避免拉到新版本而重建容器。
-  let pull_missing_only = row.import.is_some();
-  if pull_missing_only {
-    state.hub.require_safe_adopt(server)?;
-  }
-  let no_start =
-    row.spec.stopped && state.hub.supports_safe_adopt(server);
   // 起不来时自动换回上一版：只对没有数据的服务做，新版本可能已经改了数据，
   // 旧版本不一定认。compose 来源看不出有没有数据，不做。
   let rollback = row.spec.volumes.is_empty()

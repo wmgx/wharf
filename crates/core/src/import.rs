@@ -1109,7 +1109,10 @@ fn extract_container_ports(
       let (port, proto) =
         target.split_once('/').unwrap_or((target, "tcp"));
       for b in bindings.as_array().into_iter().flatten() {
-        let host_port = b["HostPort"].as_str().unwrap_or_default();
+        let host_port = b["HostPort"]
+          .as_str()
+          .filter(|s| *s != "0")
+          .unwrap_or_default();
         let ip = b["HostIp"].as_str().unwrap_or_default();
         if is_actual && host_port.is_empty() {
           continue;
