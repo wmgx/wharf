@@ -461,12 +461,15 @@ async fn dispatch(
     Command::ShellLog { server, limit } => {
       shell_log(c, server, limit, j).await
     }
-    Command::Upgrade => {
-      upgrade(c, j).await?;
+    Command::Upgrade { skip_snapshot } => {
+      upgrade(c, skip_snapshot, j).await?;
       crate::selfcmd::self_update(c, j).await
     }
     Command::SelfUpdate => crate::selfcmd::self_update(c, j).await,
     Command::Whoami => crate::selfcmd::whoami(c, j).await,
+    Command::Core(crate::CoreCmd::Snapshot(cmd)) => {
+      core_snapshot(c, cmd, j).await
+    }
     Command::Core(crate::CoreCmd::Key) => {
       let view: wharf_api_types::view::CoreKeyView =
         c.get("/api/core/key").await?;
@@ -696,7 +699,21 @@ async fn dispatch(
       plan_id,
       confirm,
       no_wait,
-    } => apply(c, &plan_id, confirm, !no_wait, j, None).await,
+      skip_snapshot,
+    } => {
+      apply(
+        c,
+        ApplyRequest {
+          plan_id,
+          confirm,
+          skip_snapshot,
+        },
+        !no_wait,
+        j,
+        None,
+      )
+      .await
+    }
     Command::Run(cmd) => run_cmd(c, cmd, j).await,
     Command::Export { output, service } => {
       let fleet: Fleet = c.get("/api/export").await?;
@@ -909,27 +926,22 @@ async fn plan_and_maybe_apply(
   if !j {
     print::plan_with(&plan, false);
   }
-  apply(c, &plan.plan_id, flags.confirm, true, j, Some(plan.clone()))
-    .await
+  let req = ApplyRequest {
+    plan_id: plan.plan_id.clone(),
+    confirm: flags.confirm,
+    skip_snapshot: false,
+  };
+  apply(c, req, true, j, Some(plan)).await
 }
 
 async fn apply(
   c: &Client,
-  plan_id: &str,
-  confirm: Vec<String>,
+  req: ApplyRequest,
   wait: bool,
   j: bool,
   plan: Option<Plan>,
 ) -> CliResult<()> {
-  let resp: ApplyResponse = c
-    .post(
-      "/api/apply",
-      &ApplyRequest {
-        plan_id: plan_id.to_string(),
-        confirm,
-      },
-    )
-    .await?;
+  let resp: ApplyResponse = c.post("/api/apply", &req).await?;
   if !wait {
     out(j, &resp, |r| {
       println!(
@@ -1802,7 +1814,37 @@ fn connection_lost(e: &ApiError) -> bool {
         || e.message.starts_with("读取响应失败")))
 }
 
-async fn upgrade(c: &Client, j: bool) -> CliResult<()> {
+async fn core_snapshot(
+  c: &Client,
+  cmd: crate::CoreSnapshotCmd,
+  j: bool,
+) -> CliResult<()> {
+  use wharf_api_types::view::{CoreSnapshotsView, DbSnapshotInfo};
+  let path = "/api/core/snapshots";
+  match cmd {
+    crate::CoreSnapshotCmd::List => {
+      let view: CoreSnapshotsView = c.get(path).await?;
+      out(j, &view, print::core_snapshots);
+    }
+    crate::CoreSnapshotCmd::Create { reason } => {
+      let info: DbSnapshotInfo =
+        c.post(path, &json!({ "reason": reason })).await?;
+      out(j, &info, |i| println!("已创建 {}", i.id));
+    }
+    crate::CoreSnapshotCmd::Rm { id } => {
+      let value: Value =
+        c.delete(&format!("{path}/{}", seg(&id))).await?;
+      out(j, &value, |_| println!("已删除 {id}"));
+    }
+  }
+  Ok(())
+}
+
+async fn upgrade(
+  c: &Client,
+  skip_snapshot: bool,
+  j: bool,
+) -> CliResult<()> {
   // 替换控制面要靠同机的 agent，落后的 agent 先升到和控制面一致。
   // 只有控制面所在机器的那台必须成功，其余的失败了也接着换控制面。
   // 失败原因 finish_task 已经打印过了。
@@ -1812,10 +1854,15 @@ async fn upgrade(c: &Client, j: bool) -> CliResult<()> {
   let before: Value = c.get("/api/version").await?;
   // 请求可能在控制面拉镜像或重启时被代理掐断（超时、502/524），这时按"正在换"处理，
   // 等新构建号出现；等不到再报原来的错误。
+  let body = if skip_snapshot {
+    json!({"skip_snapshot": true})
+  } else {
+    json!({})
+  };
   let (r, lost) = match c
     .post_timeout::<_, UpgradeResult>(
       "/api/upgrade",
-      &json!({}),
+      &body,
       CORE_UPGRADE_REQUEST,
     )
     .await
@@ -4392,11 +4439,19 @@ async fn backup(
       });
       Ok(())
     }
-    BackupCmd::CleanupLegacy { confirm } => {
+    BackupCmd::CleanupLegacy {
+      confirm,
+      skip_snapshot,
+    } => {
+      let body = if skip_snapshot {
+        json!({"confirm": confirm, "skip_snapshot": true})
+      } else {
+        json!({"confirm": confirm})
+      };
       let v: Value = c
         .post_timeout(
           "/api/backups/cleanup-legacy",
-          &json!({ "confirm": confirm }),
+          &body,
           repo_timeout,
         )
         .await?;
@@ -4455,6 +4510,7 @@ async fn backup(
     }
     BackupCmd::Restore {
       service,
+      skip_snapshot,
       snapshot,
       confirm,
       no_wait,
@@ -4465,6 +4521,7 @@ async fn backup(
           &RestoreRequest {
             snapshot,
             confirm: confirm.unwrap_or_default(),
+            skip_snapshot,
           },
         )
         .await?;

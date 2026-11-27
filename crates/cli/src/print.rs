@@ -406,6 +406,21 @@ fn gb(bytes: u64) -> String {
   format!("{:.1}G", bytes as f64 / (1u64 << 30) as f64)
 }
 
+pub fn core_snapshots(v: &wharf_api_types::view::CoreSnapshotsView) {
+  println!("ID  触发  大小  原因");
+  for s in &v.snapshots {
+    println!(
+      "{}  {}  {} B  {}",
+      s.id, s.trigger, s.size_bytes, s.reason
+    );
+  }
+  println!(
+    "{} / {} B，最多 {} 份",
+    v.dir_bytes, v.max_total_bytes, v.max_count
+  );
+  println!("{}", v.restore_hint);
+}
+
 pub fn backups(v: &BackupsView) {
   let local = |t: &chrono::DateTime<chrono::Utc>| {
     t.with_timezone(&chrono::Local)

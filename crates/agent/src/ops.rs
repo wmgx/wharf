@@ -258,6 +258,9 @@ impl Ops {
       AgentOp::Upgrade(job) => to_value(
         crate::upgrade::start(&self.docker, &job, ctx).await?,
       ),
+      AgentOp::UpgradePrepare(job) => to_value(
+        crate::upgrade::prepare(&self.docker, &job, ctx).await?,
+      ),
       AgentOp::Prune => to_value(self.docker.prune(ctx).await?),
       // 文件 IO 不长，但还是放到阻塞线程，不卡住连接。
       AgentOp::Files(op) => {

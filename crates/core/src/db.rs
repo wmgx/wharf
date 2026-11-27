@@ -27,6 +27,8 @@ use wharf_api_types::{
   view::{Applied, ImportRecord, LastOp, OpStatus},
 };
 
+pub const SCHEMA_VERSION: usize = MIGRATIONS.len();
+
 const MIGRATIONS: &[&str] = &[
   r#"
 CREATE TABLE resources (
@@ -569,6 +571,16 @@ pub fn set_setting(
   Ok(())
 }
 
+fn restrict_db_file(path: &Path) {
+  use std::os::unix::fs::PermissionsExt;
+  if let Err(e) =
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+    && e.kind() != std::io::ErrorKind::NotFound
+  {
+    tracing::warn!("收紧数据库文件权限失败：{}", e.kind());
+  }
+}
+
 #[derive(Clone)]
 pub struct Db {
   conn: Arc<Mutex<Connection>>,
@@ -578,7 +590,17 @@ pub struct Db {
 impl Db {
   pub fn open(path: &Path) -> anyhow::Result<Self> {
     let conn = Connection::open(path)?;
-    Self::init(conn, Some(&path.with_file_name(CREDENTIALS_KEY_FILE)))
+    restrict_db_file(path);
+    let db = Self::init(
+      conn,
+      Some(&path.with_file_name(CREDENTIALS_KEY_FILE)),
+    )?;
+    for suffix in ["-wal", "-shm"] {
+      let mut name = path.as_os_str().to_os_string();
+      name.push(suffix);
+      restrict_db_file(Path::new(&name));
+    }
+    Ok(db)
   }
 
   #[cfg(test)]
@@ -914,6 +936,41 @@ const CREDENTIAL_COLUMNS: [(&str, &str); 2] =
   [("secrets", "value"), ("app_accounts", "password")];
 
 pub struct CredentialsKey(ChaCha20Poly1305);
+
+pub fn verify_snapshot_decryptable(
+  c: &Connection,
+  path: &Path,
+) -> Result<(), ApiError> {
+  let invalid = || {
+    ApiError::new(
+      wharf_api_types::ErrorCode::Conflict,
+      "快照中的加密凭据无法用当前主密钥解密",
+    )
+    .with_hint("核对数据目录中的 secrets.key")
+  };
+  for (table, column) in CREDENTIAL_COLUMNS {
+    let exists: bool = c.query_row(
+      "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1)",
+      [table], |r| r.get(0),
+    ).map_err(|_| invalid())?;
+    if !exists {
+      continue;
+    }
+    let row: Option<(String, String)> = c.query_row(
+      &format!("SELECT name, {column} FROM {table} WHERE instr({column}, ?1) = 1 LIMIT 1"),
+      [ENCRYPTED], |r| Ok((r.get(0)?, r.get(1)?)),
+    ).optional().map_err(|_| invalid())?;
+    if let Some((name, value)) = row {
+      let bytes = fs::read(path).map_err(|_| invalid())?;
+      let bytes =
+        bytes.as_slice().try_into().map_err(|_| invalid())?;
+      CredentialsKey::new(bytes)
+        .decrypt(table, &name, &value)
+        .map_err(|_| invalid())?;
+    }
+  }
+  Ok(())
+}
 
 impl CredentialsKey {
   fn new(bytes: &[u8; 32]) -> Self {

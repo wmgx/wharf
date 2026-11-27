@@ -294,7 +294,7 @@ fn redact_row(row: &mut AuditEntry) {
     .map(|s| crate::log_redact::redact_text(&s));
 }
 
-async fn insert(
+pub(crate) async fn insert(
   state: &AppState,
   mut row: AuditEntry,
 ) -> Result<(), ApiError> {
