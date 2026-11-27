@@ -241,6 +241,8 @@ pub async fn upload(
 
 #[cfg(test)]
 mod tests {
+  use super::checked_offset;
+
   #[test]
   fn rejects_short_and_oversized_download_chunks() {
     assert!(checked_offset(4, 0, 8).is_err());

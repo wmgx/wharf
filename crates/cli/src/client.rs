@@ -550,8 +550,6 @@ impl Client {
           .into(),
       );
     }
-    let expected = resp.content_length();
-    let mut received = 0;
     while let Some(chunk) = resp.chunk().await.map_err(|e| {
       ApiError::internal(format!("日志流中断：{}", e.without_url()))
     })? {
@@ -593,6 +591,8 @@ impl Client {
           .into(),
       );
     }
+    let expected = resp.content_length();
+    let mut received = 0;
     while let Some(chunk) = resp.chunk().await.map_err(|e| {
       ApiError::internal(format!("下载中断：{}", e.without_url()))
     })? {

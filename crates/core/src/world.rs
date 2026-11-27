@@ -213,7 +213,6 @@ impl World {
     Ok(world)
   }
 
-  /// 每个资源的版本，`kind/name` → version。
   pub fn service_instances(&self) -> BTreeMap<String, String> {
     self
       .services
@@ -224,6 +223,7 @@ impl World {
       .collect()
   }
 
+  /// 每个资源的版本，`kind/name` → version。
   pub fn versions(&self) -> BTreeMap<String, u64> {
     let mut out = BTreeMap::new();
     for (name, r) in &self.servers {

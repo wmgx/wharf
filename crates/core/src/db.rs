@@ -2130,7 +2130,10 @@ mod tests {
   fn instance_id_migration_splits_pre_and_post_recreate_deployments()
   {
     let c = Connection::open_in_memory().unwrap();
-    for sql in &MIGRATIONS[..MIGRATIONS.len() - 1] {
+    for sql in MIGRATIONS
+      .iter()
+      .take_while(|&&sql| sql != SERVICE_INSTANCE_ID_MIGRATION)
+    {
       c.execute_batch(sql).unwrap();
     }
     c.execute_batch("INSERT INTO resources (kind, name, spec, version, created_at, updated_at)
