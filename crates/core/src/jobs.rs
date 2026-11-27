@@ -43,7 +43,8 @@ fn is_backup_candidate(
 ) -> bool {
   row.spec.backup.as_ref().is_some_and(|backup| {
     snap.deployed.contains_key(name)
-      && online(&row.spec.server)
+      && snapshot::service_runtime_server(snap, name)
+        .is_some_and(&online)
       && online(&backup.to)
   })
 }
@@ -116,94 +117,117 @@ pub fn spawn(state: Arc<AppState>) {
   });
 }
 
-/// 每次最多发起一个备份：备份占用 apply 锁，其他的等下一轮。
+/// 每轮可独立发起一个控制面备份和一个业务备份。
 async fn backups(state: &Arc<AppState>) -> Result<(), ApiError> {
   let snap = snapshot::load(&state.db).await?;
+  let history = crate::data::history(&state.db).await?;
   let now = now_ms();
-  // 控制面自己先备份：它丢了，服务备份的口令也跟着丢了。
-  let (target, core_ok, core_any) = state
-    .db
-    .call(|c| {
-      let any: Option<i64> = c
-        .query_row(
-          "SELECT MAX(created_at) FROM backups WHERE service = ?1",
-          params![crate::core_backup::REPO],
-          |r| r.get(0),
-        )
-        .map_err(sql_err)?;
-      Ok((
-        crate::core_backup::target(c)?,
-        crate::core_backup::last_ok(c)?,
-        any,
-      ))
-    })
-    .await?;
-  let backoff = core_any
-    .is_some_and(|t| core_any != core_ok && now - t < RETRY_AFTER_MS);
-  if target
-    .as_deref()
-    .is_some_and(|name| state.hub.is_online(name))
-    && crate::core_node::server_of(&snap)
-      .is_some_and(|name| state.hub.is_online(&name))
-    && core_ok.is_none_or(|t| now - t >= BACKUP_EVERY_MS)
-    && !backoff
-  {
-    let result = apply::start_task_by(
-      state.clone(),
-      "备份控制面".into(),
-      Step::CoreBackup { user_key: None },
-      Some("定时备份".into()),
+  let core = state.db.call(crate::core_backup::target).await?;
+  if let Some(target) = core {
+    let repo = crate::core_backup::REPO;
+    let h = history.get(&(repo.to_string(), target.clone()));
+    let empty = crate::data::repo_verified_empty(
+      state,
+      &snap,
+      &target,
+      repo,
+      h.and_then(|h| h.ok),
+    );
+    if state.hub.is_online(&target)
+      && crate::core_node::server_of(&snap)
+        .is_some_and(|name| state.hub.is_online(&name))
+      && due(h, empty, now)
+    {
+      let result = apply::start_task_by(
+        state.clone(),
+        "备份控制面".into(),
+        Step::CoreBackup {
+          user_key: None,
+          target: None,
+          owner_secret: None,
+        },
+        Some("定时备份".into()),
+      )
+      .await;
+      if let Some(e) = core_backup_error(result) {
+        tracing::warn!("发起控制面备份失败：{e}");
+      }
+    }
+    let issues = crate::core_backup::issues(&state.db).await?;
+    let current = issues.is_empty();
+    crate::rules::notice(
+      state,
+      "backup",
+      Some("backup.wharf-core.key"),
+      current,
+      crate::notify::Event {
+        title: if current {
+          "控制面备份恢复口令已同步".into()
+        } else {
+          "控制面备份的登录密码恢复口令已失效".into()
+        },
+        body: issues
+          .first()
+          .and_then(|i| i.hint.clone())
+          .unwrap_or_default(),
+      },
     )
     .await;
-    if let Some(error) = core_backup_error(result) {
-      tracing::warn!("定时备份控制面失败：{error}");
-    }
   }
-  let mut candidates = vec![];
+  let mut candidates = Vec::new();
   for (name, row) in &snap.world.services {
     if !is_backup_candidate(&snap, name, row, |server| {
       state.hub.is_online(server)
     }) {
       continue;
     }
-    let n = name.clone();
-    let (last_ok, last_any): (Option<i64>, Option<i64>) = state
-      .db
-      .call(move |c| {
-        c.query_row(
-          "SELECT MAX(CASE WHEN ok THEN created_at END), MAX(created_at) FROM backups WHERE service = ?1",
-          params![n],
-          |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .map_err(sql_err)
-      })
-      .await?;
-    let stale = last_ok.is_none_or(|t| now - t >= BACKUP_EVERY_MS);
-    let backoff = last_any.is_some_and(|t| {
-      last_any != last_ok && now - t < RETRY_AFTER_MS
-    });
-    if stale && !backoff {
-      candidates.push((last_ok, name));
+    let Some(backup) = &row.spec.backup else {
+      continue;
+    };
+    let h = history.get(&(name.clone(), backup.to.clone()));
+    let ok = h.and_then(|h| h.ok);
+    let empty = crate::data::repo_verified_empty(
+      state, &snap, &backup.to, name, ok,
+    );
+    if due(h, empty, now) {
+      candidates.push((ok.filter(|_| !empty), name));
     }
   }
-  let Some((_, name)) = candidates.into_iter().min() else {
-    return Ok(());
-  };
-  match apply::start_task_by(
-    state.clone(),
-    format!("定时备份 {name}"),
-    Step::Backup {
-      service: name.clone(),
-    },
-    Some("定时备份".into()),
-  )
-  .await
-  {
-    Ok(r) => tracing::info!("定时备份 {name}：{}", r.run_id),
-    Err(e) if e.code == ErrorCode::Busy => {}
-    Err(e) => return Err(e),
+  candidates.sort_unstable();
+  for (_, name) in candidates {
+    match apply::start_task_by(
+      state.clone(),
+      format!("定时备份 {name}"),
+      Step::Backup {
+        service: name.clone(),
+      },
+      Some("定时备份".into()),
+    )
+    .await
+    {
+      Ok(r) => {
+        tracing::info!("定时备份 {name}：{}", r.run_id);
+        break;
+      }
+      Err(e) if e.code == ErrorCode::Busy => continue,
+      Err(e) => return Err(e),
+    }
   }
   Ok(())
+}
+
+fn due(
+  history: Option<&crate::data::BackupHistory>,
+  empty: bool,
+  now: i64,
+) -> bool {
+  let ok = history.and_then(|h| h.ok);
+  let failed = history.and_then(|h| h.failed);
+  let backoff = failed.is_some_and(|f| {
+    ok.is_none_or(|ok| f >= ok) && now - f < RETRY_AFTER_MS
+  });
+  !backoff
+    && (empty || ok.is_none_or(|ok| now - ok >= BACKUP_EVERY_MS))
 }
 
 /// 迁移成功后记下旧服务器上要删除的数据。
@@ -263,7 +287,7 @@ pub(crate) async fn cleanup_data(
   (service, server, instance_id): (&str, &str, Option<&str>),
   progress: ProgressFn,
   cancel: &CancellationToken,
-  guard: tokio::sync::OwnedMutexGuard<()>,
+  guard: crate::locks::OpLockGuard,
 ) -> Result<(), ApiError> {
   let key = (
     service.to_string(),
@@ -287,7 +311,8 @@ pub(crate) async fn cleanup_data(
   let snap = snapshot::load(&state.db).await?;
   let row = snap.world.services.get(service);
   if row.is_some_and(|r| r.spec.server == server)
-    || snap.deployed.get(service).is_some_and(|s| s == server)
+    || snapshot::service_runtime_server(&snap, service)
+      == Some(server)
   {
     progress(format!("服务已回到 {server}，取消清理"));
     drop(guard);
@@ -362,7 +387,10 @@ async fn cleanup_skips_when_service_moved_back_or_rebuilt() {
     })
     .await
     .unwrap();
-  let locked = state.apply_lock.lock().await;
+  let locked = state
+    .locks
+    .acquire(crate::locks::LockSpec::apply([]), "测试")
+    .unwrap();
   cleanups(&state).await.unwrap();
   assert!(
     state
@@ -383,7 +411,13 @@ async fn cleanup_skips_when_service_moved_back_or_rebuilt() {
         VALUES ('service', 'app', json_object('server', ?1, 'source', json_object('image', 'fixture:1')),
           json_object('instance_id', ?2), 1, 0, 0)", params![server, instance]).map_err(sql_err)
     }).await.unwrap();
-    let lock = state.apply_lock.clone().lock_owned().await;
+    let lock = state
+      .locks
+      .acquire(
+        crate::locks::LockSpec::apply(["s1".into(), "app".into()]),
+        "测试",
+      )
+      .unwrap();
     cleanup_data(
       &state,
       ("app", "s1", Some("svc_old")),
@@ -425,7 +459,13 @@ async fn failed_cleanup_does_not_starve_next_due_record() {
       "INSERT INTO cleanups (service, server, due_at) VALUES ('s1', 's1', 0), ('s2', 's2', 1)",
     ).map_err(sql_err)
   }).await.unwrap();
-  let guard = state.apply_lock.clone().lock_owned().await;
+  let guard = state
+    .locks
+    .acquire(
+      crate::locks::LockSpec::apply(["s1".into(), "app".into()]),
+      "测试",
+    )
+    .unwrap();
   let err = cleanup_data(
     &state,
     ("s1", "s1", None),

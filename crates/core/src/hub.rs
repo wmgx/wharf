@@ -80,6 +80,7 @@ struct Conn {
   safe_delete: bool,
   safe_adopt: bool,
   safe_migrate: bool,
+  safe_backup: bool,
   /// 协议版本不一致：连接放行，但只接受升级相关的请求，好让它升上来。
   upgrade_only: bool,
 }
@@ -309,6 +310,12 @@ impl Hub {
     Ok(())
   }
 
+  pub fn supports_safe_backup(&self, server: &str) -> bool {
+    lock(&self.conns)
+      .get(server)
+      .is_some_and(|c| !c.upgrade_only && c.safe_backup)
+  }
+
   pub fn supports_safe_delete(&self, server: &str) -> bool {
     lock(&self.conns)
       .get(server)
@@ -480,7 +487,7 @@ impl Hub {
     service: &str,
     progress: ProgressFn,
     cancel: &CancellationToken,
-    guard: tokio::sync::OwnedMutexGuard<()>,
+    guard: crate::locks::OpLockGuard,
   ) -> Result<wharf_api_types::agent::RemoveDataResult, ApiError> {
     let conn = lock(&self.conns)
       .get(server)
@@ -494,7 +501,7 @@ impl Hub {
         service: service.to_string(),
       },
       Duration::from_secs(30 * 60),
-      (Some(progress), Some(guard)),
+      (Some(progress), Some((guard, service.to_string()))),
       cancel,
     )
     .await
@@ -508,7 +515,7 @@ impl Hub {
     timeout: Duration,
     (progress, dispatch_guard): (
       Option<ProgressFn>,
-      Option<tokio::sync::OwnedMutexGuard<()>>,
+      Option<(crate::locks::OpLockGuard, String)>,
     ),
     cancel: &CancellationToken,
   ) -> Result<T, ApiError> {
@@ -533,6 +540,24 @@ impl Hub {
       && !conn.safe_migrate
     {
       job.force = true;
+    }
+    let needs_safe_backup = match &op {
+      AgentOp::ServiceStopForData { .. }
+      | AgentOp::PruneRestore { .. } => true,
+      AgentOp::ProjectStart { containers, .. } => {
+        !containers.is_empty()
+      }
+      AgentOp::Restic(job) => matches!(
+        job.action,
+        wharf_api_types::agent::ResticAction::Preflight(_)
+          | wharf_api_types::agent::ResticAction::Unlock { .. }
+          | wharf_api_types::agent::ResticAction::Backup { .. }
+          | wharf_api_types::agent::ResticAction::Restore { .. }
+      ),
+      _ => false,
+    };
+    if needs_safe_backup && (conn.upgrade_only || !conn.safe_backup) {
+      return Err(crate::backup::old_agent(server));
     }
     if matches!(&op, AgentOp::RemoveData { .. })
       && (conn.upgrade_only || !conn.safe_delete)
@@ -679,7 +704,9 @@ impl Hub {
       }),
       ) => sent,
     };
-    drop(dispatch_guard);
+    if let Some((guard, service)) = &dispatch_guard {
+      guard.release_apply(service);
+    }
     if !matches!(sent, Ok(Ok(()))) {
       lock(&conn.pending).remove(&id);
       return Err(offline(server));
@@ -866,6 +893,7 @@ async fn handle_socket(
     safe_delete,
     safe_adopt,
     safe_migrate,
+    safe_backup,
     key_rotation,
   } = hello
   else {
@@ -1029,6 +1057,7 @@ async fn handle_socket(
     safe_delete,
     safe_adopt,
     safe_migrate,
+    safe_backup,
     upgrade_only,
   };
   let state_on_db = state.clone();

@@ -163,6 +163,8 @@ pub enum Step {
   Restore {
     service: String,
     snapshot: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    target: Option<String>,
   },
   /// 构建来源：按固定的 commit 重新构建并部署（没固定过的拉最新代码）。单独发起，不来自计划。
   Rebuild {
@@ -217,11 +219,18 @@ pub enum Step {
   },
   /// 控制面自身备份。`user_key`：开启时输入的登录密码，加成仓库的恢复口令。
   CoreBackup {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     user_key: Option<wharf_api_types::agent::OneTimeSecret>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    owner_secret: Option<wharf_api_types::agent::OneTimeSecret>,
   },
   /// 清理服务器上没在用的镜像。单独发起，不来自计划。
   Prune {
     server: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    restore_days: Option<u32>,
   },
   /// 边缘应用回滚到厂商那边的旧版本。单独发起，不来自计划。
   EdgeRollback {

@@ -238,6 +238,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
   upgrade::sweep_helper();
   task::cleanup(&cli.data_dir)?;
   restic::cleanup_temp_keys(&cli.data_dir);
+  restic::cleanup_stale_restore_work(std::path::Path::new("/srv"));
 
   identity::load_or_create_key(&cli.data_dir)?;
   egress::restore(&cli.data_dir, &joined.core_url);
@@ -246,6 +247,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     bin: cli.docker,
     data_dir: cli.data_dir.clone(),
   };
+  let cleanup_docker = docker.clone();
+  tokio::spawn(async move {
+    restic::cleanup_containers(&cleanup_docker).await
+  });
   let reporter = report::Reporter::new(docker.clone(), cli.public_ip);
   let host_shell = host_shell::HostShell::prepare(
     docker.clone(),

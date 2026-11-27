@@ -15,6 +15,7 @@ use wharf_api_types::{ApiError, ErrorCode};
 
 /// 执行中的进度行，转发给控制面。
 pub type Progress = Arc<dyn Fn(String) + Send + Sync>;
+type ProgressMatcher = Box<dyn FnMut(&str) -> bool + Send>;
 
 /// 一次请求的执行上下文。
 #[derive(Clone)]
@@ -88,6 +89,7 @@ pub struct Cmd {
   cwd: Option<std::path::PathBuf>,
   env: Vec<(String, String)>,
   timeout: Duration,
+  stall: Option<(Duration, ProgressMatcher)>,
   /// 把 stdout 也转发为进度（默认只转发 stderr）。
   stream_stdout: bool,
   stream: bool,
@@ -101,6 +103,7 @@ impl Cmd {
       cwd: None,
       env: Vec::new(),
       timeout: Duration::from_secs(60),
+      stall: None,
       stream_stdout: false,
       stream: false,
     }
@@ -147,6 +150,15 @@ impl Cmd {
 
   pub fn timeout(mut self, timeout: Duration) -> Self {
     self.timeout = timeout;
+    self
+  }
+
+  pub fn stall_timeout(
+    mut self,
+    duration: Duration,
+    matcher: impl FnMut(&str) -> bool + Send + 'static,
+  ) -> Self {
+    self.stall = Some((duration, Box::new(matcher)));
     self
   }
 
@@ -214,7 +226,7 @@ impl Cmd {
     let _ = child.wait().await;
   }
 
-  pub async fn run(self, ctx: &Ctx) -> Result<Output, ApiError> {
+  pub async fn run(mut self, ctx: &Ctx) -> Result<Output, ApiError> {
     let what = self.describe();
     if ctx.cancel.is_cancelled() {
       return Err(cancelled(&what));
@@ -232,20 +244,46 @@ impl Cmd {
     } else {
       None
     };
+    let (stall, output) = match self.stall.take() {
+      Some((duration, mut matches_progress)) => {
+        let (activity, receiver) =
+          tokio::sync::watch::channel(tokio::time::Instant::now());
+        let matcher: Progress = Arc::new({
+          let matcher = std::sync::Mutex::new(move |line: &str| {
+            if matches_progress(line) {
+              activity.send_replace(tokio::time::Instant::now());
+            }
+          });
+          move |line| (matcher.lock().unwrap())(&line)
+        });
+        (Some((duration, receiver)), Some(matcher))
+      }
+      None => (None, None),
+    };
+    let output =
+      |progress: Option<Progress>| match (progress, output.clone()) {
+        (None, matcher) | (matcher, None) => matcher,
+        (Some(progress), Some(matcher)) => {
+          let both: Progress = Arc::new(move |line: String| {
+            matcher(line.clone());
+            progress(line);
+          });
+          Some(both)
+        }
+      };
     let stdout = tokio::spawn(capture(
       child.stdout.take(),
-      if self.stream_stdout {
-        progress.clone()
-      } else {
-        None
-      },
+      output(self.stream_stdout.then(|| progress.clone()).flatten()),
     ));
-    let stderr = tokio::spawn(capture(child.stderr.take(), progress));
+    let stderr =
+      tokio::spawn(capture(child.stderr.take(), output(progress)));
 
+    let mut stalled = false;
     let status = tokio::select! {
       status = child.wait() => Some(status),
       _ = tokio::time::sleep(self.timeout) => None,
       _ = ctx.cancel.cancelled() => None,
+      _ = wait_for_stall(stall) => { stalled = true; None },
     };
     let status = match status {
       Some(status) => status.map_err(|e| {
@@ -257,6 +295,11 @@ impl Cmd {
         stderr.abort();
         return Err(if ctx.cancel.is_cancelled() {
           cancelled(&what)
+        } else if stalled {
+          ApiError::new(
+            ErrorCode::Timeout,
+            format!("{what} 长时间无进展，已终止"),
+          )
         } else {
           ApiError::new(
             ErrorCode::Timeout,
@@ -274,6 +317,28 @@ impl Cmd {
       stdout: stdout.await.unwrap_or_default(),
       stderr: stderr.await.unwrap_or_default(),
     })
+  }
+}
+
+async fn wait_for_stall(
+  stall: Option<(
+    Duration,
+    tokio::sync::watch::Receiver<tokio::time::Instant>,
+  )>,
+) {
+  let Some((interval, mut activity)) = stall else {
+    return std::future::pending().await;
+  };
+  loop {
+    let until = *activity.borrow_and_update() + interval;
+    match tokio::time::timeout_at(until, activity.changed()).await {
+      Ok(Ok(())) => {}
+      Ok(Err(_)) => {
+        tokio::time::sleep_until(until).await;
+        return;
+      }
+      Err(_) => return,
+    }
   }
 }
 
@@ -354,6 +419,20 @@ async fn kill_group(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn stall_timeout_kills_hung_command_even_with_unchanged_status()
+   {
+    let result = Cmd::new("sh")
+      .args(["-c", "while :; do echo unchanged; sleep 0.02; done"])
+      .timeout(Duration::from_secs(5))
+      .stall_timeout(Duration::from_millis(100), |_| false)
+      .run(&Ctx::detached())
+      .await
+      .unwrap_err();
+    assert_eq!(result.code, ErrorCode::Timeout);
+    assert!(result.message.contains("无进展"));
+  }
 
   #[tokio::test]
   async fn watch_lines_discard_bytes_past_four_kib() {

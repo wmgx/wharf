@@ -329,7 +329,9 @@ pub async fn disk_usage(
     .filter(|o| o.success)
     .map(|o| o.stdout.trim().to_string())
     .unwrap_or_else(|| "/var/lib/docker".into());
-  let mut script = String::from("cd /host\n");
+  let mut script = String::from(
+    "cd /host\necho \"data .wharf-restore $(du -sb /host/srv/.wharf-restore 2>/dev/null | cut -f1)\"\n",
+  );
   for svc in services.iter().filter(|s| safe(s)) {
     script.push_str(&format!(
       "echo \"data {svc} $(du -sb /host/srv/{svc} 2>/dev/null | cut -f1)\"\n"

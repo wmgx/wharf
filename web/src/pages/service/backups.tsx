@@ -96,7 +96,7 @@ export function Backups({ svc }: { svc: ServiceView }) {
         </CardContent>
       </Card>
 
-      {uncovered.length > 0 && <Notice kind="warn">不在备份范围：{uncovered.map((m) => m.source || `匿名卷 ${m.target}`).join("、")}</Notice>}
+      {uncovered.length > 0 && <Notice kind="warn">不在备份范围：{uncovered.map((m) => m.resolved ? `${m.source} → ${m.resolved}` : m.source || `匿名卷 ${m.target}`).join("、")}</Notice>}
       <ErrorNote error={error} />
       {data?.snapshots_error && <Notice kind="warn">读取快照失败：{data.snapshots_error}</Notice>}
       {!data ? (

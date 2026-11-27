@@ -795,6 +795,9 @@ pub enum ServerCmd {
   /// 删除没有容器在用的镜像和构建缓存，腾出磁盘。
   Prune {
     name: String,
+    /// 显式清理超过指定天数的恢复留底，0 表示全部。
+    #[arg(long)]
+    restore_days: Option<u32>,
   },
   /// 宿主机信息：系统版本、待装更新、docker 和日志占用。
   Host {
@@ -1589,6 +1592,12 @@ pub enum BackupCmd {
   },
   /// 备份记录和快照。
   List { service: String },
+  /// 清理业务备份仓库残留的锁。
+  Unlock {
+    service: String,
+    #[arg(long)]
+    stale_only: bool,
+  },
   /// 控制面异地灾备（数据库和密钥）。本机快速回退用 `wharf core snapshot`。
   /// 不带参数时查看状态和恢复命令。
   /// `--to` 开启或换备份服务器，会要求输入登录密码：它会成为恢复口令。
@@ -1598,10 +1607,17 @@ pub enum BackupCmd {
     /// 立即备份一次。
     #[arg(long)]
     run: bool,
+    /// 清理控制面备份仓库残留的锁。
+    #[arg(long, conflicts_with_all = ["to", "run"])]
+    unlock: bool,
+    #[arg(long, requires = "unlock")]
+    stale_only: bool,
   },
   /// 恢复快照：停服务、恢复数据、启动。原来的数据改名保留在 /srv/.wharf-restore/ 下。
   Restore {
     service: String,
+    #[arg(long)]
+    from: Option<String>,
     /// 紧急跳过数据库热快照，需要 Admin。
     #[arg(long)]
     skip_snapshot: bool,

@@ -685,10 +685,14 @@ fn mount_label(m: &DataMount) -> String {
     DataKind::NamedVolume if m.source.is_empty() => "匿名卷",
     DataKind::NamedVolume => "卷",
   };
-  if m.source.is_empty() {
-    format!("{kind} → {}", m.target)
-  } else {
-    format!("{kind} {} → {}", m.source, m.target)
+  let source = match &m.resolved {
+    Some(resolved) => format!("{}（软链指向 {resolved}）", m.source),
+    None => m.source.clone(),
+  };
+  match (source.is_empty(), m.target.is_empty()) {
+    (true, _) => format!("{kind} → {}", m.target),
+    (_, true) => format!("{kind} {source}"),
+    _ => format!("{kind} {source} → {}", m.target),
   }
 }
 
@@ -717,8 +721,13 @@ pub fn data(v: &DataView) {
       .last_ok
       .map(|t| format!("  最近成功 {}", local(&t)))
       .unwrap_or_default();
+    let repo = if s.repo_empty {
+      "  目标仓库无快照"
+    } else {
+      ""
+    };
     println!(
-      "{:<width$}  {:<8}  {:<4}  {backup}{last}",
+      "{:<width$}  {:<8}  {:<4}  {backup}{last}{repo}",
       s.name,
       s.server,
       data_status(s.status),

@@ -38,6 +38,7 @@ pub struct Ops {
   /// 数据目录：打包宿主机目录时的临时文件放在它下面的 `tmp/`。
   pub data_dir: std::path::PathBuf,
   locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+  restic_locks: Mutex<HashMap<String, Arc<tokio::sync::RwLock<()>>>>,
 }
 
 /// caddy 的管理接口用 unix socket，不占端口，也就不会和机器上已有的 Caddy 冲突。
@@ -58,6 +59,7 @@ impl Ops {
       host_shell,
       data_dir,
       locks: Default::default(),
+      restic_locks: Default::default(),
     }
   }
   fn lock_for(&self, project: &str) -> Arc<tokio::sync::Mutex<()>> {
@@ -247,8 +249,41 @@ impl Ops {
       AgentOp::ProjectStop { project } => {
         self.stop_start(&project, false, ctx).await
       }
-      AgentOp::ProjectStart { project } => {
-        self.stop_start(&project, true, ctx).await
+      AgentOp::ProjectStart {
+        project,
+        containers,
+      } => {
+        if containers.is_empty() {
+          self.stop_start(&project, true, ctx).await
+        } else {
+          let _guard = self.lock_data(&project, ctx).await?;
+          self
+            .docker
+            .start_containers(&project, &containers, ctx)
+            .await?;
+          to_value(true)
+        }
+      }
+      AgentOp::ServiceStopForData { project } => {
+        let _guard = self.lock_data(&project, ctx).await?;
+        to_value(
+          self.docker.stop_running_for_data(&project, ctx).await?,
+        )
+      }
+      AgentOp::PruneRestore { older_than_days } => {
+        let ctx = ctx.clone();
+        let result = tokio::task::spawn_blocking(move || {
+          crate::restic::prune_restore_kept(
+            Path::new("/srv"),
+            older_than_days,
+            &ctx,
+          )
+        })
+        .await
+        .map_err(|_| {
+          ApiError::internal("恢复目录清理任务异常结束")
+        })??;
+        to_value(result)
       }
       AgentOp::ProjectMounts { projects } => {
         to_value(self.docker.project_mounts(&projects, ctx).await?)
@@ -262,9 +297,7 @@ impl Ops {
       AgentOp::RemoveData { service } => {
         self.remove_data(&service, ctx).await
       }
-      AgentOp::Restic(job) => {
-        crate::restic::run(&self.docker, &job, ctx).await
-      }
+      AgentOp::Restic(job) => self.restic(&job, ctx).await,
       AgentOp::Build(job) => {
         check_project(&job.service)?;
         if !job.image.starts_with(&format!(
@@ -483,6 +516,61 @@ impl Ops {
         blocked_by
       }
     ))
+  }
+
+  async fn restic(
+    &self,
+    job: &wharf_api_types::agent::ResticJob,
+    ctx: &Ctx,
+  ) -> Result<Value, ApiError> {
+    use wharf_api_types::agent::{ResticAction, ResticRepo};
+    wharf_api_types::validate_name("service", &job.service)?;
+    let scope = match &job.repo {
+      ResticRepo::Local => "local",
+      ResticRepo::Rest { .. } => "rest",
+    };
+    let key = format!("{scope}:{}", job.service);
+    let lock = self
+      .restic_locks
+      .lock()
+      .unwrap_or_else(|p| p.into_inner())
+      .entry(key)
+      .or_default()
+      .clone();
+    let busy = || {
+      ApiError::new(
+        ErrorCode::Busy,
+        format!(
+          "服务 {} 的备份仓库正在使用，请稍后再试",
+          job.service
+        ),
+      )
+    };
+    if matches!(
+      &job.action,
+      ResticAction::Snapshots
+        | ResticAction::ListKeys
+        | ResticAction::Preflight(_)
+    ) {
+      let _guard = tokio::select! {
+        biased;
+        _ = ctx.cancel.cancelled() => return Err(ApiError::new(ErrorCode::Cancelled, "已取消")),
+        guard = tokio::time::timeout(Duration::from_secs(5), lock.read()) => guard.map_err(|_| busy())?,
+      };
+      crate::restic::run(&self.docker, job, ctx).await
+    } else {
+      let _guard = lock.try_write().map_err(|_| busy())?;
+      let _data = if matches!(
+        job.action,
+        ResticAction::Backup { .. } | ResticAction::Restore { .. }
+      ) && job.core_marker.is_none()
+      {
+        Some(self.lock_data(&job.service, ctx).await?)
+      } else {
+        None
+      };
+      crate::restic::run(&self.docker, job, ctx).await
+    }
   }
 
   async fn stop_start(

@@ -122,6 +122,14 @@ fn clean(s: &mut String, max: usize) {
 }
 
 pub fn sanitize_report(r: &mut AgentReport) {
+  if let Some(repos) = &mut r.backup_repos {
+    repos.retain(|name, _| {
+      wharf_api_types::validate_name("备份仓库", name).is_ok()
+    });
+    if repos.len() > 256 {
+      r.backup_repos = None;
+    }
+  }
   r.private_addr = r.private_addr.take().and_then(|mut addr| {
     addr.ip = is_valid_private_ip(&addr.ip)?;
     Some(addr)

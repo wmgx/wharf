@@ -79,9 +79,11 @@ async fn service_credentials_are_isolated_per_service() {
   let (a, same) = (a.unwrap(), same.unwrap());
   let b = ensure_service_creds(&state, "svc-b").await.unwrap();
   let snap = snapshot::load(&state.db).await.unwrap();
-  let w = locate(&snap, "svc-a").unwrap();
-  let htpasswd =
-    target_htpasswd(&state, &snap, &w.target).await.unwrap();
+  let w =
+    location(&snap, "svc-a", service_target(&snap, "svc-a").unwrap());
+  let htpasswd = target_htpasswd(&state, &snap, &w.target, None)
+    .await
+    .unwrap();
   let (a_hash, b_hash) = (
     htpasswd
       .lines()
@@ -180,7 +182,7 @@ async fn deleting_service_keeps_backup_key_and_drops_http_creds() {
   assert_eq!(secret_count(&state).await, 1);
   let snap = snapshot::load(&state.db).await.unwrap();
   assert!(
-    target_htpasswd(&state, &snap, "s2")
+    target_htpasswd(&state, &snap, "s2", None)
       .await
       .unwrap()
       .is_empty()
@@ -371,10 +373,12 @@ async fn backup_isolation_rejects_old_agent_without_capability() {
   let snap = snapshot::load(&state.db).await.unwrap();
   let cancel = CancellationToken::new();
   let progress: ProgressFn = Arc::new(|_| {});
-  let w = locate(&snap, "svc-a").unwrap();
-  let err = ensure_server(&state, &snap, &w, &progress, &cancel)
-    .await
-    .unwrap_err();
+  let w =
+    location(&snap, "svc-a", service_target(&snap, "svc-a").unwrap());
+  let err =
+    ensure_server(&state, &snap, &w, None, &progress, &cancel)
+      .await
+      .unwrap_err();
   assert_eq!(err.code, ErrorCode::Conflict);
   assert!(err.hint.unwrap().contains("upgrade"));
   let err = local_call::<Vec<ResticKeyInfo>>(

@@ -1730,11 +1730,11 @@ async fn server(
           .into(),
       ),
     },
-    ServerCmd::Prune { name } => {
+    ServerCmd::Prune { name, restore_days } => {
       let r: ApplyResponse = c
         .post(
           &format!("/api/servers/{}/prune", seg(&name)),
-          &json!({}),
+          &json!({"restore_days": restore_days}),
         )
         .await?;
       finish_task(c, &r.run_id, true, j).await
@@ -4617,6 +4617,33 @@ async fn backup(
         .await?;
       finish_task(c, &r.run_id, !no_wait, j).await
     }
+    BackupCmd::Unlock {
+      service,
+      stale_only,
+    } => {
+      let value: Value = c
+        .post(
+          &format!("/api/services/{}/backups/unlock", seg(&service)),
+          &json!({ "stale_only": stale_only }),
+        )
+        .await?;
+      out(j, &value, |_| println!("已解锁备份仓库"));
+      Ok(())
+    }
+    BackupCmd::Core {
+      unlock: true,
+      stale_only,
+      ..
+    } => {
+      let value: Value = c
+        .post(
+          "/api/core-backup/unlock",
+          &json!({ "stale_only": stale_only }),
+        )
+        .await?;
+      out(j, &value, |_| println!("已解锁控制面备份仓库"));
+      Ok(())
+    }
     BackupCmd::Core { to: Some(to), .. } => {
       let password = read_secret("登录密码（会成为恢复口令）：")?;
       let r: ApplyResponse = c
@@ -4646,6 +4673,7 @@ async fn backup(
     }
     BackupCmd::Restore {
       service,
+      from,
       skip_snapshot,
       snapshot,
       confirm,
@@ -4655,6 +4683,7 @@ async fn backup(
         .post(
           &format!("/api/services/{}/restore", seg(&service)),
           &RestoreRequest {
+            target: from,
             snapshot,
             confirm: confirm.unwrap_or_default(),
             skip_snapshot,

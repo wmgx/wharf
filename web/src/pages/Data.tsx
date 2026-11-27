@@ -83,7 +83,7 @@ export function Data() {
                   <ServerTag name={s.server} />
                 </TableCell>
                 <TableCell className="hidden md:table-cell">
-                  {summary}
+                  {summary}{s.mounts.flatMap((m) => m.resolved ? [<div key={m.source + m.target}>{m.source} → {m.resolved}</div>] : [])}
                 </TableCell>
                 <TableCell>
                   <StatusBadge tone={TONE[s.status]}>
@@ -94,7 +94,7 @@ export function Data() {
                   {s.target ?? "-"}
                 </TableCell>
                 <TableCell className="hidden md:table-cell">
-                  {s.last_ok ? ago(s.last_ok) : "-"}
+                  {s.repo_empty ? "目标仓库无快照" : s.last_ok ? ago(s.last_ok) : "-"}
                 </TableCell>
                 <TableCell onClick={(e) => e.stopPropagation()}>
                   {s.status === "off" ? <Button variant="ghost" size="xs" asChild>

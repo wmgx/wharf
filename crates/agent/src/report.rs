@@ -1,14 +1,16 @@
 //! 机器信息上报：内网地址、公网 IP、docker 版本。
 
 use std::{
+  collections::BTreeMap,
   net::Ipv4Addr,
+  path::Path,
   sync::Arc,
   time::{Duration, Instant},
 };
 
 use tokio::sync::Mutex;
 use wharf_api_types::{
-  agent::{AgentReport, Disk},
+  agent::{AgentReport, BACKUP_ROOT, CORE_BACKUP_ROOT, Disk},
   spec::{PrivateAddr, PrivateNetwork},
 };
 
@@ -85,6 +87,11 @@ impl Reporter {
       async { self.subnets.lock().await.collect(&self.docker).await },
     );
     AgentReport {
+      backup_repos: scan_backup_repos(
+        Path::new(BACKUP_ROOT),
+        Path::new(CORE_BACKUP_ROOT),
+      )
+      .ok(),
       version: wharf_api_types::VERSION.to_string(),
       hostname: hostname(),
       os: std::env::consts::OS.to_string(),
@@ -129,6 +136,78 @@ impl Reporter {
     *cache = Some((Instant::now(), ip.clone()));
     ip
   }
+}
+
+fn scan_backup_repos(
+  root: &Path,
+  core: &Path,
+) -> std::io::Result<BTreeMap<String, u32>> {
+  fn count(repo: &Path) -> std::io::Result<u32> {
+    use std::io::ErrorKind::NotFound;
+    let file_type = match std::fs::symlink_metadata(repo) {
+      Ok(meta) => meta.file_type(),
+      Err(e) if e.kind() == NotFound => return Ok(0),
+      Err(e) => return Err(e),
+    };
+    if !file_type.is_dir() {
+      return Ok(0);
+    }
+    let config = match std::fs::symlink_metadata(repo.join("config"))
+    {
+      Ok(config) => config,
+      Err(e) if e.kind() == NotFound => return Ok(0),
+      Err(e) => return Err(e),
+    };
+    if !config.is_file() {
+      return Ok(0);
+    }
+    let snapshots = repo.join("snapshots");
+    let dir = match std::fs::symlink_metadata(&snapshots) {
+      Ok(meta) => meta,
+      Err(e) if e.kind() == NotFound => return Ok(0),
+      Err(e) => return Err(e),
+    };
+    if !dir.is_dir() {
+      return Ok(0);
+    }
+    let mut count = 0;
+    for entry in std::fs::read_dir(snapshots)? {
+      if entry?.file_type()?.is_file() {
+        count += 1;
+      }
+      if count == 65_535 {
+        break;
+      }
+    }
+    Ok(count)
+  }
+  let mut repos = BTreeMap::new();
+  match std::fs::symlink_metadata(root) {
+    Ok(meta) if meta.is_dir() => {
+      for entry in std::fs::read_dir(root)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name != "wharf-core"
+          && entry.file_type()?.is_dir()
+          && wharf_api_types::validate_name("备份仓库", &name).is_ok()
+        {
+          repos.insert(name, count(&entry.path())?);
+        }
+        if repos.len() >= 256 {
+          return Err(std::io::ErrorKind::InvalidData.into());
+        }
+      }
+    }
+    Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+      return Err(e);
+    }
+    _ => {}
+  }
+  if std::fs::symlink_metadata(core).is_ok_and(|m| m.is_dir()) {
+    repos
+      .insert("wharf-core".into(), count(&core.join("wharf-core"))?);
+  }
+  Ok(repos)
 }
 
 fn hostname() -> String {

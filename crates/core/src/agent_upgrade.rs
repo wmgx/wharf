@@ -273,8 +273,9 @@ pub async fn upgrade_core(
 ) -> ApiResult<UpgradeResult> {
   auth.require(Perm::Admin)?;
   let req = body.map(|b| b.0).unwrap_or_default();
-  let _guard =
-    s.apply_lock.try_lock().map_err(|_| s.runs.busy_error())?;
+  let _guard = s
+    .locks
+    .acquire(crate::locks::LockSpec::Global, "升级控制面")?;
   let cancel = CancellationToken::new();
   let core = crate::core_node::require_verified(&s, &cancel).await?;
   let id = core.container_id.clone().ok_or_else(|| {

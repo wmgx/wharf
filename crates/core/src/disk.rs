@@ -85,9 +85,6 @@ async fn measure(
     .filter(|(_, r)| r.spec.server == server)
     .map(|(n, _)| n.clone())
     .collect();
-  if services.is_empty() {
-    return Ok(());
-  }
   let found: Vec<ServiceDisk> = state
     .hub
     .call(
@@ -132,6 +129,14 @@ fn points(
   let mut out = Vec::new();
   let mut shared: BTreeMap<&str, u64> = BTreeMap::new();
   for d in found {
+    if d.service == ".wharf-restore" {
+      out.push((
+        "disk.data",
+        format!("{server}/.wharf-restore"),
+        d.data,
+      ));
+      continue;
+    }
     let mut own = 0;
     for (v, bytes) in &d.volumes {
       if users[v.as_str()].len() > 1 {
@@ -315,6 +320,8 @@ async fn view(
       for svc in &services {
         row(svc.clone(), svc, &["disk.data", "disk.logs", "disk.vols"], false)?;
       }
+      let restore = format!("{server}/.wharf-restore");
+      row("恢复保留（.wharf-restore）".into(), &restore, &["disk.data"], false)?;
       let prefix = format!("{server}/");
       let mut stmt = c
         .prepare("SELECT DISTINCT subject FROM points WHERE name = 'disk.shared' AND subject LIKE ?1")
@@ -333,6 +340,7 @@ async fn view(
       if let Some(latest) = latest {
         rows.retain(|r| latest - r.at < 3600 * 1000);
       }
+      rows.retain(|r| r.name != "恢复保留（.wharf-restore）" || r.total > 0);
       rows.sort_by(|a, b| b.week.unwrap_or(0).cmp(&a.week.unwrap_or(0)).then(b.total.cmp(&a.total)));
       Ok(DiskView { measured_at: latest, rows })
     })

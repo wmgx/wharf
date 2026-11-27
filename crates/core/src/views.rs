@@ -268,6 +268,7 @@ pub fn service_view(
   net: &Net,
   name: &str,
   live: Option<&LiveMap>,
+  history: &crate::data::History,
 ) -> Option<ServiceView> {
   let row = snap.world.services.get(name)?;
   let addresses = row
@@ -383,7 +384,7 @@ pub fn service_view(
     note: snap.notes.get(name).cloned(),
     version: row.version,
     containers,
-    data: crate::data::mounts(name, &row.spec),
+    data: crate::data::observed_mounts(name, &row.spec, history),
     import: import_record(snap, name),
     status,
     monitor: crate::monitor::last(name),
@@ -614,11 +615,14 @@ pub async fn status(
       }
     }
   }
+  let history = crate::data::history(&state.db).await?;
   let services: Vec<ServiceView> = snap
     .world
     .services
     .keys()
-    .filter_map(|n| service_view(&snap, &net, n, Some(&live)))
+    .filter_map(|n| {
+      service_view(&snap, &net, n, Some(&live), &history)
+    })
     .collect();
   let gateways: Vec<GatewayView> = snap
     .world
@@ -717,6 +721,7 @@ pub async fn status(
   }
   issues.extend(crate::link_cert::issues(&snap, &net));
   issues.extend(crate::totp::issues(&state.db).await?);
+  issues.extend(crate::core_backup::issues(&state.db).await?);
   issues.extend(crate::tasks::issues(state).await);
   issues.extend(crate::probe::issues());
   issues.extend(crate::exposure::issues(state).await?);

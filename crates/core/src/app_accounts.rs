@@ -390,7 +390,7 @@ mod tests {
       hub: Default::default(),
       key: ed25519_dalek::SigningKey::from_bytes(&[0; 32]).into(),
       runs: Default::default(),
-      apply_lock: Default::default(),
+      locks: Default::default(),
       public_url: None,
       agent_image: String::new(),
       listen_port: 7700,

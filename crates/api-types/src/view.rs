@@ -420,6 +420,8 @@ pub enum DataKind {
   Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
 )]
 pub struct DataMount {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub resolved: Option<String>,
   pub kind: DataKind,
   /// 宿主机路径或卷名；匿名卷为空。
   pub source: String,
@@ -463,6 +465,8 @@ pub struct DataView {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ServiceData {
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub repo_empty: bool,
   pub name: String,
   /// 数据所在的服务器。
   pub server: String,
@@ -1060,6 +1064,8 @@ pub struct BackupsView {
 /// `POST /api/services/{name}/restore`
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RestoreRequest {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub target: Option<String>,
   /// 快照 id，或 `latest`。
   pub snapshot: String,
   /// 必须是 `service/<名称>`：恢复会覆盖现有数据。

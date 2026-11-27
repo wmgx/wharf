@@ -382,6 +382,7 @@ ALTER TABLE alert_history ADD COLUMN subject TEXT;
   SERVICE_INSTANCE_ID_MIGRATION,
   "DELETE FROM plans WHERE status = 'pending';",
   PENDING_STEPS_MIGRATION,
+  "CREATE INDEX IF NOT EXISTS backups_service_target ON backups (service, target, id);",
 ];
 
 const PENDING_STEPS_MIGRATION: &str = r#"

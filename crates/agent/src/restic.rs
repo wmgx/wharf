@@ -2,7 +2,7 @@
 //!
 //! - 只碰 `/srv/<service>/`，路径由服务名拼出；
 //! - 仓库地址和口令走环境变量传给 docker，不出现在命令行里；
-//! - 容器有固定名字：杀掉 `docker run` 并不会停掉容器，取消或超时后用名字删掉它。
+//! - 每次命令使用独立的容器名：杀掉 `docker run` 并不会停掉容器，取消或超时后用名字删掉它。
 
 use std::{
   net::IpAddr,
@@ -15,8 +15,10 @@ use serde_json::Value;
 use wharf_api_types::{
   ApiError, ErrorCode,
   agent::{
-    BACKUP_ROOT, BackupSummary, CORE_BACKUP_DIR, RESTIC_IMAGE,
-    ResticAction, ResticJob, ResticKeyInfo, ResticRepo, Snapshot,
+    BACKUP_ROOT, BackupSummary, CORE_BACKUP_DIR, EscapedMount,
+    RESTIC_IMAGE, ResticAction, ResticJob, ResticKeyInfo,
+    ResticPreflight, ResticPreflightMode, ResticPreflightResult,
+    ResticRepo, Snapshot,
   },
   validate_name,
 };
@@ -32,7 +34,7 @@ const SHORT_TIMEOUT: Duration = Duration::from_secs(120);
 /// restic 的退出码：仓库不存在。
 const NO_REPO: i32 = 10;
 const WRONG_PASSWORD: i32 = 12;
-static READ_RUN: AtomicU64 = AtomicU64::new(0);
+static RESTIC_RUN: AtomicU64 = AtomicU64::new(0);
 /// 恢复时的临时目录和原目录的保留位置，和 `/srv/<service>` 在同一个文件系统上，改名是原子的。
 const RESTORE_DIR: &str = "/srv/.wharf-restore";
 
@@ -42,21 +44,12 @@ struct Job<'a> {
   repo: String,
   password: &'a str,
   http_auth: Option<(&'a str, &'a str)>,
-  read_run: Option<u64>,
+
   /// 额外的 `-v`。
   mounts: Vec<String>,
 }
 
 impl Job<'_> {
-  fn container(&self) -> String {
-    match self.read_run {
-      Some(id) => {
-        format!("wharf-restic-read-{}-{id}", std::process::id())
-      }
-      None => format!("wharf-restic-{}", self.service),
-    }
-  }
-
   async fn restic(
     &self,
     args: &[&str],
@@ -64,8 +57,14 @@ impl Job<'_> {
     stream: bool,
     ctx: &Ctx,
   ) -> Result<Output, ApiError> {
-    let name = self.container();
-    self.remove_container(&name).await;
+    let seq = RESTIC_RUN.fetch_add(1, Ordering::Relaxed);
+    let name = format!(
+      "wharf-restic-{}-{}-{seq}-{}",
+      self.service,
+      std::process::id(),
+      crate::build::random_suffix()
+    );
+    let label = format!("wharf.restic.service={}", self.service);
     let mut cmd = self
       .docker
       .cmd()
@@ -74,6 +73,8 @@ impl Job<'_> {
         "--rm",
         "--label",
         "wharf.temp=1",
+        "--label",
+        &label,
         "--name",
         &name,
         "--network",
@@ -100,14 +101,69 @@ impl Job<'_> {
       .env("RESTIC_REPOSITORY", &self.repo)
       .env("RESTIC_PASSWORD", self.password)
       .timeout(timeout);
+    if matches!(args.first(), Some(&"backup" | &"restore")) {
+      cmd = cmd
+        .env("RESTIC_PROGRESS_FPS", "0.05")
+        .stall_timeout(Duration::from_secs(900), progress_matcher());
+    } else if args.contains(&"--prune") {
+      cmd = cmd.stall_timeout(Duration::from_secs(1800), |line| {
+        !line.trim().is_empty()
+      });
+    }
+    let clean_line = |mut line: String| {
+      for secret in
+        [self.password, self.http_auth.map_or("", |(_, p)| p)]
+      {
+        if !secret.is_empty() {
+          line = line.replace(secret, "***");
+        }
+      }
+      line
+    };
+    let mut safe_ctx = ctx.clone();
     if stream {
       cmd = cmd.stream(false);
+      if let Some(progress) = &ctx.progress {
+        let progress = progress.clone();
+        let password = self.password.to_string();
+        let http_password =
+          self.http_auth.map_or("", |(_, p)| p).to_string();
+        safe_ctx.progress =
+          Some(std::sync::Arc::new(move |mut line| {
+            for secret in [&password, &http_password] {
+              if !secret.is_empty() {
+                line = line.replace(secret, "***");
+              }
+            }
+            progress(line);
+          }));
+      }
     }
-    let result = cmd.run(ctx).await;
+    let result = cmd.run(&safe_ctx).await.map(|mut out| {
+      if !out.success {
+        for output in [&mut out.stdout, &mut out.stderr] {
+          *output = clean_line(std::mem::take(output));
+        }
+      }
+      out
+    });
     if result.is_err() {
       self.remove_container(&name).await;
     }
-    result
+    match result {
+      Ok(out) if restic_locked(&out) => self.check(out, "restic"),
+      Err(e) if e.code == ErrorCode::Timeout && e.message.contains("无进展") =>
+        Err(e.with_hint("检查源机与备份机连通性，残留仓库锁可用 wharf backup unlock 清理")),
+      other => other,
+    }
+  }
+
+  fn check(
+    &self,
+    out: Output,
+    what: &str,
+  ) -> Result<Output, ApiError> {
+    check_restic_output(out, what, self.service)
   }
 
   async fn remove_container(&self, name: &str) {
@@ -177,6 +233,10 @@ pub async fn run(
             ResticAction::ListKeys => {
               to_value(Vec::<ResticKeyInfo>::new())
             }
+            ResticAction::Unlock { .. } => Err(ApiError::new(
+              ErrorCode::NotFound,
+              "没有找到备份仓库",
+            )),
             _ => Ok(Value::Null),
           };
         }
@@ -200,11 +260,50 @@ pub async fn run(
     repo,
     password: &job.password.0,
     http_auth,
-    read_run: matches!(job.action, ResticAction::Snapshots)
-      .then(|| READ_RUN.fetch_add(1, Ordering::Relaxed)),
+
     mounts,
   };
   match &job.action {
+    ResticAction::Preflight(check) => {
+      if job.core_marker.is_some() {
+        return Err(ApiError::invalid("控制面备份不支持业务预检"));
+      }
+      to_value(preflight(&j, &root, check, ctx).await?)
+    }
+    ResticAction::Unlock { remove_all } => {
+      let out = docker
+        .cmd()
+        .args([
+          "ps",
+          "-q",
+          "--filter",
+          &format!("label=wharf.restic.service={}", job.service),
+        ])
+        .timeout(SHORT_TIMEOUT)
+        .run(ctx)
+        .await?
+        .check("docker ps")?;
+      if !out.stdout.trim().is_empty() {
+        return Err(ApiError::new(
+          ErrorCode::Busy,
+          "该仓库仍有运行中的 restic 容器",
+        ));
+      }
+      let args: &[&str] = if *remove_all {
+        &["unlock", "--remove-all"]
+      } else {
+        &["unlock"]
+      };
+      let out = j.restic(args, SHORT_TIMEOUT, false, ctx).await?;
+      if out.code == Some(WRONG_PASSWORD) {
+        return Err(ApiError::new(
+          ErrorCode::Forbidden,
+          "备份仓库口令不匹配",
+        ));
+      }
+      out.check("restic unlock")?;
+      Ok(Value::Null)
+    }
     ResticAction::Backup { host } => {
       // 控制面的目录不在 agent 容器里，上面已经在宿主机上确认过了。
       if job.core_marker.is_none() {
@@ -317,6 +416,257 @@ pub async fn run(
       Ok(Value::Null)
     }
   }
+}
+
+fn progress_matcher() -> impl FnMut(&str) -> bool {
+  let mut previous = None;
+  move |line| {
+    if line.trim().is_empty() {
+      return false;
+    }
+    let Ok(value) = serde_json::from_str::<Value>(line) else {
+      return true;
+    };
+    if value["message_type"] != "status" {
+      return true;
+    }
+    let files = value["files_done"]
+      .as_u64()
+      .or_else(|| value["files_restored"].as_u64())
+      .unwrap_or_default();
+    let bytes = value["bytes_done"]
+      .as_u64()
+      .or_else(|| value["bytes_restored"].as_u64())
+      .unwrap_or_default();
+    previous.replace((files, bytes)) != Some((files, bytes))
+  }
+}
+
+fn restic_locked(out: &Output) -> bool {
+  !out.success
+    && ["repository is already locked", "unable to create lock"]
+      .iter()
+      .any(|text| out.stderr.contains(text))
+}
+
+fn check_restic_output(
+  out: Output,
+  what: &str,
+  service: &str,
+) -> Result<Output, ApiError> {
+  if restic_locked(&out) {
+    let command = if service == "wharf-core" {
+      "wharf backup core --unlock".to_string()
+    } else {
+      format!("wharf backup unlock {service}")
+    };
+    return Err(
+      ApiError::new(
+        ErrorCode::Conflict,
+        format!("备份仓库 {service} 已锁定"),
+      )
+      .with_hint("确认没有正在进行的备份任务后解锁仓库")
+      .suggest(command),
+    );
+  }
+  out.check(what)
+}
+
+async fn preflight(
+  j: &Job<'_>,
+  root: &Path,
+  check: &ResticPreflight,
+  ctx: &Ctx,
+) -> Result<ResticPreflightResult, ApiError> {
+  let srv = Path::new("/srv");
+  let backup = matches!(&check.mode, ResticPreflightMode::Backup);
+  if !backup {
+    reject_mountpoint(srv, j.service)?;
+  }
+  let escaped_mounts = match DirFd::open_service_root(srv, j.service)
+  {
+    Ok(_) => {
+      detect_escaped_mounts(srv, j.service, &check.managed_mounts)?
+    }
+    Err(e) if !backup && e.code == ErrorCode::NotFound => Vec::new(),
+    Err(e) => return Err(e),
+  };
+  let targets: Vec<_> = std::iter::once(root.to_path_buf())
+    .chain(escaped_mounts.iter().map(|m| PathBuf::from(&m.resolved)))
+    .collect();
+  let conflicting_users = j
+    .docker
+    .bind_mount_active_users(&targets, j.service, backup, ctx)
+    .await?;
+  if conflicting_users.is_empty() {
+    match &check.mode {
+      ResticPreflightMode::Backup => {
+        ensure_repo(j, ctx).await?;
+        j.restic(
+          &["snapshots", "--latest", "1", "--json"],
+          SHORT_TIMEOUT,
+          false,
+          ctx,
+        )
+        .await?
+        .check("restic snapshots")?;
+      }
+      ResticPreflightMode::Restore { snapshot } => {
+        check_snapshot(snapshot)?;
+        let args = if snapshot == "latest" {
+          vec!["snapshots", "--latest", "1", "--json"]
+        } else {
+          vec!["snapshots", snapshot.as_str(), "--json"]
+        };
+        let out = j
+          .restic(&args, SHORT_TIMEOUT, false, ctx)
+          .await?
+          .check("restic snapshots")?;
+        let snapshots: Vec<Snapshot> =
+          serde_json::from_str(&out.stdout)
+            .map_err(|_| ApiError::internal("无法解析快照列表"))?;
+        if snapshots.is_empty() {
+          return Err(ApiError::new(
+            ErrorCode::NotFound,
+            format!("没有找到快照 {snapshot}"),
+          ));
+        }
+      }
+    }
+  }
+  Ok(ResticPreflightResult {
+    escaped_mounts,
+    conflicting_users,
+    is_mountpoint: false,
+  })
+}
+
+fn detect_escaped_mounts(
+  srv: &Path,
+  service: &str,
+  managed_mounts: &[String],
+) -> Result<Vec<EscapedMount>, ApiError> {
+  let root = srv.join(service);
+  let mut paths: std::collections::BTreeSet<PathBuf> = managed_mounts
+    .iter()
+    .map(PathBuf::from)
+    .filter(|p| p.starts_with(&root))
+    .collect();
+  for entry in std::fs::read_dir(&root).map_err(io_err(&root))? {
+    paths.insert(entry.map_err(io_err(&root))?.path());
+  }
+  let mut escaped = Vec::new();
+  for source in paths {
+    let mut path = crate::docker::normalize_abs(&source)
+      .ok_or_else(|| ApiError::invalid("挂载路径必须是绝对路径"))?;
+    for hops in 0..=40 {
+      let Ok(relative) = path.strip_prefix(&root) else {
+        escaped.push(EscapedMount {
+          source: source.display().to_string(),
+          resolved: path.display().to_string(),
+        });
+        break;
+      };
+      let mut current = root.clone();
+      let mut parts = relative.components();
+      let mut expanded = None;
+      while let Some(part) = parts.next() {
+        let next = current.join(part);
+        match std::fs::symlink_metadata(&next) {
+          Ok(meta) if meta.is_symlink() => {
+            let link =
+              std::fs::read_link(&next).map_err(io_err(&next))?;
+            expanded = crate::docker::normalize_abs(
+              &current.join(link).join(parts.as_path()),
+            );
+            break;
+          }
+          Ok(_) => current = next,
+          Err(e)
+            if matches!(
+              e.kind(),
+              std::io::ErrorKind::NotFound
+                | std::io::ErrorKind::NotADirectory
+            ) =>
+          {
+            break;
+          }
+          Err(e) => return Err(io_err(&next)(e)),
+        }
+      }
+      let Some(next) = expanded else {
+        break;
+      };
+      if hops == 40 {
+        return Err(ApiError::invalid(format!(
+          "软链循环：{}",
+          source.display()
+        )));
+      }
+      path = next;
+    }
+  }
+  Ok(escaped)
+}
+
+fn is_mountpoint(
+  srv: &Path,
+  service: &str,
+  mountinfo: Option<&str>,
+) -> Result<bool, ApiError> {
+  let root = srv.join(service);
+  let dir = match DirFd::open_service_root(srv, service) {
+    Ok(dir) => dir,
+    Err(e) if e.code == ErrorCode::NotFound => return Ok(false),
+    Err(e) => return Err(e),
+  };
+  let parent = DirFd::open_dir(srv)
+    .and_then(|fd| fd.stat_self())
+    .map_err(io_err(srv))?;
+  Ok(
+    dir.stat_self().map_err(io_err(&root))?.st_dev != parent.st_dev
+      || mountinfo.is_some_and(|info| {
+        info
+          .lines()
+          .filter_map(|line| line.split_whitespace().nth(4))
+          .any(|p| Path::new(p) == root)
+      }),
+  )
+}
+
+fn reject_mountpoint(
+  srv: &Path,
+  service: &str,
+) -> Result<(), ApiError> {
+  let info = std::fs::read_to_string("/proc/self/mountinfo")
+    .map_err(io_err(Path::new("/proc/self/mountinfo")))?;
+  if is_mountpoint(srv, service, Some(&info))? {
+    return Err(
+      ApiError::new(
+        ErrorCode::Conflict,
+        format!("/srv/{service} 本身是独立挂载点，无法整体切换目录"),
+      )
+      .with_hint(format!(
+        "把数据盘改挂到 /srv/{service}/data 子目录后重试"
+      )),
+    );
+  }
+  // 子挂载也无法随父目录安全换位。
+  let root = srv.join(service);
+  if info
+    .lines()
+    .filter_map(|line| line.split_whitespace().nth(4))
+    .any(|p| Path::new(p) != root && Path::new(p).starts_with(&root))
+  {
+    return Err(
+      ApiError::new(
+        ErrorCode::Conflict,
+        format!("/srv/{service} 下有活跃子挂载，无法整体切换目录"),
+      )
+      .with_hint("先卸载服务目录下的挂载，再恢复数据"),
+    );
+  }
+  Ok(())
 }
 
 /// 控制面自身备份的目录。用标记确认这台就是控制面所在的机器。
@@ -469,6 +819,7 @@ async fn restore(
   ctx: &Ctx,
 ) -> Result<Value, ApiError> {
   check_snapshot(snapshot)?;
+  reject_mountpoint(Path::new("/srv"), j.service)?;
   let nonce = crate::build::random_suffix();
   let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
   let work_name = format!("{}-{stamp}-{nonce}", j.service);
@@ -493,6 +844,7 @@ async fn restore(
     &[
       "restore",
       snapshot,
+      "--json",
       "--target",
       "/restore",
       "--include",
@@ -523,6 +875,168 @@ async fn restore(
   } else {
     Ok(Value::Null)
   }
+}
+
+pub async fn cleanup_containers(docker: &Docker) {
+  for status in ["exited", "dead"] {
+    let ctx = Ctx::detached();
+    if let Ok(out) = docker
+      .cmd()
+      .args([
+        "ps",
+        "-aq",
+        "--filter",
+        "label=wharf.restic.service",
+        "--filter",
+        &format!("status={status}"),
+      ])
+      .timeout(SHORT_TIMEOUT)
+      .run(&ctx)
+      .await
+      && out.success
+    {
+      let ids: Vec<_> = out
+        .stdout
+        .split_whitespace()
+        .filter(|id| id.bytes().all(|b| b.is_ascii_hexdigit()))
+        .collect();
+      if !ids.is_empty() {
+        let _ = docker
+          .cmd()
+          .arg("rm")
+          .args(ids)
+          .timeout(SHORT_TIMEOUT)
+          .run(&ctx)
+          .await;
+      }
+    }
+  }
+}
+
+fn restore_dir_entries(
+  srv: &Path,
+) -> Result<Vec<(PathBuf, wharf_api_types::agent::FileEntry)>, ApiError>
+{
+  let parent = srv.join(".wharf-restore");
+  let root = DirFd::open_dir(srv).map_err(|e| dir_error(srv, e))?;
+  let dir = match root.open_subdir(c".wharf-restore") {
+    Ok(d) => d,
+    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+      return Ok(Vec::new());
+    }
+    Err(e) => return Err(dir_error(&parent, e)),
+  };
+  Ok(
+    dir
+      .read_entries(&parent)?
+      .into_iter()
+      .filter(|e| e.dir && !e.link)
+      .map(|e| (parent.join(&e.name), e))
+      .collect(),
+  )
+}
+
+fn restore_dir_name(name: &str) -> Option<&str> {
+  if let Some(nonce) = name.strip_prefix(".install-") {
+    return (nonce.len() == 8
+      && nonce.bytes().all(|b| b.is_ascii_hexdigit()))
+    .then_some("");
+  }
+  let (prefix, nonce) = name.rsplit_once('-')?;
+  if nonce.len() != 8 || !nonce.bytes().all(|b| b.is_ascii_hexdigit())
+  {
+    return None;
+  }
+  let (prefix, time) = prefix.rsplit_once('-')?;
+  let (service, date) = prefix.rsplit_once('-')?;
+  if date.len() != 8
+    || time.len() != 6
+    || !date.bytes().chain(time.bytes()).all(|b| b.is_ascii_digit())
+  {
+    return None;
+  }
+  Some(service)
+}
+
+fn remove_restore_dir(
+  path: &Path,
+  mountinfo: &str,
+) -> Result<(), ApiError> {
+  if mountinfo
+    .lines()
+    .filter_map(|line| line.split_whitespace().nth(4))
+    .any(|mount| Path::new(mount).starts_with(path))
+  {
+    return Err(ApiError::new(
+      ErrorCode::Conflict,
+      format!("{} 含有挂载，跳过清理", path.display()),
+    ));
+  }
+  std::fs::remove_dir_all(path).map_err(io_err(path))
+}
+
+pub fn cleanup_stale_restore_work(srv: &Path) {
+  let Ok(entries) = restore_dir_entries(srv) else {
+    return;
+  };
+  let Ok(mountinfo) = std::fs::read_to_string("/proc/self/mountinfo")
+  else {
+    return;
+  };
+  for (path, entry) in entries {
+    // 服务名可能含 -before，任何疑似保留目录都留给显式清理。
+    if restore_dir_name(&entry.name).is_some()
+      && !entry.name.contains("-before-")
+      && let Err(e) = remove_restore_dir(&path, &mountinfo)
+    {
+      tracing::warn!("{}", e.message);
+    }
+  }
+}
+
+pub fn prune_restore_kept(
+  srv: &Path,
+  older_than_days: u32,
+  ctx: &Ctx,
+) -> Result<wharf_api_types::agent::PruneRestoreResult, ApiError> {
+  let cutoff = chrono::Utc::now().timestamp_millis()
+    - i64::from(older_than_days) * 86_400_000;
+  let mut result = wharf_api_types::agent::PruneRestoreResult {
+    removed: 0,
+    bytes: 0,
+  };
+  let mountinfo = std::fs::read_to_string("/proc/self/mountinfo")
+    .map_err(io_err(Path::new("/proc/self/mountinfo")))?;
+  for (path, entry) in restore_dir_entries(srv)? {
+    if ctx.cancel.is_cancelled() {
+      return Err(ApiError::new(ErrorCode::Cancelled, "已取消"));
+    }
+    if restore_dir_name(&entry.name)
+      .is_some_and(|p| p.ends_with("-before"))
+      && (older_than_days == 0 || entry.modified < cutoff)
+    {
+      let bytes = restore_bytes(&path, ctx).map_err(io_err(&path))?;
+      remove_restore_dir(&path, &mountinfo)?;
+      result.removed += 1;
+      result.bytes = result.bytes.saturating_add(bytes);
+    }
+  }
+  Ok(result)
+}
+
+fn restore_bytes(path: &Path, ctx: &Ctx) -> std::io::Result<u64> {
+  let meta = std::fs::symlink_metadata(path)?;
+  let mut bytes = meta.len();
+  if meta.is_dir() {
+    for entry in std::fs::read_dir(path)? {
+      if ctx.cancel.is_cancelled() {
+        return Err(std::io::ErrorKind::Interrupted.into());
+      }
+      bytes =
+        bytes.saturating_add(restore_bytes(&entry?.path(), ctx)?);
+    }
+  }
+  Ok(bytes)
 }
 
 struct RestoreWork(PathBuf);
@@ -676,6 +1190,7 @@ fn parse_summary(stdout: &str) -> Result<BackupSummary, ApiError> {
     .filter_map(|l| serde_json::from_str::<Value>(l).ok())
     .find(|v| v["message_type"] == "summary")
     .map(|v| BackupSummary {
+      escaped_mounts: Vec::new(),
       snapshot_id: v["snapshot_id"]
         .as_str()
         .unwrap_or_default()

@@ -89,6 +89,7 @@ export interface AgentReport {
    */
   agent_memory?: AgentMemory | null;
   arch: string;
+  backup_repos?: Record<string, number> | null;
   /**
    * 构建号，见 [crate::BUILD]。旧版本 agent 没有。
    */
@@ -373,6 +374,7 @@ export interface BackupSummary {
    */
   added_bytes: number;
   bytes: number;
+  escaped_mounts?: EscapedMount[];
   files: number;
   snapshot_id: string;
 }
@@ -733,6 +735,7 @@ export interface DataMount {
    */
   container?: string | null;
   kind: DataKind;
+  resolved?: string | null;
   /**
    * 宿主机路径或卷名；匿名卷为空。
    */
@@ -1047,6 +1050,11 @@ export interface EgressSpec {
 export type ErrorCode = "InvalidInput" | "NotFound" | "AlreadyExists" | "Conflict" | "Unauthorized" | "Forbidden" | "PasswordRequired" | "AgentOffline" | "Timeout" | "Cancelled" | "NotImplemented" | "Internal" | "PlanStale" | "ConfirmRequired" | "Busy" | "AgentFailed" | "Provider";
 
 export type ExplainVerdict = "allow" | "deny" | "depends";
+
+export interface EscapedMount {
+  resolved: string;
+  source: string;
+}
 
 export interface ExposureView {
   checked_at: number | null;
@@ -2169,6 +2177,7 @@ export interface RestoreRequest {
    * 快照 id，或 `latest`。
    */
   snapshot: string;
+  target?: string | null;
 }
 
 export interface RiskRow {
@@ -2552,6 +2561,7 @@ export interface ServiceData {
   last_ok?: string | null;
   mounts: DataMount[];
   name: string;
+  repo_empty?: boolean;
   /**
    * 数据所在的服务器。
    */
