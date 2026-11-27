@@ -421,6 +421,12 @@ impl World {
             content: Some(content),
             ..
           } = &spec.source
+            && old.is_none_or(|old| {
+              old.spec.source != spec.source
+                || old.spec.container != spec.container
+                || old.spec.limits != spec.limits
+                || old.spec.env != spec.env
+            })
           {
             crate::render::compose_with_settings(
               name, content, &spec,

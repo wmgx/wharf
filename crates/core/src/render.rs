@@ -905,6 +905,15 @@ pub fn compose_with_settings(
   content: &str,
   spec: &ServiceSpec,
 ) -> Result<String, ApiError> {
+  apply_compose_settings(name, content, spec, true)
+}
+
+fn apply_compose_settings(
+  name: &str,
+  content: &str,
+  spec: &ServiceSpec,
+  check_inherited: bool,
+) -> Result<String, ApiError> {
   let limits = spec.limits.clone().unwrap_or_default();
   if limits.memory_mb.is_none()
     && limits.cpu_milli.is_none()
@@ -920,7 +929,12 @@ pub fn compose_with_settings(
     ))
     .with_hint("直接写在 compose 文件里（environment、mem_limit、cpus），然后去掉设置里的")
   };
-  let value = parse_compose_template(content)?;
+  // 新改动检查继承字段，已存配置渲染仍允许原来生效的覆盖。
+  let value = if check_inherited {
+    parse_compose_template(content)?
+  } else {
+    serde_yaml_ng::from_str(content).map_err(|_| unsupported())?
+  };
   let body = &value["services"][target.as_str()];
   if (limits.memory_mb.is_some() || limits.cpu_milli.is_some())
     && ["mem_limit", "cpus", "deploy"]
@@ -1130,7 +1144,7 @@ fn compose_with_resolved_env(
       &mut file_secrets,
     )?;
   }
-  let out = compose_with_settings(name, &content, &spec)?;
+  let out = apply_compose_settings(name, &content, &spec, false)?;
   if !file_secrets.is_empty() {
     let target =
       compose_target(name, &content, spec.container.as_deref())
@@ -1156,7 +1170,8 @@ pub fn service_compose(
   match &spec.source {
     Source::Compose { content, .. } => {
       let content = content.as_deref().unwrap_or_default();
-      let template = compose_with_settings(name, content, spec)?;
+      let template =
+        apply_compose_settings(name, content, spec, false)?;
       let legacy = substitute_compose(name, &template, secrets);
       let Some(secrets) = secrets.filter(|_| !spec.env.is_empty())
       else {
@@ -2237,6 +2252,18 @@ mod tests {
           .contains(error)
       );
     }
+    let stored = serde_json::from_value(serde_json::json!({
+      "server": "s1", "limits": {"memory_mb": 64},
+      "source": {"compose": {"content": text}},
+    }))
+    .unwrap();
+    let (rendered, _) =
+      service_compose("app", &stored, &BTreeMap::new(), &[], None)
+        .unwrap();
+    assert_eq!(
+      rendered,
+      text.replacen("  app:\n", "  app:\n    mem_limit: 64m\n", 1)
+    );
   }
 
   #[test]
