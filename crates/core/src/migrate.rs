@@ -69,9 +69,7 @@ pub async fn volume_sync(
   cancel: &CancellationToken,
 ) -> Result<(), ApiError> {
   for server in [from, to] {
-    if !state.hub.supports_safe_migrate(server) {
-      return Err(crate::hub::safe_migrate_required(server));
-    }
+    state.hub.require_safe_migrate(server)?;
   }
   let source_ip = private_ip(net, from)?;
   let target_ip = private_ip(net, to)?;
@@ -302,18 +300,22 @@ pub async fn restart_source(
   progress: &ProgressFn,
 ) -> bool {
   progress(format!("迁移失败，重新启动 {server} 上的 {service}"));
-  let result = state
-    .hub
-    .call::<bool>(
-      server,
-      AgentOp::ProjectStart {
-        project: service.to_string(),
-      },
-      STOP_TIMEOUT,
-      Some(progress.clone()),
-      &CancellationToken::new(),
-    )
-    .await;
+  let result = async {
+    pending::source_changed(state, service).await?;
+    state
+      .hub
+      .call::<bool>(
+        server,
+        AgentOp::ProjectStart {
+          project: service.to_string(),
+        },
+        STOP_TIMEOUT,
+        Some(progress.clone()),
+        &CancellationToken::new(),
+      )
+      .await
+  }
+  .await;
   match result {
     Ok(true) => true,
     other => {
@@ -322,7 +324,7 @@ pub async fn restart_source(
         .map(|e| e.message)
         .unwrap_or_else(|| "容器不存在".into());
       progress(format!(
-        "重新启动失败：{detail}，需要手动处理：wharf service start {service}"
+        "重新启动失败：{detail}，需要手动处理：wharf service restart {service}"
       ));
       false
     }
@@ -447,6 +449,38 @@ pub(crate) mod tests {
       })
       .await
       .unwrap();
+  }
+
+  #[tokio::test]
+  async fn offline_agent_is_reported_offline_for_safe_migrate_operations()
+   {
+    let state = seed_service(true).await;
+    let progress: ProgressFn = Arc::new(|_| {});
+    let cancel = CancellationToken::new();
+    let error = volume_sync(
+      &state,
+      &migration_net(),
+      "notes",
+      ("s1", "s2"),
+      false,
+      progress.clone(),
+      &cancel,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::AgentOffline);
+    assert!(error.message.contains("s1"));
+    let step = crate::planner::Step::ServiceUp {
+      service: "notes".into(),
+      instance_id: None,
+      expect: None,
+    };
+    let error =
+      crate::apply::run_step(&state, "r1", &step, progress, &cancel)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::AgentOffline);
+    assert!(error.message.contains("s2"));
   }
 
   #[tokio::test]

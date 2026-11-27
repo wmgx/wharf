@@ -246,6 +246,7 @@ mod confirm;
 #[path = "apply/retry.rs"]
 mod retry;
 
+pub(crate) use retry::record_changes as record_retry_changes;
 pub use retry::retry_run;
 
 pub(crate) fn format_actor(auth: &crate::auth::Auth) -> String {
@@ -946,6 +947,9 @@ async fn execute(
     let _ = persist(&state, &snapshot_run, scope_services).await;
     crate::views::refresh_live_soon(state.clone());
   }
+  if failed || cancel.is_cancelled() {
+    recover_skipped_migrations(&state, &run, &steps, offset).await;
+  }
   let final_run = {
     let mut r = lock(&run);
     r.status = if cancel.is_cancelled() {
@@ -972,6 +976,66 @@ async fn execute(
     tokio::spawn(
       async move { crate::updates::versions(&state).await },
     );
+  }
+}
+
+async fn recover_skipped_migrations(
+  state: &AppState,
+  run: &Arc<Mutex<Run>>,
+  steps: &[StepPlan],
+  offset: usize,
+) {
+  let snap = match snapshot::load(&state.db).await {
+    Ok(snap) => snap,
+    Err(e) => {
+      tracing::warn!("读取待恢复的迁移失败：{e}");
+      return;
+    }
+  };
+  for (i, step) in steps.iter().enumerate() {
+    let Step::ServiceUp {
+      service,
+      instance_id,
+      ..
+    } = &step.step
+    else {
+      continue;
+    };
+    let index = offset + i;
+    if lock(run).steps[index].status != StepStatus::Skipped
+      || check_step_instance(
+        &snap.world,
+        service,
+        instance_id.as_deref(),
+      )
+      .is_err()
+    {
+      continue;
+    }
+    let Some(m) = snap.pending.migrations.get(service).filter(|m| {
+      m.phase != crate::pending::MigratePhase::UpDone
+        && m.payload.source_stopped
+    }) else {
+      continue;
+    };
+    let run = run.clone();
+    let progress: ProgressFn = Arc::new(move |message| {
+      lock(&run).steps[index]
+        .log
+        .push(crate::log_redact::redact_text(&message));
+    });
+    if crate::migrate::restart_source(
+      state,
+      &m.payload.from,
+      service,
+      &progress,
+    )
+    .await
+      && let Err(e) =
+        crate::migrate::reset_after_restart(state, service).await
+    {
+      progress(format!("源机已启动，更新迁移状态失败：{e}"));
+    }
   }
 }
 
@@ -1150,7 +1214,7 @@ pub(crate) async fn run_step(
             ));
             return Err(e.with_hint(format!("源机已恢复运行；排查后可重试，或执行 wharf service move {service} --abort --apply 取消迁移")));
           }
-          return Err(e.with_hint(format!("源机自动恢复失败，请先检查 {from} 并手动 wharf service start {service}")));
+          return Err(e.with_hint(format!("源机自动恢复失败，请先检查 {from} 并手动 wharf service restart {service}")));
         }
         return Err(e);
       }
@@ -1198,6 +1262,13 @@ pub(crate) async fn run_step(
         state, &server, service, true, &progress, cancel,
       )
       .await?;
+      if snap.pending.migrations.get(service).is_some_and(|m| {
+        m.phase != crate::pending::MigratePhase::UpDone
+          && m.payload.from == server
+          && m.payload.source_stopped
+      }) {
+        crate::migrate::reset_after_restart(state, service).await?;
+      }
     }
     Step::CoreBackup { user_key } => {
       crate::core_backup::backup(
@@ -1233,7 +1304,7 @@ pub(crate) async fn run_step(
       .await?;
     }
     Step::Egress { server } => {
-      crate::egress::apply(state, server, cancel).await?;
+      crate::egress::apply(state, run_id, server, cancel).await?;
     }
     Step::Prune { server } => {
       crate::prune::prune(state, server, progress, cancel).await?;
@@ -1317,9 +1388,10 @@ pub(crate) async fn run_step(
         &r.fingerprint(),
         &format!("网关 {gateway}"),
       )?;
-      let r =
-        gateway::caddyfile_for_apply(state, world, &net, gateway, r)
-          .await?;
+      let r = gateway::caddyfile_for_apply(
+        state, run_id, world, &net, gateway, r,
+      )
+      .await?;
       let result: ProjectUpResult = state
         .hub
         .call(
@@ -1375,27 +1447,28 @@ pub(crate) async fn run_step(
         )?;
       }
       let gateway = p.gateway;
+      let run_id = run_id.to_string();
       let (token, ca) = state
         .db
         .call_credentials({
           let gateway = gateway.clone();
           move |c, key| {
             let now = db::now_ms();
-            let tx = c.transaction().map_err(db::sql_err)?;
-            let token = db::ensure_scoped_secret(
-              &tx,
-              key,
-              crate::link::TOKEN_PREFIX,
-              &gateway,
-              now,
-            )?;
-            let ca = if client {
-              Some(crate::link_cert::ensure_ca(&tx, key, now)?.cert)
-            } else {
-              None
-            };
-            tx.commit().map_err(db::sql_err)?;
-            Ok((token, ca))
+            record_retry_changes(c, key, &run_id, |tx| {
+              let token = db::ensure_scoped_secret(
+                tx,
+                key,
+                crate::link::TOKEN_PREFIX,
+                &gateway,
+                now,
+              )?;
+              let ca = if client {
+                Some(crate::link_cert::ensure_ca(tx, key, now)?.cert)
+              } else {
+                None
+              };
+              Ok((token, ca))
+            })
           }
         })
         .await?;
@@ -1794,8 +1867,8 @@ async fn service_up(
     state.hub.require_safe_adopt(server)?;
   }
   let no_start = row.spec.stopped;
-  if no_start && !pull_missing_only && !state.hub.supports_safe_migrate(server) {
-    return Err(crate::hub::safe_migrate_required(server));
+  if no_start && !pull_missing_only {
+    state.hub.require_safe_migrate(server)?;
   }
   let (compose, hash) = snapshot::service_resolved(
     world,
@@ -1935,10 +2008,13 @@ async fn service_up(
       .map(|r| r.renamed.clone().unwrap_or_else(|| r.name.clone()))
       .collect();
     let (service, server) = (service.to_string(), server.to_string());
+    let run_id = run_id.to_string();
     state
       .db
-      .call(move |c| {
-        db::finish_import(c, &service, &server, &import, &retired)
+      .call_credentials(move |c, key| {
+        record_retry_changes(c, key, &run_id, |tx| {
+          db::finish_import(tx, &service, &server, &import, &retired)
+        })
       })
       .await?;
   }
@@ -2530,6 +2606,118 @@ mod tests {
   }
 
   #[tokio::test]
+  async fn failed_post_sync_step_restarts_source_of_skipped_deploy() {
+    use crate::migrate::tests::{seed_migration, seed_service};
+    let state = seed_service(false).await;
+    seed_migration(&state, "synced", true).await;
+    state.hub.mock_agent("s2", false, |op| {
+      assert!(matches!(op, AgentOp::EnsureDirs { .. }));
+      Err(ApiError::internal("创建目标目录失败"))
+    });
+    let (started, mut observed) = tokio::sync::oneshot::channel();
+    let mut started = Some(started);
+    state.hub.mock_agent("s1", false, move |op| {
+      assert!(matches!(op, AgentOp::ProjectStart { project } if project == "notes"));
+      started.take().unwrap().send(()).unwrap();
+      Ok(serde_json::json!(true))
+    });
+    let steps: Vec<_> = [
+      Step::EnsureDirs {
+        server: "s2".into(),
+        dirs: vec!["/srv/notes/data".into()],
+        after_sync: true,
+      },
+      Step::ServiceUp {
+        service: "notes".into(),
+        expect: None,
+        instance_id: None,
+      },
+    ]
+    .into_iter()
+    .map(|step| StepPlan {
+      title: "迁移".into(),
+      items: vec![],
+      step,
+    })
+    .collect();
+    let run = Arc::new(Mutex::new(Run {
+      run_id: "r1".into(),
+      plan_id: String::new(),
+      actor: None,
+      retry_of: None,
+      status: RunStatus::Running,
+      started_at: Utc::now(),
+      finished_at: None,
+      steps: steps.iter().map(pending_run_step).collect(),
+    }));
+    let guard = state.apply_lock.clone().try_lock_owned().unwrap();
+    execute(
+      state.clone(),
+      run.clone(),
+      steps,
+      0,
+      None,
+      CancellationToken::new(),
+      guard,
+    )
+    .await;
+    observed.try_recv().unwrap();
+    assert_eq!(lock(&run).steps[1].status, StepStatus::Skipped);
+    let snap = snapshot::load(&state.db).await.unwrap();
+    let migration = &snap.pending.migrations["notes"];
+    assert_eq!(
+      migration.phase,
+      crate::pending::MigratePhase::Pending
+    );
+    assert!(!migration.payload.source_stopped);
+  }
+
+  #[tokio::test]
+  async fn failed_source_recovery_suggests_restart_on_source() {
+    use crate::migrate::tests::{seed_migration, seed_service};
+    let state = seed_service(false).await;
+    seed_migration(&state, "synced", true).await;
+    let mut starts = 0;
+    state.hub.mock_agent("s1", false, move |op| {
+      match op {
+        AgentOp::ProjectStart { project } if project == "notes" => {
+          starts += 1;
+          if starts == 1 {
+            return Err(ApiError::internal("启动失败"));
+          }
+        }
+        AgentOp::ProjectStop { project } if project == "notes" => {
+          assert_eq!(starts, 1)
+        }
+        _ => panic!("意外请求"),
+      }
+      Ok(serde_json::json!(true))
+    });
+    let cancel = CancellationToken::new();
+    let progress: ProgressFn = Arc::new(|_| {});
+    let up = Step::ServiceUp {
+      service: "notes".into(),
+      instance_id: None,
+      expect: None,
+    };
+    let error =
+      run_step(&state, "r1", &up, progress.clone(), &cancel)
+        .await
+        .unwrap_err();
+    assert!(
+      error.hint.unwrap().contains("wharf service restart notes")
+    );
+    let restart = Step::ServiceRestart {
+      service: "notes".into(),
+    };
+    run_step(&state, "r2", &restart, progress, &cancel)
+      .await
+      .unwrap();
+    let snap = snapshot::load(&state.db).await.unwrap();
+    assert!(!snap.pending.migrations["notes"].payload.source_stopped);
+  }
+
+  #[tokio::test]
   async fn stopped_service_update_sends_no_start_and_records_unstarted()
    {
     let state = crate::migrate::tests::seed_service(true).await;
@@ -2547,7 +2735,9 @@ mod tests {
     assert_eq!(result.unwrap_err().code, ErrorCode::Conflict);
     state.hub.mock_safe_migrate_agent("s2", |op, _| {
       assert!(matches!(op, AgentOp::ProjectUp(up) if up.no_start && !up.rollback && up.trial.is_none()));
-      Some(Ok(serde_json::json!({"containers": [], "images": []})))
+      Some(Ok(serde_json::json!({"containers": [
+        {"service": "notes", "name": "notes-1", "state": "created"}
+      ], "images": []})))
     });
     run_step(&state, "r2", &step, Arc::new(|_| {}), &cancel)
       .await

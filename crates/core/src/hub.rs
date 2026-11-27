@@ -291,9 +291,22 @@ impl Hub {
   }
 
   pub fn supports_safe_migrate(&self, server: &str) -> bool {
-    lock(&self.conns)
+    self.require_safe_migrate(server).is_ok()
+  }
+
+  pub(crate) fn require_safe_migrate(
+    &self,
+    server: &str,
+  ) -> Result<(), ApiError> {
+    let conns = lock(&self.conns);
+    let conn = conns
       .get(server)
-      .is_some_and(|c| !c.upgrade_only && c.safe_migrate)
+      .filter(|conn| !conn.closed.is_cancelled())
+      .ok_or_else(|| offline(server))?;
+    if conn.upgrade_only || !conn.safe_migrate {
+      return Err(safe_migrate_required(server));
+    }
+    Ok(())
   }
 
   pub fn supports_safe_delete(&self, server: &str) -> bool {

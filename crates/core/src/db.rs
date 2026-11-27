@@ -1958,13 +1958,12 @@ pub fn deployed_servers(
 
 /// 导入后第一次部署成功：记进导入记录，清掉服务上的待办导入，之后部署不再接管。
 pub fn finish_import(
-  c: &Connection,
+  tx: &rusqlite::Transaction<'_>,
   service: &str,
   server: &str,
   adopt: &AdoptSpec,
   retired: &[String],
 ) -> Result<(), ApiError> {
-  let tx = c.unchecked_transaction().map_err(sql_err)?;
   tx.execute(
     "INSERT OR REPLACE INTO imports (service, server, project, containers, retired, done_at)
      VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -1984,7 +1983,7 @@ pub fn finish_import(
     params![service],
   )
   .map_err(sql_err)?;
-  tx.commit().map_err(sql_err)
+  Ok(())
 }
 
 pub fn imports(

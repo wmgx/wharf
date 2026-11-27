@@ -339,7 +339,6 @@ pub(crate) async fn deploy_server(
     .call(
       &w.target,
       AgentOp::ProjectUp(ProjectUp {
-        no_start: false,
         project: project.to_string(),
         compose,
         hash,

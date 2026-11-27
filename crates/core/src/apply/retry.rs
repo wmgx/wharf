@@ -45,13 +45,10 @@ impl RetryMeta {
     key: &db::CredentialsKey,
     from_plan: bool,
   ) -> Result<(), ApiError> {
-    let instances = db::service_instances(c)?;
     let changed = if from_plan {
-      self.post_versions != db::versions(c)?
-        || self.post_instances != instances
-        || self.inputs
-          != db::inputs(c, key, self.account_refs.as_ref())?
+      !self.is_fresh(c, key)?
     } else {
+      let instances = db::service_instances(c)?;
       self
         .steps
         .iter()
@@ -75,6 +72,63 @@ impl RetryMeta {
     }
     Ok(())
   }
+
+  fn is_fresh(
+    &self,
+    c: &rusqlite::Connection,
+    key: &db::CredentialsKey,
+  ) -> Result<bool, ApiError> {
+    Ok(
+      self.post_versions == db::versions(c)?
+        && self.post_instances == db::service_instances(c)?
+        && self.inputs
+          == db::inputs(c, key, self.account_refs.as_ref())?,
+    )
+  }
+}
+
+// 只把当前事务的变化计入续跑基线，保留之前发生的外部漂移。
+pub(crate) fn record_changes<T>(
+  c: &mut rusqlite::Connection,
+  key: &db::CredentialsKey,
+  run_id: &str,
+  write: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<T, ApiError>,
+) -> Result<T, ApiError> {
+  let tx = c.transaction().map_err(sql_err)?;
+  let before: Option<String> = tx
+    .query_row(
+      "SELECT retry_meta FROM runs WHERE id = ?1 AND plan_id <> '' AND retry_meta IS NOT NULL",
+      [run_id],
+      |r| r.get(0),
+    )
+    .optional()
+    .map_err(sql_err)?;
+  let before = before
+    .map(|raw| {
+      serde_json::from_str::<RetryMeta>(&raw).map_err(json_err)
+    })
+    .transpose()?;
+  let fresh = before
+    .as_ref()
+    .map(|meta| meta.is_fresh(&tx, key))
+    .transpose()?
+    .unwrap_or(false);
+  let result = write(&tx)?;
+  if let Some(mut meta) = before.filter(|_| fresh) {
+    meta.post_versions = db::versions(&tx)?;
+    meta.post_instances = db::service_instances(&tx)?;
+    meta.inputs = db::inputs(&tx, key, meta.account_refs.as_ref())?;
+    tx.execute(
+      "UPDATE runs SET retry_meta = ?2 WHERE id = ?1",
+      params![
+        run_id,
+        serde_json::to_string(&meta).map_err(json_err)?
+      ],
+    )
+    .map_err(sql_err)?;
+  }
+  tx.commit().map_err(sql_err)?;
+  Ok(result)
 }
 
 fn require_retryable(run: &Run) -> Result<(), ApiError> {
@@ -163,6 +217,7 @@ async fn require_retry_access(
   original: &Run,
   steps: &[StepPlan],
   snap: &snapshot::Snapshot,
+  confirmed: &[String],
 ) -> Result<(), ApiError> {
   let core_server = crate::join::core_server_of(snap);
   if !original.plan_id.is_empty() {
@@ -170,6 +225,42 @@ async fn require_retry_access(
     let mut plan = stored.body.plan;
     let items: BTreeSet<_> =
       steps.iter().flat_map(|s| s.items.iter().copied()).collect();
+    let needs_confirm: BTreeSet<_> = plan
+      .items
+      .iter()
+      .filter(|item| item.needs_confirm())
+      .filter(|item| {
+        if items.contains(&item.id) {
+          return true;
+        }
+        if item.layer == Layer::Config
+          && let Some(host) = item.address.strip_prefix("route/")
+          && let Some(route) = snap.world.routes.get(host)
+        {
+          let gateway = snap.world.route_gateway(&route.spec);
+          return steps.iter().any(|s| match &s.step {
+            Step::GatewaySync { gateway: name, .. } => gateway == Some(name.as_str()),
+            Step::DnsUpsert { hostname, .. } => hostname == host,
+            _ => false,
+          });
+        }
+        // 非托管卷的警告是独立计划项，关联到同步和目标机部署。
+        item.layer == Layer::Volume
+          && !stored.steps.iter().any(|s| s.items.contains(&item.id))
+          && item.address.strip_prefix("service/").is_some_and(|name| {
+            steps.iter().any(|s| {
+              matches!(&s.step, Step::VolumeSync { service, .. } | Step::ServiceUp { service, .. } if service == name)
+            })
+          })
+      })
+      .map(|item| item.address.clone())
+      .collect();
+    confirm::require(
+      &plan.plan_id,
+      &needs_confirm.into_iter().collect::<Vec<_>>(),
+      confirmed,
+      auth.has(Perm::Confirm),
+    )?;
     plan.items.retain(|item| {
       item.layer != Layer::Config && items.contains(&item.id)
     });
@@ -286,8 +377,15 @@ pub async fn retry_run(
   let steps = select_retry_steps(&original, &meta)?;
   let snap = snapshot::load(&state.db).await?;
   let steps = complete_migration_steps(steps, &snap);
-  require_retry_access(&state, auth, &original, &steps, &snap)
-    .await?;
+  require_retry_access(
+    &state,
+    auth,
+    &original,
+    &steps,
+    &snap,
+    &meta.confirmed,
+  )
+  .await?;
   let run = Run {
     run_id: crate::world::new_id("r"),
     plan_id: original.plan_id.clone(),
@@ -489,6 +587,160 @@ async fn run_retry_reruns_only_failed_and_skipped_and_rejects_stale()
       .code,
     ErrorCode::PlanStale
   );
+}
+
+#[tokio::test]
+async fn retry_requires_confirm_only_for_remaining_risky_steps() {
+  use wharf_api_types::{plan::PlanRequest, spec::Change};
+  let state = crate::migrate::tests::seed_service(false).await;
+  let mut plan = crate::planner::make_plan(
+    &state,
+    PlanRequest {
+      changes: vec![Change::RemoveService {
+        name: "notes".into(),
+        purge_data: true,
+      }],
+      ..Default::default()
+    },
+  )
+  .await
+  .unwrap();
+  let purge = plan
+    .steps
+    .iter()
+    .find(|s| {
+      matches!(
+        s.step,
+        Step::ServiceDown {
+          purge_data: true,
+          ..
+        }
+      )
+    })
+    .unwrap()
+    .clone();
+  let safe = StepPlan {
+    items: vec![],
+    title: "停止其他服务".into(),
+    step: Step::ServiceStop {
+      service: "other".into(),
+    },
+  };
+  plan.steps = vec![purge, safe.clone()];
+  crate::planner::save(&state, &plan).await.unwrap();
+  let mut run = Run {
+    run_id: "r_purge".into(),
+    plan_id: plan.plan.plan_id,
+    status: RunStatus::Failed,
+    started_at: Utc::now(),
+    finished_at: Some(Utc::now()),
+    actor: None,
+    retry_of: None,
+    steps: plan.steps.iter().map(pending_run_step).collect(),
+  };
+  run.steps[0].status = StepStatus::Failed;
+  run.steps[1].status = StepStatus::Skipped;
+  let recorded = run.clone();
+  let confirmed = plan.plan.needs_confirm;
+  assert_eq!(confirmed, ["service/notes"]);
+  let approved = confirmed.clone();
+  let steps = plan.steps;
+  state
+    .db
+    .call_credentials(move |c, key| {
+      let meta =
+        RetryMeta::capture(c, key, (steps, 0), None, approved)?;
+      insert_task_run(c, &recorded, None, Some(&meta))
+    })
+    .await
+    .unwrap();
+  persist(&state, &run, None).await.unwrap();
+  let auth = crate::host_access::tests::auth([Perm::Apply], false);
+  assert_eq!(
+    retry_run(state.clone(), &auth, &run.run_id, "测试".into())
+      .await
+      .unwrap_err()
+      .code,
+    ErrorCode::Forbidden,
+  );
+  let snap = snapshot::load(&state.db).await.unwrap();
+  require_retry_access(
+    &state,
+    &auth,
+    &run,
+    &[safe],
+    &snap,
+    &confirmed,
+  )
+  .await
+  .unwrap();
+}
+
+#[tokio::test]
+async fn retry_baseline_tracks_run_writes_without_accepting_external_drift()
+ {
+  let state = crate::migrate::tests::seed_service(false).await;
+  state
+    .db
+    .call_credentials(|c, key| {
+      let run = Run {
+        run_id: "r_import".into(),
+        plan_id: "p_import".into(),
+        status: RunStatus::Running,
+        started_at: Utc::now(),
+        finished_at: None,
+        actor: None,
+        retry_of: None,
+        steps: vec![],
+      };
+      let load =
+        |c: &rusqlite::Connection| -> Result<RetryMeta, ApiError> {
+          let meta: String = c
+            .query_row(
+              "SELECT retry_meta FROM runs WHERE id=?1",
+              [&run.run_id],
+              |r| r.get(0),
+            )
+            .map_err(sql_err)?;
+          serde_json::from_str(&meta).map_err(json_err)
+        };
+      let meta =
+        RetryMeta::capture(c, key, (vec![], 0), None, vec![])?;
+      insert_task_run(c, &run, None, Some(&meta))?;
+      record_changes(c, key, &run.run_id, |tx| {
+        db::finish_import(tx, "notes", "s2", &Default::default(), &[])
+      })?;
+      record_changes(c, key, &run.run_id, |tx| {
+        db::ensure_secret(
+          tx,
+          key,
+          crate::egress::TOKEN_SECRET,
+          now_ms(),
+        )
+      })?;
+      assert!(load(c)?.require_fresh(c, key, true).is_ok());
+      db::set_reach(
+        c,
+        &[("s1".into(), "s2".into(), true)],
+        now_ms(),
+      )?;
+      record_changes(c, key, &run.run_id, |tx| {
+        db::ensure_scoped_secret(
+          tx,
+          key,
+          crate::link::TOKEN_PREFIX,
+          "gw",
+          now_ms(),
+        )
+      })?;
+      assert_eq!(
+        load(c)?.require_fresh(c, key, true).unwrap_err().code,
+        ErrorCode::PlanStale
+      );
+      Ok(())
+    })
+    .await
+    .unwrap();
 }
 
 #[tokio::test]

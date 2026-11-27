@@ -167,17 +167,21 @@ pub fn effective(
 }
 
 /// 没有就生成口令，返回它。
-pub async fn ensure_token(
+async fn ensure_token(
   state: &AppState,
+  run_id: &str,
 ) -> Result<String, ApiError> {
   let fresh = crate::backup::random_hex();
+  let run_id = run_id.to_string();
   state
     .db
     .call_credentials(move |c, key| {
-      key.put_secret(c, TOKEN_SECRET, &fresh, now_ms(), false)?;
-      key
-        .secret(c, TOKEN_SECRET)?
-        .ok_or_else(|| ApiError::internal("出口口令不存在"))
+      crate::apply::record_retry_changes(c, key, &run_id, |tx| {
+        key.put_secret(tx, TOKEN_SECRET, &fresh, now_ms(), false)?;
+        key
+          .secret(tx, TOKEN_SECRET)?
+          .ok_or_else(|| ApiError::internal("出口口令不存在"))
+      })
     })
     .await
 }
@@ -263,6 +267,7 @@ pub async fn put(
 /// 计划步骤：按设置让这台的 agent 起停出口、本地分流。
 pub async fn apply(
   state: &AppState,
+  run_id: &str,
   server: &str,
   cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<(), ApiError> {
@@ -280,7 +285,7 @@ pub async fn apply(
       .with_hint("运行 wharf upgrade"),
     );
   }
-  let token = ensure_token(state).await?;
+  let token = ensure_token(state, run_id).await?;
   // 口令刚生成时快照里还没有，重新加载。
   let snap = crate::snapshot::load(&state.db).await?;
   let cfg = config_for(server, &snap, &token)?;

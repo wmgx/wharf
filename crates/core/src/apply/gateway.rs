@@ -11,6 +11,7 @@ use crate::{
 
 pub(super) async fn caddyfile_for_apply(
   state: &AppState,
+  run_id: &str,
   world: &World,
   net: &Net,
   gateway: &str,
@@ -21,13 +22,15 @@ pub(super) async fn caddyfile_for_apply(
     crate::link_cert::require_gateway_agent(
       &state.hub, server, gateway,
     )?;
-    let pair = ensure_link_certificate(state, gateway).await?;
+    let pair =
+      ensure_link_certificate(state, run_id, gateway).await?;
     fill_link_certificate(&mut rendered, pair);
   }
   let acme = if rendered.needs_acme_dns {
     Some(
       acme_credentials(
         state,
+        run_id,
         world,
         gateway,
         &world.gateways[gateway].spec,
@@ -60,22 +63,23 @@ pub(super) async fn caddyfile_for_apply(
 
 async fn ensure_link_certificate(
   state: &AppState,
+  run_id: &str,
   gateway: &str,
 ) -> Result<crate::link_cert::CertPair, ApiError> {
   let gateway = gateway.to_string();
+  let run_id = run_id.to_string();
   state
     .db
     .call_credentials(move |c, key| {
-      let tx = c.transaction().map_err(db::sql_err)?;
-      let pair = crate::link_cert::ensure_gateway_cert(
-        &tx,
-        key,
-        &gateway,
-        db::now_ms(),
-        false,
-      )?;
-      tx.commit().map_err(db::sql_err)?;
-      Ok(pair)
+      super::record_retry_changes(c, key, &run_id, |tx| {
+        crate::link_cert::ensure_gateway_cert(
+          tx,
+          key,
+          &gateway,
+          db::now_ms(),
+          false,
+        )
+      })
     })
     .await
 }
@@ -94,6 +98,7 @@ pub(super) fn fill_link_certificate(
 
 async fn acme_credentials(
   state: &AppState,
+  run_id: &str,
   world: &World,
   gateway: &str,
   spec: &GatewaySpec,
@@ -130,10 +135,13 @@ async fn acme_credentials(
   {
     return Err(ApiError::invalid(format!("控制面的域名 {host} 是内网域名，证书要用 DNS 验证签，签的时候连不回控制面")).with_hint("用 --public-url 给控制面指定一个不经过这个入口的地址，或者把控制面的域名换到别的 zone"));
   }
+  let run_id = run_id.to_string();
   let key = state
     .db
     .call_credentials(move |c, key| {
-      db::ensure_secret(c, key, &name, db::now_ms())
+      super::record_retry_changes(c, key, &run_id, |tx| {
+        db::ensure_secret(tx, key, &name, db::now_ms())
+      })
     })
     .await?;
   crate::caddy_validate::validate_acme_dns_fill(&key, &url)?;
