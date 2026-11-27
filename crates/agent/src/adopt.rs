@@ -775,7 +775,13 @@ pub async fn retire(
     match info(docker, name, ctx).await? {
       // 已经是新服务的容器：之前接管过了。
       Some(i) if i.owned || i.project != r.service => {
-        targets.push((i, true))
+        if let Some((_, rename)) =
+          targets.iter_mut().find(|(target, _)| target.id == i.id)
+        {
+          *rename = true;
+        } else {
+          targets.push((i, true));
+        }
       }
       _ => {}
     }
@@ -1065,7 +1071,7 @@ esac
     let request = Retire {
       service: "s1".into(),
       project: None,
-      containers: vec!["c1".into(), "c2".into()],
+      containers: vec!["c1".into(), "c1".into(), "c2".into()],
       rename_containers: vec![],
       expected_services: vec![],
     };
@@ -1075,6 +1081,7 @@ esac
     let log =
       std::fs::read_to_string(dir.path().join("log")).unwrap();
     assert!(e.message.contains("恢复失败"));
+    assert_eq!(log.lines().filter(|l| *l == "stop c1").count(), 1);
     assert!(log.contains(
       "rename c2 c2\nupdate --restart=on-failure:5 c2\nstart c2"
     ));

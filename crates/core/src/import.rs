@@ -222,6 +222,7 @@ pub fn from_compose(
       }
     }
   }
+  adopt.rename_containers.sort_unstable();
   if !volumes.is_null() {
     root.insert(key("volumes"), volumes);
   }
