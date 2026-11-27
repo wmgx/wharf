@@ -626,3 +626,65 @@ async fn digest_keeps_rows_on_failure_and_preserves_inflight_inserts()
 
 #[path = "custom_tests.rs"]
 mod custom_tests;
+
+#[tokio::test]
+async fn stopping_service_clears_alert_state_and_keeps_history() {
+  let _guard = TEST_LOCK.lock().await;
+  reset_memory();
+  let state = test_state();
+  seed_server_service(&state, "s1", "web").await;
+  let old = state
+    .db
+    .call(|c| World::from_rows(db::all_resources(c)?))
+    .await
+    .unwrap();
+  let mut before = old.clone();
+  before.routes.insert(
+    "app.example.com".into(),
+    crate::world::RouteRow {
+      id: "fixture".into(),
+      spec: serde_json::from_value(
+        json!({"hostname": "app.example.com", "service": "web"}),
+      )
+      .unwrap(),
+      version: 1,
+    },
+  );
+  let mut after = before.clone();
+  after.services.get_mut("web").unwrap().spec.stopped = true;
+  assert!(lifecycle::stopped_route(
+    &after,
+    &after.routes["app.example.com"].spec
+  ));
+
+  observe_at(&state, 10, "cert.days", "app.example.com", 2.0, "")
+    .await;
+  observe_at(&state, 10, "cert.days", "other.example.com", 2.0, "")
+    .await;
+  state.db.call(|c| {
+    c.execute("INSERT INTO alert_acks (rule, subject, by_actor, at) VALUES ('cert_expiring', 'app.example.com', 'fixture', 10)", []).map_err(db::sql_err)?;
+    db::set_setting(c, "notify.state.restart.web", Some("fail"))
+  }).await.unwrap();
+  lifecycle::Changes::between(&before, &after)
+    .clear(&state)
+    .await;
+
+  reset_memory();
+  ensure_loaded(&state).await;
+  assert!(firing_since("cert_expiring", "app.example.com").is_none());
+  assert!(
+    firing_since("cert_expiring", "other.example.com").is_some()
+  );
+  assert!(!with(|m| m.acks.contains_key(&(
+    "cert_expiring".into(),
+    "app.example.com".into()
+  ))));
+  state.db.call(|c| {
+    let digest: i64 = c.query_row("SELECT count(*) FROM alert_digest WHERE subject = 'app.example.com'", [], |r| r.get(0)).map_err(db::sql_err)?;
+    assert_eq!(digest, 0);
+    assert!(db::setting(c, "notify.state.cert.app.example.com")?.is_none());
+    assert!(db::setting(c, "notify.state.restart.web")?.is_none());
+    Ok(())
+  }).await.unwrap();
+  assert_eq!(history_rows(&state).await.len(), 2);
+}

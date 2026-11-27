@@ -36,6 +36,7 @@ export function routeTone(d?: RouteDiagnosis): { tone: Tone; text: string; detai
 /** 服务好不好：有域名时以域名能不能打开为准，没有域名时看容器。 */
 export function serviceTruth(svc: ServiceView, status: Status | null | undefined): { tone: Tone; text: string; detail?: string } {
   const base = serviceTone(svc);
+  if (svc.spec.stopped) return base;
   const hosts = status?.routes.filter((r) => r.spec.service === svc.name).map((r) => r.spec.hostname) ?? [];
   for (const h of hosts) {
     const t = routeTone(diagnosisOf(status, h));

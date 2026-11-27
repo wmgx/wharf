@@ -153,6 +153,10 @@ pub async fn run(
     .filter(|h| {
       host.is_none_or(|q| q == h.as_str())
         && !expired.contains(h)
+        && !crate::rules::lifecycle::stopped_route(
+          &snap.world,
+          &snap.world.routes[*h].spec,
+        )
         && allowed.is_none_or(|allowed| {
           crate::token_scope::route_spec_in_scope(
             allowed,

@@ -312,9 +312,27 @@ async fn record_keys(s: &AppState, snap: &Snapshot, devices: &Value) {
       keys.insert(name.clone(), (ip.to_string(), key));
     }
   }
+  rules::retain_subjects(
+    s,
+    "tailnet_key_expiring",
+    &keys.keys().cloned().collect(),
+  )
+  .await;
   if let Ok(mut cache) = KEYS.write() {
     *cache = keys;
   }
+}
+
+pub(crate) async fn forget_oauth(s: &AppState) {
+  if let Ok(mut cache) = KEYS.write() {
+    cache.clear();
+  }
+  rules::lifecycle::clear_matching(s, |rule, subject| {
+    rule == "tailnet_key_expiring"
+      || (rule == "vendor_token_invalid"
+        && subject == "Tailscale OAuth")
+  })
+  .await;
 }
 
 pub async fn refresh_keys(s: &AppState) -> Result<(), ApiError> {
@@ -324,10 +342,8 @@ pub async fn refresh_keys(s: &AppState) -> Result<(), ApiError> {
     && let Ok(devices) = tailscale::devices(&token).await
   {
     record_keys(s, &snap, &devices).await;
-  } else if credential(&snap).is_none()
-    && let Ok(mut cache) = KEYS.write()
-  {
-    cache.clear();
+  } else if credential(&snap).is_none() {
+    forget_oauth(s).await;
   }
   Ok(())
 }
@@ -580,7 +596,23 @@ pub async fn record(s: &AppState, checks: &[DoctorCheck]) {
   for check in checks {
     grouped.entry(&check.subject).or_default().push(check);
   }
+  let Ok(snap) = snapshot::load(&s.db).await else {
+    return;
+  };
   for (name, checks) in grouped {
+    if (name == "Tailscale OAuth" && credential(&snap).is_none())
+      || checks.iter().all(|c| c.status == CheckStatus::Skip)
+    {
+      rules::lifecycle::clear(s, "vendor_token_invalid", name).await;
+      continue;
+    }
+    if name != "Tailscale OAuth"
+      && !snap.accounts.iter().any(|account| {
+        account.name == name && account.kind == "cloudflare"
+      })
+    {
+      continue;
+    }
     let bad = checks
       .iter()
       .filter(|c| c.status == CheckStatus::Bad)

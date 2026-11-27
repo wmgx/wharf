@@ -964,24 +964,34 @@ async fn remove_server(
   }
   let state = s.clone();
   s.db
-    .call(move |c| {
-      let tx = c.transaction().map_err(sql_err)?;
-      tx.execute(
-        "DELETE FROM resources WHERE kind = ?1 AND name = ?2",
-        params![KIND_SERVER, name],
-      )
-      .map_err(sql_err)?;
-      tx.execute(
-        "DELETE FROM agents WHERE server = ?1",
-        params![name],
-      )
-      .map_err(sql_err)?;
-      crate::core_node::clear_if_server(&tx, &name)?;
-      tx.commit().map_err(sql_err)?;
-      state.hub.disconnect(&name);
-      Ok(())
+    .call({
+      let name = name.clone();
+      move |c| {
+        let tx = c.transaction().map_err(sql_err)?;
+        tx.execute(
+          "DELETE FROM resources WHERE kind = ?1 AND name = ?2",
+          params![KIND_SERVER, name],
+        )
+        .map_err(sql_err)?;
+        tx.execute(
+          "DELETE FROM agents WHERE server = ?1",
+          params![name],
+        )
+        .map_err(sql_err)?;
+        crate::core_node::clear_if_server(&tx, &name)?;
+        tx.commit().map_err(sql_err)?;
+        state.hub.disconnect(&name);
+        Ok(())
+      }
     })
     .await?;
+  crate::rules::lifecycle::clear_matching(
+    &s,
+    move |rule, subject| {
+      crate::rules::lifecycle::server_alert(rule, subject, &name)
+    },
+  )
+  .await;
   Ok(Json(json!({ "removed": true })))
 }
 
@@ -1705,13 +1715,21 @@ async fn remove_account(
       .into(),
     );
   }
+  let db_name = name.clone();
   let removed = s
     .db
     .call(move |c| {
-      c.execute("DELETE FROM accounts WHERE name = ?1", params![name])
-        .map_err(sql_err)
+      c.execute(
+        "DELETE FROM accounts WHERE name = ?1",
+        params![db_name],
+      )
+      .map_err(sql_err)
     })
     .await?;
+  if removed > 0 {
+    crate::rules::lifecycle::clear(&s, "vendor_token_invalid", &name)
+      .await;
+  }
   crate::log_redact::refresh(&s.db).await;
   Ok(Json(json!({ "removed": removed > 0 })))
 }
@@ -1994,13 +2012,22 @@ async fn remove_secret(
 ) -> ApiResult<Value> {
   auth.require(Perm::Admin)?;
   refuse_managed(&name)?;
+  let db_name = name.clone();
   let removed = s
     .db
     .call(move |c| {
-      c.execute("DELETE FROM secrets WHERE name = ?1", params![name])
-        .map_err(sql_err)
+      c.execute(
+        "DELETE FROM secrets WHERE name = ?1",
+        params![db_name],
+      )
+      .map_err(sql_err)
     })
     .await?;
+  if removed > 0 {
+    if name == "TAILSCALE_OAUTH" {
+      crate::vendor_checks::forget_oauth(&s).await;
+    }
+  }
   crate::log_redact::refresh(&s.db).await;
   Ok(Json(json!({ "removed": removed > 0 })))
 }

@@ -64,6 +64,7 @@ async fn round(
     .world
     .services
     .iter()
+    .filter(|(_, row)| !row.spec.stopped)
     .filter_map(|(name, row)| {
       let projects = live.get(&row.spec.server)?.as_ref().ok()?;
       let seen = projects.get(name).is_some_and(|p| {

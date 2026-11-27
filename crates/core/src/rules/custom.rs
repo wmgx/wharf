@@ -506,6 +506,18 @@ pub(crate) fn delete_service_rows(
   c: &Connection,
   service: &str,
 ) -> Result<(), ApiError> {
+  let mut stmt = c
+    .prepare("SELECT name FROM alert_custom_rules WHERE service = ?1")
+    .map_err(db::sql_err)?;
+  let names: BTreeSet<String> = stmt
+    .query_map([service], |r| r.get(0))
+    .and_then(Iterator::collect)
+    .map_err(db::sql_err)?;
+  if !names.is_empty() {
+    super::lifecycle::clear_rows(c, &|rule, subject| {
+      names.contains(rule) && subject == service
+    })?;
+  }
   c.execute(
     "DELETE FROM alert_service_overrides WHERE service = ?1",
     [service],
@@ -522,48 +534,27 @@ pub(crate) fn delete_service_rows(
 /// 服务被删除后，同步清理内存和数据库里的服务覆盖、自定义规则及其触发状态。
 pub async fn on_service_deleted(state: &AppState, service: &str) {
   ensure_loaded(state).await;
-  let mut removed: BTreeSet<String> = with(|m| {
-    m.service_overrides.retain(|(_, svc), _| svc != service);
-    m.series.retain(|(_, subj), _| subj != service);
-    let mut names = BTreeSet::new();
-    m.custom_rules.retain(|name, r| {
-      if r.service == service {
-        names.insert(name.clone());
-        false
-      } else {
-        true
-      }
-    });
-    names
+  let names = with(|m| {
+    m.custom_rules
+      .iter()
+      .filter(|(_, r)| r.service == service)
+      .map(|(name, _)| name.clone())
+      .collect::<BTreeSet<_>>()
   });
-  let svc_owned = service.to_string();
-  if let Ok(db_names) = state
+  let svc = service.to_string();
+  super::lifecycle::clear_matching(state, move |rule, subject| {
+    names.contains(rule) && subject == svc
+  })
+  .await;
+  with(|m| {
+    m.service_overrides.retain(|(_, svc), _| svc != service);
+    m.custom_rules.retain(|_, r| r.service != service);
+  });
+  let service = service.to_string();
+  let _ = state
     .db
-    .call(move |c| {
-      let mut stmt = c
-        .prepare(
-          "SELECT name FROM alert_custom_rules WHERE service = ?1",
-        )
-        .map_err(db::sql_err)?;
-      let names: Vec<String> = stmt
-        .query_map([&svc_owned], |r| r.get(0))
-        .and_then(Iterator::collect)
-        .map_err(db::sql_err)?;
-      delete_service_rows(c, &svc_owned)?;
-      Ok(names)
-    })
-    .await
-  {
-    removed.extend(db_names);
-  }
-  for name in removed {
-    set_firing(state, (name.clone(), service.to_string()), None)
-      .await;
-    ack::delete_key(state, &name, service).await;
-    let key = format!("notify.state.custom.{name}");
-    let _ =
-      state.db.call(move |c| db::set_setting(c, &key, None)).await;
-  }
+    .call(move |c| delete_service_rows(c, &service))
+    .await;
 }
 
 /// 判断匹配 `(metric, subject)` 的自定义规则，走与内置规则完全相同的触发、推送、确认和抑制链路。
