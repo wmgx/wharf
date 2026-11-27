@@ -380,6 +380,7 @@ ALTER TABLE alert_history ADD COLUMN subject TEXT;
    ALTER TABLE agents ADD COLUMN key_rotation INTEGER NOT NULL DEFAULT 0;",
   crate::secret_restrictions::MIGRATION,
   SERVICE_INSTANCE_ID_MIGRATION,
+  "DELETE FROM plans WHERE status = 'pending';",
 ];
 
 const SERVICE_INSTANCE_ID_MIGRATION: &str = r#"

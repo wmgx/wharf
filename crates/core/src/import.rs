@@ -6,12 +6,13 @@
 //! - 单个容器：按 `docker inspect` 生成 compose，去掉镜像自带的默认值。
 //!   原容器部署前改名停掉，失败时恢复。
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value as Json;
 use serde_yaml_ng::{Mapping, Value};
 use wharf_api_types::{
   ApiError,
+  agent::ProjectContainerRaw,
   spec::{AdoptSpec, PortSpec},
 };
 
@@ -22,6 +23,7 @@ pub struct Converted {
   pub ports: Vec<PortSpec>,
   pub adopt: Option<AdoptSpec>,
   pub warnings: Vec<String>,
+  pub stopped: bool,
 }
 
 /// 把项目名、容器名变成合法的服务名。
@@ -48,21 +50,68 @@ fn yaml_err(e: impl std::fmt::Display) -> ApiError {
 
 pub fn from_compose(
   config: &str,
+  containers: &[ProjectContainerRaw],
   project: &str,
   name: &str,
 ) -> Result<Converted, ApiError> {
+  // Compose config 会给输出里的字面量（包括映射键）加一层美元符号转义。
   let mut doc: Value =
-    serde_yaml_ng::from_str(config).map_err(yaml_err)?;
+    serde_yaml_ng::from_str(&config.replace("$$", "$"))
+      .map_err(|_| yaml_err("无法解析，检查原项目配置"))?;
   let root = doc
     .as_mapping_mut()
     .ok_or_else(|| yaml_err("顶层不是映射"))?;
   root.insert(key("name"), key(name));
   let mut warnings = Vec::new();
-  let mut published = Vec::new();
+  let mut adopt = AdoptSpec {
+    project: Some(project.into()),
+    ..Default::default()
+  };
+  let mut grouped: BTreeMap<&str, Vec<&ProjectContainerRaw>> =
+    BTreeMap::new();
+  let mut running = BTreeSet::new();
+  let mut stopped_services = BTreeSet::new();
+  for container in containers {
+    let service = container.inspect["Config"]["Labels"]["com.docker.compose.service"]
+      .as_str().unwrap_or_default();
+    grouped.entry(service).or_default().push(container);
+    if container.inspect["State"]["Running"] == true {
+      running.insert(service);
+    } else {
+      stopped_services.insert(service);
+    }
+  }
+  let stopped = !containers.is_empty() && running.is_empty();
+  if stopped {
+    warnings.push(
+      "原 compose 项目当前全部已停止，接管后将保持停止（不启动容器）"
+        .into(),
+    );
+  } else if !stopped_services.is_empty() {
+    warnings.push(format!("原 compose 项目有部分组件当前已停止（{}），接管后可能随项目一起启动",
+      service_list(stopped_services.iter().copied())));
+  }
+  let mut volumes = root.remove("volumes").unwrap_or(Value::Null);
   let mut has_env = false;
   if let Some(services) =
     root.get_mut("services").and_then(Value::as_mapping_mut)
   {
+    let configured: BTreeSet<_> =
+      services.keys().filter_map(Value::as_str).collect();
+    let missing =
+      service_list(running.difference(&configured).copied());
+    if running.difference(&configured).next().is_some() {
+      return Err(ApiError::invalid(format!(
+        "compose 项目 {project} 中正在运行的组件 {missing} 不在默认配置里（通常由 --profile 启动）"
+      )).with_hint("先在原 compose 文件中启用这些组件的默认配置，或改用 --container 单独导入"));
+    }
+    let missing_stopped =
+      service_list(stopped_services.difference(&configured).copied());
+    if !missing_stopped.is_empty() {
+      warnings.push(format!("原项目里已停止的组件 {missing_stopped} 不在默认配置中，接管后不会重建"));
+    }
+    adopt.expected_services =
+      configured.into_iter().map(str::to_string).collect();
     for (svc, body) in services.iter_mut() {
       let svc = svc.as_str().unwrap_or_default().to_string();
       let Some(body) = body.as_mapping_mut() else {
@@ -83,51 +132,77 @@ pub fn from_compose(
         .get("environment")
         .and_then(Value::as_mapping)
         .is_some_and(|m| !m.is_empty());
-      for p in body
-        .get("ports")
-        .and_then(Value::as_sequence)
-        .into_iter()
-        .flatten()
-      {
-        let tcp =
-          p.get("protocol").and_then(Value::as_str).unwrap_or("tcp")
-            == "tcp";
-        let port = match p.get("published") {
-          Some(Value::String(s)) => s.parse::<u16>().ok(),
-          Some(Value::Number(n)) => n.as_u64().map(|n| n as u16),
-          _ => None,
-        };
-        if let (true, Some(port)) = (tcp, port) {
-          published.push(port);
+      let old = grouped
+        .get(svc.as_str())
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+      if let Some((first, rest)) = old.split_first() {
+        if rest
+          .iter()
+          .any(|c| c.inspect["Image"] != first.inspect["Image"])
+        {
+          return Err(ApiError::invalid(format!(
+            "compose 项目 {project} 的组件 {svc} 有多个镜像版本，请统一后重新导入"
+          )));
         }
+        if let Some(image) = body.get("image").and_then(Value::as_str)
+        {
+          let pinned = resolve_pinned_image(
+            image,
+            &first.inspect,
+            first.image_inspect.as_ref(),
+            first.tag_image_id.as_deref(),
+            &svc,
+            &mut adopt,
+            &mut warnings,
+          )?;
+          body.insert(key("image"), key(&pinned));
+        }
+      }
+      fill_random_ports(body, old, &svc, &mut warnings)?;
+      if name != project {
+        if let Some(fixed) =
+          body.get("container_name").and_then(Value::as_str)
+          && containers.iter().any(|c| {
+            c.inspect["Name"]
+              .as_str()
+              .is_some_and(|n| n.trim_start_matches('/') == fixed)
+          })
+          && !adopt.rename_containers.iter().any(|n| n == fixed)
+        {
+          adopt.rename_containers.push(fixed.into());
+        }
+        attach_anonymous_volumes(
+          body,
+          &mut volumes,
+          old,
+          project,
+          &svc,
+          &mut warnings,
+        )?;
       }
     }
   }
-  // 同名时 Wharf 直接沿用这个项目，空的 adopt 只用来标记"刚导入，别拉新镜像"。
-  let adopt = if name == project {
-    Some(AdoptSpec::default())
-  } else {
-    // 换了项目名：原来的卷按原名继续用，网络让新项目自己建。
-    if let Some(volumes) =
-      root.get_mut("volumes").and_then(Value::as_mapping_mut)
-    {
+  if containers.is_empty() && name == project {
+    adopt = AdoptSpec::default();
+  }
+  if name != project {
+    if let Some(volumes) = volumes.as_mapping_mut() {
       for (k, v) in volumes.iter_mut() {
-        let k = k.as_str().unwrap_or_default().to_string();
         if v.is_null() {
           *v = Value::Mapping(Mapping::new());
         }
-        let Some(m) = v.as_mapping_mut() else {
-          continue;
-        };
-        if m.get("external").and_then(Value::as_bool) != Some(true) {
+        if let Some(m) = v.as_mapping_mut()
+          && m.get("external").and_then(Value::as_bool) != Some(true)
+        {
           let real = m
             .get("name")
             .and_then(Value::as_str)
             .map(str::to_string)
-            .unwrap_or_else(|| format!("{project}_{k}"));
-          m.clear();
-          m.insert(key("external"), Value::Bool(true));
-          m.insert(key("name"), key(&real));
+            .unwrap_or_else(|| {
+              format!("{project}_{}", k.as_str().unwrap_or_default())
+            });
+          *m = external(&real);
         }
       }
     }
@@ -146,11 +221,11 @@ pub fn from_compose(
         }
       }
     }
-    Some(AdoptSpec {
-      project: Some(project.to_string()),
-      containers: vec![],
-    })
-  };
+  }
+  if !volumes.is_null() {
+    root.insert(key("volumes"), volumes);
+  }
+  escape_yaml_dollars(&mut doc);
   if has_env {
     warnings.push(env_warning());
   }
@@ -159,11 +234,296 @@ pub fn from_compose(
     serde_yaml_ng::to_string(&doc).map_err(yaml_err)?
   );
   Ok(Converted {
+    ports: compose_ports(&compose),
     compose,
-    ports: port_specs(published),
-    adopt,
+    adopt: Some(adopt),
     warnings,
+    stopped,
   })
+}
+
+fn service_list<'a>(
+  services: impl Iterator<Item = &'a str>,
+) -> String {
+  services
+    .map(|s| if s.is_empty() { "未知组件" } else { s })
+    .collect::<Vec<_>>()
+    .join("、")
+}
+
+fn external(name: &str) -> Mapping {
+  Mapping::from_iter([
+    (key("external"), Value::Bool(true)),
+    (key("name"), key(name)),
+  ])
+}
+
+fn escape_yaml_dollars(value: &mut Value) {
+  match value {
+    Value::String(s) => *s = literal(s),
+    Value::Sequence(a) => a.iter_mut().for_each(escape_yaml_dollars),
+    Value::Mapping(m) => m.values_mut().for_each(escape_yaml_dollars),
+    Value::Tagged(t) => escape_yaml_dollars(&mut t.value),
+    _ => {}
+  }
+}
+
+fn repo(image: &str) -> String {
+  let name = image.split('@').next().unwrap_or_default();
+  let name = if let Some((base, tag)) = name.rsplit_once(':')
+    && !tag.contains('/')
+  {
+    base
+  } else {
+    name
+  };
+  let name = name
+    .strip_prefix("index.docker.io/")
+    .or_else(|| name.strip_prefix("docker.io/"))
+    .unwrap_or(name);
+  name.strip_prefix("library/").unwrap_or(name).to_string()
+}
+
+fn resolve_pinned_image(
+  declared: &str,
+  inspect: &Json,
+  image_inspect: Option<&Json>,
+  tag_image_id: Option<&str>,
+  who: &str,
+  adopt: &mut AdoptSpec,
+  warnings: &mut Vec<String>,
+) -> Result<String, ApiError> {
+  let Some(actual) =
+    inspect["Image"].as_str().filter(|s| !s.is_empty())
+  else {
+    return Ok(declared.into());
+  };
+  let digests = image_inspect
+    .map(|i| strs(&i["RepoDigests"]))
+    .unwrap_or_default();
+  let digests = digests.iter().filter(|r| {
+    r.split_once("@sha256:")
+      .is_some_and(|(r, d)| !r.is_empty() && !d.is_empty())
+  });
+  let matching = digests.clone().find(|r| repo(r) == repo(declared));
+  let written: String = if declared == actual
+    || (inspect["Config"]["Image"].as_str() == Some(declared)
+      && tag_image_id == Some(actual))
+  {
+    if let Some((_, digest)) = matching
+      .or_else(|| digests.clone().next())
+      .and_then(|r| r.split_once('@'))
+      && !declared.contains('@')
+      && !declared.starts_with("sha256:")
+    {
+      adopt.initial_pins.insert(declared.into(), digest.into());
+    }
+    declared.into()
+  } else {
+    let written = matching
+      .or_else(|| digests.clone().next())
+      .map(String::as_str)
+      .unwrap_or(actual);
+    warnings.push(format!("{who} 的本机镜像标签 {declared} 与实际镜像不一致，已固定到 {written}"));
+    written.into()
+  };
+  if adopt
+    .expected_images
+    .insert(written.clone(), actual.into())
+    .is_some_and(|id| id != actual)
+  {
+    return Err(ApiError::invalid(format!(
+      "{who} 与其他组件使用同名镜像但版本不同"
+    )));
+  }
+  Ok(written)
+}
+
+fn mount_path(path: &str) -> &str {
+  let path = path.trim_end_matches('/');
+  if path.is_empty() { "/" } else { path }
+}
+
+fn attach_anonymous_volumes(
+  body: &mut Mapping,
+  top: &mut Value,
+  old: &[&ProjectContainerRaw],
+  project: &str,
+  service: &str,
+  warnings: &mut Vec<String>,
+) -> Result<(), ApiError> {
+  let mut actual: BTreeMap<&str, BTreeMap<&str, bool>> =
+    BTreeMap::new();
+  for m in old.iter().flat_map(|c| {
+    c.inspect["Mounts"].as_array().into_iter().flatten()
+  }) {
+    if m["Type"] == "volume"
+      && let (Some(dest), Some(name)) =
+        (m["Destination"].as_str(), m["Name"].as_str())
+    {
+      actual
+        .entry(mount_path(dest))
+        .or_default()
+        .insert(name, m["RW"] == false);
+    }
+  }
+  let mut mounts = body
+    .remove("volumes")
+    .and_then(|v| match v {
+      Value::Sequence(items) => Some(items),
+      _ => None,
+    })
+    .unwrap_or_default();
+  let mut add = |dest: &str,
+                 names: &BTreeMap<&str, bool>|
+   -> Result<String, ApiError> {
+    if names.len() != 1 {
+      return Err(ApiError::invalid(format!(
+        "compose 项目 {project} 的组件 {service} 在 {dest} 对应多个不同的数据卷（{}）",
+        service_list(names.keys().copied())
+      )).with_hint("使用同名导入保留旧容器，或先确认要保留的数据卷"));
+    }
+    if top.is_null() {
+      *top = Value::Mapping(Mapping::new());
+    }
+    let top = top
+      .as_mapping_mut()
+      .ok_or_else(|| yaml_err("volumes 不是映射"))?;
+    let base = format!("vol-{service}-{}", service_name(dest));
+    let mut vol = base.clone();
+    let mut n = 2;
+    while top.contains_key(vol.as_str()) {
+      vol = format!("{base}-{n}");
+      n += 1;
+    }
+    top.insert(
+      key(&vol),
+      Value::Mapping(external(
+        names.keys().next().expect("已确认一个卷"),
+      )),
+    );
+    Ok(vol)
+  };
+  for mount in &mut mounts {
+    let (dest, anonymous) = if let Some(s) = mount.as_str() {
+      match s.split_once(':') {
+        Some((_, rest)) => {
+          (rest.split(':').next().unwrap_or_default(), false)
+        }
+        None => (s, true),
+      }
+    } else if let Some(dest) =
+      mount.get("target").and_then(Value::as_str)
+    {
+      (
+        dest,
+        mount.get("type").and_then(Value::as_str) == Some("volume")
+          && mount
+            .get("source")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .is_empty(),
+      )
+    } else {
+      continue;
+    };
+    let names = actual.remove(mount_path(dest));
+    if !anonymous {
+      continue;
+    }
+    if let Some(names) = names {
+      let vol = add(dest, &names)?;
+      if mount.is_mapping() {
+        let m = mount.as_mapping_mut().expect("已确认映射");
+        m.insert(key("source"), key(&vol));
+      } else {
+        *mount = key(&format!("{vol}:{dest}"));
+      }
+    } else {
+      warnings.push(format!(
+        "组件 {service} 在 {dest} 没有找到原匿名卷，保留配置"
+      ));
+    }
+  }
+  for (dest, names) in actual {
+    let vol = add(dest, &names)?;
+    let (real, ro) = names.into_iter().next().expect("已确认一个卷");
+    let mut m = Mapping::from_iter([
+      (key("type"), key("volume")),
+      (key("source"), key(&vol)),
+      (key("target"), key(dest)),
+    ]);
+    if ro {
+      m.insert(key("read_only"), Value::Bool(true));
+    }
+    mounts.push(Value::Mapping(m));
+    warnings.push(format!(
+      "已保留组件 {service} 在 {dest} 上的隐式数据卷 {real}"
+    ));
+  }
+  if !mounts.is_empty() {
+    body.insert(key("volumes"), Value::Sequence(mounts));
+  }
+  Ok(())
+}
+
+fn fill_random_ports(
+  body: &mut Mapping,
+  old: &[&ProjectContainerRaw],
+  service: &str,
+  warnings: &mut Vec<String>,
+) -> Result<(), ApiError> {
+  for port in body
+    .get_mut("ports")
+    .and_then(Value::as_sequence_mut)
+    .into_iter()
+    .flatten()
+  {
+    if port.get("published").is_some_and(|v| {
+      !v.is_null()
+        && v.as_str() != Some("")
+        && v.as_str() != Some("0")
+        && v.as_u64() != Some(0)
+    }) {
+      continue;
+    }
+    let Some(target) = port.get("target").and_then(Value::as_u64)
+    else {
+      continue;
+    };
+    let protocol = port
+      .get("protocol")
+      .and_then(Value::as_str)
+      .unwrap_or("tcp");
+    let host_ip = port.get("host_ip").and_then(Value::as_str);
+    let id = format!("{target}/{protocol}");
+    let found: BTreeSet<_> = old
+      .iter()
+      .filter(|c| c.inspect["State"]["Running"] == true)
+      .flat_map(|c| {
+        c.inspect["NetworkSettings"]["Ports"][id.as_str()]
+          .as_array()
+          .into_iter()
+          .flatten()
+      })
+      .filter(|b| {
+        host_ip.is_none_or(|ip| b["HostIp"].as_str() == Some(ip))
+      })
+      .filter_map(|b| {
+        b["HostPort"].as_str().filter(|p| !p.is_empty())
+      })
+      .collect();
+    match found.len() {
+      0 => warnings.push(format!("无法获知组件 {service} 在 {target}/{protocol} 上自动分配的端口")),
+      1 => {
+        let host = found.first().expect("已确认一个端口");
+        port["published"] = key(host);
+        warnings.push(format!("已固定组件 {service} 自动分配的端口 {host}->{target}"));
+      }
+      _ => return Err(ApiError::invalid(format!("组件 {service} 在 {target}/{protocol} 上有多个自动分配端口，请先指定要保留的端口"))),
+    }
+  }
+  Ok(())
 }
 
 fn env_warning() -> String {
@@ -272,6 +632,7 @@ fn literal(s: &str) -> String {
 pub fn from_container(
   inspect: &Json,
   image_inspect: Option<&Json>,
+  tag_image_id: Option<&str>,
   name: &str,
 ) -> Result<Converted, ApiError> {
   let config = &inspect["Config"];
@@ -292,7 +653,26 @@ pub fn from_container(
   let mut svc = Mapping::new();
   let mut volumes_top = Mapping::new();
   let mut networks_top = Mapping::new();
-  svc.insert(key("image"), key(image));
+  let mut adopt = AdoptSpec {
+    containers: vec![original.clone()],
+    ..Default::default()
+  };
+  let image = resolve_pinned_image(
+    image,
+    inspect,
+    image_inspect,
+    tag_image_id,
+    &original,
+    &mut adopt,
+    &mut warnings,
+  )?;
+  let stopped = inspect["State"]["Running"] == false;
+  if stopped {
+    warnings.push(
+      "原容器当前已停止，接管后将保持停止（不启动容器）".into(),
+    );
+  }
+  svc.insert(key("image"), key(&image));
   svc.insert(key("container_name"), key(&original));
 
   let differs = |field: &str| {
@@ -358,59 +738,93 @@ pub fn from_container(
   }
 
   let mode = host["NetworkMode"].as_str().unwrap_or_default();
-  let host_net = mode == "host";
-  match mode {
-    "" | "default" | "bridge" => {}
-    "host" | "none" => {
-      svc.insert(key("network_mode"), key(mode));
-    }
-    m if m.starts_with("container:") => {
-      svc.insert(key("network_mode"), key(m));
+  if matches!(mode, "host" | "none") || mode.starts_with("container:")
+  {
+    svc.insert(key("network_mode"), key(mode));
+    if mode.starts_with("container:") {
       warnings.push(format!(
-        "网络模式 {m} 依赖另一个容器，导入后要确认它还在"
+        "网络模式 {mode} 依赖另一个容器，导入后要确认它还在"
       ));
     }
-    custom => {
-      svc.insert(key("networks"), seq(vec![custom.to_string()]));
-      let mut m = Mapping::new();
-      m.insert(key("external"), Value::Bool(true));
-      networks_top.insert(key(custom), Value::Mapping(m));
-    }
+  } else {
+    extract_container_networks(
+      inspect,
+      name,
+      mode,
+      &mut svc,
+      &mut networks_top,
+      &mut warnings,
+    );
   }
 
-  let mut published = Vec::new();
-  let mut ports = Vec::new();
-  if !host_net
-    && let Some(bindings) = host["PortBindings"].as_object()
-  {
-    for (container_port, list) in bindings {
-      let (port, proto) = container_port
-        .split_once('/')
-        .unwrap_or((container_port, "tcp"));
-      for b in list.as_array().into_iter().flatten() {
-        let host_port = b["HostPort"].as_str().unwrap_or_default();
-        let ip = b["HostIp"].as_str().unwrap_or_default();
-        let mut spec = String::new();
-        if !ip.is_empty() && ip != "0.0.0.0" && ip != "::" {
-          spec.push_str(&format!("{ip}:"));
-        }
-        if !host_port.is_empty() {
-          spec.push_str(&format!("{host_port}:"));
-        }
-        spec.push_str(port);
-        if proto != "tcp" {
-          spec.push_str(&format!("/{proto}"));
-        } else if let Ok(p) = host_port.parse::<u16>() {
-          published.push(p);
-        }
-        if !ports.contains(&spec) {
-          ports.push(spec);
-        }
-      }
-    }
-  }
+  let (ports, published) = if mode == "host" {
+    (Vec::new(), Vec::new())
+  } else {
+    extract_container_ports(inspect, &mut warnings)
+  };
   if !ports.is_empty() {
     svc.insert(key("ports"), seq(ports));
+  }
+  let short_id = inspect["Id"].as_str().and_then(|id| id.get(..12));
+  for (field, out) in
+    [("Hostname", "hostname"), ("StopSignal", "stop_signal")]
+  {
+    if differs(field)
+      && let Some(value) =
+        config[field].as_str().filter(|s| !s.is_empty())
+      && (field != "Hostname" || Some(value) != short_id)
+    {
+      svc.insert(key(out), key(&literal(value)));
+    }
+  }
+  if let Some(timeout) = config["StopTimeout"].as_u64() {
+    svc.insert(key("stop_grace_period"), key(&format!("{timeout}s")));
+  }
+  if let Some(shm) = host["ShmSize"]
+    .as_u64()
+    .filter(|n| *n != 0 && *n != 67_108_864)
+  {
+    let mib = 1024 * 1024;
+    let size = if shm.is_multiple_of(mib) {
+      key(&format!("{}m", shm / mib))
+    } else {
+      Value::Number(shm.into())
+    };
+    svc.insert(key("shm_size"), size);
+  }
+  if host["ReadonlyRootfs"] == true {
+    svc.insert(key("read_only"), Value::Bool(true));
+  }
+  if differs("Healthcheck") {
+    let check = &config["Healthcheck"];
+    let test = strs(&check["Test"]);
+    if !test.is_empty() {
+      let mut m = Mapping::new();
+      if test == ["NONE"] {
+        m.insert(key("disable"), Value::Bool(true));
+      } else {
+        m.insert(
+          key("test"),
+          seq(test.iter().map(|s| literal(s)).collect()),
+        );
+        for (field, out) in [
+          ("Interval", "interval"),
+          ("Timeout", "timeout"),
+          ("StartPeriod", "start_period"),
+          ("StartInterval", "start_interval"),
+        ] {
+          if let Some(ns) = check[field].as_u64().filter(|n| *n > 0) {
+            m.insert(key(out), key(&format_duration_ns(ns)));
+          }
+        }
+        if let Some(retries) =
+          check["Retries"].as_u64().filter(|n| *n > 0)
+        {
+          m.insert(key("retries"), Value::Number(retries.into()));
+        }
+      }
+      svc.insert(key("healthcheck"), Value::Mapping(m));
+    }
   }
 
   let mut mounts = Vec::new();
@@ -424,11 +838,23 @@ pub fn from_container(
     match m["Type"].as_str().unwrap_or_default() {
       "bind" => {
         let src = m["Source"].as_str().unwrap_or_default();
-        mounts.push(format!("{src}:{dest}{ro}"));
+        let propagation = m["Propagation"]
+          .as_str()
+          .filter(|p| !p.is_empty() && *p != "rprivate");
+        let opts = match (ro.is_empty(), propagation) {
+          (true, Some(p)) => format!(":{p}"),
+          (false, Some(p)) => format!(":ro,{p}"),
+          (_, None) => ro.into(),
+        };
+        mounts.push(format!(
+          "{}:{}{opts}",
+          literal(src),
+          literal(dest)
+        ));
       }
       "volume" => {
         let vol = m["Name"].as_str().unwrap_or_default();
-        mounts.push(format!("{vol}:{dest}{ro}"));
+        mounts.push(format!("{vol}:{}{ro}", literal(dest)));
         let mut v = Mapping::new();
         v.insert(key("external"), Value::Bool(true));
         volumes_top.insert(key(vol), Value::Mapping(v));
@@ -519,8 +945,26 @@ pub fn from_container(
     ("VolumesFrom", "volumes_from"),
     ("Ulimits", "ulimits"),
     ("Sysctls", "sysctls"),
+    ("DeviceRequests", "device_requests"),
+    ("GroupAdd", "group_add"),
+    ("UsernsMode", "userns_mode"),
+    ("Runtime", "runtime"),
+    ("CgroupnsMode", "cgroupns_mode"),
+    ("OomScoreAdj", "oom_score_adj"),
+    ("Domainname", "domainname"),
   ] {
-    let set = match &host[field] {
+    let value = if field == "Domainname" {
+      &config[field]
+    } else {
+      &host[field]
+    };
+    let set = match value {
+      Json::String(s) => {
+        !s.is_empty()
+          && !(field == "Runtime" && s == "runc"
+            || field == "CgroupnsMode" && s == "private")
+      }
+      Json::Number(n) => n.as_i64().is_some_and(|n| n != 0),
       Json::Array(a) => !a.is_empty(),
       Json::Object(o) => !o.is_empty(),
       _ => false,
@@ -554,12 +998,162 @@ pub fn from_container(
   Ok(Converted {
     compose,
     ports: port_specs(published),
-    adopt: Some(AdoptSpec {
-      project: None,
-      containers: vec![original],
-    }),
+    adopt: Some(adopt),
     warnings,
+    stopped,
   })
+}
+
+fn format_duration_ns(ns: u64) -> String {
+  for (div, unit) in
+    [(1_000_000_000, "s"), (1_000_000, "ms"), (1_000, "us")]
+  {
+    if ns.is_multiple_of(div) {
+      return format!("{}{unit}", ns / div);
+    }
+  }
+  format!("{ns}ns")
+}
+
+fn extract_container_networks(
+  inspect: &Json,
+  name: &str,
+  mode: &str,
+  svc: &mut Mapping,
+  top: &mut Mapping,
+  warnings: &mut Vec<String>,
+) {
+  let mut networks = Mapping::new();
+  let id = inspect["Id"].as_str();
+  if let Some(entries) = inspect["NetworkSettings"]["Networks"]
+    .as_object()
+    .filter(|e| !e.is_empty())
+  {
+    if entries.len() > 1 && entries.contains_key("bridge") {
+      warnings.push("原容器同时连接了默认 bridge 与自定义网络，已保留自定义网络；如需默认 bridge 请手动确认".into());
+    }
+    for (network, ep) in
+      entries.iter().filter(|(n, _)| *n != "bridge")
+    {
+      let mut settings = Mapping::new();
+      let aliases: Vec<_> = strs(&ep["Aliases"])
+        .into_iter()
+        .filter(|a| {
+          a != name
+            && id != Some(a.as_str())
+            && id.and_then(|s| s.get(..12)) != Some(a.as_str())
+        })
+        .collect();
+      if !aliases.is_empty() {
+        settings.insert(key("aliases"), seq(aliases));
+      }
+      for (field, out) in [
+        ("IPv4Address", "ipv4_address"),
+        ("IPv6Address", "ipv6_address"),
+      ] {
+        if let Some(ip) =
+          ep["IPAMConfig"][field].as_str().filter(|s| !s.is_empty())
+        {
+          settings.insert(key(out), key(ip));
+        }
+      }
+      top.insert(key(network), Value::Mapping(external(network)));
+      networks.insert(key(network), Value::Mapping(settings));
+    }
+  } else if !matches!(mode, "" | "default" | "bridge") {
+    top.insert(key(mode), Value::Mapping(external(mode)));
+    networks.insert(key(mode), Value::Mapping(Mapping::new()));
+  }
+  if !networks.is_empty() {
+    let value = if networks
+      .values()
+      .all(|v| v.as_mapping().is_some_and(Mapping::is_empty))
+    {
+      Value::Sequence(networks.into_iter().map(|(k, _)| k).collect())
+    } else {
+      Value::Mapping(networks)
+    };
+    svc.insert(key("networks"), value);
+  }
+}
+
+fn format_host_ip(ip: &str) -> String {
+  match ip {
+    "" | "0.0.0.0" | "::" | "[::]" => String::new(),
+    ip if ip.contains(':') && !ip.starts_with('[') => {
+      format!("[{ip}]:")
+    }
+    ip => format!("{ip}:"),
+  }
+}
+
+fn extract_container_ports(
+  inspect: &Json,
+  warnings: &mut Vec<String>,
+) -> (Vec<String>, Vec<u16>) {
+  let host = &inspect["HostConfig"];
+  let running = inspect["State"]["Running"] == true;
+  let actual = &inspect["NetworkSettings"]["Ports"];
+  let mut ports = BTreeSet::new();
+  let mut published = Vec::new();
+  let mut dynamic = host["PublishAllPorts"] == true;
+  for (bindings, is_actual) in
+    [(actual, true), (&host["PortBindings"], false)]
+  {
+    if is_actual && !running {
+      continue;
+    }
+    for (target, bindings) in
+      bindings.as_object().into_iter().flatten()
+    {
+      let (port, proto) =
+        target.split_once('/').unwrap_or((target, "tcp"));
+      for b in bindings.as_array().into_iter().flatten() {
+        let host_port = b["HostPort"].as_str().unwrap_or_default();
+        let ip = b["HostIp"].as_str().unwrap_or_default();
+        if is_actual && host_port.is_empty() {
+          continue;
+        }
+        if !is_actual
+          && running
+          && actual[target.as_str()].as_array().is_some_and(
+            |entries| {
+              entries.iter().any(|a| {
+                a["HostPort"].as_str().is_some_and(|p| {
+                  !p.is_empty()
+                    && (host_port.is_empty() || p == host_port)
+                }) && format_host_ip(
+                  a["HostIp"].as_str().unwrap_or_default(),
+                ) == format_host_ip(ip)
+              })
+            },
+          )
+        {
+          continue;
+        }
+        dynamic |= host_port.is_empty();
+        let proto_suffix = if proto == "tcp" {
+          String::new()
+        } else {
+          format!("/{proto}")
+        };
+        let ip = format_host_ip(ip);
+        let prefix = if !host_port.is_empty() || !ip.is_empty() {
+          format!("{ip}{host_port}:")
+        } else {
+          String::new()
+        };
+        ports.insert(format!("{prefix}{port}{proto_suffix}"));
+        if proto == "tcp" {
+          published.extend(host_port.parse::<u16>().ok());
+        }
+      }
+    }
+  }
+  if !running && dynamic {
+    warnings.push("原容器使用自动分配端口但当前已停止，无法获知上次分配的端口，请启动原容器后重新导入或手动补充 ports".into());
+  }
+  (ports.into_iter().collect(), published)
 }
 
 #[cfg(test)]
@@ -609,7 +1203,7 @@ volumes:
 
   #[test]
   fn compose_same_name_keeps_project() {
-    let c = from_compose(CONFIG, "blog", "blog").unwrap();
+    let c = from_compose(CONFIG, &[], "blog", "blog").unwrap();
     assert_eq!(c.adopt, Some(AdoptSpec::default()));
     assert_eq!(c.ports[0].host, Some(8080));
     assert!(c.compose.contains("image: blog-web"));
@@ -619,7 +1213,7 @@ volumes:
 
   #[test]
   fn compose_new_name_reuses_volumes() {
-    let c = from_compose(CONFIG, "blog", "site").unwrap();
+    let c = from_compose(CONFIG, &[], "blog", "site").unwrap();
     assert_eq!(c.adopt.unwrap().project.as_deref(), Some("blog"));
     let doc: Value = serde_yaml_ng::from_str(&c.compose).unwrap();
     assert_eq!(doc["volumes"]["data"]["external"], Value::Bool(true));
@@ -647,8 +1241,8 @@ volumes:
     let image = serde_json::json!({
       "Config": {"Env": ["PATH=/usr/bin"], "Cmd": ["node", "index.js"], "Labels": {"build": "x"}}
     });
-    let c =
-      from_container(&inspect, Some(&image), "pairdrop").unwrap();
+    let c = from_container(&inspect, Some(&image), None, "pairdrop")
+      .unwrap();
     let doc: Value = serde_yaml_ng::from_str(&c.compose).unwrap();
     let svc = &doc["services"]["pairdrop"];
     assert_eq!(svc["environment"]["PUID"], key("1000"));
@@ -670,5 +1264,212 @@ volumes:
   #[test]
   fn names_are_sanitized() {
     assert_eq!(service_name("/My_App.v2"), "my-app-v2");
+  }
+}
+
+#[cfg(test)]
+mod adoption_tests {
+  use super::*;
+  use serde_json::json;
+
+  fn old(
+    service: &str,
+    running: bool,
+    mounts: Json,
+  ) -> ProjectContainerRaw {
+    ProjectContainerRaw {
+      inspect: json!({
+        "Name": format!("/{service}"),
+        "State": {"Running": running},
+        "Config": {"Labels": {"com.docker.compose.service": service}},
+        "Mounts": mounts
+      }),
+      image_inspect: None,
+      tag_image_id: None,
+    }
+  }
+
+  #[test]
+  fn image_uses_actual_digest_when_local_tag_moved() {
+    let c = json!({"Name": "/db", "Image": "sha256:old", "Config": {"Image": "postgres:16"}});
+    let image = json!({"RepoDigests": ["docker.io/library/postgres@sha256:digest"]});
+    let pinned = "docker.io/library/postgres@sha256:digest";
+    let moved =
+      from_container(&c, Some(&image), Some("sha256:new"), "db")
+        .unwrap();
+    assert!(moved.compose.contains(pinned));
+    assert!(moved.warnings.iter().any(|w| w.contains("已固定")));
+    assert_eq!(
+      moved.adopt.unwrap().expected_images[pinned],
+      "sha256:old"
+    );
+    let stable =
+      from_container(&c, Some(&image), Some("sha256:old"), "db")
+        .unwrap();
+    assert!(stable.compose.contains("image: postgres:16"));
+    assert_eq!(
+      stable.adopt.unwrap().initial_pins["postgres:16"],
+      "sha256:digest"
+    );
+    let local = from_container(&c, None, None, "db").unwrap();
+    assert!(local.compose.contains("image: sha256:old"));
+  }
+
+  #[test]
+  fn rename_keeps_fixed_name_and_explicit_and_implicit_volumes() {
+    let compose = "services:
+  db:
+    image: postgres:16
+    container_name: db
+    volumes: [/data]
+";
+    let c = old(
+      "db",
+      false,
+      json!([
+        {"Type": "volume", "Destination": "/data/", "Name": "v1"},
+        {"Type": "volume", "Destination": "/implicit", "Name": "v2", "RW": false}
+      ]),
+    );
+    let result =
+      from_compose(compose, std::slice::from_ref(&c), "old", "db")
+        .unwrap();
+    let yaml: Value =
+      serde_yaml_ng::from_str(&result.compose).unwrap();
+    assert_eq!(yaml["volumes"]["vol-db-data"]["name"], key("v1"));
+    assert_eq!(yaml["volumes"]["vol-db-implicit"]["name"], key("v2"));
+    assert_eq!(
+      yaml["services"]["db"]["volumes"][1]["read_only"],
+      Value::Bool(true)
+    );
+    assert_eq!(result.adopt.unwrap().rename_containers, ["db"]);
+    assert!(result.stopped);
+    let other = old(
+      "db",
+      false,
+      json!([{"Type": "volume", "Destination": "/data", "Name": "v3"}]),
+    );
+    let error =
+      from_compose(compose, &[c, other], "old", "db").unwrap_err();
+    assert!(error.message.contains("/data"));
+  }
+
+  #[test]
+  fn rejects_running_profile_and_warns_for_stopped_components() {
+    let compose = "services:
+  db:
+    image: postgres:16
+";
+    let containers =
+      [old("db", true, Json::Null), old("worker", true, Json::Null)];
+    for name in ["old", "db"] {
+      let e =
+        from_compose(compose, &containers, "old", name).unwrap_err();
+      assert!(
+        e.message.contains("worker")
+          && e.message.contains("--profile")
+      );
+    }
+    let containers = [
+      old("db", true, Json::Null),
+      old("worker", false, Json::Null),
+    ];
+    let result =
+      from_compose(compose, &containers, "old", "old").unwrap();
+    assert!(!result.stopped);
+    assert!(result.warnings.iter().any(|w| w.contains("worker")));
+    assert_eq!(result.adopt.unwrap().expected_services, ["db"]);
+  }
+
+  #[test]
+  fn compose_keeps_literal_dollars_from_resolved_output() {
+    let output = "services:
+  app:
+    image: img
+    environment: { NOTE: p$$ss }
+    command: [sh, -c, 'echo $$FOO']
+    labels: { 'x$$y': 'z$$$$w' }
+";
+    let result = from_compose(output, &[], "old", "new").unwrap();
+    let yaml: Value =
+      serde_yaml_ng::from_str(&result.compose).unwrap();
+    let body = &yaml["services"]["app"];
+    assert_eq!(body["environment"]["NOTE"], key("p$$ss"));
+    assert_eq!(body["command"][2], key("echo $$FOO"));
+    assert_eq!(body["labels"]["x$y"], key("z$$$$w"));
+  }
+
+  #[test]
+  fn single_container_preserves_endpoints_ports_and_options() {
+    let inspect = json!({
+      "Name": "/db", "Id": "0123456789abcdef", "State": {"Running": true},
+      "Config": {"Image": "img", "Hostname": "box", "StopSignal": "SIGINT", "StopTimeout": 8,
+        "Healthcheck": {"Test": ["CMD-SHELL", "echo $CHECK"], "Interval": 500000000}},
+      "HostConfig": {"NetworkMode": "front", "PublishAllPorts": true,
+        "ShmSize": 1073741824, "ReadonlyRootfs": true, "Runtime": "nvidia"},
+      "NetworkSettings": {
+        "Networks": {"front": {}, "back": {"Aliases": ["0123456789ab", "db-alias"],
+          "IPAMConfig": {"IPv4Address": "203.0.113.9"}}},
+        "Ports": {"80/tcp": [
+          {"HostIp": "0.0.0.0", "HostPort": "32772"},
+          {"HostIp": "::", "HostPort": "32772"},
+          {"HostIp": "::1", "HostPort": "8080"}
+        ]}
+      },
+      "Mounts": [{"Type": "bind", "Source": "/var/data", "Destination": "/data", "Propagation": "rslave", "RW": false}]
+    });
+    let result = from_container(&inspect, None, None, "new").unwrap();
+    let yaml: Value =
+      serde_yaml_ng::from_str(&result.compose).unwrap();
+    let svc = &yaml["services"]["new"];
+    assert!(svc["networks"]["front"].is_mapping());
+    assert_eq!(
+      svc["networks"]["back"]["aliases"],
+      seq(vec!["db-alias".into()])
+    );
+    assert_eq!(
+      svc["networks"]["back"]["ipv4_address"],
+      key("203.0.113.9")
+    );
+    assert_eq!(
+      svc["ports"],
+      seq(vec!["32772:80".into(), "[::1]:8080:80".into()])
+    );
+    assert_eq!(result.ports[1].host, Some(32772));
+    assert_eq!(svc["read_only"], Value::Bool(true));
+    assert_eq!(svc["shm_size"], key("1024m"));
+    assert_eq!(svc["healthcheck"]["interval"], key("500ms"));
+    assert_eq!(svc["hostname"], key("box"));
+    assert_eq!(svc["stop_signal"], key("SIGINT"));
+    assert_eq!(svc["stop_grace_period"], key("8s"));
+    assert_eq!(svc["volumes"][0], key("/var/data:/data:ro,rslave"));
+    assert_eq!(svc["container_name"], key("db"));
+    assert!(result.warnings.iter().any(|w| w.contains("runtime")));
+  }
+
+  #[test]
+  fn stopped_container_warns_when_random_port_is_unknown() {
+    let inspect = json!({"Name": "/db", "State": {"Running": false},
+      "Config": {"Image": "img"}, "HostConfig": {"PublishAllPorts": true}});
+    let result = from_container(&inspect, None, None, "db").unwrap();
+    assert!(result.stopped);
+    assert!(result.warnings.iter().any(|w| w.contains("保持停止")));
+    assert!(
+      result.warnings.iter().any(|w| w.contains("自动分配端口"))
+    );
+  }
+
+  #[test]
+  fn compose_reuses_random_published_port() {
+    let mut c = old("app", true, Json::Null);
+    c.inspect["NetworkSettings"] =
+      json!({"Ports": {"80/tcp": [{"HostPort": "32772"}]}});
+    let output = "services:
+  app:
+    image: img
+    ports: [{target: 80}]
+";
+    let result = from_compose(output, &[c], "old", "new").unwrap();
+    assert_eq!(result.ports[0].host, Some(32772));
   }
 }

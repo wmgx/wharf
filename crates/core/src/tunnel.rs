@@ -181,6 +181,8 @@ pub async fn sync(
         retire: None,
         rollback: false,
         pins: Default::default(),
+        expected_images: Default::default(),
+        no_start: false,
         trial: None,
       }),
       CONNECTOR_TIMEOUT,

@@ -77,6 +77,7 @@ struct Conn {
   gateway_extra_files: bool,
   backup_isolation: bool,
   safe_delete: bool,
+  safe_adopt: bool,
   /// 协议版本不一致：连接放行，但只接受升级相关的请求，好让它升上来。
   upgrade_only: bool,
 }
@@ -126,6 +127,17 @@ pub struct Hub {
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
   m.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+fn safe_adopt_required(server: &str) -> ApiError {
+  ApiError::new(
+    ErrorCode::Conflict,
+    format!(
+      "服务器 {server} 的 agent 版本旧，无法安全导入或接管容器"
+    ),
+  )
+  .with_hint("先运行 wharf upgrade 升级 agent 后重试")
+  .suggest("wharf upgrade")
 }
 
 pub fn offline(server: &str) -> ApiError {
@@ -234,6 +246,27 @@ impl Hub {
     lock(&self.conns)
       .get(server)
       .is_some_and(|c| !c.upgrade_only && c.container_diagnosis)
+  }
+
+  pub fn supports_safe_adopt(&self, server: &str) -> bool {
+    lock(&self.conns).get(server).is_some_and(|c| {
+      !c.closed.is_cancelled() && !c.upgrade_only && c.safe_adopt
+    })
+  }
+
+  pub(crate) fn require_safe_adopt(
+    &self,
+    server: &str,
+  ) -> Result<(), ApiError> {
+    let conns = lock(&self.conns);
+    let c = conns
+      .get(server)
+      .filter(|c| !c.closed.is_cancelled())
+      .ok_or_else(|| offline(server))?;
+    if c.upgrade_only || !c.safe_adopt {
+      return Err(safe_adopt_required(server));
+    }
+    Ok(())
   }
 
   pub fn supports_safe_delete(&self, server: &str) -> bool {
@@ -439,6 +472,12 @@ impl Hub {
     ),
     cancel: &CancellationToken,
   ) -> Result<T, ApiError> {
+    if (matches!(&op, AgentOp::ImportRead(_))
+      || matches!(&op, AgentOp::ProjectUp(up) if up.pull_missing_only || up.no_start))
+      && (conn.upgrade_only || !conn.safe_adopt)
+    {
+      return Err(safe_adopt_required(server));
+    }
     if matches!(&op, AgentOp::RemoveData { .. })
       && (conn.upgrade_only || !conn.safe_delete)
     {
@@ -768,6 +807,7 @@ async fn handle_socket(
     core_probe,
     backup_isolation,
     safe_delete,
+    safe_adopt,
     key_rotation,
   } = hello
   else {
@@ -928,6 +968,7 @@ async fn handle_socket(
     gateway_extra_files,
     backup_isolation,
     safe_delete,
+    safe_adopt,
     upgrade_only,
   };
   let state_on_db = state.clone();

@@ -349,6 +349,8 @@ pub(crate) async fn deploy_server(
         retire: None,
         rollback: false,
         pins: Default::default(),
+        expected_images: Default::default(),
+        no_start: false,
         trial: None,
       }),
       SERVER_TIMEOUT,

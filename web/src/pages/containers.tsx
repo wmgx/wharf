@@ -203,6 +203,7 @@ function ImportDialog({ item, onClose }: { item: Unmanaged; onClose: () => void 
                 {w}
               </Notice>
             ))}
+            {preview.spec.stopped && <Badge variant="outline">保持停止</Badge>}
             {preview.spec.ports && preview.spec.ports.length > 0 && (
               <div className="font-mono text-xs text-muted-foreground">端口 {preview.spec.ports.map((p) => `${p.name}=${p.host}`).join(" ")}</div>
             )}

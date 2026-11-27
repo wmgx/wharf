@@ -62,10 +62,14 @@ export interface AdoptSpec {
    * 原来 `docker run` 起的容器：改名为 `<名字>-wharf-old` 并停掉，留着回退用。
    */
   containers?: string[];
+  expected_images?: Record<string, string>;
+  expected_services?: string[];
+  initial_pins?: Record<string, string>;
   /**
    * 原来的 compose 项目名（和服务名不同时）：停掉它的容器。
    */
   project?: string | null;
+  rename_containers?: string[];
 }
 
 export interface AgentMemory {

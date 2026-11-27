@@ -411,7 +411,7 @@ fn adopt_ownership_and_host_required() {
   let adopt = |p: &str| {
     Some(AdoptSpec {
       project: Some(p.into()),
-      containers: vec![],
+      ..Default::default()
     })
   };
   let mut existing = current.clone();

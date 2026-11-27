@@ -451,12 +451,18 @@ impl Docker {
   pub async fn up(
     &self,
     project: &str,
+    no_start: bool,
     ctx: &Ctx,
   ) -> Result<(), ApiError> {
-    ctx.say("启动容器");
+    let mode = if no_start { "--no-start" } else { "-d" };
+    ctx.say(if no_start {
+      "创建容器（保持停止）"
+    } else {
+      "启动容器"
+    });
     self
       .compose(project)
-      .args(["up", "-d", "--remove-orphans", "--pull", "never"])
+      .args(["up", mode, "--remove-orphans", "--pull", "never"])
       .timeout(Duration::from_secs(300))
       .stream(true)
       .run(ctx)

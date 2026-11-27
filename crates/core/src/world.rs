@@ -397,6 +397,9 @@ impl World {
           // 改配置不换镜像版本；换了镜像的，旧的固定版本对不上，计划时重新查。
           let pins = old
             .map(|s| s.pins.clone())
+            .or_else(|| {
+              import.as_ref().map(|a| a.initial_pins.clone())
+            })
             .unwrap_or_default()
             .into_iter()
             .filter(|(image, _)| {

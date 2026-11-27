@@ -461,6 +461,9 @@ impl Ops {
   ) -> Result<Vec<String>, ApiError> {
     let images = self.docker.images(&up.project, ctx).await?;
     for image in &images {
+      if up.expected_images.contains_key(image) {
+        continue;
+      }
       if up.pull_missing_only
         && self.docker.image_exists(image, ctx).await
       {
@@ -498,32 +501,40 @@ impl Ops {
     previous: Option<Previous>,
     ctx: &Ctx,
   ) -> Result<ProjectUpResult, ApiError> {
-    self.docker.up(&up.project, ctx).await?;
-    self.docker.write_hash(&up.project, &up.hash)?;
-    let state = match crate::settle::watch(
-      &self.docker,
-      &up.project,
-      ctx,
-    )
-    .await
-    {
-      Ok(state) => state,
-      Err(e) => {
-        let Some(prev) = previous else { return Err(e) };
-        ctx.say(format!("{}，换回上一版", e.message));
-        self.restore_image(&prev, ctx).await?;
-        self.docker.write_compose(&up.project, &prev.compose)?;
-        self.docker.write_hash(&up.project, &prev.hash)?;
-        self.docker.up(&up.project, ctx).await?;
-        return Err(
-          ApiError::new(
-            ErrorCode::AgentFailed,
-            format!("{}，已换回上一版", e.message),
-          )
-          .with_hint("配置还是新版本，修好后重新部署；先看日志"),
-        );
+    self.docker.up(&up.project, up.no_start, ctx).await?;
+    let state = if up.no_start {
+      let state = self.docker.one_status(&up.project, ctx).await?;
+      if state.containers.is_empty()
+        || state.containers.iter().any(|c| c.state == "running")
+      {
+        return Err(ApiError::new(
+          ErrorCode::AgentFailed,
+          "创建后没有容器或容器仍在运行",
+        ));
+      }
+      state
+    } else {
+      match crate::settle::watch(&self.docker, &up.project, ctx).await
+      {
+        Ok(state) => state,
+        Err(e) => {
+          let Some(prev) = previous else { return Err(e) };
+          ctx.say(format!("{}，换回上一版", e.message));
+          self.restore_image(&prev, ctx).await?;
+          self.docker.write_compose(&up.project, &prev.compose)?;
+          self.docker.write_hash(&up.project, &prev.hash)?;
+          self.docker.up(&up.project, false, ctx).await?;
+          return Err(
+            ApiError::new(
+              ErrorCode::AgentFailed,
+              format!("{}，已换回上一版", e.message),
+            )
+            .with_hint("配置还是新版本，修好后重新部署；先看日志"),
+          );
+        }
       }
     };
+    self.docker.write_hash(&up.project, &up.hash)?;
     Ok(ProjectUpResult {
       containers: state.containers,
       images: self.docker.image_info(images, ctx).await,
@@ -587,23 +598,35 @@ impl Ops {
         previous = None;
       }
     }
+    if up.trial.is_some() {
+      self.trial_run(up, previous.as_ref(), ctx).await?;
+    }
     // 镜像拉好之后再停原来的容器，中断只有切换的那几秒。
+    crate::adopt::verify_expected_images(
+      &self.docker,
+      &up.expected_images,
+      ctx,
+    )
+    .await?;
     let retired = match &up.retire {
       Some(r) if r.service == up.project => {
         crate::adopt::retire(&self.docker, r, ctx).await?
       }
       _ => vec![],
     };
-    if up.trial.is_some() {
-      self.trial_run(up, previous.as_ref(), ctx).await?;
-    }
     match self.finish_up(up, &images, warnings, previous, ctx).await {
       Ok(result) => Ok(ProjectUpResult { retired, ..result }),
       Err(e) if !retired.is_empty() => {
         ctx.say("启动失败，恢复原来的容器");
-        let _ = self.docker.down(&up.project, false, ctx).await;
+        let recover = ctx.detached_with_progress();
+        if let Err(down) =
+          self.docker.down(&up.project, false, &recover).await
+        {
+          recover.say(format!("清理新容器失败：{}", down.message));
+        }
         if let Err(back) =
-          crate::adopt::unretire(&self.docker, &retired, ctx).await
+          crate::adopt::unretire(&self.docker, &retired, &recover)
+            .await
         {
           ctx
             .say(format!("恢复失败，需要手动处理：{}", back.message));
@@ -650,7 +673,7 @@ impl Ops {
     ctx.say("试跑新版本");
     let result = async {
       self.docker.write_compose(&project, trial)?;
-      self.docker.up(&project, ctx).await?;
+      self.docker.up(&project, false, ctx).await?;
       crate::settle::watch(&self.docker, &project, ctx).await?;
       Ok(())
     }

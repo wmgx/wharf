@@ -29,6 +29,7 @@ fn old_hello_has_no_host_shell_capability() {
     gateway_extra_files,
     backup_isolation,
     safe_delete,
+    safe_adopt,
     key_rotation,
     ..
   } = hello
@@ -41,6 +42,7 @@ fn old_hello_has_no_host_shell_capability() {
   assert!(!gateway_extra_files);
   assert!(!backup_isolation);
   assert!(!safe_delete);
+  assert!(!safe_adopt);
   assert!(!key_rotation);
 }
 
@@ -81,6 +83,7 @@ fn old_core_ignores_new_hello_capability() {
     core_probe: true,
     backup_isolation: true,
     safe_delete: true,
+    safe_adopt: false,
     key_rotation: true,
   };
   let json = serde_json::to_string(&hello).unwrap();
@@ -190,6 +193,7 @@ impl Hub {
         gateway_extra_files,
         backup_isolation,
         safe_delete: false,
+        safe_adopt: false,
         upgrade_only: false,
       },
     );
@@ -306,6 +310,7 @@ async fn agent_upgrade_needs_no_bound_core_server_or_probe_support() {
     gateway_extra_files: false,
     backup_isolation: false,
     safe_delete: false,
+    safe_adopt: false,
     upgrade_only: true,
   };
   state.hub.register("s1", conn.clone());
@@ -364,6 +369,7 @@ fn probe_connection(
     gateway_extra_files: false,
     backup_isolation: false,
     safe_delete: false,
+    safe_adopt: false,
     upgrade_only: false,
   };
   (conn, rx)
@@ -486,4 +492,34 @@ async fn rotated_agent_promotes_only_on_registration_and_updates_core_binding()
     ).map_err(sql_err)?);
     Ok(())
   }).await.unwrap();
+}
+
+#[tokio::test]
+async fn old_agent_rejects_import_and_adoption_dispatch() {
+  let hub = Hub::default();
+  hub.mock_safe_delete_agent("s1", |_| {
+    panic!("旧 agent 不应收到接管请求")
+  });
+  let target = wharf_api_types::agent::ImportTarget {
+    project: None,
+    container: Some("app".into()),
+  };
+  let up = serde_json::from_value(serde_json::json!({
+    "project": "app", "compose": "", "hash": "", "pull": {"mirrors": {}, "mirrors_only": false, "attempt_timeout_secs": 10},
+    "pull_missing_only": true
+  })).unwrap();
+  for op in [AgentOp::ImportRead(target), AgentOp::ProjectUp(up)] {
+    let error = hub
+      .call::<Value>(
+        "s1",
+        op,
+        Duration::from_secs(1),
+        None,
+        &CancellationToken::new(),
+      )
+      .await
+      .unwrap_err();
+    assert_eq!(error.code, ErrorCode::Conflict);
+    assert_eq!(error.suggest, ["wharf upgrade"]);
+  }
 }

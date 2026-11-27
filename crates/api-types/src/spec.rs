@@ -442,6 +442,14 @@ pub struct AdoptSpec {
   /// 原来 `docker run` 起的容器：改名为 `<名字>-wharf-old` 并停掉，留着回退用。
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub containers: Vec<String>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub rename_containers: Vec<String>,
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub expected_images: BTreeMap<String, String>,
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub initial_pins: BTreeMap<String, String>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub expected_services: Vec<String>,
 }
 
 #[derive(
