@@ -419,9 +419,7 @@ mod tests {
         && plan.plan.items.is_empty()
     );
     assert!(plan.plan.warnings.iter().any(|w| {
-      w.contains("cf/worker/demo")
-        && w.contains("legacy")
-        && w.contains("prod")
+      w.contains("已有 1 个厂商项目被多个边缘应用纳管")
     }));
 
     let req = PlanRequest {

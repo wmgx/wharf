@@ -140,7 +140,7 @@ pub fn validate_owners(
       .or_default()
       .push(name);
   }
-  let mut warnings = Vec::new();
+  let mut legacy = 0;
   for (project, names) in owners {
     if names.len() < 2 {
       continue;
@@ -161,12 +161,13 @@ pub fn validate_owners(
         )),
       );
     }
-    let names: Vec<_> =
-      names.iter().map(|name| name.as_str()).collect();
-    warnings.push(format!(
-      "厂商项目 {project} 已被多个边缘应用纳管：{}",
-      names.join("、")
-    ));
+    legacy += 1;
+  }
+  // 限定服务的令牌也能生成 plan，警告里不显示厂商和应用名。
+  let mut warnings = Vec::new();
+  if legacy != 0 {
+    warnings
+      .push(format!("已有 {legacy} 个厂商项目被多个边缘应用纳管"));
   }
   Ok(warnings)
 }
