@@ -158,19 +158,6 @@ pub async fn sync(
     provider.put_rules(&tunnel, &rules),
   )
   .await?;
-  let (g, hash) = (gateway.to_string(), r.config_hash.clone());
-  state
-    .db
-    .call(move |c| {
-      c.execute(
-        "UPDATE tunnels SET config_hash = ?1 WHERE gateway = ?2",
-        params![hash, g],
-      )
-      .map_err(sql_err)?;
-      Ok(())
-    })
-    .await?;
-
   let token =
     call(cancel, "读取隧道连接器 token", provider.token(&tunnel))
       .await?;
@@ -213,7 +200,16 @@ pub async fn sync(
     );
   }
 
-  // 连接器起来后几秒内隧道才会变成 healthy。没等到不算失败，只提醒。
+  let changing_account = snap
+    .pending
+    .tunnel_deletes
+    .iter()
+    .any(|p| p.gateway == gateway)
+    || snap
+      .tunnels
+      .get(gateway)
+      .is_some_and(|t| t.account != account_name);
+  // 换账号时，只有新连接器可用才能切 DNS 并删旧隧道。
   let deadline = tokio::time::Instant::now() + HEALTHY_WAIT;
   loop {
     let status =
@@ -223,6 +219,15 @@ pub async fn sync(
       break;
     }
     if tokio::time::Instant::now() > deadline {
+      if changing_account {
+        return Err(
+          ApiError::new(
+            ErrorCode::AgentFailed,
+            format!("网关 {gateway} 的新隧道尚未连接，暂缓切换 DNS"),
+          )
+          .suggest("wharf plan"),
+        );
+      }
       progress(format!(
         "提醒：隧道状态是 {status}，cloudflared 可能连不上 Cloudflare，查看 wharf gateway logs {gateway}"
       ));
@@ -230,6 +235,19 @@ pub async fn sync(
     }
     tokio::time::sleep(Duration::from_secs(3)).await;
   }
+  let (g, hash) = (gateway.to_string(), r.config_hash.clone());
+  state
+    .db
+    .call(move |c| {
+      c.execute(
+        "UPDATE tunnels SET config_hash = ?1 WHERE gateway = ?2",
+        params![hash, g],
+      )
+      .map_err(sql_err)?;
+      Ok(())
+    })
+    .await?;
+
   Ok(())
 }
 

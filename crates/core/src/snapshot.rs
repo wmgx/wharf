@@ -1573,7 +1573,7 @@ mod tests {
       },
     );
     direct.reach.insert(("s2".into(), "s1".into()), true);
-    let upstream = |n| {
+    let upstream = |n: &Net| {
       gateway_render(&world, n, "other").unwrap().sites[0]
         .gate
         .as_ref()

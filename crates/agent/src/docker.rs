@@ -191,6 +191,7 @@ impl Docker {
         .iter()
         .filter(|&(name, containers)| {
           (name == "wharf-link" || name.starts_with("wharf-link-"))
+            && wharf_api_types::validate_name("project", name).is_ok()
             && !projects.contains(name)
             && containers.iter().any(|c| {
               c.working_dir.as_deref().is_some_and(|dir| {

@@ -888,11 +888,36 @@ pub(crate) async fn make_plan_inner(
     &state.hub,
   )?;
   // 带改动的计划只看受影响的域名；只检查漂移（没有改动）时看全部。
-  let scope = (snap.pending.tunnel_deletes.is_empty()
-    && req.fleet.is_none()
+  let scope = (req.fleet.is_none()
     && (!req.changes.is_empty() || req.partial.is_some()))
   .then(|| {
-    affected_hosts(&snap, &current, &before_net, &desired, &net)
+    let mut affected =
+      affected_hosts(&snap, &current, &before_net, &desired, &net);
+    let cleanup_gateways: BTreeSet<_> = snap
+      .pending
+      .tunnel_deletes
+      .iter()
+      .map(|p| p.gateway.as_str())
+      .chain(
+        snap
+          .pending
+          .gateway_downs
+          .iter()
+          .map(|p| p.gateway.as_str()),
+      )
+      .collect();
+    affected.extend(
+      desired
+        .routes
+        .iter()
+        .filter(|(host, r)| {
+          desired
+            .live_gateway(host, &r.spec)
+            .is_some_and(|g| cleanup_gateways.contains(g))
+        })
+        .map(|(host, _)| host.clone()),
+    );
+    affected
   });
   dns_items(&mut b, &snap, &desired, &net, scope.as_ref(), true)
     .await?;
@@ -2956,6 +2981,16 @@ fn gateway_cleanup_items(
     }
   }
   for p in old_tunnels.into_values() {
+    if desired.routes.iter().any(|(host, r)| {
+      desired.live_gateway(host, &r.spec) == Some(p.gateway.as_str())
+        && snap.account_for(host).is_none()
+    }) {
+      b.warnings.push(format!(
+        "入口 {} 还有域名的 DNS 由外部管理，暂缓清理旧隧道",
+        p.gateway
+      ));
+      continue;
+    }
     if desired.gateways.get(&p.gateway).is_some_and(|g| {
       g.spec.account.as_deref() == Some(p.account.as_str())
     }) && snap
@@ -4020,7 +4055,7 @@ mod tests {
       affected_hosts(&snap, &current, &before, &desired, &after)
         .contains(host)
     );
-    let dns = |w| {
+    let dns = |w: &World| {
       desired_record(&snap, w, &after, host)
         .unwrap()
         .to_provider()
@@ -4088,6 +4123,14 @@ mod tests {
     desired.gateways.get_mut("edge").unwrap().spec.account =
       Some("cf2".into());
     let mut snap = Snapshot::default();
+    snap.accounts.push(db::AccountRow {
+      name: "cf1".into(),
+      kind: "cloudflare".into(),
+      token: String::new(),
+      zones: vec!["example.com".into()],
+      warnings: vec![],
+      updated_at: 0,
+    });
     snap.tunnels.insert(
       "edge".into(),
       db::TunnelRow {
