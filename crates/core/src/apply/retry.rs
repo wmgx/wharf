@@ -237,9 +237,9 @@ async fn require_retry_access(
           && let Some(host) = item.address.strip_prefix("route/")
           && let Some(route) = snap.world.routes.get(host)
         {
-          let gateway = snap.world.route_gateway(&route.spec);
+          let gateways = snap.world.route_gateways(&route.spec);
           return steps.iter().any(|s| match &s.step {
-            Step::GatewaySync { gateway: name, .. } => gateway == Some(name.as_str()),
+            Step::GatewaySync { gateway, .. } => gateways.contains(&gateway.as_str()),
             Step::DnsUpsert { hostname, .. } => hostname == host,
             _ => false,
           });
