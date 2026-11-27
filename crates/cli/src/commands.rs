@@ -2765,18 +2765,6 @@ async fn service(
       for k in &unset_env {
         spec.env.remove(k);
       }
-      for v in &volume {
-        let (vname, target) = v.split_once(':').ok_or_else(|| {
-          ApiError::invalid(format!(
-            "--volume {v} 格式不对，应为 data:/data"
-          ))
-        })?;
-        spec.volumes.retain(|x| x.name != vname);
-        spec.volumes.push(VolumeSpec {
-          name: vname.to_string(),
-          target: target.to_string(),
-        });
-      }
       for name in unset_volume {
         let index = spec
           .volumes
@@ -2786,6 +2774,11 @@ async fn service(
             ApiError::invalid(format!("数据卷 {name} 不存在"))
           })?;
         spec.volumes.remove(index);
+      }
+      for arg in &volume {
+        let v = parse_volume_arg(arg)?;
+        spec.volumes.retain(|x| x.name != v.name);
+        spec.volumes.push(v);
       }
       changes(
         c,
@@ -5013,4 +5006,76 @@ mod tests {
         .is_err()
     );
   }
+}
+
+fn parse_volume_arg(raw: &str) -> Result<VolumeSpec, ApiError> {
+  let invalid = || {
+    ApiError::invalid(format!("--volume {raw} 格式不对"))
+      .with_hint("使用 name:/target[:ro|:rw] 或 [本地名=]服务:卷:/target[:ro|:rw]")
+  };
+  let (left, target) = raw.split_once(":/").ok_or_else(invalid)?;
+  let (target, read_only) = match target.strip_suffix(":ro") {
+    Some(target) => (target, true),
+    None => (target.strip_suffix(":rw").unwrap_or(target), false),
+  };
+  if target.contains(':') {
+    return Err(invalid());
+  }
+  let (alias, reference) = left
+    .split_once('=')
+    .map_or((None, left), |(alias, reference)| {
+      (Some(alias), reference)
+    });
+  let (name, from_service) =
+    if let Some((owner, volume)) = reference.split_once(':') {
+      wharf_api_types::validate_name("服务", owner)
+        .map_err(|_| invalid())?;
+      wharf_api_types::validate_name("数据卷", volume)
+        .map_err(|_| invalid())?;
+      (alias.unwrap_or(volume), Some(reference.to_string()))
+    } else if alias.is_none() {
+      (reference, None)
+    } else {
+      return Err(invalid());
+    };
+  wharf_api_types::validate_name("数据卷", name)
+    .map_err(|_| invalid())?;
+  Ok(VolumeSpec {
+    name: name.to_string(),
+    target: format!("/{target}"),
+    from_service,
+    read_only,
+  })
+}
+
+#[test]
+fn parse_volume_arg_handles_local_shared_alias_and_ro() {
+  for (raw, name, reference, read_only) in [
+    ("data:/data", "data", None, false),
+    ("data:/data:ro", "data", None, true),
+    (
+      "photos:originals:/data:ro",
+      "originals",
+      Some("photos:originals"),
+      true,
+    ),
+    (
+      "pic=photos:originals:/data:rw",
+      "pic",
+      Some("photos:originals"),
+      false,
+    ),
+  ] {
+    let v = parse_volume_arg(raw).unwrap();
+    assert_eq!(
+      (
+        v.name.as_str(),
+        v.from_service.as_deref(),
+        v.target.as_str(),
+        v.read_only
+      ),
+      (name, reference, "/data", read_only)
+    );
+  }
+  assert!(parse_volume_arg("a:b:c:/x").is_err());
 }

@@ -73,7 +73,7 @@ export function Data() {
           </TableHeader>
           <TableBody>
             {rows.map((s) => {
-              const outside = s.mounts.filter((m) => m.kind !== "managed").length;
+              const outside = s.mounts.filter((m) => m.kind === "external_dir" || m.kind === "named_volume").length;
               const summary = !s.mounts.length ? "没有数据卷" : outside ? `${s.mounts.length} 处挂载，${outside} 处不在备份范围` : `${s.mounts.length} 处挂载`;
               return <TableRow key={s.name} className="cursor-pointer" {...clickable({ to: `/services/${encodeURIComponent(s.name)}?tab=data` })}>
                 <TableCell className="font-medium max-md:break-all max-md:whitespace-normal">

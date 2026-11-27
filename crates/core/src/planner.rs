@@ -104,6 +104,8 @@ pub enum Step {
     to: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     instance_id: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    shared_data: bool,
   },
   ServiceUp {
     service: String,
@@ -839,7 +841,23 @@ fn finish_plan(
   b.warnings.extend(crate::lint::plan_warnings(
     snap, desired, &b.items, &b.steps,
   ));
-  b.steps.sort_by_key(|s| s.step.order());
+  b.steps.sort_by_key(|s| {
+    (
+      s.step.order(),
+      matches!(
+        s.step,
+        Step::EnsureDirs {
+          after_sync: true,
+          ..
+        }
+      ),
+    )
+  });
+  crate::shared_volumes::sort_steps(
+    &mut b.steps,
+    &snap.world,
+    desired,
+  );
   // 同一次执行里要起 Tailscale：起来后机器地址会变，后面的服务和网关按新地址渲染，
   // 和计划时的指纹对不上是正常的，不校验。
   if b
@@ -1329,7 +1347,12 @@ fn service_items(
         Step::EnsureDirs {
           server: server.clone(),
           dirs: new_dirs,
-          after_sync: moved.is_some(),
+          after_sync: moved.is_some()
+            || crate::shared_volumes::owners(&svc.spec).any(
+              |owner| {
+                moved_from(snap, current, owner, server).is_some()
+              },
+            ),
         },
       );
     }
@@ -1687,6 +1710,13 @@ fn service_items(
       "停止并删除容器",
     );
     for m in crate::data::mounts(name, &svc.spec) {
+      if m.kind == DataKind::Shared {
+        b.warnings.push(format!(
+          "服务 {name} 的{} 归拥有者服务，不会被这一步删除",
+          crate::data::describe(&m)
+        ));
+        continue;
+      }
       let gone = purge
         && m.kind != wharf_api_types::view::DataKind::ExternalDir;
       b.warnings.push(if gone {
@@ -1995,7 +2025,9 @@ fn move_items(
   let mounts = crate::data::mounts(name, source);
   let mut left: Vec<String> = mounts
     .iter()
-    .filter(|m| m.kind != DataKind::Managed)
+    .filter(|m| {
+      matches!(m.kind, DataKind::ExternalDir | DataKind::NamedVolume)
+    })
     .map(crate::data::describe)
     .collect();
   if let Some(actual) = b.migration_mounts.get(name) {
@@ -2058,6 +2090,13 @@ fn move_items(
       from: from.to_string(),
       to: to.to_string(),
       instance_id: Some(old.instance_id.clone()),
+      shared_data: crate::shared_volumes::consumers_on(
+        &snap.world,
+        name,
+        from,
+      )
+      .next()
+      .is_some(),
     },
   );
   for (server, role) in [(from, "源"), (to, "目标")] {

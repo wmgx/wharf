@@ -794,3 +794,23 @@ fn migration_preserves_existing_host_access_and_is_idempotent() {
       && !new.host_system
   );
 }
+
+#[test]
+fn explicit_from_service_does_not_require_host_docker() {
+  let mut w = world();
+  let spec = serde_json::from_value(json!({
+    "server":"s1","source":{"image":"fixture:1"},
+    "volumes":[{"from_service":"photos:data","target":"/data"}]
+  }))
+  .unwrap();
+  w.apply_changes(&[Change::UpsertService {
+    name: "reader".into(),
+    spec,
+    adopt: None,
+  }])
+  .unwrap();
+  assert!(
+    service_reasons("reader", &w.services["reader"], false)
+      .is_empty()
+  );
+}

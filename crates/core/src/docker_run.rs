@@ -625,7 +625,12 @@ fn draft(mut p: Parsed) -> ServiceDraft {
       volumes: p
         .volumes
         .into_iter()
-        .map(|(name, target, _)| VolumeSpec { name, target })
+        .map(|(name, target, _)| VolumeSpec {
+          name,
+          target,
+          from_service: None,
+          read_only: false,
+        })
         .collect(),
       limits,
       warnings: p.warnings,

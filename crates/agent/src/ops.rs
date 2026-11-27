@@ -297,6 +297,12 @@ impl Ops {
       AgentOp::RemoveData { service } => {
         self.remove_data(&service, ctx).await
       }
+      AgentOp::BindMountUsers(query) => {
+        data_dir_relative(&query.path)?;
+        to_value(
+          self.docker.inspect_bind_mount_users(&query, ctx).await?,
+        )
+      }
       AgentOp::Restic(job) => self.restic(&job, ctx).await,
       AgentOp::Build(job) => {
         check_project(&job.service)?;
