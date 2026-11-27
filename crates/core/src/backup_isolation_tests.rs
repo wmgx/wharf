@@ -253,7 +253,11 @@ async fn legacy_repo_adds_service_key_before_cleanup() {
 #[tokio::test]
 async fn cleanup_legacy_requires_confirm_and_aborts_if_target_offline()
  {
-  let state = test_state();
+  let dir = tempfile::tempdir().unwrap();
+  let mut state = test_state();
+  let inner = Arc::get_mut(&mut state).unwrap();
+  inner.data_dir = dir.path().into();
+  inner.db = db::Db::open(&dir.path().join("wharf.db")).unwrap();
   seed_servers(&state).await;
   let legacy = seed_legacy(&state).await;
   let clean = |confirm: Option<&str>| {
