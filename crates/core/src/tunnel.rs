@@ -179,7 +179,7 @@ pub async fn sync(
         pull: snapshot::pull_policy(&world.servers[server]),
         pull_missing_only: false,
         retire: None,
-        rollback: false,
+        rollback: true,
         pins: Default::default(),
         expected_images: Default::default(),
         no_start: false,

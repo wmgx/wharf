@@ -441,12 +441,22 @@ pub async fn edge(
         for x in v {
           println!(
             "{} {:<12} {:<20} {:<10} {}",
-            if x.active { "*" } else { " " },
+            if x.active {
+              "*"
+            } else if x.last_deployed_at.is_none() {
+              "~"
+            } else {
+              " "
+            },
             &x.id[..12.min(x.id.len())],
             x.created_at.get(..19).unwrap_or(&x.created_at),
             x.source.as_deref().unwrap_or("-"),
             x.message.as_deref().unwrap_or("")
           );
+        }
+        if v.iter().any(|x| !x.active && x.last_deployed_at.is_none())
+        {
+          println!("~ 未上线");
         }
       });
       Ok(())

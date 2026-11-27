@@ -30,6 +30,8 @@ fn service(content: &str, adopt: Option<AdoptSpec>) -> Change {
     )
     .unwrap(),
     adopt,
+    pins: None,
+    commit: None,
   }
 }
 

@@ -560,8 +560,10 @@ export type Change = {
    * 导入时接管的现有容器：第一次部署前停掉它们，失败时恢复。部署成功后记进导入记录，不再起作用。
    */
   adopt?: AdoptSpec | null;
+  commit?: string | null;
   name: string;
   op: "upsert_service";
+  pins?: Record<string, string> | null;
   spec: ServiceSpec;
 } | {
   name: string;
@@ -1013,6 +1015,7 @@ export interface EdgeVersionView {
   active: boolean;
   created_at: string;
   id: string;
+  last_deployed_at?: string | null;
   message?: string | null;
   /**
    * `wrangler`、`dashboard`、`api` 等。
@@ -2194,13 +2197,16 @@ export interface RiskRow {
 }
 
 /**
- * 回滚到某次部署时要提交的服务配置。image 来源会固定到当时的镜像 digest。
+ * 回滚到某次部署时要提交的服务配置和版本。
  */
 export interface RollbackTarget {
+  commit?: string | null;
   deployed_at: string;
   deployment_id: number;
+  pins?: Record<string, string> | null;
   service: string;
   spec: ServiceSpec;
+  warnings?: string[];
 }
 
 export interface RouteDiagnosis {

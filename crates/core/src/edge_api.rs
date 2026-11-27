@@ -205,7 +205,8 @@ pub async fn rollback(
   auth.require(Perm::Apply)?;
   let snap = snapshot::load(&s.db).await?;
   let list = edge::versions(&snap, &name).await?;
-  let version = edge::rollback_target(&list, req.version.as_deref())?;
+  let version =
+    edge::rollback_target(&name, &list, req.version.as_deref())?;
   Ok(Json(
     start_task_by(
       s.clone(),

@@ -18,6 +18,10 @@ export function HistoryTab({ name }: { name: string }) {
   return <div className="grid gap-3"><Segmented value={show} options={[["all", "全部"], ["versions", "版本"]]} onChange={(v) => { const next = new URLSearchParams(params); if (v === "versions") next.set("show", v); else next.delete("show"); setParams(next, { replace: true }); }} />{show === "versions" ? <History name={name} /> : <ServiceTimeline name={name} />}</div>;
 }
 
+function versionKey(d: DeploymentView) {
+  return JSON.stringify([d.hash, d.commit ?? "", d.images.map((i) => i.digest ?? i.id).sort()]);
+}
+
 function History({ name }: { name: string }) {
   const { data } = usePoll<DeploymentView[]>(
     `/api/services/${encodeURIComponent(name)}/deployments`,
@@ -26,6 +30,7 @@ function History({ name }: { name: string }) {
   const actions = useActions();
   if (!data) return <Skeleton className="h-40 rounded-xl" />;
   if (data.length === 0) return <Empty>没有版本</Empty>;
+  const current = data.find((d) => d.started !== false);
   return (
     <Panel>
       <Table>
@@ -39,7 +44,7 @@ function History({ name }: { name: string }) {
           </TableRow>
         </TableHeader>
         <TableBody>
-          {data.map((d, i) => (
+          {data.map((d) => (
             <TableRow key={d.id}>
               <TableCell className="pl-4 font-mono text-xs">#{d.id}</TableCell>
               <TableCell>
@@ -67,9 +72,11 @@ function History({ name }: { name: string }) {
                 {d.images.map((im) => im.digest ?? im.image).join(" ")}
               </TableCell>
               <TableCell className="pr-4 text-right">
-                {i === 0 ? (
+                {d.started === false ? (
+                  <Badge variant="secondary">未启动</Badge>
+                ) : d.id === current?.id ? (
                   <Badge variant="secondary">当前版本</Badge>
-                ) : d.hash === data[0].hash ? (
+                ) : current && versionKey(d) === versionKey(current) ? (
                   <span className="text-xs text-muted-foreground">
                     和当前相同
                   </span>

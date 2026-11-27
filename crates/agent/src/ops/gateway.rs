@@ -16,7 +16,7 @@ use crate::{
   exec::{Cmd, Ctx},
 };
 
-use super::{CADDY_ADMIN, Ops};
+use super::{CADDY_ADMIN, Ops, recovery_error};
 
 const MANAGED_GATEWAY_FILES: [&str; 2] = ["link.crt", "link.key"];
 
@@ -143,49 +143,59 @@ impl Ops {
       before.hash.as_deref() != Some(up.hash.as_str());
     let running = before.all_running();
 
+    let mut previous = if running && compose_changed {
+      self.docker.previous(&up.project)
+    } else {
+      None
+    };
+    if let Some(prev) = &mut previous {
+      let names = self.docker.images(&up.project, ctx).await?;
+      prev.images =
+        self.docker.running_images(&up.project, &names, ctx).await?;
+    }
     let mut warnings = Vec::new();
     let images = vec![apply.image.clone()];
-    if !running || compose_changed {
-      self
-        .docker
-        .pull(&apply.image, &up.pull, ctx, &mut warnings)
-        .await?;
-    }
-
-    let files = GatewayFiles::stage(
-      &conf,
-      &apply.caddyfile,
-      &apply.extra_files,
-    )?;
-    ctx.say("校验 Caddy 配置");
-    Cmd::new(&self.docker.bin)
-      .args([
-        "run",
-        "--rm",
-        "--label",
-        "wharf.temp=1",
-        "--network",
-        "none",
-        "-v",
-      ])
-      .arg(format!("{}:/etc/caddy:ro", conf.display()))
-      .args([
-        apply.image.as_str(),
-        "caddy",
-        "validate",
-        "--config",
-        "/etc/caddy/Caddyfile.next",
-        "--adapter",
-        "caddyfile",
-      ])
-      .timeout(Duration::from_secs(60))
-      .run(ctx)
-      .await?
-      .check("caddy validate")?;
-
-    files.activate()?;
+    let mut activated = false;
     let result = async {
-      self.docker.write_compose(&up.project, &up.compose)?;
+      if !running || compose_changed {
+        self
+          .docker
+          .pull(&apply.image, &up.pull, ctx, &mut warnings)
+          .await?;
+      }
+      let files = GatewayFiles::stage(
+        &conf,
+        &apply.caddyfile,
+        &apply.extra_files,
+      )?;
+      ctx.say("校验 Caddy 配置");
+      Cmd::new(&self.docker.bin)
+        .args([
+          "run",
+          "--rm",
+          "--label",
+          "wharf.temp=1",
+          "--network",
+          "none",
+          "-v",
+        ])
+        .arg(format!("{}:/etc/caddy:ro", conf.display()))
+        .args([
+          apply.image.as_str(),
+          "caddy",
+          "validate",
+          "--config",
+          "/etc/caddy/Caddyfile.next",
+          "--adapter",
+          "caddyfile",
+        ])
+        .timeout(Duration::from_secs(60))
+        .run(ctx)
+        .await?
+        .check("caddy validate")?;
+
+      files.activate()?;
+      activated = true;
       let result = if running && !compose_changed {
         ctx.say("热重载 Caddy");
         // 配置文本不变时，证书换了也要让 Caddy 重新加载。
@@ -203,16 +213,45 @@ impl Ops {
         self.finish_up(up, &images, warnings, None, 10, ctx).await?
       };
       files.commit(&apply.caddyfile_hash)?;
-      Ok(result)
+      Ok::<_, ApiError>(result)
     }
     .await;
-
-    if result.is_err() && running {
-      ctx.say("失败，恢复旧配置");
-      let _ =
-        self.caddy_reload(&up.project, true, &Ctx::detached()).await;
+    // GatewayFiles 的守卫已经还原文件，旧容器现在才能读取旧配置。
+    match result {
+      Ok(result) => Ok(result),
+      Err(error) if activated && running && !compose_changed => {
+        let recover = ctx.detached_with_progress();
+        recover.say("热重载失败，恢复旧网关配置");
+        Err(
+          match self.caddy_reload(&up.project, true, &recover).await {
+            Ok(()) => error,
+            Err(back) => recovery_error(error, back, "旧网关配置"),
+          },
+        )
+      }
+      Err(error) if activated && previous.is_some() => {
+        let previous = previous.as_ref().unwrap();
+        let recover = ctx.detached_with_progress();
+        recover.say(format!("{}，恢复旧网关", error.message));
+        Err(
+          self
+            .restore_project(
+              &up.project,
+              previous,
+              &recover,
+              error,
+              "旧网关",
+              wharf_api_types::compose::parse_compose_max_grace_secs(
+                &up.compose,
+              ),
+            )
+            .await,
+        )
+      }
+      Err(error) => Err(
+        self.restore_before_up(previous.as_ref(), ctx, error).await,
+      ),
     }
-    result
   }
 
   /// `force`：配置没变也重载（Caddy 默认会跳过），证书管理随之重新开始。
@@ -346,4 +385,56 @@ mod tests {
         .all(|name| !conf.join(name).exists())
     );
   }
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn gateway_rebuild_failure_restores_conf_before_old_compose() {
+  let (dir, docker) = crate::docker::fake_docker(
+    r#"
+case "$1:$2:$6" in
+  ps:-a:*) echo '{"Names":"gateway-caddy-1","Labels":"com.docker.compose.project=wharf-gw-gw","State":"running"}';;
+  ps:-aq:*) echo container-id;;
+  inspect:*) echo 'caddy:1|old-image';;
+  compose:-p:config) echo 'caddy:1';;
+  compose:-p:up)
+    if grep -q NEW "$5"; then echo 'port conflict' >&2; exit 1; fi
+    grep -q OLD projects/wharf-gw-gw/conf/Caddyfile && test -f retagged && touch recovered;;
+  image:inspect:*) echo 'new-image|[]';;
+  tag:old-image:*) grep -q OLD projects/wharf-gw-gw/conf/Caddyfile && touch retagged;;
+  pull:*|run:*|logs:*) ;;
+  *) exit 2;;
+esac
+"#,
+  );
+  let ops = Ops::new(
+    docker.clone(),
+    crate::report::Reporter::new(docker.clone(), None),
+    String::new(),
+    crate::host_shell::HostShell::prepare(
+      docker.clone(),
+      "s1".into(),
+    )
+    .await,
+    dir.path().into(),
+  );
+  let project = "wharf-gw-gw";
+  docker.write_compose(project, "OLD").unwrap();
+  docker.write_hash(project, "old").unwrap();
+  let conf = docker.project_dir(project).join("conf");
+  fs::create_dir(&conf).unwrap();
+  write_private(&conf.join("Caddyfile"), "OLD").unwrap();
+  let apply: GatewayApply = serde_json::from_value(serde_json::json!({
+    "up":{"project":project,"compose":"NEW","hash":"new",
+      "pull":{"mirrors":{},"mirrors_only":false,"attempt_timeout_secs":1}},
+    "image":"caddy:1","caddyfile":"NEW","caddyfile_hash":"new"
+  })).unwrap();
+  let error = ops
+    .gateway_apply(&apply, &Ctx::detached())
+    .await
+    .unwrap_err();
+  assert!(error.message.contains("已恢复旧网关"));
+  assert!(dir.path().join("recovered").is_file());
+  let old = docker.previous(project).unwrap();
+  assert_eq!((&*old.compose, &*old.hash), ("OLD", "old"));
 }

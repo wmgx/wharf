@@ -342,7 +342,13 @@ impl World {
           }
           server.settings = settings.clone();
         }
-        Change::UpsertService { name, spec, adopt } => {
+        Change::UpsertService {
+          name,
+          spec,
+          adopt,
+          pins: req_pins,
+          commit: req_commit,
+        } => {
           if let Source::Build(b) = &spec.source
             && b.dockerfile.is_some()
             && b.template.is_some()
@@ -394,7 +400,7 @@ impl World {
             .clone()
             .or_else(|| old.and_then(|s| s.import.clone()));
           // 改配置不换镜像版本；换了镜像的，旧的固定版本对不上，计划时重新查。
-          let pins = old
+          let mut pins = old
             .map(|s| s.pins.clone())
             .or_else(|| {
               import.as_ref().map(|a| a.initial_pins.clone())
@@ -406,9 +412,34 @@ impl World {
             })
             .collect();
           // 改构建配置不换代码；换了仓库或分支的，计划时重新查。
-          let commit = old
+          let mut commit = old
             .filter(|o| git_ref(&o.spec) == git_ref(spec))
             .and_then(|o| o.commit.clone());
+          if let Some(requested) = req_pins {
+            let images = crate::pins::images(&spec.source);
+            for (image, digest) in requested {
+              if !images.contains(image)
+                || digest.strip_prefix("sha256:").is_none_or(|sha| {
+                  crate::uploads::check_sha(sha).is_err()
+                })
+              {
+                return Err(ApiError::invalid(format!(
+                  "服务 {name} 的镜像 {image} 没有合法的固定版本"
+                )));
+              }
+            }
+            pins = requested.clone();
+          }
+          if let Some(sha) = req_commit {
+            if git_ref(spec).is_none()
+              || !crate::rollback::valid_commit(sha)
+            {
+              return Err(ApiError::invalid(format!(
+                "服务 {name} 的固定 Git commit 不合法"
+              )));
+            }
+            commit = Some(sha.clone());
+          }
           // compose 来源没填端口时按 compose 里映射的端口补上，否则服务没有内网地址。
           let mut spec = spec.clone();
           validate_deploy_options(name, &spec)?;
@@ -711,6 +742,8 @@ impl World {
     }
     for (name, spec) in &fleet.services {
       changes.push(Change::UpsertService {
+        pins: None,
+        commit: None,
         name: name.clone(),
         spec: spec.clone(),
         adopt: None,
@@ -2310,7 +2343,7 @@ mod tests {
     w.servers.insert("s1".into(), server);
     w.apply_changes(&[
       Change::UpsertGateway { name: "edge".into(), spec: serde_json::from_value(json!({"kind":"caddy","server":"s1","default":true,"wildcard":["example.com"]})).unwrap() },
-      Change::UpsertService { name: "app".into(), spec: image_service("s1"), adopt: None },
+      Change::UpsertService { pins: None, commit: None, name: "app".into(), spec: image_service("s1"), adopt: None },
     ]).unwrap();
     w.allocate_ports().unwrap();
     let now = chrono::Utc::now().timestamp_millis();
@@ -2559,6 +2592,8 @@ mod tests {
   fn partial_fleet_keeps_unlisted_objects() {
     let mut w = sample();
     let add = |name: &str| Change::UpsertService {
+      pins: None,
+      commit: None,
       name: name.into(),
       spec: image_service("node1"),
       adopt: None,
@@ -2638,6 +2673,8 @@ mod tests {
     use wharf_api_types::ErrorCode;
     let mut w = sample();
     w.apply_changes(&[Change::UpsertService {
+      pins: None,
+      commit: None,
       name: "app".into(),
       spec: image_service("node1"),
       adopt: None,
@@ -2729,6 +2766,8 @@ services:
         spec: gw,
       },
       Change::UpsertService {
+        pins: None,
+        commit: None,
         name: "app".into(),
         spec: image_service("s1"),
         adopt: None,
@@ -2797,6 +2836,8 @@ services:
       vec![forward(20000, false)];
     w.validate().unwrap();
     w.apply_changes(&[Change::UpsertService {
+      pins: None,
+      commit: None,
       name: "new".into(),
       spec: image_service("s1"),
       adopt: None,
@@ -2813,6 +2854,8 @@ services:
     let mut spec = image_service("node1");
     spec.auto_update = true;
     w.apply_changes(&[Change::UpsertService {
+      pins: None,
+      commit: None,
       name: "app".into(),
       spec: spec.clone(),
       adopt: None,
@@ -2824,6 +2867,8 @@ services:
     });
     let err = w
       .apply_changes(&[Change::UpsertService {
+        pins: None,
+        commit: None,
         name: "app".into(),
         spec,
         adopt: None,
@@ -2836,6 +2881,8 @@ services:
   fn trial_service_name_is_rejected() {
     let err = sample()
       .apply_changes(&[Change::UpsertService {
+        pins: None,
+        commit: None,
         name: "wharf-try-s1".into(),
         spec: image_service("s1"),
         adopt: None,
@@ -2848,6 +2895,8 @@ services:
   fn task_service_name_is_rejected() {
     let err = sample()
       .apply_changes(&[Change::UpsertService {
+        pins: None,
+        commit: None,
         name: "wharf-task-x".into(),
         spec: image_service("s1"),
         adopt: None,
@@ -2888,6 +2937,8 @@ services:
     });
     let err = w
       .apply_changes(&[Change::UpsertService {
+        pins: None,
+        commit: None,
         name: "s1".into(),
         spec,
         adopt: None,
@@ -2903,11 +2954,15 @@ services:
     let mut w = sample();
     w.apply_changes(&[
       Change::UpsertService {
+        pins: None,
+        commit: None,
         name: "a".into(),
         spec: image_service("node1"),
         adopt: None,
       },
       Change::UpsertService {
+        pins: None,
+        commit: None,
         name: "b".into(),
         spec: image_service("node1"),
         adopt: None,
@@ -2998,6 +3053,8 @@ services:
     let mut w = sample();
     w.apply_changes(&[
       Change::UpsertService {
+        pins: None,
+        commit: None,
         name: "who".into(),
         spec: image_service("node1"),
         adopt: None,
@@ -3117,6 +3174,8 @@ services:
     };
     w.apply_changes(&[
       Change::UpsertService {
+        pins: None,
+        commit: None,
         name: "who".into(),
         spec: image_service("node1"),
         adopt: None,
@@ -3153,6 +3212,8 @@ services:
   fn unknown_server_is_rejected() {
     let mut w = sample();
     w.apply_changes(&[Change::UpsertService {
+      pins: None,
+      commit: None,
       name: "x".into(),
       spec: image_service("nowhere"),
       adopt: None,
@@ -3168,6 +3229,8 @@ services:
     let mut spec = image_service("node1");
     spec.source = serde_json::from_value(json!({"compose":{"content":"services:\n  db:\n    image: db:8\n  app:\n    image: app:2\n"}})).unwrap();
     w.apply_changes(&[Change::UpsertService {
+      pins: None,
+      commit: None,
       name: "x".into(),
       spec,
       adopt: None,
@@ -3203,6 +3266,8 @@ services:
     assert!(desired.writes_from(&current).is_empty());
     desired
       .apply_changes(&[Change::UpsertService {
+        pins: None,
+        commit: None,
         name: "x".into(),
         spec: image_service("node1"),
         adopt: None,

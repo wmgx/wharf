@@ -563,6 +563,7 @@ pub fn change(
   applied: Option<&Applied>,
   pins: &BTreeMap<String, String>,
   configs: Option<&BTreeMap<String, String>>,
+  explicit: bool,
 ) -> Option<(String, String, String)> {
   let applied = applied?;
   pins.iter().find_map(|(image, new)| {
@@ -573,6 +574,7 @@ pub fn change(
       (None, Some(config)) if id.as_ref() != Some(config) => {
         "当前版本未知".into()
       }
+      (None, None) if explicit => "当前版本未知".into(),
       _ => return None,
     };
     Some((image.clone(), old, new.clone()))
@@ -812,27 +814,43 @@ mod tests {
     let id =
       |v: &str| BTreeMap::from([("x:latest".into(), v.into())]);
     assert_eq!(
-      change(Some(&applied(Some("sha256:new"))), &pins, None),
+      change(Some(&applied(Some("sha256:new"))), &pins, None, false),
       None
     );
     assert_eq!(
-      change(Some(&applied(Some("sha256:old"))), &pins, None),
+      change(Some(&applied(Some("sha256:old"))), &pins, None, false),
       Some(("x:latest".into(), "old".into(), "sha256:new".into()))
     );
     // 部署记录里没有 digest：查到的镜像 ID 和部署时的一样，就是同一个版本。
     assert_eq!(
-      change(Some(&applied(None)), &pins, Some(&id("sha256:id1"))),
+      change(
+        Some(&applied(None)),
+        &pins,
+        Some(&id("sha256:id1")),
+        false
+      ),
       None
     );
     assert_eq!(
-      change(Some(&applied(None)), &pins, Some(&id("sha256:id2"))),
+      change(
+        Some(&applied(None)),
+        &pins,
+        Some(&id("sha256:id2")),
+        false
+      ),
       Some((
         "x:latest".into(),
         "当前版本未知".into(),
         "sha256:new".into()
       ))
     );
-    assert_eq!(change(Some(&applied(None)), &pins, None), None);
+    assert_eq!(
+      change(Some(&applied(None)), &pins, None, false),
+      None
+    );
+    assert!(
+      change(Some(&applied(None)), &pins, None, true).is_some()
+    );
     // compose：按镜像比，只报变了的那个。
     let compose = Applied {
       digests: BTreeMap::from([
@@ -846,7 +864,7 @@ mod tests {
       ("app:2".into(), "sha256:a2".into()),
     ]);
     assert_eq!(
-      change(Some(&compose), &pins, None),
+      change(Some(&compose), &pins, None, false),
       Some(("app:2".into(), "a1".into(), "sha256:a2".into()))
     );
   }
@@ -914,4 +932,13 @@ async fn pending_import_retry_does_not_resolve_registry_images() {
       .unwrap();
   assert!(result.image_ids.is_empty());
   assert!(desired.services["app"].pins.is_empty());
+}
+
+#[cfg(test)]
+#[test]
+fn digest_image_skips_pinning() {
+  let source =
+    Source::Image(format!("app@sha256:{}", "a".repeat(64)));
+  assert!(images(&source).is_empty());
+  assert!(unsupported(&source).is_some());
 }

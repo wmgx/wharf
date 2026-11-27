@@ -316,6 +316,7 @@ pub(crate) struct Builder {
   pub(crate) warnings: Vec<String>,
   /// 这次计划查到的镜像 ID：服务 → 镜像 → `sha256:…`。
   image_ids: BTreeMap<String, BTreeMap<String, String>>,
+  explicit_pins: BTreeSet<String>,
   /// 删除时连同数据一起删的服务。
   purge_data: BTreeSet<String>,
 }
@@ -493,7 +494,14 @@ pub(crate) async fn make_plan_inner(
   )?;
   // 只改日志、端口监控或心跳时间时，计划只写配置，离线和现存漂移都不触发部署。
   if req.changes.iter().all(|c| {
-    matches!(c, wharf_api_types::spec::Change::UpsertService { .. })
+    matches!(
+      c,
+      wharf_api_types::spec::Change::UpsertService {
+        pins: None,
+        commit: None,
+        ..
+      }
+    )
   }) {
     let writes = desired.writes_from(&current);
     if !writes.is_empty()
@@ -525,7 +533,7 @@ pub(crate) async fn make_plan_inner(
       ));
     }
   }
-  let refresh: BTreeSet<String> = req
+  let mut refresh: BTreeSet<String> = req
     .changes
     .iter()
     .filter_map(|c| match c {
@@ -536,6 +544,22 @@ pub(crate) async fn make_plan_inner(
       _ => None,
     })
     .collect();
+  for change in &req.changes {
+    if let wharf_api_types::spec::Change::UpsertService {
+      name,
+      spec,
+      pins: Some(pins),
+      ..
+    } = change
+    {
+      refresh.extend(
+        crate::pins::images(&spec.source)
+          .into_iter()
+          .filter(|image| !pins.contains_key(image))
+          .map(|image| crate::pins::refresh_key(name, Some(&image))),
+      );
+    }
+  }
   let started = std::time::Instant::now();
   let mut lap = started;
   let mut timing = Vec::new();
@@ -653,6 +677,18 @@ pub(crate) async fn make_plan_inner(
   let writes = desired.writes_from(&current);
   let mut b = Builder {
     image_ids: resolved.image_ids,
+    explicit_pins: req
+      .changes
+      .iter()
+      .filter_map(|change| match change {
+        wharf_api_types::spec::Change::UpsertService {
+          name,
+          pins: Some(_),
+          ..
+        } => Some(name.clone()),
+        _ => None,
+      })
+      .collect(),
     warnings,
     purge_data: req
       .changes
@@ -786,6 +822,26 @@ pub(crate) async fn make_plan_inner(
     &mut b, &snap, &current, &desired, &net, &status, &writes,
   )?;
   build_agent_warnings(state, &desired, &mut b)?;
+  let old_agents: BTreeSet<_> = b
+    .steps
+    .iter()
+    .filter_map(|step| {
+      let Step::ServiceUp { service, .. } = &step.step else {
+        return None;
+      };
+      let row = desired.services.get(service)?;
+      (matches!(row.spec.source, Source::Compose { .. })
+        && row.import.is_none()
+        && crate::apply::can_rollback_service(&row.spec)
+        && !state.hub.supports_safe_rollback(&row.spec.server))
+      .then_some(row.spec.server.as_str())
+    })
+    .collect();
+  b.warnings.extend(
+    old_agents
+      .into_iter()
+      .map(crate::apply::safe_rollback_warning),
+  );
   leftover_items(&mut b, &snap, &current, &desired, &status);
   link_items(&mut b, &snap, &current, &desired, &net, &status)?;
   tailscale_items(&mut b, &snap, &desired, &status);
@@ -1058,15 +1114,23 @@ fn config_items(
       (_, Action::Create) => (vec![], "新增".to_string()),
       // 配置没变，只是记下固定的镜像版本（存在 meta 里）。
       (KIND_SERVICE, Action::Update) if before == after => {
-        let pinned = desired
-          .services
-          .get(name)
-          .and_then(|r| r.pins.values().next())
-          .map(|d| crate::pins::short(d).to_string());
-        match pinned {
-          Some(d) => (vec![], format!("固定镜像版本 {d}，不重建")),
-          None => (vec![], "更新内部记录，不重建".to_string()),
-        }
+        let old = &current.services[name];
+        let new = &desired.services[name];
+        let reason = if old.commit != new.commit
+          && let Some(commit) = &new.commit
+        {
+          format!("切换代码版本到 {}", crate::pins::short(commit))
+        } else if !old.pins.is_empty() && old.pins != new.pins {
+          "切换固定镜像版本".into()
+        } else if let Some(digest) = new.pins.values().next() {
+          format!(
+            "固定镜像版本 {}，不重建",
+            crate::pins::short(digest)
+          )
+        } else {
+          "更新内部记录，不重建".into()
+        };
+        (vec![], reason)
       }
       _ => (vec![], "修改配置".to_string()),
     };
@@ -1343,9 +1407,43 @@ fn service_items(
       .get(server)
       .and_then(|s| s.as_ref())
       .and_then(|p| p.get(name));
+    let upgrade = crate::pins::change(
+      snap.applied.get(name),
+      &svc.pins,
+      b.image_ids.get(name),
+      b.explicit_pins.contains(name),
+    )
+    .map(|(image, old, new)| {
+      let what = match &svc.spec.source {
+        Source::Image(_) => String::new(),
+        _ => format!(" {image}"),
+      };
+      format!(
+        "更新镜像版本{what} {old} → {}",
+        crate::pins::short(&new)
+      )
+    })
+    .or_else(|| {
+      crate::pins::commit_change(
+        snap.applied.get(name),
+        svc.commit.as_deref(),
+      )
+      .map(|(old, new)| {
+        format!(
+          "更新代码 {old} → {}，重新构建",
+          crate::pins::short(&new)
+        )
+      })
+    });
     // 配置没变、只是要停下来：不重建，直接停。
     if moved.is_none()
       && svc.spec.stopped
+      && !(upgrade.is_some()
+        && (b.explicit_pins.contains(name)
+          || current
+            .services
+            .get(name)
+            .is_some_and(|old| old.commit != svc.commit)))
       && let Some(state) = live
       && state.hash.as_deref() == Some(hash.as_str())
     {
@@ -1379,30 +1477,6 @@ fn service_items(
       }
       continue;
     }
-    let upgrade = crate::pins::change(
-      snap.applied.get(name),
-      &svc.pins,
-      b.image_ids.get(name),
-    )
-    .map(|(image, old, new)| {
-      let what = match &svc.spec.source {
-        Source::Image(_) => String::new(),
-        _ => format!(" {image}"),
-      };
-      format!(
-        "更新镜像版本{what} {old} → {}",
-        crate::pins::short(&new)
-      )
-    })
-    .or_else(|| {
-      crate::pins::commit_change(
-        snap.applied.get(name),
-        svc.commit.as_deref(),
-      )
-      .map(|(old, new)| {
-        format!("更新代码 {old} → {}，重新构建", &new[..12])
-      })
-    });
     let decision = match status.get(server).and_then(|s| s.as_ref()) {
       None if changed(writes, KIND_SERVICE, name) => Some((
         Action::Update,
@@ -1466,6 +1540,9 @@ fn service_items(
             reason.to_string(),
             Some(before),
           ))
+        }
+        Some(_) if svc.spec.stopped && upgrade.is_some() => {
+          upgrade.map(|reason| (Action::Update, vec![Impact::Restart], reason, None))
         }
         Some(state) => {
           let expected = crate::render::service_expected_components(
@@ -2611,6 +2688,16 @@ fn gateway_items(
       },
     };
     if let Some((action, mut risk, reason)) = decision {
+      if gw.spec.kind == GatewayKind::Caddy
+        && (action == Action::Create
+          || risk.contains(&Impact::Restart))
+        && !hub.supports_safe_rollback(server)
+      {
+        let warning = crate::apply::safe_rollback_warning(server);
+        if !b.warnings.contains(&warning) {
+          b.warnings.push(warning);
+        }
+      }
       if r.needs_link_cert && !online {
         b.warnings.push(format!("服务器 {server} 离线，无法确认网关 {name} 的 agent 能下发隧道证书"));
       }
@@ -3544,6 +3631,8 @@ mod tests {
       &state,
       PlanRequest {
         changes: vec![Change::UpsertService {
+          pins: None,
+          commit: None,
           name: "notes".into(),
           spec,
           adopt: None,
