@@ -959,11 +959,10 @@ pub fn from_container(
       &host[field]
     };
     let set = match value {
-      Json::String(s) => {
-        !s.is_empty()
-          && !(field == "Runtime" && s == "runc"
-            || field == "CgroupnsMode" && s == "private")
-      }
+      Json::String(s) => !matches!(
+        (field, s.as_str()),
+        (_, "") | ("Runtime", "runc") | ("CgroupnsMode", "private")
+      ),
       Json::Number(n) => n.as_i64().is_some_and(|n| n != 0),
       Json::Array(a) => !a.is_empty(),
       Json::Object(o) => !o.is_empty(),
