@@ -201,8 +201,8 @@ mod tests {
       "INSERT INTO resources (kind, name, spec, meta, version, created_at, updated_at)
        VALUES ('service', 'reader', '{\"server\":\"s1\",\"source\":{\"image\":\"fixture:1\"}}',
          '{\"instance_id\":\"svc_new\"}', 1, 2, 2);
-       INSERT INTO deployments (id, service, server, run_id, hash, compose, created_at, instance_id)
-       VALUES (1, 'reader', 's1', 'r1', 'h1', '', 1, 'svc_old'), (2, 'reader', 's1', 'r2', 'h2', '', 3, 'svc_new');"
+       INSERT INTO deployments (id, service, server, run_id, hash, compose, images, created_at, instance_id)
+       VALUES (1, 'reader', 's1', 'r1', 'h1', '', '[]', 1, 'svc_old'), (2, 'reader', 's1', 'r2', 'h2', '', '[]', 3, 'svc_new');"
     ).map_err(sql_err)).await.unwrap();
     let auth = || Auth {
       name: "fixture".into(),

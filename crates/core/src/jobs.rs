@@ -315,6 +315,16 @@ async fn cleanup_skips_when_service_moved_back_or_rebuilt() {
     .unwrap();
   let locked = state.apply_lock.lock().await;
   cleanups(&state).await.unwrap();
+  assert!(
+    state
+      .db
+      .call(|c| c
+        .query_row("SELECT EXISTS(SELECT 1 FROM cleanups)", [], |r| r
+          .get::<_, bool>(0))
+        .map_err(sql_err))
+      .await
+      .unwrap()
+  );
   drop(locked);
   for (server, instance) in [("s1", "svc_old"), ("s2", "svc_new")] {
     state.db.call(move |c| {

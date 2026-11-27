@@ -1071,9 +1071,7 @@ pub(crate) async fn run_step(
         state,
         &snap,
         (server, service),
-        *purge_data,
-        instance_id.as_deref(),
-        *has_relative_mounts,
+        (*purge_data, instance_id.as_deref(), *has_relative_mounts),
         progress,
         cancel,
       )
@@ -1765,9 +1763,11 @@ async fn service_down(
   state: &AppState,
   snap: &snapshot::Snapshot,
   (server, service): (&str, &str),
-  purge_data: bool,
-  instance_id: Option<&str>,
-  has_relative_mounts: bool,
+  (purge_data, instance_id, has_relative_mounts): (
+    bool,
+    Option<&str>,
+    bool,
+  ),
   progress: ProgressFn,
   cancel: &CancellationToken,
 ) -> Result<(), ApiError> {

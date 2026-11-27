@@ -784,6 +784,7 @@ pub fn apply_write(
          ON CONFLICT (kind, name) DO UPDATE SET
            spec = excluded.spec, meta = CASE WHEN excluded.kind = 'service' THEN
              json_set(excluded.meta, '$.instance_id', COALESCE(
+               NULLIF(json_extract(?4, '$.instance_id'), ''),
                NULLIF(json_extract(resources.meta, '$.instance_id'), ''),
                json_extract(excluded.meta, '$.instance_id')
              ))
@@ -2134,8 +2135,8 @@ mod tests {
     }
     c.execute_batch("INSERT INTO resources (kind, name, spec, version, created_at, updated_at)
       VALUES ('service', 'reader', '{}', 1, 2000, 2000);
-      INSERT INTO deployments (service, server, run_id, hash, compose, created_at)
-      VALUES ('reader', 's1', 'r1', 'new', '', 2500), ('reader', 's2', 'r2', 'old', '', 1000);").unwrap();
+      INSERT INTO deployments (service, server, run_id, hash, compose, images, created_at)
+      VALUES ('reader', 's1', 'r1', 'new', '', '[]', 2500), ('reader', 's2', 'r2', 'old', '', '[]', 1000);").unwrap();
     c.execute_batch(SERVICE_INSTANCE_ID_MIGRATION).unwrap();
     let instance = &service_instances(&c).unwrap()["service/reader"];
     assert!(instance.starts_with("svc_"));
