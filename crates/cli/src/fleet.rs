@@ -275,6 +275,13 @@ paths = [{ path = "/images/*", service = "missing" }]
     assert_eq!(result["ok"], false);
     assert!(result["errors"].to_string().contains("非空 services"));
     assert!(result["warnings"].to_string().contains("missing"));
+    let mut fleet = load(temp.path()).unwrap();
+    fleet.routes[0].service = "other".into();
+    fleet.routes[0].paths[0].service = Some("api".into());
+    assert_eq!(
+      only_services(fleet, &["api".into()]).unwrap().routes.len(),
+      1
+    );
   }
 
   #[test]

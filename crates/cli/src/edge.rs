@@ -331,12 +331,7 @@ pub async fn edge(
         || server.is_some()
         || account.is_some()
         || project.is_some();
-      let effective_path = path
-        .clone()
-        .map(|p| {
-          (!matches!(p.as_str(), "" | "." | "./")).then_some(p)
-        })
-        .unwrap_or_else(|| old.as_ref().and_then(|o| o.path.clone()));
+      let effective_path = edge_path(path, old.as_ref());
       let old_git = old.as_ref().and_then(|o| o.git.as_ref());
       if git_options
         && git.is_none()
@@ -369,7 +364,7 @@ pub async fn edge(
         }
         (None, None, None) => {
           if let Some(mut source) =
-            old.clone().filter(|o| o.git.is_some() || adjust)
+            reusable_edge_source(old.as_ref(), adjust)
           {
             if source.script.is_none() {
               source.path = effective_path;
@@ -620,6 +615,23 @@ async fn pull(
   Ok(file)
 }
 
+fn edge_path(
+  path: Option<String>,
+  old: Option<&EdgeSource>,
+) -> Option<String> {
+  match path {
+    Some(p) => (!matches!(p.as_str(), "" | "." | "./")).then_some(p),
+    None => old.and_then(|o| o.path.clone()),
+  }
+}
+
+fn reusable_edge_source(
+  old: Option<&EdgeSource>,
+  adjust: bool,
+) -> Option<EdgeSource> {
+  old.filter(|s| s.git.is_some() || adjust).cloned()
+}
+
 /// `--script 文件`：只上传脚本，记下文件名。
 async fn script_source(
   c: &Client,
@@ -709,4 +721,23 @@ async fn local_source(
     script: Some(script.to_string()),
     ..EdgeSource::default()
   })
+}
+
+#[cfg(test)]
+mod source_tests {
+  use super::*;
+
+  #[test]
+  fn git_edge_settings_keep_source_and_inherit_path_until_cleared() {
+    let old: EdgeSource = serde_json::from_value(json!({
+      "git":{"repo":"https://example.test/site","ref":"prod","token_secret":"git-test"},
+      "path":"docs"
+    })).unwrap();
+    assert_eq!(
+      reusable_edge_source(Some(&old), true).unwrap().git,
+      old.git
+    );
+    assert_eq!(edge_path(None, Some(&old)).as_deref(), Some("docs"));
+    assert_eq!(edge_path(Some(".".into()), Some(&old)), None);
+  }
 }
