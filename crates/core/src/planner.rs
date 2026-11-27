@@ -3236,6 +3236,8 @@ mod tests {
         PlanRequest {
           changes: vec![
             wharf_api_types::spec::Change::UpsertService {
+              pins: None,
+              commit: None,
               name: "app".into(),
               spec,
               adopt: None,
@@ -3299,6 +3301,8 @@ mod tests {
     });
     let spec = |name: &str, item| PlanRequest {
       changes: vec![wharf_api_types::spec::Change::UpsertService {
+        pins: None,
+        commit: None,
         name: name.into(),
         spec: item,
         adopt: None,
