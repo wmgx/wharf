@@ -91,29 +91,11 @@ pub fn url(
 
 /// 判断一次结果，返回（正常吗，说明）。
 pub fn judge(m: &MonitorSpec, r: &HttpCheckResult) -> (bool, String) {
-  let Some(code) = r.status else {
-    return (
-      false,
-      r.error.clone().unwrap_or_else(|| "没有应答".into()),
-    );
-  };
-  let code_ok = match m.expect {
-    Some(e) => code == e,
-    None => (200..400).contains(&code),
-  };
-  if !code_ok {
-    let want =
-      m.expect.map_or("2xx 或 3xx".to_string(), |e| e.to_string());
-    return (false, format!("HTTP {code}，期望 {want}"));
-  }
-  if r.found == Some(false) {
-    let k = m.keyword.as_deref().unwrap_or_default();
-    return (
-      false,
-      format!("HTTP {code}，但应答里没有\u{201c}{k}\u{201d}"),
-    );
-  }
-  (true, format!("HTTP {code} · {} ms", r.ms))
+  wharf_api_types::agent::judge_http_check(
+    m.expect,
+    m.keyword.as_deref(),
+    r,
+  )
 }
 
 pub fn spawn(state: Arc<AppState>) {

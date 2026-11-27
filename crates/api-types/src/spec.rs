@@ -342,6 +342,9 @@ pub struct ServiceSpec {
   /// 自定义监控：服务所在机器的 agent 每分钟从本机请求一次，连续 3 次不正常推送。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub monitor: Option<MonitorSpec>,
+  /// 启动等待上限（秒），缺省 120。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub start_timeout_secs: Option<u32>,
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub log_alerts: Vec<crate::service_checks::LogAlertSpec>,
   #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]

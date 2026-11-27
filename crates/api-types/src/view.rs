@@ -224,6 +224,8 @@ pub struct ServiceStatus {
   pub applied: Option<Applied>,
   /// 实际：容器现状。
   pub actual: Actual,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub missing_components: Vec<String>,
   /// 实际：容器上标记的哈希。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub actual_hash: Option<String>,
@@ -285,6 +287,7 @@ pub struct Applied {
 #[serde(rename_all = "snake_case")]
 pub enum Actual {
   Running,
+  Restarting,
   /// 有的容器在运行，有的没有。
   Partial,
   Stopped,

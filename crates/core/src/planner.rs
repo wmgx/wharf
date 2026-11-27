@@ -1126,10 +1126,11 @@ fn changed(writes: &[Write], kind: &str, name: &str) -> bool {
 }
 
 fn describe_containers(state: &ProjectState) -> String {
+  let has_running = state.containers.iter().any(|c| c.is_running());
   state
     .containers
     .iter()
-    .filter(|c| c.state != "running")
+    .filter(|c| !c.foreign && !c.is_healthy_state(has_running))
     .map(|c| format!("{} {}", c.service, c.state))
     .collect::<Vec<_>>()
     .join("，")
@@ -1211,7 +1212,17 @@ fn service_items(
       && let Some(state) = live
       && state.hash.as_deref() == Some(hash.as_str())
     {
-      if state.containers.iter().any(|c| c.state == "running") {
+      if state.containers.iter().any(|c| !c.foreign && c.is_active())
+      {
+        let reason = if state
+          .containers
+          .iter()
+          .any(|c| !c.foreign && c.is_restarting())
+        {
+          "停止服务（包含正在反复重启的容器）"
+        } else {
+          "停止服务"
+        };
         let id = b.item(
           address.clone(),
           Layer::Container,
@@ -1219,7 +1230,7 @@ fn service_items(
           Some(json!({ "containers": state.containers })),
           after,
           vec![Impact::Downtime],
-          "停止服务",
+          reason,
         );
         b.step(
           vec![id],
@@ -1318,22 +1329,51 @@ fn service_items(
             Some(before),
           ))
         }
-        Some(state) if !state.all_running() => Some((
-          Action::Update,
-          vec![Impact::Restart],
-          if changed(writes, KIND_SERVICE, name) {
-            "启动服务".to_string()
+        Some(state) => {
+          let expected = crate::render::service_expected_components(
+            name, &svc.spec,
+          );
+          let missing = crate::render::missing_components(
+            &expected,
+            &state.containers,
+          );
+          let running = state.all_running();
+          if running && missing.is_empty() {
+            upgrade.map(|reason| {
+              (Action::Update, vec![Impact::Restart], reason, None)
+            })
           } else {
-            format!(
-              "漂移：容器没在运行（{}）",
-              describe_containers(state)
-            )
-          },
-          Some(json!({ "containers": state.containers })),
-        )),
-        Some(_) => upgrade.map(|reason| {
-          (Action::Update, vec![Impact::Restart], reason, None)
-        }),
+            let mut before =
+              json!({ "containers": state.containers });
+            let reason = if missing.is_empty() {
+              if changed(writes, KIND_SERVICE, name) {
+                "启动服务".into()
+              } else {
+                format!(
+                  "漂移：容器没在运行（{}）",
+                  describe_containers(state)
+                )
+              }
+            } else {
+              before["missing_components"] = json!(missing);
+              let missing = missing.join("、");
+              if running {
+                format!("漂移：缺少组件 {missing}，补建容器")
+              } else {
+                format!(
+                  "漂移：容器没在运行（{}）；缺少组件 {missing}",
+                  describe_containers(state)
+                )
+              }
+            };
+            Some((
+              Action::Update,
+              vec![Impact::Restart],
+              reason,
+              Some(before),
+            ))
+          }
+        }
       },
     };
     // 同名 compose 项目里混着别处起的容器：compose up 会把它们当成自己的删掉。导入时本来就要接管。
@@ -3073,6 +3113,8 @@ mod tests {
       foreign: false,
       working_dir: None,
       finished_at: None,
+      exit_code: None,
+      restart_policy: None,
     }
   }
 
@@ -3128,6 +3170,37 @@ mod tests {
     )
     .unwrap();
     b
+  }
+
+  #[test]
+  fn stop_plans_for_restarting_container() {
+    let mut world = world();
+    world.services.get_mut("app").unwrap().spec.stopped = true;
+    let b = plan(
+      &world,
+      &world,
+      &live(Some(hash_of(&world)), vec![container("restarting")]),
+    );
+    assert!(matches!(b.steps[0].step, Step::ServiceStop { .. }));
+    assert!(b.items[0].reason.contains("反复重启"));
+  }
+
+  #[test]
+  fn missing_component_plans_up() {
+    let mut world = world();
+    let spec = &mut world.services.get_mut("app").unwrap().spec;
+    spec.ports.clear();
+    spec.source = Source::Compose {
+      content: Some("services:\n  app: {image: fixture:1}\n  worker: {image: fixture:1}\n".into()),
+      file: None,
+    };
+    let b = plan(
+      &world,
+      &world,
+      &live(Some(hash_of(&world)), vec![container("running")]),
+    );
+    assert!(matches!(b.steps[0].step, Step::ServiceUp { .. }));
+    assert!(b.items[0].reason.contains("缺少组件 worker"));
   }
 
   #[test]
@@ -3194,7 +3267,10 @@ mod tests {
         project: "idle".into(),
         hash: Some(hash("idle")),
         config_hash: None,
-        containers: vec![container("running")],
+        containers: vec![ContainerInfo {
+          service: "idle".into(),
+          ..container("running")
+        }],
       },
     );
     for (secrets, expected) in
@@ -3373,7 +3449,10 @@ mod tests {
         project: "idle".into(),
         hash: Some(idle_hash),
         config_hash: None,
-        containers: vec![container("running")],
+        containers: vec![ContainerInfo {
+          service: "idle".into(),
+          ..container("running")
+        }],
       },
     );
     let b = plan(&current, &desired, &status);

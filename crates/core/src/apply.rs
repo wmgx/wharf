@@ -21,7 +21,7 @@ use wharf_api_types::{
   ApiError, ErrorCode,
   agent::{
     AgentOp, GatewayApply, ProjectUp, ProjectUpResult, Retire,
-    Retired, TRIAL_PROJECT_PREFIX,
+    Retired, SettleProbe, TRIAL_PROJECT_PREFIX,
   },
   plan::{
     ApplyRequest, ApplyResponse, Layer, Plan, PlanStatus, Run,
@@ -41,8 +41,9 @@ use crate::{
   world::gateway_project,
 };
 
-/// agent 那边 stop/start 本身限时 180 秒，这里多留一些。
-const STOP_START_TIMEOUT: Duration = Duration::from_secs(200);
+/// 停止后最多补一次 docker stop，并复查现场。
+const STOP_START_TIMEOUT: Duration = Duration::from_secs(330);
+const PROJECT_DOWN_TIMEOUT: Duration = Duration::from_secs(210);
 const SERVICE_UP_TIMEOUT: Duration = Duration::from_secs(70 * 60);
 const GATEWAY_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const SHORT_TIMEOUT: Duration = Duration::from_secs(3 * 60);
@@ -75,6 +76,14 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 impl Runs {
+  pub fn is_service_busy(&self, service: &str) -> bool {
+    lock(&self.active).values().any(|a| {
+      a.scope_services
+        .as_deref()
+        .is_none_or(|names| names.iter().any(|n| n == service))
+    })
+  }
+
   pub fn get(&self, id: &str) -> Option<Run> {
     lock(&self.active).get(id).map(|a| lock(&a.run).clone())
   }
@@ -805,6 +814,20 @@ async fn execute(
       &result,
     )
     .await;
+    if result.is_ok() {
+      match &step.step {
+        Step::ServiceUp { service, .. }
+        | Step::Rebuild { service } => crate::heal::clear(service),
+        Step::ServiceRestart { service }
+          if !step
+            .title
+            .starts_with(crate::heal::AUTO_RESTART_TITLE) =>
+        {
+          crate::heal::clear(service);
+        }
+        _ => {}
+      }
+    }
     if let Some((service, action)) = op {
       let (status, error) = match &result {
         Ok(()) => (OpStatus::Succeeded, None),
@@ -1188,6 +1211,8 @@ pub(crate) async fn run_step(
               expected_images: Default::default(),
               no_start: false,
               trial: None,
+              start_timeout_secs: None,
+              readiness: None,
             },
             caddyfile: r.config,
             caddyfile_hash: r.config_hash,
@@ -1203,6 +1228,7 @@ pub(crate) async fn run_step(
         &result,
         &format!("网关 {gateway}"),
         &format!("wharf gateway logs {gateway}"),
+        &[],
       )?;
     }
     Step::LinkUp { server, project } => {
@@ -1276,6 +1302,8 @@ pub(crate) async fn run_step(
             expected_images: Default::default(),
             no_start: false,
             trial: None,
+            start_timeout_secs: None,
+            readiness: None,
           }),
           GATEWAY_TIMEOUT,
           Some(progress),
@@ -1293,6 +1321,7 @@ pub(crate) async fn run_step(
             "frpc"
           }
         ),
+        &[],
       )?;
     }
     Step::TailscaleUp { server } => {
@@ -1314,6 +1343,8 @@ pub(crate) async fn run_step(
             expected_images: Default::default(),
             no_start: false,
             trial: None,
+            start_timeout_secs: None,
+            readiness: None,
           }),
           GATEWAY_TIMEOUT,
           Some(progress),
@@ -1327,6 +1358,7 @@ pub(crate) async fn run_step(
           "在 {server} 上 docker logs {}-tailscale-1",
           crate::tailscale::PROJECT
         ),
+        &[],
       )?;
     }
     Step::LinkDown { server, project } => {
@@ -1492,14 +1524,16 @@ fn ensure_running(
   result: &ProjectUpResult,
   what: &str,
   logs: &str,
+  expected: &[String],
 ) -> Result<(), ApiError> {
+  let has_running = result.containers.iter().any(|c| c.is_running());
   let bad: Vec<String> = result
     .containers
     .iter()
-    .filter(|c| c.state != "running")
+    .filter(|c| !c.foreign && !c.is_healthy_state(has_running))
     .map(|c| format!("{} {}（{}）", c.service, c.state, c.status))
     .collect();
-  if result.containers.is_empty() {
+  if result.containers.iter().all(|c| c.foreign) {
     return Err(ApiError::new(
       ErrorCode::AgentFailed,
       format!("{what} 启动后没有容器"),
@@ -1510,6 +1544,17 @@ fn ensure_running(
       ApiError::new(
         ErrorCode::AgentFailed,
         format!("{what} 有容器没在运行：{}", bad.join("，")),
+      )
+      .suggest(logs),
+    );
+  }
+  let missing =
+    render::missing_components(expected, &result.containers);
+  if !missing.is_empty() {
+    return Err(
+      ApiError::new(
+        ErrorCode::AgentFailed,
+        format!("{what} 缺少组件：{}", missing.join("、")),
       )
       .suggest(logs),
     );
@@ -1574,7 +1619,28 @@ async fn remove_owned(
     .await
 }
 
-/// 一次成功部署的内容，写进部署历史。
+fn service_progress(
+  values: Vec<String>,
+  progress: ProgressFn,
+) -> ProgressFn {
+  Arc::new(move |line| {
+    progress(crate::log_redact::redact_text_with(&line, &values))
+  })
+}
+
+fn should_trial(
+  spec: &ServiceSpec,
+  rollback: bool,
+  has_deployed: bool,
+  has_trial_collision: bool,
+) -> bool {
+  rollback
+    && !spec.stopped
+    && !spec.ports.is_empty()
+    && has_deployed
+    && !has_trial_collision
+}
+
 /// 部署一个服务：构建来源先构建镜像（`force` 时重新构建），再 `up`。
 #[allow(clippy::too_many_arguments)]
 async fn service_up(
@@ -1638,13 +1704,18 @@ async fn service_up(
     && retire.is_none()
     && !matches!(row.spec.source, Source::Compose { .. });
   // 先试跑再替换：和自动换回上一版的条件一样，另外要已经部署过、不是要保持停止的。
-  let trial = if rollback
+  let has_deployed = rollback
     && !row.spec.stopped
-    && has_deployment(state, service, &row.instance_id).await?
-    && !world
+    && !row.spec.ports.is_empty()
+    && has_deployment(state, service, &row.instance_id).await?;
+  let trial = if should_trial(
+    &row.spec,
+    rollback,
+    has_deployed,
+    world
       .services
-      .contains_key(&format!("{TRIAL_PROJECT_PREFIX}{service}"))
-  {
+      .contains_key(&format!("{TRIAL_PROJECT_PREFIX}{service}")),
+  ) {
     Some(snapshot::service_trial(
       world,
       &net,
@@ -1654,6 +1725,27 @@ async fn service_up(
   } else {
     None
   };
+  let values = crate::log_redact::service_values(&row.spec);
+  let progress = service_progress(values.clone(), progress);
+  let readiness = row
+    .spec
+    .monitor
+    .as_ref()
+    .filter(|_| !row.spec.stopped)
+    .and_then(|m| {
+      crate::monitor::url(row, m).ok().map(|url| SettleProbe {
+        url,
+        expect: m.expect,
+        keyword: m.keyword.clone(),
+      })
+    });
+  if (row.spec.start_timeout_secs.is_some() || readiness.is_some())
+    && !state.hub.supports_runtime_v2(server)
+  {
+    progress(format!(
+      "提醒：服务器 {server} 的 agent 版本较旧，自定义启动上限和就绪探活暂未生效，请运行 wharf upgrade 升级"
+    ));
+  }
   let result: ProjectUpResult = state
     .hub
     .call(
@@ -1674,12 +1766,22 @@ async fn service_up(
           .unwrap_or_default(),
         no_start,
         trial,
+        start_timeout_secs: row.spec.start_timeout_secs,
+        readiness,
       }),
       SERVICE_UP_TIMEOUT,
       Some(progress.clone()),
       cancel,
     )
-    .await?;
+    .await
+    .map_err(|mut e| {
+      e.message =
+        crate::log_redact::redact_text_with(&e.message, &values);
+      e.hint = e.hint.map(|hint| {
+        crate::log_redact::redact_text_with(&hint, &values)
+      });
+      e
+    })?;
   let retired = result.retired.clone();
   for warning in &result.warnings {
     progress(format!("提醒：{warning}"));
@@ -1706,6 +1808,7 @@ async fn service_up(
       &result,
       service,
       &format!("wharf service logs {service}"),
+      &render::service_expected_components(service, &row.spec),
     )
   };
   if running.is_err() && !retired.is_empty() {
@@ -1939,7 +2042,7 @@ async fn project_down(
       .call_bound(
         (server, conn),
         op,
-        SHORT_TIMEOUT,
+        PROJECT_DOWN_TIMEOUT,
         Some(progress),
         cancel,
       )
@@ -1947,7 +2050,7 @@ async fn project_down(
   } else {
     state
       .hub
-      .call(server, op, SHORT_TIMEOUT, Some(progress), cancel)
+      .call(server, op, PROJECT_DOWN_TIMEOUT, Some(progress), cancel)
       .await?
   };
   Ok(())
@@ -2046,6 +2149,30 @@ async fn record_deployment(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn crash_progress_redacts_inline_service_value() {
+    let spec = serde_json::from_value::<ServiceSpec>(serde_json::json!({
+      "server": "s1", "source": {"image": "fixture:1"}, "env": {"PASSWORD": "fixture-inline-value"},
+    })).unwrap();
+    let lines = Arc::new(Mutex::new(Vec::new()));
+    let capture = lines.clone();
+    let progress = service_progress(
+      crate::log_redact::service_values(&spec),
+      Arc::new(move |line| lock(&capture).push(line)),
+    );
+    progress("app 启动失败 fixture-inline-value".into());
+    assert_eq!(&*lock(&lines), &["app 启动失败 ***"]);
+  }
+
+  #[test]
+  fn no_port_service_skips_trial() {
+    let spec = serde_json::from_value(serde_json::json!({
+      "server": "s1", "source": {"image": "fixture:1"},
+    }))
+    .unwrap();
+    assert!(!should_trial(&spec, true, true, false));
+  }
 
   #[tokio::test]
   async fn stale_delete_plan_rejected_after_recreate_same_version() {

@@ -184,6 +184,8 @@ pub async fn sync(
         expected_images: Default::default(),
         no_start: false,
         trial: None,
+        start_timeout_secs: None,
+        readiness: None,
       }),
       CONNECTOR_TIMEOUT,
       Some(progress.clone()),

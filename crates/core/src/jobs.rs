@@ -102,40 +102,48 @@ async fn backups(state: &Arc<AppState>) -> Result<(), ApiError> {
   let snap = snapshot::load(&state.db).await?;
   let now = now_ms();
   // 控制面自己先备份：它丢了，服务备份的口令也跟着丢了。
-  let (core_on, core_ok, core_any): (bool, Option<i64>, Option<i64>) =
-    state
-      .db
-      .call(|c| {
-        let any = c
-          .query_row(
-            "SELECT MAX(created_at) FROM backups WHERE service = ?1",
-            params![crate::core_backup::REPO],
-            |r| r.get(0),
-          )
-          .map_err(sql_err)?;
-        Ok((
-          crate::core_backup::enabled(c)?,
-          crate::core_backup::last_ok(c)?,
-          any,
-        ))
-      })
-      .await?;
+  let (target, core_ok, core_any) = state
+    .db
+    .call(|c| {
+      let any: Option<i64> = c
+        .query_row(
+          "SELECT MAX(created_at) FROM backups WHERE service = ?1",
+          params![crate::core_backup::REPO],
+          |r| r.get(0),
+        )
+        .map_err(sql_err)?;
+      Ok((
+        crate::core_backup::target(c)?,
+        crate::core_backup::last_ok(c)?,
+        any,
+      ))
+    })
+    .await?;
   let backoff = core_any
     .is_some_and(|t| core_any != core_ok && now - t < RETRY_AFTER_MS);
-  if core_on
+  if target
+    .as_deref()
+    .is_some_and(|name| state.hub.is_online(name))
+    && crate::core_node::server_of(&snap)
+      .is_some_and(|name| state.hub.is_online(&name))
     && core_ok.is_none_or(|t| now - t >= BACKUP_EVERY_MS)
     && !backoff
   {
-    apply::start_task(
+    let result = apply::start_task(
       state.clone(),
       "备份控制面".into(),
       Step::CoreBackup { user_key: None },
     )
-    .await?;
-    return Ok(());
+    .await;
+    if let Some(error) = core_backup_error(result) {
+      tracing::warn!("定时备份控制面失败：{error}");
+    }
   }
+  let mut candidates = vec![];
   for (name, row) in &snap.world.services {
-    if row.spec.backup.is_none() {
+    if !is_backup_candidate(&snap, name, row, |server| {
+      state.hub.is_online(server)
+    }) {
       continue;
     }
     let n = name.clone();
@@ -154,9 +162,12 @@ async fn backups(state: &Arc<AppState>) -> Result<(), ApiError> {
     let backoff = last_any.is_some_and(|t| {
       last_any != last_ok && now - t < RETRY_AFTER_MS
     });
-    if !stale || backoff {
-      continue;
+    if stale && !backoff {
+      candidates.push((last_ok, name));
     }
+  }
+  candidates.sort_unstable();
+  for (_, name) in candidates {
     match apply::start_task(
       state.clone(),
       format!("定时备份 {name}"),
@@ -175,6 +186,25 @@ async fn backups(state: &Arc<AppState>) -> Result<(), ApiError> {
     }
   }
   Ok(())
+}
+
+fn core_backup_error(
+  result: Result<wharf_api_types::plan::ApplyResponse, ApiError>,
+) -> Option<ApiError> {
+  result.err().filter(|e| e.code != ErrorCode::Busy)
+}
+
+fn is_backup_candidate(
+  snap: &snapshot::Snapshot,
+  name: &str,
+  row: &crate::world::ServiceRow,
+  online: impl Fn(&str) -> bool,
+) -> bool {
+  row.spec.backup.as_ref().is_some_and(|backup| {
+    snap.deployed.contains_key(name)
+      && online(&row.spec.server)
+      && online(&backup.to)
+  })
 }
 
 /// 迁移成功后记下旧服务器上要删除的数据。
@@ -397,4 +427,30 @@ async fn failed_cleanup_does_not_starve_next_due_record() {
     .await
     .unwrap()
     .unwrap();
+}
+
+#[cfg(test)]
+mod runtime_tests {
+  use super::*;
+
+  #[test]
+  fn backups_skips_busy_core_offline_and_undeployed() {
+    let mut snap = snapshot::Snapshot::default();
+    let row = crate::world::ServiceRow {
+      instance_id: "svc_fixture".into(),
+      spec: serde_json::from_value(serde_json::json!({
+        "server":"s1", "source":{"image":"fixture:1"}, "backup":{"to":"s2"}, "stopped":true
+      })).unwrap(),
+      host_ports: Default::default(), import: None, pins: Default::default(),
+      commit: None, version: 1,
+    };
+    assert!(
+      core_backup_error(Err(ApiError::new(ErrorCode::Busy, "忙")))
+        .is_none()
+    );
+    assert!(!is_backup_candidate(&snap, "app", &row, |_| true));
+    snap.deployed.insert("app".into(), "hash".into());
+    assert!(!is_backup_candidate(&snap, "app", &row, |s| s == "s1"));
+    assert!(is_backup_candidate(&snap, "app", &row, |_| true));
+  }
 }

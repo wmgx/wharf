@@ -78,6 +78,7 @@ struct Conn {
   backup_isolation: bool,
   safe_delete: bool,
   safe_adopt: bool,
+  runtime_v2: bool,
   /// 协议版本不一致：连接放行，但只接受升级相关的请求，好让它升上来。
   upgrade_only: bool,
 }
@@ -269,6 +270,10 @@ impl Hub {
     Ok(())
   }
 
+  pub fn supports_runtime_v2(&self, server: &str) -> bool {
+    self.runtime_v2_conn_id(server).is_ok()
+  }
+
   pub fn supports_safe_delete(&self, server: &str) -> bool {
     lock(&self.conns)
       .get(server)
@@ -408,6 +413,27 @@ impl Hub {
       cancel,
     )
     .await
+  }
+
+  pub(crate) fn runtime_v2_conn_id(
+    &self,
+    server: &str,
+  ) -> Result<u64, ApiError> {
+    let conns = lock(&self.conns);
+    let conn = conns
+      .get(server)
+      .filter(|conn| !conn.closed.is_cancelled())
+      .ok_or_else(|| offline(server))?;
+    if conn.upgrade_only || !conn.runtime_v2 {
+      return Err(
+        ApiError::new(
+          ErrorCode::Conflict,
+          format!("服务器 {server} 的 agent 版本较旧，不支持该功能"),
+        )
+        .with_hint("运行 wharf upgrade 升级 agent"),
+      );
+    }
+    Ok(conn.conn_id)
   }
 
   pub(crate) fn safe_delete_conn_id(
@@ -808,6 +834,7 @@ async fn handle_socket(
     backup_isolation,
     safe_delete,
     safe_adopt,
+    runtime_v2,
     key_rotation,
   } = hello
   else {
@@ -969,6 +996,7 @@ async fn handle_socket(
     backup_isolation,
     safe_delete,
     safe_adopt,
+    runtime_v2,
     upgrade_only,
   };
   let state_on_db = state.clone();

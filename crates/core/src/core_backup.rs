@@ -418,8 +418,10 @@ fn check_data_dir(s: &AppState) -> Result<(), ApiError> {
   Ok(())
 }
 
-pub fn enabled(c: &rusqlite::Connection) -> Result<bool, ApiError> {
-  Ok(db::setting(c, TO)?.is_some())
+pub fn target(
+  c: &rusqlite::Connection,
+) -> Result<Option<String>, ApiError> {
+  db::setting(c, TO)
 }
 
 pub async fn backup(

@@ -150,6 +150,8 @@ pub enum AgentMsg {
     #[serde(default)]
     safe_adopt: bool,
     #[serde(default)]
+    runtime_v2: bool,
+    #[serde(default)]
     key_rotation: bool,
   },
   KeyReady {
@@ -401,6 +403,17 @@ pub enum AgentOp {
     /// 只要这个时间之后的：`30m`、`2h`，或 RFC 3339 时间。旧 agent 不认识，会忽略。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     since: Option<String>,
+  },
+  PreviousLogs {
+    project: String,
+    #[serde(default)]
+    index: u32,
+    #[serde(default)]
+    tail: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    since: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    list: bool,
   },
   /// 校验并应用网关配置，失败自动回滚。结果是 [ProjectUpResult]。
   GatewayApply(GatewayApply),

@@ -52,7 +52,7 @@ export interface AclView {
 
 export type Action = "create" | "update" | "delete" | "adopt";
 
-export type Actual = "running" | "stopped" | "partial" | "missing" | "offline" | "unknown";
+export type Actual = "running" | "restarting" | "stopped" | "partial" | "missing" | "offline" | "unknown";
 
 /**
  * 导入前容器是怎么跑的。和服务同名的 compose 项目不需要接管，Wharf 直接沿用。
@@ -608,6 +608,7 @@ export type Change = {
 export type CheckStatus = "ok" | "warn" | "bad" | "skip";
 
 export interface ContainerInfo {
+  exit_code?: number | null;
   finished_at?: string | null;
   /**
    * 同名 compose 项目里不是 Wharf 部署的容器（compose 工作目录不是 Wharf 的项目目录）。
@@ -616,6 +617,7 @@ export interface ContainerInfo {
   health?: string | null;
   image: string;
   name: string;
+  restart_policy?: string | null;
   /**
    * compose 里的服务名。
    */
@@ -2605,6 +2607,10 @@ export interface ServiceSpec {
   server: string;
   source: Source;
   /**
+   * 启动等待上限（秒），缺省 120。
+   */
+  start_timeout_secs?: number | null;
+  /**
    * 停止：容器保留但不运行，部署后也保持停止。不影响 compose，也就不会重建容器。
    */
   stopped?: boolean;
@@ -2640,6 +2646,7 @@ export interface ServiceStatus {
    * 执行：最近一次和这个服务有关的部署、启停、重启、迁移、恢复。
    */
   last_op?: LastOp | null;
+  missing_components?: string[];
   /**
    * 最后一次成功查到这台服务器现状的时间；服务器离线时就是"多久前看到的"。
    */

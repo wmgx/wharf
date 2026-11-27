@@ -1759,6 +1759,14 @@ fn validate_service(
   spec: &ServiceSpec,
 ) -> Result<(), ApiError> {
   validate_name("服务", name)?;
+  if spec
+    .start_timeout_secs
+    .is_some_and(|n| !(10..=1800).contains(&n))
+  {
+    return Err(ApiError::invalid(
+      "启动等待上限需在 10 到 1800 秒之间",
+    ));
+  }
   crate::service_monitor::validate(spec)?;
   if name.starts_with(GATEWAY_PROJECT_PREFIX) {
     return Err(ApiError::invalid(format!(
@@ -2412,6 +2420,7 @@ mod tests {
       backup: None,
       stopped: false,
       monitor: None,
+      start_timeout_secs: None,
       log_alerts: vec![],
       port_checks: Default::default(),
       heartbeat: None,
@@ -2430,6 +2439,18 @@ mod tests {
       env: Default::default(),
       volumes: vec![],
     }
+  }
+
+  #[test]
+  fn validates_start_timeout() {
+    let mut spec = image_service("node1");
+    spec.start_timeout_secs = Some(300);
+    validate_service(&sample(), "app", &spec).unwrap();
+    spec.start_timeout_secs = Some(5);
+    assert_eq!(
+      validate_service(&sample(), "app", &spec).unwrap_err().code,
+      wharf_api_types::ErrorCode::InvalidInput
+    );
   }
 
   #[test]

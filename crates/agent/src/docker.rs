@@ -141,7 +141,7 @@ impl Docker {
       .map(|c| c.name.as_str())
       .collect();
     let finished =
-      crate::docker_observation::finished_at(self, &stopped, ctx)
+      crate::docker_observation::inspect_stopped(self, &stopped, ctx)
         .await;
     Ok(
       projects
@@ -163,7 +163,15 @@ impl Docker {
                   .working_dir
                   .as_deref()
                   .is_some_and(|w| Path::new(w) != dir),
-                finished_at: finished.get(&c.name).copied(),
+                finished_at: finished
+                  .get(&c.name)
+                  .and_then(|o| o.finished_at),
+                exit_code: finished
+                  .get(&c.name)
+                  .and_then(|o| o.exit_code),
+                restart_policy: finished
+                  .get(&c.name)
+                  .and_then(|o| o.restart_policy.clone()),
                 ..c
               })
               .collect(),
@@ -504,6 +512,31 @@ impl Docker {
     purge: bool,
     ctx: &Ctx,
   ) -> Result<(), ApiError> {
+    self.down_with_options(project, purge, purge, ctx).await
+  }
+
+  pub async fn down_trial(
+    &self,
+    project: &str,
+    ctx: &Ctx,
+  ) -> Result<(), ApiError> {
+    if !project
+      .starts_with(wharf_api_types::agent::TRIAL_PROJECT_PREFIX)
+    {
+      return Err(ApiError::invalid(format!(
+        "非试跑项目禁止调用试跑清理：{project}"
+      )));
+    }
+    self.down_with_options(project, true, false, ctx).await
+  }
+
+  async fn down_with_options(
+    &self,
+    project: &str,
+    remove_volumes: bool,
+    remove_srv_data: bool,
+    ctx: &Ctx,
+  ) -> Result<(), ApiError> {
     let dir = self.project_dir(project);
     let cmd = if dir.join("compose.yaml").exists() {
       self.compose(project)
@@ -511,7 +544,7 @@ impl Docker {
       self.cmd().args(["compose", "-p", project])
     };
     let mut args = vec!["down", "--remove-orphans"];
-    if purge {
+    if remove_volumes {
       args.push("--volumes");
     }
     cmd
@@ -521,7 +554,7 @@ impl Docker {
       .run(ctx)
       .await?
       .check("docker compose down")?;
-    if purge {
+    if remove_srv_data {
       crate::dirfd::remove_service(Path::new("/srv"), project, ctx)
         .await?;
     }
@@ -637,7 +670,51 @@ impl Docker {
       .run(ctx)
       .await?
       .check(&format!("docker compose {action}"))?;
+    if !start {
+      self.verify_project_stopped(project, ctx).await?;
+    }
     Ok(true)
+  }
+
+  async fn verify_project_stopped(
+    &self,
+    project: &str,
+    ctx: &Ctx,
+  ) -> Result<(), ApiError> {
+    let active = |state: ProjectState| {
+      state
+        .containers
+        .into_iter()
+        .filter(|c| !c.foreign && c.is_active())
+        .collect::<Vec<_>>()
+    };
+    let remaining = active(self.one_status(project, ctx).await?);
+    if remaining.is_empty() {
+      return Ok(());
+    }
+    self
+      .cmd()
+      .args(["stop", "-t", "15", "--"])
+      .args(remaining.iter().map(|c| c.name.as_str()))
+      .timeout(Duration::from_secs(60))
+      .run(ctx)
+      .await?;
+    let remaining = active(self.one_status(project, ctx).await?);
+    if remaining.is_empty() {
+      return Ok(());
+    }
+    let names = remaining
+      .iter()
+      .map(|c| format!("{}({})", c.name, c.state))
+      .collect::<Vec<_>>()
+      .join("、");
+    Err(
+      ApiError::new(
+        ErrorCode::AgentFailed,
+        format!("{project} 停止后仍有容器未退出：{names}"),
+      )
+      .suggest("检查宿主机 Docker 状态或重试停止"),
+    )
   }
 
   pub async fn logs(
@@ -1047,6 +1124,8 @@ pub fn parse_ps(
         image: ps.image,
         foreign: false,
         finished_at: None,
+        exit_code: None,
+        restart_policy: None,
         working_dir: labels
           .get("com.docker.compose.project.working_dir")
           .map(|w| w.to_string()),
@@ -1214,7 +1293,7 @@ fn merge_by_time(stdout: &str, stderr: &str) -> String {
 }
 
 /// 去掉终端颜色之类的控制序列（`ESC [ ... 字母`）。
-fn strip_ansi(text: &str) -> String {
+pub(crate) fn strip_ansi(text: &str) -> String {
   let mut out = String::with_capacity(text.len());
   let mut chars = text.chars();
   while let Some(c) = chars.next() {
@@ -1235,6 +1314,38 @@ fn strip_ansi(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+  #[tokio::test]
+  async fn down_trial_removes_volumes_without_touching_srv() {
+    use std::{fs, os::unix::fs::PermissionsExt};
+    let root = tempfile::tempdir().unwrap();
+    let bin = root.path().join("docker");
+    let out = root.path().join("args");
+    fs::write(
+      &bin,
+      format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+        out.display()
+      ),
+    )
+    .unwrap();
+    fs::set_permissions(&bin, fs::Permissions::from_mode(0o700))
+      .unwrap();
+    let docker = super::Docker {
+      bin: bin.to_string_lossy().into_owned(),
+      data_dir: root.path().into(),
+    };
+    let ctx = crate::exec::Ctx::detached();
+    assert!(docker.down_trial("app", &ctx).await.is_err());
+    assert!(!out.exists());
+    docker.down_trial("wharf-try-app", &ctx).await.unwrap();
+    assert!(
+      fs::read_to_string(out)
+        .unwrap()
+        .lines()
+        .any(|arg| arg == "--volumes")
+    );
+  }
+
   #[test]
   fn clean_project_dir_preserves_relative_mount_data() {
     use std::fs;

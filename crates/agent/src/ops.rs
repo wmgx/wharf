@@ -167,8 +167,49 @@ impl Ops {
         check_project(&project)?;
         let lock = self.lock_for(&project);
         let _guard = lock.lock().await;
+        if !purge {
+          crate::prev_logs::capture(
+            &self.docker,
+            &project,
+            "remove",
+            ctx,
+          )
+          .await;
+        }
         self.docker.down(&project, purge, ctx).await?;
+        if purge {
+          crate::prev_logs::purge(&self.data_dir, &project);
+        }
         Ok(Value::Null)
+      }
+      AgentOp::PreviousLogs {
+        project,
+        index,
+        tail,
+        since,
+        list,
+      } => {
+        check_project(&project)?;
+        let lock = self.lock_for(&project);
+        let _guard = lock.lock().await;
+        let data = self.data_dir.clone();
+        tokio::task::spawn_blocking(move || {
+          if list {
+            to_value(crate::prev_logs::list(&data, &project)?)
+          } else {
+            to_value(crate::prev_logs::read(
+              &data,
+              &project,
+              index,
+              tail,
+              since.as_deref(),
+            )?)
+          }
+        })
+        .await
+        .map_err(|e| {
+          ApiError::internal(format!("读取旧日志失败：{e}"))
+        })?
       }
       AgentOp::Logs {
         project,
@@ -501,6 +542,13 @@ impl Ops {
     previous: Option<Previous>,
     ctx: &Ctx,
   ) -> Result<ProjectUpResult, ApiError> {
+    crate::prev_logs::capture(
+      &self.docker,
+      &up.project,
+      "recreate",
+      ctx,
+    )
+    .await;
     self.docker.up(&up.project, up.no_start, ctx).await?;
     let state = if up.no_start {
       let mut state =
@@ -522,11 +570,25 @@ impl Ops {
       }
       state
     } else {
-      match crate::settle::watch(&self.docker, &up.project, ctx).await
+      match crate::settle::watch(
+        &self.docker,
+        &up.project,
+        crate::settle::WatchOptions {
+          max_watch: crate::settle::max_watch(up.start_timeout_secs),
+          readiness: up.readiness.as_ref(),
+        },
+        ctx,
+      )
+      .await
       {
         Ok(state) => state,
         Err(e) => {
           let Some(prev) = previous else { return Err(e) };
+          if e.code == ErrorCode::Cancelled {
+            return Err(e);
+          }
+          crate::prev_logs::capture(&self.docker, &up.project, "rollback", ctx)
+            .await;
           ctx.say(format!("{}，换回上一版", e.message));
           self.restore_image(&prev, ctx).await?;
           self.docker.write_compose(&up.project, &prev.compose)?;
@@ -559,9 +621,8 @@ impl Ops {
     if up.trial.is_some()
       && let Err(e) = self
         .docker
-        .down(
+        .down_trial(
           &format!("{TRIAL_PROJECT_PREFIX}{}", up.project),
-          false,
           &Ctx::detached(),
         )
         .await
@@ -681,23 +742,32 @@ impl Ops {
     ctx.say("试跑新版本");
     let result = async {
       self.docker.write_compose(&project, trial)?;
-      self.docker.up(&project, false, ctx).await?;
-      crate::settle::watch(&self.docker, &project, ctx).await?;
+      if let Err(e) = self.docker.up(&project, false, ctx).await {
+        crate::settle::emit_crash_logs(
+          &self.docker,
+          &project,
+          None,
+          &[],
+          ctx,
+        )
+        .await;
+        return Err(e);
+      }
+      crate::settle::watch(
+        &self.docker,
+        &project,
+        crate::settle::WatchOptions {
+          max_watch: crate::settle::max_watch(up.start_timeout_secs),
+          readiness: None,
+        },
+        ctx,
+      )
+      .await?;
       Ok(())
     }
     .await;
-    match self.docker.logs(&project, 30, None, &Ctx::detached()).await
-    {
-      Ok(logs) if result.is_err() => {
-        for line in logs.lines() {
-          ctx.say(line);
-        }
-      }
-      Err(e) => ctx.say(format!("读取试跑日志失败：{}", e.message)),
-      _ => {}
-    }
     let cleanup =
-      self.docker.down(&project, false, &Ctx::detached()).await;
+      self.docker.down_trial(&project, &Ctx::detached()).await;
     if let Err(e) = &cleanup {
       ctx.say(format!("清理试跑失败：{}", e.message));
     }

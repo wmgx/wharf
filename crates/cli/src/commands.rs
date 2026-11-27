@@ -311,6 +311,8 @@ async fn dispatch(
         port,
         env,
         unset_env: vec![],
+        start_timeout: None,
+        health_path: None,
         volume: vec![],
         build: BuildArgs {
           dir: Some(dir),
@@ -1984,6 +1986,17 @@ pub(crate) async fn show_logs(
   }
   let v: Value = c.get(&path).await?;
   out(j, &v, |v| {
+    if let Some(meta) = v["previous"].as_object() {
+      eprintln!(
+        "# 重建前日志 #{}（{} · {}，共 {} 份）",
+        meta["index"],
+        fmt_ms(meta["at"].as_i64().unwrap_or_default()),
+        previous_log_reason(
+          meta["reason"].as_str().unwrap_or_default()
+        ),
+        meta["available"]
+      );
+    }
     if let Some(groups) = v["groups"].as_array() {
       if groups.is_empty() {
         println!("没有报错（看了 {} 行）", v["scanned"]);
@@ -2021,6 +2034,15 @@ pub(crate) async fn show_logs(
     }
   });
   Ok(())
+}
+
+fn previous_log_reason(reason: &str) -> &str {
+  match reason {
+    "recreate" => "重建前",
+    "rollback" => "回滚前",
+    "remove" => "删除前",
+    _ => reason,
+  }
 }
 
 // SERVICES
@@ -2394,11 +2416,49 @@ async fn service(
       names,
       tail,
       follow: false,
+      previous,
+      previous_list,
       since,
       grep,
       errors,
       max_line,
     } => {
+      if (previous.is_some() || previous_list) && names.len() != 1 {
+        return Err(
+          ApiError::invalid("查看重建前日志每次只能指定一个服务")
+            .into(),
+        );
+      }
+      if previous_list {
+        let name = &names[0];
+        let v: Value = c
+          .get(&format!(
+            "/api/services/{}/logs?previous_list=true",
+            seg(name)
+          ))
+          .await?;
+        out(j, &v, |v| {
+          if let Some(entries) = v["entries"].as_array() {
+            if entries.is_empty() {
+              println!("服务 {name} 还没有留存的重建前日志");
+            }
+            for item in entries {
+              let size =
+                item["size_bytes"].as_u64().unwrap_or_default();
+              println!(
+                "#{}  {}  {}  {} KB",
+                item["index"],
+                fmt_ms(item["at"].as_i64().unwrap_or_default()),
+                previous_log_reason(
+                  item["reason"].as_str().unwrap_or_default()
+                ),
+                size.div_ceil(1024)
+              );
+            }
+          }
+        });
+        return Ok(());
+      }
       let args = crate::LogArgs {
         tail,
         since,
@@ -2407,7 +2467,11 @@ async fn service(
         max_line,
       };
       let path = if let [name] = names.as_slice() {
-        format!("/api/services/{}/logs", seg(name))
+        let mut path = format!("/api/services/{}/logs", seg(name));
+        if let Some(index) = previous {
+          path.push_str(&format!("?previous={index}"));
+        }
+        path
       } else {
         format!(
           "/api/logs/services?services={}",
@@ -2491,6 +2555,8 @@ async fn service(
       port,
       env,
       unset_env,
+      start_timeout,
+      health_path,
       volume,
       build,
       apply,
@@ -2585,6 +2651,7 @@ async fn service(
             backup: None,
             stopped: false,
             monitor: None,
+            start_timeout_secs: None,
             log_alerts: vec![],
             port_checks: Default::default(),
             heartbeat: None,
@@ -2597,6 +2664,20 @@ async fn service(
       };
       if let Some(source) = source {
         spec.source = source;
+      }
+      if let Some(seconds) = start_timeout {
+        spec.start_timeout_secs = (seconds != 0).then_some(seconds);
+      }
+      if let Some(path) = health_path {
+        spec
+          .monitor
+          .get_or_insert(wharf_api_types::spec::MonitorSpec {
+            path: String::new(),
+            port: None,
+            expect: None,
+            keyword: None,
+          })
+          .path = path;
       }
       if let Some(server) = server {
         spec.server = server;
@@ -2677,6 +2758,7 @@ async fn service(
     }
     ServiceCmd::Monitor {
       name,
+      start_timeout,
       path,
       port,
       expect,
@@ -2688,23 +2770,36 @@ async fn service(
         .get::<ServiceView>(&format!("/api/services/{}", seg(&name)))
         .await?
         .spec;
-      spec.monitor = if off {
-        None
-      } else {
-        let cur = spec.monitor.take();
-        Some(wharf_api_types::spec::MonitorSpec {
-          path: path
-            .or_else(|| cur.as_ref().map(|m| m.path.clone()))
-            .unwrap_or_else(|| "/".into()),
-          port: port
-            .or_else(|| cur.as_ref().and_then(|m| m.port.clone())),
-          expect: expect
-            .or_else(|| cur.as_ref().and_then(|m| m.expect)),
-          keyword: keyword
-            .or_else(|| cur.as_ref().and_then(|m| m.keyword.clone()))
-            .filter(|k| !k.is_empty()),
-        })
-      };
+      if let Some(seconds) = start_timeout {
+        spec.start_timeout_secs = (seconds != 0).then_some(seconds);
+      }
+      if off
+        || start_timeout.is_none()
+        || path.is_some()
+        || port.is_some()
+        || expect.is_some()
+        || keyword.is_some()
+      {
+        spec.monitor = if off {
+          None
+        } else {
+          let cur = spec.monitor.take();
+          Some(wharf_api_types::spec::MonitorSpec {
+            path: path
+              .or_else(|| cur.as_ref().map(|m| m.path.clone()))
+              .unwrap_or_else(|| "/".into()),
+            port: port
+              .or_else(|| cur.as_ref().and_then(|m| m.port.clone())),
+            expect: expect
+              .or_else(|| cur.as_ref().and_then(|m| m.expect)),
+            keyword: keyword
+              .or_else(|| {
+                cur.as_ref().and_then(|m| m.keyword.clone())
+              })
+              .filter(|k| !k.is_empty()),
+          })
+        };
+      }
       changes(
         c,
         vec![Change::UpsertService {

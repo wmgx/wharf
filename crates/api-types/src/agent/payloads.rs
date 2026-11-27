@@ -381,6 +381,66 @@ pub struct ProjectUp {
   pub expected_images: BTreeMap<String, String>,
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub no_start: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub start_timeout_secs: Option<u32>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub readiness: Option<SettleProbe>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrevLogMeta {
+  pub index: u32,
+  pub at: i64,
+  pub reason: String,
+  pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrevLogOutput {
+  pub index: u32,
+  pub at: i64,
+  pub reason: String,
+  pub available: u32,
+  pub logs: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettleProbe {
+  pub url: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub expect: Option<u16>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub keyword: Option<String>,
+}
+
+pub fn judge_http_check(
+  expect: Option<u16>,
+  keyword: Option<&str>,
+  r: &HttpCheckResult,
+) -> (bool, String) {
+  let Some(code) = r.status else {
+    return (
+      false,
+      r.error.clone().unwrap_or_else(|| "没有应答".into()),
+    );
+  };
+  let code_ok = match expect {
+    Some(e) => code == e,
+    None => (200..400).contains(&code),
+  };
+  if !code_ok {
+    let want =
+      expect.map_or("2xx 或 3xx".to_string(), |e| e.to_string());
+    return (false, format!("HTTP {code}，期望 {want}"));
+  }
+  if r.found == Some(false) {
+    let k = keyword.unwrap_or_default();
+    return (
+      false,
+      format!("HTTP {code}，但应答里没有\u{201c}{k}\u{201d}"),
+    );
+  }
+  (true, format!("HTTP {code} · {} ms", r.ms))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -461,6 +521,35 @@ pub struct ContainerInfo {
   pub working_dir: Option<String>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub exit_code: Option<i64>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub restart_policy: Option<String>,
+}
+
+impl ContainerInfo {
+  pub fn is_active(&self) -> bool {
+    matches!(self.state.as_str(), "running" | "restarting" | "paused")
+  }
+
+  pub fn is_restarting(&self) -> bool {
+    self.state == "restarting"
+  }
+
+  pub fn is_running(&self) -> bool {
+    !self.foreign && self.state == "running"
+  }
+
+  pub fn is_completed_init(&self) -> bool {
+    self.state == "exited"
+      && self.exit_code == Some(0)
+      && matches!(self.restart_policy.as_deref(), Some("" | "no"))
+  }
+
+  pub fn is_healthy_state(&self, has_running: bool) -> bool {
+    self.state == "running"
+      || (has_running && self.is_completed_init())
+  }
 }
 
 #[derive(
@@ -478,10 +567,14 @@ pub struct ProjectState {
 }
 
 impl ProjectState {
-  /// 部署过，且所有容器都在运行。
+  /// 自有容器中至少一个在运行，其余可以是已完成的初始化容器。
   pub fn all_running(&self) -> bool {
-    !self.containers.is_empty()
-      && self.containers.iter().all(|c| c.state == "running")
+    self.containers.iter().any(ContainerInfo::is_running)
+      && self
+        .containers
+        .iter()
+        .filter(|c| !c.foreign)
+        .all(|c| c.is_healthy_state(true))
   }
 }
 
