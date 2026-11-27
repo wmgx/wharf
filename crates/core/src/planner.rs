@@ -4395,7 +4395,7 @@ mod tests {
     let mut b = Builder::default();
     b.step(
       vec![],
-      "更新 DNS".into(),
+      "更新 DNS",
       Step::DnsUpsert {
         hostname: host.into(),
         account: "cf".into(),
