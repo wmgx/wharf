@@ -42,7 +42,6 @@ pub fn process_lock(
       ErrorCode::Busy,
       "控制面正在使用数据库或恢复正在进行",
     )
-    .with_hint(SNAPSHOT_RESTORE_HINT)
   })?;
   Ok(file)
 }
@@ -250,7 +249,7 @@ pub(super) fn restore(
     fs::rename(&staging, &current).map_err(io_error)?;
     sync_dir(data_dir)?;
     if let Some(pre) = pre {
-      // 恢复目标本身也要保留，这次由下一次定时清理执行常规裁剪。
+      prune_after_create(&dir, id);
       println!("恢复前快照 {}", pre.id);
     }
     Ok(())

@@ -321,7 +321,8 @@ fn free_bytes(dir: &Path) -> Result<u64, ApiError> {
     return Err(io_error(io::Error::last_os_error()));
   }
   let stat = unsafe { stat.assume_init() };
-  Ok((stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64))
+  let free = u128::from(stat.f_bavail) * u128::from(stat.f_frsize);
+  Ok(free.try_into().unwrap_or(u64::MAX))
 }
 
 fn preflight(
@@ -399,7 +400,7 @@ fn write_snapshot(
   dir: &Path,
   mut info: DbSnapshotInfo,
   keep_id: Option<&str>,
-  cancelled: impl Fn() -> bool + Send + 'static,
+  cancelled: impl Fn() -> bool + Send + Sync + 'static,
 ) -> Result<DbSnapshotInfo, ApiError> {
   let mut salt = [0; 2];
   getrandom::fill(&mut salt).map_err(|_| conflict("随机数不可用"))?;

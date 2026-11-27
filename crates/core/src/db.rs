@@ -595,8 +595,10 @@ impl Db {
       conn,
       Some(&path.with_file_name(CREDENTIALS_KEY_FILE)),
     )?;
-    for name in ["wharf.db-wal", "wharf.db-shm"] {
-      restrict_db_file(&path.with_file_name(name));
+    for suffix in ["-wal", "-shm"] {
+      let mut name = path.as_os_str().to_os_string();
+      name.push(suffix);
+      restrict_db_file(Path::new(&name));
     }
     Ok(db)
   }
