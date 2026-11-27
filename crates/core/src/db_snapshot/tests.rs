@@ -221,31 +221,101 @@ async fn apply_snapshot_failure_is_atomic_and_admin_skip_is_audited()
 }
 
 #[tokio::test]
-async fn upgrade_snapshot_gates_dispatch_and_drops_noop() {
+async fn upgrade_snapshot_gates_dispatch() {
   use crate::agent_upgrade::upgrade_with_snapshot;
+  use wharf_api_types::agent::{UpgradePreparation, UpgradeResult};
   let (_dir, s) = disk_state();
   let dir = s.data_dir.join("snapshots");
+  let prepare = async || {
+    Ok(UpgradePreparation {
+      image: "test".into(),
+      image_id: Some("sha256:test".into()),
+    })
+  };
   fs::write(&dir, b"blocked").unwrap();
-  let err =
-    upgrade_with_snapshot(&s, None, async || panic!("升级不应派发"))
-      .await
-      .unwrap_err();
+  let err = upgrade_with_snapshot(&s, None, &prepare, async |_| {
+    panic!("升级不应派发")
+  })
+  .await
+  .unwrap_err();
   assert_eq!(err.code, ErrorCode::Conflict);
   fs::remove_file(&dir).unwrap();
-  for started in [true, false] {
-    upgrade_with_snapshot(&s, None, async || {
-      assert_eq!(entries(&dir)?.len(), if started { 1 } else { 2 });
-      Ok(wharf_api_types::agent::UpgradeResult {
-        started,
-        image: "test".into(),
-      })
+  upgrade_with_snapshot(&s, None, prepare, async |image_id| {
+    assert_eq!(image_id, "sha256:test");
+    assert_eq!(entries(&dir)?[0].trigger, "upgrade");
+    Ok(UpgradeResult {
+      started: true,
+      image: "test".into(),
     })
-    .await
-    .unwrap();
-    let saved = entries(&dir).unwrap();
-    assert_eq!(saved.len(), 1);
-    assert_eq!(saved[0].trigger, "upgrade");
+  })
+  .await
+  .unwrap();
+  assert_eq!(entries(&dir).unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn noop_upgrade_bypasses_snapshot_preflight() {
+  use crate::agent_upgrade::upgrade_with_snapshot;
+  use wharf_api_types::agent::UpgradePreparation;
+  let (_temp, s) = disk_state();
+  let dir = directory(&s.data_dir).unwrap();
+  for id in ["older", "newer"] {
+    private_file(&dir.join(format!("{id}.db")))
+      .unwrap()
+      .set_len(150 * 1024 * 1024)
+      .unwrap();
   }
+  // 投影出低盘预检会淘汰的旧快照，无需填满 CI 磁盘。
+  let before: Vec<_> =
+    entries(&dir).unwrap().into_iter().map(|e| e.id).collect();
+  assert!(
+    space_pruning(&entries(&dir).unwrap(), 1, None)
+      .is_some_and(|ids| ids.len() == 1)
+  );
+  let result = upgrade_with_snapshot(
+    &s,
+    None,
+    async || {
+      Ok(UpgradePreparation {
+        image: "test".into(),
+        image_id: None,
+      })
+    },
+    async |_| panic!("空升级不应派发"),
+  )
+  .await
+  .unwrap();
+  assert!(!result.started);
+  let after: Vec<_> =
+    entries(&dir).unwrap().into_iter().map(|e| e.id).collect();
+  assert_eq!(after, before);
+}
+
+#[tokio::test]
+async fn damaged_entries_do_not_block_snapshot_operations() {
+  let (_temp, s) = disk_state();
+  let dir = directory(&s.data_dir).unwrap();
+  let broken = "20000101-000000Z-manual-0000";
+  let outside = s.data_dir.join("outside");
+  fs::write(&outside, b"untouched").unwrap();
+  fs::write(dir.join(format!("{broken}.db")), b"fixture").unwrap();
+  fs::write(dir.join(format!("{broken}.json")), b"{").unwrap();
+  std::os::unix::fs::symlink(&outside, dir.join("link.db")).unwrap();
+  fs::create_dir(dir.join("directory.db")).unwrap();
+  let listed = view(&dir).unwrap();
+  assert_eq!(listed.snapshots.len(), 1);
+  assert_eq!(listed.snapshots[0].id, broken);
+  assert_eq!(listed.snapshots[0].trigger, "manual");
+  assert!(entry(&dir, broken, false).is_err());
+  let saved =
+    create(&s.db, &s.data_dir, info(Trigger::Manual, "test".into()))
+      .await
+      .unwrap();
+  assert_eq!(view(&dir).unwrap().snapshots[0].id, saved.id);
+  assert!(!dir.join(format!("{broken}.db")).exists());
+  assert_eq!(fs::read(outside).unwrap(), b"untouched");
+  assert!(dir.join("link.db").is_symlink());
+  assert!(dir.join("directory.db").is_dir());
 }
 
 #[test]
@@ -268,6 +338,29 @@ fn pruning_keeps_upgrade_and_proves_space_before_deletion() {
   );
   assert_eq!(space_pruning(&rows, 20, None).unwrap(), ["10", "9"]);
   assert!(space_pruning(&rows, 101, None).is_none());
+}
+
+#[test]
+fn pruning_evicts_upgrade_as_last_resort_for_byte_limit() {
+  let now = Utc::now();
+  let rows = [
+    DbSnapshotInfo {
+      id: "newer".into(),
+      trigger: "manual".into(),
+      created_at: now,
+      size_bytes: 150 * 1024 * 1024,
+      ..Default::default()
+    },
+    DbSnapshotInfo {
+      id: "upgrade".into(),
+      trigger: "upgrade".into(),
+      created_at: now - chrono::TimeDelta::days(1),
+      size_bytes: 150 * 1024 * 1024,
+      ..Default::default()
+    },
+  ];
+  assert_eq!(plan_pruning(&rows, now, Some("newer")), ["upgrade"]);
+  assert!(plan_pruning(&rows, now, Some("upgrade")).is_empty());
 }
 
 #[tokio::test]
@@ -399,6 +492,59 @@ async fn hot_snapshot_captures_wal_and_restores_offline() {
   })
   .await
   .unwrap();
+}
+
+#[test]
+fn offline_restore_recovers_damaged_or_missing_db() {
+  let temp = tempfile::tempdir().unwrap();
+  let path = temp.path();
+  let dir = directory(path).unwrap();
+  let id = "fixture";
+  let current = path.join("wharf.db");
+  let c = Connection::open(dir.join("fixture.db")).unwrap();
+  c.execute_batch(
+    "CREATE TABLE restored (value); INSERT INTO restored VALUES (42)",
+  )
+  .unwrap();
+  drop(c);
+  let broken: [(&str, &[u8]); 3] = [
+    ("wharf.db", b"damaged database"),
+    ("wharf.db-wal", b"damaged WAL"),
+    ("wharf.db-shm", b"damaged shared memory"),
+  ];
+  for (name, bytes) in broken {
+    fs::write(path.join(name), bytes).unwrap();
+  }
+  offline::restore(path, id, true).unwrap();
+  let archive = fs::read_dir(path)
+    .unwrap()
+    .map(|entry| entry.unwrap())
+    .find(|entry| {
+      entry
+        .file_name()
+        .to_string_lossy()
+        .starts_with(".wharf.db.before-restore-")
+    })
+    .unwrap()
+    .path();
+  for (name, bytes) in broken {
+    assert_eq!(fs::read(archive.join(name)).unwrap(), bytes);
+    if name != "wharf.db" {
+      assert!(!path.join(name).exists());
+    }
+  }
+  let check = || {
+    let c = Connection::open(&current).unwrap();
+    let value: i64 = c
+      .query_row("SELECT value FROM restored", [], |r| r.get(0))
+      .unwrap();
+    assert_eq!(value, 42);
+  };
+  check();
+  fs::remove_file(&current).unwrap();
+  offline::restore(path, id, false).unwrap();
+  check();
+  assert_eq!(entries(&dir).unwrap().len(), 1);
 }
 
 #[test]

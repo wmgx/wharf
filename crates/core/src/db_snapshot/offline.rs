@@ -106,7 +106,7 @@ fn validate_restore(
   dir: &Path,
   id: &str,
 ) -> Result<(), ApiError> {
-  let info = entry(dir, id)?;
+  let info = entry(dir, id, false)?;
   let source = dir.join(format!("{id}.db"));
   for suffix in ["-wal", "-shm", "-journal"] {
     if metadata(&dir.join(format!("{id}.db{suffix}")), false)?
@@ -177,6 +177,50 @@ fn lock_sqlite(path: &Path) -> Result<Option<File>, ApiError> {
   Ok(Some(file))
 }
 
+fn replace_and_archive(
+  data_dir: &Path,
+  staging: &Path,
+  current: &Path,
+  files: &[&Path],
+) -> Result<(), ApiError> {
+  if files.is_empty() {
+    return fs::rename(staging, current).map_err(io_error);
+  }
+  let mut salt = [0; 8];
+  getrandom::fill(&mut salt).map_err(|_| conflict("随机数不可用"))?;
+  let name =
+    format!(".wharf.db.before-restore-{}", hex::encode(salt));
+  let archive = data_dir.join(&name);
+  fs::DirBuilder::new()
+    .mode(0o700)
+    .create(&archive)
+    .map_err(io_error)?;
+  let mut moved = Vec::new();
+  let result = (|| {
+    for &path in files {
+      let backup = archive.join(path.file_name().unwrap());
+      fs::rename(path, &backup).map_err(io_error)?;
+      moved.push((backup, path));
+    }
+    sync_dir(&archive)?;
+    sync_dir(data_dir)?;
+    fs::rename(staging, current).map_err(io_error)
+  })();
+  if let Err(error) = result {
+    for (backup, path) in moved.into_iter().rev() {
+      if fs::rename(backup, path).is_err() {
+        return Err(error.with_hint(format!(
+          "恢复未完成，原库文件可能仍在数据目录的 {name} 中"
+        )));
+      }
+    }
+    let _ = fs::remove_dir(archive);
+    return Err(error);
+  }
+  println!("原库文件保留在数据目录的 {name} 中");
+  Ok(())
+}
+
 pub(super) fn restore(
   data_dir: &Path,
   id: &str,
@@ -190,10 +234,13 @@ pub(super) fn restore(
   let wal = data_dir.join("wharf.db-wal");
   let shm = data_dir.join("wharf.db-shm");
   let journal = data_dir.join("wharf.db-journal");
+  let mut files = Vec::new();
   for path in [&current, &wal, &shm, &journal] {
-    metadata(path, false)?;
+    if metadata(path, false)?.is_some() {
+      files.push(path.as_path());
+    }
   }
-  drop(lock_sqlite(&current)?);
+  let mut sqlite_lock = lock_sqlite(&current)?;
   let staging = data_dir.join(".wharf.db.restore.tmp");
   // 独占恢复锁下清理上次中断的暂存文件。
   if metadata(&staging, false)?.is_some() {
@@ -205,38 +252,52 @@ pub(super) fn restore(
       File::open(dir.join(format!("{id}.db"))).map_err(io_error)?;
     io::copy(&mut source, &mut dest).map_err(io_error)?;
     dest.sync_all().map_err(io_error)?;
-    let mut pre = None;
-    if !no_pre_snapshot || wal.exists() || journal.exists() {
+    if no_pre_snapshot || !files.contains(&current.as_path()) {
+      replace_and_archive(data_dir, &staging, &current, &files)?;
+      return sync_dir(data_dir);
+    }
+    drop(sqlite_lock.take());
+    let pre = {
       let c = Connection::open_with_flags(
         &current,
         OpenFlags::SQLITE_OPEN_READ_WRITE,
       )
       .map_err(|_| {
-        conflict("无法打开当前库进行恢复前留底或 WAL 检查")
+        conflict("无法打开当前库进行恢复前留底").with_hint(
+          "当前库损坏时可加 --no-pre-snapshot，原库文件会改名留底",
+        )
       })?;
-      if !no_pre_snapshot {
-        let started = Instant::now();
-        pre = Some(write_snapshot(
-          &c,
-          data_dir,
-          &dir,
-          info(Trigger::PreRestore, "恢复控制面前".into()),
-          Some(id),
-          move || started.elapsed() >= TIMEOUT,
-        )?);
-      }
+      let started = Instant::now();
+      let pre = write_snapshot(
+        &c,
+        data_dir,
+        &dir,
+        info(Trigger::PreRestore, "恢复控制面前".into()),
+        Some(id),
+        move || started.elapsed() >= TIMEOUT,
+      )
+      .map_err(|error| {
+        let hint = error.hint.as_deref().unwrap_or_default();
+        let hint = format!("{hint}。无法为当前库留快照时可加 --no-pre-snapshot，原库文件会改名留底");
+        error.with_hint(hint)
+      })?;
       let (busy, _, _): (i64, i64, i64) = c
         .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
           Ok((r.get(0)?, r.get(1)?, r.get(2)?))
         })
-        .map_err(|_| conflict("恢复前无法安全落盘当前库的 WAL"))?;
+        .map_err(|_| {
+          conflict("恢复前无法安全落盘当前库的 WAL").with_hint(
+            "当前库损坏时可加 --no-pre-snapshot，原库文件会改名留底",
+          )
+        })?;
       if busy != 0 {
         return Err(ApiError::new(
           ErrorCode::Busy,
           "SQLite 数据库仍在使用，请先停止控制面",
         ));
       }
-    }
+      pre
+    };
     let _sqlite = lock_sqlite(&current)?;
     if metadata(&wal, false)?.is_some_and(|m| m.len() != 0)
       || metadata(&journal, false)?.is_some_and(|m| m.len() != 0)
@@ -250,10 +311,8 @@ pub(super) fn restore(
     }
     fs::rename(&staging, &current).map_err(io_error)?;
     sync_dir(data_dir)?;
-    if let Some(pre) = pre {
-      prune_after_create(&dir, id);
-      println!("恢复前快照 {}", pre.id);
-    }
+    prune_after_create(&dir, id);
+    println!("恢复前快照 {}", pre.id);
     Ok(())
   })();
   if result.is_err() {

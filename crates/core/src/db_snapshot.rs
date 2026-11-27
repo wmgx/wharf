@@ -148,20 +148,34 @@ fn validate_id(id: &str) -> Result<(), ApiError> {
   Ok(())
 }
 
-fn entry(dir: &Path, id: &str) -> Result<DbSnapshotInfo, ApiError> {
+fn entry(
+  dir: &Path,
+  id: &str,
+  allow_bad_sidecar: bool,
+) -> Result<DbSnapshotInfo, ApiError> {
   validate_id(id)?;
   let db = metadata(&dir.join(format!("{id}.db")), false)?
     .ok_or_else(|| ApiError::not_found("快照不存在"))?;
   let sidecar = dir.join(format!("{id}.json"));
   if metadata(&sidecar, false)?.is_some() {
-    let mut info: DbSnapshotInfo =
-      serde_json::from_reader(File::open(sidecar).map_err(io_error)?)
-        .map_err(|_| conflict("快照元数据格式不对"))?;
-    if info.id != id {
-      return Err(conflict("快照元数据的 ID 不匹配"));
+    let parsed = serde_json::from_reader::<_, DbSnapshotInfo>(
+      File::open(sidecar).map_err(io_error)?,
+    )
+    .map_err(|_| conflict("快照元数据格式不对"))
+    .and_then(|mut info| {
+      if info.id != id {
+        return Err(conflict("快照元数据的 ID 不匹配"));
+      }
+      info.size_bytes = db.len();
+      Ok(info)
+    });
+    match parsed {
+      Ok(info) => return Ok(info),
+      Err(error) if allow_bad_sidecar => {
+        tracing::warn!(id, "{}", error.message);
+      }
+      Err(error) => return Err(error),
     }
-    info.size_bytes = db.len();
-    return Ok(info);
   }
   let created_at = id
     .get(..16)
@@ -194,7 +208,14 @@ fn entries(dir: &Path) -> Result<Vec<DbSnapshotInfo>, ApiError> {
       .and_then(|n| n.strip_suffix(".db"))
       && validate_id(id).is_ok()
     {
-      entries.push(entry(dir, id)?);
+      match entry(dir, id, true) {
+        Ok(entry) => entries.push(entry),
+        Err(error) if error.code == ErrorCode::NotFound => {}
+        Err(error) if error.code == ErrorCode::InvalidInput => {
+          tracing::warn!(id, "{}", error.message);
+        }
+        Err(error) => return Err(error),
+      }
     }
   }
   entries.sort_unstable_by(|a, b| {
@@ -257,6 +278,12 @@ fn plan_pruning(
       size -= e.size_bytes;
       remove.push(e.id.clone());
     }
+  }
+  if size > MAX_TOTAL_BYTES
+    && let Some(id) = upgrade
+    && Some(id) != keep_id
+  {
+    remove.push(id.to_string());
   }
   remove
 }
@@ -501,10 +528,7 @@ async fn create(
       write_snapshot(c, &data_dir, &dir, info, None, move || {
         cancel.is_cancelled() || started.elapsed() >= TIMEOUT
       })?;
-    // 空升级等 agent 确认后再裁剪，避免挤掉旧快照。
-    if info.trigger != Trigger::Upgrade.name() {
-      prune_after_create(&dir, &info.id);
-    }
+    prune_after_create(&dir, &info.id);
     Ok(info)
   });
   tokio::time::timeout(TIMEOUT, job)
@@ -600,26 +624,7 @@ pub async fn before(
     })
 }
 
-pub async fn finish_upgrade(s: &AppState, id: String, started: bool) {
-  let data_dir = s.data_dir.clone();
-  if let Err(e) = s
-    .db
-    .call(move |_| {
-      let dir = directory(&data_dir)?;
-      if started {
-        prune(&dir, Some(&id))
-      } else {
-        remove(&dir, &id)
-      }
-    })
-    .await
-  {
-    tracing::warn!("整理升级热快照失败：{}", e.message);
-  }
-}
-
 pub async fn cleanup(s: &AppState) -> Result<(), ApiError> {
-  // 升级结果未返回前保留上一份和本次临时留底。
   let Ok(_guard) = s.apply_lock.try_lock() else {
     return Ok(());
   };

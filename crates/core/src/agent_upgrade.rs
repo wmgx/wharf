@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
   ApiError, BUILD, ErrorCode, VERSION,
-  agent::{AgentOp, UpgradeJob, UpgradeResult},
+  agent::{AgentOp, UpgradeJob, UpgradePreparation, UpgradeResult},
   plan::ApplyResponse,
   view::Perm,
 };
@@ -290,23 +290,44 @@ pub async fn upgrade_core(
   let skip = req
     .skip_snapshot
     .then(|| crate::db_snapshot::api_actor(&auth, peer, &headers));
-  let r = upgrade_with_snapshot(&s, skip.as_ref(), || async {
-    let r: UpgradeResult = core
-      .call(
-        &s,
-        AgentOp::Upgrade(UpgradeJob {
-          tag: None,
-          pull: snapshot::pull_policy(row),
-          container: Some(id),
-          ready: Some(CORE_READY.into()),
-        }),
-        CORE_PULL_TIMEOUT,
-        None,
-        &cancel,
-      )
-      .await?;
-    Ok(r)
-  })
+  let job = UpgradeJob {
+    tag: None,
+    pull: snapshot::pull_policy(row),
+    container: Some(id),
+    ready: Some(CORE_READY.into()),
+    expected_image: None,
+  };
+  let deadline = tokio::time::Instant::now() + CORE_PULL_TIMEOUT;
+  let r = upgrade_with_snapshot(
+    &s,
+    skip.as_ref(),
+    async || {
+      core
+        .call(
+          &s,
+          AgentOp::UpgradePrepare(job.clone()),
+          CORE_PULL_TIMEOUT,
+          None,
+          &cancel,
+        )
+        .await
+    },
+    async |image_id| {
+      core
+        .call(
+          &s,
+          AgentOp::Upgrade(UpgradeJob {
+            expected_image: Some(image_id),
+            ..job.clone()
+          }),
+          deadline
+            .saturating_duration_since(tokio::time::Instant::now()),
+          None,
+          &cancel,
+        )
+        .await
+    },
+  )
   .await?;
   if req.then_agents && r.started {
     let from = BUILD.to_string();
@@ -322,9 +343,17 @@ pub async fn upgrade_core(
 pub(crate) async fn upgrade_with_snapshot(
   s: &AppState,
   skip: Option<&crate::security_receipt::Actor>,
-  run: impl AsyncFnOnce() -> Result<UpgradeResult, ApiError>,
+  prepare: impl AsyncFnOnce() -> Result<UpgradePreparation, ApiError>,
+  run: impl AsyncFnOnce(String) -> Result<UpgradeResult, ApiError>,
 ) -> Result<UpgradeResult, ApiError> {
-  let saved = crate::db_snapshot::before(
+  let prepared = prepare().await?;
+  let Some(image_id) = prepared.image_id else {
+    return Ok(UpgradeResult {
+      image: prepared.image,
+      started: false,
+    });
+  };
+  crate::db_snapshot::before(
     s,
     crate::db_snapshot::Trigger::Upgrade,
     "升级控制面".into(),
@@ -332,13 +361,7 @@ pub(crate) async fn upgrade_with_snapshot(
     skip,
   )
   .await?;
-  let result = run().await;
-  if let Some(saved) = saved {
-    // 请求断开时仍可能已经启动了接班容器。
-    let started = result.as_ref().map_or(true, |r| r.started);
-    crate::db_snapshot::finish_upgrade(s, saved.id, started).await;
-  }
-  result
+  run(image_id).await
 }
 
 pub async fn upgrade(
@@ -375,6 +398,7 @@ pub async fn upgrade(
         pull: snapshot::pull_policy(row),
         container: None,
         ready: None,
+        expected_image: None,
       }),
       PULL_TIMEOUT,
       Some(progress.clone()),
