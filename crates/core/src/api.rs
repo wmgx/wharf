@@ -1243,7 +1243,8 @@ async fn service_logs(
 ) -> ApiResult<Value> {
   auth.require(Perm::Read)?;
   let snap = snapshot::load(&s.db).await?;
-  let (server, project) = crate::multi_logs::service_target(&snap, &name)?;
+  let (server, project) =
+    crate::multi_logs::service_target(&snap, &name)?;
   if q.previous_list || q.previous.is_some() {
     let values = crate::log_redact::service_values(
       &snap.world.services[&name].spec,
