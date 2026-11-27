@@ -73,6 +73,23 @@ pub struct Snapshot {
   pub reach: db::Reach,
 }
 
+pub fn service_runtime_server<'a>(
+  snap: &'a Snapshot,
+  service: &str,
+) -> Option<&'a str> {
+  let row = snap.world.services.get(service)?;
+  if let Some(m) = snap.pending.migrations.get(service) {
+    return Some(
+      if m.phase == crate::pending::MigratePhase::UpDone {
+        &m.payload.to
+      } else {
+        &m.payload.from
+      },
+    );
+  }
+  Some(snap.deployed.get(service).unwrap_or(&row.spec.server))
+}
+
 impl Snapshot {
   /// 解析同步结果。解析不了的旧数据当作没同步过。
   fn with_edge_cache(
@@ -1402,21 +1419,4 @@ mod tests {
         .contains("core https://core.example.test")
     );
   }
-}
-
-pub fn service_runtime_server<'a>(
-  snap: &'a Snapshot,
-  service: &str,
-) -> Option<&'a str> {
-  let row = snap.world.services.get(service)?;
-  if let Some(m) = snap.pending.migrations.get(service) {
-    return Some(
-      if m.phase == crate::pending::MigratePhase::UpDone {
-        &m.payload.to
-      } else {
-        &m.payload.from
-      },
-    );
-  }
-  Some(snap.deployed.get(service).unwrap_or(&row.spec.server))
 }

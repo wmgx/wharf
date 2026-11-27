@@ -3149,28 +3149,65 @@ mod tests {
       .spec
       .volumes
       .clear();
-    let mut b = Builder::default();
-    b.migration_mounts.insert(
-      "notes".into(),
-      vec![wharf_api_types::agent::ContainerMount {
-        container: "notes-db-1".into(),
-        service: "db".into(),
-        kind: "volume".into(),
-        source: "a".repeat(64),
-        target: "/var/lib/db".into(),
-      }],
-    );
-    move_items(&mut b, &snap, "notes", "s2", "s1", &Net::default());
-    let p = finish_plan(
-      &snap,
-      &snap.world,
-      b,
-      vec![],
-      BTreeSet::new(),
-      None,
-    );
+    use wharf_api_types::{agent::AgentOp, spec::Change};
+    state.hub.mock_safe_migrate_agent("s2", |op, _| {
+      Some(Ok(match op {
+        AgentOp::ProjectStatus { .. } => json!([]),
+        AgentOp::ProjectMounts { projects } => {
+          assert_eq!(projects, ["notes"]);
+          json!({"notes": [{"container": "notes-db-1", "service": "db",
+            "kind": "volume", "source": "a".repeat(64), "target": "/var/lib/db"}]})
+        }
+        _ => panic!("计划期发了意外请求"),
+      }))
+    });
+    let mut spec = snap.world.services["notes"].spec.clone();
+    spec.server = "s1".into();
+    let before = state
+      .db
+      .call(|c| {
+        c.query_row("SELECT total_changes()", [], |r| {
+          r.get::<_, i64>(0)
+        })
+        .map_err(db::sql_err)
+      })
+      .await
+      .unwrap();
+    let p = make_plan_inner(
+      &state,
+      PlanRequest {
+        changes: vec![Change::UpsertService {
+          name: "notes".into(),
+          spec,
+          adopt: None,
+        }],
+        ..PlanRequest::default()
+      },
+      snap,
+      false,
+      true,
+    )
+    .await
+    .unwrap();
     assert_eq!(p.plan.needs_confirm, ["service/notes"]);
-    assert!(p.plan.items[0].reason.contains("/var/lib/db"));
+    assert!(
+      p.plan
+        .items
+        .iter()
+        .any(|item| item.impacts.contains(&Impact::DataLoss)
+          && item.reason.contains("/var/lib/db"))
+    );
+    let after = state
+      .db
+      .call(|c| {
+        c.query_row("SELECT total_changes()", [], |r| {
+          r.get::<_, i64>(0)
+        })
+        .map_err(db::sql_err)
+      })
+      .await
+      .unwrap();
+    assert_eq!(before, after);
   }
 
   #[tokio::test]
