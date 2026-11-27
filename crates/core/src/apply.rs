@@ -677,12 +677,16 @@ pub async fn start_task_by(
   step: Step,
   actor: Option<String>,
 ) -> Result<ApplyResponse, ApiError> {
-  let guard = state.locks.acquire(task_lock(&step), &title)?;
+  let guard = lock_task(&state, &step, &title).await?;
   start_task_locked(state, title, step, actor, guard).await
 }
 
-fn task_lock(step: &Step) -> LockSpec {
-  match step {
+async fn lock_task(
+  state: &AppState,
+  step: &Step,
+  title: &str,
+) -> Result<OpLockGuard, ApiError> {
+  let spec = match step {
     Step::Backup { service } => LockSpec::Backup(service.clone()),
     Step::CoreBackup { .. } => LockSpec::CoreBackup,
     Step::Prune {
@@ -690,7 +694,31 @@ fn task_lock(step: &Step) -> LockSpec {
       ..
     } => LockSpec::Global,
     _ => LockSpec::apply(run_scope::step_services(step)),
+  };
+  let guard = state.locks.acquire(spec, title)?;
+  match step {
+    Step::Backup { service } => {
+      let snap = snapshot::load(&state.db).await?;
+      guard.reserve_backup_target(crate::backup::service_target(
+        &snap, service,
+      )?)?;
+    }
+    Step::Restore {
+      service, target, ..
+    } => {
+      let snap = snapshot::load(&state.db).await?;
+      let target = crate::backup::restore_target(
+        state,
+        &snap,
+        service,
+        target.as_deref(),
+      )
+      .await?;
+      guard.reserve_backup_target(target)?;
+    }
+    _ => {}
   }
+  Ok(guard)
 }
 
 pub(crate) async fn start_task_locked(

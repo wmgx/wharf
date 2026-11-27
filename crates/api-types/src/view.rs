@@ -1052,6 +1052,9 @@ pub struct BackupsView {
   /// 没开启备份时为空。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub target: Option<String>,
+  /// 列出快照时使用的备份服务器，关闭自动备份后可来自历史记录。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub snapshot_target: Option<String>,
   /// 最近的备份记录，新的在前。
   pub records: Vec<BackupRecord>,
   /// 备份服务器上的快照，新的在前。

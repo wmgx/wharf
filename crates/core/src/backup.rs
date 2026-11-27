@@ -163,7 +163,7 @@ pub(crate) struct Where {
   pub(crate) target_ip: String,
 }
 
-fn service_target(
+pub(crate) fn service_target(
   snap: &Snap,
   service: &str,
 ) -> Result<String, ApiError> {
@@ -212,6 +212,17 @@ async fn resolve_target(
       [service], |r| r.get(0),
     ).optional().map_err(sql_err)
   }).await
+}
+
+pub(crate) async fn restore_target(
+  state: &AppState,
+  snap: &Snap,
+  service: &str,
+  target: Option<&str>,
+) -> Result<String, ApiError> {
+  resolve_target(state, snap, service, target)
+    .await?
+    .ok_or_else(|| missing_target(service))
 }
 
 fn missing_target(service: &str) -> ApiError {
@@ -578,7 +589,7 @@ async fn preflight(
         format!("/srv/{service} 本身是独立挂载点"),
       )
       .with_hint(format!(
-        "把数据盘改挂到 /srv/{service}/data 子目录后重试"
+        "如将数据盘改挂到 /srv/{service}/data，恢复期间仍须卸载服务目录及其子目录的所有挂载"
       )),
     );
   }
@@ -609,11 +620,13 @@ async fn preflight(
       .with_hint(hint),
     );
   }
-  for m in &result.escaped_mounts {
-    progress(format!(
-      "快照只包含软链：{} -> {}",
-      m.source, m.resolved
-    ));
+  if backup {
+    for m in &result.escaped_mounts {
+      progress(format!(
+        "不在备份范围：{} -> {}",
+        m.source, m.resolved
+      ));
+    }
   }
   Ok(result)
 }
@@ -627,11 +640,6 @@ pub async fn backup(
 ) -> Result<(), ApiError> {
   let snap = snapshot::load(&state.db).await?;
   let w = location(&snap, service, service_target(&snap, service)?);
-  let target_guard = state.locks.acquire(
-    crate::locks::LockSpec::BackupTarget(w.target.clone()),
-    "使用业务备份服务器",
-  )?;
-  target_guard.set_run(run_id);
   let mut started = Ok(());
   let result: Result<_, ApiError> = async {
     check_location(state, &snap, &w, service).await?;
@@ -773,14 +781,8 @@ pub async fn restore(
   cancel: &CancellationToken,
 ) -> Result<(), ApiError> {
   let snap = snapshot::load(&state.db).await?;
-  let target = resolve_target(state, &snap, service, target)
-    .await?
-    .ok_or_else(|| missing_target(service))?;
+  let target = restore_target(state, &snap, service, target).await?;
   let w = location(&snap, service, target);
-  let _target_guard = state.locks.acquire(
-    crate::locks::LockSpec::BackupTarget(w.target.clone()),
-    "使用业务备份服务器",
-  )?;
   check_location(state, &snap, &w, service).await?;
   let creds = ensure_service_creds(state, service).await?;
   ensure_server(state, &snap, &w, Some(service), &progress, cancel)
@@ -1024,6 +1026,7 @@ pub async fn list(
   Ok(Json(BackupsView {
     service: name,
     target,
+    snapshot_target: repo_target,
     records,
     snapshots,
     snapshots_error,
@@ -1462,9 +1465,7 @@ pub async fn run_now(
   Path(name): Path<String>,
 ) -> ApiResult<ApplyResponse> {
   auth.require(Perm::Apply)?;
-  let snap = snapshot::load(&s.db).await?;
   crate::token_scope::require_service(&auth, &name)?;
-  service_target(&snap, &name)?;
   Ok(Json(
     apply::start_task_by(
       s.clone(),
@@ -1512,9 +1513,8 @@ pub async fn restore_now(
   )?;
   let snap = snapshot::load(&s.db).await?;
   let target =
-    resolve_target(&s, &snap, &name, req.target.as_deref())
-      .await?
-      .ok_or_else(|| missing_target(&name))?;
+    restore_target(&s, &snap, &name, req.target.as_deref()).await?;
+  guard.reserve_backup_target(target.clone())?;
   let skip = req
     .skip_snapshot
     .then(|| crate::db_snapshot::api_actor(&auth, peer, &headers));

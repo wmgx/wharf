@@ -24,7 +24,9 @@ use wharf_api_types::{
 };
 
 use crate::{
-  dirfd::{DirFd, component, dir_error, validate_tree},
+  dirfd::{
+    DirFd, component, dir_error, tree_symlinks, validate_tree,
+  },
   docker::{Docker, io_err},
   exec::{Ctx, Output},
 };
@@ -95,20 +97,28 @@ impl Job<'_> {
     for m in &self.mounts {
       cmd = cmd.args(["-v", m.as_str()]);
     }
+    let transfer =
+      matches!(args.first(), Some(&"backup" | &"restore"));
+    let prune = args.contains(&"--prune");
+    if transfer || prune {
+      cmd = cmd
+        .args(["-e", "RESTIC_PROGRESS_FPS"])
+        .env("RESTIC_PROGRESS_FPS", "0.05");
+    }
     cmd = cmd
       .arg(RESTIC_IMAGE)
       .args(args.iter().copied())
       .env("RESTIC_REPOSITORY", &self.repo)
       .env("RESTIC_PASSWORD", self.password)
       .timeout(timeout);
-    if matches!(args.first(), Some(&"backup" | &"restore")) {
+    if transfer {
       cmd = cmd
-        .env("RESTIC_PROGRESS_FPS", "0.05")
         .stall_timeout(Duration::from_secs(900), progress_matcher());
-    } else if args.contains(&"--prune") {
-      cmd = cmd.stall_timeout(Duration::from_secs(1800), |line| {
-        !line.trim().is_empty()
-      });
+    } else if prune {
+      cmd = cmd.stall_timeout(
+        Duration::from_secs(1800),
+        prune_progress_matcher(),
+      );
     }
     let clean_line = |mut line: String| {
       for secret in
@@ -306,9 +316,10 @@ pub async fn run(
     }
     ResticAction::Backup { host } => {
       // 控制面的目录不在 agent 容器里，上面已经在宿主机上确认过了。
-      if job.core_marker.is_none() {
-        DirFd::open_service_root(Path::new("/srv"), &job.service)
-          .map_err(|e| {
+      let excludes = if job.core_marker.is_none() {
+        let dir =
+          DirFd::open_service_root(Path::new("/srv"), &job.service)
+            .map_err(|e| {
             if e.code == ErrorCode::NotFound {
               ApiError::invalid(format!(
                 "{} 不存在，没有数据可以备份",
@@ -318,7 +329,10 @@ pub async fn run(
               e
             }
           })?;
-      }
+        backup_link_excludes(&root, &dir, ctx)?
+      } else {
+        vec![]
+      };
       j.mounts.push(format!(
         "{}:{}:ro",
         root.display(),
@@ -327,16 +341,14 @@ pub async fn run(
       ensure_repo(&j, ctx).await?;
       ctx.say(format!("备份 {}", root.display()));
       let path = root.display().to_string();
+      let mut args = vec![
+        "backup", &path, "--host", host, "--tag", "wharf", "--json",
+      ];
+      for exclude in &excludes {
+        args.extend(["--exclude", exclude.as_str()]);
+      }
       let out = j
-        .restic(
-          &[
-            "backup", &path, "--host", host, "--tag", "wharf",
-            "--json",
-          ],
-          LONG_TIMEOUT,
-          false,
-          ctx,
-        )
+        .restic(&args, LONG_TIMEOUT, false, ctx)
         .await?
         .check("restic backup")?;
       let summary = parse_summary(&out.stdout)?;
@@ -418,6 +430,52 @@ pub async fn run(
   }
 }
 
+fn backup_link_excludes(
+  root: &Path,
+  dir: &DirFd,
+  ctx: &Ctx,
+) -> Result<Vec<String>, ApiError> {
+  use wharf_api_types::symlink::{
+    check_single_link, resolve_link, validate_symlinks,
+  };
+
+  let mut links = tree_symlinks(dir)?;
+  let rejected: Vec<_> = links
+    .iter()
+    .filter(|(rel, target)| {
+      rel.components().count() == 1
+        || check_single_link(rel, target).is_err()
+        || resolve_link(rel, target, &links).is_err()
+    })
+    .map(|(rel, _)| rel.clone())
+    .collect();
+  let mut excludes = Vec::new();
+  for rel in rejected {
+    let target = links.remove(&rel).expect("已扫描到软链");
+    let path = root.join(&rel);
+    let name = path.to_str().ok_or_else(|| {
+      ApiError::invalid(format!(
+        "无法排除路径非 UTF-8 的软链 {}",
+        path.display()
+      ))
+    })?;
+    ctx.say(format!(
+      "备份跳过无法安全恢复的软链：{name} -> {}",
+      target.display()
+    ));
+    let mut pattern = String::new();
+    for ch in name.chars() {
+      if matches!(ch, '\\' | '[' | '*' | '?') {
+        pattern.push('\\');
+      }
+      pattern.push(ch);
+    }
+    excludes.push(pattern);
+  }
+  validate_symlinks(&links)?;
+  Ok(excludes)
+}
+
 fn progress_matcher() -> impl FnMut(&str) -> bool {
   let mut previous = None;
   move |line| {
@@ -439,6 +497,25 @@ fn progress_matcher() -> impl FnMut(&str) -> bool {
       .or_else(|| value["bytes_restored"].as_u64())
       .unwrap_or_default();
     previous.replace((files, bytes)) != Some((files, bytes))
+  }
+}
+
+fn prune_progress_matcher() -> impl FnMut(&str) -> bool {
+  let mut previous = String::new();
+  move |line| {
+    let line = line.trim();
+    let Some((_, counter)) =
+      line.strip_prefix('[').and_then(|line| line.split_once(']'))
+    else {
+      return !line.is_empty();
+    };
+    // restic 会在计数不变时继续输出经过时间。
+    let counter = counter.trim();
+    if counter == previous {
+      return false;
+    }
+    counter.clone_into(&mut previous);
+    true
   }
 }
 
@@ -665,7 +742,7 @@ fn check_restore_mounts(
         format!("/srv/{service} 本身是独立挂载点，无法整体切换目录"),
       )
       .with_hint(format!(
-        "把数据盘改挂到 /srv/{service}/data 子目录后重试"
+        "如将数据盘改挂到 /srv/{service}/data，恢复期间仍须卸载服务目录及其子目录的所有挂载"
       )),
     );
   }
@@ -841,7 +918,6 @@ async fn restore(
   let nonce = crate::build::random_suffix();
   let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
   let work_name = format!("{}-{stamp}-{nonce}", j.service);
-  let kept_name = format!("{}-before-{stamp}-{nonce}", j.service);
   let srv = Path::new("/srv");
   let srv_fd = DirFd::open_dir(srv).map_err(|e| dir_error(srv, e))?;
   let restore_dir = Path::new(RESTORE_DIR);
@@ -874,6 +950,8 @@ async fn restore(
   )
   .await?
   .check("restic restore")?;
+  let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+  let kept_name = format!("{}-before-{stamp}-{nonce}", j.service);
   if install_restored_tree(
     srv, j.service, &work_name, &kept_name, snapshot,
   )
@@ -954,18 +1032,14 @@ fn restore_parents(
   Ok(parents)
 }
 
-fn restore_dir_name(name: &str) -> Option<&str> {
-  if let Some(nonce) = name.strip_prefix(".install-") {
-    return (nonce.len() == 8
-      && nonce.bytes().all(|b| b.is_ascii_hexdigit()))
-    .then_some("");
-  }
-  let (prefix, nonce) = name.rsplit_once('-')?;
-  if nonce.len() != 8 || !nonce.bytes().all(|b| b.is_ascii_hexdigit())
-  {
+fn restore_dir_stamp(
+  name: &str,
+) -> Option<(&str, chrono::NaiveDateTime)> {
+  let (stem, nonce) = name.rsplit_once('-')?;
+  if !restore_nonce(nonce) {
     return None;
   }
-  let (prefix, time) = prefix.rsplit_once('-')?;
+  let (prefix, time) = stem.rsplit_once('-')?;
   let (service, date) = prefix.rsplit_once('-')?;
   if date.len() != 8
     || time.len() != 6
@@ -973,7 +1047,16 @@ fn restore_dir_name(name: &str) -> Option<&str> {
   {
     return None;
   }
-  Some(service)
+  let stamp = chrono::NaiveDateTime::parse_from_str(
+    &stem[service.len() + 1..],
+    "%Y%m%d-%H%M%S",
+  )
+  .ok()?;
+  Some((service, stamp))
+}
+
+fn restore_nonce(nonce: &str) -> bool {
+  nonce.len() == 8 && nonce.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 fn restore_entry(
@@ -1021,14 +1104,18 @@ pub fn cleanup_stale_restore_work(srv: &Path) {
     {
       // 服务可能叫 foo-before，疑似留底只交给显式清理。
       let work = if central {
-        restore_dir_name(&entry.name).is_some()
-          && !entry.name.contains("-before-")
+        entry
+          .name
+          .strip_prefix(".install-")
+          .is_some_and(restore_nonce)
+          || (restore_dir_stamp(&entry.name).is_some()
+            && !entry.name.contains("-before-"))
       } else {
-        entry.name.strip_prefix(".wharf-restore-work-").is_some_and(
-          |suffix| {
-            restore_dir_name(&format!("s1-{suffix}")).is_some()
-          },
-        )
+        entry
+          .name
+          .strip_prefix(".wharf-restore-")
+          .and_then(restore_dir_stamp)
+          .is_some_and(|(name, _)| name == "work")
       };
       if work {
         let deleted = restore_entry(&parent, &fd, &entry, &mountinfo)
@@ -1069,8 +1156,8 @@ pub fn prune_restore_kept(
       if ctx.cancel.is_cancelled() {
         return Err(ApiError::new(ErrorCode::Cancelled, "已取消"));
       }
-      let kept = if central {
-        restore_dir_name(&entry.name).is_some_and(|prefix| {
+      let stamp = if central {
+        restore_dir_stamp(&entry.name).filter(|(prefix, _)| {
           prefix.strip_suffix("-before").is_some_and(|service| {
             validate_name("服务", service).is_ok()
           })
@@ -1078,12 +1165,14 @@ pub fn prune_restore_kept(
       } else {
         entry
           .name
-          .strip_prefix(".wharf-restore-before-")
-          .is_some_and(|suffix| {
-            restore_dir_name(&format!("s1-{suffix}")).is_some()
-          })
+          .strip_prefix(".wharf-restore-")
+          .and_then(restore_dir_stamp)
+          .filter(|(prefix, _)| *prefix == "before")
       };
-      if kept && (older_than_days == 0 || entry.modified < cutoff) {
+      if stamp.is_some_and(|(_, stamp)| {
+        older_than_days == 0
+          || stamp.and_utc().timestamp_millis() < cutoff
+      }) {
         let path = restore_entry(&parent, &fd, &entry, &mountinfo)?;
         let display = parent.join(&entry.name);
         let bytes =

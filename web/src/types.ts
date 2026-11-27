@@ -534,6 +534,7 @@ export interface Snapshot {
 export interface BackupsView {
   service: string;
   target?: string;
+  snapshot_target?: string;
   records: BackupRecord[];
   snapshots: Snapshot[];
   snapshots_error?: string;

@@ -11,7 +11,28 @@ pub struct OpLocks(Arc<Mutex<State>>);
 #[derive(Default)]
 struct State {
   next: u64,
-  held: BTreeMap<u64, (LockSpec, String, Option<String>)>,
+  held: BTreeMap<u64, (Vec<LockSpec>, String, Option<String>)>,
+}
+
+impl State {
+  fn check(&self, spec: &LockSpec) -> Result<(), ApiError> {
+    if let Some((_, title, run_id)) =
+      self.held.values().find(|(held, _, _)| {
+        held.iter().any(|held| spec.conflicts(held))
+      })
+    {
+      let error =
+        ApiError::new(ErrorCode::Busy, format!("正在执行：{title}"));
+      return Err(if let Some(id) = run_id {
+        error
+          .with_hint(format!("执行记录 {id}"))
+          .suggest(format!("wharf run cancel {id}"))
+      } else {
+        error.with_hint("等当前操作结束后再试")
+      });
+    }
+    Ok(())
+  }
 }
 
 pub enum LockSpec {
@@ -88,24 +109,10 @@ impl OpLocks {
     title: &str,
   ) -> Result<OpLockGuard, ApiError> {
     let mut state = self.0.lock().unwrap_or_else(|p| p.into_inner());
-    if let Some((_, title, run_id)) = state
-      .held
-      .values()
-      .find(|(held, _, _)| spec.conflicts(held))
-    {
-      let error =
-        ApiError::new(ErrorCode::Busy, format!("正在执行：{title}"));
-      return Err(if let Some(id) = run_id {
-        error
-          .with_hint(format!("执行记录 {id}"))
-          .suggest(format!("wharf run cancel {id}"))
-      } else {
-        error.with_hint("等当前操作结束后再试")
-      });
-    }
+    state.check(&spec)?;
     let id = state.next;
     state.next += 1;
-    state.held.insert(id, (spec, title.to_string(), None));
+    state.held.insert(id, (vec![spec], title.to_string(), None));
     Ok(OpLockGuard {
       state: self.0.clone(),
       id,
@@ -114,6 +121,23 @@ impl OpLocks {
 }
 
 impl OpLockGuard {
+  pub fn reserve_backup_target(
+    &self,
+    target: String,
+  ) -> Result<(), ApiError> {
+    let mut state =
+      self.state.lock().unwrap_or_else(|p| p.into_inner());
+    let spec = LockSpec::BackupTarget(target);
+    state.check(&spec)?;
+    state
+      .held
+      .get_mut(&self.id)
+      .expect("任务仍持有锁")
+      .0
+      .push(spec);
+    Ok(())
+  }
+
   pub fn set_run(&self, id: &str) {
     if let Some((_, _, run)) = self
       .state
@@ -134,7 +158,7 @@ impl OpLockGuard {
       .held
       .get_mut(&self.id)
     {
-      *spec = LockSpec::Cleanup(service.to_string());
+      spec[0] = LockSpec::Cleanup(service.to_string());
     }
   }
 }

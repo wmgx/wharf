@@ -446,7 +446,12 @@ pub fn backups(v: &BackupsView) {
   };
   match &v.target {
     Some(t) => println!("{}：每天备份到 {t}", v.service),
-    None => println!("{}：没有开启自动备份", v.service),
+    None => {
+      println!("{}：没有开启自动备份", v.service);
+      if let Some(t) = &v.snapshot_target {
+        println!("快照仓库：{t}");
+      }
+    }
   }
   if let Some(e) = &v.snapshots_error {
     println!("读取快照失败：{e}");

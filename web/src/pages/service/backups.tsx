@@ -91,7 +91,10 @@ export function Backups({ svc }: { svc: ServiceView }) {
               )}
             </>
           ) : (
-            <span className="text-muted-foreground">还没开备份</span>
+            <p className="text-muted-foreground">
+              还没开备份
+              {data?.snapshot_target && <>，历史快照仓库在 <ServerTag name={data.snapshot_target} /></>}
+            </p>
           )}
         </CardContent>
       </Card>

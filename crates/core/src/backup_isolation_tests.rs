@@ -535,6 +535,30 @@ async fn restore_works_after_backup_disabled_and_includes_htpasswd() {
 }
 
 #[tokio::test]
+async fn backup_list_returns_historical_snapshot_target_when_disabled()
+ {
+  let state = test_state();
+  seed_servers(&state).await;
+  seed_service(&state, "svc-a", false).await;
+  seed_legacy(&state).await;
+  state.hub.mock_agent("s2", false, |op| {
+    assert!(matches!(op, AgentOp::Restic(job) if matches!(job.action, ResticAction::Snapshots)));
+    Ok(json!([{
+      "id": "abcd1234", "short_id": "abcd1234", "hostname": "s1",
+      "time": "2026-01-01T00:00:00Z", "paths": ["/srv/svc-a"]
+    }]))
+  });
+  let Json(view) =
+    list(State(state), auth(true), Path("svc-a".into()))
+      .await
+      .map_err(|e| e.0)
+      .unwrap();
+  assert_eq!(view.target, None);
+  assert_eq!(view.snapshot_target.as_deref(), Some("s2"));
+  assert_eq!(view.snapshots[0].id, "abcd1234");
+}
+
+#[tokio::test]
 async fn backup_records_ok_and_prunes_even_when_restart_fails() {
   let state = test_state();
   seed_servers(&state).await;

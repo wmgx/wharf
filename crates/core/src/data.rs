@@ -205,7 +205,10 @@ pub(crate) fn apply_escaped_mounts(
   for link in escaped {
     let mut found = false;
     for mount in mounts.iter_mut() {
-      if mount.kind == DataKind::Managed
+      let exact = mount.source == link.source;
+      found |= exact;
+      if (mount.kind == DataKind::Managed
+        || (exact && mount.resolved.is_some()))
         && let Ok(suffix) =
           Path::new(&mount.source).strip_prefix(&link.source)
       {
@@ -215,7 +218,6 @@ pub(crate) fn apply_escaped_mounts(
         } else {
           Path::new(&link.resolved).join(suffix).display().to_string()
         });
-        found |= suffix.as_os_str().is_empty();
       }
     }
     if !found {
@@ -262,9 +264,10 @@ pub async fn overview(
     let ok = observed.and_then(|h| h.ok);
     let last_ok = from_ms(ok);
     let last_failed = from_ms(observed.and_then(|h| h.failed));
-    let repo_empty = target.as_ref().is_some_and(|t| {
-      repo_verified_empty(state, &snap, t, name, ok)
-    });
+    let repo_empty = !mounts.is_empty()
+      && target.as_ref().is_some_and(|t| {
+        repo_verified_empty(state, &snap, t, name, ok)
+      });
     let status = if repo_empty {
       DataStatus::Stale
     } else {
@@ -600,4 +603,60 @@ async fn switching_backup_target_and_empty_repo_show_stale() {
     view.services[0].last_ok.is_none()
       && !view.services[0].repo_empty
   );
+}
+
+#[test]
+fn nested_escaped_mount_is_listed_only_once() {
+  let mut mounts = vec![DataMount {
+    source: "/srv/s1/data/originals".into(),
+    target: "/originals".into(),
+    kind: DataKind::Managed,
+    resolved: None,
+    container: None,
+  }];
+  apply_escaped_mounts(
+    &mut mounts,
+    &[
+      EscapedMount {
+        source: "/srv/s1/data".into(),
+        resolved: "/mnt/disk".into(),
+      },
+      EscapedMount {
+        source: "/srv/s1/data/originals".into(),
+        resolved: "/mnt/disk/originals".into(),
+      },
+    ],
+  );
+  assert_eq!(mounts.len(), 2);
+  assert_eq!(mounts[0].target, "/originals");
+  assert_eq!(
+    mounts[0].resolved.as_deref(),
+    Some("/mnt/disk/originals")
+  );
+  assert_eq!(mounts[0].kind, DataKind::ExternalDir);
+  assert_eq!(mounts[1].source, "/srv/s1/data");
+}
+
+#[tokio::test]
+async fn empty_backup_repo_does_not_mark_service_without_data_stale()
+{
+  let state = crate::rules::tests::test_state();
+  crate::backup::tests::seed_servers(&state).await;
+  crate::backup::tests::seed_service(&state, "svc-a", true).await;
+  state
+    .hub
+    .mock_agent("s2", false, |_| panic!("数据状态只读"));
+  state.db.call(|c| {
+    c.execute("UPDATE resources SET spec = json_remove(spec, '$.volumes')
+      WHERE kind = 'service' AND name = 'svc-a'", []).map_err(sql_err)?;
+    let report = serde_json::to_string(&wharf_api_types::agent::AgentReport {
+      backup_repos: Some(BTreeMap::new()), ..Default::default()
+    }).map_err(crate::db::json_err)?;
+    c.execute("INSERT INTO agents (server, report, last_seen) VALUES ('s2', ?1, ?2)",
+      rusqlite::params![report, crate::db::now_ms()]).map_err(sql_err)?;
+    Ok(())
+  }).await.unwrap();
+  let view = overview(&state).await.unwrap();
+  assert_eq!(view.services[0].status, DataStatus::None);
+  assert!(!view.services[0].repo_empty);
 }

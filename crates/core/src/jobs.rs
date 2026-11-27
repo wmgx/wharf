@@ -572,3 +572,93 @@ async fn scheduler_picks_oldest_backup_first() {
     .unwrap();
   }
 }
+
+#[tokio::test]
+async fn backup_target_busy_is_rejected_before_snapshot_or_run() {
+  use crate::locks::LockSpec;
+
+  let dir = tempfile::tempdir().unwrap();
+  let mut state = crate::rules::tests::test_state();
+  let inner = Arc::get_mut(&mut state).unwrap();
+  inner.data_dir = dir.path().into();
+  inner.db =
+    crate::db::Db::open(&dir.path().join("wharf.db")).unwrap();
+  crate::backup::tests::seed_servers(&state).await;
+  for service in ["svc-a", "svc-b", "svc-c"] {
+    crate::backup::tests::seed_service(&state, service, true).await;
+  }
+  state.db.call(|c| {
+    crate::db::apply_write(c, &crate::db::Write::Upsert {
+      kind: "server".into(), name: "s3".into(),
+      spec: serde_json::json!({"private_addr": {"ip": "100.64.0.3", "network": "lan"}}),
+      meta: serde_json::json!({}),
+    })?;
+    c.execute("UPDATE resources SET spec = json_set(spec, '$.backup.to', 's3')
+      WHERE kind = 'service' AND name = 'svc-c'", []).map_err(sql_err)?;
+    Ok(())
+  }).await.unwrap();
+
+  let backup = state
+    .locks
+    .acquire(LockSpec::Backup("svc-a".into()), "备份")
+    .unwrap();
+  backup.reserve_backup_target("s2".into()).unwrap();
+  backup.set_run("r_backup");
+  let err = crate::backup::restore_now(
+    axum::extract::State(state.clone()),
+    crate::security_receipt::tests::auth(true),
+    axum::extract::Path("svc-b".into()),
+    None,
+    Default::default(),
+    axum::Json(wharf_api_types::view::RestoreRequest {
+      target: None,
+      snapshot: "abcd1234".into(),
+      confirm: "service/svc-b".into(),
+      skip_snapshot: false,
+    }),
+  )
+  .await
+  .err()
+  .unwrap()
+  .0;
+  assert_eq!(err.code, ErrorCode::Busy);
+  assert_eq!(err.suggest, ["wharf run cancel r_backup"]);
+  assert!(!dir.path().join("snapshots").exists());
+  drop(backup);
+
+  let restore = state
+    .locks
+    .acquire(LockSpec::apply(["svc-b".into()]), "恢复")
+    .unwrap();
+  restore.reserve_backup_target("s2".into()).unwrap();
+  restore.set_run("r_restore");
+  let err = apply::start_task(
+    state.clone(),
+    "备份 svc-a".into(),
+    Step::Backup {
+      service: "svc-a".into(),
+    },
+  )
+  .await
+  .err()
+  .unwrap();
+  assert_eq!(err.code, ErrorCode::Busy);
+  assert_eq!(err.suggest, ["wharf run cancel r_restore"]);
+  backups(&state).await.unwrap();
+  let titles = state
+    .db
+    .call(|c| {
+      let mut stmt = c
+        .prepare(
+          "SELECT json_extract(body, '$.steps[0].title') FROM runs",
+        )
+        .map_err(sql_err)?;
+      let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(sql_err)?;
+      rows.collect::<Result<Vec<_>, _>>().map_err(sql_err)
+    })
+    .await
+    .unwrap();
+  assert_eq!(titles, ["定时备份 svc-c"]);
+}

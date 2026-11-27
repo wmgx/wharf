@@ -120,7 +120,8 @@ fn detect_escaped_mounts_finds_symlink_outside_root() {
 }
 
 #[test]
-fn mountpoint_detected_even_when_parent_and_child_share_device() {
+fn restore_mount_hint_requires_unmounting_even_after_moving_to_child()
+{
   let dir = tempfile::tempdir().unwrap();
   let service = dir.path().join("s1");
   fs::create_dir(&service).unwrap();
@@ -130,8 +131,42 @@ fn mountpoint_detected_even_when_parent_and_child_share_device() {
   );
   let e = check_restore_mounts(dir.path(), "s1", &info).unwrap_err();
   assert_eq!(e.code, ErrorCode::Conflict);
-  assert!(e.hint.unwrap().contains("/srv/s1/data"));
+  let hint = e.hint.unwrap();
+  assert!(hint.contains("/srv/s1/data") && hint.contains("卸载"));
+  let submount = info.replace(
+    service.to_str().unwrap(),
+    service.join("data").to_str().unwrap(),
+  );
+  let e =
+    check_restore_mounts(dir.path(), "s1", &submount).unwrap_err();
+  assert_eq!(e.code, ErrorCode::Conflict);
+  assert!(e.hint.unwrap().contains("卸载"));
   assert!(!is_mountpoint(dir.path(), "s1", None).unwrap());
+}
+
+#[test]
+fn backup_excludes_links_that_would_reject_restore() {
+  let dir = tempfile::tempdir().unwrap();
+  let root = dir.path();
+  fs::create_dir(root.join("db")).unwrap();
+  fs::write(root.join("db/app.db"), "data").unwrap();
+  symlink("app.db", root.join("db/current")).unwrap();
+  symlink("/mnt/media/originals", root.join("originals")).unwrap();
+  symlink("../../outside", root.join("db/link[1]")).unwrap();
+  let fd = DirFd::open_dir(root).unwrap();
+  assert!(validate_tree(&fd, true).is_err());
+  assert_eq!(
+    backup_link_excludes(Path::new("/srv/s1"), &fd, &Ctx::detached())
+      .unwrap(),
+    [r"/srv/s1/db/link\[1]", "/srv/s1/originals"]
+  );
+  fs::remove_file(root.join("originals")).unwrap();
+  fs::remove_file(root.join("db/link[1]")).unwrap();
+  validate_tree(&fd, true).unwrap();
+  assert_eq!(
+    fs::read_to_string(root.join("db/current")).unwrap(),
+    "data"
+  );
 }
 
 #[test]
@@ -139,17 +174,23 @@ fn cleanup_stale_work_keeps_before_dirs_and_prune_respects_days() {
   let dir = tempfile::tempdir().unwrap();
   let root = dir.path().join(".wharf-restore");
   let work = root.join("s1-20260101-000000-abcdef12");
-  let kept = root.join("s1-before-20260101-000000-abcdef12");
-  let old = root.join("s2-before-20260101-000000-abcdef12");
+  let now = chrono::Utc::now();
+  let recent_stamp = now.format("%Y%m%d-%H%M%S");
+  let old_stamp =
+    (now - chrono::TimeDelta::days(10)).format("%Y%m%d-%H%M%S");
+  let kept = root.join(format!("s1-before-{recent_stamp}-abcdef12"));
+  let old = root.join(format!("s2-before-{old_stamp}-abcdef12"));
+  let live = dir.path().join("s1");
   fs::create_dir_all(&work).unwrap();
-  fs::create_dir(&kept).unwrap();
+  fs::create_dir(&live).unwrap();
   fs::create_dir(&old).unwrap();
-  fs::File::open(&old)
+  fs::File::open(&live)
     .unwrap()
     .set_times(fs::FileTimes::new().set_modified(
       std::time::SystemTime::now() - Duration::from_secs(10 * 86400),
     ))
     .unwrap();
+  fs::rename(&live, &kept).unwrap();
   cleanup_stale_restore_work(dir.path());
   assert!(kept.is_dir() && !work.exists());
   let prune = |days| {
@@ -161,6 +202,44 @@ fn cleanup_stale_work_keeps_before_dirs_and_prune_respects_days() {
   assert!(kept.is_dir() && !old.exists());
   assert_eq!(prune(0), 1);
   assert!(!kept.exists());
+}
+
+#[tokio::test]
+async fn restic_progress_frequency_is_forwarded_to_container() {
+  let (_dir, docker) = crate::docker::fake_docker(
+    r#"
+[ "$RESTIC_PROGRESS_FPS" = 0.05 ] || exit 2
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    restic/restic:*) exit 3;;
+    -e) [ "$2" != RESTIC_PROGRESS_FPS ] || exit 0;;
+  esac
+  shift
+done
+exit 4
+"#,
+  );
+  let job = Job {
+    docker: &docker,
+    service: "s1",
+    repo: "/repo".into(),
+    password: "",
+    http_auth: None,
+    mounts: vec![],
+  };
+  for args in [&["backup"][..], &["restore"], &["forget", "--prune"]]
+  {
+    job
+      .restic(args, SHORT_TIMEOUT, false, &Ctx::detached())
+      .await
+      .unwrap()
+      .check("docker run")
+      .unwrap();
+  }
+  let mut progress = prune_progress_matcher();
+  assert!(progress("[0:20] 12 packs repacked"));
+  assert!(!progress("[0:40] 12 packs repacked"));
+  assert!(progress("[1:00] 13 packs repacked"));
 }
 
 #[test]

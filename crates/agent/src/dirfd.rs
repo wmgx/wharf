@@ -431,17 +431,34 @@ fn remove_service_tree(
   }
 }
 
-/// 遍历目录项时从父目录打开，整个扫描过程都不跟随软链。
 pub(crate) fn validate_tree(
   root: &DirFd,
   reject_root_links: bool,
 ) -> Result<(), ApiError> {
+  let links = tree_symlinks(root)?;
+  if reject_root_links
+    && let Some((path, target)) = links
+      .iter()
+      .find(|(path, _)| path.components().count() == 1)
+  {
+    return Err(ApiError::invalid(format!(
+      "一级卷 {} -> {} 是符号链接",
+      path.display(),
+      target.display()
+    )));
+  }
+  wharf_api_types::symlink::validate_symlinks(&links)
+}
+
+/// 遍历目录项时从父目录打开，整个扫描过程都不跟随软链。
+pub(crate) fn tree_symlinks(
+  root: &DirFd,
+) -> Result<BTreeMap<PathBuf, PathBuf>, ApiError> {
   fn scan(
     fd: &DirFd,
     rel: &Path,
     links: &mut BTreeMap<PathBuf, PathBuf>,
     depth: usize,
-    reject_root_links: bool,
   ) -> Result<(), ApiError> {
     if depth > 64 {
       return Err(ApiError::invalid("目录层级超过 64 层"));
@@ -453,17 +470,10 @@ pub(crate) fn validate_tree(
         libc::S_IFDIR => {
           let sub =
             fd.open_subdir(&name).map_err(|e| dir_error(&path, e))?;
-          scan(&sub, &path, links, depth + 1, reject_root_links)?;
+          scan(&sub, &path, links, depth + 1)?;
         }
         libc::S_IFLNK => {
           let target = fd.readlink(&name).map_err(io_err(&path))?;
-          if depth == 0 && reject_root_links {
-            return Err(ApiError::invalid(format!(
-              "一级卷 {} -> {} 是符号链接",
-              path.display(),
-              target.display()
-            )));
-          }
           links.insert(path, target);
         }
         _ => {}
@@ -473,6 +483,6 @@ pub(crate) fn validate_tree(
   }
 
   let mut links = BTreeMap::new();
-  scan(root, Path::new(""), &mut links, 0, reject_root_links)?;
-  wharf_api_types::symlink::validate_symlinks(&links)
+  scan(root, Path::new(""), &mut links, 0)?;
+  Ok(links)
 }

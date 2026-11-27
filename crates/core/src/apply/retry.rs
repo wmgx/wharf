@@ -374,16 +374,18 @@ pub async fn retry_run(
       .await?
   };
   let steps = select_retry_steps(&original, &meta)?;
-  let spec = match steps.as_slice() {
-    [step] if original.plan_id.is_empty() => task_lock(&step.step),
-    _ => LockSpec::apply(
-      steps
+  let guard = match steps.as_slice() {
+    [step] if original.plan_id.is_empty() => {
+      lock_task(&state, &step.step, "续跑").await?
+    }
+    _ => {
+      let services = steps
         .iter()
         .flat_map(|p| run_scope::step_services(&p.step))
-        .chain(scope_services.iter().flatten().cloned()),
-    ),
+        .chain(scope_services.iter().flatten().cloned());
+      state.locks.acquire(LockSpec::apply(services), "续跑")?
+    }
   };
-  let guard = state.locks.acquire(spec, "续跑")?;
   let snap = snapshot::load(&state.db).await?;
   let steps = complete_migration_steps(steps, &snap);
   require_retry_access(

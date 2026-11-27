@@ -389,6 +389,10 @@ export interface BackupsView {
   records: BackupRecord[];
   service: string;
   /**
+   * 列出快照时使用的备份服务器，关闭自动备份后可来自历史记录。
+   */
+  snapshot_target?: string | null;
+  /**
    * 备份服务器上的快照，新的在前。
    */
   snapshots: Snapshot[];
