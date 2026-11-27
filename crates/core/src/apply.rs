@@ -262,6 +262,16 @@ pub async fn start(
   perms: &std::collections::BTreeSet<Perm>,
   caller: Option<(&crate::auth::Auth, String)>,
 ) -> Result<ApplyResponse, ApiError> {
+  start_with_actor(state, req, perms, caller, "系统").await
+}
+
+pub(crate) async fn start_with_actor(
+  state: Arc<AppState>,
+  req: ApplyRequest,
+  perms: &BTreeSet<Perm>,
+  caller: Option<(&crate::auth::Auth, String)>,
+  system_actor: &str,
+) -> Result<ApplyResponse, ApiError> {
   let auth = caller.as_ref().map(|(auth, _)| *auth);
   let guard = state
     .apply_lock
@@ -418,7 +428,9 @@ pub async fn start(
   steps.extend(stored.steps.iter().map(pending_run_step));
   let run = Run {
     run_id: run_id.clone(),
-    actor: auth.map(format_actor).or_else(|| Some("系统".into())),
+    actor: Some(
+      auth.map_or_else(|| system_actor.to_string(), format_actor),
+    ),
     retry_of: None,
     plan_id: plan.plan_id.clone(),
     status: if stored.steps.is_empty() {
@@ -732,7 +744,7 @@ pub(crate) async fn start_task_locked(
       )
     })
     .await?;
-  spawn_run(state, run, scope, steps, guard);
+  spawn_run(state, run, scope, steps, None, guard);
   Ok(ApplyResponse { run_id })
 }
 
@@ -771,6 +783,7 @@ fn spawn_run(
   run: Run,
   scope_services: Option<Vec<String>>,
   steps: Vec<StepPlan>,
+  actor: Option<crate::security_receipt::Actor>,
   guard: OwnedMutexGuard<()>,
 ) {
   let run_id = run.run_id.clone();
@@ -784,7 +797,9 @@ fn spawn_run(
       cancel: cancel.clone(),
     },
   );
-  tokio::spawn(execute(state, shared, steps, 0, None, cancel, guard));
+  tokio::spawn(execute(
+    state, shared, steps, 0, actor, cancel, guard,
+  ));
 }
 
 async fn execute(
@@ -1077,6 +1092,7 @@ pub(crate) async fn run_step(
         .await?;
     }
     Step::Restore { service, snapshot } => {
+      crate::pending::source_changed(state, service).await?;
       crate::backup::restore(
         state, service, snapshot, progress, cancel,
       )
@@ -1173,6 +1189,7 @@ pub(crate) async fn run_step(
     }
     Step::ServiceRestart { service } => {
       let server = service_server(&snap, service)?;
+      crate::pending::source_changed(state, service).await?;
       project_stop_start(
         state, &server, service, false, &progress, cancel,
       )

@@ -10,7 +10,7 @@ use axum::{
   Json,
   extract::{Path, Query, State},
 };
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use serde::Deserialize;
 use wharf_api_types::{
   ApiError,

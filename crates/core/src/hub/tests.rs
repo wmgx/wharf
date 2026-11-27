@@ -135,10 +135,13 @@ impl Hub {
     ) -> Option<Result<Value, ApiError>>
     + Send
     + 'static,
-  ) {
+  ) -> CancellationToken {
     self
       .mock_agent_options(server, false, false, false, false, handle);
-    lock(&self.conns).get_mut(server).unwrap().safe_migrate = true;
+    let mut conns = lock(&self.conns);
+    let conn = conns.get_mut(server).unwrap();
+    conn.safe_migrate = true;
+    conn.closed.clone()
   }
 
   pub(crate) fn mock_agent_with_backup(
@@ -239,10 +242,11 @@ impl Hub {
           break;
         };
         if let CoreMsg::Request { id, op, .. } = msg {
-          let mut pending = lock(&pending);
-          if let Some(p) = pending.get(&id)
-            && let Some(result) = handle(op, p.progress.clone())
-            && let Some(p) = pending.remove(&id)
+          let progress =
+            lock(&pending).get(&id).map(|p| p.progress.clone());
+          if let Some(progress) = progress
+            && let Some(result) = handle(op, progress)
+            && let Some(p) = lock(&pending).remove(&id)
           {
             let _ = p.done.send(result);
           }

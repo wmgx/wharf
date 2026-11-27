@@ -2245,8 +2245,16 @@ async fn retry_run(
   State(s): State<Arc<AppState>>,
   auth: Auth,
   Path(id): Path<String>,
-) -> ApiResult<wharf_api_types::plan::ApplyResponse> {
-  Ok(Json(apply::retry_run(s, &auth, &id).await?))
+  axum::Extension(audit): axum::Extension<crate::audit::AuditSlot>,
+  axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<
+    std::net::SocketAddr,
+  >,
+  headers: HeaderMap,
+) -> ApiResult<ApplyResponse> {
+  let source = crate::login::client_key(peer.ip(), &headers);
+  let response = apply::retry_run(s, &auth, &id, source).await?;
+  audit.set_detail(format!("retry_of={id} run={}", response.run_id));
+  Ok(Json(response))
 }
 
 async fn cancel_run(

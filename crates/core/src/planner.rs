@@ -1194,7 +1194,7 @@ fn service_items(
             && m.payload.to == *server
         });
       if !synced {
-        move_items(b, current, name, from, server, net);
+        move_items(b, snap, name, from, server, net);
       }
     }
 
@@ -1314,18 +1314,6 @@ fn service_items(
       })
     });
     let decision = match status.get(server).and_then(|s| s.as_ref()) {
-      _ if moved.is_some() => Some((
-        Action::Update,
-        vec![Impact::Restart],
-        "在目标服务器部署服务".into(),
-        None,
-      )),
-      _ if restarting_source => Some((
-        Action::Update,
-        vec![Impact::Restart],
-        "取消迁移，恢复源机服务".into(),
-        None,
-      )),
       None if changed(writes, KIND_SERVICE, name) => Some((
         Action::Update,
         vec![Impact::Restart],
@@ -1353,14 +1341,30 @@ fn service_items(
           } else if state.hash.is_none() {
             "服务器上已有同名 project，但不是 Wharf 部署的，将被接管重建".into()
           } else {
-            let (head, all) = if changed(writes, KIND_SERVICE, name) {
-              ("配置变化", "配置变化，重建容器")
-            } else {
-              (
-                "漂移：服务器上的部署和配置不一致",
-                "漂移：服务器上的部署和配置不一致，重新部署",
-              )
-            };
+            let (head, all) =
+              if changed(writes, KIND_SERVICE, name) {
+                ("配置变化", "配置变化，重建容器")
+              } else {
+                (
+                  "漂移：服务器上的部署和配置不一致",
+                  "漂移：服务器上的部署和配置不一致，重新部署",
+                )
+              }
+              .or_else(|| {
+                let reason = if moved.is_some() {
+                  "在目标服务器部署服务"
+                } else if restarting_source {
+                  "取消迁移，恢复源机服务"
+                } else {
+                  return None;
+                };
+                Some((
+                  Action::Update,
+                  vec![Impact::Restart],
+                  reason.into(),
+                  None,
+                ))
+              });
             deployed_template(
               current,
               net,
@@ -1883,14 +1887,19 @@ async fn migration_mounts(
 /// 迁移数据的计划项和步骤，以及相关提醒。
 fn move_items(
   b: &mut Builder,
-  current: &World,
+  snap: &Snapshot,
   name: &str,
   from: &str,
   to: &str,
   net: &Net,
 ) {
-  let old = &current.services[name];
-  let mounts = crate::data::mounts(name, &old.spec);
+  let old = &snap.world.services[name];
+  let source = snap
+    .applied
+    .get(name)
+    .and_then(|a| a.spec.as_ref())
+    .unwrap_or(&old.spec);
+  let mounts = crate::data::mounts(name, source);
   let mut left: Vec<String> = mounts
     .iter()
     .filter(|m| m.kind != DataKind::Managed)
@@ -1932,7 +1941,11 @@ fn move_items(
     );
   }
   // 没有 Wharf 管理的数据：没有要搬的，新容器起来、网关切过去即可，不停服。
-  if !mounts.iter().any(|m| m.kind == DataKind::Managed) {
+  let recorded = snap.pending.migrations.get(name).is_some_and(|m| {
+    m.payload.has_managed_data && m.payload.from == from
+  });
+  if !recorded && !mounts.iter().any(|m| m.kind == DataKind::Managed)
+  {
     return;
   }
   let id = b.item(
@@ -3153,14 +3166,7 @@ mod tests {
         target: "/var/lib/db".into(),
       }],
     );
-    move_items(
-      &mut b,
-      &snap.world,
-      "notes",
-      "s2",
-      "s1",
-      &Net::default(),
-    );
+    move_items(&mut b, &snap, "notes", "s2", "s1", &Net::default());
     let p = finish_plan(
       &snap,
       &snap.world,

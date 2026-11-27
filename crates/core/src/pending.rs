@@ -230,6 +230,19 @@ pub fn update_migration(
   Ok(())
 }
 
+// 源目录可能再次写入，切换前要重新停机同步。
+pub async fn source_changed(
+  state: &crate::state::AppState,
+  service: &str,
+) -> Result<(), ApiError> {
+  let service = service.to_string();
+  state.db.call(move |c| {
+    c.execute("UPDATE pending_steps SET phase='pending', updated_at=?2 WHERE kind='migrate' AND target_key=?1 AND phase='synced'",
+      params![service, db::now_ms()]).map_err(sql_err)?;
+    Ok(())
+  }).await
+}
+
 pub fn simple_key(step: &Step) -> Option<(&'static str, &str)> {
   match step {
     Step::EdgeDeploy { app } => Some(("edge_deploy", app)),

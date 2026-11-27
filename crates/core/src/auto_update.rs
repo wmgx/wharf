@@ -220,7 +220,7 @@ async fn execute(
   planner::save(state, &planned).await?;
   let mut retries = 0;
   let run = loop {
-    match apply::start(
+    match apply::start_with_actor(
       state.clone(),
       ApplyRequest {
         plan_id: planned.plan.plan_id.clone(),
@@ -229,6 +229,7 @@ async fn execute(
       },
       &BTreeSet::from([Perm::Read, Perm::Plan, Perm::Apply]),
       None,
+      "自动更新",
     )
     .await
     {

@@ -232,6 +232,7 @@ pub async fn retry_run(
   state: Arc<AppState>,
   auth: &Auth,
   id: &str,
+  source: String,
 ) -> Result<ApplyResponse, ApiError> {
   auth.require(Perm::Apply).map_err(|e| e.0)?;
   let original = load_run_for(&state, auth, id).await?;
@@ -251,13 +252,18 @@ pub async fn retry_run(
       ).optional().map_err(sql_err)?;
       let (body, meta) = row.ok_or_else(|| ApiError::not_found(format!("执行记录 {id} 不存在")))?;
       let stored: StoredRun = serde_json::from_str(&body).map_err(json_err)?;
-      let other: Option<String> = c.query_row(
-        "SELECT id FROM runs WHERE retry_of=?1 ORDER BY started_at DESC LIMIT 1",
-        [&id], |r| r.get(0),
+      let other: Option<(String, String)> = c.query_row(
+        "SELECT id,status FROM runs WHERE retry_of=?1 ORDER BY started_at DESC LIMIT 1",
+        [&id], |r| Ok((r.get(0)?, r.get(1)?)),
       ).optional().map_err(sql_err)?;
-      if let Some(other) = other {
-        return Err(ApiError::new(ErrorCode::Conflict, format!("执行记录 {id} 已有续跑记录 {other}"))
-          .suggest(format!("wharf run show {other}")));
+      if let Some((other, status)) = other {
+        let error = ApiError::new(ErrorCode::Conflict, format!("执行记录 {id} 已有续跑记录 {other}（{status}）"))
+          .suggest(format!("wharf run show {other}"));
+        return Err(if status == "failed" || status == "cancelled" {
+          error.suggest(format!("wharf run retry {other}"))
+        } else {
+          error
+        });
       }
       let meta = meta.ok_or_else(|| ApiError::invalid(format!("执行记录 {id} 没有可用的续跑信息"))
         .suggest("wharf plan"))?;
@@ -295,7 +301,9 @@ pub async fn retry_run(
       insert_task_run(c, &stored_run, scope.as_deref(), Some(&next))
     })
     .await?;
-  spawn_run(state, run, scope_services, steps, guard);
+  let actor =
+    crate::security_receipt::Actor::from_request((auth, source));
+  spawn_run(state, run, scope_services, steps, Some(actor), guard);
   Ok(ApplyResponse { run_id })
 }
 
@@ -341,4 +349,126 @@ fn select_retry_steps_only_failed_and_skipped() {
       .collect::<Vec<_>>(),
     ["b", "c"]
   );
+}
+
+#[tokio::test]
+async fn run_retry_reruns_only_failed_and_skipped_and_rejects_stale()
+{
+  let state = crate::migrate::tests::seed_service(false).await;
+  let auth = crate::host_access::tests::auth([Perm::Apply], false);
+  let service = "notes".to_string();
+  let restart = Step::ServiceRestart {
+    service: service.clone(),
+  };
+  let steps: Vec<_> = [
+    (restart.clone(), StepStatus::Done),
+    (Step::ServiceStop { service }, StepStatus::Failed),
+    (restart, StepStatus::Skipped),
+  ]
+  .into_iter()
+  .map(|(step, status)| {
+    (
+      StepPlan {
+        title: "操作".into(),
+        items: vec![],
+        step,
+      },
+      status,
+    )
+  })
+  .collect();
+  for id in ["r_first", "r_stale"] {
+    let mut run = Run {
+      run_id: id.into(),
+      plan_id: String::new(),
+      actor: None,
+      retry_of: None,
+      status: RunStatus::Failed,
+      started_at: Utc::now(),
+      finished_at: Some(Utc::now()),
+      steps: vec![],
+    };
+    for (step, status) in &steps {
+      let mut entry = pending_run_step(step);
+      entry.status = *status;
+      run.steps.push(entry);
+    }
+    let plans = steps.iter().map(|(s, _)| s.clone()).collect();
+    let stored = run.clone();
+    state
+      .db
+      .call_credentials(move |c, key| {
+        let meta =
+          RetryMeta::capture(c, key, (plans, 0), None, vec![])?;
+        insert_task_run(c, &stored, None, Some(&meta))
+      })
+      .await
+      .unwrap();
+    persist(&state, &run, None).await.unwrap();
+  }
+  let calls = Arc::new(Mutex::new(vec![]));
+  let recorded = calls.clone();
+  state.hub.mock_agent("s2", false, move |op| {
+    lock(&recorded).push(match op {
+      AgentOp::ProjectStop { .. } => "stop",
+      AgentOp::ProjectStart { .. } => "start",
+      _ => panic!("意外请求"),
+    });
+    Ok(serde_json::json!(true))
+  });
+  let response =
+    retry_run(state.clone(), &auth, "r_first", "测试".into())
+      .await
+      .unwrap();
+  let run = tokio::time::timeout(Duration::from_secs(5), async {
+    loop {
+      let run = load_run(&state, &response.run_id).await.unwrap();
+      if run.status != RunStatus::Running
+        && state.apply_lock.try_lock().is_ok()
+      {
+        break run;
+      }
+      tokio::task::yield_now().await;
+    }
+  })
+  .await
+  .unwrap();
+  assert_eq!(run.status, RunStatus::Succeeded);
+  assert_eq!(run.retry_of.as_deref(), Some("r_first"));
+  assert_eq!(run.actor.as_deref(), Some("令牌 test"));
+  assert_eq!(*lock(&calls), ["stop", "stop", "start"]);
+  state.db.call(|c| {
+    c.execute("UPDATE resources SET version=version+1 WHERE kind='service' AND name='notes'", [])
+      .map_err(sql_err)?;
+    Ok(())
+  }).await.unwrap();
+  assert_eq!(
+    retry_run(state, &auth, "r_stale", "测试".into())
+      .await
+      .unwrap_err()
+      .code,
+    ErrorCode::PlanStale
+  );
+}
+
+#[tokio::test]
+async fn retry_reinserts_volume_sync_after_source_restarts() {
+  let state = crate::migrate::tests::seed_service(false).await;
+  crate::migrate::tests::seed_migration(&state, "pending", false)
+    .await;
+  let snap = snapshot::load(&state.db).await.unwrap();
+  let up = StepPlan {
+    items: vec![1],
+    title: "部署".into(),
+    step: Step::ServiceUp {
+      service: "notes".into(),
+      instance_id: None,
+      expect: None,
+    },
+  };
+  let steps = complete_migration_steps(vec![up], &snap);
+  assert!(
+    matches!(&steps[0].step, Step::VolumeSync { from, to, .. } if from == "s1" && to == "s2")
+  );
+  assert!(matches!(steps[1].step, Step::ServiceUp { .. }));
 }

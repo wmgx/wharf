@@ -135,25 +135,7 @@ pub async fn serve(
   let conf = tmp.0.join("rsyncd.conf");
   write_private(
     &conf,
-    &format!(
-      "use chroot = no\n\
-       munge symlinks = no\n\
-       max connections = 4\n\
-       log file = {log}\n\
-       [{MODULE}]\n\
-       path = {root}\n\
-       read only = no\n\
-       uid = 0\n\
-       gid = 0\n\
-       auth users = {USER}\n\
-       secrets file = {secrets}\n\
-       strict modes = yes\n\
-       hosts allow = {allow}\n\
-       hosts deny = *\n",
-      log = tmp.0.join("rsyncd.log").display(),
-      root = root.display(),
-      secrets = secrets.display(),
-    ),
+    &rsyncd_config(&root, &tmp.0.join("rsyncd.log"), &secrets, allow),
   )?;
 
   let daemon = Cmd::new("rsync")
@@ -174,7 +156,13 @@ pub async fn serve(
   let addr = SocketAddr::new(bind, port);
   let deadline = tokio::time::Instant::now() + READY_TIMEOUT;
   loop {
-    if tokio::net::TcpStream::connect(addr).await.is_ok() {
+    if tokio::time::timeout(
+      Duration::from_millis(200),
+      tokio::net::TcpStream::connect(addr),
+    )
+    .await
+    .is_ok_and(|result| result.is_ok())
+    {
       break;
     }
     if task.is_finished()
@@ -294,6 +282,33 @@ pub async fn push(
   }
 }
 
+fn rsyncd_config(
+  root: &Path,
+  log: &Path,
+  secrets: &Path,
+  allow: IpAddr,
+) -> String {
+  format!(
+    "use chroot = no\n\
+       munge symlinks = no\n\
+       max connections = 4\n\
+       log file = {log}\n\
+       [{MODULE}]\n\
+       path = {root}\n\
+       read only = no\n\
+       uid = 0\n\
+       gid = 0\n\
+       auth users = {USER}\n\
+       secrets file = {secrets}\n\
+       strict modes = yes\n\
+       hosts allow = {allow}\n\
+       hosts deny = *\n",
+    log = log.display(),
+    root = root.display(),
+    secrets = secrets.display(),
+  )
+}
+
 fn rsync_args(pass: SyncPass) -> Vec<&'static str> {
   let mut args = vec!["-aH", "--numeric-ids"];
   if pass == SyncPass::Final {
@@ -378,8 +393,26 @@ mod tests {
   }
 
   #[test]
+  fn rsyncd_conf_disables_munge_symlinks_and_exit_24_only_ok_in_live()
+  {
+    let p = Path::new("/srv/notes");
+    assert!(
+      rsyncd_config(p, p, p, "100.64.0.1".parse().unwrap())
+        .contains("munge symlinks = no\n")
+    );
+    assert_eq!(
+      classify_rsync_exit(Some(24), SyncPass::Live),
+      RsyncOutcome::VanishedOk
+    );
+    assert_eq!(
+      classify_rsync_exit(Some(24), SyncPass::Final),
+      RsyncOutcome::Fatal
+    );
+  }
+
+  #[test]
   fn classify_rsync_exit_retries_only_transient_network_codes() {
-    for code in [5, 11, 23, 24] {
+    for code in [5, 11, 23] {
       assert_eq!(
         classify_rsync_exit(Some(code), SyncPass::Final),
         RsyncOutcome::Fatal
@@ -391,10 +424,6 @@ mod tests {
         RsyncOutcome::Retryable
       );
     }
-    assert_eq!(
-      classify_rsync_exit(Some(24), SyncPass::Live),
-      RsyncOutcome::VanishedOk
-    );
   }
 
   #[tokio::test]

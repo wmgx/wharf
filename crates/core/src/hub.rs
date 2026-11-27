@@ -491,7 +491,7 @@ impl Hub {
     id: u64,
     server: &str,
     conn: Conn,
-    op: AgentOp,
+    mut op: AgentOp,
     timeout: Duration,
     (progress, dispatch_guard): (
       Option<ProgressFn>,
@@ -505,11 +505,21 @@ impl Hub {
     {
       return Err(safe_adopt_required(server));
     }
-    if (matches!(&op, AgentOp::SyncServe(_) | AgentOp::SyncPush(_))
-      || matches!(&op, AgentOp::ProjectUp(up) if up.no_start && !up.pull_missing_only))
+    if (matches!(
+      &op,
+      AgentOp::SyncServe(_)
+        | AgentOp::SyncPush(_)
+        | AgentOp::ProjectMounts { .. }
+    ) || matches!(&op, AgentOp::ProjectUp(up) if up.no_start && !up.pull_missing_only))
       && (conn.upgrade_only || !conn.safe_migrate)
     {
       return Err(safe_migrate_required(server));
+    }
+    if let AgentOp::Build(job) = &mut op
+      && job.expected_commit.is_some()
+      && !conn.safe_migrate
+    {
+      job.force = true;
     }
     if matches!(&op, AgentOp::RemoveData { .. })
       && (conn.upgrade_only || !conn.safe_delete)

@@ -280,10 +280,16 @@ pub async fn reset_after_restart(
   state
     .db
     .call(move |c| {
-      pending::update_migration(c, &name, |m| {
-        m.phase = MigratePhase::Pending;
-        m.payload.source_stopped = false;
-      })
+      let tx = c.transaction().map_err(crate::db::sql_err)?;
+      if let Some(m) = pending::load(&tx)?.migrations.remove(&name) {
+        tx.execute("DELETE FROM cleanups WHERE service=?1 AND server=?2 AND instance_id IS ?3",
+          rusqlite::params![name, m.payload.from, m.payload.instance_id]).map_err(crate::db::sql_err)?;
+        pending::update_migration(&tx, &name, |m| {
+          m.phase = MigratePhase::Pending;
+          m.payload.source_stopped = false;
+        })?;
+      }
+      tx.commit().map_err(crate::db::sql_err)
     })
     .await
 }
@@ -491,6 +497,41 @@ pub(crate) mod tests {
       })
       .await
       .unwrap();
+  }
+
+  #[tokio::test]
+  async fn serve_crash_cancels_push() {
+    let state = seed_service(false).await;
+    seed_migration(&state, "pending", false).await;
+    let target =
+      state.hub.mock_safe_migrate_agent("s2", |op, progress| {
+        assert!(matches!(op, AgentOp::SyncServe(_)));
+        progress.unwrap()(format!("{SYNC_READY}1000"));
+        None
+      });
+    state.hub.mock_safe_migrate_agent("s1", move |op, _| {
+      assert!(
+        matches!(op, AgentOp::SyncPush(p) if p.pass == SyncPass::Live)
+      );
+      target.cancel();
+      None
+    });
+    let e = tokio::time::timeout(
+      Duration::from_secs(5),
+      volume_sync(
+        &state,
+        &migration_net(),
+        "notes",
+        ("s1", "s2"),
+        true,
+        Arc::new(|_| {}),
+        &CancellationToken::new(),
+      ),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(e.code, ErrorCode::AgentOffline);
   }
 
   #[tokio::test]
