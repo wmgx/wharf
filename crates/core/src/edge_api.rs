@@ -242,7 +242,10 @@ pub async fn redeploy(
     start_task(
       s.clone(),
       format!("重新发布 {name}"),
-      Step::EdgeDeploy { app: name },
+      Step::EdgeDeploy {
+        app: name,
+        commit: None,
+      },
     )
     .await?,
   ))

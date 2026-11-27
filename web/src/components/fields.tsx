@@ -20,9 +20,19 @@ export function parseEnv(text: string): Record<string, string> {
     if (i <= 0) continue;
     const v = kv.slice(i + 1);
     // 从 .env 粘贴来的 "value" / 'value' 去掉外层引号。
-    env[kv.slice(0, i).trim()] = /^(["']).*\1$/.test(v) ? v.slice(1, -1) : v;
+    env[kv.slice(0, i).trim()] = stripOuterQuotes(v);
   }
   return env;
+}
+
+function stripOuterQuotes(value: string): string {
+  const quote = value[0];
+  if (value.length < 2 || (quote !== "\"" && quote !== "'") || value.at(-1) !== quote) return value;
+  for (let i = 1; i < value.length; i++) {
+    if (value[i] === "\\") i++;
+    else if (value[i] === quote) return i === value.length - 1 ? value.slice(1, -1) : value;
+  }
+  return value;
 }
 
 export function formatEnv(env?: Record<string, string>): string {
@@ -86,7 +96,7 @@ export function portsValid(ports: PortSpec[], compose: boolean): boolean {
 
 /** 提交前按来源去掉另一侧：切换来源时填过的值不带过去。 */
 export function portsFor(ports: PortSpec[], compose: boolean): PortSpec[] {
-  return ports.map((p) => (compose ? { name: p.name, host: p.host ?? p.container } : { name: p.name, container: p.container, host: p.host }));
+  return ports.map((p) => (compose ? { name: p.name, host: p.host ?? p.container, ...(p.udp ? { udp: true } : {}) } : { name: p.name, container: p.container, host: p.host, ...(p.udp ? { udp: true } : {}) }));
 }
 
 const num = (v: string) => (v === "" ? undefined : Number(v));
@@ -106,6 +116,10 @@ export function PortsEditor({ ports, onChange, compose = false }: { ports: PortS
               <Input type="number" placeholder="宿主机端口（自动）" value={p.host ?? ""} onChange={(e) => set(i, { host: num(e.target.value) })} />
             </>
           )}
+          <select aria-label="端口协议" className="rounded-md border bg-background px-2 text-sm" value={p.udp ? "udp" : "tcp"} onChange={(e) => set(i, { udp: e.target.value === "udp" || undefined })}>
+            <option value="tcp">TCP</option>
+            <option value="udp">UDP</option>
+          </select>
           <Button type="button" variant="ghost" size="icon" aria-label="移除端口" onClick={() => onChange(ports.filter((_, j) => j !== i))}>
             <XIcon />
           </Button>

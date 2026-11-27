@@ -24,6 +24,22 @@ use crate::{
   state::AppState,
 };
 
+pub(crate) fn old_git_agent(server: &str) -> ApiError {
+  ApiError::new(
+    ErrorCode::Conflict,
+    format!(
+      "服务器 {server} 的 agent 版本旧，不支持自定义 Git 认证用户名"
+    ),
+  )
+  .suggest("wharf upgrade")
+}
+
+pub(crate) fn old_agent_warning(server: &str) -> String {
+  format!(
+    "服务器 {server} 的 agent 版本旧，不包含子模块拉取、大锁文件、新模板与旧镜像回收修复，建议先运行 wharf upgrade"
+  )
+}
+
 /// 拉代码、拉基础镜像、构建都算在内。
 const BUILD_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 
@@ -101,7 +117,14 @@ pub fn code_fetch(
       };
       Ok(BuildFetch::Git {
         repo: git.repo.clone(),
+        fallback_ref: reference
+          .as_ref()
+          .filter(|r| {
+            r.len() == 40 && r.bytes().all(|b| b.is_ascii_hexdigit())
+          })
+          .map(|_| git.reference.clone()),
         reference: reference.unwrap_or_else(|| git.reference.clone()),
+        user: git.user.clone(),
         token,
       })
     }

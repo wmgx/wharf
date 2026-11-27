@@ -492,7 +492,9 @@ async fn run_on_agent(
   };
   // 拉镜像的时间另算。
   let wait = Duration::from_secs(spec.timeout_secs + 15 * 60);
-  state
+  let old_agent = matches!(&job.how, TaskHow::Script { .. })
+    && !state.hub.supports_build_v2(&spec.server);
+  let mut result: TaskRunResult = state
     .hub
     .call(
       &spec.server,
@@ -501,7 +503,15 @@ async fn run_on_agent(
       None,
       &CancellationToken::new(),
     )
-    .await
+    .await?;
+  if old_agent {
+    result.output = format!(
+      "{}\n{}",
+      crate::build::old_agent_warning(&spec.server),
+      result.output
+    );
+  }
+  Ok(result)
 }
 
 pub(crate) fn script_image(runtime: ScriptRuntime) -> &'static str {

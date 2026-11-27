@@ -159,6 +159,7 @@ async fn resolve_one(
     .unwrap_or("latest")
     .to_string();
   let mut errors = Vec::new();
+  let mut best = None;
   for (host, mirror) in hosts(&registry, policy) {
     let mut repo = clients.repo(mirror, &host, &path);
     match repo.head(&reference).await {
@@ -166,12 +167,20 @@ async fn resolve_one(
         let (config, platforms) = repo
           .details(&digest, host_platform, metadata_deadline)
           .await;
-        return Ok((digest, config, platforms));
+        if platforms.is_some() {
+          return Ok((digest, config, platforms));
+        }
+        if best
+          .as_ref()
+          .is_none_or(|(_, prior, _): &Found| prior.is_none())
+        {
+          best = Some((digest, config, platforms));
+        }
       }
       Err(e) => errors.push(policy.redact(&format!("{host}：{e}"))),
     }
   }
-  Err(errors.join("；"))
+  best.ok_or_else(|| errors.join("；"))
 }
 
 /// 按镜像源顺序要试的仓库地址，和拉取一样：（地址，是不是镜像源）。
@@ -491,11 +500,7 @@ impl<'a> Repo<'a> {
         )
         .await
         .and_then(|body| platforms(&body));
-      let config = supported
-        .as_ref()
-        .is_none_or(|list| list.iter().any(|p| p == host))
-        .then(|| config.to_string());
-      return (config, supported);
+      return (Some(config.to_string()), supported);
     }
     let supported = platforms(&body);
     let Some(child) = body["manifests"]

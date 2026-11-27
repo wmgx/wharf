@@ -81,7 +81,12 @@ pub fn only_services(
     routes: fleet
       .routes
       .into_iter()
-      .filter(|r| names.contains(&r.service))
+      .filter(|r| {
+        names.contains(&r.service)
+          || r.paths.iter().any(|p| {
+            p.service.as_ref().is_some_and(|s| names.contains(s))
+          })
+      })
       .collect(),
     ..Default::default()
   })
@@ -119,7 +124,52 @@ pub fn validate(path: &Path) -> serde_json::Value {
   }
   // 引用不到：完整状态里是错，局部文件里以控制面为准，只提醒。
   let mut missing = Vec::new();
+  for (name, server) in &fleet.servers {
+    if let Some(via) = &server.via {
+      if via == name {
+        errors.push(format!("服务器 {name} 不能经自身出站"));
+      } else if !fleet.servers.contains_key(via) {
+        missing
+          .push(format!("服务器 {name} 的出口 {via} 文件里没有"));
+      }
+    }
+  }
+  for (name, gateway) in &fleet.gateways {
+    if !fleet.servers.contains_key(&gateway.server) {
+      missing.push(format!(
+        "网关 {name} 的服务器 {} 文件里没有",
+        gateway.server
+      ));
+    }
+    for rule in &gateway.layer4 {
+      if !fleet.services.contains_key(&rule.service) {
+        missing.push(format!(
+          "网关 {name} 的四层转发服务 {} 文件里没有",
+          rule.service
+        ));
+      }
+    }
+  }
+  for (name, app) in &fleet.edge_apps {
+    if let Some(server) = &app.builder
+      && !fleet.servers.contains_key(server)
+    {
+      missing.push(format!(
+        "边缘应用 {name} 的构建机 {server} 文件里没有"
+      ));
+    }
+  }
   for (name, svc) in &fleet.services {
+    if let Some(backup) = &svc.backup {
+      if backup.to == svc.server {
+        errors.push(format!("服务 {name} 不能备份到自身服务器"));
+      } else if !fleet.servers.contains_key(&backup.to) {
+        missing.push(format!(
+          "服务 {name} 的备份服务器 {} 文件里没有",
+          backup.to
+        ));
+      }
+    }
     if !fleet.servers.contains_key(&svc.server) {
       missing.push(format!(
         "服务 {name} 的服务器 {} 文件里没有",
@@ -130,11 +180,22 @@ pub fn validate(path: &Path) -> serde_json::Value {
       content: Some(text),
       ..
     } = &svc.source
-      && let Err(e) =
-        serde_yaml_ng::from_str::<serde_yaml_ng::Value>(text)
     {
-      errors
-        .push(format!("服务 {name} 的 compose 不是合法的 YAML：{e}"));
+      match serde_yaml_ng::from_str::<serde_yaml_ng::Value>(text) {
+        Err(e) => errors.push(format!(
+          "服务 {name} 的 compose 不是合法的 YAML：{e}"
+        )),
+        Ok(doc)
+          if !doc
+            .get("services")
+            .and_then(serde_yaml_ng::Value::as_mapping)
+            .is_some_and(|m| !m.is_empty()) =>
+        {
+          errors
+            .push(format!("服务 {name} 的 compose 缺少非空 services"))
+        }
+        Ok(_) => {}
+      }
     }
   }
   let mut hosts = std::collections::BTreeSet::new();
@@ -147,15 +208,17 @@ pub fn validate(path: &Path) -> serde_json::Value {
     if !hosts.insert(host.clone()) {
       errors.push(format!("域名 {host} 写了两次"));
     }
-    let target = !route.service.is_empty();
-    if target
-      && !fleet.services.contains_key(&route.service)
-      && !fleet.edge_apps.contains_key(&route.service)
+    for target in std::iter::once(&route.service)
+      .chain(route.paths.iter().filter_map(|p| p.service.as_ref()))
     {
-      missing.push(format!(
-        "域名 {host} 的服务 {} 文件里没有",
-        route.service
-      ));
+      if !target.is_empty() && !fleet.services.contains_key(target) {
+        if fleet.edge_apps.contains_key(target) {
+          errors.push(format!("路由不能指向边缘应用 {target}，请用 wharf edge domain 为边缘应用绑定域名"));
+        } else {
+          missing
+            .push(format!("域名 {host} 的服务 {target} 文件里没有"));
+        }
+      }
     }
     for gw in route.gateway.iter().chain(&route.backup_gateway) {
       if !fleet.gateways.contains_key(gw) {

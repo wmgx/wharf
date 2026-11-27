@@ -79,6 +79,7 @@ struct Conn {
   backup_isolation: bool,
   safe_delete: bool,
   safe_adopt: bool,
+  build_v2: bool,
   /// 协议版本不一致：连接放行，但只接受升级相关的请求，好让它升上来。
   upgrade_only: bool,
 }
@@ -295,6 +296,18 @@ impl Hub {
     Ok(())
   }
 
+  pub fn supports_build_v2(&self, server: &str) -> bool {
+    self.build_v2_conn_id(server).is_ok()
+  }
+
+  fn build_v2_conn_id(&self, server: &str) -> Result<u64, ApiError> {
+    lock(&self.conns)
+      .get(server)
+      .filter(|c| !c.upgrade_only && c.build_v2)
+      .map(|c| c.conn_id)
+      .ok_or_else(|| crate::build::old_git_agent(server))
+  }
+
   pub fn supports_safe_delete(&self, server: &str) -> bool {
     lock(&self.conns)
       .get(server)
@@ -503,6 +516,25 @@ impl Hub {
       && (conn.upgrade_only || !conn.safe_adopt)
     {
       return Err(safe_adopt_required(server));
+    }
+    use wharf_api_types::agent::{BuildFetch, TaskHow};
+    let fetch = match &op {
+      AgentOp::Build(job) => Some(&job.fetch),
+      AgentOp::EdgeBuild(job) => Some(&job.fetch),
+      AgentOp::ResolveCommit(job) => Some(&job.fetch),
+      _ => None,
+    };
+    if !conn.build_v2 {
+      if matches!(fetch, Some(BuildFetch::Git { user: Some(_), .. }))
+      {
+        return Err(crate::build::old_git_agent(server));
+      }
+      if (matches!(&op, AgentOp::Build(_) | AgentOp::EdgeBuild(_))
+        || matches!(&op, AgentOp::TaskRun(job) if matches!(&job.how, TaskHow::Script { .. })))
+        && let Some(progress) = &progress
+      {
+        progress(crate::build::old_agent_warning(server));
+      }
     }
     if matches!(&op, AgentOp::RemoveData { .. })
       && (conn.upgrade_only || !conn.safe_delete)
@@ -835,6 +867,7 @@ async fn handle_socket(
     backup_isolation,
     safe_delete,
     safe_adopt,
+    build_v2,
     key_rotation,
   } = hello
   else {
@@ -997,6 +1030,7 @@ async fn handle_socket(
     backup_isolation,
     safe_delete,
     safe_adopt,
+    build_v2,
     upgrade_only,
   };
   let state_on_db = state.clone();

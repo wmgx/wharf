@@ -152,6 +152,8 @@ pub enum AgentMsg {
     #[serde(default)]
     safe_adopt: bool,
     #[serde(default)]
+    build_v2: bool,
+    #[serde(default)]
     key_rotation: bool,
   },
   KeyReady {

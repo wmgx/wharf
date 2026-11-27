@@ -28,7 +28,7 @@ export function Settings({ svc, active }: { svc: ServiceView; active: boolean })
       if (location.hash === "#backup") document.getElementById("service-backup")?.focus();
     }
   }, [active, location.hash]);
-  const changed = ([['来源', 'source'], ['端口', 'ports'], ['环境变量', 'env'], ['配置文件', 'files'], ['资源上限', 'limits'], ['自动更新', 'auto_update']] as [string, keyof ServiceSpec][]).filter(([, field]) => dirty([field])).map(([label]) => label);
+  const changed = ([['来源', 'source'], ['端口', 'ports'], ['环境变量', 'env'], ['配置文件', 'files'], ['作用的容器', 'container'], ['资源上限', 'limits'], ['自动更新', 'auto_update']] as [string, keyof ServiceSpec][]).filter(([, field]) => dirty([field])).map(([label]) => label);
   return <SettingsFields key={key} svc={svc} draft={draft} set={set} changed={changed} onReset={() => { reset(); setKey((n) => n + 1); }} onSubmit={() => actions.plan({ title: `修改 ${svc.name}`, changes: [{ op: "upsert_service", name: svc.name, spec: { ...draft, monitor: svc.spec.monitor, backup: svc.spec.backup } }] })} />;
 }
 
@@ -43,12 +43,10 @@ function SettingsFields({ svc, draft, set, changed, onReset, onSubmit }: { svc: 
   const [env, setEnv] = useState(formatEnv(draft.env));
   const [envTouched, setEnvTouched] = useState(false);
   const [ports, setPorts] = useState<PortSpec[]>(() => isCompose && !draft.ports?.length ? composePorts(parseCompose(source.compose.content ?? "")) : (draft.ports ?? []));
-  const [portsTouched, setPortsTouched] = useState(!!draft.ports?.length);
   const [how, setHow] = useState<BuildHow>(howOf(build));
   const [memory, setMemory] = useState(draft.limits?.memory_mb?.toString() ?? "");
   const [cpus, setCpus] = useState(draft.limits?.cpu_milli ? String(draft.limits.cpu_milli / 1000) : "");
   useEffect(() => { if (!changed.length) { if (!envTouched) setEnv(formatEnv(draft.env)); setPorts(isCompose && !draft.ports?.length ? composePorts(parseCompose(source.compose.content ?? "")) : (draft.ports ?? [])); setHow(howOf("build" in draft.source ? draft.source.build : null)); setMemory(draft.limits?.memory_mb?.toString() ?? ""); setCpus(draft.limits?.cpu_milli ? String(draft.limits.cpu_milli / 1000) : ""); } }, [draft, changed.length, envTouched, isCompose, source]);
-  useEffect(() => { if (isCompose && changed.length && !portsTouched && !draft.ports?.length && ports.length) set({ ports: portsFor(ports, true) }); }, [isCompose, changed.length, portsTouched, draft.ports, ports, set]);
   const compose = isCompose ? source.compose.content ?? "" : "";
   const composeInfo = useMemo(() => parseCompose(compose), [compose]);
   const { data } = usePoll<{ series: Record<string, [number, number][]> }>(isCompose ? null : `/api/metrics?subject=${encodeURIComponent(svc.name)}&range=7d`, 60000);
@@ -68,7 +66,7 @@ function SettingsFields({ svc, draft, set, changed, onReset, onSubmit }: { svc: 
       {isImage ? <Field label="镜像" htmlFor="service-image">
         <Input id="service-image" value={source.image} onChange={(e) => set({ source: { image: e.target.value } })} />
       </Field> : isCompose ? <Field label="compose.yaml" htmlFor="service-compose">
-        <ComposeField id="service-compose" value={compose} onChange={(value) => { const next = !portsTouched ? composePorts(parseCompose(value)) : ports; if (!portsTouched) setPorts(next); set({ source: { compose: { ...source.compose, content: value } }, ...(!portsTouched ? { ports: portsFor(next, true) } : {}) }); }} info={composeInfo} />
+        <ComposeField id="service-compose" value={compose} onChange={(value) => set({ source: { compose: { ...source.compose, content: value } } })} info={composeInfo} />
       </Field> : build?.git ? <div className="grid grid-cols-[minmax(0,1fr)_8rem] gap-3">
         <Field label="仓库" htmlFor="service-repo">
           <Input id="service-repo" value={build.git.repo} onChange={(e) => set({ source: { build: { ...build, git: { ...build.git!, repo: e.target.value } } } })} />
@@ -93,7 +91,7 @@ function SettingsFields({ svc, draft, set, changed, onReset, onSubmit }: { svc: 
     </Panel>
     <SectionTitle>端口</SectionTitle>
     <Panel className="p-4">
-      <PortsEditor ports={ports} compose={isCompose} onChange={(value) => { setPortsTouched(true); setPorts(value); set({ ports: portsFor(value, isCompose) }); }} />
+      <PortsEditor ports={ports} compose={isCompose} onChange={(value) => { setPorts(value); set({ ports: portsFor(value, isCompose) }); }} />
     </Panel>
     {isCompose && composeInfo.services.length > 1 && <>
       <SectionTitle>设置作用的容器</SectionTitle>

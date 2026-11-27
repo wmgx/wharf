@@ -287,6 +287,8 @@ pub struct GitSource {
   /// 私有仓库：保存访问 token 的密钥名（`wharf secret set`）。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub token_secret: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub user: Option<String>,
 }
 
 #[derive(
