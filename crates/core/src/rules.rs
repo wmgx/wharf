@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use wharf_api_types::view::{AlertAckView, AlertLevel, AlertTarget};
 
 use crate::{
-  db::{self, now_ms},
+  db::now_ms,
   notify::{self, Event},
   state::AppState,
   world::World,
@@ -364,20 +364,22 @@ async fn observe_at(
   detail: &str,
 ) {
   ensure_loaded(state).await;
-  let mut builtin =
-    RULES.iter().filter(|r| r.metric == metric).peekable();
+  let has_builtin = RULES.iter().any(|r| r.metric == metric);
   let has_custom = with(|m| {
     m.custom_rules
       .values()
       .any(|r| r.metric == metric && r.service == subject)
   });
-  if builtin.peek().is_none() && !has_custom {
+  if !has_builtin && !has_custom {
     return;
   }
   let (cfg, svc_overrides) =
     with(|m| (m.config.clone(), m.service_overrides.clone()));
   let mut active_rules = Vec::new();
-  for rule in builtin {
+  for rule in RULES {
+    if rule.metric != metric {
+      continue;
+    }
     let svc_override =
       service_overrides::service_of_subject(rule.id, subject)
         .and_then(|svc| {

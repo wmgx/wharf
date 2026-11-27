@@ -112,7 +112,11 @@ pub(super) fn related_servers(
           && route.spec.redirect.is_none())
         .then_some(route.spec.service.as_str());
         for service in primary.into_iter().chain(
-          route.spec.paths.iter().map(|path| path.service.as_str()),
+          route
+            .spec
+            .paths
+            .iter()
+            .filter_map(|path| path.service.as_deref()),
         ) {
           if let Some(svc) = world.services.get(service)
             && !out.contains(&svc.spec.server)
