@@ -1298,15 +1298,6 @@ async fn handle_socket(
   result
 }
 
-#[cfg(test)]
-mod tests;
-
-pub(crate) fn safe_migrate_required(server: &str) -> ApiError {
-  ApiError::new(ErrorCode::Conflict, format!("服务器 {server} 的 agent 版本旧，无法安全同步数据或更新停机服务"))
-    .with_hint("先运行 wharf upgrade 升级 agent 后重试")
-    .suggest("wharf upgrade")
-}
-
 fn shared_volumes_required(server: &str) -> ApiError {
   ApiError::new(
     ErrorCode::Conflict,
@@ -1316,4 +1307,13 @@ fn shared_volumes_required(server: &str) -> ApiError {
   )
   .with_hint("请先运行 wharf upgrade 升级 agent，再重试")
   .suggest("wharf upgrade")
+}
+
+#[cfg(test)]
+mod tests;
+
+pub(crate) fn safe_migrate_required(server: &str) -> ApiError {
+  ApiError::new(ErrorCode::Conflict, format!("服务器 {server} 的 agent 版本旧，无法安全同步数据或更新停机服务"))
+    .with_hint("先运行 wharf upgrade 升级 agent 后重试")
+    .suggest("wharf upgrade")
 }

@@ -1,6 +1,6 @@
 use std::{
   collections::{BTreeMap, BTreeSet},
-  path::{Component, Path, PathBuf},
+  path::Path,
 };
 
 use wharf_api_types::{
@@ -102,20 +102,14 @@ pub fn validate_service(
         );
       }
     }
-    if let Some(path) = normalize_abs(Path::new(&v.target)) {
-      if crate::render::reserved_secret_mount(&path.to_string_lossy())
-      {
-        return Err(ApiError::invalid(format!(
-          "服务 {name} 的卷 {} 挂载点与密钥目录重叠",
-          v.name
-        )));
-      }
-      if !targets.insert(path) {
-        return Err(ApiError::invalid(format!(
-          "服务 {name} 的卷挂载点 {} 重复",
-          v.target
-        )));
-      }
+    if let Some(path) =
+      crate::render::normalized_mount_target(&v.target)
+      && !targets.insert(path)
+    {
+      return Err(ApiError::invalid(format!(
+        "服务 {name} 的卷挂载点 {} 重复",
+        v.target
+      )));
     }
   }
   Ok(())
@@ -123,10 +117,12 @@ pub fn validate_service(
 
 pub fn validate_world(world: &World) -> Result<(), ApiError> {
   let mut owned = BTreeMap::new();
+  let mut dependencies = BTreeMap::<&str, BTreeSet<&str>>::new();
   for (name, row) in &world.services {
     for v in &row.spec.volumes {
       let Some(raw) = &v.from_service else { continue };
       let (owner, vol) = parse_ref(raw)?;
+      dependencies.entry(name).or_default().insert(owner);
       let other = world.services.get(owner).ok_or_else(|| {
         ApiError::invalid(format!(
           "服务 {name} 的共享卷 {} 引用的服务 {owner} 不存在",
@@ -164,6 +160,27 @@ pub fn validate_world(world: &World) -> Result<(), ApiError> {
       }
     }
   }
+  // 互相挂载对方的自有卷也会形成环，任何一方都不能先安全删数。
+  while !dependencies.is_empty() {
+    let ready: Vec<_> = dependencies
+      .iter()
+      .filter(|(_, owners)| {
+        owners.iter().all(|owner| !dependencies.contains_key(owner))
+      })
+      .map(|(&service, _)| service)
+      .collect();
+    if ready.is_empty() {
+      let services =
+        dependencies.keys().copied().collect::<Vec<_>>().join("、");
+      return Err(
+        ApiError::invalid(format!("共享卷依赖成环：{services}"))
+          .with_hint("解除其中一个共享卷引用后再试"),
+      );
+    }
+    for service in ready {
+      dependencies.remove(service);
+    }
+  }
   Ok(())
 }
 
@@ -178,7 +195,7 @@ fn owned_volumes(name: &str, spec: &ServiceSpec) -> BTreeSet<String> {
       .into_iter()
       .filter(|m| m.kind == DataKind::Managed)
       .filter_map(|m| {
-        let path = normalize_abs(Path::new(&m.source))?;
+        let path = crate::render::normalized_mount_target(&m.source)?;
         let volume = path.strip_prefix(&root).ok()?.to_str()?;
         validate_name("数据卷", volume).ok()?;
         Some(volume.to_string())
@@ -192,23 +209,6 @@ fn owned_volumes(name: &str, spec: &ServiceSpec) -> BTreeSet<String> {
       .map(|v| v.name.clone())
       .collect()
   }
-}
-
-fn normalize_abs(path: &Path) -> Option<PathBuf> {
-  if !path.is_absolute() {
-    return None;
-  }
-  let mut out = PathBuf::from("/");
-  for part in path.components() {
-    match part {
-      Component::Normal(name) => out.push(name),
-      Component::ParentDir => {
-        out.pop();
-      }
-      _ => {}
-    }
-  }
-  Some(out)
 }
 
 pub fn implicit_warnings(
@@ -227,7 +227,7 @@ pub fn implicit_warnings(
     .into_iter()
     .filter(|m| m.kind == DataKind::ExternalDir && m.source.starts_with("/srv/") && !m.source.contains(['$', '~']))
     .filter_map(|m| {
-      let path = normalize_abs(Path::new(&m.source))?;
+      let path = crate::render::normalized_mount_target(&m.source)?;
       let mut parts = path.strip_prefix("/srv").ok()?.iter();
       let owner = parts.next()?.to_str()?;
       if owner == name || !world.services.contains_key(owner) {
@@ -283,8 +283,7 @@ pub fn sort_steps(
       .iter()
       .map(|(i, service)| (steps[*i].clone(), service.clone()))
       .collect();
-    for (dest, _) in slots {
-      // 相互引用不同的自有卷时两端目录已预建；有环时沿用原顺序。
+    for (dest, _) in &slots {
       let first = pending
         .iter()
         .position(|(_, service)| {
@@ -294,7 +293,7 @@ pub fn sort_steps(
         })
         .unwrap_or(0);
       let (src, _) = pending.remove(first);
-      steps[dest] = src;
+      steps[*dest] = src;
     }
   }
 }

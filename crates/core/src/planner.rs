@@ -3797,6 +3797,62 @@ mod tests {
     )])
   }
 
+  #[test]
+  fn implicit_srv_mount_warns_to_use_from_service() {
+    let mut world = world();
+    let owner = world.services["app"].clone();
+    let app = world.services.get_mut("app").unwrap();
+    app.spec.source = Source::Compose {
+      content: Some("x-a: &a {volumes: ['/srv/photos/originals:/photos:ro']}\nservices: {app: {<<: *a, image: 'fixture:1'}}".into()),
+      file: None,
+    };
+    app.spec.ports.clear();
+    app.host_ports.clear();
+    world.services.insert("photos".into(), owner);
+    let mut status =
+      live(Some(hash_of(&world)), vec![container("running")]);
+    let projects = status.get_mut("s1").unwrap().as_mut().unwrap();
+    let mut owner = projects["app"].clone();
+    owner.project = "photos".into();
+    owner.hash = Some(
+      snapshot::service_resolved(
+        &world,
+        &Net::default(),
+        "photos",
+        &Default::default(),
+      )
+      .unwrap()
+      .1,
+    );
+    projects.insert("photos".into(), owner);
+    let b = plan(&world, &world, &status);
+    assert!(b.items.is_empty());
+    let snap = Snapshot {
+      world,
+      ..Snapshot::default()
+    };
+    let has_warning = |warnings: Vec<(String, String)>| {
+      warnings
+        .iter()
+        .any(|(_, message)| message.contains("photos:originals"))
+    };
+    assert!(has_warning(crate::lint::doctor_warnings(&snap)));
+    let step = StepPlan {
+      items: vec![],
+      title: String::new(),
+      step: Step::ServiceUp {
+        service: "app".into(),
+        instance_id: None,
+        expect: None,
+      },
+    };
+    assert!(
+      crate::lint::plan_warnings(&snap, &snap.world, &[], &[step])
+        .iter()
+        .any(|warning| warning.contains("photos:originals"))
+    );
+  }
+
   fn hash_of(w: &World) -> String {
     snapshot::service_resolved(
       w,
