@@ -2243,7 +2243,6 @@ export interface RouteSpec {
    * DNS 自动切到它，主网关恢复后切回。caddy 备用入口在切过去后才申请证书。
    */
   backup_gateway?: string | null;
-  dns_ttl?: number | null;
   /**
    * 拦截常见扫描：请求命中扫描路径或扫描器的 UA 时直接返回 404，不转给服务。只支持 caddy 网关。
    */
@@ -2261,6 +2260,7 @@ export interface RouteSpec {
    * 仅向组网内来源开放控制面页面。
    */
   core_mesh_only?: boolean;
+  dns_ttl?: number | null;
   /**
    * 临时分享：到这个时间（毫秒时间戳）以后，网关直接断开这个域名的请求；路由和 DNS 记录留着，等人删除。
    */
