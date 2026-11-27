@@ -1781,77 +1781,16 @@ pub(crate) async fn run_step(
       gateway,
       keep_tunnel,
     } => {
-      let current_server =
-        world.gateways.get(gateway).map(|g| g.spec.server.as_str());
-      let keep_tunnel = *keep_tunnel || current_server.is_some();
-      let key = format!("{gateway}@{server}");
-      let mut deferred = false;
-      if current_server != Some(server.as_str()) {
-        let down = if state.hub.is_online(server) {
-          state
-            .hub
-            .call::<serde_json::Value>(
-              server,
-              AgentOp::ProjectDown {
-                project: gateway_project(gateway),
-                purge: false,
-              },
-              SHORT_TIMEOUT,
-              Some(progress.clone()),
-              cancel,
-            )
-            .await
-            .map(|_| ())
-        } else {
-          Err(ApiError::new(
-            ErrorCode::AgentOffline,
-            format!("服务器 {server} 不在线，无法停止旧网关容器"),
-          ))
-        };
-        if let Err(e) = down {
-          if e.code == ErrorCode::AgentOffline
-            && !keep_tunnel
-            && snap.tunnels.contains_key(gateway)
-          {
-            progress(format!(
-              "服务器 {server} 离线，继续删除远端隧道"
-            ));
-            deferred = world.servers.contains_key(server);
-          } else if e.code != ErrorCode::AgentOffline
-            || world.servers.contains_key(server)
-          {
-            return Err(e.with_hint(
-              "机器恢复在线后重新运行 wharf plan --apply 清理旧网关",
-            ));
-          }
-        }
-        if !keep_tunnel {
-          crate::tunnel::destroy(
-            state, &snap, gateway, &progress, cancel,
-          )
-          .await?;
-        }
-      }
-      let payload = crate::pending::GatewayDownPayload {
-        gateway: gateway.clone(),
-        server: server.clone(),
-        keep_tunnel: true,
-      };
-      let run_id = run_id.to_string();
-      state
-        .db
-        .call(move |c| {
-          if deferred {
-            crate::pending::put_gateway_down(
-              c,
-              (&run_id, ""),
-              &payload,
-            )
-          } else {
-            crate::pending::clear(c, "gateway_down", &key)
-          }
-        })
-        .await?;
+      gateway_down(
+        state,
+        &snap,
+        run_id,
+        (server, gateway, *keep_tunnel),
+        progress,
+        cancel,
+        crate::tunnel::destroy,
+      )
+      .await?;
     }
     Step::TunnelDelete {
       gateway,
@@ -1927,74 +1866,20 @@ pub(crate) async fn run_step(
         }
         None => spec.clone(),
       };
-      let want = spec.to_provider();
-      let (pre_delete, type_changed) =
-        dns_replace_order(&want, existing.as_ref(), extra);
-      if pre_delete {
-        delete_dns_records(
-          state,
-          account,
-          provider.as_ref(),
-          extra,
-          cancel,
-        )
-        .await?;
-      }
-      if let Some(r) = existing.as_ref().filter(|_| type_changed) {
-        delete_dns_records(
-          state,
-          account,
-          provider.as_ref(),
-          std::slice::from_ref(r),
-          cancel,
-        )
-        .await?;
-      }
-      let existing_record = existing
-        .as_ref()
-        .filter(|_| !type_changed)
-        .map(|r| RemoteRecord {
-          remote_id: r.remote_id.clone(),
-          scope: r.scope.clone(),
-          canonical: serde_json::Value::Null,
-          marker: None,
-        });
       progress(format!(
         "{hostname} → {} {}",
         spec.record_type, spec.content
       ));
-      let record = cancellable(
-        cancel,
-        snapshot::with_timeout(
-          "写入 DNS 记录",
-          provider.upsert(
-            hostname,
-            &want,
-            &owner,
-            existing_record.as_ref(),
-          ),
-        ),
-      )
-      .await?;
-      add_owned(
+      upsert_dns(
         state,
-        &owner.id,
-        hostname,
-        account,
-        &record.scope,
-        &record.remote_id,
+        provider.as_ref(),
+        (hostname, account),
+        &owner,
+        &spec.to_provider(),
+        (existing.as_ref(), extra),
+        cancel,
       )
       .await?;
-      if !pre_delete {
-        delete_dns_records(
-          state,
-          account,
-          provider.as_ref(),
-          extra,
-          cancel,
-        )
-        .await?;
-      }
     }
     Step::DnsDelete {
       hostname,
@@ -2039,6 +1924,87 @@ fn ensure_created(
       format!("服务 {service} 创建后没有容器或容器仍在运行"),
     ));
   }
+  Ok(())
+}
+
+async fn gateway_down(
+  state: &AppState,
+  snap: &snapshot::Snapshot,
+  run_id: &str,
+  (server, gateway, keep_tunnel): (&str, &str, bool),
+  progress: ProgressFn,
+  cancel: &CancellationToken,
+  destroy: impl AsyncFnOnce(
+    &AppState,
+    &snapshot::Snapshot,
+    &str,
+    &ProgressFn,
+    &CancellationToken,
+  ) -> Result<(), ApiError>,
+) -> Result<(), ApiError> {
+  let world = &snap.world;
+  let current_server =
+    world.gateways.get(gateway).map(|g| g.spec.server.as_str());
+  let keep_tunnel = keep_tunnel || current_server.is_some();
+  let key = format!("{gateway}@{server}");
+  let mut deferred = false;
+  if current_server != Some(server) {
+    let down = if state.hub.is_online(server) {
+      state
+        .hub
+        .call::<serde_json::Value>(
+          server,
+          AgentOp::ProjectDown {
+            project: gateway_project(gateway),
+            purge: false,
+          },
+          SHORT_TIMEOUT,
+          Some(progress.clone()),
+          cancel,
+        )
+        .await
+        .map(|_| ())
+    } else {
+      Err(ApiError::new(
+        ErrorCode::AgentOffline,
+        format!("服务器 {server} 不在线，无法停止旧网关容器"),
+      ))
+    };
+    if let Err(e) = down {
+      if e.code == ErrorCode::AgentOffline
+        && !keep_tunnel
+        && snap.tunnels.contains_key(gateway)
+      {
+        progress(format!("服务器 {server} 离线，继续删除远端隧道"));
+        deferred = world.servers.contains_key(server);
+      } else if e.code != ErrorCode::AgentOffline
+        || world.servers.contains_key(server)
+      {
+        return Err(e.with_hint(
+          "机器恢复在线后重新运行 wharf plan --apply 清理旧网关",
+        ));
+      }
+    }
+    if !keep_tunnel {
+      destroy(state, snap, gateway, &progress, cancel).await?;
+    }
+  }
+  let payload = crate::pending::GatewayDownPayload {
+    gateway: gateway.into(),
+    server: server.into(),
+    keep_tunnel: true,
+  };
+  let run_id = run_id.to_string();
+  state
+    .db
+    .call(move |c| {
+      if deferred {
+        crate::pending::put_gateway_down(c, (&run_id, ""), &payload)
+      } else {
+        crate::pending::clear(c, "gateway_down", &key)
+      }
+    })
+    .await?;
   Ok(())
 }
 
@@ -2210,6 +2176,67 @@ fn check_dns_gateway(
     .with_hint("重新 plan，确认当前活跃入口和 DNS 目标后再 apply")
     .suggest("wharf plan"),
   )
+}
+
+async fn upsert_dns(
+  state: &AppState,
+  provider: &dyn wharf_providers::DnsProvider,
+  (hostname, account): (&str, &str),
+  owner: &Owner,
+  want: &wharf_providers::DnsRecordSpec,
+  (existing, extra): (Option<&RemoteRef>, &[RemoteRef]),
+  cancel: &CancellationToken,
+) -> Result<(), ApiError> {
+  let (pre_delete, type_changed) =
+    dns_replace_order(want, existing, extra);
+  if pre_delete {
+    delete_dns_records(state, account, provider, extra, cancel)
+      .await?;
+  }
+  if let Some(r) = existing.filter(|_| type_changed) {
+    delete_dns_records(
+      state,
+      account,
+      provider,
+      std::slice::from_ref(r),
+      cancel,
+    )
+    .await?;
+  }
+  let existing_record =
+    existing.filter(|_| !type_changed).map(|r| RemoteRecord {
+      remote_id: r.remote_id.clone(),
+      scope: r.scope.clone(),
+      canonical: serde_json::Value::Null,
+      marker: None,
+    });
+  let record = cancellable(
+    cancel,
+    snapshot::with_timeout(
+      "写入 DNS 记录",
+      provider.upsert(
+        hostname,
+        want,
+        owner,
+        existing_record.as_ref(),
+      ),
+    ),
+  )
+  .await?;
+  add_owned(
+    state,
+    &owner.id,
+    hostname,
+    account,
+    &record.scope,
+    &record.remote_id,
+  )
+  .await?;
+  if !pre_delete {
+    delete_dns_records(state, account, provider, extra, cancel)
+      .await?;
+  }
+  Ok(())
 }
 
 fn dns_replace_order(
@@ -3477,27 +3504,182 @@ mod tests {
     assert_eq!(error.code, ErrorCode::Conflict);
   }
 
-  #[test]
-  fn dns_replaces_record_types_before_creating_cname() {
-    let entry = |kind: &str| RemoteRef {
+  #[derive(Default)]
+  struct DnsMock(Mutex<Vec<String>>);
+
+  impl wharf_providers::DnsProvider for DnsMock {
+    fn validate(
+      &self,
+      _: &str,
+      _: &wharf_providers::DnsRecordSpec,
+    ) -> Result<(), wharf_providers::ProviderError> {
+      unreachable!()
+    }
+
+    fn list<'a>(
+      &'a self,
+      _: &'a str,
+    ) -> wharf_providers::BoxFut<'a, Vec<RemoteRecord>> {
+      unreachable!()
+    }
+
+    fn upsert<'a>(
+      &'a self,
+      _: &'a str,
+      want: &'a wharf_providers::DnsRecordSpec,
+      _: &'a Owner,
+      existing: Option<&'a RemoteRecord>,
+    ) -> wharf_providers::BoxFut<'a, RemoteRecord> {
+      Box::pin(async move {
+        let mut calls = lock(&self.0);
+        if want.record_type.as_str() == "CNAME"
+          && (existing.is_some() || calls.len() != 2)
+        {
+          return Err(wharf_providers::ProviderError::invalid(
+            "记录类型冲突",
+          ));
+        }
+        calls.push(existing.map_or_else(
+          || "新建".into(),
+          |r| format!("更新 {}", r.remote_id),
+        ));
+        Ok(RemoteRecord {
+          scope: "zone".into(),
+          remote_id: existing
+            .map_or_else(|| "R3".into(), |r| r.remote_id.clone()),
+          canonical: want.canonical(),
+          marker: None,
+        })
+      })
+    }
+
+    fn delete<'a>(
+      &'a self,
+      _: &'a str,
+      id: &'a str,
+      _: Option<&'a Owner>,
+    ) -> wharf_providers::BoxFut<'a, ()> {
+      Box::pin(async move {
+        lock(&self.0).push(format!("删除 {id}"));
+        Ok(())
+      })
+    }
+  }
+
+  #[tokio::test]
+  async fn dns_replaces_record_types_before_creating_cname() {
+    use wharf_providers::{DnsRecordSpec, DnsRecordType};
+    let state = crate::rules::tests::test_state();
+    let entry = |id: &str, kind: &str| RemoteRef {
       scope: "zone".into(),
-      remote_id: kind.into(),
+      remote_id: id.into(),
       record_type: Some(kind.into()),
     };
-    let mut want = wharf_providers::DnsRecordSpec {
-      record_type: wharf_providers::DnsRecordType::CNAME,
-      content: "app.example.com".into(),
-      ttl: 1,
-      proxied: true,
-    };
+    let host = "a.example.com";
+    for (ty, extra, expect, remaining) in [
+      (
+        DnsRecordType::CNAME,
+        "AAAA",
+        ["删除 R2", "删除 R1", "新建"].as_slice(),
+        "R3",
+      ),
+      (
+        DnsRecordType::A,
+        "A",
+        ["更新 R1", "删除 R2"].as_slice(),
+        "R1",
+      ),
+    ] {
+      let provider = DnsMock::default();
+      let owner = Owner {
+        id: "rt_new".into(),
+      };
+      for id in ["R1", "R2"] {
+        add_owned(&state, "rt_old", host, "cf", "zone", id)
+          .await
+          .unwrap();
+      }
+      let spec = DnsRecordSpec {
+        record_type: ty,
+        content: if ty == DnsRecordType::CNAME {
+          "target.example.com"
+        } else {
+          "203.0.113.1"
+        }
+        .into(),
+        ttl: 1,
+        proxied: ty == DnsRecordType::CNAME,
+      };
+      upsert_dns(
+        &state,
+        &provider,
+        (host, "cf"),
+        &owner,
+        &spec,
+        (Some(&entry("R1", "A")), &[entry("R2", extra)]),
+        &CancellationToken::new(),
+      )
+      .await
+      .unwrap();
+      assert_eq!(lock(&provider.0).as_slice(), expect);
+      state
+        .db
+        .call(move |c| {
+          let owned = db::owned_records(c)?;
+          assert!(owned.iter().any(
+            |r| r.remote_id == remaining && r.route_id == "rt_new"
+          ));
+          assert!(
+            !owned
+              .iter()
+              .any(|r| r.remote_id == "R2" || r.route_id == "rt_old")
+          );
+          Ok(())
+        })
+        .await
+        .unwrap();
+    }
+  }
+
+  #[tokio::test]
+  async fn offline_gateway_deletes_remote_tunnel_and_defers_connector()
+   {
+    let state = crate::migrate::tests::seed_service(false).await;
+    state.db.call(|c| {
+      c.execute("INSERT INTO tunnels VALUES ('edge','cf','scope','t1','hash',0)", []).map_err(sql_err)?;
+      Ok(())
+    }).await.unwrap();
+    let snap = snapshot::load(&state.db).await.unwrap();
+    let mut destroyed = false;
+    gateway_down(
+      &state,
+      &snap,
+      "r1",
+      ("s1", "edge", false),
+      Arc::new(|_| {}),
+      &CancellationToken::new(),
+      async |state, _, gateway, _, _| {
+        assert_eq!(gateway, "edge");
+        destroyed = true;
+        state
+          .db
+          .call(|c| {
+            c.execute("DELETE FROM tunnels WHERE gateway='edge'", [])
+              .map_err(sql_err)?;
+            Ok(())
+          })
+          .await
+      },
+    )
+    .await
+    .unwrap();
+    assert!(destroyed);
+    let snap = snapshot::load(&state.db).await.unwrap();
+    assert!(snap.tunnels.is_empty());
+    let pending = &snap.pending.gateway_downs[0];
     assert_eq!(
-      dns_replace_order(&want, Some(&entry("A")), &[entry("AAAA")]),
-      (true, true)
-    );
-    want.record_type = wharf_providers::DnsRecordType::A;
-    assert_eq!(
-      dns_replace_order(&want, Some(&entry("A")), &[entry("A")]),
-      (false, false)
+      (&*pending.gateway, &*pending.server, pending.keep_tunnel),
+      ("edge", "s1", true)
     );
   }
 

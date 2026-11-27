@@ -658,7 +658,8 @@ pub async fn require_reach(
   let mut fresh = net.clone();
   let pair = (from.to_string(), to.to_string());
   fresh.reach.remove(&pair);
-  let reach = probe_pairs(state, &fresh, pairs, mode).await;
+  let reach =
+    probe_pairs(state, &fresh, pairs, ProbeMode::Plan).await;
   if !reach.contains_key(&pair) {
     return Err(
       ApiError::invalid(format!(
@@ -679,6 +680,17 @@ pub async fn require_reach(
       ),
     );
   }
+  mode
+    .record(async || {
+      let (from, to) = pair;
+      let _ = state
+        .db
+        .call(move |c| {
+          db::set_reach(c, &[(from, to, true)], db::now_ms())
+        })
+        .await;
+    })
+    .await;
   Ok(())
 }
 

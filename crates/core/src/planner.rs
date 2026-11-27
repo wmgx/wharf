@@ -3568,14 +3568,33 @@ fn plaintext_hop(
   else {
     return vec![];
   };
-  world.route_gateways(route).into_iter()
+  let Some(port) =
+    world.route_port(route).filter(|_| route.upstream.is_none())
+  else {
+    return vec![];
+  };
+  world
+    .route_gateways(route)
+    .into_iter()
     .filter_map(|name| {
-      let from = &world.gateways.get(name)?.spec.server;
-      (from != server && net.reach.get(&(from.clone(), server.clone())) == Some(&true)
-        && route.link != wharf_api_types::spec::LinkMode::Tunnel).then(|| format!(
-        "网关（{from}）到服务（{server}）这一段走内网直连 {}，是明文", addr.ip
-      ))
-    }).collect()
+      let gateway = &world.gateways.get(name)?.spec;
+      let choice = crate::link::choose(
+        world,
+        net,
+        gateway,
+        &route.service,
+        port,
+        route.link,
+      )
+      .ok()?;
+      matches!(choice, crate::link::Choice::Direct(_)).then(|| {
+        format!(
+          "网关（{}）到服务（{server}）这一段走内网直连 {}，是明文",
+          gateway.server, addr.ip
+        )
+      })
+    })
+    .collect()
 }
 
 #[cfg(test)]
