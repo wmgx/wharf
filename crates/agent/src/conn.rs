@@ -495,7 +495,7 @@ async fn session(
           }
           // 这两帧是迁移握手，接收方等它才开始同步。
           AgentOp::SyncServe(_) => {
-            Some(Arc::new(data_mux.register(id, 1)))
+            Some(Arc::new(data_mux.register(id, 2)))
           }
           AgentOp::Terminal(_) | AgentOp::HostTerminal { .. } => {
             Some(Arc::new(data_mux.register(id, 64)))
