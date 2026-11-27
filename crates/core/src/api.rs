@@ -1083,6 +1083,10 @@ pub(super) struct LogsQuery {
   /// 每行最多多少字符。
   #[serde(default)]
   pub(super) max_line: Option<usize>,
+  #[serde(default)]
+  pub(super) previous: Option<u32>,
+  #[serde(default)]
+  pub(super) previous_list: bool,
 }
 
 fn default_tail() -> u32 {
@@ -1137,12 +1141,20 @@ async fn fetch_logs(
       &tokio_util::sync::CancellationToken::new(),
     )
     .await?;
-  let logs = crate::log_redact::redact_text(&logs);
-  if !filtering && q.max_line.is_none() {
-    return Ok(json!({ "server": server, "logs": logs }));
+  Ok(filter_logs(
+    server,
+    q,
+    &crate::log_redact::redact_text(&logs),
+  ))
+}
+
+fn filter_logs(server: &str, q: &LogsQuery, logs: &str) -> Value {
+  let grep = q.grep.as_deref().filter(|g| !g.trim().is_empty());
+  if grep.is_none() && !q.errors && q.max_line.is_none() {
+    return json!({ "server": server, "logs": logs });
   }
   let found = crate::log_search::search(
-    &logs,
+    logs,
     &crate::log_search::Options {
       grep,
       errors: q.errors,
@@ -1152,7 +1164,7 @@ async fn fetch_logs(
   );
   let mut v = serde_json::to_value(found).unwrap_or_default();
   v["server"] = json!(server);
-  Ok(v)
+  v
 }
 
 /// `GET /api/servers/{name}/agent-logs`：这台机器上 agent 自己的日志。
@@ -1232,7 +1244,67 @@ async fn service_logs(
   let snap = snapshot::load(&s.db).await?;
   let (server, project) =
     crate::multi_logs::service_target(&snap.world, &name)?;
+  if q.previous_list || q.previous.is_some() {
+    let values = crate::log_redact::service_values(
+      &snap.world.services[&name].spec,
+    );
+    return Ok(Json(
+      previous_logs(&s, server, project, &q, &values).await?,
+    ));
+  }
   project_logs(&s, server, project, &q).await
+}
+
+async fn previous_logs(
+  s: &AppState,
+  server: &str,
+  project: String,
+  q: &LogsQuery,
+  values: &[String],
+) -> Result<Value, ApiError> {
+  use wharf_api_types::agent::{PrevLogMeta, PrevLogOutput};
+
+  if q.previous_list && q.previous.is_some() {
+    return Err(ApiError::invalid(
+      "不能同时选择旧日志列表和指定份数",
+    ));
+  }
+  let conn = s.hub.runtime_v2_conn_id(server)?;
+  let since = q
+    .since
+    .as_deref()
+    .filter(|s| !s.trim().is_empty())
+    .map(|s| {
+      crate::multi_logs::anchor_since(s)
+        .ok_or_else(|| ApiError::invalid("日志时间范围不合法"))
+    })
+    .transpose()?;
+  let filtering = q.errors
+    || q.grep.as_deref().is_some_and(|g| !g.trim().is_empty());
+  let op = AgentOp::PreviousLogs {
+    project,
+    index: q.previous.unwrap_or(1),
+    tail: if filtering { 2000 } else { q.tail.min(2000) },
+    since,
+    list: q.previous_list,
+  };
+  let cancel = tokio_util::sync::CancellationToken::new();
+  let timeout = Duration::from_secs(40);
+  if q.previous_list {
+    let entries: Vec<PrevLogMeta> = s
+      .hub
+      .call_bound((server, conn), op, timeout, None, &cancel)
+      .await?;
+    return Ok(json!({ "server": server, "entries": entries }));
+  }
+  let out: PrevLogOutput = s
+    .hub
+    .call_bound((server, conn), op, timeout, None, &cancel)
+    .await?;
+  let logs = crate::log_redact::redact_text_with(&out.logs, values);
+  let mut v = filter_logs(server, q, &logs);
+  v["previous"] = json!({ "index": out.index, "at": out.at, "reason": out.reason, "available": out.available });
+  Ok(v)
 }
 
 async fn multi_service_logs(
@@ -1242,6 +1314,11 @@ async fn multi_service_logs(
   Query(q): Query<LogsQuery>,
 ) -> ApiResult<Value> {
   auth.require(Perm::Read)?;
+  if q.previous_list || q.previous.is_some() {
+    return Err(
+      ApiError::invalid("查看重建前日志每次只能指定一个服务").into(),
+    );
+  }
   Ok(Json(
     crate::multi_logs::fetch(&s, &auth, services, q).await?,
   ))
@@ -2191,6 +2268,22 @@ async fn export(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn previous_logs_rejects_old_agent() {
+    let state = crate::rules::tests::test_state();
+    state.hub.mock_agent("s1", false, |_| {
+      unreachable!("不能向旧 agent 下发旧日志请求")
+    });
+    let q =
+      serde_json::from_value::<LogsQuery>(json!({"previous": 1}))
+        .unwrap();
+    let error = previous_logs(&state, "s1", "app".into(), &q, &[])
+      .await
+      .unwrap_err();
+    assert_eq!(error.code, ErrorCode::Conflict);
+    assert!(error.hint.as_deref().unwrap().contains("wharf upgrade"));
+  }
 
   #[tokio::test]
   async fn rotate_and_list_secret_views_show_only_allowed_references()

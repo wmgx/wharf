@@ -12,6 +12,7 @@ pub(super) const NOTICES: &[(&str, &str, AlertLevel)] = &[
     "定时任务失败和恢复（任务自己也要开通知）",
     AlertLevel::Urgent,
   ),
+  ("heal", "服务自动重启放弃和恢复", AlertLevel::Urgent),
   ("backup", "服务备份失败和恢复", AlertLevel::Urgent),
   ("failover", "网关切到备用入口、切回", AlertLevel::Urgent),
   ("update", "服务有新版本", AlertLevel::Digest),

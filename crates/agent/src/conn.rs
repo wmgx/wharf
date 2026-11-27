@@ -175,6 +175,7 @@ async fn handshake(
     version: wharf_api_types::VERSION.to_string(),
     protocol: wharf_api_types::PROTOCOL,
     host_shell: true,
+    runtime_v2: true,
     forward: true,
     service_checks: true,
     container_diagnosis: true,

@@ -167,8 +167,49 @@ impl Ops {
         check_project(&project)?;
         let lock = self.lock_for(&project);
         let _guard = lock.lock().await;
+        if !purge {
+          crate::prev_logs::capture(
+            &self.docker,
+            &project,
+            "remove",
+            ctx,
+          )
+          .await;
+        }
         self.docker.down(&project, purge, ctx).await?;
+        if purge {
+          crate::prev_logs::purge(&self.data_dir, &project);
+        }
         Ok(Value::Null)
+      }
+      AgentOp::PreviousLogs {
+        project,
+        index,
+        tail,
+        since,
+        list,
+      } => {
+        check_project(&project)?;
+        let lock = self.lock_for(&project);
+        let _guard = lock.lock().await;
+        let data = self.data_dir.clone();
+        tokio::task::spawn_blocking(move || {
+          if list {
+            to_value(crate::prev_logs::list(&data, &project)?)
+          } else {
+            to_value(crate::prev_logs::read(
+              &data,
+              &project,
+              index,
+              tail,
+              since.as_deref(),
+            )?)
+          }
+        })
+        .await
+        .map_err(|e| {
+          ApiError::internal(format!("读取旧日志失败：{e}"))
+        })?
       }
       AgentOp::Logs {
         project,
@@ -493,6 +534,29 @@ impl Ops {
     Ok(images)
   }
 
+  async fn up_with_crash_logs(
+    &self,
+    project: &str,
+    no_start: bool,
+    ctx: &Ctx,
+  ) -> Result<(), ApiError> {
+    let result = self.docker.up(project, no_start, ctx).await;
+    if result
+      .as_ref()
+      .is_err_and(|e| e.code != ErrorCode::Cancelled)
+    {
+      crate::settle::emit_crash_logs(
+        &self.docker,
+        project,
+        None,
+        &[],
+        ctx,
+      )
+      .await;
+    }
+    result
+  }
+
   async fn finish_up(
     &self,
     up: &ProjectUp,
@@ -501,7 +565,16 @@ impl Ops {
     previous: Option<Previous>,
     ctx: &Ctx,
   ) -> Result<ProjectUpResult, ApiError> {
-    self.docker.up(&up.project, up.no_start, ctx).await?;
+    crate::prev_logs::capture(
+      &self.docker,
+      &up.project,
+      "recreate",
+      ctx,
+    )
+    .await;
+    self
+      .up_with_crash_logs(&up.project, up.no_start, ctx)
+      .await?;
     let state = if up.no_start {
       let mut state =
         self.docker.one_status(&up.project, ctx).await?;
@@ -522,11 +595,30 @@ impl Ops {
       }
       state
     } else {
-      match crate::settle::watch(&self.docker, &up.project, ctx).await
+      match crate::settle::watch(
+        &self.docker,
+        &up.project,
+        crate::settle::WatchOptions {
+          max_watch: crate::settle::max_watch(up.start_timeout_secs),
+          readiness: up.readiness.as_ref(),
+        },
+        ctx,
+      )
+      .await
       {
         Ok(state) => state,
         Err(e) => {
           let Some(prev) = previous else { return Err(e) };
+          if e.code == ErrorCode::Cancelled {
+            return Err(e);
+          }
+          crate::prev_logs::capture(
+            &self.docker,
+            &up.project,
+            "rollback",
+            ctx,
+          )
+          .await;
           ctx.say(format!("{}，换回上一版", e.message));
           self.restore_image(&prev, ctx).await?;
           self.docker.write_compose(&up.project, &prev.compose)?;
@@ -559,9 +651,8 @@ impl Ops {
     if up.trial.is_some()
       && let Err(e) = self
         .docker
-        .down(
+        .down_trial(
           &format!("{TRIAL_PROJECT_PREFIX}{}", up.project),
-          false,
           &Ctx::detached(),
         )
         .await
@@ -681,23 +772,22 @@ impl Ops {
     ctx.say("试跑新版本");
     let result = async {
       self.docker.write_compose(&project, trial)?;
-      self.docker.up(&project, false, ctx).await?;
-      crate::settle::watch(&self.docker, &project, ctx).await?;
+      self.up_with_crash_logs(&project, false, ctx).await?;
+      crate::settle::watch(
+        &self.docker,
+        &project,
+        crate::settle::WatchOptions {
+          max_watch: crate::settle::max_watch(up.start_timeout_secs),
+          readiness: None,
+        },
+        ctx,
+      )
+      .await?;
       Ok(())
     }
     .await;
-    match self.docker.logs(&project, 30, None, &Ctx::detached()).await
-    {
-      Ok(logs) if result.is_err() => {
-        for line in logs.lines() {
-          ctx.say(line);
-        }
-      }
-      Err(e) => ctx.say(format!("读取试跑日志失败：{}", e.message)),
-      _ => {}
-    }
     let cleanup =
-      self.docker.down(&project, false, &Ctx::detached()).await;
+      self.docker.down_trial(&project, &Ctx::detached()).await;
     if let Err(e) = &cleanup {
       ctx.say(format!("清理试跑失败：{}", e.message));
     }
@@ -805,6 +895,54 @@ esac
       )
       .unwrap(),
       "new"
+    );
+  }
+
+  #[tokio::test]
+  async fn failed_formal_compose_up_prints_container_logs() {
+    let (dir, docker) = crate::docker::fake_docker(
+      r#"
+case "$1:$6" in
+  compose:up) touch failed; echo unhealthy-dependency >&2; exit 1;;
+  ps:*) if [ -f failed ]; then
+    echo '{"Names":"app-db-1","Labels":"com.docker.compose.project=app","State":"exited"}'
+  fi;;
+  logs:*) echo 'migration failed';;
+esac
+"#,
+    );
+    let ops = Ops::new(
+      docker.clone(),
+      Reporter::new(docker.clone(), None),
+      String::new(),
+      HostShell::prepare(docker.clone(), "s1".into()).await,
+      dir.path().into(),
+    );
+    let up: ProjectUp = serde_json::from_value(serde_json::json!({
+      "project": "app", "compose": "services: {db: {image: db:1}}", "hash": "new",
+      "pull": {"mirrors": {}, "mirrors_only": false, "attempt_timeout_secs": 1}
+    })).unwrap();
+    docker.write_compose("app", &up.compose).unwrap();
+    let lines =
+      std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let output = lines.clone();
+    let ctx = Ctx {
+      progress: Some(std::sync::Arc::new(move |line| {
+        output.lock().unwrap().push(line)
+      })),
+      ..Ctx::detached()
+    };
+    let error = ops
+      .finish_up(&up, &[], vec![], None, &ctx)
+      .await
+      .unwrap_err();
+    assert!(error.message.contains("unhealthy-dependency"));
+    assert!(
+      lines
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|line| line == "migration failed")
     );
   }
 

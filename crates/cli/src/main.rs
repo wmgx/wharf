@@ -906,6 +906,12 @@ pub enum ServiceCmd {
     /// 服务名，可给 1～10 个。
     #[arg(required = true, num_args = 1..=10)]
     names: Vec<String>,
+    /// 查看第 N 份重建前日志，缺省为最近一份。
+    #[arg(long, num_args = 0..=1, default_missing_value = "1", conflicts_with = "follow")]
+    previous: Option<u32>,
+    /// 列出当前服务留存的重建前日志。
+    #[arg(long, conflicts_with_all = ["follow", "previous"])]
+    previous_list: bool,
     /// 最多输出多少行（`--errors` 时是多少种报错）。
     #[arg(long, default_value_t = 200)]
     tail: u32,
@@ -1074,6 +1080,12 @@ pub enum ServiceCmd {
     /// 删除环境变量。
     #[arg(long)]
     unset_env: Vec<String>,
+    /// 启动等待上限（秒），0 恢复默认。
+    #[arg(long)]
+    start_timeout: Option<u32>,
+    /// 部署就绪检查和运行中监控用的 HTTP 路径。
+    #[arg(long)]
+    health_path: Option<String>,
     /// 数据卷 `名字:/容器内路径`，宿主机目录是 /srv/<服务>/<名字>。可以多次使用。
     #[arg(long)]
     volume: Vec<String>,
@@ -1115,6 +1127,9 @@ pub enum ServiceCmd {
   /// 例：`wharf service monitor blog --path /health --keyword ok --apply`；`--off` 关闭。
   Monitor {
     name: String,
+    /// 启动等待上限（秒），0 恢复默认。
+    #[arg(long)]
+    start_timeout: Option<u32>,
     /// 请求路径，默认 `/`。
     #[arg(long)]
     path: Option<String>,

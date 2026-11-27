@@ -452,7 +452,7 @@ pub fn stopped_issue(
 ) -> Option<Issue> {
   let mut latest = i64::MIN;
   for c in containers.iter().filter(|c| !c.foreign) {
-    if c.state == "running" {
+    if c.is_active() {
       return None;
     }
     latest = latest.max(c.finished_at?.timestamp_millis());

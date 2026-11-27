@@ -44,6 +44,7 @@ mod net_probe;
 mod network_subnets;
 mod ops;
 mod port_checks;
+mod prev_logs;
 mod probe;
 mod registry;
 mod report;

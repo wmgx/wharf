@@ -24,6 +24,7 @@ fn old_hello_has_no_host_shell_capability() {
   .unwrap();
   let AgentMsg::Hello {
     host_shell,
+    runtime_v2,
     ssh_logins,
     core_probe,
     gateway_extra_files,
@@ -37,6 +38,7 @@ fn old_hello_has_no_host_shell_capability() {
     panic!("不是 hello");
   };
   assert!(!host_shell);
+  assert!(!runtime_v2);
   assert!(!ssh_logins);
   assert!(!core_probe);
   assert!(!gateway_extra_files);
@@ -72,6 +74,7 @@ fn old_core_ignores_new_hello_capability() {
     version: "0.1.0".into(),
     protocol: PROTOCOL,
     host_shell: true,
+    runtime_v2: false,
     forward: true,
     service_checks: true,
     container_diagnosis: true,
@@ -183,6 +186,7 @@ impl Hub {
         closed: closed.clone(),
         rtt_ms: Default::default(),
         host_shell: false,
+        runtime_v2: false,
         forward: false,
         service_checks: false,
         container_diagnosis: false,
@@ -300,6 +304,7 @@ async fn agent_upgrade_needs_no_bound_core_server_or_probe_support() {
     closed: CancellationToken::new(),
     rtt_ms: Arc::new(AtomicU64::new(u64::MAX)),
     host_shell: false,
+    runtime_v2: false,
     forward: false,
     service_checks: false,
     container_diagnosis: false,
@@ -359,6 +364,7 @@ fn probe_connection(
     closed: CancellationToken::new(),
     rtt_ms: Arc::new(AtomicU64::new(u64::MAX)),
     host_shell: false,
+    runtime_v2: false,
     forward: false,
     service_checks: false,
     container_diagnosis: false,

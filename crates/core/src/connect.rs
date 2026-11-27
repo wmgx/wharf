@@ -253,6 +253,7 @@ mod tests {
       backup: None,
       stopped: false,
       monitor: None,
+      start_timeout_secs: None,
       log_alerts: vec![],
       port_checks: Default::default(),
       heartbeat: None,

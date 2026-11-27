@@ -2,6 +2,7 @@ import { ago } from "@/components/common";
 import type { DataKind, ImportRecord, ServiceStatus, ServiceView } from "@/types";
 
 const ACTUAL: Record<ServiceStatus["actual"], string> = {
+  restarting: "反复重启",
   running: "运行中",
   partial: "部分运行",
   stopped: "已停止",

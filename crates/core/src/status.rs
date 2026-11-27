@@ -10,6 +10,7 @@ use wharf_api_types::{
 
 pub struct Inputs<'a> {
   pub want_running: bool,
+  pub expected_components: &'a [String],
   pub desired_hash: Option<String>,
   pub applied: Option<&'a Applied>,
   /// 这台服务器的查询结果；`None` 表示没查。
@@ -19,7 +20,7 @@ pub struct Inputs<'a> {
 }
 
 pub fn service_status(i: Inputs<'_>) -> ServiceStatus {
-  let (actual, actual_hash, containers) = match i.live {
+  let (mut actual, actual_hash, containers) = match i.live {
     None => (Actual::Unknown, None, &[][..]),
     Some(Err(e)) if e.code == ErrorCode::AgentOffline => {
       (Actual::Offline, None, &[][..])
@@ -29,18 +30,35 @@ pub fn service_status(i: Inputs<'_>) -> ServiceStatus {
       (actual_of(&p.containers), p.hash.clone(), &p.containers[..])
     }
   };
+  let missing_components = if containers.is_empty() {
+    vec![]
+  } else {
+    crate::render::missing_components(
+      i.expected_components,
+      containers,
+    )
+  };
+  if actual == Actual::Running && !missing_components.is_empty() {
+    actual = Actual::Partial;
+  }
   let error = match i.live {
     Some(Err(e)) => Some(e.message.clone()),
     _ => None,
   };
   let health = health_of(containers);
-  let (tone, summary) =
-    summarize(&i, actual, actual_hash.as_deref(), health);
+  let (tone, summary) = summarize(
+    &i,
+    actual,
+    actual_hash.as_deref(),
+    health,
+    &missing_components,
+  );
   ServiceStatus {
     want_running: i.want_running,
     desired_hash: i.desired_hash,
     applied: i.applied.cloned(),
     actual,
+    missing_components,
     actual_hash,
     health,
     last_op: i.last_op.cloned(),
@@ -51,24 +69,31 @@ pub fn service_status(i: Inputs<'_>) -> ServiceStatus {
   }
 }
 
-fn actual_of(containers: &[ContainerInfo]) -> Actual {
-  let running =
-    containers.iter().filter(|c| c.state == "running").count();
-  if containers.is_empty() {
-    Actual::Missing
-  } else if running == containers.len() {
+pub(crate) fn actual_of(containers: &[ContainerInfo]) -> Actual {
+  let mut owned = containers.iter().filter(|c| !c.foreign).peekable();
+  if owned.peek().is_none() {
+    return Actual::Missing;
+  }
+  let has_running = owned.clone().any(ContainerInfo::is_running);
+  if owned.clone().any(ContainerInfo::is_restarting) {
+    Actual::Restarting
+  } else if has_running
+    && owned.clone().all(|c| c.is_healthy_state(true))
+  {
     Actual::Running
-  } else if running == 0 {
-    Actual::Stopped
-  } else {
+  } else if owned.any(ContainerInfo::is_active) {
     Actual::Partial
+  } else {
+    Actual::Stopped
   }
 }
 
 /// 有一个不健康就算不健康；没有任何容器配健康检查时是 `None`。
 fn health_of(containers: &[ContainerInfo]) -> Health {
   let has = |h: &str| {
-    containers.iter().any(|c| c.health.as_deref() == Some(h))
+    containers
+      .iter()
+      .any(|c| !c.foreign && c.health.as_deref() == Some(h))
   };
   if has("unhealthy") {
     Health::Unhealthy
@@ -87,6 +112,7 @@ fn summarize(
   actual: Actual,
   actual_hash: Option<&str>,
   health: Health,
+  missing: &[String],
 ) -> (Tone, String) {
   let applied = i.applied.map(|a| a.hash.as_str());
   match (actual, i.last_op) {
@@ -105,6 +131,9 @@ fn summarize(
       Actual::Stopped | Actual::Missing => {
         (Tone::Idle, "已停止".into())
       }
+      Actual::Restarting => {
+        (Tone::Warn, "应停止 · 还在反复重启".into())
+      }
       _ => (Tone::Warn, "应停止 · 还在运行".into()),
     };
   }
@@ -114,7 +143,19 @@ fn summarize(
     }
     Actual::Missing => return (Tone::Bad, "容器不见了".into()),
     Actual::Stopped => return (Tone::Bad, "已停止".into()),
-    Actual::Partial => return (Tone::Warn, "部分运行".into()),
+    Actual::Partial | Actual::Restarting => {
+      let (tone, label) = if actual == Actual::Restarting {
+        (Tone::Bad, "反复重启")
+      } else {
+        (Tone::Warn, "部分运行")
+      };
+      let message = if missing.is_empty() {
+        label.into()
+      } else {
+        format!("{label} · 缺少组件 {}", missing.join("、"))
+      };
+      return (tone, message);
+    }
     _ => {}
   }
   match health {
@@ -145,6 +186,44 @@ mod tests {
       "health": health, "image": "x",
     }))
     .unwrap()
+  }
+
+  fn observed(
+    state: &str,
+    want_running: bool,
+    expected_components: &[String],
+  ) -> ServiceStatus {
+    let p = ProjectState {
+      project: "app".into(),
+      hash: None,
+      config_hash: None,
+      containers: vec![container(state, None)],
+    };
+    service_status(Inputs {
+      want_running,
+      expected_components,
+      desired_hash: None,
+      applied: None,
+      live: Some(&Ok(&p)),
+      last_op: None,
+      observed_at: None,
+    })
+  }
+
+  #[test]
+  fn restarting_is_not_stopped() {
+    let status = observed("restarting", false, &[]);
+    assert_eq!(status.actual, Actual::Restarting);
+    assert_eq!(status.summary, "应停止 · 还在反复重启");
+  }
+
+  #[test]
+  fn missing_component_marks_partial() {
+    let status =
+      observed("running", true, &["web".into(), "worker".into()]);
+    assert_eq!(status.actual, Actual::Partial);
+    assert_eq!(status.missing_components, ["worker"]);
+    assert_eq!(status.summary, "部分运行 · 缺少组件 worker");
   }
 
   #[test]
@@ -183,6 +262,7 @@ mod tests {
                    op: Option<&LastOp>| {
       service_status(Inputs {
         want_running: true,
+        expected_components: &[],
         desired_hash: Some(desired.into()),
         applied: Some(&applied),
         live: Some(&live),

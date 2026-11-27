@@ -452,11 +452,11 @@ fn running_project(
   config_hash: Option<String>,
 ) -> ProjectState {
   ProjectState {
-    project,
+    project: project.clone(),
     hash: Some(hash),
     config_hash,
     containers: vec![serde_json::from_value::<ContainerInfo>(json!({
-      "service": "container", "name": "container", "image": "fixture:1", "state": "running",
+      "service": project, "name": "container", "image": "fixture:1", "state": "running",
     })).unwrap()],
   }
 }

@@ -559,6 +559,74 @@ fn merge_compose(
   Ok(())
 }
 
+pub fn expected_components(
+  yaml: &str,
+  active_profiles: &[String],
+) -> Vec<String> {
+  let Ok(mut doc) = serde_yaml_ng::from_str::<Value>(yaml) else {
+    return vec![];
+  };
+  if merge_compose(&mut doc).is_err() {
+    return vec![];
+  }
+  let Some(services) =
+    doc.get("services").and_then(Value::as_mapping)
+  else {
+    return vec![];
+  };
+  let active =
+    |profile: &str| active_profiles.iter().any(|p| p == profile);
+  let mut components: Vec<_> = services
+    .iter()
+    .filter_map(|(name, body)| {
+      if body.get("restart").and_then(Value::as_str) == Some("no") {
+        return None;
+      }
+      let enabled = match body.get("profiles") {
+        Some(Value::Sequence(p)) => {
+          p.is_empty()
+            || p.iter().filter_map(Value::as_str).any(active)
+        }
+        Some(Value::String(p)) => p.is_empty() || active(p),
+        _ => true,
+      };
+      let name = name.as_str()?;
+      enabled.then(|| name.to_string())
+    })
+    .collect();
+  components.sort();
+  components
+}
+
+pub fn service_expected_components(
+  name: &str,
+  spec: &ServiceSpec,
+) -> Vec<String> {
+  match &spec.source {
+    Source::Image(_) | Source::Build(_) => vec![name.to_string()],
+    Source::Compose { content, .. } => content
+      .as_deref()
+      .map(|yaml| expected_components(yaml, &[]))
+      .unwrap_or_default(),
+  }
+}
+
+pub fn missing_components(
+  expected: &[String],
+  containers: &[wharf_api_types::agent::ContainerInfo],
+) -> Vec<String> {
+  let present: BTreeSet<_> = containers
+    .iter()
+    .filter(|c| !c.foreign)
+    .map(|c| c.service.as_str())
+    .collect();
+  expected
+    .iter()
+    .filter(|c| !present.contains(c.as_str()))
+    .cloned()
+    .collect()
+}
+
 fn substitute_compose(
   service: &str,
   content: &str,
@@ -1897,6 +1965,19 @@ pub fn caddyfile_with_fill(
 
 #[cfg(test)]
 mod tests {
+  #[test]
+  fn expected_components_skips_profiles_and_explicit_no_restart() {
+    let yaml = "services:\n  web: {}\n  worker: {}\n  tools: {profiles: [debug]}\n  init: {restart: \"no\"}\n";
+    assert_eq!(
+      super::expected_components(yaml, &[]),
+      ["web", "worker"]
+    );
+    assert_eq!(
+      super::expected_components(yaml, &["debug".into()]),
+      ["tools", "web", "worker"]
+    );
+  }
+
   use super::*;
   use wharf_api_types::spec::Limits;
   use wharf_api_types::spec::{GatewayKind, PortSpec, VolumeSpec};
@@ -1969,6 +2050,7 @@ mod tests {
       backup: None,
       stopped: false,
       monitor: None,
+      start_timeout_secs: None,
       log_alerts: vec![],
       port_checks: Default::default(),
       heartbeat: None,

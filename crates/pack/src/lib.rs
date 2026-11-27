@@ -6,7 +6,7 @@
 
 use std::{
   collections::BTreeMap,
-  io::Write,
+  io::{self, Read, Write},
   path::{Path, PathBuf},
 };
 
@@ -19,6 +19,30 @@ pub use archive::{unpack_validated, validate_archive};
 
 /// 和控制面接收上传的上限一致。
 pub const MAX_ARCHIVE: usize = 512 * 1024 * 1024;
+
+pub fn gzip_bytes(data: &[u8]) -> io::Result<Vec<u8>> {
+  let mut encoder =
+    flate2::write::GzEncoder::new(Vec::new(), Compression::default());
+  encoder.write_all(data)?;
+  encoder.finish()
+}
+
+pub fn gunzip_bytes(
+  data: &[u8],
+  max_bytes: usize,
+) -> io::Result<Vec<u8>> {
+  let mut out = Vec::new();
+  flate2::read::GzDecoder::new(data)
+    .take((max_bytes as u64).saturating_add(1))
+    .read_to_end(&mut out)?;
+  if out.len() > max_bytes {
+    return Err(io::Error::new(
+      io::ErrorKind::InvalidData,
+      "解压后超过大小限制",
+    ));
+  }
+  Ok(out)
+}
 
 pub struct Packed {
   pub bytes: Vec<u8>,

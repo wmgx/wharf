@@ -352,6 +352,8 @@ pub(crate) async fn deploy_server(
         expected_images: Default::default(),
         no_start: false,
         trial: None,
+        start_timeout_secs: None,
+        readiness: None,
       }),
       SERVER_TIMEOUT,
       Some(progress.clone()),

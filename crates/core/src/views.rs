@@ -214,16 +214,13 @@ fn live_of(
       let s = states.get(project);
       let containers =
         s.map(|s| s.containers.clone()).unwrap_or_default();
-      let running =
-        containers.iter().filter(|c| c.state == "running").count();
-      let state = if containers.is_empty() {
-        "missing"
-      } else if running == containers.len() {
-        "running"
-      } else if running == 0 {
-        "stopped"
-      } else {
-        "partial"
+      use wharf_api_types::view::Actual;
+      let state = match crate::status::actual_of(&containers) {
+        Actual::Missing => "missing",
+        Actual::Running => "running",
+        Actual::Restarting => "restarting",
+        Actual::Stopped => "stopped",
+        _ => "partial",
       };
       LiveState {
         state: state.into(),
@@ -337,6 +334,8 @@ pub fn service_view(
     let project = project.map(|r| r.map(|p| p.unwrap_or(&missing)));
     crate::status::service_status(crate::status::Inputs {
       want_running: !row.spec.stopped,
+      expected_components:
+        &crate::render::service_expected_components(name, &row.spec),
       desired_hash: hash.clone(),
       applied: snap.applied.get(name),
       live: project.as_ref(),
@@ -708,6 +707,7 @@ pub async fn status(
   issues.extend(crate::exposure::issues(state).await?);
   issues.extend(crate::sso_login::issues(&snap));
   issues.extend(crate::alerts::issues());
+  issues.extend(crate::heal::issues());
   issues.extend(crate::rules::custom_issues(&snap.world));
   issues.extend(crate::external_checks::issues(&servers));
   issues.extend(crate::monitor::issues());

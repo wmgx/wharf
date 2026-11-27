@@ -22,3 +22,9 @@ pub struct AppState {
   /// 正在后台同步的边缘应用。
   pub edge_syncing: crate::edge_sync::Syncing,
 }
+
+impl AppState {
+  pub fn is_service_busy(&self, service: &str) -> bool {
+    self.runs.is_service_busy(service)
+  }
+}

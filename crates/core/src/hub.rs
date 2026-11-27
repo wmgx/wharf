@@ -67,6 +67,7 @@ struct Conn {
   /// 最近一次 ping 的往返延迟，毫秒。
   rtt_ms: Arc<AtomicU64>,
   host_shell: bool,
+  runtime_v2: bool,
   forward: bool,
   service_checks: bool,
   container_diagnosis: bool,
@@ -234,6 +235,31 @@ impl Hub {
     lock(&self.conns)
       .get(server)
       .is_some_and(|conn| conn.host_shell)
+  }
+
+  pub fn supports_runtime_v2(&self, server: &str) -> bool {
+    self.runtime_v2_conn_id(server).is_ok()
+  }
+
+  pub(crate) fn runtime_v2_conn_id(
+    &self,
+    server: &str,
+  ) -> Result<u64, ApiError> {
+    let conns = lock(&self.conns);
+    let conn = conns
+      .get(server)
+      .filter(|conn| !conn.closed.is_cancelled())
+      .ok_or_else(|| offline(server))?;
+    if conn.upgrade_only || !conn.runtime_v2 {
+      return Err(
+        ApiError::new(
+          ErrorCode::Conflict,
+          format!("服务器 {server} 的 agent 版本较旧，不支持该功能"),
+        )
+        .with_hint("运行 wharf upgrade 升级 agent"),
+      );
+    }
+    Ok(conn.conn_id)
   }
 
   pub fn supports_service_checks(&self, server: &str) -> bool {
@@ -796,6 +822,7 @@ async fn handle_socket(
     version,
     protocol,
     host_shell,
+    runtime_v2,
     forward,
     service_checks,
     container_diagnosis,
@@ -958,6 +985,7 @@ async fn handle_socket(
     closed: CancellationToken::new(),
     rtt_ms: Arc::new(AtomicU64::new(u64::MAX)),
     host_shell,
+    runtime_v2,
     forward,
     service_checks,
     container_diagnosis,

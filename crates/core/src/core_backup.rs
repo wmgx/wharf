@@ -75,6 +75,12 @@ pub struct CoreBackupView {
   pub restore_command: Option<String>,
 }
 
+pub fn target(
+  c: &rusqlite::Connection,
+) -> Result<Option<String>, ApiError> {
+  db::setting(c, TO)
+}
+
 #[derive(Deserialize)]
 pub struct PasswordRequest {
   pub password: String,
@@ -416,10 +422,6 @@ fn check_data_dir(s: &AppState) -> Result<(), ApiError> {
     )));
   }
   Ok(())
-}
-
-pub fn enabled(c: &rusqlite::Connection) -> Result<bool, ApiError> {
-  Ok(db::setting(c, TO)?.is_some())
 }
 
 pub async fn backup(

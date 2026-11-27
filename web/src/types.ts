@@ -661,7 +661,8 @@ export interface ServiceStatus {
   want_running: boolean;
   desired_hash?: string;
   applied?: { hash: string; at: string };
-  actual: "running" | "partial" | "stopped" | "missing" | "offline" | "unknown";
+  actual: Gen.Actual;
+  missing_components?: Gen.ServiceStatus["missing_components"];
   actual_hash?: string;
   health: "healthy" | "unhealthy" | "starting" | "none";
   last_op?: {

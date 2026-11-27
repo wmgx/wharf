@@ -686,20 +686,31 @@ fn container(
       "按配置停止",
     );
   }
-  let bad: Vec<String> = p
+  let has_running = p.containers.iter().any(|c| c.is_running());
+  let mut bad: Vec<String> = p
     .containers
     .iter()
     .filter(|c| !c.foreign)
     .filter(|c| {
-      c.state != "running" || c.health.as_deref() == Some("unhealthy")
+      !c.is_healthy_state(has_running)
+        || (c.is_running()
+          && c.health.as_deref() == Some("unhealthy"))
     })
     .map(|c| format!("{} {}", c.service, c.status))
     .collect();
+  let expected = crate::render::service_expected_components(
+    &route.service,
+    &row.spec,
+  );
+  bad.extend(
+    crate::render::missing_components(&expected, &p.containers)
+      .into_iter()
+      .map(|c| format!("缺少组件 {c}")),
+  );
   if bad.is_empty() {
-    let starting = p
-      .containers
-      .iter()
-      .any(|c| c.health.as_deref() == Some("health: starting"));
+    let starting = p.containers.iter().any(|c| {
+      c.is_running() && c.health.as_deref() == Some("starting")
+    });
     if starting {
       check(
         "container",
