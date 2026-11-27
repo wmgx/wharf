@@ -122,7 +122,7 @@ async fn backups(state: &Arc<AppState>) -> Result<(), ApiError> {
   let snap = snapshot::load(&state.db).await?;
   let history = crate::data::history(&state.db).await?;
   let now = now_ms();
-  let core = state.db.call(crate::core_backup::target).await?;
+  let core = state.db.call(|c| crate::core_backup::target(c)).await?;
   if let Some(target) = core {
     let repo = crate::core_backup::REPO;
     let h = history.get(&(repo.to_string(), target.clone()));
@@ -506,9 +506,25 @@ async fn failed_core_backup_does_not_starve_service_backups() {
   let state = crate::rules::tests::test_state();
   crate::backup::tests::seed_servers(&state).await;
   crate::backup::tests::seed_service(&state, "svc-a", true).await;
+  seed_scheduled_backup_agents(&state, &["s1", "s2"]).await;
   state
     .db
     .call(|c| {
+      c.execute(
+        "INSERT INTO agents (server, public_key) VALUES ('s1', 's1')",
+        [],
+      )
+      .map_err(sql_err)?;
+      crate::db::set_setting(
+        c,
+        crate::core_node::SERVER_KEY,
+        Some("s1"),
+      )?;
+      crate::db::set_setting(
+        c,
+        crate::core_node::PUBKEY_KEY,
+        Some("s1"),
+      )?;
       crate::db::set_setting(c, crate::core_backup::TO, Some("s2"))
     })
     .await
@@ -540,6 +556,7 @@ async fn scheduler_picks_oldest_backup_first() {
   for service in ["svc-a", "svc-m", "svc-z"] {
     crate::backup::tests::seed_service(&state, service, true).await;
   }
+  seed_scheduled_backup_agents(&state, &["s1", "s2"]).await;
   state.db.call(|c| {
     let at = now_ms() - BACKUP_EVERY_MS;
     for (name, age) in [("svc-a", 3_600_000), ("svc-m", 16 * 3_600_000)] {
@@ -597,6 +614,8 @@ async fn backup_target_busy_is_rejected_before_snapshot_or_run() {
       WHERE kind = 'service' AND name = 'svc-c'", []).map_err(sql_err)?;
     Ok(())
   }).await.unwrap();
+
+  seed_scheduled_backup_agents(&state, &["s1", "s2", "s3"]).await;
 
   let backup = state
     .locks
@@ -661,4 +680,29 @@ async fn backup_target_busy_is_rejected_before_snapshot_or_run() {
     .await
     .unwrap();
   assert_eq!(titles, ["定时备份 svc-c"]);
+}
+
+#[cfg(test)]
+async fn seed_scheduled_backup_agents(
+  state: &AppState,
+  servers: &[&str],
+) {
+  for server in servers {
+    state.hub.mock_agent(server, false, |op| {
+      assert!(matches!(
+        op,
+        wharf_api_types::agent::AgentOp::ProjectStatus { .. }
+      ));
+      Ok(serde_json::json!([]))
+    });
+  }
+  state.db.call(|c| {
+    c.execute(
+      "INSERT INTO deployments (service, server, run_id, hash, compose, images, created_at, instance_id)
+       SELECT name, json_extract(spec, '$.server'), 'r_fixture', 'fixture', '', '[]', 0,
+              json_extract(meta, '$.instance_id') FROM resources WHERE kind = 'service'",
+      [],
+    ).map_err(sql_err)?;
+    Ok(())
+  }).await.unwrap();
 }

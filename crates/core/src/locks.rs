@@ -103,6 +103,20 @@ pub struct OpLockGuard {
 }
 
 impl OpLocks {
+  pub fn is_service_busy(&self, service: &str) -> bool {
+    // 数据清理与持有该服务的操作互斥，复用同一冲突判定。
+    let service = LockSpec::Cleanup(service.into());
+    self
+      .0
+      .lock()
+      .unwrap_or_else(|p| p.into_inner())
+      .held
+      .values()
+      .any(|(specs, _, _)| {
+        specs.iter().any(|spec| service.conflicts(spec))
+      })
+  }
+
   pub fn acquire(
     &self,
     spec: LockSpec,

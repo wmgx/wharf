@@ -22,6 +22,6 @@ pub struct AppState {
 
 impl AppState {
   pub fn is_service_busy(&self, service: &str) -> bool {
-    self.runs.is_service_busy(service)
+    self.locks.is_service_busy(service)
   }
 }

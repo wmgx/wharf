@@ -15,7 +15,7 @@ use wharf_api_types::{
   ApiError,
   agent::ProjectState,
   plan::RunStatus,
-  view::{Issue, IssueLevel, IssueSubject, OpStatus},
+  view::{Issue, IssueLevel, IssueSubject},
 };
 
 use crate::{
@@ -175,11 +175,7 @@ async fn tick(
       }
       rec.pending_run = None;
     }
-    let busy = state.is_service_busy(name)
-      || snap
-        .ops
-        .get(name)
-        .is_some_and(|op| op.status == OpStatus::Running);
+    let busy = state.is_service_busy(name);
     let observed = live.get(&row.spec.server);
     if !ready_to_observe(
       rec,
@@ -316,6 +312,47 @@ fn broken(p: &ProjectState) -> Option<String> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn backup_and_heal_share_service_lock_before_run_is_registered()
+   {
+    use crate::locks::LockSpec;
+    use wharf_api_types::ErrorCode;
+
+    let state = crate::rules::tests::test_state();
+    let service = "app".to_string();
+    let backup = state
+      .locks
+      .acquire(LockSpec::Backup(service.clone()), "备份")
+      .unwrap();
+    assert!(state.is_service_busy(&service));
+    assert!(!state.is_service_busy("other"));
+    let result = apply::start_task(
+      state.clone(),
+      AUTO_RESTART_TITLE.into(),
+      Step::ServiceRestart {
+        service: service.clone(),
+      },
+    )
+    .await;
+    assert_eq!(result.err().unwrap().code, ErrorCode::Busy);
+    drop(backup);
+    assert!(!state.is_service_busy(&service));
+
+    let heal = state
+      .locks
+      .acquire(LockSpec::apply([service.clone()]), AUTO_RESTART_TITLE)
+      .unwrap();
+    assert!(state.is_service_busy(&service));
+    let result = apply::start_task(
+      state.clone(),
+      "备份".into(),
+      Step::Backup { service },
+    )
+    .await;
+    assert_eq!(result.err().unwrap().code, ErrorCode::Busy);
+    drop(heal);
+  }
 
   #[test]
   fn skips_busy_service_and_keeps_strikes_on_probe_err() {

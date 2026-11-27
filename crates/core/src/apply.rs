@@ -76,14 +76,6 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 impl Runs {
-  pub fn is_service_busy(&self, service: &str) -> bool {
-    lock(&self.active).values().any(|a| {
-      a.scope_services
-        .as_deref()
-        .is_none_or(|names| names.iter().any(|n| n == service))
-    })
-  }
-
   pub fn get(&self, id: &str) -> Option<Run> {
     lock(&self.active).get(id).map(|a| lock(&a.run).clone())
   }
