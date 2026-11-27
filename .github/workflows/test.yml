@@ -53,3 +53,5 @@ jobs:
         working-directory: web
       - run: node scripts/api-parity.mjs
         working-directory: web
+      - run: node --disable-warning=ExperimentalWarning --test scripts/zip-pack.test.mjs
+        working-directory: web

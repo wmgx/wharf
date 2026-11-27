@@ -719,3 +719,28 @@ mod tests {
     assert!(!is_module("addEventListener('fetch', e => {})"));
   }
 }
+
+#[cfg(test)]
+mod module_tests {
+  use super::is_module;
+
+  #[test]
+  fn recognizes_top_level_exports_only() {
+    for src in [
+      "export{h as default}",
+      "export const x=1",
+      "export/* note */async function f(){}",
+      "let x=1\nexport*from'./dep.js'",
+    ] {
+      assert!(is_module(src), "{src}");
+    }
+    for src in [
+      "// export default\naddEventListener()",
+      "const s=\"export default\";addEventListener()",
+      "const s=/[;}export default]/",
+      "let x=`a ${{v:`b ${1}`}} export default`",
+    ] {
+      assert!(!is_module(src), "{src}");
+    }
+  }
+}

@@ -304,6 +304,49 @@ fn executable(_: &std::fs::Metadata) -> bool {
 mod tests {
   use super::*;
 
+  #[test]
+  fn selected_dockerfile_survives_ignore_and_single_file_pack_stays_single()
+   {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("dist");
+    std::fs::create_dir(&src).unwrap();
+    std::fs::write(tmp.path().join(".gitignore"), "dist/\n").unwrap();
+    std::fs::write(
+      src.join(".dockerignore"),
+      "Dockerfile\n.dockerignore\n",
+    )
+    .unwrap();
+    std::fs::write(src.join("Dockerfile"), "FROM alpine").unwrap();
+    std::fs::write(src.join("app.js"), "console.log(1)").unwrap();
+    assert_eq!(list_files(&src).unwrap(), [PathBuf::from("app.js")]);
+    let files = list_files_with(
+      &src,
+      &["Dockerfile".into(), ".dockerignore".into()],
+    )
+    .unwrap();
+    assert_eq!(
+      files,
+      [
+        PathBuf::from(".dockerignore"),
+        "Dockerfile".into(),
+        "app.js".into()
+      ]
+    );
+    assert_eq!(pack_file(&src.join("app.js")).unwrap().files, 1);
+  }
+
+  #[test]
+  fn writer_rejects_over_limit_before_consuming_more_input() {
+    let mut writer = LimitWriter {
+      inner: Vec::new(),
+      written: MAX_ARCHIVE - 1,
+      hash: Sha256::new(),
+      exceeded: false,
+    };
+    assert!(writer.write_all(b"ab").is_err());
+    assert!(writer.inner.is_empty());
+  }
+
   #[cfg(unix)]
   #[test]
   fn pack_and_archive_reject_escaping_and_chained_symlinks() {

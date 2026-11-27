@@ -303,7 +303,9 @@ impl Hub {
   fn build_v2_conn_id(&self, server: &str) -> Result<u64, ApiError> {
     lock(&self.conns)
       .get(server)
-      .filter(|c| !c.upgrade_only && c.build_v2)
+      .filter(|c| {
+        !c.closed.is_cancelled() && !c.upgrade_only && c.build_v2
+      })
       .map(|c| c.conn_id)
       .ok_or_else(|| crate::build::old_git_agent(server))
   }

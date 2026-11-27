@@ -466,6 +466,12 @@ pub async fn resolve_commits(
       continue;
     };
     let server = row.spec.server.clone();
+    if build.git.as_ref().is_some_and(|g| g.user.is_some())
+      && state.hub.is_online(&server)
+      && !state.hub.supports_build_v2(&server)
+    {
+      return Err(crate::build::old_git_agent(&server));
+    }
     let fetch = crate::build::code_fetch(
       state,
       &crate::secret_policy::service_secrets(
@@ -641,6 +647,16 @@ pub fn short(digest: &str) -> &str {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn digest_platform_checks_skip_explicit_matching_platform() {
+    let src = Source::Compose { content: Some("services:\n  one:\n    image: a@sha256:abc\n    platform: linux/arm64\n  two:\n    image: b@sha256:abc\n".into()), file: None };
+    assert_eq!(
+      digest_images(&src, Some("aarch64")),
+      ["b@sha256:abc"]
+    );
+    assert!(images(&src).is_empty());
+  }
 
   #[test]
   fn warns_only_for_known_platform_mismatch() {

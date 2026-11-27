@@ -167,13 +167,10 @@ async fn resolve_one(
         let (config, platforms) = repo
           .details(&digest, host_platform, metadata_deadline)
           .await;
-        if platforms.is_some() {
+        if config.is_some() || platforms.is_some() {
           return Ok((digest, config, platforms));
         }
-        if best
-          .as_ref()
-          .is_none_or(|(_, prior, _): &Found| prior.is_none())
-        {
+        if best.is_none() {
           best = Some((digest, config, platforms));
         }
       }

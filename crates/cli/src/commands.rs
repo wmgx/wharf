@@ -2581,7 +2581,8 @@ async fn service(
         .first()
         .map(|p| parse_port(p))
         .transpose()?
-        .and_then(|p| p.container);
+        .and_then(|p| p.container)
+        .or_else(|| existing.as_ref()?.ports.first()?.container);
       let built = crate::deploy::source(
         c,
         &name,

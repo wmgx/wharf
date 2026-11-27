@@ -375,23 +375,6 @@ impl World {
               .with_hint("这个前缀留给部署时的试跑容器"),
             );
           }
-          if let Some(m) = &spec.monitor {
-            if !m.path.starts_with('/') {
-              return Err(ApiError::invalid("监控路径要以 / 开头"));
-            }
-            if spec.ports.is_empty() {
-              return Err(ApiError::invalid(format!(
-                "服务 {name} 没有端口，监控不了"
-              )));
-            }
-            if let Some(p) = &m.port
-              && !spec.ports.iter().any(|x| &x.name == p)
-            {
-              return Err(ApiError::invalid(format!(
-                "服务 {name} 没有端口 {p}"
-              )));
-            }
-          }
           let old = self.services.get(name);
           crate::host_access::validate_adopt(
             self,
@@ -503,6 +486,23 @@ impl World {
             } = &spec.source
           {
             spec.ports = crate::import::compose_ports(content);
+          }
+          if let Some(m) = &spec.monitor {
+            if !m.path.starts_with('/') {
+              return Err(ApiError::invalid("监控路径要以 / 开头"));
+            }
+            if spec.ports.is_empty() {
+              return Err(ApiError::invalid(format!(
+                "服务 {name} 没有端口，监控不了"
+              )));
+            }
+            if let Some(p) = &m.port
+              && !spec.ports.iter().any(|x| &x.name == p)
+            {
+              return Err(ApiError::invalid(format!(
+                "服务 {name} 没有端口 {p}"
+              )));
+            }
           }
           self.services.insert(
             name.clone(),
@@ -1422,13 +1422,21 @@ impl World {
       let service = &self.services[name];
       let server = service.spec.server.clone();
       let mut assigned = BTreeMap::new();
+      let mut compose_bindings = BTreeSet::new();
       for port in &service.spec.ports {
         let fixed = port.host;
         let chosen = fixed
           .or_else(|| service.host_ports.get(&port.name).copied());
         match chosen {
           Some(p) => {
-            if !take(&server, p) {
+            let shared = fixed.is_some()
+              && matches!(
+                service.spec.source,
+                Source::Compose { .. }
+              )
+              && compose_bindings.contains(&(p, !port.udp))
+              && !compose_bindings.contains(&(p, port.udp));
+            if !shared && !take(&server, p) {
               if fixed.is_some() {
                 return Err(ApiError::invalid(format!(
                   "服务器 {server} 上宿主机端口 {p} 被多个服务使用（服务 {name}）"
@@ -1437,6 +1445,9 @@ impl World {
               pending.push((name.clone(), port.name.clone()));
             } else {
               assigned.insert(port.name.clone(), p);
+              if fixed.is_some() {
+                compose_bindings.insert((p, port.udp));
+              }
             }
           }
           None => pending.push((name.clone(), port.name.clone())),
@@ -2068,6 +2079,62 @@ fn validate_lan_addrs(addrs: &[String]) -> Result<(), ApiError> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn compose_env_and_shared_tcp_udp_binding() {
+    let mut w = sample();
+    let mut spec = image_service("node1");
+    spec.env.insert("TZ".into(), "UTC".into());
+    let content = "services:\n  app:\n    image: alpine\n    ports:\n      - 11553:53/tcp\n      - 11553:53/udp";
+    spec.ports.clear();
+    spec.source = Source::Compose {
+      content: Some(content.into()),
+      file: None,
+    };
+    w.apply_changes(&[Change::UpsertService {
+      name: "app".into(),
+      spec,
+      adopt: None,
+    }])
+    .unwrap();
+    w.allocate_ports().unwrap();
+    w.validate().unwrap();
+    let spec = &w.services["app"].spec;
+    assert_eq!(
+      spec.ports.iter().map(|p| p.udp).collect::<Vec<_>>(),
+      [false, true]
+    );
+    assert!(
+      crate::render::compose_with_settings("app", content, spec)
+        .unwrap()
+        .contains("TZ")
+    );
+  }
+
+  #[test]
+  fn git_secret_names_allow_dash_but_new_dockerfile_template_conflicts_fail()
+   {
+    let mut w = sample();
+    let mut spec = image_service("node1");
+    let mut build: BuildSource = serde_json::from_value(json!({
+      "git": {"repo": "https://example.test/one", "ref": "prod", "token_secret": "git-test"},
+      "template": "node"
+    })).unwrap();
+    assert!(check_build("app", &build).is_ok());
+    build.dockerfile = Some("Dockerfile".into());
+    spec.source = Source::Build(build);
+    assert!(
+      w.apply_changes(&[Change::UpsertService {
+        name: "app".into(),
+        spec,
+        adopt: None
+      }])
+      .unwrap_err()
+      .message
+      .contains("不能同时")
+    );
+  }
+
   use wharf_api_types::spec::PortSpec;
 
   #[test]

@@ -142,10 +142,11 @@ pub fn validate(path: &Path) -> serde_json::Value {
       ));
     }
     for rule in &gateway.layer4 {
-      if !fleet.services.contains_key(&rule.service) {
+      if let Some(service) = &rule.service
+        && !fleet.services.contains_key(service)
+      {
         missing.push(format!(
-          "网关 {name} 的四层转发服务 {} 文件里没有",
-          rule.service
+          "网关 {name} 的四层转发服务 {service} 文件里没有"
         ));
       }
     }
@@ -253,6 +254,28 @@ pub fn validate(path: &Path) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn offline_validation_detects_invalid_compose_and_path_targets() {
+    let temp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+      temp.path(),
+      r#"
+[services.api]
+server = "s1"
+source = { compose = { content = "name: invalid" } }
+[[routes]]
+hostname = "example.test"
+service = "api"
+paths = [{ path = "/images/*", service = "missing" }]
+"#,
+    )
+    .unwrap();
+    let result = validate(temp.path());
+    assert_eq!(result["ok"], false);
+    assert!(result["errors"].to_string().contains("非空 services"));
+    assert!(result["warnings"].to_string().contains("missing"));
+  }
 
   #[test]
   fn round_trip_and_compose_file() {
