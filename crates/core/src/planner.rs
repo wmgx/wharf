@@ -715,7 +715,6 @@ pub(crate) async fn make_plan_inner(
   let status =
     gather_status(state, &snap, &current, &desired, &net, &mut b)
       .await;
-  reconcile_pending_deletes(state, &mut snap, &status).await?;
   mark("容器状态");
   let account_refs = crate::render::service_account_refs(&desired);
   if account_refs != crate::render::service_account_refs(&current) {
@@ -1600,51 +1599,6 @@ fn leftovers<'a>(
     .map(|(n, s)| (n.as_str(), s.as_str()))
 }
 
-/// 只销账已确认完成的普通删除，避免和正在执行的删除并发。
-async fn reconcile_pending_deletes(
-  state: &AppState,
-  snap: &mut Snapshot,
-  status: &StatusMap,
-) -> Result<(), ApiError> {
-  if snap.pending_deletes.is_empty() {
-    return Ok(());
-  }
-  let Ok(_guard) = state.apply_lock.try_lock() else {
-    return Ok(());
-  };
-  let mut confirmed = Vec::new();
-  snap.pending_deletes.retain(|p| {
-    if !p.purge_data
-      && status
-        .get(&p.server)
-        .and_then(Option::as_ref)
-        .and_then(|projects| projects.get(&p.service))
-        .is_some_and(|p| p.hash.is_none() && p.containers.is_empty())
-    {
-      confirmed.push((
-        p.service.clone(),
-        p.server.clone(),
-        p.instance_id.clone(),
-      ));
-      false
-    } else {
-      true
-    }
-  });
-  if confirmed.is_empty() {
-    return Ok(());
-  }
-  state.db.call(move |c| {
-    for (service, server, instance) in confirmed {
-      c.execute(
-        "DELETE FROM pending_deletes WHERE service = ?1 AND server = ?2 AND instance_id = ?3 AND purge_data = 0",
-        rusqlite::params![service, server, instance],
-      ).map_err(db::sql_err)?;
-    }
-    Ok(())
-  }).await
-}
-
 /// 上次删除没做完：项目目录（Wharf 的部署指纹）还在。别人同名的项目没有指纹，不碰。
 fn leftover_items(
   b: &mut Builder,
@@ -1658,22 +1612,29 @@ fn leftover_items(
     if current.services.contains_key(name) {
       continue;
     }
+    let projects = status.get(server).and_then(Option::as_ref);
+    let project = projects.and_then(|projects| projects.get(name));
+    if !p.purge_data
+      && project
+        .is_some_and(|s| s.hash.is_none() && s.containers.is_empty())
+    {
+      continue;
+    }
     if desired.services.contains_key(name) {
       b.warnings.push(format!("服务 {name} 的旧实例在 {server} 上曾有未完成的删除，新建同名服务后不会再自动清理旧数据，请按需手动检查"));
       continue;
     }
-    let Some(Some(projects)) = status.get(server) else {
+    if projects.is_none() {
       b.warnings.push(format!("上次删除服务 {name} 未完成，待服务器 {server} 上线后重新 plan 继续清理"));
       continue;
-    };
+    }
     let (impacts, reason) = if p.purge_data {
       b.warnings.push(format!("服务 {name} 的目录 /srv/{name} 和命名卷会被永久删除，不能恢复"));
       (
         vec![Impact::Remove, Impact::DataLoss],
         "上次带清数据的删除未完成，继续删除残留容器及 /srv/ 下的服务目录和命名卷",
       )
-    } else if projects
-      .get(name)
+    } else if project
       .is_some_and(|s| s.hash.is_some() || !s.containers.is_empty())
     {
       (
@@ -2917,7 +2878,7 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn plan_clears_confirmed_non_purge_delete() {
+  async fn plan_keeps_confirmed_non_purge_delete() {
     let state = crate::rules::tests::test_state();
     state
       .db
@@ -2942,13 +2903,17 @@ mod tests {
       }
       _ => panic!("意外的 agent 请求"),
     });
-    make_plan(&state, PlanRequest::default()).await.unwrap();
-    assert!(
+    let planned =
+      make_plan(&state, PlanRequest::default()).await.unwrap();
+    assert!(planned.plan.items.is_empty());
+    assert!(planned.plan.warnings.is_empty());
+    assert_eq!(
       state
         .db
-        .call(|c| Ok(db::all_pending_deletes(c)?.is_empty()))
+        .call(|c| Ok(db::all_pending_deletes(c)?.len()))
         .await
-        .unwrap()
+        .unwrap(),
+      1
     );
   }
 
