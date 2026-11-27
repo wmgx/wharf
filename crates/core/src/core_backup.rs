@@ -1285,7 +1285,7 @@ mod tests {
       *seen.lock().unwrap(),
       ["backup", "list", "add", "remove", "prune"]
     );
-    unlock(
+    let _ = unlock(
       State(state.clone()),
       crate::security_receipt::tests::auth(true),
       None,

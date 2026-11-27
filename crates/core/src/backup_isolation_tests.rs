@@ -620,5 +620,44 @@ async fn unlock_service_runs_local_and_respects_backup_lock() {
     .unwrap();
   assert_eq!(call().await.err().unwrap().0.code, ErrorCode::Busy);
   drop(guard);
-  call().await.map_err(|e| e.0).unwrap();
+  let _ = call().await.map_err(|e| e.0).unwrap();
+}
+
+#[tokio::test]
+async fn deploy_server_rejects_empty_containers() {
+  let state = test_state();
+  seed_servers(&state).await;
+  state
+    .hub
+    .mock_agent_with_backup(
+      "s2",
+      false,
+      true,
+      false,
+      |op| match op {
+        AgentOp::ProjectStatus { .. } => Ok(json!([])),
+        AgentOp::ProjectUp(_) => {
+          Ok(json!({"containers":[],"images":[]}))
+        }
+        _ => panic!("意外的备份任务"),
+      },
+    );
+  let snap = snapshot::load(&state.db).await.unwrap();
+  let w = Where {
+    server: "s1".into(),
+    target: "s2".into(),
+    target_ip: "100.64.0.2".into(),
+  };
+  let progress: ProgressFn = Arc::new(|_| {});
+  let err = deploy_server(
+    &state,
+    &snap,
+    &w,
+    (BACKUP_PROJECT, String::new()),
+    &progress,
+    &CancellationToken::new(),
+  )
+  .await
+  .unwrap_err();
+  assert_eq!(err.code, ErrorCode::AgentFailed);
 }

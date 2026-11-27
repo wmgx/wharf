@@ -1037,6 +1037,46 @@ esac
     );
   }
 
+  #[tokio::test]
+  async fn restic_repo_conflicts_do_not_run_docker() {
+    let dir = tempfile::tempdir().unwrap();
+    let docker = Docker {
+      bin: dir.path().join("no-docker").display().to_string(),
+      data_dir: dir.path().into(),
+    };
+    let shell = HostShell::prepare(docker.clone(), "s1".into()).await;
+    let reporter = Reporter::new(docker.clone(), None);
+    let ops = Ops::new(
+      docker,
+      reporter,
+      String::new(),
+      shell,
+      dir.path().into(),
+    );
+    let lock = Arc::new(tokio::sync::RwLock::new(()));
+    ops
+      .restic_locks
+      .lock()
+      .unwrap()
+      .insert("local:s1".into(), lock.clone());
+    let _held = lock.write().await;
+    let mut request: wharf_api_types::agent::ResticJob = serde_json::from_value(serde_json::json!({
+      "service": "s1", "repo": "local", "password": "", "action": "prune",
+      "pull": {"mirrors": {}, "mirrors_only": false, "attempt_timeout_secs": 1},
+    })).unwrap();
+    let ctx = Ctx::detached();
+    assert_eq!(
+      ops.restic(&request, &ctx).await.unwrap_err().code,
+      ErrorCode::Busy
+    );
+    request.action = wharf_api_types::agent::ResticAction::Snapshots;
+    ctx.cancel.cancel();
+    assert_eq!(
+      ops.restic(&request, &ctx).await.unwrap_err().code,
+      ErrorCode::Cancelled
+    );
+  }
+
   #[test]
   fn previous_tracks_config_or_image_change() {
     assert!(has_previous("a", "b", None, None));

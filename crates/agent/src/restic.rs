@@ -489,6 +489,16 @@ async fn preflight(
       detect_escaped_mounts(srv, j.service, &check.managed_mounts)?
     }
     Err(e) if !backup && e.code == ErrorCode::NotFound => Vec::new(),
+    Err(e)
+      if e.code == ErrorCode::InvalidInput
+        && let Ok(target) = std::fs::read_link(root) =>
+    {
+      return Err(e.with_hint(format!(
+        "{} 指向 {}，请把数据放进普通目录后重试",
+        root.display(),
+        target.display()
+      )));
+    }
     Err(e) => return Err(e),
   };
   let targets: Vec<_> = std::iter::once(root.to_path_buf())
@@ -640,7 +650,15 @@ fn reject_mountpoint(
 ) -> Result<(), ApiError> {
   let info = std::fs::read_to_string("/proc/self/mountinfo")
     .map_err(io_err(Path::new("/proc/self/mountinfo")))?;
-  if is_mountpoint(srv, service, Some(&info))? {
+  check_restore_mounts(srv, service, &info)
+}
+
+fn check_restore_mounts(
+  srv: &Path,
+  service: &str,
+  info: &str,
+) -> Result<(), ApiError> {
+  if is_mountpoint(srv, service, Some(info))? {
     return Err(
       ApiError::new(
         ErrorCode::Conflict,

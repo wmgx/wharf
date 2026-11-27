@@ -128,7 +128,9 @@ fn mountpoint_detected_even_when_parent_and_child_share_device() {
     "22 1 0:1 / {} rw - ext4 /dev/disk rw",
     service.display()
   );
-  assert!(is_mountpoint(dir.path(), "s1", Some(&info)).unwrap());
+  let e = check_restore_mounts(dir.path(), "s1", &info).unwrap_err();
+  assert_eq!(e.code, ErrorCode::Conflict);
+  assert!(e.hint.unwrap().contains("/srv/s1/data"));
   assert!(!is_mountpoint(dir.path(), "s1", None).unwrap());
 }
 
@@ -138,8 +140,16 @@ fn cleanup_stale_work_keeps_before_dirs_and_prune_respects_days() {
   let root = dir.path().join(".wharf-restore");
   let work = root.join("s1-20260101-000000-abcdef12");
   let kept = root.join("s1-before-20260101-000000-abcdef12");
+  let old = root.join("s2-before-20260101-000000-abcdef12");
   fs::create_dir_all(&work).unwrap();
   fs::create_dir(&kept).unwrap();
+  fs::create_dir(&old).unwrap();
+  fs::File::open(&old)
+    .unwrap()
+    .set_times(fs::FileTimes::new().set_modified(
+      std::time::SystemTime::now() - Duration::from_secs(10 * 86400),
+    ))
+    .unwrap();
   cleanup_stale_restore_work(dir.path());
   assert!(kept.is_dir() && !work.exists());
   let prune = |days| {
@@ -147,7 +157,8 @@ fn cleanup_stale_work_keeps_before_dirs_and_prune_respects_days() {
       .unwrap()
       .removed
   };
-  assert_eq!(prune(7), 0);
+  assert_eq!(prune(7), 1);
+  assert!(kept.is_dir() && !old.exists());
   assert_eq!(prune(0), 1);
   assert!(!kept.exists());
 }
@@ -167,4 +178,61 @@ fn locked_repo_error_maps_to_unlock_hint() {
   .unwrap_err();
   assert_eq!(error.code, ErrorCode::Conflict);
   assert_eq!(error.suggest, ["wharf backup unlock s1"]);
+}
+
+#[test]
+fn restic_progress_ignores_unchanged_counters() {
+  let mut progress = progress_matcher();
+  let step =
+    r#"{"message_type":"status","files_done":1,"bytes_done":20}"#;
+  assert!(progress(step));
+  assert!(!progress(step));
+  assert!(progress(
+    r#"{"message_type":"status","files_done":1,"bytes_done":30}"#
+  ));
+}
+
+#[tokio::test]
+async fn concurrent_restic_uses_unique_container_names() {
+  use std::os::unix::fs::PermissionsExt;
+  let dir = tempfile::tempdir().unwrap();
+  let script = dir.path().join("docker");
+  fs::write(
+    &script,
+    r#"#!/bin/sh
+[ "$1" = run ] || exit 8
+while [ "$#" -gt 1 ]; do
+  if [ "$1" = --name ]; then echo "$2"; exit 0; fi
+  shift
+done
+exit 9
+"#,
+  )
+  .unwrap();
+  fs::set_permissions(&script, fs::Permissions::from_mode(0o700))
+    .unwrap();
+  let docker = Docker {
+    bin: script.display().to_string(),
+    data_dir: dir.path().into(),
+  };
+  let job = Job {
+    docker: &docker,
+    service: "s1",
+    repo: "/repo".into(),
+    password: "",
+    http_auth: None,
+    mounts: vec![],
+  };
+  let ctx = Ctx::detached();
+  let (a, b) = tokio::join!(
+    job.restic(&["snapshots"], SHORT_TIMEOUT, false, &ctx),
+    job.restic(&["key", "list"], SHORT_TIMEOUT, false, &ctx)
+  );
+  let a = a.unwrap().check("snapshots").unwrap().stdout;
+  let b = b.unwrap().check("key list").unwrap().stdout;
+  assert!(
+    a.starts_with("wharf-restic-s1-")
+      && b.starts_with("wharf-restic-s1-")
+  );
+  assert_ne!(a, b);
 }

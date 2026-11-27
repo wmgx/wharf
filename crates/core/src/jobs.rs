@@ -542,7 +542,7 @@ async fn scheduler_picks_oldest_backup_first() {
   }
   state.db.call(|c| {
     let at = now_ms() - BACKUP_EVERY_MS;
-    for (name, age) in [("svc-a", 3600_000), ("svc-m", 16 * 3600_000)] {
+    for (name, age) in [("svc-a", 3_600_000), ("svc-m", 16 * 3_600_000)] {
       c.execute("INSERT INTO backups (service, server, target, run_id, ok, body, created_at)
         VALUES (?1, 's1', 's2', 'r1', 1, '{}', ?2)", params![name, at - age]).map_err(sql_err)?;
     }

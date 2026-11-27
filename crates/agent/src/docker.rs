@@ -1725,6 +1725,51 @@ mod tests {
     );
   }
 
+  #[tokio::test]
+  async fn stop_for_data_skips_stopped_and_rolls_back_partial_stop() {
+    use std::{fs, os::unix::fs::PermissionsExt};
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("docker");
+    let state = dir.path().join("state");
+    fs::write(&script, r#"#!/bin/sh
+state="$(dirname "$0")/state"
+case "$1:$(cat "$state")" in
+  ps:stopped) echo 'init exited' ;;
+  ps:running|ps:restarted) printf 'web running\nworker running\ninit exited\n' ;;
+  compose:running) echo partial > "$state"; exit 1 ;;
+  ps:partial) printf 'web exited\nworker running\ninit exited\n' ;;
+  start:partial) [ "$#" = 3 ] && [ "$2" = -- ] && [ "$3" = web ] || exit 8
+                 echo restarted > "$state" ;;
+  *) exit 9 ;;
+esac
+"#).unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o700))
+      .unwrap();
+    let docker = super::Docker {
+      bin: script.display().to_string(),
+      data_dir: dir.path().into(),
+    };
+    let project = docker.project_dir("s1");
+    fs::create_dir_all(&project).unwrap();
+    fs::write(project.join("compose.yaml"), "").unwrap();
+    let ctx = super::Ctx::detached();
+    fs::write(&state, "stopped").unwrap();
+    assert!(
+      docker
+        .stop_running_for_data("s1", &ctx)
+        .await
+        .unwrap()
+        .containers
+        .is_empty()
+    );
+    fs::write(&state, "running").unwrap();
+    assert!(docker.stop_running_for_data("s1", &ctx).await.is_err());
+    assert_eq!(
+      fs::read_to_string(&state).unwrap().trim(),
+      "restarted"
+    );
+  }
+
   #[test]
   fn bind_mount_users_ignores_only_system_management_mounts() {
     let inspect = r#""/wharf-agent" "agent" "" [{"Type":"bind","Source":"/srv","Destination":"/srv"}]
