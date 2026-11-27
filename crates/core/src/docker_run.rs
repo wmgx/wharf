@@ -115,6 +115,9 @@ struct Parsed {
   ports: Vec<(Option<u16>, u16, bool)>,
   /// compose 来源用的原始端口写法。
   port_texts: Vec<String>,
+  has_explicit_bind_ip: bool,
+  volume_sources: BTreeMap<String, String>,
+  has_reused_volume: bool,
   env: BTreeMap<String, String>,
   /// (数据卷名, 容器内路径, 只读)。
   volumes: Vec<(String, String, bool)>,
@@ -179,7 +182,20 @@ fn split_words(s: &str) -> Result<Vec<String>, ApiError> {
           }
           // 换行被去掉后的续行：独立的 `\` 后跟空格，或 `\` 后跟多个空格；
           // 单个 `\ ` 紧接字符（如 `-e A=foo\ bar`）仍保留为空格。
-          Some(_) if spaces > 0 && (!has || spaces >= 2) => {}
+          Some(next)
+            if spaces > 0
+              && (!has
+                || spaces >= 2
+                || (!cur.contains('=') && *next == '-')) =>
+          {
+            if has {
+              words.push(std::mem::take(&mut cur));
+              has = false;
+            }
+            for _ in 0..spaces {
+              chars.next();
+            }
+          }
           Some(_) => {
             if let Some(n) = chars.next() {
               cur.push(n);
@@ -222,6 +238,13 @@ fn split_words(s: &str) -> Result<Vec<String>, ApiError> {
           }
         }
       }
+      '#' if !has => {
+        for next in chars.by_ref() {
+          if next == '\n' {
+            break;
+          }
+        }
+      }
       c if c.is_whitespace() => {
         if has {
           words.push(std::mem::take(&mut cur));
@@ -241,7 +264,7 @@ fn split_words(s: &str) -> Result<Vec<String>, ApiError> {
 }
 
 fn parse(words: &[String]) -> Result<Parsed, ApiError> {
-  let mut i = 0;
+  let mut i = usize::from(words.first().is_some_and(|w| w == "$"));
   while i < words.len()
     && matches!(words[i].as_str(), "sudo" | "docker" | "podman")
   {
@@ -434,13 +457,19 @@ fn port(p: &mut Parsed, value: &str) {
         [_] => format!("127.0.0.1::{value}"),
         [_, _] => format!("127.0.0.1:{value}"),
         _ => {
-          if matches!(parts[2], "0.0.0.0" | "[::]") {
+          let ip = parts[2];
+          p.has_explicit_bind_ip |= !ip.is_empty();
+          if matches!(ip, "0.0.0.0" | "[::]" | "::") {
             p.warnings.push(format!(
               "端口 {value} 显式绑定到所有网卡，会直接暴露到公网；如只需经网关访问请去掉 {host} 或改为 127.0.0.1",
               host = parts[2],
             ));
           }
-          value.to_string()
+          if ip.contains(':') && !ip.starts_with('[') {
+            format!("[{ip}]{}", &value[ip.len()..])
+          } else {
+            value.to_string()
+          }
         }
       };
       p.port_texts.push(binding);
@@ -476,6 +505,14 @@ fn volume(p: &mut Parsed, value: &str) {
     ));
     return;
   }
+  let source =
+    src.map(|s| if s == "/" { s } else { s.trim_end_matches('/') });
+  if let Some(existing) = source.and_then(|s| p.volume_sources.get(s))
+  {
+    p.has_reused_volume = true;
+    p.volumes.push((existing.clone(), dst.to_string(), ro));
+    return;
+  }
   let base = src
     .unwrap_or(dst)
     .trim_end_matches('/')
@@ -498,6 +535,9 @@ fn volume(p: &mut Parsed, value: &str) {
     p.warnings.push(format!(
       "宿主机目录 {src} 换成了数据卷 {name}（/srv/<服务>/{name}），原来的数据要自己拷过去"
     ));
+  }
+  if let Some(source) = source {
+    p.volume_sources.insert(source.into(), name.clone());
   }
   p.volumes.push((name, dst.to_string(), ro));
 }
@@ -556,6 +596,8 @@ fn draft(mut p: Parsed) -> ServiceDraft {
     || !p.extra.is_empty()
     || !p.binds.is_empty()
     || p.network.is_some()
+    || p.has_explicit_bind_ip
+    || p.has_reused_volume
     || p.volumes.iter().any(|(.., ro)| *ro);
   if !needs_compose {
     let single = p.ports.iter().filter(|(.., udp)| !udp).count() == 1;
@@ -818,4 +860,54 @@ fn explicit_wildcard_ports_keep_binding_and_warn_about_public_access()
       "端口 {binding} 显式绑定到所有网卡，会直接暴露到公网；如只需经网关访问请去掉 {host} 或改为 127.0.0.1"
     )));
   }
+}
+
+#[test]
+fn run_keeps_shell_literals_and_explicit_ip() {
+  let draft = from_docker_run(
+    "$ docker run -d\\ --name app \\\n# comment\n -p 127.0.0.1:6379:6379 -e NOTE=a\\ b -e COLOR=#fff redis:7",
+    None,
+  ).unwrap();
+  assert_eq!(draft.name, "app");
+  let Source::Compose {
+    content: Some(compose),
+    ..
+  } = draft.source
+  else {
+    panic!("应保留显式绑定");
+  };
+  let yaml: Value = serde_yaml_ng::from_str(&compose).unwrap();
+  let svc = &yaml["services"]["app"];
+  assert_eq!(svc["ports"][0], yk("127.0.0.1:6379:6379"));
+  assert_eq!(svc["environment"]["NOTE"], yk("a b"));
+  assert_eq!(svc["environment"]["COLOR"], yk("#fff"));
+}
+
+#[test]
+fn run_reuses_the_same_source_only() {
+  for ro in ["", ":ro"] {
+    let draft = from_docker_run(
+      &format!(
+        "docker run --name app -v assets:/out -v assets:/in{ro} img"
+      ),
+      None,
+    )
+    .unwrap();
+    let Source::Compose {
+      content: Some(compose),
+      ..
+    } = draft.source
+    else {
+      panic!("重复挂载应走 compose");
+    };
+    assert!(compose.contains("/srv/app/assets:/out"));
+    assert!(compose.contains(&format!("/srv/app/assets:/in{ro}")));
+  }
+  let draft = from_docker_run(
+    "docker run -v /a/data:/x -v /b/data:/y img",
+    None,
+  )
+  .unwrap();
+  assert_eq!(draft.volumes[0].name, "data");
+  assert_eq!(draft.volumes[1].name, "data-2");
 }

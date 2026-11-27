@@ -117,6 +117,23 @@ pub struct ImportRaw {
   /// 读取时的提醒，例如 compose 里引用了没有设置的变量。
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub warnings: Vec<String>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub containers: Vec<ProjectContainerRaw>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub tag_image_id: Option<String>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub config_files: Vec<String>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub env_files: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectContainerRaw {
+  pub inspect: serde_json::Value,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub image_inspect: Option<serde_json::Value>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub tag_image_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -127,6 +144,10 @@ pub struct Retire {
   pub project: Option<String>,
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub containers: Vec<String>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub rename_containers: Vec<String>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub expected_services: Vec<String>,
 }
 
 /// 被停掉的一个容器，恢复时用。
@@ -356,6 +377,10 @@ pub struct ProjectUp {
   /// 稳定运行了才动线上的容器。旧版本 agent 不认识这个字段，直接部署。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub trial: Option<String>,
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub expected_images: BTreeMap<String, String>,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub no_start: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

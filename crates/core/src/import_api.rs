@@ -161,6 +161,7 @@ pub async fn preview(
       .into(),
     );
   }
+  s.hub.require_safe_adopt(&req.server)?;
   let raw: ImportRaw = s
     .hub
     .call(
@@ -176,11 +177,12 @@ pub async fn preview(
     .await?;
   let converted = match (&req.project, raw.compose, raw.inspect) {
     (Some(p), Some(config), _) => {
-      import::from_compose(&config, p, &name)?
+      import::from_compose(&config, &raw.containers, p, &name)?
     }
     (None, _, Some(inspect)) => import::from_container(
       &inspect,
       raw.image_inspect.as_ref(),
+      raw.tag_image_id.as_deref(),
       &name,
     )?,
     _ => {
@@ -191,6 +193,16 @@ pub async fn preview(
     }
   };
   let mut warnings = raw.warnings;
+  if raw.config_files.len() > 1 || !raw.env_files.is_empty() {
+    warnings.insert(
+      0,
+      format!(
+        "已合并读取 compose 文件：{}；env 文件：{}",
+        raw.config_files.join("、"),
+        raw.env_files.join("、")
+      ),
+    );
+  }
   warnings.extend(converted.warnings);
   let (compose, keys) =
     crate::redact::redact_compose_secrets(&converted.compose);
@@ -211,7 +223,7 @@ pub async fn preview(
       env: Default::default(),
       volumes: vec![],
       backup: None,
-      stopped: false,
+      stopped: converted.stopped,
       monitor: None,
       log_alerts: vec![],
       port_checks: Default::default(),

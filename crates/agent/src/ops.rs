@@ -461,6 +461,9 @@ impl Ops {
   ) -> Result<Vec<String>, ApiError> {
     let images = self.docker.images(&up.project, ctx).await?;
     for image in &images {
+      if up.expected_images.contains_key(image) {
+        continue;
+      }
       if up.pull_missing_only
         && self.docker.image_exists(image, ctx).await
       {
@@ -498,32 +501,48 @@ impl Ops {
     previous: Option<Previous>,
     ctx: &Ctx,
   ) -> Result<ProjectUpResult, ApiError> {
-    self.docker.up(&up.project, ctx).await?;
-    self.docker.write_hash(&up.project, &up.hash)?;
-    let state = match crate::settle::watch(
-      &self.docker,
-      &up.project,
-      ctx,
-    )
-    .await
-    {
-      Ok(state) => state,
-      Err(e) => {
-        let Some(prev) = previous else { return Err(e) };
-        ctx.say(format!("{}，换回上一版", e.message));
-        self.restore_image(&prev, ctx).await?;
-        self.docker.write_compose(&up.project, &prev.compose)?;
-        self.docker.write_hash(&up.project, &prev.hash)?;
-        self.docker.up(&up.project, ctx).await?;
-        return Err(
-          ApiError::new(
-            ErrorCode::AgentFailed,
-            format!("{}，已换回上一版", e.message),
-          )
-          .with_hint("配置还是新版本，修好后重新部署；先看日志"),
-        );
+    self.docker.up(&up.project, up.no_start, ctx).await?;
+    let state = if up.no_start {
+      let mut state =
+        self.docker.one_status(&up.project, ctx).await?;
+      // --no-start leaves unchanged containers running.
+      if !up.pull_missing_only
+        && state.containers.iter().any(|c| c.state == "running")
+      {
+        self.docker.stop_start(&up.project, false, ctx).await?;
+        state = self.docker.one_status(&up.project, ctx).await?;
+      }
+      if state.containers.is_empty()
+        || state.containers.iter().any(|c| c.state == "running")
+      {
+        return Err(ApiError::new(
+          ErrorCode::AgentFailed,
+          "创建后没有容器或容器仍在运行",
+        ));
+      }
+      state
+    } else {
+      match crate::settle::watch(&self.docker, &up.project, ctx).await
+      {
+        Ok(state) => state,
+        Err(e) => {
+          let Some(prev) = previous else { return Err(e) };
+          ctx.say(format!("{}，换回上一版", e.message));
+          self.restore_image(&prev, ctx).await?;
+          self.docker.write_compose(&up.project, &prev.compose)?;
+          self.docker.write_hash(&up.project, &prev.hash)?;
+          self.docker.up(&up.project, false, ctx).await?;
+          return Err(
+            ApiError::new(
+              ErrorCode::AgentFailed,
+              format!("{}，已换回上一版", e.message),
+            )
+            .with_hint("配置还是新版本，修好后重新部署；先看日志"),
+          );
+        }
       }
     };
+    self.docker.write_hash(&up.project, &up.hash)?;
     Ok(ProjectUpResult {
       containers: state.containers,
       images: self.docker.image_info(images, ctx).await,
@@ -587,23 +606,35 @@ impl Ops {
         previous = None;
       }
     }
+    if up.trial.is_some() {
+      self.trial_run(up, previous.as_ref(), ctx).await?;
+    }
     // 镜像拉好之后再停原来的容器，中断只有切换的那几秒。
+    crate::adopt::verify_expected_images(
+      &self.docker,
+      &up.expected_images,
+      ctx,
+    )
+    .await?;
     let retired = match &up.retire {
       Some(r) if r.service == up.project => {
         crate::adopt::retire(&self.docker, r, ctx).await?
       }
       _ => vec![],
     };
-    if up.trial.is_some() {
-      self.trial_run(up, previous.as_ref(), ctx).await?;
-    }
     match self.finish_up(up, &images, warnings, previous, ctx).await {
       Ok(result) => Ok(ProjectUpResult { retired, ..result }),
       Err(e) if !retired.is_empty() => {
         ctx.say("启动失败，恢复原来的容器");
-        let _ = self.docker.down(&up.project, false, ctx).await;
+        let recover = ctx.detached_with_progress();
+        if let Err(down) =
+          self.docker.down(&up.project, false, &recover).await
+        {
+          recover.say(format!("清理新容器失败：{}", down.message));
+        }
         if let Err(back) =
-          crate::adopt::unretire(&self.docker, &retired, ctx).await
+          crate::adopt::unretire(&self.docker, &retired, &recover)
+            .await
         {
           ctx
             .say(format!("恢复失败，需要手动处理：{}", back.message));
@@ -650,7 +681,7 @@ impl Ops {
     ctx.say("试跑新版本");
     let result = async {
       self.docker.write_compose(&project, trial)?;
-      self.docker.up(&project, ctx).await?;
+      self.docker.up(&project, false, ctx).await?;
       crate::settle::watch(&self.docker, &project, ctx).await?;
       Ok(())
     }
@@ -723,6 +754,59 @@ fn has_previous(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn stopped_update_stops_unchanged_running_container() {
+    let (dir, docker) = crate::docker::fake_docker(
+      r#"
+case "$1:$6" in
+  compose:up) [ "$7" = --no-start ] && touch updated;;
+  compose:stop) [ -f updated ] && touch stopped;;
+  ps:*)
+    [ -f updated ] || exit 2
+    state=running
+    [ ! -f stopped ] || state=exited
+    echo '{"Names":"app-web-1","Labels":"com.docker.compose.project=app","State":"created"}'
+    printf '{"Names":"app-db-1","Labels":"com.docker.compose.project=app","State":"%s"}\n' "$state";;
+  *) exit 2;;
+esac
+"#,
+    );
+    let ops = Ops::new(
+      docker.clone(),
+      Reporter::new(docker.clone(), None),
+      String::new(),
+      HostShell::prepare(docker.clone(), "s1".into()).await,
+      dir.path().into(),
+    );
+    let up: ProjectUp = serde_json::from_value(serde_json::json!({
+      "project": "app",
+      "compose": "services: {web: {image: web:2}, db: {image: db:1}}",
+      "hash": "new",
+      "pull": {"mirrors": {}, "mirrors_only": false, "attempt_timeout_secs": 1},
+      "no_start": true
+    })).unwrap();
+    docker.write_compose("app", &up.compose).unwrap();
+    let result = ops
+      .finish_up(&up, &[], vec![], None, &Ctx::detached())
+      .await
+      .unwrap();
+    assert_eq!(
+      result
+        .containers
+        .iter()
+        .map(|c| c.state.as_str())
+        .collect::<Vec<_>>(),
+      ["exited", "created"]
+    );
+    assert_eq!(
+      std::fs::read_to_string(
+        docker.project_dir("app").join(crate::docker::HASH_FILE)
+      )
+      .unwrap(),
+      "new"
+    );
+  }
 
   #[test]
   fn previous_tracks_config_or_image_change() {

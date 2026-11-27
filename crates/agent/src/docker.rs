@@ -40,6 +40,33 @@ pub struct Docker {
   pub data_dir: PathBuf,
 }
 
+#[cfg(test)]
+pub(crate) fn fake_docker(
+  script: &str,
+) -> (tempfile::TempDir, Docker) {
+  use std::os::unix::fs::PermissionsExt;
+
+  let dir = tempfile::tempdir().unwrap();
+  let bin = dir.path().join("docker");
+  std::fs::write(
+    &bin,
+    format!(
+      "#!/bin/sh\ncd -- \"$(dirname -- \"$0\")\" || exit 1\n{script}"
+    ),
+  )
+  .unwrap();
+  std::fs::set_permissions(
+    &bin,
+    std::fs::Permissions::from_mode(0o700),
+  )
+  .unwrap();
+  let docker = Docker {
+    bin: bin.display().to_string(),
+    data_dir: dir.path().into(),
+  };
+  (dir, docker)
+}
+
 impl Docker {
   pub fn project_dir(&self, project: &str) -> PathBuf {
     self.data_dir.join("projects").join(project)
@@ -451,12 +478,18 @@ impl Docker {
   pub async fn up(
     &self,
     project: &str,
+    no_start: bool,
     ctx: &Ctx,
   ) -> Result<(), ApiError> {
-    ctx.say("启动容器");
+    let mode = if no_start { "--no-start" } else { "-d" };
+    ctx.say(if no_start {
+      "创建容器（保持停止）"
+    } else {
+      "启动容器"
+    });
     self
       .compose(project)
-      .args(["up", "-d", "--remove-orphans", "--pull", "never"])
+      .args(["up", mode, "--remove-orphans", "--pull", "never"])
       .timeout(Duration::from_secs(300))
       .stream(true)
       .run(ctx)

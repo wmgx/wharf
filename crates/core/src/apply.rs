@@ -1185,6 +1185,8 @@ pub(crate) async fn run_step(
               retire: None,
               rollback: false,
               pins: Default::default(),
+              expected_images: Default::default(),
+              no_start: false,
               trial: None,
             },
             caddyfile: r.config,
@@ -1271,6 +1273,8 @@ pub(crate) async fn run_step(
             retire: None,
             rollback: false,
             pins: Default::default(),
+            expected_images: Default::default(),
+            no_start: false,
             trial: None,
           }),
           GATEWAY_TIMEOUT,
@@ -1307,6 +1311,8 @@ pub(crate) async fn run_step(
             retire: None,
             rollback: false,
             pins: Default::default(),
+            expected_images: Default::default(),
+            no_start: false,
             trial: None,
           }),
           GATEWAY_TIMEOUT,
@@ -1467,6 +1473,21 @@ pub(crate) async fn run_step(
   Ok(())
 }
 
+fn ensure_created(
+  result: &ProjectUpResult,
+  service: &str,
+) -> Result<(), ApiError> {
+  if result.containers.is_empty()
+    || result.containers.iter().any(|c| c.state == "running")
+  {
+    return Err(ApiError::new(
+      ErrorCode::AgentFailed,
+      format!("服务 {service} 创建后没有容器或容器仍在运行"),
+    ));
+  }
+  Ok(())
+}
+
 fn ensure_running(
   result: &ProjectUpResult,
   what: &str,
@@ -1575,6 +1596,13 @@ async fn service_up(
     )
   })?;
   let server = &row.spec.server;
+  // 刚导入时本机已有的镜像不拉取，避免拉到新版本而重建容器。
+  let pull_missing_only = row.import.is_some();
+  if pull_missing_only {
+    state.hub.require_safe_adopt(server)?;
+  }
+  let no_start =
+    row.spec.stopped && state.hub.supports_safe_adopt(server);
   let (compose, hash) = snapshot::service_resolved(
     world,
     &net,
@@ -1592,15 +1620,18 @@ async fn service_up(
   let retire = row
     .import
     .as_ref()
-    .filter(|a| a.project.is_some() || !a.containers.is_empty())
+    .filter(|a| {
+      a.project.is_some()
+        || !a.containers.is_empty()
+        || !a.expected_services.is_empty()
+    })
     .map(|a| Retire {
       service: service.to_string(),
       project: a.project.clone(),
       containers: a.containers.clone(),
+      rename_containers: a.rename_containers.clone(),
+      expected_services: a.expected_services.clone(),
     });
-  // 刚导入时本机已有的镜像不拉取，避免拉到新版本而重建容器。
-  let pull_missing_only = row.import.is_some()
-    && !has_deployment(state, service, &row.instance_id).await?;
   // 起不来时自动换回上一版：只对没有数据的服务做，新版本可能已经改了数据，
   // 旧版本不一定认。compose 来源看不出有没有数据，不做。
   let rollback = row.spec.volumes.is_empty()
@@ -1636,6 +1667,12 @@ async fn service_up(
         retire,
         rollback,
         pins: row.pins.clone(),
+        expected_images: row
+          .import
+          .as_ref()
+          .map(|a| a.expected_images.clone())
+          .unwrap_or_default(),
+        no_start,
         trial,
       }),
       SERVICE_UP_TIMEOUT,
@@ -1662,11 +1699,15 @@ async fn service_up(
     &result,
   )
   .await?;
-  let running = ensure_running(
-    &result,
-    service,
-    &format!("wharf service logs {service}"),
-  );
+  let running = if no_start {
+    ensure_created(&result, service)
+  } else {
+    ensure_running(
+      &result,
+      service,
+      &format!("wharf service logs {service}"),
+    )
+  };
   if running.is_err() && !retired.is_empty() {
     restore(state, server, service, retired, &progress).await;
   }
@@ -1685,7 +1726,7 @@ async fn service_up(
       })
       .await?;
   }
-  if row.spec.stopped {
+  if row.spec.stopped && !no_start {
     project_stop_start(
       state, server, service, false, &progress, cancel,
     )

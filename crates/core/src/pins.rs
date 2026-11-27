@@ -56,7 +56,12 @@ pub fn images(source: &Source) -> Vec<String> {
     .filter(|svc| svc.get("build").is_none())
     .filter_map(|svc| svc["image"].as_str())
     .map(str::trim)
-    .filter(|i| !i.is_empty() && !i.contains('@') && !i.contains('$'))
+    .filter(|i| {
+      !i.is_empty()
+        && !i.contains('@')
+        && !i.contains('$')
+        && !i.starts_with("sha256:")
+    })
     .map(str::to_string)
     .collect();
   out.sort();
@@ -202,7 +207,7 @@ pub async fn resolve(
     BTreeMap::new();
   for (name, row) in desired.services.iter_mut() {
     // 导入时按本机已有的镜像启动，不查仓库里的最新版本；部署后记下实际的版本。
-    if row.import.is_some() && !applied.contains_key(name) {
+    if row.import.is_some() {
       continue;
     }
     let check_platform = check_migrated_images
@@ -717,4 +722,36 @@ mod tests {
     );
     assert_eq!(with_tag("nginx", "1.27").unwrap(), "nginx:1.27");
   }
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn pending_import_retry_does_not_resolve_registry_images() {
+  let state = crate::rules::tests::test_state();
+  let mut snap = snapshot::load(&state.db).await.unwrap();
+  snap.applied.insert(
+    "app".into(),
+    serde_json::from_value(
+      serde_json::json!({"hash": "h1", "at": "2026-01-01T00:00:00Z"}),
+    )
+    .unwrap(),
+  );
+  let row = crate::world::ServiceRow {
+    spec: serde_json::from_value(serde_json::json!({"server": "s1", "source": {"image": "img:1"}})).unwrap(),
+    version: 1,
+    instance_id: "i1".into(),
+    host_ports: Default::default(),
+    import: Some(Default::default()),
+    pins: Default::default(),
+    commit: None,
+  };
+  let mut desired = World::default();
+  desired.services.insert("app".into(), row);
+  // 没有在线 agent，误查询仓库会返回 AgentOffline。
+  let result =
+    resolve(&state, &snap, &mut desired, &BTreeSet::new(), false)
+      .await
+      .unwrap();
+  assert!(result.image_ids.is_empty());
+  assert!(desired.services["app"].pins.is_empty());
 }

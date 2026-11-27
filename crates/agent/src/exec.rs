@@ -31,6 +31,13 @@ impl Ctx {
     }
   }
 
+  pub fn detached_with_progress(&self) -> Self {
+    Self {
+      progress: self.progress.clone(),
+      ..Self::detached()
+    }
+  }
+
   pub fn say(&self, line: impl Into<String>) {
     if let Some(progress) = &self.progress {
       progress(line.into());
