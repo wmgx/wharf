@@ -2108,6 +2108,26 @@ fn parse_port(s: &str) -> CliResult<PortSpec> {
   })
 }
 
+fn reconcile_source_switch(
+  spec: &mut ServiceSpec,
+  source: Source,
+  refresh_compose_ports: bool,
+) {
+  let was_compose = matches!(spec.source, Source::Compose { .. });
+  let is_compose = matches!(source, Source::Compose { .. });
+  if is_compose && !was_compose {
+    spec.volumes.clear();
+  }
+  if was_compose && !is_compose {
+    spec.container = None;
+    spec.ports.clear();
+  }
+  if is_compose && refresh_compose_ports {
+    spec.ports.clear();
+  }
+  spec.source = source;
+}
+
 async fn service(
   c: &Client,
   cmd: ServiceCmd,
@@ -2689,19 +2709,11 @@ async fn service(
       };
       let was_compose = matches!(spec.source, Source::Compose { .. });
       if let Some(source) = source {
-        let is_compose = matches!(source, Source::Compose { .. });
-        if is_compose && !was_compose {
-          spec.volumes.clear();
-          spec.backup = None;
-        }
-        if !is_compose && was_compose {
-          spec.container = None;
-          spec.ports.clear();
-        }
-        if is_compose && refresh_ports && port.is_empty() {
-          spec.ports.clear();
-        }
-        spec.source = source;
+        reconcile_source_switch(
+          &mut spec,
+          source,
+          refresh_ports && port.is_empty(),
+        );
       }
       if let Some(seconds) = start_timeout {
         spec.start_timeout_secs = (seconds != 0).then_some(seconds);
@@ -4799,6 +4811,26 @@ fn share_ttl(s: &str) -> Result<Duration, String> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn source_switch_refreshes_compose_ports_only_when_requested() {
+    let mut spec: ServiceSpec = serde_json::from_value(serde_json::json!({
+      "server":"s1", "source":{"compose":{"content":"services: {}"}},
+      "container":"app", "ports":[{"name":"http","host":8081}]
+    })).unwrap();
+    let new_compose = spec.source.clone();
+    reconcile_source_switch(&mut spec, new_compose.clone(), false);
+    assert_eq!(spec.ports[0].host, Some(8081));
+    reconcile_source_switch(&mut spec, new_compose, true);
+    assert!(spec.ports.is_empty());
+    reconcile_source_switch(
+      &mut spec,
+      Source::Image("nginx".into()),
+      false,
+    );
+    assert!(spec.container.is_none());
+  }
+
   use clap::Parser;
 
   #[tokio::test]

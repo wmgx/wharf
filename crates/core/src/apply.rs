@@ -1351,10 +1351,23 @@ pub(crate) async fn run_step(
     }
     Step::EdgeDeploy { app, commit } => {
       let key = crate::edge_plan::deployed_key(app);
-      let fingerprint = world
+      let spec = &world
         .edge_apps
         .get(app)
-        .map(|a| crate::edge_plan::fingerprint(app, &a.spec));
+        .ok_or_else(|| crate::edge::edge_not_found(app))?
+        .spec;
+      if spec
+        .source
+        .as_ref()
+        .and_then(|src| src.git.as_ref())
+        .is_some_and(|git| git.user.is_some())
+      {
+        let server = crate::edge::builder(state, &snap, spec)?;
+        if !state.hub.supports_build_v2(&server) {
+          return Err(crate::build::old_git_agent(&server));
+        }
+      }
+      let fingerprint = crate::edge_plan::fingerprint(app, spec);
       let k = key.clone();
       state
         .db
@@ -1373,9 +1386,7 @@ pub(crate) async fn run_step(
       .await?;
       state
         .db
-        .call(move |c| {
-          db::set_setting(c, &key, fingerprint.as_deref())
-        })
+        .call(move |c| db::set_setting(c, &key, Some(&fingerprint)))
         .await?;
     }
     Step::EdgeAttach {
