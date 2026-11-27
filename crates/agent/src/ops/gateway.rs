@@ -217,9 +217,9 @@ impl Ops {
     }
     .await;
     // GatewayFiles 的守卫已经还原文件，旧容器现在才能读取旧配置。
-    match result {
-      Ok(result) => Ok(result),
-      Err(error) if activated && running && !compose_changed => {
+    match (result, activated, previous) {
+      (Ok(result), _, _) => Ok(result),
+      (Err(error), true, _) if running && !compose_changed => {
         let recover = ctx.detached_with_progress();
         recover.say("热重载失败，恢复旧网关配置");
         Err(
@@ -229,15 +229,14 @@ impl Ops {
           },
         )
       }
-      Err(error) if activated && previous.is_some() => {
-        let previous = previous.as_ref().unwrap();
+      (Err(error), true, Some(previous)) => {
         let recover = ctx.detached_with_progress();
         recover.say(format!("{}，恢复旧网关", error.message));
         Err(
           self
             .restore_project(
               &up.project,
-              previous,
+              &previous,
               &recover,
               error,
               "旧网关",
@@ -248,7 +247,7 @@ impl Ops {
             .await,
         )
       }
-      Err(error) => Err(
+      (Err(error), _, previous) => Err(
         self.restore_before_up(previous.as_ref(), ctx, error).await,
       ),
     }

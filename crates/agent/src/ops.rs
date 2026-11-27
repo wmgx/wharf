@@ -1031,7 +1031,7 @@ impl Ops {
     let project = format!("{TRIAL_PROJECT_PREFIX}{}", up.project);
     let trial = up.trial.as_ref().unwrap();
     ctx.say("试跑新版本");
-    let result = async {
+    let result: Result<(), ApiError> = async {
       self.docker.write_compose(&project, trial)?;
       self.up_with_crash_logs(&project, false, 10, ctx).await?;
       crate::settle::watch(

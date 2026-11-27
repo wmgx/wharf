@@ -207,10 +207,11 @@ pub async fn rollback(
   let list = edge::versions(&snap, &name).await?;
   let version =
     edge::rollback_target(&name, &list, req.version.as_deref())?;
+  let short: String = version.chars().take(8).collect();
   Ok(Json(
     start_task_by(
       s.clone(),
-      format!("回滚 {name} 到 {}", &version[..8.min(version.len())]),
+      format!("回滚 {name} 到 {short}"),
       Step::EdgeRollback { app: name, version },
       Some(crate::apply::format_actor(&auth)),
     )

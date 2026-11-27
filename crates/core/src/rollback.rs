@@ -57,7 +57,7 @@ pub async fn target(
     .await?;
   let (id, _, spec, images, created, commit) = selected;
   let spec: ServiceSpec = match spec {
-    Some(spec) => serde_json::from_str(spec).map_err(json_err)?,
+    Some(spec) => serde_json::from_str(&spec).map_err(json_err)?,
     None => {
       return Err(
         ApiError::invalid(format!(

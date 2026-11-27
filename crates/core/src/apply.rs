@@ -2171,7 +2171,12 @@ async fn service_up(
     pull_missing_only,
     retire,
     rollback,
-    pins: row.pins.clone(),
+    pins: row
+      .pins
+      .iter()
+      .filter(|(image, _)| !image.contains('@'))
+      .map(|(image, digest)| (image.clone(), digest.clone()))
+      .collect(),
     expected_images: row
       .import
       .as_ref()

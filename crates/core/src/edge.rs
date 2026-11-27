@@ -689,7 +689,8 @@ mod tests {
     .await
     .unwrap();
     assert!(lines.lock().unwrap()[0].contains("刷新线上状态失败"));
-    let expected = state.db.call(db::edge_expected).await.unwrap();
+    let expected =
+      state.db.call(|c| db::edge_expected(c)).await.unwrap();
     assert_eq!(expected["w"].versions, "confirmed");
   }
 

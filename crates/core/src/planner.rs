@@ -1434,6 +1434,13 @@ fn service_items(
           crate::pins::short(&new)
         )
       })
+    })
+    .or_else(|| {
+      (b.explicit_pins.contains(name)
+        && crate::pins::images(&svc.spec.source)
+          .iter()
+          .any(|image| !svc.pins.contains_key(image)))
+      .then(|| "按标签重新拉取未固定的镜像".into())
     });
     // 配置没变、只是要停下来：不重建，直接停。
     if moved.is_none()
