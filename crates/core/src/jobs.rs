@@ -482,3 +482,21 @@ async fn failed_cleanup_does_not_starve_next_due_record() {
     .unwrap()
     .unwrap();
 }
+
+#[test]
+fn scheduler_uses_target_and_empty_repo_state() {
+  let now = BACKUP_EVERY_MS * 2;
+  let ok = crate::data::BackupHistory {
+    ok: Some(now - 180_000),
+    ..Default::default()
+  };
+  assert!(!due(Some(&ok), false, now));
+  assert!(due(Some(&ok), true, now));
+  assert!(due(None, false, now));
+  let failed = crate::data::BackupHistory {
+    failed: Some(now - 500),
+    ..Default::default()
+  };
+  assert!(!due(Some(&failed), true, now));
+  assert!(due(Some(&failed), true, now + RETRY_AFTER_MS));
+}

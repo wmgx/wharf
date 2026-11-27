@@ -101,3 +101,70 @@ fn restore_installs_staged_tree_after_original_entry_changes() {
   assert_eq!(fs::read_to_string(kept.join("old")).unwrap(), "kept");
   assert!(fresh.symlink_metadata().unwrap().is_symlink());
 }
+
+#[test]
+fn detect_escaped_mounts_finds_symlink_outside_root() {
+  let dir = tempfile::tempdir().unwrap();
+  let root = dir.path().join("s1");
+  let link = root.join("originals");
+  fs::create_dir(&root).unwrap();
+  symlink("/mnt/nonexistent-in-agent/originals", &link).unwrap();
+  let mounts = [link.display().to_string()];
+  assert_eq!(
+    detect_escaped_mounts(dir.path(), "s1", &mounts).unwrap(),
+    [EscapedMount {
+      source: mounts[0].clone(),
+      resolved: "/mnt/nonexistent-in-agent/originals".into(),
+    }]
+  );
+}
+
+#[test]
+fn mountpoint_detected_even_when_parent_and_child_share_device() {
+  let dir = tempfile::tempdir().unwrap();
+  let service = dir.path().join("s1");
+  fs::create_dir(&service).unwrap();
+  let info = format!(
+    "22 1 0:1 / {} rw - ext4 /dev/disk rw",
+    service.display()
+  );
+  assert!(is_mountpoint(dir.path(), "s1", Some(&info)).unwrap());
+  assert!(!is_mountpoint(dir.path(), "s1", None).unwrap());
+}
+
+#[test]
+fn cleanup_stale_work_keeps_before_dirs_and_prune_respects_days() {
+  let dir = tempfile::tempdir().unwrap();
+  let root = dir.path().join(".wharf-restore");
+  let work = root.join("s1-20260101-000000-abcdef12");
+  let kept = root.join("s1-before-20260101-000000-abcdef12");
+  fs::create_dir_all(&work).unwrap();
+  fs::create_dir(&kept).unwrap();
+  cleanup_stale_restore_work(dir.path());
+  assert!(kept.is_dir() && !work.exists());
+  let prune = |days| {
+    prune_restore_kept(dir.path(), days, &Ctx::detached())
+      .unwrap()
+      .removed
+  };
+  assert_eq!(prune(7), 0);
+  assert_eq!(prune(0), 1);
+  assert!(!kept.exists());
+}
+
+#[test]
+fn locked_repo_error_maps_to_unlock_hint() {
+  let error = check_restic_output(
+    Output {
+      success: false,
+      code: Some(1),
+      stdout: String::new(),
+      stderr: "repository is already locked exclusively".into(),
+    },
+    "restic backup",
+    "s1",
+  )
+  .unwrap_err();
+  assert_eq!(error.code, ErrorCode::Conflict);
+  assert_eq!(error.suggest, ["wharf backup unlock s1"]);
+}

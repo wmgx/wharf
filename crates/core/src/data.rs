@@ -538,3 +538,31 @@ volumes:
     );
   }
 }
+
+#[test]
+fn escaped_mount_downgrades_status_to_uncovered() {
+  let mut mounts = vec![DataMount {
+    source: "/srv/s1".into(),
+    target: "/data".into(),
+    kind: DataKind::Managed,
+    resolved: None,
+    container: None,
+  }];
+  let now = Utc::now();
+  assert_eq!(
+    status(true, &mounts, Some(now), None, now),
+    DataStatus::Ok
+  );
+  apply_escaped_mounts(
+    &mut mounts,
+    &[EscapedMount {
+      source: "/srv/s1/originals".into(),
+      resolved: "/mnt/originals".into(),
+    }],
+  );
+  assert_eq!(mounts[1].resolved.as_deref(), Some("/mnt/originals"));
+  assert_eq!(
+    status(true, &mounts, Some(now), None, now),
+    DataStatus::Uncovered
+  );
+}

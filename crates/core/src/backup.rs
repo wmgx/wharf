@@ -244,6 +244,9 @@ async fn check_location(
   w: &Where,
   service: &str,
 ) -> Result<(), ApiError> {
+  if !snap.world.servers.contains_key(&w.target) {
+    return Err(crate::world::server_not_found(&w.target));
+  }
   if w.server == w.target {
     return Err(ApiError::invalid(format!(
       "服务 {service} 现在就在备份服务器 {} 上，换一台备份服务器",
@@ -626,7 +629,7 @@ pub async fn backup(
   let snap = snapshot::load(&state.db).await?;
   let w = location(&snap, service, service_target(&snap, service)?);
   let mut started = Ok(());
-  let result = async {
+  let result: Result<_, ApiError> = async {
     check_location(state, &snap, &w, service).await?;
     let creds = ensure_service_creds(state, service).await?;
     ensure_server(state, &snap, &w, None, &progress, cancel).await?;

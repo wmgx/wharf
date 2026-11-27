@@ -395,3 +395,188 @@ async fn backup_isolation_rejects_old_agent_without_capability() {
   assert!(err.hint.unwrap().contains("upgrade"));
   assert_eq!(secret_count(&state).await, 0);
 }
+
+fn mock_backup_path(
+  state: &AppState,
+  source: impl FnMut(AgentOp) -> Result<serde_json::Value, ApiError>
+  + Send
+  + 'static,
+  expect_prune: Option<Arc<AtomicBool>>,
+) {
+  state
+    .hub
+    .mock_agent_with_backup("s1", false, true, false, source);
+  state.hub.mock_agent_with_backup("s2", false, true, false, move |op| match op {
+    AgentOp::ProjectStatus { .. } => Ok(json!([])),
+    AgentOp::ProjectUp(up) => {
+      assert!(up.compose.contains("svc-a:"));
+      Ok(json!({"containers":[{"name":"rest-server","service":"rest-server","state":"running"}], "images":[]}))
+    }
+    AgentOp::Restic(job) => match job.action {
+      ResticAction::ListKeys => Ok(json!([{"id":"cafe","current":true}])),
+      ResticAction::Prune => {
+        expect_prune.as_ref().expect("不应清理快照").store(true, Ordering::Relaxed);
+        Ok(json!(null))
+      }
+      _ => panic!("意外的仓库任务"),
+    },
+    _ => panic!("意外的备份目标机任务"),
+  });
+  state.hub.mock_safe_backup_agent("s1");
+  state.hub.mock_safe_backup_agent("s2");
+}
+
+#[tokio::test]
+async fn preflight_failure_never_stops_service() {
+  let state = test_state();
+  seed_servers(&state).await;
+  seed_service(&state, "svc-a", true).await;
+  let mut probes = 0;
+  mock_backup_path(
+    &state,
+    move |op| match op {
+      AgentOp::Probe { .. } => Ok(json!([true])),
+      AgentOp::Restic(job)
+        if matches!(job.action, ResticAction::Preflight(_)) =>
+      {
+        probes += 1;
+        if probes == 1 {
+          Err(ApiError::new(ErrorCode::AgentFailed, "镜像没有拉到"))
+        } else {
+          Ok(
+            json!({"conflicting_users":[{"container":"writer","source":"/srv/svc-a/data","rw":true}]}),
+          )
+        }
+      }
+      _ => panic!("预检失败后仍尝试停服或传输"),
+    },
+    None,
+  );
+  for code in [ErrorCode::AgentFailed, ErrorCode::Conflict] {
+    let err = backup(
+      &state,
+      "r1",
+      "svc-a",
+      Arc::new(|_| {}),
+      &CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code, code);
+  }
+  assert!(
+    records(&state, "svc-a", 2)
+      .await
+      .unwrap()
+      .iter()
+      .all(|r| !r.ok && r.target == "s2")
+  );
+}
+
+#[tokio::test]
+async fn restore_works_after_backup_disabled_and_includes_htpasswd() {
+  let state = test_state();
+  seed_servers(&state).await;
+  seed_service(&state, "svc-a", false).await;
+  seed_legacy(&state).await;
+  let mut stops = 0;
+  mock_backup_path(
+    &state,
+    move |op| match op {
+      AgentOp::Probe { .. } => Ok(json!([true])),
+      AgentOp::ServiceStopForData { .. } => {
+        stops += 1;
+        if stops == 1 {
+          Err(ApiError::new(ErrorCode::Conflict, "仍有活动容器"))
+        } else {
+          Ok(json!({"containers":[]}))
+        }
+      }
+      AgentOp::Restic(job) => match job.action {
+        ResticAction::Preflight(_) => Ok(json!({})),
+        ResticAction::Restore { .. } if stops == 2 => Ok(json!(null)),
+        _ => panic!("意外的恢复任务"),
+      },
+      _ => panic!("恢复启动了原先已停的服务，或未停服就传输了数据"),
+    },
+    None,
+  );
+  let cancel = CancellationToken::new();
+  assert_eq!(
+    restore(
+      &state,
+      "svc-a",
+      "abcd1234",
+      None,
+      Arc::new(|_| {}),
+      &cancel
+    )
+    .await
+    .unwrap_err()
+    .code,
+    ErrorCode::Conflict
+  );
+  restore(
+    &state,
+    "svc-a",
+    "abcd1234",
+    None,
+    Arc::new(|_| {}),
+    &cancel,
+  )
+  .await
+  .unwrap();
+  assert!(
+    snapshot::load(&state.db).await.unwrap().world.services["svc-a"]
+      .spec
+      .backup
+      .is_none()
+  );
+}
+
+#[tokio::test]
+async fn backup_records_ok_and_prunes_even_when_restart_fails() {
+  let state = test_state();
+  seed_servers(&state).await;
+  seed_service(&state, "svc-a", true).await;
+  let pruned = Arc::new(AtomicBool::new(false));
+  mock_backup_path(
+    &state,
+    |op| match op {
+      AgentOp::Probe { .. } => Ok(json!([true])),
+      AgentOp::ServiceStopForData { .. } => {
+        Ok(json!({"containers":["web"]}))
+      }
+      AgentOp::Restic(job) => match job.action {
+        ResticAction::Preflight(_) => Ok(json!({})),
+        ResticAction::Backup { .. } => Ok(
+          json!({"snapshot_id":"abcd1234","files":1,"bytes":5,"added_bytes":5}),
+        ),
+        _ => panic!("意外的传输任务"),
+      },
+      AgentOp::ProjectStart { containers, .. } => {
+        assert_eq!(containers, ["web"]);
+        Err(ApiError::new(ErrorCode::AgentFailed, "容器没起来"))
+      }
+      _ => panic!("意外的源机任务"),
+    },
+    Some(pruned.clone()),
+  );
+  let err = backup(
+    &state,
+    "r1",
+    "svc-a",
+    Arc::new(|_| {}),
+    &CancellationToken::new(),
+  )
+  .await
+  .unwrap_err();
+  assert!(err.hint.unwrap().contains("快照已写入"));
+  let entry =
+    records(&state, "svc-a", 1).await.unwrap().pop().unwrap();
+  assert!(
+    entry.ok
+      && entry.summary.is_some()
+      && pruned.load(Ordering::Relaxed)
+  );
+}

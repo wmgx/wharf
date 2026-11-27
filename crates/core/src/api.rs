@@ -929,6 +929,9 @@ async fn remove_server(
   Path(name): Path<String>,
 ) -> ApiResult<Value> {
   auth.require(Perm::Admin)?;
+  let _guard = s
+    .locks
+    .acquire(crate::locks::LockSpec::Global, "删除服务器")?;
   let snap = snapshot::load(&s.db).await?;
   if !snap.world.servers.contains_key(&name) {
     return Err(server_not_found(&name).into());

@@ -476,7 +476,7 @@ async fn backup_impl(
     target: to,
     target_ip: String::new(),
   };
-  let result = async {
+  let result: Result<_, ApiError> = async {
     if require_standard_dir {
       check_data_dir(state)?;
     }
@@ -959,6 +959,70 @@ fn restore_command(ip: &str, user: &str) -> String {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn prepare_failure_records_row_and_preserves_old_config() {
+    let state = crate::rules::tests::test_state();
+    crate::backup::tests::seed_servers(&state).await;
+    state
+      .db
+      .call(|c| db::set_setting(c, TO, Some("s1")))
+      .await
+      .unwrap();
+    assert_eq!(
+      reject_self_target("s1", "s1").unwrap_err().code,
+      ErrorCode::InvalidInput
+    );
+    assert!(
+      backup_impl(
+        &state,
+        "r1",
+        None,
+        (Some("s2"), None),
+        Arc::new(|_| {}),
+        &CancellationToken::new(),
+        false
+      )
+      .await
+      .is_err()
+    );
+    let records = backup::records(&state, REPO, 10).await.unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].target, "s2");
+    assert!(!records[0].ok);
+    assert_eq!(
+      state
+        .db
+        .call(|c| db::setting(c, TO))
+        .await
+        .unwrap()
+        .as_deref(),
+      Some("s1")
+    );
+  }
+
+  #[tokio::test]
+  async fn stale_user_key_emits_issue_and_stage_drop_cleans_dir() {
+    let state = crate::rules::tests::test_state();
+    state
+      .db
+      .call(|c| db::set_setting(c, TO, Some("s2")))
+      .await
+      .unwrap();
+    assert_eq!(
+      issues(&state.db).await.unwrap()[0].code,
+      "core_backup_key_stale"
+    );
+
+    let root = tempfile::tempdir().unwrap();
+    let dir = staging_path(root.path());
+    std::fs::create_dir(&dir).unwrap();
+    drop(StagedCoreDir(dir.clone()));
+    assert!(!dir.exists());
+    std::fs::create_dir(&dir).unwrap();
+    cleanup_staged(root.path());
+    assert!(!dir.exists());
+  }
 
   #[tokio::test]
   async fn recovery_requires_human_and_enable_password_failures_lock()

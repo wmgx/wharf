@@ -1049,12 +1049,12 @@ export interface EgressSpec {
  */
 export type ErrorCode = "InvalidInput" | "NotFound" | "AlreadyExists" | "Conflict" | "Unauthorized" | "Forbidden" | "PasswordRequired" | "AgentOffline" | "Timeout" | "Cancelled" | "NotImplemented" | "Internal" | "PlanStale" | "ConfirmRequired" | "Busy" | "AgentFailed" | "Provider";
 
-export type ExplainVerdict = "allow" | "deny" | "depends";
-
 export interface EscapedMount {
   resolved: string;
   source: string;
 }
+
+export type ExplainVerdict = "allow" | "deny" | "depends";
 
 export interface ExposureView {
   checked_at: number | null;

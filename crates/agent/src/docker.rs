@@ -1680,6 +1680,52 @@ mod tests {
   }
 
   #[test]
+  fn bind_mount_active_users_distinguishes_rw_and_ro() {
+    use std::path::PathBuf;
+    let inspect = r#""/writer" "" "other" [{"Type":"bind","Source":"/srv/s1/data","RW":true}]
+"/reader" "" "" [{"Type":"bind","Source":"/srv/s1/data","RW":false}]
+"/wharf-agent" "agent" "" [{"Type":"bind","Source":"/srv","Destination":"/srv"}]
+"/self" "" "s1" [{"Type":"bind","Source":"/srv/s1/data"}]"#;
+    let mounts = super::parse_bind_mounts(inspect).unwrap();
+    let paths = [PathBuf::from("/srv/s1")];
+    let backup =
+      super::active_mount_users(&paths, "s1", true, mounts.clone());
+    assert_eq!(backup.len(), 1);
+    assert_eq!(backup[0].container, "writer");
+    let restore =
+      super::active_mount_users(&paths, "s1", false, mounts);
+    assert_eq!(restore.len(), 2);
+    assert_eq!(restore[1].container, "reader");
+  }
+
+  #[tokio::test]
+  async fn stop_for_data_rejects_running_containers_without_compose()
+  {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("docker");
+    use std::{fs, os::unix::fs::PermissionsExt};
+    fs::write(&script, "#!/bin/sh\n[ \"$1\" = ps ] || exit 99\nprintf 'web running\ninit exited\n'\n").unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o700))
+      .unwrap();
+    let docker = super::Docker {
+      bin: script.display().to_string(),
+      data_dir: dir.path().into(),
+    };
+    let ctx = super::Ctx::detached();
+    let error =
+      docker.stop_running_for_data("s1", &ctx).await.unwrap_err();
+    assert_eq!(error.code, wharf_api_types::ErrorCode::Conflict);
+    assert!(
+      error.message.contains("web")
+        && !error.message.contains("init")
+    );
+    assert_eq!(
+      docker.stop_start("s1", false, &ctx).await.unwrap_err().code,
+      error.code
+    );
+  }
+
+  #[test]
   fn bind_mount_users_ignores_only_system_management_mounts() {
     let inspect = r#""/wharf-agent" "agent" "" [{"Type":"bind","Source":"/srv","Destination":"/srv"}]
 "/wharf-agent-old" "1" "" [{"Type":"bind","Source":"/srv","Destination":"/srv"}]
