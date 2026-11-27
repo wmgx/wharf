@@ -1020,9 +1020,17 @@ fn step_done(step: &wharf_api_types::plan::RunStep) -> bool {
 
 async fn run_cmd(c: &Client, cmd: RunCmd, j: bool) -> CliResult<()> {
   match cmd {
-    RunCmd::List { limit } => {
-      let runs: Vec<Run> =
-        c.get(&format!("/api/runs?limit={limit}")).await?;
+    RunCmd::List {
+      limit,
+      failed,
+      status,
+    } => {
+      let mut url =
+        format!("/api/runs?limit={limit}&failed={failed}");
+      if let Some(status) = status {
+        url.push_str(&format!("&status={status}"));
+      }
+      let runs: Vec<Run> = c.get(&url).await?;
       out(j, &runs, |runs| {
         for r in runs {
           print::run_line(r);
@@ -1043,6 +1051,15 @@ async fn run_cmd(c: &Client, cmd: RunCmd, j: bool) -> CliResult<()> {
         RunStatus::Succeeded => Ok(()),
         _ => Err(CliError::Exit(4)),
       }
+    }
+    RunCmd::Retry { run_id, no_wait } => {
+      let response: ApplyResponse = c
+        .post(
+          &format!("/api/runs/{}/retry", seg(&run_id)),
+          &json!({}),
+        )
+        .await?;
+      finish_task(c, &response.run_id, !no_wait, j).await
     }
     RunCmd::Cancel { run_id } => {
       let v: Value = c
@@ -2732,11 +2749,31 @@ async fn service(
       )
       .await
     }
-    ServiceCmd::Move { name, to, apply } => {
-      let mut spec = c
+    ServiceCmd::Move {
+      name,
+      to,
+      abort,
+      apply,
+    } => {
+      let view = c
         .get::<ServiceView>(&format!("/api/services/{}", seg(&name)))
-        .await?
-        .spec;
+        .await?;
+      let mut spec = view.spec;
+      let to = if abort {
+        let migration = view.migration.ok_or_else(|| {
+          ApiError::invalid(format!(
+            "服务 {name} 当前没有进行中的迁移"
+          ))
+        })?;
+        if migration.phase == "up_done" {
+          return Err(ApiError::invalid(format!("服务 {name} 已在 {} 启动成功，不能直接撤销；如需迁回请执行 wharf service move {name} --to {}", migration.to, migration.from)).into());
+        }
+        migration.from
+      } else {
+        to.ok_or_else(|| {
+          ApiError::invalid("需要指定 --to 或 --abort")
+        })?
+      };
       if spec.server == to {
         return Err(
           ApiError::invalid(format!("服务 {name} 已经在 {to} 上"))

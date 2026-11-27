@@ -87,6 +87,7 @@ fn old_core_ignores_new_hello_capability() {
     backup_isolation: true,
     safe_delete: true,
     safe_adopt: false,
+    safe_migrate: true,
     key_rotation: true,
   };
   let json = serde_json::to_string(&hello).unwrap();
@@ -198,6 +199,7 @@ impl Hub {
         backup_isolation,
         safe_delete: false,
         safe_adopt: false,
+        safe_migrate: false,
         upgrade_only: false,
       },
     );
@@ -316,6 +318,7 @@ async fn agent_upgrade_needs_no_bound_core_server_or_probe_support() {
     backup_isolation: false,
     safe_delete: false,
     safe_adopt: false,
+    safe_migrate: false,
     upgrade_only: true,
   };
   state.hub.register("s1", conn.clone());
@@ -376,6 +379,7 @@ fn probe_connection(
     backup_isolation: false,
     safe_delete: false,
     safe_adopt: false,
+    safe_migrate: false,
     upgrade_only: false,
   };
   (conn, rx)

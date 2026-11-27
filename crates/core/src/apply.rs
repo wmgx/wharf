@@ -243,6 +243,18 @@ async fn stored_plan(
 }
 
 mod confirm;
+#[path = "apply/retry.rs"]
+mod retry;
+
+pub use retry::retry_run;
+
+pub(crate) fn format_actor(auth: &crate::auth::Auth) -> String {
+  if auth.human {
+    format!("网页 ({})", auth.name)
+  } else {
+    format!("令牌 {}", auth.name)
+  }
+}
 
 pub async fn start(
   state: Arc<AppState>,
@@ -402,19 +414,12 @@ pub async fn start(
       finished_at: Some(now),
     });
   }
-  for s in &stored.steps {
-    steps.push(RunStep {
-      items: s.items.clone(),
-      title: s.title.clone(),
-      status: StepStatus::Pending,
-      log: vec![],
-      error: None,
-      started_at: None,
-      finished_at: None,
-    });
-  }
+  let offset = steps.len();
+  steps.extend(stored.steps.iter().map(pending_run_step));
   let run = Run {
     run_id: run_id.clone(),
+    actor: auth.map(format_actor).or_else(|| Some("系统".into())),
+    retry_of: None,
     plan_id: plan.plan_id.clone(),
     status: if stored.steps.is_empty() {
       RunStatus::Succeeded
@@ -429,11 +434,13 @@ pub async fn start(
     let account_refs = stored.body.account_refs;
     let base_instances = stored.body.base_instances;
     let writes = stored.writes.clone();
-    let pending = deleted_service_steps(&writes, &stored.steps);
+    let step_plans = stored.steps.clone();
     let policy_plan = plan.clone();
     let admin = perms.contains(&Perm::Admin);
     let plan_id = plan.plan_id.clone();
     let run_body = serde_json::to_string(&run).map_err(json_err)?;
+    let actor_name = run.actor.clone();
+    let confirmed = req.confirm;
     let run_status = if run.status == RunStatus::Running {
       "running"
     } else {
@@ -452,17 +459,17 @@ pub async fn start(
           base_instances.as_ref(),
         )?;
         apply_writes(&tx, &policy_plan, &writes, admin)?;
-        for p in &pending {
-          db::put_pending_delete(&tx, p)?;
-        }
+        crate::pending::stage(&tx, &run_id, &policy_plan, &writes, &step_plans)?;
         tx.execute(
           "UPDATE plans SET status = 'applied' WHERE id = ?1",
           params![plan_id],
         )
         .map_err(sql_err)?;
+        let meta = retry::RetryMeta::capture(&tx, key, (step_plans, offset), account_refs, confirmed)?;
+        let meta = serde_json::to_string(&meta).map_err(json_err)?;
         tx.execute(
-          "INSERT INTO runs (id, plan_id, status, body, started_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-          params![run_id, plan_id, run_status, run_body, now_ms()],
+          "INSERT INTO runs (id, plan_id, status, body, started_at, actor, retry_meta) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+          params![run_id, plan_id, run_status, run_body, now_ms(), actor_name, meta],
         )
         .map_err(sql_err)?;
         tx.commit().map_err(sql_err)
@@ -602,23 +609,6 @@ fn check_base_instances(
   Ok(())
 }
 
-fn deleted_service_steps(
-  writes: &[Write],
-  steps: &[StepPlan],
-) -> Vec<db::PendingDeleteRow> {
-  steps.iter().filter_map(|s| {
-    let Step::ServiceDown { service, server, purge_data, instance_id: Some(instance_id), has_relative_mounts } = &s.step else {
-      return None;
-    };
-    writes.iter().any(|write| matches!(write,
-      Write::Delete { kind, name } if kind == crate::world::KIND_SERVICE && name == service
-    )).then(|| db::PendingDeleteRow {
-      service: service.clone(), server: server.clone(), instance_id: instance_id.clone(),
-      purge_data: *purge_data, has_relative_mounts: *has_relative_mounts,
-    })
-  }).collect()
-}
-
 fn apply_writes(
   tx: &rusqlite::Transaction<'_>,
   plan: &Plan,
@@ -652,7 +642,7 @@ fn apply_writes(
       && kind == crate::world::KIND_SERVICE
       && !current.services.contains_key(name)
     {
-      db::clear_pending_deletes_for_service(tx, name)?;
+      crate::pending::clear_service(tx, name, true)?;
       tx.execute("DELETE FROM cleanups WHERE service = ?1", [name])
         .map_err(sql_err)?;
     }
@@ -671,84 +661,130 @@ fn apply_writes(
   )
 }
 
-/// 不来自计划的执行（备份、恢复）：同样占用 apply 锁、有执行记录、可以取消。
+/// 不来自计划的执行同样占用 apply 锁。
+#[allow(dead_code)]
 pub async fn start_task(
   state: Arc<AppState>,
   title: String,
   step: Step,
+) -> Result<ApplyResponse, ApiError> {
+  start_task_by(state, title, step, Some("系统".into())).await
+}
+
+pub async fn start_task_by(
+  state: Arc<AppState>,
+  title: String,
+  step: Step,
+  actor: Option<String>,
 ) -> Result<ApplyResponse, ApiError> {
   let guard = state
     .apply_lock
     .clone()
     .try_lock_owned()
     .map_err(|_| state.runs.busy_error())?;
-  start_task_locked(state, title, step, guard).await
+  start_task_locked(state, title, step, actor, guard).await
 }
 
 pub(crate) async fn start_task_locked(
   state: Arc<AppState>,
   title: String,
   step: Step,
+  actor: Option<String>,
   guard: OwnedMutexGuard<()>,
 ) -> Result<ApplyResponse, ApiError> {
-  let run_id = crate::world::new_id("r");
-  let run = Run {
-    run_id: run_id.clone(),
-    plan_id: String::new(),
-    status: RunStatus::Running,
-    started_at: Utc::now(),
-    finished_at: None,
-    steps: vec![RunStep {
-      items: vec![],
-      title: title.clone(),
-      status: StepStatus::Pending,
-      log: vec![],
-      error: None,
-      started_at: None,
-      finished_at: None,
-    }],
-  };
-  let scope_services = Some(run_scope::step_services(&step));
-  let body = run_scope::encode(&run, scope_services.as_deref())?;
-  {
-    let run_id = run_id.clone();
-    state
-      .db
-      .call(move |c| {
-        c.execute(
-          "INSERT INTO runs (id, plan_id, status, body, started_at) VALUES (?1, '', 'running', ?2, ?3)",
-          params![run_id, body, now_ms()],
-        )
-        .map_err(sql_err)?;
-        Ok(())
-      })
-      .await?;
-  }
-  let cancel = CancellationToken::new();
-  let shared = Arc::new(Mutex::new(run));
-  lock(&state.runs.active).insert(
-    run_id.clone(),
-    ActiveRun {
-      scope_services,
-      run: shared.clone(),
-      cancel: cancel.clone(),
-    },
+  let scope = Some(run_scope::step_services(&step));
+  let replayable = !matches!(
+    &step,
+    Step::CoreBackup { .. } | Step::CleanupData { .. }
   );
   let steps = vec![StepPlan {
     items: vec![],
     title,
     step,
   }];
-  tokio::spawn(execute(
-    state.clone(),
-    shared,
-    steps,
-    0,
-    None,
-    cancel,
-    guard,
-  ));
+  let run = Run {
+    run_id: crate::world::new_id("r"),
+    plan_id: String::new(),
+    actor,
+    retry_of: None,
+    status: RunStatus::Running,
+    started_at: Utc::now(),
+    finished_at: None,
+    steps: steps.iter().map(pending_run_step).collect(),
+  };
+  let run_id = run.run_id.clone();
+  let stored = run.clone();
+  let stored_steps = replayable.then(|| steps.clone());
+  let scope_services = scope.clone();
+  state
+    .db
+    .call_credentials(move |c, key| {
+      let meta = stored_steps
+        .map(|steps| {
+          retry::RetryMeta::capture(c, key, (steps, 0), None, vec![])
+        })
+        .transpose()?;
+      insert_task_run(
+        c,
+        &stored,
+        scope_services.as_deref(),
+        meta.as_ref(),
+      )
+    })
+    .await?;
+  spawn_run(state, run, scope, steps, guard);
   Ok(ApplyResponse { run_id })
+}
+
+fn pending_run_step(step: &StepPlan) -> RunStep {
+  RunStep {
+    items: step.items.clone(),
+    title: step.title.clone(),
+    status: StepStatus::Pending,
+    log: vec![],
+    error: None,
+    started_at: None,
+    finished_at: None,
+  }
+}
+
+fn insert_task_run(
+  c: &rusqlite::Connection,
+  run: &Run,
+  scope: Option<&[String]>,
+  meta: Option<&retry::RetryMeta>,
+) -> Result<(), ApiError> {
+  let body = run_scope::encode(run, scope)?;
+  let meta = meta
+    .map(serde_json::to_string)
+    .transpose()
+    .map_err(json_err)?;
+  c.execute(
+    "INSERT INTO runs (id, plan_id, status, body, started_at, actor, retry_of, retry_meta) VALUES (?1, ?2, 'running', ?3, ?4, ?5, ?6, ?7)",
+    params![run.run_id, run.plan_id, body, now_ms(), run.actor, run.retry_of, meta],
+  ).map_err(sql_err)?;
+  Ok(())
+}
+
+fn spawn_run(
+  state: Arc<AppState>,
+  run: Run,
+  scope_services: Option<Vec<String>>,
+  steps: Vec<StepPlan>,
+  guard: OwnedMutexGuard<()>,
+) {
+  let run_id = run.run_id.clone();
+  let cancel = CancellationToken::new();
+  let shared = Arc::new(Mutex::new(run));
+  lock(&state.runs.active).insert(
+    run_id,
+    ActiveRun {
+      scope_services,
+      run: shared.clone(),
+      cancel: cancel.clone(),
+    },
+  );
+  tokio::spawn(execute(state, shared, steps, 0, None, cancel, guard));
 }
 
 async fn execute(
@@ -825,6 +861,10 @@ async fn execute(
       .await
     } else {
       run_step(&state, &run_id, &step.step, progress, &cancel).await
+    };
+    let result = match result {
+      Ok(()) => crate::pending::finish_step(&state, &step.step).await,
+      Err(e) => Err(e),
     };
     crate::security_receipt::completed_step(
       &state,
@@ -1026,7 +1066,7 @@ pub(crate) async fn run_step(
         &net,
         service,
         (from, to),
-        instance_id.as_deref(),
+        !world.services[service].spec.stopped,
         progress,
         cancel,
       )
@@ -1048,19 +1088,67 @@ pub(crate) async fn run_step(
       instance_id,
     } => {
       check_step_instance(world, service, instance_id.as_deref())?;
-      service_up(
+      let migration =
+        snap.pending.migrations.get(service).filter(|m| {
+          m.phase != crate::pending::MigratePhase::UpDone
+            && world
+              .services
+              .get(service)
+              .is_some_and(|row| row.spec.server == m.payload.to)
+        });
+      if migration.is_some_and(|m| {
+        m.payload.has_managed_data
+          && m.phase != crate::pending::MigratePhase::Synced
+      }) {
+        return Err(ApiError::new(
+          ErrorCode::Conflict,
+          "迁移数据尚未同步，先运行 wharf plan",
+        ));
+      }
+      if let Err(e) = service_up(
         state,
         run_id,
         &snap,
         service,
         false,
         expect.as_deref(),
-        progress,
+        progress.clone(),
         cancel,
       )
-      .await?;
+      .await
+      {
+        if let Some(m) =
+          migration.filter(|m| m.payload.source_stopped)
+        {
+          let from = &m.payload.from;
+          if crate::migrate::restart_source(
+            state, from, service, &progress,
+          )
+          .await
+          {
+            crate::migrate::reset_after_restart(state, service)
+              .await?;
+            progress(format!(
+              "迁移至 {} 失败，已恢复 {from} 上的 {service} 运行",
+              m.payload.to
+            ));
+            return Err(e.with_hint(format!("源机已恢复运行；排查后可重试，或执行 wharf service move {service} --abort --apply 取消迁移")));
+          }
+          return Err(e.with_hint(format!("源机自动恢复失败，请先检查 {from} 并手动 wharf service start {service}")));
+        }
+        return Err(e);
+      }
+      if let Some(m) =
+        migration.filter(|m| m.payload.has_managed_data)
+      {
+        progress(format!(
+          "{} 上的 /srv/{service}/ 保留 7 天，之后自动删除",
+          m.payload.from
+        ));
+      }
     }
     Step::Rebuild { service } => {
+      crate::build::require_not_migrating(&snap, service)?;
       service_up(
         state, run_id, &snap, service, true, None, progress, cancel,
       )
@@ -1688,8 +1776,10 @@ async fn service_up(
   if pull_missing_only {
     state.hub.require_safe_adopt(server)?;
   }
-  let no_start =
-    row.spec.stopped && state.hub.supports_safe_adopt(server);
+  let no_start = row.spec.stopped;
+  if no_start && !pull_missing_only && !state.hub.supports_safe_migrate(server) {
+    return Err(crate::hub::safe_migrate_required(server));
+  }
   let (compose, hash) = snapshot::service_resolved(
     world,
     &net,
@@ -1778,7 +1868,7 @@ async fn service_up(
         pull: snapshot::pull_policy(&world.servers[server]),
         pull_missing_only,
         retire,
-        rollback,
+        rollback: rollback && !row.spec.stopped,
         pins: row.pins.clone(),
         expected_images: row
           .import
@@ -1807,21 +1897,6 @@ async fn service_up(
   for warning in &result.warnings {
     progress(format!("提醒：{warning}"));
   }
-  record_deployment(
-    state,
-    Deployed {
-      service,
-      instance_id: &row.instance_id,
-      server,
-      run_id,
-      hash: &hash,
-      template: &template,
-      spec: &row.spec,
-      commit: commit.as_deref(),
-    },
-    &result,
-  )
-  .await?;
   let running = if no_start {
     ensure_created(&result, service)
   } else {
@@ -1850,12 +1925,21 @@ async fn service_up(
       })
       .await?;
   }
-  if row.spec.stopped && !no_start {
-    project_stop_start(
-      state, server, service, false, &progress, cancel,
-    )
-    .await?;
-  }
+  record_deployment(
+    state,
+    Deployed {
+      service,
+      instance_id: &row.instance_id,
+      server,
+      run_id,
+      hash: &hash,
+      template: &template,
+      spec: &row.spec,
+      commit: commit.as_deref(),
+    },
+    &result,
+  )
+  .await?;
   Ok(())
 }
 
@@ -1863,11 +1947,8 @@ fn service_server(
   snap: &snapshot::Snapshot,
   service: &str,
 ) -> Result<String, ApiError> {
-  snap
-    .world
-    .services
-    .get(service)
-    .map(|s| s.spec.server.clone())
+  snapshot::service_runtime_server(snap, service)
+    .map(str::to_string)
     .ok_or_else(|| {
       ApiError::new(
         ErrorCode::PlanStale,
@@ -2005,7 +2086,7 @@ async fn service_down(
       )));
     }
   } else if let Some(expected) = instance_id
-    && !snap.pending_deletes.iter().any(|p| {
+    && !snap.pending.service_deletes.iter().any(|p| {
       p.service == service
         && p.server == server
         && p.instance_id == expected
@@ -2033,12 +2114,24 @@ async fn service_down(
   state
     .db
     .call(move |c| {
-      db::clear_pending_delete(
-        c,
+      let tx = c.transaction().map_err(sql_err)?;
+      crate::pending::clear_delete(
+        &tx,
         &service,
         &server,
         instance_id.as_deref(),
-      )
+      )?;
+      if crate::pending::load(&tx)?
+        .migrations
+        .get(&service)
+        .is_some_and(|m| {
+          m.phase == crate::pending::MigratePhase::UpDone
+            && m.payload.from == server
+        })
+      {
+        crate::pending::clear(&tx, "migrate", &service)?;
+      }
+      tx.commit().map_err(sql_err)
     })
     .await
 }
@@ -2088,7 +2181,7 @@ async fn has_deployment(
     .db
     .call(move |c| {
       c.query_row(
-        "SELECT 1 FROM deployments WHERE service = ?1 AND instance_id = ?2 LIMIT 1",
+        "SELECT 1 FROM deployments WHERE service = ?1 AND instance_id = ?2 AND started = 1 LIMIT 1",
         params![service, instance_id],
         |_| Ok(()),
       )
@@ -2122,6 +2215,7 @@ async fn record_deployment(
     serde_json::to_string(&images).map_err(json_err)?;
   let spec = serde_json::to_string(d.spec).map_err(json_err)?;
   let commit = d.commit.map(str::to_string);
+  let started = !d.spec.stopped;
   let instance_id = d.instance_id.to_string();
   // 记下实际跑起来的版本：导入（按本机已有的镜像启动）和每次部署之后，固定的版本都和正在跑的一致。
   let pinnable = crate::pins::images(&d.spec.source);
@@ -2148,21 +2242,33 @@ async fn record_deployment(
     .db
     .call(move |c| {
       let (service, server, run_id, hash, compose) = values;
-      c.execute(
-        "INSERT INTO deployments (service, server, run_id, hash, compose, images, created_at, spec, commit_sha, instance_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-        params![service, server, run_id, hash, compose, encoded_images, now_ms(), spec, commit, instance_id],
+      let tx = c.transaction().map_err(sql_err)?;
+      tx.execute(
+        "INSERT INTO deployments (service, server, run_id, hash, compose, images, created_at, spec, commit_sha, instance_id, started)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        params![service, server, run_id, hash, compose, encoded_images, now_ms(), spec, commit, instance_id, started],
       )
       .map_err(sql_err)?;
       if let Some(pins) = pins {
-        c.execute(
+        tx.execute(
           "UPDATE resources SET meta = json_set(COALESCE(meta, '{}'), '$.pins', json(?1))
            WHERE kind = 'service' AND name = ?2",
           params![pins, service],
         )
         .map_err(sql_err)?;
       }
-      Ok(())
+      if let Some(m) = crate::pending::load(&tx)?.migrations.remove(&service)
+        && m.payload.to == server && m.phase != crate::pending::MigratePhase::UpDone
+      {
+        if m.payload.has_managed_data {
+          crate::jobs::schedule_cleanup(&tx, &service, &m.payload.from, Some(&instance_id))?;
+        }
+        crate::pending::update_migration(&tx, &service, |m| {
+          m.phase = crate::pending::MigratePhase::UpDone;
+          m.payload.source_stopped = false;
+        })?;
+      }
+      tx.commit().map_err(sql_err)
     })
     .await
 }

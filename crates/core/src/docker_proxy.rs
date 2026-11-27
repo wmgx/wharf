@@ -145,15 +145,26 @@ pub async fn apply(
         ErrorCode::AgentFailed,
         format!("改 {server} 的 dockerd 配置失败：{out}"),
       )
-      .with_hint("daemon.json 没有改动；修好后用 --pull-proxy \"\" 清掉再重新设置"),
+      .with_hint("daemon.json 没有改动；排查后可运行 wharf plan --apply 或 wharf run retry <run_id> 重试"),
     );
   }
-  if out.ends_with("unchanged") {
-    progress("dockerd 配置已经是这样，不用改".into());
-    return Ok(());
-  }
-  progress("已写入 daemon.json，重启 dockerd（容器不停）".into());
   let want = format!("{proxy}|true");
+  if out.ends_with("unchanged") {
+    let (code, active) =
+      exec(state, server, CHECK.to_string(), cancel).await?;
+    if code == 0 && active.trim() == want {
+      progress("dockerd 配置已经是这样，不用改".into());
+      return Ok(());
+    }
+    let (code, out) = exec(state, server, "systemd-run --unit=wharf-docker-restart --on-active=3 systemctl restart docker".into(), cancel).await?;
+    if code != 0 {
+      return Err(ApiError::new(
+        ErrorCode::AgentFailed,
+        format!("安排重启 {server} 的 dockerd 失败：{out}"),
+      ));
+    }
+  }
+  progress("重启 dockerd 应用 daemon.json（容器不停）".into());
   let deadline =
     tokio::time::Instant::now() + Duration::from_secs(READY_SECS);
   tokio::time::sleep(Duration::from_secs(8)).await;

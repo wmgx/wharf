@@ -79,7 +79,8 @@ async fn deploy_items(
             .is_some_and(|r| r.spec.source.as_ref() == Some(source))
       }
     };
-    if up_to_date {
+    let pending = snap.pending.edge_deploys.contains(name);
+    if up_to_date && !pending {
       continue;
     }
     let remote_exists = if target_changed {
@@ -101,7 +102,7 @@ async fn deploy_items(
       before.is_some(),
       target_changed,
       remote_exists,
-      last == Some(DEPLOYING),
+      pending || last == Some(DEPLOYING),
     );
     let id = b.item(
       format!("{KIND_EDGE}/{name}"),

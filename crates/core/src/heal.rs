@@ -234,12 +234,13 @@ async fn tick(
       }
       continue;
     }
-    if let Ok(started) = apply::start_task(
+    if let Ok(started) = apply::start_task_by(
       state.clone(),
       format!("{AUTO_RESTART_TITLE}{name}（{why}）"),
       Step::ServiceRestart {
         service: name.clone(),
       },
+      Some("自动自愈".into()),
     )
     .await
     {

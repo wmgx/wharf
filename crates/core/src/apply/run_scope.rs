@@ -192,17 +192,24 @@ pub async fn list_runs(
   state: &AppState,
   auth: &Auth,
   limit: u32,
+  status: Option<wharf_api_types::plan::RunStatus>,
 ) -> Result<Vec<Run>, ApiError> {
+  let status = status
+    .map(serde_json::to_value)
+    .transpose()
+    .map_err(json_err)?;
+  let status =
+    status.and_then(|value| value.as_str().map(str::to_string));
   let bodies: Vec<String> = state
     .db
     .call(move |c| {
       let mut stmt = c
         .prepare(
-          "SELECT body FROM runs ORDER BY started_at DESC LIMIT ?1",
+          "SELECT body FROM runs WHERE (?2 IS NULL OR status = ?2) ORDER BY started_at DESC LIMIT ?1",
         )
         .map_err(sql_err)?;
       let rows = stmt
-        .query_map(params![limit], |r| r.get(0))
+        .query_map(params![limit, status], |r| r.get(0))
         .map_err(sql_err)?;
       rows.collect::<Result<_, _>>().map_err(sql_err)
     })
@@ -278,6 +285,8 @@ mod tests {
       ),
     ] {
       let run = Run {
+        actor: None,
+        retry_of: None,
         run_id: id.into(),
         plan_id: String::new(),
         status: RunStatus::Running,

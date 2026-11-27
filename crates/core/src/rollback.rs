@@ -58,7 +58,7 @@ pub async fn target(
       let mut stmt = c
         .prepare(
           "SELECT id, hash, spec, images, created_at, commit_sha FROM deployments
-           WHERE service = ?1 AND instance_id = ?2 AND (?3 IS NULL OR id = ?3)
+           WHERE service = ?1 AND instance_id = ?2 AND started = 1 AND (?3 IS NULL OR id = ?3)
            ORDER BY id DESC LIMIT 200",
         )
         .map_err(sql_err)?;
@@ -75,6 +75,14 @@ pub async fn target(
         })
         .map_err(sql_err)?;
       let rows = rows.collect::<Result<Vec<_>, _>>().map_err(sql_err)?;
+      if let Some(id) = requested
+        && rows.is_empty()
+        && c.query_row("SELECT EXISTS(SELECT 1 FROM deployments WHERE service = ?1 AND instance_id = ?2 AND id = ?3 AND started = 0)",
+          params![service, instance_id, id], |r| r.get::<_, bool>(0)).map_err(sql_err)?
+      {
+        return Err(ApiError::invalid(format!("部署 #{id} 是在停机状态下创建的，从未启动运行过，不能作为回滚目标"))
+          .with_hint(format!("运行 wharf service deployments {service} 查看已启动过的版本")));
+      }
       if let Some(id) = requested
         && rows.is_empty()
         && c.query_row("SELECT EXISTS(SELECT 1 FROM deployments WHERE service = ?1 AND id = ?2)",

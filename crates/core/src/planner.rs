@@ -289,6 +289,8 @@ pub struct Planned {
 
 #[derive(Default)]
 pub(crate) struct Builder {
+  migration_mounts:
+    BTreeMap<String, Vec<wharf_api_types::agent::ContainerMount>>,
   pub(crate) items: Vec<PlanItem>,
   steps: Vec<StepPlan>,
   route_effects: crate::token_scope::RouteEffects,
@@ -617,6 +619,14 @@ pub(crate) async fn make_plan_inner(
     ..Builder::default()
   };
   config_items(&mut b, &current, &desired, &writes);
+  b.migration_mounts = migration_mounts(
+    state,
+    &snap,
+    &current,
+    &desired,
+    &mut b.warnings,
+  )
+  .await;
 
   for (host, route) in &desired.routes {
     let Some(sso) = route
@@ -733,9 +743,9 @@ pub(crate) async fn make_plan_inner(
   leftover_items(&mut b, &snap, &current, &desired, &status);
   link_items(&mut b, &snap, &current, &desired, &net, &status)?;
   tailscale_items(&mut b, &snap, &desired, &status);
-  egress_items(&mut b, &current, &desired);
-  docker_proxy_items(&mut b, &current, &desired);
-  baseline_items(&mut b, &current, &desired);
+  egress_items(&mut b, &snap, &current, &desired);
+  docker_proxy_items(&mut b, &snap, &current, &desired);
+  baseline_items(&mut b, &snap, &current, &desired);
   gateway_items(
     &mut b, &snap, &current, &desired, &net, &status, &state.hub,
   )?;
@@ -863,8 +873,9 @@ fn running_on<'a>(
   current: &'a World,
   name: &str,
 ) -> Option<&'a str> {
-  let configured = &current.services.get(name)?.spec.server;
-  Some(snap.deployed.get(name).unwrap_or(configured))
+  crate::snapshot::service_runtime_server(snap, name).or_else(|| {
+    current.services.get(name).map(|s| s.spec.server.as_str())
+  })
 }
 
 /// 服务要换服务器时，返回它现在所在的服务器。
@@ -1076,7 +1087,15 @@ async fn gather_status(
         .insert(name.clone());
     }
   }
-  for pending in &snap.pending_deletes {
+  for (name, migration) in &snap.pending.migrations {
+    for server in [&migration.payload.from, &migration.payload.to] {
+      projects
+        .entry(server.clone())
+        .or_default()
+        .insert(name.clone());
+    }
+  }
+  for pending in &snap.pending.service_deletes {
     projects
       .entry(pending.server.clone())
       .or_default()
@@ -1154,6 +1173,12 @@ fn service_items(
     let address = format!("{KIND_SERVICE}/{name}");
     let server = &svc.spec.server;
     let moved = moved_from(snap, current, name, server);
+    let restarting_source = !svc.spec.stopped
+      && snap.pending.migrations.get(name).is_some_and(|m| {
+        m.phase != crate::pending::MigratePhase::UpDone
+          && m.payload.from == *server
+          && m.payload.source_stopped
+      });
     // 数据卷：新增的目录。迁移时新机器上要建全部目录。
     let old_dirs: BTreeSet<String> = current
       .services
@@ -1165,10 +1190,15 @@ fn service_items(
           .collect()
       })
       .unwrap_or_default();
+    let pending_dirs =
+      snap.pending.ensure_dirs.get(&format!("{name}@{server}"));
     let new_dirs: Vec<String> =
       crate::render::service_dirs(name, &svc.spec)
         .into_iter()
-        .filter(|d| !old_dirs.contains(d))
+        .filter(|d| {
+          !old_dirs.contains(d)
+            || pending_dirs.is_some_and(|p| p.dirs.contains(d))
+        })
         .collect();
     if !new_dirs.is_empty() {
       let id = b.item(
@@ -1191,7 +1221,14 @@ fn service_items(
     }
 
     if let Some(from) = moved {
-      move_items(b, current, name, from, server, net);
+      let synced =
+        snap.pending.migrations.get(name).is_some_and(|m| {
+          m.phase == crate::pending::MigratePhase::Synced
+            && m.payload.to == *server
+        });
+      if !synced {
+        move_items(b, current, name, from, server, net);
+      }
     }
 
     let (_, hash) = snapshot::service_resolved(
@@ -1208,7 +1245,8 @@ fn service_items(
       .and_then(|s| s.as_ref())
       .and_then(|p| p.get(name));
     // 配置没变、只是要停下来：不重建，直接停。
-    if svc.spec.stopped
+    if moved.is_none()
+      && svc.spec.stopped
       && let Some(state) = live
       && state.hash.as_deref() == Some(hash.as_str())
     {
@@ -1267,6 +1305,18 @@ fn service_items(
       })
     });
     let decision = match status.get(server).and_then(|s| s.as_ref()) {
+      _ if moved.is_some() => Some((
+        Action::Update,
+        vec![Impact::Restart],
+        "在目标服务器部署服务".into(),
+        None,
+      )),
+      _ if restarting_source => Some((
+        Action::Update,
+        vec![Impact::Restart],
+        "取消迁移，恢复源机服务".into(),
+        None,
+      )),
       None if changed(writes, KIND_SERVICE, name) => Some((
         Action::Update,
         vec![Impact::Restart],
@@ -1444,8 +1494,35 @@ fn service_items(
     }
   }
   for (name, svc) in &current.services {
-    let old =
-      running_on(snap, current, name).unwrap_or(&svc.spec.server);
+    let migration = snap.pending.migrations.get(name);
+    let desired_service = desired.services.get(name);
+    let cleanup = migration.and_then(|m| {
+      let target = &desired_service?.spec.server;
+      if m.phase == crate::pending::MigratePhase::UpDone
+        && m.payload.to == *target
+      {
+        return Some((m.payload.from.as_str(), false));
+      }
+      if m.phase != crate::pending::MigratePhase::UpDone
+        && m.payload.from == *target
+      {
+        let exists = status
+          .get(&m.payload.to)
+          .and_then(Option::as_ref)
+          .and_then(|projects| projects.get(name))
+          .is_none_or(|s| {
+            s.hash.is_some() || !s.containers.is_empty()
+          });
+        if exists {
+          return Some((m.payload.to.as_str(), true));
+        }
+      }
+      None
+    });
+    let old = cleanup
+      .map(|(server, _)| server)
+      .or_else(|| running_on(snap, current, name))
+      .unwrap_or(&svc.spec.server);
     if desired
       .services
       .get(name)
@@ -1472,9 +1549,11 @@ fn service_items(
         Some(json!({ "server": server })),
         None,
         vec![],
-        format!(
-          "迁移到 {to} 后删除 {server} 上的旧容器（数据目录保留）"
-        ),
+        if cleanup.is_some_and(|(_, abort)| abort) {
+          format!("取消迁移：服务保持在 {to}，删除 {server} 上的残留容器（数据目录保留）")
+        } else {
+          format!("迁移到 {to} 后删除 {server} 上的旧容器（数据目录保留）")
+        },
       );
       b.step(
         vec![id],
@@ -1650,9 +1729,11 @@ fn leftover_items(
   desired: &World,
   status: &StatusMap,
 ) {
-  for p in &snap.pending_deletes {
+  for p in &snap.pending.service_deletes {
     let (name, server) = (&p.service, &p.server);
-    if current.services.contains_key(name) {
+    if current.services.get(name).is_some_and(|row| {
+      row.instance_id != p.instance_id || row.spec.server == *server
+    }) {
       continue;
     }
     let projects = status.get(server).and_then(Option::as_ref);
@@ -1663,7 +1744,9 @@ fn leftover_items(
     {
       continue;
     }
-    if desired.services.contains_key(name) {
+    if desired.services.get(name).is_some_and(|row| {
+      row.instance_id != p.instance_id || row.spec.server == *server
+    }) {
       b.warnings.push(format!("服务 {name} 的旧实例在 {server} 上曾有未完成的删除，新建同名服务后不会再自动清理旧数据，请按需手动检查"));
       continue;
     }
@@ -1710,7 +1793,8 @@ fn leftover_items(
   }
   for (name, server) in leftovers(&snap.deployed, current, desired) {
     if snap
-      .pending_deletes
+      .pending
+      .service_deletes
       .iter()
       .any(|p| p.service == name && p.server == server)
     {
@@ -1749,6 +1833,44 @@ fn leftover_items(
   }
 }
 
+async fn migration_mounts(
+  state: &AppState,
+  snap: &Snapshot,
+  current: &World,
+  desired: &World,
+  warnings: &mut Vec<String>,
+) -> BTreeMap<String, Vec<wharf_api_types::agent::ContainerMount>> {
+  let mut by_server: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+  for (name, row) in &desired.services {
+    if let Some(from) =
+      moved_from(snap, current, name, &row.spec.server)
+    {
+      by_server.entry(from).or_default().push(name.clone());
+    }
+  }
+  let cancel = tokio_util::sync::CancellationToken::new();
+  let _guard = cancel.clone().drop_guard();
+  let mut out = BTreeMap::new();
+  for (from, projects) in by_server {
+    if !state.hub.supports_safe_migrate(from) {
+      warnings.push(format!("源服务器 {from} 的 agent 版本较旧或离线，无法检查镜像自带的匿名卷，建议先 wharf upgrade"));
+      continue;
+    }
+    let result = state.hub.call::<BTreeMap<String, Vec<wharf_api_types::agent::ContainerMount>>>(
+      from, wharf_api_types::agent::AgentOp::ProjectMounts { projects },
+      Duration::from_secs(15), None, &cancel,
+    ).await;
+    match result {
+      Ok(mounts) => out.extend(mounts),
+      Err(e) => warnings.push(format!(
+        "无法检查源服务器 {from} 上未声明的卷：{}",
+        e.message
+      )),
+    }
+  }
+  out
+}
+
 /// 迁移数据的计划项和步骤，以及相关提醒。
 fn move_items(
   b: &mut Builder,
@@ -1760,11 +1882,31 @@ fn move_items(
 ) {
   let old = &current.services[name];
   let mounts = crate::data::mounts(name, &old.spec);
-  let left: Vec<String> = mounts
+  let mut left: Vec<String> = mounts
     .iter()
     .filter(|m| m.kind != DataKind::Managed)
     .map(crate::data::describe)
     .collect();
+  if let Some(actual) = b.migration_mounts.get(name) {
+    left.extend(
+      crate::data::undeclared_mounts(name, &mounts, actual)
+        .iter()
+        .map(|m| {
+          let component = m
+            .container
+            .as_deref()
+            .filter(|name| !name.is_empty())
+            .unwrap_or(name);
+          format!(
+            "组件 {component} 的{}（挂载路径 {}，镜像自带或未声明）",
+            crate::data::describe(m),
+            m.target
+          )
+        }),
+    );
+  }
+  left.sort();
+  left.dedup();
   // 不归 Wharf 管的数据不会跟着走，新服务器上的服务看不到它们，要用户确认。
   if !left.is_empty() {
     b.item(
@@ -1937,12 +2079,17 @@ fn link_items(
 
 /// 出口设置变了（自己的规则、经哪台、那台的规则）：让这台的 agent 重新起出口和本地分流。
 /// 排在 dockerd 代理前面，那边要用本机的分流代理。
-fn egress_items(b: &mut Builder, current: &World, desired: &World) {
+fn egress_items(
+  b: &mut Builder,
+  snap: &Snapshot,
+  current: &World,
+  desired: &World,
+) {
   use crate::egress::effective;
   for server in desired.servers.keys() {
     let after = effective(server, desired);
     let before = effective(server, current);
-    if after == before {
+    if after == before && !snap.pending.egresses.contains(server) {
       continue;
     }
     let show = |e: &Option<(
@@ -1981,6 +2128,7 @@ fn egress_items(b: &mut Builder, current: &World, desired: &World) {
       format!("egress/{server}"),
       Layer::Container,
       match (&before, &after) {
+        _ if before == after => Action::Update,
         (None, _) => Action::Create,
         (_, None) => Action::Delete,
         _ => Action::Update,
@@ -2001,7 +2149,12 @@ fn egress_items(b: &mut Builder, current: &World, desired: &World) {
 }
 
 /// 机器基线：设置改了，或者最近一次检查有差异时，加一步纠正。
-fn baseline_items(b: &mut Builder, current: &World, desired: &World) {
+fn baseline_items(
+  b: &mut Builder,
+  snap: &Snapshot,
+  current: &World,
+  desired: &World,
+) {
   for (server, row) in &desired.servers {
     let want = &row.settings.baseline;
     if want.is_empty() {
@@ -2010,7 +2163,10 @@ fn baseline_items(b: &mut Builder, current: &World, desired: &World) {
     let before =
       current.servers.get(server).map(|r| &r.settings.baseline);
     let drift = crate::baseline::drift(server);
-    if before == Some(want) && drift.is_empty() {
+    if before == Some(want)
+      && drift.is_empty()
+      && !snap.pending.baselines.contains(server)
+    {
       continue;
     }
     let reason = if drift.is_empty() {
@@ -2041,6 +2197,7 @@ fn baseline_items(b: &mut Builder, current: &World, desired: &World) {
 /// 拉镜像代理的设置（或它要直连的镜像源）变了：改 dockerd 配置。
 fn docker_proxy_items(
   b: &mut Builder,
+  snap: &Snapshot,
   current: &World,
   desired: &World,
 ) {
@@ -2051,10 +2208,12 @@ fn docker_proxy_items(
       .servers
       .get(server)
       .and_then(|r| wanted(&r.settings));
-    if after == before {
+    if after == before
+      && !snap.pending.docker_proxies.contains(server)
+    {
       continue;
     }
-    let (reason, title) = match &after {
+    let (mut reason, title) = match &after {
       Some((proxy, _)) => (
         format!(
           "拉镜像改走{}，镜像源和内网直连；重启 dockerd，开启 live-restore 后容器不停",
@@ -2068,10 +2227,15 @@ fn docker_proxy_items(
         format!("在 {server} 上去掉 dockerd 的拉镜像代理"),
       ),
     };
+    if after == before {
+      reason = "上次拉镜像代理设置未完成，重新应用到 dockerd".into();
+    }
     let id = b.item(
       format!("docker/{server}"),
       Layer::Container,
-      if before.is_none() {
+      if before == after {
+        Action::Update
+      } else if before.is_none() {
         Action::Create
       } else if after.is_none() {
         Action::Delete
@@ -2962,9 +3126,10 @@ mod tests {
     state
       .db
       .call(|c| {
-        db::put_pending_delete(
+        crate::pending::put_delete(
           c,
-          &db::PendingDeleteRow {
+          ("", ""),
+          &crate::pending::ServiceDeletePayload {
             service: "s1".into(),
             server: "s1".into(),
             instance_id: "svc_old".into(),
@@ -2989,7 +3154,7 @@ mod tests {
     assert_eq!(
       state
         .db
-        .call(|c| Ok(db::all_pending_deletes(c)?.len()))
+        .call(|c| Ok(crate::pending::load(c)?.service_deletes.len()))
         .await
         .unwrap(),
       1
@@ -3039,13 +3204,16 @@ mod tests {
   #[test]
   fn leftover_plan_preserves_purge_data_and_drops_on_recreate() {
     let snap = Snapshot {
-      pending_deletes: vec![db::PendingDeleteRow {
-        service: "app".into(),
-        server: "s1".into(),
-        instance_id: "svc_aaa".into(),
-        purge_data: true,
-        has_relative_mounts: true,
-      }],
+      pending: crate::pending::PendingState {
+        service_deletes: vec![crate::pending::ServiceDeletePayload {
+          service: "app".into(),
+          server: "s1".into(),
+          instance_id: "svc_aaa".into(),
+          purge_data: true,
+          has_relative_mounts: true,
+        }],
+        ..Default::default()
+      },
       ..Default::default()
     };
     let current = World::default();

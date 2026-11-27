@@ -164,7 +164,16 @@ pub struct ShellLog {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct MigrationView {
+  pub from: String,
+  pub to: String,
+  pub phase: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ServiceView {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub migration: Option<MigrationView>,
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub risks: Vec<String>,
   pub name: String,
@@ -679,6 +688,9 @@ pub struct RotateSecretResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DeploymentView {
+  /// 容器是否启动并通过运行校验。
+  #[serde(default = "yes")]
+  pub started: bool,
   pub id: i64,
   pub service: String,
   pub server: String,

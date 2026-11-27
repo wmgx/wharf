@@ -182,6 +182,18 @@ pub struct SyncServe {
   /// 只接受这个地址（发送端的内网地址）的连接。
   pub allow: String,
   pub password: OneTimeSecret,
+  #[serde(default)]
+  pub preserve_existing: bool,
+}
+
+#[derive(
+  Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum SyncPass {
+  Live,
+  #[default]
+  Final,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -190,6 +202,8 @@ pub struct SyncPush {
   pub host: String,
   pub port: u16,
   pub password: OneTimeSecret,
+  #[serde(default)]
+  pub pass: SyncPass,
 }
 
 /// restic 操作，在 restic 容器里执行。结果见 [ResticAction] 各项说明。
@@ -293,6 +307,7 @@ pub struct Snapshot {
 
 /// [super::AgentOp::SyncServe] 就绪时的进度行前缀。
 pub const SYNC_READY: &str = "ready ";
+pub const SYNC_BACKUP: &str = "WHARF_SYNC_BACKUP:";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PullPolicy {
@@ -350,6 +365,15 @@ pub fn redact_addr(text: &str, addr: &str) -> String {
     }
     _ => text.to_string(),
   }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContainerMount {
+  pub container: String,
+  pub service: String,
+  pub kind: String,
+  pub source: String,
+  pub target: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -547,6 +571,8 @@ pub struct ProjectUpResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuildJob {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub expected_commit: Option<String>,
   pub service: String,
   /// 构建出的镜像，`wharf-build/<服务>:<指纹>`。
   pub image: String,

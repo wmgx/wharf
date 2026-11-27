@@ -42,12 +42,9 @@ async fn server_of(
   service: &str,
 ) -> Result<String, ApiError> {
   let snap = snapshot::load(&s.db).await?;
-  let row = snap
-    .world
-    .services
-    .get(service)
-    .ok_or_else(|| service_not_found(service))?;
-  Ok(row.spec.server.clone())
+  snapshot::service_runtime_server(&snap, service)
+    .map(str::to_string)
+    .ok_or_else(|| service_not_found(service))
 }
 
 async fn call<T: serde::de::DeserializeOwned>(

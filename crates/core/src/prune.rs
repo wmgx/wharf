@@ -33,10 +33,11 @@ pub async fn prune_now(
     return Err(crate::hub::offline(&name).into());
   }
   Ok(Json(
-    crate::apply::start_task(
+    crate::apply::start_task_by(
       s.clone(),
       format!("清理 {name} 上没在用的镜像"),
       Step::Prune { server: name },
+      Some(crate::apply::format_actor(&auth)),
     )
     .await?,
   ))

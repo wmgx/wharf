@@ -789,6 +789,10 @@ export interface DeploymentView {
    * 部署时的服务配置。早于记录这一项的部署没有。
    */
   spec?: ServiceSpec | null;
+  /**
+   * 容器是否启动并通过运行校验。
+   */
+  started?: boolean;
 }
 
 export interface Disk {
@@ -1661,6 +1665,12 @@ export interface Metrics {
 /**
  * 自定义监控：`http://127.0.0.1:<宿主机端口><path>`。
  */
+export interface MigrationView {
+  from: string;
+  phase: string;
+  to: string;
+}
+
 export interface MonitorSpec {
   /**
    * 期望的状态码；不写时 2xx、3xx 都算正常。
@@ -2300,8 +2310,10 @@ export interface RouteView {
  * 一次执行记录。
  */
 export interface Run {
+  actor?: string | null;
   finished_at?: string | null;
   plan_id: string;
+  retry_of?: string | null;
   run_id: string;
   started_at: string;
   status: RunStatus;
@@ -2689,6 +2701,7 @@ export interface ServiceView {
    */
   lan_addresses?: Record<string, string[]>;
   log_alerts?: LogAlertView[];
+  migration?: MigrationView | null;
   /**
    * 自定义监控的最近一次结果；没配监控或还没检查过时为空。
    */

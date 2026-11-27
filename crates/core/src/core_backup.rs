@@ -309,6 +309,7 @@ pub async fn enable(
       Step::CoreBackup {
         user_key: Some(OneTimeSecret(req.password)),
       },
+      Some(crate::apply::format_actor(&auth)),
       guard,
     )
     .await?,
@@ -400,10 +401,11 @@ pub async fn run_now(
 ) -> ApiResult<ApplyResponse> {
   auth.require(Perm::Apply)?;
   Ok(Json(
-    apply::start_task(
+    apply::start_task_by(
       s.clone(),
       "备份控制面".into(),
       Step::CoreBackup { user_key: None },
+      Some(crate::apply::format_actor(&auth)),
     )
     .await?,
   ))

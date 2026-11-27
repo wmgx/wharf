@@ -47,11 +47,23 @@ pub async fn run(
   ctx: &Ctx,
 ) -> Result<Value, ApiError> {
   validate_name("service", &job.service)?;
-  if !job.force && docker.image_exists(&job.image, ctx).await {
+  let exists =
+    !job.force && docker.image_exists(&job.image, ctx).await;
+  let actual = if exists && job.expected_commit.is_some() {
+    docker.image_label(&job.image, ctx).await
+  } else {
+    None
+  };
+  if should_skip_build(
+    job.force,
+    exists,
+    job.expected_commit.as_deref(),
+    actual.as_deref(),
+  ) {
     ctx.say(format!("镜像 {} 已存在，跳过构建", job.image));
     return to_value(BuildResult {
       skipped: true,
-      commit: None,
+      commit: actual,
     });
   }
   let work = docker.data_dir.join("builds").join(format!(
@@ -111,6 +123,9 @@ async fn build_in(
     .args(["build", "--progress", "plain", "--pull=false"])
     .args(["-t", &job.image, "-f", &dockerfile.to_string_lossy()])
     .args(["--label", &format!("wharf.service={}", job.service)]);
+  if let Some(sha) = &commit {
+    cmd = cmd.args(["--label", &format!("wharf.commit={sha}")]);
+  }
   for (key, value) in &job.build_env {
     cmd = cmd.env_arg("--build-arg", key, value);
   }
@@ -987,4 +1002,20 @@ fn build_no_proxy_omits_url_credentials() {
     extract_no_proxy_host("[::1]:8000").as_deref(),
     Some("::1")
   );
+}
+
+fn should_skip_build(
+  force: bool,
+  exists: bool,
+  expected: Option<&str>,
+  actual: Option<&str>,
+) -> bool {
+  !force && exists && (expected.is_none() || expected == actual)
+}
+
+#[test]
+fn should_skip_build_requires_matching_commit_label() {
+  assert!(!should_skip_build(false, true, Some("bbb"), Some("aaa")));
+  assert!(!should_skip_build(false, true, Some("bbb"), None));
+  assert!(should_skip_build(false, true, Some("bbb"), Some("bbb")));
 }

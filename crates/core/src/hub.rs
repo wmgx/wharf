@@ -79,6 +79,7 @@ struct Conn {
   backup_isolation: bool,
   safe_delete: bool,
   safe_adopt: bool,
+  safe_migrate: bool,
   /// 协议版本不一致：连接放行，但只接受升级相关的请求，好让它升上来。
   upgrade_only: bool,
 }
@@ -274,12 +275,6 @@ impl Hub {
       .is_some_and(|c| !c.upgrade_only && c.container_diagnosis)
   }
 
-  pub fn supports_safe_adopt(&self, server: &str) -> bool {
-    lock(&self.conns).get(server).is_some_and(|c| {
-      !c.closed.is_cancelled() && !c.upgrade_only && c.safe_adopt
-    })
-  }
-
   pub(crate) fn require_safe_adopt(
     &self,
     server: &str,
@@ -293,6 +288,12 @@ impl Hub {
       return Err(safe_adopt_required(server));
     }
     Ok(())
+  }
+
+  pub fn supports_safe_migrate(&self, server: &str) -> bool {
+    lock(&self.conns)
+      .get(server)
+      .is_some_and(|c| !c.upgrade_only && c.safe_migrate)
   }
 
   pub fn supports_safe_delete(&self, server: &str) -> bool {
@@ -499,10 +500,16 @@ impl Hub {
     cancel: &CancellationToken,
   ) -> Result<T, ApiError> {
     if (matches!(&op, AgentOp::ImportRead(_))
-      || matches!(&op, AgentOp::ProjectUp(up) if up.pull_missing_only || up.no_start))
+      || matches!(&op, AgentOp::ProjectUp(up) if up.pull_missing_only))
       && (conn.upgrade_only || !conn.safe_adopt)
     {
       return Err(safe_adopt_required(server));
+    }
+    if (matches!(&op, AgentOp::SyncServe(_) | AgentOp::SyncPush(_))
+      || matches!(&op, AgentOp::ProjectUp(up) if up.no_start && !up.pull_missing_only))
+      && (conn.upgrade_only || !conn.safe_migrate)
+    {
+      return Err(safe_migrate_required(server));
     }
     if matches!(&op, AgentOp::RemoveData { .. })
       && (conn.upgrade_only || !conn.safe_delete)
@@ -835,6 +842,7 @@ async fn handle_socket(
     backup_isolation,
     safe_delete,
     safe_adopt,
+    safe_migrate,
     key_rotation,
   } = hello
   else {
@@ -997,6 +1005,7 @@ async fn handle_socket(
     backup_isolation,
     safe_delete,
     safe_adopt,
+    safe_migrate,
     upgrade_only,
   };
   let state_on_db = state.clone();
@@ -1182,3 +1191,9 @@ async fn handle_socket(
 
 #[cfg(test)]
 mod tests;
+
+pub(crate) fn safe_migrate_required(server: &str) -> ApiError {
+  ApiError::new(ErrorCode::Conflict, format!("服务器 {server} 的 agent 版本旧，无法安全同步数据或更新停机服务"))
+    .with_hint("先运行 wharf upgrade 升级 agent 后重试")
+    .suggest("wharf upgrade")
+}

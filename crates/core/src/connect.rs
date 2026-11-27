@@ -72,17 +72,27 @@ pub async fn open(
       &row.spec,
     )?;
   }
-  let job = target(
-    &name,
-    &row.spec,
-    &row.host_ports,
-    q.port.as_deref(),
-    q.component,
-  )?;
-  if !s.hub.is_online(&row.spec.server) {
-    return Err(crate::hub::offline(&row.spec.server).into());
+  let server = snapshot::service_runtime_server(&snap, &name)
+    .unwrap_or(&row.spec.server);
+  let empty_ports = BTreeMap::new();
+  let (spec, host_ports) = if server == row.spec.server {
+    (&row.spec, &row.host_ports)
+  } else {
+    (
+      snap
+        .applied
+        .get(&name)
+        .and_then(|a| a.spec.as_ref())
+        .unwrap_or(&row.spec),
+      &empty_ports,
+    )
+  };
+  let job =
+    target(&name, spec, host_ports, q.port.as_deref(), q.component)?;
+  if !s.hub.is_online(server) {
+    return Err(crate::hub::offline(server).into());
   }
-  let server = row.spec.server.clone();
+  let server = server.to_string();
   Ok(ws.on_upgrade(move |socket| session(s, server, job, socket)))
 }
 

@@ -173,6 +173,7 @@ pub async fn sync(
     .call(
       server,
       AgentOp::ProjectUp(ProjectUp {
+        no_start: false,
         project: gateway_project(gateway),
         compose,
         hash: r.compose_hash.clone(),

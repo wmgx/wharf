@@ -87,6 +87,7 @@ mod notify;
 mod notify_keys;
 mod oidc;
 mod oom;
+mod pending;
 mod ping;
 mod pins;
 mod planner;

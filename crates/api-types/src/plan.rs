@@ -422,6 +422,10 @@ pub struct RunStep {
 /// 一次执行记录。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Run {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub actor: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub retry_of: Option<String>,
   pub run_id: String,
   pub plan_id: String,
   pub status: RunStatus,
