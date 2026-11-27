@@ -2,16 +2,25 @@
 //! 只有 `/srv/<服务>/` 下的目录归 Wharf（迁移时同步、备份、迁走后清理）；
 //! 其他宿主机目录和 docker 卷 Wharf 不碰，迁移和备份时要明确告诉用户。
 
-use std::path::{Component, Path};
+use std::{
+  collections::BTreeMap,
+  path::{Component, Path},
+};
 
 use chrono::{DateTime, Duration, Utc};
 use serde_yaml_ng::Value;
 use wharf_api_types::{
+  ApiError,
+  agent::{BackupSummary, EscapedMount},
   spec::{ServiceSpec, Source},
   view::{DataKind, DataMount, DataStatus, DataView, ServiceData},
 };
 
-use crate::{db::sql_err, snapshot, state::AppState};
+use crate::{
+  db::{Db, sql_err},
+  snapshot::{self, Snapshot},
+  state::AppState,
+};
 
 /// 超过这个时间没有成功的备份就算过期。
 pub const STALE_AFTER_HOURS: i64 = 48;
@@ -36,6 +45,7 @@ pub fn mounts(name: &str, spec: &ServiceSpec) -> Vec<DataMount> {
       .volumes
       .iter()
       .map(|v| DataMount {
+        resolved: None,
         kind: DataKind::Managed,
         source: format!("/srv/{name}/{}", v.name),
         target: v.target.clone(),
@@ -79,6 +89,7 @@ pub fn undeclared_mounts(
         && m.source.len() == 64
         && m.source.bytes().all(|b| b.is_ascii_hexdigit());
       Some(DataMount {
+        resolved: None,
         kind,
         source: if anonymous {
           String::new()
@@ -138,55 +149,139 @@ pub fn status(
   DataStatus::Ok
 }
 
-/// 最近一次成功和最近一次失败的时间。
-type BackupTimes = (Option<DateTime<Utc>>, Option<DateTime<Utc>>);
+#[derive(Default)]
+pub(crate) struct BackupHistory {
+  pub ok: Option<i64>,
+  pub failed: Option<i64>,
+  pub escaped: Vec<EscapedMount>,
+}
+
+pub(crate) type History = BTreeMap<(String, String), BackupHistory>;
+
+pub(crate) async fn history(db: &Db) -> Result<History, ApiError> {
+  db.call(|c| {
+    let mut stmt = c.prepare(
+      "SELECT service, target, MAX(CASE WHEN ok THEN created_at END),
+              MAX(CASE WHEN NOT ok THEN created_at END),
+              (SELECT body FROM backups AS latest
+               WHERE latest.service = backups.service AND latest.target = backups.target AND latest.ok
+               ORDER BY latest.id DESC LIMIT 1)
+       FROM backups GROUP BY service, target"
+    ).map_err(sql_err)?;
+    let rows = stmt.query_map([], |r| {
+      let summary: Option<String> = r.get(4)?;
+      let escaped = summary.and_then(|s| serde_json::from_str::<BackupSummary>(&s).ok())
+        .map(|s| s.escaped_mounts).unwrap_or_default();
+      Ok(((r.get(0)?, r.get(1)?), BackupHistory { ok: r.get(2)?, failed: r.get(3)?, escaped }))
+    }).map_err(sql_err)?;
+    rows.collect::<Result<_, _>>().map_err(sql_err)
+  }).await
+}
+
+pub(crate) fn repo_verified_empty(
+  state: &AppState,
+  snap: &Snapshot,
+  target: &str,
+  service: &str,
+  last_ok: Option<i64>,
+) -> bool {
+  state.hub.is_online(target)
+    && snap.agent(target).is_some_and(|agent| {
+      agent.last_seen.is_some_and(|seen| {
+        last_ok.is_none_or(|ok| seen >= ok.saturating_add(120_000))
+      }) && agent
+        .report
+        .as_ref()
+        .and_then(|r| r.backup_repos.as_ref())
+        .is_some_and(|repos| {
+          repos.get(service).copied().unwrap_or_default() == 0
+        })
+    })
+}
+
+pub(crate) fn apply_escaped_mounts(
+  mounts: &mut Vec<DataMount>,
+  escaped: &[EscapedMount],
+) {
+  for link in escaped {
+    let mut found = false;
+    for mount in mounts.iter_mut() {
+      let exact = mount.source == link.source;
+      found |= exact;
+      if (mount.kind == DataKind::Managed
+        || (exact && mount.resolved.is_some()))
+        && let Ok(suffix) =
+          Path::new(&mount.source).strip_prefix(&link.source)
+      {
+        mount.kind = DataKind::ExternalDir;
+        mount.resolved = Some(if suffix.as_os_str().is_empty() {
+          link.resolved.clone()
+        } else {
+          Path::new(&link.resolved).join(suffix).display().to_string()
+        });
+      }
+    }
+    if !found {
+      mounts.push(DataMount {
+        kind: DataKind::ExternalDir,
+        source: link.source.clone(),
+        target: String::new(),
+        container: None,
+        resolved: Some(link.resolved.clone()),
+      });
+    }
+  }
+}
+
+pub(crate) fn observed_mounts(
+  name: &str,
+  spec: &ServiceSpec,
+  history: &History,
+) -> Vec<DataMount> {
+  let mut mounts = mounts(name, spec);
+  if let Some(b) = &spec.backup
+    && let Some(observed) =
+      history.get(&(name.to_string(), b.to.clone()))
+  {
+    apply_escaped_mounts(&mut mounts, &observed.escaped);
+  }
+  mounts
+}
 
 /// 每个服务的数据在哪、备份有没有在跑，现查。
 pub async fn overview(
   state: &AppState,
-) -> Result<DataView, wharf_api_types::ApiError> {
+) -> Result<DataView, ApiError> {
   let snap = snapshot::load(&state.db).await?;
-  let rows: Vec<(String, Option<i64>, Option<i64>)> = state
-    .db
-    .call(|c| {
-      let mut stmt = c
-        .prepare(
-          "SELECT service,
-                  MAX(CASE WHEN ok THEN created_at END),
-                  MAX(CASE WHEN ok = 0 THEN created_at END)
-           FROM backups GROUP BY service",
-        )
-        .map_err(sql_err)?;
-      let rows = stmt
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-        .map_err(sql_err)?;
-      rows.collect::<Result<_, _>>().map_err(sql_err)
-    })
-    .await?;
-  let times: std::collections::BTreeMap<String, BackupTimes> = rows
-    .into_iter()
-    .map(|(name, ok, failed)| (name, (from_ms(ok), from_ms(failed))))
-    .collect();
+  let history = history(&state.db).await?;
   let now = Utc::now();
   let mut services = Vec::new();
   for (name, row) in &snap.world.services {
-    let mounts = mounts(name, &row.spec);
-    let (last_ok, last_failed) =
-      times.get(name).copied().unwrap_or_default();
+    let mounts = observed_mounts(name, &row.spec, &history);
     let target = row.spec.backup.as_ref().map(|b| b.to.clone());
+    let observed = target
+      .as_ref()
+      .and_then(|t| history.get(&(name.clone(), t.clone())));
+    let ok = observed.and_then(|h| h.ok);
+    let last_ok = from_ms(ok);
+    let last_failed = from_ms(observed.and_then(|h| h.failed));
+    let repo_empty = !mounts.is_empty()
+      && target.as_ref().is_some_and(|t| {
+        repo_verified_empty(state, &snap, t, name, ok)
+      });
+    let status = if repo_empty {
+      DataStatus::Stale
+    } else {
+      status(target.is_some(), &mounts, last_ok, last_failed, now)
+    };
     services.push(ServiceData {
       name: name.clone(),
       server: row.spec.server.clone(),
       last_ok,
+      repo_empty,
       last_failed: last_failed
         .filter(|f| last_ok.is_none_or(|ok| *f > ok)),
-      status: status(
-        target.is_some(),
-        &mounts,
-        last_ok,
-        last_failed,
-        now,
-      ),
+      status,
       target,
       mounts,
     });
@@ -238,6 +333,7 @@ fn compose_mounts(name: &str, content: &str) -> Vec<DataMount> {
         }
       };
       out.push(DataMount {
+        resolved: None,
         kind,
         source,
         target,
@@ -363,6 +459,7 @@ mod tests {
   fn covers_five_states() {
     let now = Utc::now();
     let mount = |kind: DataKind, source: &str| DataMount {
+      resolved: None,
       kind,
       source: source.into(),
       target: "/data".into(),
@@ -444,4 +541,123 @@ volumes:
       ]
     );
   }
+}
+
+#[test]
+fn escaped_mount_downgrades_status_to_uncovered() {
+  let mut mounts = vec![DataMount {
+    source: "/srv/s1".into(),
+    target: "/data".into(),
+    kind: DataKind::Managed,
+    resolved: None,
+    container: None,
+  }];
+  let now = Utc::now();
+  assert_eq!(
+    status(true, &mounts, Some(now), None, now),
+    DataStatus::Ok
+  );
+  apply_escaped_mounts(
+    &mut mounts,
+    &[EscapedMount {
+      source: "/srv/s1/originals".into(),
+      resolved: "/mnt/originals".into(),
+    }],
+  );
+  assert_eq!(mounts[1].resolved.as_deref(), Some("/mnt/originals"));
+  assert_eq!(
+    status(true, &mounts, Some(now), None, now),
+    DataStatus::Uncovered
+  );
+}
+
+#[tokio::test]
+async fn switching_backup_target_and_empty_repo_show_stale() {
+  let state = crate::rules::tests::test_state();
+  crate::backup::tests::seed_servers(&state).await;
+  crate::backup::tests::seed_service(&state, "svc-a", true).await;
+  state
+    .hub
+    .mock_agent("s2", false, |_| panic!("数据状态只读"));
+  state.db.call(|c| {
+    let seen = crate::db::now_ms();
+    c.execute("INSERT INTO backups (service, server, target, run_id, ok, body, created_at)
+      VALUES ('svc-a', 's1', 's2', 'r1', 1, '{}', ?1)", [seen - 180_000]).map_err(sql_err)?;
+    let report = serde_json::to_string(&wharf_api_types::agent::AgentReport {
+      backup_repos: Some(BTreeMap::new()), ..Default::default()
+    }).map_err(crate::db::json_err)?;
+    c.execute("INSERT INTO agents (server, report, last_seen) VALUES ('s2', ?1, ?2)",
+      rusqlite::params![report, seen]).map_err(sql_err)?;
+    Ok(())
+  }).await.unwrap();
+  let view = overview(&state).await.unwrap();
+  assert!(view.services[0].repo_empty);
+  assert_eq!(view.services[0].status, DataStatus::Stale);
+  state.db.call(|c| {
+    c.execute("UPDATE resources SET spec = json_set(spec, '$.backup.to', 's3')
+      WHERE kind = 'service' AND name = 'svc-a'", []).map_err(sql_err)?;
+    Ok(())
+  }).await.unwrap();
+  let view = overview(&state).await.unwrap();
+  assert_eq!(view.services[0].status, DataStatus::Stale);
+  assert!(
+    view.services[0].last_ok.is_none()
+      && !view.services[0].repo_empty
+  );
+}
+
+#[test]
+fn nested_escaped_mount_is_listed_only_once() {
+  let mut mounts = vec![DataMount {
+    source: "/srv/s1/data/originals".into(),
+    target: "/originals".into(),
+    kind: DataKind::Managed,
+    resolved: None,
+    container: None,
+  }];
+  apply_escaped_mounts(
+    &mut mounts,
+    &[
+      EscapedMount {
+        source: "/srv/s1/data".into(),
+        resolved: "/mnt/disk".into(),
+      },
+      EscapedMount {
+        source: "/srv/s1/data/originals".into(),
+        resolved: "/mnt/disk/originals".into(),
+      },
+    ],
+  );
+  assert_eq!(mounts.len(), 2);
+  assert_eq!(mounts[0].target, "/originals");
+  assert_eq!(
+    mounts[0].resolved.as_deref(),
+    Some("/mnt/disk/originals")
+  );
+  assert_eq!(mounts[0].kind, DataKind::ExternalDir);
+  assert_eq!(mounts[1].source, "/srv/s1/data");
+}
+
+#[tokio::test]
+async fn empty_backup_repo_does_not_mark_service_without_data_stale()
+{
+  let state = crate::rules::tests::test_state();
+  crate::backup::tests::seed_servers(&state).await;
+  crate::backup::tests::seed_service(&state, "svc-a", true).await;
+  state
+    .hub
+    .mock_agent("s2", false, |_| panic!("数据状态只读"));
+  state.db.call(|c| {
+    c.execute("UPDATE resources SET spec = json_remove(spec, '$.volumes')
+      WHERE kind = 'service' AND name = 'svc-a'", []).map_err(sql_err)?;
+    let report = serde_json::to_string(&wharf_api_types::agent::AgentReport {
+      backup_repos: Some(BTreeMap::new()), ..Default::default()
+    }).map_err(crate::db::json_err)?;
+    c.execute("INSERT INTO agents (server, report, last_seen) VALUES ('s2', ?1, ?2)",
+      rusqlite::params![report, crate::db::now_ms()]).map_err(sql_err)?;
+    Ok(())
+  }).await.unwrap();
+  let view = overview(&state).await.unwrap();
+  assert_eq!(view.services[0].status, DataStatus::None);
+  assert!(!view.services[0].repo_empty);
 }

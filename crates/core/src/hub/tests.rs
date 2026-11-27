@@ -32,6 +32,7 @@ fn old_hello_has_no_host_shell_capability() {
     safe_delete,
     safe_adopt,
     safe_migrate,
+    safe_backup,
     key_rotation,
     ..
   } = hello
@@ -47,6 +48,7 @@ fn old_hello_has_no_host_shell_capability() {
   assert!(!safe_delete);
   assert!(!safe_adopt);
   assert!(!safe_migrate);
+  assert!(!safe_backup);
   assert!(!key_rotation);
 }
 
@@ -90,6 +92,7 @@ fn old_core_ignores_new_hello_capability() {
     safe_delete: true,
     safe_adopt: false,
     safe_migrate: true,
+    safe_backup: true,
     key_rotation: true,
   };
   let json = serde_json::to_string(&hello).unwrap();
@@ -113,6 +116,10 @@ impl Hub {
       false,
       handle,
     );
+  }
+
+  pub(crate) fn mock_safe_backup_agent(&self, server: &str) {
+    lock(&self.conns).get_mut(server).unwrap().safe_backup = true;
   }
 
   pub(crate) fn mock_safe_delete_agent(
@@ -229,6 +236,7 @@ impl Hub {
         safe_delete: false,
         safe_adopt: false,
         safe_migrate: false,
+        safe_backup: false,
         upgrade_only: false,
       },
     );
@@ -262,7 +270,13 @@ async fn dispatched_cleanup_releases_apply_lock_and_sends_cancel() {
   state.hub.mock_safe_delete_agent("s1", |_| unreachable!());
   let (tx, mut rx) = mpsc::channel(4);
   lock(&state.hub.conns).get_mut("s1").unwrap().tx = tx;
-  let guard = state.apply_lock.clone().lock_owned().await;
+  let guard = state
+    .locks
+    .acquire(
+      crate::locks::LockSpec::apply(["s1".into(), "app".into()]),
+      "测试",
+    )
+    .unwrap();
   let cancel = CancellationToken::new();
   let job = tokio::spawn({
     let state = state.clone();
@@ -288,7 +302,12 @@ async fn dispatched_cleanup_releases_apply_lock_and_sends_cancel() {
   else {
     panic!("应发送清理请求");
   };
-  assert!(state.apply_lock.try_lock().is_ok());
+  assert!(
+    state
+      .locks
+      .acquire(crate::locks::LockSpec::apply([]), "测试")
+      .is_ok()
+  );
   cancel.cancel();
   assert!(
     matches!(rx.recv().await, Some(CoreMsg::Cancel { id: cancelled }) if cancelled == id)
@@ -353,6 +372,7 @@ async fn agent_upgrade_needs_no_bound_core_server_or_probe_support() {
     safe_delete: false,
     safe_adopt: false,
     safe_migrate: false,
+    safe_backup: false,
     upgrade_only: true,
   };
   state.hub.register("s1", conn.clone());
@@ -414,6 +434,7 @@ fn probe_connection(
     safe_delete: false,
     safe_adopt: false,
     safe_migrate: false,
+    safe_backup: false,
     upgrade_only: false,
   };
   (conn, rx)

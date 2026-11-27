@@ -308,6 +308,7 @@ pub async fn restart_source(
         server,
         AgentOp::ProjectStart {
           project: service.to_string(),
+          containers: Vec::new(),
         },
         STOP_TIMEOUT,
         Some(progress.clone()),

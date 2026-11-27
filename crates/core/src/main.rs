@@ -70,6 +70,7 @@ mod link;
 mod link_cert;
 mod lint;
 mod lockout;
+mod locks;
 mod log_redact;
 mod log_search;
 mod login;
@@ -251,7 +252,7 @@ async fn main() -> anyhow::Result<()> {
     hub: Default::default(),
     key,
     runs: Default::default(),
-    apply_lock: Default::default(),
+    locks: Default::default(),
     public_url: cli
       .public_url
       .map(|u| u.trim_end_matches('/').to_string()),
@@ -277,6 +278,7 @@ async fn main() -> anyhow::Result<()> {
     .map_err(|e| anyhow::anyhow!(e.message))?;
   cloudflare_ips::spawn(state.db.clone());
   tailnet_ips::spawn(state.db.clone());
+  core_backup::cleanup_staged(&state.data_dir);
   apply::recover(&state).await?;
   shell::recover(&state).await?;
   tasks::recover(&state).await?;

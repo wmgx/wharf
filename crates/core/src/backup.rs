@@ -13,7 +13,7 @@ use axum::{
   Json,
   extract::{Path, State},
 };
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
@@ -21,7 +21,8 @@ use wharf_api_types::{
   agent::{
     AgentOp, BackupSummary, OneTimeSecret, ProjectUp,
     ProjectUpResult, REST_SERVER_PORT, ResticAction, ResticJob,
-    ResticKeyInfo, ResticRepo, Snapshot,
+    ResticKeyInfo, ResticPreflight, ResticPreflightMode,
+    ResticPreflightResult, ResticRepo, Snapshot, StoppedContainers,
   },
   plan::ApplyResponse,
   view::{BackupRecord, BackupsView, Perm, RestoreRequest},
@@ -162,44 +163,130 @@ pub(crate) struct Where {
   pub(crate) target_ip: String,
 }
 
-fn locate(snap: &Snap, service: &str) -> Result<Where, ApiError> {
+pub(crate) fn service_target(
+  snap: &Snap,
+  service: &str,
+) -> Result<String, ApiError> {
   let row = snap
     .world
     .services
     .get(service)
     .ok_or_else(|| service_not_found(service))?;
-  let target =
-    row.spec.backup.as_ref().map(|b| b.to.clone()).ok_or_else(
-      || {
-        ApiError::invalid(format!("服务 {service} 没有开启备份"))
-          .suggest(format!(
-            "wharf backup enable {service} --to <server>"
-          ))
-      },
-    )?;
-  let server = snapshot::service_runtime_server(snap, service)
-    .unwrap_or(&row.spec.server)
-    .to_string();
-  if server == target {
-    return Err(ApiError::invalid(format!(
-      "服务 {service} 现在就在备份服务器 {target} 上，换一台备份服务器"
-    )));
+  row
+    .spec
+    .backup
+    .as_ref()
+    .map(|b| b.to.clone())
+    .ok_or_else(|| {
+      ApiError::invalid(format!("服务 {service} 没有开启备份"))
+        .suggest(format!(
+          "wharf backup enable {service} --to <server>"
+        ))
+    })
+}
+
+async fn resolve_target(
+  state: &AppState,
+  snap: &Snap,
+  service: &str,
+  explicit: Option<&str>,
+) -> Result<Option<String>, ApiError> {
+  let row = snap
+    .world
+    .services
+    .get(service)
+    .ok_or_else(|| service_not_found(service))?;
+  if let Some(target) = explicit {
+    if !snap.world.servers.contains_key(target) {
+      return Err(crate::world::server_not_found(target));
+    }
+    return Ok(Some(target.to_string()));
   }
-  let net = snap.net(&snap.world);
-  let target_ip =
-    net.private.get(&target).map(|a| a.ip.clone()).ok_or_else(
-      || {
-        ApiError::invalid(format!("备份服务器 {target} 没有内网地址"))
-          .suggest(format!(
-            "wharf server set {target} --private-ip <ip>"
-          ))
-      },
-    )?;
-  Ok(Where {
+  if let Some(b) = &row.spec.backup {
+    return Ok(Some(b.to.clone()));
+  }
+  let service = service.to_string();
+  state.db.call(move |c| {
+    c.query_row(
+      "SELECT target FROM backups WHERE service = ?1 ORDER BY ok DESC, id DESC LIMIT 1",
+      [service], |r| r.get(0),
+    ).optional().map_err(sql_err)
+  }).await
+}
+
+pub(crate) async fn restore_target(
+  state: &AppState,
+  snap: &Snap,
+  service: &str,
+  target: Option<&str>,
+) -> Result<String, ApiError> {
+  resolve_target(state, snap, service, target)
+    .await?
+    .ok_or_else(|| missing_target(service))
+}
+
+fn missing_target(service: &str) -> ApiError {
+  ApiError::invalid(format!(
+    "服务 {service} 没有开启备份，也没有历史备份记录"
+  ))
+  .with_hint("若快照在其他备份服务器上，可传 --from <server> 指定")
+}
+
+fn location(snap: &Snap, service: &str, target: String) -> Where {
+  let server = snapshot::service_runtime_server(snap, service)
+    .unwrap_or(&snap.world.services[service].spec.server)
+    .to_string();
+  let target_ip = snap
+    .net(&snap.world)
+    .private
+    .get(&target)
+    .map(|a| a.ip.clone())
+    .unwrap_or_default();
+  Where {
     server,
     target,
     target_ip,
-  })
+  }
+}
+
+async fn check_location(
+  state: &AppState,
+  snap: &Snap,
+  w: &Where,
+  service: &str,
+) -> Result<(), ApiError> {
+  if !snap.world.servers.contains_key(&w.target) {
+    return Err(crate::world::server_not_found(&w.target));
+  }
+  if w.server == w.target {
+    return Err(ApiError::invalid(format!(
+      "服务 {service} 现在就在备份服务器 {} 上，换一台备份服务器",
+      w.target
+    )));
+  }
+  if w.target_ip.is_empty() {
+    return Err(
+      ApiError::invalid(format!(
+        "备份服务器 {} 没有内网地址",
+        w.target
+      ))
+      .suggest(format!(
+        "wharf server set {} --private-ip <ip>",
+        w.target
+      )),
+    );
+  }
+  require_safe_backup(state, &w.server)?;
+  require_safe_backup(state, &w.target)?;
+  crate::link::require_reach(
+    state,
+    &snap.net(&snap.world),
+    &w.server,
+    &w.target,
+    "连接备份服务器",
+    crate::link::ProbeMode::Persist,
+  )
+  .await
 }
 
 pub(crate) fn job(
@@ -262,18 +349,41 @@ pub(crate) fn require_isolation(
   Ok(())
 }
 
+pub(crate) fn old_agent(server: &str) -> ApiError {
+  ApiError::new(
+    ErrorCode::Conflict,
+    format!("服务器 {server} 的 agent 版本旧，无法安全备份或恢复"),
+  )
+  .with_hint("运行 wharf upgrade 升级 agent")
+}
+
+pub(crate) fn require_safe_backup(
+  state: &AppState,
+  server: &str,
+) -> Result<(), ApiError> {
+  if !state.hub.is_online(server) {
+    return Err(crate::hub::offline(server));
+  }
+  if !state.hub.supports_safe_backup(server) {
+    return Err(old_agent(server));
+  }
+  Ok(())
+}
+
 async fn target_htpasswd(
   state: &AppState,
   snap: &Snap,
   target: &str,
+  extra_service: Option<&str>,
 ) -> Result<String, ApiError> {
   let mut htpasswd = String::new();
   for (service, row) in &snap.world.services {
-    if row
-      .spec
-      .backup
-      .as_ref()
-      .is_some_and(|backup| backup.to == target)
+    if extra_service == Some(service.as_str())
+      || row
+        .spec
+        .backup
+        .as_ref()
+        .is_some_and(|backup| backup.to == target)
     {
       let (_, hash) = service_http_pair(state, service).await?;
       htpasswd.push_str(&format!("{service}:{hash}\n"));
@@ -286,11 +396,13 @@ async fn ensure_server(
   state: &AppState,
   snap: &Snap,
   w: &Where,
+  extra_service: Option<&str>,
   progress: &ProgressFn,
   cancel: &CancellationToken,
 ) -> Result<(), ApiError> {
   require_isolation(state, &w.target)?;
-  let htpasswd = target_htpasswd(state, snap, &w.target).await?;
+  let htpasswd =
+    target_htpasswd(state, snap, &w.target, extra_service).await?;
   let compose =
     render::backup_server_compose(&w.target_ip, &htpasswd);
   deploy_server(
@@ -358,7 +470,9 @@ pub(crate) async fn deploy_server(
       cancel,
     )
     .await?;
-  if result.containers.iter().any(|c| c.state != "running") {
+  if result.containers.is_empty()
+    || result.containers.iter().any(|c| c.state != "running")
+  {
     return Err(ApiError::new(
       ErrorCode::AgentFailed,
       format!("{} 上的备份服务没有运行起来", w.target),
@@ -371,20 +485,23 @@ pub(crate) async fn deploy_server(
   }
 }
 
-/// 停止服务；返回是否真的停了（没部署过就不用停，也不用再启动）。
+/// 停服后只启动本次停掉的容器。
 async fn stop(
   state: &AppState,
   w: &Where,
   service: &str,
   progress: &ProgressFn,
   cancel: &CancellationToken,
-) -> Result<bool, ApiError> {
+) -> Result<StoppedContainers, ApiError> {
+  if cancel.is_cancelled() {
+    return Err(ApiError::new(ErrorCode::Cancelled, "已取消"));
+  }
   progress(format!("停止 {} 上的 {service}", w.server));
   state
     .hub
     .call(
       &w.server,
-      AgentOp::ProjectStop {
+      AgentOp::ServiceStopForData {
         project: service.to_string(),
       },
       STOP_TIMEOUT,
@@ -394,13 +511,17 @@ async fn stop(
     .await
 }
 
-/// 无论成功、失败还是取消都要启动回来，所以用新的令牌。
 async fn start(
   state: &AppState,
   w: &Where,
   service: &str,
+  stopped: StoppedContainers,
+  should_start: bool,
   progress: &ProgressFn,
 ) -> Result<(), ApiError> {
+  if !should_start || stopped.containers.is_empty() {
+    return Ok(());
+  }
   progress(format!("启动 {} 上的 {service}", w.server));
   state
     .hub
@@ -408,18 +529,106 @@ async fn start(
       &w.server,
       AgentOp::ProjectStart {
         project: service.to_string(),
+        containers: stopped.containers,
       },
       STOP_TIMEOUT,
       Some(progress.clone()),
       &CancellationToken::new(),
     )
-    .await
-    .map(|_| ())
-    .map_err(|e| {
-      e.with_hint(format!(
-        "服务没能启动，手动处理：wharf service deploy {service}"
-      ))
-    })
+    .await?;
+  Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn preflight(
+  state: &AppState,
+  snap: &Snap,
+  w: &Where,
+  service: &str,
+  creds: &ServiceCreds,
+  mode: ResticPreflightMode,
+  progress: &ProgressFn,
+  cancel: &CancellationToken,
+) -> Result<ResticPreflightResult, ApiError> {
+  let backup = matches!(&mode, ResticPreflightMode::Backup);
+  let managed_mounts =
+    crate::data::mounts(service, &snap.world.services[service].spec)
+      .into_iter()
+      .filter(|m| m.kind == wharf_api_types::view::DataKind::Managed)
+      .map(|m| m.source)
+      .collect();
+  let result: ResticPreflightResult = state
+    .hub
+    .call(
+      &w.server,
+      job(
+        snap,
+        &w.server,
+        service,
+        rest_repo(
+          &w.target_ip,
+          REST_SERVER_PORT,
+          service,
+          &creds.http,
+        ),
+        &creds.key,
+        ResticAction::Preflight(ResticPreflight {
+          mode,
+          managed_mounts,
+        }),
+      ),
+      SERVER_TIMEOUT,
+      Some(progress.clone()),
+      cancel,
+    )
+    .await?;
+  if result.is_mountpoint && !backup {
+    return Err(
+      ApiError::new(
+        ErrorCode::Conflict,
+        format!("/srv/{service} 本身是独立挂载点"),
+      )
+      .with_hint(format!(
+        "如将数据盘改挂到 /srv/{service}/data，恢复期间仍须卸载服务目录及其子目录的所有挂载"
+      )),
+    );
+  }
+  if !result.conflicting_users.is_empty() {
+    let users = result
+      .conflicting_users
+      .iter()
+      .map(|u| {
+        format!(
+          "{}（容器 {}，挂载 {}）",
+          u.project.as_deref().unwrap_or(&u.container),
+          u.container,
+          u.source
+        )
+      })
+      .collect::<Vec<_>>()
+      .join("、");
+    let hint = if backup {
+      "先停止共用该目录的服务，或将对方挂载改为只读（:ro）"
+    } else {
+      "先停止共用该目录的容器再恢复"
+    };
+    return Err(
+      ApiError::new(
+        ErrorCode::Conflict,
+        format!("无法安全操作 /srv/{service}，其他活动挂载：{users}"),
+      )
+      .with_hint(hint),
+    );
+  }
+  if backup {
+    for m in &result.escaped_mounts {
+      progress(format!(
+        "不在备份范围：{} -> {}",
+        m.source, m.resolved
+      ));
+    }
+  }
+  Ok(result)
 }
 
 pub async fn backup(
@@ -430,24 +639,28 @@ pub async fn backup(
   cancel: &CancellationToken,
 ) -> Result<(), ApiError> {
   let snap = snapshot::load(&state.db).await?;
-  let w = locate(&snap, service)?;
-  crate::link::require_reach(
-    state,
-    &snap.net(&snap.world),
-    &w.server,
-    &w.target,
-    "备份到这台机器",
-    crate::link::ProbeMode::Persist,
-  )
-  .await?;
-  let creds = ensure_service_creds(state, service).await?;
-  let result = async {
-    ensure_server(state, &snap, &w, &progress, cancel).await?;
+  let w = location(&snap, service, service_target(&snap, service)?);
+  let mut started = Ok(());
+  let result: Result<_, ApiError> = async {
+    check_location(state, &snap, &w, service).await?;
+    let creds = ensure_service_creds(state, service).await?;
+    ensure_server(state, &snap, &w, None, &progress, cancel).await?;
     ensure_repo_has_service_key(
       state,
       &snap,
       (&w.target, service),
       &creds.key,
+      cancel,
+    )
+    .await?;
+    let check = preflight(
+      state,
+      &snap,
+      &w,
+      service,
+      &creds,
+      ResticPreflightMode::Backup,
+      &progress,
       cancel,
     )
     .await?;
@@ -476,68 +689,122 @@ pub async fn backup(
         cancel,
       )
       .await;
-    let started = if stopped {
-      start(state, &w, service, &progress).await
-    } else {
-      Ok(())
-    };
-    let summary = backed?;
-    started?;
-    Ok(summary)
-  }
-  .await;
-  record(state, run_id, service, &w, &result).await?;
-  result?;
-
-  // 清理旧快照失败不影响这次备份的结果。
-  let pruned = state
-    .hub
-    .call::<serde_json::Value>(
-      &w.target,
-      job(
-        &snap,
-        &w.target,
-        service,
-        ResticRepo::Local,
-        &creds.key,
-        ResticAction::Prune,
-      ),
-      RESTIC_TIMEOUT,
-      Some(progress.clone()),
-      cancel,
+    started = start(
+      state,
+      &w,
+      service,
+      stopped,
+      !snap.world.services[service].spec.stopped,
+      &progress,
     )
     .await;
+    backed.map(|mut summary| {
+      summary.escaped_mounts = check.escaped_mounts;
+      (summary, creds)
+    })
+  }
+  .await;
+  // 快照写入成功与重启结果分别记录。
+  let record_result = result
+    .as_ref()
+    .map(|(summary, _)| summary.clone())
+    .map_err(Clone::clone);
+  if !matches!(&record_result, Err(e) if e.code == ErrorCode::Cancelled)
+  {
+    record(state, run_id, service, &w, &record_result).await?;
+  }
+  let (_, creds) = match result {
+    Ok(result) => result,
+    Err(err) => {
+      return combine_restart(Err(err), started, service, &progress);
+    }
+  };
+  let pruned = local_call::<serde_json::Value>(
+    state,
+    &snap,
+    (&w.target, service),
+    &creds.key,
+    ResticAction::Prune,
+    cancel,
+  )
+  .await;
   if let Err(e) = pruned {
     progress(format!("提醒：清理旧快照失败：{e}"));
   }
-  Ok(())
+  crate::rules::notice(
+    state,
+    "backup",
+    Some(&format!("backup.{service}.restart")),
+    started.is_ok(),
+    crate::notify::Event {
+      title: if started.is_ok() {
+        format!("服务 {service} 备份后启动恢复正常")
+      } else {
+        format!("服务 {service} 备份已完成，但重启失败")
+      },
+      body: started
+        .as_ref()
+        .err()
+        .map(ToString::to_string)
+        .unwrap_or_default(),
+    },
+  )
+  .await;
+  started.map_err(|e| e.with_hint(format!("数据快照已写入目标仓库，请手动拉起服务：wharf service deploy {service}")))
+}
+
+fn combine_restart(
+  result: Result<(), ApiError>,
+  started: Result<(), ApiError>,
+  service: &str,
+  progress: &ProgressFn,
+) -> Result<(), ApiError> {
+  match (result, started) {
+    (Ok(()), Ok(())) => Ok(()),
+    (Err(e), Ok(())) => Err(e),
+    (result, Err(restart)) => {
+      let msg = format!(
+        "重启失败：{restart}。请手动拉起服务：wharf service deploy {service}"
+      );
+      progress(msg.clone());
+      Err(result.err().unwrap_or(restart).with_hint(msg))
+    }
+  }
 }
 
 pub async fn restore(
   state: &AppState,
   service: &str,
   snapshot_id: &str,
+  target: Option<&str>,
   progress: ProgressFn,
   cancel: &CancellationToken,
 ) -> Result<(), ApiError> {
   let snap = snapshot::load(&state.db).await?;
-  let w = locate(&snap, service)?;
-  crate::link::require_reach(
-    state,
-    &snap.net(&snap.world),
-    &w.server,
-    &w.target,
-    "备份到这台机器",
-    crate::link::ProbeMode::Persist,
-  )
-  .await?;
+  let target = restore_target(state, &snap, service, target).await?;
+  let w = location(&snap, service, target);
+  check_location(state, &snap, &w, service).await?;
   let creds = ensure_service_creds(state, service).await?;
-  ensure_server(state, &snap, &w, &progress, cancel).await?;
+  ensure_server(state, &snap, &w, Some(service), &progress, cancel)
+    .await?;
   ensure_repo_has_service_key(
     state,
     &snap,
     (&w.target, service),
     &creds.key,
+    cancel,
+  )
+  .await?;
+  preflight(
+    state,
+    &snap,
+    &w,
+    service,
+    &creds,
+    ResticPreflightMode::Restore {
+      snapshot: snapshot_id.to_string(),
+    },
+    &progress,
     cancel,
   )
   .await?;
@@ -566,13 +833,16 @@ pub async fn restore(
       cancel,
     )
     .await;
-  let started = if stopped {
-    start(state, &w, service, &progress).await
-  } else {
-    Ok(())
-  };
-  restored?;
-  started
+  let started = start(
+    state,
+    &w,
+    service,
+    stopped,
+    !snap.world.services[service].spec.stopped,
+    &progress,
+  )
+  .await;
+  combine_restart(restored.map(|_| ()), started, service, &progress)
 }
 
 pub(crate) async fn record(
@@ -704,19 +974,16 @@ pub async fn list(
 ) -> ApiResult<BackupsView> {
   auth.require(Perm::Read)?;
   let snap = snapshot::load(&s.db).await?;
-  let row = snap
-    .world
-    .services
-    .get(&name)
-    .ok_or_else(|| service_not_found(&name))?;
-  let target = row.spec.backup.as_ref().map(|b| b.to.clone());
+  let repo_target = resolve_target(&s, &snap, &name, None).await?;
+  let target = snap.world.services[&name]
+    .spec
+    .backup
+    .as_ref()
+    .map(|backup| backup.to.clone());
   let records = records(&s, &name, 20).await?;
-  // 快照在备份服务器本机读，服务所在的机器离线也能看到。
   let mut snapshots = vec![];
   let mut snapshots_error = None;
-  if let Some(target) =
-    target.as_ref().or(records.first().map(|r| &r.target))
-  {
+  if let Some(target) = repo_target.as_ref() {
     let (key, legacy) = repository_secrets(&s, &name).await?;
     let cancel = CancellationToken::new();
     let _cancel = cancel.clone().drop_guard();
@@ -759,6 +1026,7 @@ pub async fn list(
   Ok(Json(BackupsView {
     service: name,
     target,
+    snapshot_target: repo_target,
     records,
     snapshots,
     snapshots_error,
@@ -786,12 +1054,17 @@ async fn local_call<T: serde::de::DeserializeOwned>(
   action: ResticAction,
   cancel: &CancellationToken,
 ) -> Result<T, ApiError> {
+  let timeout = if matches!(action, ResticAction::Prune) {
+    RESTIC_TIMEOUT
+  } else {
+    LIST_TIMEOUT
+  };
   state
     .hub
     .call(
       target,
       job(snap, target, service, ResticRepo::Local, key, action),
-      LIST_TIMEOUT,
+      timeout,
       None,
       cancel,
     )
@@ -909,8 +1182,9 @@ pub async fn migrate_all(
   auth: Auth,
 ) -> ApiResult<MigrateReport> {
   auth.require(Perm::Admin)?;
-  let _lock =
-    s.apply_lock.try_lock().map_err(|_| s.runs.busy_error())?;
+  let _lock = s
+    .locks
+    .acquire(crate::locks::LockSpec::Global, "维护业务备份仓库")?;
   let cancel = CancellationToken::new();
   let _cancel = cancel.clone().drop_guard();
   let snap = snapshot::load(&s.db).await?;
@@ -981,8 +1255,9 @@ pub async fn cleanup_legacy(
       .suggest("wharf backup cleanup-legacy --confirm backup/legacy")
       .into());
   }
-  let _lock =
-    s.apply_lock.try_lock().map_err(|_| s.runs.busy_error())?;
+  let _lock = s
+    .locks
+    .acquire(crate::locks::LockSpec::Global, "维护业务备份仓库")?;
   let cancel = CancellationToken::new();
   let _cancel = cancel.clone().drop_guard();
   let legacy = s
@@ -1124,14 +1399,73 @@ fn current_key(keys: &[ResticKeyInfo]) -> Result<&str, ApiError> {
     })
 }
 
+#[derive(Deserialize, Default)]
+pub struct UnlockRequest {
+  #[serde(default)]
+  pub stale_only: bool,
+}
+
+pub async fn unlock(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Path(service): Path<String>,
+  body: Option<Json<UnlockRequest>>,
+) -> ApiResult<()> {
+  auth.require(Perm::Apply)?;
+  crate::token_scope::require_service(&auth, &service)?;
+  let _guard = s.locks.acquire(
+    crate::locks::LockSpec::Backup(service.clone()),
+    "解锁备份仓库",
+  )?;
+  let snap = snapshot::load(&s.db).await?;
+  let target = resolve_target(&s, &snap, &service, None)
+    .await?
+    .ok_or_else(|| missing_target(&service))?;
+  require_safe_backup(&s, &target)?;
+  let (key, legacy) = repository_secrets(&s, &service).await?;
+  let action = ResticAction::Unlock {
+    remove_all: !body.is_some_and(|b| b.stale_only),
+  };
+  let cancel = CancellationToken::new();
+  let _cancel = cancel.clone().drop_guard();
+  let result = if let Some(key) = key {
+    local_call::<serde_json::Value>(
+      &s,
+      &snap,
+      (&target, &service),
+      &key,
+      action.clone(),
+      &cancel,
+    )
+    .await
+  } else {
+    Err(ApiError::new(ErrorCode::Forbidden, "没有当前仓库口令"))
+  };
+  if let Some(legacy) = legacy
+    && matches!(&result, Err(e) if e.code == ErrorCode::Forbidden)
+  {
+    local_call::<serde_json::Value>(
+      &s,
+      &snap,
+      (&target, &service),
+      &legacy,
+      action,
+      &cancel,
+    )
+    .await?;
+  } else {
+    result?;
+  }
+  Ok(Json(()))
+}
+
 pub async fn run_now(
   State(s): State<Arc<AppState>>,
   auth: Auth,
   Path(name): Path<String>,
 ) -> ApiResult<ApplyResponse> {
   auth.require(Perm::Apply)?;
-  let snap = snapshot::load(&s.db).await?;
-  locate(&snap, &name)?;
+  crate::token_scope::require_service(&auth, &name)?;
   Ok(Json(
     apply::start_task_by(
       s.clone(),
@@ -1172,13 +1506,15 @@ pub async fn restore_now(
       .into(),
     );
   }
-  let guard = s
-    .apply_lock
-    .clone()
-    .try_lock_owned()
-    .map_err(|_| s.runs.busy_error())?;
+  crate::token_scope::require_service(&auth, &name)?;
+  let guard = s.locks.acquire(
+    crate::locks::LockSpec::apply([name.clone()]),
+    "恢复服务数据",
+  )?;
   let snap = snapshot::load(&s.db).await?;
-  locate(&snap, &name)?;
+  let target =
+    restore_target(&s, &snap, &name, req.target.as_deref()).await?;
+  guard.reserve_backup_target(target.clone())?;
   let skip = req
     .skip_snapshot
     .then(|| crate::db_snapshot::api_actor(&auth, peer, &headers));
@@ -1197,6 +1533,7 @@ pub async fn restore_now(
       Step::Restore {
         service: name,
         snapshot: req.snapshot,
+        target: Some(target),
       },
       Some(crate::apply::format_actor(&auth)),
       guard,

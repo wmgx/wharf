@@ -264,19 +264,32 @@ pub enum ResticRepo {
 #[serde(rename_all = "snake_case")]
 pub enum ResticAction {
   /// 备份 `/srv/<service>/`，仓库不存在时先初始化。结果是 [BackupSummary]。
-  Backup { host: String },
+  Backup {
+    host: String,
+  },
   /// 列出快照，结果是 `Vec<Snapshot>`。
   Snapshots,
   /// 恢复快照到 `/srv/<service>/`，原来的目录改名保留。结果是保留目录的路径。
-  Restore { snapshot: String },
+  Restore {
+    snapshot: String,
+  },
   /// 按保留策略删除旧快照并回收空间。
   Prune,
   /// 给仓库加一把口令，结果是新钥匙的 id。
-  AddKey { new_password: OneTimeSecret },
+  AddKey {
+    new_password: OneTimeSecret,
+  },
   /// 列出仓库钥匙。仓库不存在时返回空的 `Vec<ResticKeyInfo>`。
   ListKeys,
   /// 删掉一把口令。业务备份只能在备份服务器本机执行。
-  RemoveKey { id: String },
+  RemoveKey {
+    id: String,
+  },
+  Preflight(ResticPreflight),
+  Unlock {
+    #[serde(default)]
+    remove_all: bool,
+  },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -288,6 +301,8 @@ pub struct ResticKeyInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct BackupSummary {
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub escaped_mounts: Vec<EscapedMount>,
   pub snapshot_id: String,
   pub files: u64,
   pub bytes: u64,
@@ -303,6 +318,58 @@ pub struct Snapshot {
   pub hostname: String,
   #[serde(default)]
   pub paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResticPreflight {
+  pub mode: ResticPreflightMode,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub managed_mounts: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ResticPreflightMode {
+  Backup,
+  Restore { snapshot: String },
+}
+
+#[derive(
+  Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct EscapedMount {
+  pub source: String,
+  pub resolved: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BindMountUser {
+  pub container: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub project: Option<String>,
+  pub source: String,
+  pub rw: bool,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct ResticPreflightResult {
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub escaped_mounts: Vec<EscapedMount>,
+  #[serde(default)]
+  pub is_mountpoint: bool,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub conflicting_users: Vec<BindMountUser>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct StoppedContainers {
+  pub containers: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PruneRestoreResult {
+  pub removed: usize,
+  pub bytes: u64,
 }
 
 /// [super::AgentOp::SyncServe] 就绪时的进度行前缀。

@@ -329,7 +329,19 @@ pub async fn disk_usage(
     .filter(|o| o.success)
     .map(|o| o.stdout.trim().to_string())
     .unwrap_or_else(|| "/var/lib/docker".into());
-  let mut script = String::from("cd /host\n");
+  let mut script = String::from(
+    r#"cd /host
+set --
+for dir in /host/srv/.wharf-restore /host/srv/*/.wharf-restore-before-*; do
+  [ -d "$dir" ] && [ ! -L "$dir" ] && [ ! -L "${dir%/*}" ] && set -- "$@" "$dir"
+done
+bytes=0
+if [ "$#" -gt 0 ]; then
+  bytes=$(du -sb -- "$@" 2>/dev/null | awk '{sum+=$1} END {print sum+0}')
+fi
+echo "data .wharf-restore $bytes"
+"#,
+  );
   for svc in services.iter().filter(|s| safe(s)) {
     script.push_str(&format!(
       "echo \"data {svc} $(du -sb /host/srv/{svc} 2>/dev/null | cut -f1)\"\n"

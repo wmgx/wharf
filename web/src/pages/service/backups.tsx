@@ -58,7 +58,7 @@ export function Backups({ svc }: { svc: ServiceView }) {
 
   if (!hasData) return <Empty>没有数据卷</Empty>;
 
-  const last = data?.records[0];
+  const last = data?.records.find((record) => record.target === target);
   const uncovered = svc.data?.filter((m) => m.kind !== "managed") ?? [];
   return (
     <div className="grid gap-3">
@@ -91,12 +91,15 @@ export function Backups({ svc }: { svc: ServiceView }) {
               )}
             </>
           ) : (
-            <span className="text-muted-foreground">还没开备份</span>
+            <p className="text-muted-foreground">
+              还没开备份
+              {data?.snapshot_target && <>，历史快照仓库在 <ServerTag name={data.snapshot_target} /></>}
+            </p>
           )}
         </CardContent>
       </Card>
 
-      {uncovered.length > 0 && <Notice kind="warn">不在备份范围：{uncovered.map((m) => m.source || `匿名卷 ${m.target}`).join("、")}</Notice>}
+      {uncovered.length > 0 && <Notice kind="warn">不在备份范围：{uncovered.map((m) => m.resolved ? `${m.source} → ${m.resolved}` : m.source || `匿名卷 ${m.target}`).join("、")}</Notice>}
       <ErrorNote error={error} />
       {data?.snapshots_error && <Notice kind="warn">读取快照失败：{data.snapshots_error}</Notice>}
       {!data ? (

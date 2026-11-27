@@ -210,8 +210,10 @@ pub async fn upload(
   body: Bytes,
 ) -> ApiResult<serde_json::Value> {
   auth.require(Perm::Exec)?;
-  let _guard =
-    s.apply_lock.try_lock().map_err(|_| s.runs.busy_error())?;
+  let _guard = s.locks.acquire(
+    crate::locks::LockSpec::apply([name.clone()]),
+    "上传服务文件",
+  )?;
   let server = server_of(&s, &name).await?;
   crate::pending::source_changed(&s, &name).await?;
   let chunks: Vec<&[u8]> = if body.is_empty() {

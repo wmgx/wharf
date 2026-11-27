@@ -62,9 +62,8 @@ pub(super) async fn rotate(
     }
   };
   let _guard = state
-    .apply_lock
-    .try_lock()
-    .map_err(|_| state.runs.busy_error())?;
+    .locks
+    .acquire(crate::locks::LockSpec::apply([]), "轮换网关认证")?;
   let snap = snapshot::load(&state.db).await?;
   let gateway = snap.world.gateways.get(&name).ok_or_else(|| {
     ApiError::not_found(format!("网关 {name} 不存在"))

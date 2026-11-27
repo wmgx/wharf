@@ -509,6 +509,7 @@ export interface BackupSummary {
   files: number;
   bytes: number;
   added_bytes: number;
+  escaped_mounts?: Gen.EscapedMount[];
 }
 
 export interface BackupRecord {
@@ -533,6 +534,7 @@ export interface Snapshot {
 export interface BackupsView {
   service: string;
   target?: string;
+  snapshot_target?: string;
   records: BackupRecord[];
   snapshots: Snapshot[];
   snapshots_error?: string;
@@ -630,6 +632,7 @@ export type DataKind = "managed" | "external_dir" | "named_volume";
 
 export interface DataMount {
   kind: DataKind;
+  resolved?: string;
   /** 宿主机路径或卷名；匿名卷为空。 */
   source: string;
   target: string;
@@ -640,6 +643,7 @@ export interface DataMount {
 export type DataStatus = "ok" | "stale" | "off" | "uncovered" | "none";
 
 export interface ServiceData {
+  repo_empty?: boolean;
   name: string;
   /** 数据所在的服务器。 */
   server: string;

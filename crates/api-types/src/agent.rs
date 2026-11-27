@@ -154,6 +154,8 @@ pub enum AgentMsg {
     #[serde(default)]
     safe_migrate: bool,
     #[serde(default)]
+    safe_backup: bool,
+    #[serde(default)]
     key_rotation: bool,
   },
   KeyReady {
@@ -179,6 +181,8 @@ pub enum AgentMsg {
   Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema,
 )]
 pub struct AgentReport {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub backup_repos: Option<std::collections::BTreeMap<String, u32>>,
   pub version: String,
   pub hostname: String,
   pub os: String,
@@ -436,6 +440,14 @@ pub enum AgentOp {
   /// `docker compose start`：启动已停止的容器。
   ProjectStart {
     project: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    containers: Vec<String>,
+  },
+  ServiceStopForData {
+    project: String,
+  },
+  PruneRestore {
+    older_than_days: u32,
   },
   /// 迁移的接收端：在内网地址上临时起一个 rsync 服务，写入 `/srv/<service>/`。
   /// 就绪后推送一条进度 `ready <port>`，之后一直运行，直到请求被取消。

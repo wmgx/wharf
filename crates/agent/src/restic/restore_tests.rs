@@ -101,3 +101,217 @@ fn restore_installs_staged_tree_after_original_entry_changes() {
   assert_eq!(fs::read_to_string(kept.join("old")).unwrap(), "kept");
   assert!(fresh.symlink_metadata().unwrap().is_symlink());
 }
+
+#[test]
+fn detect_escaped_mounts_finds_symlink_outside_root() {
+  let dir = tempfile::tempdir().unwrap();
+  let root = dir.path().join("s1");
+  let link = root.join("originals");
+  fs::create_dir(&root).unwrap();
+  symlink("/mnt/nonexistent-in-agent/originals", &link).unwrap();
+  let mounts = [link.display().to_string()];
+  assert_eq!(
+    detect_escaped_mounts(dir.path(), "s1", &mounts).unwrap(),
+    [EscapedMount {
+      source: mounts[0].clone(),
+      resolved: "/mnt/nonexistent-in-agent/originals".into(),
+    }]
+  );
+}
+
+#[test]
+fn restore_mount_hint_requires_unmounting_even_after_moving_to_child()
+{
+  let dir = tempfile::tempdir().unwrap();
+  let service = dir.path().join("s1");
+  fs::create_dir(&service).unwrap();
+  let info = format!(
+    "22 1 0:1 / {} rw - ext4 /dev/disk rw",
+    service.display()
+  );
+  let e = check_restore_mounts(dir.path(), "s1", &info).unwrap_err();
+  assert_eq!(e.code, ErrorCode::Conflict);
+  let hint = e.hint.unwrap();
+  assert!(hint.contains("/srv/s1/data") && hint.contains("卸载"));
+  let submount = info.replace(
+    service.to_str().unwrap(),
+    service.join("data").to_str().unwrap(),
+  );
+  let e =
+    check_restore_mounts(dir.path(), "s1", &submount).unwrap_err();
+  assert_eq!(e.code, ErrorCode::Conflict);
+  assert!(e.hint.unwrap().contains("卸载"));
+  assert!(!is_mountpoint(dir.path(), "s1", None).unwrap());
+}
+
+#[test]
+fn backup_excludes_links_that_would_reject_restore() {
+  let dir = tempfile::tempdir().unwrap();
+  let root = dir.path();
+  fs::create_dir(root.join("db")).unwrap();
+  fs::write(root.join("db/app.db"), "data").unwrap();
+  symlink("app.db", root.join("db/current")).unwrap();
+  symlink("/mnt/media/originals", root.join("originals")).unwrap();
+  symlink("../../outside", root.join("db/link[1]")).unwrap();
+  let fd = DirFd::open_dir(root).unwrap();
+  assert!(validate_tree(&fd, true).is_err());
+  assert_eq!(
+    backup_link_excludes(Path::new("/srv/s1"), &fd, &Ctx::detached())
+      .unwrap(),
+    [r"/srv/s1/db/link\[1]", "/srv/s1/originals"]
+  );
+  fs::remove_file(root.join("originals")).unwrap();
+  fs::remove_file(root.join("db/link[1]")).unwrap();
+  validate_tree(&fd, true).unwrap();
+  assert_eq!(
+    fs::read_to_string(root.join("db/current")).unwrap(),
+    "data"
+  );
+}
+
+#[test]
+fn cleanup_stale_work_keeps_before_dirs_and_prune_respects_days() {
+  let dir = tempfile::tempdir().unwrap();
+  let root = dir.path().join(".wharf-restore");
+  let work = root.join("s1-20260101-000000-abcdef12");
+  let now = chrono::Utc::now();
+  let recent_stamp = now.format("%Y%m%d-%H%M%S");
+  let old_stamp =
+    (now - chrono::TimeDelta::days(10)).format("%Y%m%d-%H%M%S");
+  let kept = root.join(format!("s1-before-{recent_stamp}-abcdef12"));
+  let old = root.join(format!("s2-before-{old_stamp}-abcdef12"));
+  let live = dir.path().join("s1");
+  fs::create_dir_all(&work).unwrap();
+  fs::create_dir(&live).unwrap();
+  fs::create_dir(&old).unwrap();
+  fs::File::open(&live)
+    .unwrap()
+    .set_times(fs::FileTimes::new().set_modified(
+      std::time::SystemTime::now() - Duration::from_secs(10 * 86400),
+    ))
+    .unwrap();
+  fs::rename(&live, &kept).unwrap();
+  cleanup_stale_restore_work(dir.path());
+  assert!(kept.is_dir() && !work.exists());
+  let prune = |days| {
+    prune_restore_kept(dir.path(), days, &Ctx::detached())
+      .unwrap()
+      .removed
+  };
+  assert_eq!(prune(7), 1);
+  assert!(kept.is_dir() && !old.exists());
+  assert_eq!(prune(0), 1);
+  assert!(!kept.exists());
+}
+
+#[tokio::test]
+async fn restic_progress_frequency_is_forwarded_to_container() {
+  let (_dir, docker) = crate::docker::fake_docker(
+    r#"
+[ "$RESTIC_PROGRESS_FPS" = 0.05 ] || exit 2
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    restic/restic:*) exit 3;;
+    -e) [ "$2" != RESTIC_PROGRESS_FPS ] || exit 0;;
+  esac
+  shift
+done
+exit 4
+"#,
+  );
+  let job = Job {
+    docker: &docker,
+    service: "s1",
+    repo: "/repo".into(),
+    password: "",
+    http_auth: None,
+    mounts: vec![],
+  };
+  for args in [&["backup"][..], &["restore"], &["forget", "--prune"]]
+  {
+    job
+      .restic(args, SHORT_TIMEOUT, false, &Ctx::detached())
+      .await
+      .unwrap()
+      .check("docker run")
+      .unwrap();
+  }
+  let mut progress = prune_progress_matcher();
+  assert!(progress("[0:20] 12 packs repacked"));
+  assert!(!progress("[0:40] 12 packs repacked"));
+  assert!(progress("[1:00] 13 packs repacked"));
+}
+
+#[test]
+fn locked_repo_error_maps_to_unlock_hint() {
+  let error = check_restic_output(
+    Output {
+      success: false,
+      code: Some(1),
+      stdout: String::new(),
+      stderr: "repository is already locked exclusively".into(),
+    },
+    "restic backup",
+    "s1",
+  )
+  .unwrap_err();
+  assert_eq!(error.code, ErrorCode::Conflict);
+  assert_eq!(error.suggest, ["wharf backup unlock s1"]);
+}
+
+#[test]
+fn restic_progress_ignores_unchanged_counters() {
+  let mut progress = progress_matcher();
+  let step =
+    r#"{"message_type":"status","files_done":1,"bytes_done":20}"#;
+  assert!(progress(step));
+  assert!(!progress(step));
+  assert!(progress(
+    r#"{"message_type":"status","files_done":1,"bytes_done":30}"#
+  ));
+}
+
+#[tokio::test]
+async fn concurrent_restic_uses_unique_container_names() {
+  use std::os::unix::fs::PermissionsExt;
+  let dir = tempfile::tempdir().unwrap();
+  let script = dir.path().join("docker");
+  fs::write(
+    &script,
+    r#"#!/bin/sh
+[ "$1" = run ] || exit 8
+while [ "$#" -gt 1 ]; do
+  if [ "$1" = --name ]; then echo "$2"; exit 0; fi
+  shift
+done
+exit 9
+"#,
+  )
+  .unwrap();
+  fs::set_permissions(&script, fs::Permissions::from_mode(0o700))
+    .unwrap();
+  let docker = Docker {
+    bin: script.display().to_string(),
+    data_dir: dir.path().into(),
+  };
+  let job = Job {
+    docker: &docker,
+    service: "s1",
+    repo: "/repo".into(),
+    password: "",
+    http_auth: None,
+    mounts: vec![],
+  };
+  let ctx = Ctx::detached();
+  let (a, b) = tokio::join!(
+    job.restic(&["snapshots"], SHORT_TIMEOUT, false, &ctx),
+    job.restic(&["key", "list"], SHORT_TIMEOUT, false, &ctx)
+  );
+  let a = a.unwrap().check("snapshots").unwrap().stdout;
+  let b = b.unwrap().check("key list").unwrap().stdout;
+  assert!(
+    a.starts_with("wharf-restic-s1-")
+      && b.starts_with("wharf-restic-s1-")
+  );
+  assert_ne!(a, b);
+}

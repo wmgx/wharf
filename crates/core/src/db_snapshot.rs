@@ -625,7 +625,10 @@ pub async fn before(
 }
 
 pub async fn cleanup(s: &AppState) -> Result<(), ApiError> {
-  let Ok(_guard) = s.apply_lock.try_lock() else {
+  let Ok(_guard) = s.locks.acquire(
+    crate::locks::LockSpec::CoreMaintenance,
+    "维护控制面热快照",
+  ) else {
     return Ok(());
   };
   let data_dir = s.data_dir.clone();
@@ -675,8 +678,10 @@ pub async fn create_api(
   Json(req): Json<CreateRequest>,
 ) -> ApiResult<DbSnapshotInfo> {
   auth.require(Perm::Admin)?;
-  let _guard =
-    s.apply_lock.try_lock().map_err(|_| s.runs.busy_error())?;
+  let _guard = s.locks.acquire(
+    crate::locks::LockSpec::CoreMaintenance,
+    "维护控制面热快照",
+  )?;
   let reason = crate::log_redact::redact_text(
     req.reason.as_deref().unwrap_or("手动留底"),
   );
@@ -697,8 +702,10 @@ pub async fn delete_api(
 ) -> ApiResult<Value> {
   auth.require(Perm::Admin)?;
   validate_id(&id)?;
-  let _guard =
-    s.apply_lock.try_lock().map_err(|_| s.runs.busy_error())?;
+  let _guard = s.locks.acquire(
+    crate::locks::LockSpec::CoreMaintenance,
+    "维护控制面热快照",
+  )?;
   let data_dir = s.data_dir.clone();
   Ok(Json(
     s.db

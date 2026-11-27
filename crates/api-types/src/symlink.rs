@@ -56,7 +56,7 @@ pub fn check_single_link(
   rel: &Path,
   target: &Path,
 ) -> Result<PathBuf, ApiError> {
-  resolve(rel, target, &BTreeMap::new())
+  resolve_link(rel, target, &BTreeMap::new())
 }
 
 pub fn validate_symlinks(
@@ -88,12 +88,12 @@ pub fn validate_symlinks(
       )));
     }
     check_single_link(rel, target)?;
-    resolve(rel, target, &links)?;
+    resolve_link(rel, target, &links)?;
   }
   Ok(())
 }
 
-fn resolve(
+pub fn resolve_link(
   rel: &Path,
   target: &Path,
   links: &BTreeMap<PathBuf, PathBuf>,

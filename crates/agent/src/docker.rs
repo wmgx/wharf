@@ -664,10 +664,32 @@ impl Docker {
     target: &Path,
     ctx: &Ctx,
   ) -> Result<Vec<String>, ApiError> {
+    let mounts = self.inspect_container_mounts(true, ctx).await?;
+    Ok(containers_using_path(target, &mounts))
+  }
+
+  pub async fn bind_mount_active_users(
+    &self,
+    targets: &[PathBuf],
+    project: &str,
+    writable_only: bool,
+    ctx: &Ctx,
+  ) -> Result<Vec<wharf_api_types::agent::BindMountUser>, ApiError>
+  {
+    let mounts = self.inspect_container_mounts(false, ctx).await?;
+    Ok(active_mount_users(targets, project, writable_only, mounts))
+  }
+
+  async fn inspect_container_mounts(
+    &self,
+    all: bool,
+    ctx: &Ctx,
+  ) -> Result<Vec<wharf_api_types::agent::BindMountUser>, ApiError>
+  {
     let timeout = Duration::from_secs(30);
     let out = self
       .cmd()
-      .args(["ps", "-aq"])
+      .args(["ps", if all { "-aq" } else { "-q" }])
       .timeout(timeout)
       .run(ctx)
       .await?
@@ -681,20 +703,19 @@ impl Docker {
       .args([
         "inspect",
         "--format",
-        r#"{{json .Name}} {{json (index .Config.Labels "wharf.system")}} {{json .Mounts}}"#,
+        r#"{{json .Name}} {{json (index .Config.Labels "wharf.system")}} {{json (index .Config.Labels "com.docker.compose.project")}} {{json .Mounts}}"#,
       ])
       .args(ids.iter().copied())
       .timeout(timeout)
       .run(ctx)
       .await?
       .check("docker inspect")?;
-    let containers = parse_bind_mounts(&out.stdout)?;
-    if containers.len() != ids.len() {
+    if out.stdout.lines().count() != ids.len() {
       return Err(ApiError::internal(
         "Docker 返回的容器挂载信息不完整",
       ));
     }
-    Ok(containers_using_path(target, &containers))
+    parse_bind_mounts(&out.stdout)
   }
 
   /// 当前部署的 compose 和指纹，部署新版本前留着，起不来时换回去。
@@ -738,6 +759,147 @@ impl Docker {
     Ok(format!("释放了{}", freed.join("，")))
   }
 
+  async fn active_project_containers(
+    &self,
+    project: &str,
+    ctx: &Ctx,
+  ) -> Result<Vec<(String, String)>, ApiError> {
+    let out = self
+      .cmd()
+      .args([
+        "ps",
+        "-a",
+        "--no-trunc",
+        "--filter",
+        &format!("label=com.docker.compose.project={project}"),
+        "--format",
+        "{{.Names}} {{.State}}",
+      ])
+      .timeout(Duration::from_secs(30))
+      .run(ctx)
+      .await?
+      .check("docker ps")?;
+    let mut active = Vec::new();
+    for line in out.stdout.lines() {
+      let (name, state) = line.split_once(' ').ok_or_else(|| {
+        ApiError::internal("Docker 返回的容器状态无效")
+      })?;
+      if matches!(state, "running" | "paused" | "restarting") {
+        active.push((name.to_string(), state.to_string()));
+      }
+    }
+    Ok(active)
+  }
+
+  fn missing_compose(
+    project: &str,
+    active: &[(String, String)],
+  ) -> ApiError {
+    let names = active
+      .iter()
+      .map(|(name, _)| name.as_str())
+      .collect::<Vec<_>>()
+      .join("、");
+    ApiError::new(ErrorCode::Conflict, format!("{project} 缺少 compose.yaml，仍有活动容器：{names}"))
+      .with_hint(format!("先用 wharf service deploy {project} 重建配置，或手动停止这些容器后重试"))
+  }
+
+  pub async fn stop_running_for_data(
+    &self,
+    project: &str,
+    ctx: &Ctx,
+  ) -> Result<wharf_api_types::agent::StoppedContainers, ApiError> {
+    let active = self.active_project_containers(project, ctx).await?;
+    let containers: Vec<_> =
+      active.iter().map(|(name, _)| name.clone()).collect();
+    if containers.is_empty() {
+      return Ok(wharf_api_types::agent::StoppedContainers {
+        containers,
+      });
+    }
+    if !self.project_dir(project).join("compose.yaml").exists() {
+      return Err(Self::missing_compose(project, &active));
+    }
+    let stopped = async {
+      self.stop_start(project, false, ctx).await?;
+      if !self
+        .active_project_containers(project, ctx)
+        .await?
+        .is_empty()
+      {
+        return Err(ApiError::new(
+          ErrorCode::Conflict,
+          format!("{project} 仍有活动容器，无法安全操作数据"),
+        ));
+      }
+      Ok(())
+    }
+    .await;
+    if let Err(e) = stopped {
+      let detached = Ctx::detached();
+      let restarted = async {
+        let remaining =
+          self.active_project_containers(project, &detached).await?;
+        let stopped: Vec<_> = containers
+          .iter()
+          .filter(|name| {
+            !remaining.iter().any(|(live, _)| live == *name)
+          })
+          .cloned()
+          .collect();
+        self.start_containers(project, &stopped, &detached).await
+      }
+      .await;
+      return Err(match restarted {
+        Ok(()) => e,
+        Err(err) => {
+          e.with_hint(format!("回拉已停止的容器失败：{err}"))
+        }
+      });
+    }
+    Ok(wharf_api_types::agent::StoppedContainers { containers })
+  }
+
+  pub async fn start_containers(
+    &self,
+    project: &str,
+    containers: &[String],
+    ctx: &Ctx,
+  ) -> Result<(), ApiError> {
+    if containers.is_empty() {
+      return Ok(());
+    }
+    if containers.iter().any(|name| {
+      name.is_empty()
+        || name.starts_with('-')
+        || !name.bytes().all(|b| {
+          b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-')
+        })
+    }) {
+      return Err(ApiError::invalid("容器名无效"));
+    }
+    self
+      .cmd()
+      .args(["start", "--"])
+      .args(containers.iter().map(String::as_str))
+      .timeout(Duration::from_secs(180))
+      .run(ctx)
+      .await?
+      .check("docker start")?;
+    let active = self.active_project_containers(project, ctx).await?;
+    if containers.iter().any(|name| {
+      !active
+        .iter()
+        .any(|(live, state)| live == name && state == "running")
+    }) {
+      return Err(ApiError::new(
+        ErrorCode::AgentFailed,
+        format!("{project} 有容器未回到运行状态"),
+      ));
+    }
+    Ok(())
+  }
+
   /// `stop` 或 `start`。project 没部署过时什么也不做。
   pub async fn stop_start(
     &self,
@@ -746,6 +908,13 @@ impl Docker {
     ctx: &Ctx,
   ) -> Result<bool, ApiError> {
     if !self.project_dir(project).join("compose.yaml").exists() {
+      if !start {
+        let active =
+          self.active_project_containers(project, ctx).await?;
+        if !active.is_empty() {
+          return Err(Self::missing_compose(project, &active));
+        }
+      }
       return Ok(false);
     }
     let action = if start { "start" } else { "stop" };
@@ -1031,7 +1200,7 @@ pub(crate) fn clean_project_dir(
   remove_empty(dir)
 }
 
-fn normalize_abs(path: &Path) -> Option<PathBuf> {
+pub(crate) fn normalize_abs(path: &Path) -> Option<PathBuf> {
   use std::path::Component;
   if !path.is_absolute() {
     return None;
@@ -1055,7 +1224,7 @@ fn paths_overlap(target: &Path, mount: &Path) -> bool {
 
 fn parse_bind_mounts(
   output: &str,
-) -> Result<Vec<(String, Vec<PathBuf>)>, ApiError> {
+) -> Result<Vec<wharf_api_types::agent::BindMountUser>, ApiError> {
   #[derive(Deserialize)]
   #[serde(rename_all = "PascalCase")]
   struct Mount {
@@ -1065,66 +1234,87 @@ fn parse_bind_mounts(
     source: PathBuf,
     #[serde(default)]
     destination: PathBuf,
+    #[serde(rename = "RW", default = "default_rw")]
+    rw: bool,
+  }
+  fn default_rw() -> bool {
+    true
   }
 
-  output
-    .lines()
-    .map(|line| {
-      let invalid =
-        || ApiError::internal("Docker 返回的容器挂载信息无效");
-      let (name, rest) = line.split_once(' ').ok_or_else(invalid)?;
-      let mut fields = serde_json::Deserializer::from_str(rest)
-        .into_iter::<String>();
-      let role =
-        fields.next().ok_or_else(invalid)?.map_err(|_| invalid())?;
-      let mounts = &rest[fields.byte_offset()..];
-      let name: String =
-        serde_json::from_str(name).map_err(|_| invalid())?;
-      let system = matches!(role.as_str(), "agent" | "core" | "1");
-      let mounts: Option<Vec<Mount>> =
-        serde_json::from_str(mounts).map_err(|_| invalid())?;
-      let paths = mounts
-        .into_iter()
-        .flatten()
-        .filter(|m| {
-          m.kind == "bind"
-            && !(system
-              && m.source == Path::new("/srv")
-              && m.destination == Path::new("/srv"))
-        })
-        .map(|m| {
-          if m.source.is_absolute() {
-            Ok(m.source)
-          } else {
-            Err(invalid())
-          }
-        })
-        .collect::<Result<_, _>>()?;
-      Ok((name.trim_start_matches('/').to_string(), paths))
-    })
-    .collect()
+  let invalid =
+    || ApiError::internal("Docker 返回的容器挂载信息无效");
+  let mut users = Vec::new();
+  for line in output.lines() {
+    let mut fields =
+      serde_json::Deserializer::from_str(line).into_iter::<String>();
+    let mut field =
+      || fields.next().ok_or_else(invalid)?.map_err(|_| invalid());
+    let name = field()?;
+    let role = field()?;
+    let project = field()?;
+    let system = matches!(role.as_str(), "agent" | "core" | "1");
+    let mounts: Option<Vec<Mount>> =
+      serde_json::from_str(&line[fields.byte_offset()..])
+        .map_err(|_| invalid())?;
+    for m in mounts.into_iter().flatten().filter(|m| {
+      m.kind == "bind"
+        && !(system
+          && m.source == Path::new("/srv")
+          && m.destination == Path::new("/srv"))
+    }) {
+      if !m.source.is_absolute() {
+        return Err(invalid());
+      }
+      users.push(wharf_api_types::agent::BindMountUser {
+        container: name.trim_start_matches('/').to_string(),
+        project: (!project.is_empty()).then(|| project.clone()),
+        source: m.source.display().to_string(),
+        rw: m.rw,
+      });
+    }
+  }
+  Ok(users)
+}
+
+fn mount_paths(path: &Path) -> impl Iterator<Item = PathBuf> {
+  normalize_abs(path)
+    .into_iter()
+    .chain(std::fs::canonicalize(path).ok())
 }
 
 fn containers_using_path(
   target: &Path,
-  containers: &[(String, Vec<PathBuf>)],
+  mounts: &[wharf_api_types::agent::BindMountUser],
 ) -> Vec<String> {
-  fn paths(path: &Path) -> impl Iterator<Item = PathBuf> {
-    normalize_abs(path)
-      .into_iter()
-      .chain(std::fs::canonicalize(path).ok())
-  }
-  let targets: Vec<_> = paths(target).collect();
-  containers
+  let targets: Vec<_> = mount_paths(target).collect();
+  mounts
     .iter()
-    .filter(|(_, mounts)| {
-      mounts.iter().flat_map(|m| paths(m)).any(|mount| {
-        targets.iter().any(|target| paths_overlap(target, &mount))
-      })
+    .filter(|m| {
+      mount_paths(Path::new(&m.source))
+        .any(|p| targets.iter().any(|t| paths_overlap(t, &p)))
     })
-    .map(|(name, _)| name.clone())
+    .map(|m| m.container.clone())
     .collect::<BTreeSet<_>>()
     .into_iter()
+    .collect()
+}
+
+fn active_mount_users(
+  targets: &[PathBuf],
+  project: &str,
+  writable_only: bool,
+  mounts: Vec<wharf_api_types::agent::BindMountUser>,
+) -> Vec<wharf_api_types::agent::BindMountUser> {
+  let targets: Vec<_> =
+    targets.iter().flat_map(|p| mount_paths(p)).collect();
+  mounts
+    .into_iter()
+    .filter(|m| {
+      m.project.as_deref() != Some(project)
+        && (!writable_only || m.rw)
+        && mount_paths(Path::new(&m.source))
+          .any(|p| targets.iter().any(|t| paths_overlap(t, &p)))
+    })
     .collect()
 }
 
@@ -1475,10 +1665,10 @@ mod tests {
   #[test]
   fn containers_using_path_catches_exact_child_and_parent_mounts() {
     use std::path::Path;
-    let inspect = r#""/indexer" "" [{"Type":"bind","Source":"/srv/photos/originals"}]
-"/backup-tool" "" [{"Type":"bind","Source":"/srv","Destination":"/srv"}]
-"/other" "" [{"Type":"bind","Source":"/srv/photos2"}]
-"/exact" "" [{"Type":"bind","Source":"/srv/photos"}]"#;
+    let inspect = r#""/indexer" "" "" [{"Type":"bind","Source":"/srv/photos/originals"}]
+"/backup-tool" "" "" [{"Type":"bind","Source":"/srv","Destination":"/srv"}]
+"/other" "" "" [{"Type":"bind","Source":"/srv/photos2"}]
+"/exact" "" "" [{"Type":"bind","Source":"/srv/photos"}]"#;
     let containers = super::parse_bind_mounts(inspect).unwrap();
     assert_eq!(
       super::containers_using_path(
@@ -1490,11 +1680,102 @@ mod tests {
   }
 
   #[test]
+  fn bind_mount_active_users_distinguishes_rw_and_ro() {
+    use std::path::PathBuf;
+    let inspect = r#""/writer" "" "other" [{"Type":"bind","Source":"/srv/s1/data","RW":true}]
+"/reader" "" "" [{"Type":"bind","Source":"/srv/s1/data","RW":false}]
+"/wharf-agent" "agent" "" [{"Type":"bind","Source":"/srv","Destination":"/srv"}]
+"/self" "" "s1" [{"Type":"bind","Source":"/srv/s1/data"}]"#;
+    let mounts = super::parse_bind_mounts(inspect).unwrap();
+    let paths = [PathBuf::from("/srv/s1")];
+    let backup =
+      super::active_mount_users(&paths, "s1", true, mounts.clone());
+    assert_eq!(backup.len(), 1);
+    assert_eq!(backup[0].container, "writer");
+    let restore =
+      super::active_mount_users(&paths, "s1", false, mounts);
+    assert_eq!(restore.len(), 2);
+    assert_eq!(restore[1].container, "reader");
+  }
+
+  #[tokio::test]
+  async fn stop_for_data_rejects_running_containers_without_compose()
+  {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("docker");
+    use std::{fs, os::unix::fs::PermissionsExt};
+    fs::write(&script, "#!/bin/sh\n[ \"$1\" = ps ] || exit 99\nprintf 'web running\ninit exited\n'\n").unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o700))
+      .unwrap();
+    let docker = super::Docker {
+      bin: script.display().to_string(),
+      data_dir: dir.path().into(),
+    };
+    let ctx = super::Ctx::detached();
+    let error =
+      docker.stop_running_for_data("s1", &ctx).await.unwrap_err();
+    assert_eq!(error.code, wharf_api_types::ErrorCode::Conflict);
+    assert!(
+      error.message.contains("web")
+        && !error.message.contains("init")
+    );
+    assert_eq!(
+      docker.stop_start("s1", false, &ctx).await.unwrap_err().code,
+      error.code
+    );
+  }
+
+  #[tokio::test]
+  async fn stop_for_data_skips_stopped_and_rolls_back_partial_stop() {
+    use std::{fs, os::unix::fs::PermissionsExt};
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("docker");
+    let state = dir.path().join("state");
+    fs::write(&script, r#"#!/bin/sh
+state="$(dirname "$0")/state"
+case "$1:$(cat "$state")" in
+  ps:stopped) echo 'init exited' ;;
+  ps:running|ps:restarted) printf 'web running\nworker running\ninit exited\n' ;;
+  compose:running) echo partial > "$state"; exit 1 ;;
+  ps:partial) printf 'web exited\nworker running\ninit exited\n' ;;
+  start:partial) [ "$#" = 3 ] && [ "$2" = -- ] && [ "$3" = web ] || exit 8
+                 echo restarted > "$state" ;;
+  *) exit 9 ;;
+esac
+"#).unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o700))
+      .unwrap();
+    let docker = super::Docker {
+      bin: script.display().to_string(),
+      data_dir: dir.path().into(),
+    };
+    let project = docker.project_dir("s1");
+    fs::create_dir_all(&project).unwrap();
+    fs::write(project.join("compose.yaml"), "").unwrap();
+    let ctx = super::Ctx::detached();
+    fs::write(&state, "stopped").unwrap();
+    assert!(
+      docker
+        .stop_running_for_data("s1", &ctx)
+        .await
+        .unwrap()
+        .containers
+        .is_empty()
+    );
+    fs::write(&state, "running").unwrap();
+    assert!(docker.stop_running_for_data("s1", &ctx).await.is_err());
+    assert_eq!(
+      fs::read_to_string(&state).unwrap().trim(),
+      "restarted"
+    );
+  }
+
+  #[test]
   fn bind_mount_users_ignores_only_system_management_mounts() {
-    let inspect = r#""/wharf-agent" "agent" [{"Type":"bind","Source":"/srv","Destination":"/srv"}]
-"/wharf-agent-old" "1" [{"Type":"bind","Source":"/srv","Destination":"/srv"}]
-"/wharf-core" "core" [{"Type":"bind","Source":"/srv","Destination":"/srv"}]
-"/dedicated" "core" [{"Type":"bind","Source":"/srv/s1","Destination":"/data"}]"#;
+    let inspect = r#""/wharf-agent" "agent" "" [{"Type":"bind","Source":"/srv","Destination":"/srv"}]
+"/wharf-agent-old" "1" "" [{"Type":"bind","Source":"/srv","Destination":"/srv"}]
+"/wharf-core" "core" "" [{"Type":"bind","Source":"/srv","Destination":"/srv"}]
+"/dedicated" "core" "" [{"Type":"bind","Source":"/srv/s1","Destination":"/data"}]"#;
     let containers = super::parse_bind_mounts(inspect).unwrap();
     assert_eq!(
       super::containers_using_path(

@@ -230,6 +230,7 @@ async fn restart_caddy_backup(state: &Arc<AppState>, host: &str) {
       },
       AgentOp::ProjectStart {
         project: project.clone(),
+        containers: Vec::new(),
       },
     ] {
       let r: Result<serde_json::Value, _> = state

@@ -341,40 +341,51 @@ pub async fn retry_run(
   auth.require(Perm::Apply).map_err(|e| e.0)?;
   let original = load_run_for(&state, auth, id).await?;
   require_retryable(&original)?;
-  let guard = state
-    .apply_lock
-    .clone()
-    .try_lock_owned()
-    .map_err(|_| state.runs.busy_error())?;
   let (meta, scope_services) = {
     let id = id.to_string();
-    state.db.call(move |c| {
-      let row: Option<(String, Option<String>)> = c.query_row(
-        "SELECT body,retry_meta FROM runs WHERE id=?1",
-        [&id],
-        |r| Ok((r.get(0)?,r.get(1)?)),
-      ).optional().map_err(sql_err)?;
-      let (body, meta) = row.ok_or_else(|| ApiError::not_found(format!("执行记录 {id} 不存在")))?;
-      let stored: StoredRun = serde_json::from_str(&body).map_err(json_err)?;
-      let other: Option<(String, String)> = c.query_row(
-        "SELECT id,status FROM runs WHERE retry_of=?1 ORDER BY started_at DESC LIMIT 1",
-        [&id], |r| Ok((r.get(0)?, r.get(1)?)),
-      ).optional().map_err(sql_err)?;
-      if let Some((other, status)) = other {
-        let error = ApiError::new(ErrorCode::Conflict, format!("执行记录 {id} 已有续跑记录 {other}（{status}）"))
-          .suggest(format!("wharf run show {other}"));
-        return Err(if status == "failed" || status == "cancelled" {
-          error.suggest(format!("wharf run retry {other}"))
-        } else {
-          error
-        });
-      }
-      let meta = meta.ok_or_else(|| ApiError::invalid(format!("执行记录 {id} 没有可用的续跑信息"))
-        .suggest("wharf plan"))?;
-      Ok((serde_json::from_str::<RetryMeta>(&meta).map_err(json_err)?, stored.scope_services))
-    }).await?
+    state
+      .db
+      .call(move |c| {
+        let row: Option<(String, Option<String>)> = c
+          .query_row(
+            "SELECT body,retry_meta FROM runs WHERE id=?1",
+            [&id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+          )
+          .optional()
+          .map_err(sql_err)?;
+        let (body, meta) = row.ok_or_else(|| {
+          ApiError::not_found(format!("执行记录 {id} 不存在"))
+        })?;
+        let stored: StoredRun =
+          serde_json::from_str(&body).map_err(json_err)?;
+        let meta = meta.ok_or_else(|| {
+          ApiError::invalid(format!(
+            "执行记录 {id} 没有可用的续跑信息"
+          ))
+          .suggest("wharf plan")
+        })?;
+        Ok((
+          serde_json::from_str::<RetryMeta>(&meta)
+            .map_err(json_err)?,
+          stored.scope_services,
+        ))
+      })
+      .await?
   };
   let steps = select_retry_steps(&original, &meta)?;
+  let guard = match steps.as_slice() {
+    [step] if original.plan_id.is_empty() => {
+      lock_task(&state, &step.step, "续跑").await?
+    }
+    _ => {
+      let services = steps
+        .iter()
+        .flat_map(|p| run_scope::step_services(&p.step))
+        .chain(scope_services.iter().flatten().cloned());
+      state.locks.acquire(LockSpec::apply(services), "续跑")?
+    }
+  };
   let snap = snapshot::load(&state.db).await?;
   let steps = complete_migration_steps(steps, &snap);
   require_retry_access(
@@ -400,9 +411,23 @@ pub async fn retry_run(
   let stored_steps = steps.clone();
   let stored_run = run.clone();
   let scope = scope_services.clone();
+  let id = id.to_string();
   state
     .db
     .call_credentials(move |c, key| {
+      let other: Option<(String, String)> = c.query_row(
+        "SELECT id,status FROM runs WHERE retry_of=?1 ORDER BY started_at DESC LIMIT 1",
+        [&id], |r| Ok((r.get(0)?, r.get(1)?)),
+      ).optional().map_err(sql_err)?;
+      if let Some((other, status)) = other {
+        let error = ApiError::new(ErrorCode::Conflict, format!("执行记录 {id} 已有续跑记录 {other}（{status}）"))
+          .suggest(format!("wharf run show {other}"));
+        return Err(if status == "failed" || status == "cancelled" {
+          error.suggest(format!("wharf run retry {other}"))
+        } else {
+          error
+        });
+      }
       meta.require_fresh(c, key, !stored_run.plan_id.is_empty())?;
       let next = RetryMeta {
         steps: stored_steps,
@@ -554,6 +579,19 @@ async fn run_retry_reruns_only_failed_and_skipped_and_rejects_stale()
       .await
       .unwrap();
   }
+  let backup = state
+    .locks
+    .acquire(LockSpec::Backup("notes".into()), "备份")
+    .unwrap();
+  assert_eq!(
+    retry_run(state.clone(), &scoped, "r_first", "测试".into())
+      .await
+      .unwrap_err()
+      .code,
+    ErrorCode::Busy
+  );
+  assert!(lock(&calls).is_empty());
+  drop(backup);
   let response =
     retry_run(state.clone(), &scoped, "r_first", "测试".into())
       .await
@@ -562,7 +600,10 @@ async fn run_retry_reruns_only_failed_and_skipped_and_rejects_stale()
     loop {
       let run = load_run(&state, &response.run_id).await.unwrap();
       if run.status != RunStatus::Running
-        && state.apply_lock.try_lock().is_ok()
+        && state
+          .locks
+          .acquire(LockSpec::apply(["notes".into()]), "测试")
+          .is_ok()
       {
         break run;
       }

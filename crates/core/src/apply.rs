@@ -15,7 +15,6 @@ use std::{
 
 use chrono::Utc;
 use rusqlite::{OptionalExtension, params};
-use tokio::sync::OwnedMutexGuard;
 use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
   ApiError, ErrorCode,
@@ -35,6 +34,7 @@ use wharf_providers::{Owner, RemoteRecord};
 use crate::{
   db::{self, OwnedRecord, Write, json_err, now_ms, sql_err},
   hub::ProgressFn,
+  locks::{LockSpec, OpLockGuard},
   planner::{RemoteRef, Step, StepPlan},
   render, snapshot,
   state::AppState,
@@ -76,54 +76,8 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 impl Runs {
-  pub fn is_service_busy(&self, service: &str) -> bool {
-    lock(&self.active).values().any(|a| {
-      a.scope_services
-        .as_deref()
-        .is_none_or(|names| names.iter().any(|n| n == service))
-    })
-  }
-
   pub fn get(&self, id: &str) -> Option<Run> {
     lock(&self.active).get(id).map(|a| lock(&a.run).clone())
-  }
-
-  /// 正在执行的那个：报"已有执行"时说清楚是谁、在做哪一步。
-  pub fn busy_error(&self) -> ApiError {
-    let active = lock(&self.active);
-    let Some((id, a)) = active.iter().next() else {
-      return ApiError::new(
-        ErrorCode::Busy,
-        "已有一个执行在进行，马上结束",
-      )
-      .with_hint("几秒后再试");
-    };
-    let run = lock(&a.run);
-    let doing = run
-      .steps
-      .iter()
-      .find(|s| s.status == StepStatus::Running)
-      .or_else(|| run.steps.first())
-      .map(|s| s.title.clone())
-      .unwrap_or_default();
-    let done = run
-      .steps
-      .iter()
-      .filter(|s| {
-        s.status != StepStatus::Running
-          && s.status != StepStatus::Pending
-      })
-      .count();
-    let secs = (chrono::Utc::now() - run.started_at).num_seconds();
-    ApiError::new(
-      ErrorCode::Busy,
-      format!(
-        "{id} 正在执行（{done}/{} 步，已 {secs} 秒）：{doing}",
-        run.steps.len()
-      ),
-    )
-    .with_hint("等它结束，或者取消它")
-    .suggest(format!("wharf run cancel {id}"))
   }
 
   pub fn cancel(&self, id: &str) -> bool {
@@ -274,11 +228,6 @@ pub(crate) async fn start_with_actor(
   system_actor: &str,
 ) -> Result<ApplyResponse, ApiError> {
   let auth = caller.as_ref().map(|(auth, _)| *auth);
-  let guard = state
-    .apply_lock
-    .clone()
-    .try_lock_owned()
-    .map_err(|_| state.runs.busy_error())?;
   let stored = stored_plan(&state, &req.plan_id).await?;
   let plan = &stored.body.plan;
   if let Some(auth) = auth {
@@ -289,6 +238,35 @@ pub(crate) async fn start_with_actor(
     )?;
   }
 
+  let mut services: BTreeSet<_> = stored
+    .steps
+    .iter()
+    .flat_map(|p| run_scope::step_services(&p.step))
+    .collect();
+  let mut block_backups = false;
+  for write in &stored.writes {
+    match write {
+      Write::Upsert { kind, name, .. }
+      | Write::Delete { kind, name }
+        if kind == crate::world::KIND_SERVICE =>
+      {
+        services.insert(name.clone());
+      }
+      Write::Delete { kind, .. }
+        if kind == crate::world::KIND_SERVER =>
+      {
+        block_backups = true
+      }
+      _ => {}
+    }
+  }
+  let guard = state.locks.acquire(
+    LockSpec::Apply {
+      services,
+      block_backups,
+    },
+    "执行计划",
+  )?;
   if plan.status == PlanStatus::Applied {
     return Err(
       ApiError::new(ErrorCode::PlanStale, "这个计划已经执行过了")
@@ -406,6 +384,7 @@ pub(crate) async fn start_with_actor(
 
   // 检查版本并写入配置，在一个事务里完成。
   let run_id = crate::world::new_id("r");
+  guard.set_run(&run_id);
   let mut steps = Vec::new();
   let config_items: Vec<u32> = plan
     .items
@@ -690,12 +669,48 @@ pub async fn start_task_by(
   step: Step,
   actor: Option<String>,
 ) -> Result<ApplyResponse, ApiError> {
-  let guard = state
-    .apply_lock
-    .clone()
-    .try_lock_owned()
-    .map_err(|_| state.runs.busy_error())?;
+  let guard = lock_task(&state, &step, &title).await?;
   start_task_locked(state, title, step, actor, guard).await
+}
+
+async fn lock_task(
+  state: &AppState,
+  step: &Step,
+  title: &str,
+) -> Result<OpLockGuard, ApiError> {
+  let spec = match step {
+    Step::Backup { service } => LockSpec::Backup(service.clone()),
+    Step::CoreBackup { .. } => LockSpec::CoreBackup,
+    Step::Prune {
+      restore_days: Some(_),
+      ..
+    } => LockSpec::Global,
+    _ => LockSpec::apply(run_scope::step_services(step)),
+  };
+  let guard = state.locks.acquire(spec, title)?;
+  match step {
+    Step::Backup { service } => {
+      let snap = snapshot::load(&state.db).await?;
+      guard.reserve_backup_target(crate::backup::service_target(
+        &snap, service,
+      )?)?;
+    }
+    Step::Restore {
+      service, target, ..
+    } => {
+      let snap = snapshot::load(&state.db).await?;
+      let target = crate::backup::restore_target(
+        state,
+        &snap,
+        service,
+        target.as_deref(),
+      )
+      .await?;
+      guard.reserve_backup_target(target)?;
+    }
+    _ => {}
+  }
+  Ok(guard)
 }
 
 pub(crate) async fn start_task_locked(
@@ -703,7 +718,7 @@ pub(crate) async fn start_task_locked(
   title: String,
   step: Step,
   actor: Option<String>,
-  guard: OwnedMutexGuard<()>,
+  guard: OpLockGuard,
 ) -> Result<ApplyResponse, ApiError> {
   let scope = Some(run_scope::step_services(&step));
   let replayable = !matches!(
@@ -785,9 +800,10 @@ fn spawn_run(
   scope_services: Option<Vec<String>>,
   steps: Vec<StepPlan>,
   actor: Option<crate::security_receipt::Actor>,
-  guard: OwnedMutexGuard<()>,
+  guard: OpLockGuard,
 ) {
   let run_id = run.run_id.clone();
+  guard.set_run(&run_id);
   let cancel = CancellationToken::new();
   let shared = Arc::new(Mutex::new(run));
   lock(&state.runs.active).insert(
@@ -810,7 +826,7 @@ async fn execute(
   offset: usize,
   actor: Option<crate::security_receipt::Actor>,
   cancel: CancellationToken,
-  guard: OwnedMutexGuard<()>,
+  guard: OpLockGuard,
 ) {
   let mut guard = Some(guard);
   let run_id = lock(&run).run_id.clone();
@@ -1155,10 +1171,19 @@ pub(crate) async fn run_step(
       crate::backup::backup(state, run_id, service, progress, cancel)
         .await?;
     }
-    Step::Restore { service, snapshot } => {
+    Step::Restore {
+      service,
+      snapshot,
+      target,
+    } => {
       crate::pending::source_changed(state, service).await?;
       crate::backup::restore(
-        state, service, snapshot, progress, cancel,
+        state,
+        service,
+        snapshot,
+        target.as_deref(),
+        progress,
+        cancel,
       )
       .await?;
     }
@@ -1270,11 +1295,16 @@ pub(crate) async fn run_step(
         crate::migrate::reset_after_restart(state, service).await?;
       }
     }
-    Step::CoreBackup { user_key } => {
+    Step::CoreBackup {
+      user_key,
+      target,
+      owner_secret,
+    } => {
       crate::core_backup::backup(
         state,
         run_id,
         user_key.as_ref(),
+        (target.as_deref(), owner_secret.as_ref()),
         progress,
         cancel,
       )
@@ -1306,8 +1336,18 @@ pub(crate) async fn run_step(
     Step::Egress { server } => {
       crate::egress::apply(state, run_id, server, cancel).await?;
     }
-    Step::Prune { server } => {
-      crate::prune::prune(state, server, progress, cancel).await?;
+    Step::Prune {
+      server,
+      restore_days,
+    } => {
+      crate::prune::prune(
+        state,
+        server,
+        *restore_days,
+        progress,
+        cancel,
+      )
+      .await?;
     }
     Step::EdgeDeploy { app } => {
       let key = crate::edge_plan::deployed_key(app);
@@ -2062,6 +2102,7 @@ async fn project_stop_start(
   let op = if start {
     AgentOp::ProjectStart {
       project: service.to_string(),
+      containers: Vec::new(),
     }
   } else {
     AgentOp::ProjectStop {
@@ -2617,7 +2658,7 @@ mod tests {
     let (started, mut observed) = tokio::sync::oneshot::channel();
     let mut started = Some(started);
     state.hub.mock_agent("s1", false, move |op| {
-      assert!(matches!(op, AgentOp::ProjectStart { project } if project == "notes"));
+      assert!(matches!(op, AgentOp::ProjectStart { project, .. } if project == "notes"));
       started.take().unwrap().send(()).unwrap();
       Ok(serde_json::json!(true))
     });
@@ -2650,7 +2691,10 @@ mod tests {
       finished_at: None,
       steps: steps.iter().map(pending_run_step).collect(),
     }));
-    let guard = state.apply_lock.clone().try_lock_owned().unwrap();
+    let guard = state
+      .locks
+      .acquire(LockSpec::apply(["notes".into()]), "测试迁移")
+      .unwrap();
     execute(
       state.clone(),
       run.clone(),
@@ -2680,7 +2724,9 @@ mod tests {
     let mut starts = 0;
     state.hub.mock_agent("s1", false, move |op| {
       match op {
-        AgentOp::ProjectStart { project } if project == "notes" => {
+        AgentOp::ProjectStart { project, .. }
+          if project == "notes" =>
+        {
           starts += 1;
           if starts == 1 {
             return Err(ApiError::internal("启动失败"));

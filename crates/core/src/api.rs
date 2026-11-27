@@ -227,6 +227,10 @@ pub fn router(state: Arc<AppState>) -> Router {
       get(crate::core_backup::show).post(crate::core_backup::enable),
     )
     .route("/api/core-backup/run", post(crate::core_backup::run_now))
+    .route(
+      "/api/core-backup/unlock",
+      post(crate::core_backup::unlock),
+    )
     .route("/api/doctor", get(crate::doctor::doctor))
     .route("/api/metrics", get(crate::metrics::query))
     .route("/api/metrics/usage", get(crate::metrics::usage))
@@ -375,6 +379,10 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route(
       "/api/services/{name}/backups",
       get(crate::backup::list).post(crate::backup::run_now),
+    )
+    .route(
+      "/api/services/{name}/backups/unlock",
+      post(crate::backup::unlock),
     )
     .route(
       "/api/services/{name}/restore",
@@ -921,6 +929,9 @@ async fn remove_server(
   Path(name): Path<String>,
 ) -> ApiResult<Value> {
   auth.require(Perm::Admin)?;
+  let _guard = s
+    .locks
+    .acquire(crate::locks::LockSpec::Global, "删除服务器")?;
   let snap = snapshot::load(&s.db).await?;
   if !snap.world.servers.contains_key(&name) {
     return Err(server_not_found(&name).into());
@@ -982,6 +993,7 @@ async fn list_services(
   auth.require(Perm::Read)?;
   let snap = snapshot::load(&s.db).await?;
   let net = snap.net(&snap.world);
+  let history = crate::data::history(&s.db).await?;
   let live = views::cached_live(&s, &snap.world).await;
   Ok(Json(
     snap
@@ -995,7 +1007,7 @@ async fn list_services(
           .is_none_or(|allowed| allowed.contains(*n))
       })
       .filter_map(|n| {
-        views::service_view(&snap, &net, n, Some(&live))
+        views::service_view(&snap, &net, n, Some(&live), &history)
       })
       .collect(),
   ))
@@ -1058,9 +1070,11 @@ async fn show_service(
   }
   let snap = snapshot::load(&s.db).await?;
   let net = snap.net(&snap.world);
+  let history = crate::data::history(&s.db).await?;
   let live = views::cached_live(&s, &snap.world).await;
-  let mut view = views::service_view(&snap, &net, &name, Some(&live))
-    .ok_or_else(|| service_not_found(&name))?;
+  let mut view =
+    views::service_view(&snap, &net, &name, Some(&live), &history)
+      .ok_or_else(|| service_not_found(&name))?;
   if query.reveal {
     view.heartbeat =
       crate::service_monitor::heartbeat::view(&snap, &name, true);

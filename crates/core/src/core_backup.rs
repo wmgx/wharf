@@ -16,7 +16,7 @@ use axum::{
   http::{HeaderMap, header},
   response::{AppendHeaders, IntoResponse, Response},
 };
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
@@ -26,7 +26,7 @@ use wharf_api_types::{
     OneTimeSecret, ResticAction, ResticKeyInfo,
   },
   plan::ApplyResponse,
-  view::{BackupRecord, Perm},
+  view::{BackupRecord, Issue, IssueLevel, Perm},
 };
 
 use crate::{
@@ -56,7 +56,7 @@ pub const HTTP_USER: &str = "wharf-core";
 const REPO_SETTING: &str = "core_backup.repo";
 const REPO_VERSION: &str = "7711";
 const USER_KEY_TARGET: &str = "core_backup.user_key_target";
-const TO: &str = "core_backup.to";
+pub(crate) const TO: &str = "core_backup.to";
 /// 登录密码那把钥匙的 id，换密码时删掉旧的。
 const USER_KEY: &str = "core_backup.user_key";
 /// 加钥匙时管理员的密码哈希。和现在的不一样说明改过密码，要重新输入一次。
@@ -69,6 +69,8 @@ pub struct CoreBackupView {
   pub to: Option<String>,
   /// 登录密码那把钥匙是不是当前的密码。
   pub user_key_current: bool,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub repo_empty: bool,
   pub records: Vec<BackupRecord>,
   /// 控制面整个丢了时，在新机器上执行的恢复命令。
   #[serde(skip_serializing_if = "Option::is_none")]
@@ -130,8 +132,16 @@ pub async fn show(
     let user = admin.as_ref().map(|a| a.0.clone())?;
     Some(restore_command(&ip, &user))
   });
+  let history = crate::data::history(&s.db).await?;
+  let repo_empty = to.as_ref().is_some_and(|target| {
+    let last_ok = history
+      .get(&(REPO.into(), target.clone()))
+      .and_then(|h| h.ok);
+    crate::data::repo_verified_empty(&s, &snap, target, REPO, last_ok)
+  });
   Ok(Json(CoreBackupView {
     user_key_current,
+    repo_empty,
     to,
     records,
     restore_command,
@@ -275,6 +285,24 @@ pub async fn enable(
     hash,
   )
   .await?;
+  let guard = s
+    .locks
+    .acquire(crate::locks::LockSpec::CoreBackup, "备份控制面")?;
+  let cancel = CancellationToken::new();
+  let _cancel = cancel.clone().drop_guard();
+  let core_server = match crate::core_node::server_of(&snap) {
+    Some(server) => server,
+    None => {
+      crate::core_node::require_verified(&s, &cancel)
+        .await?
+        .server
+    }
+  };
+  reject_self_target(&core_server, &req.to)?;
+  for server in [&core_server, &req.to] {
+    backup::require_isolation(&s, server)?;
+    backup::require_safe_backup(&s, server)?;
+  }
   let password = req.password.clone();
   let owner = tokio::task::spawn_blocking(move || {
     bcrypt::hash(password, bcrypt::DEFAULT_COST)
@@ -283,31 +311,14 @@ pub async fn enable(
   .map_err(|_| ApiError::internal("计算哈希失败"))?
   .map_err(|e| ApiError::internal(format!("计算哈希失败：{e}")))?;
   let owner = format!("{username}:{owner}");
-  let guard = s
-    .apply_lock
-    .clone()
-    .try_lock_owned()
-    .map_err(|_| s.runs.busy_error())?;
-  ensure_creds(&s).await?;
-  let to = req.to.clone();
-  s.db
-    .call_credentials(move |c, key| {
-      let tx = c.transaction().map_err(sql_err)?;
-      if db::setting(&tx, TO)?.as_deref() != Some(&to) {
-        db::set_setting(&tx, REPO_SETTING, None)?;
-        db::set_setting(&tx, USER_KEY_TARGET, None)?;
-      }
-      db::set_setting(&tx, TO, Some(&to))?;
-      key.put_secret(&tx, OWNER_SECRET, &owner, now_ms(), true)?;
-      tx.commit().map_err(sql_err)
-    })
-    .await?;
   Ok(Json(
     apply::start_task_locked(
       s.clone(),
       "备份控制面".into(),
       Step::CoreBackup {
         user_key: Some(OneTimeSecret(req.password)),
+        target: Some(req.to),
+        owner_secret: Some(OneTimeSecret(owner)),
       },
       Some(crate::apply::format_actor(&auth)),
       guard,
@@ -404,7 +415,11 @@ pub async fn run_now(
     apply::start_task_by(
       s.clone(),
       "备份控制面".into(),
-      Step::CoreBackup { user_key: None },
+      Step::CoreBackup {
+        user_key: None,
+        target: None,
+        owner_secret: None,
+      },
       Some(crate::apply::format_actor(&auth)),
     )
     .await?,
@@ -426,83 +441,194 @@ fn check_data_dir(s: &AppState) -> Result<(), ApiError> {
   Ok(())
 }
 
+fn reject_self_target(
+  server: &str,
+  target: &str,
+) -> Result<(), ApiError> {
+  if server == target {
+    return Err(ApiError::invalid(format!(
+      "控制面所在机器 {target} 不能同时作为控制面备份目标"
+    )));
+  }
+  Ok(())
+}
+
 pub async fn backup(
   state: &AppState,
   run_id: &str,
   user_key: Option<&OneTimeSecret>,
+  change: (Option<&str>, Option<&OneTimeSecret>),
   progress: ProgressFn,
   cancel: &CancellationToken,
 ) -> Result<(), ApiError> {
-  check_data_dir(state)?;
-  backup_impl(state, run_id, user_key, progress, cancel).await
+  backup_impl(state, run_id, user_key, change, progress, cancel, true)
+    .await
 }
 
 async fn backup_impl(
   state: &AppState,
   run_id: &str,
   user_key: Option<&OneTimeSecret>,
+  (target, owner): (Option<&str>, Option<&OneTimeSecret>),
   progress: ProgressFn,
   cancel: &CancellationToken,
+  require_standard_dir: bool,
 ) -> Result<(), ApiError> {
-  let to = state.db.call(|c| db::setting(c, TO)).await?.ok_or_else(
-    || {
-      ApiError::invalid("还没有开启控制面备份")
-        .with_hint("本机快速回退用 wharf core snapshot，整机异地灾备用 wharf backup core")
-        .suggest("wharf backup core --to <server>")
-    },
-  )?;
-  let snap = snapshot::load(&state.db).await?;
-  let target_ip = snap
-    .net(&snap.world)
-    .private
-    .get(&to)
-    .map(|a| a.ip.clone())
-    .ok_or_else(|| {
-      ApiError::invalid(format!("备份服务器 {to} 没有内网地址"))
+  let (to, old_target) =
+    state.db.call(|c| db::setting(c, TO)).await.map(|old| {
+      (target.map(str::to_string).or_else(|| old.clone()), old)
     })?;
-  let core =
-    crate::core_node::require_verified(state, cancel).await?;
-  if core.server == to {
-    return Err(ApiError::invalid(format!(
-      "控制面所在机器 {to} 不能同时作为控制面备份目标"
-    )));
-  }
-  let w = Where {
-    server: core.server.clone(),
+  let to = to.ok_or_else(|| ApiError::invalid("还没有开启控制面备份")
+    .with_hint("本机快速回退用 wharf core snapshot，整机异地灾备用 wharf backup core")
+    .suggest("wharf backup core --to <server>"))?;
+  let mut w = Where {
+    server: String::new(),
     target: to,
-    target_ip,
+    target_ip: String::new(),
   };
-  let creds = ensure_creds(state).await?;
-  ensure_core_server(state, &snap, &w, &creds, &progress, cancel)
+  let result: Result<_, ApiError> = async {
+    if require_standard_dir {
+      check_data_dir(state)?;
+    }
+    let snap = snapshot::load(&state.db).await?;
+    w.server = crate::core_node::server_of(&snap).unwrap_or_default();
+    w.target_ip = target_ip(&snap, &w.target)?;
+    let core =
+      crate::core_node::require_verified(state, cancel).await?;
+    w.server.clone_from(&core.server);
+    reject_self_target(&w.server, &w.target)?;
+    backup::require_safe_backup(state, &w.server)?;
+    backup::require_safe_backup(state, &w.target)?;
+    let mut creds = ensure_creds(state).await?;
+    // 同一个目标的旧登录凭据保留到新快照与新钥匙准备好。
+    if old_target.as_deref() != Some(&w.target) {
+      creds.owner = owner.map(|owner| owner.0.clone());
+    }
+    ensure_core_server(state, &snap, &w, &creds, &progress, cancel)
+      .await?;
+    let dir = staging_path(&state.data_dir);
+    let (marker, _stage) = stage(state, &dir).await?;
+    progress("已生成数据库快照".into());
+    let summary: BackupSummary = run_repo(
+      state,
+      &snap,
+      &w,
+      &creds,
+      &core,
+      ResticAction::Backup {
+        host: w.server.clone(),
+      },
+      Some(&marker),
+      &progress,
+      cancel,
+    )
     .await?;
-  let dir = state.data_dir.join(
-    Path::new(CORE_BACKUP_DIR).file_name().expect("备份目录名"),
-  );
-  let marker = stage(state, &dir).await?;
-  progress("已生成数据库快照".into());
-  let result: Result<BackupSummary, ApiError> = run_repo(
+    Ok((summary, snap, core, creds))
+  }
+  .await;
+  let recorded = result
+    .as_ref()
+    .map(|(summary, _, _, _)| summary.clone())
+    .map_err(Clone::clone);
+  if !matches!(&recorded, Err(e) if e.code == ErrorCode::Cancelled) {
+    backup::record(state, run_id, REPO, &w, &recorded).await?;
+  }
+  let (_, snap, core, mut creds) = result?;
+  let old_owner = creds.owner.clone();
+  if let Some(owner) = owner {
+    creds.owner = Some(owner.0.clone());
+  }
+  finish_backup(
     state,
     &snap,
     &w,
     &creds,
     &core,
-    ResticAction::Backup {
-      host: w.server.clone(),
-    },
-    Some(&marker),
+    user_key,
+    old_target.as_deref() == Some(&w.target),
+    old_owner,
     &progress,
     cancel,
-  )
-  .await;
-  let _ = std::fs::remove_dir_all(&dir);
-  backup::record(state, run_id, REPO, &w, &result).await?;
-  result?;
-  finish_backup(
-    state, &snap, &w, &creds, &core, user_key, &progress, cancel,
   )
   .await
 }
 
+fn target_ip(
+  snap: &snapshot::Snapshot,
+  to: &str,
+) -> Result<String, ApiError> {
+  snap
+    .net(&snap.world)
+    .private
+    .get(to)
+    .map(|a| a.ip.clone())
+    .ok_or_else(|| {
+      ApiError::invalid(format!("备份服务器 {to} 没有内网地址"))
+    })
+}
+
+pub async fn unlock(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  body: Option<Json<backup::UnlockRequest>>,
+) -> ApiResult<()> {
+  auth.require(Perm::Admin)?;
+  let _guard = s.locks.acquire(
+    crate::locks::LockSpec::CoreBackup,
+    "解锁控制面备份仓库",
+  )?;
+  let target = s
+    .db
+    .call(|c| db::setting(c, TO))
+    .await?
+    .ok_or_else(|| ApiError::invalid("还没有开启控制面备份"))?;
+  let snap = snapshot::load(&s.db).await?;
+  let cancel = CancellationToken::new();
+  let _cancel = cancel.clone().drop_guard();
+  let core = crate::core_node::require_verified(&s, &cancel).await?;
+  backup::require_safe_backup(&s, &core.server)?;
+  let w = Where {
+    server: core.server.clone(),
+    target_ip: target_ip(&snap, &target)?,
+    target,
+  };
+  let creds = ensure_creds(&s).await?;
+  let progress: ProgressFn = Arc::new(|_| {});
+  run_repo::<serde_json::Value>(
+    &s,
+    &snap,
+    &w,
+    &creds,
+    &core,
+    ResticAction::Unlock {
+      remove_all: !body.is_some_and(|b| b.stale_only),
+    },
+    None,
+    &progress,
+    &cancel,
+  )
+  .await?;
+  Ok(Json(()))
+}
+
+pub async fn issues(db: &db::Db) -> Result<Vec<Issue>, ApiError> {
+  db.call(|c| {
+    let Some(target) = db::setting(c, TO)? else { return Ok(Vec::new()); };
+    let hash: Option<String> = c.query_row("SELECT password_hash FROM admin WHERE id = 1", [], |r| r.get(0)).optional().map_err(sql_err)?;
+    if user_key_current(c, Some(&target), hash.as_deref())? { return Ok(Vec::new()); }
+    Ok(vec![Issue {
+      code: "core_backup_key_stale".into(),
+      level: IssueLevel::Warn,
+      subject: None,
+      ack: None,
+      alert: None,
+      title: "控制面备份的登录密码恢复口令已失效".into(),
+      hint: Some(format!("重新输入当前登录密码同步恢复口令：wharf backup core --to {target}")),
+    }])
+  }).await
+}
+
+#[derive(Clone)]
 struct CoreCreds {
   key: String,
   http: String,
@@ -576,24 +702,25 @@ async fn finish_backup(
   creds: &CoreCreds,
   core: &VerifiedCore,
   user_key: Option<&OneTimeSecret>,
+  same_target: bool,
+  old_owner: Option<String>,
   progress: &ProgressFn,
   cancel: &CancellationToken,
 ) -> Result<(), ApiError> {
-  state
-    .db
-    .call(|c| db::set_setting(c, REPO_SETTING, Some(REPO_VERSION)))
-    .await?;
   if let Some(password) = user_key {
     let (_, hash) = login::admin(&state.db)
       .await?
       .ok_or_else(|| sql_err(rusqlite::Error::QueryReturnedNoRows))?;
+    let changed = || {
+      ApiError::new(
+        ErrorCode::Conflict,
+        "登录密码已变更，请重新设置控制面备份",
+      )
+    };
     if !login::verify_password_async(password.0.clone(), hash.clone())
       .await?
     {
-      return Err(ApiError::new(
-        ErrorCode::Conflict,
-        "登录密码已变更，请重新设置控制面备份",
-      ));
+      return Err(changed());
     }
     let keys: Vec<ResticKeyInfo> = run_repo(
       state,
@@ -621,12 +748,85 @@ async fn finish_backup(
       cancel,
     )
     .await?;
-    let old = state.db.call(|c| db::setting(c, USER_KEY)).await?;
-    if let Some(old) = old
+    let owner_changed = old_owner != creds.owner;
+    let configure: Result<_, ApiError> = async {
+      if owner_changed {
+        ensure_core_server(state, snap, w, creds, progress, cancel)
+          .await?;
+      }
+      let target = w.target.clone();
+      let owner = creds.owner.clone();
+      let new_id = id.clone();
+      state
+        .db
+        .call_credentials(move |c, key| {
+          let tx = c.transaction().map_err(sql_err)?;
+          let matches = tx
+            .query_row(
+              "SELECT password_hash = ?1 FROM admin WHERE id = 1",
+              [&hash],
+              |r| r.get::<_, bool>(0),
+            )
+            .optional()
+            .map_err(sql_err)?
+            .unwrap_or(false);
+          if !matches {
+            return Err(changed());
+          }
+          let old = db::setting(&tx, USER_KEY)?;
+          db::set_setting(&tx, TO, Some(&target))?;
+          if let Some(owner) = owner {
+            key.put_secret(
+              &tx,
+              OWNER_SECRET,
+              &owner,
+              now_ms(),
+              true,
+            )?;
+          }
+          db::set_setting(&tx, REPO_SETTING, Some(REPO_VERSION))?;
+          db::set_setting(&tx, USER_KEY, Some(&new_id))?;
+          db::set_setting(&tx, KEY_FOR, Some(&hash))?;
+          db::set_setting(&tx, USER_KEY_TARGET, Some(&target))?;
+          tx.commit().map_err(sql_err)?;
+          Ok(old)
+        })
+        .await
+    }
+    .await;
+    let old = match configure {
+      Ok(old) => old,
+      Err(error) => {
+        if owner_changed && same_target {
+          let previous = CoreCreds {
+            owner: old_owner,
+            ..creds.clone()
+          };
+          let rolled_back = ensure_core_server(
+            state,
+            snap,
+            w,
+            &previous,
+            progress,
+            &CancellationToken::new(),
+          )
+          .await;
+          if let Err(rollback) = rolled_back {
+            return Err(error.with_hint(format!(
+              "恢复旧备份服务器配置失败：{}",
+              rollback.message
+            )));
+          }
+        }
+        return Err(error);
+      }
+    };
+    // 配置先提交，数据库写失败时旧钥匙仍可用。
+    if same_target
+      && let Some(old) = old
       && old != id
       && keys.iter().any(|k| !k.current && k.id == old)
-    {
-      run_repo::<serde_json::Value>(
+      && let Err(e) = run_repo::<serde_json::Value>(
         state,
         snap,
         w,
@@ -635,22 +835,18 @@ async fn finish_backup(
         ResticAction::RemoveKey { id: old },
         None,
         progress,
-        cancel,
+        &CancellationToken::new(),
       )
-      .await?;
+      .await
+    {
+      progress(format!("提醒：删除旧恢复口令失败：{}", e.message));
     }
-    let target = w.target.clone();
+    progress("已把登录密码设为恢复口令".into());
+  } else {
     state
       .db
-      .call(move |c| {
-        let tx = c.transaction().map_err(sql_err)?;
-        db::set_setting(&tx, USER_KEY, Some(&id))?;
-        db::set_setting(&tx, KEY_FOR, Some(&hash))?;
-        db::set_setting(&tx, USER_KEY_TARGET, Some(&target))?;
-        tx.commit().map_err(sql_err)
-      })
+      .call(|c| db::set_setting(c, REPO_SETTING, Some(REPO_VERSION)))
       .await?;
-    progress("已把登录密码设为恢复口令".into());
   }
   // 清理旧快照失败不影响这次备份的结果。
   let pruned = run_repo::<serde_json::Value>(
@@ -710,23 +906,43 @@ async fn run_repo<T: serde::de::DeserializeOwned>(
     .await
 }
 
+struct StagedCoreDir(std::path::PathBuf);
+
+impl Drop for StagedCoreDir {
+  fn drop(&mut self) {
+    let _ = std::fs::remove_dir_all(&self.0);
+  }
+}
+
+fn staging_path(data_dir: &Path) -> std::path::PathBuf {
+  data_dir
+    .join(Path::new(CORE_BACKUP_DIR).file_name().expect("备份目录名"))
+}
+
+pub fn cleanup_staged(data_dir: &Path) {
+  let _ = std::fs::remove_dir_all(staging_path(data_dir));
+}
+
 /// 把数据库快照、控制面密钥、加密主密钥、管理员 token 放进 [CORE_BACKUP_DIR]，返回标记。
 async fn stage(
   state: &AppState,
   dir: &Path,
-) -> Result<String, ApiError> {
+) -> Result<(String, StagedCoreDir), ApiError> {
+  use std::os::unix::fs::DirBuilderExt;
   use std::os::unix::fs::PermissionsExt;
-  let _ = std::fs::remove_dir_all(dir);
-  std::fs::create_dir_all(dir).map_err(|e| {
-    ApiError::internal(format!("创建 {}：{e}", dir.display()))
-  })?;
-  #[cfg(unix)]
-  {
-    let _ = std::fs::set_permissions(
-      dir,
-      std::fs::Permissions::from_mode(0o700),
-    );
+  match std::fs::remove_dir_all(dir) {
+    Ok(()) => {}
+    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+    Err(e) => {
+      return Err(ApiError::internal(format!(
+        "清理备份暂存目录失败：{e}"
+      )));
+    }
   }
+  std::fs::DirBuilder::new().mode(0o700).create(dir).map_err(
+    |e| ApiError::internal(format!("创建 {}：{e}", dir.display())),
+  )?;
+  let guard = StagedCoreDir(dir.to_path_buf());
   let _rotation = state.key.operation.lock().await;
   let db_copy = dir.join("wharf.db").display().to_string();
   state
@@ -762,7 +978,7 @@ async fn stage(
   let marker = backup::random_hex();
   std::fs::write(dir.join(".marker"), &marker)
     .map_err(|e| ApiError::internal(format!("写标记：{e}")))?;
-  Ok(marker)
+  Ok((marker, guard))
 }
 
 /// 新机器上恢复：先让它加入同一个内网，再执行这条命令，按提示输入两次登录密码。
@@ -780,21 +996,73 @@ fn restore_command(ip: &str, user: &str) -> String {
   )
 }
 
-/// 定时备份用：上次成功是什么时候。
-pub fn last_ok(
-  c: &rusqlite::Connection,
-) -> Result<Option<i64>, ApiError> {
-  c.query_row(
-    "SELECT MAX(created_at) FROM backups WHERE service = ?1 AND ok",
-    params![REPO],
-    |r| r.get(0),
-  )
-  .map_err(sql_err)
-}
-
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn prepare_failure_records_row_and_preserves_old_config() {
+    let state = crate::rules::tests::test_state();
+    crate::backup::tests::seed_servers(&state).await;
+    state
+      .db
+      .call(|c| db::set_setting(c, TO, Some("s1")))
+      .await
+      .unwrap();
+    assert_eq!(
+      reject_self_target("s1", "s1").unwrap_err().code,
+      ErrorCode::InvalidInput
+    );
+    assert!(
+      backup_impl(
+        &state,
+        "r1",
+        None,
+        (Some("s2"), None),
+        Arc::new(|_| {}),
+        &CancellationToken::new(),
+        false
+      )
+      .await
+      .is_err()
+    );
+    let records = backup::records(&state, REPO, 10).await.unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].target, "s2");
+    assert!(!records[0].ok);
+    assert_eq!(
+      state
+        .db
+        .call(|c| db::setting(c, TO))
+        .await
+        .unwrap()
+        .as_deref(),
+      Some("s1")
+    );
+  }
+
+  #[tokio::test]
+  async fn stale_user_key_emits_issue_and_stage_drop_cleans_dir() {
+    let state = crate::rules::tests::test_state();
+    state
+      .db
+      .call(|c| db::set_setting(c, TO, Some("s2")))
+      .await
+      .unwrap();
+    assert_eq!(
+      issues(&state.db).await.unwrap()[0].code,
+      "core_backup_key_stale"
+    );
+
+    let root = tempfile::tempdir().unwrap();
+    let dir = staging_path(root.path());
+    std::fs::create_dir(&dir).unwrap();
+    drop(StagedCoreDir(dir.clone()));
+    assert!(!dir.exists());
+    std::fs::create_dir(&dir).unwrap();
+    cleanup_staged(root.path());
+    assert!(!dir.exists());
+  }
 
   #[tokio::test]
   async fn recovery_requires_human_and_enable_password_failures_lock()
@@ -943,7 +1211,7 @@ mod tests {
           {
             assert!(!project.compose.contains(secret));
           }
-          Ok(json!({"containers": [], "images": []}))
+          Ok(json!({"containers": [{"name": "rest-server", "service": "rest-server", "state": "running", "image": "fixture:1"}], "images": []}))
         }
         _ => panic!("备份目标机收到了容器部署以外的任务"),
       },
@@ -986,6 +1254,10 @@ mod tests {
               seen.push("remove");
               Ok(serde_json::Value::Null)
             }
+            ResticAction::Unlock { remove_all: true } => {
+              seen.push("unlock");
+              Ok(serde_json::Value::Null)
+            }
             ResticAction::Prune => {
               seen.push("prune");
               Ok(serde_json::Value::Null)
@@ -996,12 +1268,16 @@ mod tests {
         _ => panic!("意外任务"),
       }
     });
+    state.hub.mock_safe_backup_agent("s1");
+    state.hub.mock_safe_backup_agent("s2");
     backup_impl(
       &state,
       "r1",
       Some(&OneTimeSecret(login_password)),
+      (None, None),
       Arc::new(|_| {}),
       &CancellationToken::new(),
+      false,
     )
     .await
     .unwrap();
@@ -1009,6 +1285,15 @@ mod tests {
       *seen.lock().unwrap(),
       ["backup", "list", "add", "remove", "prune"]
     );
+    let _ = unlock(
+      State(state.clone()),
+      crate::security_receipt::tests::auth(true),
+      None,
+    )
+    .await
+    .map_err(|e| e.0)
+    .unwrap();
+    assert_eq!(seen.lock().unwrap().last(), Some(&"unlock"));
     require_recovery_ready(&state).await.unwrap();
   }
 

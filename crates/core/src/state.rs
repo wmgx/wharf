@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use crate::{apply::Runs, db::Db, hub::Hub};
 
 pub struct AppState {
@@ -8,8 +6,7 @@ pub struct AppState {
   /// 控制面的签名密钥，agent 用它确认连上的是真的控制面。
   pub key: crate::key_rotation::CoreKeyRing,
   pub runs: Runs,
-  /// 同一时间只有一个 apply 在执行。
-  pub apply_lock: Arc<tokio::sync::Mutex<()>>,
+  pub locks: crate::locks::OpLocks,
   /// agent 连接控制面用的地址，写进 join 命令。不设置时用请求的 Host。
   pub public_url: Option<String>,
   /// join 命令里 agent 容器的镜像。
@@ -25,6 +22,6 @@ pub struct AppState {
 
 impl AppState {
   pub fn is_service_busy(&self, service: &str) -> bool {
-    self.runs.is_service_busy(service)
+    self.locks.is_service_busy(service)
   }
 }

@@ -12,7 +12,7 @@ pub(super) fn state() -> Arc<AppState> {
     hub: Default::default(),
     key: ed25519_dalek::SigningKey::from_bytes(&[0; 32]).into(),
     runs: Default::default(),
-    apply_lock: Default::default(),
+    locks: Default::default(),
     public_url: Some("https://wharf.example.test".into()),
     agent_image: String::new(),
     listen_port: 7700,

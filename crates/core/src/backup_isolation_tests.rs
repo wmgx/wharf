@@ -18,7 +18,7 @@ pub(crate) async fn seed_servers(state: &AppState) {
   }).await.unwrap();
 }
 
-async fn seed_service(
+pub(crate) async fn seed_service(
   state: &AppState,
   name: &'static str,
   enabled: bool,
@@ -79,9 +79,11 @@ async fn service_credentials_are_isolated_per_service() {
   let (a, same) = (a.unwrap(), same.unwrap());
   let b = ensure_service_creds(&state, "svc-b").await.unwrap();
   let snap = snapshot::load(&state.db).await.unwrap();
-  let w = locate(&snap, "svc-a").unwrap();
-  let htpasswd =
-    target_htpasswd(&state, &snap, &w.target).await.unwrap();
+  let w =
+    location(&snap, "svc-a", service_target(&snap, "svc-a").unwrap());
+  let htpasswd = target_htpasswd(&state, &snap, &w.target, None)
+    .await
+    .unwrap();
   let (a_hash, b_hash) = (
     htpasswd
       .lines()
@@ -180,7 +182,7 @@ async fn deleting_service_keeps_backup_key_and_drops_http_creds() {
   assert_eq!(secret_count(&state).await, 1);
   let snap = snapshot::load(&state.db).await.unwrap();
   assert!(
-    target_htpasswd(&state, &snap, "s2")
+    target_htpasswd(&state, &snap, "s2", None)
       .await
       .unwrap()
       .is_empty()
@@ -371,10 +373,12 @@ async fn backup_isolation_rejects_old_agent_without_capability() {
   let snap = snapshot::load(&state.db).await.unwrap();
   let cancel = CancellationToken::new();
   let progress: ProgressFn = Arc::new(|_| {});
-  let w = locate(&snap, "svc-a").unwrap();
-  let err = ensure_server(&state, &snap, &w, &progress, &cancel)
-    .await
-    .unwrap_err();
+  let w =
+    location(&snap, "svc-a", service_target(&snap, "svc-a").unwrap());
+  let err =
+    ensure_server(&state, &snap, &w, None, &progress, &cancel)
+      .await
+      .unwrap_err();
   assert_eq!(err.code, ErrorCode::Conflict);
   assert!(err.hint.unwrap().contains("upgrade"));
   let err = local_call::<Vec<ResticKeyInfo>>(
@@ -390,4 +394,294 @@ async fn backup_isolation_rejects_old_agent_without_capability() {
   assert_eq!(err.code, ErrorCode::Conflict);
   assert!(err.hint.unwrap().contains("upgrade"));
   assert_eq!(secret_count(&state).await, 0);
+}
+
+fn mock_backup_path(
+  state: &AppState,
+  source: impl FnMut(AgentOp) -> Result<serde_json::Value, ApiError>
+  + Send
+  + 'static,
+  expect_prune: Option<Arc<AtomicBool>>,
+) {
+  state
+    .hub
+    .mock_agent_with_backup("s1", false, true, false, source);
+  state.hub.mock_agent_with_backup("s2", false, true, false, move |op| match op {
+    AgentOp::ProjectStatus { .. } => Ok(json!([])),
+    AgentOp::ProjectUp(up) => {
+      assert!(up.compose.contains("svc-a:"));
+      Ok(json!({"containers":[{"name":"rest-server","service":"rest-server","state":"running"}], "images":[]}))
+    }
+    AgentOp::Restic(job) => match job.action {
+      ResticAction::ListKeys => Ok(json!([{"id":"cafe","current":true}])),
+      ResticAction::Prune => {
+        expect_prune.as_ref().expect("不应清理快照").store(true, Ordering::Relaxed);
+        Ok(json!(null))
+      }
+      _ => panic!("意外的仓库任务"),
+    },
+    _ => panic!("意外的备份目标机任务"),
+  });
+  state.hub.mock_safe_backup_agent("s1");
+  state.hub.mock_safe_backup_agent("s2");
+}
+
+#[tokio::test]
+async fn preflight_failure_never_stops_service() {
+  let state = test_state();
+  seed_servers(&state).await;
+  seed_service(&state, "svc-a", true).await;
+  let mut probes = 0;
+  mock_backup_path(
+    &state,
+    move |op| match op {
+      AgentOp::Probe { .. } => Ok(json!([true])),
+      AgentOp::Restic(job)
+        if matches!(job.action, ResticAction::Preflight(_)) =>
+      {
+        probes += 1;
+        if probes == 1 {
+          Err(ApiError::new(ErrorCode::AgentFailed, "镜像没有拉到"))
+        } else {
+          Ok(
+            json!({"conflicting_users":[{"container":"writer","source":"/srv/svc-a/data","rw":true}]}),
+          )
+        }
+      }
+      _ => panic!("预检失败后仍尝试停服或传输"),
+    },
+    None,
+  );
+  for code in [ErrorCode::AgentFailed, ErrorCode::Conflict] {
+    let err = backup(
+      &state,
+      "r1",
+      "svc-a",
+      Arc::new(|_| {}),
+      &CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code, code);
+  }
+  assert!(
+    records(&state, "svc-a", 2)
+      .await
+      .unwrap()
+      .iter()
+      .all(|r| !r.ok && r.target == "s2")
+  );
+}
+
+#[tokio::test]
+async fn restore_works_after_backup_disabled_and_includes_htpasswd() {
+  let state = test_state();
+  seed_servers(&state).await;
+  seed_service(&state, "svc-a", false).await;
+  seed_legacy(&state).await;
+  let mut stops = 0;
+  mock_backup_path(
+    &state,
+    move |op| match op {
+      AgentOp::Probe { .. } => Ok(json!([true])),
+      AgentOp::ServiceStopForData { .. } => {
+        stops += 1;
+        if stops == 1 {
+          Err(ApiError::new(ErrorCode::Conflict, "仍有活动容器"))
+        } else {
+          Ok(json!({"containers":[]}))
+        }
+      }
+      AgentOp::Restic(job) => match job.action {
+        ResticAction::Preflight(_) => Ok(json!({})),
+        ResticAction::Restore { .. } if stops == 2 => Ok(json!(null)),
+        _ => panic!("意外的恢复任务"),
+      },
+      _ => panic!("恢复启动了原先已停的服务，或未停服就传输了数据"),
+    },
+    None,
+  );
+  let cancel = CancellationToken::new();
+  assert_eq!(
+    restore(
+      &state,
+      "svc-a",
+      "abcd1234",
+      None,
+      Arc::new(|_| {}),
+      &cancel
+    )
+    .await
+    .unwrap_err()
+    .code,
+    ErrorCode::Conflict
+  );
+  restore(
+    &state,
+    "svc-a",
+    "abcd1234",
+    None,
+    Arc::new(|_| {}),
+    &cancel,
+  )
+  .await
+  .unwrap();
+  assert!(
+    snapshot::load(&state.db).await.unwrap().world.services["svc-a"]
+      .spec
+      .backup
+      .is_none()
+  );
+}
+
+#[tokio::test]
+async fn backup_list_returns_historical_snapshot_target_when_disabled()
+ {
+  let state = test_state();
+  seed_servers(&state).await;
+  seed_service(&state, "svc-a", false).await;
+  seed_legacy(&state).await;
+  state.hub.mock_agent("s2", false, |op| {
+    assert!(matches!(op, AgentOp::Restic(job) if matches!(job.action, ResticAction::Snapshots)));
+    Ok(json!([{
+      "id": "abcd1234", "short_id": "abcd1234", "hostname": "s1",
+      "time": "2026-01-01T00:00:00Z", "paths": ["/srv/svc-a"]
+    }]))
+  });
+  let Json(view) =
+    list(State(state), auth(true), Path("svc-a".into()))
+      .await
+      .map_err(|e| e.0)
+      .unwrap();
+  assert_eq!(view.target, None);
+  assert_eq!(view.snapshot_target.as_deref(), Some("s2"));
+  assert_eq!(view.snapshots[0].id, "abcd1234");
+}
+
+#[tokio::test]
+async fn backup_records_ok_and_prunes_even_when_restart_fails() {
+  let state = test_state();
+  seed_servers(&state).await;
+  seed_service(&state, "svc-a", true).await;
+  let pruned = Arc::new(AtomicBool::new(false));
+  mock_backup_path(
+    &state,
+    |op| match op {
+      AgentOp::Probe { .. } => Ok(json!([true])),
+      AgentOp::ServiceStopForData { .. } => {
+        Ok(json!({"containers":["web"]}))
+      }
+      AgentOp::Restic(job) => match job.action {
+        ResticAction::Preflight(_) => Ok(json!({})),
+        ResticAction::Backup { .. } => Ok(
+          json!({"snapshot_id":"abcd1234","files":1,"bytes":5,"added_bytes":5}),
+        ),
+        _ => panic!("意外的传输任务"),
+      },
+      AgentOp::ProjectStart { containers, .. } => {
+        assert_eq!(containers, ["web"]);
+        Err(ApiError::new(ErrorCode::AgentFailed, "容器没起来"))
+      }
+      _ => panic!("意外的源机任务"),
+    },
+    Some(pruned.clone()),
+  );
+  let err = backup(
+    &state,
+    "r1",
+    "svc-a",
+    Arc::new(|_| {}),
+    &CancellationToken::new(),
+  )
+  .await
+  .unwrap_err();
+  assert!(err.hint.unwrap().contains("快照已写入"));
+  let entry =
+    records(&state, "svc-a", 1).await.unwrap().pop().unwrap();
+  assert!(
+    entry.ok
+      && entry.summary.is_some()
+      && pruned.load(Ordering::Relaxed)
+  );
+}
+
+#[tokio::test]
+async fn unlock_service_runs_local_and_respects_backup_lock() {
+  let state = test_state();
+  seed_servers(&state).await;
+  seed_service(&state, "svc-a", false).await;
+  let legacy = seed_legacy(&state).await;
+  state.hub.mock_agent_with_backup(
+    "s2",
+    false,
+    true,
+    false,
+    move |op| {
+      let AgentOp::Restic(job) = op else {
+        panic!("需要本机仓库操作")
+      };
+      assert!(matches!(job.repo, ResticRepo::Local));
+      assert!(job.password.0 == legacy);
+      assert!(matches!(
+        job.action,
+        ResticAction::Unlock { remove_all: true }
+      ));
+      Ok(json!(null))
+    },
+  );
+  state.hub.mock_safe_backup_agent("s2");
+  let call = || {
+    unlock(
+      State(state.clone()),
+      auth(true),
+      Path("svc-a".into()),
+      None,
+    )
+  };
+  let guard = state
+    .locks
+    .acquire(crate::locks::LockSpec::Backup("svc-a".into()), "备份")
+    .unwrap();
+  assert_eq!(call().await.err().unwrap().0.code, ErrorCode::Busy);
+  drop(guard);
+  let _ = call().await.map_err(|e| e.0).unwrap();
+}
+
+#[tokio::test]
+async fn deploy_server_rejects_empty_containers() {
+  let state = test_state();
+  seed_servers(&state).await;
+  state
+    .hub
+    .mock_agent_with_backup(
+      "s2",
+      false,
+      true,
+      false,
+      |op| match op {
+        AgentOp::ProjectStatus { .. } => Ok(json!([])),
+        AgentOp::ProjectUp(_) => {
+          Ok(json!({"containers":[],"images":[]}))
+        }
+        _ => panic!("意外的备份任务"),
+      },
+    );
+  let snap = snapshot::load(&state.db).await.unwrap();
+  let w = Where {
+    server: "s1".into(),
+    target: "s2".into(),
+    target_ip: "100.64.0.2".into(),
+  };
+  let progress: ProgressFn = Arc::new(|_| {});
+  let err = deploy_server(
+    &state,
+    &snap,
+    &w,
+    (BACKUP_PROJECT, String::new()),
+    &progress,
+    &CancellationToken::new(),
+  )
+  .await
+  .unwrap_err();
+  assert_eq!(err.code, ErrorCode::AgentFailed);
 }
