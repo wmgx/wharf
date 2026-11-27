@@ -711,6 +711,7 @@ async fn stage(
   state: &AppState,
   dir: &Path,
 ) -> Result<String, ApiError> {
+  use std::os::unix::fs::PermissionsExt;
   let _ = std::fs::remove_dir_all(dir);
   std::fs::create_dir_all(dir).map_err(|e| {
     ApiError::internal(format!("创建 {}：{e}", dir.display()))
@@ -878,7 +879,6 @@ mod tests {
     use wharf_api_types::agent::{CoreHostProbeResult, ResticRepo};
 
     let _lock = TEST_LOCK.lock().await;
-    use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let mut state = test_state();
     let inner = Arc::get_mut(&mut state).unwrap();
