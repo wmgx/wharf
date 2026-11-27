@@ -534,6 +534,29 @@ impl Ops {
     Ok(images)
   }
 
+  async fn up_with_crash_logs(
+    &self,
+    project: &str,
+    no_start: bool,
+    ctx: &Ctx,
+  ) -> Result<(), ApiError> {
+    let result = self.docker.up(project, no_start, ctx).await;
+    if result
+      .as_ref()
+      .is_err_and(|e| e.code != ErrorCode::Cancelled)
+    {
+      crate::settle::emit_crash_logs(
+        &self.docker,
+        project,
+        None,
+        &[],
+        ctx,
+      )
+      .await;
+    }
+    result
+  }
+
   async fn finish_up(
     &self,
     up: &ProjectUp,
@@ -549,7 +572,9 @@ impl Ops {
       ctx,
     )
     .await;
-    self.docker.up(&up.project, up.no_start, ctx).await?;
+    self
+      .up_with_crash_logs(&up.project, up.no_start, ctx)
+      .await?;
     let state = if up.no_start {
       let mut state =
         self.docker.one_status(&up.project, ctx).await?;
@@ -587,8 +612,13 @@ impl Ops {
           if e.code == ErrorCode::Cancelled {
             return Err(e);
           }
-          crate::prev_logs::capture(&self.docker, &up.project, "rollback", ctx)
-            .await;
+          crate::prev_logs::capture(
+            &self.docker,
+            &up.project,
+            "rollback",
+            ctx,
+          )
+          .await;
           ctx.say(format!("{}，换回上一版", e.message));
           self.restore_image(&prev, ctx).await?;
           self.docker.write_compose(&up.project, &prev.compose)?;
@@ -742,17 +772,7 @@ impl Ops {
     ctx.say("试跑新版本");
     let result = async {
       self.docker.write_compose(&project, trial)?;
-      if let Err(e) = self.docker.up(&project, false, ctx).await {
-        crate::settle::emit_crash_logs(
-          &self.docker,
-          &project,
-          None,
-          &[],
-          ctx,
-        )
-        .await;
-        return Err(e);
-      }
+      self.up_with_crash_logs(&project, false, ctx).await?;
       crate::settle::watch(
         &self.docker,
         &project,
@@ -875,6 +895,54 @@ esac
       )
       .unwrap(),
       "new"
+    );
+  }
+
+  #[tokio::test]
+  async fn failed_formal_compose_up_prints_container_logs() {
+    let (dir, docker) = crate::docker::fake_docker(
+      r#"
+case "$1:$6" in
+  compose:up) touch failed; echo unhealthy-dependency >&2; exit 1;;
+  ps:*) if [ -f failed ]; then
+    echo '{"Names":"app-db-1","Labels":"com.docker.compose.project=app","State":"exited"}'
+  fi;;
+  logs:*) echo 'migration failed';;
+esac
+"#,
+    );
+    let ops = Ops::new(
+      docker.clone(),
+      Reporter::new(docker.clone(), None),
+      String::new(),
+      HostShell::prepare(docker.clone(), "s1".into()).await,
+      dir.path().into(),
+    );
+    let up: ProjectUp = serde_json::from_value(serde_json::json!({
+      "project": "app", "compose": "services: {db: {image: db:1}}", "hash": "new",
+      "pull": {"mirrors": {}, "mirrors_only": false, "attempt_timeout_secs": 1}
+    })).unwrap();
+    docker.write_compose("app", &up.compose).unwrap();
+    let lines =
+      std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let output = lines.clone();
+    let ctx = Ctx {
+      progress: Some(std::sync::Arc::new(move |line| {
+        output.lock().unwrap().push(line)
+      })),
+      ..Ctx::detached()
+    };
+    let error = ops
+      .finish_up(&up, &[], vec![], None, &ctx)
+      .await
+      .unwrap_err();
+    assert!(error.message.contains("unhealthy-dependency"));
+    assert!(
+      lines
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|line| line == "migration failed")
     );
   }
 

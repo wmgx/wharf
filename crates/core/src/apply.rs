@@ -507,6 +507,7 @@ pub async fn start(
     if let db::Write::Delete { kind, name } = write
       && kind == crate::world::KIND_SERVICE
     {
+      crate::heal::forget(name);
       crate::rules::on_service_deleted(&state, name).await;
     }
   }
@@ -629,6 +630,24 @@ fn apply_writes(
   crate::secret_policy::require_apply(plan, &current, admin)?;
   for write in writes {
     db::apply_write(tx, write)?;
+    match write {
+      Write::Delete { kind, name }
+        if kind == crate::world::KIND_SERVICE =>
+      {
+        crate::heal::reset_notice(tx, name)?;
+      }
+      Write::Upsert {
+        kind, name, spec, ..
+      } if kind == crate::world::KIND_SERVICE
+        && spec
+          .get("stopped")
+          .and_then(serde_json::Value::as_bool)
+          == Some(true) =>
+      {
+        crate::heal::reset_notice(tx, name)?;
+      }
+      _ => {}
+    }
     if let Write::Upsert { kind, name, .. } = write
       && kind == crate::world::KIND_SERVICE
       && !current.services.contains_key(name)
@@ -817,13 +836,15 @@ async fn execute(
     if result.is_ok() {
       match &step.step {
         Step::ServiceUp { service, .. }
-        | Step::Rebuild { service } => crate::heal::clear(service),
+        | Step::Rebuild { service } => {
+          crate::heal::clear(&state, service).await
+        }
         Step::ServiceRestart { service }
           if !step
             .title
             .starts_with(crate::heal::AUTO_RESTART_TITLE) =>
         {
-          crate::heal::clear(service);
+          crate::heal::clear(&state, service).await;
         }
         _ => {}
       }

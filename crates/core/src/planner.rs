@@ -3495,6 +3495,27 @@ mod tests {
   }
 
   #[test]
+  fn changing_start_timeout_retries_failed_service_without_rebuilding_healthy_one()
+   {
+    let current = world();
+    let mut desired = current.clone();
+    let row = desired.services.get_mut("app").unwrap();
+    row.spec.start_timeout_secs = Some(300);
+    assert!(!crate::service_monitor::config_only(
+      &current.services["app"],
+      row
+    ));
+
+    let hash = hash_of(&current);
+    assert_eq!(hash, hash_of(&desired));
+    let failed = live(Some(hash.clone()), vec![container("exited")]);
+    assert!(plan(&current, &desired, &failed).steps.iter()
+      .any(|entry| matches!(&entry.step, Step::ServiceUp { service, .. } if service == "app")));
+    let healthy = live(Some(hash), vec![container("running")]);
+    assert!(plan(&current, &desired, &healthy).steps.is_empty());
+  }
+
+  #[test]
   fn stopped_container_is_drift() {
     let w = world();
     let b = plan(

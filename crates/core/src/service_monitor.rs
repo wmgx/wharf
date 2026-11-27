@@ -111,7 +111,6 @@ pub fn validate(spec: &ServiceSpec) -> Result<(), ApiError> {
 
 pub fn config_only(old: &ServiceRow, new: &ServiceRow) -> bool {
   let mut stripped = new.clone();
-  stripped.spec.start_timeout_secs = old.spec.start_timeout_secs;
   stripped.spec.log_alerts.clone_from(&old.spec.log_alerts);
   stripped.spec.port_checks.clone_from(&old.spec.port_checks);
   if let (Some(old), Some(new)) =

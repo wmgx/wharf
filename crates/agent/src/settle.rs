@@ -3,6 +3,8 @@
 
 use std::{collections::HashMap, time::Duration};
 
+use tokio::time::{Instant, sleep_until, timeout_at};
+
 use wharf_api_types::{
   ApiError, ErrorCode,
   agent::{HttpCheck, ProjectState, SettleProbe, judge_http_check},
@@ -21,7 +23,7 @@ pub struct WatchOptions<'a> {
 
 pub fn max_watch(seconds: Option<u32>) -> Duration {
   Duration::from_secs(u64::from(
-    seconds.unwrap_or(120).clamp(10, 1800),
+    seconds.unwrap_or(120).clamp(1, 1800),
   ))
 }
 
@@ -32,102 +34,165 @@ pub async fn watch(
   ctx: &Ctx,
 ) -> Result<ProjectState, ApiError> {
   ctx.say("观察容器是否稳定运行");
-  let start = tokio::time::Instant::now();
+  let start = Instant::now();
   let deadline = start + opts.max_watch;
-  let watch_ctx = Ctx {
-    cancel: ctx.cancel.child_token(),
-    progress: ctx.progress.clone(),
-  };
-  let deadline_cancel = watch_ctx.cancel.clone();
-  let timer = tokio::spawn(async move {
-    tokio::time::sleep_until(deadline).await;
-    deadline_cancel.cancel();
-  });
+  let stable_at = deadline.min(start + MIN_WATCH);
   let mut last_state = None;
   let mut restarted = vec![];
   let mut last_probe = None;
+  let mut readiness_ok = opts.readiness.is_none();
   let result = async {
     if let Some(probe) = opts.readiness {
-      let local = reqwest::Url::parse(&probe.url).ok().is_some_and(|u| {
-        u.scheme() == "http" && u.host_str() == Some("127.0.0.1")
-          && u.username().is_empty() && u.password().is_none()
-      });
+      let local =
+        reqwest::Url::parse(&probe.url).ok().is_some_and(|u| {
+          u.scheme() == "http"
+            && u.host_str() == Some("127.0.0.1")
+            && u.username().is_empty()
+            && u.password().is_none()
+        });
       if !local {
-        return Err(ApiError::invalid("就绪探活地址必须是本机 HTTP 地址"));
+        return Err(ApiError::invalid(
+          "就绪探活地址必须是本机 HTTP 地址",
+        ));
       }
     }
-    let first = docker.one_status(project, &watch_ctx).await?;
-    let restarts_before = restart_counts(docker, &first, &watch_ctx).await;
-    let mut readiness_ok = opts.readiness.is_none();
+    let mut restarts_before = None;
     loop {
-      let state = docker.one_status(project, &watch_ctx).await?;
-      last_state = Some(state);
-      let state = last_state.as_ref().unwrap();
-      if let Some(bad) = problem(state) {
-        return Err(failed(project, bad));
-      }
-      let restarts = restart_counts(docker, state, &watch_ctx).await;
-      restarted = state.containers.iter().filter(|c| !c.foreign).filter(|c| {
-        restarts.get(&c.name).copied().unwrap_or(0)
-          > restarts_before.get(&c.name).copied().unwrap_or(0)
-      }).map(|c| c.name.clone()).collect();
-      if !restarted.is_empty() {
-        return Err(failed(project, format!("{} 退出后被重启", restarted.join("、"))));
-      }
-      let starting = starting(state);
-      if let Some(probe) = opts.readiness.filter(|_| !starting && !readiness_ok) {
-        let rem = deadline.saturating_duration_since(tokio::time::Instant::now());
-        let r = tokio::select! {
-          r = crate::probe::http(HttpCheck {
-            url: probe.url.clone(), keyword: probe.keyword.clone(),
-            timeout_secs: rem.as_secs().clamp(1, 5),
-          }) => r,
-          _ = watch_ctx.cancel.cancelled() => return Err(cancelled()),
-        };
-        let (ok, detail) = judge_http_check(probe.expect, probe.keyword.as_deref(), &r);
-        if ok {
-          readiness_ok = true;
-          ctx.say(format!("就绪探活通过：{detail}"));
-        } else {
-          last_probe = Some(detail);
+      let sampled_at = Instant::now();
+      let final_check = sampled_at >= deadline;
+      // 到点重新读一次 Docker，给这次复查留独立的 I/O 时间。
+      let read_deadline = if final_check {
+        sampled_at + POLL
+      } else {
+        deadline
+      };
+      let watch_ctx = Ctx {
+        cancel: ctx.cancel.child_token(),
+        progress: ctx.progress.clone(),
+      };
+      let cancel = watch_ctx.cancel.clone();
+      let timer = tokio::spawn(async move {
+        sleep_until(read_deadline).await;
+        cancel.cancel();
+      });
+      let observed = async {
+        let state = docker.one_status(project, &watch_ctx).await?;
+        last_state = Some(state);
+        let state = last_state.as_ref().unwrap();
+        if let Some(bad) = problem(state) {
+          return Err(failed(project, bad));
         }
+        Ok(restart_counts(docker, state, &watch_ctx).await)
       }
-      if watch_ctx.cancel.is_cancelled() {
+      .await;
+      timer.abort();
+      if ctx.cancel.is_cancelled() {
         return Err(cancelled());
       }
-      if !starting && readiness_ok && start.elapsed() >= MIN_WATCH {
+      let restarts = match observed {
+        Ok(restarts) => restarts,
+        Err(e)
+          if e.code == ErrorCode::Cancelled
+            && watch_ctx.cancel.is_cancelled() =>
+        {
+          HashMap::new()
+        }
+        Err(e) => return Err(e),
+      };
+      if watch_ctx.cancel.is_cancelled() {
+        if final_check {
+          return Err(cancelled());
+        }
+        // 中途读 Docker 跨过截止点时，重新取一次当前状态。
+        continue;
+      }
+      let state = last_state.as_ref().unwrap();
+      let baseline =
+        restarts_before.get_or_insert_with(|| restarts.clone());
+      restarted = state
+        .containers
+        .iter()
+        .filter(|c| !c.foreign)
+        .filter(|c| {
+          restarts.get(&c.name).copied().unwrap_or(0)
+            > baseline.get(&c.name).copied().unwrap_or(0)
+        })
+        .map(|c| c.name.clone())
+        .collect();
+      if !restarted.is_empty() {
+        return Err(failed(
+          project,
+          format!("{} 退出后被重启", restarted.join("、")),
+        ));
+      }
+      let starting = starting(state);
+      if let Some(probe) =
+        opts.readiness.filter(|_| !starting && !readiness_ok)
+      {
+        let rem = deadline.saturating_duration_since(Instant::now());
+        if !rem.is_zero() {
+          let probe_result = timeout_at(
+            deadline,
+            crate::probe::http(HttpCheck {
+              url: probe.url.clone(),
+              keyword: probe.keyword.clone(),
+              timeout_secs: rem.as_secs().clamp(1, 5),
+            }),
+          );
+          let r = tokio::select! {
+            r = probe_result => r,
+            _ = ctx.cancel.cancelled() => return Err(cancelled()),
+          };
+          if let Ok(r) = r {
+            let (ok, detail) = judge_http_check(
+              probe.expect,
+              probe.keyword.as_deref(),
+              &r,
+            );
+            if ok {
+              readiness_ok = true;
+              ctx.say(format!("就绪探活通过：{detail}"));
+            } else {
+              last_probe = Some(detail);
+            }
+          }
+        }
+      }
+      if !starting && readiness_ok && sampled_at >= stable_at {
         ctx.say("容器运行正常");
         return Ok(last_state.take().unwrap());
       }
+      if final_check {
+        return Err(cancelled());
+      }
+      let now = Instant::now();
+      let next = if sampled_at < stable_at {
+        (now + POLL).min(stable_at)
+      } else {
+        now + POLL
+      };
       tokio::select! {
-        biased;
-        // 最短配置等于稳定观察窗口，允许最后一次成功观测覆盖余下不到一轮的间隔。
-        _ = tokio::time::sleep_until(deadline),
-          if opts.max_watch == MIN_WATCH && !starting && readiness_ok => {
-            ctx.say("容器运行正常");
-            return Ok(last_state.take().unwrap());
-          }
-        _ = watch_ctx.cancel.cancelled() => return Err(cancelled()),
-        _ = tokio::time::sleep(POLL) => {}
+        _ = ctx.cancel.cancelled() => return Err(cancelled()),
+        _ = sleep_until(next.min(deadline)) => {}
       }
     }
-  }.await;
-  timer.abort();
+  }
+  .await;
   if ctx.cancel.is_cancelled() {
     return Err(cancelled());
   }
   let result = match result {
     Err(e) if e.code == ErrorCode::Cancelled => {
       let secs = opts.max_watch.as_secs();
-      let detail = if last_state.as_ref().is_some_and(starting) {
-        format!("健康检查 {secs} 秒内没有通过")
-      } else if opts.readiness.is_some() {
-        let last = last_probe.as_deref().unwrap_or("没有应答");
-        format!("就绪探活 {secs} 秒内没有通过（最后一次：{last}）")
-      } else {
-        format!("{secs} 秒内未能确认容器稳定运行")
-      };
-      let error = failed(project, detail);
+      let error = failed(
+        project,
+        timeout_detail(
+          secs,
+          last_state.as_ref().is_some_and(starting),
+          readiness_ok,
+          last_probe.as_deref(),
+        ),
+      );
       Err(if secs == 120 {
         error.with_hint("启动较慢的服务可通过 wharf service deploy <服务> --start-timeout <秒> 调大上限")
       } else {
@@ -147,6 +212,22 @@ pub async fn watch(
     .await;
   }
   result
+}
+
+fn timeout_detail(
+  secs: u64,
+  starting: bool,
+  readiness_ok: bool,
+  last_probe: Option<&str>,
+) -> String {
+  if starting {
+    format!("健康检查 {secs} 秒内没有通过")
+  } else if !readiness_ok {
+    let last = last_probe.unwrap_or("没有应答");
+    format!("就绪探活 {secs} 秒内没有通过（最后一次：{last}）")
+  } else {
+    format!("{secs} 秒内未能确认容器稳定运行")
+  }
 }
 
 fn cancelled() -> ApiError {
@@ -345,6 +426,78 @@ mod tests {
     state.containers.push(container("running", None));
     assert!(problem(&state).is_none());
     assert!(state.all_running());
+  }
+
+  #[tokio::test]
+  async fn short_start_limits_recheck_containers_at_end_of_window() {
+    async fn run(
+      limit: u32,
+      crash_at: Option<Duration>,
+    ) -> Result<ProjectState, ApiError> {
+      let (dir, docker) = crate::docker::fake_docker(
+        r#"
+case "$1" in
+  ps)
+    sleep 0.2
+    state=running
+    [ ! -f crashed ] || state=exited
+    printf '{"Names":"app-web-1","Labels":"com.docker.compose.project=app,com.docker.compose.service=web","State":"%s"}\n' "$state";;
+  inspect) sleep 0.2; echo /app-web-1 0;;
+esac
+"#,
+      );
+      let crash = async {
+        if let Some(at) = crash_at {
+          tokio::time::sleep(at).await;
+          std::fs::write(dir.path().join("crashed"), "").unwrap();
+        }
+      };
+      let cap = max_watch(Some(limit));
+      assert_eq!(cap.as_secs(), u64::from(limit));
+      let ctx = Ctx::detached();
+      let (result, ()) = tokio::join!(
+        watch(
+          &docker,
+          "app",
+          WatchOptions {
+            max_watch: cap,
+            readiness: None
+          },
+          &ctx
+        ),
+        crash,
+      );
+      result
+    }
+
+    let (one, ten, eleven, crash) = tokio::join!(
+      run(1, None),
+      run(10, None),
+      run(11, None),
+      run(10, Some(Duration::from_millis(9900))),
+    );
+    for state in [one, ten, eleven] {
+      assert!(state.unwrap().all_running());
+    }
+    let error = crash.unwrap_err();
+    assert_eq!(error.code, ErrorCode::AgentFailed);
+    assert!(
+      error.message.contains("web exited"),
+      "{}",
+      error.message
+    );
+  }
+
+  #[test]
+  fn timeout_after_successful_probe_reports_stability() {
+    assert_eq!(
+      timeout_detail(11, false, true, Some("HTTP 503")),
+      "11 秒内未能确认容器稳定运行",
+    );
+    assert_eq!(
+      timeout_detail(11, false, false, Some("HTTP 503")),
+      "就绪探活 11 秒内没有通过（最后一次：HTTP 503）",
+    );
   }
 
   #[test]

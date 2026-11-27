@@ -102,15 +102,15 @@ fn private_dir(dir: &Path) -> io::Result<()> {
 
 fn bounded_tail(logs: &str) -> &str {
   let start = logs.len().saturating_sub(MAX_RAW_BYTES);
-  let logs = if start == 0 || logs.as_bytes()[start - 1] == b'\n' {
-    &logs[start..]
-  } else if let Some(next) =
-    logs.as_bytes()[start..].iter().position(|b| *b == b'\n')
+  let mut start = logs.ceil_char_boundary(start);
+  if start > 0
+    && logs.as_bytes()[start - 1] != b'\n'
+    && let Some((line, rest)) = logs[start..].split_once('\n')
+    && !rest.trim().is_empty()
   {
-    &logs[start + next + 1..]
-  } else {
-    return "";
-  };
+    start += line.len() + 1;
+  }
+  let logs = &logs[start..];
   let end = logs.trim_end_matches('\n').len();
   let start = logs[..end]
     .rmatch_indices('\n')
@@ -305,6 +305,23 @@ pub fn purge(data: &Path, project: &str) {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn saves_utf8_tail_when_last_line_exceeds_byte_limit() {
+    let root = tempfile::tempdir().unwrap();
+    let logs = format!(
+      "earlier line\n{} end\n",
+      "文".repeat(MAX_RAW_BYTES / 3 + 5)
+    );
+    save(&dir(root.path(), "app"), "recreate", &logs).unwrap();
+    let result = read(root.path(), "app", 1, 1, None).unwrap();
+    assert!(logs.ends_with(&result.logs));
+    assert!(result.logs.ends_with(" end\n"));
+    assert!(
+      (MAX_RAW_BYTES - 2..=MAX_RAW_BYTES)
+        .contains(&result.logs.len())
+    );
+  }
 
   #[test]
   fn capture_rotates_five_by_name_and_filters_since() {

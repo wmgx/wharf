@@ -12,13 +12,15 @@ use std::{
 };
 
 use wharf_api_types::{
+  ApiError,
   agent::ProjectState,
   plan::RunStatus,
   view::{Issue, IssueLevel, IssueSubject, OpStatus},
 };
 
 use crate::{
-  apply, planner::Step, snapshot, state::AppState, views::cached_live,
+  apply, db, planner::Step, snapshot, state::AppState,
+  views::cached_live,
 };
 
 const TICK: Duration = Duration::from_secs(60);
@@ -42,7 +44,25 @@ static GAVE_UP: Mutex<BTreeMap<String, String>> =
   Mutex::new(BTreeMap::new());
 static CLEARED: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 
-pub fn clear(service: &str) {
+const NOTICE_PREFIX: &str = "notify.state.heal.";
+
+pub(crate) fn reset_notice(
+  conn: &rusqlite::Connection,
+  service: &str,
+) -> Result<(), ApiError> {
+  db::set_setting(conn, &format!("{NOTICE_PREFIX}{service}"), None)
+}
+
+pub async fn clear(state: &AppState, service: &str) {
+  let name = service.to_string();
+  if let Err(e) = state.db.call(move |c| reset_notice(c, &name)).await
+  {
+    tracing::warn!("清理 {service} 的自愈通知状态失败：{e}");
+  }
+  forget(service);
+}
+
+pub(crate) fn forget(service: &str) {
   CLEARED.lock().unwrap().insert(service.to_string());
   GAVE_UP.lock().unwrap().remove(service);
 }
@@ -83,9 +103,14 @@ async fn notice(state: &AppState, name: &str, why: Option<&str>) {
       body: "容器已恢复正常，自动重启重新启用".into(),
     }
   };
-  // Record 自己去重，删除/手动恢复后同名服务也可以发出新告警。
-  crate::rules::notice(state, "heal", None, why.is_none(), event)
-    .await;
+  crate::rules::notice(
+    state,
+    "heal",
+    Some(&format!("heal.{name}")),
+    why.is_none(),
+    event,
+  )
+  .await;
 }
 
 pub fn spawn(state: Arc<AppState>) {
@@ -106,10 +131,15 @@ async fn tick(
   records: &mut HashMap<String, Record>,
 ) -> Result<(), wharf_api_types::ApiError> {
   let snap = snapshot::load(&state.db).await?;
+  let mut notices = state
+    .db
+    .call(|c| db::settings_with_prefix(c, NOTICE_PREFIX))
+    .await?;
   let net = snap.net(&snap.world);
   let live = cached_live(state, &snap.world).await;
   for name in std::mem::take(&mut *CLEARED.lock().unwrap()) {
     records.remove(&name);
+    notices.remove(&name);
   }
   records.retain(|name, _| {
     snap
@@ -180,9 +210,16 @@ async fn tick(
       rec.strikes = 0;
       continue;
     }
+    let was_notified = notices.get(name).is_some_and(|s| s == "fail");
     let Some(why) = broken(p) else {
       rec.strikes = 0;
-      if clear_give_up(name, rec) {
+      if p.all_running()
+        && !p.containers.iter().any(|c| {
+          c.is_running() && c.health.as_deref() == Some("starting")
+        })
+        && (clear_give_up(name, rec) || was_notified)
+      {
+        rec.restarts.clear();
         notice(state, name, None).await;
       }
       continue;
@@ -191,8 +228,7 @@ async fn tick(
     if rec.strikes < STRIKES {
       continue;
     }
-    rec.restarts.retain(|t| t.elapsed() < WINDOW);
-    if rec.restarts.len() >= MAX_RESTARTS {
+    if restart_limit_reached(rec) || was_notified {
       if record_give_up(name, rec, &why) {
         notice(state, name, Some(&why)).await;
       }
@@ -223,6 +259,11 @@ fn ready_to_observe(
     rec.strikes = 0;
   }
   !busy && observed
+}
+
+fn restart_limit_reached(rec: &mut Record) -> bool {
+  rec.restarts.retain(|t| t.elapsed() < WINDOW);
+  rec.gave_up || rec.restarts.len() >= MAX_RESTARTS
 }
 
 fn clear_give_up(name: &str, rec: &mut Record) -> bool {
@@ -288,6 +329,52 @@ mod tests {
   }
 
   #[test]
+  fn gave_up_stays_latched_after_restart_window_expires() {
+    let mut rec = Record {
+      gave_up: true,
+      restarts: vec![Instant::now() - WINDOW; MAX_RESTARTS],
+      ..Default::default()
+    };
+    assert!(restart_limit_reached(&mut rec));
+    assert!(rec.restarts.is_empty());
+    assert!(clear_give_up("heal-window-fixture", &mut rec));
+    assert!(!restart_limit_reached(&mut rec));
+  }
+
+  #[tokio::test]
+  async fn heal_notice_deduplicates_after_memory_loss_and_resets_on_clear()
+   {
+    let _lock = crate::rules::tests::TEST_LOCK.lock().await;
+    crate::rules::tests::reset_memory();
+    let state = crate::rules::tests::test_state();
+    let name = "heal-notice-fixture";
+    notice(&state, name, Some("退出")).await;
+    // 新巡检进程没有上次的 Record，通知仍由持久化状态去重。
+    notice(&state, name, Some("退出")).await;
+    assert_eq!(
+      crate::rules::tests::notice_titles(&state, "heal")
+        .await
+        .len(),
+      1
+    );
+    notice(&state, name, None).await;
+    notice(&state, name, Some("退出")).await;
+    clear(&state, name).await;
+    notice(&state, name, Some("退出")).await;
+    assert_eq!(
+      crate::rules::tests::notice_titles(&state, "heal").await,
+      [
+        format!("服务 {name} 自动重启已放弃"),
+        format!("服务 {name} 已恢复运行"),
+        format!("服务 {name} 自动重启已放弃"),
+        format!("服务 {name} 自动重启已放弃"),
+      ]
+    );
+    CLEARED.lock().unwrap().remove(name);
+    crate::rules::tests::reset_memory();
+  }
+
+  #[test]
   fn gave_up_emits_issue_and_clears_on_recovery() {
     let name = "heal-fixture";
     let mut rec = Record::default();
@@ -303,7 +390,7 @@ mod tests {
     assert!(clear_give_up(name, &mut rec));
     assert!(!matching());
     assert!(record_give_up(name, &mut rec, "退出"));
-    clear(name);
+    forget(name);
     assert!(!matching());
     CLEARED.lock().unwrap().remove(name);
   }
