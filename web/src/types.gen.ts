@@ -792,7 +792,7 @@ export interface DeploymentView {
   /**
    * 容器是否启动并通过运行校验。
    */
-  started?: boolean;
+  started: boolean;
 }
 
 export interface Disk {
@@ -1662,15 +1662,15 @@ export interface Metrics {
   projects?: Record<string, ProjectMetrics>;
 }
 
-/**
- * 自定义监控：`http://127.0.0.1:<宿主机端口><path>`。
- */
 export interface MigrationView {
   from: string;
   phase: string;
   to: string;
 }
 
+/**
+ * 自定义监控：`http://127.0.0.1:<宿主机端口><path>`。
+ */
 export interface MonitorSpec {
   /**
    * 期望的状态码；不写时 2xx、3xx 都算正常。
