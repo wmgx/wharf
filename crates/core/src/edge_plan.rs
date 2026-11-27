@@ -390,6 +390,33 @@ mod tests {
     assert!(err.hint.unwrap().contains("--project"));
   }
 
+  #[test]
+  fn edge_owner_conflict_prefers_existing_app_in_batch() {
+    let mut current = crate::world::World::default();
+    current
+      .apply_changes(&[edge_app("prod", EdgeKind::Worker)])
+      .unwrap();
+    let mut desired = current.clone();
+    desired
+      .apply_changes(&[
+        edge_app("a", EdgeKind::Worker),
+        edge_app("b", EdgeKind::Worker),
+      ])
+      .unwrap();
+
+    let err =
+      crate::edge::validate_owners(&current, &desired).unwrap_err();
+    assert_eq!(err.code, ErrorCode::InvalidInput);
+    assert_eq!(
+      err.message,
+      "边缘应用 a 和 prod 都指向厂商项目 cf/worker/demo"
+    );
+    assert_eq!(
+      err.hint.as_deref(),
+      Some("换一个 --project，或改用已有的应用名 prod")
+    );
+  }
+
   #[tokio::test]
   async fn edge_plan_warns_legacy_duplicates_and_allows_other_kind() {
     let state = crate::rules::tests::test_state();

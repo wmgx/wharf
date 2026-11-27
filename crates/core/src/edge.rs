@@ -145,20 +145,33 @@ pub fn validate_owners(
     if names.len() < 2 {
       continue;
     }
-    if let Some(&name) = names.iter().find(|&&name| {
+    let existing = |name: &str| {
       current
         .edge_apps
         .get(name)
-        .is_none_or(|app| target(name, &app.spec) != project)
-    }) {
-      let other = if names[0] == name { names[1] } else { names[0] };
+        .is_some_and(|app| target(name, &app.spec) == project)
+    };
+    if let Some(name) =
+      names.iter().copied().find(|name| !existing(name))
+    {
+      if let Some(other) =
+        names.iter().copied().find(|name| existing(name))
+      {
+        return Err(
+          ApiError::invalid(format!(
+            "边缘应用 {name} 和 {other} 都指向厂商项目 {project}"
+          ))
+          .with_hint(format!(
+            "换一个 --project，或改用已有的应用名 {other}"
+          )),
+        );
+      }
       return Err(
         ApiError::invalid(format!(
-          "边缘应用 {name} 和 {other} 都指向厂商项目 {project}"
+          "同一批里的 {name} 和 {} 都指向厂商项目 {project}",
+          names[1]
         ))
-        .with_hint(format!(
-          "换一个 --project，或改用已有的应用名 {other}"
-        )),
+        .with_hint("换一个 --project"),
       );
     }
     legacy += 1;
