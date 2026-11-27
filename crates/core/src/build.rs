@@ -6,8 +6,6 @@
 
 use std::{path::Path, time::Duration};
 
-use base64::{Engine, engine::general_purpose::STANDARD};
-
 use rusqlite::{OptionalExtension, params};
 use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
@@ -16,6 +14,7 @@ use wharf_api_types::{
     AgentOp, BuildFetch, BuildJob, BuildResult, OneTimeSecret,
     ResolveCommit,
   },
+  build::{GIT_CREDENTIAL_HELPER, git_no_proxy},
   spec::{BuildSource, GitSource, ServiceSpec, Source},
 };
 
@@ -83,9 +82,8 @@ pub(crate) async fn plan_commit(
   }
   let url = reqwest::Url::parse(repo)
     .map_err(|_| ApiError::invalid("Git 仓库地址不合法"))?;
-  let mut args = Vec::new();
+  let mut args = vec!["-c", "http.followRedirects=initial"];
   let mut env = Vec::new();
-  let auth;
   let config;
   let mirrored;
   let repo = if let Some(token) = token {
@@ -95,15 +93,14 @@ pub(crate) async fn plan_commit(
       _ => "x-access-token",
     };
     config = format!(
-      "http.{}/.extraHeader=WHARF_GIT_AUTH",
+      "credential.{}/.helper={GIT_CREDENTIAL_HELPER}",
       url.origin().ascii_serialization()
     );
-    auth = format!(
-      "Authorization: Basic {}",
-      STANDARD.encode(format!("{git_user}:{}", token.0))
-    );
-    args.extend(["--config-env", config.as_str()]);
-    env.push(("WHARF_GIT_AUTH", auth.as_str()));
+    args.extend(["-c", config.as_str()]);
+    env.extend([
+      ("GIT_USER", git_user),
+      ("GIT_TOKEN", token.0.as_str()),
+    ]);
     repo.as_str()
   } else if let Some((path, mirror)) = repo
     .strip_prefix("https://github.com/")
@@ -117,26 +114,39 @@ pub(crate) async fn plan_commit(
   };
   let peeled = format!("{reference}^{{}}");
   args.extend(["ls-remote", "--", repo, reference, &peeled]);
-  let proxy = job.pull.git_proxy.as_deref().unwrap_or_default();
-  let bytes = tokio::time::timeout(
-    crate::pins::COMMIT_TIMEOUT,
-    crate::secret_leak::git_with_env(
-      Path::new("/"),
-      proxy,
-      &args,
-      &env,
-    ),
-  )
-  .await
-  .map_err(|_| {
-    ApiError::new(ErrorCode::Timeout, "查询 Git 代码版本超时")
-  })?
-  .map_err(|e| {
-    ApiError::new(
-      ErrorCode::AgentFailed,
-      format!("控制面查询 Git 代码版本：{e}"),
-    )
-  })?;
+  let mirror = job
+    .pull
+    .github_mirror
+    .as_deref()
+    .and_then(|mirror| reqwest::Url::parse(mirror).ok());
+  let no_proxy =
+    git_no_proxy(mirror.as_ref().and_then(reqwest::Url::host_str));
+  env.extend([
+    ("NO_PROXY", no_proxy.as_str()),
+    ("no_proxy", no_proxy.as_str()),
+  ]);
+  let bytes =
+    tokio::time::timeout(crate::pins::COMMIT_TIMEOUT, async {
+      let proxy =
+        reachable_git_proxy(job.pull.git_proxy.as_deref()).await;
+      crate::secret_leak::git_with_env(
+        Path::new("/"),
+        proxy,
+        &args,
+        &env,
+      )
+      .await
+    })
+    .await
+    .map_err(|_| {
+      ApiError::new(ErrorCode::Timeout, "查询 Git 代码版本超时")
+    })?
+    .map_err(|e| {
+      ApiError::new(
+        ErrorCode::AgentFailed,
+        format!("控制面查询 Git 代码版本：{e}"),
+      )
+    })?;
   wharf_api_types::build::pick_commit(
     &String::from_utf8_lossy(&bytes),
     reference,
@@ -144,6 +154,44 @@ pub(crate) async fn plan_commit(
   .ok_or_else(|| {
     ApiError::invalid(format!("仓库里没有分支或标签 {reference}"))
   })
+}
+
+/// 目标机的环回代理只在目标机上有效。其他代理从控制面探测，连不上走直连。
+async fn reachable_git_proxy(proxy: Option<&str>) -> &str {
+  let Some(proxy) = proxy.map(str::trim) else {
+    return "";
+  };
+  let Ok(url) = reqwest::Url::parse(proxy) else {
+    return "";
+  };
+  let Some(host) = url.host_str() else {
+    return "";
+  };
+  let host = host.trim_matches(['[', ']']).trim_end_matches('.');
+  let ip = host
+    .parse::<std::net::IpAddr>()
+    .ok()
+    .map(|ip| ip.to_canonical());
+  if host.eq_ignore_ascii_case("localhost")
+    || host.to_ascii_lowercase().ends_with(".localhost")
+    || ip.is_some_and(|ip| ip.is_loopback() || ip.is_unspecified())
+  {
+    return "";
+  }
+  let Some(port) = url.port_or_known_default() else {
+    return "";
+  };
+  if tokio::time::timeout(
+    Duration::from_secs(3),
+    tokio::net::TcpStream::connect((host, port)),
+  )
+  .await
+  .is_ok_and(|result| result.is_ok())
+  {
+    proxy
+  } else {
+    ""
+  }
 }
 
 /// 拉代码、拉基础镜像、构建都算在内。
@@ -428,6 +476,24 @@ pub async fn restart_now(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn legacy_plan_ignores_target_loopback_proxy_even_when_reachable()
+   {
+    let listener =
+      tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy = format!("http://{}", listener.local_addr().unwrap());
+    assert_eq!(reachable_git_proxy(Some(&proxy)).await, "");
+    assert_eq!(
+      reachable_git_proxy(Some("http://[::ffff:127.0.0.1]:8080"))
+        .await,
+      ""
+    );
+    assert_eq!(
+      reachable_git_proxy(Some("http://127.0.0.1:0")).await,
+      ""
+    );
+  }
 
   #[tokio::test]
   async fn plan_pin_on_legacy_agent_never_dispatches_docker_lookup() {

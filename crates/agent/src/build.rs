@@ -21,7 +21,9 @@ use wharf_api_types::{
     BuildFetch, BuildJob, BuildResult, GIT_IMAGE, PullPolicy,
     ResolveCommit,
   },
-  build::{self, SourceTree, is_commit, pick_commit},
+  build::{
+    self, GIT_CREDENTIAL_HELPER, SourceTree, is_commit, pick_commit,
+  },
   validate_name,
 };
 
@@ -592,6 +594,7 @@ async fn clone(
     .args(["--entrypoint", "sh", GIT_IMAGE, "-c", &script])
     .env("REPO", repo)
     .env("REF", reference)
+    .env("WHARF_GIT_CREDENTIAL_HELPER", GIT_CREDENTIAL_HELPER)
     .env("GIT_USER", git_auth_user(repo, user))
     .env(
       "GIT_AUTH_SCOPE",
@@ -639,7 +642,7 @@ async fn clone(
   Ok(commit)
 }
 
-const GIT_FETCH_ENV: [&str; 24] = [
+const GIT_FETCH_ENV: [&str; 26] = [
   "-e",
   "REPO",
   "-e",
@@ -650,6 +653,8 @@ const GIT_FETCH_ENV: [&str; 24] = [
   "GIT_USER",
   "-e",
   "GIT_AUTH_SCOPE",
+  "-e",
+  "WHARF_GIT_CREDENTIAL_HELPER",
   "-e",
   "FALLBACK_REF",
   "-e",
@@ -671,8 +676,7 @@ export GIT_ALLOW_PROTOCOL=https:http:ssh:git
 export GIT_SSH_COMMAND="ssh -oBatchMode=yes"
 run_git() {
   if [ -n "$GIT_TOKEN" ] && [ -n "$GIT_AUTH_SCOPE" ]; then
-    auth="Authorization: Basic $(printf '%s:%s' "$GIT_USER" "$GIT_TOKEN" | base64 | tr -d '\n')"
-    GIT_AUTH_HEADER="$auth" git -c protocol.file.allow=never -c http.followRedirects=false --config-env="http.$GIT_AUTH_SCOPE.extraHeader=GIT_AUTH_HEADER" "$@"
+    git -c protocol.file.allow=never -c http.followRedirects=initial -c credential.helper= -c "credential.$GIT_AUTH_SCOPE.helper=$WHARF_GIT_CREDENTIAL_HELPER" "$@"
   else
     git -c protocol.file.allow=never "$@"
   fi
@@ -724,18 +728,11 @@ fn git_auth_user<'a>(repo: &str, user: Option<&'a str>) -> &'a str {
 }
 
 fn git_no_proxy(mirror: Option<&str>) -> String {
-  let private = std::net::Ipv4Addr::new(192, 168, 0, 0);
-  let mut skip = format!(
-    "127.0.0.1,localhost,::1,10.0.0.0/8,172.16.0.0/12,{private}/16,100.64.0.0/10"
-  );
-  if let Some(url) =
-    mirror.and_then(|m| reqwest::Url::parse(m.trim()).ok())
-    && let Some(host) = url.host_str()
-  {
-    skip.push(',');
-    skip.push_str(host);
-  }
-  skip
+  let mirror =
+    mirror.and_then(|m| reqwest::Url::parse(m.trim()).ok());
+  build::git_no_proxy(
+    mirror.as_ref().and_then(reqwest::Url::host_str),
+  )
 }
 
 /// 传给 git 容器的环境变量名：用 git 的 `GIT_CONFIG_*` 设 `url.<镜像>.insteadOf`。
@@ -809,6 +806,7 @@ run_git ls-remote -- "$REPO" "$REF" "$REF^{{}}""#
     .env("GIT_CONFIG_GLOBAL", "/dev/null")
     .env("REPO", repo)
     .env("REF", reference)
+    .env("WHARF_GIT_CREDENTIAL_HELPER", GIT_CREDENTIAL_HELPER)
     .env("GIT_USER", git_auth_user(repo, user.as_deref()))
     .env(
       "GIT_AUTH_SCOPE",
@@ -1117,7 +1115,7 @@ mod build_v2_tests {
     );
     assert_eq!(git_auth_user(repo, None), "oauth2");
     assert_eq!(git_auth_user(repo, Some("ci")), "ci");
-    assert!(GIT_AUTH.contains("http.$GIT_AUTH_SCOPE.extraHeader"));
+    assert!(GIT_AUTH.contains("credential.$GIT_AUTH_SCOPE.helper"));
     assert!(GIT_AUTH.contains("protocol.file.allow=never"));
     assert!(
       CLONE_SCRIPT.contains("submodule update --init --recursive")

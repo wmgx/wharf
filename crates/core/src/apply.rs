@@ -1363,9 +1363,7 @@ pub(crate) async fn run_step(
         .is_some_and(|git| git.user.is_some())
       {
         let server = crate::edge::builder(state, &snap, spec)?;
-        if !state.hub.supports_build_v2(&server) {
-          return Err(crate::build::old_git_agent(&server));
-        }
+        state.hub.require_build_v2(&server)?;
       }
       let fingerprint = crate::edge_plan::fingerprint(app, spec);
       let k = key.clone();

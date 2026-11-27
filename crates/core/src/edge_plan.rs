@@ -159,7 +159,9 @@ async fn plan_build(
     Err(e) if git.is_some() => return Err(e),
     Err(_) => return Ok(None),
   };
-  if !state.hub.supports_build_v2(&server) {
+  if state.hub.is_online(&server)
+    && !state.hub.supports_build_v2(&server)
+  {
     if git.is_some_and(|g| g.user.is_some()) {
       return Err(crate::build::old_git_agent(&server));
     }
@@ -552,12 +554,47 @@ mod tests {
     );
     snap.pending.edge_deploys.insert("site".into());
     let mut b = Builder::default();
-    deploy_items(&mut b, &snap, &snap.world, &snap.world)
+    let state = crate::rules::tests::test_state();
+    deploy_items(&state, &mut b, &snap, &snap.world, &snap.world)
       .await
       .unwrap();
     assert_eq!(b.items.len(), 1);
     assert_eq!(b.items[0].address, "edge/site");
     assert!(b.items[0].reason.contains("上次发布没有完成"));
+  }
+
+  #[tokio::test]
+  async fn offline_builder_does_not_report_legacy_agent() {
+    let state = crate::rules::tests::test_state();
+    state.hub.mock_agent("s1", false, |_| unreachable!());
+    state.hub.enable_mock_build_v2("s1");
+    state.hub.disconnect("s1");
+    let spec = |source| {
+      serde_json::from_value::<EdgeAppSpec>(json!({
+      "account": "cf", "kind": "pages", "builder": "s1", "source": source,
+    })).unwrap()
+    };
+    let snap = Snapshot::default();
+    let mut b = Builder::default();
+    let upload = spec(json!({"upload": "abc"}));
+    assert!(
+      plan_build(&state, &mut b, &snap, "site", &upload)
+        .await
+        .unwrap()
+        .is_none()
+    );
+    assert!(b.warnings.is_empty());
+    let git = spec(
+      json!({"git": {"repo": "https://example.test/site", "ref": "main", "user": "ci"}}),
+    );
+    let err = plan_build(&state, &mut b, &snap, "site", &git)
+      .await
+      .unwrap_err();
+    assert_eq!(err.code, ErrorCode::AgentOffline);
+    assert_eq!(
+      state.hub.require_build_v2("s1").unwrap_err().code,
+      ErrorCode::AgentOffline
+    );
   }
 
   #[tokio::test]

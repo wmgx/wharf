@@ -335,7 +335,9 @@ fn build_agent_warnings(
       continue;
     };
     let server = &row.spec.server;
-    if !state.hub.supports_build_v2(server) {
+    if state.hub.is_online(server)
+      && !state.hub.supports_build_v2(server)
+    {
       if build.git.as_ref().is_some_and(|g| g.user.is_some()) {
         return Err(crate::build::old_git_agent(server));
       }

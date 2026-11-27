@@ -82,7 +82,7 @@ pub enum EdgeCmd {
   /// 否则找 worker.js / index.js 当单文件 Worker 上传。
   Deploy {
     name: String,
-    /// 单文件 Worker 的脚本。
+    /// 单文件 Worker 的脚本（.mjs 指定模块格式，.cjs 指定旧式格式）。
     #[arg(long, conflicts_with_all = ["dir", "git"])]
     script: Option<PathBuf>,
     /// 代码目录（wrangler 项目或 Pages）。

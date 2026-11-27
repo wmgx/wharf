@@ -95,7 +95,12 @@ pub fn resolve_dockerfile(
     });
   }
   let path = dockerfile.unwrap_or("Dockerfile");
-  if opts.template.is_none() {
+  if opts.template.is_none()
+    && (dockerfile.is_some()
+      || (opts.base.is_none()
+        && opts.install.is_none()
+        && opts.start.is_none()))
+  {
     if tree.exists(path) {
       let content = tree.read(path).ok_or_else(|| {
         ApiError::invalid(format!(
@@ -430,19 +435,20 @@ fn python_has_dep(
         l.split('#').next().unwrap_or_default().trim() != "[project]"
       });
       lines.next();
-      let section = lines
+      let Some(first) = lines
+        .by_ref()
         .take_while(|l| !l.trim_start().starts_with('['))
-        .collect::<Vec<_>>()
-        .join("\n");
-      let Some(deps) = section.lines().find_map(|l| {
-        let (key, _) = l.split_once('=')?;
-        (key.trim() == "dependencies").then(|| {
-          &section
-            [section.find(l).unwrap_or_default() + key.len() + 1..]
+        .find_map(|l| {
+          let (key, value) = l.split_once('=')?;
+          (key.trim() == "dependencies").then_some(value)
         })
-      }) else {
+      else {
         return false;
       };
+      let deps = std::iter::once(first)
+        .chain(lines.take_while(|l| !l.trim_start().starts_with('[')))
+        .collect::<Vec<_>>()
+        .join("\n");
       let mut tokens = deps
         .trim_start()
         .strip_prefix('[')
@@ -770,6 +776,25 @@ EXPOSE {port}
   }
 }
 
+/// 由 Git 按实际请求的 origin 调用，凭据只走环境变量。
+pub const GIT_CREDENTIAL_HELPER: &str = r#"!f() {
+  [ "$1" = get ] || return 0
+  case "$GIT_TOKEN" in
+    *"$(printf '\r')"*|*'
+'*) return 1 ;;
+  esac
+  printf 'username=%s\npassword=%s\n' "$GIT_USER" "$GIT_TOKEN"
+}; f"#;
+
+pub fn git_no_proxy(mirror_host: Option<&str>) -> String {
+  let mut hosts = "127.0.0.1,localhost,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10".to_string();
+  if let Some(host) = mirror_host {
+    hosts.push(',');
+    hosts.push_str(host);
+  }
+  hosts
+}
+
 pub fn is_commit(s: &str) -> bool {
   s.len() == 40 && s.bytes().all(|c| c.is_ascii_hexdigit())
 }
@@ -866,6 +891,19 @@ mod tests {
   }
 
   #[test]
+  fn pyproject_ignores_commented_dependencies_before_the_real_array()
+  {
+    let project = r#"[project]
+# dependencies = [
+keywords = ["web"]
+dependencies = [
+  "uvicorn",
+]
+"#;
+    assert!(python_has_dep(None, Some(project), "uvicorn"));
+  }
+
+  #[test]
   fn dockerfile_resolution_prefers_explicit_template() {
     let tree = Mem(BTreeMap::from([
       ("Dockerfile", "FROM alpine"),
@@ -886,6 +924,14 @@ mod tests {
     assert!(matches!(
       resolve_dockerfile(&tree, None, Some("Dockerfile"), &o)
         .unwrap(),
+      ResolvedDockerfile::Template(_)
+    ));
+    let options = Options {
+      base: Some("caddy:2"),
+      ..opts(None)
+    };
+    assert!(matches!(
+      resolve_dockerfile(&tree, None, None, &options).unwrap(),
       ResolvedDockerfile::Template(_)
     ));
   }

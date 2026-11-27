@@ -191,11 +191,14 @@ fn apply_opts(b: &mut BuildSource, o: &BuildOpts) -> CliResult<()> {
     };
     return Ok(());
   }
-  if o.dockerfile.is_some()
-    && o.template.as_deref().is_some_and(|t| t != "auto")
-  {
-    return Err(ApiError::invalid("--dockerfile 和 --template 不能同时指定")
-      .with_hint("用仓库里的 Dockerfile 就只传 --dockerfile，用内置模板就只传 --template").into());
+  let template_opts = o.template.is_some()
+    || o.base.is_some()
+    || o.install.is_some()
+    || o.start.is_some()
+    || o.start_file.is_some();
+  if o.dockerfile.is_some() && template_opts {
+    return Err(ApiError::invalid("--dockerfile 和模板选项不能同时指定")
+      .with_hint("用仓库里的 Dockerfile 就只传 --dockerfile，用内置模板就只传模板选项").into());
   }
   if let Some(p) = &o.dockerfile {
     b.dockerfile = Some(p.clone());
@@ -205,11 +208,6 @@ fn apply_opts(b: &mut BuildSource, o: &BuildOpts) -> CliResult<()> {
     b.install = None;
     b.start = None;
   }
-  let template_opts = o.template.is_some()
-    || o.base.is_some()
-    || o.install.is_some()
-    || o.start.is_some()
-    || o.start_file.is_some();
   if template_opts {
     b.dockerfile = None;
     b.dockerfile_content = None;
@@ -500,6 +498,28 @@ mod tests {
     .unwrap();
     assert!(b.dockerfile.is_none());
     assert_eq!(b.template.as_deref(), Some("node"));
+  }
+
+  #[test]
+  fn rejects_dockerfile_with_template_options() {
+    for opts in [
+      BuildOpts {
+        start: Some("node app.js".into()),
+        ..Default::default()
+      },
+      BuildOpts {
+        template: Some("auto".into()),
+        ..Default::default()
+      },
+    ] {
+      let opts = BuildOpts {
+        dockerfile: Some("Dockerfile.prod".into()),
+        ..opts
+      };
+      assert!(
+        apply_opts(&mut BuildSource::default(), &opts).is_err()
+      );
+    }
   }
 
   #[test]

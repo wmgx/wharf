@@ -2122,7 +2122,7 @@ fn reconcile_source_switch(
     spec.container = None;
     spec.ports.clear();
   }
-  if is_compose && refresh_compose_ports {
+  if is_compose && (!was_compose || refresh_compose_ports) {
     spec.ports.clear();
   }
   spec.source = source;
@@ -4829,6 +4829,22 @@ mod tests {
       false,
     );
     assert!(spec.container.is_none());
+  }
+
+  #[test]
+  fn switching_image_to_compose_url_clears_container_ports() {
+    let mut spec: ServiceSpec =
+      serde_json::from_value(serde_json::json!({
+        "server": "s1", "source": {"image": "nginx"},
+        "ports": [{"name": "http", "container": 80}]
+      }))
+      .unwrap();
+    let compose = Source::Compose {
+      content: Some("services: {app: {image: nginx}}".into()),
+      file: None,
+    };
+    reconcile_source_switch(&mut spec, compose, false);
+    assert!(spec.ports.is_empty());
   }
 
   use clap::Parser;

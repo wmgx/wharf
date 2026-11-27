@@ -246,198 +246,65 @@ pub(crate) fn builder(
     })
 }
 
-/// 单文件脚本是不是 ES Module 格式。
-fn is_module(content: &str) -> bool {
-  let mut lexer =
-    JsTokens(content.trim_start_matches('\u{feff}').as_bytes());
-  let mut depth = 0usize;
-  let mut previous = &b";"[..];
-  while let Some((token, newline)) =
-    lexer.next(regex_allowed(previous))
-  {
-    match token {
-      b"{" | b"(" | b"[" => depth += 1,
-      b"}" | b")" | b"]" => depth = depth.saturating_sub(1),
-      b"export"
-        if depth == 0
-          && previous != b"."
-          && (newline || matches!(previous, b";" | b"}")) =>
+/// .mjs / .cjs 显式选格式，.js 只识别明显的导出声明。
+fn is_module(
+  filename: &str,
+  content: &str,
+) -> Result<bool, ApiError> {
+  if filename.ends_with(".mjs") {
+    return Ok(true);
+  }
+  if filename.ends_with(".cjs") {
+    return Ok(false);
+  }
+  let content = content.trim_start_matches('\u{feff}');
+  let mut uncertain_context = false;
+  let mut ambiguous = false;
+  for line in content.split_inclusive('\n') {
+    let mut inline = "";
+    if line.trim_start().starts_with("//") {
+      continue;
+    }
+    for statement in line.split_inclusive(';') {
+      if let Some(after) =
+        statement.trim_start().strip_prefix("export")
       {
-        return match lexer.next(false).map(|(t, _)| t) {
-          Some(
-            b"{" | b"*" | b"default" | b"const" | b"let" | b"var"
-            | b"function" | b"class",
-          ) => true,
-          Some(b"async") => {
-            lexer.next(false).is_some_and(|(t, _)| t == b"function")
-          }
-          _ => false,
-        };
-      }
-      _ => {}
-    }
-    previous = token;
-  }
-  false
-}
-
-fn regex_allowed(after: &[u8]) -> bool {
-  matches!(
-    after,
-    b"="
-      | b"("
-      | b"["
-      | b"{"
-      | b"}"
-      | b":"
-      | b";"
-      | b","
-      | b"!"
-      | b"?"
-      | b"&"
-      | b"|"
-      | b"~"
-      | b"+"
-      | b"-"
-      | b"*"
-      | b"%"
-      | b"^"
-      | b"<"
-      | b">"
-      | b"return"
-      | b"throw"
-      | b"case"
-      | b"typeof"
-      | b"void"
-      | b"delete"
-      | b"yield"
-      | b"await"
-  )
-}
-
-struct JsTokens<'a>(&'a [u8]);
-
-impl<'a> JsTokens<'a> {
-  fn next(&mut self, regex: bool) -> Option<(&'a [u8], bool)> {
-    self.token(regex, false)
-  }
-
-  fn next_inner(&mut self, regex: bool) -> Option<(&'a [u8], bool)> {
-    self.token(regex, true)
-  }
-
-  fn token(
-    &mut self,
-    regex: bool,
-    in_template: bool,
-  ) -> Option<(&'a [u8], bool)> {
-    let mut newline = false;
-    loop {
-      let start = self.0;
-      match *start.first()? {
-        b if b.is_ascii_whitespace() => {
-          newline |= matches!(b, b'\n' | b'\r');
-          self.0 = &start[1..];
-        }
-        b'/' if start.starts_with(b"//") => {
-          self.0 = &start[start
+        let tail = after.trim_start();
+        let declaration = tail.starts_with(['{', '*'])
+          || (after.starts_with(char::is_whitespace)
+            && [
+              "default", "const", "let", "var", "function", "class",
+              "async",
+            ]
             .iter()
-            .position(|&b| matches!(b, b'\n' | b'\r'))
-            .unwrap_or(start.len())..];
-        }
-        b'/' if start.starts_with(b"/*") => {
-          let len = start[2..]
-            .windows(2)
-            .position(|p| p == b"*/")
-            .map_or(start.len(), |i| i + 4);
-          newline |=
-            start[..len].iter().any(|b| matches!(b, b'\n' | b'\r'));
-          self.0 = &start[len..];
-        }
-        b => {
-          self.0 = &start[1..];
-          match b {
-            b'\'' | b'"' => self.quoted(b, false),
-            b'`' if !in_template => self.template(),
-            b'/' if regex => self.quoted(b'/', true),
-            b if js_word(b) => {
-              self.0 = &self.0[self
-                .0
-                .iter()
-                .position(|b| !js_word(*b))
-                .unwrap_or(self.0.len())..];
-            }
-            _ => {}
+            .any(|&keyword| {
+              tail.strip_prefix(keyword).is_some_and(|rest| {
+                rest.is_empty()
+                  || rest.starts_with(char::is_whitespace)
+                  || rest.starts_with(['{', '(', '[', '\'', '"'])
+              })
+            }));
+        if declaration || tail.starts_with("/*") || tail.is_empty() {
+          // 行首也可能处在多行模板字符串或注释里。只有明显的导出才自动选模块。
+          if declaration
+            && !uncertain_context
+            && !inline.contains(['\'', '"', '/', '`', '\\'])
+          {
+            return Ok(true);
           }
-          return Some((
-            &start[..start.len() - self.0.len()],
-            newline,
-          ));
+          ambiguous = true;
         }
       }
+      inline = &line[..inline.len() + statement.len()];
     }
+    uncertain_context |=
+      line.contains(['`', '\\']) || line.contains("/*");
   }
-
-  fn quoted(&mut self, end: u8, regex: bool) {
-    let mut class = false;
-    while let [b, rest @ ..] = self.0 {
-      self.0 = rest;
-      match *b {
-        b'\\' => self.0 = rest.get(1..).unwrap_or_default(),
-        b'[' if regex => class = true,
-        b']' if regex => class = false,
-        b if b == end && !class => break,
-        _ => {}
-      }
-    }
+  if ambiguous {
+    return Err(ApiError::invalid("无法确定单文件 Worker 的脚本格式")
+      .with_hint("用 --script <文件.mjs> 指定 ES Module，或用 --script <文件.cjs> 指定旧式 Service Worker"));
   }
-
-  fn template(&mut self) {
-    let mut templates = vec![0usize];
-    let mut previous = &b"="[..];
-    while let Some(depth) = templates.last_mut() {
-      if *depth != 0 {
-        if self.0.first() == Some(&b'`') {
-          self.0 = &self.0[1..];
-          templates.push(0);
-        } else {
-          let Some((token, _)) =
-            self.next_inner(regex_allowed(previous))
-          else {
-            return;
-          };
-          match token {
-            b"{" => *depth += 1,
-            b"}" => *depth -= 1,
-            b"`" => templates.push(0),
-            _ => {}
-          }
-          previous = token;
-        }
-      } else if let [b, rest @ ..] = self.0 {
-        self.0 = rest;
-        match *b {
-          b'`' => {
-            templates.pop();
-            previous = b"value";
-          }
-          b'\\' => self.0 = rest.get(1..).unwrap_or_default(),
-          b'$' if rest.starts_with(b"{") => {
-            self.0 = &rest[1..];
-            *depth = 1;
-            previous = b"=";
-          }
-          _ => {}
-        }
-      } else {
-        break;
-      }
-    }
-  }
-}
-
-fn js_word(b: u8) -> bool {
-  b.is_ascii_alphanumeric() || b == b'_' || b == b'$' || !b.is_ascii()
+  Ok(false)
 }
 
 // DEPLOY
@@ -478,7 +345,7 @@ pub async fn deploy(
     ));
     let script = WorkerScript {
       filename: filename.to_string(),
-      modules: is_module(&content),
+      modules: is_module(filename, &content)?,
       content,
     };
     with_timeout(
@@ -489,10 +356,8 @@ pub async fn deploy(
     progress(format!("已发布 Worker {project}"));
   } else {
     let server = builder(state, snap, spec)?;
-    if src.git.as_ref().is_some_and(|g| g.user.is_some())
-      && !state.hub.supports_build_v2(&server)
-    {
-      return Err(crate::build::old_git_agent(&server));
+    if src.git.as_ref().is_some_and(|g| g.user.is_some()) {
+      state.hub.require_build_v2(&server)?;
     }
     let branch = match spec.kind {
       EdgeKind::Pages => {
@@ -715,8 +580,14 @@ mod tests {
 
   #[test]
   fn detects_module_workers() {
-    assert!(is_module("export default { fetch() {} }"));
-    assert!(!is_module("addEventListener('fetch', e => {})"));
+    assert!(
+      is_module("worker.js", "export default { fetch() {} }")
+        .unwrap()
+    );
+    assert!(
+      !is_module("worker.js", "addEventListener('fetch', e => {})")
+        .unwrap()
+    );
   }
 }
 
@@ -729,10 +600,10 @@ mod module_tests {
     for src in [
       "export{h as default}",
       "export const x=1",
-      "export/* note */async function f(){}",
       "let x=1\nexport*from'./dep.js'",
+      "function h(){};export{h as default}",
     ] {
-      assert!(is_module(src), "{src}");
+      assert!(is_module("worker.js", src).unwrap(), "{src}");
     }
     for src in [
       "// export default\naddEventListener()",
@@ -740,7 +611,20 @@ mod module_tests {
       "const s=/[;}export default]/",
       "let x=`a ${{v:`b ${1}`}} export default`",
     ] {
-      assert!(!is_module(src), "{src}");
+      assert!(!is_module("worker.js", src).unwrap(), "{src}");
     }
+  }
+
+  #[test]
+  fn detects_exports_after_postfix_division_or_requires_explicit_format()
+   {
+    let script = "let i = 1; const x = i++ / 2; export default { fetch() { return new Response(String(x)); } };";
+    let multiline = script.replace("; export", ";\nexport");
+    assert!(is_module("worker.js", &multiline).unwrap());
+    assert!(is_module("worker.js", script).is_err());
+    assert!(is_module("worker.mjs", script).unwrap());
+    let literal = "const text = `\nexport default {}\n`; addEventListener('fetch', f);";
+    assert!(is_module("worker.js", literal).is_err());
+    assert!(!is_module("worker.cjs", literal).unwrap());
   }
 }

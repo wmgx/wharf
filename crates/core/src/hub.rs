@@ -321,6 +321,21 @@ impl Hub {
     self.build_v2_conn_id(server).is_some()
   }
 
+  pub(crate) fn require_build_v2(
+    &self,
+    server: &str,
+  ) -> Result<(), ApiError> {
+    let conns = lock(&self.conns);
+    let conn = conns
+      .get(server)
+      .filter(|c| !c.closed.is_cancelled())
+      .ok_or_else(|| offline(server))?;
+    if conn.upgrade_only || !conn.build_v2 {
+      return Err(crate::build::old_git_agent(server));
+    }
+    Ok(())
+  }
+
   pub(crate) fn build_v2_conn_id(&self, server: &str) -> Option<u64> {
     lock(&self.conns)
       .get(server)
