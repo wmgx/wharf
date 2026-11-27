@@ -1091,9 +1091,13 @@ pub(crate) fn append_step_log(
   line: &str,
 ) {
   let line = crate::log_redact::redact_text(line);
-  step.log_lines += line.lines().count().max(1) as u64;
-  writer.append(&line);
-  step.log.push(line);
+  for line in line.lines().chain(line.is_empty().then_some("")) {
+    step.log_lines = step.log_lines.saturating_add(
+      crate::run_logs::omitted_lines(line).unwrap_or(1),
+    );
+    writer.append(line);
+    step.log.push(line.to_string());
+  }
   if step.log.len() > MAX_LOG_LINES {
     step.log.drain(..step.log.len() - MAX_LOG_LINES);
     step.log_truncated = true;

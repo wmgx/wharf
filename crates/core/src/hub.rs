@@ -1328,6 +1328,11 @@ async fn handle_socket(
               AcceptNoMetrics => report.metrics = None,
               AcceptAll => {}
             }
+            let mut hits = std::mem::take(&mut report.log_hits);
+            crate::report_guard::sanitize_log_hits(&mut hits);
+            if !conn.closed.is_cancelled() {
+              crate::service_monitor::report(&server, hits);
+            }
             reports.push(now_ms(), *report);
           }
           Ok(msg @ (AgentMsg::Progress { .. } | AgentMsg::Response { .. })) => {
@@ -1397,10 +1402,6 @@ async fn report_worker(
           continue;
         }
       };
-      crate::service_monitor::report(
-        &server,
-        std::mem::take(&mut report.log_hits),
-      );
       let agent_ms = report.time_ms;
       crate::clock::record(&state, &server, agent_ms).await;
       let settings =

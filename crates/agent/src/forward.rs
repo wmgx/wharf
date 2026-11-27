@@ -12,7 +12,7 @@ use tokio::{
 };
 use wharf_api_types::{
   ApiError, ErrorCode,
-  agent::{AgentMsg, ForwardJob, TerminalInput},
+  agent::{ForwardJob, TerminalInput},
 };
 
 use crate::{
@@ -32,7 +32,6 @@ pub async fn run(
   job: &ForwardJob,
   ctx: &Ctx,
   mut input: mpsc::Receiver<TerminalInput>,
-  id: u64,
   out: &DataSender,
 ) -> Result<Value, ApiError> {
   let addr = target(docker, job, ctx).await?;
@@ -46,7 +45,7 @@ pub async fn run(
   };
   let _ = stream.set_nodelay(true);
   // 空进度表示已连上：控制面收到它才开始送输入，保证输入不会先于本请求到达。
-  send(out, ctx, id, String::new()).await?;
+  send(out, ctx, String::new()).await?;
   let (mut rd, mut wr) = stream.into_split();
   let mut buf = vec![0u8; CHUNK];
   let mut total: u64 = 0;
@@ -60,7 +59,7 @@ pub async fn run(
         }
         total += n as u64;
         let line = STANDARD.encode(&buf[..n]);
-        send(out, ctx, id, line).await?;
+        send(out, ctx, line).await?;
       }
       msg = input.recv(), if input_open => match msg {
         Some(m) => {
@@ -93,11 +92,10 @@ pub async fn run(
 async fn send(
   out: &DataSender,
   ctx: &Ctx,
-  id: u64,
   line: String,
 ) -> Result<(), ApiError> {
   out
-    .send(AgentMsg::Progress { id, line }, &ctx.cancel, WRITE_TIMEOUT)
+    .send(line, &ctx.cancel, WRITE_TIMEOUT)
     .await
     .map_err(|err| match err {
       SendError::Cancelled => cancelled(),
@@ -220,12 +218,12 @@ mod tests {
     let (_out, _ctrl, _logs, mux) = crate::outbound::Outbound::new();
     let out = mux.register(1, 1);
     let ctx = Ctx::detached();
-    send(&out, &ctx, 1, String::new()).await.unwrap();
+    send(&out, &ctx, String::new()).await.unwrap();
     let cancel = ctx.cancel.clone();
     tokio::spawn(async move { cancel.cancel() });
     let error = tokio::time::timeout(
       Duration::from_millis(100),
-      send(&out, &ctx, 1, "data".into()),
+      send(&out, &ctx, "data".into()),
     )
     .await
     .unwrap()

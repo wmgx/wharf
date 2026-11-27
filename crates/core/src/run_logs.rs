@@ -22,6 +22,14 @@ const MAX_AGE: Duration = Duration::from_secs(30 * 24 * 3600);
 const OMITTED: &str = "[wharf] 单步日志超过 16 MiB 上限，后续已省略";
 const WIRE_OMITTED: &str = "[wharf] 日志输出过快，省略了 ";
 
+pub(crate) fn omitted_lines(line: &str) -> Option<u64> {
+  line
+    .strip_prefix(WIRE_OMITTED)?
+    .strip_suffix(" 行")?
+    .parse()
+    .ok()
+}
+
 fn valid_id(id: &str) -> bool {
   !id.is_empty()
     && id
@@ -272,7 +280,7 @@ pub fn query(
     MAX_RESPONSE_BYTES - 1024,
     filtered,
   );
-  let mut total_lines = 0;
+  let mut total_lines = 0u64;
   let mut incomplete = false;
   let mut headers = Vec::new();
   for index in range {
@@ -306,23 +314,21 @@ pub fn query(
         )),
       ));
     }
-    let mut lines = 0;
+    let mut lines = 0u64;
     for line in raw.lines() {
-      if let Some(dropped) = line
-        .strip_prefix(WIRE_OMITTED)
-        .and_then(|s| s.strip_suffix(" 行"))
-        .and_then(|s| s.parse::<u64>().ok())
-      {
-        lines += dropped;
+      if let Some(dropped) = omitted_lines(line) {
+        lines = lines.saturating_add(dropped);
         incomplete = true;
       } else if line == OMITTED {
         incomplete = true;
       } else {
-        lines += 1;
+        lines = lines.saturating_add(1);
       }
       search.push(&log_redact::redact_text(line));
     }
-    total_lines += lines.max(step.log_lines);
+    incomplete |= lines < step.log_lines;
+    total_lines =
+      total_lines.saturating_add(lines.max(step.log_lines));
   }
   let (found, limited) = search.finish(&headers);
   let mut result = json!({

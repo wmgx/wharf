@@ -2489,7 +2489,7 @@ mod tests {
     let mut spec: ServiceSpec =
       serde_json::from_value(legacy.clone()).unwrap();
     assert_eq!(serde_json::to_value(&spec).unwrap(), legacy);
-    let render = |spec| {
+    let render = |spec: &ServiceSpec| {
       service_compose("a", spec, &BTreeMap::new(), &[], None)
         .unwrap()
         .0

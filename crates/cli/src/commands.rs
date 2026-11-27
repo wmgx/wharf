@@ -321,7 +321,7 @@ async fn dispatch(
           opts: build,
           ..Default::default()
         }),
-        ops,
+        ops: Box::new(ops),
         apply,
       };
       service(c, cmd, j).await

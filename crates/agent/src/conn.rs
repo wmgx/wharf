@@ -513,10 +513,7 @@ async fn session(
             let data = data.clone().unwrap();
             let cancel = cancel.clone();
             Some(Arc::new(move |line| {
-              if data
-                .try_send(AgentMsg::Progress { id, line })
-                .is_err()
-              {
+              if data.try_send(line).is_err() {
                 cancel.cancel();
               }
             }) as crate::exec::Progress)
@@ -556,7 +553,6 @@ async fn session(
                 &job,
                 &ctx,
                 input,
-                id,
                 data.as_deref().unwrap(),
               )
               .await

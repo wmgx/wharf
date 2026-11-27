@@ -1119,7 +1119,7 @@ pub enum ServiceCmd {
     #[command(flatten)]
     build: Box<BuildArgs>,
     #[command(flatten)]
-    ops: DeployOps,
+    ops: Box<DeployOps>,
     #[command(flatten)]
     apply: ApplyFlags,
   },
