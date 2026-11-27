@@ -312,11 +312,11 @@ export interface Applied {
 }
 
 export interface ApplyRequest {
-  plan_id: string;
   /**
    * 确认高风险项的地址。
    */
   confirm?: string[];
+  plan_id: string;
   skip_snapshot?: boolean;
 }
 
@@ -674,8 +674,8 @@ export interface CoreSnapshotsView {
   max_count: number;
   max_total_bytes: number;
   min_free_after_bytes: number;
-  snapshots: DbSnapshotInfo[];
   restore_hint: string;
+  snapshots: DbSnapshotInfo[];
 }
 
 export interface CreatedToken {
@@ -750,17 +750,17 @@ export interface DataView {
 }
 
 export interface DbSnapshotInfo {
-  id: string;
-  created_at: string;
-  trigger: string;
-  reason: string;
-  plan_id?: string;
   addresses?: string[];
   build: string;
-  schema_version: number;
-  size_bytes: number;
-  sha256: string;
+  created_at: string;
+  id: string;
   key_fingerprint: string;
+  plan_id?: string | null;
+  reason: string;
+  schema_version: number;
+  sha256: string;
+  size_bytes: number;
+  trigger: string;
 }
 
 export interface DeploymentView {
@@ -2141,14 +2141,14 @@ export interface ResolvedImage {
  */
 export interface RestoreRequest {
   /**
-   * 快照 id，或 `latest`。
-   */
-  snapshot: string;
-  /**
    * 必须是 `service/<名称>`：恢复会覆盖现有数据。
    */
   confirm: string;
   skip_snapshot?: boolean;
+  /**
+   * 快照 id，或 `latest`。
+   */
+  snapshot: string;
 }
 
 export interface RiskRow {
