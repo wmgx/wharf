@@ -322,3 +322,213 @@ pub async fn restart_source(
     }
   }
 }
+
+#[cfg(test)]
+pub(crate) mod tests {
+  use super::*;
+  use serde_json::json;
+  use wharf_api_types::spec::{PrivateAddr, PrivateNetwork};
+
+  pub(crate) async fn seed_service(stopped: bool) -> Arc<AppState> {
+    let state = crate::rules::tests::test_state();
+    state.db.call(move |c| {
+      for server in ["s1", "s2"] {
+        crate::db::apply_write(c, &crate::db::Write::Upsert {
+          kind: "server".into(), name: server.into(), spec: json!({}), meta: json!({}),
+        })?;
+      }
+      crate::db::apply_write(c, &crate::db::Write::Upsert {
+        kind: "service".into(), name: "notes".into(),
+        spec: json!({"server": "s2", "source": {"image": "fixture:1"},
+          "stopped": stopped, "volumes": [{"name": "data", "target": "/data"}]}),
+        meta: json!({}),
+      })
+    }).await.unwrap();
+    state
+  }
+
+  pub(crate) async fn seed_migration(
+    state: &AppState,
+    phase: &'static str,
+    source_stopped: bool,
+  ) {
+    state.db.call(move |c| {
+      let instance = &crate::db::service_instances(c)?["service/notes"];
+      let payload = json!({"service": "notes", "from": "s1", "to": "s2",
+        "instance_id": instance, "has_managed_data": true, "source_stopped": source_stopped});
+      c.execute("INSERT INTO pending_steps (kind,target_key,run_id,instance_id,phase,payload,updated_at)
+        VALUES ('migrate','notes','r1',?1,?2,?3,0)",
+        rusqlite::params![instance, phase, payload.to_string()]).map_err(crate::db::sql_err)?;
+      Ok(())
+    }).await.unwrap();
+  }
+
+  fn migration_net() -> Net {
+    Net {
+      private: [("s1", "100.64.0.1"), ("s2", "100.64.0.2")]
+        .into_iter()
+        .map(|(s, ip)| {
+          (
+            s.into(),
+            PrivateAddr {
+              ip: ip.into(),
+              network: PrivateNetwork::Tailscale,
+            },
+          )
+        })
+        .collect(),
+      ..Net::default()
+    }
+  }
+
+  fn mock_receiver(state: &AppState) {
+    state.hub.mock_safe_migrate_agent("s2", |op, progress| {
+      let AgentOp::SyncServe(job) = op else {
+        panic!("应启动接收端")
+      };
+      assert!(job.preserve_existing);
+      progress.unwrap()(format!("{SYNC_READY}1000"));
+      None
+    });
+  }
+
+  #[tokio::test]
+  async fn volume_sync_sends_live_then_final_pass() {
+    let state = seed_service(false).await;
+    seed_migration(&state, "pending", false).await;
+    mock_receiver(&state);
+    let mut expected = [SyncPass::Live, SyncPass::Final].into_iter();
+    let mut stopped = false;
+    state.hub.mock_safe_migrate_agent("s1", move |op, _| {
+      Some(Ok(match op {
+        AgentOp::SyncPush(job) => {
+          assert_eq!(Some(job.pass), expected.next());
+          assert_eq!(stopped, job.pass == SyncPass::Final);
+          json!({"synced": true})
+        }
+        AgentOp::ProjectStop { .. } => {
+          stopped = true;
+          json!(true)
+        }
+        _ => panic!("意外请求"),
+      }))
+    });
+    volume_sync(
+      &state,
+      &migration_net(),
+      "notes",
+      ("s1", "s2"),
+      true,
+      Arc::new(|_| {}),
+      &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    state
+      .db
+      .call(|c| {
+        assert_eq!(
+          pending::load(c)?.migrations["notes"].phase,
+          MigratePhase::Synced
+        );
+        assert_eq!(
+          c.query_row("SELECT count(*) FROM cleanups", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+          0
+        );
+        Ok(())
+      })
+      .await
+      .unwrap();
+  }
+
+  #[tokio::test]
+  async fn stop_failure_restarts_source() {
+    let state = seed_service(false).await;
+    seed_migration(&state, "pending", false).await;
+    mock_receiver(&state);
+    let (sent, mut received) = oneshot::channel();
+    let mut sent = Some(sent);
+    state.hub.mock_safe_migrate_agent("s1", move |op, _| {
+      Some(match op {
+        AgentOp::SyncPush(job) if job.pass == SyncPass::Live => {
+          Ok(json!({"synced": true}))
+        }
+        AgentOp::ProjectStop { .. } => {
+          Err(ApiError::internal("无法停机"))
+        }
+        AgentOp::ProjectStart { .. } => {
+          sent.take().unwrap().send(()).unwrap();
+          Ok(json!(true))
+        }
+        _ => panic!("意外请求"),
+      })
+    });
+    assert!(
+      volume_sync(
+        &state,
+        &migration_net(),
+        "notes",
+        ("s1", "s2"),
+        true,
+        Arc::new(|_| {}),
+        &CancellationToken::new()
+      )
+      .await
+      .is_err()
+    );
+    received.try_recv().unwrap();
+    state
+      .db
+      .call(|c| {
+        assert!(
+          !pending::load(c)?.migrations["notes"]
+            .payload
+            .source_stopped
+        );
+        Ok(())
+      })
+      .await
+      .unwrap();
+  }
+
+  #[tokio::test]
+  async fn volume_sync_fails_when_source_dir_missing_and_does_not_schedule_cleanup()
+   {
+    let state = seed_service(false).await;
+    seed_migration(&state, "pending", false).await;
+    mock_receiver(&state);
+    state.hub.mock_safe_migrate_agent("s1", |op, _| {
+      assert!(
+        matches!(op, AgentOp::SyncPush(p) if p.pass == SyncPass::Live)
+      );
+      Some(Err(ApiError::not_found("源目录不存在")))
+    });
+    let error = volume_sync(
+      &state,
+      &migration_net(),
+      "notes",
+      ("s1", "s2"),
+      true,
+      Arc::new(|_| {}),
+      &CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::NotFound);
+    state
+      .db
+      .call(|c| {
+        assert_eq!(
+          c.query_row("SELECT count(*) FROM cleanups", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+          0
+        );
+        Ok(())
+      })
+      .await
+      .unwrap();
+  }
+}

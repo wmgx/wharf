@@ -94,6 +94,8 @@ pub enum Step {
   EnsureDirs {
     server: String,
     dirs: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    after_sync: bool,
   },
   /// 迁移数据：先在服务运行时同步一遍，停掉旧服务器上的容器，再增量同步。
   VolumeSync {
@@ -239,7 +241,13 @@ impl Step {
       Self::DockerProxy { .. } => 1,
       Self::Baseline { .. } => 1,
       Self::Egress { .. } => 1,
-      Self::EnsureDirs { .. } => 1,
+      Self::EnsureDirs { after_sync, .. } => {
+        if *after_sync {
+          2
+        } else {
+          1
+        }
+      }
       Self::VolumeSync { .. } => 2,
       Self::ServiceUp { .. }
       | Self::EdgeDeploy { .. }
@@ -1179,6 +1187,17 @@ fn service_items(
           && m.payload.from == *server
           && m.payload.source_stopped
       });
+    if let Some(from) = moved {
+      let synced =
+        snap.pending.migrations.get(name).is_some_and(|m| {
+          m.phase == crate::pending::MigratePhase::Synced
+            && m.payload.to == *server
+        });
+      if !synced {
+        move_items(b, current, name, from, server, net);
+      }
+    }
+
     // 数据卷：新增的目录。迁移时新机器上要建全部目录。
     let old_dirs: BTreeSet<String> = current
       .services
@@ -1216,19 +1235,9 @@ fn service_items(
         Step::EnsureDirs {
           server: server.clone(),
           dirs: new_dirs,
+          after_sync: moved.is_some(),
         },
       );
-    }
-
-    if let Some(from) = moved {
-      let synced =
-        snap.pending.migrations.get(name).is_some_and(|m| {
-          m.phase == crate::pending::MigratePhase::Synced
-            && m.payload.to == *server
-        });
-      if !synced {
-        move_items(b, current, name, from, server, net);
-      }
     }
 
     let (_, hash) = snapshot::service_resolved(
@@ -3118,6 +3127,148 @@ mod tests {
       b.items.iter().map(|i| i.address.as_str()).collect();
     assert_eq!(found, ["service/half"]);
     assert!(b.items[0].needs_confirm());
+  }
+
+  #[tokio::test]
+  async fn move_plan_warns_and_requires_confirm_for_image_anonymous_volume()
+   {
+    let state = crate::migrate::tests::seed_service(false).await;
+    let mut snap = snapshot::load(&state.db).await.unwrap();
+    snap
+      .world
+      .services
+      .get_mut("notes")
+      .unwrap()
+      .spec
+      .volumes
+      .clear();
+    let mut b = Builder::default();
+    b.migration_mounts.insert(
+      "notes".into(),
+      vec![wharf_api_types::agent::ContainerMount {
+        container: "notes-db-1".into(),
+        service: "db".into(),
+        kind: "volume".into(),
+        source: "a".repeat(64),
+        target: "/var/lib/db".into(),
+      }],
+    );
+    move_items(
+      &mut b,
+      &snap.world,
+      "notes",
+      "s2",
+      "s1",
+      &Net::default(),
+    );
+    let p = finish_plan(
+      &snap,
+      &snap.world,
+      b,
+      vec![],
+      BTreeSet::new(),
+      None,
+    );
+    assert_eq!(p.plan.needs_confirm, ["service/notes"]);
+    assert!(p.plan.items[0].reason.contains("/var/lib/db"));
+  }
+
+  #[tokio::test]
+  async fn failed_docker_proxy_egress_baseline_and_dirs_replanned() {
+    let state = crate::migrate::tests::seed_service(false).await;
+    let mut snap = snapshot::load(&state.db).await.unwrap();
+    snap
+      .world
+      .servers
+      .get_mut("s2")
+      .unwrap()
+      .settings
+      .baseline
+      .timezone = Some("Etc/UTC".into());
+    for pending in [
+      &mut snap.pending.docker_proxies,
+      &mut snap.pending.egresses,
+      &mut snap.pending.baselines,
+    ] {
+      pending.insert("s2".into());
+    }
+    snap.pending.ensure_dirs.insert(
+      "notes@s2".into(),
+      crate::pending::EnsureDirsPayload {
+        service: "notes".into(),
+        server: "s2".into(),
+        dirs: vec!["/srv/notes/data".into()],
+        instance_id: None,
+      },
+    );
+    let world = &snap.world;
+    let mut b = Builder::default();
+    egress_items(&mut b, &snap, world, world);
+    baseline_items(&mut b, &snap, world, world);
+    docker_proxy_items(&mut b, &snap, world, world);
+    service_items(
+      &mut b,
+      &snap,
+      world,
+      world,
+      &Net::default(),
+      &StatusMap::new(),
+      &[],
+    )
+    .unwrap();
+    assert!(
+      b.steps
+        .iter()
+        .any(|s| matches!(s.step, Step::Egress { .. }))
+    );
+    assert!(
+      b.steps
+        .iter()
+        .any(|s| matches!(s.step, Step::DockerProxy { .. }))
+    );
+    assert!(
+      b.steps
+        .iter()
+        .any(|s| matches!(s.step, Step::Baseline { .. }))
+    );
+    assert!(
+      b.steps
+        .iter()
+        .any(|s| matches!(s.step, Step::EnsureDirs { .. }))
+    );
+  }
+
+  #[tokio::test]
+  async fn abort_migration_skips_reverse_sync_and_cleans_target() {
+    let state = crate::migrate::tests::seed_service(false).await;
+    crate::migrate::tests::seed_migration(&state, "synced", true)
+      .await;
+    let snap = snapshot::load(&state.db).await.unwrap();
+    let mut desired = snap.world.clone();
+    desired.services.get_mut("notes").unwrap().spec.server =
+      "s1".into();
+    let mut b = Builder::default();
+    service_items(
+      &mut b,
+      &snap,
+      &snap.world,
+      &desired,
+      &Net::default(),
+      &StatusMap::new(),
+      &[],
+    )
+    .unwrap();
+    assert!(
+      !b.steps
+        .iter()
+        .any(|s| matches!(s.step, Step::VolumeSync { .. }))
+    );
+    assert!(b.steps.iter().any(|s| matches!(&s.step, Step::ServiceDown { server, purge_data: false, .. } if server == "s2")));
+    assert!(
+      b.steps
+        .iter()
+        .any(|s| matches!(s.step, Step::ServiceUp { .. }))
+    );
   }
 
   #[tokio::test]

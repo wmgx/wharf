@@ -279,7 +279,7 @@ pub fn stage(
       continue;
     }
     match &step.step {
-      Step::EnsureDirs { server, dirs } => {
+      Step::EnsureDirs { server, dirs, .. } => {
         if let Some(service) = step.items.iter().find_map(|id| {
           plan
             .items
@@ -348,7 +348,7 @@ pub async fn finish_step(
     let target = target.to_string();
     return state.db.call(move |c| clear(c, kind, &target)).await;
   }
-  if let Step::EnsureDirs { server, dirs } = step {
+  if let Step::EnsureDirs { server, dirs, .. } = step {
     let (server, dirs) = (server.clone(), dirs.clone());
     state
       .db

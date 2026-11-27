@@ -253,3 +253,11 @@ mod tests {
     assert_eq!(super::encode("数据.db"), "%E6%95%B0%E6%8D%AE.db");
   }
 }
+
+#[tokio::test]
+async fn files_server_of_uses_migration_source_when_interrupted() {
+  let state = crate::migrate::tests::seed_service(false).await;
+  crate::migrate::tests::seed_migration(&state, "pending", false)
+    .await;
+  assert_eq!(server_of(&state, "notes").await.unwrap(), "s1");
+}

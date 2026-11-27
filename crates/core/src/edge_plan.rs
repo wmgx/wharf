@@ -463,6 +463,31 @@ mod tests {
   }
 
   #[tokio::test]
+  async fn skipped_initial_edge_deploy_is_replanned_from_pending_steps()
+   {
+    let mut snap = Snapshot::default();
+    snap.world.edge_apps.insert(
+      "site".into(),
+      crate::world::EdgeRow {
+        spec: serde_json::from_value(
+          json!({"account": "cf", "kind": "worker",
+        "source": {"upload": "abc", "script": "index.js"}}),
+        )
+        .unwrap(),
+        version: 1,
+      },
+    );
+    snap.pending.edge_deploys.insert("site".into());
+    let mut b = Builder::default();
+    deploy_items(&mut b, &snap, &snap.world, &snap.world)
+      .await
+      .unwrap();
+    assert_eq!(b.items.len(), 1);
+    assert_eq!(b.items[0].address, "edge/site");
+    assert!(b.items[0].reason.contains("上次发布没有完成"));
+  }
+
+  #[tokio::test]
   async fn redeploys_after_unfinished_deploy() {
     let spec: EdgeAppSpec = serde_json::from_value(json!({
       "account": "cf",

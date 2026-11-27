@@ -31,6 +31,7 @@ fn old_hello_has_no_host_shell_capability() {
     backup_isolation,
     safe_delete,
     safe_adopt,
+    safe_migrate,
     key_rotation,
     ..
   } = hello
@@ -45,6 +46,7 @@ fn old_hello_has_no_host_shell_capability() {
   assert!(!backup_isolation);
   assert!(!safe_delete);
   assert!(!safe_adopt);
+  assert!(!safe_migrate);
   assert!(!key_rotation);
 }
 
@@ -124,13 +126,28 @@ impl Hub {
     lock(&self.conns).get_mut(server).unwrap().safe_delete = true;
   }
 
+  pub(crate) fn mock_safe_migrate_agent(
+    &self,
+    server: &str,
+    handle: impl FnMut(
+      AgentOp,
+      Option<ProgressFn>,
+    ) -> Option<Result<Value, ApiError>>
+    + Send
+    + 'static,
+  ) {
+    self
+      .mock_agent_options(server, false, false, false, false, handle);
+    lock(&self.conns).get_mut(server).unwrap().safe_migrate = true;
+  }
+
   pub(crate) fn mock_agent_with_backup(
     &self,
     server: &str,
     gateway_extra_files: bool,
     backup_isolation: bool,
     core_probe: bool,
-    handle: impl FnMut(AgentOp) -> Result<Value, ApiError>
+    mut handle: impl FnMut(AgentOp) -> Result<Value, ApiError>
     + Send
     + 'static,
   ) {
@@ -140,19 +157,25 @@ impl Hub {
       backup_isolation,
       core_probe,
       false,
-      handle,
+      move |op, _| Some(handle(op)),
     );
   }
 
   pub(crate) fn mock_rotation_agent(
     &self,
     server: &str,
-    handle: impl FnMut(AgentOp) -> Result<Value, ApiError>
+    mut handle: impl FnMut(AgentOp) -> Result<Value, ApiError>
     + Send
     + 'static,
   ) {
-    self
-      .mock_agent_options(server, false, false, false, true, handle);
+    self.mock_agent_options(
+      server,
+      false,
+      false,
+      false,
+      true,
+      move |op, _| Some(handle(op)),
+    );
   }
 
   fn mock_agent_options(
@@ -162,7 +185,10 @@ impl Hub {
     backup_isolation: bool,
     core_probe: bool,
     key_rotation: bool,
-    mut handle: impl FnMut(AgentOp) -> Result<Value, ApiError>
+    mut handle: impl FnMut(
+      AgentOp,
+      Option<ProgressFn>,
+    ) -> Option<Result<Value, ApiError>>
     + Send
     + 'static,
   ) {
@@ -212,10 +238,14 @@ impl Hub {
         let Some(msg) = msg else {
           break;
         };
-        if let CoreMsg::Request { id, op, .. } = msg
-          && let Some(p) = lock(&pending).remove(&id)
-        {
-          let _ = p.done.send(handle(op));
+        if let CoreMsg::Request { id, op, .. } = msg {
+          let mut pending = lock(&pending);
+          if let Some(p) = pending.get(&id)
+            && let Some(result) = handle(op, p.progress.clone())
+            && let Some(p) = pending.remove(&id)
+          {
+            let _ = p.done.send(result);
+          }
         }
       }
     });

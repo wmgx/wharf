@@ -52,7 +52,7 @@ pub async fn target(
   let service = name.clone();
   let instance_id = current.instance_id.clone();
   let requested = q.to;
-  let rows: Vec<Row> = s
+  let (rows, unstarted): (Vec<Row>, Option<Row>) = s
     .db
     .call(move |c| {
       let mut stmt = c
@@ -92,18 +92,32 @@ pub async fn target(
         return Err(ApiError::invalid(format!("部署 #{id} 属于已删除的旧服务实例，不能回滚到它"))
           .with_hint(format!("运行 {list} 查看当前服务的可回滚版本")).suggest(list));
       }
-      Ok(rows)
+      let unstarted = if requested.is_none() {
+        c.query_row(
+          "SELECT id, hash, spec, images, created_at, commit_sha FROM deployments
+           WHERE service = ?1 AND instance_id = ?2 AND started = 0
+             AND id = (SELECT MAX(id) FROM deployments WHERE service = ?1 AND instance_id = ?2)",
+          params![service, instance_id],
+          |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+        ).optional().map_err(sql_err)?
+      } else {
+        None
+      };
+      Ok((rows, unstarted))
     })
     .await?;
-  let row = pick(&rows, q.to).ok_or_else(|| match q.to {
-    Some(id) => ApiError::not_found(format!(
-      "服务 {name} 没有 id 为 {id} 的部署记录"
-    ))
-    .suggest(format!("wharf service deployments {name}")),
-    None => {
-      ApiError::invalid(format!("服务 {name} 没有可以回滚的旧版本"))
-    }
-  })?;
+  let row =
+    pick(&rows, q.to, unstarted.as_ref()).ok_or_else(|| {
+      match q.to {
+        Some(id) => ApiError::not_found(format!(
+          "服务 {name} 没有 id 为 {id} 的部署记录"
+        ))
+        .suggest(format!("wharf service deployments {name}")),
+        None => ApiError::invalid(format!(
+          "服务 {name} 没有可以回滚的旧版本"
+        )),
+      }
+    })?;
   let (id, _, spec, images, created, commit) = row;
   let spec: ServiceSpec = match spec {
     Some(spec) => serde_json::from_str(spec).map_err(json_err)?,
@@ -136,11 +150,15 @@ pub async fn target(
 }
 
 /// 指定了 id 就用它；否则跳过和最新一次相同的版本，取再往前的第一个。
-fn pick(rows: &[Row], to: Option<i64>) -> Option<&Row> {
+fn pick<'a>(
+  rows: &'a [Row],
+  to: Option<i64>,
+  unstarted: Option<&Row>,
+) -> Option<&'a Row> {
   match to {
     Some(id) => rows.iter().find(|r| r.0 == id),
     None => {
-      let latest = version(rows.first()?);
+      let latest = version(unstarted.or_else(|| rows.first())?);
       rows.iter().find(|r| version(r) != latest)
     }
   }
@@ -253,12 +271,23 @@ mod tests {
   }
 
   #[test]
+  fn rollback_skips_unstarted_deployments() {
+    let rows = [row(1, "v1")];
+    let unstarted = row(2, "v2");
+    assert_eq!(
+      pick(&rows, None, Some(&unstarted)).map(|r| r.0),
+      Some(1)
+    );
+    assert!(pick(&rows, Some(2), None).is_none());
+  }
+
+  #[test]
   fn pick_skips_versions_equal_to_latest() {
     let rows =
       vec![row(5, "b"), row(4, "b"), row(3, "a"), row(2, "c")];
-    assert_eq!(pick(&rows, None).map(|r| r.0), Some(3));
-    assert_eq!(pick(&rows, Some(2)).map(|r| r.0), Some(2));
-    assert!(pick(&[row(1, "a")], None).is_none());
+    assert_eq!(pick(&rows, None, None).map(|r| r.0), Some(3));
+    assert_eq!(pick(&rows, Some(2), None).map(|r| r.0), Some(2));
+    assert!(pick(&[row(1, "a")], None, None).is_none());
   }
 
   #[test]
@@ -270,7 +299,7 @@ mod tests {
       r
     };
     let rows = vec![with(3, "app@sha256:b"), with(2, "app@sha256:a")];
-    assert_eq!(pick(&rows, None).map(|r| r.0), Some(2));
+    assert_eq!(pick(&rows, None, None).map(|r| r.0), Some(2));
   }
 }
 

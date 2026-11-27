@@ -248,6 +248,41 @@ mod tests {
   use wharf_api_types::plan::RunStatus;
 
   #[tokio::test]
+  async fn list_runs_filters_failed_and_keeps_actor() {
+    let state = crate::rules::tests::test_state();
+    let auth = crate::host_access::tests::auth(
+      [wharf_api_types::view::Perm::Read],
+      false,
+    );
+    for (id, status, sql_status, at) in [
+      ("r1", RunStatus::Failed, "failed", 1),
+      ("r2", RunStatus::Succeeded, "succeeded", 2),
+    ] {
+      let run = Run {
+        run_id: id.into(),
+        plan_id: String::new(),
+        status,
+        actor: Some("令牌 fixture".into()),
+        retry_of: None,
+        started_at: chrono::Utc::now(),
+        finished_at: None,
+        steps: vec![],
+      };
+      let body = encode(&run, None).unwrap();
+      state.db.call(move |c| {
+        c.execute("INSERT INTO runs (id,plan_id,status,body,started_at) VALUES (?1,'',?2,?3,?4)",
+          params![id, sql_status, body, at]).map_err(sql_err)?;
+        Ok(())
+      }).await.unwrap();
+    }
+    let found = list_runs(&state, &auth, 1, Some(RunStatus::Failed))
+      .await
+      .unwrap();
+    assert_eq!(found[0].run_id, "r1");
+    assert_eq!(found[0].actor.as_deref(), Some("令牌 fixture"));
+  }
+
+  #[tokio::test]
   async fn scoped_token_cannot_view_or_cancel_foreign_run() {
     let state = AppState {
       db: crate::db::Db::memory(),
@@ -308,7 +343,7 @@ mod tests {
       }
     }
     assert_eq!(
-      list_runs(&state, &auth, 20).await.unwrap()[0].run_id,
+      list_runs(&state, &auth, 20, None).await.unwrap()[0].run_id,
       "own"
     );
   }

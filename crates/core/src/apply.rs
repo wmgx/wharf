@@ -1042,7 +1042,7 @@ pub(crate) async fn run_step(
   let world = &snap.world;
   let net = snap.net(world);
   match step {
-    Step::EnsureDirs { server, dirs } => {
+    Step::EnsureDirs { server, dirs, .. } => {
       state
         .hub
         .call::<serde_json::Value>(
@@ -2450,6 +2450,124 @@ mod tests {
     )
     .await;
     received.await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn migration_service_up_failure_restarts_source_and_resets_phase()
+   {
+    use crate::migrate::tests::{seed_migration, seed_service};
+    let state = seed_service(false).await;
+    seed_migration(&state, "synced", true).await;
+    state.hub.mock_agent("s2", false, |op| {
+      assert!(matches!(op, AgentOp::ProjectUp(up) if !up.no_start));
+      Ok(serde_json::json!({"containers": [{"service": "notes", "name": "notes-1", "state": "exited"}],
+        "images": [{"image": "fixture:1", "id": "i1", "digest": "fixture@sha256:abcd"}]}))
+    });
+    let (started, mut observed) = tokio::sync::oneshot::channel();
+    let mut started = Some(started);
+    state.hub.mock_agent("s1", false, move |op| {
+      assert!(matches!(op, AgentOp::ProjectStart { .. }));
+      started.take().unwrap().send(()).unwrap();
+      Ok(serde_json::json!(true))
+    });
+    let step = Step::ServiceUp {
+      service: "notes".into(),
+      instance_id: None,
+      expect: None,
+    };
+    assert!(
+      run_step(
+        &state,
+        "r1",
+        &step,
+        Arc::new(|_| {}),
+        &CancellationToken::new()
+      )
+      .await
+      .is_err()
+    );
+    observed.try_recv().unwrap();
+    let snap = snapshot::load(&state.db).await.unwrap();
+    assert_eq!(
+      snap.pending.migrations["notes"].phase,
+      crate::pending::MigratePhase::Pending
+    );
+    assert!(!snap.pending.migrations["notes"].payload.source_stopped);
+    assert!(
+      snap.deployed.is_empty()
+        && snap.world.services["notes"].pins.is_empty()
+    );
+    state
+      .db
+      .call(|c| {
+        assert_eq!(
+          c.query_row("SELECT count(*) FROM cleanups", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+          0
+        );
+        Ok(())
+      })
+      .await
+      .unwrap();
+  }
+
+  #[tokio::test]
+  async fn stopped_service_update_sends_no_start_and_records_unstarted()
+   {
+    let state = crate::migrate::tests::seed_service(true).await;
+    let step = Step::ServiceUp {
+      service: "notes".into(),
+      instance_id: None,
+      expect: None,
+    };
+    state.hub.mock_agent("s2", false, |_| {
+      panic!("不能对旧 agent 部署停机服务")
+    });
+    let cancel = CancellationToken::new();
+    let result =
+      run_step(&state, "r1", &step, Arc::new(|_| {}), &cancel).await;
+    assert_eq!(result.unwrap_err().code, ErrorCode::Conflict);
+    state.hub.mock_safe_migrate_agent("s2", |op, _| {
+      assert!(matches!(op, AgentOp::ProjectUp(up) if up.no_start && !up.rollback && up.trial.is_none()));
+      Some(Ok(serde_json::json!({"containers": [], "images": []})))
+    });
+    run_step(&state, "r2", &step, Arc::new(|_| {}), &cancel)
+      .await
+      .unwrap();
+    state
+      .db
+      .call(|c| {
+        assert!(
+          !c.query_row("SELECT started FROM deployments", [], |r| {
+            r.get::<_, bool>(0)
+          })
+          .unwrap()
+        );
+        Ok(())
+      })
+      .await
+      .unwrap();
+  }
+
+  #[tokio::test]
+  async fn rebuild_rejected_while_migration_pending() {
+    let state = crate::migrate::tests::seed_service(false).await;
+    crate::migrate::tests::seed_migration(&state, "pending", false)
+      .await;
+    let step = Step::Rebuild {
+      service: "notes".into(),
+    };
+    let error = run_step(
+      &state,
+      "r1",
+      &step,
+      Arc::new(|_| {}),
+      &CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::Conflict);
   }
 
   #[test]

@@ -2164,6 +2164,31 @@ pub fn interrupt_service_ops(c: &Connection) -> Result<(), ApiError> {
 #[cfg(test)]
 mod tests {
   #[test]
+  fn migration_moves_pending_deletes_into_pending_steps() {
+    let c = Connection::open_in_memory().unwrap();
+    for sql in MIGRATIONS
+      .iter()
+      .take_while(|&&sql| sql != PENDING_STEPS_MIGRATION)
+    {
+      c.execute_batch(sql).unwrap();
+    }
+    c.execute_batch("INSERT INTO pending_deletes VALUES ('notes', 's1', 'svc_old', 1, 1, 1);
+      INSERT INTO deployments (service,server,run_id,hash,compose,images,created_at)
+      VALUES ('notes','s1','r1','v1','','[]',1);").unwrap();
+    c.execute_batch(PENDING_STEPS_MIGRATION).unwrap();
+    assert!(c.prepare("SELECT * FROM pending_deletes").is_err());
+    let pending = crate::pending::load(&c).unwrap();
+    let deletion = &pending.service_deletes[0];
+    assert_eq!(deletion.instance_id, "svc_old");
+    assert!(deletion.purge_data && deletion.has_relative_mounts);
+    assert!(
+      c.query_row("SELECT started FROM deployments", [], |r| r
+        .get::<_, bool>(0))
+        .unwrap()
+    );
+  }
+
+  #[test]
   fn instance_id_migration_splits_pre_and_post_recreate_deployments()
   {
     let c = Connection::open_in_memory().unwrap();
