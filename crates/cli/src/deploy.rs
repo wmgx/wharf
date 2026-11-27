@@ -440,3 +440,95 @@ pub(crate) fn parse_compose(
   merge(&mut value)?;
   Ok(value)
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn packed_preview_reads_udp_dockerfile_and_checks_large_lock_by_metadata()
+   {
+    use wharf_api_types::build::SourceTree;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    std::fs::write(
+      root.join("Dockerfile"),
+      "FROM alpine\nexpose\t53/UDP",
+    )
+    .unwrap();
+    std::fs::write(root.join(".dockerignore"), "Dockerfile\n")
+      .unwrap();
+    std::fs::write(
+      root.join("package-lock.json"),
+      vec![0xff; 1_200_000],
+    )
+    .unwrap();
+    let files =
+      wharf_pack::list_files_with(&root, &["Dockerfile".into()])
+        .unwrap();
+    let tree = PackedTree {
+      root: &root,
+      allowed: files.into_iter().collect(),
+    };
+    assert!(tree.exists("package-lock.json"));
+    assert!(tree.read("package-lock.json").is_none());
+    let p =
+      preview("api", &tree, &BuildSource::default(), None, false)
+        .unwrap();
+    assert_eq!(
+      p,
+      ExposedPort {
+        port: 53,
+        udp: true
+      }
+    );
+  }
+
+  #[test]
+  fn switch_from_dockerfile_to_template() {
+    let mut b = BuildSource {
+      dockerfile: Some("Dockerfile.prod".into()),
+      ..Default::default()
+    };
+    apply_opts(
+      &mut b,
+      &BuildOpts {
+        template: Some("node".into()),
+        ..Default::default()
+      },
+    )
+    .unwrap();
+    assert!(b.dockerfile.is_none());
+    assert_eq!(b.template.as_deref(), Some("node"));
+  }
+
+  #[test]
+  fn git_options_are_inherited_only_for_the_same_repo() {
+    let old = merge_git(
+      None,
+      "https://example.test/team/app",
+      Some("prod".into()),
+      Some("git-test".into()),
+      Some("ci".into()),
+    );
+    assert_eq!(
+      merge_git(
+        Some(&old),
+        "https://example.test/team/app/",
+        None,
+        None,
+        None
+      ),
+      old
+    );
+    let other = merge_git(
+      Some(&old),
+      "https://example.test/team/other",
+      None,
+      None,
+      None,
+    );
+    assert_eq!(other.reference, "main");
+    assert!(other.token_secret.is_none() && other.user.is_none());
+  }
+}

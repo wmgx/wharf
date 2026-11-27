@@ -557,6 +557,7 @@ fn node_start(
   if let Some(main) =
     pkg["main"].as_str().map(|s| s.trim_start_matches("./"))
     && !main.is_empty()
+    && !main.starts_with('-')
     && main.split('/').all(|part| !part.is_empty() && part != "..")
     && main
       .bytes()
@@ -839,6 +840,84 @@ mod tests {
       template: None,
       install: None,
     }
+  }
+
+  #[test]
+  fn dockerfile_resolution_prefers_explicit_template() {
+    let tree = Mem(BTreeMap::from([
+      ("Dockerfile", "FROM alpine"),
+      ("index.html", ""),
+    ]));
+    let built = resolve_dockerfile(
+      &tree,
+      None,
+      Some("Dockerfile"),
+      &opts(None),
+    )
+    .unwrap();
+    assert!(matches!(built, ResolvedDockerfile::File { .. }));
+    let o = Options {
+      template: Some("static"),
+      ..opts(None)
+    };
+    assert!(matches!(
+      resolve_dockerfile(&tree, None, Some("Dockerfile"), &o)
+        .unwrap(),
+      ResolvedDockerfile::Template(_)
+    ));
+  }
+
+  #[test]
+  fn node_main_can_be_generated_by_build() {
+    let tree = Mem(BTreeMap::from([(
+      "package.json",
+      r#"{"main":"dist/server.js","scripts":{"build":"tsc"}}"#,
+    )]));
+    let g = generate(&tree, &opts(None)).unwrap();
+    assert!(
+      g.dockerfile
+        .contains("RUN npm run build\nRUN test -f 'dist/server.js'")
+    );
+    assert!(
+      g.dockerfile.contains(r#"CMD ["node","dist/server.js"]"#)
+    );
+    let tree = Mem(BTreeMap::from([(
+      "package.json",
+      r#"{"main":"dist/server.js"}"#,
+    )]));
+    assert!(generate(&tree, &opts(None)).is_err());
+  }
+
+  #[test]
+  fn mixed_stack_uses_python_port_and_dependencies() {
+    let tree = Mem(BTreeMap::from([
+      ("package.json", r#"{"scripts":{"build":"vite build"}}"#),
+      (
+        "pyproject.toml",
+        "[project]\ndependencies = [\n  'fastapi', # 'uvicorn'\n]\n[project.optional-dependencies]\nextras = ['uvicorn']",
+      ),
+      ("main.py", "app = FastAPI()"),
+    ]));
+    let g = generate(&tree, &opts(None)).unwrap();
+    assert_eq!(g.default_port(), 8000);
+    assert_eq!(g.images, [NODE_BASE, PYTHON_BASE]);
+    assert!(g.dockerfile.contains(
+      "RUN pip install --no-cache-dir .\nRUN pip install uvicorn"
+    ));
+  }
+
+  #[test]
+  fn python_requirement_includes_need_source_and_package_names_match_exactly()
+   {
+    let tree = Mem(BTreeMap::from([
+      (
+        "requirements.txt",
+        "# uvicorn\nuvicorn-worker==1.0\n-r base.txt",
+      ),
+      ("main.py", "app = FastAPI()"),
+    ]));
+    let g = generate(&tree, &opts(None)).unwrap();
+    assert!(g.dockerfile.contains("COPY . .\nRUN pip install -r requirements.txt\nRUN pip install uvicorn"));
   }
 
   #[test]

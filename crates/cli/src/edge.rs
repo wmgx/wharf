@@ -652,13 +652,25 @@ async fn local_source(
   path: Option<&str>,
 ) -> CliResult<EdgeSource> {
   let root = match path {
-    Some(p) => dir.join(p),
+    Some(p) => dir.join(
+      wharf_api_types::symlink::check_relative_entry(Path::new(p))?,
+    ),
     None => dir.to_path_buf(),
   };
   if !root.is_dir() {
     return Err(
       ApiError::invalid(format!("目录 {} 不存在", root.display()))
         .into(),
+    );
+  }
+  if !root
+    .canonicalize()
+    .ok()
+    .zip(dir.canonicalize().ok())
+    .is_some_and(|(root, dir)| root.starts_with(dir))
+  {
+    return Err(
+      ApiError::invalid("构建子目录指向上传目录之外").into(),
     );
   }
   let wrangler =

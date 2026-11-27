@@ -1106,3 +1106,52 @@ fn should_skip_build_requires_matching_commit_label() {
   assert!(!should_skip_build(false, true, Some("bbb"), None));
   assert!(should_skip_build(false, true, Some("bbb"), Some("bbb")));
 }
+
+#[cfg(test)]
+mod build_v2_tests {
+  use super::*;
+
+  #[test]
+  fn filesystem_tree_detects_large_binary_lock_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+      tmp.path().join("package-lock.json"),
+      vec![0xff; 1_200_000],
+    )
+    .unwrap();
+    let tree = FsTree(tmp.path());
+    assert!(tree.exists("package-lock.json"));
+    assert!(tree.read("package-lock.json").is_none());
+  }
+
+  #[test]
+  fn git_fetch_scopes_credentials_and_fetches_submodules() {
+    let repo = "https://gitlab.com/team/project";
+    assert_eq!(
+      git_origin_scope(repo).as_deref(),
+      Some("https://gitlab.com/")
+    );
+    assert_eq!(git_auth_user(repo, None), "oauth2");
+    assert_eq!(git_auth_user(repo, Some("ci")), "ci");
+    assert!(GIT_AUTH.contains("http.$GIT_AUTH_SCOPE.extraHeader"));
+    assert!(GIT_AUTH.contains("protocol.file.allow=never"));
+    assert!(
+      CLONE_SCRIPT.contains("submodule update --init --recursive")
+    );
+    assert!(CLONE_SCRIPT.contains("cat-file -e"));
+    assert!(CLONE_SCRIPT.contains("find . -name .git -prune"));
+    assert!(
+      git_no_proxy(Some("https://mirror.example.test"))
+        .ends_with(",mirror.example.test")
+    );
+  }
+
+  #[test]
+  fn pruning_keeps_current_image_and_counts_image_ids() {
+    let rows = "e\t<none>:<none>\nd\tapp:b\nd\tapp:c\nc\t<none>:<none>\nb\t<none>:<none>\na\tapp:current\n";
+    assert_eq!(
+      select_stale_image_ids(rows, "app:current", 3),
+      ["c", "b"]
+    );
+  }
+}

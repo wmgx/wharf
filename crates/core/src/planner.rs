@@ -3284,6 +3284,85 @@ mod tests {
   }
 
   use super::*;
+
+  #[tokio::test]
+  async fn edge_plan_pins_commit_without_changing_configured_ref() {
+    let state = crate::rules::tests::test_state();
+    let sha = "0123456789012345678901234567890123456789";
+    state.hub.mock_agent("s1", false, move |op| {
+      let wharf_api_types::agent::AgentOp::ResolveCommit(job) = op else {
+        panic!("只应查询 commit");
+      };
+      assert!(matches!(job.fetch, wharf_api_types::agent::BuildFetch::Git { reference, .. } if reference == "prod"));
+      Ok(json!(sha))
+    });
+    let mut current = world();
+    let edge: EdgeAppSpec = serde_json::from_value(json!({
+      "account":"edge", "kind":"pages", "builder":"s1",
+      "source":{"git":{"repo":"https://example.test/site", "ref":"prod"}}
+    })).unwrap();
+    current.edge_apps.insert(
+      "site".into(),
+      crate::world::EdgeRow {
+        spec: edge,
+        version: 1,
+      },
+    );
+    let mut desired = current.clone();
+    desired
+      .edge_apps
+      .get_mut("site")
+      .unwrap()
+      .spec
+      .source
+      .as_mut()
+      .unwrap()
+      .build = Some("npm run build".into());
+    let snap = Snapshot {
+      world: current.clone(),
+      ..Default::default()
+    };
+    let mut b = Builder::default();
+    crate::edge_plan::edge_items(
+      &state, &mut b, &snap, &current, &desired,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+      b.items[0].after.as_ref().unwrap()["commit"],
+      &sha[..12]
+    );
+    assert!(
+      matches!(&b.steps[0].step, Step::EdgeDeploy { commit: Some(commit), .. } if commit == sha)
+    );
+    let git = desired.edge_apps["site"]
+      .spec
+      .source
+      .as_ref()
+      .unwrap()
+      .git
+      .as_ref()
+      .unwrap();
+    assert_eq!(git.reference, "prod");
+    let fetch = crate::build::code_fetch(
+      &state,
+      &BTreeMap::new(),
+      "边缘应用 site",
+      None,
+      Some(git),
+      Some(sha.into()),
+    )
+    .unwrap();
+    assert!(
+      matches!(fetch, wharf_api_types::agent::BuildFetch::Git { reference, fallback_ref: Some(fallback), .. } if reference == sha && fallback == "prod")
+    );
+    let old: Step = serde_json::from_value(
+      json!({"kind":"edge_deploy", "app":"site"}),
+    )
+    .unwrap();
+    assert!(matches!(old, Step::EdgeDeploy { commit: None, .. }));
+  }
+
   use crate::world::{RouteRow, ServerRow, ServiceRow};
   use wharf_api_types::{agent::ContainerInfo, spec::Limits};
 

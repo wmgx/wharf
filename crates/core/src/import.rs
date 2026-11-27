@@ -604,13 +604,13 @@ fn short_port(s: &str) -> Option<(u16, bool)> {
 fn port_specs(mut ports: Vec<(u16, bool)>) -> Vec<PortSpec> {
   ports.sort_unstable();
   ports.dedup();
-  let single = ports.len() == 1;
+  let single_tcp = ports.iter().filter(|(_, udp)| !udp).count() == 1;
   ports
     .into_iter()
     .map(|(port, udp)| PortSpec {
       name: if udp {
         format!("p{port}-udp")
-      } else if single {
+      } else if single_tcp {
         "http".into()
       } else {
         format!("p{port}")

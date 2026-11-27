@@ -1,4 +1,4 @@
-import { Unzip, UnzipInflate } from "fflate";
+import { strFromU8, Unzip, UnzipInflate } from "fflate";
 
 /**
  * 把上传的 zip 转成和 CLI 一样的代码包：tar.gz、按路径排序、时间和属主固定。
@@ -30,8 +30,21 @@ function readZipModes(bytes: Uint8Array): Map<string, number> {
   }
   if (end < Math.max(0, bytes.length - 65_557)) throw badZip();
   let offset = view.getUint32(end + 16, true);
-  const limit = offset + view.getUint32(end + 12, true);
-  if (limit > end || view.getUint32(end + 4, true) !== 0) throw badZip();
+  let size = view.getUint32(end + 12, true);
+  let total = view.getUint16(end + 10, true);
+  if (view.getUint32(end + 4, true) !== 0) throw badZip();
+  const locator = end - 20;
+  if (locator >= 0 && view.getUint32(locator, true) === 0x07064b50) {
+    const directory = Number(view.getBigUint64(locator + 8, true));
+    if (directory < 0 || directory + 56 > locator || view.getUint32(directory, true) !== 0x06064b50
+      || view.getUint32(directory + 16, true) !== 0 || view.getUint32(directory + 20, true) !== 0) throw badZip();
+    total = Number(view.getBigUint64(directory + 32, true));
+    size = Number(view.getBigUint64(directory + 40, true));
+    offset = Number(view.getBigUint64(directory + 48, true));
+  }
+  const limit = offset + size;
+  if (limit > end) throw badZip();
+  if (total > MAX_ENTRIES) throw new Error("zip 文件条目过多");
   const modes = new Map<string, number>();
   const decoder = new TextDecoder();
   let count = 0;
@@ -41,13 +54,14 @@ function readZipModes(bytes: Uint8Array): Map<string, number> {
     const nameEnd = offset + 46 + view.getUint16(offset + 28, true);
     const next = nameEnd + view.getUint16(offset + 30, true) + view.getUint16(offset + 32, true);
     if (next > limit) throw badZip();
-    const path = cleanPath(decoder.decode(bytes.subarray(offset + 46, nameEnd)));
+    const name = bytes.subarray(offset + 46, nameEnd);
+    const path = cleanPath(view.getUint16(offset + 8, true) & 0x800 ? decoder.decode(name) : strFromU8(name, true));
     if (modes.has(path)) throw new Error(`zip 路径重复：${path}`);
     const mode = view.getUint8(offset + 5) === 3 ? view.getUint16(offset + 40, true) : 0;
     modes.set(path, mode);
     offset = next;
   }
-  if (count !== view.getUint16(end + 10, true)) throw badZip();
+  if (count !== total) throw badZip();
   return modes;
 }
 

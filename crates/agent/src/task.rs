@@ -1043,6 +1043,25 @@ mod tests {
   use super::*;
 
   #[test]
+  fn cache_tracks_image_id_and_prunes_only_deps() {
+    let hash = deps_hash("python:3", "sha256:aaa", "orjson");
+    assert!(needs_install(
+      Some(&hash),
+      "python:3",
+      "sha256:bbb",
+      "orjson"
+    ));
+    assert!(!has_effective_deps("# comment\n  "));
+    let temp = tempfile::tempdir().unwrap();
+    let deps = temp.path().join("deps");
+    let data = temp.path().join("data");
+    fs::create_dir(&deps).unwrap();
+    fs::write(&data, "keep").unwrap();
+    clear_deps(&deps).unwrap();
+    assert!(!deps.exists() && data.exists());
+  }
+
+  #[test]
   fn sso_credentials_only_go_in_env_file() {
     let dir = tempfile::tempdir().unwrap();
     let env_file = dir.path().join("env");
