@@ -290,7 +290,9 @@ fn extract_pins_and_commit(
     )
   };
   if matches!(source, Source::Build(b) if b.git.is_some()) {
-    let commit = commit.filter(|sha| valid_commit(sha));
+    let commit = commit
+      .filter(|sha| valid_commit(sha))
+      .map(|sha| sha.to_ascii_lowercase());
     if commit.is_none() {
       let message = format!("部署 #{id} 没有记录有效的 Git commit");
       if !allow {
@@ -418,6 +420,14 @@ mod tests {
       row.pins["worker:latest"],
       format!("sha256:{}", "b".repeat(64))
     );
+    let applied = serde_json::from_value(json!({
+      "hash":"same", "at":"2026-01-01T00:00:00Z",
+      "digests":{"web:latest":row.pins["web:latest"], "worker:latest":format!("sha256:{}", "c".repeat(64))}
+    })).unwrap();
+    let change =
+      crate::pins::change(Some(&applied), &row.pins, None, true)
+        .unwrap();
+    assert_eq!(change.0, "worker:latest");
   }
 
   #[test]

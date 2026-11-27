@@ -268,34 +268,35 @@ impl CloudflareEdge {
     Ok(
       data["result"]
         .as_array()
-        .map(|list| {
-          list
-            .iter()
-            .filter_map(|d| {
-              let id = str_of(&d["id"])?;
-              let active = canonical.as_deref() == Some(id.as_str());
-              let created_at = str_of(&d["created_on"]);
-              Some(EdgeVersion {
-                active,
-                id,
-                last_deployed_at: if active || (d["latest_stage"]["status"] == "success" && d["is_skipped"] != true) {
-                  created_at.clone()
-                } else {
-                  None
-                },
-                created_at: created_at.unwrap_or_default(),
-                source: str_of(&d["deployment_trigger"]["type"]),
-                message: str_of(
-                  &d["deployment_trigger"]["metadata"]["commit_message"],
-                ),
-                url: str_of(&d["url"]),
-              })
-            })
-            .collect()
-        })
-        .unwrap_or_default(),
+        .into_iter()
+        .flatten()
+        .filter_map(|d| pages_version(d, canonical.as_deref()))
+        .collect(),
     )
   }
+}
+
+fn pages_version(
+  d: &Value,
+  canonical: Option<&str>,
+) -> Option<EdgeVersion> {
+  let id = str_of(&d["id"])?;
+  let active = canonical == Some(id.as_str());
+  let created_at = str_of(&d["created_on"]);
+  let deployed = active
+    || (d["latest_stage"]["status"] == "success"
+      && d["is_skipped"] != true);
+  Some(EdgeVersion {
+    active,
+    id,
+    last_deployed_at: created_at.clone().filter(|_| deployed),
+    created_at: created_at.unwrap_or_default(),
+    source: str_of(&d["deployment_trigger"]["type"]),
+    message: str_of(
+      &d["deployment_trigger"]["metadata"]["commit_message"],
+    ),
+    url: str_of(&d["url"]),
+  })
 }
 
 fn worker_deployment_index(
@@ -903,4 +904,38 @@ fn worker_deployment_index_tracks_all_traffic_history() {
   assert_eq!(last["v1"], "t1");
   assert_eq!(last["v3"], "t3");
   assert!(!last.contains_key("v2"));
+}
+
+#[cfg(test)]
+#[test]
+fn pages_history_counts_only_served_production_deployments() {
+  let mut deployment = json!({
+    "id":"p1","created_on":"t1","latest_stage":{"status":"failure"}
+  });
+  assert!(
+    pages_version(&deployment, None)
+      .unwrap()
+      .last_deployed_at
+      .is_none()
+  );
+  assert!(
+    pages_version(&deployment, Some("p1"))
+      .unwrap()
+      .last_deployed_at
+      .is_some()
+  );
+  deployment["latest_stage"]["status"] = json!("success");
+  assert!(
+    pages_version(&deployment, None)
+      .unwrap()
+      .last_deployed_at
+      .is_some()
+  );
+  deployment["is_skipped"] = json!(true);
+  assert!(
+    pages_version(&deployment, None)
+      .unwrap()
+      .last_deployed_at
+      .is_none()
+  );
 }

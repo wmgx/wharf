@@ -438,7 +438,7 @@ impl World {
                 "服务 {name} 的固定 Git commit 不合法"
               )));
             }
-            commit = Some(sha.clone());
+            commit = Some(sha.to_ascii_lowercase());
           }
           // compose 来源没填端口时按 compose 里映射的端口补上，否则服务没有内网地址。
           let mut spec = spec.clone();

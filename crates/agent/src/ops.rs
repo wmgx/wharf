@@ -1351,6 +1351,40 @@ esac
   }
 
   #[tokio::test]
+  async fn successful_trial_retains_result_when_cleanup_fails() {
+    let (dir, docker) = crate::docker::fake_docker(
+      r#"
+case "$1:$6" in
+  compose:up) ;;
+  compose:down) echo 'cleanup failed' >&2; exit 1;;
+  ps:*) echo '{"Names":"trial-app-1","Labels":"com.docker.compose.project=wharf-try-app","State":"running"}';;
+  inspect:*) echo '/trial-app-1 0';;
+  logs:*) touch logged;;
+  *) exit 2;;
+esac
+"#,
+    );
+    let ops = Ops::new(
+      docker.clone(),
+      Reporter::new(docker.clone(), None),
+      String::new(),
+      HostShell::prepare(docker, "s1".into()).await,
+      dir.path().into(),
+    );
+    let up: ProjectUp = serde_json::from_value(serde_json::json!({
+      "project":"app","compose":"","hash":"h","trial":"services: {}","start_timeout_secs":1,
+      "pull":{"mirrors":{},"mirrors_only":false,"attempt_timeout_secs":1}
+    })).unwrap();
+    let mut warnings = Vec::new();
+    ops
+      .trial_run(&up, &mut warnings, &Ctx::detached())
+      .await
+      .unwrap();
+    assert!(warnings[0].contains("cleanup failed"));
+    assert!(!dir.path().join("logged").exists());
+  }
+
+  #[tokio::test]
   async fn pull_all_skips_pins_for_digest_ref() {
     let (dir, docker) = crate::docker::fake_docker(
       r#"

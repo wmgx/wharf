@@ -549,7 +549,7 @@ pub fn commit_change(
   let new = commit?;
   let applied = applied?;
   match &applied.commit {
-    Some(old) if old != new => {
+    Some(old) if !old.starts_with(new) => {
       Some((old[..old.len().min(12)].to_string(), new.to_string()))
     }
     None => Some(("当前版本未知".into(), new.to_string())),

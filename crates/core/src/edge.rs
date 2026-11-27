@@ -692,6 +692,15 @@ mod tests {
     let expected =
       state.db.call(|c| db::edge_expected(c)).await.unwrap();
     assert_eq!(expected["w"].versions, "confirmed");
+    state.db.call(|c| c.execute_batch(
+      "CREATE TRIGGER reject_version BEFORE INSERT ON edge_expected BEGIN SELECT RAISE(ABORT, 'test'); END;"
+    ).map_err(db::sql_err)).await.unwrap();
+    let err =
+      complete_rollback(&state, "w", &spec, "next".into(), &progress)
+        .await
+        .unwrap_err();
+    assert!(err.message.contains("远端 w 已切换"));
+    assert_eq!(err.suggest, ["wharf edge accept w"]);
   }
 
   #[test]

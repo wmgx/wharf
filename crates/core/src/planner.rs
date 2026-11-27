@@ -544,18 +544,24 @@ pub(crate) async fn make_plan_inner(
       _ => None,
     })
     .collect();
-  for change in &req.changes {
-    if let wharf_api_types::spec::Change::UpsertService {
-      name,
-      spec,
-      pins: Some(pins),
-      ..
-    } = change
-    {
+  let explicit_pins: BTreeSet<_> = req
+    .changes
+    .iter()
+    .filter_map(|change| match change {
+      wharf_api_types::spec::Change::UpsertService {
+        name,
+        pins: Some(_),
+        ..
+      } => Some(name.clone()),
+      _ => None,
+    })
+    .collect();
+  for name in &explicit_pins {
+    if let Some(row) = desired.services.get(name) {
       refresh.extend(
-        crate::pins::images(&spec.source)
+        crate::pins::images(&row.spec.source)
           .into_iter()
-          .filter(|image| !pins.contains_key(image))
+          .filter(|image| !row.pins.contains_key(image))
           .map(|image| crate::pins::refresh_key(name, Some(&image))),
       );
     }
@@ -677,18 +683,7 @@ pub(crate) async fn make_plan_inner(
   let writes = desired.writes_from(&current);
   let mut b = Builder {
     image_ids: resolved.image_ids,
-    explicit_pins: req
-      .changes
-      .iter()
-      .filter_map(|change| match change {
-        wharf_api_types::spec::Change::UpsertService {
-          name,
-          pins: Some(_),
-          ..
-        } => Some(name.clone()),
-        _ => None,
-      })
-      .collect(),
+    explicit_pins,
     warnings,
     purge_data: req
       .changes
