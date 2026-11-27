@@ -1335,7 +1335,9 @@ pub fn file_content(
 }
 
 // 容器内路径按组件比较，不能在控制面上做文件系统解析。
-fn normalized_mount_target(target: &str) -> Option<PathBuf> {
+pub(crate) fn normalized_mount_target(
+  target: &str,
+) -> Option<PathBuf> {
   let target = Path::new(target);
   if !target.is_absolute() {
     return None;

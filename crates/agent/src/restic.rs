@@ -329,6 +329,14 @@ pub async fn run(
               e
             }
           })?;
+        check_data_mount_users(
+          docker,
+          &root,
+          &job.service,
+          true,
+          ctx,
+        )
+        .await?;
         backup_link_excludes(&root, &dir, ctx)?
       } else {
         vec![]
@@ -907,6 +915,45 @@ fn check_snapshot(id: &str) -> Result<(), ApiError> {
   }
 }
 
+async fn check_data_mount_users(
+  docker: &Docker,
+  root: &Path,
+  service: &str,
+  writable_only: bool,
+  ctx: &Ctx,
+) -> Result<(), ApiError> {
+  let mounts = docker
+    .bind_mount_active_users(
+      &[root.to_path_buf()],
+      service,
+      writable_only,
+      ctx,
+    )
+    .await?;
+  if mounts.is_empty() {
+    return Ok(());
+  }
+  let users = mounts
+    .into_iter()
+    .map(|m| m.project.unwrap_or(m.container))
+    .collect::<std::collections::BTreeSet<_>>()
+    .into_iter()
+    .collect::<Vec<_>>()
+    .join("、");
+  Err(
+    ApiError::new(
+      ErrorCode::Conflict,
+      format!(
+        "无法安全操作 {}，仍有活动挂载：{users}",
+        root.display()
+      ),
+    )
+    .with_hint(
+      "先用 wharf service stop 停止共用该目录的服务，再重试",
+    ),
+  )
+}
+
 async fn restore(
   mut j: Job<'_>,
   root: &Path,
@@ -952,6 +999,8 @@ async fn restore(
   .check("restic restore")?;
   let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
   let kept_name = format!("{}-before-{stamp}-{nonce}", j.service);
+  check_data_mount_users(j.docker, root, j.service, false, ctx)
+    .await?;
   if install_restored_tree(
     srv, j.service, &work_name, &kept_name, snapshot,
   )

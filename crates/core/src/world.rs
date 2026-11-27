@@ -2591,6 +2591,17 @@ mod tests {
       assert_eq!(err.code, wharf_api_types::ErrorCode::InvalidInput);
       assert!(err.hint.is_some());
     }
+    let mut cycle = w.clone();
+    cycle.services.get_mut("reader").unwrap().spec.volumes.push(
+      serde_json::from_value(
+        serde_json::json!({"name":"local","target":"/local"}),
+      )
+      .unwrap(),
+    );
+    cycle.services.get_mut("photos").unwrap().spec.volumes.push(
+      serde_json::from_value(serde_json::json!({"name":"other","from_service":"reader:local","target":"/other"})).unwrap(),
+    );
+    assert!(cycle.validate().unwrap_err().message.contains("成环"));
     for service in w.services.values_mut() {
       service.spec.server = "s2".into();
     }

@@ -112,15 +112,6 @@ pub async fn volume_sync(
   for server in [from, to] {
     state.hub.require_safe_migrate(server)?;
   }
-  let mount_conn =
-    if shared || state.hub.supports_shared_volumes(from) {
-      Some(state.hub.shared_volumes_conn_id(from)?)
-    } else {
-      None
-    };
-  if let Some(conn) = mount_conn {
-    check_writers(state, (from, conn), service, true, cancel).await?;
-  }
   let source_ip = private_ip(net, from)?;
   let target_ip = private_ip(net, to)?;
   let password = one_time_password();
@@ -135,6 +126,15 @@ pub async fn volume_sync(
       && m.phase != MigratePhase::Pending
   }) {
     return Ok(());
+  }
+  let mount_conn =
+    if shared || state.hub.supports_shared_volumes(from) {
+      Some(state.hub.shared_volumes_conn_id(from)?)
+    } else {
+      None
+    };
+  if let Some(conn) = mount_conn {
+    check_writers(state, (from, conn), service, true, cancel).await?;
   }
   let preserve_existing = existing.as_ref().is_none_or(|m| {
     !m.payload.target_prepared && m.payload.target_backup.is_none()
@@ -221,22 +221,36 @@ pub async fn volume_sync(
       })
       .await?;
     let push = async |pass| {
-      let result: Pushed = state
-        .hub
-        .call(
-          from,
-          AgentOp::SyncPush(SyncPush {
-            service: service.to_string(),
-            host: target_ip.clone(),
-            port,
-            password: password.clone(),
-            pass,
-          }),
-          PUSH_TIMEOUT,
-          Some(progress.clone()),
-          &work_cancel,
-        )
-        .await?;
+      let op = AgentOp::SyncPush(SyncPush {
+        service: service.to_string(),
+        host: target_ip.clone(),
+        port,
+        password: password.clone(),
+        pass,
+      });
+      let result: Pushed = if let Some(conn) = mount_conn {
+        state
+          .hub
+          .call_bound(
+            (from, conn),
+            op,
+            PUSH_TIMEOUT,
+            Some(progress.clone()),
+            &work_cancel,
+          )
+          .await?
+      } else {
+        state
+          .hub
+          .call(
+            from,
+            op,
+            PUSH_TIMEOUT,
+            Some(progress.clone()),
+            &work_cancel,
+          )
+          .await?
+      };
       if !result.synced {
         return Err(ApiError::new(
           ErrorCode::AgentFailed,
