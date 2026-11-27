@@ -52,6 +52,7 @@ time = "0.3"
 tokio.workspace = true
 tar = "=0.4.46"
 tokio-util.workspace = true
+toml.workspace = true
 tower = { version = "0.5", features = ["util"] }
 rust-embed.workspace = true
 tracing.workspace = true

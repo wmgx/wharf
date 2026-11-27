@@ -88,7 +88,7 @@ pub fn service_values(spec: &ServiceSpec) -> Vec<String> {
     content: Some(content),
     ..
   } = &spec.source
-    && let Ok(yaml) = serde_yaml_ng::from_str::<Value>(content)
+    && let Ok(yaml) = crate::render::parse_compose(content)
     && let Some(services) =
       yaml.get("services").and_then(Value::as_mapping)
   {

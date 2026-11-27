@@ -1134,6 +1134,10 @@ export interface FileSpec {
    * 容器内的绝对路径，例如 `/etc/app/config.yaml`。
    */
   path: string;
+  /**
+   * 跳过 plan 阶段的配置文件语法预检。
+   */
+  raw?: boolean;
 }
 
 export interface FiringView {

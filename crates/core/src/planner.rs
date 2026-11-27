@@ -441,6 +441,7 @@ pub(crate) async fn make_plan_inner(
     &snap.secret_restrictions,
   )?;
   desired.validate()?;
+  validate_changed_templates(&current, &desired)?;
   let mut warnings =
     crate::edge::validate_owners(&current, &desired)?;
   crate::secret_policy::validate_accounts(
@@ -473,6 +474,17 @@ pub(crate) async fn make_plan_inner(
         warnings,
         ..Builder::default()
       };
+      let net = snap.net(&desired);
+      for write in &writes {
+        if let Write::Upsert { name, .. } = write {
+          crate::syntax_check::validate_service_files(
+            &desired,
+            &net,
+            name,
+            &snap.render_values(&desired, name),
+          )?;
+        }
+      }
       config_items(&mut b, &current, &desired, &writes);
       return Ok(finish_plan(
         &snap,
@@ -689,13 +701,9 @@ pub(crate) async fn make_plan_inner(
       && !net.bind_ips(&service.spec.server).is_empty()
       && match &service.spec.source {
         Source::Compose { content, .. } => {
-          let compose: serde_yaml_ng::Value =
-            serde_yaml_ng::from_str(
-              content.as_deref().unwrap_or_default(),
-            )
-            .map_err(|e| {
-              ApiError::invalid(format!("compose 内容解析失败：{e}"))
-            })?;
+          let compose = crate::render::parse_compose(
+            content.as_deref().unwrap_or_default(),
+          )?;
           crate::lint::compose_allows_direct_access(&compose)
         }
         _ => true,
@@ -1164,6 +1172,44 @@ fn describe_containers(state: &ProjectState) -> String {
     .join("，")
 }
 
+fn validate_changed_templates(
+  current: &World,
+  desired: &World,
+) -> Result<(), ApiError> {
+  for (name, svc) in &desired.services {
+    if let Source::Compose {
+      content: Some(content),
+      ..
+    } = &svc.spec.source
+      && current
+        .services
+        .get(name)
+        .is_none_or(|old| old.spec.source != svc.spec.source)
+    {
+      crate::render::check_compose(name, content)?;
+    }
+  }
+  for (name, route) in &desired.routes {
+    if let Some(custom) = &route.spec.caddy
+      && current
+        .routes
+        .get(name)
+        .and_then(|old| old.spec.caddy.as_ref())
+        != Some(custom)
+    {
+      crate::caddy_validate::check_custom_caddy(custom).map_err(
+        |e| {
+          ApiError::invalid(format!(
+            "路由 {name}：自定义 Caddy 配置{e}"
+          ))
+          .with_hint("检查 Caddyfile 块括号、引号与指令参数")
+        },
+      )?;
+    }
+  }
+  Ok(())
+}
+
 fn service_items(
   b: &mut Builder,
   snap: &Snapshot,
@@ -1174,6 +1220,19 @@ fn service_items(
   writes: &[Write],
 ) -> Result<(), ApiError> {
   for (name, svc) in &desired.services {
+    let service_changed = current
+      .services
+      .get(name)
+      .is_none_or(|old| old.spec != svc.spec);
+    let render_values = snap.render_values(desired, name);
+    if service_changed {
+      crate::syntax_check::validate_service_files(
+        desired,
+        net,
+        name,
+        &render_values,
+      )?;
+    }
     if current.services.get(name).is_some_and(|old| {
       crate::service_monitor::config_only(old, svc)
     }) {
@@ -1241,12 +1300,8 @@ fn service_items(
       );
     }
 
-    let (_, hash) = snapshot::service_resolved(
-      desired,
-      net,
-      name,
-      &snap.render_values(desired, name),
-    )?;
+    let (_, hash) =
+      snapshot::service_resolved(desired, net, name, &render_values)?;
     let template = snapshot::service_template(desired, net, name)?;
     let after =
       Some(json!({ "server": server, "compose": template }));
@@ -1464,6 +1519,14 @@ fn service_items(
       d => d,
     };
     if let Some((action, mut risk, reason, before)) = decision {
+      if !service_changed && !svc.spec.stopped {
+        crate::syntax_check::validate_service_files(
+          desired,
+          net,
+          name,
+          &render_values,
+        )?;
+      }
       if !risk.contains(&Impact::Public)
         && crate::host_access::has_new_public_bind(
           current, name, &svc.spec,
@@ -1688,8 +1751,7 @@ fn changed_components(
 ) -> Option<(Vec<String>, Vec<String>)> {
   let parse =
     |t: &str| -> Option<BTreeMap<String, serde_yaml_ng::Value>> {
-      let doc: serde_yaml_ng::Value =
-        serde_yaml_ng::from_str(t).ok()?;
+      let doc = crate::render::parse_compose(t).ok()?;
       let services = doc.get("services")?.as_mapping()?;
       Some(
         services
@@ -2518,6 +2580,13 @@ fn gateway_items(
         b.warnings.push(format!("服务器 {server} 离线，无法确认网关 {name} 的 agent 能下发隧道证书"));
       }
       if gw.spec.kind == GatewayKind::Caddy {
+        crate::caddy_validate::check_caddyfile(&r.config).map_err(
+          |e| {
+            ApiError::invalid(format!(
+              "网关 {name} 渲染后的 Caddyfile 不合法（{e}）"
+            ))
+          },
+        )?;
         for f in &gw.spec.layer4 {
           if current
             .gateways
@@ -3007,6 +3076,93 @@ fn plaintext_hop(
 
 #[cfg(test)]
 mod tests {
+  #[tokio::test]
+  async fn plan_rejects_broken_config_file_with_zero_side_effects() {
+    let state = crate::rules::tests::test_state();
+    let mut world = world();
+    let app = world.services.get_mut("app").unwrap();
+    app.pins.insert("nginx:1".into(), "sha256:fixture".into());
+    app.spec.files = serde_json::from_value(json!([
+      {"path":"/etc/app/config.json", "content":"{\"value\":\"[[S]]\"}"}
+    ])).unwrap();
+    let snap = || Snapshot {
+      world: world.clone(),
+      secrets: BTreeMap::from([(
+        "S".into(),
+        "fixture\"value".into(),
+      )]),
+      ..Default::default()
+    };
+    let hash = snapshot::service_resolved(
+      &world,
+      &Net::default(),
+      "app",
+      &snap().render_values(&world, "app"),
+    )
+    .unwrap()
+    .1;
+    state.hub.mock_agent("s1", false, move |op| match op {
+      wharf_api_types::agent::AgentOp::ProjectStatus { .. } => Ok(json!([
+        {"project":"app", "hash":hash, "containers":[container("running")]}
+      ])),
+      _ => panic!("意外的 agent 请求"),
+    });
+    let spec = |item| PlanRequest {
+      changes: vec![wharf_api_types::spec::Change::UpsertService {
+        name: "app".into(),
+        spec: item,
+        adopt: None,
+      }],
+      ..Default::default()
+    };
+    let mut changed = world.services["app"].spec.clone();
+    changed.env.insert("MODE".into(), "changed".into());
+    let err = make_plan_inner(
+      &state,
+      spec(changed.clone()),
+      snap(),
+      false,
+      true,
+    )
+    .await
+    .err()
+    .unwrap();
+    assert_eq!(err.code, wharf_api_types::ErrorCode::Invalid);
+    assert!(err.message.contains("/etc/app/config.json"));
+    assert!(!err.message.contains("fixture"));
+    assert!(
+      make_plan_inner(
+        &state,
+        PlanRequest::default(),
+        snap(),
+        false,
+        true
+      )
+      .await
+      .unwrap()
+      .plan
+      .items
+      .is_empty()
+    );
+    changed.files[0].raw = true;
+    assert!(
+      make_plan_inner(&state, spec(changed), snap(), false, true)
+        .await
+        .is_ok()
+    );
+    let count = state
+      .db
+      .call(|c| {
+        c.query_row("SELECT COUNT(*) FROM plans", [], |r| {
+          r.get::<_, i64>(0)
+        })
+        .map_err(db::sql_err)
+      })
+      .await
+      .unwrap();
+    assert_eq!(count, 0);
+  }
+
   use super::*;
   use crate::world::{RouteRow, ServerRow, ServiceRow};
   use wharf_api_types::{agent::ContainerInfo, spec::Limits};

@@ -66,17 +66,26 @@ pub(crate) fn url_credentials(
 }
 
 pub fn redact_compose_secrets(yaml: &str) -> (String, Vec<String>) {
-  let mut root: Value = match serde_yaml_ng::from_str(yaml) {
-    Ok(root) => root,
-    Err(_) => return (String::new(), vec![]),
+  let Ok(mut root) = crate::render::parse_compose(yaml) else {
+    return (String::new(), vec![]);
   };
   let mut keys = Vec::new();
+  redact_compose_env(&mut root, &mut keys);
+  keys.sort_unstable();
+  keys.dedup();
+  let output = if keys.is_empty() {
+    yaml.to_string()
+  } else {
+    serde_yaml_ng::to_string(&root).unwrap_or_default()
+  };
+  (output, keys)
+}
+
+fn redact_compose_env(node: &mut Value, keys: &mut Vec<String>) {
   const MASK: &str = "[[请替换为密钥名]]";
-  if let Some(services) =
-    root.get_mut("services").and_then(Value::as_mapping_mut)
-  {
-    for (_, service) in services.iter_mut() {
-      match service.get_mut("environment") {
+  match node {
+    Value::Mapping(map) => {
+      match map.get_mut("environment") {
         Some(Value::Mapping(env)) => {
           for (key, value) in env.iter_mut() {
             if let Some(key) = key.as_str()
@@ -106,16 +115,18 @@ pub fn redact_compose_secrets(yaml: &str) -> (String, Vec<String>) {
         }
         _ => {}
       }
+      for value in map.values_mut() {
+        redact_compose_env(value, keys);
+      }
     }
+    Value::Sequence(children) => {
+      for child in children {
+        redact_compose_env(child, keys);
+      }
+    }
+    Value::Tagged(tag) => redact_compose_env(&mut tag.value, keys),
+    _ => {}
   }
-  keys.sort_unstable();
-  keys.dedup();
-  let output = if keys.is_empty() {
-    yaml.to_string()
-  } else {
-    serde_yaml_ng::to_string(&root).unwrap_or_default()
-  };
-  (output, keys)
 }
 
 fn words(text: &str) -> Vec<(usize, &str)> {

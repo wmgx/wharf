@@ -25,10 +25,18 @@ export function howOf(b: BuildSource | null | undefined): BuildHow {
 /** 去掉空字符串，按方式清掉另一种方式的字段。 */
 export function cleanHow(h: BuildHow): BuildHow {
   const t = (s?: string | null) => (s?.trim() ? s.replace(/\s+$/, "") : undefined);
-  if (h.dockerfile_content != null) return { dockerfile_content: t(h.dockerfile_content) };
+  if (h.dockerfile_content != null) return {
+    dockerfile_content: t(h.dockerfile_content),
+    dockerfile: undefined,
+    template: undefined,
+    base: undefined,
+    install: undefined,
+    start: undefined,
+  };
   const template = h.template && h.template !== AUTO ? h.template : undefined;
   const withInstall = !template || TEMPLATES.find((x) => x.id === template)?.install;
   return {
+    dockerfile_content: undefined,
     dockerfile: template ? undefined : t(h.dockerfile),
     template,
     base: t(h.base),

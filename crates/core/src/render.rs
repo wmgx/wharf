@@ -535,7 +535,7 @@ fn yaml_contains(value: &Value, text: &str) -> bool {
   }
 }
 
-fn merge_compose(
+pub(crate) fn merge_compose(
   value: &mut Value,
 ) -> Result<(), serde_yaml_ng::Error> {
   // 先展开被继承的映射，避免一层合并漏掉链式继承或改变优先级。
@@ -625,6 +625,99 @@ pub fn missing_components(
     .filter(|c| !present.contains(c.as_str()))
     .cloned()
     .collect()
+}
+
+pub(crate) fn parse_compose(
+  content: &str,
+) -> Result<Value, ApiError> {
+  let mut doc: Value =
+    serde_yaml_ng::from_str(content).map_err(|e| {
+      let location = e.location().map_or_else(String::new, |loc| {
+        format!("（第 {} 行第 {} 列）", loc.line(), loc.column())
+      });
+      ApiError::invalid(format!("compose 不是合法的 YAML{location}"))
+    })?;
+  merge_compose(&mut doc).map_err(|_| {
+    ApiError::invalid("compose YAML 锚点合并不合法")
+      .with_hint("检查 <<: *anchor 是否指向映射")
+  })?;
+  Ok(doc)
+}
+
+pub(crate) fn parse_compose_template(
+  content: &str,
+) -> Result<Value, ApiError> {
+  let mut prefix = "wharf_retag_ref_".to_string();
+  let original = serde_yaml_ng::from_str::<Value>(content).ok();
+  while content.contains(&prefix)
+    || original
+      .as_ref()
+      .is_some_and(|doc| yaml_contains(doc, &prefix))
+  {
+    prefix.push('_');
+  }
+  let mut markers = Vec::new();
+  let mut marked = String::new();
+  let mut rest = content;
+  while let Some((start, inner)) = next_placeholder(rest) {
+    let end = start + inner.len() + 4;
+    marked.push_str(&rest[..start]);
+    let raw = &rest[start..end];
+    if parse_placeholder(inner, true).is_ok_and(|p| p.is_some())
+      || !crate::refs::used(raw).is_empty()
+    {
+      marked.push_str(&format!("{prefix}{}_end", markers.len()));
+      markers.push(raw);
+    } else {
+      marked.push_str(raw);
+    }
+    rest = &rest[end..];
+  }
+  marked.push_str(rest);
+  let mut doc = parse_compose(&marked)?;
+  restore_compose_refs(&mut doc, &prefix, &markers);
+  Ok(doc)
+}
+
+fn restore_compose_refs(
+  value: &mut Value,
+  prefix: &str,
+  markers: &[&str],
+) {
+  match value {
+    Value::String(s) if s.contains(prefix) => {
+      for (i, raw) in markers.iter().enumerate() {
+        *s = s.replace(&format!("{prefix}{i}_end"), raw);
+      }
+    }
+    Value::Mapping(map) => {
+      *map = std::mem::take(map)
+        .into_iter()
+        .map(|(mut k, mut v)| {
+          restore_compose_refs(&mut k, prefix, markers);
+          restore_compose_refs(&mut v, prefix, markers);
+          (k, v)
+        })
+        .collect();
+    }
+    Value::Sequence(seq) => {
+      for child in seq {
+        restore_compose_refs(child, prefix, markers);
+      }
+    }
+    Value::Tagged(tag) => {
+      restore_compose_refs(&mut tag.value, prefix, markers)
+    }
+    _ => {}
+  }
+}
+
+pub(crate) fn host_port(ip: &str, port: u16) -> String {
+  if ip.contains(':') && !ip.starts_with('[') {
+    format!("[{ip}]:{port}")
+  } else {
+    format!("{ip}:{port}")
+  }
 }
 
 fn substitute_compose(
@@ -767,10 +860,8 @@ pub fn compose_target(
   content: &str,
   container: Option<&str>,
 ) -> Result<String, ApiError> {
-  let value: serde_yaml_ng::Value = serde_yaml_ng::from_str(content)
-    .map_err(|e| {
-      ApiError::invalid(format!("compose 内容解析失败：{e}"))
-    })?;
+  let value: Value = serde_yaml_ng::from_str(content)
+    .map_err(|_| ApiError::invalid("compose 内容解析失败"))?;
   let names: Vec<String> = value
     .get("services")
     .and_then(|s| s.as_mapping())
@@ -1004,6 +1095,39 @@ pub fn compose_with_settings(
   Ok(out)
 }
 
+fn compose_with_resolved_env(
+  name: &str,
+  content: &str,
+  spec: &ServiceSpec,
+  secrets: &BTreeMap<String, String>,
+) -> Result<(String, SecretMounts), ApiError> {
+  // 只在历史文本替换失败时，先解析环境变量再按 YAML 字符串插入。
+  let (content, mut mounts) =
+    substitute_compose(name, content, Some(secrets))?;
+  let mut file_secrets = BTreeSet::new();
+  let mut spec = spec.clone();
+  for value in spec.env.values_mut() {
+    *value = substitute_values(
+      value,
+      Some(secrets),
+      SecretContext::Env,
+      &mut file_secrets,
+    )?;
+  }
+  let out = compose_with_settings(name, &content, &spec)?;
+  if !file_secrets.is_empty() {
+    let target =
+      compose_target(name, &content, spec.container.as_deref())
+        .map_err(|_| {
+          ApiError::invalid(format!(
+            "服务 {name} 的 compose 无法定位配置文件的目标容器"
+          ))
+        })?;
+    mounts.entry(target).or_default().extend(file_secrets);
+  }
+  Ok((out, mounts))
+}
+
 /// 服务的 compose 文件。image 来源自动生成；compose 来源原样使用。
 /// 端口只绑定 127.0.0.1 和内网地址，不绑定 0.0.0.0。
 pub fn service_compose(
@@ -1016,11 +1140,14 @@ pub fn service_compose(
   match &spec.source {
     Source::Compose { content, .. } => {
       let content = content.as_deref().unwrap_or_default();
-      substitute_compose(
-        name,
-        &compose_with_settings(name, content, spec)?,
-        secrets,
-      )
+      let template = compose_with_settings(name, content, spec)?;
+      let result = substitute_compose(name, &template, secrets);
+      match (result, secrets) {
+        (Err(_), Some(secrets)) if !spec.env.is_empty() => {
+          compose_with_resolved_env(name, content, spec, secrets)
+        }
+        (result, _) => result,
+      }
     }
     Source::Image(_) | Source::Build(_) => {
       let (mut service, files) = image_service(name, spec, secrets)?;
@@ -1290,9 +1417,10 @@ pub fn add_files(
   }
   let key = |s: &str| Value::String(s.to_string());
   let root = doc.as_mapping_mut().ok_or_else(bad)?;
-  let configs = root
-    .entry(key("configs"))
-    .or_insert_with(|| Value::Mapping(Mapping::new()));
+  let configs = root.entry(key("configs")).or_insert(Value::Null);
+  if configs.is_null() {
+    *configs = Value::Mapping(Mapping::new());
+  }
   let configs = configs.as_mapping_mut().ok_or_else(bad)?;
   for (id, def) in defs {
     if id
@@ -1310,9 +1438,10 @@ pub fn add_files(
       .and_then(|s| s.get_mut(target.as_str()))
       .and_then(Value::as_mapping_mut)
       .ok_or_else(bad)?;
-    let list = svc
-      .entry(key("configs"))
-      .or_insert_with(|| Value::Sequence(vec![]));
+    let list = svc.entry(key("configs")).or_insert(Value::Null);
+    if list.is_null() {
+      *list = Value::Sequence(vec![]);
+    }
     let list = list.as_sequence_mut().ok_or_else(bad)?;
     for entry in additions {
       if reserved_secret_mount(&entry.target) {
@@ -1354,7 +1483,7 @@ pub fn add_files(
 }
 
 /// compose 来源的基本检查：必须有 services，P1 不支持 build。
-pub fn check_compose(
+pub fn check_compose_template(
   name: &str,
   content: &str,
 ) -> Result<(), ApiError> {
@@ -1390,6 +1519,15 @@ pub fn check_compose(
     ))
   })?;
   check_compose_secret_volumes(name, &value)
+}
+
+pub fn check_compose(
+  name: &str,
+  content: &str,
+) -> Result<(), ApiError> {
+  let doc = parse_compose_template(content)?;
+  crate::syntax_check::validate_compose_structure(name, &doc)?;
+  check_compose_secret_volumes(name, &doc)
 }
 
 pub fn gateway_image(spec: &GatewaySpec) -> String {
@@ -1975,6 +2113,91 @@ mod tests {
     assert_eq!(
       super::expected_components(yaml, &["debug".into()]),
       ["tools", "web", "worker"]
+    );
+  }
+
+  #[test]
+  fn stored_compose_keeps_bytes_and_hash() {
+    let spec = serde_json::from_value(serde_json::json!({
+      "server": "s1", "limits": {"memory_mb": 64}, "source": {"compose": {
+        "content": "# 保留注释\nservices:\n  app:\n    image: nginx:1\n    environment:\n      PASS: \"[[K]]\"\n"
+      }}
+    })).unwrap();
+    let (out, _) = service_compose(
+      "app",
+      &spec,
+      &BTreeMap::new(),
+      &[],
+      Some(&BTreeMap::from([("K".into(), "a$b".into())])),
+    )
+    .unwrap();
+    assert_eq!(
+      out,
+      "# 保留注释\nservices:\n  app:\n    mem_limit: 64m\n    image: nginx:1\n    environment:\n      PASS: \"a$$b\"\n"
+    );
+    assert_eq!(
+      hash(&out),
+      "137c8cb13222fd17ff61583ca9dbfdc0fcadaa19ed587605145d6880ec7b3ff5"
+    );
+  }
+
+  #[test]
+  fn compose_settings_escape_resolved_env_only_on_failure() {
+    let spec = serde_json::from_value(serde_json::json!({
+      "server": "s1", "env": {"PASS":"[[K]]"}, "source":{"compose":{
+        "content":"services:\n  app:\n    image: nginx\n"
+      }}
+    }))
+    .unwrap();
+    let (out, _) = service_compose(
+      "app",
+      &spec,
+      &BTreeMap::new(),
+      &[],
+      Some(&BTreeMap::from([("K".into(), "p$\"\\\nline".into())])),
+    )
+    .unwrap();
+    assert_eq!(
+      parse_compose(&out).unwrap()["services"]["app"]["environment"]
+        ["PASS"],
+      "p$$\"\\\nline"
+    );
+  }
+
+  #[test]
+  fn check_compose_blocks_build_in_anchor() {
+    let err = check_compose("app", "x-base: &b {build: .}\nservices: {app: {<<: *b, image: nginx}}").unwrap_err();
+    assert!(err.message.contains("用了 build"));
+  }
+
+  #[test]
+  fn add_files_accepts_null_configs() {
+    let text =
+      "services:\n  app:\n    image: nginx\n    configs:\nconfigs:\n";
+    let spec = serde_json::from_value(serde_json::json!({
+      "server": "s1", "source": {"compose":{"content":text}}
+    }))
+    .unwrap();
+    let out = add_files(
+      "app",
+      &spec,
+      text,
+      &[("/etc/app.conf".into(), "ok".into())],
+      BTreeSet::new(),
+      BTreeMap::new(),
+      None,
+    )
+    .unwrap();
+    let doc = parse_compose(&out).unwrap();
+    let mount = &doc["services"]["app"]["configs"][0];
+    assert_eq!(mount["target"], "/etc/app.conf");
+    assert_eq!(
+      doc["configs"][mount["source"].as_str().unwrap()]["content"],
+      "ok"
+    );
+    assert_eq!(
+      host_port("fd7a:115c:a1e0::1", 8080),
+      "[fd7a:115c:a1e0::1]:8080"
     );
   }
 

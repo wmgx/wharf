@@ -11,14 +11,7 @@ use crate::world::{World, is_reserved_host_port};
 use super::compose;
 
 fn merged_compose(content: &str) -> Result<Value, ApiError> {
-  let mut doc: Value =
-    serde_yaml_ng::from_str(content).map_err(|e| {
-      ApiError::invalid(format!("compose YAML 不合法：{e}"))
-    })?;
-  doc.apply_merge().map_err(|e| {
-    ApiError::invalid(format!("compose YAML 合并不合法：{e}"))
-  })?;
-  Ok(doc)
+  crate::render::parse_compose(content)
 }
 
 fn services(doc: &Value) -> impl Iterator<Item = (&Value, &Value)> {

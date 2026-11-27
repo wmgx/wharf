@@ -211,7 +211,7 @@ pub fn describe(m: &DataMount) -> String {
 
 /// compose 解析不了时返回空：部署时 compose 自己会报错。
 fn compose_mounts(name: &str, content: &str) -> Vec<DataMount> {
-  let Ok(doc) = serde_yaml_ng::from_str::<Value>(content) else {
+  let Ok(doc) = crate::render::parse_compose(content) else {
     return Vec::new();
   };
   let top = doc.get("volumes");
@@ -313,6 +313,19 @@ fn volume_name(top: Option<&Value>, key: String) -> String {
 
 #[cfg(test)]
 mod tests {
+  #[test]
+  fn compose_mounts_expands_chained_anchors() {
+    let spec = serde_json::from_value(serde_json::json!({
+      "server": "s1", "source": {"compose": {"content":
+        "x-a: &a {volumes: ['./data:/data']}\nx-b: &b {<<: *a}\nservices: {app: {<<: *b, image: nginx}}"
+      }}
+    })).unwrap();
+    let found = mounts("app", &spec);
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].source, "./data");
+    assert!(has_relative_bind(&spec));
+  }
+
   use super::*;
 
   #[test]

@@ -1175,6 +1175,9 @@ pub enum ServiceCmd {
     /// 从本地文件读内容，`-` 表示标准输入。生成计划。
     #[arg(long, requires = "path", conflicts_with = "rm")]
     file: Option<String>,
+    /// 跳过语法预检。
+    #[arg(long, requires = "file", conflicts_with = "rm")]
+    raw: bool,
     /// 去掉这个配置文件。生成计划。
     #[arg(long, requires = "path")]
     rm: bool,

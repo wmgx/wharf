@@ -130,8 +130,7 @@ pub fn validate(path: &Path) -> serde_json::Value {
       content: Some(text),
       ..
     } = &svc.source
-      && let Err(e) =
-        serde_yaml_ng::from_str::<serde_yaml_ng::Value>(text)
+      && let Err(e) = crate::deploy::parse_compose(text)
     {
       errors
         .push(format!("服务 {name} 的 compose 不是合法的 YAML：{e}"));

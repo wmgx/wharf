@@ -44,9 +44,13 @@ pub fn images(source: &Source) -> Vec<String> {
     }
     Source::Build(_) => return vec![],
   };
-  let Ok(compose) =
-    serde_yaml_ng::from_str::<serde_yaml_ng::Value>(content)
-  else {
+  compose_images(crate::render::parse_compose(content).ok())
+}
+
+fn compose_images(
+  compose: Option<serde_yaml_ng::Value>,
+) -> Vec<String> {
+  let Some(compose) = compose else {
     return vec![];
   };
   let mut out: Vec<String> = compose["services"]
@@ -216,7 +220,34 @@ pub async fn resolve(
         &row.spec.server,
         arch,
       );
-    for image in images(&row.spec.source) {
+    // 单纯升级控制面时，保留历史上只按标签部署的锚点镜像。
+    let images = match &row.spec.source {
+      Source::Compose {
+        content: Some(content),
+        ..
+      } if snap
+        .world
+        .services
+        .get(name)
+        .is_some_and(|old| old.spec == row.spec)
+        && !refresh.contains(name)
+        && !check_platform =>
+      {
+        let mut explicit =
+          compose_images(serde_yaml_ng::from_str(content).ok());
+        explicit.extend(images(&row.spec.source).into_iter().filter(
+          |image| {
+            row.pins.contains_key(image)
+              || refreshing(refresh, name, image)
+          },
+        ));
+        explicit.sort_unstable();
+        explicit.dedup();
+        explicit
+      }
+      source => images(source),
+    };
+    for image in images {
       let pinned = if refreshing(refresh, name, &image) {
         None
       } else {
@@ -525,40 +556,30 @@ pub fn retag(
       content: Some(content),
       file,
     } => {
+      let mut doc = crate::render::parse_compose_template(content)?;
       let mut hit = false;
-      let lines: Vec<String> = content
-        .split_inclusive('\n')
-        .map(|line| {
-          let body = line.trim_end_matches(['\n', '\r']);
-          let indent = &body[..body.len() - body.trim_start().len()];
-          let Some(value) = body.trim_start().strip_prefix("image:")
-          else {
-            return line.to_string();
-          };
-          let (value, comment) = match value.find(" #") {
-            Some(i) => (&value[..i], &value[i..]),
-            None => (value, ""),
-          };
-          let quote = value
-            .trim()
-            .chars()
-            .next()
-            .filter(|c| matches!(c, '"' | '\''));
-          let bare = value.trim().trim_matches(['"', '\'']);
-          if bare != image {
-            return line.to_string();
+      if let Some(services) = doc
+        .get_mut("services")
+        .and_then(serde_yaml_ng::Value::as_mapping_mut)
+      {
+        for service in services.values_mut() {
+          if service.get("build").is_none()
+            && let Some(serde_yaml_ng::Value::String(value)) =
+              service.get_mut("image")
+            && value.trim() == image
+          {
+            value.clone_from(&new);
+            hit = true;
           }
-          hit = true;
-          let q = quote.map(String::from).unwrap_or_default();
-          let end = &line[body.len()..];
-          format!("{indent}image: {q}{new}{q}{comment}{end}")
-        })
-        .collect();
+        }
+      }
       if !hit {
         return Err(missing());
       }
+      let out = serde_yaml_ng::to_string(&doc)
+        .map_err(|_| ApiError::invalid("无法生成 compose YAML"))?;
       Ok(Source::Compose {
-        content: Some(lines.concat()),
+        content: Some(out),
         file: file.clone(),
       })
     }
@@ -574,6 +595,40 @@ pub fn short(digest: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
+  #[test]
+  fn images_expands_anchors() {
+    let source = Source::Compose {
+      content: Some("x-base: &b {image: example.test/app:1}\nservices: {app: {<<: *b}}".into()),
+      file: None,
+    };
+    assert_eq!(images(&source), ["example.test/app:1"]);
+  }
+
+  #[test]
+  fn retag_only_changes_service_image_not_embedded_config() {
+    let source = Source::Compose {
+      content: Some("x-base: &b {image: runner:1.4}\nservices:\n  runner:\n    <<: *b\n    environment:\n      PASS: [[K]]\nconfigs:\n  job:\n    content: |\n      image: runner:1.4\n      image: only-embedded:1.0\n".into()),
+      file: None,
+    };
+    let Source::Compose {
+      content: Some(out), ..
+    } = retag(&source, "runner:1.4", "1.5").unwrap()
+    else {
+      panic!("应保留 Compose 来源")
+    };
+    let doc = crate::render::parse_compose(&out).unwrap();
+    assert_eq!(doc["services"]["runner"]["image"], "runner:1.5");
+    assert_eq!(
+      doc["services"]["runner"]["environment"]["PASS"],
+      "[[K]]"
+    );
+    assert_eq!(
+      doc["configs"]["job"]["content"],
+      "image: runner:1.4\nimage: only-embedded:1.0\n"
+    );
+    assert!(retag(&source, "only-embedded:1.0", "2").is_err());
+  }
+
   use super::*;
 
   #[test]
@@ -713,7 +768,10 @@ mod tests {
     else {
       panic!()
     };
-    assert!(c.contains("    image: \"halo/halo:2.21\"\n"));
+    assert_eq!(
+      crate::render::parse_compose(&c).unwrap()["services"]["app"]["image"],
+      "halo/halo:2.21"
+    );
     assert!(c.contains("image: mysql:8.0.36\n"));
     assert!(retag(&source, "nope:1", "2").is_err());
     assert_eq!(

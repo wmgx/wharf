@@ -400,3 +400,19 @@ fn global_caddy_directive_order() {
     ]
   );
 }
+
+#[test]
+fn plan_time_caddy_syntax_precheck() {
+  for invalid in [
+    "order respond before basic_auth",
+    "header { X-A 1",
+    "respond 200 }",
+    "@admin",
+    "reverse_proxy",
+  ] {
+    assert!(check_custom_caddy(invalid).is_err(), "{invalid}");
+  }
+  let file = "{\n  auto_https off\n}\nexample.test {\n  respond <<PAGE\n  { \"未闭合的正文引号\n  PAGE 200\n}\n";
+  assert!(check_caddyfile(file).is_ok());
+  assert!(check_caddyfile(file.trim_end_matches("}\n")).is_err());
+}

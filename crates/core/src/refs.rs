@@ -53,7 +53,7 @@ fn parse(inner: &str) -> Option<Ref<'_>> {
 /// 文本里引用到的服务（去重、按出现顺序）。
 pub fn used(text: &str) -> Vec<String> {
   let mut out: Vec<String> = Vec::new();
-  scan(text, |r| {
+  scan(text, true, |r| {
     if !out.iter().any(|s| s == r.service) {
       out.push(r.service.to_string());
     }
@@ -82,6 +82,7 @@ pub fn uses(
 /// 逐个替换 `[[@...]]`，其余内容原样保留。
 fn scan(
   text: &str,
+  recover_nested: bool,
   mut f: impl FnMut(&Ref) -> Result<String, ApiError>,
 ) -> Result<String, ApiError> {
   let mut out = String::with_capacity(text.len());
@@ -90,13 +91,21 @@ fn scan(
     let Some(len) = rest[start + 2..].find("]]") else {
       break;
     };
-    let inner = &rest[start + 2..start + 2 + len];
+    let end = start + 2 + len;
+    let start = if recover_nested {
+      rest[start + 2..end]
+        .rfind("[[@")
+        .map_or(start, |i| start + 2 + i)
+    } else {
+      start
+    };
+    let inner = &rest[start + 2..end];
     out.push_str(&rest[..start]);
     match parse(inner) {
       Some(r) => out.push_str(&f(&r)?),
-      None => out.push_str(&rest[start..start + 4 + len]),
+      None => out.push_str(&rest[start..end + 2]),
     }
-    rest = &rest[start + 4 + len..];
+    rest = &rest[end + 2..];
   }
   out.push_str(rest);
   Ok(out)
@@ -113,7 +122,7 @@ pub fn resolve(
     return Ok(text.to_string());
   }
   let my_server = &world.services[me].spec.server;
-  scan(text, |r| {
+  scan(text, false, |r| {
     let row = world.services.get(r.service).ok_or_else(|| {
       ApiError::invalid(format!(
         "服务 {me} 引用的服务 {} 不存在",
@@ -188,6 +197,11 @@ pub fn resolve(
 
 #[cfg(test)]
 mod tests {
+  #[test]
+  fn unclosed_at_bracket_does_not_swallow_scanned_ref() {
+    assert_eq!(used("[[@bad [[@db]]"), ["db"]);
+  }
+
   use super::*;
 
   #[test]
@@ -217,7 +231,8 @@ mod tests {
     let text =
       "A=[[@db]] B=[[@cache.redis:host]] C=[[@db:port]] D=[[S]]";
     assert_eq!(used(text), vec!["db", "cache"]);
-    let out = scan(text, |r| Ok(r.service.to_uppercase())).unwrap();
+    let out =
+      scan(text, true, |r| Ok(r.service.to_uppercase())).unwrap();
     assert_eq!(out, "A=DB B=CACHE C=DB D=[[S]]");
   }
 }
