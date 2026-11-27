@@ -715,6 +715,7 @@ pub(crate) async fn make_plan_inner(
   let status =
     gather_status(state, &snap, &current, &desired, &net, &mut b)
       .await;
+  reconcile_pending_deletes(state, &mut snap, &status).await?;
   mark("容器状态");
   let account_refs = crate::render::service_account_refs(&desired);
   if account_refs != crate::render::service_account_refs(&current) {
@@ -1597,6 +1598,51 @@ fn leftovers<'a>(
         && !desired.services.contains_key(*name)
     })
     .map(|(n, s)| (n.as_str(), s.as_str()))
+}
+
+/// 只销账已确认完成的普通删除，避免和正在执行的删除并发。
+async fn reconcile_pending_deletes(
+  state: &AppState,
+  snap: &mut Snapshot,
+  status: &StatusMap,
+) -> Result<(), ApiError> {
+  if snap.pending_deletes.is_empty() {
+    return Ok(());
+  }
+  let Ok(_guard) = state.apply_lock.try_lock() else {
+    return Ok(());
+  };
+  let mut confirmed = Vec::new();
+  snap.pending_deletes.retain(|p| {
+    if !p.purge_data
+      && status
+        .get(&p.server)
+        .and_then(Option::as_ref)
+        .and_then(|projects| projects.get(&p.service))
+        .is_some_and(|p| p.hash.is_none() && p.containers.is_empty())
+    {
+      confirmed.push((
+        p.service.clone(),
+        p.server.clone(),
+        p.instance_id.clone(),
+      ));
+      false
+    } else {
+      true
+    }
+  });
+  if confirmed.is_empty() {
+    return Ok(());
+  }
+  state.db.call(move |c| {
+    for (service, server, instance) in confirmed {
+      c.execute(
+        "DELETE FROM pending_deletes WHERE service = ?1 AND server = ?2 AND instance_id = ?3 AND purge_data = 0",
+        rusqlite::params![service, server, instance],
+      ).map_err(db::sql_err)?;
+    }
+    Ok(())
+  }).await
 }
 
 /// 上次删除没做完：项目目录（Wharf 的部署指纹）还在。别人同名的项目没有指纹，不碰。
@@ -2868,6 +2914,42 @@ mod tests {
       b.items.iter().map(|i| i.address.as_str()).collect();
     assert_eq!(found, ["service/half"]);
     assert!(b.items[0].needs_confirm());
+  }
+
+  #[tokio::test]
+  async fn plan_clears_confirmed_non_purge_delete() {
+    let state = crate::rules::tests::test_state();
+    state
+      .db
+      .call(|c| {
+        db::put_pending_delete(
+          c,
+          &db::PendingDeleteRow {
+            service: "s1".into(),
+            server: "s1".into(),
+            instance_id: "svc_old".into(),
+            purge_data: false,
+            has_relative_mounts: true,
+          },
+        )
+      })
+      .await
+      .unwrap();
+    state.hub.mock_agent("s1", false, |op| match op {
+      wharf_api_types::agent::AgentOp::ProjectStatus { projects } => {
+        assert_eq!(projects, ["s1"]);
+        Ok(json!([{"project": "s1", "containers": []}]))
+      }
+      _ => panic!("意外的 agent 请求"),
+    });
+    make_plan(&state, PlanRequest::default()).await.unwrap();
+    assert!(
+      state
+        .db
+        .call(|c| Ok(db::all_pending_deletes(c)?.is_empty()))
+        .await
+        .unwrap()
+    );
   }
 
   #[test]

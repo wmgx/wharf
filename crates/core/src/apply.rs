@@ -678,8 +678,9 @@ async fn execute(
   offset: usize,
   actor: Option<crate::security_receipt::Actor>,
   cancel: CancellationToken,
-  _guard: OwnedMutexGuard<()>,
+  guard: OwnedMutexGuard<()>,
 ) {
+  let mut guard = Some(guard);
   let run_id = lock(&run).run_id.clone();
   let mut failed = false;
   let scope_services = lock(&state.runs.active)
@@ -728,8 +729,23 @@ async fn execute(
       )
       .await;
     }
-    let result =
-      run_step(&state, &run_id, &step.step, progress, &cancel).await;
+    let result = if let Step::CleanupData {
+      service,
+      server,
+      instance_id,
+    } = &step.step
+    {
+      crate::jobs::cleanup_data(
+        &state,
+        (service, server, instance_id.as_deref()),
+        progress,
+        &cancel,
+        guard.take().expect("清理任务必须先持有 apply 锁"),
+      )
+      .await
+    } else {
+      run_step(&state, &run_id, &step.step, progress, &cancel).await
+    };
     crate::security_receipt::completed_step(
       &state,
       actor.as_ref(),
@@ -1077,21 +1093,8 @@ pub(crate) async fn run_step(
       )
       .await?;
     }
-    Step::CleanupData {
-      service,
-      server,
-      instance_id,
-    } => {
-      crate::jobs::cleanup_data(
-        state,
-        &snap,
-        service,
-        server,
-        instance_id.as_deref(),
-        progress,
-        cancel,
-      )
-      .await?;
+    Step::CleanupData { .. } => {
+      return Err(ApiError::internal("清理只能由定时任务执行"));
     }
     Step::GatewaySync { gateway, expect } => {
       let gw = world.gateways.get(gateway).ok_or_else(|| {
@@ -1703,19 +1706,15 @@ async fn restore(
 ) {
   progress("部署失败，恢复原来的容器".into());
   let cancel = CancellationToken::new();
-  let down: Result<serde_json::Value, ApiError> = state
-    .hub
-    .call(
-      server,
-      AgentOp::ProjectDown {
-        project: service.to_string(),
-        purge: false,
-      },
-      SHORT_TIMEOUT,
-      Some(progress.clone()),
-      &cancel,
-    )
-    .await;
+  let down = project_down(
+    state,
+    (server, service),
+    false,
+    true,
+    progress.clone(),
+    &cancel,
+  )
+  .await;
   if let Err(e) = down {
     progress(format!("删除新容器失败：{}", e.message));
   }
@@ -1800,37 +1799,15 @@ async fn service_down(
       "服务 {service} 在 {server} 上的删除已完成或取消"
     )));
   }
-  let op = AgentOp::ProjectDown {
-    project: service.to_string(),
-    purge: purge_data,
-  };
-  if has_relative_mounts {
-    // 用同一条连接核对能力并发请求，防止重连时切到旧 agent。
-    let conn = state.hub.conn_id(server).filter(|_| state.hub.supports_safe_delete(server))
-      .ok_or_else(|| ApiError::new(ErrorCode::Conflict, format!("服务器 {server} 的 agent 版本旧，删除带相对挂载的服务 {service} 会误删项目目录内的数据"))
-        .with_hint("先运行 wharf upgrade 升级 agent 后重试").suggest("wharf upgrade"))?;
-    state
-      .hub
-      .call_bound::<serde_json::Value>(
-        (server, conn),
-        op,
-        SHORT_TIMEOUT,
-        Some(progress),
-        cancel,
-      )
-      .await?;
-  } else {
-    state
-      .hub
-      .call::<serde_json::Value>(
-        server,
-        op,
-        SHORT_TIMEOUT,
-        Some(progress),
-        cancel,
-      )
-      .await?;
-  }
+  project_down(
+    state,
+    (server, service),
+    purge_data,
+    has_relative_mounts,
+    progress,
+    cancel,
+  )
+  .await?;
   let (service, server, instance_id) = (
     service.to_string(),
     server.to_string(),
@@ -1847,6 +1824,40 @@ async fn service_down(
       )
     })
     .await
+}
+
+async fn project_down(
+  state: &AppState,
+  (server, service): (&str, &str),
+  purge: bool,
+  require_safe_delete: bool,
+  progress: ProgressFn,
+  cancel: &CancellationToken,
+) -> Result<(), ApiError> {
+  let op = AgentOp::ProjectDown {
+    project: service.to_string(),
+    purge,
+  };
+  let _: serde_json::Value = if require_safe_delete {
+    // 用同一条连接核对能力并发请求，防止重连时切到旧 agent。
+    let conn = state.hub.safe_delete_conn_id(server)?;
+    state
+      .hub
+      .call_bound(
+        (server, conn),
+        op,
+        SHORT_TIMEOUT,
+        Some(progress),
+        cancel,
+      )
+      .await?
+  } else {
+    state
+      .hub
+      .call(server, op, SHORT_TIMEOUT, Some(progress), cancel)
+      .await?
+  };
+  Ok(())
 }
 
 async fn has_deployment(
@@ -2043,6 +2054,54 @@ mod tests {
     .await
     .unwrap_err();
     assert_eq!(err.code, ErrorCode::Conflict);
+  }
+
+  #[tokio::test]
+  async fn offline_agent_is_reported_offline_for_relative_bind_delete()
+   {
+    let state = crate::rules::tests::test_state();
+    let err = service_down(
+      &state,
+      &snapshot::Snapshot::default(),
+      ("s1", "s1"),
+      (false, None, true),
+      Arc::new(|_| {}),
+      &CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code, ErrorCode::AgentOffline);
+  }
+
+  #[tokio::test]
+  async fn takeover_rollback_does_not_send_project_down_to_old_agent()
+  {
+    let state = crate::rules::tests::test_state();
+    let (sent, received) = tokio::sync::oneshot::channel();
+    let mut sent = Some(sent);
+    state.hub.mock_agent("s1", false, move |op| {
+      assert!(
+        matches!(op, AgentOp::Unretire { items } if items.len() == 1)
+      );
+      sent.take().unwrap().send(()).unwrap();
+      Ok(serde_json::Value::Null)
+    });
+    let progress: ProgressFn = Arc::new(|_| {});
+    restore(
+      &state,
+      "s1",
+      "s1",
+      vec![Retired {
+        id: "s1".into(),
+        name: "s1".into(),
+        renamed: None,
+        restart: "no".into(),
+        was_running: true,
+      }],
+      &progress,
+    )
+    .await;
+    received.await.unwrap();
   }
 
   #[test]

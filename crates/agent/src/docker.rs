@@ -489,10 +489,8 @@ impl Docker {
       .await?
       .check("docker compose down")?;
     if purge {
-      crate::dirfd::remove_service(
-        std::path::Path::new("/srv"),
-        project,
-      )?;
+      crate::dirfd::remove_service(Path::new("/srv"), project, ctx)
+        .await?;
     }
     if !clean_project_dir(&dir)? {
       ctx.say(format!(
@@ -525,7 +523,7 @@ impl Docker {
       .args([
         "inspect",
         "--format",
-        "{{json .Name}} {{json .Mounts}}",
+        r#"{{json .Name}} {{json (index .Config.Labels "wharf.system")}} {{json .Mounts}}"#,
       ])
       .args(ids.iter().copied())
       .timeout(timeout)
@@ -817,6 +815,7 @@ pub(crate) fn clean_project_dir(
           "link.key",
           "link.key.prev",
           "link.key.tmp",
+          "link.tmp",
           CONFIG_HASH_FILE,
           ".wharf-config-hash.tmp",
         ],
@@ -862,6 +861,8 @@ fn parse_bind_mounts(
     kind: String,
     #[serde(default)]
     source: PathBuf,
+    #[serde(default)]
+    destination: PathBuf,
   }
 
   output
@@ -869,16 +870,26 @@ fn parse_bind_mounts(
     .map(|line| {
       let invalid =
         || ApiError::internal("Docker 返回的容器挂载信息无效");
-      let (name, mounts) =
-        line.split_once(' ').ok_or_else(invalid)?;
+      let (name, rest) = line.split_once(' ').ok_or_else(invalid)?;
+      let mut fields = serde_json::Deserializer::from_str(rest)
+        .into_iter::<String>();
+      let role =
+        fields.next().ok_or_else(invalid)?.map_err(|_| invalid())?;
+      let mounts = &rest[fields.byte_offset()..];
       let name: String =
         serde_json::from_str(name).map_err(|_| invalid())?;
+      let system = matches!(role.as_str(), "agent" | "core" | "1");
       let mounts: Option<Vec<Mount>> =
         serde_json::from_str(mounts).map_err(|_| invalid())?;
       let paths = mounts
         .into_iter()
         .flatten()
-        .filter(|m| m.kind == "bind")
+        .filter(|m| {
+          m.kind == "bind"
+            && !(system
+              && m.source == Path::new("/srv")
+              && m.destination == Path::new("/srv"))
+        })
         .map(|m| {
           if m.source.is_absolute() {
             Ok(m.source)
@@ -1228,10 +1239,10 @@ mod tests {
   #[test]
   fn containers_using_path_catches_exact_child_and_parent_mounts() {
     use std::path::Path;
-    let inspect = r#""/indexer" [{"Type":"bind","Source":"/srv/photos/originals"}]
-"/backup-tool" [{"Type":"bind","Source":"/srv"}]
-"/other" [{"Type":"bind","Source":"/srv/photos2"}]
-"/exact" [{"Type":"bind","Source":"/srv/photos"}]"#;
+    let inspect = r#""/indexer" "" [{"Type":"bind","Source":"/srv/photos/originals"}]
+"/backup-tool" "" [{"Type":"bind","Source":"/srv","Destination":"/srv"}]
+"/other" "" [{"Type":"bind","Source":"/srv/photos2"}]
+"/exact" "" [{"Type":"bind","Source":"/srv/photos"}]"#;
     let containers = super::parse_bind_mounts(inspect).unwrap();
     assert_eq!(
       super::containers_using_path(
@@ -1240,6 +1251,33 @@ mod tests {
       ),
       ["backup-tool", "exact", "indexer"]
     );
+  }
+
+  #[test]
+  fn bind_mount_users_ignores_only_system_management_mounts() {
+    let inspect = r#""/wharf-agent" "agent" [{"Type":"bind","Source":"/srv","Destination":"/srv"}]
+"/wharf-agent-old" "1" [{"Type":"bind","Source":"/srv","Destination":"/srv"}]
+"/wharf-core" "core" [{"Type":"bind","Source":"/srv","Destination":"/srv"}]
+"/dedicated" "core" [{"Type":"bind","Source":"/srv/s1","Destination":"/data"}]"#;
+    let containers = super::parse_bind_mounts(inspect).unwrap();
+    assert_eq!(
+      super::containers_using_path(
+        std::path::Path::new("/srv/s1"),
+        &containers
+      ),
+      ["dedicated"]
+    );
+  }
+
+  #[test]
+  fn clean_project_dir_removes_interrupted_link_write() {
+    let root = tempfile::tempdir().unwrap();
+    let gateway = root.path().join("wharf-gw-s1");
+    let conf = gateway.join("conf");
+    std::fs::create_dir_all(&conf).unwrap();
+    std::fs::write(conf.join("link.tmp"), "interrupted").unwrap();
+    assert!(super::clean_project_dir(&gateway).unwrap());
+    assert!(!gateway.exists());
   }
 
   #[test]

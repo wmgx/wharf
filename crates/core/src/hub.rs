@@ -340,8 +340,16 @@ impl Hub {
       .get(server)
       .cloned()
       .ok_or_else(|| offline(server))?;
-    Self::call_conn(id, server, conn, op, timeout, progress, cancel)
-      .await
+    Self::call_conn(
+      id,
+      server,
+      conn,
+      op,
+      timeout,
+      (progress, None),
+      cancel,
+    )
+    .await
   }
 
   pub async fn call_bound<T: DeserializeOwned>(
@@ -363,7 +371,57 @@ impl Hub {
       conn,
       op,
       timeout,
-      progress,
+      (progress, None),
+      cancel,
+    )
+    .await
+  }
+
+  pub(crate) fn safe_delete_conn_id(
+    &self,
+    server: &str,
+  ) -> Result<u64, ApiError> {
+    let conns = lock(&self.conns);
+    let conn = conns
+      .get(server)
+      .filter(|conn| !conn.closed.is_cancelled())
+      .ok_or_else(|| offline(server))?;
+    if conn.upgrade_only || !conn.safe_delete {
+      return Err(
+        ApiError::new(
+          ErrorCode::Conflict,
+          format!(
+            "服务器 {server} 的 agent 版本旧，无法安全删除项目"
+          ),
+        )
+        .with_hint("先运行 wharf upgrade 升级 agent 后重试")
+        .suggest("wharf upgrade"),
+      );
+    }
+    Ok(conn.conn_id)
+  }
+
+  pub(crate) async fn dispatch_cleanup(
+    &self,
+    server: &str,
+    service: &str,
+    progress: ProgressFn,
+    cancel: &CancellationToken,
+    guard: tokio::sync::OwnedMutexGuard<()>,
+  ) -> Result<wharf_api_types::agent::RemoveDataResult, ApiError> {
+    let conn = lock(&self.conns)
+      .get(server)
+      .cloned()
+      .ok_or_else(|| offline(server))?;
+    Self::call_conn(
+      self.new_id(),
+      server,
+      conn,
+      AgentOp::RemoveData {
+        service: service.to_string(),
+      },
+      Duration::from_secs(30 * 60),
+      (Some(progress), Some(guard)),
       cancel,
     )
     .await
@@ -375,7 +433,10 @@ impl Hub {
     conn: Conn,
     op: AgentOp,
     timeout: Duration,
-    progress: Option<ProgressFn>,
+    (progress, dispatch_guard): (
+      Option<ProgressFn>,
+      Option<tokio::sync::OwnedMutexGuard<()>>,
+    ),
     cancel: &CancellationToken,
   ) -> Result<T, ApiError> {
     if matches!(&op, AgentOp::RemoveData { .. })
@@ -508,15 +569,22 @@ impl Hub {
       AgentOp::RotateAgentKey(job)
         if matches!(job.phase, wharf_api_types::agent::KeyRotatePhase::Activate)
     );
-    let sent = tokio::time::timeout(
+    let sent = tokio::select! {
+      biased;
+      _ = cancel.cancelled() => {
+        lock(&conn.pending).remove(&id);
+        return Err(ApiError::new(ErrorCode::Cancelled, "已取消"));
+      },
+      sent = tokio::time::timeout(
       Duration::from_secs(5),
       conn.tx.send(CoreMsg::Request {
         id,
         timeout_ms: timeout.as_millis() as u64,
         op,
       }),
-    )
-    .await;
+      ) => sent,
+    };
+    drop(dispatch_guard);
     if !matches!(sent, Ok(Ok(()))) {
       lock(&conn.pending).remove(&id);
       return Err(offline(server));

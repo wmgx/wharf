@@ -6,10 +6,7 @@ use std::{sync::Arc, time::Duration};
 
 use rusqlite::params;
 use tokio_util::sync::CancellationToken;
-use wharf_api_types::{
-  ApiError, ErrorCode,
-  agent::{AgentOp, RemoveDataResult},
-};
+use wharf_api_types::{ApiError, ErrorCode, agent::RemoveDataResult};
 
 use crate::{
   apply,
@@ -237,12 +234,10 @@ async fn cleanups(state: &Arc<AppState>) -> Result<(), ApiError> {
 
 pub(crate) async fn cleanup_data(
   state: &AppState,
-  snap: &snapshot::Snapshot,
-  service: &str,
-  server: &str,
-  instance_id: Option<&str>,
+  (service, server, instance_id): (&str, &str, Option<&str>),
   progress: ProgressFn,
   cancel: &CancellationToken,
+  guard: tokio::sync::OwnedMutexGuard<()>,
 ) -> Result<(), ApiError> {
   let key = (
     service.to_string(),
@@ -250,35 +245,42 @@ pub(crate) async fn cleanup_data(
     instance_id.map(str::to_string),
   );
   let query = key.clone();
-  let due = state.db.call(move |c| c.query_row(
-    "SELECT EXISTS(SELECT 1 FROM cleanups WHERE service = ?1 AND server = ?2 AND instance_id IS ?3 AND due_at <= ?4)",
-    params![query.0, query.1, query.2, now_ms()], |r| r.get::<_, bool>(0)
-  ).map_err(sql_err)).await?;
-  if !due {
+  // 先留出重试间隔，避免同一条清理重复下发或挡住其余到期清理。
+  let claimed = state.db.call(move |c| {
+    let now = now_ms();
+    let retry_at = now + RETRY_AFTER_MS;
+    let updated = c.execute(
+      "UPDATE cleanups SET due_at = ?5 WHERE service = ?1 AND server = ?2 AND instance_id IS ?3 AND due_at <= ?4",
+      params![query.0, query.1, query.2, now, retry_at],
+    ).map_err(sql_err)?;
+    Ok((updated != 0).then_some(retry_at))
+  }).await?;
+  let Some(retry_at) = claimed else {
     return Ok(());
-  }
+  };
+  let snap = snapshot::load(&state.db).await?;
   let row = snap.world.services.get(service);
   if row.is_some_and(|r| r.spec.server == server)
     || snap.deployed.get(service).is_some_and(|s| s == server)
   {
     progress(format!("服务已回到 {server}，取消清理"));
+    drop(guard);
   } else if row
     .is_some_and(|r| Some(r.instance_id.as_str()) != instance_id)
   {
     progress(format!(
       "服务 {service} 已同名重建，取消旧实例的数据清理"
     ));
+    drop(guard);
   } else {
     let result: RemoveDataResult = state
       .hub
-      .call(
+      .dispatch_cleanup(
         server,
-        AgentOp::RemoveData {
-          service: service.to_string(),
-        },
-        Duration::from_secs(30 * 60),
-        Some(progress.clone()),
+        service,
+        progress.clone(),
         cancel,
+        guard,
       )
       .await?;
     if result.removed {
@@ -291,7 +293,7 @@ pub(crate) async fn cleanup_data(
     }
   }
   state.db.call(move |c| {
-    c.execute("DELETE FROM cleanups WHERE service = ?1 AND server = ?2 AND instance_id IS ?3", params![key.0, key.1, key.2]).map_err(sql_err)?;
+    c.execute("DELETE FROM cleanups WHERE service = ?1 AND server = ?2 AND instance_id IS ?3 AND due_at = ?4", params![key.0, key.1, key.2, retry_at]).map_err(sql_err)?;
     Ok(())
   }).await
 }
@@ -334,16 +336,13 @@ async fn cleanup_skips_when_service_moved_back_or_rebuilt() {
         VALUES ('service', 'app', json_object('server', ?1, 'source', json_object('image', 'fixture:1')),
           json_object('instance_id', ?2), 1, 0, 0)", params![server, instance]).map_err(sql_err)
     }).await.unwrap();
-    let lock = state.apply_lock.lock().await;
-    let snap = snapshot::load(&state.db).await.unwrap();
+    let lock = state.apply_lock.clone().lock_owned().await;
     cleanup_data(
       &state,
-      &snap,
-      "app",
-      "s1",
-      Some("svc_old"),
+      ("app", "s1", Some("svc_old")),
       Arc::new(|_| {}),
       &CancellationToken::new(),
+      lock,
     )
     .await
     .unwrap();
@@ -358,6 +357,41 @@ async fn cleanup_skips_when_service_moved_back_or_rebuilt() {
       .await
       .unwrap();
     assert_eq!(count, 0);
-    drop(lock);
   }
+}
+
+#[tokio::test]
+async fn failed_cleanup_does_not_starve_next_due_record() {
+  let state = crate::rules::tests::test_state();
+  state.hub.mock_safe_delete_agent("s1", |_| {
+    Err(ApiError::invalid("项目仍在部署"))
+  });
+  let (sent, received) = tokio::sync::oneshot::channel();
+  let mut sent = Some(sent);
+  state.hub.mock_safe_delete_agent("s2", move |op| {
+    assert!(matches!(op, wharf_api_types::agent::AgentOp::RemoveData { service } if service == "s2"));
+    sent.take().unwrap().send(()).unwrap();
+    Ok(serde_json::json!({"removed": true, "blocked_by": []}))
+  });
+  state.db.call(|c| {
+    c.execute_batch(
+      "INSERT INTO cleanups (service, server, due_at) VALUES ('s1', 's1', 0), ('s2', 's2', 1)",
+    ).map_err(sql_err)
+  }).await.unwrap();
+  let guard = state.apply_lock.clone().lock_owned().await;
+  let err = cleanup_data(
+    &state,
+    ("s1", "s1", None),
+    Arc::new(|_| {}),
+    &CancellationToken::new(),
+    guard,
+  )
+  .await
+  .unwrap_err();
+  assert_eq!(err.code, ErrorCode::InvalidInput);
+  cleanups(&state).await.unwrap();
+  tokio::time::timeout(Duration::from_secs(2), received)
+    .await
+    .unwrap()
+    .unwrap();
 }

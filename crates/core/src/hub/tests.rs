@@ -213,6 +213,49 @@ impl Hub {
 }
 
 #[tokio::test]
+async fn dispatched_cleanup_releases_apply_lock_and_sends_cancel() {
+  let state = crate::rules::tests::test_state();
+  state.hub.mock_safe_delete_agent("s1", |_| unreachable!());
+  let (tx, mut rx) = mpsc::channel(4);
+  lock(&state.hub.conns).get_mut("s1").unwrap().tx = tx;
+  let guard = state.apply_lock.clone().lock_owned().await;
+  let cancel = CancellationToken::new();
+  let job = tokio::spawn({
+    let state = state.clone();
+    let cancel = cancel.clone();
+    async move {
+      state
+        .hub
+        .dispatch_cleanup(
+          "s1",
+          "s1",
+          Arc::new(|_| {}),
+          &cancel,
+          guard,
+        )
+        .await
+    }
+  });
+  let Some(CoreMsg::Request {
+    id,
+    op: AgentOp::RemoveData { .. },
+    ..
+  }) = rx.recv().await
+  else {
+    panic!("应发送清理请求");
+  };
+  assert!(state.apply_lock.try_lock().is_ok());
+  cancel.cancel();
+  assert!(
+    matches!(rx.recv().await, Some(CoreMsg::Cancel { id: cancelled }) if cancelled == id)
+  );
+  assert_eq!(
+    job.await.unwrap().unwrap_err().code,
+    ErrorCode::Cancelled
+  );
+}
+
+#[tokio::test]
 async fn agent_upgrade_needs_no_bound_core_server_or_probe_support() {
   let state = crate::rules::tests::test_state();
   state

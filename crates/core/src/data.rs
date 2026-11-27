@@ -23,7 +23,9 @@ pub fn has_relative_bind(spec: &ServiceSpec) -> bool {
       ..
     } => compose_mounts("", content).iter().any(|mount| {
       mount.kind == DataKind::ExternalDir
-        && mount.source.starts_with('.')
+        && !mount.source.is_empty()
+        && !Path::new(&mount.source).is_absolute()
+        && !mount.source.starts_with('~')
     }),
     _ => false,
   }
@@ -269,6 +271,15 @@ mod tests {
       })).unwrap();
       assert_eq!(has_relative_bind(&spec), expected, "{mount}");
     }
+  }
+
+  #[test]
+  fn detects_relative_bind_without_dot_in_long_syntax() {
+    let spec: ServiceSpec = serde_json::from_value(serde_json::json!({
+      "server": "s1",
+      "source": {"compose": {"content": "services: {app: {volumes: [{type: bind, source: data, target: /data}]}}"}}
+    })).unwrap();
+    assert!(has_relative_bind(&spec));
   }
 
   #[test]

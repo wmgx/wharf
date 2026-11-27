@@ -435,6 +435,27 @@ async fn session(
         }
       }
       CoreMsg::Request { id, timeout_ms, op } => {
+        // 先占服务锁，再接收后续部署或迁移请求。
+        let removal = if let AgentOp::RemoveData { service } = &op {
+          match ops.reserve_removal(service) {
+            Ok(guard) => Some(guard),
+            Err(error) => {
+              if tx
+                .send(AgentMsg::Response {
+                  id,
+                  result: Err(error),
+                })
+                .await
+                .is_err()
+              {
+                break Ok(());
+              }
+              continue;
+            }
+          }
+        } else {
+          None
+        };
         let cancel = session_cancel.child_token();
         running.lock().await.insert(id, cancel.clone());
         let input = if matches!(
@@ -509,6 +530,7 @@ async fn session(
             }
             (op, _) => ops.handle(op, &ctx).await,
           };
+          drop(removal);
           inputs.lock().await.remove(&id);
           let timed_out = deadline.is_finished();
           deadline.abort();
