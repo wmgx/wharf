@@ -443,6 +443,7 @@ async fn backup_impl(
   let to = state.db.call(|c| db::setting(c, TO)).await?.ok_or_else(
     || {
       ApiError::invalid("还没有开启控制面备份")
+        .with_hint("本机快速回退用 wharf core snapshot，整机异地灾备用 wharf backup core")
         .suggest("wharf backup core --to <server>")
     },
   )?;

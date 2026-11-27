@@ -93,7 +93,7 @@ pub fn plan_trigger_reason(
 
 fn conflict(message: impl Into<String>) -> ApiError {
   ApiError::new(ErrorCode::Conflict, message)
-    .with_hint("清理控制面磁盘或用 wharf core snapshot rm <id> 删除旧快照。紧急情况下 Admin 可显式加 --skip-snapshot。整机灾备使用 wharf backup core")
+    .with_hint("清理控制面磁盘或用 wharf core snapshot rm <id> 删除旧快照。整机灾备使用 wharf backup core")
     .suggest("wharf core snapshot list")
 }
 
@@ -589,7 +589,15 @@ pub async fn before(
       .into_iter()
       .collect();
   }
-  create(&s.db, &s.data_dir, info).await.map(Some)
+  create(&s.db, &s.data_dir, info)
+    .await
+    .map(Some)
+    .map_err(|error| {
+      let hint = error.hint.as_deref().unwrap_or_default();
+      let hint =
+        format!("{hint}。紧急情况下 Admin 可显式加 --skip-snapshot");
+      error.with_hint(hint)
+    })
 }
 
 pub async fn finish_upgrade(s: &AppState, id: String, started: bool) {

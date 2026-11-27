@@ -52,6 +52,8 @@ pub fn offline(
 ) -> Result<(), ApiError> {
   match cmd {
     OfflineCommand::List { json } => {
+      let _lock = process_lock(data_dir, true)?;
+      let _sqlite = lock_sqlite(&data_dir.join("wharf.db"))?;
       let v = view(&directory(data_dir)?)?;
       if json {
         println!(
