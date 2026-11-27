@@ -100,6 +100,9 @@ fn warnings<'a>(
     warnings.extend(
       service_warnings(&row.spec, public, &secrets)
         .into_iter()
+        .chain(crate::shared_volumes::implicit_warnings(
+          world, name, &row.spec,
+        ))
         .map(|detail| (format!("服务 {name}"), detail)),
     );
   }
@@ -630,6 +633,52 @@ mod tests {
       "source": {"compose": {"content": content}},
     }))
     .unwrap()
+  }
+
+  #[test]
+  fn implicit_srv_mount_warns_to_use_from_service() {
+    let mut world = World::default();
+    world.servers.insert(
+      "s1".into(),
+      crate::world::ServerRow {
+        settings: Default::default(),
+        version: 1,
+      },
+    );
+    let legacy = compose(
+      "x-a: &a {volumes: ['/srv/photos/originals:/photos:ro']}\nservices: {app: {<<: *a, image: 'fixture:1'}}",
+    );
+    for (name, spec) in [
+      (
+        "photos",
+        serde_json::from_value(
+          json!({"server":"s1","source":{"image":"fixture:1"}}),
+        )
+        .unwrap(),
+      ),
+      ("legacy", legacy),
+    ] {
+      world
+        .apply_changes(&[
+          wharf_api_types::spec::Change::UpsertService {
+            name: name.into(),
+            spec,
+            adopt: None,
+          },
+        ])
+        .unwrap();
+    }
+    world.validate().unwrap();
+    let snap = Snapshot {
+      world,
+      ..Default::default()
+    };
+    assert!(
+      doctor_warnings(&snap)
+        .iter()
+        .any(|(_, message)| message.contains("photos:originals"))
+    );
+    assert!(plan_warnings(&snap, &snap.world, &[], &[]).is_empty());
   }
 
   #[test]

@@ -551,37 +551,54 @@ async fn preflight(
   cancel: &CancellationToken,
 ) -> Result<ResticPreflightResult, ApiError> {
   let backup = matches!(&mode, ResticPreflightMode::Backup);
+  let conn = crate::shared_volumes::consumers_on(
+    &snap.world,
+    service,
+    &w.server,
+  )
+  .next()
+  .map(|_| state.hub.shared_volumes_conn_id(&w.server))
+  .transpose()?;
   let managed_mounts =
     crate::data::mounts(service, &snap.world.services[service].spec)
       .into_iter()
       .filter(|m| m.kind == wharf_api_types::view::DataKind::Managed)
       .map(|m| m.source)
       .collect();
-  let result: ResticPreflightResult = state
-    .hub
-    .call(
-      &w.server,
-      job(
-        snap,
+  let op = job(
+    snap,
+    &w.server,
+    service,
+    rest_repo(&w.target_ip, REST_SERVER_PORT, service, &creds.http),
+    &creds.key,
+    ResticAction::Preflight(ResticPreflight {
+      mode,
+      managed_mounts,
+    }),
+  );
+  let result: ResticPreflightResult = if let Some(conn) = conn {
+    state
+      .hub
+      .call_bound(
+        (&w.server, conn),
+        op,
+        SERVER_TIMEOUT,
+        Some(progress.clone()),
+        cancel,
+      )
+      .await?
+  } else {
+    state
+      .hub
+      .call(
         &w.server,
-        service,
-        rest_repo(
-          &w.target_ip,
-          REST_SERVER_PORT,
-          service,
-          &creds.http,
-        ),
-        &creds.key,
-        ResticAction::Preflight(ResticPreflight {
-          mode,
-          managed_mounts,
-        }),
-      ),
-      SERVER_TIMEOUT,
-      Some(progress.clone()),
-      cancel,
-    )
-    .await?;
+        op,
+        SERVER_TIMEOUT,
+        Some(progress.clone()),
+        cancel,
+      )
+      .await?
+  };
   if result.is_mountpoint && !backup {
     return Err(
       ApiError::new(
@@ -608,9 +625,9 @@ async fn preflight(
       .collect::<Vec<_>>()
       .join("、");
     let hint = if backup {
-      "先停止共用该目录的服务，或将对方挂载改为只读（:ro）"
+      "先用 wharf service stop 停止共用该目录的服务，或将对方挂载改为只读（:ro）"
     } else {
-      "先停止共用该目录的容器再恢复"
+      "先用 wharf service stop 停止共用该目录的服务，并停止其他挂载该目录的容器，再恢复"
     };
     return Err(
       ApiError::new(

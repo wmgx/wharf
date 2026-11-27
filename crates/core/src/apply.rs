@@ -1154,13 +1154,18 @@ pub(crate) async fn run_step(
       from,
       to,
       instance_id,
+      shared_data,
     } => {
       check_step_instance(world, service, instance_id.as_deref())?;
+      let shared = *shared_data
+        || crate::shared_volumes::consumers_on(world, service, to)
+          .next()
+          .is_some();
       crate::migrate::volume_sync(
         state,
         &net,
         service,
-        (from, to),
+        (from, to, shared),
         !world.services[service].spec.stopped,
         progress,
         cancel,
@@ -2282,9 +2287,17 @@ async fn project_down(
     project: service.to_string(),
     purge,
   };
-  let _: serde_json::Value = if require_safe_delete {
-    // 用同一条连接核对能力并发请求，防止重连时切到旧 agent。
-    let conn = state.hub.safe_delete_conn_id(server)?;
+  let conn = if purge {
+    if require_safe_delete {
+      state.hub.safe_delete_conn_id(server)?;
+    }
+    Some(state.hub.shared_volumes_conn_id(server)?)
+  } else if require_safe_delete {
+    Some(state.hub.safe_delete_conn_id(server)?)
+  } else {
+    None
+  };
+  let _: serde_json::Value = if let Some(conn) = conn {
     state
       .hub
       .call_bound(
@@ -2909,4 +2922,24 @@ mod tests {
       ErrorCode::Forbidden
     );
   }
+}
+
+#[tokio::test]
+async fn purge_delete_rejects_old_agent_without_shared_volumes() {
+  let state = crate::rules::tests::test_state();
+  state
+    .hub
+    .mock_safe_delete_agent("s1", |_| panic!("不能发送删数请求"));
+  let e = project_down(
+    &state,
+    ("s1", "photos"),
+    true,
+    false,
+    Arc::new(|_| {}),
+    &CancellationToken::new(),
+  )
+  .await
+  .unwrap_err();
+  assert_eq!(e.code, ErrorCode::Conflict);
+  assert_eq!(e.suggest, ["wharf upgrade"]);
 }

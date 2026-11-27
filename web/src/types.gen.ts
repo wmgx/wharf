@@ -731,14 +731,16 @@ export interface CustomAlertRuleView {
 /**
  * 数据归属：决定迁移、备份、删除时动不动它。
  */
-export type DataKind = "managed" | "external_dir" | "named_volume";
+export type DataKind = "managed" | "shared" | "external_dir" | "named_volume";
 
 export interface DataMount {
   /**
    * compose 里的服务名；image / build 来源为空。
    */
   container?: string | null;
+  from_service?: string | null;
   kind: DataKind;
+  read_only?: boolean;
   resolved?: string | null;
   /**
    * 宿主机路径或卷名；匿名卷为空。
@@ -3158,6 +3160,14 @@ export interface VersionCheck {
  * 目录挂载：宿主机 `/srv/<service>/<name>/` 挂到容器内 `target`。
  */
 export interface VolumeSpec {
-  name: string;
+  /**
+   * 同机拥有者的托管卷，格式为 <服务名>:<卷名>。
+   */
+  from_service?: string | null;
+  /**
+   * 本地卷名。共享卷省略时取拥有者的卷名。
+   */
+  name?: string;
+  read_only?: boolean;
   target: string;
 }

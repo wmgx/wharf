@@ -427,6 +427,52 @@ fn mock_backup_path(
 }
 
 #[tokio::test]
+async fn backup_and_restore_block_shared_mounts_before_stopping_owner()
+ {
+  let state = test_state();
+  seed_servers(&state).await;
+  seed_service(&state, "svc-a", true).await;
+  state.db.call(|c| db::apply_write(c, &db::Write::Upsert {
+    kind:"service".into(), name:"reader".into(),
+    spec:json!({"server":"s1","source":{"image":"fixture:1"},"volumes":[
+      {"name":"data","target":"/data","from_service":"svc-a:data","read_only":true}
+    ]}), meta:json!({}),
+  })).await.unwrap();
+  mock_backup_path(
+    &state,
+    |op| match op {
+      AgentOp::Probe { .. } => Ok(json!([true])),
+      AgentOp::Restic(job) => {
+        let ResticAction::Preflight(check) = job.action else {
+          panic!("预检冲突后不应执行停服或备份恢复")
+        };
+        let rw = matches!(check.mode, ResticPreflightMode::Backup);
+        let name = if rw { "writer" } else { "reader" };
+        Ok(
+          json!({"conflicting_users":[{"container":name,"project":name,"source":"/srv/svc-a/data","rw":rw}]}),
+        )
+      }
+      _ => panic!("不能自动停服"),
+    },
+    None,
+  );
+  state.hub.mock_shared_volumes_agent("s1");
+  let cancel = CancellationToken::new();
+  let progress: ProgressFn = Arc::new(|_| {});
+  for error in [
+    backup(&state, "r1", "svc-a", progress.clone(), &cancel)
+      .await
+      .unwrap_err(),
+    restore(&state, "svc-a", "abcd1234", None, progress, &cancel)
+      .await
+      .unwrap_err(),
+  ] {
+    assert_eq!(error.code, ErrorCode::Conflict);
+    assert!(error.hint.unwrap().contains("wharf service stop"));
+  }
+}
+
+#[tokio::test]
 async fn preflight_failure_never_stops_service() {
   let state = test_state();
   seed_servers(&state).await;

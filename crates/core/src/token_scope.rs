@@ -344,6 +344,20 @@ pub fn require_plan_request(
         .then(|| format!("route/{host}")),
       )
     };
+  let shared_refs = req
+    .partial
+    .iter()
+    .flat_map(|fleet| fleet.services.values())
+    .chain(req.changes.iter().filter_map(|change| match change {
+      Change::UpsertService { spec, .. } => Some(spec),
+      _ => None,
+    }));
+  blocked.extend(
+    shared_refs
+      .flat_map(crate::shared_volumes::owners)
+      .filter(|owner| !services.contains(*owner))
+      .map(|owner| format!("service/{owner}")),
+  );
   if let Some(partial) = &req.partial {
     blocked
       .extend(partial.servers.keys().map(|n| format!("server/{n}")));
@@ -684,4 +698,29 @@ mod tests {
       }
     }
   }
+}
+
+#[test]
+fn scoped_token_cannot_mount_out_of_scope_service_volume() {
+  let mut auth = crate::security_receipt::tests::auth(false);
+  auth.services = Some(BTreeSet::from(["reader".into()]));
+  let spec = serde_json::from_value(serde_json::json!({
+    "server":"s1", "source":{"image":"fixture:1"},
+    "volumes":[{"target":"/data","from_service":"photos:originals"}]
+  }))
+  .unwrap();
+  let req = PlanRequest {
+    changes: vec![Change::UpsertService {
+      name: "reader".into(),
+      spec,
+      adopt: None,
+    }],
+    ..Default::default()
+  };
+  assert_eq!(
+    require_plan_request(&auth, &World::default(), &req)
+      .unwrap_err()
+      .code,
+    ErrorCode::Forbidden
+  );
 }
