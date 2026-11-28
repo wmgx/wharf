@@ -520,7 +520,7 @@ async fn push_frames(
       }
       2 if size == 0 => {
         let _: serde_json::Value =
-          tx.files(FilesOp::Mkdir { service, path }).await?;
+          tx.files(FilesOp::DataMkdir { service, path }).await?;
       }
       3 if size == 0 && opts.delete => deletes.push(path),
       3 => {

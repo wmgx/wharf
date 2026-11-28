@@ -2,7 +2,7 @@
 
 use std::{collections::BTreeMap, fmt::Write, time::Duration};
 
-use chrono::{DateTime, Datelike, TimeDelta, Utc};
+use chrono::{DateTime, Utc};
 use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -59,26 +59,6 @@ fn service_names(raw: &str) -> Result<Vec<&str>, ApiError> {
     return Err(ApiError::invalid("合看至少需要 2 个不同的服务"));
   }
   Ok(names)
-}
-
-pub(super) fn anchor_since(value: &str) -> Option<String> {
-  let since = log_search::since_arg(value)?;
-  if DateTime::parse_from_rfc3339(&since).is_ok() {
-    return Some(since);
-  }
-  let (unit, digits) = since.as_bytes().split_last()?;
-  let seconds_per_unit = match unit {
-    b's' => 1,
-    b'm' => 60,
-    b'h' => 3600,
-    _ => return None,
-  };
-  let seconds =
-    std::str::from_utf8(digits).ok()?.parse::<i64>().ok()?;
-  let delta =
-    TimeDelta::try_seconds(seconds.checked_mul(seconds_per_unit)?)?;
-  let time = Utc::now().checked_sub_signed(delta)?;
-  (0..=9999).contains(&time.year()).then(|| time.to_rfc3339())
 }
 
 fn line_budget(count: u32, tail: u32, filtering: bool) -> u32 {
@@ -165,21 +145,10 @@ pub(super) async fn fetch(
     .iter()
     .map(|name| service_target(&snap, name))
     .collect::<Result<Vec<_>, _>>()?;
-  let since = q
-    .since
-    .as_deref()
-    .filter(|s| !s.trim().is_empty())
-    .map(|value| {
-      anchor_since(value).ok_or_else(|| {
-        ApiError::invalid(format!("时间范围 {value} 看不懂"))
-          .with_hint("写成 30m、2h、3d，或 2026-11-22T08:00:00+08:00")
-      })
-    })
-    .transpose()?;
+  let (since, until) = q.window()?;
   let tail = q.tail.min(2000);
-  let grep = q.grep.as_deref().filter(|g| !g.trim().is_empty());
-  let filtering = grep.is_some() || q.errors;
-  let per = line_budget(names.len() as u32, tail, filtering);
+  let search = q.search(tail as usize, until.as_deref())?;
+  let per = line_budget(names.len() as u32, tail, q.filtering());
   let mut limits = BTreeMap::new();
   for (server, _) in &targets {
     limits.entry(*server).or_insert_with(|| Semaphore::new(3));
@@ -197,19 +166,28 @@ pub(super) async fn fetch(
   let pulls = targets.iter().map(|(server, project)| {
     let limit = &limits[server];
     let since = since.clone();
+    let until = until.clone();
     let cancel = &cancel;
     async move {
       let pull = async {
         let _permit =
           limit.acquire().await.expect("日志信号量不会关闭");
-        let call = state.hub.call::<String>(
+        let conn = until
+          .as_ref()
+          .map(|_| {
+            state.hub.files_v2_conn_id(server, "按 --until 查日志")
+          })
+          .transpose()?;
+        let call = state.hub.call_optional_bound::<String>(
           server,
+          conn,
           AgentOp::Logs {
             project: project.clone(),
             container: None,
             tail: per,
             follow: false,
             since,
+            until,
           },
           call_timeout,
           None,
@@ -244,7 +222,7 @@ pub(super) async fn fetch(
       Ok(raw) => {
         let lines = raw.lines().count();
         let truncated = lines >= per as usize;
-        if truncated && since.is_some() {
+        if truncated && (since.is_some() || until.is_some()) {
           warnings.push(format!(
             "{service} 日志太多，只拿到最近 {lines} 行，可能没覆盖完整时间范围；缩小 --since 或单独看它"
           ));
@@ -277,21 +255,14 @@ pub(super) async fn fetch(
     );
   }
 
-  let mut result = if !filtering && q.max_line.is_none() {
-    json!({ "logs": merge(&logs, tail as usize) })
-  } else {
+  let mut result = if let Some(search) = search {
     let merged = merge(&logs, usize::MAX);
     drop(logs);
-    let found = log_search::search(
-      &merged,
-      &log_search::Options {
-        grep,
-        errors: q.errors,
-        max_line: q.max_line.unwrap_or(500).max(20),
-        limit: tail as usize,
-      },
-    );
+    // Agent 各自按截止时间选日志，合并后保留各服务的时间戳续行。
+    let found = search.text(&merged);
     serde_json::to_value(found).unwrap_or_default()
+  } else {
+    json!({ "logs": merge(&logs, tail as usize) })
   };
   result["services"] = json!(services);
   result["warnings"] = json!(warnings);
@@ -362,8 +333,11 @@ mod tests {
         errors: false,
         max_line: 500,
         limit: 10,
+        filters: None,
+        until: None,
       },
-    );
+    )
+    .unwrap();
     assert_eq!((found.scanned, found.matched), (2, 1));
     assert_eq!(
       found.logs.as_deref(),

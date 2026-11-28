@@ -1301,6 +1301,7 @@ impl Docker {
     tail: u32,
     since: Option<&str>,
     container: Option<&str>,
+    until: Option<&str>,
     ctx: &Ctx,
   ) -> Result<String, ApiError> {
     let mut args = vec![
@@ -1312,6 +1313,9 @@ impl Docker {
     ];
     if let Some(since) = since {
       args.push(format!("--since={since}"));
+    }
+    if let Some(until) = until {
+      args.push(format!("--until={until}"));
     }
     let out = self
       .compose(project)
@@ -1340,6 +1344,7 @@ impl Docker {
     container: &str,
     tail: u32,
     since: Option<&str>,
+    until: Option<&str>,
     ctx: &Ctx,
   ) -> Result<String, ApiError> {
     let mut args = vec![
@@ -1350,6 +1355,9 @@ impl Docker {
     ];
     if let Some(since) = since {
       args.push(format!("--since={since}"));
+    }
+    if let Some(until) = until {
+      args.push(format!("--until={until}"));
     }
     args.push(container.to_string());
     let out = self

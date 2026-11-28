@@ -10,6 +10,7 @@ use std::{
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::Value;
+use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
   ApiError, ErrorCode,
   agent::{FILE_CHUNK, FileChunk, FileVersion, FilesOp},
@@ -19,6 +20,8 @@ use crate::{
   dirfd::{DirFd, NOFOLLOW, check, stat},
   docker::io_err,
 };
+
+mod extended;
 
 const UPLOAD_SUFFIX: &str = ".wharf-upload";
 fn parse_rel(rel: &str) -> Result<Vec<CString>, ApiError> {
@@ -59,13 +62,20 @@ fn walk(
   })
 }
 
-pub fn handle(op: FilesOp) -> Result<Value, ApiError> {
-  handle_in(Path::new("/srv"), op)
+pub fn handle(
+  op: FilesOp,
+  cancel: &CancellationToken,
+) -> Result<Value, ApiError> {
+  handle_in(Path::new("/srv"), op, cancel)
 }
 
-fn handle_in(base: &Path, op: FilesOp) -> Result<Value, ApiError> {
+fn handle_in(
+  base: &Path,
+  op: FilesOp,
+  cancel: &CancellationToken,
+) -> Result<Value, ApiError> {
   let (service, path) = match &op {
-    FilesOp::Mkdir { service, path } => {
+    FilesOp::DataMkdir { service, path } => {
       return crate::data_sync::mkdir(base, service, path)
         .map(|()| Value::Null);
     }
@@ -90,6 +100,7 @@ fn handle_in(base: &Path, op: FilesOp) -> Result<Value, ApiError> {
     | FilesOp::Read { service, path, .. }
     | FilesOp::Write { service, path, .. }
     | FilesOp::DataWrite { service, path, .. } => (service, path),
+    _ => return extended::handle(base, op, cancel),
   };
   if let FilesOp::DataWrite {
     offset: 0, upload, ..
@@ -164,10 +175,7 @@ fn handle_in(base: &Path, op: FilesOp) -> Result<Value, ApiError> {
       )?;
       Ok(Value::Null)
     }
-    FilesOp::List { .. }
-    | FilesOp::Mkdir { .. }
-    | FilesOp::Remove { .. }
-    | FilesOp::AbortWrite { .. } => unreachable!(),
+    _ => unreachable!(),
   }
 }
 
@@ -364,6 +372,11 @@ fn write(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  fn handle_in(base: &Path, op: FilesOp) -> Result<Value, ApiError> {
+    super::handle_in(base, op, &CancellationToken::new())
+  }
+
   use std::{
     fs,
     os::unix::fs::{PermissionsExt, symlink},

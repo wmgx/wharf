@@ -206,6 +206,15 @@ fn effect(
     "import" => return ("plan", &["admin", "plan"]),
     _ => {}
   }
+  if matches!(
+    command,
+    "service files rm" | "service files mv" | "service files mkdir"
+  ) {
+    return ("direct", &["exec"]);
+  }
+  if matches!(command, "service files tail" | "service files grep") {
+    return ("read", &["read"]);
+  }
   if command == "gateway rotate-link" {
     return ("direct", &["apply"]);
   }
@@ -298,6 +307,13 @@ fn returns(command: &str) -> Option<&'static str> {
     "import" => "bundle-import-preview",
     "service adopt-data" | "service move" | "server set"
     | "service import" => "plan",
+    "service files" | "service files ls" => "file_entry",
+    "service files tail" => "file_tail",
+    "service files grep" => "file_grep",
+    "service files rm" => "file_rm",
+    "service files mv" => "file_mv",
+    "service files mkdir" => "file_mkdir",
+    "wait server" | "wait dns" | "wait cert" => "wait",
     "status" => "status",
     "plan" | "plan show" => "plan",
     "plan list" => "plan_summary",
@@ -534,5 +550,26 @@ mod tests {
     }
     assert!(names.contains(&"wharf wait service"));
     assert!(!names.iter().any(|n| n.ends_with(" help")));
+  }
+}
+
+#[cfg(test)]
+mod view_meta_tests {
+  #[test]
+  fn added_view_commands_report_permissions_and_schemas() {
+    let commands = super::commands(&[]);
+    let commands = commands["commands"].as_array().unwrap();
+    for (name, perm, schema) in [
+      ("wharf service files tail", "read", "file_tail"),
+      ("wharf service files rm", "exec", "file_rm"),
+      ("wharf wait cert", "read", "wait"),
+    ] {
+      let entry = commands
+        .iter()
+        .find(|entry| entry["command"] == name)
+        .unwrap();
+      assert_eq!(entry["perms"][0], perm);
+      assert_eq!(entry["returns"], schema);
+    }
   }
 }
