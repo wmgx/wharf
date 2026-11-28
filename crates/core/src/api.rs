@@ -265,6 +265,10 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route("/api/metrics", get(crate::metrics::query))
     .route("/api/metrics/usage", get(crate::metrics::usage))
     .route("/api/metrics/top", get(crate::resource_top::usage))
+    .route(
+      "/api/metrics/limits-suggest",
+      get(crate::resource_top::suggest_limits),
+    )
     .route("/api/metrics/images", get(crate::resource_top::images))
     .route("/api/report", get(crate::report::show))
     .route(

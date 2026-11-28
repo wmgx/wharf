@@ -55,7 +55,8 @@ impl Sampler {
     let net = host_net(&read("/proc/net/dev"));
     let agent = crate::agent_memory::sample();
     let host_at = Instant::now();
-    let cpus = cpu_count();
+    let cpu_cores = cpu_count();
+    let cpus = cpu_cores.unwrap_or(1) as f32;
     let containers = container_stats(docker, ctx).await;
     let containers_at = Instant::now();
     let mem = read("/proc/meminfo");
@@ -147,6 +148,7 @@ impl Sampler {
       mem_used: mem_total
         .saturating_sub(meminfo(&mem, "MemAvailable:")),
       mem_total,
+      cpu_cores,
       net_rx: rate(rx_bytes, host_secs),
       net_tx: rate(tx_bytes, host_secs),
       net_rx_bytes: Some(rx_bytes),
@@ -249,12 +251,12 @@ fn read(path: &str) -> String {
   std::fs::read_to_string(path).unwrap_or_default()
 }
 
-fn cpu_count() -> f32 {
-  let n = read("/proc/cpuinfo")
+fn cpu_count() -> Option<u32> {
+  let count = read("/proc/cpuinfo")
     .lines()
     .filter(|l| l.starts_with("processor"))
     .count();
-  n.max(1) as f32
+  u32::try_from(count).ok().filter(|&n| n > 0)
 }
 
 /// 第一行 `cpu  user nice system idle iowait irq softirq steal ...`。

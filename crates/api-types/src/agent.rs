@@ -342,6 +342,9 @@ pub struct Metrics {
   pub cpu: f32,
   pub mem_used: u64,
   pub mem_total: u64,
+  /// 本次采样的宿主机逻辑 CPU 数。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub cpu_cores: Option<u32>,
   /// 字节每秒，不含回环、docker 网桥和组网网卡。
   pub net_rx: u64,
   pub net_tx: u64,

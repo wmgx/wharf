@@ -117,6 +117,10 @@ fn entries() -> BTreeMap<&'static str, Schema> {
     ("host_exec", schema_for!(view::HostExecResponse)),
     ("exec_stream_event", schema_for!(view::ExecStreamEvent)),
     ("service_view", schema_for!(view::ServiceView)),
+    (
+      "limits-suggest",
+      schema_for!(Vec<wharf_api_types::resources::LimitSuggestion>),
+    ),
     ("service_action", schema_for!(plan::ServiceAction)),
     ("gateway_view", schema_for!(view::GatewayView)),
     ("route_view", schema_for!(view::RouteView)),

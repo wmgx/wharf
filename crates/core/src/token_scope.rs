@@ -140,6 +140,7 @@ pub fn check_service_scope(
       | ["", "api", "data", "cleanup", "policy"]
       | ["", "api", "logs", "services"]
       | ["", "api", "metrics"]
+      | ["", "api", "metrics", "limits-suggest"]
       | ["", "api", "routes", _, "cert" | "dns-check" | "failover"]
       | ["", "api", "tasks", _]
       | ["", "api", "tasks", _, "runs" | "artifacts"]

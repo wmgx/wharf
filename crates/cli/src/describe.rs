@@ -98,6 +98,11 @@ fn walk(
       };
     }
     match command.as_str() {
+      "top" => {
+        entry["flag_variants"] = json!({
+          "--suggest-limits": {"effect": "read", "perms": ["read"], "returns": "limits-suggest"}
+        });
+      }
       "service restart" | "service stop" | "service update" => {
         entry["flag_variants"] = json!({
           "--tag": {"effect": "plan", "perms": ["plan"], "returns": "plan"}

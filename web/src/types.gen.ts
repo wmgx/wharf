@@ -1905,6 +1905,10 @@ export interface Metrics {
    * 整机 CPU 使用率，0 到 100。
    */
   cpu: number;
+  /**
+   * 本次采样的宿主机逻辑 CPU 数。
+   */
+  cpu_cores?: number | null;
   disk_total: number;
   disk_used: number;
   /**
