@@ -323,7 +323,42 @@ pub(crate) fn job(
         registry_proxy: None,
       }),
     core_marker: None,
+    bwlimit_kbps: None,
   })
+}
+
+pub(crate) fn limit_job(
+  mut op: AgentOp,
+  state: &AppState,
+  snap: &Snap,
+  (server, target): (&str, &str),
+  progress: &ProgressFn,
+) -> AgentOp {
+  if let AgentOp::Restic(job) = &mut op
+    && matches!(
+      &job.action,
+      ResticAction::Backup { .. } | ResticAction::Restore { .. }
+    )
+    && let Some(limit) = [server, target]
+      .into_iter()
+      .filter_map(|name| {
+        snap
+          .world
+          .servers
+          .get(name)
+          .and_then(|row| row.settings.bg_bwlimit_kbps())
+      })
+      .min()
+  {
+    if state.hub.supports_migrate_v2(server) {
+      job.bwlimit_kbps = Some(limit);
+    } else {
+      progress(format!(
+        "服务器 {server} 的 agent 版本旧，跳过备份或恢复限速；先 wharf upgrade"
+      ));
+    }
+  }
+  op
 }
 
 pub(crate) fn rest_repo(
@@ -819,23 +854,29 @@ pub async fn backup_with_options(
     let backed: Result<BackupSummary, ApiError> = call_source(
       state,
       (&w.server, conn),
-      job(
-        &snap,
-        &w.server,
-        service,
-        rest_repo(
-          &w.target_ip,
-          REST_SERVER_PORT,
+      limit_job(
+        job(
+          &snap,
+          &w.server,
           service,
-          &creds.http,
+          rest_repo(
+            &w.target_ip,
+            REST_SERVER_PORT,
+            service,
+            &creds.http,
+          ),
+          &creds.key,
+          ResticAction::Backup {
+            host: w.server.clone(),
+            excludes: policy.exclude.clone(),
+            keep: options.keep,
+            note: options.note.clone(),
+          },
         ),
-        &creds.key,
-        ResticAction::Backup {
-          host: w.server.clone(),
-          excludes: policy.exclude.clone(),
-          keep: options.keep,
-          note: options.note.clone(),
-        },
+        state,
+        &snap,
+        (&w.server, &w.target),
+        &progress,
       ),
       RESTIC_TIMEOUT,
       &progress,
@@ -988,15 +1029,26 @@ pub async fn restore(
   let restored = call_source::<serde_json::Value>(
     state,
     (&w.server, conn),
-    job(
+    limit_job(
+      job(
+        &snap,
+        &w.server,
+        service,
+        rest_repo(
+          &w.target_ip,
+          REST_SERVER_PORT,
+          service,
+          &creds.http,
+        ),
+        &creds.key,
+        ResticAction::Restore {
+          snapshot: snapshot_id.to_string(),
+        },
+      ),
+      state,
       &snap,
-      &w.server,
-      service,
-      rest_repo(&w.target_ip, REST_SERVER_PORT, service, &creds.http),
-      &creds.key,
-      ResticAction::Restore {
-        snapshot: snapshot_id.to_string(),
-      },
+      (&w.server, &w.target),
+      &progress,
     ),
     RESTIC_TIMEOUT,
     &progress,
@@ -1849,3 +1901,70 @@ pub async fn restore_now(
 #[cfg(test)]
 #[path = "backup_isolation_tests.rs"]
 pub(crate) mod tests;
+
+#[tokio::test]
+async fn bg_bwlimit_applies_to_backup_restore_and_skips_old_agent() {
+  let state = crate::migrate::tests::seed_service(false).await;
+  let mut snap = crate::snapshot::load(&state.db).await.unwrap();
+  for (name, limit) in [("s1", "3M"), ("s2", "10M")] {
+    snap
+      .world
+      .servers
+      .get_mut(name)
+      .unwrap()
+      .settings
+      .bg_bwlimit = Some(limit.into());
+  }
+  state.hub.mock_migrate_v2_agent("s1");
+  state
+    .hub
+    .mock_agent("s2", false, |_| panic!("此测试无需通信"));
+  let progress: ProgressFn = std::sync::Arc::new(|_| {});
+  for (server, target, action, expected) in [
+    (
+      "s1",
+      "s2",
+      ResticAction::Backup {
+        host: "s1".into(),
+        excludes: vec![],
+        keep: false,
+        note: None,
+      },
+      Some(3072),
+    ),
+    (
+      "s1",
+      "s2",
+      ResticAction::Restore {
+        snapshot: "fixture".into(),
+      },
+      Some(3072),
+    ),
+    (
+      "s2",
+      "s1",
+      ResticAction::Backup {
+        host: "s2".into(),
+        excludes: vec![],
+        keep: false,
+        note: None,
+      },
+      None,
+    ),
+  ] {
+    let op = job(
+      &snap,
+      server,
+      "notes",
+      ResticRepo::Local,
+      "fixture",
+      action,
+    );
+    let op =
+      limit_job(op, &state, &snap, (server, target), &progress);
+    let AgentOp::Restic(job) = op else {
+      panic!("应返回 restic 任务");
+    };
+    assert_eq!(job.bwlimit_kbps, expected);
+  }
+}

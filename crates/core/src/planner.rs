@@ -114,6 +114,16 @@ pub enum Step {
     instance_id: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     shared_data: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bwlimit_kbps: Option<u32>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    explicit_bwlimit: bool,
+  },
+  AdoptData {
+    server: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    instance_id: Option<String>,
+    job: wharf_api_types::adopt_data::AdoptDataJob,
   },
   ServiceUp {
     service: String,
@@ -308,7 +318,7 @@ impl Step {
           1
         }
       }
-      Self::VolumeSync { .. } => 2,
+      Self::VolumeSync { .. } | Self::AdoptData { .. } => 2,
       Self::ServiceUp { .. }
       | Self::EdgeDeploy { .. }
       | Self::TailscaleUp { .. }
@@ -355,6 +365,7 @@ pub struct StepPlan {
 }
 
 /// 存进数据库的完整计划。
+#[derive(Clone)]
 pub struct Planned {
   pub plan: Plan,
   pub base_instances: BTreeMap<String, String>,
@@ -367,6 +378,7 @@ pub struct Planned {
 
 #[derive(Default)]
 pub(crate) struct Builder {
+  migration_limits: BTreeMap<String, (Option<u32>, bool)>,
   migration_mounts:
     BTreeMap<String, Vec<wharf_api_types::agent::ContainerMount>>,
   pub(crate) items: Vec<PlanItem>,
@@ -493,7 +505,34 @@ pub(crate) async fn require_plan_request(
     .db
     .call(|c| World::from_rows(db::all_resources(c)?))
     .await?;
-  crate::token_scope::require_plan_request(auth, &current, req)
+  crate::token_scope::require_plan_request(auth, &current, req)?;
+  for change in &req.changes {
+    if let wharf_api_types::spec::Change::AdoptData {
+      service, ..
+    } = change
+    {
+      auth
+        .require(wharf_api_types::view::Perm::Admin)
+        .map_err(|err| err.0)?;
+      let row = current
+        .services
+        .get(service)
+        .ok_or_else(|| crate::api::service_not_found(service))?;
+      let settings =
+        current.servers.get(&row.spec.server).map(|s| &s.settings);
+      crate::host_access::require_with(
+        auth,
+        crate::host_access::HostTarget::ImportPreview {
+          server: &row.spec.server,
+          target: service,
+        },
+        settings,
+        None,
+      )
+      .map_err(|err| err.0)?;
+    }
+  }
+  Ok(())
 }
 
 pub(crate) async fn make_plan_inner(
@@ -519,6 +558,47 @@ pub(crate) async fn make_plan_inner(
     desired.merge_with(fleet)?;
   } else {
     desired.apply_changes(&req.changes)?;
+  }
+  let mut adoption = snap.pending.adopt_data.clone();
+  let mut adoption_warnings = Vec::new();
+  for (name, job) in &adoption {
+    if current
+      .services
+      .get(name)
+      .zip(desired.services.get(name))
+      .is_none_or(|(old, new)| old.spec != new.spec)
+      && desired.services.contains_key(name)
+    {
+      return Err(ApiError::new(
+        ErrorCode::Conflict,
+        format!("服务 {name} 的数据收编未完成，先重试原执行"),
+      ));
+    }
+    debug_assert_eq!(name, &job.service);
+  }
+  for change in &req.changes {
+    if let wharf_api_types::spec::Change::AdoptData {
+      service,
+      mounts,
+    } = change
+    {
+      if req.changes.len() != 1 {
+        return Err(ApiError::invalid("数据收编需要单独生成计划"));
+      }
+      let (job, warnings) = crate::adopt_data::prepare(
+        state,
+        &snap,
+        &mut desired,
+        service,
+        mounts,
+        admin,
+      )
+      .await?;
+      adoption_warnings.extend(warnings);
+      if !job.items.is_empty() {
+        adoption.insert(service.clone(), job);
+      }
+    }
   }
   // 换了服务器的服务在新机器上重新分配宿主机端口，不和那里已有的服务抢。
   for (name, svc) in desired.services.iter_mut() {
@@ -585,6 +665,7 @@ pub(crate) async fn make_plan_inner(
       wharf_api_types::spec::Change::UpsertService {
         pins: None,
         commit: None,
+        migrate: None,
         ..
       }
     )
@@ -877,15 +958,47 @@ pub(crate) async fn make_plan_inner(
   }
   net.reach = crate::link::probe(state, &net, &desired).await;
   mark("探测互通");
+  let mut explicit_limits = BTreeMap::new();
+  for change in &req.changes {
+    if let wharf_api_types::spec::Change::UpsertService {
+      name,
+      migrate: Some(options),
+      ..
+    } = change
+      && let Some(limit) = &options.bwlimit
+    {
+      explicit_limits.insert(
+        name.as_str(),
+        wharf_api_types::resources::parse_bwlimit_kbps(limit)?,
+      );
+    }
+  }
+  for (server, row) in &desired.servers {
+    if row.settings.bg_bwlimit.is_some()
+      && current.servers.get(server).is_none_or(|old| {
+        old.settings.bg_bwlimit != row.settings.bg_bwlimit
+      })
+      && state.hub.is_online(server)
+      && !state.hub.supports_migrate_v2(server)
+    {
+      b.warnings.push(format!(
+        "服务器 {server} 的 agent 版本旧，升级后后台限速才会生效"
+      ));
+    }
+  }
   // 迁移要源机器把数据推到目标机器（design 2.10）。
   for (name, svc) in &desired.services {
     let to = &svc.spec.server;
+    let explicit = explicit_limits.get(name.as_str()).copied();
+    if crate::migrate::requires_limit_support(explicit)
+      && let Some(from) = moved_from(&snap, &current, name, to)
+    {
+      state.hub.require_migrate_v2(from)?;
+      state.hub.require_migrate_v2(to)?;
+    }
     if let Some(from) = moved_from(&snap, &current, name, to)
-      && current.services.get(name).is_some_and(|old| {
-        crate::data::mounts(name, &old.spec)
-          .iter()
-          .any(|m| m.kind == DataKind::Managed)
-      })
+      && needs_volume_sync(&snap, &current, name, from)
+      && !migration_already_synced(&snap, name, to)
     {
       crate::link::require_reach(
         state,
@@ -896,6 +1009,44 @@ pub(crate) async fn make_plan_inner(
         crate::link::ProbeMode::Plan,
       )
       .await?;
+      let new_agents = [from, to.as_str()]
+        .iter()
+        .all(|server| state.hub.supports_migrate_v2(server));
+      if new_agents {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let _guard = cancel.clone().drop_guard();
+        crate::migrate::check_space(
+          state,
+          name,
+          (from, to),
+          snap.pending.migrations.get(name),
+          &cancel,
+        )
+        .await?;
+      } else {
+        b.warnings.push(format!("迁移 {name} 的磁盘预检使用历史数据；升级两端 agent 可查实际余量"));
+        crate::migrate::check_space_from_report(
+          state, &snap, name, to,
+        )
+        .await?;
+      }
+      let limits = [from, to.as_str()].map(|server| {
+        desired
+          .servers
+          .get(server)
+          .and_then(|row| row.settings.bg_bwlimit_kbps())
+      });
+      let limit = wharf_api_types::resources::effective_bwlimit_kbps(
+        explicit, &limits,
+      );
+      if limit.is_some() && !state.hub.supports_migrate_v2(from) {
+        b.warnings.push(format!(
+          "服务器 {from} 的 agent 版本旧，迁移限速需先升级 agent"
+        ));
+      } else {
+        b.migration_limits
+          .insert(name.clone(), (limit, explicit.is_some()));
+      }
     }
   }
   let status = gather_status(
@@ -921,6 +1072,10 @@ pub(crate) async fn make_plan_inner(
   service_items(
     &mut b, &snap, &current, &desired, &net, &status, &writes,
   )?;
+  b.warnings.extend(adoption_warnings);
+  for job in adoption.into_values() {
+    crate::adopt_data::add_step(&mut b, &desired, job);
+  }
   build_agent_warnings(state, &desired, &mut b)?;
   for step in &b.steps {
     if let Step::ServiceUp { service, .. } = &step.step
@@ -1664,15 +1819,10 @@ fn service_items(
           && m.payload.from == *server
           && m.payload.source_stopped
       });
-    if let Some(from) = moved {
-      let synced =
-        snap.pending.migrations.get(name).is_some_and(|m| {
-          m.phase == crate::pending::MigratePhase::Synced
-            && m.payload.to == *server
-        });
-      if !synced {
-        move_items(b, snap, name, from, server, net);
-      }
+    if let Some(from) = moved
+      && !migration_already_synced(snap, name, server)
+    {
+      move_items(b, snap, current, name, from, server, net);
     }
 
     // 数据卷：新增的目录。迁移时新机器上要建全部目录。
@@ -2402,22 +2552,58 @@ async fn migration_mounts(
   out
 }
 
+fn migration_already_synced(
+  snap: &Snapshot,
+  name: &str,
+  to: &str,
+) -> bool {
+  snap.pending.migrations.get(name).is_some_and(|m| {
+    m.phase == crate::pending::MigratePhase::Synced
+      && m.payload.to == to
+  })
+}
+
+fn migration_source<'a>(
+  snap: &'a Snapshot,
+  current: &'a World,
+  name: &str,
+) -> &'a wharf_api_types::spec::ServiceSpec {
+  snap
+    .applied
+    .get(name)
+    .and_then(|a| a.spec.as_ref())
+    .unwrap_or_else(|| &current.services[name].spec)
+}
+
+fn needs_volume_sync(
+  snap: &Snapshot,
+  current: &World,
+  name: &str,
+  from: &str,
+) -> bool {
+  snap.pending.migrations.get(name).is_some_and(|m| {
+    m.payload.has_managed_data && m.payload.from == from
+  }) || crate::data::mounts(
+    name,
+    migration_source(snap, current, name),
+  )
+  .iter()
+  .any(|m| m.kind == DataKind::Managed)
+}
+
 /// 迁移数据的计划项和步骤，以及相关提醒。
 fn move_items(
   b: &mut Builder,
   snap: &Snapshot,
+  current: &World,
   name: &str,
   from: &str,
   to: &str,
   net: &Net,
 ) {
-  let old = &snap.world.services[name];
-  let source = snap
-    .applied
-    .get(name)
-    .and_then(|a| a.spec.as_ref())
-    .unwrap_or(&old.spec);
-  let mounts = crate::data::mounts(name, source);
+  let old = &current.services[name];
+  let mounts =
+    crate::data::mounts(name, migration_source(snap, current, name));
   let mut left: Vec<String> = mounts
     .iter()
     .filter(|m| {
@@ -2461,19 +2647,21 @@ fn move_items(
     );
   }
   // 没有 Wharf 管理的数据：没有要搬的，新容器起来、网关切过去即可，不停服。
-  let recorded = snap.pending.migrations.get(name).is_some_and(|m| {
-    m.payload.has_managed_data && m.payload.from == from
-  });
-  if !recorded && !mounts.iter().any(|m| m.kind == DataKind::Managed)
-  {
+  if !needs_volume_sync(snap, current, name, from) {
     return;
+  }
+  let (bwlimit_kbps, explicit_bwlimit) =
+    b.migration_limits.get(name).copied().unwrap_or_default();
+  let mut after = json!({ "server": to, "dir": format!("/srv/{name}/"), "via": "direct" });
+  if let Some(limit) = bwlimit_kbps {
+    after["bwlimit_kbps"] = json!(limit);
   }
   let id = b.item(
     format!("{KIND_SERVICE}/{name}"),
     Layer::Volume,
     Action::Update,
     Some(json!({ "server": from, "dir": format!("/srv/{name}/") })),
-    Some(json!({ "server": to, "dir": format!("/srv/{name}/") })),
+    Some(after),
     vec![Impact::Downtime],
     format!("迁移 /srv/{name}/ 从 {from} 到 {to}：先同步一遍，再停掉旧容器做增量同步，这段时间服务不可用"),
   );
@@ -2485,6 +2673,8 @@ fn move_items(
       from: from.to_string(),
       to: to.to_string(),
       instance_id: Some(old.instance_id.clone()),
+      bwlimit_kbps,
+      explicit_bwlimit,
       shared_data: crate::shared_volumes::consumers_on(
         &snap.world,
         name,
@@ -3941,7 +4131,15 @@ pub async fn save(
   state: &AppState,
   planned: &Planned,
 ) -> Result<(), ApiError> {
-  let id = planned.plan.plan_id.clone();
+  let planned = planned.clone();
+  state.db.call(move |c| save_in(c, &planned)).await
+}
+
+pub(crate) fn save_in(
+  c: &rusqlite::Connection,
+  planned: &Planned,
+) -> Result<(), ApiError> {
+  let id = &planned.plan.plan_id;
   let mut body =
     serde_json::to_value(&planned.plan).map_err(db::json_err)?;
   body["base_instances"] = json!(&planned.base_instances);
@@ -3971,24 +4169,19 @@ pub async fn save(
     serde_json::to_string(&planned.writes).map_err(db::json_err)?;
   let created = planned.plan.created_at.timestamp_millis();
   let expires = planned.plan.expires_at.timestamp_millis();
-  state
-    .db
-    .call(move |c| {
-      // 只保留最近的计划。
-      c.execute(
-        "DELETE FROM plans WHERE created_at < ?1",
-        rusqlite::params![db::now_ms() - 7 * 24 * 3600 * 1000],
-      )
-      .map_err(db::sql_err)?;
-      c.execute(
+  // 只保留最近的计划。
+  c.execute(
+    "DELETE FROM plans WHERE created_at < ?1",
+    rusqlite::params![db::now_ms() - 7 * 24 * 3600 * 1000],
+  )
+  .map_err(db::sql_err)?;
+  c.execute(
         "INSERT INTO plans (id, status, body, steps, writes, created_at, expires_at)
          VALUES (?1, 'pending', ?2, ?3, ?4, ?5, ?6)",
         rusqlite::params![id, body, steps, writes, created, expires],
       )
       .map_err(db::sql_err)?;
-      Ok(())
-    })
-    .await
+  Ok(())
 }
 
 /// 网关跨机器访问服务、而服务所在机器的内网地址不加密时，返回提醒。
@@ -4092,6 +4285,7 @@ mod tests {
         changes: vec![wharf_api_types::spec::Change::UpsertService {
           pins: None,
           commit: None,
+          migrate: None,
           name: "app".into(),
           spec,
           adopt: None,
@@ -4139,6 +4333,7 @@ mod tests {
       adopt: None,
       pins: None,
       commit: None,
+      migrate: None,
     };
     let warning = crate::apply::safe_rollback_warning("s1");
     let planned = make_plan_inner(
@@ -4324,6 +4519,7 @@ mod tests {
             wharf_api_types::spec::Change::UpsertService {
               pins: None,
               commit: None,
+              migrate: None,
               name: "app".into(),
               spec,
               adopt: None,
@@ -4389,6 +4585,7 @@ mod tests {
       changes: vec![wharf_api_types::spec::Change::UpsertService {
         pins: None,
         commit: None,
+        migrate: None,
         name: name.into(),
         spec: item,
         adopt: None,
@@ -5958,6 +6155,47 @@ mod tests {
   }
 
   #[tokio::test]
+  async fn migration_reach_uses_same_managed_predicate_as_move_items()
+  {
+    let state = crate::migrate::tests::seed_service(false).await;
+    let mut snap = snapshot::load(&state.db).await.unwrap();
+    let applied = snap.world.services["notes"].spec.clone();
+    snap
+      .world
+      .services
+      .get_mut("notes")
+      .unwrap()
+      .spec
+      .volumes
+      .clear();
+    assert!(!needs_volume_sync(&snap, &snap.world, "notes", "s2"));
+    let mut row: wharf_api_types::view::Applied =
+      serde_json::from_value(
+        json!({"hash":"fixture","at":"2026-01-01T00:00:00Z"}),
+      )
+      .unwrap();
+    row.spec = Some(applied);
+    snap.applied.insert("notes".into(), row);
+    assert!(needs_volume_sync(&snap, &snap.world, "notes", "s2"));
+    let mut builder = Builder::default();
+    move_items(
+      &mut builder,
+      &snap,
+      &snap.world,
+      "notes",
+      "s2",
+      "s1",
+      &Net::default(),
+    );
+    assert!(
+      builder
+        .steps
+        .iter()
+        .any(|s| matches!(s.step, Step::VolumeSync { .. }))
+    );
+  }
+
+  #[tokio::test]
   async fn move_plan_warns_and_requires_confirm_for_image_anonymous_volume()
    {
     let state = crate::migrate::tests::seed_service(false).await;
@@ -6007,6 +6245,7 @@ mod tests {
         changes: vec![Change::UpsertService {
           pins: None,
           commit: None,
+          migrate: None,
           name: "notes".into(),
           spec,
           adopt: None,

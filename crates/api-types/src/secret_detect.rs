@@ -30,9 +30,15 @@ pub fn detect_secret_value(value: &str) -> Option<&'static str> {
 
 pub fn is_placeholder_value(trimmed: &str) -> bool {
   let trimmed = trimmed.trim();
-  let lower = trimmed.to_ascii_lowercase();
-  trimmed.starts_with('/')
+  placeholder(trimmed)
     || trimmed.bytes().all(|c| c.is_ascii_digit())
+    || trimmed.eq_ignore_ascii_case("test")
+}
+
+fn placeholder(trimmed: &str) -> bool {
+  let lower = trimmed.to_ascii_lowercase();
+  trimmed.is_empty()
+    || trimmed.starts_with('/')
     || matches!(
       lower.as_str(),
       "true"
@@ -47,7 +53,6 @@ pub fn is_placeholder_value(trimmed: &str) -> bool {
         | "xxx"
         | "none"
         | "null"
-        | "test"
         | "disabled"
     )
     || lower.starts_with("your_")
@@ -190,4 +195,43 @@ pub fn known_format(value: &str) -> Option<&'static str> {
   } else {
     None
   }
+}
+
+pub fn url_credentials(
+  text: &str,
+) -> impl Iterator<Item = (usize, usize)> + '_ {
+  text.match_indices("://").filter_map(|(index, _)| {
+    let start = index + 3;
+    let authority = text[start..]
+      .split(|c: char| {
+        c.is_whitespace()
+          || matches!(c, '/' | '?' | '#' | '\'' | '"' | '<' | '>')
+      })
+      .next()?;
+    let (userinfo, _) = authority.rsplit_once('@')?;
+    userinfo
+      .contains(':')
+      .then_some((start, start + userinfo.len()))
+  })
+}
+
+fn has_url_credentials(value: &str) -> bool {
+  url_credentials(value).next().is_some()
+}
+
+pub fn env_secret_reason(
+  key: &str,
+  value: &str,
+) -> Option<&'static str> {
+  let value = value.trim();
+  if value.contains("${")
+    || (value.contains("[[") && value.contains("]]"))
+    || placeholder(value)
+  {
+    return None;
+  }
+  has_url_credentials(value)
+    .then_some("URL 内嵌密码")
+    .or_else(|| known_format(value))
+    .or_else(|| is_sensitive_env_key(key).then_some("敏感变量名"))
 }

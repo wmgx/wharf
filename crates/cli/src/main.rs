@@ -12,6 +12,7 @@ mod alert;
 mod audit;
 mod backup_extract;
 mod bookmark;
+mod bundle;
 mod catalog;
 mod client;
 mod commands;
@@ -19,6 +20,7 @@ mod config_cmd;
 mod connect;
 mod core_export;
 mod data_cleanup;
+mod data_sync;
 mod deploy;
 mod describe;
 mod dotenv;
@@ -57,6 +59,20 @@ mod wait;
 pub enum DataCmd {
   /// 查看迁移、恢复和换备份机的留底及孤儿资源。加 --apply 申请删除确认。
   Cleanup(data_cleanup::CleanupArgs),
+  /// 拉取服务数据到本地。
+  Pull {
+    #[command(flatten)]
+    common: data_sync::TransferArgs,
+    #[arg(long)]
+    sqlite_safe: bool,
+  },
+  /// 比较本地和远端数据，加 --apply 执行。
+  Push {
+    #[command(flatten)]
+    common: data_sync::TransferArgs,
+    #[arg(long)]
+    apply: bool,
+  },
 }
 
 #[derive(Parser)]
@@ -447,7 +463,13 @@ pub enum Command {
     /// 只导出这个服务（连同它的域名），可以多次使用。
     #[arg(long)]
     service: Vec<String>,
+    #[arg(long, requires = "output")]
+    with_secrets: bool,
+    #[command(flatten)]
+    passphrase: bundle::Passphrase,
   },
+  /// 从加密便携包导入，默认预览。
+  Import(bundle::ImportArgs),
   /// 离线检查单个 TOML 或目录下所有意图片段的格式、名字和引用。
   /// 机器、账号这些要控制面才知道的，用 `wharf plan -f` 检查。
   Validate { file: std::path::PathBuf },
@@ -954,6 +976,11 @@ pub enum ServerCmd {
     unset_traffic_reset_day: bool,
     #[arg(long, conflicts_with = "agent_memory")]
     unset_agent_memory: bool,
+    /// 后台传输限速，例如 3M 或 500K。
+    #[arg(long)]
+    bg_bwlimit: Option<String>,
+    #[arg(long, conflicts_with = "bg_bwlimit")]
+    unset_bg_bwlimit: bool,
     #[command(flatten)]
     apply: ApplyFlags,
   },
@@ -1281,7 +1308,19 @@ pub enum ServiceCmd {
     /// 服务名，不填时由项目名或容器名得出。和原 compose 项目同名时不重建容器。
     #[arg(long)]
     name: Option<String>,
-    /// 打印转换出的 compose（可能含明文的环境变量）。
+    #[arg(long)]
+    extract_secrets: bool,
+    #[arg(long, requires = "extract_secrets")]
+    secret_prefix: Option<String>,
+    #[arg(
+      long,
+      requires = "extract_secrets",
+      conflicts_with = "overwrite_secrets"
+    )]
+    only_missing_secrets: bool,
+    #[arg(long, requires = "extract_secrets")]
+    overwrite_secrets: bool,
+    /// 打印转换出的 compose。
     #[arg(long)]
     print: bool,
     #[command(flatten)]
@@ -1364,6 +1403,16 @@ pub enum ServiceCmd {
     #[arg(long)]
     no_wait: bool,
   },
+  /// 把外部目录和命名卷复制到 Wharf 管理的数据目录。
+  AdoptData {
+    name: String,
+    #[arg(long)]
+    mount: Vec<String>,
+    #[arg(long, value_parser = commands::parse_server_mapping)]
+    rename: Vec<(String, String)>,
+    #[command(flatten)]
+    apply: ApplyFlags,
+  },
   /// 迁移到另一台服务器：同步 /srv/<服务>/ 的数据，在新服务器上启动，
   /// 网关改指新地址后删除旧容器，域名不变。旧服务器上的数据目录保留。
   Move {
@@ -1372,6 +1421,9 @@ pub enum ServiceCmd {
     to: Option<String>,
     #[arg(long, conflicts_with = "to")]
     abort: bool,
+    /// 迁移限速，例如 3M、500K 或 none。
+    #[arg(long, conflicts_with = "abort")]
+    bwlimit: Option<String>,
     #[command(flatten)]
     apply: ApplyFlags,
   },

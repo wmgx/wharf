@@ -54,6 +54,13 @@ export type Action = "create" | "update" | "delete" | "adopt";
 
 export type Actual = "running" | "restarting" | "stopped" | "partial" | "missing" | "offline" | "unknown";
 
+export interface AdoptMountSpec {
+  rename_only?: boolean;
+  source: string | null;
+  target: string | null;
+  volume_name: string | null;
+}
+
 /**
  * 导入前容器是怎么跑的。和服务同名的 compose 项目不需要接管，Wharf 直接沿用。
  */
@@ -608,10 +615,15 @@ export type Change = {
    */
   adopt?: AdoptSpec | null;
   commit?: string | null;
+  migrate?: MigrateOptions | null;
   name: string;
   op: "upsert_service";
   pins?: Record<string, string> | null;
   spec: ServiceSpec;
+} | {
+  mounts?: AdoptMountSpec[];
+  op: "adopt_data";
+  service: string;
 } | {
   name: string;
   op: "remove_service";
@@ -1273,6 +1285,14 @@ export type Extract = {
   name: string;
 };
 
+export interface ExtractedSecretItem {
+  action: string;
+  component?: string | null;
+  env_key: string;
+  reason: string;
+  secret_name: string;
+}
+
 export interface FailoverEntryHealth {
   detail: string;
   ok: boolean;
@@ -1629,7 +1649,9 @@ export interface ImportPreview {
    * 提交 `UpsertService` 时原样带上。
    */
   adopt?: AdoptSpec | null;
+  extracted_secrets?: ExtractedSecretItem[];
   name: string;
+  secrets_committed?: boolean;
   spec: ServiceSpec;
   warnings?: string[];
 }
@@ -1911,6 +1933,10 @@ export interface Metrics {
    * compose project 名到它的容器合计。
    */
   projects?: Record<string, ProjectMetrics>;
+}
+
+export interface MigrateOptions {
+  bwlimit?: string | null;
 }
 
 export interface MigrationView {
@@ -2787,6 +2813,10 @@ export interface ServerSettings {
    * 机器基线：系统设置的期望值，agent 定时检查差异，apply 时纠正。
    */
   baseline?: Baseline;
+  /**
+   * 后台传输限速，例如 3M 或 500K。
+   */
+  bg_bwlimit?: string | null;
   /**
    * 构建时传给内置模板的参数，例如 `PIP_INDEX_URL`、`GOPROXY`（国内机器配镜像源）。
    */

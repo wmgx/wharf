@@ -280,7 +280,7 @@ pub async fn push(
   let mut attempt = 1;
   loop {
     let result = Cmd::new("rsync")
-      .args(rsync_args(p.pass, p.kind))
+      .args(rsync_args(p.pass, p.kind, p.bwlimit_kbps))
       .arg(format!("{}/", root.display()))
       .arg(format!("rsync://{USER}@{host}:{}/{MODULE}/", p.port))
       // 口令走环境变量，不出现在命令行里。
@@ -344,7 +344,11 @@ fn rsyncd_config(
   )
 }
 
-fn rsync_args(pass: SyncPass, kind: SyncKind) -> Vec<&'static str> {
+fn rsync_args(
+  pass: SyncPass,
+  kind: SyncKind,
+  bwlimit_kbps: Option<u32>,
+) -> Vec<String> {
   let mut args = vec!["-aH", "--numeric-ids"];
   if !kind.is_service_data() {
     args.extend([
@@ -362,7 +366,99 @@ fn rsync_args(pass: SyncPass, kind: SyncKind) -> Vec<&'static str> {
     "--contimeout=15",
     "--timeout=300",
   ]);
+  let mut args: Vec<_> =
+    args.into_iter().map(str::to_string).collect();
+  if let Some(limit) = bwlimit_kbps.filter(|v| *v > 0) {
+    args.push(format!("--bwlimit={limit}"));
+  }
   args
+}
+
+pub(crate) fn dir_space(
+  srv: &Path,
+  service: &str,
+  measure_data: bool,
+  cancel: &tokio_util::sync::CancellationToken,
+) -> Result<wharf_api_types::agent::DirSpaceInfo, ApiError> {
+  use crate::dirfd::DirFd;
+  let root = match DirFd::open_service_root(srv, service) {
+    Ok(root) => Some(root),
+    Err(err) if !measure_data && err.code == ErrorCode::NotFound => {
+      None
+    }
+    Err(err) => return Err(err),
+  };
+  let path = root
+    .as_ref()
+    .map_or_else(|| srv.to_path_buf(), DirFd::fd_path);
+  let (disk, _) =
+    crate::report::disk_stat(&path).ok_or_else(|| {
+      ApiError::internal("无法读取 /srv 文件系统的可用空间")
+    })?;
+  let bytes = root
+    .as_ref()
+    .map(|root| tree_bytes(root, cancel))
+    .transpose()?;
+  let data_bytes = bytes.filter(|_| measure_data);
+  Ok(wharf_api_types::agent::DirSpaceInfo {
+    fs_avail_bytes: disk.free,
+    fs_total_bytes: disk.total,
+    data_bytes,
+    existing_bytes: bytes.filter(|_| !measure_data).unwrap_or(0),
+  })
+}
+
+fn tree_bytes(
+  root: &crate::dirfd::DirFd,
+  cancel: &tokio_util::sync::CancellationToken,
+) -> Result<u64, ApiError> {
+  use crate::dirfd::DirFd;
+  use std::collections::HashSet;
+  fn walk(
+    dir: &DirFd,
+    seen: &mut HashSet<(libc::dev_t, libc::ino_t)>,
+    cancel: &tokio_util::sync::CancellationToken,
+    depth: usize,
+  ) -> Result<u64, ApiError> {
+    if depth > 256 {
+      return Err(ApiError::invalid("数据目录层级太深"));
+    }
+    let io = crate::docker::io_err(Path::new("/srv"));
+    let mut bytes = 0u64;
+    for name in dir.read_names().map_err(&io)? {
+      if cancel.is_cancelled() {
+        return Err(ApiError::new(
+          ErrorCode::Cancelled,
+          "磁盘预检已取消",
+        ));
+      }
+      let st = match dir.lstat(&name) {
+        Ok(st) => st,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+          continue;
+        }
+        Err(err) => return Err(io(err)),
+      };
+      let size = match st.st_mode & libc::S_IFMT {
+        libc::S_IFDIR => walk(
+          &dir.open_subdir(&name).map_err(&io)?,
+          seen,
+          cancel,
+          depth + 1,
+        )?,
+        libc::S_IFREG
+          if st.st_nlink == 1
+            || seen.insert((st.st_dev, st.st_ino)) =>
+        {
+          st.st_size.max(0) as u64
+        }
+        _ => 0,
+      };
+      bytes = bytes.saturating_add(size);
+    }
+    Ok(bytes)
+  }
+  walk(root, &mut HashSet::new(), cancel, 0)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -403,14 +499,16 @@ mod tests {
   #[test]
   fn rsync_args_live_omits_delete_and_final_enables_checksum_and_hardlinks()
    {
-    let live = rsync_args(SyncPass::Live, SyncKind::ServiceData);
+    let live =
+      rsync_args(SyncPass::Live, SyncKind::ServiceData, Some(3072));
     let final_pass =
-      rsync_args(SyncPass::Final, SyncKind::ServiceData);
-    assert!(live.contains(&"-aH"));
-    assert!(final_pass.contains(&"-aH"));
+      rsync_args(SyncPass::Final, SyncKind::ServiceData, None);
+    assert!(live.iter().any(|arg| arg == "--bwlimit=3072"));
+    assert!(live.contains(&"-aH".to_string()));
+    assert!(final_pass.contains(&"-aH".to_string()));
     for arg in ["--delete", "--checksum"] {
-      assert!(!live.contains(&arg));
-      assert!(final_pass.contains(&arg));
+      assert!(!live.iter().any(|item| item == arg));
+      assert!(final_pass.iter().any(|item| item == arg));
     }
   }
 
@@ -463,6 +561,21 @@ mod tests {
   }
 
   #[test]
+  fn dir_space_measures_existing_target_bytes() {
+    let temp = tempfile::tempdir().unwrap();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let target =
+      || dir_space(temp.path(), "app", false, &cancel).unwrap();
+    assert_eq!(target().existing_bytes, 0);
+    std::fs::create_dir(temp.path().join("app")).unwrap();
+    std::fs::write(temp.path().join("app/received"), b"1234")
+      .unwrap();
+    let measured = target();
+    assert_eq!(measured.existing_bytes, 4);
+    assert_eq!(measured.data_bytes, None);
+  }
+
+  #[test]
   fn classify_rsync_exit_retries_only_transient_network_codes() {
     for code in [5, 11, 23] {
       assert_eq!(
@@ -487,6 +600,7 @@ mod tests {
       password: wharf_api_types::agent::OneTimeSecret(String::new()),
       pass: SyncPass::Live,
       kind: SyncKind::ServiceData,
+      bwlimit_kbps: None,
     };
     assert_eq!(
       push(&job, &Ctx::detached()).await.unwrap_err().code,

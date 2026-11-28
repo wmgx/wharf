@@ -470,6 +470,10 @@ pub async fn run(
       let mut args = vec![
         "backup", &path, "--host", host, "--tag", "wharf", "--json",
       ];
+      let limit = job.bwlimit_kbps.map(|v| v.to_string());
+      if let Some(limit) = limit.as_deref() {
+        args.extend(["--limit-upload", limit]);
+      }
       if *keep {
         args.extend(["--tag", KEEP_TAG]);
       }
@@ -593,7 +597,7 @@ pub async fn run(
           "控制面备份请在宿主机上手动恢复",
         ));
       }
-      restore(j, &root, snapshot, ctx).await
+      restore(j, &root, snapshot, job.bwlimit_kbps, ctx).await
     }
     ResticAction::AddKey { new_password } => {
       add_key(j, &new_password.0, ctx).await
@@ -1165,6 +1169,7 @@ async fn restore(
   mut j: Job<'_>,
   root: &Path,
   snapshot: &str,
+  bwlimit_kbps: Option<u32>,
   ctx: &Ctx,
 ) -> Result<Value, ApiError> {
   check_snapshot(snapshot)?;
@@ -1188,22 +1193,22 @@ async fn restore(
   j.mounts.push(format!("{}:/restore", work.display()));
   ctx.say(format!("恢复快照 {snapshot}"));
   let include = root.display().to_string();
-  j.restic(
-    &[
-      "restore",
-      snapshot,
-      "--json",
-      "--target",
-      "/restore",
-      "--include",
-      &include,
-    ],
-    LONG_TIMEOUT,
-    true,
-    ctx,
-  )
-  .await?
-  .check("restic restore")?;
+  let mut args = vec![
+    "restore",
+    snapshot,
+    "--json",
+    "--target",
+    "/restore",
+    "--include",
+    &include,
+  ];
+  let limit = bwlimit_kbps.map(|v| v.to_string());
+  if let Some(limit) = limit.as_deref() {
+    args.extend(["--limit-download", limit]);
+  }
+  j.restic(&args, LONG_TIMEOUT, true, ctx)
+    .await?
+    .check("restic restore")?;
   let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
   let kept_name = format!("{}-before-{stamp}-{nonce}", j.service);
   check_data_mount_users(j.docker, root, j.service, false, ctx)

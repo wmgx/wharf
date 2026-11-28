@@ -47,23 +47,7 @@ pub fn is_sensitive_env_key(key: &str) -> bool {
     || key.ends_with("_PASS"))
 }
 
-pub(crate) fn url_credentials(
-  text: &str,
-) -> impl Iterator<Item = (usize, usize)> + '_ {
-  text.match_indices("://").filter_map(|(index, _)| {
-    let start = index + 3;
-    let authority = text[start..]
-      .split(|c: char| {
-        c.is_whitespace()
-          || matches!(c, '/' | '?' | '#' | '\'' | '"' | '<' | '>')
-      })
-      .next()?;
-    let (userinfo, _) = authority.rsplit_once('@')?;
-    userinfo
-      .contains(':')
-      .then_some((start, start + userinfo.len()))
-  })
-}
+pub(crate) use wharf_api_types::secret_detect::url_credentials;
 
 pub fn redact_compose_secrets(yaml: &str) -> (String, Vec<String>) {
   let Ok(mut root) = crate::render::parse_compose(yaml) else {
@@ -81,6 +65,13 @@ pub fn redact_compose_secrets(yaml: &str) -> (String, Vec<String>) {
   (output, keys)
 }
 
+fn sensitive_compose_env(key: &str, value: &str) -> bool {
+  is_sensitive_env_key(key)
+    || url_credentials(value).next().is_some()
+    || wharf_api_types::secret_detect::env_secret_reason(key, value)
+      .is_some()
+}
+
 fn redact_compose_env(node: &mut Value, keys: &mut Vec<String>) {
   const MASK: &str = "[[请替换为密钥名]]";
   match node {
@@ -89,10 +80,10 @@ fn redact_compose_env(node: &mut Value, keys: &mut Vec<String>) {
         Some(Value::Mapping(env)) => {
           for (key, value) in env.iter_mut() {
             if let Some(key) = key.as_str()
-              && (is_sensitive_env_key(key)
-                || value.as_str().is_some_and(|s| {
-                  url_credentials(s).next().is_some()
-                }))
+              && sensitive_compose_env(
+                key,
+                value.as_str().unwrap_or_default(),
+              )
             {
               keys.push(key.to_string());
               *value = Value::String(MASK.into());
@@ -104,9 +95,7 @@ fn redact_compose_env(node: &mut Value, keys: &mut Vec<String>) {
             if let Some(raw) = item.as_str() {
               let (key, value) =
                 raw.split_once('=').unwrap_or((raw, ""));
-              if is_sensitive_env_key(key)
-                || url_credentials(value).next().is_some()
-              {
+              if sensitive_compose_env(key, value) {
                 keys.push(key.to_string());
                 *item = Value::String(format!("{key}={MASK}"));
               }

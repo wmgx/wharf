@@ -487,6 +487,47 @@ async fn task_set_dry_run_without_edits_rejects_before_fetching() {
 }
 
 #[tokio::test]
+async fn bundle_import_preview_uses_text_unless_json_is_requested() {
+  let dir = tempfile::tempdir().unwrap();
+  let bundle = dir.path().join("bundle.enc");
+  let passphrase = dir.path().join("passphrase");
+  std::fs::write(
+    &bundle,
+    json!({
+      "format": "wharf-bundle", "version": 1, "cipher": "fixture",
+      "kdf": {"m_kib": 0, "t": 0, "p": 0, "salt": ""},
+      "nonce": "", "ciphertext": ""
+    })
+    .to_string(),
+  )
+  .unwrap();
+  std::fs::write(&passphrase, "fixture-passphrase").unwrap();
+  let preview = json!({
+    "services": ["app"], "routes": [], "secrets": {"create": ["APP_PASS"], "conflicts": [], "update": [], "skip": []},
+    "missing_servers": ["s2"], "missing_gateways": [], "warnings": [], "hint": "加 --plan-only"
+  });
+  let replies =
+    || vec![("POST /api/import/bundle ", preview.clone())];
+  let mut args = vec![
+    "import",
+    bundle.to_str().unwrap(),
+    "--passphrase-file",
+    passphrase.to_str().unwrap(),
+  ];
+  let (code, output, _, _) = fixture_output(&args, replies()).await;
+  assert_eq!(code, 0);
+  assert!(
+    output.lines().any(|line| line.starts_with("服务 1 个")),
+    "{output}"
+  );
+  assert!(output.contains("APP_PASS") && output.contains("s2"));
+  args.push("--json");
+  let (code, output) = run_fixture(&args, replies()).await;
+  assert_eq!(code, 0);
+  assert_eq!(output, preview);
+}
+
+#[tokio::test]
 async fn env_sync_preflights_confirmation_before_import() {
   let file = tempfile::NamedTempFile::new().unwrap();
   std::fs::write(file.path(), "API_KEY=fixture-sensitive").unwrap();

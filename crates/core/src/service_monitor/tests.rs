@@ -153,6 +153,7 @@ async fn monitoring_only_plan_skips_deploy_but_heartbeat_changes_compose()
         changes: vec![Change::UpsertService {
           pins: None,
           commit: None,
+          migrate: None,
           name: "app".into(),
           spec,
           adopt: None,

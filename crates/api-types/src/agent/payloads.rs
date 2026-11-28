@@ -242,6 +242,18 @@ pub struct SyncPush {
     skip_serializing_if = "SyncKind::is_service_data"
   )]
   pub kind: SyncKind,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub bwlimit_kbps: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DirSpaceInfo {
+  pub fs_avail_bytes: u64,
+  pub fs_total_bytes: u64,
+  #[serde(default)]
+  pub data_bytes: Option<u64>,
+  #[serde(default)]
+  pub existing_bytes: u64,
 }
 
 /// restic 操作，在 restic 容器里执行。结果见 [ResticAction] 各项说明。
@@ -258,6 +270,8 @@ pub struct ResticJob {
   /// 目录里的 `.marker` 要和这个值一样，不一样（不是控制面所在的机器）回复 NotFound。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub core_marker: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub bwlimit_kbps: Option<u32>,
 }
 
 /// 控制面把要备份的数据库快照和密钥放在这里，宿主机和容器里路径相同。

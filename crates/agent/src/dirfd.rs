@@ -209,8 +209,16 @@ impl DirFd {
   }
 
   pub(crate) fn unlink(&self, name: &CStr) -> io::Result<()> {
+    self.unlink_with(name, 0)
+  }
+
+  pub(crate) fn unlink_with(
+    &self,
+    name: &CStr,
+    flags: libc::c_int,
+  ) -> io::Result<()> {
     check(unsafe {
-      libc::unlinkat(self.0.as_raw_fd(), name.as_ptr(), 0)
+      libc::unlinkat(self.0.as_raw_fd(), name.as_ptr(), flags)
     })
   }
 
@@ -328,6 +336,23 @@ impl DirFd {
       Ok(true)
     })?;
     Ok(out)
+  }
+
+  pub(crate) fn read_names_limited(
+    &self,
+    max: usize,
+  ) -> io::Result<(Vec<CString>, bool)> {
+    let mut names = Vec::new();
+    let mut limited = false;
+    self.visit_names(|name| {
+      if names.len() == max {
+        limited = true;
+        return Ok(false);
+      }
+      names.push(name.to_owned());
+      Ok(true)
+    })?;
+    Ok((names, limited))
   }
 
   pub(crate) fn sorted_names(

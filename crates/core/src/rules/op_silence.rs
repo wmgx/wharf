@@ -120,6 +120,9 @@ pub(crate) fn steps_scope(steps: &[StepPlan]) -> BTreeSet<Target> {
       | Step::ServiceDown { service, .. } => {
         Target::Service(service.clone())
       }
+      Step::AdoptData { job, .. } => {
+        Target::Service(job.service.clone())
+      }
       Step::AgentUpgrade { server } => Target::Server(server.clone()),
       Step::AgentUpgrades { servers } => {
         targets.extend(servers.iter().cloned().map(Target::Server));

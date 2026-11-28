@@ -228,7 +228,7 @@ pub(super) async fn containers(
     rows.push('\n');
   }
   Ok(Runtime {
-    binds: parse_bind_mounts(&bind_rows)?,
+    binds: parse_bind_mounts(&bind_rows, false)?,
     containers: decode_rows(&rows)?,
     ..Default::default()
   })

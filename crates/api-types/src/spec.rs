@@ -102,6 +102,9 @@ pub struct ServerSettings {
   /// agent 内存上限，例如 256M、1G，none 为不限，缺省为 256 MiB。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub agent_memory: Option<String>,
+  /// 后台传输限速，例如 3M 或 500K。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub bg_bwlimit: Option<String>,
 }
 
 /// 机器基线（P9）。字段不填就不管；去掉某项只是不再管，不会改回去。
@@ -984,6 +987,14 @@ pub struct VarView {
   pub value: String,
 }
 
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct MigrateOptions {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub bwlimit: Option<String>,
+}
+
 /// 对期望状态的局部修改。CLI 的 `service deploy`、`route add` 等命令都生成它。
 #[derive(
   Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
@@ -1021,6 +1032,13 @@ pub enum Change {
     pins: Option<BTreeMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    migrate: Option<MigrateOptions>,
+  },
+  AdoptData {
+    service: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    mounts: Vec<crate::adopt_data::AdoptMountSpec>,
   },
   RemoveService {
     name: String,

@@ -497,6 +497,7 @@ async fn execute(
       pins: None,
       commit: None,
       adopt: None,
+      migrate: None,
     }],
     note: args.flags.note.clone(),
     ..Default::default()

@@ -88,6 +88,12 @@ pub fn percent(used: u64, total: u64) -> Option<f64> {
 }
 
 impl ServerSettings {
+  pub fn bg_bwlimit_kbps(&self) -> Option<u32> {
+    parse_bwlimit_kbps(self.bg_bwlimit.as_deref()?)
+      .ok()
+      .filter(|v| *v > 0)
+  }
+
   pub fn agent_memory_bytes(&self) -> u64 {
     self
       .agent_memory
@@ -140,4 +146,68 @@ mod agent_memory_tests {
       );
     }
   }
+}
+
+pub fn parse_bwlimit_kbps(raw: &str) -> Result<u32, crate::ApiError> {
+  let input = raw.trim().to_ascii_lowercase();
+  let invalid = || {
+    crate::ApiError::invalid("带宽限速格式不对或超出范围").with_hint(
+      "输入 16K 到 10G，例如 500K、1.5M，或输入 none 关闭限速",
+    )
+  };
+  if matches!(input.as_str(), "0" | "none" | "off") {
+    return Ok(0);
+  }
+  let split = input
+    .find(|c: char| !c.is_ascii_digit() && c != '.')
+    .ok_or_else(invalid)?;
+  let (number, unit) = input.split_at(split);
+  let scale = match unit {
+    "k" | "kb" | "k/s" => 1,
+    "m" | "mb" | "m/s" => 1024,
+    "g" | "gb" | "g/s" => 1024 * 1024,
+    _ => return Err(invalid()),
+  };
+  let (whole, fraction) =
+    number.split_once('.').unwrap_or((number, "0"));
+  if whole.is_empty()
+    || fraction.len() != 1
+    || !fraction.as_bytes()[0].is_ascii_digit()
+  {
+    return Err(invalid());
+  }
+  let whole: u64 = whole.parse().map_err(|_| invalid())?;
+  let value = whole.saturating_mul(scale).saturating_add(
+    u64::from(fraction.as_bytes()[0] - b'0') * scale / 10,
+  );
+  if !(16..=10_485_760).contains(&value) {
+    return Err(invalid());
+  }
+  Ok(value as u32)
+}
+
+pub fn effective_bwlimit_kbps(
+  explicit: Option<u32>,
+  server_limits: &[Option<u32>],
+) -> Option<u32> {
+  explicit
+    .or_else(|| {
+      server_limits
+        .iter()
+        .flatten()
+        .copied()
+        .filter(|v| *v > 0)
+        .min()
+    })
+    .filter(|v| *v > 0)
+}
+
+#[test]
+fn bg_bwlimit_parses_units_and_respects_explicit_override() {
+  let limits = [Some(parse_bwlimit_kbps("3M").unwrap()), Some(10240)];
+  assert_eq!(parse_bwlimit_kbps("1.5MB").unwrap(), 1536);
+  assert!(parse_bwlimit_kbps("2048").is_err());
+  assert!(parse_bwlimit_kbps("18446744073709551615.9G").is_err());
+  assert_eq!(effective_bwlimit_kbps(None, &limits), Some(3072));
+  assert_eq!(effective_bwlimit_kbps(Some(0), &limits), None);
 }

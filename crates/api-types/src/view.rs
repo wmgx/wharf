@@ -1425,6 +1425,16 @@ pub struct Unmanaged {
   pub name: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ExtractedSecretItem {
+  pub env_key: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub component: Option<String>,
+  pub secret_name: String,
+  pub reason: String,
+  pub action: String,
+}
+
 /// `POST /api/import`：compose 项目和容器二选一。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ImportRequest {
@@ -1436,6 +1446,14 @@ pub struct ImportRequest {
   /// 服务名，不填时由项目名或容器名得出。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub name: Option<String>,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub extract_secrets: bool,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub commit_secrets: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub secret_prefix: Option<String>,
+  #[serde(default)]
+  pub secret_conflict: SecretImportMode,
 }
 
 /// 导入预览：用 `upsert_service` 提交即可。
@@ -1448,6 +1466,16 @@ pub struct ImportPreview {
   pub adopt: Option<crate::spec::AdoptSpec>,
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub warnings: Vec<String>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub extracted_secrets: Vec<ExtractedSecretItem>,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub secrets_committed: bool,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ServiceImportPreview {
+  pub import: ImportPreview,
+  pub hint: String,
 }
 
 /// `POST /api/convert/docker-run` 的请求：一条 `docker run` 命令。

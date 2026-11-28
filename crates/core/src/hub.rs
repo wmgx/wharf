@@ -90,6 +90,8 @@ struct Conn {
   frpc_reload: bool,
   safe_adopt: bool,
   safe_migrate: bool,
+  migrate_v2: bool,
+  data_ops: bool,
   safe_backup: bool,
   backup_move: bool,
   backup_v2: bool,
@@ -366,6 +368,40 @@ impl Hub {
       .ok_or_else(|| offline(server))?;
     if c.upgrade_only || !c.safe_adopt {
       return Err(safe_adopt_required(server));
+    }
+    Ok(())
+  }
+
+  pub(crate) fn require_data_ops(
+    &self,
+    server: &str,
+  ) -> Result<u64, ApiError> {
+    let conns = lock(&self.conns);
+    let conn = conns
+      .get(server)
+      .filter(|conn| !conn.closed.is_cancelled())
+      .ok_or_else(|| offline(server))?;
+    if conn.upgrade_only || !conn.data_ops {
+      return Err(data_ops_required(server));
+    }
+    Ok(conn.conn_id)
+  }
+
+  pub fn supports_migrate_v2(&self, server: &str) -> bool {
+    self.require_migrate_v2(server).is_ok()
+  }
+
+  pub(crate) fn require_migrate_v2(
+    &self,
+    server: &str,
+  ) -> Result<(), ApiError> {
+    let conns = lock(&self.conns);
+    let conn = conns
+      .get(server)
+      .filter(|conn| !conn.closed.is_cancelled())
+      .ok_or_else(|| offline(server))?;
+    if conn.upgrade_only || !conn.migrate_v2 {
+      return Err(migrate_v2_required(server));
     }
     Ok(())
   }
@@ -889,6 +925,31 @@ impl Hub {
     {
       return Err(safe_migrate_required(server));
     }
+    if matches!(
+      &op,
+      AgentOp::AdoptDataInspect(_)
+        | AgentOp::AdoptDataCopy(_)
+        | AgentOp::DataManifest { .. }
+        | AgentOp::DataSqliteSnap { .. }
+        | AgentOp::DataSqliteRead { .. }
+        | AgentOp::DataSqliteClose { .. }
+        | AgentOp::Files(
+          wharf_api_types::agent::FilesOp::DataMkdir { .. }
+            | wharf_api_types::agent::FilesOp::Remove { .. }
+            | wharf_api_types::agent::FilesOp::AbortWrite { .. }
+            | wharf_api_types::agent::FilesOp::DataWrite { .. }
+        )
+    ) && (conn.upgrade_only || !conn.data_ops)
+    {
+      return Err(data_ops_required(server));
+    }
+    if (matches!(&op, AgentOp::DirSpace { .. })
+      || matches!(&op, AgentOp::SyncPush(p) if p.bwlimit_kbps.is_some())
+      || matches!(&op, AgentOp::Restic(j) if j.bwlimit_kbps.is_some()))
+      && (conn.upgrade_only || !conn.migrate_v2)
+    {
+      return Err(migrate_v2_required(server));
+    }
     if let AgentOp::Build(job) = &mut op
       && job.expected_commit.is_some()
       && !conn.safe_migrate
@@ -1368,6 +1429,8 @@ async fn handle_socket(
     frpc_reload,
     safe_adopt,
     safe_migrate,
+    migrate_v2,
+    data_ops,
     safe_backup,
     backup_move,
     backup_v2,
@@ -1549,6 +1612,8 @@ async fn handle_socket(
     frpc_reload,
     safe_adopt,
     safe_migrate,
+    migrate_v2,
+    data_ops,
     safe_backup,
     backup_move,
     backup_v2,
@@ -1925,6 +1990,22 @@ fn shared_volumes_required(server: &str) -> ApiError {
 
 #[cfg(test)]
 mod tests;
+
+fn data_ops_required(server: &str) -> ApiError {
+  ApiError::new(
+    ErrorCode::Conflict,
+    format!("服务器 {server} 的 agent 版本旧，不支持数据收编或推拉"),
+  )
+  .with_hint("先升级 agent：wharf upgrade")
+}
+
+fn migrate_v2_required(server: &str) -> ApiError {
+  ApiError::new(
+    ErrorCode::Conflict,
+    format!("服务器 {server} 的 agent 版本旧，不支持迁移预检或限速"),
+  )
+  .with_hint("先升级 agent：wharf upgrade")
+}
 
 pub(crate) fn safe_migrate_required(server: &str) -> ApiError {
   ApiError::new(ErrorCode::Conflict, format!("服务器 {server} 的 agent 版本旧，无法安全同步数据或更新停机服务"))

@@ -359,6 +359,19 @@ pub fn router(state: Arc<AppState>) -> Router {
     )
     .route("/api/import", post(crate::import_api::preview))
     .route(
+      "/api/services/{name}/data/manifest",
+      post(crate::data_sync_api::manifest),
+    )
+    .route(
+      "/api/services/{name}/data/pull",
+      post(crate::data_sync_api::pull),
+    )
+    .route(
+      "/api/services/{name}/data/push",
+      post(crate::data_sync_api::push)
+        .layer(axum::extract::DefaultBodyLimit::disable()),
+    )
+    .route(
       "/api/convert/docker-run",
       post(crate::docker_run::convert),
     )
@@ -640,6 +653,15 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route("/api/runs/{id}/retry", post(retry_run))
     .route("/api/runs/{id}/logs", get(run_logs))
     .route("/api/export", get(export))
+    .route("/api/export/bundle", post(crate::bundle::export))
+    .route(
+      "/api/import/bundle",
+      post(crate::bundle::import).layer(
+        axum::extract::DefaultBodyLimit::max(
+          crate::bundle::MAX_REQUEST,
+        ),
+      ),
+    )
     .route("/api/audit", get(crate::audit::list))
     .route("/api/refs", get(crate::catalog::refs))
     .route("/api/tree", get(crate::catalog::tree))

@@ -42,7 +42,7 @@ pub struct FileQuery {
   pub path: String,
 }
 
-async fn server_of(
+pub(crate) async fn server_of(
   s: &AppState,
   service: &str,
 ) -> Result<String, ApiError> {

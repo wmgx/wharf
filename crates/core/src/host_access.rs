@@ -156,6 +156,10 @@ pub fn assess(target: HostTarget<'_>) -> HostAccess {
           )
         })
       }
+      Step::AdoptData { server, job, .. } => (
+        Some((server.as_str(), HostDocker)),
+        vec![format!("收编服务 {} 的外部数据", job.service)],
+      ),
       Step::Baseline { server }
       | Step::DockerProxy { server }
       | Step::Egress { server }

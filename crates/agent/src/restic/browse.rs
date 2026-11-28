@@ -412,6 +412,7 @@ impl ExtractStore {
       data: STANDARD.encode(bytes),
       size,
       version: None,
+      mode: None,
     })
   }
 
