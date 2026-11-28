@@ -3,11 +3,14 @@
 //! 连续 [FAILS] 轮不通进"需要注意"并推送，恢复时再推一次；证书剩不到 14 天也推送。
 //! 结果只存在内存里。
 
-use std::{collections::BTreeMap, sync::Mutex};
+use std::{
+  collections::{BTreeMap, BTreeSet},
+  sync::Mutex,
+};
 
 use wharf_api_types::view::{
-  CheckStatus, DoctorReport, Issue, IssueLevel, IssueSubject,
-  ProbeView, RouteDiagnosis,
+  CheckStatus, DoctorCheck, DoctorReport, Issue, IssueLevel,
+  IssueSubject, ProbeView, RouteDiagnosis,
 };
 
 use crate::state::AppState;
@@ -68,10 +71,23 @@ pub fn issues() -> Vec<Issue> {
 
 /// 每轮完整体检后调用。
 pub async fn observe(state: &AppState, report: &DoctorReport) {
+  let active: BTreeSet<_> = report
+    .routes
+    .iter()
+    .filter(|r| {
+      web_check(r).is_some_and(|web| web.status != CheckStatus::Skip)
+    })
+    .map(|r| r.hostname.clone())
+    .collect();
   if let Ok(mut m) = LAST.lock() {
-    m.retain(|h, _| report.routes.iter().any(|r| &r.hostname == h));
+    m.retain(|h, _| active.contains(h));
   }
-  observe_routes(state, &report.routes).await;
+  for id in ["domain_down", "cert_expiring"] {
+    crate::rules::retain_subjects(state, id, &active).await;
+  }
+  for route in &report.routes {
+    observe_one(state, route, true).await;
+  }
 }
 
 pub async fn observe_routes(
@@ -79,21 +95,24 @@ pub async fn observe_routes(
   routes: &[RouteDiagnosis],
 ) {
   for route in routes {
-    observe_one(state, route).await;
+    observe_one(state, route, false).await;
   }
 }
 
-async fn observe_one(state: &AppState, r: &RouteDiagnosis) {
-  let Some(web) = r
-    .checks
+fn web_check(r: &RouteDiagnosis) -> Option<&DoctorCheck> {
+  r.checks
     .iter()
     .find(|c| c.layer == "https" || c.layer == "http")
-  else {
+}
+
+async fn observe_one(
+  state: &AppState,
+  r: &RouteDiagnosis,
+  scheduled: bool,
+) {
+  let Some(web) = web_check(r) else {
     return;
   };
-  if web.status == CheckStatus::Skip {
-    return;
-  }
   let ok = web.status != CheckStatus::Bad;
   let host = r.hostname.clone();
   let cert_days =
@@ -105,10 +124,15 @@ async fn observe_one(state: &AppState, r: &RouteDiagnosis) {
     {
       return;
     }
+    if web.status == CheckStatus::Skip {
+      m.remove(&host);
+      return;
+    }
     let fails = if ok {
       0
     } else {
-      m.get(&host).map_or(1, |p| p.fails.saturating_add(1))
+      let previous = m.get(&host).map_or(0, |p| p.fails);
+      previous.saturating_add(u32::from(scheduled))
     };
     m.insert(
       host.clone(),
@@ -124,6 +148,10 @@ async fn observe_one(state: &AppState, r: &RouteDiagnosis) {
   }
   if let Some(days) = cert_days {
     cert_notify(state, &host, days).await;
+  }
+  // 手动体检可以确认恢复，只有后台轮次计入连续失败。
+  if !ok && !scheduled {
+    return;
   }
   // 除了 HTTPS 这层，还有哪一层不通：多半就是原因。
   let cause = r
@@ -204,4 +232,35 @@ async fn observe_routes_clears_single_host_without_wiping_others() {
     .lock()
     .unwrap()
     .retain(|host, _| host != a && host != b);
+}
+
+#[tokio::test]
+async fn manual_failures_do_not_count_as_scheduled_failures() {
+  let state = crate::rules::tests::test_state();
+  let host = "p203-debounce.example.test";
+  let mut route = RouteDiagnosis {
+    hostname: host.into(),
+    url: format!("https://{host}"),
+    checks: vec![crate::doctor::check(
+      "https",
+      host,
+      CheckStatus::Bad,
+      "HTTP 502",
+    )],
+    cert_expires: None,
+    domain_expires: None,
+    edge_app: None,
+  };
+  observe_one(&state, &route, true).await;
+  for _ in 0..3 {
+    observe_routes(&state, std::slice::from_ref(&route)).await;
+  }
+  assert_eq!(last(host).unwrap().fails, 1);
+  assert!(crate::rules::firing_since("domain_down", host).is_none());
+  observe_one(&state, &route, true).await;
+  observe_one(&state, &route, true).await;
+  assert_eq!(last(host).unwrap().fails, 3);
+  route.checks[0].status = CheckStatus::Skip;
+  observe_routes(&state, &[route]).await;
+  assert!(last(host).is_none());
 }

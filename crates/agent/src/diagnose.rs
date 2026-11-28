@@ -94,9 +94,18 @@ pub async fn run(
   let containers = project_containers(docker, project, ctx).await?;
   let mut selected: BTreeMap<usize, BTreeMap<u16, u16>> =
     BTreeMap::new();
-  for &host in ports {
-    if let Some((index, port)) = select_container(&containers, host) {
-      selected.entry(index).or_default().insert(host, port);
+  if ports.is_empty() {
+    for (index, container) in containers.iter().enumerate() {
+      if !container.state.running || container.state.restarting {
+        selected.entry(index).or_default();
+      }
+    }
+  } else {
+    for &host in ports {
+      if let Some((index, port)) = select_container(&containers, host)
+      {
+        selected.entry(index).or_default().insert(host, port);
+      }
     }
   }
   let mut results = Vec::new();

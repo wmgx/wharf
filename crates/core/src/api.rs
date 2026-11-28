@@ -1008,7 +1008,14 @@ async fn list_services(
           .is_none_or(|allowed| allowed.contains(*n))
       })
       .filter_map(|n| {
-        views::service_view(&snap, &net, n, Some(&live), &history)
+        views::service_view(
+          &s.hub,
+          &snap,
+          &net,
+          n,
+          Some(&live),
+          &history,
+        )
       })
       .collect(),
   ))
@@ -1073,9 +1080,15 @@ async fn show_service(
   let net = snap.net(&snap.world);
   let history = crate::data::history(&s.db).await?;
   let live = views::cached_live(&s, &snap.world).await;
-  let mut view =
-    views::service_view(&snap, &net, &name, Some(&live), &history)
-      .ok_or_else(|| service_not_found(&name))?;
+  let mut view = views::service_view(
+    &s.hub,
+    &snap,
+    &net,
+    &name,
+    Some(&live),
+    &history,
+  )
+  .ok_or_else(|| service_not_found(&name))?;
   if query.reveal {
     view.heartbeat =
       crate::service_monitor::heartbeat::view(&snap, &name, true);

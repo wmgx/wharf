@@ -107,8 +107,8 @@ pub(crate) fn record_manual(
   if let Ok(mut results) = LAST.lock() {
     let fails = match results.get(service) {
       Some(old) if old.at > at => return,
-      Some(old) => old.fails,
-      None => 0,
+      Some(old) if !ok => old.fails,
+      _ => 0,
     };
     results.insert(
       service.into(),
@@ -316,6 +316,26 @@ mod tests {
       url(&row, &m).unwrap_err(),
       "端口 game 是 UDP，监控不了"
     );
+  }
+
+  #[test]
+  fn manual_monitor_recovery_clears_failed_status() {
+    let service = "p203-monitor-worker";
+    LAST.lock().unwrap().insert(
+      service.into(),
+      MonitorView {
+        ok: false,
+        detail: "503".into(),
+        at: 1,
+        fails: FAILS,
+      },
+    );
+    record_manual(service, 2, false, "503".into());
+    assert_eq!(last(service).unwrap().fails, FAILS);
+    record_manual(service, 3, true, "200".into());
+    let recovered = LAST.lock().unwrap().remove(service).unwrap();
+    assert!(recovered.ok);
+    assert_eq!(recovered.fails, 0);
   }
 
   #[test]

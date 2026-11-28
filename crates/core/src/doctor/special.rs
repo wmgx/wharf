@@ -272,22 +272,16 @@ async fn diagnose_containers<'a>(
       let row = &ctx.snap.world.services[service];
       let targets =
         if !row.spec.stopped && check.status == CheckStatus::Bad {
-          row
-            .host_ports
-            .values()
-            .next()
-            .map(|&port| Target {
-              service: service.into(),
-              server: row.spec.server.clone(),
-              port,
-              local_loopback_ok: true,
-              http_failed: false,
-              link_unreachable: false,
-              link_subject: None,
-              container_subject: check.subject.clone(),
-            })
-            .into_iter()
-            .collect()
+          vec![Target {
+            service: service.into(),
+            server: row.spec.server.clone(),
+            port: row.host_ports.values().next().copied(),
+            local_loopback_ok: true,
+            http_failed: false,
+            link_unreachable: false,
+            link_subject: None,
+            container_subject: check.subject.clone(),
+          }]
         } else {
           vec![]
         };

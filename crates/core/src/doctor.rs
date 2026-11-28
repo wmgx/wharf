@@ -17,8 +17,8 @@ use wharf_api_types::{
   ApiError, ErrorCode,
   agent::{AgentOp, HttpCheckResult, ProbeTarget},
   spec::{
-    GatewayKind, GatewaySpec, GatewayTls, MonitorSpec, Region,
-    RouteSpec, SsoMode,
+    GatewayKind, GatewaySpec, GatewayTls, MonitorSpec, PathRoute,
+    Region, RouteSpec, SsoMode,
   },
   view::{
     CheckStatus, DoctorCheck, DoctorReport, Perm, RouteDiagnosis,
@@ -90,7 +90,7 @@ pub async fn doctor(
     )?;
     report.vendors = vendors;
     crate::vendor_checks::record(&s, &report.vendors).await;
-    crate::probe::observe(&s, &report).await;
+    crate::probe::observe_routes(&s, &report.routes).await;
     remember(report.clone());
     return Ok(Json(report));
   }
@@ -171,6 +171,13 @@ fn route_services(route: &RouteSpec) -> impl Iterator<Item = &str> {
   .then_some(route.service.as_str())
   .into_iter()
   .chain(route.paths.iter().filter_map(|p| p.service.as_deref()))
+}
+
+fn path_active(world: &World, path: &PathRoute) -> bool {
+  path.upstream.is_some()
+    || path.service.as_ref().is_some_and(|name| {
+      world.services.get(name).is_none_or(|row| !row.spec.stopped)
+    })
 }
 
 fn selection(
@@ -601,8 +608,18 @@ impl RouteChecks<'_> {
       .is_none()
       .then(|| world.services.get(&spec.service))
       .flatten();
-    let stopped = spec.redirect.is_none()
+    let main_stopped = spec.redirect.is_none()
       && service.is_some_and(|row| row.spec.stopped);
+    let probe_path = if main_stopped {
+      spec.paths.iter().find(|p| path_active(world, p))
+    } else {
+      None
+    };
+    let stopped = main_stopped && probe_path.is_none();
+    let probe_url = probe_path.map(|p| {
+      let path = p.path.trim_end_matches('*');
+      format!("{}{path}", view.url.trim_end_matches('/'))
+    });
     let (dns, (mut https, cert_expires, bad_gateway)) = if stopped {
       (
         check("dns", host, CheckStatus::Skip, "服务已停用"),
@@ -637,10 +654,12 @@ impl RouteChecks<'_> {
         ),
         self.route_https(
           host,
-          &view.url,
+          probe_url.as_deref().unwrap_or(&view.url),
           spec,
           gateway_spec,
-          service.and_then(|r| r.spec.monitor.as_ref()),
+          service
+            .filter(|_| !main_stopped)
+            .and_then(|r| r.spec.monitor.as_ref()),
           use_egress
         ),
       )
@@ -667,6 +686,9 @@ impl RouteChecks<'_> {
       domain_expires: crate::rdap::expires_of(host),
       edge_app: None,
     };
+    if stopped {
+      return Some((diagnosis, vec![]));
+    }
     let Some((gw_name, gw)) = gateway else {
       diagnosis.checks.push(check(
         "gateway",
@@ -730,7 +752,9 @@ impl RouteChecks<'_> {
                 port,
                 path: Some(&p.path),
                 upstream,
-                bad_gateway: false,
+                bad_gateway: bad_gateway
+                  && gateway_ok
+                  && probe_path == Some(p),
               },
             )
             .await
@@ -771,12 +795,21 @@ impl RouteChecks<'_> {
           Ok(crate::link::Choice::Tunnel)
         )
       });
-    let (mut link, unreachable) = match hop.upstream {
-      Ok(up) => {
-        link(self.s, &gw.server, &up, cross_host && !via_tunnel).await
-      }
-      Err(e) => (missing_upstream(&gw.server, e), false),
-    };
+    let (mut link, unreachable) =
+      if row.is_some_and(|r| r.spec.stopped) {
+        (
+          check("link", &gw.server, CheckStatus::Skip, "服务已停用"),
+          false,
+        )
+      } else {
+        match hop.upstream {
+          Ok(up) => {
+            link(self.s, &gw.server, &up, cross_host && !via_tunnel)
+              .await
+          }
+          Err(e) => (missing_upstream(&gw.server, e), false),
+        }
+      };
     let mut container =
       container_of_service(world, self.live, hop.service);
     if let Some(path) = hop.path {
@@ -806,7 +839,7 @@ impl RouteChecks<'_> {
         Some(Target {
           service: hop.service.into(),
           server: row.spec.server.clone(),
-          port: *row.host_ports.get(hop.port?)?,
+          port: Some(*row.host_ports.get(hop.port?)?),
           local_loopback_ok: !cross_host || via_tunnel,
           http_failed: hop.bad_gateway,
           link_unreachable: unreachable,
@@ -841,17 +874,13 @@ impl RouteChecks<'_> {
     } else {
       None
     };
-    let header = monitor.is_none()
-      && spec.sso.as_ref().is_some_and(|s| s.mode == SsoMode::Header);
-    let monitor = monitor.filter(|m| {
-      gated
-        && !spec.auth
-        && !spec
-          .paths
-          .iter()
-          .any(|p| covers_monitor(&p.path, &m.path))
-    });
-    let monitor_url = monitor.map(|m| {
+    let options = HttpProbe {
+      cookie,
+      internal,
+      use_egress,
+      ..HttpProbe::for_route(spec, gated, monitor)
+    };
+    let monitor_url = options.monitor.map(|m| {
       format!(
         "{}/{}",
         url.trim_end_matches('/'),
@@ -859,18 +888,7 @@ impl RouteChecks<'_> {
       )
     });
     self
-      .https(
-        monitor_url.as_deref().unwrap_or(url),
-        HttpProbe {
-          basic_auth: spec.auth,
-          gate: gated,
-          header,
-          cookie,
-          monitor,
-          internal,
-          use_egress,
-        },
-      )
+      .https(monitor_url.as_deref().unwrap_or(url), options)
       .await
   }
 
@@ -1048,6 +1066,34 @@ struct HttpProbe<'a> {
   use_egress: bool,
 }
 
+impl<'a> HttpProbe<'a> {
+  fn for_route(
+    spec: &RouteSpec,
+    gated: bool,
+    monitor: Option<&'a MonitorSpec>,
+  ) -> Self {
+    let monitor = monitor.filter(|m| {
+      gated
+        && !spec.auth
+        && !spec
+          .paths
+          .iter()
+          .any(|p| covers_monitor(&p.path, &m.path))
+    });
+    Self {
+      basic_auth: spec.auth,
+      gate: gated,
+      header: monitor.is_none()
+        && spec
+          .sso
+          .as_ref()
+          .is_some_and(|s| s.mode == SsoMode::Header),
+      monitor,
+      ..Self::default()
+    }
+  }
+}
+
 fn http_status(
   code: reqwest::StatusCode,
   probe: &HttpProbe<'_>,
@@ -1062,7 +1108,13 @@ fn http_status(
       detail.push_str("：网关连不上上游");
     }
     CheckStatus::Bad
-  } else if probe.gate && (rejected || probe.cookie.is_none()) {
+  } else if probe.gate && probe.internal && rejected {
+    detail.push_str("：门禁正常要求登录，未穿透验证应用");
+    CheckStatus::Ok
+  } else if probe.gate
+    && !probe.internal
+    && (rejected || probe.cookie.is_none())
+  {
     return (
       CheckStatus::Warn,
       "门禁未放行控制面探针，检查网关门禁公钥和证书（wharf plan）"
@@ -1364,6 +1416,14 @@ fn container_of_service(
   };
   let server = &row.spec.server;
   let subject = format!("{server} 上的 {}", service);
+  if row.spec.stopped {
+    return check(
+      "container",
+      subject,
+      CheckStatus::Skip,
+      "按配置停止",
+    );
+  }
   let states = match live.get(server) {
     None => {
       return check(
@@ -1389,14 +1449,6 @@ fn container_of_service(
   else {
     return check("container", subject, CheckStatus::Bad, "没有容器");
   };
-  if row.spec.stopped {
-    return check(
-      "container",
-      subject,
-      CheckStatus::Warn,
-      "按配置停止",
-    );
-  }
   let has_running =
     p.containers.iter().any(|c| !c.foreign && c.is_running());
   let mut bad: Vec<String> = p

@@ -121,7 +121,7 @@ async fn doctor_service_and_server_scopes() {
 }
 
 #[tokio::test]
-async fn route_checks_include_path_services() {
+async fn stopped_main_still_probes_active_paths() {
   let mut snap = fixture();
   add_route(&mut snap, json!([{"path":"/api/*","service":"db"}]));
   snap.world.services.get_mut("app").unwrap().spec.stopped = true;
@@ -153,6 +153,41 @@ async fn route_checks_include_path_services() {
       .any(|c| c.layer == "link" && c.subject.contains("/api/*"))
   );
   assert_eq!(targets[0].service, "db");
+  for layer in ["dns", "https"] {
+    assert!(
+      report
+        .checks
+        .iter()
+        .any(|c| c.layer == layer && c.status != CheckStatus::Skip)
+    );
+  }
+  assert!(
+    report
+      .checks
+      .iter()
+      .any(|c| c.layer == "https" && c.subject.ends_with("/api/"))
+  );
+  assert!(report.checks.iter().any(|c| c.layer == "link"
+    && !c.subject.contains("/api/*")
+    && c.status == CheckStatus::Skip));
+  let stopped = container_of_service(&snap.world, &live, "app");
+  assert_eq!(stopped.status, CheckStatus::Skip);
+  snap.world.services.get_mut("db").unwrap().spec.stopped = true;
+  let ctx = RouteChecks {
+    s: &state,
+    snap: &snap,
+    net: &net,
+    live: &live,
+    clients: &clients,
+    manual: true,
+  };
+  let (report, targets) =
+    ctx.route("app.example.test").await.unwrap();
+  assert!(targets.is_empty());
+  assert_eq!(report.checks.len(), 2);
+  assert!(
+    report.checks.iter().all(|c| c.status == CheckStatus::Skip)
+  );
 }
 
 #[test]
@@ -246,5 +281,107 @@ fn probe_cookie_verifies_and_penetrates_gate() {
       b"",
     );
     assert_eq!((actual, bad), (status, bad_gateway));
+  }
+}
+
+#[test]
+fn internal_gate_login_is_expected_without_a_probe_cookie() {
+  let probe = HttpProbe {
+    gate: true,
+    internal: true,
+    ..Default::default()
+  };
+  let classify = |code, rejected| {
+    http_status(
+      reqwest::StatusCode::from_u16(code).unwrap(),
+      &probe,
+      rejected,
+      b"",
+    )
+  };
+  for code in [302, 401] {
+    let (status, detail, _) = classify(code, true);
+    assert_eq!(status, CheckStatus::Ok);
+    assert!(detail.contains("未穿透验证应用"));
+  }
+  assert_eq!(classify(200, false).0, CheckStatus::Ok);
+  assert_eq!(classify(403, false).0, CheckStatus::Warn);
+  assert_eq!(classify(502, false).0, CheckStatus::Bad);
+}
+
+#[test]
+fn filtered_monitor_preserves_header_gate_response() {
+  let mut snap = fixture();
+  add_route(&mut snap, json!([{"path":"/api/*","service":"db"}]));
+  let route =
+    &mut snap.world.routes.get_mut("app.example.test").unwrap().spec;
+  route.sso =
+    Some(serde_json::from_value(json!({"mode":"header"})).unwrap());
+  let monitor: MonitorSpec =
+    serde_json::from_value(json!({"path":"/api/health"})).unwrap();
+  for auth in [false, true] {
+    route.auth = auth;
+    if auth {
+      route.paths.clear();
+    }
+    let probe = HttpProbe {
+      cookie: Some(reqwest::header::HeaderValue::from_static(
+        "probe-fixture",
+      )),
+      ..HttpProbe::for_route(route, true, Some(&monitor))
+    };
+    assert!(probe.monitor.is_none());
+    for code in [
+      reqwest::StatusCode::UNAUTHORIZED,
+      reqwest::StatusCode::FORBIDDEN,
+    ] {
+      assert_eq!(
+        http_status(code, &probe, false, b"").0,
+        CheckStatus::Ok
+      );
+    }
+  }
+}
+
+#[tokio::test]
+async fn portless_worker_reports_crash_diagnostics() {
+  let mut snap = fixture();
+  let worker = snap.world.services.get_mut("app").unwrap();
+  worker.host_ports.clear();
+  worker.spec.ports.clear();
+  let state = crate::rules::tests::test_state();
+  state.hub.mock_agent("s1", false, |op| {
+    match op {
+      AgentOp::DiagnoseContainer { project, ports } if project == "app" => {
+        assert!(ports.is_empty());
+        Ok(json!([{
+          "name":"app-1", "running":false, "restarting":false, "exit_code":137,
+          "oom_killed":true, "started_at":"", "restart_count":0,
+          "network_mode":"bridge", "ports":{}, "mounts":[], "log_keywords":[]
+        }]))
+      }
+      _ => Err(ApiError::internal("测试不处理此操作")),
+    }
+  });
+  state.hub.enable_mock_container_diagnosis("s1");
+  let net = snap.net(&snap.world);
+  let clients = Clients::new(&snap).unwrap();
+  let live = LiveMap::default();
+  let ctx = RouteChecks {
+    s: &state,
+    snap: &snap,
+    net: &net,
+    live: &live,
+    clients: &clients,
+    manual: true,
+  };
+  for scope in [
+    DoctorScope::Service("app".into()),
+    DoctorScope::Server("s1".into()),
+  ] {
+    let checks = special::checks(&ctx, &scope).await;
+    assert!(checks.iter().any(|c| c.layer == "container"
+      && c.detail.contains("退出码 137")
+      && c.detail.contains("内存不够被杀")));
   }
 }

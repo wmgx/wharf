@@ -22,7 +22,7 @@ const UPGRADE: &str =
 pub struct Target {
   pub service: String,
   pub server: String,
-  pub port: u16,
+  pub port: Option<u16>,
   pub local_loopback_ok: bool,
   pub http_failed: bool,
   pub link_unreachable: bool,
@@ -76,7 +76,7 @@ pub async fn enrich<'a>(
     // 一次只查一个服务，避免一批故障同时起多个辅助容器。
     for ((server, service), targets) in services {
       let ports: BTreeSet<_> =
-        targets.iter().map(|(_, t)| t.port).collect();
+        targets.iter().filter_map(|(_, t)| t.port).collect();
       let Ok(results) = state
         .hub
         .call::<Vec<ContainerDiagnosis>>(
@@ -94,11 +94,19 @@ pub async fn enrich<'a>(
         continue;
       };
       for (i, target) in targets {
-        if let Some((result, &port)) = results
-          .iter()
-          .find_map(|r| r.ports.get(&target.port).map(|p| (r, p)))
-        {
-          apply(checks[i].0, &target, result, port);
+        if let Some(host) = target.port {
+          if let Some((result, &port)) = results
+            .iter()
+            .find_map(|r| r.ports.get(&host).map(|p| (r, p)))
+          {
+            apply(checks[i].0, &target, result, Some(port));
+          }
+        } else {
+          for result in
+            results.iter().filter(|r| !r.running || r.restarting)
+          {
+            apply(checks[i].0, &target, result, None);
+          }
         }
       }
     }
@@ -149,7 +157,7 @@ fn apply(
   checks: &mut Vec<DoctorCheck>,
   target: &Target,
   result: &ContainerDiagnosis,
-  port: u16,
+  port: Option<u16>,
 ) {
   let failed = !result.running || result.restarting;
   let permission_error = result.log_keywords.iter().any(|word| {
@@ -169,7 +177,9 @@ fn apply(
       c.detail.push_str(&cause);
     }
     set_cause(checks, target, &cause, true);
-  } else if let Some(listeners) = &result.listeners {
+  } else if let (Some(listeners), Some(port)) =
+    (&result.listeners, port)
+  {
     let host_network = result.network_mode == "host";
     let recent_start =
       DateTime::parse_from_rfc3339(&result.started_at).is_ok_and(

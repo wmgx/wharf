@@ -73,6 +73,9 @@ fn fresh_monitor(
 }
 
 fn pending_port(v: &ServiceView) -> Option<&str> {
+  if v.port_checks_supported == Some(false) {
+    return None;
+  }
   v.spec.ports.iter().find_map(|p| {
     let enabled = match v.spec.port_checks.get(&p.name) {
       Some(PortCheckSpec::Off) => false,
@@ -107,7 +110,8 @@ fn service_ready(v: &ServiceView) -> Check {
 fn needs_service_probe(v: &ServiceView) -> bool {
   service_base(v).0
     && v.status.as_ref().is_some_and(|st| st.want_running)
-    && ((v.spec.monitor.is_some() && fresh_monitor(v).is_none())
+    && ((v.spec.monitor.is_some()
+      && !fresh_monitor(v).is_some_and(|m| m.ok))
       || pending_port(v).is_some())
 }
 
@@ -355,6 +359,23 @@ mod tests {
     assert!(service_ready(&service).0);
     service.monitor.as_mut().unwrap().ok = false;
     assert!(!service_ready(&service).0);
+    assert!(needs_service_probe(&service));
+    service.monitor.as_mut().unwrap().ok = true;
+    assert!(service_ready(&service).0);
+    assert!(!needs_service_probe(&service));
+  }
+
+  #[test]
+  fn legacy_agent_falls_back_without_port_checks() {
+    let mut service = service_fixture();
+    let status = service.status.as_mut().unwrap();
+    status.actual_hash = status.desired_hash.clone();
+    service.spec.monitor = None;
+    assert!(!service_ready(&service).0);
+    service.port_checks_supported = Some(true);
+    assert!(needs_service_probe(&service));
+    service.port_checks_supported = Some(false);
+    assert!(service_ready(&service).0);
     assert!(!needs_service_probe(&service));
   }
 

@@ -2773,6 +2773,10 @@ export interface ServiceView {
    */
   note?: string | null;
   port_checks?: Record<string, boolean>;
+  /**
+   * 在线 agent 是否支持端口探测，能力未知时为空。
+   */
+  port_checks_supported?: boolean | null;
   risks?: string[];
   spec: ServiceSpec;
   /**
