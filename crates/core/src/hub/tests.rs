@@ -119,6 +119,7 @@ fn old_core_ignores_new_hello_capability() {
     build_v2: true,
     deploy_v2: false,
     safe_rollback: true,
+    files_v2: true,
     key_rotation: true,
   };
   let json = serde_json::to_string(&hello).unwrap();
@@ -157,6 +158,10 @@ impl Hub {
 
   pub(crate) fn mock_safe_backup_agent(&self, server: &str) {
     lock(&self.conns).get_mut(server).unwrap().safe_backup = true;
+  }
+
+  pub(crate) fn enable_mock_files_v2(&self, server: &str) {
+    lock(&self.conns).get_mut(server).unwrap().files_v2 = true;
   }
 
   pub(crate) fn enable_mock_monitor_v2(&self, server: &str) {
@@ -313,6 +318,7 @@ impl Hub {
         build_v2: false,
         deploy_v2: false,
         safe_rollback: false,
+        files_v2: false,
         upgrade_only: false,
       },
     );
@@ -458,6 +464,7 @@ async fn agent_upgrade_needs_no_bound_core_server_or_probe_support() {
     build_v2: false,
     deploy_v2: false,
     safe_rollback: false,
+    files_v2: false,
     upgrade_only: true,
   };
   state.hub.register("s1", conn.clone());
@@ -529,6 +536,7 @@ fn probe_connection(
     build_v2: false,
     deploy_v2: false,
     safe_rollback: false,
+    files_v2: false,
     upgrade_only: false,
   };
   (conn, rx)

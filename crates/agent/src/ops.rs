@@ -211,6 +211,7 @@ impl Ops {
         tail,
         since,
         list,
+        until,
       } => {
         check_project(&project)?;
         let lock = self.lock_for(&project);
@@ -226,6 +227,7 @@ impl Ops {
               index,
               tail,
               since.as_deref(),
+              until.as_deref(),
             )?)
           }
         })
@@ -239,6 +241,7 @@ impl Ops {
         tail,
         follow,
         since,
+        until,
       } => {
         check_project(&project)?;
         if follow {
@@ -248,7 +251,13 @@ impl Ops {
           to_value(
             self
               .docker
-              .logs(&project, tail, since.as_deref(), ctx)
+              .logs(
+                &project,
+                tail,
+                since.as_deref(),
+                until.as_deref(),
+                ctx,
+              )
               .await?,
           )
         }
@@ -412,9 +421,12 @@ impl Ops {
       AgentOp::Prune => to_value(self.docker.prune(ctx).await?),
       // 文件 IO 不长，但还是放到阻塞线程，不卡住连接。
       AgentOp::Files(op) => {
-        tokio::task::spawn_blocking(move || crate::files::handle(op))
-          .await
-          .map_err(|e| ApiError::internal(e.to_string()))?
+        let cancel = ctx.cancel.clone();
+        tokio::task::spawn_blocking(move || {
+          crate::files::handle(op, &cancel)
+        })
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
       }
       AgentOp::UpgradeLog => {
         to_value(crate::upgrade::helper_log(ctx).await)
@@ -433,12 +445,19 @@ impl Ops {
         container,
         tail,
         since,
+        until,
       } => {
         check_own_container(&container)?;
         to_value(
           self
             .docker
-            .container_logs(&container, tail, since.as_deref(), ctx)
+            .container_logs(
+              &container,
+              tail,
+              since.as_deref(),
+              until.as_deref(),
+              ctx,
+            )
             .await?,
         )
       }

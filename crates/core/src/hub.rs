@@ -80,6 +80,7 @@ struct Conn {
   gateway_extra_files: bool,
   backup_isolation: bool,
   safe_delete: bool,
+  files_v2: bool,
   shared_volumes: bool,
   safe_gateway: bool,
   gateway_probe: bool,
@@ -636,6 +637,29 @@ impl Hub {
     Ok(conn.conn_id)
   }
 
+  pub(crate) fn files_v2_conn_id(
+    &self,
+    server: &str,
+    feature: &str,
+  ) -> Result<u64, ApiError> {
+    let conns = lock(&self.conns);
+    let conn = conns
+      .get(server)
+      .filter(|conn| !conn.closed.is_cancelled())
+      .ok_or_else(|| offline(server))?;
+    if conn.upgrade_only || !conn.files_v2 {
+      return Err(
+        ApiError::new(
+          ErrorCode::Conflict,
+          format!("服务器 {server} 的 agent 版本旧，不支持{feature}"),
+        )
+        .with_hint("先运行 wharf upgrade 升级 agent 后重试")
+        .suggest("wharf upgrade"),
+      );
+    }
+    Ok(conn.conn_id)
+  }
+
   pub(crate) async fn dispatch_cleanup(
     &self,
     server: &str,
@@ -1137,6 +1161,7 @@ async fn handle_socket(
     core_probe,
     backup_isolation,
     safe_delete,
+    files_v2,
     shared_volumes,
     safe_gateway,
     gateway_probe,
@@ -1312,6 +1337,7 @@ async fn handle_socket(
     gateway_extra_files,
     backup_isolation,
     safe_delete,
+    files_v2,
     shared_volumes,
     safe_gateway,
     gateway_probe,

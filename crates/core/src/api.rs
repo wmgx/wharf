@@ -8,7 +8,7 @@ mod link;
 
 use axum::{
   Extension, Json, Router,
-  extract::{ConnectInfo, Path, Query, State},
+  extract::{ConnectInfo, Path, Query, RawQuery, State},
   http::{HeaderMap, StatusCode},
   response::{IntoResponse, Response},
   routing::{get, post, put},
@@ -372,6 +372,7 @@ pub fn router(state: Arc<AppState>) -> Router {
       "/api/services/{name}/files",
       get(crate::files_api::list)
         .put(crate::files_api::upload)
+        .delete(crate::files_api::rm)
         .layer(axum::extract::DefaultBodyLimit::max(
           crate::files_api::MAX_UPLOAD,
         )),
@@ -379,6 +380,22 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route(
       "/api/services/{name}/files/download",
       get(crate::files_api::download),
+    )
+    .route(
+      "/api/services/{name}/files/tail",
+      get(crate::files_api::tail),
+    )
+    .route(
+      "/api/services/{name}/files/grep",
+      get(crate::files_api::grep),
+    )
+    .route(
+      "/api/services/{name}/files/mkdir",
+      post(crate::files_api::mkdir),
+    )
+    .route(
+      "/api/services/{name}/files/mv",
+      post(crate::files_api::mv),
     )
     .route("/api/backups/migrate", post(crate::backup::migrate_all))
     .route(
@@ -697,11 +714,25 @@ async fn data_overview(
 
 // SERVERS
 
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct ServerListQuery {
+  online: bool,
+  offline: bool,
+  outdated: bool,
+}
+
 async fn list_servers(
   State(s): State<Arc<AppState>>,
   auth: Auth,
+  Query(q): Query<ServerListQuery>,
 ) -> ApiResult<Vec<ServerView>> {
   auth.require(Perm::Read)?;
+  if q.online && q.offline {
+    return Err(
+      ApiError::invalid("--online 和 --offline 不能同时指定").into(),
+    );
+  }
   let snap = snapshot::load(&s.db).await?;
   Ok(Json(
     snap
@@ -716,6 +747,11 @@ async fn list_servers(
           auth.human,
         );
         view
+      })
+      .filter(|v| {
+        (!q.online || v.online)
+          && (!q.offline || !v.online)
+          && (!q.outdated || v.agent_outdated)
       })
       .collect(),
   ))
@@ -1056,14 +1092,73 @@ async fn remove_server(
 
 // SERVICES
 
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct ServiceListQuery {
+  server: Option<String>,
+  status: Option<String>,
+  no_backup: bool,
+  has_update: bool,
+  #[serde(flatten)]
+  brief: BriefQuery,
+}
+
+const SERVICE_LIST_STATES: &[&str] = &[
+  "running",
+  "stopped",
+  "restarting",
+  "partial",
+  "missing",
+  "offline",
+  "unknown",
+  "unhealthy",
+  "abnormal",
+];
+
+fn matches_service(q: &ServiceListQuery, v: &ServiceView) -> bool {
+  use wharf_api_types::view::{Actual, Health, Tone};
+  q.server
+    .as_ref()
+    .is_none_or(|server| v.spec.server == *server)
+    && (!q.no_backup || v.spec.backup.is_none())
+    && (!q.has_update || v.has_update)
+    && q.status.as_deref().is_none_or(|status| {
+      v.status.as_ref().is_some_and(|st| match status {
+        "running" => st.actual == Actual::Running,
+        "stopped" => st.actual == Actual::Stopped,
+        "restarting" => st.actual == Actual::Restarting,
+        "partial" => st.actual == Actual::Partial,
+        "missing" => st.actual == Actual::Missing,
+        "offline" => st.actual == Actual::Offline,
+        "unknown" => st.actual == Actual::Unknown,
+        "unhealthy" => st.health == Health::Unhealthy,
+        "abnormal" => matches!(st.tone, Tone::Bad | Tone::Warn),
+        _ => false,
+      })
+    })
+}
+
 async fn list_services(
   State(s): State<Arc<AppState>>,
   auth: Auth,
-  Query(query): Query<BriefQuery>,
+  Query(q): Query<ServiceListQuery>,
 ) -> ApiResult<Vec<ServiceView>> {
   auth.require(Perm::Read)?;
+  if let Some(status) = q.status.as_deref()
+    && !SERVICE_LIST_STATES.contains(&status)
+  {
+    return Err(
+      ApiError::invalid(format!("未知服务状态：{status}"))
+        .with_hint(format!(
+          "可选状态：{}",
+          SERVICE_LIST_STATES.join("、")
+        ))
+        .into(),
+    );
+  }
   let snap = snapshot::load(&s.db).await?;
   let net = snap.net(&snap.world);
+  let updates = crate::updates::current(&snap);
   let history = crate::data::history(&s.db).await?;
   let live = views::cached_live(&s, &snap.world).await;
   Ok(Json(
@@ -1086,6 +1181,10 @@ async fn list_services(
           Some(&live),
           &history,
         )?;
+        view.has_update = updates
+          .as_ref()
+          .and_then(|u| u.services.get(n))
+          .is_some_and(|check| check.newer || !check.tags.is_empty());
         if let Some(allowed) = &auth.services {
           crate::scope_filter::filter_service_links(
             allowed, &mut view,
@@ -1096,11 +1195,12 @@ async fn list_services(
           &mut view.has_sealed_note,
           auth.human,
         );
-        if query.brief() {
+        if q.brief.brief() {
           views::compact_service(&mut view);
         }
         Some(view)
       })
+      .filter(|v| matches_service(&q, v))
       .collect(),
   ))
 }
@@ -1239,6 +1339,77 @@ pub(super) struct LogsQuery {
   pub(super) previous: Option<u32>,
   #[serde(default)]
   pub(super) previous_list: bool,
+  #[serde(skip)]
+  pub(super) filters: crate::log_search::Filters,
+}
+
+impl LogsQuery {
+  pub(super) fn window(
+    &self,
+  ) -> Result<(Option<String>, Option<String>), ApiError> {
+    let now = chrono::Utc::now();
+    let parse = |value: Option<&str>, flag: &str| {
+      value
+        .map(|value| {
+          crate::log_search::anchor_time(value, now).ok_or_else(
+            || {
+              ApiError::invalid(format!("{flag} 时间范围不合法"))
+                .with_hint("写成 30m、2h、3d 或 RFC 3339 时间")
+            },
+          )
+        })
+        .transpose()
+    };
+    let since = parse(
+      self.since.as_deref().filter(|s| !s.trim().is_empty()),
+      "--since",
+    )?;
+    let until = parse(self.filters.until.as_deref(), "--until")?;
+    if let Some((start, end)) = since
+      .as_deref()
+      .and_then(crate::log_search::parse_rfc3339_utc)
+      .zip(
+        until
+          .as_deref()
+          .and_then(crate::log_search::parse_rfc3339_utc),
+      )
+      && start > end
+    {
+      return Err(ApiError::invalid("--since 必须早于 --until"));
+    }
+    Ok((since, until))
+  }
+
+  fn grep(&self) -> Option<&str> {
+    self.grep.as_deref().filter(|g| !g.trim().is_empty())
+  }
+
+  pub(super) fn filtering(&self) -> bool {
+    self.grep().is_some() || self.errors || self.filters.active()
+  }
+
+  pub(super) fn search(
+    &self,
+    limit: usize,
+    until: Option<&str>,
+  ) -> Result<Option<crate::log_search::RunSearch>, ApiError> {
+    if !self.filtering() && self.max_line.is_none() {
+      return Ok(None);
+    }
+    crate::log_search::RunSearch::new(
+      &crate::log_search::Options {
+        grep: self.grep(),
+        errors: self.errors,
+        max_line: self.max_line.unwrap_or(500).max(20),
+        limit,
+        filters: Some(&self.filters),
+        until: until.and_then(crate::log_search::parse_rfc3339_utc),
+      },
+      (2 << 20) - 1024,
+      true,
+    )
+    .map(Some)
+  }
 }
 
 fn default_tail() -> u32 {
@@ -1252,11 +1423,12 @@ async fn project_logs(
   q: &LogsQuery,
 ) -> Result<Json<Value>, AppError> {
   Ok(Json(
-    fetch_logs(s, server, q, |tail, since| AgentOp::Logs {
+    fetch_logs(s, server, q, |tail, since, until| AgentOp::Logs {
       project: project.clone(),
       tail,
       follow: false,
       since,
+      until,
     })
     .await?,
   ))
@@ -1267,54 +1439,42 @@ async fn fetch_logs(
   s: &AppState,
   server: &str,
   q: &LogsQuery,
-  op: impl Fn(u32, Option<String>) -> AgentOp,
+  op: impl Fn(u32, Option<String>, Option<String>) -> AgentOp,
 ) -> Result<Value, ApiError> {
-  let since =
-    match q.since.as_deref().filter(|v| !v.trim().is_empty()) {
-      Some(v) => {
-        Some(crate::log_search::since_arg(v).ok_or_else(|| {
-          ApiError::invalid(format!("时间范围 {v} 看不懂")).with_hint(
-            "写成 30m、2h、3d，或 2026-11-22T08:00:00+08:00",
-          )
-        })?)
-      }
-      None => None,
-    };
-  let grep = q.grep.as_deref().filter(|g| !g.trim().is_empty());
-  let filtering = grep.is_some() || q.errors;
-  let logs: String = s
-    .hub
-    .call(
-      server,
-      // 过滤时多拿一些再挑，最终条数由 tail 控制。
-      op(if filtering { 5000 } else { q.tail }, since),
-      Duration::from_secs(40),
-      None,
-      &tokio_util::sync::CancellationToken::new(),
-    )
-    .await?;
+  let (since, until) = q.window()?;
+  let search = q.search(q.tail.max(1) as usize, until.as_deref())?;
+  let conn = until
+    .as_ref()
+    .map(|_| s.hub.files_v2_conn_id(server, "按 --until 查日志"))
+    .transpose()?;
+  let op =
+    op(if q.filtering() { 5000 } else { q.tail }, since, until);
+  let timeout = Duration::from_secs(40);
+  let cancel = tokio_util::sync::CancellationToken::new();
+  let logs: String = if let Some(conn) = conn {
+    s.hub
+      .call_bound((server, conn), op, timeout, None, &cancel)
+      .await?
+  } else {
+    s.hub.call(server, op, timeout, None, &cancel).await?
+  };
   Ok(filter_logs(
     server,
-    q,
+    search,
     &crate::log_redact::redact_text(&logs),
   ))
 }
 
-fn filter_logs(server: &str, q: &LogsQuery, logs: &str) -> Value {
-  let grep = q.grep.as_deref().filter(|g| !g.trim().is_empty());
-  if grep.is_none() && !q.errors && q.max_line.is_none() {
+fn filter_logs(
+  server: &str,
+  search: Option<crate::log_search::RunSearch>,
+  logs: &str,
+) -> Value {
+  let Some(search) = search else {
     return json!({ "server": server, "logs": logs });
-  }
-  let found = crate::log_search::search(
-    logs,
-    &crate::log_search::Options {
-      grep,
-      errors: q.errors,
-      max_line: q.max_line.unwrap_or(500).max(20),
-      limit: q.tail.max(1) as usize,
-    },
-  );
-  let mut v = serde_json::to_value(found).unwrap_or_default();
+  };
+  let mut v =
+    serde_json::to_value(search.text(logs)).unwrap_or_default();
   v["server"] = json!(server);
   v
 }
@@ -1324,18 +1484,23 @@ async fn agent_logs(
   State(s): State<Arc<AppState>>,
   auth: Auth,
   Path(name): Path<String>,
-  Query(q): Query<LogsQuery>,
+  Query(mut q): Query<LogsQuery>,
+  RawQuery(raw): RawQuery,
 ) -> ApiResult<Value> {
   auth.require(Perm::Read)?;
+  q.filters = crate::log_search::Filters::query(raw.as_deref())?;
   let snap = snapshot::load(&s.db).await?;
   if !snap.world.servers.contains_key(&name) {
     return Err(crate::world::server_not_found(&name).into());
   }
   Ok(Json(
-    fetch_logs(&s, &name, &q, |tail, since| AgentOp::ContainerLogs {
-      container: "wharf-agent".into(),
-      tail,
-      since,
+    fetch_logs(&s, &name, &q, |tail, since, until| {
+      AgentOp::ContainerLogs {
+        container: "wharf-agent".into(),
+        tail,
+        since,
+        until,
+      }
     })
     .await?,
   ))
@@ -1346,9 +1511,11 @@ async fn agent_logs(
 async fn core_logs(
   State(s): State<Arc<AppState>>,
   auth: Auth,
-  Query(q): Query<LogsQuery>,
+  Query(mut q): Query<LogsQuery>,
+  RawQuery(raw): RawQuery,
 ) -> ApiResult<Value> {
   auth.require(Perm::Read)?;
+  q.filters = crate::log_search::Filters::query(raw.as_deref())?;
   let id = std::fs::read_to_string("/proc/self/mountinfo")
     .ok()
     .and_then(|m| wharf_api_types::agent::container_id(&m))
@@ -1361,11 +1528,12 @@ async fn core_logs(
     if !s.hub.is_online(name) {
       continue;
     }
-    let found = fetch_logs(&s, name, &q, |tail, since| {
+    let found = fetch_logs(&s, name, &q, |tail, since, until| {
       AgentOp::ContainerLogs {
         container: id.clone(),
         tail,
         since,
+        until,
       }
     })
     .await;
@@ -1373,6 +1541,33 @@ async fn core_logs(
       Ok(v) => return Ok(Json(v)),
       // 不在这台机器上：问下一台。
       Err(e) if matches!(e.code, ErrorCode::NotFound) => continue,
+      Err(e)
+        if e.code == ErrorCode::Conflict
+          && q.filters.until.is_some() =>
+      {
+        // 先用旧协议确认控制面容器在这台机器上，避免无关旧 agent 挡住查询。
+        let present = s
+          .hub
+          .call::<String>(
+            name,
+            AgentOp::ContainerLogs {
+              container: id.clone(),
+              tail: 0,
+              since: None,
+              until: None,
+            },
+            Duration::from_secs(10),
+            None,
+            &tokio_util::sync::CancellationToken::new(),
+          )
+          .await;
+        if present
+          .is_err_and(|probe| probe.code == ErrorCode::NotFound)
+        {
+          continue;
+        }
+        return Err(e.into());
+      }
       Err(e) => return Err(e.into()),
     }
   }
@@ -1390,13 +1585,21 @@ async fn service_logs(
   State(s): State<Arc<AppState>>,
   auth: Auth,
   Path(name): Path<String>,
-  Query(q): Query<LogsQuery>,
+  Query(mut q): Query<LogsQuery>,
+  RawQuery(raw): RawQuery,
 ) -> ApiResult<Value> {
   auth.require(Perm::Read)?;
+  q.filters = crate::log_search::Filters::query(raw.as_deref())?;
   let snap = snapshot::load(&s.db).await?;
   let (server, project) =
     crate::multi_logs::service_target(&snap, &name)?;
   if q.previous_list || q.previous.is_some() {
+    if q.previous_list && q.filters.active() {
+      return Err(
+        ApiError::invalid("--previous-list 不能与日志筛选同用")
+          .into(),
+      );
+    }
     let values = crate::log_redact::service_values(
       &snap.world.services[&name].spec,
     );
@@ -1421,24 +1624,25 @@ async fn previous_logs(
       "不能同时选择旧日志列表和指定份数",
     ));
   }
-  let conn = s.hub.runtime_v2_conn_id(server)?;
-  let since = q
-    .since
-    .as_deref()
-    .filter(|s| !s.trim().is_empty())
-    .map(|s| {
-      crate::multi_logs::anchor_since(s)
-        .ok_or_else(|| ApiError::invalid("日志时间范围不合法"))
-    })
-    .transpose()?;
-  let filtering = q.errors
-    || q.grep.as_deref().is_some_and(|g| !g.trim().is_empty());
+  let (since, until) = q.window()?;
+  let search =
+    q.search(q.tail.clamp(1, 2000) as usize, until.as_deref())?;
+  let conn = if until.is_some() {
+    s.hub.files_v2_conn_id(server, "按 --until 查旧日志")?
+  } else {
+    s.hub.runtime_v2_conn_id(server)?
+  };
   let op = AgentOp::PreviousLogs {
     project,
     index: q.previous.unwrap_or(1),
-    tail: if filtering { 2000 } else { q.tail.min(2000) },
+    tail: if q.filtering() {
+      2000
+    } else {
+      q.tail.min(2000)
+    },
     since,
     list: q.previous_list,
+    until,
   };
   let cancel = tokio_util::sync::CancellationToken::new();
   let timeout = Duration::from_secs(40);
@@ -1454,7 +1658,7 @@ async fn previous_logs(
     .call_bound((server, conn), op, timeout, None, &cancel)
     .await?;
   let logs = crate::log_redact::redact_text_with(&out.logs, values);
-  let mut v = filter_logs(server, q, &logs);
+  let mut v = filter_logs(server, search, &logs);
   v["previous"] = json!({ "index": out.index, "at": out.at, "reason": out.reason, "available": out.available });
   Ok(v)
 }
@@ -1463,9 +1667,11 @@ async fn multi_service_logs(
   State(s): State<Arc<AppState>>,
   auth: Auth,
   Query(services): Query<crate::multi_logs::Services>,
-  Query(q): Query<LogsQuery>,
+  Query(mut q): Query<LogsQuery>,
+  RawQuery(raw): RawQuery,
 ) -> ApiResult<Value> {
   auth.require(Perm::Read)?;
+  q.filters = crate::log_search::Filters::query(raw.as_deref())?;
   if q.previous_list || q.previous.is_some() {
     return Err(
       ApiError::invalid("查看重建前日志每次只能指定一个服务").into(),
@@ -1554,11 +1760,27 @@ pub(crate) async fn deployments(
 
 // GATEWAYS
 
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct GatewayListQuery {
+  server: Option<String>,
+  kind: Option<String>,
+}
+
 async fn list_gateways(
   State(s): State<Arc<AppState>>,
   auth: Auth,
+  Query(q): Query<GatewayListQuery>,
 ) -> ApiResult<Vec<GatewayView>> {
   auth.require(Perm::Read)?;
+  if q.kind.as_deref().is_some_and(|kind| {
+    !matches!(kind, "caddy" | "cloudflare_tunnel")
+  }) {
+    return Err(
+      ApiError::invalid("网关类型须为 caddy 或 cloudflare_tunnel")
+        .into(),
+    );
+  }
   let snap = snapshot::load(&s.db).await?;
   let net = snap.net(&snap.world);
   let live = views::cached_live(&s, &snap.world).await;
@@ -1569,6 +1791,15 @@ async fn list_gateways(
       .keys()
       .filter_map(|n| {
         views::gateway_view(&snap, &net, n, Some(&live))
+      })
+      .filter(|v| {
+        q.server
+          .as_ref()
+          .is_none_or(|server| v.spec.server == *server)
+          && q
+            .kind
+            .as_deref()
+            .is_none_or(|kind| v.spec.kind.as_str() == kind)
       })
       .collect(),
   ))
@@ -1619,9 +1850,11 @@ async fn gateway_logs(
   State(s): State<Arc<AppState>>,
   auth: Auth,
   Path(name): Path<String>,
-  Query(q): Query<LogsQuery>,
+  Query(mut q): Query<LogsQuery>,
+  RawQuery(raw): RawQuery,
 ) -> ApiResult<Value> {
   auth.require(Perm::Read)?;
+  q.filters = crate::log_search::Filters::query(raw.as_deref())?;
   let snap = snapshot::load(&s.db).await?;
   let row = snap
     .world
@@ -1633,11 +1866,50 @@ async fn gateway_logs(
 
 // ROUTES
 
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct RouteListQuery {
+  gateway: Option<String>,
+  service: Option<String>,
+  public: bool,
+  internal: bool,
+  unprotected: bool,
+}
+
+fn matches_route(q: &RouteListQuery, v: &RouteView) -> bool {
+  q.gateway
+    .as_ref()
+    .is_none_or(|gateway| v.gateway.as_ref() == Some(gateway))
+    && q.service.as_deref().is_none_or(|service| {
+      v.spec.service == service
+        || v
+          .spec
+          .paths
+          .iter()
+          .any(|p| p.service.as_deref() == Some(service))
+    })
+    && (!q.public || !v.spec.internal)
+    && (!q.internal || v.spec.internal)
+    && (!q.unprotected
+      || (!v.spec.internal
+        && !v.spec.auth
+        && v.spec.sso.as_ref().is_none_or(|s| s.public)))
+}
+
 async fn list_routes(
   State(s): State<Arc<AppState>>,
   auth: Auth,
+  Query(q): Query<RouteListQuery>,
 ) -> ApiResult<Vec<RouteView>> {
   auth.require(Perm::Read)?;
+  if q.internal && (q.public || q.unprotected) {
+    return Err(
+      ApiError::invalid(
+        "--internal 不能与 --public 或 --unprotected 同时指定",
+      )
+      .into(),
+    );
+  }
   let snap = snapshot::load(&s.db).await?;
   let net = snap.net(&snap.world);
   Ok(Json(
@@ -1662,6 +1934,7 @@ async fn list_routes(
         );
         view
       })
+      .filter(|v| matches_route(&q, v))
       .collect(),
   ))
 }
@@ -2477,9 +2750,11 @@ async fn run_logs(
   State(s): State<Arc<AppState>>,
   auth: Auth,
   Path(id): Path<String>,
-  Query(query): Query<crate::run_logs::RunLogsQuery>,
+  Query(mut query): Query<crate::run_logs::RunLogsQuery>,
+  RawQuery(raw): RawQuery,
 ) -> ApiResult<Value> {
   auth.require(Perm::Read)?;
+  query.filters = crate::log_search::Filters::query(raw.as_deref())?;
   let run = apply::load_run_for(&s, &auth, &id).await?;
   let data = s.data_dir.clone();
   let result = tokio::task::spawn_blocking(move || {
@@ -2563,7 +2838,7 @@ mod tests {
       let Json(list) = list_services(
         State(state.clone()),
         scoped(name),
-        Query(BriefQuery::default()),
+        Query(ServiceListQuery::default()),
       )
       .await
       .map_err(|e| e.0)
@@ -2644,6 +2919,52 @@ mod tests {
   }
 
   #[tokio::test]
+  async fn until_does_not_dispatch_to_an_old_agent() {
+    let state = crate::rules::tests::test_state();
+    state.hub.mock_agent("s1", false, |_| {
+      unreachable!("旧 agent 不接收截止时间")
+    });
+    let mut q: LogsQuery = serde_json::from_value(json!({})).unwrap();
+    q.filters =
+      crate::log_search::Filters::query(Some("until=1h")).unwrap();
+    let err = project_logs(&state, "s1", "app".into(), &q)
+      .await
+      .err()
+      .unwrap()
+      .0;
+    assert_eq!(err.code, ErrorCode::Conflict);
+  }
+
+  #[test]
+  fn list_filters_combine_status_update_and_path_routes() {
+    let mut service: ServiceView = serde_json::from_value(json!({
+      "name":"app","spec":{"server":"s1","source":{"image":"fixture:1"}}, "host_ports":{}, "addresses":{}, "version":1,
+      "status":{"want_running":true,"actual":"running","health":"unhealthy","tone":"warn","summary":"测试"}
+    })).unwrap();
+    let uri = "/api/services?server=s1&status=abnormal&no_backup=true&has_update=true&brief=1".parse().unwrap();
+    let Query(filters) =
+      Query::<ServiceListQuery>::try_from_uri(&uri).unwrap();
+    assert!(filters.brief.brief());
+    assert!(!matches_service(&filters, &service));
+    service.has_update = true;
+    assert!(matches_service(&filters, &service));
+    let mut route: RouteView = serde_json::from_value(json!({
+      "id":"uuid-1","spec":{"hostname":"a.example.test","service":"app","paths":[{"path":"/api/*","service":"api"}]},
+      "gateway":"g1","url":"https://a.example.test","version":1
+    })).unwrap();
+    let filters = RouteListQuery {
+      service: Some("api".into()),
+      gateway: Some("g1".into()),
+      public: true,
+      unprotected: true,
+      ..Default::default()
+    };
+    assert!(matches_route(&filters, &route));
+    route.spec.auth = true;
+    assert!(!matches_route(&filters, &route));
+  }
+
+  #[tokio::test]
   async fn previous_logs_rejects_old_agent() {
     let state = crate::rules::tests::test_state();
     state.hub.mock_agent("s1", false, |_| {
@@ -2683,6 +3004,7 @@ mod tests {
       auth,
       Path("r_b".into()),
       Query(serde_json::from_value(json!({})).unwrap()),
+      RawQuery(None),
     )
     .await;
     let Err(error) = result else {

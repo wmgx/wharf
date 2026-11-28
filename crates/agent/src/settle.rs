@@ -281,7 +281,7 @@ pub async fn emit_crash_logs(
       let per = (50 / targets.len()).clamp(10, 50);
       for c in targets {
         if let Ok(logs) = docker
-          .container_logs(&c.name, per as u32, None, &detached)
+          .container_logs(&c.name, per as u32, None, None, &detached)
           .await
         {
           let prefix = if multi {

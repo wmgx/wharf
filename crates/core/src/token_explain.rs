@@ -276,6 +276,13 @@ fn fixed_items(
       None,
     ),
     (
+      "修改服务文件",
+      Method::DELETE,
+      "/api/services/{svc}/files",
+      Exec,
+      Some("上传、删除、移动和建目录均要求 exec，且仅限服务数据目录"),
+    ),
+    (
       "确认告警",
       Method::POST,
       "/api/alerts/ack",

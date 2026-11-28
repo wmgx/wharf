@@ -3227,6 +3227,7 @@ dependencies = [
  "libc",
  "qrcode",
  "rcgen",
+ "regex",
  "reqwest",
  "rpassword",
  "rusqlite",

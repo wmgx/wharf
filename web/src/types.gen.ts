@@ -2999,6 +2999,10 @@ export interface ServiceView {
    * 服务挂载的数据和归属，从配置里算出来。
    */
   data?: DataMount[];
+  /**
+   * 后台版本检查发现新镜像、commit 或版本标签。
+   */
+  has_update?: boolean;
   has_sealed_note?: boolean;
   heartbeat?: HeartbeatView | null;
   /**

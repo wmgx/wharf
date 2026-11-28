@@ -1,7 +1,16 @@
 //! 日志搜索：按关键字过滤、只看报错并按内容去重计数、限制每行长度，避免几万行日志把 AI 淹没。
 //! 时间范围由 agent 的 `docker compose logs --since` 处理，这里只处理拿回来的文本。
 
+use std::collections::VecDeque;
+
+use chrono::{DateTime, Datelike, TimeDelta, Utc};
 use serde::Serialize;
+use serde_json::{Map, Value};
+use wharf_api_types::ApiError;
+
+mod filters;
+pub(crate) use filters::Filters;
+use filters::{JsonFilter, Matcher};
 
 /// 认作报错的词（小写比较）。
 const ERROR_WORDS: &[&str] = &[
@@ -26,6 +35,8 @@ pub struct Options<'a> {
   pub max_line: usize,
   /// 最多返回多少行（或多少组）。
   pub limit: usize,
+  pub filters: Option<&'a Filters>,
+  pub until: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -50,13 +61,23 @@ pub struct Found {
   pub logs: Option<String>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub groups: Option<Vec<Group>>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub columns: Option<Vec<String>>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub rows: Option<Vec<Map<String, Value>>>,
+  #[serde(skip_serializing_if = "is_zero")]
+  pub non_json_skipped: usize,
+}
+
+fn is_zero(value: &usize) -> bool {
+  *value == 0
 }
 
 /// `web-1  | 2026-11-22T02:00:00.123Z 消息` → (`web-1`, 时间, 消息)。没有前缀时整行都是消息。
 pub(crate) fn split(line: &str) -> (&str, Option<&str>, &str) {
   let (container, rest) = match line.split_once(" | ") {
-    Some((c, r)) => (c.trim(), r),
-    None => ("", line),
+    Some((c, r)) if !c.contains('{') => (c.trim(), r),
+    _ => ("", line),
   };
   match rest.split_once(' ') {
     Some((ts, msg))
@@ -106,16 +127,92 @@ fn cut(line: &str, max: usize) -> String {
   s
 }
 
-pub fn search(raw: &str, o: &Options) -> Found {
-  let mut search = RunSearch::new(o, usize::MAX, true);
-  for line in raw.lines() {
-    search.push(line);
+#[cfg(test)]
+pub(super) fn search(
+  raw: &str,
+  o: &Options<'_>,
+) -> Result<Found, ApiError> {
+  Ok(RunSearch::new(o, usize::MAX, true)?.text(raw))
+}
+
+type Line = (usize, Option<usize>, String, usize);
+
+struct Context {
+  before: usize,
+  after: usize,
+  index: usize,
+  last_kept: usize,
+  preceding: VecDeque<Line>,
+  preceding_bytes: usize,
+  hits: VecDeque<usize>,
+}
+
+impl Context {
+  fn add(
+    &mut self,
+    raw: String,
+    index: usize,
+    matched: bool,
+    search: &mut RunSearch,
+  ) {
+    self.index += 1;
+    let position = self.index;
+    let bytes = encoded_len(&raw).saturating_add(4);
+    if matched {
+      self.hits.push_back(position);
+      if self.hits.len() > search.limit {
+        self.hits.pop_front();
+      }
+      let oldest = self.hits[0].saturating_sub(self.before);
+      while search
+        .lines
+        .front()
+        .is_some_and(|(_, pos, _, _)| pos.is_some_and(|p| p < oldest))
+      {
+        if let Some((_, _, _, bytes)) = search.lines.pop_front() {
+          search.bytes -= bytes;
+        }
+      }
+      for previous in &self.preceding {
+        if previous.1.is_some_and(|i| i > self.last_kept) {
+          search.keep(previous.clone(), 5000);
+        }
+      }
+    }
+    let line = (index, Some(position), raw, bytes);
+    if self
+      .hits
+      .back()
+      .is_some_and(|hit| position - hit <= self.after)
+    {
+      search.keep(line.clone(), 5000);
+      self.last_kept = position;
+    }
+    if self.before > 0 {
+      while self.preceding.len() >= self.before
+        || self.preceding_bytes.saturating_add(bytes) > search.budget
+      {
+        let Some((_, _, _, dropped)) = self.preceding.pop_front()
+        else {
+          break;
+        };
+        self.preceding_bytes -= dropped;
+      }
+      self.preceding_bytes += bytes;
+      self.preceding.push_back(line);
+    }
   }
-  search.finish(&[]).0
 }
 
 pub(crate) struct RunSearch {
-  grep: Option<String>,
+  grep: Option<Matcher>,
+  exclude: Vec<Matcher>,
+  until: Option<DateTime<Utc>>,
+  last_ts: Option<DateTime<Utc>>,
+  json_filter: JsonFilter,
+  rows: VecDeque<(Map<String, Value>, usize)>,
+  non_json_skipped: usize,
+  context: Option<Context>,
   errors: bool,
   filter_blank: bool,
   max_line: usize,
@@ -125,7 +222,7 @@ pub(crate) struct RunSearch {
   scanned: usize,
   matched: usize,
   truncated: bool,
-  lines: std::collections::VecDeque<(usize, String, usize)>,
+  lines: VecDeque<Line>,
   groups: std::collections::HashMap<String, (usize, Group)>,
 }
 
@@ -134,13 +231,73 @@ impl RunSearch {
     o: &Options<'_>,
     budget: usize,
     filter_blank: bool,
-  ) -> Self {
-    Self {
-      grep: o.grep.map(str::to_lowercase),
+  ) -> Result<Self, ApiError> {
+    let empty = Filters::default();
+    let f = o.filters.unwrap_or(&empty);
+    let before = f.before.or(f.context).unwrap_or(0);
+    let after = f.after.or(f.context).unwrap_or(0);
+    let context = before > 0 || after > 0;
+    if before > 50 || after > 50 {
+      return Err(ApiError::invalid("上下文行数不能超过 50"));
+    }
+    if context
+      && (o.errors || o.grep.is_none() && f.where_exprs.is_empty())
+    {
+      return Err(ApiError::invalid(
+        "上下文需要 --grep 或 --where，且不能与 --errors 同用",
+      ));
+    }
+    if f.cols.is_some() && (context || o.errors) {
+      return Err(ApiError::invalid(
+        "--cols 不能与上下文或 --errors 同用",
+      ));
+    }
+    if f.exclude.len() > 20 || f.where_exprs.len() > 20 {
+      return Err(ApiError::invalid(
+        "--exclude 和 --where 各最多指定 20 条",
+      ));
+    }
+    if f.regex
+      && o.grep.is_none()
+      && f.exclude.is_empty()
+      && f.where_exprs.is_empty()
+    {
+      return Err(ApiError::invalid(
+        "--regex 需要 --grep、--exclude 或 --where",
+      ));
+    }
+    Ok(Self {
+      grep: o
+        .grep
+        .map(|pat| Matcher::compile(pat, f.regex))
+        .transpose()?,
+      exclude: f
+        .exclude
+        .iter()
+        .map(|pat| Matcher::compile(pat, f.regex))
+        .collect::<Result<_, _>>()?,
+      until: o.until,
+      last_ts: None,
+      json_filter: JsonFilter::compile(f)?,
+      rows: VecDeque::new(),
+      non_json_skipped: 0,
+      context: context.then(|| Context {
+        before,
+        after,
+        index: 0,
+        last_kept: 0,
+        preceding: VecDeque::new(),
+        preceding_bytes: 0,
+        hits: VecDeque::new(),
+      }),
       errors: o.errors,
       filter_blank,
       max_line: o.max_line,
-      limit: o.limit,
+      limit: if context {
+        o.limit.clamp(1, 5000)
+      } else {
+        o.limit
+      },
       budget,
       bytes: 0,
       scanned: 0,
@@ -148,7 +305,33 @@ impl RunSearch {
       truncated: false,
       lines: Default::default(),
       groups: Default::default(),
+    })
+  }
+
+  pub(crate) fn text(mut self, raw: &str) -> Found {
+    for line in raw.lines() {
+      self.push(line);
     }
+    self.finish(&[]).0
+  }
+
+  fn keep(&mut self, entry: Line, limit: usize) {
+    let bytes = entry.3;
+    if self.lines.len() == limit
+      && let Some((_, _, _, old)) = self.lines.pop_front()
+    {
+      self.bytes -= old;
+      self.truncated |= entry.1.is_some();
+    }
+    while self.bytes.saturating_add(bytes) > self.budget {
+      let Some((_, _, _, removed)) = self.lines.pop_front() else {
+        break;
+      };
+      self.bytes -= removed;
+      self.truncated = true;
+    }
+    self.bytes += bytes;
+    self.lines.push_back(entry);
   }
 
   pub(crate) fn scanned(&self) -> usize {
@@ -157,13 +340,81 @@ impl RunSearch {
 
   pub(crate) fn push(&mut self, line: &str) {
     self.scanned += 1;
-    if self.filter_blank && line.trim().is_empty()
-      || self
-        .grep
-        .as_ref()
-        .is_some_and(|grep| !line.to_lowercase().contains(grep))
-      || self.errors && !is_error(line)
-    {
+    if let Some(until) = self.until {
+      if let Some(ts) = split(line).1.and_then(parse_rfc3339_utc) {
+        self.last_ts = Some(ts);
+      }
+      if self.last_ts.is_some_and(|ts| ts > until) {
+        return;
+      }
+    }
+    if self.exclude.iter().any(|matcher| matcher.matches(line)) {
+      return;
+    }
+    let blank = self.filter_blank && line.trim().is_empty();
+    if blank && self.context.is_none() {
+      return;
+    }
+    let mut matched = !blank
+      && self.grep.as_ref().is_none_or(|grep| grep.matches(line))
+      && (!self.errors || is_error(line));
+    if self.json_filter.enabled() {
+      let (container, ts, msg) = split(line);
+      let json = msg.trim();
+      let json = if json.starts_with('{') && json.ends_with('}') {
+        serde_json::from_str::<Value>(json).ok()
+      } else {
+        None
+      };
+      if let Some(obj) = json {
+        matched &= self.json_filter.matches(&obj, container, ts);
+        if matched
+          && let Some(row) = self.json_filter.project(
+            &obj,
+            container,
+            ts,
+            self.max_line,
+          )
+        {
+          self.matched += 1;
+          if self.limit > 0 {
+            let bytes = serde_json::to_vec(&row)
+              .map_or(usize::MAX, |v| v.len().saturating_add(1));
+            if bytes > self.budget {
+              self.truncated = true;
+              return;
+            }
+            if self.rows.len() == self.limit
+              && let Some((_, removed)) = self.rows.pop_front()
+            {
+              self.bytes -= removed;
+            }
+            while self.bytes.saturating_add(bytes) > self.budget {
+              if let Some((_, removed)) = self.rows.pop_front() {
+                self.bytes -= removed;
+                self.truncated = true;
+              }
+            }
+            self.bytes += bytes;
+            self.rows.push_back((row, bytes));
+          }
+          return;
+        }
+      } else {
+        self.non_json_skipped += usize::from(!blank);
+        matched = false;
+      }
+    }
+    if let Some(mut context) = self.context.take() {
+      self.matched += usize::from(matched);
+      let (line, clipped) =
+        fits(cut(line, self.max_line), self.budget.saturating_sub(4));
+      self.truncated |= clipped;
+      context.add(line, self.scanned, matched, self);
+      self.context = Some(context);
+      return;
+    }
+    if !matched {
       return;
     }
     self.matched += 1;
@@ -208,21 +459,8 @@ impl RunSearch {
     } else if self.limit > 0 {
       let (line, clipped) = fits(cut, self.budget.saturating_sub(2));
       let bytes = encoded_len(&line).saturating_add(2);
-      if self.lines.len() == self.limit
-        && let Some((_, _, old)) = self.lines.pop_front()
-      {
-        self.bytes -= old;
-      }
-      while self.bytes.saturating_add(bytes) > self.budget {
-        let Some((_, _, removed)) = self.lines.pop_front() else {
-          break;
-        };
-        self.bytes -= removed;
-        self.truncated = true;
-      }
       self.truncated |= clipped;
-      self.bytes += bytes;
-      self.lines.push_back((self.scanned, line, bytes));
+      self.keep((self.scanned, None, line, bytes), self.limit);
     }
   }
 
@@ -231,7 +469,13 @@ impl RunSearch {
     headers: &[(usize, String)],
   ) -> (Found, bool) {
     let mut truncated = self.truncated;
-    let (logs, groups) = if self.errors {
+    let columns = self.json_filter.columns;
+    let rows = columns
+      .as_ref()
+      .map(|_| self.rows.into_iter().map(|(row, _)| row).collect());
+    let (logs, groups) = if columns.is_some() {
+      (None, None)
+    } else if self.errors {
       let mut groups: Vec<_> = self.groups.into_values().collect();
       groups.sort_unstable_by_key(|(first, group)| {
         (std::cmp::Reverse(group.count), *first)
@@ -265,7 +509,7 @@ impl RunSearch {
         let mut header = None;
         keep = 0;
         // 从尾部给日志行和所属步骤标题一起留空间。
-        for (index, _, len) in self.lines.iter().rev() {
+        for (index, _, _, len) in self.lines.iter().rev() {
           let next = heading(*index);
           let cost = if next != header {
             next.map_or(0, |i| encoded_len(&headers[i].1) + 2)
@@ -287,7 +531,16 @@ impl RunSearch {
       let mut header = None;
       let mut bytes = 0;
       let skip = self.lines.len() - keep;
-      for (index, line, len) in self.lines.into_iter().skip(skip) {
+      let mut previous = None;
+      for (index, pos, line, len) in self.lines.into_iter().skip(skip)
+      {
+        if previous
+          .zip(pos)
+          .is_some_and(|(before, after)| before + 1 < after)
+        {
+          text.push_str("--\n");
+        }
+        previous = pos;
         let next = heading(index);
         if next != header {
           if let Some(i) = next {
@@ -312,9 +565,15 @@ impl RunSearch {
     (
       Found {
         scanned: self.scanned,
-        matched: self.matched,
+        matched: self
+          .context
+          .as_ref()
+          .map_or(self.matched, |c| c.hits.len()),
         logs,
         groups,
+        columns,
+        rows,
+        non_json_skipped: self.non_json_skipped,
       },
       truncated,
     )
@@ -363,9 +622,100 @@ pub fn since_arg(s: &str) -> Option<String> {
   }
 }
 
+pub fn parse_rfc3339_utc(value: &str) -> Option<DateTime<Utc>> {
+  DateTime::parse_from_rfc3339(value)
+    .ok()
+    .map(|time| time.with_timezone(&Utc))
+}
+
+pub fn anchor_time(
+  value: &str,
+  now: DateTime<Utc>,
+) -> Option<String> {
+  let value = since_arg(value)?;
+  if let Some(time) = parse_rfc3339_utc(&value) {
+    return Some(time.to_rfc3339());
+  }
+  let (unit, digits) = value.as_bytes().split_last()?;
+  let multiplier = match unit {
+    b's' => 1,
+    b'm' => 60,
+    b'h' => 3600,
+    _ => return None,
+  };
+  let n: i64 = std::str::from_utf8(digits).ok()?.parse().ok()?;
+  let delta = TimeDelta::try_seconds(n.checked_mul(multiplier)?)?;
+  let time = now.checked_sub_signed(delta)?;
+  (0..=9999).contains(&time.year()).then(|| time.to_rfc3339())
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn context_keeps_recent_matches_and_excludes_noise() {
+    let f = Filters::query(Some(
+      "context=1&after=2&exclude=healthcheck&regex=true",
+    ))
+    .unwrap();
+    let mut o = Options {
+      grep: Some("pan[i]c"),
+      errors: false,
+      max_line: 500,
+      limit: 1,
+      filters: Some(&f),
+      until: None,
+    };
+    let raw = "1\n2\n3\nPANIC\nhealthcheck\n5\n6\n7\n8\npanic\n10";
+    let found = search(raw, &o).unwrap();
+    assert_eq!(
+      (found.matched, found.logs.as_deref()),
+      (1, Some("8\npanic\n10\n"))
+    );
+    o.limit = 2;
+    assert_eq!(
+      search(raw, &o).unwrap().logs.as_deref(),
+      Some("3\nPANIC\n5\n6\n--\n8\npanic\n10\n")
+    );
+    o.grep = Some("[");
+    assert!(search(raw, &o).is_err());
+    o.grep = None;
+    assert!(search(raw, &o).is_err());
+  }
+
+  #[test]
+  fn json_fields_and_cutoff_filter_before_projection() {
+    let f = Filters::query(Some("where=status%3E%3D500&where=req.method%3DPOST&cols=time,req.path,status,ms")).unwrap();
+    let mut o = Options {
+      grep: None,
+      errors: false,
+      max_line: 500,
+      limit: 10,
+      filters: Some(&f),
+      until: parse_rfc3339_utc("2026-01-01T10:15:00Z"),
+    };
+    let raw = r#"2026-01-01T10:00:00Z text
+web | 2026-01-01T10:01:00Z {"status":502,"req":{"path":"/api","method":"POST"},"ms":1200}
+web | 2026-01-01T10:02:00Z {"status":200,"req":{"method":"POST"}}
+web | 2026-01-01T10:30:00Z {"status":503,"req":{"method":"POST"}}
+续行"#;
+    let found = search(raw, &o).unwrap();
+    assert_eq!(
+      (found.matched, found.non_json_skipped, found.logs),
+      (1, 1, None)
+    );
+    assert_eq!(
+      found.columns.unwrap(),
+      ["time", "req.path", "status", "ms"]
+    );
+    let rows = found.rows.unwrap();
+    assert_eq!(rows[0]["status"], 502);
+    assert_eq!(rows[0]["time"], "2026-01-01T10:01:00Z");
+    let invalid = Filters::query(Some("where=badexpr")).unwrap();
+    o.filters = Some(&invalid);
+    assert!(search(raw, &o).is_err());
+  }
 
   #[test]
   fn multistep_budget_preserves_final_error_line() {
@@ -374,8 +724,10 @@ mod tests {
       errors: false,
       max_line: usize::MAX,
       limit: usize::MAX,
+      filters: None,
+      until: None,
     };
-    let mut search = RunSearch::new(&options, 32, false);
+    let mut search = RunSearch::new(&options, 32, false).unwrap();
     for line in [
       "x".repeat(32),
       "a".repeat(8),
@@ -406,8 +758,10 @@ web-1  | 2026-11-22T02:00:03.1Z panic: boom
       errors: true,
       max_line: 500,
       limit: 20,
+      filters: None,
+      until: None,
     };
-    let f = search(raw, &o);
+    let f = search(raw, &o).unwrap();
     assert_eq!((f.scanned, f.matched), (4, 3));
     let g = f.groups.unwrap();
     assert_eq!(g.len(), 2);
@@ -424,8 +778,10 @@ web-1  | 2026-11-22T02:00:03.1Z panic: boom
       errors: false,
       max_line: 8,
       limit: 1,
+      filters: None,
+      until: None,
     };
-    let f = search(raw, &o);
+    let f = search(raw, &o).unwrap();
     assert_eq!(f.matched, 2);
     assert_eq!(f.logs.as_deref(), Some("c TIMEOU…\n"));
     assert_eq!(since_arg("2d").as_deref(), Some("48h"));

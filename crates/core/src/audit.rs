@@ -36,6 +36,7 @@ struct Slot {
   actor: Option<String>,
   detail: Option<String>,
   required: bool,
+  started_row: Option<i64>,
   skipped: bool,
   rejection: Option<(String, String)>,
 }
@@ -65,6 +66,38 @@ impl AuditSlot {
     slot.detail = Some(detail);
     slot.required = true;
   }
+
+  /// 先持久化记录，成功后才能下发文件写操作。
+  pub async fn record_before_files(
+    &self,
+    state: &AppState,
+    actor: &str,
+    method: Method,
+    path: String,
+    detail: String,
+  ) -> Result<(), ApiError> {
+    let id = insert_row(
+      state,
+      AuditEntry {
+        id: 0,
+        at: now_ms(),
+        kind: "api".into(),
+        actor: actor.to_owned(),
+        method: method.to_string(),
+        path,
+        status: None,
+        duration_ms: None,
+        detail: Some(detail.clone()),
+        source: None,
+      },
+    )
+    .await?;
+    let mut slot = self.0.lock().unwrap_or_else(|e| e.into_inner());
+    slot.required = true;
+    slot.detail = Some(detail);
+    slot.started_row = Some(id);
+    Ok(())
+  }
 }
 
 pub async fn layer(
@@ -83,7 +116,7 @@ pub async fn layer(
   let slot = AuditSlot::default();
   req.extensions_mut().insert(slot.clone());
   let resp = next.run(req).await;
-  let (actor, detail, required, skipped, rejection) = {
+  let (actor, detail, required, skipped, rejection, started_row) = {
     let mut slot = slot.0.lock().unwrap_or_else(|e| e.into_inner());
     (
       slot.actor.take(),
@@ -91,6 +124,7 @@ pub async fn layer(
       slot.required,
       slot.skipped,
       slot.rejection.take(),
+      slot.started_row,
     )
   };
   let status = resp.status().as_u16();
@@ -145,7 +179,11 @@ pub async fn layer(
         return resp;
       }
     }
-    let result = insert(&state, row).await;
+    let result = if let Some(id) = started_row {
+      finish_started(&state, id, row).await
+    } else {
+      insert(&state, row).await
+    };
     if required && let Err(error) = result {
       return AppError(error).into_response();
     }
@@ -205,7 +243,10 @@ pub fn should_record(method: &Method, path: &str) -> bool {
       || path == "/api/sso/accounts"
       || path.starts_with("/api/sso/accounts/")
       || path.ends_with("/terminal")
-      || path.ends_with("/files/download")
+      || (path.starts_with("/api/services/")
+        && ["/files/download", "/files/tail", "/files/grep"]
+          .iter()
+          .any(|&suffix| path.ends_with(suffix)))
       || path.ends_with("/connect"))
 }
 
@@ -294,10 +335,31 @@ fn redact_row(row: &mut AuditEntry) {
     .map(|s| crate::log_redact::redact_text(&s));
 }
 
-pub(crate) async fn insert(
+async fn finish_started(
   state: &AppState,
+  id: i64,
   mut row: AuditEntry,
 ) -> Result<(), ApiError> {
+  redact_row(&mut row);
+  state.db.call(move |c| {
+    c.execute(
+      "UPDATE audit_log SET status = ?1, duration_ms = ?2, detail = ?3, source = ?4 WHERE id = ?5",
+      params![row.status, row.duration_ms, row.detail, row.source, id],
+    ).map(|_| ()).map_err(sql_err)
+  }).await
+}
+
+pub(crate) async fn insert(
+  state: &AppState,
+  row: AuditEntry,
+) -> Result<(), ApiError> {
+  insert_row(state, row).await.map(|_| ())
+}
+
+async fn insert_row(
+  state: &AppState,
+  mut row: AuditEntry,
+) -> Result<i64, ApiError> {
   redact_row(&mut row);
   let result = state
     .db
@@ -308,7 +370,7 @@ pub(crate) async fn insert(
         params![row.at, row.kind, row.actor, row.method, row.path,
           row.status, row.duration_ms, row.detail, row.source],
       )
-      .map(|_| ())
+      .map(|_| c.last_insert_rowid())
       .map_err(sql_err)
     })
     .await;
