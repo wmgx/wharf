@@ -1932,7 +1932,7 @@ async fn run_step_with_dns(
         if manual_gateway != Some(gateway.as_str()) {
           let active = state
             .db
-            .call(crate::failover::load_active_from_conn)
+            .call(|c| crate::failover::load_active_from_conn(c))
             .await?;
           check_dns_gateway(world, &active, hostname, gateway)?;
         }

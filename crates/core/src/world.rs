@@ -2485,12 +2485,13 @@ mod tests {
   fn failover_minutes_requires_backup_and_a_valid_range() {
     let mut world = World::default();
     for server in ["s1", "s2"] {
-      world
-        .apply_changes(&[Change::UpsertServer {
-          name: server.into(),
+      world.servers.insert(
+        server.into(),
+        ServerRow {
           settings: Default::default(),
-        }])
-        .unwrap();
+          version: 1,
+        },
+      );
     }
     for (name, server) in [("primary", "s1"), ("backup", "s2")] {
       world.gateways.insert(

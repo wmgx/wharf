@@ -4840,6 +4840,107 @@ mod tests {
     );
   }
 
+  #[tokio::test]
+  async fn existing_frpc_migrates_only_with_an_actual_change() {
+    let mut current = world();
+    current.servers.insert(
+      "s2".into(),
+      ServerRow {
+        settings: Default::default(),
+        version: 1,
+      },
+    );
+    current
+      .gateways
+      .insert("edge".into(), gateway_fixture("caddy", "s2"));
+    let mut route = route_fixture();
+    route.spec.link = wharf_api_types::spec::LinkMode::Tunnel;
+    current.routes.insert("a.example.com".into(), route.clone());
+    let net = Net {
+      public_ip: BTreeMap::from([(
+        "s2".into(),
+        "203.0.113.2".into(),
+      )]),
+      ..Default::default()
+    };
+    let project = "wharf-link-s2";
+    let running = |hot| {
+      let rendered = crate::link::projects_for_servers(
+        &current,
+        &net,
+        &BTreeMap::new(),
+        |_| hot,
+      )
+      .unwrap()
+      .into_iter()
+      .find(|p| p.project == project)
+      .unwrap();
+      StatusMap::from([(
+        "s1".into(),
+        Some(BTreeMap::from([(
+          project.into(),
+          ProjectState {
+            project: project.into(),
+            hash: Some(rendered.hash),
+            config_hash: rendered.reload.map(|r| r.config_hash),
+            acme_dns_url_hash: None,
+            containers: vec![container("running")],
+          },
+        )])),
+      )])
+    };
+    let hub = crate::hub::Hub::default();
+    hub.mock_agent("s1", false, |_| panic!("计划不可下发操作"));
+    hub.enable_mock_failover_features("s1");
+    let snap = Snapshot {
+      world: current.clone(),
+      ..Default::default()
+    };
+    let mut b = Builder::default();
+    link_items(&mut b, &snap, &current, &net, &running(false), &hub)
+      .unwrap();
+    assert!(b.steps.is_empty());
+
+    let mut desired = current.clone();
+    let mut service = desired.services["app"].clone();
+    service.host_ports.insert("http".into(), 21001);
+    desired.services.insert("app2".into(), service);
+    route.spec.hostname = "b.example.com".into();
+    route.spec.service = "app2".into();
+    desired.routes.insert(route.spec.hostname.clone(), route);
+    for already_migrated in [false, true] {
+      let mut b = Builder::default();
+      link_items(
+        &mut b,
+        &snap,
+        &desired,
+        &net,
+        &running(already_migrated),
+        &hub,
+      )
+      .unwrap();
+      assert!(matches!(
+        b.steps[0].step,
+        Step::LinkUp {
+          hot_reload: true,
+          ..
+        }
+      ));
+      assert_eq!(
+        b.items[0].impacts.contains(&Impact::Restart),
+        !already_migrated
+      );
+      assert!(
+        !b.items[0]
+          .after
+          .as_ref()
+          .unwrap()
+          .to_string()
+          .contains("webServer")
+      );
+    }
+  }
+
   #[test]
   fn live_status_finds_unused_link_projects() {
     let world = world();

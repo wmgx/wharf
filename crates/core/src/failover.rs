@@ -18,17 +18,14 @@ use wharf_api_types::{
   plan::StepStatus,
   spec::GatewayKind,
   view::{
-    FailoverHealthSnapshot, FailoverPinTarget, FailoverTarget,
+    FailoverHealthSnapshot, FailoverPinTarget, FailoverTarget, Perm,
     RouteFailoverRequest, RouteFailoverView,
   },
 };
 
 use crate::{
-  api::ApiResult,
-  auth::{Auth, Perm},
-  db, gateway_probe, notify, snapshot,
-  state::AppState,
-  world::World,
+  api::ApiResult, auth::Auth, db, gateway_probe, notify, snapshot,
+  state::AppState, world::World,
 };
 
 const EVERY: Duration = Duration::from_secs(60);
@@ -81,7 +78,7 @@ struct FailoverPin {
 struct Memory {
   /// 切到备用入口的域名。
   active: BTreeSet<String>,
-  /// 域名 → 主网关所在机器连续离线（切回时是连续在线）的分钟数。
+  /// 域名 → 连续满足切备或切回条件的轮数。
   streak: BTreeMap<String, u32>,
   /// 切换了但 DNS 还没改成功的域名，下一轮重试。
   pending: BTreeMap<String, Pending>,
@@ -102,35 +99,39 @@ pub fn active(host: &str) -> bool {
   with(|m| m.active.contains(host))
 }
 
+fn load_memory(c: &rusqlite::Connection) -> Result<Memory, ApiError> {
+  Ok(Memory {
+    active: load_active_from_conn(c)?,
+    pending: db::setting(c, PENDING)?
+      .map(|v| serde_json::from_str(&v))
+      .transpose()
+      .map_err(db::json_err)?
+      .unwrap_or_default(),
+    pinned: db::setting(c, PINNED)?
+      .map(|v| serde_json::from_str(&v))
+      .transpose()
+      .map_err(db::json_err)?
+      .unwrap_or_default(),
+    ..Memory::default()
+  })
+}
+
 pub fn spawn(state: Arc<AppState>) {
   tokio::spawn(async move {
     loop {
-      match state
-        .db
-        .call(|c| {
-          Ok(Memory {
-            active: load_active_from_conn(c)?,
-            pending: db::setting(c, PENDING)?
-              .map(|v| serde_json::from_str(&v))
-              .transpose()
-              .map_err(db::json_err)?
-              .unwrap_or_default(),
-            pinned: db::setting(c, PINNED)?
-              .map(|v| serde_json::from_str(&v))
-              .transpose()
-              .map_err(db::json_err)?
-              .unwrap_or_default(),
-            ..Memory::default()
-          })
-        })
-        .await
-      {
-        Ok(memory) => {
-          with(|m| *m = memory);
-          break;
-        }
-        Err(e) => {
-          tracing::warn!("读取主备切换状态失败：{}", e.message)
+      let guard = state
+        .locks
+        .acquire(crate::locks::LockSpec::apply([]), "读取主备状态");
+      if let Ok(guard) = guard {
+        match state.db.call(|c| load_memory(c)).await {
+          Ok(memory) => {
+            with(|m| *m = memory);
+            drop(guard);
+            break;
+          }
+          Err(e) => {
+            tracing::warn!("读取主备切换状态失败：{}", e.message)
+          }
         }
       }
       tokio::time::sleep(EVERY).await;
@@ -314,57 +315,21 @@ async fn assess(
   let net = &snap.net(world);
   let live = &crate::views::cached_live(state, world).await;
   let cancel = CancellationToken::new();
-  let token = &cancel;
-  let project = |server: &str, project: &str| {
-    live.get(server)?.as_ref().ok()?.get(project)
-  };
-  let check = |host, route, name| {
-    let running = world.gateways.get(name).and_then(|gw| {
-      project(&gw.spec.server, &crate::world::gateway_project(name))
-    });
-    gateway_probe::check_entry(
+  let mut jobs = Vec::with_capacity(routes.len());
+  for (host, route, primary, backup) in routes {
+    let check_backup = !memory.active.contains(host)
+      || memory.pending.get(host).is_some_and(|p| p.target_backup);
+    jobs.push(assess_route(
       state,
       snap,
       net,
-      (host, route, name),
-      running,
-      token,
-    )
-  };
-  let probes = futures_util::stream::iter(routes.into_iter().map(
-    |(host, route, primary, backup)| async move {
-      let service_stopped =
-        world.services.get(&route.service).is_some_and(|svc| {
-          svc.spec.stopped
-            || (state.hub.is_online(&svc.spec.server)
-              && project(&svc.spec.server, &route.service)
-                .is_some_and(|s| {
-                  !s.containers.iter().any(|c| c.is_running())
-                }))
-        });
-      let mut health = FailoverHealthSnapshot {
-        at: db::now_ms(),
-        service_stopped,
-        ..Default::default()
-      };
-      if !service_stopped {
-        let main = check(host, route, primary).await;
-        if !main.ok
-          && (!memory.active.contains(host)
-            || memory
-              .pending
-              .get(host)
-              .is_some_and(|p| p.target_backup))
-        {
-          health.backup =
-            Some(check(host, route, backup).await.into());
-        }
-        health.primary = Some(main.into());
-      }
-      (host.clone(), health)
-    },
-  ))
-  .buffer_unordered(8);
+      live,
+      (host, route, primary, backup),
+      check_backup,
+      &cancel,
+    ));
+  }
+  let probes = futures_util::stream::iter(jobs).buffer_unordered(8);
   futures_util::pin_mut!(probes);
   let until = tokio::time::sleep(Duration::from_secs(42));
   tokio::pin!(until);
@@ -380,6 +345,68 @@ async fn assess(
   }
   cancel.cancel();
   health
+}
+
+async fn assess_route(
+  state: &AppState,
+  snap: &snapshot::Snapshot,
+  net: &crate::render::Net,
+  live: &crate::views::LiveMap,
+  (host, route, primary, backup): (
+    &str,
+    &wharf_api_types::spec::RouteSpec,
+    &str,
+    &str,
+  ),
+  check_backup: bool,
+  cancel: &CancellationToken,
+) -> (String, FailoverHealthSnapshot) {
+  let project = |server: &str, project: &str| {
+    live.get(server)?.as_ref().ok()?.get(project)
+  };
+  let service_stopped =
+    snap.world.services.get(&route.service).is_some_and(|svc| {
+      svc.spec.stopped
+        || (state.hub.is_online(&svc.spec.server)
+          && project(&svc.spec.server, &route.service).is_some_and(
+            |state| !state.containers.iter().any(|c| c.is_running()),
+          ))
+    });
+  let mut health = FailoverHealthSnapshot {
+    at: db::now_ms(),
+    service_stopped,
+    ..Default::default()
+  };
+  if !service_stopped {
+    let check = |name: &str| {
+      snap.world.gateways.get(name).and_then(|gw| {
+        project(&gw.spec.server, &crate::world::gateway_project(name))
+      })
+    };
+    let main = gateway_probe::check_entry(
+      state,
+      snap,
+      net,
+      (host, route, primary),
+      check(primary),
+      cancel,
+    )
+    .await;
+    if !main.ok && check_backup {
+      let backup = gateway_probe::check_entry(
+        state,
+        snap,
+        net,
+        (host, route, backup),
+        check(backup),
+        cancel,
+      )
+      .await;
+      health.backup = Some(backup.into());
+    }
+    health.primary = Some(main.into());
+  }
+  (host.into(), health)
 }
 
 async fn round(state: &Arc<AppState>) -> Result<(), ApiError> {
@@ -411,6 +438,9 @@ async fn round(state: &Arc<AppState>) -> Result<(), ApiError> {
         return false;
       }
       let route = &snap.world.routes[*host].spec;
+      if route.expires_at.is_some_and(|at| at <= now) {
+        return false;
+      }
       if route.backup_gateway.is_none() {
         return true;
       }
@@ -679,7 +709,11 @@ async fn manual(
       .suggest("wharf account list"),
     );
   }
-  let mut memory = with(|m| m.clone());
+  let mut memory = state.db.call(|c| load_memory(c)).await?;
+  with(|m| {
+    memory.streak.clone_from(&m.streak);
+    memory.health.clone_from(&m.health);
+  });
   if req.target == FailoverTarget::Auto {
     let changed = memory.pinned.remove(host).is_some();
     if changed {
@@ -891,8 +925,186 @@ fn schedule_caddy_reload(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
   use super::*;
+  use wharf_providers::{
+    BoxFut, DnsProvider, DnsRecordSpec, Owner, ProviderError,
+    RemoteRecord,
+  };
+
+  static WRITERS: tokio::sync::Mutex<()> =
+    tokio::sync::Mutex::const_new(());
+  static DNS: Mutex<(Option<RemoteRecord>, bool)> =
+    Mutex::new((None, false));
+
+  pub(crate) struct FixtureDns;
+
+  impl DnsProvider for FixtureDns {
+    fn validate(
+      &self,
+      _: &str,
+      _: &DnsRecordSpec,
+    ) -> Result<(), ProviderError> {
+      Ok(())
+    }
+
+    fn list<'a>(
+      &'a self,
+      _: &'a str,
+    ) -> BoxFut<'a, Vec<RemoteRecord>> {
+      Box::pin(async {
+        Ok(DNS.lock().unwrap().0.clone().into_iter().collect())
+      })
+    }
+
+    fn upsert<'a>(
+      &'a self,
+      _: &'a str,
+      spec: &'a DnsRecordSpec,
+      owner: &'a Owner,
+      _: Option<&'a RemoteRecord>,
+    ) -> BoxFut<'a, RemoteRecord> {
+      Box::pin(async move {
+        let mut dns = DNS.lock().unwrap();
+        if dns.1 {
+          return Err(ProviderError::new(
+            wharf_providers::error::code::TIMEOUT,
+            "DNS 请求超时",
+          ));
+        }
+        let record = RemoteRecord {
+          remote_id: "r1".into(),
+          scope: "zone".into(),
+          canonical: spec.canonical(),
+          marker: Some(owner.marker()),
+        };
+        dns.0 = Some(record.clone());
+        Ok(record)
+      })
+    }
+
+    fn delete<'a>(
+      &'a self,
+      _: &'a str,
+      _: &'a str,
+      _: Option<&'a Owner>,
+    ) -> BoxFut<'a, ()> {
+      unreachable!("切换单条同类型记录不需要删除")
+    }
+  }
+
+  #[tokio::test]
+  async fn manual_switch_pins_until_primary_and_dns_failure_keeps_state()
+   {
+    let _writers = WRITERS.lock().await;
+    *DNS.lock().unwrap() = (None, false);
+    let state = crate::rules::tests::test_state();
+    let host = "manual.example.test";
+    let mut world = World::default();
+    for (name, server, ip) in [
+      ("main", "s1", "203.0.113.1"),
+      ("backup", "s2", "203.0.113.2"),
+    ] {
+      world.servers.insert(
+        server.into(),
+        crate::world::ServerRow {
+          settings: serde_json::from_value(
+            serde_json::json!({"public_ip":ip}),
+          )
+          .unwrap(),
+          version: 1,
+        },
+      );
+      world.gateways.insert(name.into(), crate::world::GatewayRow {
+        spec: serde_json::from_value(serde_json::json!({"kind":"caddy","server":server,"tls":"off"})).unwrap(),
+        version: 1,
+      });
+    }
+    world.routes.insert(host.into(), crate::world::RouteRow {
+      spec: serde_json::from_value(serde_json::json!({
+        "hostname":host, "gateway":"main", "backup_gateway":"backup", "upstream":"127.0.0.1:8080", "failover_minutes":2
+      })).unwrap(),
+      id: "rt_manual".into(), version: 1,
+    });
+    let writes = world.writes_from(&World::default());
+    state.db.call(move |c| {
+      for write in writes {
+        db::apply_write(c, &write)?;
+      }
+      c.execute("INSERT INTO accounts VALUES ('fixture','fixture-failover','','[\"example.test\"]','[]',0)", []).map_err(db::sql_err)?;
+      Ok(())
+    }).await.unwrap();
+
+    let auth = crate::security_receipt::tests::auth(false);
+    let switch = |target| {
+      manual(
+        &state,
+        host,
+        RouteFailoverRequest {
+          target,
+          force: true,
+          verify_before_dns: true,
+          reason: None,
+        },
+        &auth,
+      )
+    };
+    let backup = switch(FailoverTarget::Backup).await.unwrap();
+    assert!(backup.on_backup && backup.run_id.is_some());
+    assert_eq!(backup.pinned, Some(FailoverPinTarget::Backup));
+    assert_eq!(
+      DNS.lock().unwrap().0.as_ref().unwrap().canonical["content"],
+      "203.0.113.2"
+    );
+    assert!(
+      switch(FailoverTarget::Backup)
+        .await
+        .unwrap()
+        .run_id
+        .is_none()
+    );
+    state.hub.mock_agent("s1", false, |op| Ok(match op {
+      AgentOp::ProjectStatus { .. } => serde_json::json!([{
+        "project":"wharf-gw-main","containers":[{"name":"main-1","service":"caddy","state":"running"}]
+      }]),
+      AgentOp::Probe { .. } => serde_json::json!([true]),
+      _ => panic!("收到意外请求"),
+    }));
+    for _ in 0..10 {
+      round(&state).await.unwrap();
+    }
+    assert!(active(host));
+    assert!(
+      status(&world, host)
+        .unwrap()
+        .health
+        .unwrap()
+        .primary
+        .unwrap()
+        .ok
+    );
+
+    DNS.lock().unwrap().1 = true;
+    assert_eq!(
+      switch(FailoverTarget::Primary).await.unwrap_err().code,
+      ErrorCode::Provider
+    );
+    assert!(active(host));
+    assert_eq!(pinned(host), Some(FailoverPinTarget::Backup));
+    DNS.lock().unwrap().1 = false;
+    let primary = switch(FailoverTarget::Primary).await.unwrap();
+    assert!(!primary.on_backup && primary.pinned.is_none());
+    assert_eq!(
+      DNS.lock().unwrap().0.as_ref().unwrap().canonical["content"],
+      "203.0.113.1"
+    );
+
+    world.routes.get_mut(host).unwrap().spec.backup_gateway = None;
+    assert_eq!(
+      status(&world, host).unwrap_err().code,
+      ErrorCode::InvalidInput
+    );
+  }
 
   #[tokio::test]
   async fn backup_gateway_reload_is_deduplicated_without_stop_start()
@@ -1047,6 +1259,7 @@ mod tests {
 
   #[tokio::test]
   async fn removing_backup_persists_active_cleanup_and_retry() {
+    let _writers = WRITERS.lock().await;
     let state = crate::rules::tests::test_state();
     let host = "removed-backup.example.test";
     let mut memory = Memory {

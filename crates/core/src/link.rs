@@ -844,6 +844,19 @@ mod tests {
 
   use super::*;
 
+  #[test]
+  fn frpc_admin_ports_do_not_collide() {
+    let mut taken = BTreeSet::new();
+    let first = pick_admin_port("s1", &mut taken).unwrap();
+    let second = pick_admin_port("s2", &mut taken).unwrap();
+    assert_ne!(first, second);
+    assert!(taken.iter().all(|port| FRPC_ADMIN_PORTS.contains(port)));
+    assert_eq!(
+      pick_admin_port("s1", &mut BTreeSet::new()),
+      Some(first)
+    );
+  }
+
   /// edge1 上一个 caddy 网关，home1 上一个服务，一条路由。
   fn world() -> World {
     let mut w = World::default();

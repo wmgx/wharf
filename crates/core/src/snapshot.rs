@@ -1109,6 +1109,10 @@ pub fn provider_error(e: ProviderError) -> ApiError {
 pub fn dns_provider(
   account: &AccountRow,
 ) -> Result<Box<dyn DnsProvider>, ApiError> {
+  #[cfg(test)]
+  if account.kind == "fixture-failover" {
+    return Ok(Box::new(crate::failover::tests::FixtureDns));
+  }
   let factory =
     wharf_providers::factory(&account.kind).ok_or_else(|| {
       ApiError::internal(format!("不支持的厂商类型 {}", account.kind))

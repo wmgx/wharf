@@ -248,25 +248,34 @@ async fn verify(
     if attempt != 0 {
       tokio::time::sleep(Duration::from_secs(1)).await;
     }
-    let response =
-      direct.get(url(tls, port)).header("Host", host).send().await;
-    let (response, cert_pending) = match response {
-      Err(error)
-        if gw.tls == GatewayTls::Auto && tls_failed(&error) =>
-      {
-        (
-          client(http_port)?
-            .get(url(false, http_port))
-            .header("Host", host)
-            .send()
-            .await,
-          true,
-        )
-      }
-      response => (response, false),
-    };
+    let (response, cert_pending) =
+      tokio::time::timeout(Duration::from_secs(8), async {
+        let response = direct
+          .get(url(tls, port))
+          .header("Host", host)
+          .send()
+          .await;
+        Ok::<_, ApiError>(match response {
+          Err(error)
+            if gw.tls == GatewayTls::Auto && tls_failed(&error) =>
+          {
+            (
+              client(http_port)?
+                .get(url(false, http_port))
+                .header("Host", host)
+                .send()
+                .await
+                .ok(),
+              true,
+            )
+          }
+          response => (response.ok(), false),
+        })
+      })
+      .await
+      .unwrap_or(Ok((None, false)))?;
     match response {
-      Ok(r) if !matches!(r.status().as_u16(), 502 | 504) => {
+      Some(r) if !matches!(r.status().as_u16(), 502 | 504) => {
         let code = r.status().as_u16();
         let mut result = entry(
           true,
@@ -277,13 +286,13 @@ async fn verify(
         result.cert_pending = cert_pending || local.cert_pending;
         return Ok(result);
       }
-      Ok(r) => {
+      Some(r) => {
         detail = format!(
           "直连 {ip}:{port} 返回 HTTP {}",
           r.status().as_u16()
         )
       }
-      Err(_) => {
+      None => {
         detail = format!("本机正常，但控制面无法直连 {ip}:{port}")
       }
     }
