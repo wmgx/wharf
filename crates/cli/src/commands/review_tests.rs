@@ -97,12 +97,28 @@ async fn fixture_requests(
       "commands::review_tests::fixture_cli",
       "--nocapture",
     ])
+    // 子进程仍由测试运行器启动，给 CLI 的 dispatch future 留出主线程大小的栈。
+    .env("RUST_MIN_STACK", "8388608")
     .env("WHARF_FIXTURE_CLI_ENDPOINT", endpoint)
     .env("WHARF_FIXTURE_CLI_ARGS", json!(args).to_string())
     .kill_on_drop(true);
   let (output, requests) =
     tokio::time::timeout(Duration::from_secs(10), async {
-      tokio::join!(child.output(), server)
+      let output = child.output();
+      tokio::pin!(output, server);
+      tokio::select! {
+        biased;
+        requests = &mut server => (output.await, requests),
+        result = &mut output => {
+          let result = result.unwrap();
+          panic!(
+            "CLI 在收到全部响应前退出（{}），stdout={:?}，stderr={:?}",
+            result.status,
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr),
+          );
+        }
+      }
     })
     .await
     .unwrap();
