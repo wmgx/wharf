@@ -993,6 +993,7 @@ async fn backup_move_blocks_old_agent_and_keeps_service_sync_compat()
       repo: ResticRepo::LocalCore,
       password: OneTimeSecret(String::new()),
       action: ResticAction::Snapshots,
+      bwlimit_kbps: None,
       pull: wharf_api_types::agent::PullPolicy {
         mirrors: Default::default(),
         mirrors_only: false,
