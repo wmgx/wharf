@@ -1585,6 +1585,41 @@ mod tests {
   }
 
   #[test]
+  fn existing_ipv6_reference_keeps_its_deployed_hash() {
+    let mut world = world(21000);
+    world
+      .services
+      .get_mut("app")
+      .unwrap()
+      .spec
+      .env
+      .insert("APP_HOST".into(), "[[@app:host]]".into());
+    let mut net = Net::default();
+    net.private.insert(
+      "s1".into(),
+      wharf_api_types::spec::PrivateAddr {
+        ip: "2001:db8::1".into(),
+        network: wharf_api_types::spec::PrivateNetwork::Overlay,
+      },
+    );
+    let secrets = BTreeMap::new();
+    let (_, legacy) =
+      resolve_service(&world, &net, "app", &secrets, true).unwrap();
+    let (_, new) =
+      service_resolved(&world, &net, "app", &secrets).unwrap();
+    assert_ne!(legacy, new);
+    assert_eq!(
+      service_hash(&world, &net, "app", &secrets, Some(&legacy))
+        .unwrap(),
+      legacy
+    );
+    assert_eq!(
+      service_hash(&world, &net, "app", &secrets, None).unwrap(),
+      new
+    );
+  }
+
+  #[test]
   fn references_follow_the_target_service() {
     use wharf_api_types::spec::{PrivateAddr, PrivateNetwork};
     let mut net = Net::default();

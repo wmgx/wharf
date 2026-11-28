@@ -841,6 +841,8 @@ impl RouteChecks<'_> {
     } else {
       None
     };
+    let header = monitor.is_none()
+      && spec.sso.as_ref().is_some_and(|s| s.mode == SsoMode::Header);
     let monitor = monitor.filter(|m| {
       gated
         && !spec.auth
@@ -862,10 +864,7 @@ impl RouteChecks<'_> {
         HttpProbe {
           basic_auth: spec.auth,
           gate: gated,
-          header: spec
-            .sso
-            .as_ref()
-            .is_some_and(|s| s.mode == SsoMode::Header),
+          header,
           cookie,
           monitor,
           internal,

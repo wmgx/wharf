@@ -418,7 +418,7 @@ mod tests {
       ]
     );
     assert!(
-      risks(&serde_json::json!({"Mounts":[{"Source":"/etc/app"}]}))
+      risks(&serde_json::json!({"Mounts":[{"Source":"/srv/app"}]}))
         .is_empty()
     );
   }

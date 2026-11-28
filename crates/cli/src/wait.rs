@@ -61,42 +61,54 @@ fn service_base(v: &ServiceView) -> Check {
   (ok, st.summary.clone())
 }
 
-fn service_ready(v: &ServiceView) -> Check {
-  let base = service_base(v);
-  let Some(st) =
-    v.status.as_ref().filter(|st| base.0 && st.want_running)
-  else {
-    return base;
-  };
-  if v.spec.monitor.is_some() {
-    match &v.monitor {
-      Some(m)
-        if st
-          .applied
-          .as_ref()
-          .is_none_or(|a| m.at >= a.at.timestamp_millis()) =>
-      {
-        if !m.ok {
-          return (false, m.detail.clone());
-        }
-      }
-      _ => return (false, "等待自定义监控结果".into()),
-    }
-  }
-  for p in &v.spec.ports {
+fn fresh_monitor(
+  v: &ServiceView,
+) -> Option<&wharf_api_types::view::MonitorView> {
+  let monitor = v.monitor.as_ref()?;
+  v.status
+    .as_ref()
+    .and_then(|status| status.applied.as_ref())
+    .is_none_or(|a| monitor.at >= a.at.timestamp_millis())
+    .then_some(monitor)
+}
+
+fn pending_port(v: &ServiceView) -> Option<&str> {
+  v.spec.ports.iter().find_map(|p| {
     let enabled = match v.spec.port_checks.get(&p.name) {
       Some(PortCheckSpec::Off) => false,
       None => !p.udp,
       _ => true,
     };
-    if enabled
+    (enabled
       && (v.host_ports.contains_key(&p.name) || p.host.is_some())
-      && v.port_checks.get(&p.name) != Some(&true)
-    {
-      return (false, format!("端口 {} 尚未通过探测", p.name));
+      && v.port_checks.get(&p.name) != Some(&true))
+    .then_some(p.name.as_str())
+  })
+}
+
+fn service_ready(v: &ServiceView) -> Check {
+  let base = service_base(v);
+  if !base.0 || !v.status.as_ref().is_some_and(|st| st.want_running) {
+    return base;
+  }
+  if v.spec.monitor.is_some() {
+    match fresh_monitor(v) {
+      Some(m) if !m.ok => return (false, m.detail.clone()),
+      Some(_) => {}
+      None => return (false, "等待自定义监控结果".into()),
     }
   }
+  if let Some(port) = pending_port(v) {
+    return (false, format!("端口 {port} 尚未通过探测"));
+  }
   base
+}
+
+fn needs_service_probe(v: &ServiceView) -> bool {
+  service_base(v).0
+    && v.status.as_ref().is_some_and(|st| st.want_running)
+    && ((v.spec.monitor.is_some() && fresh_monitor(v).is_none())
+      || pending_port(v).is_some())
 }
 
 fn route_pending(report: &DoctorReport) -> Result<(), Vec<String>> {
@@ -138,13 +150,12 @@ async fn check(c: &Client, cmd: &WaitCmd) -> CliResult<Check> {
       let name = crate::client::seg(name);
       let path = format!("/api/services/{name}");
       let v: ServiceView = c.get(&path).await?;
-      let ready = service_ready(&v);
-      if ready.0 || !service_base(&v).0 {
-        ready
-      } else {
+      if needs_service_probe(&v) {
         let _: DoctorReport =
           c.get(&format!("/api/doctor?service={name}")).await?;
         service_ready(&c.get(&path).await?)
+      } else {
+        service_ready(&v)
       }
     }
     WaitCmd::Route { hostname, .. } => {
@@ -342,6 +353,9 @@ mod tests {
     assert!(!service_ready(&service).0);
     service.port_checks.insert("http".into(), true);
     assert!(service_ready(&service).0);
+    service.monitor.as_mut().unwrap().ok = false;
+    assert!(!service_ready(&service).0);
+    assert!(!needs_service_probe(&service));
   }
 
   #[test]
