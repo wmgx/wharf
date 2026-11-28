@@ -556,7 +556,11 @@ async fn bundle_import_maps_backup_and_commits_secrets_with_plan() {
   })
   };
   assert_eq!(
-    request(true, None).await.unwrap().0["missing_servers"],
+    request(true, None)
+      .await
+      .map_err(|error| error.0)
+      .unwrap()
+      .0["missing_servers"],
     json!(["old-backup"])
   );
   assert!(request(false, Some("s1")).await.is_err());
@@ -575,7 +579,11 @@ async fn bundle_import_maps_backup_and_commits_secrets_with_plan() {
     })
     .await
     .unwrap();
-  let result = request(false, Some("s2")).await.unwrap().0;
+  let result = request(false, Some("s2"))
+    .await
+    .map_err(|error| error.0)
+    .unwrap()
+    .0;
   assert_eq!(
     result["secrets"],
     json!({"created": ["BLOG_PASS"], "updated": [], "skipped": []})
