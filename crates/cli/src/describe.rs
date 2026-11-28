@@ -382,6 +382,7 @@ fn returns(command: &str) -> Option<&'static str> {
     "exec" => "host_exec",
     "service exec" => "service_exec",
     "service render" => "service_render",
+    "service limits" => "service_limits",
     "backup list" => "backup",
     "backup ls" => "backup_ls",
     "backup extract" => "backup_extract",

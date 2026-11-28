@@ -1767,6 +1767,50 @@ esac
   }
 
   #[tokio::test]
+  async fn never_uses_only_the_planned_local_image() {
+    let (dir, docker) = crate::docker::fake_docker(
+      r#"
+case "$1:$2" in
+  image:inspect) echo 'fixture-id|[]';;
+  *) exit 2;;
+esac
+"#,
+    );
+    let ops = Ops::new(
+      docker.clone(),
+      Reporter::new(docker.clone(), None),
+      String::new(),
+      HostShell::prepare(docker.clone(), "s1".into()).await,
+      dir.path().into(),
+    );
+    let mut up: ProjectUp = serde_json::from_value(serde_json::json!({
+      "project":"app", "compose":"services: {app: {image: fixture:1}}", "hash":"new",
+      "image_pull_mode":"never", "local_images":{"fixture:1":"fixture-id"},
+      "pull":{"mirrors":{},"mirrors_only":false,"attempt_timeout_secs":1}
+    })).unwrap();
+    let ctx = Ctx::detached();
+    let mode = wharf_api_types::spec::ImagePullMode::Never;
+    assert_eq!(
+      ops
+        .pull_explicit(&up, mode, &ctx, &mut Vec::new())
+        .await
+        .unwrap(),
+      ["fixture:1"]
+    );
+    up.local_images
+      .insert("fixture:1".into(), "previous-id".into());
+    assert_eq!(
+      ops
+        .pull_explicit(&up, mode, &ctx, &mut Vec::new())
+        .await
+        .unwrap_err()
+        .code,
+      ErrorCode::PlanStale
+    );
+    assert!(!docker.project_dir("app").exists());
+  }
+
+  #[tokio::test]
   async fn pull_failure_keeps_live_compose_and_cancel_does_not_abort_recovery()
    {
     let (dir, docker) = crate::docker::fake_docker(

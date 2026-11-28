@@ -487,9 +487,24 @@ async fn add(c: &Client, a: AddArgs, j: bool) -> CliResult<()> {
         .into(),
     );
   };
+  let mut path = format!("/api/tasks/{}", seg(&a.name));
+  let before = crate::preview::get_or_null(c, &path).await?;
+  let previous = before.get("spec");
+  let prior_limits = previous
+    .and_then(|spec| spec.get("limits"))
+    .map(|value| {
+      serde_json::from_value::<Option<wharf_api_types::spec::Limits>>(
+        value.clone(),
+      )
+    })
+    .transpose()
+    .map_err(anyhow::Error::from)?
+    .flatten();
   let mut spec = TaskSpec {
-    limits: None,
-    inherit_server_limits: false,
+    limits: prior_limits,
+    inherit_server_limits: previous
+      .and_then(|spec| spec["inherit_server_limits"].as_bool())
+      .unwrap_or_default(),
     server,
     schedule: match a.schedule {
       Some(s) => s,
@@ -517,11 +532,6 @@ async fn add(c: &Client, a: AddArgs, j: bool) -> CliResult<()> {
     return Err(ApiError::invalid("只有开启了 --hook 的脚本任务或 --ping 外部报到任务支持轮换口令").into());
   }
   if a.dry_run {
-    let before = crate::preview::get_or_null(
-      c,
-      &format!("/api/tasks/{}", seg(&a.name)),
-    )
-    .await?;
     let mut after =
       serde_json::to_value(&spec).map_err(anyhow::Error::from)?;
     if a.rotate_token {
@@ -534,7 +544,6 @@ async fn add(c: &Client, a: AddArgs, j: bool) -> CliResult<()> {
       &after,
     );
   }
-  let mut path = format!("/api/tasks/{}", seg(&a.name));
   if a.rotate_token {
     path.push_str("?rotate_token=true");
   }

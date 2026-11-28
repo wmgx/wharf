@@ -169,6 +169,10 @@ fn entries() -> BTreeMap<&'static str, Schema> {
     ("report", schema_for!(wharf_api_types::report::ReportView)),
     ("top", schema_for!(wharf_api_types::resources::UsageRow)),
     (
+      "service_limits",
+      schema_for!(crate::runtime_options::LimitView<'_>),
+    ),
+    (
       "access_logs",
       schema_for!(wharf_api_types::access_logs::AccessLogsResult),
     ),

@@ -3976,7 +3976,12 @@ async fn service(
       if !editing && container.is_none() {
         out(
           j,
-          &json!({"service": name, "limits": spec.limits}),
+          &crate::runtime_options::LimitView {
+            service: &name,
+            container: None,
+            limits: spec.limits,
+            effective: None,
+          },
           pretty,
         );
         return Ok(());
@@ -4002,14 +4007,29 @@ async fn service(
             || legacy_target.then(|| spec.limits.clone()).flatten(),
           );
         if !editing {
+          let rows: Vec<wharf_api_types::resources::UsageRow> = c
+            .get(&format!(
+              "/api/metrics/top?service={}&containers=true",
+              seg(&name)
+            ))
+            .await?;
+          let effective = rows
+            .iter()
+            .flat_map(|row| &row.components)
+            .find(|row| row.name == component)
+            .map(|row| crate::runtime_options::EffectiveLimits {
+              memory_bytes: row.memory_limit,
+              cpu_milli: row.cpu_limit_milli,
+              pids: row.pids_limit,
+            });
           out(
             j,
-            &json!({
-              "service": name,
-              "container": component,
-              "limits": declared,
-              "effective": crate::runtime_options::effective_limits(&components["services"][component], declared.as_ref()),
-            }),
+            &crate::runtime_options::LimitView {
+              service: &name,
+              container: Some(component),
+              limits: declared,
+              effective,
+            },
             pretty,
           );
           return Ok(());

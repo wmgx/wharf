@@ -175,50 +175,9 @@ async fn candidates(
       if after { &change.after } else { &change.before },
     ) {
       if !after
-        && change.before.cpu_milli.is_some()
-        && (view["limits"]["CpuQuota"].as_i64().unwrap_or_default()
-          != 0
-          || view["limits"]["CpuPeriod"].as_i64().unwrap_or_default()
-            != 0)
-      {
-        return Err(unsupported(
-          "容器使用 CPU quota 或 period，需要重建",
-        ));
-      }
-      return Err(stale(project));
-    }
-    let swap =
-      view["limits"]["MemorySwap"].as_i64().unwrap_or_default();
-    if let Some(memory) = change.after.memory_mb {
-      let max =
-        memory.max(change.before.memory_mb.unwrap_or_default());
-      if swap != -1 && swap < i64::from(max) << 20 {
-        return Err(unsupported("现有 swap 无法安全保留，需要重建"));
-      }
-      if !after
         && change.before.memory_mb.is_some_and(|old| memory < old)
       {
-        let stats = docker
-          .cmd()
-          .args([
-            "stats",
-            "--no-stream",
-            "--format",
-            "{{.MemUsage}}",
-            &id,
-          ])
-          .timeout(IO_TIMEOUT)
-          .run(ctx)
-          .await?
-          .check("读取容器内存占用")?;
-        let used = crate::metrics::first_size(&stats.stdout);
-        if used == 0
-          || used.saturating_add(1 << 20) >= u64::from(memory) << 20
-        {
-          return Err(unsupported(
-            "容器当前内存占用接近或超过目标上限，需要重建",
-          ));
-        }
+        verify_memory_usage(docker, &id, memory, ctx).await?;
       }
     }
     targets.push(Container {
@@ -260,6 +219,30 @@ async fn verify(
   Ok(view)
 }
 
+async fn verify_memory_usage(
+  docker: &Docker,
+  id: &str,
+  memory: u32,
+  ctx: &Ctx,
+) -> Result<(), ApiError> {
+  let stats = docker
+    .cmd()
+    .args(["stats", "--no-stream", "--format", "{{.MemUsage}}", id])
+    .timeout(IO_TIMEOUT)
+    .run(ctx)
+    .await?
+    .check("读取容器内存占用")?;
+  let used = crate::metrics::first_size(&stats.stdout);
+  if used == 0
+    || used.saturating_add(1 << 20) >= u64::from(memory) << 20
+  {
+    return Err(unsupported(
+      "容器当前内存占用接近或超过目标上限，需要重建",
+    ));
+  }
+  Ok(())
+}
+
 async fn set_limits(
   docker: &Docker,
   project: &str,
@@ -275,6 +258,13 @@ async fn set_limits(
   }
   if matches_limits(&before, limits) {
     return Ok(());
+  }
+  if let Some(memory) = limits.memory_mb
+    && before["limits"]["Memory"]
+      .as_u64()
+      .is_some_and(|old| old > u64::from(memory) << 20)
+  {
+    verify_memory_usage(docker, &container.id, memory, ctx).await?;
   }
   let mut command = docker.cmd().arg("update");
   if let Some(memory) = limits.memory_mb {

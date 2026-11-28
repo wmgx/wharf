@@ -552,6 +552,53 @@ mod tests {
   use super::*;
 
   #[tokio::test]
+  async fn component_peaks_preserve_maxima_and_instance_identity() {
+    let db = crate::db::Db::memory();
+    let peaks = db
+      .call(|c| {
+        let now = now_ms();
+        let old = (now - 2 * DAY_MS) / COARSE_MS * COARSE_MS;
+        let subject = component_subject("svc_fixture", "s1", "db");
+        insert(
+          c,
+          old + 1,
+          &[
+            ("svc.component.cpu.max", &subject, 25.0),
+            ("svc.component.mem.max", &subject, 512.0),
+          ],
+        )?;
+        insert(
+          c,
+          old + 2,
+          &[
+            ("svc.component.cpu.max", &subject, 75.0),
+            ("svc.component.mem.max", &subject, 256.0),
+          ],
+        )?;
+        insert(
+          c,
+          now,
+          &[(
+            "svc.component.mem.max",
+            &component_subject("svc_other", "s1", "db"),
+            1024.0,
+          )],
+        )?;
+        compact_at(c, now)?;
+        Ok((
+          component_peaks(c, &subject)?,
+          component_peaks(
+            c,
+            &component_subject("svc_fixture", "s2", "db"),
+          )?,
+        ))
+      })
+      .await
+      .unwrap();
+    assert_eq!(peaks, ((Some(75.0), Some(512)), (None, None)));
+  }
+
+  #[tokio::test]
   async fn compact_averages_old_points() {
     let db = crate::db::Db::memory();
     let s = db

@@ -260,6 +260,7 @@ fn item_reasons(
                   != row.import.as_ref()),
           )
         });
+      reasons.extend(item.host_access.iter().cloned());
       if item.layer == Layer::Container
         && item.impacts.contains(&Impact::Overwrite)
       {
@@ -364,6 +365,18 @@ pub fn check_host_dir_settings(
   Ok(())
 }
 
+pub(crate) fn resolved_compose_host_access(
+  name: &str,
+  before: Option<&str>,
+  after: &str,
+) -> (bool, bool) {
+  (
+    !compose_host_reasons(name, after).is_empty(),
+    !compose::expanded_compose_privilege(name, before, after)
+      .is_empty(),
+  )
+}
+
 fn expanded_service_privilege(
   name: &str,
   before: Option<&ServiceSpec>,
@@ -457,7 +470,9 @@ pub fn mark_plan(
         &after.spec,
       );
       if !reasons.is_empty() {
-        item.impacts.push(Impact::Privilege);
+        if !item.impacts.contains(&Impact::Privilege) {
+          item.impacts.push(Impact::Privilege);
+        }
         item.host_access.append(&mut reasons);
       }
     }

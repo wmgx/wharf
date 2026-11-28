@@ -2213,6 +2213,50 @@ fn service_items(
       } else {
         reason
       };
+      let host_access = if let Source::Compose {
+        content: Some(raw),
+        ..
+      } = &svc.spec.source
+        && raw.contains("[[")
+      {
+        let (resolved, _) = snapshot::service_resolved(
+          desired,
+          net,
+          name,
+          &render_values,
+        )?;
+        let old_resolved =
+          snap.applied.get(name).and_then(|previous| {
+            let spec = previous.spec.as_ref()?;
+            if spec.server != *server
+              || live?.hash.as_deref() != Some(previous.hash.as_str())
+            {
+              return None;
+            }
+            let mut world = current.clone();
+            world.services.get_mut(name)?.spec = spec.clone();
+            let (content, hash) = snapshot::service_resolved(
+              &world,
+              &snap.net(current),
+              name,
+              &snap.render_values(&world, name),
+            )
+            .ok()?;
+            (hash == previous.hash).then_some(content)
+          });
+        let (required, expanded) =
+          crate::host_access::resolved_compose_host_access(
+            name,
+            old_resolved.as_deref(),
+            &resolved,
+          );
+        if expanded {
+          risk.push(Impact::Privilege);
+        }
+        required
+      } else {
+        false
+      };
       let id = b.item(
         address.clone(),
         Layer::Container,
@@ -2222,6 +2266,9 @@ fn service_items(
         risk,
         reason,
       );
+      if host_access && let Some(item) = b.items.last_mut() {
+        item.host_access.push("Compose 引用展开后触达宿主机".into());
+      }
       b.step(
         vec![id],
         format!("在 {server} 上部署 {name}"),
@@ -2424,6 +2471,12 @@ async fn choose_live_limits(
     })
     .collect::<BTreeSet<_>>();
   for entry in &mut b.steps {
+    if b.items.iter().any(|item| {
+      entry.items.contains(&item.id)
+        && item.impacts.contains(&Impact::Privilege)
+    }) {
+      continue;
+    }
     let Step::ServiceUp {
       service,
       expect: Some(hash),
@@ -4484,6 +4537,25 @@ mod tests {
     let warnings = plaintext_hop(&world, &net, &route);
     assert_eq!(warnings.len(), 1);
     assert!(warnings[0].contains("/api/*"));
+  }
+
+  #[test]
+  fn default_timezone_only_for_new_instances_without_explicit_environment()
+   {
+    let world = world();
+    let before = &world.services["app"];
+    let mut after = before.clone();
+    assert!(service_needs_default_timezone(None, &after));
+    assert!(!service_needs_default_timezone(Some(before), &after));
+    after.spec.env.insert("TZ".into(), String::new());
+    assert!(!service_needs_default_timezone(None, &after));
+    after.spec.timezone = Some("default".into());
+    assert!(service_needs_default_timezone(Some(before), &after));
+    after.spec.source = Source::Compose {
+      content: None,
+      file: None,
+    };
+    assert!(!service_needs_default_timezone(None, &after));
   }
 
   #[tokio::test]

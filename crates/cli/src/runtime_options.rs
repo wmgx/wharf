@@ -439,37 +439,21 @@ pub fn select_component<'a>(
   }
 }
 
-pub fn effective_limits(
-  body: &Value,
-  declared: Option<&Limits>,
-) -> serde_json::Value {
-  let deploy = &body["deploy"]["resources"]["limits"];
-  let field =
-    |direct, nested| deploy.get(nested).or_else(|| body.get(direct));
-  let option = declared.cloned().unwrap_or_default();
-  let memory =
-    option.memory_mb.map(|mb| u64::from(mb) << 20).or_else(|| {
-      let value = field("mem_limit", "memory")?;
-      value
-        .as_u64()
-        .or_else(|| value.as_str().and_then(size))
-        .filter(|n| *n > 0)
-    });
-  let cpus = option.cpu_milli.or_else(|| {
-    let value = field("cpus", "cpus")?;
-    let value =
-      value.as_f64().or_else(|| value.as_str()?.parse().ok())?;
-    cpu_milli(value).ok().filter(|n| *n > 0)
-  });
-  let pids = option.pids.or_else(|| {
-    let value = field("pids_limit", "pids")?;
-    value
-      .as_u64()
-      .and_then(|n| u32::try_from(n).ok())
-      .or_else(|| value.as_str()?.parse().ok())
-      .filter(|n| *n > 0)
-  });
-  serde_json::json!({"memory_bytes": memory, "cpu_milli": cpus, "pids": pids})
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub struct LimitView<'a> {
+  pub service: &'a str,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub container: Option<&'a str>,
+  pub limits: Option<Limits>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub effective: Option<EffectiveLimits>,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub struct EffectiveLimits {
+  pub memory_bytes: Option<u64>,
+  pub cpu_milli: Option<u32>,
+  pub pids: Option<u32>,
 }
 
 #[cfg(test)]
