@@ -315,7 +315,7 @@ pub struct PortSpec {
 )]
 pub struct VolumeSpec {
   /// 本地卷名。共享卷省略时取拥有者的卷名。
-  #[serde(default)]
+  #[serde(default, skip_serializing_if = "String::is_empty")]
   pub name: String,
   pub target: String,
   /// 同机拥有者的托管卷，格式为 <服务名>:<卷名>。
