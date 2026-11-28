@@ -262,6 +262,7 @@ fn effect(
 
 fn returns(command: &str) -> Option<&'static str> {
   Some(match command {
+    "export" => "fleet",
     "data pull" => "data-pull-summary",
     "data push" => "data-push-plan",
     "import" => "bundle-import-preview",

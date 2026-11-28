@@ -1615,3 +1615,55 @@ pub async fn restore_now(
 #[cfg(test)]
 #[path = "backup_isolation_tests.rs"]
 pub(crate) mod tests;
+
+#[tokio::test]
+async fn bg_bwlimit_applies_to_backup_restore_and_skips_old_agent() {
+  let state = crate::migrate::tests::seed_service(false).await;
+  let mut snap = crate::snapshot::load(&state.db).await.unwrap();
+  for (name, limit) in [("s1", "3M"), ("s2", "10M")] {
+    snap
+      .world
+      .servers
+      .get_mut(name)
+      .unwrap()
+      .settings
+      .bg_bwlimit = Some(limit.into());
+  }
+  state.hub.mock_migrate_v2_agent("s1");
+  state
+    .hub
+    .mock_agent("s2", false, |_| panic!("此测试无需通信"));
+  let progress: ProgressFn = std::sync::Arc::new(|_| {});
+  for (server, target, action, expected) in [
+    (
+      "s1",
+      "s2",
+      ResticAction::Backup { host: "s1".into() },
+      Some(3072),
+    ),
+    (
+      "s1",
+      "s2",
+      ResticAction::Restore {
+        snapshot: "fixture".into(),
+      },
+      Some(3072),
+    ),
+    ("s2", "s1", ResticAction::Backup { host: "s2".into() }, None),
+  ] {
+    let op = job(
+      &snap,
+      server,
+      "notes",
+      ResticRepo::Local,
+      "fixture",
+      action,
+    );
+    let op =
+      limit_job(op, &state, &snap, (server, target), &progress);
+    let AgentOp::Restic(job) = op else {
+      panic!("应返回 restic 任务");
+    };
+    assert_eq!(job.bwlimit_kbps, expected);
+  }
+}

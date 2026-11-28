@@ -202,6 +202,12 @@ impl Hub {
     lock(&self.conns).get_mut(server).unwrap().safe_delete = true;
   }
 
+  pub(crate) fn mock_migrate_v2_agent(&self, server: &str) {
+    self
+      .mock_agent(server, false, |_| panic!("此测试无需 agent 调用"));
+    lock(&self.conns).get_mut(server).unwrap().migrate_v2 = true;
+  }
+
   pub(crate) fn mock_safe_migrate_agent(
     &self,
     server: &str,

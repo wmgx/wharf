@@ -111,9 +111,7 @@ pub(crate) fn select_candidates(
       if let Some((index, _)) = override_entry {
         matched.insert(index);
       }
-      if (!overrides.is_empty() && override_entry.is_none())
-        || (ro && override_entry.is_none())
-      {
+      if override_entry.is_none() && (ro || !overrides.is_empty()) {
         if ro {
           warnings.push(format!("跳过只读挂载 {component}:{target}"));
         }
