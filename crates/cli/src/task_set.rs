@@ -6,6 +6,8 @@ use std::{collections::BTreeMap, io::Read};
 
 #[derive(Args, Default)]
 pub struct SetArgs {
+  #[command(flatten)]
+  resources: crate::runtime_options::TaskLimitEdits,
   name: String,
   #[arg(long)]
   dry_run: bool,
@@ -152,7 +154,8 @@ impl SetArgs {
   }
 
   fn has_edits(&self) -> bool {
-    self.edits().iter().any(|(present, _, _)| *present)
+    self.resources.has_edits()
+      || self.edits().iter().any(|(present, _, _)| *present)
   }
 }
 
@@ -198,6 +201,7 @@ fn apply_task_set(
   spec: &mut TaskSpec,
   args: &SetArgs,
 ) -> Result<(), ApiError> {
+  args.resources.apply(spec)?;
   let current = kind(&spec.how);
   for (present, flag, allowed) in args.edits() {
     if present && !allowed.is_empty() && !allowed.contains(&current) {

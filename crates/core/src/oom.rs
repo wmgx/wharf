@@ -33,7 +33,11 @@ pub async fn record_at(
       let detail = rules::resources::service_limit_with_source(&row.spec)
         .map(|(bytes, from_compose)| {
           let limit = rules::resources::mib(bytes as f64);
-          if from_compose {
+          let configured = row.spec.limits.iter().chain(row.spec.container_limits.values())
+            .any(|limits| limits.memory_mb.is_some_and(|mb| mb > 0));
+          if from_compose && configured {
+            format!("Compose 和 Wharf 配置的内存上限合计 {limit}，核对 mem_limit、deploy.resources.limits.memory 和各组件限额")
+          } else if from_compose {
             format!("Compose 上限 {limit}，可调整 mem_limit / deploy.resources.limits.memory")
           } else {
             format!("上限 {limit}")

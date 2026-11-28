@@ -50,7 +50,7 @@ export function TaskForm({ task, server: fixed, taken, onSaved, onCancel }: { ta
   const clash = !task && taken.includes(name);
   const validSchedule = (kind === "script" && !schedule.trim()) || schedule.trim().split(/\s+/).length === 5;
   const spec = (): TaskSpec => {
-    const base = { server, schedule: schedule.trim(), timeout_secs: Number(timeout) || 600, enabled, notify, skip_if_stopped: s?.skip_if_stopped, catch_up_mins: s?.catch_up_mins };
+    const base = { server, schedule: schedule.trim(), timeout_secs: Number(timeout) || 600, enabled, notify, skip_if_stopped: s?.skip_if_stopped, catch_up_mins: s?.catch_up_mins, limits: s?.limits, inherit_server_limits: s?.inherit_server_limits };
     if (kind === "script") return { ...base, kind, runtime, code, deps: runtime === "shell" ? undefined : deps, image: scriptImage.trim() || undefined, env: parseEnv(env), hook: hook ? (s?.kind === "script" ? s.hook ?? "" : "") : undefined };
     if (kind === "exec") return { ...base, server: services.find((v) => v.name === service)?.spec.server ?? server, kind, service, container: container.trim() || undefined, command };
     if (kind === "host") return { ...base, kind, command };

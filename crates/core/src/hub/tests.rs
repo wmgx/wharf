@@ -135,6 +135,9 @@ fn old_core_ignores_new_hello_capability() {
     safe_host_bind_v2: true,
     project_files_v2: true,
     workload_egress_v1: true,
+    service_runtime_opts: true,
+    live_limits_update: true,
+    task_resource_limits: true,
     data_cleanup: false,
     exec_v2: true,
     shared_volumes: true,
@@ -175,6 +178,14 @@ impl Hub {
       false,
       handle,
     );
+  }
+
+  pub(crate) fn disable_mock_runtime_options(&self, server: &str) {
+    let mut conns = lock(&self.conns);
+    let conn = conns.get_mut(server).unwrap();
+    conn.service_runtime_opts = false;
+    conn.live_limits_update = false;
+    conn.task_resource_limits = false;
   }
 
   pub(crate) fn enable_mock_container_diagnosis(&self, server: &str) {
@@ -389,6 +400,9 @@ impl Hub {
         safe_host_bind_v2: false,
         project_files_v2: false,
         workload_egress_v1: false,
+        service_runtime_opts: true,
+        live_limits_update: true,
+        task_resource_limits: true,
         data_cleanup: false,
         exec_v2: false,
         shared_volumes: false,
@@ -547,6 +561,9 @@ async fn agent_upgrade_needs_no_bound_core_server_or_probe_support() {
     safe_host_bind_v2: false,
     project_files_v2: false,
     workload_egress_v1: false,
+    service_runtime_opts: true,
+    live_limits_update: true,
+    task_resource_limits: true,
     data_cleanup: false,
     exec_v2: false,
     shared_volumes: false,
@@ -631,6 +648,9 @@ fn probe_connection(
     safe_host_bind_v2: false,
     project_files_v2: false,
     workload_egress_v1: false,
+    service_runtime_opts: true,
+    live_limits_update: true,
+    task_resource_limits: true,
     data_cleanup: false,
     exec_v2: false,
     shared_volumes: false,

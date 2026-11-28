@@ -75,7 +75,7 @@ pub const PROTOCOL: u32 = 2;
 /// 新增字段都有默认值，旧 CLI 照常能用；只有控制面必须拿到旧 CLI 发不出的字段时，
 /// 才把 [CLI_API] 和 [MIN_CLI_API] 一起加一，控制面会拦下旧 CLI 并提示更新。
 /// 2：CLI 必须经加密通道（[tunnel]）访问控制面。
-pub const CLI_API: u32 = 2;
+pub const CLI_API: u32 = 3;
 pub const MIN_CLI_API: u32 = 2;
 pub const CLI_API_HEADER: &str = "x-wharf-cli-api";
 /// 控制面在每个响应里带上自己的构建号，CLI 比对后提醒更新。

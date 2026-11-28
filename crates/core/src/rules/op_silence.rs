@@ -116,6 +116,7 @@ pub(crate) fn steps_scope(steps: &[StepPlan]) -> BTreeSet<Target> {
       | Step::Backup { service, .. }
       | Step::Restore { service, .. }
       | Step::ServiceRestart { service, .. }
+      | Step::ServiceStart { service, .. }
       | Step::ServiceStop { service }
       | Step::ServiceDown { service, .. } => {
         Target::Service(service.clone())

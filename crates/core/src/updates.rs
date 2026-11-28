@@ -558,7 +558,10 @@ async fn images(
   // 服务器 → [(服务, 镜像, 固定的版本)]
   let mut by_server: BTreeMap<String, Vec<Item>> = BTreeMap::new();
   for (name, row) in &snap.world.services {
-    if !included(only, name, row) {
+    if !included(only, name, row)
+      || row.spec.pull_policy
+        == Some(wharf_api_types::spec::ImagePullMode::Never)
+    {
       continue;
     }
     let Some(server) = snapshot::service_runtime_server(snap, name)
@@ -942,6 +945,7 @@ fn update_ignore_hides_major_and_all_immediately_without_restart() {
     "server":"s1","source":{"compose":{"content":"services: {app: {image: 'app:1.0'}, db: {image: 'db:15'}}"}}
   })).unwrap();
   let old = crate::world::ServiceRow {
+    host_groups: Default::default(),
     instance_id: "svc_fixture".into(),
     spec,
     host_ports: BTreeMap::new(),
@@ -1004,6 +1008,7 @@ fn update_ignore_hides_major_and_all_immediately_without_restart() {
 #[test]
 fn pinned_and_ignored_images_clear_cached_updates() {
   let row = crate::world::ServiceRow {
+    host_groups: Default::default(),
     instance_id: "svc_fixture".into(),
     spec: serde_json::from_value(serde_json::json!({
       "server":"s1","source":{"compose":{"content":"services: {app: {image: 'app:1.0'}, db: {image: 'db:15'}}"}},

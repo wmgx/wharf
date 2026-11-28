@@ -34,6 +34,7 @@ const IMPACT: Record<string, { text: string; cls: string }> = {
   data_loss: { text: "丢数据", cls: "bg-destructive/10 text-destructive" },
   overwrite: { text: "覆盖", cls: "bg-destructive/10 text-destructive" },
   public: { text: "公开", cls: "bg-primary/10 text-primary" },
+  privilege: { text: "提权", cls: "bg-destructive/10 text-destructive" },
 };
 
 type Stage = "planning" | "review" | "running" | "done";

@@ -843,6 +843,41 @@ async fn execute(
   }
 }
 
+fn effective_task_limits(
+  spec: &TaskSpec,
+  defaults: Option<&wharf_api_types::spec::Limits>,
+) -> Result<Option<wharf_api_types::spec::Limits>, ApiError> {
+  let mut limits = spec.limits.clone().unwrap_or_default();
+  crate::world::validate_limits(&mut limits)?;
+  if (!limits.is_empty() || spec.inherit_server_limits)
+    && !matches!(
+      spec.how,
+      TaskKind::Script { .. } | TaskKind::Container { .. }
+    )
+  {
+    let kind = match spec.how {
+      TaskKind::Exec { .. } => "Exec",
+      TaskKind::Host { .. } => "Host",
+      _ => "外部报到",
+    };
+    return Err(
+      ApiError::invalid(format!("{kind} 任务没有独立容器上限"))
+        .with_hint(
+          "Exec 请调整目标服务，需独立限额时使用镜像或脚本任务",
+        ),
+    );
+  }
+  if spec.inherit_server_limits
+    && let Some(defaults) = defaults
+  {
+    limits.memory_mb = limits.memory_mb.or(defaults.memory_mb);
+    limits.cpu_milli = limits.cpu_milli.or(defaults.cpu_milli);
+    limits.pids = limits.pids.or(defaults.pids);
+  }
+  crate::world::validate_limits(&mut limits)?;
+  Ok((!limits.is_empty()).then_some(limits))
+}
+
 async fn run_on_agent(
   state: &Arc<AppState>,
   (run_id, name): (i64, &str),
@@ -921,6 +956,25 @@ async fn run_on_agent(
     .servers
     .get(&spec.server)
     .ok_or_else(|| crate::world::server_not_found(&spec.server))?;
+  let limits = effective_task_limits(
+    spec,
+    server.settings.task_limits.as_ref(),
+  )?;
+  let limit_conn = limits
+    .as_ref()
+    .map(|_| state.hub.task_limits_conn_id(&spec.server))
+    .transpose()?;
+  let bound_conn = request.conn.or(proxy_conn).or(limit_conn);
+  if [request.conn, proxy_conn, limit_conn]
+    .into_iter()
+    .flatten()
+    .any(|id| Some(id) != bound_conn)
+  {
+    return Err(
+      ApiError::new(ErrorCode::Conflict, "服务器的 agent 连接已变化")
+        .with_hint("请重新运行任务"),
+    );
+  }
   let how = match &spec.how {
     TaskKind::Ping { .. } => {
       return Err(ApiError::invalid("外部报到任务由别处运行"));
@@ -1009,21 +1063,21 @@ async fn run_on_agent(
       .with_hint("运行 wharf upgrade"),
     );
   }
-  let conn =
-    if matches!(
-      &how,
-      TaskHow::Script { .. } | TaskHow::Container { .. }
-    ) {
-      state.hub.task_artifacts_conn_id(&spec.server).ok().filter(
-        |id| {
-          request.conn.or(proxy_conn).is_none_or(|bound| bound == *id)
-        },
-      )
-    } else {
-      None
-    };
+  let conn = if matches!(
+    &how,
+    TaskHow::Script { .. } | TaskHow::Container { .. }
+  ) {
+    state
+      .hub
+      .task_artifacts_conn_id(&spec.server)
+      .ok()
+      .filter(|id| bound_conn.is_none_or(|bound| bound == *id))
+  } else {
+    None
+  };
   let job = TaskRunJob {
     workload_no_proxy: proxy_bypass,
+    limits,
     name: name.to_string(),
     how,
     input,
@@ -1046,7 +1100,7 @@ async fn run_on_agent(
     .hub
     .call_optional_bound(
       &spec.server,
-      request.conn.or(proxy_conn).or(conn),
+      bound_conn.or(conn),
       AgentOp::TaskRun(job),
       wait,
       None,
@@ -1331,9 +1385,13 @@ fn validate(
   } else {
     &spec.server
   };
-  if !snap.world.servers.contains_key(server) {
-    return Err(crate::world::server_not_found(server));
-  }
+  let settings = &snap
+    .world
+    .servers
+    .get(server)
+    .ok_or_else(|| crate::world::server_not_found(server))?
+    .settings;
+  effective_task_limits(spec, settings.task_limits.as_ref())?;
   validate_schedule(spec)?;
   if spec.use_egress {
     if matches!(spec.how, TaskKind::Ping { .. }) {
@@ -1558,6 +1616,7 @@ pub async fn put(
   auth: Auth,
   Path(name): Path<String>,
   Query(query): Query<PutTaskQuery>,
+  headers: axum::http::HeaderMap,
   Json(mut spec): Json<TaskSpec>,
 ) -> ApiResult<TaskSpec> {
   let snap = snapshot::load(&s.db).await?;
@@ -1578,7 +1637,23 @@ pub async fn put(
     &snap.world,
     crate::missing_refs::task_texts(&spec.how).map(|(_, text)| text),
   )?;
+  let defaults = snap
+    .world
+    .servers
+    .get(&spec.server)
+    .and_then(|server| server.settings.task_limits.as_ref());
+  let effective = effective_task_limits(&spec, defaults)?;
+  if effective.is_some() {
+    s.hub.task_limits_conn_id(&spec.server)?;
+  }
+  if let Some(limits) = &mut spec.limits {
+    limits.normalize();
+    if limits.is_empty() {
+      spec.limits = None;
+    }
+  }
   validate(&name, &spec, &snap)?;
+  let old_cli = crate::api::cli_api(&headers) == Some(2);
   let spec = s.db.call(move |c| {
     let mut spec = spec;
     crate::secret_policy::validate_task_restrictions(
@@ -1586,6 +1661,11 @@ pub async fn put(
     )?;
     let rows = load_rows(c)?;
     let old = rows.iter().find(|(n, _, _)| n == &name).map(|(_, spec, _)| spec);
+    if old_cli && old.is_some_and(|old| (old.limits.is_some() && spec.limits.is_none())
+      || (old.inherit_server_limits && !spec.inherit_server_limits))
+    {
+      return Err(crate::api::old_cli_runtime_options());
+    }
     if query.rotate_token {
       rotate_task_token(&mut spec.how)?;
     }
@@ -2291,6 +2371,39 @@ mod tests {
     );
     assert_eq!(next_hook(Some("old".into()), None), None);
   }
+  #[test]
+  fn inherited_limits_are_per_dimension_and_require_a_task_container()
+  {
+    let defaults = wharf_api_types::spec::Limits {
+      memory_mb: Some(128),
+      cpu_milli: Some(250),
+      pids: Some(100),
+    };
+    let fields = serde_json::json!({"kind": "container", "image":"alpine",
+      "limits":{"cpu_milli":500}, "inherit_server_limits":true});
+    let mut spec = task(fields);
+    assert_eq!(
+      effective_task_limits(&spec, Some(&defaults)).unwrap(),
+      Some(wharf_api_types::spec::Limits {
+        memory_mb: Some(128),
+        cpu_milli: Some(500),
+        pids: Some(100)
+      })
+    );
+    spec.inherit_server_limits = false;
+    assert_eq!(
+      effective_task_limits(&spec, Some(&defaults))
+        .unwrap()
+        .unwrap()
+        .memory_mb,
+      None
+    );
+    spec.how = TaskKind::Host {
+      command: "true".into(),
+    };
+    assert!(effective_task_limits(&spec, Some(&defaults)).is_err());
+  }
+
   fn task(fields: serde_json::Value) -> TaskSpec {
     let mut spec =
       serde_json::json!({"server":"s1","schedule":"* * * * *"});

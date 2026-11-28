@@ -30,6 +30,24 @@ use crate::{
 
 /// 输出只留最后这么多字节。
 const OUTPUT_TAIL: usize = 16 * 1024;
+
+fn add_resource_limits(mut cmd: Cmd, job: &TaskRunJob) -> Cmd {
+  if let Some(limits) = &job.limits {
+    if let Some(value) = limits.memory_mb {
+      cmd = cmd.args(["--memory", &format!("{value}m")]);
+    }
+    if let Some(value) = limits.cpu_milli {
+      cmd = cmd.args([
+        "--cpus",
+        &format!("{}.{:03}", value / 1000, value % 1000),
+      ]);
+    }
+    if let Some(value) = limits.pids {
+      cmd = cmd.args(["--pids-limit", &value.to_string()]);
+    }
+  }
+  cmd
+}
 const QUICK: Duration = Duration::from_secs(20);
 const MAX_TIMEOUT: u64 = 6 * 3600;
 const MAX_RESULT: u64 = 64 * 1024;
@@ -168,6 +186,7 @@ pub async fn run(
           ])
           .args(["-v", &format!("{}:/deps", deps_dir.display())])
           .args(["-v", &format!("{}:/wharf:ro", dir.display())]);
+        cmd = add_resource_limits(cmd, job);
         cmd = match runtime {
           ScriptRuntime::Python => {
             let mut c = cmd.args([
@@ -281,7 +300,7 @@ pub async fn run(
       if let Some(dir) = &artifacts_dir {
         cmd = dir.mount(cmd);
       }
-      let run = cmd
+      let run = add_resource_limits(cmd, job)
         .args([
           "--entrypoint",
           entry,
@@ -398,6 +417,7 @@ pub async fn run(
       if let Some(dir) = &artifacts_dir {
         cmd = dir.mount(cmd);
       }
+      cmd = add_resource_limits(cmd, job);
       cmd = match command {
         Some(c) => cmd.args(["--entrypoint", "sh", image, "-c", c]),
         None => cmd.arg(image),

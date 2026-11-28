@@ -117,6 +117,20 @@ fn walk(
           "--extract-secrets": {"returns": "service-import-preview", "when": "无 --apply 且提取到密钥"}
         });
       }
+      "service limits" => {
+        entry["returns_by_flag"] = json!({
+          "--memory": "plan", "--cpus": "plan", "--pids": "plan",
+          "--unset-memory": "plan", "--unset-cpus": "plan",
+          "--unset-pids": "plan", "--off": "plan", "--apply": "plan_run"
+        });
+        entry["flag_variants"] = json!({
+          "--apply": {
+            "returns": "plan_run",
+            "when": "带修改参数且计划有变更项，优先于修改参数的返回类型",
+            "otherwise": "plan"
+          }
+        });
+      }
       "service env sync" => {
         entry["import_perms"] = json!(["admin"]);
       }
@@ -394,6 +408,7 @@ fn returns(command: &str) -> Option<&'static str> {
     "service render" => "service_render",
     "var get" | "var list" => "var",
     "var set" | "var rm" => "plan",
+    "service limits" => "service_limits",
     "backup list" => "backup",
     "backup ls" => "backup_ls",
     "backup extract" => "backup_extract",
@@ -564,6 +579,16 @@ mod tests {
       import["flag_variants"]["--extract-secrets"]["returns"],
       "service-import-preview"
     );
+  }
+
+  #[test]
+  fn service_limits_declares_read_plan_and_apply_results() {
+    let v = super::commands(&["service".into(), "limits".into()]);
+    let command = &v["commands"][0];
+    assert_eq!(command["returns"], "service_limits");
+    assert_eq!(command["returns_by_flag"]["--pids"], "plan");
+    assert_eq!(command["returns_by_flag"]["--unset-pids"], "plan");
+    assert_eq!(command["returns_by_flag"]["--apply"], "plan_run");
   }
 
   #[test]

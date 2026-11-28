@@ -101,6 +101,43 @@ pub fn merge_compose(
   Ok(())
 }
 
+pub fn static_project_images(
+  doc: &Value,
+) -> Result<Vec<String>, ApiError> {
+  let invalid = || {
+    ApiError::invalid("显式拉取策略需要静态镜像引用")
+      .with_hint("先把镜像引用改成可解析的固定名称和标签")
+  };
+  if doc.get("include").is_some() {
+    return Err(invalid());
+  }
+  let services = doc["services"]
+    .as_mapping()
+    .filter(|map| !map.is_empty())
+    .ok_or_else(invalid)?;
+  services
+    .values()
+    .map(|service| {
+      if service.get("extends").is_some()
+        || service.get("build").is_some()
+      {
+        return Err(invalid());
+      }
+      let image = service["image"]
+        .as_str()
+        .filter(|image| {
+          !image.is_empty()
+            && !image.starts_with('-')
+            && !image.contains(['$', '[', ']'])
+            && !image.chars().any(char::is_whitespace)
+        })
+        .ok_or_else(invalid)?;
+      Ok(image.to_owned())
+    })
+    .collect::<Result<std::collections::BTreeSet<_>, _>>()
+    .map(|images| images.into_iter().collect())
+}
+
 pub fn parse_compose(content: &str) -> Result<Value, ApiError> {
   let mut doc: Value =
     serde_yaml_ng::from_str(content).map_err(|e| {

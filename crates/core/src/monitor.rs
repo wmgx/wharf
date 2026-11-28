@@ -571,6 +571,7 @@ mod tests {
   #[test]
   fn url_skips_udp_ports() {
     let mut row: ServiceRow = ServiceRow {
+      host_groups: Default::default(),
       instance_id: "svc_fixture".into(),
       spec: serde_json::from_value(serde_json::json!({
         "server": "s1",
@@ -723,6 +724,7 @@ async fn monitor_sends_custom_headers_respects_interval_retries_and_redacts_secr
     &spec, "API_KEY"
   ));
   let row = ServiceRow {
+    host_groups: Default::default(),
     instance_id: "svc_fixture".into(),
     spec: spec.clone(),
     host_ports: BTreeMap::new(),
@@ -765,6 +767,7 @@ async fn monitor_sends_custom_headers_respects_interval_retries_and_redacts_secr
 #[test]
 fn readiness_skips_udp_but_rejects_invalid_headers_for_tcp() {
   let mut row = ServiceRow {
+    host_groups: Default::default(),
     instance_id: "svc_fixture".into(),
     spec: serde_json::from_value(serde_json::json!({
       "server":"s1","source":{"image":"app:1"},"ports":[{"name":"http","host":20001,"udp":true}],

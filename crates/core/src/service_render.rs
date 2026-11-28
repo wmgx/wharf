@@ -148,7 +148,8 @@ fn preview(
 
   let net = snap.net(&world);
   let row = &world.services[name];
-  let component = crate::compose_env::component_settings(&row.spec);
+  let runtime = snapshot::runtime_spec(row)?;
+  let component = crate::compose_env::component_settings(&runtime);
   let (spec, substitutions) = crate::variables::prepare_spec(
     &world,
     &net,

@@ -1,7 +1,7 @@
 // 和 crates/api-types 对应的类型，只写页面用到的字段。
 
 import type * as Gen from "./types.gen";
-export type { AclView, ExternalStatus } from "./types.gen";
+export type { AclView, ExternalStatus, Limits, UsageRow } from "./types.gen";
 
 export type PrivateNetwork = "tailscale" | "overlay" | "lan";
 
@@ -719,6 +719,8 @@ export type TaskSpec = TaskKind & {
   notify: boolean;
   skip_if_stopped?: boolean;
   catch_up_mins?: number;
+  limits?: Gen.TaskSpec["limits"];
+  inherit_server_limits?: Gen.TaskSpec["inherit_server_limits"];
 };
 
 export type TaskStatus =

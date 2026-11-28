@@ -407,6 +407,16 @@ pub(crate) async fn import(
       .service_values
       .insert(name.clone(), values[name].clone());
   }
+  // 便携包的旧服务没有时区字段时，按原环境部署。
+  for svc in fleet.services.values_mut() {
+    if !matches!(
+      svc.source,
+      wharf_api_types::spec::Source::Compose { .. }
+    ) && svc.timezone.is_none()
+    {
+      svc.timezone = Some("off".into());
+    }
+  }
   let planned = crate::planner::make_plan_inner(
     &state,
     PlanRequest {
@@ -607,5 +617,12 @@ async fn bundle_import_maps_backup_and_commits_secrets_with_plan() {
     json!({"created": ["BLOG_PASS"], "updated": [], "skipped": []})
   );
   assert!(result["plan"]["plan_id"].is_string());
+  assert!(result["plan"]["items"].as_array().unwrap().iter().any(
+    |item| {
+      item["address"] == "service/blog"
+        && item["layer"] == "config"
+        && item["after"].get("timezone").is_none()
+    }
+  ));
   assert_eq!(state_counts().await.unwrap(), (1, 1));
 }

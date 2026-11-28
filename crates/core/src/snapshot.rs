@@ -480,6 +480,83 @@ pub(crate) fn service_hash(
   Ok(hash)
 }
 
+pub(crate) fn runtime_spec(
+  row: &crate::world::ServiceRow,
+) -> Result<
+  std::borrow::Cow<'_, wharf_api_types::spec::ServiceSpec>,
+  ApiError,
+> {
+  if row.spec.host_groups().next().is_none() {
+    return Ok(std::borrow::Cow::Borrowed(&row.spec));
+  }
+  let mut spec = row.spec.clone();
+  for group in &mut spec.group_add {
+    if let Some(host) = group.strip_prefix("host:") {
+      let id = row.host_groups.get(host).ok_or_else(|| {
+        ApiError::new(
+          wharf_api_types::ErrorCode::PlanStale,
+          format!(
+            "服务器 {} 的宿主机组 {host} 尚未解析",
+            spec.server
+          ),
+        )
+        .suggest("wharf plan")
+      })?;
+      *group = id.to_string();
+    }
+  }
+  Ok(std::borrow::Cow::Owned(spec))
+}
+
+pub(crate) async fn resolve_host_groups(
+  state: &crate::state::AppState,
+  spec: &wharf_api_types::spec::ServiceSpec,
+  conn: u64,
+  cancel: &tokio_util::sync::CancellationToken,
+) -> Result<BTreeMap<String, u32>, ApiError> {
+  let groups = spec
+    .host_groups()
+    .collect::<std::collections::BTreeSet<_>>();
+  if groups.is_empty() {
+    return Ok(BTreeMap::new());
+  }
+  let actual: BTreeMap<String, u32> = state
+    .hub
+    .call_bound(
+      (&spec.server, conn),
+      wharf_api_types::agent::AgentOp::ReadHostGroups {
+        groups: groups.iter().map(|&group| group.into()).collect(),
+      },
+      std::time::Duration::from_secs(10),
+      None,
+      cancel,
+    )
+    .await
+    .map_err(|error| {
+      if error.code == ErrorCode::Conflict {
+        error.with_hint(format!(
+          "在服务器 {} 上用 getent group {} 查询第三列 GID，把 group_add 中的 host:<组名> 改为该数值（CLI 用 --rm-group 和 --add-group）",
+          spec.server,
+          groups.iter().copied().collect::<Vec<_>>().join(" "),
+        ))
+      } else {
+        error
+      }
+    })?;
+  if let Some(group) =
+    groups.iter().find(|&&group| !actual.contains_key(group))
+  {
+    return Err(
+      ApiError::invalid(format!(
+        "服务器 {} 上没有组 {group}",
+        spec.server
+      ))
+      .with_hint("确认设备组，或指定数值 GID"),
+    );
+  }
+  Ok(actual)
+}
+
 fn resolve_service(
   world: &World,
   net: &Net,
@@ -490,7 +567,8 @@ fn resolve_service(
   let row = world.services.get(name).ok_or_else(|| {
     ApiError::not_found(format!("服务 {name} 不存在"))
   })?;
-  let component = crate::compose_env::component_settings(&row.spec);
+  let runtime = runtime_spec(row)?;
+  let component = crate::compose_env::component_settings(&runtime);
   let (spec, substitutions) = crate::variables::prepare_spec(
     world,
     net,
@@ -574,7 +652,8 @@ pub fn service_trial(
   let row = world.services.get(name).ok_or_else(|| {
     ApiError::not_found(format!("服务 {name} 不存在"))
   })?;
-  let component = crate::compose_env::component_settings(&row.spec);
+  let runtime = runtime_spec(row)?;
+  let component = crate::compose_env::component_settings(&runtime);
   let (spec, substitutions) = crate::variables::prepare_spec(
     world,
     net,
@@ -672,7 +751,8 @@ pub fn service_template(
   name: &str,
 ) -> Result<String, ApiError> {
   let row = &world.services[name];
-  let component = crate::compose_env::component_settings(&row.spec);
+  let runtime = runtime_spec(row)?;
+  let component = crate::compose_env::component_settings(&runtime);
   let (spec, substitutions) = crate::variables::prepare_spec(
     world, net, name, &component, None,
   )?;
@@ -1182,6 +1262,7 @@ pub(crate) async fn read_legacy_acme_dns_hash(
       server,
       AgentOp::TaskRun(TaskRunJob {
         workload_no_proxy: None,
+        limits: None,
         name: "gateway-acme-hash".into(),
         how: TaskHow::Exec {
           cancellable: false,
@@ -1356,6 +1437,7 @@ mod tests {
     world.services.insert(
       "app".to_string(),
       ServiceRow {
+        host_groups: Default::default(),
         instance_id: "svc_fixture".into(),
         spec,
         host_ports: BTreeMap::from([("http".to_string(), host_port)]),
