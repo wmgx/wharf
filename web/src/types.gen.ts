@@ -199,6 +199,13 @@ export interface AlertReport {
   rule: string;
 }
 
+export interface AlertRuleDefaults {
+  enabled: boolean;
+  for_n: number;
+  level: AlertLevel;
+  threshold: number;
+}
+
 /**
  * 一条告警规则：对一个指标的每个对象，最近 `for_n` 个点都满足 `比较 阈值` 时触发。
  */
@@ -211,6 +218,7 @@ export interface AlertRuleView {
    * 和内置默认值不同。
    */
   customized: boolean;
+  defaults?: AlertRuleDefaults | null;
   enabled: boolean;
   for_n: number;
   id: string;
@@ -277,6 +285,7 @@ export type AllCookies = "all";
  */
 export interface ApiError {
   code: ErrorCode;
+  details?: unknown;
   /**
    * 怎么解决。
    */
@@ -1317,6 +1326,7 @@ export interface GatewayView {
   gate_core?: string | null;
   live?: LiveState | null;
   name: string;
+  omitted?: Record<string, number>;
   /**
    * 承载的路由 hostname。
    */
@@ -1343,9 +1353,16 @@ export interface GitSource {
 
 export type Health = "healthy" | "unhealthy" | "starting" | "none";
 
+export interface HeartbeatReportView {
+  at: number;
+  ok: boolean;
+  output: string;
+}
+
 export interface HeartbeatSpec {
   every_mins: number;
   grace_mins: number;
+  rotate?: boolean;
   /**
    * 已按目标容器配置；旧心跳保留原来的全容器注入。
    */
@@ -1928,6 +1945,7 @@ export interface NewerTag {
  */
 export interface NoticeView {
   customized: boolean;
+  default_level?: AlertLevel | null;
   enabled: boolean;
   id: string;
   level: AlertLevel;
@@ -2096,7 +2114,19 @@ export interface PlanItem {
   reason: string;
 }
 
-export type PlanStatus = "pending" | "applied";
+export type PlanStatus = "pending" | "applied" | "expired";
+
+export interface PlanSummary {
+  addresses?: string[];
+  created_at: string;
+  expires_at: string;
+  expires_in_secs: number;
+  item_count: number;
+  needs_confirm?: string[];
+  note?: string | null;
+  plan_id: string;
+  status: PlanStatus;
+}
 
 export type PortCheckSpec = {
   kind: "off";
@@ -2444,8 +2474,10 @@ export interface RouteView {
    * 实际使用的网关（spec 里没填时是默认网关）。
    */
   gateway?: string | null;
+  has_sealed_note?: boolean;
   id: string;
   note?: string | null;
+  omitted?: Record<string, number>;
   /**
    * 当前生效入口是备用网关。
    */
@@ -2706,6 +2738,7 @@ export interface ServerView {
    * 按近 7 天趋势预计几天后磁盘写满；数据不足或没在增长时没有。
    */
   disk_days_left?: number | null;
+  has_sealed_note?: boolean;
   /**
    * 当前连接的 agent 支持宿主机终端和命令执行。
    */
@@ -2722,6 +2755,7 @@ export interface ServerView {
   last_seen?: string | null;
   name: string;
   note?: string | null;
+  omitted?: Record<string, number>;
   online: boolean;
   /**
    * 实际使用的内网地址：设置里的覆盖值，否则是 agent 检测到的组网地址。
@@ -2965,6 +2999,7 @@ export interface ServiceView {
    * 服务挂载的数据和归属，从配置里算出来。
    */
   data?: DataMount[];
+  has_sealed_note?: boolean;
   heartbeat?: HeartbeatView | null;
   /**
    * 端口名到宿主机端口。
@@ -2989,6 +3024,7 @@ export interface ServiceView {
    * 备注：给人看的说明，不影响部署。
    */
   note?: string | null;
+  omitted?: Record<string, number>;
   port_checks?: Record<string, boolean>;
   /**
    * 在线 agent 是否支持端口探测，能力未知时为空。

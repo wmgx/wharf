@@ -16,35 +16,35 @@ Wharf 是一个人用的多服务器管理系统。你通过 `wharf` 命令行�
 
 ## 守则
 
-1. **一律加 `--json`**，按 JSON 读结果，不要解析给人看的文字输出。
+1. **加 `--json` 读取机器结果。** 普通命令输出一份 JSON，参数错误也一样。跟随日志需要连续输出时用文本模式。
 2. **先计划，再执行。** 修改类命令不带 `--apply` 时只生成计划，先把计划给用户看；用户同意后再 `wharf apply <plan_id>`，或者重新执行原命令加 `--apply`。用户已经明确说“直接做”时可以一步 `--apply`。
-3. **高风险项不要自己确认。** 计划里标了需要确认的项（删数据、覆盖、对公网开放等），执行时会以退出码 `2` 拒绝。把这些项原样告诉用户，用户同意后才能加 `--confirm <地址>`。需要确认的地址在计划 JSON 的 `needs_confirm` 里，例如 `service/blog`。
+3. **高风险项不要自己确认。** 计划里标了需要确认的项（删数据、覆盖、对公网开放等），执行时会以退出码 `2` 拒绝。把这些项原样告诉用户，用户同意后才能加 `--confirm <地址>`。需要确认的地址在 `needs_confirm` 里。用 `--apply --json` 或 `wharf apply --json` 遇到拦截时，看错误的 `details` 获取计划编号、待确认项及原因。用 `wharf plan show <id>` 回查计划，用 `wharf plan list --pending` 列出可执行的计划。
 4. **出错先看 `hint` 和 `suggest`。** 错误格式是 `{ code, message, hint, suggest }`，按提示改，不要盲目重试同一条命令。
-5. **字段不要猜。** 参数不确定时看 `wharf commands [命令前缀]`（全部命令和参数的 JSON，例如 `wharf commands service`）或 `wharf <命令> --help`；意图文件和对象字段看 `wharf schema`。
-   结果太长时用 `--fields` 只取要的字段，例如 `wharf service list --fields name,status.summary`（隐含 `--json`）；列表太长再加 `--page-size 20 --page 2`。
-   反复查同一件事时加 `--changed`，只输出和上次相比变了的地方。
+5. **字段不要猜。** 参数不确定时看 `wharf commands [命令前缀]`（全部命令和参数的 JSON，例如 `wharf commands service`）或 `wharf <命令> --help`；用 `wharf commands --usable` 按令牌权限筛选。对象字段用 `wharf schema <类型> --paths --json` 查看。
+   结果太长时用 `--fields` 只取要的字段，例如 `wharf service list --fields name,status.summary`（隐含 `--json`）；拼错字段会报错，可能缺失的字段加 `?`，例如 `note?`。列表太长再加 `--page-size 20 --page 2`，分页信息在 `pagination`，顶层数组改从 `items` 读取。
+   反复查同一件事时加 `--changed=<游标>`。默认不比较延迟和观测时间等高频字段，需比较时加 `--include-volatile`。旧写法 `--changed` 使用默认游标。
    `wharf whoami --json` 看当前 token 的权限；提示本机 wharf 和控制面版本不同时运行 `wharf self-update`，再用 `wharf commands --changes` 看新版本多了哪些命令和参数。
    要等部署完成、服务恢复、告警解除时用 `wharf wait`，不要自己循环查：`wharf wait service <服务>`、`wharf wait route <域名>`、`wharf wait clear --subject <服务>`，默认最多等 10 分钟（`--timeout`）。
 6. **不打印、不写入 token 和密钥。** 服务要用的密码放进密钥（`wharf secret`），环境变量里用 `[[NAME]]` 引用。`[[url:NAME]]`、`[[b64:NAME]]`、`[[json:NAME]]` 用于编码，`[[FILE:NAME]]` 用于服务里的只读文件挂载，引用会替换为容器内路径。
 7. **直接生效的命令先预览。** `wharf task add/rm`、`wharf secret set/rm`、`wharf alert set`、`wharf token set`、`wharf service note`、`wharf server note`、`wharf route note` 不走计划，先加 `--dry-run` 看会改什么。
    修改时加 `--reason "<为什么>"`，生成计划时可以加 `--note "<备注>"`，都会记进操作记录。
-8. **宿主机命令要用户同意。** `wharf exec <服务器> -- '<命令>'`、`wharf server prune`、`wharf server baseline --apply` 这类直接动机器的操作，先说明要做什么。
+8. **宿主机命令要用户同意。** `wharf exec <服务器> -- '<命令>'`、`wharf server prune`、`wharf server baseline <服务器> --apply` 这类直接动机器的操作，先说明要做什么。
 
-退出码：`0` 成功，`1` 出错，`2` 需要确认，`3` 计划已过期（重新 plan），`4` 部分失败。
+退出码：`0` 成功，`1` 出错，`2` 仅用于 `ConfirmRequired`，`3` 计划已过期（重新 plan），`4` 部分失败。
 
 ## 开始前
 
 ```bash
-wharf status --json        # 服务器、服务、网关、路由；problems 和 issues 是需要注意的事项
+wharf status --brief --json  # 服务器、服务、网关、路由；需要注意的事项看 issues
 ```
 
 没有登录或连不上控制面时，让用户在页面“设置 → 访问令牌 → 接入 CLI / AI”里拿安装登录命令，不要自己找 token。
 
 给 AI 签发访问令牌时，建议用 `--expires 30d` 设置有效期，用 `--from <地址或网段>` 限制来源；`--services blog,halo` 可以限定可操作的服务。
-管理员用 `wharf token set <名称>` 修改这些限制或 `--perms`。用 `--expires never`、`--from any`、`--services all` 分别清除三项限制。
+管理员用 `wharf token set <名称>` 修改这些限制或 `--perms`。用 `--unset-expires`、`--unset-from`、`--unset-services` 分别清除三项限制。
 管理员可用 `wharf token explain <名称> [--service 服务] [--from IP]` 只读推演常用操作的令牌判定，也可同时传 `--method` 和 `--path` 推演指定请求的令牌层。
 
-服务器和域名的备注分别用 `wharf server note <服务器> "<文本>"`、`wharf route note <域名> "<文本>"` 保存，`--clear` 清除。
+用 `wharf service note <服务>`、`wharf server note <服务器>`、`wharf route note <域名>` 查看公开备注。加文本修改，加 `--clear` 清除公开部分。页面加密的私密内容会保留，`has_sealed_note` 表示还有私密内容。
 
 ## 常见任务
 
@@ -55,16 +55,21 @@ wharf status --json        # 服务器、服务、网关、路由；problems 和
 # 不给 --port 时 Python 用 8000、Node 用 3000，其余 8080；只想看用哪个 Dockerfile 加 --print-dockerfile
 wharf deploy ./app --port http=8000 --json
 
+# 离线看语言、Dockerfile 和默认端口
+wharf deploy ./app --detect-only --json
+
 # 镜像
 wharf service deploy blog --server <服务器> --image ghcr.io/x/blog:latest --port http=80 --json
 
 # compose 文件：--port 只填宿主机端口，容器端口写在 compose 里
+# 更新既有服务时 --port 按名称合并，用 --unset-port <名称> 移除
 wharf service deploy blog --server <服务器> --compose ./compose.yml --port http=:8080 --json
 
 # git 仓库
 wharf service deploy blog --server <服务器> --git https://github.com/x/blog --port http=8000 --json
 
 # 照着文档里的 docker run 命令：端口、环境变量、数据卷、资源上限一起转过来，没转换的参数打在标准错误里
+# JSON 模式的转换提醒看 plan.warnings（仅生成计划时直接看 warnings）
 wharf service deploy blog --server <服务器> --from-run 'docker run -d -p 8080:80 -v data:/data nginx' --json
 
 # compose 文件的网址（在本机下载，GitHub 网页链接自动换成原始文件）
@@ -187,8 +192,8 @@ Wharf 以外的机器上的脚本要用地址时才加 `--show` 打印出来，�
 用 `wharf describe service` 查询服务命令和参数。
 
 - `wharf service log-alert <服务>` 查看规则、最近命中和触发状态。用 `add <pattern> [--regex] [--window 5m] [--count 1] [--container <Compose 服务名>]` 添加，用 `rm <序号或pattern>` 删除一条，或用 `--off` 关闭全部。
-- `wharf service port-check <服务> <端口名>` 启用 TCP 检查。已发布的 TCP 端口默认启用。UDP 用 `--udp-dns <域名>` 或 `--udp-send <hex> --udp-expect <hex>` 配置，用 `--off` 关闭检查。
-- `wharf service heartbeat <服务> --every 10m [--grace 5m]` 开启心跳，用 `--off` 关闭。心跳已开启时可单独调整 `--every` 或 `--grace`。容器重新部署后通过 `WHARF_HEARTBEAT_URL` 获得报到地址，失败时请求该地址的 `/fail`。控制面需设置 `WHARF_PUBLIC_URL`。用 `wharf service show <服务>` 看状态，显式加 `--reveal` 查看完整地址。
+- `wharf service port-check <服务> <端口名>` 查看当前检查，加 `--on` 启用或恢复 TCP 检查。已发布的 TCP 端口默认启用。UDP 用 `--udp-dns <域名>` 或 `--udp-send <hex> --udp-expect <hex>` 配置，用 `--off` 关闭检查。
+- `wharf service heartbeat <服务> --every 10m [--grace 5m]` 开启心跳，用 `--off` 关闭。心跳已开启时可单独调整 `--every` 或 `--grace`。容器重新部署后通过 `WHARF_HEARTBEAT_URL` 获得报到地址，失败时请求该地址的 `/fail`。控制面需设置 `WHARF_PUBLIC_URL`。用 `wharf service heartbeat <服务>` 看配置与最近报到，显式加 `--reveal` 查看完整地址。用 `--rotate` 生成轮换口令的部署计划，保留报到历史。
 - 以上配置变更默认生成计划。确认后用 `--apply` 执行。日志和端口检查、心跳间隔和宽限调整仅写配置。开启或关闭心跳会触发部署。用 `wharf alert list` 看告警规则和通知开关。
 
 ### 已有容器纳管
@@ -207,3 +212,6 @@ wharf service import <服务器> --project <compose 项目名> --json   # 或 --
 - 不知道有什么命令：`wharf --help`、`wharf <命令> --help`；
 - 想看完整期望状态：`wharf export`；只改一个服务时 `wharf export --service <服务> -o x.toml`，改完 `wharf validate x.toml`（不连控制面），再 `wharf plan -f x.toml --partial`（只动文件里写到的对象；不加 `--partial` 会删掉文件里没写的）；
 - 想知道最近谁做了什么：`wharf audit --json`。
+
+- `wharf service monitor <服务>` 和 `wharf service auto-update <服务>` 无修改参数时只读查看。加 `--on` 开启或加 `--off` 关闭，确认后可加 `--apply` 执行。例如 `wharf service auto-update <服务> --on --apply`。用 `wharf service monitor <服务> --unset-expect` 清除预期状态码。
+- `wharf server watch-unit <服务器> <unit>` 无修改参数时只读查看。加 `--on` 开启或加 `--off` 关闭，直接生效。

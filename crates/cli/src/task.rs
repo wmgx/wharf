@@ -75,6 +75,12 @@ pub struct AddArgs {
   /// 开启网址触发。
   #[arg(long, requires = "script")]
   hook: bool,
+  /// 关闭网址触发。
+  #[arg(long, requires = "script", conflicts_with = "hook")]
+  no_hook: bool,
+  /// 轮换网址触发或外部报到口令。
+  #[arg(long, conflicts_with = "no_hook")]
+  rotate_token: bool,
   /// 在这个服务的容器里执行；服务器取服务所在的服务器。
   #[arg(long, group = "how")]
   exec: Option<String>,
@@ -249,8 +255,30 @@ pub async fn task(
   }
 }
 
+fn shell_join(args: &[String]) -> String {
+  if let [script] = args {
+    return script.clone();
+  }
+  args
+    .iter()
+    .map(|arg| {
+      if !arg.is_empty()
+        && arg.bytes().all(|b| {
+          b.is_ascii_alphanumeric() || b"_@%+=:,./-".contains(&b)
+        })
+      {
+        arg.clone()
+      } else {
+        format!("'{}'", arg.replace(char::from(39), "'\\''"))
+      }
+    })
+    .collect::<Vec<_>>()
+    .join(" ")
+}
+
 async fn add(c: &Client, a: AddArgs, j: bool) -> CliResult<()> {
-  let command = (!a.command.is_empty()).then(|| a.command.join(" "));
+  let command =
+    (!a.command.is_empty()).then(|| shell_join(&a.command));
   let need_cmd = || {
     command.clone().ok_or_else(|| {
       ApiError::invalid("缺少命令").with_hint("命令写在 `--` 后面")
@@ -286,15 +314,27 @@ async fn add(c: &Client, a: AddArgs, j: bool) -> CliResult<()> {
       std::fs::read_to_string(file)
         .map_err(|_| ApiError::invalid("读取脚本失败"))?
     };
-    let tasks: Vec<TaskView> = c.get("/api/tasks").await?;
-    let old =
-      tasks.into_iter().find(|t| t.name == a.name).and_then(|t| {
-        if let TaskKind::Script { hook, .. } = t.spec.how {
-          hook
-        } else {
+    let old = if a.no_hook || a.hook {
+      None
+    } else {
+      match c
+        .get::<TaskView>(&format!("/api/tasks/{}", seg(&a.name)))
+        .await
+      {
+        Ok(task) => match task.spec.how {
+          TaskKind::Script { hook, .. } => {
+            hook.map(|_| String::new())
+          }
+          _ => None,
+        },
+        Err(CliError::Api(error))
+          if error.code == wharf_api_types::ErrorCode::NotFound =>
+        {
           None
         }
-      });
+        Err(error) => return Err(error),
+      }
+    };
     let env = a
       .env
       .iter()
@@ -397,13 +437,25 @@ async fn add(c: &Client, a: AddArgs, j: bool) -> CliResult<()> {
     skip_if_stopped: a.skip_if_stopped,
     catch_up_mins: a.catch_up,
   };
+  if a.rotate_token
+    && !matches!(
+      &spec.how,
+      TaskKind::Ping { .. } | TaskKind::Script { hook: Some(_), .. }
+    )
+  {
+    return Err(ApiError::invalid("只有开启了 --hook 的脚本任务或 --ping 外部报到任务支持轮换口令").into());
+  }
   if a.dry_run {
     let before = crate::preview::get_or_null(
       c,
       &format!("/api/tasks/{}", seg(&a.name)),
     )
     .await?;
-    let after = serde_json::to_value(&spec).unwrap_or_default();
+    let mut after =
+      serde_json::to_value(&spec).map_err(anyhow::Error::from)?;
+    if a.rotate_token {
+      after["token"] = serde_json::json!("<将轮换为新口令>");
+    }
     return crate::preview::show(
       j,
       &format!("task/{}", a.name),
@@ -411,9 +463,18 @@ async fn add(c: &Client, a: AddArgs, j: bool) -> CliResult<()> {
       &after,
     );
   }
-  let r: TaskSpec = c
-    .put(&format!("/api/tasks/{}", seg(&a.name)), &spec)
-    .await?;
+  let mut path = format!("/api/tasks/{}", seg(&a.name));
+  if a.rotate_token {
+    path.push_str("?rotate_token=true");
+  }
+  let mut r: TaskSpec = c.put(&path, &spec).await?;
+  match &mut r.how {
+    TaskKind::Ping { token, .. }
+    | TaskKind::Script {
+      hook: Some(token), ..
+    } => token.clear(),
+    _ => {}
+  }
   out(j, &r, |_| println!("已保存定时任务 {}", a.name));
   Ok(())
 }
@@ -512,4 +573,16 @@ fn runtime_name(runtime: ScriptRuntime) -> &'static str {
     ScriptRuntime::Node => "Node",
     ScriptRuntime::Shell => "Shell",
   }
+}
+
+#[test]
+fn shell_join_preserves_multiword_argument() {
+  assert_eq!(
+    shell_join(&["psql".into(), "-c".into(), "SELECT 1".into()]),
+    "psql -c 'SELECT 1'"
+  );
+  assert_eq!(
+    shell_join(&["echo".into(), "a'b".into()]),
+    "echo 'a'\\''b'"
+  );
 }

@@ -1077,6 +1077,13 @@ impl World {
     }
     for (name, service) in &self.services {
       validate_service(self, name, &service.spec)?;
+      if let Some(monitor) = &service.spec.monitor {
+        let old = current
+          .services
+          .get(name)
+          .and_then(|row| row.spec.monitor.as_ref());
+        crate::monitor::validate(monitor, old)?;
+      }
       crate::service_monitor::validate(
         &service.spec,
         current.services.get(name).map(|row| &row.spec),
@@ -1104,7 +1111,11 @@ impl World {
     }
     let mut forwards = BTreeSet::new();
     for (name, gateway) in &self.gateways {
-      validate_gateway(name, &gateway.spec)?;
+      validate_gateway(
+        name,
+        &gateway.spec,
+        current.gateways.get(name).map(|old| &old.spec),
+      )?;
       crate::entry_protection::validate_gateway(name, &gateway.spec)?;
       if !self.servers.contains_key(&gateway.spec.server) {
         return Err(server_not_found(&gateway.spec.server));
@@ -1999,9 +2010,6 @@ fn validate_service(
     ));
   }
   crate::updates::validate_ignore(spec)?;
-  if let Some(m) = &spec.monitor {
-    crate::monitor::validate(m)?;
-  }
   validate_deploy_options(name, spec)?;
   if name.starts_with(GATEWAY_PROJECT_PREFIX) {
     return Err(ApiError::invalid(format!(

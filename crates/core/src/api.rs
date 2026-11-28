@@ -339,6 +339,10 @@ pub fn router(state: Arc<AppState>) -> Router {
     )
     .route("/api/services", get(list_services))
     .route("/api/services/{name}", get(show_service))
+    .route(
+      "/api/services/{name}/heartbeat/reports",
+      get(heartbeat_reports),
+    )
     .route("/api/services/{name}/logs", get(service_logs))
     .route(
       "/api/services/{name}/probe",
@@ -533,6 +537,7 @@ pub fn router(state: Arc<AppState>) -> Router {
       put(crate::secret_restrictions::put),
     )
     .route("/api/plan", post(make_plan))
+    .route("/api/plans", get(list_plans))
     .route("/api/plans/{id}", get(show_plan))
     .route("/api/apply", post(apply_plan))
     .route("/api/runs", get(list_runs))
@@ -624,12 +629,45 @@ async fn check_cli(
 
 // STATUS
 
+#[derive(Default, Deserialize)]
+struct BriefQuery {
+  brief: Option<String>,
+}
+
+impl BriefQuery {
+  fn brief(&self) -> bool {
+    matches!(self.brief.as_deref(), Some("1" | "true"))
+  }
+}
+
 async fn status(
   State(s): State<Arc<AppState>>,
   auth: Auth,
+  Query(query): Query<BriefQuery>,
 ) -> ApiResult<Status> {
   auth.require(Perm::Read)?;
-  let status = views::status(&s, auth.services.as_ref()).await?;
+  let mut status = views::status(&s, auth.services.as_ref()).await?;
+  for view in &mut status.services {
+    wharf_api_types::filter_note(
+      &mut view.note,
+      &mut view.has_sealed_note,
+      auth.human,
+    );
+  }
+  for view in &mut status.servers {
+    wharf_api_types::filter_note(
+      &mut view.note,
+      &mut view.has_sealed_note,
+      auth.human,
+    );
+  }
+  for view in &mut status.routes {
+    wharf_api_types::filter_note(
+      &mut view.note,
+      &mut view.has_sealed_note,
+      auth.human,
+    );
+  }
   // 刚导入、还没同步过的在后台同步，下一次轮询就有了。
   if !status.edge_apps.is_empty()
     && let Ok(snap) = snapshot::load(&s.db).await
@@ -637,6 +675,9 @@ async fn status(
     for a in status.edge_apps.iter().filter(|a| a.live.is_none()) {
       crate::edge_sync::sync_if_stale(&s, &snap, &a.name);
     }
+  }
+  if query.brief() {
+    views::compact_status(&mut status);
   }
   Ok(Json(status))
 }
@@ -668,6 +709,14 @@ async fn list_servers(
       .servers
       .keys()
       .filter_map(|n| views::server_view(&s, &snap, n))
+      .map(|mut view| {
+        wharf_api_types::filter_note(
+          &mut view.note,
+          &mut view.has_sealed_note,
+          auth.human,
+        );
+        view
+      })
       .collect(),
   ))
 }
@@ -679,10 +728,14 @@ async fn show_server(
 ) -> ApiResult<ServerView> {
   auth.require(Perm::Read)?;
   let snap = snapshot::load(&s.db).await?;
-  Ok(Json(
-    views::server_view(&s, &snap, &name)
-      .ok_or_else(|| server_not_found(&name))?,
-  ))
+  let mut view = views::server_view(&s, &snap, &name)
+    .ok_or_else(|| server_not_found(&name))?;
+  wharf_api_types::filter_note(
+    &mut view.note,
+    &mut view.has_sealed_note,
+    auth.human,
+  );
+  Ok(Json(view))
 }
 
 /// 宿主机的系统版本、待装更新、docker 和日志占用，现查。
@@ -1006,6 +1059,7 @@ async fn remove_server(
 async fn list_services(
   State(s): State<Arc<AppState>>,
   auth: Auth,
+  Query(query): Query<BriefQuery>,
 ) -> ApiResult<Vec<ServiceView>> {
   auth.require(Perm::Read)?;
   let snap = snapshot::load(&s.db).await?;
@@ -1036,6 +1090,14 @@ async fn list_services(
           crate::scope_filter::filter_service_links(
             allowed, &mut view,
           );
+        }
+        wharf_api_types::filter_note(
+          &mut view.note,
+          &mut view.has_sealed_note,
+          auth.human,
+        );
+        if query.brief() {
+          views::compact_service(&mut view);
         }
         Some(view)
       })
@@ -1122,7 +1184,39 @@ async fn show_service(
       true,
     );
   }
+  wharf_api_types::filter_note(
+    &mut view.note,
+    &mut view.has_sealed_note,
+    auth.human,
+  );
   Ok(Json(view))
+}
+
+#[derive(Deserialize)]
+struct HeartbeatReportsQuery {
+  limit: Option<u32>,
+}
+
+async fn heartbeat_reports(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Path(name): Path<String>,
+  Query(q): Query<HeartbeatReportsQuery>,
+) -> ApiResult<
+  Vec<wharf_api_types::service_checks::HeartbeatReportView>,
+> {
+  auth.require(Perm::Read)?;
+  let reports = s.db.call(move |c| {
+    let exists: bool = c.query_row(
+      "SELECT EXISTS(SELECT 1 FROM resources WHERE kind = 'service' AND name = ?1)",
+      [&name], |row| row.get(0),
+    ).map_err(crate::db::sql_err)?;
+    if !exists {
+      return Err(service_not_found(&name));
+    }
+    crate::service_monitor::heartbeat::reports(c, &name, q.limit.unwrap_or(20))
+  }).await?;
+  Ok(Json(reports))
 }
 
 #[derive(Deserialize)]
@@ -1560,6 +1654,14 @@ async fn list_routes(
         })
       })
       .filter_map(|(h, _)| views::route_view(&snap, &net, h))
+      .map(|mut view| {
+        wharf_api_types::filter_note(
+          &mut view.note,
+          &mut view.has_sealed_note,
+          auth.human,
+        );
+        view
+      })
       .collect(),
   ))
 }
@@ -2148,6 +2250,7 @@ async fn auto_update_now(
 async fn make_plan(
   State(s): State<Arc<AppState>>,
   auth: Auth,
+  Query(query): Query<BriefQuery>,
   axum::Extension(audit): axum::Extension<crate::audit::AuditSlot>,
   Json(req): Json<PlanRequest>,
 ) -> ApiResult<Plan> {
@@ -2202,7 +2305,11 @@ async fn make_plan(
     "plan={} {addresses}{note}",
     planned.plan.plan_id
   ));
-  Ok(Json(planned.plan))
+  let mut plan = planned.plan;
+  if query.brief() {
+    planner::compact_plan(&mut plan);
+  }
+  Ok(Json(plan))
 }
 
 /// 宿主机终端、宿主机命令执行这类危险开关：API token（CLI、AI）只能关，打开要人在页面上操作。
@@ -2247,13 +2354,42 @@ async fn guard_dangerous(
   Ok(())
 }
 
+#[derive(Deserialize)]
+struct PlanListQuery {
+  limit: Option<u32>,
+  #[serde(default)]
+  pending: bool,
+}
+
+async fn list_plans(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Query(query): Query<PlanListQuery>,
+) -> ApiResult<Vec<wharf_api_types::plan::PlanSummary>> {
+  auth.require(Perm::Read)?;
+  Ok(Json(
+    apply::list_plans(
+      &s,
+      &auth,
+      query.pending,
+      query.limit.unwrap_or(20),
+    )
+    .await?,
+  ))
+}
+
 async fn show_plan(
   State(s): State<Arc<AppState>>,
   auth: Auth,
+  Query(query): Query<BriefQuery>,
   Path(id): Path<String>,
 ) -> ApiResult<Plan> {
   auth.require(Perm::Read)?;
-  Ok(Json(apply::load_plan_for(&s, &auth, &id).await?))
+  let mut plan = apply::load_plan_for(&s, &auth, &id).await?;
+  if query.brief() {
+    planner::compact_plan(&mut plan);
+  }
+  Ok(Json(plan))
 }
 
 async fn apply_plan(
@@ -2424,11 +2560,14 @@ mod tests {
       human: false,
     };
     for name in ["photos", "secret-indexer"] {
-      let Json(list) =
-        list_services(State(state.clone()), scoped(name))
-          .await
-          .map_err(|e| e.0)
-          .unwrap();
+      let Json(list) = list_services(
+        State(state.clone()),
+        scoped(name),
+        Query(BriefQuery::default()),
+      )
+      .await
+      .map_err(|e| e.0)
+      .unwrap();
       assert_eq!(list.len(), 1);
       let Json(show) = show_service(
         State(state.clone()),
@@ -2444,6 +2583,63 @@ mod tests {
         assert!(view.uses.is_empty());
         assert!(view.used_by.is_empty());
       }
+    }
+  }
+
+  #[tokio::test]
+  async fn cli_note_preserves_sealed_and_strips_on_read() {
+    let state = crate::rules::tests::test_state();
+    state
+      .db
+      .call(|c| {
+        db::apply_write(
+          c,
+          &db::Write::Upsert {
+            kind: "service".into(),
+            name: "app".into(),
+            spec: json!({"server":"s1","source":{"image":"nginx:1"}}),
+            meta: json!({}),
+          },
+        )?;
+        db::set_service_note(c, "app", "公开\nwharf-enc:v1:AAAA")
+      })
+      .await
+      .unwrap();
+    let auth = |human| Auth {
+      name: "fixture".into(),
+      perms: [Perm::Read, Perm::Apply].into(),
+      services: None,
+      allowed_from: vec![],
+      expires_at: None,
+      human,
+    };
+    let request = serde_json::from_value(
+      json!({"note": "新备注\nwharf-enc:v1:假的"}),
+    )
+    .unwrap();
+    let _ = crate::notes::service(
+      State(state.clone()),
+      auth(false),
+      Path("app".into()),
+      Json(request),
+    )
+    .await
+    .map_err(|e| e.0)
+    .unwrap();
+    for (human, expected) in
+      [(false, "新备注"), (true, "新备注\nwharf-enc:v1:AAAA")]
+    {
+      let Json(view) = show_service(
+        State(state.clone()),
+        auth(human),
+        Path("app".into()),
+        Query(ServiceQuery::default()),
+      )
+      .await
+      .map_err(|e| e.0)
+      .unwrap();
+      assert_eq!(view.note.as_deref(), Some(expected));
+      assert!(view.has_sealed_note);
     }
   }
 
