@@ -221,6 +221,31 @@ pub(crate) fn newer_fingerprint(
   )
 }
 
+/// 部署开始时就保存目标 pin，试跑失败后仍要识别先前失败的版本。
+pub(crate) fn matches_failed_version(
+  row: &crate::world::ServiceRow,
+  check: &VersionCheck,
+  failed: &str,
+) -> bool {
+  if matches!(row.spec.source, Source::Build(_)) {
+    return !ignore_all_source(&row.spec.update_ignore)
+      && check.latest.as_deref() == Some(failed);
+  }
+  if !failed.contains('=') {
+    return check.images.len() == 1
+      && check.latest.as_deref() == Some(failed);
+  }
+  failed.lines().all(|entry| {
+    entry.split_once('=').is_some_and(|(name, digest)| {
+      check
+        .images
+        .get(name)
+        .and_then(|image| image.latest.as_deref())
+        == Some(digest)
+    })
+  })
+}
+
 fn update(f: impl FnOnce(&mut UpdatesView)) {
   if let Ok(mut last) = LAST.write() {
     f(last.get_or_insert_with(UpdatesView::default));
