@@ -117,6 +117,12 @@ pub(crate) async fn send_with_retry(
   event: &Event,
   delays: &[u64],
 ) -> Result<(), SendErr> {
+  if state.is_safe_mode() {
+    return Err(SendErr::Permanent(ApiError::new(
+      ErrorCode::Conflict,
+      "安全接管模式已暂停外发通知",
+    )));
+  }
   let channels = channels(state).await.map_err(SendErr::Permanent)?;
   if channels.is_empty() {
     return Err(SendErr::Permanent(
@@ -185,7 +191,9 @@ pub fn spawn_retry(state: Arc<AppState>) {
   tokio::spawn(async move {
     loop {
       tokio::time::sleep(Duration::from_secs(15)).await;
-      if let Err(e) = retry_at(&state, db::now_ms()).await {
+      if !state.is_safe_mode()
+        && let Err(e) = retry_at(&state, db::now_ms()).await
+      {
         tracing::warn!("读取通知重试队列失败：{}", e.message);
       }
     }
@@ -276,6 +284,9 @@ pub async fn transition(
   key: &str,
   ok: bool,
 ) -> bool {
+  if state.is_safe_mode() {
+    return false;
+  }
   let key = key.to_string();
   state
     .db

@@ -220,7 +220,12 @@ async fn legacy_repo_adds_service_key_before_cleanup() {
   let show = || {
     let mut read_only = auth(false);
     read_only.perms = [Perm::Read].into_iter().collect();
-    list(State(state.clone()), read_only, Path("svc-a".into()))
+    list(
+      State(state.clone()),
+      read_only,
+      Path("svc-a".into()),
+      Query(ListQuery::default()),
+    )
   };
   let before = secret_count(&state).await;
   assert_eq!(
@@ -424,6 +429,87 @@ fn mock_backup_path(
   });
   state.hub.mock_safe_backup_agent("s1");
   state.hub.mock_safe_backup_agent("s2");
+}
+
+#[tokio::test]
+async fn live_diff_reopens_historical_target_with_legacy_repo_key() {
+  let state = test_state();
+  seed_servers(&state).await;
+  seed_service(&state, "svc-a", false).await;
+  let legacy = seed_legacy(&state).await;
+  let creds = ensure_service_creds(&state, "svc-a").await.unwrap();
+  let mut attempted_current = false;
+  let ready = Arc::new(AtomicBool::new(false));
+  let deployed = ready.clone();
+  state.hub.mock_agent_with_backup(
+    "s2", false, true, false,
+    move |op| match op {
+      AgentOp::ProjectStatus { .. } => Ok(json!([])),
+      AgentOp::ProjectUp(up) => {
+        assert!(up.compose.contains("svc-a:"));
+        deployed.store(true, Ordering::Release);
+        Ok(json!({"containers":[{"name":"rest-server","service":"rest-server","state":"running"}], "images":[]}))
+      }
+      _ => panic!("预览不应修改备份仓库"),
+    },
+  );
+  state.hub.mock_agent_with_backup(
+    "s1", false, true, false,
+    move |op| match op {
+      AgentOp::Probe { .. } => Ok(json!([true])),
+      AgentOp::Restic(job) => {
+        assert!(ready.load(Ordering::Acquire));
+        assert!(matches!(job.action, ResticAction::DiffLocal { .. }));
+        assert!(matches!(job.repo, ResticRepo::Rest { user, password, .. }
+          if user == "svc-a" && password.0 == creds.http));
+        if !attempted_current {
+          assert!(job.password.0 == creds.key);
+          attempted_current = true;
+          return Err(ApiError::new(ErrorCode::Forbidden, "仓库口令不匹配"));
+        }
+        assert!(job.password.0 == legacy);
+        Ok(json!({
+          "service": "svc-a", "mode": "live", "base": "", "target": "abcdef01",
+          "summary": wharf_api_types::backup::BackupDiffSummary::default(),
+          "entries": [], "truncated": false,
+        }))
+      }
+      _ => panic!("预览不应停服或恢复"),
+    },
+  );
+  state.hub.mock_safe_backup_agent("s1");
+  state.hub.mock_safe_backup_agent("s2");
+  state.hub.enable_mock_backup_v2("s1");
+  let mut read_only = auth(false);
+  read_only.perms = [Perm::Read].into_iter().collect();
+  let result = browse::diff(
+    State(state.clone()),
+    read_only,
+    Path("svc-a".into()),
+    Query(serde_json::from_value(json!({"from": "s2"})).unwrap()),
+  )
+  .await
+  .map_err(|e| e.0)
+  .unwrap();
+  assert_eq!(result.target, "abcdef01");
+}
+
+#[test]
+fn backup_browse_timeouts_cover_sequential_restic_calls() {
+  assert!(
+    restic_call_timeout(&ResticAction::ExtractPrepare {
+      snapshot: "latest".into(),
+      path: "file".into(),
+      max_bytes: 1,
+    }) > Duration::from_secs(180 + 300)
+  );
+  assert!(
+    restic_call_timeout(&ResticAction::DiffSnapshots {
+      base: "abcdef01".into(),
+      target: "latest".into(),
+      limit: 0,
+    }) > Duration::from_secs(3 * 180)
+  );
 }
 
 #[tokio::test]
@@ -663,11 +749,15 @@ async fn backup_list_returns_historical_snapshot_target_when_disabled()
       "time": "2026-01-01T00:00:00Z", "paths": ["/srv/svc-a"]
     }]))
   });
-  let Json(view) =
-    list(State(state), auth(true), Path("svc-a".into()))
-      .await
-      .map_err(|e| e.0)
-      .unwrap();
+  let Json(view) = list(
+    State(state),
+    auth(true),
+    Path("svc-a".into()),
+    Query(ListQuery::default()),
+  )
+  .await
+  .map_err(|e| e.0)
+  .unwrap();
   assert_eq!(view.target, None);
   assert_eq!(view.snapshot_target.as_deref(), Some("s2"));
   assert_eq!(view.snapshots[0].id, "abcd1234");
@@ -721,13 +811,18 @@ async fn backup_records_ok_and_prunes_even_when_restart_fails() {
 }
 
 #[tokio::test]
-async fn unlock_service_runs_local_and_respects_backup_lock() {
+async fn unlock_supports_explicit_target_and_returns_object() {
   let state = test_state();
   seed_servers(&state).await;
   seed_service(&state, "svc-a", false).await;
   let legacy = seed_legacy(&state).await;
+  state.db.call(|c| db::apply_write(c, &db::Write::Upsert {
+    kind: "server".into(), name: "s3".into(),
+    spec: json!({"private_addr": {"ip":"100.64.0.3", "network":"lan"}}),
+    meta: json!({}),
+  })).await.unwrap();
   state.hub.mock_agent_with_backup(
-    "s2",
+    "s3",
     false,
     true,
     false,
@@ -744,13 +839,16 @@ async fn unlock_service_runs_local_and_respects_backup_lock() {
       Ok(json!(null))
     },
   );
-  state.hub.mock_safe_backup_agent("s2");
+  state.hub.mock_safe_backup_agent("s3");
   let call = || {
     unlock(
       State(state.clone()),
       auth(true),
       Path("svc-a".into()),
-      None,
+      Some(Json(UnlockRequest {
+        target: Some("s3".into()),
+        stale_only: false,
+      })),
     )
   };
   let guard = state
@@ -759,7 +857,11 @@ async fn unlock_service_runs_local_and_respects_backup_lock() {
     .unwrap();
   assert_eq!(call().await.err().unwrap().0.code, ErrorCode::Busy);
   drop(guard);
-  let _ = call().await.map_err(|e| e.0).unwrap();
+  let result = call().await.map_err(|e| e.0).unwrap().0;
+  assert_eq!(
+    serde_json::to_value(result).unwrap(),
+    json!({"target":"s3","stale_only":false,"unlocked":true})
+  );
 }
 
 #[tokio::test]
@@ -799,4 +901,62 @@ async fn deploy_server_rejects_empty_containers() {
   .await
   .unwrap_err();
   assert_eq!(err.code, ErrorCode::AgentFailed);
+}
+
+#[tokio::test]
+async fn backup_v2_blocks_old_agent_and_starts_retention_without_pruning()
+ {
+  let state = test_state();
+  seed_servers(&state).await;
+  seed_service(&state, "svc-a", true).await;
+  state
+    .hub
+    .mock_agent("s2", false, |_| panic!("旧 agent 不应收到新动作"));
+  let snap = snapshot::load(&state.db).await.unwrap();
+  let cancel = CancellationToken::new();
+  let err = local_call::<serde_json::Value>(
+    &state,
+    &snap,
+    ("s2", "svc-a"),
+    "",
+    ResticAction::Ls {
+      snapshot: "latest".into(),
+      path: String::new(),
+      recursive: false,
+      limit: 10,
+    },
+    &cancel,
+  )
+  .await
+  .unwrap_err();
+  assert_eq!(err.code, ErrorCode::Conflict);
+  assert_eq!(err.suggest, ["wharf upgrade"]);
+  let progress: ProgressFn = Arc::new(|_| {});
+  assert!(matches!(
+    prune_action(&state, "svc-a", "s2", "s2", None, &progress)
+      .await
+      .unwrap(),
+    Some(ResticAction::Prune)
+  ));
+  state.hub.enable_mock_backup_v2("s2");
+  let retention = Some(BackupRetention {
+    daily: 1,
+    weekly: 0,
+    monthly: 0,
+  });
+  assert!(
+    prune_action(&state, "svc-a", "s2", "s2", retention, &progress)
+      .await
+      .unwrap()
+      .is_none()
+  );
+  assert!(matches!(
+    prune_action(&state, "svc-a", "s2", "s2", retention, &progress)
+      .await
+      .unwrap(),
+    Some(ResticAction::PruneV2 {
+      protect_before: Some(_),
+      ..
+    })
+  ));
 }

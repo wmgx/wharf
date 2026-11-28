@@ -18,6 +18,8 @@ pub(super) fn state() -> Arc<AppState> {
     listen_port: 7700,
     data_dir: Default::default(),
     downloads: Default::default(),
+    safe_mode: Default::default(),
+    resumed_at: Default::default(),
     edge_syncing: Default::default(),
   })
 }

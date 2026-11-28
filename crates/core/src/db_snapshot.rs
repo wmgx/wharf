@@ -719,6 +719,7 @@ pub async fn delete_api(
 }
 
 mod offline;
+pub(crate) use offline::lock_sqlite;
 pub use offline::{OfflineCommand, offline, process_lock};
 
 #[cfg(test)]

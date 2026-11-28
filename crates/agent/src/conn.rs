@@ -277,6 +277,7 @@ async fn handshake(
     migrate_v2: true,
     data_ops: true,
     safe_backup: true,
+    backup_v2: true,
     build_v2: true,
     deploy_v2: true,
     safe_rollback: true,

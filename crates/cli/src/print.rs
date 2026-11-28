@@ -408,6 +408,9 @@ pub fn service_state(s: &ServiceView) -> String {
 }
 
 pub fn status(s: &Status) {
+  if s.safe_mode {
+    println!("安全接管模式开启，后台自动操作已暂停");
+  }
   println!("服务器");
   for srv in &s.servers {
     let state = if !srv.joined {
@@ -522,6 +525,67 @@ pub fn core_snapshots(v: &wharf_api_types::view::CoreSnapshotsView) {
   println!("{}", v.restore_hint);
 }
 
+pub fn backup_policy(
+  r: wharf_api_types::backup::BackupRetention,
+  excludes: &[String],
+) {
+  println!(
+    "保留 {} 日 / {} 周 / {} 月",
+    r.daily, r.weekly, r.monthly
+  );
+  if !excludes.is_empty() {
+    println!("排除：{}", excludes.join("、"));
+  }
+}
+
+pub fn backup_ls(v: &wharf_api_types::backup::BackupLsView) {
+  for e in &v.entries {
+    let suffix = match e.kind.as_str() {
+      "dir" => "/",
+      "symlink" => "@",
+      _ => "",
+    };
+    println!("{:>12}  {}{suffix}", e.size, e.path);
+  }
+  if v.truncated {
+    println!("结果已截断");
+  }
+}
+
+pub fn backup_diff(v: &wharf_api_types::backup::BackupDiffView) {
+  let s = &v.summary;
+  println!(
+    "新增 {} 项（{} 字节），移除 {} 项（{} 字节），覆盖 {} 项（{} → {} 字节）",
+    s.added,
+    s.added_bytes,
+    s.removed,
+    s.removed_bytes,
+    s.modified,
+    s.modified_before_bytes,
+    s.modified_after_bytes
+  );
+  if s.removed_excluded_bytes > 0 {
+    println!(
+      "其中 {} 字节命中备份排除规则，恢复后不会保留",
+      s.removed_excluded_bytes
+    );
+  }
+  for e in &v.entries {
+    let sign = match e.status.as_str() {
+      "added" => '+',
+      "removed" => '-',
+      _ => '~',
+    };
+    println!("{sign} {}", e.path);
+  }
+  if v.truncated {
+    println!("结果已截断");
+  }
+  if let Some(note) = &v.note {
+    println!("{note}");
+  }
+}
+
 pub fn backups(v: &BackupsView) {
   let local = |t: &chrono::DateTime<chrono::Utc>| {
     t.with_timezone(&chrono::Local)
@@ -529,7 +593,10 @@ pub fn backups(v: &BackupsView) {
       .to_string()
   };
   match &v.target {
-    Some(t) => println!("{}：每天备份到 {t}", v.service),
+    Some(t) => {
+      println!("{}：每天备份到 {t}", v.service);
+      backup_policy(v.retention.unwrap_or_default(), &v.exclude);
+    }
     None => {
       println!("{}：没有开启自动备份", v.service);
       if let Some(t) = &v.snapshot_target {
@@ -544,10 +611,15 @@ pub fn backups(v: &BackupsView) {
     println!("快照：");
     for s in &v.snapshots {
       println!(
-        "  {}  {}  来自 {}",
+        "  {}  {}  来自 {}{}{}",
         s.short_id,
         local(&s.time),
-        s.hostname
+        s.hostname,
+        if s.keep { "  [留底]" } else { "" },
+        s.note
+          .as_ref()
+          .map(|n| format!("  {n}"))
+          .unwrap_or_default()
       );
     }
   }
@@ -764,6 +836,11 @@ pub use link::rotate_link;
 pub fn core_backup(v: &serde_json::Value) {
   if let Some(to) = v["to"].as_str() {
     println!("控制面每天备份到 {to}");
+    backup_policy(
+      serde_json::from_value(v["retention"].clone())
+        .unwrap_or_default(),
+      &[],
+    );
     if v["repo_empty"].as_bool() == Some(true) {
       println!("目标仓库无快照");
     }
@@ -787,7 +864,7 @@ pub fn core_backup(v: &serde_json::Value) {
   }
   if let Some(cmd) = v["restore_command"].as_str() {
     println!(
-      "\n控制面整个丢了时：新机器先加入同一个内网，执行下面的命令并输入登录密码，文件会恢复到 /var/lib/wharf-core，再启动控制面："
+      "\n控制面整个丢了时：新机器先加入同一个内网，执行下面的命令并输入登录密码，文件会恢复到 /var/lib/wharf-core，再用 --safe-mode 启动控制面："
     );
     println!("{cmd}");
   }

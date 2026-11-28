@@ -10,6 +10,7 @@
 pub mod access_logs;
 pub mod adopt_data;
 pub mod agent;
+pub mod backup;
 pub mod build;
 pub mod bundle;
 pub mod compose;
