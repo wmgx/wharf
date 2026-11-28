@@ -364,6 +364,7 @@ pub fn confirm_details(plan: &Plan, missing: &[&String]) -> Value {
     .map(|item| serde_json::json!({
       "id": item.id, "address": item.address, "layer": item.layer,
       "action": item.action, "impacts": item.impacts, "reason": item.reason,
+      "host_access": item.host_access,
     })).collect();
   serde_json::json!({
     "plan_id": plan.plan_id, "expires_at": plan.expires_at, "needs_confirm": missing,

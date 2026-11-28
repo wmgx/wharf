@@ -1011,7 +1011,7 @@ async fn plan_output(
     if j && let Some(detected) = detected {
       let mut value =
         serde_json::to_value(&plan).map_err(anyhow::Error::from)?;
-      value["detected"] = json!(detected);
+      value["detected"] = detected.summary();
       print::json(&value);
     } else {
       out(j, &plan, print::plan);
@@ -1095,7 +1095,7 @@ async fn apply(
       Some((plan, detected)) => {
         let mut value = json!({"plan": plan, "run": run});
         if let Some(detected) = detected {
-          value["detected"] = json!(detected);
+          value["detected"] = detected.summary();
         }
         print::json(&value);
       }
@@ -1563,7 +1563,14 @@ async fn server(
       Ok(())
     }
     ServerCmd::List => {
-      let v: Vec<ServerView> = c.get("/api/servers").await?;
+      let mut v: Vec<ServerView> = c.get("/api/servers").await?;
+      for server in &mut v {
+        wharf_api_types::filter_note(
+          &mut server.note,
+          &mut server.has_sealed_note,
+          false,
+        );
+      }
       out(j, &v, |v| {
         for s in v {
           println!(
@@ -2213,6 +2220,7 @@ async fn upgrade(
   j: bool,
 ) -> CliResult<()> {
   let mut data = json!({"pre_agents": null, "core": null, "post_agents": null, "cli": null});
+  let mut post_agents_failed = false;
   let mut warnings = Vec::new();
   let result: CliResult<()> = async {
     let pre = upgrade_agents(c, j).await;
@@ -2239,6 +2247,7 @@ async fn upgrade(
     let (run, passed) = upgrade_agents(c, j).await?;
     data["post_agents"] = run;
     if !passed {
+      post_agents_failed = true;
       if !j {
         return Err(CliError::Exit(4));
       }
@@ -2261,7 +2270,11 @@ async fn upgrade(
       Ok(())
     }
     Err(CliError::Api(error)) => {
-      let code = error.code.exit_code();
+      let code = if post_agents_failed {
+        4
+      } else {
+        error.code.exit_code()
+      };
       data["error"] = json!(error);
       print::json(&data);
       Err(CliError::Exit(code))
@@ -2617,12 +2630,19 @@ async fn service(
       Ok(())
     }
     ServiceCmd::List { brief } => {
-      let v: Vec<ServiceView> = c
+      let mut v: Vec<ServiceView> = c
         .get(
           crate::plan_cmd::brief_path("/api/services", brief)
             .as_ref(),
         )
         .await?;
+      for service in &mut v {
+        wharf_api_types::filter_note(
+          &mut service.note,
+          &mut service.has_sealed_note,
+          false,
+        );
+      }
       out(j, &v, |v| {
         for s in v {
           println!(
@@ -3073,7 +3093,7 @@ async fn service(
       ops,
       apply,
     } => {
-      let existing = match c
+      let mut existing = match c
         .get::<ServiceView>(&format!("/api/services/{}", seg(&name)))
         .await
       {
@@ -3083,7 +3103,7 @@ async fn service(
         }
         Err(e) => return Err(e),
       };
-      if let Some(view) = &existing
+      if let Some(view) = &mut existing
         && !(image.is_some()
           || compose.is_some()
           || from_run.is_some()
@@ -3109,6 +3129,11 @@ async fn service(
           || ops.init_timeout.is_some())
       {
         apply.check_read_only()?;
+        wharf_api_types::filter_note(
+          &mut view.note,
+          &mut view.has_sealed_note,
+          false,
+        );
         out(j, view, pretty);
         return Ok(());
       }
@@ -3391,6 +3416,7 @@ async fn service(
         .await?
         .spec;
       if !all && !major && !clear {
+        apply.check_read_only()?;
         out(j, &spec.update_ignore, |rules| {
           for rule in rules {
             println!(
@@ -3642,6 +3668,7 @@ async fn service(
         .await?
         .spec;
       let Some(path) = path else {
+        apply.check_read_only()?;
         let list: Vec<Value> = spec
           .files
           .iter()
@@ -3696,6 +3723,7 @@ async fn service(
           spec.files.push(next);
         }
       } else {
+        apply.check_read_only()?;
         let f = spec
           .files
           .iter()
@@ -3989,6 +4017,7 @@ async fn gateway(
         && rm.is_empty()
         && !off
       {
+        apply.check_read_only()?;
         out(j, &spec.trusted_proxies, pretty);
         return Ok(());
       }
@@ -4466,12 +4495,12 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
       apply,
     } => {
       let host = wharf_api_types::normalize_host(&hostname);
-      let old = c
+      let mut old = c
         .get::<Vec<RouteView>>("/api/routes")
         .await?
         .into_iter()
         .find(|r| r.spec.hostname == host);
-      if let Some(old) = &old
+      if let Some(old) = &mut old
         && !(service.is_some()
           || upstream.is_some()
           || redirect.is_some()
@@ -4495,6 +4524,11 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
           || protection.has_edits())
       {
         apply.check_read_only()?;
+        wharf_api_types::filter_note(
+          &mut old.note,
+          &mut old.has_sealed_note,
+          false,
+        );
         out(j, old, pretty);
         return Ok(());
       }
@@ -6224,3 +6258,7 @@ fn gateway_add_unset_and_service_port_merge() {
     ["http", "metrics"]
   );
 }
+
+#[cfg(test)]
+#[path = "commands/review_tests.rs"]
+mod review_tests;

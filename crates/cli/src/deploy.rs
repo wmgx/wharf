@@ -279,6 +279,16 @@ pub struct DetectResult {
   dockerfile: String,
 }
 
+impl DetectResult {
+  pub(crate) fn summary(&self) -> serde_json::Value {
+    let mut summary = serde_json::json!(self);
+    if let Some(fields) = summary.as_object_mut() {
+      fields.remove("dockerfile");
+    }
+    summary
+  }
+}
+
 struct LocalSource {
   root: std::path::PathBuf,
   files: Vec<std::path::PathBuf>,

@@ -150,16 +150,23 @@ fn effect(
   }
   if matches!(
     command,
-    "server watch-unit" | "server host-units" | "server host-logs"
+    "exec"
+      | "server apt"
+      | "server watch-unit"
+      | "server host-units"
+      | "server host-logs"
   ) {
-    let effect = if command == "server watch-unit" {
+    let effect = if matches!(
+      command,
+      "exec" | "server apt" | "server watch-unit"
+    ) {
       "direct"
     } else {
       "read"
     };
     return (effect, &["host"]);
   }
-  if matches!(command, "server apt" | "gateway rotate-link") {
+  if command == "gateway rotate-link" {
     return ("direct", &["apply"]);
   }
   if command == "egress presets" {
@@ -171,15 +178,8 @@ fn effect(
     return ("plan", &["plan"]);
   }
   let leaf = cmd.get_name();
-  if matches!(command, "exec" | "connect" | "server exec") {
-    return (
-      "direct",
-      if command == "server exec" {
-        &["host"]
-      } else {
-        &["exec"]
-      },
-    );
+  if command == "connect" {
+    return ("direct", &["exec"]);
   }
   if matches!(
     command,
@@ -302,7 +302,11 @@ pub fn usable(prefix: &[String], me: &Value) -> Value {
       if command["read_when_no_args"] == true
         && !matches!(
           command["command"].as_str(),
-          Some("wharf token set" | "wharf server watch-unit")
+          Some(
+            "wharf token set"
+              | "wharf server watch-unit"
+              | "wharf server baseline"
+          )
         )
         && has(&json!("read"))
       {
@@ -344,6 +348,37 @@ pub fn commands(prefix: &[String]) -> Value {
 
 #[cfg(test)]
 mod tests {
+  #[test]
+  fn usable_respects_host_and_baseline_permissions() {
+    use serde_json::json;
+
+    for (perms, host, baseline) in [
+      (json!(["read", "exec", "apply"]), false, false),
+      (json!(["read", "host"]), true, false),
+      (json!(["read"]), false, false),
+      (json!(["plan"]), false, true),
+    ] {
+      let result = super::usable(&[], &json!({"perms": perms}));
+      let commands = result["commands"].as_array().unwrap();
+      for (name, expected) in [
+        ("wharf exec", host),
+        ("wharf server apt", host),
+        ("wharf server baseline", baseline),
+      ] {
+        let command = commands.iter().find(|c| c["command"] == name);
+        assert_eq!(command.is_some(), expected, "{name}");
+        if let Some(command) = command {
+          let permission = if name.ends_with("baseline") {
+            "plan"
+          } else {
+            "host"
+          };
+          assert_eq!(command["perms"], json!([permission]));
+        }
+      }
+    }
+  }
+
   #[test]
   fn lists_leaf_commands() {
     let v = super::commands(&[]);

@@ -28,7 +28,7 @@ Wharf 是一个人用的多服务器管理系统。你通过 `wharf` 命令行�
 6. **不打印、不写入 token 和密钥。** 服务要用的密码放进密钥（`wharf secret`），环境变量里用 `[[NAME]]` 引用。`[[url:NAME]]`、`[[b64:NAME]]`、`[[json:NAME]]` 用于编码，`[[FILE:NAME]]` 用于服务里的只读文件挂载，引用会替换为容器内路径。
 7. **直接生效的命令先预览。** `wharf task add/rm`、`wharf secret set/rm`、`wharf alert set`、`wharf token set`、`wharf service note`、`wharf server note`、`wharf route note` 不走计划，先加 `--dry-run` 看会改什么。
    修改时加 `--reason "<为什么>"`，生成计划时可以加 `--note "<备注>"`，都会记进操作记录。
-8. **宿主机命令要用户同意。** `wharf exec <服务器> -- '<命令>'`、`wharf server prune`、`wharf server baseline --apply` 这类直接动机器的操作，先说明要做什么。
+8. **宿主机命令要用户同意。** `wharf exec <服务器> -- '<命令>'`、`wharf server prune`、`wharf server baseline <服务器> --apply` 这类直接动机器的操作，先说明要做什么。
 
 退出码：`0` 成功，`1` 出错，`2` 仅用于 `ConfirmRequired`，`3` 计划已过期（重新 plan），`4` 部分失败。
 
@@ -213,6 +213,6 @@ wharf service import <服务器> --project <compose 项目名> --json   # 或 --
 - 想看完整期望状态：`wharf export`；只改一个服务时 `wharf export --service <服务> -o x.toml`，改完 `wharf validate x.toml`（不连控制面），再 `wharf plan -f x.toml --partial`（只动文件里写到的对象；不加 `--partial` 会删掉文件里没写的）；
 - 想知道最近谁做了什么：`wharf audit --json`。
 
-`wharf service monitor <服务>`、`wharf service auto-update <服务>` 和 `wharf server watch-unit <服务器> <unit>` 无修改参数时只读查看。开启用 `--on`，关闭用 `--off`。清除单个配置用 `--unset-<字段>`，例如 `wharf service monitor <服务> --unset-expect`。
+`wharf service monitor <服务>`、`wharf service auto-update <服务>` 和 `wharf server watch-unit <服务器> <unit>` 无修改参数时只读查看。开启时加 `--on`，确认后可加 `--apply` 执行。关闭用 `--off`。例如，`wharf service auto-update <服务> --on --apply` 会开启自动更新。清除单个配置用 `--unset-<字段>`，例如 `wharf service monitor <服务> --unset-expect`。
 
 定时任务需要管道、重定向或展开变量时，把整段 shell 脚本作为 `--` 后的单个参数。多参数写法按参数边界转义，例如 `-- psql -c 'SELECT 1'`。网址触发用 `--no-hook` 关闭，用 `--rotate-token` 轮换网址触发或外部报到口令。

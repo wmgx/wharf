@@ -100,13 +100,7 @@ pub async fn list_plans(
       if services.as_ref().is_some_and(|services| plan.items.is_empty() || token_scope::check_plan_scope(services, &plan, &route_effects).is_err()) {
         continue;
       }
-      let status = if status == "applied" {
-        PlanStatus::Applied
-      } else if plan.expires_at <= now {
-        PlanStatus::Expired
-      } else {
-        PlanStatus::Pending
-      };
+      let status = super::persisted_plan_status(&status, &plan, now);
       let mut seen = BTreeSet::new();
       let addresses = plan.items.iter().filter_map(|item| {
         seen.insert(&item.address).then_some(item.address.clone())
@@ -418,12 +412,17 @@ async fn plan_list_show_and_confirm_details() {
   let mut plan = serde_json::from_value::<Plan>(json!({
     "plan_id":"p_fixture", "status":"pending", "created_at":now, "expires_at": now + chrono::Duration::minutes(5),
     "base_versions":{}, "items":[{"id":1,"address":"service/app","layer":"config",
-      "action":"delete","reason":"清理数据","impacts":["remove"]}],
+      "action":"delete","reason":"清理数据","impacts":["remove"],"host_access":["宿主机数据"]}],
     "needs_confirm":["service/app"],
   })).unwrap();
   let visible = plan.clone();
   state.db.call(move |c| {
-    for (id, service) in [("p_fixture", "app"), ("p_other", "other")] {
+    for (id, service, expires_at) in [
+      ("p_fixture", "app", now + chrono::Duration::minutes(5)),
+      ("p_other", "other", now + chrono::Duration::minutes(5)),
+      ("p_expired", "app", now - chrono::Duration::minutes(5)),
+    ] {
+      plan.expires_at = expires_at;
       plan.plan_id = id.into();
       plan.items[0].address = format!("service/{service}");
       c.execute("INSERT INTO plans (id,status,body,steps,writes,created_at,expires_at)
@@ -451,4 +450,17 @@ async fn plan_list_show_and_confirm_details() {
     &visible.needs_confirm.iter().collect::<Vec<_>>(),
   );
   assert_eq!(details["plan_id"], "p_fixture");
+  assert_eq!(
+    details["items"][0]["host_access"],
+    json!(["宿主机数据"])
+  );
+
+  use wharf_api_types::plan::PlanStatus;
+  let plans = list_plans(&state, &auth, false, 10).await.unwrap();
+  let expired =
+    plans.iter().find(|p| p.plan_id == "p_expired").unwrap();
+  assert_eq!(expired.status, PlanStatus::Expired);
+  let shown =
+    load_plan_for(&state, &auth, "p_expired").await.unwrap();
+  assert_eq!(shown.status, expired.status);
 }

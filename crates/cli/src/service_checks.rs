@@ -129,6 +129,7 @@ pub async fn log(
       flags
     }
     None => {
+      flags.check_read_only()?;
       let rows: Vec<_> = spec
         .log_alerts
         .iter()

@@ -200,14 +200,27 @@ async fn stored_plan(
   })?;
   let mut body: StoredPlanBody =
     serde_json::from_str(&body).map_err(json_err)?;
-  if status == "applied" {
-    body.plan.status = PlanStatus::Applied;
-  }
+  body.plan.status =
+    persisted_plan_status(&status, &body.plan, Utc::now());
   Ok(StoredPlan {
     body,
     steps: serde_json::from_str(&steps).map_err(json_err)?,
     writes: serde_json::from_str(&writes).map_err(json_err)?,
   })
+}
+
+fn persisted_plan_status(
+  status: &str,
+  plan: &Plan,
+  now: chrono::DateTime<Utc>,
+) -> PlanStatus {
+  if status == "applied" {
+    PlanStatus::Applied
+  } else if plan.expires_at <= now {
+    PlanStatus::Expired
+  } else {
+    PlanStatus::Pending
+  }
 }
 
 mod confirm;
@@ -294,7 +307,7 @@ pub(crate) async fn start_with_actor(
         .suggest("wharf plan"),
     );
   }
-  if plan.expires_at < Utc::now() {
+  if plan.expires_at <= Utc::now() {
     return Err(
       ApiError::new(
         ErrorCode::PlanStale,

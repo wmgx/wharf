@@ -80,6 +80,7 @@ pub(super) async fn timeouts(
     && idle.is_none()
     && grace_period.is_none()
   {
+    apply.check_read_only()?;
     out(
       j,
       &serde_json::json!({
