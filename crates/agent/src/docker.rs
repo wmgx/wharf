@@ -390,7 +390,7 @@ impl Docker {
     &self,
     project: &str,
     compose: &str,
-    env: Option<&BTreeMap<String, String>>,
+    env: Option<&str>,
     ctx: &Ctx,
   ) -> Result<Vec<String>, ApiError> {
     let dir = self.project_dir(project);
@@ -398,14 +398,11 @@ impl Docker {
     let pending = TempCompose(dir.join("compose.yaml.next"));
     write_private(&pending.0, compose)?;
     let pending_env = env
-      .map(|values| {
+      .map(|content| {
         let dir = tempfile::tempdir().map_err(|_| {
           ApiError::internal("无法建立私有 Compose 校验目录")
         })?;
-        write_private(
-          &dir.path().join("project.env"),
-          &dotenv(values)?,
-        )?;
+        write_private(&dir.path().join("project.env"), content)?;
         Ok::<_, ApiError>(dir)
       })
       .transpose()?;

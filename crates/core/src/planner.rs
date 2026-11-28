@@ -2234,7 +2234,6 @@ fn service_items(
         format!("在 {server} 上更新 {name} 的配置文件"),
         Step::ServiceUp {
           images: Default::default(),
-
           service: name.clone(),
           instance_id: Some(svc.instance_id.clone()),
           expect: Some(hash),
@@ -2901,6 +2900,7 @@ async fn choose_live_limits(
       || old_spec.init_timeout_secs != row.spec.init_timeout_secs
       || old_spec.pull_policy != row.spec.pull_policy
       || old_spec.volumes != row.spec.volumes
+      || old_spec.files != row.spec.files
       || old_spec.group_add != row.spec.group_add
       || !crate::live_limits::same_source_inputs(
         &old_spec.source,
@@ -2918,7 +2918,10 @@ async fn choose_live_limits(
     else {
       continue;
     };
-    if old_hash != applied.hash {
+    if old_hash != applied.hash
+      || crate::compose_env::inputs(&previous, net, service, &values)?
+        != crate::compose_env::inputs(desired, net, service, &values)?
+    {
       continue;
     }
     let (new, _) =

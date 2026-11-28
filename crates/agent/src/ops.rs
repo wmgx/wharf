@@ -904,7 +904,11 @@ impl Ops {
       .images_for_compose(
         &up.project,
         &up.compose,
-        up.project_env.as_ref(),
+        up.project_env
+          .as_ref()
+          .map(crate::docker::dotenv)
+          .transpose()?
+          .as_deref(),
         ctx,
       )
       .await?;
