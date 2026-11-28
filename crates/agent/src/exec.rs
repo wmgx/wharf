@@ -7,7 +7,7 @@
 use std::{path::Path, process::Stdio, sync::Arc, time::Duration};
 
 use tokio::{
-  io::{AsyncBufReadExt, AsyncRead, BufReader},
+  io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader},
   process::Command,
 };
 use tokio_util::sync::CancellationToken;
@@ -224,6 +224,34 @@ impl Cmd {
       }
     }
     let _ = child.wait().await;
+  }
+
+  pub(crate) async fn stdout_bounded(
+    self,
+    ctx: &Ctx,
+    limit: u64,
+  ) -> Option<Vec<u8>> {
+    let mut child =
+      self.command().stderr(Stdio::null()).spawn().ok()?;
+    let pid = child.id();
+    let mut stdout = child.stdout.take()?.take(limit + 1);
+    let mut bytes = Vec::new();
+    let read = async {
+      stdout.read_to_end(&mut bytes).await.ok()?;
+      if bytes.len() as u64 > limit {
+        return None;
+      }
+      child.wait().await.ok()?.success().then_some(())
+    };
+    let result = tokio::select! {
+      result = read => result,
+      _ = tokio::time::sleep(self.timeout) => None,
+      _ = ctx.cancel.cancelled() => None,
+    };
+    if result.is_none() {
+      kill_group(pid, &mut child).await;
+    }
+    result.map(|()| bytes)
   }
 
   pub async fn run(mut self, ctx: &Ctx) -> Result<Output, ApiError> {

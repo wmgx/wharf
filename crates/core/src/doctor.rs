@@ -2,7 +2,9 @@
 //! 域名解析 → HTTPS（从控制面访问）→ 网关容器 → 网关所在机器连上游 → 服务容器。
 //! 每层独立检查，第一个不通的就是要先看的地方。
 
-use std::{net::IpAddr, sync::Arc, time::Duration};
+use std::{
+  collections::BTreeSet, net::IpAddr, sync::Arc, time::Duration,
+};
 
 use axum::{
   Json,
@@ -12,8 +14,12 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
-  agent::{AgentOp, ProbeTarget},
-  spec::GatewayKind,
+  ApiError, ErrorCode,
+  agent::{AgentOp, HttpCheckResult, ProbeTarget},
+  spec::{
+    GatewayKind, GatewaySpec, GatewayTls, MonitorSpec, Region,
+    RouteSpec, SsoMode,
+  },
   view::{
     CheckStatus, DoctorCheck, DoctorReport, Perm, RouteDiagnosis,
   },
@@ -27,8 +33,12 @@ use crate::{
   snapshot::{self, Snapshot},
   state::AppState,
   views::{LiveMap, live_states, route_view_with_upstream_error},
-  world::gateway_project,
+  world::{World, gateway_project},
 };
+
+mod special;
+#[cfg(test)]
+mod tests;
 
 const DNS_TIMEOUT: Duration = Duration::from_secs(5);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -36,30 +46,58 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Deserialize)]
 pub struct DoctorQuery {
-  /// 只查这个域名。
   pub host: Option<String>,
+  pub service: Option<String>,
+  pub server: Option<String>,
 }
 
-/// `GET /api/doctor[?host=]`：现查。查全部域名时顺便更新后台检查的结果。
+#[derive(PartialEq, Eq)]
+pub(crate) enum DoctorScope {
+  All,
+  Host(String),
+  Service(String),
+  Server(String),
+}
+
+impl DoctorQuery {
+  fn scope(self) -> Result<DoctorScope, ApiError> {
+    match (self.host, self.service, self.server) {
+      (None, None, None) => Ok(DoctorScope::All),
+      (Some(host), None, None) => Ok(DoctorScope::Host(normalize_host(&host))),
+      (None, Some(service), None) => Ok(DoctorScope::Service(service)),
+      (None, None, Some(server)) => Ok(DoctorScope::Server(server)),
+      _ => Err(ApiError::invalid("host、service、server 一次只能指定一个")
+        .with_hint("例如 wharf doctor <域名>、wharf doctor --service <服务> 或 wharf doctor --server <服务器>")),
+    }
+  }
+}
+
+fn normalize_host(host: &str) -> String {
+  host.trim().trim_end_matches('.').to_ascii_lowercase()
+}
+
 pub async fn doctor(
   State(s): State<Arc<AppState>>,
   auth: Auth,
   Query(q): Query<DoctorQuery>,
 ) -> ApiResult<DoctorReport> {
   auth.require(Perm::Read)?;
-  if auth.services.is_some() {
-    let report =
-      run(&s, q.host.as_deref(), true, Some(&auth)).await?;
+  let scope = q.scope()?;
+  if scope == DoctorScope::All && auth.services.is_none() {
+    let (mut report, vendors) = tokio::try_join!(
+      run(&s, &scope, true, None),
+      crate::vendor_checks::checks(&s),
+    )?;
+    report.vendors = vendors;
+    crate::vendor_checks::record(&s, &report.vendors).await;
+    crate::probe::observe_routes(&s, &report.routes).await;
+    remember(report.clone());
     return Ok(Json(report));
   }
-  let (report, vendors) = tokio::try_join!(
-    run(&s, q.host.as_deref(), true, None),
-    crate::vendor_checks::checks(&s)
-  )?;
-  let report = DoctorReport { vendors, ..report };
-  if q.host.is_none() {
-    crate::vendor_checks::record(&s, &report.vendors).await;
-    remember(report.clone());
+  let report = run(&s, &scope, true, Some(&auth)).await?;
+  if matches!(scope, DoctorScope::Host(_) | DoctorScope::Service(_)) {
+    crate::probe::observe_routes(&s, &report.routes).await;
+    remember_routes(&report.routes);
   }
   Ok(Json(report))
 }
@@ -71,6 +109,24 @@ static LAST: std::sync::RwLock<Option<DoctorReport>> =
 fn remember(report: DoctorReport) {
   if let Ok(mut last) = LAST.write() {
     *last = Some(report);
+  }
+}
+
+fn remember_routes(updated: &[RouteDiagnosis]) {
+  if let Ok(mut guard) = LAST.write()
+    && let Some(last) = guard.as_mut()
+  {
+    for route in updated {
+      if let Some(previous) = last
+        .routes
+        .iter_mut()
+        .find(|r| r.hostname == route.hostname)
+      {
+        *previous = route.clone();
+      } else {
+        last.routes.push(route.clone());
+      }
+    }
   }
 }
 
@@ -87,7 +143,7 @@ pub fn spawn(state: Arc<AppState>) {
   tokio::spawn(async move {
     tokio::time::sleep(FIRST_TICK).await;
     loop {
-      match run(&state, None, false, None).await {
+      match run(&state, &DoctorScope::All, false, None).await {
         Ok(report) => {
           crate::probe::observe(&state, &report).await;
           remember(report)
@@ -99,151 +155,279 @@ pub fn spawn(state: Arc<AppState>) {
   });
 }
 
-/// 逐层检查域名；`host` 为空时检查全部。
-pub async fn run(
-  s: &AppState,
-  host: Option<&str>,
-  manual: bool,
-  scoped: Option<&Auth>,
-) -> Result<DoctorReport, wharf_api_types::ApiError> {
-  let snap = snapshot::load(&s.db).await?;
-  let allowed = scoped.and_then(|auth| auth.services.as_ref());
-  if let (Some(host), Some(auth)) = (host, scoped) {
-    crate::token_scope::require_route_by_host(
-      auth,
-      &snap.world,
-      host,
-    )?;
-  }
-  if let Some(host) = host
-    && !snap.world.routes.contains_key(host)
-    && (scoped.is_some() || snap.world.edge_domain(host).is_none())
-  {
-    return Err(
-      wharf_api_types::ApiError::not_found(format!(
-        "没有域名 {host}"
-      ))
-      .suggest("wharf route ls"),
-    );
-  }
+#[derive(Default)]
+struct Selection {
+  hosts: Vec<String>,
+  edge: Vec<(String, String)>,
+  services: BTreeSet<String>,
+  gateways: BTreeSet<String>,
+  servers: BTreeSet<String>,
+}
+
+fn route_services(route: &RouteSpec) -> impl Iterator<Item = &str> {
+  (route.upstream.is_none()
+    && route.redirect.is_none()
+    && !route.service.is_empty())
+  .then_some(route.service.as_str())
+  .into_iter()
+  .chain(route.paths.iter().filter_map(|p| p.service.as_deref()))
+}
+
+fn selection(
+  snap: &Snapshot,
+  scope: &DoctorScope,
+  auth: Option<&Auth>,
+) -> Result<Selection, ApiError> {
+  let world = &snap.world;
+  let allowed = auth.and_then(|a| a.services.as_ref());
   let expired =
-    crate::share::expired(&snap.world, Utc::now().timestamp_millis());
-  if let Some(host) = host
-    && expired.iter().any(|h| h == host)
+    crate::share::expired(world, Utc::now().timestamp_millis());
+  let mut result = Selection::default();
+  match scope {
+    DoctorScope::All => {
+      result.services.extend(
+        world
+          .services
+          .keys()
+          .filter(|n| allowed.is_none_or(|a| a.contains(*n)))
+          .cloned(),
+      );
+      if allowed.is_none() {
+        result.servers.extend(world.servers.keys().cloned());
+        result.gateways.extend(world.gateways.keys().cloned());
+      }
+    }
+    DoctorScope::Host(host) => {
+      if let Some(auth) = auth {
+        crate::token_scope::require_route_by_host(auth, world, host)?;
+      }
+      if expired.contains(host) {
+        return Err(
+          ApiError::invalid(format!(
+            "临时分享 {host} 已失效，不做体检"
+          ))
+          .suggest(format!("wharf route rm {host} --apply")),
+        );
+      }
+    }
+    DoctorScope::Service(name) => {
+      if let Some(auth) = auth {
+        crate::token_scope::require_service(auth, name)?;
+      }
+      if !world.services.contains_key(name) {
+        return Err(
+          ApiError::not_found(format!("没有服务 {name}"))
+            .suggest("wharf service ls"),
+        );
+      }
+      result.services.insert(name.clone());
+      result.gateways.extend(
+        world
+          .gateways
+          .iter()
+          .filter(|(_, g)| {
+            g.spec
+              .layer4
+              .iter()
+              .any(|f| f.service.as_deref() == Some(name))
+          })
+          .map(|(name, _)| name.clone()),
+      );
+    }
+    DoctorScope::Server(name) => {
+      if allowed.is_some() {
+        return Err(
+          ApiError::new(
+            ErrorCode::Forbidden,
+            "限定服务的令牌不能做整机体检",
+          )
+          .with_hint("改用 wharf doctor --service <服务>"),
+        );
+      }
+      if !world.servers.contains_key(name) {
+        return Err(
+          ApiError::not_found(format!("没有服务器 {name}"))
+            .suggest("wharf server ls"),
+        );
+      }
+      result.servers.insert(name.clone());
+      result.services.extend(
+        world
+          .services
+          .iter()
+          .filter(|(_, row)| row.spec.server == *name)
+          .map(|(n, _)| n.clone()),
+      );
+      result.gateways.extend(
+        world
+          .gateways
+          .iter()
+          .filter(|(_, row)| row.spec.server == *name)
+          .map(|(n, _)| n.clone()),
+      );
+    }
+  }
+  for (host, row) in &world.routes {
+    let spec = &row.spec;
+    if expired.contains(host)
+      || allowed.is_some_and(|a| {
+        !crate::token_scope::route_spec_in_scope(a, spec)
+      })
+    {
+      continue;
+    }
+    let gateway = world.live_gateway(host, spec);
+    let matches = match scope {
+      DoctorScope::All => true,
+      DoctorScope::Host(name) => name == host,
+      DoctorScope::Service(name) => {
+        route_services(spec).any(|service| service == name)
+      }
+      DoctorScope::Server(name) => {
+        world.route_gateways(spec).into_iter().any(|g| {
+          world
+            .gateways
+            .get(g)
+            .is_some_and(|row| row.spec.server == *name)
+        }) || route_services(spec).any(|svc| {
+          world
+            .services
+            .get(svc)
+            .is_some_and(|row| row.spec.server == *name)
+        })
+      }
+    };
+    if matches {
+      result.hosts.push(host.clone());
+      result
+        .services
+        .extend(route_services(spec).map(str::to_owned));
+      result.gateways.extend(gateway.map(str::to_owned));
+    }
+  }
+  if allowed.is_none()
+    && matches!(scope, DoctorScope::All | DoctorScope::Host(_))
+  {
+    for (name, app) in &world.edge_apps {
+      for host in &app.spec.domains {
+        if !world.routes.contains_key(host)
+          && (scope == &DoctorScope::All
+            || scope == &DoctorScope::Host(host.clone()))
+        {
+          result.edge.push((host.clone(), name.clone()));
+        }
+      }
+    }
+  }
+  if let DoctorScope::Host(host) = scope
+    && result.hosts.is_empty()
+    && result.edge.is_empty()
   {
     return Err(
-      wharf_api_types::ApiError::invalid(format!(
-        "临时分享 {host} 已失效，不做体检"
-      ))
-      .suggest(format!("wharf route rm {host} --apply")),
+      ApiError::not_found(format!("没有域名 {host}"))
+        .suggest("wharf route ls"),
     );
+  }
+  if !matches!(scope, DoctorScope::Server(_)) {
+    result.servers.extend(result.services.iter().filter_map(|n| {
+      if matches!(scope, DoctorScope::Service(service) if service != n) {
+        return None;
+      }
+      Some(world.services.get(n)?.spec.server.clone())
+    }));
+    result
+      .servers
+      .extend(result.gateways.iter().filter_map(|n| {
+        Some(world.gateways.get(n)?.spec.server.clone())
+      }));
+  }
+  Ok(result)
+}
+
+pub(crate) async fn run(
+  s: &AppState,
+  scope: &DoctorScope,
+  manual: bool,
+  auth: Option<&Auth>,
+) -> Result<DoctorReport, ApiError> {
+  let snap = snapshot::load(&s.db).await?;
+  let mut selected = selection(&snap, scope, auth)?;
+  if !manual {
+    selected.hosts.retain(|host| {
+      !crate::rules::lifecycle::stopped_route(
+        &snap.world,
+        &snap.world.routes[host].spec,
+      )
+    });
   }
   let net = snap.net(&snap.world);
-  let client = reqwest::Client::builder()
-    .redirect(reqwest::redirect::Policy::none())
-    .timeout(HTTP_TIMEOUT)
-    .tls_info(true)
-    .build()
-    .map_err(|e| {
-      wharf_api_types::ApiError::internal(format!("HTTP 客户端：{e}"))
-    })?;
-  let hosts: Vec<&String> = snap
-    .world
-    .routes
-    .keys()
-    .filter(|h| {
-      host.is_none_or(|q| q == h.as_str())
-        && !expired.contains(h)
-        && (manual
-          || !crate::rules::lifecycle::stopped_route(
-            &snap.world,
-            &snap.world.routes[*h].spec,
-          ))
-        && allowed.is_none_or(|allowed| {
-          crate::token_scope::route_spec_in_scope(
-            allowed,
-            &snap.world.routes[*h].spec,
-          )
-        })
-    })
-    .collect();
-  let live = if let Some(allowed) = allowed {
-    let mut world = snap.world.clone();
-    world.services.retain(|name, _| allowed.contains(name));
-    let gateways: std::collections::BTreeSet<_> = hosts
-      .iter()
-      .flat_map(|host| {
-        snap.world.route_gateways(&snap.world.routes[*host].spec)
-      })
-      .collect();
-    world
-      .gateways
-      .retain(|name, _| gateways.contains(name.as_str()));
-    live_states(s, &world).await
-  } else {
-    live_states(s, &snap.world).await
+  let clients = Clients::new(&snap)?;
+  let mut world = snap.world.clone();
+  world
+    .services
+    .retain(|name, _| selected.services.contains(name));
+  world
+    .gateways
+    .retain(|name, _| selected.gateways.contains(name));
+  let live = live_states(s, &world).await;
+  let ctx = RouteChecks {
+    s,
+    snap: &snap,
+    net: &net,
+    live: &live,
+    clients: &clients,
+    manual,
   };
-  let mut routes: Vec<_> = futures_util::future::join_all(
-    hosts
-      .into_iter()
-      .map(|h| route(s, &snap, &net, &live, &client, h, manual)),
-  )
-  .await
-  .into_iter()
-  .flatten()
-  .collect();
-  if scoped.is_none() {
-    let edge_hosts = snap
-      .world
-      .edge_apps
-      .values()
-      .flat_map(|row| row.spec.domains.iter())
-      .filter(|name| host.is_none_or(|h| h == name.as_str()));
-    let client = &client;
-    let diagnoses = futures_util::future::join_all(edge_hosts.map(
-      |name| async move {
-        let url = format!("https://{name}");
-        let (web, cert_expires, _) = https(client, &url, false).await;
-        (
-          RouteDiagnosis {
-            hostname: name.clone(),
-            url,
-            checks: vec![web],
-            cert_expires,
-            domain_expires: crate::rdap::expires_of(name),
-          },
-          None,
-        )
-      },
-    ))
-    .await;
-    routes.extend(diagnoses);
-  }
+  let (routes, edge, checks) = tokio::join!(
+    futures_util::future::join_all(
+      selected.hosts.iter().map(|h| ctx.route(h))
+    ),
+    futures_util::future::join_all(
+      selected.edge.iter().map(|(h, app)| ctx.edge_route(h, app))
+    ),
+    special::checks(&ctx, scope)
+  );
+  let mut routes: Vec<_> = routes.into_iter().flatten().collect();
   if manual {
-    doctor_diagnose::enrich(s, &mut routes).await;
+    doctor_diagnose::enrich(
+      s,
+      routes
+        .iter_mut()
+        .map(|(r, targets)| (&mut r.checks, std::mem::take(targets))),
+    )
+    .await;
   }
   let mut report = DoctorReport {
     checked_at: Utc::now(),
-    servers: if scoped.is_some() {
-      vec![]
-    } else {
-      servers(s, &snap)
-    },
-    routes: routes.into_iter().map(|(route, _)| route).collect(),
-    vendors: vec![],
-    config: crate::lint::doctor_warnings(&snap)
+    servers: servers(s, &snap, &selected.servers),
+    routes: routes
       .into_iter()
-      .map(|(subject, detail)| {
-        // plan 里是“服务 X 的…”连着读；doctor 主语单独一列，去掉开头的“的”。
-        let detail = detail.trim_start_matches('的').trim_start();
-        check("config", subject, CheckStatus::Warn, detail)
-      })
+      .map(|(route, _)| route)
+      .chain(edge)
       .collect(),
+    vendors: vec![],
+    config: crate::lint::scoped_warnings(
+      &snap,
+      &selected.services,
+      &selected.servers,
+    )
+    .into_iter()
+    .map(|(subject, detail)| {
+      check(
+        "config",
+        subject,
+        CheckStatus::Warn,
+        detail.trim_start_matches('的').trim_start(),
+      )
+    })
+    .collect(),
+    checks,
   };
   let now = Utc::now();
   report.config.extend(
-    crate::link_cert::leaf_expiries(&snap, &net).map(
-      |(gateway, expires)| {
+    crate::link_cert::leaf_expiries(&snap, &net)
+      .filter(|(gateway, _)| selected.gateways.contains(*gateway))
+      .map(|(gateway, expires)| {
         let days = crate::link_cert::days_left(expires, now);
         let (status, detail) = if days <= 0 {
           (CheckStatus::Bad, "隧道证书已过期".into())
@@ -259,10 +443,9 @@ pub async fn run(
           (status, format!("隧道证书 {days} 天后到期"))
         };
         check("gateway", format!("网关 {gateway}"), status, detail)
-      },
-    ),
+      }),
   );
-  if let Some(allowed) = allowed {
+  if let Some(allowed) = auth.and_then(|a| a.services.as_ref()) {
     crate::scope_filter::filter_doctor(
       allowed,
       &snap.world,
@@ -287,11 +470,16 @@ pub(crate) fn check(
   }
 }
 
-fn servers(s: &AppState, snap: &Snapshot) -> Vec<DoctorCheck> {
+fn servers(
+  s: &AppState,
+  snap: &Snapshot,
+  selected: &BTreeSet<String>,
+) -> Vec<DoctorCheck> {
   let mut checks: Vec<_> = snap
     .world
     .servers
     .keys()
+    .filter(|name| selected.contains(*name))
     .map(|name| {
       if s.hub.is_online(name) {
         check("agent", name, CheckStatus::Ok, "在线")
@@ -303,288 +491,782 @@ fn servers(s: &AppState, snap: &Snapshot) -> Vec<DoctorCheck> {
     })
     .collect();
   checks.extend(
-    crate::net_conflict::conflicts(snap).into_iter().map(
-      |(server, detail)| {
+    crate::net_conflict::conflicts(snap)
+      .into_iter()
+      .filter(|(name, _)| selected.contains(*name))
+      .map(|(server, detail)| {
         check(
           "network",
           server,
           CheckStatus::Bad,
           format!("{detail}。{}", crate::net_conflict::FIX),
         )
-      },
-    ),
+      }),
   );
   checks
 }
 
-async fn route(
-  s: &AppState,
-  snap: &Snapshot,
-  net: &Net,
-  live: &LiveMap,
-  client: &reqwest::Client,
-  host: &str,
-  manual: bool,
-) -> Option<(RouteDiagnosis, Option<Target>)> {
-  let (view, upstream_error) =
-    route_view_with_upstream_error(snap, net, host)?;
-  let world = &snap.world;
-  if crate::rules::lifecycle::stopped_route(world, &view.spec) {
-    let stopped = "目标服务已按配置停止";
-    return Some((
-      RouteDiagnosis {
-        hostname: host.into(),
-        url: view.url,
-        checks: vec![
-          check("dns", host, CheckStatus::Skip, stopped),
-          check(
-            "https",
-            host,
-            CheckStatus::Skip,
-            "目标服务已按配置停止，跳过探测",
-          ),
-          check("link", host, CheckStatus::Skip, stopped),
-          check(
-            "container",
-            &view.spec.service,
-            CheckStatus::Warn,
-            "按配置停止",
-          ),
-        ],
-        cert_expires: None,
-        domain_expires: crate::rdap::expires_of(host),
-      },
-      None,
-    ));
-  }
-  let gateway = view
-    .gateway
-    .as_ref()
-    .and_then(|g| world.gateways.get(g).map(|row| (g, &row.spec)));
-  let mut checks = vec![
-    dns(host, gateway.map(|g| g.1), net, view.spec.internal).await,
-  ];
-  let (mut https, cert_expires, bad_gateway) =
-    https(client, &view.url, view.spec.auth).await;
-  let auto_tls = gateway.is_some_and(|(_, g)| {
-    g.kind == wharf_api_types::spec::GatewayKind::Caddy
-      && g.tls == wharf_api_types::spec::GatewayTls::Auto
-  });
-  if auto_tls
-    && https.status == CheckStatus::Bad
-    && tls_failed(&https.detail)
-  {
-    https.detail = format!(
-      "证书还没签下来（申请中或申请失败），执行 wharf route cert {host} 看原因：{}",
-      https.detail
-    );
-  }
-  checks.push(https);
-  let mut diagnosis = RouteDiagnosis {
-    hostname: host.into(),
-    url: view.url,
-    checks,
-    cert_expires,
-    domain_expires: crate::rdap::expires_of(host),
-  };
-  let Some((gw_name, gw)) =
-    gateway.filter(|_| view.spec.redirect.is_none())
-  else {
-    // 没有可检查的上游时，只查到 HTTPS 这一层。
-    return Some((diagnosis, None));
-  };
-  let gateway = gateway_check(live, gw_name, &gw.server);
-  let service = if view.spec.upstream.is_none() {
-    world.services.get(&view.spec.service)
-  } else {
-    None
-  };
-  let cross_host =
-    service.is_some_and(|row| row.spec.server != gw.server);
-  let (link_check, link_unreachable) = match &view.upstream {
-    Some(up) => link(s, &gw.server, up, cross_host).await,
-    None => (
-      check(
-        "link",
-        format!("{} → 上游", gw.server),
-        CheckStatus::Bad,
-        upstream_error.map_or_else(
-          || "算不出上游地址，执行 wharf plan 看原因".into(),
-          |e| match e.hint {
-            Some(hint) => format!("{}（{hint}）", e.message),
-            None => e.message,
-          },
-        ),
-      ),
-      false,
-    ),
-  };
-  let target = service.and_then(|row| {
-    let active = live
-      .get(&row.spec.server)
-      .and_then(|states| states.as_ref().ok())
-      .and_then(|states| states.get(&view.spec.service))
-      .is_some_and(|p| {
-        p.containers.iter().any(|c| {
-          !c.foreign
-            && matches!(c.state.as_str(), "running" | "restarting")
-        })
-      });
-    if !doctor_diagnose::should_diagnose(
-      manual,
-      view.upstream.is_some()
-        && link_check.status == CheckStatus::Bad,
-      bad_gateway,
-      gateway.status == CheckStatus::Ok,
-      active,
-    ) {
-      return None;
-    }
-    let port = *row.host_ports.get(world.route_port(&view.spec)?)?;
-    Some(Target {
-      service: view.spec.service.clone(),
-      server: row.spec.server.clone(),
-      port,
-      same_host: !cross_host,
-      http_failed: bad_gateway && gateway.status == CheckStatus::Ok,
-      link_unreachable,
-    })
-  });
-  diagnosis.checks.extend([
-    gateway,
-    link_check,
-    container(world, live, &view.spec),
-  ]);
-  Some((diagnosis, target))
+struct Clients {
+  direct: reqwest::Client,
+  internal: reqwest::Client,
+  egress:
+    Option<(String, reqwest::Client, wharf_providers::http::Route)>,
+  doh: crate::dns_check::DohClients,
 }
 
-/// caddy 网关的域名应该解析到网关机器的公网 IP；经 CDN 代理或隧道时是厂商的 IP。
-async fn dns(
-  host: &str,
-  gateway: Option<&wharf_api_types::spec::GatewaySpec>,
-  net: &Net,
-  internal: bool,
-) -> DoctorCheck {
-  let lookup = tokio::time::timeout(
-    DNS_TIMEOUT,
-    tokio::net::lookup_host((host, 443)),
-  )
-  .await;
-  let ips: Vec<IpAddr> = match lookup {
-    Err(_) => {
-      return check("dns", host, CheckStatus::Bad, "解析超时");
+impl Clients {
+  fn new(snap: &Snapshot) -> Result<Self, ApiError> {
+    let builder = || {
+      reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(HTTP_TIMEOUT)
+        .tls_info(true)
+    };
+    let failed = |_| ApiError::internal("无法初始化体检 HTTP 客户端");
+    let route = crate::egress::api_route(snap);
+    let doh = crate::dns_check::DohClients::new(
+      route.as_ref().map(|(_, r)| r.proxy.clone()),
+    );
+    let egress = route.and_then(|(name, route)| {
+      let client =
+        builder().proxy(route.proxy.clone()).build().ok()?;
+      Some((name.to_owned(), client, route))
+    });
+    Ok(Self {
+      direct: builder().build().map_err(failed)?,
+      internal: builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .map_err(failed)?,
+      egress,
+      doh,
+    })
+  }
+}
+
+struct RouteChecks<'a> {
+  s: &'a AppState,
+  snap: &'a Snapshot,
+  net: &'a Net,
+  live: &'a LiveMap,
+  clients: &'a Clients,
+  manual: bool,
+}
+
+fn use_egress_for_doctor(
+  snap: &Snapshot,
+  route: Option<(&RouteSpec, &GatewaySpec)>,
+  matches_exit: bool,
+) -> bool {
+  if let Some((r, g)) = route {
+    if r.internal || g.tls == GatewayTls::Internal {
+      return false;
     }
-    Ok(Err(e)) => {
-      return check(
-        "dns",
-        host,
-        CheckStatus::Bad,
-        format!("解析失败：{e}"),
+    if g.kind == GatewayKind::CloudflareTunnel
+      || r.cf_origin_only
+      || snap
+        .world
+        .servers
+        .get(&g.server)
+        .is_some_and(|s| s.settings.region == Some(Region::Overseas))
+    {
+      return true;
+    }
+  }
+  matches_exit
+}
+
+impl RouteChecks<'_> {
+  async fn route(
+    &self,
+    host: &str,
+  ) -> Option<(RouteDiagnosis, Vec<Target>)> {
+    let (view, upstream_error) =
+      route_view_with_upstream_error(self.snap, self.net, host)?;
+    let world = &self.snap.world;
+    let spec = &view.spec;
+    let gateway = view
+      .gateway
+      .as_ref()
+      .and_then(|g| world.gateways.get(g).map(|row| (g, &row.spec)));
+    let gateway_spec = gateway.map(|(_, g)| g);
+    let use_egress = use_egress_for_doctor(
+      self.snap,
+      gateway_spec.map(|g| (spec, g)),
+      self
+        .clients
+        .egress
+        .as_ref()
+        .is_some_and(|(_, _, r)| r.matches(host)),
+    );
+    let service = spec
+      .upstream
+      .is_none()
+      .then(|| world.services.get(&spec.service))
+      .flatten();
+    let main_stopped = spec.redirect.is_none()
+      && service.is_some_and(|row| row.spec.stopped);
+    let probe_path = if main_stopped {
+      spec
+        .paths
+        .iter()
+        .find(|p| crate::rules::lifecycle::active_path(world, p))
+    } else {
+      None
+    };
+    let stopped = crate::rules::lifecycle::stopped_route(world, spec);
+    let probe_url = probe_path.map(|p| {
+      let path = p.path.trim_end_matches('*');
+      format!("{}{path}", view.url.trim_end_matches('/'))
+    });
+    let (dns, (mut https, cert_expires, bad_gateway)) = if stopped {
+      (
+        check("dns", host, CheckStatus::Skip, "服务已停用"),
+        (
+          check("https", host, CheckStatus::Skip, "服务已停用"),
+          None,
+          false,
+        ),
+      )
+    } else {
+      let proxy_ranges = !spec.internal
+        && gateway_spec
+          .is_some_and(|g| g.tls != GatewayTls::Internal);
+      let expected = gateway_spec
+        .filter(|g| g.kind == GatewayKind::Caddy)
+        .and_then(|g| {
+          if spec.internal {
+            self.net.private.get(&g.server).map(|a| a.ip.as_str())
+          } else {
+            self.net.public_ip.get(&g.server).map(String::as_str)
+          }
+        });
+      tokio::join!(
+        dns(
+          self.clients,
+          host,
+          use_egress,
+          expected,
+          spec.cf_origin_only,
+          proxy_ranges,
+          false
+        ),
+        self.route_https(
+          host,
+          probe_url.as_deref().unwrap_or(&view.url),
+          spec,
+          gateway_spec,
+          service
+            .filter(|_| !main_stopped)
+            .and_then(|r| r.spec.monitor.as_ref()),
+          use_egress
+        ),
+      )
+    };
+    let auto_tls = gateway_spec.is_some_and(|g| {
+      g.kind == GatewayKind::Caddy && g.tls == GatewayTls::Auto
+    });
+    if auto_tls
+      && https.status == CheckStatus::Bad
+      && tls_failed(&https.detail)
+    {
+      https.detail = format!(
+        "证书还没签下来（申请中或申请失败），执行 wharf route cert {host} 看原因：{}",
+        https.detail
       );
     }
-    Ok(Ok(addrs)) => {
-      let mut ips: Vec<IpAddr> = addrs.map(|a| a.ip()).collect();
-      ips.dedup();
-      ips
+    let mut checks = vec![dns, https];
+    append_cert(&mut checks, host, cert_expires);
+    let mut diagnosis = RouteDiagnosis {
+      hostname: host.into(),
+      url: view.url,
+      checks,
+      cert_expires,
+      domain_expires: crate::rdap::expires_of(host),
+      edge_app: None,
+    };
+    if stopped {
+      return Some((diagnosis, vec![]));
+    }
+    let Some((gw_name, gw)) = gateway else {
+      diagnosis.checks.push(check(
+        "gateway",
+        host,
+        CheckStatus::Bad,
+        "没有可用的网关",
+      ));
+      return Some((diagnosis, vec![]));
+    };
+    if spec.redirect.is_some() {
+      return Some((diagnosis, vec![]));
+    }
+    let gateway = gateway_check(self.live, gw_name, &gw.server);
+    let gateway_ok = gateway.status == CheckStatus::Ok;
+    diagnosis.checks.push(gateway);
+    let main = if spec.upstream.is_some() {
+      let check = if let Some(up) = view.upstream.as_deref() {
+        link(self.s, &gw.server, up, false).await.0
+      } else {
+        missing_upstream(&gw.server, upstream_error)
+      };
+      (vec![check, check_external()], None)
+    } else {
+      self
+        .service_hop(
+          gw,
+          spec,
+          ServiceHop {
+            service: &spec.service,
+            port: world.route_port(spec),
+            path: None,
+            upstream: view.upstream.ok_or(upstream_error),
+            bad_gateway: bad_gateway && gateway_ok,
+          },
+        )
+        .await
+    };
+    let paths = futures_util::future::join_all(
+      spec.paths.iter().map(|p| async {
+        if let Some(up) = &p.upstream {
+          let mut check = link(self.s, &gw.server, up, false).await.0;
+          check.subject.push_str(&format!(" ({})", p.path));
+          (vec![check], None)
+        } else if let Some(service) = &p.service {
+          let port = world.service_port(service, p.port.as_deref());
+          let upstream = port
+            .map(|port| {
+              crate::render::upstream(
+                world, self.net, gw, service, port, spec.link,
+              )
+            })
+            .transpose()
+            .map_err(Some)
+            .and_then(|u| u.ok_or(None));
+          self
+            .service_hop(
+              gw,
+              spec,
+              ServiceHop {
+                service,
+                port,
+                path: Some(&p.path),
+                upstream,
+                bad_gateway: bad_gateway
+                  && gateway_ok
+                  && probe_path == Some(p),
+              },
+            )
+            .await
+        } else {
+          (vec![], None)
+        }
+      }),
+    )
+    .await;
+    let mut targets = Vec::new();
+    for (checks, target) in std::iter::once(main).chain(paths) {
+      diagnosis.checks.extend(checks);
+      targets.extend(target);
+    }
+    Some((diagnosis, targets))
+  }
+
+  async fn service_hop(
+    &self,
+    gw: &GatewaySpec,
+    spec: &RouteSpec,
+    hop: ServiceHop<'_>,
+  ) -> (Vec<DoctorCheck>, Option<Target>) {
+    let world = &self.snap.world;
+    let row = world.services.get(hop.service);
+    let cross_host = row.is_some_and(|r| r.spec.server != gw.server);
+    let via_tunnel = cross_host
+      && hop.port.is_some_and(|port| {
+        matches!(
+          crate::link::choose(
+            world,
+            self.net,
+            gw,
+            hop.service,
+            port,
+            spec.link
+          ),
+          Ok(crate::link::Choice::Tunnel)
+        )
+      });
+    let (mut link, unreachable) =
+      if row.is_some_and(|r| r.spec.stopped) {
+        (
+          check("link", &gw.server, CheckStatus::Skip, "服务已停用"),
+          false,
+        )
+      } else {
+        match hop.upstream {
+          Ok(up) => {
+            link(self.s, &gw.server, &up, cross_host && !via_tunnel)
+              .await
+          }
+          Err(e) => (missing_upstream(&gw.server, e), false),
+        }
+      };
+    let mut container =
+      container_of_service(world, self.live, hop.service);
+    if let Some(path) = hop.path {
+      link.subject.push_str(&format!(" ({path})"));
+      container.subject.push_str(&format!(" ({path})"));
+    }
+    let target =
+      row.filter(|row| !row.spec.stopped).and_then(|row| {
+        let active = self
+          .live
+          .get(&row.spec.server)
+          .and_then(|states| states.as_ref().ok())
+          .and_then(|states| states.get(hop.service))
+          .is_some_and(|p| {
+            p.containers.iter().any(|c| !c.foreign && c.is_active())
+          });
+        if !doctor_diagnose::should_diagnose(
+          self.manual,
+          link.status == CheckStatus::Bad,
+          hop.bad_gateway,
+          true,
+          container.status == CheckStatus::Bad,
+          active,
+        ) {
+          return None;
+        }
+        Some(Target {
+          service: hop.service.into(),
+          server: row.spec.server.clone(),
+          port: Some(*row.host_ports.get(hop.port?)?),
+          local_loopback_ok: !cross_host || via_tunnel,
+          http_failed: hop.bad_gateway,
+          link_unreachable: unreachable,
+          link_subject: Some(link.subject.clone()),
+          container_subject: container.subject.clone(),
+        })
+      });
+    (vec![link, container], target)
+  }
+
+  async fn route_https(
+    &self,
+    host: &str,
+    url: &str,
+    spec: &RouteSpec,
+    gateway: Option<&GatewaySpec>,
+    monitor: Option<&MonitorSpec>,
+    use_egress: bool,
+  ) -> (DoctorCheck, Option<DateTime<Utc>>, bool) {
+    let internal = gateway.is_some_and(|g| {
+      g.kind == GatewayKind::Caddy && g.tls == GatewayTls::Internal
+    });
+    let gated = url.starts_with("https://")
+      && gateway.is_some_and(|g| {
+        g.kind == GatewayKind::Caddy && g.tls != GatewayTls::Off
+      })
+      && spec.sso.as_ref().is_some_and(|s| s.gated())
+      && spec.redirect.is_none();
+    // 验证不了对端证书时，不能把门禁凭据发给它。
+    let cookie = if gated && !internal {
+      crate::gate::probe_cookie(&self.s.db, host).await
+    } else {
+      None
+    };
+    let options = HttpProbe {
+      cookie,
+      internal,
+      use_egress,
+      ..HttpProbe::for_route(spec, gated, monitor)
+    };
+    let monitor_url = options.monitor.map(|m| {
+      format!(
+        "{}/{}",
+        url.trim_end_matches('/'),
+        m.path.trim_start_matches('/')
+      )
+    });
+    self
+      .https(monitor_url.as_deref().unwrap_or(url), options)
+      .await
+  }
+
+  async fn edge_route(
+    &self,
+    host: &str,
+    app: &str,
+  ) -> RouteDiagnosis {
+    let url = format!("https://{host}");
+    let (dns, (https, cert_expires, _)) = tokio::join!(
+      dns(self.clients, host, true, None, false, true, true),
+      self.https(
+        &url,
+        HttpProbe {
+          use_egress: true,
+          ..Default::default()
+        }
+      ),
+    );
+    let mut checks = vec![dns, https];
+    append_cert(&mut checks, host, cert_expires);
+    if let Some(row) = self.snap.world.edge_apps.get(app)
+      && let Some(detail) = crate::edge_sync::drift(
+        &crate::edge_sync::target(app, &row.spec),
+        self.snap.edge_cache.get(app),
+        self.snap.edge_expected.get(app),
+      )
+    {
+      checks.push(check("edge", app, CheckStatus::Warn, detail));
+    }
+    RouteDiagnosis {
+      hostname: host.into(),
+      url,
+      checks,
+      cert_expires,
+      domain_expires: crate::rdap::expires_of(host),
+      edge_app: Some(app.into()),
+    }
+  }
+
+  async fn https(
+    &self,
+    url: &str,
+    options: HttpProbe<'_>,
+  ) -> (DoctorCheck, Option<DateTime<Utc>>, bool) {
+    let request = |client: &reqwest::Client| {
+      let mut request = client.get(url);
+      if let Some(cookie) = &options.cookie {
+        request =
+          request.header(reqwest::header::COOKIE, cookie.clone());
+      }
+      request
+    };
+    let mut via = None;
+    let result = if options.internal {
+      request(&self.clients.internal).send().await
+    } else if let Some((name, client, _)) =
+      self.clients.egress.as_ref().filter(|_| options.use_egress)
+    {
+      match request(client).send().await {
+        Err(e) if e.is_connect() => {
+          request(&self.clients.direct).send().await
+        }
+        result => {
+          if result.is_ok() {
+            via = Some(name);
+          }
+          result
+        }
+      }
+    } else {
+      request(&self.clients.direct).send().await
+    };
+    let subject = url.split(['?', '#']).next().unwrap_or(url);
+    let layer = if url.starts_with("https://") {
+      "https"
+    } else {
+      "http"
+    };
+    let response = match result {
+      Ok(r) => r,
+      Err(e) => {
+        return (
+          check(
+            layer,
+            subject,
+            CheckStatus::Bad,
+            error_chain(&e.without_url()),
+          ),
+          None,
+          false,
+        );
+      }
+    };
+    let expires = response
+      .extensions()
+      .get::<reqwest::tls::TlsInfo>()
+      .and_then(|t| t.peer_certificate())
+      .and_then(crate::cert::not_after);
+    let code = response.status();
+    let login_redirect = code.as_u16() == 302
+      && response
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.contains("/gate/login"));
+    let body = if (options.gate && code.as_u16() == 401)
+      || options.monitor.is_some_and(|m| m.keyword.is_some())
+    {
+      http_prefix(response).await
+    } else {
+      Vec::new()
+    };
+    let gate_rejected = login_redirect
+      || (code.as_u16() == 401
+        && String::from_utf8_lossy(&body).trim() == "需要登录");
+    let (status, mut detail, bad_gateway) =
+      http_status(code, &options, gate_rejected, &body);
+    if options.internal {
+      detail.push_str("（自签证书）");
+    }
+    if let Some(via) = via {
+      detail.push_str(&format!("（经 {via} 出口）"));
+    }
+    (check(layer, subject, status, detail), expires, bad_gateway)
+  }
+}
+
+struct ServiceHop<'a> {
+  service: &'a str,
+  port: Option<&'a str>,
+  path: Option<&'a str>,
+  upstream: Result<String, Option<ApiError>>,
+  bad_gateway: bool,
+}
+
+fn missing_upstream(
+  server: &str,
+  error: Option<ApiError>,
+) -> DoctorCheck {
+  check(
+    "link",
+    format!("{server} → 上游"),
+    CheckStatus::Bad,
+    error.map_or_else(
+      || "算不出上游地址，执行 wharf plan 看原因".into(),
+      |e| match e.hint {
+        Some(hint) => format!("{}（{hint}）", e.message),
+        None => e.message,
+      },
+    ),
+  )
+}
+
+fn covers_monitor(matcher: &str, path: &str) -> bool {
+  if matcher.starts_with('@') {
+    return true;
+  }
+  let path = path.split('?').next().unwrap_or_default();
+  let path = format!("/{}", path.trim_start_matches('/'));
+  matcher.strip_suffix('*').map_or_else(
+    || path == matcher,
+    |prefix| path.starts_with(prefix),
+  )
+}
+
+#[derive(Default)]
+struct HttpProbe<'a> {
+  basic_auth: bool,
+  gate: bool,
+  header: bool,
+  cookie: Option<reqwest::header::HeaderValue>,
+  monitor: Option<&'a MonitorSpec>,
+  internal: bool,
+  use_egress: bool,
+}
+
+impl<'a> HttpProbe<'a> {
+  fn for_route(
+    spec: &RouteSpec,
+    gated: bool,
+    monitor: Option<&'a MonitorSpec>,
+  ) -> Self {
+    let monitor = monitor.filter(|m| {
+      gated
+        // 自定义请求头只发给 agent 探测的本机服务端口。
+        && m.headers.is_empty()
+        && !spec.auth
+        && !spec
+          .paths
+          .iter()
+          .any(|p| covers_monitor(&p.path, &m.path))
+    });
+    Self {
+      basic_auth: spec.auth,
+      gate: gated,
+      header: monitor.is_none()
+        && spec
+          .sso
+          .as_ref()
+          .is_some_and(|s| s.mode == SsoMode::Header),
+      monitor,
+      ..Self::default()
+    }
+  }
+}
+
+fn http_status(
+  code: reqwest::StatusCode,
+  probe: &HttpProbe<'_>,
+  rejected: bool,
+  body: &[u8],
+) -> (CheckStatus, String, bool) {
+  let n = code.as_u16();
+  let bad_gateway = matches!(n, 502 | 504);
+  let mut detail = format!("HTTP {n}");
+  let status = if code.is_server_error() {
+    if bad_gateway {
+      detail.push_str("：网关连不上上游");
+    }
+    CheckStatus::Bad
+  } else if probe.gate && probe.internal && rejected {
+    detail.push_str("：门禁正常要求登录，未穿透验证应用");
+    CheckStatus::Ok
+  } else if probe.gate
+    && !probe.internal
+    && (rejected || probe.cookie.is_none())
+  {
+    return (
+      CheckStatus::Warn,
+      "门禁未放行控制面探针，检查网关门禁公钥和证书（wharf plan）"
+        .into(),
+      false,
+    );
+  } else if probe.basic_auth && n == 401 {
+    CheckStatus::Ok
+  } else if let Some(monitor) = probe.monitor {
+    let result = HttpCheckResult {
+      status: Some(n),
+      found: monitor
+        .keyword
+        .as_ref()
+        .map(|k| String::from_utf8_lossy(body).contains(k.as_str())),
+      ..Default::default()
+    };
+    let (ok, reason) = crate::monitor::judge(monitor, &result);
+    detail = reason;
+    if ok {
+      CheckStatus::Ok
+    } else {
+      CheckStatus::Bad
+    }
+  } else if probe.header
+    && probe.cookie.is_some()
+    && matches!(n, 401 | 403)
+  {
+    return (
+      CheckStatus::Ok,
+      format!("HTTP {n}（已穿过门禁，后端存活但拒识探针用户）"),
+      false,
+    );
+  } else if code.is_client_error() {
+    CheckStatus::Warn
+  } else {
+    CheckStatus::Ok
+  };
+  if probe.cookie.is_some() && !(probe.basic_auth && n == 401) {
+    detail.push_str("（已穿过门禁）");
+  }
+  (status, detail, bad_gateway)
+}
+
+async fn http_prefix(mut response: reqwest::Response) -> Vec<u8> {
+  let mut bytes = Vec::new();
+  while bytes.len() < 64 * 1024 {
+    match response.chunk().await {
+      Ok(Some(chunk)) => bytes.extend_from_slice(
+        &chunk[..chunk.len().min(64 * 1024 - bytes.len())],
+      ),
+      _ => break,
+    }
+  }
+  bytes
+}
+
+fn append_cert(
+  checks: &mut Vec<DoctorCheck>,
+  host: &str,
+  expires: Option<DateTime<Utc>>,
+) {
+  if let Some(t) = expires {
+    let days = (t - Utc::now()).num_days();
+    if days < crate::cert::WARN_DAYS {
+      checks.push(check(
+        "cert",
+        host,
+        CheckStatus::Warn,
+        format!("证书剩 {days} 天"),
+      ));
+    }
+  }
+}
+
+async fn dns(
+  clients: &Clients,
+  host: &str,
+  use_doh: bool,
+  expected: Option<&str>,
+  cf_origin_only: bool,
+  check_ranges: bool,
+  edge: bool,
+) -> DoctorCheck {
+  let ips = if use_doh {
+    clients.doh.lookup(host).await
+  } else {
+    match tokio::time::timeout(
+      DNS_TIMEOUT,
+      tokio::net::lookup_host((host, 443)),
+    )
+    .await
+    {
+      Ok(Ok(addrs)) => Some(addrs.map(|a| a.ip()).collect()),
+      _ => None,
     }
   };
+  let Some(ips) = ips.filter(|ips| !ips.is_empty()) else {
+    return check(
+      "dns",
+      host,
+      CheckStatus::Bad,
+      "解析失败或没有 A / AAAA 记录",
+    );
+  };
+  let ips: BTreeSet<IpAddr> = ips.into_iter().collect();
   let shown = ips
     .iter()
     .map(IpAddr::to_string)
     .collect::<Vec<_>>()
     .join(", ");
-  let expected = gateway
-    .filter(|g| g.kind == GatewayKind::Caddy)
-    .and_then(|g| {
-      let ip = if internal {
-        net.private.get(&g.server).map(|a| &a.ip)
-      } else {
-        net.public_ip.get(&g.server)
-      };
-      ip.map(|ip| (g, ip))
-    });
-  match expected {
-    Some((g, ip)) if !ips.iter().any(|a| a.to_string() == *ip) => {
-      check(
-        "dns",
-        host,
-        CheckStatus::Warn,
-        if internal {
-          format!(
-            "解析到 {shown}，不是入口所在 {} 的内网地址 {ip}",
-            g.server
-          )
-        } else {
-          format!(
-            "解析到 {shown}，不是网关所在 {} 的公网 IP {ip}（经 CDN 代理时正常）",
-            g.server
-          )
-        },
-      )
-    }
-    _ => {
-      check("dns", host, CheckStatus::Ok, format!("解析到 {shown}"))
-    }
-  }
-}
-
-/// 从控制面访问一次。502 / 504 是网关连不上上游，看后面几层。
-/// 顺带读证书到期时间，快到期时标黄。
-async fn https(
-  client: &reqwest::Client,
-  url: &str,
-  auth: bool,
-) -> (DoctorCheck, Option<DateTime<Utc>>, bool) {
-  let layer = if url.starts_with("https") {
-    "https"
+  let wrong_ip = expected.is_some_and(|ip| {
+    ip.parse::<IpAddr>().is_ok_and(|ip| !ips.contains(&ip))
+  });
+  let cf = if check_ranges
+    && (edge || wrong_ip || expected.is_none())
+    && !cf_origin_only
+  {
+    crate::dns_check::cf_ranges().await.map(|ranges| {
+      ips.iter().all(|ip| ranges.iter().any(|r| r.contains(ip)))
+    })
   } else {
-    "http"
+    None
   };
-  match client.get(url).send().await {
-    Err(e) => (
-      check(layer, url, CheckStatus::Bad, error_chain(&e)),
-      None,
-      false,
-    ),
-    Ok(r) => {
-      let expires = r
-        .extensions()
-        .get::<reqwest::tls::TlsInfo>()
-        .and_then(|t| t.peer_certificate())
-        .and_then(crate::cert::not_after);
-      let code = r.status();
-      let status = if code.is_server_error() {
-        CheckStatus::Bad
-      } else if code == reqwest::StatusCode::UNAUTHORIZED && auth {
-        CheckStatus::Ok
-      } else if code.is_client_error()
-        && code != reqwest::StatusCode::UNAUTHORIZED
-      {
-        CheckStatus::Warn
-      } else {
-        CheckStatus::Ok
-      };
-      let mut detail = format!("HTTP {}", code.as_u16());
-      let bad_gateway = matches!(code.as_u16(), 502 | 504);
-      if bad_gateway {
-        detail.push_str("：网关连不上上游");
-      }
-      if let Some(to) =
-        r.headers().get("location").and_then(|v| v.to_str().ok())
-      {
-        detail.push_str(&format!(" → {to}"));
-      }
-      let mut status = status;
-      if let Some(t) = expires {
-        let days = (t - Utc::now()).num_days();
-        detail.push_str(&format!("，证书剩 {days} 天"));
-        if days < crate::cert::WARN_DAYS && status == CheckStatus::Ok
-        {
-          status = CheckStatus::Warn;
-        }
-      }
-      (check(layer, url, status, detail), expires, bad_gateway)
-    }
+  if cf_origin_only || cf == Some(true) {
+    check(
+      "dns",
+      host,
+      CheckStatus::Ok,
+      format!("解析到 {shown}（经 Cloudflare 代理）"),
+    )
+  } else if wrong_ip {
+    check(
+      "dns",
+      host,
+      CheckStatus::Warn,
+      format!(
+        "解析到 {shown}，期望 {}",
+        expected.unwrap_or_default()
+      ),
+    )
+  } else if edge && cf == Some(false) {
+    check(
+      "dns",
+      host,
+      CheckStatus::Warn,
+      format!("解析到 {shown}，不在 Cloudflare 网段"),
+    )
+  } else {
+    check("dns", host, CheckStatus::Ok, format!("解析到 {shown}"))
   }
 }
 
@@ -623,18 +1305,33 @@ fn gateway_check(
       Some(p) if p.all_running() => {
         check("gateway", subject, CheckStatus::Ok, "运行中")
       }
-      Some(p) if !p.containers.is_empty() => check(
+      Some(p) if p.containers.iter().any(|c| !c.foreign) => check(
         "gateway",
         subject,
         CheckStatus::Bad,
         p.containers
           .iter()
+          .filter(|c| !c.foreign)
           .map(|c| format!("{} {}", c.service, c.status))
           .collect::<Vec<_>>()
           .join("，"),
       ),
       _ => check("gateway", subject, CheckStatus::Bad, "没有部署"),
     },
+  }
+}
+
+fn probe_addr(upstream: &str) -> Option<String> {
+  let upstream = upstream.trim();
+  if upstream.contains("://") {
+    let url = reqwest::Url::parse(upstream).ok()?;
+    Some(format!(
+      "{}:{}",
+      url.host_str()?,
+      url.port_or_known_default()?
+    ))
+  } else {
+    (!upstream.is_empty()).then(|| upstream.to_string())
   }
 }
 
@@ -645,7 +1342,18 @@ async fn link(
   upstream: &str,
   cross_host: bool,
 ) -> (DoctorCheck, bool) {
-  let subject = format!("{server} → {upstream}");
+  let Some(addr) = probe_addr(upstream) else {
+    return (
+      check(
+        "link",
+        server,
+        CheckStatus::Bad,
+        "上游地址格式不对，无法做 TCP 探测",
+      ),
+      false,
+    );
+  };
+  let subject = format!("{server} → {addr}");
   if !s.hub.is_online(server) {
     return (
       check("link", subject, CheckStatus::Skip, "agent 离线，测不了"),
@@ -659,7 +1367,7 @@ async fn link(
       AgentOp::Probe {
         targets: vec![ProbeTarget {
           server: String::new(),
-          addr: upstream.to_string(),
+          addr,
           plain: true,
         }],
       },
@@ -691,29 +1399,33 @@ async fn link(
   }
 }
 
-fn container(
-  world: &crate::world::World,
+fn check_external() -> DoctorCheck {
+  check("container", "外部上游", CheckStatus::Skip, "不归 Wharf 管")
+}
+
+fn container_of_service(
+  world: &World,
   live: &LiveMap,
-  route: &wharf_api_types::spec::RouteSpec,
+  service: &str,
 ) -> DoctorCheck {
-  if route.upstream.is_some() {
+  let Some(row) = world.services.get(service) else {
     return check(
       "container",
-      "外部上游",
-      CheckStatus::Skip,
-      "不归 Wharf 管",
-    );
-  }
-  let Some(row) = world.services.get(&route.service) else {
-    return check(
-      "container",
-      &route.service,
+      service,
       CheckStatus::Bad,
       "服务不存在",
     );
   };
   let server = &row.spec.server;
-  let subject = format!("{server} 上的 {}", route.service);
+  let subject = format!("{server} 上的 {}", service);
+  if row.spec.stopped {
+    return check(
+      "container",
+      subject,
+      CheckStatus::Skip,
+      "按配置停止",
+    );
+  }
   let states = match live.get(server) {
     None => {
       return check(
@@ -734,20 +1446,13 @@ fn container(
     Some(Ok(states)) => states,
   };
   let Some(p) = states
-    .get(&route.service)
-    .filter(|p| !p.containers.is_empty())
+    .get(service)
+    .filter(|p| p.containers.iter().any(|c| !c.foreign))
   else {
     return check("container", subject, CheckStatus::Bad, "没有容器");
   };
-  if row.spec.stopped {
-    return check(
-      "container",
-      subject,
-      CheckStatus::Warn,
-      "按配置停止",
-    );
-  }
-  let has_running = p.containers.iter().any(|c| c.is_running());
+  let has_running =
+    p.containers.iter().any(|c| !c.foreign && c.is_running());
   let mut bad: Vec<String> = p
     .containers
     .iter()
@@ -759,10 +1464,8 @@ fn container(
     })
     .map(|c| format!("{} {}", c.service, c.status))
     .collect();
-  let expected = crate::render::service_expected_components(
-    &route.service,
-    &row.spec,
-  );
+  let expected =
+    crate::render::service_expected_components(service, &row.spec);
   bad.extend(
     crate::render::missing_components(&expected, &p.containers)
       .into_iter()
@@ -770,7 +1473,9 @@ fn container(
   );
   if bad.is_empty() {
     let starting = p.containers.iter().any(|c| {
-      c.is_running() && c.health.as_deref() == Some("starting")
+      !c.foreign
+        && c.is_running()
+        && c.health.as_deref() == Some("starting")
     });
     if starting {
       check(

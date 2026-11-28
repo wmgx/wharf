@@ -1,4 +1,4 @@
-//! 从控制面向公共递归解析器发 UDP 查询，比较已保存的路由意图。
+//! 从控制面向公共递归解析器发 DoH 查询，比较已保存的路由意图。
 use std::{
   collections::{BTreeMap, BTreeSet},
   net::{IpAddr, Ipv4Addr, Ipv6Addr},
@@ -12,7 +12,6 @@ use axum::{
 };
 use ipnet::IpNet;
 use serde::Deserialize;
-use tokio::net::UdpSocket;
 use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
   ApiError,
@@ -31,8 +30,31 @@ use crate::{
   state::AppState,
 };
 
-const RESOLVERS: &[&str] = &["1.1.1.1", "8.8.8.8", "223.5.5.5"];
-const UDP_TIMEOUT: Duration = Duration::from_secs(3);
+struct Resolver {
+  name: &'static str,
+  url: &'static str,
+  overseas: bool,
+}
+
+const CLOUDFLARE: Resolver = Resolver {
+  name: "1.1.1.1",
+  url: "https://cloudflare-dns.com/dns-query",
+  overseas: true,
+};
+const RESOLVERS: &[Resolver] = &[
+  CLOUDFLARE,
+  Resolver {
+    name: "8.8.8.8",
+    url: "https://dns.google/dns-query",
+    overseas: true,
+  },
+  Resolver {
+    name: "223.5.5.5",
+    url: "https://dns.alidns.com/dns-query",
+    overseas: false,
+  },
+];
+const DOH_TIMEOUT: Duration = Duration::from_secs(5);
 const WATCH_LIMIT: Duration = Duration::from_secs(600);
 const CF_IPS: &str = "https://api.cloudflare.com/client/v4/ips";
 
@@ -75,7 +97,7 @@ struct IpRangeLists {
 static CF_RANGES: tokio::sync::Mutex<Option<(Instant, Vec<IpNet>)>> =
   tokio::sync::Mutex::const_new(None);
 
-async fn cf_ranges() -> Option<Vec<IpNet>> {
+pub(crate) async fn cf_ranges() -> Option<Vec<IpNet>> {
   let mut cache = CF_RANGES.lock().await;
   if let Some((at, ranges)) = cache.as_ref()
     && at.elapsed() < Duration::from_secs(86_400)
@@ -121,6 +143,8 @@ fn hostname(raw: &str) -> Result<String, ApiError> {
     || !name.split('.').all(|label| {
       !label.is_empty()
         && label.len() <= 63
+        && !label.starts_with('-')
+        && !label.ends_with('-')
         && label.bytes().all(|c| {
           c.is_ascii_alphanumeric() || c == b'-' || c == b'_'
         })
@@ -239,7 +263,13 @@ fn compare(
   }
 }
 
-async fn check(host: &str, want: Expected) -> DnsCheck {
+async fn check(
+  snap: &Snapshot,
+  host: &str,
+  want: Expected,
+) -> DnsCheck {
+  let proxy = crate::egress::api_proxy(snap).map(|(_, proxy)| proxy);
+  let clients = DohClients::new(proxy);
   let ranges = if matches!(want, Expected::Cloudflare) {
     cf_ranges().await
   } else {
@@ -249,8 +279,8 @@ async fn check(host: &str, want: Expected) -> DnsCheck {
     RESOLVERS.iter().map(|resolver| async {
       let start = Instant::now();
       let (a, aaaa) = tokio::join!(
-        query(resolver, host, 1),
-        query(resolver, host, 28)
+        clients.query(resolver, host, 1),
+        clients.query(resolver, host, 28)
       );
       let ips = |a: Option<Answer>| {
         a.map(|a| {
@@ -260,7 +290,7 @@ async fn check(host: &str, want: Expected) -> DnsCheck {
       let verdict =
         compare(&want, a.as_ref(), aaaa.as_ref(), ranges.as_deref());
       DnsResolver {
-        resolver: resolver.to_string(),
+        resolver: resolver.name.into(),
         verdict,
         a: ips(a),
         aaaa: ips(aaaa),
@@ -272,44 +302,113 @@ async fn check(host: &str, want: Expected) -> DnsCheck {
   DnsCheck {
     hostname: host.to_string(),
     expected: want.label(),
-    effective: resolvers
-      .iter()
-      .all(|r| r.verdict != DnsVerdict::Mismatch),
+    effective: effective(resolvers.iter().map(|r| r.verdict)),
     resolvers,
   }
 }
 
-async fn query(
-  resolver: &str,
-  host: &str,
-  kind: u16,
-) -> Option<Answer> {
-  tokio::time::timeout(UDP_TIMEOUT, async {
-    let mut id = [0; 2];
-    getrandom::fill(&mut id).ok()?;
-    let mut request =
-      vec![id[0], id[1], 1, 0, 0, 1, 0, 0, 0, 0, 0, 0];
-    for label in host.split('.') {
-      request.push(label.len() as u8);
-      request.extend_from_slice(label.as_bytes());
+fn effective(verdicts: impl Iterator<Item = DnsVerdict>) -> bool {
+  let mut matched = false;
+  for verdict in verdicts {
+    match verdict {
+      DnsVerdict::Matches => matched = true,
+      DnsVerdict::Mismatch => return false,
+      DnsVerdict::Unavailable => {}
     }
-    request.push(0);
-    request.extend_from_slice(&kind.to_be_bytes());
-    request.extend_from_slice(&1u16.to_be_bytes());
-    let socket = UdpSocket::bind("0.0.0.0:0").await.ok()?;
-    socket.connect((resolver, 53)).await.ok()?;
-    socket.send(&request).await.ok()?;
-    let mut response = [0; 4096];
-    loop {
-      let n = socket.recv(&mut response).await.ok()?;
-      if response[..n].starts_with(&id) {
-        break parse_response(&response[..n], host, kind);
+  }
+  matched
+}
+
+pub(crate) struct DohClients {
+  direct: Option<reqwest::Client>,
+  egress: Option<reqwest::Client>,
+}
+
+impl DohClients {
+  pub(crate) fn new(proxy: Option<reqwest::Proxy>) -> Self {
+    let base = || {
+      reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(DOH_TIMEOUT)
+        .no_proxy()
+    };
+    Self {
+      direct: base().build().ok(),
+      egress: proxy
+        .and_then(|proxy| base().proxy(proxy).build().ok()),
+    }
+  }
+
+  pub(crate) async fn lookup(
+    &self,
+    host: &str,
+  ) -> Option<Vec<IpAddr>> {
+    let host = hostname(host).ok()?;
+    let (a, aaaa) = tokio::join!(
+      self.query(&CLOUDFLARE, &host, 1),
+      self.query(&CLOUDFLARE, &host, 28)
+    );
+    if a.is_none() && aaaa.is_none() {
+      return None;
+    }
+    Some(
+      [a, aaaa]
+        .into_iter()
+        .flatten()
+        .flat_map(|a| a.ips)
+        .collect(),
+    )
+  }
+
+  async fn query(
+    &self,
+    resolver: &Resolver,
+    host: &str,
+    kind: u16,
+  ) -> Option<Answer> {
+    let wire = build_wire_query(host, kind);
+    let request = |client: &reqwest::Client| {
+      client
+        .post(resolver.url)
+        .header("content-type", "application/dns-message")
+        .header("accept", "application/dns-message")
+        .body(wire.clone())
+    };
+    let direct = self.direct.as_ref()?;
+    let response = if let Some(client) =
+      self.egress.as_ref().filter(|_| resolver.overseas)
+    {
+      match request(client).send().await {
+        Err(e) if e.is_connect() => request(direct).send().await,
+        result => result,
       }
+    } else {
+      request(direct).send().await
     }
-  })
-  .await
-  .ok()
-  .flatten()
+    .ok()?
+    .error_for_status()
+    .ok()?;
+    let bytes =
+      wharf_providers::http::limited_body(response, 64 * 1024)
+        .await
+        .ok()?;
+    if !bytes.starts_with(&[0, 0]) {
+      return None;
+    }
+    parse_response(&bytes, host, kind)
+  }
+}
+
+fn build_wire_query(host: &str, kind: u16) -> Vec<u8> {
+  let mut request = vec![0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0];
+  for label in host.split('.') {
+    request.push(label.len() as u8);
+    request.extend_from_slice(label.as_bytes());
+  }
+  request.push(0);
+  request.extend_from_slice(&kind.to_be_bytes());
+  request.extend_from_slice(&1u16.to_be_bytes());
+  request
 }
 
 fn read_u16(data: &[u8], at: usize) -> Option<u16> {
@@ -514,7 +613,7 @@ async fn watch(state: &AppState, host: &str, started: Instant) {
     if let Ok(snap) = snapshot::load(&state.db).await
       && let Ok(want) = expectation(&snap, host).await
     {
-      let result = check(host, want).await;
+      let result = check(&snap, host, want).await;
       update(host, Some(started), &result);
       if result.effective {
         break;
@@ -541,7 +640,8 @@ pub async fn show(
     &snap.world,
     &host,
   )?;
-  let result = check(&host, expectation(&snap, &host).await?).await;
+  let result =
+    check(&snap, &host, expectation(&snap, &host).await?).await;
   update(&host, started, &result);
   Ok(Json(result))
 }
@@ -573,18 +673,18 @@ mod tests {
   use super::*;
 
   #[test]
-  fn resolvers_and_proxied_records() {
+  fn doh_wire_query_and_effective_requires_match() {
     // 一条 A 应答，答案里的 owner 用压缩指针指向问题名。
     let answer = |ip: [u8; 4]| {
-      let mut response =
-        vec![0x12, 0x34, 0x81, 0x80, 0, 1, 0, 1, 0, 0, 0, 0];
-      response
-        .extend_from_slice(b"\x07example\x03com\x00\x00\x01\x00\x01");
+      let mut response = build_wire_query("example.test", 1);
+      assert_eq!(&response[..2], &[0, 0]);
+      response[2..4].copy_from_slice(&[0x81, 0x80]);
+      response[7] = 1;
       response.extend_from_slice(&[
         0xc0, 12, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4,
       ]);
       response.extend_from_slice(&ip);
-      parse_response(&response, "example.com", 1).unwrap()
+      parse_response(&response, "example.test", 1).unwrap()
     };
     let want = Expected::Address("1.2.3.4".parse().unwrap());
     let aaaa = Answer::default();
@@ -601,7 +701,11 @@ mod tests {
         DnsVerdict::Unavailable
       ]
     );
-    assert!(results.contains(&DnsVerdict::Mismatch));
+    assert!(!effective(results.into_iter()));
+    assert!(!effective([DnsVerdict::Unavailable; 3].into_iter()));
+    assert!(effective(
+      [DnsVerdict::Matches, DnsVerdict::Unavailable].into_iter()
+    ));
     let proxied = compare(
       &Expected::Cloudflare,
       Some(&answer([104, 16, 0, 1])),

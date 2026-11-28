@@ -314,6 +314,15 @@ pub(crate) async fn cleanup_data(
   };
   let snap = snapshot::load(&state.db).await?;
   let row = snap.world.services.get(service);
+  if let Some(consumer) =
+    crate::shared_volumes::consumers_on(&snap.world, service, server)
+      .next()
+  {
+    progress(format!(
+      "跳过清理 {server} 上 /srv/{service}：{consumer} 仍在引用共享卷"
+    ));
+    return Ok(());
+  }
   if row.is_some_and(|r| r.spec.server == server)
     || snap.deployed.get(service).is_some_and(|s| s == server)
     || snapshot::service_runtime_server(&snap, service)

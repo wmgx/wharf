@@ -115,6 +115,7 @@ mod security_receipt;
 mod service_monitor;
 mod sessions;
 mod share;
+mod shared_volumes;
 mod shell;
 mod snapshot;
 mod source_trust;

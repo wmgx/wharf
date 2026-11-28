@@ -1019,7 +1019,20 @@ async fn list_services(
           .is_none_or(|allowed| allowed.contains(*n))
       })
       .filter_map(|n| {
-        views::service_view(&snap, &net, n, Some(&live), &history)
+        let mut view = views::service_view(
+          &s.hub,
+          &snap,
+          &net,
+          n,
+          Some(&live),
+          &history,
+        )?;
+        if let Some(allowed) = &auth.services {
+          crate::scope_filter::filter_service_links(
+            allowed, &mut view,
+          );
+        }
+        Some(view)
       })
       .collect(),
   ))
@@ -1084,9 +1097,18 @@ async fn show_service(
   let net = snap.net(&snap.world);
   let history = crate::data::history(&s.db).await?;
   let live = views::cached_live(&s, &snap.world).await;
-  let mut view =
-    views::service_view(&snap, &net, &name, Some(&live), &history)
-      .ok_or_else(|| service_not_found(&name))?;
+  let mut view = views::service_view(
+    &s.hub,
+    &snap,
+    &net,
+    &name,
+    Some(&live),
+    &history,
+  )
+  .ok_or_else(|| service_not_found(&name))?;
+  if let Some(allowed) = &auth.services {
+    crate::scope_filter::filter_service_links(allowed, &mut view);
+  }
   if query.reveal {
     view.heartbeat =
       crate::service_monitor::heartbeat::view(&snap, &name, true);
@@ -2362,6 +2384,59 @@ async fn export(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn service_list_and_show_filter_shared_volume_links() {
+    let state = crate::rules::tests::test_state();
+    state.db.call(|c| {
+      for (kind, name, spec) in [
+        ("server", "s1", json!({})),
+        ("service", "photos", json!({
+          "server":"s1", "source":{"image":"nginx:1"},
+          "volumes":[{"name":"data","target":"/data"}]
+        })),
+        ("service", "secret-indexer", json!({
+          "server":"s1", "source":{"image":"nginx:1"},
+          "volumes":[{"name":"data","target":"/data","from_service":"photos:data"}]
+        })),
+      ] {
+        db::apply_write(c, &db::Write::Upsert {
+          kind: kind.into(), name: name.into(), spec, meta: json!({}),
+        })?;
+      }
+      Ok(())
+    }).await.unwrap();
+    let scoped = |name: &str| Auth {
+      name: "reader".into(),
+      perms: [Perm::Read].into(),
+      services: Some([name.into()].into()),
+      allowed_from: vec![],
+      expires_at: None,
+      human: false,
+    };
+    for name in ["photos", "secret-indexer"] {
+      let Json(list) =
+        list_services(State(state.clone()), scoped(name))
+          .await
+          .map_err(|e| e.0)
+          .unwrap();
+      assert_eq!(list.len(), 1);
+      let Json(show) = show_service(
+        State(state.clone()),
+        scoped(name),
+        Path(name.into()),
+        Query(ServiceQuery { reveal: false }),
+      )
+      .await
+      .map_err(|e| e.0)
+      .unwrap();
+      for view in [&list[0], &show] {
+        assert_eq!(view.name, name);
+        assert!(view.uses.is_empty());
+        assert!(view.used_by.is_empty());
+      }
+    }
+  }
 
   #[tokio::test]
   async fn previous_logs_rejects_old_agent() {

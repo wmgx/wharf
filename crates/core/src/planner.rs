@@ -112,6 +112,8 @@ pub enum Step {
     to: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     instance_id: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    shared_data: bool,
   },
   ServiceUp {
     service: String,
@@ -503,7 +505,7 @@ pub(crate) async fn make_plan_inner(
     &desired,
     &snap.secret_restrictions,
   )?;
-  desired.validate()?;
+  desired.validate_against(&current)?;
   for (name, row) in &desired.services {
     if current
       .services
@@ -976,7 +978,23 @@ fn finish_plan(
   b.warnings.extend(crate::lint::plan_warnings(
     snap, desired, &b.items, &b.steps,
   ));
-  b.steps.sort_by_key(|s| s.step.order());
+  b.steps.sort_by_key(|s| {
+    (
+      s.step.order(),
+      matches!(
+        s.step,
+        Step::EnsureDirs {
+          after_sync: true,
+          ..
+        }
+      ),
+    )
+  });
+  crate::shared_volumes::sort_steps(
+    &mut b.steps,
+    &snap.world,
+    desired,
+  );
   // 同一次执行里要起 Tailscale：起来后机器地址会变，后面的服务和网关按新地址渲染，
   // 和计划时的指纹对不上是正常的，不校验。
   if b
@@ -1537,16 +1555,16 @@ fn service_items(
         Step::EnsureDirs {
           server: server.clone(),
           dirs: new_dirs,
-          after_sync: moved.is_some(),
+          after_sync: moved.is_some()
+            || crate::shared_volumes::owners(&svc.spec).any(
+              |owner| {
+                moved_from(snap, current, owner, server).is_some()
+              },
+            ),
         },
       );
     }
 
-    let (_, hash) =
-      snapshot::service_resolved(desired, net, name, &render_values)?;
-    let template = snapshot::service_template(desired, net, name)?;
-    let after =
-      Some(json!({ "server": server, "compose": template }));
     let live = status
       .get(server)
       .and_then(|s| s.as_ref())
@@ -1586,6 +1604,21 @@ fn service_items(
           .any(|image| !svc.pins.contains_key(image)))
       .then(|| "按标签重新拉取未固定的镜像".into())
     });
+    let observed = if changed(writes, KIND_SERVICE, name) {
+      None
+    } else {
+      live.and_then(|p| p.hash.as_deref())
+    };
+    let hash = snapshot::service_hash(
+      desired,
+      net,
+      name,
+      &render_values,
+      observed,
+    )?;
+    let template = snapshot::service_template(desired, net, name)?;
+    let after =
+      Some(json!({ "server": server, "compose": template }));
     // 配置没变、只是要停下来：不重建，直接停。
     if moved.is_none()
       && svc.spec.stopped
@@ -1915,6 +1948,13 @@ fn service_items(
       "停止并删除容器",
     );
     for m in crate::data::mounts(name, &svc.spec) {
+      if m.kind == DataKind::Shared {
+        b.warnings.push(format!(
+          "服务 {name} 的{} 归拥有者服务，不会被这一步删除",
+          crate::data::describe(&m)
+        ));
+        continue;
+      }
       let gone = purge
         && m.kind != wharf_api_types::view::DataKind::ExternalDir;
       b.warnings.push(if gone {
@@ -2223,7 +2263,9 @@ fn move_items(
   let mounts = crate::data::mounts(name, source);
   let mut left: Vec<String> = mounts
     .iter()
-    .filter(|m| m.kind != DataKind::Managed)
+    .filter(|m| {
+      matches!(m.kind, DataKind::ExternalDir | DataKind::NamedVolume)
+    })
     .map(crate::data::describe)
     .collect();
   if let Some(actual) = b.migration_mounts.get(name) {
@@ -2286,6 +2328,13 @@ fn move_items(
       from: from.to_string(),
       to: to.to_string(),
       instance_id: Some(old.instance_id.clone()),
+      shared_data: crate::shared_volumes::consumers_on(
+        &snap.world,
+        name,
+        from,
+      )
+      .next()
+      .is_some(),
     },
   );
   for (server, role) in [(from, "源"), (to, "目标")] {
@@ -3635,46 +3684,80 @@ fn plaintext_hop(
   net: &Net,
   route: &RouteSpec,
 ) -> Vec<String> {
-  let Some(service) = world.services.get(&route.service) else {
+  if route.redirect.is_some() {
     return vec![];
-  };
-  let server = &service.spec.server;
-  let Some(addr) =
-    net.private.get(server).filter(|a| !a.network.encrypted())
-  else {
-    return vec![];
-  };
-  let Some(port) =
-    world.route_port(route).filter(|_| route.upstream.is_none())
-  else {
-    return vec![];
-  };
-  world
-    .route_gateways(route)
-    .into_iter()
-    .filter_map(|name| {
-      let gateway = &world.gateways.get(name)?.spec;
-      let choice = crate::link::choose(
-        world,
-        net,
-        gateway,
-        &route.service,
-        port,
-        route.link,
-      )
-      .ok()?;
-      matches!(choice, crate::link::Choice::Direct(_)).then(|| {
-        format!(
-          "网关（{}）到服务（{server}）这一段走内网直连 {}，是明文",
-          gateway.server, addr.ip
-        )
-      })
-    })
-    .collect()
+  }
+  let primary = world
+    .route_port(route)
+    .filter(|_| route.upstream.is_none())
+    .map(|port| (route.service.as_str(), port, ""));
+  let targets =
+    primary
+      .into_iter()
+      .chain(route.paths.iter().filter_map(|p| {
+        let service = p.service.as_deref()?;
+        let port = world.service_port(service, p.port.as_deref())?;
+        Some((service, port, p.path.as_str()))
+      }));
+  let mut warnings = Vec::new();
+  for gateway in world.route_gateways(route) {
+    let Some(gw) = world.gateways.get(gateway) else {
+      continue;
+    };
+    for (service, port, path) in targets.clone() {
+      if let Ok(crate::link::Choice::Direct(ip)) = crate::link::choose(
+        world, net, &gw.spec, service, port, route.link,
+      ) {
+        let server = &world.services[service].spec.server;
+        if !net.private[server].network.encrypted() {
+          warnings.push(format!("网关 {gateway}（{}）到服务 {service}（{server}）{path} 走内网直连 {ip}，是明文", gw.spec.server));
+        }
+      }
+    }
+  }
+  warnings
 }
 
 #[cfg(test)]
 mod tests {
+  #[test]
+  fn plaintext_hop_respects_tunnel_and_checks_paths() {
+    use wharf_api_types::spec::{
+      LinkMode, PrivateAddr, PrivateNetwork,
+    };
+    let mut world = world();
+    let mut backend = world.services["app"].clone();
+    backend.spec.server = "s2".into();
+    world.services.insert("api".into(), backend);
+    world.gateways.insert(
+      "entry".into(),
+      crate::world::GatewayRow {
+        spec: serde_json::from_value(
+          json!({"kind":"caddy","server":"s1"}),
+        )
+        .unwrap(),
+        version: 1,
+      },
+    );
+    let mut net = Net::default();
+    net.private.insert(
+      "s2".into(),
+      PrivateAddr {
+        ip: "203.0.113.2".into(),
+        network: PrivateNetwork::Lan,
+      },
+    );
+    let mut route = serde_json::from_value::<RouteSpec>(json!({
+      "hostname":"app.example.test", "service":"app", "gateway":"entry",
+      "paths":[{"path":"/api/*","service":"api"}], "link":"tunnel"
+    })).unwrap();
+    assert!(plaintext_hop(&world, &net, &route).is_empty());
+    route.link = LinkMode::Auto;
+    let warnings = plaintext_hop(&world, &net, &route);
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains("/api/*"));
+  }
+
   #[tokio::test]
   async fn monitor_headers_require_upgraded_agent_during_plan() {
     let state = crate::rules::tests::test_state();
@@ -5246,6 +5329,65 @@ mod tests {
   }
 
   #[tokio::test]
+  async fn interrupted_purge_resumes_in_original_order() {
+    let state = crate::rules::tests::test_state();
+    state.db.call(|c| {
+      let steps = ["reader", "photos"].map(|service| StepPlan {
+        title: String::new(),
+        items: vec![],
+        step: Step::ServiceDown {
+          service: service.into(),
+          server: "s1".into(),
+          instance_id: Some(format!("svc_{service}")),
+          purge_data: true,
+          has_relative_mounts: false,
+        },
+      });
+      let plan = finish_plan(
+        &Snapshot::default(),
+        &World::default(),
+        Builder::default(),
+        vec![],
+        BTreeSet::new(),
+        None,
+      ).plan;
+      crate::pending::stage(c, "r_delete", &plan, &[], &steps)?;
+      c.execute(
+        "INSERT INTO runs (id, plan_id, status, body, started_at, retry_meta)
+         VALUES ('r_delete', ?1, 'failed', '{}', 0, ?2)",
+        rusqlite::params![plan.plan_id, json!({"steps":steps}).to_string()],
+      ).map_err(crate::db::sql_err)?;
+      Ok(())
+    }).await.unwrap();
+    state.hub.mock_agent("s1", false, |op| match op {
+      wharf_api_types::agent::AgentOp::ProjectStatus {
+        projects,
+        ..
+      } => {
+        assert_eq!(projects, ["photos", "reader"]);
+        Ok(json!([]))
+      }
+      _ => panic!("plan 只应查询现状"),
+    });
+    let planned =
+      make_plan(&state, PlanRequest::default()).await.unwrap();
+    let deletes: Vec<_> = planned
+      .steps
+      .iter()
+      .filter_map(|p| match &p.step {
+        Step::ServiceDown {
+          service,
+          purge_data: true,
+          ..
+        } => Some(service.as_str()),
+        _ => None,
+      })
+      .collect();
+    assert_eq!(deletes, ["reader", "photos"]);
+    assert!(planned.writes.is_empty());
+  }
+
+  #[tokio::test]
   async fn plan_keeps_confirmed_non_purge_delete() {
     let state = crate::rules::tests::test_state();
     state
@@ -5432,6 +5574,68 @@ mod tests {
         },
       )])),
     )])
+  }
+
+  #[test]
+  fn implicit_srv_mount_warns_to_use_from_service() {
+    let mut world = world();
+    let owner = world.services["app"].clone();
+    let app = world.services.get_mut("app").unwrap();
+    app.spec.source = Source::Compose {
+      content: Some("x-a: &a {volumes: ['/srv/photos/originals:/photos:ro']}\nservices: {app: {<<: *a, image: 'fixture:1'}}".into()),
+      file: None,
+    };
+    app.spec.ports.clear();
+    app.host_ports.clear();
+    world.services.insert("photos".into(), owner);
+    let mut status =
+      live(Some(hash_of(&world)), vec![container("running")]);
+    let projects = status.get_mut("s1").unwrap().as_mut().unwrap();
+    let mut owner = projects["app"].clone();
+    owner.project = "photos".into();
+    owner.containers[0].service = "photos".into();
+    owner.containers[0].name = "photos-photos-1".into();
+    owner.hash = Some(
+      snapshot::service_resolved(
+        &world,
+        &Net::default(),
+        "photos",
+        &Default::default(),
+      )
+      .unwrap()
+      .1,
+    );
+    projects.insert("photos".into(), owner);
+    let b = plan(&world, &world, &status);
+    assert!(b.items.is_empty());
+    let snap = Snapshot {
+      world,
+      ..Snapshot::default()
+    };
+    let has_warning = |warnings: Vec<(String, String)>| {
+      warnings
+        .iter()
+        .any(|(_, message)| message.contains("photos:originals"))
+    };
+    assert!(has_warning(crate::lint::scoped_warnings(
+      &snap,
+      &BTreeSet::from(["app".into()]),
+      &BTreeSet::new(),
+    )));
+    let step = StepPlan {
+      items: vec![],
+      title: String::new(),
+      step: Step::ServiceUp {
+        service: "app".into(),
+        instance_id: None,
+        expect: None,
+      },
+    };
+    assert!(
+      crate::lint::plan_warnings(&snap, &snap.world, &[], &[step])
+        .iter()
+        .any(|warning| warning.contains("photos:originals"))
+    );
   }
 
   fn hash_of(w: &World) -> String {

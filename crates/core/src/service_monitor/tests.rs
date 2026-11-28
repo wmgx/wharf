@@ -67,7 +67,7 @@ fn invalid_regex_returns_validation_hint() {
   w.spec.pattern = "(".into();
   w.spec.regex = true;
   spec.log_alerts.push(w.spec);
-  assert!(validate(&spec).unwrap_err().hint.is_some());
+  assert!(validate(&spec, None).unwrap_err().hint.is_some());
 }
 
 #[test]
@@ -292,6 +292,19 @@ fn backfilled_log_hits_keep_the_sample_time_and_reject_other_servers()
   let hits = &memory.hits[&hit.id];
   assert_eq!(hits.last, Some(at));
   assert_eq!(hits.batches.len(), 1);
+}
+
+#[test]
+fn unchanged_legacy_check_survives_plan_validation() {
+  let mut spec: ServiceSpec = serde_json::from_value(json!({
+    "source":{"image":"nginx:1"},"server":"s1",
+    "log_alerts":[{"pattern":"fixture","window_mins":1441}],
+  }))
+  .unwrap();
+  let installed = spec.clone();
+  assert!(validate(&installed, Some(&installed)).is_ok());
+  spec.log_alerts[0].window_mins += 1;
+  assert!(validate(&spec, Some(&installed)).is_err());
 }
 
 #[tokio::test]

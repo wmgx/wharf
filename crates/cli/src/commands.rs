@@ -619,11 +619,21 @@ async fn dispatch(
       out(j, &v, print::metrics);
       Ok(())
     }
-    Command::Doctor { hostname } => {
-      let path = match &hostname {
-        Some(h) => format!("/api/doctor?host={}", seg(h)),
-        None => "/api/doctor".to_string(),
-      };
+    Command::Doctor {
+      hostname,
+      service,
+      server,
+    } => {
+      let path = [
+        ("host", hostname),
+        ("service", service),
+        ("server", server),
+      ]
+      .into_iter()
+      .find_map(|(key, value)| {
+        value.map(|v| format!("/api/doctor?{key}={}", seg(&v)))
+      })
+      .unwrap_or_else(|| "/api/doctor".into());
       let v: DoctorReport = c.get(&path).await?;
       out(j, &v, print::doctor);
       let bad = v
@@ -631,6 +641,7 @@ async fn dispatch(
         .iter()
         .chain(&v.vendors)
         .chain(&v.config)
+        .chain(&v.checks)
         .chain(v.routes.iter().flat_map(|r| &r.checks))
         .filter(|c| c.status == CheckStatus::Bad)
         .count();
@@ -1327,11 +1338,15 @@ async fn server(
         }
         println!("本机监听\n协议/端口  地址  归属  名字  状态");
         for p in &v.ports {
+          let address = p.family.as_ref().map_or_else(
+            || p.addr.clone(),
+            |family| format!("{} ({family})", p.addr),
+          );
           println!(
             "{}/{}  {}  {}  {}  {}",
             p.proto,
             p.port,
-            p.addr,
+            address,
             p.owner,
             p.name,
             if p.expected {
@@ -1585,26 +1600,11 @@ async fn server(
           settings.build_env.insert(k, v);
         }
       }
-      if let Some(ip) = private_ip {
-        let ip = ip.trim();
-        settings.private_addr = if ip.is_empty() {
-          None
-        } else {
-          ip.parse::<std::net::IpAddr>().map_err(|_| {
-            ApiError::invalid(format!(
-              "--private-ip {ip} 不是 IP 地址"
-            ))
-          })?;
-          Some(PrivateAddr {
-            ip: ip.to_string(),
-            network: if network == "overlay" {
-              PrivateNetwork::Overlay
-            } else {
-              PrivateNetwork::Lan
-            },
-          })
-        };
-      }
+      set_private_network(
+        &mut settings,
+        private_ip.as_deref(),
+        network.as_deref(),
+      )?;
       if let Some(mode) = mode {
         settings.network_mode = match mode.as_str() {
           "tailscale" => Some(NetworkMode::Tailscale),
@@ -2850,18 +2850,6 @@ async fn service(
       for k in &unset_env {
         spec.env.remove(k);
       }
-      for v in &volume {
-        let (vname, target) = v.split_once(':').ok_or_else(|| {
-          ApiError::invalid(format!(
-            "--volume {v} 格式不对，应为 data:/data"
-          ))
-        })?;
-        spec.volumes.retain(|x| x.name != vname);
-        spec.volumes.push(VolumeSpec {
-          name: vname.to_string(),
-          target: target.to_string(),
-        });
-      }
       for name in unset_volume {
         let index = spec
           .volumes
@@ -2871,6 +2859,11 @@ async fn service(
             ApiError::invalid(format!("数据卷 {name} 不存在"))
           })?;
         spec.volumes.remove(index);
+      }
+      for arg in &volume {
+        let v = parse_volume_arg(arg)?;
+        spec.volumes.retain(|x| x.name != v.name);
+        spec.volumes.push(v);
       }
       changes(
         c,
@@ -5061,6 +5054,46 @@ fn infer_ignore_image(source: &Source) -> CliResult<String> {
   }
 }
 
+fn parse_volume_arg(raw: &str) -> Result<VolumeSpec, ApiError> {
+  let invalid = || {
+    ApiError::invalid(format!("--volume {raw} 格式不对"))
+      .with_hint("使用 name:/target[:ro|:rw] 或 [本地名=]服务:卷:/target[:ro|:rw]")
+  };
+  let (left, target) = raw.split_once(":/").ok_or_else(invalid)?;
+  let (target, read_only) = match target.strip_suffix(":ro") {
+    Some(target) => (target, true),
+    None => (target.strip_suffix(":rw").unwrap_or(target), false),
+  };
+  if target.contains(':') {
+    return Err(invalid());
+  }
+  let (alias, reference) = left
+    .split_once('=')
+    .map_or((None, left), |(alias, reference)| {
+      (Some(alias), reference)
+    });
+  let (name, from_service) =
+    if let Some((owner, volume)) = reference.split_once(':') {
+      wharf_api_types::validate_name("服务", owner)
+        .map_err(|_| invalid())?;
+      wharf_api_types::validate_name("数据卷", volume)
+        .map_err(|_| invalid())?;
+      (alias.unwrap_or(volume), Some(reference.to_string()))
+    } else if alias.is_none() {
+      (reference, None)
+    } else {
+      return Err(invalid());
+    };
+  wharf_api_types::validate_name("数据卷", name)
+    .map_err(|_| invalid())?;
+  Ok(VolumeSpec {
+    name: name.to_string(),
+    target: format!("/{target}"),
+    from_service,
+    read_only,
+  })
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -5268,4 +5301,100 @@ mod tests {
         .is_err()
     );
   }
+}
+
+fn set_private_network(
+  settings: &mut wharf_api_types::spec::ServerSettings,
+  ip: Option<&str>,
+  network: Option<&str>,
+) -> Result<(), ApiError> {
+  let network = network.map(|n| {
+    if n == "overlay" {
+      PrivateNetwork::Overlay
+    } else {
+      PrivateNetwork::Lan
+    }
+  });
+  match (ip.map(str::trim), network) {
+    (Some(""), Some(_)) => {
+      return Err(ApiError::invalid(
+        "清空 --private-ip 时不能同时指定 --network",
+      ));
+    }
+    (Some(""), None) => settings.private_addr = None,
+    (Some(ip), network) => {
+      ip.parse::<std::net::IpAddr>().map_err(|_| {
+        ApiError::invalid(format!("--private-ip {ip} 不是 IP 地址"))
+      })?;
+      let network = network
+        .or_else(|| settings.private_addr.as_ref().map(|a| a.network))
+        .unwrap_or(PrivateNetwork::Lan);
+      settings.private_addr = Some(PrivateAddr {
+        ip: ip.into(),
+        network,
+      });
+    }
+    (None, Some(network)) => {
+      let addr = settings.private_addr.as_mut().ok_or_else(|| {
+        ApiError::invalid("这台服务器还没有手动设置内网地址，请同时传 --private-ip")
+          .with_hint("wharf server set <name> --private-ip <IP> --network overlay")
+      })?;
+      addr.network = network;
+    }
+    (None, None) => {}
+  }
+  Ok(())
+}
+
+#[test]
+fn server_network_preserve_when_only_ip_changes() {
+  let mut settings = wharf_api_types::spec::ServerSettings::default();
+  assert!(
+    set_private_network(&mut settings, None, Some("overlay"))
+      .is_err()
+  );
+  set_private_network(
+    &mut settings,
+    Some("100.64.0.2"),
+    Some("overlay"),
+  )
+  .unwrap();
+  set_private_network(&mut settings, Some("100.64.0.3"), None)
+    .unwrap();
+  assert_eq!(
+    settings.private_addr.unwrap().network,
+    PrivateNetwork::Overlay
+  );
+}
+
+#[test]
+fn parse_volume_arg_handles_local_shared_alias_and_ro() {
+  for (raw, name, reference, read_only) in [
+    ("data:/data", "data", None, false),
+    ("data:/data:ro", "data", None, true),
+    (
+      "photos:originals:/data:ro",
+      "originals",
+      Some("photos:originals"),
+      true,
+    ),
+    (
+      "pic=photos:originals:/data:rw",
+      "pic",
+      Some("photos:originals"),
+      false,
+    ),
+  ] {
+    let v = parse_volume_arg(raw).unwrap();
+    assert_eq!(
+      (
+        v.name.as_str(),
+        v.from_service.as_deref(),
+        v.target.as_str(),
+        v.read_only
+      ),
+      (name, reference, "/data", read_only)
+    );
+  }
+  assert!(parse_volume_arg("a:b:c:/x").is_err());
 }

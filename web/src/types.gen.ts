@@ -744,14 +744,16 @@ export interface CustomAlertRuleView {
 /**
  * 数据归属：决定迁移、备份、删除时动不动它。
  */
-export type DataKind = "managed" | "external_dir" | "named_volume";
+export type DataKind = "managed" | "shared" | "external_dir" | "named_volume";
 
 export interface DataMount {
   /**
    * compose 里的服务名；image / build 来源为空。
    */
   container?: string | null;
+  from_service?: string | null;
   kind: DataKind;
+  read_only?: boolean;
   resolved?: string | null;
   /**
    * 宿主机路径或卷名；匿名卷为空。
@@ -894,6 +896,7 @@ export interface DoctorCheck {
  */
 export interface DoctorReport {
   checked_at: string;
+  checks?: DoctorCheck[];
   config?: DoctorCheck[];
   routes: RouteDiagnosis[];
   servers: DoctorCheck[];
@@ -2079,6 +2082,7 @@ export interface PortRow {
   acked: boolean;
   addr: string;
   expected: boolean;
+  family?: string | null;
   name: string;
   owner: string;
   port: number;
@@ -2294,6 +2298,7 @@ export interface RouteDiagnosis {
    * 这个域名的注册到期时间（后台用 RDAP 查，查不到没有）。
    */
   domain_expires?: string | null;
+  edge_app?: string | null;
   hostname: string;
   url: string;
 }
@@ -2930,6 +2935,10 @@ export interface ServiceView {
    */
   note?: string | null;
   port_checks?: Record<string, boolean>;
+  /**
+   * 在线 agent 是否支持端口探测，能力未知时为空。
+   */
+  port_checks_supported?: boolean | null;
   risks?: string[];
   spec: ServiceSpec;
   /**
@@ -3395,6 +3404,14 @@ export interface VersionCheck {
  * 目录挂载：宿主机 `/srv/<service>/<name>/` 挂到容器内 `target`。
  */
 export interface VolumeSpec {
-  name: string;
+  /**
+   * 同机拥有者的托管卷，格式为 <服务名>:<卷名>。
+   */
+  from_service?: string | null;
+  /**
+   * 本地卷名。共享卷省略时取拥有者的卷名。
+   */
+  name?: string;
+  read_only?: boolean;
   target: string;
 }

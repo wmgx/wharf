@@ -57,10 +57,12 @@ pub async fn probe_all(
       (from.to_string(), to)
     })
     .collect();
-  tokio::join!(
+  let (_, _, relays) = tokio::join!(
     link::probe_pairs(s, &net, pairs, link::ProbeMode::Persist),
-    crate::tailnet_probe::probe_extra(s, &snap, &net)
+    crate::tailnet_probe::probe_extra(s, &snap, &net),
+    crate::tailnet_probe::refresh(s)
   );
+  relays?;
   Ok(snap)
 }
 
@@ -118,4 +120,40 @@ async fn view(
     links,
     relays,
   })
+}
+
+#[tokio::test]
+async fn network_probe_refreshes_relays() {
+  use serde_json::json;
+  use std::sync::atomic::{AtomicUsize, Ordering};
+  use wharf_api_types::{ApiError, agent::AgentOp};
+
+  let state = crate::rules::tests::test_state();
+  state.db.call(|c| {
+    for (name, ip) in [("s1", "100.64.0.2"), ("s2", "100.64.0.3")] {
+      db::apply_write(c, &db::Write::Upsert {
+        kind:"server".into(), name:name.into(),
+        spec:json!({"private_addr":{"ip":ip,"network":"tailscale"}}),
+        meta:json!({}),
+      })?;
+    }
+    Ok(())
+  }).await.unwrap();
+  let requests = Arc::new(AtomicUsize::new(0));
+  for name in ["s1", "s2"] {
+    let requests = requests.clone();
+    state.hub.mock_agent(name, false, move |op| match op {
+      AgentOp::HostExec(_) => {
+        requests.fetch_add(1, Ordering::Relaxed);
+        Err(ApiError::invalid("测试状态"))
+      }
+      AgentOp::Probe { targets } => {
+        Ok(json!(vec![true; targets.len()]))
+      }
+      _ => panic!("意外的 agent 请求"),
+    });
+    state.hub.enable_mock_host_shell(name);
+  }
+  probe_all(&state).await.unwrap();
+  assert_eq!(requests.load(Ordering::Relaxed), 2);
 }

@@ -1080,3 +1080,23 @@ pub fn normalize_image_digests(images: &mut [ImageInfo]) {
       .and_then(|d| normalize_image_digest(&image.image, d));
   }
 }
+
+#[test]
+fn foreign_running_container_does_not_make_project_running() {
+  let project: ProjectState = serde_json::from_value(serde_json::json!({
+    "project":"app","containers":[{"service":"app","name":"app-1","state":"running","foreign":true}]
+  })).unwrap();
+  assert!(!project.all_running());
+}
+
+/// 查询 /srv 下数据路径的 Docker bind 挂载者。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BindMountQuery {
+  pub path: String,
+  #[serde(default)]
+  pub running_only: bool,
+  #[serde(default)]
+  pub writable_only: bool,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub exclude_projects: Vec<String>,
+}

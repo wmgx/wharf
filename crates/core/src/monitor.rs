@@ -245,6 +245,114 @@ pub fn judge(m: &MonitorSpec, r: &HttpCheckResult) -> (bool, String) {
   )
 }
 
+async fn record(
+  state: &AppState,
+  service: &str,
+  at: i64,
+  ok: bool,
+  detail: &str,
+  manual: bool,
+) {
+  {
+    let Ok(mut results) = LAST.lock() else { return };
+    let fails = match results.get(service) {
+      Some(old) if old.at > at => return,
+      previous if !ok => previous
+        .map_or(0, |old| old.fails)
+        .saturating_add(u32::from(!manual)),
+      _ => 0,
+    };
+    results.insert(
+      service.into(),
+      MonitorView {
+        ok,
+        detail: detail.into(),
+        at,
+        fails,
+      },
+    );
+  }
+  if ok || !manual {
+    crate::rules::observe(
+      state,
+      "monitor.ok",
+      service,
+      f64::from(u8::from(ok)),
+      detail,
+    )
+    .await;
+  }
+}
+
+pub(crate) async fn doctor_monitor(
+  state: &AppState,
+  snap: &crate::snapshot::Snapshot,
+  service: &str,
+  row: &ServiceRow,
+) -> Option<wharf_api_types::view::DoctorCheck> {
+  use wharf_api_types::view::CheckStatus;
+  let monitor =
+    row.spec.monitor.as_ref().filter(|_| !row.spec.stopped)?;
+  let server = &row.spec.server;
+  let check = |status, detail: String| {
+    crate::doctor::check("monitor", service, status, detail)
+  };
+  if !state.hub.is_online(server) {
+    return Some(check(
+      CheckStatus::Skip,
+      "agent 离线，测不了".into(),
+    ));
+  }
+  let at = chrono::Utc::now().timestamp_millis();
+  if let Err(error) = require_agent(state, &row.spec) {
+    return Some(check(CheckStatus::Skip, error.message));
+  }
+  let secrets = crate::secret_policy::service_secrets(
+    &snap.world,
+    service,
+    &snap.secrets,
+  );
+  let (ok, detail) = match build_http_check(row, monitor, &secrets) {
+    Ok(job) => match request(state, server, job).await {
+      Ok(result) => judge(monitor, &result),
+      Err(_) => {
+        return Some(check(
+          CheckStatus::Bad,
+          "未取得监控结果".into(),
+        ));
+      }
+    },
+    Err(e) => (false, e),
+  };
+  let detail = crate::log_redact::redact_text(&detail);
+  record(state, service, at, ok, &detail, true).await;
+  Some(check(
+    if ok {
+      CheckStatus::Ok
+    } else {
+      CheckStatus::Bad
+    },
+    detail,
+  ))
+}
+
+async fn request(
+  state: &AppState,
+  server: &str,
+  job: HttpCheck,
+) -> Result<HttpCheckResult, wharf_api_types::ApiError> {
+  state
+    .hub
+    .call(
+      server,
+      AgentOp::HttpCheck(job),
+      Duration::from_secs(TIMEOUT_SECS + 10),
+      None,
+      &tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+}
+
 pub fn spawn(state: Arc<AppState>) {
   tokio::spawn(async move {
     tokio::time::sleep(Duration::from_secs(90)).await;
@@ -300,34 +408,14 @@ async fn round(state: &Arc<AppState>) {
     let (state, server, m) =
       (state.clone(), row.spec.server.clone(), m.clone());
     let checked_row = row.clone();
+    let at = crate::db::now_ms();
     tokio::spawn(async move {
       if let Some((ok, detail)) =
         check_one(&state, &server, &m, job).await
         && let Ok(current) = crate::snapshot::load(&state.db).await
         && current.world.services.get(&name) == Some(&checked_row)
       {
-        let fails = if ok {
-          0
-        } else {
-          last(&name).map_or(1, |view| view.fails + 1)
-        };
-        LAST.lock().unwrap().insert(
-          name.clone(),
-          MonitorView {
-            ok,
-            detail: detail.clone(),
-            at: crate::db::now_ms(),
-            fails,
-          },
-        );
-        crate::rules::observe(
-          &state,
-          "monitor.ok",
-          &name,
-          f64::from(u8::from(ok)),
-          &detail,
-        )
-        .await;
+        record(&state, &name, at, ok, &detail, false).await;
       }
       IN_FLIGHT.lock().unwrap().remove(&name);
     });
@@ -348,19 +436,8 @@ async fn check_one(
     Err(e) => return Some((false, e)),
   };
   let retries = m.retries.unwrap_or_default().min(5);
-  let cancel = tokio_util::sync::CancellationToken::new();
   for attempt in 0..=retries {
-    let result = state
-      .hub
-      .call::<HttpCheckResult>(
-        server,
-        AgentOp::HttpCheck(job.clone()),
-        Duration::from_secs(TIMEOUT_SECS + 10),
-        None,
-        &cancel,
-      )
-      .await
-      .ok()?;
+    let result = request(state, server, job.clone()).await.ok()?;
     let (ok, mut detail) = judge(m, &result);
     if ok || attempt == retries {
       if !ok && retries > 0 {
@@ -419,6 +496,46 @@ mod tests {
       url(&row, &m).unwrap_err(),
       "端口 game 是 UDP，监控不了"
     );
+  }
+
+  #[tokio::test]
+  async fn manual_monitor_recovery_clears_failed_status() {
+    let _guard = crate::rules::tests::TEST_LOCK.lock().await;
+    crate::rules::tests::reset_memory();
+    let state = crate::rules::tests::test_state();
+    let service = "p203-monitor-worker";
+    for _ in 0..3 {
+      crate::rules::observe(
+        &state,
+        "monitor.ok",
+        service,
+        0.0,
+        "503",
+      )
+      .await;
+    }
+    assert!(
+      crate::rules::firing_since("monitor_failed", service).is_some()
+    );
+    LAST.lock().unwrap().insert(
+      service.into(),
+      MonitorView {
+        ok: false,
+        detail: "503".into(),
+        at: 1,
+        fails: 3,
+      },
+    );
+    record(&state, service, 2, false, "503", true).await;
+    assert_eq!(last(service).unwrap().fails, 3);
+    record(&state, service, 3, true, "200", true).await;
+    record(&state, service, 2, false, "503", false).await;
+    assert!(
+      crate::rules::firing_since("monitor_failed", service).is_none()
+    );
+    let recovered = LAST.lock().unwrap().remove(service).unwrap();
+    assert!(recovered.ok);
+    assert_eq!(recovered.fails, 0);
   }
 
   #[test]

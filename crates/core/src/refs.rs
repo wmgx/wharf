@@ -113,6 +113,16 @@ pub fn resolve(
   world: &World,
   net: &Net,
 ) -> Result<String, ApiError> {
+  resolve_with_host_style(text, me, world, net, false)
+}
+
+pub(crate) fn resolve_with_host_style(
+  text: &str,
+  me: &str,
+  world: &World,
+  net: &Net,
+  legacy: bool,
+) -> Result<String, ApiError> {
   if !text.contains("[[@") {
     return Ok(text.to_string());
   }
@@ -184,7 +194,8 @@ pub fn resolve(
     };
     Ok(match r.part {
       Part::Both => format!("{host}:{port}"),
-      Part::Host => host,
+      Part::Host if legacy => host,
+      Part::Host => addr.ip.clone(),
       Part::Port => port.to_string(),
     })
   })
@@ -218,6 +229,23 @@ mod tests {
         network: wharf_api_types::spec::PrivateNetwork::Tailscale,
       },
     );
+    net.private.get_mut("s1").unwrap().ip = "2001:db8::1".into();
+    assert_eq!(
+      resolve("[[@db:host]] [[@db]]", "db", &world, &net).unwrap(),
+      "2001:db8::1 [2001:db8::1]:21000"
+    );
+    assert_eq!(
+      resolve_with_host_style(
+        "[[@db:host]]",
+        "db",
+        &world,
+        &net,
+        true
+      )
+      .unwrap(),
+      "[2001:db8::1]"
+    );
+    net.private.get_mut("s1").unwrap().ip = "100.64.0.1".into();
     let text = "URL=prefix[[@bad [[@db]]";
     assert_eq!(used(text), ["db"]);
     assert_eq!(

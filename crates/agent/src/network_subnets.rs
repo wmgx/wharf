@@ -152,24 +152,47 @@ fn host_subnets(bridge_ifaces: &BTreeSet<String>) -> Vec<String> {
     .collect();
   let routes =
     std::fs::read_to_string("/proc/net/route").unwrap_or_default();
-  subnets.extend(routes.lines().skip(1).filter_map(|line| {
-    let mut fields = line.split_whitespace();
-    if !non_docker(fields.next()?) {
-      return None;
-    }
-    let addr = route_ipv4(fields.next()?)?;
-    let flags = u32::from_str_radix(fields.nth(1)?, 16).ok()?;
-    let mask = route_ipv4(fields.nth(3)?)?;
-    if flags & 1 == 0
-      || mask.is_unspecified()
-      || addr.is_loopback()
-      || addr.is_link_local()
-    {
-      return None;
-    }
-    cidr(addr, mask)
-  }));
+  subnets.extend(
+    routes
+      .lines()
+      .skip(1)
+      .filter_map(|line| direct_route(line, non_docker)),
+  );
   subnets.into_iter().collect()
+}
+
+fn direct_route(
+  line: &str,
+  non_docker: impl Fn(&str) -> bool,
+) -> Option<String> {
+  let mut fields = line.split_whitespace();
+  if !non_docker(fields.next()?) {
+    return None;
+  }
+  let addr = route_ipv4(fields.next()?)?;
+  let flags = u32::from_str_radix(fields.nth(1)?, 16).ok()?;
+  let mask = route_ipv4(fields.nth(3)?)?;
+  if flags & 1 == 0
+    || flags & 2 != 0
+    || mask.is_unspecified()
+    || addr.is_loopback()
+    || addr.is_link_local()
+  {
+    return None;
+  }
+  cidr(addr, mask)
+}
+
+#[test]
+fn gateway_route_ignored() {
+  let route = |flags| {
+    direct_route(
+      &format!("eth0 007100CB 00000000 {flags} 0 0 0 00FFFFFF 0 0 0"),
+      |_| true,
+    )
+  };
+  assert!(route("0003").is_none());
+  assert_eq!(route("0001").as_deref(), Some("203.0.113.0/24"));
 }
 
 fn route_ipv4(hex: &str) -> Option<Ipv4Addr> {

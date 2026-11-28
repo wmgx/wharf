@@ -208,6 +208,9 @@ pub struct ServiceView {
   pub log_alerts: Vec<crate::service_checks::LogAlertView>,
   #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
   pub port_checks: BTreeMap<String, bool>,
+  /// 在线 agent 是否支持端口探测，能力未知时为空。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub port_checks_supported: Option<bool>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub heartbeat: Option<crate::service_checks::HeartbeatView>,
   /// 用 `[[@服务]]` 引用了哪些服务。
@@ -410,6 +413,8 @@ pub struct ImportRecord {
 pub enum DataKind {
   /// `/srv/<服务>/` 下：迁移时同步、每天备份、迁走后旧机器上的 7 天后删除。
   Managed,
+  /// 数据归同机的拥有者服务。
+  Shared,
   /// 其他宿主机目录：Wharf 不迁移、不备份、不删除。
   ExternalDir,
   /// docker 命名卷或匿名卷：Wharf 不迁移、不备份、不删除。
@@ -420,6 +425,10 @@ pub enum DataKind {
   Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
 )]
 pub struct DataMount {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub from_service: Option<String>,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub read_only: bool,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub resolved: Option<String>,
   pub kind: DataKind,
@@ -1217,6 +1226,8 @@ pub struct DoctorReport {
   pub vendors: Vec<DoctorCheck>,
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub config: Vec<DoctorCheck>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub checks: Vec<DoctorCheck>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1231,6 +1242,8 @@ pub struct RouteDiagnosis {
   /// 这个域名的注册到期时间（后台用 RDAP 查，查不到没有）。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub domain_expires: Option<DateTime<Utc>>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub edge_app: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1810,6 +1823,8 @@ pub struct PortRow {
   pub name: String,
   pub expected: bool,
   pub acked: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub family: Option<String>,
 }
 
 #[derive(

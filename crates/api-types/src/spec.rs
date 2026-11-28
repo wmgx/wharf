@@ -314,8 +314,15 @@ pub struct PortSpec {
   Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
 )]
 pub struct VolumeSpec {
+  /// 本地卷名。共享卷省略时取拥有者的卷名。
+  #[serde(default, skip_serializing_if = "String::is_empty")]
   pub name: String,
   pub target: String,
+  /// 同机拥有者的托管卷，格式为 <服务名>:<卷名>。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub from_service: Option<String>,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub read_only: bool,
 }
 
 #[derive(

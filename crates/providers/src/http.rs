@@ -8,10 +8,15 @@ use reqwest::{Client, RequestBuilder, Response};
 /// 经出口出去的设置。
 #[derive(Clone)]
 pub struct Route {
-  /// 带口令的代理地址。
-  pub proxy: String,
+  pub proxy: reqwest::Proxy,
   pub all: bool,
   pub domains: Vec<String>,
+}
+
+impl Route {
+  pub fn matches(&self, host: &str) -> bool {
+    wharf_api_types::egress::via_exit(host, self.all, &self.domains)
+  }
 }
 
 static ROUTE: RwLock<Option<Route>> = RwLock::new(None);
@@ -41,10 +46,9 @@ impl Http {
     Ok(Http {
       direct: builder().no_proxy().build()?,
       exit: match route {
-        Some(r) => Some((
-          builder().proxy(reqwest::Proxy::all(&r.proxy)?).build()?,
-          r,
-        )),
+        Some(r) => {
+          Some((builder().proxy(r.proxy.clone()).build()?, r))
+        }
         None => None,
       },
     })
@@ -57,9 +61,9 @@ impl Http {
   ) -> reqwest::Result<Response> {
     let request = req(&self.direct).build()?;
     let host = request.url().host_str().unwrap_or("").to_string();
-    let Some((client, _)) = self.exit.as_ref().filter(|(_, r)| {
-      wharf_api_types::egress::via_exit(&host, r.all, &r.domains)
-    }) else {
+    let Some((client, _)) =
+      self.exit.as_ref().filter(|(_, r)| r.matches(&host))
+    else {
       return self.direct.execute(request).await;
     };
     let Some(retry) = request.try_clone() else {

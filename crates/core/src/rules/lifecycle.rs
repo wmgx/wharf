@@ -187,18 +187,22 @@ pub(crate) fn stopped_route(
 ) -> bool {
   route.upstream.is_none()
     && route.redirect.is_none()
-    && !route.paths.iter().any(|p| {
-      p.upstream.is_some()
-        || p
-          .service
-          .as_ref()
-          .and_then(|name| world.services.get(name))
-          .is_some_and(|row| !row.spec.stopped)
-    })
+    && !route.paths.iter().any(|p| active_path(world, p))
     && world
       .services
       .get(&route.service)
       .is_some_and(|r| r.spec.stopped)
+}
+
+pub(crate) fn active_path(
+  world: &World,
+  path: &wharf_api_types::spec::PathRoute,
+) -> bool {
+  path.upstream.is_some()
+    || path
+      .service
+      .as_deref()
+      .is_some_and(|name| running_service(world, name))
 }
 
 pub(crate) fn running_service(world: &World, name: &str) -> bool {
@@ -380,6 +384,7 @@ pub(crate) async fn reconcile_world(
   Ok(())
 }
 
+#[derive(Default)]
 pub(crate) struct Changes {
   services: BTreeSet<String>,
   limits: BTreeSet<String>,
@@ -392,17 +397,15 @@ pub(crate) struct Changes {
 }
 
 impl Changes {
+  pub(crate) fn deleted_service(name: &str) -> Self {
+    Self {
+      services: BTreeSet::from([name.to_string()]),
+      ..Self::default()
+    }
+  }
+
   pub(crate) fn between(old: &World, new: &World) -> Self {
-    let mut changes = Self {
-      services: BTreeSet::new(),
-      limits: BTreeSet::new(),
-      monitors: BTreeSet::new(),
-      heartbeats: BTreeSet::new(),
-      routes: BTreeSet::new(),
-      servers: BTreeSet::new(),
-      gateways: BTreeSet::new(),
-      certs: BTreeSet::new(),
-    };
+    let mut changes = Self::default();
     for (name, row) in &old.services {
       let Some(next) = new.services.get(name) else {
         changes.services.insert(name.clone());

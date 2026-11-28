@@ -20,6 +20,7 @@ import { ServerHostUnits } from "./host-units";
 import { ServerLinks } from "./links";
 import { Overview } from "./overview";
 import { NetworkSettings, SettingsForm } from "./settings";
+import { ServerDisk } from "./disk";
 import { SystemDisk, SystemInfo, SshLogins } from "./system";
 
 function useHostInfo(name: string, online: boolean) {
@@ -121,7 +122,13 @@ export function ServerDetail() {
           <Skeleton className="h-40 rounded-xl" />
         </> : <SystemInfo info={info} server={server} onRefresh={host.load} loading={host.loading} />}
       </TabsContent>
-      <TabsContent value="disk" className="mt-4">{info ? <SystemDisk info={info} server={server} /> : <Empty>读不到磁盘信息</Empty>}</TabsContent>
+      <TabsContent value="disk" className="mt-4">
+        {!server.online ? <Empty>服务器离线，读不到磁盘信息</Empty> : !info ? <>
+          <ErrorNote error={host.error} />
+          {!host.error && <Skeleton className="h-40 rounded-xl" />}
+        </> : <SystemDisk info={info} server={server} />}
+        <div className="mt-3"><ServerDisk server={name} online={server.online} /></div>
+      </TabsContent>
       <TabsContent value="host" className="mt-4">
         {tab === "host" && <ServerHostUnits server={name} online={server.online} />}
       </TabsContent>

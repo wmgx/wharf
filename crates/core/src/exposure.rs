@@ -31,6 +31,8 @@ static LAST: Mutex<BTreeMap<String, (i64, ExposureReport)>> =
 // 串行化刷新、通知与确认，避免并发读改写丢失设置。
 static WRITE: tokio::sync::Mutex<()> =
   tokio::sync::Mutex::const_new(());
+static ABSENT: Mutex<BTreeMap<(String, String), u8>> =
+  Mutex::new(BTreeMap::new());
 type Ports = BTreeMap<String, BTreeSet<String>>;
 
 fn outdated(snap: &Snapshot, server: &str) -> bool {
@@ -59,6 +61,26 @@ fn public_ip<'a>(
     })
 }
 
+fn agent_ipv6(report: &AgentReport) -> Option<&str> {
+  report.egress_info.as_ref()?.ipv6.as_deref().filter(|raw| {
+    raw.parse::<std::net::Ipv6Addr>().is_ok_and(|addr| {
+      crate::source_trust::is_global_unicast(addr.into())
+    })
+  })
+}
+
+pub(crate) fn has_public_reach(
+  snap: &Snapshot,
+  server: &str,
+) -> bool {
+  public_ip(snap, server).is_some()
+    || snap
+      .agent(server)
+      .and_then(|a| a.report.as_ref())
+      .and_then(agent_ipv6)
+      .is_some()
+}
+
 fn classify(
   l: &Listen,
   report: &AgentReport,
@@ -67,7 +89,11 @@ fn classify(
 ) -> Option<PortRow> {
   let wildcard = matches!(l.addr.as_str(), "0.0.0.0" | "::" | "*");
   let is_public_bind =
-    report.public_ip.as_deref() == Some(l.addr.as_str());
+    [report.public_ip.as_deref(), agent_ipv6(report)]
+      .into_iter()
+      .any(|addr| addr == Some(l.addr.as_str()));
+  let has_public =
+    report.public_ip.is_some() || agent_ipv6(report).is_some();
   if !wildcard && !is_public_bind {
     let other_public =
       l.addr.parse::<std::net::IpAddr>().is_ok_and(|ip| {
@@ -81,26 +107,30 @@ fn classify(
   }
   let project = l.project.as_deref().unwrap_or("");
   let gateway = gateways.iter().find(|(name, proto, port)| {
-    project == format!("wharf-gw-{name}")
-      || (*port == l.port
-        && *proto == l.proto
-        && l.process == "caddy")
+    if proto.is_empty() {
+      return project == format!("wharf-gw-{name}") && !has_public;
+    }
+    *port == l.port
+      && *proto == l.proto
+      && (project == format!("wharf-gw-{name}")
+        || l.process == "caddy")
   });
+  let agent = l.process == "wharf-agent"
+    || l.container.as_deref() == Some("wharf-agent");
+  let wharf = agent
+    || l.process == "wharf-core"
+    || project.starts_with("wharf-")
+    || l
+      .container
+      .as_deref()
+      .is_some_and(|c| c.starts_with("wharf-"));
   let (owner, name, expected) = if let Some((name, _, _)) = gateway {
     ("gateway", name.clone(), true)
-  } else if l.process == "wharf-core"
-    || project.starts_with("wharf-")
-    || matches!(
-      l.container.as_deref(),
-      Some("wharf-agent" | "wharf-core")
-    )
-    || (matches!(l.port, 7701 | 8118 | 8119 | 7710)
-      && l.process == "wharf-agent")
-  {
+  } else if wharf {
     (
       "wharf",
       l.container.clone().unwrap_or_else(|| l.process.clone()),
-      true,
+      !has_public || (agent && matches!(l.port, 7701 | 8119)),
     )
   } else if let Some((name, _)) =
     services.get_key_value(project).or_else(|| {
@@ -141,6 +171,14 @@ fn classify(
     name,
     expected,
     acked: false,
+    family: match l.addr.as_str() {
+      "*" => Some("dual".into()),
+      addr if addr.contains(':') => Some("ipv6".into()),
+      addr if addr.parse::<std::net::Ipv4Addr>().is_ok() => {
+        Some("ipv4".into())
+      }
+      _ => None,
+    },
   })
 }
 
@@ -215,8 +253,15 @@ fn rows(
           && matches!(r.addr.as_str(), "0.0.0.0" | "::" | "*")
           && matches!(p.addr.as_str(), "0.0.0.0" | "::" | "*")
       }) {
-        if prev.owner == "unknown" || prev.name == "docker-proxy" {
+        let dual = prev.family != p.family;
+        if prev.owner == "unknown"
+          || prev.name == "docker-proxy"
+          || (prev.expected && !p.expected)
+        {
           *prev = p;
+        }
+        if dual {
+          prev.family = Some("dual".into());
         }
       } else {
         ports.push(p);
@@ -284,6 +329,30 @@ fn new_ports<'a>(
     .collect()
 }
 
+fn sync_seen(
+  server: &str,
+  seen: &mut BTreeSet<String>,
+  current: &BTreeSet<String>,
+  absent: &mut BTreeMap<(String, String), u8>,
+) {
+  seen.retain(|port| {
+    let key = (server.to_owned(), port.clone());
+    if current.contains(port) {
+      absent.remove(&key);
+      true
+    } else if let std::collections::btree_map::Entry::Vacant(entry) =
+      absent.entry(key.clone())
+    {
+      entry.insert(1);
+      true
+    } else {
+      absent.remove(&key);
+      false
+    }
+  });
+  seen.extend(current.iter().cloned());
+}
+
 pub async fn refresh(
   state: &AppState,
   server: &str,
@@ -314,23 +383,29 @@ pub async fn refresh(
   let new = new_ports(
     &ports,
     seen.get(server),
-    public_ip(&snap, server).is_some(),
+    has_public_reach(&snap, server),
   );
   let body = new
     .iter()
     .map(|p| format!("{} · {}", port_key(p), p.name))
     .collect::<Vec<_>>()
     .join("\n");
-  seen
-    .entry(server.into())
-    .or_default()
-    .extend(ports.iter().map(port_key));
+  let current: BTreeSet<_> = ports.iter().map(port_key).collect();
+  let mut absent =
+    ABSENT.lock().unwrap_or_else(|e| e.into_inner()).clone();
+  sync_seen(
+    server,
+    seen.entry(server.into()).or_default(),
+    &current,
+    &mut absent,
+  );
   let value = serde_json::to_string(&seen)
     .map_err(|e| ApiError::internal(e.to_string()))?;
   state
     .db
     .call(move |c| db::set_setting(c, "exposure.seen", Some(&value)))
     .await?;
+  *ABSENT.lock().unwrap_or_else(|e| e.into_inner()) = absent;
   LAST
     .lock()
     .unwrap_or_else(|e| e.into_inner())
@@ -437,7 +512,7 @@ pub async fn issues(
   let snap = snapshot::load(&state.db).await?;
   let mut issues = vec![];
   for server in snap.world.servers.keys() {
-    if public_ip(&snap, server).is_none() {
+    if !has_public_reach(&snap, server) {
       continue;
     }
     let open: Vec<_> = view(state, server)
@@ -580,6 +655,7 @@ mod tests {
       owner: "host".into(),
       expected: false,
       acked: false,
+      family: None,
     };
     assert_eq!(exposed_title("s", &[]), None);
     assert_eq!(
@@ -698,6 +774,7 @@ mod tests {
       name: "app".into(),
       expected: false,
       acked: false,
+      family: None,
     }];
     assert!(
       new_ports(&ports, Some(&BTreeSet::new()), false).is_empty()
@@ -782,6 +859,7 @@ mod tests {
       name: "s1".into(),
       expected: false,
       acked: false,
+      family: None,
     };
     let ports = vec![p];
     assert!(new_ports(&ports, None, true).is_empty());
@@ -798,4 +876,51 @@ mod tests {
       .is_empty()
     );
   }
+}
+
+#[test]
+fn wharf_core_public_flagged_and_seen_expires_after_two_rounds() {
+  let mut snap = Snapshot::default();
+  let report = AgentReport {
+    egress_info: Some(
+      serde_json::from_value(
+        serde_json::json!({"ipv6":"2001:db8::2"}),
+      )
+      .unwrap(),
+    ),
+    ..Default::default()
+  };
+  snap.agents.push(crate::db::AgentRow {
+    server: "s1".into(),
+    report: Some(report),
+    public_key: None,
+    last_seen: None,
+  });
+  for (name, port, expected) in [
+    ("wharf-core", 7700, false),
+    ("wharf-agent", 8118, false),
+    ("wharf-foo", 8080, false),
+    ("wharf-agent", 7701, true),
+  ] {
+    let report = ExposureReport {
+      listens: vec![Listen {
+        port,
+        addr: "::".into(),
+        container: Some(name.into()),
+        proto: "tcp".into(),
+        ..Default::default()
+      }],
+      ..Default::default()
+    };
+    let (ports, _) = rows(&snap, "s1", &report);
+    assert_eq!(ports[0].expected, expected);
+    assert_eq!(ports[0].family.as_deref(), Some("ipv6"));
+  }
+  assert!(has_public_reach(&snap, "s1"));
+  let mut seen = BTreeSet::from(["tcp/8080".into()]);
+  let mut absent = BTreeMap::new();
+  sync_seen("s1", &mut seen, &BTreeSet::new(), &mut absent);
+  assert!(seen.contains("tcp/8080"));
+  sync_seen("s1", &mut seen, &BTreeSet::new(), &mut absent);
+  assert!(seen.is_empty());
 }

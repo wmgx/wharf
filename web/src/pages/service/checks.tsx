@@ -16,10 +16,11 @@ export function ServiceChecks({ svc, kind }: { svc: ServiceView; kind: "monitor"
   const monitor = draft.monitor;
   const ports = (draft.ports ?? []).filter((p) => !p.udp);
   const servers = serverOptions((status?.servers ?? []).filter((s) => s.joined && s.name !== svc.spec.server));
-  const hasData = !!svc.spec.volumes?.length || "compose" in svc.spec.source;
+  const hasData = !!svc.spec.volumes?.some((v) => !v.from_service) || "compose" in svc.spec.source;
   const updateMonitor = (patch: Partial<NonNullable<ServiceSpec['monitor']>>) => { if (monitor) set({ monitor: { ...monitor, ...patch } }); };
   const expectNum = Number(expect.trim() || 0);
   const valid = kind !== "monitor" || !monitor || (monitor.path.startsWith("/") && Number.isInteger(expectNum) && (expectNum === 0 || expectNum >= 100 && expectNum < 600));
+  if (kind === "backup" && !hasData) return null;
   return <>
     {kind === "monitor" ? (<Panel className="grid gap-3 p-4">
       <label className="flex items-center gap-2 text-sm">
@@ -39,7 +40,7 @@ export function ServiceChecks({ svc, kind }: { svc: ServiceView; kind: "monitor"
         </Field>
       </div>}
     </Panel>) : (<Panel className="p-4">
-      {!hasData ? <span className="text-sm text-muted-foreground">这个服务没有数据卷</span> : !servers.length ? <span className="text-sm text-muted-foreground">需要另一台服务器存放备份</span> : <Field label="备份到" htmlFor="service-backup" help="每天自动备份到选中的服务器。">
+      {!servers.length ? <span className="text-sm text-muted-foreground">需要另一台服务器存放备份</span> : <Field label="备份到" htmlFor="service-backup" help="每天自动备份到选中的服务器。">
         <Picker id="service-backup" value={draft.backup?.to ?? ""} options={[{ value: "", label: "不备份" }, ...servers]} onChange={(v) => set({ backup: v ? { to: v } : undefined })} />
       </Field>}
     </Panel>)}

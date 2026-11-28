@@ -44,12 +44,20 @@ pub fn mounts(name: &str, spec: &ServiceSpec) -> Vec<DataMount> {
     Source::Image(_) | Source::Build(_) => spec
       .volumes
       .iter()
-      .map(|v| DataMount {
-        resolved: None,
-        kind: DataKind::Managed,
-        source: format!("/srv/{name}/{}", v.name),
-        target: v.target.clone(),
-        container: None,
+      .filter_map(|v| {
+        Some(DataMount {
+          from_service: v.from_service.clone(),
+          read_only: v.read_only,
+          resolved: None,
+          kind: if v.from_service.is_some() {
+            DataKind::Shared
+          } else {
+            DataKind::Managed
+          },
+          source: crate::render::volume_host_dir(name, v).ok()?,
+          target: v.target.clone(),
+          container: None,
+        })
       })
       .collect(),
     Source::Compose { content, .. } => {
@@ -89,6 +97,8 @@ pub fn undeclared_mounts(
         && m.source.len() == 64
         && m.source.bytes().all(|b| b.is_ascii_hexdigit());
       Some(DataMount {
+        from_service: None,
+        read_only: false,
         resolved: None,
         kind,
         source: if anonymous {
@@ -125,7 +135,7 @@ pub fn status(
   last_failed: Option<DateTime<Utc>>,
   now: DateTime<Utc>,
 ) -> DataStatus {
-  if mounts.is_empty() {
+  if mounts.iter().all(|m| m.kind == DataKind::Shared) {
     return DataStatus::None;
   }
   if !backup {
@@ -143,7 +153,9 @@ pub fn status(
   if !fresh || failed_lately {
     return DataStatus::Stale;
   }
-  if mounts.iter().any(|m| m.kind != DataKind::Managed) {
+  if mounts.iter().any(|m| {
+    matches!(m.kind, DataKind::ExternalDir | DataKind::NamedVolume)
+  }) {
     return DataStatus::Uncovered;
   }
   DataStatus::Ok
@@ -223,6 +235,8 @@ pub(crate) fn apply_escaped_mounts(
     }
     if !found {
       mounts.push(DataMount {
+        from_service: None,
+        read_only: false,
         kind: DataKind::ExternalDir,
         source: link.source.clone(),
         target: String::new(),
@@ -295,6 +309,7 @@ fn from_ms(ms: Option<i64>) -> Option<DateTime<Utc>> {
 
 pub fn describe(m: &DataMount) -> String {
   match m.kind {
+    DataKind::Shared => format!("共享卷 {}", m.source),
     DataKind::Managed => format!("目录 {}", m.source),
     DataKind::ExternalDir => format!("外部目录 {}", m.source),
     DataKind::NamedVolume if m.source.is_empty() => {
@@ -305,7 +320,10 @@ pub fn describe(m: &DataMount) -> String {
 }
 
 /// compose 解析不了时返回空：部署时 compose 自己会报错。
-fn compose_mounts(name: &str, content: &str) -> Vec<DataMount> {
+pub(crate) fn compose_mounts(
+  name: &str,
+  content: &str,
+) -> Vec<DataMount> {
   let Ok(doc) = crate::render::parse_compose(content) else {
     return Vec::new();
   };
@@ -333,6 +351,8 @@ fn compose_mounts(name: &str, content: &str) -> Vec<DataMount> {
         }
       };
       out.push(DataMount {
+        from_service: None,
+        read_only: false,
         resolved: None,
         kind,
         source,
@@ -459,6 +479,8 @@ mod tests {
   fn covers_five_states() {
     let now = Utc::now();
     let mount = |kind: DataKind, source: &str| DataMount {
+      from_service: None,
+      read_only: false,
       resolved: None,
       kind,
       source: source.into(),
@@ -546,6 +568,8 @@ volumes:
 #[test]
 fn escaped_mount_downgrades_status_to_uncovered() {
   let mut mounts = vec![DataMount {
+    from_service: None,
+    read_only: false,
     source: "/srv/s1".into(),
     target: "/data".into(),
     kind: DataKind::Managed,
@@ -609,6 +633,8 @@ async fn switching_backup_target_and_empty_repo_show_stale() {
 #[test]
 fn nested_escaped_mount_is_listed_only_once() {
   let mut mounts = vec![DataMount {
+    from_service: None,
+    read_only: false,
     source: "/srv/s1/data/originals".into(),
     target: "/originals".into(),
     kind: DataKind::Managed,

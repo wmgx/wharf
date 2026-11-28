@@ -75,7 +75,7 @@ impl Hits {
 struct Memory {
   watches: BTreeMap<String, Vec<LogWatch>>,
   hits: BTreeMap<String, Hits>,
-  ports: BTreeMap<String, bool>,
+  ports: BTreeMap<String, (i64, bool)>,
   old_agents: BTreeSet<String>,
 }
 
@@ -87,24 +87,44 @@ fn memory<T>(f: impl FnOnce(&mut Memory) -> T) -> T {
   f(MEMORY.lock().unwrap().get_or_insert_with(Memory::default))
 }
 
-pub fn validate(spec: &ServiceSpec) -> Result<(), ApiError> {
+pub fn validate(
+  spec: &ServiceSpec,
+  previous: Option<&ServiceSpec>,
+) -> Result<(), ApiError> {
   if spec.log_alerts.len() > 20 {
     return Err(ApiError::invalid(
       "每个服务最多有 20 条日志告警规则",
     ));
   }
   for alert in &spec.log_alerts {
-    alert.compile()?;
+    if previous.is_some_and(|p| p.log_alerts.contains(alert)) {
+      alert.compile_stored()?;
+    } else {
+      alert.compile()?;
+    }
   }
   for (name, check) in &spec.port_checks {
     let port =
       spec.ports.iter().find(|p| &p.name == name).ok_or_else(
         || ApiError::invalid(format!("服务没有端口 {name}")),
       )?;
-    check.validate(port.udp)?;
+    if previous
+      .is_some_and(|p| p.port_checks.get(name) == Some(check))
+    {
+      check.validate_stored(port.udp)?;
+    } else {
+      check.validate(port.udp)?;
+    }
   }
-  if spec.heartbeat.as_ref().is_some_and(|h| h.every_mins == 0) {
-    return Err(ApiError::invalid("心跳间隔须大于 0 分钟"));
+  if let Some(heartbeat) = &spec.heartbeat
+    && !previous.and_then(|p| p.heartbeat.as_ref()).is_some_and(
+      |previous| {
+        previous.every_mins == heartbeat.every_mins
+          && previous.grace_mins == heartbeat.grace_mins
+      },
+    )
+  {
+    heartbeat.validate()?;
   }
   Ok(())
 }
@@ -327,6 +347,7 @@ pub(crate) fn ports(
 pub fn port_views(
   service: &str,
   row: &ServiceRow,
+  applied_at: i64,
 ) -> BTreeMap<String, bool> {
   if row.spec.stopped {
     return BTreeMap::new();
@@ -334,19 +355,96 @@ pub fn port_views(
   memory(|m| {
     ports(row)
       .filter_map(|(name, _)| {
-        Some((
-          name.to_string(),
-          *m.ports.get(&format!("{service}:{name}"))?,
-        ))
+        let &(at, ok) = m.ports.get(&format!("{service}:{name}"))?;
+        (at >= applied_at).then(|| (name.to_string(), ok))
       })
       .collect()
   })
+}
+
+fn record_port(id: String, at: i64, ok: bool) {
+  memory(|m| {
+    let entry = m.ports.entry(id).or_insert((at, ok));
+    if entry.0 <= at {
+      *entry = (at, ok);
+    }
+  });
+}
+
+pub(crate) async fn doctor_ports(
+  state: &AppState,
+  service: &str,
+  row: &ServiceRow,
+) -> Vec<wharf_api_types::view::DoctorCheck> {
+  use wharf_api_types::view::CheckStatus;
+  let targets: Vec<_> = ports(row).collect();
+  if targets.is_empty() || row.spec.stopped {
+    return vec![];
+  }
+  let server = &row.spec.server;
+  let skip = |detail| {
+    vec![crate::doctor::check(
+      "port",
+      service,
+      CheckStatus::Skip,
+      detail,
+    )]
+  };
+  if !state.hub.is_online(server) {
+    return skip("agent 离线，测不了");
+  }
+  if !state.hub.supports_service_checks(server) {
+    return skip("agent 版本旧，升级后可测端口（wharf upgrade）");
+  }
+  let at = now_ms();
+  let results = state
+    .hub
+    .call::<Vec<bool>>(
+      server,
+      AgentOp::PortChecks {
+        checks: targets
+          .iter()
+          .map(|(_, check)| check.clone())
+          .collect(),
+      },
+      Duration::from_secs(10),
+      None,
+      &CancellationToken::new(),
+    )
+    .await;
+  match results {
+    Ok(results) if results.len() == targets.len() => targets
+      .into_iter()
+      .zip(results)
+      .map(|((port, _), ok)| {
+        record_port(format!("{service}:{port}"), at, ok);
+        let (status, detail) = if ok {
+          (CheckStatus::Ok, "通过")
+        } else {
+          (CheckStatus::Bad, "未通过")
+        };
+        crate::doctor::check(
+          "port",
+          service,
+          status,
+          format!("端口 {port} {detail}"),
+        )
+      })
+      .collect(),
+    _ => vec![crate::doctor::check(
+      "port",
+      service,
+      CheckStatus::Bad,
+      "未取得端口探测结果",
+    )],
+  }
 }
 
 async fn check_ports(state: &AppState) {
   let Ok(snap) = crate::snapshot::load(&state.db).await else {
     return;
   };
+  let started_at = now_ms();
   let mut active = BTreeSet::new();
   let mut batches = BTreeMap::<&str, Vec<(String, PortCheck)>>::new();
   for (name, row) in &snap.world.services {
@@ -412,7 +510,7 @@ async fn check_ports(state: &AppState) {
       {
         continue;
       }
-      memory(|m| m.ports.insert(id.clone(), ok));
+      record_port(id.clone(), started_at, ok);
       let suffix = if check.udp.is_some() { "UDP" } else { "TCP" };
       let detail = format!("{suffix} 127.0.0.1:{}", check.port);
       rules::observe(

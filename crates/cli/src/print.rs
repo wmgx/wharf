@@ -410,6 +410,10 @@ pub fn status(s: &Status) {
         );
         continue;
       }
+      if r.spec.service.is_empty() {
+        println!("{}", external_upstream_line(r));
+        continue;
+      }
       println!(
         "  {}  →  {}:{}  经 {}（上游 {}）",
         r.url,
@@ -497,6 +501,32 @@ pub fn backups(v: &BackupsView) {
   }
 }
 
+fn external_upstream_line(
+  r: &wharf_api_types::view::RouteView,
+) -> String {
+  format!(
+    "  {}  →  上游 {}  经 {}",
+    r.url,
+    r.upstream
+      .as_deref()
+      .or(r.spec.upstream.as_deref())
+      .unwrap_or("-"),
+    r.gateway.as_deref().unwrap_or("-")
+  )
+}
+
+#[test]
+fn status_prints_external_upstream_cleanly() {
+  let route = serde_json::from_value(serde_json::json!({
+    "id":"fixture","url":"https://app.example.test","version":1,"gateway":"entry",
+    "spec":{"hostname":"app.example.test","upstream":"127.0.0.1:7700"},
+  })).unwrap();
+  assert_eq!(
+    external_upstream_line(&route),
+    "  https://app.example.test  →  上游 127.0.0.1:7700  经 entry"
+  );
+}
+
 pub fn doctor(v: &wharf_api_types::view::DoctorReport) {
   use wharf_api_types::view::{CheckStatus, DoctorCheck};
   let line = |c: &DoctorCheck| {
@@ -508,8 +538,14 @@ pub fn doctor(v: &wharf_api_types::view::DoctorReport) {
     };
     println!("  {mark} {:<9} {}  {}", c.layer, c.subject, c.detail);
   };
-  println!("服务器");
-  v.servers.iter().for_each(line);
+  if !v.servers.is_empty() {
+    println!("服务器");
+    v.servers.iter().for_each(line);
+  }
+  if !v.checks.is_empty() {
+    println!("专项检查");
+    v.checks.iter().for_each(line);
+  }
   if !v.vendors.is_empty() {
     println!("\n厂商账号");
     v.vendors.iter().for_each(line);
@@ -699,6 +735,7 @@ fn data_status(s: DataStatus) -> &'static str {
 fn mount_label(m: &DataMount) -> String {
   let kind = match m.kind {
     DataKind::Managed => "目录",
+    DataKind::Shared => "共享卷",
     DataKind::ExternalDir => "外部目录",
     DataKind::NamedVolume if m.source.is_empty() => "匿名卷",
     DataKind::NamedVolume => "卷",
@@ -706,6 +743,15 @@ fn mount_label(m: &DataMount) -> String {
   let source = match &m.resolved {
     Some(resolved) => format!("{}（软链指向 {resolved}）", m.source),
     None => m.source.clone(),
+  };
+  let source = if m.kind == DataKind::Shared {
+    let access = if m.read_only { "只读" } else { "可写" };
+    match &m.from_service {
+      Some(owner) => format!("{owner}（{access}） {source}"),
+      None => format!("（{access}） {source}"),
+    }
+  } else {
+    source
   };
   match (source.is_empty(), m.target.is_empty()) {
     (true, _) => format!("{kind} → {}", m.target),
@@ -836,6 +882,22 @@ pub fn monitor_settings(
 
 #[cfg(test)]
 mod pick_tests {
+  #[test]
+  fn shared_mount_label_shows_owner_and_access() {
+    for (read_only, access) in [(true, "只读"), (false, "可写")] {
+      let mount = serde_json::from_value(serde_json::json!({
+        "kind":"shared", "source":"/srv/photos/data", "target":"/data",
+        "from_service":"photos:data", "read_only":read_only
+      })).unwrap();
+      assert_eq!(
+        super::mount_label(&mount),
+        format!(
+          "共享卷 photos:data（{access}） /srv/photos/data → /data"
+        )
+      );
+    }
+  }
+
   #[test]
   fn picks_nested_fields_per_item() {
     let v = serde_json::json!([{"name":"a","status":{"summary":"运行中","tone":"ok"},"spec":{}}]);

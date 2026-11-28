@@ -229,11 +229,26 @@ pub fn volume_dir(service: &str, volume: &str) -> String {
   format!("/srv/{service}/{volume}")
 }
 
+pub fn volume_host_dir(
+  service: &str,
+  v: &wharf_api_types::spec::VolumeSpec,
+) -> Result<String, ApiError> {
+  match &v.from_service {
+    Some(raw) => {
+      let (owner, volume) = crate::shared_volumes::parse_ref(raw)?;
+      Ok(volume_dir(owner, volume))
+    }
+    None => Ok(volume_dir(service, &v.name)),
+  }
+}
+
 pub fn service_dirs(name: &str, spec: &ServiceSpec) -> Vec<String> {
+  let mut seen = BTreeSet::new();
   spec
     .volumes
     .iter()
-    .map(|v| volume_dir(name, &v.name))
+    .filter_map(|v| volume_host_dir(name, v).ok())
+    .filter(|dir| seen.insert(dir.clone()))
     .collect()
 }
 
@@ -1215,9 +1230,11 @@ pub fn service_compose(
         .volumes
         .iter()
         .map(|v| {
-          format!("{}:{}", volume_dir(name, &v.name), v.target)
+          let host = volume_host_dir(name, v)?;
+          let ro = if v.read_only { ":ro" } else { "" };
+          Ok(format!("{host}:{}{ro}", v.target))
         })
-        .collect();
+        .collect::<Result<_, ApiError>>()?;
       let file = ComposeFile {
         configs: BTreeMap::new(),
         name: name.to_string(),
@@ -1333,7 +1350,9 @@ pub fn file_content(
 }
 
 // 容器内路径按组件比较，不能在控制面上做文件系统解析。
-fn normalized_mount_target(target: &str) -> Option<PathBuf> {
+pub(crate) fn normalized_mount_target(
+  target: &str,
+) -> Option<PathBuf> {
   let target = Path::new(target);
   if !target.is_absolute() {
     return None;
@@ -2455,6 +2474,31 @@ mod tests {
     );
   }
 
+  #[test]
+  fn shared_volume_renders_owner_path_and_ro_without_legacy_drift() {
+    let mut spec = spec();
+    let render = |spec: &ServiceSpec| {
+      service_compose("app", spec, &BTreeMap::new(), &[], None)
+        .unwrap()
+        .0
+    };
+    let volume = &spec.volumes[0];
+    let before = render(&spec);
+    assert!(before.contains(&format!(
+      "/srv/app/{}:{}",
+      volume.name, volume.target
+    )));
+    let volume = &mut spec.volumes[0];
+    volume.from_service = Some("photos:originals".into());
+    volume.read_only = true;
+    let target = volume.target.clone();
+    assert!(
+      render(&spec)
+        .contains(&format!("/srv/photos/originals:{target}:ro"))
+    );
+    assert_eq!(service_dirs("app", &spec), ["/srv/photos/originals"]);
+  }
+
   fn spec() -> ServiceSpec {
     ServiceSpec {
       backup: None,
@@ -2486,6 +2530,8 @@ mod tests {
         ("TOKEN".to_string(), "[[WHO_TOKEN]]".to_string()),
       ]),
       volumes: vec![VolumeSpec {
+        from_service: None,
+        read_only: false,
         name: "data".into(),
         target: "/data".into(),
       }],

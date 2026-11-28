@@ -265,6 +265,7 @@ fn empty_project(name: &str) -> ProjectState {
 }
 
 pub fn service_view(
+  hub: &crate::hub::Hub,
   snap: &Snapshot,
   net: &Net,
   name: &str,
@@ -326,15 +327,20 @@ pub fn service_view(
         .collect()
     })
     .unwrap_or_default();
-  let hash = live.and_then(|_| {
-    snapshot::service_resolved(
+  let hash = live.and_then(|live| {
+    let observed = live
+      .get(&row.spec.server)
+      .and_then(|r| r.as_ref().ok())
+      .and_then(|states| states.get(name))
+      .and_then(|p| p.hash.as_deref());
+    snapshot::service_hash(
       &snap.world,
       net,
       name,
       &snap.render_values(&snap.world, name),
+      observed,
     )
     .ok()
-    .map(|(_, h)| h)
   });
   let status = live.map(|live| {
     let project = live
@@ -390,17 +396,28 @@ pub fn service_view(
     status,
     monitor: crate::monitor::last(name),
     log_alerts: crate::service_monitor::log_views(name, &row.spec),
-    port_checks: crate::service_monitor::port_views(name, row),
+    port_checks_supported: hub
+      .service_checks_support(&row.spec.server),
+    port_checks: crate::service_monitor::port_views(
+      name,
+      row,
+      snap
+        .applied
+        .get(name)
+        .map_or(0, |a| a.at.timestamp_millis()),
+    ),
     heartbeat: crate::service_monitor::heartbeat::view(
       snap, name, false,
     ),
-    uses: crate::refs::uses(&row.spec),
+    uses: crate::shared_volumes::uses(&row.spec),
     used_by: snap
       .world
       .services
       .iter()
       .filter(|(_, r)| {
-        crate::refs::uses(&r.spec).iter().any(|u| u == name)
+        crate::shared_volumes::uses(&r.spec)
+          .iter()
+          .any(|u| u == name)
       })
       .map(|(n, _)| n.clone())
       .collect(),
@@ -661,7 +678,7 @@ pub async fn status(
     .services
     .keys()
     .filter_map(|n| {
-      service_view(&snap, &net, n, Some(&live), &history)
+      service_view(&state.hub, &snap, &net, n, Some(&live), &history)
     })
     .collect();
   let gateways: Vec<GatewayView> = snap

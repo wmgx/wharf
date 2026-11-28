@@ -156,6 +156,8 @@ pub enum AgentMsg {
     #[serde(default)]
     safe_delete: bool,
     #[serde(default)]
+    shared_volumes: bool,
+    #[serde(default)]
     safe_gateway: bool,
     #[serde(default)]
     safe_adopt: bool,
@@ -403,7 +405,7 @@ pub enum AgentOp {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     include_links: bool,
   },
-  /// 只读诊断指定宿主机端口，结果是 Vec<ContainerDiagnosis>。
+  /// 只读诊断指定宿主机端口。端口为空时检查项目中已停止或重启中的容器。
   DiagnoseContainer {
     project: String,
     ports: Vec<u16>,
@@ -482,6 +484,7 @@ pub enum AgentOp {
   RemoveData {
     service: String,
   },
+  BindMountUsers(BindMountQuery),
   Restic(ResticJob),
   ProbeCoreHost(CoreHostProbe),
   /// 取代码、`docker build`，结果是 [BuildResult]。镜像已存在且不是 `force` 时跳过。
