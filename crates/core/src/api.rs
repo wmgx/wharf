@@ -228,7 +228,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route(
       "/api/data/cleanup",
       get(crate::data_cleanup::overview)
-        .post(crate::data_cleanup::execute),
+        .post(crate::data_cleanup::execute_http),
     )
     .route(
       "/api/data/cleanup/policy",

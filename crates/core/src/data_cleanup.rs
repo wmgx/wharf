@@ -11,6 +11,8 @@ use crate::{
 use axum::{
   Extension, Json,
   extract::{Query, State},
+  http::StatusCode,
+  response::{IntoResponse, Response},
 };
 use rusqlite::params;
 use serde::Deserialize;
@@ -260,7 +262,23 @@ fn confirm(
     .with_details(json!({ "confirm": expected, "count": items.len(), "total_bytes": bytes, "items": items })))
 }
 
-pub async fn execute(
+pub async fn execute_http(
+  state: State<Arc<AppState>>,
+  auth: Auth,
+  audit: Extension<AuditSlot>,
+  req: Json<DataCleanupExecRequest>,
+) -> Response {
+  match execute(state, auth, audit, req).await {
+    Err(e) if e.0.code == ErrorCode::ConfirmRequired => {
+      let mut response = e.into_response();
+      *response.status_mut() = StatusCode::CONFLICT;
+      response
+    }
+    result => result.into_response(),
+  }
+}
+
+async fn execute(
   State(state): State<Arc<AppState>>,
   auth: Auth,
   Extension(audit): Extension<AuditSlot>,
@@ -464,14 +482,8 @@ async fn delete_candidate(
     ));
   }
   // 共享卷消费者也可能由其他服务的 apply 创建，整批 apply 必须串行。
-  let guard =
+  let _guard =
     state.locks.acquire(LockSpec::Global, "清理遗留数据")?;
-  if matches!(
-    item.kind,
-    BackupMoveArchive | BackupMoveRetired | OrphanBackupRepo
-  ) {
-    guard.reserve_backup_target(item.server.clone())?;
-  }
   let snap = snapshot::load_inner(&state.db).await?;
   let inv = state.db.call(inventory).await?;
   let record = inv.records.get(&(
@@ -615,10 +627,44 @@ async fn auto_expire_archives(
     if !crate::jobs::auto_cleanup_enabled(state).await? {
       break;
     }
-    if let Err(e) = delete_candidate(state, &c, &cancel).await
-      && !matches!(e.code, ErrorCode::Busy | ErrorCode::AgentOffline)
+    let policy = state.db.call(|c| cleanup_policy(c)).await?;
+    if let Some(created) = c.item.created_at
+      && created + chrono::Duration::days(i64::from(policy.keep_days))
+        > chrono::Utc::now()
     {
-      tracing::warn!("留底清理失败：{e}");
+      continue;
+    }
+    match delete_candidate(state, &c, &cancel).await {
+      Ok(result) if result.removed => {
+        crate::audit::insert(
+          state,
+          wharf_api_types::view::AuditEntry {
+            id: 0,
+            at: db::now_ms(),
+            kind: "cleanup".into(),
+            actor: "到期清理".into(),
+            method: "DELETE".into(),
+            path: "/api/data/cleanup".into(),
+            status: Some(200),
+            duration_ms: None,
+            detail: Some(format!(
+              "data_cleanup deleted=1 freed_bytes={} items=[{}]",
+              result.freed_bytes, c.item.id
+            )),
+            source: None,
+          },
+        )
+        .await?;
+      }
+      Err(e)
+        if !matches!(
+          e.code,
+          ErrorCode::Busy | ErrorCode::AgentOffline
+        ) =>
+      {
+        tracing::warn!("留底清理失败：{e}")
+      }
+      _ => {}
     }
   }
   Ok(())

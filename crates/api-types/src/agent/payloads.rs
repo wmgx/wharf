@@ -1148,10 +1148,10 @@ pub struct BindMountQuery {
   pub exclude_projects: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CleanupScanRequest {
   /// 是否计算目录字节大小；低频后台提醒扫描可设 false 或加时间预算。
-  #[serde(default)]
+  #[serde(default = "cleanup_compute_sizes")]
   pub compute_sizes: bool,
   /// 额外需要测算大小的迁移旧机目录名（来自控制面 cleanups 表，避免重复全扫）。
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1159,6 +1159,20 @@ pub struct CleanupScanRequest {
   /// 额外需要测算大小的换备份机旧仓库路径提示（仅限 BACKUP_ROOT / CORE_BACKUP_ROOT 内）。
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub retired_repos: Vec<String>,
+}
+
+fn cleanup_compute_sizes() -> bool {
+  true
+}
+
+impl Default for CleanupScanRequest {
+  fn default() -> Self {
+    Self {
+      compute_sizes: true,
+      migrate_services: vec![],
+      retired_repos: vec![],
+    }
+  }
 }
 
 #[derive(
