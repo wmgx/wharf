@@ -1071,7 +1071,8 @@ async fn expired_service_mute_global_disable_and_subpath_suppress() {
     }),
   )
   .await
-  .unwrap();
+  .ok()
+  .expect("disable global http_5xx rule");
   assert!(firing_since("http_5xx", "web").is_some());
   assert!(firing_since("http_5xx", "api").is_none());
   service_overrides::set_override(

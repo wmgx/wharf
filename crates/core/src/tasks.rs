@@ -37,7 +37,7 @@ use crate::{
   api::ApiResult,
   auth::Auth,
   cron::{Cron, minute_floor},
-  db::{now_ms, sql_err, to_time},
+  db::{self, now_ms, sql_err, to_time},
   render, snapshot,
   state::AppState,
 };
