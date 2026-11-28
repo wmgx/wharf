@@ -1846,7 +1846,7 @@ mod tests {
     .unwrap();
     let mut auth =
       crate::host_access::tests::auth([Perm::Read], false);
-    auth.services = Some(BTreeSet::from(["notes".into()]));
+    auth.services = Some(["notes".into()].into_iter().collect());
     let Json(rows) = runs(
       State(state),
       auth,

@@ -4245,6 +4245,37 @@ mod tests {
   }
 
   #[tokio::test]
+  async fn restart_one_container_never_falls_back_to_project_restart()
+  {
+    let state = crate::rules::tests::test_state();
+    state.hub.mock_agent("s1", false, |op| {
+      assert!(matches!(op, AgentOp::ProjectRestart { container: Some(c), .. } if c == "db"));
+      Ok(serde_json::json!({"containers":[
+        {"name":"stack-db-1","service":"db","state":"running"},
+        {"name":"stack-web-1","service":"web","state":"exited","exit_code":1}
+      ],"images":[]}))
+    });
+    let progress: ProgressFn = Arc::new(|_| {});
+    let cancel = CancellationToken::new();
+    let restart = || {
+      service_restart(
+        &state,
+        "s1",
+        "stack",
+        Some("db"),
+        &progress,
+        &cancel,
+      )
+    };
+    assert_eq!(
+      restart().await.unwrap_err().code,
+      ErrorCode::Conflict
+    );
+    state.hub.enable_mock_exec_v2("s1");
+    restart().await.unwrap();
+  }
+
+  #[tokio::test]
   async fn legacy_restart_starts_even_if_stop_cancels() {
     let state = crate::rules::tests::test_state();
     let cancel = CancellationToken::new();

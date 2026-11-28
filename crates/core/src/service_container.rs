@@ -36,27 +36,45 @@ pub(crate) fn validate(
 
 #[cfg(test)]
 mod tests {
-  use super::*;
-  use wharf_api_types::ErrorCode;
+  use crate::{
+    api,
+    db::{self, Write},
+    host_access::tests::auth,
+  };
+  use axum::extract::{Path, Query, State};
+  use serde_json::json;
+  use wharf_api_types::{ErrorCode, agent::AgentOp, view::Perm};
 
   #[tokio::test]
-  async fn child_restart_requires_the_capability_on_current_connection()
-   {
+  async fn child_logs_validate_name_and_bind_to_capable_agent() {
     let state = crate::rules::tests::test_state();
-    state
-      .hub
-      .mock_agent("s1", false, |_| panic!("不应发送子容器操作"));
+    state.db.call(|c| db::apply_write(c, &Write::Upsert {
+      kind: "service".into(), name: "stack".into(), meta: json!({}),
+      spec: json!({"server":"s1","source":{"compose":{"content":"services: {web: {image: alpine}, db: {image: alpine}}"}}}),
+    })).await.unwrap();
+    state.hub.mock_agent("s1", false, |op| {
+      assert!(matches!(op, AgentOp::Logs { container: Some(c), .. } if c == "db"));
+      Ok(json!("db 日志"))
+    });
+    let request = |c: &str| {
+      api::service_logs(
+        State(state.clone()),
+        auth([Perm::Read], false),
+        Path("stack".into()),
+        Query(
+          serde_json::from_value(json!({"container":c})).unwrap(),
+        ),
+      )
+    };
     assert_eq!(
-      state
-        .hub
-        .exec_v2_conn_id("s1", "重启单个子容器")
-        .unwrap_err()
-        .code,
+      request("db").await.unwrap_err().0.code,
       ErrorCode::Conflict
     );
     state.hub.enable_mock_exec_v2("s1");
-    assert!(
-      state.hub.exec_v2_conn_id("s1", "重启单个子容器").is_ok()
-    );
+    assert_eq!(request("db").await.unwrap().0["logs"], "db 日志");
+    let error = request("redis").await.unwrap_err().0;
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    let hint = error.hint.unwrap();
+    assert!(hint.contains("db") && hint.contains("web"));
   }
 }

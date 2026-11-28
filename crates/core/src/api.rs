@@ -1320,7 +1320,7 @@ async fn core_logs(
   )
 }
 
-async fn service_logs(
+pub(super) async fn service_logs(
   State(s): State<Arc<AppState>>,
   auth: Auth,
   Path(name): Path<String>,

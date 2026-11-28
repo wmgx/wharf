@@ -460,4 +460,58 @@ mod tests {
     assert_eq!(rows[0].command.as_deref(), Some("printf ok"));
     assert_eq!(rows[0].exit_code, Some(7));
   }
+  #[tokio::test]
+  async fn streaming_host_exec_falls_back_for_legacy_agent() {
+    use crate::{db, host_access::tests::auth};
+    use axum::body::to_bytes;
+    use wharf_api_types::view::{ExecStreamEvent, Perm};
+    let state = crate::rules::tests::test_state();
+    state
+      .db
+      .call(|c| {
+        db::apply_write(
+          c,
+          &db::Write::Upsert {
+            kind: "server".into(),
+            name: "s1".into(),
+            meta: serde_json::json!({}),
+            spec: serde_json::json!({"host_exec":true}),
+          },
+        )
+      })
+      .await
+      .unwrap();
+    state.hub.mock_agent("s1", false, |op| {
+      assert!(matches!(op, AgentOp::HostExec(job) if !job.stream));
+      Ok(serde_json::json!({"status":"finished","exit_code":2,
+        "stdout":"hi","stderr":"","truncated":false,"duration_ms":1,"output_bytes":2}))
+    });
+    state.hub.enable_mock_host_shell("s1");
+    let response = exec(
+      State(state),
+      auth([Perm::Host], false),
+      AxumPath("s1".into()),
+      Query(ExecQuery { stream: true }),
+      Json(ExecRequest {
+        command: "true".into(),
+        timeout_secs: None,
+        cwd: None,
+      }),
+    )
+    .await
+    .unwrap();
+    let body = to_bytes(response.into_body(), 1024).await.unwrap();
+    let frames = std::str::from_utf8(&body)
+      .unwrap()
+      .lines()
+      .map(|line| serde_json::from_str(line).unwrap())
+      .collect::<Vec<ExecStreamEvent>>();
+    assert!(matches!(
+      &frames[..],
+      [
+        ExecStreamEvent::Stdout { .. },
+        ExecStreamEvent::Done { exit_code: 2, .. }
+      ]
+    ));
+  }
 }
