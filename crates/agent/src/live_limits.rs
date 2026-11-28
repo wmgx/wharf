@@ -448,8 +448,9 @@ pub(crate) async fn update(
   if hash != job.before_hash {
     return Err(stale(project));
   }
+  let env = docker.read_project_env(project)?;
   docker
-    .images_for_compose(project, &job.compose, ctx)
+    .images_for_compose(project, &job.compose, env.as_deref(), ctx)
     .await?;
   let containers = candidates(docker, job, false, ctx).await?;
   let tx = Transaction {

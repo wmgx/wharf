@@ -846,6 +846,7 @@ async fn dispatch_command(
       Box::pin(crate::task::task(c, cmd, j)).await
     }
     Command::Edge(cmd) => crate::edge::edge(c, cmd, j).await,
+    Command::Var(cmd) => crate::variables::run(c, cmd, j).await,
     Command::Bookmark(cmd) => {
       crate::bookmark::bookmark(c, cmd, j).await
     }
@@ -1070,6 +1071,64 @@ async fn plan_and_maybe_apply(
   j: bool,
 ) -> CliResult<()> {
   plan_output(c, req, flags, j, Vec::new(), None).await
+}
+
+fn set_network_options(
+  spec: &mut ServiceSpec,
+  ops: &crate::DeployOps,
+) -> CliResult<()> {
+  if ops.compose_env || ops.no_compose_env {
+    spec.compose_env = ops.compose_env;
+  }
+  if ops.self_refs || ops.no_self_refs {
+    spec.self_refs = ops.self_refs;
+  }
+  if ops.inherit_lan {
+    spec.lan = None;
+  } else if ops.lan || ops.no_lan {
+    spec.lan = Some(ops.lan);
+  }
+  for name in &ops.rm_network {
+    spec.networks.remove(name);
+  }
+  for network in &ops.add_network {
+    let (name, internal) = match network.split_once('=') {
+      None => (network.as_str(), false),
+      Some((name, "internal")) => (name, true),
+      Some(_) => {
+        return Err(
+          ApiError::invalid("网络写成 NAME 或 NAME=internal").into(),
+        );
+      }
+    };
+    wharf_api_types::validate_name("网络", name)?;
+    spec.networks.insert(
+      name.into(),
+      wharf_api_types::spec::NetworkAttachment { internal },
+    );
+  }
+  for name in &ops.rm_extra_host {
+    spec.extra_hosts.remove(&name.to_ascii_lowercase());
+  }
+  let mut added = BTreeMap::new();
+  for mapping in &ops.add_extra_host {
+    let error = || {
+      ApiError::invalid("主机映射格式不对或名称重复")
+        .with_hint("用 NAME=IP，每个名称只留一条映射")
+    };
+    let (name, ip) = mapping.split_once('=').ok_or_else(error)?;
+    if added
+      .insert(
+        name.to_ascii_lowercase(),
+        ip.parse().map_err(|_| error())?,
+      )
+      .is_some()
+    {
+      return Err(error().into());
+    }
+  }
+  spec.extra_hosts.extend(added);
+  Ok(())
 }
 
 async fn deploy_plan(
@@ -3448,6 +3507,25 @@ async fn service(
           || ops.init_cmd.is_some()
           || ops.unset_init_cmd
           || ops.init_timeout.is_some()
+          || ops.lan
+          || ops.no_lan
+          || ops.inherit_lan
+          || ops.self_refs
+          || ops.no_self_refs
+          || !ops.add_extra_host.is_empty()
+          || !ops.rm_extra_host.is_empty()
+          || !ops.add_network.is_empty()
+          || !ops.rm_network.is_empty()
+          || ops.compose_env
+          || ops.no_compose_env
+          || !ops.add_host_volume.is_empty()
+          || !ops.rm_host_volume.is_empty()
+          || ops.user.is_some()
+          || ops.unset_user
+          || !ops.volume_owner.is_empty()
+          || !ops.unset_volume_owner.is_empty()
+          || ops.use_egress
+          || ops.no_use_egress
           || ops.runtime.has_edits())
       {
         apply.check_read_only()?;
@@ -3563,6 +3641,13 @@ async fn service(
             stop_signal: None,
             init_cmd: None,
             init_timeout_secs: None,
+            lan: None,
+            extra_hosts: Default::default(),
+            self_refs: false,
+            compose_env: false,
+            user: None,
+            use_egress: false,
+            networks: Default::default(),
             command: Default::default(),
             shm_size: Default::default(),
             cap_add: Default::default(),
@@ -3596,6 +3681,13 @@ async fn service(
       }
       if let Some(server) = server {
         spec.server = server;
+      }
+      set_network_options(&mut spec, &ops)?;
+      if ops.use_egress || ops.no_use_egress {
+        spec.use_egress = ops.use_egress;
+      }
+      if ops.unset_user || ops.user.is_some() {
+        spec.user.clone_from(&ops.user);
       }
       if ops.unset_stop_grace || ops.stop_grace.is_some() {
         spec.stop_grace_secs = ops.stop_grace.filter(|n| *n != 0);
@@ -3690,10 +3782,25 @@ async fn service(
         spec.volumes.remove(index);
       }
       for arg in &volume {
-        let v = parse_volume_arg(arg)?;
+        let mut v = parse_volume_arg(arg)?;
+        if let Some(old) =
+          spec.volumes.iter().find(|old| old.name == v.name)
+        {
+          v.owner.clone_from(&old.owner);
+        }
         spec.volumes.retain(|x| x.name != v.name);
         spec.volumes.push(v);
       }
+      set_volume_owners(
+        &mut spec,
+        &ops.volume_owner,
+        &ops.unset_volume_owner,
+      )?;
+      set_host_volumes(
+        &mut spec,
+        &ops.add_host_volume,
+        &ops.rm_host_volume,
+      )?;
       deploy_plan(c, name, spec, apply, j, warnings, detected).await
     }
     ServiceCmd::AdoptData {
@@ -4089,6 +4196,7 @@ async fn service(
       file,
       raw,
       rm,
+      metadata,
       apply,
     } => {
       let mut spec = c
@@ -4101,7 +4209,8 @@ async fn service(
           .files
           .iter()
           .map(
-            |f| json!({ "path": f.path, "bytes": f.content.len() }),
+            |f| json!({ "path": f.path, "bytes": f.content.len(), "init_only": f.init_only,
+              "mode": f.mode, "owner": f.owner, "on_change": f.on_change.as_deref().unwrap_or("recreate") }),
           )
           .collect();
         out(j, &list, |l| {
@@ -4131,28 +4240,52 @@ async fn service(
         if spec.files.len() == before {
           return Err(missing());
         }
-      } else if let Some(src) = file {
-        let content = (if src == "-" {
-          std::io::read_to_string(std::io::stdin())
-        } else {
-          std::fs::read_to_string(&src)
-        })
-        .map_err(|e| {
-          ApiError::invalid(format!("读不了文件 {src}：{e}"))
-            .with_hint("只支持文本文件；从标准输入读用 --file -")
-        })?;
-        let next = wharf_api_types::spec::FileSpec {
-          path,
-          content,
-          raw,
-          file: None,
-        };
-        if let Some(f) =
-          spec.files.iter_mut().find(|f| f.path == next.path)
-        {
-          *f = next;
-        } else {
-          spec.files.push(next);
+      } else if file.is_some() || metadata.has_edits() {
+        let previous = spec.files.iter().position(|f| f.path == path);
+        let mut next =
+          previous.map(|index| spec.files[index].clone());
+        if let Some(src) = file {
+          let content = (if src == "-" {
+            std::io::read_to_string(std::io::stdin())
+          } else {
+            std::fs::read_to_string(&src)
+          })
+          .map_err(|e| {
+            ApiError::invalid(format!("读不了文件 {src}：{e}"))
+              .with_hint("只支持文本文件；从标准输入读用 --file -")
+          })?;
+          let next =
+            next.get_or_insert(wharf_api_types::spec::FileSpec {
+              path: path.clone(),
+              content: String::new(),
+              raw,
+              file: None,
+              init_only: false,
+              mode: None,
+              owner: None,
+              on_change: None,
+            });
+          next.content = content;
+          if raw {
+            next.raw = true;
+          }
+        }
+        let mut next = next.ok_or_else(missing)?;
+        if metadata.init_only || metadata.no_init_only {
+          next.init_only = metadata.init_only;
+        }
+        if metadata.mode.is_some() || metadata.unset_mode {
+          next.mode = metadata.mode;
+        }
+        if metadata.owner.is_some() || metadata.unset_owner {
+          next.owner = metadata.owner;
+        }
+        if metadata.on_change.is_some() || metadata.unset_on_change {
+          next.on_change = metadata.on_change;
+        }
+        match previous {
+          Some(index) => spec.files[index] = next,
+          None => spec.files.push(next),
         }
       } else {
         apply.check_read_only()?;
@@ -6804,6 +6937,84 @@ fn infer_ignore_image(source: &Source) -> CliResult<String> {
   }
 }
 
+fn set_volume_owners(
+  spec: &mut ServiceSpec,
+  add: &[String],
+  remove: &[String],
+) -> CliResult<()> {
+  let parsed = add
+    .iter()
+    .map(|value| {
+      value.split_once('=').ok_or_else(|| {
+        ApiError::invalid(
+          "设置属主用 --volume-owner NAME=UID:GID|auto",
+        )
+      })
+    })
+    .collect::<Result<Vec<_>, _>>()?;
+  for (name, owner) in
+    remove.iter().map(|name| (name.as_str(), None)).chain(
+      parsed.into_iter().map(|(name, owner)| (name, Some(owner))),
+    )
+  {
+    let volume = spec
+      .volumes
+      .iter_mut()
+      .find(|v| v.name == name && !v.name.is_empty())
+      .ok_or_else(|| {
+        ApiError::invalid(format!("数据卷 {name} 不存在"))
+      })?;
+    if owner.is_some_and(|owner| {
+      owner != "auto"
+        && wharf_api_types::spec::parse_uid_gid(owner).is_none()
+    }) {
+      return Err(
+        ApiError::invalid(format!("卷 {name} 的属主格式不对"))
+          .with_hint("填写 UID:GID 或 auto")
+          .into(),
+      );
+    }
+    volume.owner = owner.map(str::to_string);
+  }
+  Ok(())
+}
+
+fn set_host_volumes(
+  spec: &mut ServiceSpec,
+  add: &[String],
+  remove: &[String],
+) -> CliResult<()> {
+  for target in remove {
+    spec.volumes.retain(|v| {
+      v.host_path.is_none()
+        || v.target != target.trim_end_matches('/')
+    });
+  }
+  for entry in add {
+    let (source, target) =
+      entry.split_once(':').ok_or_else(|| {
+        ApiError::invalid("外部挂载写成 HOST_PATH:/TARGET[:ro|:rw]")
+      })?;
+    let (target, read_only) = match target.strip_suffix(":ro") {
+      Some(target) => (target, true),
+      None => (target.strip_suffix(":rw").unwrap_or(target), false),
+    };
+    wharf_api_types::adopt_data::validate_host_bind(source, target)?;
+    spec
+      .volumes
+      .retain(|v| v.host_path.is_none() || v.target != target);
+    spec.volumes.push(VolumeSpec {
+      owner: None,
+      host_path: Some(source.into()),
+      target: target.into(),
+      name: String::new(),
+      from_service: None,
+      read_only,
+    });
+  }
+  Ok(())
+}
+
 fn parse_volume_arg(raw: &str) -> Result<VolumeSpec, ApiError> {
   let invalid = || {
     ApiError::invalid(format!("--volume {raw} 格式不对"))
@@ -6841,6 +7052,8 @@ fn parse_volume_arg(raw: &str) -> Result<VolumeSpec, ApiError> {
     target: format!("/{target}"),
     from_service,
     read_only,
+    host_path: None,
+    owner: None,
   })
 }
 

@@ -311,6 +311,7 @@ impl HostShell {
     ctx: &Ctx,
   ) -> Result<String, ApiError> {
     let job = HostExecJob {
+      workload_no_proxy: None,
       stream: false,
       command: command.into(),
       timeout_secs: SESSION_CMD_TIMEOUT,
@@ -353,6 +354,25 @@ impl HostShell {
     let marker = format!("__WHARF_EXIT_{}__=", random_id());
     let marker_prefix = format!("\n{marker}");
     let mut args = self.run_args(&name, &job.cwd, false, &image);
+    let mut env = std::collections::BTreeMap::new();
+    if let Some(bypass) = &job.workload_no_proxy {
+      crate::workload_egress::require_running()
+        .map_err(|err| (err, 0))?;
+      wharf_api_types::egress::workload_env(
+        "127.0.0.1",
+        bypass,
+        &mut env,
+      )
+      .map_err(|err| (err, 0))?;
+      let before = args
+        .iter()
+        .position(|arg| arg == "--entrypoint")
+        .expect("宿主机命令带入口");
+      args.splice(
+        before..before,
+        env.keys().flat_map(|key| ["--env".into(), key.clone()]),
+      );
+    }
     args.extend([
       "/bin/sh".into(),
       "-c".into(),
@@ -364,6 +384,7 @@ impl HostShell {
     let mut command = tokio::process::Command::new(&self.docker.bin);
     command
       .args(args)
+      .envs(env)
       .stdin(Stdio::null())
       .stdout(Stdio::piped())
       .stderr(Stdio::piped())
@@ -789,6 +810,7 @@ mod tests {
   #[test]
   fn validates_exec_boundaries() {
     let valid = HostExecJob {
+      workload_no_proxy: None,
       stream: false,
       command: "printf ok".into(),
       timeout_secs: 600,

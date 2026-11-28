@@ -14,6 +14,12 @@ pub const MAX_FILE_BYTES: u64 = 512 << 20;
 pub const MAX_BYTES: u64 = 1 << 30;
 
 pub fn path_parts(path: &str) -> Result<Vec<&str>, ApiError> {
+  if path.split('/').any(|part| part == ".wharf-init") {
+    return Err(ApiError::invalid(
+      "首次写入的受管目录不允许通过便携数据操作访问",
+    ));
+  }
+
   if path.is_empty() {
     return Ok(Vec::new());
   }

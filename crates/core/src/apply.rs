@@ -60,6 +60,7 @@ pub use run_scope::{
 };
 
 struct ActiveRun {
+  deploy_connections: HashMap<String, u64>,
   scope_services: Option<Vec<String>>,
   run: Arc<Mutex<Run>>,
   cancel: CancellationToken,
@@ -388,6 +389,89 @@ pub(crate) async fn start_with_actor(
       .suggest("wharf plan"),
     );
   }
+  let mut deploy_connections = HashMap::new();
+  let network_services: BTreeSet<_> = stored
+    .steps
+    .iter()
+    .filter_map(|step| match &step.step {
+      Step::ServiceUp { service, .. } | Step::Rebuild { service } => {
+        Some(service.as_str())
+      }
+      _ => None,
+    })
+    .collect();
+  if !network_services.is_empty() {
+    let current = state
+      .db
+      .call(|c| crate::world::World::from_rows(db::all_resources(c)?))
+      .await?;
+    let cancel = CancellationToken::new();
+    for service in network_services {
+      let previous =
+        current.services.get(service).map(|row| &row.spec);
+      let next = stored
+        .writes
+        .iter()
+        .find_map(|w| match w {
+          Write::Upsert {
+            kind, name, spec, ..
+          } if kind == crate::world::KIND_SERVICE
+            && name == service =>
+          {
+            Some(spec)
+          }
+          _ => None,
+        })
+        .map(|spec| {
+          serde_json::from_value::<ServiceSpec>(spec.clone())
+            .map_err(json_err)
+        })
+        .transpose()?;
+      if let Some(spec) = &next
+        && crate::project_files::exec_changed(previous, spec)
+      {
+        crate::auth::require_perm(perms, Perm::Exec)?;
+      }
+      let Some(spec) = next.as_ref().or(previous) else {
+        continue;
+      };
+      let server = &spec.server;
+      let mut connections = Vec::new();
+      if spec.use_egress || previous.is_some_and(|old| old.use_egress)
+      {
+        connections.push(state.hub.workload_egress_conn_id(server)?);
+      }
+      if crate::project_files::needs_agent(spec)
+        || previous.is_some_and(crate::project_files::needs_agent)
+      {
+        connections.push(state.hub.project_files_conn_id(server)?);
+      }
+      if has_external_volumes(spec)
+        || previous.is_some_and(has_external_volumes)
+      {
+        connections.push(state.hub.host_bind_conn_id(server)?);
+      }
+      if spec.compose_env
+        || previous.is_some_and(|old| old.compose_env)
+      {
+        connections.push(state.hub.compose_env_conn_id(server)?);
+      }
+      if !spec.networks.is_empty()
+        || previous.is_some_and(|old| !old.networks.is_empty())
+      {
+        connections.push(
+          crate::named_networks::preflight(&state.hub, spec, &cancel)
+            .await?,
+        );
+      }
+      if let Some((&conn, rest)) = connections.split_first() {
+        if rest.iter().any(|&id| id != conn) {
+          return Err(deploy_agent_reconnected(server));
+        }
+        deploy_connections.insert(service.to_string(), conn);
+      }
+    }
+  }
   let human = auth.is_some_and(|auth| auth.human);
   if !stored.body.deployment_privilege_reviewed {
     let snap = snapshot::load(&state.db).await?;
@@ -691,6 +775,7 @@ pub(crate) async fn start_with_actor(
     lock(&state.runs.active).insert(
       run_id.clone(),
       ActiveRun {
+        deploy_connections,
         scope_services: None,
         run: shared.clone(),
         cancel: cancel.clone(),
@@ -1081,6 +1166,7 @@ pub(crate) async fn run_batch_sync(
   lock(&state.runs.active).insert(
     lock(&shared).run_id.clone(),
     ActiveRun {
+      deploy_connections: HashMap::new(),
       scope_services,
       run: shared.clone(),
       cancel: cancel.clone(),
@@ -1168,6 +1254,7 @@ fn spawn_run(
   lock(&state.runs.active).insert(
     run_id,
     ActiveRun {
+      deploy_connections: HashMap::new(),
       scope_services,
       run: shared.clone(),
       cancel: cancel.clone(),
@@ -1666,6 +1753,26 @@ async fn run_step_with_dns(
       explicit_bwlimit,
     } => {
       check_step_instance(world, service, instance_id.as_deref())?;
+      let binds: Vec<_> = world.services[service]
+        .spec
+        .volumes
+        .iter()
+        .filter(|v| v.host_path.is_some())
+        .cloned()
+        .collect();
+      if !binds.is_empty() {
+        let conn = state.hub.host_bind_conn_id(to)?;
+        let _: serde_json::Value = state
+          .hub
+          .call_bound(
+            (to, conn),
+            AgentOp::HostBindCheck { binds },
+            Duration::from_secs(120),
+            None,
+            cancel,
+          )
+          .await?;
+      }
       let shared = *shared_data
         || crate::shared_volumes::consumers_on(world, service, to)
           .next()
@@ -1715,6 +1822,7 @@ async fn run_step_with_dns(
       service,
       expect,
       instance_id,
+      refresh_files_from,
       images,
     } => {
       check_step_instance(world, service, instance_id.as_deref())?;
@@ -1747,7 +1855,11 @@ async fn run_step_with_dns(
         &snap,
         service,
         false,
-        (expect.as_deref(), Some(images)),
+        (
+          expect.as_deref(),
+          Some(images),
+          refresh_files_from.as_deref(),
+        ),
         progress.clone(),
         cancel,
       )
@@ -1802,7 +1914,7 @@ async fn run_step_with_dns(
         &snap,
         service,
         true,
-        (None, None),
+        (None, None, None),
         progress,
         cancel,
       )
@@ -2100,6 +2212,13 @@ async fn run_step_with_dns(
               start_timeout_secs: None,
               readiness: None,
               init: None,
+              networks: Default::default(),
+              project_env: None,
+              host_binds: Vec::new(),
+              volume_owners: Default::default(),
+              project_files: Vec::new(),
+              workload_egress: false,
+              refresh_files_from: None,
             },
             caddyfile: r.config,
             caddyfile_hash: r.config_hash,
@@ -2216,6 +2335,13 @@ async fn run_step_with_dns(
         start_timeout_secs: None,
         readiness: None,
         init: None,
+        networks: Default::default(),
+        project_env: None,
+        host_binds: Vec::new(),
+        volume_owners: Default::default(),
+        project_files: Vec::new(),
+        workload_egress: false,
+        refresh_files_from: None,
       };
       let op = match p.reload {
         Some(r) => {
@@ -2271,6 +2397,13 @@ async fn run_step_with_dns(
             start_timeout_secs: None,
             readiness: None,
             init: None,
+            networks: Default::default(),
+            project_env: None,
+            host_binds: Vec::new(),
+            volume_owners: Default::default(),
+            project_files: Vec::new(),
+            workload_egress: false,
+            refresh_files_from: None,
           }),
           GATEWAY_TIMEOUT,
           Some(progress),
@@ -2950,11 +3083,26 @@ fn should_trial(
   has_trial_collision: bool,
 ) -> bool {
   rollback
+    && spec.networks.is_empty()
+    && !spec.use_egress
+    && !crate::project_files::needs_agent(spec)
     && !matches!(spec.source, Source::Compose { .. })
     && !spec.stopped
     && !spec.ports.is_empty()
     && has_deployed
     && !has_trial_collision
+}
+
+fn has_external_volumes(spec: &ServiceSpec) -> bool {
+  spec.volumes.iter().any(|v| v.host_path.is_some())
+}
+
+fn deploy_agent_reconnected(server: &str) -> ApiError {
+  ApiError::new(
+    ErrorCode::AgentOffline,
+    format!("服务器 {server} 的 agent 已重连"),
+  )
+  .with_hint("重新生成计划")
 }
 
 /// 部署一个服务：构建来源先构建镜像（`force` 时重新构建），再 `up`。
@@ -3090,9 +3238,10 @@ async fn service_up(
   snap: &snapshot::Snapshot,
   service: &str,
   force: bool,
-  (expect, images): (
+  (expect, images, refresh_files_from): (
     Option<&str>,
     Option<&crate::pins::ImageSelection>,
+    Option<&str>,
   ),
   progress: ProgressFn,
   cancel: &CancellationToken,
@@ -3106,6 +3255,46 @@ async fn service_up(
     )
   })?;
   let server = &row.spec.server;
+  let old = snap
+    .applied
+    .get(service)
+    .and_then(|applied| applied.spec.as_ref())
+    .filter(|spec| &spec.server == server);
+  let egress_conn = if row.spec.use_egress {
+    crate::workload_egress::validate(world, &net, server)?;
+    Some(
+      crate::workload_egress::preflight(
+        &state.hub, server, false, cancel,
+      )
+      .await?,
+    )
+  } else if old.is_some_and(|spec| spec.use_egress) {
+    Some(state.hub.workload_egress_conn_id(server)?)
+  } else {
+    None
+  };
+  let files_conn = (crate::project_files::needs_agent(&row.spec)
+    || old.is_some_and(crate::project_files::needs_agent))
+  .then(|| state.hub.project_files_conn_id(server))
+  .transpose()?;
+  let bind_conn = (has_external_volumes(&row.spec)
+    || old.is_some_and(has_external_volumes))
+  .then(|| state.hub.host_bind_conn_id(server))
+  .transpose()?;
+  let env_conn = (row.spec.compose_env
+    || old.is_some_and(|spec| spec.compose_env))
+  .then(|| state.hub.compose_env_conn_id(server))
+  .transpose()?;
+  let network_conn = if !row.spec.networks.is_empty() {
+    Some(
+      crate::named_networks::preflight(&state.hub, &row.spec, cancel)
+        .await?,
+    )
+  } else if old.is_some_and(|spec| !spec.networks.is_empty()) {
+    Some(state.hub.named_network_conn_id(server)?)
+  } else {
+    None
+  };
   crate::monitor::require_agent(state, &row.spec)?;
   let readiness = if let Some(m) =
     row.spec.monitor.as_ref().filter(|_| !row.spec.stopped)
@@ -3242,6 +3431,13 @@ async fn service_up(
       "提醒：服务器 {server} 的 agent 版本较旧，自定义启动上限和就绪探活暂未生效，请运行 wharf upgrade 升级"
     ));
   }
+  let project_files = crate::project_files::resolved(
+    world,
+    &net,
+    service,
+    &compose,
+    &snap.render_values(world, service),
+  )?;
   let runtime_conn = row
     .spec
     .uses_runtime_options()
@@ -3303,29 +3499,60 @@ async fn service_up(
     no_start,
     trial,
     init,
+    networks: row.spec.networks.clone(),
+    project_files,
+    workload_egress: row.spec.use_egress,
+    refresh_files_from: refresh_files_from.map(str::to_string),
+    volume_owners: row
+      .spec
+      .volumes
+      .iter()
+      .filter_map(|v| {
+        v.owner.as_ref().map(|o| (v.name.clone(), o.clone()))
+      })
+      .collect(),
+    host_binds: row
+      .spec
+      .volumes
+      .iter()
+      .filter(|v| v.host_path.is_some())
+      .cloned()
+      .collect(),
+    project_env: crate::compose_env::inputs(
+      world,
+      &net,
+      service,
+      &snap.render_values(world, service),
+    )?,
     start_timeout_secs: row.spec.start_timeout_secs,
     readiness,
   });
   let deploy_conn = required
     .map(|what| state.hub.deploy_v2_conn_id(server, what))
     .transpose()?;
-  if runtime_conn.is_some()
-    && deploy_conn.is_some()
-    && runtime_conn != deploy_conn
-  {
-    return Err(
-      ApiError::new(
-        ErrorCode::PlanStale,
-        format!("服务器 {server} 的连接已变化"),
-      )
-      .with_hint("重新运行 wharf plan"),
-    );
+  let checked_conn = lock(&state.runs.active)
+    .get(run_id)
+    .and_then(|run| run.deploy_connections.get(service))
+    .copied();
+  let connections = [
+    checked_conn,
+    runtime_conn,
+    network_conn,
+    deploy_conn,
+    env_conn,
+    bind_conn,
+    files_conn,
+    egress_conn,
+  ];
+  let conn = connections.into_iter().flatten().next();
+  if connections.into_iter().flatten().any(|id| Some(id) != conn) {
+    return Err(deploy_agent_reconnected(server));
   }
   let result: ProjectUpResult = state
     .hub
     .call_optional_bound(
       server,
-      runtime_conn.or(deploy_conn),
+      conn,
       op,
       SERVICE_UP_TIMEOUT,
       Some(progress.clone()),
@@ -4151,6 +4378,7 @@ mod tests {
       service: "notes".into(),
       instance_id: None,
       expect: None,
+      refresh_files_from: None,
     };
     assert!(
       run_step(
@@ -4215,6 +4443,7 @@ mod tests {
         images: Default::default(),
         service: "notes".into(),
         expect: None,
+        refresh_files_from: None,
         instance_id: None,
       },
     ]
@@ -4293,6 +4522,7 @@ mod tests {
       service: "notes".into(),
       instance_id: None,
       expect: None,
+      refresh_files_from: None,
     };
     let error =
       run_step(&state, "r1", &up, progress.clone(), &cancel)
@@ -4313,6 +4543,42 @@ mod tests {
   }
 
   #[tokio::test]
+  async fn disabling_project_env_rejects_reconnected_old_agent() {
+    let state = crate::migrate::tests::seed_service(false).await;
+    state.db.call(|c| {
+      c.execute(
+        "INSERT INTO deployments (service, server, run_id, hash, compose, images, created_at, spec, instance_id)
+         SELECT name, 's2', 'test', 'old', '', '[]', 0,
+         json_set(spec, '$.compose_env', json('true')), json_extract(meta, '$.instance_id')
+         FROM resources WHERE kind = 'service' AND name = 'notes'", [],
+      ).map_err(sql_err)?;
+      Ok(())
+    }).await.unwrap();
+    state.hub.mock_agent("s2", false, |_| {
+      panic!("关闭项目变量不能派发给旧 agent")
+    });
+    let step = Step::ServiceUp {
+      images: Default::default(),
+
+      service: "notes".into(),
+      expect: None,
+      instance_id: None,
+      refresh_files_from: None,
+    };
+    let error = run_step(
+      &state,
+      "r1",
+      &step,
+      Arc::new(|_| {}),
+      &CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::Conflict);
+    assert!(error.message.contains("项目变量"));
+  }
+
+  #[tokio::test]
   async fn starting_precreated_service_marks_its_deployment_started()
   {
     let state = crate::migrate::tests::seed_service(true).await;
@@ -4321,6 +4587,7 @@ mod tests {
       service: "notes".into(),
       instance_id: None,
       expect: None,
+      refresh_files_from: None,
     };
     state.hub.mock_agent("s2", false, |_| {
       panic!("不能对旧 agent 部署停机服务")
@@ -4950,6 +5217,7 @@ mod tests {
         instance_id: None,
         service: "web".into(),
         expect: None,
+        refresh_files_from: None,
       }
     );
     let with = serde_json::to_string(&Step::ServiceUp {
@@ -4957,6 +5225,7 @@ mod tests {
       instance_id: None,
       service: "web".into(),
       expect: Some("h".into()),
+      refresh_files_from: None,
     })
     .unwrap();
     assert!(with.contains(r#""expect":"h""#));

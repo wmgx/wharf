@@ -247,3 +247,124 @@ pub fn owned_volumes(
       .collect()
   }
 }
+
+/// 返回 environment 值中引用的变量名。值的语义交给 Compose。
+pub fn project_env_keys(
+  doc: &Value,
+) -> Result<std::collections::BTreeSet<String>, ApiError> {
+  fn scan(text: &str, keys: &mut std::collections::BTreeSet<String>) {
+    let mut rest = text;
+    while let Some((_, tail)) = rest.split_once('$') {
+      if let Some(next) = tail.strip_prefix('$') {
+        rest = next;
+        continue;
+      }
+      let var = tail.strip_prefix('{').unwrap_or(tail);
+      if var
+        .as_bytes()
+        .first()
+        .is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_')
+      {
+        let end = var
+          .bytes()
+          .position(|b| !(b.is_ascii_alphanumeric() || b == b'_'))
+          .unwrap_or(var.len());
+        keys.insert(var[..end].to_string());
+      }
+      rest = tail;
+    }
+  }
+
+  fn walk(
+    value: &Value,
+    path: &mut Vec<String>,
+    keys: &mut std::collections::BTreeSet<String>,
+  ) -> Result<(), ApiError> {
+    let env = path.len() == 3
+      && path[0] == "services"
+      && path[2] == "environment";
+    let error = |field: &str| {
+      ApiError::invalid(format!("Compose 的 {field} 不接受项目变量"))
+        .with_hint("使用静态值，插值放在组件的 environment 值中")
+    };
+    match value {
+      Value::Mapping(map) => {
+        for (key, value) in map {
+          let key = key.as_str().ok_or_else(|| error("映射键"))?;
+          if key.contains('$')
+            || (!env
+              && matches!(
+                key,
+                "include" | "extends" | "env_file" | "label_file"
+              ))
+          {
+            return Err(error(key));
+          }
+          if env {
+            if let Some(s) = value.as_str() {
+              scan(s, keys);
+            }
+            if value.is_null() {
+              return Err(error("environment 的空值"));
+            }
+          } else {
+            path.push(key.to_string());
+            walk(value, path, keys)?;
+            path.pop();
+          }
+        }
+      }
+      Value::Sequence(seq) if env => {
+        for item in seq {
+          let (key, value) = item
+            .as_str()
+            .and_then(|v| v.split_once('='))
+            .ok_or_else(|| error("environment 的无值键"))?;
+          if key.contains('$') {
+            return Err(error("environment 的键"));
+          }
+          scan(value, keys);
+        }
+      }
+      Value::Sequence(seq) => {
+        path.push("[]".into());
+        for item in seq {
+          walk(item, path, keys)?;
+        }
+        path.pop();
+      }
+      Value::String(s) => {
+        let mut used = std::collections::BTreeSet::new();
+        scan(s, &mut used);
+        if !used.is_empty() || s.replace("$$", "").contains("${") {
+          return Err(error(&path.join(".")));
+        }
+      }
+      Value::Tagged(_) => return Err(error("YAML tag")),
+      _ => {}
+    }
+    Ok(())
+  }
+  let mut keys = std::collections::BTreeSet::new();
+  walk(doc, &mut Vec::new(), &mut keys)?;
+  if let Some(key) =
+    keys.iter().find(|key| !valid_project_env_key(key))
+  {
+    return Err(ApiError::invalid(format!(
+      "Compose 项目变量 {key} 为保留名称"
+    )));
+  }
+  Ok(keys)
+}
+
+pub fn valid_project_env_key(key: &str) -> bool {
+  let mut bytes = key.bytes();
+  bytes
+    .next()
+    .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+    && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    && !["COMPOSE_", "DOCKER_", "WHARF_"]
+      .iter()
+      .any(|prefix| key.starts_with(prefix))
+    && !matches!(key, "PATH" | "HOME" | "XDG_CONFIG_HOME")
+}

@@ -791,6 +791,7 @@ pub(crate) mod tests {
       service: "notes".into(),
       instance_id: None,
       expect: None,
+      refresh_files_from: None,
     };
     let error =
       crate::apply::run_step(&state, "r1", &step, progress, &cancel)

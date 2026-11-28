@@ -904,7 +904,45 @@ async fn run_on_agent(
     texts,
     secrets,
   )?;
-  let sub = |t: &str| render::substitute(t, Some(secrets));
+  let net = snap.net(&snap.world);
+  let (proxy_bypass, proxy_conn) = if spec.use_egress {
+    crate::workload_egress::validate(
+      &snap.world,
+      &net,
+      &spec.server,
+    )?;
+    let conn = crate::workload_egress::preflight(
+      &state.hub,
+      &spec.server,
+      false,
+      cancel,
+    )
+    .await?;
+    if request.conn.is_some_and(|bound| bound != conn) {
+      return Err(crate::hub::offline(&spec.server));
+    }
+    if matches!(&spec.how, TaskKind::Exec { .. })
+      && state.hub.exec_v2_conn_id(&spec.server, "任务分流代理")?
+        != conn
+    {
+      return Err(crate::hub::offline(&spec.server));
+    }
+    (Some(crate::workload_egress::bypass(&net)), Some(conn))
+  } else {
+    (None, None)
+  };
+  let caller = format!("任务 {name}");
+  let sub = |text: &str| {
+    let text = crate::refs::resolve_from(
+      text,
+      &caller,
+      &spec.server,
+      &snap.world,
+      &net,
+      false,
+    )?;
+    render::substitute(&text, Some(secrets))
+  };
   let env_with_overrides = |env: &BTreeMap<String, String>| {
     let mut merged = env.clone();
     merged.extend(request.env.clone());
@@ -926,10 +964,11 @@ async fn run_on_agent(
     .as_ref()
     .map(|_| state.hub.task_limits_conn_id(&spec.server))
     .transpose()?;
-  if request
-    .conn
-    .zip(limit_conn)
-    .is_some_and(|(request, limits)| request != limits)
+  let bound_conn = request.conn.or(proxy_conn).or(limit_conn);
+  if [request.conn, proxy_conn, limit_conn]
+    .into_iter()
+    .flatten()
+    .any(|id| Some(id) != bound_conn)
   {
     return Err(
       ApiError::new(ErrorCode::Conflict, "服务器的 agent 连接已变化")
@@ -942,6 +981,7 @@ async fn run_on_agent(
     }
     TaskKind::Host { command } => {
       let job = HostExecJob {
+        workload_no_proxy: proxy_bypass.clone(),
         stream: false,
         command: sub(command)?,
         timeout_secs: spec.timeout_secs,
@@ -1023,20 +1063,20 @@ async fn run_on_agent(
       .with_hint("运行 wharf upgrade"),
     );
   }
-  let conn =
-    if matches!(
-      &how,
-      TaskHow::Script { .. } | TaskHow::Container { .. }
-    ) {
-      state.hub.task_artifacts_conn_id(&spec.server).ok().filter(
-        |id| {
-          request.conn.or(limit_conn).is_none_or(|bound| bound == *id)
-        },
-      )
-    } else {
-      None
-    };
+  let conn = if matches!(
+    &how,
+    TaskHow::Script { .. } | TaskHow::Container { .. }
+  ) {
+    state
+      .hub
+      .task_artifacts_conn_id(&spec.server)
+      .ok()
+      .filter(|id| bound_conn.is_none_or(|bound| bound == *id))
+  } else {
+    None
+  };
   let job = TaskRunJob {
+    workload_no_proxy: proxy_bypass,
     limits,
     name: name.to_string(),
     how,
@@ -1060,7 +1100,7 @@ async fn run_on_agent(
     .hub
     .call_optional_bound(
       &spec.server,
-      request.conn.or(limit_conn).or(conn),
+      bound_conn.or(conn),
       AgentOp::TaskRun(job),
       wait,
       None,
@@ -1304,6 +1344,31 @@ pub(crate) fn validate_script(
   Ok(())
 }
 
+fn validate_task_refs<'a>(
+  auth: &Auth,
+  name: &str,
+  world: &crate::world::World,
+  texts: impl IntoIterator<Item = &'a str>,
+) -> Result<(), ApiError> {
+  use wharf_api_types::references::{
+    parse_service_ref, placeholders,
+  };
+  for text in texts {
+    for placeholder in
+      placeholders(text).filter(|p| p.starts_with('@'))
+    {
+      let reference =
+        parse_service_ref(placeholder).ok_or_else(|| {
+          ApiError::invalid(format!("任务 {name} 的服务引用格式不对"))
+            .with_hint("引用写作 [[@服务名]] 或 [[@服务名.端口名]]")
+        })?;
+      crate::token_scope::require_service(auth, reference.service)?;
+      crate::refs::validate_task_ref(name, world, &reference)?;
+    }
+  }
+  Ok(())
+}
+
 fn validate(
   name: &str,
   spec: &TaskSpec,
@@ -1311,13 +1376,42 @@ fn validate(
 ) -> Result<(), ApiError> {
   validate_name("task", name)?;
   crate::secret_policy::validate_task(name, &spec.how)?;
-  let server = snap
+  let server = if let TaskKind::Exec { service, .. } = &spec.how {
+    let row = snap.world.services.get(service).ok_or_else(|| {
+      ApiError::not_found(format!("没有服务 {service}"))
+        .with_hint("wharf service list")
+    })?;
+    exec_target(snap, service).unwrap_or(&row.spec.server)
+  } else {
+    &spec.server
+  };
+  let settings = &snap
     .world
     .servers
-    .get(&spec.server)
-    .ok_or_else(|| crate::world::server_not_found(&spec.server))?;
-  effective_task_limits(spec, server.settings.task_limits.as_ref())?;
+    .get(server)
+    .ok_or_else(|| crate::world::server_not_found(server))?
+    .settings;
+  effective_task_limits(spec, settings.task_limits.as_ref())?;
   validate_schedule(spec)?;
+  if spec.use_egress {
+    if matches!(spec.how, TaskKind::Ping { .. }) {
+      return Err(ApiError::invalid("外部报到任务不能使用分流代理"));
+    }
+    crate::workload_egress::validate(
+      &snap.world,
+      &snap.net(&snap.world),
+      server,
+    )?;
+    if let TaskKind::Container { env, .. }
+    | TaskKind::Script { env, .. } = &spec.how
+    {
+      wharf_api_types::egress::workload_env(
+        "127.0.0.1",
+        "",
+        &mut env.clone(),
+      )?;
+    }
+  }
   if spec.skip_if_stopped
     && !matches!(spec.how, TaskKind::Exec { .. })
   {
@@ -1361,15 +1455,7 @@ fn validate(
   }
   let blank = |s: &str| s.trim().is_empty();
   match &spec.how {
-    TaskKind::Exec {
-      service, command, ..
-    } => {
-      if !snap.world.services.contains_key(service) {
-        return Err(
-          ApiError::not_found(format!("没有服务 {service}"))
-            .with_hint("wharf service list"),
-        );
-      }
+    TaskKind::Exec { command, .. } => {
       if blank(command) {
         return Err(ApiError::invalid("命令不能为空"));
       }
@@ -1545,6 +1631,12 @@ pub async fn put(
   if let Ok(old) = load_one(&s, &name).await {
     need_perm(&auth, &old, &snap.world, core_server.as_deref())?;
   }
+  validate_task_refs(
+    &auth,
+    &name,
+    &snap.world,
+    crate::missing_refs::task_texts(&spec.how).map(|(_, text)| text),
+  )?;
   let defaults = snap
     .world
     .servers
@@ -1770,12 +1862,32 @@ pub async fn run_now(
       );
     }
     validate_run_env(&request.env)?;
+    if spec.use_egress {
+      wharf_api_types::egress::workload_env(
+        "127.0.0.1",
+        "",
+        &mut request.env.clone(),
+      )?;
+    }
     crate::secret_policy::validate_task_env(
       &name,
       request.env.values().map(String::as_str),
       &snap.secret_restrictions,
     )?;
   }
+  validate_task_refs(
+    &auth,
+    &name,
+    &snap.world,
+    crate::missing_refs::task_texts(&spec.how)
+      .filter(|(field, _)| {
+        field
+          .strip_prefix("env.")
+          .is_none_or(|key| !request.env.contains_key(key))
+      })
+      .map(|(_, text)| text)
+      .chain(request.env.values().map(String::as_str)),
+  )?;
   let (id, busy) = start_with_guard(
     &s,
     &name,
@@ -1946,7 +2058,7 @@ pub async fn cancel_run(
 
 fn validate_schedule(spec: &TaskSpec) -> Result<(), ApiError> {
   if spec.schedule.is_empty()
-    && matches!(spec.how, TaskKind::Script { .. })
+    && !matches!(spec.how, TaskKind::Ping { .. })
   {
     return Ok(());
   }
@@ -2126,6 +2238,31 @@ mod tests {
     assert_eq!(exec_target(&snap, "web"), Ok("s2"));
   }
 
+  #[test]
+  fn saving_exec_egress_uses_live_deployment_server() {
+    let row = |kind: &str, name: &str, spec| db::ResourceRow {
+      kind: kind.into(),
+      name: name.into(),
+      spec,
+      meta: serde_json::json!({}),
+      version: 1,
+    };
+    let snap = snapshot::Snapshot {
+      world: crate::world::World::from_rows(vec![
+        row("server", "s1", serde_json::json!({})),
+        row("server", "s2", serde_json::json!({"via":"exit"})),
+        row("server", "exit", serde_json::json!({"private_addr":{"ip":"100.64.0.2","network":"tailscale"},"egress":{"all":true}})),
+        row("service", "web", serde_json::json!({"server":"s2","source":{"image":"nginx"}})),
+      ]).unwrap(),
+      deployed: BTreeMap::from([("web".into(), "s2".into())]),
+      ..Default::default()
+    };
+    let spec = serde_json::from_value(serde_json::json!({
+      "kind":"exec","server":"s1","schedule":"","service":"web","command":"true","use_egress":true
+    })).unwrap();
+    validate("report", &spec, &snap).unwrap();
+  }
+
   #[tokio::test]
   async fn rebind_exec_task_preserves_run_token_scope() {
     let state = crate::rules::tests::test_state();
@@ -2208,13 +2345,18 @@ mod tests {
   }
 
   #[test]
-  fn empty_schedule_only_for_script() {
+  fn empty_schedule_requires_cron_for_ping_only() {
     let mut spec: TaskSpec = serde_json::from_value(serde_json::json!({
       "server": "s1", "schedule": "", "kind": "script", "runtime": "shell", "code": "echo ok"
     })).unwrap();
     assert!(validate_schedule(&spec).is_ok());
     spec.how = TaskKind::Host {
       command: "echo ok".into(),
+    };
+    assert!(validate_schedule(&spec).is_ok());
+    spec.how = TaskKind::Ping {
+      token: String::new(),
+      grace_mins: 5,
     };
     assert!(validate_schedule(&spec).is_err());
   }
@@ -2421,6 +2563,7 @@ async fn host_task_keeps_command_template_in_shell_log() {
     .await
     .unwrap();
   let job = HostExecJob {
+    workload_no_proxy: None,
     stream: false,
     command: "curl https://api.example.test/fixture-secret".into(),
     timeout_secs: 1,

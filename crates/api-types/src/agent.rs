@@ -200,6 +200,16 @@ pub enum AgentMsg {
     /// 支持扩展文件操作和日志截止时间。
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     files_v2: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    named_networks_v1: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    compose_env_v2: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    safe_host_bind_v2: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    project_files_v2: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    workload_egress_v1: bool,
   },
   KeyReady {
     core_public_key: String,
@@ -463,6 +473,18 @@ pub enum AgentOp {
   },
   /// 写入 compose、拉镜像、`up -d`。结果是 [ProjectUpResult]。
   ProjectUp(ProjectUp),
+  NamedNetworksCheck {
+    networks: BTreeMap<String, crate::spec::NetworkAttachment>,
+  },
+  WorkloadEgressStatus,
+  HostBindCheck {
+    binds: Vec<crate::spec::VolumeSpec>,
+  },
+  ComposeEnvCheck {
+    project: String,
+    compose: String,
+    project_env: BTreeMap<String, String>,
+  },
   ProjectCheckLimits(ProjectLimitsJob),
   ProjectUpdateLimits(ProjectLimitsJob),
   GatewayProbe(GatewayProbeJob),
@@ -1024,6 +1046,8 @@ pub struct HostExecJob {
   pub command: String,
   pub timeout_secs: u64,
   pub cwd: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub workload_no_proxy: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

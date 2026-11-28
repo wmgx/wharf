@@ -75,6 +75,7 @@ fn hit(kind: &str, target: &str, source: &str) -> MissingRef {
       format!("wharf sso account set {target} --user <用户名>")
     }
     "secret" => format!("wharf secret set {target} --generate"),
+    "var" => format!("wharf var set {target} <值>"),
     _ => "wharf service list".into(),
   };
   MissingRef {
@@ -98,6 +99,7 @@ pub(crate) fn error(
   for item in missing.iter().take(20) {
     let kind = match item.kind.as_str() {
       "secret" => "密钥",
+      "var" => "变量",
       "server" => "服务器",
       "gateway" => "网关",
       "account" => "应用账号",
@@ -248,6 +250,20 @@ pub(crate) fn collect_plan_missing(
     for (field, text) in service_secret_texts(spec) {
       let at = format!("{source} {field}");
       for raw in placeholders(text) {
+        if !field.starts_with("monitor.")
+          && let Some(reference) =
+            wharf_api_types::references::parse_public_ref(
+              raw,
+              spec.self_refs,
+            )
+        {
+          if let wharf_api_types::references::PublicRef::Var(key) =
+            reference
+          {
+            add("var", key, &at, desired.vars.contains_key(key));
+          }
+          continue;
+        }
         if let Some(r) = parse_service_ref(raw)
           .filter(|_| !field.starts_with("monitor."))
         {

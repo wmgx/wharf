@@ -165,6 +165,23 @@ fn check_all(
         remove,
       );
     }
+    for reference in crate::missing_refs::task_texts(&spec.how)
+      .flat_map(|(_, text)| placeholders(text))
+      .filter_map(wharf_api_types::references::parse_service_ref)
+      .filter(|r| visible(r.service))
+    {
+      if let Err(error) =
+        crate::refs::validate_task_ref(name, world, &reference)
+      {
+        add(
+          "dangling_task_service_ref",
+          Error,
+          subject.clone(),
+          error.message,
+          format!("wharf task show {name}"),
+        );
+      }
+    }
     let names = crate::missing_refs::task_texts(&spec.how)
       .flat_map(|(_, text)| {
         placeholders(text).filter_map(|p| {

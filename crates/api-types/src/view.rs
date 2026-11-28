@@ -187,6 +187,8 @@ pub struct ServiceRenderView {
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub secrets_masked: Vec<String>,
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub project_env_keys: Vec<String>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub warnings: Vec<String>,
 }
 
@@ -1668,6 +1670,8 @@ pub struct TaskSpec {
   pub artifacts_max_mb: Option<u32>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub artifacts_keep: Option<u32>,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub use_egress: bool,
 }
 
 fn default_task_timeout() -> u64 {

@@ -128,6 +128,7 @@ pub fn filter_data(services: &BTreeSet<String>, data: &mut DataView) {
 
 pub fn filter_export(services: &BTreeSet<String>, fleet: &mut Fleet) {
   fleet.bookmarks.clear();
+  fleet.vars.clear();
   fleet.servers.clear();
   fleet.gateways.clear();
   fleet.edge_apps.clear();

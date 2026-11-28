@@ -74,8 +74,17 @@ fn preview(
     BTreeMap::from([(marker.clone(), "***".to_string())]);
   let mut masks = BTreeMap::new();
   let mut missing = BTreeSet::new();
+  let self_refs = row.spec.self_refs;
   let mut substitute = |text: &str| {
     render::rewrite_placeholders(text, true, |p| {
+      if p.mode == SecretMode::Plain
+        && wharf_api_types::references::parse_public_ref(
+          p.name, self_refs,
+        )
+        .is_some()
+      {
+        return Ok(None);
+      }
       if !keys.contains(p.name) {
         missing.insert(p.name.to_string());
         let id = format!("{marker}MISSING{}END", replacements.len());
@@ -139,11 +148,20 @@ fn preview(
 
   let net = snap.net(&world);
   let row = &world.services[name];
+  let runtime = snapshot::runtime_spec(row)?;
+  let component = crate::compose_env::component_settings(&runtime);
+  let (spec, substitutions) = crate::variables::prepare_spec(
+    &world,
+    &net,
+    name,
+    &component,
+    Some(&masks),
+  )?;
   let (compose, mounts) = render::service_compose(
     name,
-    snapshot::runtime_spec(row)?.as_ref(),
+    &spec,
     &row.host_ports,
-    &net.bind_ips(&row.spec.server),
+    &net.bind_ips(&row.spec),
     Some(&masks),
   )?;
   let compose = crate::service_monitor::heartbeat::compose(
@@ -153,6 +171,9 @@ fn preview(
     false,
   )?;
   let compose = crate::refs::resolve(&compose, name, &world, &net)?;
+  let compose = substitutions.finish_compose(compose)?;
+  let compose =
+    crate::workload_egress::render(name, &row.spec, &net, compose)?;
   let compose = snapshot::with_files(
     &world,
     &net,
@@ -183,6 +204,11 @@ fn preview(
     init_cmd: init_cmd
       .map(|cmd| redact(&crate::redact::redact_command(&cmd))),
     secrets_masked: masks.into_keys().collect(),
+    project_env_keys: crate::compose_env::validate(
+      &snap.world.services[name].spec,
+    )?
+    .into_iter()
+    .collect(),
     warnings,
   })
 }

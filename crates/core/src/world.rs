@@ -29,6 +29,7 @@ pub const KIND_GATEWAY: &str = "gateway";
 pub const KIND_ROUTE: &str = "route";
 pub const KIND_EDGE: &str = "edge";
 pub const KIND_BOOKMARK: &str = "bookmark";
+pub const KIND_VAR: &str = "var";
 
 /// 网关的 compose project 名前缀，服务名不能用。
 pub const GATEWAY_PROJECT_PREFIX: &str = "wharf-gw-";
@@ -70,6 +71,12 @@ pub struct EdgeRow {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct VarRow {
+  pub value: String,
+  pub version: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct BookmarkRow {
   pub spec: BookmarkSpec,
   pub version: u64,
@@ -103,6 +110,7 @@ pub struct World {
   pub gateways: BTreeMap<String, GatewayRow>,
   pub edge_apps: BTreeMap<String, EdgeRow>,
   pub bookmarks: BTreeMap<String, BookmarkRow>,
+  pub vars: BTreeMap<String, VarRow>,
   /// key 是 hostname。
   pub routes: BTreeMap<String, RouteRow>,
 }
@@ -216,6 +224,18 @@ impl World {
             },
           );
         }
+        KIND_VAR => {
+          world.vars.insert(
+            row.name,
+            VarRow {
+              value: serde_json::from_value(
+                row.spec["value"].clone(),
+              )
+              .map_err(json_err)?,
+              version,
+            },
+          );
+        }
         KIND_BOOKMARK => {
           world.bookmarks.insert(
             row.name,
@@ -263,6 +283,9 @@ impl World {
     for (id, r) in &self.bookmarks {
       out.insert(format!("{KIND_BOOKMARK}/{id}"), r.version);
     }
+    for (name, row) in &self.vars {
+      out.insert(format!("{KIND_VAR}/{name}"), row.version);
+    }
     out
   }
 
@@ -294,6 +317,22 @@ impl World {
     }
     for change in changes {
       match change {
+        Change::UpsertVar { name, value } => {
+          crate::variables::validate(name, value)?;
+          let version = self.vars.get(name).map_or(0, |r| r.version);
+          self.vars.insert(
+            name.clone(),
+            VarRow {
+              value: value.clone(),
+              version,
+            },
+          );
+        }
+        Change::RemoveVar { name } => {
+          if self.vars.remove(name).is_none() {
+            return Err(crate::variables::not_found(name));
+          }
+        }
         Change::UpsertBookmark { id, spec } => {
           let version = match id {
             Some(id) => {
@@ -478,6 +517,15 @@ impl World {
           }
           // compose 来源没填端口时按 compose 里映射的端口补上，否则服务没有内网地址。
           let mut spec = spec.clone();
+          let mut hosts = BTreeMap::new();
+          for (host, ip) in std::mem::take(&mut spec.extra_hosts) {
+            let normalized = normalize_hostname(&host)
+              .map_err(|_| crate::render::extra_host_error(&host))?;
+            if hosts.insert(normalized, ip).is_some() {
+              return Err(crate::render::extra_host_error(&host));
+            }
+          }
+          spec.extra_hosts = hosts;
           if import.is_some() && spec.pull_policy.is_some() {
             return Err(ApiError::invalid(
               "请先完成接管，再设置显式拉取策略",
@@ -491,6 +539,11 @@ impl World {
               )?;
           }
           crate::shared_volumes::normalize(&mut spec)?;
+          for file in &mut spec.files {
+            if file.on_change.as_deref() == Some("recreate") {
+              file.on_change = None;
+            }
+          }
           normalize_runtime_options(&mut spec)?;
           if let Source::Compose {
             content: Some(content),
@@ -503,6 +556,7 @@ impl World {
                 || old.spec.container_limits != spec.container_limits
                 || old.spec.pull_policy != spec.pull_policy
                 || old.spec.env != spec.env
+                || old.spec.compose_env != spec.compose_env
             })
           {
             crate::render::compose_with_settings(
@@ -779,6 +833,12 @@ impl World {
   ) -> Result<(), ApiError> {
     route_hosts(fleet)?;
     let mut changes = Vec::new();
+    for (name, value) in &fleet.vars {
+      changes.push(Change::UpsertVar {
+        name: name.clone(),
+        value: value.clone(),
+      });
+    }
     for (name, settings) in &fleet.servers {
       changes.push(Change::UpdateServer {
         name: name.clone(),
@@ -1128,6 +1188,7 @@ impl World {
       )?;
     }
     crate::shared_volumes::validate_world(self)?;
+    crate::named_networks::validate_world(self)?;
     for (name, app) in &self.edge_apps {
       crate::edge::validate_app(self, name, &app.spec)?;
     }
@@ -1720,6 +1781,13 @@ impl World {
       &self.edge_apps,
       KIND_EDGE,
       |r| (to_json(&r.spec), json!({})),
+      &mut out,
+    );
+    diff_map(
+      &current.vars,
+      &self.vars,
+      KIND_VAR,
+      |r| (json!({"value": r.value}), json!({})),
       &mut out,
     );
     diff_map(
@@ -2319,6 +2387,24 @@ fn validate_service(
     ));
   }
   crate::updates::validate_ignore(spec)?;
+  crate::compose_env::validate(spec)?;
+  if let Some(user) = &spec.user {
+    let valid = |part: &str| {
+      !part.is_empty()
+        && part.len() <= 128
+        && part.bytes().all(|c| {
+          c.is_ascii_alphanumeric() || matches!(c, b'_' | b'.' | b'-')
+        })
+    };
+    let valid = user
+      .split_once(':')
+      .map_or_else(|| valid(user), |(u, g)| valid(u) && valid(g));
+    if !valid || matches!(spec.source, Source::Compose { .. }) {
+      return Err(ApiError::invalid(
+        "运行用户仅用于镜像和构建来源，格式为用户或用户:组",
+      ));
+    }
+  }
   validate_deploy_options(name, spec)?;
   if name.starts_with(GATEWAY_PROJECT_PREFIX) {
     return Err(ApiError::invalid(format!(
@@ -2341,7 +2427,47 @@ fn validate_service(
   if !world.servers.contains_key(&spec.server) {
     return Err(server_not_found(&spec.server));
   }
+  if spec.lan.is_some()
+    && matches!(spec.source, Source::Compose { .. })
+  {
+    return Err(
+      ApiError::invalid(format!(
+        "服务 {name} 的局域网开关仅支持镜像和构建来源"
+      ))
+      .with_hint("在 Compose 的 ports 中显式设置绑定地址"),
+    );
+  }
+  if spec.lan == Some(true)
+    && world.servers[&spec.server].settings.lan_addrs.is_empty()
+  {
+    return Err(
+      ApiError::invalid(format!(
+        "服务器 {} 没有局域网地址",
+        spec.server
+      ))
+      .with_hint("先配置服务器的 LAN 地址，或恢复继承"),
+    );
+  }
+  for host in spec.extra_hosts.keys() {
+    if host == "host.docker.internal"
+      || !normalize_hostname(host)
+        .is_ok_and(|normalized| normalized == *host)
+    {
+      return Err(crate::render::extra_host_error(host));
+    }
+  }
   if let Some(backup) = &spec.backup {
+    if spec.volumes.iter().any(|v| v.host_path.is_some())
+      && !spec.files.iter().any(|file| file.init_only)
+      && !spec
+        .volumes
+        .iter()
+        .any(|v| v.host_path.is_none() && v.from_service.is_none())
+    {
+      return Err(ApiError::invalid(format!(
+        "服务 {name} 没有自有托管卷，外部卷和共享卷需要单独备份"
+      )));
+    }
     wharf_api_types::backup::validate_backup_excludes(
       &backup.exclude,
     )?;
@@ -2358,6 +2484,7 @@ fn validate_service(
       )));
     }
     if spec.volumes.is_empty()
+      && !spec.files.iter().any(|file| file.init_only)
       && !matches!(spec.source, Source::Compose { .. })
     {
       return Err(ApiError::invalid(format!(
@@ -2440,6 +2567,49 @@ fn validate_service(
   crate::shared_volumes::validate_service(name, spec)?;
   let mut volume_names = BTreeSet::new();
   for volume in &spec.volumes {
+    if let Some(owner) = &volume.owner
+      && (volume.from_service.is_some()
+        || volume.host_path.is_some()
+        || (owner != "auto"
+          && wharf_api_types::spec::parse_uid_gid(owner).is_none()))
+    {
+      return Err(
+        ApiError::invalid(format!(
+          "卷 {} 的属主只用于自有托管目录",
+          volume.name
+        ))
+        .with_hint(
+          "填写 UID:GID 或 auto，或用 --unset-volume-owner 清除",
+        ),
+      );
+    }
+    if let Some(host_path) = &volume.host_path {
+      if !volume.name.is_empty() || volume.from_service.is_some() {
+        return Err(ApiError::invalid(
+          "外部挂载不能同时声明卷名或共享卷",
+        ));
+      }
+      wharf_api_types::adopt_data::validate_host_bind(
+        host_path,
+        &volume.target,
+      )?;
+      let target = std::path::Path::new(&volume.target);
+      if spec.volumes.iter().any(|v| {
+        !std::ptr::eq(v, volume)
+          && (target.starts_with(&v.target)
+            || std::path::Path::new(&v.target).starts_with(target))
+      }) || spec
+        .files
+        .iter()
+        .any(|f| std::path::Path::new(&f.path).starts_with(target))
+      {
+        return Err(ApiError::invalid(format!(
+          "外部挂载 {} 与其他挂载或文件重叠",
+          volume.target
+        )));
+      }
+      continue;
+    }
     validate_name("数据卷", &volume.name)?;
     if !volume_names.insert(&volume.name) {
       return Err(ApiError::invalid(format!(
@@ -2463,6 +2633,7 @@ fn validate_service(
     }
   }
   check_files(name, &spec.files)?;
+  crate::project_files::validate(name, spec)?;
   for key in spec.env.keys() {
     let ok = !key.is_empty()
       && key.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
@@ -2611,6 +2782,30 @@ fn validate_lan_addrs(addrs: &[String]) -> Result<(), ApiError> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn init_only_data_can_be_backed_up_with_external_binds() {
+    let mut world = sample();
+    world
+      .servers
+      .insert("node2".into(), world.servers["node1"].clone());
+    let spec = serde_json::from_value(json!({
+      "server":"node1", "source":{"image":"nginx"}, "backup":{"to":"node2"},
+      "volumes":[{"target":"/data", "host_path":"/mnt/shared"}],
+      "files":[{"path":"/app/seed/settings.json","init_only":true,"content":"{}"}],
+    })).unwrap();
+    world
+      .apply_changes(&[Change::UpsertService {
+        name: "app".into(),
+        spec,
+        pins: None,
+        commit: None,
+        migrate: None,
+        adopt: None,
+      }])
+      .unwrap();
+    world.validate().unwrap();
+  }
 
   #[test]
   fn compose_env_and_shared_tcp_udp_binding() {
@@ -3112,6 +3307,13 @@ mod tests {
       stop_signal: None,
       init_cmd: None,
       init_timeout_secs: None,
+      lan: None,
+      extra_hosts: Default::default(),
+      self_refs: false,
+      compose_env: false,
+      user: None,
+      use_egress: false,
+      networks: Default::default(),
       command: Default::default(),
       shm_size: Default::default(),
       cap_add: Default::default(),
@@ -3432,6 +3634,8 @@ services:
     .unwrap();
     spec.volumes.push(wharf_api_types::spec::VolumeSpec {
       from_service: None,
+      owner: None,
+      host_path: None,
       read_only: false,
       name: "data".into(),
       target: "/data".into(),

@@ -328,6 +328,21 @@ pub struct VolumeSpec {
   pub from_service: Option<String>,
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub read_only: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub host_path: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub owner: Option<String>,
+}
+
+pub fn parse_uid_gid(raw: &str) -> Option<(u32, u32)> {
+  let (uid, gid) = raw.split_once(':')?;
+  let parse = |id: &str| {
+    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {
+      return None;
+    }
+    id.parse::<u32>().ok().filter(|id| *id != u32::MAX)
+  };
+  Some((parse(uid)?, parse(gid)?))
 }
 
 #[derive(
@@ -418,6 +433,32 @@ pub struct ServiceSpec {
   pub log_max: Option<LogMax>,
   #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
   pub container_limits: BTreeMap<String, Limits>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub lan: Option<bool>,
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub extra_hosts: BTreeMap<String, std::net::IpAddr>,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub self_refs: bool,
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub networks: BTreeMap<String, NetworkAttachment>,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub compose_env: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub user: Option<String>,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub use_egress: bool,
+}
+
+#[derive(
+  Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct NetworkAttachment {
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub internal: bool,
+}
+
+pub fn named_network_name(name: &str) -> String {
+  format!("wharf-net-{name}")
 }
 
 #[derive(
@@ -479,6 +520,34 @@ pub struct FileSpec {
   /// 跳过 plan 阶段的配置文件语法预检。
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub raw: bool,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub init_only: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub mode: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub owner: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub on_change: Option<String>,
+}
+
+impl FileSpec {
+  pub fn managed_dir(&self) -> bool {
+    self.init_only
+      || self
+        .on_change
+        .as_deref()
+        .is_some_and(|value| value != "recreate")
+  }
+
+  pub fn needs_agent(&self) -> bool {
+    self.managed_dir() || self.mode.is_some() || self.owner.is_some()
+  }
+}
+
+pub fn parse_file_mode(mode: &str) -> Option<u32> {
+  (mode.len() == 4 && mode.starts_with('0'))
+    .then(|| u32::from_str_radix(mode, 8).ok())
+    .flatten()
 }
 
 pub const HOST_GROUPS: &[&str] = &["video", "render", "dialout"];
@@ -1096,6 +1165,16 @@ pub struct Fleet {
   pub bookmarks: BTreeMap<String, BookmarkSpec>,
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub routes: Vec<RouteSpec>,
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub vars: BTreeMap<String, String>,
+}
+
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct VarView {
+  pub name: String,
+  pub value: String,
 }
 
 #[derive(
@@ -1113,6 +1192,13 @@ pub struct MigrateOptions {
 #[serde(tag = "op", rename_all = "snake_case")]
 #[allow(clippy::large_enum_variant)] // 一次计划只有几个，装箱改动面太大
 pub enum Change {
+  UpsertVar {
+    name: String,
+    value: String,
+  },
+  RemoveVar {
+    name: String,
+  },
   /// id 为空时新建，否则修改已有书签。
   UpsertBookmark {
     id: Option<String>,

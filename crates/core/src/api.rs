@@ -375,6 +375,8 @@ pub fn router(state: Arc<AppState>) -> Router {
       "/api/convert/docker-run",
       post(crate::docker_run::convert),
     )
+    .route("/api/vars", get(crate::variables::list))
+    .route("/api/vars/{name}", get(crate::variables::get))
     .route("/api/services", get(list_services))
     .route("/api/services/{name}", get(show_service))
     .route(

@@ -199,6 +199,7 @@ fn privileged_service_env_update_still_requires_host() {
       instance_id: None,
       service: "app".into(),
       expect: None,
+      refresh_files_from: None,
     },
   }];
   let marked = plan(
@@ -507,6 +508,7 @@ fn plans_check_current_switch_and_control_plane() {
     instance_id: None,
     service: "app".into(),
     expect: None,
+    refresh_files_from: None,
   };
   let baseline = Step::Baseline {
     server: "s1".into(),

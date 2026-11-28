@@ -53,6 +53,7 @@ fn compose(
         ports: vec![],
         volumes: vec![],
         configs: mounts,
+        extra_hosts: BTreeMap::new(),
         labels: BTreeMap::from([("wharf.link".into(), bin.into())]),
       },
     )]),
@@ -158,6 +159,7 @@ pub fn frpc_render(
           "./conf:/etc/frp:ro".into(),
         )],
         configs: vec![],
+        extra_hosts: BTreeMap::new(),
         labels: BTreeMap::from([
           ("wharf.link".into(), "frpc".into()),
           ("wharf.link.base".into(), base_hash[..16].into()),

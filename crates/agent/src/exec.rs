@@ -92,6 +92,7 @@ pub struct Cmd {
   cwd: Option<std::path::PathBuf>,
   input: Option<Vec<u8>>,
   env: Vec<(String, String)>,
+  clear_env: bool,
   timeout: Duration,
   stall: Option<(Duration, ProgressMatcher)>,
   /// 把 stdout 也转发为进度（默认只转发 stderr）。
@@ -107,6 +108,7 @@ impl Cmd {
       cwd: None,
       input: None,
       env: Vec::new(),
+      clear_env: false,
       timeout: Duration::from_secs(60),
       stall: None,
       stream_stdout: false,
@@ -136,6 +138,11 @@ impl Cmd {
   /// 只设置给子进程，不会出现在命令行里（`ps` 看不到），适合放口令。
   pub fn env(mut self, key: &str, value: &str) -> Self {
     self.env.push((key.to_string(), value.to_string()));
+    self
+  }
+
+  pub fn clear_env(mut self) -> Self {
+    self.clear_env = true;
     self
   }
 
@@ -196,6 +203,9 @@ impl Cmd {
       .process_group(0);
     if let Some(cwd) = &self.cwd {
       command.current_dir(cwd);
+    }
+    if self.clear_env {
+      command.env_clear();
     }
     command.envs(self.env.iter().map(|(k, v)| (k, v)));
     command

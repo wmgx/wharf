@@ -72,6 +72,13 @@ pub async fn run(
   if job.out_dir {
     return run_sso(docker, job, ctx).await;
   }
+  let proxy = job.workload_no_proxy.as_deref();
+  if proxy.is_some() {
+    crate::workload_egress::require_running()?;
+    if !matches!(job.how, TaskHow::Exec { .. }) && !job.network_host {
+      crate::workload_egress::default_bridge(docker, ctx).await?;
+    }
+  }
   let timeout = Duration::from_secs(job.timeout_secs);
   let started = Instant::now();
   let mut mem_peak = None;
@@ -110,6 +117,16 @@ pub async fn run(
         clear_deps(&deps_dir)?;
       }
       let mut vars = env.clone();
+      if let Some(bypass) = proxy {
+        let host = if job.network_host {
+          "127.0.0.1"
+        } else {
+          wharf_api_types::egress::WORKLOAD_PROXY_HOST
+        };
+        wharf_api_types::egress::workload_env(
+          host, bypass, &mut vars,
+        )?;
+      }
       if with_deps && *runtime == ScriptRuntime::Python {
         vars.insert("PYTHONPATH".into(), "/deps".into());
       }
@@ -259,6 +276,9 @@ pub async fn run(
       }
       if job.network_host {
         cmd = cmd.args(["--network", "host"]);
+      } else if proxy.is_some() {
+        cmd = cmd
+          .args(["--add-host", "host.docker.internal:host-gateway"]);
       }
       if *runtime == ScriptRuntime::Node
         && with_deps
@@ -326,9 +346,17 @@ pub async fn run(
       let id =
         find_container(docker, project, service.as_deref(), ctx)
           .await?;
+      let mut env = env.clone();
+      if let Some(bypass) = proxy {
+        let host =
+          crate::workload_egress::exec_host(docker, &id, ctx).await?;
+        wharf_api_types::egress::workload_env(
+          &host, bypass, &mut env,
+        )?;
+      }
       let result = if *cancellable || !env.is_empty() {
         crate::service_exec::run_task(
-          docker, &id, command, env, timeout, ctx,
+          docker, &id, command, &env, timeout, ctx,
         )
         .await
       } else {
@@ -361,8 +389,22 @@ pub async fn run(
         .cmd()
         .args(["run", "--rm", "--name", &name])
         .args(["--label", &format!("wharf.task={}", job.name)]);
-      let (with_env, work) =
-        container_env(cmd, &docker.data_dir, &job.name, env)?;
+      let mut effective_env = env.clone();
+      if let Some(bypass) = proxy {
+        wharf_api_types::egress::workload_env(
+          wharf_api_types::egress::WORKLOAD_PROXY_HOST,
+          bypass,
+          &mut effective_env,
+        )?;
+        cmd = cmd
+          .args(["--add-host", "host.docker.internal:host-gateway"]);
+      }
+      let (with_env, work) = container_env(
+        cmd,
+        &docker.data_dir,
+        &job.name,
+        &effective_env,
+      )?;
       cmd = with_env;
       for m in mounts {
         cmd = cmd.args(["-v", m]);
