@@ -57,14 +57,26 @@ impl CloneJob {
     {
       state.hub.require_migrate_v2(&self.target_server)?;
     }
-    if let Write::Upsert { spec, .. } = &self.write
-      && serde_json::from_value::<wharf_api_types::spec::ServiceSpec>(
-        spec.clone(),
-      )
-      .map_err(db::json_err)?
-      .uses_runtime_options()
-    {
-      state.hub.runtime_options_conn_id(&self.target_server)?;
+    if let Write::Upsert { spec, .. } = &self.write {
+      let spec = serde_json::from_value::<
+        wharf_api_types::spec::ServiceSpec,
+      >(spec.clone())
+      .map_err(db::json_err)?;
+      if spec.uses_runtime_options() {
+        state.hub.runtime_options_conn_id(&self.target_server)?;
+      }
+      if spec.compose_env {
+        state.hub.compose_env_conn_id(&self.target_server)?;
+      }
+      if spec.use_egress {
+        state.hub.workload_egress_conn_id(&self.target_server)?;
+      }
+      if !spec.networks.is_empty() {
+        state.hub.named_network_conn_id(&self.target_server)?;
+      }
+      if crate::project_files::needs_agent(&spec) {
+        state.hub.project_files_conn_id(&self.target_server)?;
+      }
     }
     Ok(())
   }
@@ -295,6 +307,7 @@ pub(crate) async fn plan(
       ),
       expect: Some(expect),
       images: Default::default(),
+      refresh_files_from: None,
     },
   );
   b.warnings.push("确认外部依赖后再显式启动新服务".into());
@@ -333,6 +346,9 @@ pub(super) fn validate_source(
   crate::crash_guard::require_idle(snap, source)?;
   let row = &snap.world.services[source];
   let spec = &row.spec;
+  if crate::project_files::exec_changed(None, spec) {
+    return Err(unsupported("配置文件包含执行命令的变更动作"));
+  }
   if crate::shared_volumes::consumers_on(
     &snap.world,
     source,

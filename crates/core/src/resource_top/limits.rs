@@ -513,7 +513,8 @@ mod tests {
   use serde_json::json;
 
   #[tokio::test]
-  async fn recommendation_excludes_previous_instance_samples() {
+  async fn recommendation_excludes_old_instance_and_rejects_replica_totals()
+   {
     let db = db::Db::memory();
     db.call(|c| {
       let end=50*DAY;
@@ -529,14 +530,22 @@ mod tests {
         c.execute("INSERT INTO points(name,subject,at,value) VALUES('svc.mem','app',?1,?2)",
           params![start+hour*HOUR_MS+MINUTE_MS,120.0*MIB]).map_err(sql_err)?;
       }
-      let spec=serde_json::from_value(json!({"server":"s1","source":{"image":"fixture:1"},"limits":{"memory_mb":128}})).unwrap();
-      let rows=calculate(c,vec![Selected {
+      let spec: ServiceSpec=serde_json::from_value(json!({"server":"s1","source":{"compose":{"content":"services: {web: {image: alpine}}" }},"container_limits":{"web":{"memory_mb":128}}})).unwrap();
+      let selected = || Selected {
         name:"app".into(),server:"s1".into(),instance:"current".into(),at:start,
-        spec,skip:None,mem_total:1<<30,cpu_total:2,
-      }],1,end)?;
+        spec: spec.clone(),skip:None,mem_total:1<<30,cpu_total:2,
+      };
+      let rows=calculate(c,vec![selected()],1,end)?;
       assert_eq!(rows[0].memory.peak,Some(120.0));
       assert_eq!(rows[0].memory_mb,Some(256));
       assert_eq!(rows[0].oom_points,1);
+      assert_eq!(rows[0].container.as_deref(),Some("web"));
+      c.execute("INSERT INTO points(name,subject,at,value) VALUES('svc.containers.max','app',?1,2)", [start+MINUTE_MS]).map_err(sql_err)?;
+      let rows=calculate(c,vec![selected()],1,end)?;
+      assert_eq!(rows[0].memory.peak,Some(120.0));
+      assert_eq!(rows[0].skip.as_deref(),Some("项目用量无法按容器分配"));
+      assert_eq!(rows[0].memory_mb,None);
+      assert_eq!(rows[0].cpu_milli,None);
       Ok(())
     }).await.unwrap();
   }

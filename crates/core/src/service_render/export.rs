@@ -499,6 +499,15 @@ fn export(
     let body = body
       .as_mapping_mut()
       .ok_or_else(|| unsupported("services"))?;
+    if !is_compose && let Some(mode) = spec.pull_policy {
+      use wharf_api_types::spec::ImagePullMode;
+      let policy = match mode {
+        ImagePullMode::IfMissing => "missing",
+        ImagePullMode::Never => "never",
+        ImagePullMode::Always => "always",
+      };
+      body.insert("pull_policy".into(), Value::String(policy.into()));
+    }
     let mut mounts = BTreeMap::new();
     let mut env =
       env_map(body.remove("environment").unwrap_or_default())?;

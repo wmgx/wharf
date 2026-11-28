@@ -411,6 +411,11 @@ fn has_reference_to(
 ) -> bool {
   has_compose_var(value)
     || crate::render::placeholders(value).any(|inner| {
+      if wharf_api_types::references::parse_public_ref(inner, false)
+        .is_some()
+      {
+        return true;
+      }
       crate::render::parse_placeholder(inner, true)
         .ok()
         .flatten()

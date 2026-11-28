@@ -116,6 +116,7 @@ fn entries() -> BTreeMap<&'static str, Schema> {
       "service_compose_export",
       schema_for!(view::ServiceComposeExport),
     ),
+    ("var", schema_for!(spec::VarView)),
     ("service_exec", schema_for!(view::ServiceExecResponse)),
     ("host_exec", schema_for!(view::HostExecResponse)),
     ("exec_stream_event", schema_for!(view::ExecStreamEvent)),

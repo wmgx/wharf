@@ -232,8 +232,16 @@ fn start(
   Ok(())
 }
 
+pub(crate) fn workload_ready() -> bool {
+  RUNNING.lock().is_ok_and(|state| {
+    state.as_ref().is_some_and(|(cfg, cancel)| {
+      cfg.route.is_some() && !cancel.is_cancelled()
+    })
+  })
+}
+
 /// 本地分流只接受本机和 docker 网段（172.16.0.0/12）来的连接。
-fn local_peer(peer: SocketAddr) -> bool {
+pub(crate) fn local_peer(peer: SocketAddr) -> bool {
   match peer.ip() {
     IpAddr::V4(ip) => {
       let o = ip.octets();

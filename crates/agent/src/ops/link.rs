@@ -162,7 +162,7 @@ impl Ops {
           retired: vec![],
         }
       } else {
-        self.finish_up(up, images, warnings, None, 10, ctx).await?
+        self.finish_up(up, images, warnings, 10, ctx).await?
       };
       files.commit(&apply.config_hash)?;
       Ok::<_, ApiError>(result)

@@ -169,7 +169,9 @@ pub fn normalize_snapshot_rel(raw: &str) -> Result<&str, ApiError> {
   if raw.len() > 1024
     || path.contains(['\0', '\\'])
     || (!path.is_empty()
-      && path.split('/').any(|part| matches!(part, "" | "." | "..")))
+      && path
+        .split('/')
+        .any(|part| matches!(part, "" | "." | ".." | ".wharf-init")))
   {
     return Err(ApiError::invalid("快照路径无效"));
   }

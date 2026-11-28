@@ -55,6 +55,7 @@ interface Draft {
   nameTouched: boolean;
   server: string;
   ports: PortSpec[];
+  lan?: boolean;
   envText: string;
   container?: string;
   hostname: string;
@@ -97,6 +98,7 @@ function Form({ onClose }: { onClose: () => void }) {
   const [volumes, setVolumes] = useState<VolumeSpec[]>(draft?.volumes ?? []);
   const [limits, setLimits] = useState<ServiceSpec["limits"]>(draft?.limits ?? null);
   // 用户手动改过端口后，不再按 compose 内容自动填。
+  const [lan, setLan] = useState(draft?.lan);
   const [portsTouched, setPortsTouched] = useState(!!draft);
   const composeInfo = useMemo(() => parseCompose(compose), [compose]);
   const onCompose = (text: string) => {
@@ -184,6 +186,7 @@ function Form({ onClose }: { onClose: () => void }) {
               ? { build: { upload: source, ...cleanHow(how) } }
               : { compose: { content: source } },
       ports: ports.length ? portsFor(ports, kind === "compose") : undefined,
+      lan: kind === "compose" ? undefined : lan,
       env: envText.trim() ? parseEnv(envText) : undefined,
       container: selectedContainer,
       volumes: kind === "image" && volumes.length ? volumes : undefined,
@@ -194,7 +197,7 @@ function Form({ onClose }: { onClose: () => void }) {
       const { gateway, changes: gatewayChanges } = entry.resolve();
       changes.push(...gatewayChanges, { op: "upsert_route", spec: { hostname: hostname.trim().toLowerCase(), service: svcName, gateway } });
     }
-    lastDraft = { kind, image, compose, repo, gitRef, path, how, name: svcName, nameTouched, server: chosenServer, ports, envText, container, hostname, entry: entry.chosen, pkg, volumes, limits };
+    lastDraft = { kind, image, compose, repo, gitRef, path, how, name: svcName, nameTouched, server: chosenServer, ports, lan, envText, container, hostname, entry: entry.chosen, pkg, volumes, limits };
     onClose();
     actions.plan({ title: `部署 ${svcName}`, changes, then: `/services/${svcName}`, back: NEW_SERVICE_DRAFT_URL });
   };
@@ -304,6 +307,14 @@ function Form({ onClose }: { onClose: () => void }) {
             compose={kind === "compose"}
           />
         </Field>
+
+        {kind !== "compose" && <Field label="局域网绑定" htmlFor="new-service-lan">
+          <select id="new-service-lan" className="h-9 w-full rounded-md border bg-background px-3 text-sm sm:w-64" value={lan === undefined ? "" : String(lan)} onChange={(e) => setLan(e.target.value ? e.target.value === "true" : undefined)}>
+            <option value="">继承服务器</option>
+            <option value="true">启用</option>
+            <option value="false">关闭</option>
+          </select>
+        </Field>}
 
         {kind === "image" && volumes.length > 0 && (
           <Field label="数据卷">

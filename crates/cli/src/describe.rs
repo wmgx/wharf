@@ -120,6 +120,9 @@ fn walk(
           "--tag": {"effect": "plan", "perms": ["plan"], "returns": "plan"}
         });
       }
+      "var set" => {
+        entry["returns_without_value"] = json!("var");
+      }
       "data push" => {
         entry["flag_variants"] = json!({
           "--delete": {"apply_perms": ["exec", "confirm"]},
@@ -220,6 +223,7 @@ fn read_when_no_args(command: &str) -> bool {
       | "data cleanup policy"
       | "backup set"
       | "task set"
+      | "var set"
   )
 }
 
@@ -227,6 +231,12 @@ fn effect(
   command: &str,
   cmd: &clap::Command,
 ) -> (&'static str, &'static [&'static str]) {
+  if matches!(command, "var set" | "var rm") {
+    return ("plan", &["plan", "admin"]);
+  }
+  if command == "var get" {
+    return ("read", &["read"]);
+  }
   if matches!(command, "schema" | "commands" | "validate" | "login") {
     return ("read", &[]);
   }
@@ -429,6 +439,8 @@ fn returns(command: &str) -> Option<&'static str> {
     "service crash-guard" => "crash-guard",
     "service repair" => "service-repair",
     "service export-compose" => "service_compose_export",
+    "var get" | "var list" => "var",
+    "var set" | "var rm" => "plan",
     "service limits" => "service_limits",
     "backup list" => "backup",
     "backup ls" => "backup_ls",
@@ -474,6 +486,15 @@ pub fn usable(prefix: &[String], me: &Value) -> Value {
   let mut result = commands(prefix);
   if let Some(commands) = result["commands"].as_array_mut() {
     commands.retain_mut(|command| {
+      if command["command"]
+        .as_str()
+        .is_some_and(|name| name.starts_with("wharf var "))
+        && me["services"]
+          .as_array()
+          .is_some_and(|scope| !scope.is_empty())
+      {
+        return false;
+      }
       let has = |perm: &Value| {
         me["perms"]
           .as_array()
@@ -534,6 +555,35 @@ pub fn commands(prefix: &[String]) -> Value {
 
 #[cfg(test)]
 mod tests {
+  #[test]
+  fn var_commands_report_returns_and_respect_global_scope() {
+    use super::{commands, json, usable};
+
+    let prefix = ["var".into()];
+    let described = commands(&prefix);
+    let entries = described["commands"].as_array().unwrap();
+    let entry = |name: &str| {
+      entries.iter().find(|v| v["command"] == name).unwrap()
+    };
+    assert_eq!(entry("wharf var set")["returns"], "plan");
+    assert_eq!(
+      entry("wharf var set")["returns_without_value"],
+      "var"
+    );
+    assert_eq!(entry("wharf var rm")["returns"], "plan");
+    let scope = json!({"perms":["read"],"services":["app"]});
+    assert_eq!(usable(&prefix, &scope)["commands"], json!([]));
+    let global = json!({"perms":["read"],"services":[]});
+    assert!(
+      usable(&prefix, &global)["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|cmd| cmd["command"] == "wharf var set"
+          && cmd["usable_mode"] == "read_only")
+    );
+  }
+
   #[test]
   fn commands_describe_data_and_import_flag_variants() {
     use serde_json::json;

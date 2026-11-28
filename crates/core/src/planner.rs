@@ -132,6 +132,8 @@ pub enum Step {
     /// 计划时渲染出的 compose 指纹，执行前重算比对；没有这个字段的旧计划不校验。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     expect: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    refresh_files_from: Option<String>,
     #[serde(
       default,
       skip_serializing_if = "crate::pins::ImageSelection::is_empty"
@@ -747,6 +749,40 @@ pub(crate) async fn make_plan_inner(
       svc.host_ports.clear();
     }
   }
+  for (name, row) in &desired.services {
+    let has_external = |spec: &wharf_api_types::spec::ServiceSpec| {
+      spec.volumes.iter().any(|v| v.host_path.is_some())
+    };
+    let old = current.services.get(name);
+    if old.is_some_and(|old| {
+      old.spec.server != row.spec.server
+        && has_external(&old.spec)
+        && old
+          .spec
+          .volumes
+          .iter()
+          .filter(|v| v.host_path.is_some())
+          .eq(
+            row.spec.volumes.iter().filter(|v| v.host_path.is_some()),
+          )
+    }) {
+      return Err(
+        ApiError::new(
+          ErrorCode::Conflict,
+          format!("服务 {name} 的外部挂载需要显式指定目标机目录"),
+        )
+        .with_hint(
+          "先准备目标机数据，再用 service deploy 指定目标机及挂载",
+        ),
+      );
+    }
+    if old.is_none_or(|old| old.spec != row.spec)
+      && (has_external(&row.spec)
+        || old.is_some_and(|old| has_external(&old.spec)))
+    {
+      state.hub.host_bind_conn_id(&row.spec.server)?;
+    }
+  }
   let mut heartbeat_net = snap.net(&desired);
   if let Some(public) = snap
     .heartbeat_url
@@ -766,6 +802,12 @@ pub(crate) async fn make_plan_inner(
   crate::secret_policy::validate_restrictions(
     &desired,
     &snap.secret_restrictions,
+  )?;
+  crate::variables::validate_removals(&current, &desired)?;
+  crate::variables::validate_self_conflicts(
+    &current,
+    &desired,
+    &snap.secrets,
   )?;
   crate::missing_refs::check_plan(&desired, &snap)?;
   desired.validate_against(&current)?;
@@ -1098,7 +1140,7 @@ pub(crate) async fn make_plan_inner(
     }
     let header = sso.header.as_deref().unwrap_or("Remote-User");
     if let Some(service) = desired.services.get(&route.spec.service)
-      && !net.bind_ips(&service.spec.server).is_empty()
+      && !net.bind_ips(&service.spec).is_empty()
       && match &service.spec.source {
         Source::Compose { content, .. } => {
           let compose = crate::render::parse_compose(
@@ -1285,6 +1327,15 @@ pub(crate) async fn make_plan_inner(
     .await?;
 
   egress_items(&mut b, &snap, &current, &desired);
+  for row in
+    desired.services.values().filter(|row| row.spec.use_egress)
+  {
+    crate::workload_egress::validate(
+      &desired,
+      &net,
+      &row.spec.server,
+    )?;
+  }
   docker_proxy_items(&mut b, &snap, &current, &desired);
   baseline_items(&mut b, &snap, &current, &desired);
   gateway_items(
@@ -1350,6 +1401,85 @@ pub(crate) async fn make_plan_inner(
     &current,
     &desired,
   );
+  for step in &b.steps {
+    if let Step::ServiceUp { service, .. } = &step.step
+      && let Some(row) = desired.services.get(service)
+    {
+      let server = &row.spec.server;
+      if row.spec.use_egress {
+        let will_configure = b.steps.iter().any(|step| matches!(&step.step, Step::Egress { server: target } if target == server));
+        crate::workload_egress::preflight(
+          &state.hub,
+          server,
+          will_configure,
+          &tokio_util::sync::CancellationToken::new(),
+        )
+        .await?;
+      } else if current
+        .services
+        .get(service)
+        .is_some_and(|old| old.spec.use_egress)
+      {
+        state.hub.workload_egress_conn_id(server)?;
+      }
+    }
+    if let Step::ServiceUp { service, .. } = &step.step
+      && let Some(row) = desired.services.get(service)
+      && (crate::project_files::needs_agent(&row.spec)
+        || current.services.get(service).is_some_and(|old| {
+          crate::project_files::needs_agent(&old.spec)
+        }))
+    {
+      state.hub.project_files_conn_id(&row.spec.server)?;
+    }
+    if let Step::ServiceUp { service, .. } = &step.step
+      && let Some(row) = desired.services.get(service)
+      && row.spec.volumes.iter().any(|v| v.host_path.is_some())
+    {
+      state.hub.host_bind_conn_id(&row.spec.server)?;
+    }
+    if let Step::ServiceUp { service, .. } = &step.step
+      && let Some(row) = desired.services.get(service)
+      && (row.spec.compose_env
+        || current
+          .services
+          .get(service)
+          .is_some_and(|old| old.spec.compose_env))
+    {
+      crate::compose_env::preflight(
+        &state.hub,
+        &desired,
+        &net,
+        service,
+        &snap.render_values(&desired, service),
+        &tokio_util::sync::CancellationToken::new(),
+      )
+      .await?;
+    }
+    if let Step::ServiceUp { service, .. } = &step.step
+      && let Some(row) = desired.services.get(service)
+      && (!row.spec.networks.is_empty()
+        || current
+          .services
+          .get(service)
+          .is_some_and(|old| !old.spec.networks.is_empty()))
+    {
+      crate::named_networks::preflight(
+        &state.hub,
+        &row.spec,
+        &tokio_util::sync::CancellationToken::new(),
+      )
+      .await?;
+      if current
+        .services
+        .get(service)
+        .is_some_and(|old| old.spec.server != row.spec.server)
+      {
+        b.warnings
+          .push(format!("服务 {service} 的同名私网不会跨服务器互通"));
+      }
+    }
+  }
   tracing::info!(
     "生成计划用时 {}ms：{}",
     started.elapsed().as_millis(),
@@ -1557,6 +1687,21 @@ fn spec_json(world: &World, kind: &str, name: &str) -> Option<Value> {
     KIND_SERVICE => world.services.get(name).map(|r| {
       let mut v =
         to_json(&crate::service_monitor::heartbeat::redact(&r.spec));
+      if let Some(files) =
+        v.get_mut("files").and_then(Value::as_array_mut)
+      {
+        for file in files {
+          if let Some(command) = file["on_change"]
+            .as_str()
+            .and_then(|value| value.strip_prefix("exec:"))
+          {
+            file["on_change"] = json!(format!(
+              "exec:{}",
+              crate::redact::redact_command(command)
+            ));
+          }
+        }
+      }
       v["host_ports"] = json!(r.host_ports);
       v
     }),
@@ -1567,6 +1712,9 @@ fn spec_json(world: &World, kind: &str, name: &str) -> Option<Value> {
     KIND_EDGE => world.edge_apps.get(name).map(|r| to_json(&r.spec)),
     KIND_BOOKMARK => {
       world.bookmarks.get(name).map(|r| to_json(&r.spec))
+    }
+    crate::world::KIND_VAR => {
+      world.vars.get(name).map(|r| json!({"value": r.value}))
     }
     _ => None,
   }
@@ -1980,6 +2128,19 @@ fn service_items(
     }
     let address = format!("{KIND_SERVICE}/{name}");
     let server = &svc.spec.server;
+    if service_changed
+      && svc.spec.lan == Some(false)
+      && net.private.get(server).is_some_and(|addr| {
+        net
+          .lan_addrs
+          .get(server)
+          .is_some_and(|ips| ips.contains(&addr.ip))
+      })
+    {
+      b.warnings.push(format!(
+        "服务 {name} 的组网地址同时是局域网地址，仍会保留该绑定"
+      ));
+    }
     let moved = moved_from(snap, current, name, server);
     let restarting_source = !svc.spec.stopped
       && snap.pending.migrations.get(name).is_some_and(|m| {
@@ -2004,11 +2165,19 @@ fn service_items(
           .collect()
       })
       .unwrap_or_default();
+    let owner_dirs: BTreeSet<_> = svc
+      .spec
+      .volumes
+      .iter()
+      .filter(|v| v.owner.is_some())
+      .map(|v| crate::render::volume_dir(name, &v.name))
+      .collect();
     let pending_dirs =
       snap.pending.ensure_dirs.get(&format!("{name}@{server}"));
     let new_dirs: Vec<String> =
       crate::render::service_dirs(name, &svc.spec)
         .into_iter()
+        .filter(|d| !owner_dirs.contains(d))
         .filter(|d| {
           !old_dirs.contains(d)
             || pending_dirs.is_some_and(|p| p.dirs.contains(d))
@@ -2102,6 +2271,60 @@ fn service_items(
     let template = snapshot::service_template(desired, net, name)?;
     let after =
       Some(json!({ "server": server, "compose": template }));
+    if moved.is_none()
+      && upgrade.is_none()
+      && let Some(old) = old
+      && let Some(state) = live
+      && !state.containers.is_empty()
+      && state.containers.iter().all(|c| !c.foreign)
+      && let Some(previous) =
+        state.hash.as_ref().filter(|old| **old != hash)
+      && (crate::project_files::only_managed_changed(
+        &old.spec, &svc.spec,
+      ) || (old.spec == svc.spec
+        && svc
+          .spec
+          .files
+          .iter()
+          .any(|file| file.managed_dir() && !file.init_only)
+        && rendered_hot_files_only(
+          snap, current, desired, net, name, previous,
+        )?))
+      && deployed_template(current, net, name, snap.applied.get(name))
+        .as_deref()
+        == Some(template.as_str())
+    {
+      if !service_changed {
+        crate::syntax_check::validate_service_files(
+          desired,
+          net,
+          name,
+          &render_values,
+          &snap.log_values,
+        )?;
+      }
+      let id = b.item(
+        address.clone(),
+        Layer::Container,
+        Action::Update,
+        Some(json!({ "hash": previous })),
+        after.clone(),
+        Vec::new(),
+        "重载配置文件",
+      );
+      b.step(
+        vec![id],
+        format!("在 {server} 上更新 {name} 的配置文件"),
+        Step::ServiceUp {
+          images: Default::default(),
+          service: name.clone(),
+          instance_id: Some(svc.instance_id.clone()),
+          expect: Some(hash),
+          refresh_files_from: Some(previous.clone()),
+        },
+      );
+      continue;
+    }
     // 配置没变、只是要停下来：不重建，直接停。
     if moved.is_none()
       && svc.spec.stopped
@@ -2346,6 +2569,17 @@ fn service_items(
           &snap.log_values,
         )?;
       }
+      if svc.spec.volumes.iter().any(|v| {
+        v.host_path.is_some()
+          && !v.read_only
+          && old.is_none_or(|row| {
+            row.spec.server != svc.spec.server
+              || !row.spec.volumes.contains(v)
+          })
+      }) && !risk.contains(&Impact::Overwrite)
+      {
+        risk.push(Impact::Overwrite);
+      }
       if !risk.contains(&Impact::Public)
         && crate::host_access::has_new_public_bind(
           current, name, &svc.spec,
@@ -2466,6 +2700,7 @@ fn service_items(
           images: Default::default(),
           service: name.clone(),
           expect: Some(hash.clone()),
+          refresh_files_from: None,
           instance_id: Some(svc.instance_id.clone()),
         },
       );
@@ -2638,6 +2873,40 @@ fn service_items(
   Ok(())
 }
 
+fn rendered_hot_files_only(
+  snap: &Snapshot,
+  current: &World,
+  desired: &World,
+  net: &Net,
+  name: &str,
+  previous: &str,
+) -> Result<bool, ApiError> {
+  let old_net = snap.net(current);
+  let old_values = snap.render_values(current, name);
+  let Ok((old_compose, old_hash)) =
+    snapshot::service_resolved(current, &old_net, name, &old_values)
+  else {
+    return Ok(false);
+  };
+  if old_hash != previous {
+    return Ok(false);
+  }
+  let values = snap.render_values(desired, name);
+  let (new_compose, _) =
+    snapshot::service_resolved(desired, net, name, &values)?;
+  Ok(
+    old_compose == new_compose
+      && crate::compose_env::inputs(
+        current,
+        &old_net,
+        name,
+        &old_values,
+      )? == crate::compose_env::inputs(
+        desired, net, name, &values,
+      )?,
+  )
+}
+
 async fn choose_live_limits(
   state: &AppState,
   (snap, current, desired): (&Snapshot, &World, &World),
@@ -2714,6 +2983,7 @@ async fn choose_live_limits(
       || old_spec.init_timeout_secs != row.spec.init_timeout_secs
       || old_spec.pull_policy != row.spec.pull_policy
       || old_spec.volumes != row.spec.volumes
+      || old_spec.files != row.spec.files
       || old_spec.group_add != row.spec.group_add
       || !crate::live_limits::same_source_inputs(
         &old_spec.source,
@@ -2731,7 +3001,10 @@ async fn choose_live_limits(
     else {
       continue;
     };
-    if old_hash != applied.hash {
+    if old_hash != applied.hash
+      || crate::compose_env::inputs(&previous, net, service, &values)?
+        != crate::compose_env::inputs(desired, net, service, &values)?
+    {
       continue;
     }
     let (new, _) =
@@ -4965,6 +5238,215 @@ mod tests {
   }
 
   #[tokio::test]
+  async fn copy_apply_rechecks_capability_before_plan_and_run_writes()
+  {
+    use wharf_api_types::{
+      agent::{AgentOp, ServiceCopy},
+      plan::{ApplyRequest, ServiceAction},
+      view::Perm,
+    };
+    let state = crate::rules::tests::test_state();
+    let mut world = world();
+    let row = world.services.get_mut("app").unwrap();
+    row.spec.stopped = true;
+    row.spec.volumes = serde_json::from_value(
+      json!([{"name":"data","target":"/data"}]),
+    )
+    .unwrap();
+    state
+      .db
+      .call(move |c| {
+        for write in world.writes_from(&World::default()) {
+          db::apply_write(c, &write)?;
+        }
+        Ok(())
+      })
+      .await
+      .unwrap();
+    state.hub.mock_safe_migrate_agent("s1", |op, _| Some(Ok(match op {
+      AgentOp::ProjectStatus { .. } => json!([{"project":"app","hash":"fixture","containers":[]}]),
+      AgentOp::ProjectMounts { .. } => json!({}),
+      AgentOp::BindMountUsers(_) => json!([]),
+      AgentOp::ServiceCopy(ServiceCopy::Check { .. }) => json!({"committed":false}),
+      AgentOp::DirSpace { .. } => json!({"data_bytes":1024,"fs_avail_bytes":1073741824_u64,"fs_total_bytes":2147483648_u64}),
+      _ => panic!("计划中只能读"),
+    })));
+    state.hub.enable_mock_service_copy("s1");
+    let request = PlanRequest {
+      service_action: Some(ServiceAction::Clone {
+        source: "app".into(),
+        target: "copy".into(),
+        server: None,
+        copy_data: true,
+      }),
+      ..Default::default()
+    };
+    let snap = snapshot::load(&state.db).await.unwrap();
+    let planned = make_plan_inner(&state, request, snap, false, true)
+      .await
+      .unwrap();
+    save(&state, &planned).await.unwrap();
+    state.hub.mock_safe_migrate_agent("s1", |_, _| {
+      panic!("旧 agent 不得收到请求")
+    });
+    let result = crate::apply::start(
+      state.clone(),
+      ApplyRequest {
+        plan_id: planned.plan.plan_id.clone(),
+        confirm: vec!["service/copy".into()],
+        skip_snapshot: false,
+        verify_before_dns: None,
+      },
+      &BTreeSet::from([Perm::Admin, Perm::Apply, Perm::Confirm]),
+      None,
+    )
+    .await;
+    assert_eq!(result.err().unwrap().code, ErrorCode::AgentFailed);
+    assert_eq!(
+      crate::apply::load_plan(&state, &planned.plan.plan_id)
+        .await
+        .unwrap()
+        .status,
+      PlanStatus::Pending
+    );
+    state
+      .db
+      .call(|c| {
+        let runs: u64 = c
+          .query_row("SELECT COUNT(*) FROM runs", [], |r| r.get(0))
+          .map_err(db::sql_err)?;
+        assert_eq!(runs, 0);
+        assert!(crate::pending::load(c)?.clones.is_empty());
+        Ok(())
+      })
+      .await
+      .unwrap();
+  }
+
+  #[tokio::test]
+  async fn batch_update_refreshes_stopped_project_when_only_pin_changed()
+   {
+    use wharf_api_types::{agent::AgentOp, plan::ServiceAction};
+    let state = crate::rules::tests::test_state();
+    let mut world = world();
+    let before = format!("sha256:{}", "a".repeat(64));
+    let after = format!("sha256:{}", "b".repeat(64));
+    let row = world.services.get_mut("app").unwrap();
+    row.spec.stopped = true;
+    row.spec.tags.insert("test".into());
+    row.spec.source = Source::Image("alpine:3.20".into());
+    row.pins.insert("alpine:3.20".into(), before.clone());
+    let mut snap = Snapshot {
+      world,
+      ..Default::default()
+    };
+    let hash = snapshot::service_hash(
+      &snap.world,
+      &snap.net(&snap.world),
+      "app",
+      &BTreeMap::new(),
+      None,
+    )
+    .unwrap();
+    snap.applied.insert("app".into(), serde_json::from_value(json!({
+      "hash":hash,"at":"2026-01-01T00:00:00Z","digests":{"alpine:3.20":before},
+    })).unwrap());
+    state.hub.mock_agent("s1", false, {
+      let after = after.clone();
+      move |op| Ok(match op {
+        AgentOp::ProjectStatus { .. } => json!([{
+          "project":"app","hash":hash,"containers":[{"service":"app","name":"app-1","state":"exited"}]
+        }]),
+        AgentOp::ResolveImages(_) => json!([{"image":"alpine:3.20","digest":after}]),
+        _ => panic!("批量预览不得部署"),
+      })
+    });
+    let request = PlanRequest {
+      service_action: Some(ServiceAction::Update {
+        tag: "test".into(),
+      }),
+      ..Default::default()
+    };
+    let planned = make_plan_inner(&state, request, snap, false, true)
+      .await
+      .unwrap();
+    assert!(planned.steps.iter().any(|s| matches!(&s.step, Step::ServiceUp { service, .. } if service == "app")));
+    assert!(planned.writes.iter().any(|write| matches!(write, Write::Upsert { name, spec, meta, .. }
+      if name == "app" && spec["stopped"] == true && meta["pins"]["alpine:3.20"].as_str() == Some(after.as_str()))));
+  }
+
+  #[tokio::test]
+  async fn config_clone_uses_legacy_rpcs_and_keeps_runtime_options() {
+    use wharf_api_types::{agent::AgentOp, plan::ServiceAction};
+    let state = crate::rules::tests::test_state();
+    let mut world = world();
+    let row = world.services.get_mut("app").unwrap();
+    row.spec.command = Some(vec!["serve".into()]);
+    row.spec.shm_size = Some(64 << 20);
+    row.spec.ports.clear();
+    row.spec.volumes.clear();
+    let request = PlanRequest {
+      service_action: Some(ServiceAction::Clone {
+        source: "app".into(),
+        target: "copy".into(),
+        server: None,
+        copy_data: false,
+      }),
+      ..Default::default()
+    };
+    state.hub.mock_safe_migrate_agent("s1", |op, _| {
+      Some(Ok(match op {
+        AgentOp::ProjectStatus { projects, .. } => json!(
+          projects
+            .into_iter()
+            .map(|p| json!({"project":p,"containers":[]}))
+            .collect::<Vec<_>>()
+        ),
+        AgentOp::ProjectMounts { .. } => json!({}),
+        _ => panic!("配置克隆应只用旧 RPC 做预检"),
+      }))
+    });
+    let planned = make_plan_inner(
+      &state,
+      request,
+      Snapshot {
+        world,
+        ..Default::default()
+      },
+      false,
+      true,
+    )
+    .await
+    .unwrap();
+    assert!(planned.plan.items.iter().any(|item| {
+      item.after.as_ref().is_some_and(|spec| {
+        spec["stopped"] == true
+          && spec["command"] == json!(["serve"])
+          && spec["shm_size"].as_u64() == Some(64 << 20)
+      })
+    }));
+  }
+
+  #[test]
+  fn cross_machine_clone_rejects_unverified_external_network() {
+    let mut world = world();
+    let row = world.services.get_mut("app").unwrap();
+    row.spec.volumes.clear();
+    row.spec.source = serde_json::from_value(json!({
+      "compose":{"content":"services: {web: {image: alpine, networks: [shared]}}\nnetworks: {shared: {external: true}}"}
+    })).unwrap();
+    let snap = Snapshot {
+      world,
+      ..Default::default()
+    };
+    let error =
+      service_clone::validate_source(&snap, "app", "s2", false)
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::Conflict);
+    assert!(error.message.contains("外部 Compose 网络"));
+  }
+
+  #[tokio::test]
   async fn rename_plan_rejects_a_service_with_backup_before_agent_calls()
    {
     use wharf_api_types::plan::ServiceAction;
@@ -5507,6 +5989,108 @@ mod tests {
     let config =
       b.items.iter().find(|i| i.layer == Layer::Config).unwrap();
     assert_eq!(config.reason, "切换固定镜像版本");
+  }
+
+  #[test]
+  fn p23_2_legacy_spec_hash_and_plan_keep_their_bytes() {
+    let mut world = world();
+    let input = json!({
+      "server": "s1",
+      "source": {"image": "nginx:1"},
+      "ports": [{"name": "http", "container": 80}],
+      "volumes": [{"name": "data", "target": "/data", "read_only": true}]
+    });
+    let row = world.services.get_mut("app").unwrap();
+    row.spec = serde_json::from_value(input.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&row.spec).unwrap(), input);
+    let legacy_yaml = concat!(
+      "# 由 Wharf 生成，不要手改。\n",
+      "name: app\nservices:\n  app:\n    image: nginx:1\n",
+      "    restart: unless-stopped\n    ports:\n    - 127.0.0.1:21000:80\n",
+      "    volumes:\n    - /srv/app/data:/data:ro\n",
+      "    labels:\n      wharf.service: app\n"
+    );
+    let fingerprint = crate::render::hash(legacy_yaml);
+    assert_eq!(hash_of(&world), fingerprint);
+    let planned = plan(
+      &world,
+      &world,
+      &live(Some(fingerprint), vec![container("running")]),
+    );
+    assert!(planned.steps.is_empty() && planned.items.is_empty());
+
+    let raw = r#"{"kind":"service_up","service":"app"}"#;
+    let step: Step = serde_json::from_str(raw).unwrap();
+    assert!(matches!(
+      &step,
+      Step::ServiceUp {
+        refresh_files_from: None,
+        ..
+      }
+    ));
+    assert_eq!(
+      serde_json::to_value(&step).unwrap(),
+      serde_json::from_str::<Value>(raw).unwrap()
+    );
+  }
+
+  #[test]
+  fn rendered_variable_change_plans_hot_reload_without_restart() {
+    let mut current = world();
+    current.services.get_mut("app").unwrap().spec.files = serde_json::from_value(json!([
+      {"path":"/app/config/theme.txt", "content":"[[var:THEME]]", "on_change":"sighup"}
+    ])).unwrap();
+    current
+      .apply_changes(&[wharf_api_types::spec::Change::UpsertVar {
+        name: "THEME".into(),
+        value: "A".into(),
+      }])
+      .unwrap();
+    let previous = hash_of(&current);
+    let mut desired = current.clone();
+    desired.vars.get_mut("THEME").unwrap().value = "B".into();
+    let planned = plan(
+      &current,
+      &desired,
+      &live(Some(previous.clone()), vec![container("running")]),
+    );
+    assert_eq!(planned.steps.len(), 1);
+    assert!(
+      matches!(&planned.steps[0].step, Step::ServiceUp { refresh_files_from: Some(hash), .. } if hash == &previous)
+    );
+    assert!(planned.items[0].impacts.is_empty());
+  }
+
+  #[test]
+  fn legacy_variable_like_file_text_keeps_empty_plan() {
+    let mut legacy = world();
+    legacy.services.get_mut("app").unwrap().spec.files = serde_json::from_value(json!([
+      {"path":"/app/theme.txt", "content":"[[var:theme.color]]", "raw":true}
+    ])).unwrap();
+    let unexpanded = hash_of(&legacy);
+    legacy.services.get_mut("app").unwrap().spec.files[0].raw = false;
+    assert!(
+      crate::missing_refs::collect_plan_missing(
+        &legacy,
+        &Snapshot::default()
+      )
+      .is_empty()
+    );
+    let (rendered, fingerprint) = snapshot::service_resolved(
+      &legacy,
+      &Net::default(),
+      "app",
+      &BTreeMap::new(),
+    )
+    .unwrap();
+    assert!(rendered.contains("[[var:theme.color]]"));
+    assert_eq!(unexpanded, fingerprint);
+    let planned = plan(
+      &legacy,
+      &legacy,
+      &live(Some(fingerprint), vec![container("running")]),
+    );
+    assert!(planned.steps.is_empty() && planned.items.is_empty());
   }
 
   #[test]
@@ -7766,6 +8350,7 @@ mod tests {
         service: "app".into(),
         instance_id: None,
         expect: None,
+        refresh_files_from: None,
       },
     };
     assert!(

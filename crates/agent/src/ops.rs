@@ -25,8 +25,12 @@ use crate::{
 
 mod gateway;
 mod gateway_probe;
+mod host_binds;
 mod link;
+mod named_networks;
+mod project_files;
 mod validation;
+mod volume_owner;
 use validation::{
   check_own_container, check_project, data_dir_relative,
 };
@@ -193,6 +197,31 @@ impl Ops {
           }
         };
         to_value(self.link_apply(&apply, ctx).await?)
+      }
+      AgentOp::ComposeEnvCheck {
+        project,
+        compose,
+        project_env,
+      } => {
+        check_project(&project)?;
+        self
+          .docker
+          .check_project_env(&project, &compose, &project_env, ctx)
+          .await?;
+        Ok(Value::Null)
+      }
+      AgentOp::WorkloadEgressStatus => {
+        Ok(Value::Bool(crate::egress::workload_ready()))
+      }
+      AgentOp::HostBindCheck { binds } => {
+        host_binds::validate_sources(&self.docker, &binds, ctx)
+          .await?;
+        Ok(Value::Null)
+      }
+      AgentOp::NamedNetworksCheck { networks } => {
+        named_networks::ensure(&self.docker, &networks, false, ctx)
+          .await?;
+        Ok(Value::Null)
       }
       AgentOp::ProjectCheckLimits(job) => {
         check_project(&job.project)?;
@@ -881,7 +910,16 @@ impl Ops {
   ) -> Result<Vec<String>, ApiError> {
     let images = self
       .docker
-      .images_for_compose(&up.project, &up.compose, ctx)
+      .images_for_compose(
+        &up.project,
+        &up.compose,
+        up.project_env
+          .as_ref()
+          .map(crate::docker::dotenv)
+          .transpose()?
+          .as_deref(),
+        ctx,
+      )
       .await?;
     for image in &images {
       if up.expected_images.contains_key(image) {
@@ -1015,7 +1053,6 @@ impl Ops {
     up: &ProjectUp,
     images: &[String],
     warnings: Vec<String>,
-    previous: Option<Previous>,
     previous_grace: u64,
     ctx: &Ctx,
   ) -> Result<ProjectUpResult, ApiError> {
@@ -1026,16 +1063,52 @@ impl Ops {
       ctx,
     )
     .await;
-    let result = async {
+    let state = async {
       self.docker.write_compose(&up.project, &up.compose)?;
+      self.docker.write_project_env(
+        &up.project,
+        up.project_env
+          .as_ref()
+          .map(crate::docker::dotenv)
+          .transpose()?
+          .as_deref(),
+      )?;
+      let verify_files =
+        up.project_files.iter().any(|f| f.directory.is_none());
       self
         .up_with_crash_logs(
           &up.project,
-          up.no_start,
+          up.no_start
+            || verify_files
+            || up.workload_egress
+            || !up.host_binds.is_empty(),
           previous_grace,
           ctx,
         )
         .await?;
+      if !up.host_binds.is_empty() {
+        host_binds::verify_mounted(
+          &self.docker,
+          &up.project,
+          &up.host_binds,
+          ctx,
+        )
+        .await?;
+      }
+      if verify_files {
+        project_files::verify_metadata(&self.docker, up, ctx).await?;
+      }
+      if up.workload_egress {
+        crate::workload_egress::verify_service(&self.docker, up, ctx)
+          .await?;
+      }
+      if !up.no_start
+        && (verify_files
+          || up.workload_egress
+          || !up.host_binds.is_empty())
+      {
+        self.docker.stop_start(&up.project, true, ctx).await?;
+      }
       let state = if up.no_start {
         let mut state =
           self.docker.one_status(&up.project, ctx).await?;
@@ -1072,36 +1145,7 @@ impl Ops {
       self.docker.write_hash(&up.project, &up.hash)?;
       Ok::<_, ApiError>(state)
     }
-    .await;
-    let state = match (result, previous) {
-      (Ok(state), _) => state,
-      (Err(error), None) => return Err(error),
-      (Err(error), Some(prev)) => {
-        let recover = ctx.detached_with_progress();
-        crate::prev_logs::capture(
-          &self.docker,
-          &up.project,
-          "rollback",
-          &recover,
-        )
-        .await;
-        ctx.say(format!("{}，换回上一版", error.message));
-        return Err(
-          self
-            .restore_project(
-              &up.project,
-              &prev,
-              &recover,
-              error,
-              "上一版",
-              wharf_api_types::compose::parse_compose_max_grace_secs(
-                &up.compose,
-              ),
-            )
-            .await,
-        );
-      }
-    };
+    .await?;
     Ok(ProjectUpResult {
       containers: state.containers,
       images: self.docker.image_info(images, ctx).await,
@@ -1151,6 +1195,17 @@ impl Ops {
     if up.image_pull_mode.is_some() {
       self.verify_local_images(up, ctx).await?;
     }
+    if up.workload_egress {
+      crate::workload_egress::require_running()?;
+    }
+    if let Some(from) = &up.refresh_files_from {
+      return project_files::refresh(&self.docker, up, from, ctx)
+        .await;
+    }
+    host_binds::validate_sources(&self.docker, &up.host_binds, ctx)
+      .await?;
+    named_networks::ensure(&self.docker, &up.networks, true, ctx)
+      .await?;
     if up.trial.is_some()
       && let Err(e) = self
         .docker
@@ -1203,6 +1258,7 @@ impl Ops {
         }
         None => self.pull_all(up, ctx, &mut warnings).await?,
       };
+      volume_owner::prepare(&self.docker, up, ctx).await?;
       if up.trial.is_some() {
         self.trial_run(up, &mut warnings, ctx).await?;
       }
@@ -1255,8 +1311,17 @@ impl Ops {
         self.restore_before_up(previous.as_ref(), ctx, error).await,
       );
     }
+    let mut files =
+      project_files::prepare(&self.docker, up, ctx).await?;
     if let Some(init) = &up.init {
+      let old_env = self.docker.read_project_env(&up.project)?;
       self.docker.write_compose(&up.project, &up.compose)?;
+      let env = up
+        .project_env
+        .as_ref()
+        .map(crate::docker::dotenv)
+        .transpose()?;
+      self.docker.write_project_env(&up.project, env.as_deref())?;
       if let Err(error) =
         self.docker.run_init(&up.project, init, ctx).await
       {
@@ -1277,6 +1342,12 @@ impl Ops {
           ctx.say(format!("恢复原 compose 失败：{}", back.message));
         }
         if let Err(back) = self
+          .docker
+          .write_project_env(&up.project, old_env.as_deref())
+        {
+          ctx.say(format!("恢复原项目变量失败：{}", back.message));
+        }
+        if let Err(back) = self
           .restore_images(
             &saved_images,
             &ctx.detached_with_progress(),
@@ -1295,29 +1366,84 @@ impl Ops {
       _ => vec![],
     };
     match self
-      .finish_up(up, &images, warnings, previous, previous_grace, ctx)
+      .finish_up(up, &images, warnings, previous_grace, ctx)
       .await
     {
-      Ok(result) => Ok(ProjectUpResult { retired, ..result }),
-      Err(e) if !retired.is_empty() => {
-        ctx.say("启动失败，恢复原来的容器");
-        let recover = ctx.detached_with_progress();
-        if let Err(down) =
-          self.docker.down(&up.project, false, &recover).await
-        {
-          recover.say(format!("清理新容器失败：{}", down.message));
-        }
-        if let Err(back) =
-          crate::adopt::unretire(&self.docker, &retired, &recover)
-            .await
-        {
-          ctx
-            .say(format!("恢复失败，需要手动处理：{}", back.message));
-        }
-        Err(e)
+      Ok(result) => {
+        files.commit();
+        Ok(ProjectUpResult { retired, ..result })
       }
-      Err(e) => Err(e),
+      Err(mut error) => {
+        let recover = ctx.detached_with_progress();
+        error = self
+          .restore_deployment(
+            up,
+            previous.as_ref(),
+            &mut files,
+            &recover,
+            error,
+          )
+          .await;
+        if !retired.is_empty() {
+          ctx.say("启动失败，恢复原来的容器");
+          if let Err(down) =
+            self.docker.down(&up.project, false, &recover).await
+          {
+            recover.say(format!("清理新容器失败：{}", down.message));
+          }
+          if let Err(back) =
+            crate::adopt::unretire(&self.docker, &retired, &recover)
+              .await
+          {
+            ctx.say(format!(
+              "恢复失败，需要手动处理：{}",
+              back.message
+            ));
+          }
+        }
+        Err(error)
+      }
     }
+  }
+
+  async fn restore_deployment(
+    &self,
+    up: &ProjectUp,
+    previous: Option<&Previous>,
+    files: &mut project_files::Writes,
+    ctx: &Ctx,
+    error: ApiError,
+  ) -> ApiError {
+    if !files.rollback() {
+      return recovery_error(
+        error,
+        ApiError::internal("恢复热重载配置文件失败"),
+        "上一版",
+      );
+    }
+    let Some(previous) = previous else {
+      return error;
+    };
+    crate::prev_logs::capture(
+      &self.docker,
+      &up.project,
+      "rollback",
+      ctx,
+    )
+    .await;
+    ctx.say(format!("{}，换回上一版", error.message));
+    self
+      .restore_project(
+        &up.project,
+        previous,
+        ctx,
+        error,
+        "上一版",
+        wharf_api_types::compose::parse_compose_max_grace_secs(
+          &up.compose,
+        ),
+      )
+      .await
   }
 
   async fn restore_images(
@@ -1382,6 +1508,10 @@ impl Ops {
     let restored = async {
       self.restore_images(&previous.images, ctx).await?;
       self.docker.write_compose(project, &previous.compose)?;
+      self.docker.write_project_env(
+        project,
+        previous.project_env.as_deref(),
+      )?;
       self.docker.write_hash(project, &previous.hash)?;
       self.docker.up(project, false, previous_grace, ctx).await?;
       let status = self.docker.one_status(project, ctx).await?;
@@ -1623,7 +1753,7 @@ esac
     })).unwrap();
     docker.write_compose("app", &up.compose).unwrap();
     let result = ops
-      .finish_up(&up, &[], vec![], None, 10, &Ctx::detached())
+      .finish_up(&up, &[], vec![], 10, &Ctx::detached())
       .await
       .unwrap();
     assert_eq!(
@@ -1677,10 +1807,8 @@ esac
       })),
       ..Ctx::detached()
     };
-    let error = ops
-      .finish_up(&up, &[], vec![], None, 10, &ctx)
-      .await
-      .unwrap_err();
+    let error =
+      ops.finish_up(&up, &[], vec![], 10, &ctx).await.unwrap_err();
     assert!(error.message.contains("unhealthy-dependency"));
     assert!(
       lines

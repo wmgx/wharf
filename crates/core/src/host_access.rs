@@ -30,7 +30,10 @@ pub use policy::{
 };
 
 pub(crate) use compose::compose_host_reasons;
-pub use compose::{has_new_public_bind, validate_service_ports};
+pub use compose::{
+  compose_published_ports, has_new_public_bind,
+  validate_service_ports,
+};
 
 #[cfg(test)]
 pub(crate) use compose::compose_public_binds;
@@ -318,6 +321,14 @@ fn service_reasons(
     .map_or_else(Vec::new, |content| {
       compose_host_reasons(name, content)
     });
+  reasons.extend(
+    row
+      .spec
+      .volumes
+      .iter()
+      .filter_map(|v| v.host_path.as_ref())
+      .map(|p| format!("挂载了宿主机路径 {p}")),
+  );
   if !row.spec.cap_add.is_empty() {
     reasons.push(format!("容器 {name} 添加了内核能力 cap_add"));
   }

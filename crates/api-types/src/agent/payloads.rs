@@ -706,6 +706,28 @@ pub struct ProjectUp {
   pub no_start: bool,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub init: Option<InitRun>,
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub networks: BTreeMap<String, crate::spec::NetworkAttachment>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub project_env: Option<BTreeMap<String, String>>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub host_binds: Vec<crate::spec::VolumeSpec>,
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub volume_owners: BTreeMap<String, String>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub project_files: Vec<ProjectFile>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub refresh_files_from: Option<String>,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub workload_egress: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectFile {
+  pub spec: crate::spec::FileSpec,
+  pub component: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub directory: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1051,6 +1073,8 @@ pub struct TaskRunJob {
   pub artifacts_keep: Option<u32>,
   pub timeout_secs: u64,
   pub pull: PullPolicy,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub workload_no_proxy: Option<String>,
 }
 
 pub fn sso_runner_name(

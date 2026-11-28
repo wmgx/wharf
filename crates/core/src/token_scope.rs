@@ -342,6 +342,71 @@ pub fn require_plan_request(
   current: &World,
   req: &PlanRequest,
 ) -> Result<(), ApiError> {
+  if req.changes.iter().any(|change| {
+    matches!(
+      change,
+      Change::UpsertVar { .. } | Change::RemoveVar { .. }
+    )
+  }) || req
+    .fleet
+    .iter()
+    .chain(req.partial.iter())
+    .any(|fleet| !fleet.vars.is_empty())
+  {
+    crate::variables::require_global(auth)?;
+    crate::auth::require_perm(
+      &auth.perms,
+      wharf_api_types::view::Perm::Admin,
+    )?;
+  }
+  let submitted = req
+    .fleet
+    .iter()
+    .chain(req.partial.iter())
+    .flat_map(|f| &f.services)
+    .chain(req.changes.iter().filter_map(|change| match change {
+      Change::UpsertService { name, spec, .. } => Some((name, spec)),
+      _ => None,
+    }));
+  if !auth.human {
+    for (_, spec) in submitted.clone() {
+      if spec.volumes.iter().any(|v| v.host_path.is_some())
+        && auth.services.is_none()
+      {
+        crate::auth::require_perm(
+          &auth.perms,
+          wharf_api_types::view::Perm::Host,
+        )?;
+        if current
+          .servers
+          .get(&spec.server)
+          .is_some_and(|server| !server.settings.host_docker)
+        {
+          return Err(
+            ApiError::new(
+              ErrorCode::Forbidden,
+              format!(
+                "服务器 {} 未开启宿主机 Docker 权限",
+                spec.server
+              ),
+            )
+            .with_hint("在服务器设置中开启特权与未纳管容器权限"),
+          );
+        }
+      }
+    }
+  }
+  if submitted.into_iter().any(|(name, spec)| {
+    crate::project_files::exec_changed(
+      current.services.get(name).map(|row| &row.spec),
+      spec,
+    )
+  }) {
+    crate::auth::require_perm(
+      &auth.perms,
+      wharf_api_types::view::Perm::Exec,
+    )?;
+  }
   let Some(services) = &auth.services else {
     return Ok(());
   };
@@ -377,6 +442,16 @@ pub fn require_plan_request(
       Change::UpsertService { spec, .. } => Some(spec),
       _ => None,
     }));
+  if shared_refs
+    .clone()
+    .any(|spec| spec.volumes.iter().any(|v| v.host_path.is_some()))
+  {
+    return Err(forbidden(
+      &auth.name,
+      services,
+      "；外部挂载需要全局令牌",
+    ));
+  }
   blocked.extend(
     shared_refs
       .flat_map(crate::shared_volumes::owners)
@@ -432,6 +507,9 @@ pub fn require_plan_request(
         Some(format!("bookmark/{}", id.as_deref().unwrap_or("new")))
       }
       Change::RemoveBookmark { id } => Some(format!("bookmark/{id}")),
+      Change::UpsertVar { name, .. } | Change::RemoveVar { name } => {
+        Some(format!("var/{name}"))
+      }
       Change::UpsertRoute { spec } => upsert_route(spec)?,
       Change::RemoveRoute { hostname } => {
         let host = crate::world::normalize_hostname(hostname)?;
@@ -475,6 +553,17 @@ pub fn require_plan(
   plan: &Plan,
   effects: &RouteEffects,
 ) -> Result<(), ApiError> {
+  if plan
+    .items
+    .iter()
+    .any(|item| item.address.starts_with("var/"))
+  {
+    crate::variables::require_global(auth)?;
+    crate::auth::require_perm(
+      &auth.perms,
+      wharf_api_types::view::Perm::Admin,
+    )?;
+  }
   if let Some(services) = &auth.services {
     check_plan_scope(services, plan, effects).map_err(|blocked| {
       forbidden(

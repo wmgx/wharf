@@ -22,6 +22,19 @@ pub(crate) struct RenameJob {
   expected_hash: String,
   has_data: bool,
 }
+impl RenameJob {
+  pub(crate) fn is_retiring(
+    &self,
+    c: &rusqlite::Connection,
+  ) -> Result<bool, ApiError> {
+    c.query_row("SELECT EXISTS(SELECT 1 FROM pending_steps WHERE kind='clone_data' AND target_key=?1 AND instance_id=?2 AND payload=?3)
+      AND NOT EXISTS(SELECT 1 FROM resources WHERE kind='service' AND name=?1)",
+      rusqlite::params![self.source, self.instance, serde_json::to_string(&self.receipt).map_err(db::json_err)?],
+      |row| row.get(0),
+    ).map_err(db::sql_err)
+  }
+}
+
 fn reject(reason: &str) -> ApiError {
   ApiError::new(
     ErrorCode::Conflict,
@@ -191,8 +204,18 @@ fn config_checks(
   {
     return Err(reject("仅支持已停止且来源可验证的服务"));
   }
+  if row.spec.compose_env
+    || row.spec.use_egress
+    || !row.spec.networks.is_empty()
+    || crate::project_files::needs_agent(&row.spec)
+  {
+    return Err(reject(
+      "存在项目变量、专用网络或需单独下发的文件和卷配置",
+    ));
+  }
   if row.spec.backup.is_some()
     || snap.pending.backup_moves.contains_key(from)
+    || snap.pending.backup_moves.contains_key(to)
     || row.spec.heartbeat.is_some()
     || snap
       .account_links
@@ -526,21 +549,29 @@ pub(crate) async fn execute(
     job.server.as_str(),
     state.hub.service_copy_conn_id(&job.server)?,
   );
+  let retiring = state
+    .db
+    .call({
+      let job = job.clone();
+      move |c| job.is_retiring(c)
+    })
+    .await?;
+  if retiring {
+    return retire(state, server, job, &progress, cancel)
+      .await
+      .map_err(|error| {
+        error.with_hint("已改名，旧项目待清理；重试原执行")
+      });
+  }
   if snap
     .world
     .services
     .get(&job.target)
     .is_some_and(|r| r.instance_id == job.instance)
     && !snap.world.services.contains_key(&job.source)
+    && !snap.pending.clones.contains(&job.target)
   {
-    if !snap.pending.clones.contains(&job.source) {
-      return Ok(());
-    }
-    return retire(state, server, job, &progress, cancel)
-      .await
-      .map_err(|error| {
-        error.with_hint("已改名，旧项目待清理；重试原执行")
-      });
+    return Ok(());
   }
   if !snap.pending.clones.contains(&job.target)
     || !snap.world.services.get(&job.source).is_some_and(|r| {
@@ -680,6 +711,13 @@ pub(crate) async fn execute(
             .image_ids
             .clone(),
           no_start: true,
+          networks: Default::default(),
+          project_env: None,
+          host_binds: Vec::new(),
+          volume_owners: Default::default(),
+          project_files: Vec::new(),
+          refresh_files_from: None,
+          workload_egress: false,
           trial: None,
           init: None,
           start_timeout_secs: None,
@@ -861,11 +899,13 @@ async fn rename_switch_releases_new_name_and_keeps_old_name_until_archive()
     c.execute("INSERT INTO resources VALUES ('server','s1','{}','{}',1,0,0)", []).map_err(db::sql_err)?;
     c.execute("INSERT INTO resources VALUES ('service','old',?1,?2,1,0,0)", [
       json!({"server":"s1","source":{"image":"alpine"},"stopped":true,"volumes":[{"name":"data","target":"/data"}]}).to_string(),
-      json!({"instance_id":"svc_old"}).to_string(),
+      json!({"instance_id":"svc_old","pins":{"alpine":format!("sha256:{}", "a".repeat(64))}}).to_string(),
     ]).map_err(db::sql_err)?;
     c.execute("INSERT INTO pending_steps (kind,target_key,run_id,plan_id,instance_id,payload,updated_at)
       VALUES ('clone_data','new','run','plan','svc_old','\"rename-receipt\"',0)", []).map_err(db::sql_err)?;
     c.execute("INSERT INTO alert_service_overrides (rule,service,muted_until) VALUES ('oom_killed','old',42)", []).map_err(db::sql_err)?;
+    c.execute("INSERT INTO alert_custom_rules (name,service,metric,op,threshold,for_n,muted_until,created_at)
+      VALUES ('fixture','old','svc.mem','gt',100,1,42,0)", []).map_err(db::sql_err)?;
     Ok(())
   }).await.unwrap();
   let snap = snapshot::load(&state.db).await.unwrap();
@@ -906,6 +946,14 @@ async fn rename_switch_releases_new_name_and_keeps_old_name_until_archive()
           )
           .map_err(db::sql_err)?;
         assert_eq!(silence, ("new".into(), 42));
+        let custom: (String, i64) = tx
+          .query_row(
+            "SELECT service,muted_until FROM alert_custom_rules",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+          )
+          .map_err(db::sql_err)?;
+        assert_eq!(custom, ("new".into(), 42));
         tx.commit().map_err(db::sql_err)?;
         Ok(())
       }
@@ -919,6 +967,7 @@ async fn rename_switch_releases_new_name_and_keeps_old_name_until_archive()
     } else {
       json!({"project":p,"containers":[]})
     }).collect::<Vec<_>>())),
+    AgentOp::ResolveImages(_) => Ok(json!([{"image":"alpine","digest":format!("sha256:{}", "a".repeat(64))}])),
     AgentOp::ServiceCopy(ServiceCopy::Archive { .. }) if fail_archive.swap(false, Ordering::Relaxed) => Err(ApiError::internal("归档失败")),
     AgentOp::ServiceCopy(ServiceCopy::Archive { .. }) => Ok(json!({"committed":true})),
     _ => panic!("不应改动目标项目"),
@@ -955,6 +1004,31 @@ async fn rename_switch_releases_new_name_and_keeps_old_name_until_archive()
   assert_eq!(err.code, ErrorCode::Conflict);
   let plan = make_plan(&state, PlanRequest::default()).await.unwrap();
   assert!(plan.steps.is_empty());
+
+  let plan = make_plan_inner(
+    &state,
+    PlanRequest {
+      changes: vec![Change::UpsertService {
+        name: "new".into(),
+        spec: {
+          let mut spec = desired.services["new"].spec.clone();
+          spec.stopped = false;
+          spec
+        },
+        adopt: None,
+        pins: None,
+        commit: None,
+        migrate: None,
+      }],
+      ..Default::default()
+    },
+    snapshot::load(&state.db).await.unwrap(),
+    false,
+    true,
+  )
+  .await
+  .unwrap();
+  assert!(plan.steps.iter().any(|s| matches!(&s.step, Step::ServiceStart { service, .. } if service == "new")));
 
   let snap = snapshot::load(&state.db).await.unwrap();
   execute(&state, &snap, "run", &job, progress, &cancel)

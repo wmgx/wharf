@@ -49,6 +49,17 @@ impl RetryMeta {
     key: &db::CredentialsKey,
     from_plan: bool,
   ) -> Result<(), ApiError> {
+    if let [
+      StepPlan {
+        step: Step::RenameService { job },
+        ..
+      },
+    ] = self.steps.as_slice()
+      && job.is_retiring(c)?
+    {
+      // 切换已提交，续跑只清理原服务名占用。
+      return Ok(());
+    }
     let changed = if from_plan {
       !self.is_fresh(c, key)?
     } else {
@@ -359,6 +370,7 @@ async fn require_retry_access(
         service: service.clone(),
         instance_id: None,
         expect: None,
+        refresh_files_from: None,
       };
       &deploy
     } else {
@@ -880,6 +892,7 @@ async fn retry_reinserts_volume_sync_after_source_restarts() {
       service: "notes".into(),
       instance_id: None,
       expect: None,
+      refresh_files_from: None,
     },
   };
   let steps = complete_migration_steps(vec![up], &snap);

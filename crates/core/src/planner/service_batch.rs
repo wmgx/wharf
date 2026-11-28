@@ -491,11 +491,15 @@ mod tests {
       for name in ["a", "b", "c"] {
         db::apply_write(c, &Write::Upsert {
           kind: "service".into(), name: name.into(), meta: json!({}),
-          spec: json!({"server":"s1","source":{"image":"fixture:1"},"stopped":name != "c","tags":["试验"]}),
+          spec: json!({"server":"s1","source":{"image":"fixture:1"},"stopped":name == "b","tags":["试验"]}),
         })?;
       }
       Ok(())
     }).await.unwrap();
+    state.hub.mock_agent("s1", false, |op| {
+      assert!(matches!(op, wharf_api_types::agent::AgentOp::ProjectStatus { projects, .. } if projects == ["a"]));
+      Ok(json!([{"project":"a","hash":"fixture","containers":[{"service":"a","name":"a-1","state":"exited"}]}]))
+    });
     let allowed = BTreeSet::from(["a".into(), "b".into()]);
     let req = serde_json::from_value(json!({
       "service_action":{"action":"restart","tag":" 试验 "}

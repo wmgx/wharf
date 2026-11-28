@@ -592,6 +592,13 @@ export interface CertStatus {
  * 对期望状态的局部修改。CLI 的 `service deploy`、`route add` 等命令都生成它。
  */
 export type Change = {
+  name: string;
+  op: "upsert_var";
+  value: string;
+} | {
+  name: string;
+  op: "remove_var";
+} | {
   id: string | null;
   op: "upsert_bookmark";
   spec: BookmarkSpec;
@@ -1383,6 +1390,10 @@ export interface FileSpec {
    * 意图文件中的外置配置路径。
    */
   file?: string | null;
+  init_only?: boolean;
+  mode?: string | null;
+  on_change?: string | null;
+  owner?: string | null;
   /**
    * 容器内的绝对路径，例如 `/etc/app/config.yaml`。
    */
@@ -2091,6 +2102,10 @@ export interface NetProbeTcp {
 export interface NetProbeTls {
   verified: boolean;
   verify_error: string | null;
+}
+
+export interface NetworkAttachment {
+  internal?: boolean;
 }
 
 /**
@@ -3070,6 +3085,7 @@ export interface ServiceExecResponse {
 export interface ServiceRenderView {
   compose: string;
   init_cmd?: string | null;
+  project_env_keys?: string[];
   secrets_masked?: string[];
   server: string;
   service: string;
@@ -3128,6 +3144,7 @@ export interface ServiceSpec {
   backup?: BackupSpec | null;
   cap_add?: string[];
   command?: string[] | null;
+  compose_env?: boolean;
   /**
    * compose 来源：环境变量、资源上限和配置文件加在哪个容器上。只有一个容器时不用填。
    */
@@ -3141,6 +3158,7 @@ export interface ServiceSpec {
    * `[[@服务.端口名]]` 指定端口，末尾加 `:host` / `:port` 只取地址或端口。
    */
   env?: Record<string, string>;
+  extra_hosts?: Record<string, string>;
   /**
    * 配置文件：内容存在 Wharf 里，部署时放进容器（只读，属主 root），跟着部署历史和回滚走。
    * 应用自己改写的内容下次部署会被覆盖。
@@ -3158,6 +3176,7 @@ export interface ServiceSpec {
    * 初始化超时秒数（10 到 1800），缺省 300 秒。
    */
   init_timeout_secs?: number | null;
+  lan?: boolean | null;
   /**
    * 资源上限，不填不限。
    */
@@ -3168,9 +3187,11 @@ export interface ServiceSpec {
    * 自定义监控：服务所在机器的 agent 每分钟从本机请求一次，连续 3 次不正常推送。
    */
   monitor?: MonitorSpec | null;
+  networks?: Record<string, NetworkAttachment>;
   port_checks?: Record<string, PortCheckSpec>;
   ports?: PortSpec[];
   pull_policy?: ImagePullMode | null;
+  self_refs?: boolean;
   /**
    * 运行在哪台服务器上。
    */
@@ -3201,6 +3222,8 @@ export interface ServiceSpec {
    * 镜像和构建版本的更新忽略规则。
    */
   update_ignore?: UpdateIgnoreSpec[];
+  use_egress?: boolean;
+  user?: string | null;
   volumes?: VolumeSpec[];
 }
 
@@ -3587,6 +3610,7 @@ export type TaskSpec = ({
    * 超时秒数，默认 600；宿主机命令最长 600，其他最长 6 小时。
    */
   timeout_secs: number;
+  use_egress?: boolean;
 };
 
 export type TaskStatus = "running" | "succeeded" | "failed" | "timed_out" | "skipped" | "cancelled";
@@ -3792,10 +3816,12 @@ export interface VolumeSpec {
    * 同机拥有者的托管卷，格式为 <服务名>:<卷名>。
    */
   from_service?: string | null;
+  host_path?: string | null;
   /**
    * 本地卷名。共享卷省略时取拥有者的卷名。
    */
   name?: string;
+  owner?: string | null;
   read_only?: boolean;
   target: string;
 }
