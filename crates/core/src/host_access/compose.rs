@@ -93,6 +93,22 @@ pub(super) fn expanded_compose_privilege(
   compose_host_reasons_doc(service, &Value::Mapping(doc))
 }
 
+#[test]
+fn expanded_capabilities_require_confirmation_when_the_set_grows() {
+  let previous = "services: { app: { cap_add: [NET_BIND_SERVICE] } }";
+  let next =
+    "services: { app: { cap_add: [NET_BIND_SERVICE, CHOWN] } }";
+  assert!(
+    expanded_compose_privilege("app", Some(previous), next)
+      .iter()
+      .any(|reason| reason.contains("cap_add"))
+  );
+  assert!(
+    expanded_compose_privilege("app", Some(next), previous)
+      .is_empty()
+  );
+}
+
 pub fn compose_host_reasons(
   service: &str,
   content: &str,

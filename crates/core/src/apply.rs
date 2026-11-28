@@ -379,6 +379,50 @@ pub(crate) async fn start_with_actor(
       core_server.as_deref(),
     )?;
   }
+  for entry in &stored.steps {
+    match &entry.step {
+      Step::ServiceLimitsUpdate { server, .. } => {
+        state.hub.live_limits_conn_id(server)?;
+      }
+      Step::ServiceUp { service, .. } => {
+        if let Some((spec, meta)) =
+          stored.writes.iter().find_map(|write| match write {
+            Write::Upsert {
+              kind,
+              name,
+              spec,
+              meta,
+            } if kind == crate::world::KIND_SERVICE
+              && name == service =>
+            {
+              Some((spec, meta))
+            }
+            _ => None,
+          })
+        {
+          let spec: ServiceSpec =
+            serde_json::from_value(spec.clone()).map_err(json_err)?;
+          if spec.uses_runtime_options() {
+            let conn =
+              state.hub.runtime_options_conn_id(&spec.server)?;
+            if spec.host_groups().next().is_some() {
+              check_host_groups(
+                &state,
+                service,
+                &spec,
+                &serde_json::from_value(meta["host_groups"].clone())
+                  .unwrap_or_default(),
+                conn,
+                &CancellationToken::new(),
+              )
+              .await?;
+            }
+          }
+        }
+      }
+      _ => {}
+    }
+  }
   if !perms.contains(&Perm::Admin)
     && plan.items.iter().any(|item| {
       if item.layer != Layer::Config
@@ -2835,6 +2879,32 @@ fn should_trial(
 }
 
 /// 部署一个服务：构建来源先构建镜像（`force` 时重新构建），再 `up`。
+async fn check_host_groups(
+  state: &AppState,
+  service: &str,
+  spec: &ServiceSpec,
+  expected: &std::collections::BTreeMap<String, u32>,
+  conn: u64,
+  cancel: &CancellationToken,
+) -> Result<(), ApiError> {
+  let result =
+    snapshot::resolve_host_groups(state, spec, conn, cancel).await;
+  if result.as_ref().is_ok_and(|groups| groups != expected)
+    || result
+      .as_ref()
+      .is_err_and(|error| error.code == ErrorCode::InvalidInput)
+  {
+    return Err(
+      ApiError::new(
+        ErrorCode::PlanStale,
+        format!("服务 {service} 的宿主机组已变化"),
+      )
+      .suggest("wharf plan"),
+    );
+  }
+  result.map(|_| ())
+}
+
 async fn service_limits_update(
   state: &AppState,
   snap: &snapshot::Snapshot,
@@ -3089,6 +3159,19 @@ async fn service_up(
     .uses_runtime_options()
     .then(|| state.hub.runtime_options_conn_id(server))
     .transpose()?;
+  if let Some(conn) = runtime_conn
+    && row.spec.host_groups().next().is_some()
+  {
+    check_host_groups(
+      state,
+      service,
+      &row.spec,
+      &row.host_groups,
+      conn,
+      cancel,
+    )
+    .await?;
+  }
   let explicit_images =
     match (images, row.spec.pull_policy, runtime_conn) {
       (Some(images), Some(_), _) if images.is_empty() => {

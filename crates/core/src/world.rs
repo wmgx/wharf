@@ -44,6 +44,7 @@ pub struct ServerRow {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ServiceRow {
   pub instance_id: String,
+  pub host_groups: BTreeMap<String, u32>,
   pub spec: ServiceSpec,
   /// 端口名 → 宿主机端口。
   pub host_ports: BTreeMap<String, u16>,
@@ -162,6 +163,10 @@ impl World {
                 .to_string(),
               spec: serde_json::from_value(row.spec)
                 .map_err(json_err)?,
+              host_groups: serde_json::from_value(
+                row.meta["host_groups"].clone(),
+              )
+              .unwrap_or_default(),
               host_ports: serde_json::from_value(
                 row.meta["host_ports"].clone(),
               )
@@ -575,10 +580,18 @@ impl World {
               )));
             }
           }
+          let host_groups = old
+            .filter(|old| {
+              old.spec.server == spec.server
+                && old.spec.group_add == spec.group_add
+            })
+            .map(|old| old.host_groups.clone())
+            .unwrap_or_default();
           self.services.insert(
             name.clone(),
             ServiceRow {
               instance_id,
+              host_groups,
               spec,
               host_ports,
               import,
@@ -1675,6 +1688,9 @@ impl World {
         if let Some(import) = &r.import {
           meta["import"] = to_json(import);
         }
+        if !r.host_groups.is_empty() {
+          meta["host_groups"] = to_json(&r.host_groups);
+        }
         if !r.pins.is_empty() {
           meta["pins"] = to_json(&r.pins);
         }
@@ -2116,6 +2132,15 @@ fn validate_runtime_options(
     );
   }
   for group in &spec.group_add {
+    if let Some(host) = group.strip_prefix("host:") {
+      if !wharf_api_types::spec::HOST_GROUPS.contains(&host) {
+        return Err(
+          ApiError::invalid(format!("宿主机组 {host} 不支持"))
+            .with_hint("可选 host:video、host:render、host:dialout"),
+        );
+      }
+      continue;
+    }
     if group.is_empty()
       || !group
         .bytes()

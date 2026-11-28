@@ -141,7 +141,7 @@ fn preview(
   let row = &world.services[name];
   let (compose, mounts) = render::service_compose(
     name,
-    &row.spec,
+    &snapshot::runtime_spec(row)?,
     &row.host_ports,
     &net.bind_ips(&row.spec.server),
     Some(&masks),

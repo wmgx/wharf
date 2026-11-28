@@ -21,7 +21,7 @@ use crate::{
 const IO_TIMEOUT: Duration = Duration::from_secs(15);
 const JOURNAL: &str = ".wharf-limits.json";
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 struct Container {
   id: String,
   started: String,
@@ -235,6 +235,7 @@ async fn candidates(
   if seen.iter().ne(job.images.keys()) || targets.is_empty() {
     return Err(stale(project));
   }
+  targets.sort_unstable_by(|a, b| a.id.cmp(&b.id));
   Ok(targets)
 }
 
@@ -459,7 +460,9 @@ pub(crate) async fn update(
       )
       .await?;
     }
-    candidates(docker, job, true, ctx).await?;
+    if candidates(docker, job, true, ctx).await? != tx.containers {
+      return Err(stale(project));
+    }
     write_private(&dir.join("compose.yaml"), &job.compose)?;
     sync_dir(&dir)?;
     write_private(&dir.join(HASH_FILE), &job.hash)?;
@@ -491,4 +494,88 @@ pub(crate) async fn update(
     ));
   }
   clear(docker, project)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::docker::fake_docker;
+
+  #[tokio::test]
+  async fn failed_second_replica_rolls_back_and_can_be_retried() {
+    let (temp, docker) = fake_docker(
+      r#"
+case "$1" in
+  ps) printf 'id1\nid2\n' ;;
+  inspect)
+    shift 6
+    for id in "$@"; do
+      if [ ! -e "$id" ]; then printf '500000000' > "$id"; fi
+      cpu=$(cat "$id")
+      printf '{"id":"%s","image":"sha256:fixture","state":{"Status":"running","Running":true,"StartedAt":"fixture"},' "$id"
+      printf '"labels":{"com.docker.compose.project":"app","com.docker.compose.service":"web","com.docker.compose.project.working_dir":"%s/projects/app"},' "$(pwd)"
+      printf '"limits":{"NanoCpus":%s,"CpuQuota":0,"CpuPeriod":0}}\n' "$cpu"
+    done ;;
+  update)
+    if [ "$3" = "0.750" ]; then
+      if [ "$4" = "id2" ] && [ -e fail ]; then exit 1; fi
+      printf 750000000 > "$4"
+    else
+      printf 500000000 > "$4"
+    fi ;;
+  *) exit 1 ;;
+esac
+"#,
+    );
+    let before = Limits {
+      cpu_milli: Some(500),
+      ..Default::default()
+    };
+    let after = Limits {
+      cpu_milli: Some(750),
+      ..Default::default()
+    };
+    let job = ProjectLimitsJob {
+      project: "app".into(),
+      before_hash: "before".into(),
+      hash: "after".into(),
+      compose: "new".into(),
+      changes: BTreeMap::from([(
+        "web".into(),
+        ContainerLimitsDelta { before, after },
+      )]),
+      images: BTreeMap::from([(
+        "web".into(),
+        "sha256:fixture".into(),
+      )]),
+    };
+    docker.write_compose("app", "old").unwrap();
+    docker.write_hash("app", "before").unwrap();
+    fs::write(temp.path().join("fail"), "").unwrap();
+    let ctx = Ctx::detached();
+    assert!(
+      update(&docker, &job, &ctx)
+        .await
+        .unwrap_err()
+        .message
+        .contains("已恢复原上限")
+    );
+    assert_eq!(
+      fs::read_to_string(temp.path().join("id1")).unwrap(),
+      "500000000"
+    );
+    assert_eq!(current_hash(&docker, "app").unwrap(), "before");
+    assert_eq!(
+      docker.read_compose("app").unwrap().as_deref(),
+      Some("old")
+    );
+    fs::remove_file(temp.path().join("fail")).unwrap();
+    update(&docker, &job, &ctx).await.unwrap();
+    update(&docker, &job, &ctx).await.unwrap();
+    assert_eq!(current_hash(&docker, "app").unwrap(), "after");
+    assert_eq!(
+      fs::read_to_string(temp.path().join("id2")).unwrap(),
+      "750000000"
+    );
+  }
 }

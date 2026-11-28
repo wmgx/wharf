@@ -438,6 +438,9 @@ pub enum AgentOp {
   Report,
   /// 结果是 `Vec<ResolvedImage>`。
   ResolveImages(ResolveImages),
+  ReadHostGroups {
+    groups: Vec<String>,
+  },
   InspectLocalImages {
     images: Vec<String>,
   },

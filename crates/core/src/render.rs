@@ -2695,6 +2695,123 @@ mod tests {
   }
 
   #[test]
+  fn runtime_defaults_preserve_image_render_and_all_options_can_be_removed()
+   {
+    let mut spec: ServiceSpec =
+      serde_json::from_value(serde_json::json!({
+        "server":"s1", "source":{"image":"alpine"}
+      }))
+      .unwrap();
+    let baseline = "# 由 Wharf 生成，不要手改。\nname: app\nservices:\n  app:\n    image: alpine\n    restart: unless-stopped\n    labels:\n      wharf.service: app\n";
+    let (rendered, _) =
+      service_compose("app", &spec, &BTreeMap::new(), &[], None)
+        .unwrap();
+    assert_eq!(rendered, baseline);
+    assert_eq!(
+      serde_json::to_value(&spec).unwrap(),
+      serde_json::json!({"server":"s1", "source":{"image":"alpine"}})
+    );
+    spec.command = Some(vec!["echo".into(), "$HOME".into()]);
+    spec.shm_size = Some(128 << 20);
+    spec.cap_add = vec!["NET_BIND_SERVICE".into()];
+    spec.ulimits.insert(
+      "nofile".into(),
+      wharf_api_types::spec::Ulimit {
+        soft: 1024,
+        hard: 2048,
+      },
+    );
+    spec.init = Some(true);
+    spec.init_cmd = Some("prepare".into());
+    spec.group_add = vec!["44".into(), "render".into()];
+    spec.hostname = Some("worker-a".into());
+    spec.tmpfs.insert("/tmp".into(), 64 << 20);
+    spec.timezone = Some("+08:00".into());
+    spec.log_max = Some(wharf_api_types::spec::LogMax {
+      max_bytes: 5 << 20,
+      max_files: 1,
+    });
+    spec.limits = Some(wharf_api_types::spec::Limits {
+      pids: Some(128),
+      ..Default::default()
+    });
+    for yaml in [
+      service_compose("app", &spec, &BTreeMap::new(), &[], None)
+        .unwrap()
+        .0,
+      trial_compose("app", &spec, None).unwrap().0,
+    ] {
+      let doc = parse_compose(&yaml).unwrap();
+      let app = &doc["services"]["app"];
+      assert_eq!(app["command"][1].as_str(), Some("$$HOME"));
+      assert!(app.get("entrypoint").is_none());
+      assert_eq!(app["shm_size"].as_u64(), Some(128 << 20));
+      assert_eq!(
+        app["cap_add"][0].as_str(),
+        Some("NET_BIND_SERVICE")
+      );
+      assert_eq!(
+        app["ulimits"]["nofile"]["hard"].as_i64(),
+        Some(2048)
+      );
+      assert_eq!(app["init"].as_bool(), Some(true));
+      assert_eq!(app["group_add"][0].as_str(), Some("44"));
+      assert_eq!(app["hostname"].as_str(), Some("worker-a"));
+      assert_eq!(
+        app["volumes"][0]["tmpfs"]["size"].as_u64(),
+        Some(64 << 20)
+      );
+      assert_eq!(
+        app["environment"]["TZ"].as_str(),
+        Some("UTC-08:00")
+      );
+      assert_eq!(
+        app["logging"]["options"]["max-file"].as_str(),
+        Some("1")
+      );
+      assert_eq!(app["pids_limit"].as_u64(), Some(128));
+    }
+  }
+
+  #[test]
+  fn component_limits_preserve_other_services_and_reject_conflicts() {
+    let raw = "# 保留注释\nservices:\n  web:\n    image: alpine\n    mem_limit: 256m\n  db:\n    image: alpine\n    deploy:\n      replicas: 2\n";
+    let mut spec: ServiceSpec = serde_json::from_value(serde_json::json!({
+      "server":"s1", "source":{"compose":{"content":raw}}, "container":"web",
+      "container_limits":{"db":{"memory_mb":512,"pids":128}}
+    })).unwrap();
+    let yaml = compose_with_settings("app", raw, &spec).unwrap();
+    assert!(yaml.starts_with("# 保留注释\nservices:\n  web:\n    image: alpine\n    mem_limit: 256m\n"));
+    assert_eq!(
+      parse_compose(&yaml).unwrap()["services"]["db"]["pids_limit"]
+        .as_u64(),
+      Some(128)
+    );
+    assert_eq!(
+      crate::lint::compose_memory_limits(&spec),
+      Some((768 << 20, true))
+    );
+    spec.container_limits.get_mut("db").unwrap().memory_mb = None;
+    assert_eq!(
+      crate::lint::compose_memory_limits(&spec),
+      Some((256 << 20, false))
+    );
+    spec.container_limits.insert(
+      "web".into(),
+      wharf_api_types::spec::Limits {
+        memory_mb: Some(256),
+        ..Default::default()
+      },
+    );
+    assert!(
+      compose_with_settings("app", raw, &spec)
+        .unwrap_err()
+        .message
+        .contains("已在 Compose 原文设置")
+    );
+  }
+
+  #[test]
   fn stop_grace_zero_drift_and_renders_when_set() {
     let legacy = serde_json::json!({"server": "s1", "source": {"image": "alpine"}});
     let mut spec: ServiceSpec =

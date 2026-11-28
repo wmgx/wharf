@@ -685,9 +685,29 @@ pub(crate) async fn make_plan_inner(
       crate::monitor::require_agent(state, &row.spec)?;
     }
   }
-  validate_changed_templates(&current, &desired)?;
   let mut warnings =
     crate::edge::validate_owners(&current, &desired)?;
+  for (name, row) in &mut desired.services {
+    if row.spec.host_groups().next().is_none()
+      || !row.host_groups.is_empty()
+    {
+      continue;
+    }
+    let conn = state.hub.runtime_options_conn_id(&row.spec.server)?;
+    row.host_groups = snapshot::resolve_host_groups(
+      state,
+      &row.spec,
+      conn,
+      &Default::default(),
+    )
+    .await?;
+    for (group, gid) in &row.host_groups {
+      warnings.push(format!(
+        "服务 {name} 的宿主机组 host:{group} 对应 GID {gid}"
+      ));
+    }
+  }
+  validate_changed_templates(&current, &desired)?;
   crate::secret_policy::validate_accounts(
     &desired,
     &snap.account_links,
@@ -2049,12 +2069,8 @@ fn service_items(
                   "漂移：服务器上的部署和配置不一致，重新部署",
                 )
               };
-            deployed_template(
-              current,
-              net,
-              name,
-              snap.applied.get(name),
-            )
+            deployed_template(current, net, name, snap.applied.get(name))
+            .filter(|old| !crate::live_limits::mentions_limits(old))
             .and_then(|old| changed_components(&old, &template))
             .map_or(all.to_string(), |(redo, keep)| {
               format!(
@@ -6782,6 +6798,7 @@ mod tests {
     world.services.insert(
       "app".to_string(),
       ServiceRow {
+        host_groups: Default::default(),
         instance_id: "svc_fixture".into(),
         spec,
         host_ports: BTreeMap::from([("http".to_string(), 21000)]),

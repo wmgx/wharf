@@ -481,7 +481,16 @@ pub struct FileSpec {
   pub raw: bool,
 }
 
+pub const HOST_GROUPS: &[&str] = &["video", "render", "dialout"];
+
 impl ServiceSpec {
+  pub fn host_groups(&self) -> impl Iterator<Item = &str> {
+    self
+      .group_add
+      .iter()
+      .filter_map(|group| group.strip_prefix("host:"))
+  }
+
   pub fn image_runtime_fields(
     &self,
   ) -> impl Iterator<Item = &'static str> {

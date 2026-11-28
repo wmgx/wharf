@@ -201,6 +201,20 @@ pub(crate) fn changes(
   Ok((!updates.is_empty()).then_some(Change { updates, images }))
 }
 
+pub(crate) fn mentions_limits(compose: &str) -> bool {
+  let Ok(value) = crate::render::parse_compose(compose) else {
+    return true;
+  };
+  value["services"].as_mapping().is_none_or(|services| {
+    services.values().any(|body| {
+      ["mem_limit", "cpus", "pids_limit"]
+        .iter()
+        .any(|field| body.get(*field).is_some())
+        || body["deploy"]["resources"].get("limits").is_some()
+    })
+  })
+}
+
 pub(crate) fn same_source_inputs(old: &Source, new: &Source) -> bool {
   match (old, new) {
     (

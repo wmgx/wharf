@@ -137,6 +137,9 @@ impl Ops {
       AgentOp::ResolveCommit(job) => to_value(
         crate::build::resolve_commit(&self.docker, &job, ctx).await?,
       ),
+      AgentOp::ReadHostGroups { groups } => {
+        to_value(read_host_groups(&groups).await?)
+      }
       AgentOp::InspectLocalImages { images } => {
         if images.iter().any(|image| image.starts_with('-')) {
           return Err(ApiError::invalid("镜像引用不合法"));
@@ -856,6 +859,7 @@ impl Ops {
     check_project(project)?;
     let lock = self.lock_for(project);
     let _guard = lock.lock().await;
+    crate::live_limits::require_clear(&self.docker, project)?;
     to_value(self.docker.stop_start(project, start, ctx).await?)
   }
 
@@ -1465,6 +1469,46 @@ fn recovery_error(
     format!("{}；恢复{target}失败：{}", error.message, back.message),
   )
   .with_hint("请检查容器和镜像，手动恢复上一版")
+}
+
+async fn read_host_groups(
+  groups: &[String],
+) -> Result<BTreeMap<String, u32>, ApiError> {
+  if groups.iter().any(|group| {
+    !wharf_api_types::spec::HOST_GROUPS.contains(&group.as_str())
+  }) {
+    return Err(ApiError::invalid("请求了不支持的宿主机组"));
+  }
+  if Path::new("/.dockerenv").exists()
+    || Path::new("/run/.containerenv").exists()
+  {
+    return Err(
+      ApiError::new(
+        ErrorCode::Conflict,
+        "容器化 agent 没有宿主机组的只读通道",
+      )
+      .with_hint("指定数值 GID，或使用直接运行在宿主机上的 agent"),
+    );
+  }
+  let contents =
+    tokio::fs::read_to_string("/etc/group").await.map_err(|_| {
+      ApiError::new(ErrorCode::Conflict, "agent 无法读取宿主机组")
+        .with_hint("升级 agent 或确认已挂载宿主机组数据库")
+    })?;
+  Ok(
+    contents
+      .lines()
+      .filter_map(|line| {
+        let mut fields = line.split(':');
+        let name = fields.next()?;
+        if !groups.iter().any(|group| group == name) {
+          return None;
+        }
+        let gid = fields.nth(1)?.parse::<u32>().ok()?;
+        Some((name.into(), gid))
+      })
+      .collect(),
+  )
 }
 
 fn to_value<T: serde::Serialize>(v: T) -> Result<Value, ApiError> {

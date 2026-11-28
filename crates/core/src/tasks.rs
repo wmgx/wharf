@@ -1530,6 +1530,7 @@ pub async fn put(
   auth: Auth,
   Path(name): Path<String>,
   Query(query): Query<PutTaskQuery>,
+  headers: axum::http::HeaderMap,
   Json(mut spec): Json<TaskSpec>,
 ) -> ApiResult<TaskSpec> {
   let snap = snapshot::load(&s.db).await?;
@@ -1560,6 +1561,7 @@ pub async fn put(
     }
   }
   validate(&name, &spec, &snap)?;
+  let old_cli = crate::api::cli_api(&headers) == Some(2);
   let spec = s.db.call(move |c| {
     let mut spec = spec;
     crate::secret_policy::validate_task_restrictions(
@@ -1567,6 +1569,11 @@ pub async fn put(
     )?;
     let rows = load_rows(c)?;
     let old = rows.iter().find(|(n, _, _)| n == &name).map(|(_, spec, _)| spec);
+    if old_cli && old.is_some_and(|old| (old.limits.is_some() && spec.limits.is_none())
+      || (old.inherit_server_limits && !spec.inherit_server_limits))
+    {
+      return Err(crate::api::old_cli_runtime_options());
+    }
     if query.rotate_token {
       rotate_task_token(&mut spec.how)?;
     }
@@ -2222,6 +2229,39 @@ mod tests {
     );
     assert_eq!(next_hook(Some("old".into()), None), None);
   }
+  #[test]
+  fn inherited_limits_are_per_dimension_and_require_a_task_container()
+  {
+    let defaults = wharf_api_types::spec::Limits {
+      memory_mb: Some(128),
+      cpu_milli: Some(250),
+      pids: Some(100),
+    };
+    let fields = serde_json::json!({"kind": "container", "image":"alpine",
+      "limits":{"cpu_milli":500}, "inherit_server_limits":true});
+    let mut spec = task(fields);
+    assert_eq!(
+      effective_task_limits(&spec, Some(&defaults)).unwrap(),
+      Some(wharf_api_types::spec::Limits {
+        memory_mb: Some(128),
+        cpu_milli: Some(500),
+        pids: Some(100)
+      })
+    );
+    spec.inherit_server_limits = false;
+    assert_eq!(
+      effective_task_limits(&spec, Some(&defaults))
+        .unwrap()
+        .unwrap()
+        .memory_mb,
+      None
+    );
+    spec.how = TaskKind::Host {
+      command: "true".into(),
+    };
+    assert!(effective_task_limits(&spec, Some(&defaults)).is_err());
+  }
+
   fn task(fields: serde_json::Value) -> TaskSpec {
     let mut spec =
       serde_json::json!({"server":"s1","schedule":"* * * * *"});
