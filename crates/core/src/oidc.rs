@@ -965,7 +965,7 @@ pub async fn show(
   }))
 }
 
-fn email_ok(email: &str) -> bool {
+pub(crate) fn email_ok(email: &str) -> bool {
   email.len() <= 254
     && email.split_once('@').is_some_and(|(a, b)| {
       !a.is_empty()

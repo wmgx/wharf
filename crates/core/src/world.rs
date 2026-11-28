@@ -1329,6 +1329,14 @@ impl World {
           }
         }
       }
+      if route.spec.caddy_file.is_some() {
+        return Err(
+          ApiError::invalid(format!(
+            "路由 {host} 的 caddy_file 需要由 CLI 读取后提交"
+          ))
+          .with_hint("用 wharf plan -f 提交，CLI 会自动读取外置文件"),
+        );
+      }
       if let Some(custom) = &route.spec.caddy {
         let bad = |m: &str| {
           Err(ApiError::invalid(format!(
@@ -2179,6 +2187,10 @@ fn check_files(
   }
   let mut paths = BTreeSet::new();
   for f in files {
+    if f.file.is_some() {
+      return Err(ApiError::invalid(format!("服务 {name} 的配置文件 {} 的 file 字段需要由 CLI 读取后提交", f.path))
+        .with_hint("用 wharf plan -f 提交，CLI 会自动读取外置文件"));
+    }
     let dir = crate::render::SECRET_FILE_DIR;
     if crate::render::reserved_secret_mount(&f.path) {
       return Err(
@@ -3309,6 +3321,7 @@ services:
           auth: false,
           paths: vec![],
           caddy: None,
+          caddy_file: None,
           upstream: None,
           link: Default::default(),
           redirect: None,
@@ -3403,6 +3416,7 @@ services:
       auth: false,
       paths: vec![],
       caddy: None,
+      caddy_file: None,
       upstream: None,
       link: Default::default(),
       redirect: None,

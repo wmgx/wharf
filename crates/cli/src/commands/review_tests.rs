@@ -487,6 +487,120 @@ async fn task_set_dry_run_without_edits_rejects_before_fetching() {
 }
 
 #[tokio::test]
+async fn env_sync_preflights_confirmation_before_import() {
+  let file = tempfile::NamedTempFile::new().unwrap();
+  std::fs::write(file.path(), "API_KEY=fixture-sensitive").unwrap();
+  let mut plan = plan_response();
+  plan["needs_confirm"] = json!(["service/app"]);
+  plan["items"][0]["impacts"] = json!(["public"]);
+  let (code, body, requests) = fixture_requests(
+    &[
+      "service",
+      "env",
+      "sync",
+      "app",
+      file.path().to_str().unwrap(),
+      "--apply",
+      "--json",
+    ],
+    vec![
+      ("GET /api/services/app ", service_view()),
+      ("GET /api/secrets ", json!([])),
+      ("POST /api/plan?preview_secrets=", plan),
+    ],
+  )
+  .await;
+  assert_eq!(code, 2);
+  assert_eq!(body["code"], "ConfirmRequired");
+  assert_eq!(
+    body["details"]["needs_confirm"],
+    json!(["service/app"])
+  );
+  assert!(
+    body["hint"]
+      .as_str()
+      .unwrap()
+      .contains("--confirm service/app")
+  );
+  assert_eq!(requests.len(), 1);
+  assert!(!requests[0].to_string().contains("fixture-sensitive"));
+}
+
+#[tokio::test]
+async fn env_sync_brief_masks_logs_and_preserves_machine_output() {
+  let file = tempfile::NamedTempFile::new().unwrap();
+  std::fs::write(
+    file.path(),
+    "DEBUG=1\nPORT=80\nAPI_KEY=fixture-sensitive",
+  )
+  .unwrap();
+  let mut plan = plan_response();
+  plan["plan_id"] = json!("p_180");
+  let mut run = run_response("succeeded");
+  run["plan_id"] = json!("p_180");
+  run["run_id"] = json!("r_801");
+  run["steps"] = json!([
+    {"items":[1],"title":"应用","status":"done","log":["fixture-sensitive", "2", "3", "4", "5", "6"]},
+    {"items":[1],"title":"验证","status":"done","log":["fixture-sensitive DEBUG=1 PORT=80"]}
+  ]);
+  let (code, body) = run_fixture(
+    &[
+      "service",
+      "env",
+      "sync",
+      "app",
+      file.path().to_str().unwrap(),
+      "--apply",
+      "--plain",
+      "API_KEY",
+      "--brief",
+      "--json",
+    ],
+    vec![
+      ("GET /api/services/app ", service_view()),
+      ("GET /api/secrets ", json!([])),
+      ("POST /api/plan?brief=1 ", plan),
+      ("POST /api/apply ", json!({"run_id":"r_801"})),
+      ("GET /api/runs/r_801 ", run),
+    ],
+  )
+  .await;
+  assert_eq!(code, 0);
+  assert_eq!(body["plan"]["plan_id"], "p_180");
+  assert_eq!(body["run"]["run_id"], "r_801");
+  assert_eq!(body["run"]["status"], "succeeded");
+  assert_eq!(
+    body["run"]["steps"][0]["log"],
+    json!(["<omitted 6 lines>"])
+  );
+  assert_eq!(
+    body["run"]["steps"][1]["log"],
+    json!(["*** DEBUG=1 PORT=80"])
+  );
+}
+
+#[tokio::test]
+async fn artifact_download_returns_manifest_fields() {
+  let dir = tempfile::tempdir().unwrap();
+  let file = dir.path().join("report.txt");
+  let artifacts =
+    json!([{"path":"report.txt","size":3,"sha256":"fixture"}]);
+  let (code, body) = run_fixture(
+    &["task", "artifacts", "fixture", "--get", "report.txt", "-o", file.to_str().unwrap(), "--fields", "artifacts"],
+    vec![
+      ("GET /api/tasks/fixture/artifacts ", json!({
+        "task":"fixture","run_id":1,"started_at":"2026-11-28T00:00:00Z",
+        "status":"succeeded","total_bytes":3,"artifacts":artifacts,
+      })),
+      ("GET /api/tasks/fixture/runs/1/artifacts/download?path=report.txt ", json!(123)),
+    ],
+  ).await;
+  assert_eq!(code, 0);
+  assert_eq!(body["artifacts"], artifacts);
+  assert_eq!(std::fs::read(file).unwrap(), b"123");
+}
+
+#[tokio::test]
 async fn quiet_secret_rotation_finishes_apply_or_exits_silently() {
   for (action, endpoint, status, exit) in [
     (

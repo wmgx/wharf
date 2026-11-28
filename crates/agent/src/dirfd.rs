@@ -290,6 +290,14 @@ impl DirFd {
     })
   }
 
+  pub(crate) fn remove_tree(
+    &self,
+    name: &CStr,
+    cancelled: &impl Fn() -> io::Result<()>,
+  ) -> io::Result<()> {
+    remove_dir_counted(self, name, cancelled).map(|_| ())
+  }
+
   pub(crate) fn read_entries(
     &self,
     path: &Path,
@@ -313,7 +321,7 @@ impl DirFd {
     Ok(out)
   }
 
-  fn read_names(&self) -> io::Result<Vec<CString>> {
+  pub(crate) fn read_names(&self) -> io::Result<Vec<CString>> {
     let mut out = Vec::new();
     self.visit_names(|name| {
       out.push(name.to_owned());

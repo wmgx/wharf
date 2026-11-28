@@ -1,5 +1,13 @@
 //! 由期望状态渲染出 compose 文件和 Caddyfile。纯函数，不碰网络和数据库。
 
+pub(crate) use wharf_api_types::compose::{
+  merge_compose, parse_compose,
+};
+pub(crate) use wharf_api_types::references::{
+  Placeholder, SecretMode, account_ref, next_placeholder,
+  parse_placeholder, placeholders,
+};
+
 use std::{
   collections::{BTreeMap, BTreeSet},
   path::{Component, Path, PathBuf},
@@ -307,63 +315,6 @@ fn to_yaml(file: &ComposeFile) -> String {
 
 pub const SECRET_FILE_DIR: &str = "/run/wharf-secrets";
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SecretMode {
-  Plain,
-  Url,
-  B64,
-  Json,
-  File,
-}
-
-pub(crate) struct Placeholder<'a> {
-  pub mode: SecretMode,
-  pub name: &'a str,
-}
-
-fn bare_secret(name: &str) -> bool {
-  !name.is_empty()
-    && name
-      .bytes()
-      .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
-}
-
-pub(crate) fn parse_placeholder(
-  inner: &str,
-  allow_account: bool,
-) -> Result<Option<Placeholder<'_>>, ApiError> {
-  if inner.starts_with('@') {
-    return Ok(None);
-  }
-  let valid = |name| {
-    bare_secret(name)
-      || (allow_account && account_ref(name).is_some())
-  };
-  let (mode, name) = match inner.split_once(':') {
-    None if valid(inner) => (SecretMode::Plain, inner),
-    None => return Ok(None),
-    Some((prefix, name)) => {
-      let mode = match prefix {
-        "url" => SecretMode::Url,
-        "b64" => SecretMode::B64,
-        "json" => SecretMode::Json,
-        "FILE" => SecretMode::File,
-        _ if bare_secret(prefix) && valid(name) => {
-          return Err(ApiError::invalid(format!("不支持的密钥修饰符：{prefix}"))
-            .with_hint("可用修饰符：[[SECRET]]、[[url:SECRET]]、[[b64:SECRET]]、[[json:SECRET]]、[[FILE:SECRET]]"));
-        }
-        _ => return Ok(None),
-      };
-      if !valid(name) {
-        return Err(ApiError::invalid(format!("密钥引用 [[{inner}]] 格式不对"))
-          .with_hint("写成 [[url:密钥名]]、[[b64:密钥名]]、[[json:密钥名]] 或 [[FILE:密钥名]]，密钥名只能用字母、数字、_ 和 -"));
-      }
-      (mode, name)
-    }
-  };
-  Ok(Some(Placeholder { mode, name }))
-}
-
 pub(crate) fn reject_file(
   placeholder: &Placeholder<'_>,
 ) -> Result<(), ApiError> {
@@ -389,26 +340,6 @@ fn encode_secret(
       json[1..json.len() - 1].to_string()
     }
     SecretMode::File => unreachable!(),
-  })
-}
-
-pub(crate) fn next_placeholder(text: &str) -> Option<(usize, &str)> {
-  let start = text.find("[[")?;
-  let end = start + 2 + text[start + 2..].find("]]")?;
-  let inner_start = start + 1;
-  let start = text[inner_start..end]
-    .rfind("[[")
-    .map_or(start, |inner| inner_start + inner);
-  Some((start, &text[start + 2..end]))
-}
-
-pub(crate) fn placeholders(
-  mut text: &str,
-) -> impl Iterator<Item = &str> {
-  std::iter::from_fn(move || {
-    let (start, inner) = next_placeholder(text)?;
-    text = &text[start + inner.len() + 4..];
-    Some(inner)
   })
 }
 
@@ -557,30 +488,6 @@ fn yaml_contains(value: &Value, text: &str) -> bool {
   }
 }
 
-pub(crate) fn merge_compose(
-  value: &mut Value,
-) -> Result<(), serde_yaml_ng::Error> {
-  // 先展开被继承的映射，避免一层合并漏掉链式继承或改变优先级。
-  match value {
-    Value::Mapping(map) => {
-      for child in map.values_mut() {
-        merge_compose(child)?;
-      }
-      if map.contains_key("<<") {
-        value.apply_merge()?;
-      }
-    }
-    Value::Sequence(seq) => {
-      for child in seq {
-        merge_compose(child)?;
-      }
-    }
-    Value::Tagged(tag) => merge_compose(&mut tag.value)?,
-    _ => {}
-  }
-  Ok(())
-}
-
 pub fn expected_components(
   yaml: &str,
   active_profiles: &[String],
@@ -647,23 +554,6 @@ pub fn missing_components(
     .filter(|c| !present.contains(c.as_str()))
     .cloned()
     .collect()
-}
-
-pub(crate) fn parse_compose(
-  content: &str,
-) -> Result<Value, ApiError> {
-  let mut doc: Value =
-    serde_yaml_ng::from_str(content).map_err(|e| {
-      let location = e.location().map_or_else(String::new, |loc| {
-        format!("（第 {} 行第 {} 列）", loc.line(), loc.column())
-      });
-      ApiError::invalid(format!("compose 不是合法的 YAML{location}"))
-    })?;
-  merge_compose(&mut doc).map_err(|_| {
-    ApiError::invalid("compose YAML 锚点合并不合法")
-      .with_hint("检查 <<: *anchor 是否指向映射")
-  })?;
-  Ok(doc)
 }
 
 pub(crate) fn parse_compose_template(
@@ -855,14 +745,6 @@ pub fn service_account_refs(world: &World) -> BTreeSet<String> {
     })
     .map(|(name, _)| name.to_string())
     .collect()
-}
-
-pub(crate) fn account_ref(name: &str) -> Option<&str> {
-  let (account, field) =
-    name.strip_prefix("account.")?.split_once('.')?;
-  (matches!(field, "username" | "password")
-    && wharf_api_types::validate_name("应用账号", account).is_ok())
-  .then_some(account)
 }
 
 /// 构建来源的镜像名：`wharf-build/<服务>:<指纹>`。指纹来自构建配置和端口

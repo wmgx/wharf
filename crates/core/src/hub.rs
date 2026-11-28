@@ -69,6 +69,7 @@ struct Conn {
   host_shell: bool,
   runtime_v2: bool,
   monitor_v2: bool,
+  task_artifacts: bool,
   backfill: bool,
   forward: bool,
   service_checks: bool,
@@ -449,6 +450,29 @@ impl Hub {
     lock(&self.conns).get(server).is_some_and(|c| {
       !c.closed.is_cancelled() && !c.upgrade_only && c.backfill
     })
+  }
+
+  pub(crate) fn task_artifacts_conn_id(
+    &self,
+    server: &str,
+  ) -> Result<u64, ApiError> {
+    let conns = lock(&self.conns);
+    let conn = conns
+      .get(server)
+      .filter(|c| !c.closed.is_cancelled())
+      .ok_or_else(|| offline(server))?;
+    if conn.upgrade_only || !conn.task_artifacts {
+      return Err(
+        ApiError::new(
+          ErrorCode::Conflict,
+          format!(
+            "服务器 {server} 的 agent 版本旧，不支持定时任务产物读取"
+          ),
+        )
+        .with_hint("先升级 agent：wharf upgrade"),
+      );
+    }
+    Ok(conn.conn_id)
   }
 
   pub fn supports_monitor_v2(&self, server: &str) -> bool {
@@ -1304,6 +1328,7 @@ async fn handle_socket(
     host_shell,
     runtime_v2,
     monitor_v2,
+    task_artifacts,
     backfill,
     forward,
     service_checks,
@@ -1484,6 +1509,7 @@ async fn handle_socket(
     host_shell,
     runtime_v2,
     monitor_v2,
+    task_artifacts,
     backfill,
     forward,
     service_checks,

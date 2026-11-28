@@ -14,6 +14,7 @@ fn has(set: u64, value: u32) -> bool {
 }
 
 pub struct Cron {
+  offset: FixedOffset,
   minute: u64,
   hour: u64,
   dom: u64,
@@ -52,6 +53,7 @@ impl Cron {
       return Err(ApiError::invalid("cron 指定的月和日永远不会出现"));
     }
     Ok(Cron {
+      offset: beijing(),
       minute: field(mi, 0, 59)?,
       hour: field(h, 0, 23)?,
       dom,
@@ -62,9 +64,14 @@ impl Cron {
     })
   }
 
-  /// 这一分钟（北京时间）是否到点。
+  pub(crate) fn with_offset(mut self, offset: FixedOffset) -> Self {
+    self.offset = offset;
+    self
+  }
+
+  /// 这一分钟是否到点。
   pub fn matches(&self, t: DateTime<Utc>) -> bool {
-    let t = t.with_timezone(&beijing());
+    let t = t.with_timezone(&self.offset);
     has(self.minute, t.minute())
       && has(self.hour, t.hour())
       && has(self.month, t.month())
@@ -100,7 +107,7 @@ impl Cron {
   ) -> Option<DateTime<Utc>> {
     let start =
       minute_floor(after).checked_add_signed(Duration::minutes(1))?;
-    let mut t = start.with_timezone(&beijing()).naive_local();
+    let mut t = start.with_timezone(&self.offset).naive_local();
     let limit = t.checked_add_months(Months::new(48))?;
     while t <= limit {
       let midnight = || t.date().and_hms_opt(0, 0, 0);
@@ -120,7 +127,7 @@ impl Cron {
       {
         return t
           .with_minute(minute)?
-          .and_local_timezone(beijing())
+          .and_local_timezone(self.offset)
           .single()
           .map(|t| t.to_utc());
       } else {

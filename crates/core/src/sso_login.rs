@@ -636,6 +636,14 @@ fn script_env(
   hostname: &str,
   upstream: &str,
 ) -> Result<Values, ApiError> {
+  crate::missing_refs::check_text(
+    &format!("route/{hostname} sso.login"),
+    script
+      .env
+      .iter()
+      .map(|(k, v)| (format!("env.{k}"), v.as_str())),
+    secrets,
+  )?;
   let mut env: Values = script
     .env
     .iter()
@@ -814,6 +822,9 @@ async fn execute(
       network_host: true,
       out_dir: true,
       wait_for_deps,
+      run_id: None,
+      artifacts_max_bytes: None,
+      artifacts_keep: None,
       timeout_secs: script.timeout_secs,
       pull: snapshot::pull_policy(server_row),
     };

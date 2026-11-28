@@ -1556,6 +1556,10 @@ pub struct TaskSpec {
   /// 错过触发后允许补跑的分钟数。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub catch_up_mins: Option<u32>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub artifacts_max_mb: Option<u32>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub artifacts_keep: Option<u32>,
 }
 
 fn default_task_timeout() -> u64 {
@@ -1665,6 +1669,8 @@ pub struct TaskRunView {
   pub exit_code: Option<i32>,
   /// 输出的最后 16 KB，密钥值已换成 `***`；出错时是错误信息。
   pub output: String,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub artifacts: Vec<crate::agent::TaskArtifact>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -2220,6 +2226,200 @@ pub struct AgentKeyRotation {
   pub server: String,
   pub key_fingerprint: String,
   pub rotated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ConfigItemView {
+  pub key: String,
+  pub value: serde_json::Value,
+  pub default_value: serde_json::Value,
+  pub customized: bool,
+  pub value_type: String,
+  pub readonly: bool,
+  pub description: String,
+}
+
+#[derive(
+  Debug,
+  Clone,
+  Copy,
+  Default,
+  PartialEq,
+  Eq,
+  Serialize,
+  Deserialize,
+  JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum SecretImportMode {
+  #[default]
+  FailOnConflict,
+  OnlyMissing,
+  Overwrite,
+}
+
+#[derive(
+  Debug, Clone, Default, Serialize, Deserialize, JsonSchema,
+)]
+pub struct SecretImportResponse {
+  pub created: Vec<String>,
+  pub updated: Vec<String>,
+  pub skipped: Vec<String>,
+  pub needs_plan: bool,
+  pub affected_services: Vec<String>,
+  pub affected_gateways: Vec<String>,
+  pub suggest: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RefHit {
+  pub kind: String,
+  pub name: String,
+  pub field: String,
+  pub relation: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RefReport {
+  pub kind: String,
+  pub name: String,
+  pub exists: bool,
+  pub count: usize,
+  pub refs: Vec<RefHit>,
+  #[serde(default)]
+  pub complete: bool,
+  #[serde(default)]
+  pub removable: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TreeView {
+  pub routes: Vec<TreeRouteNode>,
+  pub orphan_services: Vec<TreeServiceNode>,
+  pub servers: Vec<TreeServerNode>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TreeRouteNode {
+  pub hostname: String,
+  pub https: bool,
+  pub gate: bool,
+  pub basic_auth: bool,
+  pub gateway: Option<TreeGatewayNode>,
+  pub backup_gateway: Option<TreeGatewayNode>,
+  pub backup_active: bool,
+  pub link: Option<String>,
+  pub service: Option<TreeServiceNode>,
+  pub port: Option<String>,
+  pub path_services: Vec<TreeServiceNode>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub target: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TreeGatewayNode {
+  pub name: String,
+  pub server: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TreeServiceNode {
+  pub name: String,
+  pub server: Option<String>,
+  pub ports: BTreeMap<String, String>,
+  pub dependencies: Vec<String>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub dependency_details: Vec<TreeDependency>,
+  pub backup_to: Option<String>,
+  pub stopped: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub state: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TreeDependency {
+  pub service: String,
+  pub server: Option<String>,
+  pub kind: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TreeServerNode {
+  pub name: String,
+  pub services: Vec<TreeServiceNode>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SearchResponse {
+  pub total: usize,
+  pub hits: Vec<SearchHit>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SearchHit {
+  pub kind: String,
+  pub name: String,
+  pub field: String,
+  pub match_text: String,
+}
+
+#[derive(
+  Debug,
+  Clone,
+  Copy,
+  PartialEq,
+  Eq,
+  PartialOrd,
+  Ord,
+  Serialize,
+  Deserialize,
+  JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum LintSeverity {
+  Info,
+  Warning,
+  Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct LintFinding {
+  pub id: String,
+  pub category: String,
+  pub severity: LintSeverity,
+  pub subject: String,
+  pub message: String,
+  pub suggest: Vec<String>,
+}
+
+#[derive(
+  Debug, Clone, Default, Serialize, Deserialize, JsonSchema,
+)]
+pub struct LintSummary {
+  pub error: usize,
+  pub warning: usize,
+  pub info: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct LintReport {
+  pub ok: bool,
+  pub summary: LintSummary,
+  pub findings: Vec<LintFinding>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TaskArtifactsView {
+  pub task: String,
+  pub run_id: Option<i64>,
+  pub started_at: Option<DateTime<Utc>>,
+  pub status: Option<TaskStatus>,
+  pub total_bytes: u64,
+  pub artifacts: Vec<crate::agent::TaskArtifact>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub hint: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

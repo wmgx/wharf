@@ -67,12 +67,16 @@ pub struct SetArgs {
   no_hook: bool,
   #[arg(long)]
   grace: Option<u32>,
+  #[arg(long)]
+  artifacts_max_mb: Option<u32>,
+  #[arg(long)]
+  artifacts_keep: Option<u32>,
 }
 
 impl SetArgs {
   fn edits(
     &self,
-  ) -> [(bool, &'static str, &'static [&'static str]); 23] {
+  ) -> [(bool, &'static str, &'static [&'static str]); 25] {
     [
       (self.schedule.is_some(), "--schedule", &[]),
       (self.clear_schedule, "--clear-schedule", &["脚本"]),
@@ -125,6 +129,16 @@ impl SetArgs {
       (self.hook, "--hook", &["脚本"]),
       (self.no_hook, "--no-hook", &["脚本"]),
       (self.grace.is_some(), "--grace", &["外部报到"]),
+      (
+        self.artifacts_max_mb.is_some(),
+        "--artifacts-max-mb",
+        &["脚本", "一次性容器"],
+      ),
+      (
+        self.artifacts_keep.is_some(),
+        "--artifacts-keep",
+        &["脚本", "一次性容器"],
+      ),
     ]
   }
 
@@ -206,6 +220,12 @@ fn apply_task_set(
   }
   if args.no_catch_up || args.catch_up.is_some() {
     spec.catch_up_mins = args.catch_up;
+  }
+  if args.artifacts_max_mb.is_some() {
+    spec.artifacts_max_mb = args.artifacts_max_mb;
+  }
+  if args.artifacts_keep.is_some() {
+    spec.artifacts_keep = args.artifacts_keep;
   }
   let new_command = (!args.command.is_empty())
     .then(|| super::shell_join(&args.command));

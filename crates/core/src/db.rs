@@ -390,6 +390,7 @@ ALTER TABLE task_runs ADD COLUMN service_instance_id TEXT;
 CREATE INDEX task_runs_service_started ON task_runs (service, started_at DESC);
 "#,
   crate::service_monitor::heartbeat::ROTATE_MIGRATION,
+  "ALTER TABLE task_runs ADD COLUMN artifacts TEXT;",
   "ALTER TABLE cleanups ADD COLUMN created_at INTEGER;
    UPDATE cleanups SET created_at = due_at - 604800000 WHERE created_at IS NULL;
    ALTER TABLE cleanups ADD COLUMN blocked_reason TEXT;
@@ -1267,9 +1268,23 @@ impl CredentialsKey {
     create: bool,
   ) -> Result<(), ApiError> {
     let tx = conn.unchecked_transaction().map_err(sql_err)?;
-    match self.secret(&tx, name)? {
+    self
+      .rotate_secret_in(&tx, name, value, now, keep_until, create)?;
+    tx.commit().map_err(sql_err)
+  }
+
+  pub(crate) fn rotate_secret_in(
+    &self,
+    tx: &rusqlite::Transaction<'_>,
+    name: &str,
+    value: &str,
+    now: i64,
+    keep_until: Option<i64>,
+    create: bool,
+  ) -> Result<(), ApiError> {
+    match self.secret(tx, name)? {
       None if create => {
-        self.put_secret(&tx, name, value, now, false)?
+        self.put_secret(tx, name, value, now, false)?
       }
       None => return Err(secret_not_found(name)),
       Some(old) if old != value => {
@@ -1283,11 +1298,11 @@ impl CredentialsKey {
         ).map_err(sql_err)?;
       }
       Some(_) if keep_until.is_none() => {
-        clear_secret_prev(&tx, name)?;
+        clear_secret_prev(tx, name)?;
       }
       Some(_) => {}
     }
-    tx.commit().map_err(sql_err)
+    Ok(())
   }
 
   pub fn rollback_secret(

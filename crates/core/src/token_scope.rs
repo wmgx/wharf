@@ -134,7 +134,7 @@ pub fn check_service_scope(
         "api",
         "status" | "services" | "routes" | "data" | "alerts"
         | "doctor" | "report" | "export" | "plans" | "runs"
-        | "secrets" | "tasks",
+        | "secrets" | "tasks" | "refs" | "tree" | "search" | "lint",
       ]
       | ["", "api", "data", "cleanup"]
       | ["", "api", "data", "cleanup", "policy"]
@@ -142,7 +142,8 @@ pub fn check_service_scope(
       | ["", "api", "metrics"]
       | ["", "api", "routes", _, "cert" | "dns-check" | "failover"]
       | ["", "api", "tasks", _]
-      | ["", "api", "tasks", _, "runs"]
+      | ["", "api", "tasks", _, "runs" | "artifacts"]
+      | ["", "api", "tasks", _, "runs", _, "artifacts", "download"]
       | ["", "api", "tasks", _, "runs", _]
       | ["", "api", "runs", _, "logs"]
       | ["", "api", "plans" | "runs", _] => true,

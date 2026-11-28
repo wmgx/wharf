@@ -442,7 +442,11 @@ pub struct FileSpec {
   /// 容器内的绝对路径，例如 `/etc/app/config.yaml`。
   pub path: String,
   /// 文本内容，最大 64 KB。可以用 `[[密钥名]]` 和 `[[@服务]]`，部署时替换。
+  #[serde(default)]
   pub content: String,
+  /// 意图文件中的外置配置路径。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub file: Option<String>,
   /// 跳过 plan 阶段的配置文件语法预检。
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub raw: bool,
@@ -723,6 +727,9 @@ pub struct RouteSpec {
   /// 网关下发前会用 Caddy 校验，写错了不会生效。只支持 caddy 网关。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub caddy: Option<String>,
+  /// 意图文件中的外置 Caddy 片段路径。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub caddy_file: Option<String>,
   /// 网关到服务的走法。不填为自动：同机、能直连内网地址就直连，否则走反向隧道。
   #[serde(default, skip_serializing_if = "LinkMode::is_auto")]
   pub link: LinkMode,

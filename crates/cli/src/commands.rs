@@ -231,7 +231,16 @@ fn out_quiet<T: serde::Serialize>(
   }
 }
 
-async fn dispatch(
+// 分发包含许多异步分支。让调用方只持有指针，避免在进程启动时复制大状态。
+fn dispatch(
+  c: &Client,
+  command: Command,
+  j: bool,
+) -> impl std::future::Future<Output = CliResult<()>> + '_ {
+  Box::pin(dispatch_command(c, command, j))
+}
+
+async fn dispatch_command(
   c: &Client,
   command: Command,
   j: bool,
@@ -547,6 +556,7 @@ async fn dispatch(
         auth: false,
         paths: vec![],
         caddy: None,
+        caddy_file: None,
         link: Default::default(),
         rate_limit: None,
         block_scanners: false,
@@ -572,9 +582,16 @@ async fn dispatch(
       )
       .await
     }
-    Command::Audit { actor, kind, limit } => {
-      crate::audit::audit(c, actor, kind, limit, j).await
+    Command::Refs { target } => {
+      crate::catalog::refs(c, &target, j).await
     }
+    Command::Tree(args) => crate::catalog::tree(c, args, j).await,
+    Command::Lint(args) => crate::lint_cmd::run(c, args, j).await,
+    Command::Search(args) => crate::catalog::search(c, args, j).await,
+    Command::Config { cmd } => {
+      crate::config_cmd::run(c, cmd, j).await
+    }
+    Command::Audit(args) => crate::audit::audit(c, args, j).await,
     Command::ShellLog { server, limit } => {
       shell_log(c, server, limit, j).await
     }
@@ -804,13 +821,16 @@ async fn dispatch(
     Command::Server(cmd) => server(c, cmd, j).await,
     Command::Top(args) => crate::top::run(c, args, j).await,
     Command::Report(args) => crate::report::run(c, args, j).await,
-    Command::Service(cmd) => service(c, cmd, j).await,
+    // 部署和同步的异步状态较大，隔离它们，避免撑大整个命令分发的栈。
+    Command::Service(cmd) => Box::pin(service(c, cmd, j)).await,
     Command::Gateway(cmd) => gateway(c, cmd, j).await,
     Command::Route(cmd) => route(c, cmd, j).await,
     Command::Account(cmd) => account(c, cmd, j).await,
     Command::Secret(cmd) => secret(c, cmd, j).await,
     Command::Backup(cmd) => backup(c, cmd, j).await,
-    Command::Task(cmd) => crate::task::task(c, cmd, j).await,
+    Command::Task(cmd) => {
+      Box::pin(crate::task::task(c, cmd, j)).await
+    }
     Command::Edge(cmd) => crate::edge::edge(c, cmd, j).await,
     Command::Bookmark(cmd) => {
       crate::bookmark::bookmark(c, cmd, j).await
@@ -1149,7 +1169,7 @@ async fn apply(
     });
     return Ok(());
   }
-  let mut run = wait_run(c, &resp.run_id, j).await?;
+  let mut run = wait_run(c, &resp.run_id, j, &[]).await?;
   if j {
     if brief {
       crate::plan_cmd::compact_run(&mut run);
@@ -1177,10 +1197,11 @@ async fn apply(
 
 /// 轮询直到执行结束。人看的模式下边执行边打印步骤和日志。
 /// Ctrl-C 只停止等待，不取消执行。
-async fn wait_run(
+pub(crate) async fn wait_run(
   c: &Client,
   run_id: &str,
   j: bool,
+  mask: &[String],
 ) -> CliResult<Run> {
   let mut printed: Vec<(usize, bool)> = Vec::new();
   let path = format!("/api/runs/{}", seg(run_id));
@@ -1198,7 +1219,7 @@ async fn wait_run(
       r = c.get(&path) => r,
       _ = tokio::signal::ctrl_c() => return Err(interrupted()),
     };
-    let run = match result {
+    let mut run = match result {
       Ok(run) => {
         retries = 0;
         run
@@ -1224,6 +1245,9 @@ async fn wait_run(
       }
       Err(error) => return Err(error),
     };
+    if !mask.is_empty() {
+      crate::env_sync::redact_run(&mut run, mask);
+    }
     if !j && !print::is_quiet() {
       printed.resize(run.steps.len(), (0, false));
       for (i, step) in run.steps.iter().enumerate() {
@@ -1324,7 +1348,7 @@ async fn run_cmd(c: &Client, cmd: RunCmd, j: bool) -> CliResult<()> {
       .await
     }
     RunCmd::Wait { run_id } => {
-      let run = wait_run(c, &run_id, j).await?;
+      let run = wait_run(c, &run_id, j, &[]).await?;
       out(j, &run, print::run_summary);
       match run.status {
         RunStatus::Succeeded => Ok(()),
@@ -2203,7 +2227,7 @@ async fn upgrade_agents(
     }
     return Ok((data, true));
   };
-  let run = wait_run(c, id, j).await?;
+  let run = wait_run(c, id, j, &[]).await?;
   if !j {
     print::run_summary(&run);
   }
@@ -3068,6 +3092,7 @@ async fn service(
       };
       show_logs(c, &path, &args, j).await
     }
+    ServiceCmd::Env(args) => crate::env_sync::run(c, args, j).await,
     ServiceCmd::Files { cmd: Some(cmd), .. } => {
       crate::files::run(c, cmd, j).await
     }
@@ -3807,8 +3832,12 @@ async fn service(
           ApiError::invalid(format!("读不了文件 {src}：{e}"))
             .with_hint("只支持文本文件；从标准输入读用 --file -")
         })?;
-        let next =
-          wharf_api_types::spec::FileSpec { path, content, raw };
+        let next = wharf_api_types::spec::FileSpec {
+          path,
+          content,
+          raw,
+          file: None,
+        };
         if let Some(f) =
           spec.files.iter_mut().find(|f| f.path == next.path)
         {
@@ -5181,6 +5210,7 @@ fn route_add_spec(
       auth: false,
       paths: vec![],
       caddy: None,
+      caddy_file: None,
       link: Default::default(),
       redirect: None,
       rate_limit: None,
@@ -5600,9 +5630,35 @@ async fn secret(
   j: bool,
 ) -> CliResult<()> {
   match cmd {
-    SecretCmd::List { detail } => {
-      let v: Vec<SecretView> = c.get("/api/secrets").await?;
+    SecretCmd::List { detail, prefix } => {
+      let path = prefix.map_or_else(
+        || "/api/secrets".into(),
+        |prefix| format!("/api/secrets?prefix={}", seg(&prefix)),
+      );
+      let v: Vec<SecretView> = c.get(&path).await?;
       out(j || detail, &v, |v| v.iter().for_each(print_secret));
+      Ok(())
+    }
+    SecretCmd::Refs { name } => {
+      crate::catalog::refs(c, &format!("secret/{name}"), j).await
+    }
+    SecretCmd::Import(args) => {
+      crate::secret_import::run(c, args, j).await
+    }
+    SecretCmd::Unused { include_system } => {
+      let v: Vec<SecretView> = c
+        .get(&format!(
+          "/api/secrets?unused=1&include_system={include_system}"
+        ))
+        .await?;
+      out(j, &v, |rows| {
+        for row in rows {
+          print_secret(row);
+          if !row.managed && row.system.is_none() {
+            println!("  wharf secret rm {}", row.name);
+          }
+        }
+      });
       Ok(())
     }
     SecretCmd::Rotate {
@@ -6220,7 +6276,7 @@ pub(crate) async fn finish_task(
     });
     return Ok(());
   }
-  let run = wait_run(c, run_id, j).await?;
+  let run = wait_run(c, run_id, j, &[]).await?;
   out(j, &run, print::run_summary);
   match run.status {
     RunStatus::Succeeded => Ok(()),
