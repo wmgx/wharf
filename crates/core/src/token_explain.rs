@@ -434,7 +434,7 @@ mod tests {
       };
       let result =
         explain(&row, Utc::now(), ExplainQuery::default()).unwrap();
-      assert_eq!(result.items.len(), 14);
+      assert_eq!(result.items.len(), 15);
       let item = |op: &str| {
         result.items.iter().find(|item| item.op == op).unwrap()
       };
@@ -457,6 +457,13 @@ mod tests {
           item("看任务完整触发地址").reason.as_deref().unwrap();
         assert_eq!(reveal.contains("任务归属"), scoped);
       }
+      let files = item("修改服务文件");
+      assert_eq!(files.method, "DELETE");
+      assert_eq!(files.perm, Some(Perm::Exec));
+      assert_eq!(
+        files.verdict,
+        if perms == "read,host" { Deny } else { Depends }
+      );
       let host = item("宿主机执行命令");
       assert_eq!(host.perm, Some(Perm::Host));
       assert_eq!(host.verdict, host_verdict);
@@ -476,7 +483,7 @@ mod tests {
     row.expires_at = Some(0);
     let result =
       explain(&row, Utc::now(), ExplainQuery::default()).unwrap();
-    assert_eq!(result.items.len(), 14);
+    assert_eq!(result.items.len(), 15);
     for item in result.items {
       assert_eq!(item.verdict, ExplainVerdict::Deny);
       assert_eq!(
