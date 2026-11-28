@@ -305,7 +305,6 @@ mod tests {
         let mut request = [0; 4096];
         if stream.read(&mut request).await.unwrap() > 0 {
           stream.write_all(response).await.unwrap();
-          break;
         }
       }
     }
@@ -323,7 +322,7 @@ mod tests {
     let result = run(&job, &Ctx::detached()).await.unwrap();
     assert!(!result.ok && !result.cert_pending, "{result:?}");
     assert_eq!(result.stage, "gateway_unreachable");
-    fixtures.await.unwrap();
+    fixtures.abort();
   }
 
   #[tokio::test]
