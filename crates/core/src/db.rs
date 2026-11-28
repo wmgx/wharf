@@ -390,6 +390,10 @@ ALTER TABLE task_runs ADD COLUMN service_instance_id TEXT;
 CREATE INDEX task_runs_service_started ON task_runs (service, started_at DESC);
 "#,
   crate::service_monitor::heartbeat::ROTATE_MIGRATION,
+  "ALTER TABLE cleanups ADD COLUMN created_at INTEGER;
+   UPDATE cleanups SET created_at = due_at - 604800000 WHERE created_at IS NULL;
+   ALTER TABLE cleanups ADD COLUMN blocked_reason TEXT;
+   ALTER TABLE cleanups ADD COLUMN next_retry_at INTEGER;",
 ];
 
 const PENDING_STEPS_MIGRATION: &str = r#"

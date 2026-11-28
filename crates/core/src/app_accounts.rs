@@ -397,6 +397,7 @@ mod tests {
       data_dir: Default::default(),
       downloads: Default::default(),
       edge_syncing: Default::default(),
+      cleanup_cache: Default::default(),
     });
     state
       .db

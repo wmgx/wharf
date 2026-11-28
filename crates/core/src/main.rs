@@ -33,6 +33,7 @@ mod core_backup;
 mod core_node;
 mod cron;
 mod data;
+mod data_cleanup;
 mod db;
 mod db_snapshot;
 mod disk;
@@ -264,6 +265,7 @@ async fn main() -> anyhow::Result<()> {
     data_dir: cli.data_dir.clone(),
     downloads: Default::default(),
     edge_syncing: Default::default(),
+    cleanup_cache: Default::default(),
   });
   gate::init(&state, cli.listen.ip().is_loopback())
     .await

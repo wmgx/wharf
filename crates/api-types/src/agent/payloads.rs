@@ -1147,3 +1147,131 @@ pub struct BindMountQuery {
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub exclude_projects: Vec<String>,
 }
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CleanupScanRequest {
+  /// 是否计算目录字节大小；低频后台提醒扫描可设 false 或加时间预算。
+  #[serde(default)]
+  pub compute_sizes: bool,
+  /// 额外需要测算大小的迁移旧机目录名（来自控制面 cleanups 表，避免重复全扫）。
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub migrate_services: Vec<String>,
+  /// 额外需要测算大小的换备份机旧仓库路径提示（仅限 BACKUP_ROOT / CORE_BACKUP_ROOT 内）。
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub retired_repos: Vec<String>,
+}
+
+#[derive(
+  Debug,
+  Clone,
+  Copy,
+  PartialEq,
+  Eq,
+  PartialOrd,
+  Ord,
+  Serialize,
+  Deserialize,
+  JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum CleanupKind {
+  MigrateOldData,
+  MigrateTargetBackup,
+  RestoreBackup,
+  BackupMoveRetired,
+  BackupMoveArchive,
+  OrphanServiceData,
+  OrphanTaskData,
+  OrphanBackupRepo,
+  OrphanContainer,
+  OrphanVolume,
+  OrphanNetwork,
+  OrphanImage,
+  OrphanCaddy,
+  OrphanFrpc,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentCleanupEntry {
+  pub kind: CleanupKind,
+  /// 归属服务名（若可从目录名/标签解析）。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub service: Option<String>,
+  /// 目标标识：绝对路径（目录/仓库）或容器 ID / 卷名 / 网络 ID / 镜像 ID / project 名。
+  pub target: String,
+  /// 人类可读展示名（如容器名、镜像 repo:tag、目录路径）。
+  pub display: String,
+  /// 是否控制面仓库/归档（`wharf-core`）。
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_core: bool,
+  /// 大小（字节）；网络或未统计时为 None。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub size_bytes: Option<u64>,
+  /// 是否因文件数/时间预算触顶而为估算值。
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub size_estimated: bool,
+  /// 产生时间（epoch ms，来自目录名时间戳 / 容器 Created / 镜像 Created / stat mtime）。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub created_at: Option<i64>,
+  /// 无 compose project 标签的外部悬空卷标记。
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub unlabeled: bool,
+  /// 实时检测到正在阻塞删除的容器名（如仍挂载该目录）。
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub blocked_by: Vec<String>,
+  /// 附加说明（如快照数、容器状态、额外目录 `projects/wharf-gw-x`）。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub detail: Option<String>,
+  /// 关联附加路径（如 Caddy 同时存在 `/srv/wharf-gw-x` 与 `projects/wharf-gw-x`）。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub extra_project: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CleanupScanResult {
+  #[serde(default)]
+  pub entries: Vec<AgentCleanupEntry>,
+  /// 供 `migrate_services` / `retired_repos` 查表回填大小与阻塞容器。
+  #[serde(default)]
+  pub path_stats: BTreeMap<String, PathCleanupStat>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub prune_reclaimable_bytes: Option<u64>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PathCleanupStat {
+  pub exists: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub size_bytes: Option<u64>,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub size_estimated: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub modified_at: Option<i64>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub blocked_by: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CleanupDeleteRequest {
+  pub kind: CleanupKind,
+  pub target: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub service: Option<String>,
+  #[serde(default)]
+  pub is_core: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub extra_project: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CleanupDeleteResult {
+  pub removed: bool,
+  #[serde(default)]
+  pub freed_bytes: u64,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub blocked_by: Vec<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub detail: Option<String>,
+}

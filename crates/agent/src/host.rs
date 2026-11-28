@@ -160,7 +160,10 @@ fn meminfo(s: &str, key: &str) -> u64 {
     .map_or(0, |kb| kb * 1024)
 }
 
-async fn docker_df(docker: &Docker, ctx: &Ctx) -> Vec<DockerUsage> {
+pub(crate) async fn docker_df(
+  docker: &Docker,
+  ctx: &Ctx,
+) -> Vec<DockerUsage> {
   #[derive(serde::Deserialize)]
   #[serde(rename_all = "PascalCase")]
   struct Row {
@@ -332,6 +335,7 @@ pub async fn disk_usage(
   let mut script = String::from(
     r#"cd /host
 set --
+echo "data .wharf-migrate $(du -sb /host/srv/.wharf-migrate 2>/dev/null | cut -f1)"
 for dir in /host/srv/.wharf-restore /host/srv/*/.wharf-restore-before-*; do
   [ -d "$dir" ] && [ ! -L "$dir" ] && [ ! -L "${dir%/*}" ] && set -- "$@" "$dir"
 done

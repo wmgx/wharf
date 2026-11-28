@@ -225,6 +225,16 @@ pub fn router(state: Arc<AppState>) -> Router {
         .delete(crate::external_status::rm),
     )
     .route("/api/data", get(data_overview))
+    .route(
+      "/api/data/cleanup",
+      get(crate::data_cleanup::overview)
+        .post(crate::data_cleanup::execute),
+    )
+    .route(
+      "/api/data/cleanup/policy",
+      get(crate::data_cleanup::policy)
+        .put(crate::data_cleanup::set_policy),
+    )
     .route("/api/network/probe", post(crate::network::probe))
     .route("/api/upgrade", post(crate::agent_upgrade::upgrade_core))
     .route(

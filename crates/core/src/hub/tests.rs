@@ -33,6 +33,7 @@ fn old_hello_has_no_host_shell_capability() {
     gateway_extra_files,
     backup_isolation,
     safe_delete,
+    data_cleanup,
     shared_volumes,
     safe_gateway,
     safe_adopt,
@@ -58,6 +59,7 @@ fn old_hello_has_no_host_shell_capability() {
   assert!(!gateway_extra_files);
   assert!(!backup_isolation);
   assert!(!safe_delete);
+  assert!(!data_cleanup);
   assert!(!shared_volumes);
   assert!(!safe_gateway);
   assert!(!safe_adopt);
@@ -109,6 +111,7 @@ fn old_core_ignores_new_hello_capability() {
     core_probe: true,
     backup_isolation: true,
     safe_delete: true,
+    data_cleanup: false,
     shared_volumes: true,
     safe_gateway: true,
     gateway_probe: false,
@@ -187,6 +190,17 @@ impl Hub {
   ) {
     self.mock_agent(server, false, handle);
     lock(&self.conns).get_mut(server).unwrap().safe_gateway = true;
+  }
+
+  pub(crate) fn mock_data_cleanup_agent(
+    &self,
+    server: &str,
+    handle: impl FnMut(AgentOp) -> Result<Value, ApiError>
+    + Send
+    + 'static,
+  ) {
+    self.mock_agent(server, false, handle);
+    lock(&self.conns).get_mut(server).unwrap().data_cleanup = true;
   }
 
   pub(crate) fn mock_safe_delete_agent(
@@ -303,6 +317,7 @@ impl Hub {
         gateway_extra_files,
         backup_isolation,
         safe_delete: false,
+        data_cleanup: false,
         shared_volumes: false,
         safe_gateway: false,
         gateway_probe: false,
@@ -448,6 +463,7 @@ async fn agent_upgrade_needs_no_bound_core_server_or_probe_support() {
     gateway_extra_files: false,
     backup_isolation: false,
     safe_delete: false,
+    data_cleanup: false,
     shared_volumes: false,
     safe_gateway: false,
     gateway_probe: false,
@@ -519,6 +535,7 @@ fn probe_connection(
     gateway_extra_files: false,
     backup_isolation: false,
     safe_delete: false,
+    data_cleanup: false,
     shared_volumes: false,
     safe_gateway: false,
     gateway_probe: false,

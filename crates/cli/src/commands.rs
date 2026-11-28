@@ -387,7 +387,10 @@ async fn dispatch(
       };
       service(c, cmd, j).await
     }
-    Command::Data => {
+    Command::Data {
+      cmd: Some(crate::DataCmd::Cleanup(args)),
+    } => crate::data_cleanup::run(c, args, j).await,
+    Command::Data { cmd: None } => {
       let v: DataView = c.get("/api/data").await?;
       out(j, &v, print::data);
       Ok(())

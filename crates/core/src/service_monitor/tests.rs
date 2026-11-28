@@ -19,6 +19,7 @@ pub(super) fn state() -> Arc<AppState> {
     data_dir: Default::default(),
     downloads: Default::default(),
     edge_syncing: Default::default(),
+    cleanup_cache: Default::default(),
   })
 }
 

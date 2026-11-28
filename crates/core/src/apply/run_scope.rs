@@ -341,6 +341,7 @@ mod tests {
       data_dir: Default::default(),
       downloads: Default::default(),
       edge_syncing: Default::default(),
+      cleanup_cache: Default::default(),
     };
     let mut auth = crate::host_access::tests::auth(
       [wharf_api_types::view::Perm::Apply],

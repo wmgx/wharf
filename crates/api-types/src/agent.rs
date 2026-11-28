@@ -155,6 +155,8 @@ pub enum AgentMsg {
     backup_isolation: bool,
     #[serde(default)]
     safe_delete: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    data_cleanup: bool,
     #[serde(default)]
     shared_volumes: bool,
     #[serde(default)]
@@ -482,6 +484,8 @@ pub enum AgentOp {
   ServiceStopForData {
     project: String,
   },
+  CleanupScan(CleanupScanRequest),
+  CleanupDelete(CleanupDeleteRequest),
   PruneRestore {
     older_than_days: u32,
   },

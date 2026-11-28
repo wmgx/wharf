@@ -17,6 +17,7 @@ mod adopt;
 mod agent_memory;
 mod backfill;
 mod build;
+mod cleanup;
 mod conn;
 mod container_probe;
 mod core_probe;

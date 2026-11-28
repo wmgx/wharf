@@ -158,6 +158,10 @@ wharf server host <服务器> --json        # 镜像、构建缓存、容器日�
 
 ### 迁移和备份
 
+`wharf data cleanup --json` 只列留底和孤儿资源。用 `--id <ID>`、`--expired` 或 `--all` 加 `--apply --json` 取得确认串和将要删除的明细，核对后追加 `--confirm <确认串>`。无标签悬空卷默认跳过，可由全权管理员按 ID 删除或在 `--all` 时加 `--include-unlabeled`。
+
+`wharf data cleanup policy` 查看策略。管理员可用 `--on`、`--off` 或 `--keep-days <天数>` 修改策略。默认保留 7 天，自动清理关闭。开启后只自动清理到期的迁移和恢复留底目录。
+
 ```bash
 wharf service move <服务> --to <服务器> --json             # 同步数据、新机器启动、网关改指，域名不变
 wharf backup enable <服务> --to <另一台服务器> --json   # 每天备份 /srv/<服务>/

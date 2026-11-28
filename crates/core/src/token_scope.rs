@@ -136,6 +136,8 @@ pub fn check_service_scope(
         | "doctor" | "report" | "export" | "plans" | "runs"
         | "secrets" | "tasks",
       ]
+      | ["", "api", "data", "cleanup"]
+      | ["", "api", "data", "cleanup", "policy"]
       | ["", "api", "logs", "services"]
       | ["", "api", "metrics"]
       | ["", "api", "routes", _, "cert" | "dns-check" | "failover"]
@@ -163,6 +165,7 @@ pub fn check_service_scope(
       | ["", "api", "routes", _, "failover"]
       | ["", "api", "routes", _, "sso", "test"]
       | ["", "api", "plan" | "apply"]
+      | ["", "api", "data", "cleanup"]
       | ["", "api", "runs", _, "cancel" | "retry"]
       | ["", "api", "convert", "docker-run"] => {
         *method == Method::POST

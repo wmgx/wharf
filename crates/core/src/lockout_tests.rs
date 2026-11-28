@@ -78,6 +78,7 @@ async fn lockout_notice_records_alert_history() {
     data_dir: Default::default(),
     downloads: Default::default(),
     edge_syncing: Default::default(),
+    cleanup_cache: Default::default(),
   };
   let mut table = LockoutTable::default();
   let now = Instant::now();

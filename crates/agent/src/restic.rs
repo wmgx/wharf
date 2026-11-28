@@ -1081,7 +1081,7 @@ fn restore_parents(
   Ok(parents)
 }
 
-fn restore_dir_stamp(
+pub(crate) fn restore_dir_stamp(
   name: &str,
 ) -> Option<(&str, chrono::NaiveDateTime)> {
   let (stem, nonce) = name.rsplit_once('-')?;
