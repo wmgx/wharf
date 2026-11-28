@@ -1490,7 +1490,8 @@ fn check_purge_mounts(
 
 #[test]
 fn down_purge_refuses_delete_when_other_container_mounts_srv() {
-  let mounts = parse_bind_mounts(r#""/reader" null "reader" [{"Type":"bind","Source":"/srv/photos/originals","Destination":"/photos","RW":false}]"#).unwrap();
+  let inspect = r#""/reader" "" "reader" [{"Type":"bind","Source":"/srv/photos/originals","Destination":"/photos","RW":false}]"#;
+  let mounts = parse_bind_mounts(inspect).unwrap();
   let users =
     containers_using_path(Path::new("/srv/photos"), &mounts);
   assert_eq!(users, ["reader"]);
