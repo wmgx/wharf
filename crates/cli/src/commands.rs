@@ -6368,33 +6368,23 @@ mod tests {
 
   #[test]
   fn exec_keeps_one_command_string() {
-    // libtest 工作线程的栈比 CLI 主线程小。
-    std::thread::Builder::new()
-      .stack_size(8 * 1024 * 1024)
-      .spawn(|| {
-        let cli = Cli::try_parse_from([
-          "wharf",
-          "exec",
-          "s1",
-          "--",
-          "printf '%s' hello",
-        ])
-        .unwrap();
-        let Command::Exec { command, .. } = cli.command else {
-          panic!("不是 exec");
-        };
-        assert_eq!(command.as_deref(), Some("printf '%s' hello"));
-        assert_eq!(command_summary("a\x1b[31m"), r"a\u{1b}[31m");
-        assert!(
-          Cli::try_parse_from([
-            "wharf", "exec", "s1", "--", "a", "b"
-          ])
-          .is_err()
-        );
-      })
-      .unwrap()
-      .join()
-      .unwrap();
+    let cli = Cli::try_parse_from([
+      "wharf",
+      "exec",
+      "s1",
+      "--",
+      "printf '%s' hello",
+    ])
+    .unwrap();
+    let Command::Exec { command, .. } = cli.command else {
+      panic!("不是 exec");
+    };
+    assert_eq!(command.as_deref(), Some("printf '%s' hello"));
+    assert_eq!(command_summary("a\x1b[31m"), r"a\u{1b}[31m");
+    assert!(
+      Cli::try_parse_from(["wharf", "exec", "s1", "--", "a", "b"])
+        .is_err()
+    );
   }
 }
 
