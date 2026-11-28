@@ -885,6 +885,7 @@ export interface DoctorCheck {
  */
 export interface DoctorReport {
   checked_at: string;
+  checks?: DoctorCheck[];
   config?: DoctorCheck[];
   routes: RouteDiagnosis[];
   servers: DoctorCheck[];
@@ -2046,6 +2047,7 @@ export interface PortRow {
   acked: boolean;
   addr: string;
   expected: boolean;
+  family?: string | null;
   name: string;
   owner: string;
   port: number;
@@ -2231,6 +2233,7 @@ export interface RouteDiagnosis {
    * 这个域名的注册到期时间（后台用 RDAP 查，查不到没有）。
    */
   domain_expires?: string | null;
+  edge_app?: string | null;
   hostname: string;
   url: string;
 }
@@ -2772,6 +2775,10 @@ export interface ServiceView {
    */
   note?: string | null;
   port_checks?: Record<string, boolean>;
+  /**
+   * 在线 agent 是否支持端口探测，能力未知时为空。
+   */
+  port_checks_supported?: boolean | null;
   risks?: string[];
   spec: ServiceSpec;
   /**

@@ -35,7 +35,7 @@ async fn udp(
   addr: SocketAddrV4,
   probe: &PortCheckSpec,
 ) -> io::Result<bool> {
-  if probe.validate(true).is_err() {
+  if probe.validate_stored(true).is_err() {
     return Ok(false);
   }
   let (send, expect, dns) = match probe {

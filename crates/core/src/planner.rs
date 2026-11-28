@@ -505,7 +505,7 @@ pub(crate) async fn make_plan_inner(
     &desired,
     &snap.secret_restrictions,
   )?;
-  desired.validate()?;
+  desired.validate_against(&current)?;
   validate_changed_templates(&current, &desired)?;
   let mut warnings =
     crate::edge::validate_owners(&current, &desired)?;
@@ -1549,11 +1549,6 @@ fn service_items(
       );
     }
 
-    let (_, hash) =
-      snapshot::service_resolved(desired, net, name, &render_values)?;
-    let template = snapshot::service_template(desired, net, name)?;
-    let after =
-      Some(json!({ "server": server, "compose": template }));
     let live = status
       .get(server)
       .and_then(|s| s.as_ref())
@@ -1593,6 +1588,21 @@ fn service_items(
           .any(|image| !svc.pins.contains_key(image)))
       .then(|| "按标签重新拉取未固定的镜像".into())
     });
+    let observed = if changed(writes, KIND_SERVICE, name) {
+      None
+    } else {
+      live.and_then(|p| p.hash.as_deref())
+    };
+    let hash = snapshot::service_hash(
+      desired,
+      net,
+      name,
+      &render_values,
+      observed,
+    )?;
+    let template = snapshot::service_template(desired, net, name)?;
+    let after =
+      Some(json!({ "server": server, "compose": template }));
     // 配置没变、只是要停下来：不重建，直接停。
     if moved.is_none()
       && svc.spec.stopped
@@ -3658,46 +3668,80 @@ fn plaintext_hop(
   net: &Net,
   route: &RouteSpec,
 ) -> Vec<String> {
-  let Some(service) = world.services.get(&route.service) else {
+  if route.redirect.is_some() {
     return vec![];
-  };
-  let server = &service.spec.server;
-  let Some(addr) =
-    net.private.get(server).filter(|a| !a.network.encrypted())
-  else {
-    return vec![];
-  };
-  let Some(port) =
-    world.route_port(route).filter(|_| route.upstream.is_none())
-  else {
-    return vec![];
-  };
-  world
-    .route_gateways(route)
-    .into_iter()
-    .filter_map(|name| {
-      let gateway = &world.gateways.get(name)?.spec;
-      let choice = crate::link::choose(
-        world,
-        net,
-        gateway,
-        &route.service,
-        port,
-        route.link,
-      )
-      .ok()?;
-      matches!(choice, crate::link::Choice::Direct(_)).then(|| {
-        format!(
-          "网关（{}）到服务（{server}）这一段走内网直连 {}，是明文",
-          gateway.server, addr.ip
-        )
-      })
-    })
-    .collect()
+  }
+  let primary = world
+    .route_port(route)
+    .filter(|_| route.upstream.is_none())
+    .map(|port| (route.service.as_str(), port, ""));
+  let targets =
+    primary
+      .into_iter()
+      .chain(route.paths.iter().filter_map(|p| {
+        let service = p.service.as_deref()?;
+        let port = world.service_port(service, p.port.as_deref())?;
+        Some((service, port, p.path.as_str()))
+      }));
+  let mut warnings = Vec::new();
+  for gateway in world.route_gateways(route) {
+    let Some(gw) = world.gateways.get(gateway) else {
+      continue;
+    };
+    for (service, port, path) in targets.clone() {
+      if let Ok(crate::link::Choice::Direct(ip)) = crate::link::choose(
+        world, net, &gw.spec, service, port, route.link,
+      ) {
+        let server = &world.services[service].spec.server;
+        if !net.private[server].network.encrypted() {
+          warnings.push(format!("网关 {gateway}（{}）到服务 {service}（{server}）{path} 走内网直连 {ip}，是明文", gw.spec.server));
+        }
+      }
+    }
+  }
+  warnings
 }
 
 #[cfg(test)]
 mod tests {
+  #[test]
+  fn plaintext_hop_respects_tunnel_and_checks_paths() {
+    use wharf_api_types::spec::{
+      LinkMode, PrivateAddr, PrivateNetwork,
+    };
+    let mut world = world();
+    let mut backend = world.services["app"].clone();
+    backend.spec.server = "s2".into();
+    world.services.insert("api".into(), backend);
+    world.gateways.insert(
+      "entry".into(),
+      crate::world::GatewayRow {
+        spec: serde_json::from_value(
+          json!({"kind":"caddy","server":"s1"}),
+        )
+        .unwrap(),
+        version: 1,
+      },
+    );
+    let mut net = Net::default();
+    net.private.insert(
+      "s2".into(),
+      PrivateAddr {
+        ip: "203.0.113.2".into(),
+        network: PrivateNetwork::Lan,
+      },
+    );
+    let mut route = serde_json::from_value::<RouteSpec>(json!({
+      "hostname":"app.example.test", "service":"app", "gateway":"entry",
+      "paths":[{"path":"/api/*","service":"api"}], "link":"tunnel"
+    })).unwrap();
+    assert!(plaintext_hop(&world, &net, &route).is_empty());
+    route.link = LinkMode::Auto;
+    let warnings = plaintext_hop(&world, &net, &route);
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains("/api/*"));
+  }
+
   #[tokio::test]
   async fn rollback_warning_skips_offline_server_and_new_gateway() {
     use wharf_api_types::spec::Change;
@@ -5515,7 +5559,11 @@ mod tests {
         .iter()
         .any(|(_, message)| message.contains("photos:originals"))
     };
-    assert!(has_warning(crate::lint::doctor_warnings(&snap)));
+    assert!(has_warning(crate::lint::scoped_warnings(
+      &snap,
+      &BTreeSet::from(["app".into()]),
+      &BTreeSet::new(),
+    )));
     let step = StepPlan {
       items: vec![],
       title: String::new(),

@@ -186,6 +186,19 @@ async fn ensure_token(
     .await
 }
 
+pub(crate) fn api_proxy(
+  snap: &Snapshot,
+) -> Option<(&str, reqwest::Proxy)> {
+  let exit = snap.api_via.as_deref()?.trim();
+  let route = route(exit, snap).ok()?;
+  let (ip, _) = route.exit.rsplit_once(':')?;
+  let address = crate::render::host_port(ip, SERVE_PORT);
+  let proxy = reqwest::Proxy::all(format!("http://{address}"))
+    .ok()?
+    .basic_auth("wharf", &route.token);
+  Some((exit, proxy))
+}
+
 /// 控制面加载快照后调用：按 [API_VIA] 设置厂商 API 的分流。出口配置不全时直连。
 pub fn apply_api_route(via: Option<&str>, snap: &Snapshot) {
   let r = via

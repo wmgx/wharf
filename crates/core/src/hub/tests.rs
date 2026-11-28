@@ -131,6 +131,17 @@ impl Hub {
     );
   }
 
+  pub(crate) fn enable_mock_container_diagnosis(&self, server: &str) {
+    lock(&self.conns)
+      .get_mut(server)
+      .unwrap()
+      .container_diagnosis = true;
+  }
+
+  pub(crate) fn enable_mock_host_shell(&self, server: &str) {
+    lock(&self.conns).get_mut(server).unwrap().host_shell = true;
+  }
+
   pub(crate) fn mock_safe_backup_agent(&self, server: &str) {
     lock(&self.conns).get_mut(server).unwrap().safe_backup = true;
   }

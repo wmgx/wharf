@@ -1019,8 +1019,14 @@ async fn list_services(
           .is_none_or(|allowed| allowed.contains(*n))
       })
       .filter_map(|n| {
-        let mut view =
-          views::service_view(&snap, &net, n, Some(&live), &history)?;
+        let mut view = views::service_view(
+          &s.hub,
+          &snap,
+          &net,
+          n,
+          Some(&live),
+          &history,
+        )?;
         if let Some(allowed) = &auth.services {
           crate::scope_filter::filter_service_links(
             allowed, &mut view,
@@ -1091,9 +1097,15 @@ async fn show_service(
   let net = snap.net(&snap.world);
   let history = crate::data::history(&s.db).await?;
   let live = views::cached_live(&s, &snap.world).await;
-  let mut view =
-    views::service_view(&snap, &net, &name, Some(&live), &history)
-      .ok_or_else(|| service_not_found(&name))?;
+  let mut view = views::service_view(
+    &s.hub,
+    &snap,
+    &net,
+    &name,
+    Some(&live),
+    &history,
+  )
+  .ok_or_else(|| service_not_found(&name))?;
   if let Some(allowed) = &auth.services {
     crate::scope_filter::filter_service_links(allowed, &mut view);
   }

@@ -4,7 +4,7 @@ use std::{collections::BTreeSet, net::Ipv4Addr};
 
 use ipnet::Ipv4Net;
 use wharf_api_types::{
-  spec::{PrivateAddr, PrivateNetwork},
+  spec::PrivateNetwork,
   view::{Issue, IssueLevel, IssueSubject},
 };
 
@@ -15,21 +15,12 @@ pub const FIX: &str = r#"在 /etc/docker/daemon.json 设置不重叠的 default-
 pub fn conflicts(snap: &Snapshot) -> Vec<(&str, String)> {
   let mut has_tailscale = false;
   let mut peers = BTreeSet::new();
-  for (name, server) in &snap.world.servers {
-    let report = snap.agent(name).and_then(|a| a.report.as_ref());
-    let private = server
-      .settings
-      .private_addr
-      .iter()
-      .chain(report.and_then(|r| r.private_addr.as_ref()));
-    for PrivateAddr { ip, network } in private {
-      has_tailscale |= *network == PrivateNetwork::Tailscale;
-      if let Ok(ip) = ip.parse::<Ipv4Addr>() {
-        peers.insert((name.as_str(), ip));
-      }
+  let net = snap.net(&snap.world);
+  for (name, addr) in &net.private {
+    has_tailscale |= addr.network == PrivateNetwork::Tailscale;
+    if let Ok(ip) = addr.ip.parse::<Ipv4Addr>() {
+      peers.insert((name.as_str(), ip));
     }
-    // 只比 Wharf 跨机连接实际用的地址。对方的局域网地址（例如云厂商 VPC）别的机器连不到，
-    // 和它重叠不影响；同一个局域网的情况已经由“本机网段”覆盖。
   }
 
   let tailscale: Ipv4Net = "100.64.0.0/10".parse().unwrap();
@@ -103,6 +94,7 @@ pub fn issues(snap: &Snapshot) -> impl Iterator<Item = Issue> {
 mod tests {
   use super::*;
   use wharf_api_types::agent::{AgentReport, DockerSubnet};
+  use wharf_api_types::spec::PrivateAddr;
 
   #[test]
   fn finds_local_and_peer_subnet_conflicts() {
@@ -163,4 +155,60 @@ mod tests {
     assert!(found[0].1.contains("peer 的内网地址 192.168.31.250"));
     assert!(!found[0].1.contains("192.168.20.5"));
   }
+}
+
+#[test]
+fn public_mode_ignores_reported_tailnet() {
+  use wharf_api_types::{
+    agent::{AgentReport, DockerSubnet},
+    spec::{NetworkMode, PrivateAddr},
+  };
+  let mut snap = Snapshot::default();
+  for name in ["s1", "s2"] {
+    snap.world.servers.insert(
+      name.into(),
+      crate::world::ServerRow {
+        settings: Default::default(),
+        version: 1,
+      },
+    );
+  }
+  snap
+    .world
+    .servers
+    .get_mut("s1")
+    .unwrap()
+    .settings
+    .network_mode = Some(NetworkMode::Public);
+  for (name, report) in [
+    (
+      "s1",
+      AgentReport {
+        private_addr: Some(PrivateAddr {
+          ip: "100.64.0.2".into(),
+          network: PrivateNetwork::Tailscale,
+        }),
+        ..Default::default()
+      },
+    ),
+    (
+      "s2",
+      AgentReport {
+        docker_subnets: vec![DockerSubnet {
+          name: "fixture".into(),
+          subnet: "100.64.1.0/24".into(),
+        }],
+        ..Default::default()
+      },
+    ),
+  ] {
+    snap.agents.push(crate::db::AgentRow {
+      server: name.into(),
+      report: Some(report),
+      public_key: None,
+      last_seen: None,
+    });
+  }
+  assert!(crate::tailnet_probe::address(&snap, "s1").is_none());
+  assert!(conflicts(&snap).is_empty());
 }

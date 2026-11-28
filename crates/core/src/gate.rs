@@ -99,6 +99,21 @@ async fn key(db: &Db) -> Result<SigningKey, ApiError> {
   db.call(|c| Ok(SigningKey::from_bytes(&seed(c, "gate.key")?)))
     .await
 }
+pub(crate) async fn probe_cookie(
+  db: &Db,
+  host: &str,
+) -> Option<axum::http::HeaderValue> {
+  let seed = db.call(|c| db::setting(c, "gate.key")).await.ok()??;
+  let seed = hex::decode(seed).ok()?.try_into().ok()?;
+  let key = SigningKey::from_bytes(&seed);
+  let token = credentials::probe_token(&key, host, now_ms() / 1000);
+  let mut cookie =
+    axum::http::HeaderValue::from_str(&format!("wharf_gate={token}"))
+      .ok()?;
+  cookie.set_sensitive(true);
+  Some(cookie)
+}
+
 async fn rt_key(db: &Db) -> Result<[u8; 32], ApiError> {
   db.call(|c| seed(c, RT_SEED)).await
 }

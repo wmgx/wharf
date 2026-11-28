@@ -690,7 +690,7 @@ fn apply_writes(
     &desired,
     &crate::secret_restrictions::load(tx)?,
   )?;
-  desired.validate()?;
+  desired.validate_against(&current)?;
   crate::edge::validate_owners(&current, &desired)?;
   crate::secret_policy::validate_accounts(
     &desired,

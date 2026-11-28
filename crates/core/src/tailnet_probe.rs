@@ -45,16 +45,20 @@ pub fn address<'a>(
   snap: &'a Snapshot,
   name: &str,
 ) -> Option<&'a str> {
-  let configured =
-    snap.world.servers.get(name)?.settings.private_addr.as_ref();
+  let settings = &snap.world.servers.get(name)?.settings;
+  if settings.network_mode
+    == Some(wharf_api_types::spec::NetworkMode::Public)
+  {
+    return None;
+  }
+  let configured = settings.private_addr.as_ref();
   let reported = snap
     .agent(name)
     .and_then(|a| a.report.as_ref())
     .and_then(|r| r.private_addr.as_ref());
-  reported
-    .into_iter()
-    .chain(configured)
-    .find(|a| a.network == PrivateNetwork::Tailscale)
+  configured
+    .or(reported)
+    .filter(|a| a.network == PrivateNetwork::Tailscale)
     .map(|a| a.ip.as_str())
 }
 

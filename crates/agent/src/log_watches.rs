@@ -137,7 +137,7 @@ async fn follow(
     watches
       .into_iter()
       .filter_map(|watch| {
-        let regex = watch.spec.compile().ok()?;
+        let regex = watch.spec.compile_stored().ok()?;
         Some(Matcher { watch, regex })
       })
       .collect(),

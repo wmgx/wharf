@@ -7,7 +7,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import type { HostInfo, ServerView, Status } from "@/types";
 import { ResourceNote } from "../service/note";
-import { size, type Traffic } from "./format";
+import { parseUpstream, size, type Traffic } from "./format";
 
 export function Overview({ server, status, info, traffic, loading }: { server: ServerView; status: Status; info: HostInfo | null; traffic: Traffic | null; loading: boolean }) {
   const name = server.name;
@@ -27,7 +27,14 @@ export function Overview({ server, status, info, traffic, loading }: { server: S
   const services = status.services.filter((s) => s.spec.server === name);
   const gateways = status.gateways.filter((g) => g.spec.server === name);
   const ips = [server.public_ip, server.private_addr?.ip].filter(Boolean);
-  const direct = status.routes.filter((r) => !r.spec.service && ips.some((ip) => r.spec.upstream?.split(":")[0] === ip));
+  const direct = status.routes.flatMap((r) => {
+    if (r.spec.service || r.spec.redirect) return [];
+    const upstream = parseUpstream(r.upstream || r.spec.upstream);
+    if (!upstream) return [];
+    const loopback = ["127.0.0.1", "localhost", "::1"].includes(upstream.host);
+    return ips.includes(upstream.host) || (loopback && gateways.some((g) => g.name === r.gateway))
+      ? [{ route: r, port: upstream.port }] : [];
+  });
   const used = traffic ? traffic.rx + traffic.tx : 0;
   return <>
     <ObjectIssues kind="server" name={server.name} />
@@ -106,7 +113,7 @@ export function Overview({ server, status, info, traffic, loading }: { server: S
             入口 {g.name}
           </Link>
         ))}
-        {direct.map((r) => (
+        {direct.map(({ route: r, port }) => (
           <a
             key={r.id}
             href={r.url}
@@ -119,8 +126,8 @@ export function Overview({ server, status, info, traffic, loading }: { server: S
               {r.spec.hostname}
             </span>
             <span className="text-xs text-muted-foreground">
-              → :{r.spec.upstream?.split(":")[1]}
-              {r.spec.upstream?.endsWith(":7700")
+              → :{port}
+              {(r.core || port === "7700")
                 ? " · Wharf 控制面"
                 : ""}
             </span>

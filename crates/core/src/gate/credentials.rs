@@ -65,6 +65,26 @@ fn sign_ttl(
     URL_SAFE_NO_PAD.encode(key.sign(raw.as_bytes()).to_bytes())
   )
 }
+pub(super) fn probe_token(
+  key: &SigningKey,
+  host: &str,
+  now: i64,
+) -> String {
+  sign_ttl(key, "_wharf_probe", host, now, 30)
+}
+
+#[test]
+fn probe_cookie_is_audience_bound_and_short_lived() {
+  let key = SigningKey::from_bytes(&[3; 32]);
+  let token = probe_token(&key, "app.example.test", 100);
+  assert_eq!(
+    verify(&key, &token, "app.example.test", 129).as_deref(),
+    Some("_wharf_probe")
+  );
+  assert!(verify(&key, &token, "other.example.test", 129).is_none());
+  assert!(verify(&key, &token, "app.example.test", 130).is_none());
+}
+
 pub(super) fn rt_sign(
   key: &[u8],
   hash: &str,

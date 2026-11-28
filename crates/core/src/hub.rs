@@ -307,9 +307,17 @@ impl Hub {
   }
 
   pub fn supports_service_checks(&self, server: &str) -> bool {
+    self.service_checks_support(server) == Some(true)
+  }
+
+  pub(crate) fn service_checks_support(
+    &self,
+    server: &str,
+  ) -> Option<bool> {
     lock(&self.conns)
       .get(server)
-      .is_some_and(|c| !c.upgrade_only && c.service_checks)
+      .filter(|c| !c.closed.is_cancelled() && !c.upgrade_only)
+      .map(|c| c.service_checks)
   }
 
   pub fn supports_container_diagnosis(&self, server: &str) -> bool {

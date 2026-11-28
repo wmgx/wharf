@@ -57,3 +57,10 @@ export function parseMirrors(text: string): Record<string, string[]> {
   }
   return out;
 }
+
+export function parseUpstream(raw?: string | null) {
+  const address = raw?.replace(/^[a-z][a-z0-9+.-]*:\/\//i, "").split(/[/?#]/, 1)[0];
+  const match = address?.match(/^(\[[^\]]+\]|[^:]+):(\d+)$/);
+  if (!match) return undefined;
+  return { host: match[1].replace(/^\[|\]$/g, ""), port: match[2] };
+}

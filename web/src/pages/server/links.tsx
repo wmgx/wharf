@@ -49,7 +49,7 @@ export function ServerLinks({ server }: { server: string }) {
         <span className="font-mono text-xs">
           {r.spec.hostname}
         </span>
-        <span className="text-xs text-muted-foreground">→ {r.spec.service ?? r.upstream ?? r.spec.upstream}
+        <span className="text-xs text-muted-foreground">→ {r.spec.service || (r.spec.redirect ? "跳转 " + r.spec.redirect : r.upstream || r.spec.upstream || "-")}
         </span>
         {r.spec.backup_gateway && gateways.includes(r.spec.backup_gateway) && <Badge variant="outline">备用</Badge>}
       </Row>)}
