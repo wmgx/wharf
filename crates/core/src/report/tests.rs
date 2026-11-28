@@ -2,6 +2,7 @@ use serde_json::json;
 
 use super::*;
 use crate::db::{self, Db};
+use crate::world::World;
 
 fn seed_world(c: &Connection) -> World {
   db::apply_write(
@@ -80,7 +81,19 @@ async fn linear_growth_matches_hand_calculation_and_picks_biggest_change()
           insert_point(c, "req.qps", "web", at, 10.0 + 60.0 * frac);
         }
       }
-      compute_at(c, &world, now, 7, None, None, MAX_SCAN_POINTS, None)
+      compute_at(
+        c,
+        &snapshot::Snapshot {
+          world,
+          ..Default::default()
+        },
+        now,
+        7,
+        None,
+        None,
+        MAX_SCAN_POINTS,
+        None,
+      )
     })
     .await
     .unwrap();
@@ -128,7 +141,19 @@ async fn three_days_data_has_no_previous_comparison_and_valid_coverage()
         insert_point(c, "host.cpu", "s1", at, 20.0);
         insert_point(c, "svc.cpu", "web", at, 15.0);
       }
-      compute_at(c, &world, now, 7, None, None, MAX_SCAN_POINTS, None)
+      compute_at(
+        c,
+        &snapshot::Snapshot {
+          world,
+          ..Default::default()
+        },
+        now,
+        7,
+        None,
+        None,
+        MAX_SCAN_POINTS,
+        None,
+      )
     })
     .await
     .unwrap();
@@ -161,7 +186,19 @@ async fn scan_limit_returns_error_with_hint() {
           20.0,
         );
       }
-      compute_at(c, &world, now, 7, None, None, 5, None)
+      compute_at(
+        c,
+        &snapshot::Snapshot {
+          world,
+          ..Default::default()
+        },
+        now,
+        7,
+        None,
+        None,
+        5,
+        None,
+      )
     })
     .await
     .unwrap_err();
@@ -222,7 +259,7 @@ async fn partial_previous_ten_minutes_disables_comparison() {
         )
         .unwrap();
       }
-      compute_at(c, &world, now, 7, None, None, MAX_SCAN_POINTS, None)
+      compute_at(c, &snapshot::Snapshot { world, ..Default::default() }, now, 7, None, None, MAX_SCAN_POINTS, None)
     })
     .await
     .unwrap();

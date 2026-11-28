@@ -628,7 +628,10 @@ pub async fn usage(
     .world
     .services
     .iter()
-    .filter(|(_, r)| r.spec.server == q.server)
+    .filter(|(n, _)| {
+      crate::snapshot::service_runtime_server(&snap, n)
+        == Some(q.server.as_str())
+    })
     .map(|(n, _)| (n.clone(), n.clone(), "service"))
     .collect();
   subjects.extend(

@@ -132,7 +132,13 @@ fn metrics_and_alerts_drop_foreign_projects_and_hosts() {
     m.hosts.insert(h.into(), HostTraffic::default());
   }
   m.oom = Some(vec!["web".into(), "db".into()]);
-  filter_owned_metrics("s1", &mut m, &world, &BTreeMap::new());
+  filter_owned_metrics(
+    "s1",
+    &mut m,
+    &world,
+    &BTreeMap::from([("web".into(), "s1".into())]),
+    &PendingState::default(),
+  );
   assert_eq!(
     m.projects.into_keys().collect::<Vec<_>>(),
     ["web", "wharf-gw-gw1"]
@@ -143,11 +149,11 @@ fn metrics_and_alerts_drop_foreign_projects_and_hosts() {
     ["a.example.test"]
   );
   assert_eq!(
-    route_owned_by_server(&world, "s1", "b.example.test"),
+    route_single_service(&world, "s1", "b.example.test"),
     None
   );
   assert_eq!(
-    route_owned_by_server(&world, "s1", "a.example.test").as_deref(),
+    route_single_service(&world, "s1", "a.example.test").as_deref(),
     Some("web")
   );
 }
@@ -168,4 +174,57 @@ fn report_rate_gate_throttles_flood_but_allows_upgrade_first_report()
   assert_eq!(check(31, 2, false), DropAll);
   assert_eq!(check(33, 2, false), AcceptAll);
   assert_eq!(check(35, 3, true), AcceptNoMetrics);
+}
+
+#[test]
+fn metrics_owner_excludes_unmanaged_and_migrating_dup() {
+  let mut pending = PendingState::default();
+  let deployed = BTreeMap::new();
+  assert_eq!(metric_owner_server("web", &deployed, &pending), None);
+  pending.migrations.insert(
+    "web".into(),
+    crate::pending::Migration {
+      phase: MigratePhase::Synced,
+      payload: serde_json::from_value(
+        json!({"service":"web","from":"s1","to":"s2"}),
+      )
+      .unwrap(),
+    },
+  );
+  assert_eq!(
+    metric_owner_server("web", &deployed, &pending),
+    Some("s1")
+  );
+  pending.migrations.get_mut("web").unwrap().phase =
+    MigratePhase::UpDone;
+  assert_eq!(
+    metric_owner_server("web", &deployed, &pending),
+    Some("s2")
+  );
+}
+
+#[test]
+fn multi_backend_paths_do_not_pollute_primary_service() {
+  let row = |kind: &str, name: &str, spec| ResourceRow {
+    kind: kind.into(),
+    name: name.into(),
+    spec,
+    meta: json!({}),
+    version: 1,
+  };
+  let mut world = World::from_rows(vec![
+    row("gateway", "gw", json!({"server":"s1","kind":"caddy"})),
+    row("route", "a.example.test", json!({"hostname":"a.example.test","gateway":"gw","service":"web","paths":[{"path":"/api/*","service":"api"}]})),
+  ]).unwrap();
+  assert!(route_on_caddy_server(&world, "s1", "a.example.test"));
+  assert_eq!(
+    route_single_service(&world, "s1", "a.example.test"),
+    None
+  );
+  world.routes.get_mut("a.example.test").unwrap().spec.paths[0]
+    .service = Some("web".into());
+  assert_eq!(
+    route_single_service(&world, "s1", "a.example.test").as_deref(),
+    Some("web")
+  );
 }

@@ -29,7 +29,6 @@ use crate::{
   rules::resources::service_limit,
   snapshot,
   state::AppState,
-  world::World,
 };
 
 #[path = "report/summary.rs"]
@@ -86,13 +85,12 @@ pub async fn show(
   let server_filter = q.server.clone();
   let service_filter = q.service.clone();
   let now = now_ms();
-  let world = snap.world;
   let view = s
     .db
     .call(move |c| {
       compute_at(
         c,
-        &world,
+        &snap,
         now,
         days,
         server_filter.as_deref(),
@@ -480,7 +478,7 @@ fn alert_matches_filter(
 #[allow(clippy::too_many_arguments)]
 fn compute_at(
   c: &Connection,
-  world: &World,
+  snap: &snapshot::Snapshot,
   now: i64,
   days: u32,
   server_filter: Option<&str>,
@@ -488,18 +486,22 @@ fn compute_at(
   max_points: usize,
   allowed_services: Option<&BTreeSet<String>>,
 ) -> Result<ReportView, ApiError> {
+  let world = &snap.world;
+  let runtime = |name: &str| {
+    snapshot::service_runtime_server(snap, name).unwrap_or_default()
+  };
   if let Some(srv) = server_filter
     && !world.servers.contains_key(srv)
   {
     return Err(crate::world::server_not_found(srv));
   }
   if let Some(svc) = service_filter {
-    let row = world.services.get(svc).ok_or_else(|| {
+    world.services.get(svc).ok_or_else(|| {
       ApiError::not_found(format!("没有服务 {svc}"))
         .with_hint("用 wharf service list 查看服务名")
     })?;
     if let Some(srv) = server_filter
-      && row.spec.server != srv
+      && runtime(svc) != srv
     {
       return Err(ApiError::invalid(format!(
         "服务 {svc} 不在服务器 {srv} 上"
@@ -518,18 +520,18 @@ fn compute_at(
       let row = &world.services[svc];
       vec![(
         svc.to_string(),
-        row.spec.server.clone(),
+        runtime(svc).to_string(),
         service_limit(&row.spec),
       )]
     } else {
       world
         .services
         .iter()
-        .filter(|(_, r)| {
-          server_filter.is_none_or(|srv| r.spec.server == srv)
+        .filter(|(name, _)| {
+          server_filter.is_none_or(|srv| runtime(name) == srv)
         })
         .map(|(n, r)| {
-          (n.clone(), r.spec.server.clone(), service_limit(&r.spec))
+          (n.clone(), runtime(n).to_string(), service_limit(&r.spec))
         })
         .collect()
     };

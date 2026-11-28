@@ -20,9 +20,11 @@ pub async fn record_at(
   };
   for (name, row) in &snap.world.services {
     if row.spec.stopped
-      || (!snap.deployed.contains_key(name)
-        && !snap.pending.migrations.contains_key(name))
-      || snapshot::service_runtime_server(&snap, name) != Some(server)
+      || (crate::report_guard::metric_owner_server(
+        name,
+        &snap.deployed,
+        &snap.pending,
+      ) != Some(server))
     {
       continue;
     }

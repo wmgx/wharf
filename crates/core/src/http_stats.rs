@@ -83,11 +83,7 @@ pub async fn record_at(
     return;
   };
   let mut sums = by_service(&hosts, |h| {
-    crate::report_guard::route_owned_by_server(
-      &snap.world,
-      &server,
-      h,
-    )
+    crate::report_guard::route_single_service(&snap.world, &server, h)
   });
   let mut points: Vec<(String, String, f64)> = Vec::new();
   for (svc, s) in &sums {

@@ -79,16 +79,12 @@ pub fn service_runtime_server<'a>(
   service: &str,
 ) -> Option<&'a str> {
   let row = snap.world.services.get(service)?;
-  if let Some(m) = snap.pending.migrations.get(service) {
-    return Some(
-      if m.phase == crate::pending::MigratePhase::UpDone {
-        &m.payload.to
-      } else {
-        &m.payload.from
-      },
-    );
-  }
-  Some(snap.deployed.get(service).unwrap_or(&row.spec.server))
+  crate::report_guard::metric_owner_server(
+    service,
+    &snap.deployed,
+    &snap.pending,
+  )
+  .or(Some(row.spec.server.as_str()))
 }
 
 impl Snapshot {
