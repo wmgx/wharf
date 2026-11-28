@@ -340,6 +340,7 @@ mod tests {
     };
     let view = |name| {
       crate::views::service_view(
+        &crate::hub::Hub::default(),
         &snap,
         &Net::default(),
         name,
