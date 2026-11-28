@@ -3031,6 +3031,10 @@ export interface ServiceView {
    */
   data?: DataMount[];
   has_sealed_note?: boolean;
+  /**
+   * 后台版本检查发现新镜像、commit 或版本标签。
+   */
+  has_update?: boolean;
   heartbeat?: HeartbeatView | null;
   /**
    * 端口名到宿主机端口。

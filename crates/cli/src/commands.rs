@@ -201,13 +201,34 @@ pub(crate) fn out<T: serde::Serialize>(
 ) {
   if j {
     print::json(value);
+  } else if print::is_quiet() {
+    print::quiet_output(value);
   } else {
     human(value);
   }
 }
 
 pub(crate) fn pretty<T: serde::Serialize>(value: &T) {
-  print::json(value);
+  if print::is_quiet() {
+    print::quiet_output(value);
+  } else {
+    print::json(value);
+  }
+}
+
+fn out_quiet<T: serde::Serialize>(
+  j: bool,
+  value: &T,
+  keys: impl FnOnce(&T) -> Vec<String>,
+  human: impl FnOnce(&T),
+) {
+  if print::is_quiet() {
+    for key in keys(value) {
+      println!("{key}");
+    }
+  } else {
+    out(j, value, human);
+  }
 }
 
 async fn dispatch(
@@ -1064,7 +1085,7 @@ async fn plan_output(
     .filter(|a| !flags.confirm.contains(a))
     .collect();
   if !missing.is_empty() {
-    if !j {
+    if !j && !print::is_quiet() {
       print::plan(&plan);
     }
     let mut flags: String =
@@ -1095,7 +1116,7 @@ async fn plan_output(
     }
     return Err(err.into());
   }
-  if !j {
+  if !j && !print::is_quiet() {
     print::plan_with(&plan, false);
   }
   let req = ApplyRequest {
@@ -1140,6 +1161,8 @@ async fn apply(
       }
       None => print::json(&run),
     }
+  } else if print::is_quiet() {
+    println!("{}", run.run_id);
   } else {
     print::run_summary(&run);
   }
@@ -1160,7 +1183,7 @@ async fn wait_run(
   let path = format!("/api/runs/{}", seg(run_id));
   let mut retries = 0;
   let interrupted = || {
-    if !j {
+    if !j && !print::is_quiet() {
       eprintln!(
         "已停止等待，执行仍在继续。取消：wharf run cancel {run_id}"
       );
@@ -1198,7 +1221,7 @@ async fn wait_run(
       }
       Err(error) => return Err(error),
     };
-    if !j {
+    if !j && !print::is_quiet() {
       printed.resize(run.steps.len(), (0, false));
       for (i, step) in run.steps.iter().enumerate() {
         let (lines, finished) = &mut printed[i];
@@ -1244,11 +1267,18 @@ async fn run_cmd(c: &Client, cmd: RunCmd, j: bool) -> CliResult<()> {
         url.push_str(&format!("&status={status}"));
       }
       let runs: Vec<Run> = c.get(&url).await?;
-      out(j, &runs, |runs| {
-        for r in runs {
-          print::run_line(r);
-        }
-      });
+      out_quiet(
+        j,
+        &runs,
+        |runs| {
+          runs.iter().map(|r| r.run_id.clone()).collect::<Vec<_>>()
+        },
+        |runs| {
+          for r in runs {
+            print::run_line(r);
+          }
+        },
+      );
       Ok(())
     }
     RunCmd::Show { run_id } => {
@@ -1265,6 +1295,7 @@ async fn run_cmd(c: &Client, cmd: RunCmd, j: bool) -> CliResult<()> {
       grep,
       errors,
       max_line,
+      search,
     } => {
       let mut path =
         format!("/api/runs/{}/logs?all={all}", seg(&run_id));
@@ -1280,6 +1311,10 @@ async fn run_cmd(c: &Client, cmd: RunCmd, j: bool) -> CliResult<()> {
           grep,
           errors,
           max_line,
+          filters: Box::new(crate::log_options::LogOptions {
+            search: *search,
+            ..Default::default()
+          }),
         },
         j,
       )
@@ -1534,8 +1569,8 @@ async fn server(
       out(j, &view, pretty);
       Ok(())
     }
-    ServerCmd::List => {
-      let mut v: Vec<ServerView> = c.get("/api/servers").await?;
+    ServerCmd::List(filters) => {
+      let mut v: Vec<ServerView> = c.get(&filters.path()).await?;
       for server in &mut v {
         wharf_api_types::filter_note(
           &mut server.note,
@@ -2199,7 +2234,14 @@ async fn core_snapshot(
   match cmd {
     crate::CoreSnapshotCmd::List => {
       let view: CoreSnapshotsView = c.get(path).await?;
-      out(j, &view, print::core_snapshots);
+      out_quiet(
+        j,
+        &view,
+        |v| {
+          v.snapshots.iter().map(|s| s.id.clone()).collect::<Vec<_>>()
+        },
+        print::core_snapshots,
+      );
     }
     crate::CoreSnapshotCmd::Create { reason } => {
       let info: DbSnapshotInfo =
@@ -2430,6 +2472,7 @@ pub(crate) async fn show_logs(
   if let Some(v) = args.max_line {
     path.push_str(&format!("&max_line={v}"));
   }
+  args.filters.append_query(&mut path);
   let v: Value = c.get(&path).await?;
   out(j, &v, |v| {
     if let Some(meta) = v["previous"].as_object() {
@@ -2456,7 +2499,7 @@ pub(crate) async fn show_logs(
           g["line"].as_str().unwrap_or("")
         );
       }
-    } else {
+    } else if !crate::log_options::print_rows(v) {
       print!("{}", v["logs"].as_str().unwrap_or_default());
       if let Some(n) = v["matched"].as_u64() {
         eprintln!("命中 {n} 行（看了 {} 行）", v["scanned"]);
@@ -2618,13 +2661,8 @@ async fn service(
       out(j, &value, pretty);
       Ok(())
     }
-    ServiceCmd::List { brief } => {
-      let mut v: Vec<ServiceView> = c
-        .get(
-          crate::plan_cmd::brief_path("/api/services", brief)
-            .as_ref(),
-        )
-        .await?;
+    ServiceCmd::List(filters) => {
+      let mut v: Vec<ServiceView> = c.get(&filters.path()).await?;
       for service in &mut v {
         wharf_api_types::filter_note(
           &mut service.note,
@@ -2766,7 +2804,7 @@ async fn service(
           },
         )
         .await?;
-      if !j {
+      if !j && !print::is_quiet() {
         println!("导入为服务 {}", v.name);
         for w in &v.warnings {
           println!("  提醒：{w}");
@@ -2893,7 +2931,7 @@ async fn service(
         u8::from(allow_unpinned)
       );
       let target: RollbackTarget = c.get(&path).await?;
-      if !j {
+      if !j && !print::is_quiet() {
         println!(
           "回滚 {name} 到部署 #{}（{}）",
           target.deployment_id,
@@ -2964,6 +3002,7 @@ async fn service(
       grep,
       errors,
       max_line,
+      filters,
     } => {
       if (previous.is_some() || previous_list) && names.len() != 1 {
         return Err(
@@ -3007,6 +3046,7 @@ async fn service(
         grep,
         errors,
         max_line,
+        filters,
       };
       let path = if let [name] = names.as_slice() {
         let mut path = format!("/api/services/{}/logs", seg(name));
@@ -3025,8 +3065,16 @@ async fn service(
       };
       show_logs(c, &path, &args, j).await
     }
-    ServiceCmd::Files { name, path } => {
-      crate::files::list(c, &name, &path, j).await
+    ServiceCmd::Files { cmd: Some(cmd), .. } => {
+      crate::files::run(c, cmd, j).await
+    }
+    ServiceCmd::Files { name, path, .. } => {
+      let name = name.ok_or_else(|| {
+        ApiError::invalid("请指定服务名")
+          .suggest("wharf service files --help")
+      })?;
+      crate::files::list(c, &name, path.as_deref().unwrap_or(""), j)
+        .await
     }
     ServiceCmd::Download { name, path, output } => {
       crate::files::download(c, &name, &path, output, j).await
@@ -3074,30 +3122,35 @@ async fn service(
       let v: Vec<DeploymentView> = c
         .get(&format!("/api/services/{}/deployments", seg(&name)))
         .await?;
-      out(j, &v, |v| {
-        for d in v {
-          let images: Vec<String> = d
-            .commit
-            .iter()
-            .map(|c| format!("commit {}", &c[..c.len().min(12)]))
-            .chain(d.images.iter().map(|i| {
-              i.digest.clone().unwrap_or_else(|| i.image.clone())
-            }))
-            .collect();
-          println!(
-            "#{} {} {} {}  {}",
-            d.id,
-            d.created_at.format("%m-%d %H:%M"),
-            d.server,
-            d.run_id,
-            if d.started {
-              images.join(" ")
-            } else {
-              format!("未启动 {}", images.join(" "))
-            }
-          );
-        }
-      });
+      out_quiet(
+        j,
+        &v,
+        |v| v.iter().map(|d| d.id.to_string()).collect(),
+        |v| {
+          for d in v {
+            let images: Vec<String> = d
+              .commit
+              .iter()
+              .map(|c| format!("commit {}", &c[..c.len().min(12)]))
+              .chain(d.images.iter().map(|i| {
+                i.digest.clone().unwrap_or_else(|| i.image.clone())
+              }))
+              .collect();
+            println!(
+              "#{} {} {} {}  {}",
+              d.id,
+              d.created_at.format("%m-%d %H:%M"),
+              d.server,
+              d.run_id,
+              if d.started {
+                images.join(" ")
+              } else {
+                format!("未启动 {}", images.join(" "))
+              }
+            );
+          }
+        },
+      );
       Ok(())
     }
     ServiceCmd::Deploy {
@@ -3202,7 +3255,7 @@ async fn service(
               },
             )
             .await?;
-          if !j {
+          if !j && !print::is_quiet() {
             for w in &d.warnings {
               eprintln!("提醒：{w}");
             }
@@ -3898,8 +3951,8 @@ async fn gateway(
   j: bool,
 ) -> CliResult<()> {
   match cmd {
-    GatewayCmd::List => {
-      let v: Vec<GatewayView> = c.get("/api/gateways").await?;
+    GatewayCmd::List(filters) => {
+      let v: Vec<GatewayView> = c.get(&filters.path()).await?;
       out(j, &v, |v| {
         for g in v {
           println!(
@@ -3956,7 +4009,7 @@ async fn gateway(
         .rotate_link(&name, link_token || both, cert || both)
         .await?;
       if apply.apply {
-        if !j {
+        if !j && !print::is_quiet() {
           print::rotate_link(&response);
         }
         plan_and_maybe_apply(c, PlanRequest::default(), apply, j)
@@ -4428,8 +4481,14 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
     RouteCmd::Note { host, args } => {
       crate::note::run(c, "route", &host, args, j).await
     }
-    RouteCmd::List => {
-      let mut v: Vec<RouteView> = c.get("/api/routes").await?;
+    RouteCmd::List(filters) => {
+      let mut v: Vec<RouteView> = c.get(&filters.path()).await?;
+      if print::is_quiet() {
+        for route in &v {
+          println!("{}", route.spec.hostname);
+        }
+        return Ok(());
+      }
       for route in &mut v {
         wharf_api_types::filter_note(
           &mut route.note,
@@ -5689,13 +5748,15 @@ async fn finish_secret_rotation(
   j: bool,
 ) -> CliResult<()> {
   if flags.apply && response.needs_plan {
-    if !j {
+    if !j && !print::is_quiet() {
       pretty(&response);
     }
     return plan_and_maybe_apply(c, PlanRequest::default(), flags, j)
       .await;
   }
-  pretty(&response);
+  if !print::is_quiet() {
+    pretty(&response);
+  }
   Ok(())
 }
 
@@ -6104,7 +6165,17 @@ async fn backup(
       let v: BackupsView = c
         .get(&backup_url(&service, "", &[("from", from.as_deref())]))
         .await?;
-      out(j, &v, print::backups);
+      out_quiet(
+        j,
+        &v,
+        |v| {
+          v.snapshots
+            .iter()
+            .map(|s| s.short_id.clone())
+            .collect::<Vec<_>>()
+        },
+        print::backups,
+      );
       Ok(())
     }
     BackupCmd::Restore {

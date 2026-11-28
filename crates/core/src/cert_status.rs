@@ -264,6 +264,7 @@ pub async fn status(
         tail: LOG_TAIL,
         follow: false,
         since: None,
+        until: None,
       },
       Duration::from_secs(40),
       None,

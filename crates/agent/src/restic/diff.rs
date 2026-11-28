@@ -53,7 +53,7 @@ fn live_index(
       let st = match dir.lstat(name) {
         Ok(st) => st,
         Err(err) if err.kind() == io::ErrorKind::NotFound => {
-          return Ok(());
+          return Ok(true);
         }
         Err(err) => return Err(err),
       };
@@ -63,7 +63,7 @@ fn live_index(
         libc::S_IFLNK => {
           let target = dir.readlink(name)?;
           if check_single_link(Path::new(&rel), &target).is_err() {
-            return Ok(());
+            return Ok(true);
           }
           "symlink"
         }
@@ -96,7 +96,7 @@ fn live_index(
           Err(e) => return Err(e),
         }
       }
-      Ok(())
+      Ok(true)
     })
   }
   let dir = match DirFd::open_service_root(Path::new("/srv"), service)

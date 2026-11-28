@@ -18,6 +18,22 @@ fn entries() -> BTreeMap<&'static str, Schema> {
     ("plan_summary", schema_for!(plan::PlanSummary)),
     ("run", schema_for!(plan::Run)),
     ("status", schema_for!(view::Status)),
+    ("file_entry", schema_for!(wharf_api_types::agent::FileEntry)),
+    (
+      "file_tail",
+      schema_for!(wharf_api_types::agent::FileTailResult),
+    ),
+    (
+      "file_grep",
+      schema_for!(wharf_api_types::agent::FileGrepResult),
+    ),
+    ("file_rm", schema_for!(wharf_api_types::agent::FileRmResult)),
+    ("file_mv", schema_for!(wharf_api_types::agent::FileMvResult)),
+    (
+      "file_mkdir",
+      schema_for!(wharf_api_types::agent::FileMkdirResult),
+    ),
+    ("wait", schema_for!(crate::wait::WaitOutput)),
     ("error", schema_for!(ApiError)),
     ("server_view", schema_for!(view::ServerView)),
     ("service_render", schema_for!(view::ServiceRenderView)),

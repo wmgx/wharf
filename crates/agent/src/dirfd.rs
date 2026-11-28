@@ -191,6 +191,58 @@ impl DirFd {
     })
   }
 
+  pub(crate) fn clone_dir(&self) -> io::Result<Self> {
+    self.open_subdir(c".")
+  }
+
+  pub(crate) fn unlink_dir(&self, name: &CStr) -> io::Result<()> {
+    check(unsafe {
+      libc::unlinkat(
+        self.0.as_raw_fd(),
+        name.as_ptr(),
+        libc::AT_REMOVEDIR,
+      )
+    })
+  }
+
+  pub(crate) fn fchown_self(
+    &self,
+    uid: libc::uid_t,
+    gid: libc::gid_t,
+  ) -> io::Result<()> {
+    check(unsafe { libc::fchown(self.0.as_raw_fd(), uid, gid) })
+  }
+
+  pub(crate) fn rename_noreplace(
+    &self,
+    from: &CStr,
+    dst: &Self,
+    to: &CStr,
+  ) -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    let rc = unsafe {
+      libc::syscall(
+        libc::SYS_renameat2,
+        self.0.as_raw_fd(),
+        from.as_ptr(),
+        dst.0.as_raw_fd(),
+        to.as_ptr(),
+        libc::RENAME_NOREPLACE,
+      ) as libc::c_int
+    };
+    #[cfg(target_os = "macos")]
+    let rc = unsafe {
+      libc::renameatx_np(
+        self.0.as_raw_fd(),
+        from.as_ptr(),
+        dst.0.as_raw_fd(),
+        to.as_ptr(),
+        libc::RENAME_EXCL,
+      )
+    };
+    check(rc)
+  }
+
   pub(crate) fn rename(
     &self,
     from: &CStr,
@@ -242,14 +294,27 @@ impl DirFd {
     let mut out = Vec::new();
     self.visit_names(|name| {
       out.push(name.to_owned());
-      Ok(())
+      Ok(true)
     })?;
+    Ok(out)
+  }
+
+  pub(crate) fn sorted_names(
+    &self,
+    limit: usize,
+  ) -> io::Result<Vec<CString>> {
+    let mut out = Vec::new();
+    self.visit_names(|name| {
+      out.push(name.to_owned());
+      Ok(out.len() < limit)
+    })?;
+    out.sort_unstable();
     Ok(out)
   }
 
   pub(crate) fn visit_names(
     &self,
-    mut visit: impl FnMut(&CStr) -> io::Result<()>,
+    mut visit: impl FnMut(&CStr) -> io::Result<bool>,
   ) -> io::Result<()> {
     let fd = unsafe {
       libc::openat(self.0.as_raw_fd(), c".".as_ptr(), DIRECTORY)
@@ -279,8 +344,8 @@ impl DirFd {
       }
       // d_name 在下一次 readdir 前有效。
       let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
-      if !matches!(name.to_bytes(), b"." | b"..") {
-        visit(name)?;
+      if !matches!(name.to_bytes(), b"." | b"..") && !visit(name)? {
+        break;
       }
     }
     Ok(())
@@ -357,36 +422,35 @@ pub(crate) async fn remove_service(
   .map_err(|e| ApiError::internal(format!("删除目录任务中断：{e}")))?
 }
 
+pub(crate) fn remove_dir_counted(
+  parent: &DirFd,
+  name: &CStr,
+  cancelled: &impl Fn() -> io::Result<()>,
+) -> io::Result<u64> {
+  cancelled()?;
+  let dir = parent.open_subdir(name)?;
+  let mut removed = 1;
+  dir.visit_names(|entry| {
+    cancelled()?;
+    removed +=
+      if dir.lstat(entry)?.st_mode & libc::S_IFMT == libc::S_IFDIR {
+        remove_dir_counted(&dir, entry, cancelled)?
+      } else {
+        dir.unlink(entry)?;
+        1
+      };
+    Ok(true)
+  })?;
+  cancelled()?;
+  parent.unlink_dir(name)?;
+  Ok(removed)
+}
+
 fn remove_service_tree(
   base: &Path,
   service: &str,
   cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<(), ApiError> {
-  fn remove_dir(
-    parent: &DirFd,
-    name: &CStr,
-    cancelled: &impl Fn() -> io::Result<()>,
-  ) -> io::Result<()> {
-    cancelled()?;
-    let dir = parent.open_subdir(name)?;
-    dir.visit_names(|entry| {
-      cancelled()?;
-      if dir.lstat(entry)?.st_mode & libc::S_IFMT == libc::S_IFDIR {
-        remove_dir(&dir, entry, cancelled)
-      } else {
-        dir.unlink(entry)
-      }
-    })?;
-    cancelled()?;
-    check(unsafe {
-      libc::unlinkat(
-        parent.0.as_raw_fd(),
-        name.as_ptr(),
-        libc::AT_REMOVEDIR,
-      )
-    })
-  }
-
   validate_name(
     "服务",
     service
@@ -420,7 +484,9 @@ fn remove_service_tree(
   let name = component(service.as_ref()).map_err(io_err(&dir))?;
   match fd.lstat(&name) {
     Ok(stat) if stat.st_mode & libc::S_IFMT == libc::S_IFDIR => {
-      remove_dir(&fd, &name, &cancelled).map_err(error)
+      remove_dir_counted(&fd, &name, &cancelled)
+        .map(|_| ())
+        .map_err(error)
     }
     Ok(_) => Err(ApiError::invalid(format!(
       "{} 是软链接或非目录，已拒绝删除",
