@@ -166,9 +166,17 @@ wharf server host <服务器> --json        # 镜像、构建缓存、容器日�
 
 ```bash
 wharf service move <服务> --to <服务器> --json             # 同步数据、新机器启动、网关改指，域名不变
-wharf backup enable <服务> --to <另一台服务器> --json   # 每天备份 /srv/<服务>/
-wharf backup run <服务> --json
-wharf backup list <服务> --json
+wharf backup enable <服务> --to <备份机> --exclude 'data/cache/**' --keep-daily 7 --json
+wharf backup set <服务> --json
+wharf backup set <服务> --unset-exclude 'data/cache/**' --unset-retention --json
+wharf backup run <服务> --keep --note '升级前留底' --json
+wharf backup list <服务> [--from <备份机>] --json
+wharf backup ls <服务> [目录] [--snapshot <快照>] --json
+wharf backup extract <服务> <文件> -o <本地路径> --json
+wharf backup diff <服务> [--base <旧快照>] [--snapshot <快照>] --json
+wharf backup keep <服务> <快照> [--off] [--note <备注> | --unset-note] --json
+wharf backup unlock <服务> --from <备份机> --stale-only --json
+wharf backup core --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --json
 wharf backup core --verify-password --json    # 交互输入登录密码，核验 HTTP 认证、仓库解密和快照
 wharf backup core --export -o <文件> --json    # 交互输入登录密码，下载离线加密灾备包
 wharf backup move <服务> --to <新备份机> --dry-run --json
@@ -176,6 +184,8 @@ wharf backup move <服务> --to <新备份机> --json  # 控制面仓库把服�
 # 恢复会停服务并覆盖数据（原数据改名保留），必须先问用户，用户同意后：
 wharf backup restore <服务> --snapshot <快照 id> --confirm service/<服务> --json
 ```
+
+整机灾备先用 `wharf-core restore --from <备份机地址> --user <管理员>` 或 `--recovery-key <文件>`，随后用 `wharf-core --safe-mode` 启动。核对节点和备份目标后执行 `wharf core resume --json`。
 
 仓库迁移中断后重跑同一条命令即可续传。目标机已有仓库时按预检提示确认归档。源仓库保留，由 `wharf data cleanup` 统一管理。
 

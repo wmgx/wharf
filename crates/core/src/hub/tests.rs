@@ -40,6 +40,7 @@ fn old_hello_has_no_host_shell_capability() {
     safe_migrate,
     safe_backup,
     backup_move,
+    backup_v2,
     build_v2,
     safe_rollback,
     key_rotation,
@@ -67,6 +68,7 @@ fn old_hello_has_no_host_shell_capability() {
   assert!(!safe_migrate);
   assert!(!safe_backup);
   assert!(!backup_move);
+  assert!(!backup_v2);
   assert!(!build_v2);
   assert!(!safe_rollback);
   assert!(!key_rotation);
@@ -122,6 +124,7 @@ fn old_core_ignores_new_hello_capability() {
     safe_migrate: true,
     safe_backup: true,
     backup_move: false,
+    backup_v2: false,
     build_v2: true,
     deploy_v2: false,
     safe_rollback: true,
@@ -177,6 +180,10 @@ impl Hub {
     let conn = all.get_mut(server).unwrap();
     conn.safe_backup = true;
     conn.backup_move = true;
+  }
+
+  pub(crate) fn enable_mock_backup_v2(&self, server: &str) {
+    lock(&self.conns).get_mut(server).unwrap().backup_v2 = true;
   }
 
   pub(crate) fn mock_safe_backup_agent(&self, server: &str) {
@@ -340,6 +347,7 @@ impl Hub {
         safe_migrate: false,
         safe_backup: false,
         backup_move: false,
+        backup_v2: false,
         build_v2: false,
         deploy_v2: false,
         safe_rollback: false,
@@ -487,6 +495,7 @@ async fn agent_upgrade_needs_no_bound_core_server_or_probe_support() {
     safe_migrate: false,
     safe_backup: false,
     backup_move: false,
+    backup_v2: false,
     build_v2: false,
     deploy_v2: false,
     safe_rollback: false,
@@ -560,6 +569,7 @@ fn probe_connection(
     safe_migrate: false,
     safe_backup: false,
     backup_move: false,
+    backup_v2: false,
     build_v2: false,
     deploy_v2: false,
     safe_rollback: false,

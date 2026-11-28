@@ -89,6 +89,7 @@ struct Conn {
   safe_migrate: bool,
   safe_backup: bool,
   backup_move: bool,
+  backup_v2: bool,
   build_v2: bool,
   deploy_v2: bool,
   safe_rollback: bool,
@@ -370,6 +371,12 @@ impl Hub {
     lock(&self.conns)
       .get(server)
       .is_some_and(|c| !c.upgrade_only && c.backup_move)
+  }
+
+  pub fn supports_backup_v2(&self, server: &str) -> bool {
+    lock(&self.conns)
+      .get(server)
+      .is_some_and(|c| !c.upgrade_only && c.backup_v2)
   }
 
   pub fn supports_safe_backup(&self, server: &str) -> bool {
@@ -844,6 +851,7 @@ impl Hub {
           wharf_api_types::agent::ResticAction::Backup { .. }
             | wharf_api_types::agent::ResticAction::Restore { .. }
             | wharf_api_types::agent::ResticAction::Prune
+            | wharf_api_types::agent::ResticAction::PruneV2 { .. }
         ) =>
       {
         Some(Duration::from_secs(45))
@@ -870,6 +878,12 @@ impl Hub {
     };
     if needs_backup_move && (conn.upgrade_only || !conn.backup_move) {
       return Err(crate::backup_move::old_agent(server));
+    }
+    if let AgentOp::Restic(job) = &op
+      && job.action.needs_backup_v2()
+      && (conn.upgrade_only || !conn.backup_v2)
+    {
+      return Err(crate::backup::old_backup_v2(server));
     }
     let needs_safe_backup = match &op {
       AgentOp::ServiceStopForData { .. }
@@ -1262,6 +1276,7 @@ async fn handle_socket(
     safe_migrate,
     safe_backup,
     backup_move,
+    backup_v2,
     build_v2,
     deploy_v2,
     safe_rollback,
@@ -1439,6 +1454,7 @@ async fn handle_socket(
     safe_migrate,
     safe_backup,
     backup_move,
+    backup_v2,
     build_v2,
     deploy_v2,
     safe_rollback,

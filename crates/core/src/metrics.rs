@@ -220,7 +220,7 @@ pub async fn step_done(
     Step::ServiceUp { service, .. } | Step::Rebuild { service } => {
       ("deploy", service.as_str())
     }
-    Step::Backup { service } => ("backup", service.as_str()),
+    Step::Backup { service, .. } => ("backup", service.as_str()),
     Step::CoreBackup { .. } => ("backup", crate::core_backup::REPO),
     _ => return,
   };

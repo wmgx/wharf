@@ -56,6 +56,9 @@ fn safe_plan(plan: &Plan, name: &str) -> Result<(), String> {
 }
 
 pub async fn tick(state: &Arc<AppState>) {
+  if state.is_safe_mode() {
+    return;
+  }
   let now = Utc::now();
   if !in_window(now) {
     return;

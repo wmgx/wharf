@@ -761,7 +761,7 @@ async fn lock_task(
   title: &str,
 ) -> Result<OpLockGuard, ApiError> {
   let spec = match step {
-    Step::Backup { service } => LockSpec::Backup(service.clone()),
+    Step::Backup { service, .. } => LockSpec::Backup(service.clone()),
     Step::CoreBackup { .. }
     | Step::BackupMove { is_core: true, .. } => LockSpec::CoreBackup,
     Step::BackupMove { service, .. } => {
@@ -786,7 +786,7 @@ async fn lock_task(
         crate::core_backup::REPO,
       )?;
     }
-    Step::Backup { service } => {
+    Step::Backup { service, .. } => {
       let snap = snapshot::load(&state.db).await?;
       crate::backup_move::require_idle(&snap, service)?;
       guard.reserve_backup_target(crate::backup::service_target(
@@ -1448,10 +1448,12 @@ async fn run_step_with_dns(
       )
       .await?;
     }
-    Step::Backup { service } => {
+    Step::Backup { service, options } => {
       crate::backup_move::require_idle(&snap, service)?;
-      crate::backup::backup(state, run_id, service, progress, cancel)
-        .await?;
+      crate::backup::backup_with_options(
+        state, run_id, service, options, progress, cancel,
+      )
+      .await?;
     }
     Step::Restore {
       service,
@@ -1595,6 +1597,7 @@ async fn run_step_with_dns(
       }
     }
     Step::CoreBackup {
+      options,
       user_key,
       target,
       owner_secret,
@@ -1607,7 +1610,7 @@ async fn run_step_with_dns(
         state,
         run_id,
         user_key.as_ref(),
-        (target.as_deref(), owner_secret.as_ref()),
+        (target.as_deref(), owner_secret.as_ref(), options),
         progress,
         cancel,
       )

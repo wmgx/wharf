@@ -25,10 +25,11 @@ use wharf_api_types::{
     AgentOp, BackupSummary, CORE_BACKUP_DIR, CORE_REST_SERVER_PORT,
     OneTimeSecret, ResticAction, ResticKeyInfo, Snapshot,
   },
+  backup::{BackupRetention, BackupRunRequest, validate_retention},
   plan::ApplyResponse,
   view::{
-    BackupRecord, CoreBackupVerifySnapshot, CoreBackupVerifyView,
-    Issue, IssueLevel, Perm,
+    BackupRecord, BackupUnlockResult, CoreBackupVerifySnapshot,
+    CoreBackupVerifyView, Issue, IssueLevel, Perm,
   },
 };
 
@@ -67,6 +68,8 @@ const KEY_FOR: &str = "core_backup.key_for";
 
 #[derive(Serialize)]
 pub struct CoreBackupView {
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub retention: Option<BackupRetention>,
   /// 备份到哪台服务器，没开启时没有。
   #[serde(skip_serializing_if = "Option::is_none")]
   pub to: Option<String>,
@@ -80,6 +83,49 @@ pub struct CoreBackupView {
   pub restore_command: Option<String>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub pending_move: Option<wharf_api_types::view::BackupMoveStatus>,
+}
+
+const RETENTION: &str = "core_backup.retention";
+
+fn retention(
+  c: &rusqlite::Connection,
+) -> Result<Option<BackupRetention>, ApiError> {
+  db::setting(c, RETENTION)?
+    .map(|value| serde_json::from_str(&value).map_err(db::json_err))
+    .transpose()
+}
+
+#[derive(Deserialize)]
+pub struct RetentionRequest {
+  #[serde(default)]
+  retention: Option<BackupRetention>,
+}
+
+pub async fn set_retention(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Json(req): Json<RetentionRequest>,
+) -> ApiResult<serde_json::Value> {
+  auth.require(Perm::Admin)?;
+  let _guard = s.locks.acquire(
+    crate::locks::LockSpec::CoreBackup,
+    "设置控制面备份保留策略",
+  )?;
+  if let Some(policy) = req.retention {
+    validate_retention(policy)?;
+  }
+  s.db
+    .call(move |c| {
+      let value = req
+        .retention
+        .map(|r| serde_json::to_string(&r).map_err(db::json_err))
+        .transpose()?;
+      db::set_setting(c, RETENTION, value.as_deref())
+    })
+    .await?;
+  Ok(Json(
+    serde_json::json!({"retention": req.retention, "effective_retention": req.retention.unwrap_or_default()}),
+  ))
 }
 
 pub fn target(
@@ -143,6 +189,7 @@ pub async fn show(
     crate::data::repo_verified_empty(&s, &snap, target, REPO, h)
   });
   Ok(Json(CoreBackupView {
+    retention: s.db.call(|c| retention(c)).await?,
     user_key_current,
     repo_empty,
     to,
@@ -518,6 +565,7 @@ pub async fn enable(
       s.clone(),
       "备份控制面".into(),
       Step::CoreBackup {
+        options: Default::default(),
         user_key: Some(OneTimeSecret(req.password)),
         target: Some(req.to),
         owner_secret: Some(OneTimeSecret(owner)),
@@ -568,7 +616,6 @@ pub async fn recovery_key(
     });
   let creds = ensure_creds(&s).await?;
   tracing::info!("已下载恢复密钥");
-  let image = wharf_api_types::agent::RESTIC_IMAGE;
   let user = HTTP_USER;
   let mut text = format!(
     "# Wharf 恢复密钥：能打开控制面备份，收好，别放在被备份的机器上。\n\
@@ -582,8 +629,7 @@ RESTIC_REST_PASSWORD={http}\n",
     text.push_str(&format!(
       "\n# 控制面备份在 {to}（{target}）的仓库 {REPO}。\n\
 # 恢复控制面（新机器先加入同一个内网，把本文件存成 wharf-recovery.env）：\n\
-docker run --rm --label wharf.temp=1 --network host --env-file wharf-recovery.env -v /var/lib/wharf-core:/restore \\\n  \
-{image} -r rest:http://{target}/{REPO} restore latest:{CORE_BACKUP_DIR} --target /restore\n",
+# docker run --rm --network host -v /var/lib/wharf-core:/var/lib/wharf-core -v \"$PWD/wharf-recovery.env:/wharf-recovery.env:ro\" ghcr.io/wmgx/wharf-core:latest restore --from {target} --recovery-key /wharf-recovery.env\n",
       to = to.unwrap_or_default(),
     ));
   }
@@ -611,13 +657,17 @@ docker run --rm --label wharf.temp=1 --network host --env-file wharf-recovery.en
 pub async fn run_now(
   State(s): State<Arc<AppState>>,
   auth: Auth,
+  body: Option<Json<BackupRunRequest>>,
 ) -> ApiResult<ApplyResponse> {
   auth.require(Perm::Apply)?;
+  let options = body.map(|Json(options)| options).unwrap_or_default();
+  options.validate()?;
   Ok(Json(
     apply::start_task_by(
       s.clone(),
       "备份控制面".into(),
       Step::CoreBackup {
+        options,
         user_key: None,
         target: None,
         owner_secret: None,
@@ -659,7 +709,7 @@ pub async fn backup(
   state: &AppState,
   run_id: &str,
   user_key: Option<&OneTimeSecret>,
-  change: (Option<&str>, Option<&OneTimeSecret>),
+  change: (Option<&str>, Option<&OneTimeSecret>, &BackupRunRequest),
   progress: ProgressFn,
   cancel: &CancellationToken,
 ) -> Result<(), ApiError> {
@@ -671,11 +721,17 @@ async fn backup_impl(
   state: &AppState,
   run_id: &str,
   user_key: Option<&OneTimeSecret>,
-  (target, owner): (Option<&str>, Option<&OneTimeSecret>),
+  (target, owner, options): (
+    Option<&str>,
+    Option<&OneTimeSecret>,
+    &BackupRunRequest,
+  ),
   progress: ProgressFn,
   cancel: &CancellationToken,
   require_standard_dir: bool,
 ) -> Result<(), ApiError> {
+  options.validate()?;
+  let policy = state.db.call(|c| retention(c)).await?;
   let (to, old_target) =
     state.db.call(|c| db::setting(c, TO)).await.map(|old| {
       (target.map(str::to_string).or_else(|| old.clone()), old)
@@ -708,6 +764,14 @@ async fn backup_impl(
     reject_self_target(&w.server, &w.target)?;
     backup::require_safe_backup(state, &w.server)?;
     backup::require_safe_backup(state, &w.target)?;
+    if (options.needs_backup_v2() || policy.is_some())
+      && !state.hub.supports_backup_v2(&w.server)
+    {
+      return Err(backup::old_backup_v2(&w.server));
+    }
+    if options.keep {
+      backup::guard_kept(state, REPO).await?;
+    }
     let mut creds = ensure_creds(state).await?;
     // 同一个目标的旧登录凭据保留到新快照与新钥匙准备好。
     if old_target.as_deref() != Some(&w.target) {
@@ -726,6 +790,9 @@ async fn backup_impl(
       &core,
       ResticAction::Backup {
         host: w.server.clone(),
+        excludes: Vec::new(),
+        keep: options.keep,
+        note: options.note.clone(),
       },
       Some(&marker),
       &progress,
@@ -780,7 +847,7 @@ pub async fn unlock(
   State(s): State<Arc<AppState>>,
   auth: Auth,
   body: Option<Json<backup::UnlockRequest>>,
-) -> ApiResult<()> {
+) -> ApiResult<BackupUnlockResult> {
   auth.require(Perm::Admin)?;
   let _guard = s.locks.acquire(
     crate::locks::LockSpec::CoreBackup,
@@ -801,6 +868,7 @@ pub async fn unlock(
     target_ip: target_ip(&snap, &target)?,
     target,
   };
+  let stale_only = body.is_some_and(|b| b.stale_only);
   let creds = ensure_creds(&s).await?;
   let progress: ProgressFn = Arc::new(|_| {});
   run_repo::<serde_json::Value>(
@@ -810,14 +878,18 @@ pub async fn unlock(
     &creds,
     &core,
     ResticAction::Unlock {
-      remove_all: !body.is_some_and(|b| b.stale_only),
+      remove_all: !stale_only,
     },
     None,
     &progress,
     &cancel,
   )
   .await?;
-  Ok(Json(()))
+  Ok(Json(BackupUnlockResult {
+    target: w.target,
+    stale_only,
+    unlocked: true,
+  }))
 }
 
 pub async fn issues(db: &db::Db) -> Result<Vec<Issue>, ApiError> {
@@ -1081,17 +1153,20 @@ async fn finish_backup(
       .await?;
   }
   // 清理旧快照失败不影响这次备份的结果。
-  let pruned = run_repo::<serde_json::Value>(
-    state,
-    snap,
-    w,
-    creds,
-    core,
-    ResticAction::Prune,
-    None,
-    progress,
-    cancel,
-  )
+  let pruned = async {
+    let policy = state.db.call(|c| retention(c)).await?;
+    if let Some(action) = backup::prune_action(
+      state, REPO, &w.target, &w.server, policy, progress,
+    )
+    .await?
+    {
+      run_repo::<serde_json::Value>(
+        state, snap, w, creds, core, action, None, progress, cancel,
+      )
+      .await?;
+    }
+    Ok::<_, ApiError>(())
+  }
   .await;
   if let Err(e) = pruned {
     progress(format!("提醒：清理旧快照失败：{}", e.message));
@@ -1213,18 +1288,10 @@ async fn stage(
   Ok((marker, guard))
 }
 
-/// 新机器上恢复：先让它加入同一个内网，再执行这条命令，按提示输入两次登录密码。
 fn restore_command(ip: &str, user: &str) -> String {
-  let image = wharf_api_types::agent::RESTIC_IMAGE;
-  let ip = if ip.contains(':') {
-    format!("[{ip}]")
-  } else {
-    ip.to_string()
-  };
   format!(
-    "read -rsp '登录密码：' P && echo && docker run --rm --label wharf.temp=1 --network host -v /var/lib/wharf-core:/restore \
--e RESTIC_REST_USERNAME={user} -e RESTIC_REST_PASSWORD=\"$P\" -e RESTIC_PASSWORD=\"$P\" \
-{image} -r rest:http://{ip}:{CORE_REST_SERVER_PORT}/{REPO} restore latest:{CORE_BACKUP_DIR} --target /restore"
+    "docker run --rm -it --network host -v /var/lib/wharf-core:/var/lib/wharf-core ghcr.io/wmgx/wharf-core:latest restore --from {ip} --user '{}'",
+    user.replace('\'', "'\"'\"'")
   )
 }
 
@@ -1250,7 +1317,7 @@ mod tests {
         &state,
         "r1",
         None,
-        (Some("s2"), None),
+        (Some("s2"), None, &BackupRunRequest::default()),
         Arc::new(|_| {}),
         &CancellationToken::new(),
         false
@@ -1506,7 +1573,7 @@ mod tests {
       &state,
       "r1",
       Some(&OneTimeSecret(login_password)),
-      (None, None),
+      (None, None, &BackupRunRequest::default()),
       Arc::new(|_| {}),
       &CancellationToken::new(),
       false,
@@ -1559,8 +1626,9 @@ mod tests {
       Some("/srv/wharf-backup-core:/data")
     );
     let restore = restore_command("100.64.0.2", "operator");
-    assert!(restore.contains("RESTIC_REST_USERNAME=operator"));
-    assert!(restore.contains("7711/wharf-core restore"));
+    assert!(
+      restore.contains("restore --from 100.64.0.2 --user 'operator'")
+    );
     assert!(!restore.contains("--no-lock"));
   }
 

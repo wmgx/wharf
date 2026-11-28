@@ -305,6 +305,12 @@ pub enum ResticAction {
   /// 备份 `/srv/<service>/`，仓库不存在时先初始化。结果是 [BackupSummary]。
   Backup {
     host: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    excludes: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    keep: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    note: Option<String>,
   },
   /// 列出快照，结果是 `Vec<Snapshot>`。
   Snapshots,
@@ -316,6 +322,56 @@ pub enum ResticAction {
   },
   /// 按保留策略删除旧快照并回收空间。
   Prune,
+  PruneV2 {
+    daily: u16,
+    weekly: u16,
+    monthly: u16,
+    #[serde(default)]
+    keep_tag: Option<String>,
+    #[serde(default)]
+    protect_before: Option<chrono::DateTime<chrono::Utc>>,
+  },
+  Ls {
+    snapshot: String,
+    #[serde(default)]
+    path: String,
+    #[serde(default)]
+    recursive: bool,
+    #[serde(default)]
+    limit: u32,
+  },
+  ExtractPrepare {
+    snapshot: String,
+    path: String,
+    max_bytes: u64,
+  },
+  ExtractRead {
+    token: String,
+    offset: u64,
+    len: u32,
+  },
+  ExtractClose {
+    token: String,
+  },
+  DiffLocal {
+    snapshot: String,
+    #[serde(default)]
+    excludes: Vec<String>,
+    limit: u32,
+  },
+  DiffSnapshots {
+    base: String,
+    target: String,
+    limit: u32,
+  },
+  Tag {
+    snapshot: String,
+    keep: bool,
+    #[serde(default)]
+    note: Option<String>,
+    #[serde(default)]
+    clear_note: bool,
+  },
   /// 给仓库加一把口令，结果是新钥匙的 id。
   AddKey {
     new_password: OneTimeSecret,
@@ -331,6 +387,28 @@ pub enum ResticAction {
     #[serde(default)]
     remove_all: bool,
   },
+}
+
+impl ResticAction {
+  pub fn needs_backup_v2(&self) -> bool {
+    match self {
+      Self::Backup {
+        excludes,
+        keep,
+        note,
+        ..
+      } => !excludes.is_empty() || *keep || note.is_some(),
+      Self::PruneV2 { .. }
+      | Self::Tag { .. }
+      | Self::Ls { .. }
+      | Self::ExtractPrepare { .. }
+      | Self::ExtractRead { .. }
+      | Self::ExtractClose { .. }
+      | Self::DiffLocal { .. }
+      | Self::DiffSnapshots { .. } => true,
+      _ => false,
+    }
+  }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -353,6 +431,12 @@ pub struct BackupSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Snapshot {
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub tags: Vec<String>,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub keep: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub note: Option<String>,
   pub id: String,
   pub short_id: String,
   pub time: chrono::DateTime<chrono::Utc>,

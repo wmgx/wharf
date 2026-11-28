@@ -175,20 +175,17 @@ struct Cli {
   trusted_proxies: Vec<String>,
   #[command(subcommand)]
   command: Option<Command>,
+  #[arg(long, env = "WHARF_SAFE_MODE", value_parser = clap::builder::BoolishValueParser::new())]
+  safe_mode: bool,
 }
 
 #[derive(clap::Subcommand)]
 enum Command {
+  /// 从异地仓库或离线加密灾备包恢复控制面。
+  Restore(core_restore::Args),
   /// 控制面已停止时查看或恢复本机数据库热快照。
   #[command(subcommand)]
   Snapshot(db_snapshot::OfflineCommand),
-  /// 从离线加密灾备包恢复控制面。
-  Restore {
-    #[arg(long)]
-    file: PathBuf,
-    #[arg(long)]
-    yes: bool,
-  },
   /// 重置页面登录的管理员密码：`docker exec -it wharf-core wharf-core reset-password`。
   ResetPassword {
     /// 同时改账号名。不给时沿用现在的账号（没有账号时用 admin）。
@@ -230,20 +227,20 @@ async fn main() -> anyhow::Result<()> {
     )
     .init();
   let cli = Cli::parse();
-  if let Some(Command::Snapshot(cmd)) = cli.command {
-    match db_snapshot::offline(&cli.data_dir, cmd) {
-      Ok(()) => return Ok(()),
+  if let Some(Command::Restore(args)) = &cli.command {
+    return match core_restore::run(&cli.data_dir, args).await {
+      Ok(()) => Ok(()),
       Err(e)
         if e.code == wharf_api_types::ErrorCode::ConfirmRequired =>
       {
         eprintln!("{e}");
         std::process::exit(2);
       }
-      Err(e) => return Err(anyhow::anyhow!("{e}")),
-    }
+      Err(e) => Err(anyhow::anyhow!("{e}")),
+    };
   }
-  if let Some(Command::Restore { file, yes }) = cli.command {
-    match core_restore::restore_from_file(&cli.data_dir, &file, yes) {
+  if let Some(Command::Snapshot(cmd)) = cli.command {
+    match db_snapshot::offline(&cli.data_dir, cmd) {
       Ok(()) => return Ok(()),
       Err(e)
         if e.code == wharf_api_types::ErrorCode::ConfirmRequired =>
@@ -290,7 +287,14 @@ async fn main() -> anyhow::Result<()> {
     data_dir: cli.data_dir.clone(),
     downloads: Default::default(),
     edge_syncing: Default::default(),
+    safe_mode: cli.safe_mode.into(),
+    resumed_at: Default::default(),
   });
+  if state.is_safe_mode() {
+    tracing::warn!(
+      "控制面处于安全接管模式，后台自动操作和告警外发已暂停。确认后执行 wharf core resume"
+    );
+  }
   gate::init(&state, cli.listen.ip().is_loopback())
     .await
     .map_err(|e| anyhow::anyhow!(e.message))?;

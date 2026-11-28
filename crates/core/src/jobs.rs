@@ -65,7 +65,9 @@ pub fn spawn(state: Arc<AppState>) {
   tokio::spawn(async move {
     tokio::time::sleep(Duration::from_secs(10)).await;
     loop {
-      if let Err(e) = crate::edge_sync::sync_all(&edge_state).await {
+      if !edge_state.is_safe_mode()
+        && let Err(e) = crate::edge_sync::sync_all(&edge_state).await
+      {
         tracing::warn!("同步边缘应用失败：{e}");
       }
       tokio::time::sleep(EDGE_REFRESH).await;
@@ -74,6 +76,10 @@ pub fn spawn(state: Arc<AppState>) {
   tokio::spawn(async move {
     tokio::time::sleep(FIRST_TICK).await;
     loop {
+      if state.is_safe_mode() {
+        tokio::time::sleep(TICK).await;
+        continue;
+      }
       if let Err(e) = cleanups(&state).await {
         tracing::warn!("清理迁移留下的旧数据失败：{e}");
       }
@@ -143,6 +149,7 @@ async fn backups(state: &Arc<AppState>) -> Result<(), ApiError> {
         state.clone(),
         "备份控制面".into(),
         Step::CoreBackup {
+          options: Default::default(),
           user_key: None,
           target: None,
           owner_secret: None,
@@ -201,6 +208,7 @@ async fn backups(state: &Arc<AppState>) -> Result<(), ApiError> {
       state.clone(),
       format!("定时备份 {name}"),
       Step::Backup {
+        options: Default::default(),
         service: name.clone(),
       },
       Some("定时备份".into()),
@@ -671,6 +679,7 @@ async fn backup_target_busy_is_rejected_before_snapshot_or_run() {
     state.clone(),
     "备份 svc-a".into(),
     Step::Backup {
+      options: Default::default(),
       service: "svc-a".into(),
     },
   )

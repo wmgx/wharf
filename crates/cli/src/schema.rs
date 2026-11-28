@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use schemars::{Schema, schema_for};
 use serde_json::{Value, json};
-use wharf_api_types::{ApiError, plan, spec, view};
+use wharf_api_types::{ApiError, backup, plan, spec, view};
 
 use crate::{client::CliResult, commands::out, print};
 
@@ -46,6 +46,13 @@ fn entries() -> BTreeMap<&'static str, Schema> {
       schema_for!(view::CoreBackupExportResult),
     ),
     ("backup", schema_for!(view::BackupsView)),
+    ("backup_ls", schema_for!(backup::BackupLsView)),
+    ("backup_extract", schema_for!(backup::BackupExtractResult)),
+    ("backup_diff", schema_for!(backup::BackupDiffView)),
+    ("backup_keep", schema_for!(backup::BackupKeepResult)),
+    ("backup_policy", schema_for!(backup::BackupPolicy)),
+    ("backup_unlock", schema_for!(view::BackupUnlockResult)),
+    ("core_safe_mode", schema_for!(view::CoreSafeModeView)),
     ("deployment", schema_for!(view::DeploymentView)),
     ("edge", schema_for!(view::EdgeAppView)),
     ("account", schema_for!(view::AccountView)),

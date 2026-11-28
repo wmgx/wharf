@@ -390,7 +390,15 @@ export interface BackupRecord {
   target: string;
 }
 
+export interface BackupRetention {
+  daily: number;
+  monthly: number;
+  weekly: number;
+}
+
 export interface BackupSpec {
+  exclude?: string[];
+  retention?: BackupRetention | null;
   /**
    * 备份存到哪台服务器，不能是服务所在的服务器。
    */
@@ -412,11 +420,13 @@ export interface BackupSummary {
  * `GET /api/services/{name}/backups`
  */
 export interface BackupsView {
+  exclude?: string[];
   pending_move?: BackupMoveStatus | null;
   /**
    * 最近的备份记录，新的在前。
    */
   records: BackupRecord[];
+  retention?: BackupRetention | null;
   service: string;
   /**
    * 列出快照时使用的备份服务器，关闭自动备份后可来自历史记录。
@@ -3105,8 +3115,11 @@ export interface ShellLog {
 export interface Snapshot {
   hostname: string;
   id: string;
+  keep?: boolean;
+  note?: string | null;
   paths: string[];
   short_id: string;
+  tags?: string[];
   time: string;
 }
 
@@ -3202,6 +3215,7 @@ export interface Status {
    */
   problems?: string[];
   routes: RouteView[];
+  safe_mode: boolean;
   servers: ServerView[];
   services: ServiceView[];
   /**

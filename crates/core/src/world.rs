@@ -2033,6 +2033,12 @@ fn validate_service(
     return Err(server_not_found(&spec.server));
   }
   if let Some(backup) = &spec.backup {
+    wharf_api_types::backup::validate_backup_excludes(
+      &backup.exclude,
+    )?;
+    if let Some(retention) = backup.retention {
+      wharf_api_types::backup::validate_retention(retention)?;
+    }
     if !world.servers.contains_key(&backup.to) {
       return Err(server_not_found(&backup.to));
     }
@@ -2854,8 +2860,11 @@ mod tests {
         spec.volumes[0].from_service = Some(reference.into());
       }
       if backup {
-        spec.backup =
-          Some(wharf_api_types::spec::BackupSpec { to: "s2".into() });
+        spec.backup = Some(wharf_api_types::spec::BackupSpec {
+          to: "s2".into(),
+          exclude: vec![],
+          retention: None,
+        });
       }
       let err = changed.validate().unwrap_err();
       assert_eq!(err.code, wharf_api_types::ErrorCode::InvalidInput);

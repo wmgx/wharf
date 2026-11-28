@@ -28,7 +28,7 @@ pub(super) fn encode(
 
 pub(super) fn step_services(step: &Step) -> Vec<String> {
   match step {
-    Step::Backup { service }
+    Step::Backup { service, .. }
     | Step::BackupMove {
       service,
       is_core: false,
@@ -345,6 +345,8 @@ mod tests {
       listen_port: 7700,
       data_dir: Default::default(),
       downloads: Default::default(),
+      safe_mode: Default::default(),
+      resumed_at: Default::default(),
       edge_syncing: Default::default(),
     };
     let mut auth = crate::host_access::tests::auth(
@@ -363,6 +365,7 @@ mod tests {
       (
         "global",
         Step::CoreBackup {
+          options: Default::default(),
           user_key: None,
           target: None,
           owner_secret: None,
