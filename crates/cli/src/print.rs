@@ -411,15 +411,7 @@ pub fn status(s: &Status) {
         continue;
       }
       if r.spec.service.is_empty() {
-        println!(
-          "  {}  →  上游 {}  经 {}",
-          r.url,
-          r.upstream
-            .as_deref()
-            .or(r.spec.upstream.as_deref())
-            .unwrap_or("-"),
-          r.gateway.as_deref().unwrap_or("-")
-        );
+        println!("{}", external_upstream_line(r));
         continue;
       }
       println!(
@@ -507,6 +499,32 @@ pub fn backups(v: &BackupsView) {
       );
     }
   }
+}
+
+fn external_upstream_line(
+  r: &wharf_api_types::view::RouteView,
+) -> String {
+  format!(
+    "  {}  →  上游 {}  经 {}",
+    r.url,
+    r.upstream
+      .as_deref()
+      .or(r.spec.upstream.as_deref())
+      .unwrap_or("-"),
+    r.gateway.as_deref().unwrap_or("-")
+  )
+}
+
+#[test]
+fn status_prints_external_upstream_cleanly() {
+  let route = serde_json::from_value(serde_json::json!({
+    "id":"fixture","url":"https://app.example.test","version":1,"gateway":"entry",
+    "spec":{"hostname":"app.example.test","upstream":"127.0.0.1:7700"},
+  })).unwrap();
+  assert_eq!(
+    external_upstream_line(&route),
+    "  https://app.example.test  →  上游 127.0.0.1:7700  经 entry"
+  );
 }
 
 pub fn doctor(v: &wharf_api_types::view::DoctorReport) {

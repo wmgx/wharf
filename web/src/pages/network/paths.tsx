@@ -6,7 +6,8 @@ import { hopBetween } from "@/components/hop";
 import { Panel, Tip } from "@/components/kit";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import type { LinkMode, NetworkView, Status } from "@/types";
+import type { NetworkView, Status } from "@/types";
+import type { LinkMode } from "@/types.gen";
 import { linkState } from "./model";
 
 export function Paths({ status, net }: { status: Status; net: NetworkView }) {

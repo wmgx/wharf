@@ -273,3 +273,16 @@ fn previous_agent_report_and_service_spec_still_deserialize() {
       && spec.heartbeat.is_none()
   );
 }
+
+#[test]
+fn unchanged_legacy_check_survives_plan_validation() {
+  let mut spec: ServiceSpec = serde_json::from_value(json!({
+    "source":{"image":"nginx:1"},"server":"s1",
+    "log_alerts":[{"pattern":"fixture","window_mins":1441}],
+  }))
+  .unwrap();
+  let installed = spec.clone();
+  assert!(validate(&installed, Some(&installed)).is_ok());
+  spec.log_alerts[0].window_mins += 1;
+  assert!(validate(&spec, Some(&installed)).is_err());
+}

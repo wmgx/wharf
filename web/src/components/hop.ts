@@ -1,4 +1,5 @@
-import type { LinkMode, NetworkView, RouteView, Status } from "@/types";
+import type { NetworkView, RouteView, Status } from "@/types";
+import type { LinkMode } from "@/types.gen";
 
 export type Hop =
   | { kind: "local"; text: "本机" }

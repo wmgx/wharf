@@ -98,9 +98,6 @@ async fn observe_one(state: &AppState, r: &RouteDiagnosis) {
   let host = r.hostname.clone();
   let cert_days =
     r.cert_expires.map(|t| (t - chrono::Utc::now()).num_days());
-  if let Some(days) = cert_days {
-    cert_notify(state, &host, days).await;
-  }
   if let Ok(mut m) = LAST.lock() {
     if m
       .get(&host)
@@ -124,6 +121,9 @@ async fn observe_one(state: &AppState, r: &RouteDiagnosis) {
         cert_days,
       },
     );
+  }
+  if let Some(days) = cert_days {
+    cert_notify(state, &host, days).await;
   }
   // 除了 HTTPS 这层，还有哪一层不通：多半就是原因。
   let cause = r

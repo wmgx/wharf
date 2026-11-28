@@ -171,7 +171,7 @@ fn edge_domains_included_and_egress_routing_rules() {
   .unwrap();
   assert_eq!(
     selected.edge,
-    [("edge.example.test".into(), "site".into())]
+    [("edge.example.test".to_string(), "site".to_string())]
   );
   let should_egress =
     |snap: &Snapshot, patch: &RouteSpec, gw: &GatewaySpec| {

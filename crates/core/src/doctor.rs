@@ -329,11 +329,12 @@ fn selection(
     );
   }
   if !matches!(scope, DoctorScope::Server(_)) {
-    result
-      .servers
-      .extend(result.services.iter().filter_map(|n| {
-        Some(world.services.get(n)?.spec.server.clone())
-      }));
+    result.servers.extend(result.services.iter().filter_map(|n| {
+      if matches!(scope, DoctorScope::Service(service) if service != n) {
+        return None;
+      }
+      Some(world.services.get(n)?.spec.server.clone())
+    }));
     result
       .servers
       .extend(result.gateways.iter().filter_map(|n| {
@@ -567,6 +568,7 @@ fn use_egress_for_doctor(
     || snap
       .api_via
       .as_deref()
+      .map(str::trim)
       .and_then(|name| snap.world.servers.get(name))
       .and_then(|s| s.settings.egress.as_ref())
       .is_some_and(|e| {
@@ -665,11 +667,18 @@ impl RouteChecks<'_> {
       domain_expires: crate::rdap::expires_of(host),
       edge_app: None,
     };
-    let Some((gw_name, gw)) =
-      gateway.filter(|_| spec.redirect.is_none())
-    else {
+    let Some((gw_name, gw)) = gateway else {
+      diagnosis.checks.push(check(
+        "gateway",
+        host,
+        CheckStatus::Bad,
+        "没有可用的网关",
+      ));
       return Some((diagnosis, vec![]));
     };
+    if spec.redirect.is_some() {
+      return Some((diagnosis, vec![]));
+    }
     let gateway = gateway_check(self.live, gw_name, &gw.server);
     let gateway_ok = gateway.status == CheckStatus::Ok;
     diagnosis.checks.push(gateway);
@@ -936,6 +945,7 @@ impl RouteChecks<'_> {
     } else {
       request(&self.clients.direct).send().await
     };
+    let subject = url.split(['?', '#']).next().unwrap_or(url);
     let layer = if url.starts_with("https://") {
       "https"
     } else {
@@ -947,7 +957,7 @@ impl RouteChecks<'_> {
         return (
           check(
             layer,
-            url,
+            subject,
             CheckStatus::Bad,
             error_chain(&e.without_url()),
           ),
@@ -986,7 +996,7 @@ impl RouteChecks<'_> {
     if let Some(via) = via {
       detail.push_str(&format!("（经 {via} 出口）"));
     }
-    (check(layer, url, status, detail), expires, bad_gateway)
+    (check(layer, subject, status, detail), expires, bad_gateway)
   }
 }
 

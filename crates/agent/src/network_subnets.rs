@@ -156,7 +156,7 @@ fn host_subnets(bridge_ifaces: &BTreeSet<String>) -> Vec<String> {
     routes
       .lines()
       .skip(1)
-      .filter_map(|line| direct_route(line, &non_docker)),
+      .filter_map(|line| direct_route(line, non_docker)),
   );
   subnets.into_iter().collect()
 }

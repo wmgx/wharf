@@ -198,6 +198,7 @@ pub fn spawn(state: Arc<AppState>) {
 }
 
 async fn round(state: &AppState) {
+  let at = chrono::Utc::now().timestamp_millis();
   let Ok(snap) = crate::snapshot::load(&state.db).await else {
     return;
   };
@@ -242,16 +243,19 @@ async fn round(state: &AppState) {
     let Some((ok, detail)) = outcome else {
       continue;
     };
-    let prev = last(&name).map_or(0, |v| v.fails);
-    let fails = if ok { 0 } else { prev + 1 };
     if let Ok(mut l) = LAST.lock() {
+      let prev = match l.get(&name) {
+        Some(previous) if previous.at > at => continue,
+        Some(previous) => previous.fails,
+        None => 0,
+      };
       l.insert(
         name.clone(),
         MonitorView {
           ok,
           detail: detail.clone(),
-          at: chrono::Utc::now().timestamp_millis(),
-          fails,
+          at,
+          fails: if ok { 0 } else { prev.saturating_add(1) },
         },
       );
     }

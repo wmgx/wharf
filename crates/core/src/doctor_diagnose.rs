@@ -113,6 +113,14 @@ fn set_cause(
   confirmed: bool,
 ) {
   for c in checks {
+    if c.layer == "container"
+      && c.subject == target.container_subject
+      && !confirmed
+      && c.status == CheckStatus::Bad
+    {
+      c.detail.push('。');
+      c.detail.push_str(cause);
+    }
     if c.status != CheckStatus::Bad {
       continue;
     }
