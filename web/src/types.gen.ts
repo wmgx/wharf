@@ -1094,14 +1094,6 @@ export interface ExposureView {
   risks: RiskRow[];
 }
 
-export interface ExtractedSecretItem {
-  action: string;
-  component?: string | null;
-  env_key: string;
-  reason: string;
-  secret_name: string;
-}
-
 export interface ExternalIncident {
   name: string;
   url: string;
@@ -1134,6 +1126,14 @@ export type Extract = {
   from: "cookie";
   name: string;
 };
+
+export interface ExtractedSecretItem {
+  action: string;
+  component?: string | null;
+  env_key: string;
+  reason: string;
+  secret_name: string;
+}
 
 export interface FailoverEntryHealth {
   detail: string;
