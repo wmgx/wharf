@@ -29,6 +29,7 @@ use crate::{
   rules::resources::service_limit,
   snapshot,
   state::AppState,
+  world::World,
 };
 
 #[path = "report/summary.rs"]

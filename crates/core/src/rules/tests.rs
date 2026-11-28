@@ -685,6 +685,7 @@ async fn notice_with_subject_respects_offline_and_custom_suppression()
         delivery: Delivery::None,
         suppressed: false,
       }),
+      now,
     )
     .await;
   }
