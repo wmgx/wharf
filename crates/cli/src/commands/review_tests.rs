@@ -1,5 +1,5 @@
 use super::*;
-use clap::Parser;
+use crate::command_paths;
 use tokio::{
   io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
   net::TcpListener,
@@ -13,9 +13,12 @@ async fn fixture_cli() {
   };
   let args = std::env::var("WHARF_FIXTURE_CLI_ARGS").unwrap();
   let args: Vec<String> = serde_json::from_str(&args).unwrap();
-  let cli =
-    Cli::try_parse_from(std::iter::once("wharf".into()).chain(args))
-      .unwrap();
+  let argv: Vec<_> = std::iter::once("wharf")
+    .chain(args.iter().map(String::as_str))
+    .collect();
+  let app = command_paths::app();
+  let (cli, matches) = command_paths::parse(&app, &argv).unwrap();
+  assert!(!cli.quiet || crate::quiet_supported(&app, &matches));
   let client = Client::test_endpoint(endpoint);
   print::set_quiet(cli.quiet);
   println!("WHARF_FIXTURE_STDOUT");
@@ -96,9 +99,13 @@ async fn fixture_output(
       if !request.is_empty() {
         requests.push(serde_json::from_slice(&request).unwrap());
       }
+      let status = match body["code"].as_str() {
+        Some("ConfirmRequired" | "PlanStale") => "409 Conflict",
+        _ => "200 OK",
+      };
       let body = body.to_string();
       let response = format!(
-        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
       );
       socket.write_all(response.as_bytes()).await.unwrap();
@@ -466,13 +473,20 @@ async fn exec_fields_keeps_single_document_and_remote_exit_code() {
     "exit_code": 2, "stdout": "fixture-out", "stderr": "fixture-err",
     "truncated": false, "duration_ms": 1, "output_bytes": 22
   });
-  let (code, value) = run_fixture(
-    &["exec", "s1", "--fields", "stdout", "--", "exit 2"],
-    vec![("POST /api/servers/s1/exec ", response)],
-  )
-  .await;
-  assert_eq!(code, 2);
-  assert_eq!(value, json!({"stdout": "fixture-out"}));
+  for prefix in [&["exec"][..], &["server", "exec"][..]] {
+    let args: Vec<_> = prefix
+      .iter()
+      .copied()
+      .chain(["s1", "--fields", "stdout", "--", "exit 2"])
+      .collect();
+    let (code, value) = run_fixture(
+      &args,
+      vec![("POST /api/servers/s1/exec ", response.clone())],
+    )
+    .await;
+    assert_eq!(code, 2);
+    assert_eq!(value, json!({"stdout": "fixture-out"}));
+  }
 }
 
 #[tokio::test]
@@ -747,4 +761,131 @@ async fn repair_json_preserves_business_exit_without_signaling_confirmation()
   assert!(stderr.is_empty());
   let view: Value = serde_json::from_str(&stdout).unwrap();
   assert_eq!(view["execution"]["exit_code"], 2);
+}
+
+#[tokio::test]
+async fn moved_export_and_task_keep_stdout() {
+  let dir = tempfile::tempdir().unwrap();
+  let output = dir.path().join("app.toml");
+  let fleet = json!({"services": {"app": {"server": "s1", "source": {"image":"nginx"}}}});
+  for prefix in [&["export"][..], &["plan", "export"][..]] {
+    let (code, stdout, stderr, _) = fixture_output(
+      prefix,
+      vec![("GET /api/export ", fleet.clone())],
+    )
+    .await;
+    assert_eq!(code, 0);
+    assert!(stdout.contains("[services.app]") && stderr.is_empty());
+    let argv: Vec<_> = prefix
+      .iter()
+      .copied()
+      .chain(["--service", "app", "-o", output.to_str().unwrap()])
+      .collect();
+    let (code, _, _, _) = fixture_output(
+      &argv,
+      vec![("GET /api/export ", fleet.clone())],
+    )
+    .await;
+    assert_eq!(code, 0);
+    assert!(
+      std::fs::read_to_string(&output)
+        .unwrap()
+        .contains("[services.app]")
+    );
+  }
+
+  let tasks = json!([{
+    "name":"fixture", "updated_at":"2026-01-01T00:00:00Z",
+    "spec":{"server":"s1", "schedule":"", "kind":"exec", "service":"app", "command":"true"}
+  }]);
+  for args in [
+    &["-q", "task", "list"][..],
+    &["ops", "task", "ls", "-q"][..],
+  ] {
+    let (code, stdout, stderr, _) =
+      fixture_output(args, vec![("GET /api/tasks ", tasks.clone())])
+        .await;
+    assert_eq!(
+      (code, stdout.as_str(), stderr.as_str()),
+      (0, "fixture\n", "")
+    );
+  }
+}
+
+#[tokio::test]
+async fn moved_restore_keeps_confirmation_and_partial_failure_codes()
+{
+  for prefix in [
+    &["backup", "restore"][..],
+    &["data", "backup", "restore"][..],
+  ] {
+    let mut args: Vec<_> = prefix
+      .iter()
+      .copied()
+      .chain(["app", "--snapshot", "snap", "--json"])
+      .collect();
+    let restore = "POST /api/services/app/restore ";
+    let required = json!({
+      "code":"ConfirmRequired", "message":"需要确认", "hint":"--confirm service/app",
+      "suggest":["wharf data backup restore app"], "details":{"needs_confirm":["service/app"]}
+    });
+    let (code, body) =
+      run_fixture(&args, vec![(restore, required.clone())]).await;
+    assert_eq!(code, 2);
+    assert_eq!(body, required);
+    args.extend(["--confirm", "service/app"]);
+    let (code, body, requests) = fixture_requests(
+      &args,
+      vec![
+        (restore, json!({"run_id":"r1"})),
+        (
+          "GET /api/runs/r1 ",
+          json!({
+            "run_id":"r1", "plan_id":"p1", "status":"failed",
+            "started_at":"2026-01-01T00:00:00Z", "steps":[]
+          }),
+        ),
+      ],
+    )
+    .await;
+    assert_eq!(code, 4);
+    assert_eq!(body["status"], "failed");
+    assert_eq!(requests[0]["confirm"], "service/app");
+  }
+
+  let (code, body) = run_fixture(
+    &["apply", "p1", "--json"],
+    vec![(
+      "POST /api/apply ",
+      json!({"code":"PlanStale", "message":"计划过期"}),
+    )],
+  )
+  .await;
+  assert_eq!(code, 3);
+  assert_eq!(body["code"], "PlanStale");
+}
+
+#[tokio::test]
+async fn moved_alert_options_keep_read_and_write_responses() {
+  let alerts = json!({"rules":[], "notices":[], "firing":[], "history":[], "include_logs":true});
+  for prefix in
+    [&["alert", "options"][..], &["ops", "alert", "options"][..]]
+  {
+    let mut args: Vec<_> =
+      prefix.iter().copied().chain(["--json"]).collect();
+    let (code, body) =
+      run_fixture(&args, vec![("GET /api/alerts ", alerts.clone())])
+        .await;
+    assert_eq!(code, 0);
+    assert_eq!(body, json!({"include_logs":true}));
+    args.extend(["--include-logs", "on"]);
+    let (code, body, requests) = fixture_requests(
+      &args,
+      vec![("PUT /api/alerts/options ", alerts.clone())],
+    )
+    .await;
+    assert_eq!(code, 0);
+    assert_eq!(body["rules"], json!([]));
+    assert_eq!(requests, vec![json!({"include_logs":true})]);
+  }
 }

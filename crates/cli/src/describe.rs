@@ -3,6 +3,8 @@
 use clap::CommandFactory;
 use serde_json::{Value, json};
 
+use crate::command_paths;
+
 /// 只留有内容的字段，省 AI 的上下文。
 fn compact(v: Value) -> Value {
   match v {
@@ -37,16 +39,36 @@ fn arg(a: &clap::Arg) -> Value {
   }))
 }
 
-fn walk(
+fn children(
   cmd: &clap::Command,
-  path: &mut Vec<String>,
+) -> impl Iterator<Item = &clap::Command> {
+  cmd.get_subcommands().filter(|sub| sub.get_name() != "help")
+}
+
+fn walk<'a>(
+  cmd: &'a clap::Command,
+  path: &mut Vec<&'a str>,
   out: &mut Vec<Value>,
+  legacy: bool,
 ) {
-  let subs: Vec<&clap::Command> = cmd
-    .get_subcommands()
-    .filter(|s| s.get_name() != "help")
-    .collect();
-  if subs.is_empty()
+  if let Some(entry) = entry(cmd, path) {
+    out.push(entry);
+  }
+  for sub in children(cmd) {
+    if path.is_empty()
+      && !legacy
+      && command_paths::group(sub.get_name()).is_some()
+    {
+      continue;
+    }
+    path.push(sub.get_name());
+    walk(sub, path, out, legacy);
+    path.pop();
+  }
+}
+
+fn entry(cmd: &clap::Command, path: &[&str]) -> Option<Value> {
+  if children(cmd).next().is_none()
     || !path.is_empty() && !cmd.is_subcommand_required_set()
   {
     let args: Vec<Value> = cmd
@@ -57,9 +79,9 @@ fn walk(
       })
       .map(arg)
       .collect();
-    let command = path.join(" ");
+    let command = command_paths::business_path(path).join(" ");
     let mut entry = compact(json!({
-      "command": format!("wharf {command}"),
+      "command": format!("wharf {}", path.join(" ")),
       "about": cmd.get_about().map(|h| h.to_string()),
       "details": cmd.get_long_about().map(|h| h.to_string()),
       "args": args,
@@ -192,13 +214,45 @@ fn walk(
       }
       _ => {}
     }
-    out.push(entry);
+    Some(entry)
+  } else {
+    None
   }
-  for s in subs {
-    path.push(s.get_name().to_string());
-    walk(s, path, out);
-    path.pop();
+}
+
+pub fn lookup(words: &[String]) -> Option<Value> {
+  let mut root = command_paths::app();
+  root.build();
+  let mut cmd = &root;
+  let mut path = Vec::new();
+  if let Some(group) =
+    words.first().and_then(|name| command_paths::group(name))
+  {
+    cmd = root.find_subcommand(group)?;
+    path.push(group);
   }
+  for word in words {
+    cmd = children(cmd).find(|sub| {
+      sub.get_name() == word.as_str()
+        || sub.get_all_aliases().any(|alias| alias == word.as_str())
+    })?;
+    path.push(cmd.get_name());
+  }
+  let mut description = entry(cmd, &path).unwrap_or_else(|| {
+    let mut group = compact(json!({
+      "command": format!("wharf {}", path.join(" ")),
+      "about": cmd.get_about().map(|h| h.to_string()),
+      "details": cmd.get_long_about().map(|h| h.to_string()),
+    }));
+    group["returns"] = Value::Null;
+    group
+  });
+  let subcommands: Vec<_> =
+    children(cmd).map(clap::Command::get_name).collect();
+  if !subcommands.is_empty() {
+    description["subcommands"] = json!(subcommands);
+  }
+  Some(description)
 }
 
 fn read_when_no_args(command: &str) -> bool {
@@ -510,9 +564,14 @@ pub fn usable(prefix: &[String], me: &Value) -> Value {
   let mut result = commands(prefix);
   if let Some(commands) = result["commands"].as_array_mut() {
     commands.retain_mut(|command| {
-      if command["command"]
+      let path: Vec<_> = command["command"]
         .as_str()
-        .is_some_and(|name| name.starts_with("wharf var "))
+        .unwrap_or_default()
+        .split_whitespace()
+        .skip(1)
+        .collect();
+      let path = command_paths::business_path(&path);
+      if matches!(path, ["var", ..])
         && me["services"]
           .as_array()
           .is_some_and(|scope| !scope.is_empty())
@@ -532,12 +591,8 @@ pub fn usable(prefix: &[String], me: &Value) -> Value {
       }
       if command["read_when_no_args"] == true
         && !matches!(
-          command["command"].as_str(),
-          Some(
-            "wharf token set"
-              | "wharf server watch-unit"
-              | "wharf server baseline"
-          )
+          path,
+          ["token", "set"] | ["server", "watch-unit" | "baseline"]
         )
         && has(&json!("read"))
       {
@@ -553,16 +608,24 @@ pub fn usable(prefix: &[String], me: &Value) -> Value {
 
 /// `prefix` 不为空时只列这一组，例如 `["service"]`。
 pub fn commands(prefix: &[String]) -> Value {
-  let mut root = crate::Cli::command();
+  let legacy = prefix
+    .first()
+    .is_some_and(|name| command_paths::group(name).is_some());
+  let mut root = if legacy {
+    crate::Cli::command()
+  } else {
+    command_paths::app()
+  };
   root.build();
   let mut list = Vec::new();
-  walk(&root, &mut Vec::new(), &mut list);
+  walk(&root, &mut Vec::new(), &mut list, legacy);
   if !prefix.is_empty() {
     let want = format!("wharf {}", prefix.join(" "));
+    let descendants = format!("{want} ");
     list.retain(|c| {
-      c["command"].as_str().is_some_and(|n| {
-        n == want || n.starts_with(&format!("{want} "))
-      })
+      c["command"]
+        .as_str()
+        .is_some_and(|n| n == want || n.starts_with(&descendants))
     });
   }
   let globals: Vec<Value> = root
@@ -580,6 +643,46 @@ pub fn commands(prefix: &[String]) -> Value {
 #[cfg(test)]
 mod tests {
   #[test]
+  fn migrated_directory_preserves_every_entry_and_its_metadata() {
+    use super::{command_paths::MOVES, commands, json};
+    use std::collections::BTreeMap;
+
+    let directory = commands(&[]);
+    let entries = directory["commands"].as_array().unwrap();
+    let canonical: BTreeMap<_, _> = entries
+      .iter()
+      .map(|row| (row["command"].as_str().unwrap(), row))
+      .collect();
+    assert_eq!(canonical.len(), entries.len());
+    for &(old, group) in MOVES {
+      let old_entries = commands(&[old.into()]);
+      let old_entries = old_entries["commands"].as_array().unwrap();
+      assert!(!old_entries.is_empty(), "{old}");
+      let new_entries = commands(&[group.into(), old.into()]);
+      assert_eq!(
+        new_entries["commands"].as_array().unwrap().len(),
+        old_entries.len(),
+        "{old}"
+      );
+      for row in old_entries {
+        let path = row["command"]
+          .as_str()
+          .unwrap()
+          .strip_prefix("wharf ")
+          .unwrap();
+        assert!(
+          !canonical.contains_key(row["command"].as_str().unwrap()),
+          "{path}"
+        );
+        let new = format!("wharf {group} {path}");
+        let mut expected = row.clone();
+        expected["command"] = json!(new);
+        assert_eq!(canonical[new.as_str()], &expected, "{path}");
+      }
+    }
+  }
+
+  #[test]
   fn var_commands_report_returns_and_respect_global_scope() {
     use super::{commands, json, usable};
 
@@ -596,16 +699,21 @@ mod tests {
     );
     assert_eq!(entry("wharf var rm")["returns"], "plan");
     let scope = json!({"perms":["read"],"services":["app"]});
-    assert_eq!(usable(&prefix, &scope)["commands"], json!([]));
     let global = json!({"perms":["read"],"services":[]});
-    assert!(
-      usable(&prefix, &global)["commands"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|cmd| cmd["command"] == "wharf var set"
-          && cmd["usable_mode"] == "read_only")
-    );
+    for (prefix, name) in [
+      (vec!["var".into()], "wharf var set"),
+      (vec!["config".into(), "var".into()], "wharf config var set"),
+    ] {
+      assert_eq!(usable(&prefix, &scope)["commands"], json!([]));
+      assert!(
+        usable(&prefix, &global)["commands"]
+          .as_array()
+          .unwrap()
+          .iter()
+          .any(|cmd| cmd["command"] == name
+            && cmd["usable_mode"] == "read_only")
+      );
+    }
   }
 
   #[test]
@@ -625,7 +733,7 @@ mod tests {
       push["flag_variants"]["--delete"]["apply_perms"],
       json!(["exec", "confirm"])
     );
-    let export = command("wharf export");
+    let export = command("wharf plan export");
     assert_eq!(
       export["flag_variants"]["--with-secrets"],
       json!({"perms": ["admin"], "returns": "bundle-export-summary"})
@@ -698,7 +806,7 @@ mod tests {
       let result = super::usable(&[], &json!({"perms": perms}));
       let commands = result["commands"].as_array().unwrap();
       for (name, expected) in [
-        ("wharf exec", host),
+        ("wharf server exec", host),
         ("wharf server apt", host),
         ("wharf server baseline", baseline),
       ] {
@@ -726,7 +834,7 @@ mod tests {
       .filter_map(|c| c["command"].as_str())
       .collect();
     assert!(names.contains(&"wharf service deploy"));
-    assert!(names.contains(&"wharf egress"));
+    assert!(names.contains(&"wharf network egress"));
     let usable =
       super::usable(&[], &serde_json::json!({"perms": ["read"]}));
     let entries = usable["commands"].as_array().unwrap();
