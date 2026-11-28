@@ -349,7 +349,7 @@ fn suggest(
   let components =
     crate::render::service_expected_components(&selected.name, spec);
   let component =
-    components.iter().next().filter(|_| components.len() == 1);
+    components.first().filter(|_| components.len() == 1);
   let component_limits =
     component.and_then(|name| spec.container_limits.get(name));
   let limits = component_limits

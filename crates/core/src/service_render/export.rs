@@ -782,6 +782,7 @@ mod tests {
         "server":"s1", "source":{"compose":{"content":content}},
         "files":[{"path":"/etc/app.conf","content":"key=never-export-this"}]
       })).unwrap(),
+      host_groups: Default::default(),
       host_ports: Default::default(),
       pins: Default::default(),
       import: None,
@@ -861,6 +862,7 @@ fn compose_export_carries_23_1_runtime_and_component_limits() {
   let row = |spec| ServiceRow {
     instance_id: "fixture".into(),
     spec: serde_json::from_value(spec).unwrap(),
+    host_groups: Default::default(),
     host_ports: Default::default(),
     pins: Default::default(),
     import: None,

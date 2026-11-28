@@ -229,14 +229,16 @@ impl Docker {
         .collect();
       projects.extend(discovered);
     }
-    let containers =
-      projects.iter().filter_map(|p| by_project.get(p)).flatten();
-    let observed: Vec<_> = containers
-      .clone()
-      .filter(|c| c.state != "running")
-      .chain(containers.filter(|c| c.state == "running").take(512))
-      .map(|c| c.name.as_str())
-      .collect();
+    let observed: Vec<_> = {
+      let containers =
+        projects.iter().filter_map(|p| by_project.get(p)).flatten();
+      containers
+        .clone()
+        .filter(|c| c.state != "running")
+        .chain(containers.filter(|c| c.state == "running").take(512))
+        .map(|c| c.name.as_str())
+        .collect()
+    };
     let mut finished = std::collections::BTreeMap::new();
     for batch in observed.chunks(128) {
       finished.extend(
