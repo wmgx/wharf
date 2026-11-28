@@ -5559,7 +5559,11 @@ mod tests {
         .iter()
         .any(|(_, message)| message.contains("photos:originals"))
     };
-    assert!(has_warning(crate::lint::doctor_warnings(&snap)));
+    assert!(has_warning(crate::lint::scoped_warnings(
+      &snap,
+      &BTreeSet::from(["app".into()]),
+      &BTreeSet::new(),
+    )));
     let step = StepPlan {
       items: vec![],
       title: String::new(),
