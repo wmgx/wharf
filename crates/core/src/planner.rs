@@ -561,22 +561,9 @@ pub(crate) async fn require_plan_request(
   Ok(())
 }
 
-fn service_needs_default_timezone(
-  previous: Option<&crate::world::ServiceRow>,
-  row: &crate::world::ServiceRow,
-) -> bool {
-  !matches!(row.spec.source, Source::Compose { .. })
-    && (row.spec.timezone.as_deref() == Some("default")
-      || (row.spec.timezone.is_none()
-        && row.import.is_none()
-        && !row.spec.env.contains_key("TZ")
-        && previous
-          .is_none_or(|old| old.instance_id != row.instance_id)))
-}
-
 pub(crate) async fn make_plan_inner(
   state: &AppState,
-  req: PlanRequest,
+  mut req: PlanRequest,
   mut snap: Snapshot,
   check_migrated_images: bool,
   admin: bool,
@@ -591,6 +578,10 @@ pub(crate) async fn make_plan_inner(
       "changes、fleet、partial 只能给一个",
     ));
   }
+  if req.no_defaults && req.fleet.is_none() && req.partial.is_none() {
+    return Err(ApiError::invalid("计划 no_defaults 仅用于 Fleet"));
+  }
+  let frozen = crate::service_defaults::prepare(&mut req, &snap);
   if let Some(fleet) = &req.fleet {
     desired.replace_with(fleet)?;
   } else if let Some(fleet) = &req.partial {
@@ -639,27 +630,7 @@ pub(crate) async fn make_plan_inner(
       }
     }
   }
-  if desired.services.iter().any(|(name, row)| {
-    service_needs_default_timezone(current.services.get(name), row)
-  }) {
-    let timezone = state
-      .db
-      .call(|conn| crate::config_api::container_timezone(conn))
-      .await?;
-    for (name, row) in &mut desired.services {
-      if service_needs_default_timezone(
-        current.services.get(name),
-        row,
-      ) {
-        row.spec.timezone = Some(timezone.clone());
-      }
-    }
-  }
-  for row in desired.services.values_mut() {
-    if row.spec.timezone.as_deref() == Some("off") {
-      row.spec.timezone = None;
-    }
-  }
+  crate::service_defaults::finish(&mut desired, &snap, frozen);
   // 换了服务器的服务在新机器上重新分配宿主机端口，不和那里已有的服务抢。
   for (name, svc) in desired.services.iter_mut() {
     if current
@@ -4954,25 +4925,6 @@ mod tests {
     assert!(warnings[0].contains("/api/*"));
   }
 
-  #[test]
-  fn default_timezone_only_for_new_instances_without_explicit_environment()
-   {
-    let world = world();
-    let before = &world.services["app"];
-    let mut after = before.clone();
-    assert!(service_needs_default_timezone(None, &after));
-    assert!(!service_needs_default_timezone(Some(before), &after));
-    after.spec.env.insert("TZ".into(), String::new());
-    assert!(!service_needs_default_timezone(None, &after));
-    after.spec.timezone = Some("default".into());
-    assert!(service_needs_default_timezone(Some(before), &after));
-    after.spec.source = Source::Compose {
-      content: None,
-      file: None,
-    };
-    assert!(!service_needs_default_timezone(None, &after));
-  }
-
   #[tokio::test]
   async fn upgrade_keeps_baseline_services_and_legacy_wire_data_without_drift()
    {
@@ -5028,6 +4980,7 @@ mod tests {
       move |c| {
         use rusqlite::params;
         c.execute("INSERT INTO resources VALUES ('server','s1','{}','{}',1,0,0)", []).map_err(db::sql_err)?;
+        db::set_setting(c, crate::service_defaults::KEY, Some(r#"{"timezone":"UTC","limits":{"memory_mb":256}}"#))?;
         for (service, _, compose, hash, spec) in rows {
           let instance = format!("svc_{service}");
           let mut meta = json!({"instance_id": instance});
@@ -5115,6 +5068,7 @@ mod tests {
       &state,
       PlanRequest {
         changes: vec![wharf_api_types::spec::Change::UpsertService {
+          no_defaults: false,
           pins: None,
           commit: None,
           migrate: None,
@@ -5274,6 +5228,7 @@ mod tests {
       &state,
       PlanRequest {
         changes: vec![Change::UpsertService {
+          no_defaults: false,
           name: "app".into(),
           spec,
           pins: None,
@@ -5330,6 +5285,7 @@ mod tests {
       &state,
       PlanRequest {
         changes: vec![Change::UpsertService {
+          no_defaults: false,
           name: "app".into(),
           spec,
           pins: Some(BTreeMap::new()),
@@ -5487,6 +5443,7 @@ mod tests {
     }))
     .unwrap();
     let service = Change::UpsertService {
+      no_defaults: false,
       name: "app".into(),
       spec,
       adopt: None,
@@ -5767,6 +5724,7 @@ mod tests {
       &state,
       PlanRequest {
         changes: vec![wharf_api_types::spec::Change::UpsertService {
+          no_defaults: false,
           name: "app".into(),
           spec,
           adopt: None,
@@ -5887,6 +5845,7 @@ mod tests {
         PlanRequest {
           changes: vec![
             wharf_api_types::spec::Change::UpsertService {
+              no_defaults: false,
               pins: None,
               commit: None,
               migrate: None,
@@ -5953,6 +5912,7 @@ mod tests {
     });
     let spec = |name: &str, item| PlanRequest {
       changes: vec![wharf_api_types::spec::Change::UpsertService {
+        no_defaults: false,
         pins: None,
         commit: None,
         migrate: None,
@@ -7613,6 +7573,7 @@ mod tests {
       &state,
       PlanRequest {
         changes: vec![Change::UpsertService {
+          no_defaults: false,
           pins: None,
           commit: None,
           migrate: None,
@@ -7961,6 +7922,7 @@ mod tests {
     world.services.insert(
       "app".to_string(),
       ServiceRow {
+        frozen_defaults: Default::default(),
         host_groups: Default::default(),
         instance_id: "svc_fixture".into(),
         spec,

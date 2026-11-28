@@ -45,6 +45,7 @@ pub struct ServerRow {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ServiceRow {
   pub instance_id: String,
+  pub frozen_defaults: wharf_api_types::spec::ServiceDefaults,
   pub host_groups: BTreeMap<String, u32>,
   pub spec: ServiceSpec,
   /// 端口名 → 宿主机端口。
@@ -171,6 +172,10 @@ impl World {
                 .to_string(),
               spec: serde_json::from_value(row.spec)
                 .map_err(json_err)?,
+              frozen_defaults: serde_json::from_value(
+                row.meta["frozen_defaults"].clone(),
+              )
+              .unwrap_or_default(),
               host_groups: serde_json::from_value(
                 row.meta["host_groups"].clone(),
               )
@@ -413,6 +418,12 @@ impl World {
               settings.task_limits = None;
             }
           }
+          if let Some(defaults) = &settings.defaults {
+            crate::service_defaults::validate(defaults)?;
+            if defaults.is_empty() {
+              settings.defaults = None;
+            }
+          }
           server.settings = settings;
         }
         Change::AdoptData { .. } => {}
@@ -422,6 +433,7 @@ impl World {
           adopt,
           pins: req_pins,
           commit: req_commit,
+          no_defaults,
           ..
         } => {
           if let Source::Build(b) = &spec.source
@@ -641,10 +653,19 @@ impl World {
             })
             .map(|old| old.host_groups.clone())
             .unwrap_or_default();
+          let frozen_defaults = old
+            .filter(|_| !no_defaults && adopt.is_none())
+            .map_or_else(Default::default, |old| {
+              crate::service_defaults::matching(
+                &old.frozen_defaults,
+                &spec,
+              )
+            });
           self.services.insert(
             name.clone(),
             ServiceRow {
               instance_id,
+              frozen_defaults,
               host_groups,
               spec,
               host_ports,
@@ -854,6 +875,7 @@ impl World {
     }
     for (name, spec) in &fleet.services {
       changes.push(Change::UpsertService {
+        no_defaults: false,
         pins: None,
         commit: None,
         migrate: None,
@@ -1749,6 +1771,9 @@ impl World {
         if let Some(import) = &r.import {
           meta["import"] = to_json(import);
         }
+        if !r.frozen_defaults.is_empty() {
+          meta["frozen_defaults"] = to_json(&r.frozen_defaults);
+        }
         if !r.host_groups.is_empty() {
           meta["host_groups"] = to_json(&r.host_groups);
         }
@@ -2173,14 +2198,8 @@ fn validate_runtime_options(
         .with_hint("例如 --shm-size 128m"),
     );
   }
-  if spec
-    .log_max
-    .is_some_and(|log| log.max_bytes == 0 || log.max_files == 0)
-  {
-    return Err(
-      ApiError::invalid("日志轮转需要正数大小和保留文件数")
-        .with_hint("例如 --log-max 5m:1"),
-    );
+  if let Some(log) = &spec.log_max {
+    log.validate()?;
   }
   if spec.hostname.as_ref().is_some_and(|hostname| {
     hostname.len() > 253
@@ -2801,6 +2820,7 @@ mod tests {
     })).unwrap();
     world
       .apply_changes(&[Change::UpsertService {
+        no_defaults: false,
         name: "app".into(),
         spec,
         pins: None,
@@ -2824,6 +2844,7 @@ mod tests {
       file: None,
     };
     w.apply_changes(&[Change::UpsertService {
+      no_defaults: false,
       name: "app".into(),
       spec,
       adopt: None,
@@ -2860,6 +2881,7 @@ mod tests {
     spec.source = Source::Build(build);
     assert!(
       w.apply_changes(&[Change::UpsertService {
+        no_defaults: false,
         name: "app".into(),
         spec,
         adopt: None,
@@ -2959,7 +2981,7 @@ mod tests {
     w.servers.insert("s1".into(), server);
     w.apply_changes(&[
       Change::UpsertGateway { name: "edge".into(), spec: serde_json::from_value(json!({"kind":"caddy","server":"s1","default":true,"wildcard":["example.com"]})).unwrap() },
-      Change::UpsertService { pins: None, commit: None, migrate: None, name: "app".into(), spec: image_service("s1"), adopt: None },
+      Change::UpsertService { no_defaults: false, pins: None, commit: None, migrate: None, name: "app".into(), spec: image_service("s1"), adopt: None },
     ]).unwrap();
     w.allocate_ports().unwrap();
     let now = chrono::Utc::now().timestamp_millis();
@@ -3259,6 +3281,7 @@ mod tests {
   fn partial_fleet_keeps_unlisted_objects() {
     let mut w = sample();
     let add = |name: &str| Change::UpsertService {
+      no_defaults: false,
       pins: None,
       commit: None,
       migrate: None,
@@ -3368,6 +3391,7 @@ mod tests {
     reader.volumes = serde_json::from_value(serde_json::json!([{"from_service":"photos:data","target":"/data"}])).unwrap();
     w.apply_changes(&[
       Change::UpsertService {
+        no_defaults: false,
         name: "photos".into(),
         spec: owner,
         adopt: None,
@@ -3376,6 +3400,7 @@ mod tests {
         migrate: None,
       },
       Change::UpsertService {
+        no_defaults: false,
         name: "reader".into(),
         spec: reader,
         adopt: None,
@@ -3449,6 +3474,7 @@ mod tests {
     use wharf_api_types::ErrorCode;
     let mut w = sample();
     w.apply_changes(&[Change::UpsertService {
+      no_defaults: false,
       pins: None,
       commit: None,
       migrate: None,
@@ -3543,6 +3569,7 @@ services:
         spec: gw,
       },
       Change::UpsertService {
+        no_defaults: false,
         pins: None,
         commit: None,
         migrate: None,
@@ -3614,6 +3641,7 @@ services:
       vec![forward(20000, false)];
     w.validate().unwrap();
     w.apply_changes(&[Change::UpsertService {
+      no_defaults: false,
       pins: None,
       commit: None,
       migrate: None,
@@ -3633,6 +3661,7 @@ services:
     let mut spec = image_service("node1");
     spec.auto_update = true;
     w.apply_changes(&[Change::UpsertService {
+      no_defaults: false,
       pins: None,
       commit: None,
       migrate: None,
@@ -3651,6 +3680,7 @@ services:
     });
     let err = w
       .apply_changes(&[Change::UpsertService {
+        no_defaults: false,
         pins: None,
         commit: None,
         migrate: None,
@@ -3666,6 +3696,7 @@ services:
   fn trial_service_name_is_rejected() {
     let err = sample()
       .apply_changes(&[Change::UpsertService {
+        no_defaults: false,
         pins: None,
         commit: None,
         migrate: None,
@@ -3681,6 +3712,7 @@ services:
   fn task_service_name_is_rejected() {
     let err = sample()
       .apply_changes(&[Change::UpsertService {
+        no_defaults: false,
         pins: None,
         commit: None,
         migrate: None,
@@ -3725,6 +3757,7 @@ services:
     });
     let err = w
       .apply_changes(&[Change::UpsertService {
+        no_defaults: false,
         pins: None,
         commit: None,
         migrate: None,
@@ -3743,6 +3776,7 @@ services:
     let mut w = sample();
     w.apply_changes(&[
       Change::UpsertService {
+        no_defaults: false,
         pins: None,
         commit: None,
         migrate: None,
@@ -3751,6 +3785,7 @@ services:
         adopt: None,
       },
       Change::UpsertService {
+        no_defaults: false,
         pins: None,
         commit: None,
         migrate: None,
@@ -3844,6 +3879,7 @@ services:
     let mut w = sample();
     w.apply_changes(&[
       Change::UpsertService {
+        no_defaults: false,
         pins: None,
         commit: None,
         migrate: None,
@@ -3972,6 +4008,7 @@ services:
     };
     w.apply_changes(&[
       Change::UpsertService {
+        no_defaults: false,
         pins: None,
         commit: None,
         migrate: None,
@@ -4011,6 +4048,7 @@ services:
   fn unknown_server_is_rejected() {
     let mut w = sample();
     w.apply_changes(&[Change::UpsertService {
+      no_defaults: false,
       pins: None,
       commit: None,
       migrate: None,
@@ -4029,6 +4067,7 @@ services:
     let mut spec = image_service("node1");
     spec.source = serde_json::from_value(json!({"compose":{"content":"services:\n  db:\n    image: db:8\n  app:\n    image: app:2\n"}})).unwrap();
     w.apply_changes(&[Change::UpsertService {
+      no_defaults: false,
       pins: None,
       commit: None,
       migrate: None,
@@ -4067,6 +4106,7 @@ services:
     assert!(desired.writes_from(&current).is_empty());
     desired
       .apply_changes(&[Change::UpsertService {
+        no_defaults: false,
         pins: None,
         commit: None,
         migrate: None,

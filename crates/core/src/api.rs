@@ -3723,6 +3723,7 @@ mod tests {
     for (name, reference) in [("a", "[[url:S]]"), ("b", "[[FILE:S]]")]
     {
       world.services.insert(name.into(), crate::world::ServiceRow {
+        frozen_defaults: Default::default(),
         host_groups: Default::default(),
         instance_id: "svc_fixture".into(),
         spec: serde_json::from_value(json!({

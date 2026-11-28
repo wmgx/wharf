@@ -131,6 +131,7 @@ pub fn validate(
 
 pub fn config_only(old: &ServiceRow, new: &ServiceRow) -> bool {
   let mut stripped = new.clone();
+  stripped.frozen_defaults.clone_from(&old.frozen_defaults);
   stripped.spec.wait_for.clone_from(&old.spec.wait_for);
   stripped.spec.wait_for_timeout_secs =
     old.spec.wait_for_timeout_secs;

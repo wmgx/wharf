@@ -568,6 +568,7 @@ mod tests {
   #[test]
   fn url_skips_udp_ports() {
     let mut row: ServiceRow = ServiceRow {
+      frozen_defaults: Default::default(),
       host_groups: Default::default(),
       instance_id: "svc_fixture".into(),
       spec: serde_json::from_value(serde_json::json!({
@@ -721,6 +722,7 @@ async fn monitor_sends_custom_headers_respects_interval_retries_and_redacts_secr
     &spec, "API_KEY"
   ));
   let row = ServiceRow {
+    frozen_defaults: Default::default(),
     host_groups: Default::default(),
     instance_id: "svc_fixture".into(),
     spec: spec.clone(),
@@ -764,6 +766,7 @@ async fn monitor_sends_custom_headers_respects_interval_retries_and_redacts_secr
 #[test]
 fn readiness_skips_udp_but_rejects_invalid_headers_for_tcp() {
   let mut row = ServiceRow {
+    frozen_defaults: Default::default(),
     host_groups: Default::default(),
     instance_id: "svc_fixture".into(),
     spec: serde_json::from_value(serde_json::json!({

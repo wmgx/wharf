@@ -156,26 +156,8 @@ impl RuntimeOptions {
       };
     }
     if self.unset_log_max || self.log_max.is_some() {
-      spec.log_max = self
-        .log_max
-        .as_deref()
-        .map(|value| {
-          let parse = || {
-            let (bytes, files) = value.rsplit_once(':')?;
-            let max_bytes = size(bytes)?;
-            let max_files =
-              files.parse::<u32>().ok().filter(|&n| n > 0)?;
-            Some(LogMax {
-              max_bytes,
-              max_files,
-            })
-          };
-          parse().ok_or_else(|| {
-            ApiError::invalid("日志轮转需要正数大小和保留文件数")
-              .with_hint("例如 --log-max 5m:1")
-          })
-        })
-        .transpose()?;
+      spec.log_max =
+        self.log_max.as_deref().map(parse_log_max).transpose()?;
     }
     if self.clear_caps {
       spec.cap_add.clear();
@@ -399,7 +381,23 @@ impl ServerTaskLimitEdits {
   }
 }
 
-fn cpu_milli(cpus: f64) -> Result<u32, ApiError> {
+pub(crate) fn parse_log_max(value: &str) -> Result<LogMax, ApiError> {
+  let parse = || {
+    let (bytes, files) = value.rsplit_once(':')?;
+    let max_bytes = size(bytes)?;
+    let max_files = files.parse::<u32>().ok().filter(|&n| n > 0)?;
+    Some(LogMax {
+      max_bytes,
+      max_files,
+    })
+  };
+  parse().ok_or_else(|| {
+    ApiError::invalid("日志轮转需要正数大小和保留文件数")
+      .with_hint("例如 --log-max 5m:1")
+  })
+}
+
+pub(crate) fn cpu_milli(cpus: f64) -> Result<u32, ApiError> {
   let milli = cpus * 1000.0;
   if !cpus.is_finite()
     || !(0.0..=f64::from(u32::MAX)).contains(&milli)

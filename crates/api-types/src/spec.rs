@@ -107,6 +107,8 @@ pub struct ServerSettings {
   /// 后台传输限速，例如 3M 或 500K。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub bg_bwlimit: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub defaults: Option<ServiceDefaults>,
 }
 
 /// 机器基线（P9）。字段不填就不管；去掉某项只是不再管，不会改回去。
@@ -881,6 +883,109 @@ pub enum ImagePullMode {
   Always,
 }
 
+#[derive(
+  Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceDefaults {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub timezone: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub log_max: Option<LogMax>,
+  #[serde(default, skip_serializing_if = "Limits::is_empty")]
+  pub limits: Limits,
+}
+
+impl ServiceDefaults {
+  pub fn is_empty(&self) -> bool {
+    self.timezone.is_none()
+      && self.log_max.is_none()
+      && self.limits.is_empty()
+  }
+
+  pub fn with_fallback(mut self, fallback: &Self) -> Self {
+    self.timezone =
+      self.timezone.or_else(|| fallback.timezone.clone());
+    self.log_max = self.log_max.or(fallback.log_max);
+    self.limits.memory_mb =
+      self.limits.memory_mb.or(fallback.limits.memory_mb);
+    self.limits.cpu_milli =
+      self.limits.cpu_milli.or(fallback.limits.cpu_milli);
+    self.limits.pids = self.limits.pids.or(fallback.limits.pids);
+    self
+  }
+
+  pub fn patch(
+    &mut self,
+    patch: serde_json::Value,
+  ) -> Result<(), crate::ApiError> {
+    use serde_json::Value;
+
+    fn read<T: serde::de::DeserializeOwned>(
+      field: &str,
+      value: &Value,
+    ) -> Result<T, crate::ApiError> {
+      serde_json::from_value(value.clone()).map_err(|error| {
+        crate::ApiError::invalid(format!("默认值 {field} 无效"))
+          .with_hint(error.to_string())
+      })
+    }
+
+    for (field, value) in patch
+      .as_object()
+      .ok_or_else(|| crate::ApiError::invalid("默认值更新需为对象"))?
+    {
+      match field.as_str() {
+        "timezone" => self.timezone = read(field, value)?,
+        "log_max" => self.log_max = read(field, value)?,
+        "limits" if value.is_null() => {
+          self.limits = Limits::default()
+        }
+        "limits" => {
+          for (dimension, value) in
+            value.as_object().ok_or_else(|| {
+              crate::ApiError::invalid("默认值 limits 无效")
+            })?
+          {
+            match dimension.as_str() {
+              "memory_mb" => {
+                self.limits.memory_mb = read(dimension, value)?
+              }
+              "cpu_milli" => {
+                self.limits.cpu_milli = read(dimension, value)?
+              }
+              "pids" => self.limits.pids = read(dimension, value)?,
+              _ => {
+                return Err(crate::ApiError::invalid(format!(
+                  "默认值 {dimension} 无效"
+                )));
+              }
+            }
+          }
+        }
+        _ => {
+          return Err(crate::ApiError::invalid(format!(
+            "默认值 {field} 无效"
+          )));
+        }
+      }
+    }
+    Ok(())
+  }
+}
+
+impl LogMax {
+  pub fn validate(&self) -> Result<(), crate::ApiError> {
+    if self.max_bytes == 0 || self.max_files == 0 {
+      return Err(
+        crate::ApiError::invalid("日志轮转需要正数大小和保留文件数")
+          .with_hint("例如 --log-max 5m:1"),
+      );
+    }
+    Ok(())
+  }
+}
+
 impl Limits {
   pub fn is_empty(&self) -> bool {
     self.memory_mb.is_none()
@@ -1398,6 +1503,8 @@ pub enum Change {
   UpsertService {
     name: String,
     spec: ServiceSpec,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    no_defaults: bool,
     /// 导入时接管的现有容器：第一次部署前停掉它们，失败时恢复。部署成功后记进导入记录，不再起作用。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     adopt: Option<AdoptSpec>,

@@ -33,11 +33,17 @@ pub async fn run(
       c.get(&format!("/api/config/{}", seg(&key))).await?
     }
     ConfigCmd::Set { key, value } => {
-      c.put(
-        &format!("/api/config/{}", seg(&key)),
-        &Value::String(value),
-      )
-      .await?
+      let value = if key == "defaults.global" {
+        serde_json::from_str(&value).map_err(|error| {
+          wharf_api_types::ApiError::invalid(
+            "默认值更新需为 JSON 对象",
+          )
+          .with_hint(error.to_string())
+        })?
+      } else {
+        Value::String(value)
+      };
+      c.put(&format!("/api/config/{}", seg(&key)), &value).await?
     }
     ConfigCmd::Unset { key } => {
       c.delete(&format!("/api/config/{}", seg(&key))).await?

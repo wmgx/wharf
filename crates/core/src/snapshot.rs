@@ -28,6 +28,8 @@ pub const PULL_ATTEMPT_SECS: u64 = 30 * 60;
 #[derive(Default)]
 pub struct Snapshot {
   pub world: World,
+  pub global_defaults: wharf_api_types::spec::ServiceDefaults,
+  pub container_timezone: Option<String>,
   pub core_server: Option<String>,
   pub api_via: Option<String>,
   pub heartbeat_url: Option<String>,
@@ -215,6 +217,8 @@ pub(crate) async fn load_inner(
     Ok(
       Snapshot {
         world,
+        global_defaults: crate::service_defaults::load(c)?,
+        container_timezone: db::setting(c, "core.timezone")?,
         agents,
         core_server,
         api_via: db::setting(c, crate::egress::API_VIA)?,
@@ -1437,6 +1441,7 @@ mod tests {
     world.services.insert(
       "app".to_string(),
       ServiceRow {
+        frozen_defaults: Default::default(),
         host_groups: Default::default(),
         instance_id: "svc_fixture".into(),
         spec,

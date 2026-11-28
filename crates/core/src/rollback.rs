@@ -460,6 +460,7 @@ mod tests {
     let mut world = crate::world::World::default();
     world
       .apply_changes(&[Change::UpsertService {
+        no_defaults: false,
         name: "app".into(),
         spec: spec.clone(),
         adopt: None,
@@ -506,6 +507,7 @@ mod tests {
     let mut world = crate::world::World::default();
     world
       .apply_changes(&[Change::UpsertService {
+        no_defaults: false,
         name: "app".into(),
         spec: spec.clone(),
         adopt: None,
@@ -641,6 +643,7 @@ mod tests {
     })).unwrap();
     spec.heartbeat.as_mut().unwrap().token = crate::auth::new_token();
     let change = |spec| Change::UpsertService {
+      no_defaults: false,
       name: "app".into(),
       spec,
       adopt: None,

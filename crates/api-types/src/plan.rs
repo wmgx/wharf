@@ -26,6 +26,9 @@ pub struct PlanRequest {
   /// 局部期望状态：只新建或修改文件里写到的对象，没写到的不动，也不会删除。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub partial: Option<Fleet>,
+  /// Fleet 或局部 Fleet 跳过新建默认值和冻结值。
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub no_defaults: bool,
   /// 计划备注，随计划保存，执行时记进操作记录。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub note: Option<String>,

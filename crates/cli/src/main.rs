@@ -21,6 +21,7 @@ mod connect;
 mod core_export;
 mod data_cleanup;
 mod data_sync;
+mod defaults;
 mod deploy;
 mod describe;
 mod dotenv;
@@ -364,6 +365,8 @@ pub enum Command {
     #[command(subcommand)]
     cmd: Option<config_cmd::ConfigCmd>,
   },
+  /// 查看或修改新建服务的默认值。
+  Defaults(Box<defaults::Args>),
   /// 宿主机终端和命令执行审计。
   ShellLog {
     #[arg(long)]
@@ -433,6 +436,9 @@ pub enum Command {
     /// 文件是局部的：没写到的服务、网关、路由保持原样，不会被删除。
     #[arg(long, requires = "file")]
     partial: bool,
+    /// 跳过新建模板及已有的冻结值。
+    #[arg(long, requires = "file")]
+    no_defaults: bool,
     #[command(flatten)]
     apply: ApplyFlags,
   },
@@ -543,6 +549,9 @@ pub enum CoreSnapshotCmd {
 
 #[derive(Args)]
 pub struct DeployOps {
+  /// 新建时跳过服务默认值。
+  #[arg(long)]
+  pub no_defaults: bool,
   #[command(flatten)]
   pub runtime: Box<runtime_options::RuntimeOptions>,
   /// 启动前等待，写作 KEY=service:NAME、KEY=tcp:NAME.PORT 或 KEY=dns:HOST。

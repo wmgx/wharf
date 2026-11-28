@@ -159,6 +159,7 @@ fn entries() -> BTreeMap<&'static str, Schema> {
       schema_for!(crate::env_sync::SyncResponse),
     ),
     ("config", schema_for!(view::ConfigItemView)),
+    ("service_defaults", schema_for!(spec::ServiceDefaults)),
     ("ref_report", schema_for!(view::RefReport)),
     ("tree", schema_for!(view::TreeView)),
     ("search", schema_for!(view::SearchResponse)),

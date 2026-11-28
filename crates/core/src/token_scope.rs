@@ -845,6 +845,7 @@ fn scoped_token_cannot_mount_out_of_scope_service_volume() {
   .unwrap();
   let req = PlanRequest {
     changes: vec![Change::UpsertService {
+      no_defaults: false,
       name: "reader".into(),
       spec,
       adopt: None,

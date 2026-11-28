@@ -617,6 +617,7 @@ export type Change = {
   commit?: string | null;
   migrate?: MigrateOptions | null;
   name: string;
+  no_defaults?: boolean;
   op: "upsert_service";
   pins?: Record<string, string> | null;
   spec: ServiceSpec;
@@ -2870,6 +2871,7 @@ export interface ServerSettings {
    * 构建时传给内置模板的参数，例如 `PIP_INDEX_URL`、`GOPROXY`（国内机器配镜像源）。
    */
   build_env?: Record<string, string>;
+  defaults?: ServiceDefaults | null;
   /**
    * 这台提供出口：agent 在内网地址上起 HTTP 代理（要口令），规则决定哪些域名经它出去。
    */
@@ -3043,6 +3045,12 @@ export interface ServiceData {
    * 备份存到哪台服务器，没开备份时为空。
    */
   target?: string | null;
+}
+
+export interface ServiceDefaults {
+  limits?: Limits;
+  log_max?: LogMax | null;
+  timezone?: string | null;
 }
 
 /**

@@ -123,6 +123,7 @@ async fn monitoring_only_plan_skips_deploy_but_heartbeat_changes_compose()
   world.services.insert(
     "app".into(),
     ServiceRow {
+      frozen_defaults: Default::default(),
       host_groups: Default::default(),
       instance_id: "svc_fixture".into(),
       spec: spec.clone(),
@@ -152,6 +153,7 @@ async fn monitoring_only_plan_skips_deploy_but_heartbeat_changes_compose()
       &state,
       PlanRequest {
         changes: vec![Change::UpsertService {
+          no_defaults: false,
           pins: None,
           commit: None,
           migrate: None,

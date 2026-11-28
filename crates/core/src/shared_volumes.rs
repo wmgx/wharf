@@ -282,6 +282,7 @@ mod tests {
       ),
     ] {
       world.apply_changes(&[Change::UpsertService {
+        no_defaults: false,
         name: name.into(),
         spec: serde_json::from_value(json!({"server":"s1","source":{"image":"fixture:1"},"volumes":[volume]})).unwrap(),
         adopt: None,

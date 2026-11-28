@@ -396,6 +396,7 @@ mod tests {
     world.services.insert(
       "app".into(),
       crate::world::ServiceRow {
+        frozen_defaults: Default::default(),
         host_groups: Default::default(),
         instance_id: "svc_fixture".into(),
         spec,

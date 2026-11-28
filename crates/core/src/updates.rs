@@ -945,6 +945,7 @@ fn update_ignore_hides_major_and_all_immediately_without_restart() {
     "server":"s1","source":{"compose":{"content":"services: {app: {image: 'app:1.0'}, db: {image: 'db:15'}}"}}
   })).unwrap();
   let old = crate::world::ServiceRow {
+    frozen_defaults: Default::default(),
     host_groups: Default::default(),
     instance_id: "svc_fixture".into(),
     spec,
@@ -1008,6 +1009,7 @@ fn update_ignore_hides_major_and_all_immediately_without_restart() {
 #[test]
 fn pinned_and_ignored_images_clear_cached_updates() {
   let row = crate::world::ServiceRow {
+    frozen_defaults: Default::default(),
     host_groups: Default::default(),
     instance_id: "svc_fixture".into(),
     spec: serde_json::from_value(serde_json::json!({

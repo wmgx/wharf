@@ -132,6 +132,7 @@ mod secret_policy_tests;
 mod secret_restrictions;
 mod security_receipt;
 mod service_container;
+mod service_defaults;
 mod service_exec;
 mod service_monitor;
 mod service_render;

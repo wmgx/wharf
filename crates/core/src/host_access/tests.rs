@@ -24,6 +24,7 @@ fn world() -> World {
 
 fn service(content: &str, adopt: Option<AdoptSpec>) -> Change {
   Change::UpsertService {
+    no_defaults: false,
     name: "app".into(),
     spec: serde_json::from_value(
       json!({"server":"s1","source":{"compose":{"content":content}}}),
@@ -814,6 +815,7 @@ fn explicit_from_service_does_not_require_host_docker() {
   }))
   .unwrap();
   w.apply_changes(&[Change::UpsertService {
+    no_defaults: false,
     name: "reader".into(),
     spec,
     adopt: None,

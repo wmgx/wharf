@@ -602,6 +602,9 @@ async fn dispatch_command(
     Command::Tree(args) => crate::catalog::tree(c, args, j).await,
     Command::Lint(args) => crate::lint_cmd::run(c, args, j).await,
     Command::Search(args) => crate::catalog::search(c, args, j).await,
+    Command::Defaults(args) => {
+      crate::defaults::run(c, *args, j).await
+    }
     Command::Config { cmd } => {
       crate::config_cmd::run(c, cmd, j).await
     }
@@ -854,12 +857,14 @@ async fn dispatch_command(
       cmd,
       file,
       partial,
+      no_defaults,
       apply,
     } => {
       if let Some(cmd) = cmd {
         apply.check_read_only()?;
         if file.is_some()
           || partial
+          || no_defaults
           || apply.brief
           || apply.dns_verify.mode().is_some()
         {
@@ -888,11 +893,13 @@ async fn dispatch_command(
           if partial {
             PlanRequest {
               partial: Some(fleet),
+              no_defaults,
               ..Default::default()
             }
           } else {
             PlanRequest {
               fleet: Some(fleet),
+              no_defaults,
               ..Default::default()
             }
           }
@@ -1134,7 +1141,7 @@ fn set_network_options(
 async fn deploy_plan(
   c: &Client,
   name: String,
-  spec: ServiceSpec,
+  (spec, no_defaults): (ServiceSpec, bool),
   flags: ApplyFlags,
   j: bool,
   warnings: Vec<String>,
@@ -1142,6 +1149,7 @@ async fn deploy_plan(
 ) -> CliResult<()> {
   let req = PlanRequest {
     changes: vec![Change::UpsertService {
+      no_defaults,
       name,
       spec,
       adopt: None,
@@ -3101,6 +3109,7 @@ async fn service(
       let context = extract_secrets.then(|| ("import", json!(&v)));
       let req = PlanRequest {
         changes: vec![Change::UpsertService {
+          no_defaults: true,
           pins: None,
           commit: None,
           migrate: None,
@@ -3165,6 +3174,7 @@ async fn service(
       changes(
         c,
         vec![Change::UpsertService {
+          no_defaults: false,
           pins: None,
           commit: None,
           migrate: None,
@@ -3238,6 +3248,7 @@ async fn service(
         && target.commit.is_none()
         && matches!(&target.spec.source, Source::Build(build) if build.git.is_some());
       let mut edits = vec![Change::UpsertService {
+        no_defaults: false,
         migrate: None,
         name: name.clone(),
         spec: target.spec,
@@ -3418,6 +3429,7 @@ async fn service(
       changes(
         c,
         vec![Change::UpsertService {
+          no_defaults: false,
           name,
           spec,
           adopt: None,
@@ -3460,6 +3472,7 @@ async fn service(
       changes(
         c,
         vec![Change::UpsertService {
+          no_defaults: false,
           pins: None,
           commit: None,
           migrate: None,
@@ -3608,6 +3621,7 @@ async fn service(
           || !ops.unset_volume_owner.is_empty()
           || ops.use_egress
           || ops.no_use_egress
+          || ops.no_defaults
           || ops.runtime.has_edits())
       {
         apply.check_read_only()?;
@@ -3956,7 +3970,16 @@ async fn service(
         &ops.add_host_volume,
         &ops.rm_host_volume,
       )?;
-      deploy_plan(c, name, spec, apply, j, warnings, detected).await
+      deploy_plan(
+        c,
+        name,
+        (spec, ops.no_defaults || from_run.is_some()),
+        apply,
+        j,
+        warnings,
+        detected,
+      )
+      .await
     }
     ServiceCmd::AdoptData {
       name,
@@ -4033,6 +4056,7 @@ async fn service(
       changes(
         c,
         vec![Change::UpsertService {
+          no_defaults: false,
           pins: None,
           commit: None,
           migrate: bwlimit.map(|value| {
@@ -4098,6 +4122,7 @@ async fn service(
       changes(
         c,
         vec![Change::UpsertService {
+          no_defaults: false,
           pins: None,
           commit: None,
           migrate: None,
@@ -4218,6 +4243,7 @@ async fn service(
       changes(
         c,
         vec![Change::UpsertService {
+          no_defaults: false,
           pins: None,
           commit: None,
           migrate: None,
@@ -4332,6 +4358,7 @@ async fn service(
       changes(
         c,
         vec![Change::UpsertService {
+          no_defaults: false,
           pins: None,
           commit: None,
           migrate: None,
@@ -4458,6 +4485,7 @@ async fn service(
       changes(
         c,
         vec![Change::UpsertService {
+          no_defaults: false,
           pins: None,
           commit: None,
           migrate: None,
@@ -6455,6 +6483,7 @@ async fn backup(
     async move { c.get::<ServiceView>(&url).await }
   };
   let change = |name, spec| Change::UpsertService {
+    no_defaults: false,
     pins: None,
     commit: None,
     migrate: None,

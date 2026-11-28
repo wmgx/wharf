@@ -407,20 +407,11 @@ pub(crate) async fn import(
       .service_values
       .insert(name.clone(), values[name].clone());
   }
-  // 便携包的旧服务没有时区字段时，按原环境部署。
-  for svc in fleet.services.values_mut() {
-    if !matches!(
-      svc.source,
-      wharf_api_types::spec::Source::Compose { .. }
-    ) && svc.timezone.is_none()
-    {
-      svc.timezone = Some("off".into());
-    }
-  }
   let planned = crate::planner::make_plan_inner(
     &state,
     PlanRequest {
       partial: Some(fleet),
+      no_defaults: true,
       ..Default::default()
     },
     snap,
