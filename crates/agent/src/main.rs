@@ -55,6 +55,7 @@ mod service_exec;
 mod settle;
 mod sync;
 mod task;
+mod task_artifacts;
 mod terminal;
 mod upgrade;
 

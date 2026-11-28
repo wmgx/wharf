@@ -131,6 +131,8 @@ pub enum AgentMsg {
     #[serde(default)]
     monitor_v2: bool,
     #[serde(default)]
+    task_artifacts: bool,
+    #[serde(default)]
     backfill: bool,
     /// 是否支持 [AgentOp::Forward]。旧 agent 缺省为不支持。
     #[serde(default)]
@@ -607,6 +609,20 @@ pub enum AgentOp {
   ServiceExec(ServiceExecJob),
   /// 定时任务：在服务容器里执行命令，或跑一次性容器。结果是 [TaskRunResult]。
   TaskRun(TaskRunJob),
+  TaskArtifactRead {
+    task: String,
+    run_id: i64,
+    path: String,
+    offset: u64,
+    len: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    expect: Option<FileVersion>,
+  },
+  TaskArtifactPrune {
+    task: String,
+    #[serde(default)]
+    keep_run_ids: Vec<i64>,
+  },
   /// 入口服务器上仍在使用的代登录目录和运行容器。
   SsoCleanup {
     #[serde(default)]

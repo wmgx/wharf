@@ -7,19 +7,51 @@ use crate::{
   commands::out,
 };
 
+#[derive(clap::Args)]
+pub struct AuditArgs {
+  /// 只看这个发起人（令牌名，或 页面:<用户名>）。
+  #[arg(long)]
+  actor: Option<String>,
+  /// 只看一类：api 或 login。
+  #[arg(long, value_parser = ["api", "login"])]
+  kind: Option<String>,
+  #[arg(long, default_value_t = 50)]
+  limit: u32,
+  /// 起始时间，例如 24h 或 2026-11-28。
+  #[arg(long)]
+  since: Option<String>,
+  /// 截止时间，例如 now 或 2026-11-28。
+  #[arg(long)]
+  until: Option<String>,
+  /// 目标，例如 service/blog。
+  #[arg(long)]
+  target: Option<String>,
+  /// 只看失败操作。
+  #[arg(long)]
+  errors: bool,
+  /// 按 HTTP 状态码筛选。
+  #[arg(long)]
+  status: Option<u16>,
+}
+
 pub async fn audit(
   c: &Client,
-  actor: Option<String>,
-  kind: Option<String>,
-  limit: u32,
+  args: AuditArgs,
   j: bool,
 ) -> CliResult<()> {
-  let mut path = format!("/api/audit?limit={limit}");
-  if let Some(actor) = actor {
-    path.push_str(&format!("&actor={}", seg(&actor)));
-  }
-  if let Some(kind) = kind {
-    path.push_str(&format!("&kind={}", seg(&kind)));
+  let mut path =
+    format!("/api/audit?limit={}&errors={}", args.limit, args.errors);
+  for (key, value) in [
+    ("actor", args.actor),
+    ("kind", args.kind),
+    ("since", args.since),
+    ("until", args.until),
+    ("target", args.target),
+    ("status", args.status.map(|status| status.to_string())),
+  ] {
+    if let Some(value) = value {
+      path.push_str(&format!("&{key}={}", seg(&value)));
+    }
   }
   let rows: Vec<AuditEntry> = c.get(&path).await?;
   out(j, &rows, |rows| {

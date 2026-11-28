@@ -294,6 +294,7 @@ pub fn should_record(method: &Method, path: &str) -> bool {
         && ["/files/download", "/files/tail", "/files/grep"]
           .iter()
           .any(|&suffix| path.ends_with(suffix)))
+      || path.ends_with("/artifacts/download")
       || path.ends_with("/connect"))
 }
 
@@ -456,7 +457,7 @@ pub async fn cleanup(state: &AppState) -> Result<(), ApiError> {
   state.db.call(|c| cleanup_rows(c, now_ms())).await
 }
 
-fn cleanup_rows(
+pub(crate) fn cleanup_rows(
   c: &rusqlite::Connection,
   now: i64,
 ) -> Result<(), ApiError> {
@@ -465,7 +466,15 @@ fn cleanup_rows(
     "DELETE FROM audit_log WHERE at < ?1
        OR (method IN ('login_failed', 'gate_key_failed') AND at < ?2)
        OR (actor = 'anonymous' AND status IN (401, 403) AND at < ?2)",
-    params![now - 90 * DAY, now - 7 * DAY],
+    params![
+      now
+        - i64::from(crate::config_api::number(
+          c,
+          "retention.audit_days"
+        )?)
+          * DAY,
+      now - 7 * DAY
+    ],
   )
   .map(|_| ())
   .map_err(sql_err)
@@ -496,12 +505,137 @@ pub async fn login_event(
   .await;
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 pub struct AuditQuery {
   actor: Option<String>,
   kind: Option<String>,
   before: Option<i64>,
   limit: Option<u32>,
+  since: Option<String>,
+  until: Option<String>,
+  target: Option<String>,
+  errors: Option<String>,
+  status: Option<u16>,
+}
+
+pub(crate) fn parse_time_bound(
+  raw: &str,
+  is_until: bool,
+  offset: chrono::FixedOffset,
+) -> Result<i64, ApiError> {
+  use chrono::TimeZone;
+  let raw = raw.trim();
+  let now = now_ms();
+  if raw == "now" {
+    return Ok(now);
+  }
+  if let Ok(ms) = raw.parse::<i64>() {
+    return Ok(ms);
+  }
+  if let Ok(at) = chrono::DateTime::parse_from_rfc3339(raw) {
+    return Ok(at.timestamp_millis());
+  }
+  if let Some(relative) = crate::log_search::since_arg(raw) {
+    let (digits, unit) = relative.split_at(relative.len() - 1);
+    let multiplier = match unit {
+      "h" => 3_600_000,
+      "m" => 60_000,
+      _ => 1_000,
+    };
+    if let Some(at) = digits
+      .parse::<i64>()
+      .ok()
+      .and_then(|n| n.checked_mul(multiplier))
+      .and_then(|ms| now.checked_sub(ms))
+    {
+      return Ok(at);
+    }
+  }
+  let local =
+    chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M")
+      .ok()
+      .or_else(|| {
+        let day =
+          chrono::NaiveDate::parse_from_str(raw, "%Y-%m-%d").ok()?;
+        if is_until {
+          day.and_hms_milli_opt(23, 59, 59, 999)
+        } else {
+          day.and_hms_opt(0, 0, 0)
+        }
+      });
+  local
+    .and_then(|at| offset.from_local_datetime(&at).single())
+    .map(|at| at.timestamp_millis())
+    .ok_or_else(|| {
+      ApiError::invalid("审计时间格式不对").with_hint(
+        "可以用 24h、2026-11-28、2026-11-28 10:00 或 RFC3339 时间",
+      )
+    })
+}
+
+fn target_patterns(
+  target: &str,
+) -> Result<(Vec<String>, &str, String), ApiError> {
+  let escape = |value: &str| {
+    value
+      .chars()
+      .map(|c| match c {
+        '*' => "[*]".into(),
+        '?' => "[?]".into(),
+        '[' => "[[]".into(),
+        _ => c.to_string(),
+      })
+      .collect::<String>()
+  };
+  let target = target.trim();
+  if target.is_empty() {
+    return Err(ApiError::invalid("审计目标不能为空"));
+  }
+  let Some((kind, name)) = target.split_once('/') else {
+    let path = escape(target);
+    return Ok((
+      vec![format!("*/{path}"), format!("*/{path}/*")],
+      "",
+      escape(target),
+    ));
+  };
+  if name.is_empty() || name.contains('/') {
+    return Err(ApiError::invalid("审计目标应写成 类型/名称"));
+  }
+  let name = if kind == "route" {
+    crate::world::normalize_hostname(name)?
+  } else {
+    name.to_string()
+  };
+  let path = escape(&name);
+  let collection = match kind {
+    "service" => "services",
+    "server" => "servers",
+    "gateway" => "gateways",
+    "route" => "routes",
+    "secret" => "secrets",
+    "task" => "tasks",
+    "token" => "tokens",
+    "edge" => "edge",
+    "account" => "accounts",
+    _ => return Err(ApiError::invalid("未知审计目标类型")),
+  };
+  let mut paths = vec![
+    format!("/api/{collection}/{path}"),
+    format!("/api/{collection}/{path}/*"),
+  ];
+  if kind == "service" {
+    paths.push(format!("/api/alerts/*/services/{path}"));
+  }
+  if kind == "route" {
+    paths.push(format!("/api/oidc/clients/{path}/*"));
+  }
+  let detail = match kind {
+    "secret" => format!(",{name},"),
+    "task" | "token" | "edge" | "account" => String::new(),
+    _ => format!(" {kind}/{name} "),
+  };
+  Ok((paths, kind, detail))
 }
 
 /// `GET /api/audit`
@@ -511,40 +645,96 @@ pub async fn list(
   Query(q): Query<AuditQuery>,
 ) -> ApiResult<Vec<AuditEntry>> {
   auth.require(Perm::Admin)?;
-  let mut rows: Vec<AuditEntry> = state
-    .db
-    .call(move |c| {
-      let mut stmt = c
-        .prepare(
-          "SELECT id, at, kind, actor, method, path, status, duration_ms, detail, source
-           FROM audit_log WHERE (?1 IS NULL OR actor = ?1) AND (?2 IS NULL OR kind = ?2)
-           AND (?3 IS NULL OR id < ?3) ORDER BY id DESC LIMIT ?4",
-        )
-        .map_err(sql_err)?;
-      stmt
-        .query_map(
-          params![q.actor, q.kind, q.before, q.limit.unwrap_or(100).min(500)],
-          |r| {
-            Ok(AuditEntry {
-              id: r.get(0)?,
-              at: r.get(1)?,
-              kind: r.get(2)?,
-              actor: r.get(3)?,
-              method: r.get(4)?,
-              path: r.get(5)?,
-              status: r.get(6)?,
-              duration_ms: r.get(7)?,
-              detail: r.get(8)?,
-              source: r.get(9)?,
-            })
-          },
-        )
-        .and_then(Iterator::collect)
-        .map_err(sql_err)
-    })
-    .await?;
+  let mut rows = state.db.call(move |c| query_rows(c, q)).await?;
   rows.iter_mut().for_each(redact_row);
   Ok(Json(rows))
+}
+
+fn query_rows(
+  c: &rusqlite::Connection,
+  q: AuditQuery,
+) -> Result<Vec<AuditEntry>, ApiError> {
+  let offset = crate::config_api::offset(c)?;
+  let bound = |raw: Option<String>, until| {
+    raw
+      .as_deref()
+      .map(|s| parse_time_bound(s, until, offset))
+      .transpose()
+  };
+  let since = bound(q.since, false)?;
+  let until = bound(q.until, true)?;
+  if since.zip(until).is_some_and(|(since, until)| since > until) {
+    return Err(
+      ApiError::invalid("since 不能晚于 until")
+        .with_hint("例如 --since 24h --until now"),
+    );
+  }
+  if q.status.is_some_and(|code| !(100..=599).contains(&code)) {
+    return Err(ApiError::invalid("审计状态码须在 100 到 599 之间"));
+  }
+  let mut sql = String::from(
+    "SELECT id, at, kind, actor, method, path, status, duration_ms, detail, source
+     FROM audit_log WHERE (?1 IS NULL OR actor = ?1) AND (?2 IS NULL OR kind = ?2)
+     AND (?3 IS NULL OR id < ?3) AND (?4 IS NULL OR at >= ?4) AND (?5 IS NULL OR at <= ?5)
+     AND (?6 IS NULL OR status = ?6)
+     AND (NOT ?7 OR status >= 400 OR method IN ('login_failed', 'gate_key_failed'))"
+  );
+  let limit = q.limit.unwrap_or(100).min(500);
+  let errors = match q.errors.as_deref() {
+    Some("1" | "true") => true,
+    None | Some("0" | "false") => false,
+    _ => return Err(ApiError::invalid("errors 须为 true 或 false")),
+  };
+  let mut bind: Vec<&dyn rusqlite::ToSql> = vec![
+    &q.actor, &q.kind, &q.before, &since, &until, &q.status, &errors,
+  ];
+  let target =
+    q.target.as_deref().map(target_patterns).transpose()?;
+  if let Some((paths, kind, detail)) = &target {
+    sql.push_str(" AND (");
+    for (i, path) in paths.iter().enumerate() {
+      if i > 0 {
+        sql.push_str(" OR ");
+      }
+      sql.push_str("path GLOB ?");
+      bind.push(path);
+    }
+    let detail_sql = match *kind {
+      "secret" => {
+        " OR (path = '/api/secrets/import' AND instr(detail, ' names=') > 0 AND instr(',' || substr(detail, instr(detail, ' names=') + 7) || ',', ?) > 0)"
+      }
+      "" => " OR detail GLOB '*' || ? || '*'",
+      _ if !detail.is_empty() => {
+        " OR instr(' ' || replace(iif(instr(detail, ' 备注：') > 0, substr(detail, 1, instr(detail, ' 备注：') - 1), detail), ',', ' ') || ' ', ?) > 0"
+      }
+      _ => "",
+    };
+    if !detail_sql.is_empty() {
+      sql.push_str(detail_sql);
+      bind.push(detail);
+    }
+    sql.push(')');
+  }
+  sql.push_str(" ORDER BY id DESC LIMIT ?");
+  bind.push(&limit);
+  let mut stmt = c.prepare(&sql).map_err(sql_err)?;
+  stmt
+    .query_map(rusqlite::params_from_iter(bind), |r| {
+      Ok(AuditEntry {
+        id: r.get(0)?,
+        at: r.get(1)?,
+        kind: r.get(2)?,
+        actor: r.get(3)?,
+        method: r.get(4)?,
+        path: r.get(5)?,
+        status: r.get(6)?,
+        duration_ms: r.get(7)?,
+        detail: r.get(8)?,
+        source: r.get(9)?,
+      })
+    })
+    .and_then(Iterator::collect)
+    .map_err(sql_err)
 }
 
 #[cfg(test)]
@@ -807,6 +997,58 @@ async fn requests_audit_anonymous_expired_and_service_scope_rejections()
       assert_eq!(*status, expected_status);
       assert!(!detail.is_empty() && !detail.contains("fixture-"));
     }
+    Ok(())
+  }).await.unwrap();
+}
+
+#[tokio::test]
+async fn audit_filters_recent_target_failures() {
+  let db = crate::db::Db::memory();
+  db.call(|c| {
+    let now = now_ms();
+    for (at, method, path, status) in [
+      (now - 86_400_000, "GET", "/api/services/blog", Some(200)),
+      (now, "GET", "/api/services/blog/logs", Some(403)),
+      (now, "GET", "/api/services/other", Some(200)),
+      (now, "login_failed", "", None),
+    ] {
+      c.execute("INSERT INTO audit_log (at, kind, actor, method, path, status) VALUES (?1, 'api', 'fixture', ?2, ?3, ?4)",
+        params![at, method, path, status]).map_err(sql_err)?;
+    }
+    let filtered = query_rows(c, AuditQuery { since: Some("6h".into()), target: Some("service/blog".into()), errors: Some("true".into()), ..Default::default() })?;
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].status, Some(403));
+    assert_eq!(query_rows(c, AuditQuery { errors: Some("true".into()), ..Default::default() })?.len(), 2);
+    assert!(query_rows(c, AuditQuery { since: Some("10".into()), until: Some("1".into()), ..Default::default() }).is_err());
+    Ok(())
+  }).await.unwrap();
+}
+
+#[tokio::test]
+async fn audit_targets_match_case_sensitive_complete_tokens() {
+  let db = crate::db::Db::memory();
+  db.call(|c| {
+    for (path, detail) in [
+      ("/api/secrets/import", "created=1 updated=0 skipped=0 names=OTHER,DB_PASS_V2,db_pass"),
+      ("/api/secrets/import", "created=1 updated=0 skipped=0 names=OTHER,DB_PASS"),
+      ("/api/plan", "plan=p1 service/api-v2,server/s10 备注：service/api"),
+      ("/api/plan", "plan=p2 server/s1,service/api"),
+      ("/api/secrets/db_pass", ""),
+      ("/api/routes/a.example.test", ""),
+    ] {
+      c.execute("INSERT INTO audit_log (at,kind,actor,method,path,status,detail) VALUES (0,'api','fixture','POST',?1,200,?2)", params![path, detail]).map_err(sql_err)?;
+    }
+    let hits = |target: &str| query_rows(c, AuditQuery {
+      target: Some(target.into()), ..Default::default()
+    });
+    assert!(hits("secret/A")?.is_empty());
+    assert_eq!(hits("secret/DB_PASS")?.len(), 1);
+    assert_eq!(hits("service/api")?.len(), 1);
+    assert_eq!(hits("server/s1")?.len(), 1);
+    assert_eq!(hits("route/A.example.test.")?.len(), 1);
+    assert_eq!(query_rows(c, AuditQuery {
+      errors: Some("yes".into()), ..Default::default()
+    }).unwrap_err().code, wharf_api_types::ErrorCode::InvalidInput);
     Ok(())
   }).await.unwrap();
 }

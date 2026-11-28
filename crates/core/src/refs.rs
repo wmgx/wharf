@@ -10,45 +10,7 @@ use wharf_api_types::ApiError;
 
 use crate::{render::Net, world::World};
 
-/// 一处引用。
-#[derive(Debug, PartialEq)]
-pub struct Ref<'a> {
-  pub service: &'a str,
-  pub port: Option<&'a str>,
-  pub part: Part,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Part {
-  Both,
-  Host,
-  Port,
-}
-
-fn parse(inner: &str) -> Option<Ref<'_>> {
-  let body = inner.strip_prefix('@')?;
-  let (body, part) = match body.rsplit_once(':') {
-    Some((b, "host")) => (b, Part::Host),
-    Some((b, "port")) => (b, Part::Port),
-    Some(_) => return None,
-    None => (body, Part::Both),
-  };
-  let (service, port) = match body.split_once('.') {
-    Some((s, p)) => (s, Some(p)),
-    None => (body, None),
-  };
-  let ok = |s: &str| {
-    !s.is_empty()
-      && s
-        .bytes()
-        .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
-  };
-  (ok(service) && port.is_none_or(ok)).then_some(Ref {
-    service,
-    port,
-    part,
-  })
-}
+use wharf_api_types::references::{Part, Ref, parse_service_ref};
 
 /// 文本里引用到的服务（去重、按出现顺序）。
 pub fn used(text: &str) -> Vec<String> {
@@ -63,7 +25,7 @@ pub fn used(text: &str) -> Vec<String> {
   out
 }
 
-/// 服务配置里引用到的服务：env 的值和 compose 内容。
+/// 服务配置里引用到的服务。
 pub fn uses(
   spec: &wharf_api_types::spec::ServiceSpec,
 ) -> Vec<String> {
@@ -75,6 +37,10 @@ pub fn uses(
   } = &spec.source
   {
     text.push_str(c);
+  }
+  for f in &spec.files {
+    text.push('\n');
+    text.push_str(&f.content);
   }
   used(&text)
 }
@@ -96,7 +62,7 @@ fn scan(
       .map_or(start, |i| start + 2 + i);
     let inner = &rest[start + 2..end];
     out.push_str(&rest[..start]);
-    match parse(inner) {
+    match parse_service_ref(inner) {
       Some(r) => out.push_str(&f(&r)?),
       None => out.push_str(&rest[start..end + 2]),
     }
@@ -259,7 +225,7 @@ mod tests {
   #[test]
   fn parses_forms() {
     assert_eq!(
-      parse("@db"),
+      parse_service_ref("@db"),
       Some(Ref {
         service: "db",
         port: None,
@@ -267,15 +233,15 @@ mod tests {
       })
     );
     assert_eq!(
-      parse("@db.http:port"),
+      parse_service_ref("@db.http:port"),
       Some(Ref {
         service: "db",
         port: Some("http"),
         part: Part::Port
       })
     );
-    assert_eq!(parse("@db:nope"), None);
-    assert_eq!(parse("SECRET"), None);
+    assert_eq!(parse_service_ref("@db:nope"), None);
+    assert_eq!(parse_service_ref("SECRET"), None);
   }
 
   #[test]

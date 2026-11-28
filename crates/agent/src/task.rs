@@ -58,6 +58,8 @@ pub async fn run(
   let started = Instant::now();
   let mut mem_peak = None;
   let mut timed_out = false;
+  let mut artifacts_warning = None;
+  let mut artifacts_dir = None;
   if job.network_host && !matches!(job.how, TaskHow::Script { .. }) {
     return Err(ApiError::invalid("代登录参数只能用于脚本"));
   }
@@ -199,6 +201,8 @@ pub async fn run(
           tail(&format!("{}{}", installed.stdout, installed.stderr));
         if !installed.success {
           return Ok(TaskRunResult {
+            artifacts: Vec::new(),
+            artifacts_warning: None,
             result: None,
             exit_code: installed.code,
             timed_out: false,
@@ -248,6 +252,14 @@ pub async fn run(
             deps_dir.display().to_string() + "/node_modules"
           ),
         ]);
+      }
+      artifacts_dir = crate::task_artifacts::start(
+        job,
+        &[],
+        &mut artifacts_warning,
+      );
+      if let Some(dir) = &artifacts_dir {
+        cmd = dir.mount(cmd);
       }
       let run = cmd
         .args([
@@ -336,6 +348,14 @@ pub async fn run(
       for m in mounts {
         cmd = cmd.args(["-v", m]);
       }
+      artifacts_dir = crate::task_artifacts::start(
+        job,
+        mounts,
+        &mut artifacts_warning,
+      );
+      if let Some(dir) = &artifacts_dir {
+        cmd = dir.mount(cmd);
+      }
       cmd = match command {
         Some(c) => cmd.args(["--entrypoint", "sh", image, "-c", c]),
         None => cmd.arg(image),
@@ -349,8 +369,17 @@ pub async fn run(
     }
   };
   let duration_ms = started.elapsed().as_millis() as u64;
+  let mut artifacts = Vec::new();
+  if let Some(dir) = artifacts_dir
+    && !ctx.cancel.is_cancelled()
+  {
+    (artifacts, artifacts_warning) =
+      crate::task_artifacts::finish(dir, job, &ctx.cancel).await;
+  }
   match output {
     Ok(o) => Ok(TaskRunResult {
+      artifacts,
+      artifacts_warning,
       result: None,
       mem_peak,
       exit_code: o.code,
@@ -359,6 +388,8 @@ pub async fn run(
       duration_ms,
     }),
     Err(e) if e.code == ErrorCode::Timeout => Ok(TaskRunResult {
+      artifacts,
+      artifacts_warning,
       result: None,
       mem_peak,
       exit_code: None,
@@ -538,6 +569,8 @@ async fn run_sso(
   let duration_ms = started.elapsed().as_millis() as u64;
   match output {
     Ok((o, timed_out)) => Ok(TaskRunResult {
+      artifacts: Vec::new(),
+      artifacts_warning: None,
       result: (!timed_out).then(|| read_result(&work.0)).flatten(),
       mem_peak: None,
       exit_code: o.code,
@@ -549,6 +582,8 @@ async fn run_sso(
       duration_ms,
     }),
     Err(e) if e.code == ErrorCode::Timeout => Ok(TaskRunResult {
+      artifacts: Vec::new(),
+      artifacts_warning: None,
       result: None,
       mem_peak: None,
       exit_code: None,

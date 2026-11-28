@@ -36,3 +36,29 @@ fn json_single_doc_exit_code_and_detect_only() {
   assert_eq!(detected["language"], "python");
   assert_eq!(detected["default_port"]["port"], 8000);
 }
+
+#[test]
+fn new_commands_explicitly_reject_quiet_with_one_json_error() {
+  let wharf = env!("CARGO_BIN_EXE_wharf");
+  for args in [
+    &["task", "enable", "fixture"][..],
+    &["task", "disable", "fixture"],
+    &["task", "set", "fixture"],
+    &["task", "cancel", "1"],
+    &["service", "exec", "fixture", "--script", "fixture"],
+    &["exec", "s1", "--script", "fixture"],
+    &["service", "env", "sync", "fixture", ".env"],
+    &["task", "artifacts", "fixture"],
+  ] {
+    let result = Command::new(wharf)
+      .args(["--json", "-q"])
+      .args(args)
+      .output()
+      .unwrap();
+    assert_eq!(result.status.code(), Some(1), "{args:?}");
+    assert!(result.stderr.is_empty(), "{args:?}");
+    let error: serde_json::Value =
+      serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(error["code"], "InvalidInput");
+  }
+}

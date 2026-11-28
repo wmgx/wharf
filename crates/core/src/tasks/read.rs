@@ -23,6 +23,7 @@ pub(super) async fn build_views(
   let visible = visible_services(auth)?;
   let mut out = Vec::new();
   let now = Utc::now();
+  let offset = s.db.call(|c| crate::config_api::offset(c)).await?;
   for (name, spec, updated) in tasks {
     if let Some(services) = &auth.services
       && !matches!(&spec.how, TaskKind::Exec { service, .. } if services.contains(service))
@@ -54,7 +55,12 @@ pub(super) async fn build_views(
       .await?;
     let next_at = spec
       .enabled
-      .then(|| Cron::parse(&spec.schedule).ok()?.next_after(now))
+      .then(|| {
+        Cron::parse(&spec.schedule)
+          .ok()?
+          .with_offset(offset)
+          .next_after(now)
+      })
       .flatten();
     let url = |prefix: &str, token: &str| {
       if token.is_empty() {
