@@ -46,6 +46,12 @@ pub(crate) async fn plan(
     .get(&source)
     .ok_or_else(|| reject("源服务尚未部署"))?;
   let mounts = config_checks(&snap, &source, &target)?;
+  if crate::pins::images(&row.spec.source).iter().any(|image| {
+    !row.pins.contains_key(image)
+      && !applied.image_ids.contains_key(image)
+  }) {
+    return Err(reject("已应用镜像版本无法核实"));
+  }
   let desired = candidate(&snap, &source, &target)?;
   let net = snap.net(&desired);
   let expected_hash = snapshot::service_hash(
@@ -224,7 +230,6 @@ fn config_checks(
   }
   service_clone::validate_source(snap, from, "", false)
 }
-
 fn candidate(
   snap: &Snapshot,
   from: &str,
@@ -368,7 +373,6 @@ fn changed_config(
   }
   changes
 }
-
 fn inspect_db(
   c: &rusqlite::Connection,
   from: &str,
@@ -404,7 +408,6 @@ fn inspect_db(
   }
   Ok(())
 }
-
 async fn check_storage(
   state: &AppState,
   snap: &Snapshot,
@@ -438,7 +441,6 @@ async fn check_storage(
   }
   Ok(())
 }
-
 async fn status(
   state: &AppState,
   server: (&str, u64),
@@ -463,7 +465,6 @@ async fn status(
     .find(|p| p.project == name)
     .ok_or_else(|| reject("无法核实真实项目状态"))
 }
-
 async fn require_stopped(
   state: &AppState,
   server: (&str, u64),
@@ -480,7 +481,6 @@ async fn require_stopped(
   }
   Ok(())
 }
-
 async fn copy(
   state: &AppState,
   server: (&str, u64),
@@ -506,7 +506,6 @@ async fn copy(
       .unwrap_or(false),
   )
 }
-
 pub(crate) async fn execute(
   state: &AppState,
   snap: &Snapshot,
@@ -654,7 +653,9 @@ pub(crate) async fn execute(
           retire: None,
           rollback: false,
           pins: row.pins.clone(),
-          expected_images: BTreeMap::new(),
+          expected_images: snap.applied[&job.source]
+            .image_ids
+            .clone(),
           no_start: true,
           trial: None,
           init: None,
@@ -690,7 +691,6 @@ pub(crate) async fn execute(
     .await
     .map_err(|e| e.with_hint("已改名，旧项目待清理；重试原执行"))
 }
-
 fn switch_name(
   tx: &rusqlite::Transaction<'_>,
   job: &RenameJob,
@@ -742,7 +742,6 @@ fn switch_name(
     rusqlite::params![job.target,job.source]).map_err(db::sql_err)?;
   Ok(())
 }
-
 async fn retire(
   state: &AppState,
   server: (&str, u64),

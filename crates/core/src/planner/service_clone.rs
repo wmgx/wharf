@@ -298,6 +298,16 @@ pub(super) fn validate_source(
   crate::crash_guard::require_idle(snap, source)?;
   let row = &snap.world.services[source];
   let spec = &row.spec;
+  if crate::shared_volumes::consumers_on(
+    &snap.world,
+    source,
+    &spec.server,
+  )
+  .next()
+  .is_some()
+  {
+    return Err(unsupported("源服务的托管数据被其他服务共享"));
+  }
   if moved_from(snap, &snap.world, source, &spec.server).is_some()
     || snap.pending.migrations.contains_key(source)
     || snap.pending.adopt_data.contains_key(source)

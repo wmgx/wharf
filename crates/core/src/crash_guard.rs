@@ -550,7 +550,10 @@ pub(crate) async fn stop(
     state,
     "crash_guard",
     Some(name),
-    Some(&format!("crash_guard.{}", row.instance_id)),
+    Some(&format!(
+      "crash_guard.{}.{}",
+      row.instance_id, evidence.first
+    )),
     false,
     crate::notify::Event {
       title: format!("服务 {name} 已保护停机"),
@@ -648,6 +651,7 @@ pub(crate) async fn resume(
     .ok_or_else(|| blocker(name))?
     .clone();
   recovery.phase = "resuming".into();
+  recovery.run = run.into();
   save(state, name, server, instance, &recovery, None, run).await?;
   let result = async {
     let live = project(state, (server, conn), name, cancel).await?;

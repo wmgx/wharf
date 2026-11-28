@@ -1666,7 +1666,7 @@ mod tests {
     let mut world = world(21000);
     world.servers.get_mut("s1").unwrap().settings.private_addr = Some(
       serde_json::from_value(
-        json!({"ip":"2001:db8::1","network":"overlay"}),
+        json!({"ip":"fd00:23:4::1","network":"overlay"}),
       )
       .unwrap(),
     );

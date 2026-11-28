@@ -283,6 +283,9 @@ async fn start(
       env.push('\n');
     }
   }
+  if lease.expires_ms <= chrono::Utc::now().timestamp_millis() {
+    return Err(refuse("租约已过期"));
+  }
   std::fs::create_dir_all(root(docker))
     .map_err(|_| ApiError::internal("无法创建修复租约目录"))?;
   let lease_path = lease_file(docker, lease);
@@ -385,8 +388,13 @@ pub(crate) async fn run(
       {
         return Err(ApiError::invalid("修复命令或超时不合法"));
       }
+      let remaining =
+        lease.expires_ms - chrono::Utc::now().timestamp_millis();
+      if remaining <= 0 {
+        return Err(refuse("租约已过期"));
+      }
       let timeout = Duration::from_secs(*timeout_secs)
-        .min(Duration::from_millis((lease.expires_ms - now) as u64));
+        .min(Duration::from_millis(remaining as u64));
       let started = Instant::now();
       let (output, expired) = crate::service_exec::run_task(
         docker,
