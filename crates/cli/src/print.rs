@@ -812,6 +812,28 @@ pub fn network(v: &NetworkView) {
   crate::external::network(v);
 }
 
+pub fn monitor_settings(
+  monitor: Option<&wharf_api_types::spec::MonitorSpec>,
+) {
+  if let Some(m) = monitor {
+    println!(
+      "监控：间隔 {} 秒 · 重试 {} 次",
+      m.interval_secs.unwrap_or(60),
+      m.retries.unwrap_or_default()
+    );
+    if !m.headers.is_empty() {
+      println!(
+        "请求头：{}",
+        m.headers
+          .keys()
+          .map(String::as_str)
+          .collect::<Vec<_>>()
+          .join("、")
+      );
+    }
+  }
+}
+
 #[cfg(test)]
 mod pick_tests {
   #[test]
@@ -832,27 +854,5 @@ mod pick_tests {
       out,
       serde_json::json!({"servers":[{"name":"s1","online":true}]})
     );
-  }
-}
-
-pub fn monitor_settings(
-  monitor: Option<&wharf_api_types::spec::MonitorSpec>,
-) {
-  if let Some(m) = monitor {
-    println!(
-      "监控：间隔 {} 秒 · 重试 {} 次",
-      m.interval_secs.unwrap_or(60),
-      m.retries.unwrap_or_default()
-    );
-    if !m.headers.is_empty() {
-      println!(
-        "请求头：{}",
-        m.headers
-          .keys()
-          .map(String::as_str)
-          .collect::<Vec<_>>()
-          .join("、")
-      );
-    }
   }
 }

@@ -5022,6 +5022,45 @@ fn share_ttl(s: &str) -> Result<Duration, String> {
   Ok(Duration::from_secs(secs))
 }
 
+fn infer_ignore_image(source: &Source) -> CliResult<String> {
+  match source {
+    Source::Image(image) => Ok(image_repo(image).to_string()),
+    Source::Build(_) => Ok("*".into()),
+    Source::Compose { content, .. } => {
+      let compose = crate::deploy::parse_compose(
+        content.as_deref().unwrap_or_default(),
+      )
+      .map_err(|_| ApiError::invalid("无法读取 Compose 镜像"))?;
+      let mut images: Vec<_> = compose["services"]
+        .as_mapping()
+        .into_iter()
+        .flat_map(|m| m.values())
+        .filter(|svc| svc.get("build").is_none())
+        .filter_map(|svc| svc["image"].as_str())
+        .map(str::trim)
+        .filter(|i| {
+          !i.is_empty()
+            && !i.contains('@')
+            && !i.contains('$')
+            && !i.starts_with("sha256:")
+        })
+        .collect();
+      images.sort_unstable();
+      images.dedup();
+      match images.as_slice() {
+        [image] => Ok(image_repo(image).to_string()),
+        _ => Err(
+          ApiError::invalid(
+            "请用 --image 指定镜像名，或传 --image '*' 匹配全部",
+          )
+          .with_hint(format!("Compose 镜像：{}", images.join("、")))
+          .into(),
+        ),
+      }
+    }
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -5228,44 +5267,5 @@ mod tests {
       Cli::try_parse_from(["wharf", "exec", "s1", "--", "a", "b"])
         .is_err()
     );
-  }
-}
-
-fn infer_ignore_image(source: &Source) -> CliResult<String> {
-  match source {
-    Source::Image(image) => Ok(image_repo(image).to_string()),
-    Source::Build(_) => Ok("*".into()),
-    Source::Compose { content, .. } => {
-      let compose = crate::deploy::parse_compose(
-        content.as_deref().unwrap_or_default(),
-      )
-      .map_err(|_| ApiError::invalid("无法读取 Compose 镜像"))?;
-      let mut images: Vec<_> = compose["services"]
-        .as_mapping()
-        .into_iter()
-        .flat_map(|m| m.values())
-        .filter(|svc| svc.get("build").is_none())
-        .filter_map(|svc| svc["image"].as_str())
-        .map(str::trim)
-        .filter(|i| {
-          !i.is_empty()
-            && !i.contains('@')
-            && !i.contains('$')
-            && !i.starts_with("sha256:")
-        })
-        .collect();
-      images.sort_unstable();
-      images.dedup();
-      match images.as_slice() {
-        [image] => Ok(image_repo(image).to_string()),
-        _ => Err(
-          ApiError::invalid(
-            "请用 --image 指定镜像名，或传 --image '*' 匹配全部",
-          )
-          .with_hint(format!("Compose 镜像：{}", images.join("、")))
-          .into(),
-        ),
-      }
-    }
   }
 }
