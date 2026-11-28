@@ -1,16 +1,23 @@
 use std::{
-  collections::{BTreeMap, HashMap},
+  collections::{BTreeMap, HashMap, VecDeque},
+  fs,
+  hash::{DefaultHasher, Hash, Hasher},
+  path::{Path, PathBuf},
   sync::{Arc, Mutex},
   time::Duration,
 };
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use wharf_api_types::service_checks::{
   LogAlertSpec, LogHit, LogWatch,
 };
 
 use crate::{docker::Docker, exec::Ctx};
+
+const REPLAY: TimeDelta = TimeDelta::minutes(5);
+const MAX_PENDING: usize = 1000;
 
 pub type Hits = Arc<Mutex<BTreeMap<String, LogHit>>>;
 
@@ -27,8 +34,122 @@ struct Worker {
   cancel: CancellationToken,
 }
 
-pub type Cursors = Arc<Mutex<BTreeMap<String, Cursor>>>;
-type Cursor = Arc<Mutex<DateTime<Utc>>>;
+pub type Cursors = Arc<CursorStore>;
+type Cursor = Arc<Mutex<ProjectCursor>>;
+type Watermarks = BTreeMap<String, DateTime<Utc>>;
+
+pub struct CursorStore {
+  path: PathBuf,
+  projects: Mutex<BTreeMap<String, Cursor>>,
+  // 只允许一个落盘线程更新文件和判断是否有变化。
+  last_saved: Mutex<Vec<u8>>,
+}
+
+impl CursorStore {
+  pub fn load(data_dir: &Path) -> Cursors {
+    let path = data_dir.join("log-cursors.json");
+    let bytes = fs::read(&path).unwrap_or_default();
+    let restored: BTreeMap<String, Watermarks> =
+      serde_json::from_slice(&bytes).unwrap_or_default();
+    Arc::new(Self {
+      path,
+      projects: Mutex::new(
+        restored
+          .into_iter()
+          .map(|(name, times)| {
+            (
+              name,
+              Arc::new(Mutex::new(ProjectCursor {
+                times,
+                ..Default::default()
+              })),
+            )
+          })
+          .collect(),
+      ),
+      last_saved: Mutex::new(bytes),
+    })
+  }
+
+  pub fn save(&self) {
+    let mut last = self.last_saved.lock().unwrap();
+    let times: BTreeMap<_, _> = self
+      .projects
+      .lock()
+      .unwrap()
+      .iter()
+      .map(|(name, cursor)| {
+        (name.clone(), cursor.lock().unwrap().times.clone())
+      })
+      .collect();
+    let Ok(next) = serde_json::to_vec(&times) else {
+      return;
+    };
+    if *last == next {
+      return;
+    }
+    let tmp = self.path.with_extension("tmp");
+    match fs::write(&tmp, &next)
+      .and_then(|()| fs::rename(&tmp, &self.path))
+    {
+      Ok(()) => *last = next,
+      Err(e) => tracing::warn!("保存日志监听游标失败：{e}"),
+    }
+  }
+}
+
+#[derive(Default)]
+struct ProjectCursor {
+  times: Watermarks,
+  recent: VecDeque<(String, DateTime<Utc>, u64)>,
+}
+
+impl ProjectCursor {
+  fn start(&self, now: DateTime<Utc>) -> DateTime<Utc> {
+    self
+      .times
+      .iter()
+      .filter(|(prefix, _)| *prefix != "*")
+      .map(|(_, at)| *at)
+      .min()
+      .or_else(|| self.times.get("*").copied())
+      .unwrap_or(now)
+      .max(now - REPLAY)
+      .min(now)
+  }
+
+  fn accept(
+    &mut self,
+    prefix: &str,
+    at: DateTime<Utc>,
+    line: &str,
+  ) -> bool {
+    let previous = self
+      .times
+      .get(prefix)
+      .or_else(|| self.times.get("*"))
+      .copied();
+    if previous.is_some_and(|prev| at < prev) {
+      return false;
+    }
+    let mut hasher = DefaultHasher::new();
+    line.hash(&mut hasher);
+    let hash = hasher.finish();
+    if self
+      .recent
+      .iter()
+      .any(|(p, ts, h)| p == prefix && *ts == at && *h == hash)
+    {
+      return false;
+    }
+    self.times.insert(prefix.to_string(), at);
+    if self.recent.len() >= 512 {
+      self.recent.pop_front();
+    }
+    self.recent.push_back((prefix.to_string(), at, hash));
+    true
+  }
+}
 
 impl Watches {
   pub fn new(
@@ -66,7 +187,7 @@ impl Watches {
         false
       }
     });
-    let mut cursors = self.cursors.lock().unwrap();
+    let mut cursors = self.cursors.projects.lock().unwrap();
     cursors.retain(|project, _| projects.contains_key(project));
     for (project, watches) in projects {
       if self
@@ -81,7 +202,12 @@ impl Watches {
       }
       let cursor = cursors
         .entry(project.clone())
-        .or_insert_with(|| Arc::new(Mutex::new(Utc::now())))
+        .or_insert_with(|| {
+          Arc::new(Mutex::new(ProjectCursor {
+            times: BTreeMap::from([("*".into(), Utc::now())]),
+            ..Default::default()
+          }))
+        })
         .clone();
       let cancel = self.cancel.child_token();
       self.projects.insert(
@@ -137,7 +263,16 @@ async fn follow(
     watches
       .into_iter()
       .filter_map(|watch| {
-        let regex = watch.spec.compile_stored().ok()?;
+        let regex = match watch.spec.compile_stored() {
+          Ok(regex) => regex,
+          Err(e) => {
+            tracing::warn!(
+              "日志监听规则 {project} 编译失败：{}",
+              e.message
+            );
+            return None;
+          }
+        };
         Some(Matcher { watch, regex })
       })
       .collect(),
@@ -150,64 +285,68 @@ async fn follow(
     cancel: cancel.clone(),
     progress: None,
   };
+  let targeted = watches
+    .iter()
+    .any(|matcher| matcher.watch.spec.container.is_some());
   while !cancel.is_cancelled() {
-    let started = tokio::time::Instant::now();
-    let mut containers = HashMap::new();
-    if watches.iter().any(|m| m.watch.spec.container.is_some())
-      && let Ok(state) = docker.one_status(&project, &ctx).await
-    {
-      for c in state.containers {
-        for separator in ['-', '_'] {
-          if let Some(short) =
-            c.name.strip_prefix(&format!("{project}{separator}"))
-          {
-            containers.insert(short.to_string(), c.service.clone());
-          }
-        }
-        containers.insert(c.name, c.service);
-      }
-    }
-    let since = *cursor.lock().unwrap();
-    let line = {
-      let (watches, hits, cursor, cancel) = (
-        watches.clone(),
-        hits.clone(),
-        cursor.clone(),
-        cancel.clone(),
-      );
-      move |line: &str| {
+    let started = Instant::now();
+    let since = cursor.lock().unwrap().start(Utc::now());
+    let mut containers = if targeted {
+      container_names(&docker, &project, &ctx).await
+    } else {
+      HashMap::new()
+    };
+    let mut refreshed = Instant::now();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(256);
+    let cmd = docker
+      .compose(&project)
+      .args([
+        "logs",
+        "--follow",
+        "--no-color",
+        "--timestamps",
+        "--since",
+      ])
+      .arg(since.to_rfc3339())
+      .timeout(Duration::from_secs(30 * 60));
+    let consume = async {
+      while let Some(line) = rx.recv().await {
         if cancel.is_cancelled() {
-          return;
+          break;
         }
-        let Some((prefix, line)) = line.split_once(" | ") else {
-          return;
+        let Some((prefix, at, content)) = parse_line(&line) else {
+          continue;
         };
-        let Some((timestamp, content)) =
-          line.trim_start().split_once(' ')
-        else {
-          return;
-        };
-        let Ok(timestamp) = DateTime::parse_from_rfc3339(timestamp)
-        else {
-          return;
-        };
-        let at = timestamp.with_timezone(&Utc);
-        if at < since {
-          return;
+        if at < since
+          || !cursor.lock().unwrap().accept(prefix, at, content)
+        {
+          continue;
         }
-        let mut next = cursor.lock().unwrap();
-        *next = (*next).max(at + chrono::Duration::nanoseconds(1));
-        drop(next);
+        if targeted
+          && !containers.contains_key(prefix)
+          && refreshed.elapsed() >= Duration::from_secs(10)
+          && watches.iter().any(|m| {
+            m.watch.spec.container.is_some()
+              && matches(&m.watch.spec, m.regex.as_ref(), content)
+          })
+        {
+          containers = container_names(&docker, &project, &ctx).await;
+          refreshed = Instant::now();
+        }
         for m in watches.iter() {
           let spec = &m.watch.spec;
           if spec.container.as_ref().is_some_and(|want| {
-            containers.get(prefix.trim()) != Some(want)
-              && prefix.trim() != want
+            containers.get(prefix) != Some(want) && prefix != want
           }) || !matches(spec, m.regex.as_ref(), content)
           {
             continue;
           }
           let mut hits = hits.lock().unwrap();
+          if hits.len() >= MAX_PENDING
+            && !hits.contains_key(&m.watch.id)
+          {
+            continue;
+          }
           let hit =
             hits.entry(m.watch.id.clone()).or_insert_with(|| {
               LogHit {
@@ -226,21 +365,16 @@ async fn follow(
         }
       }
     };
-    docker
-      .compose(&project)
-      .args([
-        "logs",
-        "--follow",
-        "--no-color",
-        "--timestamps",
-        "--since",
-      ])
-      .arg(since.to_rfc3339())
-      .timeout(Duration::from_secs(30 * 60))
-      .stream_bounded(&ctx, &line)
-      .await;
+    let (normal, ()) =
+      tokio::join!(cmd.stream_bounded(&ctx, tx), consume);
     if started.elapsed() >= Duration::from_secs(60) {
       retry = 10;
+    }
+    if normal
+      && !cancel.is_cancelled()
+      && started.elapsed() >= Duration::from_secs(1)
+    {
+      continue;
     }
     tokio::select! {
       _ = cancel.cancelled() => return,
@@ -250,9 +384,62 @@ async fn follow(
   }
 }
 
+fn parse_line(line: &str) -> Option<(&str, DateTime<Utc>, &str)> {
+  let (prefix, line) = line.split_once(" | ")?;
+  let (timestamp, content) = line.trim_start().split_once(' ')?;
+  let at = DateTime::parse_from_rfc3339(timestamp)
+    .ok()?
+    .with_timezone(&Utc);
+  Some((prefix.trim(), at, content))
+}
+
+async fn container_names(
+  docker: &Docker,
+  project: &str,
+  ctx: &Ctx,
+) -> HashMap<String, String> {
+  let mut names = HashMap::new();
+  if let Ok(state) = docker.one_status(project, ctx).await {
+    for c in state.containers {
+      for separator in ['-', '_'] {
+        if let Some(short) =
+          c.name.strip_prefix(&format!("{project}{separator}"))
+        {
+          names.insert(short.to_string(), c.service.clone());
+        }
+      }
+      names.insert(c.name, c.service);
+    }
+  }
+  names
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn log_watch_keeps_independent_container_cursors_and_persists() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = CursorStore::load(dir.path());
+    let now = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+    let at = |ms| now + TimeDelta::milliseconds(ms);
+    let cursor = Arc::new(Mutex::new(ProjectCursor::default()));
+    {
+      let mut cur = cursor.lock().unwrap();
+      assert!(cur.accept("web-1", at(500), "later"));
+      assert!(cur.accept("worker-1", at(200), "earlier"));
+      assert!(!cur.accept("worker-1", at(200), "earlier"));
+      assert!(cur.accept("worker-1", at(200), "same timestamp"));
+    }
+    store.projects.lock().unwrap().insert("web".into(), cursor);
+    store.save();
+    let restored = CursorStore::load(dir.path());
+    let stored = restored.projects.lock().unwrap();
+    let cur = stored["web"].lock().unwrap();
+    assert_eq!(cur.start(at(1000)), at(200));
+    assert_eq!(cur.start(now + TimeDelta::minutes(10)), now + REPLAY);
+  }
 
   #[test]
   fn text_and_regex_match_once() {

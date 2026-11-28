@@ -194,36 +194,37 @@ impl Cmd {
   pub async fn stream_bounded(
     self,
     ctx: &Ctx,
-    line: &(impl Fn(&str) + Sync),
-  ) {
+    lines: tokio::sync::mpsc::Sender<String>,
+  ) -> bool {
     if ctx.cancel.is_cancelled() {
-      return;
+      return false;
     }
     let Ok(mut child) = self.command().spawn() else {
-      return;
+      return false;
     };
     let pid = child.id();
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
     let streams = async {
       tokio::join!(
-        bounded_lines(stdout, line),
-        bounded_lines(stderr, line)
+        bounded_lines(stdout, &lines),
+        bounded_lines(stderr, &lines)
       );
-      let _ = child.wait().await;
+      child.wait().await.is_ok_and(|status| status.success())
     };
-    tokio::select! {
-      _ = streams => {}
-      _ = tokio::time::sleep(self.timeout) => {}
-      _ = ctx.cancel.cancelled() => {}
-    }
-    // Compose can leave its CLI plugin alive even after the parent exits.
+    let normal = tokio::select! {
+      normal = streams => normal,
+      _ = tokio::time::sleep(self.timeout) => true,
+      _ = ctx.cancel.cancelled() => false,
+    };
+    // Compose 退出后仍可能留下 CLI 插件。
     if let Some(pid) = pid {
       unsafe {
         libc::kill(-(pid as i32), libc::SIGKILL);
       }
     }
     let _ = child.wait().await;
+    normal
   }
 
   pub(crate) async fn stdout_bounded(
@@ -399,7 +400,7 @@ async fn capture(
 
 async fn bounded_lines(
   stream: impl AsyncRead + Unpin,
-  emit: &impl Fn(&str),
+  lines: &tokio::sync::mpsc::Sender<String>,
 ) {
   let mut stream = BufReader::new(stream);
   let mut line = Vec::with_capacity(4096);
@@ -411,13 +412,20 @@ async fn bounded_lines(
     let len = end.unwrap_or(chunk.len());
     line.extend_from_slice(&chunk[..len.min(4096 - line.len())]);
     if end.is_some() {
-      emit(String::from_utf8_lossy(&line).trim_end_matches('\r'));
+      let text = String::from_utf8_lossy(&line)
+        .trim_end_matches('\r')
+        .to_string();
+      if lines.send(text).await.is_err() {
+        return;
+      }
       line.clear();
     }
     stream.consume(len + usize::from(end.is_some()));
   }
   if !line.is_empty() {
-    emit(&String::from_utf8_lossy(&line));
+    let _ = lines
+      .send(String::from_utf8_lossy(&line).into_owned())
+      .await;
   }
 }
 

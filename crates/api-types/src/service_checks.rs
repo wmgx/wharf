@@ -28,11 +28,18 @@ const fn one() -> u32 {
 impl LogAlertSpec {
   pub fn compile(&self) -> Result<Option<regex::Regex>, ApiError> {
     if !(1..=1440).contains(&self.window_mins)
-      || !(1..=100_000).contains(&self.min_count)
+      || !(1..=10_000).contains(&self.min_count)
     {
       return Err(ApiError::invalid(
-        "日志规则窗口须为 1 到 1440 分钟，最少次数须为 1 到 100000",
+        "日志规则窗口须为 1 到 1440 分钟，最少次数须为 1 到 10000",
       ));
+    }
+    if self
+      .container
+      .as_ref()
+      .is_some_and(|name| name.trim().is_empty())
+    {
+      return Err(ApiError::invalid("日志规则的容器名不能为空"));
     }
     self.compile_stored()
   }

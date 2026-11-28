@@ -199,8 +199,9 @@ pub async fn sync_watches(
     for server in
       old.keys().chain(m.watches.keys()).collect::<BTreeSet<_>>()
     {
-      if old.get(server) != m.watches.get(server)
-        || connecting == Some(server.as_str())
+      if state.hub.supports_service_checks(server)
+        && (old.get(server) != m.watches.get(server)
+          || connecting == Some(server.as_str()))
       {
         state.hub.log_watches(
           server,

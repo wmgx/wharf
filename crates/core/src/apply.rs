@@ -1075,6 +1075,14 @@ async fn execute(
         )
       {
         deployed.insert(service.to_string());
+        if matches!(step.step, Step::ServiceUp { .. })
+          && let Ok(snap) = snapshot::load(&state.db).await
+          && let Some(server) =
+            snapshot::service_runtime_server(&snap, service)
+        {
+          crate::service_monitor::sync_watches(&state, Some(server))
+            .await;
+        }
       }
       record_op(&state, service, action, &run_id, status, error)
         .await;
