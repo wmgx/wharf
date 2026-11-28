@@ -413,6 +413,8 @@ pub struct ImportRecord {
 pub enum DataKind {
   /// `/srv/<服务>/` 下：迁移时同步、每天备份、迁走后旧机器上的 7 天后删除。
   Managed,
+  /// 数据归同机的拥有者服务。
+  Shared,
   /// 其他宿主机目录：Wharf 不迁移、不备份、不删除。
   ExternalDir,
   /// docker 命名卷或匿名卷：Wharf 不迁移、不备份、不删除。
@@ -423,6 +425,10 @@ pub enum DataKind {
   Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
 )]
 pub struct DataMount {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub from_service: Option<String>,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub read_only: bool,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub resolved: Option<String>,
   pub kind: DataKind,

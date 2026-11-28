@@ -384,6 +384,7 @@ pub(crate) async fn reconcile_world(
   Ok(())
 }
 
+#[derive(Default)]
 pub(crate) struct Changes {
   services: BTreeSet<String>,
   limits: BTreeSet<String>,
@@ -396,17 +397,15 @@ pub(crate) struct Changes {
 }
 
 impl Changes {
+  pub(crate) fn deleted_service(name: &str) -> Self {
+    Self {
+      services: BTreeSet::from([name.to_string()]),
+      ..Self::default()
+    }
+  }
+
   pub(crate) fn between(old: &World, new: &World) -> Self {
-    let mut changes = Self {
-      services: BTreeSet::new(),
-      limits: BTreeSet::new(),
-      monitors: BTreeSet::new(),
-      heartbeats: BTreeSet::new(),
-      routes: BTreeSet::new(),
-      servers: BTreeSet::new(),
-      gateways: BTreeSet::new(),
-      certs: BTreeSet::new(),
-    };
+    let mut changes = Self::default();
     for (name, row) in &old.services {
       let Some(next) = new.services.get(name) else {
         changes.services.insert(name.clone());

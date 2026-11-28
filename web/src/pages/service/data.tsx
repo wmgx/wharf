@@ -21,9 +21,9 @@ export function DataTab({ svc }: { svc: ServiceView }) {
                 <span>{m.source || "匿名卷"}</span>
                 <span className="text-muted-foreground">→ {m.target}</span>
                 <Badge
-                  variant={m.kind === "managed" ? "secondary" : "outline"}
+                  variant={m.kind === "managed" || m.kind === "shared" ? "secondary" : "outline"}
                   className={
-                    m.kind === "managed"
+                    m.kind === "managed" || m.kind === "shared"
                       ? "ml-auto font-normal"
                       : "ml-auto border-warning/50 font-normal text-warning"
                   }

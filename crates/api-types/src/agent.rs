@@ -150,6 +150,8 @@ pub enum AgentMsg {
     #[serde(default)]
     safe_delete: bool,
     #[serde(default)]
+    shared_volumes: bool,
+    #[serde(default)]
     safe_gateway: bool,
     #[serde(default)]
     safe_adopt: bool,
@@ -471,6 +473,7 @@ pub enum AgentOp {
   RemoveData {
     service: String,
   },
+  BindMountUsers(BindMountQuery),
   Restic(ResticJob),
   ProbeCoreHost(CoreHostProbe),
   /// 取代码、`docker build`，结果是 [BuildResult]。镜像已存在且不是 `force` 时跳过。

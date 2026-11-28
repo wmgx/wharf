@@ -103,6 +103,9 @@ fn warnings<'a>(
     warnings.extend(
       service_warnings(&row.spec, public, &secrets)
         .into_iter()
+        .chain(crate::shared_volumes::implicit_warnings(
+          world, name, &row.spec,
+        ))
         .map(|detail| (format!("服务 {name}"), detail)),
     );
   }
