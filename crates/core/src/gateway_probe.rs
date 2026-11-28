@@ -7,8 +7,8 @@ use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
   ApiError, ErrorCode,
   agent::{
-    AgentOp, GatewayProbeJob, GatewayProbeResult, ProbeTarget,
-    ProjectState,
+    AgentOp, GatewayProbeJob, GatewayProbeResult, OneTimeSecret,
+    ProbeTarget, ProjectState,
   },
   spec::{GatewayKind, GatewayTls, RouteSpec},
 };
@@ -30,6 +30,11 @@ fn entry(
     cert_pending: false,
     detail: detail.into(),
   }
+}
+
+fn has_gate(route: &RouteSpec) -> bool {
+  !route.cf_origin_only
+    && route.sso.as_ref().is_some_and(|sso| !sso.public)
 }
 
 pub(crate) async fn check_entry(
@@ -68,10 +73,26 @@ pub(crate) async fn check_entry(
   if gw.kind == GatewayKind::Caddy
     && state.hub.supports_gateway_probe(&gw.server)
   {
+    let gate_cookie = if has_gate(route) {
+      match crate::gate::probe_cookie(&state.db, host).await {
+        Ok(cookie) => Some(OneTimeSecret(cookie)),
+        Err(_) => {
+          return entry(
+            false,
+            "gateway_auth_rejected",
+            "无法签发门禁探测凭证",
+          );
+        }
+      }
+    } else {
+      None
+    };
     let job = GatewayProbeJob {
       hostname: host.into(),
       path: path(snap, net, host, route).into(),
       tls: gw.tls != GatewayTls::Off,
+      allow_pending_cert: gw.tls == GatewayTls::Auto,
+      gate_cookie,
       http_port: gw.http_port.unwrap_or(80),
       https_port: gw.https_port.unwrap_or(443),
       upstream,
@@ -91,6 +112,16 @@ pub(crate) async fn check_entry(
       .unwrap_or_else(|_| {
         entry(false, "gateway_unreachable", "网关本机探测未完成")
       });
+  }
+  if gw.kind == GatewayKind::Caddy && has_gate(route) {
+    return entry(
+      false,
+      "gateway_auth_rejected",
+      format!(
+        "服务器 {} 的 agent 不支持门禁探测，请先 wharf server upgrade {}",
+        gw.server, gw.server
+      ),
+    );
   }
   if let Some(addr) = upstream {
     let result: Result<Vec<bool>, ApiError> = state
@@ -217,6 +248,17 @@ async fn verify(
     }
     .ok_or_else(|| conflict(host, gateway, "没有可直连的 IP"))?;
   let tls = gw.tls != GatewayTls::Off;
+  if has_gate(route) && !tls && !ip.is_loopback() {
+    return Err(conflict(host, gateway, "门禁直连预验需要 HTTPS"));
+  }
+  let gate_cookie =
+    if has_gate(route) {
+      Some(crate::gate::probe_cookie(&state.db, host).await.map_err(
+        |_| conflict(host, gateway, "无法签发门禁探测凭证"),
+      )?)
+    } else {
+      None
+    };
   let http_port = gw.http_port.unwrap_or(80);
   let port = if tls {
     gw.https_port.unwrap_or(443)
@@ -244,39 +286,69 @@ async fn verify(
     )
   };
   let mut detail = String::new();
+  let mut attempted_port = port;
   for attempt in 0..2 {
     if attempt != 0 {
       tokio::time::sleep(Duration::from_secs(1)).await;
     }
-    let (response, cert_pending) =
+    attempted_port = port;
+    let outcome =
       tokio::time::timeout(Duration::from_secs(8), async {
-        let response = direct
-          .get(url(tls, port))
-          .header("Host", host)
-          .send()
-          .await;
-        Ok::<_, ApiError>(match response {
+        let mut request =
+          direct.get(url(tls, port)).header("Host", host);
+        if let Some(cookie) = &gate_cookie {
+          request = request.header(reqwest::header::COOKIE, cookie);
+        }
+        let (response, pending) = match request.send().await {
           Err(error)
             if gw.tls == GatewayTls::Auto && tls_failed(&error) =>
           {
+            attempted_port = http_port;
             (
               client(http_port)?
                 .get(url(false, http_port))
                 .header("Host", host)
                 .send()
-                .await
-                .ok(),
+                .await,
               true,
             )
           }
-          response => (response.ok(), false),
-        })
+          response => (response, false),
+        };
+        let mut response = match response {
+          Ok(response) => response,
+          Err(error) => return Ok(Err(network_error(&error))),
+        };
+        let code = response.status().as_u16();
+        if !pending && gate_cookie.is_some() {
+          let login_redirect = (300..400).contains(&code)
+            && response
+              .headers()
+              .get(reqwest::header::LOCATION)
+              .and_then(|v| v.to_str().ok())
+              .is_some_and(|location| {
+                location.contains("/gate/login")
+                  || location.starts_with("/_wharf/login")
+              });
+          if login_redirect
+            || code == 401
+              && match gate_login_body(&mut response).await {
+                Ok(rejected) => rejected,
+                Err(error) => return Ok(Err(network_error(&error))),
+              }
+          {
+            return Ok(Err("Wharf 门禁未放行探测请求".into()));
+          }
+        }
+        Ok::<_, ApiError>(Ok((code, pending)))
       })
-      .await
-      .unwrap_or(Ok((None, false)))?;
-    match response {
-      Some(r) if !matches!(r.status().as_u16(), 502 | 504) => {
-        let code = r.status().as_u16();
+      .await;
+    match outcome.unwrap_or_else(|_| Ok(Err("请求超时".into())))?
+    {
+      Ok((code, cert_pending))
+        if code < 500
+          && (!cert_pending || matches!(code, 301 | 308)) =>
+      {
         let mut result = entry(
           true,
           "direct",
@@ -286,28 +358,54 @@ async fn verify(
         result.cert_pending = cert_pending || local.cert_pending;
         return Ok(result);
       }
-      Some(r) => {
-        detail = format!(
-          "直连 {ip}:{port} 返回 HTTP {}",
-          r.status().as_u16()
-        )
+      Ok((code, _)) => {
+        detail =
+          format!("直连 {ip}:{attempted_port} 返回 HTTP {code}");
       }
-      None => {
-        detail = format!("本机正常，但控制面无法直连 {ip}:{port}")
+      Err(error) => {
+        detail = format!(
+          "本机正常，但控制面直连 {ip}:{attempted_port} 失败（{error}）"
+        );
       }
     }
   }
-  let mut error = conflict(host, gateway, &detail);
-  if snap.world.servers.get(&gw.server).is_some_and(|row| {
+  let server = &gw.server;
+  let hint = if snap.world.servers.get(server).is_some_and(|row| {
     row.settings.region
       == Some(wharf_api_types::spec::Region::Overseas)
-  }) && detail.contains("无法直连")
-  {
-    error = error.with_hint(format!(
-      "检查安全组和防火墙是否放行 {port}；若仅是控制面国际线路波动，可加 --no-verify-before-dns 跳过预验"
-    ));
+  }) {
+    format!(
+      "检查服务器 {server} 的安全组和防火墙是否放行 {attempted_port}；若仅是控制面国际线路波动，可加 --no-verify-before-dns 跳过预验"
+    )
+  } else {
+    format!(
+      "检查目标网关、上游及服务器 {server} 的安全组和防火墙是否放行 {attempted_port}，或加 --no-verify-before-dns 跳过预验"
+    )
+  };
+  Err(conflict(host, gateway, &detail).with_hint(hint))
+}
+
+fn network_error(error: &reqwest::Error) -> String {
+  let mut detail = error.to_string();
+  let mut cause = std::error::Error::source(error);
+  while let Some(next) = cause {
+    detail.push_str(&format!("，{next}"));
+    cause = next.source();
   }
-  Err(error)
+  detail
+}
+
+async fn gate_login_body(
+  response: &mut reqwest::Response,
+) -> Result<bool, reqwest::Error> {
+  let mut remaining = "需要登录\n".as_bytes();
+  while let Some(chunk) = response.chunk().await? {
+    let Some(rest) = remaining.strip_prefix(chunk.as_ref()) else {
+      return Ok(false);
+    };
+    remaining = rest;
+  }
+  Ok(remaining.is_empty())
 }
 
 fn tls_failed(e: &reqwest::Error) -> bool {
@@ -330,7 +428,8 @@ mod tests {
   use super::*;
 
   #[tokio::test]
-  async fn origin_only_skips_http_and_unhealthy_gateway_blocks_dns() {
+  async fn dns_preverify_probes_local_and_direct_with_gate_credentials()
+   {
     let state = crate::rules::tests::test_state();
     let mut snap = Snapshot::default();
     let gw: wharf_api_types::spec::GatewaySpec =
@@ -353,6 +452,9 @@ mod tests {
       }]),
       AgentOp::GatewayProbe(job) => {
         assert_eq!(job.path, "/healthz");
+        if !job.tls {
+          assert!(job.gate_cookie.is_some());
+        }
         let ok = job.upstream_only || !job.tls;
         serde_json::json!({
           "ok":ok,
@@ -398,14 +500,31 @@ mod tests {
     gw.http_port = Some(http.local_addr().unwrap().port());
     net.core_server = Some("s1".into());
     route.cf_origin_only = false;
+    route.sso = Some(
+      serde_json::from_value(serde_json::json!({"mode":"header"}))
+        .unwrap(),
+    );
     let server = tokio::spawn(async move {
-      let (mut stream, _) = http.accept().await.unwrap();
-      let mut request = [0; 4096];
-      assert!(stream.read(&mut request).await.unwrap() > 0);
-      stream
-        .write_all(b"HTTP/1.1 302 Found\r\nContent-Length: 0\r\n\r\n")
-        .await
-        .unwrap();
+      for code in [403, 502, 502] {
+        let (mut stream, _) = http.accept().await.unwrap();
+        let mut request = Vec::new();
+        while !request.ends_with(b"\r\n\r\n") {
+          request.push(stream.read_u8().await.unwrap());
+        }
+        let request =
+          String::from_utf8(request).unwrap().to_ascii_lowercase();
+        assert!(request.contains("\r\nhost: check.example.test\r\n"));
+        assert!(request.contains("\r\ncookie: wharf_gate="));
+        stream
+          .write_all(
+            format!(
+              "HTTP/1.1 {code} Fixture\r\nContent-Length: 0\r\n\r\n"
+            )
+            .as_bytes(),
+          )
+          .await
+          .unwrap();
+      }
     });
     let direct = verify_before_dns(
       &state,
@@ -415,7 +534,45 @@ mod tests {
       &cancel,
     )
     .await;
-    server.abort();
-    assert_eq!(direct.unwrap().status, Some(302));
+    assert_eq!(direct.unwrap().status, Some(403));
+    let err = verify_before_dns(
+      &state,
+      &snap,
+      &net,
+      (host, &route, "gw2"),
+      &cancel,
+    )
+    .await
+    .unwrap_err();
+    assert!(err.message.contains("HTTP 502"));
+    server.await.unwrap();
+    let err = verify_before_dns(
+      &state,
+      &snap,
+      &net,
+      (host, &route, "gw2"),
+      &cancel,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+      err
+        .message
+        .to_ascii_lowercase()
+        .contains("connection refused"),
+      "{}",
+      err.message
+    );
+    let hint = err.hint.unwrap();
+    assert!(hint.contains("s1"));
+    assert!(
+      hint.contains(
+        &snap.world.gateways["gw2"]
+          .spec
+          .http_port
+          .unwrap()
+          .to_string()
+      )
+    );
   }
 }

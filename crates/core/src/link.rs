@@ -445,13 +445,16 @@ pub fn projects_with_secrets(
   net: &Net,
   secrets: &BTreeMap<String, String>,
 ) -> Result<Vec<LinkProject>, ApiError> {
-  projects_for_servers(world, net, secrets, |_| false)
+  projects_for_servers(world, net, secrets, &BTreeMap::new(), |_| {
+    false
+  })
 }
 
 pub fn projects_for_servers(
   world: &World,
   net: &Net,
   secrets: &BTreeMap<String, String>,
+  existing_ports: &BTreeMap<(&str, &str), u16>,
   hot_reload: impl Fn(&LinkProject) -> bool,
 ) -> Result<Vec<LinkProject>, ApiError> {
   let token = |gateway: &str| {
@@ -474,11 +477,11 @@ pub fn projects_for_servers(
     })
   };
   let tunnels = tunnels(world, net)?;
-  let mut clients: BTreeMap<(String, String), Vec<&Tunnel>> =
+  let mut clients: BTreeMap<(&str, &str), Vec<&Tunnel>> =
     BTreeMap::new();
   for t in &tunnels {
     clients
-      .entry((t.service_server.clone(), t.gateway_server.clone()))
+      .entry((&t.service_server, &t.gateway_server))
       .or_default()
       .push(t);
   }
@@ -500,24 +503,24 @@ pub fn projects_for_servers(
         .to_string(),
     });
   }
-  // 在已配置的承载机上分配端口，增删路由不会推挤同机其他 frpc。
-  let mut taken = configured_admin_port_bindings(world)
-    .into_iter()
-    .map(|(_, p)| p)
-    .collect();
-  let admin_ports: BTreeMap<_, _> = world
-    .servers
-    .keys()
-    .filter(|server| link_gateway(world, server).is_some())
-    .filter_map(|server| {
-      pick_admin_port(server, &mut taken).map(|port| (server, port))
-    })
-    .collect();
+  // frpc 使用宿主网络。保留同机已有端口，再给新连接分配。
+  let mut taken: BTreeMap<&str, BTreeSet<u16>> = BTreeMap::new();
+  for (server, port) in configured_admin_port_bindings(world) {
+    taken.entry(server).or_default().insert(port);
+  }
+  let mut reserved = BTreeMap::new();
+  for (&(server, project), &port) in existing_ports {
+    if FRPC_ADMIN_PORTS.contains(&port)
+      && taken.entry(server).or_default().insert(port)
+    {
+      reserved.insert((server, project), port);
+    }
+  }
   for ((service_server, gateway_server), list) in clients {
-    let addr = frps_addr(net, &gateway_server)?;
-    let (gateway, spec) = carrier(&gateway_server)?;
+    let addr = frps_addr(net, gateway_server)?;
+    let (gateway, spec) = carrier(gateway_server)?;
     let port = spec.https_port.unwrap_or(443);
-    let project = client_project(&gateway_server);
+    let project = client_project(gateway_server);
     let proxies: Vec<(String, u16, u16)> = list
       .iter()
       .map(|t| {
@@ -542,7 +545,7 @@ pub fn projects_for_servers(
       .collect();
     let mut rendered = LinkProject {
       gateway: gateway.to_string(),
-      server: service_server.clone(),
+      server: service_server.to_string(),
       reload: None,
       hash: render::hash(&compose),
       compose,
@@ -553,9 +556,15 @@ pub fn projects_for_servers(
       ),
     };
     if hot_reload(&rendered) {
-      let admin_port = admin_ports
-        .get(&gateway_server)
+      let admin_port = reserved
+        .get(&(service_server, rendered.project.as_str()))
         .copied()
+        .or_else(|| {
+          pick_admin_port(
+            gateway_server,
+            taken.entry(service_server).or_default(),
+          )
+        })
         .ok_or_else(|| ApiError::invalid("frpc 管理端口已用完"))?;
       let reload = render::frpc_render(
         &rendered.project,

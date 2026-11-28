@@ -99,6 +99,17 @@ async fn key(db: &Db) -> Result<SigningKey, ApiError> {
   db.call(|c| Ok(SigningKey::from_bytes(&seed(c, "gate.key")?)))
     .await
 }
+pub(crate) async fn probe_cookie(
+  db: &Db,
+  host: &str,
+) -> Result<String, ApiError> {
+  let key = key(db).await?;
+  Ok(format!(
+    "wharf_gate={}",
+    credentials::probe_token(&key, host, now_ms() / 1000)
+  ))
+}
+
 async fn rt_key(db: &Db) -> Result<[u8; 32], ApiError> {
   db.call(|c| seed(c, RT_SEED)).await
 }

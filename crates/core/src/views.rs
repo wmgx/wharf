@@ -260,6 +260,7 @@ fn empty_project(name: &str) -> ProjectState {
     hash: None,
     config_hash: None,
     acme_dns_url_hash: None,
+    frpc_admin_port: None,
     containers: Vec::new(),
   }
 }

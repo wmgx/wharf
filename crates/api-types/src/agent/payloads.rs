@@ -611,6 +611,9 @@ pub struct ProjectState {
   /// 只上报 DNS-01 回调地址的指纹，不上报 Caddyfile。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub acme_dns_url_hash: Option<String>,
+  /// 管理端口只用于保持同机已有 frpc 的分配。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub frpc_admin_port: Option<u16>,
   pub containers: Vec<ContainerInfo>,
 }
 
@@ -1073,6 +1076,10 @@ pub struct GatewayProbeJob {
   pub hostname: String,
   pub path: String,
   pub tls: bool,
+  #[serde(default)]
+  pub allow_pending_cert: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub gate_cookie: Option<OneTimeSecret>,
   pub http_port: u16,
   pub https_port: u16,
   #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -151,7 +151,7 @@ pub enum AgentMsg {
     safe_delete: bool,
     #[serde(default)]
     safe_gateway: bool,
-    #[serde(default)]
+    #[serde(default, rename = "gateway_probe_v2")]
     gateway_probe: bool,
     #[serde(default)]
     frpc_reload: bool,

@@ -3,7 +3,7 @@ use std::{net::SocketAddr, time::Duration};
 use reqwest::{Client, Url};
 use wharf_api_types::{
   ApiError, ErrorCode,
-  agent::{GatewayProbeJob, GatewayProbeResult},
+  agent::{GatewayProbeJob, GatewayProbeResult, OneTimeSecret},
 };
 
 use crate::exec::Ctx;
@@ -67,34 +67,45 @@ async fn status(
   client: &Client,
   url: Url,
   host: &str,
-) -> Result<u16, reqwest::Error> {
-  client
-    .get(url)
-    .header("Host", host)
-    .send()
-    .await
-    .map(|r| r.status().as_u16())
+  cookie: Option<&OneTimeSecret>,
+) -> Result<(u16, bool), reqwest::Error> {
+  let mut request = client.get(url).header("Host", host);
+  if let Some(cookie) = cookie {
+    request = request.header(reqwest::header::COOKIE, &cookie.0);
+  }
+  let mut response = request.send().await?;
+  let code = response.status().as_u16();
+  let rejected = cookie.is_some()
+    && ((300..400).contains(&code)
+      && response
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|location| {
+          location.contains("/gate/login")
+            || location.starts_with("/_wharf/login")
+        })
+      || code == 401 && gate_login_body(&mut response).await?);
+  Ok((code, rejected))
+}
+
+async fn gate_login_body(
+  response: &mut reqwest::Response,
+) -> Result<bool, reqwest::Error> {
+  let mut remaining = "需要登录\n".as_bytes();
+  while let Some(chunk) = response.chunk().await? {
+    let Some(rest) = remaining.strip_prefix(chunk.as_ref()) else {
+      return Ok(false);
+    };
+    remaining = rest;
+  }
+  Ok(remaining.is_empty())
 }
 
 async fn probe(
   job: &GatewayProbeJob,
-  upstream: Option<Url>,
 ) -> Result<GatewayProbeResult, ApiError> {
   let host = job.hostname.as_str();
-  let bad_upstream =
-    || result("upstream_unreachable", None, false, "网关连不上上游");
-  if let Some(url) = &upstream {
-    let target = (
-      url.host_str().unwrap().trim_matches(['[', ']']),
-      url.port_or_known_default().unwrap(),
-    );
-    if tokio::net::TcpStream::connect(target).await.is_err() {
-      return Ok(bad_upstream());
-    }
-  }
-  if job.upstream_only {
-    return Ok(result("upstream_only", None, true, "上游 TCP 可达"));
-  }
   let builder = || {
     Client::builder()
       .no_proxy()
@@ -103,6 +114,28 @@ async fn probe(
       .retry(reqwest::retry::never())
       .tls_danger_accept_invalid_certs(true)
   };
+  let check_upstream = || async {
+    if let Some(address) = &job.upstream {
+      let mut upstream = upstream_addr(address)?;
+      upstream.set_path(&job.path);
+      let client = builder()
+        .build()
+        .map_err(|_| ApiError::internal("无法创建上游探测客户端"))?;
+      return Ok::<_, ApiError>(matches!(
+        status(&client, upstream, host, None).await,
+        Ok((code, _)) if code < 500
+      ));
+    }
+    Ok(true)
+  };
+  if job.upstream_only {
+    return Ok(result(
+      "upstream_only",
+      None,
+      check_upstream().await?,
+      "探测上游 HTTP",
+    ));
+  }
   let client = |port| {
     builder()
       .resolve(host, SocketAddr::from(([127, 0, 0, 1], port)))
@@ -123,16 +156,38 @@ async fn probe(
   } else {
     job.http_port
   };
-  let first = status(&client(port)?, url(job.tls)?, host).await;
+  let first = status(
+    &client(port)?,
+    url(job.tls)?,
+    host,
+    job.gate_cookie.as_ref(),
+  )
+  .await;
   let (response, cert_pending) = match first {
-    Err(error) if job.tls && tls_failed(&error) => (
-      status(&client(job.http_port)?, url(false)?, host).await,
-      true,
-    ),
+    Err(error)
+      if job.tls && job.allow_pending_cert && tls_failed(&error) =>
+    {
+      (
+        status(&client(job.http_port)?, url(false)?, host, None)
+          .await,
+        true,
+      )
+    }
     other => (other, false),
   };
   let code = match response {
-    Ok(code @ (502 | 504)) => {
+    Ok((code, true)) => {
+      return Ok(result(
+        "gateway_auth_rejected",
+        Some(code),
+        false,
+        "Wharf 门禁未放行探测请求",
+      ));
+    }
+    Ok((code, _))
+      if code >= 500
+        || cert_pending && !matches!(code, 301 | 308) =>
+    {
       return Ok(result(
         "gateway_http_bad",
         Some(code),
@@ -140,7 +195,7 @@ async fn probe(
         &format!("网关返回 HTTP {code}"),
       ));
     }
-    Ok(code) => code,
+    Ok((code, _)) => code,
     Err(_) => {
       return Ok(result(
         "gateway_unreachable",
@@ -151,15 +206,13 @@ async fn probe(
     }
   };
   if cert_pending {
-    if let Some(mut upstream) = upstream {
-      upstream.set_path(&job.path);
-      let upstream_client = builder()
-        .build()
-        .map_err(|_| ApiError::internal("无法创建上游探测客户端"))?;
-      if !matches!(status(&upstream_client, upstream, host).await, Ok(n) if !matches!(n, 502 | 504))
-      {
-        return Ok(bad_upstream());
-      }
+    if !check_upstream().await? {
+      return Ok(result(
+        "upstream_unreachable",
+        None,
+        false,
+        "网关连不上上游 HTTP",
+      ));
     }
     return Ok(result(
       "http_cert_pending",
@@ -189,14 +242,12 @@ pub(super) async fn run(
   {
     return Err(ApiError::invalid("网关探测目标无效"));
   }
-  let upstream =
-    job.upstream.as_deref().map(upstream_addr).transpose()?;
   let limit =
     Duration::from_secs(job.timeout_secs.clamp(2, 15).into());
   tokio::select! {
     biased;
     _ = ctx.cancel.cancelled() => Err(ApiError::new(ErrorCode::Cancelled, "网关探测已取消")),
-    outcome = tokio::time::timeout(limit, probe(job, upstream)) => {
+    outcome = tokio::time::timeout(limit, probe(job)) => {
       outcome.unwrap_or_else(|_| Ok(result("gateway_unreachable", None, false, "网关探测超时")))
     }
   }
@@ -217,10 +268,12 @@ mod tests {
     let tls = bind().await.unwrap();
     let http = bind().await.unwrap();
     let upstream = bind().await.unwrap();
-    let job = GatewayProbeJob {
+    let mut job = GatewayProbeJob {
       hostname: "probe.example.test".into(),
       path: "/".into(),
       tls: true,
+      allow_pending_cert: true,
+      gate_cookie: None,
       http_port: http.local_addr().unwrap().port(),
       https_port: tls.local_addr().unwrap().port(),
       upstream: Some(upstream.local_addr().unwrap().to_string()),
@@ -228,10 +281,23 @@ mod tests {
       timeout_secs: 5,
     };
     let tls_fail = async move {
-      let (mut conn, _) = tls.accept().await.unwrap();
-      let mut hello = [0; 4096];
-      assert!(conn.read(&mut hello).await.unwrap() > 0);
-      conn.shutdown().await.unwrap();
+      for _ in 0..2 {
+        let (mut conn, _) = tls.accept().await.unwrap();
+        let mut header = [0; 5];
+        conn.read_exact(&mut header).await.unwrap();
+        let mut hello = vec![
+          0;
+          u16::from_be_bytes([header[3], header[4]])
+            as usize
+        ];
+        conn.read_exact(&mut hello).await.unwrap();
+        assert!(
+          hello
+            .windows(b"probe.example.test".len())
+            .any(|bytes| bytes == b"probe.example.test")
+        );
+        conn.shutdown().await.unwrap();
+      }
     };
     async fn respond(listener: TcpListener, response: &[u8]) {
       loop {
@@ -251,9 +317,100 @@ mod tests {
       );
     });
     let result = run(&job, &Ctx::detached()).await.unwrap();
-    fixtures.abort();
     assert!(result.ok && result.cert_pending, "{result:?}");
     assert_eq!(result.status, Some(308));
+    job.allow_pending_cert = false;
+    let result = run(&job, &Ctx::detached()).await.unwrap();
+    assert!(!result.ok && !result.cert_pending, "{result:?}");
+    assert_eq!(result.stage, "gateway_unreachable");
+    fixtures.await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn signed_gateway_probe_distinguishes_gate_denial_from_backend()
+   {
+    use tokio::{
+      io::{AsyncReadExt, AsyncWriteExt},
+      net::TcpListener,
+    };
+
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let job = GatewayProbeJob {
+      hostname: "probe.example.test".into(),
+      path: "/".into(),
+      tls: false,
+      allow_pending_cert: false,
+      gate_cookie: Some(OneTimeSecret("wharf_gate=fixture".into())),
+      http_port: listener.local_addr().unwrap().port(),
+      https_port: 443,
+      upstream: None,
+      upstream_only: false,
+      timeout_secs: 2,
+    };
+    let replies = [
+      (
+        401,
+        "需要登录
+",
+        false,
+      ),
+      (401, "backend", true),
+      (403, "backend", true),
+      (500, "", false),
+      (502, "", false),
+      (504, "", false),
+    ];
+    let server = tokio::spawn(async move {
+      for (code, body, _) in replies {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        while !request.ends_with(
+          b"
+
+",
+        ) {
+          request.push(stream.read_u8().await.unwrap());
+        }
+        let request =
+          String::from_utf8(request).unwrap().to_ascii_lowercase();
+        assert!(request.contains(
+          "
+host: probe.example.test
+"
+        ));
+        let (code, body) = if request.contains(
+          "
+cookie: wharf_gate=fixture
+",
+        ) {
+          (code, body)
+        } else {
+          (302, "")
+        };
+        stream
+          .write_all(
+            format!(
+              "HTTP/1.1 {code} Fixture
+Content-Length: {}
+
+{body}",
+              body.len()
+            )
+            .as_bytes(),
+          )
+          .await
+          .unwrap();
+      }
+    });
+    for (code, _, ok) in replies {
+      let result = run(&job, &Ctx::detached()).await.unwrap();
+      assert_eq!(
+        (result.status, result.ok),
+        (Some(code), ok),
+        "{result:?}"
+      );
+    }
+    server.await.unwrap();
   }
 
   #[test]

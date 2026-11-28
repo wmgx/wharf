@@ -105,6 +105,7 @@ pub fn frpc_compose(
 }
 
 pub struct FrpcRender {
+  pub admin_port: u16,
   pub compose: String,
   pub config: String,
   pub config_hash: String,
@@ -162,6 +163,7 @@ pub fn frpc_render(
     configs: BTreeMap::new(),
   });
   FrpcRender {
+    admin_port,
     compose,
     config_hash: hash(&config),
     config,

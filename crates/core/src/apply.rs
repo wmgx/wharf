@@ -1720,6 +1720,7 @@ async fn run_step_with_dns(
       server,
       project,
       hot_reload,
+      admin_port,
       ..
     } => {
       if *hot_reload && !state.hub.supports_frpc_reload(server) {
@@ -1785,6 +1786,10 @@ async fn run_step_with_dns(
         world,
         &net,
         &secrets,
+        &admin_port
+          .map(|port| ((server.as_str(), project.as_str()), port))
+          .into_iter()
+          .collect(),
         |p| {
           *hot_reload && &p.server == server && &p.project == project
         },

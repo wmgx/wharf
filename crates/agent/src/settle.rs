@@ -420,6 +420,7 @@ mod tests {
       hash: None,
       config_hash: None,
       acme_dns_url_hash: None,
+      frpc_admin_port: None,
       containers: vec![init],
     };
     assert!(problem(&state).is_some());
@@ -551,6 +552,7 @@ esac
       hash: None,
       config_hash: None,
       acme_dns_url_hash: None,
+      frpc_admin_port: None,
       containers: vec![container("running", Some("starting"))],
     }));
   }
@@ -562,6 +564,7 @@ esac
       hash: None,
       config_hash: None,
       acme_dns_url_hash: None,
+      frpc_admin_port: None,
       containers: vec![c],
     };
     assert!(problem(&state(container("running", None))).is_none());

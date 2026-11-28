@@ -65,6 +65,14 @@ fn sign_ttl(
     URL_SAFE_NO_PAD.encode(key.sign(raw.as_bytes()).to_bytes())
   )
 }
+pub(super) fn probe_token(
+  key: &SigningKey,
+  host: &str,
+  now: i64,
+) -> String {
+  sign_ttl(key, "_wharf_probe", host, now, 30)
+}
+
 pub(super) fn rt_sign(
   key: &[u8],
   hash: &str,
@@ -208,6 +216,18 @@ mod tests {
       .is_none()
     );
     assert!(rt_parse(&[0; 32], &token, HOST, 1700000001).is_none());
+  }
+
+  #[test]
+  fn probe_token_is_scoped_to_one_host_and_thirty_seconds() {
+    let key = SigningKey::from_bytes(&[0; 32]);
+    let token = probe_token(&key, HOST, 1000);
+    assert_eq!(
+      verify(&key, &token, HOST, 1029).as_deref(),
+      Some("_wharf_probe")
+    );
+    assert!(verify(&key, &token, HOST, 1030).is_none());
+    assert!(verify(&key, &token, "b.example.test", 1000).is_none());
   }
 
   #[test]

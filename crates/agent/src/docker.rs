@@ -235,6 +235,19 @@ impl Docker {
               .flatten()
               .as_deref()
               .and_then(acme_dns_url_hash),
+            frpc_admin_port: if project.starts_with("wharf-link-") {
+              std::fs::read_to_string(
+                dir.join("conf").join("frpc.toml"),
+              )
+              .ok()
+              .and_then(|config| {
+                config.lines().find_map(|line| {
+                  line.strip_prefix("webServer.port = ")?.parse().ok()
+                })
+              })
+            } else {
+              None
+            },
             containers: by_project
               .remove(project)
               .unwrap_or_default()

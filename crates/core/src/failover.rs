@@ -210,23 +210,25 @@ fn observe(
       route.spec.backup_gateway.as_deref().unwrap_or_default();
     let assessed = memory.health.get(host);
     let target = if world.gateways.contains_key(backup) {
-      let n = memory.streak.entry(host.clone()).or_default();
-      let blocked = memory.pinned.contains_key(host)
+      if memory.pinned.contains_key(host)
         || route.spec.expires_at.is_some_and(|at| at <= db::now_ms())
-        || assessed.is_none_or(|h| h.service_stopped);
-      let primary = assessed
-        .and_then(|h| h.primary.as_ref())
-        .is_some_and(|p| p.ok);
-      let backup = assessed
-        .and_then(|h| h.backup.as_ref())
-        .is_some_and(|p| p.ok);
-      decide_failover(
-        on_backup,
-        (primary, backup),
-        blocked,
-        n,
-        route.spec.failover_minutes.unwrap_or(SWITCH_MINUTES),
-      )
+      {
+        memory.streak.remove(host);
+        on_backup
+      } else if let Some(assessed) = assessed {
+        decide_failover(
+          on_backup,
+          (
+            assessed.primary.as_ref().is_some_and(|p| p.ok),
+            assessed.backup.as_ref().is_some_and(|p| p.ok),
+          ),
+          assessed.service_stopped,
+          memory.streak.entry(host.clone()).or_default(),
+          route.spec.failover_minutes.unwrap_or(SWITCH_MINUTES),
+        )
+      } else {
+        on_backup
+      }
     } else {
       memory.streak.remove(host);
       false
@@ -369,7 +371,12 @@ async fn assess_route(
       svc.spec.stopped
         || (state.hub.is_online(&svc.spec.server)
           && project(&svc.spec.server, &route.service).is_some_and(
-            |state| !state.containers.iter().any(|c| c.is_running()),
+            |state| {
+              !state
+                .containers
+                .iter()
+                .any(|c| !c.foreign && c.is_running())
+            },
           ))
     });
   let mut health = FailoverHealthSnapshot {
@@ -1159,7 +1166,8 @@ pub(crate) mod tests {
   }
 
   #[test]
-  fn external_dns_does_not_enter_or_keep_failover() {
+  fn incomplete_round_keeps_streak_and_external_dns_clears_failover()
+  {
     let host = "external.example.net";
     let mut world = World::default();
     for (name, server) in [("edge", "s1"), ("backup", "s2")] {
@@ -1188,7 +1196,16 @@ pub(crate) mod tests {
       }));
     }
     assert!(memory.active.is_empty() && memory.pending.is_empty());
-    for _ in 0..SWITCH_MINUTES {
+    for round in 0..SWITCH_MINUTES {
+      if round != 0 {
+        assert!(!observe(
+          &mut memory,
+          &world,
+          BTreeMap::new(),
+          |_| true
+        ));
+        assert_eq!(memory.streak.get(host), Some(&round));
+      }
       let health = FailoverHealthSnapshot {
         backup: Some(wharf_api_types::view::FailoverEntryHealth {
           ok: true,
@@ -1271,6 +1288,50 @@ pub(crate) mod tests {
       &mut streak,
       2
     ));
+  }
+
+  #[tokio::test]
+  async fn foreign_running_container_does_not_keep_stopped_service_eligible()
+   {
+    let state = crate::rules::tests::test_state();
+    state
+      .hub
+      .mock_agent("s1", false, |_| panic!("已停机服务不应探测"));
+    let mut snap = snapshot::Snapshot::default();
+    snap
+      .world
+      .apply_changes(&[serde_json::from_value(serde_json::json!({
+        "op": "upsert_service", "name": "app",
+        "spec": {"server": "s1", "source": {"image": "fixture:1"}}
+      }))
+      .unwrap()])
+      .unwrap();
+    let route = serde_json::from_value(serde_json::json!({
+      "hostname": "a.example.test", "service": "app"
+    }))
+    .unwrap();
+    let project = serde_json::from_value(serde_json::json!({
+      "project": "app", "containers": [
+        {"name":"app-1","service":"app","state":"exited"},
+        {"name":"other-1","service":"app","state":"running","foreign":true}
+      ]
+    })).unwrap();
+    let live = BTreeMap::from([(
+      "s1".into(),
+      Ok(BTreeMap::from([("app".into(), project)])),
+    )]);
+    let (_, health) = assess_route(
+      &state,
+      &snap,
+      &snap.net(&snap.world),
+      &live,
+      ("a.example.test", &route, "gw1", "gw2"),
+      true,
+      &CancellationToken::new(),
+    )
+    .await;
+    assert!(health.service_stopped);
+    assert!(health.primary.is_none() && health.backup.is_none());
   }
 
   #[test]
