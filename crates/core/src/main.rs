@@ -36,6 +36,7 @@ mod core_node;
 mod core_restore;
 mod cron;
 mod data;
+mod data_cleanup;
 mod db;
 mod db_snapshot;
 mod disk;
@@ -290,6 +291,7 @@ async fn main() -> anyhow::Result<()> {
     data_dir: cli.data_dir.clone(),
     downloads: Default::default(),
     edge_syncing: Default::default(),
+    cleanup_cache: Default::default(),
     safe_mode: cli.safe_mode.into(),
     resumed_at: Default::default(),
   });

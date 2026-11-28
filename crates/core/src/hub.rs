@@ -81,6 +81,7 @@ struct Conn {
   gateway_extra_files: bool,
   backup_isolation: bool,
   safe_delete: bool,
+  data_cleanup: bool,
   exec_v2: bool,
   files_v2: bool,
   shared_volumes: bool,
@@ -96,6 +97,25 @@ struct Conn {
   safe_rollback: bool,
   /// 协议版本不一致：连接放行，但只接受升级相关的请求，好让它升上来。
   upgrade_only: bool,
+}
+
+fn check_data_cleanup(
+  server: &str,
+  conn: &Conn,
+) -> Result<(), ApiError> {
+  if conn.upgrade_only || !conn.data_cleanup {
+    return Err(
+      ApiError::new(
+        ErrorCode::Conflict,
+        format!(
+          "服务器 {server} 的 agent 版本旧，不支持数据与孤儿资源清理"
+        ),
+      )
+      .with_hint("先运行 wharf upgrade 升级 agent 后重试")
+      .suggest("wharf upgrade"),
+    );
+  }
+  Ok(())
 }
 
 impl Conn {
@@ -467,6 +487,23 @@ impl Hub {
       .is_some_and(|c| !c.upgrade_only && c.safe_gateway)
   }
 
+  pub fn supports_data_cleanup(&self, server: &str) -> bool {
+    self.require_data_cleanup(server).is_ok()
+  }
+
+  pub(crate) fn require_data_cleanup(
+    &self,
+    server: &str,
+  ) -> Result<u64, ApiError> {
+    let conns = lock(&self.conns);
+    let conn = conns
+      .get(server)
+      .filter(|conn| !conn.closed.is_cancelled())
+      .ok_or_else(|| offline(server))?;
+    check_data_cleanup(server, conn)?;
+    Ok(conn.conn_id)
+  }
+
   pub fn supports_safe_delete(&self, server: &str) -> bool {
     lock(&self.conns)
       .get(server)
@@ -803,6 +840,12 @@ impl Hub {
     ),
     cancel: &CancellationToken,
   ) -> Result<T, ApiError> {
+    if matches!(
+      &op,
+      AgentOp::CleanupScan(_) | AgentOp::CleanupDelete(_)
+    ) {
+      check_data_cleanup(server, &conn)?;
+    }
     if !conn.monitor_v2
       && match &op {
         AgentOp::HttpCheck(job) => !job.headers.is_empty(),
@@ -1298,6 +1341,7 @@ async fn handle_socket(
     core_probe,
     backup_isolation,
     safe_delete,
+    data_cleanup,
     exec_v2,
     files_v2,
     shared_volumes,
@@ -1477,6 +1521,7 @@ async fn handle_socket(
     gateway_extra_files,
     backup_isolation,
     safe_delete,
+    data_cleanup,
     exec_v2,
     files_v2,
     shared_volumes,
