@@ -2330,6 +2330,7 @@ async fn service(
         seg(&names[0])
       );
       if let Some(container) = container {
+        c.require_exec_v2_core().await?;
         path.push_str(&format!("&container={}", seg(&container)));
       }
       follow_logs(c, &path).await
@@ -2614,6 +2615,7 @@ async fn service(
         if let Some(index) = previous {
           path.push_str(&format!("?previous={index}"));
         } else if let Some(container) = container {
+          c.require_exec_v2_core().await?;
           path.push_str(&format!("?container={}", seg(&container)));
         }
         path
@@ -2658,6 +2660,9 @@ async fn service(
       .await
     }
     ServiceCmd::Restart { name, container } => {
+      if container.is_some() {
+        c.require_exec_v2_core().await?;
+      }
       let r: ApplyResponse = c
         .post(
           &format!("/api/services/{}/restart", seg(&name)),

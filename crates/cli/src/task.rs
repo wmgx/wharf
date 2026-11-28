@@ -490,7 +490,9 @@ async fn run(
   let body = if env.is_empty() {
     serde_json::json!({})
   } else {
-    serde_json::json!({ "env": edit::parse_env(env)? })
+    let env = edit::parse_env(env)?;
+    c.require_exec_v2_core().await?;
+    serde_json::json!({ "env": env })
   };
   let r: serde_json::Value = c
     .post(&format!("/api/tasks/{}/run", seg(name)), &body)

@@ -2350,3 +2350,66 @@ fn temporary_env_rejects_reserved_names_and_restricted_values() {
     );
   }
 }
+
+#[cfg(test)]
+#[tokio::test]
+async fn temporary_env_binds_to_runtime_agent_and_stays_out_of_task_config()
+ {
+  use crate::host_access::tests::auth;
+  use serde_json::json;
+  let state = crate::rules::tests::test_state();
+  let spec = json!({"server":"s1","schedule":"0 4 * * *","kind":"exec","service":"app","command":"echo ok","notify":false});
+  let saved = spec.to_string();
+  state.db.call(move |c| {
+    db::apply_write(c, &db::Write::Upsert {
+      kind: "server".into(), name: "s2".into(), spec: json!({}), meta: json!({}),
+    })?;
+    db::apply_write(c, &db::Write::Upsert {
+      kind: "service".into(), name: "app".into(),
+      spec: json!({"server":"s2","source":{"image":"alpine"}}),
+      meta: json!({"instance_id":"fixture"}),
+    })?;
+    c.execute("INSERT INTO deployments(service,server,run_id,hash,compose,images,created_at,instance_id)
+       SELECT 'app','s2','r1','h','{}','[]',0,json_extract(meta,'$.instance_id')
+       FROM resources WHERE kind='service' AND name='app'", []).map_err(sql_err)?;
+    c.execute("INSERT INTO tasks(name,spec,created_at,updated_at) VALUES ('env-fixture',?1,0,0)", [saved]).map_err(sql_err)?;
+    Ok(())
+  }).await.unwrap();
+  let (sent, received) = tokio::sync::oneshot::channel();
+  let mut sent = Some(sent);
+  state.hub.mock_agent("s2", false, move |op| {
+    let AgentOp::TaskRun(TaskRunJob { how: TaskHow::Exec { env, .. }, .. }) = op else {
+      panic!("意外请求");
+    };
+    assert_eq!(env.get("DRY").map(String::as_str), Some("1"));
+    let _ = sent.take().unwrap().send(());
+    Ok(json!({"output":"","exit_code":0,"timed_out":false,"duration_ms":0}))
+  });
+  let start = || {
+    run_now(
+      State(state.clone()),
+      auth([Perm::Apply, Perm::Exec], false),
+      Path("env-fixture".into()),
+      Some(Json(RunTaskRequest {
+        env: BTreeMap::from([("DRY".into(), "1".into())]),
+        conn: None,
+      })),
+    )
+  };
+  assert_eq!(start().await.unwrap_err().0.code, ErrorCode::Conflict);
+  state.hub.enable_mock_exec_v2("s2");
+  let Json(receipt) = start().await.map_err(|error| error.0).unwrap();
+  assert_eq!(receipt["status"], "running");
+  tokio::time::timeout(Duration::from_secs(2), received)
+    .await
+    .unwrap()
+    .unwrap();
+  let after = load_one(&state, "env-fixture").await.unwrap();
+  assert_eq!(
+    serde_json::to_value(after).unwrap(),
+    serde_json::to_value(
+      serde_json::from_value::<TaskSpec>(spec).unwrap()
+    )
+    .unwrap()
+  );
+}

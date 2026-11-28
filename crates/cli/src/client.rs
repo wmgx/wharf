@@ -623,6 +623,21 @@ impl Client {
     Ok(())
   }
 
+  pub(crate) async fn require_exec_v2_core(&self) -> CliResult<()> {
+    let identity: serde_json::Value = self.get("/api/whoami").await?;
+    if identity["exec_v2"] != true {
+      return Err(
+        ApiError::new(
+          ErrorCode::Conflict,
+          "控制面版本旧，可能忽略新增的操作参数",
+        )
+        .with_hint("升级控制面和 agent 后重试：wharf upgrade")
+        .into(),
+      );
+    }
+    Ok(())
+  }
+
   pub async fn get<T: DeserializeOwned>(
     &self,
     path: &str,

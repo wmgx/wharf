@@ -271,6 +271,7 @@ mod tests {
       Request::builder()
         .method("POST")
         .uri(format!("/api/services/{name}/exec"))
+        .extension(crate::cli_tunnel::Sealed)
         .header("authorization", "Bearer fixture-exec")
         .header("content-type", "application/json")
         .body(Body::from(r#"{"command":"printf fixture-inline"}"#))
