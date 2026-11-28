@@ -1454,6 +1454,8 @@ mod tests {
     let mut w = world(21000);
     w.services.get_mut("app").unwrap().spec.volumes.push(
       wharf_api_types::spec::VolumeSpec {
+        from_service: None,
+        read_only: false,
         name: "data".into(),
         target: "/run/fixture/../wharf-secrets//PG_PASS".into(),
       },

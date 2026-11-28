@@ -394,13 +394,15 @@ pub fn service_view(
     heartbeat: crate::service_monitor::heartbeat::view(
       snap, name, false,
     ),
-    uses: crate::refs::uses(&row.spec),
+    uses: crate::shared_volumes::uses(&row.spec),
     used_by: snap
       .world
       .services
       .iter()
       .filter(|(_, r)| {
-        crate::refs::uses(&r.spec).iter().any(|u| u == name)
+        crate::shared_volumes::uses(&r.spec)
+          .iter()
+          .any(|u| u == name)
       })
       .map(|(n, _)| n.clone())
       .collect(),

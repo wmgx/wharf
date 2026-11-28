@@ -867,6 +867,13 @@ impl Docker {
       .await?
       .check("docker compose down")?;
     if remove_srv_data {
+      let path = Path::new("/srv").join(project);
+      let users = self.bind_mount_users(&path, ctx).await?;
+      if let Err(e) = check_purge_mounts(project, &users) {
+        ctx.say(e.message.clone());
+        let _ = clean_project_dir(&dir);
+        return Err(e);
+      }
       crate::dirfd::remove_service(Path::new("/srv"), project, ctx)
         .await?;
     }
@@ -886,6 +893,29 @@ impl Docker {
   ) -> Result<Vec<String>, ApiError> {
     let mounts = self.inspect_container_mounts(true, ctx).await?;
     Ok(containers_using_path(target, &mounts))
+  }
+
+  pub async fn inspect_bind_mount_users(
+    &self,
+    query: &wharf_api_types::agent::BindMountQuery,
+    ctx: &Ctx,
+  ) -> Result<Vec<wharf_api_types::agent::BindMountUser>, ApiError>
+  {
+    let mounts = self
+      .inspect_container_mounts(!query.running_only, ctx)
+      .await?;
+    Ok(
+      mount_users(
+        &[PathBuf::from(&query.path)],
+        query.writable_only,
+        mounts.into_iter().filter(|m| {
+          m.project
+            .as_ref()
+            .is_none_or(|p| !query.exclude_projects.contains(p))
+        }),
+      )
+      .collect(),
+    )
   }
 
   pub async fn bind_mount_active_users(
@@ -1558,17 +1588,54 @@ fn active_mount_users(
   writable_only: bool,
   mounts: Vec<wharf_api_types::agent::BindMountUser>,
 ) -> Vec<wharf_api_types::agent::BindMountUser> {
+  mount_users(
+    targets,
+    writable_only,
+    mounts
+      .into_iter()
+      .filter(|m| m.project.as_deref() != Some(project)),
+  )
+  .collect()
+}
+
+fn mount_users(
+  targets: &[PathBuf],
+  writable_only: bool,
+  mounts: impl Iterator<Item = wharf_api_types::agent::BindMountUser>,
+) -> impl Iterator<Item = wharf_api_types::agent::BindMountUser> {
   let targets: Vec<_> =
     targets.iter().flat_map(|p| mount_paths(p)).collect();
-  mounts
-    .into_iter()
-    .filter(|m| {
-      m.project.as_deref() != Some(project)
-        && (!writable_only || m.rw)
-        && mount_paths(Path::new(&m.source))
-          .any(|p| targets.iter().any(|t| paths_overlap(t, &p)))
-    })
-    .collect()
+  mounts.filter(move |m| {
+    (!writable_only || m.rw)
+      && mount_paths(Path::new(&m.source))
+        .any(|p| targets.iter().any(|t| paths_overlap(t, &p)))
+  })
+}
+
+fn check_purge_mounts(
+  project: &str,
+  users: &[String],
+) -> Result<(), ApiError> {
+  if users.is_empty() {
+    return Ok(());
+  }
+  Err(ApiError::new(ErrorCode::Conflict, format!(
+    "已删除 {project} 的容器，但拒绝删除 /srv/{project}：仍有容器挂载该目录（{}）",
+    users.join("、"),
+  )).with_hint("先停止并移除挂载该目录的容器，再重新执行删除或手动清理"))
+}
+
+#[test]
+fn down_purge_refuses_delete_when_other_container_mounts_srv() {
+  let inspect = r#""/reader" "" "reader" [{"Type":"bind","Source":"/srv/photos/originals","Destination":"/photos","RW":false}]"#;
+  let mounts = parse_bind_mounts(inspect).unwrap();
+  let users =
+    containers_using_path(Path::new("/srv/photos"), &mounts);
+  assert_eq!(users, ["reader"]);
+  assert_eq!(
+    check_purge_mounts("photos", &users).unwrap_err().code,
+    ErrorCode::Conflict
+  );
 }
 
 pub fn io_err(

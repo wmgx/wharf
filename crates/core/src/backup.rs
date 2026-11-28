@@ -540,6 +540,25 @@ async fn start(
   Ok(())
 }
 
+async fn call_source<T: serde::de::DeserializeOwned>(
+  state: &AppState,
+  (server, conn): (&str, Option<u64>),
+  op: AgentOp,
+  timeout: Duration,
+  progress: &ProgressFn,
+  cancel: &CancellationToken,
+) -> Result<T, ApiError> {
+  let progress = Some(progress.clone());
+  if let Some(conn) = conn {
+    state
+      .hub
+      .call_bound((server, conn), op, timeout, progress, cancel)
+      .await
+  } else {
+    state.hub.call(server, op, timeout, progress, cancel).await
+  }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn preflight(
   state: &AppState,
@@ -550,39 +569,42 @@ async fn preflight(
   mode: ResticPreflightMode,
   progress: &ProgressFn,
   cancel: &CancellationToken,
-) -> Result<ResticPreflightResult, ApiError> {
+) -> Result<(ResticPreflightResult, Option<u64>), ApiError> {
   let backup = matches!(&mode, ResticPreflightMode::Backup);
+  let conn = crate::shared_volumes::consumers_on(
+    &snap.world,
+    service,
+    &w.server,
+  )
+  .next()
+  .map(|_| state.hub.shared_volumes_conn_id(&w.server))
+  .transpose()?;
   let managed_mounts =
     crate::data::mounts(service, &snap.world.services[service].spec)
       .into_iter()
       .filter(|m| m.kind == wharf_api_types::view::DataKind::Managed)
       .map(|m| m.source)
       .collect();
-  let result: ResticPreflightResult = state
-    .hub
-    .call(
-      &w.server,
-      job(
-        snap,
-        &w.server,
-        service,
-        rest_repo(
-          &w.target_ip,
-          REST_SERVER_PORT,
-          service,
-          &creds.http,
-        ),
-        &creds.key,
-        ResticAction::Preflight(ResticPreflight {
-          mode,
-          managed_mounts,
-        }),
-      ),
-      SERVER_TIMEOUT,
-      Some(progress.clone()),
-      cancel,
-    )
-    .await?;
+  let op = job(
+    snap,
+    &w.server,
+    service,
+    rest_repo(&w.target_ip, REST_SERVER_PORT, service, &creds.http),
+    &creds.key,
+    ResticAction::Preflight(ResticPreflight {
+      mode,
+      managed_mounts,
+    }),
+  );
+  let result: ResticPreflightResult = call_source(
+    state,
+    (&w.server, conn),
+    op,
+    SERVER_TIMEOUT,
+    progress,
+    cancel,
+  )
+  .await?;
   if result.is_mountpoint && !backup {
     return Err(
       ApiError::new(
@@ -609,9 +631,9 @@ async fn preflight(
       .collect::<Vec<_>>()
       .join("、");
     let hint = if backup {
-      "先停止共用该目录的服务，或将对方挂载改为只读（:ro）"
+      "先用 wharf service stop 停止共用该目录的服务，或将对方挂载改为只读（:ro）"
     } else {
-      "先停止共用该目录的容器再恢复"
+      "先用 wharf service stop 停止共用该目录的服务，并停止其他挂载该目录的容器，再恢复"
     };
     return Err(
       ApiError::new(
@@ -629,7 +651,7 @@ async fn preflight(
       ));
     }
   }
-  Ok(result)
+  Ok((result, conn))
 }
 
 pub async fn backup(
@@ -654,7 +676,7 @@ pub async fn backup(
       cancel,
     )
     .await?;
-    let check = preflight(
+    let (check, conn) = preflight(
       state,
       &snap,
       &w,
@@ -666,30 +688,29 @@ pub async fn backup(
     )
     .await?;
     let stopped = stop(state, &w, service, &progress, cancel).await?;
-    let backed: Result<BackupSummary, ApiError> = state
-      .hub
-      .call(
+    let backed: Result<BackupSummary, ApiError> = call_source(
+      state,
+      (&w.server, conn),
+      job(
+        &snap,
         &w.server,
-        job(
-          &snap,
-          &w.server,
+        service,
+        rest_repo(
+          &w.target_ip,
+          REST_SERVER_PORT,
           service,
-          rest_repo(
-            &w.target_ip,
-            REST_SERVER_PORT,
-            service,
-            &creds.http,
-          ),
-          &creds.key,
-          ResticAction::Backup {
-            host: w.server.clone(),
-          },
+          &creds.http,
         ),
-        RESTIC_TIMEOUT,
-        Some(progress.clone()),
-        cancel,
-      )
-      .await;
+        &creds.key,
+        ResticAction::Backup {
+          host: w.server.clone(),
+        },
+      ),
+      RESTIC_TIMEOUT,
+      &progress,
+      cancel,
+    )
+    .await;
     started = start(
       state,
       &w,
@@ -796,7 +817,7 @@ pub async fn restore(
     cancel,
   )
   .await?;
-  preflight(
+  let (_, conn) = preflight(
     state,
     &snap,
     &w,
@@ -810,30 +831,24 @@ pub async fn restore(
   )
   .await?;
   let stopped = stop(state, &w, service, &progress, cancel).await?;
-  let restored = state
-    .hub
-    .call::<serde_json::Value>(
+  let restored = call_source::<serde_json::Value>(
+    state,
+    (&w.server, conn),
+    job(
+      &snap,
       &w.server,
-      job(
-        &snap,
-        &w.server,
-        service,
-        rest_repo(
-          &w.target_ip,
-          REST_SERVER_PORT,
-          service,
-          &creds.http,
-        ),
-        &creds.key,
-        ResticAction::Restore {
-          snapshot: snapshot_id.to_string(),
-        },
-      ),
-      RESTIC_TIMEOUT,
-      Some(progress.clone()),
-      cancel,
-    )
-    .await;
+      service,
+      rest_repo(&w.target_ip, REST_SERVER_PORT, service, &creds.http),
+      &creds.key,
+      ResticAction::Restore {
+        snapshot: snapshot_id.to_string(),
+      },
+    ),
+    RESTIC_TIMEOUT,
+    &progress,
+    cancel,
+  )
+  .await;
   let started = start(
     state,
     &w,

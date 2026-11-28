@@ -699,6 +699,7 @@ fn data_status(s: DataStatus) -> &'static str {
 fn mount_label(m: &DataMount) -> String {
   let kind = match m.kind {
     DataKind::Managed => "目录",
+    DataKind::Shared => "共享卷",
     DataKind::ExternalDir => "外部目录",
     DataKind::NamedVolume if m.source.is_empty() => "匿名卷",
     DataKind::NamedVolume => "卷",
@@ -706,6 +707,15 @@ fn mount_label(m: &DataMount) -> String {
   let source = match &m.resolved {
     Some(resolved) => format!("{}（软链指向 {resolved}）", m.source),
     None => m.source.clone(),
+  };
+  let source = if m.kind == DataKind::Shared {
+    let access = if m.read_only { "只读" } else { "可写" };
+    match &m.from_service {
+      Some(owner) => format!("{owner}（{access}） {source}"),
+      None => format!("（{access}） {source}"),
+    }
+  } else {
+    source
   };
   match (source.is_empty(), m.target.is_empty()) {
     (true, _) => format!("{kind} → {}", m.target),
@@ -814,6 +824,22 @@ pub fn network(v: &NetworkView) {
 
 #[cfg(test)]
 mod pick_tests {
+  #[test]
+  fn shared_mount_label_shows_owner_and_access() {
+    for (read_only, access) in [(true, "只读"), (false, "可写")] {
+      let mount = serde_json::from_value(serde_json::json!({
+        "kind":"shared", "source":"/srv/photos/data", "target":"/data",
+        "from_service":"photos:data", "read_only":read_only
+      })).unwrap();
+      assert_eq!(
+        super::mount_label(&mount),
+        format!(
+          "共享卷 photos:data（{access}） /srv/photos/data → /data"
+        )
+      );
+    }
+  }
+
   #[test]
   fn picks_nested_fields_per_item() {
     let v = serde_json::json!([{"name":"a","status":{"summary":"运行中","tone":"ok"},"spec":{}}]);

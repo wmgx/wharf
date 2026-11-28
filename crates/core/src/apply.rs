@@ -1309,13 +1309,18 @@ pub(crate) async fn run_step(
       from,
       to,
       instance_id,
+      shared_data,
     } => {
       check_step_instance(world, service, instance_id.as_deref())?;
+      let shared = *shared_data
+        || crate::shared_volumes::consumers_on(world, service, to)
+          .next()
+          .is_some();
       crate::migrate::volume_sync(
         state,
         &net,
         service,
-        (from, to),
+        (from, to, shared),
         !world.services[service].spec.stopped,
         progress,
         cancel,
@@ -2915,12 +2920,18 @@ async fn service_down(
     cancel,
   )
   .await?;
+  let alert_changes = if snap.world.services.contains_key(service) {
+    crate::rules::lifecycle::Changes::default()
+  } else {
+    crate::rules::ensure_loaded(state).await;
+    crate::rules::lifecycle::Changes::deleted_service(service)
+  };
   let (service, server, instance_id) = (
     service.to_string(),
     server.to_string(),
     instance_id.map(str::to_string),
   );
-  state
+  let removed_firing = state
     .db
     .call(move |c| {
       let tx = c.transaction().map_err(sql_err)?;
@@ -2940,9 +2951,15 @@ async fn service_down(
       {
         crate::pending::clear(&tx, "migrate", &service)?;
       }
-      tx.commit().map_err(sql_err)
+      alert_changes.clear_storage(&tx)?;
+      tx.commit().map_err(sql_err)?;
+      Ok(alert_changes.clear_after_commit())
     })
-    .await
+    .await?;
+  if removed_firing {
+    crate::rules::flush_unsuppressed(state, now_ms()).await;
+  }
+  Ok(())
 }
 
 async fn project_down(
@@ -2968,14 +2985,23 @@ async fn project_down(
   } else {
     None
   };
-  let conn = if require_safe_delete {
-    let conn = state.hub.safe_delete_conn_id(server)?;
-    if deploy.is_some_and(|id| id != conn) {
+  let safe_delete = if require_safe_delete {
+    let id = state.hub.safe_delete_conn_id(server)?;
+    if deploy.is_some_and(|conn| conn != id) {
       return Err(crate::hub::offline(server));
     }
-    Some(conn)
+    Some(id)
   } else {
     deploy
+  };
+  let conn = if purge {
+    let id = state.hub.shared_volumes_conn_id(server)?;
+    if safe_delete.is_some_and(|conn| conn != id) {
+      return Err(crate::hub::offline(server));
+    }
+    Some(id)
+  } else {
+    safe_delete
   };
   let _: serde_json::Value = if let Some(conn) = conn {
     state
@@ -3263,6 +3289,69 @@ mod tests {
     .await
     .unwrap_err();
     assert_eq!(err.code, ErrorCode::Conflict);
+  }
+
+  #[tokio::test]
+  async fn resumed_purge_clears_deleted_service_alerts() {
+    let state = crate::rules::tests::test_state();
+    state
+      .db
+      .call(|c| {
+        crate::pending::put_delete(
+          c,
+          ("r1", "p1"),
+          &crate::pending::ServiceDeletePayload {
+            service: "photos".into(),
+            server: "s1".into(),
+            instance_id: "svc_old".into(),
+            purge_data: true,
+            has_relative_mounts: false,
+          },
+        )?;
+        c.execute(
+          "INSERT INTO alert_acks (rule, subject, by_actor, at) VALUES
+            ('port_down', 'photos:80', 'fixture', 1),
+            ('server_offline', 'photos', 'fixture', 1)",
+          [],
+        )
+        .map_err(sql_err)?;
+        Ok(())
+      })
+      .await
+      .unwrap();
+    state.hub.mock_agent("s1", false, |op| {
+      assert!(matches!(op, AgentOp::ProjectDown { project, purge: true } if project == "photos"));
+      Ok(serde_json::Value::Null)
+    });
+    state.hub.mock_shared_volumes_agent("s1");
+    run_step(
+      &state,
+      "r2",
+      &Step::ServiceDown {
+        server: "s1".into(),
+        service: "photos".into(),
+        purge_data: true,
+        instance_id: Some("svc_old".into()),
+        has_relative_mounts: false,
+      },
+      Arc::new(|_| {}),
+      &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let remaining: String = state
+      .db
+      .call(|c| {
+        c.query_row(
+          "SELECT group_concat(rule) FROM alert_acks",
+          [],
+          |r| r.get(0),
+        )
+        .map_err(sql_err)
+      })
+      .await
+      .unwrap();
+    assert_eq!(remaining, "server_offline");
   }
 
   #[tokio::test]
@@ -3949,4 +4038,24 @@ mod tests {
       ErrorCode::Forbidden
     );
   }
+}
+
+#[tokio::test]
+async fn purge_delete_rejects_old_agent_without_shared_volumes() {
+  let state = crate::rules::tests::test_state();
+  state
+    .hub
+    .mock_safe_delete_agent("s1", |_| panic!("不能发送删数请求"));
+  let e = project_down(
+    &state,
+    ("s1", "photos"),
+    true,
+    false,
+    Arc::new(|_| {}),
+    &CancellationToken::new(),
+  )
+  .await
+  .unwrap_err();
+  assert_eq!(e.code, ErrorCode::Conflict);
+  assert_eq!(e.suggest, ["wharf upgrade"]);
 }
