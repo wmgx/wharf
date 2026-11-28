@@ -3,13 +3,16 @@
 
 use std::time::{Duration, Instant};
 
+use chrono::{DateTime, Utc};
+#[cfg(test)]
 use serde_json::json;
 use wharf_api_types::{
   ApiError, ErrorCode,
+  external::{DnsCheck, DnsVerdict},
   service_checks::PortCheckSpec,
   view::{
-    Actual, CheckStatus, DoctorReport, Health, Issue, IssueLevel,
-    ServiceView, Status,
+    Actual, CertState, CertStatus, CheckStatus, DoctorReport, Health,
+    Issue, IssueLevel, ServerView, ServiceView, Status,
   },
 };
 
@@ -140,6 +143,131 @@ fn route_pending(report: &DoctorReport) -> Result<(), Vec<String>> {
   }
 }
 
+fn server_ready(report: &DoctorReport, name: &str) -> Check {
+  let Some(agent) = report
+    .servers
+    .iter()
+    .find(|ch| ch.layer == "agent" && ch.subject == name)
+  else {
+    return (false, "还查不到 agent 状态".into());
+  };
+  if agent.status != CheckStatus::Ok {
+    return (false, format!("agent：{}", agent.detail));
+  }
+  let pending: Vec<_> = report
+    .servers
+    .iter()
+    .filter(|ch| ch.status == CheckStatus::Bad)
+    .chain(report.checks.iter().filter(|ch| {
+      matches!(ch.layer.as_str(), "gateway" | "link" | "container")
+        && ch.status == CheckStatus::Bad
+    }))
+    .map(|ch| format!("{}：{}", ch.layer, ch.detail))
+    .collect();
+  if pending.is_empty() {
+    (true, "服务器在线，本机网关、链路与容器正常".into())
+  } else {
+    (false, pending.join("；"))
+  }
+}
+
+fn server_online_only(v: &ServerView) -> Check {
+  if !v.joined {
+    (false, "服务器还没有完成 agent 加入".into())
+  } else if !v.online {
+    (false, "agent 离线".into())
+  } else {
+    (true, "agent 已在线".into())
+  }
+}
+
+fn dns_ready(v: &DnsCheck, all: bool) -> Check {
+  let matched = v
+    .resolvers
+    .iter()
+    .filter(|r| r.verdict == DnsVerdict::Matches)
+    .count();
+  let total = v.resolvers.len();
+  let ok = if all {
+    total > 0 && matched == total
+  } else {
+    v.effective
+  };
+  if ok {
+    (
+      true,
+      format!(
+        "DNS 已生效（期望 {}，{matched}/{total} 解析一致）",
+        v.expected
+      ),
+    )
+  } else {
+    let pending: Vec<_> = v
+      .resolvers
+      .iter()
+      .filter_map(|r| {
+        let state = match r.verdict {
+          DnsVerdict::Matches => return None,
+          DnsVerdict::Mismatch => "不一致",
+          DnsVerdict::Unavailable => "不可用",
+        };
+        Some(format!("{} {state}", r.resolver))
+      })
+      .collect();
+    (
+      false,
+      format!(
+        "等待 DNS 生效（期望 {}）：{}",
+        v.expected,
+        pending.join("、")
+      ),
+    )
+  }
+}
+
+fn cert_ready(
+  report: &DoctorReport,
+  hostname: &str,
+  now: DateTime<Utc>,
+) -> Result<Check, ApiError> {
+  let route = report
+    .routes
+    .iter()
+    .find(|r| r.hostname == hostname)
+    .ok_or_else(|| {
+    ApiError::not_found(format!("没有找到域名 {hostname}"))
+      .suggest("wharf route list")
+  })?;
+  if route.url.starts_with("http://") {
+    return Err(ApiError::invalid(format!(
+      "域名 {hostname} 仅使用 HTTP，没有 HTTPS 证书"
+    )));
+  }
+  let https = route.checks.iter().find(|ch| ch.layer == "https");
+  if let Some(ch) = https.filter(|ch| ch.status == CheckStatus::Skip)
+  {
+    return Err(ApiError::invalid(format!(
+      "域名 {hostname} 当前无法探测证书：{}",
+      ch.detail
+    )));
+  }
+  if let Some(exp) = route.cert_expires.filter(|exp| *exp > now) {
+    return Ok((
+      true,
+      format!(
+        "证书已生效（{} 到期，剩 {} 天）",
+        exp.format("%Y-%m-%d"),
+        (exp - now).num_days()
+      ),
+    ));
+  }
+  Ok((
+    false,
+    https
+      .map_or_else(|| "等待有效证书".into(), |ch| ch.detail.clone()),
+  ))
+}
+
 fn clear_pending(issue: &Issue, strict: bool) -> bool {
   strict || (issue.level != IssueLevel::Info && issue.ack.is_none())
 }
@@ -174,6 +302,55 @@ async fn check(c: &Client, cmd: &WaitCmd) -> CliResult<Check> {
         Err(pending) => (false, pending.join("；")),
       }
     }
+    WaitCmd::Server {
+      name, online_only, ..
+    } => {
+      let encoded = crate::client::seg(name);
+      if *online_only {
+        server_online_only(
+          &c.get(&format!("/api/servers/{encoded}")).await?,
+        )
+      } else {
+        server_ready(
+          &c.get(&format!("/api/doctor?server={encoded}")).await?,
+          name,
+        )
+      }
+    }
+    WaitCmd::Dns { hostname, all, .. } => {
+      let hostname = crate::client::seg(hostname);
+      dns_ready(
+        &c.get(&format!("/api/routes/{hostname}/dns-check")).await?,
+        *all,
+      )
+    }
+    WaitCmd::Cert { hostname, .. } => {
+      let hostname =
+        hostname.trim().trim_end_matches('.').to_ascii_lowercase();
+      let encoded = crate::client::seg(&hostname);
+      let report =
+        c.get(&format!("/api/doctor?host={encoded}")).await?;
+      let (ok, mut detail) =
+        cert_ready(&report, &hostname, Utc::now())?;
+      if !ok
+        && let Ok(cert) = c
+          .get::<CertStatus>(&format!("/api/routes/{encoded}/cert"))
+          .await
+      {
+        match cert.state {
+          CertState::Obtaining => detail = "证书申请中".into(),
+          CertState::Failed => {
+            let reason = cert.reason.or(cert.error).unwrap_or(detail);
+            detail = format!(
+              "证书申请失败（第 {} 次）：{reason}",
+              cert.attempts
+            );
+          }
+          _ => {}
+        }
+      }
+      (ok, detail)
+    }
     WaitCmd::Clear {
       subject, strict, ..
     } => {
@@ -200,10 +377,22 @@ async fn check(c: &Client, cmd: &WaitCmd) -> CliResult<Check> {
   })
 }
 
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct WaitOutput {
+  met: bool,
+  state: String,
+  waited_secs: u64,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  error: Option<ApiError>,
+}
+
 pub async fn run(c: &Client, cmd: WaitCmd, j: bool) -> CliResult<()> {
   let timeout = match &cmd {
     WaitCmd::Service { timeout, .. }
     | WaitCmd::Route { timeout, .. }
+    | WaitCmd::Server { timeout, .. }
+    | WaitCmd::Dns { timeout, .. }
+    | WaitCmd::Cert { timeout, .. }
     | WaitCmd::Clear { timeout, .. } => {
       parse_timeout(timeout).map_err(ApiError::invalid)?
     }
@@ -229,32 +418,55 @@ pub async fn run(c: &Client, cmd: WaitCmd, j: bool) -> CliResult<()> {
         Err(_) => (false, last.clone()),
       };
     if now != last {
-      if !j {
+      if !j && !print::is_quiet() {
         eprintln!("{}s  {now}", start.elapsed().as_secs());
       }
       last = now.clone();
     }
     if ok {
       if j {
-        print::json(
-          &json!({ "met": true, "state": now, "waited_secs": start.elapsed().as_secs() }),
-        );
+        print::json(&WaitOutput {
+          met: true,
+          state: now,
+          waited_secs: start.elapsed().as_secs(),
+          error: None,
+        });
       }
       return Ok(());
     }
     let remaining =
       deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
-      let elapsed = start.elapsed().as_secs();
-      let error = ApiError::new(ErrorCode::Timeout, format!("等了 {elapsed} 秒还没满足：{now}"))
-        .with_hint("看现状再决定：wharf service show / wharf doctor / wharf status");
+      let waited = start.elapsed().as_secs();
+      let hint = match &cmd {
+        WaitCmd::Server { .. } => {
+          "查看现状：wharf doctor --server <名> / wharf server show <名>"
+        }
+        WaitCmd::Dns { .. } => {
+          "查看解析：wharf route dns-check <域名>"
+        }
+        WaitCmd::Cert { .. } => {
+          "查看申请原因：wharf route cert <域名> 或重试 wharf route cert <域名> --retry"
+        }
+        _ => {
+          "看现状再决定：wharf service show / wharf doctor / wharf status"
+        }
+      };
+      let err = ApiError::new(
+        ErrorCode::Timeout,
+        format!("等了 {waited} 秒还没满足：{now}"),
+      )
+      .with_hint(hint);
       if j {
-        print::json(
-          &json!({ "met": false, "state": now, "waited_secs": elapsed, "error": error }),
-        );
+        print::json_raw(&WaitOutput {
+          met: false,
+          state: now,
+          waited_secs: waited,
+          error: Some(err),
+        });
         return Err(CliError::Exit(1));
       }
-      return Err(error.into());
+      return Err(err.into());
     }
     tokio::time::sleep(poll_delay(remaining)).await;
   }
@@ -267,6 +479,35 @@ fn poll_delay(remaining: Duration) -> Duration {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn server_dns_and_cert_wait_use_existing_checks() {
+    let mut report: DoctorReport = serde_json::from_value(json!({
+      "checked_at":"2026-01-01T00:00:00Z",
+      "servers":[{"layer":"agent","subject":"s1","status":"ok","detail":"在线","at":"2026-01-01T00:00:00Z"}],
+      "routes":[{"hostname":"a.example.test","url":"https://a.example.test","cert_expires":"2026-02-01T00:00:00Z",
+        "checks":[{"layer":"https","subject":"a.example.test","status":"bad","detail":"502","at":"2026-01-01T00:00:00Z"}]}]
+    })).unwrap();
+    assert!(server_ready(&report, "s1").0);
+    report.checks.push(report.routes[0].checks[0].clone());
+    report.checks[0].layer = "container".into();
+    assert!(!server_ready(&report, "s1").0);
+    let dns = serde_json::from_value(json!({"hostname":"a.example.test","expected":"203.0.113.1",
+      "effective":true,"resolvers":[{"resolver":"r1","verdict":"matches","elapsed_ms":0},
+      {"resolver":"r2","verdict":"unavailable","elapsed_ms":0}]})).unwrap();
+    assert!(dns_ready(&dns, false).0);
+    assert!(!dns_ready(&dns, true).0);
+    assert!(
+      cert_ready(&report, "a.example.test", report.checked_at)
+        .unwrap()
+        .0
+    );
+    report.routes[0].checks[0].status = CheckStatus::Skip;
+    assert!(
+      cert_ready(&report, "a.example.test", report.checked_at)
+        .is_err()
+    );
+  }
 
   #[test]
   fn transient_error_classification_and_deadline() {

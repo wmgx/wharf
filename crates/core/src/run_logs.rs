@@ -246,6 +246,8 @@ pub struct RunLogsQuery {
   #[serde(default)]
   errors: bool,
   max_line: Option<usize>,
+  #[serde(skip)]
+  pub(super) filters: log_search::Filters,
 }
 
 pub fn query(
@@ -265,8 +267,18 @@ pub fn query(
     }
     None => 0..n,
   };
-  let filtered =
-    query.grep.is_some() || query.errors || query.max_line.is_some();
+  if query.filters.until.is_some()
+    || query.filters.cols.is_some()
+    || !query.filters.where_exprs.is_empty()
+  {
+    return Err(ApiError::invalid(
+      "执行日志不支持 --until、--where 或 --cols",
+    ));
+  }
+  let filtered = query.grep.is_some()
+    || query.errors
+    || query.max_line.is_some()
+    || query.filters.active();
   let mut search = log_search::RunSearch::new(
     &log_search::Options {
       grep: query.grep.as_deref(),
@@ -277,10 +289,12 @@ pub fn query(
       } else {
         query.tail.unwrap_or(500).max(1) as usize
       },
+      filters: Some(&query.filters),
+      until: None,
     },
     MAX_RESPONSE_BYTES - 1024,
     filtered,
-  );
+  )?;
   let mut total_lines = 0u64;
   let mut incomplete = false;
   let mut headers = Vec::new();

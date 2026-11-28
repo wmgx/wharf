@@ -10,6 +10,73 @@ use wharf_api_types::{
   },
 };
 
+static QUIET: std::sync::atomic::AtomicBool =
+  std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_quiet(quiet: bool) {
+  QUIET.store(quiet, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn is_quiet() -> bool {
+  QUIET.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn quiet_unsupported() -> ApiError {
+  ApiError::invalid("当前命令不支持 -q/--quiet")
+    .with_hint("列表、plan、apply、wait 命令支持 -q")
+}
+
+pub fn quiet_lines(
+  value: &serde_json::Value,
+) -> Result<Vec<String>, ApiError> {
+  use serde_json::Value;
+  let id = |v: &Value, keys: &[&str]| {
+    keys.iter().filter_map(|key| v.get(key)).find_map(|value| {
+      match value {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+      }
+    })
+  };
+  match value {
+    Value::Array(rows) => rows
+      .iter()
+      .map(|v| {
+        id(v, &["plan_id", "run_id", "name", "hostname", "id"])
+          .ok_or_else(quiet_unsupported)
+      })
+      .collect(),
+    Value::Object(_)
+      if value.get("plan_id").is_some()
+        && value["items"].as_array().is_some_and(Vec::is_empty) =>
+    {
+      Ok(vec![])
+    }
+    Value::Object(_) => id(value, &["run_id", "plan_id"])
+      .map(|v| vec![v])
+      .ok_or_else(quiet_unsupported),
+    _ => Err(quiet_unsupported()),
+  }
+}
+
+pub fn quiet_output<T: serde::Serialize>(value: &T) {
+  let lines = serde_json::to_value(value)
+    .map_err(|_| quiet_unsupported())
+    .and_then(|value| quiet_lines(&value));
+  match lines {
+    Ok(lines) => {
+      for line in lines {
+        println!("{line}");
+      }
+    }
+    Err(err) => {
+      error(&err, false);
+      std::process::exit(err.code.exit_code());
+    }
+  }
+}
+
 /// `--fields`：JSON 只输出这些字段（`a.b` 取嵌套字段），列表按每一项取。
 static FIELDS: std::sync::OnceLock<Vec<String>> =
   std::sync::OnceLock::new();
@@ -147,11 +214,18 @@ pub fn json<T: serde::Serialize>(value: &T) {
   }
 }
 
+pub(crate) fn json_raw<T: serde::Serialize>(value: &T) {
+  println!(
+    "{}",
+    serde_json::to_string_pretty(value)
+      .unwrap_or_else(|_| "null".into())
+  );
+}
+
 pub fn error(e: &ApiError, as_json: bool) {
   if as_json {
     // 错误原样输出，不挑字段也不分页。
-    let text = serde_json::to_string_pretty(e);
-    println!("{}", text.unwrap_or_else(|_| "null".into()));
+    json_raw(e);
     return;
   }
   eprintln!("错误 [{}]：{}", e.code.as_str(), e.message);
@@ -1088,5 +1162,28 @@ mod pick_tests {
       out,
       serde_json::json!({"servers":[{"name":"s1","online":true}]})
     );
+  }
+}
+
+#[cfg(test)]
+mod quiet_tests {
+  #[test]
+  fn lists_and_plans_emit_only_ids() {
+    use super::quiet_lines;
+    use serde_json::json;
+    assert_eq!(
+      quiet_lines(&json!([{"name":"a"},{"name":"b"}])).unwrap(),
+      ["a", "b"]
+    );
+    assert_eq!(
+      quiet_lines(&json!({"plan_id":"p_1","items":[{}]})).unwrap(),
+      ["p_1"]
+    );
+    assert!(
+      quiet_lines(&json!({"plan_id":"p_1","items":[]}))
+        .unwrap()
+        .is_empty()
+    );
+    assert!(quiet_lines(&json!({"services":[]})).is_err());
   }
 }

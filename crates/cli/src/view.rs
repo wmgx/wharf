@@ -104,6 +104,9 @@ fn paginate(
             "commands",
             "logs",
             "reports",
+            "rows",
+            "matches",
+            "groups",
           ]
           .contains(&key.as_str())
         })
@@ -288,6 +291,18 @@ pub fn diff(path: &str, a: &Value, b: &Value, out: &mut Vec<Value>) {
 #[cfg(test)]
 mod tests {
   use serde_json::json;
+
+  #[test]
+  fn paginates_log_rows_without_slicing_columns() {
+    let v = super::paginate(
+      json!({"columns":["status"],"rows":[{"status":500},{"status":502}]}),
+      1,
+      2,
+    ).unwrap();
+    assert_eq!(v["rows"], json!([{"status":502}]));
+    assert_eq!(v["columns"], json!(["status"]));
+    assert_eq!(v["pagination"]["total"], 2);
+  }
 
   #[test]
   fn diffs_lists_by_name() {

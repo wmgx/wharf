@@ -54,8 +54,9 @@ pub async fn capture(
     {
       return Ok(());
     }
-    let logs =
-      docker.logs(project, MAX_LINES, None, None, &quiet).await?;
+    let logs = docker
+      .logs(project, MAX_LINES, None, None, None, &quiet)
+      .await?;
     if !logs.trim().is_empty() {
       let dir = dir(&docker.data_dir, project);
       tokio::task::spawn_blocking(move || save(&dir, reason, &logs))
@@ -229,6 +230,7 @@ pub fn read(
   index: u32,
   tail: u32,
   since: Option<&str>,
+  until: Option<&str>,
 ) -> Result<PrevLogOutput, ApiError> {
   let rows = entries(&dir(data, project)).map_err(io_error)?;
   let available = rows.len() as u32;
@@ -237,10 +239,14 @@ pub fn read(
     ApiError::not_found(format!("服务 {project} 没有第 {index} 份重建前日志（当前共有 {available} 份）"))
       .with_hint(format!("运行 wharf service logs {project} --previous-list 查看可用历史日志"))
   })?;
-  let since = since
-    .map(DateTime::parse_from_rfc3339)
-    .transpose()
-    .map_err(|_| ApiError::invalid("日志时间需为 RFC 3339"))?;
+  let parse = |value: Option<&str>| {
+    value
+      .map(DateTime::parse_from_rfc3339)
+      .transpose()
+      .map_err(|_| ApiError::invalid("日志时间需为 RFC 3339"))
+  };
+  let since = parse(since)?;
+  let until = parse(until)?;
   let mut raw = Vec::new();
   OpenOptions::new()
     .read(true)
@@ -256,17 +262,25 @@ pub fn read(
   let raw = wharf_pack::gunzip_bytes(&raw, MAX_RAW_BYTES)
     .map_err(io_error)?;
   let logs = String::from_utf8_lossy(&raw);
+  let mut timestamp = None;
   let lines: Vec<_> = logs
     .lines()
     .filter(|line| {
-      since.is_none_or(|since| {
-        let log =
-          line.split_once(" | ").map_or(*line, |(_, body)| body);
-        log
-          .split_whitespace()
-          .next()
-          .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-          .is_some_and(|at| at >= since)
+      if since.is_none() && until.is_none() {
+        return true;
+      }
+      let log =
+        line.split_once(" | ").map_or(*line, |(_, body)| body);
+      if let Some(at) = log
+        .split_whitespace()
+        .next()
+        .and_then(|ts| DateTime::parse_from_rfc3339(ts).ok())
+      {
+        timestamp = Some(at);
+      }
+      timestamp.is_some_and(|at| {
+        since.is_none_or(|from| at >= from)
+          && until.is_none_or(|to| at <= to)
       })
     })
     .collect();
@@ -315,13 +329,30 @@ mod tests {
       "文".repeat(MAX_RAW_BYTES / 3 + 5)
     );
     save(&dir(root.path(), "app"), "recreate", &logs).unwrap();
-    let result = read(root.path(), "app", 1, 1, None).unwrap();
+    let result = read(root.path(), "app", 1, 1, None, None).unwrap();
     assert!(logs.ends_with(&result.logs));
     assert!(result.logs.ends_with(" end\n"));
     assert!(
       (MAX_RAW_BYTES - 2..=MAX_RAW_BYTES)
         .contains(&result.logs.len())
     );
+  }
+
+  #[test]
+  fn until_keeps_only_eligible_timestamp_and_its_continuations() {
+    let root = tempfile::tempdir().unwrap();
+    let raw = "web | 2026-01-01T10:00:00Z old\nstack\nweb | 2026-01-01T10:30:00Z new\ndropped\n";
+    save(&dir(root.path(), "app"), "recreate", raw).unwrap();
+    let r = read(
+      root.path(),
+      "app",
+      1,
+      10,
+      None,
+      Some("2026-01-01T10:15:00Z"),
+    )
+    .unwrap();
+    assert_eq!(r.logs, "web | 2026-01-01T10:00:00Z old\nstack\n");
   }
 
   #[test]
@@ -339,9 +370,15 @@ mod tests {
       entries[0].1.metadata().unwrap().permissions().mode() & 0o777,
       0o600
     );
-    let result =
-      read(root.path(), "app", 2, 2, Some("2026-01-01T00:00:01Z"))
-        .unwrap();
+    let result = read(
+      root.path(),
+      "app",
+      2,
+      2,
+      Some("2026-01-01T00:00:01Z"),
+      None,
+    )
+    .unwrap();
     assert!(result.logs.ends_with("new 5\n"));
     assert!(!result.logs.contains("old"));
     purge(root.path(), "app");
