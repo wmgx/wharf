@@ -295,6 +295,7 @@ async fn dispatch(
       port,
       env,
       build,
+      ops,
       apply,
     } => {
       let name = match name {
@@ -320,6 +321,7 @@ async fn dispatch(
           opts: build,
           ..Default::default()
         }),
+        ops: Box::new(ops),
         apply,
       };
       service(c, cmd, j).await
@@ -1044,6 +1046,34 @@ async fn run_cmd(c: &Client, cmd: RunCmd, j: bool) -> CliResult<()> {
         c.get(&format!("/api/runs/{}", seg(&run_id))).await?;
       out(j, &run, print::run);
       Ok(())
+    }
+    RunCmd::Logs {
+      run_id,
+      step,
+      tail,
+      all,
+      grep,
+      errors,
+      max_line,
+    } => {
+      let mut path =
+        format!("/api/runs/{}/logs?all={all}", seg(&run_id));
+      if let Some(step) = step {
+        path.push_str(&format!("&step={step}"));
+      }
+      show_logs(
+        c,
+        &path,
+        &crate::LogArgs {
+          tail,
+          since: None,
+          grep,
+          errors,
+          max_line,
+        },
+        j,
+      )
+      .await
     }
     RunCmd::Wait { run_id } => {
       let run = wait_run(c, &run_id, j).await?;
@@ -2034,6 +2064,9 @@ pub(crate) async fn show_logs(
         eprintln!("命中 {n} 行（看了 {} 行）", v["scanned"]);
       }
     }
+    if let Some(hint) = v["hint"].as_str() {
+      eprintln!("{hint}");
+    }
     if let Some(warnings) = v["warnings"].as_array() {
       for warning in warnings.iter().filter_map(Value::as_str) {
         eprintln!("注意：{warning}");
@@ -2602,6 +2635,7 @@ async fn service(
       volume,
       unset_volume,
       build,
+      ops,
       apply,
     } => {
       let existing = match c
@@ -2704,6 +2738,10 @@ async fn service(
             auto_update: false,
             container: None,
             files: vec![],
+            stop_grace_secs: None,
+            stop_signal: None,
+            init_cmd: None,
+            init_timeout_secs: None,
           }
         }
       };
@@ -2731,6 +2769,29 @@ async fn service(
       }
       if let Some(server) = server {
         spec.server = server;
+      }
+      if let Some(n) = ops.stop_grace {
+        spec.stop_grace_secs = (n != 0).then_some(n);
+      }
+      if let Some(signal) = ops.stop_signal {
+        spec.stop_signal = if signal.is_empty() {
+          None
+        } else {
+          Some(wharf_api_types::compose::normalize_stop_signal(
+            &signal,
+          )?)
+        };
+      }
+      if let Some(secs) = ops.init_timeout {
+        spec.init_timeout_secs = (secs != 0).then_some(secs);
+      }
+      if let Some(cmd) = ops.init_cmd {
+        if cmd.is_empty() {
+          spec.init_cmd = None;
+          spec.init_timeout_secs = None;
+        } else {
+          spec.init_cmd = Some(cmd);
+        }
       }
       if let Some(d) = draft {
         spec.ports = d.ports;

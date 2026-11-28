@@ -29,8 +29,8 @@ use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
   ApiError, ErrorCode, PROTOCOL,
   agent::{
-    AgentMsg, AgentOp, CoreMsg, TerminalInput, auth_payload,
-    auth_payload_v2,
+    AgentMsg, AgentOp, AgentReport, CoreMsg, TerminalInput,
+    auth_payload, auth_payload_v2,
   },
   seal::{KeyShare, Opener, Role, Sealer},
 };
@@ -82,11 +82,49 @@ struct Conn {
   safe_migrate: bool,
   safe_backup: bool,
   build_v2: bool,
+  deploy_v2: bool,
   /// 协议版本不一致：连接放行，但只接受升级相关的请求，好让它升上来。
   upgrade_only: bool,
 }
 
 impl Conn {
+  fn deliver_reply(&self, msg: AgentMsg) {
+    match msg {
+      AgentMsg::Progress { id, line } => {
+        let progress = lock(&self.pending)
+          .get(&id)
+          .and_then(|p| p.progress.clone());
+        if let Some(progress) = progress {
+          progress(line);
+        }
+      }
+      AgentMsg::Response { id, result } => {
+        if let Some(pending) = lock(&self.pending).remove(&id) {
+          let _ = pending.done.send(result);
+        }
+      }
+      _ => {}
+    }
+  }
+
+  fn require_deploy_v2(
+    &self,
+    server: &str,
+    what: &str,
+  ) -> Result<(), ApiError> {
+    if self.upgrade_only || !self.deploy_v2 {
+      return Err(
+        ApiError::new(
+          ErrorCode::Conflict,
+          format!("服务器 {server} 的 agent 版本较旧，不支持{what}"),
+        )
+        .with_hint("先运行 wharf upgrade 升级 agent 后重试")
+        .suggest("wharf upgrade"),
+      );
+    }
+    Ok(())
+  }
+
   fn check_net_probe(
     &self,
     server: &str,
@@ -486,6 +524,24 @@ impl Hub {
     .await
   }
 
+  pub fn supports_deploy_v2(&self, server: &str) -> bool {
+    self.deploy_v2_conn_id(server, "").is_ok()
+  }
+
+  pub(crate) fn deploy_v2_conn_id(
+    &self,
+    server: &str,
+    what: &str,
+  ) -> Result<u64, ApiError> {
+    let conns = lock(&self.conns);
+    let conn = conns
+      .get(server)
+      .filter(|c| !c.closed.is_cancelled())
+      .ok_or_else(|| offline(server))?;
+    conn.require_deploy_v2(server, what)?;
+    Ok(conn.conn_id)
+  }
+
   pub(crate) fn safe_delete_conn_id(
     &self,
     server: &str,
@@ -548,6 +604,17 @@ impl Hub {
     ),
     cancel: &CancellationToken,
   ) -> Result<T, ApiError> {
+    if let AgentOp::ProjectUp(up) = &op {
+      if up.init.is_some() {
+        conn.require_deploy_v2(server, "部署前初始化")?;
+      } else if wharf_api_types::compose::parse_compose_max_grace_secs(
+        &up.compose,
+      ) > 150
+      {
+        conn
+          .require_deploy_v2(server, "超过 150 秒的优雅停机超时")?;
+      }
+    }
     if (matches!(&op, AgentOp::ImportRead(_))
       || matches!(&op, AgentOp::ProjectUp(up) if up.pull_missing_only))
       && (conn.upgrade_only || !conn.safe_adopt)
@@ -970,6 +1037,7 @@ async fn handle_socket(
     safe_migrate,
     safe_backup,
     build_v2,
+    deploy_v2,
     key_rotation,
   } = hello
   else {
@@ -1135,6 +1203,7 @@ async fn handle_socket(
     safe_migrate,
     safe_backup,
     build_v2,
+    deploy_v2,
     upgrade_only,
   };
   let state_on_db = state.clone();
@@ -1199,12 +1268,13 @@ async fn handle_socket(
   let mut ping = tokio::time::interval(PING_EVERY);
   let mut last_recv = tokio::time::Instant::now();
   let mut ping_sent: Option<tokio::time::Instant> = None;
-  let mut agent_memory = None;
-  let alerts = crate::rules::resources::report_queue(
+  let reports = Arc::new(ReportSlot::default());
+  let report_task = tokio::spawn(report_worker(
     state.clone(),
     server.clone(),
-    conn.closed.clone(),
-  );
+    conn.clone(),
+    reports.clone(),
+  ));
   let result: anyhow::Result<()> = loop {
     tokio::select! {
       biased;
@@ -1258,53 +1328,15 @@ async fn handle_socket(
               AcceptNoMetrics => report.metrics = None,
               AcceptAll => {}
             }
-            let mut report = match crate::report_guard::record_report(&state.db, &server, &conn.public_key, *report).await {
-              Ok(report) if !conn.closed.is_cancelled() => report,
-              Ok(_) => continue,
-              Err(e) => {
-                tracing::warn!("校验服务器 {server} 上报失败：{e}");
-                continue;
-              }
-            };
-            crate::service_monitor::report(&server, std::mem::take(&mut report.log_hits));
-            let received = now_ms();
-            let agent_ms = report.time_ms;
-            crate::clock::record(&state, &server, agent_ms).await;
-            let settings = crate::rules::resources::settings(&state, &server).await;
-            if !conn.upgrade_only && let Some(bytes) = settings.as_ref().map(|s| s.0)
-              && agent_memory != Some(bytes)
-              && conn.tx.try_send(CoreMsg::AgentMemory { bytes }).is_ok()
-            {
-              agent_memory = Some(bytes);
+            let mut hits = std::mem::take(&mut report.log_hits);
+            crate::report_guard::sanitize_log_hits(&mut hits);
+            if !conn.closed.is_cancelled() {
+              crate::service_monitor::report(&server, hits);
             }
-            if let Some(m) = report.metrics.as_mut() {
-              let oom = m.oom.take();
-              let hosts = std::mem::take(&mut m.hosts);
-              if !hosts.is_empty() {
-                tokio::spawn(crate::http_stats::record(state.clone(), server.clone(), hosts));
-              }
-              crate::metrics::record_report(&state, &server, m).await;
-              if let Some((wanted, limits)) = settings {
-                let limit = report.agent_memory.as_ref().and_then(|m| m.limit).filter(|_| wanted > 0);
-                let _ = alerts.try_send((received, m.as_ref().clone(), limits, limit));
-              }
-              let state = state.clone();
-              let server = server.clone();
-              tokio::spawn(async move {
-                crate::oom::record(&state, &server, oom).await;
-              });
-            }
+            reports.push(now_ms(), *report);
           }
-          Ok(AgentMsg::Progress { id, line }) => {
-            let progress = lock(&conn.pending).get(&id).and_then(|p| p.progress.clone());
-            if let Some(progress) = progress {
-              progress(line);
-            }
-          }
-          Ok(AgentMsg::Response { id, result }) => {
-            if let Some(pending) = lock(&conn.pending).remove(&id) {
-              let _ = pending.done.send(result);
-            }
+          Ok(msg @ (AgentMsg::Progress { .. } | AgentMsg::Response { .. })) => {
+            conn.deliver_reply(msg);
           }
           Ok(AgentMsg::Hello { .. } | AgentMsg::KeyReady { .. }) => {}
           Err(e) => tracing::debug!("无法解析 {server} 的消息：{:?}", e.classify()),
@@ -1313,9 +1345,107 @@ async fn handle_socket(
     }
   };
   conn.closed.cancel();
+  report_task.abort();
   state.hub.unregister(&server, &conn);
   tracing::info!("服务器 {server} 离线");
   result
+}
+
+#[derive(Default)]
+struct ReportSlot {
+  latest: Mutex<Option<(i64, AgentReport)>>,
+  ready: tokio::sync::Notify,
+}
+
+impl ReportSlot {
+  fn push(&self, received: i64, report: AgentReport) {
+    *lock(&self.latest) = Some((received, report));
+    self.ready.notify_one();
+  }
+
+  async fn next(&self) -> (i64, AgentReport) {
+    loop {
+      if let Some(report) = lock(&self.latest).take() {
+        return report;
+      }
+      self.ready.notified().await;
+    }
+  }
+}
+
+async fn report_worker(
+  state: Arc<AppState>,
+  server: String,
+  conn: Conn,
+  reports: Arc<ReportSlot>,
+) {
+  let mut agent_memory = None;
+  let alerts = crate::rules::resources::report_queue(
+    state.clone(),
+    server.clone(),
+    conn.closed.clone(),
+  );
+  let process = async {
+    loop {
+      let (received, report) = reports.next().await;
+      let mut report = match crate::report_guard::record_report(
+        &state.db,
+        &server,
+        &conn.public_key,
+        report,
+      )
+      .await
+      {
+        Ok(report) => report,
+        Err(e) => {
+          tracing::warn!("校验服务器 {server} 上报失败：{e}");
+          continue;
+        }
+      };
+      let agent_ms = report.time_ms;
+      crate::clock::record(&state, &server, agent_ms).await;
+      let settings =
+        crate::rules::resources::settings(&state, &server).await;
+      if !conn.upgrade_only
+        && let Some(bytes) = settings.as_ref().map(|s| s.0)
+        && agent_memory != Some(bytes)
+        && conn.tx.try_send(CoreMsg::AgentMemory { bytes }).is_ok()
+      {
+        agent_memory = Some(bytes);
+      }
+      if let Some(m) = report.metrics.as_mut() {
+        let oom = m.oom.take();
+        let hosts = std::mem::take(&mut m.hosts);
+        if !hosts.is_empty() {
+          crate::http_stats::record(
+            state.clone(),
+            server.clone(),
+            hosts,
+          )
+          .await;
+        }
+        crate::metrics::record_report(&state, &server, m).await;
+        if let Some((wanted, limits)) = settings {
+          let limit = report
+            .agent_memory
+            .as_ref()
+            .and_then(|m| m.limit)
+            .filter(|_| wanted > 0);
+          let _ = alerts.try_send((
+            received,
+            m.as_ref().clone(),
+            limits,
+            limit,
+          ));
+        }
+        crate::oom::record(&state, &server, oom).await;
+      }
+    }
+  };
+  tokio::select! {
+    _ = conn.closed.cancelled() => {},
+    _ = process => {},
+  }
 }
 
 #[cfg(test)]

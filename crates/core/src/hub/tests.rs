@@ -96,6 +96,7 @@ fn old_core_ignores_new_hello_capability() {
     safe_migrate: true,
     safe_backup: true,
     build_v2: true,
+    deploy_v2: false,
     key_rotation: true,
   };
   let json = serde_json::to_string(&hello).unwrap();
@@ -245,6 +246,7 @@ impl Hub {
         safe_migrate: false,
         safe_backup: false,
         build_v2: false,
+        deploy_v2: false,
         upgrade_only: false,
       },
     );
@@ -382,6 +384,7 @@ async fn agent_upgrade_needs_no_bound_core_server_or_probe_support() {
     safe_migrate: false,
     safe_backup: false,
     build_v2: false,
+    deploy_v2: false,
     upgrade_only: true,
   };
   state.hub.register("s1", conn.clone());
@@ -445,6 +448,7 @@ fn probe_connection(
     safe_migrate: false,
     safe_backup: false,
     build_v2: false,
+    deploy_v2: false,
     upgrade_only: false,
   };
   (conn, rx)
@@ -597,4 +601,88 @@ async fn old_agent_rejects_import_and_adoption_dispatch() {
     assert_eq!(error.code, ErrorCode::Conflict);
     assert_eq!(error.suggest, ["wharf upgrade"]);
   }
+}
+
+#[tokio::test]
+async fn init_cmd_blocked_on_old_agent() {
+  let hub = Hub::default();
+  let (conn, mut rx) = probe_connection(1, "s1");
+  hub.register("s1", conn);
+  let op: AgentOp = serde_json::from_value(serde_json::json!({
+    "op": "project_up", "project": "a", "compose": "services: {}", "hash": "h",
+    "pull": {"mirrors": {}, "mirrors_only": false, "attempt_timeout_secs": 1},
+    "init": {"service": "a", "command": "true"}
+  })).unwrap();
+  let error = hub
+    .call::<Value>(
+      "s1",
+      op,
+      Duration::from_secs(1),
+      None,
+      &CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
+  assert_eq!(error.code, ErrorCode::Conflict);
+  assert_eq!(
+    error.hint.as_deref(),
+    Some("先运行 wharf upgrade 升级 agent 后重试")
+  );
+  assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn slow_report_db_does_not_block_progress_and_response() {
+  let state = crate::rules::tests::test_state();
+  let (conn, _rx) = probe_connection(1, "s1");
+  let reports = Arc::new(ReportSlot::default());
+  let (entered, started) = oneshot::channel();
+  let (unlock, ready) = std::sync::mpsc::channel();
+  let db = state.db.clone();
+  let locked = tokio::spawn(async move {
+    db.call(move |_| {
+      let _ = entered.send(());
+      let _ = ready.recv();
+      Ok(())
+    })
+    .await
+    .unwrap();
+  });
+  started.await.unwrap();
+  let worker = tokio::spawn(report_worker(
+    state,
+    "s1".into(),
+    conn.clone(),
+    reports.clone(),
+  ));
+  reports.push(1, AgentReport::default());
+  tokio::task::yield_now().await;
+  reports.push(2, AgentReport::default());
+  reports.push(3, AgentReport::default());
+  assert_eq!(lock(&reports.latest).as_ref().unwrap().0, 3);
+  let (done, response) = oneshot::channel();
+  let (tx, mut lines) = mpsc::channel(1);
+  lock(&conn.pending).insert(
+    1,
+    Pending {
+      done,
+      progress: Some(Arc::new(move |line| {
+        tx.try_send(line).unwrap();
+      })),
+    },
+  );
+  conn.deliver_reply(AgentMsg::Progress {
+    id: 1,
+    line: "build".into(),
+  });
+  conn.deliver_reply(AgentMsg::Response {
+    id: 1,
+    result: Ok(Value::Null),
+  });
+  assert_eq!(lines.try_recv().unwrap(), "build");
+  assert_eq!(response.await.unwrap().unwrap(), Value::Null);
+  conn.closed.cancel();
+  unlock.send(()).unwrap();
+  worker.await.unwrap();
+  locked.await.unwrap();
 }

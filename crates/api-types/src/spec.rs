@@ -367,6 +367,18 @@ pub struct ServiceSpec {
   /// 应用自己改写的内容下次部署会被覆盖。
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub files: Vec<FileSpec>,
+  /// 容器优雅停机等待秒数（1 到 600），缺省用 Docker 默认。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub stop_grace_secs: Option<u32>,
+  /// 容器停机信号，缺省用镜像默认。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub stop_signal: Option<String>,
+  /// 部署前在临时容器内执行的初始化命令。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub init_cmd: Option<String>,
+  /// 初始化超时秒数（10 到 1800），缺省 300 秒。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub init_timeout_secs: Option<u32>,
 }
 
 /// 一个配置文件。

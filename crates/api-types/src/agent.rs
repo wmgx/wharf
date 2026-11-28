@@ -151,6 +151,8 @@ pub enum AgentMsg {
     safe_delete: bool,
     #[serde(default)]
     safe_adopt: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    deploy_v2: bool,
     #[serde(default)]
     safe_migrate: bool,
     #[serde(default)]

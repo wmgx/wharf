@@ -280,6 +280,10 @@ mod tests {
       auto_update: false,
       container: None,
       files: vec![],
+      stop_grace_secs: None,
+      stop_signal: None,
+      init_cmd: None,
+      init_timeout_secs: None,
     };
     let hp = BTreeMap::from([("pg".to_string(), 20001)]);
     let j = target("db", &spec, &hp, None, None).unwrap();

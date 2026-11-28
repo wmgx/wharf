@@ -444,6 +444,14 @@ pub struct ContainerMount {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InitRun {
+  pub service: String,
+  pub command: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub timeout_secs: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectUp {
   pub project: String,
   /// 已经替换过密钥的 compose 内容，agent 以 0600 写入磁盘。
@@ -476,6 +484,8 @@ pub struct ProjectUp {
   pub expected_images: BTreeMap<String, String>,
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub no_start: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub init: Option<InitRun>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

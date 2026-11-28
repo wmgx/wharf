@@ -188,6 +188,7 @@ async fn handshake(
     safe_migrate: true,
     safe_backup: true,
     build_v2: true,
+    deploy_v2: true,
     key_rotation: true,
     access_logs: true,
     net_probe: true,
@@ -288,15 +289,18 @@ async fn session(
     joined.server
   );
 
-  // 所有出站消息走一个通道，由写任务统一发送。
-  let (tx, mut rx) = mpsc::channel::<AgentMsg>(4096);
+  let (mut outbound, tx, progress_tx, data_mux) =
+    crate::outbound::Outbound::new();
   let session_cancel = CancellationToken::new();
   let reconnect_after = Arc::new(AtomicU64::new(0));
   let writer = {
     let reconnect_after = reconnect_after.clone();
     let cancel = session_cancel.clone();
     tokio::spawn(async move {
-      while let Some(msg) = rx.recv().await {
+      while let Some(msg) = tokio::select! {
+        _ = cancel.cancelled() => None,
+        msg = outbound.recv() => msg,
+      } {
         let reconnect = matches!(&msg, AgentMsg::Response { id, .. }
           if *id == reconnect_after.load(Ordering::Acquire));
         let Ok(text) = serde_json::to_string(&msg) else {
@@ -471,7 +475,7 @@ async fn session(
         ) {
           // 转发的输入是数据块，多留些余量。
           let cap = if matches!(op, AgentOp::Forward(_)) {
-            4096
+            64
           } else {
             256
           };
@@ -485,19 +489,40 @@ async fn session(
         let ops = ops.clone();
         let running = running.clone();
         let inputs = inputs.clone();
+        let data = match &op {
+          AgentOp::Forward(_) => {
+            Some(Arc::new(data_mux.register(id, 32)))
+          }
+          // 这两帧是迁移握手，接收方等它才开始同步。
+          AgentOp::SyncServe(_) => {
+            Some(Arc::new(data_mux.register(id, 2)))
+          }
+          AgentOp::Terminal(_) | AgentOp::HostTerminal { .. } => {
+            Some(Arc::new(data_mux.register(id, 64)))
+          }
+          _ => None,
+        };
+        let log = data.is_none().then(|| {
+          crate::outbound::ProgressLog::new(progress_tx.clone(), id)
+        });
+        let session = session_cancel.clone();
         tokio::spawn(async move {
-          let progress_tx = tx.clone();
-          let progress_cancel = cancel.clone();
+          let progress = if let Some(log) = &log {
+            Some(log.callback())
+          } else if !matches!(&op, AgentOp::Forward(_)) {
+            let data = data.clone().unwrap();
+            let cancel = cancel.clone();
+            Some(Arc::new(move |line| {
+              if data.try_send(line).is_err() {
+                cancel.cancel();
+              }
+            }) as crate::exec::Progress)
+          } else {
+            None
+          };
           let ctx = Ctx {
             cancel: cancel.clone(),
-            progress: Some(Arc::new(move |line| {
-              if progress_tx
-                .try_send(AgentMsg::Progress { id, line })
-                .is_err()
-              {
-                progress_cancel.cancel();
-              }
-            })),
+            progress,
           };
           let timeout = Duration::from_millis(timeout_ms.max(1000));
           let deadline = {
@@ -528,8 +553,7 @@ async fn session(
                 &job,
                 &ctx,
                 input,
-                id,
-                tx.clone(),
+                data.as_deref().unwrap(),
               )
               .await
             }
@@ -551,6 +575,19 @@ async fn session(
             }
             other => other,
           };
+          drop(ctx);
+          if let Some(log) = log {
+            tokio::select! {
+              _ = session.cancelled() => {}
+              _ = log.finish() => {}
+            }
+          }
+          if let Some(data) = data {
+            tokio::select! {
+              _ = cancel.cancelled() => {}
+              _ = data.finish() => {}
+            }
+          }
           running.lock().await.remove(&id);
           let _ = tx.send(AgentMsg::Response { id, result }).await;
         });

@@ -259,6 +259,10 @@ struct ComposeService {
   image: String,
   restart: &'static str,
   #[serde(skip_serializing_if = "Option::is_none")]
+  stop_grace_period: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  stop_signal: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
   mem_limit: Option<String>,
   #[serde(skip_serializing_if = "Option::is_none")]
   cpus: Option<String>,
@@ -1246,6 +1250,14 @@ fn image_service(
   }
   Ok((
     ComposeService {
+      stop_grace_period: spec
+        .stop_grace_secs
+        .map(|n| format!("{n}s")),
+      stop_signal: spec
+        .stop_signal
+        .as_deref()
+        .map(wharf_api_types::compose::normalize_stop_signal)
+        .transpose()?,
       configs: vec![],
       image,
       restart: "unless-stopped",
@@ -1290,6 +1302,7 @@ pub fn trial_compose(
 ) -> Result<(String, SecretMounts), ApiError> {
   let (mut service, files) = image_service(name, spec, secrets)?;
   service.restart = "no";
+  service.stop_grace_period = None;
   service.labels =
     BTreeMap::from([("wharf.trial".into(), name.into())]);
   Ok((
@@ -1605,6 +1618,8 @@ pub fn tunnel_compose(
     services: BTreeMap::from([(
       "cloudflared".to_string(),
       ComposeService {
+        stop_grace_period: None,
+        stop_signal: None,
         configs: vec![],
         image: gateway_image(spec),
         restart: "unless-stopped",
@@ -1645,6 +1660,8 @@ pub fn gateway_compose(name: &str, spec: &GatewaySpec) -> String {
     services: BTreeMap::from([(
       "caddy".to_string(),
       ComposeService {
+        stop_grace_period: None,
+        stop_signal: None,
         configs: vec![],
         image: gateway_image(spec),
         restart: "unless-stopped",
@@ -1748,6 +1765,8 @@ fn backup_compose(
     services: BTreeMap::from([(
       "rest-server".to_string(),
       ComposeService {
+        stop_grace_period: None,
+        stop_signal: None,
         configs: vec![ComposeConfigRef {
           source,
           target: target.into(),
@@ -2441,6 +2460,10 @@ mod tests {
       auto_update: false,
       container: None,
       files: vec![],
+      stop_grace_secs: None,
+      stop_signal: None,
+      init_cmd: None,
+      init_timeout_secs: None,
       server: "node1".into(),
       source: Source::Image("traefik/whoami".into()),
       ports: vec![PortSpec {
@@ -2458,6 +2481,32 @@ mod tests {
         target: "/data".into(),
       }],
     }
+  }
+
+  #[test]
+  fn stop_grace_zero_drift_and_renders_when_set() {
+    let legacy = serde_json::json!({"server": "s1", "source": {"image": "alpine"}});
+    let mut spec: ServiceSpec =
+      serde_json::from_value(legacy.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&spec).unwrap(), legacy);
+    let render = |spec: &ServiceSpec| {
+      service_compose("a", spec, &BTreeMap::new(), &[], None)
+        .unwrap()
+        .0
+    };
+    let expected = "# 由 Wharf 生成，不要手改。\nname: a\nservices:\n  a:\n    image: alpine\n    restart: unless-stopped\n    labels:\n      wharf.service: a\n";
+    assert_eq!(hash(&render(&spec)), hash(expected));
+    spec.stop_grace_secs = Some(300);
+    spec.stop_signal = Some("SIGINT".into());
+    let yaml = render(&spec);
+    assert!(yaml.contains("stop_grace_period: 300s"));
+    assert!(yaml.contains("stop_signal: SIGINT"));
+    assert!(
+      !trial_compose("a", &spec, None)
+        .unwrap()
+        .0
+        .contains("stop_grace_period")
+    );
   }
 
   #[test]

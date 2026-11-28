@@ -200,7 +200,7 @@ impl Ops {
           retired: vec![],
         }
       } else {
-        self.finish_up(up, &images, warnings, None, ctx).await?
+        self.finish_up(up, &images, warnings, None, 10, ctx).await?
       };
       files.commit(&apply.caddyfile_hash)?;
       Ok(result)

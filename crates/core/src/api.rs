@@ -534,6 +534,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route("/api/runs/{id}", get(show_run))
     .route("/api/runs/{id}/cancel", post(cancel_run))
     .route("/api/runs/{id}/retry", post(retry_run))
+    .route("/api/runs/{id}/logs", get(run_logs))
     .route("/api/export", get(export))
     .route("/api/audit", get(crate::audit::list))
     .route(
@@ -2272,6 +2273,23 @@ async fn retry_run(
   Ok(Json(response))
 }
 
+async fn run_logs(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Path(id): Path<String>,
+  Query(query): Query<crate::run_logs::RunLogsQuery>,
+) -> ApiResult<Value> {
+  auth.require(Perm::Read)?;
+  let run = apply::load_run_for(&s, &auth, &id).await?;
+  let data = s.data_dir.clone();
+  let result = tokio::task::spawn_blocking(move || {
+    crate::run_logs::query(&data, run, query)
+  })
+  .await
+  .map_err(|e| ApiError::internal(e.to_string()))??;
+  Ok(Json(result))
+}
+
 async fn cancel_run(
   State(s): State<Arc<AppState>>,
   auth: Auth,
@@ -2326,6 +2344,41 @@ mod tests {
       .unwrap_err();
     assert_eq!(error.code, ErrorCode::Conflict);
     assert!(error.hint.as_deref().unwrap().contains("wharf upgrade"));
+  }
+
+  #[tokio::test]
+  async fn run_logs_respects_token_scope() {
+    let state = crate::rules::tests::test_state();
+    state.db.call(|c| {
+      let body = json!({
+        "run_id": "r_b", "plan_id": "", "status": "succeeded",
+        "started_at": chrono::Utc::now(), "steps": [], "scope_services": ["b"]
+      });
+      c.execute("INSERT INTO runs (id, plan_id, status, body, started_at) VALUES ('r_b', '', 'succeeded', ?1, 0)", [body.to_string()]).map_err(crate::db::sql_err)?;
+      Ok(())
+    }).await.unwrap();
+    let auth = Auth {
+      name: "reader".into(),
+      perms: [Perm::Read].into(),
+      services: Some(["a".into()].into()),
+      allowed_from: vec![],
+      expires_at: None,
+      human: false,
+    };
+    let result = run_logs(
+      State(state),
+      auth,
+      Path("r_b".into()),
+      Query(serde_json::from_value(json!({})).unwrap()),
+    )
+    .await;
+    let Err(error) = result else {
+      panic!("令牌不能读取其他服务的执行日志")
+    };
+    assert_eq!(
+      axum::response::IntoResponse::into_response(error).status(),
+      StatusCode::FORBIDDEN
+    );
   }
 
   #[tokio::test]

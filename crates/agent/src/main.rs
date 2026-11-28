@@ -43,6 +43,7 @@ mod mirror;
 mod net_probe;
 mod network_subnets;
 mod ops;
+mod outbound;
 mod port_checks;
 mod prev_logs;
 mod probe;

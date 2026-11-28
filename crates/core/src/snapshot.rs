@@ -440,7 +440,16 @@ pub fn service_resolved(
   let resolved =
     with_files(world, net, name, &resolved, mounts, Some(secrets))?;
   crate::syntax_check::validate_rendered_compose(name, &resolved)?;
-  let hash = render::hash(&resolved);
+  let hash = match &row.spec.init_cmd {
+    Some(command) => {
+      let init = serde_json::json!([
+        command,
+        row.spec.init_timeout_secs.unwrap_or(300)
+      ]);
+      render::hash(&format!("{resolved}\n# wharf.init={init}"))
+    }
+    None => render::hash(&resolved),
+  };
   Ok((resolved, hash))
 }
 

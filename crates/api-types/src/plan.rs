@@ -411,12 +411,22 @@ pub struct RunStep {
   pub status: StepStatus,
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub log: Vec<String>,
+  /// 本步骤收到的日志总行数。
+  #[serde(default, skip_serializing_if = "run_log_lines_zero")]
+  pub log_lines: u64,
+  /// 摘要日志只保留尾部；完整日志可另行读取。
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub log_truncated: bool,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub error: Option<ApiError>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub started_at: Option<DateTime<Utc>>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub finished_at: Option<DateTime<Utc>>,
+}
+
+fn run_log_lines_zero(n: &u64) -> bool {
+  *n == 0
 }
 
 /// 一次执行记录。

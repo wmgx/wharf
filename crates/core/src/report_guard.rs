@@ -121,6 +121,18 @@ fn clean(s: &mut String, max: usize) {
   *s = s.chars().filter(|c| !c.is_control()).take(max).collect();
 }
 
+pub(crate) fn sanitize_log_hits(
+  hits: &mut Vec<wharf_api_types::service_checks::LogHit>,
+) {
+  hits.truncate(64);
+  for hit in hits.iter_mut() {
+    hit.lines.truncate(3);
+    for line in &mut hit.lines {
+      clean(line, 300);
+    }
+  }
+}
+
 pub fn sanitize_report(r: &mut AgentReport) {
   if let Some(repos) = &mut r.backup_repos {
     repos.retain(|name, _| {
@@ -186,13 +198,7 @@ pub fn sanitize_report(r: &mut AgentReport) {
       clean(s, 128);
     }
   }
-  r.log_hits.truncate(64);
-  for hit in &mut r.log_hits {
-    hit.lines.truncate(3);
-    for line in &mut hit.lines {
-      clean(line, 300);
-    }
-  }
+  sanitize_log_hits(&mut r.log_hits);
   if let Some(m) = &mut r.metrics {
     m.cpu = nonnegative(m.cpu).min(100.0);
     m.agent_cpu = m.agent_cpu.map(|n| nonnegative(n).min(100.0));

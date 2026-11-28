@@ -464,6 +464,7 @@ pub(crate) async fn deploy_server(
         trial: None,
         start_timeout_secs: None,
         readiness: None,
+        init: None,
       }),
       SERVER_TIMEOUT,
       Some(progress.clone()),
@@ -497,18 +498,17 @@ async fn stop(
     return Err(ApiError::new(ErrorCode::Cancelled, "已取消"));
   }
   progress(format!("停止 {} 上的 {service}", w.server));
-  state
-    .hub
-    .call(
-      &w.server,
-      AgentOp::ServiceStopForData {
-        project: service.to_string(),
-      },
-      STOP_TIMEOUT,
-      Some(progress.clone()),
-      cancel,
-    )
-    .await
+  crate::apply::call_with_stop_timeout(
+    state,
+    (&w.server, service),
+    AgentOp::ServiceStopForData {
+      project: service.to_string(),
+    },
+    STOP_TIMEOUT,
+    progress,
+    cancel,
+  )
+  .await
 }
 
 async fn start(

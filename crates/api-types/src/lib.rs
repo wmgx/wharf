@@ -10,6 +10,7 @@
 pub mod access_logs;
 pub mod agent;
 pub mod build;
+pub mod compose;
 pub mod egress;
 pub mod error;
 pub mod external;
