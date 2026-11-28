@@ -332,7 +332,7 @@ pub(crate) async fn run_task(
       .args(session.args("", "stdin", "0"))
       .input(script.into_bytes())
   }
-  .timeout(timeout + Duration::from_secs(5));
+  .timeout(timeout);
   let result =
     crate::task::run_wrapped(cmd, &session.marker, ctx).await;
   if result.is_err()

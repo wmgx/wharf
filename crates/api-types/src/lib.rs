@@ -90,20 +90,6 @@ pub fn validate_name(kind: &str, name: &str) -> Result<(), ApiError> {
   }
 }
 
-#[cfg(test)]
-mod tests {
-  use super::*;
-
-  #[test]
-  fn names() {
-    assert!(validate_name("服务", "whoami").is_ok());
-    assert!(validate_name("服务", "a-1").is_ok());
-    for bad in ["", "-a", "a-", "A", "a_b", "a.b", &"a".repeat(49)] {
-      assert!(validate_name("服务", bad).is_err(), "{bad}");
-    }
-  }
-}
-
 /// 校验传给 Compose 的服务名。
 pub fn validate_container_name(name: &str) -> Result<(), ApiError> {
   let mut bytes = name.bytes();
@@ -118,5 +104,19 @@ pub fn validate_container_name(name: &str) -> Result<(), ApiError> {
     Err(ApiError::invalid(
       "子容器名须以字母或数字开头，最多 64 个字符，只能包含 ASCII 字母、数字、点、下划线或连字符",
     ))
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn names() {
+    assert!(validate_name("服务", "whoami").is_ok());
+    assert!(validate_name("服务", "a-1").is_ok());
+    for bad in ["", "-a", "a-", "A", "a_b", "a.b", &"a".repeat(49)] {
+      assert!(validate_name("服务", bad).is_err(), "{bad}");
+    }
   }
 }

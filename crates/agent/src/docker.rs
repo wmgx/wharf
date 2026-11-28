@@ -1974,6 +1974,18 @@ pub(crate) fn strip_ansi(text: &str) -> String {
   out
 }
 
+fn container_args(
+  container: Option<&str>,
+) -> Result<Vec<&str>, ApiError> {
+  match container {
+    Some(c) => {
+      wharf_api_types::validate_container_name(c)?;
+      Ok(vec!["--", c])
+    }
+    None => Ok(vec![]),
+  }
+}
+
 #[cfg(test)]
 mod tests {
   #[tokio::test]
@@ -2430,16 +2442,4 @@ fn parse_running_images_maps_multiple_containers() {
       ("db:latest".into(), "id3".into())
     ])
   );
-}
-
-fn container_args(
-  container: Option<&str>,
-) -> Result<Vec<&str>, ApiError> {
-  match container {
-    Some(c) => {
-      wharf_api_types::validate_container_name(c)?;
-      Ok(vec!["--", c])
-    }
-    None => Ok(vec![]),
-  }
 }
