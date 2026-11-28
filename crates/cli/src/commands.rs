@@ -3368,6 +3368,63 @@ async fn service(
     ServiceCmd::Upload { name, local, path } => {
       crate::files::upload(c, &name, &local, &path, j).await
     }
+    ServiceCmd::Repair {
+      name,
+      status,
+      exit,
+      timeout,
+      command,
+    } => {
+      use wharf_api_types::view::{RepairView, ServiceRepairRequest};
+      let path = format!("/api/services/{}/repair", seg(&name));
+      let response: RepairView = if status {
+        c.get(&path).await?
+      } else {
+        let request = if exit {
+          ServiceRepairRequest::Exit
+        } else if command.is_empty() {
+          ServiceRepairRequest::Start
+        } else {
+          ServiceRepairRequest::Exec {
+            command: crate::exec_command::read_exec_source(
+              command, None,
+            )?,
+            timeout_secs: timeout,
+          }
+        };
+        c.post(&path, &request).await?
+      };
+      out(j, &response, |view| {
+        if let Some(execution) = &view.execution {
+          print!("{}", execution.stdout);
+          eprint!("{}", execution.stderr);
+        } else {
+          pretty(view);
+        }
+      });
+      if let Some(execution) = response.execution
+        && execution.exit_code != 0
+      {
+        return Err(CliError::Exit(execution.exit_code));
+      }
+      Ok(())
+    }
+    ServiceCmd::CrashGuard { name, on, off } => {
+      if on || off {
+        return changes(
+          c,
+          vec![Change::SetCrashGuard { name, enabled: on }],
+          ApplyFlags::default(),
+          j,
+        )
+        .await;
+      }
+      let view: wharf_api_types::view::CrashGuardView = c
+        .get(&format!("/api/services/{}/crash-guard", seg(&name)))
+        .await?;
+      out(j, &view, pretty);
+      Ok(())
+    }
     ServiceCmd::Stop { .. } | ServiceCmd::Start { .. } => {
       let (name, apply, stopped) = match cmd {
         ServiceCmd::Stop { name, apply, .. } => {
@@ -3381,6 +3438,20 @@ async fn service(
       };
       let v: ServiceView =
         c.get(&format!("/api/services/{}", seg(&name))).await?;
+      if !stopped
+        && v
+          .status
+          .as_ref()
+          .is_some_and(|status| status.recovery.is_some())
+      {
+        return plan_batch(
+          c,
+          ServiceAction::ResumeProtected { service: name },
+          apply,
+          j,
+        )
+        .await;
+      }
       let spec = ServiceSpec { stopped, ..v.spec };
       changes(
         c,
@@ -3638,6 +3709,7 @@ async fn service(
             init_cmd: None,
             init_timeout_secs: None,
             tags: Default::default(),
+            crash_guard: false,
           }
         }
       };

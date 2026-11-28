@@ -292,6 +292,20 @@ pub(crate) async fn start_with_actor(
       let spec =
         serde_json::from_value(spec.clone()).map_err(json_err)?;
       crate::monitor::require_agent(&state, &spec)?;
+      if spec.crash_guard
+        && plan.items.iter().any(|item| {
+          item.layer == wharf_api_types::plan::Layer::Config
+            && item.address == format!("service/{name}")
+            && item
+              .before
+              .as_ref()
+              .and_then(|before| before.get("crash_guard"))
+              .and_then(serde_json::Value::as_bool)
+              != Some(true)
+        })
+      {
+        state.hub.crash_guard_conn_id(&spec.server)?;
+      }
       bind_sources.extend(
         crate::data::mounts(name, &spec).into_iter().filter_map(
           |mount| {
@@ -736,6 +750,7 @@ pub(crate) fn apply_writes(
     crate::world::World::from_rows(db::all_resources(tx)?)?;
   crate::secret_policy::require_apply(plan, &current, admin)?;
   let reserved = crate::pending::load(tx)?.clones;
+  crate::crash_guard::check_writes(tx, writes)?;
   for write in writes {
     if let Write::Upsert { kind, name, .. } = write
       && kind == crate::world::KIND_SERVICE
@@ -1550,7 +1565,27 @@ async fn run_step_with_dns(
   }
   let world = &snap.world;
   let net = snap.net(world);
+  if !matches!(
+    step,
+    Step::CrashStop { .. } | Step::ResumeProtected { .. }
+  ) {
+    for service in run_scope::step_services(step) {
+      crate::crash_guard::require_idle(&snap, &service)?;
+    }
+  }
   match step {
+    Step::CrashStop { service, evidence } => {
+      crate::crash_guard::stop(
+        state, &snap, run_id, service, evidence, progress, cancel,
+      )
+      .await?;
+    }
+    Step::ResumeProtected { service, instance } => {
+      crate::crash_guard::resume(
+        state, &snap, run_id, service, instance, progress, cancel,
+      )
+      .await?;
+    }
     Step::RenameService { job } => {
       crate::planner::service_rename::execute(
         state, &snap, run_id, job, progress, cancel,
@@ -3128,6 +3163,25 @@ async fn project_stop_start(
   progress: &ProgressFn,
   cancel: &CancellationToken,
 ) -> Result<(), ApiError> {
+  project_stop_start_on(
+    state,
+    (server, None),
+    service,
+    start,
+    progress,
+    cancel,
+  )
+  .await
+}
+
+pub(crate) async fn project_stop_start_on(
+  state: &AppState,
+  (server, conn): (&str, Option<u64>),
+  service: &str,
+  start: bool,
+  progress: &ProgressFn,
+  cancel: &CancellationToken,
+) -> Result<(), ApiError> {
   let op = if start {
     AgentOp::ProjectStart {
       project: service.to_string(),
@@ -3138,7 +3192,28 @@ async fn project_stop_start(
       project: service.to_string(),
     }
   };
-  let done: bool = if start {
+  let done: bool = if let Some(conn) = conn {
+    let grace = if start {
+      None
+    } else {
+      project_grace(state, server, service).await?
+    };
+    if grace.is_some_and(|g| g > 150)
+      && state.hub.deploy_v2_conn_id(server, "优雅停机超时")? != conn
+    {
+      return Err(crate::hub::offline(server));
+    }
+    state
+      .hub
+      .call_bound(
+        (server, conn),
+        op,
+        stop_rpc_timeout(STOP_START_TIMEOUT, grace),
+        Some(progress.clone()),
+        cancel,
+      )
+      .await?
+  } else if start {
     state
       .hub
       .call(

@@ -186,6 +186,40 @@ pub struct ServiceComposeExport {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(
+  tag = "action",
+  rename_all = "snake_case",
+  deny_unknown_fields
+)]
+pub enum ServiceRepairRequest {
+  Start,
+  Exec {
+    command: String,
+    timeout_secs: Option<u64>,
+  },
+  Exit,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RepairView {
+  pub service: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub phase: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub expires_ms: Option<i64>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub execution: Option<ServiceExecResponse>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CrashGuardView {
+  pub enabled: bool,
+  pub supported: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub phase: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ServiceRenderView {
   pub service: String,
   pub server: String,
@@ -330,6 +364,8 @@ pub struct ServiceView {
   Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
 )]
 pub struct ServiceStatus {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub recovery: Option<String>,
   /// 期望：按配置应该在运行（`stopped` 时为 false）。
   pub want_running: bool,
   /// 期望：当前配置生成的 compose 哈希；缺密钥等算不出时为空。

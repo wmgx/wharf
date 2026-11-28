@@ -396,6 +396,7 @@ CREATE INDEX task_runs_service_started ON task_runs (service, started_at DESC);
    ALTER TABLE cleanups ADD COLUMN blocked_reason TEXT;
    ALTER TABLE cleanups ADD COLUMN next_retry_at INTEGER;",
   "ALTER TABLE deployments ADD COLUMN original_service TEXT;",
+  crate::crash_guard::MIGRATION,
 ];
 
 const PENDING_STEPS_MIGRATION: &str = r#"

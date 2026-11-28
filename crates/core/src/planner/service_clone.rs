@@ -140,6 +140,7 @@ pub(crate) async fn plan(
   spec.server = to.into();
   spec.stopped = true;
   spec.backup = None;
+  spec.crash_guard = false;
   spec.auto_update = false;
   spec.heartbeat = None;
   spec.monitor = None;
@@ -294,6 +295,7 @@ pub(super) fn validate_source(
   target_server: &str,
   copy: bool,
 ) -> Result<usize, ApiError> {
+  crate::crash_guard::require_idle(snap, source)?;
   let row = &snap.world.services[source];
   let spec = &row.spec;
   if moved_from(snap, &snap.world, source, &spec.server).is_some()

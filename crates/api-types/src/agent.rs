@@ -179,6 +179,10 @@ pub enum AgentMsg {
     migrate_v2: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     service_copy: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    crash_guard: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    service_repair: bool,
     #[serde(default)]
     data_ops: bool,
     #[serde(default)]
@@ -523,6 +527,8 @@ pub enum AgentOp {
   /// 迁移的发送端：把本机 `/srv/<service>/` 推送到另一台机器的 [AgentOp::SyncServe]。
   SyncPush(SyncPush),
   ServiceCopy(ServiceCopy),
+  CrashGuard(CrashGuardOp),
+  ServiceRepair(ServiceRepairOp),
   DirSpace {
     service: String,
     #[serde(default)]

@@ -365,6 +365,14 @@ impl World {
           server.settings = settings.clone();
         }
         Change::AdoptData { .. } => {}
+        Change::SetCrashGuard { name, enabled } => {
+          self
+            .services
+            .get_mut(name)
+            .ok_or_else(|| crate::api::service_not_found(name))?
+            .spec
+            .crash_guard = *enabled;
+        }
         Change::EditServiceTags { name, add, remove } => {
           let row = self
             .services
@@ -2877,6 +2885,7 @@ mod tests {
       init_cmd: None,
       init_timeout_secs: None,
       tags: Default::default(),
+      crash_guard: false,
       server: server.into(),
       source: Source::Image("traefik/whoami".into()),
       ports: vec![PortSpec {

@@ -49,6 +49,9 @@ pub enum ServiceAction {
   Update {
     tag: String,
   },
+  ResumeProtected {
+    service: String,
+  },
   Rename {
     source: String,
     target: String,
@@ -80,6 +83,7 @@ pub enum ServiceActionKind {
   Update,
   Clone,
   Rename,
+  ResumeProtected,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

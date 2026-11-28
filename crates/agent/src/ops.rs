@@ -406,6 +406,12 @@ impl Ops {
         crate::data_sync::sqlite_close(&snap_id);
         Ok(Value::Null)
       }
+      AgentOp::ServiceRepair(job) => {
+        crate::service_repair::run(&self.docker, job, ctx).await
+      }
+      AgentOp::CrashGuard(job) => {
+        crate::crash_guard::run(&self.docker, job, ctx).await
+      }
       AgentOp::ServiceCopy(job) => {
         crate::sync::service_copy(&self.docker, job, ctx).await
       }

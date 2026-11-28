@@ -38,6 +38,7 @@ mod core_backup;
 mod core_export;
 mod core_node;
 mod core_restore;
+mod crash_guard;
 mod cron;
 mod data;
 mod data_cleanup;

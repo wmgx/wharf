@@ -45,6 +45,7 @@ pub struct Snapshot {
   /// 每个服务最近一次成功部署在哪台服务器上。和配置里的服务器不同，说明迁移还没完成。
   pub deployed: BTreeMap<String, String>,
   pub pending: crate::pending::PendingState,
+  pub recovery: BTreeMap<String, crate::crash_guard::Recovery>,
   /// cloudflare_tunnel 网关已经创建的隧道。
   pub tunnels: BTreeMap<String, db::TunnelRow>,
   /// 已绑定到边缘应用的自定义域名。
@@ -214,6 +215,7 @@ pub(crate) async fn load_inner(
     }
     Ok(
       Snapshot {
+        recovery: crate::crash_guard::load(c, &world)?,
         world,
         agents,
         core_server,

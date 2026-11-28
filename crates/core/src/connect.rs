@@ -286,6 +286,7 @@ mod tests {
       init_cmd: None,
       init_timeout_secs: None,
       tags: Default::default(),
+      crash_guard: false,
     };
     let hp = BTreeMap::from([("pg".to_string(), 20001)]);
     let j = target("db", &spec, &hp, None, None).unwrap();

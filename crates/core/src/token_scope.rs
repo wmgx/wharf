@@ -409,6 +409,7 @@ pub fn require_plan_request(
     let address = match change {
       Change::AdoptData { service: name, .. }
       | Change::EditServiceTags { name, .. }
+      | Change::SetCrashGuard { name, .. }
       | Change::UpsertService { name, .. }
       | Change::RemoveService { name, .. }
       | Change::RefreshImages { name, .. }

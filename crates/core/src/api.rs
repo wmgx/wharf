@@ -390,6 +390,15 @@ pub fn router(state: Arc<AppState>) -> Router {
       get(crate::service_render::get),
     )
     .route(
+      "/api/services/{name}/repair",
+      get(crate::crash_guard::repair::get)
+        .post(crate::crash_guard::repair::act),
+    )
+    .route(
+      "/api/services/{name}/crash-guard",
+      get(crate::crash_guard::get),
+    )
+    .route(
       "/api/services/{name}/export-compose",
       get(crate::service_render::export_compose),
     )

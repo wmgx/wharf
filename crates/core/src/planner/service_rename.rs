@@ -160,12 +160,8 @@ fn config_checks(
   to: &str,
 ) -> Result<usize, ApiError> {
   wharf_api_types::validate_name("服务", to)?;
-  if [
-    wharf_api_types::agent::TASK_DATA_PREFIX,
-    wharf_api_types::agent::TRIAL_PROJECT_PREFIX,
-  ]
-  .iter()
-  .any(|prefix| to.starts_with(prefix))
+  if to.starts_with(wharf_api_types::agent::TASK_DATA_PREFIX)
+    || to.starts_with(wharf_api_types::agent::TRIAL_PROJECT_PREFIX)
   {
     return Err(reject("目标名称使用保留前缀"));
   }

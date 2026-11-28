@@ -276,6 +276,14 @@ pub enum Step {
   RenameService {
     job: Box<service_rename::RenameJob>,
   },
+  CrashStop {
+    service: String,
+    evidence: crate::crash_guard::Evidence,
+  },
+  ResumeProtected {
+    service: String,
+    instance: String,
+  },
   /// 重启服务的容器。单独发起，不来自计划。
   ServiceRestart {
     service: String,
@@ -357,6 +365,8 @@ impl Step {
       | Self::Prune { .. }
       | Self::CoreBackup { .. }
       | Self::ServiceRestart { .. }
+      | Self::CrashStop { .. }
+      | Self::ResumeProtected { .. }
       | Self::CleanupData { .. }
       | Self::CleanupArchive { .. }
       | Self::EdgeRollback { .. } => 9,
@@ -571,11 +581,13 @@ pub(crate) async fn make_plan_inner(
   } else {
     desired.apply_changes(&req.changes)?;
   }
+  crate::crash_guard::check_plan(state, &snap, &desired)?;
   if !req.changes.is_empty()
     && req.changes.iter().all(|change| {
       matches!(
         change,
         wharf_api_types::spec::Change::EditServiceTags { .. }
+          | wharf_api_types::spec::Change::SetCrashGuard { .. }
       )
     })
   {
@@ -1826,6 +1838,9 @@ fn service_items(
       continue;
     }
     let old = current.services.get(name);
+    if snap.recovery.contains_key(name) {
+      continue;
+    }
     if old.is_some_and(|old| {
       crate::service_monitor::config_only(old, svc)
     }) {
@@ -6651,6 +6666,9 @@ mod tests {
       finished_at: None,
       exit_code: None,
       restart_policy: None,
+      container_id: None,
+      restart_count: None,
+      restart_observed_at: None,
     }
   }
 

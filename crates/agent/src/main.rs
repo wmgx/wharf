@@ -22,6 +22,7 @@ mod cleanup;
 mod conn;
 mod container_probe;
 mod core_probe;
+mod crash_guard;
 mod data_sync;
 mod diagnose;
 mod dirfd;
@@ -55,6 +56,7 @@ mod registry;
 mod report;
 mod restic;
 mod service_exec;
+mod service_repair;
 mod settle;
 mod sync;
 mod task;
@@ -254,6 +256,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     bin: cli.docker,
     data_dir: cli.data_dir.clone(),
   };
+  tokio::spawn(service_repair::sweep(docker.clone()));
   let cleanup_docker = docker.clone();
   tokio::spawn(async move {
     restic::cleanup_containers(&cleanup_docker).await

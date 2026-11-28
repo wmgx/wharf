@@ -1241,6 +1241,26 @@ pub enum ServiceCmd {
     #[command(flatten)]
     apply: ApplyFlags,
   },
+  /// 进入、查询、执行修复命令或退出修复模式。
+  Repair {
+    name: String,
+    #[arg(long, conflicts_with_all = ["exit", "command", "timeout"])]
+    status: bool,
+    #[arg(long, conflicts_with_all = ["command", "timeout"])]
+    exit: bool,
+    #[arg(long, requires = "command")]
+    timeout: Option<u64>,
+    #[arg(last = true)]
+    command: Vec<String>,
+  },
+  /// 查看或设置重启循环保护。
+  CrashGuard {
+    name: String,
+    #[arg(long, conflicts_with = "off")]
+    on: bool,
+    #[arg(long)]
+    off: bool,
+  },
   /// 启动之前停止的服务。生成计划。
   Start {
     name: String,

@@ -278,6 +278,8 @@ async fn handshake(
     safe_migrate: true,
     migrate_v2: true,
     service_copy: true,
+    crash_guard: true,
+    service_repair: true,
     data_ops: true,
     safe_backup: true,
     backup_move: true,

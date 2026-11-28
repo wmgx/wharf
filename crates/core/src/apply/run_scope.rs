@@ -38,6 +38,8 @@ pub(super) fn step_services(step: &Step) -> Vec<String> {
     | Step::Rebuild { service }
     | Step::ServiceRestart { service, .. }
     | Step::ServiceStop { service }
+    | Step::CrashStop { service, .. }
+    | Step::ResumeProtected { service, .. }
     | Step::ServiceUp { service, .. }
     | Step::ServiceDown { service, .. }
     | Step::CleanupData { service, .. }

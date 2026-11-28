@@ -109,6 +109,8 @@ fn entries() -> BTreeMap<&'static str, Schema> {
     ),
     ("server_view", schema_for!(view::ServerView)),
     ("service_render", schema_for!(view::ServiceRenderView)),
+    ("crash-guard", schema_for!(view::CrashGuardView)),
+    ("service-repair", schema_for!(view::RepairView)),
     (
       "service_compose_export",
       schema_for!(view::ServiceComposeExport),

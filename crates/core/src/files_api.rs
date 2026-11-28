@@ -240,6 +240,7 @@ pub async fn upload(
     crate::locks::LockSpec::apply([name.clone()]),
     "上传服务文件",
   )?;
+  crate::crash_guard::require_data_writable(&s, &name).await?;
   let server = server_of(&s, &name).await?;
   crate::pending::source_changed(&s, &name).await?;
   let chunks: Vec<&[u8]> = if body.is_empty() {
@@ -413,6 +414,7 @@ async fn edit<T: serde::de::DeserializeOwned>(
     crate::locks::LockSpec::apply([name.to_owned()]),
     "修改服务文件",
   )?;
+  crate::crash_guard::require_data_writable(s, name).await?;
   let server = server_of(s, name).await?;
   let conn = s.hub.files_v2_conn_id(&server, "文件修改")?;
   let (method, suffix, detail, timeout) = match &op {

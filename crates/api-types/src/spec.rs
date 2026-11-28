@@ -337,6 +337,8 @@ pub struct ServiceSpec {
   pub source: Source,
   #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
   pub tags: BTreeSet<String>,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub crash_guard: bool,
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub ports: Vec<PortSpec>,
   /// 环境变量。值里可以用 `[[SECRET_NAME]]` 引用密钥；compose 来源加到 `container` 指定的容器上，
@@ -1013,6 +1015,10 @@ pub enum Change {
     commit: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     migrate: Option<MigrateOptions>,
+  },
+  SetCrashGuard {
+    name: String,
+    enabled: bool,
   },
   EditServiceTags {
     name: String,

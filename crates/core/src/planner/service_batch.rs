@@ -21,6 +21,15 @@ pub(crate) async fn make_service_action_plan(
     ));
   }
   match req.service_action {
+    Some(ServiceAction::ResumeProtected { service }) => {
+      if allowed.is_some_and(|scope| !scope.contains(&service)) {
+        return Err(ApiError::new(
+          ErrorCode::Forbidden,
+          "服务不在令牌范围内",
+        ));
+      }
+      resume_plan(state, &snap, &service, req.note.as_deref())
+    }
     Some(ServiceAction::Rename { source, target }) => {
       if !admin || allowed.is_some() {
         return Err(ApiError::new(
@@ -130,6 +139,7 @@ async fn make_batch_plan(
   let outside =
     |service: &str| !targets.iter().any(|name| name == service);
   for name in &targets {
+    crate::crash_guard::require_idle(&snap, name)?;
     let row = &current.services[name];
     if action == ServiceActionKind::Restart && row.spec.stopped {
       b.warnings.push(format!("跳过 {name}：服务已停"));
@@ -445,4 +455,73 @@ mod tests {
       .is_err()
     );
   }
+}
+
+fn resume_plan(
+  state: &AppState,
+  snap: &Snapshot,
+  name: &str,
+  note: Option<&str>,
+) -> Result<Planned, ApiError> {
+  let row = snap
+    .world
+    .services
+    .get(name)
+    .ok_or_else(|| crate::api::service_not_found(name))?;
+  let recovery = snap
+    .recovery
+    .get(name)
+    .ok_or_else(|| ApiError::invalid("服务没有保护停机状态"))?;
+  if !row.spec.stopped
+    || recovery.phase != "protected"
+    || recovery.lease.is_some()
+  {
+    return Err(
+      ApiError::new(
+        ErrorCode::Conflict,
+        "服务仍在保护停机确认或修复",
+      )
+      .with_hint(format!(
+        "运行 wharf service repair {name} --status"
+      )),
+    );
+  }
+  state.hub.crash_guard_conn_id(&row.spec.server)?;
+  let address = format!("service/{name}");
+  let mut b = Builder::default();
+  let id = b.item(
+    address.clone(),
+    Layer::Container,
+    Action::Update,
+    None,
+    None,
+    vec![Impact::Restart],
+    "恢复原重启策略并启动服务",
+  );
+  b.step(
+    vec![id],
+    format!("恢复并启动 {name}"),
+    Step::ResumeProtected {
+      service: name.into(),
+      instance: row.instance_id.clone(),
+    },
+  );
+  let mut plan = finish_plan(
+    snap,
+    &snap.world,
+    b,
+    vec![],
+    crate::render::service_account_refs(&snap.world),
+    note,
+  );
+  plan.plan.needs_confirm.push(address.clone());
+  if let Some(suggest) = plan.plan.suggest.first_mut() {
+    suggest.push_str(&format!(" --confirm {address}"));
+  }
+  plan.plan.service_action = Some(PlannedServiceAction {
+    action: ServiceActionKind::ResumeProtected,
+    tag: None,
+    targets: vec![name.into()],
+  });
+  Ok(plan)
 }

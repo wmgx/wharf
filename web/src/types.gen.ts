@@ -614,6 +614,10 @@ export type Change = {
   pins?: Record<string, string> | null;
   spec: ServiceSpec;
 } | {
+  enabled: boolean;
+  name: string;
+  op: "set_crash_guard";
+} | {
   add: string[];
   name: string;
   op: "edit_service_tags";
@@ -681,6 +685,7 @@ export interface CleanupSkippedServer {
 }
 
 export interface ContainerInfo {
+  container_id?: string | null;
   exit_code?: number | null;
   finished_at?: string | null;
   /**
@@ -690,6 +695,8 @@ export interface ContainerInfo {
   health?: string | null;
   image: string;
   name: string;
+  restart_count?: number | null;
+  restart_observed_at?: number | null;
   restart_policy?: string | null;
   /**
    * compose 里的服务名。
@@ -2975,7 +2982,7 @@ export interface ServerView {
 /**
  * 按服务的内置告警规则覆盖。
  */
-export type ServiceActionKind = "restart" | "stop" | "update" | "clone" | "rename";
+export type ServiceActionKind = "restart" | "stop" | "update" | "clone" | "rename" | "resume_protected";
 
 export interface ServiceAlertOverrideView {
   enabled?: boolean | null;
@@ -3098,6 +3105,7 @@ export interface ServiceSpec {
    * compose 来源：环境变量、资源上限和配置文件加在哪个容器上。只有一个容器时不用填。
    */
   container?: string | null;
+  crash_guard?: boolean;
   /**
    * 环境变量。值里可以用 `[[SECRET_NAME]]` 引用密钥；compose 来源加到 `container` 指定的容器上，
    * compose 文件内容也会做同样的替换。
@@ -3193,6 +3201,7 @@ export interface ServiceStatus {
    * 最后一次成功查到这台服务器现状的时间；服务器离线时就是"多久前看到的"。
    */
   observed_at?: string | null;
+  recovery?: string | null;
   /**
    * 一句话，例如"运行中"、"部署失败"、"服务器离线"。
    */

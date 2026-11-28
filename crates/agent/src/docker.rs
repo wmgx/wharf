@@ -203,16 +203,20 @@ impl Docker {
         .collect();
       projects.extend(discovered);
     }
-    let stopped: Vec<_> = projects
+    let observed: Vec<_> = projects
       .iter()
       .filter_map(|p| by_project.get(p))
       .flatten()
-      .filter(|c| c.state != "running")
       .map(|c| c.name.as_str())
+      .take(512)
       .collect();
-    let finished =
-      crate::docker_observation::inspect_stopped(self, &stopped, ctx)
-        .await;
+    let mut finished = std::collections::BTreeMap::new();
+    for batch in observed.chunks(128) {
+      finished.extend(
+        crate::docker_observation::inspect_stopped(self, batch, ctx)
+          .await,
+      );
+    }
     Ok(
       projects
         .iter()
@@ -266,6 +270,16 @@ impl Docker {
                 restart_policy: finished
                   .get(&c.name)
                   .and_then(|o| o.restart_policy.clone()),
+                container_id: finished
+                  .get(&c.name)
+                  .and_then(|o| o.container_id.clone()),
+                restart_count: finished
+                  .get(&c.name)
+                  .and_then(|o| o.restart_count),
+                restart_observed_at: finished
+                  .get(&c.name)
+                  .filter(|o| o.container_id.is_some())
+                  .map(|o| o.observed_at),
                 ..c
               })
               .collect(),
@@ -1816,6 +1830,9 @@ pub fn parse_ps(
         finished_at: None,
         exit_code: None,
         restart_policy: None,
+        container_id: None,
+        restart_count: None,
+        restart_observed_at: None,
         working_dir: labels
           .get("com.docker.compose.project.working_dir")
           .map(|w| w.to_string()),

@@ -98,6 +98,18 @@ fn walk(
       };
     }
     match command.as_str() {
+      "service repair" => {
+        entry["flag_variants"] = json!({
+          "--status": {"effect": "read", "perms": ["read"], "returns": "service-repair"},
+          "command": {"perms": ["admin", "apply", "confirm", "exec"]}
+        });
+      }
+      "service crash-guard" => {
+        entry["flag_variants"] = json!({
+          "--on": {"effect": "plan", "perms": ["plan"], "returns": "plan"},
+          "--off": {"effect": "plan", "perms": ["plan"], "returns": "plan"}
+        });
+      }
       "top" => {
         entry["flag_variants"] = json!({
           "--suggest-limits": {"effect": "read", "perms": ["read"], "returns": "limits-suggest"}
@@ -242,9 +254,14 @@ fn effect(
       return ("plan", &["plan", "host", "admin"]);
     }
     "service import" => return ("plan", &["plan", "host"]),
-    "service export-compose" => return ("read", &["read"]),
+    "service export-compose" | "service crash-guard" => {
+      return ("read", &["read"]);
+    }
     "service clone" => return ("plan", &["plan"]),
     "service rename" => return ("plan", &["plan", "admin"]),
+    "service repair" => {
+      return ("direct", &["admin", "apply", "confirm"]);
+    }
     "import" => return ("plan", &["admin", "plan"]),
     _ => {}
   }
@@ -395,6 +412,8 @@ fn returns(command: &str) -> Option<&'static str> {
     "exec" => "host_exec",
     "service exec" => "service_exec",
     "service render" => "service_render",
+    "service crash-guard" => "crash-guard",
+    "service repair" => "service-repair",
     "service export-compose" => "service_compose_export",
     "backup list" => "backup",
     "backup ls" => "backup_ls",
