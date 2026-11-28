@@ -87,6 +87,7 @@ pub(super) const RULES: &[Rule] = &[
     mode: Mode::Consecutive,
     recover: None,
     every: "每 5 分钟一次，按本期用量",
+    period_secs: 300,
     default_level: AlertLevel::Digest,
     key: |s| format!("traffic.{s}"),
     fire: |c| {
@@ -116,6 +117,7 @@ pub(super) const RULES: &[Rule] = &[
     mode: Mode::Consecutive,
     recover: Some(2.0),
     every: "每 30 秒一次",
+    period_secs: 30,
     default_level: AlertLevel::Urgent,
     key: |s| format!("clock.{s}"),
     fire: |c| {
@@ -145,6 +147,7 @@ pub(super) const RULES: &[Rule] = &[
     mode: Mode::Consecutive,
     recover: Some(21.0),
     every: "每小时一次，按近 7 天趋势",
+    period_secs: 3600,
     default_level: AlertLevel::Digest,
     key: |s| format!("diskfc.{s}"),
     fire: |c| {
@@ -183,6 +186,7 @@ pub(super) const RULES: &[Rule] = &[
     mode: Mode::Consecutive,
     recover: None,
     every: "每小时一次",
+    period_secs: 3600,
     default_level: AlertLevel::Digest,
     key: |s| format!("expiry.soon.{s}"),
     fire: expiry_fire,
@@ -199,6 +203,7 @@ pub(super) const RULES: &[Rule] = &[
     mode: Mode::Consecutive,
     recover: None,
     every: "每小时一次",
+    period_secs: 3600,
     default_level: AlertLevel::Urgent,
     key: |s| format!("expiry.urgent.{s}"),
     fire: expiry_fire,
@@ -215,6 +220,7 @@ pub(super) const RULES: &[Rule] = &[
     mode: Mode::Consecutive,
     recover: None,
     every: "每分钟一次",
+    period_secs: 60,
     default_level: AlertLevel::Urgent,
     key: |s| format!("agent.{s}"),
     fire: |c| {
@@ -244,6 +250,7 @@ pub(super) const RULES: &[Rule] = &[
     mode: Mode::Window(10),
     recover: None,
     every: "每分钟一次",
+    period_secs: 60,
     default_level: AlertLevel::Urgent,
     key: |s| format!("restart.{s}"),
     fire: |c| {
@@ -273,6 +280,7 @@ pub(super) const RULES: &[Rule] = &[
     mode: Mode::Window(30),
     recover: None,
     every: "每分钟一次",
+    period_secs: 60,
     default_level: AlertLevel::Urgent,
     key: |s| format!("oom.{s}"),
     fire: |c| {
@@ -302,6 +310,7 @@ pub(super) const RULES: &[Rule] = &[
     mode: Mode::Consecutive,
     recover: None,
     every: "每分钟一次",
+    period_secs: 60,
     default_level: AlertLevel::Urgent,
     key: |s| format!("monitor.{s}"),
     fire: |c| {
@@ -331,6 +340,7 @@ pub(super) const RULES: &[Rule] = &[
     mode: Mode::Consecutive,
     recover: None,
     every: "每 2 分钟一次",
+    period_secs: 120,
     default_level: AlertLevel::Urgent,
     key: |s| format!("probe.{s}"),
     fire: |c| {
@@ -357,6 +367,7 @@ pub(super) const RULES: &[Rule] = &[
     mode: Mode::Consecutive,
     recover: None,
     every: "每 2 分钟一次",
+    period_secs: 120,
     default_level: AlertLevel::Digest,
     key: |s| format!("cert.{s}"),
     fire: |c| {
@@ -390,6 +401,7 @@ pub(super) const RULES: &[Rule] = &[
     mode: Mode::Consecutive,
     recover: None,
     every: "每分钟一次",
+    period_secs: 60,
     default_level: AlertLevel::Digest,
     key: |s| format!("link_cert.{s}"),
     fire: |c| {
@@ -416,6 +428,7 @@ pub(super) const RULES: &[Rule] = &[
     mode: Mode::Consecutive,
     recover: None,
     every: "每分钟一次",
+    period_secs: 60,
     default_level: AlertLevel::Digest,
     key: |_| "link_ca".into(),
     fire: |c| {
@@ -437,6 +450,7 @@ pub(super) const RULES: &[Rule] = &[
     mode: Mode::Consecutive,
     recover: None,
     every: "每 5 分钟一次",
+    period_secs: 300,
     default_level: AlertLevel::Urgent,
     key: |s| format!("link.{s}"),
     fire: |c| {
@@ -470,6 +484,7 @@ pub(super) const RULES: &[Rule] = &[
     mode: Mode::Consecutive,
     recover: Some(2.0),
     every: "每分钟一次，最近 5 分钟合计",
+    period_secs: 300,
     default_level: AlertLevel::Urgent,
     key: |s| format!("http5xx.{s}"),
     fire: |c| {
@@ -498,7 +513,8 @@ pub(super) const RULES: &[Rule] = &[
     for_n: 1,
     mode: Mode::Consecutive,
     recover: None,
-    every: "每分钟一次",
+    every: "每 5 分钟一次",
+    period_secs: 300,
     default_level: AlertLevel::Urgent,
     key: |s| {
       let (server, unit) = split_unit(s);

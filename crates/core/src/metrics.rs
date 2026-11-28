@@ -704,3 +704,34 @@ pub async fn usage(
   });
   Ok(Json(out))
 }
+
+#[cfg(test)]
+#[tokio::test]
+async fn report_metrics_roll_back_traffic_if_point_write_fails() {
+  let state = crate::rules::tests::test_state();
+  state.db.call(|c| c.execute_batch(
+    "CREATE TRIGGER reject_point BEFORE INSERT ON points WHEN NEW.name='host.net_rx' BEGIN SELECT RAISE(ABORT,'test'); END;"
+  ).map_err(sql_err)).await.unwrap();
+  record_report_at(
+    &state,
+    "s1",
+    now_ms(),
+    &Metrics {
+      net_rx_bytes: Some(1000),
+      net_tx_bytes: Some(100),
+      ..Default::default()
+    },
+  )
+  .await;
+  state
+    .db
+    .call(|c| {
+      let points: i64 = c
+        .query_row("SELECT count(*) FROM points", [], |r| r.get(0))
+        .map_err(sql_err)?;
+      assert_eq!(points, 0);
+      Ok(())
+    })
+    .await
+    .unwrap();
+}

@@ -1482,3 +1482,21 @@ async fn failover_notice_ignores_primary_offline_suppression() {
       .starts_with("被抑制：")
   );
 }
+
+#[test]
+fn rule_window_clamps_old_counts_and_slow_metrics_keep_their_series()
+{
+  let rule = rule("container_restarting");
+  assert!(validate_for_n(rule, Some(11)).is_err());
+  assert!(matches!(
+    judge(rule, rule.threshold, 11, &VecDeque::from(vec![1.0; 10])),
+    Verdict::Fire
+  ));
+  assert_eq!(metric_stale_ms(rule.metric), STALE_MS);
+  assert_eq!(
+    metric_stale_ms(
+      super::tests::rule("tailnet_key_expiring").metric
+    ),
+    18 * 3_600_000
+  );
+}

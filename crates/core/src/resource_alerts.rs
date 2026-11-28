@@ -48,6 +48,7 @@ const REPORT_RULE: Rule = Rule {
   mode: Mode::Consecutive,
   recover: None,
   every: "每分钟一次",
+  period_secs: 60,
   default_level: AlertLevel::Urgent,
   key: |_| String::new(),
   fire: |_| unreachable!(),
@@ -116,6 +117,7 @@ pub(super) const MEM_FORECAST: Rule = Rule {
   mode: Mode::Consecutive,
   recover: Some(5.0),
   every: "每小时一次，按近 3 天趋势",
+  period_secs: 3600,
   default_level: AlertLevel::Digest,
   key: |s| format!("mem.forecast.{s}"),
   fire: |c| {

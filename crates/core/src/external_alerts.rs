@@ -13,6 +13,7 @@ const BINARY: Rule = Rule {
   mode: Mode::Consecutive,
   recover: None,
   every: "每 5 分钟一次",
+  period_secs: 300,
   default_level: AlertLevel::Digest,
   key: |_| unreachable!(),
   fire: |_| unreachable!(),
@@ -27,6 +28,7 @@ pub(super) const KEY: Rule = Rule {
   threshold: 14.0,
   recover: Some(14.0),
   every: "每 6 小时一次",
+  period_secs: 21600,
   key: |s| format!("tailnet.key.{s}"),
   fire: |c| {
     ev(format!("{} 的组网密钥快到期", c.subject), c.detail.into())
@@ -65,6 +67,7 @@ pub(super) const VENDOR: Rule = Rule {
   name: "厂商账号不可用",
   metric: "vendor.invalid",
   every: "每天一次",
+  period_secs: 86400,
   default_level: AlertLevel::Urgent,
   key: |s| format!("vendor.invalid.{s}"),
   fire: |c| {

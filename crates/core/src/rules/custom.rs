@@ -569,10 +569,20 @@ pub(super) async fn evaluate_at(
   detail: &str,
   points: &VecDeque<f64>,
 ) {
+  // 没有请求时没有真实采样，只允许恢复正在触发的上限告警。
+  let idle = points.is_empty();
   let matched: Vec<CustomRule> = with(|m| {
     m.custom_rules
       .values()
-      .filter(|r| r.metric == metric && r.service == subject)
+      .filter(|r| {
+        r.metric == metric
+          && r.service == subject
+          && (!idle
+            || (matches!(r.op, Op::Gt)
+              && m
+                .firing
+                .contains_key(&(r.name.clone(), r.service.clone()))))
+      })
       .cloned()
       .collect()
   });
@@ -582,14 +592,18 @@ pub(super) async fn evaluate_at(
       set_firing(state, fkey, None, now).await;
       continue;
     }
-    let verdict = judge_consecutive(
-      cr.op,
-      cr.threshold,
-      cr.for_n,
-      None,
-      resources::is_report_metric(&cr.metric),
-      points,
-    );
+    let verdict = if idle {
+      Verdict::Recover
+    } else {
+      judge_consecutive(
+        cr.op,
+        cr.threshold,
+        cr.for_n,
+        None,
+        resources::is_report_metric(&cr.metric),
+        points,
+      )
+    };
     let mut prev = None;
     let (ok, event) = match verdict {
       Verdict::Hold => continue,
@@ -628,7 +642,11 @@ pub(super) async fn evaluate_at(
         ack::on_firing_change(state, &fkey, false, now).await;
         let e = ev(
           format!("服务 {} 的告警 {} 已恢复", cr.service, cr.name),
-          format!("当前 {}", fmt_value(&cr.metric, value)),
+          if idle {
+            detail.to_string()
+          } else {
+            format!("当前 {}", fmt_value(&cr.metric, value))
+          },
         );
         (true, e)
       }

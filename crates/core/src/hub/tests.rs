@@ -767,6 +767,10 @@ async fn backfill_ingests_without_clock_skew_and_rejects_duplicate_or_foreign_sa
     ] {
       crate::db::apply_write(c, &crate::db::Write::Upsert { kind: kind.into(), name: name.into(), spec, meta: serde_json::json!({}) })?;
     }
+    c.execute(
+      "INSERT INTO deployments (service,server,run_id,hash,compose,images,created_at,instance_id) SELECT 'app','s1','fixture','fixture','','[]',?1,json_extract(meta,'$.instance_id') FROM resources WHERE kind='service' AND name='app'",
+      [now - 7 * 60_000],
+    ).map_err(sql_err)?;
     Ok(())
   }).await.unwrap();
   let alerts = crate::rules::resources::ReportQueue::default();
