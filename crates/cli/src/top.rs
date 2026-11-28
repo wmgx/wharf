@@ -26,6 +26,10 @@ pub struct TopArgs {
   /// 只看指定服务器。
   #[arg(long)]
   server: Option<String>,
+  #[arg(long, conflicts_with = "images")]
+  service: Option<String>,
+  #[arg(long, requires = "service", conflicts_with = "images")]
+  containers: bool,
   /// 现查镜像大小和占用它的容器，按体积排序。
   #[arg(long)]
   images: bool,
@@ -84,10 +88,18 @@ pub async fn run(
   args: TopArgs,
   json: bool,
 ) -> CliResult<()> {
-  let filter = args
+  let mut filter = args
     .server
     .as_ref()
     .map_or_else(String::new, |s| format!("server={}", seg(s)));
+  if let Some(service) = args.service.as_deref() {
+    filter.push('&');
+    filter.push_str(&format!(
+      "service={}&containers={}",
+      seg(service),
+      args.containers
+    ));
+  }
   if args.images {
     let view: ImagesView =
       c.get(&format!("/api/metrics/images?{filter}")).await?;
@@ -163,6 +175,25 @@ pub async fn run(
           rate(row.net_rx),
           rate(row.net_tx),
         );
+        for component in &row.components {
+          let cpu = component
+            .cpu_limit_milli
+            .map(|milli| format!("{}", f64::from(milli) / 1000.0))
+            .unwrap_or_else(|| "-".into());
+          let pids = component
+            .pids_limit
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "-".into());
+          println!(
+            "  {}  CPU 上限 {} 核  内存上限 {}  PID 上限 {}  7 天峰值 CPU {} 内存 {}",
+            component.name,
+            cpu,
+            bytes(component.memory_limit),
+            pids,
+            pct(component.cpu_peak),
+            bytes(component.memory_peak)
+          );
+        }
       }
     });
   }

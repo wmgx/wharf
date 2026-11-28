@@ -631,6 +631,23 @@ pub struct ProjectUp {
   pub init: Option<InitRun>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ContainerLimitsDelta {
+  pub before: crate::spec::Limits,
+  pub after: crate::spec::Limits,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProjectLimitsJob {
+  pub project: String,
+  pub before_hash: String,
+  pub hash: String,
+  #[serde(default, skip_serializing_if = "String::is_empty")]
+  pub compose: String,
+  pub changes: BTreeMap<String, ContainerLimitsDelta>,
+  pub images: BTreeMap<String, String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolveCommit {
   pub service: String,

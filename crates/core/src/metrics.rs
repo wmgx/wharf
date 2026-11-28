@@ -13,7 +13,7 @@ use axum::{
   Json,
   extract::{Query, State},
 };
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use wharf_api_types::{ApiError, agent::Metrics, view::Perm};
 
@@ -163,6 +163,7 @@ pub async fn record_report_at(
       }
       for (p, v) in &m.projects {
         let p = p.as_str();
+        record_components(&tx, p, s, at, &v.components)?;
         insert(
           &tx,
           at,
@@ -180,6 +181,89 @@ pub async fn record_report_at(
   if let Err(e) = result {
     tracing::warn!("记录 {server} 的资源采样失败：{e}");
   }
+}
+
+pub(crate) fn component_subject(
+  instance: &str,
+  server: &str,
+  component: &str,
+) -> String {
+  serde_json::json!([instance, server, component]).to_string()
+}
+
+fn record_components(
+  c: &Connection,
+  service: &str,
+  server: &str,
+  at: i64,
+  components: &BTreeMap<
+    String,
+    wharf_api_types::agent::ComponentMetrics,
+  >,
+) -> Result<(), ApiError> {
+  if components.is_empty() {
+    return Ok(());
+  }
+  let record: Option<(String, String)> = c.query_row(
+    "SELECT d.instance_id, d.spec FROM resources r JOIN deployments d
+       ON d.service = r.name AND d.instance_id = json_extract(r.meta, '$.instance_id')
+     WHERE r.kind = 'service' AND r.name = ?1
+       AND d.id = (SELECT MAX(latest.id) FROM deployments latest
+                   WHERE latest.service = r.name AND latest.instance_id = d.instance_id)
+       AND d.server = ?2 AND d.created_at <= ?3 AND d.started = 1 AND d.spec IS NOT NULL",
+    params![service, server, at],
+    |row| Ok((row.get(0)?, row.get(1)?)),
+  ).optional().map_err(sql_err)?;
+  let Some((instance, spec)) = record else {
+    return Ok(());
+  };
+  let Ok(spec) =
+    serde_json::from_str::<wharf_api_types::spec::ServiceSpec>(&spec)
+  else {
+    return Ok(());
+  };
+  let wharf_api_types::spec::Source::Compose {
+    content: Some(content),
+    ..
+  } = &spec.source
+  else {
+    return Ok(());
+  };
+  let Ok(compose) = crate::render::parse_compose(content) else {
+    return Ok(());
+  };
+  for (name, value) in components {
+    if !compose["services"]
+      .as_mapping()
+      .is_some_and(|services| services.contains_key(name.as_str()))
+    {
+      continue;
+    }
+    let subject = component_subject(&instance, server, name);
+    insert(
+      c,
+      at,
+      &[
+        ("svc.component.cpu.max", &subject, f64::from(value.cpu)),
+        ("svc.component.mem.max", &subject, value.mem as f64),
+      ],
+    )?;
+  }
+  Ok(())
+}
+
+pub(crate) fn component_peaks(
+  c: &Connection,
+  subject: &str,
+) -> Result<(Option<f64>, Option<u64>), ApiError> {
+  c.query_row("SELECT MAX(CASE WHEN name = 'svc.component.cpu.max' THEN value END),
+           MAX(CASE WHEN name = 'svc.component.mem.max' THEN value END)
+       FROM points WHERE subject = ?1 AND at >= ?2
+         AND name IN ('svc.component.cpu.max', 'svc.component.mem.max')",
+    params![subject, now_ms() - 7 * DAY_MS], |r| {
+      Ok((r.get(0)?, r.get::<_, Option<f64>>(1)?.map(|value| value as u64)))
+    },
+  ).map_err(sql_err)
 }
 
 /// 记一个事件点，失败只记日志。
@@ -217,6 +301,9 @@ pub async fn step_done(
   ok: bool,
 ) {
   let (kind, subject) = match step {
+    Step::ServiceLimitsUpdate { job, .. } => {
+      ("deploy", job.project.as_str())
+    }
     Step::ServiceUp { service, .. } | Step::Rebuild { service } => {
       ("deploy", service.as_str())
     }

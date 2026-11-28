@@ -138,6 +138,11 @@ pub enum Step {
     )]
     images: crate::pins::ImageSelection,
   },
+  ServiceLimitsUpdate {
+    server: String,
+    instance_id: String,
+    job: wharf_api_types::agent::ProjectLimitsJob,
+  },
   GatewaySync {
     gateway: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -325,6 +330,7 @@ impl Step {
       }
       Self::VolumeSync { .. } | Self::AdoptData { .. } => 2,
       Self::ServiceUp { .. }
+      | Self::ServiceLimitsUpdate { .. }
       | Self::EdgeDeploy { .. }
       | Self::TailscaleUp { .. }
       | Self::ServiceStop { .. } => 3,
@@ -1108,27 +1114,6 @@ pub(crate) async fn make_plan_inner(
     crate::adopt_data::add_step(&mut b, &desired, job);
   }
   build_agent_warnings(state, &desired, &mut b)?;
-  for step in &mut b.steps {
-    if let Step::ServiceUp {
-      service, images, ..
-    } = &mut step.step
-      && let Some(row) = desired.services.get(service)
-    {
-      crate::monitor::require_agent(state, &row.spec)?;
-      if row.spec.uses_runtime_options() {
-        let conn =
-          state.hub.runtime_options_conn_id(&row.spec.server)?;
-        *images = crate::pins::select_explicit_images(
-          state,
-          &snap,
-          row,
-          conn,
-          &Default::default(),
-        )
-        .await?;
-      }
-    }
-  }
   let old_agents: BTreeSet<_> = b
     .steps
     .iter()
@@ -1160,6 +1145,36 @@ pub(crate) async fn make_plan_inner(
     &state.hub,
   )?;
   tailscale_items(&mut b, &snap, &desired, &status);
+  choose_live_limits(
+    state,
+    (&snap, &current, &desired),
+    &net,
+    &status,
+    &mut b,
+  )
+  .await?;
+  for step in &mut b.steps {
+    if let Step::ServiceUp {
+      service, images, ..
+    } = &mut step.step
+      && let Some(row) = desired.services.get(service)
+    {
+      crate::monitor::require_agent(state, &row.spec)?;
+      if row.spec.uses_runtime_options() {
+        let conn =
+          state.hub.runtime_options_conn_id(&row.spec.server)?;
+        *images = crate::pins::select_explicit_images(
+          state,
+          &snap,
+          row,
+          conn,
+          &Default::default(),
+        )
+        .await?;
+      }
+    }
+  }
+
   egress_items(&mut b, &snap, &current, &desired);
   docker_proxy_items(&mut b, &snap, &current, &desired);
   baseline_items(&mut b, &snap, &current, &desired);
@@ -2368,6 +2383,151 @@ fn service_items(
 /// `docker compose up -d` 本来就只重建配置变了的组件，这里只是在计划里说清楚。
 /// 服务器上现在跑的 compose：按上次部署的配置渲染；没有记录时退回当前配置。
 /// 上次部署失败时新配置已经写进去了，拿当前配置比会看不出哪些容器要重建。
+async fn choose_live_limits(
+  state: &AppState,
+  (snap, current, desired): (&Snapshot, &World, &World),
+  net: &Net,
+  status: &StatusMap,
+  b: &mut Builder,
+) -> Result<(), ApiError> {
+  if b
+    .steps
+    .iter()
+    .any(|step| matches!(step.step, Step::TailscaleUp { .. }))
+  {
+    return Ok(());
+  }
+  for entry in &mut b.steps {
+    let Step::ServiceUp {
+      service,
+      expect: Some(hash),
+      instance_id: Some(id),
+      ..
+    } = &entry.step
+    else {
+      continue;
+    };
+    let Some(row) = desired.services.get(service) else {
+      continue;
+    };
+    let server = &row.spec.server;
+    if snap.deployed.get(service) != Some(server)
+      || snap.pending.migrations.contains_key(service)
+      || row.import.is_some()
+      || row.spec.stopped
+      || b.explicit_pins.contains(service)
+      || b.image_ids.contains_key(service)
+      || current.services.get(service).is_none_or(|old| {
+        old.instance_id != *id || old.pins != row.pins
+      })
+    {
+      continue;
+    }
+    let Some(applied) = snap.applied.get(service) else {
+      continue;
+    };
+    let Some(old_spec) = applied.spec.as_ref() else {
+      continue;
+    };
+    let Some(live) = status
+      .get(server)
+      .and_then(Option::as_ref)
+      .and_then(|projects| projects.get(service))
+    else {
+      continue;
+    };
+    if live.hash.as_deref() != Some(applied.hash.as_str())
+      || hash == &applied.hash
+      || applied.commit != row.commit
+      || old_spec.server != *server
+      || old_spec.init_cmd != row.spec.init_cmd
+      || old_spec.init_timeout_secs != row.spec.init_timeout_secs
+      || old_spec.stopped
+      || old_spec.pull_policy != row.spec.pull_policy
+      || old_spec.volumes != row.spec.volumes
+      || old_spec.group_add != row.spec.group_add
+      || !crate::live_limits::same_source_inputs(
+        &old_spec.source,
+        &row.spec.source,
+      )
+    {
+      continue;
+    }
+    let mut previous = desired.clone();
+    previous.services.get_mut(service).expect("服务存在").spec =
+      old_spec.clone();
+    let values = snap.render_values(desired, service);
+    let Ok((old, old_hash)) =
+      snapshot::service_resolved(&previous, net, service, &values)
+    else {
+      continue;
+    };
+    if old_hash != applied.hash {
+      continue;
+    }
+    let (new, _) =
+      snapshot::service_resolved(desired, net, service, &values)?;
+    let change =
+      crate::live_limits::changes(&old, &new, applied, live);
+    let items = b
+      .items
+      .iter_mut()
+      .filter(|item| entry.items.contains(&item.id));
+    let change = match change {
+      Ok(Some(change)) => change,
+      Ok(None) => continue,
+      Err(reason) => {
+        for item in items {
+          item.reason = reason.into();
+        }
+        continue;
+      }
+    };
+    let conn = state.hub.live_limits_conn_id(server)?;
+    let job = wharf_api_types::agent::ProjectLimitsJob {
+      project: service.clone(),
+      before_hash: applied.hash.clone(),
+      hash: hash.clone(),
+      compose: String::new(),
+      changes: change.updates,
+      images: change.images,
+    };
+    let checked: Result<serde_json::Value, ApiError> = state
+      .hub
+      .call_bound(
+        (server, conn),
+        wharf_api_types::agent::AgentOp::ProjectCheckLimits(
+          job.clone(),
+        ),
+        std::time::Duration::from_secs(90),
+        None,
+        &Default::default(),
+      )
+      .await;
+    if let Err(error) = checked {
+      if error.code == wharf_api_types::ErrorCode::InvalidInput {
+        for item in items {
+          item.reason = error.message.clone();
+        }
+        continue;
+      }
+      return Err(error);
+    }
+    for item in items {
+      item.impacts.retain(|impact| *impact != Impact::Restart);
+      item.reason = "原地更新资源上限".into();
+    }
+    entry.title =
+      format!("在 {server} 上原地更新 {service} 的资源上限");
+    entry.step = Step::ServiceLimitsUpdate {
+      server: server.clone(),
+      instance_id: id.clone(),
+      job,
+    };
+  }
+  Ok(())
+}
+
 fn deployed_template(
   current: &World,
   net: &Net,

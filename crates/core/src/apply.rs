@@ -1432,6 +1432,9 @@ pub(crate) fn append_step_log(
 fn service_op(step: &Step) -> Option<(&str, &'static str)> {
   match step {
     Step::ServiceUp { service, .. } => Some((service, "部署")),
+    Step::ServiceLimitsUpdate { job, .. } => {
+      Some((&job.project, "原地更新资源上限"))
+    }
     Step::Rebuild { service, .. } => Some((service, "重新构建")),
     Step::ServiceStop { service, .. } => Some((service, "停止")),
     Step::ServiceRestart { service, .. } => Some((service, "重启")),
@@ -1689,6 +1692,17 @@ async fn run_step_with_dns(
           m.payload.from
         ));
       }
+    }
+    Step::ServiceLimitsUpdate {
+      server,
+      instance_id,
+      job,
+    } => {
+      check_step_instance(world, &job.project, Some(instance_id))?;
+      service_limits_update(
+        state, &snap, run_id, server, job, progress, cancel,
+      )
+      .await?;
     }
     Step::Rebuild { service } => {
       crate::build::require_not_migrating(&snap, service)?;
@@ -2821,6 +2835,96 @@ fn should_trial(
 }
 
 /// 部署一个服务：构建来源先构建镜像（`force` 时重新构建），再 `up`。
+async fn service_limits_update(
+  state: &AppState,
+  snap: &snapshot::Snapshot,
+  run_id: &str,
+  server: &str,
+  expected: &wharf_api_types::agent::ProjectLimitsJob,
+  progress: ProgressFn,
+  cancel: &CancellationToken,
+) -> Result<(), ApiError> {
+  let service = &expected.project;
+  let row = &snap.world.services[service];
+  let stale = || {
+    ApiError::new(
+      ErrorCode::PlanStale,
+      format!("服务 {service} 的运行状态已变化"),
+    )
+    .with_hint("重新运行 wharf plan")
+    .suggest("wharf plan")
+  };
+  if row.spec.server != server
+    || row.spec.stopped
+    || snapshot::service_runtime_server(snap, service) != Some(server)
+    || snap.pending.migrations.contains_key(service)
+  {
+    return Err(stale());
+  }
+  let applied = snap
+    .applied
+    .get(service)
+    .filter(|known| {
+      known.hash == expected.before_hash
+        || known.hash == expected.hash
+    })
+    .ok_or_else(stale)?;
+  let net = snap.net(&snap.world);
+  let (compose, hash) = snapshot::service_resolved(
+    &snap.world,
+    &net,
+    service,
+    &snap.render_values(&snap.world, service),
+  )?;
+  if hash != expected.hash {
+    return Err(stale());
+  }
+  let conn = state.hub.live_limits_conn_id(server)?;
+  let mut job = expected.clone();
+  job.compose = compose;
+  let _: serde_json::Value = state.hub.call_bound(
+    (server, conn), AgentOp::ProjectUpdateLimits(job),
+    Duration::from_secs(600), Some(progress), cancel,
+  ).await.map_err(|error| {
+    if error.code == ErrorCode::PlanStale { return stale(); }
+    error.with_hint(format!("用 wharf run show {run_id} 查看，再用 wharf run retry {run_id} 重试已失败步骤"))
+  })?;
+  if applied.hash == hash {
+    return Ok(());
+  }
+  let images = applied
+    .image_ids
+    .iter()
+    .map(|(image, id)| wharf_api_types::agent::ImageInfo {
+      id: id.clone(),
+      image: image.clone(),
+      digest: applied.digests.get(image).cloned(),
+    })
+    .collect();
+  let template =
+    snapshot::service_template(&snap.world, &net, service)?;
+  record_deployment(
+    state,
+    Deployed {
+      service,
+      server,
+      run_id,
+      hash: &hash,
+      template: &template,
+      instance_id: &row.instance_id,
+      spec: &row.spec,
+      commit: applied.commit.as_deref(),
+    },
+    &ProjectUpResult {
+      containers: vec![],
+      images,
+      warnings: vec![],
+      retired: vec![],
+    },
+  )
+  .await
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn service_up(
   state: &AppState,

@@ -7,7 +7,7 @@ use std::{
 };
 
 use wharf_api_types::agent::{
-  Metrics, ProjectMetrics, TRIAL_PROJECT_PREFIX,
+  ComponentMetrics, Metrics, ProjectMetrics, TRIAL_PROJECT_PREFIX,
 };
 
 use crate::{docker::Docker, exec::Ctx};
@@ -115,6 +115,14 @@ impl Sampler {
             )
           });
         let m = ProjectMetrics {
+          components: s
+            .components
+            .into_iter()
+            .map(|(name, mut metrics)| {
+              metrics.cpu /= cpus;
+              (name, metrics)
+            })
+            .collect(),
           cpu: s.cpu / cpus,
           mem: s.mem,
           net_rx: rx,
@@ -307,6 +315,7 @@ fn host_net(dev: &str) -> (u64, u64) {
 
 #[derive(Default)]
 struct Stat {
+  components: BTreeMap<String, ComponentMetrics>,
   cpu: f32,
   mem: u64,
   rx: u64,
@@ -329,19 +338,34 @@ async fn container_stats(
     run(&[
       "ps",
       "--format",
-      "{{.Names}}\t{{.Label \"com.docker.compose.project\"}}",
+      "{{.Names}}\t{{.Label \"com.docker.compose.project\"}}\t{{.Label \"com.docker.compose.service\"}}\t{{.Label \"com.docker.compose.project.working_dir\"}}\t{{.Label \"com.docker.compose.oneoff\"}}",
     ]),
     run(&["stats", "--no-stream", "--format", "{{json .}}"]),
   );
   let (Ok(ps), Ok(stats)) = (ps, stats) else {
     return BTreeMap::new();
   };
-  let project: HashMap<&str, &str> = ps
+  let project: HashMap<&str, (&str, Option<&str>)> = ps
     .stdout
     .lines()
-    .filter_map(|l| l.split_once('\t'))
-    .filter(|(_, p)| {
-      !p.is_empty() && !p.starts_with(TRIAL_PROJECT_PREFIX)
+    .filter_map(|line| {
+      let mut fields = line.split('\t');
+      let (name, project, component, cwd, oneoff) = (
+        fields.next()?,
+        fields.next()?,
+        fields.next()?,
+        fields.next()?,
+        fields.next()?,
+      );
+      if project.is_empty()
+        || project.starts_with(TRIAL_PROJECT_PREFIX)
+      {
+        return None;
+      }
+      let managed = !component.is_empty()
+        && oneoff.eq_ignore_ascii_case("false")
+        && std::path::Path::new(cwd) == docker.project_dir(project);
+      Some((name, (project, managed.then_some(component))))
     })
     .collect();
   #[derive(serde::Deserialize)]
@@ -360,13 +384,20 @@ async fn container_stats(
     .lines()
     .filter_map(|l| serde_json::from_str::<Row>(l).ok())
   {
-    let Some(p) = project.get(row.name.as_str()) else {
+    let Some(&(p, component)) = project.get(row.name.as_str()) else {
       continue;
     };
     let e = out.entry(p.to_string()).or_default();
-    e.cpu +=
+    let cpu =
       row.cpu.trim_end_matches('%').parse::<f32>().unwrap_or(0.0);
-    e.mem += first_size(&row.mem_usage);
+    let mem = first_size(&row.mem_usage);
+    e.cpu += cpu;
+    e.mem = e.mem.saturating_add(mem);
+    if let Some(component) = component {
+      let entry = e.components.entry(component.into()).or_default();
+      entry.cpu += cpu;
+      entry.mem = entry.mem.saturating_add(mem);
+    }
     let (rx, tx) = row.net.split_once('/').unwrap_or(("", ""));
     e.rx += size(rx);
     e.tx += size(tx);

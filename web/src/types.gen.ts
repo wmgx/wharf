@@ -675,6 +675,20 @@ export interface CleanupSkippedServer {
   server: string;
 }
 
+export interface ComponentMetrics {
+  cpu: number;
+  mem: number;
+}
+
+export interface ComponentUsage {
+  cpu_limit_milli: number | null;
+  cpu_peak: number | null;
+  memory_limit: number | null;
+  memory_peak: number | null;
+  name: string;
+  pids_limit: number | null;
+}
+
 export interface ContainerInfo {
   exit_code?: number | null;
   finished_at?: string | null;
@@ -2389,6 +2403,7 @@ export interface ProbeView {
 }
 
 export interface ProjectMetrics {
+  components?: Record<string, ComponentMetrics>;
   /**
    * 占整机 CPU 的百分比，0 到 100。
    */
@@ -3702,6 +3717,7 @@ export type Upstream = "docker_hub" | "git_hub" | "cloudflare";
 export type UsageKind = "service" | "gateway" | "agent";
 
 export interface UsageRow {
+  components?: ComponentUsage[];
   cpu: number | null;
   kind: UsageKind;
   mem: number | null;

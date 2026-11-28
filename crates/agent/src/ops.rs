@@ -77,12 +77,15 @@ impl Ops {
     service: &str,
   ) -> Result<tokio::sync::OwnedMutexGuard<()>, ApiError> {
     check_project(service)?;
-    self.lock_for(service).try_lock_owned().map_err(|_| {
-      ApiError::new(
-        ErrorCode::Busy,
-        format!("服务 {service} 正在执行其他操作"),
-      )
-    })
+    let guard =
+      self.lock_for(service).try_lock_owned().map_err(|_| {
+        ApiError::new(
+          ErrorCode::Busy,
+          format!("服务 {service} 正在执行其他操作"),
+        )
+      })?;
+    crate::live_limits::require_clear(&self.docker, service)?;
+    Ok(guard)
   }
 
   pub(crate) async fn lock_data(
@@ -188,6 +191,18 @@ impl Ops {
         };
         to_value(self.link_apply(&apply, ctx).await?)
       }
+      AgentOp::ProjectCheckLimits(job) => {
+        check_project(&job.project)?;
+        let _guard = self.lock_data(&job.project, ctx).await?;
+        crate::live_limits::check(&self.docker, &job, ctx).await?;
+        Ok(Value::Null)
+      }
+      AgentOp::ProjectUpdateLimits(job) => {
+        check_project(&job.project)?;
+        let _guard = self.lock_data(&job.project, ctx).await?;
+        crate::live_limits::update(&self.docker, &job, ctx).await?;
+        Ok(Value::Null)
+      }
       AgentOp::ProjectUp(up) => {
         check_project(&up.project)?;
         let lock = self.lock_for(&up.project);
@@ -198,6 +213,7 @@ impl Ops {
         check_project(&project)?;
         let lock = self.lock_for(&project);
         let _guard = lock.lock().await;
+        crate::live_limits::require_clear(&self.docker, &project)?;
         if !purge {
           crate::prev_logs::capture(
             &self.docker,
@@ -1116,6 +1132,7 @@ impl Ops {
     up: &ProjectUp,
     ctx: &Ctx,
   ) -> Result<ProjectUpResult, ApiError> {
+    crate::live_limits::require_clear(&self.docker, &up.project)?;
     let mut warnings = Vec::new();
     if up.image_pull_mode.is_some() {
       self.verify_local_images(up, ctx).await?;

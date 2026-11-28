@@ -349,7 +349,7 @@ fn service_memory(spec: &ServiceSpec) -> f64 {
   )
 }
 
-fn effective_component_memory(
+pub(crate) fn effective_component_memory(
   spec: &ServiceSpec,
   name: &Value,
   container: &Value,

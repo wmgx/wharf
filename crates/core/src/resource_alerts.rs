@@ -487,6 +487,7 @@ mod tests {
     metrics.projects.insert(
       "wharf-gw-edge".into(),
       wharf_api_types::agent::ProjectMetrics {
+        components: Default::default(),
         cpu: 90.0,
         ..Default::default()
       },

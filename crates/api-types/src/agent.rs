@@ -160,6 +160,8 @@ pub enum AgentMsg {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     service_runtime_opts: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    live_limits_update: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     task_resource_limits: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     data_cleanup: bool,
@@ -392,7 +394,17 @@ pub struct HostTraffic {
 #[derive(
   Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema,
 )]
+pub struct ComponentMetrics {
+  pub cpu: f32,
+  pub mem: u64,
+}
+
+#[derive(
+  Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
 pub struct ProjectMetrics {
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub components: BTreeMap<String, ComponentMetrics>,
   /// 占整机 CPU 的百分比，0 到 100。
   pub cpu: f32,
   pub mem: u64,
@@ -448,6 +460,8 @@ pub enum AgentOp {
   },
   /// 写入 compose、拉镜像、`up -d`。结果是 [ProjectUpResult]。
   ProjectUp(ProjectUp),
+  ProjectCheckLimits(ProjectLimitsJob),
+  ProjectUpdateLimits(ProjectLimitsJob),
   GatewayProbe(GatewayProbeJob),
   LinkApply(LinkApply),
   ProjectMounts {

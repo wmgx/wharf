@@ -269,6 +269,7 @@ async fn handshake(
     backup_isolation: true,
     safe_delete: true,
     service_runtime_opts: true,
+    live_limits_update: true,
     task_resource_limits: true,
     data_cleanup: true,
     exec_v2: true,
