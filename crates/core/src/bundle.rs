@@ -505,21 +505,31 @@ fn bundle_envelope_roundtrip_and_rejects_wrong_passphrase() {
 #[tokio::test]
 async fn bundle_import_maps_backup_and_commits_secrets_with_plan() {
   use serde_json::json;
-  let state = crate::migrate::tests::seed_service(false).await;
-  use wharf_api_types::agent::AgentOp;
-  state.hub.mock_agent("s1", false, |op| match op {
-    AgentOp::ResolveImages(_) => Ok(json!([
-      {"image": "fixture:1", "digest": format!("sha256:{}", "a".repeat(64))}
-    ])),
-    AgentOp::ProjectStatus { .. } => Ok(json!([])),
-    _ => panic!("便携包计划发出意外的 agent 请求"),
-  });
+  let state = crate::rules::tests::test_state();
+  state
+    .db
+    .call(|c| {
+      for server in ["s1", "s2"] {
+        crate::db::apply_write(
+          c,
+          &crate::db::Write::Upsert {
+            kind: "server".into(),
+            name: server.into(),
+            spec: json!({}),
+            meta: json!({}),
+          },
+        )?;
+      }
+      Ok(())
+    })
+    .await
+    .unwrap();
   let payload = BundlePayload {
     version: 1,
     exported_at: 0,
     partial: true,
     fleet: serde_json::from_value(json!({
-      "services": {"blog": {"server": "old-app", "source": {"image": "fixture:1"},
+      "services": {"blog": {"server": "old-app", "source": {"image": format!("fixture@sha256:{}", "a".repeat(64))},
         "env": {"PASS": "[[BLOG_PASS]]"},
         "backup": {"to": "old-backup"}, "volumes": [{"name": "data", "target": "/data"}]}}
     })).unwrap(),
