@@ -42,7 +42,10 @@ fn entries() -> BTreeMap<&'static str, Schema> {
     ("search", schema_for!(view::SearchResponse)),
     ("lint", schema_for!(view::LintReport)),
     ("task_artifacts", schema_for!(view::TaskArtifactsView)),
-    ("missing_ref", schema_for!(wharf_api_types::error::MissingRef)),
+    (
+      "missing_ref",
+      schema_for!(wharf_api_types::error::MissingRef),
+    ),
     ("token", schema_for!(view::TokenView)),
     ("token_explain", schema_for!(view::TokenExplain)),
     ("report", schema_for!(wharf_api_types::report::ReportView)),

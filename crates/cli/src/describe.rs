@@ -222,8 +222,14 @@ fn effect(
       | "network acl"
       | "service files"
       | "alert firing"
-      | "refs" | "tree" | "search" | "lint"
-      | "config" | "config get" | "secret refs" | "secret unused"
+      | "refs"
+      | "tree"
+      | "search"
+      | "lint"
+      | "config"
+      | "config get"
+      | "secret refs"
+      | "secret unused"
       | "task artifacts"
   ) || command.starts_with("wait ")
     || matches!(
@@ -276,7 +282,8 @@ fn returns(command: &str) -> Option<&'static str> {
     "tree" => "tree",
     "search" => "search",
     "lint" => "lint",
-    "config" | "config list" | "config get" | "config set" | "config unset" => "config",
+    "config" | "config list" | "config get" | "config set"
+    | "config unset" => "config",
     "secret import" => "secret_import",
     "task artifacts" => "task_artifacts",
     "token list" => "token",
