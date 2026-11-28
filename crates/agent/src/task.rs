@@ -301,20 +301,30 @@ pub async fn run(
       project,
       service,
       command,
+      env,
+      cancellable,
     } => {
       let id =
         find_container(docker, project, service.as_deref(), ctx)
           .await?;
-      let marker = timeout_marker()?;
-      let wrapper = wrap_exec_timeout(job.timeout_secs, &marker);
-      let cmd = docker
-        .cmd()
-        .args([
-          "exec", &id, "sh", "-c", &wrapper, "sh", "sh", "-c",
-          command,
-        ])
-        .timeout(timeout + Duration::from_secs(5));
-      run_wrapped(cmd, &marker, ctx).await.map(|(out, expired)| {
+      let result = if *cancellable || !env.is_empty() {
+        crate::service_exec::run_task(
+          docker, &id, command, env, timeout, ctx,
+        )
+        .await
+      } else {
+        let marker = timeout_marker()?;
+        let wrapper = wrap_exec_timeout(job.timeout_secs, &marker);
+        let cmd = docker
+          .cmd()
+          .args([
+            "exec", &id, "sh", "-c", &wrapper, "sh", "sh", "-c",
+            command,
+          ])
+          .timeout(timeout + Duration::from_secs(5));
+        run_wrapped(cmd, &marker, ctx).await
+      };
+      result.map(|(out, expired)| {
         timed_out = expired;
         out
       })
@@ -722,7 +732,7 @@ impl TimeoutSentinel {
   }
 }
 
-async fn run_wrapped(
+pub(crate) async fn run_wrapped(
   cmd: Cmd,
   marker: &str,
   ctx: &Ctx,

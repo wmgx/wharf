@@ -217,3 +217,14 @@ async fn old_agent_is_rejected_before_artifact_dispatch() {
   assert_eq!(error.code, wharf_api_types::ErrorCode::Conflict);
   assert!(error.hint.unwrap().contains("wharf upgrade"));
 }
+
+#[test]
+fn existing_task_spec_does_not_serialize_artifact_defaults() {
+  let raw = serde_json::json!({
+    "server":"s1","schedule":"0 4 * * *","kind":"container","image":"app:1",
+    "timeout_secs":600,"enabled":true,"notify":true
+  });
+  let task: wharf_api_types::view::TaskSpec =
+    serde_json::from_value(raw.clone()).unwrap();
+  assert_eq!(serde_json::to_value(task).unwrap(), raw);
+}

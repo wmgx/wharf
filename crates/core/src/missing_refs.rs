@@ -296,7 +296,8 @@ pub(crate) fn collect_plan_missing(
             "volume",
             raw,
             &at,
-            row.spec.volumes.iter().any(|v| v.name == vol),
+            wharf_api_types::compose::owned_volumes(owner, &row.spec)
+              .contains(vol),
           );
         } else {
           add("service", owner, &at, false);
@@ -513,4 +514,24 @@ fn plan_aggregates_missing_across_resources() {
       .collect::<Vec<_>>(),
     ["gw-x", "K1", "K2", "svc-x", "redis"]
   );
+}
+
+#[test]
+fn plan_precheck_accepts_compose_owned_volume() {
+  let mut snap = Snapshot::default();
+  let fleet = serde_json::from_value(json!({
+    "services":{
+      "photos":{"server":"s1","source":{"compose":{"content":"services: { photos: { image: app:1, volumes: ['/srv/photos/originals:/data'] } }"}}},
+      "reader":{"server":"s1","source":{"image":"app:1"},"volumes":[{"name":"orig","target":"/orig","from_service":"photos:originals"}]}
+    }
+  })).unwrap();
+  snap.world.servers.insert(
+    "s1".into(),
+    crate::world::ServerRow {
+      settings: Default::default(),
+      version: 0,
+    },
+  );
+  snap.world.merge_with(&fleet).unwrap();
+  check_plan(&snap.world, &snap).unwrap();
 }

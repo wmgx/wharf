@@ -9,7 +9,7 @@ import { KIND, STATUS, cronText, where } from "./model";
 export function Overview({ task, onRuns }: { task: TaskView; onRuns: () => void }) {
   const { data } = usePoll<TaskRunView[]>(`/api/tasks/${encodeURIComponent(task.name)}/runs?limit=50`, 10000);
   const s = task.spec;
-  const recent = (data ?? []).filter((r) => r.status !== "skipped" && r.status !== "running");
+  const recent = (data ?? []).filter((r) => r.status !== "skipped" && r.status !== "running" && r.status !== "cancelled");
   const durations = recent.filter((r) => r.ended_at).map((r) => new Date(r.ended_at!).getTime() - new Date(r.started_at).getTime()).sort((a, b) => a - b);
   const middle = Math.floor(durations.length / 2);
   const median = durations.length ? (durations[middle] + durations[Math.floor((durations.length - 1) / 2)]) / 2 : null;

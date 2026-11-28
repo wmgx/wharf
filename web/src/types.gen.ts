@@ -2836,6 +2836,27 @@ export interface ServiceDraft {
   warnings?: string[];
 }
 
+export interface ServiceExecResponse {
+  container: string;
+  duration_ms: number;
+  exit_code: number;
+  server: string;
+  service: string;
+  stderr: string;
+  stdout: string;
+  truncated: boolean;
+}
+
+export interface ServiceRenderView {
+  compose: string;
+  init_cmd?: string | null;
+  secrets_masked?: string[];
+  server: string;
+  service: string;
+  source: string;
+  warnings?: string[];
+}
+
 /**
  * 单个服务的周期指标。
  */
@@ -3323,7 +3344,7 @@ export type TaskSpec = ({
   timeout_secs: number;
 };
 
-export type TaskStatus = "running" | "succeeded" | "failed" | "timed_out" | "skipped";
+export type TaskStatus = "running" | "succeeded" | "failed" | "timed_out" | "skipped" | "cancelled";
 
 export interface TaskView {
   data_bytes?: number | null;

@@ -68,6 +68,9 @@ fn walk(
     entry["effect"] = json!(effect);
     entry["perms"] = json!(perms);
     entry["returns"] = json!(returns(&command));
+    if matches!(command.as_str(), "exec" | "service exec") {
+      entry["exit_code"] = json!("remote");
+    }
     if perms.is_empty() {
       entry["offline"] = json!(true);
     }
@@ -78,7 +81,14 @@ fn walk(
       entry["dry_run"] = json!(true);
     }
     if cmd.get_arguments().any(|a| a.get_long() == Some("apply")) {
-      entry["apply_perms"] = json!(["apply"]);
+      entry["apply_perms"] = if command == "service env sync" {
+        json!(["plan", "apply"])
+      } else {
+        json!(["apply"])
+      };
+    }
+    if command == "service env sync" {
+      entry["import_perms"] = json!(["admin"]);
     }
     out.push(entry);
   }
@@ -125,6 +135,7 @@ fn read_when_no_args(command: &str) -> bool {
       | "external set"
       | "egress api"
       | "backup core"
+      | "task set"
   )
 }
 
@@ -172,6 +183,9 @@ fn effect(
   if command == "egress presets" {
     return ("read", &[]);
   }
+  if command == "service env sync" {
+    return ("read", &["read"]);
+  }
   if command == "plan"
     || cmd.get_arguments().any(|a| a.get_long() == Some("apply"))
   {
@@ -181,7 +195,10 @@ fn effect(
     return ("direct", &["admin"]);
   }
   let leaf = cmd.get_name();
-  if command == "connect" {
+  if matches!(command, "task run" | "task cancel") {
+    return ("direct", &["apply", "exec"]);
+  }
+  if matches!(command, "connect" | "service exec") {
     return ("direct", &["exec"]);
   }
   if matches!(
@@ -207,6 +224,7 @@ fn effect(
       | "route dns-check"
       | "gateway config"
       | "service origin"
+      | "service render"
       | "service history"
       | "service timeline"
       | "server exposure"
@@ -273,6 +291,9 @@ fn returns(command: &str) -> Option<&'static str> {
     "alert list" => "alerts",
     "task ls" | "task show" => "task",
     "task logs" => "task_run",
+    "exec" => "host_exec",
+    "service exec" => "service_exec",
+    "service render" => "service_render",
     "backup list" => "backup",
     "service history" => "deployment",
     "edge list" | "edge show" => "edge",
@@ -285,6 +306,8 @@ fn returns(command: &str) -> Option<&'static str> {
     "config" | "config list" | "config get" | "config set"
     | "config unset" => "config",
     "secret import" => "secret_import",
+    "service env" | "service env list" => "service_env",
+    "service env sync" => "service_env_sync",
     "task artifacts" => "task_artifacts",
     "token list" => "token",
     "token explain" => "token_explain",
@@ -369,6 +392,32 @@ pub fn commands(prefix: &[String]) -> Value {
 #[cfg(test)]
 mod tests {
   #[test]
+  fn usable_keeps_ping_task_edits_with_apply_permission() {
+    use serde_json::json;
+    let prefix = ["task".into()];
+    let apply =
+      super::usable(&prefix, &json!({"perms": ["read", "apply"]}));
+    let read = super::usable(&prefix, &json!({"perms": ["read"]}));
+    let task = |result: &serde_json::Value, name: &str| {
+      result["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["command"] == name)
+        .cloned()
+    };
+    for name in
+      ["wharf task enable", "wharf task disable", "wharf task set"]
+    {
+      assert!(task(&apply, name).is_some(), "{name}");
+    }
+    assert_eq!(
+      task(&read, "wharf task set").unwrap()["usable_mode"],
+      "read_only"
+    );
+  }
+
+  #[test]
   fn usable_respects_host_and_baseline_permissions() {
     use serde_json::json;
 
@@ -437,4 +486,20 @@ mod tests {
     assert!(names.contains(&"wharf wait service"));
     assert!(!names.iter().any(|n| n.ends_with(" help")));
   }
+}
+
+#[test]
+fn env_sync_advertises_preview_apply_and_import_permissions() {
+  let report =
+    usable(&["service".into()], &json!({"perms":["read"]}));
+  let sync = report["commands"]
+    .as_array()
+    .unwrap()
+    .iter()
+    .find(|row| row["command"] == "wharf service env sync")
+    .unwrap();
+  assert_eq!(sync["perms"], json!(["read"]));
+  assert_eq!(sync["apply_perms"], json!(["plan", "apply"]));
+  assert_eq!(sync["import_perms"], json!(["admin"]));
+  assert_eq!(sync["returns"], "service_env_sync");
 }

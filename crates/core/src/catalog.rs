@@ -10,7 +10,8 @@ use serde::Deserialize;
 use wharf_api_types::{
   ApiError,
   references::{
-    account_ref, parse_placeholder, parse_service_ref, placeholders,
+    SecretMode, account_ref, parse_placeholder, parse_service_ref,
+    placeholders,
   },
   spec::{BuildSource, RouteSpec, Source},
   view::{
@@ -45,6 +46,7 @@ pub struct TreeQuery {
   server: Option<String>,
   service: Option<String>,
   route: Option<String>,
+  gateway: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -65,6 +67,13 @@ pub async fn refs(
   let tasks = s.db.call(|c| crate::tasks::load_rows(c)).await?;
   let mut report =
     collect_refs(&snap, &tasks, auth.services.as_ref(), kind, name);
+  if auth.services.is_none()
+    && matches!(kind, "server" | "service" | "route" | "gateway")
+  {
+    let name = report.name.clone();
+    let hits = s.db.call(move |c| alert_refs(c, kind, &name)).await?;
+    report.refs.extend(hits);
+  }
   if auth.services.is_none() && kind == "route" {
     let host = report.name.clone();
     let gate_keys: Vec<String> = s.db.call(move |c| {
@@ -98,12 +107,89 @@ pub async fn refs(
           detail: None,
         }),
     );
-    report.count = report.refs.len();
-    report.refs.sort_by(|a, b| {
-      (&a.kind, &a.name, &a.field).cmp(&(&b.kind, &b.name, &b.field))
-    });
   }
+  report.count = report.refs.len();
+  report.refs.sort_by(|a, b| {
+    (&a.kind, &a.name, &a.field).cmp(&(&b.kind, &b.name, &b.field))
+  });
   Ok(Json(report))
+}
+
+fn alert_refs(
+  c: &rusqlite::Connection,
+  kind: &str,
+  name: &str,
+) -> Result<Vec<RefHit>, ApiError> {
+  use crate::db::sql_err;
+  let mut hits = Vec::new();
+  let mut add = |name: String, field: &str| {
+    hits.push(RefHit {
+      kind: "alert".into(),
+      name,
+      field: field.into(),
+      relation: "monitors".into(),
+      detail: None,
+    })
+  };
+  let mut stmt = c
+    .prepare("SELECT name, service FROM alert_custom_rules")
+    .map_err(sql_err)?;
+  let custom = stmt
+    .query_map([], |r| {
+      Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    })
+    .and_then(Iterator::collect::<Result<Vec<_>, _>>)
+    .map_err(sql_err)?;
+  if kind == "service" {
+    for (rule, _) in
+      custom.iter().filter(|(_, service)| service == name)
+    {
+      add(rule.clone(), "custom.service");
+    }
+    let mut stmt = c
+      .prepare(
+        "SELECT rule FROM alert_service_overrides WHERE service = ?",
+      )
+      .map_err(sql_err)?;
+    for row in
+      stmt.query_map([name], |r| r.get(0)).map_err(sql_err)?
+    {
+      add(row.map_err(sql_err)?, "override.service");
+    }
+  }
+  let mut stmt = c.prepare("SELECT id, source_rule, source_subject, target_rule, target_subject FROM alert_suppressions").map_err(sql_err)?;
+  let rows = stmt
+    .query_map([], |r| {
+      Ok((
+        r.get::<_, i64>(0)?,
+        r.get::<_, String>(1)?,
+        r.get::<_, Option<String>>(2)?,
+        r.get::<_, String>(3)?,
+        r.get::<_, Option<String>>(4)?,
+      ))
+    })
+    .map_err(sql_err)?;
+  for row in rows {
+    let (id, source, a, target, b) = row.map_err(sql_err)?;
+    for (rule, subject, field) in
+      [(source, a, "source_subject"), (target, b, "target_subject")]
+    {
+      if let Some(subject) = subject
+        && crate::rules::subject_resources(
+          &rule,
+          &subject,
+          custom.iter().any(|(r, _)| r == &rule),
+        )
+        .into_iter()
+        .any(|(resource, subject)| {
+          resource == kind && subject == name
+        })
+      {
+        add(format!("suppression/{id}"), field);
+      }
+    }
+  }
+  Ok(hits)
 }
 
 pub async fn tree(
@@ -113,7 +199,8 @@ pub async fn tree(
 ) -> ApiResult<TreeView> {
   auth.require(Perm::Read)?;
   let snap = snapshot::load_inner(&s.db).await?;
-  Ok(Json(build_tree(&snap, auth.services.as_ref(), &q)?))
+  let live = crate::views::cached_live(&s, &snap.world).await;
+  Ok(Json(build_tree(&snap, auth.services.as_ref(), &q, &live)?))
 }
 
 pub async fn search(
@@ -190,10 +277,10 @@ fn task_visible(
 
 fn secret_matches(text: &str, name: &str) -> bool {
   placeholders(text).any(|p| {
-    parse_placeholder(p, true)
+    parse_placeholder(p, false)
       .ok()
       .flatten()
-      .is_some_and(|p| p.name == name)
+      .is_some_and(|p| p.name == name && p.mode != SecretMode::File)
   })
 }
 
@@ -220,7 +307,14 @@ fn collect_refs(
         detail: None,
       });
     };
+  let hidden_secret = scope.is_some()
+    && kind == "secret"
+    && (crate::secret_policy::is_system_secret(name)
+      || crate::secret_policy::is_managed_secret(name));
   for (service, row) in &world.services {
+    if hidden_secret {
+      break;
+    }
     if !visible(scope, service) {
       continue;
     }
@@ -264,6 +358,9 @@ fn collect_refs(
             .any(|p| {
               if kind == "secret" {
                 p.name == name
+                  && account_ref(p.name).is_none()
+                  && (!field.starts_with("monitor.")
+                    || p.mode != SecretMode::File)
               } else {
                 account_ref(p.name) == Some(name)
               }
@@ -318,6 +415,9 @@ fn collect_refs(
     }
   }
   for (host, row) in &world.routes {
+    if hidden_secret {
+      break;
+    }
     let spec = &row.spec;
     if !route_visible(scope, spec) {
       continue;
@@ -339,7 +439,12 @@ fn collect_refs(
         }
       }
       "gateway" => {
-        if world.route_gateway(spec) == Some(name) {
+        let gateway = if scope.is_none() {
+          world.route_gateway(spec)
+        } else {
+          spec.gateway.as_deref()
+        };
+        if gateway == Some(name) {
           add("route", host, "gateway", "route_gateway");
         }
         if spec.backup_gateway.as_deref() == Some(name) {
@@ -366,16 +471,26 @@ fn collect_refs(
     }
   }
   for (task, spec, _) in tasks {
-    if !task_visible(scope, &spec.how) {
+    if hidden_secret || !task_visible(scope, &spec.how) {
       continue;
     }
     match kind {
       "service" if matches!(&spec.how, TaskKind::Exec { service, .. } if service == name) => {
         add("task", task, "exec.service", "runs_on")
       }
-      "server" if scope.is_none() && spec.server == name => {
-        add("task", task, "server", "runs_on")
-      }
+      "server" if scope.is_none() => match &spec.how {
+        TaskKind::Exec { service, .. }
+          if crate::tasks::exec_target(snap, service).ok()
+            == Some(name) =>
+        {
+          add("task", task, "exec.service", "runs_on");
+        }
+        TaskKind::Exec { .. } => {}
+        _ if spec.server == name => {
+          add("task", task, "server", "runs_on")
+        }
+        _ => {}
+      },
       "secret" => {
         for (field, text) in task_texts(&spec.how) {
           if secret_matches(text, name) {
@@ -496,7 +611,11 @@ fn collect_refs(
       .routes
       .get(name)
       .is_some_and(|row| route_visible(scope, &row.spec)),
-    "secret" => discoverable && snap.secrets.contains_key(name),
+    "secret" => {
+      !hidden_secret
+        && discoverable
+        && snap.secrets.contains_key(name)
+    }
     "account" => {
       scope.is_none() && snap.accounts.iter().any(|a| a.name == name)
     }
@@ -522,6 +641,16 @@ fn collect_refs(
   }
 }
 
+fn env_reference(text: &str) -> bool {
+  text
+    .strip_prefix("[[")
+    .and_then(|s| s.strip_suffix("]]"))
+    .is_some_and(|raw| {
+      parse_placeholder(raw, true).is_ok_and(|p| p.is_some())
+        || parse_service_ref(raw).is_some()
+    })
+}
+
 fn search_snapshot(
   snap: &Snapshot,
   tasks: &Tasks,
@@ -541,10 +670,18 @@ fn search_snapshot(
       .lines()
       .filter(|line| !line.trim_start().starts_with("wharf-enc:v1:"))
     {
-      let clean = crate::log_redact::redact_text_with(
-        &crate::redact::redact_command(line),
-        &snap.log_values,
-      );
+      let clean = if field.starts_with("env.")
+        && line
+          .split_once('=')
+          .is_some_and(|(_, value)| env_reference(value))
+      {
+        crate::log_redact::redact_text_with(line, &snap.log_values)
+      } else {
+        crate::log_redact::redact_text_with(
+          &crate::redact::redact_command(line),
+          &snap.log_values,
+        )
+      };
       let text = clean.to_lowercase();
       if !text.contains(&needle) {
         continue;
@@ -585,21 +722,22 @@ fn search_snapshot(
     }
     for (field, text) in service_texts(&row.spec) {
       if let Some(key) = field.strip_prefix("env.") {
-        let value =
-          if wharf_api_types::secret_detect::is_sensitive_env_key(key)
+        let sensitive =
+          wharf_api_types::secret_detect::is_sensitive_env_key(key)
             || crate::redact::is_sensitive_env_key(key)
             || wharf_api_types::secret_detect::detect_secret_value(
               text,
             )
-            .is_some()
-          {
-            "***"
-          } else {
-            text
-          };
+            .is_some();
+        let value = if sensitive && !env_reference(text) {
+          "***"
+        } else {
+          text
+        };
         add("service", service, &field, &format!("{key}={value}"));
+      } else if let Some(path) = field.strip_prefix("file:") {
+        add("service", service, &field, &format!("{path}\n{text}"));
       } else {
-        add("service", service, &field, &field);
         add("service", service, &field, text);
       }
     }
@@ -713,6 +851,148 @@ mod tests {
   }
 
   #[test]
+  fn scoped_refs_hide_default_gateway_and_system_secrets_and_skip_invalid_refs()
+   {
+    let mut snap = seeded();
+    let route = &mut snap
+      .world
+      .routes
+      .get_mut("api.example.test")
+      .unwrap()
+      .spec;
+    route.gateway = None;
+    route.auth = true;
+    let basic_auth =
+      crate::render::route_auth_secret(&route.hostname);
+    for name in [&basic_auth, "OIDC_SECRET_FIXTURE"] {
+      snap
+        .secrets
+        .insert(name.to_string(), "fixture-value".into());
+    }
+    snap
+      .world
+      .services
+      .get_mut("api")
+      .unwrap()
+      .spec
+      .env
+      .extend([
+        ("PASSWORD".into(), "[[account.demo.password]]".into()),
+        ("OIDC_KEY".into(), "[[OIDC_SECRET_FIXTURE]]".into()),
+      ]);
+    let tasks = vec![("fixture".into(), serde_json::from_value(json!({
+      "server":"s3","schedule":"","kind":"exec","service":"api","command":"echo [[FILE:FOO]]"
+    })).unwrap(), 0)];
+    let scope = ["api".into()].into();
+    for (kind, name) in [
+      ("gateway", "edge"),
+      ("secret", &basic_auth),
+      ("secret", "OIDC_SECRET_FIXTURE"),
+    ] {
+      let report =
+        collect_refs(&snap, &tasks, Some(&scope), kind, name);
+      assert!(!report.exists);
+      assert!(report.refs.is_empty());
+    }
+    for name in ["FOO", "account.demo.password"] {
+      assert!(
+        collect_refs(&snap, &tasks, None, "secret", name)
+          .refs
+          .is_empty()
+      );
+    }
+  }
+
+  #[test]
+  fn server_refs_resolve_exec_target_after_service_migration() {
+    let mut snap = seeded();
+    snap.deployed.insert("api".into(), "s3".into());
+    let tasks = vec![("moved".into(), serde_json::from_value(json!({
+      "server":"s1","schedule":"","kind":"exec","service":"api","command":"true"
+    })).unwrap(), 0)];
+    assert!(
+      collect_refs(&snap, &tasks, None, "server", "s3")
+        .refs
+        .iter()
+        .any(|hit| hit.kind == "task")
+    );
+    assert!(
+      !collect_refs(&snap, &tasks, None, "server", "s1")
+        .refs
+        .iter()
+        .any(|hit| hit.kind == "task")
+    );
+  }
+
+  #[test]
+  fn search_matches_file_path_once_and_preserves_sensitive_env_reference()
+   {
+    let mut snap = seeded();
+    let spec = &mut snap.world.services.get_mut("api").unwrap().spec;
+    spec.files[0].content = "app.conf".into();
+    spec
+      .env
+      .insert("DB_PASSWORD".into(), "[[MY_DB_PASS]]".into());
+    let search = |q: &str| {
+      search_snapshot(
+        &snap,
+        &vec![],
+        None,
+        &SearchQuery {
+          q: q.into(),
+          kind: Some("service".into()),
+          limit: None,
+        },
+      )
+    };
+    assert_eq!(search("file").total, 0);
+    assert_eq!(search("app.conf").total, 1);
+    let hits = search("MY_DB_PASS");
+    assert_eq!(hits.total, 1);
+    assert_eq!(hits.hits[0].match_text, "DB_PASSWORD=[[MY_DB_PASS]]");
+  }
+
+  #[test]
+  fn tree_normalizes_routes_and_disambiguates_gateway() {
+    let mut snap = seeded();
+    let edge = snap.world.services["api"].clone();
+    snap.world.services.insert("edge".into(), edge);
+    let lookup = |q| build_tree(&snap, None, &q, &Default::default());
+    for q in [
+      TreeQuery {
+        target: Some("API.EXAMPLE.TEST".into()),
+        ..Default::default()
+      },
+      TreeQuery {
+        route: Some("api.example.test.".into()),
+        ..Default::default()
+      },
+      TreeQuery {
+        gateway: Some("edge".into()),
+        ..Default::default()
+      },
+    ] {
+      let view = lookup(q).unwrap();
+      let route = &view.routes[0];
+      assert_eq!(route.hostname, "api.example.test");
+      let svc = route.service.as_ref().unwrap();
+      assert_eq!(svc.state.as_deref(), Some("unknown"));
+      assert_eq!(svc.dependency_details[0].kind, "service_ref");
+      assert_eq!(
+        svc.dependency_details[0].server.as_deref(),
+        Some("s3")
+      );
+    }
+    assert!(
+      lookup(TreeQuery {
+        target: Some("edge".into()),
+        ..Default::default()
+      })
+      .is_err()
+    );
+  }
+
+  #[test]
   fn refs_find_file_volume_and_route_with_scope() {
     let mut snap = seeded();
     snap
@@ -734,7 +1014,13 @@ mod tests {
   #[test]
   fn tree_includes_backup_dependencies_and_server_filter() {
     let snap = seeded();
-    let all = build_tree(&snap, None, &TreeQuery::default()).unwrap();
+    let all = build_tree(
+      &snap,
+      None,
+      &TreeQuery::default(),
+      &Default::default(),
+    )
+    .unwrap();
     let route = &all.routes[0];
     assert_eq!(route.gateway.as_ref().unwrap().name, "edge");
     assert_eq!(
@@ -753,6 +1039,7 @@ mod tests {
         server: Some("s3".into()),
         ..Default::default()
       },
+      &Default::default(),
     )
     .unwrap();
     assert_eq!(filtered.servers.len(), 1);
@@ -778,4 +1065,18 @@ mod tests {
     assert_eq!(search("fixture-private-999").total, 0);
     assert_eq!(search("fixture-cipher").total, 0);
   }
+}
+
+#[tokio::test]
+async fn refs_include_alert_overrides_and_rule_aware_suppressions() {
+  let db = crate::db::Db::memory();
+  db.call(|c| {
+    c.execute("INSERT INTO alert_service_overrides (rule, service) VALUES ('port_down','api')", []).map_err(crate::db::sql_err)?;
+    c.execute("INSERT INTO alert_suppressions (source_rule, source_subject, target_rule, target_subject, created_at)
+      VALUES ('host_unit_down','s1:db','port_down','api:http',0)", []).map_err(crate::db::sql_err)?;
+    let hits = alert_refs(c, "service", "api")?;
+    assert_eq!(hits.iter().map(|hit| hit.field.as_str()).collect::<Vec<_>>(), ["override.service", "target_subject"]);
+    assert_eq!(alert_refs(c, "server", "s1")?[0].field, "source_subject");
+    Ok(())
+  }).await.unwrap();
 }

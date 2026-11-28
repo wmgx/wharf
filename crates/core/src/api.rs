@@ -340,6 +340,14 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route("/api/services", get(list_services))
     .route("/api/services/{name}", get(show_service))
     .route(
+      "/api/services/{name}/exec",
+      post(crate::service_exec::exec),
+    )
+    .route(
+      "/api/services/{name}/render",
+      get(crate::service_render::get),
+    )
+    .route(
       "/api/services/{name}/heartbeat/reports",
       get(heartbeat_reports),
     )
@@ -524,6 +532,14 @@ pub fn router(state: Arc<AppState>) -> Router {
       get(crate::tasks::artifacts::download),
     )
     .route(
+      "/api/tasks/{name}/runs/{id}",
+      get(crate::tasks::run_detail),
+    )
+    .route(
+      "/api/tasks/runs/{id}/cancel",
+      post(crate::tasks::cancel_run),
+    )
+    .route(
       "/api/secrets/{name}",
       put(set_secret).delete(remove_secret),
     )
@@ -657,6 +673,7 @@ async fn check_cli(
 #[derive(Default, Deserialize)]
 struct BriefQuery {
   brief: Option<String>,
+  preview_secrets: Option<String>,
 }
 
 impl BriefQuery {
@@ -1246,6 +1263,8 @@ async fn heartbeat_reports(
 
 #[derive(Deserialize)]
 pub(super) struct LogsQuery {
+  #[serde(default)]
+  pub(super) container: Option<String>,
   #[serde(default = "default_tail")]
   pub(super) tail: u32,
   /// 只看这个时间之后的：`30m`、`2h`、`3d` 或 RFC 3339 时间。
@@ -1275,9 +1294,15 @@ async fn project_logs(
   server: &str,
   project: String,
   q: &LogsQuery,
+  container: Option<String>,
 ) -> Result<Json<Value>, AppError> {
+  let conn = container
+    .as_ref()
+    .map(|_| s.hub.exec_v2_conn_id(server, "按子容器看日志"))
+    .transpose()?;
   Ok(Json(
-    fetch_logs(s, server, q, |tail, since| AgentOp::Logs {
+    fetch_logs(s, server, q, conn, |tail, since| AgentOp::Logs {
+      container: container.clone(),
       project: project.clone(),
       tail,
       follow: false,
@@ -1292,6 +1317,7 @@ async fn fetch_logs(
   s: &AppState,
   server: &str,
   q: &LogsQuery,
+  conn: Option<u64>,
   op: impl Fn(u32, Option<String>) -> AgentOp,
 ) -> Result<Value, ApiError> {
   let since =
@@ -1309,8 +1335,9 @@ async fn fetch_logs(
   let filtering = grep.is_some() || q.errors;
   let logs: String = s
     .hub
-    .call(
+    .call_optional_bound(
       server,
+      conn,
       // 过滤时多拿一些再挑，最终条数由 tail 控制。
       op(if filtering { 5000 } else { q.tail }, since),
       Duration::from_secs(40),
@@ -1357,10 +1384,12 @@ async fn agent_logs(
     return Err(crate::world::server_not_found(&name).into());
   }
   Ok(Json(
-    fetch_logs(&s, &name, &q, |tail, since| AgentOp::ContainerLogs {
-      container: "wharf-agent".into(),
-      tail,
-      since,
+    fetch_logs(&s, &name, &q, None, |tail, since| {
+      AgentOp::ContainerLogs {
+        container: "wharf-agent".into(),
+        tail,
+        since,
+      }
     })
     .await?,
   ))
@@ -1386,7 +1415,7 @@ async fn core_logs(
     if !s.hub.is_online(name) {
       continue;
     }
-    let found = fetch_logs(&s, name, &q, |tail, since| {
+    let found = fetch_logs(&s, name, &q, None, |tail, since| {
       AgentOp::ContainerLogs {
         container: id.clone(),
         tail,
@@ -1411,7 +1440,7 @@ async fn core_logs(
   )
 }
 
-async fn service_logs(
+pub(super) async fn service_logs(
   State(s): State<Arc<AppState>>,
   auth: Auth,
   Path(name): Path<String>,
@@ -1421,6 +1450,20 @@ async fn service_logs(
   let snap = snapshot::load(&s.db).await?;
   let (server, project) =
     crate::multi_logs::service_target(&snap, &name)?;
+  if q.container.is_some()
+    && (q.previous_list || q.previous.is_some())
+  {
+    return Err(
+      ApiError::invalid("重建前日志不支持 --container")
+        .with_hint("用 --grep 关键字筛选")
+        .into(),
+    );
+  }
+  crate::service_container::validate(
+    &snap.world.services[&name],
+    &name,
+    q.container.as_deref(),
+  )?;
   if q.previous_list || q.previous.is_some() {
     let values = crate::log_redact::service_values(
       &snap.world.services[&name].spec,
@@ -1429,7 +1472,7 @@ async fn service_logs(
       previous_logs(&s, server, project, &q, &values).await?,
     ));
   }
-  project_logs(&s, server, project, &q).await
+  project_logs(&s, server, project, &q, q.container.clone()).await
 }
 
 async fn previous_logs(
@@ -1491,6 +1534,11 @@ async fn multi_service_logs(
   Query(q): Query<LogsQuery>,
 ) -> ApiResult<Value> {
   auth.require(Perm::Read)?;
+  if q.container.is_some() {
+    return Err(
+      ApiError::invalid("--container 只能用于单个服务").into(),
+    );
+  }
   if q.previous_list || q.previous.is_some() {
     return Err(
       ApiError::invalid("查看重建前日志每次只能指定一个服务").into(),
@@ -1653,7 +1701,8 @@ async fn gateway_logs(
     .gateways
     .get(&name)
     .ok_or_else(|| gateway_not_found(&name))?;
-  project_logs(&s, &row.spec.server, gateway_project(&name), &q).await
+  project_logs(&s, &row.spec.server, gateway_project(&name), &q, None)
+    .await
 }
 
 // ROUTES
@@ -2306,7 +2355,31 @@ async fn make_plan(
   if !auth.human {
     guard_dangerous(&s, &req).await?;
   }
-  let snap = snapshot::load(&s.db).await?;
+  let mut snap = snapshot::load(&s.db).await?;
+  if let Some(names) = &query.preview_secrets {
+    auth.require(Perm::Admin)?;
+    audit.skip_record();
+    let names = names.split(',').collect::<Vec<_>>();
+    if names.len() > 200 {
+      return Err(
+        ApiError::invalid("每次最多预览 200 条密钥").into(),
+      );
+    }
+    for name in names {
+      check_secret_name(name)?;
+      crate::secret_policy::refuse_managed(name)?;
+      if !crate::render::is_auth_secret(name) {
+        crate::secret_policy::reject_system_secret(
+          name,
+          "同步环境变量",
+        )?;
+      }
+      snap
+        .secrets
+        .entry(name.to_string())
+        .or_insert_with(|| "***".into());
+    }
+  }
   if let Err(error) =
     crate::token_scope::require_plan_request(&auth, &snap.world, &req)
   {
@@ -2325,12 +2398,17 @@ async fn make_plan(
         })
         .map(|(host, _)| host.clone()),
     );
-    visible_routes.extend(req.changes.iter().filter_map(|change| {
-      let wharf_api_types::spec::Change::UpsertRoute { spec } =
-        change
-      else {
-        return None;
-      };
+    let submitted_routes = req
+      .changes
+      .iter()
+      .filter_map(|change| match change {
+        wharf_api_types::spec::Change::UpsertRoute { spec } => {
+          Some(spec)
+        }
+        _ => None,
+      })
+      .chain(req.partial.iter().flat_map(|fleet| &fleet.routes));
+    visible_routes.extend(submitted_routes.filter_map(|spec| {
       crate::token_scope::route_spec_in_scope(services, spec)
         .then(|| {
           crate::world::normalize_hostname(&spec.hostname).ok()
@@ -2358,7 +2436,9 @@ async fn make_plan(
     &planned.plan,
     &planned.route_effects,
   )?;
-  planner::save(&s, &planned).await?;
+  if query.preview_secrets.is_none() {
+    planner::save(&s, &planned).await?;
+  }
   let mut seen = std::collections::BTreeSet::new();
   let addresses = planned
     .plan
@@ -2603,6 +2683,73 @@ async fn export(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn partial_plan_reports_missing_gateway_for_scoped_route() {
+    let state = crate::rules::tests::test_state();
+    let request = serde_json::from_value(json!({
+      "partial": {"routes": [{"hostname":"A.example.test.","service":"app","gateway":"missing"}]}
+    })).unwrap();
+    let auth = Auth {
+      name: "fixture".into(),
+      perms: [Perm::Plan].into(),
+      services: Some(["app".into()].into()),
+      expires_at: None,
+      allowed_from: vec![],
+      human: false,
+    };
+    let error = make_plan(
+      State(state),
+      auth,
+      Query(BriefQuery::default()),
+      axum::Extension(crate::audit::AuditSlot::default()),
+      Json(request),
+    )
+    .await
+    .unwrap_err()
+    .0;
+    let details = error.details.unwrap();
+    assert!(
+      details["missing"].as_array().unwrap().iter().any(|r| {
+        r["target"] == "missing"
+          && r["source"] == "route/a.example.test"
+      }),
+      "{details}"
+    );
+  }
+
+  #[tokio::test]
+  async fn env_secret_preflight_uses_names_without_persisting_plan_or_secrets()
+   {
+    let state = crate::rules::tests::test_state();
+    let auth = Auth {
+      name: "fixture".into(),
+      perms: [Perm::Admin, Perm::Plan].into(),
+      services: None,
+      expires_at: None,
+      allowed_from: vec![],
+      human: false,
+    };
+    let Json(plan) = make_plan(
+      State(state.clone()),
+      auth,
+      Query(BriefQuery {
+        preview_secrets: Some("FIXTURE_API_KEY".into()),
+        ..Default::default()
+      }),
+      axum::Extension(crate::audit::AuditSlot::default()),
+      Json(PlanRequest::default()),
+    )
+    .await
+    .map_err(|e| e.0)
+    .unwrap();
+    state.db.call(move |c| {
+      let plan_count: i64 = c.query_row("SELECT count(*) FROM plans WHERE id = ?1", [&plan.plan_id], |r| r.get(0)).map_err(sql_err)?;
+      let secret_count: i64 = c.query_row("SELECT count(*) FROM secrets WHERE name = 'FIXTURE_API_KEY'", [], |r| r.get(0)).map_err(sql_err)?;
+      assert_eq!((plan_count, secret_count), (0, 0));
+      Ok(())
+    }).await.unwrap();
+  }
 
   #[tokio::test]
   async fn service_list_and_show_filter_shared_volume_links() {

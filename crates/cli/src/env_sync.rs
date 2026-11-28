@@ -5,8 +5,9 @@ use std::{
   path::PathBuf,
 };
 
+use schemars::JsonSchema;
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::Value;
 use wharf_api_types::{
   ApiError, ErrorCode,
   plan::{
@@ -27,6 +28,14 @@ use crate::{
   commands::{out, wait_run},
   dotenv, secret_import,
 };
+
+#[derive(clap::Args)]
+#[command(subcommand_precedence_over_arg = true)]
+pub struct ServiceEnvArgs {
+  name: Option<String>,
+  #[command(subcommand)]
+  command: Option<ServiceEnvCmd>,
+}
 
 #[derive(clap::Subcommand)]
 pub enum ServiceEnvCmd {
@@ -60,18 +69,45 @@ pub struct EnvSyncArgs {
   flags: ApplyFlags,
 }
 
-#[derive(Serialize)]
-struct EnvChange {
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct EnvChange {
   key: String,
   action: &'static str,
   before: Option<String>,
   after: Option<String>,
 }
 
-#[derive(Serialize)]
-struct SecretAction {
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct SecretAction {
   name: String,
   action: &'static str,
+}
+
+type Env = BTreeMap<String, String>;
+
+#[derive(Serialize, JsonSchema)]
+#[serde(untagged)]
+pub(crate) enum EnvList {
+  Service(Env),
+  All(BTreeMap<String, Env>),
+}
+
+#[derive(Serialize, JsonSchema)]
+#[serde(untagged)]
+pub(crate) enum SyncResponse {
+  Preview {
+    service: String,
+    file: PathBuf,
+    env_changes: Vec<EnvChange>,
+    secret_actions: Vec<SecretAction>,
+    warnings: Vec<String>,
+    hint: Option<&'static str>,
+  },
+  Applied {
+    secrets: wharf_api_types::view::SecretImportResponse,
+    plan: Box<Plan>,
+    run: Option<Run>,
+  },
 }
 
 struct SyncPlan {
@@ -216,28 +252,58 @@ fn plan_env_sync(
 
 pub async fn run(
   c: &Client,
-  command: ServiceEnvCmd,
+  args: ServiceEnvArgs,
   j: bool,
 ) -> CliResult<()> {
-  match command {
-    ServiceEnvCmd::List { name } => {
-      let service: ServiceView =
-        c.get(&format!("/api/services/{}", seg(&name))).await?;
-      let env = service
-        .spec
-        .env
-        .iter()
-        .map(|(k, v)| (k, display_value(v)))
-        .collect::<BTreeMap<_, _>>();
-      out(j, &env, |env| {
-        for (k, v) in env {
-          println!("{k}={v}");
-        }
-      });
-      Ok(())
+  let (name, command) = (args.name, args.command);
+  let name = match (name, command) {
+    (None, Some(ServiceEnvCmd::Sync(args))) => {
+      return sync(c, args, j).await;
     }
-    ServiceEnvCmd::Sync(args) => sync(c, args, j).await,
-  }
+    (None, Some(ServiceEnvCmd::List { name })) => Some(name),
+    (name, None) => name,
+    _ => {
+      return Err(
+        ApiError::invalid("服务名和子命令只能选一个入口").into(),
+      );
+    }
+  };
+  let masked = |service: ServiceView| -> Env {
+    service
+      .spec
+      .env
+      .into_iter()
+      .map(|(k, v)| (k, display_value(&v)))
+      .collect()
+  };
+  let listing = if let Some(name) = name {
+    let service =
+      c.get(&format!("/api/services/{}", seg(&name))).await?;
+    EnvList::Service(masked(service))
+  } else {
+    let services: Vec<ServiceView> = c.get("/api/services").await?;
+    EnvList::All(
+      services
+        .into_iter()
+        .map(|s| (s.name.clone(), masked(s)))
+        .collect(),
+    )
+  };
+  let show = |env: &Env| {
+    for (k, v) in env {
+      println!("{k}={v}");
+    }
+  };
+  out(j, &listing, |result| match result {
+    EnvList::Service(env) => show(env),
+    EnvList::All(services) => {
+      for (service, env) in services {
+        println!("[{service}]");
+        show(env);
+      }
+    }
+  });
+  Ok(())
 }
 
 async fn sync(
@@ -250,33 +316,38 @@ async fn sync(
     c.get(&format!("/api/services/{}", seg(&args.name))).await?;
   let secrets: Vec<SecretView> = c.get("/api/secrets").await?;
   let existing = secrets.into_iter().map(|s| s.name).collect();
-  let mut mask = local
-    .values()
-    .chain(service.spec.env.values())
-    .filter(|v| !v.is_empty() && secret_ref(v).is_none())
-    .cloned()
-    .collect::<Vec<_>>();
-  mask.sort_unstable();
-  mask.dedup();
+  let mut mask = sensitive_values(&local);
+  mask.extend(sensitive_values(&service.spec.env));
   let mut env =
     plan_env_sync(&args, local, &service.spec.env, &existing)?;
   if args.dry_run || !args.flags.apply {
     let pending =
       env.imports.len() + env.generated.len() + env.missing.len();
-    let preview = json!({
-      "service": args.name, "file": args.file, "env_changes": env.changes,
-      "secret_actions": env.actions, "warnings": [],
-      "hint": (pending > 0).then_some("确认预览后加 --apply；缺少的密钥须提供值或用 --generate-secrets"),
-    });
-    out(j, &preview, |_| {
-      for change in &env.changes {
-        println!("{}  {}", change.key, change.action);
-      }
-      for action in &env.actions {
-        println!("{}  {}", action.name, action.action);
-      }
-      if let Some(hint) = preview["hint"].as_str() {
-        println!("{hint}");
+    let hint = (pending > 0).then_some("确认预览后加 --apply；缺少的密钥须提供值或用 --generate-secrets");
+    let preview = SyncResponse::Preview {
+      service: args.name,
+      file: args.file,
+      env_changes: env.changes,
+      secret_actions: env.actions,
+      warnings: Vec::new(),
+      hint,
+    };
+    out(j, &preview, |response| {
+      if let SyncResponse::Preview {
+        env_changes,
+        secret_actions,
+        ..
+      } = response
+      {
+        for change in env_changes {
+          println!("{}  {}", change.key, change.action);
+        }
+        for action in secret_actions {
+          println!("{}  {}", action.name, action.action);
+        }
+        if let Some(hint) = hint {
+          println!("{hint}");
+        }
       }
     });
     return Ok(());
@@ -298,40 +369,36 @@ async fn sync(
       .map_err(|_| ApiError::internal("无法生成随机密钥"))?;
     env.imports.insert(name.clone(), hex::encode(bytes));
   }
+  mask.extend(env.imports.values().filter(|v| v.len() >= 6).cloned());
   service.spec.env = env.env;
-  let operation = execute(c, args, service, env.imports).await;
-  let (secrets, plan, run) = operation.map_err(|e| match e {
-    CliError::Api(mut e) => {
-      e.message = wharf_api_types::mask_values(&e.message, &mask);
-      if let Some(hint) = &mut e.hint {
-        *hint = wharf_api_types::mask_values(hint, &mask);
-      }
-      for suggestion in &mut e.suggest {
-        *suggestion = wharf_api_types::mask_values(suggestion, &mask);
-      }
-      if let Some(details) = &mut e.details {
-        redact(details, &mask);
-      }
-      CliError::Api(e)
-    }
-    e => e,
-  })?;
+  let (secrets, plan, run) =
+    execute(c, args, service, env.imports, j, &mask)
+      .await
+      .map_err(|e| match e {
+        CliError::Api(mut e)
+          if e.code != ErrorCode::ConfirmRequired =>
+        {
+          redact_error(&mut e, &mask);
+          CliError::Api(e)
+        }
+        e => e,
+      })?;
   let succeeded = run
     .as_ref()
     .is_none_or(|run| run.status == RunStatus::Succeeded);
-  let mut result =
-    json!({ "secrets": secrets, "plan": plan, "run": run });
-  redact(&mut result, &mask);
-  out(j, &result, |_| {
-    println!("计划 {}，{} 项变更", plan.plan_id, plan.items.len());
-    if let Some(run) = &run {
-      println!(
-        "执行 {}：{}",
-        run.run_id,
-        if succeeded { "成功" } else { "失败" }
-      );
-    }
-  });
+  out(
+    j,
+    &SyncResponse::Applied {
+      secrets,
+      plan: Box::new(plan),
+      run,
+    },
+    |response| {
+      if let SyncResponse::Applied { run: Some(run), .. } = response {
+        crate::print::run_summary(run);
+      }
+    },
+  );
   if succeeded {
     Ok(())
   } else {
@@ -339,16 +406,75 @@ async fn sync(
   }
 }
 
-fn redact(json: &mut Value, values: &[String]) {
-  match json {
-    Value::String(s) => *s = wharf_api_types::mask_values(s, values),
-    Value::Array(items) => {
-      items.iter_mut().for_each(|item| redact(item, values))
+fn sensitive_values(env: &BTreeMap<String, String>) -> Vec<String> {
+  env
+    .iter()
+    .filter(|(key, value)| {
+      value.len() >= 6
+        && !has_wharf_ref(value)
+        && (is_sensitive_env_key(key)
+          || detect_secret_value(value).is_some())
+    })
+    .map(|(_, value)| value.clone())
+    .collect()
+}
+
+fn redact_error(error: &mut ApiError, values: &[String]) {
+  error.message =
+    wharf_api_types::mask_values(&error.message, values);
+  if let Some(hint) = &mut error.hint {
+    *hint = wharf_api_types::mask_values(hint, values);
+  }
+}
+
+pub(crate) fn redact_run(run: &mut Run, values: &[String]) {
+  for step in &mut run.steps {
+    for line in &mut step.log {
+      *line = wharf_api_types::mask_values(line, values);
     }
-    Value::Object(items) => {
-      items.values_mut().for_each(|item| redact(item, values))
+    if let Some(error) = &mut step.error {
+      redact_error(error, values);
     }
-    _ => {}
+  }
+}
+
+fn redact_plan(plan: &mut Plan, values: &[String]) {
+  let mask = |text: &mut String| {
+    *text = wharf_api_types::mask_values(text, values);
+  };
+  let mask_env = |key: &str, value: &mut Value| {
+    if let Value::String(text) = value {
+      if is_sensitive_env_key(key) && secret_ref(text).is_none() {
+        *text = "***".into();
+      } else {
+        mask(text);
+      }
+    }
+  };
+  if let Some(note) = &mut plan.note {
+    mask(note);
+  }
+  plan.warnings.iter_mut().for_each(mask);
+  for item in &mut plan.items {
+    mask(&mut item.reason);
+    for change in &mut item.changes {
+      change.lines.iter_mut().for_each(mask);
+      if let Some(key) = change.path.strip_prefix("env.") {
+        for value in change.before.iter_mut().chain(&mut change.after)
+        {
+          mask_env(key, value);
+        }
+      }
+    }
+    for value in item.before.iter_mut().chain(&mut item.after) {
+      if let Some(env) =
+        value.get_mut("env").and_then(Value::as_object_mut)
+      {
+        for (key, value) in env {
+          mask_env(key, value);
+        }
+      }
+    }
   }
 }
 
@@ -357,14 +483,39 @@ async fn execute(
   args: EnvSyncArgs,
   service: ServiceView,
   imports: BTreeMap<String, String>,
+  j: bool,
+  mask: &[String],
 ) -> CliResult<(
   wharf_api_types::view::SecretImportResponse,
   Plan,
   Option<Run>,
 )> {
+  let req = PlanRequest {
+    changes: vec![Change::UpsertService {
+      name: service.name,
+      spec: service.spec,
+      pins: None,
+      commit: None,
+      adopt: None,
+    }],
+    note: args.flags.note.clone(),
+    ..Default::default()
+  };
+  let path =
+    crate::plan_cmd::brief_path("/api/plan", args.flags.brief);
   let mut secrets =
     wharf_api_types::view::SecretImportResponse::default();
   if !imports.is_empty() {
+    let names = imports.keys().cloned().collect::<Vec<_>>().join(",");
+    let sep = if args.flags.brief { '&' } else { '?' };
+    let mut preview: Plan = c
+      .post(
+        &format!("{path}{sep}preview_secrets={}", seg(&names)),
+        &req,
+      )
+      .await?;
+    redact_plan(&mut preview, mask);
+    require_confirmation(&preview, &args, j, true)?;
     let mode = if args.overwrite_secrets {
       SecretImportMode::Overwrite
     } else {
@@ -372,48 +523,14 @@ async fn execute(
     };
     secrets = secret_import::import(c, imports, mode, None).await?;
   }
-  let plan: Plan = c
-    .post(
-      crate::plan_cmd::brief_path("/api/plan", args.flags.brief)
-        .as_ref(),
-      &PlanRequest {
-        changes: vec![Change::UpsertService {
-          name: service.name,
-          spec: service.spec,
-          pins: None,
-          commit: None,
-          adopt: None,
-        }],
-        note: args.flags.note,
-        ..Default::default()
-      },
-    )
-    .await?;
+  let mut plan: Plan = c.post(path.as_ref(), &req).await?;
+  redact_plan(&mut plan, mask);
+  require_confirmation(&plan, &args, j, false)?;
+  if !j {
+    crate::print::plan_with(&plan, false);
+  }
   if plan.items.is_empty() {
     return Ok((secrets, plan, None));
-  }
-  let missing = plan
-    .needs_confirm
-    .iter()
-    .filter(|a| !args.flags.confirm.contains(a))
-    .collect::<Vec<_>>();
-  if !missing.is_empty() {
-    let mut details =
-      wharf_api_types::plan::confirm_details(&plan, &missing);
-    details["secrets"] = json!(secrets);
-    return Err(
-      ApiError::new(ErrorCode::ConfirmRequired, "计划需要确认")
-        .with_details(details)
-        .suggest(format!(
-          "wharf apply {}{}",
-          plan.plan_id,
-          missing
-            .iter()
-            .map(|a| format!(" --confirm {a}"))
-            .collect::<String>()
-        ))
-        .into(),
-    );
   }
   let applying: ApplyResponse = c
     .post(
@@ -426,8 +543,58 @@ async fn execute(
       },
     )
     .await?;
-  let run = wait_run(c, &applying.run_id, true).await?;
+  let mut run = wait_run(c, &applying.run_id, j, mask).await?;
+  if args.flags.brief {
+    crate::plan_cmd::compact_run(&mut run);
+  }
   Ok((secrets, plan, Some(run)))
+}
+
+fn require_confirmation(
+  plan: &Plan,
+  args: &EnvSyncArgs,
+  j: bool,
+  preview: bool,
+) -> CliResult<()> {
+  let missing: Vec<_> = plan
+    .needs_confirm
+    .iter()
+    .filter(|a| !args.flags.confirm.contains(a))
+    .collect();
+  if missing.is_empty() {
+    return Ok(());
+  }
+  if !j {
+    crate::print::plan_with(plan, !preview);
+  }
+  let names = missing.iter().map(|a| a.as_str()).collect::<Vec<_>>();
+  let mut error = ApiError::new(
+    ErrorCode::ConfirmRequired,
+    format!("计划里有高风险项，需要确认：{}", names.join("、")),
+  )
+  .with_details(wharf_api_types::plan::confirm_details(
+    plan, &missing,
+  ));
+  let flags = names
+    .iter()
+    .map(|a| format!(" --confirm {a}"))
+    .collect::<String>();
+  if preview {
+    error = error.with_hint(format!("重新运行原命令并追加{flags}"));
+  } else {
+    let verify = match args.flags.dns_verify.mode() {
+      Some(true) => " --verify-before-dns",
+      Some(false) => " --no-verify-before-dns",
+      None => "",
+    };
+    error = error
+      .with_hint(format!("plan_id = {}", plan.plan_id))
+      .suggest(format!(
+        "wharf apply {}{flags}{verify}",
+        plan.plan_id
+      ));
+  }
+  Err(error.into())
 }
 
 #[test]
@@ -438,7 +605,10 @@ fn sync_preserves_refs_and_masks_preview() {
   ])
   .unwrap();
   let crate::Command::Service(crate::ServiceCmd::Env(
-    ServiceEnvCmd::Sync(args),
+    ServiceEnvArgs {
+      command: Some(ServiceEnvCmd::Sync(args)),
+      ..
+    },
   )) = cli.command
   else {
     panic!("预期为 env sync");
@@ -459,4 +629,90 @@ fn sync_preserves_refs_and_masks_preview() {
     !preview.contains("fixture-old-plain")
       && !preview.contains("fixture-new-plain")
   );
+}
+
+#[test]
+fn sync_masks_only_secret_text_and_preserves_plan_run_receipts() {
+  use serde_json::json;
+  let values = sensitive_values(&dotenv::parse(
+    "DEBUG=1\nPORT=80\nAPP_ENV=production\nSHORT_TOKEN=short\nAPI_KEY=fixture-secret"
+  ).unwrap());
+  assert_eq!(values, ["fixture-secret"]);
+  let mut run = serde_json::from_value(json!({
+    "run_id":"fixture-secret-180","plan_id":"fixture-secret-801",
+    "status":"succeeded","started_at":"2026-11-28T00:00:00Z",
+    "steps":[{"items":[1],"title":"fixture","status":"done","log":["fixture-secret DEBUG=1 PORT=80"]}]
+  })).unwrap();
+  redact_run(&mut run, &values);
+  let receipt = serde_json::to_value(run).unwrap();
+  assert_eq!(receipt["run_id"], "fixture-secret-180");
+  assert_eq!(receipt["plan_id"], "fixture-secret-801");
+  assert_eq!(receipt["status"], "succeeded");
+  assert_eq!(receipt["steps"][0]["log"][0], "*** DEBUG=1 PORT=80");
+}
+
+#[test]
+fn env_accepts_read_only_shorthand_and_keeps_sync() {
+  use clap::Parser;
+  for argv in [
+    &["wharf", "service", "env"][..],
+    &["wharf", "service", "env", "app"],
+    &["wharf", "service", "env", "list", "app"],
+    &["wharf", "service", "env", "sync", "app", ".env"],
+  ] {
+    assert!(crate::Cli::try_parse_from(argv).is_ok(), "{argv:?}");
+  }
+}
+
+#[test]
+fn sync_confirmation_preserves_machine_receipt_and_retry_command() {
+  use clap::Parser;
+  use serde_json::json;
+  let cli = crate::Cli::try_parse_from([
+    "wharf",
+    "service",
+    "env",
+    "sync",
+    "app",
+    ".env",
+    "--apply",
+    "--no-verify-before-dns",
+  ])
+  .unwrap();
+  let crate::Command::Service(crate::ServiceCmd::Env(
+    ServiceEnvArgs {
+      command: Some(ServiceEnvCmd::Sync(args)),
+      ..
+    },
+  )) = cli.command
+  else {
+    panic!("预期为 env sync")
+  };
+  let plan = serde_json::from_value(json!({
+    "plan_id":"plan-180","status":"pending",
+    "created_at":"2026-11-28T00:00:00Z","expires_at":"2026-11-28T00:15:00Z",
+    "base_versions":{},"items":[],"needs_confirm":["service/app"],
+  })).unwrap();
+  let CliError::Api(err) =
+    require_confirmation(&plan, &args, true, false).unwrap_err()
+  else {
+    panic!("预期为确认错误")
+  };
+  assert_eq!(err.code, ErrorCode::ConfirmRequired);
+  assert_eq!(err.hint.as_deref(), Some("plan_id = plan-180"));
+  assert_eq!(
+    err.suggest,
+    [
+      "wharf apply plan-180 --confirm service/app --no-verify-before-dns"
+    ]
+  );
+  assert_eq!(err.details.unwrap()["plan_id"], "plan-180");
+
+  let CliError::Api(preview) =
+    require_confirmation(&plan, &args, true, true).unwrap_err()
+  else {
+    panic!("预期为确认错误")
+  };
+  assert!(preview.hint.unwrap().contains("--confirm service/app"));
+  assert!(preview.suggest.is_empty());
 }

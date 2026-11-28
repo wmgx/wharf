@@ -38,6 +38,7 @@ struct Slot {
   required: bool,
   skipped: bool,
   rejection: Option<(String, String)>,
+  exec_context: Option<(String, Option<String>, Option<String>)>,
 }
 
 impl AuditSlot {
@@ -58,6 +59,41 @@ impl AuditSlot {
   pub fn set_detail(&self, detail: String) {
     self.0.lock().unwrap_or_else(|e| e.into_inner()).detail =
       Some(detail);
+  }
+
+  pub(crate) async fn start_exec(
+    &self,
+    state: &AppState,
+    actor: &str,
+    detail: String,
+  ) -> Result<i64, ApiError> {
+    let (path, reason, source) = self
+      .0
+      .lock()
+      .unwrap_or_else(|e| e.into_inner())
+      .exec_context
+      .take()
+      .ok_or_else(|| ApiError::internal("缺少执行审计上下文"))?;
+    let detail = reason
+      .map_or(detail.clone(), |r| format!("{detail} 原因：{r}"));
+    let id = insert_id(
+      state,
+      AuditEntry {
+        id: 0,
+        at: now_ms(),
+        kind: "api".into(),
+        actor: actor.into(),
+        method: "POST".into(),
+        path,
+        status: None,
+        duration_ms: None,
+        detail: Some(detail),
+        source,
+      },
+    )
+    .await?;
+    self.skip_record();
+    Ok(id)
   }
 
   pub fn require_record(&self, detail: String) {
@@ -81,6 +117,17 @@ pub async fn layer(
     .get::<ConnectInfo<std::net::SocketAddr>>()
     .map(|peer| crate::login::client_key(peer.0.ip(), req.headers()));
   let slot = AuditSlot::default();
+  if method == Method::POST
+    && path.starts_with("/api/services/")
+    && path.ends_with("/exec")
+  {
+    slot
+      .0
+      .lock()
+      .unwrap_or_else(|e| e.into_inner())
+      .exec_context =
+      Some((path.clone(), reason.clone(), source.clone()));
+  }
   req.extensions_mut().insert(slot.clone());
   let resp = next.run(req).await;
   let (actor, detail, required, skipped, rejection) = {
@@ -297,8 +344,15 @@ fn redact_row(row: &mut AuditEntry) {
 
 pub(crate) async fn insert(
   state: &AppState,
-  mut row: AuditEntry,
+  row: AuditEntry,
 ) -> Result<(), ApiError> {
+  insert_id(state, row).await.map(|_| ())
+}
+
+async fn insert_id(
+  state: &AppState,
+  mut row: AuditEntry,
+) -> Result<i64, ApiError> {
   redact_row(&mut row);
   let result = state
     .db
@@ -309,7 +363,7 @@ pub(crate) async fn insert(
         params![row.at, row.kind, row.actor, row.method, row.path,
           row.status, row.duration_ms, row.detail, row.source],
       )
-      .map(|_| ())
+      .map(|_| c.last_insert_rowid())
       .map_err(sql_err)
     })
     .await;
@@ -317,6 +371,21 @@ pub(crate) async fn insert(
     tracing::warn!("记录操作失败：{}", e.message);
   }
   result
+}
+
+pub(crate) async fn finish_exec(
+  state: &AppState,
+  id: i64,
+  status: u16,
+  duration_ms: u64,
+  detail: String,
+) -> Result<(), ApiError> {
+  let detail = crate::log_redact::redact_text(&detail);
+  state.db.call(move |c| {
+    c.execute("UPDATE audit_log SET status = ?2, duration_ms = ?3, detail = detail || ?4 WHERE id = ?1",
+      params![id, status, duration_ms as i64, detail]).map_err(sql_err)?;
+    Ok(())
+  }).await
 }
 
 pub async fn cleanup(state: &AppState) -> Result<(), ApiError> {
@@ -449,29 +518,41 @@ pub(crate) fn parse_time_bound(
     })
 }
 
-pub(crate) fn target_patterns(
+fn target_patterns(
   target: &str,
-) -> Result<(Vec<String>, String), ApiError> {
-  let escape = |s: &str| {
-    s.replace('\\', "\\\\")
-      .replace('%', "\\%")
-      .replace('_', "\\_")
+) -> Result<(Vec<String>, &str, String), ApiError> {
+  let escape = |value: &str| {
+    value
+      .chars()
+      .map(|c| match c {
+        '*' => "[*]".into(),
+        '?' => "[?]".into(),
+        '[' => "[[]".into(),
+        _ => c.to_string(),
+      })
+      .collect::<String>()
   };
   let target = target.trim();
   if target.is_empty() {
     return Err(ApiError::invalid("审计目标不能为空"));
   }
   let Some((kind, name)) = target.split_once('/') else {
-    let name = escape(target);
+    let path = escape(target);
     return Ok((
-      vec![format!("%/{name}"), format!("%/{name}/%")],
-      format!("%{name}%"),
+      vec![format!("*/{path}"), format!("*/{path}/*")],
+      "",
+      escape(target),
     ));
   };
   if name.is_empty() || name.contains('/') {
     return Err(ApiError::invalid("审计目标应写成 类型/名称"));
   }
-  let name = escape(name);
+  let name = if kind == "route" {
+    crate::world::normalize_hostname(name)?
+  } else {
+    name.to_string()
+  };
+  let path = escape(&name);
   let collection = match kind {
     "service" => "services",
     "server" => "servers",
@@ -485,21 +566,21 @@ pub(crate) fn target_patterns(
     _ => return Err(ApiError::invalid("未知审计目标类型")),
   };
   let mut paths = vec![
-    format!("/api/{collection}/{name}"),
-    format!("/api/{collection}/{name}/%"),
+    format!("/api/{collection}/{path}"),
+    format!("/api/{collection}/{path}/*"),
   ];
   if kind == "service" {
-    paths.push(format!("/api/alerts/%/services/{name}"));
+    paths.push(format!("/api/alerts/*/services/{path}"));
   }
   if kind == "route" {
-    paths.push(format!("/api/oidc/clients/{name}/%"));
+    paths.push(format!("/api/oidc/clients/{path}/*"));
   }
   let detail = match kind {
-    "secret" => format!("%{name}%"),
+    "secret" => format!(",{name},"),
     "task" | "token" | "edge" | "account" => String::new(),
-    _ => format!("%{kind}/{name}%"),
+    _ => format!(" {kind}/{name} "),
   };
-  Ok((paths, detail))
+  Ok((paths, kind, detail))
 }
 
 /// `GET /api/audit`
@@ -544,31 +625,37 @@ fn query_rows(
      AND (NOT ?7 OR status >= 400 OR method IN ('login_failed', 'gate_key_failed'))"
   );
   let limit = q.limit.unwrap_or(100).min(500);
-  let errors = matches!(q.errors.as_deref(), Some("1" | "true"));
+  let errors = match q.errors.as_deref() {
+    Some("1" | "true") => true,
+    None | Some("0" | "false") => false,
+    _ => return Err(ApiError::invalid("errors 须为 true 或 false")),
+  };
   let mut bind: Vec<&dyn rusqlite::ToSql> = vec![
     &q.actor, &q.kind, &q.before, &since, &until, &q.status, &errors,
   ];
   let target =
     q.target.as_deref().map(target_patterns).transpose()?;
-  if let Some((paths, detail)) = &target {
+  if let Some((paths, kind, detail)) = &target {
     sql.push_str(" AND (");
     for (i, path) in paths.iter().enumerate() {
       if i > 0 {
         sql.push_str(" OR ");
       }
-      sql.push_str("path LIKE ? ESCAPE '\\'");
+      sql.push_str("path GLOB ?");
       bind.push(path);
     }
-    if !detail.is_empty() {
-      if q
-        .target
-        .as_deref()
-        .is_some_and(|t| t.trim().starts_with("secret/"))
-      {
-        sql.push_str(" OR (path = '/api/secrets/import' AND detail LIKE ? ESCAPE '\\')");
-      } else {
-        sql.push_str(" OR detail LIKE ? ESCAPE '\\'");
+    let detail_sql = match *kind {
+      "secret" => {
+        " OR (path = '/api/secrets/import' AND instr(detail, ' names=') > 0 AND instr(',' || substr(detail, instr(detail, ' names=') + 7) || ',', ?) > 0)"
       }
+      "" => " OR detail GLOB '*' || ? || '*'",
+      _ if !detail.is_empty() => {
+        " OR instr(' ' || replace(iif(instr(detail, ' 备注：') > 0, substr(detail, 1, instr(detail, ' 备注：') - 1), detail), ',', ' ') || ' ', ?) > 0"
+      }
+      _ => "",
+    };
+    if !detail_sql.is_empty() {
+      sql.push_str(detail_sql);
       bind.push(detail);
     }
     sql.push(')');
@@ -878,6 +965,35 @@ async fn audit_filters_recent_target_failures() {
     assert_eq!(filtered[0].status, Some(403));
     assert_eq!(query_rows(c, AuditQuery { errors: Some("true".into()), ..Default::default() })?.len(), 2);
     assert!(query_rows(c, AuditQuery { since: Some("10".into()), until: Some("1".into()), ..Default::default() }).is_err());
+    Ok(())
+  }).await.unwrap();
+}
+
+#[tokio::test]
+async fn audit_targets_match_case_sensitive_complete_tokens() {
+  let db = crate::db::Db::memory();
+  db.call(|c| {
+    for (path, detail) in [
+      ("/api/secrets/import", "created=1 updated=0 skipped=0 names=OTHER,DB_PASS_V2,db_pass"),
+      ("/api/secrets/import", "created=1 updated=0 skipped=0 names=OTHER,DB_PASS"),
+      ("/api/plan", "plan=p1 service/api-v2,server/s10 备注：service/api"),
+      ("/api/plan", "plan=p2 server/s1,service/api"),
+      ("/api/secrets/db_pass", ""),
+      ("/api/routes/a.example.test", ""),
+    ] {
+      c.execute("INSERT INTO audit_log (at,kind,actor,method,path,status,detail) VALUES (0,'api','fixture','POST',?1,200,?2)", params![path, detail]).map_err(sql_err)?;
+    }
+    let hits = |target: &str| query_rows(c, AuditQuery {
+      target: Some(target.into()), ..Default::default()
+    });
+    assert!(hits("secret/A")?.is_empty());
+    assert_eq!(hits("secret/DB_PASS")?.len(), 1);
+    assert_eq!(hits("service/api")?.len(), 1);
+    assert_eq!(hits("server/s1")?.len(), 1);
+    assert_eq!(hits("route/A.example.test.")?.len(), 1);
+    assert_eq!(query_rows(c, AuditQuery {
+      errors: Some("yes".into()), ..Default::default()
+    }).unwrap_err().code, wharf_api_types::ErrorCode::InvalidInput);
     Ok(())
   }).await.unwrap();
 }

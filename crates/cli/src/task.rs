@@ -18,6 +18,9 @@ use crate::{
   commands::out,
 };
 
+#[path = "task_set.rs"]
+mod edit;
+
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
 pub enum TaskCmd {
@@ -33,7 +36,27 @@ pub enum TaskCmd {
     reveal: bool,
   },
   /// 立即运行并等待结果；失败时退出码为 4。
-  Run { name: String },
+  Run {
+    name: String,
+    #[arg(long)]
+    env: Vec<String>,
+    #[arg(long)]
+    no_wait: bool,
+  },
+  Enable {
+    name: String,
+    #[arg(long)]
+    dry_run: bool,
+  },
+  Disable {
+    name: String,
+    #[arg(long)]
+    dry_run: bool,
+  },
+  Set(edit::SetArgs),
+  Cancel {
+    run_id: i64,
+  },
   /// 列出或下载任务运行产物。
   Artifacts(crate::task_artifacts::ArtifactArgs),
   /// 最近的运行记录，最新一条带完整输出。
@@ -41,6 +64,8 @@ pub enum TaskCmd {
     name: String,
     #[arg(short = 'n', long, default_value_t = 10)]
     limit: u32,
+    #[arg(long, conflicts_with = "limit")]
+    run: Option<i64>,
   },
   /// 删除任务和它的运行记录。
   Rm {
@@ -184,42 +209,38 @@ pub async fn task(
       let query = if reveal { "?reveal=true" } else { "" };
       let t: TaskView =
         c.get(&format!("/api/tasks/{}{query}", seg(&name))).await?;
-      out(j, &t, |t| {
-        println!(
-          "{}",
-          serde_json::to_string_pretty(&t.spec).unwrap_or_default()
-        );
-        if let Some(server) = &t.target_server {
-          println!("执行服务器：{server}");
-        } else if t.migrating {
-          println!("迁移中");
-        }
-        if let TaskKind::Script { runtime, code, .. } = &t.spec.how {
-          println!("运行环境：{}", runtime_name(*runtime));
-          if let Some(url) = &t.hook_url {
-            println!("触发地址：{url}");
-          }
-          print!("\n{code}");
-        }
-        if let Some(url) = &t.ping_url {
-          if reveal {
-            println!("\n报到：脚本成功后 curl -fsS -m 10 {url}");
-            println!("失败时：curl -fsS -m 10 {url}/fail");
-          } else {
-            println!("\n报到地址：{url}");
-          }
-        }
-        if !reveal && (t.ping_url.is_some() || t.hook_url.is_some()) {
-          println!("完整地址含口令，加上 --reveal 查看（需写权限）");
-        }
-      });
+      show(&t, reveal, j);
       Ok(())
     }
     TaskCmd::Artifacts(args) => {
       crate::task_artifacts::run(c, args, j).await
     }
-    TaskCmd::Run { name } => run(c, &name, j).await,
-    TaskCmd::Logs { name, limit } => {
+    TaskCmd::Run { name, env, no_wait } => {
+      run(c, &name, &env, no_wait, j).await
+    }
+    TaskCmd::Enable { name, dry_run } => {
+      edit::toggle(c, &name, true, dry_run, j).await
+    }
+    TaskCmd::Disable { name, dry_run } => {
+      edit::toggle(c, &name, false, dry_run, j).await
+    }
+    TaskCmd::Set(args) => edit::set(c, args, j).await,
+    TaskCmd::Cancel { run_id } => {
+      let v: serde_json::Value = c
+        .post(
+          &format!("/api/tasks/runs/{run_id}/cancel"),
+          &serde_json::json!({}),
+        )
+        .await?;
+      out(j, &v, |_| println!("已请求取消任务运行 #{run_id}"));
+      Ok(())
+    }
+    TaskCmd::Logs { name, limit, run } => {
+      if let Some(id) = run {
+        let v: TaskRunView = c.get(&run_path(&name, id)).await?;
+        out(j, &v, |r| println!("{}\n{}", line(r), r.output));
+        return Ok(());
+      }
       let v: Vec<TaskRunView> = c
         .get(&format!("/api/tasks/{}/runs?limit={limit}", seg(&name)))
         .await?;
@@ -266,7 +287,39 @@ pub async fn task(
   }
 }
 
-fn shell_join(args: &[String]) -> String {
+fn show(t: &TaskView, reveal: bool, j: bool) {
+  out(j, t, |t| {
+    println!(
+      "{}",
+      serde_json::to_string_pretty(&t.spec).unwrap_or_default()
+    );
+    if let Some(server) = &t.target_server {
+      println!("执行服务器：{server}");
+    } else if t.migrating {
+      println!("迁移中");
+    }
+    if let TaskKind::Script { runtime, code, .. } = &t.spec.how {
+      println!("运行环境：{}", runtime_name(*runtime));
+      if let Some(url) = &t.hook_url {
+        println!("触发地址：{url}");
+      }
+      print!("\n{code}");
+    }
+    if let Some(url) = &t.ping_url {
+      if reveal {
+        println!("\n报到：脚本成功后 curl -fsS -m 10 {url}");
+        println!("失败时：curl -fsS -m 10 {url}/fail");
+      } else {
+        println!("\n报到地址：{url}");
+      }
+    }
+    if !reveal && (t.ping_url.is_some() || t.hook_url.is_some()) {
+      println!("完整地址含口令，加上 --reveal 查看（需写权限）");
+    }
+  });
+}
+
+pub(super) fn shell_join(args: &[String]) -> String {
   if let [script] = args {
     return script.clone();
   }
@@ -496,34 +549,82 @@ fn need_server(s: Option<String>) -> Result<String, ApiError> {
   s.ok_or_else(|| ApiError::invalid("缺少 --server"))
 }
 
+fn run_path(name: &str, id: i64) -> String {
+  format!("/api/tasks/{}/runs/{id}", seg(name))
+}
+
 /// 触发后每 2 秒查一次，直到这条记录结束。
-async fn run(c: &Client, name: &str, j: bool) -> CliResult<()> {
+async fn run(
+  c: &Client,
+  name: &str,
+  env: &[String],
+  no_wait: bool,
+  j: bool,
+) -> CliResult<()> {
+  let body = if env.is_empty() {
+    serde_json::json!({})
+  } else {
+    let env = edit::parse_env(env)?;
+    c.require_exec_v2_core().await?;
+    serde_json::json!({ "env": env })
+  };
   let r: serde_json::Value = c
-    .post(
-      &format!("/api/tasks/{}/run", seg(name)),
-      &serde_json::json!({}),
-    )
+    .post(&format!("/api/tasks/{}/run", seg(name)), &body)
     .await?;
-  let id = r["id"].as_i64().unwrap_or_default();
+  let id = r["id"]
+    .as_i64()
+    .ok_or_else(|| ApiError::internal("缺少任务运行记录 id"))?;
+  if no_wait {
+    out(j, &r, |r| {
+      if r["status"] == "skipped" {
+        println!("上一次还没跑完，已跳过 #{id}");
+      } else {
+        println!("开始运行 {name}（#{id}）");
+        println!(
+          "查看：wharf task logs {name} --run {id}，取消：wharf task cancel {id}"
+        );
+      }
+    });
+    return Ok(());
+  }
   if !j {
     println!("开始运行 {name}（#{id}）");
   }
-  let done = loop {
-    let runs: Vec<TaskRunView> = c
-      .get(&format!("/api/tasks/{}/runs?limit=50", seg(name)))
-      .await?;
-    match runs.into_iter().find(|r| r.id == id) {
-      Some(r) if r.status != TaskStatus::Running => break r,
-      Some(_) => tokio::time::sleep(Duration::from_secs(2)).await,
-      None => {
-        return Err(ApiError::internal("运行记录不见了").into());
+  let path = run_path(name, id);
+  let wait = async {
+    loop {
+      let run: TaskRunView = match c.get(&path).await {
+        // 升级过渡期兼容尚未提供单条查询的控制面。
+        Err(CliError::Api(e))
+          if e.code == wharf_api_types::ErrorCode::NotFound =>
+        {
+          let runs: Vec<TaskRunView> = c
+            .get(&format!("/api/tasks/{}/runs?limit=50", seg(name)))
+            .await?;
+          runs.into_iter().find(|run| run.id == id).ok_or(e)?
+        }
+        result => result?,
+      };
+      if run.status != TaskStatus::Running {
+        break Ok::<_, CliError>(run);
       }
+      tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+  };
+  let done = tokio::select! {
+    result = wait => result?,
+    _ = tokio::signal::ctrl_c() => {
+      let hint = format!("任务 #{id} 仍在后台运行，可用 wharf task cancel {id} 取消");
+      if j {
+        crate::print::error(&ApiError::new(wharf_api_types::ErrorCode::Cancelled, "已停止本地等待").with_hint(hint), true);
+      } else {
+        eprintln!("已停止本地等待。{hint}");
+      }
+      return Err(CliError::Exit(130));
     }
   };
   let ok = done.status == TaskStatus::Succeeded;
-  out(j, &done, |r| {
-    println!("{}\n{}", line(r), r.output);
-  });
+  out(j, &done, |r| println!("{}\n{}", line(r), r.output));
   if ok { Ok(()) } else { Err(CliError::Exit(4)) }
 }
 
@@ -569,6 +670,7 @@ fn status(s: TaskStatus) -> &'static str {
     TaskStatus::Failed => "失败",
     TaskStatus::TimedOut => "超时",
     TaskStatus::Skipped => "跳过",
+    TaskStatus::Cancelled => "已取消",
   }
 }
 

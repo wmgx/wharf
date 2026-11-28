@@ -593,10 +593,30 @@ pub fn validate_task_restrictions(
   how: &TaskKind,
   restrictions: &Restrictions,
 ) -> Result<(), ApiError> {
+  validate_task_values(task, task_templates(how), restrictions)
+}
+
+pub(crate) fn validate_task_env<'a>(
+  task: &str,
+  values: impl Iterator<Item = &'a str> + Clone,
+  restrictions: &Restrictions,
+) -> Result<(), ApiError> {
+  let context = format!("任务 {task}");
+  for value in values.clone() {
+    reject_templates(value, &context)?;
+  }
+  validate_task_values(task, values, restrictions)
+}
+
+fn validate_task_values<'a>(
+  task: &str,
+  values: impl IntoIterator<Item = &'a str>,
+  restrictions: &Restrictions,
+) -> Result<(), ApiError> {
   if restrictions.is_empty() {
     return Ok(());
   }
-  for p in task_templates(how)
+  for p in values
     .into_iter()
     .flat_map(|text| placeholders_checked(text, false, true))
     .filter_map(Result::ok)

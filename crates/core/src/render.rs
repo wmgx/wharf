@@ -1,5 +1,8 @@
 //! 由期望状态渲染出 compose 文件和 Caddyfile。纯函数，不碰网络和数据库。
 
+pub(crate) use wharf_api_types::compose::{
+  merge_compose, parse_compose,
+};
 pub(crate) use wharf_api_types::references::{
   Placeholder, SecretMode, account_ref, next_placeholder,
   parse_placeholder, placeholders,
@@ -340,7 +343,7 @@ fn encode_secret(
   })
 }
 
-fn rewrite_placeholders(
+pub(crate) fn rewrite_placeholders(
   text: &str,
   service: bool,
   mut replace: impl FnMut(
@@ -485,30 +488,6 @@ fn yaml_contains(value: &Value, text: &str) -> bool {
   }
 }
 
-pub(crate) fn merge_compose(
-  value: &mut Value,
-) -> Result<(), serde_yaml_ng::Error> {
-  // 先展开被继承的映射，避免一层合并漏掉链式继承或改变优先级。
-  match value {
-    Value::Mapping(map) => {
-      for child in map.values_mut() {
-        merge_compose(child)?;
-      }
-      if map.contains_key("<<") {
-        value.apply_merge()?;
-      }
-    }
-    Value::Sequence(seq) => {
-      for child in seq {
-        merge_compose(child)?;
-      }
-    }
-    Value::Tagged(tag) => merge_compose(&mut tag.value)?,
-    _ => {}
-  }
-  Ok(())
-}
-
 pub fn expected_components(
   yaml: &str,
   active_profiles: &[String],
@@ -575,23 +554,6 @@ pub fn missing_components(
     .filter(|c| !present.contains(c.as_str()))
     .cloned()
     .collect()
-}
-
-pub(crate) fn parse_compose(
-  content: &str,
-) -> Result<Value, ApiError> {
-  let mut doc: Value =
-    serde_yaml_ng::from_str(content).map_err(|e| {
-      let location = e.location().map_or_else(String::new, |loc| {
-        format!("（第 {} 行第 {} 列）", loc.line(), loc.column())
-      });
-      ApiError::invalid(format!("compose 不是合法的 YAML{location}"))
-    })?;
-  merge_compose(&mut doc).map_err(|_| {
-    ApiError::invalid("compose YAML 锚点合并不合法")
-      .with_hint("检查 <<: *anchor 是否指向映射")
-  })?;
-  Ok(doc)
 }
 
 pub(crate) fn parse_compose_template(

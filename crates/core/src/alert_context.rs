@@ -70,6 +70,7 @@ pub async fn enrich(
                 server,
                 AgentOp::Logs {
                   project: service.to_string(),
+                  container: None,
                   tail: 30,
                   follow: false,
                   since: None,

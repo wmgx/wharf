@@ -16,6 +16,8 @@ pub struct TreeArgs {
   service: Option<String>,
   #[arg(long)]
   route: Option<String>,
+  #[arg(long)]
+  gateway: Option<String>,
 }
 
 #[derive(clap::Args)]
@@ -63,6 +65,7 @@ pub async fn tree(
     ("server", args.server),
     ("service", args.service),
     ("route", args.route),
+    ("gateway", args.gateway),
   ] {
     if let Some(value) = value {
       query.push(format!("{key}={}", seg(&value)));
@@ -91,6 +94,9 @@ pub async fn tree(
           let state = if active { "（已启用）" } else { "" };
           println!("├── {label}：{}{server}{state}", gateway.name);
         }
+      }
+      if let Some(target) = &r.target {
+        println!("├── 目标：{target}");
       }
       if let Some(link) = &r.link {
         println!("├── 链路：{link}");
@@ -133,7 +139,20 @@ fn service(s: &TreeServiceNode) {
     |state| format!(" [{state}]"),
   );
   println!("└── 服务：{}{server} {ports}{state}", s.name);
-  if !s.dependencies.is_empty() {
+  if !s.dependency_details.is_empty() {
+    for dep in &s.dependency_details {
+      let kind = if dep.kind == "shared_volume" {
+        "共享卷"
+      } else {
+        "服务引用"
+      };
+      let server = dep
+        .server
+        .as_deref()
+        .map_or_else(String::new, |name| format!(" ({name})"));
+      println!("    [{kind}] {}{server}", dep.service);
+    }
+  } else if !s.dependencies.is_empty() {
     println!("    依赖：{}", s.dependencies.join("、"));
   }
   if let Some(backup) = &s.backup_to {

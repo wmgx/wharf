@@ -142,6 +142,7 @@ pub fn check_service_scope(
       | ["", "api", "tasks", _]
       | ["", "api", "tasks", _, "runs" | "artifacts"]
       | ["", "api", "tasks", _, "runs", _, "artifacts", "download"]
+      | ["", "api", "tasks", _, "runs", _]
       | ["", "api", "runs", _, "logs"]
       | ["", "api", "plans" | "runs", _] => true,
       _ => false,

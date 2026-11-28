@@ -5,6 +5,7 @@ use std::{
 
 use wharf_api_types::{
   ApiError,
+  compose::owned_volumes,
   spec::{ServiceSpec, Source},
   validate_name,
   view::DataKind,
@@ -182,33 +183,6 @@ pub fn validate_world(world: &World) -> Result<(), ApiError> {
     }
   }
   Ok(())
-}
-
-fn owned_volumes(name: &str, spec: &ServiceSpec) -> BTreeSet<String> {
-  if let Source::Compose {
-    content: Some(content),
-    ..
-  } = &spec.source
-  {
-    let root = Path::new("/srv").join(name);
-    crate::data::compose_mounts(name, content)
-      .into_iter()
-      .filter(|m| m.kind == DataKind::Managed)
-      .filter_map(|m| {
-        let path = crate::render::normalized_mount_target(&m.source)?;
-        let volume = path.strip_prefix(&root).ok()?.to_str()?;
-        validate_name("数据卷", volume).ok()?;
-        Some(volume.to_string())
-      })
-      .collect()
-  } else {
-    spec
-      .volumes
-      .iter()
-      .filter(|v| v.from_service.is_none())
-      .map(|v| v.name.clone())
-      .collect()
-  }
 }
 
 pub fn implicit_warnings(

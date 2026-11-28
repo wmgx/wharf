@@ -22,7 +22,6 @@ use crate::{
   db, lint,
   snapshot::{self, Snapshot},
   state::AppState,
-  world::World,
 };
 
 #[derive(Default, Deserialize)]
@@ -34,13 +33,16 @@ pub struct LintQuery {
   strict: bool,
 }
 
+type Suppression =
+  (i64, String, Option<String>, String, Option<String>);
+
 #[derive(Default)]
 struct Rows {
   tasks: Vec<(String, TaskSpec, i64)>,
   gate_hosts: Vec<(String, String)>,
   custom: Vec<(String, String)>,
   overrides: Vec<(String, String)>,
-  suppressions: Vec<(i64, Option<String>, Option<String>)>,
+  suppressions: Vec<Suppression>,
 }
 
 pub async fn report(
@@ -71,8 +73,8 @@ pub async fn report(
       rows.gate_hosts = pairs("SELECT gate_keys.name, j.value FROM gate_keys, json_each(gate_keys.hosts) j")?;
       rows.custom = pairs("SELECT name, service FROM alert_custom_rules")?;
       rows.overrides = pairs("SELECT rule, service FROM alert_service_overrides")?;
-      let mut stmt = c.prepare("SELECT id, source_subject, target_subject FROM alert_suppressions").map_err(db::sql_err)?;
-      rows.suppressions = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+      let mut stmt = c.prepare("SELECT id, source_rule, source_subject, target_rule, target_subject FROM alert_suppressions").map_err(db::sql_err)?;
+      rows.suppressions = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
         .and_then(Iterator::collect).map_err(db::sql_err)?;
     }
     Ok(rows)
@@ -116,17 +118,17 @@ fn check_all(
     });
   };
   for (name, spec, _) in &rows.tasks {
-    let service = match &spec.how {
-      TaskKind::Exec { service, .. } if visible(service) => {
-        Some(service.as_str())
-      }
+    match &spec.how {
+      TaskKind::Exec { service, .. } if visible(service) => {}
       TaskKind::Exec { .. } => continue,
-      _ if global => None,
+      _ if global => {}
       _ => continue,
-    };
+    }
     let subject = format!("task/{name}");
     let remove = format!("wharf task rm {name}");
-    if !world.servers.contains_key(&spec.server) {
+    if !matches!(&spec.how, TaskKind::Exec { .. })
+      && !world.servers.contains_key(&spec.server)
+    {
       add(
         "dangling_task_server",
         Error,
@@ -139,11 +141,19 @@ fn check_all(
       service, container, ..
     } = &spec.how
       && world.services.get(service).is_none_or(|r| {
-        container.as_ref().is_some_and(|c| {
-          !crate::render::service_expected_components(
-            service, &r.spec,
-          )
-          .contains(c)
+        container.as_deref().is_some_and(|c| match &r.spec.source {
+          wharf_api_types::spec::Source::Compose {
+            content, ..
+          } => content
+            .as_deref()
+            .and_then(|yaml| crate::render::parse_compose(yaml).ok())
+            .is_some_and(|doc| {
+              doc
+                .get("services")
+                .and_then(|svcs| svcs.get(c))
+                .is_none()
+            }),
+          _ => c != service,
         })
       })
     {
@@ -163,11 +173,10 @@ fn check_all(
       })
       .collect::<BTreeSet<_>>();
     for name in names {
-      let restricted =
-        snap.secret_restrictions.get(name).is_some_and(|allowed| {
-          service.is_none_or(|s| !allowed.contains(s))
-        });
-      if !snap.secrets.contains_key(name) || restricted {
+      if !snap.secrets.contains_key(name)
+        || crate::secret_policy::is_system_secret(name)
+        || snap.secret_restrictions.contains_key(name)
+      {
         add(
           "dangling_task_secret",
           Error,
@@ -197,14 +206,32 @@ fn check_all(
     }
   }
   if global {
+    let gated = |host: &str| {
+      world
+        .routes
+        .get(host)
+        .and_then(|r| r.spec.sso.as_ref())
+        .is_some_and(|sso| sso.gated())
+    };
     for (name, host) in &rows.gate_hosts {
-      if world.routes.get(host).is_none_or(|r| r.spec.sso.is_none()) {
+      if !gated(host) {
+        let hosts = rows
+          .gate_hosts
+          .iter()
+          .filter(|(key, host)| key == name && gated(host))
+          .map(|(_, host)| format!(" --host {host}"))
+          .collect::<String>();
+        let command = if hosts.is_empty() {
+          format!("wharf gate key rm {name}")
+        } else {
+          format!("wharf gate key add {name}{hosts}")
+        };
         add(
           "stale_gate_key_host",
           Warning,
           format!("gate_key/{name}"),
           format!("域名 {host} 已失效"),
-          format!("wharf gate key rm {name}"),
+          command,
         );
       }
     }
@@ -260,8 +287,28 @@ fn check_all(
         }
       }
     }
-    for (id, a, b) in &rows.suppressions {
-      if a.iter().chain(b).any(|name| missing_subject(world, name)) {
+    for (id, a_rule, a, b_rule, b) in &rows.suppressions {
+      let missing = |rule: &str, subject: &str| {
+        let custom = rows.custom.iter().any(|(name, _)| name == rule);
+        crate::rules::subject_resources(rule, subject, custom)
+          .into_iter()
+          .any(|(kind, name)| match kind {
+            "server" => !world.servers.contains_key(name),
+            "service" => !world.services.contains_key(name),
+            "route" => {
+              !world.routes.contains_key(name)
+                && world.edge_domain(name).is_none()
+            }
+            "gateway" => !world.gateways.contains_key(name),
+            "task" => {
+              !rows.tasks.iter().any(|(task, _, _)| task == name)
+            }
+            _ => false,
+          })
+      };
+      if a.as_deref().is_some_and(|s| missing(a_rule, s))
+        || b.as_deref().is_some_and(|s| missing(b_rule, s))
+      {
         add(
           "stale_alert_suppression",
           Warning,
@@ -310,6 +357,12 @@ fn check_all(
     let roots = hosts
       .iter()
       .copied()
+      .chain(hosts.iter().filter_map(|host| {
+        let (_, parent) = host.split_once('.')?;
+        let (label, suffix) = parent.rsplit_once('.')?;
+        // 对可能是公共后缀的两层国家域名，只接受显式托管根域。
+        (label.contains('.') || suffix.len() != 2).then_some(parent)
+      }))
       .chain(world.gateways.values().flat_map(|r| {
         r.spec.wildcard.iter().map(|s| s.trim_start_matches("*."))
       }))
@@ -408,10 +461,8 @@ fn check_all(
       suggest: Vec::new(),
     });
   }
-  findings.retain(|f| {
-    q.category.as_ref().is_none_or(|c| c == &f.category)
-      && q.severity.is_none_or(|s| f.severity >= s)
-  });
+  findings
+    .retain(|f| q.category.as_ref().is_none_or(|c| c == &f.category));
   findings.sort_by(|a, b| {
     (b.severity, &a.subject, &a.id, &a.message)
       .cmp(&(a.severity, &b.subject, &b.id, &b.message))
@@ -424,26 +475,11 @@ fn check_all(
       Info => summary.info += 1,
     }
   }
+  findings.retain(|f| q.severity.is_none_or(|s| f.severity >= s));
   LintReport {
     ok: summary.error == 0 && (!q.strict || summary.warning == 0),
     summary,
     findings,
-  }
-}
-
-fn missing_subject(world: &World, name: &str) -> bool {
-  let (kind, name) = name.split_once('/').unwrap_or(("", name));
-  match kind {
-    "server" => !world.servers.contains_key(name),
-    "service" => !world.services.contains_key(name),
-    "route" => !world.routes.contains_key(name),
-    _ => {
-      !world.servers.contains_key(name)
-        && !world.services.contains_key(name)
-        && !world.routes.contains_key(name)
-        && !world.gateways.contains_key(name)
-        && !world.edge_apps.contains_key(name)
-    }
   }
 }
 
@@ -499,4 +535,161 @@ fn lint_reports_stale_objects_without_matching_external_bookmark() {
   assert!(report.findings.iter().all(|f| !f.suggest.is_empty()
     && f.subject != "bookmark/external"
     && f.subject != "bookmark/public-suffix"));
+}
+
+#[test]
+fn lint_validates_suppression_subjects_by_rule_and_keeps_strict_warnings()
+ {
+  use serde_json::json;
+  let mut snap = Snapshot::default();
+  for name in ["s1", "s2"] {
+    snap.world.servers.insert(
+      name.into(),
+      crate::world::ServerRow {
+        settings: Default::default(),
+        version: 0,
+      },
+    );
+  }
+  let fleet = serde_json::from_value(json!({
+    "services":{"api":{"server":"s1","source":{"image":"app:1"}}}
+  }))
+  .unwrap();
+  snap.world.merge_with(&fleet).unwrap();
+  let task = serde_json::from_value(json!({
+    "server":"s1","schedule":"","kind":"host","command":"true"
+  }))
+  .unwrap();
+  let rows = Rows {
+    tasks: vec![("sync".into(), task, 0)],
+    suppressions: vec![
+      (
+        1,
+        "host_unit_down".into(),
+        Some("s1:db".into()),
+        "task".into(),
+        Some("sync".into()),
+      ),
+      (
+        2,
+        "link_loss".into(),
+        Some("s1>s2".into()),
+        "port_down".into(),
+        Some("api:http".into()),
+      ),
+      (
+        3,
+        "mem_forecast".into(),
+        Some("服务器 s1".into()),
+        "vendor_token_invalid".into(),
+        Some("cloud".into()),
+      ),
+      (
+        4,
+        "server_offline".into(),
+        Some("absent".into()),
+        "task".into(),
+        Some("sync".into()),
+      ),
+    ],
+    ..Default::default()
+  };
+  let all = check_all(&snap, &rows, None, &LintQuery::default(), 0);
+  let stale = all
+    .findings
+    .iter()
+    .filter(|f| f.id == "stale_alert_suppression")
+    .map(|f| f.subject.as_str())
+    .collect::<Vec<_>>();
+  assert_eq!(stale, ["alert_suppression/4"]);
+  let strict = check_all(
+    &snap,
+    &rows,
+    None,
+    &LintQuery {
+      strict: true,
+      severity: Some(LintSeverity::Error),
+      ..Default::default()
+    },
+    0,
+  );
+  assert!(!strict.ok);
+  assert_eq!(strict.summary.warning, 1);
+  assert!(strict.findings.is_empty());
+}
+
+#[test]
+fn lint_exec_uses_actual_service_and_rejects_restricted_secrets() {
+  use serde_json::json;
+  let mut snap = Snapshot::default();
+  snap.world.servers.insert(
+    "s2".into(),
+    crate::world::ServerRow {
+      settings: Default::default(),
+      version: 0,
+    },
+  );
+  let fleet = serde_json::from_value(json!({
+    "services":{"api":{"server":"s2","source":{"compose":{"content":"services: { worker: { image: app:1, restart: 'no', profiles: [batch] } }"}}}}
+  })).unwrap();
+  snap.world.merge_with(&fleet).unwrap();
+  snap
+    .secrets
+    .insert("DB_PASS".into(), "fixture-value".into());
+  snap
+    .secret_restrictions
+    .insert("DB_PASS".into(), ["api".into()].into());
+  let task = serde_json::from_value(json!({
+    "server":"s1","schedule":"","kind":"exec","service":"api","container":"worker","command":"echo [[DB_PASS]]"
+  })).unwrap();
+  let rows = Rows {
+    tasks: vec![("sync".into(), task, 0)],
+    ..Default::default()
+  };
+  let report =
+    check_all(&snap, &rows, None, &LintQuery::default(), 0);
+  let errors = report
+    .findings
+    .iter()
+    .filter(|f| f.severity == LintSeverity::Error)
+    .map(|f| f.id.as_str())
+    .collect::<Vec<_>>();
+  assert_eq!(errors, ["dangling_task_secret"]);
+}
+
+#[test]
+fn lint_gate_key_retains_gated_hosts_and_finds_sibling_bookmark() {
+  use serde_json::json;
+  let mut snap = Snapshot::default();
+  let fleet = serde_json::from_value(json!({
+    "routes":[
+      {"hostname":"live.example.test","upstream":"app.test:80","sso":{"mode":"gate"}},
+      {"hostname":"public.example.test","upstream":"app.test:80","sso":{"mode":"oidc","public":true,"oidc":{"redirect_uris":["/callback"]}}}
+    ],
+    "bookmarks":{"dead":{"title":"dead","url":"https://gone.example.test"}}
+  })).unwrap();
+  snap.world.merge_with(&fleet).unwrap();
+  let rows = Rows {
+    gate_hosts: vec![
+      ("mixed".into(), "live.example.test".into()),
+      ("mixed".into(), "public.example.test".into()),
+    ],
+    ..Default::default()
+  };
+  let report =
+    check_all(&snap, &rows, None, &LintQuery::default(), 0);
+  let stale = report
+    .findings
+    .iter()
+    .find(|f| f.id == "stale_gate_key_host")
+    .unwrap();
+  assert_eq!(
+    stale.suggest,
+    ["wharf gate key add mixed --host live.example.test"]
+  );
+  assert!(
+    report.findings.iter().any(
+      |f| f.id == "dead_bookmark" && f.subject == "bookmark/dead"
+    )
+  );
 }

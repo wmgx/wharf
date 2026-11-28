@@ -80,43 +80,46 @@ pub async fn run(
   };
   if args.dry_run {
     let existing: Vec<SecretView> = c.get("/api/secrets").await?;
-    let mut actions = BTreeMap::new();
-    let mut conflicts = Vec::new();
-    for name in items.keys() {
-      let action = if existing.iter().any(|v| &v.name == name) {
-        match mode {
-          SecretImportMode::OnlyMissing => "skip",
-          SecretImportMode::Overwrite => "update",
-          SecretImportMode::FailOnConflict => {
-            conflicts.push(name);
-            "conflict"
-          }
-        }
-      } else {
-        "create"
-      };
-      actions.insert(name, action);
-    }
-    if !conflicts.is_empty() {
-      return Err(
-        ApiError::new(ErrorCode::Conflict, "预览发现同名密钥")
-          .with_hint("加 --only-missing 或 --overwrite")
-          .with_details(
-            json!({ "conflicts": conflicts, "actions": actions }),
-          )
-          .into(),
-      );
-    }
-    out(j, &actions, |actions| {
-      for (name, action) in actions {
-        println!("{action}  {name}");
-      }
-    });
+    let result = preview(items.into_keys(), &existing, mode)?;
+    out(j, &result, show);
     return Ok(());
   }
   let result = import(c, items, mode, args.keep_days).await?;
   out(j, &result, show);
   Ok(())
+}
+
+fn preview(
+  names: impl IntoIterator<Item = String>,
+  existing: &[SecretView],
+  mode: SecretImportMode,
+) -> Result<SecretImportResponse, ApiError> {
+  let mut result = SecretImportResponse::default();
+  let mut conflicts = Vec::new();
+  for name in names {
+    if existing.iter().any(|v| v.name == name) {
+      match mode {
+        SecretImportMode::OnlyMissing => result.skipped.push(name),
+        SecretImportMode::Overwrite => result.updated.push(name),
+        SecretImportMode::FailOnConflict => conflicts.push(name),
+      }
+    } else {
+      result.created.push(name);
+    }
+  }
+  if !conflicts.is_empty() {
+    return Err(
+      ApiError::new(
+        ErrorCode::Conflict,
+        format!("预览发现同名密钥：{}", conflicts.join("、")),
+      )
+      .with_hint("加 --only-missing 或 --overwrite")
+      .with_details(json!({"conflicts": conflicts})),
+    );
+  }
+  result.needs_plan =
+    !result.created.is_empty() || !result.updated.is_empty();
+  Ok(result)
 }
 
 pub(crate) async fn import(
@@ -145,4 +148,25 @@ fn show(result: &SecretImportResponse) {
   if result.needs_plan {
     println!("下一步：wharf plan");
   }
+}
+
+#[test]
+fn import_preview_lists_all_conflicts_and_matches_receipt_schema() {
+  let existing = ["API_KEY", "DB_PASS"].map(|name| {
+    serde_json::from_value(json!({
+      "name":name, "updated_at":"2026-11-28T00:00:00Z",
+      "used_by":[], "has_previous":false, "managed":false
+    }))
+    .unwrap()
+  });
+  let names = || ["API_KEY", "DB_PASS", "NEW_KEY"].map(str::to_owned);
+  let error =
+    preview(names(), &existing, SecretImportMode::FailOnConflict)
+      .unwrap_err();
+  assert!(error.message.contains("API_KEY、DB_PASS"));
+  let receipt =
+    preview(names(), &existing, SecretImportMode::Overwrite).unwrap();
+  let body = serde_json::to_value(receipt).unwrap();
+  assert_eq!(body["created"], json!(["NEW_KEY"]));
+  assert_eq!(body["updated"], json!(["API_KEY", "DB_PASS"]));
 }

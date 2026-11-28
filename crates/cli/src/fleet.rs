@@ -401,11 +401,10 @@ pub fn validate(path: &Path) -> serde_json::Value {
           ));
           continue;
         };
-        if fleet
-          .services
-          .get(owner)
-          .is_none_or(|s| !s.volumes.iter().any(|v| v.name == vol))
-        {
+        if fleet.services.get(owner).is_none_or(|s| {
+          !wharf_api_types::compose::owned_volumes(owner, s)
+            .contains(vol)
+        }) {
           missing.push(format!(
             "服务 {name} 的共享卷来源 {reference} 文件里没有"
           ));
@@ -676,4 +675,21 @@ caddy_file = "./extra.caddy""#;
       && err.contains("services/dup.toml")
       && err.contains("routes/dup.toml")
   );
+}
+
+#[test]
+fn validate_accepts_compose_owned_volume() {
+  let file = tempfile::NamedTempFile::new().unwrap();
+  std::fs::write(file.path(), r#"
+[servers.s1]
+[services.photos]
+server = "s1"
+source = { compose = { content = "services: { photos: { image: app:1, volumes: ['/srv/photos/originals:/data'] } }" } }
+[services.reader]
+server = "s1"
+source = { image = "app:1" }
+volumes = [{ name = "orig", target = "/orig", from_service = "photos:originals" }]
+"#).unwrap();
+  let result = validate(file.path());
+  assert_eq!(result["ok"], true, "{result}");
 }

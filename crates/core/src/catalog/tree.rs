@@ -4,8 +4,8 @@ use wharf_api_types::{
   ApiError,
   spec::{GatewayKind, GatewayTls},
   view::{
-    TreeGatewayNode, TreeRouteNode, TreeServerNode, TreeServiceNode,
-    TreeView,
+    TreeDependency, TreeGatewayNode, TreeRouteNode, TreeServerNode,
+    TreeServiceNode, TreeView,
   },
 };
 
@@ -16,14 +16,26 @@ pub(super) fn build_tree(
   snap: &Snapshot,
   scope: Option<&BTreeSet<String>>,
   q: &TreeQuery,
+  live: &crate::views::LiveMap,
 ) -> Result<TreeView, ApiError> {
   let world = &snap.world;
   let mut server = q.server.as_deref();
   let mut service = q.service.as_deref();
-  let mut route = q.route.as_deref();
-  let mut gateway = None;
-  let choices =
-    [server, service, route].into_iter().flatten().count();
+  let explicit_route = q
+    .route
+    .as_deref()
+    .map(crate::world::normalize_hostname)
+    .transpose()?;
+  let inferred_route = q
+    .target
+    .as_deref()
+    .and_then(|name| crate::world::normalize_hostname(name).ok());
+  let mut route = explicit_route.as_deref();
+  let mut gateway = q.gateway.as_deref();
+  let choices = [server, service, route, gateway]
+    .into_iter()
+    .flatten()
+    .count();
   if choices > 1 || choices != 0 && q.target.is_some() {
     return Err(ApiError::invalid("树视图只能选一个目标"));
   }
@@ -37,12 +49,13 @@ pub(super) fn build_tree(
       server = Some(target);
       found += 1;
     }
-    if world
-      .routes
-      .get(target)
-      .is_some_and(|r| route_visible(scope, &r.spec))
+    if let Some(host) = inferred_route.as_deref()
+      && world
+        .routes
+        .get(host)
+        .is_some_and(|r| route_visible(scope, &r.spec))
     {
-      route = Some(target);
+      route = Some(host);
       found += 1;
     }
     if scope.is_none() && world.gateways.contains_key(target) {
@@ -53,10 +66,9 @@ pub(super) fn build_tree(
       0 => return Err(ApiError::not_found("未找到树视图目标")),
       1 => {}
       _ => {
-        return Err(
-          ApiError::invalid("目标名称有重复")
-            .with_hint("用 --server、--service 或 --route 明确指定"),
-        );
+        return Err(ApiError::invalid("目标名称有重复").with_hint(
+          "用 --server、--service、--route 或 --gateway 明确指定",
+        ));
       }
     }
   }
@@ -64,6 +76,8 @@ pub(super) fn build_tree(
     scope.is_some() || !world.servers.contains_key(n)
   }) || service.is_some_and(|n| {
     !visible(scope, n) || !world.services.contains_key(n)
+  }) || gateway.is_some_and(|n| {
+    scope.is_some() || !world.gateways.contains_key(n)
   }) || route.is_some_and(|n| {
     !world
       .routes
@@ -92,6 +106,34 @@ pub(super) fn build_tree(
         )
       })
       .collect();
+    let mut deps = BTreeSet::new();
+    for (_, text) in crate::missing_refs::service_texts(&row.spec) {
+      deps.extend(
+        wharf_api_types::references::placeholders(text)
+          .filter_map(wharf_api_types::references::parse_service_ref)
+          .map(|r| (r.service, "service_ref")),
+      );
+    }
+    deps.extend(row.spec.volumes.iter().filter_map(|v| {
+      let (owner, _) =
+        crate::shared_volumes::parse_ref(v.from_service.as_deref()?)
+          .ok()?;
+      Some((owner, "shared_volume"))
+    }));
+    let dependency_details = deps
+      .into_iter()
+      .filter(|(n, _)| visible(scope, n))
+      .map(|(n, kind)| TreeDependency {
+        service: n.into(),
+        server: scope
+          .is_none()
+          .then(|| {
+            world.services.get(n).map(|row| row.spec.server.clone())
+          })
+          .flatten(),
+        kind: kind.into(),
+      })
+      .collect();
     Some(TreeServiceNode {
       name: name.into(),
       server: scope.is_none().then(|| row.spec.server.clone()),
@@ -100,19 +142,24 @@ pub(super) fn build_tree(
         .into_iter()
         .filter(|n| visible(scope, n))
         .collect(),
+      dependency_details,
       backup_to: scope
         .is_none()
         .then(|| row.spec.backup.as_ref().map(|b| b.to.clone()))
         .flatten(),
       stopped: row.spec.stopped,
-      state: crate::snapshot::service_runtime_server(snap, name)
-        .and_then(|server| {
-          crate::views::cached_project_state(
+      state: crate::snapshot::service_runtime_server(snap, name).map(
+        |server| {
+          crate::views::live_of(
+            live,
             server,
             name,
+            None,
             row.spec.stopped,
           )
-        }),
+          .state
+        },
+      ),
     })
   };
   let on_server = |name| {
@@ -196,7 +243,9 @@ pub(super) fn build_tree(
         .is_none()
         .then(|| backup.map(gateway_node))
         .flatten(),
-      backup_active: scope.is_none() && crate::failover::active(host),
+      backup_active: scope.is_none()
+        && backup.is_some()
+        && crate::failover::active(host),
       link: scope
         .is_none()
         .then_some(chain)
@@ -204,6 +253,16 @@ pub(super) fn build_tree(
         .map(str::to_string),
       service: node(&spec.service),
       port: world.route_port(spec).map(str::to_string),
+      target: scope
+        .is_none()
+        .then(|| {
+          spec
+            .redirect
+            .as_ref()
+            .or(spec.upstream.as_ref())
+            .map(|url| crate::redact::redact_command(url))
+        })
+        .flatten(),
       path_services: targets
         .into_iter()
         .filter(|n| *n != spec.service)

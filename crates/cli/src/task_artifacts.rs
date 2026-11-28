@@ -3,7 +3,6 @@ use std::{
   path::{Path, PathBuf},
 };
 
-use serde_json::json;
 use wharf_api_types::{ApiError, view::TaskArtifactsView};
 
 use crate::{
@@ -63,15 +62,10 @@ pub async fn run(
     .file_name()
     .ok_or_else(|| ApiError::invalid("产物文件名不对"))?;
   let target = args.output.unwrap_or_else(|| PathBuf::from(file));
-  let id = match args.run {
-    Some(id) => id,
-    None => {
-      let result: TaskArtifactsView = c.get(&list_path).await?;
-      result
-        .run_id
-        .ok_or_else(|| ApiError::not_found("该任务没有运行产物"))?
-    }
-  };
+  let result: TaskArtifactsView = c.get(&list_path).await?;
+  let id = result
+    .run_id
+    .ok_or_else(|| ApiError::not_found("该任务没有运行产物"))?;
   let url = format!(
     "/api/tasks/{name}/runs/{id}/artifacts/download?path={}",
     seg(&path)
@@ -85,12 +79,8 @@ pub async fn run(
       .map_err(|_| ApiError::internal("写入标准输出失败").into());
   }
   let size = download_to(c, &url, &target).await?;
-  out(
-    j,
-    &json!({ "task": args.name, "run_id": id, "path": target, "size": size }),
-    |_| {
-      println!("已下载到 {}（{size} B）", target.display());
-    },
-  );
+  out(j, &result, |_| {
+    println!("已下载到 {}（{size} B）", target.display());
+  });
   Ok(())
 }

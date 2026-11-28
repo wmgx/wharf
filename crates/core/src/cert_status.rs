@@ -260,6 +260,7 @@ pub async fn status(
       &server,
       AgentOp::Logs {
         project: crate::world::gateway_project(&gateway),
+        container: None,
         tail: LOG_TAIL,
         follow: false,
         since: None,

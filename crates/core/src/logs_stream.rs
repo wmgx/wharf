@@ -33,6 +33,8 @@ const BACKLOG: usize = 2000;
 
 #[derive(Deserialize)]
 pub struct FollowQuery {
+  #[serde(default)]
+  container: Option<String>,
   #[serde(default = "default_tail")]
   tail: u32,
 }
@@ -51,7 +53,24 @@ pub async fn service(
   let snap = snapshot::load(&s.db).await?;
   let (server, project) =
     crate::multi_logs::service_target(&snap, &name)?;
-  Ok(follow(s, server.to_string(), project, q.tail))
+  crate::service_container::validate(
+    &snap.world.services[&name],
+    &name,
+    q.container.as_deref(),
+  )?;
+  let conn = q
+    .container
+    .as_ref()
+    .map(|_| s.hub.exec_v2_conn_id(server, "按子容器看日志"))
+    .transpose()?;
+  Ok(follow(
+    s,
+    server.to_string(),
+    project,
+    q.tail,
+    q.container,
+    conn,
+  ))
 }
 
 pub async fn gateway(
@@ -72,6 +91,8 @@ pub async fn gateway(
     row.spec.server.clone(),
     gateway_project(&name),
     q.tail,
+    None,
+    None,
   ))
 }
 
@@ -80,6 +101,8 @@ fn follow(
   server: String,
   project: String,
   tail: u32,
+  container: Option<String>,
+  conn: Option<u64>,
 ) -> Response {
   let (tx, rx) = mpsc::channel::<String>(BACKLOG);
   let cancel = CancellationToken::new();
@@ -91,10 +114,12 @@ fn follow(
   tokio::spawn(async move {
     let result = state
       .hub
-      .call::<String>(
+      .call_optional_bound::<String>(
         &server,
+        conn,
         AgentOp::Logs {
           project,
+          container,
           tail,
           follow: true,
           since: None,

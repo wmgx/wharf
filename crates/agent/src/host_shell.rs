@@ -5,7 +5,7 @@ use std::{
   io::{Read, Write},
   path::Path,
   process::Stdio,
-  sync::atomic::{AtomicU64, Ordering},
+  sync::atomic::{AtomicU64, AtomicUsize, Ordering},
   time::{Duration, Instant},
 };
 
@@ -311,6 +311,7 @@ impl HostShell {
     ctx: &Ctx,
   ) -> Result<String, ApiError> {
     let job = HostExecJob {
+      stream: false,
       command: command.into(),
       timeout_secs: SESSION_CMD_TIMEOUT,
       cwd: "/".into(),
@@ -377,8 +378,17 @@ impl HostShell {
         0,
       )
     })?;
-    let mut stdout = tokio::spawn(capture(child.stdout.take()));
-    let mut stderr = tokio::spawn(capture(child.stderr.take()));
+    let stream = StreamOutput::new(job.stream, ctx);
+    let mut stdout = tokio::spawn(capture(
+      child.stdout.take(),
+      stream.clone(),
+      false,
+    ));
+    let mut stderr = tokio::spawn(capture(
+      child.stderr.take(),
+      stream.clone(),
+      true,
+    ));
     let deadline =
       tokio::time::sleep(Duration::from_secs(job.timeout_secs));
     tokio::pin!(deadline);
@@ -407,13 +417,13 @@ impl HostShell {
       finish_stderr(err, marker_prefix.as_bytes())
         .map_err(|e| (e, output_bytes))?;
     let output_bytes = out.total.saturating_add(err.total);
-    let (stdout, stdout_truncated) = output_text(out);
-    let (stderr, stderr_truncated) = output_text(err);
+    let (stdout, stderr, truncated) =
+      complete_output(out, err, stream.as_ref());
     Ok(HostExecResult {
       exit_code,
       stdout,
       stderr,
-      truncated: stdout_truncated || stderr_truncated,
+      truncated,
       duration_ms: 0,
       output_bytes,
     })
@@ -533,13 +543,17 @@ fn validate_exec(job: &HostExecJob) -> Result<(), ApiError> {
 }
 
 #[derive(Default)]
-struct Captured {
+pub(crate) struct Captured {
   kept: Vec<u8>,
   tail: Vec<u8>,
-  total: u64,
+  pub(crate) total: u64,
 }
 
 impl Captured {
+  pub(crate) fn tail(&self) -> &[u8] {
+    &self.tail
+  }
+
   fn push(&mut self, chunk: &[u8]) {
     self.total = self.total.saturating_add(chunk.len() as u64);
     let remaining = OUTPUT_LIMIT.saturating_sub(self.kept.len());
@@ -553,8 +567,10 @@ impl Captured {
   }
 }
 
-async fn capture(
+pub(crate) async fn capture(
   stream: Option<impl tokio::io::AsyncRead + Unpin>,
+  output: Option<std::sync::Arc<StreamOutput>>,
+  stderr: bool,
 ) -> Captured {
   let Some(mut stream) = stream else {
     return Captured::default();
@@ -565,12 +581,24 @@ async fn capture(
     if n == 0 {
       break;
     }
-    captured.push(&buf[..n]);
+    if let Some(output) = &output {
+      captured.total = captured.total.saturating_add(n as u64);
+      if stderr {
+        captured.tail.extend_from_slice(&buf[..n]);
+        let ready = captured.tail.len().saturating_sub(TAIL_LIMIT);
+        output.send(true, &captured.tail[..ready]);
+        captured.tail.drain(..ready);
+      } else {
+        output.send(false, &buf[..n]);
+      }
+    } else {
+      captured.push(&buf[..n]);
+    }
   }
   captured
 }
 
-async fn finish_capture(
+pub(crate) async fn finish_capture(
   task: &mut tokio::task::JoinHandle<Captured>,
 ) -> Captured {
   match tokio::time::timeout(Duration::from_secs(2), &mut *task).await
@@ -583,7 +611,7 @@ async fn finish_capture(
   }
 }
 
-fn finish_stderr(
+pub(crate) fn finish_stderr(
   mut captured: Captured,
   marker: &[u8],
 ) -> Result<(Captured, i32), ApiError> {
@@ -592,10 +620,7 @@ fn finish_stderr(
     .windows(marker.len())
     .rposition(|w| w == marker)
     .ok_or_else(|| {
-      ApiError::new(
-        ErrorCode::AgentFailed,
-        "宿主机命令没有返回退出状态",
-      )
+      ApiError::new(ErrorCode::AgentFailed, "命令没有返回退出状态")
     })?;
   let digits = start + marker.len();
   let end = digits
@@ -613,11 +638,68 @@ fn finish_stderr(
     .and_then(|s| s.parse().ok())
     .ok_or_else(|| ApiError::internal("宿主机命令退出状态不合法"))?;
   let marker_len = marker.len() + end - digits + 1;
+  captured.tail.truncate(start);
   captured.total = captured.total.saturating_sub(marker_len as u64);
   captured
     .kept
     .truncate(captured.kept.len().min(captured.total as usize));
   Ok((captured, code))
+}
+
+pub(crate) struct StreamOutput {
+  ctx: Ctx,
+  bytes: AtomicUsize,
+}
+
+impl StreamOutput {
+  pub(crate) fn new(
+    enabled: bool,
+    ctx: &Ctx,
+  ) -> Option<std::sync::Arc<Self>> {
+    enabled.then(|| {
+      std::sync::Arc::new(Self {
+        ctx: ctx.clone(),
+        bytes: AtomicUsize::new(0),
+      })
+    })
+  }
+
+  fn send(&self, stderr: bool, chunk: &[u8]) {
+    const LIMIT: usize = 1024 * 1024;
+    if chunk.is_empty() {
+      return;
+    }
+    let offset = self.bytes.fetch_add(chunk.len(), Ordering::Relaxed);
+    let n = (LIMIT.saturating_sub(offset)).min(chunk.len());
+    if n > 0 {
+      self.ctx.say(
+        serde_json::json!({
+          "s": if stderr { "err" } else { "out" },
+          "d": STANDARD.encode(&chunk[..n])
+        })
+        .to_string(),
+      );
+    }
+  }
+}
+
+pub(crate) fn complete_output(
+  out: Captured,
+  err: Captured,
+  stream: Option<&std::sync::Arc<StreamOutput>>,
+) -> (String, String, bool) {
+  if let Some(stream) = stream {
+    stream.send(true, &err.tail);
+    (
+      String::new(),
+      String::new(),
+      stream.bytes.load(Ordering::Relaxed) > 1024 * 1024,
+    )
+  } else {
+    let (stdout, a) = output_text(out);
+    let (stderr, b) = output_text(err);
+    (stdout, stderr, a || b)
+  }
 }
 
 fn output_text(captured: Captured) -> (String, bool) {
@@ -647,7 +729,7 @@ fn missing_container(stderr: &str) -> bool {
     || stderr.contains("No such object")
 }
 
-fn random_id() -> String {
+pub(crate) fn random_id() -> String {
   let mut bytes = [0u8; 8];
   getrandom::fill(&mut bytes).expect("随机数不可用");
   hex::encode(bytes)
@@ -656,6 +738,21 @@ fn random_id() -> String {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn streaming_stderr_strips_marker_at_every_split() {
+    let prefix = b"\n__WHARF_EXIT_fixture__=";
+    let marker = b"\n__WHARF_EXIT_fixture__=2\n";
+    for split in 1..marker.len() {
+      let mut captured = Captured::default();
+      captured.push(b"hello\n");
+      captured.push(&marker[..split]);
+      captured.push(&marker[split..]);
+      let (output, code) = finish_stderr(captured, prefix).unwrap();
+      assert_eq!(output.tail, b"hello\n");
+      assert_eq!(code, 2);
+    }
+  }
 
   #[test]
   fn capture_keeps_exact_prefix_and_exit_marker() {
@@ -692,6 +789,7 @@ mod tests {
   #[test]
   fn validates_exec_boundaries() {
     let valid = HostExecJob {
+      stream: false,
       command: "printf ok".into(),
       timeout_secs: 600,
       cwd: "/tmp".into(),
