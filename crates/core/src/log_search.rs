@@ -685,6 +685,26 @@ mod tests {
   }
 
   #[test]
+  fn blank_excludes_keep_logs_in_text_and_regex_modes() {
+    for query in [
+      "exclude=&exclude=+&exclude=skip",
+      "exclude=&exclude=+&exclude=skip&regex=true",
+    ] {
+      let filters = Filters::query(Some(query)).unwrap();
+      let options = Options {
+        grep: None,
+        errors: false,
+        max_line: 500,
+        limit: 20,
+        filters: Some(&filters),
+        until: None,
+      };
+      let found = search("keep this\nskip this\n", &options).unwrap();
+      assert_eq!(found.logs.as_deref(), Some("keep this\n"));
+    }
+  }
+
+  #[test]
   fn json_fields_and_cutoff_filter_before_projection() {
     let f = Filters::query(Some("where=status%3E%3D500&where=req.method%3DPOST&cols=time,req.path,status,ms")).unwrap();
     let mut o = Options {

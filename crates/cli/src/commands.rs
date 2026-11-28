@@ -2785,7 +2785,7 @@ async fn service(
           },
         )
         .await?;
-      if !j {
+      if !j && !print::is_quiet() {
         println!("导入为服务 {}", v.name);
         for w in &v.warnings {
           println!("  提醒：{w}");
@@ -3103,30 +3103,35 @@ async fn service(
       let v: Vec<DeploymentView> = c
         .get(&format!("/api/services/{}/deployments", seg(&name)))
         .await?;
-      out(j, &v, |v| {
-        for d in v {
-          let images: Vec<String> = d
-            .commit
-            .iter()
-            .map(|c| format!("commit {}", &c[..c.len().min(12)]))
-            .chain(d.images.iter().map(|i| {
-              i.digest.clone().unwrap_or_else(|| i.image.clone())
-            }))
-            .collect();
-          println!(
-            "#{} {} {} {}  {}",
-            d.id,
-            d.created_at.format("%m-%d %H:%M"),
-            d.server,
-            d.run_id,
-            if d.started {
-              images.join(" ")
-            } else {
-              format!("未启动 {}", images.join(" "))
-            }
-          );
-        }
-      });
+      out_quiet(
+        j,
+        &v,
+        |v| v.iter().map(|d| d.id.to_string()).collect(),
+        |v| {
+          for d in v {
+            let images: Vec<String> = d
+              .commit
+              .iter()
+              .map(|c| format!("commit {}", &c[..c.len().min(12)]))
+              .chain(d.images.iter().map(|i| {
+                i.digest.clone().unwrap_or_else(|| i.image.clone())
+              }))
+              .collect();
+            println!(
+              "#{} {} {} {}  {}",
+              d.id,
+              d.created_at.format("%m-%d %H:%M"),
+              d.server,
+              d.run_id,
+              if d.started {
+                images.join(" ")
+              } else {
+                format!("未启动 {}", images.join(" "))
+              }
+            );
+          }
+        },
+      );
       Ok(())
     }
     ServiceCmd::Deploy {
@@ -3985,7 +3990,7 @@ async fn gateway(
         .rotate_link(&name, link_token || both, cert || both)
         .await?;
       if apply.apply {
-        if !j {
+        if !j && !print::is_quiet() {
           print::rotate_link(&response);
         }
         plan_and_maybe_apply(c, PlanRequest::default(), apply, j)
@@ -5724,13 +5729,15 @@ async fn finish_secret_rotation(
   j: bool,
 ) -> CliResult<()> {
   if flags.apply && response.needs_plan {
-    if !j {
+    if !j && !print::is_quiet() {
       pretty(&response);
     }
     return plan_and_maybe_apply(c, PlanRequest::default(), flags, j)
       .await;
   }
-  pretty(&response);
+  if !print::is_quiet() {
+    pretty(&response);
+  }
   Ok(())
 }
 

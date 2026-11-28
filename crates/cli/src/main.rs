@@ -2346,6 +2346,54 @@ mod quiet_arg_tests {
   use clap::CommandFactory;
 
   #[test]
+  fn quiet_support_for_21_2_commands() {
+    let app = super::Cli::command();
+    for (args, supported) in [
+      (
+        &["service", "restart", "app", "--container", "db"][..],
+        true,
+      ),
+      (
+        &[
+          "service",
+          "deploy",
+          "app",
+          "--container",
+          "db",
+          "--add-env",
+          "X=1",
+        ][..],
+        true,
+      ),
+      (&["exec", "s1", "--script", "fixture.sh"][..], false),
+      (
+        &["service", "exec", "app", "--script", "fixture.sh"][..],
+        false,
+      ),
+      (&["service", "render", "app"][..], false),
+      (&["service", "logs", "app", "--container", "db"][..], false),
+      (&["task", "set", "fixture"][..], false),
+      (&["task", "enable", "fixture"][..], false),
+      (&["task", "disable", "fixture"][..], false),
+      (&["task", "cancel", "1"][..], false),
+      (&["task", "run", "fixture"][..], false),
+      (&["task", "logs", "fixture", "--run", "1"][..], false),
+    ] {
+      let matches = app
+        .clone()
+        .try_get_matches_from(
+          ["wharf", "-q"].into_iter().chain(args.iter().copied()),
+        )
+        .unwrap();
+      assert_eq!(
+        super::quiet_supported(&app, &matches),
+        supported,
+        "{args:?}"
+      );
+    }
+  }
+
+  #[test]
   fn quiet_rejects_json_and_unsupported_commands_before_dispatch() {
     let app = super::Cli::command();
     let parse =

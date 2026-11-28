@@ -47,7 +47,10 @@ impl Filters {
         })
       };
       match key.as_ref() {
-        "exclude" => out.exclude.push(value.into_owned()),
+        "exclude" if !value.trim().is_empty() => {
+          out.exclude.push(value.into_owned());
+        }
+        "exclude" => {}
         "where" => out.where_exprs.push(value.into_owned()),
         "until" if out.until.is_none() => {
           out.until = Some(value.into_owned())
