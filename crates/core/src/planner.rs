@@ -846,7 +846,7 @@ pub(crate) async fn make_plan_inner(
     }
     let header = sso.header.as_deref().unwrap_or("Remote-User");
     if let Some(service) = desired.services.get(&route.spec.service)
-      && !net.bind_ips(&service.spec.server).is_empty()
+      && !net.bind_ips(&service.spec).is_empty()
       && match &service.spec.source {
         Source::Compose { content, .. } => {
           let compose = crate::render::parse_compose(
@@ -1635,6 +1635,19 @@ fn service_items(
     }
     let address = format!("{KIND_SERVICE}/{name}");
     let server = &svc.spec.server;
+    if service_changed
+      && svc.spec.lan == Some(false)
+      && net.private.get(server).is_some_and(|addr| {
+        net
+          .lan_addrs
+          .get(server)
+          .is_some_and(|ips| ips.contains(&addr.ip))
+      })
+    {
+      b.warnings.push(format!(
+        "服务 {name} 的组网地址同时是局域网地址，仍会保留该绑定"
+      ));
+    }
     let moved = moved_from(snap, current, name, server);
     let restarting_source = !svc.spec.stopped
       && snap.pending.migrations.get(name).is_some_and(|m| {

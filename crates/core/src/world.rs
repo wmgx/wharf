@@ -456,6 +456,15 @@ impl World {
           }
           // compose 来源没填端口时按 compose 里映射的端口补上，否则服务没有内网地址。
           let mut spec = spec.clone();
+          let mut hosts = BTreeMap::new();
+          for (host, ip) in std::mem::take(&mut spec.extra_hosts) {
+            let normalized = normalize_hostname(&host)
+              .map_err(|_| crate::render::extra_host_error(&host))?;
+            if hosts.insert(normalized, ip).is_some() {
+              return Err(crate::render::extra_host_error(&host));
+            }
+          }
+          spec.extra_hosts = hosts;
           validate_deploy_options(name, &spec)?;
           if let Some(signal) = &mut spec.stop_signal {
             *signal =
@@ -2040,6 +2049,35 @@ fn validate_service(
   if !world.servers.contains_key(&spec.server) {
     return Err(server_not_found(&spec.server));
   }
+  if spec.lan.is_some()
+    && matches!(spec.source, Source::Compose { .. })
+  {
+    return Err(
+      ApiError::invalid(format!(
+        "服务 {name} 的局域网开关仅支持镜像和构建来源"
+      ))
+      .with_hint("在 Compose 的 ports 中显式设置绑定地址"),
+    );
+  }
+  if spec.lan == Some(true)
+    && world.servers[&spec.server].settings.lan_addrs.is_empty()
+  {
+    return Err(
+      ApiError::invalid(format!(
+        "服务器 {} 没有局域网地址",
+        spec.server
+      ))
+      .with_hint("先配置服务器的 LAN 地址，或恢复继承"),
+    );
+  }
+  for host in spec.extra_hosts.keys() {
+    if host == "host.docker.internal"
+      || !normalize_hostname(host)
+        .is_ok_and(|normalized| normalized == *host)
+    {
+      return Err(crate::render::extra_host_error(host));
+    }
+  }
   if let Some(backup) = &spec.backup {
     wharf_api_types::backup::validate_backup_excludes(
       &backup.exclude,
@@ -2808,6 +2846,8 @@ mod tests {
       stop_signal: None,
       init_cmd: None,
       init_timeout_secs: None,
+      lan: None,
+      extra_hosts: Default::default(),
       server: server.into(),
       source: Source::Image("traefik/whoami".into()),
       ports: vec![PortSpec {

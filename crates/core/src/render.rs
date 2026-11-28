@@ -141,19 +141,27 @@ impl Net {
 
   /// 只取影响渲染的地址，给 plan 的 inputs 指纹用。
   /// 服务端口除 127.0.0.1 外要绑定的地址：内网地址，加上设置的局域网地址。
-  pub fn bind_ips(&self, server: &str) -> Vec<String> {
+  pub fn bind_ips(&self, spec: &ServiceSpec) -> Vec<String> {
+    let server = &spec.server;
     let mut ips: Vec<String> = self
       .private
       .get(server)
       .map(|a| a.ip.clone())
       .into_iter()
       .collect();
-    for ip in self.lan_addrs.get(server).into_iter().flatten() {
+    for ip in self.lan_bind_ips(spec) {
       if !ips.contains(ip) {
         ips.push(ip.clone());
       }
     }
     ips
+  }
+
+  pub(crate) fn lan_bind_ips(&self, spec: &ServiceSpec) -> &[String] {
+    if spec.lan == Some(false) {
+      return &[];
+    }
+    self.lan_addrs.get(&spec.server).map_or(&[], Vec::as_slice)
   }
 
   pub fn addresses(&self) -> Addresses {
@@ -306,6 +314,8 @@ struct ComposeService {
   #[serde(skip_serializing_if = "Vec::is_empty")]
   configs: Vec<ComposeConfigRef>,
   labels: BTreeMap<String, String>,
+  #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+  extra_hosts: BTreeMap<String, std::net::IpAddr>,
 }
 
 fn to_yaml(file: &ComposeFile) -> String {
@@ -1100,6 +1110,13 @@ pub fn service_compose(
   match &spec.source {
     Source::Compose { content, .. } => {
       let content = content.as_deref().unwrap_or_default();
+      let updated;
+      let content = if spec.extra_hosts.is_empty() {
+        content
+      } else {
+        updated = compose_extra_hosts(name, content, spec)?;
+        &updated
+      };
       let template =
         apply_compose_settings(name, content, spec, false)?;
       let legacy = substitute_compose(name, &template, secrets);
@@ -1154,6 +1171,80 @@ pub fn service_compose(
   }
 }
 
+pub(crate) fn extra_host_error(host: &str) -> ApiError {
+  ApiError::invalid(format!(
+    "主机映射 {host} 格式不对或与现有映射冲突"
+  ))
+  .with_hint("用 NAME=IP，每个名称只留一条映射")
+}
+
+fn compose_extra_hosts(
+  name: &str,
+  content: &str,
+  spec: &ServiceSpec,
+) -> Result<String, ApiError> {
+  let target =
+    compose_target(name, content, spec.container.as_deref())?;
+  let mut doc = parse_compose(content)?;
+  let body = &mut doc["services"][target.as_str()];
+  let mut hosts = Vec::new();
+  match &body["extra_hosts"] {
+    Value::Null => {}
+    Value::Mapping(map) => {
+      for (host, ip) in map {
+        let host = host
+          .as_str()
+          .ok_or_else(|| extra_host_error("extra_hosts"))?;
+        let ip = ip.as_str().ok_or_else(|| extra_host_error(host))?;
+        hosts.push((host.to_string(), ip.to_string()));
+      }
+    }
+    Value::Sequence(entries) => {
+      for entry in entries {
+        let (host, ip) = entry
+          .as_str()
+          .and_then(|s| {
+            s.split_once('=').or_else(|| s.split_once(':'))
+          })
+          .ok_or_else(|| extra_host_error("extra_hosts"))?;
+        hosts.push((host.to_string(), ip.to_string()));
+      }
+    }
+    _ => return Err(extra_host_error("extra_hosts")),
+  }
+  let mut changed = false;
+  for (host, ip) in &spec.extra_hosts {
+    let mut existing = hosts
+      .iter()
+      .filter(|(key, _)| key.eq_ignore_ascii_case(host))
+      .peekable();
+    if existing.peek().is_none() {
+      hosts.push((host.clone(), ip.to_string()));
+      changed = true;
+    } else if existing.any(|(_, value)| {
+      value
+        .trim_matches(['[', ']'])
+        .parse::<std::net::IpAddr>()
+        .ok()
+        .as_ref()
+        != Some(ip)
+    }) {
+      return Err(extra_host_error(host));
+    }
+  }
+  if !changed {
+    return Ok(content.to_string());
+  }
+  body["extra_hosts"] = Value::Sequence(
+    hosts
+      .into_iter()
+      .map(|(host, ip)| Value::String(format!("{host}={ip}")))
+      .collect(),
+  );
+  serde_yaml_ng::to_string(&doc)
+    .map_err(|_| ApiError::internal("无法生成 Compose 主机映射"))
+}
+
 fn image_service(
   name: &str,
   spec: &ServiceSpec,
@@ -1205,6 +1296,7 @@ fn image_service(
       environment,
       ports: Vec::new(),
       volumes: Vec::new(),
+      extra_hosts: spec.extra_hosts.clone(),
       labels: BTreeMap::from([(
         "wharf.service".to_string(),
         name.to_string(),
@@ -1575,6 +1667,7 @@ pub fn tunnel_compose(
         )]),
         ports: vec![],
         volumes: vec![],
+        extra_hosts: BTreeMap::new(),
         labels: BTreeMap::from([(
           "wharf.gateway".to_string(),
           name.to_string(),
@@ -1622,6 +1715,7 @@ pub fn gateway_compose(name: &str, spec: &GatewaySpec) -> String {
           format!("/srv/{project}/data:/data"),
           format!("/srv/{project}/config:/config"),
         ],
+        extra_hosts: BTreeMap::new(),
         labels: BTreeMap::from([(
           "wharf.gateway".to_string(),
           name.to_string(),
@@ -1715,6 +1809,7 @@ fn backup_compose(
         environment: BTreeMap::new(),
         ports: vec![],
         volumes: vec![format!("{root}:/data")],
+        extra_hosts: BTreeMap::new(),
         labels: BTreeMap::from([(
           "wharf.backup".to_string(),
           label.into(),
@@ -2226,6 +2321,66 @@ mod tests {
   }
 
   #[test]
+  fn network_options_preserve_loopback_and_isolate_component() {
+    let mut spec: ServiceSpec =
+      serde_json::from_value(serde_json::json!({
+        "server": "s1", "source": {"image": "alpine"},
+        "ports": [{"name": "http", "container": 80}],
+      }))
+      .unwrap();
+    let mut net = Net::default();
+    net.private.insert(
+      "s1".into(),
+      PrivateAddr {
+        ip: "100.64.0.1".into(),
+        network: wharf_api_types::spec::PrivateNetwork::Tailscale,
+      },
+    );
+    net.lan_addrs.insert(
+      "s1".into(),
+      vec!["203.0.113.1".into(), "100.64.0.1".into()],
+    );
+    let render = |spec: &ServiceSpec| {
+      service_compose(
+        "a",
+        spec,
+        &BTreeMap::from([("http".into(), 8080)]),
+        &net.bind_ips(spec),
+        None,
+      )
+      .unwrap()
+      .0
+    };
+    let inherited = render(&spec);
+    assert!(inherited.contains("203.0.113.1:8080:80"));
+    spec.lan = Some(false);
+    let disabled = render(&spec);
+    assert!(!disabled.contains("203.0.113.1:8080:80"));
+    for binding in ["127.0.0.1:8080:80", "100.64.0.1:8080:80"] {
+      assert!(disabled.contains(binding));
+    }
+    spec.lan = None;
+    assert_eq!(render(&spec), inherited);
+    spec.source = Source::Compose { file: None, content: Some(
+      "services:\n  web: {image: alpine}\n  other: {image: alpine, extra_hosts: {peer.lab.test: 203.0.113.8}}\n".into()
+    ) };
+    spec.container = Some("web".into());
+    spec
+      .extra_hosts
+      .insert("peer.lab.test".into(), "2001:db8::8".parse().unwrap());
+    let doc = parse_compose(&render(&spec)).unwrap();
+    assert_eq!(
+      doc["services"]["web"]["extra_hosts"][0].as_str(),
+      Some("peer.lab.test=2001:db8::8")
+    );
+    assert_eq!(
+      doc["services"]["other"]["extra_hosts"]["peer.lab.test"]
+        .as_str(),
+      Some("203.0.113.8")
+    );
+  }
+
+  #[test]
   fn compose_target_finds_inherited_services() {
     let text =
       "x-base: &b {services: {app: {image: nginx}}}\n<<: *b\n";
@@ -2430,6 +2585,8 @@ mod tests {
       stop_signal: None,
       init_cmd: None,
       init_timeout_secs: None,
+      lan: None,
+      extra_hosts: Default::default(),
       server: "node1".into(),
       source: Source::Image("traefik/whoami".into()),
       ports: vec![PortSpec {

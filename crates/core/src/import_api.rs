@@ -238,6 +238,8 @@ pub async fn preview(
       stop_signal: None,
       init_cmd: None,
       init_timeout_secs: None,
+      lan: None,
+      extra_hosts: Default::default(),
     },
     adopt: converted.adopt,
     name,

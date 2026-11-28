@@ -1043,6 +1043,39 @@ async fn plan_and_maybe_apply(
   plan_output(c, req, flags, j, Vec::new(), None).await
 }
 
+fn set_network_options(
+  spec: &mut ServiceSpec,
+  ops: &crate::DeployOps,
+) -> CliResult<()> {
+  if ops.inherit_lan {
+    spec.lan = None;
+  } else if ops.lan || ops.no_lan {
+    spec.lan = Some(ops.lan);
+  }
+  for name in &ops.rm_extra_host {
+    spec.extra_hosts.remove(&name.to_ascii_lowercase());
+  }
+  let mut added = BTreeMap::new();
+  for mapping in &ops.add_extra_host {
+    let error = || {
+      ApiError::invalid("主机映射格式不对或名称重复")
+        .with_hint("用 NAME=IP，每个名称只留一条映射")
+    };
+    let (name, ip) = mapping.split_once('=').ok_or_else(error)?;
+    if added
+      .insert(
+        name.to_ascii_lowercase(),
+        ip.parse().map_err(|_| error())?,
+      )
+      .is_some()
+    {
+      return Err(error().into());
+    }
+  }
+  spec.extra_hosts.extend(added);
+  Ok(())
+}
+
 async fn deploy_plan(
   c: &Client,
   name: String,
@@ -3276,7 +3309,12 @@ async fn service(
           || ops.unset_stop_signal
           || ops.init_cmd.is_some()
           || ops.unset_init_cmd
-          || ops.init_timeout.is_some())
+          || ops.init_timeout.is_some()
+          || ops.lan
+          || ops.no_lan
+          || ops.inherit_lan
+          || !ops.add_extra_host.is_empty()
+          || !ops.rm_extra_host.is_empty())
       {
         apply.check_read_only()?;
         wharf_api_types::filter_note(
@@ -3391,6 +3429,8 @@ async fn service(
             stop_signal: None,
             init_cmd: None,
             init_timeout_secs: None,
+            lan: None,
+            extra_hosts: Default::default(),
           }
         }
       };
@@ -3412,6 +3452,7 @@ async fn service(
       if let Some(server) = server {
         spec.server = server;
       }
+      set_network_options(&mut spec, &ops)?;
       if ops.unset_stop_grace || ops.stop_grace.is_some() {
         spec.stop_grace_secs = ops.stop_grace.filter(|n| *n != 0);
       }

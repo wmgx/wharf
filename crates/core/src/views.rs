@@ -297,9 +297,18 @@ pub fn service_view(
       )
     })
     .collect();
-  let lan_addresses = net
-    .lan_addrs
-    .get(&row.spec.server)
+  let lan_ips = net.lan_bind_ips(&row.spec);
+  let published = match &row.spec.source {
+    wharf_api_types::spec::Source::Compose { content, .. } => Some(
+      crate::host_access::compose_published_ports(
+        content.as_deref().unwrap_or_default(),
+      )
+      .unwrap_or_default(),
+    ),
+    _ => None,
+  };
+  let lan_addresses = Some(lan_ips)
+    .filter(|ips| !ips.is_empty())
     .map(|ips| {
       row
         .host_ports
@@ -318,15 +327,30 @@ pub fn service_view(
             port.clone(),
             ips
               .iter()
+              .filter(|ip| {
+                published.as_ref().is_none_or(|ports| {
+                  ports.iter().any(|p| {
+                    p.host_port == *host
+                      && p.udp == (suffix == "/udp")
+                      && match p.host_ip.as_deref() {
+                        None => true,
+                        Some("0.0.0.0") => !ip.contains(':'),
+                        Some("::") => ip.contains(':'),
+                        Some(addr) => addr == ip.as_str(),
+                      }
+                  })
+                })
+              })
               .map(|ip| {
                 format!(
                   "{}{suffix}",
                   crate::render::host_port(ip, *host)
                 )
               })
-              .collect(),
+              .collect::<Vec<_>>(),
           )
         })
+        .filter(|(_, bindings)| !bindings.is_empty())
         .collect()
     })
     .unwrap_or_default();

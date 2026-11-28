@@ -3056,6 +3056,7 @@ export interface ServiceSpec {
    * `[[@服务.端口名]]` 指定端口，末尾加 `:host` / `:port` 只取地址或端口。
    */
   env?: Record<string, string>;
+  extra_hosts?: Record<string, string>;
   /**
    * 配置文件：内容存在 Wharf 里，部署时放进容器（只读，属主 root），跟着部署历史和回滚走。
    * 应用自己改写的内容下次部署会被覆盖。
@@ -3070,6 +3071,7 @@ export interface ServiceSpec {
    * 初始化超时秒数（10 到 1800），缺省 300 秒。
    */
   init_timeout_secs?: number | null;
+  lan?: boolean | null;
   /**
    * 资源上限，不填不限。
    */

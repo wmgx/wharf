@@ -494,7 +494,7 @@ fn resolve_service(
     name,
     &row.spec,
     &row.host_ports,
-    &net.bind_ips(&row.spec.server),
+    &net.bind_ips(&row.spec),
     Some(secrets),
   )?;
   let resolved = crate::service_monitor::heartbeat::compose(
@@ -621,7 +621,7 @@ pub fn service_template(
     name,
     &row.spec,
     &row.host_ports,
-    &net.bind_ips(&row.spec.server),
+    &net.bind_ips(&row.spec),
     None,
   )?;
   let text = crate::service_monitor::heartbeat::compose(

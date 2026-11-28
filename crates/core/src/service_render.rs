@@ -143,7 +143,7 @@ fn preview(
     name,
     &row.spec,
     &row.host_ports,
-    &net.bind_ips(&row.spec.server),
+    &net.bind_ips(&row.spec),
     Some(&masks),
   )?;
   let compose = crate::service_monitor::heartbeat::compose(

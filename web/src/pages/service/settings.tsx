@@ -31,7 +31,7 @@ export function Settings({ svc, active }: { svc: ServiceView; active: boolean })
       if (location.hash === "#backup") document.getElementById("service-backup")?.focus();
     }
   }, [active, location.hash]);
-  const changed = ([['来源', 'source'], ['端口', 'ports'], ['目标容器', 'container'], ['环境变量', 'env'], ['配置文件', 'files'], ['资源上限', 'limits'], ['自动更新', 'auto_update']] as [string, keyof ServiceSpec][]).filter(([, field]) => dirty([field])).map(([label]) => label);
+  const changed = ([['来源', 'source'], ['端口', 'ports'], ['局域网绑定', 'lan'], ['目标容器', 'container'], ['环境变量', 'env'], ['配置文件', 'files'], ['资源上限', 'limits'], ['自动更新', 'auto_update']] as [string, keyof ServiceSpec][]).filter(([, field]) => dirty([field])).map(([label]) => label);
   return <SettingsFields key={key} svc={svc} draft={draft} set={set} dirty={dirty} changed={changed} onReset={() => { reset(); setKey((n) => n + 1); }} onSubmit={() => {
     const spec = mergeInto(svc.spec);
     if ("build" in spec.source && "build" in svc.spec.source) {
@@ -122,6 +122,13 @@ function SettingsFields({ svc, draft, set, dirty, changed, onReset, onSubmit }: 
     </Panel>
     <SectionTitle>端口</SectionTitle>
     <Panel className="p-4">
+      {!isCompose && <Field label="局域网绑定" htmlFor="service-lan">
+        <select id="service-lan" className="h-9 w-full rounded-md border bg-background px-3 text-sm sm:w-64" value={draft.lan == null ? "" : String(draft.lan)} onChange={(e) => set({ lan: e.target.value ? e.target.value === "true" : undefined })}>
+          <option value="">继承服务器</option>
+          <option value="true">启用</option>
+          <option value="false">关闭</option>
+        </select>
+      </Field>}
       <PortsEditor ports={ports} compose={isCompose} onChange={(value) => { setPorts(value); set({ ports: portsFor(value, isCompose) }); }} />
     </Panel>
     {isCompose && composeInfo.services.length > 1 && <>

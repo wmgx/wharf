@@ -869,7 +869,19 @@ async fn run_on_agent(
     texts,
     secrets,
   )?;
-  let sub = |t: &str| render::substitute(t, Some(secrets));
+  let net = snap.net(&snap.world);
+  let caller = format!("任务 {name}");
+  let sub = |text: &str| {
+    let text = crate::refs::resolve_from(
+      text,
+      &caller,
+      &spec.server,
+      &snap.world,
+      &net,
+      false,
+    )?;
+    render::substitute(&text, Some(secrets))
+  };
   let env_with_overrides = |env: &BTreeMap<String, String>| {
     let mut merged = env.clone();
     merged.extend(request.env.clone());
@@ -1249,6 +1261,31 @@ pub(crate) fn validate_script(
   Ok(())
 }
 
+fn validate_task_refs<'a>(
+  auth: &Auth,
+  name: &str,
+  world: &crate::world::World,
+  texts: impl IntoIterator<Item = &'a str>,
+) -> Result<(), ApiError> {
+  use wharf_api_types::references::{
+    parse_service_ref, placeholders,
+  };
+  for text in texts {
+    for placeholder in
+      placeholders(text).filter(|p| p.starts_with('@'))
+    {
+      let reference =
+        parse_service_ref(placeholder).ok_or_else(|| {
+          ApiError::invalid(format!("任务 {name} 的服务引用格式不对"))
+            .with_hint("引用写作 [[@服务名]] 或 [[@服务名.端口名]]")
+        })?;
+      crate::token_scope::require_service(auth, reference.service)?;
+      crate::refs::validate_task_ref(name, world, &reference)?;
+    }
+  }
+  Ok(())
+}
+
 fn validate(
   name: &str,
   spec: &TaskSpec,
@@ -1486,6 +1523,12 @@ pub async fn put(
   if let Ok(old) = load_one(&s, &name).await {
     need_perm(&auth, &old, &snap.world, core_server.as_deref())?;
   }
+  validate_task_refs(
+    &auth,
+    &name,
+    &snap.world,
+    crate::missing_refs::task_texts(&spec.how).map(|(_, text)| text),
+  )?;
   validate(&name, &spec, &snap)?;
   let spec = s.db.call(move |c| {
     let mut spec = spec;
@@ -1696,6 +1739,19 @@ pub async fn run_now(
       &snap.secret_restrictions,
     )?;
   }
+  validate_task_refs(
+    &auth,
+    &name,
+    &snap.world,
+    crate::missing_refs::task_texts(&spec.how)
+      .filter(|(field, _)| {
+        field
+          .strip_prefix("env.")
+          .is_none_or(|key| !request.env.contains_key(key))
+      })
+      .map(|(_, text)| text)
+      .chain(request.env.values().map(String::as_str)),
+  )?;
   let (id, busy) = start_with_guard(
     &s,
     &name,

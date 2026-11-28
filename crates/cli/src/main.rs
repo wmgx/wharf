@@ -534,6 +534,16 @@ pub struct DeployOps {
   pub unset_stop_signal: bool,
   #[arg(long, conflicts_with = "init_cmd")]
   pub unset_init_cmd: bool,
+  #[arg(long, conflicts_with_all = ["no_lan", "inherit_lan"])]
+  pub lan: bool,
+  #[arg(long, conflicts_with = "inherit_lan")]
+  pub no_lan: bool,
+  #[arg(long)]
+  pub inherit_lan: bool,
+  #[arg(long, value_name = "NAME=IP")]
+  pub add_extra_host: Vec<String>,
+  #[arg(long, value_name = "NAME")]
+  pub rm_extra_host: Vec<String>,
 }
 
 /// 看日志的公共参数。

@@ -475,8 +475,20 @@ fn collect_refs(
       continue;
     }
     match kind {
-      "service" if matches!(&spec.how, TaskKind::Exec { service, .. } if service == name) => {
-        add("task", task, "exec.service", "runs_on")
+      "service" => {
+        if matches!(&spec.how, TaskKind::Exec { service, .. } if service == name)
+        {
+          add("task", task, "exec.service", "runs_on");
+        }
+        for (field, text) in task_texts(&spec.how) {
+          if placeholders(text)
+            .filter_map(parse_service_ref)
+            .any(|r| r.service == name)
+            && visible(scope, name)
+          {
+            add("task", task, &field, "service_ref");
+          }
+        }
       }
       "server" if scope.is_none() => match &spec.how {
         TaskKind::Exec { service, .. }
