@@ -112,6 +112,12 @@ pub struct AddArgs {
   /// 失败时不通知。
   #[arg(long)]
   no_notify: bool,
+  /// 关联服务停用时跳过，仅适用于容器内执行任务。
+  #[arg(long)]
+  skip_if_stopped: bool,
+  /// 离线后允许补跑的分钟数（1～1440）。
+  #[arg(long)]
+  catch_up: Option<u32>,
   /// 用 `sh -c` 执行的命令，可以写 `[[密钥]]`。
   #[arg(last = true)]
   command: Vec<String>,
@@ -379,6 +385,8 @@ async fn add(c: &Client, a: AddArgs, j: bool) -> CliResult<()> {
     timeout_secs: a.timeout,
     enabled: !a.disabled,
     notify: !a.no_notify,
+    skip_if_stopped: a.skip_if_stopped,
+    catch_up_mins: a.catch_up,
   };
   if a.dry_run {
     let before = crate::preview::get_or_null(
@@ -447,6 +455,7 @@ fn line(r: &TaskRunView) -> String {
   let by = match r.trigger.as_str() {
     "manual" => " 手动",
     "hook" => " 网址",
+    "catch_up" => " 补跑",
     _ => "",
   };
   let mem = r

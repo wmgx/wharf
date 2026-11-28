@@ -206,6 +206,13 @@ fn merge_settings(
   spec.init_timeout_secs = current.init_timeout_secs;
   spec.limits.clone_from(&current.limits);
   spec.log_alerts.clone_from(&current.log_alerts);
+  spec.update_ignore.clone_from(&current.update_ignore);
+  if matches!(spec.source, Source::Build(_)) {
+    spec.update_ignore.retain(|r| {
+      r.image == "*"
+        && r.scope == wharf_api_types::spec::UpdateIgnoreScope::All
+    });
+  }
   spec.heartbeat.clone_from(&current.heartbeat);
   if current.auto_update {
     warnings.push(

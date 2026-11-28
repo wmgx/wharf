@@ -523,6 +523,15 @@ pub(crate) async fn make_plan_inner(
   )?;
   desired.validate_against(&current)?;
   crate::link::validate_new_admin_port_bindings(&current, &desired)?;
+  for (name, row) in &desired.services {
+    if current
+      .services
+      .get(name)
+      .is_none_or(|old| old.spec != row.spec)
+    {
+      crate::monitor::require_agent(state, &row.spec)?;
+    }
+  }
   validate_changed_templates(&current, &desired)?;
   let mut warnings =
     crate::edge::validate_owners(&current, &desired)?;
@@ -871,6 +880,13 @@ pub(crate) async fn make_plan_inner(
     &mut b, &snap, &current, &desired, &net, &status, &writes,
   )?;
   build_agent_warnings(state, &desired, &mut b)?;
+  for step in &b.steps {
+    if let Step::ServiceUp { service, .. } = &step.step
+      && let Some(row) = desired.services.get(service)
+    {
+      crate::monitor::require_agent(state, &row.spec)?;
+    }
+  }
   let old_agents: BTreeSet<_> = b
     .steps
     .iter()
@@ -3929,6 +3945,48 @@ mod tests {
     let warnings = plaintext_hop(&world, &net, &route);
     assert_eq!(warnings.len(), 1);
     assert!(warnings[0].contains("/api/*"));
+  }
+
+  #[tokio::test]
+  async fn monitor_headers_require_upgraded_agent_during_plan() {
+    let state = crate::rules::tests::test_state();
+    let world = world();
+    let mut spec = world.services["app"].spec.clone();
+    spec.monitor = Some(wharf_api_types::spec::MonitorSpec {
+      headers: BTreeMap::from([(
+        "Host".into(),
+        "app.example.test".into(),
+      )]),
+      ..Default::default()
+    });
+    state.hub.mock_agent("s1", false, |_| {
+      panic!("能力不足时不应访问 agent")
+    });
+    let result = make_plan_inner(
+      &state,
+      PlanRequest {
+        changes: vec![wharf_api_types::spec::Change::UpsertService {
+          pins: None,
+          commit: None,
+          name: "app".into(),
+          spec,
+          adopt: None,
+        }],
+        ..Default::default()
+      },
+      Snapshot {
+        world,
+        ..Default::default()
+      },
+      false,
+      true,
+    )
+    .await;
+    let Some(error) = result.err() else {
+      panic!("旧 agent 应被拦下");
+    };
+    assert_eq!(error.code, wharf_api_types::ErrorCode::Conflict);
+    assert!(error.hint.unwrap().contains("wharf upgrade"));
   }
 
   #[tokio::test]

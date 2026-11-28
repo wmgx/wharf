@@ -293,6 +293,7 @@ async fn main() -> anyhow::Result<()> {
   updates::spawn(state.clone());
   alerts::spawn(state.clone());
   rules::spawn(state.clone());
+  notify::spawn_retry(state.clone());
   external_checks::spawn(state.clone());
   agent_upgrade::spawn_check();
   monitor::spawn(state.clone());

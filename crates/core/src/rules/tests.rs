@@ -629,6 +629,68 @@ async fn digest_keeps_rows_on_failure_and_preserves_inflight_inserts()
 mod custom_tests;
 
 #[tokio::test]
+async fn notice_with_subject_respects_offline_and_custom_suppression()
+{
+  let _guard = TEST_LOCK.lock().await;
+  reset_memory();
+  let state = test_state();
+  seed_server_service(&state, "s1", "db").await;
+  let now = now_ms();
+  ensure_loaded(&state).await;
+  for server in ["s1", "s2"] {
+    set_firing(
+      &state,
+      ("server_offline".into(), server.into()),
+      Some(FiringEntry {
+        since: now,
+        title: format!("{server} 离线"),
+        body: String::new(),
+        delivery: Delivery::None,
+        suppressed: false,
+      }),
+    )
+    .await;
+  }
+  suppress::add_rule(
+    &state,
+    AlertSuppressionRequest {
+      source_rule: "server_offline".into(),
+      source_subject: Some("s2".into()),
+      target_rule: "task".into(),
+      target_subject: Some("sync".into()),
+    },
+    now,
+  )
+  .await
+  .unwrap();
+  for (rule, subject) in [("backup", "db"), ("task", "sync")] {
+    notice(
+      &state,
+      rule,
+      Some(subject),
+      None,
+      false,
+      Event {
+        title: subject.into(),
+        body: String::new(),
+      },
+    )
+    .await;
+  }
+  let rows = history_rows(&state).await;
+  for (row, (subject, server)) in
+    rows.iter().zip([("db", "s1"), ("sync", "s2")])
+  {
+    assert_eq!(row.1.as_deref(), Some(subject));
+    assert_eq!(
+      row.3.as_deref(),
+      Some(format!("被抑制：{server} 离线").as_str())
+    );
+  }
+  assert_eq!(rows.len(), 2);
+}
+
+#[tokio::test]
 async fn stopping_service_clears_alert_state_and_keeps_history() {
   let _guard = TEST_LOCK.lock().await;
   reset_memory();
@@ -1317,4 +1379,77 @@ async fn tailnet_and_gateway_operations_silence_only_matching_samples()
   assert!(firing_since("domain_down", "app.example.com").is_none());
   assert!(firing_since("server_offline", "s1").is_none());
   assert!(firing_since("server_offline", "s2").is_some());
+}
+
+#[tokio::test]
+async fn failover_notice_ignores_primary_offline_suppression() {
+  let _guard = TEST_LOCK.lock().await;
+  reset_memory();
+  let state = test_state();
+  seed_server_service(&state, "s1", "web").await;
+  seed_server_service(&state, "s2", "other").await;
+  state.db.call(|c| {
+    for (kind, name, spec) in [
+      ("gateway", "gw1", json!({"server":"s1","kind":"caddy"})),
+      ("gateway", "gw2", json!({"server":"s2","kind":"caddy"})),
+      ("route", "app.example.test", json!({"hostname":"app.example.test","service":"web","gateway":"gw1","backup_gateway":"gw2"})),
+    ] {
+      db::apply_write(c, &db::Write::Upsert {
+        kind: kind.into(), name: name.into(), spec, meta: json!({}),
+      })?;
+    }
+    Ok(())
+  }).await.unwrap();
+  for _ in 0..3 {
+    observe(&state, "server.online", "s1", 0.0, "").await;
+  }
+  assert!(firing_since("server_offline", "s1").is_some());
+  let failover = || Event {
+    title: "已切到备用入口".into(),
+    body: String::new(),
+  };
+  notice(
+    &state,
+    "failover",
+    Some("app.example.test"),
+    None,
+    false,
+    failover(),
+  )
+  .await;
+  let rows = history_rows(&state).await;
+  assert_eq!(rows.last().unwrap().0, "failover");
+  assert!(delivered(&rows.last().unwrap().3));
+
+  suppress::add_rule(
+    &state,
+    AlertSuppressionRequest {
+      source_rule: "server_offline".into(),
+      source_subject: Some("s1".into()),
+      target_rule: "failover".into(),
+      target_subject: Some("app.example.test".into()),
+    },
+    now_ms(),
+  )
+  .await
+  .unwrap();
+  notice(
+    &state,
+    "failover",
+    Some("app.example.test"),
+    None,
+    false,
+    failover(),
+  )
+  .await;
+  assert!(
+    history_rows(&state)
+      .await
+      .last()
+      .unwrap()
+      .3
+      .as_deref()
+      .unwrap()
+      .starts_with("被抑制：")
+  );
 }

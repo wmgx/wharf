@@ -1,13 +1,13 @@
 use std::{net::SocketAddr, time::Duration};
 
-use reqwest::{Client, StatusCode, Url};
+use reqwest::Url;
 use wharf_api_types::{
   ApiError, ErrorCode,
-  agent::{GatewayProbeJob, GatewayProbeResult, OneTimeSecret},
-  gateway_http::{inspect, tls_failed},
+  agent::{GatewayProbeJob, GatewayProbeResult},
+  gateway_http::tls_failed,
 };
 
-use crate::exec::Ctx;
+use crate::{exec::Ctx, probe};
 
 fn result(
   stage: &str,
@@ -49,33 +49,18 @@ fn upstream_addr(upstream: &str) -> Result<Url, ApiError> {
   Url::parse(&format!("http://{upstream}")).map_err(|_| invalid())
 }
 
-async fn status(
-  client: &Client,
-  url: Url,
-  host: &str,
-  cookie: Option<&OneTimeSecret>,
-) -> Result<(StatusCode, bool), reqwest::Error> {
-  let mut request = client.get(url).header("Host", host);
-  if let Some(cookie) = cookie {
-    request = request.header(reqwest::header::COOKIE, &cookie.0);
-  }
-  let (code, rejected, _) =
-    inspect(request.send().await?, cookie.is_some(), false).await;
-  Ok((code, cookie.is_some() && rejected))
-}
-
 async fn probe(
   job: &GatewayProbeJob,
 ) -> Result<GatewayProbeResult, ApiError> {
   let host = job.hostname.as_str();
   let builder = || {
-    Client::builder()
-      .no_proxy()
-      .redirect(reqwest::redirect::Policy::none())
+    probe::http_client()
       .user_agent("wharf-probe")
       .retry(reqwest::retry::never())
       .tls_danger_accept_invalid_certs(true)
   };
+  let headers = probe::http_headers([("host", host)])
+    .map_err(ApiError::invalid)?;
   let check_upstream = || async {
     if let Some(address) = &job.upstream {
       let mut upstream = upstream_addr(address)?;
@@ -84,8 +69,10 @@ async fn probe(
         .build()
         .map_err(|_| ApiError::internal("无法创建上游探测客户端"))?;
       return Ok::<_, ApiError>(matches!(
-        status(&client, upstream, host, None).await,
-        Ok((code, _)) if !code.is_server_error()
+        probe::http_response(
+          &client, upstream, headers.clone(), false, false
+        ).await,
+        Ok((code, _, _)) if !code.is_server_error()
       ));
     }
     Ok(true)
@@ -118,11 +105,22 @@ async fn probe(
   } else {
     job.http_port
   };
-  let first = status(
+  let gated = job.gate_cookie.is_some();
+  let probe_headers = if let Some(cookie) = &job.gate_cookie {
+    probe::http_headers([
+      ("host", host),
+      ("cookie", cookie.0.as_str()),
+    ])
+    .map_err(ApiError::invalid)?
+  } else {
+    headers.clone()
+  };
+  let first = probe::http_response(
     &client(port)?,
     url(job.tls)?,
-    host,
-    job.gate_cookie.as_ref(),
+    probe_headers,
+    gated,
+    false,
   )
   .await;
   let (response, cert_pending) = match first {
@@ -130,15 +128,21 @@ async fn probe(
       if job.tls && job.allow_pending_cert && tls_failed(&error) =>
     {
       (
-        status(&client(job.http_port)?, url(false)?, host, None)
-          .await,
+        probe::http_response(
+          &client(job.http_port)?,
+          url(false)?,
+          headers.clone(),
+          false,
+          false,
+        )
+        .await,
         true,
       )
     }
     other => (other, false),
   };
   let code = match response {
-    Ok((code, true)) => {
+    Ok((code, true, _)) if gated && !cert_pending => {
       return Ok(result(
         "gateway_auth_rejected",
         Some(code.as_u16()),
@@ -146,7 +150,7 @@ async fn probe(
         "Wharf 门禁未放行探测请求",
       ));
     }
-    Ok((code, _))
+    Ok((code, _, _))
       if code.is_server_error()
         || cert_pending && !matches!(code.as_u16(), 301 | 308) =>
     {
@@ -157,7 +161,7 @@ async fn probe(
         &format!("网关返回 HTTP {}", code.as_u16()),
       ));
     }
-    Ok((code, _)) => code,
+    Ok((code, _, _)) => code,
     Err(_) => {
       return Ok(result(
         "gateway_unreachable",
@@ -294,6 +298,7 @@ mod tests {
       io::{AsyncReadExt, AsyncWriteExt},
       net::TcpListener,
     };
+    use wharf_api_types::agent::OneTimeSecret;
 
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let job = GatewayProbeJob {

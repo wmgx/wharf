@@ -25,9 +25,9 @@ use crate::{
   state::AppState,
 };
 
-const MINUTE_MS: i64 = 60 * 1000;
-const COARSE_MS: i64 = 10 * MINUTE_MS;
-const HOUR_MS: i64 = 60 * MINUTE_MS;
+pub(crate) const MINUTE_MS: i64 = 60 * 1000;
+pub(crate) const COARSE_MS: i64 = 10 * MINUTE_MS;
+pub(crate) const HOUR_MS: i64 = 60 * MINUTE_MS;
 const DAY_MS: i64 = 24 * HOUR_MS;
 const COARSE_KEEP_MS: i64 = 7 * DAY_MS;
 const KEEP_RESOURCE_MS: i64 = 14 * DAY_MS;
@@ -55,8 +55,9 @@ fn insert(
 }
 
 /// 记一批现在的点，失败只记日志。
-pub async fn insert_owned(
+pub async fn insert_owned_at(
   state: &AppState,
+  at: i64,
   points: Vec<(String, String, f64)>,
 ) {
   if points.is_empty() {
@@ -69,7 +70,7 @@ pub async fn insert_owned(
         .iter()
         .map(|(n, s, v)| (n.as_str(), s.as_str(), *v))
         .collect();
-      insert(c, now_ms(), &rows)
+      insert(c, at, &rows)
     })
     .await;
   if let Err(e) = result {
@@ -110,9 +111,10 @@ pub async fn record_links(
 }
 
 /// agent 上报的资源采样。
-pub async fn record_report(
+pub async fn record_report_at(
   state: &AppState,
   server: &str,
+  at: i64,
   m: &Metrics,
 ) {
   let owned = server.to_string();
@@ -120,11 +122,11 @@ pub async fn record_report(
   let result = state
     .db
     .call(move |c| {
-      let at = now_ms();
+      let tx = c.transaction().map_err(sql_err)?;
       let s = owned.as_str();
-      crate::traffic::add(c, s, at, m.net_rx, m.net_tx)?;
+      crate::traffic::add(&tx, s, at, m.net_rx, m.net_tx)?;
       insert(
-        c,
+        &tx,
         at,
         &[
           ("host.cpu", s, m.cpu as f64),
@@ -146,13 +148,13 @@ pub async fn record_report(
         ("agent.mem", m.agent_mem.map(|v| v as f64)),
       ] {
         if let Some(value) = value {
-          insert(c, at, &[(name, s, value)])?;
+          insert(&tx, at, &[(name, s, value)])?;
         }
       }
       for (p, v) in &m.projects {
         let p = p.as_str();
         insert(
-          c,
+          &tx,
           at,
           &[
             ("svc.cpu", p, v.cpu as f64),
@@ -162,7 +164,7 @@ pub async fn record_report(
           ],
         )?;
       }
-      Ok(())
+      tx.commit().map_err(sql_err)
     })
     .await;
   if let Err(e) = result {
@@ -177,10 +179,20 @@ pub async fn event(
   subject: &str,
   value: f64,
 ) {
+  event_at(state, now_ms(), name, subject, value).await;
+}
+
+pub async fn event_at(
+  state: &AppState,
+  at: i64,
+  name: &str,
+  subject: &str,
+  value: f64,
+) {
   let (n, s) = (name.to_string(), subject.to_string());
   let result = state
     .db
-    .call(move |c| insert(c, now_ms(), &[(&n, &s, value)]))
+    .call(move |c| insert(c, at, &[(&n, &s, value)]))
     .await;
   if let Err(e) = result {
     tracing::warn!("记录 {name} 失败：{e}");
@@ -220,50 +232,54 @@ pub async fn compact(state: &AppState) -> Result<(), ApiError> {
   state.db.call(|c| compact_at(c, now_ms())).await
 }
 
-fn compact_at(c: &mut Connection, now: i64) -> Result<(), ApiError> {
+const PEAK_METRICS: &str =
+  "name IN ('host.cpu', 'host.mem', 'svc.mem')";
+const MAX_SUFFIX: &str = "name LIKE '%.max'";
+
+pub(crate) fn cutoffs(now: i64) -> (i64, i64) {
+  (
+    (now - DAY_MS) / COARSE_MS * COARSE_MS,
+    (now - COARSE_KEEP_MS) / HOUR_MS * HOUR_MS,
+  )
+}
+
+pub(crate) fn compact_at(
+  c: &mut Connection,
+  now: i64,
+) -> Result<(), ApiError> {
   // 对齐到 10 分钟和整点，保证每个时间段一次合成完。合成后的点时间正好对齐，
   // 通过 `at % bucket != 0` 判断该桶里是否还有更细粒度的点需要合成并清理。
-  let coarse_cutoff = (now - DAY_MS) / COARSE_MS * COARSE_MS;
-  let hourly_cutoff = (now - COARSE_KEEP_MS) / HOUR_MS * HOUR_MS;
+  let (coarse_cutoff, hourly_cutoff) = cutoffs(now);
   let tx = c.transaction().map_err(sql_err)?;
-  // 1～7 天：原始点合成 10 分钟均值。
   tx.execute(
     &format!(
-      "INSERT OR REPLACE INTO points (name, subject, at, value)
-       SELECT name, subject, at / ?2 * ?2, AVG(value) FROM points
-       WHERE at < ?1 AND {RESOURCE}
+      "INSERT INTO points (name, subject, at, value)
+       SELECT name || '.max', subject, at / ?2 * ?2, MAX(value) FROM points
+       WHERE at < ?1 AND {PEAK_METRICS}
        GROUP BY name, subject, at / ?2
-       HAVING SUM(CASE WHEN at % ?2 != 0 THEN 1 ELSE 0 END) > 0"
+       HAVING SUM(CASE WHEN at % ?2 != 0 THEN 1 ELSE 0 END) > 0
+       ON CONFLICT (subject, name, at) DO UPDATE SET value = MAX(value, excluded.value)"
     ),
     params![coarse_cutoff, COARSE_MS],
-  )
-  .map_err(sql_err)?;
-  tx.execute(
-    &format!(
-      "DELETE FROM points WHERE at < ?1 AND at % ?2 != 0 AND {RESOURCE}"
-    ),
-    params![coarse_cutoff, COARSE_MS],
-  )
-  .map_err(sql_err)?;
-  // 7～14 天：10 分钟均值合成每小时均值（时间对齐到整点）。
-  tx.execute(
-    &format!(
-      "INSERT OR REPLACE INTO points (name, subject, at, value)
-       SELECT name, subject, at / ?2 * ?2, AVG(value) FROM points
-       WHERE at < ?1 AND {RESOURCE}
-       GROUP BY name, subject, at / ?2
-       HAVING SUM(CASE WHEN at % ?2 != 0 THEN 1 ELSE 0 END) > 0"
-    ),
-    params![hourly_cutoff, HOUR_MS],
-  )
-  .map_err(sql_err)?;
-  tx.execute(
-    &format!(
-      "DELETE FROM points WHERE at < ?1 AND at % ?2 != 0 AND {RESOURCE}"
-    ),
-    params![hourly_cutoff, HOUR_MS],
-  )
-  .map_err(sql_err)?;
+  ).map_err(sql_err)?;
+  for (cutoff, bucket) in
+    [(coarse_cutoff, COARSE_MS), (hourly_cutoff, HOUR_MS)]
+  {
+    tx.execute(
+      &format!(
+        "INSERT OR REPLACE INTO points (name, subject, at, value)
+         SELECT name, subject, at / ?2 * ?2, CASE WHEN {MAX_SUFFIX} THEN MAX(value) ELSE AVG(value) END
+         FROM points WHERE at < ?1 AND {RESOURCE}
+         GROUP BY name, subject, at / ?2
+         HAVING SUM(CASE WHEN at % ?2 != 0 THEN 1 ELSE 0 END) > 0"
+      ),
+      params![cutoff, bucket],
+    ).map_err(sql_err)?;
+    tx.execute(
+      &format!("DELETE FROM points WHERE at < ?1 AND at % ?2 != 0 AND {RESOURCE}"),
+      params![cutoff, bucket],
+    ).map_err(sql_err)?;
+  }
   tx.execute(
     &format!("DELETE FROM points WHERE at < ?1 AND {RESOURCE}"),
     params![now - KEEP_RESOURCE_MS],
@@ -359,15 +375,20 @@ pub async fn query(
 
 type Series = BTreeMap<String, Vec<(i64, f64)>>;
 
-fn read(
+pub(crate) fn read(
   c: &Connection,
   subject: &str,
   names: &[String],
   from: i64,
   step: i64,
 ) -> Result<Series, ApiError> {
-  let wanted =
-    |name: &str| names.is_empty() || names.iter().any(|n| n == name);
+  let wanted = |name: &str| {
+    if names.is_empty() {
+      !name.ends_with(".max")
+    } else {
+      names.iter().any(|n| n == name)
+    }
+  };
   let mut out: Series = BTreeMap::new();
   let mut stmt = c
     .prepare_cached(&format!(

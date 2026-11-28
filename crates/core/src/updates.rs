@@ -17,7 +17,10 @@ use chrono::Utc;
 use wharf_api_types::{
   ApiError,
   agent::{AgentOp, ResolveCommit, ResolveImages, ResolvedImage},
-  spec::Source,
+  spec::{
+    ServiceSpec, Source, UpdateIgnoreScope, UpdateIgnoreSpec,
+    image_repo,
+  },
   view::{NewerTag, PendingCheck, Perm, UpdatesView, VersionCheck},
 };
 
@@ -36,37 +39,127 @@ const VERSIONS_EVERY: u32 = 36;
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(120);
 const COMMIT_TIMEOUT: Duration = Duration::from_secs(180);
 
-static LAST: RwLock<Option<UpdatesView>> = RwLock::new(None);
+type ImageDigests = BTreeMap<String, BTreeMap<String, String>>;
 
-pub fn last() -> Option<UpdatesView> {
-  LAST.read().ok().and_then(|l| l.clone())
+#[derive(Default)]
+struct CachedUpdates {
+  view: UpdatesView,
+  image_digests: ImageDigests,
+}
+
+static LAST: RwLock<Option<CachedUpdates>> = RwLock::new(None);
+
+fn last() -> Option<UpdatesView> {
+  LAST.read().ok()?.as_ref().map(|cached| cached.view.clone())
+}
+
+fn effective_ignore(
+  rules: &[UpdateIgnoreSpec],
+  image: &str,
+) -> Option<UpdateIgnoreScope> {
+  rules
+    .iter()
+    .filter(|rule| {
+      rule.image == "*"
+        || rule.image == image
+        || rule.image == image_repo(image)
+    })
+    .map(|r| r.scope)
+    .min()
+}
+
+fn ignore_all_source(rules: &[UpdateIgnoreSpec]) -> bool {
+  rules
+    .iter()
+    .any(|r| r.image == "*" && r.scope == UpdateIgnoreScope::All)
+}
+
+pub(crate) fn validate_ignore(
+  spec: &ServiceSpec,
+) -> Result<(), ApiError> {
+  if spec.update_ignore.len() > 32 {
+    return Err(ApiError::invalid(
+      "每个服务最多设 32 条更新忽略规则",
+    ));
+  }
+  let mut names = BTreeSet::new();
+  for rule in &spec.update_ignore {
+    if rule.image.is_empty()
+      || rule.image.contains('@')
+      || rule
+        .image
+        .chars()
+        .any(|c| c.is_whitespace() || c.is_control())
+      || !names.insert(&rule.image)
+    {
+      return Err(ApiError::invalid(
+        "更新忽略规则的镜像名无效或重复",
+      ));
+    }
+    if matches!(spec.source, Source::Build(_))
+      && (rule.image != "*" || rule.scope != UpdateIgnoreScope::All)
+    {
+      return Err(ApiError::invalid(
+        "构建来源服务只能用 --image '*' --all 忽略更新提醒",
+      ));
+    }
+  }
+  Ok(())
+}
+
+fn filter_check(
+  row: &crate::world::ServiceRow,
+  check: &mut VersionCheck,
+  digests: Option<&BTreeMap<String, String>>,
+) {
+  let rules = &row.spec.update_ignore;
+  let images = crate::pins::images(&row.spec.source);
+  check.tags.retain(|t| {
+    images.contains(&t.image)
+      && match effective_ignore(rules, &t.image) {
+        Some(UpdateIgnoreScope::All) => false,
+        Some(UpdateIgnoreScope::Major) => !t.major,
+        None => true,
+      }
+  });
+  let allowed = |image: &String| {
+    images.contains(image)
+      && effective_ignore(rules, image)
+        != Some(UpdateIgnoreScope::All)
+  };
+  if matches!(row.spec.source, Source::Build(_)) {
+    check.newer &= !ignore_all_source(rules)
+      && row.commit.as_ref() != check.latest.as_ref();
+  } else {
+    check.newer_images.retain(|image| {
+      allowed(image)
+        && digests
+          .and_then(|d| d.get(image))
+          .is_none_or(|latest| row.pins.get(image) != Some(latest))
+    });
+    check.newer = !check.newer_images.is_empty();
+  }
 }
 
 /// 按现在的配置修正上次的结论：检查之后服务已经换了标签或升级过，
 /// 旧镜像的"更高版本"和已经固定下来的"新版本"都不再提示，等下次检查重新算。
 pub fn current(snap: &Snapshot) -> Option<UpdatesView> {
-  let mut view = last()?;
+  let last = LAST.read().ok()?;
+  let cached = last.as_ref()?;
+  let mut view = cached.view.clone();
   view.services.retain(|name, check| {
     let Some(row) = snap.world.services.get(name) else {
       return false;
     };
-    let images = crate::pins::images(&row.spec.source);
-    check.tags.retain(|t| images.contains(&t.image));
-    if check
-      .latest
-      .as_ref()
-      .is_some_and(|l| row.pins.values().any(|p| p == l))
-    {
-      check.newer = false;
-    }
+    filter_check(row, check, cached.image_digests.get(name));
     true
   });
   Some(view)
 }
 
-fn update(f: impl FnOnce(&mut UpdatesView)) {
+fn update(f: impl FnOnce(&mut CachedUpdates)) {
   if let Ok(mut last) = LAST.write() {
-    f(last.get_or_insert_with(UpdatesView::default));
+    f(last.get_or_insert_with(CachedUpdates::default));
   }
 }
 
@@ -115,7 +208,7 @@ async fn pending(state: &AppState) {
       error: Some(e.message),
     },
   };
-  update(|u| u.pending = Some(check));
+  update(|u| u.view.pending = Some(check));
 }
 
 /// 查一个服务的结果：(查到的版本, 固定的版本) 或者错误。
@@ -129,7 +222,8 @@ pub(crate) async fn versions(state: &AppState) {
       return;
     }
   };
-  let (mut found, tags) = images(state, &snap).await;
+  let (mut found, tags, mut image_digests) =
+    images(state, &snap).await;
   found.extend(commits(state, &snap).await);
   let fresh: Vec<(String, String)> = found
     .iter()
@@ -144,7 +238,8 @@ pub(crate) async fn versions(state: &AppState) {
   let names: BTreeSet<String> =
     found.keys().chain(tags.keys()).cloned().collect();
   update(|u| {
-    let old = std::mem::take(&mut u.services);
+    let old = std::mem::take(&mut u.view.services);
+    let mut old_digests = std::mem::take(&mut u.image_digests);
     for name in names {
       let prev = old.get(&name);
       let mut check = match found.remove(&name) {
@@ -154,6 +249,7 @@ pub(crate) async fn versions(state: &AppState) {
           latest: Some(latest),
           error: None,
           tags: vec![],
+          newer_images: vec![],
         },
         Some(Err(e)) => VersionCheck {
           at: now,
@@ -161,6 +257,7 @@ pub(crate) async fn versions(state: &AppState) {
           latest: prev.and_then(|c| c.latest.clone()),
           error: Some(e),
           tags: vec![],
+          newer_images: vec![],
         },
         None => VersionCheck {
           at: now,
@@ -168,6 +265,7 @@ pub(crate) async fn versions(state: &AppState) {
           latest: None,
           error: None,
           tags: vec![],
+          newer_images: vec![],
         },
       };
       check.tags = match tags.get(&name) {
@@ -177,14 +275,42 @@ pub(crate) async fn versions(state: &AppState) {
         }
         None => vec![],
       };
-      u.services.insert(name, check);
+      let mut digests =
+        image_digests.remove(&name).unwrap_or_default();
+      if check.error.is_some()
+        && let Some(previous) = old_digests.remove(&name)
+      {
+        for (image, digest) in previous {
+          digests.entry(image).or_insert(digest);
+        }
+      }
+      let pins = &snap.world.services[&name].pins;
+      check.newer_images = digests
+        .iter()
+        .filter(|(image, digest)| pins.get(*image) != Some(*digest))
+        .map(|(image, _)| image.clone())
+        .collect();
+      u.image_digests.insert(name.clone(), digests);
+      if !matches!(
+        snap.world.services[&name].spec.source,
+        Source::Build(_)
+      ) {
+        check.newer = !check.newer_images.is_empty();
+      }
+      u.view.services.insert(name, check);
     }
   });
+  let Ok(snap) = snapshot::load(&state.db).await else {
+    return;
+  };
+  let checks = current(&snap).unwrap_or_default().services;
   for (name, latest) in fresh {
-    notify_newer(state, &name, &latest).await;
+    if checks.get(&name).is_some_and(|c| c.newer) {
+      notify_newer(state, &name, &latest).await;
+    }
   }
-  for (name, list) in &tags {
-    notify_tags(state, name, list).await;
+  for (name, check) in &checks {
+    notify_tags(state, name, &check.tags).await;
   }
 }
 
@@ -216,7 +342,15 @@ async fn notify_tags(
       first.image, first.tag, first.tag
     ),
   };
-  crate::rules::notice(state, "update", None, true, event).await;
+  crate::rules::notice(
+    state,
+    "update",
+    Some(name),
+    None,
+    true,
+    event,
+  )
+  .await;
 }
 
 /// 记下这次推送的内容，和上次一样就返回 true。
@@ -254,7 +388,15 @@ async fn notify_newer(state: &AppState, name: &str, latest: &str) {
       "最新版本 {short}。看改动：wharf plan，要更新：wharf service update {name}（或在页面上点\u{201c}更新\u{201d}）"
     ),
   };
-  crate::rules::notice(state, "update", None, true, event).await;
+  crate::rules::notice(
+    state,
+    "update",
+    Some(name),
+    None,
+    true,
+    event,
+  )
+  .await;
 }
 
 /// (服务, 镜像, 固定的版本)。
@@ -268,12 +410,14 @@ type Tags = BTreeMap<String, Vec<NewerTag>>;
 async fn images(
   state: &AppState,
   snap: &Snapshot,
-) -> (BTreeMap<String, Found>, Tags) {
+) -> (BTreeMap<String, Found>, Tags, ImageDigests) {
   // 服务器 → [(服务, 镜像, 固定的版本)]
   let mut by_server: BTreeMap<&str, Vec<Item>> = BTreeMap::new();
   for (name, row) in &snap.world.services {
     for image in crate::pins::images(&row.spec.source) {
-      if image.contains('@') {
+      if effective_ignore(&row.spec.update_ignore, &image)
+        == Some(UpdateIgnoreScope::All)
+      {
         continue;
       }
       let pinned = row.pins.get(&image).map(String::as_str);
@@ -285,6 +429,7 @@ async fn images(
   }
   let mut found: BTreeMap<String, Found> = BTreeMap::new();
   let mut tags = Tags::new();
+  let mut digests = ImageDigests::new();
   for (server, items) in by_server {
     let Some(row) = snap.world.servers.get(server) else {
       continue;
@@ -311,11 +456,19 @@ async fn images(
       if let Some(hit) = hit {
         let list = tags.entry(name.to_string()).or_default();
         for tag in &hit.newer_tags {
-          list.push(NewerTag {
-            image: image.clone(),
-            tag: tag.clone(),
-            major: major(tag) != major(current_tag(&image)),
-          });
+          let major = major(tag) != major(current_tag(&image));
+          if !major
+            || effective_ignore(
+              &snap.world.services[name].spec.update_ignore,
+              &image,
+            ) != Some(UpdateIgnoreScope::Major)
+          {
+            list.push(NewerTag {
+              image: image.clone(),
+              tag: tag.clone(),
+              major,
+            });
+          }
         }
       }
       let Some(pinned) = pinned else { continue };
@@ -329,6 +482,12 @@ async fn images(
         ),
       };
       // 一个服务里有一个镜像变了就是有新版本；查失败的优先报出来。
+      if let Ok((latest, _)) = &r {
+        digests
+          .entry(name.to_string())
+          .or_default()
+          .insert(image, latest.clone());
+      }
       let keep = match (found.get(name), &r) {
         (None, _) => true,
         (Some(Err(_)), _) => false,
@@ -341,7 +500,7 @@ async fn images(
     }
   }
   tags.retain(|_, l| !l.is_empty());
-  (found, tags)
+  (found, tags, digests)
 }
 
 /// 镜像现在写的标签，没写就是 `latest`。
@@ -367,6 +526,9 @@ async fn commits(
     let Source::Build(build) = &row.spec.source else {
       continue;
     };
+    if ignore_all_source(&row.spec.update_ignore) {
+      continue;
+    }
     let (Some(git), Some(pinned)) = (build.git.as_ref(), &row.commit)
     else {
       continue;
@@ -410,4 +572,87 @@ async fn commits(
     );
   }
   out
+}
+
+#[test]
+fn update_ignore_hides_major_and_all_immediately_without_restart() {
+  let spec = serde_json::from_value(serde_json::json!({
+    "server":"s1","source":{"compose":{"content":"services: {app: {image: 'app:1.0'}, db: {image: 'db:15'}}"}}
+  })).unwrap();
+  let old = crate::world::ServiceRow {
+    instance_id: "svc_fixture".into(),
+    spec,
+    host_ports: BTreeMap::new(),
+    import: None,
+    pins: BTreeMap::new(),
+    commit: None,
+    version: 1,
+  };
+  let mut row = old.clone();
+  row.spec.update_ignore = vec![
+    UpdateIgnoreSpec {
+      image: "app".into(),
+      scope: UpdateIgnoreScope::All,
+    },
+    UpdateIgnoreSpec {
+      image: "db".into(),
+      scope: UpdateIgnoreScope::Major,
+    },
+  ];
+  let mut check = VersionCheck {
+    at: Utc::now(),
+    latest: Some("sha256:test".into()),
+    newer: true,
+    error: None,
+    newer_images: vec!["app:1.0".into(), "db:15".into()],
+    tags: [
+      ("app:1.0", "1.1", false),
+      ("db:15", "16", true),
+      ("db:15", "15.1", false),
+    ]
+    .into_iter()
+    .map(|(image, tag, major)| NewerTag {
+      image: image.into(),
+      tag: tag.into(),
+      major,
+    })
+    .collect(),
+  };
+  filter_check(&row, &mut check, None);
+  assert!(crate::service_monitor::config_only(&old, &row));
+  assert!(check.newer);
+  assert_eq!(check.newer_images, ["db:15"]);
+  assert_eq!(check.tags.len(), 1);
+  assert_eq!(check.tags[0].tag, "15.1");
+}
+
+#[test]
+fn pinned_and_ignored_images_clear_cached_updates() {
+  let row = crate::world::ServiceRow {
+    instance_id: "svc_fixture".into(),
+    spec: serde_json::from_value(serde_json::json!({
+      "server":"s1","source":{"compose":{"content":"services: {app: {image: 'app:1.0'}, db: {image: 'db:15'}}"}},
+      "update_ignore":[{"image":"db","scope":"all"}],
+    })).unwrap(),
+    host_ports: BTreeMap::new(),
+    import: None,
+    pins: BTreeMap::from([("app:1.0".into(), "sha256:app-new".into())]),
+    commit: None,
+    version: 1,
+  };
+  let mut check = VersionCheck {
+    at: Utc::now(),
+    latest: Some("sha256:db-new".into()),
+    newer: true,
+    error: None,
+    newer_images: vec!["app:1.0".into(), "db:15".into()],
+    tags: vec![],
+  };
+  let digests = BTreeMap::from([
+    ("app:1.0".into(), "sha256:app-new".into()),
+    ("db:15".into(), "sha256:db-new".into()),
+  ]);
+  filter_check(&row, &mut check, Some(&digests));
+  assert!(!check.newer);
+  assert!(check.newer_images.is_empty());
 }

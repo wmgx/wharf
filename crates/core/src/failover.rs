@@ -573,10 +573,25 @@ async fn round(state: &Arc<AppState>) -> Result<(), ApiError> {
   for (host, kind, resolved, event) in notices {
     if kind == "failover" {
       crate::notify::transition(state, &host, true).await;
-      crate::rules::notice(state, kind, None, resolved, event).await;
+      crate::rules::notice(
+        state,
+        kind,
+        Some(&host),
+        None,
+        resolved,
+        event,
+      )
+      .await;
     } else {
-      crate::rules::notice(state, kind, Some(&host), resolved, event)
-        .await;
+      crate::rules::notice(
+        state,
+        kind,
+        Some(&host),
+        Some(&host),
+        resolved,
+        event,
+      )
+      .await;
     }
   }
   Ok(())

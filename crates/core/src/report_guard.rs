@@ -200,17 +200,21 @@ pub fn sanitize_report(r: &mut AgentReport) {
   }
   sanitize_log_hits(&mut r.log_hits);
   if let Some(m) = &mut r.metrics {
-    m.cpu = nonnegative(m.cpu).min(100.0);
-    m.agent_cpu = m.agent_cpu.map(|n| nonnegative(n).min(100.0));
-    for project in m.projects.values_mut() {
-      project.cpu = nonnegative(project.cpu).min(100.0);
-    }
-    for traffic in m.hosts.values_mut() {
-      traffic.secs = nonnegative(traffic.secs).clamp(1.0, 3600.0);
-      traffic.p50_ms = nonnegative(traffic.p50_ms);
-      traffic.p95_ms = nonnegative(traffic.p95_ms);
-      traffic.errors = traffic.errors.min(traffic.reqs);
-    }
+    sanitize_metrics(m);
+  }
+}
+
+pub(crate) fn sanitize_metrics(m: &mut Metrics) {
+  m.cpu = nonnegative(m.cpu).min(100.0);
+  m.agent_cpu = m.agent_cpu.map(|n| nonnegative(n).min(100.0));
+  for project in m.projects.values_mut() {
+    project.cpu = nonnegative(project.cpu).min(100.0);
+  }
+  for traffic in m.hosts.values_mut() {
+    traffic.secs = nonnegative(traffic.secs).clamp(1.0, 3600.0);
+    traffic.p50_ms = nonnegative(traffic.p50_ms);
+    traffic.p95_ms = nonnegative(traffic.p95_ms);
+    traffic.errors = traffic.errors.min(traffic.reqs);
   }
 }
 

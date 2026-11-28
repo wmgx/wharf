@@ -232,7 +232,7 @@ pub(crate) fn mib(bytes: f64) -> String {
 }
 
 type Limits = BTreeMap<String, u64>;
-type Sample = (i64, Metrics, Limits, Option<u64>);
+pub(crate) type Sample = (i64, Metrics, Limits, Option<u64>);
 
 pub(crate) async fn settings(
   state: &AppState,
@@ -274,7 +274,7 @@ pub(crate) fn report_queue(
   server: String,
   cancel: CancellationToken,
 ) -> mpsc::Sender<Sample> {
-  let (tx, mut rx) = mpsc::channel::<Sample>(2);
+  let (tx, mut rx) = mpsc::channel::<Sample>(32);
   tokio::spawn(async move {
     while let Some((at, m, limits, agent_limit)) = tokio::select! {
       _ = cancel.cancelled() => None,

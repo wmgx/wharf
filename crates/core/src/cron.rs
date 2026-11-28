@@ -60,6 +60,17 @@ impl Cron {
       && day
   }
 
+  pub fn prev_at_or_before(
+    &self,
+    at: DateTime<Utc>,
+    max_lookback_mins: u32,
+  ) -> Option<DateTime<Utc>> {
+    let at = minute_floor(at);
+    (0..=i64::from(max_lookback_mins.min(1440)))
+      .map(|n| at - Duration::minutes(n))
+      .find(|t| self.matches(*t))
+  }
+
   /// `after` 之后（不含这一分钟）第一次到点的时间，一年内没有就是 `None`。
   pub fn next_after(
     &self,

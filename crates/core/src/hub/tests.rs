@@ -25,6 +25,9 @@ fn old_hello_has_no_host_shell_capability() {
   let AgentMsg::Hello {
     host_shell,
     runtime_v2,
+    backfill,
+    monitor_v2,
+    service_checks,
     ssh_logins,
     core_probe,
     gateway_extra_files,
@@ -47,6 +50,9 @@ fn old_hello_has_no_host_shell_capability() {
   };
   assert!(!host_shell);
   assert!(!runtime_v2);
+  assert!(!backfill);
+  assert!(!monitor_v2);
+  assert!(!service_checks);
   assert!(!ssh_logins);
   assert!(!core_probe);
   assert!(!gateway_extra_files);
@@ -90,6 +96,8 @@ fn old_core_ignores_new_hello_capability() {
     protocol: PROTOCOL,
     host_shell: true,
     runtime_v2: false,
+    monitor_v2: true,
+    backfill: false,
     forward: true,
     service_checks: true,
     container_diagnosis: true,
@@ -149,6 +157,10 @@ impl Hub {
 
   pub(crate) fn mock_safe_backup_agent(&self, server: &str) {
     lock(&self.conns).get_mut(server).unwrap().safe_backup = true;
+  }
+
+  pub(crate) fn enable_mock_monitor_v2(&self, server: &str) {
+    lock(&self.conns).get_mut(server).unwrap().monitor_v2 = true;
   }
 
   pub(crate) fn enable_mock_build_v2(&self, server: &str) {
@@ -279,6 +291,8 @@ impl Hub {
         rtt_ms: Default::default(),
         host_shell: false,
         runtime_v2: false,
+        monitor_v2: false,
+        backfill: false,
         forward: false,
         service_checks: false,
         container_diagnosis: false,
@@ -422,6 +436,8 @@ async fn agent_upgrade_needs_no_bound_core_server_or_probe_support() {
     rtt_ms: Arc::new(AtomicU64::new(u64::MAX)),
     host_shell: false,
     runtime_v2: false,
+    monitor_v2: false,
+    backfill: false,
     forward: false,
     service_checks: false,
     container_diagnosis: false,
@@ -491,6 +507,8 @@ fn probe_connection(
     rtt_ms: Arc::new(AtomicU64::new(u64::MAX)),
     host_shell: false,
     runtime_v2: false,
+    monitor_v2: false,
+    backfill: false,
     forward: false,
     service_checks: false,
     container_diagnosis: false,
@@ -747,4 +765,93 @@ async fn slow_report_db_does_not_block_progress_and_response() {
   unlock.send(()).unwrap();
   worker.await.unwrap();
   locked.await.unwrap();
+}
+
+#[tokio::test]
+async fn backfill_ingests_without_clock_skew_and_rejects_duplicate_or_foreign_samples()
+ {
+  let _guard = crate::rules::tests::TEST_LOCK.lock().await;
+  crate::rules::tests::reset_memory();
+  let state = crate::rules::tests::test_state();
+  let now = now_ms();
+  state.db.call(move |c| {
+    c.execute("INSERT INTO agents (server, public_key) VALUES ('s1', 'fixture')", []).map_err(sql_err)?;
+    c.execute("INSERT INTO points (name, subject, at, value) VALUES ('host.net_rx', 's1', ?1, 10)", [now - 6 * 60_000]).map_err(sql_err)?;
+    for (kind, name, spec) in [
+      ("server", "s1", serde_json::json!({})),
+      ("server", "s2", serde_json::json!({})),
+      ("service", "app", serde_json::json!({"server":"s1","source":{"image":"app:1"}})),
+      ("service", "foreign", serde_json::json!({"server":"s2","source":{"image":"app:1"}})),
+    ] {
+      crate::db::apply_write(c, &crate::db::Write::Upsert { kind: kind.into(), name: name.into(), spec, meta: serde_json::json!({}) })?;
+    }
+    Ok(())
+  }).await.unwrap();
+  let (alerts, _rx) = mpsc::channel(32);
+  let samples: Vec<_> = [
+    25 * 60_000,
+    0,
+    -25_000,
+    60_000,
+    120_000,
+    180_000,
+    240_000,
+    300_000,
+  ]
+  .into_iter()
+  .map(|age| BufferedSample {
+    at_ms: now - age,
+    log_hits: vec![],
+    metrics: Some(wharf_api_types::agent::Metrics {
+      net_rx: 10,
+      projects: std::collections::BTreeMap::from([
+        ("app".into(), Default::default()),
+        ("foreign".into(), Default::default()),
+      ]),
+      oom: (age == 300_000)
+        .then(|| vec!["app".into(), "foreign".into()]),
+      ..Default::default()
+    }),
+  })
+  .collect();
+  assert_eq!(
+    ingest_backfill(
+      &state,
+      "s1",
+      "fixture",
+      now,
+      samples.clone(),
+      &alerts
+    )
+    .await
+    .unwrap(),
+    5
+  );
+  assert_eq!(
+    ingest_backfill(&state, "s1", "fixture", now, samples, &alerts)
+      .await
+      .unwrap(),
+    0
+  );
+  state.db.call(move |c| {
+    let entry: (i64, i64, f64) = c.query_row(
+      "SELECT COUNT(*), MAX(at), (SELECT SUM(value) FROM points WHERE name = 'traffic.rx')
+       FROM points WHERE name = 'host.net_rx' AND subject = 's1'", [],
+      |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    ).map_err(sql_err)?;
+    assert_eq!(entry, (6, now - 60_000, 3_000.0));
+    let (subject, at): (String, i64) = c.query_row(
+      "SELECT subject, at FROM points WHERE name = 'oom.kill'", [],
+      |r| Ok((r.get(0)?, r.get(1)?)),
+    ).map_err(sql_err)?;
+    assert_eq!((subject.as_str(), at), ("app", now - 5 * 60_000));
+    let subjects: String = c.query_row(
+      "SELECT group_concat(DISTINCT subject) FROM points WHERE name = 'svc.cpu'", [], |r| r.get(0),
+    ).map_err(sql_err)?;
+    assert_eq!(subjects, "app");
+    let stored: Option<String> = c.query_row("SELECT report FROM agents WHERE server = 's1'", [], |r| r.get(0)).map_err(sql_err)?;
+    assert!(stored.is_none());
+    Ok(())
+  }).await.unwrap();
+  assert!(crate::rules::firing_subjects("clock_skew").is_empty());
 }

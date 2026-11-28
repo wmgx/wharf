@@ -39,8 +39,13 @@ pub fn alert_in_scope(
     {
       services.contains(service)
     } else {
-      matches!(rule_id, "domain_down" | "cert_expiring")
-        && route_in_scope(services, world, subject)
+      matches!(
+        rule_id,
+        "domain_down"
+          | "cert_expiring"
+          | "failover"
+          | "failover_error"
+      ) && route_in_scope(services, world, subject)
     }
   })
 }
@@ -151,6 +156,7 @@ pub fn filter_alerts(
   world: &World,
   alerts: &mut AlertsView,
   history_subjects: &[(String, Option<String>)],
+  tasks: &BTreeSet<String>,
 ) {
   alerts.rules.retain(|r| {
     crate::rules::service_overrides::is_service_rule(&r.id)
@@ -185,7 +191,17 @@ pub fn filter_alerts(
         return subject.as_deref() == Some(service.as_str())
           && services.contains(service);
       }
-      alert_in_scope(services, world, None, rule, subject.as_deref())
+      if rule == "task" {
+        subject.as_ref().is_some_and(|name| tasks.contains(name))
+      } else {
+        alert_in_scope(
+          services,
+          world,
+          None,
+          rule,
+          subject.as_deref(),
+        )
+      }
     })
   });
 }

@@ -1188,6 +1188,24 @@ pub enum ServiceCmd {
     #[command(flatten)]
     apply: ApplyFlags,
   },
+  /// 查看或配置镜像更新忽略规则。
+  UpdateIgnore {
+    name: String,
+    /// 镜像标签、仓库名或 *。
+    #[arg(long, requires = "update_ignore_action")]
+    image: Option<String>,
+    /// 忽略全部更新。
+    #[arg(long, group = "update_ignore_action")]
+    all: bool,
+    /// 仅忽略跨大版本标签。
+    #[arg(long, group = "update_ignore_action")]
+    major: bool,
+    /// 清除一条规则，省略镜像则清空。
+    #[arg(long, group = "update_ignore_action")]
+    clear: bool,
+    #[command(flatten)]
+    apply: ApplyFlags,
+  },
   /// 自定义监控：服务所在机器每分钟请求 `http://127.0.0.1:<端口><路径>`，连续 3 次不正常推送。
   /// 例：`wharf service monitor blog --path /health --keyword ok --apply`；`--off` 关闭。
   Monitor {
@@ -1207,6 +1225,21 @@ pub enum ServiceCmd {
     /// 应答里必须包含的文字。
     #[arg(long)]
     keyword: Option<String>,
+    /// 设置请求头，可重复传入。
+    #[arg(long)]
+    header: Vec<String>,
+    /// 删除请求头，可重复传入。
+    #[arg(long)]
+    unset_header: Vec<String>,
+    /// 清空请求头。
+    #[arg(long)]
+    clear_headers: bool,
+    /// 检查间隔（秒），0 恢复默认。
+    #[arg(long)]
+    interval: Option<u32>,
+    /// 单轮失败后的重试次数（0～5）。
+    #[arg(long)]
+    retries: Option<u8>,
     /// 关闭监控。
     #[arg(long)]
     off: bool,

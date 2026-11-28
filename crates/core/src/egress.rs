@@ -186,9 +186,9 @@ async fn ensure_token(
     .await
 }
 
-pub(crate) fn api_proxy(
+pub(crate) fn api_route(
   snap: &Snapshot,
-) -> Option<(&str, reqwest::Proxy)> {
+) -> Option<(&str, wharf_providers::http::Route)> {
   let exit = snap.api_via.as_deref()?.trim();
   let route = route(exit, snap).ok()?;
   let (ip, _) = route.exit.rsplit_once(':')?;
@@ -196,22 +196,27 @@ pub(crate) fn api_proxy(
   let proxy = reqwest::Proxy::all(format!("http://{address}"))
     .ok()?
     .basic_auth("wharf", &route.token);
-  Some((exit, proxy))
+  Some((
+    exit,
+    wharf_providers::http::Route {
+      proxy,
+      all: route.all,
+      domains: route.domains,
+    },
+  ))
+}
+
+pub(crate) fn api_proxy(
+  snap: &Snapshot,
+) -> Option<(&str, reqwest::Proxy)> {
+  api_route(snap).map(|(name, route)| (name, route.proxy))
 }
 
 /// 控制面加载快照后调用：按 [API_VIA] 设置厂商 API 的分流。出口配置不全时直连。
-pub fn apply_api_route(via: Option<&str>, snap: &Snapshot) {
-  let r = via
-    .map(str::trim)
-    .filter(|v| !v.is_empty())
-    .and_then(|v| route(v, snap).ok());
-  wharf_providers::http::set_route(r.map(|r| {
-    wharf_providers::http::Route {
-      proxy: format!("http://wharf:{}@{}", r.token, r.exit),
-      all: r.all,
-      domains: r.domains,
-    }
-  }));
+pub fn apply_api_route(snap: &Snapshot) {
+  wharf_providers::http::set_route(
+    api_route(snap).map(|(_, route)| route),
+  );
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]

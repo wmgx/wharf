@@ -29,8 +29,8 @@ use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
   ApiError, ErrorCode, PROTOCOL,
   agent::{
-    AgentMsg, AgentOp, AgentReport, CoreMsg, TerminalInput,
-    auth_payload, auth_payload_v2,
+    AgentMsg, AgentOp, AgentReport, BufferedSample, CoreMsg,
+    TerminalInput, auth_payload, auth_payload_v2,
   },
   seal::{KeyShare, Opener, Role, Sealer},
 };
@@ -68,6 +68,8 @@ struct Conn {
   rtt_ms: Arc<AtomicU64>,
   host_shell: bool,
   runtime_v2: bool,
+  monitor_v2: bool,
+  backfill: bool,
   forward: bool,
   service_checks: bool,
   container_diagnosis: bool,
@@ -414,6 +416,18 @@ impl Hub {
       .is_some_and(|c| !c.upgrade_only && c.frpc_reload)
   }
 
+  pub fn supports_backfill(&self, server: &str) -> bool {
+    lock(&self.conns).get(server).is_some_and(|c| {
+      !c.closed.is_cancelled() && !c.upgrade_only && c.backfill
+    })
+  }
+
+  pub fn supports_monitor_v2(&self, server: &str) -> bool {
+    lock(&self.conns).get(server).is_some_and(|c| {
+      !c.closed.is_cancelled() && !c.upgrade_only && c.monitor_v2
+    })
+  }
+
   pub fn supports_safe_gateway(&self, server: &str) -> bool {
     lock(&self.conns)
       .get(server)
@@ -660,6 +674,17 @@ impl Hub {
     ),
     cancel: &CancellationToken,
   ) -> Result<T, ApiError> {
+    if !conn.monitor_v2
+      && match &op {
+        AgentOp::HttpCheck(job) => !job.headers.is_empty(),
+        AgentOp::ProjectUp(up) => {
+          up.readiness.as_ref().is_some_and(|p| !p.headers.is_empty())
+        }
+        _ => false,
+      }
+    {
+      return Err(crate::monitor::old_agent(server));
+    }
     if let AgentOp::ProjectUp(up) = &op {
       if up.init.is_some() {
         conn.require_deploy_v2(server, "部署前初始化")?;
@@ -1099,6 +1124,8 @@ async fn handle_socket(
     protocol,
     host_shell,
     runtime_v2,
+    monitor_v2,
+    backfill,
     forward,
     service_checks,
     container_diagnosis,
@@ -1195,6 +1222,7 @@ async fn handle_socket(
         .map_err(|e| anyhow::anyhow!("{e}"))?;
       (
         CoreMsg::Welcome {
+          backfill: !upgrade_only,
           signature,
           alt_signature: if key_rotation {
             alt_signature
@@ -1212,6 +1240,7 @@ async fn handle_socket(
         keys.sign(&auth_payload("core", &server, &agent_nonce));
       (
         CoreMsg::Welcome {
+          backfill: !upgrade_only,
           signature,
           alt_signature: None,
           confirm_key: false,
@@ -1271,6 +1300,8 @@ async fn handle_socket(
     rtt_ms: Arc::new(AtomicU64::new(u64::MAX)),
     host_shell,
     runtime_v2,
+    monitor_v2,
+    backfill,
     forward,
     service_checks,
     container_diagnosis,
@@ -1356,6 +1387,7 @@ async fn handle_socket(
   let mut last_recv = tokio::time::Instant::now();
   let mut ping_sent: Option<tokio::time::Instant> = None;
   let reports = Arc::new(ReportSlot::default());
+  let mut backfill_open = conn.backfill && !conn.upgrade_only;
   let report_task = tokio::spawn(report_worker(
     state.clone(),
     server.clone(),
@@ -1408,7 +1440,17 @@ async fn handle_socket(
           },
         };
         match serde_json::from_slice::<AgentMsg>(&text) {
+          Ok(AgentMsg::Backfill { mut samples, dropped })
+            if std::mem::take(&mut backfill_open) && state.hub.supports_backfill(&server) =>
+          {
+            samples.truncate(20);
+            reports.push_backfill(now_ms(), samples, dropped);
+          }
+          Ok(AgentMsg::Backfill { .. }) => {
+            tracing::debug!("忽略服务器 {server} 的重复或不支持的断连补传");
+          }
           Ok(AgentMsg::Report(mut report)) => {
+            backfill_open = false;
             use crate::report_guard::RateDecision::*;
             match state.hub.report_rate.check(&server, conn.conn_id, report.metrics.is_some(), std::time::Instant::now()) {
               DropAll => continue,
@@ -1441,6 +1483,7 @@ async fn handle_socket(
 #[derive(Default)]
 struct ReportSlot {
   latest: Mutex<Option<(i64, AgentReport)>>,
+  backfill: Mutex<Option<(i64, Vec<BufferedSample>, u32)>>,
   ready: tokio::sync::Notify,
 }
 
@@ -1450,14 +1493,99 @@ impl ReportSlot {
     self.ready.notify_one();
   }
 
-  async fn next(&self) -> (i64, AgentReport) {
+  fn push_backfill(
+    &self,
+    received: i64,
+    samples: Vec<BufferedSample>,
+    dropped: u32,
+  ) {
+    *lock(&self.backfill) = Some((received, samples, dropped));
+    self.ready.notify_one();
+  }
+
+  async fn next(&self) -> IncomingReport {
     loop {
-      if let Some(report) = lock(&self.latest).take() {
-        return report;
+      if let Some((received, samples, dropped)) =
+        lock(&self.backfill).take()
+      {
+        return IncomingReport::Backfill(received, samples, dropped);
+      }
+      if let Some((at, report)) = lock(&self.latest).take() {
+        return IncomingReport::Live(at, Box::new(report));
       }
       self.ready.notified().await;
     }
   }
+}
+
+enum IncomingReport {
+  Backfill(i64, Vec<BufferedSample>, u32),
+  Live(i64, Box<AgentReport>),
+}
+
+async fn ingest_backfill(
+  state: &Arc<AppState>,
+  server: &str,
+  public_key: &str,
+  now: i64,
+  mut samples: Vec<BufferedSample>,
+  alerts: &mpsc::Sender<crate::rules::resources::Sample>,
+) -> Result<usize, ApiError> {
+  let (name, key) = (server.to_string(), public_key.to_string());
+  let (world, deployed, mut last) = state.db.call(move |c| {
+    if !crate::db::agents(c)?.iter().any(|a| a.server == name && a.public_key.as_deref() == Some(key.as_str())) {
+      return Err(ApiError::not_found("agent 已取消注册"));
+    }
+    let world = crate::world::World::from_rows(crate::db::all_resources(c)?)?;
+    let deployed = crate::db::deployed_servers(c)?;
+    let last = c.query_row(
+      "SELECT MAX(at) FROM points WHERE subject = ?1 AND name = 'host.net_rx'",
+      [&name], |r| r.get::<_, Option<i64>>(0),
+    ).map_err(sql_err)?.unwrap_or(i64::MIN);
+    Ok((world, deployed, last))
+  }).await?;
+  samples.retain(|s| {
+    // 后续实时报告可能在同一毫秒收到，补传只能排在它之前。
+    (now - 20 * 60_000..now).contains(&s.at_ms)
+  });
+  samples.sort_by_key(|s| s.at_ms);
+  let settings =
+    crate::rules::resources::settings(state, server).await;
+  let mut applied = 0;
+  for sample in samples {
+    let at = sample.at_ms;
+    if at <= last {
+      continue;
+    }
+    last = at;
+    let mut hits = sample.log_hits;
+    crate::report_guard::sanitize_log_hits(&mut hits);
+    crate::service_monitor::report_at(server, at, hits);
+    if let Some(mut m) = sample.metrics {
+      crate::report_guard::sanitize_metrics(&mut m);
+      crate::report_guard::filter_owned_metrics(
+        server, &mut m, &world, &deployed,
+      );
+      let oom = m.oom.take();
+      let hosts = std::mem::take(&mut m.hosts);
+      if !hosts.is_empty() {
+        crate::http_stats::record_at(
+          state.clone(),
+          server.to_string(),
+          at,
+          hosts,
+        )
+        .await;
+      }
+      crate::metrics::record_report_at(state, server, at, &m).await;
+      if let Some((_, limits)) = &settings {
+        let _ = alerts.send((at, m, limits.clone(), None)).await;
+      }
+      crate::oom::record_at(state, server, at, oom).await;
+    }
+    applied += 1;
+  }
+  Ok(applied)
 }
 
 async fn report_worker(
@@ -1474,7 +1602,33 @@ async fn report_worker(
   );
   let process = async {
     loop {
-      let (received, report) = reports.next().await;
+      let (received, report) = match reports.next().await {
+        IncomingReport::Live(at, report) => (at, *report),
+        IncomingReport::Backfill(received, samples, dropped) => {
+          match ingest_backfill(
+            &state,
+            &server,
+            &conn.public_key,
+            received,
+            samples,
+            &alerts,
+          )
+          .await
+          {
+            Ok(applied) if applied > 0 || dropped > 0 => {
+              tracing::info!(
+                "服务器 {server} 补传 {applied} 条断连采样（淘汰 {dropped} 条）"
+              )
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(
+              "服务器 {server} 补传失败：{}",
+              e.message
+            ),
+          }
+          continue;
+        }
+      };
       let mut report = match crate::report_guard::record_report(
         &state.db,
         &server,
@@ -1504,14 +1658,18 @@ async fn report_worker(
         let oom = m.oom.take();
         let hosts = std::mem::take(&mut m.hosts);
         if !hosts.is_empty() {
-          crate::http_stats::record(
+          crate::http_stats::record_at(
             state.clone(),
             server.clone(),
+            received,
             hosts,
           )
           .await;
         }
-        crate::metrics::record_report(&state, &server, m).await;
+        crate::metrics::record_report_at(
+          &state, &server, received, m,
+        )
+        .await;
         if let Some((wanted, limits)) = settings {
           let limit = report
             .agent_memory
@@ -1525,7 +1683,7 @@ async fn report_worker(
             limit,
           ));
         }
-        crate::oom::record(&state, &server, oom).await;
+        crate::oom::record_at(&state, &server, received, oom).await;
       }
     }
   };

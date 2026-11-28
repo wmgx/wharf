@@ -188,6 +188,7 @@ pub async fn used(state: &AppState, actor: &str, source: String) {
       state,
       "recovery",
       None,
+      None,
       false,
       crate::notify::Event {
         title: "用掉了一个恢复码".into(),

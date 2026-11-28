@@ -166,7 +166,7 @@ pub async fn load(db: &Db) -> Result<Snapshot, ApiError> {
   let snap = load_inner(db).await?;
   *SECRETS.write().unwrap_or_else(|e| e.into_inner()) =
     crate::secret_policy::non_system_secrets(&snap.secrets);
-  crate::egress::apply_api_route(snap.api_via.as_deref(), &snap);
+  crate::egress::apply_api_route(&snap);
   crate::source_trust::refresh_core_proxies(
     &snap.world,
     &snap.net(&snap.world),

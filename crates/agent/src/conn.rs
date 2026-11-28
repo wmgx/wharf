@@ -5,7 +5,7 @@ use std::{
   path::Path,
   sync::{
     Arc,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
   },
   time::Duration,
 };
@@ -19,12 +19,14 @@ use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
   ApiError, ErrorCode,
   agent::{
-    AgentMsg, AgentOp, CoreMsg, TerminalInput, auth_payload_v2,
+    AgentMsg, AgentOp, BufferedSample, CoreMsg, TerminalInput,
+    auth_payload_v2,
   },
   seal::{KeyShare, Role},
 };
 
 use crate::{
+  backfill::{BackfillBuffer, unix_ms},
   exec::Ctx,
   identity::{self, Joined},
   ops::Ops,
@@ -67,21 +69,32 @@ fn handle_auth_failure(
 pub async fn run_forever(ops: Arc<Ops>) -> ! {
   let mut backoff = 1u64;
   let mut auth_failures = 0;
-  let cursors = crate::log_watches::Cursors::default();
   let hits = crate::log_watches::Hits::default();
+  let cancel = CancellationToken::new();
+  let _guard = cancel.clone().drop_guard();
+  let mut watches = crate::log_watches::Watches::new(
+    ops.docker.clone(),
+    cancel.clone(),
+    hits.clone(),
+    Default::default(),
+  );
+  let telemetry = Arc::new(Telemetry {
+    online: AtomicBool::new(false),
+    buffer: Mutex::new(BackfillBuffer::default()),
+    hits,
+  });
+  tokio::spawn(sample_offline(
+    ops.clone(),
+    telemetry.clone(),
+    cancel,
+  ));
   loop {
     let result = async {
       let joined = Joined::load(&ops.data_dir)?
         .context("agent 没有加入控制面")?;
       let key = identity::load_key(&ops.data_dir)?;
-      session(
-        &joined,
-        &key,
-        ops.clone(),
-        cursors.clone(),
-        hits.clone(),
-      )
-      .await
+      session(&joined, &key, ops.clone(), &mut watches, &telemetry)
+        .await
     }
     .await;
     match result {
@@ -121,6 +134,62 @@ pub async fn run_forever(ops: Arc<Ops>) -> ! {
   }
 }
 
+struct Telemetry {
+  online: AtomicBool,
+  buffer: Mutex<BackfillBuffer>,
+  hits: crate::log_watches::Hits,
+}
+
+struct Online<'a>(&'a AtomicBool);
+
+impl Drop for Online<'_> {
+  fn drop(&mut self) {
+    self.0.store(false, Ordering::Release);
+  }
+}
+
+async fn sample_offline(
+  ops: Arc<Ops>,
+  telemetry: Arc<Telemetry>,
+  cancel: CancellationToken,
+) {
+  let ctx = Ctx {
+    cancel: cancel.clone(),
+    progress: None,
+  };
+  let mut tick = tokio::time::interval(Duration::from_secs(60));
+  tick
+    .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+  tick.tick().await;
+  loop {
+    tokio::select! {
+      _ = cancel.cancelled() => break,
+      _ = tick.tick() => {}
+    }
+    if telemetry.online.load(Ordering::Acquire) {
+      continue;
+    }
+    let mut buffer = telemetry.buffer.lock().await;
+    if telemetry.online.load(Ordering::Acquire) {
+      continue;
+    }
+    let metrics = ops.reporter.metrics(&ctx).await;
+    let log_hits =
+      std::mem::take(&mut *telemetry.hits.lock().unwrap())
+        .into_values()
+        .collect();
+    let at_ms = unix_ms();
+    buffer.push(
+      BufferedSample {
+        at_ms,
+        metrics,
+        log_hits,
+      },
+      at_ms,
+    );
+  }
+}
+
 fn random_nonce() -> String {
   let mut bytes = [0u8; 24];
   getrandom::fill(&mut bytes).expect("随机数不可用");
@@ -139,6 +208,7 @@ async fn handshake(
   HandshakeSocket,
   wharf_api_types::seal::Sealer,
   wharf_api_types::seal::Opener,
+  bool,
 )> {
   let url = joined.ws_url();
   let (mut ws, _) = tokio::time::timeout(
@@ -176,6 +246,8 @@ async fn handshake(
     protocol: wharf_api_types::PROTOCOL,
     host_shell: true,
     runtime_v2: true,
+    monitor_v2: true,
+    backfill: true,
     forward: true,
     service_checks: true,
     container_diagnosis: true,
@@ -209,6 +281,7 @@ async fn handshake(
     signature,
     alt_signature,
     confirm_key,
+    backfill,
     kx,
   } = next_core_msg(&mut ws).await?
   else {
@@ -275,19 +348,41 @@ async fn handshake(
   } else if identity::has_previous_key(data_dir) {
     return Err(AuthenticationFailed.into());
   }
-  Ok((ws, sealer, opener))
+  Ok((ws, sealer, opener, backfill))
 }
 
 async fn session(
   joined: &Joined,
   key: &SigningKey,
   ops: Arc<Ops>,
-  cursors: crate::log_watches::Cursors,
-  hits: crate::log_watches::Hits,
+  watches: &mut crate::log_watches::Watches,
+  telemetry: &Telemetry,
 ) -> anyhow::Result<bool> {
-  let (ws, mut sealer, mut opener) =
+  let (ws, mut sealer, mut opener, backfill) =
     handshake(joined, key, &ops.data_dir).await?;
+  let _online = Online(&telemetry.online);
+  telemetry.online.store(true, Ordering::Release);
   let (mut sink, mut stream) = ws.split();
+  {
+    let mut buffer = telemetry.buffer.lock().await;
+    if backfill {
+      let (samples, dropped) = buffer.peek_all(unix_ms());
+      if !samples.is_empty() || dropped > 0 {
+        let plain = serde_json::to_vec(&AgentMsg::Backfill {
+          samples,
+          dropped,
+        })?;
+        tokio::time::timeout(
+          SOCKET_WRITE_TIMEOUT,
+          sink.send(Message::binary(sealer.seal(&plain))),
+        )
+        .await
+        .context("发送断连采样超时")??;
+      }
+    }
+    buffer.clear();
+  }
+  let hits = telemetry.hits.clone();
   let url = joined.ws_url();
   tracing::info!(
     "已连接控制面 {url}，服务器名 {}（通道已加密）",
@@ -339,12 +434,6 @@ async fn session(
     memory_status,
     session_cancel.clone(),
   ));
-  let mut watches = crate::log_watches::Watches::new(
-    ops.docker.clone(),
-    session_cancel.clone(),
-    hits.clone(),
-    cursors,
-  );
   let reporter = {
     let tx = tx.clone();
     let ops = ops.clone();
@@ -622,6 +711,7 @@ async fn session(
   // 断线时取消全部进行中的请求，不留下"一直在忙"的操作。
   session_cancel.cancel();
   reporter.abort();
+  let _ = reporter.await;
   drop(tx);
   let _ = tokio::time::timeout(Duration::from_secs(2), writer).await;
   result.map(|()| reconnect_after.load(Ordering::Acquire) != 0)
@@ -753,6 +843,7 @@ mod rotation_tests {
               signature: hex::encode(signature.to_bytes()),
               alt_signature: None,
               confirm_key: false,
+              backfill: false,
               kx: Some(share.public),
             })
             .unwrap(),
