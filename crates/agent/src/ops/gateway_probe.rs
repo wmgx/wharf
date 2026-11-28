@@ -347,12 +347,7 @@ mod tests {
       timeout_secs: 2,
     };
     let replies = [
-      (
-        401,
-        "需要登录
-",
-        false,
-      ),
+      (401, "需要登录\n", false),
       (401, "backend", true),
       (403, "backend", true),
       (500, "", false),
@@ -363,42 +358,19 @@ mod tests {
       for (code, body, _) in replies {
         let (mut stream, _) = listener.accept().await.unwrap();
         let mut request = Vec::new();
-        while !request.ends_with(
-          b"
-
-",
-        ) {
+        while !request.ends_with(b"\r\n\r\n") {
           request.push(stream.read_u8().await.unwrap());
         }
         let request =
           String::from_utf8(request).unwrap().to_ascii_lowercase();
-        assert!(request.contains(
-          "
-host: probe.example.test
-"
-        ));
-        let (code, body) = if request.contains(
-          "
-cookie: wharf_gate=fixture
-",
-        ) {
-          (code, body)
-        } else {
-          (302, "")
-        };
-        stream
-          .write_all(
-            format!(
-              "HTTP/1.1 {code} Fixture
-Content-Length: {}
-
-{body}",
-              body.len()
-            )
-            .as_bytes(),
-          )
-          .await
-          .unwrap();
+        assert!(request.contains("\r\nhost: probe.example.test\r\n"));
+        let (code, body) =
+          if request.contains("\r\ncookie: wharf_gate=fixture\r\n") {
+            (code, body)
+          } else {
+            (302, "")
+          };
+        stream.write_all(format!("HTTP/1.1 {code} Fixture\r\nContent-Length: {}\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
       }
     });
     for (code, _, ok) in replies {
