@@ -196,24 +196,67 @@ fn page_path(rule: &str, subject: Option<&str>) -> String {
   let Some(subject) = subject else {
     return "/alerts".into();
   };
+  let name = urlencoding::encode(subject);
   match rule {
-    "server_offline" => format!("/servers/{subject}"),
-    "container_restarting"
-    | "monitor_failed"
-    | "http_5xx"
-    | "oom_killed"
-    | "svc_mem_near_limit" => {
-      format!("/services/{subject}")
+    "server_offline" | "host_cpu_high" | "host_mem_high"
+    | "inode_high" | "agent_mem_high" | "clock_skew"
+    | "traffic_quota" => format!("/servers/{name}"),
+    "disk_forecast" => format!("/servers/{name}?tab=disk"),
+    "container_restarting" | "http_5xx" | "oom_killed" => {
+      format!("/services/{name}?tab=logs")
     }
-    "domain_down" | "cert_expiring" | "link_cert_expiring"
-    | "link_ca_expiring" => "/entries".into(),
-    "link_loss" => "/network".into(),
+    "monitor_failed" | "svc_mem_near_limit" | "heartbeat_late" => {
+      format!("/services/{name}?tab=metrics")
+    }
+    "log_keyword" | "port_down" => {
+      let service = subject.split_once(':').map_or(subject, |s| s.0);
+      format!(
+        "/services/{}?tab=metrics",
+        urlencoding::encode(service)
+      )
+    }
+    "mem_forecast" => {
+      if let Some(service) = subject.strip_prefix("服务 ") {
+        format!(
+          "/services/{}?tab=metrics",
+          urlencoding::encode(service)
+        )
+      } else if let Some(server) = subject.strip_prefix("服务器 ")
+      {
+        format!("/servers/{}", urlencoding::encode(server))
+      } else {
+        "/alerts".into()
+      }
+    }
+    "domain_down" | "cert_expiring" => {
+      format!("/domains?open={name}")
+    }
+    "link_cert_expiring" | "link_ca_expiring" => {
+      "/domains?tab=entries".into()
+    }
+    "link_loss"
+    | "tailnet_relay"
+    | "tailnet_key_expiring"
+    | "external_incident" => "/network".into(),
+    "vendor_token_invalid" => "/settings".into(),
+    "expiry_soon" | "expiry_urgent" => {
+      match subject.split_once(':') {
+        Some(("domain", domain)) => {
+          format!("/domains?q={}", urlencoding::encode(domain))
+        }
+        Some(("server", server)) => format!(
+          "/servers/{}?tab=settings",
+          urlencoding::encode(server)
+        ),
+        _ => "/alerts".into(),
+      }
+    }
     "host_unit_down" => {
       let server = subject.split_once(':').map_or(subject, |s| s.0);
-      format!("/servers/{server}")
+      format!("/servers/{}?tab=host", urlencoding::encode(server))
     }
     _ if crate::rules::is_custom_rule(rule) => {
-      format!("/services/{subject}")
+      format!("/services/{name}?tab=metrics")
     }
     _ => "/alerts".into(),
   }

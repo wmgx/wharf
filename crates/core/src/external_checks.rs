@@ -45,7 +45,10 @@ pub fn spawn(state: Arc<AppState>) {
   });
 }
 
-pub fn issues(servers: &[ServerView]) -> Vec<Issue> {
+pub fn issues(
+  servers: &[ServerView],
+  snap: &crate::snapshot::Snapshot,
+) -> Vec<Issue> {
   let mut issues = dns_check::issues();
   issues.extend(servers.iter().filter_map(|server| {
     let quota = server.report.as_ref()?.docker_quota.as_ref()?;
@@ -72,5 +75,53 @@ pub fn issues(servers: &[ServerView]) -> Vec<Issue> {
       alert: None,
     })
   }));
+  for (rule, level) in [
+    ("vendor_token_invalid", IssueLevel::Fault),
+    ("tailnet_key_expiring", IssueLevel::Warn),
+    ("tailnet_relay", IssueLevel::Warn),
+    ("external_incident", IssueLevel::Warn),
+  ] {
+    for (name, title) in crate::rules::firing_subjects(rule) {
+      let subject = match rule {
+        "vendor_token_invalid"
+          if !vendor_checks::active_account(snap, &name) =>
+        {
+          continue;
+        }
+        "tailnet_key_expiring" => {
+          if !snap.world.servers.contains_key(&name)
+            || !snap
+              .secrets
+              .contains_key(crate::tailscale::OAUTH_SECRET)
+          {
+            continue;
+          }
+          Some(IssueSubject {
+            kind: "server".into(),
+            name: name.clone(),
+          })
+        }
+        "tailnet_relay"
+          if !name.split_once('>').is_some_and(|(from, to)| {
+            snap.world.servers.contains_key(from)
+              && snap.world.servers.contains_key(to)
+          }) =>
+        {
+          continue;
+        }
+        _ => None,
+      };
+      let (alert, ack) = crate::rules::issue_alert(rule, &name);
+      issues.push(Issue {
+        code: rule.into(),
+        level,
+        subject,
+        title,
+        hint: None,
+        alert,
+        ack,
+      });
+    }
+  }
   issues
 }

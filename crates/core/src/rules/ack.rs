@@ -147,30 +147,6 @@ pub(super) fn view_of(
   })
 }
 
-pub(super) async fn delete_key(
-  state: &AppState,
-  rule: &str,
-  subject: &str,
-) {
-  let key = (rule.to_string(), subject.to_string());
-  let existed = with(|m| m.acks.remove(&key).is_some());
-  if !existed {
-    return;
-  }
-  let (r, s) = key;
-  let _ = state
-    .db
-    .call(move |c| {
-      c.execute(
-        "DELETE FROM alert_acks WHERE rule = ?1 AND subject = ?2",
-        params![r, s],
-      )
-      .map(|_| ())
-      .map_err(db::sql_err)
-    })
-    .await;
-}
-
 pub(super) async fn ack_at(
   state: &AppState,
   rule: &str,

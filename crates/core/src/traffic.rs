@@ -172,16 +172,19 @@ pub fn spawn(state: Arc<AppState>) {
     loop {
       match snapshot::load(&state.db).await {
         Ok(snap) => {
+          let keep = snap
+            .world
+            .servers
+            .iter()
+            .filter(|(_, row)| {
+              row.settings.traffic_quota_gb.is_some()
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+          rules::retain_subjects(&state, "traffic_quota", &keep)
+            .await;
           for (name, row) in &snap.world.servers {
             let Some(quota) = row.settings.traffic_quota_gb else {
-              rules::observe(
-                &state,
-                "traffic.used_pct",
-                name,
-                0.0,
-                "没有设置额度",
-              )
-              .await;
               continue;
             };
             let reset =
@@ -223,9 +226,15 @@ pub fn spawn(state: Arc<AppState>) {
 }
 
 /// 正在触发的流量提醒，给“待处理”用。
-pub fn issues() -> Vec<Issue> {
+pub fn issues(world: &crate::world::World) -> Vec<Issue> {
   rules::firing_subjects("traffic_quota")
     .into_iter()
+    .filter(|(name, _)| {
+      world
+        .servers
+        .get(name)
+        .is_some_and(|row| row.settings.traffic_quota_gb.is_some())
+    })
     .map(|(name, title)| {
       let (alert, ack) = rules::issue_alert("traffic_quota", &name);
       Issue {

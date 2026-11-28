@@ -360,9 +360,16 @@ pub(super) const RULES: &[Rule] = &[
     default_level: AlertLevel::Digest,
     key: |s| format!("cert.{s}"),
     fire: |c| {
+      let detail = if c.value < 0.0 {
+        format!("已过期 {:.0} 天", c.value.abs())
+      } else if c.value == 0.0 {
+        "已到期".into()
+      } else {
+        format!("{:.0} 天后到期", c.value)
+      };
       ev(
-        format!("域名 {} 的证书 {:.0} 天后到期", c.subject, c.value),
-        format!("证书还剩 {:.0} 天", c.value),
+        format!("域名 {} 的证书{detail}", c.subject),
+        format!("证书{detail}"),
       )
     },
     ok: |c| {

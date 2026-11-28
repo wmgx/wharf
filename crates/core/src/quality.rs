@@ -37,6 +37,15 @@ struct Memory {
 
 static MEMORY: Mutex<Option<Memory>> = Mutex::new(None);
 
+pub(crate) fn forget_server(server: &str) {
+  if let Ok(mut memory) = MEMORY.lock()
+    && let Some(m) = memory.as_mut()
+  {
+    m.latest
+      .retain(|(from, to), _| from != server && to != server);
+  }
+}
+
 pub fn spawn(state: Arc<AppState>) {
   tokio::spawn(async move {
     tokio::time::sleep(Duration::from_secs(120)).await;
@@ -105,6 +114,16 @@ async fn round(state: &AppState) -> Result<(), ApiError> {
   let net = snap.net(&snap.world);
   let names: Vec<String> =
     snap.world.servers.keys().cloned().collect();
+  let keep = names
+    .iter()
+    .flat_map(|from| {
+      names
+        .iter()
+        .filter(move |to| *to != from)
+        .map(move |to| format!("{from}>{to}"))
+    })
+    .collect();
+  crate::rules::retain_subjects(state, "link_loss", &keep).await;
   let calls = names
     .iter()
     .filter(|from| state.hub.is_online(from))
@@ -168,9 +187,19 @@ async fn round(state: &AppState) -> Result<(), ApiError> {
     return Ok(());
   }
 
+  let current = crate::snapshot::load(&state.db).await?;
+  let names = current
+    .world
+    .servers
+    .keys()
+    .cloned()
+    .collect::<std::collections::BTreeSet<_>>();
   let at = chrono::Utc::now();
   let views: Vec<LinkView> = results
     .iter()
+    .filter(|((from, to), _)| {
+      names.contains(from) && names.contains(to)
+    })
     .map(|((from, to), s)| LinkView {
       from: from.clone(),
       to: to.clone(),

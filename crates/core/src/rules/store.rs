@@ -239,22 +239,32 @@ pub(super) async fn set_firing(
   key: (String, String),
   fire: Option<FiringEntry>,
 ) {
-  let changed = with(|m| match &fire {
-    Some(v) if !m.firing.contains_key(&key) => {
-      m.firing.insert(key.clone(), v.clone());
-      true
+  let update = with(|m| match &fire {
+    Some(v) => {
+      if let Some(old) = m.firing.get_mut(&key) {
+        if old.title == v.title && old.body == v.body {
+          return None;
+        }
+        old.title.clone_from(&v.title);
+        old.body.clone_from(&v.body);
+        Some(true)
+      } else {
+        m.firing.insert(key.clone(), v.clone());
+        Some(false)
+      }
     }
-    Some(_) => false,
-    None => m.firing.remove(&key).is_some(),
+    None => m.firing.remove(&key).map(|_| false),
   });
-  if !changed {
-    return;
-  }
+  let Some(update) = update else { return };
   let result = state
     .db
     .call(move |c| {
       let (rule, subject) = key;
       match fire {
+        Some(f) if update => c.execute(
+          "UPDATE alert_firing SET title = ?3, body = ?4 WHERE rule = ?1 AND subject = ?2",
+          rusqlite::params![rule, subject, f.title, f.body],
+        ),
         Some(f) => c.execute(
           "INSERT OR REPLACE INTO alert_firing (rule, subject, since, title, body, delivery, suppressed)
            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",

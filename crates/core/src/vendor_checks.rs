@@ -45,6 +45,12 @@ static ACL: tokio::sync::Mutex<Option<CachedAcl>> =
 static KEYS: RwLock<BTreeMap<String, (String, TailnetKey)>> =
   RwLock::new(BTreeMap::new());
 
+pub(crate) fn forget_server(server: &str) {
+  if let Ok(mut keys) = KEYS.write() {
+    keys.remove(server);
+  }
+}
+
 fn credential(snap: &Snapshot) -> Option<&str> {
   snap
     .secrets
@@ -312,9 +318,27 @@ async fn record_keys(s: &AppState, snap: &Snapshot, devices: &Value) {
       keys.insert(name.clone(), (ip.to_string(), key));
     }
   }
+  rules::retain_subjects(
+    s,
+    "tailnet_key_expiring",
+    &keys.keys().cloned().collect(),
+  )
+  .await;
   if let Ok(mut cache) = KEYS.write() {
     *cache = keys;
   }
+}
+
+pub(crate) async fn forget_oauth(s: &AppState) {
+  if let Ok(mut cache) = KEYS.write() {
+    cache.clear();
+  }
+  rules::lifecycle::clear_matching(s, |rule, subject| {
+    rule == "tailnet_key_expiring"
+      || (rule == "vendor_token_invalid"
+        && subject == "Tailscale OAuth")
+  })
+  .await;
 }
 
 pub async fn refresh_keys(s: &AppState) -> Result<(), ApiError> {
@@ -323,11 +347,12 @@ pub async fn refresh_keys(s: &AppState) -> Result<(), ApiError> {
     && let Ok(token) = tailscale::access_token(secret).await
     && let Ok(devices) = tailscale::devices(&token).await
   {
-    record_keys(s, &snap, &devices).await;
-  } else if credential(&snap).is_none()
-    && let Ok(mut cache) = KEYS.write()
-  {
-    cache.clear();
+    let latest = snapshot::load(&s.db).await?;
+    if credential(&latest) == Some(secret) {
+      record_keys(s, &latest, &devices).await;
+    }
+  } else if credential(&snap).is_none() {
+    forget_oauth(s).await;
   }
   Ok(())
 }
@@ -380,8 +405,21 @@ fn valid_id(id: &str) -> bool {
   id.len() == 32 && id.bytes().all(|c| c.is_ascii_hexdigit())
 }
 
+fn cloudflare_subject(name: &str) -> String {
+  format!("Cloudflare {name}")
+}
+
+pub(crate) async fn forget_cloudflare(s: &AppState, name: &str) {
+  rules::lifecycle::clear(
+    s,
+    "vendor_token_invalid",
+    &cloudflare_subject(name),
+  )
+  .await;
+}
+
 async fn cloudflare(account: &AccountRow) -> Vec<DoctorCheck> {
-  let name = &format!("Cloudflare {}", account.name);
+  let name = &cloudflare_subject(&account.name);
   let Ok(http) = Http::new(Duration::from_secs(10)) else {
     return vec![item(
       "令牌",
@@ -574,13 +612,34 @@ pub async fn refresh(s: &AppState) -> Result<(), ApiError> {
 }
 
 /// 按检查结果更新“厂商账号不可用”告警：有失败就触发，全部通过就恢复。
+pub(crate) fn active_account(snap: &Snapshot, name: &str) -> bool {
+  if name == "Tailscale OAuth" {
+    return credential(snap).is_some();
+  }
+  snap.accounts.iter().any(|account| {
+    account.kind == "cloudflare"
+      && name.strip_prefix("Cloudflare ")
+        == Some(account.name.as_str())
+  })
+}
+
 pub async fn record(s: &AppState, checks: &[DoctorCheck]) {
   let mut grouped: BTreeMap<&str, Vec<&DoctorCheck>> =
     BTreeMap::new();
   for check in checks {
     grouped.entry(&check.subject).or_default().push(check);
   }
+  let Ok(snap) = snapshot::load(&s.db).await else {
+    return;
+  };
+  let mut active = std::collections::BTreeSet::new();
   for (name, checks) in grouped {
+    if !active_account(&snap, name)
+      || checks.iter().all(|c| c.status == CheckStatus::Skip)
+    {
+      continue;
+    }
+    active.insert(name.to_string());
     let bad = checks
       .iter()
       .filter(|c| c.status == CheckStatus::Bad)
@@ -600,6 +659,7 @@ pub async fn record(s: &AppState, checks: &[DoctorCheck]) {
       .await;
     }
   }
+  rules::retain_subjects(s, "vendor_token_invalid", &active).await;
 }
 
 #[cfg(test)]

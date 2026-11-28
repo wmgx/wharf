@@ -438,6 +438,7 @@ pub(crate) async fn start_with_actor(
     finished_at: stored.steps.is_empty().then(Utc::now),
     steps,
   };
+  silence_steps(&guard, &stored.steps, run.actor.as_deref());
   {
     let account_refs = stored.body.account_refs;
     let base_instances = stored.body.base_instances;
@@ -470,7 +471,8 @@ pub(crate) async fn start_with_actor(
       "succeeded"
     };
     let run_id = run_id.clone();
-    state
+    crate::rules::ensure_loaded(&state).await;
+    let removed_firing = state
       .db
       .call_credentials(move |c, key| {
         let tx = c.transaction().map_err(sql_err)?;
@@ -481,7 +483,7 @@ pub(crate) async fn start_with_actor(
           account_refs.as_ref(),
           base_instances.as_ref(),
         )?;
-        apply_writes(&tx, &policy_plan, &writes, admin)?;
+        let alert_changes = apply_writes(&tx, &policy_plan, &writes, admin)?;
         if let Some(dns_gateways) = dns_gateways.filter(|m| !m.is_empty()) {
           let world = crate::world::World::from_rows(db::all_resources(&tx)?)?;
           let active = crate::failover::load_active_from_conn(&tx)?;
@@ -502,12 +504,25 @@ pub(crate) async fn start_with_actor(
           params![run_id, plan_id, run_status, run_body, now_ms(), actor_name, meta],
         )
         .map_err(sql_err)?;
-        tx.commit().map_err(sql_err)
+        alert_changes.clear_storage(&tx)?;
+        tx.commit().map_err(sql_err)?;
+        Ok(alert_changes.clear_after_commit())
       })
       .await?;
     crate::log_redact::refresh(&state.db).await;
+    if removed_firing {
+      crate::rules::flush_unsuppressed(&state, now_ms()).await;
+    }
   }
 
+  for write in &stored.writes {
+    if let db::Write::Delete { kind, name } = write
+      && kind == crate::world::KIND_SERVICE
+    {
+      crate::heal::forget(name);
+      crate::rules::on_service_deleted(&state, name).await;
+    }
+  }
   let actor =
     caller.map(crate::security_receipt::Actor::from_request);
   if run.status == RunStatus::Running {
@@ -539,14 +554,6 @@ pub(crate) async fn start_with_actor(
       &plan.items,
     )
     .await;
-  }
-  for write in &stored.writes {
-    if let db::Write::Delete { kind, name } = write
-      && kind == crate::world::KIND_SERVICE
-    {
-      crate::heal::forget(name);
-      crate::rules::on_service_deleted(&state, name).await;
-    }
   }
   crate::service_monitor::sync_watches(&state, None).await;
   Ok(ApplyResponse { run_id })
@@ -644,7 +651,7 @@ fn apply_writes(
   plan: &Plan,
   writes: &[crate::db::Write],
   admin: bool,
-) -> Result<(), ApiError> {
+) -> Result<crate::rules::lifecycle::Changes, ApiError> {
   let current =
     crate::world::World::from_rows(db::all_resources(tx)?)?;
   crate::secret_policy::require_apply(plan, &current, admin)?;
@@ -688,7 +695,10 @@ fn apply_writes(
   crate::secret_policy::validate_accounts(
     &desired,
     &crate::app_accounts::account_links(tx)?,
-  )
+  )?;
+  Ok(crate::rules::lifecycle::Changes::between(
+    &current, &desired,
+  ))
 }
 
 /// 不来自计划的执行同样占用 apply 锁。
@@ -880,6 +890,22 @@ fn insert_task_run(
   Ok(())
 }
 
+fn silence_steps(
+  guard: &OpLockGuard,
+  steps: &[StepPlan],
+  actor: Option<&str>,
+) {
+  let targets = crate::rules::op_silence::steps_scope(steps);
+  if targets.is_empty() {
+    return;
+  }
+  let title =
+    steps.first().map_or("执行计划", |step| step.title.as_str());
+  let reason = actor
+    .map_or_else(|| title.to_string(), |a| format!("{a}：{title}"));
+  guard.silence_alerts(targets, reason);
+}
+
 fn spawn_run(
   state: Arc<AppState>,
   run: Run,
@@ -890,6 +916,7 @@ fn spawn_run(
 ) {
   let run_id = run.run_id.clone();
   guard.set_run(&run_id);
+  silence_steps(&guard, &steps, run.actor.as_deref());
   let cancel = CancellationToken::new();
   let shared = Arc::new(Mutex::new(run));
   lock(&state.runs.active).insert(
@@ -1083,6 +1110,9 @@ async fn execute(
     r.finished_at = Some(Utc::now());
     r.clone()
   };
+  if let Some(guard) = &guard {
+    guard.finish_silence(final_run.status == RunStatus::Succeeded);
+  }
   if let Err(e) = persist(&state, &final_run, scope_services).await {
     tracing::error!("保存执行记录 {run_id} 失败：{e}");
   }

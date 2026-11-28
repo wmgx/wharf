@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use wharf_api_types::view::{AlertAckView, AlertLevel, AlertTarget};
 
 use crate::{
-  db::{self, now_ms},
+  db::now_ms,
   notify::{self, Event},
   state::AppState,
   world::World,
@@ -39,6 +39,10 @@ mod catalog;
 mod custom;
 #[path = "rules/digest.rs"]
 mod digest;
+#[path = "rules/lifecycle.rs"]
+pub(crate) mod lifecycle;
+#[path = "rules/op_silence.rs"]
+pub(crate) mod op_silence;
 #[path = "rules/service_checks.rs"]
 mod service_checks;
 #[path = "rules/service_overrides.rs"]
@@ -47,6 +51,7 @@ pub(crate) mod service_overrides;
 mod store;
 #[path = "rules/suppress.rs"]
 mod suppress;
+pub(crate) use suppress::flush_unsuppressed;
 
 use api::view;
 use catalog::{NOTICES, RULES};
@@ -369,6 +374,39 @@ async fn observe_at(
   if !has_builtin && !has_custom {
     return;
   }
+  let (cfg, svc_overrides) =
+    with(|m| (m.config.clone(), m.service_overrides.clone()));
+  let mut active_rules = Vec::new();
+  for rule in RULES {
+    if rule.metric != metric {
+      continue;
+    }
+    let svc_override =
+      service_overrides::service_of_subject(rule.id, subject)
+        .and_then(|svc| {
+          svc_overrides.get(&(rule.id.to_string(), svc.to_string()))
+        });
+    let o = service_overrides::effective_override(
+      cfg.get(rule.id),
+      svc_override,
+      now,
+    );
+    if !op_silence::skip_sample(
+      state,
+      rule,
+      subject,
+      value,
+      o.threshold.unwrap_or(rule.threshold),
+      now,
+    )
+    .await
+    {
+      active_rules.push((rule, o));
+    }
+  }
+  if active_rules.is_empty() && !has_custom {
+    return;
+  }
   let Some(points) = with(|m| {
     m.series.retain(|_, (_, at)| now - *at < STALE_MS);
     let (p, at) = m
@@ -389,18 +427,7 @@ async fn observe_at(
   }) else {
     return;
   };
-  let (cfg, svc_overrides) =
-    with(|m| (m.config.clone(), m.service_overrides.clone()));
-  for rule in RULES.iter().filter(|r| r.metric == metric) {
-    let svc_override =
-      service_overrides::service_of_subject(rule.id, subject)
-        .and_then(|svc| {
-          svc_overrides.get(&(rule.id.to_string(), svc.to_string()))
-        });
-    let o = service_overrides::effective_override(
-      cfg.get(rule.id),
-      svc_override,
-    );
+  for (rule, o) in active_rules {
     let fkey = (rule.id.to_string(), subject.to_string());
     if !o.enabled() {
       set_firing(state, fkey, None).await;
@@ -707,34 +734,15 @@ pub async fn retain_subjects(
   id: &str,
   keep: &BTreeSet<String>,
 ) {
-  let Some(rule) = RULES.iter().find(|r| r.id == id) else {
-    return;
-  };
-  ensure_loaded(state).await;
-  let removed = with(|m| {
-    let mut removed = BTreeSet::new();
-    m.series.retain(|(metric, subject), _| {
-      let keep = metric != rule.metric || keep.contains(subject);
-      if !keep {
-        removed.insert(subject.clone());
-      }
-      keep
-    });
-    removed.extend(
-      m.firing
-        .keys()
-        .filter(|(r, subject)| r == id && !keep.contains(subject))
-        .map(|(_, subject)| subject.clone()),
-    );
-    removed
-  });
-  for subject in removed {
-    set_firing(state, (id.to_string(), subject.clone()), None).await;
-    ack::delete_key(state, id, &subject).await;
-    let key = format!("notify.state.{}", (rule.key)(&subject));
-    let _ =
-      state.db.call(move |c| db::set_setting(c, &key, None)).await;
-  }
+  let id = id.to_string();
+  let keep = keep.clone();
+  lifecycle::clear_matching(state, move |rule, subject| {
+    rule == id
+      && !keep.contains(subject)
+      && !(rule == "external_incident"
+        && keep.iter().any(|name| name.eq_ignore_ascii_case(subject)))
+  })
+  .await;
 }
 
 pub fn firing_since(rule: &str, subject: &str) -> Option<i64> {
