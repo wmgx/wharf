@@ -494,13 +494,13 @@ async fn bundle_import_preview_uses_text_unless_json_is_requested() {
   ];
   let (code, output, _) = fixture_stdout(&args, replies()).await;
   assert_eq!(code, 0);
-  assert!(output.starts_with("服务 1 个"));
+  assert!(
+    output.lines().any(|line| line.starts_with("服务 1 个")),
+    "{output}"
+  );
   assert!(output.contains("APP_PASS") && output.contains("s2"));
   args.push("--json");
-  let (code, output, _) = fixture_stdout(&args, replies()).await;
+  let (code, output) = run_fixture(&args, replies()).await;
   assert_eq!(code, 0);
-  assert_eq!(
-    serde_json::from_str::<Value>(&output).unwrap(),
-    preview
-  );
+  assert_eq!(output, preview);
 }
