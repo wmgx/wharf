@@ -236,19 +236,29 @@ impl Ops {
       }
       AgentOp::Logs {
         project,
+        container,
         tail,
         follow,
         since,
       } => {
         check_project(&project)?;
         if follow {
-          self.docker.follow_logs(&project, tail, ctx).await;
+          self
+            .docker
+            .follow_logs(&project, tail, container.as_deref(), ctx)
+            .await?;
           to_value(String::new())
         } else {
           to_value(
             self
               .docker
-              .logs(&project, tail, since.as_deref(), ctx)
+              .logs(
+                &project,
+                tail,
+                since.as_deref(),
+                container.as_deref(),
+                ctx,
+              )
               .await?,
           )
         }
@@ -267,11 +277,16 @@ impl Ops {
         self.caddy_reload(&project, true, ctx).await?;
         to_value(String::new())
       }
-      AgentOp::ProjectRestart { project } => {
+      AgentOp::ProjectRestart { project, container } => {
         check_project(&project)?;
         let lock = self.lock_for(&project);
         let _guard = lock.lock().await;
-        to_value(self.docker.restart(&project, ctx).await?)
+        to_value(
+          self
+            .docker
+            .restart(&project, container.as_deref(), ctx)
+            .await?,
+        )
       }
       AgentOp::ProjectStop { project } => {
         self.stop_start(&project, false, ctx).await
@@ -490,6 +505,9 @@ impl Ops {
       }
       AgentOp::HostSessionRename { session, to } => to_value(
         self.host_shell.rename_session(&session, &to, ctx).await?,
+      ),
+      AgentOp::ServiceExec(job) => to_value(
+        crate::service_exec::run(&self.docker, job, ctx).await,
       ),
       AgentOp::HostExec(job) => {
         to_value(self.host_shell.exec(job, ctx).await)

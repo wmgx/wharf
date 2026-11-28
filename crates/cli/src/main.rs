@@ -18,6 +18,7 @@ mod core_export;
 mod deploy;
 mod describe;
 mod edge;
+mod exec_command;
 mod external;
 mod files;
 mod fleet;
@@ -192,8 +193,18 @@ pub enum Command {
     /// 端口 `名字=容器端口`，不给时 Python 用 8000、Node 用 3000，其余用 8080。
     #[arg(long)]
     port: Vec<String>,
-    #[arg(long)]
+    #[arg(long, conflicts_with = "port")]
+    add_port: Vec<String>,
+    #[arg(
+      long,
+      visible_alias = "unset-port",
+      conflicts_with = "port"
+    )]
+    rm_port: Vec<String>,
+    #[arg(long, visible_alias = "add-env")]
     env: Vec<String>,
+    #[arg(long, visible_alias = "rm-env")]
+    unset_env: Vec<String>,
     /// 只识别语言、Dockerfile 和默认端口，不上传也不部署。
     #[arg(long, conflicts_with = "apply")]
     detect_only: bool,
@@ -292,13 +303,10 @@ pub enum Command {
   /// 在宿主机执行一次非交互 shell 命令。
   Exec {
     server: String,
-    #[arg(long)]
-    timeout: Option<u64>,
-    #[arg(long)]
-    cwd: Option<String>,
-    /// 完整 shell 命令；写在 `--` 后并用本地 shell 引号保护。
-    #[arg(last = true, required = true)]
-    command: String,
+    #[command(flatten)]
+    args: exec_command::ExecArgs,
+    #[arg(last = true, required_unless_present = "script")]
+    command: Option<String>,
   },
   /// 操作记录和登录记录：谁在什么时候做了什么。
   Audit {
@@ -772,6 +780,8 @@ pub enum ServerCmd {
     /// 镜像源，例如 `docker.io=docker.1ms.run,docker.m.daocloud.io`，可以多次使用。
     #[arg(long)]
     mirror: Vec<String>,
+    #[arg(long, conflicts_with = "clear_mirrors")]
+    rm_mirror: Vec<String>,
     /// 清空全部镜像源。
     #[arg(long)]
     clear_mirrors: bool,
@@ -790,14 +800,22 @@ pub enum ServerCmd {
     mode: Option<String>,
     /// 额外绑定的局域网地址（私有网段），可以多次使用；服务端口也绑到这些地址上。
     /// 可选地址见 `wharf server show <name>` 里 agent 上报的 lan_ips。
-    #[arg(long)]
+    #[arg(long, visible_alias = "add-lan-ip")]
     lan_ip: Vec<String>,
+    #[arg(long, conflicts_with = "clear_lan_ips")]
+    rm_lan_ip: Vec<String>,
     /// 清空额外绑定的局域网地址。
     #[arg(long)]
     clear_lan_ips: bool,
     /// 构建时传给内置模板的参数 `KEY=VALUE`（国内机器配 PIP_INDEX_URL、GOPROXY），可以多次使用。
-    #[arg(long)]
+    #[arg(long, visible_alias = "add-build-env")]
     build_env: Vec<String>,
+    #[arg(
+      long,
+      visible_alias = "unset-build-env",
+      conflicts_with = "clear_build_env"
+    )]
+    rm_build_env: Vec<String>,
     /// 清空构建参数。
     #[arg(long)]
     clear_build_env: bool,
@@ -1017,12 +1035,28 @@ pub enum ServiceCmd {
     #[arg(long)]
     reveal: bool,
   },
+  /// 在服务的运行容器内执行一次非交互命令。
+  Exec {
+    name: String,
+    /// Compose 子容器名；只有一个运行容器时可省略。
+    #[arg(long)]
+    container: Option<String>,
+    #[command(flatten)]
+    args: exec_command::ExecArgs,
+    #[arg(last = true, required_unless_present = "script")]
+    command: Vec<String>,
+  },
+  /// 预览展开后的 Compose，密钥自动打码。
+  Render { name: String },
   /// 看日志。可以给多个服务，按时间合在一起看。支持按时间、关键字筛和用 `--errors` 合并同类报错。
   /// 例：`wharf service logs blog --since 2h --errors`、`wharf service logs blog --grep timeout --tail 50`。
   Logs {
     /// 服务名，可给 1～10 个。
     #[arg(required = true, num_args = 1..=10)]
     names: Vec<String>,
+    /// 仅看指定 Compose 子容器。
+    #[arg(long, conflicts_with_all = ["previous", "previous_list"])]
+    container: Option<String>,
     /// 查看第 N 份重建前日志，缺省为最近一份。
     #[arg(long, num_args = 0..=1, default_missing_value = "1", conflicts_with = "follow")]
     previous: Option<u32>,
@@ -1094,7 +1128,12 @@ pub enum ServiceCmd {
     apply: ApplyFlags,
   },
   /// 重启容器，不改配置、不重建。
-  Restart { name: String },
+  Restart {
+    name: String,
+    /// 仅重启指定 Compose 子容器。
+    #[arg(long)]
+    container: Option<String>,
+  },
   /// 检查更新：镜像（image 来源和 compose 里的镜像）重新查标签现在的版本，git 构建来源重新查分支现在的 commit，
   /// 有新版本时计划里会更新。平时改配置不会换版本。不会换标签，换标签用 `wharf service retag`。
   Update {
@@ -1190,15 +1229,27 @@ pub enum ServiceCmd {
     #[arg(long)]
     server: Option<String>,
     /// 端口：`名字=容器端口` 或 `名字=容器端口:宿主机端口`，可以多次使用。
-    /// compose 来源只有宿主机端口，写 `名字=:宿主机端口`。按端口名合并，同名替换。
+    /// compose 来源只有宿主机端口，写 `名字=:宿主机端口`。给出后替换全部端口。
     #[arg(long)]
     port: Vec<String>,
+    #[arg(long, conflicts_with = "port")]
+    add_port: Vec<String>,
+    #[arg(
+      long,
+      visible_alias = "unset-port",
+      conflicts_with = "port"
+    )]
+    rm_port: Vec<String>,
+    #[arg(long, conflicts_with_all = ["port", "add_port", "rm_port"])]
+    clear_ports: bool,
     /// 环境变量 `KEY=VALUE`，值里可以用 `[[SECRET]]`。可以多次使用。
-    #[arg(long)]
+    #[arg(long, visible_alias = "add-env")]
     env: Vec<String>,
     /// 删除环境变量。
-    #[arg(long)]
+    #[arg(long, visible_alias = "rm-env")]
     unset_env: Vec<String>,
+    #[arg(long, conflicts_with_all = ["env", "unset_env"])]
+    clear_env: bool,
     /// 启动等待上限（秒），0 恢复默认。
     #[arg(long)]
     start_timeout: Option<u32>,
@@ -1206,14 +1257,11 @@ pub enum ServiceCmd {
     #[arg(long)]
     health_path: Option<String>,
     /// 数据卷：名字:/路径[:ro|:rw] 或 [本地名=]服务:卷:/路径[:ro|:rw]。
-    #[arg(long)]
+    #[arg(long, visible_alias = "add-volume")]
     volume: Vec<String>,
     /// 按本地卷名解除挂载。
-    #[arg(long)]
+    #[arg(long, visible_alias = "rm-volume")]
     unset_volume: Vec<String>,
-    /// 按名称解除发布。
-    #[arg(long)]
-    unset_port: Vec<String>,
     #[arg(long, conflicts_with = "start_timeout")]
     unset_start_timeout: bool,
     #[command(flatten)]
@@ -1603,6 +1651,10 @@ pub enum RouteCmd {
     /// 清空全部路径转发。
     #[arg(long)]
     no_paths: bool,
+    #[arg(long, conflicts_with_all = ["paths", "no_paths"])]
+    add_path: Vec<String>,
+    #[arg(long, conflicts_with_all = ["paths", "no_paths"])]
+    rm_path: Vec<String>,
     /// 总是走反向隧道。不给时自动选：同机、能直连内网地址就直连，否则走隧道。
     #[arg(long, conflicts_with = "no_tunnel")]
     tunnel: bool,
@@ -1635,6 +1687,14 @@ pub enum RouteCmd {
     redirect: Vec<String>,
     #[arg(long = "skip", requires = "mode")]
     skip: Vec<String>,
+    #[arg(long, conflicts_with = "skip")]
+    add_skip: Vec<String>,
+    #[arg(long, conflicts_with = "skip")]
+    rm_skip: Vec<String>,
+    #[arg(long, conflicts_with = "redirect")]
+    add_redirect: Vec<String>,
+    #[arg(long, conflicts_with = "redirect")]
+    rm_redirect: Vec<String>,
     #[arg(
       long,
       requires = "mode",
@@ -1653,7 +1713,7 @@ pub enum RouteCmd {
     public: bool,
     #[arg(long, conflicts_with = "mode")]
     off: bool,
-    #[arg(long, requires = "mode", conflicts_with = "skip")]
+    #[arg(long, requires = "mode", conflicts_with_all = ["skip", "add_skip", "rm_skip"])]
     unset_skip: bool,
     #[arg(long, requires = "mode", conflicts_with = "header")]
     unset_header: bool,

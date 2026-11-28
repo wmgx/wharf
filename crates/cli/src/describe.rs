@@ -68,6 +68,9 @@ fn walk(
     entry["effect"] = json!(effect);
     entry["perms"] = json!(perms);
     entry["returns"] = json!(returns(&command));
+    if matches!(command.as_str(), "exec" | "service exec") {
+      entry["exit_code"] = json!("remote");
+    }
     if perms.is_empty() {
       entry["offline"] = json!(true);
     }
@@ -144,6 +147,7 @@ fn read_when_no_args(command: &str) -> bool {
       | "external set"
       | "egress api"
       | "backup core"
+      | "task set"
   )
 }
 
@@ -197,7 +201,10 @@ fn effect(
     return ("plan", &["plan"]);
   }
   let leaf = cmd.get_name();
-  if command == "connect" {
+  if matches!(command, "task run" | "task cancel") {
+    return ("direct", &["apply", "exec"]);
+  }
+  if matches!(command, "connect" | "service exec") {
     return ("direct", &["exec"]);
   }
   if matches!(
@@ -223,6 +230,7 @@ fn effect(
       | "route dns-check"
       | "gateway config"
       | "service origin"
+      | "service render"
       | "service history"
       | "service timeline"
       | "server exposure"
@@ -281,6 +289,9 @@ fn returns(command: &str) -> Option<&'static str> {
     "task ls" | "task show" => "task",
     "task logs" => "task_run",
     "backup move" => "run",
+    "exec" => "host_exec",
+    "service exec" => "service_exec",
+    "service render" => "service_render",
     "backup list" => "backup",
     "service history" => "deployment",
     "edge list" | "edge show" => "edge",
@@ -376,6 +387,32 @@ mod tests {
     assert_eq!(
       command["returns_by_flag"]["--no-wait"],
       "apply_response"
+    );
+  }
+
+  #[test]
+  fn usable_keeps_ping_task_edits_with_apply_permission() {
+    use serde_json::json;
+    let prefix = ["task".into()];
+    let apply =
+      super::usable(&prefix, &json!({"perms": ["read", "apply"]}));
+    let read = super::usable(&prefix, &json!({"perms": ["read"]}));
+    let task = |result: &serde_json::Value, name: &str| {
+      result["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["command"] == name)
+        .cloned()
+    };
+    for name in
+      ["wharf task enable", "wharf task disable", "wharf task set"]
+    {
+      assert!(task(&apply, name).is_some(), "{name}");
+    }
+    assert_eq!(
+      task(&read, "wharf task set").unwrap()["usable_mode"],
+      "read_only"
     );
   }
 

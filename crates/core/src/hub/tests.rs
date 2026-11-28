@@ -33,6 +33,7 @@ fn old_hello_has_no_host_shell_capability() {
     gateway_extra_files,
     backup_isolation,
     safe_delete,
+    exec_v2,
     shared_volumes,
     safe_gateway,
     safe_adopt,
@@ -59,6 +60,7 @@ fn old_hello_has_no_host_shell_capability() {
   assert!(!gateway_extra_files);
   assert!(!backup_isolation);
   assert!(!safe_delete);
+  assert!(!exec_v2);
   assert!(!shared_volumes);
   assert!(!safe_gateway);
   assert!(!safe_adopt);
@@ -111,6 +113,7 @@ fn old_core_ignores_new_hello_capability() {
     core_probe: true,
     backup_isolation: true,
     safe_delete: true,
+    exec_v2: true,
     shared_volumes: true,
     safe_gateway: true,
     gateway_probe: false,
@@ -178,6 +181,10 @@ impl Hub {
 
   pub(crate) fn mock_safe_backup_agent(&self, server: &str) {
     lock(&self.conns).get_mut(server).unwrap().safe_backup = true;
+  }
+
+  pub(crate) fn enable_mock_exec_v2(&self, server: &str) {
+    lock(&self.conns).get_mut(server).unwrap().exec_v2 = true;
   }
 
   pub(crate) fn enable_mock_monitor_v2(&self, server: &str) {
@@ -324,6 +331,7 @@ impl Hub {
         gateway_extra_files,
         backup_isolation,
         safe_delete: false,
+        exec_v2: false,
         shared_volumes: false,
         safe_gateway: false,
         gateway_probe: false,
@@ -470,6 +478,7 @@ async fn agent_upgrade_needs_no_bound_core_server_or_probe_support() {
     gateway_extra_files: false,
     backup_isolation: false,
     safe_delete: false,
+    exec_v2: false,
     shared_volumes: false,
     safe_gateway: false,
     gateway_probe: false,
@@ -542,6 +551,7 @@ fn probe_connection(
     gateway_extra_files: false,
     backup_isolation: false,
     safe_delete: false,
+    exec_v2: false,
     shared_volumes: false,
     safe_gateway: false,
     gateway_probe: false,

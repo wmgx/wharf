@@ -443,12 +443,20 @@ pub async fn rebuild_now(
 }
 
 /// `POST /api/services/{name}/restart`：重启容器，不改配置、不重建。
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RestartRequest {
+  #[serde(default)]
+  container: Option<String>,
+}
+
 pub async fn restart_now(
   axum::extract::State(s): axum::extract::State<
     std::sync::Arc<AppState>,
   >,
   auth: crate::auth::Auth,
   axum::extract::Path(name): axum::extract::Path<String>,
+  body: Option<axum::Json<RestartRequest>>,
 ) -> crate::api::ApiResult<wharf_api_types::plan::ApplyResponse> {
   auth.require(wharf_api_types::view::Perm::Apply)?;
   let snap = snapshot::load(&s.db).await?;
@@ -464,11 +472,28 @@ pub async fn restart_now(
         .into(),
     );
   }
+  let container = body.and_then(|body| body.0.container);
+  crate::service_container::validate(
+    row,
+    &name,
+    container.as_deref(),
+  )?;
+  let title = if let Some(c) = &container {
+    let server = snapshot::service_runtime_server(&snap, &name)
+      .ok_or_else(|| crate::api::service_not_found(&name))?;
+    s.hub.exec_v2_conn_id(server, "重启单个子容器")?;
+    format!("重启 {name}/{c}")
+  } else {
+    format!("重启 {name}")
+  };
   Ok(axum::Json(
     crate::apply::start_task_by(
       s.clone(),
-      format!("重启 {name}"),
-      crate::planner::Step::ServiceRestart { service: name },
+      title,
+      crate::planner::Step::ServiceRestart {
+        service: name,
+        container,
+      },
       Some(crate::apply::format_actor(&auth)),
     )
     .await?,
