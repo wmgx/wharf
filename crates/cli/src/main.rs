@@ -249,7 +249,7 @@ pub enum Command {
     #[command(flatten)]
     build: BuildOpts,
     #[command(flatten)]
-    ops: DeployOps,
+    ops: Box<DeployOps>,
     #[command(flatten)]
     apply: ApplyFlags,
   },
