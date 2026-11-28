@@ -202,10 +202,14 @@ pub(crate) fn compose(
   let mut doc = render::parse_compose(&text)?;
   let service = &mut doc["services"][component.as_str()];
   let mut targets = BTreeSet::new();
-  for (kind, entries) in ["volumes", "configs", "secrets", "tmpfs"]
-    .into_iter()
-    .filter_map(|key| service[key].as_sequence().map(|v| (key, v)))
-  {
+  for kind in ["volumes", "configs", "secrets", "tmpfs"] {
+    let entries = match &service[kind] {
+      Value::Sequence(entries) => entries.as_slice(),
+      entry @ Value::String(_) if kind == "tmpfs" => {
+        std::slice::from_ref(entry)
+      }
+      _ => continue,
+    };
     for entry in entries {
       let target = if let Some(s) = entry.as_str() {
         if kind == "volumes" {
@@ -382,12 +386,12 @@ fn dedicated_file_parent_cannot_overlap_compose_tmpfs() {
     "server": "s1", "source": {"image": "alpine"},
     "files": [{"path": "/app/seed/settings.json", "init_only": true, "content": "{}"}]
   })).unwrap();
-  let yaml =
-    "services: {app: {image: alpine, tmpfs: ['/app/seed:size=1m']}}";
-  assert_eq!(
-    compose("app", "svc_fixture", &spec, yaml.into())
-      .unwrap_err()
-      .code,
-    ErrorCode::Conflict
-  );
+  for tmpfs in ["'/app/seed'", "['/app/seed:size=1m']"] {
+    let yaml =
+      format!("services: {{app: {{image: alpine, tmpfs: {tmpfs}}}}}");
+    assert_eq!(
+      compose("app", "svc_fixture", &spec, yaml).unwrap_err().code,
+      ErrorCode::Conflict
+    );
+  }
 }
