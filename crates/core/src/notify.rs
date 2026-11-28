@@ -117,6 +117,12 @@ pub(crate) async fn send_with_retry(
   event: &Event,
   delays: &[u64],
 ) -> Result<(), SendErr> {
+  if state.is_safe_mode() {
+    return Err(SendErr::Permanent(ApiError::new(
+      ErrorCode::Conflict,
+      "安全接管模式已暂停外发通知",
+    )));
+  }
   let channels = channels(state).await.map_err(SendErr::Permanent)?;
   if channels.is_empty() {
     return Err(SendErr::Permanent(

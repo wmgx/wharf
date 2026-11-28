@@ -4187,6 +4187,46 @@ mod tests {
     assert_eq!(config.reason, "切换固定镜像版本");
   }
 
+  #[test]
+  fn backup_exclude_is_config_only_and_legacy_spec_has_zero_drift() {
+    let mut current = world();
+    let old = current.services.get_mut("app").unwrap();
+    old.spec.backup =
+      Some(serde_json::from_value(json!({"to":"s2"})).unwrap());
+    old.spec.volumes = serde_json::from_value(
+      json!([{"name":"data","target":"/data"}]),
+    )
+    .unwrap();
+    let mut desired = current.clone();
+    let policy = desired
+      .services
+      .get_mut("app")
+      .unwrap()
+      .spec
+      .backup
+      .as_mut()
+      .unwrap();
+    assert_eq!(
+      serde_json::to_value(&policy).unwrap(),
+      json!({"to":"s2"})
+    );
+    let status =
+      live(Some(hash_of(&current)), vec![container("running")]);
+    let unchanged = plan(&current, &current, &status);
+    assert!(unchanged.items.is_empty() && unchanged.steps.is_empty());
+    policy.exclude.push("data/cache/**".into());
+    let mut b = plan(&current, &desired, &status);
+    config_items(
+      &mut b,
+      &current,
+      &desired,
+      &desired.writes_from(&current),
+    );
+    assert!(b.steps.is_empty());
+    assert_eq!(b.items.len(), 1);
+    assert_eq!(b.items[0].layer, Layer::Config);
+  }
+
   #[tokio::test]
   async fn plan_stops_and_updates_monitoring_with_legacy_jsonc() {
     let state = crate::rules::tests::test_state();

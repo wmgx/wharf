@@ -735,8 +735,13 @@ async fn unlock_supports_explicit_target_and_returns_object() {
   seed_servers(&state).await;
   seed_service(&state, "svc-a", false).await;
   let legacy = seed_legacy(&state).await;
+  state.db.call(|c| db::apply_write(c, &db::Write::Upsert {
+    kind: "server".into(), name: "s3".into(),
+    spec: json!({"private_addr": {"ip":"100.64.0.3", "network":"lan"}}),
+    meta: json!({}),
+  })).await.unwrap();
   state.hub.mock_agent_with_backup(
-    "s2",
+    "s3",
     false,
     true,
     false,
@@ -753,14 +758,14 @@ async fn unlock_supports_explicit_target_and_returns_object() {
       Ok(json!(null))
     },
   );
-  state.hub.mock_safe_backup_agent("s2");
+  state.hub.mock_safe_backup_agent("s3");
   let call = || {
     unlock(
       State(state.clone()),
       auth(true),
       Path("svc-a".into()),
       Some(Json(UnlockRequest {
-        target: Some("s2".into()),
+        target: Some("s3".into()),
         stale_only: false,
       })),
     )
@@ -774,7 +779,7 @@ async fn unlock_supports_explicit_target_and_returns_object() {
   let result = call().await.map_err(|e| e.0).unwrap().0;
   assert_eq!(
     serde_json::to_value(result).unwrap(),
-    json!({"target":"s2","stale_only":false,"unlocked":true})
+    json!({"target":"s3","stale_only":false,"unlocked":true})
   );
 }
 

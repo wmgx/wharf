@@ -1672,7 +1672,7 @@ pub async fn unlock(
   let req = body.map(|Json(req)| req).unwrap_or_default();
   auth.require(Perm::Apply)?;
   crate::token_scope::require_service(&auth, &service)?;
-  let _guard = s.locks.acquire(
+  let guard = s.locks.acquire(
     crate::locks::LockSpec::Backup(service.clone()),
     "解锁备份仓库",
   )?;
@@ -1681,6 +1681,7 @@ pub async fn unlock(
     resolve_target(&s, &snap, &service, req.target.as_deref())
       .await?
       .ok_or_else(|| missing_target(&service))?;
+  guard.reserve_backup_target(target.clone())?;
   require_safe_backup(&s, &target)?;
   let (key, legacy) = repository_secrets(&s, &service).await?;
   let action = ResticAction::Unlock {

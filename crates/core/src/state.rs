@@ -89,6 +89,17 @@ mod tests {
     s.safe_mode.store(true, Ordering::Release);
     let status = crate::views::status(&s, None).await.unwrap();
     assert!(status.safe_mode);
+    assert!(
+      crate::notify::send(
+        &s,
+        &crate::notify::Event {
+          title: String::new(),
+          body: String::new()
+        }
+      )
+      .await
+      .is_err_and(|e| e.code == wharf_api_types::ErrorCode::Conflict)
+    );
     assert_eq!(status.issues[0].code, "core_safe_mode");
     let mut reader = auth(false);
     reader.perms = [Perm::Read].into_iter().collect();

@@ -395,21 +395,27 @@ pub async fn extract(
     return Err(ApiError::internal("备份文件元数据无效").into());
   }
   let headers = [
+    (header::CONTENT_TYPE, "application/octet-stream".into()),
+    (header::CONTENT_LENGTH, meta.size.to_string()),
     (
-      header::CONTENT_TYPE.as_str(),
-      "application/octet-stream".into(),
-    ),
-    (header::CONTENT_LENGTH.as_str(), meta.size.to_string()),
-    (
-      header::CONTENT_DISPOSITION.as_str(),
+      header::CONTENT_DISPOSITION,
       format!(
         "attachment; filename*=UTF-8''{}",
         urlencoding::encode(&meta.name)
       ),
     ),
-    ("x-wharf-file-mode", format!("{:04o}", meta.mode)),
-    ("x-wharf-file-sha256", meta.sha256.clone()),
-    ("x-wharf-snapshot", meta.snapshot.clone()),
+    (
+      header::HeaderName::from_static("x-wharf-file-mode"),
+      format!("{:04o}", meta.mode),
+    ),
+    (
+      header::HeaderName::from_static("x-wharf-file-sha256"),
+      meta.sha256.clone(),
+    ),
+    (
+      header::HeaderName::from_static("x-wharf-snapshot"),
+      meta.snapshot.clone(),
+    ),
   ];
   let stream = futures_util::stream::unfold(
     Some((transfer, 0)),
