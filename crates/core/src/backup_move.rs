@@ -509,7 +509,7 @@ async fn start(
         ErrorCode::ConfirmRequired,
         "目标机已有备份仓库数据",
       )
-      .with_hint(preview.hint.unwrap_or_default())
+      .with_hint(preview.hint.as_deref().unwrap_or_default())
       .suggest(format!(
         "wharf backup move {command} --from {} --to {} --confirm {}",
         movement.from,
