@@ -594,6 +594,10 @@ pub struct DeployOps {
   pub volume_owner: Vec<String>,
   #[arg(long, value_name = "NAME")]
   pub unset_volume_owner: Vec<String>,
+  #[arg(long, conflicts_with = "no_use_egress")]
+  pub use_egress: bool,
+  #[arg(long)]
+  pub no_use_egress: bool,
 }
 
 /// 看日志的公共参数。

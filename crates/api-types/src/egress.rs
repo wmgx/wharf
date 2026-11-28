@@ -197,3 +197,53 @@ mod tests {
     );
   }
 }
+
+pub const WORKLOAD_PROXY_HOST: &str = "host.docker.internal";
+
+pub fn workload_env(
+  host: &str,
+  bypass: &str,
+  env: &mut std::collections::BTreeMap<String, String>,
+) -> Result<(), crate::ApiError> {
+  if env.keys().any(|key| {
+    matches!(
+      key.to_ascii_uppercase().as_str(),
+      "HTTP_PROXY" | "HTTPS_PROXY" | "ALL_PROXY"
+    )
+  }) {
+    return Err(
+      crate::ApiError::invalid("已有代理变量与 use_egress 冲突")
+        .with_hint("移除自定义代理设置，或关闭 use_egress"),
+    );
+  }
+  let mut parts: std::collections::BTreeSet<String> = bypass
+    .split(',')
+    .filter(|part| !part.is_empty())
+    .map(str::to_string)
+    .collect();
+  env.retain(|key, value| {
+    if key.eq_ignore_ascii_case("no_proxy") {
+      parts.extend(
+        value
+          .split(',')
+          .map(str::trim)
+          .filter(|part| !part.is_empty())
+          .map(str::to_string),
+      );
+      false
+    } else {
+      true
+    }
+  });
+  let no_proxy = parts.into_iter().collect::<Vec<_>>().join(",");
+  let proxy = format!("http://{host}:{LOCAL_PORT}");
+  for key in
+    ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]
+  {
+    env.insert(key.into(), proxy.clone());
+  }
+  for key in ["NO_PROXY", "no_proxy"] {
+    env.insert(key.into(), no_proxy.clone());
+  }
+  Ok(())
+}

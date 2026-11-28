@@ -272,6 +272,7 @@ async fn handshake(
     compose_env_v1: true,
     safe_host_bind_v1: true,
     project_files_v1: true,
+    workload_egress_v1: true,
     data_cleanup: true,
     exec_v2: true,
     shared_volumes: true,

@@ -61,6 +61,7 @@ mod task;
 mod task_artifacts;
 mod terminal;
 mod upgrade;
+mod workload_egress;
 
 #[derive(Parser)]
 #[command(name = "wharf-agent", version, about = "Wharf agent")]

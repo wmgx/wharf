@@ -515,6 +515,8 @@ fn resolve_service(
     &resolved, name, world, net, legacy,
   )?;
   let resolved = substitutions.finish_compose(resolved)?;
+  let resolved =
+    crate::workload_egress::render(name, &row.spec, net, resolved)?;
   let resolved = with_files(
     world,
     net,
@@ -688,6 +690,8 @@ pub fn service_template(
   )?;
   let text = crate::refs::resolve(&text, name, world, net)?;
   let text = substitutions.finish_compose(text)?;
+  let text =
+    crate::workload_egress::render(name, &row.spec, net, text)?;
   with_files(world, net, name, &text, mounts, None, false)
 }
 
@@ -1176,6 +1180,7 @@ pub(crate) async fn read_legacy_acme_dns_hash(
     .call(
       server,
       AgentOp::TaskRun(TaskRunJob {
+        workload_no_proxy: None,
         name: "gateway-acme-hash".into(),
         how: TaskHow::Exec {
           cancellable: false,

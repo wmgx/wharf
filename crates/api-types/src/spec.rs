@@ -419,6 +419,8 @@ pub struct ServiceSpec {
   pub compose_env: bool,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub user: Option<String>,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub use_egress: bool,
 }
 
 #[derive(

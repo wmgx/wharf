@@ -85,6 +85,7 @@ struct Conn {
   compose_env_v1: bool,
   safe_host_bind_v1: bool,
   project_files_v1: bool,
+  workload_egress_v1: bool,
   data_cleanup: bool,
   exec_v2: bool,
   files_v2: bool,
@@ -220,7 +221,15 @@ fn safe_adopt_required(server: &str) -> ApiError {
   .suggest("wharf upgrade")
 }
 
-pub fn old_project_files_agent(server: &str) -> ApiError {
+pub fn old_workload_egress_agent(server: &str) -> ApiError {
+  ApiError::new(
+    ErrorCode::Conflict,
+    format!("服务器 {server} 的 agent 不支持服务或任务分流代理"),
+  )
+  .with_hint("运行 wharf upgrade，升级后重新生成计划")
+}
+
+fn old_project_files_agent(server: &str) -> ApiError {
   ApiError::new(
     ErrorCode::Conflict,
     format!("服务器 {server} 的 agent 不支持项目文件和目录属主"),
@@ -834,6 +843,21 @@ impl Hub {
     }
   }
 
+  pub(crate) fn workload_egress_conn_id(
+    &self,
+    server: &str,
+  ) -> Result<u64, ApiError> {
+    let conns = lock(&self.conns);
+    let conn = conns
+      .get(server)
+      .filter(|conn| !conn.closed.is_cancelled())
+      .ok_or_else(|| offline(server))?;
+    if conn.upgrade_only || !conn.workload_egress_v1 {
+      return Err(old_workload_egress_agent(server));
+    }
+    Ok(conn.conn_id)
+  }
+
   pub(crate) fn project_files_conn_id(
     &self,
     server: &str,
@@ -1170,6 +1194,18 @@ impl Hub {
       {
         progress(crate::build::old_agent_warning(server));
       }
+    }
+    let workload_egress = match &op {
+      AgentOp::WorkloadEgressStatus => true,
+      AgentOp::ProjectUp(up) => up.workload_egress,
+      AgentOp::TaskRun(job) => job.workload_no_proxy.is_some(),
+      AgentOp::HostExec(job) => job.workload_no_proxy.is_some(),
+      _ => false,
+    };
+    if workload_egress
+      && (conn.upgrade_only || !conn.workload_egress_v1)
+    {
+      return Err(old_workload_egress_agent(server));
     }
     if matches!(&op, AgentOp::ProjectUp(up) if !up.volume_owners.is_empty() || !up.project_files.is_empty())
       && (conn.upgrade_only || !conn.project_files_v1)
@@ -1543,6 +1579,7 @@ async fn handle_socket(
     compose_env_v1,
     safe_host_bind_v1,
     project_files_v1,
+    workload_egress_v1,
     data_cleanup,
     exec_v2,
     files_v2,
@@ -1730,6 +1767,7 @@ async fn handle_socket(
     compose_env_v1,
     safe_host_bind_v1,
     project_files_v1,
+    workload_egress_v1,
     data_cleanup,
     exec_v2,
     files_v2,

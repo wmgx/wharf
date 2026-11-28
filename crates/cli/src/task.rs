@@ -145,6 +145,10 @@ pub struct AddArgs {
   /// 失败时不通知。
   #[arg(long)]
   no_notify: bool,
+  #[arg(long, conflicts_with = "no_use_egress")]
+  use_egress: bool,
+  #[arg(long)]
+  no_use_egress: bool,
   /// 关联服务停用时跳过，仅适用于容器内执行任务。
   #[arg(long)]
   skip_if_stopped: bool,
@@ -489,7 +493,7 @@ async fn add(c: &Client, a: AddArgs, j: bool) -> CliResult<()> {
     server,
     schedule: match a.schedule {
       Some(s) => s,
-      None if matches!(how, TaskKind::Script { .. }) => String::new(),
+      None if !matches!(how, TaskKind::Ping { .. }) => String::new(),
       None => {
         return Err(ApiError::invalid("缺少 --schedule").into());
       }
@@ -498,6 +502,7 @@ async fn add(c: &Client, a: AddArgs, j: bool) -> CliResult<()> {
     timeout_secs: a.timeout,
     enabled: !a.disabled,
     notify: !a.no_notify,
+    use_egress: a.use_egress && !a.no_use_egress,
     skip_if_stopped: a.skip_if_stopped,
     catch_up_mins: a.catch_up,
     artifacts_max_mb: a.artifacts_max_mb,

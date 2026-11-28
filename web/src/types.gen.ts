@@ -3157,6 +3157,7 @@ export interface ServiceSpec {
    * 镜像和构建版本的更新忽略规则。
    */
   update_ignore?: UpdateIgnoreSpec[];
+  use_egress?: boolean;
   user?: string | null;
   volumes?: VolumeSpec[];
 }
@@ -3541,6 +3542,7 @@ export type TaskSpec = ({
    * 超时秒数，默认 600；宿主机命令最长 600，其他最长 6 小时。
    */
   timeout_secs: number;
+  use_egress?: boolean;
 };
 
 export type TaskStatus = "running" | "succeeded" | "failed" | "timed_out" | "skipped" | "cancelled";

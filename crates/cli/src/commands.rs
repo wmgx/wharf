@@ -3490,7 +3490,9 @@ async fn service(
           || ops.user.is_some()
           || ops.unset_user
           || !ops.volume_owner.is_empty()
-          || !ops.unset_volume_owner.is_empty())
+          || !ops.unset_volume_owner.is_empty()
+          || ops.use_egress
+          || ops.no_use_egress)
       {
         apply.check_read_only()?;
         wharf_api_types::filter_note(
@@ -3610,6 +3612,7 @@ async fn service(
             self_refs: false,
             compose_env: false,
             user: None,
+            use_egress: false,
             networks: Default::default(),
           }
         }
@@ -3633,6 +3636,9 @@ async fn service(
         spec.server = server;
       }
       set_network_options(&mut spec, &ops)?;
+      if ops.use_egress || ops.no_use_egress {
+        spec.use_egress = ops.use_egress;
+      }
       if ops.unset_user || ops.user.is_some() {
         spec.user.clone_from(&ops.user);
       }

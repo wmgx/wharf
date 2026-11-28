@@ -204,6 +204,7 @@ fn merge_settings(
   spec.extra_hosts.clone_from(&current.extra_hosts);
   spec.networks.clone_from(&current.networks);
   spec.user.clone_from(&current.user);
+  spec.use_egress = current.use_egress;
   spec.volumes.retain(|v| v.host_path.is_none());
   spec.volumes.extend(
     current

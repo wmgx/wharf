@@ -870,6 +870,32 @@ async fn run_on_agent(
     secrets,
   )?;
   let net = snap.net(&snap.world);
+  let (proxy_bypass, proxy_conn) = if spec.use_egress {
+    crate::workload_egress::validate(
+      &snap.world,
+      &net,
+      &spec.server,
+    )?;
+    let conn = crate::workload_egress::preflight(
+      &state.hub,
+      &spec.server,
+      false,
+      cancel,
+    )
+    .await?;
+    if request.conn.is_some_and(|bound| bound != conn) {
+      return Err(crate::hub::offline(&spec.server));
+    }
+    if matches!(&spec.how, TaskKind::Exec { .. })
+      && state.hub.exec_v2_conn_id(&spec.server, "任务分流代理")?
+        != conn
+    {
+      return Err(crate::hub::offline(&spec.server));
+    }
+    (Some(crate::workload_egress::bypass(&net)), Some(conn))
+  } else {
+    (None, None)
+  };
   let caller = format!("任务 {name}");
   let sub = |text: &str| {
     let text = crate::refs::resolve_from(
@@ -901,6 +927,7 @@ async fn run_on_agent(
     }
     TaskKind::Host { command } => {
       let job = HostExecJob {
+        workload_no_proxy: proxy_bypass.clone(),
         stream: false,
         command: sub(command)?,
         timeout_secs: spec.timeout_secs,
@@ -982,19 +1009,21 @@ async fn run_on_agent(
       .with_hint("运行 wharf upgrade"),
     );
   }
-  let conn = if matches!(
-    &how,
-    TaskHow::Script { .. } | TaskHow::Container { .. }
-  ) {
-    state
-      .hub
-      .task_artifacts_conn_id(&spec.server)
-      .ok()
-      .filter(|id| request.conn.is_none_or(|bound| bound == *id))
-  } else {
-    None
-  };
+  let conn =
+    if matches!(
+      &how,
+      TaskHow::Script { .. } | TaskHow::Container { .. }
+    ) {
+      state.hub.task_artifacts_conn_id(&spec.server).ok().filter(
+        |id| {
+          request.conn.or(proxy_conn).is_none_or(|bound| bound == *id)
+        },
+      )
+    } else {
+      None
+    };
   let job = TaskRunJob {
+    workload_no_proxy: proxy_bypass,
     name: name.to_string(),
     how,
     input,
@@ -1017,7 +1046,7 @@ async fn run_on_agent(
     .hub
     .call_optional_bound(
       &spec.server,
-      request.conn.or(conn),
+      request.conn.or(proxy_conn).or(conn),
       AgentOp::TaskRun(job),
       wait,
       None,
@@ -1297,6 +1326,25 @@ fn validate(
     return Err(crate::world::server_not_found(&spec.server));
   }
   validate_schedule(spec)?;
+  if spec.use_egress {
+    if matches!(spec.how, TaskKind::Ping { .. }) {
+      return Err(ApiError::invalid("外部报到任务不能使用分流代理"));
+    }
+    crate::workload_egress::validate(
+      &snap.world,
+      &snap.net(&snap.world),
+      &spec.server,
+    )?;
+    if let TaskKind::Container { env, .. }
+    | TaskKind::Script { env, .. } = &spec.how
+    {
+      wharf_api_types::egress::workload_env(
+        "127.0.0.1",
+        "",
+        &mut env.clone(),
+      )?;
+    }
+  }
   if spec.skip_if_stopped
     && !matches!(spec.how, TaskKind::Exec { .. })
   {
@@ -1733,6 +1781,13 @@ pub async fn run_now(
       );
     }
     validate_run_env(&request.env)?;
+    if spec.use_egress {
+      wharf_api_types::egress::workload_env(
+        "127.0.0.1",
+        "",
+        &mut request.env.clone(),
+      )?;
+    }
     crate::secret_policy::validate_task_env(
       &name,
       request.env.values().map(String::as_str),
@@ -1922,7 +1977,7 @@ pub async fn cancel_run(
 
 fn validate_schedule(spec: &TaskSpec) -> Result<(), ApiError> {
   if spec.schedule.is_empty()
-    && matches!(spec.how, TaskKind::Script { .. })
+    && !matches!(spec.how, TaskKind::Ping { .. })
   {
     return Ok(());
   }
@@ -2184,13 +2239,18 @@ mod tests {
   }
 
   #[test]
-  fn empty_schedule_only_for_script() {
+  fn empty_schedule_requires_cron_for_ping_only() {
     let mut spec: TaskSpec = serde_json::from_value(serde_json::json!({
       "server": "s1", "schedule": "", "kind": "script", "runtime": "shell", "code": "echo ok"
     })).unwrap();
     assert!(validate_schedule(&spec).is_ok());
     spec.how = TaskKind::Host {
       command: "echo ok".into(),
+    };
+    assert!(validate_schedule(&spec).is_ok());
+    spec.how = TaskKind::Ping {
+      token: String::new(),
+      grace_mins: 5,
     };
     assert!(validate_schedule(&spec).is_err());
   }
@@ -2364,6 +2424,7 @@ async fn host_task_keeps_command_template_in_shell_log() {
     .await
     .unwrap();
   let job = HostExecJob {
+    workload_no_proxy: None,
     stream: false,
     command: "curl https://api.example.test/fixture-secret".into(),
     timeout_secs: 1,

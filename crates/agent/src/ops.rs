@@ -198,6 +198,9 @@ impl Ops {
           .await?;
         Ok(Value::Null)
       }
+      AgentOp::WorkloadEgressStatus => {
+        Ok(Value::Bool(crate::egress::workload_ready()))
+      }
       AgentOp::NamedNetworksCheck { networks } => {
         named_networks::ensure(&self.docker, &networks, false, ctx)
           .await?;
@@ -964,7 +967,10 @@ impl Ops {
       self
         .up_with_crash_logs(
           &up.project,
-          up.no_start || verify_files || !up.host_binds.is_empty(),
+          up.no_start
+            || verify_files
+            || up.workload_egress
+            || !up.host_binds.is_empty(),
           previous_grace,
           ctx,
         )
@@ -981,7 +987,15 @@ impl Ops {
       if verify_files {
         project_files::verify_metadata(&self.docker, up, ctx).await?;
       }
-      if !up.no_start && (verify_files || !up.host_binds.is_empty()) {
+      if up.workload_egress {
+        crate::workload_egress::verify_service(&self.docker, up, ctx)
+          .await?;
+      }
+      if !up.no_start
+        && (verify_files
+          || up.workload_egress
+          || !up.host_binds.is_empty())
+      {
         self.docker.stop_start(&up.project, true, ctx).await?;
       }
       let state = if up.no_start {
@@ -1094,6 +1108,9 @@ impl Ops {
     up: &ProjectUp,
     ctx: &Ctx,
   ) -> Result<ProjectUpResult, ApiError> {
+    if up.workload_egress {
+      crate::workload_egress::require_running()?;
+    }
     if let Some(from) = &up.refresh_files_from {
       return project_files::refresh(&self.docker, up, from, ctx)
         .await;

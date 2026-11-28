@@ -1144,6 +1144,15 @@ pub(crate) async fn make_plan_inner(
   )?;
   tailscale_items(&mut b, &snap, &desired, &status);
   egress_items(&mut b, &snap, &current, &desired);
+  for row in
+    desired.services.values().filter(|row| row.spec.use_egress)
+  {
+    crate::workload_egress::validate(
+      &desired,
+      &net,
+      &row.spec.server,
+    )?;
+  }
   docker_proxy_items(&mut b, &snap, &current, &desired);
   baseline_items(&mut b, &snap, &current, &desired);
   gateway_items(
@@ -1210,6 +1219,27 @@ pub(crate) async fn make_plan_inner(
     &desired,
   );
   for step in &b.steps {
+    if let Step::ServiceUp { service, .. } = &step.step
+      && let Some(row) = desired.services.get(service)
+    {
+      let server = &row.spec.server;
+      if row.spec.use_egress {
+        let will_configure = b.steps.iter().any(|step| matches!(&step.step, Step::Egress { server: target } if target == server));
+        crate::workload_egress::preflight(
+          &state.hub,
+          server,
+          will_configure,
+          &tokio_util::sync::CancellationToken::new(),
+        )
+        .await?;
+      } else if current
+        .services
+        .get(service)
+        .is_some_and(|old| old.spec.use_egress)
+      {
+        state.hub.workload_egress_conn_id(server)?;
+      }
+    }
     if let Step::ServiceUp { service, .. } = &step.step
       && let Some(row) = desired.services.get(service)
       && (crate::project_files::needs_agent(&row.spec)

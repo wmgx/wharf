@@ -637,6 +637,8 @@ pub struct ProjectUp {
   pub project_files: Vec<ProjectFile>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub refresh_files_from: Option<String>,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub workload_egress: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -965,6 +967,8 @@ pub struct TaskRunJob {
   pub artifacts_keep: Option<u32>,
   pub timeout_secs: u64,
   pub pull: PullPolicy,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub workload_no_proxy: Option<String>,
 }
 
 pub fn sso_runner_name(

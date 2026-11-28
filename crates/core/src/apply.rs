@@ -379,6 +379,12 @@ pub(crate) async fn start_with_actor(
             .map_err(json_err)
         })
         .transpose()?;
+      if let Some(spec) = next.as_ref().or(previous)
+        && (spec.use_egress
+          || previous.is_some_and(|old| old.use_egress))
+      {
+        state.hub.workload_egress_conn_id(&spec.server)?;
+      }
       if let Some(spec) = &next
         && crate::project_files::exec_changed(previous, spec)
       {
@@ -2024,6 +2030,7 @@ async fn run_step_with_dns(
               host_binds: Vec::new(),
               volume_owners: Default::default(),
               project_files: Vec::new(),
+              workload_egress: false,
               refresh_files_from: None,
             },
             caddyfile: r.config,
@@ -2144,6 +2151,7 @@ async fn run_step_with_dns(
         host_binds: Vec::new(),
         volume_owners: Default::default(),
         project_files: Vec::new(),
+        workload_egress: false,
         refresh_files_from: None,
       };
       let op = match p.reload {
@@ -2203,6 +2211,7 @@ async fn run_step_with_dns(
             host_binds: Vec::new(),
             volume_owners: Default::default(),
             project_files: Vec::new(),
+            workload_egress: false,
             refresh_files_from: None,
           }),
           GATEWAY_TIMEOUT,
@@ -2884,6 +2893,7 @@ fn should_trial(
 ) -> bool {
   rollback
     && spec.networks.is_empty()
+    && !spec.use_egress
     && !crate::project_files::needs_agent(spec)
     && !matches!(spec.source, Source::Compose { .. })
     && !spec.stopped
@@ -2914,6 +2924,17 @@ async fn service_up(
     )
   })?;
   let server = &row.spec.server;
+  let egress_conn = if row.spec.use_egress {
+    crate::workload_egress::validate(world, &net, server)?;
+    Some(
+      crate::workload_egress::preflight(
+        &state.hub, server, false, cancel,
+      )
+      .await?,
+    )
+  } else {
+    None
+  };
   let files_conn = crate::project_files::needs_agent(&row.spec)
     .then(|| state.hub.project_files_conn_id(server))
     .transpose()?;
@@ -3104,6 +3125,7 @@ async fn service_up(
     init,
     networks: row.spec.networks.clone(),
     project_files,
+    workload_egress: row.spec.use_egress,
     refresh_files_from: refresh_files_from.map(str::to_string),
     volume_owners: row
       .spec
@@ -3136,11 +3158,19 @@ async fn service_up(
     .or(deploy_conn)
     .or(env_conn)
     .or(bind_conn)
-    .or(files_conn);
-  if [network_conn, deploy_conn, env_conn, bind_conn, files_conn]
-    .into_iter()
-    .flatten()
-    .any(|id| Some(id) != conn)
+    .or(files_conn)
+    .or(egress_conn);
+  if [
+    network_conn,
+    deploy_conn,
+    env_conn,
+    bind_conn,
+    files_conn,
+    egress_conn,
+  ]
+  .into_iter()
+  .flatten()
+  .any(|id| Some(id) != conn)
   {
     return Err(
       ApiError::new(

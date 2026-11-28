@@ -2997,6 +2997,7 @@ mod tests {
       self_refs: false,
       compose_env: false,
       user: None,
+      use_egress: false,
       networks: Default::default(),
       server: server.into(),
       source: Source::Image("traefik/whoami".into()),

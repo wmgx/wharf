@@ -807,6 +807,7 @@ async fn execute(
     )?;
     let server_row = &snap.world.servers[server];
     let job = TaskRunJob {
+      workload_no_proxy: None,
       name: config::hash(hostname)[..32].to_string(),
       how: TaskHow::Script {
         image: script.image.clone().unwrap_or_else(|| {

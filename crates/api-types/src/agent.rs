@@ -202,6 +202,8 @@ pub enum AgentMsg {
     safe_host_bind_v1: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     project_files_v1: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    workload_egress_v1: bool,
   },
   KeyReady {
     core_public_key: String,
@@ -452,6 +454,7 @@ pub enum AgentOp {
   NamedNetworksCheck {
     networks: BTreeMap<String, crate::spec::NetworkAttachment>,
   },
+  WorkloadEgressStatus,
   ComposeEnvCheck {
     project: String,
     compose: String,
@@ -1016,6 +1019,8 @@ pub struct HostExecJob {
   pub command: String,
   pub timeout_secs: u64,
   pub cwd: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub workload_no_proxy: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

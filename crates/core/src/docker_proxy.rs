@@ -23,6 +23,10 @@ const READY_SECS: u64 = 120;
 /// 总是直连的地址：本机、内网、Tailscale。
 const ALWAYS_DIRECT: &str = "localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10,fd7a:115c:a1e0::/48";
 
+pub(crate) fn internal_bypass() -> &'static str {
+  ALWAYS_DIRECT
+}
+
 /// 想要的 dockerd 代理配置：`(代理, no-proxy)`。没设代理时为 `None`。
 pub fn wanted(s: &ServerSettings) -> Option<(String, String)> {
   // 经出口时指向本机的分流代理，改规则不用再动 dockerd。
@@ -116,6 +120,7 @@ async fn exec(
     .call(
       server,
       AgentOp::HostExec(HostExecJob {
+        workload_no_proxy: None,
         stream: false,
         command,
         timeout_secs: EXEC_SECS,

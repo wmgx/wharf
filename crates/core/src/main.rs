@@ -162,6 +162,7 @@ mod variables;
 mod vendor_checks;
 mod views;
 mod web;
+mod workload_egress;
 mod world;
 
 #[derive(Parser)]

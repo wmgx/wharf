@@ -290,6 +290,7 @@ pub async fn preview(
       self_refs: false,
       compose_env: false,
       user: None,
+      use_egress: false,
       networks: Default::default(),
     },
     adopt: converted.adopt,

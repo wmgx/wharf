@@ -71,15 +71,24 @@ pub struct SetArgs {
   artifacts_max_mb: Option<u32>,
   #[arg(long)]
   artifacts_keep: Option<u32>,
+  #[arg(long, conflicts_with = "no_use_egress")]
+  use_egress: bool,
+  #[arg(long)]
+  no_use_egress: bool,
 }
 
 impl SetArgs {
   fn edits(
     &self,
-  ) -> [(bool, &'static str, &'static [&'static str]); 25] {
+  ) -> [(bool, &'static str, &'static [&'static str]); 26] {
     [
       (self.schedule.is_some(), "--schedule", &[]),
-      (self.clear_schedule, "--clear-schedule", &["脚本"]),
+      (self.use_egress || self.no_use_egress, "--use-egress", &[]),
+      (
+        self.clear_schedule,
+        "--clear-schedule",
+        &["脚本", "容器内", "一次性容器", "宿主机"],
+      ),
       (self.server.is_some(), "--server", &[]),
       (self.timeout.is_some(), "--timeout", &[]),
       (self.notify.is_some(), "--notify", &[]),
@@ -199,6 +208,9 @@ fn apply_task_set(
         .with_hint("更换任务形式请用 wharf task add"),
       );
     }
+  }
+  if args.use_egress || args.no_use_egress {
+    spec.use_egress = args.use_egress;
   }
   if let Some(server) = &args.server {
     spec.server.clone_from(server);

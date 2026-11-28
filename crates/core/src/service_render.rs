@@ -171,6 +171,8 @@ fn preview(
   )?;
   let compose = crate::refs::resolve(&compose, name, &world, &net)?;
   let compose = substitutions.finish_compose(compose)?;
+  let compose =
+    crate::workload_egress::render(name, &row.spec, &net, compose)?;
   let compose = snapshot::with_files(
     &world,
     &net,

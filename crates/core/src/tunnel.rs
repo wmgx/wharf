@@ -207,6 +207,7 @@ pub async fn sync(
         host_binds: Vec::new(),
         volume_owners: Default::default(),
         project_files: Vec::new(),
+        workload_egress: false,
         refresh_files_from: None,
       }),
       CONNECTOR_TIMEOUT,

@@ -62,6 +62,7 @@ impl ExecRequest {
       ));
     }
     Ok(HostExecJob {
+      workload_no_proxy: None,
       stream: false,
       command: self.command,
       timeout_secs,

@@ -32,10 +32,12 @@ const FILE_LIMIT: u64 = 64 * 1024;
 #[derive(Default)]
 pub(super) struct Writes(Vec<Undo>);
 
+type FileState = (String, u32, (u32, u32));
+
 struct Undo {
   dir: DirFd,
   name: CString,
-  previous: Option<(String, u32, (u32, u32))>,
+  previous: Option<FileState>,
   init: bool,
 }
 
@@ -188,7 +190,7 @@ fn read(
   dir: &DirFd,
   name: &CStr,
   init: bool,
-) -> Result<Option<(String, u32, (u32, u32))>, ApiError> {
+) -> Result<Option<FileState>, ApiError> {
   let err = io_err(Path::new("配置目录"));
   let fd = match dir.open_file(
     name,
