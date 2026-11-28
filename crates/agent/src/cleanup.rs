@@ -30,7 +30,7 @@ const ARCHIVE: &str = ".wharf-backup-archive";
 const CORE: &str = "wharf-core";
 
 mod runtime;
-use runtime::{PROJECT, containers, docker_entries, label, runtime};
+use runtime::{containers, docker_entries, label, runtime};
 
 fn valid(name: &str) -> bool {
   validate_name("服务", name).is_ok()

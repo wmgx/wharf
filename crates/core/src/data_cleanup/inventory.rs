@@ -77,7 +77,7 @@ fn string_set(
 }
 
 pub(super) fn inventory(
-  c: &Connection,
+  c: &mut Connection,
 ) -> Result<Inventory, ApiError> {
   let mut records = BTreeMap::new();
   let mut rows = c.prepare("SELECT service, server, due_at, created_at, instance_id, blocked_reason FROM cleanups").map_err(sql_err)?;
