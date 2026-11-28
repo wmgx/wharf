@@ -58,7 +58,7 @@ pub async fn run(
     if !dotenv::check_name(name)
       || ["WHARF_", "OIDC_SECRET_", "ACME_DNS_", "NOTIFY_URL_"]
         .iter()
-        .any(|p| upper.starts_with(p))
+        .any(|p| upper.starts_with(*p))
     {
       return Err(
         ApiError::invalid("导入包含格式错误或保留的密钥名").into(),

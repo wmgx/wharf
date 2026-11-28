@@ -63,7 +63,7 @@ pub fn account_ref(name: &str) -> Option<&str> {
   let (account, field) =
     name.strip_prefix("account.")?.split_once('.')?;
   (matches!(field, "username" | "password")
-    && wharf_api_types::validate_name("应用账号", account).is_ok())
+    && crate::validate_name("应用账号", account).is_ok())
   .then_some(account)
 }
 
