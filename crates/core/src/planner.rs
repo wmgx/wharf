@@ -5383,7 +5383,6 @@ mod tests {
     let row = world.services.get_mut("app").unwrap();
     row.spec.command = Some(vec!["serve".into()]);
     row.spec.shm_size = Some(64 << 20);
-    row.spec.ports.clear();
     row.spec.volumes.clear();
     let request = PlanRequest {
       service_action: Some(ServiceAction::Clone {
