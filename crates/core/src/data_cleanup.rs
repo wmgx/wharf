@@ -716,11 +716,11 @@ pub(crate) async fn expire_archive(
   progress: crate::hub::ProgressFn,
   cancel: &CancellationToken,
 ) -> Result<(), ApiError> {
-  if !crate::jobs::auto_cleanup_enabled(state).await? {
+  let policy = state.db.call(|c| cleanup_policy(c)).await?;
+  if state.is_safe_mode() || !policy.auto_expire {
     progress("自动清理已暂停".into());
     return Ok(());
   }
-  let policy = state.db.call(|c| cleanup_policy(c)).await?;
   let c = Candidate::new(server, entry, None, policy.keep_days);
   if !c.item.expired
     || !matches!(c.item.kind, MigrateTargetBackup | RestoreBackup)
@@ -755,7 +755,7 @@ pub(crate) async fn audit_auto_cleanup(
     wharf_api_types::view::AuditEntry {
       id: 0,
       at: db::now_ms(),
-      kind: "cleanup".into(),
+      kind: "api".into(),
       actor: AUTO_ACTOR.into(),
       method: "DELETE".into(),
       path: "/api/data/cleanup".into(),

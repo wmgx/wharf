@@ -662,7 +662,8 @@ async fn migration_and_archive_expiry_record_runs_and_audit() {
   let linked = state.db.call(|c| c.query_row(
     "SELECT COUNT(*) FROM runs JOIN audit_log ON instr(audit_log.detail, runs.id) = 1
      WHERE runs.actor = '到期清理' AND runs.status = 'succeeded'
-       AND audit_log.actor = '到期清理' AND audit_log.kind = 'cleanup' AND audit_log.status = 200",
+       AND audit_log.actor = '到期清理' AND audit_log.kind = 'api'
+       AND audit_log.path = '/api/data/cleanup' AND audit_log.status = 200",
     [], |r| r.get::<_, usize>(0),
   ).map_err(sql_err)).await.unwrap();
   assert_eq!(linked, 2);
