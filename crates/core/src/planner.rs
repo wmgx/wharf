@@ -1749,10 +1749,10 @@ fn service_items(
           && m.payload.from == *server
           && m.payload.source_stopped
       });
-    if let Some(from) = moved {
-      if !migration_already_synced(snap, name, server) {
-        move_items(b, snap, current, name, from, server, net);
-      }
+    if let Some(from) = moved
+      && !migration_already_synced(snap, name, server)
+    {
+      move_items(b, snap, current, name, from, server, net);
     }
 
     // 数据卷：新增的目录。迁移时新机器上要建全部目录。
