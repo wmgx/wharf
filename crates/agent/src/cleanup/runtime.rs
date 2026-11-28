@@ -234,13 +234,12 @@ pub(super) async fn containers(
   })
 }
 
-pub(super) async fn runtime(
+pub(super) async fn project_networks(
   docker: &Docker,
   ctx: &Ctx,
 ) -> Result<Runtime, ApiError> {
-  let (mut current, volumes, networks, images) = tokio::try_join!(
+  let (mut current, ids) = tokio::try_join!(
     containers(docker, ctx),
-    docker_output(docker, &["volume", "ls", "-q"], ctx),
     docker_output(
       docker,
       &[
@@ -253,21 +252,33 @@ pub(super) async fn runtime(
       ],
       ctx
     ),
+  )?;
+  let networks = inspect(
+    docker,
+    "network",
+    &ids,
+    r#"[{{json .Id}},{{json .Name}},{{json .Labels}},{{json .Containers}}]"#,
+    ctx,
+  ).await?;
+  current.networks = decode_rows(&networks)?;
+  Ok(current)
+}
+
+pub(super) async fn runtime(
+  docker: &Docker,
+  ctx: &Ctx,
+) -> Result<Runtime, ApiError> {
+  let (mut current, volumes, images) = tokio::try_join!(
+    project_networks(docker, ctx),
+    docker_output(docker, &["volume", "ls", "-q"], ctx),
     docker_output(docker, &["image", "ls", "-aq", "--no-trunc"], ctx),
   )?;
-  let (volumes, networks, images) = tokio::try_join!(
+  let (volumes, images) = tokio::try_join!(
     inspect(
       docker,
       "volume",
       &volumes,
       r#"[{{json .Name}},{{json .Labels}}]"#,
-      ctx
-    ),
-    inspect(
-      docker,
-      "network",
-      &networks,
-      r#"[{{json .Id}},{{json .Name}},{{json .Labels}},{{json .Containers}}]"#,
       ctx
     ),
     inspect(
@@ -279,7 +290,6 @@ pub(super) async fn runtime(
     ),
   )?;
   current.volumes = decode_rows(&volumes)?;
-  current.networks = decode_rows(&networks)?;
   current.images = decode_rows(&images)?;
   Ok(current)
 }

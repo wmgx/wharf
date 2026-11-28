@@ -576,8 +576,8 @@ pub async fn delete(
     req.kind,
     OrphanContainer | OrphanVolume | OrphanNetwork | OrphanImage
   ) {
-    let current = runtime(docker, ctx).await?;
-    let current = docker_entries(&current, docker, Utc::now())
+    let inventory = runtime(docker, ctx).await?;
+    let current = docker_entries(&inventory, docker, Utc::now())
       .into_iter()
       .find(|item| {
         item.kind == req.kind
@@ -606,7 +606,7 @@ pub async fn delete(
       cmd = cmd.arg("--no-prune");
     }
     let targets = if req.kind == OrphanImage {
-      current.image_tags(&req.target)
+      inventory.image_tags(&req.target)
     } else {
       &[]
     };
@@ -652,18 +652,22 @@ pub async fn delete(
     .as_ref()
     .filter(|_| req.kind == OrphanCaddy)
     .map(|p| projects.join(p));
-  let current = containers(docker, ctx).await?;
   let project_cleanup = matches!(req.kind, OrphanCaddy | OrphanFrpc);
-  let relevant_binds =
-    project_cleanup.then(|| current.project_binds(docker, &key));
-  let binds = relevant_binds.as_deref().unwrap_or(&current.binds);
-  let mut users = blockers(&path, binds);
-  if let Some(extra) = &extra {
-    users.extend(blockers(extra, binds));
-  }
-  if project_cleanup {
-    users.extend(current.project_blockers(docker, &key));
-  }
+  let path_users = |current: &runtime::Runtime| {
+    let relevant_binds =
+      project_cleanup.then(|| current.project_binds(docker, &key));
+    let binds = relevant_binds.as_deref().unwrap_or(&current.binds);
+    let mut users = blockers(&path, binds);
+    if let Some(extra) = &extra {
+      users.extend(blockers(extra, binds));
+    }
+    if project_cleanup {
+      users.extend(current.project_blockers(docker, &key));
+    }
+    users
+  };
+  let current = containers(docker, ctx).await?;
+  let mut users = path_users(&current);
   if repo.is_some() {
     users.extend(
       current
@@ -722,16 +726,7 @@ pub async fn delete(
   .map_err(|_| ApiError::internal("清理目录测量中断"))??;
   // 测量可能耗时，实际删除前再次核对挂载。
   let live = containers(docker, ctx).await?;
-  let relevant_binds =
-    project_cleanup.then(|| live.project_binds(docker, &key));
-  let binds = relevant_binds.as_deref().unwrap_or(&live.binds);
-  let mut users = blockers(&path, binds);
-  if let Some(extra) = &extra {
-    users.extend(blockers(extra, binds));
-  }
-  if project_cleanup {
-    users.extend(live.project_blockers(docker, &key));
-  }
+  let users = path_users(&live);
   if !users.is_empty() {
     return Ok(blocked(users));
   }
@@ -747,8 +742,21 @@ pub async fn delete(
         .await?
         .check("移除孤儿项目的已停止容器")?;
     }
-    // 按 ID 回收项目网络，避免依赖残留 Compose 文件里的网络声明。
-    let current = runtime(docker, ctx).await?;
+    let compose = docker.project_dir(&key).join("compose.yaml");
+    if compose.symlink_metadata().is_ok_and(|meta| meta.is_file()) {
+      let current = containers(docker, ctx).await?;
+      let users = path_users(&current);
+      if !users.is_empty() {
+        return Ok(blocked(users));
+      }
+      docker.down(&key, false, ctx).await?;
+    }
+    // Compose 文件缺失或网络不在声明里时，按 ID 回收无引用的遗留网络。
+    let current = runtime::project_networks(docker, ctx).await?;
+    let users = path_users(&current);
+    if !users.is_empty() {
+      return Ok(blocked(users));
+    }
     for network in docker_entries(&current, docker, Utc::now())
       .into_iter()
       .filter(|entry| {

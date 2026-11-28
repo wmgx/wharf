@@ -173,6 +173,9 @@ async fn orphan_project_cleanup_removes_only_its_unused_networks() {
   let (tmp, docker) = crate::docker::fake_docker(
     r#"
 case "$1:$2" in
+  compose:-p)
+    [ "$3" = "wharf-link-old" ] && [ "$6" = "down" ] && [ "$7" = "--remove-orphans" ] && [ "$#" = 7 ] || exit 1
+    touch down ;;
   network:ls) printf '%s\n' free foreign occupied ;;
   network:inspect)
     printf '%s\n' '["free","old_default",{"com.docker.compose.project":"wharf-link-old"},{}]' '["foreign","other",{"com.docker.compose.project":"somebody-else"},{}]' '["occupied","in-use",{"com.docker.compose.project":"wharf-link-old"},{"consumer":{}}]' ;;
@@ -184,6 +187,8 @@ esac
   );
   let path = docker.project_dir("wharf-link-old");
   std::fs::create_dir_all(&path).unwrap();
+  std::fs::write(path.join("compose.yaml"), "services: {}\n")
+    .unwrap();
   let shell = crate::host_shell::HostShell::prepare(
     docker.clone(),
     "s1".into(),
@@ -210,6 +215,7 @@ esac
   .await
   .unwrap();
   assert!(result.removed);
+  assert!(tmp.path().join("down").exists());
   assert!(tmp.path().join("removed").exists());
   assert!(!path.exists());
 }

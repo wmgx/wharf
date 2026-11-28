@@ -1294,7 +1294,7 @@ pub enum CleanupKind {
   OrphanFrpc,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentCleanupEntry {
   pub kind: CleanupKind,
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]

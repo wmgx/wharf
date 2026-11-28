@@ -514,7 +514,11 @@ async fn batch_preflight_preserves_old_agent_and_offline_errors() {
   });
   for (server, code, suggestions) in [
     ("old", ErrorCode::Conflict, &["wharf upgrade"][..]),
-    ("offline", ErrorCode::AgentOffline, &[][..]),
+    (
+      "offline",
+      ErrorCode::AgentOffline,
+      &["wharf server show offline"][..],
+    ),
   ] {
     let response = execute(
       State(state.clone()),

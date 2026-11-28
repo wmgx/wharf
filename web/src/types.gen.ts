@@ -771,7 +771,7 @@ export interface CustomAlertRuleView {
 
 export interface DataCleanupActionResult {
   display: string;
-  freed_bytes?: number;
+  freed_bytes: number;
   id: string;
   kind: CleanupKind;
   reason?: string | null;
@@ -787,35 +787,35 @@ export interface DataCleanupExecRequest {
   /**
    * 清理筛选范围内的全部未阻塞项（仍默认跳过 unlabeled 卷，除非 include_unlabeled = true）。
    */
-  all?: boolean;
+  all: boolean;
   /**
    * 确认串：单选为 `data-cleanup/<id>`；批量为 `data-cleanup/batch-<8位hex>`。
    */
-  confirm?: string | null;
+  confirm: string | null;
   /**
    * 仅清理已到期项（expires_at <= now；不含无到期时间的孤儿项与 unlabeled 卷）。
    */
-  expired_only?: boolean;
+  expired_only: boolean;
   /**
    * 显式按 ID 删除（与 expired_only / all 互斥）。
    */
-  ids?: string[];
-  include_unlabeled?: boolean;
-  kind?: CleanupKind | null;
-  server?: string | null;
-  service?: string | null;
+  ids: string[];
+  include_unlabeled: boolean;
+  kind: CleanupKind | null;
+  server: string | null;
+  service: string | null;
 }
 
 export interface DataCleanupItem {
   /**
    * 是否被在用容器、共享卷或实例变化阻拦，阻拦时禁止删除。
    */
-  blocked?: boolean;
+  blocked: boolean;
   blocked_reason?: string | null;
   created_at?: string | null;
   detail?: string | null;
   display: string;
-  expired?: boolean;
+  expired: boolean;
   expires_at?: string | null;
   /**
    * 稳定短 ID（如 `cln_a1b2c3d4e5f6`，由 `kind + server + target` 算 SHA-256 前 12 位），供 `--id` 精准删除。
@@ -847,11 +847,11 @@ export interface DataCleanupPolicy {
   /**
    * 是否启用到期自动清理（默认 false，拍板 1 选 A）。
    */
-  auto_expire?: boolean;
+  auto_expire: boolean;
   /**
    * 迁移/恢复/换备份机留底默认保留天数（1..=365，默认 7）。
    */
-  keep_days?: number;
+  keep_days: number;
 }
 
 export interface DataCleanupResult {

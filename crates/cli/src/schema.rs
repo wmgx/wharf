@@ -229,7 +229,7 @@ mod tests {
   }
 
   #[test]
-  fn cleanup_web_schema_keeps_defaulted_fields_optional() {
+  fn cleanup_web_schema_matches_serialized_fields() {
     let web = wharf_api_types::web_schema::web_schema();
     for (name, fields) in [
       (
@@ -256,7 +256,7 @@ mod tests {
           "{name}.{field}"
         );
         assert!(
-          !schema["required"]
+          schema["required"]
             .as_array()
             .into_iter()
             .flatten()
@@ -265,5 +265,11 @@ mod tests {
         );
       }
     }
+    assert!(
+      serde_json::from_value::<
+        wharf_api_types::view::DataCleanupExecRequest,
+      >(serde_json::json!({}))
+      .is_ok()
+    );
   }
 }
