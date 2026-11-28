@@ -326,7 +326,8 @@ pub(crate) async fn select_explicit_images(
         .with_hint("先导入镜像到该服务器，或改为 if_missing"),
       );
     } else if let Some(digest) = pinned {
-      result.pins.insert(image, digest.to_owned());
+      let digest = digest.to_owned();
+      result.pins.insert(image, digest);
     } else {
       resolve.push(image);
     }
@@ -1055,6 +1056,7 @@ async fn pending_import_retry_does_not_resolve_registry_images() {
     .unwrap(),
   );
   let row = crate::world::ServiceRow {
+    host_groups: Default::default(),
     spec: serde_json::from_value(serde_json::json!({"server": "s1", "source": {"image": "img:1"}})).unwrap(),
     version: 1,
     instance_id: "i1".into(),

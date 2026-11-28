@@ -558,7 +558,7 @@ fn resolve_service(
   })?;
   let (resolved, mounts) = render::service_compose(
     name,
-    &runtime_spec(row)?,
+    runtime_spec(row)?.as_ref(),
     &row.host_ports,
     &net.bind_ips(&row.spec.server),
     Some(secrets),
@@ -604,8 +604,11 @@ pub fn service_trial(
   let row = world.services.get(name).ok_or_else(|| {
     ApiError::not_found(format!("服务 {name} 不存在"))
   })?;
-  let (trial, mounts) =
-    render::trial_compose(name, &runtime_spec(row)?, Some(secrets))?;
+  let (trial, mounts) = render::trial_compose(
+    name,
+    runtime_spec(row)?.as_ref(),
+    Some(secrets),
+  )?;
   let trial = crate::refs::resolve(&trial, name, world, net)?;
   with_files(world, net, name, &trial, mounts, Some(secrets), false)
 }
@@ -685,7 +688,7 @@ pub fn service_template(
   let row = &world.services[name];
   let (text, mounts) = render::service_compose(
     name,
-    &runtime_spec(row)?,
+    runtime_spec(row)?.as_ref(),
     &row.host_ports,
     &net.bind_ips(&row.spec.server),
     None,

@@ -627,8 +627,10 @@ pub(crate) async fn make_plan_inner(
   if desired.services.iter().any(|(name, row)| {
     service_needs_default_timezone(current.services.get(name), row)
   }) {
-    let timezone =
-      state.db.call(crate::config_api::container_timezone).await?;
+    let timezone = state
+      .db
+      .call(|conn| crate::config_api::container_timezone(conn))
+      .await?;
     for (name, row) in &mut desired.services {
       if service_needs_default_timezone(
         current.services.get(name),
@@ -689,7 +691,11 @@ pub(crate) async fn make_plan_inner(
     crate::edge::validate_owners(&current, &desired)?;
   for (name, row) in &mut desired.services {
     if row.spec.host_groups().next().is_none()
-      || !row.host_groups.is_empty()
+      || (!row.host_groups.is_empty()
+        && current
+          .services
+          .get(name)
+          .is_some_and(|old| old.spec == row.spec))
     {
       continue;
     }
@@ -2395,10 +2401,6 @@ fn service_items(
   Ok(())
 }
 
-/// compose 里多个组件时，比较新旧模板逐个组件看：有的变了、有的没变时返回 (要重建的, 不变的)。
-/// `docker compose up -d` 本来就只重建配置变了的组件，这里只是在计划里说清楚。
-/// 服务器上现在跑的 compose：按上次部署的配置渲染；没有记录时退回当前配置。
-/// 上次部署失败时新配置已经写进去了，拿当前配置比会看不出哪些容器要重建。
 async fn choose_live_limits(
   state: &AppState,
   (snap, current, desired): (&Snapshot, &World, &World),
@@ -2413,6 +2415,14 @@ async fn choose_live_limits(
   {
     return Ok(());
   }
+  let adopting = b
+    .steps
+    .iter()
+    .filter_map(|entry| match &entry.step {
+      Step::AdoptData { job, .. } => Some(job.service.clone()),
+      _ => None,
+    })
+    .collect::<BTreeSet<_>>();
   for entry in &mut b.steps {
     let Step::ServiceUp {
       service,
@@ -2429,6 +2439,7 @@ async fn choose_live_limits(
     let server = &row.spec.server;
     if snap.deployed.get(service) != Some(server)
       || snap.pending.migrations.contains_key(service)
+      || adopting.contains(service)
       || row.import.is_some()
       || row.spec.stopped
       || b.explicit_pins.contains(service)
@@ -2544,6 +2555,10 @@ async fn choose_live_limits(
   Ok(())
 }
 
+/// compose 里多个组件时，比较新旧模板逐个组件看：有的变了、有的没变时返回 (要重建的, 不变的)。
+/// `docker compose up -d` 本来就只重建配置变了的组件，这里只是在计划里说清楚。
+/// 服务器上现在跑的 compose：按上次部署的配置渲染；没有记录时退回当前配置。
+/// 上次部署失败时新配置已经写进去了，拿当前配置比会看不出哪些容器要重建。
 fn deployed_template(
   current: &World,
   net: &Net,

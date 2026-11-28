@@ -74,9 +74,9 @@ fn pids(value: &Value) -> Option<u32> {
     .filter(|n| *n > 0)
 }
 
-fn strip_limits(
-  doc: &mut Value,
-) -> Option<BTreeMap<String, (String, [Option<Value>; 3])>> {
+type ComponentLimits = BTreeMap<String, (String, [Option<Value>; 3])>;
+
+fn strip_limits(doc: &mut Value) -> Option<ComponentLimits> {
   if doc.get("include").is_some() {
     return None;
   }

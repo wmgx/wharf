@@ -70,7 +70,8 @@ function SettingsFields({ svc, active, draft, set, dirty, changed, onReset, onSu
   }, [portsDirty, savedPorts, isCompose, composeInfo]);
   useEffect(() => { if (!sourceDirty) setHow(JSON.parse(savedHow)); }, [savedHow]);
   const [selectedComponent, setSelectedComponent] = useState("");
-  const component = composeInfo.services.includes(selectedComponent) ? selectedComponent : (composeInfo.services[0] ?? "");
+  const initialComponent = draft.container && composeInfo.services.includes(draft.container) ? draft.container : (composeInfo.services[0] ?? "");
+  const component = composeInfo.services.includes(selectedComponent) ? selectedComponent : initialComponent;
   const legacyTarget = draft.container ?? (composeInfo.services.length === 1 ? component : "");
   const declared = isCompose ? (draft.container_limits?.[component] ?? (component === legacyTarget ? draft.limits : undefined)) : draft.limits;
   const base = {

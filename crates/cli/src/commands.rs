@@ -2756,6 +2756,8 @@ fn reconcile_source_switch(
   let is_compose = matches!(source, Source::Compose { .. });
   if is_compose && !was_compose {
     spec.volumes.clear();
+    spec.stop_grace_secs = None;
+    spec.stop_signal = None;
     spec.command = None;
     spec.shm_size = None;
     spec.cap_add.clear();

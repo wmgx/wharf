@@ -540,7 +540,7 @@ pub enum CoreSnapshotCmd {
 #[derive(Args)]
 pub struct DeployOps {
   #[command(flatten)]
-  pub runtime: runtime_options::RuntimeOptions,
+  pub runtime: Box<runtime_options::RuntimeOptions>,
   /// 优雅停机等待秒数（1 到 600），0 恢复 Docker 默认。
   #[arg(long)]
   pub stop_grace: Option<u32>,
