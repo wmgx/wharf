@@ -192,7 +192,7 @@ pub async fn cached_live(state: &AppState, world: &World) -> LiveMap {
 }
 
 /// `stopped`：配置要求停止，这时容器停着才算和配置一致。
-fn live_of(
+pub(crate) fn live_of(
   live: &LiveMap,
   server: &str,
   project: &str,

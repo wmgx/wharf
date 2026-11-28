@@ -2,16 +2,14 @@
 //! 只有 `/srv/<服务>/` 下的目录归 Wharf（迁移时同步、备份、迁走后清理）；
 //! 其他宿主机目录和 docker 卷 Wharf 不碰，迁移和备份时要明确告诉用户。
 
-use std::{
-  collections::BTreeMap,
-  path::{Component, Path},
-};
+use std::{collections::BTreeMap, path::Path};
 
 use chrono::{DateTime, Duration, Utc};
 use serde_yaml_ng::Value;
 use wharf_api_types::{
   ApiError,
   agent::{BackupSummary, EscapedMount},
+  compose::{Mount, is_managed_dir, parse_mount},
   spec::{ServiceSpec, Source},
   view::{DataKind, DataMount, DataStatus, DataView, ServiceData},
 };
@@ -362,7 +360,14 @@ pub(crate) fn compose_mounts(
         continue;
       };
       let (kind, source) = match kind {
-        Mount::Bind => (classify_dir(name, &source), source),
+        Mount::Bind => {
+          let kind = if is_managed_dir(name, &source) {
+            DataKind::Managed
+          } else {
+            DataKind::ExternalDir
+          };
+          (kind, source)
+        }
         Mount::Volume => {
           (DataKind::NamedVolume, volume_name(top, source))
         }
@@ -379,60 +384,6 @@ pub(crate) fn compose_mounts(
     }
   }
   out
-}
-
-enum Mount {
-  Bind,
-  Volume,
-}
-
-/// 短写法 `源:目标[:选项]` 或长写法 `{type, source, target}`；tmpfs 不算数据。
-fn parse_mount(v: &Value) -> Option<(Mount, String, String)> {
-  if let Some(s) = v.as_str() {
-    let mut parts = s.splitn(3, ':');
-    let first = parts.next()?.to_string();
-    return Some(match parts.next() {
-      None => (Mount::Volume, String::new(), first),
-      Some(target) => {
-        let kind = if is_path(&first) {
-          Mount::Bind
-        } else {
-          Mount::Volume
-        };
-        (kind, first, target.to_string())
-      }
-    });
-  }
-  let get =
-    |k: &str| v.get(k).and_then(Value::as_str).unwrap_or_default();
-  let target = get("target").to_string();
-  let source = get("source").to_string();
-  match get("type") {
-    "bind" => Some((Mount::Bind, source, target)),
-    "volume" | "" => Some((Mount::Volume, source, target)),
-    _ => None,
-  }
-}
-
-fn is_path(s: &str) -> bool {
-  s.starts_with('/')
-    || s.starts_with('.')
-    || s.starts_with('~')
-    || s.starts_with('$')
-}
-
-/// 绝对路径、没有 `..`、在 `/srv/<服务>/` 下才算 Wharf 管理。
-fn classify_dir(name: &str, source: &str) -> DataKind {
-  let path = Path::new(source.trim_end_matches('/'));
-  let clean = path.is_absolute()
-    && path.components().all(|c| {
-      matches!(c, Component::RootDir | Component::Normal(_))
-    });
-  if clean && path.starts_with(Path::new("/srv").join(name)) {
-    DataKind::Managed
-  } else {
-    DataKind::ExternalDir
-  }
 }
 
 /// 顶层 `volumes` 里写了 `name:` 时，docker 里的卷名以它为准。

@@ -19,7 +19,7 @@ use wharf_api_types::{
   agent::{
     AgentOp, FILE_CHUNK, FileChunk, FileEntry, FileGrepResult,
     FileMkdirResult, FileMvResult, FileRmResult, FileTailResult,
-    FilesOp,
+    FileVersion, FilesOp,
   },
   view::Perm,
 };
@@ -32,7 +32,7 @@ use crate::{
   state::AppState,
 };
 
-const CHUNK_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const CHUNK_TIMEOUT: Duration = Duration::from_secs(60);
 /// 上传整个放在内存里，限制大小。更大的文件用 scp 或备份恢复。
 pub const MAX_UPLOAD: usize = 100 << 20;
 
@@ -100,46 +100,67 @@ pub async fn download(
 ) -> Result<Response, crate::api::AppError> {
   auth.require(Perm::Read)?;
   let server = server_of(&s, &name).await?;
-  let (svc, path) = (name.clone(), q.path.clone());
-  let read = move |offset: u64, expect| FilesOp::Read {
-    service: svc.clone(),
-    path: path.clone(),
-    offset,
-    len: FILE_CHUNK,
-    expect,
-  };
-  let first: FileChunk = call(&s, &server, read(0, None)).await?;
+  let path = q.path.clone();
+  stream_download(&q.path, None, move |offset, expect| {
+    let state = Arc::clone(&s);
+    let server = server.clone();
+    let op = FilesOp::Read {
+      service: name.clone(),
+      path: path.clone(),
+      offset,
+      len: FILE_CHUNK,
+      expect,
+    };
+    async move { call(&state, &server, op).await }
+  })
+  .await
+}
+
+pub(crate) async fn stream_download<F, Fut>(
+  path: &str,
+  expected_size: Option<u64>,
+  read: F,
+) -> Result<Response, crate::api::AppError>
+where
+  F: Fn(u64, Option<FileVersion>) -> Fut + Send + 'static,
+  Fut: std::future::Future<Output = Result<FileChunk, ApiError>>
+    + Send
+    + 'static,
+{
+  let first = read(0, None).await?;
   let size = first.size;
+  if expected_size.is_some_and(|expected| expected != size) {
+    return Err(
+      ApiError::new(ErrorCode::Conflict, "产物大小与任务清单不符")
+        .into(),
+    );
+  }
   let version = first.version;
   let first = decode(&first.data)?;
   let offset = checked_offset(0, first.len(), size)?;
-  let state = (s, server, read, offset, version);
+  let state = (read, offset, version);
   let rest =
     futures_util::stream::unfold(Some(state), move |st| async move {
-      let (s, server, read, offset, version) = st?;
+      let (read, offset, version) = st?;
       if offset >= size {
         return None;
       }
-      let chunk =
-        call::<FileChunk>(&s, &server, read(offset, version.clone()))
-          .await
-          .and_then(|c| {
-            if version.is_some() && c.version != version {
-              return Err(ApiError::new(
-                ErrorCode::Conflict,
-                "下载期间文件已变化",
-              ));
-            }
-            let bytes = decode(&c.data)?;
-            let next = checked_offset(offset, bytes.len(), size)?;
-            Ok((bytes, next))
-          });
+      let chunk = read(offset, version.clone()).await.and_then(|c| {
+        if c.size != size || version.is_some() && c.version != version
+        {
+          return Err(ApiError::new(
+            ErrorCode::Conflict,
+            "下载期间文件已变化",
+          ));
+        }
+        let bytes = decode(&c.data)?;
+        let next = checked_offset(offset, bytes.len(), size)?;
+        Ok((bytes, next))
+      });
       match chunk {
-        Ok((b, next)) => Some((
-          Ok(Bytes::from(b)),
-          Some((s, server, read, next, version)),
-        )),
-        // 中途出错只能断开，浏览器会显示下载失败。
+        Ok((bytes, next)) => {
+          Some((Ok(Bytes::from(bytes)), Some((read, next, version))))
+        }
         Err(e) => Some((Err(std::io::Error::other(e.message)), None)),
       }
     });
@@ -148,7 +169,7 @@ pub async fn download(
   })
   .chain(rest);
   let filename =
-    q.path.rsplit('/').next().unwrap_or("file").to_string();
+    path.rsplit('/').next().unwrap_or("file").to_string();
   Ok(
     (
       [

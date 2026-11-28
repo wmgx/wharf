@@ -537,6 +537,30 @@ impl Ops {
         .await?;
         Ok(Value::Null)
       }
+      AgentOp::TaskArtifactRead {
+        task,
+        run_id,
+        path,
+        offset,
+        len,
+        expect,
+      } => to_value(crate::task_artifacts::read(
+        &task,
+        run_id,
+        &path,
+        offset,
+        len,
+        expect.as_ref(),
+      )?),
+      AgentOp::TaskArtifactPrune { task, keep_run_ids } => {
+        let cancel = ctx.cancel.clone();
+        tokio::task::spawn_blocking(move || {
+          crate::task_artifacts::prune(&task, &keep_run_ids, &cancel)
+        })
+        .await
+        .map_err(|_| ApiError::internal("清理任务产物失败"))??;
+        Ok(Value::Null)
+      }
       AgentOp::TaskRun(job) => {
         to_value(crate::task::run(&self.docker, &job, ctx).await?)
       }
