@@ -191,14 +191,14 @@ async fn tick(
       rec.strikes = 0;
       continue;
     };
-    let expected = snapshot::service_resolved(
+    let expected = snapshot::service_hash(
       &snap.world,
       &net,
       name,
       &snap.render_values(&snap.world, name),
+      p.hash.as_deref(),
     )
-    .ok()
-    .map(|(_, h)| h);
+    .ok();
     if p.hash.is_none()
       || p.hash != expected
       || p.containers.iter().all(|c| c.foreign)

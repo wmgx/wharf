@@ -1,9 +1,10 @@
 use std::{net::SocketAddr, time::Duration};
 
-use reqwest::{Client, Url};
+use reqwest::{Client, StatusCode, Url};
 use wharf_api_types::{
   ApiError, ErrorCode,
   agent::{GatewayProbeJob, GatewayProbeResult, OneTimeSecret},
+  gateway_http::{inspect, tls_failed},
 };
 
 use crate::exec::Ctx;
@@ -48,58 +49,19 @@ fn upstream_addr(upstream: &str) -> Result<Url, ApiError> {
   Url::parse(&format!("http://{upstream}")).map_err(|_| invalid())
 }
 
-fn tls_failed(e: &reqwest::Error) -> bool {
-  let mut cause = std::error::Error::source(e);
-  while let Some(error) = cause {
-    let text = error.to_string().to_ascii_lowercase();
-    if ["tls", "handshake", "certificate", "ssl", "eof"]
-      .iter()
-      .any(|s| text.contains(s))
-    {
-      return true;
-    }
-    cause = error.source();
-  }
-  false
-}
-
 async fn status(
   client: &Client,
   url: Url,
   host: &str,
   cookie: Option<&OneTimeSecret>,
-) -> Result<(u16, bool), reqwest::Error> {
+) -> Result<(StatusCode, bool), reqwest::Error> {
   let mut request = client.get(url).header("Host", host);
   if let Some(cookie) = cookie {
     request = request.header(reqwest::header::COOKIE, &cookie.0);
   }
-  let mut response = request.send().await?;
-  let code = response.status().as_u16();
-  let rejected = cookie.is_some()
-    && ((300..400).contains(&code)
-      && response
-        .headers()
-        .get(reqwest::header::LOCATION)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|location| {
-          location.contains("/gate/login")
-            || location.starts_with("/_wharf/login")
-        })
-      || code == 401 && gate_login_body(&mut response).await?);
-  Ok((code, rejected))
-}
-
-async fn gate_login_body(
-  response: &mut reqwest::Response,
-) -> Result<bool, reqwest::Error> {
-  let mut remaining = "需要登录\n".as_bytes();
-  while let Some(chunk) = response.chunk().await? {
-    let Some(rest) = remaining.strip_prefix(chunk.as_ref()) else {
-      return Ok(false);
-    };
-    remaining = rest;
-  }
-  Ok(remaining.is_empty())
+  let (code, rejected, _) =
+    inspect(request.send().await?, cookie.is_some(), false).await;
+  Ok((code, cookie.is_some() && rejected))
 }
 
 async fn probe(
@@ -123,7 +85,7 @@ async fn probe(
         .map_err(|_| ApiError::internal("无法创建上游探测客户端"))?;
       return Ok::<_, ApiError>(matches!(
         status(&client, upstream, host, None).await,
-        Ok((code, _)) if code < 500
+        Ok((code, _)) if !code.is_server_error()
       ));
     }
     Ok(true)
@@ -179,20 +141,20 @@ async fn probe(
     Ok((code, true)) => {
       return Ok(result(
         "gateway_auth_rejected",
-        Some(code),
+        Some(code.as_u16()),
         false,
         "Wharf 门禁未放行探测请求",
       ));
     }
     Ok((code, _))
-      if code >= 500
-        || cert_pending && !matches!(code, 301 | 308) =>
+      if code.is_server_error()
+        || cert_pending && !matches!(code.as_u16(), 301 | 308) =>
     {
       return Ok(result(
         "gateway_http_bad",
-        Some(code),
+        Some(code.as_u16()),
         false,
-        &format!("网关返回 HTTP {code}"),
+        &format!("网关返回 HTTP {}", code.as_u16()),
       ));
     }
     Ok((code, _)) => code,
@@ -216,16 +178,16 @@ async fn probe(
     }
     return Ok(result(
       "http_cert_pending",
-      Some(code),
+      Some(code.as_u16()),
       true,
       "证书待签发，上游 HTTP 可达",
     ));
   }
   Ok(result(
     if job.tls { "https" } else { "http" },
-    Some(code),
+    Some(code.as_u16()),
     true,
-    &format!("HTTP {code}"),
+    &format!("HTTP {}", code.as_u16()),
   ))
 }
 

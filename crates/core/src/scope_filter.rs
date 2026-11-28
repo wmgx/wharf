@@ -102,6 +102,7 @@ pub fn filter_doctor(
 ) {
   report.servers.clear();
   report.vendors.clear();
+  report.checks.retain(|c| services.contains(&c.subject));
   report
     .routes
     .retain(|r| route_in_scope(services, world, &r.hostname));

@@ -220,7 +220,12 @@ pub enum Command {
   /// 有不通的项时退出码为 1。
   Doctor {
     /// 只查这个域名。
+    #[arg(conflicts_with_all = ["service", "server"])]
     hostname: Option<String>,
+    #[arg(long, conflicts_with = "server")]
+    service: Option<String>,
+    #[arg(long)]
+    server: Option<String>,
   },
   /// 打点：服务器或服务的资源曲线（host.* / svc.*），以及部署、备份耗时等事件。
   Metrics {
@@ -509,6 +514,9 @@ pub enum WaitCmd {
   Clear {
     #[arg(long)]
     subject: Option<String>,
+    /// 连同 Info 级提示和已确认项一起等清零。
+    #[arg(long)]
+    strict: bool,
     #[arg(long, default_value = "10m")]
     timeout: String,
   },
@@ -730,8 +738,8 @@ pub enum ServerCmd {
     #[arg(long)]
     private_ip: Option<String>,
     /// 内网地址所在网络：lan（普通内网，明文）或 overlay（WireGuard 等加密组网）。
-    #[arg(long, default_value = "lan", value_parser = ["lan", "overlay"])]
-    network: String,
+    #[arg(long, value_parser = ["lan", "overlay"])]
+    network: Option<String>,
     /// 接入方式：tailscale（没装时由 Wharf 装 Tailscale 容器并加入）、lan（要 --private-ip）、
     /// public（不用内网地址，网关一律走反向隧道）、auto（按检测到的地址推断）。
     #[arg(long, value_parser = ["tailscale", "lan", "public", "auto"])]

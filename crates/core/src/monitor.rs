@@ -112,6 +112,101 @@ pub fn judge(m: &MonitorSpec, r: &HttpCheckResult) -> (bool, String) {
   )
 }
 
+async fn record_manual(
+  state: &AppState,
+  service: &str,
+  at: i64,
+  ok: bool,
+  detail: &str,
+) {
+  {
+    let Ok(mut results) = LAST.lock() else { return };
+    let fails = match results.get(service) {
+      Some(old) if old.at > at => return,
+      Some(old) if !ok => old.fails,
+      _ => 0,
+    };
+    results.insert(
+      service.into(),
+      MonitorView {
+        ok,
+        detail: detail.into(),
+        at,
+        fails,
+      },
+    );
+  }
+  if ok {
+    crate::rules::observe(state, "monitor.ok", service, 1.0, detail)
+      .await;
+  }
+}
+
+pub(crate) async fn doctor_monitor(
+  state: &AppState,
+  service: &str,
+  row: &ServiceRow,
+) -> Option<wharf_api_types::view::DoctorCheck> {
+  use wharf_api_types::view::CheckStatus;
+  let monitor =
+    row.spec.monitor.as_ref().filter(|_| !row.spec.stopped)?;
+  let server = &row.spec.server;
+  let check = |status, detail: String| {
+    crate::doctor::check("monitor", service, status, detail)
+  };
+  if !state.hub.is_online(server) {
+    return Some(check(
+      CheckStatus::Skip,
+      "agent 离线，测不了".into(),
+    ));
+  }
+  let at = chrono::Utc::now().timestamp_millis();
+  let (ok, detail) = match url(row, monitor) {
+    Ok(url) => match request(state, server, url, monitor).await {
+      Ok(result) => judge(monitor, &result),
+      Err(_) => {
+        return Some(check(
+          CheckStatus::Bad,
+          "未取得监控结果".into(),
+        ));
+      }
+    },
+    Err(e) => (false, e),
+  };
+  record_manual(state, service, at, ok, &detail).await;
+  Some(check(
+    if ok {
+      CheckStatus::Ok
+    } else {
+      CheckStatus::Bad
+    },
+    detail,
+  ))
+}
+
+async fn request(
+  state: &AppState,
+  server: &str,
+  url: String,
+  monitor: &MonitorSpec,
+) -> Result<HttpCheckResult, wharf_api_types::ApiError> {
+  let job = HttpCheck {
+    url,
+    keyword: monitor.keyword.clone(),
+    timeout_secs: TIMEOUT_SECS,
+  };
+  state
+    .hub
+    .call(
+      server,
+      AgentOp::HttpCheck(job),
+      Duration::from_secs(TIMEOUT_SECS + 10),
+      None,
+      &tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+}
+
 pub fn spawn(state: Arc<AppState>) {
   tokio::spawn(async move {
     tokio::time::sleep(Duration::from_secs(90)).await;
@@ -123,6 +218,7 @@ pub fn spawn(state: Arc<AppState>) {
 }
 
 async fn round(state: &AppState) {
+  let at = chrono::Utc::now().timestamp_millis();
   let Ok(snap) = crate::snapshot::load(&state.db).await else {
     return;
   };
@@ -157,30 +253,13 @@ async fn round(state: &AppState) {
         }
         let outcome = match url {
           Err(e) => Some((false, e)),
-          Ok(url) => {
-            let job = HttpCheck {
-              url,
-              keyword: m.keyword.clone(),
-              timeout_secs: TIMEOUT_SECS,
-            };
-            match state
-              .hub
-              .call::<HttpCheckResult>(
-                &server,
-                AgentOp::HttpCheck(job),
-                Duration::from_secs(TIMEOUT_SECS + 10),
-                None,
-                &tokio_util::sync::CancellationToken::new(),
-              )
-              .await
-            {
-              Ok(r) => Some(judge(&m, &r)),
-              Err(e) => {
-                tracing::debug!("监控 {name}：{}", e.message);
-                None
-              }
+          Ok(url) => match request(state, &server, url, &m).await {
+            Ok(r) => Some(judge(&m, &r)),
+            Err(e) => {
+              tracing::debug!("监控 {name}：{}", e.message);
+              None
             }
-          }
+          },
         };
         (name, outcome)
       });
@@ -197,16 +276,19 @@ async fn round(state: &AppState) {
     let Some((ok, detail)) = outcome else {
       continue;
     };
-    let prev = last(&name).map_or(0, |v| v.fails);
-    let fails = if ok { 0 } else { prev + 1 };
     if let Ok(mut l) = LAST.lock() {
+      let prev = match l.get(&name) {
+        Some(previous) if previous.at > at => continue,
+        Some(previous) => previous.fails,
+        None => 0,
+      };
       l.insert(
         name.clone(),
         MonitorView {
           ok,
           detail: detail.clone(),
-          at: chrono::Utc::now().timestamp_millis(),
-          fails,
+          at,
+          fails: if ok { 0 } else { prev.saturating_add(1) },
         },
       );
     }
@@ -267,6 +349,45 @@ mod tests {
       url(&row, &m).unwrap_err(),
       "端口 game 是 UDP，监控不了"
     );
+  }
+
+  #[tokio::test]
+  async fn manual_monitor_recovery_clears_failed_status() {
+    let _guard = crate::rules::tests::TEST_LOCK.lock().await;
+    crate::rules::tests::reset_memory();
+    let state = crate::rules::tests::test_state();
+    let service = "p203-monitor-worker";
+    for _ in 0..3 {
+      crate::rules::observe(
+        &state,
+        "monitor.ok",
+        service,
+        0.0,
+        "503",
+      )
+      .await;
+    }
+    assert!(
+      crate::rules::firing_since("monitor_failed", service).is_some()
+    );
+    LAST.lock().unwrap().insert(
+      service.into(),
+      MonitorView {
+        ok: false,
+        detail: "503".into(),
+        at: 1,
+        fails: 3,
+      },
+    );
+    record_manual(&state, service, 2, false, "503").await;
+    assert_eq!(last(service).unwrap().fails, 3);
+    record_manual(&state, service, 3, true, "200").await;
+    assert!(
+      crate::rules::firing_since("monitor_failed", service).is_none()
+    );
+    let recovered = LAST.lock().unwrap().remove(service).unwrap();
+    assert!(recovered.ok);
+    assert_eq!(recovered.fails, 0);
   }
 
   #[test]

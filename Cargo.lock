@@ -3162,6 +3162,7 @@ dependencies = [
  "hkdf",
  "ipnet",
  "regex",
+ "reqwest",
  "schemars",
  "serde",
  "serde_json",

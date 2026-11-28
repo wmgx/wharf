@@ -187,18 +187,22 @@ pub(crate) fn stopped_route(
 ) -> bool {
   route.upstream.is_none()
     && route.redirect.is_none()
-    && !route.paths.iter().any(|p| {
-      p.upstream.is_some()
-        || p
-          .service
-          .as_ref()
-          .and_then(|name| world.services.get(name))
-          .is_some_and(|row| !row.spec.stopped)
-    })
+    && !route.paths.iter().any(|p| active_path(world, p))
     && world
       .services
       .get(&route.service)
       .is_some_and(|r| r.spec.stopped)
+}
+
+pub(crate) fn active_path(
+  world: &World,
+  path: &wharf_api_types::spec::PathRoute,
+) -> bool {
+  path.upstream.is_some()
+    || path
+      .service
+      .as_deref()
+      .is_some_and(|name| running_service(world, name))
 }
 
 pub(crate) fn running_service(world: &World, name: &str) -> bool {

@@ -10,7 +10,7 @@ use chrono::{DateTime, Utc};
 use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
   agent::{AgentOp, ContainerDiagnosis, ContainerLogKeyword},
-  view::{CheckStatus, RouteDiagnosis},
+  view::{CheckStatus, DoctorCheck},
 };
 
 use crate::{doctor::check, state::AppState};
@@ -22,10 +22,12 @@ const UPGRADE: &str =
 pub struct Target {
   pub service: String,
   pub server: String,
-  pub port: u16,
-  pub same_host: bool,
+  pub port: Option<u16>,
+  pub local_loopback_ok: bool,
   pub http_failed: bool,
   pub link_unreachable: bool,
+  pub link_subject: Option<String>,
+  pub container_subject: String,
 }
 
 pub fn should_diagnose(
@@ -33,20 +35,28 @@ pub fn should_diagnose(
   link_failed: bool,
   bad_gateway: bool,
   gateway_ok: bool,
+  container_bad: bool,
   active: bool,
 ) -> bool {
-  manual && (link_failed || (bad_gateway && gateway_ok && active))
+  manual
+    && (link_failed
+      || container_bad
+      || (bad_gateway && gateway_ok && active))
 }
 
-pub async fn enrich(
+pub async fn enrich<'a>(
   state: &AppState,
-  routes: &mut [(RouteDiagnosis, Option<Target>)],
+  checks: impl IntoIterator<
+    Item = (&'a mut Vec<DoctorCheck>, Vec<Target>),
+  >,
 ) {
+  let mut checks: Vec<_> = checks.into_iter().collect();
   let mut services: BTreeMap<(String, String), Vec<(usize, Target)>> =
     BTreeMap::new();
-  for (i, (route, target)) in routes.iter_mut().enumerate() {
-    if let Some(target) = target.take()
-      && state.hub.is_online(&target.server)
+  for (i, (route, targets)) in checks.iter_mut().enumerate() {
+    for target in std::mem::take(targets)
+      .into_iter()
+      .filter(|t| state.hub.is_online(&t.server))
     {
       if !state.hub.supports_container_diagnosis(&target.server) {
         set_cause(route, &target, UPGRADE, false);
@@ -59,11 +69,14 @@ pub async fn enrich(
     }
   }
 
-  let _ = tokio::time::timeout(TIMEOUT, async {
+  let total = TIMEOUT * (services.len() as u32).clamp(1, 4);
+  let cancel = CancellationToken::new();
+  let _guard = cancel.clone().drop_guard();
+  let _ = tokio::time::timeout(total, async {
     // 一次只查一个服务，避免一批故障同时起多个辅助容器。
     for ((server, service), targets) in services {
       let ports: BTreeSet<_> =
-        targets.iter().map(|(_, t)| t.port).collect();
+        targets.iter().filter_map(|(_, t)| t.port).collect();
       let Ok(results) = state
         .hub
         .call::<Vec<ContainerDiagnosis>>(
@@ -74,18 +87,26 @@ pub async fn enrich(
           },
           TIMEOUT,
           None,
-          &CancellationToken::new(),
+          &cancel,
         )
         .await
       else {
         continue;
       };
       for (i, target) in targets {
-        if let Some((result, &port)) = results
-          .iter()
-          .find_map(|r| r.ports.get(&target.port).map(|p| (r, p)))
-        {
-          apply(&mut routes[i].0, &target, result, port);
+        if let Some(host) = target.port {
+          if let Some((result, &port)) = results
+            .iter()
+            .find_map(|r| r.ports.get(&host).map(|p| (r, p)))
+          {
+            apply(checks[i].0, &target, result, Some(port));
+          }
+        } else {
+          for result in
+            results.iter().filter(|r| !r.running || r.restarting)
+          {
+            apply(checks[i].0, &target, result, None);
+          }
         }
       }
     }
@@ -94,13 +115,26 @@ pub async fn enrich(
 }
 
 fn set_cause(
-  route: &mut RouteDiagnosis,
+  checks: &mut [DoctorCheck],
   target: &Target,
   cause: &str,
   confirmed: bool,
 ) {
-  for c in &mut route.checks {
+  for c in checks {
+    if c.layer == "container"
+      && c.subject == target.container_subject
+      && !confirmed
+      && c.status == CheckStatus::Bad
+    {
+      c.detail.push('。');
+      c.detail.push_str(cause);
+    }
     if c.status != CheckStatus::Bad {
+      continue;
+    }
+    if c.layer == "link"
+      && target.link_subject.as_deref() != Some(c.subject.as_str())
+    {
       continue;
     }
     let http = target.http_failed
@@ -120,10 +154,10 @@ fn set_cause(
 }
 
 fn apply(
-  route: &mut RouteDiagnosis,
+  checks: &mut Vec<DoctorCheck>,
   target: &Target,
   result: &ContainerDiagnosis,
-  port: u16,
+  port: Option<u16>,
 ) {
   let failed = !result.running || result.restarting;
   let permission_error = result.log_keywords.iter().any(|word| {
@@ -136,20 +170,22 @@ fn apply(
   });
   if failed {
     let cause = exit_cause(result);
-    if let Some(c) =
-      route.checks.iter_mut().find(|c| c.layer == "container")
-    {
+    if let Some(c) = checks.iter_mut().find(|c| {
+      c.layer == "container" && c.subject == target.container_subject
+    }) {
       c.detail.push('。');
       c.detail.push_str(&cause);
     }
-    set_cause(route, target, &cause, true);
-  } else if let Some(listeners) = &result.listeners {
+    set_cause(checks, target, &cause, true);
+  } else if let (Some(listeners), Some(port)) =
+    (&result.listeners, port)
+  {
     let host_network = result.network_mode == "host";
     let recent_start =
       DateTime::parse_from_rfc3339(&result.started_at).is_ok_and(
         |at| Utc::now().signed_duration_since(at).num_seconds() < 15,
       );
-    let cause = match listening(listeners, port, host_network, target.same_host) {
+    let cause = match listening(listeners, port, host_network, target.local_loopback_ok) {
       Listening::Loopback(addr) => Some(format!(
         "应用只监听 {addr}，网关连不上。把应用的监听地址改成 0.0.0.0:{port}"
       )),
@@ -161,7 +197,7 @@ fn apply(
         Some(format!("容器没有监听 {port}，实际在监听 {names}"))
       }
       Listening::Missing => Some(format!("应用尚未监听 {port}，可能还未就绪或已挂起，可查看容器日志")),
-      Listening::Ready if !target.same_host && target.link_unreachable => {
+      Listening::Ready if !target.local_loopback_ok && target.link_unreachable => {
         Some("应用在监听，问题在两台机器之间的网络（wharf network --probe）".into())
       }
       // 网关连得上、应用也在监听，502/504 是应用自己返回的（例如它反代的上游不通）。
@@ -172,13 +208,27 @@ fn apply(
       Listening::Ready => None,
     };
     if let Some(cause) = cause {
-      set_cause(route, target, &cause, true);
+      set_cause(checks, target, &cause, true);
     }
   }
 
   for m in &result.mounts {
     let (detail, status) = match (&m.permissions, result.user) {
       (None, _) => ("挂载目录权限未检查".into(), CheckStatus::Skip),
+      (Some(p), None)
+        if failed
+          && permission_error
+          && p.uid == 0
+          && p.mode & 0o003 != 0o003 =>
+      {
+        (
+          format!(
+            "{} 属主 {}:{}（{:o}），容器用户未知且日志出现权限拒绝，检查目录属主（chown）",
+            m.source, p.uid, p.gid, p.mode
+          ),
+          CheckStatus::Warn,
+        )
+      }
       (Some(_), None) => (
         "容器用户未知，挂载目录的可写性未检查".into(),
         CheckStatus::Skip,
@@ -222,9 +272,12 @@ fn apply(
       }
       _ => continue,
     };
-    route
-      .checks
-      .push(check("container", &m.source, status, detail));
+    checks.push(check(
+      "container",
+      &target.container_subject,
+      status,
+      detail,
+    ));
   }
 }
 
@@ -277,14 +330,14 @@ fn listening(
   listeners: &[SocketAddr],
   port: u16,
   host_network: bool,
-  same_host: bool,
+  local_loopback_ok: bool,
 ) -> Listening {
   let mut matched =
     listeners.iter().filter(|addr| addr.port() == port);
   if let Some(first) = matched.next() {
     if !first.ip().is_loopback()
       || matched.any(|addr| !addr.ip().is_loopback())
-      || (host_network && same_host)
+      || (host_network && local_loopback_ok)
     {
       return Listening::Ready;
     }
@@ -332,12 +385,18 @@ mod tests {
   }
 
   #[test]
-  fn diagnoses_only_manual_doctor_failures() {
-    assert!(!should_diagnose(false, true, true, true, true));
-    assert!(!should_diagnose(false, false, true, true, true));
-    assert!(should_diagnose(true, true, false, false, false));
-    assert!(should_diagnose(true, false, true, true, true));
-    assert!(!should_diagnose(true, false, true, false, true));
-    assert!(!should_diagnose(true, false, true, true, false));
+  fn tunnel_crashed_and_host_loopback_diagnosis() {
+    assert!(should_diagnose(true, false, false, true, true, false));
+    let loopback = "127.0.0.1:8080".parse().unwrap();
+    assert_eq!(
+      listening(&[loopback], 8080, true, true),
+      Listening::Ready
+    );
+    assert!(!should_diagnose(false, true, true, true, false, true));
+    assert!(!should_diagnose(false, false, true, true, false, true));
+    assert!(should_diagnose(true, true, false, false, false, false));
+    assert!(should_diagnose(true, false, true, true, false, true));
+    assert!(!should_diagnose(true, false, true, false, false, true));
+    assert!(!should_diagnose(true, false, true, true, false, false));
   }
 }

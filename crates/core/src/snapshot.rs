@@ -29,6 +29,7 @@ pub const PULL_ATTEMPT_SECS: u64 = 30 * 60;
 pub struct Snapshot {
   pub world: World,
   pub core_server: Option<String>,
+  pub api_via: Option<String>,
   pub sso_login: BTreeMap<String, SsoLoginState>,
   pub log_values: Arc<Vec<String>>,
   pub agents: Vec<AgentRow>,
@@ -165,10 +166,7 @@ pub async fn load(db: &Db) -> Result<Snapshot, ApiError> {
   let snap = load_inner(db).await?;
   *SECRETS.write().unwrap_or_else(|e| e.into_inner()) =
     crate::secret_policy::non_system_secrets(&snap.secrets);
-  let api = db
-    .call(|c| crate::db::setting(c, crate::egress::API_VIA))
-    .await?;
-  crate::egress::apply_api_route(api.as_deref(), &snap);
+  crate::egress::apply_api_route(snap.api_via.as_deref(), &snap);
   crate::source_trust::refresh_core_proxies(
     &snap.world,
     &snap.net(&snap.world),
@@ -221,6 +219,7 @@ pub(crate) async fn load_inner(
         world,
         agents,
         core_server,
+        api_via: db::setting(c, crate::egress::API_VIA)?,
         accounts,
         app_account_defaults: crate::app_accounts::defaults(c)?,
         sso_login,
@@ -443,6 +442,36 @@ pub fn service_resolved(
   name: &str,
   secrets: &BTreeMap<String, String>,
 ) -> Result<(String, String), ApiError> {
+  resolve_service(world, net, name, secrets, false)
+}
+
+pub(crate) fn service_hash(
+  world: &World,
+  net: &Net,
+  name: &str,
+  secrets: &BTreeMap<String, String>,
+  observed: Option<&str>,
+) -> Result<String, ApiError> {
+  let (_, hash) = service_resolved(world, net, name, secrets)?;
+  if let Some(observed) = observed
+    && observed != hash
+    && net.private.values().any(|a| a.ip.contains(':'))
+    && resolve_service(world, net, name, secrets, true)
+      .is_ok_and(|(_, legacy)| legacy == observed)
+  {
+    // 旧指纹和现有内容完全一致时，保留已有部署。下次部署写入裸 IPv6。
+    return Ok(observed.into());
+  }
+  Ok(hash)
+}
+
+fn resolve_service(
+  world: &World,
+  net: &Net,
+  name: &str,
+  secrets: &BTreeMap<String, String>,
+  legacy: bool,
+) -> Result<(String, String), ApiError> {
   let row = world.services.get(name).ok_or_else(|| {
     ApiError::not_found(format!("服务 {name} 不存在"))
   })?;
@@ -459,9 +488,18 @@ pub fn service_resolved(
     net.heartbeat_url.as_deref(),
     true,
   )?;
-  let resolved = crate::refs::resolve(&resolved, name, world, net)?;
-  let resolved =
-    with_files(world, net, name, &resolved, mounts, Some(secrets))?;
+  let resolved = crate::refs::resolve_with_host_style(
+    &resolved, name, world, net, legacy,
+  )?;
+  let resolved = with_files(
+    world,
+    net,
+    name,
+    &resolved,
+    mounts,
+    Some(secrets),
+    legacy,
+  )?;
   crate::syntax_check::validate_rendered_compose(name, &resolved)?;
   let hash = match &row.spec.init_cmd {
     Some(command) => {
@@ -488,7 +526,7 @@ pub fn service_trial(
   let (trial, mounts) =
     render::trial_compose(name, &row.spec, Some(secrets))?;
   let trial = crate::refs::resolve(&trial, name, world, net)?;
-  with_files(world, net, name, &trial, mounts, Some(secrets))
+  with_files(world, net, name, &trial, mounts, Some(secrets), false)
 }
 
 pub(crate) fn render_config_file(
@@ -499,8 +537,24 @@ pub(crate) fn render_config_file(
   secrets: Option<&BTreeMap<String, String>>,
   mounts: &mut BTreeSet<String>,
 ) -> Result<String, ApiError> {
+  render_config_file_with_host_style(
+    world, net, name, file, secrets, mounts, false,
+  )
+}
+
+fn render_config_file_with_host_style(
+  world: &World,
+  net: &Net,
+  name: &str,
+  file: &wharf_api_types::spec::FileSpec,
+  secrets: Option<&BTreeMap<String, String>>,
+  mounts: &mut BTreeSet<String>,
+  legacy: bool,
+) -> Result<String, ApiError> {
   let content = render::file_content(&file.content, secrets, mounts)?;
-  crate::refs::resolve(&content, name, world, net)
+  crate::refs::resolve_with_host_style(
+    &content, name, world, net, legacy,
+  )
 }
 
 /// 加上服务的配置文件，内容里的密钥和 `[[@服务]]` 先替换好。
@@ -511,6 +565,7 @@ fn with_files(
   compose: &str,
   mounts: render::SecretMounts,
   secrets: Option<&BTreeMap<String, String>>,
+  legacy: bool,
 ) -> Result<String, ApiError> {
   let spec = &world.services[name].spec;
   let mut file_secrets = BTreeSet::new();
@@ -518,13 +573,14 @@ fn with_files(
     .files
     .iter()
     .map(|f| {
-      let content = render_config_file(
+      let content = render_config_file_with_host_style(
         world,
         net,
         name,
         f,
         secrets,
         &mut file_secrets,
+        legacy,
       )?;
       Ok((f.path.clone(), content))
     })
@@ -560,7 +616,7 @@ pub fn service_template(
     false,
   )?;
   let text = crate::refs::resolve(&text, name, world, net)?;
-  with_files(world, net, name, &text, mounts, None)
+  with_files(world, net, name, &text, mounts, None, false)
 }
 
 /// 网关的 compose、Caddyfile，以及它承载的站点。
@@ -1535,6 +1591,41 @@ mod tests {
     };
     assert_eq!(hash(&same), hash(&same));
     assert_ne!(hash(&same), hash(&moved));
+  }
+
+  #[test]
+  fn existing_ipv6_reference_keeps_its_deployed_hash() {
+    let mut world = world(21000);
+    world
+      .services
+      .get_mut("app")
+      .unwrap()
+      .spec
+      .env
+      .insert("APP_HOST".into(), "[[@app:host]]".into());
+    let mut net = Net::default();
+    net.private.insert(
+      "s1".into(),
+      wharf_api_types::spec::PrivateAddr {
+        ip: "2001:db8::1".into(),
+        network: wharf_api_types::spec::PrivateNetwork::Overlay,
+      },
+    );
+    let secrets = BTreeMap::new();
+    let (_, legacy) =
+      resolve_service(&world, &net, "app", &secrets, true).unwrap();
+    let (_, new) =
+      service_resolved(&world, &net, "app", &secrets).unwrap();
+    assert_ne!(legacy, new);
+    assert_eq!(
+      service_hash(&world, &net, "app", &secrets, Some(&legacy))
+        .unwrap(),
+      legacy
+    );
+    assert_eq!(
+      service_hash(&world, &net, "app", &secrets, None).unwrap(),
+      new
+    );
   }
 
   #[test]

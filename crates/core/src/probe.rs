@@ -9,8 +9,8 @@ use std::{
 };
 
 use wharf_api_types::view::{
-  CheckStatus, DoctorReport, Issue, IssueLevel, IssueSubject,
-  ProbeView,
+  CheckStatus, DoctorCheck, DoctorReport, Issue, IssueLevel,
+  IssueSubject, ProbeView, RouteDiagnosis,
 };
 
 use crate::state::AppState;
@@ -106,72 +106,193 @@ pub async fn observe(state: &AppState, report: &DoctorReport) {
     .collect();
   crate::rules::retain_subjects(state, "cert_expiring", &cert_hosts)
     .await;
-  for r in report
+  for route in report
     .routes
     .iter()
     .filter(|r| active.contains(&r.hostname))
   {
-    let Some(web) = r
-      .checks
-      .iter()
-      .find(|c| c.layer == "https" || c.layer == "http")
-    else {
-      continue;
-    };
-    if web.status == CheckStatus::Skip {
-      continue;
-    }
-    let ok = web.status != CheckStatus::Bad;
-    let host = r.hostname.clone();
-    let cert_days =
-      r.cert_expires.map(|t| (t - chrono::Utc::now()).num_days());
-    if let Some(days) =
-      cert_days.filter(|_| cert_hosts.contains(&host))
-    {
-      cert_notify(state, &host, days).await;
-    }
-    let prev = last(&host).map_or(0, |p| p.fails);
-    let fails = if ok { 0 } else { prev + 1 };
-    if let Ok(mut m) = LAST.lock() {
-      m.insert(
-        host.clone(),
-        ProbeView {
-          ok,
-          detail: web.detail.clone(),
-          ms: 0,
-          at: web.at.timestamp_millis(),
-          fails,
-          cert_days,
-        },
-      );
-    }
-    // 除了 HTTPS 这层，还有哪一层不通：多半就是原因。
-    let cause = r
-      .checks
-      .iter()
-      .find(|c| c.status == CheckStatus::Bad && c.layer != web.layer);
-    let detail = match cause {
-      Some(c) if !ok => {
-        format!(
-          "{}：{}；{}：{}",
-          r.url, web.detail, c.subject, c.detail
-        )
-      }
-      _ => format!("{}：{}", r.url, web.detail),
-    };
-    crate::rules::observe(
+    observe_one(
       state,
-      "probe.ok",
-      &host,
-      f64::from(u8::from(ok)),
-      &detail,
+      route,
+      true,
+      cert_hosts.contains(&route.hostname),
     )
     .await;
   }
+}
+
+pub async fn observe_routes(
+  state: &AppState,
+  routes: &[RouteDiagnosis],
+) {
+  for route in routes {
+    observe_one(state, route, false, true).await;
+  }
+}
+
+fn web_check(r: &RouteDiagnosis) -> Option<&DoctorCheck> {
+  r.checks
+    .iter()
+    .find(|c| c.layer == "https" || c.layer == "http")
+}
+
+async fn observe_one(
+  state: &AppState,
+  r: &RouteDiagnosis,
+  scheduled: bool,
+  cert_enabled: bool,
+) {
+  let Some(web) = web_check(r) else {
+    return;
+  };
+  let ok = web.status != CheckStatus::Bad;
+  let host = r.hostname.clone();
+  let cert_days =
+    r.cert_expires.map(|t| (t - chrono::Utc::now()).num_days());
+  if let Ok(mut m) = LAST.lock() {
+    if m
+      .get(&host)
+      .is_some_and(|p| p.at > web.at.timestamp_millis())
+    {
+      return;
+    }
+    if web.status == CheckStatus::Skip {
+      m.remove(&host);
+      return;
+    }
+    let fails = if ok {
+      0
+    } else {
+      let previous = m.get(&host).map_or(0, |p| p.fails);
+      previous.saturating_add(u32::from(scheduled))
+    };
+    m.insert(
+      host.clone(),
+      ProbeView {
+        ok,
+        detail: web.detail.clone(),
+        ms: 0,
+        at: web.at.timestamp_millis(),
+        fails,
+        cert_days,
+      },
+    );
+  }
+  if let Some(days) = cert_days.filter(|_| cert_enabled) {
+    cert_notify(state, &host, days).await;
+  }
+  // 手动体检可以确认恢复，只有后台轮次计入连续失败。
+  if !ok && !scheduled {
+    return;
+  }
+  // 除了 HTTPS 这层，还有哪一层不通：多半就是原因。
+  let cause = r
+    .checks
+    .iter()
+    .find(|c| c.status == CheckStatus::Bad && c.layer != web.layer);
+  let detail = match cause {
+    Some(c) if !ok => {
+      format!(
+        "{}：{}；{}：{}",
+        r.url, web.detail, c.subject, c.detail
+      )
+    }
+    _ => format!("{}：{}", r.url, web.detail),
+  };
+  crate::rules::observe(
+    state,
+    "probe.ok",
+    &host,
+    f64::from(u8::from(ok)),
+    &detail,
+  )
+  .await;
 }
 
 /// 证书剩余天数，规则见 [crate::rules]。
 async fn cert_notify(state: &AppState, host: &str, days: i64) {
   crate::rules::observe(state, "cert.days", host, days as f64, "")
     .await;
+}
+
+#[tokio::test]
+async fn observe_routes_clears_single_host_without_wiping_others() {
+  let _guard = crate::rules::tests::TEST_LOCK.lock().await;
+  crate::rules::tests::reset_memory();
+  let state = crate::rules::tests::test_state();
+  let a = "p203-a.example.test";
+  let b = "p203-b.example.test";
+  {
+    let mut last = LAST.lock().unwrap();
+    for host in [a, b] {
+      last.insert(
+        host.into(),
+        ProbeView {
+          ok: false,
+          detail: String::new(),
+          ms: 0,
+          at: 0,
+          fails: 3,
+          cert_days: None,
+        },
+      );
+    }
+  }
+  observe_routes(
+    &state,
+    &[RouteDiagnosis {
+      hostname: a.into(),
+      url: format!("https://{a}"),
+      checks: vec![crate::doctor::check(
+        "https",
+        a,
+        CheckStatus::Ok,
+        "HTTP 200",
+      )],
+      cert_expires: None,
+      domain_expires: None,
+      edge_app: None,
+    }],
+  )
+  .await;
+  assert_eq!(last(a).unwrap().fails, 0);
+  assert_eq!(last(b).unwrap().fails, 3);
+  LAST
+    .lock()
+    .unwrap()
+    .retain(|host, _| host != a && host != b);
+}
+
+#[tokio::test]
+async fn manual_failures_do_not_count_as_scheduled_failures() {
+  let _guard = crate::rules::tests::TEST_LOCK.lock().await;
+  crate::rules::tests::reset_memory();
+  let state = crate::rules::tests::test_state();
+  let host = "p203-debounce.example.test";
+  let mut route = RouteDiagnosis {
+    hostname: host.into(),
+    url: format!("https://{host}"),
+    checks: vec![crate::doctor::check(
+      "https",
+      host,
+      CheckStatus::Bad,
+      "HTTP 502",
+    )],
+    cert_expires: None,
+    domain_expires: None,
+    edge_app: None,
+  };
+  observe_one(&state, &route, true, true).await;
+  for _ in 0..3 {
+    observe_routes(&state, std::slice::from_ref(&route)).await;
+  }
+  assert_eq!(last(host).unwrap().fails, 1);
+  assert!(crate::rules::firing_since("domain_down", host).is_none());
+  observe_one(&state, &route, true, true).await;
+  observe_one(&state, &route, true, true).await;
+  assert_eq!(last(host).unwrap().fails, 3);
+  assert!(crate::rules::firing_since("domain_down", host).is_some());
+  route.checks[0].status = CheckStatus::Skip;
+  observe_routes(&state, &[route]).await;
+  assert!(last(host).is_none());
 }

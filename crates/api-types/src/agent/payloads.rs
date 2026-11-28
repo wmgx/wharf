@@ -1115,6 +1115,14 @@ pub struct LinkApply {
   pub image: String,
 }
 
+#[test]
+fn foreign_running_container_does_not_make_project_running() {
+  let project: ProjectState = serde_json::from_value(serde_json::json!({
+    "project":"app","containers":[{"service":"app","name":"app-1","state":"running","foreign":true}]
+  })).unwrap();
+  assert!(!project.all_running());
+}
+
 /// 查询 /srv 下数据路径的 Docker bind 挂载者。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BindMountQuery {

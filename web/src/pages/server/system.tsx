@@ -9,7 +9,6 @@ import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import type { HostInfo, ServerView } from "@/types";
 import { ServerBaseline } from "./baseline";
-import { ServerDisk } from "./disk";
 import { size } from "./format";
 
 const DOCKER_KIND: Record<string, string> = {
@@ -127,7 +126,6 @@ export function SystemDisk({ info, server }: { info: HostInfo; server: ServerVie
           </TableBody>
         </Table>
       </Panel>
-      <div className="mt-3"><ServerDisk server={server.name} online={server.online} /></div>
   </>;
 }
 

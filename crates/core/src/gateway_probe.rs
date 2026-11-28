@@ -10,6 +10,7 @@ use wharf_api_types::{
     AgentOp, GatewayProbeJob, GatewayProbeResult, OneTimeSecret,
     ProbeTarget, ProjectState,
   },
+  gateway_http::{inspect, tls_failed},
   spec::{GatewayKind, GatewayTls, RouteSpec},
 };
 
@@ -34,7 +35,8 @@ fn entry(
 
 fn has_gate(route: &RouteSpec) -> bool {
   !route.cf_origin_only
-    && route.sso.as_ref().is_some_and(|sso| !sso.public)
+    && route.redirect.is_none()
+    && route.sso.as_ref().is_some_and(|sso| sso.gated())
 }
 
 pub(crate) async fn check_entry(
@@ -74,9 +76,12 @@ pub(crate) async fn check_entry(
     && state.hub.supports_gateway_probe(&gw.server)
   {
     let gate_cookie = if has_gate(route) {
-      match crate::gate::probe_cookie(&state.db, host).await {
-        Ok(cookie) => Some(OneTimeSecret(cookie)),
-        Err(_) => {
+      match crate::gate::probe_cookie(&state.db, host)
+        .await
+        .and_then(|cookie| cookie.to_str().ok().map(str::to_owned))
+      {
+        Some(cookie) => Some(OneTimeSecret(cookie)),
+        None => {
           return entry(
             false,
             "gateway_auth_rejected",
@@ -251,14 +256,21 @@ async fn verify(
   if has_gate(route) && !tls && !ip.is_loopback() {
     return Err(conflict(host, gateway, "门禁直连预验需要 HTTPS"));
   }
-  let gate_cookie =
-    if has_gate(route) {
-      Some(crate::gate::probe_cookie(&state.db, host).await.map_err(
-        |_| conflict(host, gateway, "无法签发门禁探测凭证"),
-      )?)
-    } else {
-      None
-    };
+  let gated = has_gate(route);
+  // 内部自签证书的后端已由网关本机验证，此处只验证直连路径。
+  let send_cookie =
+    gated && (ip.is_loopback() || gw.tls == GatewayTls::Auto);
+  let gate_cookie = if send_cookie {
+    Some(
+      crate::gate::probe_cookie(&state.db, host)
+        .await
+        .ok_or_else(|| {
+          conflict(host, gateway, "无法签发门禁探测凭证")
+        })?,
+    )
+  } else {
+    None
+  };
   let http_port = gw.http_port.unwrap_or(80);
   let port = if tls {
     gw.https_port.unwrap_or(443)
@@ -271,7 +283,9 @@ async fn verify(
       .redirect(reqwest::redirect::Policy::none())
       .user_agent("wharf-verify")
       .retry(reqwest::retry::never())
-      .tls_danger_accept_invalid_certs(true)
+      .tls_danger_accept_invalid_certs(
+        !send_cookie || ip.is_loopback(),
+      )
       .timeout(Duration::from_secs(8))
       .resolve(host, SocketAddr::new(ip, port))
       .build()
@@ -297,7 +311,8 @@ async fn verify(
         let mut request =
           direct.get(url(tls, port)).header("Host", host);
         if let Some(cookie) = &gate_cookie {
-          request = request.header(reqwest::header::COOKIE, cookie);
+          request =
+            request.header(reqwest::header::COOKIE, cookie.clone());
         }
         let (response, pending) = match request.send().await {
           Err(error)
@@ -315,30 +330,14 @@ async fn verify(
           }
           response => (response, false),
         };
-        let mut response = match response {
+        let response = match response {
           Ok(response) => response,
           Err(error) => return Ok(Err(network_error(&error))),
         };
-        let code = response.status().as_u16();
-        if !pending && gate_cookie.is_some() {
-          let login_redirect = (300..400).contains(&code)
-            && response
-              .headers()
-              .get(reqwest::header::LOCATION)
-              .and_then(|v| v.to_str().ok())
-              .is_some_and(|location| {
-                location.contains("/gate/login")
-                  || location.starts_with("/_wharf/login")
-              });
-          if login_redirect
-            || code == 401
-              && match gate_login_body(&mut response).await {
-                Ok(rejected) => rejected,
-                Err(error) => return Ok(Err(network_error(&error))),
-              }
-          {
-            return Ok(Err("Wharf 门禁未放行探测请求".into()));
-          }
+        let (code, rejected, _) =
+          inspect(response, !pending && send_cookie, false).await;
+        if !pending && send_cookie && rejected {
+          return Ok(Err("Wharf 门禁未放行探测请求".into()));
         }
         Ok::<_, ApiError>(Ok((code, pending)))
       })
@@ -346,9 +345,11 @@ async fn verify(
     match outcome.unwrap_or_else(|_| Ok(Err("请求超时".into())))?
     {
       Ok((code, cert_pending))
-        if code < 500
-          && (!cert_pending || matches!(code, 301 | 308)) =>
+        if !code.is_server_error()
+          && (!cert_pending
+            || matches!(code.as_u16(), 301 | 308)) =>
       {
+        let code = code.as_u16();
         let mut result = entry(
           true,
           "direct",
@@ -359,8 +360,10 @@ async fn verify(
         return Ok(result);
       }
       Ok((code, _)) => {
-        detail =
-          format!("直连 {ip}:{attempted_port} 返回 HTTP {code}");
+        detail = format!(
+          "直连 {ip}:{attempted_port} 返回 HTTP {}",
+          code.as_u16()
+        );
       }
       Err(error) => {
         detail = format!(
@@ -395,34 +398,6 @@ fn network_error(error: &reqwest::Error) -> String {
   detail
 }
 
-async fn gate_login_body(
-  response: &mut reqwest::Response,
-) -> Result<bool, reqwest::Error> {
-  let mut remaining = "需要登录\n".as_bytes();
-  while let Some(chunk) = response.chunk().await? {
-    let Some(rest) = remaining.strip_prefix(chunk.as_ref()) else {
-      return Ok(false);
-    };
-    remaining = rest;
-  }
-  Ok(remaining.is_empty())
-}
-
-fn tls_failed(e: &reqwest::Error) -> bool {
-  let mut cause = std::error::Error::source(e);
-  while let Some(error) = cause {
-    let text = error.to_string().to_ascii_lowercase();
-    if ["tls", "handshake", "certificate", "ssl", "eof"]
-      .iter()
-      .any(|s| text.contains(s))
-    {
-      return true;
-    }
-    cause = error.source();
-  }
-  false
-}
-
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -431,6 +406,11 @@ mod tests {
   async fn dns_preverify_probes_local_and_direct_with_gate_credentials()
    {
     let state = crate::rules::tests::test_state();
+    state
+      .db
+      .call(|c| crate::gate::rotate_seed(c, "gate.key"))
+      .await
+      .unwrap();
     let mut snap = Snapshot::default();
     let gw: wharf_api_types::spec::GatewaySpec =
       serde_json::from_str(r#"{"kind":"caddy","server":"s1"}"#)
