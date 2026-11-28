@@ -684,6 +684,20 @@ export interface CleanupSkippedServer {
   server: string;
 }
 
+export interface ComponentMetrics {
+  cpu: number;
+  mem: number;
+}
+
+export interface ComponentUsage {
+  cpu_limit_milli: number | null;
+  cpu_peak: number | null;
+  memory_limit: number | null;
+  memory_peak: number | null;
+  name: string;
+  pids_limit: number | null;
+}
+
 export interface ContainerInfo {
   container_id?: string | null;
   exit_code?: number | null;
@@ -1622,6 +1636,8 @@ export interface ImageInfo {
   image: string;
 }
 
+export type ImagePullMode = "if_missing" | "never" | "always";
+
 export interface ImageRow {
   id: string;
   image: string;
@@ -1645,7 +1661,7 @@ export interface ImagesView {
 /**
  * 计划项会造成的影响，一项可以有多个。
  */
-export type Impact = "restart" | "downtime" | "remove" | "data_loss" | "overwrite" | "public";
+export type Impact = "privilege" | "restart" | "downtime" | "remove" | "data_loss" | "overwrite" | "public";
 
 /**
  * 导入预览：用 `upsert_service` 提交即可。
@@ -1772,6 +1788,7 @@ export interface Limits {
    * 内存上限，单位 MB。
    */
   memory_mb?: number | null;
+  pids?: number | null;
 }
 
 /**
@@ -1828,6 +1845,11 @@ export interface LogHit {
   count: number;
   id: string;
   lines: string[];
+}
+
+export interface LogMax {
+  max_bytes: number;
+  max_files: number;
 }
 
 export interface LoginScript {
@@ -2405,6 +2427,8 @@ export interface ProbeView {
 }
 
 export interface ProjectMetrics {
+  components?: Record<string, ComponentMetrics>;
+  containers?: number | null;
   /**
    * 占整机 CPU 的百分比，0 到 100。
    */
@@ -2906,6 +2930,7 @@ export interface ServerSettings {
    * 服务器续费日（`YYYY-MM-DD`，北京时间）。只用来提醒，不影响任何部署。
    */
   renew_at?: string | null;
+  task_limits?: Limits | null;
   /**
    * 每月流量额度（GB），用于显示本期用了多少，用到 80% 时提醒（阈值在告警规则里改）。
    */
@@ -3101,10 +3126,13 @@ export interface ServiceSpec {
    * 每天自动备份 `/srv/<服务>/` 到另一台服务器（restic）。
    */
   backup?: BackupSpec | null;
+  cap_add?: string[];
+  command?: string[] | null;
   /**
    * compose 来源：环境变量、资源上限和配置文件加在哪个容器上。只有一个容器时不用填。
    */
   container?: string | null;
+  container_limits?: Record<string, Limits>;
   crash_guard?: boolean;
   /**
    * 环境变量。值里可以用 `[[SECRET_NAME]]` 引用密钥；compose 来源加到 `container` 指定的容器上，
@@ -3118,7 +3146,10 @@ export interface ServiceSpec {
    * 应用自己改写的内容下次部署会被覆盖。
    */
   files?: FileSpec[];
+  group_add?: string[];
   heartbeat?: HeartbeatSpec | null;
+  hostname?: string | null;
+  init?: boolean | null;
   /**
    * 部署前在临时容器内执行的初始化命令。
    */
@@ -3132,16 +3163,19 @@ export interface ServiceSpec {
    */
   limits?: Limits | null;
   log_alerts?: LogAlertSpec[];
+  log_max?: LogMax | null;
   /**
    * 自定义监控：服务所在机器的 agent 每分钟从本机请求一次，连续 3 次不正常推送。
    */
   monitor?: MonitorSpec | null;
   port_checks?: Record<string, PortCheckSpec>;
   ports?: PortSpec[];
+  pull_policy?: ImagePullMode | null;
   /**
    * 运行在哪台服务器上。
    */
   server: string;
+  shm_size?: number | null;
   source: Source;
   /**
    * 启动等待上限（秒），缺省 120。
@@ -3160,6 +3194,9 @@ export interface ServiceSpec {
    */
   stopped?: boolean;
   tags?: string[];
+  timezone?: string | null;
+  tmpfs?: Record<string, number>;
+  ulimits?: Record<string, Ulimit>;
   /**
    * 镜像和构建版本的更新忽略规则。
    */
@@ -3531,6 +3568,8 @@ export type TaskSpec = ({
    */
   catch_up_mins?: number | null;
   enabled: boolean;
+  inherit_server_limits?: boolean;
+  limits?: Limits | null;
   /**
    * 失败和恢复时发通知。
    */
@@ -3660,6 +3699,11 @@ export interface TrustedProxiesSpec {
   cluster?: boolean;
 }
 
+export interface Ulimit {
+  hard: number;
+  soft: number;
+}
+
 /**
  * `GET /api/servers/{name}/unmanaged`：服务器上还没纳管的一组容器，
  * 是一个 compose 项目或一个 `docker run` 起的容器。
@@ -3703,6 +3747,7 @@ export type Upstream = "docker_hub" | "git_hub" | "cloudflare";
 export type UsageKind = "service" | "gateway" | "agent";
 
 export interface UsageRow {
+  components?: ComponentUsage[];
   cpu: number | null;
   kind: UsageKind;
   mem: number | null;

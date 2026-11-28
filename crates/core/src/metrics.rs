@@ -13,7 +13,7 @@ use axum::{
   Json,
   extract::{Query, State},
 };
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use wharf_api_types::{ApiError, agent::Metrics, view::Perm};
 
@@ -174,6 +174,14 @@ pub async fn record_report_at(
             )],
           )?;
         }
+        if let Some(count) = v.containers {
+          insert(
+            &tx,
+            at,
+            &[("svc.containers.max", p, f64::from(count))],
+          )?;
+        }
+        record_components(&tx, p, s, at, &v.components)?;
         insert(
           &tx,
           at,
@@ -191,6 +199,91 @@ pub async fn record_report_at(
   if let Err(e) = result {
     tracing::warn!("记录 {server} 的资源采样失败：{e}");
   }
+}
+
+pub(crate) fn component_subject(
+  instance: &str,
+  server: &str,
+  component: &str,
+) -> String {
+  serde_json::json!([instance, server, component]).to_string()
+}
+
+fn record_components(
+  c: &Connection,
+  service: &str,
+  server: &str,
+  at: i64,
+  components: &BTreeMap<
+    String,
+    wharf_api_types::agent::ComponentMetrics,
+  >,
+) -> Result<(), ApiError> {
+  if components.is_empty() {
+    return Ok(());
+  }
+  let record: Option<(String, String)> = c.query_row(
+    "SELECT d.instance_id, d.spec FROM resources r JOIN deployments d
+       ON d.service = r.name AND d.instance_id = json_extract(r.meta, '$.instance_id')
+     WHERE r.kind = 'service' AND r.name = ?1
+       AND d.id = (SELECT latest.id FROM deployments latest
+                   WHERE latest.service = r.name AND latest.instance_id = d.instance_id
+                     AND latest.created_at <= ?3
+                   ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1)
+       AND d.server = ?2 AND d.spec IS NOT NULL",
+    params![service, server, at],
+    |row| Ok((row.get(0)?, row.get(1)?)),
+  ).optional().map_err(sql_err)?;
+  let Some((instance, spec)) = record else {
+    return Ok(());
+  };
+  let Ok(spec) =
+    serde_json::from_str::<wharf_api_types::spec::ServiceSpec>(&spec)
+  else {
+    return Ok(());
+  };
+  let wharf_api_types::spec::Source::Compose {
+    content: Some(content),
+    ..
+  } = &spec.source
+  else {
+    return Ok(());
+  };
+  let Ok(compose) = crate::render::parse_compose(content) else {
+    return Ok(());
+  };
+  for (name, value) in components {
+    if !compose["services"]
+      .as_mapping()
+      .is_some_and(|services| services.contains_key(name.as_str()))
+    {
+      continue;
+    }
+    let subject = component_subject(&instance, server, name);
+    insert(
+      c,
+      at,
+      &[
+        ("svc.component.cpu.max", &subject, f64::from(value.cpu)),
+        ("svc.component.mem.max", &subject, value.mem as f64),
+      ],
+    )?;
+  }
+  Ok(())
+}
+
+pub(crate) fn component_peaks(
+  c: &Connection,
+  subject: &str,
+) -> Result<(Option<f64>, Option<u64>), ApiError> {
+  c.query_row("SELECT MAX(CASE WHEN name = 'svc.component.cpu.max' THEN value END),
+           MAX(CASE WHEN name = 'svc.component.mem.max' THEN value END)
+       FROM points WHERE subject = ?1 AND at >= ?2
+         AND name IN ('svc.component.cpu.max', 'svc.component.mem.max')",
+    params![subject, now_ms() - 7 * DAY_MS], |r| {
+      Ok((r.get(0)?, r.get::<_, Option<f64>>(1)?.map(|value| value as u64)))
+    },
+  ).map_err(sql_err)
 }
 
 /// 记一个事件点，失败只记日志。
@@ -228,6 +321,9 @@ pub async fn step_done(
   ok: bool,
 ) {
   let (kind, subject) = match step {
+    Step::ServiceLimitsUpdate { job, .. } => {
+      ("deploy", job.project.as_str())
+    }
     Step::ServiceUp { service, .. } | Step::Rebuild { service } => {
       ("deploy", service.as_str())
     }
@@ -474,6 +570,83 @@ pub(crate) fn read(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn component_peaks_preserve_maxima_and_instance_identity() {
+    let db = crate::db::Db::memory();
+    let peaks = db
+      .call(|c| {
+        let now = now_ms();
+        let old = (now - 2 * DAY_MS) / COARSE_MS * COARSE_MS;
+        let subject = component_subject("svc_fixture", "s1", "db");
+        insert(
+          c,
+          old + 1,
+          &[
+            ("svc.component.cpu.max", &subject, 25.0),
+            ("svc.component.mem.max", &subject, 512.0),
+          ],
+        )?;
+        insert(
+          c,
+          old + 2,
+          &[
+            ("svc.component.cpu.max", &subject, 75.0),
+            ("svc.component.mem.max", &subject, 256.0),
+          ],
+        )?;
+        insert(
+          c,
+          now,
+          &[(
+            "svc.component.mem.max",
+            &component_subject("svc_other", "s1", "db"),
+            1024.0,
+          )],
+        )?;
+        compact_at(c, now)?;
+        Ok((
+          component_peaks(c, &subject)?,
+          component_peaks(
+            c,
+            &component_subject("svc_fixture", "s2", "db"),
+          )?,
+        ))
+      })
+      .await
+      .unwrap();
+    assert_eq!(peaks, ((Some(75.0), Some(512)), (None, None)));
+  }
+
+  #[tokio::test]
+  async fn late_component_sample_matches_deployment_at_sample_time() {
+    use wharf_api_types::agent::ComponentMetrics;
+    let db = crate::db::Db::memory();
+    db.call(|c| {
+      c.execute_batch(
+        r#"INSERT INTO resources (kind,name,spec,meta,version,created_at,updated_at)
+         VALUES ('service','app','{}','{"instance_id":"svc_fixture"}',1,0,0);"#,
+      ).map_err(sql_err)?;
+      let now = now_ms();
+      let spec = |server: &str| serde_json::json!({
+        "server":server, "source":{"compose":{"content":"services: {db: {image: db}}"}}
+      }).to_string();
+      for (server, time) in [("s1", now - 3000), ("s1", now - 2000), ("s2", now - 1000)] {
+        c.execute(
+          "INSERT INTO deployments (service,server,run_id,hash,compose,images,created_at,spec,instance_id)
+           VALUES ('app',?1,'run','hash','','[]',?2,?3,'svc_fixture')",
+          params![server, time, spec(server)],
+        ).map_err(sql_err)?;
+      }
+      let sample = BTreeMap::from([("db".into(), ComponentMetrics { cpu: 75.0, mem: 512 })]);
+      record_components(c, "app", "s1", now - 2500, &sample)?;
+      assert_eq!(component_peaks(c, &component_subject("svc_fixture", "s1", "db"))?, (Some(75.0), Some(512)));
+      let obsolete = BTreeMap::from([("db".into(), ComponentMetrics { cpu: 100.0, mem: 1024 })]);
+      record_components(c, "app", "s1", now, &obsolete)?;
+      assert_eq!(component_peaks(c, &component_subject("svc_fixture", "s1", "db"))?, (Some(75.0), Some(512)));
+      Ok(())
+    }).await.unwrap();
+  }
 
   #[tokio::test]
   async fn compact_averages_old_points() {

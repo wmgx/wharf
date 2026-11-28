@@ -77,12 +77,15 @@ impl Ops {
     service: &str,
   ) -> Result<tokio::sync::OwnedMutexGuard<()>, ApiError> {
     check_project(service)?;
-    self.lock_for(service).try_lock_owned().map_err(|_| {
-      ApiError::new(
-        ErrorCode::Busy,
-        format!("服务 {service} 正在执行其他操作"),
-      )
-    })
+    let guard =
+      self.lock_for(service).try_lock_owned().map_err(|_| {
+        ApiError::new(
+          ErrorCode::Busy,
+          format!("服务 {service} 正在执行其他操作"),
+        )
+      })?;
+    crate::live_limits::require_clear(&self.docker, service)?;
+    Ok(guard)
   }
 
   pub(crate) async fn lock_data(
@@ -134,6 +137,15 @@ impl Ops {
       AgentOp::ResolveCommit(job) => to_value(
         crate::build::resolve_commit(&self.docker, &job, ctx).await?,
       ),
+      AgentOp::ReadHostGroups { groups } => {
+        to_value(read_host_groups(&groups).await?)
+      }
+      AgentOp::InspectLocalImages { images } => {
+        if images.iter().any(|image| image.starts_with('-')) {
+          return Err(ApiError::invalid("镜像引用不合法"));
+        }
+        to_value(self.docker.image_info(&images, ctx).await)
+      }
       AgentOp::ResolveImages(job) => {
         to_value(crate::registry::resolve(&job, ctx).await?)
       }
@@ -182,6 +194,18 @@ impl Ops {
         };
         to_value(self.link_apply(&apply, ctx).await?)
       }
+      AgentOp::ProjectCheckLimits(job) => {
+        check_project(&job.project)?;
+        let _guard = self.lock_data(&job.project, ctx).await?;
+        crate::live_limits::check(&self.docker, &job, ctx).await?;
+        Ok(Value::Null)
+      }
+      AgentOp::ProjectUpdateLimits(job) => {
+        check_project(&job.project)?;
+        let _guard = self.lock_data(&job.project, ctx).await?;
+        crate::live_limits::update(&self.docker, &job, ctx).await?;
+        Ok(Value::Null)
+      }
       AgentOp::ProjectUp(up) => {
         check_project(&up.project)?;
         let lock = self.lock_for(&up.project);
@@ -192,6 +216,7 @@ impl Ops {
         check_project(&project)?;
         let lock = self.lock_for(&project);
         let _guard = lock.lock().await;
+        crate::live_limits::require_clear(&self.docker, &project)?;
         if !purge {
           crate::prev_logs::capture(
             &self.docker,
@@ -287,6 +312,7 @@ impl Ops {
         check_project(&project)?;
         let lock = self.lock_for(&project);
         let _guard = lock.lock().await;
+        crate::live_limits::require_clear(&self.docker, &project)?;
         to_value(
           self
             .docker
@@ -843,6 +869,7 @@ impl Ops {
     check_project(project)?;
     let lock = self.lock_for(project);
     let _guard = lock.lock().await;
+    crate::live_limits::require_clear(&self.docker, project)?;
     to_value(self.docker.stop_start(project, start, ctx).await?)
   }
 
@@ -887,6 +914,73 @@ impl Ops {
         continue;
       }
       self.docker.pull(image, &up.pull, ctx, warnings).await?;
+    }
+    Ok(images)
+  }
+
+  async fn verify_local_images(
+    &self,
+    up: &ProjectUp,
+    ctx: &Ctx,
+  ) -> Result<(), ApiError> {
+    if up.local_images.keys().any(|image| image.starts_with('-')) {
+      return Err(ApiError::invalid("镜像引用不合法"));
+    }
+    let refs = up.local_images.keys().cloned().collect::<Vec<_>>();
+    for info in self.docker.image_info(&refs, ctx).await {
+      if up.local_images.get(&info.image) != Some(&info.id) {
+        return Err(
+          ApiError::new(
+            ErrorCode::PlanStale,
+            format!("镜像 {} 自 plan 后已变化", info.image),
+          )
+          .suggest("wharf plan"),
+        );
+      }
+    }
+    Ok(())
+  }
+
+  async fn pull_explicit(
+    &self,
+    up: &ProjectUp,
+    mode: wharf_api_types::spec::ImagePullMode,
+    ctx: &Ctx,
+    warnings: &mut Vec<String>,
+  ) -> Result<Vec<String>, ApiError> {
+    use wharf_api_types::spec::ImagePullMode;
+    let doc = wharf_api_types::compose::parse_compose(&up.compose)?;
+    let images =
+      wharf_api_types::compose::static_project_images(&doc)?;
+    self.verify_local_images(up, ctx).await?;
+    for image in &images {
+      if up.local_images.contains_key(image) {
+        continue;
+      }
+      let digest = up
+        .pins
+        .get(image)
+        .filter(|_| mode != ImagePullMode::Never)
+        .ok_or_else(|| {
+          ApiError::new(
+            ErrorCode::PlanStale,
+            format!("镜像 {image} 缺少计划版本"),
+          )
+          .suggest("wharf plan")
+        })?;
+      if mode == ImagePullMode::IfMissing
+        && self.docker.has_digest(image, digest, ctx).await
+      {
+        continue;
+      }
+      if image.contains('@') {
+        self.docker.pull(image, &up.pull, ctx, warnings).await?;
+      } else {
+        self
+          .docker
+          .pull_pinned(image, digest, &up.pull, ctx)
+          .await?;
+      }
     }
     Ok(images)
   }
@@ -1052,6 +1146,11 @@ impl Ops {
     up: &ProjectUp,
     ctx: &Ctx,
   ) -> Result<ProjectUpResult, ApiError> {
+    crate::live_limits::require_clear(&self.docker, &up.project)?;
+    let mut warnings = Vec::new();
+    if up.image_pull_mode.is_some() {
+      self.verify_local_images(up, ctx).await?;
+    }
     if up.trial.is_some()
       && let Err(e) = self
         .docker
@@ -1063,7 +1162,6 @@ impl Ops {
     {
       ctx.say(format!("清理上次试跑失败：{}", e.message));
     }
-    let mut warnings = Vec::new();
     let mut previous = if up.rollback {
       self
         .previous_for_rollback(&up.project, ctx, &mut warnings)
@@ -1099,7 +1197,12 @@ impl Ops {
       BTreeMap::new()
     };
     let prepared = async {
-      let images = self.pull_all(up, ctx, &mut warnings).await?;
+      let images = match up.image_pull_mode {
+        Some(mode) => {
+          self.pull_explicit(up, mode, ctx, &mut warnings).await?
+        }
+        None => self.pull_all(up, ctx, &mut warnings).await?,
+      };
       if up.trial.is_some() {
         self.trial_run(up, &mut warnings, ctx).await?;
       }
@@ -1378,6 +1481,46 @@ fn recovery_error(
   .with_hint("请检查容器和镜像，手动恢复上一版")
 }
 
+async fn read_host_groups(
+  groups: &[String],
+) -> Result<BTreeMap<String, u32>, ApiError> {
+  if groups.iter().any(|group| {
+    !wharf_api_types::spec::HOST_GROUPS.contains(&group.as_str())
+  }) {
+    return Err(ApiError::invalid("请求了不支持的宿主机组"));
+  }
+  if Path::new("/.dockerenv").exists()
+    || Path::new("/run/.containerenv").exists()
+  {
+    return Err(
+      ApiError::new(
+        ErrorCode::Conflict,
+        "容器化 agent 没有宿主机组的只读通道",
+      )
+      .with_hint("指定数值 GID，或使用直接运行在宿主机上的 agent"),
+    );
+  }
+  let contents =
+    tokio::fs::read_to_string("/etc/group").await.map_err(|_| {
+      ApiError::new(ErrorCode::Conflict, "agent 无法读取宿主机组")
+        .with_hint("升级 agent 或确认已挂载宿主机组数据库")
+    })?;
+  Ok(
+    contents
+      .lines()
+      .filter_map(|line| {
+        let mut fields = line.split(':');
+        let name = fields.next()?;
+        if !groups.iter().any(|group| group == name) {
+          return None;
+        }
+        let gid = fields.nth(1)?.parse::<u32>().ok()?;
+        Some((name.into(), gid))
+      })
+      .collect(),
+  )
+}
+
 fn to_value<T: serde::Serialize>(v: T) -> Result<Value, ApiError> {
   serde_json::to_value(v)
     .map_err(|e| ApiError::internal(e.to_string()))
@@ -1631,6 +1774,50 @@ esac
       let current = docker.previous("app").unwrap();
       assert_eq!((&*current.compose, &*current.hash), ("NEW", "new"));
     }
+  }
+
+  #[tokio::test]
+  async fn never_uses_only_the_planned_local_image() {
+    let (dir, docker) = crate::docker::fake_docker(
+      r#"
+case "$1:$2" in
+  image:inspect) echo 'fixture-id|[]';;
+  *) exit 2;;
+esac
+"#,
+    );
+    let ops = Ops::new(
+      docker.clone(),
+      Reporter::new(docker.clone(), None),
+      String::new(),
+      HostShell::prepare(docker.clone(), "s1".into()).await,
+      dir.path().into(),
+    );
+    let mut up: ProjectUp = serde_json::from_value(serde_json::json!({
+      "project":"app", "compose":"services: {app: {image: fixture:1}}", "hash":"new",
+      "image_pull_mode":"never", "local_images":{"fixture:1":"fixture-id"},
+      "pull":{"mirrors":{},"mirrors_only":false,"attempt_timeout_secs":1}
+    })).unwrap();
+    let ctx = Ctx::detached();
+    let mode = wharf_api_types::spec::ImagePullMode::Never;
+    assert_eq!(
+      ops
+        .pull_explicit(&up, mode, &ctx, &mut Vec::new())
+        .await
+        .unwrap(),
+      ["fixture:1"]
+    );
+    up.local_images
+      .insert("fixture:1".into(), "previous-id".into());
+    assert_eq!(
+      ops
+        .pull_explicit(&up, mode, &ctx, &mut Vec::new())
+        .await
+        .unwrap_err()
+        .code,
+      ErrorCode::PlanStale
+    );
+    assert!(!docker.project_dir("app").exists());
   }
 
   #[tokio::test]

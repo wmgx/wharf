@@ -65,6 +65,9 @@ pub(crate) async fn plan(
   let _guard = cancel.clone().drop_guard();
   check_storage(state, &snap, &source, &target, &cancel).await?;
   let conn = state.hub.service_copy_conn_id(&row.spec.server)?;
+  if row.spec.uses_runtime_options() {
+    state.hub.runtime_options_conn_id(&row.spec.server)?;
+  }
   require_stopped(
     state,
     (&row.spec.server, conn),
@@ -383,16 +386,21 @@ fn inspect_db(
     db::scoped_secret_name(crate::backup::KEY_PREFIX, to)?;
   let blocked: bool = c.query_row(
     "SELECT
+      EXISTS(SELECT 1 FROM settings WHERE
+        substr(key, 1, length('backup_move.arrived.' || ?1 || '@')) = 'backup_move.arrived.' || ?1 || '@' OR
+        substr(key, 1, length('backup_move.arrived.' || ?2 || '@')) = 'backup_move.arrived.' || ?2 || '@') OR
       EXISTS(SELECT 1 FROM backups WHERE service IN (?1,?2)) OR
       EXISTS(SELECT 1 FROM cleanups WHERE service IN (?1,?2)) OR
       EXISTS(SELECT 1 FROM api_tokens, json_each(api_tokens.services) WHERE json_each.value IN (?1,?2)) OR
+      EXISTS(SELECT 1 FROM alert_service_overrides WHERE service=?2) OR
+      EXISTS(SELECT 1 FROM alert_custom_rules WHERE service=?2) OR
       EXISTS(SELECT 1 FROM secret_allowed_services WHERE service=?2) OR
       EXISTS(SELECT 1 FROM secrets WHERE name IN (?3,?4))",
     rusqlite::params![from,to,key,target_key], |row| row.get(0),
   ).map_err(db::sql_err)?;
   if blocked {
     return Err(reject(
-      "存在备份记录、待清理数据、服务令牌或预绑定密钥",
+      "存在备份记录、待清理数据、服务令牌或目标已绑定告警或密钥",
     ));
   }
   for (_, task, _) in crate::tasks::load_rows(c)? {
@@ -525,6 +533,9 @@ pub(crate) async fn execute(
     .is_some_and(|r| r.instance_id == job.instance)
     && !snap.world.services.contains_key(&job.source)
   {
+    if !snap.pending.clones.contains(&job.source) {
+      return Ok(());
+    }
     return retire(state, server, job, &progress, cancel)
       .await
       .map_err(|error| {
@@ -640,11 +651,23 @@ pub(crate) async fn execute(
       )
       .await?;
     }
+    let images = if row.spec.pull_policy.is_some() {
+      crate::pins::select_explicit_images(
+        state, snap, row, server.1, cancel,
+      )
+      .await?
+    } else {
+      Default::default()
+    };
+    let mut pins = row.pins.clone();
+    pins.extend(images.pins);
     let result: ProjectUpResult = state
       .hub
       .call_bound(
         server,
         AgentOp::ProjectUp(ProjectUp {
+          image_pull_mode: row.spec.pull_policy,
+          local_images: images.local,
           project: job.target.clone(),
           compose,
           hash: hash.clone(),
@@ -652,7 +675,7 @@ pub(crate) async fn execute(
           pull_missing_only: false,
           retire: None,
           rollback: false,
-          pins: row.pins.clone(),
+          pins,
           expected_images: snap.applied[&job.source]
             .image_ids
             .clone(),
@@ -686,6 +709,7 @@ pub(crate) async fn execute(
       })
     })
     .await?;
+  crate::rules::rename_service_cache(&job.source, &job.target);
   progress(format!("已改名为 {}，正在清理旧项目", job.target));
   retire(state, server, job, &progress, cancel)
     .await
@@ -700,9 +724,9 @@ fn switch_name(
   template: &str,
 ) -> Result<(), ApiError> {
   inspect_db(tx, &job.source, &job.target)?;
-  let reservation: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM pending_steps WHERE kind='clone_data' AND target_key=?1 AND instance_id=?2)",
-    rusqlite::params![job.target,job.instance],|row| row.get(0)).map_err(db::sql_err)?;
-  if !reservation {
+  let reservation = tx.execute("UPDATE pending_steps SET target_key=?2 WHERE kind='clone_data' AND target_key=?1 AND instance_id=?3 AND payload=?4",
+    rusqlite::params![job.target,job.source,job.instance,serde_json::to_string(&job.receipt).map_err(db::json_err)?]).map_err(db::sql_err)?;
+  if reservation != 1 {
     return Err(reject("目标名称保留已失效"));
   }
   let changed = tx.execute("UPDATE resources SET name=?2 WHERE kind='service' AND name=?1 AND json_extract(meta,'$.instance_id')=?3",
@@ -717,6 +741,16 @@ fn switch_name(
   .map_err(db::sql_err)?;
   tx.execute("UPDATE deployments SET service=?2, original_service=COALESCE(original_service,?1) WHERE service=?1 AND instance_id=?3",
     rusqlite::params![job.source,job.target,job.instance]).map_err(db::sql_err)?;
+  tx.execute(
+    "UPDATE alert_service_overrides SET service=?2 WHERE service=?1",
+    rusqlite::params![job.source, job.target],
+  )
+  .map_err(db::sql_err)?;
+  tx.execute(
+    "UPDATE alert_custom_rules SET service=?2 WHERE service=?1",
+    rusqlite::params![job.source, job.target],
+  )
+  .map_err(db::sql_err)?;
   let mut applied_spec = None;
   for write in writes {
     if matches!(&write,Write::Delete {kind,name} if kind==KIND_SERVICE && name==&job.source)
@@ -738,8 +772,6 @@ fn switch_name(
       VALUES (?1,?2,?3,?4,?5,CASE WHEN ?6='[]' THEN COALESCE((SELECT images FROM deployments WHERE service=?1 AND instance_id=?9 ORDER BY id DESC LIMIT 1),'[]') ELSE ?6 END,?7,?8,?9,0)",
     rusqlite::params![job.target,job.server,run,job.expected_hash,template,images,db::now_ms(),applied_spec,job.instance],
   ).map_err(db::sql_err)?;
-  tx.execute("UPDATE pending_steps SET target_key=?2 WHERE kind='clone_data' AND target_key=?1",
-    rusqlite::params![job.target,job.source]).map_err(db::sql_err)?;
   Ok(())
 }
 async fn retire(
@@ -787,11 +819,185 @@ async fn retire(
     )
     .await?;
   }
-  let source = job.source.clone();
+  if !job.has_data {
+    copy(
+      state,
+      server,
+      ServiceCopy::Check {
+        target: job.source.clone(),
+      },
+      CHECK,
+      None,
+      cancel,
+    )
+    .await?;
+  }
+  let (source, instance, receipt) = (
+    job.source.clone(),
+    job.instance.clone(),
+    job.receipt.clone(),
+  );
   state
     .db
-    .call(move |c| crate::pending::clear(c, "clone_data", &source))
+    .call(move |c| {
+      c.execute("DELETE FROM pending_steps WHERE kind='clone_data' AND target_key=?1 AND instance_id=?2 AND payload=?3",
+        rusqlite::params![source, instance, serde_json::to_string(&receipt).map_err(db::json_err)?]).map_err(db::sql_err)?;
+      Ok(())
+    })
     .await?;
   progress(format!("旧项目 {} 已拆除，数据保留", job.source));
   Ok(())
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn rename_switch_releases_new_name_and_keeps_old_name_until_archive()
+ {
+  use std::sync::atomic::{AtomicBool, Ordering};
+  use wharf_api_types::spec::Change;
+
+  let state = crate::rules::tests::test_state();
+  state.db.call(|c| {
+    c.execute("INSERT INTO resources VALUES ('server','s1','{}','{}',1,0,0)", []).map_err(db::sql_err)?;
+    c.execute("INSERT INTO resources VALUES ('service','old',?1,?2,1,0,0)", [
+      json!({"server":"s1","source":{"image":"alpine"},"stopped":true,"volumes":[{"name":"data","target":"/data"}]}).to_string(),
+      json!({"instance_id":"svc_old"}).to_string(),
+    ]).map_err(db::sql_err)?;
+    c.execute("INSERT INTO pending_steps (kind,target_key,run_id,plan_id,instance_id,payload,updated_at)
+      VALUES ('clone_data','new','run','plan','svc_old','\"rename-receipt\"',0)", []).map_err(db::sql_err)?;
+    c.execute("INSERT INTO alert_service_overrides (rule,service,muted_until) VALUES ('oom_killed','old',42)", []).map_err(db::sql_err)?;
+    Ok(())
+  }).await.unwrap();
+  let snap = snapshot::load(&state.db).await.unwrap();
+  let mut desired = snap.world.clone();
+  let row = desired.services.remove("old").unwrap();
+  desired.services.insert("new".into(), row);
+  let (compose, hash) = snapshot::service_resolved(
+    &desired,
+    &snap.net(&desired),
+    "new",
+    &BTreeMap::new(),
+  )
+  .unwrap();
+  let job = RenameJob {
+    source: "old".into(),
+    target: "new".into(),
+    server: "s1".into(),
+    instance: "svc_old".into(),
+    receipt: "rename-receipt".into(),
+    services: vec!["old".into()],
+    before_hash: "before".into(),
+    expected_hash: hash.clone(),
+    has_data: true,
+  };
+  let writes = desired.writes_from(&snap.world);
+  state
+    .db
+    .call({
+      let job = job.clone();
+      move |c| {
+        let tx = c.transaction().map_err(db::sql_err)?;
+        switch_name(&tx, &job, "run", writes, &[], &compose)?;
+        let silence: (String, i64) = tx
+          .query_row(
+            "SELECT service,muted_until FROM alert_service_overrides",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+          )
+          .map_err(db::sql_err)?;
+        assert_eq!(silence, ("new".into(), 42));
+        tx.commit().map_err(db::sql_err)?;
+        Ok(())
+      }
+    })
+    .await
+    .unwrap();
+  let fail_archive = AtomicBool::new(true);
+  state.hub.mock_safe_migrate_agent("s1", move |op, _| Some(match op {
+    AgentOp::ProjectStatus { projects, .. } => Ok(json!(projects.iter().map(|p| if p == "new" {
+      json!({"project":p,"hash": hash,"containers":[{"service":"new","name":"new-1","state":"exited"}]})
+    } else {
+      json!({"project":p,"containers":[]})
+    }).collect::<Vec<_>>())),
+    AgentOp::ServiceCopy(ServiceCopy::Archive { .. }) if fail_archive.swap(false, Ordering::Relaxed) => Err(ApiError::internal("归档失败")),
+    AgentOp::ServiceCopy(ServiceCopy::Archive { .. }) => Ok(json!({"committed":true})),
+    _ => panic!("不应改动目标项目"),
+  }));
+  state.hub.enable_mock_service_copy("s1");
+  let conn = state.hub.service_copy_conn_id("s1").unwrap();
+  let cancel = CancellationToken::new();
+  let progress: ProgressFn = std::sync::Arc::new(|_| {});
+  assert!(
+    retire(&state, ("s1", conn), &job, &progress, &cancel)
+      .await
+      .is_err()
+  );
+
+  let snap = snapshot::load(&state.db).await.unwrap();
+  assert_eq!(snap.pending.clones, BTreeSet::from(["old".into()]));
+  assert_eq!(snap.world.services["new"].instance_id, job.instance);
+  let recreate = PlanRequest {
+    changes: vec![Change::UpsertService {
+      name: "old".into(),
+      spec: snap.world.services["new"].spec.clone(),
+      adopt: None,
+      pins: None,
+      commit: None,
+      migrate: None,
+    }],
+    ..Default::default()
+  };
+  let err =
+    make_plan_inner(&state, recreate.clone(), snap, false, true)
+      .await
+      .err()
+      .unwrap();
+  assert_eq!(err.code, ErrorCode::Conflict);
+  let plan = make_plan(&state, PlanRequest::default()).await.unwrap();
+  assert!(plan.steps.is_empty());
+
+  let snap = snapshot::load(&state.db).await.unwrap();
+  execute(&state, &snap, "run", &job, progress, &cancel)
+    .await
+    .unwrap();
+  let snap = snapshot::load(&state.db).await.unwrap();
+  assert!(snap.pending.clones.is_empty());
+  let plan = make_plan_inner(&state, recreate, snap, false, true)
+    .await
+    .unwrap();
+  assert!(plan.writes.iter().any(|write| matches!(write, Write::Upsert { name, meta, .. }
+    if name == "old" && meta["instance_id"].as_str().is_some_and(|id| id != job.instance))));
+  assert!(
+    plan
+      .steps
+      .iter()
+      .any(|step| matches!(&step.step, Step::EnsureDirs {dirs, ..}
+    if dirs == &["/srv/old/data"]))
+  );
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn rename_rejects_completed_backup_move_for_either_name() {
+  let db = db::Db::memory();
+  db.call(|c| {
+    db::set_setting(
+      c,
+      "backup_move.arrived.old-other@s1",
+      Some("run"),
+    )?;
+    inspect_db(c, "old", "new")?;
+    db::set_setting(c, "backup_move.arrived.new@s1", Some("run"))?;
+    assert_eq!(
+      inspect_db(c, "old", "new").unwrap_err().code,
+      ErrorCode::Conflict
+    );
+    assert_eq!(
+      inspect_db(c, "new", "other").unwrap_err().code,
+      ErrorCode::Conflict
+    );
+    Ok(())
+  })
+  .await
+  .unwrap();
 }

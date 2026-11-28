@@ -260,6 +260,7 @@ fn item_reasons(
                   != row.import.as_ref()),
           )
         });
+      reasons.extend(item.host_access.iter().cloned());
       if item.layer == Layer::Container
         && item.impacts.contains(&Impact::Overwrite)
       {
@@ -317,6 +318,17 @@ fn service_reasons(
     .map_or_else(Vec::new, |content| {
       compose_host_reasons(name, content)
     });
+  if !row.spec.cap_add.is_empty() {
+    reasons.push(format!("容器 {name} 添加了内核能力 cap_add"));
+  }
+  if row
+    .spec
+    .group_add
+    .iter()
+    .any(|group| group.starts_with("host:"))
+  {
+    reasons.push(format!("容器 {name} 使用了宿主机组 group_add"));
+  }
   if adopting {
     reasons.push("接管宿主机上的未纳管容器".into());
   }
@@ -353,6 +365,81 @@ pub fn check_host_dir_settings(
   Ok(())
 }
 
+pub(crate) fn resolved_compose_host_access(
+  name: &str,
+  before: Option<&str>,
+  after: &str,
+) -> (bool, bool) {
+  (
+    !compose_host_reasons(name, after).is_empty(),
+    !compose::expanded_compose_privilege(name, before, after)
+      .is_empty(),
+  )
+}
+
+pub(crate) fn expanded_service_privilege(
+  name: &str,
+  before: Option<&ServiceSpec>,
+  after: &ServiceSpec,
+) -> Vec<String> {
+  let before = before.filter(|old| old.server == after.server);
+  let mut reasons = Vec::new();
+  if after
+    .cap_add
+    .iter()
+    .any(|cap| before.is_none_or(|old| !old.cap_add.contains(cap)))
+  {
+    reasons.push(format!("容器 {name} 扩大了 cap_add"));
+  }
+  if after.group_add.iter().any(|group| {
+    group.starts_with("host:")
+      && before.is_none_or(|old| !old.group_add.contains(group))
+  }) {
+    reasons.push(format!("容器 {name} 使用了新的宿主机组 group_add"));
+  }
+  if let Some(after) = compose(after) {
+    reasons.extend(compose::expanded_compose_privilege(
+      name,
+      before.and_then(compose),
+      after,
+    ));
+  }
+  reasons
+}
+
+pub fn check_privilege_review(
+  plan: &Plan,
+  current: &World,
+  writes: &[crate::db::Write],
+) -> Result<(), ApiError> {
+  for write in writes {
+    let crate::db::Write::Upsert {
+      kind, name, spec, ..
+    } = write
+    else {
+      continue;
+    };
+    if kind != KIND_SERVICE {
+      continue;
+    }
+    let after: ServiceSpec = serde_json::from_value(spec.clone())
+      .map_err(crate::db::json_err)?;
+    let before = current.services.get(name).map(|row| &row.spec);
+    if !expanded_service_privilege(name, before, &after).is_empty()
+      && !plan.items.iter().any(|item| {
+        item.address == format!("service/{name}")
+          && item.impacts.contains(&Impact::Privilege)
+      })
+    {
+      return Err(
+        ApiError::new(ErrorCode::PlanStale, "服务提权需要重新 plan")
+          .suggest("wharf plan"),
+      );
+    }
+  }
+  Ok(())
+}
+
 pub fn mark_plan(
   current: &World,
   desired: &World,
@@ -368,6 +455,27 @@ pub fn mark_plan(
       && !item.impacts.contains(&Impact::Public)
     {
       item.impacts.push(Impact::Public);
+    }
+    if item.layer == Layer::Config
+      && item.action != Action::Delete
+      && let Some(name) = item.address.strip_prefix("service/")
+      && let Some(after) = desired.services.get(name)
+    {
+      let before = current
+        .services
+        .get(name)
+        .filter(|old| old.instance_id == after.instance_id);
+      let mut reasons = expanded_service_privilege(
+        name,
+        before.map(|old| &old.spec),
+        &after.spec,
+      );
+      if !reasons.is_empty() {
+        if !item.impacts.contains(&Impact::Privilege) {
+          item.impacts.push(Impact::Privilege);
+        }
+        item.host_access.append(&mut reasons);
+      }
     }
     let access = assess(HostTarget::PlanItem {
       item,

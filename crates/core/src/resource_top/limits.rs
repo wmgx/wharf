@@ -108,7 +108,14 @@ pub async fn get(
             {
               Some("runtime_unverified")
             } else {
-              None
+              match metrics
+                .and_then(|m| m.projects.get(name))
+                .and_then(|p| p.containers)
+              {
+                Some(1) => None,
+                Some(_) => Some("项目用量无法按容器分配"),
+                None => Some("runtime_unverified"),
+              }
             },
             mem_total: metrics.map_or(0, |m| m.mem_total),
             cpu_total: metrics
@@ -223,7 +230,7 @@ fn calculate(
        AND name IN ('svc.cpu', 'svc.cpu.cores', 'svc.mem', 'svc.mem.max', 'oom.kill')
      ORDER BY at",
   ).map_err(sql_err)?;
-  for service in selected {
+  for mut service in selected {
     // 最近一次成功部署是当前名字、实例、机器和已应用版本共同可证明的起点。
     let at: Option<i64> = c.query_row(
       "SELECT MAX(created_at) FROM deployments WHERE service=?1 AND instance_id=?2",
@@ -231,6 +238,14 @@ fn calculate(
     ).map_err(sql_err)?;
     let attributable = service.at > 0 && at == Some(service.at);
     let start = (end - days.min(retention) * DAY).max(service.at);
+    let historical_multi: bool = c.query_row(
+      "SELECT EXISTS(SELECT 1 FROM points WHERE subject=?1 AND name='svc.containers.max'
+       AND at>=?2 AND at<?3 AND value>1)",
+      params![service.name, start, end], |row| row.get(0),
+    ).map_err(sql_err)?;
+    if historical_multi {
+      service.skip = service.skip.or(Some("项目用量无法按容器分配"));
+    }
     let mut rows = stmt
       .query(params![
         service.name,
@@ -331,9 +346,23 @@ fn suggest(
   oom: usize,
 ) -> LimitSuggestion {
   let spec = &selected.spec;
-  let limits = spec.limits.clone().unwrap_or_default();
-  let memory =
-    crate::rules::resources::service_limit_with_source(spec);
+  let components =
+    crate::render::service_expected_components(&selected.name, spec);
+  let component =
+    components.iter().next().filter(|_| components.len() == 1);
+  let component_limits =
+    component.and_then(|name| spec.container_limits.get(name));
+  let limits = component_limits
+    .or(spec.limits.as_ref())
+    .cloned()
+    .unwrap_or_default();
+  let memory = limits
+    .memory_mb
+    .filter(|&mb| mb > 0)
+    .map(|mb| (u64::from(mb) << 20, false))
+    .or_else(|| {
+      crate::rules::resources::service_limit_with_source(spec)
+    });
   let current_memory = memory.map(|(v, _)| v as f64 / MIB);
   let memory_source = memory.map(|(_, compose)| {
     if compose { "compose" } else { "wharf" }.into()
@@ -365,14 +394,11 @@ fn suggest(
   } else {
     None
   };
-  let components =
-    crate::render::service_expected_components(&selected.name, spec)
-      .len();
   let mut skip = selected.skip;
   if !attributable {
     skip = skip.or(Some("runtime_unverified"));
   }
-  if components != 1 {
+  if components.len() != 1 {
     skip = skip.or(Some("项目用量无法按容器分配"));
   }
   if !enough_memory && !enough_cpu {
@@ -436,7 +462,7 @@ fn suggest(
   } else if !enough_cpu {
     cpu_reason = Some("insufficient_fine_cpu_samples");
     None
-  } else if compose_cpu.is_some() {
+  } else if limits.cpu_milli.is_none() && compose_cpu.is_some() {
     cpu_reason = Some("compose_limits");
     None
   } else {
@@ -453,6 +479,14 @@ fn suggest(
   LimitSuggestion {
     name: selected.name,
     server: selected.server,
+    container: component
+      .filter(|_| {
+        matches!(spec.source, Source::Compose { .. })
+          && (component_limits.is_some()
+            || spec.limits.is_none()
+            || spec.limits.as_ref().is_some_and(|l| l.is_empty()))
+      })
+      .cloned(),
     memory_source,
     cpu_source: limits
       .cpu_milli

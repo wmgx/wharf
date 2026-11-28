@@ -722,16 +722,87 @@ pub fn router(state: Arc<AppState>) -> Router {
     .with_state(state)
 }
 
+pub(crate) fn cli_api(
+  headers: &axum::http::HeaderMap,
+) -> Option<u32> {
+  headers
+    .get(wharf_api_types::CLI_API_HEADER)?
+    .to_str()
+    .ok()?
+    .parse()
+    .ok()
+}
+
+pub(crate) fn old_cli_runtime_options() -> ApiError {
+  ApiError::new(
+    ErrorCode::Conflict,
+    "当前 CLI 会丢失已启用的运行配置",
+  )
+  .with_hint("升级 CLI 后重新执行")
+}
+
+fn require_cli_runtime_options(
+  world: &crate::world::World,
+  request: &PlanRequest,
+) -> Result<(), ApiError> {
+  use wharf_api_types::spec::{Change, ServiceSpec};
+  let changed = |name: &str, after: &ServiceSpec| {
+    world.services.get(name).is_some_and(|row| {
+      let old = &row.spec;
+      old.image_runtime_fields().any(|field| {
+        !after.image_runtime_fields().any(|key| key == field)
+      }) || (old.pull_policy.is_some() && after.pull_policy.is_none())
+        || (old
+          .limits
+          .as_ref()
+          .and_then(|limits| limits.pids)
+          .is_some()
+          && after
+            .limits
+            .as_ref()
+            .and_then(|limits| limits.pids)
+            .is_none())
+        || old
+          .container_limits
+          .keys()
+          .any(|key| !after.container_limits.contains_key(key))
+    })
+  };
+  let server_changed =
+    |name: &str, after: &wharf_api_types::spec::ServerSettings| {
+      after.task_limits.is_none()
+        && world
+          .servers
+          .get(name)
+          .is_some_and(|row| row.settings.task_limits.is_some())
+    };
+  if request.changes.iter().any(|change| match change {
+    Change::UpsertService { name, spec, .. } => changed(name, spec),
+    Change::UpdateServer { name, settings } => {
+      server_changed(name, settings)
+    }
+    _ => false,
+  }) || request.fleet.iter().chain(&request.partial).any(|fleet| {
+    fleet
+      .services
+      .iter()
+      .any(|(name, spec)| changed(name, spec))
+      || fleet
+        .servers
+        .iter()
+        .any(|(name, settings)| server_changed(name, settings))
+  }) {
+    return Err(old_cli_runtime_options());
+  }
+  Ok(())
+}
+
 /// 拦下太旧的 CLI。页面和控制面一起发布，不带这个头；更早的 CLI 也不带，放过。
 async fn check_cli(
   req: axum::extract::Request,
   next: axum::middleware::Next,
 ) -> Response {
-  let api = req
-    .headers()
-    .get(wharf_api_types::CLI_API_HEADER)
-    .and_then(|v| v.to_str().ok())
-    .and_then(|v| v.parse::<u32>().ok());
+  let api = cli_api(req.headers());
   if let Some(api) = api
     && api < wharf_api_types::MIN_CLI_API
   {
@@ -2719,6 +2790,7 @@ async fn make_plan(
   auth: Auth,
   Query(query): Query<BriefQuery>,
   axum::Extension(audit): axum::Extension<crate::audit::AuditSlot>,
+  headers: axum::http::HeaderMap,
   Json(req): Json<PlanRequest>,
 ) -> ApiResult<Plan> {
   auth.require(Perm::Plan)?;
@@ -2732,6 +2804,9 @@ async fn make_plan(
     guard_dangerous(&s, &req).await?;
   }
   let mut snap = snapshot::load(&s.db).await?;
+  if cli_api(&headers) == Some(2) {
+    require_cli_runtime_options(&snap.world, &req)?;
+  }
   if let Some(names) = &query.preview_secrets {
     auth.require(Perm::Admin)?;
     audit.skip_record();
@@ -3093,6 +3168,7 @@ mod tests {
       auth,
       Query(BriefQuery::default()),
       axum::Extension(crate::audit::AuditSlot::default()),
+      Default::default(),
       Json(request),
     )
     .await
@@ -3128,6 +3204,7 @@ mod tests {
         ..Default::default()
       }),
       axum::Extension(crate::audit::AuditSlot::default()),
+      Default::default(),
       Json(PlanRequest::default()),
     )
     .await
@@ -3440,6 +3517,7 @@ mod tests {
     for (name, reference) in [("a", "[[url:S]]"), ("b", "[[FILE:S]]")]
     {
       world.services.insert(name.into(), crate::world::ServiceRow {
+        host_groups: Default::default(),
         instance_id: "svc_fixture".into(),
         spec: serde_json::from_value(json!({
           "server": "s1", "source": {"image": "nginx:1"}, "env": {"KEY": reference}

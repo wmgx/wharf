@@ -287,6 +287,18 @@ mod tests {
       init_timeout_secs: None,
       tags: Default::default(),
       crash_guard: false,
+      command: Default::default(),
+      shm_size: Default::default(),
+      cap_add: Default::default(),
+      ulimits: Default::default(),
+      init: Default::default(),
+      group_add: Default::default(),
+      hostname: Default::default(),
+      tmpfs: Default::default(),
+      timezone: Default::default(),
+      pull_policy: Default::default(),
+      log_max: Default::default(),
+      container_limits: Default::default(),
     };
     let hp = BTreeMap::from([("pg".to_string(), 20001)]);
     let j = target("db", &spec, &hp, None, None).unwrap();

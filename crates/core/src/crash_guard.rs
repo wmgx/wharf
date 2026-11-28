@@ -378,7 +378,7 @@ pub(crate) async fn retry_stops(
   snap: &Snapshot,
 ) {
   for (name, row) in &snap.recovery {
-    if row.phase == "stopping"
+    if matches!(row.phase.as_str(), "stopping" | "resuming")
       && row.attempts < 3
       && !state.is_service_busy(name)
       && let Some(evidence) = &row.evidence
@@ -445,7 +445,9 @@ pub(crate) async fn stop(
     if r.phase == "protected" {
       return Ok(());
     }
-    if r.phase != "stopping" || r.lease.is_some() {
+    if !matches!(r.phase.as_str(), "stopping" | "resuming")
+      || r.lease.is_some()
+    {
       return Err(blocker(name));
     }
     r.clone()
@@ -651,6 +653,7 @@ pub(crate) async fn resume(
     .ok_or_else(|| blocker(name))?
     .clone();
   recovery.phase = "resuming".into();
+  recovery.attempts = 0;
   recovery.run = run.into();
   save(state, name, server, instance, &recovery, None, run).await?;
   let result = async {
@@ -693,6 +696,15 @@ pub(crate) async fn resume(
   .await;
   if let Err(e) = result {
     let undo = CancellationToken::new();
+    let conn = state.hub.crash_guard_conn_id(server)?;
+    let live = project(state, (server, conn), name, &undo).await?;
+    if live.hash.as_deref()
+      != recovery.evidence.as_ref().map(|e| e.hash.as_str())
+      || live.containers.is_empty()
+      || live.containers.iter().any(|c| c.foreign)
+    {
+      return Err(blocker(name));
+    }
     policy(
       state,
       (server, conn),
@@ -712,6 +724,12 @@ pub(crate) async fn resume(
       &undo,
     )
     .await?;
+    let live = project(state, (server, conn), name, &undo).await?;
+    if live.containers.is_empty()
+      || live.containers.iter().any(|c| c.foreign || c.is_active())
+    {
+      return Err(blocker(name));
+    }
     recovery.phase = "protected".into();
     save(state, name, server, instance, &recovery, None, run).await?;
     return Err(e);
@@ -767,4 +785,90 @@ pub(crate) async fn require_data_writable(
       Ok(())
     })
     .await
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn interrupted_resume_is_stopped_after_agent_reconnects() {
+  use std::sync::atomic::{AtomicBool, Ordering};
+
+  let _lock = crate::rules::tests::TEST_LOCK.lock().await;
+  let state = crate::rules::tests::test_state();
+  state.hub.mock_safe_migrate_agent("s1", {
+    let started = AtomicBool::new(false);
+    move |op, _| Some(match op {
+      AgentOp::ProjectStatus { .. } if started.load(Ordering::Relaxed) => Err(crate::hub::offline("s1")),
+      AgentOp::ProjectStatus { .. } => Ok(serde_json::json!([{"project":"app","hash":"fixture","containers":[{"name":"app-1","service":"app","state":"exited"}]}])),
+      AgentOp::CrashGuard(CrashGuardOp::Restore { .. }) => Ok(serde_json::json!(true)),
+      AgentOp::ProjectStart { .. } => {
+        started.store(true, Ordering::Relaxed);
+        Ok(serde_json::json!(true))
+      }
+      _ => panic!("断线后旧连接不能继续执行"),
+    })
+  });
+  state.hub.enable_mock_crash_guard("s1");
+  state.db.call(|c| {
+    c.execute("INSERT INTO resources VALUES ('service','app',?1,?2,1,0,0)", [
+      serde_json::json!({"server":"s1","source":{"image":"alpine"},"stopped":true}).to_string(),
+      serde_json::json!({"instance_id":"svc_app"}).to_string(),
+    ]).map_err(sql_err)?;
+    store(c, "app", "s1", "svc_app", &Recovery {
+      phase:"protected".into(),
+      evidence:Some(Evidence { instance:"svc_app".into(), hash:"fixture".into(), container:"app-1".into(), count:5, conn:0, observed:1, first:0 }),
+      policies:vec![], attempts:1, run:"old-run".into(), lease:None,
+    })
+  }).await.unwrap();
+  let snap = snapshot::load(&state.db).await.unwrap();
+  let cancel = CancellationToken::new();
+  resume(
+    &state,
+    &snap,
+    "resume",
+    "app",
+    "svc_app",
+    Arc::new(|_| {}),
+    &cancel,
+  )
+  .await
+  .unwrap_err();
+  let snap = snapshot::load(&state.db).await.unwrap();
+  assert_eq!(snap.recovery["app"].phase, "resuming");
+  let running = Arc::new(AtomicBool::new(true));
+  let disabled = Arc::new(AtomicBool::new(false));
+  state.hub.mock_agent("s1", false, {
+    let running=running.clone();
+    let disabled=disabled.clone();
+    move |op| Ok(match op {
+      AgentOp::ProjectStatus { .. } => serde_json::json!([{"project":"app","hash":"fixture","containers":[{"name":"app-1","service":"app","state": if running.load(Ordering::Relaxed) {"running"} else {"exited"}}]}]),
+      AgentOp::CrashGuard(CrashGuardOp::Disable { .. }) => {
+        disabled.store(true, Ordering::Relaxed);
+        serde_json::json!(true)
+      }
+      AgentOp::ProjectStop { .. } => {
+        assert!(disabled.load(Ordering::Relaxed));
+        running.store(false, Ordering::Relaxed);
+        serde_json::json!(true)
+      }
+      _ => panic!("重连只应恢复保护停机"),
+    })
+  });
+  state.hub.enable_mock_crash_guard("s1");
+  retry_stops(&state, &snap).await;
+  tokio::time::timeout(Duration::from_secs(3), async {
+    loop {
+      let snap = snapshot::load(&state.db).await.unwrap();
+      if snap.recovery["app"].phase == "protected"
+        && !state.is_service_busy("app")
+      {
+        assert!(snap.world.services["app"].spec.stopped);
+        break;
+      }
+      tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+  })
+  .await
+  .unwrap();
+  assert!(disabled.load(Ordering::Relaxed));
+  assert!(!running.load(Ordering::Relaxed));
 }

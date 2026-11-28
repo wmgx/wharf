@@ -26,6 +26,8 @@ pub struct LimitEvidence {
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct LimitSuggestion {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub container: Option<String>,
   pub name: String,
   pub server: String,
   #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -99,6 +101,8 @@ pub enum UsageKind {
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct UsageRow {
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub components: Vec<ComponentUsage>,
   pub name: String,
   pub kind: UsageKind,
   pub server: String,
@@ -108,6 +112,16 @@ pub struct UsageRow {
   pub memory_pct: Option<f64>,
   pub net_rx: Option<u64>,
   pub net_tx: Option<u64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ComponentUsage {
+  pub name: String,
+  pub cpu_limit_milli: Option<u32>,
+  pub memory_limit: Option<u64>,
+  pub pids_limit: Option<u32>,
+  pub cpu_peak: Option<f64>,
+  pub memory_peak: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]

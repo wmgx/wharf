@@ -203,12 +203,13 @@ impl Docker {
         .collect();
       projects.extend(discovered);
     }
-    let observed: Vec<_> = projects
-      .iter()
-      .filter_map(|p| by_project.get(p))
-      .flatten()
+    let containers =
+      projects.iter().filter_map(|p| by_project.get(p)).flatten();
+    let observed: Vec<_> = containers
+      .clone()
+      .filter(|c| c.state != "running")
+      .chain(containers.filter(|c| c.state == "running").take(512))
       .map(|c| c.name.as_str())
-      .take(512)
       .collect();
     let mut finished = std::collections::BTreeMap::new();
     for batch in observed.chunks(128) {
@@ -1512,6 +1513,12 @@ pub(crate) fn clean_project_dir(
     Err(e) if e.kind() == ErrorKind::NotFound => return Ok(true),
     Err(e) => return Err(io_err(dir)(e)),
   }
+  if dir.join(crate::live_limits::JOURNAL).exists() {
+    return Err(ApiError::new(
+      ErrorCode::Busy,
+      "项目仍有待恢复的限额更新",
+    ));
+  }
   remove_files(
     dir,
     &[
@@ -2489,4 +2496,36 @@ fn parse_running_images_maps_multiple_containers() {
       ("db:latest".into(), "id3".into())
     ])
   );
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn status_observes_completed_init_after_running_container_budget()
+ {
+  let (_dir, docker) = fake_docker(
+    r#"
+case "$1" in
+  ps)
+    i=0
+    while [ "$i" -lt 513 ]; do
+      printf '{"Names":"app-%d","State":"running","Labels":"com.docker.compose.project=app,com.docker.compose.service=app"}\n' "$i"
+      i=$((i + 1))
+    done
+    printf '{"Names":"app-init","State":"exited","Labels":"com.docker.compose.project=app,com.docker.compose.service=init"}\n'
+    ;;
+  inspect)
+    for name in "$@"; do
+      if [ "$name" = app-init ]; then
+        printf '/app-init\t2026-01-01T00:00:00Z\t0\tno\t0\n'
+      fi
+    done
+    ;;
+  *) exit 1;;
+esac
+"#,
+  );
+  let status =
+    docker.one_status("app", &Ctx::detached()).await.unwrap();
+  assert!(status.containers.last().unwrap().is_completed_init());
+  assert!(status.all_running());
 }

@@ -211,6 +211,15 @@ pub(crate) fn sanitize_metrics(m: &mut Metrics) {
   m.agent_cpu = m.agent_cpu.map(|n| nonnegative(n).min(100.0));
   for project in m.projects.values_mut() {
     project.cpu = nonnegative(project.cpu).min(100.0);
+    project.components.retain(|name, metrics| {
+      metrics.cpu = nonnegative(metrics.cpu).min(100.0);
+      !name.is_empty()
+        && name.len() <= 128
+        && name
+          .bytes()
+          .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+    });
+    trim_map(&mut project.components, 128);
   }
   for traffic in m.hosts.values_mut() {
     traffic.secs = nonnegative(traffic.secs).clamp(1.0, 3600.0);

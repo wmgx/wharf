@@ -36,6 +36,40 @@ pub(crate) struct CloneJob {
   write: Write,
 }
 
+impl CloneJob {
+  pub(crate) fn check_agents(
+    &self,
+    state: &AppState,
+  ) -> Result<(), ApiError> {
+    let conn =
+      clone_conn(state, &self.target_server, self.copy_data)?;
+    clone_conn(state, &self.source_server, self.copy_data)?;
+    state.hub.require_safe_migrate(&self.source_server)?;
+    state.hub.require_safe_migrate(&self.target_server)?;
+    if self.copy_data && self.source_server != self.target_server {
+      state.hub.require_migrate_v2(&self.source_server)?;
+      state.hub.require_migrate_v2(&self.target_server)?;
+    }
+    if !self.copy_data
+      && self.reserve_dir
+      && state.hub.service_copy_conn_id(&self.target_server).ok()
+        != Some(conn)
+    {
+      state.hub.require_migrate_v2(&self.target_server)?;
+    }
+    if let Write::Upsert { spec, .. } = &self.write
+      && serde_json::from_value::<wharf_api_types::spec::ServiceSpec>(
+        spec.clone(),
+      )
+      .map_err(db::json_err)?
+      .uses_runtime_options()
+    {
+      state.hub.runtime_options_conn_id(&self.target_server)?;
+    }
+    Ok(())
+  }
+}
+
 #[derive(Deserialize)]
 struct CopyState {
   committed: bool,
@@ -103,8 +137,8 @@ pub(crate) async fn plan(
   }
   let cancel = CancellationToken::new();
   let _cancel = cancel.clone().drop_guard();
-  let src_conn = state.hub.service_copy_conn_id(from)?;
-  let dst_conn = state.hub.service_copy_conn_id(to)?;
+  let src_conn = clone_conn(state, from, copy_data)?;
+  let dst_conn = clone_conn(state, to, copy_data)?;
   inspect_source(
     state,
     &snap,
@@ -113,14 +147,12 @@ pub(crate) async fn plan(
     &cancel,
   )
   .await?;
-  copy_rpc(
+  check_target(
     state,
     (to, dst_conn),
-    ServiceCopy::Check {
-      target: target.clone(),
-    },
-    CHECK_TIMEOUT,
-    None,
+    &target,
+    copy_data,
+    mount_count > 0,
     &cancel,
   )
   .await?;
@@ -206,6 +238,7 @@ pub(crate) async fn plan(
     reserve_dir: mount_count > 0,
     write: write.clone(),
   };
+  job.check_agents(state)?;
   let mut b = Builder::default();
   config_items(&mut b, current, &desired, &writes);
   let title = if copy_data {
@@ -261,11 +294,13 @@ pub(crate) async fn plan(
         desired.services[&target].instance_id.clone(),
       ),
       expect: Some(expect),
+      images: Default::default(),
     },
   );
   b.warnings.push("确认外部依赖后再显式启动新服务".into());
-  state.hub.require_safe_migrate(to)?;
   build_agent_warnings(state, &desired, &mut b)?;
+  select_planned_service_images(state, &snap, &desired, &mut b)
+    .await?;
   let mut planned = finish_plan(
     &snap,
     &desired,
@@ -348,6 +383,21 @@ pub(super) fn validate_source(
       .get("services")
       .and_then(serde_yaml_ng::Value::as_mapping)
       .ok_or_else(|| unsupported("无法解析 Compose 组件"))?;
+    if !target_server.is_empty()
+      && target_server != spec.server
+      && doc
+        .get("networks")
+        .and_then(serde_yaml_ng::Value::as_mapping)
+        .is_some_and(|networks| {
+          networks.values().any(|net| {
+            net.get("external").is_some_and(|external| {
+              external.as_bool() != Some(false)
+            })
+          })
+        })
+    {
+      return Err(unsupported("跨机无法核实目标的外部 Compose 网络"));
+    }
     if doc.get("include").is_some()
       || components.values().any(|component| {
         [
@@ -386,6 +436,86 @@ pub(super) fn validate_source(
     return Err(unsupported("同机克隆和源服务的固定宿主端口冲突"));
   }
   Ok(mounts.len())
+}
+
+fn clone_conn(
+  state: &AppState,
+  server: &str,
+  copy_data: bool,
+) -> Result<u64, ApiError> {
+  if copy_data {
+    state.hub.service_copy_conn_id(server)
+  } else {
+    state
+      .hub
+      .conn_id(server)
+      .ok_or_else(|| crate::hub::offline(server))
+  }
+}
+
+async fn check_target(
+  state: &AppState,
+  server: (&str, u64),
+  target: &str,
+  copy_data: bool,
+  has_mounts: bool,
+  cancel: &CancellationToken,
+) -> Result<(), ApiError> {
+  if copy_data
+    || state.hub.service_copy_conn_id(server.0).ok() == Some(server.1)
+  {
+    copy_rpc(
+      state,
+      server,
+      ServiceCopy::Check {
+        target: target.into(),
+      },
+      CHECK_TIMEOUT,
+      None,
+      cancel,
+    )
+    .await?;
+    return Ok(());
+  }
+  let statuses: Vec<ProjectState> = state
+    .hub
+    .call_bound(
+      server,
+      AgentOp::ProjectStatus {
+        projects: vec![target.into()],
+        include_links: false,
+      },
+      CHECK_TIMEOUT,
+      None,
+      cancel,
+    )
+    .await?;
+  if !statuses.iter().any(|p| {
+    p.project == target && p.hash.is_none() && p.containers.is_empty()
+  }) {
+    return Err(occupied());
+  }
+  if has_mounts {
+    match state
+      .hub
+      .call_bound::<DirSpaceInfo>(
+        server,
+        AgentOp::DirSpace {
+          service: target.into(),
+          measure_data: true,
+        },
+        CHECK_TIMEOUT,
+        None,
+        cancel,
+      )
+      .await
+    {
+      Err(error) if error.code == ErrorCode::NotFound => {}
+      Err(error) => return Err(error),
+      Ok(_) => return Err(occupied()),
+    }
+  }
+  Ok(())
 }
 
 pub(super) async fn inspect_source(
@@ -667,11 +797,11 @@ pub(crate) async fn execute(
   )?;
   let from = (
     job.source_server.as_str(),
-    state.hub.service_copy_conn_id(&job.source_server)?,
+    clone_conn(state, &job.source_server, job.copy_data)?,
   );
   let to = (
     job.target_server.as_str(),
-    state.hub.service_copy_conn_id(&job.target_server)?,
+    clone_conn(state, &job.target_server, job.copy_data)?,
   );
   inspect_source(
     state,
@@ -684,7 +814,10 @@ pub(crate) async fn execute(
   if job.copy_data && from.0 != to.0 {
     cross_machine(state, snap, from.0, to.0)?;
   }
-  if job.reserve_dir {
+  if job.reserve_dir
+    && (job.copy_data
+      || state.hub.service_copy_conn_id(to.0).ok() == Some(to.1))
+  {
     let start = copy_rpc(
       state,
       to,
@@ -753,14 +886,12 @@ pub(crate) async fn execute(
       }
     }
   } else {
-    copy_rpc(
+    check_target(
       state,
       to,
-      ServiceCopy::Check {
-        target: job.target.clone(),
-      },
-      CHECK_TIMEOUT,
-      None,
+      &job.target,
+      job.copy_data,
+      job.reserve_dir,
       cancel,
     )
     .await?;

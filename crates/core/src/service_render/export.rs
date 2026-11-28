@@ -154,25 +154,36 @@ impl Export<'_> {
         out.push_str("$$");
         rest = after;
       } else if let Some(after) = rest.strip_prefix("${") {
-        let end =
-          after.find('}').ok_or_else(|| unsupported(field))?;
+        let mut depth = 1;
+        let end = after
+          .char_indices()
+          .find_map(|(offset, ch)| {
+            if after[offset..].starts_with("${") {
+              depth += 1;
+            } else if ch == '}' {
+              depth -= 1;
+            }
+            (depth == 0).then_some(offset)
+          })
+          .ok_or_else(|| unsupported(field))?;
         let expr = &after[..end];
         let name =
           expr.split([':', '-', '+', '?']).next().unwrap_or_default();
         let op = &expr[name.len()..];
         if !env_name(name)
           || (!op.is_empty()
-            && !["-", ":-", "+", ":+", "?", ":?"].iter().any(
-              |prefix| {
-                op.strip_prefix(prefix).is_some_and(|arg| {
-                  arg.is_empty()
-                    || arg.bytes().all(|b| b.is_ascii_digit())
-                })
-              },
-            ))
+            && !["-", ":-", "+", ":+", "?", ":?"]
+              .iter()
+              .any(|prefix| op.starts_with(prefix)))
+          || next_placeholder(expr).is_some()
         {
           return Err(unsupported(field));
         }
+        safe_tree(
+          &Value::String(expr.to_owned()),
+          field,
+          self.known,
+        )?;
         out.push_str(&rest[..end + 3]);
         rest = &after[end + 1..];
       } else {
@@ -246,6 +257,18 @@ impl Export<'_> {
     let kind = map.get("type").and_then(Value::as_str).unwrap_or("");
     if !matches!(kind, "bind" | "volume" | "tmpfs")
       || map.keys().any(|key| {
+        if kind == "tmpfs" && key.as_str() == Some("tmpfs") {
+          return !map
+            .get(key)
+            .and_then(Value::as_mapping)
+            .is_some_and(|options| {
+              options.len() == 1
+                && options
+                  .get("size")
+                  .and_then(Value::as_u64)
+                  .is_some()
+            });
+        }
         !matches!(
           key.as_str(),
           Some("type" | "source" | "target" | "read_only")
@@ -507,6 +530,13 @@ fn export(
           }
           _ => return Err(unsupported("environment")),
         };
+        if key == "TZ"
+          && !is_compose
+          && !spec.env.contains_key(key)
+          && spec.timezone.is_some()
+        {
+          continue;
+        }
         *value = Value::String(ctx.scalar(
           text.trim_end_matches('\n'),
           key,
@@ -637,7 +667,54 @@ fn export(
           if value.as_str().is_some_and(|s| {
             wharf_api_types::compose::normalize_stop_signal(s).is_ok()
           }) => {}
-        "stop_grace_period" | "cpus" | "mem_limit"
+        "pull_policy"
+          if value.as_str().is_some_and(|s| {
+            matches!(s, "always" | "missing" | "never")
+          }) => {}
+        "hostname" if value.as_str().is_some_and(identifier) => {}
+        "pids_limit" if value.as_i64().is_some() => {}
+        "cap_add" | "group_add"
+          if value.as_sequence().is_some_and(|values| {
+            values.iter().all(|v| {
+              v.as_str().is_some_and(identifier)
+                || v.as_u64().is_some()
+            })
+          }) => {}
+        "ulimits"
+          if value.as_mapping().is_some_and(|limits| {
+            limits.iter().all(|(key, limit)| {
+              key.as_str().is_some_and(identifier)
+                && (limit.as_i64().is_some()
+                  || limit.as_mapping().is_some_and(|pair| {
+                    pair.len() == 2
+                      && ["soft", "hard"].iter().all(|key| {
+                        pair
+                          .get(*key)
+                          .and_then(Value::as_i64)
+                          .is_some()
+                      })
+                  }))
+            })
+          }) => {}
+        "logging"
+          if value.as_mapping().is_some_and(|logging| {
+            logging.len() == 2
+              && logging.get("driver").and_then(Value::as_str)
+                == Some("json-file")
+              && logging
+                .get("options")
+                .and_then(Value::as_mapping)
+                .is_some_and(|options| {
+                  options.len() == 2
+                    && ["max-size", "max-file"].iter().all(|key| {
+                      options
+                        .get(*key)
+                        .and_then(Value::as_str)
+                        .is_some_and(|s| s.parse::<u64>().is_ok())
+                    })
+                })
+          }) => {}
+        "stop_grace_period" | "cpus" | "mem_limit" | "shm_size"
           if value.as_f64().is_some()
             || value.as_str().is_some_and(|s| {
               s.bytes().all(|b| {
@@ -717,7 +794,7 @@ services:
       ENCODED: '[[url:PASS]],[[b64:PASS]],[[json:PASS]]'
       KEY: '[[FILE:KEY]]'
       DB: '[[@db.http:port]]'
-      MODE: '${LOCAL_MODE} $$'
+      MODE: '${LOCAL_MODE:-production} $$'
       RAW: 'fixture-inline'
 "#,
     );
@@ -727,7 +804,7 @@ services:
     let web = &yaml["services"]["web"];
     assert_eq!(
       web["environment"]["MODE"].as_str(),
-      Some("${LOCAL_MODE} $$")
+      Some("${LOCAL_MODE:-production} $$")
     );
     assert_eq!(view.files.len(), 2);
     assert_eq!(web["volumes"].as_sequence().unwrap().len(), 2);
@@ -767,4 +844,65 @@ services:
       assert!(status.success());
     }
   }
+}
+
+#[cfg(test)]
+#[test]
+fn compose_export_carries_23_1_runtime_and_component_limits() {
+  let row = |spec| ServiceRow {
+    instance_id: "fixture".into(),
+    spec: serde_json::from_value(spec).unwrap(),
+    host_ports: Default::default(),
+    pins: Default::default(),
+    import: None,
+    commit: None,
+    version: 1,
+  };
+  let image = row(serde_json::json!({
+    "server":"s1", "source":{"image":"alpine"}, "command":["serve"],
+    "init":true, "shm_size":67108864, "cap_add":["NET_BIND_SERVICE"],
+    "ulimits":{"nofile":{"soft":64,"hard":128}}, "hostname":"worker",
+    "group_add":["1000"], "tmpfs":{"/tmp":67108864}, "timezone":"Asia/Singapore",
+    "log_max":{"max_bytes":10485760,"max_files":3}, "limits":{"pids":64}
+  }));
+  let yaml: Value = serde_yaml_ng::from_str(
+    &export("app", &image, &[]).unwrap().compose,
+  )
+  .unwrap();
+  let app = &yaml["services"]["app"];
+  assert_eq!(app["shm_size"].as_u64(), Some(67108864));
+  assert_eq!(
+    app["environment"]["TZ"].as_str(),
+    Some("Asia/Singapore")
+  );
+  assert_eq!(
+    app["volumes"][0]["tmpfs"]["size"].as_u64(),
+    Some(67108864)
+  );
+  assert_eq!(
+    app["logging"]["options"]["max-file"].as_str(),
+    Some("3")
+  );
+  assert_eq!(app["pids_limit"].as_u64(), Some(64));
+
+  let compose = row(serde_json::json!({
+    "server":"s1", "source":{"compose":{"content":"services:\n  web:\n    image: alpine\n"}},
+    "pull_policy":"never", "container_limits":{"web":{"memory_mb":128,"pids":32}}
+  }));
+  let yaml: Value = serde_yaml_ng::from_str(
+    &export("app", &compose, &[]).unwrap().compose,
+  )
+  .unwrap();
+  assert_eq!(
+    yaml["services"]["web"]["pull_policy"].as_str(),
+    Some("never")
+  );
+  assert_eq!(
+    yaml["services"]["web"]["mem_limit"].as_str(),
+    Some("128m")
+  );
+  assert_eq!(
+    yaml["services"]["web"]["pids_limit"].as_u64(),
+    Some(32)
+  );
 }

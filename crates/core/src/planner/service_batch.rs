@@ -297,10 +297,10 @@ async fn make_batch_plan(
         }) {
           continue;
         }
-      } else if project
-        .is_none_or(|project| project.containers.is_empty())
-      {
-        b.warnings.push(format!("跳过 {name}：没有部署容器"));
+      } else if project.is_none_or(|project| {
+        project.containers.iter().all(|c| !c.is_active())
+      }) {
+        b.warnings.push(format!("跳过 {name}：服务已停"));
         continue;
       }
       runtime.insert(name.clone());
@@ -349,12 +349,15 @@ async fn make_batch_plan(
   config_items(&mut b, current, &desired, &writes);
   match action {
     ServiceActionKind::Update => {
+      b.explicit_pins.clone_from(&runtime);
       b.service_targets = Some(runtime);
       let net = snap.net(&desired);
       service_items(
         &mut b, &snap, current, &desired, &net, &status, &writes,
       )?;
       build_agent_warnings(state, &desired, &mut b)?;
+      select_planned_service_images(state, &snap, &desired, &mut b)
+        .await?;
     }
     kind => {
       for name in runtime {

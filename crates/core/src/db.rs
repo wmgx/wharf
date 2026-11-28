@@ -2051,7 +2051,7 @@ pub fn applied(
 ) -> Result<std::collections::BTreeMap<String, Applied>, ApiError> {
   let mut stmt = c
     .prepare(
-      "SELECT service, hash, created_at, images, commit_sha, json_extract(spec, '$.source.build.git.repo') || '#' || json_extract(spec, '$.source.build.git.ref'), spec FROM deployments
+      "SELECT service, hash, created_at, images, commit_sha, json_extract(spec, '$.source.build.git.repo') || '#' || json_extract(spec, '$.source.build.git.ref'), spec, compose FROM deployments
        WHERE id IN (
          SELECT MAX(d.id) FROM deployments d JOIN resources r
            ON r.kind = 'service' AND r.name = d.service AND d.instance_id = json_extract(r.meta, '$.instance_id')
@@ -2096,11 +2096,29 @@ pub fn applied(
           spec: r
             .get::<_, Option<String>>(6)?
             .and_then(|s| serde_json::from_str(&s).ok()),
+          compose: r.get(7)?,
         },
       ))
     })
     .map_err(sql_err)?;
   rows.collect::<Result<_, _>>().map_err(sql_err)
+}
+
+pub(crate) fn mark_deployment_started(
+  c: &Connection,
+  service: &str,
+  server: &str,
+  instance_id: &str,
+  hash: &str,
+) -> Result<(), ApiError> {
+  c.execute(
+    "UPDATE deployments SET started = 1
+     WHERE id = (SELECT MAX(id) FROM deployments WHERE service = ?1 AND instance_id = ?2)
+       AND server = ?3 AND hash = ?4",
+    params![service, instance_id, server, hash],
+  )
+  .map_err(sql_err)?;
+  Ok(())
 }
 
 pub fn service_notes(

@@ -123,6 +123,7 @@ async fn monitoring_only_plan_skips_deploy_but_heartbeat_changes_compose()
   world.services.insert(
     "app".into(),
     ServiceRow {
+      host_groups: Default::default(),
       instance_id: "svc_fixture".into(),
       spec: spec.clone(),
       host_ports: BTreeMap::from([("web".into(), 8080)]),

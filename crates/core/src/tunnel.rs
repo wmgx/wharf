@@ -188,6 +188,8 @@ pub async fn sync(
     .call(
       server,
       AgentOp::ProjectUp(ProjectUp {
+        image_pull_mode: None,
+        local_images: Default::default(),
         project: gateway_project(gateway),
         compose,
         hash: r.compose_hash.clone(),
