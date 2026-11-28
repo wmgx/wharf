@@ -1297,6 +1297,8 @@ pub enum CleanupKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentCleanupEntry {
   pub kind: CleanupKind,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub ephemeral: bool,
   /// 归属服务名（若可从目录名/标签解析）。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub service: Option<String>,

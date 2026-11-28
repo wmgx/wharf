@@ -56,6 +56,7 @@ fn entry(
 ) -> AgentCleanupEntry {
   AgentCleanupEntry {
     kind,
+    ephemeral: false,
     service: service.map(str::to_string),
     display: target.clone(),
     target,
@@ -600,9 +601,23 @@ pub async fn delete(
       OrphanImage => "image",
       _ => unreachable!(),
     };
-    docker
-      .cmd()
-      .args([command, "rm", "--", &req.target])
+    let mut cmd = docker.cmd().args([command, "rm"]);
+    if req.kind == OrphanImage {
+      cmd = cmd.arg("--no-prune");
+    }
+    let targets = if req.kind == OrphanImage {
+      current.image_tags(&req.target)
+    } else {
+      &[]
+    };
+    let targets = if targets.len() < 2 {
+      std::slice::from_ref(&req.target)
+    } else {
+      targets
+    };
+    cmd
+      .arg("--")
+      .args(targets)
       .timeout(Duration::from_secs(60))
       .run(ctx)
       .await?
@@ -731,6 +746,22 @@ pub async fn delete(
         .run(ctx)
         .await?
         .check("移除孤儿项目的已停止容器")?;
+    }
+    // 按 ID 回收项目网络，避免依赖残留 Compose 文件里的网络声明。
+    let current = runtime(docker, ctx).await?;
+    for network in docker_entries(&current, docker, Utc::now())
+      .into_iter()
+      .filter(|entry| {
+        entry.kind == OrphanNetwork
+          && entry.service.as_deref() == Some(key.as_str())
+      })
+    {
+      docker
+        .cmd()
+        .args(["network", "rm", "--", &network.target])
+        .run(ctx)
+        .await?
+        .check("移除孤儿项目网络")?;
     }
   }
   dirfd::remove_tree_under(&base, &rel, ctx).await?;

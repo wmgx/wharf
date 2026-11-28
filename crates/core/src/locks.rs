@@ -1,5 +1,6 @@
 use std::{
   collections::{BTreeMap, BTreeSet},
+  path::PathBuf,
   sync::{Arc, Mutex},
 };
 
@@ -46,12 +47,14 @@ pub enum LockSpec {
   Apply {
     services: BTreeSet<String>,
     block_backups: bool,
+    bind_sources: Vec<PathBuf>,
   },
   Backup(String),
   CoreBackup,
   CoreMaintenance,
   BackupTarget(String),
   Cleanup(String),
+  CleanupPath(PathBuf),
 }
 
 impl LockSpec {
@@ -59,6 +62,7 @@ impl LockSpec {
     Self::Apply {
       services: services.into_iter().collect(),
       block_backups: false,
+      bind_sources: vec![],
     }
   }
 
@@ -74,6 +78,15 @@ impl LockSpec {
       | (CoreMaintenance, CoreBackup) => true,
       (Backup(_), Backup(_)) => true,
       (BackupTarget(a), BackupTarget(b)) => a == b,
+      (Apply { bind_sources, .. }, CleanupPath(path))
+      | (CleanupPath(path), Apply { bind_sources, .. }) => {
+        bind_sources.iter().any(|source| {
+          source.starts_with(path) || path.starts_with(source)
+        })
+      }
+      (CleanupPath(a), CleanupPath(b)) => {
+        a.starts_with(b) || b.starts_with(a)
+      }
       (
         Apply {
           block_backups: true,
@@ -204,9 +217,19 @@ impl OpLockGuard {
     &self,
     target: String,
   ) -> Result<(), ApiError> {
+    self.reserve(LockSpec::BackupTarget(target))
+  }
+
+  pub(crate) fn reserve_cleanup_path(
+    &self,
+    path: PathBuf,
+  ) -> Result<(), ApiError> {
+    self.reserve(LockSpec::CleanupPath(path))
+  }
+
+  fn reserve(&self, spec: LockSpec) -> Result<(), ApiError> {
     let mut state =
       self.state.lock().unwrap_or_else(|p| p.into_inner());
-    let spec = LockSpec::BackupTarget(target);
     state.check(&spec)?;
     state
       .held
@@ -254,6 +277,33 @@ impl Drop for OpLockGuard {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn cleanup_path_conflicts_with_new_shared_bind_on_another_service()
+  {
+    let locks = OpLocks::default();
+    let cleanup = locks
+      .acquire(LockSpec::Cleanup("app".into()), "清理")
+      .unwrap();
+    cleanup.reserve_cleanup_path("/srv/app".into()).unwrap();
+    let error = locks
+      .acquire(
+        LockSpec::Apply {
+          services: BTreeSet::from(["reader".into()]),
+          block_backups: false,
+          bind_sources: vec!["/srv/app/shared".into()],
+        },
+        "部署共享卷消费者",
+      )
+      .err()
+      .unwrap();
+    assert_eq!(error.code, ErrorCode::Busy);
+    assert!(
+      locks
+        .acquire(LockSpec::apply(["reader".into()]), "无挂载部署")
+        .is_ok()
+    );
+  }
 
   #[test]
   fn backup_does_not_block_other_service_apply_or_failover() {

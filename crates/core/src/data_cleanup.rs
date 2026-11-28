@@ -41,6 +41,7 @@ use wharf_api_types::{
 
 pub type CleanupCache =
   std::sync::RwLock<BTreeMap<String, Vec<AgentCleanupEntry>>>;
+pub(crate) const AUTO_ACTOR: &str = "到期清理";
 
 mod inventory;
 pub(crate) use inventory::migration_block;
@@ -65,6 +66,10 @@ fn machine_item(item: &DataCleanupItem) -> bool {
     || matches!(item.kind, OrphanTaskData | OrphanCaddy | OrphanFrpc)
     || item.service.as_ref().is_some_and(|s| {
       s.starts_with(wharf_api_types::agent::TASK_DATA_PREFIX)
+        || (item.kind == OrphanNetwork
+          && (s.starts_with("wharf-gw-")
+            || s == "wharf-link"
+            || s.starts_with("wharf-link-")))
     })
 }
 
@@ -96,7 +101,10 @@ fn update_cache(
   cache.retain(|server, _| {
     skipped.iter().any(|skip| &skip.server == server)
   });
-  for item in items.iter().filter(|i| is_archive(i.item.kind)) {
+  for item in items.iter().filter(|i| {
+    !skipped.iter().any(|skip| skip.server == i.item.server)
+      && (i.record.is_some() || is_archive(i.item.kind))
+  }) {
     cache
       .entry(item.item.server.clone())
       .or_default()
@@ -104,14 +112,12 @@ fn update_cache(
   }
 }
 
-pub async fn refresh_cache(state: &AppState) -> Result<(), ApiError> {
-  let listing = list(
-    state,
-    &Filters::default(),
-    false,
-    &CancellationToken::new(),
-  )
-  .await?;
+pub async fn refresh_cache(
+  state: &Arc<AppState>,
+) -> Result<(), ApiError> {
+  let listing =
+    list(state, &Filters::default(), true, &CancellationToken::new())
+      .await?;
   update_cache(state, &listing.items, &listing.skipped);
   auto_expire_archives(state, listing.items).await
 }
@@ -362,8 +368,13 @@ async fn execute(
       auth.require(Perm::Admin)?;
     }
   }
-  if selected.len() == 1 && !selected[0].item.blocked {
-    state.hub.require_data_cleanup(&selected[0].item.server)?;
+  for server in selected
+    .iter()
+    .filter(|c| !c.item.blocked)
+    .map(|c| &c.item.server)
+    .collect::<BTreeSet<_>>()
+  {
+    state.hub.require_data_cleanup(server)?;
   }
   confirm(&req, &selected)?;
   let mut result = DataCleanupResult {
@@ -484,9 +495,43 @@ async fn delete_candidate(
       item.blocked_reason.clone().unwrap_or_default(),
     ));
   }
-  // 共享卷消费者也可能由其他服务的 apply 创建，整批 apply 必须串行。
-  let _guard =
-    state.locks.acquire(LockSpec::Global, "清理遗留数据")?;
+  let lock = if machine_item(item)
+    && !matches!(item.kind, OrphanTaskData | OrphanContainer)
+  {
+    LockSpec::CoreMaintenance
+  } else {
+    item
+      .service
+      .as_ref()
+      .map_or(LockSpec::CoreMaintenance, |service| {
+        LockSpec::Cleanup(service.clone())
+      })
+  };
+  let guard = state.locks.acquire(lock, "清理遗留数据")?;
+  if matches!(
+    item.kind,
+    BackupMoveRetired | BackupMoveArchive | OrphanBackupRepo
+  ) {
+    guard.reserve_backup_target(item.server.clone())?;
+  }
+  if item.target.starts_with('/') {
+    guard.reserve_cleanup_path(item.target.clone().into())?;
+  }
+  delete_locked_candidate(state, c, cancel).await
+}
+
+async fn delete_locked_candidate(
+  state: &AppState,
+  c: &Candidate,
+  cancel: &CancellationToken,
+) -> Result<CleanupDeleteResult, ApiError> {
+  let item = &c.item;
+  let block = |detail| CleanupDeleteResult {
+    removed: false,
+    freed_bytes: 0,
+    blocked_by: vec![],
+    detail: Some(detail),
+  };
   let snap = snapshot::load_inner(&state.db).await?;
   let inv = state.db.call(inventory).await?;
   let record = inv.records.get(&(
@@ -563,7 +608,8 @@ pub async fn issues(
   snap: &Snapshot,
 ) -> Result<Vec<Issue>, ApiError> {
   let inv = state.db.call(inventory).await?;
-  let mut grouped = BTreeMap::<(_, _), (usize, u64, bool)>::new();
+  let mut grouped =
+    BTreeMap::<(_, _), (usize, Option<u64>, bool)>::new();
   let mut add = |mut c: Candidate| {
     c.update_block(snap, &inv);
     let item = c.item;
@@ -575,27 +621,41 @@ pub async fn issues(
       };
       let group = grouped.entry(subject).or_default();
       group.0 += 1;
-      group.1 = group.1.saturating_add(item.size_bytes.unwrap_or(0));
+      if let Some(bytes) = item.size_bytes {
+        group.1 = Some(group.1.unwrap_or(0).saturating_add(bytes));
+      }
       group.2 |= item.blocked;
     }
   };
+  let cache = state
+    .cleanup_cache
+    .read()
+    .unwrap_or_else(|e| e.into_inner());
   for ((server, kind, svc), record) in &inv.records {
-    add(Candidate::from_record(
+    let mut candidate = Candidate::from_record(
       server,
       *kind,
       svc,
       record,
       inv.policy.keep_days,
       None,
-    ));
+    );
+    if let Some(cached) =
+      cache.get(server).into_iter().flatten().find(|entry| {
+        entry.kind == *kind && entry.target == candidate.item.target
+      })
+    {
+      candidate.item.size_bytes = cached.size_bytes;
+      if let Some(reason) = mount_reason(&cached.blocked_by) {
+        candidate.item.blocked_reason = Some(reason);
+        candidate.item.blocked = true;
+      }
+    }
+    add(candidate);
   }
-  for (server, entries) in state
-    .cleanup_cache
-    .read()
-    .unwrap_or_else(|e| e.into_inner())
-    .iter()
-  {
-    for entry in entries {
+  for (server, entries) in cache.iter() {
+    for entry in entries.iter().filter(|entry| is_archive(entry.kind))
+    {
       add(Candidate::new(
         server,
         entry.clone(),
@@ -606,7 +666,7 @@ pub async fn issues(
   }
   Ok(grouped.into_iter().map(|((kind, name), (count, bytes, blocked))| Issue {
     code: "stale_cleanup_data".into(), level: IssueLevel::Warn,
-    title: format!("{name} 有 {count} 项超期留底（约 {bytes} 字节）{}", if blocked { "，存在清理阻拦" } else { "" }),
+    title: format!("{name} 有 {count} 项超期留底{}{}", bytes.map_or_else(|| "（大小待统计）".into(), |bytes| format!("（约 {bytes} 字节）")), if blocked { "，存在清理阻拦" } else { "" }),
     subject: Some(IssueSubject { kind: kind.into(), name }),
     hint: Some("wharf data cleanup 查看清单，wharf data cleanup --expired --apply 清理到期项".into()),
     ack: None, alert: None,
@@ -614,14 +674,12 @@ pub async fn issues(
 }
 
 async fn auto_expire_archives(
-  state: &AppState,
+  state: &Arc<AppState>,
   items: Vec<Candidate>,
 ) -> Result<(), ApiError> {
   if !crate::jobs::auto_cleanup_enabled(state).await? {
     return Ok(());
   }
-  let cancel = CancellationToken::new();
-  let _cancel = cancel.clone().drop_guard();
   for c in items.into_iter().filter(|c| {
     c.item.expired
       && !c.item.blocked
@@ -630,35 +688,13 @@ async fn auto_expire_archives(
     if !crate::jobs::auto_cleanup_enabled(state).await? {
       break;
     }
-    let policy = state.db.call(|c| cleanup_policy(c)).await?;
-    if let Some(created) = c.item.created_at
-      && created + chrono::Duration::days(i64::from(policy.keep_days))
-        > chrono::Utc::now()
+    match crate::apply::run_cleanup_archive(
+      state.clone(),
+      c.item.server,
+      c.agent,
+    )
+    .await
     {
-      continue;
-    }
-    match delete_candidate(state, &c, &cancel).await {
-      Ok(result) if result.removed => {
-        crate::audit::insert(
-          state,
-          wharf_api_types::view::AuditEntry {
-            id: 0,
-            at: db::now_ms(),
-            kind: "cleanup".into(),
-            actor: "到期清理".into(),
-            method: "DELETE".into(),
-            path: "/api/data/cleanup".into(),
-            status: Some(200),
-            duration_ms: None,
-            detail: Some(format!(
-              "data_cleanup deleted=1 freed_bytes={} items=[{}]",
-              result.freed_bytes, c.item.id
-            )),
-            source: None,
-          },
-        )
-        .await?;
-      }
       Err(e)
         if !matches!(
           e.code,
@@ -671,6 +707,65 @@ async fn auto_expire_archives(
     }
   }
   Ok(())
+}
+
+pub(crate) async fn expire_archive(
+  state: &AppState,
+  server: &str,
+  entry: AgentCleanupEntry,
+  progress: crate::hub::ProgressFn,
+  cancel: &CancellationToken,
+) -> Result<(), ApiError> {
+  if !crate::jobs::auto_cleanup_enabled(state).await? {
+    progress("自动清理已暂停".into());
+    return Ok(());
+  }
+  let policy = state.db.call(|c| cleanup_policy(c)).await?;
+  let c = Candidate::new(server, entry, None, policy.keep_days);
+  if !c.item.expired
+    || !matches!(c.item.kind, MigrateTargetBackup | RestoreBackup)
+  {
+    progress("清理项已失效或未到期".into());
+    return Ok(());
+  }
+  let result = delete_locked_candidate(state, &c, cancel).await?;
+  if result.removed {
+    progress(format!(
+      "已删除 {}，释放 {} 字节",
+      c.item.display, result.freed_bytes
+    ));
+  } else {
+    let reason = result
+      .detail
+      .or_else(|| mount_reason(&result.blocked_by))
+      .unwrap_or_default();
+    progress(format!("跳过删除 {}：{reason}", c.item.display));
+  }
+  Ok(())
+}
+
+pub(crate) async fn audit_auto_cleanup(
+  state: &AppState,
+  run_id: &str,
+  title: &str,
+  ok: bool,
+) -> Result<(), ApiError> {
+  crate::audit::insert(
+    state,
+    wharf_api_types::view::AuditEntry {
+      id: 0,
+      at: db::now_ms(),
+      kind: "cleanup".into(),
+      actor: AUTO_ACTOR.into(),
+      method: "DELETE".into(),
+      path: "/api/data/cleanup".into(),
+      status: Some(if ok { 200 } else { 500 }),
+      duration_ms: None,
+      detail: Some(format!("{run_id} {title}")),
+      source: None,
+    },
+  )
+  .await
 }
 
 #[cfg(test)]

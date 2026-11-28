@@ -1,4 +1,4 @@
-use super::{CORE, entry, reserved, valid};
+use super::{CORE, entry, frpc_project, reserved, valid};
 use crate::{
   docker::{Docker, parse_bind_mounts},
   exec::Ctx,
@@ -43,7 +43,6 @@ struct Mount {
 struct Image(
   String,
   Option<Vec<String>>,
-  Option<Vec<String>>,
   i64,
   DateTime<Utc>,
   Option<Labels>,
@@ -70,6 +69,15 @@ pub(super) struct Runtime {
 }
 
 impl Runtime {
+  pub(super) fn image_tags(&self, id: &str) -> &[String] {
+    self
+      .images
+      .iter()
+      .find(|image| image.0 == id)
+      .and_then(|image| image.1.as_deref())
+      .unwrap_or_default()
+  }
+
   fn removable_stopped(
     docker: &Docker,
     project: &str,
@@ -127,7 +135,9 @@ impl Runtime {
           c.1.trim_start_matches('/') == m.container
             && (label(&c.5, PROJECT) == Some(project)
               && Self::removable_stopped(docker, project, c)
-              || label(&c.5, "wharf.system") == Some("agent")
+              || (label(&c.5, "wharf.system") == Some("agent")
+                || (label(&c.5, "wharf.system") == Some("1")
+                  && m.container == "wharf-agent"))
                 && Path::new(&m.source) == docker.data_dir)
         })
       })
@@ -264,7 +274,7 @@ pub(super) async fn runtime(
       docker,
       "image",
       &images,
-      r#"[{{json .Id}},{{json .RepoTags}},{{json .RepoDigests}},{{json .Size}},{{json .Created}},{{json .Config.Labels}}]"#,
+      r#"[{{json .Id}},{{json .RepoTags}},{{json .Size}},{{json .Created}},{{json .Config.Labels}}]"#,
       ctx
     ),
   )?;
@@ -300,7 +310,12 @@ pub(super) fn docker_entries(
     {
       continue;
     }
-    let task = project.and_then(|p| p.strip_prefix(TASK_DATA_PREFIX));
+    let task = label(labels, "wharf.task")
+      .or_else(|| {
+        project.and_then(|p| p.strip_prefix(TASK_DATA_PREFIX))
+      })
+      .filter(|name| valid(name))
+      .map(|name| format!("{TASK_DATA_PREFIX}{name}"));
     let restic = label(labels, "wharf.restic.service");
     let ephemeral = task.is_some()
       || restic.is_some()
@@ -319,8 +334,12 @@ pub(super) fn docker_entries(
     } else {
       owned
     } {
-      let mut item =
-        entry(OrphanContainer, restic.or(project), id.clone());
+      let mut item = entry(
+        OrphanContainer,
+        task.as_deref().or(restic).or(project),
+        id.clone(),
+      );
+      item.ephemeral = ephemeral;
       item.display = name.trim_start_matches('/').to_string();
       item.created_at = Some(created.timestamp_millis());
       if !stopped {
@@ -351,7 +370,12 @@ pub(super) fn docker_entries(
     let owner = label(labels, PROJECT)
       .or_else(|| label(labels, "wharf.service"))
       .or_else(|| label(labels, "wharf.gateway"));
-    if owner.is_some_and(reserved)
+    let system_project =
+      label(labels, PROJECT).is_some_and(|project| {
+        frpc_project(project)
+          || project.strip_prefix("wharf-gw-").is_some_and(valid)
+      });
+    if (owner.is_some_and(reserved) && !system_project)
       || matches!(
         name.as_str(),
         "bridge" | "host" | "none" | "ingress" | "docker_gwbridge"
@@ -374,9 +398,7 @@ pub(super) fn docker_entries(
     item.display = name.clone();
     entries.push(item);
   }
-  for Image(id, tags, digests, size, created, labels) in
-    &current.images
-  {
+  for Image(id, tags, size, created, labels) in &current.images {
     if current.containers.iter().any(|c| &c.4 == id) {
       continue;
     }
@@ -391,18 +413,14 @@ pub(super) fn docker_entries(
           tags[0].split_once(':')?.0.strip_prefix("wharf-build-")
         })
     });
-    if (tags.is_empty()
-      && owner.is_none()
-      && digests.as_ref().is_some_and(|digests| !digests.is_empty()))
-      || (!tags.is_empty()
-        && !owner.is_some_and(|owner| {
-          valid(owner)
-            && tags.iter().all(|tag| {
-              tag
-                .starts_with(&format!("{BUILD_IMAGE_PREFIX}{owner}:"))
-                || tag.starts_with(&format!("wharf-build-{owner}:"))
-            })
-        }))
+    if !tags.is_empty()
+      && !owner.is_some_and(|owner| {
+        valid(owner)
+          && tags.iter().all(|tag| {
+            tag.starts_with(&format!("{BUILD_IMAGE_PREFIX}{owner}:"))
+              || tag.starts_with(&format!("wharf-build-{owner}:"))
+          })
+      })
     {
       continue;
     }
@@ -434,8 +452,8 @@ fn orphan_docker_resources_skip_in_use_and_third_party() {
       Network("empty".into(), "empty".into(), Some(Labels::from([(PROJECT.into(), "old".into())])), None),
     ],
     images: vec![
-      Image("used".into(), None, None, 2, created, None),
-      Image("old".into(), Some(vec!["wharf-build/old:1".into()]), None, 2, created, None),
+      Image("used".into(), None, 2, created, None),
+      Image("old".into(), Some(vec!["wharf-build/old:1".into()]), 2, created, None),
     ],
     ..Default::default()
   };
@@ -446,5 +464,98 @@ fn orphan_docker_resources_skip_in_use_and_third_party() {
       .map(|item| item.target.as_str())
       .collect::<Vec<_>>(),
     ["temp", "free-vol", "empty", "old"]
+  );
+}
+
+#[test]
+fn upgraded_agent_root_mount_is_ignored_only_for_project_cleanup() {
+  use serde_json::json;
+
+  let (_tmp, docker) = crate::docker::fake_docker("exit 0");
+  let mut current = Runtime::default();
+  for (name, role, source) in [
+    ("wharf-agent", "1", docker.data_dir.clone()),
+    ("backup", "1", docker.data_dir.clone()),
+  ] {
+    current.containers.push(
+      serde_json::from_value(json!([
+        name, format!("/{name}"), "running", Utc::now(), "image",
+        {"wharf.system":role}, [], {}
+      ]))
+      .unwrap(),
+    );
+    current.binds.push(BindMountUser {
+      container: name.into(),
+      project: None,
+      source: source.display().to_string(),
+      rw: true,
+    });
+  }
+  for project in ["wharf-gw-old", "wharf-link-old"] {
+    let users = crate::docker::containers_using_path(
+      &docker.project_dir(project),
+      &current.project_binds(&docker, project),
+    );
+    assert_eq!(users, ["backup"]);
+  }
+}
+
+#[test]
+fn stale_ephemeral_containers_include_tasks_without_compose_labels() {
+  use serde_json::json;
+
+  let (_tmp, docker) = crate::docker::fake_docker("exit 0");
+  let now = Utc::now();
+  let old = now - chrono::Duration::minutes(30);
+  let current = Runtime {
+    containers: [
+      (
+        "backup",
+        "exited",
+        old,
+        json!({"wharf.restic.service":"app"}),
+      ),
+      (
+        "temp",
+        "dead",
+        old,
+        json!({"wharf.temp":"1", PROJECT:"app"}),
+      ),
+      ("task", "exited", old, json!({"wharf.task":"nightly"})),
+      ("running", "running", old, json!({"wharf.task":"nightly"})),
+      ("recent", "exited", now, json!({"wharf.task":"nightly"})),
+    ]
+    .into_iter()
+    .map(|(name, status, created, labels)| {
+      serde_json::from_value(json!([
+        name,
+        format!("/{name}"),
+        status,
+        created,
+        "image",
+        labels,
+        [],
+        {}
+      ]))
+      .unwrap()
+    })
+    .collect(),
+    ..Default::default()
+  };
+  let entries = docker_entries(&current, &docker, now);
+  assert_eq!(
+    entries
+      .iter()
+      .map(|e| (
+        e.display.as_str(),
+        e.service.as_deref(),
+        e.ephemeral
+      ))
+      .collect::<Vec<_>>(),
+    [
+      ("backup", Some("app"), true),
+      ("temp", Some("app"), true),
+      ("task", Some("wharf-task-nightly"), true),
+    ]
   );
 }

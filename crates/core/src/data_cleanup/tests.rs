@@ -214,6 +214,15 @@ async fn orphan_caddy_and_frpc_dirs_detected_and_active_protected() {
     (OrphanCaddy, Some("old"), "/srv/wharf-gw-old", false),
     (OrphanFrpc, None, "wharf-link-s2", true),
     (OrphanFrpc, None, "wharf-link-s9", false),
+    (OrphanNetwork, Some("wharf-gw-live"), "live-net", true),
+    (OrphanNetwork, Some("wharf-gw-old"), "old-net", false),
+    (
+      OrphanNetwork,
+      Some("wharf-link-s2"),
+      "link-current-net",
+      true,
+    ),
+    (OrphanNetwork, Some("wharf-link-s9"), "link-old-net", false),
   ] {
     assert_eq!(
       active_resource(
@@ -444,6 +453,223 @@ async fn auto_expire_defaults_off_and_never_auto_deletes_backup_repos_or_orphans
   refresh_cache(&state).await.unwrap();
   assert_eq!(deletes.load(std::sync::atomic::Ordering::Relaxed), 0);
   seed(&state, r#"INSERT INTO settings VALUES ('data_cleanup.policy','{"auto_expire":true}');"#).await;
+  state
+    .safe_mode
+    .store(true, std::sync::atomic::Ordering::Release);
+  assert!(!crate::jobs::auto_cleanup_enabled(&state).await.unwrap());
+  refresh_cache(&state).await.unwrap();
+  assert_eq!(deletes.load(std::sync::atomic::Ordering::Relaxed), 0);
+  let Json(resumed) = crate::state::resume(
+    State(state.clone()),
+    auth(None),
+    Extension(AuditSlot::default()),
+  )
+  .await
+  .map_err(|e| e.0)
+  .unwrap();
+  assert_eq!(resumed.resumed, Some(true));
+  assert!(crate::jobs::auto_cleanup_enabled(&state).await.unwrap());
   refresh_cache(&state).await.unwrap();
   assert_eq!(deletes.load(std::sync::atomic::Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn active_service_filter_keeps_only_its_stale_ephemeral_containers()
+ {
+  let state = crate::rules::tests::test_state();
+  seed(&state, r#"
+    INSERT INTO resources (kind,name,spec,version,created_at,updated_at)
+    VALUES ('service','app','{"server":"s1","source":{"image":"fixture:1"}}',1,0,0);
+  "#).await;
+  let snap = snapshot::load_inner(&state.db).await.unwrap();
+  let inv = state.db.call(inventory).await.unwrap();
+  let mut container =
+    entry(OrphanContainer, Some("app"), "container-id");
+  assert!(active_resource(
+    &snap,
+    &inv,
+    "s1",
+    &container,
+    &Ok(vec![])
+  ));
+  container.ephemeral = true;
+  assert!(!active_resource(
+    &snap,
+    &inv,
+    "s1",
+    &container,
+    &Ok(vec![])
+  ));
+}
+
+#[tokio::test]
+async fn batch_preflight_preserves_old_agent_and_offline_errors() {
+  let state = crate::rules::tests::test_state();
+  seed(&state, "
+    INSERT INTO cleanups (service, server, due_at) VALUES
+    ('a','old',0), ('b','old',0), ('a','offline',0), ('b','offline',0);
+  ").await;
+  state.hub.mock_safe_delete_agent("old", |_| {
+    panic!("旧 agent 不应收到清理请求")
+  });
+  for (server, code, suggestions) in [
+    ("old", ErrorCode::Conflict, &["wharf upgrade"][..]),
+    ("offline", ErrorCode::AgentOffline, &[][..]),
+  ] {
+    let response = execute(
+      State(state.clone()),
+      auth(None),
+      Extension(AuditSlot::default()),
+      Json(DataCleanupExecRequest {
+        server: Some(server.into()),
+        expired_only: true,
+        ..Default::default()
+      }),
+    )
+    .await;
+    let err = response.err().unwrap().0;
+    assert_eq!(err.code, code);
+    assert_eq!(err.suggest, suggestions);
+  }
+}
+
+#[tokio::test]
+async fn stale_cleanup_status_uses_measured_record_and_archive_sizes()
+{
+  let state = crate::rules::tests::test_state();
+  migrations(&state).await;
+  seed(&state, r#"
+    INSERT INTO settings (key, value) VALUES ('backup_move.retired.app@s1',
+      '{"service":"app","is_core":false,"server":"s1","path":"/srv/wharf-backup/app","moved_at":0,"expires_at":1}');
+  "#).await;
+  state.hub.mock_data_cleanup_agent("s1", |op| match op {
+    AgentOp::CleanupScan(request) => {
+      assert!(request.compute_sizes);
+      Ok(json!({
+        "path_stats": {
+          "/srv/app": {"exists":true,"size_bytes":100},
+          "/srv/wharf-backup/app": {"exists":true,"size_bytes":250}
+        },
+        "entries": [{
+          "kind":"restore_backup","service":"app","target":"/srv/.wharf-restore/snapshot",
+          "display":"snapshot","created_at":0,"size_bytes":300
+        }]
+      }))
+    }
+    _ => panic!("只刷新清理缓存"),
+  });
+  refresh_cache(&state).await.unwrap();
+  let snap = snapshot::load_inner(&state.db).await.unwrap();
+  let titles: Vec<_> = issues(&state, &snap)
+    .await
+    .unwrap()
+    .into_iter()
+    .map(|i| i.title)
+    .collect();
+  assert_eq!(
+    titles,
+    [
+      "app 有 3 项超期留底（约 650 字节）",
+      "other 有 1 项超期留底（大小待统计）"
+    ]
+  );
+}
+
+#[tokio::test]
+async fn service_cleanup_allows_unrelated_apply_and_reserves_repo_target()
+ {
+  let state = crate::rules::tests::test_state();
+  state.hub.mock_data_cleanup_agent("s1", |op| match op {
+    AgentOp::CleanupDelete(req) if req.kind == OrphanBackupRepo => {
+      Ok(json!({"removed":true}))
+    }
+    _ => panic!("只应删除测试仓库"),
+  });
+  let c = Candidate::new(
+    "s1",
+    entry(OrphanBackupRepo, Some("app"), "/srv/wharf-backup/app"),
+    None,
+    7,
+  );
+  let cancel = CancellationToken::new();
+  let other = state
+    .locks
+    .acquire(LockSpec::apply(["other".into()]), "部署其他服务")
+    .unwrap();
+  assert!(
+    delete_candidate(&state, &c, &cancel).await.unwrap().removed
+  );
+  drop(other);
+  let backup = state
+    .locks
+    .acquire(LockSpec::Backup("other".into()), "同服务器备份")
+    .unwrap();
+  backup.reserve_backup_target("s1".into()).unwrap();
+  assert_eq!(
+    delete_candidate(&state, &c, &cancel)
+      .await
+      .unwrap_err()
+      .code,
+    ErrorCode::Busy
+  );
+}
+
+#[tokio::test]
+async fn migration_and_archive_expiry_record_runs_and_audit() {
+  let state = crate::rules::tests::test_state();
+  migrations(&state).await;
+  seed(&state, r#"
+    INSERT INTO settings VALUES ('data_cleanup.policy','{"auto_expire":true}');
+    INSERT INTO resources (kind,name,spec,version,created_at,updated_at)
+    VALUES ('server','s3','{}',1,0,0);
+  "#).await;
+  state.hub.mock_safe_delete_agent("s1", |op| {
+    assert!(matches!(op, AgentOp::RemoveData { service } if service == "app"));
+    Ok(json!({"removed":true}))
+  });
+  state.hub.mock_data_cleanup_agent("s3", |op| match op {
+    AgentOp::CleanupScan(_) => Ok(json!({"entries":[{
+      "kind":"restore_backup","service":"app","target":"/srv/.wharf-restore/snapshot",
+      "display":"snapshot","created_at":0
+    }]})),
+    AgentOp::CleanupDelete(req) if req.kind == RestoreBackup => Ok(json!({"removed":true})),
+    _ => panic!("不相关的请求"),
+  });
+  let migration = crate::apply::start_task_by(
+    state.clone(),
+    "迁移旧数据".into(),
+    crate::planner::Step::CleanupData {
+      service: "app".into(),
+      server: "s1".into(),
+      instance_id: Some("svc_old".into()),
+    },
+    Some(AUTO_ACTOR.into()),
+  )
+  .await
+  .unwrap();
+  tokio::time::timeout(Duration::from_secs(3), async {
+    while state.runs.is_active(&migration.run_id) {
+      tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+  })
+  .await
+  .unwrap();
+  refresh_cache(&state).await.unwrap();
+  let linked = state.db.call(|c| c.query_row(
+    "SELECT COUNT(*) FROM runs JOIN audit_log ON instr(audit_log.detail, runs.id) = 1
+     WHERE runs.actor = '到期清理' AND runs.status = 'succeeded'
+       AND audit_log.actor = '到期清理' AND audit_log.kind = 'cleanup' AND audit_log.status = 200",
+    [], |r| r.get::<_, usize>(0),
+  ).map_err(sql_err)).await.unwrap();
+  assert_eq!(linked, 2);
+  assert!(
+    state
+      .db
+      .call(inventory)
+      .await
+      .unwrap()
+      .records
+      .keys()
+      .all(|(_, _, svc)| svc != "app")
+  );
 }

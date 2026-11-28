@@ -241,6 +241,27 @@ pub(super) fn active_resource(
       .records
       .contains_key(&(server.into(), kind, service.into()))
   };
+  let gateway_active = |gateway: &str| {
+    snap
+      .world
+      .gateways
+      .get(gateway)
+      .is_some_and(|gw| gw.spec.server == server)
+      || snap
+        .pending
+        .gateway_downs
+        .iter()
+        .any(|p| p.gateway == gateway && p.server == server)
+      || snap.pending.gateways_after_dns.contains(gateway)
+  };
+  let link_active = |project: &str| {
+    !snap.pending.links_after_dns.is_empty()
+      || links.as_ref().ok().is_none_or(|links| {
+        links.iter().any(|link| {
+          link.server == server && link.project == project
+        })
+      })
+  };
   match item.kind {
     OrphanServiceData => {
       !item.blocked_by.is_empty()
@@ -260,35 +281,24 @@ pub(super) fn active_resource(
         || registered(BackupMoveRetired)
         || inv.moving_backups.contains(service)
     }
+    OrphanContainer if item.ephemeral => false,
     OrphanContainer | OrphanVolume | OrphanNetwork | OrphanImage => {
       known_service(snap, service)
         || snap.world.gateways.contains_key(service)
+        || item.kind == OrphanNetwork
+          && (service
+            .strip_prefix("wharf-gw-")
+            .is_some_and(gateway_active)
+            || (service == "wharf-link"
+              || service.starts_with("wharf-link-"))
+              && link_active(service))
         || service
           .strip_prefix(wharf_api_types::agent::TASK_DATA_PREFIX)
           .is_some_and(|task| inv.tasks.contains(task))
         || compose_resource_declared(snap, server, item)
     }
-    OrphanCaddy => {
-      snap
-        .world
-        .gateways
-        .get(service)
-        .is_some_and(|gw| gw.spec.server == server)
-        || snap
-          .pending
-          .gateway_downs
-          .iter()
-          .any(|p| p.gateway == service && p.server == server)
-        || snap.pending.gateways_after_dns.contains(service)
-    }
-    OrphanFrpc => {
-      !snap.pending.links_after_dns.is_empty()
-        || links.as_ref().ok().is_none_or(|links| {
-          links.iter().any(|link| {
-            link.server == server && link.project == item.target
-          })
-        })
-    }
+    OrphanCaddy => gateway_active(service),
+    OrphanFrpc => link_active(&item.target),
     _ => false,
   }
 }
@@ -538,6 +548,7 @@ impl Candidate {
     let stats = scan.and_then(|scan| scan.path_stats.get(&target));
     let agent = AgentCleanupEntry {
       kind,
+      ephemeral: false,
       service: Some(service.into()),
       target: target.clone(),
       display: target.clone(),

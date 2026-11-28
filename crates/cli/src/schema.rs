@@ -218,12 +218,51 @@ mod tests {
     assert!(
       super::paths(&cleanup)
         .iter()
-        .any(|row| row["path"] == "items.id")
+        .any(|row| row["path"] == "items[].id")
     );
     let commands = crate::describe::commands(&[]);
     for entry in commands["commands"].as_array().unwrap() {
       if let Some(schema) = entry["returns"].as_str() {
         assert!(all.contains_key(schema));
+      }
+    }
+  }
+
+  #[test]
+  fn cleanup_web_schema_keeps_defaulted_fields_optional() {
+    let web = wharf_api_types::web_schema::web_schema();
+    for (name, fields) in [
+      (
+        "DataCleanupExecRequest",
+        &[
+          "all",
+          "confirm",
+          "expired_only",
+          "ids",
+          "include_unlabeled",
+          "kind",
+          "server",
+          "service",
+        ][..],
+      ),
+      ("DataCleanupPolicy", &["auto_expire", "keep_days"][..]),
+      ("DataCleanupItem", &["blocked", "expired"][..]),
+      ("DataCleanupActionResult", &["freed_bytes"][..]),
+    ] {
+      let schema = &web["$defs"][name];
+      for field in fields {
+        assert!(
+          schema["properties"][*field].is_object(),
+          "{name}.{field}"
+        );
+        assert!(
+          !schema["required"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|required| required == *field),
+          "{name}.{field}"
+        );
       }
     }
   }

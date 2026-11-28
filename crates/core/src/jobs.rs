@@ -293,17 +293,12 @@ pub fn schedule_cleanup(
 pub(crate) async fn auto_cleanup_enabled(
   state: &AppState,
 ) -> Result<bool, ApiError> {
-  let safe_mode =
-    std::env::var("WHARF_SAFE_MODE").ok().is_some_and(|value| {
-      !matches!(
-        value.to_ascii_lowercase().as_str(),
-        "" | "false" | "0" | "no" | "off"
-      )
-    });
-  Ok(
-    !safe_mode
-      && state.db.call(|c| cleanup_policy(c)).await?.auto_expire,
-  )
+  if state.is_safe_mode() {
+    return Ok(false);
+  }
+  let enabled =
+    state.db.call(|c| cleanup_policy(c)).await?.auto_expire;
+  Ok(enabled && !state.is_safe_mode())
 }
 
 async fn cleanups(state: &Arc<AppState>) -> Result<(), ApiError> {
@@ -334,7 +329,7 @@ async fn cleanups(state: &Arc<AppState>) -> Result<(), ApiError> {
         server,
         instance_id,
       },
-      Some("到期清理".into()),
+      Some(crate::data_cleanup::AUTO_ACTOR.into()),
     )
     .await;
     return match result {
