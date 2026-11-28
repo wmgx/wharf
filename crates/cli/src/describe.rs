@@ -509,6 +509,8 @@ pub fn commands(prefix: &[String]) -> Value {
 mod tests {
   #[test]
   fn var_commands_report_returns_and_respect_global_scope() {
+    use super::{commands, json, usable};
+
     let prefix = ["var".into()];
     let described = commands(&prefix);
     let entries = described["commands"].as_array().unwrap();
