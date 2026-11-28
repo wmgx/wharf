@@ -399,6 +399,7 @@ mod tests {
       safe_mode: Default::default(),
       resumed_at: Default::default(),
       edge_syncing: Default::default(),
+      cleanup_cache: Default::default(),
     });
     state
       .db

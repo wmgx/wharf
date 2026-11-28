@@ -37,6 +37,7 @@ fn state_with_db(db: db::Db) -> Arc<AppState> {
     safe_mode: Default::default(),
     resumed_at: Default::default(),
     edge_syncing: Default::default(),
+    cleanup_cache: Default::default(),
   })
 }
 

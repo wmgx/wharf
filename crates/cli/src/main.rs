@@ -18,6 +18,7 @@ mod commands;
 mod config_cmd;
 mod connect;
 mod core_export;
+mod data_cleanup;
 mod deploy;
 mod describe;
 mod dotenv;
@@ -50,6 +51,12 @@ mod top;
 mod tunnel;
 mod view;
 mod wait;
+
+#[derive(Subcommand)]
+pub enum DataCmd {
+  /// 查看迁移、恢复和换备份机的留底及孤儿资源。加 --apply 申请删除确认。
+  Cleanup(data_cleanup::CleanupArgs),
+}
 
 #[derive(Parser)]
 #[command(
@@ -273,7 +280,10 @@ pub enum Command {
     range: String,
   },
   /// 数据：每个服务的挂载和备份情况。
-  Data,
+  Data {
+    #[command(subcommand)]
+    cmd: Option<DataCmd>,
+  },
   /// 按服务名在本机开一个端口连到服务（数据库客户端等用）。
   /// 能直连组网或局域网地址就直连，否则经控制面中转。
   Connect {
@@ -983,6 +993,7 @@ pub enum ServerCmd {
   Prune {
     name: String,
     /// 显式清理超过指定天数的恢复留底，0 表示全部。
+    /// 用 wharf data cleanup --kind restore_backup 可单独查看。
     #[arg(long)]
     restore_days: Option<u32>,
   },

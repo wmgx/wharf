@@ -1563,7 +1563,7 @@ fn paths_overlap(target: &Path, mount: &Path) -> bool {
   mount.starts_with(target) || target.starts_with(mount)
 }
 
-fn parse_bind_mounts(
+pub(crate) fn parse_bind_mounts(
   output: &str,
 ) -> Result<Vec<wharf_api_types::agent::BindMountUser>, ApiError> {
   #[derive(Deserialize)]
@@ -1623,7 +1623,7 @@ fn mount_paths(path: &Path) -> impl Iterator<Item = PathBuf> {
     .chain(std::fs::canonicalize(path).ok())
 }
 
-fn containers_using_path(
+pub(crate) fn containers_using_path(
   target: &Path,
   mounts: &[wharf_api_types::agent::BindMountUser],
 ) -> Vec<String> {

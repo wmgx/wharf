@@ -20,6 +20,7 @@ pub struct AppState {
   pub resumed_at: std::sync::OnceLock<chrono::DateTime<chrono::Utc>>,
   /// 正在后台同步的边缘应用。
   pub edge_syncing: crate::edge_sync::Syncing,
+  pub cleanup_cache: crate::data_cleanup::CleanupCache,
 }
 
 impl AppState {

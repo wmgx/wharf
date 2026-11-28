@@ -1,12 +1,15 @@
 //! 定时任务，每 10 分钟检查一次：
 //! - 开启备份的服务，上次成功备份超过 24 小时就备份（失败后 1 小时内不重试）；
-//! - 迁移后留在旧服务器上的数据，7 天后删除（服务又迁回来了就不删）。
+//! - 开启自动清理时，处理到期的迁移旧机目录。
 
 use std::{sync::Arc, time::Duration};
 
 use rusqlite::params;
 use tokio_util::sync::CancellationToken;
-use wharf_api_types::{ApiError, ErrorCode, agent::RemoveDataResult};
+use wharf_api_types::{
+  ApiError, ErrorCode, agent::RemoveDataResult,
+  view::DataCleanupPolicy,
+};
 
 use crate::{
   apply,
@@ -24,7 +27,20 @@ const FIRST_TICK: Duration = Duration::from_secs(2 * 60);
 const BACKUP_EVERY_MS: i64 = 24 * 3600 * 1000;
 const RETRY_AFTER_MS: i64 = 3600 * 1000;
 /// 迁移后旧数据保留多久。
-pub const KEEP_OLD_DATA_MS: i64 = 7 * 24 * 3600 * 1000;
+const DAY_MS: i64 = 24 * 3600 * 1000;
+pub(crate) const CLEANUP_POLICY_KEY: &str = "data_cleanup.policy";
+
+pub(crate) fn cleanup_policy(
+  c: &rusqlite::Connection,
+) -> Result<DataCleanupPolicy, ApiError> {
+  crate::db::setting(c, CLEANUP_POLICY_KEY)?
+    .map(|value| {
+      serde_json::from_str(&value)
+        .map_err(|_| ApiError::internal("数据清理策略无效"))
+    })
+    .transpose()
+    .map(Option::unwrap_or_default)
+}
 
 /// 边缘应用现状的刷新间隔。
 const EDGE_REFRESH: Duration = Duration::from_secs(5 * 60);
@@ -51,6 +67,18 @@ fn is_backup_candidate(
 }
 
 pub fn spawn(state: Arc<AppState>) {
+  let cleanup_state = state.clone();
+  tokio::spawn(async move {
+    tokio::time::sleep(FIRST_TICK).await;
+    loop {
+      if let Err(e) =
+        crate::data_cleanup::refresh_cache(&cleanup_state).await
+      {
+        tracing::warn!("刷新超期留底失败：{e}");
+      }
+      tokio::time::sleep(REACH_REFRESH).await;
+    }
+  });
   let edge_state = state.clone();
   let reach_state = state.clone();
   tokio::spawn(async move {
@@ -247,19 +275,37 @@ pub fn schedule_cleanup(
   server: &str,
   instance_id: Option<&str>,
 ) -> Result<(), ApiError> {
+  let now = now_ms();
+  let keep_days = cleanup_policy(c)?.keep_days;
   c.execute(
-    "INSERT INTO cleanups (service, server, due_at, instance_id) VALUES (?1, ?2, ?3, ?4)
-     ON CONFLICT (service, server) DO UPDATE SET due_at = excluded.due_at, instance_id = excluded.instance_id",
-    params![service, server, now_ms() + KEEP_OLD_DATA_MS, instance_id],
+    "INSERT INTO cleanups (service, server, due_at, instance_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5)
+     ON CONFLICT (service, server) DO UPDATE SET due_at = excluded.due_at,
+       instance_id = excluded.instance_id, created_at = excluded.created_at,
+       blocked_reason = NULL, next_retry_at = NULL",
+    params![service, server, now + i64::from(keep_days) * DAY_MS, instance_id, now],
   )
   .map_err(sql_err)?;
   Ok(())
 }
 
+pub(crate) async fn auto_cleanup_enabled(
+  state: &AppState,
+) -> Result<bool, ApiError> {
+  if state.is_safe_mode() {
+    return Ok(false);
+  }
+  let enabled =
+    state.db.call(|c| cleanup_policy(c)).await?.auto_expire;
+  Ok(enabled && !state.is_safe_mode())
+}
+
 async fn cleanups(state: &Arc<AppState>) -> Result<(), ApiError> {
+  if !auto_cleanup_enabled(state).await? {
+    return Ok(());
+  }
   let now = now_ms();
   let due: Vec<(String, String, Option<String>)> = state.db.call(move |c| {
-    let mut stmt = c.prepare("SELECT service, server, instance_id FROM cleanups WHERE due_at <= ?1 ORDER BY due_at ASC").map_err(sql_err)?;
+    let mut stmt = c.prepare("SELECT service, server, instance_id FROM cleanups WHERE due_at <= ?1 AND COALESCE(next_retry_at, 0) <= ?1 ORDER BY due_at ASC").map_err(sql_err)?;
     let rows = stmt.query_map([now], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).map_err(sql_err)?;
     rows.collect::<Result<_, _>>().map_err(sql_err)
   }).await?;
@@ -281,7 +327,7 @@ async fn cleanups(state: &Arc<AppState>) -> Result<(), ApiError> {
         server,
         instance_id,
       },
-      Some("到期清理".into()),
+      Some(crate::data_cleanup::AUTO_ACTOR.into()),
     )
     .await;
     return match result {
@@ -310,7 +356,7 @@ pub(crate) async fn cleanup_data(
     let now = now_ms();
     let retry_at = now + RETRY_AFTER_MS;
     let updated = c.execute(
-      "UPDATE cleanups SET due_at = ?5 WHERE service = ?1 AND server = ?2 AND instance_id IS ?3 AND due_at <= ?4",
+      "UPDATE cleanups SET next_retry_at = ?5 WHERE service = ?1 AND server = ?2 AND instance_id IS ?3 AND due_at <= ?4 AND COALESCE(next_retry_at, 0) <= ?4",
       params![query.0, query.1, query.2, now, retry_at],
     ).map_err(sql_err)?;
     Ok((updated != 0).then_some(retry_at))
@@ -320,29 +366,24 @@ pub(crate) async fn cleanup_data(
   };
   let snap = snapshot::load(&state.db).await?;
   let row = snap.world.services.get(service);
-  if let Some(consumer) =
-    crate::shared_volumes::consumers_on(&snap.world, service, server)
-      .next()
-  {
-    progress(format!(
-      "跳过清理 {server} 上 /srv/{service}：{consumer} 仍在引用共享卷"
-    ));
-    return Ok(());
-  }
-  if row.is_some_and(|r| r.spec.server == server)
+  let blocked = if row.is_some_and(|r| r.spec.server == server)
     || snap.deployed.get(service).is_some_and(|s| s == server)
     || snapshot::service_runtime_server(&snap, service)
       == Some(server)
   {
     progress(format!("服务已回到 {server}，取消清理"));
-    drop(guard);
+    None
   } else if row
     .is_some_and(|r| Some(r.instance_id.as_str()) != instance_id)
   {
     progress(format!(
       "服务 {service} 已同名重建，取消旧实例的数据清理"
     ));
-    drop(guard);
+    None
+  } else if let Some(reason) =
+    crate::data_cleanup::migration_block(&snap, service, server)
+  {
+    Some(reason)
   } else {
     let result: RemoveDataResult = state
       .hub
@@ -356,15 +397,28 @@ pub(crate) async fn cleanup_data(
       .await?;
     if result.removed {
       progress(format!("已删除 {server} 上 /srv/{service}"));
+      None
     } else {
-      progress(format!(
-        "跳过删除 {server} 上 /srv/{service}：仍有容器挂载（{}）",
-        result.blocked_by.join("、")
-      ));
+      Some(format!("仍有容器挂载：{}", result.blocked_by.join("、")))
     }
+  };
+  if let Some(reason) = &blocked {
+    progress(format!(
+      "跳过删除 {server} 上 /srv/{service}：{reason}"
+    ));
   }
   state.db.call(move |c| {
-    c.execute("DELETE FROM cleanups WHERE service = ?1 AND server = ?2 AND instance_id IS ?3 AND due_at = ?4", params![key.0, key.1, key.2, retry_at]).map_err(sql_err)?;
+    if let Some(reason) = blocked {
+      c.execute(
+        "UPDATE cleanups SET blocked_reason = ?5 WHERE service = ?1 AND server = ?2 AND instance_id IS ?3 AND next_retry_at = ?4",
+        params![key.0, key.1, key.2, retry_at, reason],
+      )
+    } else {
+      c.execute(
+        "DELETE FROM cleanups WHERE service = ?1 AND server = ?2 AND instance_id IS ?3 AND next_retry_at = ?4",
+        params![key.0, key.1, key.2, retry_at],
+      )
+    }.map_err(sql_err)?;
     Ok(())
   }).await
 }
@@ -500,6 +554,17 @@ async fn failed_cleanup_does_not_starve_next_due_record() {
   .await
   .unwrap_err();
   assert_eq!(err.code, ErrorCode::InvalidInput);
+  state
+    .db
+    .call(|c| {
+      crate::db::set_setting(
+        c,
+        CLEANUP_POLICY_KEY,
+        Some(r#"{"auto_expire":true}"#),
+      )
+    })
+    .await
+    .unwrap();
   cleanups(&state).await.unwrap();
   tokio::time::timeout(Duration::from_secs(2), received)
     .await

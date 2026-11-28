@@ -170,6 +170,29 @@ impl DirFd {
     }
   }
 
+  pub(crate) fn same_mount(&self, other: &Self) -> io::Result<bool> {
+    if self.stat_self()?.st_dev != other.stat_self()?.st_dev {
+      return Ok(false);
+    }
+    #[cfg(target_os = "linux")]
+    {
+      fn mount_id(fd: &DirFd) -> io::Result<String> {
+        let content = std::fs::read_to_string(format!(
+          "/proc/self/fdinfo/{}",
+          fd.0.as_raw_fd()
+        ))?;
+        content
+          .lines()
+          .find_map(|line| line.strip_prefix("mnt_id:"))
+          .map(str::to_string)
+          .ok_or_else(|| io::Error::other("无法读取挂载 ID"))
+      }
+      Ok(mount_id(self)? == mount_id(other)?)
+    }
+    #[cfg(not(target_os = "linux"))]
+    Ok(true)
+  }
+
   pub(crate) fn stat_self(&self) -> io::Result<libc::stat> {
     stat(self.0.as_raw_fd())
   }
@@ -420,11 +443,25 @@ pub(crate) async fn remove_service(
   service: &str,
   ctx: &crate::exec::Ctx,
 ) -> Result<(), ApiError> {
+  validate_name(
+    "服务",
+    service
+      .strip_prefix(wharf_api_types::agent::TASK_DATA_PREFIX)
+      .unwrap_or(service),
+  )?;
+  remove_tree_under(base, Path::new(service), ctx).await
+}
+
+pub(crate) async fn remove_tree_under(
+  base: &Path,
+  rel: &Path,
+  ctx: &crate::exec::Ctx,
+) -> Result<(), ApiError> {
   let base = base.to_owned();
-  let service = service.to_owned();
+  let rel = rel.to_owned();
   let cancel = ctx.cancel.clone();
   tokio::task::spawn_blocking(move || {
-    remove_service_tree(&base, &service, &cancel)
+    remove_tree(&base, &rel, &cancel)
   })
   .await
   .map_err(|e| ApiError::internal(format!("删除目录任务中断：{e}")))?
@@ -454,18 +491,51 @@ pub(crate) fn remove_dir_counted(
   Ok(removed)
 }
 
-fn remove_service_tree(
+fn remove_tree(
   base: &Path,
-  service: &str,
+  rel: &Path,
   cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<(), ApiError> {
-  validate_name(
-    "服务",
-    service
-      .strip_prefix(wharf_api_types::agent::TASK_DATA_PREFIX)
-      .unwrap_or(service),
-  )?;
-  let dir = base.join(service);
+  fn remove_dir(
+    parent: &DirFd,
+    name: &CStr,
+    cancelled: &impl Fn() -> io::Result<()>,
+    depth: usize,
+  ) -> io::Result<()> {
+    cancelled()?;
+    let dir = parent.open_subdir(name)?;
+    if depth > 64 || !parent.same_mount(&dir)? {
+      return Err(io::Error::other("目录层级过深或路径跨挂载点"));
+    }
+    dir.visit_names(|entry| {
+      cancelled()?;
+      if dir.lstat(entry)?.st_mode & libc::S_IFMT == libc::S_IFDIR {
+        remove_dir(&dir, entry, cancelled, depth + 1)?;
+      } else {
+        dir.unlink(entry)?;
+      }
+      Ok(true)
+    })?;
+    cancelled()?;
+    parent.unlink_dir(name)
+  }
+
+  let parts = rel
+    .components()
+    .map(|part| {
+      let Component::Normal(name) = part else {
+        return Err(ApiError::invalid("目录必须位于数据根目录内"));
+      };
+      component(name).map_err(|_| ApiError::invalid("目录名不合法"))
+    })
+    .collect::<Result<Vec<_>, _>>()?;
+  let Some((name, parents)) = parts.split_last() else {
+    return Err(ApiError::invalid("缺少待清理目录"));
+  };
+  if parents.len() > 1 {
+    return Err(ApiError::invalid("待清理目录超过两级"));
+  }
+  let dir = base.join(rel);
   let cancelled = || {
     if cancel.is_cancelled() {
       Err(io::Error::from(io::ErrorKind::Interrupted))
@@ -482,19 +552,28 @@ fn remove_service_tree(
     }
   };
   cancelled().map_err(error)?;
-  let fd = match DirFd::open_dir(base).map_err(|e| dir_error(base, e))
+  let fd = match DirFd::open_absolute(base)
+    .map_err(|e| dir_error(base, e))
   {
     Err(e) if e.code == wharf_api_types::ErrorCode::NotFound => {
       return Ok(());
     }
     result => result?,
   };
-  let name = component(service.as_ref()).map_err(io_err(&dir))?;
-  match fd.lstat(&name) {
+  let mut fd = fd;
+  for part in parents {
+    let child = match fd.open_subdir(part) {
+      Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+      other => other.map_err(|e| dir_error(&dir, e))?,
+    };
+    if !fd.same_mount(&child).map_err(error)? {
+      return Err(ApiError::invalid("路径跨挂载点"));
+    }
+    fd = child;
+  }
+  match fd.lstat(name) {
     Ok(stat) if stat.st_mode & libc::S_IFMT == libc::S_IFDIR => {
-      remove_dir_counted(&fd, &name, &cancelled)
-        .map(|_| ())
-        .map_err(error)
+      remove_dir(&fd, name, &cancelled, 0).map_err(error)
     }
     Ok(_) => Err(ApiError::invalid(format!(
       "{} 是软链接或非目录，已拒绝删除",

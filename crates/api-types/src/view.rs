@@ -2493,3 +2493,147 @@ pub struct TaskArtifactsView {
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub hint: Option<String>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DataCleanupPolicy {
+  /// 是否启用到期自动清理（默认 false，拍板 1 选 A）。
+  #[serde(default)]
+  pub auto_expire: bool,
+  /// 迁移/恢复/换备份机留底默认保留天数（1..=365，默认 7）。
+  #[serde(default = "default_cleanup_keep_days")]
+  pub keep_days: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DataCleanupItem {
+  /// 稳定短 ID（如 `cln_a1b2c3d4e5f6`，由 `kind + server + target` 算 SHA-256 前 12 位），供 `--id` 精准删除。
+  pub id: String,
+  pub kind: crate::agent::CleanupKind,
+  /// 中文来源描述（如 `"迁移旧机目录"`、`"恢复前留底"`、`"换备份机旧仓库"`、`"孤儿服务数据"`、`"Caddy 残留"` 等）。
+  pub source: String,
+  pub server: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub service: Option<String>,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_core: bool,
+  pub target: String,
+  pub display: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub size_bytes: Option<u64>,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub size_estimated: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub created_at: Option<DateTime<Utc>>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub expires_at: Option<DateTime<Utc>>,
+  #[serde(default)]
+  pub expired: bool,
+  /// 绑定服务实例 ID（主要来自 `cleanups` 表）。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub instance_id: Option<String>,
+  /// 是否被在用容器、共享卷或实例变化阻拦，阻拦时禁止删除。
+  #[serde(default)]
+  pub blocked: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub blocked_reason: Option<String>,
+  /// 无 compose project 标签的悬空卷，默认批量不纳入。
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub unlabeled: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub server_status: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CleanupSkippedServer {
+  pub server: String,
+  pub reason: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub hint: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DataCleanupView {
+  pub policy: DataCleanupPolicy,
+  pub total_items: usize,
+  pub expired_items: usize,
+  pub blocked_items: usize,
+  pub total_bytes: u64,
+  pub expired_bytes: u64,
+  /// 各在线服务器 `AgentReport.docker_disk` 汇总的可回收通用镜像/构建缓存字节（仅提示用，归 `wharf server prune`）。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub prune_reclaimable_bytes: Option<u64>,
+  pub items: Vec<DataCleanupItem>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub skipped_servers: Vec<CleanupSkippedServer>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub warnings: Vec<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub hint: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DataCleanupActionResult {
+  pub id: String,
+  pub kind: crate::agent::CleanupKind,
+  pub server: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub service: Option<String>,
+  pub display: String,
+  /// `"deleted"` | `"skipped"` | `"blocked"` | `"failed"`
+  pub status: String,
+  #[serde(default)]
+  pub freed_bytes: u64,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DataCleanupResult {
+  pub deleted: usize,
+  pub skipped: usize,
+  pub blocked: usize,
+  pub failed: usize,
+  pub freed_bytes: u64,
+  pub results: Vec<DataCleanupActionResult>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub warnings: Vec<String>,
+}
+fn default_cleanup_keep_days() -> u32 {
+  7
+}
+
+impl Default for DataCleanupPolicy {
+  fn default() -> Self {
+    Self {
+      auto_expire: false,
+      keep_days: default_cleanup_keep_days(),
+    }
+  }
+}
+#[derive(
+  Debug, Clone, Default, Serialize, Deserialize, JsonSchema,
+)]
+pub struct DataCleanupExecRequest {
+  /// 显式按 ID 删除（与 expired_only / all 互斥）。
+  #[serde(default)]
+  pub ids: Vec<String>,
+  /// 仅清理已到期项（expires_at <= now；不含无到期时间的孤儿项与 unlabeled 卷）。
+  #[serde(default)]
+  pub expired_only: bool,
+  /// 清理筛选范围内的全部未阻塞项（仍默认跳过 unlabeled 卷，除非 include_unlabeled = true）。
+  #[serde(default)]
+  pub all: bool,
+  #[serde(default)]
+  pub server: Option<String>,
+  #[serde(default)]
+  pub service: Option<String>,
+  #[serde(default)]
+  pub kind: Option<crate::agent::CleanupKind>,
+  #[serde(default)]
+  pub include_unlabeled: bool,
+  /// 确认串：单选为 `data-cleanup/<id>`；批量为 `data-cleanup/batch-<8位hex>`。
+  #[serde(default)]
+  pub confirm: Option<String>,
+}

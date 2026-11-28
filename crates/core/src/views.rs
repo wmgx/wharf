@@ -789,6 +789,7 @@ pub async fn status(
   issues.extend(crate::link_cert::issues(&snap, &net));
   issues.extend(crate::totp::issues(&state.db).await?);
   issues.extend(crate::core_backup::issues(&state.db).await?);
+  issues.extend(crate::data_cleanup::issues(state, &snap).await?);
   issues.extend(crate::backup::spike_issues(&snap.world));
   issues.extend(crate::tasks::issues(state).await);
   issues.extend(crate::probe::issues(&snap.world));

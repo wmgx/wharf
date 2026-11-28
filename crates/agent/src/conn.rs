@@ -268,6 +268,7 @@ async fn handshake(
     core_probe: true,
     backup_isolation: true,
     safe_delete: true,
+    data_cleanup: true,
     exec_v2: true,
     shared_volumes: true,
     safe_gateway: true,

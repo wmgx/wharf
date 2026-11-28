@@ -309,7 +309,9 @@ async fn require_retry_access(
           auth.require(Perm::Confirm).map_err(|e| e.0)?;
         }
       }
-      Step::CoreBackup { .. } | Step::CleanupData { .. } => {
+      Step::CoreBackup { .. }
+      | Step::CleanupData { .. }
+      | Step::CleanupArchive { .. } => {
         return Err(ApiError::invalid("此任务不能续跑，请重新发起"));
       }
       Step::AgentUpgrade { .. }
@@ -463,14 +465,14 @@ pub async fn retry_run(
     .await?;
   let actor =
     crate::security_receipt::Actor::from_request((auth, source));
-  spawn_run(
+  drop(spawn_run(
     state,
     run,
     scope_services,
     steps,
     (Some(actor), verify),
     guard,
-  );
+  ));
   Ok(ApplyResponse { run_id })
 }
 
