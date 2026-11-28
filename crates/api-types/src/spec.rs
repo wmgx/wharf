@@ -392,6 +392,26 @@ pub struct ServiceSpec {
   /// 初始化超时秒数（10 到 1800），缺省 300 秒。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub init_timeout_secs: Option<u32>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub extra_logs: Vec<String>,
+}
+
+pub fn validate_extra_log_path(
+  path: &str,
+) -> Result<(), crate::ApiError> {
+  crate::data_sync::path_parts(path).map_err(|_| {
+    crate::ApiError::invalid("日志文件不在服务托管目录内")
+  })?;
+  if path.is_empty()
+    || path
+      .chars()
+      .any(|c| c.is_control() || "*?[]{}\\".contains(c))
+  {
+    return Err(crate::ApiError::invalid(
+      "日志文件不在服务托管目录内",
+    ));
+  }
+  Ok(())
 }
 
 #[derive(

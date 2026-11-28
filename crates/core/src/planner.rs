@@ -640,6 +640,9 @@ pub(crate) async fn make_plan_inner(
       .is_none_or(|old| old.spec != row.spec)
     {
       crate::monitor::require_agent(state, &row.spec)?;
+      if !row.spec.extra_logs.is_empty() {
+        state.hub.extra_logs_conn_id(&row.spec.server)?;
+      }
     }
   }
   validate_changed_templates(&current, &desired)?;

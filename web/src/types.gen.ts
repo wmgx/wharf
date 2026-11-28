@@ -3086,6 +3086,7 @@ export interface ServiceSpec {
    * `[[@服务.端口名]]` 指定端口，末尾加 `:host` / `:port` 只取地址或端口。
    */
   env?: Record<string, string>;
+  extra_logs?: string[];
   /**
    * 配置文件：内容存在 Wharf 里，部署时放进容器（只读，属主 root），跟着部署历史和回滚走。
    * 应用自己改写的内容下次部署会被覆盖。

@@ -137,6 +137,7 @@ fn old_core_ignores_new_hello_capability() {
     deploy_v2: false,
     safe_rollback: true,
     files_v2: true,
+    extra_logs_v1: false,
     key_rotation: true,
   };
   let json = serde_json::to_string(&hello).unwrap();
@@ -386,6 +387,7 @@ impl Hub {
         deploy_v2: false,
         safe_rollback: false,
         files_v2: false,
+        extra_logs_v1: false,
         upgrade_only: false,
       },
     );
@@ -539,6 +541,7 @@ async fn agent_upgrade_needs_no_bound_core_server_or_probe_support() {
     deploy_v2: false,
     safe_rollback: false,
     files_v2: false,
+    extra_logs_v1: false,
     upgrade_only: true,
   };
   state.hub.register("s1", conn.clone());
@@ -618,6 +621,7 @@ fn probe_connection(
     deploy_v2: false,
     safe_rollback: false,
     files_v2: false,
+    extra_logs_v1: false,
     upgrade_only: false,
   };
   (conn, rx)

@@ -38,6 +38,58 @@ pub(super) fn handle(
       )?;
       to_value(tail(&parent, &name, &path, lines, max_bytes, cancel)?)
     }
+    FilesOp::ExtraLog {
+      service,
+      path,
+      lines,
+    } => {
+      wharf_api_types::spec::validate_extra_log_path(&path)?;
+      let invalid =
+        || ApiError::invalid("日志文件不在服务托管目录内");
+      let err = |e: io::Error| {
+        if e.kind() == io::ErrorKind::NotFound {
+          path_error(&path, e)
+        } else {
+          invalid()
+        }
+      };
+      let base = DirFd::open_absolute(base).map_err(err)?;
+      wharf_api_types::validate_name("服务", &service)?;
+      let service = CString::new(service).map_err(|_| invalid())?;
+      let mut dir = base.open_subdir(&service).map_err(err)?;
+      if !base.same_mount(&dir).map_err(err)? {
+        return Err(invalid());
+      }
+      let parts = relative(&path)?;
+      let (name, dirs) = nonempty(&parts)?;
+      for part in dirs {
+        check_cancel(cancel)?;
+        let next = dir.open_subdir(part).map_err(err)?;
+        if !dir.same_mount(&next).map_err(err)? {
+          return Err(invalid());
+        }
+        dir = next;
+      }
+      let fd = dir
+        .open_file(name, libc::O_RDONLY | NOFOLLOW, 0)
+        .map_err(err)?;
+      let st = stat(fd.as_raw_fd()).map_err(err)?;
+      if st.st_mode & libc::S_IFMT != libc::S_IFREG
+        || st.st_nlink != 1
+        || !dir.same_file_mount(&fd).map_err(err)?
+      {
+        return Err(invalid());
+      }
+      to_value(tail_file(
+        File::from(fd),
+        st.st_size as u64,
+        &path,
+        lines,
+        512 << 10,
+        true,
+        cancel,
+      )?)
+    }
     FilesOp::Grep {
       service,
       path,
@@ -170,10 +222,22 @@ fn tail(
   max_bytes: Option<u32>,
   cancel: &CancellationToken,
 ) -> Result<FileTailResult, ApiError> {
-  let (mut file, size) = open_regular(parent, name, path)?;
+  let (file, size) = open_regular(parent, name, path)?;
+  let bytes = max_bytes.unwrap_or(512 << 10).clamp(1024, 2 << 20);
+  tail_file(file, size, path, lines, bytes, false, cancel)
+}
+
+fn tail_file(
+  mut file: File,
+  size: u64,
+  path: &str,
+  lines: u32,
+  bytes: u32,
+  strict: bool,
+  cancel: &CancellationToken,
+) -> Result<FileTailResult, ApiError> {
   let lines = lines.clamp(1, 2000) as usize;
-  let bytes =
-    max_bytes.unwrap_or(512 << 10).clamp(1024, 2 << 20) as u64;
+  let bytes = u64::from(bytes);
   let from = size.saturating_sub(bytes);
   let err = io_err(Path::new(path));
   let mut end = size;
@@ -208,7 +272,19 @@ fn tail(
     end = start;
   }
   let data: Vec<u8> = chunks.into_iter().rev().flatten().collect();
-  let skip = if complete {
+  let skip = if !complete && strict {
+    file.seek(SeekFrom::Start(from - 1)).map_err(&err)?;
+    let mut previous = [0];
+    file.read_exact(&mut previous).map_err(&err)?;
+    if previous == [b'\n'] {
+      0
+    } else {
+      data
+        .iter()
+        .position(|&byte| byte == b'\n')
+        .map_or(data.len(), |i| i + 1)
+    }
+  } else if complete {
     0
   } else {
     data.iter().take_while(|&&byte| byte & 0xc0 == 0x80).count()
@@ -219,7 +295,7 @@ fn tail(
     size,
     lines: content.lines().count() as u32,
     content,
-    truncated: !complete,
+    truncated: !complete || (strict && end > 0 && breaks == lines),
   })
 }
 
@@ -603,6 +679,42 @@ mod tests {
       (500, 1, 1)
     );
     assert!(r.matches.iter().all(|hit| hit.path == "text"));
+  }
+
+  #[test]
+  fn extra_log_reads_only_single_link_regular_files() {
+    let root = tempfile::tempdir().unwrap();
+    let svc = root.path().join("app");
+    fs::create_dir_all(svc.join("logs")).unwrap();
+    let cancel = CancellationToken::new();
+    let read = |path: &str| {
+      handle(
+        root.path(),
+        FilesOp::ExtraLog {
+          service: "app".into(),
+          path: format!("logs/{path}"),
+          lines: 2000,
+        },
+        &cancel,
+      )
+    };
+    let log = svc.join("logs/error.log");
+    fs::write(
+      &log,
+      format!("{}\nbefore\nERROR\nafter\n", "x".repeat(512 << 10)),
+    )
+    .unwrap();
+    let result = read("error.log").unwrap();
+    assert_eq!(result["content"], "before\nERROR\nafter\n");
+    assert_eq!(result["truncated"], true);
+    symlink(&log, svc.join("logs/symlink")).unwrap();
+    fs::hard_link(&log, svc.join("logs/hardlink")).unwrap();
+    for path in ["symlink", "hardlink"] {
+      assert_eq!(
+        read(path).unwrap_err().code,
+        ErrorCode::InvalidInput
+      );
+    }
   }
 
   #[test]

@@ -2148,6 +2148,7 @@ fn validate_service(
     }
   }
   crate::shared_volumes::validate_service(name, spec)?;
+  crate::data::validate_extra_logs(name, spec)?;
   let mut volume_names = BTreeSet::new();
   for volume in &spec.volumes {
     validate_name("数据卷", &volume.name)?;
@@ -2822,6 +2823,7 @@ mod tests {
       stop_signal: None,
       init_cmd: None,
       init_timeout_secs: None,
+      extra_logs: Vec::new(),
       server: server.into(),
       source: Source::Image("traefik/whoami".into()),
       ports: vec![PortSpec {

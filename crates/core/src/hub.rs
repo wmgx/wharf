@@ -84,6 +84,7 @@ struct Conn {
   data_cleanup: bool,
   exec_v2: bool,
   files_v2: bool,
+  extra_logs_v1: bool,
   shared_volumes: bool,
   safe_gateway: bool,
   gateway_probe: bool,
@@ -845,6 +846,27 @@ impl Hub {
     Ok(conn.conn_id)
   }
 
+  pub(crate) fn extra_logs_conn_id(
+    &self,
+    server: &str,
+  ) -> Result<u64, ApiError> {
+    let conns = lock(&self.conns);
+    let conn = conns
+      .get(server)
+      .filter(|conn| !conn.closed.is_cancelled())
+      .ok_or_else(|| offline(server))?;
+    if conn.upgrade_only || !conn.files_v2 || !conn.extra_logs_v1 {
+      return Err(
+        ApiError::new(
+          ErrorCode::Conflict,
+          format!("服务器 {server} 的 agent 不支持文件日志"),
+        )
+        .with_hint("运行 wharf upgrade"),
+      );
+    }
+    Ok(conn.conn_id)
+  }
+
   pub(crate) async fn dispatch_cleanup(
     &self,
     server: &str,
@@ -1423,6 +1445,7 @@ async fn handle_socket(
     data_cleanup,
     exec_v2,
     files_v2,
+    extra_logs_v1,
     shared_volumes,
     safe_gateway,
     gateway_probe,
@@ -1606,6 +1629,7 @@ async fn handle_socket(
     data_cleanup,
     exec_v2,
     files_v2,
+    extra_logs_v1,
     shared_volumes,
     safe_gateway,
     gateway_probe,

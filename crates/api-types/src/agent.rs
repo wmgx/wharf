@@ -194,6 +194,8 @@ pub enum AgentMsg {
     /// 支持扩展文件操作和日志截止时间。
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     files_v2: bool,
+    #[serde(default)]
+    extra_logs_v1: bool,
   },
   KeyReady {
     core_public_key: String,
@@ -758,6 +760,11 @@ pub enum FilesOp {
     lines: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     max_bytes: Option<u32>,
+  },
+  ExtraLog {
+    service: String,
+    path: String,
+    lines: u32,
   },
   Grep {
     service: String,

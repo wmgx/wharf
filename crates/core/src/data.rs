@@ -64,6 +64,38 @@ pub fn mounts(name: &str, spec: &ServiceSpec) -> Vec<DataMount> {
   }
 }
 
+pub(crate) fn validate_extra_logs(
+  name: &str,
+  spec: &ServiceSpec,
+) -> Result<(), ApiError> {
+  if spec.extra_logs.is_empty() {
+    return Ok(());
+  }
+  if spec.extra_logs.len() > 16 {
+    return Err(ApiError::invalid("每个服务最多声明 16 个日志文件"));
+  }
+  let mounts = mounts(name, spec);
+  let mut seen = std::collections::BTreeSet::new();
+  for path in &spec.extra_logs {
+    wharf_api_types::spec::validate_extra_log_path(path)?;
+    if !seen.insert(path) {
+      return Err(ApiError::invalid(format!(
+        "重复声明日志文件 {path}"
+      )));
+    }
+    let full_path = Path::new("/srv").join(name).join(path);
+    if !mounts.iter().any(|mount| {
+      mount.kind == DataKind::Managed
+        && mount.from_service.is_none()
+        && full_path != Path::new(&mount.source)
+        && full_path.starts_with(&mount.source)
+    }) {
+      return Err(ApiError::invalid("日志文件不在服务托管目录内"));
+    }
+  }
+  Ok(())
+}
+
 pub fn undeclared_mounts(
   service: &str,
   declared: &[DataMount],

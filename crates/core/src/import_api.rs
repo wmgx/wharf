@@ -285,6 +285,7 @@ pub async fn preview(
       stop_signal: None,
       init_cmd: None,
       init_timeout_secs: None,
+      extra_logs: Vec::new(),
     },
     adopt: converted.adopt,
     extracted_secrets,

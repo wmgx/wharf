@@ -281,6 +281,9 @@ pub(crate) async fn start_with_actor(
       let spec =
         serde_json::from_value(spec.clone()).map_err(json_err)?;
       crate::monitor::require_agent(&state, &spec)?;
+      if !spec.extra_logs.is_empty() {
+        state.hub.extra_logs_conn_id(&spec.server)?;
+      }
       bind_sources.extend(
         crate::data::mounts(name, &spec).into_iter().filter_map(
           |mount| {
@@ -2818,6 +2821,9 @@ async fn service_up(
   })?;
   let server = &row.spec.server;
   crate::monitor::require_agent(state, &row.spec)?;
+  if !row.spec.extra_logs.is_empty() {
+    state.hub.extra_logs_conn_id(&row.spec.server)?;
+  }
   let readiness = if let Some(m) =
     row.spec.monitor.as_ref().filter(|_| !row.spec.stopped)
   {

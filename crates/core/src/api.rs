@@ -1430,6 +1430,7 @@ async fn heartbeat_reports(
 
 #[derive(Deserialize)]
 pub(super) struct LogsQuery {
+  pub(super) file: Option<String>,
   #[serde(default)]
   pub(super) container: Option<String>,
   #[serde(default = "default_tail")]
@@ -1716,12 +1717,43 @@ pub(super) async fn service_logs(
   Path(name): Path<String>,
   Query(mut q): Query<LogsQuery>,
   RawQuery(raw): RawQuery,
+  Extension(audit): Extension<crate::audit::AuditSlot>,
 ) -> ApiResult<Value> {
   auth.require(Perm::Read)?;
+  crate::token_scope::require_service(&auth, &name)?;
   q.filters = crate::log_search::Filters::query(raw.as_deref())?;
   let snap = snapshot::load(&s.db).await?;
   let (server, project) =
     crate::multi_logs::service_target(&snap, &name)?;
+  if let Some(path) = &q.file {
+    if q.container.is_some()
+      || q.previous_list
+      || q.previous.is_some()
+    {
+      return Err(
+        ApiError::invalid(
+          "--file 不能与 --container 或 --previous 同用",
+        )
+        .into(),
+      );
+    }
+    wharf_api_types::spec::validate_extra_log_path(path)?;
+    let spec = &snap.world.services[&name].spec;
+    if !spec.extra_logs.contains(path) {
+      return Err(
+        ApiError::invalid(format!(
+          "服务 {name} 未声明日志文件 {path}"
+        ))
+        .with_hint(format!("用 --add-extra-log {path} 声明后再查"))
+        .into(),
+      );
+    }
+    crate::data::validate_extra_logs(&name, spec)?;
+    audit.set_detail(format!("logs {name}:{path}"));
+    return Ok(Json(
+      file_logs(&s, &snap, &name, server, path, &q).await?,
+    ));
+  }
   if q.container.is_some()
     && (q.previous_list || q.previous.is_some())
   {
@@ -1751,6 +1783,134 @@ pub(super) async fn service_logs(
     ));
   }
   project_logs(&s, server, project, &q, q.container.clone()).await
+}
+
+async fn file_logs(
+  s: &AppState,
+  snap: &snapshot::Snapshot,
+  name: &str,
+  server: &str,
+  path: &str,
+  q: &LogsQuery,
+) -> Result<Value, ApiError> {
+  use wharf_api_types::agent::{FileTailResult, FilesOp};
+
+  let (since, until) = q.window()?;
+  let limit = q.tail.clamp(1, 2000);
+  let search = q.search(limit as usize, None)?;
+  let window = since.is_some() || until.is_some();
+  let lines = if search.is_some() || window {
+    2000
+  } else {
+    limit
+  };
+  let (result, values): (FileTailResult, _) =
+    crate::files_api::read_from_snapshot(
+      s,
+      snap,
+      name,
+      FilesOp::ExtraLog {
+        service: name.into(),
+        path: path.into(),
+        lines,
+      },
+    )
+    .await
+    .map_err(|e| {
+      if e.code == ErrorCode::NotFound {
+        ApiError::not_found(format!("日志文件 {path} 尚未创建"))
+          .with_hint("确认应用已在该服务的托管数据目录中写入文件")
+      } else {
+        e
+      }
+    })?;
+  let text =
+    crate::log_redact::redact_text_with(&result.content, &values);
+  let (logs, has_time) = if window {
+    file_log_window(
+      &text,
+      since.as_deref(),
+      until.as_deref(),
+      limit as usize,
+      search.is_some(),
+    )
+  } else {
+    (text, true)
+  };
+  let mut out = filter_logs(server, search, &logs);
+  if !has_time {
+    out["hint"] = json!("文件中没有可用于筛选的时间");
+  }
+  out["file"] = json!(path);
+  out["truncated"] =
+    json!(result.truncated || out["truncated"] == true);
+  Ok(out)
+}
+
+fn file_log_window(
+  text: &str,
+  since: Option<&str>,
+  until: Option<&str>,
+  limit: usize,
+  searching: bool,
+) -> (String, bool) {
+  use crate::log_search::parse_rfc3339_utc;
+  let start = since.and_then(parse_rfc3339_utc);
+  let end = until.and_then(parse_rfc3339_utc);
+  let mut time = None;
+  let mut included = Vec::new();
+  for line in text.lines() {
+    if let Some(ts) = line
+      .split_ascii_whitespace()
+      .next()
+      .and_then(parse_rfc3339_utc)
+    {
+      time = Some(ts);
+    }
+    if time.is_some_and(|ts| {
+      start.is_none_or(|start| ts >= start)
+        && end.is_none_or(|end| ts <= end)
+    }) {
+      included.push(line);
+    }
+  }
+  let from = if searching {
+    0
+  } else {
+    included.len().saturating_sub(limit)
+  };
+  let mut text = included[from..].join("\n");
+  if !text.is_empty() {
+    text.push('\n');
+  }
+  (text, time.is_some())
+}
+
+#[test]
+fn extra_log_filters_timestamps_and_context() {
+  let text = "before-window\n2026-01-01T00:00:00Z before\nERROR\nafter\n2026-01-01T01:00:00Z late\n";
+  let (logs, has_time) = file_log_window(
+    text,
+    Some("2026-01-01T00:00:00Z"),
+    Some("2026-01-01T00:10:00Z"),
+    200,
+    true,
+  );
+  assert!(has_time);
+  let mut q: LogsQuery =
+    serde_json::from_value(json!({"grep": "ERROR"})).unwrap();
+  q.filters =
+    crate::log_search::Filters::query(Some("context=1")).unwrap();
+  let out = filter_logs("s1", q.search(200, None).unwrap(), &logs);
+  assert_eq!(
+    out["logs"],
+    "2026-01-01T00:00:00Z before\nERROR\nafter\n"
+  );
+  assert_eq!(out["scanned"], 3);
+  assert_eq!(
+    file_log_window("无时间\n", None, None, 200, false),
+    (String::new(), false)
+  );
 }
 
 async fn previous_logs(

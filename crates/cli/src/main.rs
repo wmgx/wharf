@@ -538,6 +538,13 @@ pub enum CoreSnapshotCmd {
 
 #[derive(Args)]
 pub struct DeployOps {
+  /// 声明服务托管目录中的日志文件，可多次使用。
+  #[arg(long, conflicts_with = "clear_extra_logs")]
+  pub add_extra_log: Vec<String>,
+  #[arg(long, conflicts_with = "clear_extra_logs")]
+  pub rm_extra_log: Vec<String>,
+  #[arg(long)]
+  pub clear_extra_logs: bool,
   /// 优雅停机等待秒数（1 到 600），0 恢复 Docker 默认。
   #[arg(long)]
   pub stop_grace: Option<u32>,
@@ -1138,6 +1145,9 @@ pub enum ServiceCmd {
     /// 服务名，可给 1～10 个。
     #[arg(required = true, num_args = 1..=10)]
     names: Vec<String>,
+    /// 仅看这个已声明的日志文件。
+    #[arg(long, conflicts_with_all = ["follow", "container", "previous", "previous_list"])]
+    file: Option<String>,
     /// 仅看指定 Compose 子容器。
     #[arg(long, conflicts_with_all = ["previous", "previous_list"])]
     container: Option<String>,

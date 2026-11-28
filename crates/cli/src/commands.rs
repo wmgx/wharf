@@ -3195,6 +3195,7 @@ async fn service(
       tail,
       follow: false,
       container,
+      file,
       previous,
       previous_list,
       since,
@@ -3203,6 +3204,11 @@ async fn service(
       max_line,
       filters,
     } => {
+      if file.is_some() && names.len() != 1 {
+        return Err(
+          ApiError::invalid("--file 每次只能查询一个服务").into(),
+        );
+      }
       if (previous.is_some() || previous_list) && names.len() != 1 {
         return Err(
           ApiError::invalid("查看重建前日志每次只能指定一个服务")
@@ -3254,6 +3260,8 @@ async fn service(
         } else if let Some(container) = container {
           c.require_exec_v2_core().await?;
           path.push_str(&format!("?container={}", seg(&container)));
+        } else if let Some(file) = file {
+          path.push_str(&format!("?file={}", seg(&file)));
         }
         path
       } else {
@@ -3414,7 +3422,10 @@ async fn service(
           || ops.unset_stop_signal
           || ops.init_cmd.is_some()
           || ops.unset_init_cmd
-          || ops.init_timeout.is_some())
+          || ops.init_timeout.is_some()
+          || !ops.add_extra_log.is_empty()
+          || !ops.rm_extra_log.is_empty()
+          || ops.clear_extra_logs)
       {
         apply.check_read_only()?;
         wharf_api_types::filter_note(
@@ -3529,6 +3540,7 @@ async fn service(
             stop_signal: None,
             init_cmd: None,
             init_timeout_secs: None,
+            extra_logs: Vec::new(),
           }
         }
       };
@@ -3564,6 +3576,29 @@ async fn service(
             &signal,
           )?)
         };
+      }
+      for path in ops.add_extra_log.iter().chain(&ops.rm_extra_log) {
+        wharf_api_types::spec::validate_extra_log_path(path)?;
+      }
+      if let Some(path) = ops
+        .add_extra_log
+        .iter()
+        .find(|path| ops.rm_extra_log.contains(path))
+      {
+        return Err(
+          ApiError::invalid(format!(
+            "不能同时添加和删除日志文件 {path}"
+          ))
+          .into(),
+        );
+      }
+      spec.extra_logs.retain(|path| {
+        !ops.clear_extra_logs && !ops.rm_extra_log.contains(path)
+      });
+      for path in &ops.add_extra_log {
+        if !spec.extra_logs.contains(path) {
+          spec.extra_logs.push(path.clone());
+        }
       }
       if let Some(secs) = ops.init_timeout {
         spec.init_timeout_secs = (secs != 0).then_some(secs);
