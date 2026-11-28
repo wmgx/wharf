@@ -323,7 +323,9 @@ fn judge(
     }
     Mode::ServiceLog => Verdict::Hold,
     Mode::Heartbeat if last == f64::MAX => Verdict::Fire,
-    Mode::Heartbeat if last == -f64::MAX => Verdict::Recover,
+    Mode::Heartbeat if last == -f64::MAX || !bad(last) => {
+      Verdict::Recover
+    }
     Mode::Heartbeat
       if points.len() >= n
         && points.iter().rev().take(n).all(|v| bad(*v)) =>

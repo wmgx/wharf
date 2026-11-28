@@ -407,7 +407,10 @@ pub fn service_view(
         .map_or(0, |a| a.at.timestamp_millis()),
     ),
     heartbeat: crate::service_monitor::heartbeat::view(
-      snap, name, false,
+      snap,
+      name,
+      net.heartbeat_url.as_deref(),
+      false,
     ),
     uses: crate::shared_volumes::uses(&row.spec),
     used_by: snap

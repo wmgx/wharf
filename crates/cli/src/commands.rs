@@ -312,6 +312,7 @@ async fn dispatch(
       };
       let cmd = ServiceCmd::Deploy {
         name,
+        container: None,
         image: None,
         compose: None,
         from_run: None,
@@ -2204,13 +2205,14 @@ async fn service(
     }
     ServiceCmd::Heartbeat {
       name,
+      container,
       every,
       grace,
       off,
       apply,
     } => {
       crate::service_checks::heartbeat(
-        c, name, every, grace, off, apply, j,
+        c, name, every, grace, off, container, apply, j,
       )
       .await
     }
@@ -2653,6 +2655,7 @@ async fn service(
     }
     ServiceCmd::Deploy {
       name,
+      container,
       image,
       compose,
       from_run,
@@ -2823,6 +2826,9 @@ async fn service(
         spec.container = None;
         spec.volumes = d.volumes;
         spec.limits = d.limits;
+      }
+      if let Some(container) = container {
+        spec.container = Some(container);
       }
       if !port.is_empty() {
         spec.ports = port
@@ -3076,6 +3082,7 @@ async fn service(
     }
     ServiceCmd::Limits {
       name,
+      container,
       memory,
       cpus,
       off,
@@ -3094,6 +3101,9 @@ async fn service(
         .get::<ServiceView>(&format!("/api/services/{}", seg(&name)))
         .await?
         .spec;
+      if let Some(container) = container {
+        spec.container = Some(container);
+      }
       if off {
         spec.limits = None;
       } else {
@@ -3126,6 +3136,7 @@ async fn service(
     }
     ServiceCmd::File {
       name,
+      container,
       path,
       file,
       raw,
@@ -3198,6 +3209,9 @@ async fn service(
           .ok_or_else(missing)?;
         out(j, f, |f| print!("{}", f.content));
         return Ok(());
+      }
+      if let Some(container) = container {
+        spec.container = Some(container);
       }
       changes(
         c,

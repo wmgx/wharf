@@ -1110,8 +1110,12 @@ async fn show_service(
     crate::scope_filter::filter_service_links(allowed, &mut view);
   }
   if query.reveal {
-    view.heartbeat =
-      crate::service_monitor::heartbeat::view(&snap, &name, true);
+    view.heartbeat = crate::service_monitor::heartbeat::view(
+      &snap,
+      &name,
+      net.heartbeat_url.as_deref(),
+      true,
+    );
   }
   Ok(Json(view))
 }

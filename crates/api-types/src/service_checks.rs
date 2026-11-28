@@ -137,6 +137,9 @@ pub struct HeartbeatSpec {
   pub grace_mins: u32,
   #[serde(default, skip_serializing_if = "String::is_empty")]
   pub token: String,
+  /// 已按目标容器配置；旧心跳保留原来的全容器注入。
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub targeted: bool,
 }
 
 #[derive(

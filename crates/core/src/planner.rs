@@ -493,10 +493,16 @@ pub(crate) async fn make_plan_inner(
       svc.host_ports.clear();
     }
   }
+  let mut heartbeat_net = snap.net(&desired);
+  if let Some(public) =
+    state.public_url.as_ref().filter(|u| !u.is_empty())
+  {
+    heartbeat_net.heartbeat_url = Some(public.clone());
+  }
   crate::service_monitor::heartbeat::prepare(
-    state,
     &current,
     &mut desired,
+    heartbeat_net.heartbeat_url.as_deref(),
   )?;
   desired.allocate_ports_with(&retiring_ports(
     &snap, &current, &desired,
@@ -772,9 +778,13 @@ pub(crate) async fn make_plan_inner(
     }
   }
   let mut before_net = snap.net(&current);
-  before_net.heartbeat_url.clone_from(&state.public_url);
   let mut net = snap.net(&desired);
-  net.heartbeat_url.clone_from(&state.public_url);
+  if let Some(public) =
+    state.public_url.as_ref().filter(|u| !u.is_empty())
+  {
+    before_net.heartbeat_url = Some(public.clone());
+    net.heartbeat_url = Some(public.clone());
+  }
   for (host, route) in &desired.routes {
     let Some(sso) = route
       .spec

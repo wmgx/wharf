@@ -220,6 +220,7 @@ async fn monitoring_only_plan_skips_deploy_but_heartbeat_changes_compose()
     let changed = ServiceSpec {
       heartbeat: Some(
         wharf_api_types::service_checks::HeartbeatSpec {
+          targeted: false,
           every_mins,
           grace_mins,
           token: String::new(),

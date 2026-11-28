@@ -1327,6 +1327,10 @@ export type Health = "healthy" | "unhealthy" | "starting" | "none";
 export interface HeartbeatSpec {
   every_mins: number;
   grace_mins: number;
+  /**
+   * 已按目标容器配置；旧心跳保留原来的全容器注入。
+   */
+  targeted?: boolean;
   token?: string;
 }
 

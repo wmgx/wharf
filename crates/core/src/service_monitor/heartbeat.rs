@@ -54,23 +54,49 @@ END;
 ";
 
 pub fn prepare(
-  state: &AppState,
   current: &World,
   desired: &mut World,
+  base: Option<&str>,
 ) -> Result<(), ApiError> {
   for (name, row) in &mut desired.services {
-    let old = current
-      .services
-      .get(name)
-      .and_then(|r| r.spec.heartbeat.as_ref());
+    let before = current.services.get(name).map(|r| &r.spec);
+    let old = before.and_then(|spec| spec.heartbeat.as_ref());
     if let Some(h) = &mut row.spec.heartbeat {
       h.token = old
         .filter(|h| !h.token.is_empty())
         .map_or_else(crate::auth::new_token, |h| h.token.clone());
-      if old != Some(h)
-        && state.public_url.as_deref().is_none_or(str::is_empty)
-      {
+      h.targeted = old.is_some_and(|old| old.targeted);
+      let changed = old != Some(h)
+        || before
+          .is_some_and(|spec| spec.container != row.spec.container);
+      if changed && base.is_none_or(str::is_empty) {
         return Err(missing_url());
+      }
+      h.targeted |= changed;
+      if h.targeted
+        && let wharf_api_types::spec::Source::Compose {
+          content: Some(yaml),
+          ..
+        } = &row.spec.source
+      {
+        crate::render::compose_target(
+          name,
+          yaml,
+          row.spec.container.as_deref(),
+        )
+        .map_err(|e| {
+          if row.spec.container.is_none() {
+            let containers = e.hint.unwrap_or_default();
+            ApiError::invalid(format!(
+              "服务 {name} 要指定接收心跳变量的容器"
+            ))
+            .with_hint(format!(
+              "加上 --container <容器名>。{containers}"
+            ))
+          } else {
+            e
+          }
+        })?;
       }
     }
   }
@@ -78,8 +104,8 @@ pub fn prepare(
 }
 
 fn missing_url() -> ApiError {
-  ApiError::invalid("控制面没有公开地址，无法配置心跳")
-    .with_hint("在控制面设置 WHARF_PUBLIC_URL=https://你的控制面地址，或用 --public-url 启动")
+  ApiError::invalid("没有控制面的访问地址，无法生成心跳链接")
+    .with_hint("先给控制面绑一个域名，或配置 WHARF_PUBLIC_URL")
 }
 
 pub fn redact(spec: &ServiceSpec) -> ServiceSpec {
@@ -90,13 +116,13 @@ pub fn redact(spec: &ServiceSpec) -> ServiceSpec {
   spec
 }
 
-pub fn url(h: &HeartbeatSpec, reveal: bool) -> String {
+pub fn url(
+  h: &HeartbeatSpec,
+  base: Option<&str>,
+  reveal: bool,
+) -> String {
   if reveal {
-    format!(
-      "{}/ping/{}",
-      crate::gate::public_url().unwrap_or_default(),
-      h.token
-    )
+    format!("{}/ping/{}", base.unwrap_or_default(), h.token)
   } else {
     format!("/ping/{}…", h.token.chars().take(4).collect::<String>())
   }
@@ -113,7 +139,16 @@ pub fn compose(
   };
   let public =
     public.filter(|u| !u.is_empty()).ok_or_else(missing_url)?;
-  inject(text, h, public, resolved)
+  let target = if h.targeted
+    && matches!(
+      spec.source,
+      wharf_api_types::spec::Source::Compose { .. }
+    ) {
+    spec.container.as_deref()
+  } else {
+    None
+  };
+  inject(text, h, public, resolved, target)
 }
 
 fn inject(
@@ -121,6 +156,7 @@ fn inject(
   h: &HeartbeatSpec,
   public: &str,
   resolved: bool,
+  target: Option<&str>,
 ) -> Result<String, ApiError> {
   let invalid = || {
     ApiError::invalid("无法给 compose 容器注入心跳变量")
@@ -141,7 +177,23 @@ fn inject(
     "<heartbeat>"
   };
   let url = format!("{public}/ping/{token}").replace('$', "$$");
+  if let Some(target) = target
+    && !services.contains_key(Value::from(target))
+  {
+    let names = services
+      .keys()
+      .filter_map(Value::as_str)
+      .collect::<Vec<_>>()
+      .join("、");
+    return Err(
+      ApiError::invalid(format!("compose 里没有容器 {target}"))
+        .with_hint(format!("可用容器：{names}")),
+    );
+  }
   for (name, service) in services {
+    if target.is_some_and(|target| name.as_str() != Some(target)) {
+      continue;
+    }
     let inherited = merged["services"][name].get("environment");
     let service = service.as_mapping_mut().ok_or_else(invalid)?;
     let environment = service
@@ -206,13 +258,19 @@ fn overdue(h: &HeartbeatSpec, elapsed_ms: i64) -> f64 {
 }
 
 impl Reading {
+  fn is_failed(&self, applied: Option<i64>) -> bool {
+    self.failed
+      && applied
+        .is_none_or(|a| self.last_at.is_none_or(|last| last >= a))
+  }
+
   fn value(
     &self,
     h: &HeartbeatSpec,
     applied: Option<i64>,
     now: i64,
   ) -> f64 {
-    if self.failed {
+    if self.is_failed(applied) {
       return f64::MAX;
     }
     let since = self
@@ -226,27 +284,35 @@ impl Reading {
 pub fn view(
   snap: &Snapshot,
   name: &str,
+  base: Option<&str>,
   reveal: bool,
 ) -> Option<HeartbeatView> {
   let spec = &snap.world.services.get(name)?.spec;
   let h = spec.heartbeat.as_ref()?;
   let r = snap.heartbeats.get(name);
+  let applied =
+    snap.applied.get(name).map(|a| a.at.timestamp_millis());
   let firing = crate::rules::firing_subjects("heartbeat_late")
     .iter()
     .any(|(s, _)| s == name);
   let status = if spec.stopped {
     "已停止"
-  } else if r.is_some_and(|r| r.failed) {
+  } else if r.is_some_and(|r| r.is_failed(applied)) {
     "报到失败"
-  } else if firing {
+  } else if firing
+    && r.is_some_and(|r| r.value(h, applied, now_ms()) > 0.0)
+  {
     "超时"
-  } else if r.and_then(|r| r.last_at).is_some() {
+  } else if r
+    .and_then(|r| r.last_at)
+    .is_some_and(|last| applied.is_none_or(|at| last >= at))
+  {
     "正常"
   } else {
     "等待报到"
   };
   Some(HeartbeatView {
-    url: url(h, reveal),
+    url: url(h, base, reveal),
     last_at: r.and_then(|r| r.last_at),
     status: status.into(),
   })
@@ -283,22 +349,7 @@ pub async fn round(state: &AppState) {
     let applied =
       snap.applied.get(&name).map(|a| a.at.timestamp_millis());
     let value = r.value(h, applied, now_ms());
-    // 报到先落库。若控制面在提交后、通知前退出，重启后也能补上恢复。
-    if !r.failed
-      && crate::rules::firing_since("heartbeat_late", &name)
-        .zip(r.last_ok)
-        .is_some_and(|(since, ok)| ok >= since)
-    {
-      crate::rules::observe(
-        state,
-        METRIC,
-        &name,
-        -f64::MAX,
-        "收到成功报到",
-      )
-      .await;
-    }
-    let detail = if r.failed {
+    let detail = if r.is_failed(applied) {
       let service = name.clone();
       state.db.call(move |c| {
         c.query_row("SELECT output FROM service_heartbeat_reports WHERE service=?1 ORDER BY id DESC LIMIT 1",
@@ -457,10 +508,11 @@ mod tests {
       every_mins: 10,
       grace_mins: 5,
       token: "fixture".into(),
+      targeted: false,
     };
     assert_eq!(overdue(&h, 14 * 60_000), -1.0);
     assert_eq!(overdue(&h, 16 * 60_000), 1.0);
-    let rendered = inject("services:\n  web: {image: nginx, environment: [FOO=bar]}\n  app: {image: alpine}", &h, "https://wharf.example.test", true).unwrap();
+    let rendered = inject("services:\n  web: {image: nginx, environment: [FOO=bar]}\n  app: {image: alpine}", &h, "https://wharf.example.test", true, None).unwrap();
     assert_eq!(
       rendered
         .matches("https://wharf.example.test/ping/fixture")
@@ -468,6 +520,56 @@ mod tests {
       2
     );
     assert!(rendered.contains("FOO=bar"));
+  }
+
+  #[test]
+  fn compose_heartbeat_and_env_respect_container() {
+    let spec = serde_json::from_value::<ServiceSpec>(json!({
+      "server":"s1", "source":{"compose":{"content":"services:\n  app:\n    image: nginx\n    environment: {}\n  db:\n    image: redis\n"}},
+      "container":"app", "env":{"FOO":"1"},
+      "heartbeat":{"every_mins":5,"targeted":true}
+    })).unwrap();
+    let wharf_api_types::spec::Source::Compose {
+      content: Some(yaml),
+      ..
+    } = &spec.source
+    else {
+      unreachable!()
+    };
+    let configured =
+      crate::render::compose_with_settings("app", yaml, &spec)
+        .unwrap();
+    let rendered = compose(
+      &configured,
+      &spec,
+      Some("https://wharf.example.test"),
+      false,
+    )
+    .unwrap();
+    let doc = crate::render::parse_compose(&rendered).unwrap();
+    assert_eq!(doc["services"]["app"]["environment"]["FOO"], "1");
+    assert!(doc["services"]["app"]["environment"].get(ENV).is_some());
+    assert!(doc["services"]["db"].get("environment").is_none());
+  }
+
+  #[test]
+  fn heartbeat_recovers_on_relax_and_redeploy() {
+    let h = HeartbeatSpec {
+      every_mins: 60,
+      grace_mins: 1,
+      token: String::new(),
+      targeted: false,
+    };
+    let mut r = Reading {
+      enabled_at: 0,
+      last_at: Some(1000),
+      last_ok: None,
+      failed: true,
+    };
+    assert_eq!(r.value(&h, None, 600_000), f64::MAX);
+    assert!(r.value(&h, Some(2000), 600_000) < 0.0);
+    r.failed = false;
+    assert!(r.value(&h, None, 600_000) < 0.0);
   }
 
   #[test]
@@ -481,9 +583,11 @@ mod tests {
       every_mins: 10,
       grace_mins: 5,
       token: "fixture".into(),
+      targeted: false,
     };
     let out =
-      inject(text, &heartbeat, "https://example.test", true).unwrap();
+      inject(text, &heartbeat, "https://example.test", true, None)
+        .unwrap();
     let doc = crate::render::parse_compose(&out).unwrap();
     let env = &doc["services"]["app"]["environment"];
     assert_eq!(env["A"], "1");

@@ -316,7 +316,16 @@ impl Snapshot {
     Net {
       gate_public,
       gate_login,
-      heartbeat_url: crate::gate::public_url().map(str::to_string),
+      heartbeat_url: crate::gate::public_url()
+        .filter(|url| !url.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+          base.core_listener.and_then(|(port, _)| {
+            crate::join::route_urls(world, &base, port)
+              .into_iter()
+              .next()
+          })
+        }),
       basic_auth: self
         .secrets
         .iter()
