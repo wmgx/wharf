@@ -312,6 +312,7 @@ impl Ops {
         check_project(&project)?;
         let lock = self.lock_for(&project);
         let _guard = lock.lock().await;
+        crate::live_limits::require_clear(&self.docker, &project)?;
         to_value(
           self
             .docker

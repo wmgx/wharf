@@ -280,6 +280,12 @@ pub enum Step {
   ServiceStop {
     service: String,
   },
+  /// 按计划启动配置已一致的容器。
+  ServiceStart {
+    service: String,
+    instance_id: String,
+    expect: String,
+  },
   /// 重启服务的容器。单独发起，不来自计划。
   ServiceRestart {
     service: String,
@@ -333,7 +339,8 @@ impl Step {
       | Self::ServiceLimitsUpdate { .. }
       | Self::EdgeDeploy { .. }
       | Self::TailscaleUp { .. }
-      | Self::ServiceStop { .. } => 3,
+      | Self::ServiceStop { .. }
+      | Self::ServiceStart { .. } => 3,
       Self::LinkUp { project, .. }
         if project == crate::link::SERVER_PROJECT =>
       {
@@ -2046,6 +2053,50 @@ fn service_items(
       }
       continue;
     }
+    if moved.is_none()
+      && !snap.pending.migrations.contains_key(name)
+      && !svc.spec.stopped
+      && svc.import.is_none()
+      && upgrade.is_none()
+      && old.is_some_and(|old| {
+        old.spec.stopped && old.instance_id == svc.instance_id
+      })
+      && let Some(live) = live
+      && live.hash.as_deref() == Some(hash.as_str())
+      && !live.all_running()
+      && live.containers.iter().all(|container| {
+        !container.foreign
+          && matches!(
+            container.state.as_str(),
+            "running" | "created" | "exited"
+          )
+      })
+      && crate::render::missing_components(
+        &crate::render::service_expected_components(name, &svc.spec),
+        &live.containers,
+      )
+      .is_empty()
+    {
+      let id = b.item(
+        address.clone(),
+        Layer::Container,
+        Action::Update,
+        Some(json!({"containers":live.containers})),
+        after,
+        vec![],
+        "启动已有容器",
+      );
+      b.step(
+        vec![id],
+        format!("在 {server} 上启动 {name}"),
+        Step::ServiceStart {
+          service: name.clone(),
+          instance_id: svc.instance_id.clone(),
+          expect: hash,
+        },
+      );
+      continue;
+    }
     let decision = match status.get(server).and_then(|s| s.as_ref()) {
       None if changed(writes, KIND_SERVICE, name) => Some((
         Action::Update,
@@ -2530,7 +2581,6 @@ async fn choose_live_limits(
       || old_spec.server != *server
       || old_spec.init_cmd != row.spec.init_cmd
       || old_spec.init_timeout_secs != row.spec.init_timeout_secs
-      || old_spec.stopped
       || old_spec.pull_policy != row.spec.pull_policy
       || old_spec.volumes != row.spec.volumes
       || old_spec.group_add != row.spec.group_add
@@ -7418,6 +7468,13 @@ mod tests {
     assert_eq!(b.items[0].impacts, vec![Impact::Downtime]);
     assert!(b.items[0].reason.contains("停止服务"));
     assert!(matches!(b.steps[0].step, Step::ServiceStop { .. }));
+    let start = plan(
+      &desired,
+      &current,
+      &live(Some(hash_of(&desired)), vec![container("exited")]),
+    );
+    assert!(matches!(start.steps[0].step, Step::ServiceStart { .. }));
+    assert!(!start.items[0].impacts.contains(&Impact::Restart));
   }
 
   #[test]

@@ -1481,6 +1481,7 @@ fn service_op(step: &Step) -> Option<(&str, &'static str)> {
     }
     Step::Rebuild { service, .. } => Some((service, "重新构建")),
     Step::ServiceStop { service, .. } => Some((service, "停止")),
+    Step::ServiceStart { service, .. } => Some((service, "启动")),
     Step::ServiceRestart { service, .. } => Some((service, "重启")),
     Step::VolumeSync { service, .. } => Some((service, "迁移数据")),
     Step::AdoptData { job, .. } => Some((&job.service, "收编数据")),
@@ -1769,6 +1770,25 @@ async fn run_step_with_dns(
     Step::AgentUpgrades { servers } => {
       crate::agent_upgrade::upgrade_each(
         state, servers, progress, cancel,
+      )
+      .await?;
+    }
+    Step::ServiceStart {
+      service,
+      instance_id,
+      expect,
+    } => {
+      check_step_instance(world, service, Some(instance_id))?;
+      let server = service_server(&snap, service)?;
+      let (_, hash) = snapshot::service_resolved(
+        world,
+        &net,
+        service,
+        &snap.render_values(world, service),
+      )?;
+      check_expect(Some(expect), &hash, &format!("服务 {service}"))?;
+      project_stop_start(
+        state, &server, service, true, &progress, cancel,
       )
       .await?;
     }

@@ -1498,6 +1498,12 @@ pub(crate) fn clean_project_dir(
     Err(e) if e.kind() == ErrorKind::NotFound => return Ok(true),
     Err(e) => return Err(io_err(dir)(e)),
   }
+  if dir.join(crate::live_limits::JOURNAL).exists() {
+    return Err(ApiError::new(
+      ErrorCode::Busy,
+      "项目仍有待恢复的限额更新",
+    ));
+  }
   remove_files(
     dir,
     &[

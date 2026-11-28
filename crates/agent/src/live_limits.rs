@@ -19,7 +19,7 @@ use crate::{
 };
 
 const IO_TIMEOUT: Duration = Duration::from_secs(15);
-const JOURNAL: &str = ".wharf-limits.json";
+pub(crate) const JOURNAL: &str = ".wharf-limits.json";
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 struct Container {

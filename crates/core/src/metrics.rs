@@ -210,7 +210,7 @@ fn record_components(
      WHERE r.kind = 'service' AND r.name = ?1
        AND d.id = (SELECT MAX(latest.id) FROM deployments latest
                    WHERE latest.service = r.name AND latest.instance_id = d.instance_id)
-       AND d.server = ?2 AND d.created_at <= ?3 AND d.started = 1 AND d.spec IS NOT NULL",
+       AND d.server = ?2 AND d.created_at <= ?3 AND d.spec IS NOT NULL",
     params![service, server, at],
     |row| Ok((row.get(0)?, row.get(1)?)),
   ).optional().map_err(sql_err)?;
