@@ -452,7 +452,20 @@ mod tests {
           item("看任务完整触发地址").reason.as_deref().unwrap();
         assert_eq!(reveal.contains("任务归属"), scoped);
       }
-      let service_exec = item("容器内执行命令");
+      let with_service = explain(
+        &row,
+        Utc::now(),
+        ExplainQuery {
+          service: Some("blog".into()),
+          ..Default::default()
+        },
+      )
+      .unwrap();
+      let service_exec = with_service
+        .items
+        .iter()
+        .find(|item| item.op == "容器内执行命令")
+        .unwrap();
       assert_eq!(service_exec.perm, Some(Perm::Exec));
       assert_eq!(
         service_exec.verdict,
