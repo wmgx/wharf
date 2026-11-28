@@ -2501,7 +2501,7 @@ mod tests {
       .insert("node2".into(), world.servers["node1"].clone());
     let spec = serde_json::from_value(json!({
       "server":"node1", "source":{"image":"nginx"}, "backup":{"to":"node2"},
-      "volumes":[{"name":"external", "target":"/data", "host_path":"/mnt/shared"}],
+      "volumes":[{"target":"/data", "host_path":"/mnt/shared"}],
       "files":[{"path":"/app/seed/settings.json","init_only":true,"content":"{}"}],
     })).unwrap();
     world
