@@ -205,6 +205,18 @@ fn service_warnings(
       warnings.push(format!("的 env 变量 {key} {detail}"));
     }
   }
+  if let Some(m) = &spec.monitor {
+    for (key, value) in &m.headers {
+      let check_key = if crate::monitor::sensitive_header(key) {
+        "ACCESS_TOKEN"
+      } else {
+        key
+      };
+      if let Some(detail) = env_secret(check_key, value, secrets) {
+        warnings.push(format!("的监控请求头 {key} {detail}"));
+      }
+    }
+  }
   if let Some(containers) = compose_services(spec) {
     for (name, container) in &containers {
       let Some(name) = name.as_str() else { continue };

@@ -13,7 +13,7 @@ use wharf_api_types::{
     BackupSpec, Change, Fleet, GatewayKind, GatewaySpec, GatewayTls,
     NetworkMode, PathRoute, PortSpec, PrivateAddr, PrivateNetwork,
     Region, RouteSpec, ServerSettings, ServiceSpec, Source, SsoMode,
-    VolumeSpec,
+    UpdateIgnoreScope, UpdateIgnoreSpec, VolumeSpec, image_repo,
   },
   view::{
     AccountView, AppAccountView, AutoUpdateResult, BackupsView,
@@ -2254,6 +2254,7 @@ async fn service(
       let v: ServiceView = c.get(&path).await?;
       out(j, &v, |v| {
         pretty(v);
+        print::monitor_settings(v.spec.monitor.as_ref());
         if !v.risks.is_empty() {
           println!(
             "风险：{}",
@@ -2757,6 +2758,7 @@ async fn service(
             heartbeat: None,
             limits: None,
             auto_update: false,
+            update_ignore: vec![],
             container: None,
             files: vec![],
             stop_grace_secs: None,
@@ -2778,15 +2780,7 @@ async fn service(
         spec.start_timeout_secs = (seconds != 0).then_some(seconds);
       }
       if let Some(path) = health_path {
-        spec
-          .monitor
-          .get_or_insert(wharf_api_types::spec::MonitorSpec {
-            path: String::new(),
-            port: None,
-            expect: None,
-            keyword: None,
-          })
-          .path = path;
+        spec.monitor.get_or_insert_with(Default::default).path = path;
       }
       if let Some(server) = server {
         spec.server = server;
@@ -2929,6 +2923,65 @@ async fn service(
       )
       .await
     }
+    ServiceCmd::UpdateIgnore {
+      name,
+      image,
+      all,
+      major,
+      clear,
+      apply,
+    } => {
+      let mut spec = c
+        .get::<ServiceView>(&format!("/api/services/{}", seg(&name)))
+        .await?
+        .spec;
+      if !all && !major && !clear {
+        out(j, &spec.update_ignore, |rules| {
+          for rule in rules {
+            println!(
+              "{}  {}",
+              rule.image,
+              match rule.scope {
+                UpdateIgnoreScope::All => "全部",
+                UpdateIgnoreScope::Major => "大版本",
+              }
+            );
+          }
+        });
+        return Ok(());
+      }
+      if clear {
+        spec
+          .update_ignore
+          .retain(|r| image.as_ref().is_some_and(|i| &r.image != i));
+      } else {
+        let image = match image {
+          Some(image) => image,
+          None => infer_ignore_image(&spec.source)?,
+        };
+        let scope = if all {
+          UpdateIgnoreScope::All
+        } else {
+          UpdateIgnoreScope::Major
+        };
+        spec.update_ignore.retain(|rule| rule.image != image);
+        spec.update_ignore.push(UpdateIgnoreSpec { image, scope });
+        spec.update_ignore.sort();
+      }
+      changes(
+        c,
+        vec![Change::UpsertService {
+          pins: None,
+          commit: None,
+          name,
+          spec,
+          adopt: None,
+        }],
+        apply,
+        j,
+      )
+      .await
+    }
     ServiceCmd::Monitor {
       name,
       start_timeout,
@@ -2936,6 +2989,11 @@ async fn service(
       port,
       expect,
       keyword,
+      header,
+      unset_header,
+      clear_headers,
+      interval,
+      retries,
       off,
       apply,
     } => {
@@ -2952,26 +3010,53 @@ async fn service(
         || port.is_some()
         || expect.is_some()
         || keyword.is_some()
+        || !header.is_empty()
+        || !unset_header.is_empty()
+        || clear_headers
+        || interval.is_some()
+        || retries.is_some()
       {
-        spec.monitor = if off {
-          None
+        if off {
+          spec.monitor = None;
         } else {
-          let cur = spec.monitor.take();
-          Some(wharf_api_types::spec::MonitorSpec {
-            path: path
-              .or_else(|| cur.as_ref().map(|m| m.path.clone()))
-              .unwrap_or_else(|| "/".into()),
-            port: port
-              .or_else(|| cur.as_ref().and_then(|m| m.port.clone())),
-            expect: expect
-              .or_else(|| cur.as_ref().and_then(|m| m.expect)),
-            keyword: keyword
-              .or_else(|| {
-                cur.as_ref().and_then(|m| m.keyword.clone())
-              })
-              .filter(|k| !k.is_empty()),
-          })
-        };
+          let m = spec.monitor.get_or_insert_with(Default::default);
+          if let Some(path) = path {
+            m.path = path;
+          }
+          if port.is_some() {
+            m.port = port;
+          }
+          if expect.is_some() {
+            m.expect = expect;
+          }
+          if let Some(keyword) = keyword {
+            m.keyword = (!keyword.is_empty()).then_some(keyword);
+          }
+          if let Some(secs) = interval {
+            m.interval_secs = (secs != 0).then_some(secs);
+          }
+          if retries.is_some() {
+            m.retries = retries;
+          }
+          if clear_headers {
+            m.headers.clear();
+          }
+          for key in unset_header {
+            m.headers
+              .retain(|old, _| !old.eq_ignore_ascii_case(&key));
+          }
+          for item in header {
+            let split = item.find([':', '=']).ok_or_else(|| {
+              ApiError::invalid(
+                "请求头要写成 Key: Value 或 Key=Value",
+              )
+            })?;
+            let (key, value) =
+              (item[..split].trim(), item[split + 1..].trim());
+            m.headers.retain(|old, _| !old.eq_ignore_ascii_case(key));
+            m.headers.insert(key.to_string(), value.to_string());
+          }
+        }
       }
       changes(
         c,
@@ -5106,5 +5191,44 @@ mod tests {
       Cli::try_parse_from(["wharf", "exec", "s1", "--", "a", "b"])
         .is_err()
     );
+  }
+}
+
+fn infer_ignore_image(source: &Source) -> CliResult<String> {
+  match source {
+    Source::Image(image) => Ok(image_repo(image).to_string()),
+    Source::Build(_) => Ok("*".into()),
+    Source::Compose { content, .. } => {
+      let compose = crate::deploy::parse_compose(
+        content.as_deref().unwrap_or_default(),
+      )
+      .map_err(|_| ApiError::invalid("无法读取 Compose 镜像"))?;
+      let mut images: Vec<_> = compose["services"]
+        .as_mapping()
+        .into_iter()
+        .flat_map(|m| m.values())
+        .filter(|svc| svc.get("build").is_none())
+        .filter_map(|svc| svc["image"].as_str())
+        .map(str::trim)
+        .filter(|i| {
+          !i.is_empty()
+            && !i.contains('@')
+            && !i.contains('$')
+            && !i.starts_with("sha256:")
+        })
+        .collect();
+      images.sort_unstable();
+      images.dedup();
+      match images.as_slice() {
+        [image] => Ok(image_repo(image).to_string()),
+        _ => Err(
+          ApiError::invalid(
+            "请用 --image 指定镜像名，或传 --image '*' 匹配全部",
+          )
+          .with_hint(format!("Compose 镜像：{}", images.join("、")))
+          .into(),
+        ),
+      }
+    }
   }
 }

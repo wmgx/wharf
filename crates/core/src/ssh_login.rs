@@ -140,6 +140,7 @@ async fn send(state: &AppState, server: &str, logins: Vec<SshLogin>) {
     crate::rules::notice(
       state,
       "ssh_login",
+      Some(server),
       None,
       false,
       event(server, login),

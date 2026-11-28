@@ -482,6 +482,15 @@ pub(crate) async fn make_plan_inner(
     &snap.secret_restrictions,
   )?;
   desired.validate()?;
+  for (name, row) in &desired.services {
+    if current
+      .services
+      .get(name)
+      .is_none_or(|old| old.spec != row.spec)
+    {
+      crate::monitor::require_agent(state, &row.spec)?;
+    }
+  }
   validate_changed_templates(&current, &desired)?;
   let mut warnings =
     crate::edge::validate_owners(&current, &desired)?;
@@ -817,6 +826,13 @@ pub(crate) async fn make_plan_inner(
     &mut b, &snap, &current, &desired, &net, &status, &writes,
   )?;
   build_agent_warnings(state, &desired, &mut b)?;
+  for step in &b.steps {
+    if let Step::ServiceUp { service, .. } = &step.step
+      && let Some(row) = desired.services.get(service)
+    {
+      crate::monitor::require_agent(state, &row.spec)?;
+    }
+  }
   let old_agents: BTreeSet<_> = b
     .steps
     .iter()

@@ -205,6 +205,16 @@ fn template_refs(spec: &ServiceSpec) -> impl Iterator<Item = &str> {
     .flat_map(|text| {
       placeholders_checked(text, true, true).filter_map(Result::ok)
     })
+    .chain(
+      spec
+        .monitor
+        .iter()
+        .flat_map(|m| m.headers.values())
+        .flat_map(|text| {
+          placeholders_checked(text, false, false)
+            .filter_map(Result::ok)
+        }),
+    )
     .map(|p| p.name)
     .filter(|name| render::account_ref(name).is_none())
 }
@@ -466,6 +476,13 @@ pub fn validate_world(world: &World) -> Result<(), ApiError> {
   for (name, row) in &world.services {
     let context = format!("服务 {name}");
     let oidc = oidc_names(world, name);
+    if let Some(m) = &row.spec.monitor {
+      for text in m.headers.values() {
+        for p in placeholders_checked(text, false, false) {
+          reject_system_secret(p?.name, &context)?;
+        }
+      }
+    }
     for p in service_templates(&row.spec)
       .flat_map(|text| placeholders_checked(text, true, true))
     {

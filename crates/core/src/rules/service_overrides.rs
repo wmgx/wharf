@@ -52,7 +52,11 @@ pub(crate) fn service_of_subject<'a>(
     | "oom_killed"
     | "monitor_failed"
     | "http_5xx"
-    | "heartbeat_late" => Some(subject),
+    | "heartbeat_late"
+    | "backup"
+    | "heal"
+    | "auto_update"
+    | "update" => Some(subject),
     "log_keyword" | "port_down" => Some(split_unit(subject).0),
     "mem_forecast" => subject.strip_prefix("服务 "),
     _ => None,

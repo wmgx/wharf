@@ -4,9 +4,10 @@ use wharf_api_types::view::{Issue, IssueLevel, IssueSubject};
 
 use crate::{metrics, rules, snapshot, state::AppState};
 
-pub async fn record(
+pub async fn record_at(
   state: &AppState,
   server: &str,
+  at: i64,
   oom: Option<Vec<String>>,
 ) {
   let Some(oom) = oom else { return };
@@ -22,7 +23,7 @@ pub async fn record(
       continue;
     }
     if oom.contains(name) {
-      metrics::event(state, "oom.kill", name, 1.0).await;
+      metrics::event_at(state, at, "oom.kill", name, 1.0).await;
       let detail = row
         .spec
         .limits
@@ -30,10 +31,18 @@ pub async fn record(
         .and_then(|l| l.memory_mb)
         .map(|mb| format!("上限 {mb} MB"))
         .unwrap_or_else(|| "没有在 Wharf 里设内存上限".into());
-      rules::observe(state, "container.oom", name, 1.0, &detail)
-        .await;
+      rules::observe_at(
+        state,
+        at,
+        "container.oom",
+        name,
+        1.0,
+        &detail,
+      )
+      .await;
     } else {
-      rules::observe(state, "container.oom", name, 0.0, "").await;
+      rules::observe_at(state, at, "container.oom", name, 0.0, "")
+        .await;
     }
   }
 }

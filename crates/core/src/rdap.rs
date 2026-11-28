@@ -26,7 +26,7 @@ static CACHE: Mutex<BTreeMap<String, Entry>> =
 static DAYS: Mutex<BTreeMap<String, i64>> =
   Mutex::new(BTreeMap::new());
 
-fn candidates(host: &str) -> Vec<String> {
+pub(crate) fn candidates(host: &str) -> Vec<String> {
   let host = host.trim_end_matches('.').to_lowercase();
   if host.parse::<IpAddr>().is_ok()
     || [

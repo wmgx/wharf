@@ -351,7 +351,7 @@ pub async fn observe(
   observe_at(state, now_ms(), metric, subject, value, detail).await;
 }
 
-async fn observe_at(
+pub(crate) async fn observe_at(
   state: &AppState,
   now: i64,
   metric: &str,
@@ -485,17 +485,19 @@ async fn observe_at(
 pub async fn notice(
   state: &AppState,
   id: &'static str,
+  subject: Option<&str>,
   key: Option<&str>,
   ok: bool,
   event: Event,
 ) {
-  notice_at(state, now_ms(), id, key, ok, event).await;
+  notice_at(state, now_ms(), id, subject, key, ok, event).await;
 }
 
 async fn notice_at(
   state: &AppState,
   now: i64,
   id: &'static str,
+  subject: Option<&str>,
   key: Option<&str>,
   ok: bool,
   event: Event,
@@ -510,7 +512,7 @@ async fn notice_at(
     state,
     PushArgs {
       id,
-      subject: None,
+      subject,
       o: &o,
       ok,
       event,
@@ -587,11 +589,15 @@ async fn push_with_world(state: &AppState, args: PushArgs<'_>) {
     return;
   }
   let cfg = config(state).await;
-  if !ok || subject.is_none() {
+  let tracked = is_rule(id) || is_custom_rule(id);
+  if !ok || !tracked {
     if let Some(reason) =
       suppress::check(state, id, subject, &cfg, world).await
     {
-      if !ok && let Some(subj) = subject {
+      if tracked
+        && !ok
+        && let Some(subj) = subject
+      {
         set_firing_suppressed(
           state,
           (id.to_string(), subj.to_string()),
@@ -660,11 +666,14 @@ async fn push_with_world(state: &AppState, args: PushArgs<'_>) {
       subject,
       &event.title,
       ok,
-      !is_rule(id),
+      !tracked,
       now,
     )
     .await;
-    if !ok && let Some(subj) = subject {
+    if tracked
+      && !ok
+      && let Some(subj) = subject
+    {
       set_firing_delivery(
         state,
         (id.to_string(), subj.to_string()),
@@ -689,8 +698,30 @@ async fn push_with_world(state: &AppState, args: PushArgs<'_>) {
   } else {
     event
   };
-  let skipped = notify::deliver(state, &event).await;
-  if !ok && let Some(subj) = subject {
+  let (skipped, retry) =
+    match notify::deliver_tracked(state, &event).await {
+      Ok(()) => (None, None),
+      Err(notify::SendErr::Retryable(e)) => {
+        tracing::warn!("发送通知失败，等待重试：{}", e.message);
+        (
+          Some(format!("发送失败（重试中）：{}", e.message)),
+          Some(e.message),
+        )
+      }
+      Err(notify::SendErr::Permanent(e))
+        if e.code == wharf_api_types::ErrorCode::NotFound =>
+      {
+        (Some("没有配置通知渠道".into()), None)
+      }
+      Err(notify::SendErr::Permanent(e)) => {
+        tracing::warn!("发送通知失败：{}", e.message);
+        (Some(format!("发送失败：{}", e.message)), None)
+      }
+    };
+  if tracked
+    && !ok
+    && let Some(subj) = subject
+  {
     set_firing_delivery(
       state,
       (id.to_string(), subj.to_string()),
@@ -698,7 +729,10 @@ async fn push_with_world(state: &AppState, args: PushArgs<'_>) {
     )
     .await;
   }
-  record_at(state, now, id, subject, &event, ok, skipped).await;
+  store::record_delivery(
+    state, now, id, subject, &event, ok, skipped, retry,
+  )
+  .await;
 }
 
 /// 关注项被删除或服务停止时，清除告警、确认和通知状态，不发恢复通知。

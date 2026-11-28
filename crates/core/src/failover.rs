@@ -148,8 +148,15 @@ async fn round(
         ),
       }
     };
-    crate::rules::notice(state, "failover", None, !*to_backup, event)
-      .await;
+    crate::rules::notice(
+      state,
+      "failover",
+      Some(host),
+      None,
+      !*to_backup,
+      event,
+    )
+    .await;
   }
   let pending: Vec<String> =
     with(|m| m.pending.iter().cloned().collect());

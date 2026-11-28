@@ -156,6 +156,7 @@ fn scope_filter_trims_status_export_secrets_and_alerts() {
       ("http_5xx".into(), Some("blog".into())),
       ("server_offline".into(), Some("s1".into())),
     ],
+    &BTreeSet::new(),
   );
   assert_eq!(alerts.firing.len(), 1);
   assert_eq!(alerts.firing[0].subject, "blog");

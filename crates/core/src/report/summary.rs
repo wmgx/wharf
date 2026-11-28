@@ -60,18 +60,25 @@ fn push_change(
   ));
 }
 
+#[derive(Default)]
+pub(super) struct RawPeaks {
+  pub servers: Vec<(Option<f64>, Option<f64>)>,
+  pub services: Vec<Option<f64>>,
+}
+
 /// 从统计结果里挑出最值得关注的 1～5 条摘要，没有明显变化则返回固定文案。
-pub(crate) fn build_summary(
+pub(super) fn build_summary(
   servers: &[ServerReport],
   services: &[ServiceReport],
   alerts: &[AlertReport],
+  raw: &RawPeaks,
 ) -> Vec<String> {
   let mut items: Vec<(f64, String)> = Vec::new();
   let pct_fmt = |v: f64| format!("{v:.1}%");
   let ms_fmt = |v: f64| format!("{v:.0}ms");
 
-  for s in servers {
-    if let Some(peak) = s.cpu_peak.current
+  for (s, &(cpu_peak, mem_peak)) in servers.iter().zip(&raw.servers) {
+    if let Some(peak) = cpu_peak
       && peak >= PEAK_LIMIT_PCT
     {
       items.push((
@@ -82,8 +89,7 @@ pub(crate) fn build_summary(
         ),
       ));
     }
-    if let (Some(peak), Some(total)) =
-      (s.mem_peak.current, s.mem_total)
+    if let (Some(peak), Some(total)) = (mem_peak, s.mem_total)
       && total > 0.0
     {
       let pct = peak / total * 100.0;
@@ -153,9 +159,8 @@ pub(crate) fn build_summary(
     );
   }
 
-  for svc in services {
-    if let (Some(peak), Some(limit)) =
-      (svc.mem_peak.current, svc.mem_limit)
+  for (svc, &mem_peak) in services.iter().zip(&raw.services) {
+    if let (Some(peak), Some(limit)) = (mem_peak, svc.mem_limit)
       && limit > 0
     {
       let pct = peak / limit as f64 * 100.0;

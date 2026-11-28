@@ -57,9 +57,10 @@ fn by_service(
   out
 }
 
-pub async fn record(
+pub async fn record_at(
   state: Arc<AppState>,
   server: String,
+  at: i64,
   hosts: BTreeMap<String, HostTraffic>,
 ) {
   let Ok(snap) = crate::snapshot::load(&state.db).await else {
@@ -89,7 +90,7 @@ pub async fn record(
       ));
     }
   }
-  crate::metrics::insert_owned(&state, points).await;
+  crate::metrics::insert_owned_at(&state, at, points).await;
 
   let mut events = Vec::new();
   {
@@ -115,17 +116,28 @@ pub async fn record(
     }
   }
   for (svc, pct) in events {
-    crate::rules::observe(&state, "req.err_pct_5m", &svc, pct, "")
-      .await;
+    crate::rules::observe_at(
+      &state,
+      at,
+      "req.err_pct_5m",
+      &svc,
+      pct,
+      "",
+    )
+    .await;
   }
   for (svc, s) in &sums {
     if s.reqs > 0 {
       let err_pct = 100.0 * s.errors as f64 / s.reqs as f64;
       let detail = format!("最近 1 分钟共 {} 次请求", s.reqs);
-      crate::rules::observe(&state, "req.err", svc, err_pct, &detail)
-        .await;
-      crate::rules::observe(&state, "req.p95", svc, s.p95, &detail)
-        .await;
+      crate::rules::observe_at(
+        &state, at, "req.err", svc, err_pct, &detail,
+      )
+      .await;
+      crate::rules::observe_at(
+        &state, at, "req.p95", svc, s.p95, &detail,
+      )
+      .await;
     }
   }
 }

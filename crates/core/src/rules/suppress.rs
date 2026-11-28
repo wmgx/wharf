@@ -72,7 +72,10 @@ pub(super) fn related_servers(
     | "monitor_failed"
     | "http_5xx"
     | "svc_mem_near_limit"
-    | "heartbeat_late" => world
+    | "heartbeat_late"
+    | "heal"
+    | "auto_update"
+    | "update" => world
       .services
       .get(subject)
       .map(|s| vec![s.spec.server.clone()])
@@ -98,31 +101,65 @@ pub(super) fn related_servers(
         vec![]
       }
     }
-    "domain_down" | "cert_expiring" => {
-      let mut out = Vec::new();
-      if let Some(route) = world.routes.get(subject) {
-        if let Some(gw_name) =
-          world.live_gateway(subject, &route.spec)
-          && let Some(gw) = world.gateways.get(gw_name)
-        {
-          out.push(gw.spec.server.clone());
-        }
-        if route.spec.upstream.is_none()
-          && route.spec.redirect.is_none()
-          && let Some(svc) = world.services.get(&route.spec.service)
-          && !out.contains(&svc.spec.server)
-        {
-          out.push(svc.spec.server.clone());
-        }
-      }
-      out
+    "domain_down" | "cert_expiring" | "failover" => {
+      route_servers(world, subject, rule == "failover")
     }
+    "backup" => world
+      .services
+      .get(subject)
+      .map(|row| {
+        let mut servers = vec![row.spec.server.clone()];
+        if let Some(backup) = &row.spec.backup {
+          servers.push(backup.to.clone());
+        }
+        servers
+      })
+      .unwrap_or_default(),
+    "exposure" | "unmanaged_container" => vec![subject.to_string()],
+    "link_cert_expiring" => world
+      .gateways
+      .get(subject)
+      .map(|row| vec![row.spec.server.clone()])
+      .unwrap_or_default(),
     "link_loss" | "tailnet_relay" => match subject.split_once('>') {
       Some((from, to)) => vec![from.to_string(), to.to_string()],
       None => vec![],
     },
     _ => vec![],
   }
+}
+
+fn route_servers(
+  world: &World,
+  host: &str,
+  all_gateways: bool,
+) -> Vec<String> {
+  let Some(route) = world.routes.get(host) else {
+    return vec![];
+  };
+  let spec = &route.spec;
+  let gateways = if all_gateways {
+    world.route_gateways(spec)
+  } else {
+    world.live_gateway(host, spec).into_iter().collect()
+  };
+  let mut servers: BTreeSet<_> = gateways
+    .into_iter()
+    .filter_map(|name| {
+      world.gateways.get(name).map(|g| g.spec.server.clone())
+    })
+    .collect();
+  let upstream = (spec.upstream.is_none() && spec.redirect.is_none())
+    .then_some(spec.service.as_str());
+  for service in upstream
+    .into_iter()
+    .chain(spec.paths.iter().filter_map(|p| p.service.as_deref()))
+  {
+    if let Some(row) = world.services.get(service) {
+      servers.insert(row.spec.server.clone());
+    }
+  }
+  servers.into_iter().collect()
 }
 
 /// 纯函数判断是否命中内置或自定义抑制，返回抑制原因（上游告警的标题）。
@@ -209,6 +246,34 @@ pub(super) async fn check(
   cfg: &BTreeMap<String, Override>,
   cached_world: Option<&World>,
 ) -> Option<String> {
+  if cfg.get(BUILTIN_OFFLINE).is_none_or(Override::enabled)
+    && let Some(subject) = subject
+    && (id == "task"
+      || (id == "backup" && subject == crate::core_backup::REPO))
+  {
+    let name = subject.to_string();
+    let task = id == "task";
+    let servers = state.db.call(move |c| {
+      if task {
+        let mut stmt = c.prepare(
+          "SELECT json_extract(spec, '$.server') FROM tasks WHERE name = ?1"
+        ).map_err(db::sql_err)?;
+        return stmt.query_map([name], |r| r.get::<_, String>(0))
+          .map_err(db::sql_err)?.collect::<Result<Vec<_>, _>>().map_err(db::sql_err);
+      }
+      Ok(crate::core_node::load_persisted(c)?.map(|(server, _)| server).into_iter()
+        .chain(db::setting(c, crate::core_backup::TO)?).collect())
+    }).await.unwrap_or_default();
+    if let Some(reason) = with(|m| {
+      servers.into_iter().find_map(|server| {
+        m.firing
+          .get(&("server_offline".to_string(), server))
+          .map(|entry| entry.title.clone())
+      })
+    }) {
+      return Some(reason);
+    }
+  }
   let need_world = cached_world.is_none()
     && subject.is_some()
     && (cfg.get(BUILTIN_OFFLINE).is_none_or(Override::enabled)

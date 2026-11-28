@@ -96,7 +96,7 @@ pub async fn run(state: &Arc<AppState>) -> Vec<AutoUpdateResult> {
     .lock()
     .unwrap()
     .retain(|name, _| names.contains(name));
-  let checks = updates::last().unwrap_or_default().services;
+  let checks = updates::current(&snap).unwrap_or_default().services;
   let mut results = Vec::new();
   for name in names {
     let Some(check) = checks.get(&name) else {
@@ -126,7 +126,17 @@ pub async fn run(state: &Arc<AppState>) -> Vec<AutoUpdateResult> {
         Some("这个版本上次自动更新失败过，等下一个版本".into()),
       )),
       Ok(_) if !check.newer => continue,
-      Ok(_) => execute(state, &name).await,
+      Ok(_) => {
+        let row = &snap.world.services[&name];
+        let explicit = if row.spec.update_ignore.iter().any(|r| {
+          r.scope == wharf_api_types::spec::UpdateIgnoreScope::All
+        }) {
+          &check.newer_images[..]
+        } else {
+          &[]
+        };
+        execute(state, &name, explicit).await
+      }
       Err(e) => Err(e),
     };
     let (status, reason) = match result {
@@ -186,8 +196,15 @@ pub async fn run(state: &Arc<AppState>) -> Vec<AutoUpdateResult> {
           ),
         }
       };
-      crate::rules::notice(state, "auto_update", None, ok, event)
-        .await;
+      crate::rules::notice(
+        state,
+        "auto_update",
+        Some(&name),
+        None,
+        ok,
+        event,
+      )
+      .await;
     }
     results.push(AutoUpdateResult {
       service: name,
@@ -202,14 +219,26 @@ pub async fn run(state: &Arc<AppState>) -> Vec<AutoUpdateResult> {
 async fn execute(
   state: &Arc<AppState>,
   name: &str,
+  images: &[String],
 ) -> Result<(&'static str, Option<String>), ApiError> {
+  let changes = if images.is_empty() {
+    vec![Change::RefreshImages {
+      name: name.into(),
+      image: None,
+    }]
+  } else {
+    images
+      .iter()
+      .map(|image| Change::RefreshImages {
+        name: name.into(),
+        image: Some(image.clone()),
+      })
+      .collect()
+  };
   let planned = planner::make_plan(
     state,
     PlanRequest {
-      changes: vec![Change::RefreshImages {
-        name: name.into(),
-        image: None,
-      }],
+      changes,
       ..Default::default()
     },
   )

@@ -38,6 +38,9 @@ pub struct ReportCoverage {
 /// 单台服务器的周期指标。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ServerReport {
+  /// 该对象的上期覆盖比例（0.0～1.0）。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub previous_ratio: Option<f64>,
   pub name: String,
   /// CPU 均值（%）。
   pub cpu_avg: MetricDelta,
@@ -67,6 +70,9 @@ pub struct ServerReport {
 /// 单个服务的周期指标。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ServiceReport {
+  /// 该对象的上期覆盖比例（0.0～1.0）。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub previous_ratio: Option<f64>,
   pub name: String,
   pub server: String,
   /// CPU 均值（%）。

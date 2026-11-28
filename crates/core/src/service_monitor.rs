@@ -113,6 +113,10 @@ pub fn config_only(old: &ServiceRow, new: &ServiceRow) -> bool {
   let mut stripped = new.clone();
   stripped.spec.log_alerts.clone_from(&old.spec.log_alerts);
   stripped.spec.port_checks.clone_from(&old.spec.port_checks);
+  stripped
+    .spec
+    .update_ignore
+    .clone_from(&old.spec.update_ignore);
   if let (Some(old), Some(new)) =
     (&old.spec.heartbeat, &mut stripped.spec.heartbeat)
     && old.token == new.token
@@ -194,20 +198,30 @@ pub async fn sync_watches(
 }
 
 pub fn report(server: &str, hits: Vec<LogHit>) {
+  report_at(server, now_ms(), hits);
+}
+
+pub fn report_at(server: &str, at: i64, hits: Vec<LogHit>) {
   if hits.is_empty() {
     return;
   }
-  let now = now_ms();
-  memory(|m| {
-    let Some(watches) = m.watches.get(server) else {
-      return;
-    };
-    for hit in hits {
-      if hit.count > 0 && watches.iter().any(|w| w.id == hit.id) {
-        m.hits.entry(hit.id.clone()).or_default().add(hit, now);
-      }
+  memory(|m| add_log_hits(m, server, at, hits));
+}
+
+fn add_log_hits(
+  m: &mut Memory,
+  server: &str,
+  at: i64,
+  hits: Vec<LogHit>,
+) {
+  let Some(watches) = m.watches.get(server) else {
+    return;
+  };
+  for hit in hits {
+    if hit.count > 0 && watches.iter().any(|w| w.id == hit.id) {
+      m.hits.entry(hit.id.clone()).or_default().add(hit, at);
     }
-  });
+  }
 }
 
 async fn logs(state: &AppState) {

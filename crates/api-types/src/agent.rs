@@ -58,6 +58,8 @@ pub enum CoreMsg {
   /// `signature`：控制面对 `auth_payload_v2("core", server, agent_nonce, "<kx>,<agent kx>")` 的签名；
   /// 旧 agent 收到的是对 `auth_payload("core", server, agent_nonce)` 的签名，没有 `kx`。
   Welcome {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    backfill: bool,
     signature: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     alt_signature: Option<String>,
@@ -126,6 +128,10 @@ pub enum AgentMsg {
     host_shell: bool,
     #[serde(default)]
     runtime_v2: bool,
+    #[serde(default)]
+    monitor_v2: bool,
+    #[serde(default)]
+    backfill: bool,
     /// 是否支持 [AgentOp::Forward]。旧 agent 缺省为不支持。
     #[serde(default)]
     forward: bool,
@@ -172,6 +178,11 @@ pub enum AgentMsg {
     trusted_alt: Option<String>,
   },
   Report(Box<AgentReport>),
+  Backfill {
+    samples: Vec<BufferedSample>,
+    #[serde(default)]
+    dropped: u32,
+  },
   Progress {
     id: u64,
     line: String,

@@ -161,6 +161,7 @@ async fn backups(state: &Arc<AppState>) -> Result<(), ApiError> {
     crate::rules::notice(
       state,
       "backup",
+      Some(crate::core_backup::REPO),
       Some("backup.wharf-core.key"),
       current,
       crate::notify::Event {

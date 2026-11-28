@@ -1920,6 +1920,10 @@ fn validate_service(
     ));
   }
   crate::service_monitor::validate(spec)?;
+  crate::updates::validate_ignore(spec)?;
+  if let Some(m) = &spec.monitor {
+    crate::monitor::validate(m)?;
+  }
   validate_deploy_options(name, spec)?;
   if name.starts_with(GATEWAY_PROJECT_PREFIX) {
     return Err(ApiError::invalid(format!(
@@ -2641,6 +2645,7 @@ mod tests {
       heartbeat: None,
       limits: None,
       auto_update: false,
+      update_ignore: vec![],
       container: None,
       files: vec![],
       stop_grace_secs: None,

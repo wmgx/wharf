@@ -257,6 +257,13 @@ pub(crate) async fn start_with_actor(
     .collect();
   let mut block_backups = false;
   for write in &stored.writes {
+    if let Write::Upsert { kind, spec, .. } = write
+      && kind == crate::world::KIND_SERVICE
+    {
+      let spec =
+        serde_json::from_value(spec.clone()).map_err(json_err)?;
+      crate::monitor::require_agent(&state, &spec)?;
+    }
     match write {
       Write::Upsert { kind, name, .. }
       | Write::Delete { kind, name }
@@ -2028,6 +2035,30 @@ async fn service_up(
     )
   })?;
   let server = &row.spec.server;
+  crate::monitor::require_agent(state, &row.spec)?;
+  let readiness = if let Some(m) =
+    row.spec.monitor.as_ref().filter(|_| !row.spec.stopped)
+  {
+    let secrets = crate::secret_policy::service_secrets(
+      world,
+      service,
+      &snap.secrets,
+    );
+    match crate::monitor::build_http_check(row, m, &secrets) {
+      Ok(job) => Some(SettleProbe {
+        url: job.url,
+        expect: m.expect,
+        keyword: job.keyword,
+        headers: job.headers,
+      }),
+      Err(e) if !m.headers.is_empty() => {
+        return Err(ApiError::invalid(e));
+      }
+      Err(_) => None,
+    }
+  } else {
+    None
+  };
   // 刚导入时本机已有的镜像不拉取，避免拉到新版本而重建容器。
   let pull_missing_only = row.import.is_some();
   if pull_missing_only {
@@ -2144,18 +2175,6 @@ async fn service_up(
   {
     progress(safe_rollback_warning(server));
   }
-  let readiness = row
-    .spec
-    .monitor
-    .as_ref()
-    .filter(|_| !row.spec.stopped)
-    .and_then(|m| {
-      crate::monitor::url(row, m).ok().map(|url| SettleProbe {
-        url,
-        expect: m.expect,
-        keyword: m.keyword.clone(),
-      })
-    });
   if (row.spec.start_timeout_secs.is_some() || readiness.is_some())
     && !state.hub.supports_runtime_v2(server)
   {

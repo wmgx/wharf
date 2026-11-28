@@ -1278,6 +1278,9 @@ pub struct VersionCheck {
   /// 仓库里有比现在写的标签更高的版本（例如 `2.20` → `2.21`）。换标签要改配置，不会自动升级。
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub tags: Vec<NewerTag>,
+  /// 有新 digest 的镜像名。
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub newer_images: Vec<String>,
 }
 
 #[derive(
@@ -1319,6 +1322,12 @@ pub struct TaskSpec {
   /// 失败和恢复时发通知。
   #[serde(default = "yes")]
   pub notify: bool,
+  /// 关联服务停用时跳过定时执行。
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub skip_if_stopped: bool,
+  /// 错过触发后允许补跑的分钟数。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub catch_up_mins: Option<u32>,
 }
 
 fn default_task_timeout() -> u64 {

@@ -62,6 +62,7 @@ pub fn web_schema() -> Value {
   let _ = generator.subschema_for::<view::IssueSubject>();
   let _ = generator.subschema_for::<view::Issue>();
   let _ = generator.subschema_for::<view::Status>();
+  let _ = generator.subschema_for::<crate::report::ReportView>();
   let _ = generator.subschema_for::<view::VersionCheck>();
   let _ = generator.subschema_for::<view::UpdatesView>();
   let _ = generator.subschema_for::<view::CheckStatus>();

@@ -734,6 +734,7 @@ pub async fn backup(
   crate::rules::notice(
     state,
     "backup",
+    Some(service),
     Some(&format!("backup.{service}.restart")),
     started.is_ok(),
     crate::notify::Event {
@@ -864,6 +865,7 @@ pub(crate) async fn record(
   crate::rules::notice(
     state,
     "backup",
+    Some(service),
     Some(&format!("backup.{service}")),
     result.is_ok(),
     crate::notify::Event {

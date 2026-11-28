@@ -33,6 +33,7 @@ impl Http {
   pub fn new(timeout: Duration) -> reqwest::Result<Http> {
     let builder = || {
       Client::builder()
+        .connect_timeout(Duration::from_secs(5))
         .timeout(timeout)
         .redirect(reqwest::redirect::Policy::none())
     };

@@ -626,3 +626,65 @@ async fn digest_keeps_rows_on_failure_and_preserves_inflight_inserts()
 
 #[path = "custom_tests.rs"]
 mod custom_tests;
+
+#[tokio::test]
+async fn notice_with_subject_respects_offline_and_custom_suppression()
+{
+  let _guard = TEST_LOCK.lock().await;
+  reset_memory();
+  let state = test_state();
+  seed_server_service(&state, "s1", "db").await;
+  let now = now_ms();
+  ensure_loaded(&state).await;
+  for server in ["s1", "s2"] {
+    set_firing(
+      &state,
+      ("server_offline".into(), server.into()),
+      Some(FiringEntry {
+        since: now,
+        title: format!("{server} 离线"),
+        body: String::new(),
+        delivery: Delivery::None,
+        suppressed: false,
+      }),
+    )
+    .await;
+  }
+  suppress::add_rule(
+    &state,
+    AlertSuppressionRequest {
+      source_rule: "server_offline".into(),
+      source_subject: Some("s2".into()),
+      target_rule: "task".into(),
+      target_subject: Some("sync".into()),
+    },
+    now,
+  )
+  .await
+  .unwrap();
+  for (rule, subject) in [("backup", "db"), ("task", "sync")] {
+    notice(
+      &state,
+      rule,
+      Some(subject),
+      None,
+      false,
+      Event {
+        title: subject.into(),
+        body: String::new(),
+      },
+    )
+    .await;
+  }
+  let rows = history_rows(&state).await;
+  for (row, (subject, server)) in
+    rows.iter().zip([("db", "s1"), ("sync", "s2")])
+  {
+    assert_eq!(row.1.as_deref(), Some(subject));
+    assert_eq!(
+      row.3.as_deref(),
+      Some(format!("被抑制：{server} 离线").as_str())
+    );
+  }
+  assert_eq!(rows.len(), 2);
+}

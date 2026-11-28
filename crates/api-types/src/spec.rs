@@ -360,6 +360,9 @@ pub struct ServiceSpec {
   /// 自动更新：每天检查一次，有新版本就自动更新。只支持没有数据卷的服务（compose 来源看 compose 里有没有挂载）。
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub auto_update: bool,
+  /// 镜像和构建版本的更新忽略规则。
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub update_ignore: Vec<UpdateIgnoreSpec>,
   /// compose 来源：环境变量、资源上限和配置文件加在哪个容器上。只有一个容器时不用填。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub container: Option<String>,
@@ -379,6 +382,49 @@ pub struct ServiceSpec {
   /// 初始化超时秒数（10 到 1800），缺省 300 秒。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub init_timeout_secs: Option<u32>,
+}
+
+#[derive(
+  Debug,
+  Clone,
+  PartialEq,
+  Eq,
+  PartialOrd,
+  Ord,
+  Serialize,
+  Deserialize,
+  JsonSchema,
+)]
+pub struct UpdateIgnoreSpec {
+  /// 镜像仓库名、完整镜像标签，或 *。
+  pub image: String,
+  pub scope: UpdateIgnoreScope,
+}
+
+#[derive(
+  Debug,
+  Clone,
+  Copy,
+  PartialEq,
+  Eq,
+  PartialOrd,
+  Ord,
+  Serialize,
+  Deserialize,
+  JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateIgnoreScope {
+  All,
+  Major,
+}
+
+pub fn image_repo(image: &str) -> &str {
+  let image = image.split_once('@').map_or(image, |(repo, _)| repo);
+  let segment = image.rfind('/').map_or(0, |i| i + 1);
+  image[segment..]
+    .find(':')
+    .map_or(image, |i| &image[..segment + i])
 }
 
 /// 一个配置文件。
@@ -420,6 +466,15 @@ impl ServiceSpec {
   Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
 )]
 pub struct MonitorSpec {
+  /// 自定义请求头，值支持密钥引用。
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub headers: BTreeMap<String, String>,
+  /// 检查间隔（秒），缺省 60。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub interval_secs: Option<u32>,
+  /// 单轮失败后的重试次数。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub retries: Option<u8>,
   /// 请求路径，默认 `/`。
   #[serde(default = "default_monitor_path")]
   pub path: String,
@@ -445,6 +500,20 @@ pub struct Limits {
   /// CPU 上限，单位是千分之一核，500 表示 0.5 核。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub cpu_milli: Option<u32>,
+}
+
+impl Default for MonitorSpec {
+  fn default() -> Self {
+    Self {
+      path: default_monitor_path(),
+      port: None,
+      expect: None,
+      keyword: None,
+      headers: BTreeMap::new(),
+      interval_secs: None,
+      retries: None,
+    }
+  }
 }
 
 fn default_monitor_path() -> String {

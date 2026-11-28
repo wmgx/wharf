@@ -339,6 +339,7 @@ pub async fn refresh(
     crate::rules::notice(
       state,
       "exposure",
+      Some(server),
       None,
       false,
       crate::notify::Event {
