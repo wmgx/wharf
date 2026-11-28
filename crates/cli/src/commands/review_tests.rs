@@ -17,7 +17,16 @@ async fn fixture_cli() {
     Cli::try_parse_from(std::iter::once("wharf".into()).chain(args))
       .unwrap();
   let client = Client::test_endpoint(endpoint);
-  let code = match dispatch(&client, cli.command, cli.json).await {
+  if let Some(fields) = &cli.fields {
+    print::set_fields(fields);
+  }
+  let code = match dispatch(
+    &client,
+    cli.command,
+    cli.json || cli.fields.is_some(),
+  )
+  .await
+  {
     Ok(()) => 0,
     Err(CliError::Exit(code)) => code,
     Err(CliError::Api(error)) => {
@@ -32,9 +41,18 @@ async fn run_fixture(
   args: &[&str],
   replies: Vec<(&'static str, Value)>,
 ) -> (i32, Value) {
+  let (code, value, _) = fixture_requests(args, replies).await;
+  (code, value)
+}
+
+async fn fixture_requests(
+  args: &[&str],
+  replies: Vec<(&'static str, Value)>,
+) -> (i32, Value, Vec<Value>) {
   let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
   let endpoint = format!("http://{}", listener.local_addr().unwrap());
   let server = async move {
+    let mut requests = Vec::new();
     for (expected, body) in replies {
       let (socket, _) = listener.accept().await.unwrap();
       let mut socket = BufReader::new(socket);
@@ -57,7 +75,11 @@ async fn run_fixture(
           len = value.trim().parse().unwrap();
         }
       }
-      socket.read_exact(&mut vec![0; len]).await.unwrap();
+      let mut request = vec![0; len];
+      socket.read_exact(&mut request).await.unwrap();
+      if !request.is_empty() {
+        requests.push(serde_json::from_slice(&request).unwrap());
+      }
       let body = body.to_string();
       let response = format!(
         "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -65,6 +87,7 @@ async fn run_fixture(
       );
       socket.write_all(response.as_bytes()).await.unwrap();
     }
+    requests
   };
   let mut child =
     tokio::process::Command::new(std::env::current_exe().unwrap());
@@ -74,24 +97,32 @@ async fn run_fixture(
       "commands::review_tests::fixture_cli",
       "--nocapture",
     ])
-    // 测试在 libtest 线程里执行 CLI 分发，栈大小对齐 Linux 主线程。
-    .env("RUST_MIN_STACK", (8 << 20).to_string())
+    // 子进程仍由测试运行器启动，给 CLI 的 dispatch future 留出主线程大小的栈。
+    .env("RUST_MIN_STACK", "8388608")
     .env("WHARF_FIXTURE_CLI_ENDPOINT", endpoint)
     .env("WHARF_FIXTURE_CLI_ARGS", json!(args).to_string())
     .kill_on_drop(true);
-  let output = tokio::time::timeout(Duration::from_secs(10), async {
-    let command = child.output();
-    tokio::pin!(command, server);
-    tokio::select! {
-      biased;
-      () = &mut server => command.await.unwrap(),
-      output = &mut command => {
-        let output = output.unwrap();
-        panic!("命令提前退出：{args:?}，状态={}，输出={:?}，错误={:?}",
-          output.status, String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+  let (output, requests) =
+    tokio::time::timeout(Duration::from_secs(10), async {
+      let output = child.output();
+      tokio::pin!(output, server);
+      tokio::select! {
+        biased;
+        requests = &mut server => (output.await, requests),
+        result = &mut output => {
+          let result = result.unwrap();
+          panic!(
+            "CLI 在收到全部响应前退出（{}），stdout={:?}，stderr={:?}",
+            result.status,
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr),
+          );
+        }
       }
-    }
-  }).await.unwrap();
+    })
+    .await
+    .unwrap();
+  let output = output.unwrap();
   let stdout = String::from_utf8(output.stdout).unwrap();
   let json =
     &stdout[stdout.find(['{', '[']).unwrap_or(stdout.len())..];
@@ -101,7 +132,7 @@ async fn run_fixture(
       String::from_utf8_lossy(&output.stderr)
     )
   });
-  (output.status.code().unwrap(), value)
+  (output.status.code().unwrap(), value, requests)
 }
 
 fn service_view() -> Value {
@@ -309,4 +340,122 @@ async fn deploy_plan_and_apply_omit_dockerfile_from_detection() {
     assert_eq!(value["detected"]["language"], "python");
     assert!(value["detected"].get("dockerfile").is_none());
   }
+}
+
+#[tokio::test]
+async fn service_deploy_removes_env_before_adding_and_replaces_ports()
+{
+  let mut service = service_view();
+  service["spec"]["env"] = json!({"FOO": "old", "KEEP": "yes"});
+  service["spec"]["ports"] =
+    json!([{"name": "http", "container": 80}]);
+  service["spec"]["port_checks"] = json!({"http": {"kind": "off"}});
+  let (code, _, requests) = fixture_requests(
+    &[
+      "service",
+      "deploy",
+      "app",
+      "--rm-env",
+      "FOO",
+      "--add-env",
+      "FOO=new",
+      "--port",
+      "metrics=9090",
+      "--json",
+    ],
+    vec![
+      ("GET /api/services/app ", service),
+      ("POST /api/plan ", plan_response()),
+    ],
+  )
+  .await;
+  assert_eq!(code, 0);
+  let spec = &requests[0]["changes"][0]["spec"];
+  assert_eq!(spec["env"], json!({"FOO": "new", "KEEP": "yes"}));
+  assert_eq!(spec["ports"].as_array().unwrap().len(), 1);
+  assert_eq!(spec["ports"][0]["name"], "metrics");
+  assert!(spec["port_checks"].get("http").is_none());
+}
+
+#[tokio::test]
+async fn incremental_flags_prepare_changes_without_a_mode_or_replacement()
+ {
+  let mut service = service_view();
+  service["spec"]["ports"] =
+    json!([{"name": "http", "container": 80}]);
+  let (code, _, requests) = fixture_requests(
+    &[
+      "service",
+      "deploy",
+      "app",
+      "--add-port",
+      "metrics=9090",
+      "--json",
+    ],
+    vec![
+      ("GET /api/services/app ", service),
+      ("POST /api/plan ", plan_response()),
+    ],
+  )
+  .await;
+  assert_eq!(code, 0);
+  assert_eq!(
+    requests[0]["changes"][0]["spec"]["ports"]
+      .as_array()
+      .unwrap()
+      .len(),
+    2
+  );
+
+  let route = json!({
+    "id": "app.example.test", "url": "https://app.example.test", "version": 1,
+    "spec": {"hostname": "app.example.test", "service": "app",
+      "sso": {"mode":"gate", "skip_paths":["/health"]}}
+  });
+  let (code, _, requests) = fixture_requests(
+    &[
+      "route",
+      "sso",
+      "app.example.test",
+      "--add-skip",
+      "/ready",
+      "--json",
+    ],
+    vec![
+      ("GET /api/routes ", json!([route])),
+      ("POST /api/plan ", plan_response()),
+    ],
+  )
+  .await;
+  assert_eq!(code, 0);
+  assert_eq!(
+    requests[0]["changes"][0]["spec"]["sso"]["skip_paths"],
+    json!(["/health", "/ready"])
+  );
+}
+
+#[tokio::test]
+async fn exec_fields_keeps_single_document_and_remote_exit_code() {
+  let response = json!({
+    "exit_code": 2, "stdout": "fixture-out", "stderr": "fixture-err",
+    "truncated": false, "duration_ms": 1, "output_bytes": 22
+  });
+  let (code, value) = run_fixture(
+    &["exec", "s1", "--fields", "stdout", "--", "exit 2"],
+    vec![("POST /api/servers/s1/exec ", response)],
+  )
+  .await;
+  assert_eq!(code, 2);
+  assert_eq!(value, json!({"stdout": "fixture-out"}));
+}
+
+#[tokio::test]
+async fn task_set_dry_run_without_edits_rejects_before_fetching() {
+  let (code, value) = run_fixture(
+    &["task", "set", "fixture", "--dry-run", "--json"],
+    vec![],
+  )
+  .await;
+  assert_eq!(code, 1);
+  assert_eq!(value["code"], "InvalidInput");
 }

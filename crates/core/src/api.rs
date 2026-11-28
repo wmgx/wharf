@@ -340,6 +340,14 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route("/api/services", get(list_services))
     .route("/api/services/{name}", get(show_service))
     .route(
+      "/api/services/{name}/exec",
+      post(crate::service_exec::exec),
+    )
+    .route(
+      "/api/services/{name}/render",
+      get(crate::service_render::get),
+    )
+    .route(
       "/api/services/{name}/heartbeat/reports",
       get(heartbeat_reports),
     )
@@ -526,6 +534,14 @@ pub fn router(state: Arc<AppState>) -> Router {
     )
     .route("/api/tasks/{name}/run", post(crate::tasks::run_now))
     .route("/api/tasks/{name}/runs", get(crate::tasks::runs))
+    .route(
+      "/api/tasks/{name}/runs/{id}",
+      get(crate::tasks::run_detail),
+    )
+    .route(
+      "/api/tasks/runs/{id}/cancel",
+      post(crate::tasks::cancel_run),
+    )
     .route(
       "/api/secrets/{name}",
       put(set_secret).delete(remove_secret),
@@ -1321,6 +1337,8 @@ async fn heartbeat_reports(
 
 #[derive(Deserialize)]
 pub(super) struct LogsQuery {
+  #[serde(default)]
+  pub(super) container: Option<String>,
   #[serde(default = "default_tail")]
   pub(super) tail: u32,
   /// 只看这个时间之后的：`30m`、`2h`、`3d` 或 RFC 3339 时间。
@@ -1421,14 +1439,22 @@ async fn project_logs(
   server: &str,
   project: String,
   q: &LogsQuery,
+  container: Option<String>,
 ) -> Result<Json<Value>, AppError> {
+  let conn = container
+    .as_ref()
+    .map(|_| s.hub.exec_v2_conn_id(server, "按子容器看日志"))
+    .transpose()?;
   Ok(Json(
-    fetch_logs(s, server, q, |tail, since, until| AgentOp::Logs {
-      project: project.clone(),
-      tail,
-      follow: false,
-      since,
-      until,
+    fetch_logs(s, server, q, conn, |tail, since, until| {
+      AgentOp::Logs {
+        container: container.clone(),
+        project: project.clone(),
+        tail,
+        follow: false,
+        since,
+        until,
+      }
     })
     .await?,
   ))
@@ -1439,25 +1465,34 @@ async fn fetch_logs(
   s: &AppState,
   server: &str,
   q: &LogsQuery,
+  conn: Option<u64>,
   op: impl Fn(u32, Option<String>, Option<String>) -> AgentOp,
 ) -> Result<Value, ApiError> {
   let (since, until) = q.window()?;
   let search = q.search(q.tail.max(1) as usize, until.as_deref())?;
-  let conn = until
+  let files_conn = until
     .as_ref()
     .map(|_| s.hub.files_v2_conn_id(server, "按 --until 查日志"))
     .transpose()?;
+  if let (Some(exec_conn), Some(files_conn)) = (conn, files_conn)
+    && exec_conn != files_conn
+  {
+    return Err(crate::hub::offline(server));
+  }
   let op =
     op(if q.filtering() { 5000 } else { q.tail }, since, until);
-  let timeout = Duration::from_secs(40);
   let cancel = tokio_util::sync::CancellationToken::new();
-  let logs: String = if let Some(conn) = conn {
-    s.hub
-      .call_bound((server, conn), op, timeout, None, &cancel)
-      .await?
-  } else {
-    s.hub.call(server, op, timeout, None, &cancel).await?
-  };
+  let logs: String = s
+    .hub
+    .call_optional_bound(
+      server,
+      conn.or(files_conn),
+      op,
+      Duration::from_secs(40),
+      None,
+      &cancel,
+    )
+    .await?;
   Ok(filter_logs(
     server,
     search,
@@ -1494,7 +1529,7 @@ async fn agent_logs(
     return Err(crate::world::server_not_found(&name).into());
   }
   Ok(Json(
-    fetch_logs(&s, &name, &q, |tail, since, until| {
+    fetch_logs(&s, &name, &q, None, |tail, since, until| {
       AgentOp::ContainerLogs {
         container: "wharf-agent".into(),
         tail,
@@ -1528,15 +1563,16 @@ async fn core_logs(
     if !s.hub.is_online(name) {
       continue;
     }
-    let found = fetch_logs(&s, name, &q, |tail, since, until| {
-      AgentOp::ContainerLogs {
-        container: id.clone(),
-        tail,
-        since,
-        until,
-      }
-    })
-    .await;
+    let found =
+      fetch_logs(&s, name, &q, None, |tail, since, until| {
+        AgentOp::ContainerLogs {
+          container: id.clone(),
+          tail,
+          since,
+          until,
+        }
+      })
+      .await;
     match found {
       Ok(v) => return Ok(Json(v)),
       // 不在这台机器上：问下一台。
@@ -1581,7 +1617,7 @@ async fn core_logs(
   )
 }
 
-async fn service_logs(
+pub(super) async fn service_logs(
   State(s): State<Arc<AppState>>,
   auth: Auth,
   Path(name): Path<String>,
@@ -1593,6 +1629,20 @@ async fn service_logs(
   let snap = snapshot::load(&s.db).await?;
   let (server, project) =
     crate::multi_logs::service_target(&snap, &name)?;
+  if q.container.is_some()
+    && (q.previous_list || q.previous.is_some())
+  {
+    return Err(
+      ApiError::invalid("重建前日志不支持 --container")
+        .with_hint("用 --grep 关键字筛选")
+        .into(),
+    );
+  }
+  crate::service_container::validate(
+    &snap.world.services[&name],
+    &name,
+    q.container.as_deref(),
+  )?;
   if q.previous_list || q.previous.is_some() {
     if q.previous_list && q.filters.active() {
       return Err(
@@ -1607,7 +1657,7 @@ async fn service_logs(
       previous_logs(&s, server, project, &q, &values).await?,
     ));
   }
-  project_logs(&s, server, project, &q).await
+  project_logs(&s, server, project, &q, q.container.clone()).await
 }
 
 async fn previous_logs(
@@ -1671,6 +1721,11 @@ async fn multi_service_logs(
   RawQuery(raw): RawQuery,
 ) -> ApiResult<Value> {
   auth.require(Perm::Read)?;
+  if q.container.is_some() {
+    return Err(
+      ApiError::invalid("--container 只能用于单个服务").into(),
+    );
+  }
   q.filters = crate::log_search::Filters::query(raw.as_deref())?;
   if q.previous_list || q.previous.is_some() {
     return Err(
@@ -1861,7 +1916,8 @@ async fn gateway_logs(
     .gateways
     .get(&name)
     .ok_or_else(|| gateway_not_found(&name))?;
-  project_logs(&s, &row.spec.server, gateway_project(&name), &q).await
+  project_logs(&s, &row.spec.server, gateway_project(&name), &q, None)
+    .await
 }
 
 // ROUTES
@@ -2927,7 +2983,7 @@ mod tests {
     let mut q: LogsQuery = serde_json::from_value(json!({})).unwrap();
     q.filters =
       crate::log_search::Filters::query(Some("until=1h")).unwrap();
-    let err = project_logs(&state, "s1", "app".into(), &q)
+    let err = project_logs(&state, "s1", "app".into(), &q, None)
       .await
       .err()
       .unwrap()

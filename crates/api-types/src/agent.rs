@@ -156,6 +156,8 @@ pub enum AgentMsg {
     #[serde(default)]
     safe_delete: bool,
     #[serde(default)]
+    exec_v2: bool,
+    #[serde(default)]
     shared_volumes: bool,
     #[serde(default)]
     safe_gateway: bool,
@@ -442,6 +444,8 @@ pub enum AgentOp {
   /// 直到被取消或超时，结果是空字符串。
   Logs {
     project: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    container: Option<String>,
     tail: u32,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     follow: bool,
@@ -476,6 +480,8 @@ pub enum AgentOp {
   /// `docker compose stop`：停止容器但不删除。project 不存在时什么也不做。
   ProjectRestart {
     project: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    container: Option<String>,
   },
   ProjectStop {
     project: String,
@@ -596,6 +602,7 @@ pub enum AgentOp {
   },
   /// 在宿主机命名空间里执行一次命令。结果是 [HostExecOutcome]。
   HostExec(HostExecJob),
+  ServiceExec(ServiceExecJob),
   /// 定时任务：在服务容器里执行命令，或跑一次性容器。结果是 [TaskRunResult]。
   TaskRun(TaskRunJob),
   /// 入口服务器上仍在使用的代登录目录和运行容器。
@@ -911,9 +918,33 @@ pub struct HostSession {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HostExecJob {
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub stream: bool,
   pub command: String,
   pub timeout_secs: u64,
   pub cwd: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceExecJob {
+  pub project: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub container: Option<String>,
+  pub command: String,
+  pub timeout_secs: u64,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub cwd: Option<String>,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub stream: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ServiceExecOutcome {
+  Finished {
+    container: String,
+    result: HostExecResult,
+  },
+  Failed(HostExecFailure),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

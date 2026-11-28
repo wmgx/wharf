@@ -178,32 +178,21 @@ pub(super) async fn fetch(
             state.hub.files_v2_conn_id(server, "按 --until 查日志")
           })
           .transpose()?;
-        let op = AgentOp::Logs {
-          project: project.clone(),
-          tail: per,
-          follow: false,
-          since,
-          until,
-        };
-        let call = async {
-          if let Some(conn) = conn {
-            state
-              .hub
-              .call_bound(
-                (server, conn),
-                op,
-                call_timeout,
-                None,
-                cancel,
-              )
-              .await
-          } else {
-            state
-              .hub
-              .call::<String>(server, op, call_timeout, None, cancel)
-              .await
-          }
-        };
+        let call = state.hub.call_optional_bound::<String>(
+          server,
+          conn,
+          AgentOp::Logs {
+            project: project.clone(),
+            container: None,
+            tail: per,
+            follow: false,
+            since,
+            until,
+          },
+          call_timeout,
+          None,
+          cancel,
+        );
         // hub 会额外留出等待回包的宽限时间，这里限制实际等待时间。
         timeout(call_timeout, call).await.unwrap_or_else(|_| {
           Err(ApiError::new(

@@ -261,6 +261,8 @@ fn fixed_items(
       Apply,
       None,
     ),
+    ("容器内执行命令", Method::POST, "/api/services/{svc}/exec", Exec, None),
+    ("预览服务配置", Method::GET, "/api/services/{svc}/render", Read, None),
     (
       "进容器终端",
       Method::GET,
@@ -434,7 +436,7 @@ mod tests {
       };
       let result =
         explain(&row, Utc::now(), ExplainQuery::default()).unwrap();
-      assert_eq!(result.items.len(), 15);
+      assert_eq!(result.items.len(), 17);
       let item = |op: &str| {
         result.items.iter().find(|item| item.op == op).unwrap()
       };
@@ -461,6 +463,25 @@ mod tests {
       assert_eq!(files.method, "DELETE");
       assert_eq!(files.perm, Some(Perm::Exec));
       assert_eq!(files.verdict, Depends);
+      let with_service = explain(
+        &row,
+        Utc::now(),
+        ExplainQuery {
+          service: Some("blog".into()),
+          ..Default::default()
+        },
+      )
+      .unwrap();
+      let service_exec = with_service
+        .items
+        .iter()
+        .find(|item| item.op == "容器内执行命令")
+        .unwrap();
+      assert_eq!(service_exec.perm, Some(Perm::Exec));
+      assert_eq!(
+        service_exec.verdict,
+        if perms == "read,host" { Deny } else { Allow }
+      );
       let host = item("宿主机执行命令");
       assert_eq!(host.perm, Some(Perm::Host));
       assert_eq!(host.verdict, host_verdict);
@@ -480,7 +501,7 @@ mod tests {
     row.expires_at = Some(0);
     let result =
       explain(&row, Utc::now(), ExplainQuery::default()).unwrap();
-    assert_eq!(result.items.len(), 15);
+    assert_eq!(result.items.len(), 17);
     for item in result.items {
       assert_eq!(item.verdict, ExplainVerdict::Deny);
       assert_eq!(

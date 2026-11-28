@@ -54,8 +54,9 @@ pub async fn capture(
     {
       return Ok(());
     }
-    let logs =
-      docker.logs(project, MAX_LINES, None, None, &quiet).await?;
+    let logs = docker
+      .logs(project, MAX_LINES, None, None, None, &quiet)
+      .await?;
     if !logs.trim().is_empty() {
       let dir = dir(&docker.data_dir, project);
       tokio::task::spawn_blocking(move || save(&dir, reason, &logs))

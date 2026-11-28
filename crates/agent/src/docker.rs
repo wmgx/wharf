@@ -1166,11 +1166,14 @@ impl Docker {
   pub async fn restart(
     &self,
     project: &str,
+    container: Option<&str>,
     ctx: &Ctx,
   ) -> Result<ProjectUpResult, ApiError> {
+    let args = container_args(container)?;
     self
       .compose(project)
       .arg("restart")
+      .args(args)
       .timeout(Duration::from_secs(180))
       .stream(true)
       .run(ctx)
@@ -1278,6 +1281,7 @@ impl Docker {
     project: &str,
     tail: u32,
     since: Option<&str>,
+    container: Option<&str>,
     until: Option<&str>,
     ctx: &Ctx,
   ) -> Result<String, ApiError> {
@@ -1297,10 +1301,19 @@ impl Docker {
     let out = self
       .compose(project)
       .args(args)
+      .args(container_args(container)?)
       .timeout(Duration::from_secs(30))
       .run(ctx)
-      .await?
-      .check("docker compose logs")?;
+      .await?;
+    if let Some(c) = container
+      && !out.success
+      && out.stderr.contains("no such service")
+    {
+      return Err(ApiError::not_found(format!(
+        "服务 {project} 里没有子容器 {c}"
+      )));
+    }
+    let out = out.check("docker compose logs")?;
     // compose 把日志写到 stdout，部分版本的提示写到 stderr。
     Ok(out.stdout)
   }
@@ -1345,13 +1358,13 @@ impl Docker {
   }
 
   /// 持续推送新日志，直到被取消（页面关闭）或到达上限时长。
-  /// 结束本身就是正常情况，所以不返回错误。
   pub async fn follow_logs(
     &self,
     project: &str,
     tail: u32,
+    container: Option<&str>,
     ctx: &Ctx,
-  ) {
+  ) -> Result<(), ApiError> {
     let result = self
       .compose(project)
       .args([
@@ -1362,15 +1375,26 @@ impl Docker {
         "--tail".into(),
         tail.min(5000).to_string(),
       ])
+      .args(container_args(container)?)
       .timeout(FOLLOW_MAX)
       .stream(true)
       .run(ctx)
       .await;
+    if let Some(c) = container
+      && let Ok(out) = &result
+      && !out.success
+      && out.stderr.contains("no such service")
+    {
+      return Err(ApiError::not_found(format!(
+        "服务 {project} 里没有子容器 {c}"
+      )));
+    }
     if let Err(e) = result
       && !ctx.cancel.is_cancelled()
     {
       ctx.say(format!("日志流结束：{}", e.message));
     }
+    Ok(())
   }
 
   /// 镜像 id 和 digest，写进部署历史用于回滚。
@@ -1956,6 +1980,18 @@ pub(crate) fn strip_ansi(text: &str) -> String {
     }
   }
   out
+}
+
+fn container_args(
+  container: Option<&str>,
+) -> Result<Vec<&str>, ApiError> {
+  match container {
+    Some(c) => {
+      wharf_api_types::validate_container_name(c)?;
+      Ok(vec!["--", c])
+    }
+    None => Ok(vec![]),
+  }
 }
 
 #[cfg(test)]
