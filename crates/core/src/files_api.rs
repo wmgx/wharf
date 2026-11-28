@@ -4,10 +4,10 @@
 use std::{sync::Arc, time::Duration};
 
 use axum::{
-  Json,
+  Extension, Json,
   body::{Body, Bytes},
   extract::{Path, Query, State},
-  http::header,
+  http::{Method, header},
   response::{IntoResponse, Response},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -16,12 +16,17 @@ use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
   ApiError, ErrorCode,
-  agent::{AgentOp, FILE_CHUNK, FileChunk, FileEntry, FilesOp},
+  agent::{
+    AgentOp, FILE_CHUNK, FileChunk, FileEntry, FileGrepResult,
+    FileMkdirResult, FileMvResult, FileRmResult, FileTailResult,
+    FilesOp,
+  },
   view::Perm,
 };
 
 use crate::{
   api::{ApiResult, service_not_found},
+  audit::AuditSlot,
   auth::Auth,
   snapshot,
   state::AppState,
@@ -241,6 +246,278 @@ pub async fn upload(
   Ok(Json(serde_json::json!({ "size": body.len() })))
 }
 
+#[derive(Deserialize)]
+pub struct TailQuery {
+  path: String,
+  #[serde(default = "default_lines")]
+  lines: u32,
+  max_bytes: Option<u32>,
+}
+
+#[derive(Deserialize)]
+pub struct GrepQuery {
+  #[serde(default)]
+  path: String,
+  pattern: String,
+  #[serde(default)]
+  regex: bool,
+  #[serde(default = "default_lines")]
+  limit: u32,
+}
+
+fn default_lines() -> u32 {
+  100
+}
+
+async fn read_v2<T: serde::de::DeserializeOwned>(
+  s: &AppState,
+  name: &str,
+  op: FilesOp,
+) -> Result<(T, Vec<String>), ApiError> {
+  let snap = snapshot::load(&s.db).await?;
+  let server = snapshot::service_runtime_server(&snap, name)
+    .ok_or_else(|| service_not_found(name))?;
+  let conn = s.hub.files_v2_conn_id(server, "文件查看")?;
+  let mut values: Vec<_> = snap
+    .render_values(&snap.world, name)
+    .into_values()
+    .collect();
+  if let Some(row) = snap.world.services.get(name) {
+    values.extend(crate::log_redact::service_values(&row.spec));
+  }
+  let cancel = CancellationToken::new();
+  let _cancel_on_drop = cancel.clone().drop_guard();
+  let out = s
+    .hub
+    .call_bound(
+      (server, conn),
+      AgentOp::Files(op),
+      Duration::from_secs(30),
+      None,
+      &cancel,
+    )
+    .await
+    .map_err(crate::log_redact::redact_error)?;
+  Ok((out, values))
+}
+
+pub async fn tail(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Path(name): Path<String>,
+  Query(q): Query<TailQuery>,
+  Extension(audit): Extension<AuditSlot>,
+) -> ApiResult<FileTailResult> {
+  auth.require(Perm::Read)?;
+  crate::token_scope::require_service(&auth, &name)?;
+  audit
+    .set_detail(format!("tail {name}:{} lines={}", q.path, q.lines));
+  let (mut result, values): (FileTailResult, _) = read_v2(
+    &s,
+    &name,
+    FilesOp::Tail {
+      service: name.clone(),
+      path: q.path,
+      lines: q.lines,
+      max_bytes: q.max_bytes,
+    },
+  )
+  .await?;
+  result.content =
+    crate::log_redact::redact_text_with(&result.content, &values);
+  Ok(Json(result))
+}
+
+pub async fn grep(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Path(name): Path<String>,
+  Query(q): Query<GrepQuery>,
+  Extension(audit): Extension<AuditSlot>,
+) -> ApiResult<FileGrepResult> {
+  auth.require(Perm::Read)?;
+  crate::token_scope::require_service(&auth, &name)?;
+  audit.set_detail(format!("grep {name}:{}", q.path));
+  let (mut result, values): (FileGrepResult, _) = read_v2(
+    &s,
+    &name,
+    FilesOp::Grep {
+      service: name.clone(),
+      path: q.path,
+      pattern: q.pattern,
+      regex: q.regex,
+      limit: q.limit,
+    },
+  )
+  .await?;
+  for hit in &mut result.matches {
+    hit.text =
+      crate::log_redact::redact_text_with(&hit.text, &values);
+  }
+  Ok(Json(result))
+}
+
+#[derive(Deserialize)]
+pub struct RmQuery {
+  path: String,
+  #[serde(default)]
+  recursive: bool,
+}
+
+#[derive(Deserialize)]
+pub struct MvRequest {
+  from: String,
+  to: String,
+  #[serde(default)]
+  force: bool,
+}
+
+#[derive(Deserialize)]
+pub struct MkdirRequest {
+  path: String,
+  #[serde(default)]
+  parents: bool,
+}
+
+async fn edit<T: serde::de::DeserializeOwned>(
+  s: &AppState,
+  auth: &Auth,
+  audit: &AuditSlot,
+  name: &str,
+  op: FilesOp,
+) -> Result<T, crate::api::AppError> {
+  auth.require(Perm::Exec)?;
+  crate::token_scope::require_service(auth, name)?;
+  let _guard = s.locks.acquire(
+    crate::locks::LockSpec::apply([name.to_owned()]),
+    "修改服务文件",
+  )?;
+  let server = server_of(s, name).await?;
+  let conn = s.hub.files_v2_conn_id(&server, "文件修改")?;
+  let (method, suffix, detail, timeout) = match &op {
+    FilesOp::Rm {
+      path, recursive, ..
+    } => (
+      Method::DELETE,
+      "",
+      format!("rm {name}:{path} recursive={recursive}"),
+      60,
+    ),
+    FilesOp::Mv {
+      from, to, force, ..
+    } => (
+      Method::POST,
+      "/mv",
+      format!("mv {name}:{from} -> {to} force={force}"),
+      30,
+    ),
+    FilesOp::Mkdir { path, parents, .. } => (
+      Method::POST,
+      "/mkdir",
+      format!("mkdir {name}:{path} parents={parents}"),
+      30,
+    ),
+    _ => unreachable!(),
+  };
+  audit
+    .record_before_files(
+      s,
+      &auth.name,
+      method,
+      format!("/api/services/{name}/files{suffix}"),
+      detail,
+    )
+    .await?;
+  crate::pending::source_changed(s, name).await?;
+  let cancel = CancellationToken::new();
+  let _cancel_on_drop = cancel.clone().drop_guard();
+  Ok(
+    s.hub
+      .call_bound(
+        (&server, conn),
+        AgentOp::Files(op),
+        Duration::from_secs(timeout),
+        None,
+        &cancel,
+      )
+      .await
+      .map_err(crate::log_redact::redact_error)?,
+  )
+}
+
+pub async fn rm(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Path(name): Path<String>,
+  Query(q): Query<RmQuery>,
+  Extension(audit): Extension<AuditSlot>,
+) -> ApiResult<FileRmResult> {
+  let result: FileRmResult = edit(
+    &s,
+    &auth,
+    &audit,
+    &name,
+    FilesOp::Rm {
+      service: name.clone(),
+      path: q.path,
+      recursive: q.recursive,
+    },
+  )
+  .await?;
+  audit.set_detail(format!(
+    "rm {name}:{} recursive={} removed={}",
+    result.path, q.recursive, result.removed
+  ));
+  Ok(Json(result))
+}
+
+pub async fn mv(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Path(name): Path<String>,
+  Extension(audit): Extension<AuditSlot>,
+  Json(q): Json<MvRequest>,
+) -> ApiResult<FileMvResult> {
+  Ok(Json(
+    edit(
+      &s,
+      &auth,
+      &audit,
+      &name,
+      FilesOp::Mv {
+        service: name.clone(),
+        from: q.from,
+        to: q.to,
+        force: q.force,
+      },
+    )
+    .await?,
+  ))
+}
+
+pub async fn mkdir(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Path(name): Path<String>,
+  Extension(audit): Extension<AuditSlot>,
+  Json(q): Json<MkdirRequest>,
+) -> ApiResult<FileMkdirResult> {
+  Ok(Json(
+    edit(
+      &s,
+      &auth,
+      &audit,
+      &name,
+      FilesOp::Mkdir {
+        service: name.clone(),
+        path: q.path,
+        parents: q.parents,
+      },
+    )
+    .await?,
+  ))
+}
+
 #[cfg(test)]
 mod tests {
   use super::checked_offset;
@@ -265,4 +542,94 @@ async fn files_server_of_uses_migration_source_when_interrupted() {
   crate::migrate::tests::seed_migration(&state, "pending", false)
     .await;
   assert_eq!(server_of(&state, "notes").await.unwrap(), "s1");
+}
+
+#[tokio::test]
+async fn file_edits_require_exec_service_scope_capability_and_audit()
+{
+  let state = crate::migrate::tests::seed_service(false).await;
+  crate::migrate::tests::seed_migration(&state, "synced", false)
+    .await;
+  let calls =
+    std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+  let counter = calls.clone();
+  state.hub.mock_agent("s1", false, move |op| {
+    assert!(matches!(op, AgentOp::Files(FilesOp::Rm { .. })));
+    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    Ok(serde_json::json!({"path":"a","removed":1}))
+  });
+  let auth = |exec, service: &str| Auth {
+    name: "fixture".into(),
+    perms: if exec {
+      [Perm::Read, Perm::Exec].into_iter().collect()
+    } else {
+      [Perm::Read].into()
+    },
+    services: Some([service.into()].into()),
+    allowed_from: vec![],
+    expires_at: None,
+    human: false,
+  };
+  let request = |auth| {
+    rm(
+      State(state.clone()),
+      auth,
+      Path("notes".into()),
+      Query(RmQuery {
+        path: "a".into(),
+        recursive: false,
+      }),
+      Extension(AuditSlot::default()),
+    )
+  };
+  for (exec, service, code) in [
+    (false, "notes", ErrorCode::Forbidden),
+    (true, "other", ErrorCode::Forbidden),
+    (true, "notes", ErrorCode::Conflict),
+  ] {
+    assert_eq!(
+      request(auth(exec, service)).await.err().unwrap().0.code,
+      code
+    );
+  }
+  let old_read = tail(
+    State(state.clone()),
+    auth(false, "notes"),
+    Path("notes".into()),
+    Query(TailQuery {
+      path: "a".into(),
+      lines: 5,
+      max_bytes: None,
+    }),
+    Extension(AuditSlot::default()),
+  )
+  .await;
+  assert_eq!(old_read.err().unwrap().0.code, ErrorCode::Conflict);
+  state.hub.enable_mock_files_v2("s1");
+  assert_eq!(
+    request(auth(true, "notes"))
+      .await
+      .map_err(|e| e.0)
+      .unwrap()
+      .0
+      .removed,
+    1
+  );
+  let (audit_count, phase) = state.db.call(|c| {
+    let count: i64 = c.query_row("SELECT count(*) FROM audit_log WHERE method='DELETE' AND path='/api/services/notes/files'", [], |r| r.get(0)).map_err(crate::db::sql_err)?;
+    let phase: String = c.query_row("SELECT phase FROM pending_steps WHERE target_key='notes'", [], |r| r.get(0)).map_err(crate::db::sql_err)?;
+    Ok((count, phase))
+  }).await.unwrap();
+  assert_eq!((audit_count, phase.as_str()), (1, "pending"));
+  state
+    .db
+    .call(|c| {
+      c.execute("DROP TABLE audit_log", [])
+        .map(|_| ())
+        .map_err(crate::db::sql_err)
+    })
+    .await
+    .unwrap();
+  assert!(request(auth(true, "notes")).await.is_err());
+  assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
 }

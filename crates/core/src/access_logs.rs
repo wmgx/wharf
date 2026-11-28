@@ -4,7 +4,7 @@ use axum::{
   Json,
   extract::{Path, Query, State},
 };
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
@@ -18,7 +18,7 @@ use wharf_api_types::{
 use crate::{
   api::{ApiResult, gateway_not_found},
   auth::Auth,
-  multi_logs::anchor_since,
+  log_search::{anchor_time, parse_rfc3339_utc},
   snapshot,
   state::AppState,
   world::World,
@@ -133,9 +133,8 @@ async fn fetch(
     .as_deref()
     .filter(|value| !value.trim().is_empty())
     .map(|value| {
-      anchor_since(value)
-        .and_then(|time| DateTime::parse_from_rfc3339(&time).ok())
-        .map(|time| time.with_timezone(&Utc))
+      anchor_time(value, Utc::now())
+        .and_then(|time| parse_rfc3339_utc(&time))
         .ok_or_else(|| {
           ApiError::invalid(format!("时间范围 {value} 看不懂"))
             .with_hint(

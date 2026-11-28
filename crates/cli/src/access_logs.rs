@@ -27,10 +27,10 @@ pub struct GatewayArgs {
   #[command(flatten)]
   logs: LogArgs,
   /// 持续跟随容器日志。
-  #[arg(long, short, conflicts_with_all = ["access", "since", "grep", "errors", "max_line"])]
+  #[arg(long, short, conflicts_with_all = ["access", "since", "grep", "errors", "max_line", "until", "exclude", "regex", "after_context", "before_context", "context", "where_exprs", "cols"])]
   follow: bool,
   /// 查看访问日志。例：wharf gateway logs edge --access --host blog.example.com --status 5xx。
-  #[arg(long, conflicts_with_all = ["grep", "errors", "max_line"])]
+  #[arg(long, conflicts_with_all = ["grep", "errors", "max_line", "until", "exclude", "regex", "after_context", "before_context", "context", "where_exprs", "cols"])]
   access: bool,
   /// 仅查看此域名，需要 --access。
   #[arg(long)]

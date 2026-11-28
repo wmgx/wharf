@@ -282,7 +282,7 @@ fn stat_path(
       } else if st.st_mode & libc::S_IFMT == libc::S_IFREG {
         *bytes = bytes.saturating_add(st.st_size.max(0) as u64);
       }
-      Ok(())
+      Ok(true)
     })
   }
   let dir = match DirFd::open_absolute(path) {

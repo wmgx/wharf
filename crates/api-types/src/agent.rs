@@ -183,6 +183,9 @@ pub enum AgentMsg {
     safe_rollback: bool,
     #[serde(default)]
     key_rotation: bool,
+    /// 支持扩展文件操作和日志截止时间。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    files_v2: bool,
   },
   KeyReady {
     core_public_key: String,
@@ -453,6 +456,8 @@ pub enum AgentOp {
     /// 只要这个时间之后的：`30m`、`2h`，或 RFC 3339 时间。旧 agent 不认识，会忽略。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     since: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    until: Option<String>,
   },
   PreviousLogs {
     project: String,
@@ -464,6 +469,8 @@ pub enum AgentOp {
     since: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     list: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    until: Option<String>,
   },
   /// 校验并应用网关配置，失败自动回滚。结果是 [ProjectUpResult]。
   GatewayApply(GatewayApply),
@@ -531,6 +538,8 @@ pub enum AgentOp {
     tail: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     since: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    until: Option<String>,
   },
   /// 测各服务的占用：`/srv/<服务>`、容器日志、挂载的命名卷。要遍历文件，结果是 `Vec<ServiceDisk>`。
   DiskUsage {
@@ -673,6 +682,102 @@ pub enum FilesOp {
     data: String,
     last: bool,
   },
+  Tail {
+    service: String,
+    path: String,
+    #[serde(default = "default_file_lines")]
+    lines: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_bytes: Option<u32>,
+  },
+  Grep {
+    service: String,
+    #[serde(default)]
+    path: String,
+    pattern: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    regex: bool,
+    #[serde(default = "default_file_lines")]
+    limit: u32,
+  },
+  Rm {
+    service: String,
+    path: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    recursive: bool,
+  },
+  Mv {
+    service: String,
+    from: String,
+    to: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    force: bool,
+  },
+  Mkdir {
+    service: String,
+    path: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    parents: bool,
+  },
+}
+
+fn default_file_lines() -> u32 {
+  100
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct FileTailResult {
+  pub path: String,
+  pub size: u64,
+  pub lines: u32,
+  pub content: String,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct FileGrepMatch {
+  pub path: String,
+  pub line: u64,
+  pub text: String,
+}
+
+#[derive(
+  Debug, Clone, Default, Serialize, Deserialize, JsonSchema,
+)]
+pub struct FileGrepResult {
+  pub matches: Vec<FileGrepMatch>,
+  pub scanned_files: u32,
+  #[serde(default, skip_serializing_if = "is_zero_u32")]
+  pub skipped_binary: u32,
+  #[serde(default, skip_serializing_if = "is_zero_u32")]
+  pub skipped_large: u32,
+  #[serde(default, skip_serializing_if = "is_zero_u32")]
+  pub skipped_links: u32,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub truncated: bool,
+}
+
+fn is_zero_u32(value: &u32) -> bool {
+  *value == 0
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct FileMkdirResult {
+  pub path: String,
+  pub created: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct FileMvResult {
+  pub from: String,
+  pub to: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct FileRmResult {
+  pub path: String,
+  pub removed: u64,
 }
 
 /// 分块传输的块大小：base64 后远小于 websocket 单帧上限。

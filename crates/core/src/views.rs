@@ -369,6 +369,7 @@ pub fn service_view(
     .map(|p| p.containers.clone())
     .unwrap_or_default();
   Some(ServiceView {
+    has_update: false,
     omitted: Default::default(),
     migration: snap.pending.migrations.get(name).map(|m| {
       wharf_api_types::view::MigrationView {

@@ -74,6 +74,7 @@ pub async fn enrich(
                   tail: 30,
                   follow: false,
                   since: None,
+                  until: None,
                 },
                 Duration::from_secs(5),
                 None,

@@ -54,6 +54,34 @@ wharf status --brief --json  # 服务器、服务、网关、路由；需要注�
 
 ## 常见任务
 
+### 查列表、日志和服务文件
+
+列表筛选可组合。服务支持 --server、--status、--no-backup、--has-update、--brief。路由支持 --gateway、--service、--public、--internal、--unprotected。服务器支持 --online、--offline、--outdated，网关支持 --server、--kind。
+
+-q 让列表每行输出一个主键，计划与执行只输出 ID，等待期间静默。-q 与 --json、--fields、--page-size、--changed 互斥。
+
+    wharf service list --server s1 --status abnormal -q
+    wharf route list --unprotected -q
+    wharf service logs app --grep panic -C 3 --exclude healthcheck
+    wharf service logs app --grep '50[0-4]' --regex --since 2h --until 1h
+    wharf gateway logs gw --where 'status>=500' --cols time,method,path,status
+    wharf service files ls app config
+    wharf service files tail app logs/app.log -n 50
+    wharf service files grep app ERROR config --limit 20
+    wharf service files mkdir app data/tmp -p
+    wharf service files mv app data/tmp/a data/tmp/b
+    wharf service files rm app data/tmp/b
+
+日志上下文可以用 -A 或 -B 单独调整，执行日志支持上下文、排除和正则。--where 可重复，所有条件同时匹配。带 --until 的容器日志查询需要新版 agent。
+
+文件查看需要 read 权限。建目录、移动和删除需要 exec 权限，直接执行并记审计。--force 允许覆盖目标，--recursive 允许递归删除。
+
+    wharf wait server s1 --online-only
+    wharf wait dns app.example.test --all
+    wharf wait cert app.example.test --timeout 5m
+
+wait server 默认同时检查网关、链路和运行中的容器。wait dns 默认复用 DNS 生效判定，--all 要求全部解析器一致。wait cert 以 HTTPS 握手取得的证书为准。
+
 ### 部署
 
 ```bash

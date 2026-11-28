@@ -169,7 +169,7 @@ pub async fn source(
       }
       return Err(CliError::Exit(0));
     }
-    if !j {
+    if !j && !crate::print::is_quiet() {
       print_detected(&local.detected);
     }
     b.upload = Some(
@@ -465,6 +465,7 @@ async fn upload_packed(
   packed: wharf_pack::Packed,
   verbose: bool,
 ) -> CliResult<String> {
+  let verbose = verbose && !crate::print::is_quiet();
   if verbose {
     eprintln!(
       "打包 {} 个文件，{} KiB（{}）",
@@ -550,7 +551,7 @@ pub async fn fetch_compose(url: &str, j: bool) -> CliResult<String> {
       "内容里没有 services，不是 compose 文件".into(),
     ));
   }
-  if !j && text.contains("${") {
+  if !j && !crate::print::is_quiet() && text.contains("${") {
     eprintln!(
       "提醒：compose 里用了 ${{变量}}，原来靠 .env 文件提供的值要直接写进 compose，密码用 [[密钥名]]"
     );

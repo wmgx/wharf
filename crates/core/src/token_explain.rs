@@ -278,6 +278,13 @@ fn fixed_items(
       None,
     ),
     (
+      "修改服务文件",
+      Method::DELETE,
+      "/api/services/{svc}/files",
+      Exec,
+      Some("上传、删除、移动和建目录均要求 exec，且仅限服务数据目录"),
+    ),
+    (
       "确认告警",
       Method::POST,
       "/api/alerts/ack",
@@ -429,7 +436,7 @@ mod tests {
       };
       let result =
         explain(&row, Utc::now(), ExplainQuery::default()).unwrap();
-      assert_eq!(result.items.len(), 16);
+      assert_eq!(result.items.len(), 17);
       let item = |op: &str| {
         result.items.iter().find(|item| item.op == op).unwrap()
       };
@@ -452,6 +459,10 @@ mod tests {
           item("看任务完整触发地址").reason.as_deref().unwrap();
         assert_eq!(reveal.contains("任务归属"), scoped);
       }
+      let files = item("修改服务文件");
+      assert_eq!(files.method, "DELETE");
+      assert_eq!(files.perm, Some(Perm::Exec));
+      assert_eq!(files.verdict, Depends);
       let with_service = explain(
         &row,
         Utc::now(),
@@ -490,7 +501,7 @@ mod tests {
     row.expires_at = Some(0);
     let result =
       explain(&row, Utc::now(), ExplainQuery::default()).unwrap();
-    assert_eq!(result.items.len(), 16);
+    assert_eq!(result.items.len(), 17);
     for item in result.items {
       assert_eq!(item.verdict, ExplainVerdict::Deny);
       assert_eq!(

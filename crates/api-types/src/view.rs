@@ -274,6 +274,9 @@ pub struct ServiceView {
   /// 被哪些服务引用。
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub used_by: Vec<String>,
+  /// 后台版本检查发现新镜像、commit 或版本标签。
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub has_update: bool,
 }
 
 /// 服务的分层状态：期望、已应用、实际、健康、执行，加上按优先级挑出的一句话。
