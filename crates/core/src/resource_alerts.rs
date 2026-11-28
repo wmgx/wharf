@@ -1,23 +1,20 @@
 use std::{
   collections::{BTreeMap, VecDeque},
-  sync::Arc,
+  sync::{Arc, Mutex},
 };
 
-use rusqlite::{OptionalExtension, params};
-use tokio::sync::mpsc;
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
-  agent::Metrics,
-  resources::percent,
-  spec::{ServerSettings, ServiceSpec},
+  agent::Metrics, resources::percent, spec::ServiceSpec,
   view::AlertLevel,
 };
 
 use super::{Ctx, Mode, Op, Rule, ev, observe_at};
-use crate::{db, notify::Event, state::AppState};
+use crate::{notify::Event, snapshot, state::AppState};
 
-// 两个一分钟采样周期减 5 秒余量，避免漏采一次后因轻微抖动仍接成连续序列。
-const SAMPLE_GAP_MS: i64 = 115_000;
+// 容忍连续漏掉两个一分钟采样周期和短暂抖动。
+const SAMPLE_GAP_MS: i64 = 210_000;
 
 pub(super) const HOST_CPU: Rule = Rule {
   id: "host_cpu_high",
@@ -66,8 +63,17 @@ pub(super) const SERVICE_MEM: Rule = Rule {
     ev(
       format!("服务 {} 内存接近上限", c.subject),
       format!(
-        "{}，已用 {:.1}%。确认后重启服务，或调大上限：wharf service limits {} --memory <MB> --apply",
-        c.detail, c.value, c.subject
+        "{}，已用 {:.1}%。确认后重启服务，或调大上限：{}",
+        c.detail,
+        c.value,
+        if c.detail.contains("Compose 上限") {
+          "调整 compose 文件里的 mem_limit / deploy.resources.limits.memory".into()
+        } else {
+          format!(
+            "wharf service limits {} --memory <MB> --apply",
+            c.subject
+          )
+        }
       ),
     )
   },
@@ -194,13 +200,7 @@ fn host_ok(c: &Ctx, label: &str) -> Event {
 }
 
 fn top_projects(m: &Metrics, cpu: bool) -> String {
-  let mut projects: Vec<_> = m
-    .projects
-    .iter()
-    .filter(|(name, _)| {
-      !name.starts_with(crate::world::GATEWAY_PROJECT_PREFIX)
-    })
-    .collect();
+  let mut projects: Vec<_> = m.projects.iter().collect();
   projects.sort_by(|(_, a), (_, b)| {
     if cpu {
       b.cpu.total_cmp(&a.cpu)
@@ -212,6 +212,12 @@ fn top_projects(m: &Metrics, cpu: bool) -> String {
     .into_iter()
     .take(3)
     .map(|(name, v)| {
+      let name = name
+        .strip_prefix(crate::world::GATEWAY_PROJECT_PREFIX)
+        .map_or_else(
+          || name.clone(),
+          |gateway| format!("网关 {gateway}"),
+        );
       if cpu {
         format!("{name} {:.1}%", v.cpu)
       } else {
@@ -231,60 +237,121 @@ pub(crate) fn mib(bytes: f64) -> String {
   format!("{:.1} MiB", bytes / f64::from(1 << 20))
 }
 
-type Limits = BTreeMap<String, u64>;
-pub(crate) type Sample = (i64, Metrics, Limits, Option<u64>);
+type Limits = BTreeMap<String, (u64, bool)>;
+type Sample = (i64, Metrics, Limits, Option<u64>);
 
 pub(crate) async fn settings(
   state: &AppState,
   server: &str,
 ) -> Option<(u64, Limits)> {
-  let server = server.to_string();
-  state.db.call(move |c| {
-    let Some(spec): Option<String> = c.query_row(
-      "SELECT spec FROM resources WHERE kind = 'server' AND name = ?1",
-      [&server], |r| r.get(0),
-    ).optional().map_err(db::sql_err)? else { return Ok(None); };
-    let settings: ServerSettings = serde_json::from_str(&spec).map_err(db::json_err)?;
-    let mut stmt = c.prepare_cached(
-      "SELECT name, json_extract(spec, '$.limits.memory_mb')
-       FROM resources WHERE kind = 'service' AND json_extract(spec, '$.server') = ?1
-         AND COALESCE(json_extract(spec, '$.stopped'), 0) = 0
-         AND json_extract(spec, '$.limits.memory_mb') > 0",
-    ).map_err(db::sql_err)?;
-    let limits = stmt.query_map(params![server], |r| Ok((r.get(0)?, r.get::<_, u64>(1)? << 20)))
-      .and_then(Iterator::collect).map_err(db::sql_err)?;
-    Ok(Some((settings.agent_memory_bytes(), limits)))
-  }).await.unwrap_or_else(|e| {
-    tracing::warn!("读取资源告警配置失败：{}", e.message);
-    None
-  })
+  let snap = snapshot::load(&state.db)
+    .await
+    .map_err(|e| {
+      tracing::warn!("读取资源告警配置失败：{}", e.message);
+    })
+    .ok()?;
+  let settings = &snap.world.servers.get(server)?.settings;
+  let limits = snap
+    .world
+    .services
+    .iter()
+    .filter_map(|(name, row)| {
+      if row.spec.stopped
+        || snapshot::service_runtime_server(&snap, name)
+          != Some(server)
+      {
+        return None;
+      }
+      let limit = service_limit(&row.spec)?;
+      Some((name.clone(), (limit, row.spec.limits.is_none())))
+    })
+    .collect();
+  Some((settings.agent_memory_bytes(), limits))
 }
 
 pub(crate) fn service_limit(spec: &ServiceSpec) -> Option<u64> {
-  spec
-    .limits
-    .as_ref()?
-    .memory_mb
-    .filter(|&n| n > 0)
-    .map(|n| u64::from(n) << 20)
+  if let Some(limits) = &spec.limits {
+    return limits
+      .memory_mb
+      .filter(|&n| n > 0)
+      .map(|n| u64::from(n) << 20);
+  }
+  let (bytes, all_limited) =
+    crate::lint::compose_memory_limits(spec)?;
+  (all_limited && bytes > 0).then_some(bytes)
+}
+
+#[derive(Default)]
+pub(crate) struct ReportQueue {
+  samples: Mutex<VecDeque<Sample>>,
+  ready: Notify,
+  space: Notify,
+}
+
+impl ReportQueue {
+  const MAX: usize = 16;
+  pub(crate) fn push(&self, sample: Sample) {
+    let mut queue =
+      self.samples.lock().unwrap_or_else(|e| e.into_inner());
+    if queue.len() == Self::MAX {
+      queue.pop_front();
+    }
+    queue.push_back(sample);
+    self.ready.notify_one();
+  }
+
+  pub(crate) async fn push_backfill(&self, sample: Sample) {
+    loop {
+      {
+        let mut queue =
+          self.samples.lock().unwrap_or_else(|e| e.into_inner());
+        if queue.len() < Self::MAX {
+          queue.push_back(sample);
+          self.ready.notify_one();
+          return;
+        }
+      }
+      self.space.notified().await;
+    }
+  }
+
+  async fn next(&self) -> Sample {
+    loop {
+      if let Some(sample) = self
+        .samples
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .pop_front()
+      {
+        self.space.notify_one();
+        return sample;
+      }
+      self.ready.notified().await;
+    }
+  }
 }
 
 pub(crate) fn report_queue(
   state: Arc<AppState>,
   server: String,
   cancel: CancellationToken,
-) -> mpsc::Sender<Sample> {
-  let (tx, mut rx) = mpsc::channel::<Sample>(32);
+) -> Arc<ReportQueue> {
+  let queue = Arc::new(ReportQueue::default());
+  let receiver = queue.clone();
   tokio::spawn(async move {
-    while let Some((at, m, limits, agent_limit)) = tokio::select! {
-      _ = cancel.cancelled() => None,
-      sample = rx.recv() => sample,
-    } {
-      observe_report(&state, at, &server, &m, &limits, agent_limit)
-        .await;
+    let process = async {
+      loop {
+        let (at, m, limits, agent_limit) = receiver.next().await;
+        observe_report(&state, at, &server, &m, &limits, agent_limit)
+          .await;
+      }
+    };
+    tokio::select! {
+      _ = cancel.cancelled() => {},
+      _ = process => {},
     }
   });
-  tx
+  queue
 }
 
 async fn observe_report(
@@ -333,15 +400,16 @@ async fn observe_report(
     observe_at(state, at, "svc.mem", name, mem_mb, &server_detail)
       .await;
   }
-  for (name, used, total) in
-    limits.iter().filter_map(|(name, total)| {
-      Some((name, m.projects.get(name)?.mem, *total))
+  for (name, used, total, compose) in
+    limits.iter().filter_map(|(name, &(total, compose))| {
+      Some((name, m.projects.get(name)?.mem, total, compose))
     })
   {
     if let Some(pct) = percent(used, total) {
       let detail = format!(
-        "服务器 {server}，当前 {}，上限 {}",
+        "服务器 {server}，当前 {}，{}上限 {}",
         mib(used as f64),
+        if compose { "Compose " } else { "" },
         mib(total as f64)
       );
       observe_at(state, at, SERVICE_MEM.metric, name, pct, &detail)
@@ -395,17 +463,38 @@ mod tests {
   }
 
   #[test]
-  fn host_cpu_restarts_after_missing_a_sample() {
+  fn cpu_window_survives_single_skip_and_top_includes_gateway() {
     let mut points = VecDeque::from(vec![91.0; 14]);
-    assert!(prepare_sample(&mut points, 840_000, 900_000));
-    assert_eq!(points.len(), 14);
-    assert!(prepare_sample(&mut points, 840_000, 960_000));
-    points.push_back(91.0);
-    assert_eq!(points.len(), 1);
-    assert!(matches!(
-      judge(&HOST_CPU, HOST_CPU.threshold, HOST_CPU.for_n, &points),
-      Verdict::Hold
-    ));
+    for gap in [120_000, 180_000] {
+      assert!(prepare_sample(&mut points, 0, gap));
+      assert_eq!(points.len(), 14);
+    }
+    assert!(prepare_sample(&mut points, 0, 240_000));
+    assert!(points.is_empty());
+    let mut metrics = Metrics::default();
+    metrics.projects.insert(
+      "wharf-gw-edge".into(),
+      wharf_api_types::agent::ProjectMetrics {
+        cpu: 90.0,
+        ..Default::default()
+      },
+    );
+    assert!(top_projects(&metrics, true).contains("网关 edge 90.0%"));
+  }
+
+  #[test]
+  fn service_limit_reads_compose_yaml_memory() {
+    let limit = |extra: &str| {
+      let spec = serde_json::from_value(serde_json::json!({
+        "server":"s1", "source":{"compose":{"content":format!("services:\n  web: {{mem_limit: 256m}}\n  db: {{{extra}}}")}}
+      })).unwrap();
+      service_limit(&spec)
+    };
+    assert_eq!(
+      limit("deploy: {resources: {limits: {memory: 512M}}}"),
+      Some(768 << 20)
+    );
+    assert_eq!(limit("image: redis"), None);
   }
 
   #[test]

@@ -1,6 +1,6 @@
 //! 按近 3 天的小时末值粗估内存用完的时间。
 
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use rusqlite::{OptionalExtension, params};
 use wharf_api_types::ApiError;
@@ -18,15 +18,9 @@ enum Forecast {
 }
 
 fn forecast(points: &[(i64, f64)], total: f64, now: i64) -> Forecast {
-  let mut hours = BTreeMap::new();
-  for &(at, used) in points {
-    let point = hours.entry(at / HOUR).or_insert((at, used));
-    if at > point.0 {
-      *point = (at, used);
-    }
-  }
-  let (Some((_, &(first, _))), Some((_, &(last, used)))) =
-    (hours.first_key_value(), hours.last_key_value())
+  let hours = crate::disk_forecast::hourly_points(points);
+  let (Some(&(first, _)), Some(&(last, used))) =
+    (hours.first(), hours.last())
   else {
     return Forecast::Insufficient;
   };
@@ -37,21 +31,8 @@ fn forecast(points: &[(i64, f64)], total: f64, now: i64) -> Forecast {
   {
     return Forecast::Insufficient;
   }
-  let mut sum = 0.0;
-  let mut count = 0;
-  for ((h0, (_, before)), (h1, (_, after))) in
-    hours.iter().zip(hours.iter().skip(1))
-  {
-    let diff = after - before;
-    if h1 - h0 == 1 && diff.abs() <= total * 0.10 {
-      sum += diff;
-      count += 1;
-    }
-  }
-  if count == 0 {
-    return Forecast::Insufficient;
-  }
-  let daily = sum / f64::from(count) * 24.0;
+  let daily =
+    crate::disk_forecast::daily_growth(&hours, total * 0.10, 12);
   if daily <= 0.0 {
     return Forecast::Flat;
   }
@@ -119,9 +100,13 @@ async fn round(state: &AppState) -> Result<(), ApiError> {
     if service.spec.stopped {
       continue;
     }
+    let Some(server) = snapshot::service_runtime_server(&snap, name)
+    else {
+      continue;
+    };
     subjects.push((
       name.clone(),
-      service.spec.server.clone(),
+      server.to_string(),
       "svc.mem",
       rules::resources::service_limit(&service.spec),
     ));
@@ -262,6 +247,20 @@ mod tests {
     let mut points = rising();
     points[36].1 = 200.0;
     expect_growth(&points);
+  }
+
+  #[test]
+  fn forecast_rejects_sawtooth_and_catches_rapid_leak() {
+    let mut points: Vec<_> = (0..72)
+      .map(|h| (h * HOUR, 50.0 + (h % 12) as f64 * 5.0))
+      .collect();
+    assert_eq!(forecast(&points, 256.0, 71 * HOUR), Forecast::Flat);
+    for h in 72..76 {
+      points.push((h * HOUR, 105.0 + (h - 71) as f64 * 35.0));
+    }
+    assert!(
+      matches!(forecast(&points, 256.0, 75 * HOUR), Forecast::Growing { days, .. } if days < 0.1)
+    );
   }
 
   #[test]

@@ -45,6 +45,27 @@ pub fn spawn(state: Arc<AppState>) {
   });
 }
 
+fn low_quota(
+  settings: &wharf_api_types::spec::ServerSettings,
+  quota: &wharf_api_types::external::DockerQuota,
+  now: chrono::DateTime<chrono::Utc>,
+) -> Option<(u32, u32)> {
+  let (remaining, limit) = (quota.remaining?, quota.limit?);
+  let mirrored =
+    ["docker.io", "registry-1.docker.io", "index.docker.io"]
+      .iter()
+      .any(|host| {
+        settings.registry_mirrors.get(*host).is_some_and(|mirrors| {
+          mirrors.iter().any(|url| !url.trim().is_empty())
+        })
+      });
+  let window = i64::from(quota.window_secs.unwrap_or(21_600));
+  (!mirrored
+    && now - quota.checked_at < chrono::TimeDelta::seconds(window)
+    && u64::from(remaining) * 10 < u64::from(limit))
+  .then_some((remaining, limit))
+}
+
 pub fn issues(
   servers: &[ServerView],
   snap: &crate::snapshot::Snapshot,
@@ -52,13 +73,8 @@ pub fn issues(
   let mut issues = dns_check::issues();
   issues.extend(servers.iter().filter_map(|server| {
     let quota = server.report.as_ref()?.docker_quota.as_ref()?;
-    let (remaining, limit) = (quota.remaining?, quota.limit?);
-    if chrono::Utc::now() - quota.checked_at
-      >= chrono::TimeDelta::days(1)
-      || u64::from(remaining) * 10 >= u64::from(limit)
-    {
-      return None;
-    }
+    let (remaining, limit) =
+      low_quota(&server.settings, quota, chrono::Utc::now())?;
     Some(Issue {
       code: "docker_hub_quota_low".into(),
       level: IssueLevel::Warn,
@@ -124,4 +140,31 @@ pub fn issues(
     }
   }
   issues
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn docker_quota_respects_window_and_mirrors() {
+    let mut settings =
+      wharf_api_types::spec::ServerSettings::default();
+    let now = chrono::Utc::now();
+    let mut quota = wharf_api_types::external::DockerQuota {
+      remaining: Some(5),
+      limit: Some(100),
+      window_secs: Some(21_600),
+      checked_at: now - chrono::TimeDelta::hours(7),
+      error: None,
+    };
+    assert_eq!(low_quota(&settings, &quota, now), None);
+    quota.checked_at = now - chrono::TimeDelta::hours(1);
+    assert_eq!(low_quota(&settings, &quota, now), Some((5, 100)));
+    settings.registry_mirrors.insert(
+      "docker.io".into(),
+      vec!["https://mirror.example.test".into()],
+    );
+    assert_eq!(low_quota(&settings, &quota, now), None);
+  }
 }

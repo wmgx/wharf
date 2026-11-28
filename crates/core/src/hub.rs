@@ -1498,7 +1498,7 @@ async fn ingest_backfill(
   public_key: &str,
   now: i64,
   mut samples: Vec<BufferedSample>,
-  alerts: &mpsc::Sender<crate::rules::resources::Sample>,
+  alerts: &crate::rules::resources::ReportQueue,
 ) -> Result<usize, ApiError> {
   let (name, key) = (server.to_string(), public_key.to_string());
   let (world, deployed, mut last) = state.db.call(move |c| {
@@ -1548,7 +1548,7 @@ async fn ingest_backfill(
       }
       crate::metrics::record_report_at(state, server, at, &m).await;
       if let Some((_, limits)) = &settings {
-        let _ = alerts.send((at, m, limits.clone(), None)).await;
+        alerts.push_backfill((at, m, limits.clone(), None)).await;
       }
       crate::oom::record_at(state, server, at, oom).await;
     }
@@ -1645,12 +1645,7 @@ async fn report_worker(
             .as_ref()
             .and_then(|m| m.limit)
             .filter(|_| wanted > 0);
-          let _ = alerts.try_send((
-            received,
-            m.as_ref().clone(),
-            limits,
-            limit,
-          ));
+          alerts.push((received, m.as_ref().clone(), limits, limit));
         }
         crate::oom::record_at(&state, &server, received, oom).await;
       }

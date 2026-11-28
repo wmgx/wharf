@@ -769,7 +769,7 @@ async fn backfill_ingests_without_clock_skew_and_rejects_duplicate_or_foreign_sa
     }
     Ok(())
   }).await.unwrap();
-  let (alerts, _rx) = mpsc::channel(32);
+  let alerts = crate::rules::resources::ReportQueue::default();
   let samples: Vec<_> = [
     25 * 60_000,
     0,

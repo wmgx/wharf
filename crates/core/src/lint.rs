@@ -345,19 +345,38 @@ fn service_memory(spec: &ServiceSpec) -> f64 {
       {
         continue;
       }
-      let resources = &container["deploy"]["resources"]["limits"];
-      let memory = resources
-        .get("memory")
-        .filter(|value| !value.is_null())
-        .or_else(|| container.get("mem_limit"));
-      if let Some(mb) =
-        memory.and_then(scalar_text).as_deref().and_then(memory_mb)
-      {
-        sum += mb;
-      }
+      sum += container_memory_mb(container).unwrap_or_default();
     }
   }
   sum
+}
+
+fn container_memory_mb(container: &Value) -> Option<f64> {
+  container["deploy"]["resources"]["limits"]
+    .get("memory")
+    .filter(|value| !value.is_null())
+    .or_else(|| container.get("mem_limit"))
+    .and_then(scalar_text)
+    .as_deref()
+    .and_then(memory_mb)
+}
+
+pub(crate) fn compose_memory_limits(
+  spec: &ServiceSpec,
+) -> Option<(u64, bool)> {
+  let containers = compose_services(spec)?;
+  let mut all_limited = !containers.is_empty();
+  let mut bytes = 0_u64;
+  for (_, container) in &containers {
+    if let Some(mb) =
+      container_memory_mb(container).filter(|&mb| mb > 0.0)
+    {
+      bytes = bytes.saturating_add((mb * (1 << 20) as f64) as u64);
+    } else {
+      all_limited = false;
+    }
+  }
+  Some((bytes, all_limited))
 }
 
 fn has_compose_var(value: &str) -> bool {
