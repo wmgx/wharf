@@ -37,7 +37,7 @@ use crate::{
   api::ApiResult,
   auth::Auth,
   cron::{Cron, minute_floor},
-  db::{now_ms, sql_err, to_time},
+  db::{self, now_ms, sql_err, to_time},
   render, snapshot,
   state::AppState,
 };
@@ -272,7 +272,7 @@ async fn start_with_guard(
       execute(&state, &name, &spec, input).await;
     finish(&state, id, status, code, &output, mem_peak).await;
     drop(guard);
-    notify_result(&state, &name, &spec, status, &output).await;
+    notify_result(&state, &name, id, status, &output).await;
   });
   Ok((id, false))
 }
@@ -281,14 +281,30 @@ async fn start_with_guard(
 pub(crate) async fn notify_result(
   state: &AppState,
   name: &str,
-  spec: &TaskSpec,
+  run_id: i64,
   status: TaskStatus,
   output: &str,
 ) {
-  if !spec.notify {
-    return;
-  }
   let ok = status == TaskStatus::Succeeded;
+  let task = name.to_string();
+  let server = state.db.call(move |c| {
+    let server = c.query_row(
+      "SELECT json_extract(spec, '$.server'),
+              COALESCE(json_extract(spec, '$.enabled'), 1)
+                AND COALESCE(json_extract(spec, '$.notify'), 1)
+       FROM tasks WHERE name = ?1
+        AND EXISTS (SELECT 1 FROM task_runs WHERE id = ?2 AND task = ?1)",
+      params![task, run_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?)),
+    ).optional().map_err(sql_err)?;
+    let Some((server, notify)) = server else { return Ok(None) };
+    let key = task_notice_key(&task);
+    if !notify {
+      db::set_setting(c, &key, None)?;
+      return Ok(None);
+    }
+    Ok(crate::notify::transition_row(c, &key, ok)?.then_some(server))
+  }).await;
+  let Ok(Some(server)) = server else { return };
   let title = if ok {
     format!("定时任务 {name} 恢复正常")
   } else {
@@ -297,18 +313,18 @@ pub(crate) async fn notify_result(
   crate::rules::notice(
     state,
     "task",
-    Some(&format!("task.{name}")),
+    None,
     ok,
     crate::notify::Event {
       title,
-      body: format!(
-        "服务器 {}\n{}",
-        spec.server,
-        last_lines(output, 10)
-      ),
+      body: format!("服务器 {}\n{}", server, last_lines(output, 10)),
     },
   )
   .await;
+}
+
+fn task_notice_key(name: &str) -> String {
+  format!("notify.state.task.{name}")
 }
 
 fn release(name: &str) {
@@ -549,6 +565,44 @@ pub(crate) async fn insert_run(
     .await
 }
 
+pub(crate) async fn record_ping(
+  state: &AppState,
+  name: &str,
+  token: &str,
+  status: TaskStatus,
+  trigger: &str,
+  output: &str,
+) -> Result<Option<i64>, ApiError> {
+  let (name, token, trigger, output) = (
+    name.to_string(),
+    token.to_string(),
+    trigger.to_string(),
+    output.to_string(),
+  );
+  let status = enc(status);
+  state.db.call(move |c| {
+    let tx = c.transaction().map_err(sql_err)?;
+    let at = now_ms();
+    if tx.execute(
+      "INSERT INTO task_runs (task, status, trigger, started_at, ended_at, output)
+       SELECT name, ?3, ?4, ?5, ?5, ?6 FROM tasks
+       WHERE name = ?1 AND json_extract(spec, '$.kind') = 'ping'
+         AND json_extract(spec, '$.token') = ?2
+         AND COALESCE(json_extract(spec, '$.enabled'), 1) = 1",
+      params![name, token, status, trigger, at, output],
+    ).map_err(sql_err)? == 0 {
+      return Ok(None);
+    }
+    let id = tx.last_insert_rowid();
+    tx.execute(
+      "DELETE FROM task_runs WHERE task = ?1 AND id <= ?2 - ?3",
+      params![name, id, KEEP_RUNS],
+    ).map_err(sql_err)?;
+    tx.commit().map_err(sql_err)?;
+    Ok(Some(id))
+  }).await
+}
+
 pub(crate) async fn finish(
   state: &AppState,
   id: i64,
@@ -594,7 +648,8 @@ pub async fn issues(state: &AppState) -> Vec<Issue> {
           "SELECT t.name, r.status FROM tasks t JOIN task_runs r ON r.id = (
              SELECT id FROM task_runs WHERE task = t.name AND status NOT IN ('skipped', 'running')
              ORDER BY id DESC LIMIT 1)
-           WHERE r.status IN ('failed', 'timed_out') ORDER BY t.name",
+           WHERE r.status IN ('failed', 'timed_out')
+             AND COALESCE(json_extract(t.spec, '$.enabled'), 1) = 1 ORDER BY t.name",
         )
         .map_err(sql_err)?;
       let rows = stmt
@@ -870,11 +925,16 @@ pub async fn put(
       validate_task_token(token, old.and_then(task_token), used)?;
     }
     let text = serde_json::to_string(&spec).map_err(crate::db::json_err)?;
-    c.execute(
+    let tx = c.transaction().map_err(sql_err)?;
+    tx.execute(
       "INSERT INTO tasks (name, spec, created_at, updated_at) VALUES (?1, ?2, ?3, ?3)
        ON CONFLICT (name) DO UPDATE SET spec = excluded.spec, updated_at = excluded.updated_at",
       params![name, text, now_ms()],
     ).map_err(sql_err)?;
+    if !spec.enabled || !spec.notify {
+      crate::db::set_setting(&tx, &task_notice_key(&name), None)?;
+    }
+    tx.commit().map_err(sql_err)?;
     index_hooks(&load_rows(c)?);
     Ok(spec)
   }).await?;
@@ -937,6 +997,7 @@ pub async fn remove(
         params![name],
       )
       .map_err(sql_err)?;
+      crate::db::set_setting(&tx, &task_notice_key(&name), None)?;
       tx.commit().map_err(sql_err)?;
       index_hooks(&load_rows(c)?);
       Ok(())
@@ -1165,6 +1226,27 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn quiet_task_clears_legacy_dedup_and_disabled_task_is_hidden()
+   {
+    let state = crate::rules::tests::test_state();
+    state.db.call(|c| {
+      let spec = serde_json::json!({"server":"s1","kind":"ping","notify":false}).to_string();
+      c.execute("INSERT INTO tasks (name, spec, created_at, updated_at) VALUES ('daily', ?1, 0, 0)", [spec]).map_err(sql_err)?;
+      c.execute("INSERT INTO task_runs (id, task, status, trigger, started_at) VALUES (1,'daily','succeeded','ping',0)", []).map_err(sql_err)?;
+      db::set_setting(c, &task_notice_key("daily"), Some("fail"))
+    }).await.unwrap();
+    notify_result(&state, "daily", 1, TaskStatus::Succeeded, "")
+      .await;
+    state.db.call(|c| {
+      assert!(db::setting(c, &task_notice_key("daily"))?.is_none());
+      c.execute("UPDATE tasks SET spec = json_set(spec, '$.enabled', json('false'))", []).map_err(sql_err)?;
+      c.execute("UPDATE task_runs SET status = 'failed'", []).map_err(sql_err)?;
+      Ok(())
+    }).await.unwrap();
+    assert!(issues(&state).await.is_empty());
+  }
 
   #[test]
   fn empty_schedule_only_for_script() {

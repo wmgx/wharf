@@ -95,21 +95,25 @@ pub async fn transition(
   key: &str,
   ok: bool,
 ) -> bool {
-  let setting = format!("notify.state.{key}");
-  let now = if ok { "ok" } else { "fail" };
-  let prev = state
+  let key = key.to_string();
+  state
     .db
     .call(move |c| {
-      let prev = db::setting(c, &setting)?;
-      db::set_setting(c, &setting, Some(now))?;
-      Ok(prev)
+      transition_row(c, &format!("notify.state.{key}"), ok)
     })
-    .await;
-  match prev.as_ref().map(|p| p.as_deref()) {
-    Ok(Some(p)) => p != now,
-    Ok(None) => !ok,
-    Err(_) => false,
-  }
+    .await
+    .unwrap_or(false)
+}
+
+pub(crate) fn transition_row(
+  c: &rusqlite::Connection,
+  setting: &str,
+  ok: bool,
+) -> Result<bool, ApiError> {
+  let now = if ok { "ok" } else { "fail" };
+  let prev = db::setting(c, setting)?;
+  db::set_setting(c, setting, Some(now))?;
+  Ok(prev.as_deref().map_or(!ok, |prev| prev != now))
 }
 
 /// 发出去，失败只记日志；返回没发出去的原因。

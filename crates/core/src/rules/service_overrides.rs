@@ -15,7 +15,7 @@ use wharf_api_types::{
 use super::{
   KEEP, NOTICES, Override, RULES,
   custom::{CustomRule, level_str, parse_level, service_exists},
-  ensure_loaded, set_firing, split_unit, suppress, with,
+  ensure_loaded, split_unit, suppress, with,
 };
 use crate::{
   api::ApiResult,
@@ -63,8 +63,10 @@ pub(crate) fn service_of_subject<'a>(
 pub(super) fn effective_override(
   global: Option<&Override>,
   service: Option<&Override>,
+  now: i64,
 ) -> Override {
-  let g = global.cloned().unwrap_or_default();
+  let mut g = global.cloned().unwrap_or_default();
+  g.muted_until = g.muted_until.filter(|&until| until > now);
   let Some(s) = service else {
     return g;
   };
@@ -73,7 +75,10 @@ pub(super) fn effective_override(
     threshold: s.threshold.or(g.threshold),
     for_n: s.for_n.or(g.for_n),
     level: s.level.or(g.level),
-    muted_until: s.muted_until.or(g.muted_until),
+    muted_until: s
+      .muted_until
+      .filter(|&until| until > now)
+      .max(g.muted_until),
   }
 }
 
@@ -84,6 +89,7 @@ pub(super) fn override_for_firing(
   custom_rules: &BTreeMap<String, CustomRule>,
   rule_id: &str,
   subject: &str,
+  now: i64,
 ) -> Override {
   if let Some(cr) = custom_rules.get(rule_id) {
     return cr.as_override();
@@ -91,7 +97,7 @@ pub(super) fn override_for_firing(
   let svc = service_of_subject(rule_id, subject).and_then(|svc| {
     service_overrides.get(&(rule_id.to_string(), svc.to_string()))
   });
-  effective_override(cfg.get(rule_id), svc)
+  effective_override(cfg.get(rule_id), svc, now)
 }
 
 pub(super) fn load_from_db(
@@ -269,19 +275,17 @@ pub(super) async fn set_override(
     }
   });
 
-  if o.enabled == Some(false) {
-    let to_clear: Vec<String> = with(|m| {
-      m.firing
-        .keys()
-        .filter(|(r, subj)| {
-          r == id && service_of_subject(id, subj) == Some(service)
-        })
-        .map(|(_, subj)| subj.clone())
-        .collect()
-    });
-    for subj in to_clear {
-      set_firing(state, (id.to_string(), subj), None).await;
-    }
+  if with(|m| {
+    !effective_override(m.config.get(id), (!empty).then_some(&o), now)
+      .enabled()
+  }) {
+    let service = service.to_string();
+    let id = id.to_string();
+    super::lifecycle::clear_matching(state, move |rule, subj| {
+      rule == id
+        && service_of_subject(rule, subj) == Some(service.as_str())
+    })
+    .await;
   }
   Ok(())
 }
