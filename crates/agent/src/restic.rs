@@ -20,6 +20,7 @@ use wharf_api_types::{
     ResticPreflight, ResticPreflightMode, ResticPreflightResult,
     ResticRepo, Snapshot,
   },
+  backup::{KEEP_TAG, NOTE_TAG_PREFIX, restic_exclude_patterns},
   validate_name,
 };
 
@@ -30,6 +31,11 @@ use crate::{
   docker::{Docker, io_err},
   exec::{Ctx, Output},
 };
+
+mod browse;
+mod diff;
+mod policy;
+pub(crate) use browse::ExtractStore;
 
 const LONG_TIMEOUT: Duration = Duration::from_secs(6 * 3600);
 const SHORT_TIMEOUT: Duration = Duration::from_secs(120);
@@ -52,13 +58,11 @@ struct Job<'a> {
 }
 
 impl Job<'_> {
-  async fn restic(
+  fn restic_command(
     &self,
     args: &[&str],
     timeout: Duration,
-    stream: bool,
-    ctx: &Ctx,
-  ) -> Result<Output, ApiError> {
+  ) -> (crate::exec::Cmd, String) {
     let seq = RESTIC_RUN.fetch_add(1, Ordering::Relaxed);
     let name = format!(
       "wharf-restic-{}-{}-{seq}-{}",
@@ -120,6 +124,45 @@ impl Job<'_> {
         prune_progress_matcher(),
       );
     }
+    (cmd, name)
+  }
+
+  async fn restic_to(
+    &self,
+    args: &[&str],
+    limit: u64,
+    dest: &mut (impl tokio::io::AsyncWrite + Unpin),
+    ctx: &Ctx,
+  ) -> Result<(), ApiError> {
+    let (cmd, name) = self.restic_command(args, SHORT_TIMEOUT);
+    let result = cmd.stdout_to(ctx, limit, dest).await;
+    match result {
+      Err(e) => {
+        self.remove_container(&name).await;
+        Err(e)
+      }
+      Ok(Some(WRONG_PASSWORD)) => {
+        Err(ApiError::new(ErrorCode::Forbidden, "备份仓库口令不匹配"))
+      }
+      Ok(Some(NO_REPO)) => {
+        Err(ApiError::not_found("没有找到备份仓库"))
+      }
+      Ok(Some(0)) => Ok(()),
+      Ok(_) => Err(ApiError::new(
+        ErrorCode::AgentFailed,
+        "restic 无法读取快照",
+      )),
+    }
+  }
+
+  async fn restic(
+    &self,
+    args: &[&str],
+    timeout: Duration,
+    stream: bool,
+    ctx: &Ctx,
+  ) -> Result<Output, ApiError> {
+    let (mut cmd, name) = self.restic_command(args, timeout);
     let clean_line = |mut line: String| {
       for secret in
         [self.password, self.http_auth.map_or("", |(_, p)| p)]
@@ -210,8 +253,25 @@ fn rest_url(
 pub async fn run(
   docker: &Docker,
   job: &ResticJob,
+  extracts: &ExtractStore,
   ctx: &Ctx,
 ) -> Result<Value, ApiError> {
+  if matches!(
+    &job.action,
+    ResticAction::Ls { .. }
+      | ResticAction::ExtractPrepare { .. }
+      | ResticAction::DiffSnapshots { .. }
+      | ResticAction::DiffLocal { .. }
+  ) {
+    if job.core_marker.is_some() || job.service == "wharf-core" {
+      return Err(ApiError::invalid("控制面备份不支持浏览"));
+    }
+    if matches!(job.repo, ResticRepo::Local)
+      == matches!(job.action, ResticAction::DiffLocal { .. })
+    {
+      return Err(ApiError::invalid("备份操作与仓库位置不匹配"));
+    }
+  }
   let root = match &job.core_marker {
     Some(marker) => core_root(docker, marker, ctx).await?,
     None => data_root(&job.service)?,
@@ -243,7 +303,8 @@ pub async fn run(
             ResticAction::ListKeys => {
               to_value(Vec::<ResticKeyInfo>::new())
             }
-            ResticAction::Unlock { .. } => Err(ApiError::new(
+            ResticAction::Unlock { .. }
+            | ResticAction::Tag { .. } => Err(ApiError::new(
               ErrorCode::NotFound,
               "没有找到备份仓库",
             )),
@@ -314,7 +375,15 @@ pub async fn run(
       out.check("restic unlock")?;
       Ok(Value::Null)
     }
-    ResticAction::Backup { host } => {
+    ResticAction::Backup {
+      host,
+      excludes: rules,
+      keep,
+      note,
+    } => {
+      let patterns = restic_exclude_patterns(&root, rules)?;
+      let note =
+        note.as_deref().map(policy::encode_note_tag).transpose()?;
       // 控制面的目录不在 agent 容器里，上面已经在宿主机上确认过了。
       let excludes = if job.core_marker.is_none() {
         let dir =
@@ -352,6 +421,17 @@ pub async fn run(
       let mut args = vec![
         "backup", &path, "--host", host, "--tag", "wharf", "--json",
       ];
+      if *keep {
+        args.extend(["--tag", KEEP_TAG]);
+      }
+      if let Some(note) = &note {
+        args.extend(["--tag", note]);
+      }
+      let patterns: Vec<_> = patterns
+        .into_iter()
+        .map(|p| format!("--exclude={p}"))
+        .collect();
+      args.extend(patterns.iter().map(String::as_str));
       for exclude in &excludes {
         args.extend(["--exclude", exclude.as_str()]);
       }
@@ -370,25 +450,89 @@ pub async fn run(
       to_value(summary)
     }
     ResticAction::Snapshots => {
-      let out = j
-        .restic(&["snapshots", "--json"], SHORT_TIMEOUT, false, ctx)
-        .await?;
-      if out.code == Some(NO_REPO) {
-        return to_value(Vec::<Snapshot>::new());
+      to_value(policy::snapshots(&j, ctx).await?)
+    }
+    ResticAction::Ls {
+      snapshot,
+      path,
+      recursive,
+      limit,
+    } => to_value(
+      browse::list(
+        &j, &root, snapshot, path, *recursive, *limit, ctx,
+      )
+      .await?,
+    ),
+    ResticAction::ExtractPrepare {
+      snapshot,
+      path,
+      max_bytes,
+    } => to_value(
+      extracts
+        .prepare(&j, &root, snapshot, path, *max_bytes, ctx)
+        .await?,
+    ),
+    ResticAction::DiffLocal {
+      snapshot,
+      excludes,
+      limit,
+    } => to_value(
+      diff::live(&j, &root, snapshot, excludes, *limit, ctx).await?,
+    ),
+    ResticAction::DiffSnapshots {
+      base,
+      target,
+      limit,
+    } => to_value(
+      diff::snapshots(&j, &root, base, target, *limit, ctx).await?,
+    ),
+    ResticAction::ExtractRead { .. }
+    | ResticAction::ExtractClose { .. } => {
+      Err(ApiError::invalid("提取会话操作不访问仓库"))
+    }
+    ResticAction::Tag {
+      snapshot,
+      keep,
+      note,
+      clear_note,
+    } => {
+      if job.core_marker.is_some()
+        || !matches!(job.repo, ResticRepo::Local)
+      {
+        return Err(ApiError::invalid("留底只支持业务备份仓库"));
       }
-      if out.code == Some(WRONG_PASSWORD) {
-        return Err(ApiError::new(
-          ErrorCode::Forbidden,
-          "备份仓库口令不匹配",
-        ));
-      }
-      let out = out.check("restic snapshots")?;
-      let mut list: Vec<Snapshot> = serde_json::from_str(&out.stdout)
-        .map_err(|e| {
-          ApiError::internal(format!("解析 restic 快照列表失败：{e}"))
-        })?;
-      list.sort_by_key(|s| std::cmp::Reverse(s.time));
-      to_value(list)
+      to_value(
+        policy::tag(
+          &j,
+          snapshot,
+          *keep,
+          note.as_deref(),
+          *clear_note,
+          ctx,
+        )
+        .await?,
+      )
+    }
+    ResticAction::PruneV2 {
+      daily,
+      weekly,
+      monthly,
+      keep_tag,
+      protect_before,
+    } => {
+      policy::prune(
+        &j,
+        wharf_api_types::backup::BackupRetention {
+          daily: *daily,
+          weekly: *weekly,
+          monthly: *monthly,
+        },
+        keep_tag.as_deref(),
+        *protect_before,
+        ctx,
+      )
+      .await?;
+      Ok(Value::Null)
     }
     ResticAction::ListKeys => to_value(list_keys(&j, ctx).await?),
     ResticAction::Restore { snapshot } => {

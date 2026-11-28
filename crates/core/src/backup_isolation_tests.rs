@@ -220,7 +220,12 @@ async fn legacy_repo_adds_service_key_before_cleanup() {
   let show = || {
     let mut read_only = auth(false);
     read_only.perms = [Perm::Read].into_iter().collect();
-    list(State(state.clone()), read_only, Path("svc-a".into()))
+    list(
+      State(state.clone()),
+      read_only,
+      Path("svc-a".into()),
+      Query(ListQuery::default()),
+    )
   };
   let before = secret_count(&state).await;
   assert_eq!(
@@ -663,11 +668,15 @@ async fn backup_list_returns_historical_snapshot_target_when_disabled()
       "time": "2026-01-01T00:00:00Z", "paths": ["/srv/svc-a"]
     }]))
   });
-  let Json(view) =
-    list(State(state), auth(true), Path("svc-a".into()))
-      .await
-      .map_err(|e| e.0)
-      .unwrap();
+  let Json(view) = list(
+    State(state),
+    auth(true),
+    Path("svc-a".into()),
+    Query(ListQuery::default()),
+  )
+  .await
+  .map_err(|e| e.0)
+  .unwrap();
   assert_eq!(view.target, None);
   assert_eq!(view.snapshot_target.as_deref(), Some("s2"));
   assert_eq!(view.snapshots[0].id, "abcd1234");
@@ -721,7 +730,7 @@ async fn backup_records_ok_and_prunes_even_when_restart_fails() {
 }
 
 #[tokio::test]
-async fn unlock_service_runs_local_and_respects_backup_lock() {
+async fn unlock_supports_explicit_target_and_returns_object() {
   let state = test_state();
   seed_servers(&state).await;
   seed_service(&state, "svc-a", false).await;
@@ -750,7 +759,10 @@ async fn unlock_service_runs_local_and_respects_backup_lock() {
       State(state.clone()),
       auth(true),
       Path("svc-a".into()),
-      None,
+      Some(Json(UnlockRequest {
+        target: Some("s2".into()),
+        stale_only: false,
+      })),
     )
   };
   let guard = state
@@ -759,7 +771,11 @@ async fn unlock_service_runs_local_and_respects_backup_lock() {
     .unwrap();
   assert_eq!(call().await.err().unwrap().0.code, ErrorCode::Busy);
   drop(guard);
-  let _ = call().await.map_err(|e| e.0).unwrap();
+  let result = call().await.map_err(|e| e.0).unwrap().0;
+  assert_eq!(
+    serde_json::to_value(result).unwrap(),
+    json!({"target":"s2","stale_only":false,"unlocked":true})
+  );
 }
 
 #[tokio::test]
@@ -799,4 +815,62 @@ async fn deploy_server_rejects_empty_containers() {
   .await
   .unwrap_err();
   assert_eq!(err.code, ErrorCode::AgentFailed);
+}
+
+#[tokio::test]
+async fn backup_v2_blocks_old_agent_and_starts_retention_without_pruning()
+ {
+  let state = test_state();
+  seed_servers(&state).await;
+  seed_service(&state, "svc-a", true).await;
+  state
+    .hub
+    .mock_agent("s2", false, |_| panic!("旧 agent 不应收到新动作"));
+  let snap = snapshot::load(&state.db).await.unwrap();
+  let cancel = CancellationToken::new();
+  let err = local_call::<serde_json::Value>(
+    &state,
+    &snap,
+    ("s2", "svc-a"),
+    "",
+    ResticAction::Ls {
+      snapshot: "latest".into(),
+      path: String::new(),
+      recursive: false,
+      limit: 10,
+    },
+    &cancel,
+  )
+  .await
+  .unwrap_err();
+  assert_eq!(err.code, ErrorCode::Conflict);
+  assert_eq!(err.suggest, ["wharf upgrade"]);
+  let progress: ProgressFn = Arc::new(|_| {});
+  assert!(matches!(
+    prune_action(&state, "svc-a", "s2", "s2", None, &progress)
+      .await
+      .unwrap(),
+    Some(ResticAction::Prune)
+  ));
+  state.hub.enable_mock_backup_v2("s2");
+  let retention = Some(BackupRetention {
+    daily: 1,
+    weekly: 0,
+    monthly: 0,
+  });
+  assert!(
+    prune_action(&state, "svc-a", "s2", "s2", retention, &progress)
+      .await
+      .unwrap()
+      .is_none()
+  );
+  assert!(matches!(
+    prune_action(&state, "svc-a", "s2", "s2", retention, &progress)
+      .await
+      .unwrap(),
+    Some(ResticAction::PruneV2 {
+      protect_before: Some(_),
+      ..
+    })
+  ));
 }

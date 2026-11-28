@@ -331,6 +331,7 @@ export type IssueSubject = Gen.IssueSubject;
 export type Issue = Gen.Issue;
 
 export interface Status {
+  safe_mode?: boolean;
   bookmarks: BookmarkView[];
   servers: ServerView[];
   services: ServiceView[];
@@ -529,6 +530,9 @@ export interface BackupRecord {
 }
 
 export interface Snapshot {
+  tags?: string[];
+  keep?: boolean;
+  note?: string | null;
   id: string;
   short_id: string;
   time: string;
@@ -537,6 +541,8 @@ export interface Snapshot {
 }
 
 export interface BackupsView {
+  exclude?: string[];
+  retention?: Gen.BackupRetention | null;
   service: string;
   target?: string;
   snapshot_target?: string;
@@ -576,6 +582,7 @@ export type CreatedToken = Gen.CreatedToken;
 export type TokenSettings = Gen.TokenSettings;
 
 export interface CoreBackupView {
+  retention?: Gen.BackupRetention | null;
   to?: string;
   user_key_current: boolean;
   records: BackupRecord[];

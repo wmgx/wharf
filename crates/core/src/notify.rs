@@ -185,7 +185,9 @@ pub fn spawn_retry(state: Arc<AppState>) {
   tokio::spawn(async move {
     loop {
       tokio::time::sleep(Duration::from_secs(15)).await;
-      if let Err(e) = retry_at(&state, db::now_ms()).await {
+      if !state.is_safe_mode()
+        && let Err(e) = retry_at(&state, db::now_ms()).await
+      {
         tracing::warn!("读取通知重试队列失败：{}", e.message);
       }
     }

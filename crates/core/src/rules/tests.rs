@@ -34,6 +34,7 @@ fn state_with_db(db: db::Db) -> Arc<AppState> {
     listen_port: 7700,
     data_dir: Default::default(),
     downloads: Default::default(),
+    safe_mode: Default::default(),
     edge_syncing: Default::default(),
   })
 }
@@ -1580,4 +1581,35 @@ fn rule_window_clamps_old_counts_and_slow_metrics_keep_their_series()
     ),
     18 * 3_600_000
   );
+}
+
+#[tokio::test]
+async fn retention_validation_and_backup_spike_rule_fires_under_op_silence()
+ {
+  let _guard = TEST_LOCK.lock().await;
+  let zero = wharf_api_types::backup::BackupRetention {
+    daily: 0,
+    weekly: 0,
+    monthly: 0,
+  };
+  assert!(wharf_api_types::backup::validate_retention(zero).is_err());
+  reset_memory();
+  let state = test_state();
+  let lock = state
+    .locks
+    .acquire(crate::locks::LockSpec::Backup("web".into()), "备份 web")
+    .unwrap();
+  lock.silence_alerts(
+    [op_silence::Target::Service("web".into())].into(),
+    "备份 web".into(),
+  );
+  let mib = 1 << 20;
+  for (added, firing) in [(200 * mib, true), (30 * mib, false)] {
+    let (ratio, detail) =
+      crate::backup::evaluate_backup_spike(added, &[20 * mib; 5])
+        .unwrap();
+    observe(&state, "backup.spike_ratio", "web", ratio, &detail)
+      .await;
+    assert_eq!(firing_since("backup_spike", "web").is_some(), firing);
+  }
 }

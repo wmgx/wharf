@@ -35,6 +35,7 @@ pub(super) const SERVICE_RULES: &[&str] = &[
   "port_down",
   "heartbeat_late",
   "mem_forecast",
+  "backup_spike",
 ];
 
 pub(crate) fn is_service_rule(id: &str) -> bool {
@@ -53,6 +54,7 @@ pub(crate) fn service_of_subject<'a>(
     | "monitor_failed"
     | "http_5xx"
     | "heartbeat_late"
+    | "backup_spike"
     | "backup"
     | "heal"
     | "auto_update"

@@ -189,6 +189,8 @@ pub enum Step {
   /// 备份和恢复不来自计划，是单独发起的执行。
   Backup {
     service: String,
+    #[serde(flatten)]
+    options: wharf_api_types::backup::BackupRunRequest,
   },
   Restore {
     service: String,
@@ -251,6 +253,8 @@ pub enum Step {
   },
   /// 控制面自身备份。`user_key`：开启时输入的登录密码，加成仓库的恢复口令。
   CoreBackup {
+    #[serde(flatten)]
+    options: wharf_api_types::backup::BackupRunRequest,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     user_key: Option<wharf_api_types::agent::OneTimeSecret>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

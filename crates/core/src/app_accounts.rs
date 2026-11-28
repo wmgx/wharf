@@ -396,6 +396,7 @@ mod tests {
       listen_port: 7700,
       data_dir: Default::default(),
       downloads: Default::default(),
+      safe_mode: Default::default(),
       edge_syncing: Default::default(),
     });
     state

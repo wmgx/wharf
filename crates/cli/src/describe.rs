@@ -125,6 +125,7 @@ fn read_when_no_args(command: &str) -> bool {
       | "external set"
       | "egress api"
       | "backup core"
+      | "backup set"
   )
 }
 
@@ -219,6 +220,8 @@ fn effect(
       | "network acl"
       | "service files"
       | "alert firing"
+      | "backup diff"
+      | "backup extract"
   ) || command.starts_with("wait ")
     || matches!(
       leaf,
@@ -262,6 +265,13 @@ fn returns(command: &str) -> Option<&'static str> {
     "task ls" | "task show" => "task",
     "task logs" => "task_run",
     "backup list" => "backup",
+    "backup ls" => "backup_ls",
+    "backup extract" => "backup_extract",
+    "backup diff" => "backup_diff",
+    "backup keep" => "backup_keep",
+    "backup set" => "backup_policy",
+    "backup unlock" => "backup_unlock",
+    "core resume" => "core_safe_mode",
     "service history" => "deployment",
     "edge list" | "edge show" => "edge",
     "account list" => "account",

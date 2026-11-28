@@ -77,6 +77,7 @@ async fn lockout_notice_records_alert_history() {
     listen_port: 7700,
     data_dir: Default::default(),
     downloads: Default::default(),
+    safe_mode: Default::default(),
     edge_syncing: Default::default(),
   };
   let mut table = LockoutTable::default();

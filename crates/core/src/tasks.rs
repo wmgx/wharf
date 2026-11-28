@@ -137,7 +137,9 @@ pub fn spawn(state: Arc<AppState>) {
     tokio::time::sleep(Duration::from_secs(30)).await;
     loop {
       let now = minute_floor(Utc::now());
-      if let Err(e) = tick(&state, checked, now).await {
+      if !state.is_safe_mode()
+        && let Err(e) = tick(&state, checked, now).await
+      {
         tracing::warn!("检查定时任务失败：{e}");
       }
       checked = now;

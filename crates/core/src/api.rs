@@ -161,6 +161,8 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route("/cli.sh", get(crate::cli_dist::script))
     .route("/skill.md", get(crate::cli_dist::skill))
     .route("/api/core/addresses", get(crate::join::addresses))
+    .route("/api/core/safe-mode", get(crate::state::safe_mode))
+    .route("/api/core/resume", post(crate::state::resume))
     .route(
       "/api/core/snapshots",
       get(crate::db_snapshot::list_api)
@@ -232,6 +234,10 @@ pub fn router(state: Arc<AppState>) -> Router {
       get(crate::core_backup::show).post(crate::core_backup::enable),
     )
     .route("/api/core-backup/run", post(crate::core_backup::run_now))
+    .route(
+      "/api/core-backup/retention",
+      put(crate::core_backup::set_retention),
+    )
     .route(
       "/api/core-backup/unlock",
       post(crate::core_backup::unlock),
@@ -388,6 +394,22 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route(
       "/api/services/{name}/backups",
       get(crate::backup::list).post(crate::backup::run_now),
+    )
+    .route(
+      "/api/services/{name}/backups/ls",
+      get(crate::backup::browse::ls),
+    )
+    .route(
+      "/api/services/{name}/backups/extract",
+      get(crate::backup::browse::extract),
+    )
+    .route(
+      "/api/services/{name}/backups/diff",
+      get(crate::backup::browse::diff),
+    )
+    .route(
+      "/api/services/{name}/backups/keep",
+      post(crate::backup::browse::keep),
     )
     .route(
       "/api/services/{name}/backups/unlock",
