@@ -1,13 +1,171 @@
 //! 意图文件 fleet.toml 的读写。
 
-use std::path::Path;
+use std::{
+  collections::{BTreeMap, BTreeSet},
+  io::Read,
+  path::{Path, PathBuf},
+};
 
 use anyhow::Context;
-use wharf_api_types::spec::{Fleet, Source};
+use wharf_api_types::{
+  references::{parse_placeholder, parse_service_ref, placeholders},
+  spec::{Fleet, Source},
+};
 
-/// 读取意图文件，把 `source = { compose = { file = "..." } }` 换成文件内容。
-/// 相对路径以意图文件所在目录为准。
+/// 加载单个意图文件，或按路径顺序合并目录中的意图片段。
 pub fn load(path: &Path) -> anyhow::Result<Fleet> {
+  load_files(path).map(|(fleet, _)| fleet)
+}
+
+fn load_files(path: &Path) -> anyhow::Result<(Fleet, Vec<PathBuf>)> {
+  let meta = std::fs::symlink_metadata(path)
+    .with_context(|| format!("读取 {}", path.display()))?;
+  anyhow::ensure!(
+    !meta.is_symlink() || !path.is_dir(),
+    "意图目录不能是符号链接：{}",
+    path.display()
+  );
+  if !meta.is_dir() {
+    return Ok((load_one(path)?, vec![path.to_path_buf()]));
+  }
+  let files = collect_toml_files(path)?;
+  let parts = files
+    .iter()
+    .map(|f| Ok((f.strip_prefix(path)?.to_path_buf(), load_one(f)?)))
+    .collect::<anyhow::Result<Vec<_>>>()?;
+  Ok((merge_fleets(parts)?, files))
+}
+
+fn collect_toml_files(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
+  let mut pending = vec![dir.to_owned()];
+  let mut files = Vec::new();
+  while let Some(parent) = pending.pop() {
+    for entry in std::fs::read_dir(&parent)
+      .with_context(|| format!("读取目录 {}", parent.display()))?
+    {
+      let entry = entry?;
+      if entry.file_name().to_string_lossy().starts_with('.') {
+        continue;
+      }
+      let path = entry.path();
+      let kind = entry.file_type()?;
+      anyhow::ensure!(
+        !kind.is_symlink() || !path.is_dir(),
+        "意图目录不能是符号链接：{}",
+        path.display()
+      );
+      if kind.is_dir() {
+        pending.push(path);
+      } else if path.extension().is_some_and(|ext| ext == "toml")
+        && (kind.is_file() || kind.is_symlink() && path.is_file())
+      {
+        files.push(path);
+      }
+    }
+  }
+  files.sort_unstable();
+  anyhow::ensure!(
+    !files.is_empty(),
+    "目录 {} 里没有 .toml 文件",
+    dir.display()
+  );
+  Ok(files)
+}
+
+fn merge_fleets(
+  parts: Vec<(PathBuf, Fleet)>,
+) -> anyhow::Result<Fleet> {
+  let mut merged = Fleet::default();
+  let mut sources = BTreeMap::new();
+  let mut duplicates = Vec::new();
+  for (path, part) in parts {
+    let mut first = |kind, name: &str| match sources
+      .entry((kind, name.to_owned()))
+    {
+      std::collections::btree_map::Entry::Vacant(entry) => {
+        entry.insert(path.clone());
+        true
+      }
+      std::collections::btree_map::Entry::Occupied(entry) => {
+        duplicates.push(format!(
+          "- {kind} {name}：{} 与 {}",
+          entry.get().display(),
+          path.display()
+        ));
+        false
+      }
+    };
+    macro_rules! merge {
+      ($field:ident, $kind:literal) => {
+        merged.$field.extend(
+          part
+            .$field
+            .into_iter()
+            .filter(|(name, _)| first($kind, name)),
+        );
+      };
+    }
+    merge!(servers, "服务器");
+    merge!(services, "服务");
+    merge!(gateways, "网关");
+    merge!(edge_apps, "边缘应用");
+    merge!(bookmarks, "书签");
+    merged
+      .routes
+      .extend(part.routes.into_iter().filter(|route| {
+        first(
+          "路由",
+          &route
+            .hostname
+            .trim()
+            .trim_end_matches('.')
+            .to_ascii_lowercase(),
+        )
+      }));
+  }
+  anyhow::ensure!(
+    duplicates.is_empty(),
+    "合并目录失败，发现 {} 处重复定义：\n{}",
+    duplicates.len(),
+    duplicates.join("\n")
+  );
+  Ok(merged)
+}
+
+fn read_external(
+  path: &Path,
+  owner: &str,
+  file: &str,
+  bounded: bool,
+) -> anyhow::Result<String> {
+  let file = Path::new(file);
+  anyhow::ensure!(
+    !file.as_os_str().is_empty() && file.is_relative(),
+    "{} 中的 {owner}：外置文件必须使用非空相对路径",
+    path.display()
+  );
+  let full = path.parent().unwrap_or(Path::new(".")).join(file);
+  let context = || {
+    format!(
+      "{} 中的 {owner}：读取 {}",
+      path.display(),
+      full.display()
+    )
+  };
+  if !bounded {
+    return std::fs::read_to_string(&full).with_context(context);
+  }
+  const MAX: usize = 64 * 1024;
+  let mut content = String::new();
+  let f = std::fs::File::open(&full).with_context(context)?;
+  f.take((MAX + 1) as u64)
+    .read_to_string(&mut content)
+    .with_context(context)?;
+  anyhow::ensure!(content.len() <= MAX, "{}：超过 64 KiB", context());
+  Ok(content)
+}
+
+fn load_one(path: &Path) -> anyhow::Result<Fleet> {
   let text = std::fs::read_to_string(path)
     .with_context(|| format!("读取 {}", path.display()))?;
   // 类型本身容忍未知字段（新旧版本互通）；自己写的文件仍然报出来，防止拼错。
@@ -23,19 +181,58 @@ pub fn load(path: &Path) -> anyhow::Result<Fleet> {
     path.display(),
     unknown.join("、")
   );
-  let base = path.parent().unwrap_or(Path::new("."));
   for (name, service) in &mut fleet.services {
-    if let Source::Compose { content, file } = &mut service.source
-      && content.is_none()
-    {
-      let Some(file) = file.take() else {
-        anyhow::bail!("服务 {name} 的 compose 需要 content 或 file");
-      };
-      let full = base.join(&file);
-      *content =
-        Some(std::fs::read_to_string(&full).with_context(|| {
-          format!("服务 {name}：读取 {}", full.display())
-        })?);
+    if let Source::Compose { content, file } = &mut service.source {
+      if let Some(file) = file.take() {
+        anyhow::ensure!(
+          content.is_none(),
+          "{} 中的服务 {name}：compose 不能同时写 content 和 file",
+          path.display()
+        );
+        *content = Some(read_external(
+          path,
+          &format!("服务 {name} 的 compose"),
+          &file,
+          false,
+        )?);
+      } else {
+        anyhow::ensure!(
+          content.is_some(),
+          "服务 {name} 的 compose 需要 content 或 file"
+        );
+      }
+    }
+    for f in &mut service.files {
+      if let Some(file) = f.file.take() {
+        anyhow::ensure!(
+          f.content.is_empty(),
+          "{} 中的服务 {name}：配置 {} 不能同时写 content 和 file",
+          path.display(),
+          f.path
+        );
+        f.content = read_external(
+          path,
+          &format!("服务 {name} 的配置 {}", f.path),
+          &file,
+          true,
+        )?;
+      }
+    }
+  }
+  for route in &mut fleet.routes {
+    if let Some(file) = route.caddy_file.take() {
+      let host = &route.hostname;
+      anyhow::ensure!(
+        route.caddy.is_none(),
+        "{} 中的路由 {host} 不能同时写 caddy 和 caddy_file",
+        path.display()
+      );
+      route.caddy = Some(read_external(
+        path,
+        &format!("路由 {host}"),
+        &file,
+        false,
+      )?);
     }
   }
   Ok(fleet)
@@ -96,12 +293,13 @@ pub fn only_services(
 /// 没有时按局部文件查，引用不到的只提醒。
 pub fn validate(path: &Path) -> serde_json::Value {
   use serde_json::json;
-  let fleet = match load(path) {
+  let (fleet, files) = match load_files(path) {
     Ok(f) => f,
     Err(e) => {
       return json!({
         "ok": false,
         "file": path.display().to_string(),
+        "files": [],
         "errors": [format!("{e:#}")],
         "warnings": [],
       });
@@ -160,7 +358,59 @@ pub fn validate(path: &Path) -> serde_json::Value {
       ));
     }
   }
+  let mut referenced_secrets = BTreeSet::new();
   for (name, svc) in &fleet.services {
+    let compose = match &svc.source {
+      Source::Compose { content, .. } => content.as_deref(),
+      _ => None,
+    };
+    for text in svc
+      .env
+      .values()
+      .map(String::as_str)
+      .chain(compose)
+      .chain(svc.files.iter().map(|f| f.content.as_str()))
+    {
+      for p in placeholders(text) {
+        if let Some(r) = parse_service_ref(p) {
+          match fleet.services.get(r.service) {
+            None => missing.push(format!(
+              "服务 {name} 引用 [[{p}]]，目标服务文件里没有"
+            )),
+            Some(target)
+              if r.port.map_or(target.ports.is_empty(), |port| {
+                target.find_port(Some(port)).is_none()
+              }) =>
+            {
+              missing.push(format!(
+                "服务 {name} 引用 [[{p}]]，目标端口文件里没有"
+              ))
+            }
+            Some(_) => {}
+          }
+        } else if let Ok(Some(secret)) = parse_placeholder(p, false) {
+          referenced_secrets.insert(secret.name);
+        }
+      }
+    }
+    for volume in &svc.volumes {
+      if let Some(reference) = &volume.from_service {
+        let Some((owner, vol)) = reference.split_once(':') else {
+          errors.push(format!(
+            "服务 {name} 的共享卷引用 {reference} 应写成 服务:卷"
+          ));
+          continue;
+        };
+        if fleet.services.get(owner).is_none_or(|s| {
+          !wharf_api_types::compose::owned_volumes(owner, s)
+            .contains(vol)
+        }) {
+          missing.push(format!(
+            "服务 {name} 的共享卷来源 {reference} 文件里没有"
+          ));
+        }
+      }
+    }
     if let Some(backup) = &svc.backup {
       if backup.to == svc.server {
         errors.push(format!("服务 {name} 不能备份到自身服务器"));
@@ -238,6 +488,8 @@ pub fn validate(path: &Path) -> serde_json::Value {
   json!({
     "ok": errors.is_empty(),
     "file": path.display().to_string(),
+    "files": files,
+    "referenced_secrets": referenced_secrets,
     "kind": if complete { "complete" } else { "partial" },
     "counts": {
       "servers": fleet.servers.len(),
@@ -356,4 +608,88 @@ service = "whoami"
     let v = validate(&path);
     assert_eq!(v["ok"], false, "{v}");
   }
+}
+
+#[test]
+fn validate_reports_template_and_volume_references() {
+  let file = tempfile::NamedTempFile::new().unwrap();
+  std::fs::write(
+    file.path(),
+    r#"
+[servers.s1]
+[services.api]
+server = "s1"
+source = { image = "app:1" }
+env = { DB = "[[@missing-db]]", KEY = "[[API_KEY]]" }
+volumes = [{ target = "/data", from_service = "missing-owner:data" }]
+"#,
+  )
+  .unwrap();
+  let result = validate(file.path());
+  assert_eq!(result["ok"], false);
+  assert_eq!(
+    result["referenced_secrets"],
+    serde_json::json!(["API_KEY"])
+  );
+  let errors = result["errors"].to_string();
+  assert!(
+    errors.contains("missing-db") && errors.contains("missing-owner")
+  );
+}
+
+#[test]
+fn fleet_directory_expands_files_and_reports_all_duplicates() {
+  let dir = tempfile::tempdir().unwrap();
+  let root = dir.path();
+  std::fs::create_dir(root.join("services")).unwrap();
+  std::fs::create_dir(root.join("routes")).unwrap();
+  let write =
+    |path, text| std::fs::write(root.join(path), text).unwrap();
+  write("servers.toml", "[servers.s1]");
+  let service = r#"[services.api]
+server = "s1"
+source = { image = "app:1" }
+files = [{ path = "/etc/a.conf", file = "./a.conf" }]"#;
+  write("services/api.toml", service);
+  write("services/a.conf", "hello");
+  let route = r#"[[routes]]
+hostname = "api.example.test"
+service = "api"
+caddy_file = "./extra.caddy""#;
+  write("routes/api.toml", route);
+  write("routes/extra.caddy", "header X-Test yes");
+  let (fleet, paths) = load_files(root).unwrap();
+  assert_eq!(paths.len(), 3);
+  assert_eq!(fleet.services["api"].files[0].content, "hello");
+  assert!(fleet.services["api"].files[0].file.is_none());
+  assert_eq!(
+    fleet.routes[0].caddy.as_deref(),
+    Some("header X-Test yes")
+  );
+  assert!(fleet.routes[0].caddy_file.is_none());
+  write("services/dup.toml", service);
+  write("routes/dup.toml", route);
+  let err = load(root).unwrap_err().to_string();
+  assert!(
+    err.contains("2 处重复定义")
+      && err.contains("services/dup.toml")
+      && err.contains("routes/dup.toml")
+  );
+}
+
+#[test]
+fn validate_accepts_compose_owned_volume() {
+  let file = tempfile::NamedTempFile::new().unwrap();
+  std::fs::write(file.path(), r#"
+[servers.s1]
+[services.photos]
+server = "s1"
+source = { compose = { content = "services: { photos: { image: app:1, volumes: ['/srv/photos/originals:/data'] } }" } }
+[services.reader]
+server = "s1"
+source = { image = "app:1" }
+volumes = [{ name = "orig", target = "/orig", from_service = "photos:originals" }]
+"#).unwrap();
+  let result = validate(file.path());
+  assert_eq!(result["ok"], true, "{result}");
 }

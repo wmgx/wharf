@@ -30,8 +30,8 @@ pub(crate) const COARSE_MS: i64 = 10 * MINUTE_MS;
 pub(crate) const HOUR_MS: i64 = 60 * MINUTE_MS;
 const DAY_MS: i64 = 24 * HOUR_MS;
 const COARSE_KEEP_MS: i64 = 7 * DAY_MS;
+#[cfg(test)]
 const KEEP_RESOURCE_MS: i64 = 14 * DAY_MS;
-const KEEP_EVENT_MS: i64 = 90 * DAY_MS;
 
 /// 合成和按时间段平均的只有资源点，事件点原样保留。
 const RESOURCE: &str = "(name LIKE 'host.%' OR name LIKE 'svc.%' OR name LIKE 'link.%' OR name LIKE 'req.%' OR name LIKE 'agent.%')";
@@ -292,12 +292,26 @@ pub(crate) fn compact_at(
   }
   tx.execute(
     &format!("DELETE FROM points WHERE at < ?1 AND {RESOURCE}"),
-    params![now - KEEP_RESOURCE_MS],
+    params![
+      now
+        - i64::from(crate::config_api::number(
+          &tx,
+          "retention.metrics_days"
+        )?)
+          * DAY_MS
+    ],
   )
   .map_err(sql_err)?;
   tx.execute(
     &format!("DELETE FROM points WHERE at < ?1 AND NOT {RESOURCE}"),
-    params![now - KEEP_EVENT_MS],
+    params![
+      now
+        - i64::from(crate::config_api::number(
+          &tx,
+          "retention.events_days"
+        )?)
+          * DAY_MS
+    ],
   )
   .map_err(sql_err)?;
   tx.commit().map_err(sql_err)

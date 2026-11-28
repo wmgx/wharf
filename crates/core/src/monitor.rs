@@ -259,6 +259,14 @@ fn http_check(
   m: &MonitorSpec,
   secrets: &BTreeMap<String, String>,
 ) -> Result<HttpCheck, String> {
+  crate::missing_refs::check_text(
+    "monitor",
+    m.headers
+      .iter()
+      .map(|(k, v)| (format!("headers.{k}"), v.as_str())),
+    secrets,
+  )
+  .map_err(|e| e.message)?;
   let mut headers = BTreeMap::new();
   for (key, template) in &m.headers {
     let value = crate::render::substitute(template, Some(secrets))

@@ -83,10 +83,10 @@ fn walk(
       entry["dry_run"] = json!(true);
     }
     if cmd.get_arguments().any(|a| a.get_long() == Some("apply")) {
-      entry["apply_perms"] = if command == "data push" {
-        json!(["exec"])
-      } else {
-        json!(["apply"])
+      entry["apply_perms"] = match command.as_str() {
+        "data push" => json!(["exec"]),
+        "service env sync" => json!(["plan", "apply"]),
+        _ => json!(["apply"]),
       };
     }
     match command.as_str() {
@@ -105,6 +105,9 @@ fn walk(
         entry["flag_variants"] = json!({
           "--extract-secrets": {"returns": "service-import-preview", "when": "无 --apply 且提取到密钥"}
         });
+      }
+      "service env sync" => {
+        entry["import_perms"] = json!(["admin"]);
       }
       _ => {}
     }
@@ -221,10 +224,16 @@ fn effect(
   if command == "egress presets" {
     return ("read", &[]);
   }
+  if command == "service env sync" {
+    return ("read", &["read"]);
+  }
   if command == "plan"
     || cmd.get_arguments().any(|a| a.get_long() == Some("apply"))
   {
     return ("plan", &["plan"]);
+  }
+  if matches!(command, "config set" | "config unset") {
+    return ("direct", &["admin"]);
   }
   let leaf = cmd.get_name();
   if matches!(command, "task run" | "task cancel") {
@@ -272,6 +281,15 @@ fn effect(
       | "network acl"
       | "service files"
       | "alert firing"
+      | "refs"
+      | "tree"
+      | "search"
+      | "lint"
+      | "config"
+      | "config get"
+      | "secret refs"
+      | "secret unused"
+      | "task artifacts"
       | "backup diff"
       | "backup extract"
   ) || command.starts_with("wait ")
@@ -343,7 +361,17 @@ fn returns(command: &str) -> Option<&'static str> {
     "service history" => "deployment",
     "edge list" | "edge show" => "edge",
     "account list" => "account",
-    "secret list" => "secret",
+    "secret list" | "secret unused" => "secret",
+    "refs" | "secret refs" => "ref_report",
+    "tree" => "tree",
+    "search" => "search",
+    "lint" => "lint",
+    "config" | "config list" | "config get" | "config set"
+    | "config unset" => "config",
+    "secret import" => "secret_import",
+    "service env" | "service env list" => "service_env",
+    "service env sync" => "service_env_sync",
+    "task artifacts" => "task_artifacts",
     "token list" => "token",
     "token explain" => "token_explain",
     "report" => "report",
@@ -551,6 +579,22 @@ mod tests {
     assert!(names.contains(&"wharf wait service"));
     assert!(!names.iter().any(|n| n.ends_with(" help")));
   }
+}
+
+#[test]
+fn env_sync_advertises_preview_apply_and_import_permissions() {
+  let report =
+    usable(&["service".into()], &json!({"perms":["read"]}));
+  let sync = report["commands"]
+    .as_array()
+    .unwrap()
+    .iter()
+    .find(|row| row["command"] == "wharf service env sync")
+    .unwrap();
+  assert_eq!(sync["perms"], json!(["read"]));
+  assert_eq!(sync["apply_perms"], json!(["plan", "apply"]));
+  assert_eq!(sync["import_perms"], json!(["admin"]));
+  assert_eq!(sync["returns"], "service_env_sync");
 }
 
 #[cfg(test)]

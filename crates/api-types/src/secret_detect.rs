@@ -1,3 +1,90 @@
+//! 环境变量和配置文本里的明文密钥识别规则。
+
+use crate::references::{
+  parse_placeholder, parse_service_ref, placeholders,
+};
+
+pub fn has_wharf_ref(value: &str) -> bool {
+  has_compose_var(value)
+    || placeholders(value).any(|p| {
+      parse_service_ref(p).is_some()
+        || parse_placeholder(p, true).is_ok_and(|p| p.is_some())
+    })
+}
+
+pub fn detect_secret_value(value: &str) -> Option<&'static str> {
+  let value = value.trim();
+  if let Some((_, rest)) = value.split_once("://")
+    && let Some((auth, _)) = rest
+      .split(['/', '?', '#'])
+      .next()
+      .and_then(|s| s.rsplit_once('@'))
+    && auth.split_once(':').is_some_and(|(_, pass)| {
+      !pass.is_empty() && !has_wharf_ref(pass)
+    })
+  {
+    return Some("URL 内嵌密码");
+  }
+  known_format(value)
+}
+
+pub fn is_placeholder_value(trimmed: &str) -> bool {
+  let trimmed = trimmed.trim();
+  placeholder(trimmed)
+    || trimmed.bytes().all(|c| c.is_ascii_digit())
+    || trimmed.eq_ignore_ascii_case("test")
+}
+
+fn placeholder(trimmed: &str) -> bool {
+  let lower = trimmed.to_ascii_lowercase();
+  trimmed.is_empty()
+    || trimmed.starts_with('/')
+    || matches!(
+      lower.as_str(),
+      "true"
+        | "false"
+        | "yes"
+        | "no"
+        | "on"
+        | "off"
+        | "changeme"
+        | "example"
+        | "placeholder"
+        | "xxx"
+        | "none"
+        | "null"
+        | "disabled"
+    )
+    || lower.starts_with("your_")
+}
+
+pub fn has_compose_var(value: &str) -> bool {
+  let mut bytes = value.bytes().peekable();
+  while let Some(b) = bytes.next() {
+    if b != b'$' {
+      continue;
+    }
+    match bytes.next_if(|b| *b == b'$') {
+      Some(_) => continue,
+      None
+        if bytes
+          .peek()
+          .is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_') =>
+      {
+        return true;
+      }
+      None if bytes.next_if_eq(&b'{').is_some() => {
+        return bytes
+          .next()
+          .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+          && bytes.any(|b| b == b'}');
+      }
+      None => {}
+    }
+  }
+  false
+}
+
 pub fn is_sensitive_env_key(key: &str) -> bool {
   let key = key.to_ascii_uppercase().replace('-', "_");
   if key == "PUBLIC_KEY"
@@ -69,7 +156,7 @@ pub fn private_key_header(value: &str) -> bool {
     .is_some_and(|rest| rest.contains("PRIVATE KEY-----"))
 }
 
-pub fn detect_secret_value(value: &str) -> Option<&'static str> {
+pub fn known_format(value: &str) -> Option<&'static str> {
   if ["ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_"]
     .into_iter()
     .any(|p| value.starts_with(p))
@@ -128,48 +215,23 @@ pub fn url_credentials(
   })
 }
 
-pub fn has_url_credentials(value: &str) -> bool {
+fn has_url_credentials(value: &str) -> bool {
   url_credentials(value).next().is_some()
-}
-
-pub fn has_wharf_ref(value: &str) -> bool {
-  value.contains("[[") && value.contains("]]")
-}
-
-pub fn is_placeholder_value(value: &str) -> bool {
-  let value = value.trim();
-  value.is_empty()
-    || value.contains("${")
-    || has_wharf_ref(value)
-    || value.starts_with('/')
-    || value.to_ascii_lowercase().starts_with("your_")
-    || matches!(
-      value.to_ascii_lowercase().as_str(),
-      "true"
-        | "false"
-        | "yes"
-        | "no"
-        | "on"
-        | "off"
-        | "changeme"
-        | "placeholder"
-        | "xxx"
-        | "none"
-        | "null"
-        | "disabled"
-    )
 }
 
 pub fn env_secret_reason(
   key: &str,
   value: &str,
 ) -> Option<&'static str> {
-  if is_placeholder_value(value) {
+  let value = value.trim();
+  if value.contains("${")
+    || (value.contains("[[") && value.contains("]]"))
+    || placeholder(value)
+  {
     return None;
   }
-  if has_url_credentials(value) {
-    return Some("URL 内嵌密码");
-  }
-  detect_secret_value(value)
+  has_url_credentials(value)
+    .then_some("URL 内嵌密码")
+    .or_else(|| known_format(value))
     .or_else(|| is_sensitive_env_key(key).then_some("敏感变量名"))
 }

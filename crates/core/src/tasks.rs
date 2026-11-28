@@ -191,6 +191,8 @@ async fn tick(
     .unwrap_or(DateTime::<Utc>::MIN_UTC);
   let after = after.max(resumed_at);
   let rows = load(state).await?;
+  let offset =
+    state.db.call(|c| crate::config_api::offset(c)).await?;
   let snap = if rows.iter().any(|(_, spec, _)| {
     spec.enabled && matches!(spec.how, TaskKind::Exec { .. })
   }) {
@@ -205,6 +207,7 @@ async fn tick(
     let Ok(cron) = Cron::parse(&spec.schedule) else {
       continue;
     };
+    let cron = cron.with_offset(offset);
     if let TaskKind::Ping { grace_mins, .. } = spec.how {
       if until > after {
         crate::ping::check_due(
@@ -309,19 +312,22 @@ async fn tick(
             None,
           )
           .await?;
-          finish(state, id, TaskStatus::Skipped, None, &reason, None)
-            .await;
+          finish(
+            state,
+            id,
+            TaskStatus::Skipped,
+            None,
+            &reason,
+            None,
+            None,
+          )
+          .await;
           continue;
         }
       };
       let output = format!(
         "错过计划时间 {}，在 {window} 分钟宽限内服务器 {} 未补跑",
-        due
-          .with_timezone(
-            &chrono::FixedOffset::east_opt(8 * 3600)
-              .expect("固定时区")
-          )
-          .format("%H:%M"),
+        due.with_timezone(&offset).format("%H:%M"),
         server,
       );
       // 这条记录对应未执行的旧计划点，用实际写入时间会挡住后续补跑。
@@ -335,8 +341,16 @@ async fn tick(
         None,
       )
       .await?;
-      finish(state, id, TaskStatus::Failed, None, &output, None)
-        .await;
+      finish(
+        state,
+        id,
+        TaskStatus::Failed,
+        None,
+        &output,
+        None,
+        None,
+      )
+      .await;
       let state = state.clone();
       let server = server.to_string();
       tokio::spawn(async move {
@@ -394,6 +408,7 @@ async fn record_skipped(
     TaskStatus::Skipped,
     None,
     &format!("服务 {service} 已停止，按 skip_if_stopped 跳过"),
+    None,
     None,
   )
   .await;
@@ -521,7 +536,7 @@ async fn start(
   .await
 }
 
-fn exec_target<'a>(
+pub(crate) fn exec_target<'a>(
   snap: &'a snapshot::Snapshot,
   service: &str,
 ) -> Result<&'a str, String> {
@@ -602,7 +617,8 @@ async fn start_with_guard(
   )
   .await?;
   if let Some(reason) = skip {
-    finish(state, id, TaskStatus::Skipped, None, &reason, None).await;
+    finish(state, id, TaskStatus::Skipped, None, &reason, None, None)
+      .await;
     return Ok((id, true));
   }
   let server = target.expect("可执行任务已有目标").to_string();
@@ -613,15 +629,23 @@ async fn start_with_guard(
   let state = state.clone();
   let name = name.to_string();
   tokio::spawn(async move {
-    let (status, code, output, mem_peak) =
-      execute(&state, &name, &spec, &snap, input, &request, &cancel)
-        .await;
+    let (status, code, output, mem_peak, artifacts) = execute(
+      &state,
+      (id, &name),
+      &spec,
+      &snap,
+      input,
+      &request,
+      &cancel,
+    )
+    .await;
     let (status, code, output) = if cancel.is_cancelled() {
       (TaskStatus::Cancelled, None, "已手动取消".into())
     } else {
       (status, code, output)
     };
-    finish(&state, id, status, code, &output, mem_peak).await;
+    finish(&state, id, status, code, &output, mem_peak, artifacts)
+      .await;
     drop(guard);
     notify_result(
       &state,
@@ -722,19 +746,25 @@ fn last_lines(s: &str, n: usize) -> String {
 /// 替换密钥、下发、把输出里的密钥值换成 `***`。
 async fn execute(
   state: &Arc<AppState>,
-  name: &str,
+  (run_id, name): (i64, &str),
   spec: &TaskSpec,
   snap: &snapshot::Snapshot,
   input: Option<TaskInput>,
   request: &RunTaskRequest,
   cancel: &CancellationToken,
-) -> (TaskStatus, Option<i32>, String, Option<u64>) {
+) -> (
+  TaskStatus,
+  Option<i32>,
+  String,
+  Option<u64>,
+  Option<artifacts::Stored>,
+) {
   if let Err(e) = crate::secret_policy::validate_task_restrictions(
     name,
     &spec.how,
     &snap.secret_restrictions,
   ) {
-    return (TaskStatus::Failed, None, e.message, None);
+    return (TaskStatus::Failed, None, e.message, None, None);
   }
   let secrets =
     crate::secret_policy::non_system_secrets(&snap.secrets);
@@ -743,7 +773,7 @@ async fn execute(
     request.env.values().map(String::as_str),
     &snap.secret_restrictions,
   ) {
-    return (TaskStatus::Failed, None, e.message, None);
+    return (TaskStatus::Failed, None, e.message, None, None);
   }
   let mut used = crate::secret_policy::redact_values(&secrets);
   used.extend(
@@ -764,7 +794,7 @@ async fn execute(
   };
   let result = run_on_agent(
     state,
-    name,
+    (run_id, name),
     spec,
     (snap, &secrets),
     input,
@@ -781,7 +811,18 @@ async fn execute(
       } else {
         TaskStatus::Failed
       };
-      (status, r.exit_code, redact(r.output), r.mem_peak)
+      let mut output = redact(r.output);
+      if let Some(warning) = r.artifacts_warning {
+        use std::fmt::Write;
+        let _ = write!(output, "\n{}", redact(warning));
+      }
+      let artifacts =
+        (!r.artifacts.is_empty()).then(|| artifacts::Stored {
+          server: spec.server.clone(),
+          files: r.artifacts,
+          keep: spec.artifacts_keep.unwrap_or(5),
+        });
+      (status, r.exit_code, output, r.mem_peak, artifacts)
     }
     Err(e) => {
       let status = if e.code == ErrorCode::Cancelled {
@@ -790,26 +831,44 @@ async fn execute(
           None,
           "已手动取消".into(),
           None,
+          None,
         );
       } else if e.code == ErrorCode::Timeout {
         TaskStatus::TimedOut
       } else {
         TaskStatus::Failed
       };
-      (status, None, redact(e.message), None)
+      (status, None, redact(e.message), None, None)
     }
   }
 }
 
 async fn run_on_agent(
   state: &Arc<AppState>,
-  name: &str,
+  (run_id, name): (i64, &str),
   spec: &TaskSpec,
   (snap, secrets): (&snapshot::Snapshot, &BTreeMap<String, String>),
   input: Option<TaskInput>,
   request: &RunTaskRequest,
   cancel: &CancellationToken,
 ) -> Result<TaskRunResult, ApiError> {
+  let texts = crate::missing_refs::task_texts(&spec.how)
+    .filter(|(field, _)| {
+      field
+        .strip_prefix("env.")
+        .is_none_or(|key| !request.env.contains_key(key))
+    })
+    .chain(
+      request
+        .env
+        .iter()
+        .map(|(key, value)| (format!("env.{key}"), value.as_str())),
+    );
+  crate::missing_refs::check_text(
+    &format!("task/{name}"),
+    texts,
+    secrets,
+  )?;
   let sub = |t: &str| render::substitute(t, Some(secrets));
   let env_with_overrides = |env: &BTreeMap<String, String>| {
     let mut merged = env.clone();
@@ -845,6 +904,8 @@ async fn run_on_agent(
       )
       .await?;
       return Ok(TaskRunResult {
+        artifacts: Vec::new(),
+        artifacts_warning: None,
         result: None,
         mem_peak: None,
         exit_code: Some(r.exit_code),
@@ -909,6 +970,18 @@ async fn run_on_agent(
       .with_hint("运行 wharf upgrade"),
     );
   }
+  let conn = if matches!(
+    &how,
+    TaskHow::Script { .. } | TaskHow::Container { .. }
+  ) {
+    state
+      .hub
+      .task_artifacts_conn_id(&spec.server)
+      .ok()
+      .filter(|id| request.conn.is_none_or(|bound| bound == *id))
+  } else {
+    None
+  };
   let job = TaskRunJob {
     name: name.to_string(),
     how,
@@ -916,6 +989,11 @@ async fn run_on_agent(
     network_host: false,
     out_dir: false,
     wait_for_deps: false,
+    run_id: conn.map(|_| run_id),
+    artifacts_max_bytes: conn.map(|_| {
+      u64::from(spec.artifacts_max_mb.unwrap_or(50)) * 1024 * 1024
+    }),
+    artifacts_keep: conn.map(|_| spec.artifacts_keep.unwrap_or(5)),
     timeout_secs: spec.timeout_secs,
     pull: snapshot::pull_policy(server),
   };
@@ -927,7 +1005,7 @@ async fn run_on_agent(
     .hub
     .call_optional_bound(
       &spec.server,
-      request.conn,
+      request.conn.or(conn),
       AgentOp::TaskRun(job),
       wait,
       None,
@@ -1043,23 +1121,39 @@ pub(crate) async fn record_ping(
   }).await
 }
 
-pub(crate) async fn finish(
+async fn finish(
   state: &AppState,
   id: i64,
   status: TaskStatus,
   code: Option<i32>,
   output: &str,
   mem_peak: Option<u64>,
+  artifacts: Option<artifacts::Stored>,
 ) {
   let (status, output) = (enc(status), output.to_string());
   let r = state
     .db
     .call(move |c| {
-      c.execute(
-        "UPDATE task_runs SET status = ?2, exit_code = ?3, output = ?4, ended_at = ?5, mem_peak = ?6 WHERE id = ?1",
-        params![id, status, code, output, now_ms(), mem_peak],
-      )
-      .map_err(sql_err)
+      let manifest = artifacts.as_ref().map(serde_json::to_string).transpose().map_err(db::json_err)?;
+      let tx = c.transaction().map_err(sql_err)?;
+      let updated = tx.execute(
+        "UPDATE task_runs SET status = ?2, exit_code = ?3, output = ?4, ended_at = ?5, mem_peak = ?6, artifacts = ?7 WHERE id = ?1",
+        params![id, status, code, output, now_ms(), mem_peak, manifest],
+      ).map_err(sql_err)?;
+      if updated > 0
+        && let Some(artifacts) = artifacts
+      {
+        tx.execute(
+          "UPDATE task_runs SET artifacts = NULL
+           WHERE id IN (
+             SELECT id FROM task_runs WHERE task = (SELECT task FROM task_runs WHERE id = ?1)
+             AND json_extract(artifacts, '$.server') = ?2
+             ORDER BY id DESC LIMIT -1 OFFSET ?3
+           )",
+          params![id, artifacts.server, artifacts.keep],
+        ).map_err(sql_err)?;
+      }
+      tx.commit().map_err(sql_err)
     })
     .await;
   if let Err(e) = r {
@@ -1187,6 +1281,17 @@ fn validate(
       ));
     }
   }
+  if spec
+    .artifacts_max_mb
+    .is_some_and(|size| !(1..=200).contains(&size))
+    || spec
+      .artifacts_keep
+      .is_some_and(|keep| !(1..=20).contains(&keep))
+  {
+    return Err(ApiError::invalid(
+      "产物大小上限须为 1 到 200 MiB，保留次数须为 1 到 20",
+    ));
+  }
   let max = match spec.how {
     TaskKind::Host { .. } => HOST_MAX,
     _ => OTHER_MAX,
@@ -1286,10 +1391,17 @@ fn run_view(r: &rusqlite::Row) -> rusqlite::Result<TaskRunView> {
     output: crate::log_redact::redact_text(&r.get::<_, String>(7)?),
     mem_peak: r.get(8)?,
     service: r.get(9)?,
+    artifacts: r
+      .get::<_, Option<String>>(10)?
+      .and_then(|raw| {
+        serde_json::from_str::<artifacts::Stored>(&raw).ok()
+      })
+      .map(|s| s.files)
+      .unwrap_or_default(),
   })
 }
 
-const RUN_COLS: &str = "id, task, status, trigger, started_at, ended_at, exit_code, output, mem_peak, service";
+const RUN_COLS: &str = "id, task, status, trigger, started_at, ended_at, exit_code, output, mem_peak, service, artifacts";
 
 /// `GET /api/tasks`
 pub async fn list(
@@ -1306,6 +1418,7 @@ pub struct TaskQuery {
   reveal: bool,
 }
 
+pub(crate) mod artifacts;
 #[path = "tasks/read.rs"]
 mod read;
 use read::build_views;
@@ -1459,23 +1572,27 @@ pub async fn remove(
     crate::join::core_server_of(&snap).as_deref(),
   )?;
   require_confirm_task_data(&auth, &name, &spec, q.data)?;
+  let _guard = RunGuard::acquire(&name).ok_or_else(|| {
+    ApiError::new(ErrorCode::Busy, "任务仍在运行，结束后再删除")
+  })?;
   let task_name = name.clone();
-  s.db
-    .call(move |c| {
-      let tx = c.transaction().map_err(sql_err)?;
-      tx.execute("DELETE FROM tasks WHERE name = ?1", params![name])
-        .map_err(sql_err)?;
-      tx.execute(
-        "DELETE FROM task_runs WHERE task = ?1",
-        params![name],
-      )
-      .map_err(sql_err)?;
-      crate::db::set_setting(&tx, &task_notice_key(&name), None)?;
-      tx.commit().map_err(sql_err)?;
-      index_hooks(&load_rows(c)?);
-      Ok(())
-    })
-    .await?;
+  let mut servers: std::collections::BTreeSet<String> = s.db.call(move |c| {
+    let tx = c.transaction().map_err(sql_err)?;
+    let servers = {
+      let mut stmt = tx.prepare(
+        "SELECT DISTINCT json_extract(artifacts, '$.server') FROM task_runs WHERE task = ?1 AND artifacts IS NOT NULL"
+      ).map_err(sql_err)?;
+      stmt.query_map([&name], |r| r.get(0)).and_then(Iterator::collect).map_err(sql_err)?
+    };
+    tx.execute("DELETE FROM tasks WHERE name = ?1", params![name]).map_err(sql_err)?;
+    tx.execute("DELETE FROM task_runs WHERE task = ?1", params![name]).map_err(sql_err)?;
+    crate::db::set_setting(&tx, &task_notice_key(&name), None)?;
+    tx.commit().map_err(sql_err)?;
+    index_hooks(&load_rows(c)?);
+    Ok(servers)
+  }).await?;
+  servers.insert(spec.server.clone());
+  artifacts::prune(&s, &task_name, &servers).await;
   crate::log_redact::refresh(&s.db).await;
   if q.data && matches!(spec.how, TaskKind::Script { .. }) {
     let result: wharf_api_types::agent::RemoveDataResult = s
@@ -2417,6 +2534,7 @@ async fn task_is_cancellable_as_soon_as_run_record_is_visible() {
     Some(1),
     "上次失败",
     None,
+    None,
   )
   .await;
   let guard = RunGuard::acquire("cancel-fixture").unwrap();
@@ -2441,8 +2559,16 @@ async fn task_is_cancellable_as_soon_as_run_record_is_visible() {
       .unwrap();
   assert_eq!(receipt["cancelled"], true);
   assert!(token.is_cancelled());
-  finish(&state, id, TaskStatus::Cancelled, None, "已手动取消", None)
-    .await;
+  finish(
+    &state,
+    id,
+    TaskStatus::Cancelled,
+    None,
+    "已手动取消",
+    None,
+    None,
+  )
+  .await;
   assert_eq!(
     cancel_run(State(state.clone()), permissions(), Path(id))
       .await

@@ -269,3 +269,13 @@ wharf service import <服务器> --project <compose 项目名> --json   # 或 --
 - `wharf data pull <服务>[:子目录] <本地目录> --sqlite-safe` 对 SQLite 拍一致快照再下载。
 - `wharf service import <服务器> --project <项目> --extract-secrets` 先预览将抽取的密钥名。加 `--apply` 才会写密钥，同名默认拒绝，可明确选 `--only-missing-secrets` 或 `--overwrite-secrets`。
 - `wharf export --service <服务> --with-secrets -o <加密包>` 生成加密文件。`wharf import <加密包> --map-server <原机>=<目标机>` 默认只预览。`--plan-only` 写密钥并生成计划，`--apply` 继续执行。同名密钥默认拒绝，可明确选 `--only-missing` 或 `--overwrite`。口令从终端、`--passphrase-file` 或 `--passphrase-env` 读取。
+
+### 引用、配置和体检
+
+- 用 `wharf refs service/<服务>` 查引用，用 `wharf tree [目标]` 看拓扑，用 `wharf search <词> --kind <类别>` 查配置。密钥引用用 `wharf secret refs <名称>`，无引用的业务密钥用 `wharf secret unused` 查看。
+- 用 `wharf config` 列配置，`config get <键>` 查看一项，`config set <键> <值>` 或 `config unset <键>` 修改。
+- `wharf secret import .env --dry-run` 预览批量导入。默认有冲突时整批拒绝，加 `--only-missing` 跳过或用 `--overwrite` 覆盖。用 `wharf secret list --prefix <前缀>` 筛名称。
+- `wharf service env sync <服务> .env` 预览变量差异。确认后加 `--apply`，敏感值默认转存为密钥。要保留明文时指定 `--plain <键>`。
+- `wharf task artifacts <任务> [--run <编号>]` 列产物，用 `--get <相对路径> -o <文件>` 下载。
+- `wharf audit --since 24h --target service/<服务> --errors` 只看近期失败，可再加 `--until` 或 `--status`。
+- `wharf lint` 有错误时退出码为 1，`--strict` 时警告也算失败。意图目录可用 `wharf validate ./fleet.d/` 和 `wharf plan -f ./fleet.d/`。

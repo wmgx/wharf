@@ -21,6 +21,7 @@ pub mod external;
 pub mod gateway_http;
 pub mod net_probe;
 pub mod plan;
+pub mod references;
 pub mod report;
 pub mod resources;
 pub mod seal;

@@ -1224,6 +1224,10 @@ export interface FileSpec {
    */
   content: string;
   /**
+   * 意图文件中的外置配置路径。
+   */
+  file?: string | null;
+  /**
    * 容器内的绝对路径，例如 `/etc/app/config.yaml`。
    */
   path: string;
@@ -2439,6 +2443,10 @@ export interface RouteSpec {
    */
   caddy?: string | null;
   /**
+   * 意图文件中的外置 Caddy 片段路径。
+   */
+  caddy_file?: string | null;
+  /**
    * 只接受 Cloudflare 官方网段的直连请求。
    */
   cf_origin_only?: boolean;
@@ -3262,6 +3270,12 @@ export interface TailnetRelay {
   to: string;
 }
 
+export interface TaskArtifact {
+  path: string;
+  sha256: string;
+  size: number;
+}
+
 export type TaskKind = {
   command: string;
   /**
@@ -3297,6 +3311,7 @@ export type TaskKind = {
 };
 
 export interface TaskRunView {
+  artifacts?: TaskArtifact[];
   ended_at?: string | null;
   exit_code?: number | null;
   id: number;
@@ -3351,6 +3366,8 @@ export type TaskSpec = ({
    */
   token: string;
 }) & {
+  artifacts_keep?: number | null;
+  artifacts_max_mb?: number | null;
   /**
    * 错过触发后允许补跑的分钟数。
    */

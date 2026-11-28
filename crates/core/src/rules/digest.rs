@@ -42,13 +42,14 @@ pub(super) struct DigestRow {
   pub is_notice: bool,
 }
 
+#[cfg(test)]
 pub(super) fn beijing() -> FixedOffset {
   FixedOffset::east_opt(8 * 3600).expect("固定时区")
 }
 
-fn fmt_hm(ms: i64) -> String {
+fn fmt_hm(ms: i64, offset: FixedOffset) -> String {
   db::to_time(ms)
-    .with_timezone(&beijing())
+    .with_timezone(&offset)
     .format("%H:%M")
     .to_string()
 }
@@ -58,9 +59,11 @@ fn due_action(
   now: i64,
   last_date: Option<&str>,
   retry: Option<&Retry>,
+  offset: FixedOffset,
+  hour: u16,
 ) -> Option<String> {
-  let dt = db::to_time(now).with_timezone(&beijing());
-  if dt.hour() < 9 {
+  let dt = db::to_time(now).with_timezone(&offset);
+  if dt.hour() < u32::from(hour) {
     return None;
   }
   let today = dt.format("%Y-%m-%d").to_string();
@@ -70,7 +73,10 @@ fn due_action(
 }
 
 /// 按规则分组拼每日汇总正文；没有内容返回 `None`。
-pub(super) fn render(rows: &[DigestRow]) -> Option<(String, String)> {
+fn render(
+  rows: &[DigestRow],
+  offset: FixedOffset,
+) -> Option<(String, String)> {
   if rows.is_empty() {
     return None;
   }
@@ -83,12 +89,12 @@ pub(super) fn render(rows: &[DigestRow]) -> Option<(String, String)> {
   'groups: for (source, items) in groups {
     let mut header = format!("【{}】\n", display_name(source));
     for item in items {
-      let at = fmt_hm(item.fired_at);
+      let at = fmt_hm(item.fired_at, offset);
       let line = if item.is_notice {
         format!("- {}（{at}）\n", item.title)
       } else {
         let state = match item.recovered_at {
-          Some(t) => format!("已恢复（{}）", fmt_hm(t)),
+          Some(t) => format!("已恢复（{}）", fmt_hm(t, offset)),
           None => "仍在触发".into(),
         };
         let label = item.subject.as_deref().unwrap_or(&item.title);
@@ -222,7 +228,9 @@ pub(super) async fn preview(
 ) -> Result<AlertDigestPreview, ApiError> {
   let (rows, last_sent_date, _) = load_rows(state).await?;
   let count = rows.len();
-  let (title, body) = match render(&rows) {
+  let offset =
+    state.db.call(|c| crate::config_api::offset(c)).await?;
+  let (title, body) = match render(&rows, offset) {
     Some((t, b)) => (Some(t), Some(b)),
     None => (None, None),
   };
@@ -262,12 +270,28 @@ where
   let Ok((rows, last_date, retry)) = load_rows(state).await else {
     return false;
   };
-  let Some(today) =
-    due_action(now, last_date.as_deref(), retry.as_ref())
+  let Ok((offset, hour)) = state
+    .db
+    .call(|c| {
+      Ok((
+        crate::config_api::offset(c)?,
+        crate::config_api::number(c, "alerts.digest_hour")?,
+      ))
+    })
+    .await
   else {
     return false;
   };
-  let Some((title, body)) = render(&rows) else {
+  let Some(today) = due_action(
+    now,
+    last_date.as_deref(),
+    retry.as_ref(),
+    offset,
+    hour,
+  ) else {
+    return false;
+  };
+  let Some((title, body)) = render(&rows, offset) else {
     // 今天 09:00 没有待汇总内容：不发送，但记下今天已过 09:00，免得之后的新条目提前发出。
     let _ = state
       .db
@@ -353,7 +377,7 @@ fn digest_render_caps_body_without_losing_total_count() {
       is_notice: false,
     })
     .collect::<Vec<_>>();
-  let (title, body) = render(&rows).unwrap();
+  let (title, body) = render(&rows, beijing()).unwrap();
   assert!(title.contains("100 条"));
   assert!(body.contains("条已省略"));
   assert!(body.len() <= MAX_RENDER_BYTES);

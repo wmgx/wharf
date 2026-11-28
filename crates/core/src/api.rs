@@ -519,6 +519,12 @@ pub fn router(state: Arc<AppState>) -> Router {
     )
     .route("/api/edge/{name}/accept", post(crate::edge_api::accept))
     .route("/api/secrets", get(list_secrets))
+    .route(
+      "/api/secrets/import",
+      post(crate::secret_import::import).layer(
+        axum::extract::DefaultBodyLimit::max(80 * 1024 * 1024),
+      ),
+    )
     .route("/api/notify/test", post(crate::notify::test))
     .route("/api/notify/keys", get(crate::notify_keys::list))
     .route(
@@ -569,6 +575,14 @@ pub fn router(state: Arc<AppState>) -> Router {
     )
     .route("/api/tasks/{name}/run", post(crate::tasks::run_now))
     .route("/api/tasks/{name}/runs", get(crate::tasks::runs))
+    .route(
+      "/api/tasks/{name}/artifacts",
+      get(crate::tasks::artifacts::list),
+    )
+    .route(
+      "/api/tasks/{name}/runs/{run_id}/artifacts/download",
+      get(crate::tasks::artifacts::download),
+    )
     .route(
       "/api/tasks/{name}/runs/{id}",
       get(crate::tasks::run_detail),
@@ -624,6 +638,17 @@ pub fn router(state: Arc<AppState>) -> Router {
       ),
     )
     .route("/api/audit", get(crate::audit::list))
+    .route("/api/refs", get(crate::catalog::refs))
+    .route("/api/tree", get(crate::catalog::tree))
+    .route("/api/lint", get(crate::lint_report::report))
+    .route("/api/search", get(crate::catalog::search))
+    .route("/api/config", get(crate::config_api::list))
+    .route(
+      "/api/config/{key}",
+      get(crate::config_api::get)
+        .put(crate::config_api::set)
+        .delete(crate::config_api::unset),
+    )
     .route(
       "/api/credentials/revoke-all",
       post(revoke_all_credentials),
@@ -709,6 +734,7 @@ async fn check_cli(
 #[derive(Default, Deserialize)]
 struct BriefQuery {
   brief: Option<String>,
+  preview_secrets: Option<String>,
 }
 
 impl BriefQuery {
@@ -2242,15 +2268,45 @@ async fn remove_account(
 
 // SECRETS
 
+#[derive(Default, Deserialize)]
+struct SecretListQuery {
+  prefix: Option<String>,
+  unused: Option<String>,
+  include_system: Option<String>,
+}
+
 async fn list_secrets(
   State(s): State<Arc<AppState>>,
   auth: Auth,
+  Query(q): Query<SecretListQuery>,
 ) -> ApiResult<Vec<SecretView>> {
   auth.require(Perm::Read)?;
+  let yes = |flag| matches!(flag, Some("1" | "true"));
+  let unused = yes(q.unused.as_deref());
+  if unused && auth.services.is_some() {
+    return Err(
+      ApiError::new(
+        ErrorCode::Forbidden,
+        "按孤儿密钥筛选需要全局视野",
+      )
+      .with_hint("请改用不限服务的令牌执行 wharf secret unused")
+      .into(),
+    );
+  }
   let mut list = read_secret_views(&s).await?;
   if let Some(allowed) = &auth.services {
     crate::scope_filter::filter_secrets(allowed, &mut list);
   }
+  let include_system = yes(q.include_system.as_deref());
+  list.retain(|row| {
+    q.prefix
+      .as_ref()
+      .is_none_or(|prefix| row.name.starts_with(prefix))
+      && (!unused
+        || (include_system || !row.managed && row.system.is_none())
+          && row.used_by.is_empty()
+          && row.other_refs.is_empty())
+  });
   Ok(Json(list))
 }
 
@@ -2355,9 +2411,7 @@ async fn write_secret(
 ) -> Result<RotateSecretResponse, AppError> {
   check_secret_name(&name)?;
   refuse_managed(&name)?;
-  let keep_days =
-    req.keep_days.unwrap_or(db::DEFAULT_SECRET_KEEP_DAYS);
-  if keep_days > 30 {
+  if req.keep_days.is_some_and(|days| days > 30) {
     return Err(
       ApiError::invalid("保留天数须在 0 到 30 之间")
         .with_hint("0 表示不保留旧值，默认保留 7 天")
@@ -2373,6 +2427,12 @@ async fn write_secret(
   s.db
     .call_credentials(move |c, key| {
       let now = now_ms();
+      let keep_days = match req.keep_days {
+        Some(days) => days,
+        None => {
+          crate::config_api::number(c, "retention.secret_keep_days")?
+        }
+      };
       let until = (keep_days > 0)
         .then(|| now + i64::from(keep_days) * 86_400_000);
       key.rotate_secret(c, &n, &value, now, until, create)
@@ -2420,27 +2480,10 @@ async fn secret_rotation_response(
 ) -> Result<RotateSecretResponse, AppError> {
   let secret = read_secret_view(s, &name).await?;
   let snap = snapshot::load(&s.db).await?;
-  let affected_services: Vec<_> = snap
-    .world
-    .services
-    .iter()
-    .filter(|(_, row)| {
-      crate::secret_policy::service_renders_secret(&row.spec, &name)
-    })
-    .map(|(service, _)| service.clone())
-    .collect();
-  let affected_gateways: Vec<_> = snap
-    .world
-    .routes
-    .iter()
-    .filter(|(host, row)| {
-      row.spec.auth && crate::render::route_auth_secret(host) == name
-    })
-    .flat_map(|(_, row)| snap.world.route_gateways(&row.spec))
-    .map(str::to_string)
-    .collect::<std::collections::BTreeSet<_>>()
-    .into_iter()
-    .collect();
+  let (affected_services, affected_gateways) =
+    crate::secret_import::affected(&snap.world, |secret| {
+      secret == name
+    });
   let needs_plan =
     !affected_services.is_empty() || !affected_gateways.is_empty();
   Ok(RotateSecretResponse {
@@ -2637,12 +2680,66 @@ async fn make_plan(
   if !auth.human {
     guard_dangerous(&s, &req).await?;
   }
-  let snap = snapshot::load(&s.db).await?;
+  let mut snap = snapshot::load(&s.db).await?;
+  if let Some(names) = &query.preview_secrets {
+    auth.require(Perm::Admin)?;
+    audit.skip_record();
+    let names = names.split(',').collect::<Vec<_>>();
+    if names.len() > 200 {
+      return Err(
+        ApiError::invalid("每次最多预览 200 条密钥").into(),
+      );
+    }
+    for name in names {
+      check_secret_name(name)?;
+      crate::secret_policy::refuse_managed(name)?;
+      if !crate::render::is_auth_secret(name) {
+        crate::secret_policy::reject_system_secret(
+          name,
+          "同步环境变量",
+        )?;
+      }
+      snap
+        .secrets
+        .entry(name.to_string())
+        .or_insert_with(|| "***".into());
+    }
+  }
   if let Err(error) =
     crate::token_scope::require_plan_request(&auth, &snap.world, &req)
   {
     audit.skip_record();
     return Err(error.into());
+  }
+  let mut visible_routes = std::collections::BTreeSet::new();
+  if let Some(services) = &auth.services {
+    visible_routes.extend(
+      snap
+        .world
+        .routes
+        .iter()
+        .filter(|(_, row)| {
+          crate::token_scope::route_spec_in_scope(services, &row.spec)
+        })
+        .map(|(host, _)| host.clone()),
+    );
+    let submitted_routes = req
+      .changes
+      .iter()
+      .filter_map(|change| match change {
+        wharf_api_types::spec::Change::UpsertRoute { spec } => {
+          Some(spec)
+        }
+        _ => None,
+      })
+      .chain(req.partial.iter().flat_map(|fleet| &fleet.routes));
+    visible_routes.extend(submitted_routes.filter_map(|spec| {
+      crate::token_scope::route_spec_in_scope(services, spec)
+        .then(|| {
+          crate::world::normalize_hostname(&spec.hostname).ok()
+        })
+        .flatten()
+    }));
   }
   let planned = planner::make_plan_inner(
     &s,
@@ -2651,13 +2748,22 @@ async fn make_plan(
     true,
     auth.has(Perm::Admin),
   )
-  .await?;
+  .await
+  .map_err(|error| {
+    crate::missing_refs::scope_error(
+      error,
+      auth.services.as_ref(),
+      &visible_routes,
+    )
+  })?;
   crate::token_scope::require_plan(
     &auth,
     &planned.plan,
     &planned.route_effects,
   )?;
-  planner::save(&s, &planned).await?;
+  if query.preview_secrets.is_none() {
+    planner::save(&s, &planned).await?;
+  }
   let mut seen = std::collections::BTreeSet::new();
   let addresses = planned
     .plan
@@ -2904,6 +3010,73 @@ async fn export(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn partial_plan_reports_missing_gateway_for_scoped_route() {
+    let state = crate::rules::tests::test_state();
+    let request = serde_json::from_value(json!({
+      "partial": {"routes": [{"hostname":"A.example.test.","service":"app","gateway":"missing"}]}
+    })).unwrap();
+    let auth = Auth {
+      name: "fixture".into(),
+      perms: [Perm::Plan].into(),
+      services: Some(["app".into()].into()),
+      expires_at: None,
+      allowed_from: vec![],
+      human: false,
+    };
+    let error = make_plan(
+      State(state),
+      auth,
+      Query(BriefQuery::default()),
+      axum::Extension(crate::audit::AuditSlot::default()),
+      Json(request),
+    )
+    .await
+    .unwrap_err()
+    .0;
+    let details = error.details.unwrap();
+    assert!(
+      details["missing"].as_array().unwrap().iter().any(|r| {
+        r["target"] == "missing"
+          && r["source"] == "route/a.example.test"
+      }),
+      "{details}"
+    );
+  }
+
+  #[tokio::test]
+  async fn env_secret_preflight_uses_names_without_persisting_plan_or_secrets()
+   {
+    let state = crate::rules::tests::test_state();
+    let auth = Auth {
+      name: "fixture".into(),
+      perms: [Perm::Admin, Perm::Plan].into(),
+      services: None,
+      expires_at: None,
+      allowed_from: vec![],
+      human: false,
+    };
+    let Json(plan) = make_plan(
+      State(state.clone()),
+      auth,
+      Query(BriefQuery {
+        preview_secrets: Some("FIXTURE_API_KEY".into()),
+        ..Default::default()
+      }),
+      axum::Extension(crate::audit::AuditSlot::default()),
+      Json(PlanRequest::default()),
+    )
+    .await
+    .map_err(|e| e.0)
+    .unwrap();
+    state.db.call(move |c| {
+      let plan_count: i64 = c.query_row("SELECT count(*) FROM plans WHERE id = ?1", [&plan.plan_id], |r| r.get(0)).map_err(sql_err)?;
+      let secret_count: i64 = c.query_row("SELECT count(*) FROM secrets WHERE name = 'FIXTURE_API_KEY'", [], |r| r.get(0)).map_err(sql_err)?;
+      assert_eq!((plan_count, secret_count), (0, 0));
+      Ok(())
+    }).await.unwrap();
+  }
 
   #[tokio::test]
   async fn service_list_and_show_filter_shared_volume_links() {
@@ -3166,17 +3339,24 @@ mod tests {
       !view.contains("fixture-before")
         && !view.contains("fixture-after")
     );
-    let Json(all) = list_secrets(State(s.clone()), auth(None))
-      .await
-      .map_err(|e| e.0)
-      .unwrap();
+    let Json(all) = list_secrets(
+      State(s.clone()),
+      auth(None),
+      Query(SecretListQuery::default()),
+    )
+    .await
+    .map_err(|e| e.0)
+    .unwrap();
     assert_eq!(all[0].used_by, ["app-a"]);
     assert_eq!(all[0].other_refs, ["server:s1", "task:t1"]);
-    let Json(filtered) =
-      list_secrets(State(s), auth(Some(["app-a".into()].into())))
-        .await
-        .map_err(|e| e.0)
-        .unwrap();
+    let Json(filtered) = list_secrets(
+      State(s),
+      auth(Some(["app-a".into()].into())),
+      Query(SecretListQuery::default()),
+    )
+    .await
+    .map_err(|e| e.0)
+    .unwrap();
     assert_eq!(filtered.len(), 1);
     assert_eq!(filtered[0].name, "K1");
     assert_eq!(filtered[0].used_by, ["app-a"]);
@@ -3621,4 +3801,60 @@ mod tests {
       assert_eq!(consumed, allowed);
     }
   }
+}
+
+#[tokio::test]
+async fn unused_secrets_skip_basic_auth_and_require_global_scope() {
+  let s = crate::rules::tests::test_state();
+  s.db.call_credentials(|c, key| {
+    db::apply_write(c, &db::Write::Upsert {
+      kind: "route".into(), name: "a.example.test".into(),
+      spec: json!({"hostname":"a.example.test","service":"app","auth":true}), meta: json!({}),
+    })?;
+    db::apply_write(c, &db::Write::Upsert {
+      kind: "service".into(), name: "app".into(),
+      spec: json!({"server":"s1","source":{"image":"app:1"},"env":{"K":"[[USED_ENV]]"}}), meta: json!({}),
+    })?;
+    for name in ["USED_ENV", "BASIC_AUTH_a_example_test", "ORPHAN_K", "WHARF_INTERNAL"] {
+      key.put_secret(c, name, "fixture-value", 1, false)?;
+    }
+    Ok(())
+  }).await.unwrap();
+  let auth = |services| Auth {
+    name: "reader".into(),
+    perms: [Perm::Read].into(),
+    services,
+    allowed_from: Vec::new(),
+    expires_at: None,
+    human: false,
+  };
+  let rows = read_secret_views(&s).await.unwrap();
+  let basic = rows
+    .iter()
+    .find(|r| r.name == "BASIC_AUTH_a_example_test")
+    .unwrap();
+  assert_eq!(basic.other_refs, ["route_auth:a.example.test"]);
+  let query = || {
+    Query(SecretListQuery {
+      unused: Some("1".into()),
+      ..Default::default()
+    })
+  };
+  let Json(unused) =
+    list_secrets(State(s.clone()), auth(None), query())
+      .await
+      .map_err(|e| e.0)
+      .unwrap();
+  assert_eq!(
+    unused.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+    ["ORPHAN_K"]
+  );
+  let error = list_secrets(
+    State(s),
+    auth(Some(["app".into()].into())),
+    query(),
+  )
+  .await
+  .unwrap_err();
+  assert_eq!(error.0.code, ErrorCode::Forbidden);
 }

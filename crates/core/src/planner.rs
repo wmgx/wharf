@@ -596,8 +596,10 @@ pub(crate) async fn make_plan_inner(
     }
   }
   let mut heartbeat_net = snap.net(&desired);
-  if let Some(public) =
-    state.public_url.as_ref().filter(|u| !u.is_empty())
+  if let Some(public) = snap
+    .heartbeat_url
+    .as_ref()
+    .or_else(|| state.public_url.as_ref().filter(|u| !u.is_empty()))
   {
     heartbeat_net.heartbeat_url = Some(public.clone());
   }
@@ -613,6 +615,7 @@ pub(crate) async fn make_plan_inner(
     &desired,
     &snap.secret_restrictions,
   )?;
+  crate::missing_refs::check_plan(&desired, &snap)?;
   desired.validate_against(&current)?;
   crate::link::validate_new_admin_port_bindings(&current, &desired)?;
   for (name, row) in &desired.services {
@@ -883,8 +886,10 @@ pub(crate) async fn make_plan_inner(
   }
   let mut before_net = snap.net(&current);
   let mut net = snap.net(&desired);
-  if let Some(public) =
-    state.public_url.as_ref().filter(|u| !u.is_empty())
+  if let Some(public) = snap
+    .heartbeat_url
+    .as_ref()
+    .or_else(|| state.public_url.as_ref().filter(|u| !u.is_empty()))
   {
     before_net.heartbeat_url = Some(public.clone());
     net.heartbeat_url = Some(public.clone());

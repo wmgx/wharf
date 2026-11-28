@@ -1,5 +1,10 @@
 //! 配置自查只读快照和期望状态。提醒只包含位置、规则和修复建议。
 
+use wharf_api_types::secret_detect::{
+  has_compose_var, is_placeholder_value, is_sensitive_env_key,
+  known_format, private_key_header,
+};
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_yaml_ng::{Mapping, Value};
@@ -379,33 +384,6 @@ pub(crate) fn compose_memory_limits(
   Some((bytes, all_limited))
 }
 
-fn has_compose_var(value: &str) -> bool {
-  let mut bytes = value.bytes().peekable();
-  while let Some(b) = bytes.next() {
-    if b != b'$' {
-      continue;
-    }
-    match bytes.next_if(|b| *b == b'$') {
-      Some(_) => continue,
-      None
-        if bytes
-          .peek()
-          .is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_') =>
-      {
-        return true;
-      }
-      None if bytes.next_if_eq(&b'{').is_some() => {
-        return bytes
-          .next()
-          .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
-          && bytes.any(|b| b == b'}');
-      }
-      None => {}
-    }
-  }
-  false
-}
-
 fn has_reference_to(
   value: &str,
   known: Option<&BTreeMap<String, String>>,
@@ -435,42 +413,19 @@ fn env_secret(
   if url_has_password(trimmed, Some(secrets)) {
     return Some(move_to_vault("密码", "URL 内嵌密码"));
   }
-  let lower = trimmed.to_ascii_lowercase();
   if has_reference_to(trimmed, Some(secrets))
-    || trimmed.starts_with('/')
-    || trimmed.bytes().all(|c| c.is_ascii_digit())
-    || matches!(
-      lower.as_str(),
-      "true"
-        | "false"
-        | "yes"
-        | "no"
-        | "on"
-        | "off"
-        | "changeme"
-        | "example"
-        | "placeholder"
-        | "xxx"
-        | "none"
-        | "null"
-        | "test"
-        | "disabled"
-    )
-    || lower.starts_with("your_")
+    || is_placeholder_value(trimmed)
   {
     return None;
   }
   if let Some(name) = stored_secret(value, secrets) {
     return Some(reuse_secret(name));
   }
-  if let Some(rule) =
-    wharf_api_types::secret_detect::detect_secret_value(trimmed)
-  {
+  if let Some(rule) = known_format(trimmed) {
     return Some(move_to_vault("密钥", rule));
   }
-  (trimmed.chars().count() >= 6
-    && wharf_api_types::secret_detect::is_sensitive_env_key(key))
-  .then(|| move_to_vault("密码", "敏感变量名"))
+  (trimmed.chars().count() >= 6 && is_sensitive_env_key(key))
+    .then(|| move_to_vault("密码", "敏感变量名"))
 }
 
 fn url_has_password(
@@ -535,11 +490,9 @@ fn file_secret(
   let mut rule = content
     .lines()
     .any(|line| {
-      line.find("-----BEGIN ").is_some_and(|start| {
-        wharf_api_types::secret_detect::private_key_header(
-          &line[start..],
-        )
-      })
+      line
+        .find("-----BEGIN ")
+        .is_some_and(|start| private_key_header(&line[start..]))
     })
     .then_some("PEM 私钥格式");
   // shortcut: 按常见配置分隔符取值；需要识别带空格的字段时再按文件格式解析。
@@ -562,9 +515,7 @@ fn file_secret(
         return Some(reuse_secret(name));
       }
       if rule.is_none() {
-        rule = wharf_api_types::secret_detect::detect_secret_value(
-          value.trim_matches(['[', ']']),
-        );
+        rule = known_format(value.trim_matches(['[', ']']));
       }
     }
   }

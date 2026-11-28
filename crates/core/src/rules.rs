@@ -155,6 +155,55 @@ fn ev(title: String, body: String) -> Event {
 }
 
 /// `<服务器>:<程序>` 拆开。
+/// 只识别规则能明确归属的资源，其余主体验证交给规则本身。
+pub(crate) fn subject_resources<'a>(
+  rule: &str,
+  subject: &'a str,
+  custom: bool,
+) -> Vec<(&'static str, &'a str)> {
+  if custom {
+    return vec![("service", subject)];
+  }
+  if let Some(service) =
+    service_overrides::service_of_subject(rule, subject)
+  {
+    return vec![("service", service)];
+  }
+  match rule {
+    "host_cpu_high"
+    | "host_mem_high"
+    | "inode_high"
+    | "agent_mem_high"
+    | "traffic_quota"
+    | "clock_skew"
+    | "disk_forecast"
+    | "tailnet_key_expiring"
+    | "server_offline"
+    | "exposure"
+    | "unmanaged_container" => vec![("server", subject)],
+    "host_unit_down" => vec![("server", split_unit(subject).0)],
+    "mem_forecast" => subject
+      .strip_prefix("服务器 ")
+      .map(|s| vec![("server", s)])
+      .unwrap_or_default(),
+    "domain_down" | "cert_expiring" | "failover" => {
+      vec![("route", subject)]
+    }
+    "link_cert_expiring" => vec![("gateway", subject)],
+    "expiry_soon" | "expiry_urgent" => match split_unit(subject) {
+      ("domain", name) => vec![("route", name)],
+      ("server", name) => vec![("server", name)],
+      _ => vec![],
+    },
+    "link_loss" | "tailnet_relay" => subject
+      .split_once('>')
+      .map(|(from, to)| vec![("server", from), ("server", to)])
+      .unwrap_or_default(),
+    "task" => vec![("task", subject)],
+    _ => vec![],
+  }
+}
+
 fn split_unit(s: &str) -> (&str, &str) {
   s.split_once(':').unwrap_or((s, ""))
 }
