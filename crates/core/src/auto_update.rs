@@ -105,12 +105,11 @@ pub async fn run(state: &Arc<AppState>) -> Vec<AutoUpdateResult> {
     let Some(check) = checks.get(&name) else {
       continue;
     };
-    let Some(latest) = check.latest.clone() else {
+    let Some(mut latest) = check.latest.clone() else {
       continue;
     };
-    let Some(fingerprint) = updates::newer_fingerprint(check) else {
-      continue;
-    };
+    let row = &snap.world.services[&name];
+    let fingerprint = updates::newer_fingerprint(check);
     let key = format!("autoupdate.failed.{name}");
     let previous = state
       .db
@@ -119,7 +118,10 @@ pub async fn run(state: &Arc<AppState>) -> Vec<AutoUpdateResult> {
         let fingerprint = fingerprint.clone();
         move |c| {
           let previous = db::setting(c, &key)?;
-          if previous.as_ref().is_some_and(|p| p != &fingerprint) {
+          if let (Some(previous), Some(fingerprint)) =
+            (&previous, &fingerprint)
+            && previous != fingerprint
+          {
             db::set_setting(c, &key, None)?;
           }
           Ok(previous)
@@ -127,12 +129,28 @@ pub async fn run(state: &Arc<AppState>) -> Vec<AutoUpdateResult> {
       })
       .await;
     let result = match previous {
-      Ok(Some(previous)) if previous == fingerprint => Ok((
-        "skipped",
-        Some("这个版本上次自动更新失败过，等下一个版本".into()),
-      )),
+      Ok(Some(previous))
+        if fingerprint.as_ref() == Some(&previous)
+          || (fingerprint.is_none()
+            && updates::matches_failed_version(
+              row, check, &previous,
+            )) =>
+      {
+        if fingerprint.is_none()
+          && let Some((_, digest)) = previous
+            .lines()
+            .next()
+            .and_then(|entry| entry.split_once('='))
+        {
+          latest = digest.into();
+        }
+        Ok((
+          "skipped",
+          Some("这个版本上次自动更新失败过，等下一个版本".into()),
+        ))
+      }
+      _ if fingerprint.is_none() => continue,
       Ok(_) => {
-        let row = &snap.world.services[&name];
         let explicit = if row.spec.update_ignore.iter().any(|r| {
           r.scope == wharf_api_types::spec::UpdateIgnoreScope::All
         }) {
@@ -163,7 +181,7 @@ pub async fn run(state: &Arc<AppState>) -> Vec<AutoUpdateResult> {
         1.0,
       )
       .await;
-      let value = (!ok).then_some(fingerprint);
+      let value = if ok { None } else { fingerprint };
       if let Err(e) = state
         .db
         .call(move |c| db::set_setting(c, &key, value.as_deref()))
