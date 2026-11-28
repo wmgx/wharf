@@ -447,7 +447,7 @@ async fn migrated_exec_task_is_suppressed_by_its_runtime_server() {
        SELECT 'web', 's2', 'r1', 'v1', '', '[]', 1, json_extract(meta, '$.instance_id')
        FROM resources WHERE kind = 'service' AND name = 'web';
        INSERT INTO tasks (name, spec, created_at, updated_at) VALUES
-       ('dump', '{\"server\":\"s1\",\"kind\":\"exec\",\"service\":\"web\",\"command\":\"true\"}', 0, 0);",
+       ('dump', '{\"server\":\"s1\",\"kind\":\"exec\",\"service\":\"web\",\"command\":\"true\",\"schedule\":\"0 4 * * *\"}', 0, 0);",
     ).map_err(db::sql_err)
   }).await.unwrap();
   let cfg = config(&state).await;
@@ -463,6 +463,7 @@ async fn migrated_exec_task_is_suppressed_by_its_runtime_server() {
   for _ in 0..3 {
     observe(&state, "server.online", "s2", 0.0, "").await;
   }
+  assert!(firing_since("server_offline", "s2").is_some());
   assert_eq!(
     suppress::check(&state, "task", Some("dump"), &cfg, None)
       .await
