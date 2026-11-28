@@ -432,7 +432,7 @@ pub(crate) async fn observe_at(
   for (rule, o) in active_rules {
     let fkey = (rule.id.to_string(), subject.to_string());
     if !o.enabled() {
-      set_firing(state, fkey, None).await;
+      set_firing(state, fkey, None, now).await;
       continue;
     }
     let threshold = o.threshold.unwrap_or(rule.threshold);
@@ -459,6 +459,7 @@ pub(crate) async fn observe_at(
             delivery: Delivery::None,
             suppressed: false,
           }),
+          now,
         )
         .await;
         ack::on_firing_change(state, &fkey, true, now).await;
@@ -466,7 +467,7 @@ pub(crate) async fn observe_at(
       }
       Verdict::Recover => {
         prev = with(|m| m.firing.get(&fkey).cloned());
-        set_firing(state, fkey.clone(), None).await;
+        set_firing(state, fkey.clone(), None, now).await;
         ack::on_firing_change(state, &fkey, false, now).await;
         (true, (rule.ok)(&ctx))
       }
@@ -662,16 +663,6 @@ async fn push_with_world(state: &AppState, args: PushArgs<'_>) {
         return;
       }
       Some(Delivery::Digest) => {
-        digest::enqueue(
-          state,
-          id,
-          subject,
-          &event.title,
-          true,
-          false,
-          now,
-        )
-        .await;
         record_at(
           state,
           now,

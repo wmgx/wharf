@@ -579,7 +579,7 @@ pub(super) async fn evaluate_at(
   for cr in matched {
     let fkey = (cr.name.clone(), cr.service.clone());
     if !cr.enabled {
-      set_firing(state, fkey, None).await;
+      set_firing(state, fkey, None, now).await;
       continue;
     }
     let verdict = judge_consecutive(
@@ -616,6 +616,7 @@ pub(super) async fn evaluate_at(
             delivery: Delivery::None,
             suppressed: false,
           }),
+          now,
         )
         .await;
         ack::on_firing_change(state, &fkey, true, now).await;
@@ -623,7 +624,7 @@ pub(super) async fn evaluate_at(
       }
       Verdict::Recover => {
         prev = with(|m| m.firing.get(&fkey).cloned());
-        set_firing(state, fkey.clone(), None).await;
+        set_firing(state, fkey.clone(), None, now).await;
         ack::on_firing_change(state, &fkey, false, now).await;
         let e = ev(
           format!("服务 {} 的告警 {} 已恢复", cr.service, cr.name),

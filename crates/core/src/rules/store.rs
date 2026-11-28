@@ -238,6 +238,7 @@ pub(super) async fn set_firing(
   state: &AppState,
   key: (String, String),
   fire: Option<FiringEntry>,
+  now: i64,
 ) {
   let update = with(|m| match &fire {
     Some(v) => {
@@ -278,10 +279,17 @@ pub(super) async fn set_firing(
             i64::from(f.suppressed),
           ],
         ),
-        None => c.execute(
-          "DELETE FROM alert_firing WHERE rule = ?1 AND subject = ?2",
-          rusqlite::params![rule, subject],
-        ),
+        None => {
+          let tx = c.transaction().map_err(db::sql_err)?;
+          // 告警清除和汇总恢复同事务，即使静默期间也记恢复时刻。
+          super::digest::mark_recovered(&tx, &rule, Some(&subject), now)?;
+          let deleted = tx.execute(
+            "DELETE FROM alert_firing WHERE rule = ?1 AND subject = ?2",
+            rusqlite::params![rule, subject],
+          ).map_err(db::sql_err)?;
+          tx.commit().map_err(db::sql_err)?;
+          Ok(deleted)
+        },
       }
       .map(|_| ())
       .map_err(db::sql_err)

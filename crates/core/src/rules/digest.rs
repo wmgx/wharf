@@ -2,7 +2,8 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use axum::{Json, extract::State};
 use chrono::{FixedOffset, Timelike};
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{Connection, params};
+use serde::{Deserialize, Serialize};
 use wharf_api_types::{
   ApiError,
   view::{AlertDigestPreview, Perm},
@@ -19,6 +20,16 @@ use crate::{
 
 pub(super) const SOURCE_ID: &str = "daily_digest";
 const LAST_DATE_KEY: &str = "alerts.digest.last_date";
+const RETRY_KEY: &str = "alerts.digest.retry";
+const MAX_RENDER_BYTES: usize = 12_000;
+const MAX_RENDER_ITEMS: usize = 80;
+
+#[derive(Serialize, Deserialize)]
+struct Retry {
+  date: String,
+  attempts: u32,
+  next_at: i64,
+}
 
 #[derive(Debug, Clone)]
 pub(super) struct DigestRow {
@@ -43,16 +54,19 @@ fn fmt_hm(ms: i64) -> String {
 }
 
 /// 东八区到了 09:00 且今天还没发过时，返回今天的日期（`YYYY-MM-DD`）。
-pub(super) fn beijing_due_date(
+fn due_action(
   now: i64,
   last_date: Option<&str>,
+  retry: Option<&Retry>,
 ) -> Option<String> {
   let dt = db::to_time(now).with_timezone(&beijing());
   if dt.hour() < 9 {
     return None;
   }
   let today = dt.format("%Y-%m-%d").to_string();
-  (last_date != Some(today.as_str())).then_some(today)
+  (last_date != Some(today.as_str())
+    && retry.is_none_or(|r| r.date != today || now >= r.next_at))
+  .then_some(today)
 }
 
 /// 按规则分组拼每日汇总正文；没有内容返回 `None`。
@@ -64,29 +78,59 @@ pub(super) fn render(rows: &[DigestRow]) -> Option<(String, String)> {
   for row in rows {
     groups.entry(row.source.as_str()).or_default().push(row);
   }
-  let mut sections = Vec::with_capacity(groups.len());
-  for (source, items) in groups {
-    let mut lines = vec![format!("【{}】", display_name(source))];
+  let mut body = String::new();
+  let mut count = 0;
+  'groups: for (source, items) in groups {
+    let mut header = format!("【{}】\n", display_name(source));
     for item in items {
       let at = fmt_hm(item.fired_at);
-      if item.is_notice {
-        lines.push(format!("- {}（{at}）", item.title));
+      let line = if item.is_notice {
+        format!("- {}（{at}）\n", item.title)
       } else {
         let state = match item.recovered_at {
           Some(t) => format!("已恢复（{}）", fmt_hm(t)),
           None => "仍在触发".into(),
         };
         let label = item.subject.as_deref().unwrap_or(&item.title);
-        lines.push(format!(
-          "- {label}（{at} 触发，{state}）· {}",
-          item.title
-        ));
+        format!("- {label}（{at} 触发，{state}）· {}\n", item.title)
+      };
+      if count == MAX_RENDER_ITEMS
+        || body.len() + header.len() + line.len()
+          > MAX_RENDER_BYTES - 160
+      {
+        break 'groups;
       }
+      body.push_str(&header);
+      header.clear();
+      body.push_str(&line);
+      count += 1;
     }
-    sections.push(lines.join("\n"));
+    body.push('\n');
   }
-  let title = format!("每日汇总（{} 条）", rows.len());
-  Some((title, sections.join("\n\n")))
+  let total = rows.len();
+  if count < total {
+    body.push_str(&format!(
+      "\n……其余 {} 条已省略，运行 wharf alert history 查看完整记录",
+      total - count
+    ));
+  }
+  Some((
+    format!("每日汇总（共 {total} 条）"),
+    body.trim().to_string(),
+  ))
+}
+
+pub(super) fn mark_recovered(
+  c: &Connection,
+  source: &str,
+  subject: Option<&str>,
+  now: i64,
+) -> Result<(), ApiError> {
+  c.execute(
+    "UPDATE alert_digest SET recovered_at = ?3
+     WHERE source = ?1 AND subject IS ?2 AND is_notice = 0 AND recovered_at IS NULL",
+    params![source, subject, now],
+  ).map(|_| ()).map_err(db::sql_err)
 }
 
 /// 把一条 `digest` 级别的告警或事件通知记入待汇总队列。
@@ -116,41 +160,21 @@ pub(super) async fn enqueue(
         .map(|_| ())
         .map_err(db::sql_err)
       } else if !ok {
-        let existing: Option<(i64, Option<i64>)> = c
-          .query_row(
-            "SELECT id, recovered_at FROM alert_digest
-             WHERE source = ?1 AND subject IS ?2 AND is_notice = 0
-             ORDER BY id DESC LIMIT 1",
-            params![source, subject],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-          )
-          .optional()
-          .map_err(db::sql_err)?;
-        match existing {
-          Some((id, None)) => c.execute(
-            "UPDATE alert_digest SET title = ?2 WHERE id = ?1",
-            params![id, title],
-          ),
-          Some((id, Some(_))) => c.execute(
-            "UPDATE alert_digest SET title = ?2, fired_at = ?3, recovered_at = NULL WHERE id = ?1",
-            params![id, title, now],
-          ),
-          None => c.execute(
+        let updated = c.execute(
+          "UPDATE alert_digest SET title = ?3
+           WHERE source = ?1 AND subject IS ?2 AND is_notice = 0 AND recovered_at IS NULL",
+          params![source, subject, title],
+        ).map_err(db::sql_err)?;
+        if updated == 0 {
+          c.execute(
             "INSERT INTO alert_digest (source, subject, title, fired_at, recovered_at, is_notice)
              VALUES (?1, ?2, ?3, ?4, NULL, 0)",
             params![source, subject, title, now],
-          ),
+          ).map_err(db::sql_err)?;
         }
-        .map(|_| ())
-        .map_err(db::sql_err)
+        Ok(())
       } else {
-        c.execute(
-          "UPDATE alert_digest SET recovered_at = ?3
-           WHERE source = ?1 AND subject IS ?2 AND is_notice = 0 AND recovered_at IS NULL",
-          params![source, subject, now],
-        )
-        .map(|_| ())
-        .map_err(db::sql_err)
+        mark_recovered(c, &source, subject.as_deref(), now)
       }
     })
     .await;
@@ -161,11 +185,13 @@ pub(super) async fn enqueue(
 
 async fn load_rows(
   state: &AppState,
-) -> Result<(Vec<DigestRow>, Option<String>), ApiError> {
+) -> Result<(Vec<DigestRow>, Option<String>, Option<Retry>), ApiError>
+{
   state
     .db
     .call(|c| {
       let last = db::setting(c, LAST_DATE_KEY)?;
+      let retry = db::setting(c, RETRY_KEY)?.and_then(|data| serde_json::from_str(&data).ok());
       let mut stmt = c
         .prepare(
           "SELECT id, source, subject, title, fired_at, recovered_at, is_notice
@@ -186,7 +212,7 @@ async fn load_rows(
         })
         .and_then(Iterator::collect)
         .map_err(db::sql_err)?;
-      Ok((rows, last))
+      Ok((rows, last, retry))
     })
     .await
 }
@@ -194,7 +220,7 @@ async fn load_rows(
 pub(super) async fn preview(
   state: &AppState,
 ) -> Result<AlertDigestPreview, ApiError> {
-  let (rows, last_sent_date) = load_rows(state).await?;
+  let (rows, last_sent_date, _) = load_rows(state).await?;
   let count = rows.len();
   let (title, body) = match render(&rows) {
     Some((t, b)) => (Some(t), Some(b)),
@@ -208,7 +234,7 @@ pub(super) async fn preview(
   })
 }
 
-/// 投递成功或未配置通知渠道时清理已读条目；真正发送失败时保留到次日一起发。
+/// 投递成功或未配置通知渠道时清理已读条目。
 fn should_clear(skipped: Option<&str>) -> bool {
   matches!(skipped, None | Some("没有配置通知渠道"))
 }
@@ -230,10 +256,11 @@ where
   F: FnOnce(Event) -> Fut,
   Fut: std::future::Future<Output = Option<String>>,
 {
-  let Ok((rows, last_date)) = load_rows(state).await else {
+  let Ok((rows, last_date, retry)) = load_rows(state).await else {
     return false;
   };
-  let Some(today) = beijing_due_date(now, last_date.as_deref())
+  let Some(today) =
+    due_action(now, last_date.as_deref(), retry.as_ref())
   else {
     return false;
   };
@@ -245,7 +272,10 @@ where
       .await;
     return false;
   };
-  let max_id = rows.iter().map(|r| r.id).max();
+  let max_id = rows.last().map(|r| r.id);
+  let attempts = retry
+    .filter(|r| r.date == today)
+    .map_or(1, |r| r.attempts + 1);
   let event = Event { title, body };
   let deliver_event = Event {
     title: event.title.clone(),
@@ -265,7 +295,20 @@ where
         )
         .map_err(db::sql_err)?;
       }
-      db::set_setting(&tx, LAST_DATE_KEY, Some(&today))?;
+      if clear || attempts >= 3 {
+        db::set_setting(&tx, LAST_DATE_KEY, Some(&today))?;
+        db::set_setting(&tx, RETRY_KEY, None)?;
+      } else {
+        let delay = if attempts == 1 { 15 } else { 60 };
+        let retry = Retry {
+          date: today,
+          attempts,
+          next_at: now + delay * 60_000,
+        };
+        let json = serde_json::to_string(&retry)
+          .map_err(|e| ApiError::internal(e.to_string()))?;
+        db::set_setting(&tx, RETRY_KEY, Some(&json))?;
+      }
       tx.commit().map_err(db::sql_err)
     })
     .await;

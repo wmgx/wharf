@@ -573,6 +573,27 @@ async fn muted_beats_digest_priority() {
 }
 
 #[tokio::test]
+async fn digest_ack_recovery_marks_recovered_at() {
+  let _g = TEST_LOCK.lock().await;
+  reset_memory();
+  let s = test_state();
+  let now = db::now_ms();
+  observe_at(&s, now, "disk.days_left", "s1", 5.0, "").await;
+  ack::ack_at(&s, "disk_forecast", "s1", "fixture", None, now)
+    .await
+    .unwrap();
+  observe_at(&s, now + 1, "disk.days_left", "s1", 30.0, "").await;
+  assert!(
+    digest::preview(&s)
+      .await
+      .unwrap()
+      .body
+      .unwrap()
+      .contains("已恢复")
+  );
+}
+
+#[tokio::test]
 async fn digest_keeps_rows_on_failure_and_preserves_inflight_inserts()
 {
   let _g = TEST_LOCK.lock().await;
@@ -603,15 +624,24 @@ async fn digest_keeps_rows_on_failure_and_preserves_inflight_inserts()
   assert!(
     digest::tick_at_with(
       &s,
-      beijing_ms(2026, 6, 2, 9, 0),
+      beijing_ms(2026, 6, 1, 9, 15),
       move |_| async move {
         observe_at(
           &s_inflight,
-          beijing_ms(2026, 6, 2, 9, 0),
+          beijing_ms(2026, 6, 1, 9, 15),
           "disk.days_left",
-          "s2",
-          5.0,
+          "s1",
+          30.0,
           "",
+        )
+        .await;
+        observe_at(
+          &s_inflight,
+          beijing_ms(2026, 6, 1, 9, 15),
+          "disk.days_left",
+          "s1",
+          4.0,
+          "再次触发",
         )
         .await;
         None
@@ -622,7 +652,7 @@ async fn digest_keeps_rows_on_failure_and_preserves_inflight_inserts()
   let pv = digest::preview(&s).await.unwrap();
   assert_eq!(pv.count, 1);
   let body = pv.body.unwrap();
-  assert!(!body.contains("s1") && body.contains("s2"));
+  assert!(body.contains("s1") && body.contains("仍在触发"));
 }
 
 #[path = "custom_tests.rs"]
