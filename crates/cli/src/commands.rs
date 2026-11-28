@@ -22,11 +22,11 @@ use wharf_api_types::{
   view::{
     AccountView, AppAccountView, AutoUpdateResult,
     BackupUnlockResult, BackupsView, CheckStatus, DataView,
-    DeploymentView, DoctorReport, GatewayView, HostExecResponse,
-    ImportPreview, ImportRequest, JoinInfo, NetworkView,
-    RestoreRequest, RollbackTarget, RouteView, ScriptRuntime,
-    SecretView, ServerView, ServiceView, ShellLog, SsoStepResult,
-    SsoTestResult, Status, Unmanaged,
+    DeploymentView, DoctorReport, GatewayView, ImportPreview,
+    ImportRequest, JoinInfo, NetworkView, RestoreRequest,
+    RollbackTarget, RouteView, ScriptRuntime, SecretView, ServerView,
+    ServiceView, ShellLog, SsoStepResult, SsoTestResult, Status,
+    Unmanaged,
   },
 };
 

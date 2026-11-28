@@ -2311,15 +2311,15 @@ async fn resume_skips_paused_due_times_without_skipping_future_runs()
   let minute = chrono::Duration::minutes(1);
   tick(&state, resume, resume + minute).await.unwrap();
   assert!(
-    !scheduled_since(&state, "online", resume - 20 * minute)
+    !scheduled_since(&state, "online", resume - minute * 20)
       .await
       .unwrap()
   );
 
-  let next = resume + 40 * minute;
+  let next = resume + minute * 40;
   tick(&state, next - minute, next).await.unwrap();
   assert!(
-    !scheduled_since(&state, "offline", resume - 20 * minute)
+    !scheduled_since(&state, "offline", resume - minute * 20)
       .await
       .unwrap()
   );
