@@ -203,6 +203,15 @@ fn merge_settings(
   spec.lan = current.lan;
   spec.extra_hosts.clone_from(&current.extra_hosts);
   spec.networks.clone_from(&current.networks);
+  spec.user.clone_from(&current.user);
+  spec.volumes.retain(|v| v.host_path.is_none());
+  spec.volumes.extend(
+    current
+      .volumes
+      .iter()
+      .filter(|v| v.host_path.is_some())
+      .cloned(),
+  );
   spec.stop_grace_secs = current.stop_grace_secs;
   spec.stop_signal.clone_from(&current.stop_signal);
   spec.init_cmd.clone_from(&current.init_cmd);

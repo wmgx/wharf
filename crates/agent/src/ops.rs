@@ -29,6 +29,7 @@ mod host_binds;
 mod link;
 mod named_networks;
 mod validation;
+mod volume_owner;
 use validation::{
   check_own_container, check_project, data_dir_relative,
 };
@@ -1139,6 +1140,7 @@ impl Ops {
     };
     let prepared = async {
       let images = self.pull_all(up, ctx, &mut warnings).await?;
+      volume_owner::prepare(&self.docker, up, ctx).await?;
       if up.trial.is_some() {
         self.trial_run(up, &mut warnings, ctx).await?;
       }

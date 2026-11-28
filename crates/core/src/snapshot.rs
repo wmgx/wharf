@@ -535,6 +535,19 @@ fn resolve_service(
     }
     None => render::hash(&resolved),
   };
+  let owners: BTreeMap<_, _> = row
+    .spec
+    .volumes
+    .iter()
+    .filter_map(|v| v.owner.as_ref().map(|owner| (&v.name, owner)))
+    .collect();
+  let hash = if owners.is_empty() {
+    hash
+  } else {
+    let owners =
+      serde_json::to_string(&owners).map_err(crate::db::json_err)?;
+    render::hash(&format!("{hash}\n# wharf.volume_owners={owners}"))
+  };
   let hash = if let Some(inputs) =
     crate::compose_env::inputs(world, net, name, secrets)?
   {
@@ -1577,6 +1590,7 @@ mod tests {
     w.services.get_mut("app").unwrap().spec.volumes.push(
       wharf_api_types::spec::VolumeSpec {
         from_service: None,
+        owner: None,
         host_path: None,
         read_only: false,
         name: "data".into(),

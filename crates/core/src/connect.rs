@@ -289,6 +289,7 @@ mod tests {
       extra_hosts: Default::default(),
       self_refs: false,
       compose_env: false,
+      user: None,
       networks: Default::default(),
     };
     let hp = BTreeMap::from([("pg".to_string(), 20001)]);

@@ -1210,6 +1210,15 @@ pub(crate) async fn make_plan_inner(
   for step in &b.steps {
     if let Step::ServiceUp { service, .. } = &step.step
       && let Some(row) = desired.services.get(service)
+      && (row.spec.volumes.iter().any(|v| v.owner.is_some())
+        || current.services.get(service).is_some_and(|old| {
+          old.spec.volumes.iter().any(|v| v.owner.is_some())
+        }))
+    {
+      state.hub.project_files_conn_id(&row.spec.server)?;
+    }
+    if let Step::ServiceUp { service, .. } = &step.step
+      && let Some(row) = desired.services.get(service)
       && row.spec.volumes.iter().any(|v| v.host_path.is_some())
     {
       state.hub.host_bind_conn_id(&row.spec.server)?;
@@ -1911,11 +1920,19 @@ fn service_items(
           .collect()
       })
       .unwrap_or_default();
+    let owner_dirs: BTreeSet<_> = svc
+      .spec
+      .volumes
+      .iter()
+      .filter(|v| v.owner.is_some())
+      .map(|v| crate::render::volume_dir(name, &v.name))
+      .collect();
     let pending_dirs =
       snap.pending.ensure_dirs.get(&format!("{name}@{server}"));
     let new_dirs: Vec<String> =
       crate::render::service_dirs(name, &svc.spec)
         .into_iter()
+        .filter(|d| !owner_dirs.contains(d))
         .filter(|d| {
           !old_dirs.contains(d)
             || pending_dirs.is_some_and(|p| p.dirs.contains(d))

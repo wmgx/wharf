@@ -328,6 +328,19 @@ pub struct VolumeSpec {
   pub read_only: bool,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub host_path: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub owner: Option<String>,
+}
+
+pub fn parse_uid_gid(raw: &str) -> Option<(u32, u32)> {
+  let (uid, gid) = raw.split_once(':')?;
+  let parse = |id: &str| {
+    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {
+      return None;
+    }
+    id.parse::<u32>().ok().filter(|id| *id != u32::MAX)
+  };
+  Some((parse(uid)?, parse(gid)?))
 }
 
 #[derive(
@@ -404,6 +417,8 @@ pub struct ServiceSpec {
   pub networks: BTreeMap<String, NetworkAttachment>,
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub compose_env: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub user: Option<String>,
 }
 
 #[derive(

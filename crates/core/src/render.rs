@@ -1209,14 +1209,14 @@ fn service_compose_base(
       };
       let text = to_yaml(&file);
       Ok((
-        render_external_binds(name, spec, text)?,
+        render_image_options(name, spec, text)?,
         image_mounts(name, files),
       ))
     }
   }
 }
 
-fn render_external_binds(
+fn render_image_options(
   name: &str,
   spec: &ServiceSpec,
   text: String,
@@ -1227,10 +1227,17 @@ fn render_external_binds(
       "bind": {"create_host_path": false, "propagation": "rprivate"}
     }))
   }).collect();
-  if binds.is_empty() {
+  if binds.is_empty() && spec.user.is_none() {
     return Ok(text);
   }
   let mut doc = parse_compose(&text)?;
+  if let Some(user) = &spec.user {
+    doc["services"][name]["user"] = Value::String(user.clone());
+  }
+  if binds.is_empty() {
+    return serde_yaml_ng::to_string(&doc)
+      .map_err(|_| ApiError::internal("无法渲染运行用户"));
+  }
   let volumes = &mut doc["services"][name]["volumes"];
   let mut all = volumes.as_sequence().cloned().unwrap_or_default();
   for bind in binds {
@@ -1398,12 +1405,13 @@ pub fn trial_compose(
   service.stop_grace_period = None;
   service.labels =
     BTreeMap::from([("wharf.trial".into(), name.into())]);
+  let text = to_yaml(&ComposeFile {
+    configs: BTreeMap::new(),
+    name: format!("{TRIAL_PROJECT_PREFIX}{name}"),
+    services: BTreeMap::from([(name.to_string(), service)]),
+  });
   Ok((
-    to_yaml(&ComposeFile {
-      configs: BTreeMap::new(),
-      name: format!("{TRIAL_PROJECT_PREFIX}{name}"),
-      services: BTreeMap::from([(name.to_string(), service)]),
-    }),
+    render_image_options(name, spec, text)?,
     image_mounts(name, files),
   ))
 }
@@ -2662,6 +2670,7 @@ mod tests {
       extra_hosts: Default::default(),
       self_refs: false,
       compose_env: false,
+      user: None,
       networks: Default::default(),
       server: "node1".into(),
       source: Source::Image("traefik/whoami".into()),
@@ -2677,6 +2686,7 @@ mod tests {
       ]),
       volumes: vec![VolumeSpec {
         from_service: None,
+        owner: None,
         host_path: None,
         read_only: false,
         name: "data".into(),

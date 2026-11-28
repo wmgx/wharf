@@ -2093,6 +2093,23 @@ fn validate_service(
   }
   crate::updates::validate_ignore(spec)?;
   crate::compose_env::validate(spec)?;
+  if let Some(user) = &spec.user {
+    let valid = |part: &str| {
+      !part.is_empty()
+        && part.len() <= 128
+        && part.bytes().all(|c| {
+          c.is_ascii_alphanumeric() || matches!(c, b'_' | b'.' | b'-')
+        })
+    };
+    let valid = user
+      .split_once(':')
+      .map_or_else(|| valid(user), |(u, g)| valid(u) && valid(g));
+    if !valid || matches!(spec.source, Source::Compose { .. }) {
+      return Err(ApiError::invalid(
+        "运行用户仅用于镜像和构建来源，格式为用户或用户:组",
+      ));
+    }
+  }
   validate_deploy_options(name, spec)?;
   if name.starts_with(GATEWAY_PROJECT_PREFIX) {
     return Err(ApiError::invalid(format!(
@@ -2253,6 +2270,22 @@ fn validate_service(
   crate::shared_volumes::validate_service(name, spec)?;
   let mut volume_names = BTreeSet::new();
   for volume in &spec.volumes {
+    if let Some(owner) = &volume.owner
+      && (volume.from_service.is_some()
+        || volume.host_path.is_some()
+        || (owner != "auto"
+          && wharf_api_types::spec::parse_uid_gid(owner).is_none()))
+    {
+      return Err(
+        ApiError::invalid(format!(
+          "卷 {} 的属主只用于自有托管目录",
+          volume.name
+        ))
+        .with_hint(
+          "填写 UID:GID 或 auto，或用 --unset-volume-owner 清除",
+        ),
+      );
+    }
     if let Some(host_path) = &volume.host_path {
       if !volume.name.is_empty() || volume.from_service.is_some() {
         return Err(ApiError::invalid(
@@ -2956,6 +2989,7 @@ mod tests {
       extra_hosts: Default::default(),
       self_refs: false,
       compose_env: false,
+      user: None,
       networks: Default::default(),
       server: server.into(),
       source: Source::Image("traefik/whoami".into()),
@@ -3265,6 +3299,7 @@ services:
     .unwrap();
     spec.volumes.push(wharf_api_types::spec::VolumeSpec {
       from_service: None,
+      owner: None,
       host_path: None,
       read_only: false,
       name: "data".into(),

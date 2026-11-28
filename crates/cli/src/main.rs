@@ -586,6 +586,14 @@ pub struct DeployOps {
   pub add_host_volume: Vec<String>,
   #[arg(long, value_name = "TARGET")]
   pub rm_host_volume: Vec<String>,
+  #[arg(long, conflicts_with = "unset_user")]
+  pub user: Option<String>,
+  #[arg(long)]
+  pub unset_user: bool,
+  #[arg(long, value_name = "NAME=UID:GID|auto")]
+  pub volume_owner: Vec<String>,
+  #[arg(long, value_name = "NAME")]
+  pub unset_volume_owner: Vec<String>,
 }
 
 /// 看日志的公共参数。

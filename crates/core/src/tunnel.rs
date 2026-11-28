@@ -205,6 +205,7 @@ pub async fn sync(
         networks: Default::default(),
         project_env: None,
         host_binds: Vec::new(),
+        volume_owners: Default::default(),
       }),
       CONNECTOR_TIMEOUT,
       Some(progress.clone()),

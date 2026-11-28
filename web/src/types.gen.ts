@@ -3153,6 +3153,7 @@ export interface ServiceSpec {
    * 镜像和构建版本的更新忽略规则。
    */
   update_ignore?: UpdateIgnoreSpec[];
+  user?: string | null;
   volumes?: VolumeSpec[];
 }
 
@@ -3740,6 +3741,7 @@ export interface VolumeSpec {
    * 本地卷名。共享卷省略时取拥有者的卷名。
    */
   name?: string;
+  owner?: string | null;
   read_only?: boolean;
   target: string;
 }

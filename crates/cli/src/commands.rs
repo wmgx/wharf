@@ -3486,7 +3486,11 @@ async fn service(
           || ops.compose_env
           || ops.no_compose_env
           || !ops.add_host_volume.is_empty()
-          || !ops.rm_host_volume.is_empty())
+          || !ops.rm_host_volume.is_empty()
+          || ops.user.is_some()
+          || ops.unset_user
+          || !ops.volume_owner.is_empty()
+          || !ops.unset_volume_owner.is_empty())
       {
         apply.check_read_only()?;
         wharf_api_types::filter_note(
@@ -3605,6 +3609,7 @@ async fn service(
             extra_hosts: Default::default(),
             self_refs: false,
             compose_env: false,
+            user: None,
             networks: Default::default(),
           }
         }
@@ -3628,6 +3633,9 @@ async fn service(
         spec.server = server;
       }
       set_network_options(&mut spec, &ops)?;
+      if ops.unset_user || ops.user.is_some() {
+        spec.user.clone_from(&ops.user);
+      }
       if ops.unset_stop_grace || ops.stop_grace.is_some() {
         spec.stop_grace_secs = ops.stop_grace.filter(|n| *n != 0);
       }
@@ -3725,6 +3733,11 @@ async fn service(
         spec.volumes.retain(|x| x.name != v.name);
         spec.volumes.push(v);
       }
+      set_volume_owners(
+        &mut spec,
+        &ops.volume_owner,
+        &ops.unset_volume_owner,
+      )?;
       set_host_volumes(
         &mut spec,
         &ops.add_host_volume,
@@ -6799,6 +6812,48 @@ fn infer_ignore_image(source: &Source) -> CliResult<String> {
   }
 }
 
+fn set_volume_owners(
+  spec: &mut ServiceSpec,
+  add: &[String],
+  remove: &[String],
+) -> CliResult<()> {
+  let parsed = add
+    .iter()
+    .map(|value| {
+      value.split_once('=').ok_or_else(|| {
+        ApiError::invalid(
+          "设置属主用 --volume-owner NAME=UID:GID|auto",
+        )
+      })
+    })
+    .collect::<Result<Vec<_>, _>>()?;
+  for (name, owner) in
+    remove.iter().map(|name| (name.as_str(), None)).chain(
+      parsed.into_iter().map(|(name, owner)| (name, Some(owner))),
+    )
+  {
+    let volume = spec
+      .volumes
+      .iter_mut()
+      .find(|v| v.name == name && !v.name.is_empty())
+      .ok_or_else(|| {
+        ApiError::invalid(format!("数据卷 {name} 不存在"))
+      })?;
+    if owner.is_some_and(|owner| {
+      owner != "auto"
+        && wharf_api_types::spec::parse_uid_gid(owner).is_none()
+    }) {
+      return Err(
+        ApiError::invalid(format!("卷 {name} 的属主格式不对"))
+          .with_hint("填写 UID:GID 或 auto")
+          .into(),
+      );
+    }
+    volume.owner = owner.map(str::to_string);
+  }
+  Ok(())
+}
+
 fn set_host_volumes(
   spec: &mut ServiceSpec,
   add: &[String],
@@ -6824,6 +6879,7 @@ fn set_host_volumes(
       .volumes
       .retain(|v| v.host_path.is_none() || v.target != target);
     spec.volumes.push(VolumeSpec {
+      owner: None,
       host_path: Some(source.into()),
       target: target.into(),
       name: String::new(),
