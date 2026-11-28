@@ -248,6 +248,7 @@ pub(crate) async fn settings(
     let mut stmt = c.prepare_cached(
       "SELECT name, json_extract(spec, '$.limits.memory_mb')
        FROM resources WHERE kind = 'service' AND json_extract(spec, '$.server') = ?1
+         AND COALESCE(json_extract(spec, '$.stopped'), 0) = 0
          AND json_extract(spec, '$.limits.memory_mb') > 0",
     ).map_err(db::sql_err)?;
     let limits = stmt.query_map(params![server], |r| Ok((r.get(0)?, r.get::<_, u64>(1)? << 20)))

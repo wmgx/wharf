@@ -55,8 +55,13 @@ pub async fn check_due(
       )
       .format("%m-%d %H:%M")
   );
-  record(state, name, spec, TaskStatus::Failed, "late", &output)
-    .await;
+  if let TaskKind::Ping { token, .. } = &spec.how
+    && let Err(e) =
+      record(state, name, token, TaskStatus::Failed, "late", &output)
+        .await
+  {
+    tracing::warn!("记录 {name} 的报到失败：{e}");
+  }
 }
 
 /// 预期时间加宽限落在 `(after, until]` 里的那次预期时间。
@@ -75,18 +80,18 @@ fn due_in(
 async fn record(
   state: &AppState,
   name: &str,
-  spec: &TaskSpec,
+  token: &str,
   status: TaskStatus,
   trigger: &str,
   output: &str,
-) {
-  match tasks::insert_run(state, name, status, trigger).await {
-    Ok(id) => {
-      tasks::finish(state, id, status, None, output, None).await
-    }
-    Err(e) => tracing::warn!("记录 {name} 的报到失败：{e}"),
+) -> Result<bool, wharf_api_types::ApiError> {
+  let recorded =
+    tasks::record_ping(state, name, token, status, trigger, output)
+      .await?;
+  if let Some(id) = recorded {
+    tasks::notify_result(state, name, id, status, output).await;
   }
-  tasks::notify_result(state, name, spec, status, output).await;
+  Ok(recorded.is_some())
 }
 
 /// `GET/POST /ping/{token}`：报到成功。请求体（可选）记为输出。
@@ -128,6 +133,9 @@ async fn handle(
     )
     .await;
   };
+  if !spec.enabled {
+    return (StatusCode::FORBIDDEN, "任务已停用\n");
+  }
   let mut output = body;
   if output.len() > MAX_OUTPUT {
     let mut cut = MAX_OUTPUT;
@@ -136,14 +144,72 @@ async fn handle(
     }
     output.truncate(cut);
   }
-  record(s, &name, &spec, status, "ping", &output).await;
-  (StatusCode::OK, "ok\n")
+  match record(s, &name, token, status, "ping", &output).await {
+    Ok(true) => (StatusCode::OK, "ok\n"),
+    Ok(false) => {
+      (StatusCode::FORBIDDEN, "任务已停用或报到地址已变更\n")
+    }
+    Err(e) => {
+      tracing::warn!("记录 {name} 的报到失败：{e}");
+      (StatusCode::SERVICE_UNAVAILABLE, "稍后再试\n")
+    }
+  }
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
 
+  #[tokio::test]
+  async fn disabled_task_ping_keeps_runs_and_notifications_untouched()
+  {
+    let state = crate::rules::tests::test_state();
+    let token = crate::auth::new_token();
+    let fixture = serde_json::json!({
+      "server": "s1", "kind": "ping", "enabled": false,
+      "schedule": "0 4 * * *", "token": token
+    })
+    .to_string();
+    state.db.call(move |c| {
+      c.execute("INSERT INTO tasks (name, spec, created_at, updated_at) VALUES ('daily', ?1, 0, 0)", [fixture]).map_err(sql_err)?;
+      Ok(())
+    }).await.unwrap();
+    assert_eq!(
+      handle(&state, &token, TaskStatus::Failed, String::new())
+        .await
+        .0,
+      StatusCode::FORBIDDEN
+    );
+    assert!(
+      tasks::record_ping(
+        &state,
+        "daily",
+        &token,
+        TaskStatus::Failed,
+        "ping",
+        ""
+      )
+      .await
+      .unwrap()
+      .is_none()
+    );
+    state
+      .db
+      .call(|c| {
+        assert_eq!(
+          c.query_row("SELECT count(*) FROM task_runs", [], |r| r
+            .get::<_, i64>(0))
+            .map_err(sql_err)?,
+          0
+        );
+        assert!(
+          crate::db::setting(c, "notify.state.task.daily")?.is_none()
+        );
+        Ok(())
+      })
+      .await
+      .unwrap();
+  }
   #[test]
   fn late_only_once_after_grace() {
     // 北京时间每天 4 点 = UTC 20 点，宽限 30 分钟。

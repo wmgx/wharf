@@ -132,8 +132,12 @@ export function IssueRow({ issue }: { issue: Issue }) {
         <Button variant="outline" size="xs" onClick={() => actions.upgradeAgent(subject.name)}>升级 agent</Button>
       ) : issue.code === "pending_changes" ? (
         <Button variant="outline" size="xs" onClick={() => actions.plan({ title: "执行未完成的改动", changes: [] })}>预览改动</Button>
+      ) : issue.code === "vendor_token_invalid" ? (
+        <Button variant="outline" size="xs" onClick={() => nav("/settings")}>查看</Button>
+      ) : ["tailnet_relay", "tailnet_key_expiring", "external_incident"].includes(issue.code) ? (
+        <Button variant="outline" size="xs" onClick={() => nav("/network")}>查看</Button>
       ) : subject ? (
-        <Button variant="outline" size="xs" onClick={() => nav(issue.code === "baseline_drift" ? `/servers/${encodeURIComponent(subject.name)}?tab=updates` : issue.code === "exposed_port" ? `/servers/${encodeURIComponent(subject.name)}?tab=exposure` : issue.code === "host_unit_down" ? `/servers/${encodeURIComponent(subject.name)}?tab=host` : issue.code === "disk_low" || issue.code === "disk_forecast" ? `/servers/${encodeURIComponent(subject.name)}?tab=disk` : ["monitor_down", "log_keyword", "port_down", "heartbeat_late"].includes(issue.code) ? `/services/${encodeURIComponent(subject.name)}?tab=metrics` : issue.code === "recovery_low" ? "/settings?tab=security" : subjectPath(subject))}>{issue.code === "exposed_port" ? "去确认" : issue.code === "baseline_drift" ? "看基线" : issue.code === "host_unit_down" ? "看日志" : "查看"}</Button>
+        <Button variant="outline" size="xs" onClick={() => nav(issue.code === "baseline_drift" ? `/servers/${encodeURIComponent(subject.name)}?tab=updates` : issue.code === "exposed_port" ? `/servers/${encodeURIComponent(subject.name)}?tab=exposure` : issue.code === "host_unit_down" ? `/servers/${encodeURIComponent(subject.name)}?tab=host` : issue.code === "disk_low" || issue.code === "disk_forecast" ? `/servers/${encodeURIComponent(subject.name)}?tab=disk` : (["monitor_down", "log_keyword", "port_down", "heartbeat_late"].includes(issue.code) || (issue.code === "mem_forecast" && subject.kind === "service")) ? `/services/${encodeURIComponent(subject.name)}?tab=metrics` : issue.code === "recovery_low" ? "/settings?tab=security" : subjectPath(subject))}>{issue.code === "exposed_port" ? "去确认" : issue.code === "baseline_drift" ? "看基线" : issue.code === "host_unit_down" ? "看日志" : "查看"}</Button>
       ) : <Button variant="outline" size="xs" onClick={() => nav(issue.code === "recovery_low" ? "/settings?tab=security" : issue.code === "domain_expiring" ? "/domains" : "/inbox")}>查看</Button>}
     </Row>
   );

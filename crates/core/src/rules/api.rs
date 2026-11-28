@@ -300,6 +300,24 @@ pub async fn patch(
     .call(move |c| db::set_setting(c, CONFIG_KEY, Some(&json)))
     .await?;
   with(|m| m.config = cfg);
+  if rule.is_some() && p.enabled == Some(false) {
+    let disabled = id.clone();
+    let enabled_services = with(|m| {
+      m.service_overrides
+        .iter()
+        .filter(|((rule, _), o)| {
+          *rule == disabled && o.enabled == Some(true)
+        })
+        .map(|((_, svc), _)| svc.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+    });
+    super::lifecycle::clear_matching(&s, move |rule, subject| {
+      rule == disabled
+        && service_overrides::service_of_subject(rule, subject)
+          .is_none_or(|svc| !enabled_services.contains(svc))
+    })
+    .await;
+  }
   if builtin_sup && p.enabled == Some(false) {
     suppress::flush_unsuppressed(&s, now_ms()).await;
   }

@@ -72,6 +72,19 @@ async fn pages(
   Ok(pages)
 }
 
+pub(crate) async fn enabled_names(
+  s: &AppState,
+) -> Result<std::collections::BTreeSet<String>, ApiError> {
+  Ok(
+    pages(s)
+      .await?
+      .into_iter()
+      .filter(|(_, p)| p.enabled)
+      .map(|(name, _)| name)
+      .collect(),
+  )
+}
+
 async fn save(
   s: &AppState,
   pages: &BTreeMap<String, Page>,
@@ -340,6 +353,12 @@ pub async fn refresh(s: &AppState) -> Result<(), ApiError> {
   let _update = UPDATE.lock().await;
   let pages = pages(s).await?;
   crate::snapshot::load(&s.db).await?;
+  let keep = pages
+    .iter()
+    .filter(|(_, p)| p.enabled)
+    .map(|(name, _)| name.clone())
+    .collect();
+  rules::retain_subjects(s, "external_incident", &keep).await;
   futures_util::future::join_all(
     pages.iter().filter(|(_, p)| p.enabled).map(
       |(name, page)| async move {
@@ -467,7 +486,7 @@ async fn clear(s: &AppState, name: &str) {
   if let Ok(mut cache) = CACHE.write() {
     cache.remove(name);
   }
-  rules::external::clear_incident(s, name).await;
+  rules::lifecycle::clear(s, "external_incident", name).await;
 }
 
 const MAX_HINT_INCIDENTS: usize = 3;
