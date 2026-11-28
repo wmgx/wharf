@@ -814,7 +814,7 @@ pub(crate) async fn run_batch_sync(
   state: Arc<AppState>,
   steps: Vec<StepPlan>,
   guard: OpLockGuard,
-  manual: Option<(&str, &Auth)>,
+  manual: Option<(&str, &crate::auth::Auth)>,
 ) -> Result<(String, Vec<RunStep>, OpLockGuard), ApiError> {
   let scope_services = manual
     .and_then(|(_, auth)| auth.services.as_ref())
@@ -1950,6 +1950,27 @@ async fn run_step_with_dns(
         if verify.unwrap_or(*verify_target)
           && let Some(route) = world.routes.get(hostname)
         {
+          if spec.tunnel.is_none()
+            && crate::planner::desired_record_at(
+              &snap,
+              world,
+              &net,
+              hostname,
+              Some(gateway),
+            )?
+            .content
+              != spec.content
+          {
+            return Err(
+              ApiError::new(
+                ErrorCode::PlanStale,
+                format!(
+                  "预验前发现 {hostname} 的 DNS 目标地址已变化"
+                ),
+              )
+              .suggest("wharf plan"),
+            );
+          }
           let checked = crate::gateway_probe::verify_before_dns(
             state,
             &snap,
@@ -3855,6 +3876,16 @@ mod tests {
    {
     let state = crate::rules::tests::test_state();
     let mut world = crate::world::World::default();
+    world.servers.insert(
+      "s2".into(),
+      crate::world::ServerRow {
+        settings: serde_json::from_str(
+          r#"{"public_ip":"203.0.113.2"}"#,
+        )
+        .unwrap(),
+        version: 1,
+      },
+    );
     world.gateways.insert(
       "gw2".into(),
       crate::world::GatewayRow {

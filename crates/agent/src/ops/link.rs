@@ -128,6 +128,8 @@ impl Ops {
     let project = &up.project;
     let conf = self.docker.project_dir(project).join("conf");
     let before = self.docker.one_status(project, ctx).await?;
+    let new_project =
+      before.hash.is_none() && before.containers.is_empty();
     let reload = before.all_running()
       && before.hash.as_deref() == Some(&up.hash);
     let mut warnings = Vec::new();
@@ -189,6 +191,15 @@ impl Ops {
                 10,
               )
               .await,
+          )
+        } else if new_project {
+          Err(
+            match self.docker.down(project, false, &recover).await {
+              Ok(()) => error,
+              Err(back) => {
+                recovery_error(error, back, "新建失败的 frpc 项目")
+              }
+            },
           )
         } else {
           Err(error)
@@ -296,6 +307,20 @@ impl Ops {
 mod tests {
   use super::*;
   use std::os::unix::fs::PermissionsExt;
+
+  #[test]
+  fn link_apply_rejects_unmanaged_file_names() {
+    let apply: LinkApply = serde_json::from_str(r#"{
+      "up":{"project":"wharf-link-s1","compose":"","hash":"fixture",
+        "pull":{"mirrors":{},"mirrors_only":false,"attempt_timeout_secs":5}},
+      "image":"fixture:1","config":"","config_hash":"fixture",
+      "extra_files":{"../ca.pem":"fixture"}
+    }"#).unwrap();
+    assert_eq!(
+      ca_file(&apply).unwrap_err().code,
+      ErrorCode::InvalidInput
+    );
+  }
 
   #[test]
   fn uncommitted_link_files_restore_private_configuration() {

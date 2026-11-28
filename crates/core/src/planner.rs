@@ -3191,7 +3191,7 @@ pub(crate) fn desired_record(
   desired_record_at(snap, desired, net, hostname, None)
 }
 
-fn desired_record_at(
+pub(crate) fn desired_record_at(
   snap: &Snapshot,
   desired: &World,
   net: &Net,
@@ -3435,6 +3435,15 @@ pub(crate) async fn plan_dns_for_hosts(
   .await
 }
 
+fn dns_endpoint_changed(
+  existing: &serde_json::Value,
+  desired: &serde_json::Value,
+) -> bool {
+  ["type", "content", "proxied"]
+    .iter()
+    .any(|field| existing[*field] != desired[*field])
+}
+
 async fn dns_items(
   b: &mut Builder,
   snap: &Snapshot,
@@ -3670,11 +3679,10 @@ async fn dns_items(
           },
         );
         let extra = rest.iter().map(|r| remote_ref(r)).collect();
-        let verify_target = ["type", "content", "proxied"]
-          .iter()
-          .any(|field| first.canonical[*field] != canonical[*field])
-          || handover
-          || gateway_changed;
+        let verify_target =
+          dns_endpoint_changed(&first.canonical, &canonical)
+            || handover
+            || gateway_changed;
         b.step(
           vec![id],
           title,
@@ -4266,6 +4274,18 @@ mod tests {
       })).unwrap(),
       version: 1,
     }
+  }
+
+  #[test]
+  fn ttl_only_keeps_default_dns_verification_off() {
+    let existing =
+      wharf_providers::dns_canonical("A", "203.0.113.1", 60, false);
+    let ttl =
+      wharf_providers::dns_canonical("A", "203.0.113.1", 120, false);
+    let ip =
+      wharf_providers::dns_canonical("A", "203.0.113.2", 120, false);
+    assert!(!dns_endpoint_changed(&existing, &ttl));
+    assert!(dns_endpoint_changed(&existing, &ip));
   }
 
   #[test]
