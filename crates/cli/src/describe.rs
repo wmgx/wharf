@@ -114,6 +114,13 @@ fn walk(
           "--extract-secrets": {"returns": "service-import-preview", "when": "无 --apply 且提取到密钥"}
         });
       }
+      "service restart-schedule" => {
+        entry["write_perms"] = json!(["plan"]);
+        entry["returns_by_flag"] = json!({
+          "--cron": "plan", "--skip-if-stopped": "plan", "--catch-up": "plan",
+          "--unset-catch-up": "plan", "--off": "plan", "--apply": "run"
+        });
+      }
       "service env sync" => {
         entry["import_perms"] = json!(["admin"]);
       }

@@ -195,8 +195,12 @@ async fn tick(
   let rows = load(state).await?;
   let offset =
     state.db.call(|c| crate::config_api::offset(c)).await?;
-  restart_schedule::tick(state, after, until, resumed_at, offset)
-    .await?;
+  if let Err(error) =
+    restart_schedule::tick(state, after, until, resumed_at, offset)
+      .await
+  {
+    tracing::warn!("检查定时重启失败：{error}");
+  }
   let snap = if rows.iter().any(|(_, spec, _)| {
     spec.enabled && matches!(spec.how, TaskKind::Exec { .. })
   }) {

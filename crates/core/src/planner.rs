@@ -1921,7 +1921,20 @@ fn service_items(
           .any(|image| !svc.pins.contains_key(image)))
       .then(|| "按标签重新拉取未固定的镜像".into())
     });
-    let observed = if changed(writes, KIND_SERVICE, name) {
+    let runtime_settings_only = old.is_some_and(|old| {
+      let mut row = svc.clone();
+      row.spec.wait_for.clone_from(&old.spec.wait_for);
+      row.spec.wait_for_timeout_secs = old.spec.wait_for_timeout_secs;
+      row
+        .spec
+        .restart_schedule
+        .clone_from(&old.spec.restart_schedule);
+      row.spec.extra_logs.clone_from(&old.spec.extra_logs);
+      &row == old
+    });
+    let observed = if changed(writes, KIND_SERVICE, name)
+      && !runtime_settings_only
+    {
       None
     } else {
       live.and_then(|p| p.hash.as_deref())

@@ -7,7 +7,9 @@ use wharf_api_types::{
   view::{RestartScheduleRun, RestartScheduleView},
 };
 
-#[derive(Debug, Clone, serde::Serialize, Deserialize)]
+#[derive(
+  Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize,
+)]
 pub(crate) struct RestartIdentity {
   instance_id: String,
   revision: String,
@@ -433,7 +435,7 @@ fn restart_due_does_not_catch_up_before_revision_or_resume() {
       &spec,
       at(1),
       at(3),
-      DateTime::MIN_UTC,
+      DateTime::<Utc>::MIN_UTC,
       at(0).timestamp_millis()
     ),
     Some((at(0), "catch_up"))
@@ -445,7 +447,7 @@ fn restart_due_does_not_catch_up_before_revision_or_resume() {
       &spec,
       at(1),
       at(3),
-      DateTime::MIN_UTC,
+      DateTime::<Utc>::MIN_UTC,
       at(1).timestamp_millis()
     ),
     None

@@ -75,6 +75,7 @@ mod tests {
           serde_json::from_value(json!({"container":c})).unwrap(),
         ),
         RawQuery(until.map(str::to_owned)),
+        axum::Extension(crate::audit::AuditSlot::default()),
       )
     };
     assert_eq!(

@@ -281,11 +281,36 @@ pub(crate) async fn start_with_actor(
       let spec =
         serde_json::from_value(spec.clone()).map_err(json_err)?;
       crate::monitor::require_agent(&state, &spec)?;
-      if spec.restart_schedule.is_some() {
+      let before = plan
+        .items
+        .iter()
+        .find(|item| {
+          item.layer == Layer::Config
+            && item.address.strip_prefix("service/") == Some(name)
+        })
+        .and_then(|item| item.before.as_ref())
+        .and_then(|value| {
+          serde_json::from_value::<ServiceSpec>(value.clone()).ok()
+        });
+      let same_server = before
+        .as_ref()
+        .filter(|before| before.server == spec.server);
+      if spec.restart_schedule.is_some()
+        && same_server.is_none_or(|before| {
+          before.restart_schedule != spec.restart_schedule
+        })
+      {
         state.hub.scheduled_restart_conn_id(&spec.server)?;
       }
-      crate::wait_for::require_agent(&state, &spec.server, &spec)?;
-      if !spec.extra_logs.is_empty() {
+      if same_server
+        .is_none_or(|before| before.wait_for != spec.wait_for)
+      {
+        crate::wait_for::require_agent(&state, &spec.server, &spec)?;
+      }
+      if !spec.extra_logs.is_empty()
+        && same_server
+          .is_none_or(|before| before.extra_logs != spec.extra_logs)
+      {
         state.hub.extra_logs_conn_id(&spec.server)?;
       }
       bind_sources.extend(
@@ -440,11 +465,11 @@ pub(crate) async fn start_with_actor(
       auth.and_then(|auth| auth.services.as_ref()),
       &visible_routes,
     );
-    let error = if visible.items.iter().any(|item| {
-      item.stopping_service && missing.contains(&&item.address)
-    }) {
-      let address =
-        missing.first().map(String::as_str).unwrap_or_default();
+    let error = if let Some(item) =
+      visible.items.iter().find(|item| {
+        item.stopping_service && missing.contains(&&item.address)
+      }) {
+      let address = &item.address;
       ApiError::new(
         ErrorCode::ConfirmRequired,
         format!("停止 {address} 会影响其他对象，需要确认"),
@@ -1781,20 +1806,16 @@ async fn run_step_with_dns(
       crate::wait_for::run(state, world, service, &server, cancel)
         .await?;
       crate::pending::source_changed(state, service).await?;
-      if scheduled.is_some() {
-        scheduled_restart(state, &server, service, &progress, cancel)
-          .await?;
-      } else {
-        service_restart(
-          state,
-          &server,
-          service,
-          container.as_deref(),
-          &progress,
-          cancel,
-        )
-        .await?;
-      }
+      service_restart(
+        state,
+        &server,
+        service,
+        container.as_deref(),
+        scheduled.is_some(),
+        &progress,
+        cancel,
+      )
+      .await?;
       if container.is_none()
         && snap.pending.migrations.get(service).is_some_and(|m| {
           m.phase != crate::pending::MigratePhase::UpDone
@@ -2485,54 +2506,38 @@ async fn gateway_down(
   Ok(())
 }
 
-async fn scheduled_restart(
-  state: &AppState,
-  server: &str,
-  service: &str,
-  progress: &ProgressFn,
-  cancel: &CancellationToken,
-) -> Result<(), ApiError> {
-  let conn = state.hub.scheduled_restart_conn_id(server)?;
-  let grace = project_grace(state, server, service).await?;
-  if grace.is_some_and(|n| n > 150)
-    && state
-      .hub
-      .deploy_v2_conn_id(server, "超过 150 秒的优雅停机超时")?
-      != conn
-  {
-    return Err(crate::hub::offline(server));
-  }
-  let result: ProjectUpResult = state
-    .hub
-    .call_bound(
-      (server, conn),
-      AgentOp::ProjectRestart {
-        project: service.into(),
-        container: None,
-      },
-      stop_rpc_timeout(Duration::from_secs(240), grace),
-      Some(progress.clone()),
-      cancel,
-    )
-    .await?;
-  ensure_running(
-    &result,
-    service,
-    &format!("wharf service logs {service}"),
-  )
-}
-
 async fn service_restart(
   state: &AppState,
   server: &str,
   service: &str,
   container: Option<&str>,
+  scheduled: bool,
   progress: &ProgressFn,
   cancel: &CancellationToken,
 ) -> Result<(), ApiError> {
-  let conn = container
-    .map(|_| state.hub.exec_v2_conn_id(server, "重启单个子容器"))
-    .transpose()?;
+  let (conn, timeout) = if scheduled {
+    let conn = state.hub.scheduled_restart_conn_id(server)?;
+    let grace = project_grace(state, server, service).await?;
+    if grace.is_some_and(|n| n > 150)
+      && state
+        .hub
+        .deploy_v2_conn_id(server, "超过 150 秒的优雅停机超时")?
+        != conn
+    {
+      return Err(crate::hub::offline(server));
+    }
+    (
+      Some(conn),
+      stop_rpc_timeout(Duration::from_secs(240), grace),
+    )
+  } else {
+    (
+      container
+        .map(|_| state.hub.exec_v2_conn_id(server, "重启单个子容器"))
+        .transpose()?,
+      Duration::from_secs(240),
+    )
+  };
   let mut result: ProjectUpResult =
     if conn.is_some() || state.hub.supports_safe_gateway(server) {
       state
@@ -2544,7 +2549,7 @@ async fn service_restart(
             project: service.into(),
             container: container.map(str::to_string),
           },
-          Duration::from_secs(240),
+          timeout,
           Some(progress.clone()),
           cancel,
         )
@@ -4543,6 +4548,7 @@ mod tests {
       "s1",
       "notes",
       None,
+      false,
       &progress,
       &CancellationToken::new(),
     )
@@ -4570,6 +4576,7 @@ mod tests {
         "s1",
         "stack",
         Some("db"),
+        false,
         &progress,
         &cancel,
       )
@@ -4602,9 +4609,11 @@ mod tests {
         during_stop.cancel();
       }
     });
-    service_restart(&state, "s1", "notes", None, &progress, &cancel)
-      .await
-      .unwrap();
+    service_restart(
+      &state, "s1", "notes", None, false, &progress, &cancel,
+    )
+    .await
+    .unwrap();
     assert!(cancel.is_cancelled());
   }
 

@@ -419,7 +419,7 @@ export type Change =
 export type Impact =
   "restart" | "downtime" | "remove" | "data_loss" | "overwrite" | "public";
 
-export interface PlanItem {
+export interface PlanItem extends Pick<Gen.PlanItem, "dependents" | "hidden_dependents" | "stopping_service"> {
   id: number;
   address: string;
   layer: string;

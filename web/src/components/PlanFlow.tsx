@@ -237,28 +237,29 @@ function PlanReview({ plan, confirmed, setConfirmed }: { plan: Plan; confirmed: 
               const items = plan.items.filter((item) => item.address === a);
               const affected = items.find((item) => item.dependents?.length || item.hidden_dependents);
               return (
-              <div key={a}>
-              <label className="flex cursor-pointer items-center gap-2.5 text-sm">
-                <Checkbox checked={confirmed.has(a)} onCheckedChange={() => toggle(a)} />
-                <span className="font-mono text-xs">{a}</span>
-                <span className="text-xs text-muted-foreground">
-                  {[...new Set(plan.items.filter((i) => i.address === a).flatMap((i) => (i.impacts ?? []).map((k) => IMPACT[k]?.text)))]
-                    .filter(Boolean)
-                    .join("、")}
-                </span>
-              </label>
-              {affected && (
-                <ul className="ml-6 mt-1 text-xs text-muted-foreground">
-                  {affected.dependents?.map((dep) => (
-                    <li key={JSON.stringify([dep.address, dep.kind, dep.field])}>
-                      <span className="font-mono">{dep.address}</span> {dep.field} · {DEPENDENT_STATUS[dep.disposition]}
-                    </li>
-                  ))}
-                  {!!affected.hidden_dependents && <li>{affected.hidden_dependents} 项不可见</li>}
-                </ul>
-              )}
-              </div>
-            );})}
+                <div key={a}>
+                  <label className="flex cursor-pointer items-center gap-2.5 text-sm">
+                    <Checkbox checked={confirmed.has(a)} onCheckedChange={() => toggle(a)} />
+                    <span className="font-mono text-xs">{a}</span>
+                    <span className="text-xs text-muted-foreground">
+                      {[...new Set(items.flatMap((i) => (i.impacts ?? []).map((k) => IMPACT[k]?.text)))]
+                        .filter(Boolean)
+                        .join("、")}
+                    </span>
+                  </label>
+                  {affected && (
+                    <ul className="ml-6 mt-1 text-xs text-muted-foreground">
+                      {affected.dependents?.map((dep) => (
+                        <li key={JSON.stringify([dep.address, dep.kind, dep.field])}>
+                          <span className="font-mono">{dep.address}</span> {dep.field} · {DEPENDENT_STATUS[dep.disposition]}
+                        </li>
+                      ))}
+                      {!!affected.hidden_dependents && <li>{affected.hidden_dependents} 项不可见</li>}
+                    </ul>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </div>
       )}
