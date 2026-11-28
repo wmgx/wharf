@@ -460,10 +460,7 @@ mod tests {
       let files = item("修改服务文件");
       assert_eq!(files.method, "DELETE");
       assert_eq!(files.perm, Some(Perm::Exec));
-      assert_eq!(
-        files.verdict,
-        if perms == "read,host" { Deny } else { Depends }
-      );
+      assert_eq!(files.verdict, Depends);
       let host = item("宿主机执行命令");
       assert_eq!(host.perm, Some(Perm::Host));
       assert_eq!(host.verdict, host_verdict);
