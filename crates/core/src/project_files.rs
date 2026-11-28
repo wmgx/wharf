@@ -39,10 +39,15 @@ pub(crate) fn exec_changed(
   })
 }
 
-pub(crate) fn directory(service: &str, file: &FileSpec) -> String {
+fn directory(
+  service: &str,
+  instance: &str,
+  file: &FileSpec,
+) -> String {
   let parent =
     Path::new(&file.path).parent().expect("已校验绝对路径");
-  let digest = render::hash(&parent.to_string_lossy());
+  let digest =
+    render::hash(&format!("{instance}:{}", parent.display()));
   if file.init_only {
     format!("/srv/{service}/.wharf-init/{}", &digest[..24])
   } else {
@@ -185,6 +190,7 @@ pub(crate) fn validate(
 
 pub(crate) fn compose(
   name: &str,
+  instance: &str,
   spec: &ServiceSpec,
   text: String,
 ) -> Result<String, ApiError> {
@@ -238,7 +244,7 @@ pub(crate) fn compose(
       continue;
     }
     let bind = serde_yaml_ng::to_value(serde_json::json!({
-      "type": "bind", "source": directory(name, file), "target": parent,
+      "type": "bind", "source": directory(name, instance, file), "target": parent,
       "read_only": !file.init_only, "bind": {"create_host_path": false}
     })).map_err(|_| dedicated(&file.path))?;
     volumes.push(bind);
@@ -258,7 +264,8 @@ pub(crate) fn resolved(
   compose: &str,
   secrets: &BTreeMap<String, String>,
 ) -> Result<Vec<ProjectFile>, ApiError> {
-  let spec = &world.services[name].spec;
+  let row = &world.services[name];
+  let spec = &row.spec;
   if !spec.files.iter().any(FileSpec::needs_agent) {
     return Ok(Vec::new());
   }
@@ -269,7 +276,9 @@ pub(crate) fn resolved(
     .iter()
     .filter(|file| file.needs_agent())
     .map(|file| {
-      let dir = file.managed_dir().then(|| directory(name, file));
+      let dir = file
+        .managed_dir()
+        .then(|| directory(name, &row.instance_id, file));
       let mut spec = file.clone();
       spec.content = if dir.is_some() {
         crate::snapshot::render_config_file(
@@ -360,7 +369,7 @@ fn file_content_changes_keep_a_stable_dedicated_bind() {
   let yaml = "services: {app: {image: alpine}}".to_string();
   assert!(only_managed_changed(&old, &new));
   assert_eq!(
-    compose("app", &old, yaml.clone()).unwrap(),
-    compose("app", &new, yaml).unwrap()
+    compose("app", "svc_fixture", &old, yaml.clone()).unwrap(),
+    compose("app", "svc_fixture", &new, yaml).unwrap()
   );
 }

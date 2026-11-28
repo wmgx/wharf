@@ -53,9 +53,9 @@ impl Writes {
         continue;
       }
       let result = match undo.previous {
-        Some((content, mode, owner)) => {
-          replace(&undo.dir, &undo.name, &content, mode, owner, false)
-        }
+        Some((content, mode, owner)) => replace(
+          &undo.dir, &undo.name, &content, mode, owner, false, None,
+        ),
         None => undo
           .dir
           .unlink(&undo.name)
@@ -225,15 +225,17 @@ fn replace(
   mode: u32,
   owner: (u32, u32),
   init: bool,
+  staging: Option<&DirFd>,
 ) -> Result<(), ApiError> {
   use crate::dirfd::check;
+  let stage = staging.unwrap_or(dir);
   let err = io_err(Path::new("配置目录"));
   let tmp = CString::new(format!(
     ".wharf-new-{}",
     crate::build::random_suffix()
   ))
   .expect("临时文件名为 ASCII");
-  let fd = dir
+  let fd = stage
     .open_file(
       &tmp,
       libc::O_CREAT
@@ -255,13 +257,13 @@ fn replace(
       .map_err(&err)?;
     file.sync_all().map_err(&err)?;
     if init {
-      dir.rename_noreplace(&tmp, dir, name).map_err(&err)?;
+      stage.rename_noreplace(&tmp, dir, name).map_err(&err)?;
     } else {
       dir.rename(&tmp, name).map_err(&err)?;
     }
     Ok(())
   })();
-  let _ = dir.unlink(&tmp);
+  let _ = stage.unlink(&tmp);
   result
 }
 
@@ -403,7 +405,24 @@ fn write_files(
     }) {
       continue;
     }
-    replace(&dir, &name, content, mode, owner, file.spec.init_only)?;
+    let stage = file
+      .spec
+      .init_only
+      .then(|| {
+        let state = format!("/srv/{}/.wharf-init", up.project);
+        DirFd::open_absolute(Path::new(&state))
+          .map_err(io_err(Path::new("配置目录")))
+      })
+      .transpose()?;
+    replace(
+      &dir,
+      &name,
+      content,
+      mode,
+      owner,
+      file.spec.init_only,
+      stage.as_ref(),
+    )?;
     writes.0.push(Undo {
       dir,
       name,
@@ -639,10 +658,12 @@ fn first_file_keeps_application_content() {
   let owner =
     (unsafe { libc::geteuid() }, unsafe { libc::getegid() });
   let name = c"settings.json";
-  replace(&dir, name, "{\"n\":1}", 0o600, owner, true).unwrap();
-  replace(&dir, name, "{\"n\":2}", 0o600, owner, false).unwrap();
+  replace(&dir, name, "{\"n\":1}", 0o600, owner, true, None).unwrap();
+  replace(&dir, name, "{\"n\":2}", 0o600, owner, false, None)
+    .unwrap();
   assert!(
-    replace(&dir, name, "{\"n\":3}", 0o600, owner, true).is_err()
+    replace(&dir, name, "{\"n\":3}", 0o600, owner, true, None)
+      .is_err()
   );
   let (actual, mode, ids) = read(&dir, name, false).unwrap().unwrap();
   assert_eq!(

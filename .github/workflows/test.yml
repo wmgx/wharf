@@ -30,6 +30,7 @@ jobs:
         env:
           # CLI 测试在 libtest 工作线程运行，给它与主线程相同的栈空间。
           RUST_MIN_STACK: "8388608"
+          WHARF_TEST_COMPOSE: "1"
       - name: 页面类型没有漂移
         run: |
           cargo run -q -p wharf-cli -- schema web | node web/scripts/gen-types.mjs > /tmp/types.gen.ts

@@ -66,17 +66,16 @@ pub fn mounts(name: &str, spec: &ServiceSpec) -> Vec<DataMount> {
   };
   let mut directories = std::collections::BTreeSet::new();
   for file in spec.files.iter().filter(|file| file.init_only) {
-    let source = crate::project_files::directory(name, file);
-    if directories.insert(source.clone()) {
-      let target = std::path::Path::new(&file.path)
-        .parent()
-        .map(|p| p.display().to_string())
-        .unwrap_or_default();
+    let target = std::path::Path::new(&file.path)
+      .parent()
+      .map(|p| p.display().to_string())
+      .unwrap_or_default();
+    if directories.insert(target.clone()) {
       mounts.push(DataMount {
         from_service: None,
         read_only: false,
         kind: DataKind::Managed,
-        source,
+        source: format!("/srv/{name}/.wharf-init"),
         target,
         container: spec.container.clone(),
         resolved: None,

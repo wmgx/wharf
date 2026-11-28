@@ -635,7 +635,8 @@ pub(crate) fn with_files(
   secrets: Option<&BTreeMap<String, String>>,
   legacy: bool,
 ) -> Result<String, ApiError> {
-  let spec = &world.services[name].spec;
+  let row = &world.services[name];
+  let spec = &row.spec;
   let mut file_secrets = BTreeSet::new();
   let files = spec
     .files
@@ -662,7 +663,7 @@ pub(crate) fn with_files(
     mounts,
     secrets,
   )?;
-  crate::project_files::compose(name, spec, compose)
+  crate::project_files::compose(name, &row.instance_id, spec, compose)
 }
 
 pub fn service_template(

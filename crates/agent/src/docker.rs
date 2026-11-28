@@ -384,14 +384,15 @@ impl Docker {
     std::fs::create_dir_all(&dir).map_err(io_err(&dir))?;
     let pending = TempCompose(dir.join("compose.yaml.next"));
     write_private(&pending.0, compose)?;
-    let pending_env =
-      TempCompose(dir.join(".wharf-project-env.next"));
-    let env = if let Some(env) = env {
-      write_private(&pending_env.0, &dotenv(env)?)?;
-      Some(pending_env.0.as_path())
-    } else {
-      None
-    };
+    let pending_env = env
+      .map(|values| {
+        let pending =
+          TempCompose(dir.join(".wharf-project-env.next"));
+        write_private(&pending.0, &dotenv(values)?)?;
+        Ok::<_, ApiError>(pending)
+      })
+      .transpose()?;
+    let env = pending_env.as_ref().map(|env| env.0.as_path());
     let cmd = self.compose_file(project, &dir, &pending.0, env);
     match self.compose_images(cmd, ctx).await {
       Err(error)
@@ -2634,5 +2635,76 @@ fn parse_running_images_maps_multiple_containers() {
       ("worker:2".into(), "id2".into()),
       ("db:latest".into(), "id3".into())
     ])
+  );
+}
+
+#[tokio::test]
+async fn native_compose_project_env_round_trips_without_expanding_the_input()
+ {
+  if std::env::var_os("WHARF_TEST_COMPOSE").is_none() {
+    return;
+  }
+  let dir = tempfile::tempdir().unwrap();
+  let docker = Docker {
+    bin: "docker".into(),
+    data_dir: dir.path().into(),
+  };
+  let ctx = Ctx::detached();
+  let yaml = r#"
+services:
+  first:
+    image: alpine
+    environment:
+      VALUE: '${VALUE:?required}'
+  second:
+    image: alpine
+    environment: ['VALUE=${VALUE:?required}', 'DEFAULT=${UNSET:-default}']
+"#;
+  let value = "line 1: $literal, \"quotes\", \\backslash\nline 2";
+  let inputs =
+    BTreeMap::from([("VALUE".to_string(), value.to_string())]);
+  docker
+    .check_project_env("p23-fixture", yaml, &inputs, &ctx)
+    .await
+    .unwrap();
+  assert!(
+    docker
+      .check_project_env("p23-fixture", yaml, &BTreeMap::new(), &ctx)
+      .await
+      .is_err()
+  );
+  docker.write_compose("p23-fixture", yaml).unwrap();
+  let user_dotenv = docker.project_dir("p23-fixture").join(".env");
+  std::fs::write(&user_dotenv, "VALUE=from-user-file\n").unwrap();
+  docker
+    .write_project_env("p23-fixture", Some(&dotenv(&inputs).unwrap()))
+    .unwrap();
+  let doc = docker
+    .compose("p23-fixture")
+    .args(["config", "--format", "json"])
+    .timeout(Duration::from_secs(20))
+    .run(&ctx)
+    .await
+    .unwrap()
+    .check("Compose dotenv")
+    .unwrap();
+  let doc: serde_json::Value =
+    serde_json::from_str(&doc.stdout).unwrap();
+  assert_eq!(
+    doc["services"]["first"]["environment"]["VALUE"].as_str(),
+    Some(value)
+  );
+  assert_eq!(
+    doc["services"]["second"]["environment"]["VALUE"].as_str(),
+    Some(value)
+  );
+  assert_eq!(
+    doc["services"]["second"]["environment"]["DEFAULT"].as_str(),
+    Some("default")
+  );
+  docker.write_project_env("p23-fixture", None).unwrap();
+  assert_eq!(
+    std::fs::read_to_string(user_dotenv).unwrap(),
+    "VALUE=from-user-file\n"
   );
 }
