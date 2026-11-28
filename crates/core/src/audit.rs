@@ -38,6 +38,7 @@ struct Slot {
   required: bool,
   skipped: bool,
   rejection: Option<(String, String)>,
+  exec_context: Option<(String, Option<String>, Option<String>)>,
 }
 
 impl AuditSlot {
@@ -58,6 +59,41 @@ impl AuditSlot {
   pub fn set_detail(&self, detail: String) {
     self.0.lock().unwrap_or_else(|e| e.into_inner()).detail =
       Some(detail);
+  }
+
+  pub(crate) async fn start_exec(
+    &self,
+    state: &AppState,
+    actor: &str,
+    detail: String,
+  ) -> Result<i64, ApiError> {
+    let (path, reason, source) = self
+      .0
+      .lock()
+      .unwrap_or_else(|e| e.into_inner())
+      .exec_context
+      .take()
+      .ok_or_else(|| ApiError::internal("缺少执行审计上下文"))?;
+    let detail = reason
+      .map_or(detail.clone(), |r| format!("{detail} 原因：{r}"));
+    let id = insert_id(
+      state,
+      AuditEntry {
+        id: 0,
+        at: now_ms(),
+        kind: "api".into(),
+        actor: actor.into(),
+        method: "POST".into(),
+        path,
+        status: None,
+        duration_ms: None,
+        detail: Some(detail),
+        source,
+      },
+    )
+    .await?;
+    self.skip_record();
+    Ok(id)
   }
 
   pub fn require_record(&self, detail: String) {
@@ -81,6 +117,17 @@ pub async fn layer(
     .get::<ConnectInfo<std::net::SocketAddr>>()
     .map(|peer| crate::login::client_key(peer.0.ip(), req.headers()));
   let slot = AuditSlot::default();
+  if method == Method::POST
+    && path.starts_with("/api/services/")
+    && path.ends_with("/exec")
+  {
+    slot
+      .0
+      .lock()
+      .unwrap_or_else(|e| e.into_inner())
+      .exec_context =
+      Some((path.clone(), reason.clone(), source.clone()));
+  }
   req.extensions_mut().insert(slot.clone());
   let resp = next.run(req).await;
   let (actor, detail, required, skipped, rejection) = {
@@ -296,8 +343,15 @@ fn redact_row(row: &mut AuditEntry) {
 
 pub(crate) async fn insert(
   state: &AppState,
-  mut row: AuditEntry,
+  row: AuditEntry,
 ) -> Result<(), ApiError> {
+  insert_id(state, row).await.map(|_| ())
+}
+
+async fn insert_id(
+  state: &AppState,
+  mut row: AuditEntry,
+) -> Result<i64, ApiError> {
   redact_row(&mut row);
   let result = state
     .db
@@ -308,7 +362,7 @@ pub(crate) async fn insert(
         params![row.at, row.kind, row.actor, row.method, row.path,
           row.status, row.duration_ms, row.detail, row.source],
       )
-      .map(|_| ())
+      .map(|_| c.last_insert_rowid())
       .map_err(sql_err)
     })
     .await;
@@ -316,6 +370,21 @@ pub(crate) async fn insert(
     tracing::warn!("记录操作失败：{}", e.message);
   }
   result
+}
+
+pub(crate) async fn finish_exec(
+  state: &AppState,
+  id: i64,
+  status: u16,
+  duration_ms: u64,
+  detail: String,
+) -> Result<(), ApiError> {
+  let detail = crate::log_redact::redact_text(&detail);
+  state.db.call(move |c| {
+    c.execute("UPDATE audit_log SET status = ?2, duration_ms = ?3, detail = detail || ?4 WHERE id = ?1",
+      params![id, status, duration_ms as i64, detail]).map_err(sql_err)?;
+    Ok(())
+  }).await
 }
 
 pub async fn cleanup(state: &AppState) -> Result<(), ApiError> {

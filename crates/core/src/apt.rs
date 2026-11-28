@@ -55,6 +55,7 @@ async fn run(
     .call(
       server,
       AgentOp::HostExec(HostExecJob {
+        stream: false,
         command: command.into(),
         timeout_secs: TIMEOUT_SECS,
         cwd: "/".into(),

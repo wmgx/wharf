@@ -722,7 +722,7 @@ export type TaskSpec = TaskKind & {
 };
 
 export type TaskStatus =
-  "running" | "succeeded" | "failed" | "timed_out" | "skipped";
+  "running" | "succeeded" | "failed" | "timed_out" | "skipped" | "cancelled";
 
 export interface TaskRunView {
   service?: string;
