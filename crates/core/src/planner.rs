@@ -270,6 +270,9 @@ pub enum Step {
   ServiceStop {
     service: String,
   },
+  CloneData {
+    job: Box<service_clone::CloneJob>,
+  },
   /// 重启服务的容器。单独发起，不来自计划。
   ServiceRestart {
     service: String,
@@ -318,6 +321,7 @@ impl Step {
           1
         }
       }
+      Self::CloneData { .. } => 1,
       Self::VolumeSync { .. } | Self::AdoptData { .. } => 2,
       Self::ServiceUp { .. }
       | Self::EdgeDeploy { .. }
@@ -544,7 +548,8 @@ pub(crate) async fn make_plan_inner(
   admin: bool,
 ) -> Result<Planned, ApiError> {
   if req.service_action.is_some() {
-    return make_batch_plan(state, req, snap, None).await;
+    return make_service_action_plan(state, req, snap, None, admin)
+      .await;
   }
   let current = snap.world.clone();
   let mut desired = current.clone();
@@ -582,6 +587,17 @@ pub(crate) async fn make_plan_inner(
       crate::render::service_account_refs(&desired),
       req.note.as_deref(),
     ));
+  }
+  if snap
+    .pending
+    .clones
+    .iter()
+    .any(|name| desired.services.contains_key(name))
+  {
+    return Err(
+      ApiError::new(ErrorCode::Conflict, "克隆目标仍由原执行保留")
+        .with_hint("先重试原执行，完成克隆后再使用该名称"),
+    );
   }
   let mut adoption = snap.pending.adopt_data.clone();
   let mut adoption_warnings = Vec::new();
@@ -1425,7 +1441,8 @@ fn spec_json(world: &World, kind: &str, name: &str) -> Option<Value> {
 
 mod route_impact;
 mod service_batch;
-pub(crate) use service_batch::make_batch_plan;
+pub(crate) mod service_clone;
+pub(crate) use service_batch::make_service_action_plan;
 
 fn config_items(
   b: &mut Builder,

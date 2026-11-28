@@ -15,7 +15,7 @@ use wharf_api_types::{
   },
   plan::{
     ApplyRequest, ApplyResponse, Plan, PlanRequest, Run, RunStatus,
-    ServiceAction, ServiceActionKind,
+    ServiceAction,
   },
   spec::{
     BackupSpec, Change, Fleet, GatewayKind, GatewaySpec, GatewayTls,
@@ -1079,15 +1079,14 @@ async fn plan_and_maybe_apply(
 
 async fn plan_batch(
   c: &Client,
-  action: ServiceActionKind,
-  tag: String,
+  action: ServiceAction,
   flags: ApplyFlags,
   json: bool,
 ) -> CliResult<()> {
   plan_output(
     c,
     PlanRequest {
-      service_action: Some(ServiceAction { action, tag }),
+      service_action: Some(action),
       ..Default::default()
     },
     flags,
@@ -2884,6 +2883,25 @@ async fn service(
       )
       .await
     }
+    ServiceCmd::Clone {
+      source,
+      target,
+      server,
+      copy_data,
+    } => {
+      plan_batch(
+        c,
+        ServiceAction::Clone {
+          source,
+          target,
+          server,
+          copy_data,
+        },
+        ApplyFlags::default(),
+        j,
+      )
+      .await
+    }
     ServiceCmd::ExportCompose { name, output } => {
       let view: wharf_api_types::view::ServiceComposeExport = c
         .get(&format!("/api/services/{}/export-compose", seg(&name)))
@@ -3068,19 +3086,16 @@ async fn service(
       tag: Some(tag),
       apply,
       ..
-    } => plan_batch(c, ServiceActionKind::Stop, tag, apply, j).await,
+    } => plan_batch(c, ServiceAction::Stop { tag }, apply, j).await,
     ServiceCmd::Update {
       tag: Some(tag),
       apply,
       ..
-    } => {
-      plan_batch(c, ServiceActionKind::Update, tag, apply, j).await
-    }
+    } => plan_batch(c, ServiceAction::Update { tag }, apply, j).await,
     ServiceCmd::Restart { tag: Some(tag), .. } => {
       plan_batch(
         c,
-        ServiceActionKind::Restart,
-        tag,
+        ServiceAction::Restart { tag },
         ApplyFlags::default(),
         j,
       )

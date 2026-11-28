@@ -40,7 +40,10 @@ struct Pushed {
   synced: bool,
 }
 
-fn private_ip(net: &Net, server: &str) -> Result<String, ApiError> {
+pub(crate) fn private_ip(
+  net: &Net,
+  server: &str,
+) -> Result<String, ApiError> {
   net
     .private
     .get(server)
@@ -53,13 +56,13 @@ fn private_ip(net: &Net, server: &str) -> Result<String, ApiError> {
     })
 }
 
-fn one_time_password() -> OneTimeSecret {
+pub(crate) fn one_time_password() -> OneTimeSecret {
   let mut bytes = [0u8; 24];
   getrandom::fill(&mut bytes).expect("随机数不可用");
   OneTimeSecret(hex::encode(bytes))
 }
 
-async fn check_writers(
+pub(crate) async fn check_writers(
   state: &AppState,
   source: (&str, u64),
   service: &str,
@@ -185,7 +188,7 @@ pub(crate) async fn check_space_from_report(
   Ok(())
 }
 
-fn check_migration_disk(
+pub(crate) fn check_migration_disk(
   to: &str,
   source_bytes: u64,
   existing_bytes: u64,

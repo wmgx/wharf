@@ -2309,7 +2309,7 @@ export interface PlanSummary {
 
 export interface PlannedServiceAction {
   action: ServiceActionKind;
-  tag: string;
+  tag?: string | null;
   targets: string[];
 }
 
@@ -2974,7 +2974,7 @@ export interface ServerView {
 /**
  * 按服务的内置告警规则覆盖。
  */
-export type ServiceActionKind = "restart" | "stop" | "update";
+export type ServiceActionKind = "restart" | "stop" | "update" | "clone";
 
 export interface ServiceAlertOverrideView {
   enabled?: boolean | null;

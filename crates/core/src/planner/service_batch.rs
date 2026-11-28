@@ -1,15 +1,16 @@
 use wharf_api_types::{
-  plan::{PlannedServiceAction, ServiceActionKind},
+  plan::{PlannedServiceAction, ServiceAction, ServiceActionKind},
   spec::{Change, UpdateIgnoreScope},
 };
 
 use super::*;
 
-pub(crate) async fn make_batch_plan(
+pub(crate) async fn make_service_action_plan(
   state: &AppState,
   req: PlanRequest,
   snap: Snapshot,
   allowed: Option<&BTreeSet<String>>,
+  admin: bool,
 ) -> Result<Planned, ApiError> {
   if !req.changes.is_empty()
     || req.fleet.is_some()
@@ -19,25 +20,88 @@ pub(crate) async fn make_batch_plan(
       "service_action、changes、fleet、partial 只能给一个",
     ));
   }
-  let mut action = req
-    .service_action
-    .ok_or_else(|| ApiError::invalid("缺少 service_action"))?;
-  action.tag =
-    crate::world::normalize_service_tag(&action.tag)?.to_owned();
+  match req.service_action {
+    Some(ServiceAction::Clone {
+      source,
+      target,
+      server,
+      copy_data,
+    }) => {
+      service_clone::plan(
+        state,
+        snap,
+        allowed,
+        admin,
+        service_clone::CloneRequest {
+          source,
+          target,
+          server,
+          copy_data,
+          note: req.note,
+        },
+      )
+      .await
+    }
+    Some(ServiceAction::Restart { tag }) => {
+      make_batch_plan(
+        state,
+        snap,
+        allowed,
+        ServiceActionKind::Restart,
+        &tag,
+        req.note.as_deref(),
+      )
+      .await
+    }
+    Some(ServiceAction::Stop { tag }) => {
+      make_batch_plan(
+        state,
+        snap,
+        allowed,
+        ServiceActionKind::Stop,
+        &tag,
+        req.note.as_deref(),
+      )
+      .await
+    }
+    Some(ServiceAction::Update { tag }) => {
+      make_batch_plan(
+        state,
+        snap,
+        allowed,
+        ServiceActionKind::Update,
+        &tag,
+        req.note.as_deref(),
+      )
+      .await
+    }
+    None => Err(ApiError::invalid("缺少 service_action")),
+  }
+}
+
+async fn make_batch_plan(
+  state: &AppState,
+  snap: Snapshot,
+  allowed: Option<&BTreeSet<String>>,
+  action: ServiceActionKind,
+  tag: &str,
+  note: Option<&str>,
+) -> Result<Planned, ApiError> {
+  let tag = crate::world::normalize_service_tag(tag)?;
   let current = &snap.world;
   let targets: Vec<_> = current
     .services
     .iter()
     .filter(|(name, row)| {
       allowed.is_none_or(|allowed| allowed.contains(*name))
-        && row.spec.tags.contains(&action.tag)
+        && row.spec.tags.contains(tag)
     })
     .map(|(name, _)| name.clone())
     .collect();
   if targets.is_empty() {
     return Err(
       ApiError::not_found("可见范围内没有匹配的服务").with_hint(
-        format!("先运行 wharf service list --tag {}", action.tag),
+        format!("先运行 wharf service list --tag {}", tag),
       ),
     );
   }
@@ -51,8 +115,7 @@ pub(crate) async fn make_batch_plan(
     |service: &str| !targets.iter().any(|name| name == service);
   for name in &targets {
     let row = &current.services[name];
-    if action.action == ServiceActionKind::Restart && row.spec.stopped
-    {
+    if action == ServiceActionKind::Restart && row.spec.stopped {
       b.warnings.push(format!("跳过 {name}：服务已停"));
       continue;
     }
@@ -68,7 +131,7 @@ pub(crate) async fn make_batch_plan(
         .with_hint("先完成原执行，再重新生成计划"),
       );
     }
-    if action.action == ServiceActionKind::Update {
+    if action == ServiceActionKind::Update {
       let spec = &row.spec;
       if row.import.is_some()
         || spec.update_ignore.iter().any(|rule| {
@@ -140,7 +203,7 @@ pub(crate) async fn make_batch_plan(
     status.insert(server, Some(projects));
   }
   let mut runtime = BTreeSet::new();
-  if action.action == ServiceActionKind::Update {
+  if action == ServiceActionKind::Update {
     desired.apply_changes(&refresh_changes)?;
     let refresh = refresh_changes
       .iter()
@@ -196,7 +259,7 @@ pub(crate) async fn make_batch_plan(
         .get(&row.spec.server)
         .and_then(Option::as_ref)
         .and_then(|projects| projects.get(name));
-      if action.action == ServiceActionKind::Stop {
+      if action == ServiceActionKind::Stop {
         desired
           .services
           .get_mut(name)
@@ -258,7 +321,7 @@ pub(crate) async fn make_batch_plan(
   }
   let writes = desired.writes_from(current);
   config_items(&mut b, current, &desired, &writes);
-  match action.action {
+  match action {
     ServiceActionKind::Update => {
       b.service_targets = Some(runtime);
       let net = snap.net(&desired);
@@ -308,11 +371,11 @@ pub(crate) async fn make_batch_plan(
     b,
     writes,
     crate::render::service_account_refs(&desired),
-    req.note.as_deref(),
+    note,
   );
   planned.plan.service_action = Some(PlannedServiceAction {
-    action: action.action,
-    tag: action.tag,
+    action,
+    tag: Some(tag.into()),
     targets,
   });
   Ok(planned)
@@ -341,9 +404,15 @@ mod tests {
     }))
     .unwrap();
     let snap = snapshot::load(&state.db).await.unwrap();
-    let plan = make_batch_plan(&state, req, snap, Some(&allowed))
-      .await
-      .unwrap();
+    let plan = make_service_action_plan(
+      &state,
+      req,
+      snap,
+      Some(&allowed),
+      false,
+    )
+    .await
+    .unwrap();
     assert!(plan.steps.is_empty());
     assert!(plan.writes.is_empty());
     assert_eq!(

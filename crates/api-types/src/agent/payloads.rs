@@ -192,6 +192,29 @@ pub enum SyncKind {
   ServiceData,
   BackupRepo,
   CoreBackupRepo,
+  CloneData,
+  CloneSource,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "phase", rename_all = "snake_case")]
+pub enum ServiceCopy {
+  Check {
+    target: String,
+  },
+  Stage {
+    target: String,
+    receipt: String,
+  },
+  Local {
+    source: String,
+    target: String,
+    receipt: String,
+  },
+  Commit {
+    target: String,
+    receipt: String,
+  },
 }
 
 impl SyncKind {

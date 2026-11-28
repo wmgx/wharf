@@ -715,7 +715,7 @@ fn check_base_instances(
   Ok(())
 }
 
-fn apply_writes(
+pub(crate) fn apply_writes(
   tx: &rusqlite::Transaction<'_>,
   plan: &Plan,
   writes: &[crate::db::Write],
@@ -724,7 +724,17 @@ fn apply_writes(
   let current =
     crate::world::World::from_rows(db::all_resources(tx)?)?;
   crate::secret_policy::require_apply(plan, &current, admin)?;
+  let reserved = crate::pending::load(tx)?.clones;
   for write in writes {
+    if let Write::Upsert { kind, name, .. } = write
+      && kind == crate::world::KIND_SERVICE
+      && reserved.contains(name)
+    {
+      return Err(ApiError::new(
+        ErrorCode::Conflict,
+        "克隆目标仍由原执行保留",
+      ));
+    }
     db::apply_write(tx, write)?;
     match write {
       Write::Delete { kind, name }
@@ -1530,6 +1540,12 @@ async fn run_step_with_dns(
   let world = &snap.world;
   let net = snap.net(world);
   match step {
+    Step::CloneData { job } => {
+      crate::planner::service_clone::execute(
+        state, &snap, run_id, job, progress, cancel,
+      )
+      .await?;
+    }
     Step::EnsureDirs { server, dirs, .. } => {
       state
         .hub

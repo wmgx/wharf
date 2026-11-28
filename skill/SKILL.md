@@ -131,6 +131,7 @@ wharf service update <服务> --json      # 查新版本（镜像标签或分支
 wharf service history <服务> --json     # 部署历史
 wharf service rollback <服务> --json    # 回到上一个不同的版本，--to <部署记录 id> 指定
 wharf top --suggest-limits --service <服务> --json  # 只读资源上限推荐
+wharf service clone <源> <新名> --server s2 --json  # 生成计划，新服务保持停止
 wharf service export-compose <服务> --json  # Compose 和所需变量、文件清单
 wharf service restart <服务> --json     # 只重启容器，不改配置
 wharf service restart --tag 试验 --json  # 批量生成计划，stop 和 update 也支持

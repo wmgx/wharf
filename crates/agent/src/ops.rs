@@ -406,6 +406,9 @@ impl Ops {
         crate::data_sync::sqlite_close(&snap_id);
         Ok(Value::Null)
       }
+      AgentOp::ServiceCopy(job) => {
+        crate::sync::service_copy(&self.docker, job, ctx).await
+      }
       AgentOp::DirSpace {
         service,
         measure_data,

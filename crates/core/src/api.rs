@@ -2781,8 +2781,14 @@ async fn make_plan(
     }));
   }
   let planned = if req.service_action.is_some() {
-    planner::make_batch_plan(&s, req, snap, auth.services.as_ref())
-      .await
+    planner::make_service_action_plan(
+      &s,
+      req,
+      snap,
+      auth.services.as_ref(),
+      auth.has(Perm::Admin),
+    )
+    .await
   } else {
     planner::make_plan_inner(
       &s,

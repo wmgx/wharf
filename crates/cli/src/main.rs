@@ -1138,6 +1138,15 @@ pub enum ServiceCmd {
   Render {
     name: String,
   },
+  /// 克隆服务，生成保持停止的计划。
+  Clone {
+    source: String,
+    target: String,
+    #[arg(long)]
+    server: Option<String>,
+    #[arg(long)]
+    copy_data: bool,
+  },
   /// 导出普通 Compose 和所需变量、文件清单。
   ExportCompose {
     name: String,

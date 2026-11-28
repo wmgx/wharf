@@ -34,10 +34,29 @@ pub struct PlanRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ServiceAction {
-  pub action: ServiceActionKind,
-  pub tag: String,
+#[serde(
+  tag = "action",
+  rename_all = "snake_case",
+  deny_unknown_fields
+)]
+pub enum ServiceAction {
+  Restart {
+    tag: String,
+  },
+  Stop {
+    tag: String,
+  },
+  Update {
+    tag: String,
+  },
+  Clone {
+    source: String,
+    target: String,
+    #[serde(default)]
+    server: Option<String>,
+    #[serde(default)]
+    copy_data: bool,
+  },
 }
 
 #[derive(
@@ -55,12 +74,14 @@ pub enum ServiceActionKind {
   Restart,
   Stop,
   Update,
+  Clone,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct PlannedServiceAction {
   pub action: ServiceActionKind,
-  pub tag: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub tag: Option<String>,
   pub targets: Vec<String>,
 }
 
