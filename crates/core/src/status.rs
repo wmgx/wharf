@@ -241,6 +241,7 @@ mod tests {
       commit: None,
       git: None,
       spec: None,
+      compose: None,
     };
     let failed = LastOp {
       action: "部署".into(),

@@ -15,6 +15,7 @@ fn entries() -> BTreeMap<&'static str, Schema> {
     ("route", schema_for!(spec::RouteSpec)),
     ("change", schema_for!(spec::Change)),
     ("plan", schema_for!(plan::Plan)),
+    ("plan_run", schema_for!(crate::commands::PlanRun<'_>)),
     ("plan_summary", schema_for!(plan::PlanSummary)),
     ("run", schema_for!(plan::Run)),
     ("status", schema_for!(view::Status)),

@@ -208,9 +208,11 @@ fn record_components(
     "SELECT d.instance_id, d.spec FROM resources r JOIN deployments d
        ON d.service = r.name AND d.instance_id = json_extract(r.meta, '$.instance_id')
      WHERE r.kind = 'service' AND r.name = ?1
-       AND d.id = (SELECT MAX(latest.id) FROM deployments latest
-                   WHERE latest.service = r.name AND latest.instance_id = d.instance_id)
-       AND d.server = ?2 AND d.created_at <= ?3 AND d.spec IS NOT NULL",
+       AND d.id = (SELECT latest.id FROM deployments latest
+                   WHERE latest.service = r.name AND latest.instance_id = d.instance_id
+                     AND latest.created_at <= ?3
+                   ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1)
+       AND d.server = ?2 AND d.spec IS NOT NULL",
     params![service, server, at],
     |row| Ok((row.get(0)?, row.get(1)?)),
   ).optional().map_err(sql_err)?;
@@ -596,6 +598,36 @@ mod tests {
       .await
       .unwrap();
     assert_eq!(peaks, ((Some(75.0), Some(512)), (None, None)));
+  }
+
+  #[tokio::test]
+  async fn late_component_sample_matches_deployment_at_sample_time() {
+    use wharf_api_types::agent::ComponentMetrics;
+    let db = crate::db::Db::memory();
+    db.call(|c| {
+      c.execute_batch(
+        r#"INSERT INTO resources (kind,name,spec,meta,version,created_at,updated_at)
+         VALUES ('service','app','{}','{"instance_id":"svc_fixture"}',1,0,0);"#,
+      ).map_err(sql_err)?;
+      let now = now_ms();
+      let spec = |server: &str| serde_json::json!({
+        "server":server, "source":{"compose":{"content":"services: {db: {image: db}}"}}
+      }).to_string();
+      for (server, time) in [("s1", now - 3000), ("s1", now - 2000), ("s2", now - 1000)] {
+        c.execute(
+          "INSERT INTO deployments (service,server,run_id,hash,compose,images,created_at,spec,instance_id)
+           VALUES ('app',?1,'run','hash','','[]',?2,?3,'svc_fixture')",
+          params![server, time, spec(server)],
+        ).map_err(sql_err)?;
+      }
+      let sample = BTreeMap::from([("db".into(), ComponentMetrics { cpu: 75.0, mem: 512 })]);
+      record_components(c, "app", "s1", now - 2500, &sample)?;
+      assert_eq!(component_peaks(c, &component_subject("svc_fixture", "s1", "db"))?, (Some(75.0), Some(512)));
+      let obsolete = BTreeMap::from([("db".into(), ComponentMetrics { cpu: 100.0, mem: 1024 })]);
+      record_components(c, "app", "s1", now, &obsolete)?;
+      assert_eq!(component_peaks(c, &component_subject("svc_fixture", "s1", "db"))?, (Some(75.0), Some(512)));
+      Ok(())
+    }).await.unwrap();
   }
 
   #[tokio::test]

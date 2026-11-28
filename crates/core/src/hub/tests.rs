@@ -165,6 +165,14 @@ impl Hub {
     );
   }
 
+  pub(crate) fn disable_mock_runtime_options(&self, server: &str) {
+    let mut conns = lock(&self.conns);
+    let conn = conns.get_mut(server).unwrap();
+    conn.service_runtime_opts = false;
+    conn.live_limits_update = false;
+    conn.task_resource_limits = false;
+  }
+
   pub(crate) fn enable_mock_container_diagnosis(&self, server: &str) {
     lock(&self.conns)
       .get_mut(server)

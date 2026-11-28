@@ -1231,6 +1231,14 @@ async fn finish_prepared_plan(
   apply(c, req, true, j, Some((plan, detected)), flags.brief).await
 }
 
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct PlanRun<'a> {
+  plan: &'a Plan,
+  run: &'a Run,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  detected: Option<Value>,
+}
+
 async fn apply(
   c: &Client,
   req: ApplyRequest,
@@ -1256,11 +1264,13 @@ async fn apply(
     }
     match plan {
       Some((plan, detected)) => {
-        let mut value = json!({"plan": plan, "run": run});
-        if let Some(detected) = detected {
-          value["detected"] = detected.summary();
-        }
-        print::json(&value);
+        print::json(&PlanRun {
+          plan: &plan,
+          run: &run,
+          detected: detected
+            .as_ref()
+            .map(crate::deploy::DetectResult::summary),
+        });
       }
       None => print::json(&run),
     }

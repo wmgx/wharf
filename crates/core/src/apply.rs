@@ -159,13 +159,57 @@ struct StoredPlanBody {
   #[serde(default)]
   host_requirements: Option<Vec<crate::host_access::HostRequirement>>,
   #[serde(default)]
-  privilege_reviewed: bool,
+  deployment_privilege_reviewed: bool,
 }
 
 struct StoredPlan {
   body: StoredPlanBody,
   steps: Vec<StepPlan>,
   writes: Vec<Write>,
+}
+
+impl StoredPlan {
+  fn check_deployment_privilege(
+    &self,
+    steps: &[StepPlan],
+    world: &crate::world::World,
+  ) -> Result<(), ApiError> {
+    if !self.body.deployment_privilege_reviewed
+      && steps.iter().any(|entry| {
+        let Step::ServiceUp { service, .. } = &entry.step else {
+          return false;
+        };
+        let address = format!("service/{service}");
+        self
+          .body
+          .plan
+          .items
+          .iter()
+          .any(|item| item.address == address && item.needs_host())
+          || self
+            .body
+            .host_requirements
+            .iter()
+            .flatten()
+            .any(|req| req.address == address)
+          || world.services.get(service).is_some_and(|row| {
+            !crate::host_access::expanded_service_privilege(
+              service, None, &row.spec,
+            )
+            .is_empty()
+          })
+      })
+    {
+      return Err(
+        ApiError::new(
+          ErrorCode::PlanStale,
+          "旧计划的宿主机配置需要重新 plan",
+        )
+        .suggest("wharf plan"),
+      );
+    }
+    Ok(())
+  }
 }
 
 pub async fn load_plan(
@@ -345,8 +389,9 @@ pub(crate) async fn start_with_actor(
     );
   }
   let human = auth.is_some_and(|auth| auth.human);
-  if !stored.body.privilege_reviewed && !stored.writes.is_empty() {
+  if !stored.body.deployment_privilege_reviewed {
     let snap = snapshot::load(&state.db).await?;
+    stored.check_deployment_privilege(&stored.steps, &snap.world)?;
     crate::host_access::check_privilege_review(
       plan,
       &snap.world,
@@ -1791,6 +1836,20 @@ async fn run_step_with_dns(
         state, &server, service, true, &progress, cancel,
       )
       .await?;
+      let (service, instance_id) =
+        (service.clone(), instance_id.clone());
+      state
+        .db
+        .call(move |c| {
+          db::mark_deployment_started(
+            c,
+            &service,
+            &server,
+            &instance_id,
+            &hash,
+          )
+        })
+        .await?;
     }
     Step::ServiceStop { service } => {
       let server = service_server(&snap, service)?;
@@ -2984,11 +3043,20 @@ async fn service_limits_update(
   }
   let images = applied
     .image_ids
-    .iter()
-    .map(|(image, id)| wharf_api_types::agent::ImageInfo {
-      id: id.clone(),
+    .keys()
+    .chain(
+      applied
+        .digests
+        .keys()
+        .filter(|image| !applied.image_ids.contains_key(*image)),
+    )
+    .map(|image| wharf_api_types::agent::ImageInfo {
+      id: applied.image_ids.get(image).cloned().unwrap_or_default(),
       image: image.clone(),
-      digest: applied.digests.get(image).cloned(),
+      digest: applied
+        .digests
+        .get(image)
+        .map(|digest| format!("{image}@{digest}")),
     })
     .collect();
   let template =
@@ -4245,8 +4313,8 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn stopped_service_update_sends_no_start_and_records_unstarted()
-   {
+  async fn starting_precreated_service_marks_its_deployment_started()
+  {
     let state = crate::migrate::tests::seed_service(true).await;
     let step = Step::ServiceUp {
       images: Default::default(),
@@ -4283,6 +4351,109 @@ mod tests {
       })
       .await
       .unwrap();
+    state.db.call(|c| {
+      c.execute(
+        "UPDATE resources SET spec = json_remove(spec, '$.stopped') WHERE kind = 'service' AND name = 'notes'",
+        [],
+      ).map_err(sql_err)?;
+      Ok(())
+    }).await.unwrap();
+    let snap = snapshot::load(&state.db).await.unwrap();
+    state.hub.mock_agent("s2", false, |op| {
+      assert!(
+        matches!(op, AgentOp::ProjectStart { project, containers }
+        if project == "notes" && containers.is_empty())
+      );
+      Ok(serde_json::json!(true))
+    });
+    let start = Step::ServiceStart {
+      service: "notes".into(),
+      instance_id: snap.world.services["notes"].instance_id.clone(),
+      expect: snap.applied["notes"].hash.clone(),
+    };
+    run_step(&state, "r3", &start, Arc::new(|_| {}), &cancel)
+      .await
+      .unwrap();
+    state
+      .db
+      .call(|c| {
+        assert!(
+          c.query_row("SELECT started FROM deployments", [], |r| {
+            r.get::<_, bool>(0)
+          })
+          .map_err(sql_err)?
+        );
+        Ok(())
+      })
+      .await
+      .unwrap();
+  }
+
+  #[tokio::test]
+  async fn live_limit_deployment_preserves_history_image_digest() {
+    let state = crate::migrate::tests::seed_service(false).await;
+    let digest = format!("sha256:{}", "a".repeat(64));
+    let snap = snapshot::load(&state.db).await.unwrap();
+    let row = &snap.world.services["notes"];
+    let image = "fixture:1";
+    record_deployment(
+      &state,
+      Deployed {
+        service: "notes",
+        server: "s2",
+        run_id: "old-run",
+        hash: "before",
+        template: "",
+        instance_id: &row.instance_id,
+        spec: &row.spec,
+        commit: None,
+      },
+      &ProjectUpResult {
+        containers: vec![],
+        images: vec![wharf_api_types::agent::ImageInfo {
+          id: "sha256:local".into(),
+          image: image.into(),
+          digest: Some(format!("fixture@{digest}")),
+        }],
+        warnings: vec![],
+        retired: vec![],
+      },
+    )
+    .await
+    .unwrap();
+    let snap = snapshot::load(&state.db).await.unwrap();
+    let (_, hash) = snapshot::service_resolved(
+      &snap.world,
+      &snap.net(&snap.world),
+      "notes",
+      &snap.render_values(&snap.world, "notes"),
+    )
+    .unwrap();
+    state.hub.mock_agent("s2", false, |op| {
+      assert!(matches!(op, AgentOp::ProjectUpdateLimits(_)));
+      Ok(serde_json::json!(null))
+    });
+    let job = wharf_api_types::agent::ProjectLimitsJob {
+      project: "notes".into(),
+      before_hash: "before".into(),
+      hash,
+      compose: String::new(),
+      changes: Default::default(),
+      images: Default::default(),
+    };
+    service_limits_update(
+      &state,
+      &snap,
+      "new-run",
+      "s2",
+      &job,
+      Arc::new(|_| {}),
+      &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let after = snapshot::load(&state.db).await.unwrap();
+    assert_eq!(after.applied["notes"].digests[image], digest);
   }
 
   #[tokio::test]

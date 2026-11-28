@@ -379,6 +379,10 @@ pub struct Applied {
   #[serde(skip)]
   #[schemars(skip)]
   pub spec: Option<crate::spec::ServiceSpec>,
+  /// 上次部署保存的 Compose 模板，仅用于比较已部署的运行设置。
+  #[serde(skip)]
+  #[schemars(skip)]
+  pub compose: Option<String>,
 }
 
 #[derive(

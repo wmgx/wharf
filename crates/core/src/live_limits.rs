@@ -66,6 +66,30 @@ fn memory(value: &Value) -> Option<u32> {
     .then_some(mb as u32)
 }
 
+pub(crate) fn conflicting_limits(
+  doc: &Value,
+) -> Option<&'static str> {
+  type Parser = fn(&Value) -> Option<u32>;
+  let fields: [(&str, &str, Parser); 3] = [
+    ("mem_limit", "memory", memory),
+    ("cpus", "cpus", milli),
+    ("pids_limit", "pids", pids),
+  ];
+  for body in doc["services"].as_mapping()?.values() {
+    for (direct, nested, parse) in fields {
+      if let (Some(a), Some(b)) = (
+        body.get(direct),
+        body["deploy"]["resources"]["limits"].get(nested),
+      ) && let (Some(a), Some(b)) = (parse(a), parse(b))
+        && a != b
+      {
+        return Some(direct);
+      }
+    }
+  }
+  None
+}
+
 fn pids(value: &Value) -> Option<u32> {
   value
     .as_u64()
@@ -155,6 +179,19 @@ pub(crate) fn changes(
   else {
     return Ok(None);
   };
+  if let Some(field) = conflicting_limits(&after) {
+    return Err(match field {
+      "mem_limit" => {
+        "Compose 的 mem_limit 与 deploy.resources.limits.memory 不一致"
+      }
+      "cpus" => {
+        "Compose 的 cpus 与 deploy.resources.limits.cpus 不一致"
+      }
+      _ => {
+        "Compose 的 pids_limit 与 deploy.resources.limits.pids 不一致"
+      }
+    });
+  }
   let (Some(old), Some(new)) =
     (strip_limits(&mut before), strip_limits(&mut after))
   else {

@@ -1750,6 +1750,11 @@ pub fn check_compose(
 ) -> Result<(), ApiError> {
   let doc = parse_compose_template(content)?;
   crate::syntax_check::validate_compose_structure(name, &doc)?;
+  if let Some(field) = crate::live_limits::conflicting_limits(&doc) {
+    return Err(ApiError::invalid(format!(
+      "服务 {name} 的 Compose 中 {field} 与 deploy.resources.limits 对应值不一致"
+    )));
+  }
   check_compose_secret_volumes(name, &doc)
 }
 
@@ -2511,6 +2516,19 @@ mod tests {
       parse_compose(&out).unwrap()["services"]["app"]["environment"]
         ["PASS"],
       "p$$\"\\\nline"
+    );
+  }
+
+  #[test]
+  fn compose_rejects_conflicting_direct_and_deploy_memory() {
+    let yaml = "services: {app: {image: alpine, mem_limit: 128m, deploy: {resources: {limits: {memory: 134217728}}}}}";
+    check_compose("app", yaml).unwrap();
+    let invalid = yaml.replace("134217728", "256m");
+    assert!(
+      check_compose("app", &invalid)
+        .unwrap_err()
+        .message
+        .contains("mem_limit")
     );
   }
 

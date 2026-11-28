@@ -269,6 +269,7 @@ async fn set_limits(
   project: &str,
   container: &Container,
   limits: &Limits,
+  restoring: bool,
   ctx: &Ctx,
 ) -> Result<(), ApiError> {
   let before = verify(docker, project, container, ctx).await?;
@@ -280,7 +281,9 @@ async fn set_limits(
   if matches_limits(&before, limits) {
     return Ok(());
   }
-  if let Some(memory) = limits.memory_mb
+  // 恢复已校验的原上限时，容器可能已经用掉调高后可用的内存。
+  if !restoring
+    && let Some(memory) = limits.memory_mb
     && before["limits"]["Memory"]
       .as_u64()
       .is_some_and(|old| old > u64::from(memory) << 20)
@@ -364,6 +367,7 @@ async fn recover(
         project,
         container,
         &tx.changes[&container.component].before,
+        true,
         &ctx,
       )
       .await?;
@@ -444,6 +448,9 @@ pub(crate) async fn update(
   if hash != job.before_hash {
     return Err(stale(project));
   }
+  docker
+    .images_for_compose(project, &job.compose, ctx)
+    .await?;
   let containers = candidates(docker, job, false, ctx).await?;
   let tx = Transaction {
     before: hash,
@@ -467,6 +474,7 @@ pub(crate) async fn update(
         project,
         container,
         &tx.changes[&container.component].after,
+        false,
         ctx,
       )
       .await?;
@@ -513,36 +521,45 @@ mod tests {
   use crate::docker::fake_docker;
 
   #[tokio::test]
-  async fn failed_second_replica_rolls_back_and_can_be_retried() {
+  async fn failed_second_replica_restores_memory_and_cpu_and_can_be_retried()
+   {
     let (temp, docker) = fake_docker(
       r#"
 case "$1" in
+  compose) test ! -e invalid-compose || exit 1 ;;
+  stats) printf '200MiB / 512MiB\n' ;;
   ps) printf 'id1\nid2\n' ;;
   inspect)
     shift 6
     for id in "$@"; do
       if [ ! -e "$id" ]; then printf '500000000' > "$id"; fi
       cpu=$(cat "$id")
+      memory=134217728
+      if [ "$cpu" = 750000000 ]; then memory=536870912; fi
       printf '{"id":"%s","image":"sha256:fixture","state":{"Status":"running","Running":true,"StartedAt":"fixture"},' "$id"
       printf '"labels":{"com.docker.compose.project":"app","com.docker.compose.service":"web","com.docker.compose.project.working_dir":"%s/projects/app"},' "$(pwd)"
-      printf '"limits":{"NanoCpus":%s,"CpuQuota":0,"CpuPeriod":0}}\n' "$cpu"
+      printf '"limits":{"NanoCpus":%s,"CpuQuota":0,"CpuPeriod":0,"Memory":%s,"MemorySwap":-1}}\n' "$cpu" "$memory"
     done ;;
   update)
-    if [ "$3" = "0.750" ]; then
-      if [ "$4" = "id2" ] && [ -e fail ]; then exit 1; fi
-      printf 750000000 > "$4"
+    if [ "$7" = "0.750" ] && [ "$3" = "512m" ]; then
+      if [ "$8" = "id2" ] && [ -e fail ]; then exit 1; fi
+      printf 750000000 > "$8"
+    elif [ "$7" = "0.500" ] && [ "$3" = "128m" ]; then
+      printf 500000000 > "$8"
     else
-      printf 500000000 > "$4"
+      exit 1
     fi ;;
   *) exit 1 ;;
 esac
 "#,
     );
     let before = Limits {
+      memory_mb: Some(128),
       cpu_milli: Some(500),
       ..Default::default()
     };
     let after = Limits {
+      memory_mb: Some(512),
       cpu_milli: Some(750),
       ..Default::default()
     };
@@ -562,8 +579,15 @@ esac
     };
     docker.write_compose("app", "old").unwrap();
     docker.write_hash("app", "before").unwrap();
-    fs::write(temp.path().join("fail"), "").unwrap();
     let ctx = Ctx::detached();
+    let invalid = temp.path().join("invalid-compose");
+    fs::write(&invalid, "").unwrap();
+    assert!(update(&docker, &job, &ctx).await.is_err());
+    assert!(!journal(&docker, "app").exists());
+    assert!(!temp.path().join("id1").exists());
+    assert_eq!(current_hash(&docker, "app").unwrap(), "before");
+    fs::remove_file(invalid).unwrap();
+    fs::write(temp.path().join("fail"), "").unwrap();
     assert!(
       update(&docker, &job, &ctx)
         .await

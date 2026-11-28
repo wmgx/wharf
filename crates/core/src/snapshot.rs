@@ -531,7 +531,18 @@ pub(crate) async fn resolve_host_groups(
       None,
       cancel,
     )
-    .await?;
+    .await
+    .map_err(|error| {
+      if error.code == ErrorCode::Conflict {
+        error.with_hint(format!(
+          "在服务器 {} 上用 getent group {} 查询第三列 GID，把 group_add 中的 host:<组名> 改为该数值（CLI 用 --rm-group 和 --add-group）",
+          spec.server,
+          groups.iter().copied().collect::<Vec<_>>().join(" "),
+        ))
+      } else {
+        error
+      }
+    })?;
   if let Some(group) =
     groups.iter().find(|&&group| !actual.contains_key(group))
   {

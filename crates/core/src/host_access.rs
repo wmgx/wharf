@@ -377,7 +377,7 @@ pub(crate) fn resolved_compose_host_access(
   )
 }
 
-fn expanded_service_privilege(
+pub(crate) fn expanded_service_privilege(
   name: &str,
   before: Option<&ServiceSpec>,
   after: &ServiceSpec,
@@ -456,7 +456,8 @@ pub fn mark_plan(
     {
       item.impacts.push(Impact::Public);
     }
-    if item.action != Action::Delete
+    if item.layer == Layer::Config
+      && item.action != Action::Delete
       && let Some(name) = item.address.strip_prefix("service/")
       && let Some(after) = desired.services.get(name)
     {

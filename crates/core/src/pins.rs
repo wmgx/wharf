@@ -393,6 +393,8 @@ pub async fn resolve(
   for (name, row) in desired.services.iter_mut() {
     // 导入时按本机已有的镜像启动，不查仓库里的最新版本；部署后记下实际的版本。
     if row.import.is_some()
+      || row.spec.pull_policy
+        == Some(wharf_api_types::spec::ImagePullMode::Never)
       || row.spec.pull_policy.is_some()
         && !refresh.contains(name)
         && !images(&row.spec.source)
@@ -951,6 +953,7 @@ mod tests {
       commit: None,
       git: None,
       spec: None,
+      compose: None,
     };
     let id =
       |v: &str| BTreeMap::from([("x:latest".into(), v.into())]);
