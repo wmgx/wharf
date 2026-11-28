@@ -3928,6 +3928,8 @@ mod tests {
     let projects = status.get_mut("s1").unwrap().as_mut().unwrap();
     let mut owner = projects["app"].clone();
     owner.project = "photos".into();
+    owner.containers[0].service = "photos".into();
+    owner.containers[0].name = "photos-photos-1".into();
     owner.hash = Some(
       snapshot::service_resolved(
         &world,
