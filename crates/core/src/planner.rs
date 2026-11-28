@@ -378,6 +378,7 @@ pub struct Planned {
 
 #[derive(Default)]
 pub(crate) struct Builder {
+  service_targets: Option<BTreeSet<String>>,
   migration_limits: BTreeMap<String, (Option<u32>, bool)>,
   migration_mounts:
     BTreeMap<String, Vec<wharf_api_types::agent::ContainerMount>>,
@@ -542,6 +543,9 @@ pub(crate) async fn make_plan_inner(
   check_migrated_images: bool,
   admin: bool,
 ) -> Result<Planned, ApiError> {
+  if req.service_action.is_some() {
+    return make_batch_plan(state, req, snap, None).await;
+  }
   let current = snap.world.clone();
   let mut desired = current.clone();
   let given = usize::from(!req.changes.is_empty())
@@ -760,6 +764,7 @@ pub(crate) async fn make_plan_inner(
     &mut desired,
     &refresh,
     check_migrated_images,
+    None,
   )
   .await?;
   warnings.extend(resolved.warnings);
@@ -795,6 +800,7 @@ pub(crate) async fn make_plan_inner(
     &mut desired,
     &refresh,
     &mut warnings,
+    None,
   )
   .await?;
   mark("定版本");
@@ -1300,6 +1306,7 @@ fn finish_plan(
     created_at: now,
     expires_at: now + chrono::Duration::minutes(PLAN_TTL_MINUTES),
     base_versions: snap.world.versions(),
+    service_action: None,
     inputs: Some(crate::db::inputs_fingerprint(
       &snap.reach,
       &snap.service_values,
@@ -1417,6 +1424,8 @@ fn spec_json(world: &World, kind: &str, name: &str) -> Option<Value> {
 }
 
 mod route_impact;
+mod service_batch;
+pub(crate) use service_batch::make_batch_plan;
 
 fn config_items(
   b: &mut Builder,
@@ -1788,6 +1797,13 @@ fn service_items(
   writes: &[Write],
 ) -> Result<(), ApiError> {
   for (name, svc) in &desired.services {
+    if b
+      .service_targets
+      .as_ref()
+      .is_some_and(|targets| !targets.contains(name))
+    {
+      continue;
+    }
     let old = current.services.get(name);
     if old.is_some_and(|old| {
       crate::service_monitor::config_only(old, svc)

@@ -15,6 +15,7 @@ use wharf_api_types::{
   },
   plan::{
     ApplyRequest, ApplyResponse, Plan, PlanRequest, Run, RunStatus,
+    ServiceAction, ServiceActionKind,
   },
   spec::{
     BackupSpec, Change, Fleet, GatewayKind, GatewaySpec, GatewayTls,
@@ -1074,6 +1075,27 @@ async fn plan_and_maybe_apply(
   j: bool,
 ) -> CliResult<()> {
   plan_output(c, req, flags, j, Vec::new(), None).await
+}
+
+async fn plan_batch(
+  c: &Client,
+  action: ServiceActionKind,
+  tag: String,
+  flags: ApplyFlags,
+  json: bool,
+) -> CliResult<()> {
+  plan_output(
+    c,
+    PlanRequest {
+      service_action: Some(ServiceAction { action, tag }),
+      ..Default::default()
+    },
+    flags,
+    json,
+    vec![],
+    None,
+  )
+  .await
 }
 
 async fn plan_output(
@@ -3009,7 +3031,33 @@ async fn service(
         .await?;
       apply_prepared_plan(c, plan, apply, j, context).await
     }
-    ServiceCmd::Update { name, image, apply } => {
+    ServiceCmd::Stop {
+      tag: Some(tag),
+      apply,
+      ..
+    } => plan_batch(c, ServiceActionKind::Stop, tag, apply, j).await,
+    ServiceCmd::Update {
+      tag: Some(tag),
+      apply,
+      ..
+    } => {
+      plan_batch(c, ServiceActionKind::Update, tag, apply, j).await
+    }
+    ServiceCmd::Restart { tag: Some(tag), .. } => {
+      plan_batch(
+        c,
+        ServiceActionKind::Restart,
+        tag,
+        ApplyFlags::default(),
+        j,
+      )
+      .await
+    }
+    ServiceCmd::Update {
+      name, image, apply, ..
+    } => {
+      let name = name
+        .ok_or_else(|| ApiError::invalid("请指定服务名或 --tag"))?;
       changes(
         c,
         vec![Change::RefreshImages { name, image }],
@@ -3265,7 +3313,12 @@ async fn service(
     }
     ServiceCmd::Stop { .. } | ServiceCmd::Start { .. } => {
       let (name, apply, stopped) = match cmd {
-        ServiceCmd::Stop { name, apply } => (name, apply, true),
+        ServiceCmd::Stop { name, apply, .. } => {
+          let name = name.ok_or_else(|| {
+            ApiError::invalid("请指定服务名或 --tag")
+          })?;
+          (name, apply, true)
+        }
         ServiceCmd::Start { name, apply } => (name, apply, false),
         _ => unreachable!(),
       };
@@ -3287,7 +3340,11 @@ async fn service(
       )
       .await
     }
-    ServiceCmd::Restart { name, container } => {
+    ServiceCmd::Restart {
+      name, container, ..
+    } => {
+      let name = name
+        .ok_or_else(|| ApiError::invalid("请指定服务名或 --tag"))?;
       if container.is_some() {
         c.require_exec_v2_core().await?;
       }

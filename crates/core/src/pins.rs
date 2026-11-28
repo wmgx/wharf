@@ -244,6 +244,7 @@ pub async fn resolve(
   desired: &mut World,
   refresh: &BTreeSet<String>,
   check_migrated_images: bool,
+  targets: Option<&BTreeSet<String>>,
 ) -> Result<Resolved, ApiError> {
   let mut out = Resolved {
     image_ids: BTreeMap::new(),
@@ -261,6 +262,9 @@ pub async fn resolve(
   let mut todo: BTreeMap<(String, bool), Vec<ImageLookup>> =
     BTreeMap::new();
   for (name, row) in desired.services.iter_mut() {
+    if targets.is_some_and(|targets| !targets.contains(name)) {
+      continue;
+    }
     // 导入时按本机已有的镜像启动，不查仓库里的最新版本；部署后记下实际的版本。
     if row.import.is_some() {
       continue;
@@ -465,9 +469,13 @@ pub async fn resolve_commits(
   desired: &mut World,
   refresh: &BTreeSet<String>,
   warnings: &mut Vec<String>,
+  targets: Option<&BTreeSet<String>>,
 ) -> Result<(), ApiError> {
   let mut todo = Vec::new();
   for (name, row) in desired.services.iter_mut() {
+    if targets.is_some_and(|targets| !targets.contains(name)) {
+      continue;
+    }
     let Some(git) = crate::world::git_ref(&row.spec) else {
       continue;
     };

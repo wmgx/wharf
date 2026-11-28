@@ -2772,14 +2772,19 @@ async fn make_plan(
         .flatten()
     }));
   }
-  let planned = planner::make_plan_inner(
-    &s,
-    req,
-    snap,
-    true,
-    auth.has(Perm::Admin),
-  )
-  .await
+  let planned = if req.service_action.is_some() {
+    planner::make_batch_plan(&s, req, snap, auth.services.as_ref())
+      .await
+  } else {
+    planner::make_plan_inner(
+      &s,
+      req,
+      snap,
+      true,
+      auth.has(Perm::Admin),
+    )
+    .await
+  }
   .map_err(|error| {
     crate::missing_refs::scope_error(
       error,

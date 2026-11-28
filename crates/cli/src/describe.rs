@@ -98,6 +98,11 @@ fn walk(
       };
     }
     match command.as_str() {
+      "service restart" | "service stop" | "service update" => {
+        entry["flag_variants"] = json!({
+          "--tag": {"effect": "plan", "perms": ["plan"], "returns": "plan"}
+        });
+      }
       "data push" => {
         entry["flag_variants"] = json!({
           "--delete": {"apply_perms": ["exec", "confirm"]},

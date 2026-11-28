@@ -2247,6 +2247,7 @@ export interface Plan {
    */
   note?: string | null;
   plan_id: string;
+  service_action?: PlannedServiceAction | null;
   status: PlanStatus;
   /**
    * 建议的下一步命令。
@@ -2295,6 +2296,12 @@ export interface PlanSummary {
   note?: string | null;
   plan_id: string;
   status: PlanStatus;
+}
+
+export interface PlannedServiceAction {
+  action: ServiceActionKind;
+  tag: string;
+  targets: string[];
 }
 
 export type PortCheckSpec = {
@@ -2958,6 +2965,8 @@ export interface ServerView {
 /**
  * 按服务的内置告警规则覆盖。
  */
+export type ServiceActionKind = "restart" | "stop" | "update";
+
 export interface ServiceAlertOverrideView {
   enabled?: boolean | null;
   for_n?: number | null;

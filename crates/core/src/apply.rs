@@ -647,6 +647,15 @@ pub(crate) fn require_fresh(
     .into_iter()
     .collect::<Vec<_>>();
   if !stale.is_empty() {
+    if plan.service_action.is_some() {
+      return Err(
+        ApiError::new(
+          ErrorCode::PlanStale,
+          "服务操作的计划基线发生变化",
+        )
+        .with_hint("重新执行原命令生成计划"),
+      );
+    }
     return Err(
       ApiError::new(
         ErrorCode::PlanStale,
@@ -4553,6 +4562,7 @@ mod tests {
       created_at: now,
       expires_at: now,
       base_versions: Default::default(),
+      service_action: None,
       inputs: None,
       items: vec![wharf_api_types::plan::PlanItem {
         id: 1,

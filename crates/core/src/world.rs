@@ -479,6 +479,13 @@ impl World {
           }
           // compose 来源没填端口时按 compose 里映射的端口补上，否则服务没有内网地址。
           let mut spec = spec.clone();
+          if let Some(old) = old
+            && changes.iter().any(|change| {
+              matches!(change, Change::EditServiceTags { name: edited, .. } if edited == name)
+            })
+          {
+            spec.tags.clone_from(&old.spec.tags);
+          }
           spec.tags = spec
             .tags
             .iter()

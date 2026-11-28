@@ -320,6 +320,14 @@ pub fn check_plan_scope(
       !allowed
     })
     .map(|item| item.address.clone())
+    .chain(
+      plan
+        .service_action
+        .iter()
+        .flat_map(|action| &action.targets)
+        .filter(|name| !services.contains(*name))
+        .map(|name| format!("service/{name}")),
+    )
     .collect();
   if blocked.is_empty() {
     Ok(())

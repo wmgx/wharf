@@ -1212,7 +1212,11 @@ pub enum ServiceCmd {
   },
   /// 停止：容器保留但不运行，之后部署也保持停止。生成计划。
   Stop {
-    name: String,
+    #[arg(required_unless_present = "tag")]
+    name: Option<String>,
+    /// 按标签选服务，只生成计划。
+    #[arg(long, conflicts_with_all = ["name", "apply"])]
+    tag: Option<String>,
     #[command(flatten)]
     apply: ApplyFlags,
   },
@@ -1224,7 +1228,11 @@ pub enum ServiceCmd {
   },
   /// 重启容器，不改配置、不重建。
   Restart {
-    name: String,
+    #[arg(required_unless_present = "tag")]
+    name: Option<String>,
+    /// 按标签选服务，只生成计划。
+    #[arg(long, conflicts_with_all = ["name", "container"])]
+    tag: Option<String>,
     /// 仅重启指定 Compose 子容器。
     #[arg(long)]
     container: Option<String>,
@@ -1232,7 +1240,11 @@ pub enum ServiceCmd {
   /// 检查更新：镜像（image 来源和 compose 里的镜像）重新查标签现在的版本，git 构建来源重新查分支现在的 commit，
   /// 有新版本时计划里会更新。平时改配置不会换版本。不会换标签，换标签用 `wharf service retag`。
   Update {
-    name: String,
+    #[arg(required_unless_present = "tag")]
+    name: Option<String>,
+    /// 按标签选服务，只生成计划。
+    #[arg(long, conflicts_with_all = ["name", "image", "apply"])]
+    tag: Option<String>,
     /// 只检查这一个镜像，和 compose 里写的一字不差；不填检查全部镜像。
     /// 例：`wharf service update halo --image mysql:8.0.36`。
     #[arg(long)]

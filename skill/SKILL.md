@@ -131,6 +131,7 @@ wharf service update <服务> --json      # 查新版本（镜像标签或分支
 wharf service history <服务> --json     # 部署历史
 wharf service rollback <服务> --json    # 回到上一个不同的版本，--to <部署记录 id> 指定
 wharf service restart <服务> --json     # 只重启容器，不改配置
+wharf service restart --tag 试验 --json  # 批量生成计划，stop 和 update 也支持
 ```
 
 `update`、`rollback` 不带 `--apply` 时只出计划，同样按守则 2 处理。

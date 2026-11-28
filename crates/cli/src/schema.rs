@@ -113,6 +113,7 @@ fn entries() -> BTreeMap<&'static str, Schema> {
     ("host_exec", schema_for!(view::HostExecResponse)),
     ("exec_stream_event", schema_for!(view::ExecStreamEvent)),
     ("service_view", schema_for!(view::ServiceView)),
+    ("service_action", schema_for!(plan::ServiceAction)),
     ("gateway_view", schema_for!(view::GatewayView)),
     ("route_view", schema_for!(view::RouteView)),
     ("doctor", schema_for!(view::DoctorReport)),
