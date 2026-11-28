@@ -303,24 +303,30 @@ fn check_all(
       .chain(world.edge_apps.values().flat_map(|r| &r.spec.domains))
       .map(String::as_str)
       .collect::<BTreeSet<_>>();
+    let is_in = |host: &str, root: &str| {
+      host == root
+        || host.strip_suffix(root).is_some_and(|p| p.ends_with('.'))
+    };
     let roots = hosts
       .iter()
-      .filter_map(|host| host.split_once('.').map(|(_, root)| root))
+      .copied()
       .chain(world.gateways.values().flat_map(|r| {
         r.spec.wildcard.iter().map(|s| s.trim_start_matches("*."))
       }))
-      .filter(|root| root.contains('.'))
+      .chain(
+        snap
+          .accounts
+          .iter()
+          .flat_map(|account| &account.zones)
+          .map(String::as_str)
+          .filter(|zone| hosts.iter().any(|host| is_in(host, zone))),
+      )
       .collect::<BTreeSet<_>>();
     for (id, row) in &world.bookmarks {
       if let Ok(url) = reqwest::Url::parse(&row.spec.url)
         && let Some(host) = url.host_str()
         && !hosts.contains(host)
-        && roots.iter().any(|root| {
-          host == *root
-            || host
-              .strip_suffix(root)
-              .is_some_and(|p| p.ends_with('.'))
-        })
+        && roots.iter().any(|root| is_in(host, root))
       {
         add(
           "dead_bookmark",
@@ -450,8 +456,10 @@ fn lint_reports_stale_objects_without_matching_external_bookmark() {
     "gateways": {"edge": {"kind":"caddy","server":"s1","wildcard":["example.test"]}},
     "bookmarks": {
       "dead": {"title":"dead","url":"https://missing.example.test"},
-      "external": {"title":"external","url":"https://example.net"}
-    }
+      "external": {"title":"external","url":"https://example.net"},
+      "public-suffix": {"title":"external","url":"https://outside-fixture.co.uk"}
+    },
+    "routes": [{"hostname":"cluster-fixture.co.uk","upstream":"example.test:80"}]
   })).unwrap();
   snap.world.merge_with(&fleet).unwrap();
   snap.world.servers.insert(
@@ -488,7 +496,7 @@ fn lint_reports_stale_objects_without_matching_external_bookmark() {
     ]
     .into()
   );
-  assert!(report.findings.iter().all(
-    |f| !f.suggest.is_empty() && f.subject != "bookmark/external"
-  ));
+  assert!(report.findings.iter().all(|f| !f.suggest.is_empty()
+    && f.subject != "bookmark/external"
+    && f.subject != "bookmark/public-suffix"));
 }
