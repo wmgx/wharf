@@ -335,3 +335,23 @@ pub async fn preview_api(
   auth.require(Perm::Read)?;
   Ok(Json(preview(&s).await?))
 }
+
+#[cfg(test)]
+#[test]
+fn digest_render_caps_body_without_losing_total_count() {
+  let rows = (0..100)
+    .map(|id| DigestRow {
+      id,
+      source: "disk_forecast".into(),
+      subject: Some("s1".into()),
+      title: "磁盘预警".repeat(300),
+      fired_at: 0,
+      recovered_at: None,
+      is_notice: false,
+    })
+    .collect::<Vec<_>>();
+  let (title, body) = render(&rows).unwrap();
+  assert!(title.contains("100 条"));
+  assert!(body.contains("条已省略"));
+  assert!(body.len() <= MAX_RENDER_BYTES);
+}

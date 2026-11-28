@@ -724,6 +724,14 @@ async fn commits(
 mod tests {
   use super::*;
 
+  #[tokio::test]
+  async fn update_check_rejects_read_only_tokens() {
+    let state = crate::rules::tests::test_state();
+    let auth = crate::host_access::tests::auth([Perm::Read], false);
+    let error = check_now(State(state), auth).await.unwrap_err();
+    assert_eq!(error.0.code, wharf_api_types::ErrorCode::Forbidden);
+  }
+
   #[test]
   fn multi_image_partial_error_single_update_git_and_stopped() {
     let world = crate::world::World::from_rows(vec![crate::db::ResourceRow {
@@ -768,6 +776,12 @@ mod tests {
     reconcile(row, &mut check);
     assert_eq!(check.latest.as_deref(), Some("new-b"));
     assert!(check.newer && !check.images["app:1"].newer);
+    row.spec.source = serde_json::from_value(serde_json::json!({
+      "build": {"git":{"repo":"https://git.example.test/team/repo","ref":"main"}}
+    })).unwrap();
+    row.commit = Some("new-b".into());
+    reconcile(row, &mut check);
+    assert!(!check.newer);
     row.spec.stopped = true;
     assert!(!included(None, "web", row));
   }

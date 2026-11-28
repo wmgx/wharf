@@ -194,3 +194,42 @@ async fn custom_rule_p95_consecutive_three_and_service_delete_cleanup()
   assert!(v.service_overrides.is_empty());
   assert!(v.custom_rules.is_empty());
 }
+
+#[tokio::test]
+async fn idle_http_recovers_an_upper_bound_without_firing_a_lower_bound()
+ {
+  let _guard = TEST_LOCK.lock().await;
+  reset_memory();
+  let state = test_state();
+  seed_server_service(&state, "s1", "web").await;
+  let now = db::now_ms();
+  for (name, op, threshold) in
+    [("error-high", ">", 5.0), ("latency-low", "<", 100.0)]
+  {
+    custom::add_rule(
+      &state,
+      CustomAlertRuleRequest {
+        name: name.into(),
+        service: "web".into(),
+        metric: if op == ">" { "err" } else { "p95" }.into(),
+        op: op.into(),
+        threshold,
+        for_n: 1,
+        level: AlertLevel::Urgent,
+      },
+      now,
+    )
+    .await
+    .unwrap();
+  }
+  observe_at(&state, now, "req.err", "web", 90.0, "").await;
+  assert!(firing_since("error-high", "web").is_some());
+  super::super::recover_idle_http(
+    &state,
+    now + 90_000,
+    &Default::default(),
+  )
+  .await;
+  assert!(firing_since("error-high", "web").is_none());
+  assert!(firing_since("latency-low", "web").is_none());
+}

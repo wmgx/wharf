@@ -296,7 +296,7 @@ async fn follow(
     } else {
       HashMap::new()
     };
-    let mut refreshed = Instant::now();
+    let mut refreshed: Option<Instant> = None;
     let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(256);
     let cmd = docker
       .compose(&project)
@@ -324,14 +324,15 @@ async fn follow(
         }
         if targeted
           && !containers.contains_key(prefix)
-          && refreshed.elapsed() >= Duration::from_secs(10)
+          && refreshed
+            .is_none_or(|at| at.elapsed() >= Duration::from_secs(10))
           && watches.iter().any(|m| {
             m.watch.spec.container.is_some()
               && matches(&m.watch.spec, m.regex.as_ref(), content)
           })
         {
           containers = container_names(&docker, &project, &ctx).await;
-          refreshed = Instant::now();
+          refreshed = Some(Instant::now());
         }
         for m in watches.iter() {
           let spec = &m.watch.spec;

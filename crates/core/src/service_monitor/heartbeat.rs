@@ -72,6 +72,22 @@ BEGIN
 END;
 ";
 
+pub(crate) fn base_url(
+  world: &World,
+  net: &crate::render::Net,
+  listener: Option<u16>,
+  configured: Option<&str>,
+) -> Option<String> {
+  configured
+    .filter(|url| !url.is_empty())
+    .map(str::to_string)
+    .or_else(|| {
+      crate::join::route_urls(world, net, listener?)
+        .into_iter()
+        .next()
+    })
+}
+
 pub fn prepare(
   current: &World,
   desired: &mut World,
@@ -596,6 +612,39 @@ mod tests {
     assert_eq!(doc["services"]["app"]["environment"]["FOO"], "1");
     assert!(doc["services"]["app"]["environment"].get(ENV).is_some());
     assert!(doc["services"]["db"].get("environment").is_none());
+  }
+
+  #[test]
+  fn heartbeat_base_uses_core_route_without_explicit_url() {
+    let row = |kind: &str, name: &str, spec| crate::db::ResourceRow {
+      kind: kind.into(),
+      name: name.into(),
+      version: 1,
+      meta: json!({}),
+      spec,
+    };
+    let world = World::from_rows(vec![
+      row("gateway", "gw", json!({"kind":"caddy","server":"s1"})),
+      row("route", "wharf.example.test", json!({"hostname":"wharf.example.test","gateway":"gw","upstream":"127.0.0.1:7700"})),
+    ]).unwrap();
+    let net = crate::render::Net {
+      core_server: Some("s1".into()),
+      ..Default::default()
+    };
+    assert_eq!(
+      base_url(&world, &net, Some(7700), None).as_deref(),
+      Some("https://wharf.example.test")
+    );
+    assert_eq!(
+      base_url(
+        &world,
+        &net,
+        Some(7700),
+        Some("https://legacy.example.test")
+      )
+      .as_deref(),
+      Some("https://legacy.example.test")
+    );
   }
 
   #[test]

@@ -213,7 +213,8 @@ fn reject_out_of_range_service_checks() {
     HeartbeatSpec {
       every_mins: 100000,
       grace_mins: 5,
-      token: String::new()
+      token: String::new(),
+      targeted: false,
     }
     .validate()
     .is_err()
