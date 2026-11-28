@@ -2313,6 +2313,31 @@ async fn make_plan(
     audit.skip_record();
     return Err(error.into());
   }
+  let mut visible_routes = std::collections::BTreeSet::new();
+  if let Some(services) = &auth.services {
+    visible_routes.extend(
+      snap
+        .world
+        .routes
+        .iter()
+        .filter(|(_, row)| {
+          crate::token_scope::route_spec_in_scope(services, &row.spec)
+        })
+        .map(|(host, _)| host.clone()),
+    );
+    visible_routes.extend(req.changes.iter().filter_map(|change| {
+      let wharf_api_types::spec::Change::UpsertRoute { spec } =
+        change
+      else {
+        return None;
+      };
+      crate::token_scope::route_spec_in_scope(services, spec)
+        .then(|| {
+          crate::world::normalize_hostname(&spec.hostname).ok()
+        })
+        .flatten()
+    }));
+  }
   let planned = planner::make_plan_inner(
     &s,
     req,
@@ -2320,7 +2345,14 @@ async fn make_plan(
     true,
     auth.has(Perm::Admin),
   )
-  .await?;
+  .await
+  .map_err(|error| {
+    crate::missing_refs::scope_error(
+      error,
+      auth.services.as_ref(),
+      &visible_routes,
+    )
+  })?;
   crate::token_scope::require_plan(
     &auth,
     &planned.plan,

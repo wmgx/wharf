@@ -2215,6 +2215,8 @@ pub struct RefReport {
   pub refs: Vec<RefHit>,
   #[serde(default)]
   pub complete: bool,
+  #[serde(default)]
+  pub removable: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -2230,13 +2232,19 @@ pub struct TreeRouteNode {
   pub https: bool,
   pub gate: bool,
   pub basic_auth: bool,
-  pub gateway: Option<String>,
-  pub backup_gateway: Option<String>,
+  pub gateway: Option<TreeGatewayNode>,
+  pub backup_gateway: Option<TreeGatewayNode>,
   pub backup_active: bool,
   pub link: Option<String>,
   pub service: Option<TreeServiceNode>,
   pub port: Option<String>,
   pub path_services: Vec<TreeServiceNode>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TreeGatewayNode {
+  pub name: String,
+  pub server: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -2247,6 +2255,8 @@ pub struct TreeServiceNode {
   pub dependencies: Vec<String>,
   pub backup_to: Option<String>,
   pub stopped: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub state: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

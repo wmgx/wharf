@@ -275,6 +275,9 @@ async fn sync(
       for action in &env.actions {
         println!("{}  {}", action.name, action.action);
       }
+      if let Some(hint) = preview["hint"].as_str() {
+        println!("{hint}");
+      }
     });
     return Ok(());
   }
@@ -426,7 +429,7 @@ fn sync_preserves_refs_and_masks_preview() {
   else {
     panic!("预期为 env sync");
   };
-  let map = dotenv_fixture;
+  let map = |s| dotenv::parse(s).unwrap();
   let old = map("APP_ENV=prod\nDB_PASS=[[APP_DB_PASS]]");
   let local = map(
     "APP_ENV=staging\nDB_PASS=fixture-old-plain\nNEW_TOKEN=fixture-new-plain\nEMPTY_SECRET=changeme",
@@ -442,13 +445,4 @@ fn sync_preserves_refs_and_masks_preview() {
     !preview.contains("fixture-old-plain")
       && !preview.contains("fixture-new-plain")
   );
-}
-
-#[cfg(test)]
-fn dotenv_fixture(text: &str) -> BTreeMap<String, String> {
-  text
-    .lines()
-    .map(|l| l.split_once('=').unwrap())
-    .map(|(k, v)| (k.into(), v.into()))
-    .collect()
 }

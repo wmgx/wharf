@@ -505,6 +505,12 @@ fn collect_refs(
     }
     _ => !hits.is_empty(),
   };
+  let removable = kind == "secret"
+    && exists
+    && scope.is_none()
+    && hits.is_empty()
+    && !crate::secret_policy::is_managed_secret(name)
+    && !crate::secret_policy::is_system_secret(name);
   RefReport {
     kind: kind.into(),
     name: name.into(),
@@ -512,6 +518,7 @@ fn collect_refs(
     count: hits.len(),
     refs: hits,
     complete: scope.is_none(),
+    removable,
   }
 }
 
@@ -729,10 +736,12 @@ mod tests {
     let snap = seeded();
     let all = build_tree(&snap, None, &TreeQuery::default()).unwrap();
     let route = &all.routes[0];
-    assert!(route.gateway.as_deref().unwrap().starts_with("edge"));
-    assert!(
-      route.backup_gateway.as_deref().unwrap().starts_with("cf")
+    assert_eq!(route.gateway.as_ref().unwrap().name, "edge");
+    assert_eq!(
+      route.backup_gateway.as_ref().unwrap().server.as_deref(),
+      Some("s2")
     );
+    assert_eq!(route.link.as_deref(), Some("frp"));
     let service = route.service.as_ref().unwrap();
     assert_eq!(service.dependencies, ["db"]);
     assert_eq!(service.backup_to.as_deref(), Some("s2"));

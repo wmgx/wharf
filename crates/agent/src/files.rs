@@ -96,6 +96,7 @@ fn handle_in(base: &Path, op: FilesOp) -> Result<Value, ApiError> {
       offset,
       len,
       expect.as_ref(),
+      false,
     )?),
     FilesOp::Write {
       path,
@@ -128,7 +129,7 @@ pub(crate) fn read_root(
     .split_last()
     .ok_or_else(|| ApiError::invalid("路径不对"))?;
   let parent = walk(root, dirs, path, false)?;
-  read(&parent, name, path, offset, len, expect)
+  read(&parent, name, path, offset, len, expect, true)
 }
 
 fn file_version(meta: &std::fs::Metadata) -> FileVersion {
@@ -148,6 +149,7 @@ fn read(
   offset: u64,
   len: u32,
   expect: Option<&FileVersion>,
+  private: bool,
 ) -> Result<FileChunk, ApiError> {
   let err = io_err(Path::new(path));
   let fd = parent
@@ -161,7 +163,7 @@ fn read(
     })?;
   let mut f = File::from(fd);
   let meta = f.metadata().map_err(&err)?;
-  if !meta.is_file() {
+  if !meta.is_file() || private && meta.nlink() != 1 {
     return Err(ApiError::invalid("只能读文件"));
   }
   let changed = || {

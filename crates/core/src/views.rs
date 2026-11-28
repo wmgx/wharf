@@ -178,6 +178,17 @@ pub fn spawn_live(state: Arc<AppState>) {
   });
 }
 
+pub(crate) fn cached_project_state(
+  server: &str,
+  project: &str,
+  stopped: bool,
+) -> Option<String> {
+  let cache = LIVE_CACHE.lock().ok()?;
+  let (at, live) = cache.as_ref()?;
+  (at.elapsed() < LIVE_STALE)
+    .then(|| live_of(live, server, project, None, stopped).state)
+}
+
 /// 缓存里的现状；没有或太旧时现查。
 pub async fn cached_live(state: &AppState, world: &World) -> LiveMap {
   let cached = LIVE_CACHE

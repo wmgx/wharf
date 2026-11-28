@@ -36,7 +36,7 @@ pub async fn refs(
     c.get(&format!("/api/refs?target={}", seg(target))).await?;
   out(j, &report, |r| {
     println!("{}/{}：{} 处引用", r.kind, r.name, r.count);
-    if r.kind == "secret" && r.exists && r.complete && r.count == 0 {
+    if r.removable {
       println!("无引用：wharf secret rm {}", r.name);
     }
     let mut previous = None;
@@ -79,18 +79,18 @@ pub async fn tree(
         if r.gate { " · gate" } else { "" },
         if r.basic_auth { " · Basic Auth" } else { "" }
       );
-      if let Some(g) = &r.gateway {
-        println!("├── 网关：{g}");
-      }
-      if let Some(g) = &r.backup_gateway {
-        println!(
-          "├── 备用：{g}{}",
-          if r.backup_active {
-            "（已启用）"
-          } else {
-            ""
-          }
-        );
+      for (label, gateway, active) in [
+        ("网关", &r.gateway, false),
+        ("备用", &r.backup_gateway, r.backup_active),
+      ] {
+        if let Some(gateway) = gateway {
+          let server = gateway
+            .server
+            .as_deref()
+            .map_or_else(String::new, |name| format!(" ({name})"));
+          let state = if active { "（已启用）" } else { "" };
+          println!("├── {label}：{}{server}{state}", gateway.name);
+        }
       }
       if let Some(link) = &r.link {
         println!("├── 链路：{link}");
@@ -122,11 +122,17 @@ fn service(s: &TreeServiceNode) {
     .map(|(p, v)| format!("{p}({v})"))
     .collect::<Vec<_>>()
     .join(" ");
-  println!(
-    "└── 服务：{}{server} {ports}{}",
-    s.name,
-    if s.stopped { " [已停用]" } else { "" }
+  let state = s.state.as_deref().map_or_else(
+    || {
+      if s.stopped {
+        " [已停用]".into()
+      } else {
+        String::new()
+      }
+    },
+    |state| format!(" [{state}]"),
   );
+  println!("└── 服务：{}{server} {ports}{state}", s.name);
   if !s.dependencies.is_empty() {
     println!("    依赖：{}", s.dependencies.join("、"));
   }

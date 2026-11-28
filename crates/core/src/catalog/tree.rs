@@ -3,7 +3,10 @@ use std::collections::BTreeSet;
 use wharf_api_types::{
   ApiError,
   spec::{GatewayKind, GatewayTls},
-  view::{TreeRouteNode, TreeServerNode, TreeServiceNode, TreeView},
+  view::{
+    TreeGatewayNode, TreeRouteNode, TreeServerNode, TreeServiceNode,
+    TreeView,
+  },
 };
 
 use super::{TreeQuery, route_visible, visible};
@@ -102,6 +105,14 @@ pub(super) fn build_tree(
         .then(|| row.spec.backup.as_ref().map(|b| b.to.clone()))
         .flatten(),
       stopped: row.spec.stopped,
+      state: crate::snapshot::service_runtime_server(snap, name)
+        .and_then(|server| {
+          crate::views::cached_project_state(
+            server,
+            name,
+            row.spec.stopped,
+          )
+        }),
     })
   };
   let on_server = |name| {
@@ -165,11 +176,9 @@ pub(super) fn build_tree(
         crate::link::Choice::Tunnel => Some("frp"),
       }
     });
-    let gateway_label = |name: &str| {
-      world.gateways.get(name).map_or_else(
-        || name.to_string(),
-        |g| format!("{name} ({})", g.spec.server),
-      )
+    let gateway_node = |name: &str| TreeGatewayNode {
+      name: name.to_string(),
+      server: world.gateways.get(name).map(|g| g.spec.server.clone()),
     };
     routes.push(TreeRouteNode {
       hostname: host.clone(),
@@ -181,11 +190,11 @@ pub(super) fn build_tree(
       basic_auth: spec.auth,
       gateway: scope
         .is_none()
-        .then(|| main.map(gateway_label))
+        .then(|| main.map(gateway_node))
         .flatten(),
       backup_gateway: scope
         .is_none()
-        .then(|| backup.map(gateway_label))
+        .then(|| backup.map(gateway_node))
         .flatten(),
       backup_active: scope.is_none() && crate::failover::active(host),
       link: scope
@@ -194,7 +203,7 @@ pub(super) fn build_tree(
         .flatten()
         .map(str::to_string),
       service: node(&spec.service),
-      port: spec.port.clone(),
+      port: world.route_port(spec).map(str::to_string),
       path_services: targets
         .into_iter()
         .filter(|n| *n != spec.service)

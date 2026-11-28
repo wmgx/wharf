@@ -42,7 +42,9 @@ pub(crate) fn check_name(name: &str) -> bool {
       .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
 }
 
-fn parse(text: &str) -> Result<BTreeMap<String, String>, ApiError> {
+pub(crate) fn parse(
+  text: &str,
+) -> Result<BTreeMap<String, String>, ApiError> {
   let mut entries = BTreeMap::new();
   for (i, line) in text.lines().enumerate() {
     let line = line.trim();

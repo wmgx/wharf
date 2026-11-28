@@ -3201,6 +3201,12 @@ export interface TailnetRelay {
   to: string;
 }
 
+export interface TaskArtifact {
+  path: string;
+  sha256: string;
+  size: number;
+}
+
 export type TaskKind = {
   command: string;
   /**
@@ -3234,12 +3240,6 @@ export type TaskKind = {
    */
   token: string;
 };
-
-export interface TaskArtifact {
-  path: string;
-  sha256: string;
-  size: number;
-}
 
 export interface TaskRunView {
   artifacts?: TaskArtifact[];

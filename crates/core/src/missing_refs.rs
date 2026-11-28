@@ -444,6 +444,42 @@ pub(crate) fn check_plan(
   )
 }
 
+pub(crate) fn scope_error(
+  err: ApiError,
+  allowed: Option<&BTreeSet<String>>,
+  routes: &BTreeSet<String>,
+) -> ApiError {
+  let Some(allowed) = allowed else { return err };
+  let Some(missing) =
+    err.details.as_ref().and_then(|d| d.get("missing"))
+  else {
+    return err;
+  };
+  let Ok(mut missing) =
+    serde_json::from_value::<Vec<MissingRef>>(missing.clone())
+  else {
+    return err;
+  };
+  let total = missing.len();
+  missing.retain(|hit| {
+    let owner =
+      hit.source.split_whitespace().next().unwrap_or_default();
+    owner
+      .strip_prefix("service/")
+      .is_some_and(|name| allowed.contains(name))
+      || owner
+        .strip_prefix("route/")
+        .is_some_and(|name| routes.contains(name))
+  });
+  if missing.len() == total {
+    return err;
+  }
+  error(missing).err().unwrap_or_else(|| {
+    ApiError::invalid("改动导致其他资源引用缺失")
+      .with_hint("使用不限服务的令牌查看完整引用")
+  })
+}
+
 #[test]
 fn plan_aggregates_missing_across_resources() {
   let snap = Snapshot::default();

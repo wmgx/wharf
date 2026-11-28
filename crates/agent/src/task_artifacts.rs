@@ -34,7 +34,7 @@ pub(crate) struct OutputDir {
   retain: bool,
 }
 
-fn task_root(
+fn task_dir(
   base: &Path,
   task: &str,
   create: bool,
@@ -44,12 +44,20 @@ fn task_root(
     DirFd::open_dir(base).map_err(|e| dir_error(base, e))?;
   let name = format!("{TASK_DATA_PREFIX}{task}");
   let key = component(name.as_ref()).map_err(io_err(base))?;
-  let task_fd = if create {
+  if create {
     base_fd.ensure_subdir(&key, 0o700)
   } else {
     base_fd.open_subdir(&key)
   }
-  .map_err(|e| dir_error(&base.join(name), e))?;
+  .map_err(|e| dir_error(&base.join(name), e))
+}
+
+fn task_root(
+  base: &Path,
+  task: &str,
+  create: bool,
+) -> Result<DirFd, ApiError> {
+  let task_fd = task_dir(base, task, create)?;
   let root = if create {
     task_fd.ensure_subdir(c"artifacts", 0o700)
   } else {
@@ -343,7 +351,27 @@ pub(crate) fn prune(
   keep: &[i64],
   cancel: &CancellationToken,
 ) -> Result<(), ApiError> {
-  let base = Path::new("/srv");
+  prune_at(Path::new("/srv"), task, keep, cancel)
+}
+
+fn prune_at(
+  base: &Path,
+  task: &str,
+  keep: &[i64],
+  cancel: &CancellationToken,
+) -> Result<(), ApiError> {
+  if keep.is_empty() {
+    let task_dir = match task_dir(base, task, false) {
+      Err(e) if e.code == ErrorCode::NotFound => return Ok(()),
+      result => result?,
+    };
+    return match task_dir
+      .remove_tree(c"artifacts", &|| check_cancel(cancel))
+    {
+      Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+      result => result.map_err(io_err(base)),
+    };
+  }
   let root = match task_root(base, task, false) {
     Err(e) if e.code == ErrorCode::NotFound => return Ok(()),
     result => result?,
@@ -410,4 +438,6 @@ fn retains_five_runs_and_discards_symlinks() {
     run_ids(&DirFd::open_dir(&root.unwrap()).unwrap()).unwrap();
   runs.sort_unstable();
   assert_eq!(runs, [3, 4, 5, 6, 7]);
+  prune_at(temp.path(), "t1", &[], &cancel).unwrap();
+  assert!(!temp.path().join("wharf-task-t1/artifacts").exists());
 }
