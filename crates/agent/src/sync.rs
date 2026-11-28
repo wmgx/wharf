@@ -124,6 +124,9 @@ pub async fn serve(
   let base = sync_root(s.kind, &s.service)?;
   let root = base.join(&s.service);
   if s.kind == SyncKind::CloneData {
+    if s.preserve_existing {
+      return Err(ApiError::invalid("复制只能写到本次暂存目录"));
+    }
     crate::dirfd::DirFd::open_service_root(base, &s.service)?;
   } else if !s.kind.is_service_data() {
     let relative = base.strip_prefix("/srv").expect("固定备份根目录");

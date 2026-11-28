@@ -2847,6 +2847,7 @@ async fn make_plan(
     planned.plan.plan_id
   ));
   let mut plan = planned.plan;
+  crate::token_scope::redact_plan_baseline(&auth, &mut plan);
   if query.brief() {
     planner::compact_plan(&mut plan);
   }

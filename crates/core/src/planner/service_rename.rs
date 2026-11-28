@@ -22,7 +22,6 @@ pub(crate) struct RenameJob {
   expected_hash: String,
   has_data: bool,
 }
-
 fn reject(reason: &str) -> ApiError {
   ApiError::new(
     ErrorCode::Conflict,
@@ -30,7 +29,6 @@ fn reject(reason: &str) -> ApiError {
   )
   .with_hint("处理列出的关系，或先克隆后手动切换")
 }
-
 pub(crate) async fn plan(
   state: &AppState,
   snap: Snapshot,
@@ -153,7 +151,6 @@ pub(crate) async fn plan(
   });
   Ok(plan)
 }
-
 fn config_checks(
   snap: &Snapshot,
   from: &str,
@@ -335,7 +332,6 @@ fn candidate(
   }
   Ok(desired)
 }
-
 type ConfigItem =
   (&'static str, String, Option<Value>, Option<Value>);
 fn changed_config(
@@ -378,13 +374,17 @@ fn inspect_db(
   from: &str,
   to: &str,
 ) -> Result<(), ApiError> {
+  let key = db::scoped_secret_name(crate::backup::KEY_PREFIX, from)?;
+  let target_key =
+    db::scoped_secret_name(crate::backup::KEY_PREFIX, to)?;
   let blocked: bool = c.query_row(
     "SELECT
       EXISTS(SELECT 1 FROM backups WHERE service IN (?1,?2)) OR
       EXISTS(SELECT 1 FROM cleanups WHERE service IN (?1,?2)) OR
       EXISTS(SELECT 1 FROM api_tokens, json_each(api_tokens.services) WHERE json_each.value IN (?1,?2)) OR
-      EXISTS(SELECT 1 FROM secret_allowed_services WHERE service=?2)",
-    rusqlite::params![from,to], |row| row.get(0),
+      EXISTS(SELECT 1 FROM secret_allowed_services WHERE service=?2) OR
+      EXISTS(SELECT 1 FROM secrets WHERE name IN (?3,?4))",
+    rusqlite::params![from,to,key,target_key], |row| row.get(0),
   ).map_err(db::sql_err)?;
   if blocked {
     return Err(reject(

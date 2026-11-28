@@ -165,22 +165,7 @@ pub(crate) async fn run(
         return Err(ApiError::invalid("源和目标服务不能相同"));
       }
       let source = DirFd::open_service_root(Path::new(SRV), source)?;
-      crate::dirfd::validate_tree(&source, true)?;
-      Cmd::new("rsync")
-        .args([
-          "-aH",
-          "--numeric-ids",
-          "--checksum",
-          "--delete",
-          "--one-file-system",
-        ])
-        .arg(format!("{}/", in_child(&source).display()))
-        .arg(format!("{}/", in_child(&staged).display()))
-        .stream(true)
-        .timeout(Duration::from_secs(4 * 3600))
-        .run(ctx)
-        .await?
-        .check("复制托管数据")?;
+      copy_local(&source, &staged, ctx).await?;
     }
     ServiceCopy::Commit { .. } => {
       crate::dirfd::validate_tree(&staged, true)?;
@@ -298,4 +283,61 @@ async fn archive(
     Err(e) => return Err(io_err(Path::new(SRV))(e)),
   }
   Ok(json!({"committed": true}))
+}
+
+async fn copy_local(
+  source: &DirFd,
+  staged: &DirFd,
+  ctx: &Ctx,
+) -> Result<(), ApiError> {
+  crate::dirfd::validate_tree(source, true)?;
+  Cmd::new("rsync")
+    .args([
+      "-aH",
+      "--numeric-ids",
+      "--checksum",
+      "--delete",
+      "--one-file-system",
+    ])
+    .arg(format!("{}/", in_child(source).display()))
+    .arg(format!("{}/", in_child(staged).display()))
+    .stream(true)
+    .timeout(Duration::from_secs(4 * 3600))
+    .run(ctx)
+    .await?
+    .check("复制托管数据")?;
+  Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn local_copy_preserves_source_and_never_replaces_a_destination()
+ {
+  if std::env::var_os("GITHUB_ACTIONS").is_none() {
+    return;
+  }
+  let tmp = tempfile::tempdir().unwrap();
+  for name in ["a", "staged", "b"] {
+    std::fs::create_dir(tmp.path().join(name)).unwrap();
+  }
+  std::fs::write(tmp.path().join("a/marker"), "data").unwrap();
+  std::fs::write(tmp.path().join("b/marker"), "other").unwrap();
+  let root = DirFd::open_dir(tmp.path()).unwrap();
+  let src = root.open_subdir(c"a").unwrap();
+  let staged = root.open_subdir(c"staged").unwrap();
+  copy_local(&src, &staged, &Ctx::detached()).await.unwrap();
+  assert_eq!(
+    std::fs::read_to_string(tmp.path().join("staged/marker"))
+      .unwrap(),
+    "data"
+  );
+  assert!(root.rename_noreplace(c"staged", &root, c"b").is_err());
+  assert_eq!(
+    std::fs::read_to_string(tmp.path().join("b/marker")).unwrap(),
+    "other"
+  );
+  assert_eq!(
+    std::fs::read_to_string(tmp.path().join("a/marker")).unwrap(),
+    "data"
+  );
 }

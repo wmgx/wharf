@@ -407,63 +407,6 @@ async fn make_batch_plan(
   Ok(planned)
 }
 
-#[cfg(test)]
-mod tests {
-  use super::*;
-
-  #[tokio::test]
-  async fn batch_uses_visible_targets_and_does_not_plan_other_drift()
-  {
-    let state = crate::rules::tests::test_state();
-    state.db.call(|c| {
-      for name in ["a", "b", "c"] {
-        db::apply_write(c, &Write::Upsert {
-          kind: "service".into(), name: name.into(), meta: json!({}),
-          spec: json!({"server":"s1","source":{"image":"fixture:1"},"stopped":name != "c","tags":["试验"]}),
-        })?;
-      }
-      Ok(())
-    }).await.unwrap();
-    let allowed = BTreeSet::from(["a".into(), "b".into()]);
-    let req = serde_json::from_value(json!({
-      "service_action":{"action":"restart","tag":" 试验 "}
-    }))
-    .unwrap();
-    let snap = snapshot::load(&state.db).await.unwrap();
-    let plan = make_service_action_plan(
-      &state,
-      req,
-      snap,
-      Some(&allowed),
-      false,
-    )
-    .await
-    .unwrap();
-    assert!(plan.steps.is_empty());
-    assert!(plan.writes.is_empty());
-    assert_eq!(
-      plan.plan.service_action.as_ref().unwrap().targets,
-      ["a", "b"]
-    );
-    assert_eq!(plan.plan.warnings.len(), 2);
-    assert!(
-      crate::token_scope::check_plan_scope(
-        &BTreeSet::from(["a".into()]),
-        &plan.plan,
-        &plan.route_effects
-      )
-      .is_err()
-    );
-    state.db.call_credentials(move |c,key| {
-      c.execute("UPDATE resources SET version=version+1 WHERE kind='service' AND name='a'",[]).map_err(db::sql_err)?;
-      let err=crate::apply::require_fresh(c,key,&plan.plan,Some(&plan.account_refs),Some(&plan.base_instances)).unwrap_err();
-      assert_eq!(err.code,ErrorCode::PlanStale);
-      assert_eq!(err.hint.as_deref(),Some("重新执行原命令生成计划"));
-      Ok(())
-    }).await.unwrap();
-  }
-}
-
 fn resume_plan(
   state: &AppState,
   snap: &Snapshot,
@@ -531,4 +474,61 @@ fn resume_plan(
     targets: vec![name.into()],
   });
   Ok(plan)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[tokio::test]
+  async fn batch_uses_visible_targets_and_does_not_plan_other_drift()
+  {
+    let state = crate::rules::tests::test_state();
+    state.db.call(|c| {
+      for name in ["a", "b", "c"] {
+        db::apply_write(c, &Write::Upsert {
+          kind: "service".into(), name: name.into(), meta: json!({}),
+          spec: json!({"server":"s1","source":{"image":"fixture:1"},"stopped":name != "c","tags":["试验"]}),
+        })?;
+      }
+      Ok(())
+    }).await.unwrap();
+    let allowed = BTreeSet::from(["a".into(), "b".into()]);
+    let req = serde_json::from_value(json!({
+      "service_action":{"action":"restart","tag":" 试验 "}
+    }))
+    .unwrap();
+    let snap = snapshot::load(&state.db).await.unwrap();
+    let plan = make_service_action_plan(
+      &state,
+      req,
+      snap,
+      Some(&allowed),
+      false,
+    )
+    .await
+    .unwrap();
+    assert!(plan.steps.is_empty());
+    assert!(plan.writes.is_empty());
+    assert_eq!(
+      plan.plan.service_action.as_ref().unwrap().targets,
+      ["a", "b"]
+    );
+    assert_eq!(plan.plan.warnings.len(), 2);
+    assert!(
+      crate::token_scope::check_plan_scope(
+        &BTreeSet::from(["a".into()]),
+        &plan.plan,
+        &plan.route_effects
+      )
+      .is_err()
+    );
+    state.db.call_credentials(move |c,key| {
+      c.execute("UPDATE resources SET version=version+1 WHERE kind='service' AND name='a'",[]).map_err(db::sql_err)?;
+      let err=crate::apply::require_fresh(c,key,&plan.plan,Some(&plan.account_refs),Some(&plan.base_instances)).unwrap_err();
+      assert_eq!(err.code,ErrorCode::PlanStale);
+      assert_eq!(err.hint.as_deref(),Some("重新执行原命令生成计划"));
+      Ok(())
+    }).await.unwrap();
+  }
 }

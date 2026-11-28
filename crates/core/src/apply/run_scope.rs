@@ -82,7 +82,9 @@ pub async fn load_plan_for(
     )
     .map_err(|_| token_scope::forbidden(&auth.name, allowed, ""))?;
   }
-  Ok(stored.body.plan)
+  let mut plan = stored.body.plan;
+  token_scope::redact_plan_baseline(auth, &mut plan);
+  Ok(plan)
 }
 
 pub async fn list_plans(

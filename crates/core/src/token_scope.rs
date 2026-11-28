@@ -458,6 +458,18 @@ pub fn require_plan_request(
   }
 }
 
+pub(crate) fn redact_plan_baseline(auth: &Auth, plan: &mut Plan) {
+  if plan.service_action.is_some()
+    && let Some(services) = &auth.services
+  {
+    plan.base_versions.retain(|address, _| {
+      address
+        .strip_prefix("service/")
+        .is_some_and(|name| services.contains(name))
+    });
+  }
+}
+
 pub fn require_plan(
   auth: &Auth,
   plan: &Plan,

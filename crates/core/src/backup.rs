@@ -50,7 +50,7 @@ const LEGACY_HTTP_HASH_SECRET: &str = "WHARF_BACKUP_HTTP_HASH";
 pub(crate) mod browse;
 
 pub const SECRET_PREFIX: &str = "WHARF_BACKUP_";
-const KEY_PREFIX: &str = "WHARF_BACKUP_KEY_";
+pub(crate) const KEY_PREFIX: &str = "WHARF_BACKUP_KEY_";
 pub const HTTP_PREFIX: &str = "WHARF_BACKUP_HTTP_";
 pub const HTTP_HASH_PREFIX: &str = "WHARF_BACKUP_HTTP_HASH_";
 
