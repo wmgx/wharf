@@ -2679,6 +2679,16 @@ services:
   docker
     .write_project_env("p23-fixture", Some(&dotenv(&inputs).unwrap()))
     .unwrap();
+  let env = docker
+    .compose("p23-fixture")
+    .args(["config", "--environment"])
+    .timeout(Duration::from_secs(20))
+    .run(&ctx)
+    .await
+    .unwrap()
+    .check("Compose dotenv")
+    .unwrap();
+  assert!(env.stdout.contains(&format!("VALUE={value}\n")));
   let doc = docker
     .compose("p23-fixture")
     .args(["config", "--format", "json"])
@@ -2690,14 +2700,14 @@ services:
     .unwrap();
   let doc: serde_json::Value =
     serde_json::from_str(&doc.stdout).unwrap();
-  assert_eq!(
-    doc["services"]["first"]["environment"]["VALUE"].as_str(),
-    Some(value)
-  );
-  assert_eq!(
-    doc["services"]["second"]["environment"]["VALUE"].as_str(),
-    Some(value)
-  );
+  let escaped = value.replace('$', "$$");
+  for service in ["first", "second"] {
+    let actual = doc["services"][service]["environment"]["VALUE"]
+      .as_str()
+      .unwrap();
+    // Compose 2.x 的 config 输出会把字面量 $ 转义为 $$。
+    assert!(actual == value || actual == escaped);
+  }
   assert_eq!(
     doc["services"]["second"]["environment"]["DEFAULT"].as_str(),
     Some("default")
