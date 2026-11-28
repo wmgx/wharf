@@ -27,12 +27,16 @@ while [ -n "$rest" ]; do
   [ "$rest" != "$component" ] || break
   rest="/${rest#*/}"
 done
-awk -v path="$path" '
+# Docker's recursive bind exposes the same source tree as a workload bind.
+awk -v path="/host$path" "$2" /proc/self/mountinfo
+"#;
+
+const CHECK_MOUNTS: &str = r#"
+  $5 == "/host" { found=1; next }
   $5 == path || index($5, path "/") == 1 { bad=1 }
-  $5 != "/" && index(path, $5 "/") == 1 &&
-    !($4 == "/" && ($5 == "/mnt" || $5 == "/media" || $5 == "/opt")) { bad=1 }
-  END { exit bad }
-' /host-mountinfo
+  index($5, "/host/") == 1 && index(path, $5 "/") == 1 &&
+    !($4 == "/" && ($5 == "/host/mnt" || $5 == "/host/media" || $5 == "/host/opt")) { bad=1 }
+  END { exit (!found || bad) }
 "#;
 
 fn error(path: &str) -> ApiError {
@@ -57,14 +61,32 @@ pub(super) async fn validate_sources(
     validate_host_bind(source, &bind.target)?;
     let name =
       format!("wharf-bind-check-{}", crate::build::random_suffix());
-    let result = docker.cmd().args([
-      "run", "--rm", "--name", &name, "--label", "wharf.temp=1", "--network", "none",
-      "--pull", "never", "--read-only", "--cap-drop", "ALL",
-      "--mount", "type=bind,src=/,dst=/host,readonly",
-      "--mount", "type=bind,src=/proc/1/mountinfo,dst=/host-mountinfo,readonly",
-      "--entrypoint", "/bin/sh",
-    ]).arg(&image).args(["-c", CHECK, "wharf-bind-check", source])
-      .timeout(TIMEOUT).run(ctx).await;
+    let result = docker
+      .cmd()
+      .args([
+        "run",
+        "--rm",
+        "--name",
+        &name,
+        "--label",
+        "wharf.temp=1",
+        "--network",
+        "none",
+        "--pull",
+        "never",
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "--mount",
+        "type=bind,src=/,dst=/host,readonly",
+        "--entrypoint",
+        "/bin/sh",
+      ])
+      .arg(&image)
+      .args(["-c", CHECK, "wharf-bind-check", source, CHECK_MOUNTS])
+      .timeout(TIMEOUT)
+      .run(ctx)
+      .await;
     if !result.as_ref().is_ok_and(|out| out.success) {
       let _ = docker
         .cmd()
@@ -131,4 +153,33 @@ pub(super) async fn verify_mounted(
     }
   }
   Ok(())
+}
+
+#[test]
+fn docker_bind_mount_table_rejects_overlaid_sources() {
+  use std::{
+    io::Write,
+    process::{Command, Stdio},
+  };
+
+  let check = |extra: &str| {
+    let mut child = Command::new("awk")
+      .args(["-v", "path=/host/mnt/data", CHECK_MOUNTS])
+      .stdin(Stdio::piped())
+      .spawn()
+      .unwrap();
+    write!(child.stdin.take().unwrap(),
+      "15 14 8:1 / /host ro - ext4 /dev/root rw\n16 15 8:2 / /host/mnt ro - ext4 /dev/data rw\n{extra}"
+    ).unwrap();
+    child.wait().unwrap().success()
+  };
+  assert!(check(
+    "17 16 8:2 /other /host/mnt/database ro - ext4 /dev/data rw\n"
+  ));
+  assert!(!check(
+    "17 16 8:1 /restricted /host/mnt/data ro - ext4 /dev/root rw\n"
+  ));
+  assert!(!check(
+    "17 16 8:1 /restricted /host/mnt/data/child ro - ext4 /dev/root rw\n"
+  ));
 }

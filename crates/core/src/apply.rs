@@ -60,6 +60,7 @@ pub use run_scope::{
 };
 
 struct ActiveRun {
+  deploy_connections: HashMap<String, u64>,
   scope_services: Option<Vec<String>>,
   run: Arc<Mutex<Run>>,
   cancel: CancellationToken,
@@ -342,6 +343,7 @@ pub(crate) async fn start_with_actor(
       .suggest("wharf plan"),
     );
   }
+  let mut deploy_connections = HashMap::new();
   let network_services: BTreeSet<_> = stored
     .steps
     .iter()
@@ -379,45 +381,48 @@ pub(crate) async fn start_with_actor(
             .map_err(json_err)
         })
         .transpose()?;
-      if let Some(spec) = next.as_ref().or(previous)
-        && (spec.use_egress
-          || previous.is_some_and(|old| old.use_egress))
-      {
-        state.hub.workload_egress_conn_id(&spec.server)?;
-      }
       if let Some(spec) = &next
         && crate::project_files::exec_changed(previous, spec)
       {
         crate::auth::require_perm(perms, Perm::Exec)?;
       }
-      if let Some(spec) = next.as_ref().or(previous)
-        && (crate::project_files::needs_agent(spec)
-          || previous.is_some_and(|old| {
-            crate::project_files::needs_agent(old)
-          }))
+      let Some(spec) = next.as_ref().or(previous) else {
+        continue;
+      };
+      let server = &spec.server;
+      let mut connections = Vec::new();
+      if spec.use_egress || previous.is_some_and(|old| old.use_egress)
       {
-        state.hub.project_files_conn_id(&spec.server)?;
+        connections.push(state.hub.workload_egress_conn_id(server)?);
       }
-      if let Some(spec) = next.as_ref().or(previous)
-        && (spec.volumes.iter().any(|v| v.host_path.is_some())
-          || previous.is_some_and(|old| {
-            old.volumes.iter().any(|v| v.host_path.is_some())
-          }))
+      if crate::project_files::needs_agent(spec)
+        || previous.is_some_and(crate::project_files::needs_agent)
       {
-        state.hub.host_bind_conn_id(&spec.server)?;
+        connections.push(state.hub.project_files_conn_id(server)?);
       }
-      if let Some(spec) = next.as_ref().or(previous)
-        && (spec.compose_env
-          || previous.is_some_and(|old| old.compose_env))
+      if has_external_volumes(spec)
+        || previous.is_some_and(has_external_volumes)
       {
-        state.hub.compose_env_conn_id(&spec.server)?;
+        connections.push(state.hub.host_bind_conn_id(server)?);
       }
-      if let Some(spec) = next.as_ref().or(previous)
-        && (!spec.networks.is_empty()
-          || previous.is_some_and(|old| !old.networks.is_empty()))
+      if spec.compose_env
+        || previous.is_some_and(|old| old.compose_env)
       {
-        crate::named_networks::preflight(&state.hub, spec, &cancel)
-          .await?;
+        connections.push(state.hub.compose_env_conn_id(server)?);
+      }
+      if !spec.networks.is_empty()
+        || previous.is_some_and(|old| !old.networks.is_empty())
+      {
+        connections.push(
+          crate::named_networks::preflight(&state.hub, spec, &cancel)
+            .await?,
+        );
+      }
+      if let Some((&conn, rest)) = connections.split_first() {
+        if rest.iter().any(|&id| id != conn) {
+          return Err(deploy_agent_reconnected(server));
+        }
+        deploy_connections.insert(service.to_string(), conn);
       }
     }
   }
@@ -671,6 +676,7 @@ pub(crate) async fn start_with_actor(
     lock(&state.runs.active).insert(
       run_id.clone(),
       ActiveRun {
+        deploy_connections,
         scope_services: None,
         run: shared.clone(),
         cancel: cancel.clone(),
@@ -1061,6 +1067,7 @@ pub(crate) async fn run_batch_sync(
   lock(&state.runs.active).insert(
     lock(&shared).run_id.clone(),
     ActiveRun {
+      deploy_connections: HashMap::new(),
       scope_services,
       run: shared.clone(),
       cancel: cancel.clone(),
@@ -1148,6 +1155,7 @@ fn spawn_run(
   lock(&state.runs.active).insert(
     run_id,
     ActiveRun {
+      deploy_connections: HashMap::new(),
       scope_services,
       run: shared.clone(),
       cancel: cancel.clone(),
@@ -2922,6 +2930,18 @@ fn should_trial(
     && !has_trial_collision
 }
 
+fn has_external_volumes(spec: &ServiceSpec) -> bool {
+  spec.volumes.iter().any(|v| v.host_path.is_some())
+}
+
+fn deploy_agent_reconnected(server: &str) -> ApiError {
+  ApiError::new(
+    ErrorCode::AgentOffline,
+    format!("服务器 {server} 的 agent 已重连"),
+  )
+  .with_hint("重新生成计划")
+}
+
 /// 部署一个服务：构建来源先构建镜像（`force` 时重新构建），再 `up`。
 #[allow(clippy::too_many_arguments)]
 async fn service_up(
@@ -2944,6 +2964,11 @@ async fn service_up(
     )
   })?;
   let server = &row.spec.server;
+  let old = snap
+    .applied
+    .get(service)
+    .and_then(|applied| applied.spec.as_ref())
+    .filter(|spec| &spec.server == server);
   let egress_conn = if row.spec.use_egress {
     crate::workload_egress::validate(world, &net, server)?;
     Some(
@@ -2952,31 +2977,32 @@ async fn service_up(
       )
       .await?,
     )
+  } else if old.is_some_and(|spec| spec.use_egress) {
+    Some(state.hub.workload_egress_conn_id(server)?)
   } else {
     None
   };
-  let files_conn = crate::project_files::needs_agent(&row.spec)
-    .then(|| state.hub.project_files_conn_id(server))
-    .transpose()?;
-  let bind_conn = row
-    .spec
-    .volumes
-    .iter()
-    .any(|v| v.host_path.is_some())
-    .then(|| state.hub.host_bind_conn_id(server))
-    .transpose()?;
-  let env_conn = row
-    .spec
-    .compose_env
-    .then(|| state.hub.compose_env_conn_id(server))
-    .transpose()?;
-  let network_conn = if row.spec.networks.is_empty() {
-    None
-  } else {
+  let files_conn = (crate::project_files::needs_agent(&row.spec)
+    || old.is_some_and(crate::project_files::needs_agent))
+  .then(|| state.hub.project_files_conn_id(server))
+  .transpose()?;
+  let bind_conn = (has_external_volumes(&row.spec)
+    || old.is_some_and(has_external_volumes))
+  .then(|| state.hub.host_bind_conn_id(server))
+  .transpose()?;
+  let env_conn = (row.spec.compose_env
+    || old.is_some_and(|spec| spec.compose_env))
+  .then(|| state.hub.compose_env_conn_id(server))
+  .transpose()?;
+  let network_conn = if !row.spec.networks.is_empty() {
     Some(
       crate::named_networks::preflight(&state.hub, &row.spec, cancel)
         .await?,
     )
+  } else if old.is_some_and(|spec| !spec.networks.is_empty()) {
+    Some(state.hub.named_network_conn_id(server)?)
+  } else {
+    None
   };
   crate::monitor::require_agent(state, &row.spec)?;
   let readiness = if let Some(m) =
@@ -3174,31 +3200,22 @@ async fn service_up(
   let deploy_conn = required
     .map(|what| state.hub.deploy_v2_conn_id(server, what))
     .transpose()?;
-  let conn = network_conn
-    .or(deploy_conn)
-    .or(env_conn)
-    .or(bind_conn)
-    .or(files_conn)
-    .or(egress_conn);
-  if [
+  let checked_conn = lock(&state.runs.active)
+    .get(run_id)
+    .and_then(|run| run.deploy_connections.get(service))
+    .copied();
+  let connections = [
+    checked_conn,
     network_conn,
     deploy_conn,
     env_conn,
     bind_conn,
     files_conn,
     egress_conn,
-  ]
-  .into_iter()
-  .flatten()
-  .any(|id| Some(id) != conn)
-  {
-    return Err(
-      ApiError::new(
-        ErrorCode::AgentOffline,
-        format!("服务器 {server} 的 agent 已重连"),
-      )
-      .with_hint("重新生成计划"),
-    );
+  ];
+  let conn = connections.into_iter().flatten().next();
+  if connections.into_iter().flatten().any(|id| Some(id) != conn) {
+    return Err(deploy_agent_reconnected(server));
   }
   let result: ProjectUpResult = state
     .hub
@@ -4189,6 +4206,40 @@ mod tests {
       .unwrap();
     let snap = snapshot::load(&state.db).await.unwrap();
     assert!(!snap.pending.migrations["notes"].payload.source_stopped);
+  }
+
+  #[tokio::test]
+  async fn disabling_project_env_rejects_reconnected_old_agent() {
+    let state = crate::migrate::tests::seed_service(false).await;
+    state.db.call(|c| {
+      c.execute(
+        "INSERT INTO deployments (service, server, run_id, hash, compose, images, created_at, spec, instance_id)
+         SELECT name, 's2', 'test', 'old', '', '[]', 0,
+         json_set(spec, '$.compose_env', json('true')), json_extract(meta, '$.instance_id')
+         FROM resources WHERE kind = 'service' AND name = 'notes'", [],
+      ).map_err(sql_err)?;
+      Ok(())
+    }).await.unwrap();
+    state.hub.mock_agent("s2", false, |_| {
+      panic!("关闭项目变量不能派发给旧 agent")
+    });
+    let step = Step::ServiceUp {
+      service: "notes".into(),
+      expect: None,
+      instance_id: None,
+      refresh_files_from: None,
+    };
+    let error = run_step(
+      &state,
+      "r1",
+      &step,
+      Arc::new(|_| {}),
+      &CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::Conflict);
+    assert!(error.message.contains("项目变量"));
   }
 
   #[tokio::test]

@@ -2076,18 +2076,35 @@ fn service_items(
     if moved.is_none()
       && upgrade.is_none()
       && let Some(old) = old
-      && crate::project_files::only_managed_changed(
-        &old.spec, &svc.spec,
-      )
       && let Some(state) = live
       && !state.containers.is_empty()
       && state.containers.iter().all(|c| !c.foreign)
       && let Some(previous) =
         state.hash.as_ref().filter(|old| **old != hash)
+      && (crate::project_files::only_managed_changed(
+        &old.spec, &svc.spec,
+      ) || (old.spec == svc.spec
+        && svc
+          .spec
+          .files
+          .iter()
+          .any(|file| file.managed_dir() && !file.init_only)
+        && rendered_hot_files_only(
+          snap, current, desired, net, name, previous,
+        )?))
       && deployed_template(current, net, name, snap.applied.get(name))
         .as_deref()
         == Some(template.as_str())
     {
+      if !service_changed {
+        crate::syntax_check::validate_service_files(
+          desired,
+          net,
+          name,
+          &render_values,
+          &snap.log_values,
+        )?;
+      }
       let id = b.item(
         address.clone(),
         Layer::Container,
@@ -2527,6 +2544,40 @@ fn service_items(
     }
   }
   Ok(())
+}
+
+fn rendered_hot_files_only(
+  snap: &Snapshot,
+  current: &World,
+  desired: &World,
+  net: &Net,
+  name: &str,
+  previous: &str,
+) -> Result<bool, ApiError> {
+  let old_net = snap.net(current);
+  let old_values = snap.render_values(current, name);
+  let Ok((old_compose, old_hash)) =
+    snapshot::service_resolved(current, &old_net, name, &old_values)
+  else {
+    return Ok(false);
+  };
+  if old_hash != previous {
+    return Ok(false);
+  }
+  let values = snap.render_values(desired, name);
+  let (new_compose, _) =
+    snapshot::service_resolved(desired, net, name, &values)?;
+  Ok(
+    old_compose == new_compose
+      && crate::compose_env::inputs(
+        current,
+        &old_net,
+        name,
+        &old_values,
+      )? == crate::compose_env::inputs(
+        desired, net, name, &values,
+      )?,
+  )
 }
 
 /// compose 里多个组件时，比较新旧模板逐个组件看：有的变了、有的没变时返回 (要重建的, 不变的)。
@@ -4677,6 +4728,65 @@ mod tests {
       serde_json::to_value(&step).unwrap(),
       serde_json::from_str::<Value>(raw).unwrap()
     );
+  }
+
+  #[test]
+  fn rendered_variable_change_plans_hot_reload_without_restart() {
+    let mut current = world();
+    current.services.get_mut("app").unwrap().spec.files = serde_json::from_value(json!([
+      {"path":"/app/config/theme.txt", "content":"[[var:THEME]]", "on_change":"sighup"}
+    ])).unwrap();
+    current
+      .apply_changes(&[wharf_api_types::spec::Change::UpsertVar {
+        name: "THEME".into(),
+        value: "A".into(),
+      }])
+      .unwrap();
+    let previous = hash_of(&current);
+    let mut desired = current.clone();
+    desired.vars.get_mut("THEME").unwrap().value = "B".into();
+    let planned = plan(
+      &current,
+      &desired,
+      &live(Some(previous.clone()), vec![container("running")]),
+    );
+    assert_eq!(planned.steps.len(), 1);
+    assert!(
+      matches!(&planned.steps[0].step, Step::ServiceUp { refresh_files_from: Some(hash), .. } if hash == &previous)
+    );
+    assert!(planned.items[0].impacts.is_empty());
+  }
+
+  #[test]
+  fn legacy_variable_like_file_text_keeps_empty_plan() {
+    let mut legacy = world();
+    legacy.services.get_mut("app").unwrap().spec.files = serde_json::from_value(json!([
+      {"path":"/app/theme.txt", "content":"[[var:theme.color]]", "raw":true}
+    ])).unwrap();
+    let unexpanded = hash_of(&legacy);
+    legacy.services.get_mut("app").unwrap().spec.files[0].raw = false;
+    assert!(
+      crate::missing_refs::collect_plan_missing(
+        &legacy,
+        &Snapshot::default()
+      )
+      .is_empty()
+    );
+    let (rendered, fingerprint) = snapshot::service_resolved(
+      &legacy,
+      &Net::default(),
+      "app",
+      &BTreeMap::new(),
+    )
+    .unwrap();
+    assert!(rendered.contains("[[var:theme.color]]"));
+    assert_eq!(unexpanded, fingerprint);
+    let planned = plan(
+      &legacy,
+      &legacy,
+      &live(Some(fingerprint), vec![container("running")]),
+    );
+    assert!(planned.steps.is_empty() && planned.items.is_empty());
   }
 
   #[test]

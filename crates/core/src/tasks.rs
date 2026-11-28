@@ -1322,8 +1322,17 @@ fn validate(
 ) -> Result<(), ApiError> {
   validate_name("task", name)?;
   crate::secret_policy::validate_task(name, &spec.how)?;
-  if !snap.world.servers.contains_key(&spec.server) {
-    return Err(crate::world::server_not_found(&spec.server));
+  let server = if let TaskKind::Exec { service, .. } = &spec.how {
+    let row = snap.world.services.get(service).ok_or_else(|| {
+      ApiError::not_found(format!("没有服务 {service}"))
+        .with_hint("wharf service list")
+    })?;
+    exec_target(snap, service).unwrap_or(&row.spec.server)
+  } else {
+    &spec.server
+  };
+  if !snap.world.servers.contains_key(server) {
+    return Err(crate::world::server_not_found(server));
   }
   validate_schedule(spec)?;
   if spec.use_egress {
@@ -1333,7 +1342,7 @@ fn validate(
     crate::workload_egress::validate(
       &snap.world,
       &snap.net(&snap.world),
-      &spec.server,
+      server,
     )?;
     if let TaskKind::Container { env, .. }
     | TaskKind::Script { env, .. } = &spec.how
@@ -1388,15 +1397,7 @@ fn validate(
   }
   let blank = |s: &str| s.trim().is_empty();
   match &spec.how {
-    TaskKind::Exec {
-      service, command, ..
-    } => {
-      if !snap.world.services.contains_key(service) {
-        return Err(
-          ApiError::not_found(format!("没有服务 {service}"))
-            .with_hint("wharf service list"),
-        );
-      }
+    TaskKind::Exec { command, .. } => {
       if blank(command) {
         return Err(ApiError::invalid("命令不能为空"));
       }
@@ -2155,6 +2156,31 @@ mod tests {
     snap.pending.migrations.get_mut("web").unwrap().phase =
       crate::pending::MigratePhase::UpDone;
     assert_eq!(exec_target(&snap, "web"), Ok("s2"));
+  }
+
+  #[test]
+  fn saving_exec_egress_uses_live_deployment_server() {
+    let row = |kind: &str, name: &str, spec| db::ResourceRow {
+      kind: kind.into(),
+      name: name.into(),
+      spec,
+      meta: serde_json::json!({}),
+      version: 1,
+    };
+    let snap = snapshot::Snapshot {
+      world: crate::world::World::from_rows(vec![
+        row("server", "s1", serde_json::json!({})),
+        row("server", "s2", serde_json::json!({"via":"exit"})),
+        row("server", "exit", serde_json::json!({"private_addr":{"ip":"100.64.0.2","network":"tailscale"},"egress":{"all":true}})),
+        row("service", "web", serde_json::json!({"server":"s2","source":{"image":"nginx"}})),
+      ]).unwrap(),
+      deployed: BTreeMap::from([("web".into(), "s2".into())]),
+      ..Default::default()
+    };
+    let spec = serde_json::from_value(serde_json::json!({
+      "kind":"exec","server":"s1","schedule":"","service":"web","command":"true","use_egress":true
+    })).unwrap();
+    validate("report", &spec, &snap).unwrap();
   }
 
   #[tokio::test]

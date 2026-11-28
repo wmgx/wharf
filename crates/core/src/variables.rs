@@ -26,15 +26,7 @@ pub(crate) fn validate(
   name: &str,
   value: &str,
 ) -> Result<(), ApiError> {
-  let mut bytes = name.bytes();
-  if name.len() > 64
-    || !bytes
-      .next()
-      .is_some_and(|b| b.is_ascii_uppercase() || b == b'_')
-    || !bytes.all(|b| {
-      b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_'
-    })
-  {
+  if !wharf_api_types::references::valid_var_name(name) {
     return Err(
       ApiError::invalid(
         "变量名须以大写字母或下划线开头，最多 64 个字符",
@@ -335,9 +327,43 @@ impl Substitutions {
       return Ok(text);
     }
     let mut doc = crate::render::parse_compose(&text)?;
+    fn substitute_values(sub: &Substitutions, value: &mut Value) {
+      match value {
+        Value::String(s) => *s = sub.finish_text(s, true),
+        Value::Sequence(values) => {
+          for value in values {
+            substitute_values(sub, value);
+          }
+        }
+        Value::Mapping(values) => {
+          for value in values.values_mut() {
+            substitute_values(sub, value);
+          }
+        }
+        _ => {}
+      }
+    }
     for (_, body) in
       doc["services"].as_mapping_mut().into_iter().flatten()
     {
+      for key in [
+        "command",
+        "entrypoint",
+        "working_dir",
+        "hostname",
+        "domainname",
+        "stop_signal",
+      ] {
+        if let Some(value) = body.get_mut(key) {
+          substitute_values(self, value);
+        }
+      }
+      if let Some(test) = body
+        .get_mut("healthcheck")
+        .and_then(|value| value.get_mut("test"))
+      {
+        substitute_values(self, test);
+      }
       match body.get_mut("environment") {
         Some(Value::Mapping(env)) => {
           for value in env.values_mut() {
@@ -364,9 +390,9 @@ impl Substitutions {
       // Compose 的结构由端口分配和宿主机权限先校验。
       return Err(
         ApiError::invalid(
-          "Compose 变量和自身引用仅可用于 environment 的值",
+          "Compose 变量和自身引用不能用于键名或部署结构",
         )
-        .with_hint("将引用移到服务组件的 environment"),
+        .with_hint("将引用用于 environment 的值或容器命令参数"),
       );
     }
     Ok(out)
@@ -448,6 +474,37 @@ mod tests {
   use super::*;
   use serde_json::json;
   use wharf_api_types::spec::{Change, PrivateAddr, PrivateNetwork};
+
+  #[test]
+  fn compose_command_expands_public_values_as_yaml_strings() {
+    let mut world = World::default();
+    let spec = json!({
+      "op":"upsert_service", "name":"app", "spec":{
+        "server":"s1", "self_refs": true, "source":{"compose":{"content":
+          "services: {app: {image: alpine, command: ['[[SELF_NAME]]', '[[var:ARG]]']}}"
+        }}
+      }
+    });
+    world
+      .apply_changes(&[
+        Change::UpsertVar {
+          name: "ARG".into(),
+          value: "$HOME: [[SELF_NAME]]".into(),
+        },
+        serde_json::from_value(spec).unwrap(),
+      ])
+      .unwrap();
+    let text = crate::snapshot::service_template(
+      &world,
+      &Net::default(),
+      "app",
+    )
+    .unwrap();
+    let doc = crate::render::parse_compose(&text).unwrap();
+    let args = &doc["services"]["app"]["command"];
+    assert_eq!(args[0].as_str(), Some("app"));
+    assert_eq!(args[1].as_str(), Some("$$HOME: [[SELF_NAME]]"));
+  }
 
   #[test]
   fn variables_are_literal_and_only_change_the_consumer() {

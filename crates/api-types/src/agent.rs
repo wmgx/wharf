@@ -197,11 +197,11 @@ pub enum AgentMsg {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     named_networks_v1: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    compose_env_v1: bool,
+    compose_env_v2: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    safe_host_bind_v1: bool,
+    safe_host_bind_v2: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    project_files_v1: bool,
+    project_files_v2: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     workload_egress_v1: bool,
   },

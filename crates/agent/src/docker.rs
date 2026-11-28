@@ -30,7 +30,6 @@ fn stop_timeout(grace: u64) -> Duration {
 }
 
 pub const HASH_FILE: &str = ".wharf-hash";
-const PROJECT_ENV_FILE: &str = ".wharf-project.env";
 pub const CONFIG_HASH_FILE: &str = ".wharf-config-hash";
 
 /// 跟随日志的最长时长，到点后页面会自动重连。
@@ -132,7 +131,7 @@ impl Docker {
   /// `docker compose -p <project> -f <dir>/compose.yaml ...`
   pub fn compose(&self, project: &str) -> Cmd {
     let dir = self.project_dir(project);
-    let env = dir.join(PROJECT_ENV_FILE);
+    let env = self.project_env_path(project);
     self.compose_file(
       project,
       &dir,
@@ -323,11 +322,18 @@ impl Docker {
     write_private(&dir.join("compose.yaml"), compose)
   }
 
+  fn project_env_path(&self, project: &str) -> PathBuf {
+    self
+      .data_dir
+      .join("project-env")
+      .join(format!("{project}.env"))
+  }
+
   pub(crate) fn read_project_env(
     &self,
     project: &str,
   ) -> Result<Option<String>, ApiError> {
-    let env = self.project_dir(project).join(PROJECT_ENV_FILE);
+    let env = self.project_env_path(project);
     match std::fs::read_to_string(&env) {
       Ok(value) => Ok(Some(value)),
       Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -342,8 +348,15 @@ impl Docker {
     project: &str,
     content: Option<&str>,
   ) -> Result<(), ApiError> {
-    let env = self.project_dir(project).join(PROJECT_ENV_FILE);
+    let env = self.project_env_path(project);
     if let Some(content) = content {
+      let dir = env.parent().expect("项目变量目录");
+      use std::os::unix::fs::DirBuilderExt;
+      std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+        .map_err(io_err(dir))?;
       return write_private(&env, content);
     }
     match std::fs::remove_file(&env) {
@@ -386,14 +399,21 @@ impl Docker {
     write_private(&pending.0, compose)?;
     let pending_env = env
       .map(|values| {
-        let pending =
-          TempCompose(dir.join(".wharf-project-env.next"));
-        write_private(&pending.0, &dotenv(values)?)?;
-        Ok::<_, ApiError>(pending)
+        let dir = tempfile::tempdir().map_err(|_| {
+          ApiError::internal("无法建立私有 Compose 校验目录")
+        })?;
+        write_private(
+          &dir.path().join("project.env"),
+          &dotenv(values)?,
+        )?;
+        Ok::<_, ApiError>(dir)
       })
       .transpose()?;
-    let env = pending_env.as_ref().map(|env| env.0.as_path());
-    let cmd = self.compose_file(project, &dir, &pending.0, env);
+    let env = pending_env
+      .as_ref()
+      .map(|dir| dir.path().join("project.env"));
+    let cmd =
+      self.compose_file(project, &dir, &pending.0, env.as_deref());
     match self.compose_images(cmd, ctx).await {
       Err(error)
         if env.is_some() && error.code == ErrorCode::AgentFailed =>
@@ -423,7 +443,7 @@ impl Docker {
         ApiError::internal("无法建立私有 Compose 校验目录")
       })?;
     let file = temp.path().join("compose.yaml");
-    let env = temp.path().join(PROJECT_ENV_FILE);
+    let env = temp.path().join("project.env");
     write_private(&file, compose)?;
     write_private(&env, &dotenv(inputs)?)?;
     let quiet = Ctx {
@@ -1010,6 +1030,7 @@ impl Docker {
       .run(ctx)
       .await?
       .check("docker compose down")?;
+    self.write_project_env(project, None)?;
     if remove_srv_data {
       let path = Path::new("/srv").join(project);
       let users = self.bind_mount_users(&path, ctx).await?;
@@ -1637,10 +1658,6 @@ pub(crate) fn clean_project_dir(
       HASH_FILE,
       ".wharf-hash.tmp",
       "compose.tmp",
-      PROJECT_ENV_FILE,
-      ".wharf-project.tmp",
-      ".wharf-project-env.next",
-      ".wharf-project-env.tmp",
     ],
   )?;
   // 只清理 Wharf 管理的网关和隧道配置。
@@ -2676,6 +2693,10 @@ services:
   docker.write_compose("p23-fixture", yaml).unwrap();
   let user_dotenv = docker.project_dir("p23-fixture").join(".env");
   std::fs::write(&user_dotenv, "VALUE=from-user-file\n").unwrap();
+  let old_name =
+    docker.project_dir("p23-fixture").join(".wharf-project.env");
+  std::fs::write(&old_name, "VALUE=user-managed\n").unwrap();
+  assert_eq!(docker.read_project_env("p23-fixture").unwrap(), None);
   docker
     .write_project_env("p23-fixture", Some(&dotenv(&inputs).unwrap()))
     .unwrap();
@@ -2713,6 +2734,11 @@ services:
     Some("default")
   );
   docker.write_project_env("p23-fixture", None).unwrap();
+  assert_eq!(docker.read_project_env("p23-fixture").unwrap(), None);
+  assert_eq!(
+    std::fs::read_to_string(old_name).unwrap(),
+    "VALUE=user-managed\n"
+  );
   assert_eq!(
     std::fs::read_to_string(user_dotenv).unwrap(),
     "VALUE=from-user-file\n"

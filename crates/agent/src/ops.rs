@@ -946,7 +946,6 @@ impl Ops {
     up: &ProjectUp,
     images: &[String],
     warnings: Vec<String>,
-    previous: Option<Previous>,
     previous_grace: u64,
     ctx: &Ctx,
   ) -> Result<ProjectUpResult, ApiError> {
@@ -957,7 +956,7 @@ impl Ops {
       ctx,
     )
     .await;
-    let result = async {
+    let state = async {
       self.docker.write_compose(&up.project, &up.compose)?;
       self.docker.write_project_env(
         &up.project,
@@ -1039,36 +1038,7 @@ impl Ops {
       self.docker.write_hash(&up.project, &up.hash)?;
       Ok::<_, ApiError>(state)
     }
-    .await;
-    let state = match (result, previous) {
-      (Ok(state), _) => state,
-      (Err(error), None) => return Err(error),
-      (Err(error), Some(prev)) => {
-        let recover = ctx.detached_with_progress();
-        crate::prev_logs::capture(
-          &self.docker,
-          &up.project,
-          "rollback",
-          &recover,
-        )
-        .await;
-        ctx.say(format!("{}，换回上一版", error.message));
-        return Err(
-          self
-            .restore_project(
-              &up.project,
-              &prev,
-              &recover,
-              error,
-              "上一版",
-              wharf_api_types::compose::parse_compose_max_grace_secs(
-                &up.compose,
-              ),
-            )
-            .await,
-        );
-      }
-    };
+    .await?;
     Ok(ProjectUpResult {
       containers: state.containers,
       images: self.docker.image_info(images, ctx).await,
@@ -1225,7 +1195,8 @@ impl Ops {
         self.restore_before_up(previous.as_ref(), ctx, error).await,
       );
     }
-    let files = project_files::prepare(&self.docker, up, ctx).await?;
+    let mut files =
+      project_files::prepare(&self.docker, up, ctx).await?;
     if let Some(init) = &up.init {
       let old_env = self.docker.read_project_env(&up.project)?;
       self.docker.write_compose(&up.project, &up.compose)?;
@@ -1279,32 +1250,84 @@ impl Ops {
       _ => vec![],
     };
     match self
-      .finish_up(up, &images, warnings, previous, previous_grace, ctx)
+      .finish_up(up, &images, warnings, previous_grace, ctx)
       .await
     {
       Ok(result) => {
         files.commit();
         Ok(ProjectUpResult { retired, ..result })
       }
-      Err(e) if !retired.is_empty() => {
-        ctx.say("启动失败，恢复原来的容器");
+      Err(mut error) => {
         let recover = ctx.detached_with_progress();
-        if let Err(down) =
-          self.docker.down(&up.project, false, &recover).await
-        {
-          recover.say(format!("清理新容器失败：{}", down.message));
+        error = self
+          .restore_deployment(
+            up,
+            previous.as_ref(),
+            &mut files,
+            &recover,
+            error,
+          )
+          .await;
+        if !retired.is_empty() {
+          ctx.say("启动失败，恢复原来的容器");
+          if let Err(down) =
+            self.docker.down(&up.project, false, &recover).await
+          {
+            recover.say(format!("清理新容器失败：{}", down.message));
+          }
+          if let Err(back) =
+            crate::adopt::unretire(&self.docker, &retired, &recover)
+              .await
+          {
+            ctx.say(format!(
+              "恢复失败，需要手动处理：{}",
+              back.message
+            ));
+          }
         }
-        if let Err(back) =
-          crate::adopt::unretire(&self.docker, &retired, &recover)
-            .await
-        {
-          ctx
-            .say(format!("恢复失败，需要手动处理：{}", back.message));
-        }
-        Err(e)
+        Err(error)
       }
-      Err(e) => Err(e),
     }
+  }
+
+  async fn restore_deployment(
+    &self,
+    up: &ProjectUp,
+    previous: Option<&Previous>,
+    files: &mut project_files::Writes,
+    ctx: &Ctx,
+    error: ApiError,
+  ) -> ApiError {
+    if !files.rollback() {
+      return recovery_error(
+        error,
+        ApiError::internal("恢复热重载配置文件失败"),
+        "上一版",
+      );
+    }
+    let Some(previous) = previous else {
+      return error;
+    };
+    crate::prev_logs::capture(
+      &self.docker,
+      &up.project,
+      "rollback",
+      ctx,
+    )
+    .await;
+    ctx.say(format!("{}，换回上一版", error.message));
+    self
+      .restore_project(
+        &up.project,
+        previous,
+        ctx,
+        error,
+        "上一版",
+        wharf_api_types::compose::parse_compose_max_grace_secs(
+          &up.compose,
+        ),
+      )
+      .await
   }
 
   async fn restore_images(
@@ -1574,7 +1597,7 @@ esac
     })).unwrap();
     docker.write_compose("app", &up.compose).unwrap();
     let result = ops
-      .finish_up(&up, &[], vec![], None, 10, &Ctx::detached())
+      .finish_up(&up, &[], vec![], 10, &Ctx::detached())
       .await
       .unwrap();
     assert_eq!(
@@ -1628,10 +1651,8 @@ esac
       })),
       ..Ctx::detached()
     };
-    let error = ops
-      .finish_up(&up, &[], vec![], None, 10, &ctx)
-      .await
-      .unwrap_err();
+    let error =
+      ops.finish_up(&up, &[], vec![], 10, &ctx).await.unwrap_err();
     assert!(error.message.contains("unhealthy-dependency"));
     assert!(
       lines

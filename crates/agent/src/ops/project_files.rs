@@ -39,6 +39,7 @@ struct Undo {
   name: CString,
   previous: Option<FileState>,
   init: bool,
+  reload: Option<(String, String)>,
 }
 
 impl Writes {
@@ -46,7 +47,7 @@ impl Writes {
     self.0.clear();
   }
 
-  fn rollback(&mut self) -> bool {
+  pub(super) fn rollback(&mut self) -> bool {
     let mut ok = true;
     for undo in self.0.drain(..).rev() {
       if undo.init {
@@ -428,6 +429,12 @@ fn write_files(
       name,
       previous,
       init: file.spec.init_only,
+      reload: file
+        .spec
+        .on_change
+        .as_ref()
+        .filter(|action| *action != "recreate")
+        .map(|action| (file.component.clone(), action.clone())),
     });
   }
   Ok(writes)
@@ -494,27 +501,31 @@ pub(super) async fn verify_metadata(
   Ok(())
 }
 
+fn reload_actions(
+  changed: &Writes,
+) -> BTreeMap<String, BTreeSet<String>> {
+  let mut actions = BTreeMap::<_, BTreeSet<_>>::new();
+  for (component, action) in
+    changed.0.iter().filter_map(|undo| undo.reload.as_ref())
+  {
+    actions
+      .entry(component.clone())
+      .or_default()
+      .insert(action.clone());
+  }
+  actions
+}
+
 async fn reload(
   docker: &Docker,
   up: &ProjectUp,
+  actions: &BTreeMap<String, BTreeSet<String>>,
   ctx: &Ctx,
 ) -> Result<(), ApiError> {
   if up.no_start {
     return Ok(());
   }
-  let mut by_component: BTreeMap<&str, BTreeSet<&str>> =
-    BTreeMap::new();
-  for file in &up.project_files {
-    if let Some(action) =
-      file.spec.on_change.as_deref().filter(|v| *v != "recreate")
-    {
-      by_component
-        .entry(&file.component)
-        .or_default()
-        .insert(action);
-    }
-  }
-  for (component, actions) in by_component {
+  for (component, actions) in actions {
     let ids = docker
       .compose(&up.project)
       .args(["ps", "--status", "running", "--quiet", component])
@@ -532,7 +543,7 @@ async fn reload(
       );
     }
     for id in active {
-      for action in &actions {
+      for action in actions {
         if *action == "sighup" {
           let out = docker
             .cmd()
@@ -552,7 +563,7 @@ async fn reload(
             docker,
             ServiceExecJob {
               project: up.project.clone(),
-              container: Some(component.into()),
+              container: Some(component.clone()),
               command: command.into(),
               timeout_secs: 20,
               cwd: None,
@@ -624,17 +635,18 @@ pub(super) async fn refresh(
     return Err(stale());
   }
   let mut changed = write_files(docker, up)?;
+  let actions = reload_actions(&changed);
   let result = async {
-    if changed.0.iter().any(|undo| !undo.init) {
-      reload(docker, up, ctx).await?;
+    if !actions.is_empty() {
+      reload(docker, up, &actions, ctx).await?;
     }
     docker.write_hash(&up.project, &up.hash)
   }
   .await;
   if let Err(error) = result {
     let restored = changed.rollback();
-    let recovered =
-      reload(docker, up, &Ctx::detached()).await.is_ok();
+    let recovered = actions.is_empty()
+      || reload(docker, up, &actions, &Ctx::detached()).await.is_ok();
     ctx.say(format!(
       "配置文件恢复{}，重新加载旧配置{}",
       if restored { "成功" } else { "失败" },
@@ -670,4 +682,75 @@ fn first_file_keeps_application_content() {
     (actual.as_str(), mode, ids),
     ("{\"n\":2}", 0o600, owner)
   );
+}
+
+#[test]
+fn only_changed_hot_files_contribute_reload_actions() {
+  let dir = tempfile::tempdir().unwrap();
+  let undo = |action: &str| Undo {
+    dir: DirFd::open_absolute(dir.path()).unwrap(),
+    name: c"config".to_owned(),
+    previous: None,
+    init: false,
+    reload: Some(("app".into(), action.into())),
+  };
+  let changed = Writes(vec![undo("sighup"), undo("sighup")]);
+  assert_eq!(
+    reload_actions(&changed),
+    BTreeMap::from([(
+      "app".into(),
+      BTreeSet::from(["sighup".into()])
+    )])
+  );
+  changed.commit();
+}
+
+#[tokio::test]
+async fn rollback_restores_hot_file_before_old_container_starts() {
+  use super::{HostShell, Ops, Previous, Reporter};
+  let (root, docker) = crate::docker::fake_docker(
+    r#"
+case "$1:$6" in
+  compose:up) [ "$(cat config)" = previous ] && touch restored;;
+  ps:*) echo '{"Names":"app-app-1","Labels":"com.docker.compose.project=app","State":"running"}';;
+esac
+"#,
+  );
+  let ops = Ops::new(
+    docker.clone(),
+    Reporter::new(docker.clone(), None),
+    String::new(),
+    HostShell::prepare(docker.clone(), "s1".into()).await,
+    root.path().into(),
+  );
+  let up: ProjectUp = serde_json::from_value(serde_json::json!({
+    "project":"app","compose":"services: {app: {image: app:2}}","hash":"new",
+    "pull":{"mirrors":{},"mirrors_only":false,"attempt_timeout_secs":1}
+  })).unwrap();
+  let previous = Previous {
+    compose: "services: {app: {image: app:1}}".into(),
+    hash: "old".into(),
+    images: BTreeMap::new(),
+    project_env: None,
+  };
+  std::fs::write(root.path().join("config"), "new").unwrap();
+  let owner =
+    (unsafe { libc::geteuid() }, unsafe { libc::getegid() });
+  let mut files = Writes(vec![Undo {
+    dir: DirFd::open_absolute(root.path()).unwrap(),
+    name: c"config".to_owned(),
+    previous: Some(("previous".into(), 0o600, owner)),
+    init: false,
+    reload: None,
+  }]);
+  ops
+    .restore_deployment(
+      &up,
+      Some(&previous),
+      &mut files,
+      &Ctx::detached(),
+      ApiError::internal("fixture"),
+    )
+    .await;
+  assert!(root.path().join("restored").exists());
 }

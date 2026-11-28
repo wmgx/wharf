@@ -82,9 +82,9 @@ struct Conn {
   backup_isolation: bool,
   safe_delete: bool,
   named_networks_v1: bool,
-  compose_env_v1: bool,
-  safe_host_bind_v1: bool,
-  project_files_v1: bool,
+  compose_env_v2: bool,
+  safe_host_bind_v2: bool,
+  project_files_v2: bool,
   workload_egress_v1: bool,
   data_cleanup: bool,
   exec_v2: bool,
@@ -867,7 +867,7 @@ impl Hub {
       .get(server)
       .filter(|conn| !conn.closed.is_cancelled())
       .ok_or_else(|| offline(server))?;
-    if conn.upgrade_only || !conn.project_files_v1 {
+    if conn.upgrade_only || !conn.project_files_v2 {
       return Err(old_project_files_agent(server));
     }
     Ok(conn.conn_id)
@@ -882,7 +882,7 @@ impl Hub {
       .get(server)
       .filter(|conn| !conn.closed.is_cancelled())
       .ok_or_else(|| offline(server))?;
-    if conn.upgrade_only || !conn.safe_host_bind_v1 {
+    if conn.upgrade_only || !conn.safe_host_bind_v2 {
       return Err(old_host_bind_agent(server));
     }
     Ok(conn.conn_id)
@@ -897,7 +897,7 @@ impl Hub {
       .get(server)
       .filter(|conn| !conn.closed.is_cancelled())
       .ok_or_else(|| offline(server))?;
-    if conn.upgrade_only || !conn.compose_env_v1 {
+    if conn.upgrade_only || !conn.compose_env_v2 {
       return Err(old_compose_env_agent(server));
     }
     Ok(conn.conn_id)
@@ -1208,19 +1208,19 @@ impl Hub {
       return Err(old_workload_egress_agent(server));
     }
     if matches!(&op, AgentOp::ProjectUp(up) if !up.volume_owners.is_empty() || !up.project_files.is_empty())
-      && (conn.upgrade_only || !conn.project_files_v1)
+      && (conn.upgrade_only || !conn.project_files_v2)
     {
       return Err(old_project_files_agent(server));
     }
     if (matches!(&op, AgentOp::HostBindCheck { .. })
       || matches!(&op, AgentOp::ProjectUp(up) if !up.host_binds.is_empty()))
-      && (conn.upgrade_only || !conn.safe_host_bind_v1)
+      && (conn.upgrade_only || !conn.safe_host_bind_v2)
     {
       return Err(old_host_bind_agent(server));
     }
     if (matches!(&op, AgentOp::ComposeEnvCheck { .. })
       || matches!(&op, AgentOp::ProjectUp(up) if up.project_env.is_some()))
-      && (conn.upgrade_only || !conn.compose_env_v1)
+      && (conn.upgrade_only || !conn.compose_env_v2)
     {
       return Err(old_compose_env_agent(server));
     }
@@ -1577,9 +1577,9 @@ async fn handle_socket(
     backup_isolation,
     safe_delete,
     named_networks_v1,
-    compose_env_v1,
-    safe_host_bind_v1,
-    project_files_v1,
+    compose_env_v2,
+    safe_host_bind_v2,
+    project_files_v2,
     workload_egress_v1,
     data_cleanup,
     exec_v2,
@@ -1765,9 +1765,9 @@ async fn handle_socket(
     backup_isolation,
     safe_delete,
     named_networks_v1,
-    compose_env_v1,
-    safe_host_bind_v1,
-    project_files_v1,
+    compose_env_v2,
+    safe_host_bind_v2,
+    project_files_v2,
     workload_egress_v1,
     data_cleanup,
     exec_v2,

@@ -202,7 +202,7 @@ pub(crate) fn compose(
   let mut doc = render::parse_compose(&text)?;
   let service = &mut doc["services"][component.as_str()];
   let mut targets = BTreeSet::new();
-  for (kind, entries) in ["volumes", "configs", "secrets"]
+  for (kind, entries) in ["volumes", "configs", "secrets", "tmpfs"]
     .into_iter()
     .filter_map(|key| service[key].as_sequence().map(|v| (key, v)))
   {
@@ -213,6 +213,8 @@ pub(crate) fn compose(
             .find(|part| part.starts_with('/'))
             .unwrap_or("")
             .to_string()
+        } else if kind == "tmpfs" {
+          s.split(':').next().unwrap_or_default().to_string()
         } else if kind == "secrets" {
           format!("/run/secrets/{s}")
         } else {
@@ -371,5 +373,21 @@ fn file_content_changes_keep_a_stable_dedicated_bind() {
   assert_eq!(
     compose("app", "svc_fixture", &old, yaml.clone()).unwrap(),
     compose("app", "svc_fixture", &new, yaml).unwrap()
+  );
+}
+
+#[test]
+fn dedicated_file_parent_cannot_overlap_compose_tmpfs() {
+  let spec: ServiceSpec = serde_json::from_value(serde_json::json!({
+    "server": "s1", "source": {"image": "alpine"},
+    "files": [{"path": "/app/seed/settings.json", "init_only": true, "content": "{}"}]
+  })).unwrap();
+  let yaml =
+    "services: {app: {image: alpine, tmpfs: ['/app/seed:size=1m']}}";
+  assert_eq!(
+    compose("app", "svc_fixture", &spec, yaml.into())
+      .unwrap_err()
+      .code,
+    ErrorCode::Conflict
   );
 }

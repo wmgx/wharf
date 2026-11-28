@@ -23,6 +23,17 @@ fn bare_secret(name: &str) -> bool {
       .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
 }
 
+pub fn valid_var_name(name: &str) -> bool {
+  let mut bytes = name.bytes();
+  name.len() <= 64
+    && bytes
+      .next()
+      .is_some_and(|b| b.is_ascii_uppercase() || b == b'_')
+    && bytes.all(|b| {
+      b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_'
+    })
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum PublicRef<'a> {
   Var(&'a str),
@@ -33,7 +44,9 @@ pub fn parse_public_ref(
   raw: &str,
   self_refs: bool,
 ) -> Option<PublicRef<'_>> {
-  if let Some(name) = raw.strip_prefix("var:") {
+  if let Some(name) =
+    raw.strip_prefix("var:").filter(|name| valid_var_name(name))
+  {
     return Some(PublicRef::Var(name));
   }
   if !self_refs {

@@ -2168,6 +2168,7 @@ fn validate_service(
   }
   if let Some(backup) = &spec.backup {
     if spec.volumes.iter().any(|v| v.host_path.is_some())
+      && !spec.files.iter().any(|file| file.init_only)
       && !spec
         .volumes
         .iter()
@@ -2491,6 +2492,30 @@ fn validate_lan_addrs(addrs: &[String]) -> Result<(), ApiError> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn init_only_data_can_be_backed_up_with_external_binds() {
+    let mut world = sample();
+    world
+      .servers
+      .insert("node2".into(), world.servers["node1"].clone());
+    let spec = serde_json::from_value(json!({
+      "server":"node1", "source":{"image":"nginx"}, "backup":{"to":"node2"},
+      "volumes":[{"name":"external", "target":"/data", "host_path":"/mnt/shared"}],
+      "files":[{"path":"/app/seed/settings.json","init_only":true,"content":"{}"}],
+    })).unwrap();
+    world
+      .apply_changes(&[Change::UpsertService {
+        name: "app".into(),
+        spec,
+        pins: None,
+        commit: None,
+        migrate: None,
+        adopt: None,
+      }])
+      .unwrap();
+    world.validate().unwrap();
+  }
 
   #[test]
   fn compose_env_and_shared_tcp_udp_binding() {
