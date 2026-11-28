@@ -2795,26 +2795,24 @@ export interface ServiceDraft {
 }
 
 export interface ServiceExecResponse {
-  service: string;
-  server: string;
   container: string;
-  exit_code: number;
-  stdout: string;
-  stderr: string;
-  truncated: boolean;
   duration_ms: number;
-}
-
-export interface ServiceRenderView {
-  service: string;
+  exit_code: number;
   server: string;
-  source: string;
+  service: string;
+  stderr: string;
+  stdout: string;
+  truncated: boolean;
+}
+export interface ServiceRenderView {
   compose: string;
   init_cmd?: string | null;
   secrets_masked?: string[];
+  server: string;
+  service: string;
+  source: string;
   warnings?: string[];
 }
-
 /**
  * 单个服务的周期指标。
  */
