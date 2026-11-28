@@ -30,7 +30,13 @@ Wharf 是一个人用的多服务器管理系统。你通过 `wharf` 命令行�
    修改时加 `--reason "<为什么>"`，生成计划时可以加 `--note "<备注>"`，都会记进操作记录。
 8. **宿主机命令要用户同意。** `wharf exec <服务器> -- '<命令>'`、`wharf server prune`、`wharf server baseline <服务器> --apply` 这类直接动机器的操作，先说明要做什么。
 
-退出码：`0` 成功，`1` 出错，`2` 仅用于 `ConfirmRequired`，`3` 计划已过期（重新 plan），`4` 部分失败。
+退出码：`0` 成功，`1` 出错，`2` 仅用于 `ConfirmRequired`，`3` 计划已过期（重新 plan），`4` 部分失败。`wharf exec` 和 `wharf service exec` 执行成功发起后透传远端命令退出码，`--json` 也一样。
+
+- `wharf service render <服务>` 预览展开后的 Compose，密钥会打码。
+- `wharf service logs <服务> --container <名>` 和 `wharf service restart <服务> --container <名>` 指向单个 Compose 子容器。
+- `wharf service exec <服务> --container <名> -- '<命令>'` 在容器内执行。宿主机和容器 exec 都可用 `--script <文件|->`，文本模式默认实时输出。
+- 保留 `--port` / `--path` 全量替换行为，只增删一项时用 `--add-port` / `--rm-port` 或 `--add-path` / `--rm-path`。
+- `wharf task set <任务>` 只读查看，传修改参数可局部更新。`task enable` / `task disable` 切换启用状态。`task run --no-wait --env K=V` 返回运行记录 ID，可用 `task logs <任务> --run <ID>` 查看或用 `task cancel <ID>` 取消。
 
 ## 开始前
 
@@ -62,7 +68,7 @@ wharf deploy ./app --detect-only --json
 wharf service deploy blog --server <服务器> --image ghcr.io/x/blog:latest --port http=80 --json
 
 # compose 文件：--port 只填宿主机端口，容器端口写在 compose 里
-# 更新既有服务时 --port 按名称合并，用 --unset-port <名称> 移除
+# --port 替换全部端口，按名称增删请用 --add-port / --rm-port
 wharf service deploy blog --server <服务器> --compose ./compose.yml --port http=:8080 --json
 
 # git 仓库

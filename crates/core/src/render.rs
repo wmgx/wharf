@@ -412,7 +412,7 @@ pub(crate) fn placeholders(
   })
 }
 
-fn rewrite_placeholders(
+pub(crate) fn rewrite_placeholders(
   text: &str,
   service: bool,
   mut replace: impl FnMut(

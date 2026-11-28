@@ -2,7 +2,7 @@ import type { Tone } from "@/components/common";
 import type { TaskStatus, TaskView } from "@/types";
 
 export const STATUS: Record<TaskStatus, [Tone, string]> = {
-  running: ["warn", "运行中"], succeeded: ["ok", "成功"], failed: ["bad", "失败"], timed_out: ["bad", "超时"], skipped: ["idle", "跳过"],
+  running: ["warn", "运行中"], succeeded: ["ok", "成功"], failed: ["bad", "失败"], timed_out: ["bad", "超时"], skipped: ["idle", "跳过"], cancelled: ["idle", "已取消"],
 };
 export const KIND = { exec: "在服务里执行", container: "一次性容器", host: "宿主机命令", ping: "外部报到", script: "脚本" } as const;
 
