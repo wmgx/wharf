@@ -1380,7 +1380,7 @@ pub async fn hook(
   )
 }
 
-fn constant_time_eq(a: &str, b: &str) -> bool {
+pub(crate) fn constant_time_eq(a: &str, b: &str) -> bool {
   let mut diff = a.len() ^ b.len();
   for (i, byte) in a.bytes().enumerate() {
     diff |=

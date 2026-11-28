@@ -18,8 +18,6 @@ use crate::{
 
 const ENV: &str = "WHARF_HEARTBEAT_URL";
 const METRIC: &str = "heartbeat.overdue_mins";
-static UPDATE: tokio::sync::Mutex<()> =
-  tokio::sync::Mutex::const_new(());
 
 pub const MIGRATION: &str = "
 CREATE TABLE service_heartbeats (
@@ -255,7 +253,6 @@ pub fn view(
 }
 
 pub async fn round(state: &AppState) {
-  let _guard = UPDATE.lock().await;
   let Ok(snap) = crate::snapshot::load(&state.db).await else {
     return;
   };
@@ -319,13 +316,22 @@ pub async fn round(state: &AppState) {
   }
 }
 
+pub async fn has_token(
+  state: &AppState,
+  token: &str,
+) -> Result<bool, ApiError> {
+  let token = token.to_string();
+  state.db.call(move |c| {
+    c.query_row("SELECT EXISTS(SELECT 1 FROM service_heartbeats WHERE token = ?1)", [token], |r| r.get(0)).map_err(sql_err)
+  }).await
+}
+
 pub async fn ping(
   state: &AppState,
   token: &str,
   ok: bool,
   body: &str,
 ) -> (StatusCode, &'static str) {
-  let _guard = UPDATE.lock().await;
   let token = token.to_string();
   let output: String =
     body.replace(&token, "…").chars().take(500).collect();
@@ -404,10 +410,19 @@ mod tests {
          VALUES ('service','heartbeat-test',?1,1000,1000,1)", [spec.to_string()]).map_err(sql_err)?;
       Ok(())
     }).await.unwrap();
+    let peer = || {
+      axum::extract::ConnectInfo("203.0.113.1:1234".parse().unwrap())
+    };
     let endpoint = || (State(state.clone()), Path("fixture".into()));
     let (s, path) = endpoint();
-    let (status, _) =
-      crate::ping::fail(s, path, "failed".into()).await;
+    let (status, _) = crate::ping::fail(
+      s,
+      path,
+      peer(),
+      Default::default(),
+      "failed".into(),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert!(
       crate::rules::firing_subjects("heartbeat_late")
@@ -415,7 +430,14 @@ mod tests {
         .any(|(s, _)| s == "heartbeat-test")
     );
     let (s, path) = endpoint();
-    let (status, _) = crate::ping::ok(s, path, String::new()).await;
+    let (status, _) = crate::ping::ok(
+      s,
+      path,
+      peer(),
+      Default::default(),
+      String::new(),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert!(
       !crate::rules::firing_subjects("heartbeat_late")
