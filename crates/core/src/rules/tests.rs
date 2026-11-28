@@ -402,6 +402,76 @@ async fn digest_batches_sends_at_nine_and_catches_up_once_after_restart()
 }
 
 #[tokio::test]
+async fn oom_alert_names_compose_limit_with_empty_override() {
+  let _guard = TEST_LOCK.lock().await;
+  reset_memory();
+  let state = test_state();
+  state.db.call(|c| {
+    db::apply_write(c, &db::Write::Upsert {
+      kind: "service".into(), name: "web".into(),
+      spec: json!({
+        "server":"s1", "limits":{}, "source":{"compose":{"content":"services: {web: {image: nginx, mem_limit: 256m}}"}}
+      }),
+      meta: json!({}),
+    })?;
+    c.execute_batch(
+      "INSERT INTO deployments (service, server, run_id, hash, compose, images, created_at, instance_id)
+       SELECT 'web', 's1', 'r1', 'v1', '', '[]', 1, json_extract(meta, '$.instance_id')
+       FROM resources WHERE kind = 'service' AND name = 'web';",
+    ).map_err(db::sql_err)
+  }).await.unwrap();
+  crate::oom::record_at(
+    &state,
+    "s1",
+    db::now_ms(),
+    Some(vec!["web".into()]),
+  )
+  .await;
+  assert!(with(|m| {
+    m.firing[&("oom_killed".into(), "web".into())]
+      .body
+      .contains("Compose 上限 256")
+  }));
+}
+
+#[tokio::test]
+async fn migrated_exec_task_is_suppressed_by_its_runtime_server() {
+  let _guard = TEST_LOCK.lock().await;
+  reset_memory();
+  let state = test_state();
+  seed_server_service(&state, "s2", "web").await;
+  seed_server_service(&state, "s1", "other").await;
+  state.db.call(|c| {
+    c.execute_batch(
+      "INSERT INTO deployments (service, server, run_id, hash, compose, images, created_at, instance_id)
+       SELECT 'web', 's2', 'r1', 'v1', '', '[]', 1, json_extract(meta, '$.instance_id')
+       FROM resources WHERE kind = 'service' AND name = 'web';
+       INSERT INTO tasks (name, spec, created_at, updated_at) VALUES
+       ('dump', '{\"server\":\"s1\",\"kind\":\"exec\",\"service\":\"web\",\"command\":\"true\"}', 0, 0);",
+    ).map_err(db::sql_err)
+  }).await.unwrap();
+  let cfg = config(&state).await;
+  for _ in 0..3 {
+    observe(&state, "server.online", "s1", 0.0, "").await;
+  }
+  assert!(firing_since("server_offline", "s1").is_some());
+  assert_eq!(
+    suppress::check(&state, "task", Some("dump"), &cfg, None).await,
+    None
+  );
+  observe(&state, "server.online", "s1", 1.0, "").await;
+  for _ in 0..3 {
+    observe(&state, "server.online", "s2", 0.0, "").await;
+  }
+  assert_eq!(
+    suppress::check(&state, "task", Some("dump"), &cfg, None)
+      .await
+      .as_deref(),
+    Some("服务器 s2 离线")
+  );
+}
+
+#[tokio::test]
 async fn suppress_offline_flushes_on_recovery_and_skips_unpushed_recovery()
  {
   let _g = TEST_LOCK.lock().await;

@@ -13,7 +13,12 @@ use std::{
 
 use wharf_api_types::agent::HostTraffic;
 
-use crate::{db::now_ms, rules, state::AppState};
+use crate::{
+  db::{self, now_ms},
+  report_guard, rules,
+  state::AppState,
+  world::World,
+};
 
 const WINDOW: usize = 5;
 const MIN_ERRORS: u64 = 10;
@@ -121,6 +126,35 @@ fn accumulate(
   (latest, qps, observation)
 }
 
+fn service_gateways(world: &World) -> BTreeMap<&str, BTreeSet<&str>> {
+  let mut services = BTreeMap::<_, BTreeSet<_>>::new();
+  for route in world.routes.values().map(|row| &row.spec) {
+    if let Some(service) = report_guard::single_service(route) {
+      for server in report_guard::caddy_servers(world, route) {
+        services.entry(service).or_default().insert(server);
+      }
+    }
+  }
+  services
+}
+
+fn has_fresh_samples(
+  gateways: &BTreeSet<&str>,
+  samples: &Gateways,
+  at: i64,
+  online: impl Fn(&str) -> bool,
+) -> bool {
+  gateways.iter().all(|&server| {
+    online(server)
+      && samples.get(server).is_some_and(|samples| {
+        samples
+          .iter()
+          .rev()
+          .any(|(stamp, _)| (0..LATEST_MS).contains(&(at - *stamp)))
+      })
+  })
+}
+
 pub async fn record_at(
   state: &AppState,
   server: &str,
@@ -131,14 +165,12 @@ pub async fn record_at(
     return;
   };
   let sums = by_service(&hosts, |host| {
-    let service = crate::report_guard::route_single_service(
-      &snap.world,
-      server,
-      host,
-    )?;
+    let service =
+      report_guard::route_single_service(&snap.world, server, host)?;
     rules::lifecycle::running_service(&snap.world, &service)
       .then_some(service)
   });
+  let gateways = service_gateways(&snap.world);
   let events: Vec<_> = {
     let mut windows =
       WINDOWS.lock().unwrap_or_else(|e| e.into_inner());
@@ -154,15 +186,19 @@ pub async fn record_at(
           }
           samples.push_back((at, sum));
         }
+        let expected = &gateways[service.as_str()];
+        let online = |s: &str| state.hub.is_online(s);
         let (summary, qps, pct) = accumulate(by_server, at, |s| {
-          s == server || state.hub.is_online(s)
+          expected.contains(s) && (s == server || online(s))
         });
-        (service, summary, qps, pct)
+        let known =
+          has_fresh_samples(expected, by_server, at, online);
+        (service, summary, qps, pct, known)
       })
       .collect()
   };
   let mut points = Vec::new();
-  for (service, sum, qps, _) in &events {
+  for (service, sum, qps, _, _) in &events {
     points.push(("req.qps".into(), service.clone(), *qps));
     if sum.reqs > 0 {
       points.push(("req.p50".into(), service.clone(), sum.p50));
@@ -180,7 +216,10 @@ pub async fn record_at(
     points,
   )
   .await;
-  for (service, sum, _, pct) in events {
+  for (service, sum, _, pct, known) in events {
+    if !known {
+      continue;
+    }
     if let Some(pct) = pct {
       rules::observe_at(
         state,
@@ -211,33 +250,55 @@ pub async fn record_at(
   }
 }
 
-async fn sweep(state: &AppState, at: i64) {
+pub(crate) async fn sweep(state: &AppState, at: i64) {
   rules::ensure_loaded(state).await;
-  let (busy, anomalous) = {
+  let Ok(world) = state
+    .db
+    .call(|c| World::from_rows(db::all_resources(c)?))
+    .await
+  else {
+    return;
+  };
+  let gateways = service_gateways(&world);
+  let (idle, recovered) = {
     let mut windows =
       WINDOWS.lock().unwrap_or_else(|e| e.into_inner());
-    let mut busy = BTreeSet::new();
-    let mut anomalous = BTreeSet::new();
+    let mut idle = BTreeSet::new();
+    let mut recovered = BTreeSet::new();
     windows.retain(|service, by_server| {
-      let (latest, _, pct) =
-        accumulate(by_server, at, |s| state.hub.is_online(s));
-      if latest.reqs > 0 {
-        busy.insert(service.clone());
-      }
-      if pct.is_some_and(|pct| pct >= RECOVER_PCT) {
-        anomalous.insert(service.clone());
+      let Some(expected) = gateways.get(service.as_str()) else {
+        return false;
+      };
+      let online = |s: &str| state.hub.is_online(s);
+      let (latest, _, pct) = accumulate(by_server, at, |s| {
+        expected.contains(s) && online(s)
+      });
+      if has_fresh_samples(expected, by_server, at, online) {
+        if latest.reqs == 0 {
+          idle.insert(service.clone());
+        }
+        if pct.is_some_and(|pct| pct < RECOVER_PCT) {
+          recovered.insert(service.clone());
+        }
       }
       !by_server.is_empty()
     });
-    (busy, anomalous)
+    (idle, recovered)
   };
   for (service, _) in rules::firing_subjects("http_5xx") {
-    if !anomalous.contains(&service) {
-      rules::observe(state, "req.err_pct_5m", &service, 0.0, "")
-        .await;
+    if recovered.contains(&service) {
+      rules::observe_at(
+        state,
+        at,
+        "req.err_pct_5m",
+        &service,
+        0.0,
+        "",
+      )
+      .await;
     }
   }
-  rules::recover_idle_http(state, at, &busy).await;
+  rules::recover_idle_http(state, at, &idle).await;
 }
 
 pub fn spawn(state: Arc<AppState>) {

@@ -264,23 +264,30 @@ pub(crate) async fn settings(
       {
         return None;
       }
-      let limit = service_limit(&row.spec)?;
-      Some((name.clone(), (limit, row.spec.limits.is_none())))
+      Some((name.clone(), service_limit_with_source(&row.spec)?))
     })
     .collect();
   Some((settings.agent_memory_bytes(), limits))
 }
 
 pub(crate) fn service_limit(spec: &ServiceSpec) -> Option<u64> {
-  if let Some(limits) = &spec.limits {
-    return limits
-      .memory_mb
-      .filter(|&n| n > 0)
-      .map(|n| u64::from(n) << 20);
+  service_limit_with_source(spec).map(|(bytes, _)| bytes)
+}
+
+pub(crate) fn service_limit_with_source(
+  spec: &ServiceSpec,
+) -> Option<(u64, bool)> {
+  if let Some(mb) = spec
+    .limits
+    .as_ref()
+    .and_then(|l| l.memory_mb)
+    .filter(|&n| n > 0)
+  {
+    return Some((u64::from(mb) << 20, false));
   }
   let (bytes, all_limited) =
     crate::lint::compose_memory_limits(spec)?;
-  (all_limited && bytes > 0).then_some(bytes)
+  (all_limited && bytes > 0).then_some((bytes, true))
 }
 
 #[derive(Default)]
@@ -488,13 +495,13 @@ mod tests {
   fn service_limit_reads_compose_yaml_memory() {
     let limit = |extra: &str| {
       let spec = serde_json::from_value(serde_json::json!({
-        "server":"s1", "source":{"compose":{"content":format!("services:\n  web: {{mem_limit: 256m}}\n  db: {{{extra}}}")}}
+        "server":"s1", "limits":{}, "source":{"compose":{"content":format!("services:\n  web: {{mem_limit: 256m}}\n  db: {{{extra}}}")}}
       })).unwrap();
-      service_limit(&spec)
+      service_limit_with_source(&spec)
     };
     assert_eq!(
       limit("deploy: {resources: {limits: {memory: 512M}}}"),
-      Some(768 << 20)
+      Some((768 << 20, true))
     );
     assert_eq!(limit("image: redis"), None);
   }

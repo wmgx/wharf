@@ -648,7 +648,7 @@ exec "$@""#
 #[derive(Default)]
 struct TimeoutSentinel {
   done: Option<i32>,
-  wrapped: bool,
+  wrapped: Option<i32>,
 }
 
 impl TimeoutSentinel {
@@ -660,7 +660,7 @@ impl TimeoutSentinel {
       self.done = value.parse().ok();
     }
     if let Some(value) = line.strip_prefix(":WRAP:") {
-      self.wrapped = value.parse::<i32>().is_ok();
+      self.wrapped = value.parse().ok();
     }
   }
 
@@ -669,11 +669,12 @@ impl TimeoutSentinel {
     mut out: Output,
     marker: &str,
   ) -> (Output, bool) {
-    let timed_out = self.done.is_none() && self.wrapped;
+    let timed_out =
+      self.done.is_none() && matches!(self.wrapped, Some(124 | 137));
     out.code = if timed_out {
       None
     } else {
-      self.done.or(out.code)
+      self.done.or(self.wrapped).or(out.code)
     };
     out.success = !timed_out && out.success;
     out.stderr = out
@@ -1224,6 +1225,10 @@ mod tests {
       (timed_out, out.code)
     };
     assert_eq!(classify(None, true, 137), (true, None));
+    assert_eq!(classify(None, true, 124), (true, None));
+    for code in [1, 125, 126, 127] {
+      assert_eq!(classify(None, true, code), (false, Some(code)));
+    }
     assert_eq!(classify(Some(137), true, 137), (false, Some(137)));
     assert_eq!(classify(Some(124), true, 124), (false, Some(124)));
     assert_eq!(classify(None, false, 137), (false, Some(137)));

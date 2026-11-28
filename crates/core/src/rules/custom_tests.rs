@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use wharf_api_types::view::{
   AlertLevel, AlertPatch, AlertTarget, CustomAlertRuleRequest,
 };
@@ -227,9 +229,156 @@ async fn idle_http_recovers_an_upper_bound_without_firing_a_lower_bound()
   super::super::recover_idle_http(
     &state,
     now + 90_000,
-    &Default::default(),
+    &BTreeSet::from(["web".into()]),
   )
   .await;
   assert!(firing_since("error-high", "web").is_none());
   assert!(firing_since("latency-low", "web").is_none());
+}
+
+#[tokio::test]
+async fn offline_http_gateway_holds_alerts_until_confirmed_idle() {
+  let _guard = TEST_LOCK.lock().await;
+  reset_memory();
+  let state = test_state();
+  seed_server_service(&state, "s1", "web").await;
+  state.db.call(|c| {
+    use serde_json::json;
+    for (kind, name, spec) in [
+      ("gateway", "primary", json!({"server":"s1","kind":"caddy"})),
+      ("gateway", "secondary", json!({"server":"s2","kind":"caddy"})),
+      ("route", "a.example.com", json!({"hostname":"a.example.com","service":"web","gateway":"primary"})),
+      ("route", "b.example.com", json!({"hostname":"b.example.com","service":"web","gateway":"secondary"})),
+    ] {
+      db::apply_write(c, &db::Write::Upsert {
+        kind: kind.into(), name: name.into(), spec, meta: json!({}),
+      })?;
+    }
+    Ok(())
+  }).await.unwrap();
+  state.hub.mock_agent("s1", false, |_| unreachable!());
+  state.hub.mock_agent("s2", false, |_| unreachable!());
+  let at = db::now_ms();
+  for (name, metric) in
+    [("error-high", "err"), ("latency-high", "p95")]
+  {
+    custom::add_rule(
+      &state,
+      CustomAlertRuleRequest {
+        name: name.into(),
+        service: "web".into(),
+        metric: metric.into(),
+        op: ">".into(),
+        threshold: 5.0,
+        for_n: 1,
+        level: AlertLevel::Urgent,
+      },
+      at,
+    )
+    .await
+    .unwrap();
+  }
+  use crate::http_stats::{record_at, sweep};
+  use wharf_api_types::agent::HostTraffic;
+  let idle =
+    |host: &str| [(host.into(), HostTraffic::default())].into();
+  record_at(&state, "s2", at, idle("b.example.com")).await;
+  record_at(
+    &state,
+    "s1",
+    at,
+    [(
+      "a.example.com".into(),
+      HostTraffic {
+        reqs: 20,
+        errors: 15,
+        p95_ms: 100.0,
+        ..Default::default()
+      },
+    )]
+    .into(),
+  )
+  .await;
+  let alerts = ["http_5xx", "error-high", "latency-high"];
+  assert!(
+    alerts
+      .iter()
+      .all(|rule| firing_since(rule, "web").is_some())
+  );
+  let before = history_rows(&state).await.len();
+  state.hub.disconnect("s1");
+  sweep(&state, at + 60_000).await;
+  let later = at + 360_000;
+  record_at(&state, "s2", later, idle("b.example.com")).await;
+  sweep(&state, later).await;
+  state.hub.mock_agent("s1", false, |_| unreachable!());
+  sweep(&state, later).await;
+  assert!(
+    alerts
+      .iter()
+      .all(|rule| firing_since(rule, "web").is_some())
+  );
+  assert_eq!(history_rows(&state).await.len(), before);
+
+  record_at(&state, "s1", later + 1, idle("a.example.com")).await;
+  sweep(&state, later + 1).await;
+  assert!(
+    alerts
+      .iter()
+      .all(|rule| firing_since(rule, "web").is_none())
+  );
+  assert_eq!(history_rows(&state).await.len(), before + alerts.len());
+  crate::http_stats::forget_sample("web");
+}
+
+#[tokio::test]
+async fn deleting_custom_suppression_source_delivers_pending_alert() {
+  let _guard = TEST_LOCK.lock().await;
+  reset_memory();
+  let state = test_state();
+  seed_server_service(&state, "s1", "web").await;
+  let at = db::now_ms();
+  custom::add_rule(
+    &state,
+    CustomAlertRuleRequest {
+      name: "error-high".into(),
+      service: "web".into(),
+      metric: "err".into(),
+      op: ">".into(),
+      threshold: 5.0,
+      for_n: 1,
+      level: AlertLevel::Urgent,
+    },
+    at,
+  )
+  .await
+  .unwrap();
+  super::suppress::add_rule(
+    &state,
+    wharf_api_types::view::AlertSuppressionRequest {
+      source_rule: "error-high".into(),
+      source_subject: Some("web".into()),
+      target_rule: "http_5xx".into(),
+      target_subject: Some("web".into()),
+    },
+    at,
+  )
+  .await
+  .unwrap();
+  observe_at(&state, at, "req.err", "web", 50.0, "").await;
+  observe_at(&state, at, "req.err_pct_5m", "web", 50.0, "").await;
+  let rows = history_rows(&state).await;
+  assert_eq!(rows.len(), 2);
+  assert!(rows[1].3.as_deref().unwrap().starts_with("被抑制"));
+  let auth = crate::host_access::tests::auth(
+    [wharf_api_types::view::Perm::Apply],
+    false,
+  );
+  custom::remove_rule(&state, &auth, "error-high")
+    .await
+    .unwrap();
+  let rows = history_rows(&state).await;
+  assert_eq!(rows.len(), 3);
+  assert_eq!(rows[2].0, "http_5xx");
+  assert!(!rows[2].2 && delivered(&rows[2].3));
 }

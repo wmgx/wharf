@@ -492,14 +492,26 @@ pub(super) async fn remove_rule(
       "没有自定义规则 {name}"
     )));
   }
-  with(|m| {
+  let was_source = with(|m| {
     if m.custom_rules.get(name).is_some_and(|r| {
       r.service == cr.service && r.created_at == cr.created_at
     }) {
       m.custom_rules.remove(name);
+      m.suppressions.iter().any(|r| {
+        r.source_rule == name
+          && r
+            .source_subject
+            .as_deref()
+            .is_none_or(|s| s == cr.service)
+      })
+    } else {
+      false
     }
   });
   super::lifecycle::clear(state, &cr.name, &cr.service).await;
+  if was_source {
+    super::suppress::flush_unsuppressed_now(state, now_ms()).await;
+  }
   Ok(())
 }
 

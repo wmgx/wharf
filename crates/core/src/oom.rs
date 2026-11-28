@@ -30,10 +30,10 @@ pub async fn record_at(
     }
     if oom.contains(name) {
       metrics::event_at(state, at, "oom.kill", name, 1.0).await;
-      let detail = rules::resources::service_limit(&row.spec)
-        .map(|bytes| {
+      let detail = rules::resources::service_limit_with_source(&row.spec)
+        .map(|(bytes, from_compose)| {
           let limit = rules::resources::mib(bytes as f64);
-          if row.spec.limits.is_none() {
+          if from_compose {
             format!("Compose 上限 {limit}，可调整 mem_limit / deploy.resources.limits.memory")
           } else {
             format!("上限 {limit}")

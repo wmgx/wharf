@@ -8,7 +8,7 @@ use std::{
 use ipnet::Ipv4Net;
 use wharf_api_types::{
   agent::{AgentReport, Metrics},
-  spec::GatewayKind,
+  spec::{GatewayKind, RouteSpec},
 };
 
 use crate::{
@@ -378,12 +378,33 @@ fn route_on_caddy_server(
   hostname: &str,
 ) -> bool {
   world.routes.get(hostname).is_some_and(|route| {
-    world.route_gateways(&route.spec).iter().any(|g| {
-      world.gateways.get(*g).is_some_and(|g| {
-        g.spec.kind == GatewayKind::Caddy && g.spec.server == server
-      })
-    })
+    caddy_servers(world, &route.spec).any(|s| s == server)
   })
+}
+
+pub(crate) fn caddy_servers<'a>(
+  world: &'a World,
+  route: &'a RouteSpec,
+) -> impl Iterator<Item = &'a str> {
+  world
+    .route_gateways(route)
+    .into_iter()
+    .filter_map(move |name| {
+      let gateway = &world.gateways.get(name)?.spec;
+      (gateway.kind == GatewayKind::Caddy)
+        .then_some(gateway.server.as_str())
+    })
+}
+
+pub(crate) fn single_service(route: &RouteSpec) -> Option<&str> {
+  (!route.service.is_empty()
+    && route.upstream.is_none()
+    && route.redirect.is_none()
+    && route.paths.iter().all(|path| {
+      path.upstream.is_none()
+        && path.service.as_deref() == Some(&route.service)
+    }))
+  .then_some(route.service.as_str())
 }
 
 pub(crate) fn route_single_service(
@@ -392,15 +413,10 @@ pub(crate) fn route_single_service(
   hostname: &str,
 ) -> Option<String> {
   let route = &world.routes.get(hostname)?.spec;
-  (route_on_caddy_server(world, server, hostname)
-    && !route.service.is_empty()
-    && route.upstream.is_none()
-    && route.redirect.is_none()
-    && route.paths.iter().all(|path| {
-      path.upstream.is_none()
-        && path.service.as_deref() == Some(&route.service)
-    }))
-  .then(|| route.service.clone())
+  let service = single_service(route)?;
+  caddy_servers(world, route)
+    .any(|s| s == server)
+    .then(|| service.to_owned())
 }
 
 pub async fn record_report(

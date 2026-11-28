@@ -183,10 +183,12 @@ async fn tick(
       snap.as_ref().and_then(|snap| run_service(&spec, snap));
     let target = service
       .zip(snap.as_ref())
-      .map(|((name, _), snap)| exec_target(snap, name));
-    let cannot_run = target.as_ref().is_some_and(Result::is_err);
-    let server = target.and_then(Result::ok).unwrap_or(&spec.server);
-    let online = !cannot_run && state.hub.is_online(server);
+      .map_or(Ok(spec.server.as_str()), |((name, _), snap)| {
+        exec_target(snap, name)
+      });
+    let online = target
+      .as_ref()
+      .is_ok_and(|server| state.hub.is_online(server));
     if until > after
       && cron.next_after(after).is_some_and(|t| t <= until)
     {
@@ -201,7 +203,7 @@ async fn tick(
         .await?;
         continue;
       }
-      if spec.catch_up_mins.is_none() || online || cannot_run {
+      if spec.catch_up_mins.is_none() || online || target.is_err() {
         start(state, &name, spec, "schedule", None).await?;
         continue;
       }
@@ -244,6 +246,23 @@ async fn tick(
       && due.timestamp_millis() >= updated_at
       && !scheduled_since(state, &name, due).await?
     {
+      let server = match target {
+        Ok(server) => server,
+        Err(reason) => {
+          let id = insert_run_at(
+            state,
+            &name,
+            TaskStatus::Skipped,
+            "catch_up",
+            due.timestamp_millis(),
+            service,
+          )
+          .await?;
+          finish(state, id, TaskStatus::Skipped, None, &reason, None)
+            .await;
+          continue;
+        }
+      };
       let output = format!(
         "错过计划时间 {}，在 {window} 分钟宽限内服务器 {} 未补跑",
         due
@@ -391,6 +410,20 @@ async fn load_one(
       ApiError::not_found(format!("没有定时任务 {name}"))
         .with_hint("wharf task ls")
     })
+}
+
+pub(crate) async fn notification_server(
+  state: &AppState,
+  name: &str,
+) -> Option<String> {
+  let spec = load_one(state, name).await.ok()?;
+  match spec.how {
+    TaskKind::Exec { service, .. } => {
+      let snap = snapshot::load_inner(&state.db).await.ok()?;
+      exec_target(&snap, &service).ok().map(str::to_owned)
+    }
+    _ => Some(spec.server),
+  }
 }
 
 /// 记一条运行记录并在后台执行，返回记录 id。上一次还没跑完时记为跳过。
@@ -1882,6 +1915,40 @@ async fn task_skips_when_service_stopped_and_catches_up_once_after_offline()
       |r| Ok((r.get(0)?, r.get(1)?)),
     ).map_err(sql_err)?;
     assert_eq!(expired, (1, "failed".into()));
+    Ok(())
+  }).await.unwrap();
+}
+
+#[tokio::test]
+async fn expired_exec_catch_up_skips_an_undeployed_service() {
+  let state = crate::rules::tests::test_state();
+  let at = DateTime::parse_from_rfc3339("2026-11-20T10:30:00+08:00")
+    .unwrap()
+    .with_timezone(&Utc);
+  let due = at - chrono::Duration::minutes(30);
+  state.db.call(|c| {
+    db::apply_write(c, &db::Write::Upsert {
+      kind: "service".into(), name: "web".into(),
+      spec: serde_json::json!({"server":"s2","source":{"image":"app:1"}}),
+      meta: serde_json::json!({}),
+    })?;
+    c.execute_batch(
+      "INSERT INTO tasks (name, spec, created_at, updated_at) VALUES
+       ('dump', '{\"server\":\"s1\",\"kind\":\"exec\",\"service\":\"web\",\"command\":\"true\",\"schedule\":\"0 10 * * *\",\"catch_up_mins\":30}', 0, 0)",
+    ).map_err(sql_err)
+  }).await.unwrap();
+  let before = at - chrono::Duration::minutes(1);
+  tick(&state, before, at).await.unwrap();
+  tick(&state, before, at).await.unwrap();
+  state.db.call(move |c| {
+    let row: (i64, String, String, i64) = c.query_row(
+      "SELECT COUNT(*), status, output, started_at FROM task_runs WHERE task = 'dump' AND trigger = 'catch_up'",
+      [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    ).map_err(sql_err)?;
+    assert_eq!(row, (
+      1, "skipped".into(), "服务 web 尚未部署，跳过本次执行".into(),
+      due.timestamp_millis(),
+    ));
     Ok(())
   }).await.unwrap();
 }

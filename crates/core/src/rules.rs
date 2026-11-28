@@ -327,12 +327,12 @@ fn validate_for_n(
 pub(crate) async fn recover_idle_http(
   state: &AppState,
   now: i64,
-  busy: &BTreeSet<String>,
+  idle_services: &BTreeSet<String>,
 ) {
   let targets: BTreeSet<_> = with(|m| {
     let idle = |metric: &str, service: &str| {
       matches!(metric, "req.err" | "req.p95")
-        && !busy.contains(service)
+        && idle_services.contains(service)
     };
     m.series
       .retain(|(metric, service), _| !idle(metric, service));

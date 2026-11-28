@@ -259,19 +259,26 @@ pub(super) async fn check(
     && (id == "task"
       || (id == "backup" && subject == crate::core_backup::REPO))
   {
-    let name = subject.to_string();
-    let task = id == "task";
-    let servers = state.db.call(move |c| {
-      if task {
-        let mut stmt = c.prepare(
-          "SELECT json_extract(spec, '$.server') FROM tasks WHERE name = ?1"
-        ).map_err(db::sql_err)?;
-        return stmt.query_map([name], |r| r.get::<_, String>(0))
-          .map_err(db::sql_err)?.collect::<Result<Vec<_>, _>>().map_err(db::sql_err);
-      }
-      Ok(crate::core_node::load_persisted(c)?.map(|(server, _)| server).into_iter()
-        .chain(db::setting(c, crate::core_backup::TO)?).collect())
-    }).await.unwrap_or_default();
+    let servers = if id == "task" {
+      crate::tasks::notification_server(state, subject)
+        .await
+        .into_iter()
+        .collect()
+    } else {
+      state
+        .db
+        .call(|c| {
+          Ok(
+            crate::core_node::load_persisted(c)?
+              .map(|(server, _)| server)
+              .into_iter()
+              .chain(db::setting(c, crate::core_backup::TO)?)
+              .collect::<Vec<_>>(),
+          )
+        })
+        .await
+        .unwrap_or_default()
+    };
     if let Some(reason) = with(|m| {
       servers.into_iter().find_map(|server| {
         m.firing
