@@ -187,6 +187,12 @@ mod tests {
     let schema = serde_json::to_value(&all["service_view"]).unwrap();
     let paths = super::paths(&schema);
     assert!(paths.iter().any(|row| row["path"] == "status.actual"));
+    let cleanup = serde_json::to_value(&all["data_cleanup"]).unwrap();
+    assert!(
+      super::paths(&cleanup)
+        .iter()
+        .any(|row| row["path"] == "items.id")
+    );
     let commands = crate::describe::commands(&[]);
     for entry in commands["commands"].as_array().unwrap() {
       if let Some(schema) = entry["returns"].as_str() {

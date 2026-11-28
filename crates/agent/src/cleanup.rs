@@ -123,13 +123,13 @@ fn directory_entries(
     (srv.join(MIGRATE), "-before-", MigrateTargetBackup, false),
     (srv.join(RESTORE), "", RestoreBackup, false),
     (
-      Path::new(BACKUP_ROOT).join(ARCHIVE),
+      srv.join("wharf-backup").join(ARCHIVE),
       "-replaced-",
       BackupMoveArchive,
       false,
     ),
     (
-      Path::new(CORE_BACKUP_ROOT).join(ARCHIVE),
+      srv.join("wharf-backup-core").join(ARCHIVE),
       "-replaced-",
       BackupMoveArchive,
       true,
@@ -196,15 +196,20 @@ fn directory_entries(
       }
     }
   }
-  for info in dir_entries(Path::new(BACKUP_ROOT))? {
-    if valid(&info.name) && info.name != CORE {
+  let backups = srv.join("wharf-backup");
+  for info in dir_entries(&backups)? {
+    let path = backups.join(&info.name);
+    if valid(&info.name)
+      && info.name != CORE
+      && !DirFd::open_absolute(&path)
+        .map_err(|e| dirfd::dir_error(&path, e))?
+        .read_entries(&path)?
+        .is_empty()
+    {
       entries.push(entry(
         OrphanBackupRepo,
         Some(&info.name),
-        Path::new(BACKUP_ROOT)
-          .join(&info.name)
-          .display()
-          .to_string(),
+        path.display().to_string(),
       ));
     }
   }
@@ -345,6 +350,7 @@ pub async fn scan(
   let current = current?;
   let mut entries = docker_entries(&current, docker, Utc::now());
   let projects = docker.project_dir("");
+  let docker = docker.clone();
   let ctx = ctx.clone();
   tokio::task::spawn_blocking(move || {
     let deadline = req
@@ -379,32 +385,30 @@ pub async fn scan(
       if let Some(project) = &item.extra_project {
         let extra = stats(&projects.join(project))?;
         stat.size_estimated |= extra.size_estimated;
-        stat.size_bytes =
-          stat.size_bytes.or(extra.size_bytes).map(|size| {
-            size.saturating_add(if stat.size_bytes.is_some() {
-              extra.size_bytes.unwrap_or(0)
-            } else {
-              0
-            })
-          });
-        stat.blocked_by.extend(extra.blocked_by);
+        stat.size_bytes = match (stat.size_bytes, extra.size_bytes) {
+          (Some(a), Some(b)) => Some(a.saturating_add(b)),
+          (a, b) => a.or(b),
+        };
         stat.modified_at = stat.modified_at.or(extra.modified_at);
+      }
+      if matches!(item.kind, OrphanCaddy | OrphanFrpc) {
+        let project =
+          item.extra_project.as_deref().unwrap_or(&item.target);
+        let binds = current.project_binds(&docker, project);
+        stat.blocked_by = blockers(&path, &binds);
+        if let Some(extra) = &item.extra_project {
+          stat
+            .blocked_by
+            .extend(blockers(&projects.join(extra), &binds));
+        }
+        stat
+          .blocked_by
+          .extend(current.project_blockers(&docker, project));
       }
       item.size_bytes = stat.size_bytes;
       item.size_estimated = stat.size_estimated;
       item.created_at = item.created_at.or(stat.modified_at);
       item.blocked_by = stat.blocked_by;
-      if matches!(item.kind, OrphanCaddy | OrphanFrpc) {
-        let project =
-          item.extra_project.as_deref().unwrap_or(&item.target);
-        item.blocked_by.extend(
-          current
-            .containers
-            .iter()
-            .filter(|c| label(&c.5, PROJECT) == Some(project))
-            .map(|c| c.1.clone()),
-        );
-      }
     }
     for service in req.migrate_services.into_iter().filter(|name| {
       valid(name)
@@ -634,18 +638,16 @@ pub async fn delete(
     .filter(|_| req.kind == OrphanCaddy)
     .map(|p| projects.join(p));
   let current = containers(docker, ctx).await?;
-  let mut users = blockers(&path, &current.binds);
+  let project_cleanup = matches!(req.kind, OrphanCaddy | OrphanFrpc);
+  let relevant_binds =
+    project_cleanup.then(|| current.project_binds(docker, &key));
+  let binds = relevant_binds.as_deref().unwrap_or(&current.binds);
+  let mut users = blockers(&path, binds);
   if let Some(extra) = &extra {
-    users.extend(blockers(extra, &current.binds));
+    users.extend(blockers(extra, binds));
   }
-  if matches!(req.kind, OrphanCaddy | OrphanFrpc) {
-    users.extend(
-      current
-        .containers
-        .iter()
-        .filter(|c| label(&c.5, PROJECT) == Some(&key))
-        .map(|c| c.1.clone()),
-    );
+  if project_cleanup {
+    users.extend(current.project_blockers(docker, &key));
   }
   if repo.is_some() {
     users.extend(
@@ -705,21 +707,31 @@ pub async fn delete(
   .map_err(|_| ApiError::internal("清理目录测量中断"))??;
   // 测量可能耗时，实际删除前再次核对挂载。
   let live = containers(docker, ctx).await?;
-  let mut users = blockers(&path, &live.binds);
+  let relevant_binds =
+    project_cleanup.then(|| live.project_binds(docker, &key));
+  let binds = relevant_binds.as_deref().unwrap_or(&live.binds);
+  let mut users = blockers(&path, binds);
   if let Some(extra) = &extra {
-    users.extend(blockers(extra, &live.binds));
+    users.extend(blockers(extra, binds));
   }
-  if matches!(req.kind, OrphanCaddy | OrphanFrpc) {
-    users.extend(
-      live
-        .containers
-        .iter()
-        .filter(|c| label(&c.5, PROJECT) == Some(&key))
-        .map(|c| c.1.clone()),
-    );
+  if project_cleanup {
+    users.extend(live.project_blockers(docker, &key));
   }
   if !users.is_empty() {
     return Ok(blocked(users));
+  }
+  if project_cleanup {
+    let ids = live.owned_stops(docker, &key);
+    if !ids.is_empty() {
+      docker
+        .cmd()
+        .args(["container", "rm", "--"])
+        .args(ids)
+        .timeout(Duration::from_secs(60))
+        .run(ctx)
+        .await?
+        .check("移除孤儿项目的已停止容器")?;
+    }
   }
   dirfd::remove_tree_under(&base, &rel, ctx).await?;
   if extra.is_some() {

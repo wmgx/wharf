@@ -321,6 +321,9 @@ async fn execute(
   {
     return Err(denied().into());
   }
+  if req.include_unlabeled {
+    auth.require(Perm::Admin)?;
+  }
   let filters = Filters {
     server: req.server.clone(),
     service: req.service.clone(),

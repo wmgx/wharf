@@ -463,7 +463,10 @@ impl Hub {
     server: &str,
   ) -> Result<u64, ApiError> {
     let conns = lock(&self.conns);
-    let conn = conns.get(server).ok_or_else(|| offline(server))?;
+    let conn = conns
+      .get(server)
+      .filter(|conn| !conn.closed.is_cancelled())
+      .ok_or_else(|| offline(server))?;
     check_data_cleanup(server, conn)?;
     Ok(conn.conn_id)
   }

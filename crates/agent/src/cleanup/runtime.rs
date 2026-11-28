@@ -69,6 +69,73 @@ pub(super) struct Runtime {
   images: Vec<Image>,
 }
 
+impl Runtime {
+  fn removable_stopped(
+    docker: &Docker,
+    project: &str,
+    c: &Container,
+  ) -> bool {
+    matches!(c.2.as_str(), "exited" | "dead" | "created")
+      && label(&c.5, "com.docker.compose.project.working_dir")
+        .is_some_and(|dir| {
+          Path::new(dir) == docker.project_dir(project)
+        })
+  }
+
+  pub(super) fn project_blockers(
+    &self,
+    docker: &Docker,
+    project: &str,
+  ) -> Vec<String> {
+    self
+      .containers
+      .iter()
+      .filter(|c| {
+        label(&c.5, PROJECT) == Some(project)
+          && !Self::removable_stopped(docker, project, c)
+      })
+      .map(|c| c.1.trim_start_matches('/').into())
+      .collect()
+  }
+
+  pub(super) fn owned_stops<'a>(
+    &'a self,
+    docker: &Docker,
+    project: &str,
+  ) -> Vec<&'a str> {
+    self
+      .containers
+      .iter()
+      .filter(|c| {
+        label(&c.5, PROJECT) == Some(project)
+          && Self::removable_stopped(docker, project, c)
+      })
+      .map(|c| c.0.as_str())
+      .collect()
+  }
+
+  pub(super) fn project_binds(
+    &self,
+    docker: &Docker,
+    project: &str,
+  ) -> Vec<BindMountUser> {
+    self
+      .binds
+      .iter()
+      .filter(|m| {
+        !self.containers.iter().any(|c| {
+          c.1.trim_start_matches('/') == m.container
+            && (label(&c.5, PROJECT) == Some(project)
+              && Self::removable_stopped(docker, project, c)
+              || label(&c.5, "wharf.system") == Some("agent")
+                && Path::new(&m.source) == docker.data_dir)
+        })
+      })
+      .cloned()
+      .collect()
+  }
+}
+
 async fn docker_output(
   docker: &Docker,
   args: &[&str],
