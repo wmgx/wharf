@@ -58,9 +58,11 @@ fn due_action(
   now: i64,
   last_date: Option<&str>,
   retry: Option<&Retry>,
+  offset: FixedOffset,
+  hour: u16,
 ) -> Option<String> {
-  let dt = db::to_time(now).with_timezone(&beijing());
-  if dt.hour() < 9 {
+  let dt = db::to_time(now).with_timezone(&offset);
+  if dt.hour() < u32::from(hour) {
     return None;
   }
   let today = dt.format("%Y-%m-%d").to_string();
@@ -259,9 +261,25 @@ where
   let Ok((rows, last_date, retry)) = load_rows(state).await else {
     return false;
   };
-  let Some(today) =
-    due_action(now, last_date.as_deref(), retry.as_ref())
+  let Ok((offset, hour)) = state
+    .db
+    .call(|c| {
+      Ok((
+        crate::config_api::offset(c)?,
+        crate::config_api::number(c, "alerts.digest_hour")?,
+      ))
+    })
+    .await
   else {
+    return false;
+  };
+  let Some(today) = due_action(
+    now,
+    last_date.as_deref(),
+    retry.as_ref(),
+    offset,
+    hour,
+  ) else {
     return false;
   };
   let Some((title, body)) = render(&rows) else {

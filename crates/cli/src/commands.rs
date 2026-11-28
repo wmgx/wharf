@@ -508,6 +508,7 @@ async fn dispatch(
         auth: false,
         paths: vec![],
         caddy: None,
+        caddy_file: None,
         link: Default::default(),
         rate_limit: None,
         block_scanners: false,
@@ -523,9 +524,16 @@ async fn dispatch(
       cwd,
       command,
     } => host_exec(c, server, timeout, cwd, command, j).await,
-    Command::Audit { actor, kind, limit } => {
-      crate::audit::audit(c, actor, kind, limit, j).await
+    Command::Refs { target } => {
+      crate::catalog::refs(c, &target, j).await
     }
+    Command::Tree(args) => crate::catalog::tree(c, args, j).await,
+    Command::Lint(args) => crate::lint_cmd::run(c, args, j).await,
+    Command::Search(args) => crate::catalog::search(c, args, j).await,
+    Command::Config { cmd } => {
+      crate::config_cmd::run(c, cmd, j).await
+    }
+    Command::Audit(args) => crate::audit::audit(c, args, j).await,
     Command::ShellLog { server, limit } => {
       shell_log(c, server, limit, j).await
     }
@@ -1112,7 +1120,7 @@ async fn apply(
 
 /// 轮询直到执行结束。人看的模式下边执行边打印步骤和日志。
 /// Ctrl-C 只停止等待，不取消执行。
-async fn wait_run(
+pub(crate) async fn wait_run(
   c: &Client,
   run_id: &str,
   j: bool,
@@ -3001,6 +3009,7 @@ async fn service(
       };
       show_logs(c, &path, &args, j).await
     }
+    ServiceCmd::Env(cmd) => crate::env_sync::run(c, cmd, j).await,
     ServiceCmd::Files { name, path } => {
       crate::files::list(c, &name, &path, j).await
     }
@@ -3713,8 +3722,12 @@ async fn service(
           ApiError::invalid(format!("读不了文件 {src}：{e}"))
             .with_hint("只支持文本文件；从标准输入读用 --file -")
         })?;
-        let next =
-          wharf_api_types::spec::FileSpec { path, content, raw };
+        let next = wharf_api_types::spec::FileSpec {
+          path,
+          content,
+          raw,
+          file: None,
+        };
         if let Some(f) =
           spec.files.iter_mut().find(|f| f.path == next.path)
         {
@@ -5039,6 +5052,7 @@ fn route_add_spec(
       auth: false,
       paths: vec![],
       caddy: None,
+      caddy_file: None,
       link: Default::default(),
       redirect: None,
       rate_limit: None,
@@ -5458,9 +5472,35 @@ async fn secret(
   j: bool,
 ) -> CliResult<()> {
   match cmd {
-    SecretCmd::List { detail } => {
-      let v: Vec<SecretView> = c.get("/api/secrets").await?;
+    SecretCmd::List { detail, prefix } => {
+      let path = prefix.map_or_else(
+        || "/api/secrets".into(),
+        |prefix| format!("/api/secrets?prefix={}", seg(&prefix)),
+      );
+      let v: Vec<SecretView> = c.get(&path).await?;
       out(j || detail, &v, |v| v.iter().for_each(print_secret));
+      Ok(())
+    }
+    SecretCmd::Refs { name } => {
+      crate::catalog::refs(c, &format!("secret/{name}"), j).await
+    }
+    SecretCmd::Import(args) => {
+      crate::secret_import::run(c, args, j).await
+    }
+    SecretCmd::Unused { include_system } => {
+      let v: Vec<SecretView> = c
+        .get(&format!(
+          "/api/secrets?unused=1&include_system={include_system}"
+        ))
+        .await?;
+      out(j, &v, |rows| {
+        for row in rows {
+          print_secret(row);
+          if !row.managed && row.system.is_none() {
+            println!("  wharf secret rm {}", row.name);
+          }
+        }
+      });
       Ok(())
     }
     SecretCmd::Rotate {

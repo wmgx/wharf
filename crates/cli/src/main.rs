@@ -11,16 +11,21 @@ mod access_logs;
 mod alert;
 mod audit;
 mod bookmark;
+mod catalog;
 mod client;
 mod commands;
+mod config_cmd;
 mod connect;
 mod deploy;
 mod describe;
+mod dotenv;
 mod edge;
+mod env_sync;
 mod external;
 mod files;
 mod fleet;
 mod gh;
+mod lint_cmd;
 mod note;
 mod pack;
 mod plan_cmd;
@@ -29,10 +34,12 @@ mod print;
 mod probe;
 mod report;
 mod schema;
+mod secret_import;
 mod selfcmd;
 mod server;
 mod service_checks;
 mod task;
+mod task_artifacts;
 mod token;
 mod top;
 mod tunnel;
@@ -300,15 +307,19 @@ pub enum Command {
     command: String,
   },
   /// 操作记录和登录记录：谁在什么时候做了什么。
-  Audit {
-    /// 只看这个发起人（令牌名，或 页面:<用户名>）。
-    #[arg(long)]
-    actor: Option<String>,
-    /// 只看一类：api 或 login。
-    #[arg(long, value_parser = ["api", "login"])]
-    kind: Option<String>,
-    #[arg(long, default_value_t = 50)]
-    limit: u32,
+  Audit(audit::AuditArgs),
+  /// 查看资源被哪些对象引用。
+  Refs { target: String },
+  /// 查看路由、入口和服务的拓扑。
+  Tree(catalog::TreeArgs),
+  /// 在资源名称和配置中搜索。
+  Search(catalog::SearchArgs),
+  /// 静态体检：检查失效引用和部署配置。
+  Lint(lint_cmd::LintArgs),
+  /// 查看或调整控制面配置。
+  Config {
+    #[command(subcommand)]
+    cmd: Option<config_cmd::ConfigCmd>,
   },
   /// 宿主机终端和命令执行审计。
   ShellLog {
@@ -408,7 +419,7 @@ pub enum Command {
     #[arg(long)]
     service: Vec<String>,
   },
-  /// 不连控制面，检查意图文件写得对不对：格式、拼错的字段、名字、域名重复、compose 语法、文件内的引用。
+  /// 离线检查单个 TOML 或目录下所有意图片段的格式、名字和引用。
   /// 机器、账号这些要控制面才知道的，用 `wharf plan -f` 检查。
   Validate { file: std::path::PathBuf },
   /// 输出字段说明（JSON Schema），不需要连接控制面。
@@ -948,6 +959,9 @@ pub enum ServerCmd {
 // 只在启动时解析一次，变体大小无所谓。
 #[allow(clippy::large_enum_variant)]
 pub enum ServiceCmd {
+  /// 查看或同步服务环境变量。
+  #[command(subcommand)]
+  Env(env_sync::ServiceEnvCmd),
   /// 从服务容器的网络探测一个目标。
   Probe(probe::ServiceProbeArgs),
   /// 查看服务的代码包来自哪台服务器的哪个目录。
@@ -1731,6 +1745,19 @@ pub enum SecretCmd {
   List {
     #[arg(long)]
     detail: bool,
+    #[arg(long)]
+    prefix: Option<String>,
+  },
+  /// 原子导入 .env 中的业务密钥。
+  Import(secret_import::ImportArgs),
+  /// 查看一个密钥的引用。
+  Refs {
+    name: String,
+  },
+  /// 列出没有引用的密钥。
+  Unused {
+    #[arg(long)]
+    include_system: bool,
   },
   /// 从标准输入读入新值并保留旧值。
   Rotate {

@@ -22,10 +22,8 @@ static DAY: Mutex<Option<NaiveDate>> = Mutex::new(None);
 static FAILED: Mutex<BTreeMap<String, String>> =
   Mutex::new(BTreeMap::new());
 
-fn in_window(now: DateTime<Utc>) -> bool {
-  let hour = now
-    .with_timezone(&FixedOffset::east_opt(8 * 3600).unwrap())
-    .hour();
+fn in_window(now: DateTime<Utc>, offset: FixedOffset) -> bool {
+  let hour = now.with_timezone(&offset).hour();
   (3..6).contains(&hour)
 }
 
@@ -57,12 +55,15 @@ fn safe_plan(plan: &Plan, name: &str) -> Result<(), String> {
 
 pub async fn tick(state: &Arc<AppState>) {
   let now = Utc::now();
-  if !in_window(now) {
+  let Ok(offset) =
+    state.db.call(|c| crate::config_api::offset(c)).await
+  else {
+    return;
+  };
+  if !in_window(now, offset) {
     return;
   }
-  let today = now
-    .with_timezone(&FixedOffset::east_opt(8 * 3600).unwrap())
-    .date_naive();
+  let today = now.with_timezone(&offset).date_naive();
   {
     let mut day = DAY.lock().unwrap();
     if *day == Some(today) {
@@ -335,7 +336,13 @@ mod tests {
       ("2026-11-14T21:59:00Z", true),
       ("2026-11-14T22:00:00Z", false),
     ] {
-      assert_eq!(in_window(time.parse().unwrap()), expected);
+      assert_eq!(
+        in_window(
+          time.parse().unwrap(),
+          FixedOffset::east_opt(8 * 3600).unwrap()
+        ),
+        expected
+      );
     }
   }
 

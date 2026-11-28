@@ -34,6 +34,8 @@ pub enum TaskCmd {
   },
   /// 立即运行并等待结果；失败时退出码为 4。
   Run { name: String },
+  /// 列出或下载任务运行产物。
+  Artifacts(crate::task_artifacts::ArtifactArgs),
   /// 最近的运行记录，最新一条带完整输出。
   Logs {
     name: String,
@@ -124,6 +126,12 @@ pub struct AddArgs {
   /// 离线后允许补跑的分钟数（1～1440）。
   #[arg(long)]
   catch_up: Option<u32>,
+  /// 每次运行最多保留多少 MiB 的产物。
+  #[arg(long, value_parser = clap::value_parser!(u32).range(1..=200))]
+  artifacts_max_mb: Option<u32>,
+  /// 保留最近多少次运行的产物。
+  #[arg(long, value_parser = clap::value_parser!(u32).range(1..=20))]
+  artifacts_keep: Option<u32>,
   /// 用 `sh -c` 执行的命令，可以写 `[[密钥]]`。
   #[arg(last = true)]
   command: Vec<String>,
@@ -206,6 +214,9 @@ pub async fn task(
         }
       });
       Ok(())
+    }
+    TaskCmd::Artifacts(args) => {
+      crate::task_artifacts::run(c, args, j).await
     }
     TaskCmd::Run { name } => run(c, &name, j).await,
     TaskCmd::Logs { name, limit } => {
@@ -436,6 +447,8 @@ async fn add(c: &Client, a: AddArgs, j: bool) -> CliResult<()> {
     notify: !a.no_notify,
     skip_if_stopped: a.skip_if_stopped,
     catch_up_mins: a.catch_up,
+    artifacts_max_mb: a.artifacts_max_mb,
+    artifacts_keep: a.artifacts_keep,
   };
   if a.rotate_token
     && !matches!(

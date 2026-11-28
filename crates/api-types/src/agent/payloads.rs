@@ -807,6 +807,12 @@ pub struct TaskRunJob {
   pub out_dir: bool,
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub wait_for_deps: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub run_id: Option<i64>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub artifacts_max_bytes: Option<u64>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub artifacts_keep: Option<u32>,
   pub timeout_secs: u64,
   pub pull: PullPolicy,
 }
@@ -871,6 +877,10 @@ pub enum TaskHow {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskRunResult {
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub artifacts: Vec<TaskArtifact>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub artifacts_warning: Option<String>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub result: Option<String>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1146,4 +1156,13 @@ pub struct BindMountQuery {
   pub writable_only: bool,
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub exclude_projects: Vec<String>,
+}
+
+#[derive(
+  Debug, Clone, Serialize, Deserialize, schemars::JsonSchema,
+)]
+pub struct TaskArtifact {
+  pub path: String,
+  pub size: u64,
+  pub sha256: String,
 }

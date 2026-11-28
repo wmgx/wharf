@@ -200,7 +200,9 @@ fn git_token(spec: &ServiceSpec) -> Option<&str> {
   }
 }
 
-fn template_refs(spec: &ServiceSpec) -> impl Iterator<Item = &str> {
+pub(crate) fn service_render_refs(
+  spec: &ServiceSpec,
+) -> impl Iterator<Item = &str> {
   service_templates(spec)
     .flat_map(|text| {
       placeholders_checked(text, true, true).filter_map(Result::ok)
@@ -220,16 +222,9 @@ fn template_refs(spec: &ServiceSpec) -> impl Iterator<Item = &str> {
 }
 
 pub fn service_uses_secret(spec: &ServiceSpec, name: &str) -> bool {
-  template_refs(spec)
+  service_render_refs(spec)
     .chain(git_token(spec))
     .any(|secret| secret == name)
-}
-
-pub fn service_renders_secret(
-  spec: &ServiceSpec,
-  name: &str,
-) -> bool {
-  template_refs(spec).any(|secret| secret == name)
 }
 
 pub fn other_secret_refs<'a>(
@@ -249,6 +244,9 @@ pub fn other_secret_refs<'a>(
     }
   }
   for (host, row) in &world.routes {
+    if row.spec.auth && render::route_auth_secret(host) == name {
+      refs.push(format!("route_auth:{host}"));
+    }
     if route_login(&row.spec).is_some_and(|login| {
       crate::sso_login::secret_refs(login).contains(name)
     }) {
@@ -377,11 +375,9 @@ fn direct_refs<'a>(
   world: &'a World,
   service: &str,
 ) -> impl Iterator<Item = &'a str> {
-  world
-    .services
-    .get(service)
-    .into_iter()
-    .flat_map(|r| template_refs(&r.spec).chain(git_token(&r.spec)))
+  world.services.get(service).into_iter().flat_map(|r| {
+    service_render_refs(&r.spec).chain(git_token(&r.spec))
+  })
 }
 
 fn owned_refs(world: &World, service: &str) -> BTreeSet<String> {
@@ -723,7 +719,7 @@ pub fn borrows_other_service_secret(
       && let Ok(spec) =
         serde_json::from_value::<ServiceSpec>(after.clone())
     {
-      for name in template_refs(&spec).chain(git_token(&spec)) {
+      for name in service_render_refs(&spec).chain(git_token(&spec)) {
         if !is_system_secret(name)
           && borrowing(current_world, service, name).is_some()
         {

@@ -116,6 +116,21 @@ fn to_value<T: serde::Serialize>(v: T) -> Result<Value, ApiError> {
     .map_err(|e| ApiError::internal(e.to_string()))
 }
 
+pub(crate) fn read_root(
+  root: DirFd,
+  path: &str,
+  offset: u64,
+  len: u32,
+  expect: Option<&FileVersion>,
+) -> Result<FileChunk, ApiError> {
+  let segments = parse_rel(path)?;
+  let (name, dirs) = segments
+    .split_last()
+    .ok_or_else(|| ApiError::invalid("路径不对"))?;
+  let parent = walk(root, dirs, path, false)?;
+  read(&parent, name, path, offset, len, expect)
+}
+
 fn file_version(meta: &std::fs::Metadata) -> FileVersion {
   FileVersion {
     dev: meta.dev(),
@@ -136,7 +151,7 @@ fn read(
 ) -> Result<FileChunk, ApiError> {
   let err = io_err(Path::new(path));
   let fd = parent
-    .open_file(name, libc::O_RDONLY | NOFOLLOW, 0)
+    .open_file(name, libc::O_RDONLY | libc::O_NONBLOCK | NOFOLLOW, 0)
     .map_err(|e| match e.raw_os_error() {
       Some(libc::ENOENT) => {
         ApiError::not_found(format!("没有 {path}"))

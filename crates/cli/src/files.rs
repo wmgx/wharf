@@ -17,7 +17,8 @@ use crate::{
 
 /// 和控制面一致：上传整个放在内存里。
 const MAX_UPLOAD: u64 = 100 << 20;
-const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+pub(crate) const DOWNLOAD_TIMEOUT: Duration =
+  Duration::from_secs(30 * 60);
 
 pub async fn list(
   c: &Client,
@@ -121,7 +122,7 @@ fn create_download_temp(
   Ok((file, tmp))
 }
 
-async fn download_to(
+pub(crate) async fn download_to(
   c: &Client,
   url: &str,
   target: &Path,

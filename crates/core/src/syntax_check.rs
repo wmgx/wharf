@@ -215,6 +215,7 @@ mod tests {
   #[test]
   fn validates_json_yaml_toml_caddy_without_leaking_secrets() {
     let file = FileSpec {
+      file: None,
       path: "/etc/app/config".into(),
       content: "[[S]]".into(),
       raw: false,

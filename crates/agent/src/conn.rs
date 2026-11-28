@@ -258,6 +258,7 @@ async fn handshake(
     host_shell: true,
     runtime_v2: true,
     monitor_v2: true,
+    task_artifacts: true,
     backfill: true,
     forward: true,
     service_checks: true,

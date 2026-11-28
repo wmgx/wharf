@@ -27,6 +27,7 @@ fn old_hello_has_no_host_shell_capability() {
     runtime_v2,
     backfill,
     monitor_v2,
+    task_artifacts,
     service_checks,
     ssh_logins,
     core_probe,
@@ -52,6 +53,7 @@ fn old_hello_has_no_host_shell_capability() {
   assert!(!runtime_v2);
   assert!(!backfill);
   assert!(!monitor_v2);
+  assert!(!task_artifacts);
   assert!(!service_checks);
   assert!(!ssh_logins);
   assert!(!core_probe);
@@ -97,6 +99,7 @@ fn old_core_ignores_new_hello_capability() {
     host_shell: true,
     runtime_v2: false,
     monitor_v2: true,
+    task_artifacts: true,
     backfill: false,
     forward: true,
     service_checks: true,
@@ -292,6 +295,7 @@ impl Hub {
         host_shell: false,
         runtime_v2: false,
         monitor_v2: false,
+        task_artifacts: false,
         backfill: false,
         forward: false,
         service_checks: false,
@@ -437,6 +441,7 @@ async fn agent_upgrade_needs_no_bound_core_server_or_probe_support() {
     host_shell: false,
     runtime_v2: false,
     monitor_v2: false,
+    task_artifacts: false,
     backfill: false,
     forward: false,
     service_checks: false,
@@ -508,6 +513,7 @@ fn probe_connection(
     host_shell: false,
     runtime_v2: false,
     monitor_v2: false,
+    task_artifacts: false,
     backfill: false,
     forward: false,
     service_checks: false,

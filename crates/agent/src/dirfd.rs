@@ -215,6 +215,31 @@ impl DirFd {
     })
   }
 
+  pub(crate) fn remove_tree(
+    &self,
+    name: &CStr,
+    cancelled: &impl Fn() -> io::Result<()>,
+  ) -> io::Result<()> {
+    cancelled()?;
+    let dir = self.open_subdir(name)?;
+    dir.visit_names(|entry| {
+      cancelled()?;
+      if dir.lstat(entry)?.st_mode & libc::S_IFMT == libc::S_IFDIR {
+        dir.remove_tree(entry, cancelled)
+      } else {
+        dir.unlink(entry)
+      }
+    })?;
+    cancelled()?;
+    check(unsafe {
+      libc::unlinkat(
+        self.0.as_raw_fd(),
+        name.as_ptr(),
+        libc::AT_REMOVEDIR,
+      )
+    })
+  }
+
   pub(crate) fn read_entries(
     &self,
     path: &Path,
@@ -238,7 +263,7 @@ impl DirFd {
     Ok(out)
   }
 
-  fn read_names(&self) -> io::Result<Vec<CString>> {
+  pub(crate) fn read_names(&self) -> io::Result<Vec<CString>> {
     let mut out = Vec::new();
     self.visit_names(|name| {
       out.push(name.to_owned());
@@ -362,31 +387,6 @@ fn remove_service_tree(
   service: &str,
   cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<(), ApiError> {
-  fn remove_dir(
-    parent: &DirFd,
-    name: &CStr,
-    cancelled: &impl Fn() -> io::Result<()>,
-  ) -> io::Result<()> {
-    cancelled()?;
-    let dir = parent.open_subdir(name)?;
-    dir.visit_names(|entry| {
-      cancelled()?;
-      if dir.lstat(entry)?.st_mode & libc::S_IFMT == libc::S_IFDIR {
-        remove_dir(&dir, entry, cancelled)
-      } else {
-        dir.unlink(entry)
-      }
-    })?;
-    cancelled()?;
-    check(unsafe {
-      libc::unlinkat(
-        parent.0.as_raw_fd(),
-        name.as_ptr(),
-        libc::AT_REMOVEDIR,
-      )
-    })
-  }
-
   validate_name(
     "服务",
     service
@@ -420,7 +420,7 @@ fn remove_service_tree(
   let name = component(service.as_ref()).map_err(io_err(&dir))?;
   match fd.lstat(&name) {
     Ok(stat) if stat.st_mode & libc::S_IFMT == libc::S_IFDIR => {
-      remove_dir(&fd, &name, &cancelled).map_err(error)
+      fd.remove_tree(&name, &cancelled).map_err(error)
     }
     Ok(_) => Err(ApiError::invalid(format!(
       "{} 是软链接或非目录，已拒绝删除",

@@ -390,6 +390,7 @@ ALTER TABLE task_runs ADD COLUMN service_instance_id TEXT;
 CREATE INDEX task_runs_service_started ON task_runs (service, started_at DESC);
 "#,
   crate::service_monitor::heartbeat::ROTATE_MIGRATION,
+  "ALTER TABLE task_runs ADD COLUMN artifacts TEXT;",
 ];
 
 const PENDING_STEPS_MIGRATION: &str = r#"

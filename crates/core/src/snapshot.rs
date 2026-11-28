@@ -30,11 +30,13 @@ pub struct Snapshot {
   pub world: World,
   pub core_server: Option<String>,
   pub api_via: Option<String>,
+  pub heartbeat_url: Option<String>,
   pub sso_login: BTreeMap<String, SsoLoginState>,
   pub log_values: Arc<Vec<String>>,
   pub agents: Vec<AgentRow>,
   pub accounts: Vec<AccountRow>,
   pub app_account_defaults: BTreeMap<String, String>,
+  pub app_account_names: std::collections::BTreeSet<String>,
   pub owned: Vec<OwnedRecord>,
   pub secrets: BTreeMap<String, String>,
   pub secret_restrictions: crate::secret_restrictions::Restrictions,
@@ -216,8 +218,18 @@ pub(crate) async fn load_inner(
         agents,
         core_server,
         api_via: db::setting(c, crate::egress::API_VIA)?,
+        heartbeat_url: db::setting(c, "core.heartbeat_url")?,
         accounts,
         app_account_defaults: crate::app_accounts::defaults(c)?,
+        app_account_names: {
+          let mut stmt = c
+            .prepare("SELECT name FROM app_accounts")
+            .map_err(db::sql_err)?;
+          stmt
+            .query_map([], |r| r.get(0))
+            .and_then(Iterator::collect)
+            .map_err(db::sql_err)?
+        },
         sso_login,
         log_values,
         owned: db::owned_records(c)?,
@@ -312,12 +324,14 @@ impl Snapshot {
     Net {
       gate_public,
       gate_login,
-      heartbeat_url: crate::service_monitor::heartbeat::base_url(
-        world,
-        &base,
-        base.core_listener.map(|(port, _)| port),
-        crate::gate::public_url(),
-      ),
+      heartbeat_url: self.heartbeat_url.clone().or_else(|| {
+        crate::service_monitor::heartbeat::base_url(
+          world,
+          &base,
+          base.core_listener.map(|(port, _)| port),
+          crate::gate::public_url(),
+        )
+      }),
       basic_auth: self
         .secrets
         .iter()
@@ -1115,6 +1129,9 @@ pub(crate) async fn read_legacy_acme_dns_hash(
         network_host: false,
         out_dir: false,
         wait_for_deps: false,
+        run_id: None,
+        artifacts_max_bytes: None,
+        artifacts_keep: None,
         timeout_secs: 5,
         pull: PullPolicy {
           mirrors: BTreeMap::new(),
@@ -1539,6 +1556,7 @@ mod tests {
       .env
       .insert("PASSWORD_FILE".into(), "[[FILE:DB_PASS]]".into());
     spec.files.push(wharf_api_types::spec::FileSpec {
+      file: None,
       path: "/etc/app/conf.toml".into(),
       content: "pass_file = \"[[FILE:DB_PASS]]\"\n".into(),
       raw: false,

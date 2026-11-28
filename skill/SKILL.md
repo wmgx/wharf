@@ -215,3 +215,13 @@ wharf service import <服务器> --project <compose 项目名> --json   # 或 --
 
 - `wharf service monitor <服务>` 和 `wharf service auto-update <服务>` 无修改参数时只读查看。加 `--on` 开启或加 `--off` 关闭，确认后可加 `--apply` 执行。例如 `wharf service auto-update <服务> --on --apply`。用 `wharf service monitor <服务> --unset-expect` 清除预期状态码。
 - `wharf server watch-unit <服务器> <unit>` 无修改参数时只读查看。加 `--on` 开启或加 `--off` 关闭，直接生效。
+
+### 引用、配置和体检
+
+- 用 `wharf refs service/<服务>` 查引用，用 `wharf tree [目标]` 看拓扑，用 `wharf search <词> --kind <类别>` 查配置。密钥引用用 `wharf secret refs <名称>`，无引用的业务密钥用 `wharf secret unused` 查看。
+- 用 `wharf config` 列配置，`config get <键>` 查看一项，`config set <键> <值>` 或 `config unset <键>` 修改。
+- `wharf secret import .env --dry-run` 预览批量导入。默认有冲突时整批拒绝，加 `--only-missing` 跳过或用 `--overwrite` 覆盖。用 `wharf secret list --prefix <前缀>` 筛名称。
+- `wharf service env sync <服务> .env` 预览变量差异。确认后加 `--apply`，敏感值默认转存为密钥。要保留明文时指定 `--plain <键>`。
+- `wharf task artifacts <任务> [--run <编号>]` 列产物，用 `--get <相对路径> -o <文件>` 下载。
+- `wharf audit --since 24h --target service/<服务> --errors` 只看近期失败，可再加 `--until` 或 `--status`。
+- `wharf lint` 有错误时退出码为 1，`--strict` 时警告也算失败。意图目录可用 `wharf validate ./fleet.d/` 和 `wharf plan -f ./fleet.d/`。

@@ -177,6 +177,9 @@ fn effect(
   {
     return ("plan", &["plan"]);
   }
+  if matches!(command, "config set" | "config unset") {
+    return ("direct", &["admin"]);
+  }
   let leaf = cmd.get_name();
   if command == "connect" {
     return ("direct", &["exec"]);
@@ -219,6 +222,9 @@ fn effect(
       | "network acl"
       | "service files"
       | "alert firing"
+      | "refs" | "tree" | "search" | "lint"
+      | "config" | "config get" | "secret refs" | "secret unused"
+      | "task artifacts"
   ) || command.starts_with("wait ")
     || matches!(
       leaf,
@@ -265,7 +271,14 @@ fn returns(command: &str) -> Option<&'static str> {
     "service history" => "deployment",
     "edge list" | "edge show" => "edge",
     "account list" => "account",
-    "secret list" => "secret",
+    "secret list" | "secret unused" => "secret",
+    "refs" | "secret refs" => "ref_report",
+    "tree" => "tree",
+    "search" => "search",
+    "lint" => "lint",
+    "config" | "config list" | "config get" | "config set" | "config unset" => "config",
+    "secret import" => "secret_import",
+    "task artifacts" => "task_artifacts",
     "token list" => "token",
     "token explain" => "token_explain",
     "report" => "report",

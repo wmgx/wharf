@@ -160,3 +160,21 @@ impl fmt::Display for ApiError {
 }
 
 impl std::error::Error for ApiError {}
+
+#[derive(
+  Debug,
+  Clone,
+  PartialEq,
+  Eq,
+  PartialOrd,
+  Ord,
+  Serialize,
+  Deserialize,
+  JsonSchema,
+)]
+pub struct MissingRef {
+  pub kind: String,
+  pub target: String,
+  pub source: String,
+  pub hint: String,
+}
