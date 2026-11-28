@@ -26,7 +26,7 @@ static CACHE: Mutex<BTreeMap<String, Entry>> =
 static DAYS: Mutex<BTreeMap<String, i64>> =
   Mutex::new(BTreeMap::new());
 
-fn candidates(host: &str) -> Vec<String> {
+pub(crate) fn candidates(host: &str) -> Vec<String> {
   let host = host.trim_end_matches('.').to_lowercase();
   if host.parse::<IpAddr>().is_ok()
     || [
@@ -74,7 +74,7 @@ pub fn expires_of(host: &str) -> Option<DateTime<Utc>> {
     .find_map(|h| cache.get(h).and_then(|e| e.expires))
 }
 
-pub fn issues() -> Vec<Issue> {
+pub fn issues(world: &crate::world::World) -> Vec<Issue> {
   let mut firing = BTreeMap::new();
   for (rule, urgent) in
     [("expiry_soon", false), ("expiry_urgent", true)]
@@ -89,6 +89,20 @@ pub fn issues() -> Vec<Issue> {
     .filter_map(|(s, (rule, urgent, title))| {
       let (kind, name) = s.split_once(':')?;
       let domain = kind == "domain";
+      let exists = if domain {
+        world
+          .routes
+          .keys()
+          .any(|host| candidates(host).iter().any(|n| n == name))
+      } else {
+        world
+          .servers
+          .get(name)
+          .is_some_and(|row| row.settings.renew_at.is_some())
+      };
+      if !exists {
+        return None;
+      }
       let title =
         days.get(&s).map_or(title, |n| match (domain, *n < 0) {
           (true, true) => format!("域名 {name} 已经到期"),

@@ -117,6 +117,7 @@ pub async fn run(
   }
   if let Some(host) = host
     && !snap.world.routes.contains_key(host)
+    && (scoped.is_some() || snap.world.edge_domain(host).is_none())
   {
     return Err(
       wharf_api_types::ApiError::not_found(format!(
@@ -153,10 +154,11 @@ pub async fn run(
     .filter(|h| {
       host.is_none_or(|q| q == h.as_str())
         && !expired.contains(h)
-        && !crate::rules::lifecycle::stopped_route(
-          &snap.world,
-          &snap.world.routes[*h].spec,
-        )
+        && (manual
+          || !crate::rules::lifecycle::stopped_route(
+            &snap.world,
+            &snap.world.routes[*h].spec,
+          ))
         && allowed.is_none_or(|allowed| {
           crate::token_scope::route_spec_in_scope(
             allowed,
@@ -190,6 +192,33 @@ pub async fn run(
   .into_iter()
   .flatten()
   .collect();
+  if scoped.is_none() {
+    let edge_hosts = snap
+      .world
+      .edge_apps
+      .values()
+      .flat_map(|row| row.spec.domains.iter())
+      .filter(|name| host.is_none_or(|h| h == name.as_str()));
+    let client = &client;
+    let diagnoses = futures_util::future::join_all(edge_hosts.map(
+      |name| async move {
+        let url = format!("https://{name}");
+        let (web, cert_expires, _) = https(client, &url, false).await;
+        (
+          RouteDiagnosis {
+            hostname: name.clone(),
+            url,
+            checks: vec![web],
+            cert_expires,
+            domain_expires: crate::rdap::expires_of(name),
+          },
+          None,
+        )
+      },
+    ))
+    .await;
+    routes.extend(diagnoses);
+  }
   if manual {
     doctor_diagnose::enrich(s, &mut routes).await;
   }
@@ -300,6 +329,34 @@ async fn route(
   let (view, upstream_error) =
     route_view_with_upstream_error(snap, net, host)?;
   let world = &snap.world;
+  if crate::rules::lifecycle::stopped_route(world, &view.spec) {
+    let stopped = "目标服务已按配置停止";
+    return Some((
+      RouteDiagnosis {
+        hostname: host.into(),
+        url: view.url,
+        checks: vec![
+          check("dns", host, CheckStatus::Skip, stopped),
+          check(
+            "https",
+            host,
+            CheckStatus::Skip,
+            "目标服务已按配置停止，跳过探测",
+          ),
+          check("link", host, CheckStatus::Skip, stopped),
+          check(
+            "container",
+            &view.spec.service,
+            CheckStatus::Warn,
+            "按配置停止",
+          ),
+        ],
+        cert_expires: None,
+        domain_expires: crate::rdap::expires_of(host),
+      },
+      None,
+    ));
+  }
   let gateway = view
     .gateway
     .as_ref()
@@ -333,7 +390,7 @@ async fn route(
   let Some((gw_name, gw)) =
     gateway.filter(|_| view.spec.redirect.is_none())
   else {
-    // 边缘应用和跳转路由只查到 HTTPS 这一层。
+    // 没有可检查的上游时，只查到 HTTPS 这一层。
     return Some((diagnosis, None));
   };
   let gateway = gateway_check(live, gw_name, &gw.server);

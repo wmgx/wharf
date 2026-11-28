@@ -41,6 +41,27 @@ async fn watched(state: &AppState, server: &str) -> BTreeSet<String> {
     .unwrap_or_default()
 }
 
+pub(crate) async fn watched_subjects(
+  state: &AppState,
+  world: &crate::world::World,
+) -> Result<BTreeSet<String>, ApiError> {
+  let rows = state
+    .db
+    .call(|c| db::settings_with_prefix(c, "host_units."))
+    .await?;
+  let mut subjects = BTreeSet::new();
+  for (server, raw) in rows {
+    if world.servers.contains_key(&server) {
+      let units: BTreeSet<String> =
+        serde_json::from_str(&raw).map_err(db::json_err)?;
+      subjects.extend(
+        units.into_iter().map(|unit| format!("{server}:{unit}")),
+      );
+    }
+  }
+  Ok(subjects)
+}
+
 async fn fetch(
   state: &AppState,
   server: &str,
@@ -62,6 +83,15 @@ pub fn spawn(state: Arc<AppState>) {
     tokio::time::sleep(Duration::from_secs(150)).await;
     loop {
       if let Ok(snap) = snapshot::load(&state.db).await {
+        if let Ok(keep) = watched_subjects(&state, &snap.world).await
+        {
+          crate::rules::retain_subjects(
+            &state,
+            "host_unit_down",
+            &keep,
+          )
+          .await;
+        }
         for server in snap.world.servers.keys() {
           check(&state, server).await;
         }
@@ -97,9 +127,14 @@ async fn check(state: &AppState, server: &str) {
   }
 }
 
-pub fn issues() -> Vec<Issue> {
+pub fn issues(world: &crate::world::World) -> Vec<Issue> {
   crate::rules::firing_subjects("host_unit_down")
     .into_iter()
+    .filter(|(subject, _)| {
+      world.servers.contains_key(
+        subject.split_once(':').map_or(subject.as_str(), |s| s.0),
+      )
+    })
     .map(|(subject, title)| {
       let (alert, ack) =
         crate::rules::issue_alert("host_unit_down", &subject);

@@ -55,13 +55,20 @@ pub fn forecast(points: &[(i64, f64)], total: f64) -> Forecast {
 static LAST: Mutex<BTreeMap<String, f64>> =
   Mutex::new(BTreeMap::new());
 
+pub(crate) fn forget_server(server: &str) {
+  if let Ok(mut last) = LAST.lock() {
+    last.remove(server);
+  }
+}
+
 pub fn days_left(server: &str) -> Option<f64> {
   LAST.lock().ok()?.get(server).copied()
 }
 
-pub fn issues() -> Vec<Issue> {
+pub fn issues(world: &crate::world::World) -> Vec<Issue> {
   rules::firing_subjects("disk_forecast")
     .into_iter()
+    .filter(|(server, _)| world.servers.contains_key(server))
     .map(|(name, title)| {
       let (alert, ack) = rules::issue_alert("disk_forecast", &name);
       Issue {
@@ -94,6 +101,12 @@ pub fn spawn(state: Arc<AppState>) {
 
 async fn round(state: &AppState) -> Result<(), ApiError> {
   let snap = snapshot::load(&state.db).await?;
+  rules::retain_subjects(
+    state,
+    "disk_forecast",
+    &snap.world.servers.keys().cloned().collect(),
+  )
+  .await;
   for name in snap.world.servers.keys() {
     let server = name.clone();
     let result = state.db.call(move |c| {

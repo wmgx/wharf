@@ -9,9 +9,12 @@ use crate::state::AppState;
 const EVERY: Duration = Duration::from_secs(60);
 
 /// 正在反复重启的服务，进"需要注意"。
-pub fn issues() -> Vec<Issue> {
+pub fn issues(world: &crate::world::World) -> Vec<Issue> {
   crate::rules::firing_subjects("container_restarting")
     .into_iter()
+    .filter(|(name, _)| {
+      crate::rules::lifecycle::running_service(world, name)
+    })
     .map(|(name, title)| {
       let (alert, ack) =
         crate::rules::issue_alert("container_restarting", &name);
@@ -58,6 +61,9 @@ async fn round(
     .filter(|v| v.joined)
     .map(|v| (v.name, v.online))
     .collect();
+
+  let keep = servers.iter().map(|(name, _)| name.clone()).collect();
+  crate::rules::retain_subjects(state, "server_offline", &keep).await;
 
   let live = crate::views::cached_live(state, &snap.world).await;
   let restarting: Vec<(String, bool)> = snap
@@ -115,6 +121,8 @@ async fn round(
     )
     .await;
   }
+  crate::rules::lifecycle::reconcile_world(state, snap).await?;
+  crate::rules::flush_unsuppressed(state, crate::db::now_ms()).await;
   Ok(())
 }
 

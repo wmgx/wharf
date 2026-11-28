@@ -438,6 +438,7 @@ pub(crate) async fn start_with_actor(
     finished_at: stored.steps.is_empty().then(Utc::now),
     steps,
   };
+  silence_steps(&guard, &stored.steps, run.actor.as_deref());
   {
     let account_refs = stored.body.account_refs;
     let base_instances = stored.body.base_instances;
@@ -471,7 +472,7 @@ pub(crate) async fn start_with_actor(
     };
     let run_id = run_id.clone();
     crate::rules::ensure_loaded(&state).await;
-    state
+    let removed_firing = state
       .db
       .call_credentials(move |c, key| {
         let tx = c.transaction().map_err(sql_err)?;
@@ -505,11 +506,13 @@ pub(crate) async fn start_with_actor(
         .map_err(sql_err)?;
         alert_changes.clear_storage(&tx)?;
         tx.commit().map_err(sql_err)?;
-        alert_changes.clear_after_commit();
-        Ok(())
+        Ok(alert_changes.clear_after_commit())
       })
       .await?;
     crate::log_redact::refresh(&state.db).await;
+    if removed_firing {
+      crate::rules::flush_unsuppressed(&state, now_ms()).await;
+    }
   }
 
   for write in &stored.writes {
@@ -887,6 +890,22 @@ fn insert_task_run(
   Ok(())
 }
 
+fn silence_steps(
+  guard: &OpLockGuard,
+  steps: &[StepPlan],
+  actor: Option<&str>,
+) {
+  let targets = crate::rules::op_silence::steps_scope(steps);
+  if targets.is_empty() {
+    return;
+  }
+  let title =
+    steps.first().map_or("执行计划", |step| step.title.as_str());
+  let reason = actor
+    .map_or_else(|| title.to_string(), |a| format!("{a}：{title}"));
+  guard.silence_alerts(targets, reason);
+}
+
 fn spawn_run(
   state: Arc<AppState>,
   run: Run,
@@ -897,6 +916,7 @@ fn spawn_run(
 ) {
   let run_id = run.run_id.clone();
   guard.set_run(&run_id);
+  silence_steps(&guard, &steps, run.actor.as_deref());
   let cancel = CancellationToken::new();
   let shared = Arc::new(Mutex::new(run));
   lock(&state.runs.active).insert(
@@ -973,13 +993,6 @@ async fn execute(
     tracing::info!("[{run_id}] {}", step.title);
     let started = std::time::Instant::now();
     let op = service_op(&step.step);
-    if let Some(service) = crate::rules::op_silence::service(
-      &step.step,
-      op.map(|(service, _)| service),
-    ) && let Some(guard) = &guard
-    {
-      guard.silence_alerts(service);
-    }
     if let Some((service, action)) = op {
       record_op(
         &state,

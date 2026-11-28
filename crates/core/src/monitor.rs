@@ -26,9 +26,14 @@ pub fn last(service: &str) -> Option<MonitorView> {
   LAST.lock().ok()?.get(service).cloned()
 }
 
-pub fn issues() -> Vec<Issue> {
+pub fn issues(world: &crate::world::World) -> Vec<Issue> {
   crate::rules::firing_subjects("monitor_failed")
     .into_iter()
+    .filter(|(s, _)| {
+      world.services.get(s).is_some_and(|row| {
+        !row.spec.stopped && row.spec.monitor.is_some()
+      })
+    })
     .map(|(s, title)| {
       let (alert, ack) =
         crate::rules::issue_alert("monitor_failed", &s);
@@ -130,7 +135,7 @@ async fn round(state: &AppState) {
     .world
     .services
     .iter()
-    .filter(|(_, r)| !r.spec.stopped)
+    .filter(|(n, r)| !r.spec.stopped && snap.applied.contains_key(*n))
     .filter_map(|(n, r)| {
       let m = r.spec.monitor.clone()?;
       Some((n.clone(), r.spec.server.clone(), m.clone(), url(r, &m)))
@@ -147,10 +152,11 @@ async fn round(state: &AppState) {
     targets
       .into_iter()
       .map(|(name, server, m, url)| async move {
+        if !state.hub.is_online(&server) {
+          return (name, None);
+        }
         let outcome = match url {
           Err(e) => Some((false, e)),
-          // agent 离线或太旧：这一轮不算，离线有自己的告警。
-          Ok(_) if !state.hub.is_online(&server) => None,
           Ok(url) => {
             let job = HttpCheck {
               url,

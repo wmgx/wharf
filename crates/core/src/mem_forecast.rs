@@ -17,7 +17,7 @@ enum Forecast {
   Growing { used: f64, daily: f64, days: f64 },
 }
 
-fn forecast(points: &[(i64, f64)], total: f64) -> Forecast {
+fn forecast(points: &[(i64, f64)], total: f64, now: i64) -> Forecast {
   let mut hours = BTreeMap::new();
   for &(at, used) in points {
     let point = hours.entry(at / HOUR).or_insert((at, used));
@@ -30,7 +30,11 @@ fn forecast(points: &[(i64, f64)], total: f64) -> Forecast {
   else {
     return Forecast::Insufficient;
   };
-  if total <= 0.0 || hours.len() < 36 || last - first < 24 * HOUR {
+  if total <= 0.0
+    || hours.len() < 36
+    || last - first < 24 * HOUR
+    || now - last > 2 * HOUR
+  {
     return Forecast::Insufficient;
   }
   let mut sum = 0.0;
@@ -58,6 +62,39 @@ fn forecast(points: &[(i64, f64)], total: f64) -> Forecast {
   }
 }
 
+pub fn issues(
+  world: &crate::world::World,
+) -> Vec<wharf_api_types::view::Issue> {
+  use wharf_api_types::view::{Issue, IssueLevel, IssueSubject};
+
+  rules::firing_subjects("mem_forecast")
+    .into_iter()
+    .filter_map(|(subject, title)| {
+      let (kind, name) = subject.split_once(' ')?;
+      let kind = match kind {
+        "服务" if rules::lifecycle::running_service(world, name) => {
+          "service"
+        }
+        "服务器" if world.servers.contains_key(name) => "server",
+        _ => return None,
+      };
+      let (alert, ack) = rules::issue_alert("mem_forecast", &subject);
+      Some(Issue {
+        code: "mem_forecast".into(),
+        level: IssueLevel::Warn,
+        title,
+        subject: Some(IssueSubject {
+          kind: kind.into(),
+          name: name.into(),
+        }),
+        hint: None,
+        alert,
+        ack,
+      })
+    })
+    .collect()
+}
+
 pub fn spawn(state: Arc<AppState>) {
   tokio::spawn(async move {
     tokio::time::sleep(Duration::from_secs(120)).await;
@@ -72,7 +109,8 @@ pub fn spawn(state: Arc<AppState>) {
 
 async fn round(state: &AppState) -> Result<(), ApiError> {
   let snap = snapshot::load(&state.db).await?;
-  let from = db::now_ms() - LOOKBACK;
+  let now = db::now_ms();
+  let from = now - LOOKBACK;
   let mut subjects = Vec::new();
   for name in snap.world.servers.keys() {
     subjects.push((name.clone(), name.clone(), "host.mem", None));
@@ -88,12 +126,21 @@ async fn round(state: &AppState) -> Result<(), ApiError> {
       rules::resources::service_limit(&service.spec),
     ));
   }
-  for (name, server, series, limit) in subjects {
-    let subject = if series == "host.mem" {
-      format!("服务器 {name}")
+  let subject_of = |name: &str, series: &str| {
+    let kind = if series == "host.mem" {
+      "服务器"
     } else {
-      format!("服务 {name}")
+      "服务"
     };
+    format!("{kind} {name}")
+  };
+  let keep = subjects
+    .iter()
+    .map(|(name, _, series, _)| subject_of(name, series))
+    .collect();
+  rules::retain_subjects(state, "mem_forecast", &keep).await;
+  for (name, server, series, limit) in subjects {
+    let subject = subject_of(&name, series);
     let machine = if series == "svc.mem" {
       format!("所在机器 {server}，")
     } else {
@@ -114,7 +161,7 @@ async fn round(state: &AppState) -> Result<(), ApiError> {
       ).map_err(db::sql_err)?;
       let points = stmt.query_map(params![name, series, from], |r| Ok((r.get(0)?, r.get(1)?)))
         .and_then(Iterator::collect::<Result<Vec<_>, _>>).map_err(db::sql_err)?;
-      Ok((forecast(&points, total), total))
+      Ok((forecast(&points, total, now), total))
     }).await;
     let (value, detail) = match result {
       Ok((Forecast::Growing { used, daily, days }, total)) => {
@@ -130,7 +177,11 @@ async fn round(state: &AppState) -> Result<(), ApiError> {
         )
       }
       Ok((Forecast::Flat, _)) => (f64::MAX, String::new()),
-      Ok((Forecast::Insufficient, _)) => continue,
+      Ok((Forecast::Insufficient, _)) => {
+        rules::lifecycle::clear(state, "mem_forecast", &subject)
+          .await;
+        continue;
+      }
       Err(e) => {
         tracing::warn!("{subject} 的内存预测失败：{}", e.message);
         continue;
@@ -153,9 +204,11 @@ mod tests {
   }
 
   fn expect_growth(points: &[(i64, f64)]) {
-    let Forecast::Growing { used, daily, days } =
-      forecast(points, 1000.0)
-    else {
+    let Forecast::Growing { used, daily, days } = forecast(
+      points,
+      1000.0,
+      points.iter().map(|p| p.0).max().unwrap(),
+    ) else {
       panic!("应有增长预测")
     };
     assert_eq!(used, 700.0);
@@ -186,13 +239,14 @@ mod tests {
       .collect();
     mixed.extend_from_slice(recent);
     mixed.reverse();
-    let growth =
-      |points: &[(i64, f64)]| match forecast(points, 1000.0) {
-        Forecast::Growing { used, daily, days } => {
-          [used, daily, days]
-        }
-        other => panic!("应有增长预测，实际为 {other:?}"),
-      };
+    let growth = |points: &[(i64, f64)]| match forecast(
+      points,
+      1000.0,
+      points.iter().map(|p| p.0).max().unwrap(),
+    ) {
+      Forecast::Growing { used, daily, days } => [used, daily, days],
+      other => panic!("应有增长预测，实际为 {other:?}"),
+    };
     for (compressed, original) in
       growth(&mixed).into_iter().zip(growth(&raw))
     {
@@ -213,13 +267,21 @@ mod tests {
   #[test]
   fn flat() {
     let points: Vec<_> = (0..36).map(|h| (h * HOUR, 700.0)).collect();
-    assert_eq!(forecast(&points, 1000.0), Forecast::Flat);
+    assert_eq!(forecast(&points, 1000.0, 35 * HOUR), Forecast::Flat);
+  }
+
+  #[test]
+  fn stale_points_do_not_forecast_memory_exhaustion() {
+    assert_eq!(
+      forecast(&rising(), 1000.0, 74 * HOUR),
+      Forecast::Insufficient
+    );
   }
 
   #[test]
   fn needs_at_least_36_hourly_points() {
     assert_eq!(
-      forecast(&rising()[..20], 1000.0),
+      forecast(&rising()[..20], 1000.0, 19 * HOUR),
       Forecast::Insufficient
     );
   }

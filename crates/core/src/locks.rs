@@ -5,7 +5,10 @@ use std::{
 
 use wharf_api_types::{ApiError, ErrorCode};
 
-use crate::{db::now_ms, rules::op_silence::Windows};
+use crate::{
+  db::now_ms,
+  rules::op_silence::{Target, Windows},
+};
 
 #[derive(Default)]
 pub struct OpLocks(Arc<Mutex<State>>);
@@ -115,20 +118,32 @@ impl OpLocks {
       .any(now)
   }
 
-  pub(crate) fn suppress_alert(
+  pub(crate) fn has_active_service_silence(
     &self,
     service: &str,
-    rule: &str,
-    subject: &str,
-    healthy: bool,
-    now: i64,
   ) -> bool {
     self
       .0
       .lock()
       .unwrap_or_else(|p| p.into_inner())
       .silence
-      .suppress(service, rule, subject, healthy, now)
+      .active_service(service)
+  }
+
+  pub(crate) fn alert_sample(
+    &self,
+    targets: &BTreeSet<Target>,
+    rule: &str,
+    subject: &str,
+    healthy: bool,
+    now: i64,
+  ) -> (bool, Vec<String>) {
+    self
+      .0
+      .lock()
+      .unwrap_or_else(|p| p.into_inner())
+      .silence
+      .sample(targets, rule, subject, healthy, now)
   }
 
   pub fn is_service_busy(&self, service: &str) -> bool {
@@ -163,13 +178,17 @@ impl OpLocks {
 }
 
 impl OpLockGuard {
-  pub(crate) fn silence_alerts(&self, service: &str) {
+  pub(crate) fn silence_alerts(
+    &self,
+    targets: BTreeSet<Target>,
+    reason: String,
+  ) {
     self
       .state
       .lock()
       .unwrap_or_else(|p| p.into_inner())
       .silence
-      .start(self.id, service, now_ms());
+      .start(self.id, targets, reason, now_ms());
   }
 
   pub(crate) fn finish_silence(&self, success: bool) {

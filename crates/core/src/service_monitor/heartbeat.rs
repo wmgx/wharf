@@ -274,6 +274,13 @@ pub async fn round(state: &AppState) {
     let Some(r) = snap.heartbeats.get(&name) else {
       continue;
     };
+    if crate::rules::op_silence::service_busy(state, &name)
+      || snap.ops.get(&name).is_some_and(|op| {
+        op.status == wharf_api_types::view::OpStatus::Running
+      })
+    {
+      continue;
+    }
     let h =
       snap.world.services[&name].spec.heartbeat.as_ref().unwrap();
     let applied =

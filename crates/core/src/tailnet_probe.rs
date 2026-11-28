@@ -22,6 +22,12 @@ type AdditionalReach =
   BTreeMap<(String, String), (String, ReachView)>;
 static REACH: RwLock<AdditionalReach> = RwLock::new(BTreeMap::new());
 static RELAYS: RwLock<Vec<TailnetRelay>> = RwLock::new(Vec::new());
+
+pub(crate) fn forget_server(server: &str) {
+  if let Ok(mut relays) = RELAYS.write() {
+    relays.retain(|r| r.from != server && r.to != server);
+  }
+}
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 pub fn addresses(snap: &Snapshot) -> BTreeMap<String, String> {

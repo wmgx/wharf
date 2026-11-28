@@ -15,12 +15,13 @@ use wharf_api_types::{
     LogAlertView, LogHit, LogWatch, PortCheck, PortCheckSpec,
   },
   spec::ServiceSpec,
-  view::{Issue, IssueLevel, IssueSubject},
+  view::{Issue, IssueLevel, IssueSubject, OpStatus},
 };
 
 use crate::{
   db::now_ms,
   rules,
+  snapshot::Snapshot,
   state::AppState,
   world::{ServiceRow, World},
 };
@@ -121,7 +122,9 @@ pub fn config_only(old: &ServiceRow, new: &ServiceRow) -> bool {
   old != new && &stripped == old
 }
 
-fn watches(world: &World) -> BTreeMap<String, Vec<LogWatch>> {
+pub(crate) fn watches(
+  world: &World,
+) -> BTreeMap<String, Vec<LogWatch>> {
   let mut watches = BTreeMap::<String, Vec<LogWatch>>::new();
   for (name, row) in &world.services {
     if row.spec.stopped {
@@ -224,6 +227,7 @@ async fn logs(state: &AppState) {
         let (value, count) = window.value(watch, now);
         if count == 0
           && window.last.is_none()
+          && rules::firing_since("log_keyword", &watch.id).is_none()
           && now - window.started_at
             < i64::from(watch.spec.window_mins) * MINUTE
         {
@@ -292,7 +296,7 @@ pub fn log_views(
   })
 }
 
-fn ports(
+pub(crate) fn ports(
   row: &ServiceRow,
 ) -> impl Iterator<Item = (&str, PortCheck)> {
   row.spec.ports.iter().filter_map(|p| {
@@ -332,11 +336,13 @@ async fn check_ports(state: &AppState) {
   let mut active = BTreeSet::new();
   let mut batches = BTreeMap::<&str, Vec<(String, PortCheck)>>::new();
   for (name, row) in &snap.world.services {
-    if row.spec.stopped {
+    if row.spec.stopped || !snap.applied.contains_key(name) {
       continue;
     }
     let server = row.spec.server.as_str();
-    let skip = !state.hub.is_online(server);
+    let skip = !state.hub.is_online(server)
+      || deploying(&snap, name, now_ms())
+      || rules::op_silence::service_busy(state, name);
     for (port, check) in ports(row) {
       let id = format!("{name}:{port}");
       active.insert(id.clone());
@@ -385,6 +391,7 @@ async fn check_ports(state: &AppState) {
       let (name, _) = id.split_once(':').unwrap_or((&id, ""));
       if snap.world.services.get(name)
         != latest.world.services.get(name)
+        || deploying(&latest, name, now_ms())
         || !state
           .hub
           .is_online(&latest.world.services[name].spec.server)
@@ -404,6 +411,16 @@ async fn check_ports(state: &AppState) {
       .await;
     }
   }
+}
+
+fn deploying(snap: &Snapshot, name: &str, now: i64) -> bool {
+  snap.ops.get(name).is_some_and(|op| {
+    op.status == OpStatus::Running
+      || now - op.at.timestamp_millis() < 2 * MINUTE
+  }) || snap
+    .applied
+    .get(name)
+    .is_some_and(|a| now - a.at.timestamp_millis() < 2 * MINUTE)
 }
 
 pub fn spawn(state: Arc<AppState>) {

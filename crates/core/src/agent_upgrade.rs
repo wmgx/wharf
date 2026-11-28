@@ -278,6 +278,13 @@ pub async fn upgrade_core(
     .acquire(crate::locks::LockSpec::Global, "升级控制面")?;
   let cancel = CancellationToken::new();
   let core = crate::core_node::require_verified(&s, &cancel).await?;
+  _guard.silence_alerts(
+    [crate::rules::op_silence::Target::Server(
+      core.server.clone(),
+    )]
+    .into(),
+    "升级控制面".into(),
+  );
   let id = core.container_id.clone().ok_or_else(|| {
     ApiError::invalid("控制面不在容器里运行，不能自动升级")
   })?;
@@ -347,6 +354,7 @@ pub async fn upgrade_core(
       })
       .await?;
   }
+  _guard.finish_silence(r.started);
   Ok(Json(r))
 }
 

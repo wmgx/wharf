@@ -451,7 +451,7 @@ pub(super) async fn patch_custom(
     }
   });
   if disabled {
-    set_firing(state, (name.to_string(), svc), None).await;
+    super::lifecycle::clear(state, name, &svc).await;
   }
   Ok(())
 }
@@ -460,7 +460,6 @@ pub(super) async fn remove_rule(
   state: &AppState,
   auth: &Auth,
   name: &str,
-  now: i64,
 ) -> Result<(), ApiError> {
   ensure_loaded(state).await;
   let rule = with(|m| m.custom_rules.get(name).cloned());
@@ -475,10 +474,19 @@ pub(super) async fn remove_rule(
   let (n, service, created_at) =
     (name.to_string(), cr.service.clone(), cr.created_at);
   let changed = state.db.call(move |c| {
-    c.execute("DELETE FROM alert_custom_rules WHERE name = ?1 AND service = ?2 AND created_at = ?3",
-      params![n, service, created_at]).map_err(db::sql_err)
+    let tx = c.transaction().map_err(db::sql_err)?;
+    let exists = tx.query_row(
+      "SELECT EXISTS(SELECT 1 FROM alert_custom_rules WHERE name = ?1 AND service = ?2 AND created_at = ?3)",
+      params![n, service, created_at], |row| row.get::<_, bool>(0),
+    ).map_err(db::sql_err)?;
+    if exists {
+      super::lifecycle::clear_rows(&tx, &|rule, subject| rule == n && subject == service)?;
+      tx.execute("DELETE FROM alert_custom_rules WHERE name = ?1", [&n]).map_err(db::sql_err)?;
+    }
+    tx.commit().map_err(db::sql_err)?;
+    Ok(exists)
   }).await?;
-  if changed == 0 {
+  if !changed {
     require_custom_scope(auth, None)?;
     return Err(ApiError::not_found(format!(
       "没有自定义规则 {name}"
@@ -491,13 +499,7 @@ pub(super) async fn remove_rule(
       m.custom_rules.remove(name);
     }
   });
-  set_firing(state, (cr.name.clone(), cr.service.clone()), None)
-    .await;
-  ack::delete_key(state, &cr.name, &cr.service).await;
-  let key = format!("notify.state.{}", cr.notify_key());
-  let _ =
-    state.db.call(move |c| db::set_setting(c, &key, None)).await;
-  suppress::flush_unsuppressed(state, now).await;
+  super::lifecycle::clear(state, &cr.name, &cr.service).await;
   Ok(())
 }
 
@@ -660,9 +662,13 @@ pub fn issues(world: &World) -> Vec<Issue> {
       .iter()
       .filter_map(|((rule, subj), f)| {
         let cr = m.custom_rules.get(rule)?;
-        world.services.contains_key(subj).then(|| {
-          (rule.clone(), subj.clone(), f.title.clone(), cr.level)
-        })
+        world
+          .services
+          .get(subj)
+          .is_some_and(|row| !row.spec.stopped)
+          .then(|| {
+            (rule.clone(), subj.clone(), f.title.clone(), cr.level)
+          })
       })
       .collect()
   });
@@ -707,6 +713,6 @@ pub async fn rm_api(
   Path(name): Path<String>,
 ) -> ApiResult<AlertsView> {
   auth.require(Perm::Apply)?;
-  remove_rule(&s, &auth, &name, now_ms()).await?;
+  remove_rule(&s, &auth, &name).await?;
   Ok(Json(super::api::view_for(&s, &auth).await?))
 }

@@ -75,10 +75,3 @@ pub(super) const VENDOR: Rule = Rule {
   },
   ..BINARY
 };
-
-pub(crate) async fn clear_incident(
-  state: &crate::state::AppState,
-  name: &str,
-) {
-  super::lifecycle::clear(state, INCIDENT.id, name).await;
-}

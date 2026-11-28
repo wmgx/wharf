@@ -24,12 +24,21 @@ pub fn last(host: &str) -> Option<ProbeView> {
 }
 
 /// 连续失败够次数的域名。
-pub fn issues() -> Vec<Issue> {
+pub fn issues(world: &crate::world::World) -> Vec<Issue> {
   ["domain_down", "cert_expiring"]
     .into_iter()
     .flat_map(|rule| {
-      crate::rules::firing_subjects(rule).into_iter().map(
-        move |(name, title)| {
+      crate::rules::firing_subjects(rule)
+        .into_iter()
+        .filter(move |(name, _)| {
+          crate::rules::lifecycle::active_route(
+            world,
+            name,
+            crate::db::now_ms(),
+          ) && (rule != "cert_expiring"
+            || crate::rules::lifecycle::route_has_tls(world, name))
+        })
+        .map(move |(name, title)| {
           let (alert, ack) = crate::rules::issue_alert(rule, &name);
           let down = rule == "domain_down";
           Issue {
@@ -48,8 +57,7 @@ pub fn issues() -> Vec<Issue> {
             alert,
             ack,
           }
-        },
-      )
+        })
     })
     .collect()
 }
@@ -68,22 +76,36 @@ pub async fn observe(state: &AppState, report: &DoctorReport) {
   let active = snap
     .world
     .routes
-    .iter()
-    .filter(|(_, row)| {
-      !crate::rules::lifecycle::stopped_route(&snap.world, &row.spec)
-        && row
-          .spec
-          .expires_at
-          .is_none_or(|end| end > crate::db::now_ms())
+    .keys()
+    .chain(
+      snap
+        .world
+        .edge_apps
+        .values()
+        .flat_map(|row| row.spec.domains.iter()),
+    )
+    .filter(|host| {
+      crate::rules::lifecycle::active_route(
+        &snap.world,
+        host,
+        crate::db::now_ms(),
+      )
     })
-    .map(|(host, _)| host.clone())
+    .cloned()
     .collect::<BTreeSet<_>>();
   if let Ok(mut m) = LAST.lock() {
     m.retain(|h, _| active.contains(h));
   }
-  for rule in ["domain_down", "cert_expiring"] {
-    crate::rules::retain_subjects(state, rule, &active).await;
-  }
+  crate::rules::retain_subjects(state, "domain_down", &active).await;
+  let cert_hosts = active
+    .iter()
+    .filter(|host| {
+      crate::rules::lifecycle::route_has_tls(&snap.world, host)
+    })
+    .cloned()
+    .collect();
+  crate::rules::retain_subjects(state, "cert_expiring", &cert_hosts)
+    .await;
   for r in report
     .routes
     .iter()
@@ -96,11 +118,16 @@ pub async fn observe(state: &AppState, report: &DoctorReport) {
     else {
       continue;
     };
+    if web.status == CheckStatus::Skip {
+      continue;
+    }
     let ok = web.status != CheckStatus::Bad;
     let host = r.hostname.clone();
     let cert_days =
       r.cert_expires.map(|t| (t - chrono::Utc::now()).num_days());
-    if let Some(days) = cert_days {
+    if let Some(days) =
+      cert_days.filter(|_| cert_hosts.contains(&host))
+    {
       cert_notify(state, &host, days).await;
     }
     let prev = last(&host).map_or(0, |p| p.fails);

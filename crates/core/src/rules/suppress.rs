@@ -34,7 +34,7 @@ pub(super) const BUILTIN_GATEWAY: &str = "suppress_gateway";
 pub(super) const MAX_CUSTOM: usize = 50;
 
 pub(super) const BUILTINS: &[(&str, &str)] = &[
-  (super::op_silence::ID, "受控操作期间抑制服务告警"),
+  (super::op_silence::ID, "Wharf 操作期间自动静默相关告警"),
   (BUILTIN_OFFLINE, "机器离线时抑制其上告警"),
   (BUILTIN_GATEWAY, "网关不可用时抑制其下域名告警"),
 ];
@@ -244,7 +244,7 @@ pub(super) async fn check(
 }
 
 /// 抑制源恢复（或抑制规则关闭/删除）后，把仍在触发且还没推过的告警按自身级别补推一次。
-pub(super) async fn flush_unsuppressed(state: &AppState, now: i64) {
+pub(crate) async fn flush_unsuppressed(state: &AppState, now: i64) {
   let pending: Vec<(String, String, Event)> = with(|m| {
     m.firing
       .iter()
@@ -287,6 +287,7 @@ pub(super) async fn flush_unsuppressed(state: &AppState, now: i64) {
       &custom_rules,
       &rule_id,
       &subject,
+      now,
     );
     push_with_world(
       state,
@@ -338,6 +339,34 @@ fn clean_subject(
   }
 }
 
+fn creates_cycle(
+  existing: &[SuppressionRule],
+  source: (&str, Option<&str>),
+  target: (&str, Option<&str>),
+) -> bool {
+  let overlaps = |a: (&str, Option<&str>),
+                  b: (&str, Option<&str>)| {
+    a.0 == b.0 && (a.1.is_none() || b.1.is_none() || a.1 == b.1)
+  };
+  let mut pending = vec![target];
+  let mut visited = BTreeSet::new();
+  while let Some(node) = pending.pop() {
+    if overlaps(node, source) {
+      return true;
+    }
+    if visited.insert(node) {
+      pending.extend(existing.iter().filter_map(|r| {
+        overlaps(node, (&r.source_rule, r.source_subject.as_deref()))
+          .then_some((
+            r.target_rule.as_str(),
+            r.target_subject.as_deref(),
+          ))
+      }));
+    }
+  }
+  false
+}
+
 pub(super) async fn add_rule(
   state: &AppState,
   req: AlertSuppressionRequest,
@@ -373,20 +402,36 @@ pub(super) async fn add_rule(
   {
     return Err(ApiError::invalid("不能用一条告警抑制它自己"));
   }
-  let (count, dup) = with(|m| {
+  static ADD: tokio::sync::Mutex<()> =
+    tokio::sync::Mutex::const_new(());
+  let _add = ADD.lock().await;
+  let (count, dup, cycle) = with(|m| {
     let dup = m.suppressions.iter().any(|r| {
       r.source_rule == req.source_rule
         && r.source_subject == source_subject
         && r.target_rule == req.target_rule
         && r.target_subject == target_subject
     });
-    (m.suppressions.len(), dup)
+    let cycle = creates_cycle(
+      &m.suppressions,
+      (&req.source_rule, source_subject.as_deref()),
+      (&req.target_rule, target_subject.as_deref()),
+    );
+    (m.suppressions.len(), dup, cycle)
   });
   if dup {
     return Err(ApiError::new(
       ErrorCode::AlreadyExists,
       "相同的抑制规则已存在",
     ));
+  }
+  if cycle {
+    return Err(
+      ApiError::invalid(
+        "这条抑制规则会和现有规则形成循环抑制，导致告警互相吞掉",
+      )
+      .with_hint("用 wharf alert suppress list 查看现有规则"),
+    );
   }
   if count >= MAX_CUSTOM {
     return Err(ApiError::invalid(format!(

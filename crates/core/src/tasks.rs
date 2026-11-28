@@ -289,17 +289,20 @@ pub(crate) async fn notify_result(
   let task = name.to_string();
   let server = state.db.call(move |c| {
     let server = c.query_row(
-      "SELECT json_extract(spec, '$.server') FROM tasks WHERE name = ?1
-        AND COALESCE(json_extract(spec, '$.enabled'), 1) = 1
-        AND COALESCE(json_extract(spec, '$.notify'), 1) = 1
+      "SELECT json_extract(spec, '$.server'),
+              COALESCE(json_extract(spec, '$.enabled'), 1)
+                AND COALESCE(json_extract(spec, '$.notify'), 1)
+       FROM tasks WHERE name = ?1
         AND EXISTS (SELECT 1 FROM task_runs WHERE id = ?2 AND task = ?1)",
-      params![task, run_id], |r| r.get::<_, String>(0),
+      params![task, run_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?)),
     ).optional().map_err(sql_err)?;
-    if server.is_some() && crate::notify::transition_row(c, &task_notice_key(&task), ok)? {
-      Ok(server)
-    } else {
-      Ok(None)
+    let Some((server, notify)) = server else { return Ok(None) };
+    let key = task_notice_key(&task);
+    if !notify {
+      db::set_setting(c, &key, None)?;
+      return Ok(None);
     }
+    Ok(crate::notify::transition_row(c, &key, ok)?.then_some(server))
   }).await;
   let Ok(Some(server)) = server else { return };
   let title = if ok {
@@ -1223,6 +1226,27 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn quiet_task_clears_legacy_dedup_and_disabled_task_is_hidden()
+   {
+    let state = crate::rules::tests::test_state();
+    state.db.call(|c| {
+      let spec = serde_json::json!({"server":"s1","kind":"ping","notify":false}).to_string();
+      c.execute("INSERT INTO tasks (name, spec, created_at, updated_at) VALUES ('daily', ?1, 0, 0)", [spec]).map_err(sql_err)?;
+      c.execute("INSERT INTO task_runs (id, task, status, trigger, started_at) VALUES (1,'daily','succeeded','ping',0)", []).map_err(sql_err)?;
+      db::set_setting(c, &task_notice_key("daily"), Some("fail"))
+    }).await.unwrap();
+    notify_result(&state, "daily", 1, TaskStatus::Succeeded, "")
+      .await;
+    state.db.call(|c| {
+      assert!(db::setting(c, &task_notice_key("daily"))?.is_none());
+      c.execute("UPDATE tasks SET spec = json_set(spec, '$.enabled', json('false'))", []).map_err(sql_err)?;
+      c.execute("UPDATE task_runs SET status = 'failed'", []).map_err(sql_err)?;
+      Ok(())
+    }).await.unwrap();
+    assert!(issues(&state).await.is_empty());
+  }
 
   #[test]
   fn empty_schedule_only_for_script() {

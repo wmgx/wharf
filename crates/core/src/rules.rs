@@ -51,6 +51,7 @@ pub(crate) mod service_overrides;
 mod store;
 #[path = "rules/suppress.rs"]
 mod suppress;
+pub(crate) use suppress::flush_unsuppressed;
 
 use api::view;
 use catalog::{NOTICES, RULES};
@@ -388,6 +389,7 @@ async fn observe_at(
     let o = service_overrides::effective_override(
       cfg.get(rule.id),
       svc_override,
+      now,
     );
     if !op_silence::skip_sample(
       state,
@@ -735,7 +737,10 @@ pub async fn retain_subjects(
   let id = id.to_string();
   let keep = keep.clone();
   lifecycle::clear_matching(state, move |rule, subject| {
-    rule == id && !keep.contains(subject)
+    rule == id
+      && !keep.contains(subject)
+      && !(rule == "external_incident"
+        && keep.iter().any(|name| name.eq_ignore_ascii_case(subject)))
   })
   .await;
 }

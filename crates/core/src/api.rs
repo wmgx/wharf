@@ -979,11 +979,13 @@ async fn remove_server(
       )
       .map_err(sql_err)?;
       crate::core_node::clear_if_server(&tx, &name)?;
+      db::set_setting(&tx, &format!("host_units.{name}"), None)?;
       tx.commit().map_err(sql_err)?;
       state.hub.disconnect(&name);
       Ok(())
     })
     .await?;
+  crate::rules::lifecycle::forget_server(&name);
   crate::rules::lifecycle::clear_matching(
     &s,
     move |rule, subject| {
