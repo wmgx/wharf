@@ -334,6 +334,7 @@ export interface ApplyRequest {
   confirm?: string[];
   plan_id: string;
   skip_snapshot?: boolean;
+  verify_before_dns?: boolean | null;
 }
 
 /**
@@ -1117,11 +1118,29 @@ export type Extract = {
   name: string;
 };
 
+export interface FailoverEntryHealth {
+  detail: string;
+  ok: boolean;
+  stage: string;
+  status?: number | null;
+}
+
+export interface FailoverHealthSnapshot {
+  at: number;
+  backup?: FailoverEntryHealth | null;
+  primary?: FailoverEntryHealth | null;
+  service_stopped?: boolean;
+}
+
 export interface FailoverPendingView {
   attempts: number;
   last_error?: string | null;
   target_backup: boolean;
 }
+
+export type FailoverPinTarget = "backup";
+
+export type FailoverTarget = "primary" | "backup" | "auto";
 
 /**
  * 配置里改动的一个字段。
@@ -2303,14 +2322,33 @@ export interface RouteDiagnosis {
   url: string;
 }
 
+export interface RouteFailoverRequest {
+  force: boolean;
+  reason?: string | null;
+  target: FailoverTarget;
+  verify_before_dns: boolean;
+}
+
+export interface RouteFailoverView {
+  backup_gateway: string;
+  changed: boolean;
+  health?: FailoverHealthSnapshot | null;
+  hostname: string;
+  on_backup: boolean;
+  pending?: FailoverPendingView | null;
+  pinned: FailoverPinTarget | null;
+  primary_gateway: string;
+  run_id?: string | null;
+  verification?: string | null;
+}
+
 export interface RouteSpec {
   /**
    * 登录保护（P3）。
    */
   auth?: boolean;
   /**
-   * 备用入口：这个网关也配好这个域名；主网关所在机器连续离线 5 分钟，
-   * DNS 自动切到它，主网关恢复后切回。caddy 备用入口在切过去后才申请证书。
+   * 备用入口：主入口持续不可达且备用可达时切换 DNS，主入口持续恢复后切回。
    */
   backup_gateway?: string | null;
   /**
@@ -2335,6 +2373,10 @@ export interface RouteSpec {
    * 临时分享：到这个时间（毫秒时间戳）以后，网关直接断开这个域名的请求；路由和 DNS 记录留着，等人删除。
    */
   expires_at?: number | null;
+  /**
+   * 自动切备和切回所需的连续异常或恢复分钟数，默认 5 分钟。
+   */
+  failover_minutes?: number | null;
   /**
    * 入口网关。不填则用默认网关；边缘应用的域名不经过网关，不填。
    */
@@ -2385,6 +2427,7 @@ export interface RouteSpec {
 export interface RouteView {
   core?: boolean;
   failover_pending?: FailoverPendingView | null;
+  failover_pinned?: FailoverPinTarget | null;
   /**
    * 实际使用的网关（spec 里没填时是默认网关）。
    */
@@ -2392,7 +2435,7 @@ export interface RouteView {
   id: string;
   note?: string | null;
   /**
-   * 主网关那台离线，DNS 现在指向备用入口（`gateway` 是备用网关）。
+   * 当前生效入口是备用网关。
    */
   on_backup?: boolean;
   /**

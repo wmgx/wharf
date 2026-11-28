@@ -102,6 +102,9 @@ pub struct PendingState {
   pub egresses: BTreeSet<String>,
   pub baselines: BTreeSet<String>,
   pub ensure_dirs: BTreeMap<String, EnsureDirsPayload>,
+  pub gateways_after_dns: BTreeSet<String>,
+  pub links_after_dns: BTreeSet<String>,
+  pub dns_cutovers: BTreeSet<String>,
 }
 
 pub fn load(c: &Connection) -> Result<PendingState, ApiError> {
@@ -167,6 +170,15 @@ pub fn load(c: &Connection) -> Result<PendingState, ApiError> {
       }
       "baseline" => {
         pending.baselines.insert(key);
+      }
+      "gateway_after_dns" => {
+        pending.gateways_after_dns.insert(key);
+      }
+      "link_after_dns" => {
+        pending.links_after_dns.insert(key);
+      }
+      "dns_cutover" => {
+        pending.dns_cutovers.insert(key);
       }
       "ensure_dirs" => {
         pending.ensure_dirs.insert(
@@ -322,6 +334,23 @@ pub fn simple_key(step: &Step) -> Option<(&'static str, &str)> {
   }
 }
 
+fn dns_cleanup_key(step: &Step) -> Option<(&'static str, String)> {
+  match step {
+    Step::GatewaySync {
+      gateway,
+      after_dns: true,
+      ..
+    } => Some(("gateway_after_dns", gateway.clone())),
+    Step::LinkUp {
+      server,
+      project,
+      after_dns: true,
+      ..
+    } => Some(("link_after_dns", format!("{server}/{project}"))),
+    _ => None,
+  }
+}
+
 // 配置与未执行步骤一起提交。执行器启动前，重规划就能看到这些步骤。
 pub fn stage(
   c: &Connection,
@@ -348,6 +377,37 @@ pub fn stage(
         .is_some_and(|row| row.spec.server == m.payload.from)
     {
       clear(c, "migrate", name)?;
+    }
+  }
+  for host in &pending.dns_cutovers {
+    if !world.routes.contains_key(host) {
+      clear(c, "dns_cutover", host)?;
+    }
+  }
+  let cutovers: Vec<_> = steps
+    .iter()
+    .filter_map(|step| match &step.step {
+      Step::DnsUpsert {
+        hostname,
+        expected_gateway: Some(_),
+        verify_target: true,
+        ..
+      } => Some(hostname),
+      _ => None,
+    })
+    .collect();
+  if !cutovers.is_empty() {
+    let mut cleanup = steps
+      .iter()
+      .filter_map(|step| dns_cleanup_key(&step.step))
+      .peekable();
+    if cleanup.peek().is_some() {
+      for (kind, key) in cleanup {
+        put(c, (kind, &key), ids, None, &())?;
+      }
+      for host in cutovers {
+        put(c, ("dns_cutover", host), ids, None, &())?;
+      }
     }
   }
   for step in steps {
@@ -460,6 +520,21 @@ pub async fn finish_step(
 ) -> Result<(), ApiError> {
   if let Some((kind, target)) = simple_key(step) {
     let target = target.to_string();
+    return state.db.call(move |c| clear(c, kind, &target)).await;
+  }
+  let cleanup = match step {
+    Step::DnsUpsert { hostname, .. } => {
+      Some(("dns_cutover", hostname.clone()))
+    }
+    Step::GatewayDown { gateway, .. } => {
+      Some(("gateway_after_dns", gateway.clone()))
+    }
+    Step::LinkDown { server, project } => {
+      Some(("link_after_dns", format!("{server}/{project}")))
+    }
+    _ => dns_cleanup_key(step),
+  };
+  if let Some((kind, target)) = cleanup {
     return state.db.call(move |c| clear(c, kind, &target)).await;
   }
   if let Step::EnsureDirs { server, dirs, .. } = step {

@@ -82,6 +82,8 @@ struct Conn {
   safe_delete: bool,
   shared_volumes: bool,
   safe_gateway: bool,
+  gateway_probe: bool,
+  frpc_reload: bool,
   safe_adopt: bool,
   safe_migrate: bool,
   safe_backup: bool,
@@ -402,6 +404,18 @@ impl Hub {
       .is_some_and(|c| !c.upgrade_only && c.safe_rollback)
   }
 
+  pub fn supports_gateway_probe(&self, server: &str) -> bool {
+    lock(&self.conns)
+      .get(server)
+      .is_some_and(|c| !c.upgrade_only && c.gateway_probe)
+  }
+
+  pub fn supports_frpc_reload(&self, server: &str) -> bool {
+    lock(&self.conns)
+      .get(server)
+      .is_some_and(|c| !c.upgrade_only && c.frpc_reload)
+  }
+
   pub fn supports_backfill(&self, server: &str) -> bool {
     lock(&self.conns).get(server).is_some_and(|c| {
       !c.closed.is_cancelled() && !c.upgrade_only && c.backfill
@@ -704,7 +718,20 @@ impl Hub {
     {
       job.force = true;
     }
+    if (matches!(&op, AgentOp::GatewayProbe(_))
+      && !conn.gateway_probe)
+      || (matches!(&op, AgentOp::LinkApply(_)) && !conn.frpc_reload)
+    {
+      return Err(
+        ApiError::new(
+          ErrorCode::Conflict,
+          format!("服务器 {server} 的 agent 不支持该操作"),
+        )
+        .suggest(format!("wharf server upgrade {server}")),
+      );
+    }
     let cancel_grace = match &op {
+      AgentOp::LinkApply(_) => Some(Duration::from_secs(90)),
       AgentOp::ServiceStopForData { .. } => {
         Some(Duration::from_secs(250))
       }
@@ -1112,6 +1139,8 @@ async fn handle_socket(
     safe_delete,
     shared_volumes,
     safe_gateway,
+    gateway_probe,
+    frpc_reload,
     safe_adopt,
     safe_migrate,
     safe_backup,
@@ -1285,6 +1314,8 @@ async fn handle_socket(
     safe_delete,
     shared_volumes,
     safe_gateway,
+    gateway_probe,
+    frpc_reload,
     safe_adopt,
     safe_migrate,
     safe_backup,

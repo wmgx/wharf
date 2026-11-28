@@ -451,6 +451,7 @@ async fn dispatch(
         redirect: None,
         backup_gateway: None,
         dns_ttl: None,
+        failover_minutes: None,
         auth: false,
         paths: vec![],
         caddy: None,
@@ -725,6 +726,7 @@ async fn dispatch(
       confirm,
       no_wait,
       skip_snapshot,
+      dns_verify,
     } => {
       apply(
         c,
@@ -732,6 +734,7 @@ async fn dispatch(
           plan_id,
           confirm,
           skip_snapshot,
+          verify_before_dns: dns_verify.mode(),
         },
         !no_wait,
         j,
@@ -920,6 +923,7 @@ async fn plan_and_maybe_apply(
     out(j, &plan, print::plan);
     return Ok(());
   }
+  let verify_before_dns = flags.dns_verify.mode();
   let missing: Vec<&String> = plan
     .needs_confirm
     .iter()
@@ -929,8 +933,13 @@ async fn plan_and_maybe_apply(
     if !j {
       print::plan(&plan);
     }
-    let flags: String =
+    let mut flags: String =
       missing.iter().map(|a| format!(" --confirm {a}")).collect();
+    match verify_before_dns {
+      Some(true) => flags.push_str(" --verify-before-dns"),
+      Some(false) => flags.push_str(" --no-verify-before-dns"),
+      None => {}
+    }
     let mut err = ApiError::new(
       ErrorCode::ConfirmRequired,
       format!(
@@ -955,6 +964,7 @@ async fn plan_and_maybe_apply(
     plan_id: plan.plan_id.clone(),
     confirm: flags.confirm,
     skip_snapshot: false,
+    verify_before_dns,
   };
   apply(c, req, true, j, Some(plan)).await
 }
@@ -3655,6 +3665,14 @@ async fn gateway(
   }
 }
 
+fn failover_label(r: &RouteView) -> &'static str {
+  match (r.on_backup, r.failover_pinned) {
+    (true, Some(_)) => "（备用 · 手动锁定）",
+    (true, None) => "（备用）",
+    _ => "",
+  }
+}
+
 fn print_failover_pending(r: &RouteView) {
   if let Some(p) = &r.failover_pending {
     let target = if p.target_backup {
@@ -3671,6 +3689,70 @@ fn print_failover_pending(r: &RouteView) {
 
 async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
   match cmd {
+    RouteCmd::Failover {
+      hostname,
+      to,
+      no_verify,
+      force,
+      reason,
+    } => {
+      use wharf_api_types::view::{
+        FailoverTarget, RouteFailoverRequest, RouteFailoverView,
+      };
+      let path =
+        format!("/api/routes/{}/failover", seg(hostname.trim()));
+      let value: RouteFailoverView = if let Some(to) = to {
+        let target = match to.as_str() {
+          "backup" => FailoverTarget::Backup,
+          "primary" => FailoverTarget::Primary,
+          "auto" => FailoverTarget::Auto,
+          _ => {
+            return Err(
+              ApiError::invalid(
+                "主备切换目标须为 backup、primary 或 auto",
+              )
+              .into(),
+            );
+          }
+        };
+        c.post_timeout(
+          &path,
+          &RouteFailoverRequest {
+            target,
+            verify_before_dns: !no_verify,
+            force,
+            reason,
+          },
+          std::time::Duration::from_secs(120),
+        )
+        .await?
+      } else {
+        c.get(&path).await?
+      };
+      out(j, &value, |v| {
+        let current = if v.on_backup {
+          &v.backup_gateway
+        } else {
+          &v.primary_gateway
+        };
+        let pin = if v.pinned.is_some() {
+          "（手动锁定）"
+        } else {
+          ""
+        };
+        println!(
+          "{}  当前：{current}{pin}  主：{}  备：{}",
+          v.hostname, v.primary_gateway, v.backup_gateway
+        );
+        if let Some(checked) = &v.verification {
+          println!("  预验：{checked}");
+        }
+        if let Some(run) = &v.run_id {
+          println!("  执行记录：{run}");
+        }
+      });
+      Ok(())
+    }
     RouteCmd::Logs(args) => {
       crate::access_logs::route(c, args, j).await
     }
@@ -3687,7 +3769,7 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
       out(j, &v, |v| {
         for r in v {
           println!(
-            "{}  →  {}  经 {}{}",
+            "{}  →  {}  经 {}{}{}",
             r.url,
             r.spec
               .redirect
@@ -3695,6 +3777,7 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
               .or(r.spec.upstream.as_deref())
               .unwrap_or(&r.spec.service),
             r.gateway.as_deref().unwrap_or("-"),
+            failover_label(r),
             r.spec
               .expires_at
               .map(|ms| {
@@ -3761,6 +3844,8 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
       port,
       gateway,
       backup_gateway,
+      failover_minutes,
+      no_failover_minutes,
       dns_ttl,
       no_dns_ttl,
       auth,
@@ -3790,6 +3875,9 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
         gateway,
         backup_gateway,
         dns_ttl: dns_ttl.map(Some).or(no_dns_ttl.then_some(None)),
+        failover_minutes: failover_minutes
+          .map(Some)
+          .or(no_failover_minutes.then_some(None)),
         auth: flag(auth, no_auth),
         paths: if no_paths {
           Some(vec![])
@@ -4181,6 +4269,7 @@ struct RouteAddArgs {
   gateway: Option<String>,
   backup_gateway: Option<String>,
   dns_ttl: Option<Option<u32>>,
+  failover_minutes: Option<Option<u32>>,
   auth: Option<bool>,
   paths: Option<Vec<PathRoute>>,
   tunnel: Option<bool>,
@@ -4217,6 +4306,7 @@ fn route_add_spec(
       gateway: None,
       backup_gateway: None,
       dns_ttl: None,
+      failover_minutes: None,
       sso: None,
       auth: false,
       paths: vec![],
@@ -4259,6 +4349,11 @@ fn route_add_spec(
   }
   if let Some(b) = a.backup_gateway {
     spec.backup_gateway = (!b.is_empty()).then_some(b);
+  }
+  if let Some(minutes) = a.failover_minutes {
+    spec.failover_minutes = minutes;
+  } else if spec.backup_gateway.is_none() {
+    spec.failover_minutes = None;
   }
   if let Some(ttl) = a.dns_ttl {
     spec.dns_ttl = ttl;
@@ -5252,6 +5347,7 @@ mod tests {
         gateway: None,
         backup_gateway: Some("edge2".into()),
         dns_ttl: Some(Some(120)),
+        failover_minutes: Some(Some(2)),
         auth: None,
         paths: None,
         tunnel: None,
@@ -5261,6 +5357,7 @@ mod tests {
     .unwrap_or_else(|_| panic!("应当成功"));
     assert_eq!(spec.backup_gateway.as_deref(), Some("edge2"));
     assert_eq!(spec.dns_ttl, Some(120));
+    assert_eq!(spec.failover_minutes, Some(2));
     assert!(spec.sso.is_some());
     assert_eq!(spec.paths.len(), 1);
     assert_eq!(spec.service, "blog");

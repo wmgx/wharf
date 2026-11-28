@@ -55,6 +55,7 @@ mod failover;
 mod favicon;
 mod files_api;
 mod gate;
+mod gateway_probe;
 mod heal;
 mod host_access;
 mod host_dir;

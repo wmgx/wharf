@@ -14,6 +14,7 @@ pub mod compose;
 pub mod egress;
 pub mod error;
 pub mod external;
+pub mod gateway_http;
 pub mod net_probe;
 pub mod plan;
 pub mod report;

@@ -79,6 +79,11 @@ pub fn router(state: Arc<AppState>) -> Router {
       "/api/routes/{hostname}/cert/retry",
       post(crate::cert_status::retry),
     )
+    .route(
+      "/api/routes/{hostname}/failover",
+      get(crate::failover::status_api)
+        .post(crate::failover::manual_api),
+    )
     .route("/api/sso/accounts", get(crate::app_accounts::list))
     .route(
       "/api/sso/accounts/{name}",

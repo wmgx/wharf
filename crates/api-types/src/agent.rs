@@ -159,6 +159,10 @@ pub enum AgentMsg {
     shared_volumes: bool,
     #[serde(default)]
     safe_gateway: bool,
+    #[serde(default, rename = "gateway_probe_v2")]
+    gateway_probe: bool,
+    #[serde(default)]
+    frpc_reload: bool,
     #[serde(default)]
     safe_adopt: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -416,6 +420,8 @@ pub enum AgentOp {
   },
   /// 写入 compose、拉镜像、`up -d`。结果是 [ProjectUpResult]。
   ProjectUp(ProjectUp),
+  GatewayProbe(GatewayProbeJob),
+  LinkApply(LinkApply),
   ProjectMounts {
     projects: Vec<String>,
   },

@@ -472,6 +472,7 @@ pub(crate) async fn start_with_actor(
     let run_body = serde_json::to_string(&run).map_err(json_err)?;
     let actor_name = run.actor.clone();
     let confirmed = req.confirm;
+    let verify_before_dns = req.verify_before_dns;
     let run_status = if run.status == RunStatus::Running {
       "running"
     } else {
@@ -504,7 +505,7 @@ pub(crate) async fn start_with_actor(
           params![plan_id],
         )
         .map_err(sql_err)?;
-        let meta = retry::RetryMeta::capture(&tx, key, (step_plans, offset), account_refs, confirmed)?;
+        let meta = retry::RetryMeta::capture(&tx, key, (step_plans, offset), account_refs, confirmed, verify_before_dns)?;
         let meta = serde_json::to_string(&meta).map_err(json_err)?;
         tx.execute(
           "INSERT INTO runs (id, plan_id, status, body, started_at, actor, retry_meta) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -548,7 +549,7 @@ pub(crate) async fn start_with_actor(
       state.clone(),
       shared,
       stored.steps,
-      (first_pending, false),
+      (first_pending, false, req.verify_before_dns, None),
       actor.clone(),
       cancel,
       guard,
@@ -804,7 +805,14 @@ pub(crate) async fn start_task_locked(
     .call_credentials(move |c, key| {
       let meta = stored_steps
         .map(|steps| {
-          retry::RetryMeta::capture(c, key, (steps, 0), None, vec![])
+          retry::RetryMeta::capture(
+            c,
+            key,
+            (steps, 0),
+            None,
+            vec![],
+            None,
+          )
         })
         .transpose()?;
       insert_task_run(
@@ -815,7 +823,7 @@ pub(crate) async fn start_task_locked(
       )
     })
     .await?;
-  spawn_run(state, run, scope, steps, None, guard);
+  spawn_run(state, run, scope, steps, (None, Some(false)), guard);
   Ok(ApplyResponse { run_id })
 }
 
@@ -823,11 +831,19 @@ pub(crate) async fn run_batch_sync(
   state: Arc<AppState>,
   steps: Vec<StepPlan>,
   guard: OpLockGuard,
-) -> Result<(Vec<RunStep>, OpLockGuard), ApiError> {
+  manual: Option<(&str, &crate::auth::Auth)>,
+) -> Result<(String, Vec<RunStep>, OpLockGuard), ApiError> {
+  let scope_services = manual
+    .and_then(|(_, auth)| auth.services.as_ref())
+    .map(|services| services.iter().cloned().collect::<Vec<_>>());
+  let manual_gateway = manual.map(|(gateway, _)| gateway.to_string());
   let run = Run {
     run_id: crate::world::new_id("r"),
     plan_id: String::new(),
-    actor: Some("主备切换".into()),
+    actor: Some(manual.map_or_else(
+      || "主备切换".into(),
+      |(_, auth)| format_actor(auth),
+    )),
     retry_of: None,
     status: RunStatus::Running,
     started_at: Utc::now(),
@@ -836,16 +852,19 @@ pub(crate) async fn run_batch_sync(
   };
   guard.set_run(&run.run_id);
   let stored = run.clone();
+  let scope = scope_services.clone();
   state
     .db
-    .call(move |c| insert_task_run(c, &stored, None, None))
+    .call(move |c| {
+      insert_task_run(c, &stored, scope.as_deref(), None)
+    })
     .await?;
   let cancel = CancellationToken::new();
   let shared = Arc::new(Mutex::new(run));
   lock(&state.runs.active).insert(
     lock(&shared).run_id.clone(),
     ActiveRun {
-      scope_services: None,
+      scope_services,
       run: shared.clone(),
       cancel: cancel.clone(),
     },
@@ -854,15 +873,15 @@ pub(crate) async fn run_batch_sync(
     state,
     shared.clone(),
     steps,
-    (0, true),
+    (0, true, Some(false), manual_gateway),
     None,
     cancel,
     guard,
   )
   .await
   .expect("独立 DNS 步骤保留执行锁");
-  let results = lock(&shared).steps.clone();
-  Ok((results, guard))
+  let run = lock(&shared);
+  Ok((run.run_id.clone(), run.steps.clone(), guard))
 }
 
 fn pending_run_step(step: &StepPlan) -> RunStep {
@@ -918,7 +937,10 @@ fn spawn_run(
   run: Run,
   scope_services: Option<Vec<String>>,
   steps: Vec<StepPlan>,
-  actor: Option<crate::security_receipt::Actor>,
+  (actor, verify): (
+    Option<crate::security_receipt::Actor>,
+    Option<bool>,
+  ),
   guard: OpLockGuard,
 ) {
   let run_id = run.run_id.clone();
@@ -938,7 +960,7 @@ fn spawn_run(
     state,
     shared,
     steps,
-    (0, false),
+    (0, false, verify, None),
     actor,
     cancel,
     guard,
@@ -949,7 +971,12 @@ async fn execute(
   state: Arc<AppState>,
   run: Arc<Mutex<Run>>,
   steps: Vec<StepPlan>,
-  (offset, independent): (usize, bool),
+  (offset, independent, verify, manual_gateway): (
+    usize,
+    bool,
+    Option<bool>,
+    Option<String>,
+  ),
   actor: Option<crate::security_receipt::Actor>,
   cancel: CancellationToken,
   guard: OpLockGuard,
@@ -1026,7 +1053,15 @@ async fn execute(
       )
       .await
     } else {
-      run_step(&state, &run_id, &step.step, progress, &cancel).await
+      run_step_with_dns(
+        &state,
+        &run_id,
+        &step.step,
+        progress,
+        &cancel,
+        (verify, manual_gateway.as_deref()),
+      )
+      .await
     };
     let result = match result {
       Ok(()) => crate::pending::finish_step(&state, &step.step).await,
@@ -1283,12 +1318,32 @@ async fn record_op(
   }
 }
 
+#[cfg(test)]
 pub(crate) async fn run_step(
   state: &AppState,
   run_id: &str,
   step: &Step,
   progress: ProgressFn,
   cancel: &CancellationToken,
+) -> Result<(), ApiError> {
+  run_step_with_dns(
+    state,
+    run_id,
+    step,
+    progress,
+    cancel,
+    (Some(false), None),
+  )
+  .await
+}
+
+async fn run_step_with_dns(
+  state: &AppState,
+  run_id: &str,
+  step: &Step,
+  progress: ProgressFn,
+  cancel: &CancellationToken,
+  (verify, manual_gateway): (Option<bool>, Option<&str>),
 ) -> Result<(), ApiError> {
   let mut snap = snapshot::load(&state.db).await?;
   if matches!(step, Step::LinkUp { .. } | Step::GatewaySync { .. }) {
@@ -1585,7 +1640,9 @@ pub(crate) async fn run_step(
     Step::CleanupData { .. } => {
       return Err(ApiError::internal("清理只能由定时任务执行"));
     }
-    Step::GatewaySync { gateway, expect } => {
+    Step::GatewaySync {
+      gateway, expect, ..
+    } => {
       let gw = world.gateways.get(gateway).ok_or_else(|| {
         ApiError::new(
           ErrorCode::PlanStale,
@@ -1671,7 +1728,22 @@ pub(crate) async fn run_step(
         &[],
       )?;
     }
-    Step::LinkUp { server, project } => {
+    Step::LinkUp {
+      server,
+      project,
+      hot_reload,
+      admin_port,
+      ..
+    } => {
+      if *hot_reload && !state.hub.supports_frpc_reload(server) {
+        return Err(
+          ApiError::new(
+            ErrorCode::PlanStale,
+            format!("服务器 {server} 当前不支持 frpc 热重载"),
+          )
+          .suggest("wharf plan"),
+        );
+      }
       let p = crate::link::projects(world, &net)?
         .into_iter()
         .find(|p| &p.server == server && &p.project == project)
@@ -1722,35 +1794,52 @@ pub(crate) async fn run_step(
       if let Some(ca) = ca {
         secrets.insert(crate::link::CA_CERT_SECRET.into(), ca);
       }
-      let p =
-        crate::link::projects_with_secrets(world, &net, &secrets)?
+      let p = crate::link::projects_for_servers(
+        world,
+        &net,
+        &secrets,
+        &admin_port
+          .map(|port| ((server.as_str(), project.as_str()), port))
           .into_iter()
-          .find(|p| &p.server == server && &p.project == project)
-          .ok_or_else(|| ApiError::internal("反向隧道配置丢失"))?;
+          .collect(),
+        |p| {
+          *hot_reload && &p.server == server && &p.project == project
+        },
+      )?
+      .into_iter()
+      .find(|p| &p.server == server && &p.project == project)
+      .ok_or_else(|| ApiError::internal("反向隧道配置丢失"))?;
+      let up = ProjectUp {
+        project: project.clone(),
+        compose: p.compose,
+        hash: p.hash,
+        pull: snapshot::pull_policy(&world.servers[server]),
+        pull_missing_only: false,
+        retire: None,
+        rollback: true,
+        pins: Default::default(),
+        expected_images: Default::default(),
+        no_start: false,
+        trial: None,
+        start_timeout_secs: None,
+        readiness: None,
+        init: None,
+      };
+      let op = match p.reload {
+        Some(r) => {
+          AgentOp::LinkApply(wharf_api_types::agent::LinkApply {
+            up,
+            config: r.config,
+            config_hash: r.config_hash,
+            extra_files: r.extra_files,
+            image: render::FRPC_IMAGE.into(),
+          })
+        }
+        None => AgentOp::ProjectUp(up),
+      };
       let result: ProjectUpResult = state
         .hub
-        .call(
-          server,
-          AgentOp::ProjectUp(ProjectUp {
-            project: project.clone(),
-            compose: p.compose,
-            hash: p.hash,
-            pull: snapshot::pull_policy(&world.servers[server]),
-            pull_missing_only: false,
-            retire: None,
-            rollback: true,
-            pins: Default::default(),
-            expected_images: Default::default(),
-            no_start: false,
-            trial: None,
-            start_timeout_secs: None,
-            readiness: None,
-            init: None,
-          }),
-          GATEWAY_TIMEOUT,
-          Some(progress),
-          cancel,
-        )
+        .call(server, op, GATEWAY_TIMEOUT, Some(progress), cancel)
         .await?;
       ensure_running(
         &result,
@@ -1895,13 +1984,53 @@ pub(crate) async fn run_step(
       existing,
       extra,
       expected_gateway,
+      verify_target,
     } => {
       if let Some(gateway) = expected_gateway {
-        let active = state
-          .db
-          .call(|c| crate::failover::load_active_from_conn(c))
+        if manual_gateway != Some(gateway.as_str()) {
+          let active = state
+            .db
+            .call(|c| crate::failover::load_active_from_conn(c))
+            .await?;
+          check_dns_gateway(world, &active, hostname, gateway)?;
+        }
+        if verify.unwrap_or(*verify_target)
+          && let Some(route) = world.routes.get(hostname)
+        {
+          if spec.tunnel.is_none()
+            && crate::planner::desired_record_at(
+              &snap,
+              world,
+              &net,
+              hostname,
+              Some(gateway),
+            )?
+            .content
+              != spec.content
+          {
+            return Err(
+              ApiError::new(
+                ErrorCode::PlanStale,
+                format!(
+                  "预验前发现 {hostname} 的 DNS 目标地址已变化"
+                ),
+              )
+              .suggest("wharf plan"),
+            );
+          }
+          let checked = crate::gateway_probe::verify_before_dns(
+            state,
+            &snap,
+            &net,
+            (hostname, &route.spec, gateway),
+            cancel,
+          )
           .await?;
-        check_dns_gateway(world, &active, hostname, gateway)?;
+          progress(format!(
+            "改 DNS 前预验 {gateway}：{}",
+            checked.detail
+          ));
+        }
       } else if world.routes.contains_key(hostname) {
         return Err(
           ApiError::new(
@@ -3259,6 +3388,7 @@ mod tests {
       ApplyRequest {
         plan_id: plan.plan.plan_id,
         confirm: vec!["service/blog".into()],
+        verify_before_dns: None,
         skip_snapshot: false,
       },
       &BTreeSet::from([Perm::Admin, Perm::Confirm]),
@@ -3523,7 +3653,7 @@ mod tests {
       state.clone(),
       run.clone(),
       steps,
-      (0, false),
+      (0, false, None, None),
       None,
       CancellationToken::new(),
       guard,
@@ -3874,6 +4004,125 @@ mod tests {
   }
 
   #[tokio::test]
+  async fn dns_502_skips_removing_old_site_and_explicit_skip_reaches_provider()
+   {
+    let state = crate::rules::tests::test_state();
+    let mut world = crate::world::World::default();
+    world.servers.insert(
+      "s2".into(),
+      crate::world::ServerRow {
+        settings: serde_json::from_str(
+          r#"{"public_ip":"203.0.113.2"}"#,
+        )
+        .unwrap(),
+        version: 1,
+      },
+    );
+    world.gateways.insert(
+      "gw2".into(),
+      crate::world::GatewayRow {
+        spec: serde_json::from_str(
+          r#"{"kind":"caddy","server":"s2"}"#,
+        )
+        .unwrap(),
+        version: 1,
+      },
+    );
+    world.routes.insert("a.example.test".into(), crate::world::RouteRow {
+      spec: serde_json::from_str(r#"{"hostname":"a.example.test","upstream":"100.64.0.2:80","gateway":"gw2"}"#).unwrap(),
+      id: "rt_verify".into(),
+      version: 1,
+    });
+    let writes = world.writes_from(&crate::world::World::default());
+    state
+      .db
+      .call(move |c| {
+        for write in writes {
+          db::apply_write(c, &write)?;
+        }
+        Ok(())
+      })
+      .await
+      .unwrap();
+    state.hub.mock_agent("s2", false, |op| Ok(match op {
+      AgentOp::ProjectStatus { .. } => serde_json::json!([{
+        "project":"wharf-gw-gw2","containers":[{"name":"gw2-1","service":"caddy","state":"running"}]
+      }]),
+      AgentOp::GatewayProbe(_) => serde_json::json!({
+        "ok":false,"stage":"gateway_http_bad","status":502,"detail":"HTTP 502"
+      }),
+      _ => panic!("不应同步旧网关"),
+    }));
+    state.hub.enable_mock_failover_features("s2");
+    let dns: Step = serde_json::from_value(serde_json::json!({
+      "kind":"dns_upsert","hostname":"a.example.test","account":"fixture",
+      "expected_gateway":"gw2","verify_target":true,
+      "spec":{"record_type":"A","content":"203.0.113.2","proxied":false},
+      "existing":null,"extra":[]
+    })).unwrap();
+    let steps: Vec<StepPlan> = [
+      dns.clone(),
+      Step::GatewaySync {
+        gateway: "gw1".into(),
+        after_dns: true,
+        expect: None,
+      },
+    ]
+    .into_iter()
+    .map(|step| StepPlan {
+      step,
+      title: "切入口".into(),
+      items: vec![],
+    })
+    .collect();
+    let run = Arc::new(Mutex::new(Run {
+      run_id: "r-verify".into(),
+      plan_id: String::new(),
+      actor: None,
+      retry_of: None,
+      status: RunStatus::Running,
+      started_at: Utc::now(),
+      finished_at: None,
+      steps: steps.iter().map(pending_run_step).collect(),
+    }));
+    let guard = state
+      .locks
+      .acquire(LockSpec::apply([]), "测试写入 DNS")
+      .unwrap();
+    let cancel = CancellationToken::new();
+    execute(
+      state.clone(),
+      run.clone(),
+      steps,
+      (0, false, None, None),
+      None,
+      cancel.clone(),
+      guard,
+    )
+    .await;
+    {
+      let run = lock(&run);
+      let error = run.steps[0].error.as_ref().unwrap();
+      assert_eq!(error.code, ErrorCode::Conflict);
+      assert!(error.message.contains("HTTP 502"));
+      assert_eq!(run.steps[1].status, StepStatus::Skipped);
+    }
+    let error = run_step_with_dns(
+      &state,
+      "r-skip",
+      &dns,
+      Arc::new(|_| {}),
+      &cancel,
+      (Some(false), None),
+    )
+    .await
+    .unwrap_err();
+    // 未配置测试厂商，进入查账号这一步即证明预验已被跳过。
+    assert_eq!(error.code, ErrorCode::PlanStale);
+    assert!(error.message.contains("账号"));
+  }
+
+  #[tokio::test]
   async fn independent_dns_batch_keeps_running_after_stale_step() {
     let state = crate::rules::tests::test_state();
     state.hub.mock_agent("s1", false, |op| {
@@ -3904,8 +4153,8 @@ mod tests {
       .locks
       .acquire(LockSpec::apply([]), "主备切换测试")
       .unwrap();
-    let (results, _) =
-      run_batch_sync(state, steps, guard).await.unwrap();
+    let (_, results, _) =
+      run_batch_sync(state, steps, guard, None).await.unwrap();
     assert_eq!(
       results[0].error.as_ref().unwrap().code,
       ErrorCode::PlanStale
@@ -3989,6 +4238,7 @@ mod tests {
       gateway,
       Step::GatewaySync {
         gateway: "gw".into(),
+        after_dns: false,
         expect: None,
       }
     );

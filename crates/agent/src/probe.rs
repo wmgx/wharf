@@ -3,11 +3,15 @@
 
 use std::{net::IpAddr, sync::Arc, time::Duration};
 
+use reqwest::{
+  Client, ClientBuilder, IntoUrl, StatusCode,
+  header::{HeaderMap, HeaderName, HeaderValue},
+};
 use tokio::{
   io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
   net::{TcpListener, TcpStream},
 };
-use wharf_api_types::agent::ProbeTarget;
+use wharf_api_types::{agent::ProbeTarget, gateway_http::inspect};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 /// TCP 第一次重传 SYN 大约在 1 秒后。
@@ -126,18 +130,50 @@ async fn timed(target: &ProbeTarget) -> Option<f64> {
     .flatten()
 }
 
+pub(crate) fn http_client() -> ClientBuilder {
+  Client::builder()
+    .redirect(reqwest::redirect::Policy::none())
+    .no_proxy()
+}
+
+pub(crate) fn http_headers<'a>(
+  values: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> Result<HeaderMap, &'static str> {
+  let mut headers = HeaderMap::new();
+  for (key, value) in values {
+    let (Ok(name), Ok(mut value)) = (
+      HeaderName::from_bytes(key.as_bytes()),
+      HeaderValue::from_str(value),
+    ) else {
+      return Err("监控请求头格式无效");
+    };
+    value.set_sensitive(true);
+    headers.append(name, value);
+  }
+  Ok(headers)
+}
+
+pub(crate) async fn http_response(
+  client: &Client,
+  url: impl IntoUrl,
+  headers: HeaderMap,
+  gated: bool,
+  read_body: bool,
+) -> Result<(StatusCode, bool, Vec<u8>), reqwest::Error> {
+  let response = client.get(url).headers(headers).send().await?;
+  Ok(inspect(response, gated, read_body).await)
+}
+
 /// 自定义监控：从本机发一次 GET，只读前 64KB 找关键字，不跟随跳转。
 pub async fn http(
   job: wharf_api_types::agent::HttpCheck,
 ) -> wharf_api_types::agent::HttpCheckResult {
   use wharf_api_types::agent::HttpCheckResult;
   let start = std::time::Instant::now();
-  let client = match reqwest::Client::builder()
+  let client = match http_client()
     .timeout(std::time::Duration::from_secs(
       job.timeout_secs.clamp(1, 60),
     ))
-    .redirect(reqwest::redirect::Policy::none())
-    .no_proxy()
     .user_agent("wharf-monitor")
     .build()
   {
@@ -150,22 +186,26 @@ pub async fn http(
     }
   };
   let ms = |s: std::time::Instant| s.elapsed().as_millis() as u64;
-  let mut request = client.get(&job.url);
-  for (key, value) in &job.headers {
-    use reqwest::header::{HeaderName, HeaderValue};
-    let (Ok(name), Ok(mut value)) = (
-      HeaderName::from_bytes(key.as_bytes()),
-      HeaderValue::from_str(value),
-    ) else {
+  let headers = match http_headers(
+    job.headers.iter().map(|(k, v)| (k.as_str(), v.as_str())),
+  ) {
+    Ok(headers) => headers,
+    Err(error) => {
       return HttpCheckResult {
-        error: Some("监控请求头格式无效".into()),
+        error: Some(error.into()),
         ..Default::default()
       };
-    };
-    value.set_sensitive(true);
-    request = request.header(name, value);
-  }
-  let mut resp = match request.send().await {
+    }
+  };
+  let (status, _, body) = match http_response(
+    &client,
+    &job.url,
+    headers,
+    false,
+    job.keyword.is_some(),
+  )
+  .await
+  {
     Ok(r) => r,
     Err(e) => {
       let error = if e.is_timeout() {
@@ -182,22 +222,12 @@ pub async fn http(
       };
     }
   };
-  let status = resp.status().as_u16();
-  let found = match &job.keyword {
-    None => None,
-    Some(k) => {
-      let mut body = Vec::new();
-      while body.len() < 64 * 1024 {
-        match resp.chunk().await {
-          Ok(Some(c)) => body.extend_from_slice(&c),
-          _ => break,
-        }
-      }
-      Some(String::from_utf8_lossy(&body).contains(k.as_str()))
-    }
-  };
+  let found = job
+    .keyword
+    .as_ref()
+    .map(|k| String::from_utf8_lossy(&body).contains(k.as_str()));
   HttpCheckResult {
-    status: Some(status),
+    status: Some(status.as_u16()),
     ms: ms(start),
     found,
     error: None,

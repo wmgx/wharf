@@ -198,6 +198,7 @@ mod tests {
       hash: None,
       config_hash: None,
       acme_dns_url_hash: None,
+      frpc_admin_port: None,
       containers: vec![container(state, None)],
     };
     service_status(Inputs {
@@ -253,6 +254,7 @@ mod tests {
       project: "web".into(),
       config_hash: None,
       acme_dns_url_hash: None,
+      frpc_admin_port: None,
       containers: vec![container("running", None)],
     };
     let offline = ApiError::new(

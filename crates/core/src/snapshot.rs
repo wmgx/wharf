@@ -628,6 +628,7 @@ pub struct GatewayRender {
   pub config: String,
   pub config_hash: String,
   pub sites: Vec<render::Site>,
+  pub forwards: Vec<(bool, u16, String)>,
   pub needs_acme_dns: bool,
   pub needs_link_cert: bool,
   pub extra_files: BTreeMap<String, String>,
@@ -931,9 +932,9 @@ pub fn gateway_render_with_fill(
   let mut needs_acme_dns = false;
   let needs_link_cert = gateway.spec.kind == GatewayKind::Caddy
     && crate::link::caddy_site(world, net, name, &gateway.spec)?;
+  let mut forwards = Vec::new();
   let (compose, config) = match gateway.spec.kind {
     GatewayKind::Caddy => {
-      let mut forwards = Vec::new();
       for f in &gateway.spec.layer4 {
         let upstream = if let Some(up) = &f.upstream {
           up.clone()
@@ -1050,6 +1051,7 @@ pub fn gateway_render_with_fill(
     compose,
     config,
     sites,
+    forwards,
     needs_acme_dns,
     needs_link_cert,
     extra_files: BTreeMap::new(),
@@ -1165,6 +1167,10 @@ pub fn provider_error(e: ProviderError) -> ApiError {
 pub fn dns_provider(
   account: &AccountRow,
 ) -> Result<Box<dyn DnsProvider>, ApiError> {
+  #[cfg(test)]
+  if account.kind == "fixture-failover" {
+    return Ok(Box::new(crate::failover::tests::FixtureDns));
+  }
   let factory =
     wharf_providers::factory(&account.kind).ok_or_else(|| {
       ApiError::internal(format!("不支持的厂商类型 {}", account.kind))
@@ -1566,6 +1572,7 @@ mod tests {
       config: config.to_string(),
       config_hash: render::hash(config),
       sites: Vec::new(),
+      forwards: Vec::new(),
       needs_acme_dns: false,
       needs_link_cert: false,
       extra_files: BTreeMap::new(),

@@ -1356,6 +1356,7 @@ async fn tailnet_and_gateway_operations_silence_only_matching_samples()
       server: "s1".into(),
     },
     crate::planner::Step::GatewaySync {
+      after_dns: false,
       gateway: "entry".into(),
       expect: None,
     },
