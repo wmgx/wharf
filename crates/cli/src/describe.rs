@@ -30,7 +30,7 @@ fn arg(a: &clap::Arg) -> Value {
     "arg": flag,
     "required": a.is_required_set(),
     "value": !a.is_positional() && a.get_action().takes_values(),
-    "repeat": matches!(a.get_action(), clap::ArgAction::Append),
+    "repeat": matches!(a.get_action(), clap::ArgAction::Append) || a.get_num_args().is_some_and(|r| r.max_values() > 1),
     "default": a.get_default_values().iter().map(|v| v.to_string_lossy().into_owned()).collect::<Vec<_>>(),
     "choices": a.get_possible_values().iter().map(|v| v.get_name().to_string()).collect::<Vec<_>>(),
     "help": a.get_long_help().or(a.get_help()).map(|h| h.to_string()),
@@ -47,11 +47,7 @@ fn walk(
     .filter(|s| s.get_name() != "help")
     .collect();
   if subs.is_empty()
-    || !path.is_empty()
-      && cmd.get_arguments().any(|a| {
-        !a.is_global_set()
-          && (a.is_positional() || a.get_id() == "probe")
-      })
+    || !path.is_empty() && !cmd.is_subcommand_required_set()
   {
     let args: Vec<Value> = cmd
       .get_arguments()
@@ -61,12 +57,30 @@ fn walk(
       })
       .map(arg)
       .collect();
-    out.push(compact(json!({
-      "command": format!("wharf {}", path.join(" ")),
+    let command = path.join(" ");
+    let mut entry = compact(json!({
+      "command": format!("wharf {command}"),
       "about": cmd.get_about().map(|h| h.to_string()),
       "details": cmd.get_long_about().map(|h| h.to_string()),
       "args": args,
-    })));
+    }));
+    let (effect, perms) = effect(&command, cmd);
+    entry["effect"] = json!(effect);
+    entry["perms"] = json!(perms);
+    entry["returns"] = json!(returns(&command));
+    if perms.is_empty() {
+      entry["offline"] = json!(true);
+    }
+    if read_when_no_args(&command) {
+      entry["read_when_no_args"] = json!(true);
+    }
+    if cmd.get_arguments().any(|a| a.get_long() == Some("dry-run")) {
+      entry["dry_run"] = json!(true);
+    }
+    if cmd.get_arguments().any(|a| a.get_long() == Some("apply")) {
+      entry["apply_perms"] = json!(["apply"]);
+    }
+    out.push(entry);
   }
   for s in subs {
     path.push(s.get_name().to_string());
@@ -75,9 +89,237 @@ fn walk(
   }
 }
 
+fn read_when_no_args(command: &str) -> bool {
+  matches!(
+    command,
+    "service auto-update"
+      | "service monitor"
+      | "service limits"
+      | "service port-check"
+      | "service heartbeat"
+      | "service note"
+      | "service log-alert"
+      | "service update-ignore"
+      | "service file"
+      | "service deploy"
+      | "server note"
+      | "server set"
+      | "server watch-unit"
+      | "server baseline"
+      | "gateway add"
+      | "gateway forward"
+      | "gateway wildcard"
+      | "gateway error-page"
+      | "gateway trusted-proxies"
+      | "gateway timeouts"
+      | "route note"
+      | "route sso"
+      | "route caddy"
+      | "route guard"
+      | "route add"
+      | "alert set"
+      | "alert options"
+      | "token set"
+      | "sso email"
+      | "secret restrict"
+      | "external set"
+      | "egress api"
+      | "backup core"
+  )
+}
+
+fn effect(
+  command: &str,
+  cmd: &clap::Command,
+) -> (&'static str, &'static [&'static str]) {
+  if matches!(command, "schema" | "commands" | "validate" | "login") {
+    return ("read", &[]);
+  }
+  if matches!(
+    command,
+    "audit"
+      | "token list"
+      | "token explain"
+      | "gate key list"
+      | "core snapshot list"
+  ) {
+    return ("read", &["admin"]);
+  }
+  if matches!(command, "sso account list" | "sso account show") {
+    return ("read", &["admin"]);
+  }
+  if matches!(
+    command,
+    "server watch-unit" | "server host-units" | "server host-logs"
+  ) {
+    let effect = if command == "server watch-unit" {
+      "direct"
+    } else {
+      "read"
+    };
+    return (effect, &["host"]);
+  }
+  if matches!(command, "server apt" | "gateway rotate-link") {
+    return ("direct", &["apply"]);
+  }
+  if command == "egress presets" {
+    return ("read", &[]);
+  }
+  if command == "plan"
+    || cmd.get_arguments().any(|a| a.get_long() == Some("apply"))
+  {
+    return ("plan", &["plan"]);
+  }
+  let leaf = cmd.get_name();
+  if matches!(command, "exec" | "connect" | "server exec") {
+    return (
+      "direct",
+      if command == "server exec" {
+        &["host"]
+      } else {
+        &["exec"]
+      },
+    );
+  }
+  if matches!(
+    command,
+    "status"
+      | "top"
+      | "report"
+      | "whoami"
+      | "doctor"
+      | "metrics"
+      | "data"
+      | "egress"
+      | "network"
+      | "export"
+      | "audit"
+      | "shell-log"
+      | "self-update"
+      | "core addresses"
+      | "core key"
+      | "core logs"
+      | "alert digest"
+      | "route cert"
+      | "route dns-check"
+      | "gateway config"
+      | "service origin"
+      | "service history"
+      | "service timeline"
+      | "server exposure"
+      | "server dirs"
+      | "server usage"
+      | "server traffic"
+      | "server sessions"
+      | "server host"
+      | "server disk"
+      | "server host-units"
+      | "secret explain"
+      | "sso oidc"
+      | "network acl"
+      | "service files"
+      | "alert firing"
+  ) || command.starts_with("wait ")
+    || matches!(
+      leaf,
+      "list" | "ls" | "show" | "logs" | "host-logs" | "versions"
+    )
+  {
+    return ("read", &["read"]);
+  }
+  if command.starts_with("token ")
+    || command.starts_with("secret ")
+    || command.starts_with("sso account ")
+    || command.starts_with("core ")
+    || command.starts_with("external ")
+    || command.starts_with("gate ")
+    || command.starts_with("notify ")
+    || matches!(
+      command,
+      "upgrade" | "egress api" | "sso email" | "sso oidc"
+    )
+  {
+    return ("direct", &["admin"]);
+  }
+  ("direct", &["apply"])
+}
+
+fn returns(command: &str) -> Option<&'static str> {
+  Some(match command {
+    "status" => "status",
+    "plan" | "plan show" => "plan",
+    "plan list" => "plan_summary",
+    "apply" | "run list" | "run show" | "run wait" => "run",
+    "server list" | "server show" => "server_view",
+    "service list" | "service show" => "service_view",
+    "gateway list" | "gateway show" => "gateway_view",
+    "route list" => "route_view",
+    "doctor" => "doctor",
+    "network" => "network",
+    "data" => "data",
+    "server exposure" => "exposure",
+    "alert list" => "alerts",
+    "task ls" | "task show" => "task",
+    "task logs" => "task_run",
+    "backup list" => "backup",
+    "service history" => "deployment",
+    "edge list" | "edge show" => "edge",
+    "account list" => "account",
+    "secret list" => "secret",
+    "token list" => "token",
+    "token explain" => "token_explain",
+    "report" => "report",
+    "top" => "top",
+    "gateway logs" => "access_logs",
+    "server probe" => "net_probe",
+    "route cert" => "cert",
+    "route dns-check" => "dns_check",
+    "external list" => "external",
+    "audit" => "audit",
+    "core snapshot list" => "core_snapshots",
+    "core key" => "core_key",
+    "sso oidc" => "oidc",
+    "service timeline" => "timeline",
+    _ => return None,
+  })
+}
+
+pub fn usable(prefix: &[String], me: &Value) -> Value {
+  let mut result = commands(prefix);
+  if let Some(commands) = result["commands"].as_array_mut() {
+    commands.retain_mut(|command| {
+      let has = |perm: &Value| {
+        me["perms"]
+          .as_array()
+          .is_some_and(|perms| perms.contains(perm))
+      };
+      if command["perms"]
+        .as_array()
+        .is_some_and(|perms| perms.iter().all(has))
+      {
+        return true;
+      }
+      if command["read_when_no_args"] == true
+        && !matches!(
+          command["command"].as_str(),
+          Some("wharf token set" | "wharf server watch-unit")
+        )
+        && has(&json!("read"))
+      {
+        command["usable_mode"] = json!("read_only");
+        return true;
+      }
+      false
+    });
+  }
+  result["whoami"] = json!({"name": me["name"], "perms": me["perms"], "services": me["services"]});
+  result
+}
+
 /// `prefix` 不为空时只列这一组，例如 `["service"]`。
 pub fn commands(prefix: &[String]) -> Value {
-  let root = crate::Cli::command();
+  let mut root = crate::Cli::command();
+  root.build();
   let mut list = Vec::new();
   walk(&root, &mut Vec::new(), &mut list);
   if !prefix.is_empty() {
@@ -112,6 +354,19 @@ mod tests {
       .filter_map(|c| c["command"].as_str())
       .collect();
     assert!(names.contains(&"wharf service deploy"));
+    assert!(names.contains(&"wharf egress"));
+    let usable =
+      super::usable(&[], &serde_json::json!({"perms": ["read"]}));
+    let entries = usable["commands"].as_array().unwrap();
+    assert!(
+      entries
+        .iter()
+        .any(|e| e["command"] == "wharf service monitor"
+          && e["usable_mode"] == "read_only")
+    );
+    assert!(
+      !entries.iter().any(|e| e["command"] == "wharf service rm")
+    );
     for name in [
       "log-alert",
       "log-alert add",

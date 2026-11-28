@@ -70,6 +70,57 @@ pub async fn load_plan_for(
   Ok(stored.body.plan)
 }
 
+pub async fn list_plans(
+  state: &AppState,
+  auth: &Auth,
+  pending: bool,
+  limit: u32,
+) -> Result<Vec<wharf_api_types::plan::PlanSummary>, ApiError> {
+  use super::StoredPlanBody;
+  use wharf_api_types::plan::{PlanStatus, PlanSummary};
+
+  let services = auth.services.clone();
+  let limit = limit.clamp(1, 100) as usize;
+  let now = chrono::Utc::now();
+  state.db.call(move |c| {
+    let mut stmt = c.prepare(
+      "SELECT status, body FROM plans WHERE NOT ?1 OR (status = 'pending' AND expires_at > ?2)
+       ORDER BY created_at DESC, id DESC"
+    ).map_err(sql_err)?;
+    let mut rows = stmt.query(params![pending, now.timestamp_millis()]).map_err(sql_err)?;
+    let mut summaries = Vec::new();
+    while summaries.len() < limit {
+      let Some(row) = rows.next().map_err(sql_err)? else { break };
+      let status: String = row.get(0).map_err(sql_err)?;
+      let body: String = row.get(1).map_err(sql_err)?;
+      let Ok(StoredPlanBody { plan, route_effects, .. }) = serde_json::from_str(&body) else {
+        tracing::warn!("跳过无法读取的旧计划");
+        continue;
+      };
+      if services.as_ref().is_some_and(|services| plan.items.is_empty() || token_scope::check_plan_scope(services, &plan, &route_effects).is_err()) {
+        continue;
+      }
+      let status = if status == "applied" {
+        PlanStatus::Applied
+      } else if plan.expires_at <= now {
+        PlanStatus::Expired
+      } else {
+        PlanStatus::Pending
+      };
+      let mut seen = BTreeSet::new();
+      let addresses = plan.items.iter().filter_map(|item| {
+        seen.insert(&item.address).then_some(item.address.clone())
+      }).take(20).collect();
+      summaries.push(PlanSummary {
+        plan_id: plan.plan_id, status, created_at: plan.created_at, expires_at: plan.expires_at,
+        expires_in_secs: if status == PlanStatus::Pending { (plan.expires_at - now).num_seconds() } else { 0 },
+        note: plan.note, item_count: plan.items.len(), needs_confirm: plan.needs_confirm, addresses,
+      });
+    }
+    Ok(summaries)
+  }).await
+}
+
 pub async fn run_in_scope(
   state: &AppState,
   services: &BTreeSet<String>,
@@ -355,4 +406,49 @@ mod tests {
       "own"
     );
   }
+}
+
+#[tokio::test]
+async fn plan_list_show_and_confirm_details() {
+  use crate::rules::tests::test_state;
+  use serde_json::json;
+
+  let state = test_state();
+  let now = chrono::Utc::now();
+  let mut plan = serde_json::from_value::<Plan>(json!({
+    "plan_id":"p_fixture", "status":"pending", "created_at":now, "expires_at": now + chrono::Duration::minutes(5),
+    "base_versions":{}, "items":[{"id":1,"address":"service/app","layer":"config",
+      "action":"delete","reason":"清理数据","impacts":["remove"]}],
+    "needs_confirm":["service/app"],
+  })).unwrap();
+  let visible = plan.clone();
+  state.db.call(move |c| {
+    for (id, service) in [("p_fixture", "app"), ("p_other", "other")] {
+      plan.plan_id = id.into();
+      plan.items[0].address = format!("service/{service}");
+      c.execute("INSERT INTO plans (id,status,body,steps,writes,created_at,expires_at)
+        VALUES (?1,'pending',?2,'[]','[]',?3,?4)",
+        params![id, serde_json::to_string(&plan).map_err(json_err)?, plan.created_at.timestamp_millis(), plan.expires_at.timestamp_millis()],
+      ).map_err(sql_err)?;
+    }
+    Ok(())
+  }).await.unwrap();
+  let auth = Auth {
+    name: "reader".into(),
+    perms: [wharf_api_types::view::Perm::Read].into(),
+    services: Some(["app".into()].into()),
+    allowed_from: vec![],
+    expires_at: None,
+    human: false,
+  };
+  let plans = list_plans(&state, &auth, true, 1).await.unwrap();
+  assert_eq!(plans[0].plan_id, "p_fixture");
+  let plan = load_plan_for(&state, &auth, "p_fixture").await.unwrap();
+  assert_eq!(plan.plan_id, visible.plan_id);
+  assert!(load_plan_for(&state, &auth, "p_other").await.is_err());
+  let details = wharf_api_types::plan::confirm_details(
+    &visible,
+    &visible.needs_confirm.iter().collect::<Vec<_>>(),
+  );
+  assert_eq!(details["plan_id"], "p_fixture");
 }

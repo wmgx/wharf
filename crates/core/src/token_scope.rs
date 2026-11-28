@@ -133,8 +133,8 @@ pub fn check_service_scope(
         "",
         "api",
         "status" | "services" | "routes" | "data" | "alerts"
-        | "doctor" | "report" | "export" | "runs" | "secrets"
-        | "tasks",
+        | "doctor" | "report" | "export" | "plans" | "runs"
+        | "secrets" | "tasks",
       ]
       | ["", "api", "logs", "services"]
       | ["", "api", "metrics"]

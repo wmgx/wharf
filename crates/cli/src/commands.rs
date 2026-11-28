@@ -39,7 +39,7 @@ pub async fn run(cli: Cli) -> CliResult<()> {
   let j = cli.json;
   match cli.command {
     Command::Login { url, core_key, token_file, token_cmd } => login(url, core_key, token_file, token_cmd, j).await,
-    Command::Schema { resource } => schema(resource.as_deref()),
+    Command::Schema { resource, paths } => crate::schema::run(resource.as_deref(), paths, j),
     Command::Validate { file } => {
       let v = fleet::validate(&file);
       out(j, &v, |v| {
@@ -80,6 +80,12 @@ pub async fn run(cli: Cli) -> CliResult<()> {
     Command::Commands { changes: true, .. } => {
       crate::selfcmd::command_changes(j)
     }
+    Command::Commands { prefix, usable: true, .. } => {
+      let c = Client::new(cli.url, cli.token).await?;
+      let me = c.get("/api/whoami").await?;
+      print::json(&crate::describe::usable(&prefix, &me));
+      Ok(())
+    }
     Command::Commands { prefix, .. } => {
       let all = crate::describe::commands(&[]);
       crate::selfcmd::save_snapshot(&all);
@@ -91,8 +97,16 @@ pub async fn run(cli: Cli) -> CliResult<()> {
       }
       Ok(())
     }
+    Command::Deploy { dir, name, port, build, detect_only: true, .. } => {
+      let name = match name { Some(name) => name, None => dir_name(&dir)? };
+      let port = port.first().map(|p| parse_port(p)).transpose()?.and_then(|p| p.container);
+      crate::deploy::detect_only(&dir, &name, &build, port, j)
+    }
     Command::Token(cmd) => {
       crate::token::run(cmd, cli.url, cli.token, j).await
+    }
+    Command::Service(ServiceCmd::Logs { follow: true, .. }) if j => {
+      Err(ApiError::invalid("--json 需要一次性输出，跟随日志请去掉 --json 或 --follow").into())
     }
     Command::Service(ServiceCmd::Logs { names, follow: true, .. })
       if names.len() > 1 =>
@@ -203,7 +217,7 @@ async fn dispatch(
       let mut view: wharf_api_types::view::OidcView =
         c.get("/api/oidc").await?;
       if let Some(host) = hostname {
-        let host = host.trim().to_ascii_lowercase();
+        let host = wharf_api_types::normalize_host(&host);
         view.clients.retain(|c| c.client_id == host);
         if view.clients.is_empty() {
           return Err(
@@ -245,6 +259,12 @@ async fn dispatch(
       Ok(())
     }
     Command::Sso(crate::SsoCmd::Email { email, clear }) => {
+      if email.is_none() && !clear {
+        let current: wharf_api_types::view::OidcView =
+          c.get("/api/oidc").await?;
+        out(j, &json!({"email": current.email}), pretty);
+        return Ok(());
+      }
       let _: serde_json::Value = c
         .put(
           "/api/oidc/settings",
@@ -259,7 +279,10 @@ async fn dispatch(
     Command::Sso(crate::SsoCmd::Test { hostname }) => {
       let result: SsoTestResult = match c
         .post_timeout(
-          &format!("/api/routes/{}/sso/test", seg(&hostname)),
+          &format!(
+            "/api/routes/{}/sso/test",
+            seg(&wharf_api_types::normalize_host(&hostname))
+          ),
           &json!({}),
           Duration::from_secs(14 * 60),
         )
@@ -283,8 +306,33 @@ async fn dispatch(
       }
       Ok(())
     }
-    Command::Status => {
-      let s: Status = c.get("/api/status").await?;
+    Command::Status { brief } => {
+      let mut s: Status = c
+        .get(
+          crate::plan_cmd::brief_path("/api/status", brief).as_ref(),
+        )
+        .await?;
+      for service in &mut s.services {
+        wharf_api_types::filter_note(
+          &mut service.note,
+          &mut service.has_sealed_note,
+          false,
+        );
+      }
+      for server in &mut s.servers {
+        wharf_api_types::filter_note(
+          &mut server.note,
+          &mut server.has_sealed_note,
+          false,
+        );
+      }
+      for route in &mut s.routes {
+        wharf_api_types::filter_note(
+          &mut route.note,
+          &mut route.has_sealed_note,
+          false,
+        );
+      }
       out(j, &s, |s| {
         print::status(s);
         for route in &s.routes {
@@ -305,6 +353,7 @@ async fn dispatch(
       build,
       ops,
       apply,
+      ..
     } => {
       let name = match name {
         Some(n) => n,
@@ -321,6 +370,8 @@ async fn dispatch(
         port,
         env,
         unset_env: vec![],
+        unset_port: vec![],
+        unset_start_timeout: false,
         start_timeout: None,
         health_path: None,
         volume: vec![],
@@ -478,8 +529,7 @@ async fn dispatch(
       shell_log(c, server, limit, j).await
     }
     Command::Upgrade { skip_snapshot } => {
-      upgrade(c, skip_snapshot, j).await?;
-      crate::selfcmd::self_update(c, j).await
+      upgrade(c, skip_snapshot, j).await
     }
     Command::SelfUpdate => crate::selfcmd::self_update(c, j).await,
     Command::Whoami => crate::selfcmd::whoami(c, j).await,
@@ -522,7 +572,12 @@ async fn dispatch(
     }
     Command::Egress { cmd } => {
       let v: Value = match cmd {
-        Some(EgressCmd::Api { server }) => {
+        Some(EgressCmd::Api {
+          server: None,
+          off: false,
+        }) => c.get("/api/egress").await?,
+        Some(EgressCmd::Api { server, .. }) => {
+          let server = server.unwrap_or_default();
           c.put("/api/egress", &json!({ "via": server })).await?
         }
         Some(EgressCmd::Presets) => {
@@ -637,7 +692,6 @@ async fn dispatch(
       })
       .unwrap_or_else(|| "/api/doctor".into());
       let v: DoctorReport = c.get(&path).await?;
-      out(j, &v, print::doctor);
       let bad = v
         .servers
         .iter()
@@ -647,8 +701,19 @@ async fn dispatch(
         .chain(v.routes.iter().flat_map(|r| &r.checks))
         .filter(|c| c.status == CheckStatus::Bad)
         .count();
+      if bad > 0 && j {
+        let mut value =
+          serde_json::to_value(&v).map_err(anyhow::Error::from)?;
+        value["error"] =
+          json!(ApiError::invalid(format!("{bad} 项不通")));
+        print::json(&value);
+        return Err(CliError::Exit(1));
+      }
+      out(j, &v, print::doctor);
       if bad > 0 {
-        return Err(anyhow::anyhow!("{bad} 项不通").into());
+        return Err(
+          ApiError::invalid(format!("{bad} 项不通")).into(),
+        );
       }
       Ok(())
     }
@@ -687,10 +752,25 @@ async fn dispatch(
       crate::bookmark::bookmark(c, cmd, j).await
     }
     Command::Plan {
+      cmd,
       file,
       partial,
       apply,
     } => {
+      if let Some(cmd) = cmd {
+        apply.check_read_only()?;
+        if file.is_some()
+          || partial
+          || apply.brief
+          || apply.dns_verify.mode().is_some()
+        {
+          return Err(
+            ApiError::invalid("plan 子命令不能与生成计划的参数混用")
+              .into(),
+          );
+        }
+        return crate::plan_cmd::run(c, cmd, j).await;
+      }
       let req = match file {
         Some(path) => {
           let fleet = fleet::load(&path)?;
@@ -723,6 +803,7 @@ async fn dispatch(
       plan_and_maybe_apply(c, req, apply, j).await
     }
     Command::Apply {
+      brief,
       plan_id,
       confirm,
       no_wait,
@@ -740,6 +821,7 @@ async fn dispatch(
         !no_wait,
         j,
         None,
+        brief,
       )
       .await
     }
@@ -866,47 +948,6 @@ async fn login_credentials(
   Ok((config, token))
 }
 
-fn schema(resource: Option<&str>) -> CliResult<()> {
-  if resource == Some("web") {
-    print::json(&wharf_api_types::web_schema::web_schema());
-    return Ok(());
-  }
-  use schemars::schema_for;
-  use wharf_api_types::{plan, spec, view};
-  let all: Vec<(&str, schemars::Schema)> = vec![
-    ("fleet", schema_for!(spec::Fleet)),
-    ("server", schema_for!(spec::ServerSettings)),
-    ("service", schema_for!(spec::ServiceSpec)),
-    ("gateway", schema_for!(spec::GatewaySpec)),
-    ("route", schema_for!(spec::RouteSpec)),
-    ("change", schema_for!(spec::Change)),
-    ("plan", schema_for!(plan::Plan)),
-    ("run", schema_for!(plan::Run)),
-    ("status", schema_for!(view::Status)),
-    ("error", schema_for!(ApiError)),
-  ];
-  match resource {
-    None => {
-      let map: BTreeMap<&str, &schemars::Schema> =
-        all.iter().map(|(k, v)| (*k, v)).collect();
-      print::json(&map);
-    }
-    Some(name) => {
-      let found =
-        all.iter().find(|(k, _)| *k == name).ok_or_else(|| {
-          let names: Vec<&str> =
-            all.iter().map(|(k, _)| *k).collect();
-          ApiError::invalid(format!(
-            "没有 {name}，可选：{}",
-            names.join("、")
-          ))
-        })?;
-      print::json(&found.1);
-    }
-  }
-  Ok(())
-}
-
 // PLAN / APPLY
 
 async fn plan_and_maybe_apply(
@@ -915,13 +956,65 @@ async fn plan_and_maybe_apply(
   flags: ApplyFlags,
   j: bool,
 ) -> CliResult<()> {
+  plan_output(c, req, flags, j, Vec::new(), None).await
+}
+
+async fn deploy_plan(
+  c: &Client,
+  name: String,
+  spec: ServiceSpec,
+  flags: ApplyFlags,
+  j: bool,
+  warnings: Vec<String>,
+  detected: Option<crate::deploy::DetectResult>,
+) -> CliResult<()> {
+  let req = PlanRequest {
+    changes: vec![Change::UpsertService {
+      name,
+      spec,
+      adopt: None,
+      pins: None,
+      commit: None,
+    }],
+    ..Default::default()
+  };
+  plan_output(c, req, flags, j, warnings, detected).await
+}
+
+async fn plan_output(
+  c: &Client,
+  req: PlanRequest,
+  flags: ApplyFlags,
+  j: bool,
+  warnings: Vec<String>,
+  detected: Option<crate::deploy::DetectResult>,
+) -> CliResult<()> {
   let req = PlanRequest {
     note: flags.note.clone().or(req.note),
     ..req
   };
-  let plan: Plan = c.post("/api/plan", &req).await?;
+  let mut plan: Plan = c
+    .post(
+      crate::plan_cmd::brief_path("/api/plan", flags.brief).as_ref(),
+      &req,
+    )
+    .await?;
+  if j {
+    for warning in warnings {
+      if !plan.warnings.contains(&warning) {
+        plan.warnings.push(warning);
+      }
+    }
+  }
   if !flags.apply || plan.items.is_empty() {
-    out(j, &plan, print::plan);
+    if j && let Some(detected) = detected {
+      let mut value =
+        serde_json::to_value(&plan).map_err(anyhow::Error::from)?;
+      value["detected"] = json!(detected);
+      print::json(&value);
+    } else {
+      out(j, &plan, print::plan);
+    }
     return Ok(());
   }
   let verify_before_dns = flags.dns_verify.mode();
@@ -954,7 +1047,11 @@ async fn plan_and_maybe_apply(
     )
     .suggest(format!("wharf apply {}{flags}", plan.plan_id));
     if j {
-      err = err.with_hint(format!("plan_id = {}", plan.plan_id));
+      err = err
+        .with_hint(format!("plan_id = {}", plan.plan_id))
+        .with_details(wharf_api_types::plan::confirm_details(
+          &plan, &missing,
+        ));
     }
     return Err(err.into());
   }
@@ -967,7 +1064,7 @@ async fn plan_and_maybe_apply(
     skip_snapshot: false,
     verify_before_dns,
   };
-  apply(c, req, true, j, Some(plan)).await
+  apply(c, req, true, j, Some((plan, detected)), flags.brief).await
 }
 
 async fn apply(
@@ -975,7 +1072,8 @@ async fn apply(
   req: ApplyRequest,
   wait: bool,
   j: bool,
-  plan: Option<Plan>,
+  plan: Option<(Plan, Option<crate::deploy::DetectResult>)>,
+  brief: bool,
 ) -> CliResult<()> {
   let resp: ApplyResponse = c.post("/api/apply", &req).await?;
   if !wait {
@@ -987,10 +1085,19 @@ async fn apply(
     });
     return Ok(());
   }
-  let run = wait_run(c, &resp.run_id, j).await?;
+  let mut run = wait_run(c, &resp.run_id, j).await?;
   if j {
+    if brief {
+      crate::plan_cmd::compact_run(&mut run);
+    }
     match plan {
-      Some(plan) => print::json(&json!({ "plan": plan, "run": run })),
+      Some((plan, detected)) => {
+        let mut value = json!({"plan": plan, "run": run});
+        if let Some(detected) = detected {
+          value["detected"] = json!(detected);
+        }
+        print::json(&value);
+      }
       None => print::json(&run),
     }
   } else {
@@ -1011,13 +1118,45 @@ async fn wait_run(
 ) -> CliResult<Run> {
   let mut printed: Vec<(usize, bool)> = Vec::new();
   let path = format!("/api/runs/{}", seg(run_id));
+  let mut retries = 0;
+  let interrupted = || {
+    if !j {
+      eprintln!(
+        "已停止等待，执行仍在继续。取消：wharf run cancel {run_id}"
+      );
+    }
+    CliError::Exit(130)
+  };
   loop {
-    let run: Run = tokio::select! {
-      r = c.get(&path) => r?,
-      _ = tokio::signal::ctrl_c() => {
-        eprintln!("\n已停止等待，执行仍在继续。取消：wharf run cancel {run_id}");
-        return Err(CliError::Exit(130));
+    let result: CliResult<Run> = tokio::select! {
+      r = c.get(&path) => r,
+      _ = tokio::signal::ctrl_c() => return Err(interrupted()),
+    };
+    let run = match result {
+      Ok(run) => {
+        retries = 0;
+        run
       }
+      Err(CliError::Api(error))
+        if connection_lost(&error) && retries < 10 =>
+      {
+        retries += 1;
+        tokio::select! {
+          _ = tokio::time::sleep(Duration::from_secs(retries.min(3))) => {}
+          _ = tokio::signal::ctrl_c() => return Err(interrupted()),
+        }
+        continue;
+      }
+      Err(CliError::Api(error)) => {
+        let command = format!("wharf run show {run_id}");
+        return Err(
+          error
+            .with_hint(format!("执行可能仍在进行，查看：{command}"))
+            .suggest(command)
+            .into(),
+        );
+      }
+      Err(error) => return Err(error),
     };
     if !j {
       printed.resize(run.steps.len(), (0, false));
@@ -1189,10 +1328,20 @@ async fn host_exec(
     Wait::Done(result) => result?,
     Wait::Interrupted => {
       if !j {
-        eprintln!("\n正在取消，等待远端清理…");
+        eprintln!(
+          "\n正在取消，等待远端清理。再按一次 Ctrl-C 立即退出"
+        );
       }
       // 关闭 HTTP 请求会触发控制面取消；agent 的独立清理预算是 10 秒。
-      tokio::time::sleep(Duration::from_secs(20)).await;
+      tokio::select! {
+        _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+        _ = tokio::signal::ctrl_c() => {}
+      }
+      if j {
+        print::json(
+          &json!({"error": ApiError::new(ErrorCode::Cancelled, "已中止等待宿主机命令")}),
+        );
+      }
       return Err(CliError::Exit(130));
     }
   };
@@ -1212,7 +1361,11 @@ async fn host_exec(
   if result.exit_code == 0 {
     Ok(())
   } else {
-    Err(CliError::Exit(result.exit_code))
+    Err(CliError::Exit(if j && result.exit_code == 2 {
+      1
+    } else {
+      result.exit_code
+    }))
   }
 }
 
@@ -1308,8 +1461,17 @@ async fn server(
     ServerCmd::HostLogs { name, unit, lines } => {
       crate::server::host_logs(c, &name, &unit, lines, j).await
     }
-    ServerCmd::WatchUnit { name, unit, off } => {
-      crate::server::watch_unit(c, &name, &unit, !off, j).await
+    ServerCmd::WatchUnit {
+      name,
+      unit,
+      on,
+      off,
+    } => {
+      if on || off {
+        crate::server::watch_unit(c, &name, &unit, on, j).await
+      } else {
+        crate::server::show_watch_unit(c, &name, &unit, j).await
+      }
     }
     ServerCmd::Usage { name } => {
       crate::server::usage(c, &name, j).await
@@ -1428,8 +1590,13 @@ async fn server(
       crate::note::run(c, "server", &name, args, j).await
     }
     ServerCmd::Show { name } => {
-      let v: ServerView =
+      let mut v: ServerView =
         c.get(&format!("/api/servers/{}", seg(&name))).await?;
+      wharf_api_types::filter_note(
+        &mut v.note,
+        &mut v.has_sealed_note,
+        false,
+      );
       out(j, &v, crate::top::show_server);
       Ok(())
     }
@@ -1491,11 +1658,96 @@ async fn server(
       traffic_reset_day,
       renew_at,
       agent_memory,
+      unset_public_ip,
+      unset_private_ip,
+      unset_git_proxy,
+      unset_pull_proxy,
+      unset_via,
+      unset_github_mirror,
+      unset_renew_at,
+      unset_traffic_quota,
+      unset_traffic_reset_day,
+      unset_agent_memory,
       apply,
     } => {
       let current: ServerView =
         c.get(&format!("/api/servers/{}", seg(&name))).await?;
       let mut settings: ServerSettings = current.settings;
+      if !(!mirror.is_empty()
+        || clear_mirrors
+        || !lan_ip.is_empty()
+        || clear_lan_ips
+        || !build_env.is_empty()
+        || clear_build_env
+        || region.is_some()
+        || public_ip.is_some()
+        || mirrors_only.is_some()
+        || private_ip.is_some()
+        || network.is_some()
+        || mode.is_some()
+        || git_proxy.is_some()
+        || pull_proxy.is_some()
+        || egress.is_some()
+        || via.is_some()
+        || github_mirror.is_some()
+        || host_terminal.is_some()
+        || host_exec.is_some()
+        || host_docker.is_some()
+        || host_system.is_some()
+        || traffic_quota_gb.is_some()
+        || traffic_reset_day.is_some()
+        || renew_at.is_some()
+        || agent_memory.is_some()
+        || unset_public_ip
+        || unset_private_ip
+        || unset_git_proxy
+        || unset_pull_proxy
+        || unset_via
+        || unset_github_mirror
+        || unset_renew_at
+        || unset_traffic_quota
+        || unset_traffic_reset_day
+        || unset_agent_memory)
+      {
+        apply.check_read_only()?;
+        out(
+          j,
+          &json!({"server": name, "settings": settings}),
+          pretty,
+        );
+        return Ok(());
+      }
+      if unset_public_ip {
+        settings.public_ip = None;
+      }
+      if unset_private_ip {
+        settings.private_addr = None;
+      }
+      if unset_git_proxy {
+        settings.git_proxy = None;
+      }
+      if unset_pull_proxy {
+        settings.pull_proxy = None;
+      }
+      if unset_via {
+        settings.via = None;
+      }
+      if unset_github_mirror {
+        settings.github_mirror = None;
+      }
+      if unset_renew_at {
+        settings.renew_at = None;
+      }
+      if unset_traffic_quota {
+        settings.traffic_quota_gb = None;
+      }
+      if unset_traffic_reset_day {
+        settings.traffic_reset_day = None;
+      }
+      if unset_agent_memory {
+        settings.agent_memory = None;
+      }
+
       if let Some(value) = agent_memory {
         settings.agent_memory = Some(value);
       }
@@ -1653,6 +1905,11 @@ async fn server(
       journal_max,
       security_updates,
       copy_from,
+      unset_timezone,
+      unset_swap,
+      unset_docker_log,
+      unset_journal_max,
+      unset_sysctl,
       apply,
     } => {
       let edits = timezone.is_some()
@@ -1661,8 +1918,14 @@ async fn server(
         || docker_log.is_some()
         || journal_max.is_some()
         || security_updates.is_some()
-        || copy_from.is_some();
+        || copy_from.is_some()
+        || unset_timezone
+        || unset_swap
+        || unset_docker_log
+        || unset_journal_max
+        || !unset_sysctl.is_empty();
       if !edits && !apply.apply {
+        apply.check_read_only()?;
         #[derive(serde::Deserialize, serde::Serialize)]
         struct Report {
           diffs: Vec<String>,
@@ -1698,6 +1961,22 @@ async fn server(
         let other: ServerView =
           c.get(&format!("/api/servers/{}", seg(&from))).await?;
         *b = other.settings.baseline;
+      }
+      if unset_timezone {
+        b.timezone = None;
+      }
+      if unset_swap {
+        b.swap_gb = None;
+      }
+      if unset_docker_log {
+        b.docker_log_size = None;
+        b.docker_log_files = None;
+      }
+      if unset_journal_max {
+        b.journal_max = None;
+      }
+      for key in unset_sysctl {
+        b.sysctl.remove(&key);
       }
       let text = |v: String| {
         let v = v.trim().to_string();
@@ -1858,14 +2137,31 @@ async fn server(
 
 /// 升级全部在线、版本落后的 agent，逐台进行，一台失败不影响其余的。
 async fn upgrade_outdated(c: &Client, j: bool) -> CliResult<()> {
-  let r: Value = c.post("/api/servers/upgrade", &json!({})).await?;
-  match r["run_id"].as_str() {
-    Some(id) => finish_task(c, id, true, j).await,
-    None => {
-      out(j, &r, |_| println!("全部 agent 都是最新版本"));
-      Ok(())
-    }
+  let (data, ok) = upgrade_agents(c, j).await?;
+  if j {
+    print::json(&data);
   }
+  if ok { Ok(()) } else { Err(CliError::Exit(4)) }
+}
+
+async fn upgrade_agents(
+  c: &Client,
+  j: bool,
+) -> CliResult<(Value, bool)> {
+  let data: Value =
+    c.post("/api/servers/upgrade", &json!({})).await?;
+  let Some(id) = data["run_id"].as_str() else {
+    if !j {
+      println!("全部 agent 都是最新版本");
+    }
+    return Ok((data, true));
+  };
+  let run = wait_run(c, id, j).await?;
+  if !j {
+    print::run_summary(&run);
+  }
+  let ok = run.status == RunStatus::Succeeded;
+  Ok((json!(run), ok))
 }
 
 /// 控制面重启后，等它带着新构建号回来、agent 重新连上。
@@ -1915,12 +2211,72 @@ async fn upgrade(
   skip_snapshot: bool,
   j: bool,
 ) -> CliResult<()> {
-  // 替换控制面要靠同机的 agent，落后的 agent 先升到和控制面一致。
-  // 只有控制面所在机器的那台必须成功，其余的失败了也接着换控制面。
-  // 失败原因 finish_task 已经打印过了。
-  if upgrade_outdated(c, j).await.is_err() {
-    eprintln!("有 agent 没升级成功，继续升级控制面");
+  let mut data = json!({"pre_agents": null, "core": null, "post_agents": null, "cli": null});
+  let mut warnings = Vec::new();
+  let result: CliResult<()> = async {
+    let pre = upgrade_agents(c, j).await;
+    match pre {
+      Ok((run, passed)) => {
+        data["pre_agents"] = run;
+        if !passed {
+          warnings
+            .push("有 agent 没升级成功，继续升级控制面".to_string());
+        }
+      }
+      Err(CliError::Api(error)) => {
+        data["pre_agents"] = json!({"error": error});
+        warnings
+          .push("有 agent 没升级成功，继续升级控制面".to_string());
+      }
+      Err(error) => return Err(error),
+    }
+    if !j && let Some(warning) = warnings.last() {
+      eprintln!("{warning}");
+    }
+    data["core"] =
+      upgrade_core(c, skip_snapshot, j, &mut warnings).await?;
+    let (run, passed) = upgrade_agents(c, j).await?;
+    data["post_agents"] = run;
+    if !passed {
+      return Err(
+        ApiError::new(ErrorCode::AgentFailed, "有 agent 没升级成功")
+          .into(),
+      );
+    }
+    data["cli"] = crate::selfcmd::self_update_data(c, j).await?;
+    Ok(())
   }
+  .await;
+  if !j {
+    return result;
+  }
+  data["warnings"] = json!(warnings);
+  match result {
+    Ok(()) => {
+      print::json(&data);
+      Ok(())
+    }
+    Err(CliError::Api(error)) => {
+      let code = error.code.exit_code();
+      data["error"] = json!(error);
+      print::json(&data);
+      Err(CliError::Exit(code))
+    }
+    Err(CliError::Exit(code)) => {
+      data["error"] =
+        json!(ApiError::new(ErrorCode::Cancelled, "升级等待已中止"));
+      print::json(&data);
+      Err(CliError::Exit(code))
+    }
+  }
+}
+
+async fn upgrade_core(
+  c: &Client,
+  skip_snapshot: bool,
+  j: bool,
+  warnings: &mut Vec<String>,
+) -> CliResult<Value> {
   let before: Value = c.get("/api/version").await?;
   // 请求可能在控制面拉镜像或重启时被代理掐断（超时、502/524），这时按"正在换"处理，
   // 等新构建号出现；等不到再报原来的错误。
@@ -2012,10 +2368,14 @@ async fn upgrade(
     }
     tokio::time::sleep(Duration::from_secs(3)).await;
   };
-  for s in servers.iter().filter(|s| !s.online) {
-    eprintln!("{} 不在线，跳过", s.name);
+  for server in servers.iter().filter(|s| !s.online) {
+    let warning = format!("{} 不在线，跳过", server.name);
+    if !j {
+      eprintln!("{warning}");
+    }
+    warnings.push(warning);
   }
-  upgrade_outdated(c, j).await
+  Ok(json!(r))
 }
 
 /// 取日志并打印：服务、agent、控制面共用。
@@ -2128,6 +2488,18 @@ fn parse_kv(s: &str, what: &str) -> CliResult<(String, String)> {
     })
 }
 
+fn merge_ports(current: &mut Vec<PortSpec>, updates: Vec<PortSpec>) {
+  for port in updates {
+    if let Some(old) =
+      current.iter_mut().find(|old| old.name == port.name)
+    {
+      *old = port;
+    } else {
+      current.push(port);
+    }
+  }
+}
+
 fn parse_port(s: &str) -> CliResult<PortSpec> {
   let (name, value) = parse_kv(s, "--port")?;
   let bad = || {
@@ -2213,18 +2585,8 @@ async fn service(
     ServiceCmd::PortCheck(args) => {
       crate::service_checks::port(c, args, j).await
     }
-    ServiceCmd::Heartbeat {
-      name,
-      container,
-      every,
-      grace,
-      off,
-      apply,
-    } => {
-      crate::service_checks::heartbeat(
-        c, name, every, grace, off, container, apply, j,
-      )
-      .await
+    ServiceCmd::Heartbeat(args) => {
+      crate::service_checks::heartbeat(c, args, j).await
     }
     ServiceCmd::UnmanagedIgnore {
       server,
@@ -2250,8 +2612,13 @@ async fn service(
       out(j, &value, pretty);
       Ok(())
     }
-    ServiceCmd::List => {
-      let v: Vec<ServiceView> = c.get("/api/services").await?;
+    ServiceCmd::List { brief } => {
+      let v: Vec<ServiceView> = c
+        .get(
+          crate::plan_cmd::brief_path("/api/services", brief)
+            .as_ref(),
+        )
+        .await?;
       out(j, &v, |v| {
         for s in v {
           println!(
@@ -2272,7 +2639,12 @@ async fn service(
       if reveal {
         path.push_str("?reveal=true");
       }
-      let v: ServiceView = c.get(&path).await?;
+      let mut v: ServiceView = c.get(&path).await?;
+      wharf_api_types::filter_note(
+        &mut v.note,
+        &mut v.has_sealed_note,
+        false,
+      );
       out(j, &v, |v| {
         pretty(v);
         print::monitor_settings(v.spec.monitor.as_ref());
@@ -2400,12 +2772,25 @@ async fn service(
       )
       .await
     }
-    ServiceCmd::AutoUpdate { name, off, apply } => {
+    ServiceCmd::AutoUpdate {
+      name,
+      on,
+      off,
+      apply,
+    } => {
       let mut spec = c
         .get::<ServiceView>(&format!("/api/services/{}", seg(&name)))
         .await?
         .spec;
-      spec.auto_update = !off;
+      if !on && !off {
+        apply.check_read_only()?;
+        return crate::service_checks::show_auto_update(
+          &name,
+          spec.auto_update,
+          j,
+        );
+      }
+      spec.auto_update = on;
       changes(
         c,
         vec![Change::UpsertService {
@@ -2678,6 +3063,8 @@ async fn service(
       health_path,
       volume,
       unset_volume,
+      unset_port,
+      unset_start_timeout,
       build,
       ops,
       apply,
@@ -2686,26 +3073,59 @@ async fn service(
         .get::<ServiceView>(&format!("/api/services/{}", seg(&name)))
         .await
       {
-        Ok(v) => Some(v.spec),
+        Ok(view) => Some(view),
         Err(CliError::Api(e)) if e.code == ErrorCode::NotFound => {
           None
         }
         Err(e) => return Err(e),
       };
+      if let Some(view) = &existing
+        && !(image.is_some()
+          || compose.is_some()
+          || from_run.is_some()
+          || compose_url.is_some()
+          || container.is_some()
+          || server.is_some()
+          || !port.is_empty()
+          || !unset_port.is_empty()
+          || !env.is_empty()
+          || !unset_env.is_empty()
+          || start_timeout.is_some()
+          || unset_start_timeout
+          || health_path.is_some()
+          || !volume.is_empty()
+          || !unset_volume.is_empty()
+          || build.has_edits()
+          || ops.stop_grace.is_some()
+          || ops.unset_stop_grace
+          || ops.stop_signal.is_some()
+          || ops.unset_stop_signal
+          || ops.init_cmd.is_some()
+          || ops.unset_init_cmd
+          || ops.init_timeout.is_some())
+      {
+        apply.check_read_only()?;
+        out(j, view, pretty);
+        return Ok(());
+      }
+      let existing = existing.map(|view| view.spec);
       let first_port = port
         .first()
         .map(|p| parse_port(p))
         .transpose()?
         .and_then(|p| p.container)
         .or_else(|| existing.as_ref()?.ports.first()?.container);
-      let built = crate::deploy::source(
+      let mut built = crate::deploy::source(
         c,
         &name,
         &build,
         existing.as_ref().map(|s| &s.source),
         first_port,
+        j,
       )
       .await?;
+      let detected =
+        built.as_mut().and_then(|built| built.detected.take());
       let default_port = built.as_ref().map(|b| b.default_port);
       let draft = match &from_run {
         Some(command) => {
@@ -2718,15 +3138,19 @@ async fn service(
               },
             )
             .await?;
-          for w in &d.warnings {
-            eprintln!("提醒：{w}");
+          if !j {
+            for w in &d.warnings {
+              eprintln!("提醒：{w}");
+            }
           }
           Some(d)
         }
         None => None,
       };
       let url_compose = match &compose_url {
-        Some(url) => Some(crate::deploy::fetch_compose(url).await?),
+        Some(url) => {
+          Some(crate::deploy::fetch_compose(url, j).await?)
+        }
         None => None,
       };
       let refresh_ports = compose.is_some();
@@ -2798,8 +3222,9 @@ async fn service(
           refresh_ports && port.is_empty(),
         );
       }
-      if let Some(seconds) = start_timeout {
-        spec.start_timeout_secs = (seconds != 0).then_some(seconds);
+      if unset_start_timeout || start_timeout.is_some() {
+        spec.start_timeout_secs =
+          start_timeout.filter(|seconds| *seconds != 0);
       }
       if let Some(path) = health_path {
         spec.monitor.get_or_insert_with(Default::default).path = path;
@@ -2807,8 +3232,11 @@ async fn service(
       if let Some(server) = server {
         spec.server = server;
       }
-      if let Some(n) = ops.stop_grace {
-        spec.stop_grace_secs = (n != 0).then_some(n);
+      if ops.unset_stop_grace || ops.stop_grace.is_some() {
+        spec.stop_grace_secs = ops.stop_grace.filter(|n| *n != 0);
+      }
+      if ops.unset_stop_signal {
+        spec.stop_signal = None;
       }
       if let Some(signal) = ops.stop_signal {
         spec.stop_signal = if signal.is_empty() {
@@ -2822,6 +3250,10 @@ async fn service(
       if let Some(secs) = ops.init_timeout {
         spec.init_timeout_secs = (secs != 0).then_some(secs);
       }
+      if ops.unset_init_cmd {
+        spec.init_cmd = None;
+        spec.init_timeout_secs = None;
+      }
       if let Some(cmd) = ops.init_cmd {
         if cmd.is_empty() {
           spec.init_cmd = None;
@@ -2830,6 +3262,10 @@ async fn service(
           spec.init_cmd = Some(cmd);
         }
       }
+      let warnings = draft
+        .as_ref()
+        .map(|d| d.warnings.clone())
+        .unwrap_or_default();
       if let Some(d) = draft {
         spec.ports = d.ports;
         spec.env = d.env;
@@ -2841,10 +3277,15 @@ async fn service(
         spec.container = Some(container);
       }
       if !port.is_empty() {
-        spec.ports = port
+        let ports = port
           .iter()
           .map(|p| parse_port(p))
-          .collect::<CliResult<_>>()?;
+          .collect::<CliResult<Vec<_>>>()?;
+        if is_new || from_run.is_some() {
+          spec.ports = ports;
+        } else {
+          merge_ports(&mut spec.ports, ports);
+        }
       } else if (is_new && default_port.is_some() || was_compose)
         && !matches!(spec.source, Source::Compose { .. })
         && spec.ports.is_empty()
@@ -2858,6 +3299,10 @@ async fn service(
           host: None,
           udp: p.udp,
         }];
+      }
+      for name in unset_port {
+        spec.ports.retain(|port| port.name != name);
+        spec.port_checks.remove(&name);
       }
       for e in &env {
         let (k, v) = parse_kv(e, "--env")?;
@@ -2881,19 +3326,7 @@ async fn service(
         spec.volumes.retain(|x| x.name != v.name);
         spec.volumes.push(v);
       }
-      changes(
-        c,
-        vec![Change::UpsertService {
-          pins: None,
-          commit: None,
-          name,
-          spec,
-          adopt: None,
-        }],
-        apply,
-        j,
-      )
-      .await
+      deploy_plan(c, name, spec, apply, j, warnings, detected).await
     }
     ServiceCmd::Move {
       name,
@@ -3013,17 +3446,22 @@ async fn service(
       interval,
       retries,
       off,
+      on,
+      unset_port,
+      unset_expect,
+      unset_keyword,
+      unset_start_timeout,
       apply,
     } => {
-      let mut spec = c
+      let view = c
         .get::<ServiceView>(&format!("/api/services/{}", seg(&name)))
-        .await?
-        .spec;
-      if let Some(seconds) = start_timeout {
-        spec.start_timeout_secs = (seconds != 0).then_some(seconds);
-      }
-      if off
-        || start_timeout.is_none()
+        .await?;
+      let mut spec = view.spec;
+      let edit_monitor = off
+        || on
+        || unset_port
+        || unset_expect
+        || unset_keyword
         || path.is_some()
         || port.is_some()
         || expect.is_some()
@@ -3032,8 +3470,32 @@ async fn service(
         || !unset_header.is_empty()
         || clear_headers
         || interval.is_some()
-        || retries.is_some()
+        || retries.is_some();
+      if !edit_monitor
+        && start_timeout.is_none()
+        && !unset_start_timeout
       {
+        apply.check_read_only()?;
+        return crate::service_checks::show_monitor(
+          &name,
+          &spec,
+          view.monitor.as_ref(),
+          j,
+        );
+      }
+      if unset_start_timeout || start_timeout.is_some() {
+        spec.start_timeout_secs =
+          start_timeout.filter(|seconds| *seconds != 0);
+      }
+      let enable = on
+        || path.is_some()
+        || port.as_ref().is_some_and(|p| !p.trim().is_empty())
+        || expect.is_some_and(|code| code != 0)
+        || keyword.as_ref().is_some_and(|k| !k.is_empty())
+        || !header.is_empty()
+        || interval.is_some_and(|secs| secs != 0)
+        || retries.is_some();
+      if edit_monitor && (off || enable || spec.monitor.is_some()) {
         if off {
           spec.monitor = None;
         } else {
@@ -3041,14 +3503,14 @@ async fn service(
           if let Some(path) = path {
             m.path = path;
           }
-          if port.is_some() {
-            m.port = port;
+          if unset_port || port.is_some() {
+            m.port = port.filter(|port| !port.trim().is_empty());
           }
-          if expect.is_some() {
-            m.expect = expect;
+          if unset_expect || expect.is_some() {
+            m.expect = expect.filter(|expect| *expect != 0);
           }
-          if let Some(keyword) = keyword {
-            m.keyword = (!keyword.is_empty()).then_some(keyword);
+          if unset_keyword || keyword.is_some() {
+            m.keyword = keyword.filter(|keyword| !keyword.is_empty());
           }
           if let Some(secs) = interval {
             m.interval_secs = (secs != 0).then_some(secs);
@@ -3096,6 +3558,8 @@ async fn service(
       memory,
       cpus,
       off,
+      unset_memory,
+      unset_cpus,
       apply,
     } => {
       if cpus.is_some_and(|n| {
@@ -3111,6 +3575,21 @@ async fn service(
         .get::<ServiceView>(&format!("/api/services/{}", seg(&name)))
         .await?
         .spec;
+      if container.is_none()
+        && memory.is_none()
+        && cpus.is_none()
+        && !off
+        && !unset_memory
+        && !unset_cpus
+      {
+        apply.check_read_only()?;
+        out(
+          j,
+          &json!({"service": name, "limits": spec.limits}),
+          pretty,
+        );
+        return Ok(());
+      }
       if let Some(container) = container {
         spec.container = Some(container);
       }
@@ -3122,12 +3601,13 @@ async fn service(
             memory_mb: None,
             cpu_milli: None,
           });
-        if let Some(memory) = memory {
-          limits.memory_mb = (memory != 0).then_some(memory);
+        if unset_memory || memory.is_some() {
+          limits.memory_mb = memory.filter(|memory| *memory != 0);
         }
-        if let Some(cpus) = cpus {
-          limits.cpu_milli =
-            (cpus != 0.0).then_some((cpus * 1000.0).round() as u32);
+        if unset_cpus || cpus.is_some() {
+          limits.cpu_milli = cpus
+            .filter(|cpus| *cpus != 0.0)
+            .map(|cpus| (cpus * 1000.0).round() as u32);
         }
       }
       changes(
@@ -3376,8 +3856,16 @@ async fn gateway(
         .await?;
       out(j, &v, |v| {
         println!(
-          "# Caddyfile\n{}",
-          v["caddyfile"].as_str().unwrap_or_default()
+          "# {}\n{}",
+          if v["kind"] == "cloudflare_tunnel" {
+            "cloudflared"
+          } else {
+            "Caddyfile"
+          },
+          v["config"]
+            .as_str()
+            .or_else(|| v["caddyfile"].as_str())
+            .unwrap_or_default()
         );
         println!(
           "# compose.yaml\n{}",
@@ -3412,12 +3900,24 @@ async fn gateway(
       crate::access_logs::gateway(c, args, j).await
     }
     GatewayCmd::ErrorPage {
-      name, file, apply, ..
+      name,
+      file,
+      apply,
+      default,
     } => {
       let mut spec = c
         .get::<GatewayView>(&format!("/api/gateways/{}", seg(&name)))
         .await?
         .spec;
+      if file.is_none() && !default {
+        apply.check_read_only()?;
+        out(
+          j,
+          &json!({"gateway": name, "error_page": spec.error_page}),
+          pretty,
+        );
+        return Ok(());
+      }
       spec.error_page = match file {
         None => None,
         Some(path) => Some(
@@ -3445,8 +3945,12 @@ async fn gateway(
         .get::<GatewayView>(&format!("/api/gateways/{}", seg(&name)))
         .await?
         .spec;
-      let zone =
-        zone.trim().trim_end_matches('.').to_ascii_lowercase();
+      let Some(zone) = zone else {
+        apply.check_read_only()?;
+        out(j, &spec.wildcard, pretty);
+        return Ok(());
+      };
+      let zone = wharf_api_types::normalize_host(&zone);
       if off {
         spec.wildcard.retain(|z| z != &zone);
       } else if !spec.wildcard.contains(&zone) {
@@ -3523,6 +4027,20 @@ async fn gateway(
         .get::<GatewayView>(&format!("/api/gateways/{}", seg(&name)))
         .await?
         .spec;
+      if !rm && service.is_none() && upstream.is_none() {
+        apply.check_read_only()?;
+        let list: Vec<_> = spec
+          .layer4
+          .iter()
+          .filter(|f| {
+            listen.is_none_or(|port| f.listen == port && f.udp == udp)
+          })
+          .collect();
+        out(j, &list, pretty);
+        return Ok(());
+      }
+      let listen =
+        listen.ok_or_else(|| ApiError::invalid("要给 --listen"))?;
       let before = spec.layer4.len();
       spec.layer4.retain(|f| f.listen != listen || f.udp != udp);
       if rm {
@@ -3564,11 +4082,44 @@ async fn gateway(
       email,
       image,
       tls,
+      no_default,
+      unset_account,
+      unset_email,
+      unset_image,
+      unset_http_port,
+      unset_https_port,
       apply,
     } => {
       let gateways: Vec<GatewayView> = c.get("/api/gateways").await?;
-      let old =
-        gateways.iter().find(|g| g.name == name).map(|g| &g.spec);
+      let old = gateways.iter().find(|g| g.name == name);
+      if let Some(old) = old
+        && !(server.is_some()
+          || kind.is_some()
+          || account.is_some()
+          || default
+          || no_default
+          || http_port.is_some()
+          || https_port.is_some()
+          || email.is_some()
+          || image.is_some()
+          || tls.is_some()
+          || unset_email
+          || unset_image
+          || unset_account
+          || unset_http_port
+          || unset_https_port)
+      {
+        apply.check_read_only()?;
+        out(j, old, pretty);
+        return Ok(());
+      }
+      let old = old.map(|g| &g.spec);
+      let email = gateway_text(email, unset_email);
+      let image = gateway_text(image, unset_image);
+      let account = gateway_text(account, unset_account);
+      let http_port = gateway_port(http_port, unset_http_port, 80);
+      let https_port =
+        gateway_port(https_port, unset_https_port, 443);
       let kind = kind.map(|k| match k.as_str() {
         "cloudflare_tunnel" => GatewayKind::CloudflareTunnel,
         _ => GatewayKind::Caddy,
@@ -3589,13 +4140,13 @@ async fn gateway(
           }
           GatewaySpec {
             server: server.unwrap_or_else(|| old.server.clone()),
-            default: default || old.default,
-            http_port: http_port.or(old.http_port),
-            https_port: https_port.or(old.https_port),
-            email: email.or_else(|| old.email.clone()),
-            image: image.or_else(|| old.image.clone()),
+            default: default || !no_default && old.default,
+            http_port: http_port.unwrap_or(old.http_port),
+            https_port: https_port.unwrap_or(old.https_port),
+            email: email.unwrap_or_else(|| old.email.clone()),
+            image: image.unwrap_or_else(|| old.image.clone()),
             tls: tls.unwrap_or(old.tls),
-            account: account.or_else(|| old.account.clone()),
+            account: account.unwrap_or_else(|| old.account.clone()),
             ..old.clone()
           }
         }
@@ -3633,16 +4184,16 @@ async fn gateway(
                 }
               }
             }
-            (_, account) => account,
+            (_, account) => account.flatten(),
           };
           GatewaySpec {
             kind,
             server,
             default,
-            http_port,
-            https_port,
-            email,
-            image,
+            http_port: http_port.flatten(),
+            https_port: https_port.flatten(),
+            email: email.flatten(),
+            image: image.flatten(),
             tls: tls.unwrap_or_default(),
             account,
             error_page: None,
@@ -3677,6 +4228,30 @@ async fn gateway(
       changes(c, vec![Change::RemoveGateway { name }], apply, j).await
     }
   }
+}
+
+fn gateway_text(
+  value: Option<String>,
+  unset: bool,
+) -> Option<Option<String>> {
+  if unset {
+    return Some(None);
+  }
+  value.map(|value| {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
+  })
+}
+
+fn gateway_port(
+  value: Option<u16>,
+  unset: bool,
+  default: u16,
+) -> Option<Option<u16>> {
+  if unset {
+    return Some(None);
+  }
+  value.map(|value| (value != 0 && value != default).then_some(value))
 }
 
 fn failover_label(r: &RouteView) -> &'static str {
@@ -3771,15 +4346,25 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
       crate::access_logs::route(c, args, j).await
     }
     RouteCmd::DnsCheck { hostname } => {
-      crate::external::dns(c, &hostname, j).await
+      crate::external::dns(
+        c,
+        &wharf_api_types::normalize_host(&hostname),
+        j,
+      )
+      .await
     }
     RouteCmd::Note { host, args } => {
-      let host =
-        host.trim().trim_end_matches('.').to_ascii_lowercase();
       crate::note::run(c, "route", &host, args, j).await
     }
     RouteCmd::List => {
-      let v: Vec<RouteView> = c.get("/api/routes").await?;
+      let mut v: Vec<RouteView> = c.get("/api/routes").await?;
+      for route in &mut v {
+        wharf_api_types::filter_note(
+          &mut route.note,
+          &mut route.has_sealed_note,
+          false,
+        );
+      }
       out(j, &v, |v| {
         for r in v {
           println!(
@@ -3871,23 +4456,53 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
       internal,
       no_internal,
       protection,
+      unset_port,
+      unset_backup_gateway,
       apply,
     } => {
-      let host = hostname.trim().to_ascii_lowercase();
+      let host = wharf_api_types::normalize_host(&hostname);
       let old = c
         .get::<Vec<RouteView>>("/api/routes")
         .await?
         .into_iter()
-        .find(|r| r.spec.hostname == host)
-        .map(|r| r.spec);
+        .find(|r| r.spec.hostname == host);
+      if let Some(old) = &old
+        && !(service.is_some()
+          || upstream.is_some()
+          || redirect.is_some()
+          || port.is_some()
+          || unset_port
+          || gateway.is_some()
+          || backup_gateway.is_some()
+          || unset_backup_gateway
+          || failover_minutes.is_some()
+          || no_failover_minutes
+          || dns_ttl.is_some()
+          || no_dns_ttl
+          || auth
+          || no_auth
+          || !paths.is_empty()
+          || no_paths
+          || tunnel
+          || no_tunnel
+          || internal
+          || no_internal
+          || protection.has_edits())
+      {
+        apply.check_read_only()?;
+        out(j, old, pretty);
+        return Ok(());
+      }
+      let old = old.map(|r| r.spec);
       let args = RouteAddArgs {
-        hostname,
+        hostname: host,
         service,
         upstream,
         redirect,
         port,
         gateway,
-        backup_gateway,
+        backup_gateway: backup_gateway
+          .or_else(|| unset_backup_gateway.then(String::new)),
         dns_ttl: dns_ttl.map(Some).or(no_dns_ttl.then_some(None)),
         failover_minutes: failover_minutes
           .map(Some)
@@ -3909,6 +4524,9 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
         internal: flag(internal, no_internal),
       };
       let mut spec = route_add_spec(old, args)?;
+      if unset_port {
+        spec.port = None;
+      }
       protection.set(&mut spec);
       changes(c, vec![Change::UpsertRoute { spec }], apply, j).await
     }
@@ -3922,18 +4540,26 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
       file,
       public,
       redirect,
+      off,
+      unset_skip,
+      unset_header,
       apply,
     } => {
       let route = c
         .get::<Vec<RouteView>>("/api/routes")
         .await?
         .into_iter()
-        .find(|r| r.spec.hostname == name.trim().to_ascii_lowercase())
+        .find(|r| {
+          r.spec.hostname == wharf_api_types::normalize_host(&name)
+        })
         .ok_or_else(|| {
           ApiError::not_found(format!("域名 {name} 不存在"))
         })?;
       let mut spec = route.spec;
-      let Some(mode) = mode else {
+      let Some(mode) =
+        mode.or_else(|| off.then(|| "off".to_string()))
+      else {
+        apply.check_read_only()?;
         if !j
           && let Some(sso) = &spec.sso
           && sso.mode == SsoMode::Login
@@ -4049,12 +4675,46 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
         });
         return Ok(());
       };
-      spec.sso =
-        (mode != "off").then_some(wharf_api_types::spec::SsoSpec {
-          login: if mode == "login" {
-            let file = file.ok_or_else(|| {
-              ApiError::invalid("login 方式需要 --file")
-            })?;
+      if mode == "off" {
+        if file.is_some() || !redirect.is_empty() {
+          return Err(
+            ApiError::invalid(
+              "关闭门禁时不能指定 --file 或 --redirect",
+            )
+            .into(),
+          );
+        }
+        spec.sso = None;
+        return changes(
+          c,
+          vec![Change::UpsertRoute { spec }],
+          apply,
+          j,
+        )
+        .await;
+      }
+      let old = spec.sso.as_ref();
+      let skip = if skip.is_empty() && !unset_skip {
+        old.map(|s| s.skip_paths.clone()).unwrap_or_default()
+      } else {
+        skip
+      };
+      let header = if !unset_header && mode == "header" {
+        header.or_else(|| old.and_then(|s| s.header.clone()))
+      } else {
+        header
+      };
+      let redirect = if redirect.is_empty() && mode == "oidc" {
+        old
+          .and_then(|s| s.oidc.as_ref())
+          .map(|oidc| oidc.redirect_uris.clone())
+          .unwrap_or_default()
+      } else {
+        redirect
+      };
+      spec.sso = Some(wharf_api_types::spec::SsoSpec {
+        login: if mode == "login" {
+          if let Some(file) = file {
             let text = if file == "-" {
               std::io::read_to_string(std::io::stdin())
                 .map_err(|_| ApiError::invalid("读取登录配置失败"))?
@@ -4070,49 +4730,55 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
               ApiError::invalid("登录配置字段不符合要求")
             })?)
           } else {
-            if file.is_some() {
-              return Err(
-                ApiError::invalid("只有 login 方式才能用 --file")
-                  .into(),
-              );
-            }
-            None
-          },
-          oidc: if mode == "oidc" {
-            if redirect.is_empty() {
-              return Err(
+            Some(old.and_then(|s| s.login.clone()).ok_or_else(
+              || ApiError::invalid("login 方式需要 --file"),
+            )?)
+          }
+        } else {
+          if file.is_some() {
+            return Err(
+              ApiError::invalid("只有 login 方式才能用 --file")
+                .into(),
+            );
+          }
+          None
+        },
+        oidc: if mode == "oidc" {
+          if redirect.is_empty() {
+            return Err(
                 ApiError::invalid("oidc 方式至少要一个 --redirect")
                   .with_hint("回调路径看应用的 OIDC 文档，例如 Grafana 是 /login/generic_oauth")
                   .into(),
               );
-            }
-            Some(wharf_api_types::spec::OidcClientSpec {
-              redirect_uris: redirect,
-            })
-          } else if !redirect.is_empty() {
-            return Err(
-              ApiError::invalid("只有 oidc 方式才能用 --redirect").into(),
-            );
-          } else {
-            None
-          },
-          mode: if mode == "oidc" {
-            wharf_api_types::spec::SsoMode::Oidc
-          } else if mode == "login" {
-            wharf_api_types::spec::SsoMode::Login
-          } else if mode == "header" {
-            wharf_api_types::spec::SsoMode::Header
-          } else {
-            wharf_api_types::spec::SsoMode::Gate
-          },
-          header,
-          trust_internal: !public
-            && !no_trust_internal
-            && (trust_internal
-              || spec.sso.as_ref().is_some_and(|s| s.trust_internal)),
-          skip_paths: skip,
-          public,
-        });
+          }
+          Some(wharf_api_types::spec::OidcClientSpec {
+            redirect_uris: redirect,
+          })
+        } else if !redirect.is_empty() {
+          return Err(
+            ApiError::invalid("只有 oidc 方式才能用 --redirect")
+              .into(),
+          );
+        } else {
+          None
+        },
+        mode: if mode == "oidc" {
+          wharf_api_types::spec::SsoMode::Oidc
+        } else if mode == "login" {
+          wharf_api_types::spec::SsoMode::Login
+        } else if mode == "header" {
+          wharf_api_types::spec::SsoMode::Header
+        } else {
+          wharf_api_types::spec::SsoMode::Gate
+        },
+        header,
+        trust_internal: !public
+          && !no_trust_internal
+          && (trust_internal
+            || spec.sso.as_ref().is_some_and(|s| s.trust_internal)),
+        skip_paths: skip,
+        public,
+      });
       changes(c, vec![Change::UpsertRoute { spec }], apply, j).await
     }
     RouteCmd::Guard {
@@ -4121,37 +4787,42 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
       no_rate,
       block,
       no_block,
+      off,
       apply,
     } => {
-      if rate.is_none() && !no_rate && !block && !no_block {
-        return Err(
-          ApiError::invalid(
-            "至少给一个：--rate、--no-rate、--block、--no-block",
-          )
-          .into(),
-        );
-      }
       let mut spec = c
         .get::<Vec<RouteView>>("/api/routes")
         .await?
         .into_iter()
-        .find(|r| r.spec.hostname == name.trim().to_ascii_lowercase())
+        .find(|r| {
+          r.spec.hostname == wharf_api_types::normalize_host(&name)
+        })
         .ok_or_else(|| {
           ApiError::not_found(format!("路由 {name} 不存在"))
             .suggest("wharf route list")
         })?
         .spec;
-      if rate.is_some() || no_rate {
+      if rate.is_none() && !no_rate && !block && !no_block && !off {
+        apply.check_read_only()?;
+        out(
+          j,
+          &json!({"rate_limit": spec.rate_limit, "block_scanners": spec.block_scanners}),
+          pretty,
+        );
+        return Ok(());
+      }
+      if rate.is_some() || no_rate || off {
         spec.rate_limit = rate;
       }
-      if block || no_block {
+      if block || no_block || off {
         spec.block_scanners = block;
       }
       changes(c, vec![Change::UpsertRoute { spec }], apply, j).await
     }
     RouteCmd::Cert { name, retry } => {
       use wharf_api_types::view::{CertState, CertStatus};
-      let path = format!("/api/routes/{}/cert", seg(name.trim()));
+      let host = seg(&wharf_api_types::normalize_host(&name));
+      let path = format!("/api/routes/{host}/cert");
       if retry {
         let v: serde_json::Value = c
           .post_timeout(
@@ -4227,13 +4898,16 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
         .get::<Vec<RouteView>>("/api/routes")
         .await?
         .into_iter()
-        .find(|r| r.spec.hostname == name.trim().to_ascii_lowercase())
+        .find(|r| {
+          r.spec.hostname == wharf_api_types::normalize_host(&name)
+        })
         .ok_or_else(|| {
           ApiError::not_found(format!("路由 {name} 不存在"))
             .suggest("wharf route list")
         })?
         .spec;
       if file.is_none() && !off {
+        apply.check_read_only()?;
         out(j, &serde_json::json!({ "caddy": spec.caddy }), |_| {
           match &spec.caddy {
             Some(text) => print!("{text}"),
@@ -4260,6 +4934,7 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
       changes(c, vec![Change::UpsertRoute { spec }], apply, j).await
     }
     RouteCmd::Rm { hostname, apply } => {
+      let hostname = wharf_api_types::normalize_host(&hostname);
       changes(c, vec![Change::RemoveRoute { hostname }], apply, j)
         .await
     }
@@ -4599,7 +5274,11 @@ async fn app_account(
 ) -> CliResult<()> {
   let path = |name: &str| format!("/api/sso/accounts/{}", seg(name));
   let domains = |name: &str, hostname: &str| {
-    format!("{}/domains/{}", path(name), seg(hostname))
+    format!(
+      "{}/domains/{}",
+      path(name),
+      seg(&wharf_api_types::normalize_host(hostname))
+    )
   };
   let print_single = |a: &AppAccountView| {
     print_app_account(a, a.name.len(), a.username.chars().count())
@@ -4795,6 +5474,21 @@ async fn secret(
       services,
       clear,
     } => {
+      if services.is_empty() && !clear {
+        let secrets: Vec<SecretView> = c.get("/api/secrets").await?;
+        let secret = secrets
+          .into_iter()
+          .find(|secret| secret.name == name)
+          .ok_or_else(|| {
+            ApiError::not_found(format!("密钥 {name} 不存在"))
+          })?;
+        out(
+          j,
+          &json!({"name": name, "services": secret.allowed_services}),
+          pretty,
+        );
+        return Ok(());
+      }
       let allowed = (!clear).then_some(services);
       let v: Option<Vec<String>> = c
         .put(
@@ -5508,4 +6202,20 @@ fn parse_volume_arg_handles_local_shared_alias_and_ro() {
     );
   }
   assert!(parse_volume_arg("a:b:c:/x").is_err());
+}
+
+#[test]
+fn gateway_add_unset_and_service_port_merge() {
+  assert_eq!(gateway_text(Some(" ".into()), false), Some(None));
+  assert_eq!(gateway_port(Some(80), false, 80), Some(None));
+  assert_eq!(gateway_port(Some(0), false, 443), Some(None));
+  let mut ports = vec![parse_port("http=8080").unwrap()];
+  merge_ports(&mut ports, vec![parse_port("metrics=9090").unwrap()]);
+  assert_eq!(
+    ports
+      .iter()
+      .map(|port| port.name.as_str())
+      .collect::<Vec<_>>(),
+    ["http", "metrics"]
+  );
 }

@@ -10,7 +10,7 @@ use wharf_api_types::{
 use crate::{
   ApplyFlags,
   client::{CliResult, Client},
-  commands::{changes, pretty},
+  commands::{changes, out},
 };
 
 #[derive(Subcommand)]
@@ -44,7 +44,19 @@ pub async fn bookmark(
   match cmd {
     BookmarkCmd::List => {
       let status: Status = c.get("/api/status").await?;
-      pretty(&status.bookmarks);
+      out(j, &status.bookmarks, |bookmarks| {
+        if bookmarks.is_empty() {
+          println!("还没有书签");
+        }
+        for bookmark in bookmarks {
+          println!(
+            "{}  {}  {}",
+            bookmark.spec.group.as_deref().unwrap_or("-"),
+            bookmark.spec.title,
+            bookmark.spec.url
+          );
+        }
+      });
       Ok(())
     }
     BookmarkCmd::Add {

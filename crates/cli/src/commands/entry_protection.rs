@@ -17,6 +17,10 @@ pub struct RouteProtectionArgs {
 }
 
 impl RouteProtectionArgs {
+  pub(crate) fn has_edits(&self) -> bool {
+    self.core_mesh_only.is_some() || self.cf_origin_only.is_some()
+  }
+
   pub(crate) fn set(self, spec: &mut RouteSpec) {
     if let Some(enabled) = self.core_mesh_only {
       spec.core_mesh_only = enabled;
@@ -40,7 +44,7 @@ pub struct TimeoutsArgs {
   #[arg(long)]
   grace_period: Option<u32>,
   /// 三项都恢复默认值。
-  #[arg(long, conflicts_with_all = ["read_header", "idle", "grace_period"])]
+  #[arg(long, visible_alias = "off", conflicts_with_all = ["read_header", "idle", "grace_period"])]
   default: bool,
   #[command(flatten)]
   apply: ApplyFlags,

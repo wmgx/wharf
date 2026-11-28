@@ -23,57 +23,128 @@ pub fn set_fields(fields: &str) {
   let _ = FIELDS.set(list);
 }
 
-/// 按字段路径挑出值，保留原来的嵌套结构；列表对每一项挑。没有的字段不输出。
-pub fn pick(
-  value: &serde_json::Value,
-  fields: &[String],
-) -> serde_json::Value {
-  use serde_json::{Map, Value};
+use serde_json::{Map, Value};
+
+fn check_path(
+  value: &Value,
+  path: &[&str],
+) -> Result<(), Vec<String>> {
+  let Some((head, rest)) = path.split_first() else {
+    return Ok(());
+  };
   match value {
+    Value::Object(map) => check_path(
+      map
+        .get(*head)
+        .ok_or_else(|| map.keys().cloned().collect::<Vec<_>>())?,
+      rest,
+    ),
     Value::Array(items) => {
-      Value::Array(items.iter().map(|i| pick(i, fields)).collect())
-    }
-    Value::Object(map) => {
-      // 同一个字段下的子路径放在一起挑，`a.x,a.y` 不会互相覆盖。
-      let mut wanted: Vec<(&str, Option<Vec<String>>)> = Vec::new();
-      for f in fields {
-        let (head, rest) = match f.split_once('.') {
-          Some((h, r)) => (h, Some(r.to_string())),
-          None => (f.as_str(), None),
-        };
-        match wanted.iter_mut().find(|(h, _)| *h == head) {
-          Some((_, sub)) => match (sub.as_mut(), rest) {
-            (Some(list), Some(r)) => list.push(r),
-            _ => *sub = None,
-          },
-          None => wanted.push((head, rest.map(|r| vec![r]))),
+      let mut available = Vec::new();
+      for item in items {
+        match check_path(item, path) {
+          Ok(()) => return Ok(()),
+          Err(keys) if available.is_empty() => available = keys,
+          Err(_) => {}
         }
       }
-      let mut out = Map::new();
-      for (head, sub) in wanted {
-        let Some(v) = map.get(head) else { continue };
-        let picked = match sub {
-          None => v.clone(),
-          Some(rest) => pick(v, &rest),
-        };
-        out.insert(head.to_string(), picked);
+      if items.is_empty() {
+        Ok(())
+      } else {
+        Err(available)
       }
-      Value::Object(out)
     }
-    other => other.clone(),
+    _ => Err(Vec::new()),
   }
 }
 
-/// 输出结果：依次按 `--fields` 挑字段、`--page-size` 分页、`--changed` 比较上次。
+fn pick(value: &Value, fields: &[&str]) -> Option<Value> {
+  match value {
+    Value::Array(items) => Some(Value::Array(
+      items
+        .iter()
+        .map(|item| {
+          pick(item, fields)
+            .unwrap_or_else(|| Value::Object(Map::new()))
+        })
+        .collect(),
+    )),
+    Value::Object(map) => {
+      let selected: Map<_, _> = map
+        .iter()
+        .filter_map(|(key, value)| {
+          if fields.contains(&key.as_str()) {
+            return Some((key.clone(), value.clone()));
+          }
+          let nested: Vec<_> = fields
+            .iter()
+            .filter_map(|field| {
+              let (head, rest) = field.split_once('.')?;
+              (head == key).then_some(rest)
+            })
+            .collect();
+          if nested.is_empty() {
+            return None;
+          }
+          pick(value, &nested).map(|value| (key.clone(), value))
+        })
+        .collect();
+      (!selected.is_empty()).then_some(Value::Object(selected))
+    }
+    _ => None,
+  }
+}
+
+fn pick_strict(
+  value: &Value,
+  fields: &[String],
+) -> Result<Value, ApiError> {
+  let mut paths = Vec::new();
+  for field in fields {
+    let optional = field.ends_with('?');
+    let path =
+      field.strip_suffix('?').unwrap_or(field).replace("[]", "");
+    match check_path(value, &path.split('.').collect::<Vec<_>>()) {
+      Ok(()) => paths.push(path),
+      Err(_) if optional => {}
+      Err(keys) => {
+        return Err(
+          ApiError::invalid(format!(
+            "字段 {path} 不存在或无法取子字段"
+          ))
+          .with_hint(format!(
+            "可用字段：{}。允许缺失的字段可加 ? 后缀",
+            keys.join("、")
+          )),
+        );
+      }
+    }
+  }
+  let paths: Vec<_> = paths.iter().map(String::as_str).collect();
+  Ok(pick(value, &paths).unwrap_or_else(|| Value::Object(Map::new())))
+}
+
+fn render_json<T: serde::Serialize>(
+  value: &T,
+) -> Result<String, ApiError> {
+  let encode_error = |_| ApiError::internal("无法序列化命令结果");
+  let mut value =
+    serde_json::to_value(value).map_err(encode_error)?;
+  if let Some(fields) = FIELDS.get().filter(|f| !f.is_empty()) {
+    value = pick_strict(&value, fields)?;
+  }
+  serde_json::to_string_pretty(&crate::view::apply(value)?)
+    .map_err(encode_error)
+}
+
 pub fn json<T: serde::Serialize>(value: &T) {
-  let text = serde_json::to_value(value).and_then(|v| {
-    let v = match FIELDS.get().filter(|f| !f.is_empty()) {
-      Some(fields) => pick(&v, fields),
-      None => v,
-    };
-    serde_json::to_string_pretty(&crate::view::apply(v))
-  });
-  println!("{}", text.unwrap_or_else(|_| "null".into()));
+  match render_json(value) {
+    Ok(text) => println!("{text}"),
+    Err(e) => {
+      error(&e, true);
+      std::process::exit(e.code.exit_code());
+    }
+  }
 }
 
 pub fn error(e: &ApiError, as_json: bool) {
@@ -900,18 +971,30 @@ mod pick_tests {
 
   #[test]
   fn picks_nested_fields_per_item() {
+    let v =
+      serde_json::json!([{"name":"a"}, {"name":"b","note":"hi"}]);
+    assert_eq!(
+      super::pick_strict(&v, &["name".into(), "note?".into()])
+        .unwrap(),
+      v
+    );
+    assert!(super::pick_strict(&v, &["name.typo".into()]).is_err());
     let v = serde_json::json!([{"name":"a","status":{"summary":"运行中","tone":"ok"},"spec":{}}]);
-    let out =
-      super::pick(&v, &["name".into(), "status.summary".into()]);
+    let out = super::pick_strict(
+      &v,
+      &["name".into(), "status.summary".into()],
+    )
+    .unwrap();
     assert_eq!(
       out,
       serde_json::json!([{"name":"a","status":{"summary":"运行中"}}])
     );
     let v = serde_json::json!({"servers":[{"name":"s1","online":true,"x":1}]});
-    let out = super::pick(
+    let out = super::pick_strict(
       &v,
       &["servers.name".into(), "servers.online".into()],
-    );
+    )
+    .unwrap();
     assert_eq!(
       out,
       serde_json::json!({"servers":[{"name":"s1","online":true}]})

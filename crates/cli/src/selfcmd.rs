@@ -176,6 +176,14 @@ fn replace_exe(bytes: &[u8]) -> CliResult<PathBuf> {
   Ok(exe)
 }
 
+fn valid_skill(bytes: &[u8]) -> bool {
+  std::str::from_utf8(bytes).is_ok_and(|text| {
+    text.len() >= 100
+      && text.starts_with("---")
+      && text.lines().any(|line| line.trim() == "name: wharf")
+  })
+}
+
 /// 通过已验证的控制面通道同步 Skill。
 async fn update_skill(c: &Client) -> Option<String> {
   let path = PathBuf::from(std::env::var_os("HOME")?)
@@ -188,13 +196,21 @@ async fn update_skill(c: &Client) -> Option<String> {
       Ok(())
     })
     .await;
-  let tmp = path.with_extension("md.tmp");
+  let tmp = path.with_extension(format!(
+    "md.tmp.{}.{}",
+    std::process::id(),
+    std::time::SystemTime::now()
+      .duration_since(std::time::UNIX_EPOCH)
+      .ok()?
+      .as_millis()
+  ));
   let saved = fetched.is_ok()
+    && valid_skill(&text)
     && std::fs::write(&tmp, &text).is_ok()
     && std::fs::rename(&tmp, &path).is_ok();
   if !saved {
     let _ = std::fs::remove_file(&tmp);
-    eprintln!("Skill 没更新成功，下次再试");
+
     return None;
   }
   Some(path.display().to_string())
@@ -215,6 +231,17 @@ async fn new_changes(exe: &PathBuf) -> Value {
 }
 
 pub async fn self_update(c: &Client, j: bool) -> CliResult<()> {
+  let result = self_update_data(c, j).await?;
+  if j {
+    crate::print::json(&result);
+  }
+  Ok(())
+}
+
+pub async fn self_update_data(
+  c: &Client,
+  j: bool,
+) -> CliResult<Value> {
   let v: Value = c.get("/api/version").await?;
   let target = v["build"].as_str().unwrap_or_default().to_string();
   if target.is_empty() || target == "dev" {
@@ -228,17 +255,18 @@ pub async fn self_update(c: &Client, j: bool) -> CliResult<()> {
   }
   if target == MINE {
     let skill = update_skill(c).await;
-    out(
-      j,
-      &json!({"updated": false, "build": MINE, "skill": skill}),
-      |_| println!("本机 wharf 已经是构建 {MINE}，和控制面一致"),
+    let warnings = skill_warnings(skill.is_some(), j);
+    if !j {
+      println!("本机 wharf 已经是构建 {MINE}，和控制面一致");
+    }
+    return Ok(
+      json!({"updated": false, "build": MINE, "skill": skill, "warnings": warnings}),
     );
-    return Ok(());
   }
-  // 先记下旧版本的命令，新版本装好后据此列出变化。
-  save_snapshot(&crate::describe::commands(&[]));
-  let releases =
-    v["cli_releases"].as_str().unwrap_or(DEFAULT_RELEASES);
+  let releases = v["cli_releases"]
+    .as_str()
+    .unwrap_or(DEFAULT_RELEASES)
+    .trim_end_matches('/');
   let (os, arch) = platform()?;
   let expected = required_sha256(&v, &target, os, arch)?;
   let url = format!("{releases}/build-{target}/wharf-{os}-{arch}");
@@ -247,8 +275,10 @@ pub async fn self_update(c: &Client, j: bool) -> CliResult<()> {
   }
   let bytes = fetch_binary(&url).await?;
   verify_sha256(&bytes, expected)?;
+  save_snapshot(&crate::describe::commands(&[]));
   let exe = replace_exe(&bytes)?;
   let skill = update_skill(c).await;
+  let warnings = skill_warnings(skill.is_some(), j);
   let changes = new_changes(&exe).await;
   let result = json!({
     "updated": true,
@@ -257,15 +287,17 @@ pub async fn self_update(c: &Client, j: bool) -> CliResult<()> {
     "path": exe.display().to_string(),
     "skill": skill,
     "changes": changes,
+    "warnings": warnings,
   });
-  out(j, &result, |r| {
+  if !j {
+    let r = &result;
     println!("已换成构建 {target}：{}", exe.display());
     if let Some(s) = r["skill"].as_str() {
       println!("已更新 Skill：{s}");
     }
     print_changes(&r["changes"]);
-  });
-  Ok(())
+  }
+  Ok(result)
 }
 
 // 命令变化
@@ -328,6 +360,33 @@ fn find<'a>(
   list.iter().find(|(n, _)| *n == name).map(|(_, v)| *v)
 }
 
+fn args_diff<'a>(
+  old: &'a Value,
+  new: &'a Value,
+  key: &str,
+) -> (Vec<&'a str>, Vec<&'a str>, Vec<&'a str>) {
+  let old = by_name(old, key, "arg");
+  let new = by_name(new, key, "arg");
+  let added = new
+    .iter()
+    .filter(|(arg, _)| find(&old, arg).is_none())
+    .map(|(arg, _)| *arg)
+    .collect();
+  let removed = old
+    .iter()
+    .filter(|(arg, _)| find(&new, arg).is_none())
+    .map(|(arg, _)| *arg)
+    .collect();
+  let changed = new
+    .iter()
+    .filter(|(arg, value)| {
+      find(&old, arg).is_some_and(|old| old != *value)
+    })
+    .map(|(arg, _)| *arg)
+    .collect();
+  (added, removed, changed)
+}
+
 /// 两份命令清单的差异：新增、删除的命令，以及参数或说明变了的命令。
 pub fn changes(old: &Value, new: &Value) -> Value {
   let old_cmds = by_name(old, "commands", "command");
@@ -350,37 +409,28 @@ pub fn changes(old: &Value, new: &Value) -> Value {
     if ov == *nv {
       continue;
     }
-    let oa = by_name(ov, "args", "arg");
-    let na = by_name(nv, "args", "arg");
-    let args_added: Vec<&str> = na
-      .iter()
-      .filter(|(a, _)| find(&oa, a).is_none())
-      .map(|(a, _)| *a)
-      .collect();
-    let args_removed: Vec<&str> = oa
-      .iter()
-      .filter(|(a, _)| find(&na, a).is_none())
-      .map(|(a, _)| *a)
-      .collect();
-    let args_changed: Vec<&str> = na
-      .iter()
-      .filter(|(a, v)| find(&oa, a).is_some_and(|o| o != *v))
-      .map(|(a, _)| *a)
-      .collect();
+    let (args_added, args_removed, args_changed) =
+      args_diff(ov, nv, "args");
     changed.push(json!({
       "command": name,
+      "meta_changed": ["effect", "perms", "returns", "dry_run"].iter().any(|key| ov[*key] != nv[*key]),
       "about_changed": ov["about"] != nv["about"] || ov["details"] != nv["details"],
       "args_added": args_added,
       "args_removed": args_removed,
       "args_changed": args_changed,
     }));
   }
+  let (global_args_added, global_args_removed, global_args_changed) =
+    args_diff(old, new, "global_args");
   json!({
     "from": old["build"],
     "to": new["build"],
     "added": added,
     "removed": removed,
     "changed": changed,
+    "global_args_added": global_args_added,
+    "global_args_removed": global_args_removed,
+    "global_args_changed": global_args_changed,
   })
 }
 
@@ -425,8 +475,29 @@ fn print_changes(v: &Value) {
     v["from"].as_str().unwrap_or("-"),
     v["to"].as_str().unwrap_or("-")
   );
-  if added.is_empty() && removed.is_empty() && changed.is_empty() {
+  let has_global_changes = [
+    "global_args_added",
+    "global_args_removed",
+    "global_args_changed",
+  ]
+  .iter()
+  .any(|key| !list(key).is_empty());
+  if added.is_empty()
+    && removed.is_empty()
+    && changed.is_empty()
+    && !has_global_changes
+  {
     println!("  没有变化");
+  }
+  for (key, label) in [
+    ("global_args_added", "新增"),
+    ("global_args_removed", "移除"),
+    ("global_args_changed", "调整"),
+  ] {
+    let args = list(key);
+    if !args.is_empty() {
+      println!("  {label}全局参数 {}", args.join(" "));
+    }
   }
   for c in &added {
     println!("  + {c}");
@@ -457,6 +528,9 @@ fn print_changes(v: &Value) {
         parts.push(format!("{label} {n}"));
       }
     }
+    if c["meta_changed"] == true {
+      parts.push("机器契约改了".into());
+    }
     if c["about_changed"] == true {
       parts.push("说明改了".into());
     }
@@ -466,6 +540,17 @@ fn print_changes(v: &Value) {
       parts.join("；")
     );
   }
+}
+
+fn skill_warnings(saved: bool, j: bool) -> Vec<&'static str> {
+  if saved {
+    return Vec::new();
+  }
+  let warning = "Skill 没更新成功，下次再试";
+  if !j {
+    eprintln!("{warning}");
+  }
+  vec![warning]
 }
 
 fn required_sha256<'a>(
@@ -528,4 +613,15 @@ fn update_requires_hash_and_rejects_tampered_executable() {
   assert!(executable(changed));
   assert!(verify_sha256(original, &hash).is_ok());
   assert!(verify_sha256(changed, &hash).is_err());
+}
+
+#[test]
+fn describe_global_changes_and_skill_guard() {
+  let before = json!({"global_args": []});
+  let after = json!({"global_args": [{"arg":"--fields"}]});
+  assert_eq!(
+    changes(&before, &after)["global_args_added"],
+    json!(["--fields"])
+  );
+  assert!(!valid_skill(b"<html>502</html>"));
 }

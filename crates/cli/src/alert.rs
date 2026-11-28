@@ -20,7 +20,7 @@ pub enum AlertCmd {
   /// 告警里附带服务最近的日志：`wharf alert options --include-logs on`。
   Options {
     #[arg(long, value_parser = ["on", "off"])]
-    include_logs: String,
+    include_logs: Option<String>,
   },
   /// 规则、事件通知、内置抑制、正在触发的告警、最近的推送。
   List,
@@ -47,6 +47,8 @@ pub enum AlertCmd {
     /// 静默多少分钟，0 取消。
     #[arg(long)]
     mute: Option<u32>,
+    #[arg(long, conflicts_with = "mute")]
+    unset_mute: bool,
     /// 恢复默认值。
     #[arg(long)]
     reset: bool,
@@ -93,8 +95,7 @@ pub enum AlertCmd {
   Unack { rule: String, subject: String },
   /// 预览当前待发送的每日汇总内容（不发送）。
   Digest {
-    /// 预览而不发送。
-    #[arg(long)]
+    #[arg(long, hide = true)]
     preview: bool,
   },
   /// 自定义告警抑制规则。
@@ -166,7 +167,7 @@ fn preview(
   now: &AlertsView,
   id: &str,
   service: Option<&str>,
-  patch: &AlertPatch,
+  patch: Option<&AlertPatch>,
   j: bool,
 ) -> CliResult<()> {
   let inherited_mute = service.and_then(|_| {
@@ -242,9 +243,32 @@ fn preview(
         .into(),
     );
   };
+  let Some(patch) = patch else {
+    out(j, &before, crate::commands::pretty);
+    return Ok(());
+  };
   let mut after = before.clone();
   if patch.reset {
-    after["reset"] = json!("恢复默认值");
+    if let Some(rule) = now.rules.iter().find(|rule| rule.id == id) {
+      if service.is_some() {
+        after = json!({"enabled": rule.enabled, "level": level_text(rule.level),
+          "threshold": rule.threshold, "for": rule.for_n, "muted_until": inherited_mute.map(fmt_ms)});
+      } else if let Some(defaults) = &rule.defaults {
+        after = json!({"enabled": defaults.enabled, "level": level_text(defaults.level),
+          "threshold": defaults.threshold, "for": defaults.for_n, "muted_until": null});
+      } else {
+        after["reset"] = json!("恢复默认值");
+      }
+    } else if let Some(level) = now
+      .notices
+      .iter()
+      .find(|notice| notice.id == id)
+      .and_then(|notice| notice.default_level)
+    {
+      after = json!({"enabled": true, "level": level_text(level), "muted_until": null});
+    } else {
+      after["reset"] = json!("恢复默认值");
+    }
   }
   if let Some(v) = patch.enabled {
     after["enabled"] = json!(v);
@@ -516,6 +540,17 @@ pub async fn run(
       return Ok(());
     }
     AlertCmd::Options { include_logs } => {
+      let Some(include_logs) = include_logs else {
+        let alerts: AlertsView = c.get("/api/alerts").await?;
+        out(
+          j,
+          &AlertOptions {
+            include_logs: alerts.include_logs,
+          },
+          crate::commands::pretty,
+        );
+        return Ok(());
+      };
       let v: AlertsView = c
         .put(
           "/api/alerts/options",
@@ -536,9 +571,27 @@ pub async fn run(
       for_n,
       level,
       mute,
+      unset_mute,
       reset,
       dry_run,
     } => {
+      if !on
+        && !off
+        && threshold.is_none()
+        && for_n.is_none()
+        && level.is_none()
+        && mute.is_none()
+        && !unset_mute
+        && !reset
+      {
+        if dry_run {
+          return Err(
+            ApiError::invalid("--dry-run 需要指定修改项").into(),
+          );
+        }
+        let now: AlertsView = c.get("/api/alerts").await?;
+        return preview(&now, &id, service.as_deref(), None, j);
+      }
       let level = level.map(|l| match l.as_str() {
         "digest" => AlertLevel::Digest,
         _ => AlertLevel::Urgent,
@@ -548,12 +601,18 @@ pub async fn run(
         threshold,
         for_n,
         level,
-        mute_minutes: mute,
+        mute_minutes: mute.or(unset_mute.then_some(0)),
         reset,
       };
       if dry_run {
         let now: AlertsView = c.get("/api/alerts").await?;
-        return preview(&now, &id, service.as_deref(), &patch, j);
+        return preview(
+          &now,
+          &id,
+          service.as_deref(),
+          Some(&patch),
+          j,
+        );
       }
       let path = match &service {
         Some(svc) => {

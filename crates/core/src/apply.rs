@@ -56,7 +56,7 @@ mod run_scope;
 
 use run_scope::{StoredRun, persist};
 pub use run_scope::{
-  list_runs, load_plan_for, load_run, load_run_for,
+  list_plans, list_runs, load_plan_for, load_run, load_run_for,
 };
 
 struct ActiveRun {
@@ -360,7 +360,20 @@ pub(crate) async fn start_with_actor(
     &plan.needs_confirm,
     &req.confirm,
     perms.contains(&Perm::Confirm),
-  )?;
+  )
+  .map_err(|error| {
+    if error.code != ErrorCode::ConfirmRequired {
+      return error;
+    }
+    let missing: Vec<_> = plan
+      .needs_confirm
+      .iter()
+      .filter(|address| !req.confirm.contains(address))
+      .collect();
+    error.with_details(wharf_api_types::plan::confirm_details(
+      plan, &missing,
+    ))
+  })?;
 
   let skip = if req.skip_snapshot {
     crate::auth::require_perm(perms, Perm::Admin)?;

@@ -304,6 +304,7 @@ impl PlanItem {
 pub enum PlanStatus {
   Pending,
   Applied,
+  Expired,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -339,6 +340,35 @@ pub struct Plan {
   /// 生成计划时写的备注。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct PlanSummary {
+  pub plan_id: String,
+  pub status: PlanStatus,
+  pub created_at: DateTime<Utc>,
+  pub expires_at: DateTime<Utc>,
+  pub expires_in_secs: i64,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub note: Option<String>,
+  pub item_count: usize,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub needs_confirm: Vec<String>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub addresses: Vec<String>,
+}
+
+pub fn confirm_details(plan: &Plan, missing: &[&String]) -> Value {
+  let items: Vec<_> = plan.items.iter()
+    .filter(|item| missing.contains(&&item.address) && item.needs_confirm())
+    .map(|item| serde_json::json!({
+      "id": item.id, "address": item.address, "layer": item.layer,
+      "action": item.action, "impacts": item.impacts, "reason": item.reason,
+    })).collect();
+  serde_json::json!({
+    "plan_id": plan.plan_id, "expires_at": plan.expires_at, "needs_confirm": missing,
+    "items": items, "warnings": plan.warnings,
+  })
 }
 
 impl Plan {

@@ -49,6 +49,7 @@ pub fn server_view(
     report.time_ms = None;
   }
   Some(ServerView {
+    omitted: Default::default(),
     key_rotation: state
       .hub
       .key_connection(name)
@@ -57,6 +58,7 @@ pub fn server_view(
       .and_then(|a| a.public_key.as_deref())
       .map(crate::key_rotation::fingerprint),
     note: snap.server_notes.get(name).cloned(),
+    has_sealed_note: false,
     name: name.to_string(),
     settings: row.settings.clone(),
     agent: agent_usage,
@@ -367,6 +369,7 @@ pub fn service_view(
     .map(|p| p.containers.clone())
     .unwrap_or_default();
   Some(ServiceView {
+    omitted: Default::default(),
     migration: snap.pending.migrations.get(name).map(|m| {
       wharf_api_types::view::MigrationView {
         from: m.payload.from.clone(),
@@ -390,6 +393,7 @@ pub fn service_view(
     addresses,
     lan_addresses,
     note: snap.notes.get(name).cloned(),
+    has_sealed_note: false,
     version: row.version,
     containers,
     data: crate::data::observed_mounts(name, &row.spec, history),
@@ -496,6 +500,7 @@ pub fn gateway_view(
     None
   };
   Some(GatewayView {
+    omitted: Default::default(),
     gate_core,
     name: name.to_string(),
     spec: row.spec.clone(),
@@ -554,10 +559,12 @@ pub(crate) fn route_view_with_upstream_error(
   let url = route_url(hostname, gw_spec.map(|g| &g.spec));
   Some((
     RouteView {
+      omitted: Default::default(),
       failover_pending: crate::failover::pending_view(hostname),
       failover_pinned: crate::failover::pinned(hostname),
       core: crate::gate::is_core_host(world, net, hostname),
       note: snap.route_notes.get(hostname).cloned(),
+      has_sealed_note: false,
       sso_login: row
         .spec
         .sso
@@ -1037,4 +1044,62 @@ mod tests {
       vec!["网关 s1 和配置不一致，执行 wharf plan 查看"]
     );
   }
+}
+
+pub fn compact_service(view: &mut ServiceView) {
+  use wharf_api_types::spec::Source;
+  let source = match &mut view.spec.source {
+    Source::Compose { content, .. } => {
+      Some(("spec.source.compose.content", content))
+    }
+    Source::Build(build) => Some((
+      "spec.source.build.dockerfile_content",
+      &mut build.dockerfile_content,
+    )),
+    Source::Image(_) => None,
+  };
+  if let Some((path, Some(text))) = source {
+    view.omitted.insert(path.into(), text.len());
+    *text = format!("<omitted {} bytes>", text.len());
+  }
+  for file in &mut view.spec.files {
+    view.omitted.insert(
+      format!("spec.files[{}]", file.path),
+      file.content.len(),
+    );
+    file.content.clear();
+  }
+  if view.data.len() > 10 {
+    view.omitted.insert("data".into(), view.data.len() - 10);
+    view.data.truncate(10);
+  }
+}
+
+pub fn compact_status(status: &mut Status) {
+  status.services.iter_mut().for_each(compact_service);
+  for view in &mut status.gateways {
+    if let Some(page) = view.spec.error_page.take() {
+      view.omitted.insert("spec.error_page".into(), page.len());
+    }
+  }
+  for view in &mut status.routes {
+    if let Some(caddy) = view.spec.caddy.take() {
+      view.omitted.insert("spec.caddy".into(), caddy.len());
+    }
+    if let Some(script) = view
+      .spec
+      .sso
+      .as_mut()
+      .and_then(|sso| sso.login.as_mut())
+      .and_then(|login| login.script.as_mut())
+    {
+      view.omitted.insert(
+        "spec.sso.login.script.code".into(),
+        script.code.len(),
+      );
+      script.code.clear();
+    }
+  }
+  status.problems.clear();
+  status.health = None;
 }
