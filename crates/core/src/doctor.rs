@@ -52,7 +52,7 @@ pub struct DoctorQuery {
 }
 
 #[derive(PartialEq, Eq)]
-enum DoctorScope {
+pub(crate) enum DoctorScope {
   All,
   Host(String),
   Service(String),
@@ -344,7 +344,7 @@ fn selection(
   Ok(result)
 }
 
-async fn run(
+pub(crate) async fn run(
   s: &AppState,
   scope: &DoctorScope,
   manual: bool,

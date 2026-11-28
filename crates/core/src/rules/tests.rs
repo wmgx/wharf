@@ -1105,13 +1105,18 @@ async fn stopped_service_route_skipped_in_bg_doctor_and_clears_domain_down()
       spec: json!({"hostname":"app.example.com","service":"web"}), meta: json!({}),
     })
   }).await.unwrap();
+  use crate::doctor::{DoctorScope, run};
   let background =
-    crate::doctor::run(&state, None, false, None).await.unwrap();
+    run(&state, &DoctorScope::All, false, None).await.unwrap();
   assert!(background.routes.is_empty());
-  let manual =
-    crate::doctor::run(&state, Some("app.example.com"), true, None)
-      .await
-      .unwrap();
+  let manual = run(
+    &state,
+    &DoctorScope::Host("app.example.com".into()),
+    true,
+    None,
+  )
+  .await
+  .unwrap();
   assert!(manual.routes[0].checks.iter().any(|c| c.layer == "https"
     && c.status == wharf_api_types::view::CheckStatus::Skip));
   for _ in 0..3 {
