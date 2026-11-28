@@ -1272,10 +1272,10 @@ async fn run_cmd(c: &Client, cmd: RunCmd, j: bool) -> CliResult<()> {
           grep,
           errors,
           max_line,
-          filters: crate::log_options::LogOptions {
-            search,
+          filters: Box::new(crate::log_options::LogOptions {
+            search: *search,
             ..Default::default()
-          },
+          }),
         },
         j,
       )

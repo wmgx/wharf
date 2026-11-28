@@ -74,6 +74,8 @@ async fn run_fixture(
       "commands::review_tests::fixture_cli",
       "--nocapture",
     ])
+    // 测试在 libtest 线程里执行 CLI 分发，栈大小对齐 Linux 主线程。
+    .env("RUST_MIN_STACK", (8 << 20).to_string())
     .env("WHARF_FIXTURE_CLI_ENDPOINT", endpoint)
     .env("WHARF_FIXTURE_CLI_ARGS", json!(args).to_string())
     .kill_on_drop(true);

@@ -522,7 +522,7 @@ pub struct LogArgs {
   #[arg(long)]
   pub max_line: Option<usize>,
   #[command(flatten)]
-  pub filters: log_options::LogOptions,
+  pub filters: Box<log_options::LogOptions>,
 }
 
 #[derive(Subcommand)]
@@ -1075,7 +1075,7 @@ pub enum ServiceCmd {
     #[arg(long)]
     max_line: Option<usize>,
     #[command(flatten)]
-    filters: log_options::LogOptions,
+    filters: Box<log_options::LogOptions>,
   },
   /// 列出服务数据目录（`/srv/<服务>/`）里的文件。例：`wharf service files blog config`。
   #[command(args_conflicts_with_subcommands = true)]
@@ -1936,7 +1936,7 @@ pub enum RunCmd {
     #[arg(long)]
     max_line: Option<usize>,
     #[command(flatten)]
-    search: log_options::SearchArgs,
+    search: Box<log_options::SearchArgs>,
   },
   /// 等待执行结束。
   Wait {
