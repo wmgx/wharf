@@ -685,6 +685,14 @@ pub(crate) async fn make_plan_inner(
       .is_none_or(|old| old.spec != row.spec)
     {
       crate::monitor::require_agent(state, &row.spec)?;
+      if let Some(mode) = row.spec.pull_policy
+        && current
+          .services
+          .get(name)
+          .is_none_or(|old| old.spec.pull_policy != Some(mode))
+      {
+        state.hub.runtime_options_conn_id(&row.spec.server)?;
+      }
     }
   }
   let mut warnings =

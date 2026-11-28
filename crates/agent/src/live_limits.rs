@@ -175,6 +175,27 @@ async fn candidates(
       if after { &change.after } else { &change.before },
     ) {
       if !after
+        && change.before.cpu_milli.is_some()
+        && (view["limits"]["CpuQuota"].as_i64().unwrap_or_default()
+          != 0
+          || view["limits"]["CpuPeriod"].as_i64().unwrap_or_default()
+            != 0)
+      {
+        return Err(unsupported(
+          "容器使用 CPU quota 或 period，需要重建",
+        ));
+      }
+      return Err(stale(project));
+    }
+    let swap =
+      view["limits"]["MemorySwap"].as_i64().unwrap_or_default();
+    if let Some(memory) = change.after.memory_mb {
+      let max =
+        memory.max(change.before.memory_mb.unwrap_or_default());
+      if swap != -1 && swap < i64::from(max) << 20 {
+        return Err(unsupported("现有 swap 无法安全保留，需要重建"));
+      }
+      if !after
         && change.before.memory_mb.is_some_and(|old| memory < old)
       {
         verify_memory_usage(docker, &id, memory, ctx).await?;
