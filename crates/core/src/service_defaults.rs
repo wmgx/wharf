@@ -291,6 +291,8 @@ mod tests {
       Json(value),
     )
     .await
+    .map(|Json(item)| item)
+    .map_err(|error| error.0)
   }
 
   fn write(plan: &Planned, service: &str) -> (Value, Value) {
@@ -439,13 +441,12 @@ mod tests {
       json!({"timezone":"UTC","limits":{"memory_mb":128,"pids":32}}),
     )
     .await
-    .unwrap()
-    .0;
+    .unwrap();
     let error = patch(&state, json!({"timezone":"Asia/Tokyo","limits":{"memory_mb":1,"pids":null}})).await.unwrap_err().0;
     assert_eq!(error.code, ErrorCode::InvalidInput);
     assert_eq!(error.message, "默认值 memory_mb 无效");
     assert!(error.hint.unwrap().contains("32 MB"));
-    let saved = state.db.call(load).await.unwrap();
+    let saved = state.db.call(|c| load(c)).await.unwrap();
     assert_eq!(json!(saved), original.value);
   }
 }
